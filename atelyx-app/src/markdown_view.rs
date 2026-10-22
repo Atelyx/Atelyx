@@ -27,6 +27,23 @@ pub type ImageHandles = HashMap<String, iced::widget::image::Handle>;
 pub(crate) fn base_size() -> f32 {
     crate::ui::palette::fs_body()
 }
+
+/// 行尾风格残留：正文换行只由 `\n` 决定，`\r` 既不进排版也不计字符位。
+/// 富文本排版按双向文本段落切行，`\r` 与 `\n` 各算一个段落分隔符——CRLF 会排出一根
+/// 源码里不存在的空行，且该行没有对应字符（光标落不上去）。
+pub(crate) fn is_cr(ch: char) -> bool {
+    ch == '\r'
+}
+
+/// 撇去不占位的行尾 `\r`：进排版的文本一律经此（原地改动，不额外分配）。
+pub(crate) fn without_cr(mut text: String) -> String {
+    if text.contains(is_cr) {
+        text.retain(|c| !is_cr(c));
+    }
+    text
+}
+
+/// 行高倍数（空行行的间距按此折算；编辑面空行预编辑同源）。
 pub(crate) const LINE_HEIGHT: f32 = 1.625;
 /// 代码字号与代码块最多展示行数（超出转块内纵向滚动）。
 fn mono_size() -> f32 {
@@ -1483,7 +1500,8 @@ fn code_body<'a>(code: &str, hit: Option<((usize, usize), f32)>, scale: f32) -> 
     }
 
     fn leaf<'a>(&self, content: String, st: TextStyle) -> Span<'a, LinkTarget, Font> {
-        let mut span = Span::new(content).font(st.font).strikethrough(st.strike);
+        // 行尾风格不进排版（见 is_cr）：一个 CRLF 才只算一个换行
+        let mut span = Span::new(without_cr(content)).font(st.font).strikethrough(st.strike);
         if let Some(color) = st.color {
             span = span.color(color);
         }
@@ -1808,6 +1826,26 @@ fn callout_color(name: &str) -> Option<Color> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 行尾风格不进排版：撇去 `\r` 后一个 CRLF 只算一个换行。
+    #[test]
+    fn without_cr_drops_line_ending_fill() {
+        assert_eq!(without_cr("甲\r\n乙".to_string()), "甲\n乙");
+        assert_eq!(without_cr("甲\n乙".to_string()), "甲\n乙");
+        assert_eq!(without_cr(String::new()), "");
+    }
+
+    /// 段落行的渲染文本只保留源码里的换行：CRLF 不得在渲染侧多出一个换行。
+    #[test]
+    fn crlf_row_keeps_one_break_per_source_line() {
+        let source = "甲乙\r\n丙丁\r\n";
+        let doc = parse_document(source);
+        let images = ImageHandles::default();
+        let rows = edit_rows(source, &doc.blocks, &iced::Theme::Dark, &images);
+        let row = rows.iter().find(|r| !r.runs.is_empty()).expect("段落在编辑档有可见片段");
+        let laid: String = row.runs.iter().map(|r| without_cr(r.text.clone())).collect();
+        assert_eq!(laid, "甲乙\n丙丁");
+    }
 
     #[test]
     fn blank_line_count_counts_inner_only() {

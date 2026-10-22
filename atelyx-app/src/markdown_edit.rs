@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 
 use crate::commands::{self, NoteBindings};
 use crate::layout_view::parse_hex_color;
-use crate::markdown_view::{LineRun, SourceKind};
+use crate::markdown_view::{is_cr, LineRun, SourceKind};
 use crate::text_preedit::{self, Composed};
 use crate::ui::palette as pal;
 use crate::ui::bold;
@@ -154,6 +154,15 @@ fn covered_line_starts(text: &str, from: usize, to: usize) -> Vec<usize> {
             None => return starts,
         }
     }
+}
+
+/// 行尾风格归一：正文换行只认 `\n`，`\r\n` 与孤立 `\r` 都折成一个 `\n`。
+/// 无 `\r` 时原样返回（粘贴常带 CRLF，见 is_cr）。
+pub fn normalize_newlines(text: String) -> String {
+    if !text.contains('\r') {
+        return text;
+    }
+    text.replace("\r\n", "\n").replace('\r', "\n")
 }
 
 /// 列表行 Enter 的文本变换：光标所在行是列表标记行时延续该项——
@@ -508,8 +517,8 @@ fn nest(
     }
 }
 
-/// 块内逐字符样式：按行内片段覆盖，未被覆盖处按标记（弱化）；下标与字符一一对应。
-/// 组合态在插入点补组合串字符的弱化样式（与插入后的排版文本一一对应）。
+/// 块内逐字符样式：按行内片段覆盖，未被覆盖处按标记（弱化）；下标与排版字符一一对应
+/// （`\r` 不占位，故不产出样式项）。组合态在插入点补组合串字符的弱化样式。
 fn source_styles(
     source: &str,
     from: usize,
@@ -522,7 +531,10 @@ fn source_styles(
     collect_runs(&inline, CharStyle::default(), &mut runs);
     runs.sort_by_key(|r| r.0);
     let mut out = Vec::new();
-    for (idx, _) in source[from..to].char_indices() {
+    for (idx, ch) in source[from..to].char_indices() {
+        if is_cr(ch) {
+            continue;
+        }
         let abs = from + idx;
         let st = runs
             .iter()
@@ -550,8 +562,14 @@ fn build_paragraph(
     pal: EditPalette,
 ) -> ParagraphT {
     let mut spans: Vec<Span<'static, (), Font>> = Vec::with_capacity(content.chars().count());
-    for (k, ch) in content.chars().enumerate() {
+    let mut k = 0;
+    for ch in content.chars() {
+        // `\r` 不占位（见 is_cr）：既不进排版，也不占样式下标
+        if is_cr(ch) {
+            continue;
+        }
         let st = styles.get(k).copied().unwrap_or_default();
+        k += 1;
         let base = if st.mono { crate::ui::mono() } else { crate::ui::regular() };
         let font = Font {
             weight: if st.bold { iced::font::Weight::Bold } else { base.weight },
@@ -587,13 +605,18 @@ fn build_paragraph(
     })
 }
 
-/// 块内字节偏移 → 字符下标。
+/// 块内字节偏移 → 排版字符下标（`\r` 不占位，见 is_cr）。
 pub(crate) fn char_index(content: &str, byte: usize) -> usize {
     let mut b = byte.min(content.len());
     while !content.is_char_boundary(b) {
         b -= 1;
     }
-    content[..b].chars().count()
+    visible_count(&content[..b])
+}
+
+/// 排版字符数：段落逐字符排版后的字符个数（`\r` 不占位）。
+pub(crate) fn visible_count(content: &str) -> usize {
+    content.chars().filter(|c| !is_cr(*c)).count()
 }
 
 /// 组合串（未上屏文本）单行字宽：与画组合串同字体字号实测，光标竖条据此落在串尾。
@@ -672,14 +695,18 @@ pub(crate) fn char_at_point(p: &ParagraphT, count: usize, point: Point) -> usize
     best.map_or(0, |(i, _, _, _)| i)
 }
 
-/// 字符下标 → 内容内字节偏移。
+/// 排版字符下标 → 内容内字节偏移（`\r` 不占位；越界归末尾）。
 pub(crate) fn byte_of_char(content: &str, index: usize) -> usize {
-    content.char_indices().nth(index).map_or(content.len(), |(b, _)| b)
+    content
+        .char_indices()
+        .filter(|(_, c)| !is_cr(*c))
+        .nth(index)
+        .map_or(content.len(), |(b, _)| b)
 }
 
 /// 命中换算：局部坐标 → 内容内字节偏移（按命中字符的左右半取边界）。
 pub(crate) fn hit_offset(p: &ParagraphT, content: &str, point: Point) -> usize {
-    let count = content.chars().count();
+    let count = visible_count(content);
     let i = char_at_point(p, count, point);
     let split = p
         .span_bounds(i)
@@ -959,7 +986,7 @@ impl Widget<Message, Theme, iced::Renderer> for SourceBlock<'_> {
         };
         let origin = bounds.position();
         let line_px = source_line_px(&self.source);
-        let count = state.content.chars().count();
+        let count = visible_count(&state.content);
         let at = state.composed();
         let laid_count = count + at.span().len();
 
@@ -1074,7 +1101,7 @@ impl Widget<Message, Theme, iced::Renderer> for SourceBlock<'_> {
             }
             Event::Window(window::Event::RedrawRequested(_)) => {
                 let at = state.composed();
-                let count = state.content.chars().count() + at.span().len();
+                let count = visible_count(&state.content) + at.span().len();
                 let clamped = self.caret.clamp(self.from, self.to);
                 let caret_char = char_index(&state.content, clamped - self.from);
                 let line_px = source_line_px(&self.source);
@@ -1203,7 +1230,7 @@ impl SourceBlock<'_> {
             KeyAction::Event(e) => send(shell, e),
             KeyAction::LineUp(extend) => {
                 let line_px = source_line_px(&self.source);
-                let count = state.content.chars().count();
+                let count = visible_count(&state.content);
                 let idx = char_index(&state.content, self.caret.clamp(self.from, self.to) - self.from);
                 // 段落在组合态下按插入组合串后的文本排版，此时不按该几何换算
                 let moved = match (state.paragraph.as_ref(), state.preedit.is_none()) {
@@ -1226,7 +1253,7 @@ impl SourceBlock<'_> {
             }
             KeyAction::LineDown(extend) => {
                 let line_px = source_line_px(&self.source);
-                let count = state.content.chars().count();
+                let count = visible_count(&state.content);
                 let idx = char_index(&state.content, self.caret.clamp(self.from, self.to) - self.from);
                 // 段落在组合态下按插入组合串后的文本排版，此时不按该几何换算
                 let moved = match (state.paragraph.as_ref(), state.preedit.is_none()) {
@@ -2166,8 +2193,10 @@ pub(crate) fn code_offset(code: &str, size: f32, width: f32, point: Point) -> us
     if code.is_empty() {
         return 0;
     }
+    // 排版用撇去 `\r` 的正文（行尾风格不占位），落点再换算回原文偏移
+    let laid: String = code.chars().filter(|c| !is_cr(*c)).collect();
     let paragraph = ParagraphT::with_text(advanced_text::Text {
-        content: code,
+        content: laid.as_str(),
         bounds: Size::new(width.max(1.0), f32::INFINITY),
         size: size.into(),
         line_height: advanced_text::LineHeight::Relative(CODE_LINE_HEIGHT),
@@ -2177,7 +2206,7 @@ pub(crate) fn code_offset(code: &str, size: f32, width: f32, point: Point) -> us
         shaping: advanced_text::Shaping::Auto,
         wrapping: advanced_text::Wrapping::None,
     });
-    byte_of_char(code, char_at_point(&paragraph, code.chars().count(), point))
+    byte_of_char(code, char_at_point(&paragraph, visible_count(code), point))
 }
 
 /// 代码正文的局部坐标上报：转发子件的布局与绘制，按压时把正文内坐标交给应用层
@@ -2334,13 +2363,14 @@ impl LineProbe {
         for run in runs {
             let (src_from, src_to) = run.src;
             let aligned = src_to.saturating_sub(src_from) == run.text.len();
-            for (k, ch) in run.text.chars().enumerate() {
+            for (byte, ch) in run.text.char_indices() {
+                // `\r` 不占位：不进探针排版，也不占字符下标（见 is_cr）
+                if is_cr(ch) {
+                    continue;
+                }
                 spans.push(Span::new(ch.to_string()).font(run.font()));
                 offsets.push(if aligned {
-                    (
-                        src_from + byte_of_char(&run.text, k),
-                        src_from + byte_of_char(&run.text, k + 1),
-                    )
+                    (src_from + byte, src_from + byte + ch.len_utf8())
                 } else {
                     (src_from, src_to)
                 });
@@ -2818,5 +2848,76 @@ mod tests {
         assert_eq!(remote_span_in_block(8, 20, 10, body_len, 0, 10), None);
         // 光标与选区都不触及块
         assert_eq!(remote_span_in_block(22, 24, 10, body_len, 4, 10), None);
+    }
+
+    /// 段内换行按一个换行排：行尾风格（CRLF）不能让两行之间多出空行——富文本排版把
+    /// `\r` 与 `\n` 各算一个段落分隔符，撇去 `\r` 后与纯文本口径一致。
+    #[test]
+    fn crlf_paragraph_lays_out_one_line_per_source_line() {
+        for source in ["甲乙\n丙丁\n", "甲乙\r\n丙丁\r\n", "甲乙  \r\n丙丁\r\n"] {
+            let doc = atelyx_core::markdown::parse_markdown(source, &ParseOptions::default());
+            let images = crate::markdown_view::ImageHandles::default();
+            let rows = crate::markdown_view::edit_rows(source, &doc.blocks, &Theme::Dark, &images);
+            let row = rows.iter().find(|r| !r.runs.is_empty()).expect("段落在编辑档有可见片段");
+            let (size, line_height) = source_metrics(&row.source);
+            let line_px = size * line_height;
+
+            // 落点探针（未揭示时的命中与远端光标反算）
+            let probe = LineProbe::build(&row.runs, &row.source, 600.0).expect("有片段即有探针");
+            let probe_lines = probe.paragraph.min_bounds().height / line_px;
+            assert!(
+                (probe_lines - 2.0).abs() < 0.1,
+                "{source:?} 探针排了 {probe_lines} 行，应为 2 行"
+            );
+
+            // 揭示态的源码块（同一份正文的逐字符排版）
+            let (from, to) = (row.from, row.to);
+            let styles = source_styles(
+                source,
+                from,
+                to,
+                &ParseOptions::default(),
+                Composed::default(),
+            );
+            assert_eq!(styles.len(), visible_count(&source[from..to]), "样式项按排版字符计");
+            let block = build_paragraph(
+                &source[from..to],
+                size,
+                line_height,
+                600.0,
+                &styles,
+                EditPalette::from_theme(&Theme::Dark),
+            );
+            let block_lines = block.min_bounds().height / line_px;
+            assert!(
+                (block_lines - 2.0).abs() < 0.1,
+                "{source:?} 源码块排了 {block_lines} 行，应为 2 行"
+            );
+        }
+    }
+
+    /// 排版字符空间：`\r` 不占位，字节偏移与字符下标在 CRLF 文本上仍互为反函数。
+    #[test]
+    fn crlf_stays_out_of_char_space() {
+        let content = "甲\r\n乙";
+        assert_eq!(visible_count(content), 3);
+        // 甲(0..3) \r(3) \n(4) 乙(5..8)
+        assert_eq!(char_index(content, 0), 0);
+        assert_eq!(char_index(content, 3), 1);
+        assert_eq!(char_index(content, 4), 1);
+        assert_eq!(char_index(content, 5), 2);
+        assert_eq!(char_index(content, content.len()), 3);
+        assert_eq!(byte_of_char(content, 0), 0);
+        assert_eq!(byte_of_char(content, 1), 4);
+        assert_eq!(byte_of_char(content, 2), 5);
+        assert_eq!(byte_of_char(content, 3), content.len());
+    }
+
+    /// 粘贴归一：CRLF 与孤立 CR 都折成 LF，正文不留 `\r`。
+    #[test]
+    fn normalize_newlines_folds_crlf_and_lone_cr() {
+        assert_eq!(normalize_newlines("甲\r\n乙\r丙".to_string()), "甲\n乙\n丙");
+        assert_eq!(normalize_newlines("甲\n乙".to_string()), "甲\n乙");
+        assert_eq!(normalize_newlines("\r\n".to_string()), "\n");
     }
 }

@@ -25,8 +25,10 @@ use std::time::{Duration, Instant};
 use atelyx_core::ai::refs::{self, RefEntry};
 
 use crate::markdown_edit::{
-    byte_of_char, char_index, line_end_at, line_start_at, selection_rects, ParagraphT,
+    byte_of_char, char_index, line_end_at, line_start_at, selection_rects, visible_count,
+    ParagraphT,
 };
+use crate::markdown_view::is_cr;
 use crate::text_preedit::{self, Composed};
 use crate::ui::palette as pal;
 use crate::Message;
@@ -247,12 +249,17 @@ impl InputState {
 }
 
 /// 逐字符 span 段落（`span_bounds` 按字符给几何——命中测试与光标定位的前提，
-/// 与笔记编辑面同口径）；组合串按弱化色排在插入点。
+/// 与笔记编辑面同口径）；组合串按弱化色排在插入点。`\r` 不占位（见 is_cr）。
 fn build_paragraph(content: &str, size: f32, width: f32, at: Composed) -> ParagraphT {
     let mut spans: Vec<Span<'static, (), Font>> = Vec::with_capacity(content.chars().count());
-    for (k, ch) in content.chars().enumerate() {
+    let mut k = 0;
+    for ch in content.chars() {
+        if is_cr(ch) {
+            continue;
+        }
         let span = Span::new(ch.to_string());
         spans.push(if at.span().contains(&k) { span.color(pal::TEXT_SECONDARY) } else { span });
+        k += 1;
     }
     ParagraphT::with_spans(advanced_text::Text {
         content: spans.as_slice(),
@@ -288,7 +295,7 @@ enum RowKind {
 /// 行表构建：字形按 y 聚带；首带前（前导换行）、带间（连续换行）、
 /// 末带后（结尾换行的文末虚拟行）按行高网格推算。行表按视觉序、行首字节升序。
 fn rows_of(p: &ParagraphT, content: &str, line_px: f32) -> Vec<Row> {
-    let count = content.chars().count();
+    let count = visible_count(content);
     let byte_at = |i: usize| byte_of_char(content, i.min(count));
     let mut bands: Vec<(f32, usize, usize)> = Vec::new();
     for i in 0..count {
@@ -346,7 +353,7 @@ fn hit_offset_rows(
     point: Point,
     line_px: f32,
 ) -> usize {
-    let count = content.chars().count();
+    let count = visible_count(content);
     let row = row_at(rows, point.y, line_px);
     let RowKind::Glyph { first, last } = row.kind else {
         return row.start;
@@ -383,7 +390,7 @@ fn caret_row_pos(
     idx: usize,
     line_px: f32,
 ) -> (f32, f32, f32) {
-    let count = content.chars().count();
+    let count = visible_count(content);
     let idx = idx.min(count);
     if idx < count {
         if let Some(r) = p.span_bounds(idx).into_iter().next() {

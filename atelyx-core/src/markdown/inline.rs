@@ -233,13 +233,14 @@ fn scan_atoms(ctx: &Ctx, from: usize, to: usize) -> Vec<Atom> {
                 i += run;
             }
             b'\n' => {
-                // GFM 硬换行：行尾 ≥2 空格
+                // GFM 硬换行：行尾 ≥2 空格（CRLF 的 `\r` 属行尾风格，先跳过再数空格）
+                let end = if i > from && bytes[i - 1] == b'\r' { i - 1 } else { i };
                 let mut spaces = 0;
-                while i > from && bytes[i - 1 - spaces] == b' ' {
+                while end > from + spaces && bytes[end - 1 - spaces] == b' ' {
                     spaces += 1;
                 }
                 if spaces >= 2 {
-                    let hb_from = i - spaces;
+                    let hb_from = end - spaces;
                     atoms.push(Atom {
                         from: hb_from,
                         to: i + 1,
@@ -1116,4 +1117,45 @@ fn inline_math_ranges(line_text: &str, line_from: usize) -> Vec<RangeInfo> {
 
 fn is_ascii_punct(b: u8) -> bool {
     b.is_ascii_punctuation()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn inline(source: &str) -> Vec<InlineSpan> {
+        crate::markdown::parse_inline(source, 0, source.len(), &ParseOptions::default())
+    }
+
+    /// 硬换行（行尾 ≥2 空格）在 CRLF 文档里同样识别：`\r` 属行尾风格，不参与空格计数。
+    #[test]
+    fn hard_break_follows_trailing_spaces_before_crlf() {
+        for source in ["甲  \n乙", "甲  \r\n乙"] {
+            let spans = inline(source);
+            assert!(
+                spans.iter().any(|s| matches!(s, InlineSpan::HardBreak { .. })),
+                "{source:?} 应识别为硬换行：{spans:?}"
+            );
+        }
+    }
+
+    /// 单空格与无空格仍不是硬换行（CRLF 下也不得误判）。
+    #[test]
+    fn soft_break_stays_soft_before_crlf() {
+        for source in ["甲 \r\n乙", "甲\r\n乙"] {
+            let spans = inline(source);
+            assert!(
+                !spans.iter().any(|s| matches!(s, InlineSpan::HardBreak { .. })),
+                "{source:?} 不应识别为硬换行：{spans:?}"
+            );
+        }
+    }
+
+    /// 整行只有空格时行尾扫描不越出区间起点（区间之前没有字节可数）。
+    #[test]
+    fn trailing_space_scan_stops_at_range_start() {
+        let source = "   \n甲";
+        let spans = crate::markdown::parse_inline(source, 0, source.len(), &ParseOptions::default());
+        assert!(!spans.is_empty());
+    }
 }

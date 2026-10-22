@@ -6210,8 +6210,10 @@ impl App {
         true
     }
 
-    /// 插入文本（替换选区）。
+    /// 插入文本（替换选区）。行尾风格归一到 `\n`：正文只认 LF 换行，粘贴带来的 CRLF
+    /// 会让段内换行在排版里被拆成两根（多出一根源码里没有的空行）。
     fn edit_insert(&mut self, text: String) {
+        let text = markdown_edit::normalize_newlines(text);
         if text.is_empty() {
             return;
         }
