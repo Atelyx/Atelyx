@@ -2737,16 +2737,27 @@ pub fn space_move_entry(app: &mut App, from: &str, to_dir: &str) -> Task<Message
 
 /// 挂断当前帧泵（空间切换 / 离开时）：先发协作离场帧与 bye（防心跳窗口幽灵在线），再丢弃命令入口。
 fn teardown_pump(app: &mut App) {
-    // 离场 awareness 帧（对端即时移除本端光标）先于 Bye 上行
+    // 笔记离场帧（对端即时移除本端光标）先于 Bye 上行
     if let Some(cmds) = &app.space_cmds {
-        if let Some(nc) = app.note_collab.as_mut() {
-            if let (Some(file), Some(leave)) = (app.note_collab_file.clone(), nc.close()) {
-                let _ = cmds.send(atelyx_core::collab::SpaceCmd::NoteAware { file, payload: leave });
-            }
+        let now = std::time::Instant::now();
+        if let Some(payload) = app
+            .note_collab_channel
+            .as_mut()
+            .and_then(|channel| channel.leave(now))
+        {
+            let _ = cmds.send(atelyx_core::collab::SpaceCmd::Ephemeral {
+                channel: crate::note_collab_channel::CHANNEL.to_string(),
+                payload,
+                target_peer_id: None,
+            });
         }
+    }
+    if let Some(nc) = app.note_collab.as_mut() {
+        nc.close();
     }
     app.note_collab = None;
     app.note_collab_file = None;
+    app.note_collab_channel = None;
     if let Some(cmds) = app.space_cmds.take() {
         let _ = cmds.send(atelyx_core::collab::SpaceCmd::Bye);
     }
@@ -2756,14 +2767,21 @@ fn teardown_pump(app: &mut App) {
     app.remote_cursors.clear();
 }
 
-/// 摘除当前笔记的协作绑定（关闭笔记 / 删除打开中笔记）：先广播离场 awareness 帧（对端即时
+/// 摘除当前笔记的协作绑定（关闭笔记 / 删除打开中笔记）：先广播离场帧（对端即时
 /// 移除本端光标）再清绑定，presence 随之回收（否则名册滞留「正在编辑已关闭的文件」，
 /// 且压住后续表格打开的在场上报）。
 pub fn collab_unbind_note(app: &mut App) {
+    let now = std::time::Instant::now();
+    if let Some(payload) = app
+        .note_collab_channel
+        .as_mut()
+        .and_then(|channel| channel.leave(now))
+    {
+        send_note_presence(app, payload);
+    }
+    app.note_collab_channel = None;
     if let Some(nc) = app.note_collab.as_mut() {
-        if let (Some(file), Some(leave)) = (app.note_collab_file.clone(), nc.close()) {
-            send_cmd(app, atelyx_core::collab::SpaceCmd::NoteAware { file, payload: leave });
-        }
+        nc.close();
     }
     app.note_collab = None;
     app.note_collab_file = None;
@@ -2816,22 +2834,85 @@ fn send_note_frames(app: &App, file: &str, frames: Vec<Vec<u8>>) {
     }
 }
 
-/// note-aware 通道帧上行（编辑选区随行与保活重发共用出口）。
-fn send_awareness(app: &App, file: &str, payload: Vec<u8>) {
-    send_cmd(app, atelyx_core::collab::SpaceCmd::NoteAware { file: file.to_string(), payload });
+/// 笔记在场帧上行（编辑选区随行、保活补发与离场共用出口）。
+pub(crate) fn send_note_presence(app: &App, payload: serde_json::Value) {
+    send_cmd(
+        app,
+        atelyx_core::collab::SpaceCmd::Ephemeral {
+            channel: crate::note_collab_channel::CHANNEL.to_string(),
+            payload,
+            target_peer_id: None,
+        },
+    );
 }
 
-/// awareness 保活重发（UiTick 搭载，core 内 15s 限频）：空闲端身份帧否则被对端 30s 超时剔除。
-pub(crate) fn awareness_keepalive(app: &mut App) {
-    let Some(file) = app.note_collab_file.clone() else { return };
-    let Some(frame) = app
-        .note_collab
+/// 笔记在场同步：进入 / 换文件 / 选区变化都从这里收口（事件与 tick 共用，幂等）。
+fn sync_note_presence(app: &mut App, file: &str) {
+    let (name, color) = local_identity(app);
+    let identity = crate::note_collab_channel::Identity { name: &name, color: &color };
+    let selection = local_selection(app);
+    let now = Instant::now();
+    let channel = app
+        .note_collab_channel
+        .get_or_insert_with(crate::note_collab_channel::NoteCollabChannel::new);
+    if let Some(payload) = channel.update(now, &identity, file, selection) {
+        send_note_presence(app, payload);
+    }
+}
+
+/// 强制重发本端在场身份（重连 / 文档重建后对端旧条目将在 30s 过期）。
+pub(crate) fn resend_note_presence(app: &mut App) {
+    let now = Instant::now();
+    let Some(payload) = app
+        .note_collab_channel
         .as_mut()
-        .and_then(|nc| nc.keepalive_if_due(std::time::Instant::now()))
+        .and_then(|channel| channel.resend(now))
     else {
         return;
     };
-    send_awareness(app, &file, frame);
+    send_note_presence(app, payload);
+}
+
+/// 重建后作废本端选区并重发身份：合并全文的 UTF-16 偏移与旧选区不匹配，
+/// 新选区由后续光标事件上报（对端在本端停编期间只看到身份，不看到失效光标）。
+fn reset_note_selection(app: &mut App, file: &str) {
+    let (name, color) = local_identity(app);
+    let identity = crate::note_collab_channel::Identity { name: &name, color: &color };
+    let now = Instant::now();
+    let Some(channel) = app.note_collab_channel.as_mut() else { return };
+    if channel.file() != Some(file) {
+        return;
+    }
+    channel.update(now, &identity, file, None);
+    if let Some(payload) = channel.resend(now) {
+        send_note_presence(app, payload);
+    }
+}
+
+/// 在场保活（UiTick 搭载，通道内 15s 限频）：空闲端身份帧否则被对端 30s 超时剔除。
+pub(crate) fn note_presence_keepalive(app: &mut App) {
+    let now = Instant::now();
+    let Some(payload) = app
+        .note_collab_channel
+        .as_mut()
+        .and_then(|channel| channel.keepalive_if_due(now))
+    else {
+        return;
+    };
+    send_note_presence(app, payload);
+}
+
+/// 限频压下的选区变化补发（UiTick 搭载）：拖选收尾后对端仍须拿到最终选区。
+pub(crate) fn note_presence_flush(app: &mut App) {
+    let now = Instant::now();
+    let Some(payload) = app
+        .note_collab_channel
+        .as_mut()
+        .and_then(|channel| channel.flush(now))
+    else {
+        return;
+    };
+    send_note_presence(app, payload);
 }
 
 /// 当前打开文件路径集合（笔记 + 表格 + 画布平级，≤3；presence、协作房间视图与删除命中判定共用）。
@@ -2903,7 +2984,7 @@ pub(crate) fn peer_open_files(presence: Option<&serde_json::Value>) -> Vec<Strin
         .unwrap_or_default()
 }
 
-/// 本端协作身份（昵称 + 成员色）：笔记 awareness 与表格在场共用同一份身份。
+/// 本端协作身份（昵称 + 成员色）：笔记在场与表格在场共用同一份身份。
 fn local_identity(app: &App) -> (String, String) {
     let name = app
         .global
@@ -2920,14 +3001,7 @@ pub(crate) fn peer_has_open_file(presence: Option<&serde_json::Value>, file: &st
     peer_open_files(presence).iter().any(|f| f == file)
 }
 
-/// 本端 awareness 身份 JSON（昵称 / 协作色；core `set_local_state` 外层再包 user 键，此处传裸对象）。
-fn local_user_json(app: &App) -> String {
-    let (name, color) = local_identity(app);
-    serde_json::json!({ "name": name, "color": color, "colorLight": format!("{color}33") })
-        .to_string()
-}
-
-/// 字节偏移对（全文，可越界）→ awareness 选区的 UTF-16 偏移对。
+/// 字节偏移对（全文，可越界）→ 选区上行的 UTF-16 偏移对。
 fn selection_units(text: &str, anchor: usize, head: usize) -> Option<(u32, u32)> {
     let unit = |byte: usize| {
         u32::try_from(atelyx_core::space_frame::byte_to_utf16_offset(
@@ -2957,7 +3031,7 @@ fn source_offset(text: &str, pos: text_editor::Position) -> usize {
     start + pos.column.min(line_len)
 }
 
-/// 本端选区（awareness 口径：全文 UTF-16，anchor = 锚点、head = 光标）。源码档取纯文本
+/// 本端选区（上行口径：全文 UTF-16，anchor = 锚点、head = 光标）。源码档取纯文本
 /// 编辑面光标；预览编辑档取正文编辑面（偏移相对正文，剥 frontmatter 前缀）；只读档无光标。
 fn local_selection(app: &App) -> Option<(u32, u32)> {
     let text = app.note_text.as_str();
@@ -2976,34 +3050,13 @@ fn local_selection(app: &App) -> Option<(u32, u32)> {
 }
 
 /// 选区 / 光标变化上行（不涉内容）：点选、拖选、方向键移动都要让对端可见，
-/// 内容变化路径（`collab_after_edit`）另走差分与 Update 帧。限频与补发在 core。
+/// 内容变化路径（`collab_after_edit`）另走差分与 Update 帧。限频与补发在通道层。
 pub fn collab_after_caret(app: &mut App) {
     if !matches!(app.repo_kind, crate::RepoKind::Space(_)) || app.note_collab_file.is_none() {
         return;
     }
     let Some(rel) = app.note_collab_file.clone() else { return };
-    let user_json = local_user_json(app);
-    let selection = local_selection(app);
-    let aware = app
-        .note_collab
-        .as_mut()
-        .and_then(|nc| nc.set_local_state(&user_json, selection));
-    if let Some(frame) = aware {
-        send_awareness(app, &rel, frame);
-    }
-}
-
-/// 限频压下的选区变化补发（UiTick 搭载）：拖选收尾后对端仍须拿到最终选区。
-pub(crate) fn awareness_flush(app: &mut App) {
-    let Some(file) = app.note_collab_file.clone() else { return };
-    let Some(frame) = app
-        .note_collab
-        .as_mut()
-        .and_then(|nc| nc.flush_awareness(Instant::now()))
-    else {
-        return;
-    };
-    send_awareness(app, &file, frame);
+    sync_note_presence(app, &rel);
 }
 
 /// 表格在场同步：进入 / 切换 / 关闭与选区变化都从这里收口（事件与 tick 共用，幂等）。
@@ -3012,8 +3065,10 @@ pub(crate) fn table_collab_sync(app: &mut App) {
     // 高频路径（指针移动 / 滚动）无变化直接返回：避免每次消息都重建状态与比较
     if app.space_connected && in_space {
         if let (Some(session), Some(collab)) = (app.table.as_ref(), app.table_collab.as_ref()) {
+            let (name, color) = local_identity(app);
             if collab.file() == Some(session.file.as_str())
                 && collab.sent_selection() == session.view.selection.as_ref()
+                && collab.sent_identity() == Some((name.as_str(), color.as_str()))
             {
                 return;
             }
@@ -3053,6 +3108,17 @@ pub(crate) fn table_collab_sync(app: &mut App) {
     }
 }
 
+/// 断链 / 被拒：清两端在场远端条目（本端状态保留，重连后由各通道强制重发）。
+fn clear_remote_presence(app: &mut App) {
+    if let Some(channel) = app.note_collab_channel.as_mut() {
+        channel.clear_remotes();
+    }
+    if let Some(collab) = app.table_collab.as_mut() {
+        collab.clear_remotes();
+    }
+    app.remote_cursors.clear();
+}
+
 /// UiTick 搭载：远端超时剔除、限频补发、空闲保活（连接不可用时不发上行）。
 pub(crate) fn table_collab_tick(app: &mut App) {
     table_collab_sync(app);
@@ -3086,7 +3152,7 @@ fn send_table_frame(app: &App, payload: serde_json::Value) {
     );
 }
 
-/// 绑定当前打开笔记到协作文档（打开 / 重连后调用）：基线通告 + 握手 + 身份帧。
+/// 绑定当前打开笔记到协作文档（打开 / 换文件 / 重连后调用）：基线通告 + 握手 + 在场身份。
 pub fn collab_bind_note(app: &mut App) {
     let Some(rel) = app.ui.last_note_file.clone() else { return };
     if app
@@ -3094,61 +3160,31 @@ pub fn collab_bind_note(app: &mut App) {
         .as_deref()
         .is_some_and(|f| f == rel && app.note_collab.is_some())
     {
-        // 重连场景：文档还在，重发握手（note-sync 通道）与身份帧（note-aware 通道，对端
-        // 旧 awareness 条目将在 30s 过期）
-        let (note_frames, aware) = {
-            let nc = app.note_collab.as_mut().expect("上方已确认存在");
-            let mut frames = Vec::new();
-            if let Some(step1) = nc.sync_step1() {
-                frames.push(step1);
-            }
-            let aware = nc.resend_awareness();
-            (frames, aware)
-        };
-        if let Some(aw) = aware {
-            send_cmd(
-                app,
-                atelyx_core::collab::SpaceCmd::NoteAware { file: rel.clone(), payload: aw },
-            );
-        }
+        // 重连场景：文档还在，重发握手与在场身份（对端旧条目将在 30s 过期）
+        let note_frames = app
+            .note_collab
+            .as_mut()
+            .and_then(|nc| nc.sync_step1())
+            .into_iter()
+            .collect();
         send_note_frames(app, &rel, note_frames);
+        resend_note_presence(app);
         send_presence(app);
         return;
     }
     let author = collab_author();
     let text = app.note_text.clone();
-    let user_json = local_user_json(app);
-    // 换文件：旧文档先销毁并广播离场帧（对端即时移除旧文件上的本端光标）
-    if let Some(old_file) = app.note_collab_file.clone() {
-        if old_file != rel {
-            if let Some(nc) = app.note_collab.as_mut() {
-                if let Some(leave) = nc.close() {
-                    send_cmd(
-                        app,
-                        atelyx_core::collab::SpaceCmd::NoteAware { file: old_file, payload: leave },
-                    );
-                }
-            }
-        }
-    }
     let outcome = {
         let nc = app
             .note_collab
             .get_or_insert_with(|| atelyx_core::note_collab::NoteCollab::new(author));
-        let out = nc.open(&rel, &text);
-        let aware = nc.set_local_state(&user_json, None);
-        (out, aware)
+        nc.open(&rel, &text)
     };
     app.note_collab_file = Some(rel.clone());
-    let frames = vec![outcome.0.baseline_frame, outcome.0.sync_step1];
+    let frames = vec![outcome.baseline_frame, outcome.sync_step1];
     send_note_frames(app, &rel, frames);
-    // 身份帧走 note-aware 通道（note-sync 通道解码器不认 awareness 载荷，塞进去对端必丢）
-    if let Some(aw) = outcome.1 {
-        send_cmd(
-            app,
-            atelyx_core::collab::SpaceCmd::NoteAware { file: rel, payload: aw },
-        );
-    }
+    // 在场身份：换文件时 state.file 变化即生效，对端按 file 过滤自然不画旧文件光标
+    sync_note_presence(app, &rel);
     send_presence(app);
 }
 
@@ -3162,7 +3198,7 @@ fn collab_author() -> String {
 }
 
 /// 本地编辑推进协作文档：差分基于文档真值（core 侧以文档当前文本求差，保存合流造成的
-/// 文档落后会被自动补齐）→ Update 帧上行；awareness 选区随行。
+/// 文档落后会被自动补齐）→ Update 帧上行；在场选区随行。
 pub fn collab_after_edit(app: &mut App) {
     if !matches!(app.repo_kind, crate::RepoKind::Space(_)) || app.note_collab_file.is_none() {
         return;
@@ -3172,8 +3208,6 @@ pub fn collab_after_edit(app: &mut App) {
         None => return,
     };
     let new = app.note_text.clone();
-    let user_json = local_user_json(app);
-    let selection = local_selection(app);
     let mut update_frame = None;
     if let Some(nc) = app.note_collab.as_mut() {
         let inner = nc.local_edit(&new);
@@ -3186,13 +3220,7 @@ pub fn collab_after_edit(app: &mut App) {
     if let Some(frame) = update_frame {
         send_note_frames(app, &rel, vec![frame]);
     }
-    let aware = app
-        .note_collab
-        .as_mut()
-        .and_then(|nc| nc.set_local_state(&user_json, selection));
-    if let Some(aw) = aware {
-        send_awareness(app, &rel, aw);
-    }
+    sync_note_presence(app, &rel);
 }
 
 /// 保存落地后推进协作基线祖先（空间模式三方合流的 base）。
@@ -3203,27 +3231,24 @@ pub fn collab_note_flushed(app: &mut App, flushed: &str) {
     }
 }
 
-/// awareness 远端状态 → 编辑面光标视图（UTF-16 → note_text 字节偏移）。
+/// 远端在场状态 → 编辑面光标视图（UTF-16 → note_text 字节偏移）。
 /// 事件驱动与周期 tick（过期剔除节流）共用。
 pub(crate) fn refresh_remote_cursors(app: &mut App) {
     let now = std::time::Instant::now();
     let text = app.note_text.clone();
-    let cursors = app
-        .note_collab
-        .as_mut()
-        .map(|nc| nc.remote_states(now))
-        .unwrap_or_default();
-    app.remote_cursors = cursors
-        .into_iter()
+    let Some(channel) = app.note_collab_channel.as_mut() else {
+        app.remote_cursors.clear();
+        return;
+    };
+    channel.refresh(now);
+    app.remote_cursors = channel
+        .remote()
+        .iter()
         .map(|c| {
             let byte = |unit: u32| atelyx_core::space_frame::utf16_to_byte_offset(&text, unit as usize);
             crate::RemoteCursorView {
-                name: c.name,
-                color: if c.color.is_empty() {
-                    "#9aa0a6".to_string()
-                } else {
-                    c.color
-                },
+                name: c.name.clone(),
+                color: c.color.clone(),
                 anchor: c.anchor.map(byte),
                 head: c.head.map(byte),
             }
@@ -3271,7 +3296,7 @@ fn on_space_event(app: &mut App, event: atelyx_core::collab::SpaceEvent) -> Task
             Task::none()
         }
         E::Peers(list) => {
-            // 名册里消失的连接 = 对端退出 / 断链：其光标条目立即摘除（不必等 awareness 超时）
+            // 名册里消失的连接 = 对端退出 / 断链：其光标条目立即摘除（不必等通道超时）
             let gone: Vec<String> = app
                 .space_peers
                 .iter()
@@ -3284,9 +3309,9 @@ fn on_space_event(app: &mut App, event: atelyx_core::collab::SpaceEvent) -> Task
                 .filter(|p| Some(p.peer_id.as_str()) != app.space_own_peer_id.as_deref())
                 .collect();
             let mut dropped = false;
-            if let Some(nc) = app.note_collab.as_mut() {
+            if let Some(channel) = app.note_collab_channel.as_mut() {
                 for peer in &gone {
-                    dropped |= nc.drop_peer(peer);
+                    dropped |= channel.drop_peer(peer);
                 }
             }
             if dropped {
@@ -3307,16 +3332,6 @@ fn on_space_event(app: &mut App, event: atelyx_core::collab::SpaceEvent) -> Task
         }
         E::NoteSync { peer_id, file, payload } => {
             collab_remote_note(app, &peer_id, &file, &payload);
-            Task::none()
-        }
-        E::NoteAware { peer_id, file, payload } => {
-            let now = std::time::Instant::now();
-            if app.note_collab_file.as_deref() == Some(file.as_str()) {
-                if let Some(nc) = app.note_collab.as_mut() {
-                    nc.apply_awareness(&peer_id, &payload, now);
-                }
-                refresh_remote_cursors(app);
-            }
             Task::none()
         }
         E::TablePatch { peer_id, file, patch, landed } => {
@@ -3356,10 +3371,18 @@ fn on_space_event(app: &mut App, event: atelyx_core::collab::SpaceEvent) -> Task
             Task::none()
         }
         E::Ephemeral { peer_id, channel, payload } => {
+            let now = std::time::Instant::now();
             if channel == crate::table_collab::CHANNEL {
-                let now = std::time::Instant::now();
                 if let Some(collab) = app.table_collab.as_mut() {
                     collab.apply(&peer_id, &payload, now);
+                }
+            } else if channel == crate::note_collab_channel::CHANNEL {
+                let changed = app
+                    .note_collab_channel
+                    .as_mut()
+                    .is_some_and(|c| c.apply(&peer_id, &payload, now));
+                if changed {
+                    refresh_remote_cursors(app);
                 }
             } else {
                 deliver_plugin_message(app, &peer_id, &channel, payload);
@@ -3379,17 +3402,13 @@ fn on_space_event(app: &mut App, event: atelyx_core::collab::SpaceEvent) -> Task
             app.space_pump_denied = true;
             app.space_cmds = None;
             app.space_connected = false;
-            if let Some(collab) = app.table_collab.as_mut() {
-                collab.clear_remotes();
-            }
+            clear_remote_presence(app);
             app.notify(NoticeLevel::Error, format!("协作：{message}"));
             Task::none()
         }
         E::Disconnected => {
             app.space_connected = false;
-            if let Some(collab) = app.table_collab.as_mut() {
-                collab.clear_remotes();
-            }
+            clear_remote_presence(app);
             app.notify(NoticeLevel::Warning, "协作连接断开，正在重连");
             Task::none()
         }
@@ -3405,8 +3424,9 @@ fn collab_remote_note(app: &mut App, peer_id: &str, file: &str, payload: &[u8]) 
     let Some(nc) = app.note_collab.as_mut() else { return };
     let out = nc.apply_remote(peer_id, file, payload);
     send_note_frames(app, file, out.reply);
-    if let Some(aw) = out.awareness {
-        send_cmd(app, atelyx_core::collab::SpaceCmd::NoteAware { file: file.to_string(), payload: aw });
+    // 文档被重建：选区偏移已失效，先作废再重发身份（对端不画失效光标）
+    if out.rebuilt {
+        reset_note_selection(app, file);
     }
     if out.doc_changed {
         if let Some(text) = out.text {
@@ -3566,6 +3586,17 @@ pub fn collab_follow_rename(app: &mut App, old: &str, new: &str) {
     }
     if let Some(nc) = app.note_collab.as_mut() {
         nc.relocate(old, new);
+    }
+    // 在场通道的挂靠文件随之改写：否则保活重发旧路径，本端从对端视图消失
+    let (name, color) = local_identity(app);
+    let identity = crate::note_collab_channel::Identity { name: &name, color: &color };
+    let now = std::time::Instant::now();
+    if let Some(payload) = app
+        .note_collab_channel
+        .as_mut()
+        .and_then(|channel| channel.relocate(now, &identity, old, new))
+    {
+        send_note_presence(app, payload);
     }
 }
 

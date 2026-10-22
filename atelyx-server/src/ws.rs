@@ -192,7 +192,7 @@ pub struct PeerMeta {
 }
 
 /// C→S 帧类型（`type` 字段分派）：`hello`（首条必发，见 space_ws）/ `presence` /
-/// `table-patch`、`canvas-patch`（不透明透传）/ `note-sync`、`note-aware`（base64 载荷不透明透传）/
+/// `table-patch`、`canvas-patch`（不透明透传）/ `note-sync`（base64 载荷不透明透传）/
 /// `ephemeral`（通用瞬时通道：不缓存不补投，按 `channel` 命名空间分派）/
 /// `plugin-msg`（广播/定向单播）/ `plugin-replay`（可靠补投：回放 seq > after 的缓存广播帧）/
 /// `ping`（保活，回 `pong` 广播）/ `bye`（离开）；二进制帧 = 插件消息二进制载荷直传
@@ -223,7 +223,7 @@ pub(crate) struct ClientMsg {
     /// 表格/画布增量补丁（不透明透传，服务端不解析内容）。
     #[serde(default)]
     pub patch: Option<serde_json::Value>,
-    /// 笔记协作同步/awareness（Yjs 二进制经 base64 包装）或插件消息载荷。不透明透传。
+    /// 笔记内容同步（Yjs 二进制经 base64 包装）或插件消息载荷。不透明透传。
     #[serde(default)]
     pub payload: Option<serde_json::Value>,
     /// 插件消息频道名（不解析，按频道转发）。
@@ -292,7 +292,7 @@ struct ServerMsg {
     /// 插件消息 / 瞬时通道的频道名（`plugin-msg`、`ephemeral` 转发帧携带）。
     #[serde(skip_serializing_if = "Option::is_none")]
     channel: Option<String>,
-    /// 载荷（`note-sync`/`note-aware` 为 base64 字符串，`plugin-msg`/`ephemeral` 为任意 JSON）。
+    /// 载荷（`note-sync` 为 base64 字符串，`plugin-msg`/`ephemeral` 为任意 JSON）。
     #[serde(skip_serializing_if = "Option::is_none")]
     payload: Option<serde_json::Value>,
     /// 插件广播帧的房间级序号（可靠补投对账；单播帧不携带）。
@@ -855,17 +855,17 @@ pub(crate) async fn run_room_connection(
                             forward_to_room(&mut rooms, &room_id, peer_id, payload);
                         }
                     }
-                    // 笔记协作同步 / awareness：不透明透传（base64 载荷），原样转发房间内其他成员
+                    // 笔记内容同步：不透明透传（base64 载荷），原样转发房间内其他成员
                     // （客户端按 file 匹配只合入当前打开的笔记）
-                    "note-sync" | "note-aware" => {
+                    "note-sync" => {
                         if let (Some(file), Some(payload)) = (
                             msg.file,
                             msg.payload.and_then(|p| p.as_str().map(str::to_string)),
                         ) {
-                            debug!(peer_id, room = %room_id, kind = %msg.kind, file = %file, bytes = payload.len(), "笔记同步转发");
+                            debug!(peer_id, room = %room_id, file = %file, bytes = payload.len(), "笔记同步转发");
                             let mut rooms = hub.0.lock().unwrap();
                             let relayed = server_msg(
-                                if msg.kind == "note-sync" { "note-sync" } else { "note-aware" },
+                                "note-sync",
                                 Some(peer_id),
                                 None,
                                 None,

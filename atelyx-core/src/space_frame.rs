@@ -1,4 +1,4 @@
-//! 笔记协作帧编解码（`note-sync` / `note-aware` 通道载荷）与 lib0 基元。
+//! 笔记协作帧编解码（`note-sync` 通道载荷）与 lib0 基元。
 //! 字节布局与 lib0 / y-protocols 完全一致，由 golden vector 测试冻结。
 //! 解码对网络载荷不可信：字段不完整 / 未知类型 / 尾随字节一律返回 `None` 不抛错。
 
@@ -44,14 +44,6 @@ pub enum NoteFrame {
     Baseline { tag: DocTag, baseline_text: String, current_text: String },
     Resync { reason: u64 },
     Relocate { old_path: String, new_path: String },
-}
-
-/// awareness 单条状态：JSON 原文（`null` 表示移除该端）。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AwarenessEntry {
-    pub client_id: u64,
-    pub clock: u64,
-    pub state_json: String,
 }
 
 // ---------- lib0 基元 ----------
@@ -197,36 +189,6 @@ pub fn decode_note_payload(payload: &[u8]) -> Option<NoteFrame> {
         return None;
     }
     Some(frame)
-}
-
-// ---------- awareness 载荷 ----------
-
-pub fn encode_awareness_update(entries: &[AwarenessEntry]) -> Vec<u8> {
-    let mut buf = Vec::new();
-    write_var_uint(&mut buf, entries.len() as u64);
-    for e in entries {
-        write_var_uint(&mut buf, e.client_id);
-        write_var_uint(&mut buf, e.clock);
-        write_var_string(&mut buf, &e.state_json);
-    }
-    buf
-}
-
-pub fn decode_awareness_update(payload: &[u8]) -> Option<Vec<AwarenessEntry>> {
-    let mut r = Reader::new(payload);
-    let count = read_var_uint(&mut r)?;
-    let mut entries = Vec::with_capacity(count.min(1024) as usize);
-    for _ in 0..count {
-        entries.push(AwarenessEntry {
-            client_id: read_var_uint(&mut r)?,
-            clock: read_var_uint(&mut r)?,
-            state_json: read_var_string(&mut r)?.to_owned(),
-        });
-    }
-    if r.has_content() {
-        return None;
-    }
-    Some(entries)
 }
 
 // ---------- 基线内容标识与偏移换算 ----------
@@ -400,20 +362,6 @@ mod tests {
         assert_eq!(t(2, "b", "x").compare(&t(2, "b", "x")), Ordering::Equal);
         assert!(t(1, "甲", "i1").same_content(&t(9, "乙", "i1")));
         assert!(!t(1, "甲", "i1").same_content(&t(1, "甲", "i2")));
-    }
-
-    #[test]
-    fn awareness载荷编解码还原() {
-        // golden vector：yjs 侧 encodeAwarenessUpdate 实测（state JSON 原样，clock=1）
-        let raw = unhex("01eac1a3940f01677b2275736572223a7b226e616d65223a22e5b08fe6988e222c22636f6c6f72223a2223653036633735222c22636f6c6f724c69676874223a22236530366337353333227d2c2273656c656374696f6e223a7b22616e63686f72223a332c2268656164223a377d7d");
-        let entries = decode_awareness_update(&raw).expect("合法载荷应可解码");
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].clock, 1);
-        assert!(entries[0].state_json.contains("\"selection\":{\"anchor\":3,\"head\":7}"));
-        assert_eq!(hex(encode_awareness_update(&entries)), hex(&raw));
-        // 截断 / 尾随字节拒绝
-        assert_eq!(decode_awareness_update(&raw[..raw.len() - 1]), None);
-        assert_eq!(decode_awareness_update(&raw[..5]), None);
     }
 
     #[test]

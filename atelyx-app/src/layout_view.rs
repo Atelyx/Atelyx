@@ -2938,7 +2938,7 @@ fn note_view(app: &App, window: iced::window::Id) -> Element<'_, Message> {
         .popup
         .as_ref()
         .is_some_and(|(_, open)| matches!(open.state, PopupState::NoteMenu));
-    // 协作者胶囊（空间模式；远端 awareness 在场者，色点 + 昵称，多时折叠；名册见协作房间视图）
+    // 协作者胶囊（空间模式；同文件在场者，色点 + 昵称，多时折叠；名册见协作房间视图）
     let mut toolbar_row = row![space().width(Length::Fill)].spacing(4);
     if matches!(app.repo_kind, crate::RepoKind::Space(_)) && !app.remote_cursors.is_empty() {
         let members: Vec<(iced::Color, String)> = app

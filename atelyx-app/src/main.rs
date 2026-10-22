@@ -35,6 +35,7 @@ mod settings_view;
 mod space_actions;
 mod table_actions;
 mod table_collab;
+mod note_collab_channel;
 mod table_text;
 mod table_view;
 mod text_preedit;
@@ -1263,7 +1264,9 @@ pub struct App {
     pub note_collab: Option<atelyx_core::note_collab::NoteCollab>,
     /// 协作绑定当前挂的文件（None = 未挂）。
     pub note_collab_file: Option<String>,
-    /// 远端成员光标（awareness 换算为 note_text 字节偏移；编辑面渲染）。
+    /// 笔记在场通道（本端光标/选区上行与远端光标条目）。
+    pub note_collab_channel: Option<note_collab_channel::NoteCollabChannel>,
+    /// 远端成员光标（在场通道状态换算为 note_text 字节偏移；编辑面渲染）。
     pub remote_cursors: Vec<RemoteCursorView>,
     /// 本端帧泵 peerId（hello-ack 分配）：自声落地帧与名册自条目据此过滤。
     pub space_own_peer_id: Option<String>,
@@ -1694,6 +1697,7 @@ impl App {
                 fs_tree_refresh_pending: false,
                 note_collab: None,
                 note_collab_file: None,
+                note_collab_channel: None,
                 remote_cursors: Vec::new(),
                 table_collab: None,
         };
@@ -1956,6 +1960,7 @@ impl App {
                 self.space_note_flushed = None;
                 self.note_collab = None;
                 self.note_collab_file = None;
+                self.note_collab_channel = None;
                 self.remote_cursors.clear();
                 self.notify(NoticeLevel::Error, e);
                 Task::none()
@@ -2742,8 +2747,8 @@ impl App {
                 self.notifications.retain(|n| !n.expired());
                 // 表格图片长按检查（拖拽排序激活）
                 table_actions::check_long_press(self);
-                // 远端光标过期剔除节流（1s）：对端崩溃/断网无离场帧，靠 awareness 超时惰性剔除
-                if self.note_collab.is_some()
+                // 远端光标过期剔除节流（1s）：对端崩溃/断网无离场帧，靠通道超时惰性剔除
+                if self.note_collab_channel.is_some()
                     && self
                         .space_cursor_prune_at
                         .is_none_or(|at| at.elapsed() >= std::time::Duration::from_secs(1))
@@ -2751,14 +2756,14 @@ impl App {
                     self.space_cursor_prune_at = Some(Instant::now());
                     space_actions::refresh_remote_cursors(self);
                 }
-                // awareness 保活重发（core 内 15s 限频，连接期间搭载）：空闲端身份帧
+                // 在场保活重发（通道内 15s 限频，连接期间搭载）：空闲端身份帧
                 // 否则被对端 30s 超时剔除——后加入者与对端互见都依赖周期重发
                 if self.space_connected {
-                    space_actions::awareness_keepalive(self);
+                    space_actions::note_presence_keepalive(self);
                 }
                 // 限频压下的选区变化（拖选连续位移）由本拍补发最新一份：断线期产出即丢弃，
                 // 重连时的强制重发以最新状态兜底
-                space_actions::awareness_flush(self);
+                space_actions::note_presence_flush(self);
                 // 表格在场：远端超时剔除、限频补发、空闲保活
                 space_actions::table_collab_tick(self);
                 // 重名提醒条 3s 过期
@@ -6689,19 +6694,18 @@ impl App {
 
     fn subscription(&self) -> Subscription<Message> {
         // 心跳仅在有待过期通知、提醒条在途、悬停提示在途（距离收起判定）、编辑面聚焦、
-        // 远端光标在册（过期剔除节流搭载）、选区待补发、表格图片长按候选或快捷键页展示中
-        // （冲突警示两态闪烁）时挂载
+        // 笔记 / 表格在场有待发状态或有对端（补发 / 保活 / 远端剔除搭载）、表格图片长按候选
+        // 或快捷键页展示中（冲突警示两态闪烁）时挂载
         let need_tick = !self.notifications.is_empty()
             || self.rename_notice.is_some()
             || self.tooltip.is_some()
             || self.edit.focused
-            || !self.remote_cursors.is_empty()
+            // 笔记在场：有待发状态或有对端时需要周期拍；单人无对端不挂拍，避免空闲被 10Hz 重绘
             || self
-                .note_collab
+                .note_collab_channel
                 .as_ref()
-                .is_some_and(|nc| nc.has_pending_awareness())
-            // 表格在场：有待发状态或有对端时需要周期拍（补发 / 保活 / 远端剔除）；
-            // 单人无对端不挂拍，避免空闲表格被 10Hz 重绘
+                .is_some_and(|ch| ch.has_pending() || ch.has_peers())
+            // 表格在场：同笔记口径（补发 / 保活 / 远端剔除）
             || self
                 .table_collab
                 .as_ref()

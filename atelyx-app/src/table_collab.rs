@@ -33,6 +33,8 @@ pub struct TableCollab {
     file: Option<String>,
     /// 已写入通道状态的选区（变化检测基准，含被限频压下待补发的那份）。
     sent_selection: Option<TableSelection>,
+    /// 已写入通道状态的身份（昵称 / 成员色）：设置里改名或换色也要让对端看到。
+    sent_identity: Option<(String, String)>,
     /// 当前文件可绘制的远端选区（事件与 tick 驱动刷新，绘制只读）。
     remote: Vec<RemoteSelection>,
 }
@@ -43,6 +45,7 @@ impl TableCollab {
             channel: EphemeralChannel::new(),
             file: None,
             sent_selection: None,
+            sent_identity: None,
             remote: Vec::new(),
         }
     }
@@ -52,9 +55,15 @@ impl TableCollab {
         self.file.as_deref()
     }
 
-    /// 已提交到通道状态的选区（调用方据此跳过无变化的同步）。
+    /// 已提交到通道状态的选区与身份（调用方据此跳过无变化的同步）。
     pub fn sent_selection(&self) -> Option<&TableSelection> {
         self.sent_selection.as_ref()
+    }
+
+    pub fn sent_identity(&self) -> Option<(&str, &str)> {
+        self.sent_identity
+            .as_ref()
+            .map(|(name, color)| (name.as_str(), color.as_str()))
     }
 
     pub fn remote(&self) -> &[RemoteSelection] {
@@ -71,6 +80,7 @@ impl TableCollab {
     ) -> Option<Value> {
         self.file = Some(file.to_owned());
         self.sent_selection = selection.cloned();
+        self.sent_identity = Some(identity_pair(identity));
         // 换文件后旧文件的远端条目不再属于本视图
         self.remote.clear();
         self.channel
@@ -88,10 +98,13 @@ impl TableCollab {
         if self.file.as_deref() != Some(file) {
             return self.enter(now, identity, file, selection);
         }
-        if self.sent_selection.as_ref() == selection {
+        if self.sent_selection.as_ref() == selection
+            && self.sent_identity.as_ref() == Some(&identity_pair(identity))
+        {
             return None;
         }
         self.sent_selection = selection.cloned();
+        self.sent_identity = Some(identity_pair(identity));
         self.channel
             .set_local_state(now, state_json(identity, file, selection))
     }
@@ -100,6 +113,7 @@ impl TableCollab {
     pub fn leave(&mut self, now: Instant) -> Option<Value> {
         self.file = None;
         self.sent_selection = None;
+        self.sent_identity = None;
         self.remote.clear();
         self.channel.leave(now)
     }
@@ -159,7 +173,7 @@ impl TableCollab {
                     .get("color")
                     .and_then(Value::as_str)
                     .and_then(crate::layout_view::parse_hex_color)
-                    .unwrap_or(pal::TEXT_MUTED);
+                    .unwrap_or(pal::FALLBACK_COLLAB);
                 Some(RemoteSelection { name, color, selection })
             })
             .collect();
@@ -185,6 +199,10 @@ impl Default for TableCollab {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn identity_pair(identity: &Identity<'_>) -> (String, String) {
+    (identity.name.to_owned(), identity.color.to_owned())
 }
 
 fn state_json(identity: &Identity<'_>, file: &str, selection: Option<&TableSelection>) -> Value {
@@ -227,6 +245,23 @@ mod tests {
         assert_eq!(first["state"]["selection"]["kind"], "cell");
         assert_eq!(collab.file(), Some("a.atb"));
         assert!(collab.update(now, &identity(), "a.atb", Some(&sel)).is_none());
+    }
+
+    #[test]
+    fn 身份变化也要上行_同身份同选区不再上行() {
+        let mut collab = TableCollab::new();
+        let now = Instant::now();
+        let sel = TableSelection::Cell { row_id: "r1".into(), field_id: "f1".into() };
+        collab.enter(now, &identity(), "a.atb", Some(&sel)).expect("进入");
+        assert!(collab.update(now, &identity(), "a.atb", Some(&sel)).is_none());
+        let renamed = Identity { name: "爱丽丝2", color: "#e0533d" };
+        let frame = collab
+            .update(now + Duration::from_millis(60), &renamed, "a.atb", Some(&sel))
+            .expect("改名应对端可见");
+        assert_eq!(frame["state"]["name"], "爱丽丝2");
+        assert!(collab
+            .update(now + Duration::from_millis(120), &renamed, "a.atb", Some(&sel))
+            .is_none());
     }
 
     #[test]
@@ -293,7 +328,7 @@ mod tests {
         });
         collab.apply("p1", &bad_color, now);
         assert_eq!(collab.remote().len(), 1, "颜色畸形只回落颜色，条目仍可见");
-        assert_eq!(collab.remote()[0].color, pal::TEXT_MUTED);
+        assert_eq!(collab.remote()[0].color, pal::FALLBACK_COLLAB);
 
         assert!(collab.drop_peer("p1"));
         assert!(collab.remote().is_empty());

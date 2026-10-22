@@ -68,10 +68,8 @@ impl std::fmt::Debug for HelloFrame {
 /// 壳 → 泵命令。
 #[derive(Debug)]
 pub enum SpaceCmd {
-    /// 笔记协作同步（Yjs 二进制，泵内 base64 包装）。
+    /// 笔记内容同步（Yjs 二进制，泵内 base64 包装）。
     NoteSync { file: String, payload: Vec<u8> },
-    /// 笔记协作 awareness。
-    NoteAware { file: String, payload: Vec<u8> },
     /// presence 上行（JSON 对象，字段由壳组装，服务端不解析）。
     Presence { presence: Value },
     /// 插件通用消息上行（频道由壳按插件命名空间拼好，载荷服务端不解析）。
@@ -106,7 +104,6 @@ pub enum SpaceEvent {
     Presence { peer_id: String, presence: Value },
     /// 载荷已从 base64 解码为原始字节。
     NoteSync { peer_id: String, file: String, payload: Vec<u8> },
-    NoteAware { peer_id: String, file: String, payload: Vec<u8> },
     /// 表格/画布补丁。peer_id = Some 是他人 WS 透传（不落盘）或服务端落地广播回填的发起者
     /// peerId；None = 服务端落地广播且发起者无房间连接。`landed` = 服务端真源已含本补丁
     /// （HTTP 落地广播帧标记；WS 透传帧不带）——壳据此推进保存基线，peerId 匹配本端时跳过合入。
@@ -685,7 +682,7 @@ async fn handle_text_frame(
             };
             deliver(events.send(SpaceEvent::Presence { peer_id, presence }).await)
         }
-        "note-sync" | "note-aware" => {
+        "note-sync" => {
             let (Some(peer_id), Some(file), Some(payload)) = (
                 frame.get("peerId").and_then(peer_id_string),
                 str_field(&frame, "file"),
@@ -693,12 +690,7 @@ async fn handle_text_frame(
             ) else {
                 return FrameFlow::Continue;
             };
-            let event = if kind == "note-sync" {
-                SpaceEvent::NoteSync { peer_id, file, payload }
-            } else {
-                SpaceEvent::NoteAware { peer_id, file, payload }
-            };
-            deliver(events.send(event).await)
+            deliver(events.send(SpaceEvent::NoteSync { peer_id, file, payload }).await)
         }
         "table-patch" => {
             let Some(file) = str_field(&frame, "file") else {
@@ -857,8 +849,7 @@ async fn gap_wait(deadline: Option<tokio::time::Instant>) {
 /// 命令编码上行（false = 写失败，连接已死）。Bye 由会话循环拦截，不经此路径。
 async fn send_cmd(ws: &mut WsStream, cmd: SpaceCmd) -> bool {
     let text = match cmd {
-        SpaceCmd::NoteSync { file, payload } => note_frame_text("note-sync", &file, &payload),
-        SpaceCmd::NoteAware { file, payload } => note_frame_text("note-aware", &file, &payload),
+        SpaceCmd::NoteSync { file, payload } => note_frame_text(&file, &payload),
         SpaceCmd::Presence { presence } => presence_frame_text(presence),
         SpaceCmd::PluginMsg { channel, payload, target_peer_id } => {
             plugin_frame_text(&channel, payload, target_peer_id)
@@ -871,10 +862,10 @@ async fn send_cmd(ws: &mut WsStream, cmd: SpaceCmd) -> bool {
     send_with_timeout(ws, Message::text(text)).await.is_ok()
 }
 
-/// 笔记协作帧：Yjs 二进制经标准 base64 包装，服务端不透明转发。
-fn note_frame_text(kind: &str, file: &str, payload: &[u8]) -> String {
+/// 笔记内容同步帧：Yjs 二进制经标准 base64 包装，服务端不透明转发。
+fn note_frame_text(file: &str, payload: &[u8]) -> String {
     json!({
-        "type": kind,
+        "type": "note-sync",
         "file": file,
         "payload": base64::engine::general_purpose::STANDARD.encode(payload),
     })
@@ -960,14 +951,13 @@ fn hello_frame_text(hello: &HelloFrame) -> String {
 
 /// 命令入缓冲；容量满丢最旧（断线期的旧命令已无现场价值，保留最新）。
 /// NoteSync 是因果链增量，丢弃会产生文档缺口——满时优先腾出可覆盖类命令
-/// （presence / awareness 新盖旧），无可腾才按序丢最旧。
+/// （presence / 在场状态新盖旧），无可腾才按序丢最旧。
 fn buffer_cmd(buf: &mut VecDeque<SpaceCmd>, cmd: SpaceCmd, cap: usize) {
     if buf.len() >= cap {
         let evictable = buf.iter().position(|c| {
             matches!(
                 c,
                 SpaceCmd::Presence { .. }
-                    | SpaceCmd::NoteAware { .. }
                     | SpaceCmd::Ephemeral { .. }
             )
         });
@@ -997,7 +987,7 @@ fn str_field(value: &Value, key: &str) -> Option<String> {
     value.get(key).and_then(Value::as_str).map(str::to_string)
 }
 
-/// note-sync/note-aware 载荷解码（base64 → 原始字节；缺失或非法 → None，丢帧）。
+/// note-sync 载荷解码（base64 → 原始字节；缺失或非法 → None，丢帧）。
 fn decode_payload(frame: &Value) -> Option<Vec<u8>> {
     let raw = frame.get("payload").and_then(Value::as_str)?;
     base64::engine::general_purpose::STANDARD.decode(raw).ok()
@@ -1193,9 +1183,9 @@ mod tests {
         server.await.unwrap();
     }
 
-    /// 命令上行：NoteSync/NoteAware → base64 包装帧，服务端解码一致。
+    /// 命令上行：NoteSync → base64 包装帧，服务端解码一致。
     #[tokio::test]
-    async fn note_cmds_uplink_with_base64_payload() {
+    async fn note_sync_cmd_uplink_with_base64_payload() {
         let payload = vec![0u8, 1, 2, 250, 255];
         let server_payload = payload.clone();
         let (base, server) = spawn_handshake_server(move |mut ws| async move {
@@ -1206,9 +1196,6 @@ mod tests {
                 .decode(frame["payload"].as_str().unwrap())
                 .unwrap();
             assert_eq!(decoded, server_payload);
-            let frame = read_json(&mut ws).await;
-            assert_eq!(frame["type"], "note-aware");
-            assert_eq!(frame["file"], "notes/a.md");
         })
         .await;
         let (cmd_tx, mut events) = spawn_pump_with(&base, test_hello(), test_config());
@@ -1218,12 +1205,6 @@ mod tests {
         );
         cmd_tx
             .send(SpaceCmd::NoteSync { file: "notes/a.md".to_string(), payload })
-            .unwrap();
-        cmd_tx
-            .send(SpaceCmd::NoteAware {
-                file: "notes/a.md".to_string(),
-                payload: b"aw".to_vec(),
-            })
             .unwrap();
         server.await.unwrap();
     }

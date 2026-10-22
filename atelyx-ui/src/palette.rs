@@ -206,6 +206,10 @@ pub const REMOTE_TAG_RADIUS: f32 = 3.0;
 pub const REMOTE_TAG_GAP: f32 = 1.0;
 /// 远端名签最大宽度（超出省略）。
 pub const REMOTE_TAG_MAX_W: f32 = 140.0;
+/// 远端成员色缺失 / 为空时的兜底（中性灰；畸形非空色由渲染层回落，不在此归一）。
+pub const FALLBACK_COLLAB_COLOR: &str = "#9aa0a6";
+/// [`FALLBACK_COLLAB_COLOR`] 的已解析形态（直接绘制的链路用）。
+pub const FALLBACK_COLLAB: Color = rgb(0x9a, 0xa0, 0xa6);
 
 /// 内置 iced 主题：按本调色板定制（内置部件的 palette 色 = accent 等语义映射）。
 pub fn app_theme() -> Theme {
