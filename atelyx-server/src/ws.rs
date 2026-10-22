@@ -156,6 +156,7 @@ struct PeerEntry {
     nickname: String,
     color: String,
     device_name: String,
+    platform: Option<String>,
     version: Option<String>,
     presence: Option<Presence>,
     tx: broadcast::Sender<WireFrame>,
@@ -179,6 +180,7 @@ pub struct PeerMeta {
     pub nickname: String,
     pub color: String,
     pub device_name: String,
+    pub platform: Option<String>,
     pub version: Option<String>,
     /// 所属设备会话（吊销会话时按此踢连接）。
     pub session_id: String,
@@ -254,6 +256,8 @@ struct PeerInfo {
     nickname: String,
     color: String,
     device_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    platform: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -407,6 +411,7 @@ fn broadcast_peers(rooms: &HashMap<String, Room>, room_id: &str) {
             nickname: p.nickname.clone(),
             color: p.color.clone(),
             device_name: p.device_name.clone(),
+            platform: p.platform.clone(),
             version: p.version.clone(),
             presence: p.presence.clone(),
         })
@@ -678,6 +683,7 @@ pub(crate) async fn run_room_connection(
     });
     let nickname = meta.nickname.clone();
     let device_name = meta.device_name.clone();
+    let platform = meta.platform.clone();
     let version = meta.version.clone();
     let session_id = meta.session_id.clone();
     {
@@ -691,6 +697,7 @@ pub(crate) async fn run_room_connection(
                 nickname: meta.nickname,
                 color: meta.color,
                 device_name: meta.device_name,
+                platform: meta.platform,
                 version: meta.version,
                 presence: None,
                 tx: btx.clone(),
@@ -704,6 +711,7 @@ pub(crate) async fn run_room_connection(
             room = %room_id,
             nickname = %nickname,
             device_name = %device_name,
+            platform = platform.as_deref().unwrap_or(""),
             version = version.as_deref().unwrap_or(""),
             %remote,
             room_size = room.peers.len(),
@@ -1229,6 +1237,7 @@ mod tests {
             nickname: session.to_string(),
             color: String::new(),
             device_name: String::new(),
+            platform: None,
             version: None,
             presence: None,
             tx,

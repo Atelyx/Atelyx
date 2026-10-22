@@ -45,6 +45,7 @@ pub struct HelloFrame {
     pub nickname: String,
     pub color: String,
     pub device_name: String,
+    pub platform: Option<String>,
     pub version: Option<String>,
 }
 
@@ -56,6 +57,7 @@ impl std::fmt::Debug for HelloFrame {
             .field("nickname", &self.nickname)
             .field("color", &self.color)
             .field("device_name", &self.device_name)
+            .field("platform", &self.platform)
             .field("version", &self.version)
             .finish()
     }
@@ -84,6 +86,8 @@ pub struct PeerInfo {
     pub nickname: String,
     pub color: String,
     pub device_name: String,
+    /// 客户端平台标识（`windows` / `linux` / `android`…；旧端缺省）。
+    pub platform: Option<String>,
     pub version: Option<String>,
     pub presence: Option<Value>,
 }
@@ -886,7 +890,7 @@ fn presence_frame_text(presence: Value) -> String {
     Value::Object(obj).to_string()
 }
 
-/// hello 首帧（camelCase；version 缺省不下发）。
+/// hello 首帧（camelCase；platform / version 缺省不下发）。
 fn hello_frame_text(hello: &HelloFrame) -> String {
     let mut obj = Map::new();
     obj.insert("type".to_string(), Value::from("hello"));
@@ -898,6 +902,9 @@ fn hello_frame_text(hello: &HelloFrame) -> String {
         "deviceName".to_string(),
         Value::from(hello.device_name.as_str()),
     );
+    if let Some(platform) = &hello.platform {
+        obj.insert("platform".to_string(), Value::from(platform.as_str()));
+    }
     if let Some(version) = &hello.version {
         obj.insert("version".to_string(), Value::from(version.as_str()));
     }
@@ -954,6 +961,7 @@ fn parse_peer(entry: &Value) -> PeerInfo {
         nickname: str_field(entry, "nickname").unwrap_or_default(),
         color: str_field(entry, "color").unwrap_or_default(),
         device_name: str_field(entry, "deviceName").unwrap_or_default(),
+        platform: str_field(entry, "platform"),
         version: str_field(entry, "version"),
         presence: entry.get("presence").cloned().filter(|p| !p.is_null()),
     }
@@ -989,6 +997,7 @@ mod tests {
             nickname: "小明".to_string(),
             color: "#3b82f6".to_string(),
             device_name: "dev-a".to_string(),
+            platform: Some("windows".to_string()),
             version: Some("0.1.0".to_string()),
         }
     }
@@ -1056,6 +1065,7 @@ mod tests {
         assert_eq!(hello["nickname"], "小明");
         assert_eq!(hello["color"], "#3b82f6");
         assert_eq!(hello["deviceName"], "dev-a");
+        assert_eq!(hello["platform"], "windows");
         assert_eq!(hello["version"], "0.1.0");
         send_json(&mut ws, json!({"type": "hello-ack", "peerId": 1})).await;
         ws
@@ -1094,7 +1104,7 @@ mod tests {
     async fn handshake_yields_ready_and_peers() {
         let (base, server) = spawn_handshake_server(|mut ws| async move {
             send_json(&mut ws, json!({"type": "peers", "peers": [
-                {"peerId": 1, "nickname": "小明", "color": "#3b82f6", "deviceName": "dev-a", "version": "0.1.0"},
+                {"peerId": 1, "nickname": "小明", "color": "#3b82f6", "deviceName": "dev-a", "platform": "windows", "version": "0.1.0"},
                 {"peerId": 2, "nickname": "小红", "color": "#f97316", "deviceName": "dev-b", "presence": {"view": "table"}}
             ]}))
             .await;
@@ -1113,6 +1123,7 @@ mod tests {
                     nickname: "小明".to_string(),
                     color: "#3b82f6".to_string(),
                     device_name: "dev-a".to_string(),
+                    platform: Some("windows".to_string()),
                     version: Some("0.1.0".to_string()),
                     presence: None,
                 },
@@ -1121,6 +1132,7 @@ mod tests {
                     nickname: "小红".to_string(),
                     color: "#f97316".to_string(),
                     device_name: "dev-b".to_string(),
+                    platform: None,
                     version: None,
                     presence: Some(json!({"view": "table"})),
                 },

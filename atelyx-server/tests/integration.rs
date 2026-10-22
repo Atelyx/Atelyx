@@ -906,7 +906,7 @@ async fn ws_space_channel_auth_and_presence() {
     let c_token = register(&ctx, "carol").await;
 
     // 两个成员入频道：各自收到 hello-ack，且 peers 快照含双方
-    let mut a = ws_connect(&ctx.base, "/ws/space", json!({ "type": "hello", "spaceId": space_id, "token": a_token, "nickname": "爱丽丝", "color": "#ff0000", "deviceName": "A机" })).await;
+    let mut a = ws_connect(&ctx.base, "/ws/space", json!({ "type": "hello", "spaceId": space_id, "token": a_token, "nickname": "爱丽丝", "color": "#ff0000", "deviceName": "A机", "platform": "windows", "version": "0.6.1" })).await;
     let ack = next_frame(&mut a).await;
     assert_eq!(ack["type"], "hello-ack");
     let mut b = ws_connect(&ctx.base, "/ws/space", json!({ "type": "hello", "spaceId": space_id, "token": b_token, "nickname": "鲍勃", "color": "#00ff00", "deviceName": "B机" })).await;
@@ -921,6 +921,24 @@ async fn ws_space_channel_auth_and_presence() {
         peers = next_frame(&mut a).await;
     }
     assert_eq!(peers["peers"].as_array().unwrap().len(), 2);
+    // hello 的客户端身份字段随 peers 快照透传（旧端不报 = 字段缺省）
+    let alice = peers["peers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["nickname"] == "爱丽丝")
+        .expect("快照应含爱丽丝");
+    assert_eq!(alice["deviceName"], "A机");
+    assert_eq!(alice["platform"], "windows");
+    assert_eq!(alice["version"], "0.6.1");
+    let bob = peers["peers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["nickname"] == "鲍勃")
+        .expect("快照应含鲍勃");
+    assert!(bob.get("platform").is_none());
+    assert!(bob.get("version").is_none());
 
     // presence 转发：A 发，B 收（不含自己）。B 先 drain 掉自己入房触发的 peers 快照
     a.send(Message::text(json!({ "type": "presence", "file": "笔记/会议.md" }).to_string())).await.unwrap();

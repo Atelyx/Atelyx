@@ -35,6 +35,8 @@ struct SpaceHello {
     #[serde(default)]
     device_name: String,
     #[serde(default)]
+    platform: Option<String>,
+    #[serde(default)]
     version: Option<String>,
 }
 
@@ -113,6 +115,7 @@ async fn handle(mut socket: WebSocket, state: ServerState, remote: SocketAddr) {
             nickname,
             color: hello.color,
             device_name: hello.device_name,
+            platform: hello.platform,
             version: hello.version,
             session_id: identity.session_id,
         },

@@ -1701,12 +1701,21 @@ fn collab_room_view(app: &App) -> Element<'_, Message> {
                     .collab_color
                     .clone()
                     .unwrap_or_else(|| crate::space_actions::DEFAULT_COLLAB_COLOR.into()),
-                crate::space_actions::DEFAULT_DEVICE_NAME.to_string(),
+                Some(crate::space_actions::client_platform().to_string()),
+                Some(crate::space_actions::CLIENT_VERSION.to_string()),
                 crate::space_actions::open_file_paths(app),
                 true,
             ));
-            for (nickname, device, color, files) in merge_peers(&app.space_peers) {
-                col = col.push(device_row(app, nickname, color, device, files, false));
+            for peer in merge_peers(&app.space_peers) {
+                col = col.push(device_row(
+                    app,
+                    peer.nickname,
+                    peer.color,
+                    peer.platform,
+                    peer.version,
+                    peer.files,
+                    false,
+                ));
             }
             if app.space_peers.is_empty() {
                 col = col.push(
@@ -1731,12 +1740,13 @@ fn collab_room_view(app: &App) -> Element<'_, Message> {
         .into()
 }
 
-/// 在线设备卡片：色点 + 昵称（自己标「我」）一行，设备名次行，打开文件清单可点击。
+/// 在线设备卡片：色点 + 昵称（自己标「我」）一行，平台 · 版本次行，打开文件清单可点击。
 fn device_row(
     app: &App,
     nickname: String,
     color_hex: String,
-    device: String,
+    platform: Option<String>,
+    version: Option<String>,
     files: Vec<String>,
     is_self: bool,
 ) -> Element<'static, Message> {
@@ -1761,7 +1771,7 @@ fn device_row(
         .spacing(3)
         .push(head);
     col = col.push(
-        text(device)
+        text(device_meta_line(platform.as_deref(), version.as_deref()))
             .size(pal::fs_micro())
             .color(pal::TEXT_MUTED),
     );
@@ -1801,25 +1811,58 @@ fn device_row(
         .into()
 }
 
-/// 在线设备按「昵称::设备」合并（同身份多连接）；打开文件并集去重，色取首条。
-fn merge_peers(
-    peers: &[atelyx_core::collab::PeerInfo],
-) -> Vec<(String, String, String, Vec<String>)> {
-    let mut rows: Vec<(String, String, String, Vec<String>)> = Vec::new();
+/// 平台 · 版本展示行：旧端未上报的字段显式标注未知。
+fn device_meta_line(platform: Option<&str>, version: Option<&str>) -> String {
+    let platform = platform
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(crate::space_actions::platform_label)
+        .unwrap_or_else(|| "未知平台".into());
+    let version = version.map(str::trim).filter(|s| !s.is_empty()).unwrap_or("未知版本");
+    format!("{platform} · {version}")
+}
+
+/// 合并后的在线设备行（`device_name` 仅作合并键，不进卡片）。
+struct PeerRow {
+    nickname: String,
+    device_name: String,
+    platform: Option<String>,
+    version: Option<String>,
+    color: String,
+    files: Vec<String>,
+}
+
+/// 在线设备按「昵称 + 设备」合并（同身份多连接）；打开文件并集去重，色取首条，
+/// 平台 / 版本取首个已知值。
+fn merge_peers(peers: &[atelyx_core::collab::PeerInfo]) -> Vec<PeerRow> {
+    let mut rows: Vec<PeerRow> = Vec::new();
     for p in peers {
         let files = crate::space_actions::peer_open_files(p.presence.as_ref());
         match rows
             .iter_mut()
-            .find(|(n, d, _, _)| *n == p.nickname && *d == p.device_name)
+            .find(|r| r.nickname == p.nickname && r.device_name == p.device_name)
         {
             Some(entry) => {
                 for f in files {
-                    if !entry.3.contains(&f) {
-                        entry.3.push(f);
+                    if !entry.files.contains(&f) {
+                        entry.files.push(f);
                     }
                 }
+                if entry.platform.is_none() {
+                    entry.platform = p.platform.clone();
+                }
+                if entry.version.is_none() {
+                    entry.version = p.version.clone();
+                }
             }
-            None => rows.push((p.nickname.clone(), p.device_name.clone(), p.color.clone(), files)),
+            None => rows.push(PeerRow {
+                nickname: p.nickname.clone(),
+                device_name: p.device_name.clone(),
+                platform: p.platform.clone(),
+                version: p.version.clone(),
+                color: p.color.clone(),
+                files,
+            }),
         }
     }
     rows
@@ -6229,7 +6272,8 @@ pub fn drop_zone_at(zone: &PanelZone, global: iced::Point) -> DropZone {
 
 #[cfg(test)]
 mod tests {
-    use super::{note_title_label, truncate_to_width};
+    use super::{device_meta_line, merge_peers, note_title_label, truncate_to_width};
+    use atelyx_core::collab::PeerInfo;
 
     /// 固定度量：每字符 1 单位（截断只按字符数收缩，与字体 shaping 解耦）。
     fn per_char(s: &str) -> f32 {
@@ -6244,6 +6288,42 @@ mod tests {
         // 非 .md 与无扩展名按整名（标题即文件名，不猜扩展名）
         assert_eq!(note_title_label("a/表.atb"), "表.atb");
         assert_eq!(note_title_label("readme"), "readme");
+    }
+
+    #[test]
+    fn device_meta_line_marks_missing_fields_unknown() {
+        assert_eq!(device_meta_line(Some("windows"), Some("0.6.1")), "Windows · 0.6.1");
+        assert_eq!(device_meta_line(Some("linux"), None), "Linux · 未知版本");
+        assert_eq!(device_meta_line(None, Some("0.6.1")), "未知平台 · 0.6.1");
+        assert_eq!(device_meta_line(None, None), "未知平台 · 未知版本");
+        assert_eq!(device_meta_line(Some(""), Some(" ")), "未知平台 · 未知版本");
+    }
+
+    fn peer(nick: &str, device: &str, platform: Option<&str>, files: &[&str]) -> PeerInfo {
+        PeerInfo {
+            peer_id: nick.to_string(),
+            nickname: nick.to_string(),
+            color: "#30bced".into(),
+            device_name: device.into(),
+            platform: platform.map(str::to_string),
+            version: None,
+            presence: Some(serde_json::json!({
+                "openFiles": files.iter().map(|f| serde_json::json!({ "file": f })).collect::<Vec<_>>()
+            })),
+        }
+    }
+
+    #[test]
+    fn merge_peers_unions_files_and_keeps_known_identity() {
+        let rows = merge_peers(&[
+            peer("小明", "桌面端", None, &["a.md"]),
+            peer("小明", "桌面端", Some("windows"), &["b.atb", "a.md"]),
+            peer("小明", "笔记本", Some("linux"), &[]),
+        ]);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].files, ["a.md", "b.atb"]);
+        assert_eq!(rows[0].platform.as_deref(), Some("windows"));
+        assert_eq!(rows[1].platform.as_deref(), Some("linux"));
     }
 
     #[test]

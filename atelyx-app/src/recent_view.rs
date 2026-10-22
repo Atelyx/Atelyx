@@ -237,8 +237,7 @@ pub fn recent_view(app: &App) -> Element<'_, Message> {
                         column![
                             text(name)
                                 .size(pal::fs_body())
-                                .color(pal::TEXT_PRIMARY)
-                                .font(crate::ui::bold()),
+                                .color(pal::TEXT_PRIMARY),
                             row![
                                 text(parent).size(pal::fs_micro()).color(pal::TEXT_MUTED),
                                 space().width(Length::Fill),

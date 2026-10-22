@@ -73,11 +73,11 @@ pub fn month_cells(y: i64, m: u32) -> Vec<Option<u32>> {
         .collect()
 }
 
-/// 热力图 / 月视图共用的月份窗口：以 (base_y, base_m) 为末月向前取 `months` 个月（旧→新）。
-pub fn month_window(base_y: i64, base_m: u32, months: u32) -> Vec<(i64, u32)> {
+/// 热力图月份窗口：以 (base_y, base_m) 为中心的 `months` 个月（旧→新；`months` 为奇数）。
+pub fn month_window_around(base_y: i64, base_m: u32, months: u32) -> Vec<(i64, u32)> {
+    let half = months.saturating_sub(1) as i32 / 2;
     (0..months as i32)
-        .rev()
-        .map(|i| month_add(base_y, base_m, -i))
+        .map(|i| month_add(base_y, base_m, i - half))
         .collect()
 }
 
@@ -228,10 +228,13 @@ mod tests {
         assert_eq!(month_add(2025, 12, 1), (2026, 1));
         assert_eq!(month_add(2026, 6, -6), (2025, 12));
         assert_eq!(month_add(2026, 7, 12), (2027, 7));
-        let window = month_window(2026, 3, 12);
-        assert_eq!(window.first(), Some(&(2025, 4)));
-        assert_eq!(window.last(), Some(&(2026, 3)));
-        assert_eq!(window.len(), 12);
+        let window = month_window_around(2026, 3, 13);
+        assert_eq!(window.first(), Some(&(2025, 9)));
+        assert_eq!(window.last(), Some(&(2026, 9)));
+        assert_eq!(window.len(), 13);
+        assert_eq!(window[6], (2026, 3));
+        assert_eq!(month_window_around(2026, 1, 3), [(2025, 12), (2026, 1), (2026, 2)]);
+        assert_eq!(month_window_around(2026, 1, 1), [(2026, 1)]);
     }
 
     #[test]

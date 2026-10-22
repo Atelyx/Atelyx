@@ -3016,6 +3016,7 @@ impl App {
                 self.press = None;
                 self.tab_press = None;
                 self.file_press = None;
+                calendar_actions::finish_heat_drag(self);
                 // 表格手势悬挂清理：松手在画布外时画布收不到 Release（按压会话作废，
                 // 防下一次无关移动触发幽灵灯箱/翻页/框选；画布内松手已在同批先行消费）
                 if let Some(s) = self.table.as_mut() {
@@ -6902,7 +6903,8 @@ fn space_pump_stream(
             nickname: parts[3].clone(),
             color: parts[4].clone(),
             device_name: parts[5].clone(),
-            version: None,
+            platform: Some(space_actions::client_platform().to_string()),
+            version: Some(space_actions::CLIENT_VERSION.to_string()),
         };
         let (cmds, mut events) = atelyx_core::collab::spawn_pump(&parts[0], hello);
         let _ = iced::futures::SinkExt::send(

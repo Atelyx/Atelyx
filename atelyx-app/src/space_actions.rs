@@ -27,6 +27,25 @@ const HISTORY_COALESCE_MS: i64 = 60_000;
 /// 设备名缺省值（登录表单留空 / WS hello）。
 pub(crate) const DEFAULT_DEVICE_NAME: &str = "桌面端";
 
+/// 本端客户端版本（hello 上报，在线设备卡片展示）。
+pub(crate) const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// 本端平台标识（hello 上报；与 `std::env::consts::OS` 同词表）。
+pub(crate) fn client_platform() -> &'static str {
+    std::env::consts::OS
+}
+
+/// 平台标识 → 展示名（未知标识原样透出，缺失由调用方标注「未知平台」）。
+pub(crate) fn platform_label(token: &str) -> String {
+    match token.to_ascii_lowercase().as_str() {
+        "windows" => "Windows".into(),
+        "linux" => "Linux".into(),
+        "android" => "Android".into(),
+        "macos" => "macOS".into(),
+        other => other.to_string(),
+    }
+}
+
 /// 协作在场色缺省值（用户未自定义 collab_color 时的设备标色）。
 pub(crate) const DEFAULT_COLLAB_COLOR: &str = "#30bced";
 

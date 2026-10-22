@@ -191,21 +191,6 @@ pub fn repohistory_view(app: &App, window: iced::window::Id) -> Element<'_, Mess
     if !container_ready(app) {
         return controls::empty_state("history", "未打开仓库", "打开仓库后显示", None);
     }
-    let header = container(
-        row![
-            space().width(Length::Fill),
-            controls::icon_button(
-                "refresh-cw",
-                12.0,
-                24.0,
-                controls::Variant::Secondary,
-                Some(Message::RepoHistoryRefresh),
-                Some((window, "刷新".into())),
-            ),
-        ]
-        .spacing(6),
-    )
-    .padding(Padding::ZERO.horizontal(12.0).vertical(8.0));
     let body: Element<'_, Message> = match &app.repo_history {
         Some(Err(e)) => controls::empty_state(
             "triangle-alert",
@@ -228,7 +213,7 @@ pub fn repohistory_view(app: &App, window: iced::window::Id) -> Element<'_, Mess
                 .into()
         }
     };
-    let col = iced::widget::Column::<Message>::new().push(header).push(body);
+    let col = iced::widget::Column::<Message>::new().push(body);
     scroll::v(container(col.width(Length::Fill)).width(Length::Fill).height(Length::Fill))
         .width(Length::Fill)
         .height(Length::Fill)
@@ -258,8 +243,7 @@ fn group_card(g: &RepoHistoryGroup, window: iced::window::Id) -> Element<'static
                     row![
                         text(name)
                             .size(pal::fs_body())
-                            .color(pal::TEXT_PRIMARY)
-                            .font(crate::ui::bold()),
+                            .color(pal::TEXT_PRIMARY),
                         space().width(Length::Fill),
                         controls::badge(count, pal::BG_SUNKEN, pal::TEXT_SECONDARY),
                     ]

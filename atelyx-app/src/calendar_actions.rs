@@ -22,6 +22,15 @@ pub const META_KEY: &str = "calendar";
 /// 标题行内输入的固定部件 id（同一时刻至多一个编辑会话）。
 pub const EDIT_INPUT_ID: &str = "calendar-edit-input";
 
+/// 热力图横向拖拽翻月的最小位移（逻辑像素）。
+const HEAT_DRAG_THRESHOLD: f32 = 40.0;
+
+/// 热力图拖拽会话：按压起点横坐标，松开时按位移方向翻月。
+struct HeatDrag {
+    window: iced::window::Id,
+    start_x: f32,
+}
+
 /// 一次日程变更：内存按它即时推进，磁盘 / 服务端按它重放。
 #[derive(Clone, Debug)]
 pub enum CalendarOp {
@@ -100,6 +109,8 @@ pub struct CalendarState {
     pub delete_confirm: Option<String>,
     /// 编辑输入行按压标志（全局 Press 失焦提交判定，见 controls::inline_input）。
     pub press_inside: bool,
+    /// 热力图拖拽会话（全局 Release 收尾）。
+    heat_drag: Option<HeatDrag>,
     /// 空间写单飞（在途时变更入队，落地后续发；防并发读改写互相覆盖）。
     space_writing: bool,
     /// 空间在途期间排队的变更（按应用序，整批一次重放）。
@@ -116,6 +127,8 @@ pub enum CalendarMsg {
     PrevMonth,
     NextMonth,
     Today,
+    /// 热力图按压起点（松开翻月判定见 `finish_heat_drag`）。
+    HeatPress(iced::window::Id),
     SelectDay(i64),
     DraftInput(String),
     DraftColor(usize),
@@ -156,6 +169,12 @@ pub fn on_msg(app: &mut App, msg: CalendarMsg) -> Task<Message> {
             app.calendar.month_offset = 0;
             app.calendar.selected = Some(day_key(crate::now_secs() as i64 * 1000));
             app.calendar.delete_confirm = None;
+            Task::none()
+        }
+        CalendarMsg::HeatPress(window) => {
+            // 无光标记录（该窗口尚未收到移动事件）时不开启会话，免得以默认原点当起点
+            let start_x = app.cursors.get(&window).map(|pos| pos.x);
+            app.calendar.heat_drag = start_x.map(|start_x| HeatDrag { window, start_x });
             Task::none()
         }
         CalendarMsg::SelectDay(day) => {
@@ -201,6 +220,24 @@ pub fn on_msg(app: &mut App, msg: CalendarMsg) -> Task<Message> {
         CalendarMsg::Committed(gen, rev, result) => on_committed(app, gen, rev, result),
         CalendarMsg::ActivityLoaded(gen, result) => on_activity(app, gen, result),
     }
+}
+
+/// 热力图拖拽收尾：位移过阈值才翻月（左拖看下月、右拖看上月）；未过阈值视作普通按压。
+pub fn finish_heat_drag(app: &mut App) {
+    let Some(drag) = app.calendar.heat_drag.take() else { return };
+    // 起点与终点都取本窗口的光标记录：窗口缺失记录（已关闭 / 从未移动）即放弃本次判定
+    let Some(current) = app.cursors.get(&drag.window) else { return };
+    let dx = current.x - drag.start_x;
+    if dx.abs() < HEAT_DRAG_THRESHOLD {
+        return;
+    }
+    app.calendar.month_offset += heat_drag_step(dx);
+    app.calendar.delete_confirm = None;
+}
+
+/// 横向拖拽方向 → 月份增量。
+fn heat_drag_step(dx: f32) -> i32 {
+    if dx < 0.0 { 1 } else { -1 }
 }
 
 /// PersistTick 搭载：面板展示中按需装载日程与活动密度。
@@ -570,6 +607,13 @@ mod tests {
         assert!(apply_op(&mut items, &CalendarOp::CycleColor("a".into())));
         assert_eq!(items[0].color.as_deref(), Some(color_hex(0).as_str()));
         assert!(!apply_op(&mut items, &CalendarOp::CycleColor("zz".into())));
+    }
+
+    #[test]
+    fn heat_drag_step_flips_toward_drag() {
+        // 左拖 = 看下月，右拖 = 看上月
+        assert_eq!(heat_drag_step(-HEAT_DRAG_THRESHOLD), 1);
+        assert_eq!(heat_drag_step(HEAT_DRAG_THRESHOLD), -1);
     }
 
     #[test]
