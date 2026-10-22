@@ -35,3 +35,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 tokio-tungstenite = "0.24"
 tempfile = "3"
 rcgen = "0.13"
+
+# 开发档只保留行表调试信息，避免 MSVC 完整 debuginfo 把 pdb 撑到数百 MB（同 workspace 根口径）。
+[profile.dev]
+debug = "line-tables-only"

@@ -9,6 +9,11 @@ exclude = ["atelyx-server"]
 winit = { path = "patches/winit" }
 iced_widget = { path = "patches/iced_widget" }
 
+# 开发档只保留行表调试信息：MSVC 的完整 debuginfo 会让每个 pdb 涨到数百 MB，
+# 而 deps/incremental 里的旧产物 Cargo 永不回收。栈回溯仍有 文件:行号，断点看变量需临时改回 true。
+[profile.dev]
+debug = "line-tables-only"
+
 # profile 仅在 workspace 根生效；发版用 thin LTO + strip。
 [profile.release]
 lto = "thin"
