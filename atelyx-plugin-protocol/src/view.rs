@@ -35,7 +35,7 @@ impl ViewNode {
     }
 
     /// 宿主挂载前的结构校验：id 非空且全树唯一、叶子无 children、浮层有且仅有一个内容子节点、
-    /// 弹性权重为正、图标名非空、容器尺寸不为负。
+    /// 弹性权重为正、图标名非空、文本行数上限为正、容器尺寸不为负。
     pub fn validate(&self) -> Result<(), String> {
         if matches!(self.body, NodeBody::Overlay { .. }) {
             return Err("根节点不能是浮层：浮层须挂在某个容器下".into());
@@ -64,6 +64,9 @@ impl ViewNode {
             if name.trim().is_empty() {
                 return Err(format!("图标节点 {} 的 name 不能为空", self.id));
             }
+        }
+        if let NodeBody::Text { max_lines: Some(0), .. } = &self.body {
+            return Err(format!("文本节点 {} 的 maxLines 至少为 1", self.id));
         }
         if let Some(size) = self.body.size() {
             if let Some(slot) = size.negative_slot() {
@@ -203,6 +206,10 @@ pub enum NodeBody {
         /// 是否允许按词换行；缺省 true。`false` 即单行（长标签不把行撑高）。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         wrap: Option<bool>,
+        /// 最多渲染几行（至少 1）；超出时最后一行以省略号收尾。缺省不限。
+        /// `wrap: false` 时恒单行，`maxLines` 只决定是否截断。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_lines: Option<u32>,
     },
     /// 只读 Markdown 正文：宿主按笔记同源解析器渲染（标题 / 列表 / 引用 / 代码块 / 表格 / 链接）。
     /// 块级图片与笔记同源载入：http(s) 走下载，其余按仓库相对路径。
@@ -1241,6 +1248,25 @@ mod tests {
         assert!(tree.validate().unwrap_err().contains("minWidth"));
     }
 
+    #[test]
+    fn validate_rejects_zero_max_lines() {
+        let mut tree = sample_tree();
+        tree.children.push(leaf(
+            "label",
+            NodeBody::Text {
+                content: "长标签".into(),
+                size: None,
+                weight: None,
+                color: None,
+                align: None,
+                family: None,
+                wrap: None,
+                max_lines: Some(0),
+            },
+        ));
+        assert!(tree.validate().unwrap_err().contains("maxLines"));
+    }
+
     /// 尺寸三形态与上下限：关键字与像素都落到 `SizeSpec`，拼错的字段名拒收。
     #[test]
     fn size_spec_and_box_size_roundtrip() {
@@ -1393,6 +1419,7 @@ mod tests {
             align: Some(Align::End),
             family: None,
             wrap: None,
+            max_lines: None,
         };
         let json = serde_json::to_value(&text).unwrap();
         assert_eq!(json["align"], "end");
@@ -1415,7 +1442,7 @@ mod tests {
         assert_eq!(serde_json::from_value::<NodeBody>(json).unwrap(), card);
     }
 
-    /// 排版字段：字体族、单行不换行、自定义取色。
+    /// 排版字段：字体族、单行不换行、行数上限、自定义取色。
     #[test]
     fn typography_fields_roundtrip() {
         let text = NodeBody::Text {
@@ -1426,10 +1453,12 @@ mod tests {
             align: None,
             family: Some(TextFamily::Mono),
             wrap: Some(false),
+            max_lines: Some(1),
         };
         let json = serde_json::to_value(&text).unwrap();
         assert_eq!(json["family"], "mono");
         assert_eq!(json["wrap"], false);
+        assert_eq!(json["maxLines"], 1);
         assert_eq!(json["color"], "warningSoft");
         assert_eq!(serde_json::from_value::<NodeBody>(json).unwrap(), text);
 

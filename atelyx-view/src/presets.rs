@@ -73,6 +73,7 @@ fn text_node(
             align,
             family: None,
             wrap,
+            max_lines: None,
         },
         Vec::new(),
     )

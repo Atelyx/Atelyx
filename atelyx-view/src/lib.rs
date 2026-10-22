@@ -8,4 +8,7 @@ pub mod view_builders;
 #[cfg(feature = "render")]
 pub mod render;
 
+#[cfg(feature = "render")]
+mod truncated_text;
+
 pub use view_builders::NodeId;

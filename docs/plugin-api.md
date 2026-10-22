@@ -363,6 +363,10 @@ pub enum NodeBody {
         /// 是否允许按词换行；缺省 true。`false` 即单行（长标签不把行撑高）。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         wrap: Option<bool>,
+        /// 最多渲染几行（至少 1）；超出时最后一行以省略号收尾。缺省不限。
+        /// `wrap: false` 时恒单行，`maxLines` 只决定是否截断。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_lines: Option<u32>,
     },
     /// 只读 Markdown 正文：宿主按笔记同源解析器渲染（标题 / 列表 / 引用 / 代码块 / 表格 / 链接）。
     /// 块级图片与笔记同源载入：http(s) 走下载，其余按仓库相对路径。

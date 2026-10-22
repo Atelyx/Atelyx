@@ -103,6 +103,9 @@ fn view_tree_shape_is_frozen() {
     }
     assert_eq!(find(&tree, "query").unwrap().events, vec![EventKind::Submit]);
     assert!(matches!(find(&tree, "go").unwrap().body, NodeBody::Button { .. }));
+    // 文本行数上限：单行不换行 + 省略号
+    let speed = find(&tree, "speed").unwrap();
+    assert!(matches!(&speed.body, NodeBody::Text { max_lines: Some(1), wrap: Some(false), .. }));
     let menu = find(&tree, "more").unwrap();
     assert!(matches!(&menu.body, NodeBody::Menu { items, .. } if items.len() == 2));
     let canvas = find(&tree, "board").unwrap();

@@ -253,6 +253,7 @@ pub fn text<'a>(id: impl Into<NodeId<'a>>, content: impl Into<String>) -> ViewNo
             align: None,
             family: None,
             wrap: None,
+            max_lines: None,
         },
     )
 }

@@ -28,6 +28,7 @@ use atelyx_ui::scroll;
 use atelyx_ui::text;
 
 use crate::support::{declares, node_value_text, report_mode};
+use crate::truncated_text::TruncatedText;
 
 /// 容器缺省间距（插件未声明 gap 时）。
 const DEFAULT_GAP: f32 = 6.0;
@@ -500,14 +501,32 @@ where
             list.into()
         }
         NodeBody::Divider {} => controls::h_divider_subtle(),
-        NodeBody::Text { content, size, weight, color, align, family, wrap } => {
-            let mut line = text(content.as_str())
-                .size(pal::fs_body() * size.unwrap_or(1.0))
-                .font(text_font(*weight, *family))
-                .color(color.map_or(pal::TEXT_PRIMARY, spec_color));
-            if *wrap == Some(false) {
-                line = line.wrapping(iced::advanced::text::Wrapping::None);
-            }
+        NodeBody::Text { content, size, weight, color, align, family, wrap, max_lines } => {
+            let size = pal::fs_body() * size.unwrap_or(1.0);
+            let font = text_font(*weight, *family);
+            let color = color.map_or(pal::TEXT_PRIMARY, spec_color);
+            let wrapping = if *wrap == Some(false) {
+                iced::advanced::text::Wrapping::None
+            } else {
+                iced::advanced::text::Wrapping::Word
+            };
+            let line: Element<'a, M> = match max_lines {
+                Some(max_lines) => Element::new(TruncatedText::new(
+                    content.as_str(),
+                    size,
+                    font,
+                    color,
+                    *max_lines,
+                    wrapping,
+                )),
+                None => {
+                    let mut line = text(content.as_str()).size(size).font(font).color(color);
+                    if *wrap == Some(false) {
+                        line = line.wrapping(wrapping);
+                    }
+                    line.into()
+                }
+            };
             // 声明对齐才占满父容器宽度（对齐只在该前提下有意义）；否则按内容宽度收缩，
             // 让 shrink 容器能形成内容自适应气泡
             match align {
@@ -515,7 +534,7 @@ where
                     .width(Length::Fill)
                     .align_x(horizontal(*align))
                     .into(),
-                None => line.into(),
+                None => line,
             }
         }
         NodeBody::Markdown { size, weight, color, family, .. } => {

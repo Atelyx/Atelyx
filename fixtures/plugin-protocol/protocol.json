@@ -76,7 +76,8 @@
         "content": "1.20 GB/s",
         "color": "#e0a94e",
         "family": "mono",
-        "wrap": false
+        "wrap": false,
+        "maxLines": 1
       },
       {
         "id": "guide",
