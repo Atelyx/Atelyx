@@ -15,14 +15,17 @@ use atelyx_core::layout::{self, LayoutNode};
 use atelyx_core::markdown::LinkForm;
 use atelyx_core::plugin_runtime::{
     CanvasPointer, Contribution, ContributionSlot, DrawCommand, EventKind, EventValue, ImageSource,
-    NodeBody, ProtocolLinkForm, ScrollEdge, ScrollToParams, SurfaceKind, TakeoverScope, ViewEvent,
-    ViewNode, WindowOpenParams, WindowUpdateParams,
+    NodeBody, ProtocolLinkForm, ReportMode, ScrollEdge, ScrollToParams, SurfaceKind, TakeoverScope,
+    ViewEvent, ViewNode, WindowOpenParams, WindowUpdateParams,
 };
 
 use crate::{App, Message};
 
 /// 壳侧插件视图 kind 前缀（内置视图词汇不被插件占用；插件 id 与贡献 id 都不含 `:`）。
 const KIND_PREFIX: &str = "plugin:";
+
+/// 多行输入在 `commit` 档位下的静默提交间隔：编辑器没有提交信号，输入停顿即视为一段输入结束。
+const EDITOR_COMMIT_MS: u64 = 600;
 
 // ===== 视图 kind 编解码 =====
 
@@ -99,19 +102,52 @@ pub type InputKey = (String, String, String);
 pub struct InputDraft {
     local: String,
     reported: String,
+    /// 上次见到的插件值：非逐键上报时用它判定插件是否主动改值（变了即接管输入）。
+    baseline: String,
+    mode: ReportMode,
 }
 
 impl InputDraft {
-    /// 记录一次本地编辑；`forwarded` = 该节点声明了 `change`（本次文本已回发给插件）。
-    fn edited(local: String, plugin_value: &str, forwarded: bool) -> Self {
+    /// 记录一次本地编辑；`forwarded` = 本次文本已回发给插件。
+    fn edited(local: String, plugin_value: &str, forwarded: bool, mode: ReportMode) -> Self {
         let reported = if forwarded { local.clone() } else { plugin_value.to_string() };
-        Self { local, reported }
+        Self { local, reported, baseline: plugin_value.to_string(), mode }
+    }
+
+    /// 换上报档位（树重发时同步，换档不清本机文本）。
+    fn set_mode(&mut self, mode: ReportMode) {
+        self.mode = mode;
+    }
+
+    /// 插件下发了新值：覆盖本机文本并开启新的编辑会话。
+    fn adopt(&mut self, plugin_value: String) {
+        self.local = plugin_value.clone();
+        self.reported = plugin_value.clone();
+        self.baseline = plugin_value;
+    }
+
+    /// 本机当前编辑值（防抖到期上报用）。
+    fn local(&self) -> &str {
+        &self.local
+    }
+
+    /// 记下插件的当前值（值未变即不打断输入）。
+    fn observe(&mut self, plugin_value: &str) {
+        if self.baseline != plugin_value {
+            if self.mode.is_deferred() {
+                self.adopt(plugin_value.to_string());
+            } else {
+                self.baseline = plugin_value.to_string();
+            }
+        }
     }
 }
 
-/// 草稿下的显示值（无草稿 = 插件的值）。
+/// 草稿下的显示值（无草稿 = 插件的值）。非逐键上报时本机值是唯一显示来源：
+/// 插件主动改值已由 [`sync_drafts`] 在树更新时写回草稿，渲染路径不再做比较。
 pub fn input_display(plugin_value: &str, draft: Option<&InputDraft>) -> String {
     match draft {
+        Some(draft) if draft.mode.is_deferred() => draft.local.clone(),
         Some(draft) if draft.reported == plugin_value => draft.local.clone(),
         _ => plugin_value.to_string(),
     }
@@ -122,6 +158,9 @@ pub fn input_display(plugin_value: &str, draft: Option<&InputDraft>) -> String {
 pub struct EditorState {
     pub(crate) content: text_editor::Content,
     reported: String,
+    /// 上次见到的插件值：非逐键上报时用它判定插件是否主动改值。
+    baseline: String,
+    mode: ReportMode,
 }
 
 /// markdown 节点的解析投影：`source` 用于变更比对（源码不变不重解析）。
@@ -151,6 +190,26 @@ fn format_number(value: f64) -> String {
 /// 输入类节点（文本 / 数字）：事件携带文本，需先写宿主草稿再上行。
 fn is_input(body: &NodeBody) -> bool {
     matches!(body, NodeBody::TextInput { .. } | NodeBody::NumberInput { .. })
+}
+
+/// 输入节点的上报档位（缺省逐键）；只读节点不产生事件，档位无意义，按逐键返回。
+pub(crate) fn report_mode(body: &NodeBody) -> ReportMode {
+    match body {
+        NodeBody::TextInput { report, .. } | NodeBody::NumberInput { report, .. } => {
+            report.unwrap_or(ReportMode::Immediate)
+        }
+        _ => ReportMode::Immediate,
+    }
+}
+
+/// 输入节点是否接受编辑（只读节点保留外观但不建草稿、不收事件）。
+fn is_editable_input(body: &NodeBody) -> bool {
+    match body {
+        NodeBody::TextInput { read_only, .. } | NodeBody::NumberInput { read_only, .. } => {
+            !matches!(read_only, Some(true))
+        }
+        _ => false,
+    }
 }
 
 /// 数字输入的文本 → 事件值：清空上报 `Null`（与 0 区分），不可解析为有限数值时不发事件，
@@ -340,6 +399,7 @@ pub fn refresh_projection(app: &mut App) -> Task<Message> {
         let key = (plugin_id.clone(), surface_id.clone());
         match app.plugins.surface_tree(&plugin_id, &surface_id) {
             Some(tree) => {
+                sync_drafts(app, &plugin_id, &surface_id, &tree);
                 sync_editors(app, &plugin_id, &surface_id, &tree);
                 prune_node_state(app, &plugin_id, &surface_id, &tree);
                 sync_markdown(app, &plugin_id, &surface_id, &tree);
@@ -407,26 +467,70 @@ fn prune_node_state(app: &mut App, plugin_id: &str, surface_id: &str, tree: &Vie
         key.0 != plugin_id || key.1 != surface_id || find_node(tree, key.2.as_str()).is_some()
     };
     app.plugin_drafts.retain(|key, _| alive(key));
+    app.plugin_draft_seq.retain(|key, _| alive(key));
     app.plugin_editors.retain(|key, _| alive(key));
     app.plugin_hovered.retain(|key| alive(key));
+}
+
+/// 单行 / 数字输入的草稿同步：记下插件当前值，非逐键上报时值变了即接管本机文本。
+/// 与 [`sync_editors`] 同在树投影刷新时执行，保证插件改值先于渲染生效。
+fn sync_drafts(app: &mut App, plugin_id: &str, surface_id: &str, tree: &ViewNode) {
+    let mut wanted: Vec<(String, String, ReportMode)> = Vec::new();
+    collect_drafts(tree, &mut |node, value, mode| {
+        wanted.push((node.to_string(), value, mode));
+    });
+    for (node_id, plugin_value, mode) in wanted {
+        let key = (plugin_id.to_string(), surface_id.to_string(), node_id);
+        if let Some(draft) = app.plugin_drafts.get_mut(&key) {
+            draft.set_mode(mode);
+            draft.observe(&plugin_value);
+        }
+    }
+}
+
+/// 收集树里走草稿的输入节点（单行文本与数字；多行由编辑器状态承担）。
+fn collect_drafts<'a>(node: &'a ViewNode, out: &mut impl FnMut(&'a str, String, ReportMode)) {
+    let single_line = matches!(node.body, NodeBody::TextInput { multiline, .. } if !matches!(multiline, Some(true)));
+    if single_line || matches!(node.body, NodeBody::NumberInput { .. }) {
+        if is_editable_input(&node.body) {
+            if let Some(value) = node_value_text(&node.body) {
+                out(node.id.as_str(), value, report_mode(&node.body));
+            }
+        }
+    }
+    for child in &node.children {
+        collect_drafts(child, out);
+    }
 }
 
 /// 多行输入节点的本机编辑器同步：仅当插件值既不同于本机当前文本、也不同于已上报值时接管
 /// （同文重建内容会丢光标与选区，故同文不动）。
 fn sync_editors(app: &mut App, plugin_id: &str, surface_id: &str, tree: &ViewNode) {
-    let mut wanted: Vec<(InputKey, String)> = Vec::new();
-    collect_multiline(tree, &mut |node, value| {
+    let mut wanted: Vec<(InputKey, String, ReportMode)> = Vec::new();
+    collect_multiline(tree, &mut |node, value, mode| {
         wanted.push((
             (plugin_id.to_string(), surface_id.to_string(), node.to_string()),
             value,
+            mode,
         ));
     });
-    for (key, plugin_value) in wanted {
+    for (key, plugin_value, mode) in wanted {
         match app.plugin_editors.get_mut(&key) {
             Some(state) => {
-                if plugin_value != state.content.text() && plugin_value != state.reported {
+                state.mode = mode;
+                if mode.is_deferred() {
+                    // 非逐键：只有插件主动改值才重建，输入期间不打断光标与选区
+                    if plugin_value != state.baseline {
+                        state.content = text_editor::Content::with_text(&plugin_value);
+                        state.reported = plugin_value.clone();
+                        state.baseline = plugin_value;
+                    }
+                } else if plugin_value != state.content.text() && plugin_value != state.reported {
                     state.content = text_editor::Content::with_text(&plugin_value);
-                    state.reported = plugin_value;
+                    state.reported = plugin_value.clone();
+                    state.baseline = plugin_value;
+                } else {
+                    state.baseline = plugin_value;
                 }
             }
             None => {
@@ -434,7 +538,9 @@ fn sync_editors(app: &mut App, plugin_id: &str, surface_id: &str, tree: &ViewNod
                     key,
                     EditorState {
                         content: text_editor::Content::with_text(&plugin_value),
-                        reported: plugin_value,
+                        reported: plugin_value.clone(),
+                        baseline: plugin_value,
+                        mode,
                     },
                 );
             }
@@ -443,14 +549,14 @@ fn sync_editors(app: &mut App, plugin_id: &str, surface_id: &str, tree: &ViewNod
 }
 
 /// 收集树里的可编辑多行输入节点（节点 id + 值文本）：只读多行画静态框，不建编辑器状态。
-fn collect_multiline<'a>(node: &'a ViewNode, out: &mut impl FnMut(&'a str, String)) {
+fn collect_multiline<'a>(node: &'a ViewNode, out: &mut impl FnMut(&'a str, String, ReportMode)) {
     let editable = matches!(
         node.body,
         NodeBody::TextInput { multiline: Some(true), read_only: None | Some(false), .. }
     );
     if editable {
         if let Some(value) = node_value_text(&node.body) {
-            out(node.id.as_str(), value);
+            out(node.id.as_str(), value, report_mode(&node.body));
         }
     }
     for child in &node.children {
@@ -1148,6 +1254,145 @@ pub(crate) struct PopupEntry {
 }
 
 /// 节点事件处理：输入类先写本机草稿（含回显抑制），再按该事件的声明决定是否上行。
+/// 输入框本地编辑（非逐键上报档位）：写草稿；`commit` 为真时按声明上报。
+/// 防抖档位在未提交时排一次到期上报，同节点以最新序号为准（过期拍丢弃）。
+pub fn on_draft(
+    app: &mut App,
+    plugin_id: String,
+    surface_id: String,
+    node_id: String,
+    text: Option<String>,
+    commit: bool,
+) -> Task<Message> {
+    let key = (plugin_id.clone(), surface_id.clone(), node_id.clone());
+    let found = app
+        .plugin_trees
+        .get(&(plugin_id.clone(), surface_id.clone()))
+        .and_then(|tree| find_node(tree, &node_id))
+        .map(|node| (node.body.clone(), node.events.clone()));
+    let Some((body, events)) = found else {
+        return Task::none();
+    };
+    if !is_editable_input(&body) {
+        return Task::none();
+    }
+    let plugin_value = node_value_text(&body).unwrap_or_default();
+    let mode = report_mode(&body);
+    let text = text
+        .or_else(|| app.plugin_drafts.get(&key).map(|draft| draft.local().to_string()))
+        .unwrap_or_else(|| plugin_value.clone());
+    // 这条路径只在非逐键档位绑定到控件上；逐键档位由事件回发路径维护草稿
+    let forwarded = commit && mode.is_deferred() && events.contains(&EventKind::Change);
+    app.plugin_drafts.insert(
+        key.clone(),
+        InputDraft::edited(text.clone(), &plugin_value, forwarded, mode),
+    );
+    if commit {
+        app.plugin_draft_seq.remove(&key);
+        return report_input_value(app, &plugin_id, &surface_id, &node_id, &body, &events, &text, mode);
+    }
+    match mode {
+        ReportMode::Debounced(ms) if ms > 0 => {
+            let seq = app.plugin_draft_seq.entry(key).or_insert(0);
+            *seq += 1;
+            let seq = *seq;
+            Task::perform(
+                tokio::time::sleep(std::time::Duration::from_millis(u64::from(ms))),
+                move |_| Message::PluginDraftFlush { plugin_id, surface_id, node_id, seq },
+            )
+        }
+        _ => Task::none(),
+    }
+}
+
+/// 防抖到期：序号仍是最新才把草稿上报（编辑期间落后的拍次直接丢弃）。
+pub fn on_draft_flush(
+    app: &mut App,
+    plugin_id: String,
+    surface_id: String,
+    node_id: String,
+    seq: u64,
+) -> Task<Message> {
+    let key = (plugin_id.clone(), surface_id.clone(), node_id.clone());
+    if app.plugin_draft_seq.get(&key).copied() != Some(seq) {
+        return Task::none();
+    }
+    app.plugin_draft_seq.remove(&key);
+    let Some(text) = app.plugin_drafts.get(&key).map(|draft| draft.local().to_string()) else {
+        return Task::none();
+    };
+    let found = app
+        .plugin_trees
+        .get(&(plugin_id.clone(), surface_id.clone()))
+        .and_then(|tree| find_node(tree, &node_id))
+        .map(|node| (node.body.clone(), node.events.clone()));
+    let Some((body, events)) = found else {
+        return Task::none();
+    };
+    let mode = report_mode(&body);
+    report_input_value(app, &plugin_id, &surface_id, &node_id, &body, &events, &text, mode)
+}
+
+/// 多行编辑器静默到期：序号仍是最新才把整段内容上报（期间又有输入则本次丢弃）。
+pub fn on_editor_flush(
+    app: &mut App,
+    plugin_id: String,
+    surface_id: String,
+    node_id: String,
+    seq: u64,
+) -> Task<Message> {
+    let key = (plugin_id.clone(), surface_id.clone(), node_id.clone());
+    if app.plugin_draft_seq.get(&key).copied() != Some(seq) {
+        return Task::none();
+    }
+    app.plugin_draft_seq.remove(&key);
+    let Some(state) = app.plugin_editors.get_mut(&key) else {
+        return Task::none();
+    };
+    let text = state.content.text();
+    if text == state.reported {
+        return Task::none();
+    }
+    state.reported = text.clone();
+    state.baseline = text.clone();
+    app.plugins.send_view_event(
+        &plugin_id,
+        &surface_id,
+        &node_id,
+        ViewEvent::Change { value: EventValue::Text(text) },
+    );
+    Task::none()
+}
+
+/// 把输入文本上报为事件：延迟档位发 `change`（数字转数值），按声明发 `submit`。
+/// 不可解析为数值时不发事件（与逐键路径同口径）。
+fn report_input_value(
+    app: &mut App,
+    plugin_id: &str,
+    surface_id: &str,
+    node_id: &str,
+    body: &NodeBody,
+    events: &[EventKind],
+    text: &str,
+    mode: ReportMode,
+) -> Task<Message> {
+    let event_value = |body: &NodeBody| match body {
+        NodeBody::NumberInput { .. } => number_event_value(body, text),
+        _ => Some(EventValue::Text(text.to_string())),
+    };
+    if mode.is_deferred() && events.contains(&EventKind::Change) {
+        if let Some(value) = event_value(body) {
+            app.plugins.send_view_event(plugin_id, surface_id, node_id, ViewEvent::Change { value });
+        }
+    }
+    if events.contains(&EventKind::Submit) {
+        if let Some(value) = event_value(body) {
+            app.plugins.send_view_event(plugin_id, surface_id, node_id, ViewEvent::Submit { value });
+        }
+    }
+    Task::none()
+}
+
 pub fn on_view_event(
     app: &mut App,
     plugin_id: String,
@@ -1169,8 +1414,10 @@ pub fn on_view_event(
         ViewEvent::Change { value: EventValue::Text(text) } if is_input(&body) => {
             let plugin_value = node_value_text(&body).unwrap_or_default();
             let forwarded = events.contains(&EventKind::Change);
-            app.plugin_drafts
-                .insert(key, InputDraft::edited(text.clone(), &plugin_value, forwarded));
+            app.plugin_drafts.insert(
+                key,
+                InputDraft::edited(text.clone(), &plugin_value, forwarded, report_mode(&body)),
+            );
             match body {
                 NodeBody::NumberInput { .. } => match number_event_value(&body, &text) {
                     Some(value) => ViewEvent::Change { value },
@@ -1243,8 +1490,29 @@ pub fn on_text_edit(
     let Some(state) = app.plugin_editors.get_mut(&key) else {
         return Task::none();
     };
+    let mode = state.mode;
+    let edited = matches!(action, text_editor::Action::Edit(_));
     state.content.perform(action);
     let text = state.content.text();
+
+    if mode.is_deferred() {
+        // 非逐键上报：输入过程只更新编辑器内容，静默一段后整段提交
+        if !declares_change || !edited {
+            return Task::none();
+        }
+        let delay = match mode {
+            ReportMode::Debounced(ms) if ms > 0 => u64::from(ms),
+            _ => EDITOR_COMMIT_MS,
+        };
+        let seq = app.plugin_draft_seq.entry(key).or_insert(0);
+        *seq += 1;
+        let seq = *seq;
+        return Task::perform(
+            tokio::time::sleep(std::time::Duration::from_millis(delay)),
+            move |_| Message::PluginEditorFlush { plugin_id, surface_id, node_id, seq },
+        );
+    }
+
     if text == state.reported {
         return Task::none();
     }
@@ -1276,6 +1544,7 @@ mod tests {
                 multiline: None,
                 password: None,
                 read_only: None,
+                report: None,
             },
             children: Vec::new(),
             events: vec![EventKind::Change],
@@ -1290,6 +1559,7 @@ mod tests {
             step: None,
             placeholder: None,
             read_only: None,
+            report: None,
         }
     }
 
@@ -1315,10 +1585,37 @@ mod tests {
         }
     }
 
+    /// 非逐键上报：插件不回显也必须显示本机文本（逐键档位下这一条会退回插件值）。
+    #[test]
+    fn deferred_draft_shows_local_text_without_plugin_echo() {
+        let draft = InputDraft::edited("xy".into(), "x", false, ReportMode::Commit);
+        assert_eq!(input_display("x", Some(&draft)), "xy", "插件值停在 x，本机文本不得被回退");
+        assert_eq!(input_display("", Some(&draft)), "xy", "插件值为空同样不打断输入");
+    }
+
+    /// 非逐键上报：插件值未变不打断输入，变了才接管并开启新会话。
+    #[test]
+    fn deferred_draft_adopts_only_fresh_plugin_values() {
+        let mut draft = InputDraft::edited("xy".into(), "x", false, ReportMode::Commit);
+        draft.observe("x");
+        assert_eq!(input_display("x", Some(&draft)), "xy", "值未变：保持本机文本");
+        draft.observe("z");
+        assert_eq!(input_display("z", Some(&draft)), "z", "插件主动改值：接管");
+        draft.observe("xy");
+        assert_eq!(input_display("xy", Some(&draft)), "xy", "插件接受本机值：仍显示本机文本");
+    }
+
+    /// 逐键上报保持既有语义：不回显时返回插件值（这条锁住缺省行为不被改掉）。
+    #[test]
+    fn immediate_draft_still_compares_reported_value() {
+        let draft = InputDraft::edited("xy".into(), "x", true, ReportMode::Immediate);
+        assert_eq!(input_display("x", Some(&draft)), "x", "逐键档位以插件值为准");
+    }
+
     /// 草稿显示规则：插件回显本机刚发的值不改变显示，插件主动改值即接管。
     #[test]
     fn draft_display_prefers_local_until_plugin_overrides() {
-        let draft = InputDraft::edited("xy".into(), "x", true);
+        let draft = InputDraft::edited("xy".into(), "x", true, ReportMode::Immediate);
         assert_eq!(input_display("xy", Some(&draft)), "xy", "回显本机已上报值：显示本机文本");
         assert_eq!(input_display("z", Some(&draft)), "z", "插件改值：接管显示");
         assert_eq!(input_display("x", None), "x", "无草稿：显示插件值");
@@ -1327,10 +1624,10 @@ mod tests {
     /// 未声明 change 的输入：已上报值保持插件现值，本机文本原地保留；插件改值仍接管。
     #[test]
     fn draft_without_forwarding_keeps_local_text() {
-        let first = InputDraft::edited("a".into(), "", false);
+        let first = InputDraft::edited("a".into(), "", false, ReportMode::Immediate);
         assert_eq!(first.reported, "", "未回发时已上报值 = 插件现值");
         assert_eq!(input_display("", Some(&first)), "a");
-        let second = InputDraft::edited("ab".into(), "", false);
+        let second = InputDraft::edited("ab".into(), "", false, ReportMode::Immediate);
         assert_eq!(input_display("", Some(&second)), "ab");
         assert_eq!(input_display("z", Some(&second)), "z", "插件改值即接管");
     }
@@ -1356,6 +1653,7 @@ mod tests {
             step: None,
             placeholder: None,
             read_only: None,
+            report: None,
         };
         assert_eq!(node_value_text(&body).as_deref(), Some("3.5"));
         assert_eq!(number_event_value(&body, "3.5"), Some(EventValue::Number(3.5)));
@@ -1366,6 +1664,7 @@ mod tests {
             step: None,
             placeholder: None,
             read_only: None,
+            report: None,
         };
         assert_eq!(node_value_text(&whole).as_deref(), Some("7"));
         // 未给值时不产生值文本（输入草稿按空串起算）
@@ -1418,6 +1717,7 @@ mod tests {
                         multiline: Some(true),
                         password: None,
                         read_only: None,
+                        report: None,
                     },
                     children: Vec::new(),
                     events: vec![EventKind::Change],
@@ -1426,7 +1726,7 @@ mod tests {
             events: Vec::new(),
         };
         let mut found = Vec::new();
-        collect_multiline(&tree, &mut |id, value| found.push((id.to_string(), value)));
+        collect_multiline(&tree, &mut |id, value, _mode| found.push((id.to_string(), value)));
         assert_eq!(found, vec![("multi".to_string(), "m".to_string())]);
     }
 

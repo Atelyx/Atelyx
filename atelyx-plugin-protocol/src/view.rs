@@ -219,6 +219,9 @@ pub enum NodeBody {
         /// 只读：保留输入控件外观但不接受编辑，不产生事件。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         read_only: Option<bool>,
+        /// 值上报档位（缺省逐键上报）。非逐键时输入值由宿主本地持有并显示，插件不必回显。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        report: Option<ReportMode>,
     },
     NumberInput {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -234,6 +237,9 @@ pub enum NodeBody {
         /// 只读：保留输入控件外观但不接受编辑、无步进，不产生事件。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         read_only: Option<bool>,
+        /// 值上报档位（缺省逐键上报）。非逐键时输入值由宿主本地持有并显示，插件不必回显。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        report: Option<ReportMode>,
     },
     Dropdown {
         options: Vec<String>,
@@ -936,6 +942,34 @@ impl MenuItem {
     }
 }
 
+/// 输入控件的上报档位：决定宿主何时把用户输入回发给插件。
+///
+/// `Immediate` 下宿主每次编辑都回发 `change`，插件须把值写回树——宿主用「已上报值 = 插件值」
+/// 判定能否显示本机文本，不回写即表现为输入不显示。`Commit` / `Debounced` 下输入值完全由
+/// 宿主本地持有并显示，插件不必回显；宿主仅在插件下发的值发生变化时视为主动改值、接管输入。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ReportMode {
+    /// 逐键上报。
+    Immediate,
+    /// 提交时上报：单行按 Enter、多行按 Ctrl+Enter，或控件失去焦点时回发 `change`。
+    Commit,
+    /// 停顿上报：停止编辑 `Debounced` 毫秒后回发 `change`（毫秒为 0 按 [`ReportMode::Immediate`] 处理）。
+    Debounced(u32),
+}
+
+impl ReportMode {
+    /// 是否由宿主本地持有输入值（不逐键回发）。停顿时长为 0 按逐键处理——
+    /// 否则既不逐键回发、也不会有到期上报，输入永远到不了插件。
+    pub fn is_deferred(self) -> bool {
+        match self {
+            ReportMode::Immediate => false,
+            ReportMode::Commit => true,
+            ReportMode::Debounced(ms) => ms > 0,
+        }
+    }
+}
+
 /// 节点事件种类：声明在 [`ViewNode::events`] 里宿主才回发，未声明的事件不上行（省流量、省误触）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1074,6 +1108,7 @@ mod tests {
                 multiline: None,
                 password: None,
                 read_only: None,
+                report: None,
             },
         );
         query.events = vec![EventKind::Submit];
@@ -1103,6 +1138,35 @@ mod tests {
         assert_eq!(json["children"][1]["id"], "go");
         // roundtrip 保持一致
         assert_eq!(serde_json::from_value::<ViewNode>(json).unwrap(), tree);
+    }
+
+    /// 停顿时长为 0 必须按逐键处理，否则输入既不逐键回发、也不会有到期上报。
+    #[test]
+    fn zero_debounce_falls_back_to_immediate() {
+        assert!(!ReportMode::Debounced(0).is_deferred());
+        assert!(ReportMode::Debounced(1).is_deferred());
+        assert!(ReportMode::Commit.is_deferred());
+        assert!(!ReportMode::Immediate.is_deferred());
+    }
+
+    /// 上报档位的编码形状是对外契约：改形状即改协议。
+    #[test]
+    fn report_mode_encoding_is_frozen() {
+        assert_eq!(serde_json::to_value(ReportMode::Immediate).unwrap(), serde_json::json!("immediate"));
+        assert_eq!(serde_json::to_value(ReportMode::Commit).unwrap(), serde_json::json!("commit"));
+        assert_eq!(
+            serde_json::to_value(ReportMode::Debounced(200)).unwrap(),
+            serde_json::json!({ "debounced": 200 })
+        );
+        let body = NodeBody::TextInput {
+            value: "x".into(),
+            placeholder: None,
+            multiline: None,
+            password: None,
+            read_only: None,
+            report: Some(ReportMode::Commit),
+        };
+        assert_eq!(serde_json::to_value(&body).unwrap()["report"], serde_json::json!("commit"));
     }
 
     #[test]

@@ -6,8 +6,8 @@ use atelyx_plugin_sdk::protocol::canvas::DrawCommand;
 use atelyx_plugin_sdk::protocol::event;
 use atelyx_plugin_sdk::protocol::method::ContributionSlot;
 use atelyx_plugin_sdk::protocol::view::{
-    CanvasEventKind, CanvasPointer, ColorToken, EventKind, EventValue, MouseButton, ViewEvent,
-    ViewNode,
+    CanvasEventKind, CanvasPointer, ColorToken, EventKind, EventValue, MouseButton, ReportMode,
+    ViewEvent, ViewNode,
 };
 use atelyx_plugin_sdk::view_builders::{canvas, column, text, text_input, NodeExt};
 use atelyx_plugin_sdk::{run_stdio, Context, PluginHandler, PluginInfo};
@@ -48,7 +48,7 @@ impl Stub {
             "root",
             vec![
                 text("status", model.status.clone()),
-                text_input("query", model.query.clone()).with_events(vec![
+                text_input("query", model.query.clone(), ReportMode::Immediate).with_events(vec![
                     EventKind::Change,
                     EventKind::Submit,
                 ]),

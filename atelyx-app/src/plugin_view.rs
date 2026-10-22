@@ -15,11 +15,13 @@ use iced::{Color, Element, Length, Padding, Rectangle, Renderer, Size, Theme, Ve
 
 use atelyx_core::plugin_runtime::{
     Align, Axis, BoxSize, ButtonVariant, CardTone, ColorSpec, ControlSize, EventKind, EventValue,
-    ImageFit, ImageSource, Justify, NodeBody, PaddingSpec, RowHeight, SizeSpec, Surface, TextFamily,
-    TextWeight, ViewEvent, ViewNode,
+    ImageFit, ImageSource, Justify, NodeBody, PaddingSpec, ReportMode, RowHeight, SizeSpec, Surface,
+    TextFamily, TextWeight, ViewEvent, ViewNode,
 };
 
-use crate::plugin_actions::{contribution, declares, image_key, input_display, node_value_text, PopupEntry};
+use crate::plugin_actions::{
+    contribution, declares, image_key, input_display, node_value_text, report_mode, PopupEntry,
+};
 use crate::ui::controls::{self, Variant};
 use crate::ui::palette as pal;
 use crate::ui::scroll;
@@ -919,6 +921,7 @@ fn single_line_input<'a>(
     let plugin_value = node_value_text(&node.body).unwrap_or_default();
     let key = (ctx.plugin_id.clone(), ctx.surface_id.clone(), node.id.clone());
     let value = input_display(&plugin_value, app.plugin_drafts.get(&key));
+    let report = report_mode(&node.body);
     let input = text_input(placeholder, value.as_str())
         .size(pal::fs_ui())
         .font(crate::ui::regular())
@@ -927,11 +930,39 @@ fn single_line_input<'a>(
         .secure(password)
         .style(|_theme, status| controls::form_input_style(status))
         .on_input({
-            let ctx = Ctx { plugin_id: ctx.plugin_id.clone(), surface_id: ctx.surface_id.clone(), window: ctx.window };
+            let ctx = Ctx {
+                plugin_id: ctx.plugin_id.clone(),
+                surface_id: ctx.surface_id.clone(),
+                window: ctx.window,
+            };
             let node_id = node.id.clone();
-            move |text| node_event(&ctx, &node_id, ViewEvent::Change { value: EventValue::Text(text) })
+            move |text| match report {
+                ReportMode::Immediate => {
+                    node_event(&ctx, &node_id, ViewEvent::Change { value: EventValue::Text(text) })
+                }
+                _ => Message::PluginDraft {
+                    plugin_id: ctx.plugin_id.clone(),
+                    surface_id: ctx.surface_id.clone(),
+                    node_id: node_id.clone(),
+                    text: Some(text),
+                    commit: false,
+                },
+            }
         });
-    if declares(node, EventKind::Submit) {
+    if report.is_deferred() {
+        let plugin_id = ctx.plugin_id.clone();
+        let surface_id = ctx.surface_id.clone();
+        let node_id = node.id.clone();
+        input
+            .on_submit(Message::PluginDraft {
+                plugin_id,
+                surface_id,
+                node_id,
+                text: None,
+                commit: true,
+            })
+            .into()
+    } else if declares(node, EventKind::Submit) {
         input
             .on_submit(node_event(ctx, &node.id, ViewEvent::Submit { value: EventValue::Text(value) }))
             .into()
@@ -939,6 +970,7 @@ fn single_line_input<'a>(
         input.into()
     }
 }
+
 
 /// 多行输入（编辑器状态归宿主：插件不改值则光标与选区原地保留）。
 fn multiline_input<'a>(

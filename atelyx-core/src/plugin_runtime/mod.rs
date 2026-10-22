@@ -56,7 +56,8 @@ pub use atelyx_plugin_protocol::view::{
     ColorSpec,
     ColorToken, ControlSize, EdgesPadding, EventKind, EventValue, ImageFit, ImageSource, Interaction,
     InteractionState, Justify, LinkForm as ProtocolLinkForm, MenuItem, MouseButton, NodeBody,
-    PaddingSpec, RowHeight, Rgba, SizeSpec, Surface, TextFamily, TextWeight, ViewEvent, ViewNode,
+    PaddingSpec, ReportMode, RowHeight, Rgba, SizeSpec, Surface, TextFamily, TextWeight, ViewEvent,
+    ViewNode,
 };
 
 /// 插件运行状态。

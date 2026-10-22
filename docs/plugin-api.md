@@ -386,6 +386,9 @@ pub enum NodeBody {
         /// 只读：保留输入控件外观但不接受编辑，不产生事件。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         read_only: Option<bool>,
+        /// 值上报档位（缺省逐键上报）。非逐键时输入值由宿主本地持有并显示，插件不必回显。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        report: Option<ReportMode>,
     },
     NumberInput {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -401,6 +404,9 @@ pub enum NodeBody {
         /// 只读：保留输入控件外观但不接受编辑、无步进，不产生事件。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         read_only: Option<bool>,
+        /// 值上报档位（缺省逐键上报）。非逐键时输入值由宿主本地持有并显示，插件不必回显。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        report: Option<ReportMode>,
     },
     Dropdown {
         options: Vec<String>,
@@ -828,6 +834,24 @@ pub struct EdgesPadding {
 ## 4. 视图事件与指针
 
 宿主回发给插件的事件种类与取值形态；画布指针事件单列在下一节。
+
+```rust
+// atelyx-plugin-protocol/src/view.rs
+/// 输入控件的上报档位：决定宿主何时把用户输入回发给插件。
+///
+/// `Immediate` 下宿主每次编辑都回发 `change`，插件须把值写回树——宿主用「已上报值 = 插件值」
+/// 判定能否显示本机文本，不回写即表现为输入不显示。`Commit` / `Debounced` 下输入值完全由
+/// 宿主本地持有并显示，插件不必回显；宿主仅在插件下发的值发生变化时视为主动改值、接管输入。
+#[serde(rename_all = "camelCase")]
+pub enum ReportMode {
+    /// 逐键上报。
+    Immediate,
+    /// 提交时上报：单行按 Enter、多行按 Ctrl+Enter，或控件失去焦点时回发 `change`。
+    Commit,
+    /// 停顿上报：停止编辑 `Debounced` 毫秒后回发 `change`（毫秒为 0 按 [`ReportMode::Immediate`] 处理）。
+    Debounced(u32),
+}
+```
 
 ```rust
 // atelyx-plugin-protocol/src/view.rs

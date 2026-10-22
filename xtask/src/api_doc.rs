@@ -104,6 +104,7 @@ const SECTIONS: &[Section] = &[
         title: "视图事件与指针",
         intro: "宿主回发给插件的事件种类与取值形态；画布指针事件单列在下一节。",
         items: items!(
+            "view.rs": "ReportMode",
             "view.rs": "EventKind",
             "view.rs": "ViewEvent",
             "view.rs": "LinkForm",

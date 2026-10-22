@@ -3,7 +3,7 @@
 
 use crate::protocol::view::{
     BoxSize, ButtonVariant, CanvasEventKind, ColorSpec, EventKind, ImageSource, Interaction,
-    MenuItem, NodeBody, SizeSpec, ViewNode,
+    MenuItem, NodeBody, ReportMode, SizeSpec, ViewNode,
 };
 
 fn node(id: &str, body: NodeBody) -> ViewNode {
@@ -184,7 +184,7 @@ pub fn markdown(id: &str, content: impl Into<String>) -> ViewNode {
     )
 }
 
-pub fn text_input(id: &str, value: impl Into<String>) -> ViewNode {
+pub fn text_input(id: &str, value: impl Into<String>, report: ReportMode) -> ViewNode {
     node(
         id,
         NodeBody::TextInput {
@@ -193,14 +193,23 @@ pub fn text_input(id: &str, value: impl Into<String>) -> ViewNode {
             multiline: None,
             password: None,
             read_only: None,
+            report: Some(report),
         },
     )
 }
 
-pub fn number_input(id: &str, value: Option<f64>) -> ViewNode {
+pub fn number_input(id: &str, value: Option<f64>, report: ReportMode) -> ViewNode {
     node(
         id,
-        NodeBody::NumberInput { value, min: None, max: None, step: None, placeholder: None, read_only: None },
+        NodeBody::NumberInput {
+            value,
+            min: None,
+            max: None,
+            step: None,
+            placeholder: None,
+            read_only: None,
+            report: Some(report),
+        },
     )
 }
 

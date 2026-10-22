@@ -565,6 +565,19 @@ enum Message {
         node_id: String,
         event: atelyx_core::plugin_runtime::ViewEvent,
     },
+    /// 输入框本地编辑（非逐键上报档位）：只写草稿，`commit` 为真时把它上报给插件。
+    PluginDraft {
+        plugin_id: String,
+        surface_id: String,
+        node_id: String,
+        /// `None` = 取草稿里的本机当前值（提交时用，控件提交信号只带固定消息）。
+        text: Option<String>,
+        commit: bool,
+    },
+    /// 防抖到期：把该节点的草稿上报给插件（`seq` 过期即丢弃）。
+    PluginDraftFlush { plugin_id: String, surface_id: String, node_id: String, seq: u64 },
+    /// 多行编辑器静默到期：把整段内容上报给插件（`seq` 过期即丢弃）。
+    PluginEditorFlush { plugin_id: String, surface_id: String, node_id: String, seq: u64 },
     /// 插件正文链接点击（回发 linkClick 后按宿主默认行为打开）。
     PluginLink {
         plugin_id: String,
@@ -1116,6 +1129,8 @@ pub struct App {
     pub plugin_trees: HashMap<(String, String), atelyx_core::plugin_runtime::ViewNode>,
     /// 单行 / 数字输入的宿主草稿（键 = 插件 id + 面 id + 节点 id）。
     pub plugin_drafts: HashMap<plugin_actions::InputKey, plugin_actions::InputDraft>,
+    /// 防抖上报的序号：同节点每次编辑递增，过期拍到达即丢弃。
+    pub plugin_draft_seq: HashMap<plugin_actions::InputKey, u64>,
     /// 多行输入的本机编辑器状态（内容与光标归宿主所有）。
     pub plugin_editors: HashMap<plugin_actions::InputKey, plugin_actions::EditorState>,
     /// 画布节点的最新绘图指令清单投影（键 = 插件 id + 面 id + 节点 id；随树投影刷新）。
@@ -1507,6 +1522,7 @@ impl App {
                 table_event_path: None,
                 plugin_trees: HashMap::new(),
                 plugin_drafts: HashMap::new(),
+                plugin_draft_seq: HashMap::new(),
                 plugin_editors: HashMap::new(),
                 plugin_canvases: HashMap::new(),
                 plugin_markdown: HashMap::new(),
@@ -3239,6 +3255,15 @@ impl App {
             }
             Message::PluginView { plugin_id, surface_id, node_id, event } => {
                 plugin_actions::on_view_event(self, plugin_id, surface_id, node_id, event)
+            }
+            Message::PluginDraft { plugin_id, surface_id, node_id, text, commit } => {
+                plugin_actions::on_draft(self, plugin_id, surface_id, node_id, text, commit)
+            }
+            Message::PluginDraftFlush { plugin_id, surface_id, node_id, seq } => {
+                plugin_actions::on_draft_flush(self, plugin_id, surface_id, node_id, seq)
+            }
+            Message::PluginEditorFlush { plugin_id, surface_id, node_id, seq } => {
+                plugin_actions::on_editor_flush(self, plugin_id, surface_id, node_id, seq)
             }
             Message::PluginLink { plugin_id, surface_id, node_id, href, form } => {
                 plugin_actions::on_link_click(self, plugin_id, surface_id, node_id, href, form)
