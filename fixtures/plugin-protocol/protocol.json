@@ -388,6 +388,34 @@
         "fill": true
       },
       {
+        "id": "modalLayer",
+        "kind": "overlay",
+        "scrim": "#00000099",
+        "events": ["click"],
+        "children": [
+          {
+            "id": "modalCard",
+            "kind": "card",
+            "gap": 4.0,
+            "size": { "width": 320.0, "height": "shrink" },
+            "children": [
+              {
+                "id": "modalText",
+                "kind": "text",
+                "content": "大图预览"
+              },
+              {
+                "id": "modalClose",
+                "kind": "button",
+                "label": "关闭",
+                "variant": "ghost",
+                "events": ["click"]
+              }
+            ]
+          }
+        ]
+      },
+      {
         "id": "titleDrag",
         "kind": "dragRegion"
       }

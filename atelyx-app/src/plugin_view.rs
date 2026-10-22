@@ -4,8 +4,8 @@
 
 use std::borrow::Cow;
 
-use iced::widget::{container, text};
-use iced::{Element, Length, Padding};
+use iced::widget::text;
+use iced::{Element, Padding};
 
 use atelyx_core::plugin_runtime::ImageSource;
 use atelyx_view::render::{
@@ -35,10 +35,14 @@ pub fn window_view<'a>(
 ) -> Element<'a, Message> {
     let key = (entry.plugin_id.clone(), entry.window_key.clone());
     match app.plugin_trees.get(&key) {
-        Some(tree) => container(render::surface(app, window, &entry.plugin_id, &entry.window_key, tree))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into(),
+        Some(tree) => render::surface(
+            app,
+            window,
+            &entry.plugin_id,
+            &entry.window_key,
+            tree,
+            Padding::ZERO,
+        ),
         None => placeholder(
             "puzzle",
             "插件窗口",
@@ -56,10 +60,9 @@ pub fn takeover_content<'a>(
 ) -> Element<'a, Message> {
     let key = (plugin_id.to_string(), surface_id.to_string());
     match app.plugin_trees.get(&key) {
-        Some(tree) => container(render::surface(app, window, plugin_id, surface_id, tree))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into(),
+        Some(tree) => {
+            render::surface(app, window, plugin_id, surface_id, tree, Padding::ZERO)
+        }
         None => placeholder("puzzle", "接管面", "等待插件提交界面"),
     }
 }
@@ -87,11 +90,9 @@ pub(crate) fn surface_view<'a>(
         None => Padding::ZERO.horizontal(12.0).vertical(10.0),
     };
     match app.plugin_trees.get(&key) {
-        Some(tree) => container(render::surface(app, window, plugin_id, surface_id, tree))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .padding(outer_pad)
-            .into(),
+        Some(tree) => {
+            render::surface(app, window, plugin_id, surface_id, tree, outer_pad)
+        }
         None => {
             let icon_key =
                 crate::plugin_actions::plugin_icon_key(plugin_id, contribution.icon.as_deref(), "puzzle");

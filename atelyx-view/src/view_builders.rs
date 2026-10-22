@@ -195,6 +195,12 @@ pub fn stack<'a>(id: impl Into<NodeId<'a>>, children: Vec<ViewNode>) -> ViewNode
     node(id, NodeBody::Stack {}).with_children(children)
 }
 
+/// 面内浮层：唯一子节点为浮层内容，宿主把它铺满整个插件面（遮罩 + 内容居中），
+/// 打开 = 节点在树里、关闭 = 移除。声明 `click` 即点击遮罩回发（收起浮层）。
+pub fn overlay<'a>(id: impl Into<NodeId<'a>>, content: ViewNode) -> ViewNode {
+    node(id, NodeBody::Overlay { scrim: None }).with_children(vec![content])
+}
+
 /// 分隔线（主题弱边界色的 1px 水平线）。
 pub fn divider<'a>(id: impl Into<NodeId<'a>>) -> ViewNode {
     node(id, NodeBody::Divider {})

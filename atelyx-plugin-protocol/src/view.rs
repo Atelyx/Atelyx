@@ -34,8 +34,12 @@ impl ViewNode {
         self.children.iter().find_map(|child| child.find(node_id))
     }
 
-    /// 宿主挂载前的结构校验：id 非空且全树唯一、叶子无 children、弹性权重为正、图标名非空、容器尺寸不为负。
+    /// 宿主挂载前的结构校验：id 非空且全树唯一、叶子无 children、浮层有且仅有一个内容子节点、
+    /// 弹性权重为正、图标名非空、容器尺寸不为负。
     pub fn validate(&self) -> Result<(), String> {
+        if matches!(self.body, NodeBody::Overlay { .. }) {
+            return Err("根节点不能是浮层：浮层须挂在某个容器下".into());
+        }
         let mut ids = HashSet::new();
         self.validate_into(&mut ids)
     }
@@ -49,6 +53,9 @@ impl ViewNode {
         }
         if !self.body.allows_children() && !self.children.is_empty() {
             return Err(format!("叶子节点 {}（kind = {}）不得携带 children", self.id, self.body.kind_name()));
+        }
+        if matches!(self.body, NodeBody::Overlay { .. }) && self.children.len() != 1 {
+            return Err(format!("浮层节点 {} 须有且仅有一个子节点（浮层内容）", self.id));
         }
         if self.grow == Some(0) {
             return Err(format!("节点 {} 的 grow 须大于 0", self.id));
@@ -137,6 +144,17 @@ pub enum NodeBody {
     /// 叠层：子节点按提交顺序重叠（后提交的在上），同尺寸对齐于左上角。
     /// 用于「自绘画布当底 + 宿主控件叠其上」或徽标叠图。
     Stack {},
+    /// 面内浮层（模态）：唯一子节点即浮层内容，宿主把它铺满整个插件面——一层遮罩 + 居中内容，
+    /// 且不参与父容器排版（挂在任何一层效果相同，浮层之间按树序叠放）。
+    /// 打开 = 节点出现在树里，关闭 = 从树里移除；遮罩拦下所有指针事件（按下 / 抬起 / 滚轮），
+    /// 下层控件不响应点击也不滚动。声明 `click` 时点击遮罩（内容之外）回发 `Click`，
+    /// 插件据此收起浮层；不声明则遮罩只拦截。浮层自身不参与排版与交互外观（`size` / `grow` /
+    /// `interaction` 不生效，外观取 `scrim` 与内容节点），键盘与焦点不被改写。浮层不能作根节点。
+    Overlay {
+        /// 遮罩底色（缺省主题遮罩；`transparent` 不画底色，只保留事件拦截）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scrim: Option<ColorSpec>,
+    },
     Scroll {
         /// 子节点按主轴单向排列：`horizontal` 排成行，其余（含缺省）排成列。
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -354,7 +372,7 @@ pub enum NodeBody {
 }
 
 impl NodeBody {
-    /// 容器类节点（可携带 children）：布局容器、滚动容器、网格与列表。
+    /// 容器类节点（可携带 children）：布局容器、浮层、滚动容器、网格与列表。
     pub fn allows_children(&self) -> bool {
         matches!(
             self,
@@ -362,6 +380,7 @@ impl NodeBody {
                 | Self::Column { .. }
                 | Self::Card { .. }
                 | Self::Stack { .. }
+                | Self::Overlay { .. }
                 | Self::Scroll { .. }
                 | Self::Grid { .. }
                 | Self::List { .. }
@@ -374,6 +393,7 @@ impl NodeBody {
             Self::Column { .. } => "column",
             Self::Card { .. } => "card",
             Self::Stack { .. } => "stack",
+            Self::Overlay { .. } => "overlay",
             Self::Scroll { .. } => "scroll",
             Self::Grid { .. } => "grid",
             Self::List { .. } => "list",
@@ -1478,6 +1498,49 @@ mod tests {
             events: vec![],
         };
         assert!(with_children.validate().is_ok());
+    }
+
+    /// 浮层：唯一子节点为浮层内容；不能作根节点。
+    #[test]
+    fn overlay_requires_exactly_one_content_child() {
+        let body = NodeBody::Overlay { scrim: Some(ColorSpec::Token(ColorToken::SurfaceSunken)) };
+        assert!(body.allows_children());
+        assert_eq!(body.kind_name(), "overlay");
+        assert_eq!(
+            serde_json::to_value(&body).unwrap(),
+            serde_json::json!({ "kind": "overlay", "scrim": "surfaceSunken" })
+        );
+        assert_eq!(
+            serde_json::from_value::<NodeBody>(serde_json::json!({ "kind": "overlay" })).unwrap(),
+            NodeBody::Overlay { scrim: None }
+        );
+
+        let root = |children: Vec<ViewNode>| ViewNode {
+            id: "root".into(),
+            body: NodeBody::Column { gap: None, padding: None, cross_align: None, align: None, size: None },
+            interaction: None,
+            grow: None,
+            children,
+            events: vec![],
+        };
+        let layer = |id: &str, children: Vec<ViewNode>| ViewNode {
+            id: id.into(),
+            body: NodeBody::Overlay { scrim: None },
+            interaction: None,
+            grow: None,
+            children,
+            events: vec![],
+        };
+        let content = leaf("dialog", NodeBody::Divider {});
+
+        assert!(root(vec![layer("layer", vec![content.clone()])]).validate().is_ok());
+        assert!(root(vec![layer("layer", vec![])]).validate().unwrap_err().contains("仅有一个"));
+        assert!(root(vec![layer("layer", vec![content.clone(), content.clone()])])
+            .validate()
+            .unwrap_err()
+            .contains("仅有一个"));
+        // 根节点自身是浮层：没有可承载的内容面，拒收
+        assert!(layer("layer", vec![content.clone()]).validate().unwrap_err().contains("根节点"));
     }
 
     #[test]

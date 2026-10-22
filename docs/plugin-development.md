@@ -210,7 +210,7 @@ async fn main() {
 
 ### 5.1 控件
 
-控件集：`column` / `row` / `card` / `stack` / `scroll` / `grid` / `list` / `text` / `markdown` / `textInput` / `numberInput` / `dropdown` / `checkbox` / `button` / `iconButton` / `icon` / `image` / `progress` / `menu` / `divider` / `canvas` / `dragRegion`。每个 `kind` 的字段与语义以 [API 参考 · 界面控件树](plugin-api.md#3-界面控件树) 为准（含 `NodeBody` 的完整声明）。
+控件集：`column` / `row` / `card` / `stack` / `overlay` / `scroll` / `grid` / `list` / `text` / `markdown` / `textInput` / `numberInput` / `dropdown` / `checkbox` / `button` / `iconButton` / `icon` / `image` / `progress` / `menu` / `divider` / `canvas` / `dragRegion`。每个 `kind` 的字段与语义以 [API 参考 · 界面控件树](plugin-api.md#3-界面控件树) 为准（含 `NodeBody` 的完整声明）。
 
 控件之上还有四个**节点级能力**，写在节点上（与 `kind` 并列）：
 
@@ -240,6 +240,7 @@ token 随主题与界面字号设置联动，自定义色由插件自负对比�
 - `progress` 的 `girth` 是轨道粗细（px，缺省 30 的粗条；细进度条写 `3` / `4`），`tone` 是完成段颜色（缺省主题强调色）；
 - `markdown` 的 `content` 用笔记同源解析器渲染，`size` 是整体字号倍率，`weight` / `color` 覆盖基础字重与文字色（标题与加粗片段恒为加粗，链接与代码块语义色不受影响）；正文里的链接可点击，宿主按形态默认打开（外链 / wiki / 仓库路径），节点声明 `linkClick` 时同时回发链接点击事件；
 - `menu` 的 `label` 与 `icon` 可并存（并存为紧凑的「图标 + 文字」触发钮），只给 `label` 才是全宽下拉钮；条目可标 `current`（宿主在条目前画勾）；
+- `overlay` 是面内浮层：唯一子节点即浮层内容，宿主把它铺满整个插件面——一层遮罩 + 居中内容。**节点在树里就是打开**，从树里移除即关闭；挂在哪个容器下效果都一样（不参与父容器排版），多个浮层按树序叠放、后出现的盖在上面。遮罩拦下所有指针事件（下层既不响应点击也不滚动）；声明 `click` 时点击遮罩（内容之外）回发点击事件，用来收起浮层。`scrim` 换底色（缺省主题遮罩，`"transparent"` 只拦截不画底）。浮层不改写键盘与焦点，也不能作根节点；弹层类界面（大图预览 / 确认框 / 表单）用它，不要用 `stack` 模拟；
 - 可滚动容器（`list` / `scroll`）用 `ctx.scroll_to(surface, node, ScrollEdge::End)` 滚到主轴一端，无需插件自己维护滚动状态；`scroll` 的 `direction` 决定子项排布与滚动主轴（`horizontal` = 子项排成行并横向滚动），`height` 给定即收住自身高度（把横向图条嵌进纵向内容流），缺省占满父容器剩余高度；
 - 输入控件（`textInput` / `numberInput` / `dropdown` / `checkbox`）给 `readOnly: true` 即保留控件外观展示只读值，不接受编辑、不产生事件；
 - 滚动位置：给 `list` / `scroll` 节点声明 `scroll` 事件，宿主就回发 `{ offset, maxOffset }`（主轴当前偏移与可滚动余量，`offset >= maxOffset` 即停在末端）。内容不足一屏没有可滚动余量，不会发事件。「用户停在底部才跟随最新」「滚离底部时露出回底入口」都按这一对值判断，不用插件自己记账。

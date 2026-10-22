@@ -89,9 +89,9 @@ fn view_tree_shape_is_frozen() {
     let mut kinds = std::collections::HashSet::new();
     walk(&tree, &mut kinds);
     for expected in [
-        "row", "column", "card", "stack", "scroll", "grid", "list", "text", "markdown", "textInput",
-        "numberInput", "dropdown", "checkbox", "button", "iconButton", "icon", "image", "progress",
-        "menu", "canvas", "divider", "dragRegion",
+        "row", "column", "card", "stack", "overlay", "scroll", "grid", "list", "text", "markdown",
+        "textInput", "numberInput", "dropdown", "checkbox", "button", "iconButton", "icon", "image",
+        "progress", "menu", "canvas", "divider", "dragRegion",
     ] {
         assert!(kinds.contains(expected), "控件集缺快照覆盖：{expected}");
     }
@@ -107,6 +107,10 @@ fn view_tree_shape_is_frozen() {
     assert!(matches!(&menu.body, NodeBody::Menu { items, .. } if items.len() == 2));
     let canvas = find(&tree, "board").unwrap();
     assert!(matches!(&canvas.body, NodeBody::Canvas { mouse_events, .. } if mouse_events.len() == 6));
+    // 浮层：唯一子节点即浮层内容，遮罩色走 ColorSpec 自定义色轨
+    let layer = find(&tree, "modalLayer").unwrap();
+    assert!(matches!(&layer.body, NodeBody::Overlay { scrim: Some(_) } if layer.children.len() == 1));
+    assert_eq!(layer.events, vec![EventKind::Click]);
 
     // 冻结编码：序列化产物与快照值逐字段一致
     assert_eq!(serde_json::to_value(&tree).unwrap(), snapshot["viewTree"], "ViewNode 编码与快照不一致");

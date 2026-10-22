@@ -304,6 +304,17 @@ pub enum NodeBody {
     /// 叠层：子节点按提交顺序重叠（后提交的在上），同尺寸对齐于左上角。
     /// 用于「自绘画布当底 + 宿主控件叠其上」或徽标叠图。
     Stack {},
+    /// 面内浮层（模态）：唯一子节点即浮层内容，宿主把它铺满整个插件面——一层遮罩 + 居中内容，
+    /// 且不参与父容器排版（挂在任何一层效果相同，浮层之间按树序叠放）。
+    /// 打开 = 节点出现在树里，关闭 = 从树里移除；遮罩拦下所有指针事件（按下 / 抬起 / 滚轮），
+    /// 下层控件不响应点击也不滚动。声明 `click` 时点击遮罩（内容之外）回发 `Click`，
+    /// 插件据此收起浮层；不声明则遮罩只拦截。浮层自身不参与排版与交互外观（`size` / `grow` /
+    /// `interaction` 不生效，外观取 `scrim` 与内容节点），键盘与焦点不被改写。浮层不能作根节点。
+    Overlay {
+        /// 遮罩底色（缺省主题遮罩；`transparent` 不画底色，只保留事件拦截）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scrim: Option<ColorSpec>,
+    },
     Scroll {
         /// 子节点按主轴单向排列：`horizontal` 排成行，其余（含缺省）排成列。
         #[serde(default, skip_serializing_if = "Option::is_none")]

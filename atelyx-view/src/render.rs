@@ -6,9 +6,11 @@ use std::borrow::Cow;
 
 use iced::advanced::layout::{Layout, Limits, Node};
 use iced::advanced::widget::tree;
+use iced::advanced::Renderer as _;
 use iced::advanced::{overlay, renderer, Clipboard, Shell, Widget};
 use iced::alignment::{Horizontal, Vertical};
 use iced::mouse;
+use iced::touch;
 use iced::widget::{
     column, container, grid, image, keyed_column, mouse_area, progress_bar, responsive, row, space,
     text_editor, text_input, Stack,
@@ -139,21 +141,35 @@ struct Ctx {
     window: iced::window::Id,
 }
 
-/// 渲染一面的根节点：根容器按面区域撑满高度（Fill 子项——画布 / 列表——才有可分配空间；
-/// Shrink 根列内的 Fill 子项会塌缩成 0 高）。嵌套容器保持各自声明的尺寸语义。
+/// 渲染一面的根节点：内容按面区域撑满高度（Fill 子项——画布 / 列表——才有可分配空间；
+/// Shrink 根列内的 Fill 子项会塌缩成 0 高），`padding` 为宿主外壳给面的内边距。
+/// 浮层节点不参与内容排版：宿主按树序把它们铺在整面最上层（含内边距区域）。
 pub fn surface<'a, M, H>(
     host: &'a H,
     window: iced::window::Id,
     plugin_id: &str,
     surface_id: &str,
     tree: &'a ViewNode,
+    padding: Padding,
 ) -> Element<'a, M>
 where
     M: ViewMessage,
     H: ViewHost<M>,
 {
     let ctx = Ctx { plugin_id: plugin_id.to_string(), surface_id: surface_id.to_string(), window };
-    render_root(host, &ctx, tree)
+    let base: Element<'a, M> = container(render_root(host, &ctx, tree))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .padding(padding)
+        .into();
+    let mut layers = Vec::new();
+    collect_overlays(tree, &mut layers);
+    // 始终经由 Stack：浮层开关不改变根控件类型，内容子树的滚动 / 编辑态得以保留。
+    let mut stack = Stack::new().push(base);
+    for layer in layers {
+        stack = stack.push(overlay_layer(host, &ctx, layer));
+    }
+    stack.width(Length::Fill).height(Length::Fill).into()
 }
 
 /// 可滚动节点的稳定 id（插件 id + 面 id + 节点 id；`view.scrollTo` 按它定位）。
@@ -172,6 +188,51 @@ where
         }
         _ => render_node_in(host, ctx, node, false),
     }
+}
+
+/// 树里的浮层节点（深度优先序，后出现的盖在前面之上）；浮层内容里的浮层同样上提，
+/// 因此挂在树里任何一层效果一致。
+fn collect_overlays<'a>(node: &'a ViewNode, out: &mut Vec<&'a ViewNode>) {
+    for child in &node.children {
+        if is_overlay(child) {
+            out.push(child);
+        }
+        collect_overlays(child, out);
+    }
+}
+
+/// 浮层节点由 [`surface`] 提到面级合成，不进父容器排版。
+fn is_overlay(node: &ViewNode) -> bool {
+    matches!(node.body, NodeBody::Overlay { .. })
+}
+
+/// 单个浮层：铺满整面的遮罩 + 居中内容；声明 `click` 时点击遮罩（内容之外）回发节点点击事件。
+fn overlay_layer<'a, M, H>(host: &'a H, ctx: &Ctx, node: &'a ViewNode) -> Element<'a, M>
+where
+    M: ViewMessage,
+    H: ViewHost<M>,
+{
+    let NodeBody::Overlay { scrim } = &node.body else {
+        unreachable!("overlay_layer 只接收浮层节点")
+    };
+    let scrim = scrim.map_or(pal::SCRIM, spec_color);
+    let content: Element<'a, M> = match node.children.first() {
+        Some(child) => render_node(host, ctx, child),
+        None => space().into(),
+    };
+    let layer: Element<'a, M> = container(content)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(Horizontal::Center)
+        .align_y(Vertical::Center)
+        .style(move |_| container::Style {
+            background: Some(scrim.into()),
+            ..container::Style::default()
+        })
+        .into();
+    let on_dismiss =
+        declares(node, EventKind::Click).then(|| node_event(ctx, &node.id, ViewEvent::Click));
+    ModalLayer::new(layer, on_dismiss).into()
 }
 
 /// 单节点解释：容器递归渲染子节点；叶子按控件语义取主题 token 与事件绑定。
@@ -650,6 +711,8 @@ where
         )
         .on_press(M::view(ViewMsg::WindowDrag(ctx.window)))
         .into(),
+        // 浮层由 surface 提级合成（见 overlay_layer），不走节点本体渲染
+        NodeBody::Overlay { .. } => space().into(),
     }
 }
 
@@ -667,6 +730,7 @@ where
 {
     node.children
         .iter()
+        .filter(|child| !is_overlay(child))
         .map(|child| (node_key(&child.id), child_element(host, ctx, child, axis)))
         .collect()
 }
@@ -682,7 +746,11 @@ where
     M: ViewMessage,
     H: ViewHost<M>,
 {
-    node.children.iter().map(|child| child_element(host, ctx, child, axis)).collect()
+    node.children
+        .iter()
+        .filter(|child| !is_overlay(child))
+        .map(|child| child_element(host, ctx, child, axis))
+        .collect()
 }
 
 /// 子节点元素：声明 `grow` 的子项按权重占父容器主轴剩余空间（交叉轴由子项自身尺寸决定）。
@@ -708,9 +776,9 @@ where
     }
 }
 
-/// 子项是否声明了弹性权重（决定父容器主轴须占满才分配得了剩余空间）。
+/// 子项是否声明了弹性权重（决定父容器主轴须占满才分配得了剩余空间）；浮层不参与排版。
 fn grows(node: &ViewNode) -> bool {
-    node.children.iter().any(|child| child.grow.is_some())
+    node.children.iter().any(|child| !is_overlay(child) && child.grow.is_some())
 }
 
 /// 列与卡片缺省占满宽度。
@@ -827,7 +895,8 @@ where
     M: ViewMessage,
     H: ViewHost<M>,
 {
-    let count = node.children.len().max(1);
+    // 浮层不参与网格排版，不计入行数换算与自动列数上限
+    let count = node.children.iter().filter(|child| !is_overlay(child)).count().max(1);
     let fixed = columns.map(|columns| columns.max(1) as usize);
     let build = move |host: &'a H, ctx: &Ctx, columns: usize| -> Element<'a, M> {
         let mut grid = grid(children_elements(host, ctx, node, Some(Axis::Horizontal)))
@@ -1422,6 +1491,263 @@ impl<'a, Message: Clone + 'static> From<NodeBox<'a, Message>> for Element<'a, Me
     }
 }
 
+/// 浮层事件拦截：内容先拿指针事件，其余一律吞掉——下层控件既不响应点击也不滚动。
+/// 在内容之外按下并抬起的左键视为遮罩点击，`on_dismiss` 存在时回发。
+struct ModalLayer<'a, Message> {
+    content: Element<'a, Message>,
+    on_dismiss: Option<Message>,
+}
+
+/// 遮罩按下记在哪个输入源上：`Some(None)` = 鼠标左键，`Some(Some(finger))` = 该手指。
+#[derive(Debug, Default)]
+struct ModalState {
+    scrim_press: Option<Option<touch::Finger>>,
+}
+
+impl<'a, Message> ModalLayer<'a, Message> {
+    fn new(content: Element<'a, Message>, on_dismiss: Option<Message>) -> Self {
+        Self { content, on_dismiss }
+    }
+}
+
+impl<'a, Message: Clone + 'static> Widget<Message, Theme, Renderer> for ModalLayer<'a, Message> {
+    fn tag(&self) -> tree::Tag {
+        tree::Tag::of::<ModalState>()
+    }
+
+    fn state(&self) -> tree::State {
+        tree::State::new(ModalState::default())
+    }
+
+    fn size(&self) -> Size<Length> {
+        Size::new(Length::Fill, Length::Fill)
+    }
+
+    fn children(&self) -> Vec<tree::Tree> {
+        vec![tree::Tree::new(self.content.as_widget())]
+    }
+
+    fn diff(&self, tree: &mut tree::Tree) {
+        tree.diff_children(std::slice::from_ref(&self.content));
+    }
+
+    fn layout(&mut self, tree: &mut tree::Tree, renderer: &Renderer, limits: &Limits) -> Node {
+        // 层内容自带 Fill 尺寸（遮罩容器），取给到的完整区域
+        let child = self
+            .content
+            .as_widget_mut()
+            .layout(&mut tree.children[0], renderer, limits);
+        let size = child.size();
+        Node::with_children(size, vec![child])
+    }
+
+    fn operate(
+        &mut self,
+        tree: &mut tree::Tree,
+        layout: Layout<'_>,
+        renderer: &Renderer,
+        operation: &mut dyn iced::advanced::widget::Operation,
+    ) {
+        let Some(child) = layout.children().next() else { return };
+        self.content
+            .as_widget_mut()
+            .operate(&mut tree.children[0], child, renderer, operation);
+    }
+
+    fn update(
+        &mut self,
+        tree: &mut tree::Tree,
+        event: &iced::Event,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        renderer: &Renderer,
+        clipboard: &mut dyn Clipboard,
+        shell: &mut Shell<'_, Message>,
+        viewport: &Rectangle,
+    ) {
+        let Some(child) = layout.children().next() else { return };
+        self.content.as_widget_mut().update(
+            &mut tree.children[0],
+            event,
+            child,
+            cursor,
+            renderer,
+            clipboard,
+            shell,
+            viewport,
+        );
+        if shell.is_event_captured() || !blocks_pointer(event) {
+            return;
+        }
+        let state: &mut ModalState = tree.state.downcast_mut();
+        let position = pointer_position(event, cursor);
+        let over = position.is_some_and(|position| layout.bounds().contains(position));
+        let on_content = position.is_some_and(|position| {
+            content_bounds(child).is_some_and(|bounds| bounds.contains(position))
+        });
+        match event {
+            iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+                if over {
+                    shell.capture_event();
+                    if !on_content {
+                        state.scrim_press = Some(None);
+                    }
+                }
+            }
+            iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                let pressed = state.scrim_press == Some(None);
+                if pressed {
+                    state.scrim_press = None;
+                }
+                if over {
+                    shell.capture_event();
+                }
+                if pressed && over && !on_content {
+                    publish_dismiss(shell, self.on_dismiss.as_ref());
+                }
+            }
+            iced::Event::Touch(touch::Event::FingerPressed { id, .. }) => {
+                if over {
+                    shell.capture_event();
+                    if !on_content {
+                        state.scrim_press = Some(Some(*id));
+                    }
+                }
+            }
+            iced::Event::Touch(touch::Event::FingerLifted { id, .. }) => {
+                let pressed = state.scrim_press == Some(Some(*id));
+                if pressed {
+                    state.scrim_press = None;
+                }
+                if over {
+                    shell.capture_event();
+                }
+                if pressed && over && !on_content {
+                    publish_dismiss(shell, self.on_dismiss.as_ref());
+                }
+            }
+            iced::Event::Touch(touch::Event::FingerLost { id, .. }) => {
+                if state.scrim_press == Some(Some(*id)) {
+                    state.scrim_press = None;
+                }
+            }
+            _ => {
+                if over {
+                    shell.capture_event();
+                }
+            }
+        }
+    }
+
+    fn mouse_interaction(
+        &self,
+        tree: &tree::Tree,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+        renderer: &Renderer,
+    ) -> mouse::Interaction {
+        let content = layout.children().next().map_or(mouse::Interaction::None, |child| {
+            self.content.as_widget().mouse_interaction(
+                &tree.children[0],
+                child,
+                cursor,
+                viewport,
+                renderer,
+            )
+        });
+        // 铺满整面且吞掉指针事件：光标在浮层上时报非 None，下层图层不再按悬停着色
+        if content == mouse::Interaction::None && cursor.is_over(layout.bounds()) {
+            mouse::Interaction::Idle
+        } else {
+            content
+        }
+    }
+
+    fn draw(
+        &self,
+        tree: &tree::Tree,
+        renderer: &mut Renderer,
+        theme: &Theme,
+        style: &renderer::Style,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+    ) {
+        let (Some(child), Some(bounds)) =
+            (layout.children().next(), layout.bounds().intersection(viewport))
+        else {
+            return;
+        };
+        // 内容超出面边界时裁在面内，不画到相邻面板
+        renderer.with_layer(bounds, |renderer| {
+            self.content.as_widget().draw(
+                &tree.children[0],
+                renderer,
+                theme,
+                style,
+                child,
+                cursor,
+                viewport,
+            );
+        });
+    }
+
+    fn overlay<'b>(
+        &'b mut self,
+        tree: &'b mut tree::Tree,
+        layout: Layout<'b>,
+        renderer: &Renderer,
+        viewport: &Rectangle,
+        translation: Vector,
+    ) -> Option<overlay::Element<'b, Message, Theme, Renderer>> {
+        let child = layout.children().next()?;
+        self.content
+            .as_widget_mut()
+            .overlay(&mut tree.children[0], child, renderer, viewport, translation)
+    }
+}
+
+impl<'a, Message: Clone + 'static> From<ModalLayer<'a, Message>> for Element<'a, Message> {
+    fn from(layer: ModalLayer<'a, Message>) -> Self {
+        Element::new(layer)
+    }
+}
+
+/// 浮层拦下除光标移动外的指针事件：移动放行到下层，层级游标（levitate）才会让下层悬停退出。
+fn blocks_pointer(event: &iced::Event) -> bool {
+    match event {
+        iced::Event::Mouse(mouse::Event::CursorMoved { .. }) => false,
+        iced::Event::Mouse(_) | iced::Event::Touch(_) => true,
+        _ => false,
+    }
+}
+
+/// 浮层内容的实际矩形（内容由外层容器居中摆放，取内层节点边界）。
+fn content_bounds(layer: Layout<'_>) -> Option<Rectangle> {
+    layer.children().next().map(|content| content.bounds())
+}
+
+/// 遮罩点击成立时回发节点点击事件（插件据此收起浮层）。
+fn publish_dismiss<Message: Clone>(shell: &mut Shell<'_, Message>, message: Option<&Message>) {
+    if let Some(message) = message {
+        shell.publish(message.clone());
+    }
+}
+
+/// 事件发生处的指针坐标：触摸事件自带坐标（触屏没有鼠标游标），其余取游标位置。
+fn pointer_position(event: &iced::Event, cursor: mouse::Cursor) -> Option<iced::Point> {
+    match event {
+        iced::Event::Touch(
+            touch::Event::FingerPressed { position, .. }
+            | touch::Event::FingerMoved { position, .. }
+            | touch::Event::FingerLifted { position, .. }
+            | touch::Event::FingerLost { position, .. },
+        ) => Some(*position),
+        _ => cursor.position(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1479,5 +1805,52 @@ mod tests {
         // 等宽族：换族但不动字重
         let mono = text_font(Some(TextWeight::Normal), Some(TextFamily::Mono));
         assert!(matches!(mono.family, iced::font::Family::Monospace));
+    }
+
+    /// 浮层按深度优先序提到面级：嵌套在任意容器里的浮层都收集得到，先出现的在下。
+    #[test]
+    fn overlays_are_collected_in_tree_order() {
+        let node = |id: &str, body: NodeBody, children: Vec<ViewNode>| ViewNode {
+            id: id.into(),
+            body,
+            interaction: None,
+            grow: None,
+            children,
+            events: vec![],
+        };
+        let overlay = |id: &str| {
+            node(
+                id,
+                NodeBody::Overlay { scrim: None },
+                vec![node("inner", NodeBody::Divider {}, vec![])],
+            )
+        };
+        let tree = node(
+            "root",
+            NodeBody::Column { gap: None, padding: None, cross_align: None, align: None, size: None },
+            vec![
+                node("first", NodeBody::Overlay { scrim: None }, vec![overlay("nested")]),
+                node(
+                    "box",
+                    NodeBody::Card {
+                        gap: None,
+                        padding: None,
+                        accent: None,
+                        tone: None,
+                        radius: None,
+                        bordered: None,
+                        align: None,
+                        size: None,
+                    },
+                    vec![overlay("second")],
+                ),
+            ],
+        );
+        let mut found = Vec::new();
+        collect_overlays(&tree, &mut found);
+        assert_eq!(
+            found.iter().map(|node| node.id.as_str()).collect::<Vec<_>>(),
+            ["first", "nested", "second"]
+        );
     }
 }
