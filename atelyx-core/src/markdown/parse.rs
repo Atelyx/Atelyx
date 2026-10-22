@@ -531,14 +531,15 @@ fn quote_prefix(text: &str) -> Option<(usize, usize)> {
     Some((ind + 1 + ws_bytes, ws_cols.saturating_sub(1)))
 }
 
-/// 段落续行判定（lazy continuation 依据）：非空、缩进 <4、不是任何块起始。
+/// 段落续行判定（lazy continuation 依据）：非空、缩进 <4 时不是任何块起始。
+/// 缩进 ≥4 的行一律续行——缩进代码块只能从块起始成立，不能打断段落。
 fn is_paragraph_continuation(text: &str) -> bool {
     if is_blank(text) {
         return false;
     }
     let (ind, ind_cols) = indent_prefix(text);
     if ind_cols >= 4 {
-        return false;
+        return true;
     }
     let body = &text[ind..];
     if body.starts_with('>')

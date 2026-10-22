@@ -1999,6 +1999,30 @@
       }
     },
     {
+      "name": "para-lazy-indented",
+      "source": "alpha\nbeta,\n        indented continuation\n        second line\ngamma\n",
+      "mentions": null,
+      "links": null,
+      "expected": {
+        "source": "alpha\nbeta,\n        indented continuation\n        second line\ngamma\n",
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "from": 0,
+            "to": 67,
+            "inline": [
+              {
+                "kind": "text",
+                "from": 0,
+                "to": 67,
+                "text": "alpha\nbeta,\n        indented continuation\n        second line\ngamma"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
       "name": "list-multi-para",
       "source": "- a\n\n  b\n",
       "mentions": null,
