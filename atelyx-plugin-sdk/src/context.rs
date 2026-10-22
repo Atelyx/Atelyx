@@ -132,7 +132,8 @@ impl Context {
 
     // ---------- view / event ----------
 
-    pub async fn submit_view(
+    /// 界面树的底层提交口（仅供 [`crate::ui`] 的托管循环使用）：插件侧经 `Ui::mount` / `Ui::notify` 提交。
+    pub(crate) async fn submit_view(
         &self,
         surface_id: &str,
         tree: crate::protocol::view::ViewNode,
@@ -208,7 +209,7 @@ impl Context {
     }
 
     /// 打开一个独立窗口承载自己的界面树：`id` 插件内唯一且不得含 `:`，同时是该窗口面的
-    /// surfaceId（树经 [`Context::submit_view`] 提交）。重复 id 或宿主不可开窗由宿主可读拒绝。
+    /// surfaceId（树经 `ctx.ui().mount(id, build)` 登记后由 `notify` 提交）。重复 id 或宿主不可开窗由宿主可读拒绝。
     pub async fn window_open(&self, params: WindowOpenParams) -> Result<(), RpcError> {
         self.call_unit(method::window::OPEN, &params).await
     }
