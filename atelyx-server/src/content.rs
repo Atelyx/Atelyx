@@ -219,6 +219,11 @@ pub async fn rename(
         std::fs::rename(&from, &to).map_err(|e| {
             ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("重命名失败：{e}"))
         })?;
+        // 单文件改名换了主名：内嵌标题随文件名一并改写（目录改名不动文件名，无需处理）。
+        // 锁内完成，与补丁的读改写互斥；改写失败只记日志——改名本身已落地，不因此回滚。
+        if !from_is_dir {
+            crate::patches::retitle_after_rename(&to);
+        }
         drop(lock_to);
         drop(lock_from);
     }

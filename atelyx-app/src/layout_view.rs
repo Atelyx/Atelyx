@@ -157,25 +157,16 @@ fn truncate_to_width(text: &str, max_w: f32, measure: impl Fn(&str) -> f32) -> S
 
 /// 面板标签文字（笔记/表格/画布视图打开文件 = 文件名去扩展名后缀，否则视图名）。
 pub fn tab_label(app: &App, view: &str) -> String {
-    let file_label = |f: &str, ext: &str| {
-        f.rsplit('/').next().unwrap_or(f).strip_suffix(ext).map(|s| s.to_string()).unwrap_or_else(|| f.to_string())
+    let open = match view {
+        "note" => app.ui.last_note_file.as_deref(),
+        "table" => app.ui.last_table_file.as_deref(),
+        "canvas" => app.ui.last_canvas_file.as_deref(),
+        _ => None,
     };
-    if view == "note" {
-        if let Some(f) = app.ui.last_note_file.as_deref() {
-            return file_label(f, ".md");
-        }
+    match open {
+        Some(file) => file_label(file),
+        None => view_label(app, view),
     }
-    if view == "table" {
-        if let Some(f) = app.ui.last_table_file.as_deref() {
-            return file_label(f, ".atb");
-        }
-    }
-    if view == "canvas" {
-        if let Some(f) = app.ui.last_canvas_file.as_deref() {
-            return file_label(f, ".atlx");
-        }
-    }
-    view_label(app, view)
 }
 
 /// 面板标签近似宽度（拖拽命中几何用；渲染宽度由内容自适应，见 panel_tab）。
@@ -2909,10 +2900,11 @@ fn push_children(
 
 // ===== note 视图 =====
 
-/// 笔记显示标题：相对路径末段去 `.md` 后缀（页面内标题与改名初值同源）。
-pub fn note_title_label(rel: &str) -> String {
+/// 文件显示标题：相对路径末段去掉扩展名（页面内标题、标题栏与改名初值同源——
+/// 改名输入框只给主名，后缀由提交时按原名补回）。
+pub fn file_label(rel: &str) -> String {
     let name = rel.rsplit('/').next().unwrap_or(rel);
-    name.strip_suffix(".md").unwrap_or(name).to_string()
+    atelyx_core::vault::file_stem(name).to_string()
 }
 
 /// note 视图：工具条（模式分段 + ···菜单）+ 对应档位的内容面。
@@ -3111,7 +3103,7 @@ thread_local! {
 /// 页面内标题：正文列顶部的文件名（去扩展名）；点击就地改名，重命名在途 = 原位输入框。
 fn page_title(app: &App, window: iced::window::Id) -> Element<'_, Message> {
     let rel = app.ui.last_note_file.clone().unwrap_or_default();
-    let title = note_title_label(&rel);
+    let title = file_label(&rel);
     let (renaming, value) = match &app.rename {
         Some(r) if r.from_title => (true, r.value.clone()),
         _ => (false, String::new()),
@@ -6272,7 +6264,7 @@ pub fn drop_zone_at(zone: &PanelZone, global: iced::Point) -> DropZone {
 
 #[cfg(test)]
 mod tests {
-    use super::{device_meta_line, merge_peers, note_title_label, truncate_to_width};
+    use super::{device_meta_line, merge_peers, file_label, truncate_to_width};
     use atelyx_core::collab::PeerInfo;
 
     /// 固定度量：每字符 1 单位（截断只按字符数收缩，与字体 shaping 解耦）。
@@ -6282,12 +6274,15 @@ mod tests {
 
     #[test]
     fn title_label_takes_file_stem() {
-        assert_eq!(note_title_label("a/b/笔记.md"), "笔记");
-        assert_eq!(note_title_label("笔记.md"), "笔记");
-        assert_eq!(note_title_label("a/b/v1.2.md"), "v1.2");
-        // 非 .md 与无扩展名按整名（标题即文件名，不猜扩展名）
-        assert_eq!(note_title_label("a/表.atb"), "表.atb");
-        assert_eq!(note_title_label("readme"), "readme");
+        assert_eq!(file_label("a/b/笔记.md"), "笔记");
+        assert_eq!(file_label("笔记.md"), "笔记");
+        assert_eq!(file_label("a/b/v1.2.md"), "v1.2");
+        // 各类文件一律去扩展名（重命名输入框与标题都只给主名）
+        assert_eq!(file_label("a/表.atb"), "表");
+        assert_eq!(file_label("a/画布.atlx"), "画布");
+        // 无扩展名与隐藏名按整名
+        assert_eq!(file_label("readme"), "readme");
+        assert_eq!(file_label("a/.env"), ".env");
     }
 
     #[test]

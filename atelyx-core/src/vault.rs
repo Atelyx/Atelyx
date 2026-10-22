@@ -712,7 +712,8 @@ pub fn same_physical_file(a: &Path, b: &Path) -> bool {
 pub struct CanvasPatch {
     /// 画布 id（防串文件守卫）。
     pub id: String,
-    /// 标题变化时更新（title 变更 = 同目录改文件名，写盘后返回新相对路径）。
+    /// 标题（线形状保留：合并端按此应用标题）。文件名是唯一真源，内容保存不携带——
+    /// 改名只走重命名端点，否则陈旧标题会把文件改回旧名。
     #[serde(default)]
     pub title: Option<String>,
     #[serde(default)]
@@ -731,7 +732,8 @@ pub struct CanvasPatch {
 pub struct TablePatch {
     /// 表格 id（防串文件守卫）。
     pub id: String,
-    /// 标题变化时更新（title 变更 = 同目录改文件名 + 同步画布 table 节点引用）。
+    /// 标题（线形状保留：合并端按此应用标题）。文件名是唯一真源，内容保存不携带——
+    /// 改名只走重命名端点，否则陈旧标题会把文件改回旧名。
     #[serde(default)]
     pub title: Option<String>,
     #[serde(default)]
@@ -801,20 +803,19 @@ pub fn compute_table_patch(baseline: &TableFile, current: &TableFile) -> Option<
         .collect();
     let field_order_changed = !same_id_sequence(&baseline.fields, &current.fields);
     let row_order_changed = !same_id_sequence(&baseline.rows, &current.rows);
-    let title = (baseline.title != current.title).then(|| current.title.clone());
     if upsert_fields.is_empty()
         && upsert_rows.is_empty()
         && removed_field_ids.is_empty()
         && removed_row_ids.is_empty()
         && !field_order_changed
         && !row_order_changed
-        && title.is_none()
     {
         return None;
     }
     Some(TablePatch {
         id: current.id.clone(),
-        title,
+        // 标题随文件名，不由内容补丁携带（见字段注释）
+        title: None,
         upsert_fields,
         removed_field_ids,
         upsert_rows,
@@ -912,18 +913,17 @@ pub fn compute_canvas_patch(baseline: &CanvasFile, current: &CanvasFile) -> Opti
         .filter(|e| !current_edge_ids.contains(e.id.as_str()))
         .map(|e| e.id.clone())
         .collect();
-    let title = (baseline.title != current.title).then(|| current.title.clone());
     if upsert_nodes.is_empty()
         && removed_node_ids.is_empty()
         && upsert_edges.is_empty()
         && removed_edge_ids.is_empty()
-        && title.is_none()
     {
         return None;
     }
     Some(CanvasPatch {
         id: current.id.clone(),
-        title,
+        // 标题随文件名，不由内容补丁携带（见字段注释）
+        title: None,
         upsert_nodes,
         removed_node_ids,
         upsert_edges,
@@ -2278,6 +2278,64 @@ pub fn sanitize_filename(title: &str) -> String {
     }
 }
 
+/// 文件名的扩展名（不含点；无扩展名与仅前导点的隐藏名返回 None）。
+pub fn file_extension(name: &str) -> Option<&str> {
+    match name.rfind('.') {
+        None | Some(0) => None,
+        Some(i) => Some(&name[i + 1..]),
+    }
+}
+
+/// 文件名的主名（去掉最后一个扩展名；无扩展名与隐藏名原样返回）。
+pub fn file_stem(name: &str) -> &str {
+    match file_extension(name) {
+        Some(ext) => &name[..name.len() - ext.len() - 1],
+        None => name,
+    }
+}
+
+/// 名称尾部若恰好是本文件的扩展名（忽略大小写）则剥掉：重命名输入框只显示主名，
+/// 用户补打后缀时不该落成 `名字.atb.atb`。
+pub fn strip_own_extension<'a>(name: &'a str, ext: &str) -> &'a str {
+    let suffix = ext.len() + 1;
+    if name.len() < suffix || !name.is_char_boundary(name.len() - suffix) {
+        return name;
+    }
+    let (head, tail) = name.split_at(name.len() - suffix);
+    (tail.starts_with('.') && tail[1..].eq_ignore_ascii_case(ext)).then_some(head).unwrap_or(name)
+}
+
+/// 重命名提交：输入的主名 → 新文件名。扩展名恒取原名（重命名不改类型），
+/// 输入尾部手打的同名后缀先剥掉。净化后为空返回 None。
+pub fn rename_file_name(input: &str, old_name: &str) -> Option<String> {
+    let input = input.trim();
+    match file_extension(old_name) {
+        Some(ext) => {
+            // 输入即当前主名 = 未改动，原样返回（主名本身以同后缀结尾的文件不会被顺手削一段）
+            if input == file_stem(old_name) {
+                return Some(old_name.to_string());
+            }
+            let stem = sanitize_filename(strip_own_extension(input, ext));
+            (!stem.is_empty()).then(|| format!("{stem}.{ext}"))
+        }
+        None => {
+            let name = sanitize_filename(input);
+            (!name.is_empty()).then_some(name)
+        }
+    }
+}
+
+/// 新建草稿名净化：与重命名同口径剥掉手打的同名后缀（新建表格输入「表.atb」不落成
+/// 「表.atb.atb」）。`ext` = 该类条目的扩展名（文件夹为 None）。净化后为空返回 None。
+pub fn draft_file_name(input: &str, ext: Option<&str>) -> Option<String> {
+    let input = input.trim();
+    let stem = sanitize_filename(match ext {
+        Some(ext) => strip_own_extension(input, ext),
+        None => input,
+    });
+    (!stem.is_empty()).then_some(stem)
+}
+
 /// Windows 保留设备名（不带扩展名时同样保留，如 `CON` / `CON.txt` 均非法）。
 fn is_windows_reserved_name(stem: &str) -> bool {
     let up = stem.to_ascii_uppercase();
@@ -2422,8 +2480,8 @@ pub fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// 重写目录内全部 `.atlx`/`.atb` 的 id 为新值（title 保持原样：副本文件名与原件不同、
-/// 内部标题与各自文件名仍一致）。读失败的文件视为损坏跳过（与画布扫描同策略）。
+/// 重写目录内全部 `.atlx`/`.atb` 的 id 为新值（目录副本不改文件名，内嵌标题本就与
+/// 各自文件名一致）。读失败的文件视为损坏跳过（与画布扫描同策略）。
 fn regenerate_ids_in(dir: &Path) -> Result<(), String> {
     for entry in std::fs::read_dir(dir).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
@@ -2437,19 +2495,27 @@ fn regenerate_ids_in(dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// 重写单个 `.atlx`/`.atb` 的 id 为新值（单文件复制副本防同 id 双文件歧义：
-/// 画布标签按 id 去重、协作合并按 id 身份；与 copy_folder 的 regenerate_ids_in 同语义）。
+/// 重写单个 `.atlx`/`.atb` 的 id 为新值，内嵌标题改为这份文件自己的主名
+/// （单文件副本换了文件名：留着原件的标题会让副本被当成原件改名，见 `title` 字段语义）。
+/// 防同 id 双文件歧义：画布标签按 id 去重、协作合并按 id 身份；
 /// 非这两种扩展名/读失败（损坏文件）原样保留，不阻断复制。
 pub fn regenerate_file_id(path: &Path) -> Result<(), String> {
     let ext = path.extension().and_then(|s| s.to_str());
+    let title = path.file_stem().and_then(|s| s.to_str()).map(str::to_string);
     if ext == Some("atlx") {
         if let Ok(mut canvas) = read_canvas_file(path) {
             canvas.id = nanoid!();
+            if let Some(title) = &title {
+                canvas.title = title.clone();
+            }
             write_canvas_file(path, &canvas)?;
         }
     } else if ext == Some("atb") {
         if let Ok(mut table) = read_table_file(path) {
             table.id = nanoid!();
+            if let Some(title) = &title {
+                table.title = title.clone();
+            }
             write_table_file(path, &table)?;
         }
     }
@@ -4202,6 +4268,43 @@ mod copy_folder_tests {
 }
 
 #[cfg(test)]
+mod duplicate_tests {
+    use super::test_support::TempDir;
+    use super::{read_table_file, regenerate_file_id, write_table_file, TableFile, TABLE_SCHEMA};
+
+    /// 单文件副本换了文件名：id 换新，内嵌标题改成副本自己的主名
+    /// （留着原件的标题会让副本被当成原件改名）。
+    #[test]
+    fn copy_takes_own_id_and_title() {
+        let root = TempDir::new("duplicate-title");
+        let src = root.join("动画分镜模板.atb");
+        write_table_file(
+            &src,
+            &TableFile {
+                schema: TABLE_SCHEMA.into(),
+                id: "tb-1".into(),
+                title: "动画分镜模板".into(),
+                fields: vec![],
+                rows: vec![],
+                created_at: 0,
+                updated_at: 0,
+            },
+        )
+        .unwrap();
+
+        let copy = root.join("动画分镜模板-2.atb");
+        std::fs::copy(&src, &copy).unwrap();
+        regenerate_file_id(&copy).unwrap();
+
+        let copied = read_table_file(&copy).unwrap();
+        assert_ne!(copied.id, "tb-1", "副本须换新 id");
+        assert_eq!(copied.title, "动画分镜模板-2", "内嵌标题取副本自己的主名");
+        // 原件不动
+        assert_eq!(read_table_file(&src).unwrap().title, "动画分镜模板");
+    }
+}
+
+#[cfg(test)]
 mod read_file_head_tests {
     use super::test_support::TempDir;
     use super::read_file_head;
@@ -4617,6 +4720,51 @@ mod sanitize_filename_tests {
 }
 
 #[cfg(test)]
+mod file_name_tests {
+    use super::{draft_file_name, file_extension, file_stem, rename_file_name};
+
+    #[test]
+    fn extension_and_stem_split_on_last_dot() {
+        assert_eq!(file_extension("笔记.md"), Some("md"));
+        assert_eq!(file_extension("v1.2.md"), Some("md"));
+        assert_eq!(file_extension("readme"), None);
+        // 仅前导点的隐藏名没有扩展名
+        assert_eq!(file_extension(".env"), None);
+        assert_eq!(file_stem("v1.2.md"), "v1.2");
+        assert_eq!(file_stem("表.atb"), "表");
+        assert_eq!(file_stem("readme"), "readme");
+        assert_eq!(file_stem(".env"), ".env");
+    }
+
+    /// 输入框只显示主名：手打的同名后缀先剥掉，后缀恒取原名（不改类型）。
+    #[test]
+    fn rename_keeps_original_extension() {
+        assert_eq!(rename_file_name("新名", "表.atb").as_deref(), Some("新名.atb"));
+        assert_eq!(rename_file_name("新名.atb", "表.atb").as_deref(), Some("新名.atb"));
+        assert_eq!(rename_file_name("新名.ATB", "表.atb").as_deref(), Some("新名.atb"));
+        // 别的后缀不剥（是主名的一部分）
+        assert_eq!(rename_file_name("新名.md", "表.atb").as_deref(), Some("新名.md.atb"));
+        // 无扩展名与隐藏名按原名改名
+        assert_eq!(rename_file_name("新名.md", "readme").as_deref(), Some("新名.md"));
+        assert_eq!(rename_file_name("新名", ".env").as_deref(), Some("新名"));
+        // 净化后为空 = 不提交
+        assert_eq!(rename_file_name("   ", "表.atb"), None);
+        assert_eq!(rename_file_name(".atb", "表.atb"), None);
+        // 未改动（输入即当前主名）= 原样返回：主名自带同后缀的双后缀文件不被削一段
+        assert_eq!(rename_file_name("表.md", "表.md.md").as_deref(), Some("表.md.md"));
+    }
+
+    #[test]
+    fn draft_name_strips_typed_extension() {
+        assert_eq!(draft_file_name("表", Some("atb")).as_deref(), Some("表"));
+        assert_eq!(draft_file_name("表.atb", Some("atb")).as_deref(), Some("表"));
+        assert_eq!(draft_file_name("笔记.md", Some("md")).as_deref(), Some("笔记"));
+        assert_eq!(draft_file_name("素材", None).as_deref(), Some("素材"));
+        assert_eq!(draft_file_name("  ", Some("md")), None);
+    }
+}
+
+#[cfg(test)]
 mod chat_session_meta_tests {
     use super::{ChatCompaction, ChatSessionMeta};
 
@@ -4865,16 +5013,11 @@ mod canvas_patch_tests {
     }
 
     #[test]
-    fn title_only_change_carries_no_entities() {
+    fn title_only_change_yields_no_patch() {
         let base = canvas("c", vec![node("n1", 0.0, 0.0)], vec![]);
         let mut next = base.clone();
         next.title = "新名".into();
-        let patch = compute_canvas_patch(&base, &next).expect("patch");
-        assert_eq!(patch.title.as_deref(), Some("新名"));
-        assert!(patch.upsert_nodes.is_empty());
-        assert!(patch.removed_node_ids.is_empty());
-        assert!(patch.upsert_edges.is_empty());
-        assert!(patch.removed_edge_ids.is_empty());
+        assert!(compute_canvas_patch(&base, &next).is_none());
     }
 
     #[test]
@@ -4922,7 +5065,6 @@ mod canvas_patch_tests {
         let mut next = base.clone();
         next.nodes[0].node_type = "conversation".into();
         next.nodes[0].data = serde_json::json!({ "bodyMd": "正文" });
-        next.title = "新名".into();
         let patch = compute_canvas_patch(&base, &next).expect("patch");
         let json = serde_json::to_string(&patch).expect("serialize");
         assert!(json.contains("\"type\""));
@@ -4932,6 +5074,5 @@ mod canvas_patch_tests {
         let mut disk = base.clone();
         apply_canvas_patch(&mut disk, &back);
         assert_eq!(disk.nodes, next.nodes);
-        assert_eq!(disk.title, next.title);
     }
 }

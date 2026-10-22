@@ -307,6 +307,8 @@ pub fn submit_canvas_save(app: &mut App, reason: SaveReason) -> Task<Message> {
                 if let Some(patch) = vault::compute_canvas_patch(&baseline, &frozen) {
                     vault::apply_canvas_patch(&mut disk, &patch);
                 }
+                // 内嵌标题随文件名（文件名是唯一真源；内容补丁不改名，此处按路径收取主名）
+                disk.title = crate::layout_view::file_label(&file);
                 disk.updated_at = crate::now_secs() as i64;
                 let json = serde_json::to_string_pretty(&disk).map_err(|e| e.to_string())?;
                 queue.write(path.clone(), json).await?;

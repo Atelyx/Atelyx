@@ -1575,6 +1575,51 @@ async fn table_patch_merge_order() {
 }
 
 #[tokio::test]
+async fn content_patch_never_renames_by_stale_title() {
+    // 文件内标题落后于文件名（改名只走重命名端点）：内容补丁必须落在请求路径上。
+    // 按陈旧标题推导路径会把已改名的文件漂回旧名，旧名被另一张表占用时保存永久 409。
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+    let space_id = setup_two_members(&ctx, "alice", "bob").await;
+    let a = login_as(&ctx, "alice").await;
+
+    let fields = json!([{ "id": "f1", "name": "名称", "type": "text" }]);
+    let rows = json!([{ "id": "r1", "values": { "f1": "任务一" } }]);
+    let file_url = format!("/api/spaces/{space_id}/file");
+    let patch_url = format!("/api/spaces/{space_id}/patches/table");
+
+    // 旧名由另一张表占用（id 不同）
+    let (status, _) = ctx
+        .put(
+            &file_url,
+            Some(&a),
+            json!({ "path": "表格/动画分镜模板.atb", "content": table_doc("tb-other", "动画分镜模板", fields.clone(), rows.clone()).to_string() }),
+        )
+        .await;
+    assert_eq!(status, 200);
+    // 已改名的文件：内部标题仍停在旧名
+    let file = "表格/分镜模板.atb";
+    let (status, _) = ctx
+        .put(
+            &file_url,
+            Some(&a),
+            json!({ "path": file, "content": table_doc("tb-1", "动画分镜模板", fields.clone(), rows.clone()).to_string() }),
+        )
+        .await;
+    assert_eq!(status, 200);
+
+    let patch = json!({ "id": "tb-1", "upsertRows": [{ "id": "r2", "values": { "f1": "任务二" } }] });
+    let (status, resp) = ctx.post(&patch_url, Some(&a), json!({ "path": file, "patch": patch })).await;
+    assert_eq!(status, 200, "内容补丁不得因陈旧标题报名冲突：{resp}");
+    assert_eq!(resp["file"], file, "内容补丁不改名：{resp}");
+    let doc = read_json(&ctx, &a, &space_id, file).await;
+    assert_eq!(doc["rows"].as_array().unwrap().len(), 2, "内容应落盘：{doc}");
+    assert_eq!(doc["title"], "分镜模板", "内嵌标题随文件名收口：{doc}");
+    let other = read_json(&ctx, &a, &space_id, "表格/动画分镜模板.atb").await;
+    assert_eq!(other["id"], "tb-other", "同名旧表应原样保留：{other}");
+}
+
+#[tokio::test]
 async fn rename_and_patch_concurrent_no_duplicate_files() {
     // 改名与补丁并发（多轮压测）：两者互斥（结构锁 + 双路径锁），旧路径不得被在途补丁的
     // 「检查→读→写」窗口原样重建——那会产生同 id 双文件（旧文件名复活）
@@ -1595,7 +1640,7 @@ async fn rename_and_patch_concurrent_no_duplicate_files() {
 
     // 多轮压测（竞态窗口极窄，确定性复现以客户端测试为准；本测试作回归守卫）
     for round in 0..30u32 {
-        // 文件名与内部 title 一致（仓库不变式，与修复后的客户端行为一致）
+        // 文件名与内部 title 一致：内容补丁不按标题推导路径，改名只走重命名端点
         let path_a = format!("表格/表{round}.atb");
         let path_b = format!("表格/表{round}改.atb");
         let (status, body) = ctx
@@ -1678,6 +1723,43 @@ async fn rename_same_path_is_noop_without_deadlock() {
         .post(&rename_url, Some(&a), json!({ "oldPath": "笔记/不存在.md", "newPath": "笔记/不存在.md" }))
         .await;
     assert_eq!(status, 404);
+}
+
+#[tokio::test]
+async fn rename_retitles_entity_file() {
+    // 改名换了主名：内嵌标题随文件名改写——标题落后于文件名时内容补丁会被当成改名意图，
+    // 把文件漂回旧名（旧名被占则永久名冲突）。目录改名不动文件名，标题不动。
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+    let space_id = setup_two_members(&ctx, "alice", "bob").await;
+    let a = login_as(&ctx, "alice").await;
+    let file_url = format!("/api/spaces/{space_id}/file");
+    let rename_url = format!("/api/spaces/{space_id}/rename");
+
+    let fields = json!([{ "id": "f1", "name": "名称", "type": "text" }]);
+    // 副本场景：文件内标题停在原件的名字
+    let (status, _) = ctx
+        .put(
+            &file_url,
+            Some(&a),
+            json!({ "path": "表格/动画分镜模板-2.atb", "content": table_doc("tb-2", "动画分镜模板", fields, json!([])).to_string() }),
+        )
+        .await;
+    assert_eq!(status, 200);
+
+    let (status, body) = ctx
+        .post(&rename_url, Some(&a), json!({ "oldPath": "表格/动画分镜模板-2.atb", "newPath": "表格/分镜模板.atb" }))
+        .await;
+    assert_eq!(status, 200, "改名应成功：{body}");
+    let doc = read_json(&ctx, &a, &space_id, "表格/分镜模板.atb").await;
+    assert_eq!(doc["title"], "分镜模板", "内嵌标题随新文件名：{doc}");
+    assert_eq!(doc["id"], "tb-2", "id 不随改名变化：{doc}");
+
+    // 目录改名：文件名未变，标题保持
+    let (status, _) = ctx.post(&rename_url, Some(&a), json!({ "oldPath": "表格", "newPath": "数据" })).await;
+    assert_eq!(status, 200);
+    let doc = read_json(&ctx, &a, &space_id, "数据/分镜模板.atb").await;
+    assert_eq!(doc["title"], "分镜模板", "目录改名不动内嵌标题：{doc}");
 }
 
 #[tokio::test]

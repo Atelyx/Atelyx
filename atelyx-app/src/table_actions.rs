@@ -533,7 +533,12 @@ fn on_msg_open(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
         }
         tv::TableMsg::ExportXlsxPick => {
             app.dismiss_popup();
-            let title = app.table.as_ref().map(|s| s.data.title.clone()).unwrap_or_default();
+            // 导出默认名取文件名主名：文件名是唯一真源，会话内嵌标题可能落后于改名
+            let title = app
+                .table
+                .as_ref()
+                .map(|s| crate::layout_view::file_label(&s.file))
+                .unwrap_or_default();
             Task::perform(
                 async move {
                     rfd::AsyncFileDialog::new()
@@ -739,6 +744,8 @@ pub fn submit_table_save(app: &mut App, reason: tv::SaveReason) -> Task<Message>
                 if let Some(patch) = vault::compute_table_patch(&baseline, &frozen) {
                     vault::apply_table_patch(&mut disk, &patch);
                 }
+                // 内嵌标题随文件名（文件名是唯一真源；内容补丁不改名，此处按路径收取主名）
+                disk.title = crate::layout_view::file_label(&file);
                 disk.updated_at = now_secs() as i64;
                 let json = serde_json::to_string_pretty(&disk).map_err(|e| e.to_string())?;
                 queue.write(path.clone(), json).await?;

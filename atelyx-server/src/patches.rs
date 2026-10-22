@@ -252,6 +252,36 @@ fn remove_replaced_file(old_path: &Path, new_path: &Path, kind: &str) -> Result<
     Ok(())
 }
 
+/// 单文件改名后把 `.atb`/`.atlx` 的内嵌标题改写为新主名：标题是文件名的冗余镜像，
+/// 落后于文件名时内容补丁会被当成改名意图（把文件漂回旧名）。非这两种扩展名、
+/// 读失败 / 损坏文件原样保留；改写失败只记日志，改名本身已落地、不因此回滚。
+pub(crate) fn retitle_after_rename(path: &Path) {
+    let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else { return };
+    match path.extension().and_then(|s| s.to_str()) {
+        Some("atb") => {
+            let Ok(mut table) = read_table_file(path) else { return };
+            if table.title == stem {
+                return;
+            }
+            table.title = stem.to_string();
+            if let Err(e) = write_table_file(path, &table) {
+                tracing::warn!(path = %path.display(), error = %e.1, "改名后同步表格内嵌标题失败");
+            }
+        }
+        Some("atlx") => {
+            let Ok(mut canvas) = read_canvas_file(path) else { return };
+            if canvas.title == stem {
+                return;
+            }
+            canvas.title = stem.to_string();
+            if let Err(e) = write_canvas_file(path, &canvas) {
+                tracing::warn!(path = %path.display(), error = %e.1, "改名后同步画布内嵌标题失败");
+            }
+        }
+        _ => {}
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CanvasPatchBody {
@@ -440,14 +470,30 @@ async fn patch_entity<E: serde::de::DeserializeOwned, P>(
             io.kind
         )));
     }
-    if let Some(title) = (io.patch_title)(&patch) {
+    // 落盘路径：只有补丁显式携带 title（改名意图）时才按标题推导新路径；内容补丁留在请求路径上。
+    // 否则文件里陈旧的标题会被每次保存当成改名意图，把已改名的文件漂回旧名（旧名被占则永久 409）。
+    let title_change = (io.patch_title)(&patch);
+    if let Some(title) = title_change {
         (io.set_title)(&mut entity, title.clone());
     }
-    let parent = path
-        .parent()
-        .ok_or_else(|| bad_request(&format!("非法路径：{}", body_path)))?;
-    let new_path = parent.join(format!("{}.{}", sanitize_filename((io.entity_title)(&entity)), io.ext));
-    let new_rel = rel_with_new_title(body_path, (io.entity_title)(&entity), io.ext);
+    let (new_path, new_rel) = match title_change {
+        Some(_) => {
+            let parent = path
+                .parent()
+                .ok_or_else(|| bad_request(&format!("非法路径：{}", body_path)))?;
+            (
+                parent.join(format!("{}.{}", sanitize_filename((io.entity_title)(&entity)), io.ext)),
+                rel_with_new_title(body_path, (io.entity_title)(&entity), io.ext),
+            )
+        }
+        None => {
+            // 内嵌标题随请求路径的文件名（文件名是唯一真源，改名只走重命名端点）
+            let stem = body_path.rsplit('/').next().unwrap_or(body_path);
+            let stem = stem.rsplit_once('.').map_or(stem, |(head, _)| head);
+            (io.set_title)(&mut entity, stem.to_string());
+            (path.to_path_buf(), body_path.to_string())
+        }
+    };
     // 漂移目标路径锁：目标路径上的并发 write_file（单路径锁，不进结构锁）可与本端点的
     // 「写新删旧」交错——不持锁时对方的整文件写会被随后的删旧静默吞掉。补丁与改名是仅有的
     // 双路径锁持有者且已被结构锁互斥，单锁持有方不会等待第二把锁，持一取二无死锁环。

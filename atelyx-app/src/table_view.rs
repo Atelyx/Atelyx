@@ -947,7 +947,8 @@ pub fn hit_at(g: &Geo, pos: Point) -> Hit {
         return Hit::VScrollbar;
     }
     let cy = g.content_y(pos.y);
-    if cy >= g.cache.content_h {
+    // 条带 = 内容最后一格；内容下方的空白区同样算新增行（滚到底时条带落在视口内）
+    if cy >= g.cache.content_h - NEW_ROW_H * g.z {
         // 行号列区段属覆盖层，新行条带从其右缘起（命中与绘制同口径）
         if pos.x < g.gutter_w() {
             return Hit::None;
@@ -1534,10 +1535,11 @@ fn draw_table(session: &TableSession, frame: &mut canvas::Frame, size: Size, hov
         }
     }
 
-    // 「+ 新行」（行号列区段属于 chrome 覆盖层，条带从行号列右缘起；超出行区视口 = 不可见）
-    let new_row_y = g.cache.content_h - view.scroll_y + g.header_h();
-    if new_row_y < g.rows_viewport_bottom() {
-        let nr = rect(g.gutter_w(), new_row_y, (g.total_w() - view.scroll_x - g.gutter_w()).max(0.0), NEW_ROW_H * g.z);
+    // 「+ 新行」= 内容最后一格（内容高度已含条带；可见性与行同口径按行区裁）
+    let strip_h = NEW_ROW_H * g.z;
+    let new_row_y = g.cache.content_h - strip_h - view.scroll_y + g.header_h();
+    if new_row_y + strip_h > g.header_h() && new_row_y < g.rows_bottom() {
+        let nr = rect(g.gutter_w(), new_row_y, (g.total_w() - view.scroll_x - g.gutter_w()).max(0.0), strip_h);
         let hovered = hover.is_some_and(|p| nr.contains(p));
         if hovered {
             frame.fill_rectangle(nr.position(), nr.size(), pal::HOVER);
@@ -3175,5 +3177,23 @@ mod tests {
         let ext = g.scroll_extent();
         assert!(ext.v_visible && ext.h_visible);
         assert_eq!(ext.max_y, 566.0 - 560.0);
+    }
+
+    /// 新行条带是内容最后一格：滚到最底时必须落在行区视口内并可命中
+    /// （条带落在内容高度之外时，滚到底恰好被推出视口 → 永远点不到）。
+    #[test]
+    fn new_row_strip_is_reachable_at_max_scroll() {
+        // content_h = 行高 + 条带（600 的最后 32 属于条带）
+        let mut s = extent_session(100.0, 600.0);
+        s.view.scroll_y = 64.0;
+        let g = geo(&s, Size::new(800.0, 600.0));
+        assert_eq!(g.max_scroll_y(), 64.0);
+        let strip_h = NEW_ROW_H * g.z;
+        let strip_top = g.cache.content_h - strip_h - s.view.scroll_y + g.header_h();
+        assert!(
+            strip_top + strip_h <= g.rows_viewport_bottom(),
+            "滚到底条带须在行区视口内"
+        );
+        assert!(matches!(hit_at(&g, Point::new(100.0, strip_top + strip_h / 2.0)), Hit::NewRow));
     }
 }

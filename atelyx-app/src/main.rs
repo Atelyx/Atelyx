@@ -812,6 +812,24 @@ pub enum DraftKind {
     Doc { extension: String, label: String },
 }
 
+impl DraftKind {
+    /// 该类条目的扩展名（文件夹为 None）。
+    fn extension(&self) -> Option<&str> {
+        match self {
+            DraftKind::Note => Some("md"),
+            DraftKind::Table => Some("atb"),
+            DraftKind::Canvas => Some("atlx"),
+            DraftKind::Doc { extension, .. } => Some(extension.as_str()),
+            DraftKind::Folder => None,
+        }
+    }
+}
+
+/// 草稿提交名净化：剥掉手打的同名后缀（新建表格输入「表.atb」不落成「表.atb.atb」）。
+fn draft_name(kind: &DraftKind, input: &str) -> Option<String> {
+    vault::draft_file_name(input, kind.extension())
+}
+
 /// 跨窗口标签/布局 tab 拖拽会话：源窗口只产生输入事件，落点由全局面板几何命中。
 struct DragSession {
     tab_id: String,
@@ -970,7 +988,7 @@ pub enum SpaceMsg {
         reason: SaveReason,
         result: Result<String, String>,
     },
-    /// 空间表格补丁回执（new_file = 服务端标题漂移后的实际路径）。
+    /// 空间表格补丁回执（new_file = 补丁落地后的实际路径；带 title 的补丁会改名）。
     TablePatchDone {
         gen: u64,
         file: String,
@@ -979,7 +997,7 @@ pub enum SpaceMsg {
         result: Result<String, String>,
         frozen: atelyx_core::vault::TableFile,
     },
-    /// 空间画布补丁回执（new_file = 服务端标题漂移后的实际路径）。
+    /// 空间画布补丁回执（new_file = 补丁落地后的实际路径；带 title 的补丁会改名）。
     CanvasPatchDone {
         gen: u64,
         file: String,
@@ -3550,10 +3568,10 @@ impl App {
             }
             Message::RenameStartFile(rel) => {
                 self.dismiss_popup();
-                // 笔记重命名初值去 .md 后缀（标题即文件名约定）
+                // 初值只给主名：后缀不进输入框（提交时按原名补回，见 rename_file_name）
                 self.rename = Some(self.rename_state(
                     RenameTarget::File(rel.clone()),
-                    layout_view::note_title_label(&rel),
+                    layout_view::file_label(&rel),
                 ));
                 rename_focus_task()
             }
@@ -3562,7 +3580,7 @@ impl App {
                 let Some(rel) = self.ui.last_note_file.clone() else { return Task::none() };
                 self.rename = Some(RenameState {
                     target: RenameTarget::File(rel.clone()),
-                    value: layout_view::note_title_label(&rel),
+                    value: layout_view::file_label(&rel),
                     window,
                     from_title: true,
                 });
@@ -3817,8 +3835,9 @@ impl App {
             }
             Message::DividerAdjust(horizontal, positive) => {
                 // 键盘调整上次拖动过的把手（±2%，双侧钳 12%）；
-                // 门控：编辑面聚焦 / 源码档 / 行内重命名在途时方向键属文本操作，不调把手
+                // 门控：编辑面聚焦 / 对话输入聚焦 / 源码档 / 行内重命名在途时方向键属文本操作，不调把手
                 if self.edit.focused
+                    || self.chat.input.focused
                     || self.note_mode == NoteMode::Source
                     || self.rename.is_some()
                     || self.popup.is_some()
@@ -5375,18 +5394,8 @@ impl App {
                         if let Some(s) = &mut self.table {
                             if s.file == *f || s.file.starts_with(&format!("{from}/")) {
                                 s.file = n.clone();
-                                // 表格内标题与文件名保持一致（新表以文件名起稿，改名随之同步）
-                                let stem = n
-                                    .rsplit('/')
-                                    .next()
-                                    .unwrap_or(n.as_str())
-                                    .strip_suffix(".atb")
-                                    .unwrap_or(n.as_str());
-                                if s.data.title != stem {
-                                    s.data.title = stem.to_string();
-                                    s.touch();
-                                    self.autosave_deadline = Some(Instant::now() + AUTOSAVE_DEBOUNCE);
-                                }
+                                // 会话内嵌标题跟随文件名（标题不由内容保存落盘，不置脏）
+                                s.data.title = layout_view::file_label(&n);
                             }
                         }
                         self.ui.last_table_file = Some(n);
@@ -5405,18 +5414,8 @@ impl App {
                         if let Some(s) = &mut self.canvas {
                             if s.file == *f || s.file.starts_with(&format!("{from}/")) {
                                 s.file = n.clone();
-                                // 画布内标题与文件名保持一致（空间服务端按 title 推导落盘路径）
-                                let stem = n
-                                    .rsplit('/')
-                                    .next()
-                                    .unwrap_or(n.as_str())
-                                    .strip_suffix(".atlx")
-                                    .unwrap_or(n.as_str());
-                                if s.data.title != stem {
-                                    s.data.title = stem.to_string();
-                                    s.touch();
-                                    self.autosave_deadline = Some(Instant::now() + AUTOSAVE_DEBOUNCE);
-                                }
+                                // 会话内嵌标题跟随文件名（标题不由内容保存落盘，不置脏）
+                                s.data.title = layout_view::file_label(&n);
                             }
                         }
                         self.ui.last_canvas_file = Some(n);
@@ -5530,10 +5529,7 @@ impl App {
     fn commit_file_rename(&mut self, r: RenameState) -> Task<Message> {
         if matches!(self.repo_kind, RepoKind::Space(_)) {
             if let RenameTarget::Draft { dir, kind } = &r.target {
-                let name = vault::sanitize_filename(r.value.trim());
-                if name.is_empty() {
-                    return Task::none();
-                }
+                let Some(name) = draft_name(kind, &r.value) else { return Task::none() };
                 return space_actions::space_create_entry(self, dir, kind.clone(), &name);
             }
             return space_actions::space_commit_rename(self, r);
@@ -5542,10 +5538,7 @@ impl App {
         let gen = self.epoch();
         match r.target {
             RenameTarget::Draft { dir, kind } => {
-                let name = vault::sanitize_filename(r.value.trim());
-                if name.is_empty() {
-                    return Task::none();
-                }
+                let Some(name) = draft_name(&kind, &r.value) else { return Task::none() };
                         // 新条目落 dir 内部：完成后刷新 dir 本身的子项缓存
                         let parent = dir.clone();
                         Task::perform(
@@ -5613,16 +5606,11 @@ impl App {
                         )
             }
             RenameTarget::File(old) => {
-                let title = vault::sanitize_filename(r.value.trim());
-                if title.is_empty() {
-                    return Task::none();
-                }
-                // 无扩展名文件（或仅前导点的隐藏名）按原名改名，不补扩展名
-                let new = match old.rfind('.') {
-                    Some(0) | None => title,
-                    Some(i) => format!("{title}.{}", &old[i + 1..]),
-                };
+                // 输入框只给主名：扩展名恒取原名（重命名不改类型），手打的同名后缀先剥掉
+                let old_name = old.rsplit('/').next().unwrap_or(&old);
+                let Some(new_name) = vault::rename_file_name(&r.value, old_name) else { return Task::none() };
                 let parent = parent_of(&old);
+                let new = full_rel(&parent, &new_name);
                 let parent_for_task = parent.clone();
                 let old_for_task = old.clone();
                 let new_for_task = new.clone();
@@ -6718,7 +6706,10 @@ impl App {
                 Subscription::none()
             },
             // 方向键：双链候选开启时导航候选，否则调整分割把手（语义在 NavKey 处理器分派）
-            // 表格专属键在弹层打开时也照发，由 on_msg 处理器按弹层态自守卫
+            // 表格专属键在弹层打开时也照发，由 on_msg 处理器按弹层态自守卫。
+            // 已被控件捕获的左右键（文本输入 / 编辑器光标）不再全局派发：输入框里的光标
+            // 移动不得连带调布局。上下键照发——候选高亮由本路径驱动，而编辑面同时吃掉
+            // 光标移动，捕获状态分不开这两种意图，改由 NavKey 处理器按输入态门控。
             iced::event::listen_with(|event, status, window| match event {
                 Event::Keyboard(keyboard::Event::ModifiersChanged(m)) => {
                     Some(Message::ModsChanged(m))
@@ -6727,12 +6718,16 @@ impl App {
                     key: keyboard::Key::Named(keyboard::key::Named::ArrowLeft),
                     modifiers,
                     ..
-                }) if modifiers.is_empty() => Some(Message::NavKey(true, false)),
+                }) if modifiers.is_empty() && status == iced::event::Status::Ignored => {
+                    Some(Message::NavKey(true, false))
+                }
                 Event::Keyboard(keyboard::Event::KeyPressed {
                     key: keyboard::Key::Named(keyboard::key::Named::ArrowRight),
                     modifiers,
                     ..
-                }) if modifiers.is_empty() => Some(Message::NavKey(true, true)),
+                }) if modifiers.is_empty() && status == iced::event::Status::Ignored => {
+                    Some(Message::NavKey(true, true))
+                }
                 Event::Keyboard(keyboard::Event::KeyPressed {
                     key: keyboard::Key::Named(keyboard::key::Named::ArrowUp),
                     modifiers,

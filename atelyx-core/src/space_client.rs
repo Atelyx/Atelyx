@@ -167,7 +167,7 @@ pub struct TreeNode {
 #[serde(rename_all = "camelCase")]
 pub struct PatchAck {
     pub updated_at: i64,
-    /// 标题漂移后的新相对路径（未改名 = 原路径）。
+    /// 补丁落地后的相对路径（补丁显式带 title 时按标题改名，否则即原路径）。
     pub file: String,
 }
 
@@ -647,7 +647,7 @@ impl SpaceClient {
         .await
     }
 
-    /// 表格增量补丁：服务端按稳定 id 合并、title 漂移算新路径；补丁 id 与文件 id 不符 → 400。
+    /// 表格增量补丁：服务端按稳定 id 合并（补丁显式带 title 时按标题改名）；补丁 id 与文件 id 不符 → 400。
     pub async fn table_patch(&self, space_id: &str, path: &str, patch: &TablePatch) -> Result<PatchAck, SpaceError> {
         self.post_json(
             &format!("/api/spaces/{space_id}/patches/table"),
@@ -656,7 +656,7 @@ impl SpaceClient {
         .await
     }
 
-    /// 画布增量补丁：服务端按稳定 id 合并、title 漂移算新路径；补丁 id 与文件 id 不符 → 400。
+    /// 画布增量补丁：服务端按稳定 id 合并（补丁显式带 title 时按标题改名）；补丁 id 与文件 id 不符 → 400。
     pub async fn canvas_patch(&self, space_id: &str, path: &str, patch: &CanvasPatch) -> Result<PatchAck, SpaceError> {
         self.post_json(
             &format!("/api/spaces/{space_id}/patches/canvas"),

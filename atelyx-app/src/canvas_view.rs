@@ -1549,7 +1549,8 @@ pub fn props_panel(app: &App) -> iced::Element<'static, Message> {
         }
         None => {
             let groups = session.data.nodes.iter().filter(|n| n.node_type == "group").count();
-            col = col.push(props_row("标题", session.data.title.clone()));
+            // 标题取文件名主名：文件名是唯一真源，内嵌标题可能落后于改名
+            col = col.push(props_row("标题", crate::layout_view::file_label(&session.file)));
             col = col.push(props_row("卡", format!("{}", session.data.nodes.len() - groups)));
             col = col.push(props_row("分组", groups.to_string()));
             col = col.push(props_row("连线", format!("{}", session.data.edges.len())));

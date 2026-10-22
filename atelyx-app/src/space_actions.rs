@@ -1730,10 +1730,11 @@ fn on_table_patch_done(
             return refresh_space_tree(app);
         }
         Ok(_) => {
-            // 标题漂移：服务端按 title 重算路径，本端跟随（会话与最近表路径）
+            // 补丁带 title 时服务端按标题改名：本端跟随路径与内嵌标题（会话与最近表路径）
             if new_file != file {
                 if let Some(s) = app.table.as_mut() {
                     s.file = new_file.clone();
+                    s.data.title = crate::layout_view::file_label(&new_file);
                 }
                 if app.ui.last_table_file.as_deref() == Some(file.as_str()) {
                     app.ui.last_table_file = Some(new_file.clone());
@@ -1973,10 +1974,11 @@ fn on_canvas_patch_done(
             return refresh_space_tree(app);
         }
         Ok(_) => {
-            // 标题漂移：服务端按 title 重算路径，本端跟随（会话与最近画布路径）
+            // 补丁带 title 时服务端按标题改名：本端跟随路径与内嵌标题（会话与最近画布路径）
             if new_file != file {
                 if let Some(s) = app.canvas.as_mut() {
                     s.file = new_file.clone();
+                    s.data.title = crate::layout_view::file_label(&new_file);
                 }
                 if app.ui.last_canvas_file.as_deref() == Some(file.as_str()) {
                     app.ui.last_canvas_file = Some(new_file.clone());
@@ -2534,15 +2536,9 @@ pub fn space_commit_rename(app: &mut App, r: RenameState) -> Task<Message> {
     let Some(session) = require_write(app) else { return Task::none() };
     let (old_rel, new_rel, _is_dir) = match &r.target {
         RenameTarget::File(old) => {
-            let title = vault::sanitize_filename(r.value.trim());
-            if title.is_empty() {
-                return Task::none();
-            }
-            // 无扩展名文件（或仅前导点）按原名改名，不补扩展名（与本地口径一致）
-            let new_name = match old.rfind('.') {
-                Some(0) | None => title,
-                Some(i) => format!("{title}.{}", &old[i + 1..]),
-            };
+            // 输入框只给主名：扩展名恒取原名（重命名不改类型），手打的同名后缀先剥掉
+            let old_name = old.rsplit('/').next().unwrap_or(old);
+            let Some(new_name) = vault::rename_file_name(&r.value, old_name) else { return Task::none() };
             let parent = parent_of(old);
             let new_rel = if parent.is_empty() { new_name } else { format!("{parent}/{new_name}") };
             (old.clone(), new_rel, false)
@@ -2680,11 +2676,14 @@ pub fn space_duplicate_entry(app: &mut App, rel: &str, is_dir: bool) -> Task<Mes
             }
             let new_rel = if parent.is_empty() { target.clone() } else { format!("{parent}/{target}") };
             client.copy_file(&space_id, &rel, &new_rel).await?;
-            // 服务端 copy 不重建实体 id：非目录副本读改写换新 id
+            // 服务端 copy 不重建实体 id：非目录副本读改写换新 id，内嵌标题改为副本自己的
+            // 主名（留着原件的标题会让副本被当成原件改名，撞上原件即名冲突）
             if !is_dir && (new_rel.ends_with(".atb") || new_rel.ends_with(".atlx")) {
                 if let Ok(text) = client.get_file_text(&space_id, &new_rel).await {
                     if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&text) {
                         value["id"] = serde_json::Value::String(atelyx_core::vault::new_entity_id());
+                        value["title"] =
+                            serde_json::Value::String(atelyx_core::vault::file_stem(&target).to_string());
                         let _ = client
                             .put_file_text(
                                 &space_id,
@@ -3360,32 +3359,20 @@ fn on_space_renamed(app: &mut App, old_path: &str, new_path: &str) -> Task<Messa
     if app.ui.last_table_file.as_deref() == Some(old_path) {
         app.ui.last_table_file = Some(new_path.to_string());
         app.schedule_persist();
+        // 会话路径与内嵌标题一并跟随：路径滞留旧路径让后续补丁打到不存在的文件，
+        // 标题滞留旧名则与文件名不一致（换名广播先于改名回执到达时，回执侧无从再跟）
         if let Some(s) = app.table.as_mut() {
             s.file = new_path.to_string();
+            s.data.title = crate::layout_view::file_label(new_path);
         }
     }
     if app.ui.last_canvas_file.as_deref() == Some(old_path) {
         app.ui.last_canvas_file = Some(new_path.to_string());
         app.schedule_persist();
-        // 会话路径与内嵌标题一并跟随：滞留旧路径让后续补丁打到不存在的文件；
-        // 标题落后于文件名则服务端下次保存按 title 推导路径，会把已改的名漂回旧名
-        let name = new_path.rsplit('/').next().unwrap_or(new_path);
-        let stem = name.strip_suffix(".atlx").unwrap_or(name);
-        let touched = match app.canvas.as_mut() {
-            Some(s) => {
-                s.file = new_path.to_string();
-                if s.data.title != stem {
-                    s.data.title = stem.to_string();
-                    s.touch();
-                    true
-                } else {
-                    false
-                }
-            }
-            None => false,
-        };
-        if touched {
-            app.autosave_deadline = Some(Instant::now() + crate::AUTOSAVE_DEBOUNCE);
+        // 同上：会话路径与内嵌标题一并跟随
+        if let Some(s) = app.canvas.as_mut() {
+            s.file = new_path.to_string();
+            s.data.title = crate::layout_view::file_label(new_path);
         }
     }
     collab_follow_rename(app, old_path, new_path);

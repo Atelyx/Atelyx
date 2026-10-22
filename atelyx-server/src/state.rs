@@ -363,10 +363,10 @@ impl ServerState {
         self.inner.path_locks.lock(&format!("{space_id}/{rel}")).await
     }
 
-    /// 空间级结构锁：补丁端点与改名端点都先取本锁再取路径锁。补丁按文件内 title 推导落盘
-    /// 路径，可能对请求路径之外的第二条路径写/删——与改名的双路径锁若各自按不同顺序两两取锁
+    /// 空间级结构锁：补丁端点与改名端点都先取本锁再取路径锁。补丁显式携带 title 时按标题
+    /// 推导落盘路径，可能对请求路径之外的第二条路径写/删——与改名的双路径锁若各自按不同顺序两两取锁
     /// 无法静态排出全局顺序（第二把锁的 key 要读了文件才知道），统一先串行到本锁上消解死锁，
-    /// 顺带把「补丁漂移」与「改名」完全互斥。持有时长为单请求处理窗口（毫秒级）。
+    /// 顺带把「补丁改名」与「改名」完全互斥。持有时长为单请求处理窗口（毫秒级）。
     pub(crate) async fn structure_lock(&self, space_id: &str) -> PathLockGuard {
         self.inner.structure_locks.lock(space_id).await
     }
