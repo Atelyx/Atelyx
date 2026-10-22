@@ -465,12 +465,18 @@ let peers = ctx.collab_peers().await?;      // connected / selfId / peers（不�
 let sent = ctx.collab_send("sync", payload, None).await?;   // None = 广播给全部对端
 if !sent.queued { /* 本机没连上空间 */ }
 ctx.collab_send("sync", payload, Some(&peers.peers[0].peer_id)).await?;   // 定向单播
+
+// 光标 / 选中这类随时被新状态覆盖的在场数据用瞬时档
+ctx.collab_send_ephemeral("cursor", payload, None).await?;
 ```
 
 - 通道名按插件命名空间隔离：宿主在投递时给通道加上发送方插件 id 前缀，收端只会拿到**同一插件的其他实例**发出的消息，`on_collab_message` 里的 `channel` 已去掉前缀。通道名非空、不含 `:`、不超过 64 字符。
 - `peerId` 取 `collab_peers()` 里的原值，不要自己拼或猜。未连接空间时 `peers` 为空、`connected = false`；`send` 回 `queued = false`（这是状态而非错误），`queued = true` 只表示已交本机连接发出，不代表对端收到。
 - **广播不会回到发送方自己**；自己那份要显示在自己的界面上，请本地回显。
-- 断线期间的广播由服务端短期缓存并在重连后补投（缓存有容量上限，超出后补不回来）；定向单播不缓存、不补投。把这条通道当「在线提示」用，需要可靠的共享请落在仓库内容上。
+- 两档投递（`collab_send` = 可靠档，`collab_send_ephemeral` = 瞬时档）：
+  - 可靠档：断线期间的广播由服务端短期缓存并在重连后补投（缓存有容量上限，超出后补不回来），适合内容类增量；定向单播不缓存、不补投。
+  - 瞬时档：不缓存、不补投、不占房间序号，延迟最低；对端断线期间发出的消息**不会**在重连后补达。把本端状态整份重发即可自愈——变化时发、空闲时按十几秒的节奏重发一次，对端据此判断你在场；对端消失后你那份状态会在半分钟内自然过期，不必发「离开」也能收敛。
+- 需要可靠的共享请落在仓库内容上，这两档都只适合在线协作期的状态同步。
 
 ## 9. 构建与打包
 

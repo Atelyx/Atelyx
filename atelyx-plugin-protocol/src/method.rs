@@ -1048,6 +1048,16 @@ pub struct CollabPeersResult {
     pub peers: Vec<CollabPeer>,
 }
 
+/// 协作消息投递语义。`reliable` = 广播帧按房间序号缓存、重连后可补投（内容类增量）；
+/// `ephemeral` = 不缓存、不补投、不占序号（光标 / 选中这类随时可被新状态覆盖的在场数据）。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CollabSendQos {
+    #[default]
+    Reliable,
+    Ephemeral,
+}
+
 /// [`collab::SEND`] 的 params：`channel` 为插件自定义的通道名（非空、不含 `:`、≤ 64 字符），
 /// 宿主在投递时加插件前缀；`payload` 任意 JSON。`targetPeerId` 取 [`CollabPeersResult`] 里的
 /// `peerId` 原值，缺省 = 广播给全部对端。
@@ -1058,6 +1068,9 @@ pub struct CollabSendParams {
     pub payload: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_peer_id: Option<String>,
+    /// 投递语义，缺省 = `reliable`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qos: Option<CollabSendQos>,
 }
 
 impl CollabSendParams {
@@ -1214,6 +1227,7 @@ mod tests {
             channel: "cursor".into(),
             payload: serde_json::json!({ "line": 3 }),
             target_peer_id: None,
+            qos: None,
         };
         assert!(ok.validate().is_ok());
         for bad in ["", "  ", "a:b", &"x".repeat(MAX_CHANNEL_CHARS + 1)] {
@@ -1221,9 +1235,30 @@ mod tests {
                 channel: bad.to_string(),
                 payload: serde_json::Value::Null,
                 target_peer_id: None,
+                qos: None,
             };
             assert!(params.validate().is_err(), "应拒绝通道：{bad}");
         }
+        // 投递档位缺省不落线（旧插件帧形状不变），显式档位按小驼峰编码
+        assert_eq!(
+            serde_json::to_value(&ok).unwrap(),
+            serde_json::json!({ "channel": "cursor", "payload": { "line": 3 } })
+        );
+        let ephemeral = CollabSendParams {
+            channel: "cursor".into(),
+            payload: serde_json::json!({ "line": 3 }),
+            target_peer_id: None,
+            qos: Some(CollabSendQos::Ephemeral),
+        };
+        assert_eq!(serde_json::to_value(&ephemeral).unwrap()["qos"], "ephemeral");
+        assert_eq!(
+            serde_json::from_value::<CollabSendParams>(
+                serde_json::json!({ "channel": "c", "payload": {}, "qos": "reliable" })
+            )
+            .unwrap()
+            .qos,
+            Some(CollabSendQos::Reliable)
+        );
         let peers = CollabPeersResult {
             connected: true,
             self_id: Some("p1".into()),

@@ -30,6 +30,8 @@ const SEND_TIMEOUT: Duration = Duration::from_secs(10);
 /// 连接建立超时（TCP + TLS + WS 握手）：对端 accept 后停滞时裸 connect 永不返回，
 /// 泵在 bye_pending 置位后会永久卡死无法终结。
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// 关闭握手回执等待上限：超时即断开（对端不回应答时不拖住收尾）。
+const CLOSE_ACK_TIMEOUT: Duration = Duration::from_millis(500);
 /// 插件帧缺口积压上限（条）：服务端补投缓存只留 128 条，积压逼近它就先要补投，
 /// 免等缺口被新帧挤出缓存窗口。
 const PLUGIN_PENDING_MAX: usize = 64;
@@ -75,6 +77,9 @@ pub enum SpaceCmd {
     /// 插件通用消息上行（频道由壳按插件命名空间拼好，载荷服务端不解析）。
     /// `target_peer_id` 缺省 = 广播房间内其他成员；定向单播为尽力而为、不经补投。
     PluginMsg { channel: String, payload: Value, target_peer_id: Option<u64> },
+    /// 通用瞬时通道上行（在场状态 / 光标类数据）：服务端不解析、不缓存、不补投。
+    /// `channel` 按命名空间隔离（宿主内置 `host.*`，插件 `<插件id>:<频道>`）。
+    Ephemeral { channel: String, payload: Value, target_peer_id: Option<u64> },
     /// 优雅断开（切空间前发）。泵收此命令即终结，不再产事件。
     Bye,
 }
@@ -113,6 +118,8 @@ pub enum SpaceEvent {
     FsChanged,
     /// 插件通用消息（广播帧已按房间序号去重补序，单播帧原样直达）。
     PluginMsg { peer_id: String, channel: String, payload: Value },
+    /// 通用瞬时通道（他人上行；本端自己发出的回声由发送方按 clientID 过滤）。
+    Ephemeral { peer_id: String, channel: String, payload: Value },
     /// 服务端提示本端消费过慢：需重新握手补齐状态。
     Resync,
     Error { message: String },
@@ -416,6 +423,7 @@ fn ws_targets(base_url: &str) -> Option<(String, String)> {
 async fn bye_once(base_url: &str, hello_text: &str) {
     if let Ok(mut ws) = establish(base_url).await {
         send_bye_frames(&mut ws, hello_text).await;
+        close_quiet(&mut ws).await;
     }
 }
 
@@ -457,6 +465,9 @@ async fn run_session(
                     close_quiet(&mut ws).await;
                     return SessionEnd::Bye;
                 }
+                // 瞬时状态不排队：断线期的旧状态在重连后逐帧重放只会让对端看到一串过期结果，
+                // 壳层重连后整份重发当前状态
+                Some(SpaceCmd::Ephemeral { .. }) if !ready => {}
                 Some(cmd) => {
                     if ready {
                         if !send_cmd(&mut ws, cmd).await {
@@ -580,7 +591,18 @@ async fn send_with_timeout(ws: &mut WsStream, msg: Message) -> Result<(), ()> {
 /// 主动断开前发 close 帧：直接 drop 只关 TCP（未读下行帧会让内核改发 RST），
 /// 服务端把「未走 close 握手的断开」统一报协议错误，掩盖真实断开原因。
 async fn close_quiet(ws: &mut WsStream) {
-    let _ = send_with_timeout(ws, Message::Close(None)).await;
+    if send_with_timeout(ws, Message::Close(None)).await.is_err() {
+        return;
+    }
+    // 等对端 Close 回执（限时）：发完即 drop 会让服务端在关闭握手中途读到 EOF
+    let _ = tokio::time::timeout(CLOSE_ACK_TIMEOUT, async {
+        while let Some(frame) = ws.next().await {
+            if frame.is_err() {
+                break;
+            }
+        }
+    })
+    .await;
 }
 
 /// 文本帧 → 事件：字段抽取与 base64 解码，业务匹配归壳层。
@@ -686,6 +708,16 @@ async fn handle_text_frame(
             let patch = frame.get("patch").cloned().unwrap_or(Value::Null);
             let landed = frame.get("landed").and_then(Value::as_bool).unwrap_or(false);
             deliver(events.send(SpaceEvent::TablePatch { peer_id, file, patch, landed }).await)
+        }
+        "ephemeral" => {
+            let (Some(peer_id), Some(channel)) = (
+                frame.get("peerId").and_then(peer_id_string),
+                str_field(&frame, "channel"),
+            ) else {
+                return FrameFlow::Continue;
+            };
+            let payload = frame.get("payload").cloned().unwrap_or(Value::Null);
+            deliver(events.send(SpaceEvent::Ephemeral { peer_id, channel, payload }).await)
         }
         "meta-changed" => {
             let Some(key) = str_field(&frame, "key") else {
@@ -831,6 +863,9 @@ async fn send_cmd(ws: &mut WsStream, cmd: SpaceCmd) -> bool {
         SpaceCmd::PluginMsg { channel, payload, target_peer_id } => {
             plugin_frame_text(&channel, payload, target_peer_id)
         }
+        SpaceCmd::Ephemeral { channel, payload, target_peer_id } => {
+            ephemeral_frame_text(&channel, payload, target_peer_id)
+        }
         SpaceCmd::Bye => return true,
     };
     send_with_timeout(ws, Message::text(text)).await.is_ok()
@@ -890,6 +925,18 @@ fn presence_frame_text(presence: Value) -> String {
     Value::Object(obj).to_string()
 }
 
+/// 瞬时通道上行：频道 + 任意 JSON 载荷；定向单播带数值 `targetPeerId`。
+fn ephemeral_frame_text(channel: &str, payload: Value, target_peer_id: Option<u64>) -> String {
+    let mut obj = Map::new();
+    obj.insert("type".to_string(), Value::from("ephemeral"));
+    obj.insert("channel".to_string(), Value::from(channel));
+    obj.insert("payload".to_string(), payload);
+    if let Some(target) = target_peer_id {
+        obj.insert("targetPeerId".to_string(), Value::from(target));
+    }
+    Value::Object(obj).to_string()
+}
+
 /// hello 首帧（camelCase；platform / version 缺省不下发）。
 fn hello_frame_text(hello: &HelloFrame) -> String {
     let mut obj = Map::new();
@@ -916,9 +963,14 @@ fn hello_frame_text(hello: &HelloFrame) -> String {
 /// （presence / awareness 新盖旧），无可腾才按序丢最旧。
 fn buffer_cmd(buf: &mut VecDeque<SpaceCmd>, cmd: SpaceCmd, cap: usize) {
     if buf.len() >= cap {
-        let evictable = buf
-            .iter()
-            .position(|c| matches!(c, SpaceCmd::Presence { .. } | SpaceCmd::NoteAware { .. }));
+        let evictable = buf.iter().position(|c| {
+            matches!(
+                c,
+                SpaceCmd::Presence { .. }
+                    | SpaceCmd::NoteAware { .. }
+                    | SpaceCmd::Ephemeral { .. }
+            )
+        });
         match evictable {
             Some(i) => {
                 buf.remove(i);
@@ -1176,11 +1228,45 @@ mod tests {
         server.await.unwrap();
     }
 
-    /// 下行帧映射：presence / WS 透传与服务端落地（带 landed）的 table-patch / meta-changed / renamed / resync。
+    /// 瞬时通道上行：频道与任意 JSON 载荷原样透传，定向单播带 targetPeerId（广播帧不携带）。
+    #[tokio::test]
+    async fn ephemeral_cmd_uplink_keeps_channel_and_payload() {
+        let (base, server) = spawn_handshake_server(|mut ws| async move {
+            let broadcast = read_json(&mut ws).await;
+            assert_eq!(broadcast["type"], "ephemeral");
+            assert_eq!(broadcast["channel"], "host.table");
+            assert_eq!(broadcast["payload"], json!({"clientId": 7, "clock": 2, "state": {"v": 1}}));
+            assert!(broadcast.get("targetPeerId").is_none());
+            let unicast = read_json(&mut ws).await;
+            assert_eq!(unicast["targetPeerId"], 4);
+        })
+        .await;
+        let (cmd_tx, mut events) = spawn_pump_with(&base, test_hello(), test_config());
+        assert!(matches!(recv_event(&mut events).await, SpaceEvent::Ready { .. }));
+        cmd_tx
+            .send(SpaceCmd::Ephemeral {
+                channel: "host.table".to_string(),
+                payload: json!({"clientId": 7, "clock": 2, "state": {"v": 1}}),
+                target_peer_id: None,
+            })
+            .unwrap();
+        cmd_tx
+            .send(SpaceCmd::Ephemeral {
+                channel: "host.table".to_string(),
+                payload: Value::Null,
+                target_peer_id: Some(4),
+            })
+            .unwrap();
+        server.await.unwrap();
+    }
+
+    /// 下行帧映射：presence / 瞬时通道 / WS 透传与服务端落地（带 landed）的 table-patch /
+    /// meta-changed / renamed / resync。
     #[tokio::test]
     async fn downstream_frames_map_to_events() {
         let (base, server) = spawn_handshake_server(|mut ws| async move {
             send_json(&mut ws, json!({"type": "presence", "peerId": 2, "presence": {"view": "table", "file": "t.atb"}})).await;
+            send_json(&mut ws, json!({"type": "ephemeral", "peerId": 3, "channel": "host.table", "payload": {"clientId": 7, "clock": 1, "state": null}})).await;
             send_json(&mut ws, json!({"type": "table-patch", "peerId": 2, "file": "t.atb", "patch": {"ops": 1}})).await;
             send_json(&mut ws, json!({"type": "table-patch", "peerId": 1, "file": "t.atb", "patch": {"ops": 2}, "landed": true})).await;
             send_json(&mut ws, json!({"type": "meta-changed", "key": "calendar"})).await;
@@ -1197,6 +1283,14 @@ mod tests {
             SpaceEvent::Presence {
                 peer_id: "2".to_string(),
                 presence: json!({"view": "table", "file": "t.atb"}),
+            }
+        );
+        assert_eq!(
+            recv_event(&mut events).await,
+            SpaceEvent::Ephemeral {
+                peer_id: "3".to_string(),
+                channel: "host.table".to_string(),
+                payload: json!({"clientId": 7, "clock": 1, "state": null}),
             }
         );
         assert_eq!(

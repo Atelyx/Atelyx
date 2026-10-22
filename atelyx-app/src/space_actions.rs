@@ -857,6 +857,8 @@ fn clear_session_state(app: &mut App) {
     app.rename_notice = None;
     app.table = None;
     app.canvas = None;
+    // 表格在场随容器切换作废（旧空间的通道身份不再有效；对端靠名册剔除与超时收尾）
+    app.table_collab = None;
     app.space_note_flushed = None;
     app.space_note_save_inflight = false;
     app.space_note_save_flush_queued = false;
@@ -2781,21 +2783,22 @@ fn send_cmd(app: &App, cmd: atelyx_core::collab::SpaceCmd) {
 pub(crate) const PLUGIN_CHANNEL_SEP: char = ':';
 
 /// 插件消息上行：通道在投递前加插件命名空间，同空间其他实例据此路由回本插件。
+/// `ephemeral` = 走瞬时通道（不缓存不补投），否则走可靠档插件消息通道。
 pub(crate) fn send_plugin_message(
     app: &App,
     plugin_id: &str,
     channel: &str,
     payload: serde_json::Value,
     target_peer_id: Option<u64>,
+    ephemeral: bool,
 ) {
-    send_cmd(
-        app,
-        atelyx_core::collab::SpaceCmd::PluginMsg {
-            channel: format!("{plugin_id}{PLUGIN_CHANNEL_SEP}{channel}"),
-            payload,
-            target_peer_id,
-        },
-    );
+    let channel = format!("{plugin_id}{PLUGIN_CHANNEL_SEP}{channel}");
+    let cmd = if ephemeral {
+        atelyx_core::collab::SpaceCmd::Ephemeral { channel, payload, target_peer_id }
+    } else {
+        atelyx_core::collab::SpaceCmd::PluginMsg { channel, payload, target_peer_id }
+    };
+    send_cmd(app, cmd);
 }
 
 /// note-sync 通道帧批量上行（帧 = 完整通道载荷，由 note_collab 产出）。
@@ -2900,8 +2903,8 @@ pub(crate) fn peer_open_files(presence: Option<&serde_json::Value>) -> Vec<Strin
         .unwrap_or_default()
 }
 
-/// 本端 awareness 身份 JSON（昵称 / 协作色；core `set_local_state` 外层再包 user 键，此处传裸对象）。
-fn local_user_json(app: &App) -> String {
+/// 本端协作身份（昵称 + 成员色）：笔记 awareness 与表格在场共用同一份身份。
+fn local_identity(app: &App) -> (String, String) {
     let name = app
         .global
         .last_identity
@@ -2909,6 +2912,17 @@ fn local_user_json(app: &App) -> String {
         .map(|i| i.display_name.clone())
         .unwrap_or_else(|| "用户".into());
     let color = app.global.collab_color.clone().unwrap_or_else(|| DEFAULT_COLLAB_COLOR.into());
+    (name, color)
+}
+
+/// 对端是否打开了指定文件（与 [`peer_open_files`] 同一口径：openFiles 优先，回退旧版单 file 字段）。
+pub(crate) fn peer_has_open_file(presence: Option<&serde_json::Value>, file: &str) -> bool {
+    peer_open_files(presence).iter().any(|f| f == file)
+}
+
+/// 本端 awareness 身份 JSON（昵称 / 协作色；core `set_local_state` 外层再包 user 键，此处传裸对象）。
+fn local_user_json(app: &App) -> String {
+    let (name, color) = local_identity(app);
     serde_json::json!({ "name": name, "color": color, "colorLight": format!("{color}33") })
         .to_string()
 }
@@ -2990,6 +3004,86 @@ pub(crate) fn awareness_flush(app: &mut App) {
         return;
     };
     send_awareness(app, &file, frame);
+}
+
+/// 表格在场同步：进入 / 切换 / 关闭与选区变化都从这里收口（事件与 tick 共用，幂等）。
+pub(crate) fn table_collab_sync(app: &mut App) {
+    let in_space = matches!(app.repo_kind, crate::RepoKind::Space(_));
+    // 高频路径（指针移动 / 滚动）无变化直接返回：避免每次消息都重建状态与比较
+    if app.space_connected && in_space {
+        if let (Some(session), Some(collab)) = (app.table.as_ref(), app.table_collab.as_ref()) {
+            if collab.file() == Some(session.file.as_str())
+                && collab.sent_selection() == session.view.selection.as_ref()
+            {
+                return;
+            }
+        }
+    }
+    let want = if in_space {
+        app.table
+            .as_ref()
+            .map(|s| (s.file.clone(), s.view.selection.clone()))
+    } else {
+        None
+    };
+    let Some((file, selection)) = want else {
+        // 离开表格 / 非空间容器：有在场记录就发离场帧
+        if let Some(mut collab) = app.table_collab.take() {
+            if let Some(frame) = collab.leave(Instant::now()) {
+                send_table_frame(app, frame);
+            }
+        }
+        return;
+    };
+    if !app.space_connected {
+        // 连接不可用：保留在场状态（重连后同一 clientID 整份重发覆盖），只清远端条目
+        if let Some(collab) = app.table_collab.as_mut() {
+            collab.clear_remotes();
+        }
+        return;
+    }
+    let now = Instant::now();
+    let (name, color) = local_identity(app);
+    let identity = crate::table_collab::Identity { name: &name, color: &color };
+    let collab = app
+        .table_collab
+        .get_or_insert_with(crate::table_collab::TableCollab::new);
+    if let Some(frame) = collab.update(now, &identity, &file, selection.as_ref()) {
+        send_table_frame(app, frame);
+    }
+}
+
+/// UiTick 搭载：远端超时剔除、限频补发、空闲保活（连接不可用时不发上行）。
+pub(crate) fn table_collab_tick(app: &mut App) {
+    table_collab_sync(app);
+    let connected = app.space_connected;
+    let now = Instant::now();
+    let mut frames = Vec::new();
+    if let Some(collab) = app.table_collab.as_mut() {
+        collab.refresh(now);
+        if let Some(frame) = collab.flush(now) {
+            frames.push(frame);
+        }
+        if connected {
+            if let Some(frame) = collab.keepalive_if_due(now) {
+                frames.push(frame);
+            }
+        }
+    }
+    for frame in frames {
+        send_table_frame(app, frame);
+    }
+}
+
+fn send_table_frame(app: &App, payload: serde_json::Value) {
+    send_cmd(
+        app,
+        atelyx_core::collab::SpaceCmd::Ephemeral {
+            channel: crate::table_collab::CHANNEL.to_string(),
+            payload,
+            target_peer_id: None,
+        },
+    );
 }
 
 /// 绑定当前打开笔记到协作文档（打开 / 重连后调用）：基线通告 + 握手 + 身份帧。
@@ -3137,6 +3231,28 @@ pub(crate) fn refresh_remote_cursors(app: &mut App) {
         .collect();
 }
 
+/// 插件通道消息转投（可靠档与瞬时档同形）：通道前缀由发送方宿主加，
+/// 拆不出命名空间或该插件不在跑即丢弃（消息不跨插件串道）。
+fn deliver_plugin_message(app: &App, peer_id: &str, channel: &str, payload: serde_json::Value) {
+    let Some((plugin_id, channel)) = channel.split_once(PLUGIN_CHANNEL_SEP) else {
+        return;
+    };
+    let peer_name = app
+        .space_peers
+        .iter()
+        .find(|peer| peer.peer_id == peer_id)
+        .map(|peer| peer.nickname.clone());
+    app.plugins.notify_collab_message(
+        plugin_id,
+        &atelyx_core::plugin_runtime::CollabMessageParams {
+            channel: channel.to_string(),
+            payload,
+            peer_id: peer_id.to_string(),
+            peer_name,
+        },
+    );
+}
+
 /// 帧泵事件分派。
 fn on_space_event(app: &mut App, event: atelyx_core::collab::SpaceEvent) -> Task<Message> {
     use atelyx_core::collab::SpaceEvent as E;
@@ -3146,6 +3262,12 @@ fn on_space_event(app: &mut App, event: atelyx_core::collab::SpaceEvent) -> Task
             app.space_connected = true;
             app.notify(NoticeLevel::Success, "协作已连接");
             collab_bind_note(app);
+            // 重连后表格身份帧与当前选区重发（对端旧条目将在超时后过期）
+            let now = std::time::Instant::now();
+            if let Some(frame) = app.table_collab.as_mut().and_then(|c| c.resend(now)) {
+                send_table_frame(app, frame);
+            }
+            table_collab_sync(app);
             Task::none()
         }
         E::Peers(list) => {
@@ -3169,6 +3291,11 @@ fn on_space_event(app: &mut App, event: atelyx_core::collab::SpaceEvent) -> Task
             }
             if dropped {
                 refresh_remote_cursors(app);
+            }
+            if let Some(collab) = app.table_collab.as_mut() {
+                for peer in &gone {
+                    collab.drop_peer(peer);
+                }
             }
             Task::none()
         }
@@ -3225,24 +3352,18 @@ fn on_space_event(app: &mut App, event: atelyx_core::collab::SpaceEvent) -> Task
             Task::none()
         }
         E::PluginMsg { peer_id, channel, payload } => {
-            // 通道前缀由发送方宿主加：拆不出来或该插件不在跑即丢弃（消息不跨插件串道）
-            let Some((plugin_id, channel)) = channel.split_once(PLUGIN_CHANNEL_SEP) else {
-                return Task::none();
-            };
-            let peer_name = app
-                .space_peers
-                .iter()
-                .find(|peer| peer.peer_id == peer_id)
-                .map(|peer| peer.nickname.clone());
-            app.plugins.notify_collab_message(
-                plugin_id,
-                &atelyx_core::plugin_runtime::CollabMessageParams {
-                    channel: channel.to_string(),
-                    payload,
-                    peer_id,
-                    peer_name,
-                },
-            );
+            deliver_plugin_message(app, &peer_id, &channel, payload);
+            Task::none()
+        }
+        E::Ephemeral { peer_id, channel, payload } => {
+            if channel == crate::table_collab::CHANNEL {
+                let now = std::time::Instant::now();
+                if let Some(collab) = app.table_collab.as_mut() {
+                    collab.apply(&peer_id, &payload, now);
+                }
+            } else {
+                deliver_plugin_message(app, &peer_id, &channel, payload);
+            }
             Task::none()
         }
         E::Error { message } => {
@@ -3258,11 +3379,17 @@ fn on_space_event(app: &mut App, event: atelyx_core::collab::SpaceEvent) -> Task
             app.space_pump_denied = true;
             app.space_cmds = None;
             app.space_connected = false;
+            if let Some(collab) = app.table_collab.as_mut() {
+                collab.clear_remotes();
+            }
             app.notify(NoticeLevel::Error, format!("协作：{message}"));
             Task::none()
         }
         E::Disconnected => {
             app.space_connected = false;
+            if let Some(collab) = app.table_collab.as_mut() {
+                collab.clear_remotes();
+            }
             app.notify(NoticeLevel::Warning, "协作连接断开，正在重连");
             Task::none()
         }
@@ -3530,5 +3657,12 @@ mod tests {
         let none = serde_json::json!({ "file": null, "view": null, "openFiles": [] });
         assert!(peer_open_files(Some(&none)).is_empty());
         assert!(peer_open_files(None).is_empty());
+
+        // 同文件判定：并排打开时表格不是主文件也必须命中
+        assert!(peer_has_open_file(Some(&multi), "t.atb"));
+        assert!(peer_has_open_file(Some(&multi), "a/n.md"));
+        assert!(!peer_has_open_file(Some(&multi), "other.atb"));
+        assert!(peer_has_open_file(Some(&legacy), "t.atb"));
+        assert!(!peer_has_open_file(None, "t.atb"));
     }
 }

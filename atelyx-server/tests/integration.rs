@@ -3281,3 +3281,78 @@ async fn ws_plugin_msg_binary_and_reliable_replay() {
     assert_eq!(live["seq"], 5, "缓存里 A 自己的帧不回放给 A");
     assert_eq!(live["peerId"], ack_re["peerId"]);
 }
+
+/// 瞬时通道：按房间转发（不含自己）、不占房间插件序号、支持定向单播；关闭握手有应答。
+#[tokio::test]
+async fn ws_ephemeral_forwarding_and_close_handshake() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+    let a_token = register(&ctx, "alice").await;
+    let (_, body) = ctx.post("/api/spaces", Some(&a_token), json!({ "name": "项目空间" })).await;
+    let space_id = body["spaceId"].as_str().unwrap().to_string();
+    let (_, invite) = ctx
+        .post(&format!("/api/spaces/{space_id}/invites"), Some(&a_token), json!({ "role": "editor" }))
+        .await;
+    let code = invite["code"].as_str().unwrap().to_string();
+    let b_token = register(&ctx, "bob").await;
+    ctx.post("/api/invites/accept", Some(&b_token), json!({ "code": code })).await;
+    let mut a = ws_connect(&ctx.base, "/ws/space", json!({ "type": "hello", "spaceId": space_id, "token": a_token, "nickname": "爱丽丝" })).await;
+    let ack = next_frame(&mut a).await;
+    let a_peer = ack["peerId"].as_u64().unwrap();
+    let mut b = ws_connect(&ctx.base, "/ws/space", json!({ "type": "hello", "spaceId": space_id, "token": b_token, "nickname": "鲍勃" })).await;
+    let ack_b = next_frame(&mut b).await;
+    let b_peer = ack_b["peerId"].as_u64().unwrap();
+
+    // 广播：B 收到转发帧（回填发送方 peerId），不带房间序号
+    a.send(Message::text(json!({
+        "type": "ephemeral", "channel": "host.table",
+        "payload": { "clientId": 7, "clock": 1, "state": { "v": 1 } },
+    }).to_string())).await.unwrap();
+    let got = next_frame_of(&mut b, "ephemeral").await;
+    assert_eq!(got["peerId"], a_peer);
+    assert_eq!(got["channel"], "host.table");
+    assert_eq!(got["payload"], json!({ "clientId": 7, "clock": 1, "state": { "v": 1 } }));
+    assert!(got.get("seq").is_none(), "瞬时帧不占房间序号");
+
+    // 不占序号：随后一条插件广播的序号仍是 1
+    a.send(Message::text(json!({ "type": "plugin-msg", "channel": "com.a:ch", "payload": { "n": 1 } }).to_string())).await.unwrap();
+    assert_eq!(next_frame_of(&mut b, "plugin-msg").await["seq"], 1);
+    assert_eq!(next_frame_of(&mut a, "plugin-msg-ack").await["seq"], 1);
+
+    // 定向单播：只到目标连接
+    a.send(Message::text(json!({
+        "type": "ephemeral", "channel": "host.table", "payload": { "clientId": 8 }, "targetPeerId": b_peer,
+    }).to_string())).await.unwrap();
+    let unicast = next_frame_of(&mut b, "ephemeral").await;
+    assert_eq!(unicast["peerId"], a_peer);
+    assert_eq!(unicast["payload"], json!({ "clientId": 8 }));
+
+    // 空通道名与超长通道名都不转发：随后一条合法帧作为分界，B 先收到的必须是它
+    a.send(Message::text(json!({ "type": "ephemeral", "channel": "", "payload": {} }).to_string())).await.unwrap();
+    a.send(Message::text(json!({
+        "type": "ephemeral", "channel": "h".repeat(257), "payload": {},
+    }).to_string())).await.unwrap();
+    a.send(Message::text(json!({
+        "type": "ephemeral", "channel": "host.table", "payload": { "clientId": 9 },
+    }).to_string())).await.unwrap();
+    let after = next_frame_of(&mut b, "ephemeral").await;
+    assert_eq!(after["payload"], json!({ "clientId": 9 }), "被拒的帧不得转发");
+
+    // 关闭握手：客户端发 Close，服务端必须回应答后断开（未回应答即 EOF 视为失败）
+    a.send(Message::Close(None)).await.unwrap();
+    loop {
+        let frame = tokio::time::timeout(Duration::from_secs(5), a.next())
+            .await
+            .expect("等待关闭应答超时");
+        match frame {
+            Some(Ok(Message::Close(_))) => break,
+            Some(Ok(Message::Text(text))) => {
+                let value: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+                assert_ne!(value["type"], "error", "正常关闭不应触发错误帧");
+            }
+            Some(Ok(_)) => continue,
+            Some(Err(e)) => panic!("关闭握手异常：{e}"),
+            None => panic!("服务端未回应 Close 就断开"),
+        }
+    }
+}

@@ -718,17 +718,10 @@ pub(crate) fn hit_offset(p: &ParagraphT, content: &str, point: Point) -> usize {
 
 /// 远端协作者光标竖条宽（比本端光标 1.5 略宽，便于区分归属）。
 const REMOTE_CARET_W: f32 = 2.0;
-/// 远端选区色块透明度：压在正文上仍可读。
-const REMOTE_SELECTION_ALPHA: f32 = 0.18;
-/// 名签内边距、圆角与名签底边到光标条顶端的间距。
-const REMOTE_TAG_PAD_X: f32 = 4.0;
-const REMOTE_TAG_PAD_Y: f32 = 2.0;
-const REMOTE_TAG_RADIUS: f32 = 3.0;
-const REMOTE_TAG_GAP: f32 = 1.0;
 
 /// 名签占用的纵向空间（胶囊高 + 与光标条的间距）：光标绘制裁切框按此向上外扩。
 fn remote_tag_height() -> f32 {
-    pal::fs_micro() + REMOTE_TAG_PAD_Y * 2.0 + REMOTE_TAG_GAP
+    pal::fs_micro() + pal::REMOTE_TAG_PAD_Y * 2.0 + pal::REMOTE_TAG_GAP
 }
 
 /// 光标绘制裁切框：向上外扩出名签高度，名签浮在行上方不会被行边界裁掉。
@@ -740,15 +733,6 @@ fn remote_clip(bounds: Rectangle) -> Rectangle {
     )
 }
 
-/// 名签文字色：按胶囊底色亮度取白 / 近黑（浅色成员色上白字不可读）。
-fn remote_tag_text_color(bg: Color) -> Color {
-    if 0.299 * bg.r + 0.587 * bg.g + 0.114 * bg.b > 0.6 {
-        Color::from_rgb8(0x1a, 0x1a, 0x1a)
-    } else {
-        Color::WHITE
-    }
-}
-
 /// 远端选区色块（成员色低透明）：`rects` 为行内局部矩形，`origin` 为行左缘。
 fn draw_remote_selection(
     renderer: &mut iced::Renderer,
@@ -756,7 +740,7 @@ fn draw_remote_selection(
     origin: Point,
     color: Color,
 ) {
-    let tint = color.scale_alpha(REMOTE_SELECTION_ALPHA);
+    let tint = color.scale_alpha(pal::REMOTE_MARK_ALPHA);
     for r in rects {
         renderer.fill_quad(
             Quad {
@@ -790,9 +774,9 @@ fn draw_remote_caret(
     if name.is_empty() {
         return;
     }
-    let tag_h = pal::fs_micro() + REMOTE_TAG_PAD_Y * 2.0;
-    let tag_w = measured_text_width(name, pal::fs_micro(), 1.0, bold()) + REMOTE_TAG_PAD_X * 2.0;
-    let tag_y = top - tag_h - REMOTE_TAG_GAP;
+    let tag_h = pal::fs_micro() + pal::REMOTE_TAG_PAD_Y * 2.0;
+    let tag_w = measured_text_width(name, pal::fs_micro(), 1.0, bold()) + pal::REMOTE_TAG_PAD_X * 2.0;
+    let tag_y = top - tag_h - pal::REMOTE_TAG_GAP;
     let tag_x = if x + tag_w > clip.x + clip.width {
         (x - tag_w).max(clip.x)
     } else {
@@ -801,7 +785,7 @@ fn draw_remote_caret(
     renderer.fill_quad(
         Quad {
             bounds: Rectangle::new(Point::new(tag_x, tag_y), Size::new(tag_w, tag_h)),
-            border: iced::border::rounded(REMOTE_TAG_RADIUS),
+            border: iced::border::rounded(pal::REMOTE_TAG_RADIUS),
             ..Quad::default()
         },
         color,
@@ -818,8 +802,8 @@ fn draw_remote_caret(
             shaping: advanced_text::Shaping::Auto,
             wrapping: advanced_text::Wrapping::None,
         },
-        Point::new(tag_x + REMOTE_TAG_PAD_X, tag_y + REMOTE_TAG_PAD_Y),
-        remote_tag_text_color(color),
+        Point::new(tag_x + pal::REMOTE_TAG_PAD_X, tag_y + pal::REMOTE_TAG_PAD_Y),
+        pal::text_on(color),
         clip,
     );
 }
@@ -1774,7 +1758,7 @@ impl<'a> EditSurface<'a> {
                     if whole {
                         renderer.fill_quad(
                             Quad { bounds, ..Quad::default() },
-                            color.scale_alpha(REMOTE_SELECTION_ALPHA),
+                            color.scale_alpha(pal::REMOTE_MARK_ALPHA),
                         );
                     }
                     if (hi > lo && !whole) || caret_here {
@@ -1810,7 +1794,7 @@ impl<'a> EditSurface<'a> {
                             // 图片 / 表格等无逐字映射的行：整行轻染，至少标明有选区经过
                             None if hi > lo => renderer.fill_quad(
                                 Quad { bounds, ..Quad::default() },
-                                color.scale_alpha(REMOTE_SELECTION_ALPHA / 2.0),
+                                color.scale_alpha(pal::REMOTE_MARK_ALPHA / 2.0),
                             ),
                             None => {}
                         }
@@ -1829,7 +1813,7 @@ impl<'a> EditSurface<'a> {
                                 ),
                                 ..Quad::default()
                             },
-                            color.scale_alpha(REMOTE_SELECTION_ALPHA),
+                            color.scale_alpha(pal::REMOTE_MARK_ALPHA),
                         );
                     }
                     // 光标：行区间半开认领（端点归后一行，正文末尾归末行），空行行与块行

@@ -7,6 +7,7 @@ pub mod ai;
 pub mod collab;
 pub mod credentials;
 pub mod calendar;
+pub mod ephemeral;
 pub mod filesearch;
 pub mod frontmatter;
 pub mod global_config;

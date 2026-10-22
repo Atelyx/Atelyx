@@ -118,6 +118,9 @@ pub const HSCROLLBAR_H: f32 = 8.0;
 /// 竖向滚动条宽度（px；贴表格区右缘）。
 pub const VSCROLLBAR_W: f32 = 8.0;
 
+/// 远端选区描边宽度（px，随缩放）。
+const REMOTE_BORDER_W: f32 = 1.5;
+
 // ===== 会话状态 =====
 
 /// 打开的表格会话（数据 + 保存基线 + 视图态）。
@@ -1262,6 +1265,8 @@ pub fn image_layout_of(cell: Rectangle, v: &serde_json::Value, zoom: f32, curren
 pub struct TableView<'a> {
     pub session: &'a TableSession,
     pub window: iced::window::Id,
+    /// 远端协作者选区（App 侧在场状态解析后的只读快照）。
+    pub remote: &'a [crate::table_collab::RemoteSelection],
 }
 
 impl canvas::Program<Message> for TableView<'_> {
@@ -1333,7 +1338,13 @@ impl canvas::Program<Message> for TableView<'_> {
     ) -> Vec<canvas::Geometry> {
         let mut frame = canvas::Frame::new(renderer, bounds.size());
         pin_visible_thumbs(self.session, renderer, bounds.size());
-        draw_table(self.session, &mut frame, bounds.size(), cursor.position_in(bounds));
+        draw_table(
+            self.session,
+            &mut frame,
+            bounds.size(),
+            cursor.position_in(bounds),
+            self.remote,
+        );
         vec![frame.into_geometry()]
     }
 
@@ -1457,7 +1468,13 @@ fn pin_visible_thumbs(session: &TableSession, renderer: &iced::Renderer, size: S
     }
 }
 
-fn draw_table(session: &TableSession, frame: &mut canvas::Frame, size: Size, hover: Option<Point>) {
+fn draw_table(
+    session: &TableSession,
+    frame: &mut canvas::Frame,
+    size: Size,
+    hover: Option<Point>,
+    remote: &[crate::table_collab::RemoteSelection],
+) {
     let g = geo(session, size);
     let view = &session.view;
     let data = &session.data;
@@ -1468,6 +1485,7 @@ fn draw_table(session: &TableSession, frame: &mut canvas::Frame, size: Size, hov
     frame.fill_rectangle(Point::ORIGIN, Size::new(w, h), pal::BG_PRIMARY);
 
     let region = table_ops::region_of(view.selection.as_ref(), &data.fields, &data.rows);
+    let remote_regions = remote_regions_of(data, remote);
 
     // 行 / 列选中淡底
     match &view.selection {
@@ -1516,6 +1534,16 @@ fn draw_table(session: &TableSession, frame: &mut canvas::Frame, size: Size, hov
             if let Some(bg) = st.bg.as_deref().and_then(parse_hex) {
                 frame.fill_rectangle(cell.position(), cell.size(), bg);
             }
+            // 远端选区淡底：画在格底色之后、内容之前（不压暗文字，也不被自定义底色盖住）
+            for (region, color, _) in &remote_regions {
+                if region.contains(r, c) {
+                    frame.fill_rectangle(
+                        cell.position(),
+                        cell.size(),
+                        color.scale_alpha(pal::REMOTE_MARK_ALPHA),
+                    );
+                }
+            }
             draw_cell_content(session, &g, frame, r, c, cell, row, field, &st, hover);
             frame.fill_rectangle(Point::new(x + g.cache.col_w[c] - 1.0, y), Size::new(1.0, rh), pal::BORDER_SUBTLE);
         }
@@ -1557,6 +1585,9 @@ fn draw_table(session: &TableSession, frame: &mut canvas::Frame, size: Size, hov
 
     // 表头 / 状态栏 / 滚动条在 chrome 覆盖层绘制（draw_chrome）
 
+    // 远端协作者选区（描边 + 名签）：本机选中框最后画，压过远端描边
+    draw_remote_outlines(&g, frame, &remote_regions);
+
     // 选中框描边（2px 强调色贴格内缘，编辑态边框同用此框）
     if let Some(region) = region {
         let x0 = g.cache.col_x[region.col_start] - view.scroll_x + g.gutter_w();
@@ -1581,6 +1612,110 @@ fn draw_table(session: &TableSession, frame: &mut canvas::Frame, size: Size, hov
             frame.fill_rectangle(Point::new(g.gutter_w(), y - 1.0), Size::new(w - g.gutter_w(), 2.0), pal::ACCENT);
         }
     }
+}
+
+/// 远端选区 → 行列区域（行 / 字段 id 已失效的条目跳过：对端删行后自然不画）。
+fn remote_regions_of<'a>(
+    data: &TableFile,
+    remote: &'a [crate::table_collab::RemoteSelection],
+) -> Vec<(table_ops::Region, Color, &'a str)> {
+    remote
+        .iter()
+        .filter_map(|entry| {
+            table_ops::region_of(Some(&entry.selection), &data.fields, &data.rows)
+                .map(|region| (region, entry.color, entry.name.as_str()))
+        })
+        .collect()
+}
+
+/// 远端选区描边与名签（画在内容之上、本机选中框之下）：区域裁到可视内容区，
+/// 名签贴选区左上角外侧，放不下时落到格内；多人同角落时依次下移一档。
+fn draw_remote_outlines(
+    g: &Geo,
+    frame: &mut canvas::Frame,
+    regions: &[(table_ops::Region, Color, &str)],
+) {
+    if regions.is_empty() {
+        return;
+    }
+    let view = &g.session.view;
+    let top = g.header_h();
+    // 底界用行区视口（滚动条占位时已上收）：否则选区下边框会被滚动条轨道盖掉
+    let bottom = g.rows_viewport_bottom();
+    let left = g.gutter_w();
+    let right = g.cols_viewport_right().min(g.width);
+    let bw = REMOTE_BORDER_W * g.z;
+    let mut placed: Vec<Rectangle> = Vec::new();
+    for (region, color, name) in regions {
+        let x0 = g.cache.col_x[region.col_start] - view.scroll_x + left;
+        let x1 =
+            g.cache.col_x[region.col_end] + g.cache.col_w[region.col_end] - view.scroll_x + left;
+        let y0 = g.cache.row_y[region.row_start] - view.scroll_y + top;
+        let y1 = g.cache.row_y[region.row_end] + g.cache.row_h[region.row_end] - view.scroll_y + top;
+        if x1 <= left || x0 >= right || y1 <= top || y0 >= bottom {
+            continue;
+        }
+        let (bx0, bx1) = (x0.max(left), x1.min(right));
+        let (by0, by1) = (y0.max(top), y1.min(bottom));
+        for line in [
+            rect(bx0, by0, bx1 - bx0, bw),
+            rect(bx0, by1 - bw, bx1 - bx0, bw),
+            rect(bx0, by0, bw, by1 - by0),
+            rect(bx1 - bw, by0, bw, by1 - by0),
+        ] {
+            frame.fill_rectangle(line.position(), line.size(), *color);
+        }
+        draw_remote_tag(frame, &mut placed, bx0, by0, name, *color, top, bottom, right);
+    }
+}
+
+fn draw_remote_tag(
+    frame: &mut canvas::Frame,
+    placed: &mut Vec<Rectangle>,
+    x: f32,
+    y: f32,
+    name: &str,
+    color: Color,
+    top: f32,
+    bottom: f32,
+    right: f32,
+) {
+    if name.is_empty() {
+        return;
+    }
+    let size = pal::fs_micro();
+    let label = ellipsize_text(name, pal::REMOTE_TAG_MAX_W, size);
+    let tag_w = text_width(&label, size) + pal::REMOTE_TAG_PAD_X * 2.0;
+    let tag_h = size + pal::REMOTE_TAG_PAD_Y * 2.0;
+    let tag_x = (x + 2.0).min(right - tag_w).max(0.0);
+    let mut tag_y = y - tag_h - pal::REMOTE_TAG_GAP;
+    if tag_y < top {
+        tag_y = y + 2.0;
+    }
+    for _ in 0..4 {
+        let candidate = rect(tag_x, tag_y, tag_w, tag_h);
+        if !placed.iter().any(|p| p.intersects(&candidate)) {
+            break;
+        }
+        tag_y += tag_h + pal::REMOTE_TAG_GAP;
+    }
+    if tag_y + tag_h > bottom {
+        return;
+    }
+    let tag = rect(tag_x, tag_y, tag_w, tag_h);
+    frame.fill(
+        &Path::rounded_rectangle(tag.position(), tag.size(), pal::REMOTE_TAG_RADIUS.into()),
+        color,
+    );
+    fill_text(
+        frame,
+        &label,
+        Point::new(tag_x + pal::REMOTE_TAG_PAD_X, tag_y + pal::REMOTE_TAG_PAD_Y),
+        size,
+        crate::ui::bold(),
+        pal::text_on(color),
+    );
+    placed.push(tag);
 }
 
 fn insert_line_y(g: &Geo, at: usize) -> f32 {
@@ -2105,7 +2240,12 @@ pub fn table_view<'a>(app: &'a crate::App, window: iced::window::Id) -> Element<
         .into();
     }
 
-    let canvas: Element<Message> = TableView { session, window }.into();
+    let remote = app
+        .table_collab
+        .as_ref()
+        .map(|collab| collab.remote())
+        .unwrap_or(&[]);
+    let canvas: Element<Message> = TableView { session, window, remote }.into();
     let chrome: Element<Message> = TableChrome { session }.into();
     let mut stack = iced::widget::Stack::new().push(canvas).push(chrome);
     if let Some(overlay) = editor_overlay(session) {
@@ -2128,19 +2268,15 @@ pub fn table_view<'a>(app: &'a crate::App, window: iced::window::Id) -> Element<
     root.width(Length::Fill).height(Length::Fill).into()
 }
 
-/// 在场协作者：名册里 presence.file 指向当前表格的空间成员（颜色 + 昵称）。
+/// 在场协作者：名册里打开了当前表格的空间成员（颜色 + 昵称）。
+/// 判据用打开文件集合（`openFiles`）：表格常与笔记并排打开，只看主打开文件会漏人。
 fn collab_members(app: &crate::App, session: &TableSession) -> Vec<(iced::Color, String)> {
     if !matches!(app.repo_kind, crate::RepoKind::Space(_)) {
         return Vec::new();
     }
     app.space_peers
         .iter()
-        .filter(|p| {
-            p.presence
-                .as_ref()
-                .and_then(|pr| pr.get("file").and_then(|f| f.as_str()))
-                .is_some_and(|f| f == session.file)
-        })
+        .filter(|p| crate::space_actions::peer_has_open_file(p.presence.as_ref(), &session.file))
         .map(|p| (crate::layout_view::parse_hex_color(&p.color).unwrap_or(pal::TEXT_MUTED), p.nickname.clone()))
         .collect()
 }

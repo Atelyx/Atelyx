@@ -21,6 +21,13 @@ use crate::ui::notify::Level as NoticeLevel;
 const HISTORY_COALESCE_MS: i64 = 60_000;
 
 pub fn on_msg(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
+    let task = dispatch(app, msg);
+    // 选区可能已变（点选 / 拖选 / 键盘 / 行头列头 / 回滚清空）：全部消息的唯一收口
+    space_actions::table_collab_sync(app);
+    task
+}
+
+fn dispatch(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
     if let tv::TableMsg::Menu(inner) = msg {
         // 菜单条目来源：先关弹层再执行。菜单按压非画布按压，同批全局 Press 会按失焦处理——
         // 置 press_seen 抵消（表格保持聚焦），并回置 focused 供 table_active 守卫通过：
@@ -710,6 +717,8 @@ pub fn apply_history_snapshot(app: &mut App, table: TableFile) -> bool {
     s.version += 1;
     s.rebuild_layout();
     clamp_scroll(s);
+    // 回滚清空了选区：协作者据此撤销远端高亮
+    space_actions::table_collab_sync(app);
     true
 }
 

@@ -902,6 +902,11 @@
       "value": { "channel": "chat", "payload": "hi", "targetPeerId": "2" }
     },
     {
+      "name": "collab.send params (ephemeral)",
+      "type": "CollabSendParams",
+      "value": { "channel": "cursor", "payload": { "line": 9 }, "qos": "ephemeral" }
+    },
+    {
       "name": "collab.send result",
       "type": "CollabSendResult",
       "value": { "queued": true }

@@ -567,7 +567,7 @@ impl Context {
         self.call_null(method::collab::PEERS).await
     }
 
-    /// 向同空间对等插件发消息：`target_peer_id` 缺省 = 广播给全部对端。
+    /// 向同空间对等插件发消息（可靠档：广播帧可补投）：`target_peer_id` 缺省 = 广播给全部对端。
     /// `queued` = 已交本机连接发出（不代表送达）；未连接空间时 `queued = false`。
     pub async fn collab_send(
         &self,
@@ -575,10 +575,33 @@ impl Context {
         payload: Value,
         target_peer_id: Option<&str>,
     ) -> Result<CollabSendResult, RpcError> {
+        self.collab_send_with(channel, payload, target_peer_id, None).await
+    }
+
+    /// 瞬时档：不缓存、不补投、不占房间序号，适合光标 / 选中这类随时被新状态覆盖的在场数据。
+    /// 对端断开期间发出的消息不会在重连后补达。
+    pub async fn collab_send_ephemeral(
+        &self,
+        channel: &str,
+        payload: Value,
+        target_peer_id: Option<&str>,
+    ) -> Result<CollabSendResult, RpcError> {
+        self.collab_send_with(channel, payload, target_peer_id, Some(CollabSendQos::Ephemeral))
+            .await
+    }
+
+    async fn collab_send_with(
+        &self,
+        channel: &str,
+        payload: Value,
+        target_peer_id: Option<&str>,
+        qos: Option<CollabSendQos>,
+    ) -> Result<CollabSendResult, RpcError> {
         let params = CollabSendParams {
             channel: channel.into(),
             payload,
             target_peer_id: target_peer_id.map(Into::into),
+            qos,
         };
         self.call_typed(method::collab::SEND, &params).await
     }

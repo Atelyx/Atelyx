@@ -2324,6 +2324,18 @@ pub struct CollabPeersResult {
 
 ```rust
 // atelyx-plugin-protocol/src/method.rs
+/// 协作消息投递语义。`reliable` = 广播帧按房间序号缓存、重连后可补投（内容类增量）；
+/// `ephemeral` = 不缓存、不补投、不占序号（光标 / 选中这类随时可被新状态覆盖的在场数据）。
+#[serde(rename_all = "camelCase")]
+pub enum CollabSendQos {
+    #[default]
+    Reliable,
+    Ephemeral,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
 /// [`collab::SEND`] 的 params：`channel` 为插件自定义的通道名（非空、不含 `:`、≤ 64 字符），
 /// 宿主在投递时加插件前缀；`payload` 任意 JSON。`targetPeerId` 取 [`CollabPeersResult`] 里的
 /// `peerId` 原值，缺省 = 广播给全部对端。
@@ -2333,6 +2345,9 @@ pub struct CollabSendParams {
     pub payload: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_peer_id: Option<String>,
+    /// 投递语义，缺省 = `reliable`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qos: Option<CollabSendQos>,
 }
 ```
 

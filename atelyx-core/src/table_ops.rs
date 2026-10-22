@@ -315,6 +315,69 @@ pub fn region_of(sel: Option<&TableSelection>, fields: &[TableField], rows: &[Ta
     })
 }
 
+/// 选区 → 跨端 JSON：存稳定 id（行/字段增删后对端自行失效），形态与插件表格快照的选区一致。
+pub fn selection_to_json(sel: &TableSelection) -> Value {
+    match sel {
+        TableSelection::Cell { row_id, field_id } => Value::Object(
+            [
+                ("kind".to_string(), Value::from("cell")),
+                ("rowId".to_string(), Value::from(row_id.as_str())),
+                ("fieldId".to_string(), Value::from(field_id.as_str())),
+            ]
+            .into_iter()
+            .collect(),
+        ),
+        TableSelection::Range { anchor_row_id, anchor_field_id, row_id, field_id } => Value::Object(
+            [
+                ("kind".to_string(), Value::from("range")),
+                ("anchorRowId".to_string(), Value::from(anchor_row_id.as_str())),
+                ("anchorFieldId".to_string(), Value::from(anchor_field_id.as_str())),
+                ("rowId".to_string(), Value::from(row_id.as_str())),
+                ("fieldId".to_string(), Value::from(field_id.as_str())),
+            ]
+            .into_iter()
+            .collect(),
+        ),
+        TableSelection::Row(id) => Value::Object(
+            [
+                ("kind".to_string(), Value::from("row")),
+                ("rowId".to_string(), Value::from(id.as_str())),
+            ]
+            .into_iter()
+            .collect(),
+        ),
+        TableSelection::Column(id) => Value::Object(
+            [
+                ("kind".to_string(), Value::from("column")),
+                ("fieldId".to_string(), Value::from(id.as_str())),
+            ]
+            .into_iter()
+            .collect(),
+        ),
+        TableSelection::All => Value::Object(
+            [("kind".to_string(), Value::from("all"))].into_iter().collect(),
+        ),
+    }
+}
+
+/// 跨端 JSON → 选区：字段缺失或未知形态 = None（对端版本更新/载荷损坏时丢弃该条）。
+pub fn selection_from_json(value: &Value) -> Option<TableSelection> {
+    let text = |key: &str| value.get(key).and_then(Value::as_str).map(str::to_string);
+    Some(match value.get("kind")?.as_str()? {
+        "cell" => TableSelection::Cell { row_id: text("rowId")?, field_id: text("fieldId")? },
+        "range" => TableSelection::Range {
+            anchor_row_id: text("anchorRowId")?,
+            anchor_field_id: text("anchorFieldId")?,
+            row_id: text("rowId")?,
+            field_id: text("fieldId")?,
+        },
+        "row" => TableSelection::Row(text("rowId")?),
+        "column" => TableSelection::Column(text("fieldId")?),
+        "all" => TableSelection::All,
+        _ => return None,
+    })
+}
+
 /// 区域 → TSV（行 = \n、列 = \t）：单格 = 原值（多行文本原样无损）；
 /// 多格 = 值内嵌 \t/\n 压成空格保 TSV 结构完整。
 pub fn build_region_tsv(fields: &[TableField], rows: &[TableRow], region: &Region) -> String {
@@ -824,6 +887,38 @@ pub fn restore(table: &mut TableFile, snap: TableSnapshot) {
 mod tests {
     use super::*;
     use crate::vault::TableFile;
+
+    #[test]
+    fn 选区跨端json往返且未知形态丢弃() {
+        let cases = [
+            TableSelection::Cell { row_id: "r1".into(), field_id: "f1".into() },
+            TableSelection::Range {
+                anchor_row_id: "r1".into(),
+                anchor_field_id: "f1".into(),
+                row_id: "r3".into(),
+                field_id: "f2".into(),
+            },
+            TableSelection::Row("r2".into()),
+            TableSelection::Column("f3".into()),
+            TableSelection::All,
+        ];
+        for sel in cases {
+            let wire = selection_to_json(&sel);
+            assert_eq!(selection_from_json(&wire).as_ref(), Some(&sel));
+        }
+        assert_eq!(
+            selection_to_json(&TableSelection::Column("f3".into())),
+            serde_json::json!({ "kind": "column", "fieldId": "f3" })
+        );
+        for bad in [
+            serde_json::json!({ "kind": "cell" }),
+            serde_json::json!({ "kind": "node", "nodeId": "n1" }),
+            serde_json::json!("cell"),
+            serde_json::Value::Null,
+        ] {
+            assert!(selection_from_json(&bad).is_none(), "应丢弃：{bad}");
+        }
+    }
 
     fn field(id: &str, name: &str, field_type: &str) -> TableField {
         TableField {

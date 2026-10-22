@@ -262,6 +262,7 @@ const SECTIONS: &[Section] = &[
             "method.rs": "TrayClickParams",
             "method.rs": "CollabPeer",
             "method.rs": "CollabPeersResult",
+            "method.rs": "CollabSendQos",
             "method.rs": "CollabSendParams",
             "method.rs": "CollabSendResult",
             "method.rs": "CollabMessageParams",

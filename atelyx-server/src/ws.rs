@@ -77,11 +77,12 @@ impl KickReason {
     }
 }
 
-/// 下行帧（文本 = JSON 协议帧；二进制 = 插件消息二进制载荷直传）。
+/// 下行帧（文本 = JSON 协议帧；二进制 = 插件消息二进制载荷直传；Close = 关闭握手应答）。
 #[derive(Clone)]
 pub(crate) enum WireFrame {
     Text(Arc<String>),
     Binary(Arc<Vec<u8>>),
+    Close,
 }
 
 impl WireFrame {
@@ -89,6 +90,7 @@ impl WireFrame {
         match self {
             WireFrame::Text(s) => s.len(),
             WireFrame::Binary(b) => b.len(),
+            WireFrame::Close => 0,
         }
     }
 }
@@ -98,6 +100,7 @@ fn wire_to_message(frame: &WireFrame) -> Message {
     match frame {
         WireFrame::Text(s) => Message::text((**s).clone()),
         WireFrame::Binary(b) => Message::Binary(b.as_ref().clone().into()),
+        WireFrame::Close => Message::Close(None),
     }
 }
 
@@ -116,6 +119,8 @@ struct Room {
 const PLUGIN_CACHE_MAX_ENTRIES: usize = 128;
 /// 插件帧缓存上限（字节）：防大载荷刷爆内存，与条数上限先到先逐出。
 const PLUGIN_CACHE_MAX_BYTES: usize = 4 * 1024 * 1024;
+/// 瞬时通道名长度上限（按字符计：宿主内置 `host.*` 与插件 `<插件id>:<频道>` 都在此内）。
+const EPHEMERAL_CHANNEL_MAX_CHARS: usize = 256;
 
 struct CachedPluginFrame {
     seq: u64,
@@ -188,6 +193,7 @@ pub struct PeerMeta {
 
 /// C→S 帧类型（`type` 字段分派）：`hello`（首条必发，见 space_ws）/ `presence` /
 /// `table-patch`、`canvas-patch`（不透明透传）/ `note-sync`、`note-aware`（base64 载荷不透明透传）/
+/// `ephemeral`（通用瞬时通道：不缓存不补投，按 `channel` 命名空间分派）/
 /// `plugin-msg`（广播/定向单播）/ `plugin-replay`（可靠补投：回放 seq > after 的缓存广播帧）/
 /// `ping`（保活，回 `pong` 广播）/ `bye`（离开）；二进制帧 = 插件消息二进制载荷直传
 /// （布局见 `parse_plugin_binary`，与 `plugin-msg` 同语义）。
@@ -283,10 +289,10 @@ struct ServerMsg {
     file: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     patch: Option<serde_json::Value>,
-    /// 插件消息频道名（`plugin-msg` 转发帧携带）。
+    /// 插件消息 / 瞬时通道的频道名（`plugin-msg`、`ephemeral` 转发帧携带）。
     #[serde(skip_serializing_if = "Option::is_none")]
     channel: Option<String>,
-    /// 载荷（`note-sync`/`note-aware` 为 base64 字符串，`plugin-msg` 为任意 JSON）。
+    /// 载荷（`note-sync`/`note-aware` 为 base64 字符串，`plugin-msg`/`ephemeral` 为任意 JSON）。
     #[serde(skip_serializing_if = "Option::is_none")]
     payload: Option<serde_json::Value>,
     /// 插件广播帧的房间级序号（可靠补投对账；单播帧不携带）。
@@ -369,6 +375,24 @@ fn server_plugin_msg(
         channel: Some(channel),
         payload: Some(payload),
         seq,
+        plugin_seq: None,
+        key: None,
+        landed: None,
+    }))
+}
+
+/// 构造瞬时通道转发帧：回填发送方 peerId，载荷原样透传（服务端不解析）。
+fn server_ephemeral(peer_id: u64, channel: &str, payload: serde_json::Value) -> WireFrame {
+    WireFrame::Text(server_text_msg(ServerMsg {
+        kind: "ephemeral",
+        peer_id: Some(peer_id),
+        peers: None,
+        presence: None,
+        file: None,
+        patch: None,
+        channel: Some(channel.to_string()),
+        payload: Some(payload),
+        seq: None,
         plugin_seq: None,
         key: None,
         landed: None,
@@ -655,6 +679,14 @@ pub(crate) async fn run_room_connection(
         let mut last_resync: Option<Instant> = None;
         loop {
             match btx_rx.recv().await {
+                // 关闭帧单独收尾：读侧收到对端 Close 时 tungstenite 已把应答排进写缓冲，
+                // 再 send 会被拒绝，只能 flush；主动离开（bye）时写缓冲无应答，需真正发一帧
+                Ok(WireFrame::Close) => {
+                    if sink.send(Message::Close(None)).await.is_err() {
+                        let _ = sink.flush().await;
+                    }
+                    break;
+                }
                 Ok(frame) => {
                     if sink.send(wire_to_message(&frame)).await.is_err() {
                         debug!(peer_id, "发送失败，客户端断开");
@@ -680,6 +712,9 @@ pub(crate) async fn run_room_connection(
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
+        // 收尾统一 flush：前置业务帧发送失败时不会走到 Close 分支，但读侧可能已把关闭应答
+        // 排进写缓冲，漏掉这次 flush 客户端就等不到应答
+        let _ = sink.flush().await;
     });
     let nickname = meta.nickname.clone();
     let device_name = meta.device_name.clone();
@@ -751,8 +786,9 @@ pub(crate) async fn run_room_connection(
                 debug!(peer_id, room = %room_id, "连接关闭（对端断开）");
                 break;
             }
-            Ok(Some(Err(_))) => {
-                warn!(peer_id, room = %room_id, "WebSocket 协议错误，断开");
+            Ok(Some(Err(err))) => {
+                // 对端未走关闭握手（进程被强杀 / 网络中断）落在这里，错误本体是唯一定位线索
+                warn!(peer_id, room = %room_id, error = %err, "WebSocket 读取出错，断开");
                 break;
             }
             Ok(Some(Ok(Message::Text(text)))) => {
@@ -895,6 +931,53 @@ pub(crate) async fn run_room_connection(
                             }
                         }
                     }
+                    // 通用瞬时通道（在场状态 / 光标类数据）：channel + payload 原样转发房间内其他成员。
+                    // 不缓存、不落盘、不占房间序号（瞬时状态补投无意义）；通道名按命名空间区分
+                    // （宿主内置 `host.*`，插件 `<插件id>:<频道>`），服务端只校验空值与长度。
+                    "ephemeral" => {
+                        if let (Some(channel), Some(payload)) = (msg.channel, msg.payload) {
+                            if channel.is_empty()
+                                || channel.chars().count() > EPHEMERAL_CHANNEL_MAX_CHARS
+                            {
+                                debug!(
+                                    peer_id,
+                                    room = %room_id,
+                                    chars = channel.chars().count(),
+                                    "瞬时通道名非法（空或超长），丢弃",
+                                );
+                                continue;
+                            }
+                            debug!(
+                                peer_id,
+                                room = %room_id,
+                                channel = %channel,
+                                target_peer = ?msg.target_peer_id,
+                                bytes = text.len(),
+                                "瞬时通道转发",
+                            );
+                            stats.forwarded_msgs += 1;
+                            let mut rooms = hub.0.lock().unwrap();
+                            match msg.target_peer_id {
+                                Some(target) => {
+                                    if target != peer_id {
+                                        if let Some(room) = rooms.get(&room_id) {
+                                            if let Some(peer) = room.peers.get(&target) {
+                                                let frame =
+                                                    server_ephemeral(peer_id, &channel, payload);
+                                                stats.forwarded_bytes += frame.len() as u64;
+                                                let _ = peer.tx.send(frame);
+                                            }
+                                        }
+                                    }
+                                }
+                                None => {
+                                    let frame = server_ephemeral(peer_id, &channel, payload);
+                                    stats.forwarded_bytes += frame.len() as u64;
+                                    forward_to_room(&mut rooms, &room_id, peer_id, frame);
+                                }
+                            }
+                        }
+                    }
                     // 可靠补投：回放 seq > after 的缓存广播帧（经本连接出站通道，与直播帧保序；
                     // 跳过请求者自己的帧，广播不回显发送方）。回放上限 = 缓存条数上限
                     // < 通道容量，回放本身不会触发 Lagged。
@@ -913,6 +996,8 @@ pub(crate) async fn run_room_connection(
                     }
                     "bye" => {
                         info!(peer_id, room = %room_id, "协作者离开（bye）");
+                        // 回应关闭握手：客户端随后等 Close 回执再关，服务端也不留半开连接
+                        let _ = btx.send(WireFrame::Close);
                         break;
                     }
                     // 心跳回执：回 pong 广播（健康连接每 ≤25s 有人 ping，全员 lastMessageAt 刷新，
@@ -980,6 +1065,18 @@ pub(crate) async fn run_room_connection(
                         }
                     }
                 }
+            }
+            Ok(Some(Ok(Message::Close(frame)))) => {
+                // 收到对端 Close 即回应答并结束：读循环收到 Close 后若继续读，下一步读到 EOF 时
+                // 关闭握手尚未完成（应答还没写出），库按「未走关闭握手」报错
+                debug!(
+                    peer_id,
+                    room = %room_id,
+                    code = frame.as_ref().map(|f| f.code),
+                    "对端请求关闭，回应后断开",
+                );
+                let _ = btx.send(WireFrame::Close);
+                break;
             }
             Ok(Some(Ok(_))) => {
                 debug!(peer_id, "忽略非文本帧");

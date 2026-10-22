@@ -34,6 +34,7 @@ mod repohistory_view;
 mod settings_view;
 mod space_actions;
 mod table_actions;
+mod table_collab;
 mod table_text;
 mod table_view;
 mod text_preedit;
@@ -1091,6 +1092,8 @@ pub struct App {
     vault: Arc<vault::VaultState>,
     /// 打开的表格会话（数据 + 保存基线 + 视图态；None = 未打开）。
     pub table: Option<table_view::TableSession>,
+    /// 表格实时在场（本端选区上行 + 远端选区；None = 不在任何表格上）。
+    pub table_collab: Option<table_collab::TableCollab>,
     /// 画布会话（对称表格会话；None = 未打开）。
     pub canvas: Option<canvas_view::CanvasSession>,
     /// flush 放行后待续的动作（笔记 / 表格 / 画布任一脏时挂起，全部落盘后执行）。
@@ -1692,6 +1695,7 @@ impl App {
                 note_collab: None,
                 note_collab_file: None,
                 remote_cursors: Vec::new(),
+                table_collab: None,
         };
         // 启动自动进入的仓库：把持久化的展开集预置为该仓库的记忆（enter_vault 据此恢复子目录展开）；
         // 空集不种子（全新安装 / 上次全收起），走无记忆的根行保底
@@ -2755,6 +2759,8 @@ impl App {
                 // 限频压下的选区变化（拖选连续位移）由本拍补发最新一份：断线期产出即丢弃，
                 // 重连时的强制重发以最新状态兜底
                 space_actions::awareness_flush(self);
+                // 表格在场：远端超时剔除、限频补发、空闲保活
+                space_actions::table_collab_tick(self);
                 // 重名提醒条 3s 过期
                 if self
                     .rename_notice
@@ -3186,6 +3192,7 @@ impl App {
                     if let Some(s) = &mut self.table {
                         s.view.selection = None;
                     }
+                    space_actions::table_collab_sync(self);
                 }
                 Task::none()
             }
@@ -6693,6 +6700,12 @@ impl App {
                 .note_collab
                 .as_ref()
                 .is_some_and(|nc| nc.has_pending_awareness())
+            // 表格在场：有待发状态或有对端时需要周期拍（补发 / 保活 / 远端剔除）；
+            // 单人无对端不挂拍，避免空闲表格被 10Hz 重绘
+            || self
+                .table_collab
+                .as_ref()
+                .is_some_and(|tc| tc.has_pending() || tc.has_peers())
             || !self.chat.renaming.is_empty()
             || (self.settings_open && self.settings_tab == "shortcuts")
             || self.table.as_ref().is_some_and(|t| {

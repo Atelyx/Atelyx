@@ -11,10 +11,10 @@ use iced::{border, widget::container::Style, Element, Length, Padding, Task};
 
 use atelyx_core::plugin_runtime::market::{self, MarketSnapshot};
 use atelyx_core::plugin_runtime::{
-    AuditRecord, ClipboardImage, CollabPeer, CollabPeersResult, CollabSendParams, CollabSendResult,
-    DialogKind, DialogRequest, HostRequest, ImageInfoResult, InstallOutcome, NotificationLevel,
-    Permission, PluginEvent, PluginRuntime, PluginStatus, PluginSummary, SetTrayItemsParams,
-    MAX_VAULT_BINARY_BYTES,
+    AuditRecord, ClipboardImage, CollabPeer, CollabPeersResult, CollabSendParams, CollabSendQos,
+    CollabSendResult, DialogKind, DialogRequest, HostRequest, ImageInfoResult, InstallOutcome,
+    NotificationLevel, Permission, PluginEvent, PluginRuntime, PluginStatus, PluginSummary,
+    SetTrayItemsParams, MAX_VAULT_BINARY_BYTES,
 };
 
 use crate::settings_view::{card, group_head};
@@ -998,6 +998,7 @@ fn collab_peers(app: &App) -> CollabPeersResult {
 }
 
 /// 发一条插件消息：未连接时按协议回 `queued: false`（不是错误）；对端 id 非法是可读失败。
+/// `qos = ephemeral` 走瞬时通道（不缓存不补投）。
 fn collab_send(
     app: &App,
     plugin_id: &str,
@@ -1010,6 +1011,7 @@ fn collab_send(
         ),
         None => None,
     };
+    let ephemeral = params.qos == Some(CollabSendQos::Ephemeral);
     let queued = app.space_connected && app.space_cmds.is_some();
     if queued {
         crate::space_actions::send_plugin_message(
@@ -1018,6 +1020,7 @@ fn collab_send(
             &params.channel,
             params.payload,
             target,
+            ephemeral,
         );
     }
     serde_json::to_value(CollabSendResult { queued })

@@ -186,6 +186,27 @@ pub const MENU_GROUP_H: f32 = 22.0;
 /// 浮层容器上下内边距
 pub const POPUP_PAD_Y: f32 = 4.0;
 
+/// 彩色底上的文字色（成员色名签等）：按底色亮度取近黑 / 白。
+pub fn text_on(bg: Color) -> Color {
+    if 0.299 * bg.r + 0.587 * bg.g + 0.114 * bg.b > 0.6 {
+        rgb(0x1a, 0x1a, 0x1a)
+    } else {
+        Color::WHITE
+    }
+}
+
+// ===== 协作远端标记（笔记光标与表格选区共用一套视觉口径）=====
+/// 远端选区色块透明度：压在内容上仍可读。
+pub const REMOTE_MARK_ALPHA: f32 = 0.18;
+/// 远端名签内边距。
+pub const REMOTE_TAG_PAD_X: f32 = 4.0;
+pub const REMOTE_TAG_PAD_Y: f32 = 2.0;
+/// 远端名签圆角与名签底边到标记上缘的间距。
+pub const REMOTE_TAG_RADIUS: f32 = 3.0;
+pub const REMOTE_TAG_GAP: f32 = 1.0;
+/// 远端名签最大宽度（超出省略）。
+pub const REMOTE_TAG_MAX_W: f32 = 140.0;
+
 /// 内置 iced 主题：按本调色板定制（内置部件的 palette 色 = accent 等语义映射）。
 pub fn app_theme() -> Theme {
     Theme::custom(
