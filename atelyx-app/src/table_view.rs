@@ -1534,16 +1534,6 @@ fn draw_table(
             if let Some(bg) = st.bg.as_deref().and_then(parse_hex) {
                 frame.fill_rectangle(cell.position(), cell.size(), bg);
             }
-            // 远端选区淡底：画在格底色之后、内容之前（不压暗文字，也不被自定义底色盖住）
-            for (region, color, _) in &remote_regions {
-                if region.contains(r, c) {
-                    frame.fill_rectangle(
-                        cell.position(),
-                        cell.size(),
-                        color.scale_alpha(pal::REMOTE_MARK_ALPHA),
-                    );
-                }
-            }
             draw_cell_content(session, &g, frame, r, c, cell, row, field, &st, hover);
             frame.fill_rectangle(Point::new(x + g.cache.col_w[c] - 1.0, y), Size::new(1.0, rh), pal::BORDER_SUBTLE);
         }
@@ -1585,8 +1575,8 @@ fn draw_table(
 
     // 表头 / 状态栏 / 滚动条在 chrome 覆盖层绘制（draw_chrome）
 
-    // 远端协作者选区（描边 + 名签）：本机选中框最后画，压过远端描边
-    draw_remote_outlines(&g, frame, &remote_regions);
+    // 远端协作者选区（描边常驻，名签仅悬停显示）：本机选中框最后画，压过远端描边
+    draw_remote_outlines(&g, frame, &remote_regions, hover);
 
     // 选中框描边（2px 强调色贴格内缘，编辑态边框同用此框）
     if let Some(region) = region {
@@ -1628,12 +1618,13 @@ fn remote_regions_of<'a>(
         .collect()
 }
 
-/// 远端选区描边与名签（画在内容之上、本机选中框之下）：区域裁到可视内容区，
-/// 名签贴选区左上角外侧，放不下时落到格内；多人同角落时依次下移一档。
+/// 远端选区描边（画在内容之上、本机选中框之下）：区域裁到可视内容区。
+/// 悬停命中某选区时附加该成员名签——表格格面密集，名签常驻会压住单元格内容。
 fn draw_remote_outlines(
     g: &Geo,
     frame: &mut canvas::Frame,
     regions: &[(table_ops::Region, Color, &str)],
+    hover: Option<Point>,
 ) {
     if regions.is_empty() {
         return;
@@ -1645,6 +1636,7 @@ fn draw_remote_outlines(
     let left = g.gutter_w();
     let right = g.cols_viewport_right().min(g.width);
     let bw = REMOTE_BORDER_W * g.z;
+    // 悬停名签避让簿：多人同时选中同区域时逐个下移一档，不互相盖住
     let mut placed: Vec<Rectangle> = Vec::new();
     for (region, color, name) in regions {
         let x0 = g.cache.col_x[region.col_start] - view.scroll_x + left;
@@ -1665,20 +1657,24 @@ fn draw_remote_outlines(
         ] {
             frame.fill_rectangle(line.position(), line.size(), *color);
         }
-        draw_remote_tag(frame, &mut placed, bx0, by0, name, *color, top, bottom, right);
+        // 悬停命中：名签跟随鼠标（贴选区角会被表头 / 行高挤到格内压住内容）
+        if let Some(at) = hover {
+            if at.x >= bx0 && at.x <= bx1 && at.y >= by0 && at.y <= by1 {
+                draw_remote_tag(frame, at, name, *color, g.width, g.height, &mut placed);
+            }
+        }
     }
 }
 
+/// 悬停名签：跟随鼠标，右 / 下越界时翻到锚点另一侧（锚点 = 鼠标在画布内的位置）。
 fn draw_remote_tag(
     frame: &mut canvas::Frame,
-    placed: &mut Vec<Rectangle>,
-    x: f32,
-    y: f32,
+    at: Point,
     name: &str,
     color: Color,
-    top: f32,
-    bottom: f32,
-    right: f32,
+    max_w: f32,
+    max_h: f32,
+    placed: &mut Vec<Rectangle>,
 ) {
     if name.is_empty() {
         return;
@@ -1687,10 +1683,13 @@ fn draw_remote_tag(
     let label = ellipsize_text(name, pal::REMOTE_TAG_MAX_W, size);
     let tag_w = text_width(&label, size) + pal::REMOTE_TAG_PAD_X * 2.0;
     let tag_h = size + pal::REMOTE_TAG_PAD_Y * 2.0;
-    let tag_x = (x + 2.0).min(right - tag_w).max(0.0);
-    let mut tag_y = y - tag_h - pal::REMOTE_TAG_GAP;
-    if tag_y < top {
-        tag_y = y + 2.0;
+    let mut tag_x = at.x + 12.0;
+    if tag_x + tag_w > max_w {
+        tag_x = (at.x - 12.0 - tag_w).max(0.0);
+    }
+    let mut tag_y = at.y + 14.0;
+    if tag_y + tag_h > max_h {
+        tag_y = (at.y - 14.0 - tag_h).max(0.0);
     }
     for _ in 0..4 {
         let candidate = rect(tag_x, tag_y, tag_w, tag_h);
@@ -1699,7 +1698,7 @@ fn draw_remote_tag(
         }
         tag_y += tag_h + pal::REMOTE_TAG_GAP;
     }
-    if tag_y + tag_h > bottom {
+    if tag_y + tag_h > max_h {
         return;
     }
     let tag = rect(tag_x, tag_y, tag_w, tag_h);
@@ -2281,7 +2280,7 @@ fn collab_members(app: &crate::App, session: &TableSession) -> Vec<(iced::Color,
         .collect()
 }
 
-/// 顶部工具条：视图切换 + 协作者胶囊 + 行列统计 + 缩放 + ··· 菜单。
+/// 顶部工具条：视图切换 + 未保存标记在左，保存状态 + 协作者胶囊 + 行列统计 + 缩放 + ··· 菜单在右。
 fn toolbar<'a>(
     app: &'a crate::App,
     collab_members: &[(iced::Color, String)],
@@ -2306,10 +2305,10 @@ fn toolbar<'a>(
     let collab_pills: Element<'static, Message> = crate::layout_view::collab_pill_row(collab_members);
     row![
         view_select(app, session, window),
-        collab_pills,
         dirty_pill,
         space().width(Length::Fill),
         save_state,
+        collab_pills,
         text(zoom_label).size(pal::fs_caption()).color(pal::TEXT_MUTED),
         text(stats).size(pal::fs_caption()).color(pal::TEXT_SECONDARY),
         icon_btn(window, "ellipsis", "更多", Message::Table(TableMsg::OpenMoreMenu(window))),

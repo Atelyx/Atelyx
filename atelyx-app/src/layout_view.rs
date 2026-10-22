@@ -2495,7 +2495,9 @@ pub(crate) fn collab_pill_row(members: &[(iced::Color, String)]) -> Element<'sta
                         .size(pal::fs_micro())
                         .color(pal::TEXT_PRIMARY),
                 ]
-                .spacing(5),
+                .spacing(5)
+                // 色点与昵称同基准线对齐：色点固定 8px，靠行内居中抵消文字行高差
+                .align_y(Vertical::Center),
             )
             .padding(Padding::ZERO.horizontal(8.0).vertical(4.0))
             .style(|_t| Style {
