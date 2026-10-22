@@ -319,7 +319,8 @@ impl Context {
     }
 
     /// 回报一次工具调用结果：`call_id` 原样带回 [`PluginHandler::on_tool_call`] 收到的值，
-    /// `content` 为模型可见文本。
+    /// `content` 为模型可见文本。调用已超时 / 已取消或不归本插件时报可读错误，结果不会
+    /// 进入模型上下文——据此区分「已送达」与「迟到被丢弃」。
     pub async fn tool_result(
         &self,
         call_id: &str,
@@ -525,6 +526,7 @@ impl Context {
         self.call_unit(method::state::WRITE, &StateWriteParams { json }).await
     }
 
+    /// 在应用内弹一条通知（宿主已收尾、通知未投递时报可读错误）。
     pub async fn notify(
         &self,
         title: &str,

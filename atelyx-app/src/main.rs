@@ -1292,6 +1292,8 @@ pub struct App {
     pub note_images: markdown_view::ImageHandles,
     /// 图片像素尺寸（key 同 `note_images`）：自绘画布按 contain / cover 摆放贴片要用原图长宽。
     pub note_image_sizes: HashMap<String, (u32, u32)>,
+    /// 图片句柄代数：句柄入表或整表清空即自增，自绘画布据此作废已缓存的几何。
+    pub note_image_epoch: u64,
     note_images_inflight: HashSet<String>,
     note_images_failed: HashSet<String>,
     /// ensure_image_srcs 收集的载入任务（update 收尾统一 chain，调用点不必逐个穿 Task）。
@@ -1579,6 +1581,7 @@ impl App {
                 preview_doc: None,
                 note_images: markdown_view::ImageHandles::new(),
                 note_image_sizes: HashMap::new(),
+                note_image_epoch: 0,
                 note_images_inflight: HashSet::new(),
                 note_images_failed: HashSet::new(),
                 image_loads: None,
@@ -1904,6 +1907,7 @@ impl App {
                 // 图片缓存随文件清空：同 src 不同仓库指向不同文件，过期句柄不得复用
                 self.note_images.clear();
                 self.note_image_sizes.clear();
+                self.note_image_epoch = self.note_image_epoch.wrapping_add(1);
                 self.note_images_inflight.clear();
                 self.note_images_failed.clear();
                 self.refresh_preview();
@@ -2273,6 +2277,7 @@ impl App {
                                 self.note_image_sizes.insert(key.clone(), size);
                             }
                             self.note_images.insert(key, iced::widget::image::Handle::from_bytes(bytes));
+                            self.note_image_epoch = self.note_image_epoch.wrapping_add(1);
                         }
                         // 失败进失败集：占位回落且本次会话不重试（避免滚动反复发起）
                         Err(_) => {

@@ -2595,25 +2595,9 @@ fn plugin_history(
             let meta = store
                 .session_meta(id)
                 .ok_or_else(|| format!("会话 {id} 不存在"))?;
-            let mut messages = store.session_messages(id).unwrap_or_default();
-            if let Some(query) = query.map(str::trim).filter(|q| !q.is_empty()) {
-                let needle = query.to_lowercase();
-                messages.retain(|m| message_matches_query(m, &needle));
-            }
-            let end = messages.len().saturating_sub(offset.unwrap_or(0) as usize);
-            let start = match limit {
-                Some(limit) => end.saturating_sub(limit as usize),
-                None => 0,
-            };
-            let messages: Vec<Value> = messages.drain(start..end).collect();
-            let wire = ChatSessionWire {
-                id: id.clone(),
-                title: meta.get("title").and_then(Value::as_str).map(str::to_string),
-                created_at: meta.get("createdAt").and_then(Value::as_i64).unwrap_or(0),
-                updated_at: meta.get("updatedAt").and_then(Value::as_i64).unwrap_or(0),
-                messages,
-            };
-            serde_json::to_value(wire).map_err(|e| format!("会话出线序列化失败：{e}"))
+            let messages = store.session_messages(id).unwrap_or_default();
+            let result = single_session_history(id, &meta, &messages, limit, offset, query);
+            serde_json::to_value(result).map_err(|e| format!("会话出线序列化失败：{e}"))
         }
         None => {
             let mut sessions: Vec<ChatSessionSummary> = store
@@ -2635,6 +2619,39 @@ fn plugin_history(
             serde_json::to_value(ChatHistoryResult { sessions, session: None })
                 .map_err(|e| format!("会话清单序列化失败：{e}"))
         }
+    }
+}
+
+/// 单会话模式的回执装配：先按 `query` 过滤，再从末尾跳过 `offset` 条、取 `limit` 条（缺省全量）。
+/// 两种模式共用 [`ChatHistoryResult`] 外层，单会话只填 `session`。
+fn single_session_history(
+    id: &str,
+    meta: &Value,
+    messages: &[Value],
+    limit: Option<u32>,
+    offset: Option<u32>,
+    query: Option<&str>,
+) -> ChatHistoryResult {
+    // 只收引用再切窗口：分页调用只付窗口大小的拷贝代价，不复制整段历史
+    let needle = query.map(str::trim).filter(|q| !q.is_empty()).map(str::to_lowercase);
+    let selected: Vec<&Value> = messages
+        .iter()
+        .filter(|m| needle.as_deref().is_none_or(|needle| message_matches_query(m, needle)))
+        .collect();
+    let end = selected.len().saturating_sub(offset.unwrap_or(0) as usize);
+    let start = match limit {
+        Some(limit) => end.saturating_sub(limit as usize),
+        None => 0,
+    };
+    ChatHistoryResult {
+        sessions: Vec::new(),
+        session: Some(ChatSessionWire {
+            id: id.to_string(),
+            title: meta.get("title").and_then(Value::as_str).map(str::to_string),
+            created_at: meta.get("createdAt").and_then(Value::as_i64).unwrap_or(0),
+            updated_at: meta.get("updatedAt").and_then(Value::as_i64).unwrap_or(0),
+            messages: selected[start..end].iter().map(|m| (*m).clone()).collect(),
+        }),
     }
 }
 
@@ -2865,6 +2882,30 @@ mod tests {
                 ("shots/d.gif".to_string(), "image/gif".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn single_session_history_uses_the_shared_envelope() {
+        let meta = json!({ "title": "对话", "createdAt": 1, "updatedAt": 2 });
+        let messages = vec![
+            json!({ "id": "m1", "content": "甲" }),
+            json!({ "id": "m2", "content": "乙" }),
+            json!({ "id": "m3", "content": "甲" }),
+        ];
+        // 过滤后剩 m1/m3；从末尾跳过 1 条再取 1 条 → m1
+        let result = single_session_history("s", &meta, &messages, Some(1), Some(1), Some("甲"));
+        assert!(result.sessions.is_empty(), "单会话模式不填清单");
+        let wire = result.session.as_ref().expect("单会话模式填 session");
+        assert_eq!(wire.id, "s");
+        assert_eq!(wire.title.as_deref(), Some("对话"));
+        assert_eq!((wire.created_at, wire.updated_at), (1, 2));
+        assert_eq!(wire.messages, vec![json!({ "id": "m1", "content": "甲" })]);
+
+        // 回执要按协议类型原样可解，插件才不会读到两个空槽
+        let value = serde_json::to_value(result).expect("可序列化");
+        assert!(value.get("sessions").is_none(), "空清单不落字段");
+        let decoded: ChatHistoryResult = serde_json::from_value(value).expect("按协议类型可解");
+        assert_eq!(decoded.session.map(|s| s.id), Some("s".to_string()));
     }
 
     #[test]

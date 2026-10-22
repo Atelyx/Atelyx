@@ -967,12 +967,15 @@ impl Instance {
             }
             method::notification::SHOW => {
                 let p: method::ShowNotificationParams = parse(params)?;
-                let _ = self.events.send(PluginEvent::Notification {
-                    id: self.id.clone(),
-                    title: p.title,
-                    body: p.body,
-                    level: p.level,
-                });
+                // 无订阅者（壳已收尾）时 send 失败即回错误：插件不能把「塞进通道」当成「已弹出」
+                self.events
+                    .send(PluginEvent::Notification {
+                        id: self.id.clone(),
+                        title: p.title,
+                        body: p.body,
+                        level: p.level,
+                    })
+                    .map_err(|_| RpcError::failed("通知通道已关闭，未投递到宿主".to_string()))?;
                 Ok(json!({}))
             }
             // ---------- fs ----------
@@ -1100,12 +1103,9 @@ impl Instance {
             }
             method::ai::TOOL_RESULT => {
                 let p: method::ToolResultParams = parse(params)?;
-                self.runtime_upgrade()?.resolve_tool_result(
-                    &self.id,
-                    &p.call_id,
-                    p.content,
-                    p.is_error,
-                );
+                self.runtime_upgrade()?
+                    .resolve_tool_result(&self.id, &p.call_id, p.content, p.is_error)
+                    .map_err(RpcError::failed)?;
                 Ok(json!({}))
             }
             // AI 对话 / 剪贴板 / 仓库读写 / 表格读写 / 滚动指令走异步应答（见 handle_request 的分流）
@@ -1684,6 +1684,18 @@ mod tests {
 
     /// 构造一个不落进程的实例（`entry` 留空：单元测试只驱动请求分派与状态，不启动进程）。
     fn make_instance(permissions: Vec<Permission>) -> (TempDir, Arc<Instance>) {
+        let (tmp, instance, _rx) = make_instance_with_events(permissions);
+        (tmp, instance)
+    }
+
+    /// 同 [`make_instance`]，但保留事件订阅端（验证通知确实投递到壳侧）。
+    fn make_instance_with_events(
+        permissions: Vec<Permission>,
+    ) -> (
+        TempDir,
+        Arc<Instance>,
+        tokio::sync::broadcast::Receiver<PluginEvent>,
+    ) {
         let tmp = TempDir::new("plugin-instance");
         let dir = tmp.join("com.example.demo");
         std::fs::create_dir_all(&dir).unwrap();
@@ -1696,7 +1708,7 @@ mod tests {
             permissions,
             ..Manifest::default()
         };
-        let (events, _rx) = tokio::sync::broadcast::channel(16);
+        let (events, rx) = tokio::sync::broadcast::channel(16);
         let instance = Instance::new(
             manifest,
             dir,
@@ -1707,7 +1719,7 @@ mod tests {
             shortcut::Registrar::unavailable("全局快捷键不可用：测试"),
             events,
         );
-        (tmp, instance)
+        (tmp, instance, rx)
     }
 
     fn initialize_params(api_version: u32, id: &str) -> Value {
@@ -1736,6 +1748,32 @@ mod tests {
         assert!(instance
             .dispatch(event::SUBSCRIBE, &json!({ "name": "unknown:event" }))
             .is_err());
+    }
+
+    /// 通知必须真正投递；事件通道无订阅者时回可读错误，不把「塞进通道」当成已弹出。
+    #[test]
+    fn notification_show_reports_delivery() {
+        let (_tmp, instance, mut rx) = make_instance_with_events(vec![Permission::Notification]);
+        instance
+            .dispatch(
+                method::notification::SHOW,
+                &json!({ "title": "完成", "body": "已生成" }),
+            )
+            .expect("有订阅者应投递成功");
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(PluginEvent::Notification { title, body, .. })
+                if title == "完成" && body.as_deref() == Some("已生成")
+        ));
+
+        let (_tmp, instance) = make_instance(vec![Permission::Notification]);
+        let err = instance
+            .dispatch(
+                method::notification::SHOW,
+                &json!({ "title": "完成", "body": "已生成" }),
+            )
+            .expect_err("无订阅者不得回成功");
+        assert!(err.to_string().contains("通知通道已关闭"), "错误应可读：{err}");
     }
 
     #[test]
@@ -2674,6 +2712,12 @@ mod tests {
             async move { runtime.call_tool("find_notes", json!({ "q": "周报" })).await }
         });
         let call_id = wait_call_id(&runtime).await;
+        assert!(
+            runtime
+                .resolve_tool_result("com.example.other", &call_id, "冒领".into(), false)
+                .is_err(),
+            "他插件的回报不得认领本插件的调用"
+        );
         instance
             .dispatch(
                 method::ai::TOOL_RESULT,
@@ -2683,6 +2727,15 @@ mod tests {
         let output = call.await.unwrap().expect("调用应拿到插件回传");
         assert_eq!(output.content, "命中 2 条");
         assert!(!output.is_error);
+
+        // 已收场的 callId：迟到回报不得回成功，插件才能区分「已进模型上下文」与「被丢弃」
+        let late = instance
+            .dispatch(
+                method::ai::TOOL_RESULT,
+                &json!({ "callId": "tool-missing", "content": "迟到" }),
+            )
+            .expect_err("已收场的 callId 不得回成功");
+        assert!(late.to_string().contains("已收场"), "错误应可读：{late}");
 
         // 停用：工具随会话摘除，在途调用以可读失败收场
         let pending = tokio::spawn({

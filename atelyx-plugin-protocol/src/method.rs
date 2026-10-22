@@ -110,6 +110,7 @@ pub mod state {
 }
 
 pub mod notification {
+    /// 在应用内弹一条通知（宿主已收尾、通知未投递时报可读错误）。
     pub const SHOW: &str = "notification.show";
 }
 
@@ -183,7 +184,8 @@ pub mod ai {
     pub const REGISTER_TOOL: &str = "ai.registerTool";
     /// 撤销自己注册的工具（未注册的名称报可读错误）。
     pub const UNREGISTER_TOOL: &str = "ai.unregisterTool";
-    /// 回报一次工具调用结果（`callId` 原样带回宿主下发值）。
+    /// 回报一次工具调用结果（`callId` 原样带回宿主下发值；不在册或不属于本插件的 `callId`
+    /// 报可读错误——结果不会进入模型上下文）。
     pub const TOOL_RESULT: &str = "ai.toolResult";
     /// 宿主请求插件执行一次工具调用（通知）；插件处理完经 [`TOOL_RESULT`] 回报。
     pub const HOST_TOOL_CALL: &str = "host:ai.toolCall";

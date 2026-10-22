@@ -73,6 +73,7 @@ fn on_loaded(app: &mut App, gen: u64, file: String, result: Result<LoadOut, Stri
                         let handle = iced::widget::image::Handle::from_bytes(bytes);
                         // 消息流附件缩略图与笔记图片共用句柄缓存（键 = 仓库相对路径）
                         app.note_images.insert(path.clone(), handle.clone());
+                        app.note_image_epoch = app.note_image_epoch.wrapping_add(1);
                         if width > 0 && height > 0 {
                             app.note_image_sizes.insert(path.clone(), (width, height));
                         }

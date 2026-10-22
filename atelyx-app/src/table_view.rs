@@ -29,6 +29,8 @@ const HEADER_H: f32 = 32.0;
 const STATUS_H: f32 = 32.0;
 const NEW_ROW_H: f32 = 32.0;
 const TOOLBAR_H: f32 = 30.0;
+/// 工具条视图下拉的触发器宽（固定宽防切视图时工具条跳动）。
+const VIEW_TRIGGER_W: f32 = 120.0;
 pub const MIN_ZOOM: f32 = 0.5;
 pub const MAX_ZOOM: f32 = 2.0;
 
@@ -2093,7 +2095,7 @@ pub fn table_view<'a>(app: &'a crate::App, window: iced::window::Id) -> Element<
     if let Some(kind) = session.view.active_view.as_deref() {
         let members = collab_members(app, session);
         return column![
-            toolbar(&members, session, window),
+            toolbar(app, &members, session, window),
             crate::plugin_view::surface_view(app, window, kind, "表格视图"),
         ]
         .width(Length::Fill)
@@ -2111,7 +2113,7 @@ pub fn table_view<'a>(app: &'a crate::App, window: iced::window::Id) -> Element<
     let collab_members = collab_members(app, session);
 
     let body = column![
-        toolbar(&collab_members, session, window),
+        toolbar(app, &collab_members, session, window),
         stack.width(Length::Fill).height(Length::Fill),
     ]
     .width(Length::Fill)
@@ -2141,8 +2143,9 @@ fn collab_members(app: &crate::App, session: &TableSession) -> Vec<(iced::Color,
         .collect()
 }
 
-/// 顶部工具条：协作者胶囊 + 行列统计 + 缩放 + ··· 菜单。
+/// 顶部工具条：视图切换 + 协作者胶囊 + 行列统计 + 缩放 + ··· 菜单。
 fn toolbar<'a>(
+    app: &'a crate::App,
     collab_members: &[(iced::Color, String)],
     session: &'a TableSession,
     window: iced::window::Id,
@@ -2164,7 +2167,7 @@ fn toolbar<'a>(
     };
     let collab_pills: Element<'static, Message> = crate::layout_view::collab_pill_row(collab_members);
     row![
-        view_select(window),
+        view_select(app, session, window),
         collab_pills,
         dirty_pill,
         space().width(Length::Fill),
@@ -2180,19 +2183,26 @@ fn toolbar<'a>(
     .into()
 }
 
-/// 视图切换下拉（内置「表格」；插件表格视图随插件路线接入）。
-fn view_select(window: iced::window::Id) -> Element<'static, Message> {
-    iced::widget::button(
-        row![
-            text("视图").size(pal::fs_caption()).color(pal::TEXT_MUTED),
-            text("表格").size(pal::fs_caption()).color(pal::TEXT_PRIMARY),
-            crate::ui::icon::icon("chevron-down", 11.0, pal::TEXT_MUTED),
-        ]
-        .spacing(4),
-    )
-    .padding(iced::Padding::ZERO.horizontal(6.0).vertical(3.0))
-    .style(bar_btn_style())
-    .on_press(Message::Table(TableMsg::OpenViewMenu(window)))
+/// 视图切换下拉：触发器显示当前视图名（内置网格 / 插件表格视图同一弹层切换）。
+fn view_select<'a>(
+    app: &crate::App,
+    session: &TableSession,
+    window: iced::window::Id,
+) -> Element<'a, Message> {
+    let label = crate::layout_view::view_label(
+        app,
+        session.view.active_view.as_deref().unwrap_or("table"),
+    );
+    row![
+        text("视图：").size(pal::fs_caption()).color(pal::TEXT_MUTED),
+        crate::ui::controls::dropdown_trigger(
+            &label,
+            VIEW_TRIGGER_W,
+            Some(Message::Table(TableMsg::OpenViewMenu(window))),
+        ),
+    ]
+    .spacing(4)
+    .align_y(alignment::Vertical::Center)
     .into()
 }
 

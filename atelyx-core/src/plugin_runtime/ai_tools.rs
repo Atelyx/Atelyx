@@ -177,24 +177,32 @@ impl PluginRuntime {
         }
     }
 
-    /// 插件回报一次工具调用结果。callId 不属于该插件或已摘除（超时 / 停用）时是空操作。
+    /// 插件回报一次工具调用结果。`call_id` 不在册（超时 / 停用后迟到）或归属不符即回可读错误——
+    /// 插件据此区分「已进模型上下文」与「迟到被丢弃」。
     pub(crate) fn resolve_tool_result(
         &self,
         plugin_id: &str,
         call_id: &str,
         content: String,
         is_error: bool,
-    ) {
+    ) -> Result<(), String> {
         let waiter = {
             let mut calls = self.tool_calls.lock().unwrap();
             match calls.get(call_id) {
                 Some((owner, _)) if owner == plugin_id => calls.remove(call_id),
-                _ => None,
+                Some(_) => return Err(format!("工具调用不属于本插件：{call_id}")),
+                None => {
+                    return Err(format!(
+                        "工具调用已收场或不存在：{call_id}（迟到结果不会进入模型上下文）"
+                    ))
+                }
             }
         };
         if let Some((_, tx)) = waiter {
-            let _ = tx.send(Ok(PluginToolOutput { content, is_error }));
+            tx.send(Ok(PluginToolOutput { content, is_error }))
+                .map_err(|_| format!("工具调用已收场：{call_id}（结果未送达）"))?;
         }
+        Ok(())
     }
 
     /// 让某插件全部在途工具调用以可读失败收场（插件停用 / 失败 / 崩溃时调用）。

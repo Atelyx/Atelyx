@@ -1,6 +1,7 @@
 //! 插件自绘画布部件：执行插件提交的绘图指令清单（`canvas.submit` 存档），指针事件按节点声明
-//! 子集回发（命中由插件按指令几何自算）。缓存按「清单 Arc 指针 + 尺寸 + 界面字体族变更计数」
-//! 失效——清单整发整换，指针不变即清单未变，直接复用上次几何。
+//! 子集回发（命中由插件按指令几何自算）。缓存按「清单 Arc 指针 + 尺寸 + 界面字体族变更计数 +
+//! 界面图片句柄代数」失效——清单整发整换，指针不变即清单未变；界面图片异步就绪时清单可以不变，
+//! 靠图片代数作废旧几何，否则首帧的图片空洞不会自愈。
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -30,6 +31,8 @@ pub struct CanvasState {
     list_key: std::cell::Cell<usize>,
     /// 上次绘制用的界面字体族变更计数；换族后文字几何要重画（清单不变也得失效）。
     font_epoch: std::cell::Cell<u64>,
+    /// 上次绘制用的界面图片句柄代数；图片异步就绪后按此重画，补上首帧跳过的 `Image`。
+    image_epoch: std::cell::Cell<u64>,
     /// 按下中：Move / Up 走绝对坐标换算（拖出画布不丢事件，抬起为止）。
     pressed: std::cell::Cell<bool>,
     /// 悬停中：Leave 按「从内到外」边沿触发，不逐帧重发。
@@ -46,6 +49,7 @@ impl Default for CanvasState {
             cache: canvas::Cache::new(),
             list_key: std::cell::Cell::new(0),
             font_epoch: std::cell::Cell::new(0),
+            image_epoch: std::cell::Cell::new(0),
             pressed: std::cell::Cell::new(false),
             inside: std::cell::Cell::new(false),
             last_press: std::cell::RefCell::new(None),
@@ -193,10 +197,15 @@ impl canvas::Program<Message> for PluginCanvas<'_> {
             .map(|list| Arc::as_ptr(list) as usize)
             .unwrap_or_default();
         let epoch = crate::ui::epoch();
-        if state.list_key.get() != list_key || state.font_epoch.get() != epoch {
+        let image_epoch = self.app.note_image_epoch;
+        if state.list_key.get() != list_key
+            || state.font_epoch.get() != epoch
+            || state.image_epoch.get() != image_epoch
+        {
             state.cache.clear();
             state.list_key.set(list_key);
             state.font_epoch.set(epoch);
+            state.image_epoch.set(image_epoch);
         }
         // 节点或尺寸变化即上报插件：绘制拿到的是真实分配尺寸，这是插件对齐坐标与滚动范围的唯一来源
         let reported = (node_identity(&self.node_id), bounds.width, bounds.height);

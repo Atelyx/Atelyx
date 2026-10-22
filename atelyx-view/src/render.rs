@@ -562,8 +562,11 @@ where
                 let mut area = mouse_area(inner)
                     .on_enter(hover_msg(ctx, &node.id, true))
                     .on_exit(hover_msg(ctx, &node.id, false));
-                if let Some(msg) = on_press {
-                    area = area.on_press(msg);
+                // 占位期只留进出热区：不可见的钮不接按住（悬停态先落账，下一帧才带按下目标）
+                if shown {
+                    if let Some(msg) = on_press {
+                        area = area.on_press(msg);
+                    }
                 }
                 area.into()
             } else {
