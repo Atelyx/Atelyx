@@ -407,14 +407,23 @@ fn message_flow(app: &App, window: iced::window::Id) -> iced::Element<'_, Messag
         actions: Some(actions),
         streaming_id,
         toggle: crate::chat_stream::ToggleRoute::Panel,
+        selectable: true,
+        selection: app.chat.selection.as_ref(),
     };
     let col = crate::chat_stream::message_column(messages, session, ctx);
     // 覆盖层恒定 Stack 承载、按需追加：显隐不换型（Scrollable ↔ Stack 换型会整树重建、丢滚动位置）
-    let flow = scroll::v(container(col).width(Length::Fill))
-        .id(crate::chat_actions::chat_flow_id())
-        .on_scroll(|v| Message::Chat(ChatMsg::FlowScrolled(v.relative_offset().y)))
-        .width(Length::Fill)
-        .height(Length::Fill);
+    let flow = mouse_area(
+        scroll::v(container(col).width(Length::Fill))
+            .id(crate::chat_actions::chat_flow_id())
+            .on_scroll(|v| Message::Chat(ChatMsg::FlowScrolled(v.relative_offset().y)))
+            .width(Length::Fill)
+            .height(Length::Fill),
+    )
+    .on_right_press(crate::layout_view::selection_popup(
+        window,
+        app.cursor_for(window),
+        crate::markdown_select::SelectionTarget::Chat,
+    ));
     let mut layered = stack![flow].width(Length::Fill).height(Length::Fill);
     if !app.chat.follow_bottom {
         // 上翻即脱离跟随：浮钮一键回底（贴底状态由 on_scroll 恢复）

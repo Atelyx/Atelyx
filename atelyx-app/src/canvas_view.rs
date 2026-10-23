@@ -1244,6 +1244,8 @@ fn card_overlays<'a>(
                             actions: None,
                             streaming_id: None,
                             toggle: crate::chat_stream::ToggleRoute::Canvas,
+                            selectable: false,
+                            selection: None,
                         };
                         crate::chat_stream::message_column(messages, &n.data, ctx)
                     }),

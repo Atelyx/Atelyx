@@ -1,4 +1,4 @@
-//! 只读笔记的拖选复制：与富文本渲染同源的段落（样式片段不拆分），叠加选区高亮与
+//! 只读正文的拖选复制：与富文本渲染同源的段落（样式片段不拆分），叠加选区高亮与
 //! 落点换算；选区真相（文档源字节区间）由应用层持有。
 
 use iced::advanced::graphics::text::cosmic_text;
@@ -32,6 +32,44 @@ impl NoteSelection {
     }
 }
 
+/// 消息正文的拖选段标识：`id` 区分消息与步骤段（防同文互串），`doc_key` = 正文解析缓存键。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SelectScope {
+    pub id: u64,
+    pub doc_key: u64,
+}
+
+/// 对话正文选区：偏移只在本段文档内有效（跨段不拼接）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChatSelection {
+    pub scope: u64,
+    pub doc_key: u64,
+    pub anchor: usize,
+    pub head: usize,
+    /// 左键拖拽在途（全局 Release 收口）。
+    pub dragging: bool,
+}
+
+impl ChatSelection {
+    pub fn range(&self) -> (usize, usize) {
+        (self.anchor.min(self.head), self.anchor.max(self.head))
+    }
+
+    /// 本段的选区区间与拖拽态；段标识或正文缓存键不符 = 不参与
+    /// （他段不串选，正文已替换的旧偏移也不落高亮）。
+    pub fn for_scope(&self, scope: SelectScope) -> Option<((usize, usize), bool)> {
+        (self.scope == scope.id && self.doc_key == scope.doc_key)
+            .then(|| (self.range(), self.dragging))
+    }
+}
+
+/// 右键复制菜单的作用对象。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelectionTarget {
+    Note,
+    Chat,
+}
+
 /// 一个样式片段的源区间与对齐口径。`linear` = 可见文本与源区间逐字节对应；
 /// 否则整段替换（图片占位、角标等），选择时按整体处理。
 pub struct SelectRun {
@@ -52,10 +90,13 @@ pub struct SelectableRich<'a> {
     size: f32,
     line_height: f32,
     align_x: alignment::Horizontal,
+    width: Length,
     color: Option<Color>,
     /// 文档源区间（已排序；None = 无选区）
     selection: Option<(usize, usize)>,
     dragging: bool,
+    /// 消息正文段（Some = 上报对话选区；None = 笔记整篇选区）。
+    chat: Option<SelectScope>,
 }
 
 impl<'a> SelectableRich<'a> {
@@ -66,9 +107,11 @@ impl<'a> SelectableRich<'a> {
             size: 16.0,
             line_height: 1.0,
             align_x: alignment::Horizontal::Left,
+            width: Length::Fill,
             color: None,
             selection: None,
             dragging: false,
+            chat: None,
         }
     }
 
@@ -87,6 +130,12 @@ impl<'a> SelectableRich<'a> {
         self
     }
 
+    /// 段落宽度（缺省撑满；短句气泡用 `Shrink` 按内容收缩）。
+    pub fn width(mut self, width: Length) -> Self {
+        self.width = width;
+        self
+    }
+
     pub fn color_maybe(mut self, color: Option<Color>) -> Self {
         self.color = color;
         self
@@ -101,6 +150,22 @@ impl<'a> SelectableRich<'a> {
     /// 拖拽在途标志：与选区区间分开传——锚点尚未移动时也要接住后续移动。
     pub fn dragging(mut self, dragging: bool) -> Self {
         self.dragging = dragging;
+        self
+    }
+
+    /// 消息正文段的选区归属：只有段标识相符的选区参与本段高亮与拖拽。
+    pub fn chat_selection(
+        mut self,
+        scope: SelectScope,
+        selection: Option<&ChatSelection>,
+    ) -> Self {
+        self.chat = Some(scope);
+        if let Some((range, dragging)) = selection.and_then(|s| s.for_scope(scope)) {
+            self.dragging = dragging;
+            if range.0 < range.1 {
+                self.selection = Some(range);
+            }
+        }
         self
     }
 }
@@ -262,7 +327,7 @@ impl Widget<Message, iced::Theme, iced::Renderer> for SelectableRich<'_> {
     }
 
     fn size(&self) -> Size<Length> {
-        Size::new(Length::Fill, Length::Shrink)
+        Size::new(self.width, Length::Shrink)
     }
 
     fn layout(
@@ -271,7 +336,7 @@ impl Widget<Message, iced::Theme, iced::Renderer> for SelectableRich<'_> {
         _renderer: &iced::Renderer,
         limits: &layout::Limits,
     ) -> layout::Node {
-        layout::sized(limits, Length::Fill, Length::Shrink, |limits| {
+        layout::sized(limits, self.width, Length::Shrink, |limits| {
             let bounds = limits.max();
             let state = tree.state.downcast_mut::<State>();
             let text = || advanced_text::Text {
@@ -426,7 +491,10 @@ impl Widget<Message, iced::Theme, iced::Renderer> for SelectableRich<'_> {
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 let state = tree.state.downcast_ref::<State>();
                 if let Some(offset) = self.offset_at(&self.geometry(&state.paragraph), position) {
-                    shell.publish(Message::NoteSelectStart(offset));
+                    shell.publish(match self.chat {
+                        Some(scope) => Message::ChatSelectStart { scope, offset },
+                        None => Message::NoteSelectStart(offset),
+                    });
                 }
             }
             // 拖选在途：只有光标落在本块内才按本块几何推进（块间空隙保留上一个落点）
@@ -436,7 +504,10 @@ impl Widget<Message, iced::Theme, iced::Renderer> for SelectableRich<'_> {
                 }
                 let state = tree.state.downcast_ref::<State>();
                 if let Some(offset) = self.offset_at(&self.geometry(&state.paragraph), position) {
-                    shell.publish(Message::NoteSelectTo(offset));
+                    shell.publish(match self.chat {
+                        Some(scope) => Message::ChatSelectTo { scope: scope.id, offset },
+                        None => Message::NoteSelectTo(offset),
+                    });
                 }
             }
             _ => {}
@@ -514,5 +585,30 @@ mod tests {
         assert_eq!(widget.offset_at(&cells, right), Some(1));
         let merged = selection_rects(&cells, (0, 2));
         assert_eq!(merged.len(), 1);
+    }
+
+    /// 选区只落到所属消息段：他段标识即便偏移相同也不参与高亮与拖拽。
+    #[test]
+    fn chat_selection_is_scoped_to_its_part() {
+        let selection =
+            ChatSelection { scope: 7, doc_key: 11, anchor: 5, head: 2, dragging: true };
+        assert_eq!(selection.range(), (2, 5));
+        assert_eq!(
+            selection.for_scope(SelectScope { id: 7, doc_key: 11 }),
+            Some(((2, 5), true))
+        );
+        // 他段不串选；同段但正文已替换 = 旧偏移作废
+        assert_eq!(selection.for_scope(SelectScope { id: 8, doc_key: 11 }), None);
+        assert_eq!(selection.for_scope(SelectScope { id: 7, doc_key: 12 }), None);
+
+        let own = SelectableRich::new(vec![], vec![])
+            .chat_selection(SelectScope { id: 7, doc_key: 11 }, Some(&selection));
+        assert_eq!(own.selection, Some((2, 5)));
+        assert!(own.dragging);
+
+        let other = SelectableRich::new(vec![], vec![])
+            .chat_selection(SelectScope { id: 8, doc_key: 11 }, Some(&selection));
+        assert_eq!(other.selection, None);
+        assert!(!other.dragging);
     }
 }

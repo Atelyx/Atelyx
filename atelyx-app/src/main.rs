@@ -401,8 +401,14 @@ enum Message {
     NoteSelectStart(usize),
     /// 只读档拖选移动中的落点（文档源字节偏移）。
     NoteSelectTo(usize),
-    /// 只读档复制选区（Ctrl/Cmd+C 未被输入部件捕获时；未命中笔记选区则回落到命令路由）。
-    NoteCopy { key: keyboard::Key, mods: keyboard::Modifiers },
+    /// 对话正文拖选起点（消息段标识 + 段内文档源字节偏移）。
+    ChatSelectStart { scope: markdown_select::SelectScope, offset: usize },
+    /// 对话正文拖选移动中的落点（段标识 + 段内偏移）。
+    ChatSelectTo { scope: u64, offset: usize },
+    /// 选区复制（Ctrl/Cmd+C 未被输入部件捕获时；未命中选区则回落到命令路由）。
+    CopyKey { key: keyboard::Key, mods: keyboard::Modifiers },
+    /// 右键菜单「复制」。
+    CopySelection(markdown_select::SelectionTarget),
     /// 编辑面事件（部件只上报，正文/光标/选区真相在应用层）。
     Editor(markdown_edit::EditorEvent),
     /// 属性面板消息（frontmatter 类型化编辑）。
@@ -1318,10 +1324,10 @@ pub struct App {
     pub note_mode: NoteMode,
     /// 笔记面板内按压标志（NotePressInside 同批置位，全局 Press 消费）。
     note_press_inside: bool,
-    /// 只读档选区（源字节偏移；预览解析产物重建或面板外按压即清空）。
+    /// 只读档选区（源字节偏移；预览解析产物重建、正文外松手或切文件即清空）。
     pub note_selection: Option<markdown_select::NoteSelection>,
-    /// 本次按压已由只读档正文拖选接手（全局 Press 据此保留选区）。
-    note_select_seen: bool,
+    /// 本次按压落在选区右键菜单内（松手时保留选区：菜单项在释放时才回发复制）。
+    selection_menu_press: bool,
     /// 进编辑档待落光标（只读档双击进入时置位，首个编辑面事件消化）。
     note_edit_caret_pending: bool,
     /// 只读档的解析产物：进入只读档或文件载入时重建，避免每帧重解析。
@@ -1616,7 +1622,7 @@ impl App {
                 note_mode: NoteMode::Read,
                 note_press_inside: false,
                 note_selection: None,
-                note_select_seen: false,
+                selection_menu_press: false,
                 note_edit_caret_pending: false,
                 preview_doc: None,
                 note_images: markdown_view::ImageHandles::new(),
@@ -2137,7 +2143,6 @@ impl App {
                     head: offset,
                     dragging: true,
                 });
-                self.note_select_seen = true;
                 Task::none()
             }
             Message::NoteSelectTo(offset) => {
@@ -2148,11 +2153,40 @@ impl App {
                 }
                 Task::none()
             }
-            Message::NoteCopy { key, mods } => {
+            Message::ChatSelectStart { scope, offset } => {
+                self.chat.selection = Some(markdown_select::ChatSelection {
+                    scope: scope.id,
+                    doc_key: scope.doc_key,
+                    anchor: offset,
+                    head: offset,
+                    dragging: true,
+                });
+                Task::none()
+            }
+            Message::ChatSelectTo { scope, offset } => {
+                if let Some(sel) = self.chat.selection.as_mut() {
+                    if sel.dragging && sel.scope == scope {
+                        sel.head = offset;
+                    }
+                }
+                Task::none()
+            }
+            Message::CopyKey { key, mods } => {
                 if self.note_mode == NoteMode::Read && self.note_selection.is_some() {
                     self.copy_note_selection()
+                } else if let Some(task) = self.chat_copy_task() {
+                    task
                 } else {
                     self.on_key_command(key, mods)
+                }
+            }
+            Message::CopySelection(target) => {
+                self.dismiss_popup();
+                match target {
+                    markdown_select::SelectionTarget::Note => self.copy_note_selection(),
+                    markdown_select::SelectionTarget::Chat => {
+                        self.chat_copy_task().unwrap_or(Task::none())
+                    }
                 }
             }
             Message::Editor(event) => self.on_editor(event),
@@ -2874,11 +2908,10 @@ impl App {
                     .is_some_and(|rect| rect.contains(cursor));
                 // 笔记面板内按压标志：同批 widget 消息（PressRelay）先行置位，此处一次性消费
                 let note_press_inside = std::mem::take(&mut self.note_press_inside);
-                // 只读档选区：同批正文拖选起点先行置位；否则本次按压即清空选区
-                let note_select_seen = std::mem::take(&mut self.note_select_seen);
-                if !note_select_seen {
-                    self.note_selection = None;
-                }
+                // 选区右键菜单内按压（外点已在同批先行关闭弹层）：松手时保留选区
+                self.selection_menu_press = self.popup.as_ref().is_some_and(|(w, open)| {
+                    *w == id && matches!(open.state, PopupState::SelectionMenu { .. })
+                });
                 // 对话输入面外点失焦：同批输入部件按压（Focus 事件）先行置位
                 let chat_press_inside = std::mem::take(&mut self.chat.press_inside);
                 if self.chat.input.focused && !chat_press_inside {
@@ -3086,8 +3119,22 @@ impl App {
                 Task::none()
             }
             Message::Release => {
+                // 选区：拖选在途 → 松手收口并保留；按压落在选区菜单内 → 保留（复制在释放时
+                // 才回发）；其余 = 按压在正文外 → 清空。
+                let keep = std::mem::take(&mut self.selection_menu_press);
                 if let Some(sel) = self.note_selection.as_mut() {
-                    sel.dragging = false;
+                    if sel.dragging {
+                        sel.dragging = false;
+                    } else if !keep {
+                        self.note_selection = None;
+                    }
+                }
+                if let Some(sel) = self.chat.selection.as_mut() {
+                    if sel.dragging {
+                        sel.dragging = false;
+                    } else if !keep {
+                        self.chat.selection = None;
+                    }
                 }
                 self.press = None;
                 self.tab_press = None;
@@ -5891,6 +5938,24 @@ impl App {
         iced::clipboard::write(text)
     }
 
+    /// 对话正文选区复制：命中非空选区才产出任务，否则交回命令路由（表格复制等）。
+    fn chat_copy_task(&self) -> Option<Task<Message>> {
+        let selection = self.chat.selection?;
+        let (from, to) = selection.range();
+        if from >= to {
+            return None;
+        }
+        let doc = self.chat.docs.get(&selection.doc_key)?;
+        let text = markdown_view::selected_text(
+            doc,
+            &self.theme,
+            &self.note_images,
+            true,
+            (from, to),
+        );
+        (!text.is_empty()).then(|| iced::clipboard::write(text))
+    }
+
     /// 进入预览编辑档：不揭示任何块、不持光标，首帧全篇按块渲染。
     fn enter_edit_mode(&mut self) {
         self.note_mode = NoteMode::Edit;
@@ -6873,8 +6938,8 @@ impl App {
                     key: keyboard::Key::Named(keyboard::key::Named::Escape),
                     ..
                 }) => Some(Message::Escape(window)),
-                // 只读笔记选区复制：输入部件已捕获的 Ctrl/Cmd+C 走其原生复制；未命中笔记
-                // 选区时在处理器里回落命令路由（表格复制等）
+                // 正文选区复制：输入部件已捕获的 Ctrl/Cmd+C 走其原生复制；未命中笔记 /
+                // 对话选区时在处理器里回落命令路由（表格复制等）
                 Event::Keyboard(keyboard::Event::KeyPressed {
                     key: keyboard::Key::Character(c),
                     modifiers,
@@ -6883,7 +6948,7 @@ impl App {
                     && (modifiers.control() || modifiers.logo())
                     && status == iced::event::Status::Ignored =>
                 {
-                    Some(Message::NoteCopy { key: keyboard::Key::Character(c), mods: modifiers })
+                    Some(Message::CopyKey { key: keyboard::Key::Character(c), mods: modifiers })
                 }
                 // 命令候选键（撤销/重做/剪贴板/清空 + Ctrl+S/A 兜底）：置于具名键臂之后，
                 // 不抢占 NavKey / CharKey / Tab / Escape 既有路径

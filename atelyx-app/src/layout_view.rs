@@ -292,6 +292,8 @@ pub(crate) enum PopupState {
     LicenseInfo,
     /// 历史记录弹层（居中模态；kind+file 定位侧文件）。
     HistoryBrowser { kind: atelyx_core::history::HistoryKind, file: String },
+    /// 只读正文 / 对话消息的选区右键菜单（复制）。
+    SelectionMenu { target: crate::markdown_select::SelectionTarget },
     /// 插件菜单 / 下拉节点的弹层（条目由插件界面树带来，点击回发节点事件）。
     PluginList { entries: Vec<atelyx_view::render::PopupEntry<Message>> },
 }
@@ -340,6 +342,7 @@ impl PopupState {
             PopupState::SpaceMembers => 320.0,
             PopupState::SpaceInvite => 320.0,
             PopupState::NoteMenu => 144.0,
+            PopupState::SelectionMenu { .. } => 128.0,
             PopupState::PropTypeMenu { .. } => 128.0,
             PopupState::TableCellMenu => 128.0,
             PopupState::TableFieldMenu { .. } => 176.0,
@@ -407,6 +410,15 @@ pub(crate) fn btn_popup_min(window: iced::window::Id, cursor: Point, state: Popu
 /// 右键菜单类弹层：锚点 = 光标点，无翻转。
 fn ctx_popup(window: iced::window::Id, cursor: Point, state: PopupState) -> Message {
     Message::PopupOpen(window, PopupOpen { point: cursor, flip_y: None, state, min_width: 0.0 })
+}
+
+/// 只读正文右键：选区复制菜单（锚点 = 光标点）。
+pub(crate) fn selection_popup(
+    window: iced::window::Id,
+    cursor: Point,
+    target: crate::markdown_select::SelectionTarget,
+) -> Message {
+    ctx_popup(window, cursor, PopupState::SelectionMenu { target })
 }
 
 /// 设置-关于：开源许可模态的打开消息（居中模态不走锚点几何）。
@@ -3046,9 +3058,14 @@ fn note_view(app: &App, window: iced::window::Id) -> Element<'_, Message> {
             if app.note_mode == NoteMode::Edit {
                 wiki_picker_overlay(app, mouse_area(scrolled).into())
             } else {
-                // 只读档双击正文进预览编辑档（光标落点由编辑面按释放点换算）
+                // 只读档双击正文进预览编辑档（光标落点由编辑面按释放点换算）；右键 = 选区复制菜单
                 mouse_area(scrolled)
                     .on_double_click(Message::NoteEnterEdit)
+                    .on_right_press(selection_popup(
+                        window,
+                        cursor,
+                        crate::markdown_select::SelectionTarget::Note,
+                    ))
                     .into()
             }
         }
@@ -3958,6 +3975,35 @@ fn popup_element<'a>(
             (0, MenuEntry::action_icon("粘贴", "clipboard-paste", Message::Table(crate::table_view::TableMsg::Menu(Box::new(crate::table_view::TableMsg::Paste))))),
             (0, MenuEntry::action_icon("格式", "type", Message::Table(crate::table_view::TableMsg::ShowStyleBar))),
         ],
+        PopupState::SelectionMenu { target } => {
+            let has_text = match target {
+                crate::markdown_select::SelectionTarget::Note => {
+                    app.note_mode == NoteMode::Read
+                        && app.note_selection.is_some_and(|s| {
+                            let (from, to) = s.range();
+                            from < to
+                        })
+                }
+                crate::markdown_select::SelectionTarget::Chat => {
+                    app.chat.selection.is_some_and(|s| {
+                        let (from, to) = s.range();
+                        from < to
+                    })
+                }
+            };
+            vec![(
+                0,
+                MenuEntry::Action {
+                    label: "复制".into(),
+                    icon: Some("copy".into()),
+                    danger: false,
+                    disabled: !has_text,
+                    on_press: has_text.then_some(Message::CopySelection(*target)),
+                    note: None,
+                    hint: None,
+                },
+            )]
+        }
         PopupState::TableFieldMenu { field_id } => {
             let fid = field_id.clone();
             let ftype = app.table.as_ref().and_then(|s| {

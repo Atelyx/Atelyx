@@ -17,7 +17,9 @@ use iced::widget::{
 use iced::{Border, Color, Element, Font, Length, Padding, Size};
 
 use crate::markdown_edit::ParagraphT;
-use crate::markdown_select::{NoteSelection, SelectRun, SelectableRich};
+use crate::markdown_select::{
+    ChatSelection, NoteSelection, SelectRun, SelectScope, SelectableRich,
+};
 use crate::ui::text;
 use crate::Message;
 
@@ -164,10 +166,43 @@ pub fn document_body_styled<'a>(
     document_body_with(doc, theme, images, soft_break, scale, body, SelectMode::Off)
 }
 
-/// 只读面的拖选档位：笔记只读档可起选（当前选区可空），其余只读面用纯富文本。
+/// 对话正文体（可拖选）：`scope` 标识本消息段，`selection` 为应用层选区（按段隔离）。
+pub fn document_body_select<'a>(
+    doc: &'a MarkdownDocument,
+    theme: &iced::Theme,
+    images: &'a ImageHandles,
+    soft_break: bool,
+    scale: f32,
+    scope: SelectScope,
+    selection: Option<&'a ChatSelection>,
+) -> Element<'a, Message> {
+    document_body_with(
+        doc,
+        theme,
+        images,
+        soft_break,
+        scale,
+        BodyStyle::default(),
+        SelectMode::Chat { scope, selection },
+    )
+}
+
+/// 只读面的拖选档位：笔记只读档整篇一个文档；对话按消息段各持一份选区
+/// （只读面其余调用方用纯富文本）。
+#[derive(Clone, Copy)]
 enum SelectMode<'a> {
     Off,
     Note(Option<&'a NoteSelection>),
+    Chat {
+        scope: SelectScope,
+        selection: Option<&'a ChatSelection>,
+    },
+}
+
+impl SelectMode<'_> {
+    fn selectable(&self) -> bool {
+        !matches!(self, Self::Off)
+    }
 }
 
 fn document_body_with<'a>(
@@ -179,10 +214,6 @@ fn document_body_with<'a>(
     body: BodyStyle,
     select: SelectMode<'a>,
 ) -> Element<'a, Message> {
-    let (selectable, selection) = match select {
-        SelectMode::Off => (false, None),
-        SelectMode::Note(selection) => (true, selection),
-    };
     let render = Render {
         pal: Palette::from_theme(theme),
         opts: link_options(),
@@ -191,8 +222,7 @@ fn document_body_with<'a>(
         soft_break,
         scale,
         body,
-        selectable,
-        selection,
+        select,
     };
     let mut body = column![].width(Length::Fill).spacing(0);
     for chunk in render.chunks(&doc.source, &doc.blocks) {
@@ -505,8 +535,7 @@ pub fn edit_rows<'a>(
         soft_break: true,
         scale: 1.0,
         body: BodyStyle::default(),
-        selectable: false,
-        selection: None,
+        select: SelectMode::Off,
     };
     render.rows(source, blocks)
 }
@@ -523,13 +552,14 @@ struct Render<'a> {
     scale: f32,
     /// 整体样式覆盖（插件正文；缺省 = 主题语义）。
     body: BodyStyle,
-    /// 行内段落可拖选（仅笔记只读档）。
-    selectable: bool,
-    /// 应用层选区（文档源字节区间；随 `selectable` 下发给段落）。
-    selection: Option<&'a NoteSelection>,
+    /// 行内段落拖选档位（含应用层选区；随档位下发给段落）。
+    select: SelectMode<'a>,
 }
 
 impl Render<'_> {
+    fn selectable(&self) -> bool {
+        self.select.selectable()
+    }
     // 字号助手：渲染链上的字号一律经此，随 scale 等比。
     fn base(&self) -> f32 {
         base_size() * self.scale
@@ -951,7 +981,7 @@ impl Render<'_> {
         }
         // 剥引用前缀后的文本与源区间不再逐字节对应：选择按整段落项内容区间
         let mut runs = self.runs(&stripped, &inline, self.text_style());
-        if self.selectable {
+        if self.selectable() {
             for run in &mut runs {
                 run.src = (content_from, content_to);
             }
@@ -1173,8 +1203,7 @@ fn code_body<'a>(code: &str, hit: Option<((usize, usize), f32)>, scale: f32) -> 
                 soft_break: self.soft_break,
                 scale: self.scale,
                 body: self.body.clone(),
-                selectable: self.selectable,
-                selection: self.selection,
+                select: self.select,
             };
             table::column(head, move |row: usize| {
                 let cell = rows.get(row).and_then(|r| r.get(i));
@@ -1511,7 +1540,7 @@ fn code_body<'a>(code: &str, hit: Option<((usize, usize), f32)>, scale: f32) -> 
         color: Option<Color>,
         align: alignment::Horizontal,
     ) -> Element<'a, Message> {
-        if !self.selectable {
+        if !self.selectable() {
             return rich(self.run_spans(runs.to_vec()), size, line_height, color, align);
         }
         let mut spans = Vec::with_capacity(runs.len());
@@ -1525,11 +1554,19 @@ fn code_body<'a>(code: &str, hit: Option<((usize, usize), f32)>, scale: f32) -> 
             .line_height(line_height)
             .align_x(align)
             .color_maybe(color);
-        if let Some(sel) = self.selection {
-            widget = widget.dragging(sel.dragging);
-            let (from, to) = sel.range();
-            if from < to {
-                widget = widget.selection((from, to));
+        match self.select {
+            SelectMode::Off => {}
+            SelectMode::Note(selection) => {
+                if let Some(sel) = selection {
+                    widget = widget.dragging(sel.dragging);
+                    let (from, to) = sel.range();
+                    if from < to {
+                        widget = widget.selection((from, to));
+                    }
+                }
+            }
+            SelectMode::Chat { scope, selection } => {
+                widget = widget.chat_selection(scope, selection);
             }
         }
         widget.into()
@@ -1698,8 +1735,7 @@ pub fn selected_text(
         soft_break,
         scale: 1.0,
         body: BodyStyle::default(),
-        selectable: false,
-        selection: None,
+        select: SelectMode::Off,
     };
     let mut pieces = Vec::new();
     render.collect_text(&doc.source, &doc.blocks, range, &mut pieces);

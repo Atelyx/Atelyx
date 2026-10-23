@@ -144,6 +144,8 @@ pub struct ChatState {
     pub sessions: Vec<Value>,
     /// 消息正文的 markdown 解析缓存（键 = 源文本哈希；按会话刷新时收敛）。
     pub docs: std::collections::HashMap<u64, atelyx_core::markdown::MarkdownDocument>,
+    /// 消息正文选区（按消息段隔离；选区所在正文被替换即作废）。
+    pub selection: Option<crate::markdown_select::ChatSelection>,
     /// 发送 / 重生成在等 Agent 提示词取回（空间模式：提示词文件在服务端）。
     pub pending_action: Option<PendingChatAction>,
     /// 已取回待用的 Agent 提示词正文（一次性，随本次发送消费）。
@@ -300,6 +302,10 @@ impl ChatState {
                 if self.docs.len() > used.len() {
                     self.docs.retain(|hash, _| used.contains(hash));
                 }
+                // 选区按正文源偏移持有：所选正文被替换（流式增长 / 消息变化）后偏移失效
+                if self.selection.is_some_and(|sel| !used.contains(&sel.doc_key)) {
+                    self.selection = None;
+                }
                 let wire = session_wire(session_id, messages);
                 match self.session_mut(session_id) {
                     Some(slot) => *slot = wire,
@@ -310,6 +316,8 @@ impl ChatState {
                 self.sessions.retain(|s| s["id"] != json!(session_id));
                 if self.active.as_deref() == Some(session_id) {
                     self.active = None;
+                    // 显示中会话已消失：选区随正文离场作废
+                    self.selection = None;
                 }
             }
         }
@@ -506,6 +514,7 @@ fn prepare_load(app: &mut App) {
     app.chat.streaming.clear();
     app.chat.compacting = None;
     app.chat.docs.clear();
+    app.chat.selection = None;
     app.chat.delete_confirm = None;
     app.chat.rollback_confirm = None;
     app.chat.pending_action = None;
@@ -530,6 +539,7 @@ fn apply_snapshot(app: &mut App, snap: StoreSnapshot) {
     app.chat.streaming.clear();
     app.chat.compacting = None;
     app.chat.docs.clear();
+    app.chat.selection = None;
     app.chat.delete_confirm = None;
     app.chat.rollback_confirm = None;
     app.chat.follow_bottom = true;
@@ -546,17 +556,23 @@ pub fn detach_vault(app: &mut App) {
     app.chat.persist_error = None;
 }
 
-/// 消息集引用的正文源哈希（docs 缓存保留集计算用）。
+/// 消息集引用的正文解析缓存键（与 `refresh_session` 的入库键同口径：
+/// 带引用的 user 显示正文按「源 + 引用签名」计键，否则后台刷新会把在显会话的胶囊文档当陈旧键清掉）。
 fn collect_doc_keys(messages: &[Value], keys: &mut HashSet<u64>) {
     for m in messages {
+        let sig = mention_sig(m);
         let sources = [
             m.get("displayContent").and_then(Value::as_str),
             m.get("content").and_then(Value::as_str),
         ];
         for src in sources.into_iter().flatten() {
-            if !src.is_empty() {
-                keys.insert(source_hash(src));
+            if src.is_empty() {
+                continue;
             }
+            let user_display = m["role"] == json!("user")
+                && !sig.is_empty()
+                && m.get("displayContent").and_then(Value::as_str) == Some(src);
+            keys.insert(if user_display { doc_key(src, &sig) } else { source_hash(src) });
         }
         if let Some(steps) = m.get("steps").and_then(Value::as_array) {
             for st in steps {
@@ -916,6 +932,7 @@ fn update_inner(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
             app.chat.active = Some(id.clone());
             app.chat.rollback_confirm = None;
             app.chat.error = None;
+            app.chat.selection = None;
             // 切换会话即重建该会话的解析缓存（装载后历史消息不退化纯文本）
             app.chat.refresh_session(&id);
             // 切会话直接呈现到最新消息（贴底跟随一并复位）
@@ -924,6 +941,7 @@ fn update_inner(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
         }
         ChatMsg::NewSession => {
             app.chat.active = None;
+            app.chat.selection = None;
             // 新会话继承上次使用的 Agent（面板覆盖；未选过 = 内置「对话」走名册缺省）
             app.chat.draft_agent_id = app.chat.agent_override.clone();
             app.chat.error = None;
@@ -2676,6 +2694,8 @@ fn delete_session_now(app: &mut App, id: &str) -> Result<(), String> {
     app.chat.sessions.retain(|s| s["id"] != json!(id));
     if app.chat.active.as_deref() == Some(id) {
         app.chat.active = latest_session_id(&app.chat.sessions);
+        // 删掉的是显示中会话：选区随正文离场作废（防复制已删内容）
+        app.chat.selection = None;
     }
     if matches!(app.repo_kind, RepoKind::Local) {
         if let Some(root) = app.vault_root.clone() {
@@ -2922,5 +2942,27 @@ mod tests {
         }
         // 插件自管附件可落在隐藏目录
         assert!(plugin_image_entries(&[".atelyx/temp/chats/a.png".to_string()]).is_ok());
+    }
+
+    /// 后台刷新（另一会话）的保留集必须认得在显会话带引用正文的缓存键，
+    /// 否则胶囊文档被当陈旧键清掉、选区也被误判作废。
+    #[test]
+    fn collect_doc_keys_covers_mention_cache_keys() {
+        let display = "#笔记：a 看这个";
+        let refs = json!([{ "path": "a.md", "label": "a", "refKind": "note" }]);
+        let message = json!({
+            "id": "m1",
+            "role": "user",
+            "displayContent": display,
+            "content": display,
+            "refs": refs,
+        });
+        let mut keys = HashSet::new();
+        collect_doc_keys(&[message], &mut keys);
+        let sig = mention_sig(&json!({ "refs": refs }));
+        assert!(
+            keys.contains(&doc_key(display, &sig)),
+            "带引用的显示正文须按 mention 键计入保留集"
+        );
     }
 }
