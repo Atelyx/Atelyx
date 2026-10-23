@@ -119,6 +119,9 @@ impl ViewMessage for Message {
             ViewMsg::Draft { plugin_id, surface_id, node_id, text, commit } => {
                 Message::PluginDraft { plugin_id, surface_id, node_id, text, commit }
             }
+            ViewMsg::Step { plugin_id, surface_id, node_id, up } => {
+                Message::PluginStep { plugin_id, surface_id, node_id, up }
+            }
             ViewMsg::TextEdit { plugin_id, surface_id, node_id, action } => {
                 Message::PluginTextEdit { plugin_id, surface_id, node_id, action }
             }

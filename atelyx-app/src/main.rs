@@ -578,6 +578,8 @@ enum Message {
         text: Option<String>,
         commit: bool,
     },
+    /// 数字输入步进：按节点声明的 step 增减当前值，立即按 change 上报。
+    PluginStep { plugin_id: String, surface_id: String, node_id: String, up: bool },
     /// 防抖到期：把该节点的草稿上报给插件（`seq` 过期即丢弃）。
     PluginDraftFlush { plugin_id: String, surface_id: String, node_id: String, seq: u64 },
     /// 多行编辑器静默到期：把整段内容上报给插件（`seq` 过期即丢弃）。
@@ -3302,6 +3304,9 @@ impl App {
             }
             Message::PluginDraft { plugin_id, surface_id, node_id, text, commit } => {
                 plugin_actions::on_draft(self, plugin_id, surface_id, node_id, text, commit)
+            }
+            Message::PluginStep { plugin_id, surface_id, node_id, up } => {
+                plugin_actions::on_step(self, plugin_id, surface_id, node_id, up)
             }
             Message::PluginDraftFlush { plugin_id, surface_id, node_id, seq } => {
                 plugin_actions::on_draft_flush(self, plugin_id, surface_id, node_id, seq)

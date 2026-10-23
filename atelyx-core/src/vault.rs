@@ -214,13 +214,17 @@ fn normalize_rel_separators(rel: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
+/// 相对路径是否命中排除文件夹（按统一分隔符切段；`\` 与 `/` 同义）。
+fn hits_exclude_folder(rel: &str, exclude: &[String]) -> bool {
+    let rel = normalize_rel_separators(rel);
+    rel.split('/').any(|seg| exclude.iter().any(|e| e.as_str() == seg))
+}
+
 /// 相对路径是否应被过滤：任一路径段以 `.` 开头（隐藏目录/文件，如 `.atelyx`/`.git`/`.obsidian`）
 /// 或精确命中排除文件夹列表。文件树与全仓库扫描共用此判定，保证显示/扫描语义一致。
 pub fn is_excluded_rel(rel: &str, exclude: &[String]) -> bool {
     let rel = normalize_rel_separators(rel);
-    rel.split('/').any(|seg| {
-        seg.starts_with('.') || exclude.iter().any(|e| e.as_str() == seg)
-    })
+    rel.split('/').any(|seg| seg.starts_with('.') || exclude.iter().any(|e| e.as_str() == seg))
 }
 
 /// 相对路径是否含隐藏段（任一段以 `.` 开头，如 `.atelyx/x`、`a/.git/y`）。AI 工具发现层
@@ -247,6 +251,25 @@ pub fn read_dir_entries(
     rel: &str,
     exclude: &[String],
 ) -> Result<Vec<DirChild>, String> {
+    read_dir_entries_with(root, rel, exclude, false)
+}
+
+/// 目录条目（插件能力面）：与 [`read_dir_entries`] 同口径，但保留 `.` 开头的隐藏项
+/// （插件按显式路径访问 `.atelyx/temp/` 时能列出自己写入的附件）。
+pub fn read_dir_entries_all(
+    root: &Path,
+    rel: &str,
+    exclude: &[String],
+) -> Result<Vec<DirChild>, String> {
+    read_dir_entries_with(root, rel, exclude, true)
+}
+
+fn read_dir_entries_with(
+    root: &Path,
+    rel: &str,
+    exclude: &[String],
+    include_hidden: bool,
+) -> Result<Vec<DirChild>, String> {
     let dir = if rel.is_empty() {
         root.to_path_buf()
     } else {
@@ -259,8 +282,10 @@ pub fn read_dir_entries(
             Some(n) => n.to_string(),
             None => continue,
         };
-        // 单段文件名与 is_excluded_rel 的整段判定等价（隐藏项/排除文件夹），过滤规则只此一处
-        if is_excluded_rel(&name, exclude) {
+        // 单段名：排除文件夹始终过滤；隐藏项只在文件树口径下过滤
+        if hits_exclude_folder(&name, exclude)
+            || (!include_hidden && has_hidden_segment(&name))
+        {
             continue;
         }
         let child_rel = if rel.is_empty() {
@@ -495,15 +520,25 @@ fn validate_relative_path(file: &str) -> Result<PathBuf, String> {
     Ok(clean)
 }
 
-/// 外部工具路径校验：在通用相对路径校验之上拒绝隐藏段（`.atelyx` / `.git` 等——仓库配置与
-/// 密钥所在处不对插件与 AI 工具开放），返回以 `/` 分隔的净化相对路径（空间端点直接使用该形态）。
+/// AI 工具路径校验：在通用相对路径校验之上拒绝隐藏段（`.atelyx` / `.git` 等——仓库配置与
+/// 密钥所在处不对 AI 工具开放），返回以 `/` 分隔的净化相对路径（空间端点直接使用该形态）。
 pub fn validate_tool_path(rel: &str) -> Result<String, String> {
     let clean = validate_relative_path(rel)?;
     let text = clean.to_string_lossy().replace('\\', "/");
     if has_hidden_segment(&text) {
-        return Err(format!("路径不可访问（隐藏目录不对插件与 AI 工具开放）：{rel}"));
+        return Err(format!("路径不可访问（隐藏目录不对 AI 工具开放）：{rel}"));
     }
     Ok(text)
+}
+
+/// 插件能力面路径校验：只拦越界（绝对路径 / `..`），隐藏目录可访问——插件自管的临时附件
+/// 就落在 `.atelyx/temp/` 下。返回以 `/` 分隔的净化相对路径（空间端点直接使用该形态）。
+pub fn validate_plugin_path(rel: &str) -> Result<String, String> {
+    let clean = validate_relative_path(rel)?;
+    let text = clean.to_string_lossy().replace('\\', "/");
+    // 反斜杠在 Unix 上是普通字符：归一后重新校验，防 `..\x` 变成越界路径
+    let clean = validate_relative_path(&text)?;
+    Ok(clean.to_string_lossy().replace('\\', "/"))
 }
 
 /// 校验相对路径安全并 join 仓库根，返回绝对路径（安全 12）。
@@ -3565,6 +3600,50 @@ mod hidden_segment_tests {
         assert!(has_hidden_segment(r".atelyx\config.json"));
         assert!(has_hidden_segment(r"a\.git\config"));
         assert!(!has_hidden_segment(r"a\b.md"));
+    }
+
+    #[test]
+    fn plugin_paths_allow_hidden_segments_but_reject_escapes() {
+        assert_eq!(
+            validate_plugin_path(".atelyx/temp/tables/t1/a.png").unwrap(),
+            ".atelyx/temp/tables/t1/a.png"
+        );
+        assert_eq!(validate_plugin_path("./笔记/a.md").unwrap(), "笔记/a.md");
+        assert!(validate_plugin_path("../x").is_err());
+        assert!(validate_plugin_path(r"..\x").is_err(), "反斜杠形态的越界段同样拒绝");
+        assert!(validate_plugin_path("/x").is_err());
+        assert!(validate_plugin_path("").is_err());
+    }
+
+    #[test]
+    fn plugin_listing_keeps_hidden_entries() {
+        let dir = crate::vault::test_support::TempDir::new("plugin-list");
+        std::fs::create_dir_all(dir.join(".atelyx/temp/tables/t1")).unwrap();
+        std::fs::write(dir.join(".atelyx/temp/tables/t1/a.png"), b"x").unwrap();
+        std::fs::write(dir.join(".secret"), b"x").unwrap();
+        std::fs::create_dir_all(dir.join("private")).unwrap();
+        std::fs::write(dir.join("note.md"), b"x").unwrap();
+
+        let exclude = vec!["private".to_string()];
+        let mut visible: Vec<String> = read_dir_entries(&dir, "", &exclude)
+            .unwrap()
+            .into_iter()
+            .map(|child| child.rel)
+            .collect();
+        visible.sort();
+        assert_eq!(visible, vec!["note.md"], "文件树口径过滤隐藏项");
+
+        let mut all: Vec<String> = read_dir_entries_all(&dir, "", &exclude)
+            .unwrap()
+            .into_iter()
+            .map(|child| child.rel)
+            .collect();
+        all.sort();
+        assert_eq!(all, vec![".atelyx", ".secret", "note.md"], "插件口径保留隐藏项、仍过滤排除文件夹");
+
+        let attachments = read_dir_entries_all(&dir, ".atelyx/temp/tables/t1", &[]).unwrap();
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].rel, ".atelyx/temp/tables/t1/a.png");
     }
 
     #[test]

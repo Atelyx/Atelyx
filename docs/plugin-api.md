@@ -412,6 +412,8 @@ pub enum NodeBody {
         min: Option<f64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         max: Option<f64>,
+        /// 步进值（正数，缺省 1）：节点带 `change` 事件时，输入框右侧渲染上下步进按钮，
+        /// 每次点击按该值增减，结果受 min / max 约束。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         step: Option<f64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2154,6 +2156,9 @@ pub struct ToolResultParams {
 #[serde(rename_all = "camelCase", default)]
 pub struct TableSnapshot {
     pub open: bool,
+    /// 表格稳定 id（改名 / 移动后不变；未打开表格时缺省）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     /// 当前打开表格的仓库相对路径。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
@@ -2164,6 +2169,9 @@ pub struct TableSnapshot {
     /// 用户当前选区（未打开表格或无选区时缺省）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selection: Option<TableSelection>,
+    /// 其他协作者的当前选区（不含本端；未打开表格或无人时缺省）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remote_selections: Vec<TableRemoteSelection>,
 }
 ```
 
@@ -2183,6 +2191,17 @@ pub enum TableSelection {
     Column { field_id: String },
     /// 全表。
     All,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 快照里的远端协作者选区：显示名、身份色（`#rrggbb`）与范围。
+#[serde(rename_all = "camelCase")]
+pub struct TableRemoteSelection {
+    pub name: String,
+    pub color: String,
+    pub selection: TableSelection,
 }
 ```
 

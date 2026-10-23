@@ -255,6 +255,8 @@ pub enum NodeBody {
         min: Option<f64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         max: Option<f64>,
+        /// 步进值（正数，缺省 1）：节点带 `change` 事件时，输入框右侧渲染上下步进按钮，
+        /// 每次点击按该值增减，结果受 min / max 约束。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         step: Option<f64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]

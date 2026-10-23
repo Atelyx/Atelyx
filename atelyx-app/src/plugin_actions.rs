@@ -18,7 +18,7 @@ use atelyx_core::plugin_runtime::{
     NodeBody, ProtocolLinkForm, ReportMode, ScrollEdge, ScrollToParams, SurfaceKind, TakeoverScope,
     ViewEvent, ViewNode, WindowOpenParams, WindowUpdateParams,
 };
-use atelyx_view::support::{declares, node_value_text, report_mode};
+use atelyx_view::support::{declares, format_number, node_value_text, report_mode};
 
 use crate::{App, Message};
 
@@ -1263,6 +1263,81 @@ pub fn on_draft(
     }
 }
 
+/// 数字输入步进：空值直接落到 min（缺省 0），其余按 step 增减后夹在 min / max 内。
+/// 点击是离散动作，不受逐键上报档位影响——结果立即按 change 上行；已在该方向边界时
+/// 不上行重复值。
+pub fn on_step(
+    app: &mut App,
+    plugin_id: String,
+    surface_id: String,
+    node_id: String,
+    up: bool,
+) -> Task<Message> {
+    let key = (plugin_id.clone(), surface_id.clone(), node_id.clone());
+    let found = app
+        .plugin_trees
+        .get(&(plugin_id.clone(), surface_id.clone()))
+        .and_then(|tree| find_node(tree, &node_id))
+        .map(|node| (node.body.clone(), node.events.clone()));
+    let Some((body, events)) = found else {
+        return Task::none();
+    };
+    if !matches!(body, NodeBody::NumberInput { .. }) || !is_editable_input(&body) {
+        return Task::none();
+    }
+    if !events.contains(&EventKind::Change) {
+        return Task::none();
+    }
+    let plugin_value = node_value_text(&body).unwrap_or_default();
+    let current = app
+        .plugin_drafts
+        .get(&key)
+        .map(|draft| input_display(&plugin_value, Some(draft)))
+        .unwrap_or_else(|| plugin_value.clone());
+    let Some(text) = stepped_number_text(&body, &current, up) else {
+        return Task::none();
+    };
+    if same_number(&current, &text) {
+        return Task::none();
+    }
+    // 先按本机步进值显示（插件回显前不回退），插件回显后以它的值为准
+    app.plugin_drafts.insert(
+        key.clone(),
+        InputDraft::edited(text.clone(), &plugin_value, false, report_mode(&body)),
+    );
+    app.plugin_draft_seq.remove(&key);
+    if let Some(value) = number_event_value(&body, &text) {
+        app.plugins
+            .send_view_event(&plugin_id, &surface_id, &node_id, ViewEvent::Change { value });
+    }
+    Task::none()
+}
+
+/// 步进后的数值文本：解析失败（空 / 非数值）时落到 min（缺省 0）而不是叠加一步。
+fn stepped_number_text(body: &NodeBody, text: &str, up: bool) -> Option<String> {
+    let NodeBody::NumberInput { min, max, step, .. } = body else {
+        return None;
+    };
+    let next = match text.trim().parse::<f64>().ok().filter(|v| v.is_finite()) {
+        Some(value) => {
+            let delta = step.filter(|s| s.is_finite() && *s > 0.0).unwrap_or(1.0);
+            if up { value + delta } else { value - delta }
+        }
+        None => min.unwrap_or(0.0),
+    };
+    let next = min.map_or(next, |lo| next.max(lo));
+    let next = max.map_or(next, |hi| next.min(hi));
+    next.is_finite().then(|| format_number(next))
+}
+
+/// 两次输入是否表示同一个数值（步进落到边界时不再重复上行）。
+fn same_number(left: &str, right: &str) -> bool {
+    match (left.trim().parse::<f64>(), right.trim().parse::<f64>()) {
+        (Ok(a), Ok(b)) => a.is_finite() && b.is_finite() && (a - b).abs() < f64::EPSILON,
+        _ => false,
+    }
+}
+
 /// 防抖到期：序号仍是最新才把草稿上报（编辑期间落后的拍次直接丢弃）。
 pub fn on_draft_flush(
     app: &mut App,
@@ -1521,6 +1596,51 @@ mod tests {
         }
     }
 
+    fn stepped_input(min: Option<f64>, max: Option<f64>, step: Option<f64>) -> NodeBody {
+        NodeBody::NumberInput {
+            value: Some(1.0),
+            min,
+            max,
+            step,
+            placeholder: None,
+            read_only: None,
+            report: None,
+        }
+    }
+
+    #[test]
+    fn step_uses_declared_step_and_clamps_bounds() {
+        let body = stepped_input(Some(1.0), Some(5.0), Some(2.0));
+        assert_eq!(stepped_number_text(&body, "1", true).as_deref(), Some("3"));
+        assert_eq!(stepped_number_text(&body, "5", true).as_deref(), Some("5"));
+        assert_eq!(stepped_number_text(&body, "1", false).as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn step_starts_from_min_for_empty_value() {
+        let body = stepped_input(Some(2.5), None, Some(0.5));
+        assert_eq!(stepped_number_text(&body, "", true).as_deref(), Some("2.5"));
+        assert_eq!(stepped_number_text(&body, "  ", false).as_deref(), Some("2.5"));
+    }
+
+    #[test]
+    fn step_defaults_to_one_and_formats_fraction() {
+        let body = stepped_input(None, None, Some(0.25));
+        assert_eq!(stepped_number_text(&body, "1", true).as_deref(), Some("1.25"));
+        let body = stepped_input(None, None, Some(0.1));
+        assert_eq!(stepped_number_text(&body, "0.2", true).as_deref(), Some("0.3"));
+        let body = stepped_input(None, None, Some(0.0));
+        assert_eq!(stepped_number_text(&body, "2.5", false).as_deref(), Some("1.5"));
+    }
+
+    #[test]
+    fn step_ignores_pathological_values() {
+        let body = stepped_input(None, None, Some(f64::INFINITY));
+        assert_eq!(stepped_number_text(&body, "1", true).as_deref(), Some("2"));
+        let body = stepped_input(Some(f64::MAX), None, Some(f64::MAX));
+        assert_eq!(stepped_number_text(&body, &f64::MAX.to_string(), true), None);
+    }
+
     #[test]
     fn plugin_view_kind_roundtrip() {
         let kind = view_kind("com.a.panel", "models");
@@ -1568,6 +1688,13 @@ mod tests {
     fn immediate_draft_still_compares_reported_value() {
         let draft = InputDraft::edited("xy".into(), "x", true, ReportMode::Immediate);
         assert_eq!(input_display("x", Some(&draft)), "x", "逐键档位以插件值为准");
+    }
+
+    /// 步进的草稿把「待上报」标为已上报：插件回显前逐键档位也显示本机步进值。
+    #[test]
+    fn step_draft_shows_local_value_before_plugin_echo() {
+        let draft = InputDraft::edited("3".into(), "1", false, ReportMode::Immediate);
+        assert_eq!(input_display("1", Some(&draft)), "3");
     }
 
     /// 草稿显示规则：插件回显本机刚发的值不改变显示，插件主动改值即接管。

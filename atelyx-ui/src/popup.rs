@@ -29,7 +29,9 @@ pub struct PopupGeom {
 
 /// 钳制 + 翻转（视口边距 6px；下方放不下且上方放得下才翻转）。
 pub fn resolve(spec: &PopupSpec, viewport: Size) -> PopupGeom {
-    let w = spec.width.max(spec.min_width);
+    // 宽度同样受视口约束（窄窗口下长标签弹层不能横向溢出）
+    let max_w = (viewport.width - pal::VIEWPORT_GAP * 2.0).max(0.0);
+    let w = spec.width.max(spec.min_width).min(max_w);
     let h = spec.height;
     let max_x = (viewport.width - w - pal::VIEWPORT_GAP).max(pal::VIEWPORT_GAP);
     let x = spec.anchor.x.clamp(pal::VIEWPORT_GAP, max_x);

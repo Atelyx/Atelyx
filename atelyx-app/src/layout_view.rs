@@ -129,9 +129,9 @@ pub fn estimate_char_w(c: char, font_size: f32) -> f32 {
 }
 
 /// 估算文字宽度（拉丁 ≈6.5px、CJK ≈13.5px / 12px 字号；按字号线性缩放）。
-/// 渲染宽度全部由内容自适应（Shrink），本估算仅服务于拖拽命中几何的插入位判定
-/// （标题栏 tab 条起点/宽度、面板标签条插入索引）；与真实 shaping 存在逐字符
-/// 累积的估宽偏差，标签越多插入位偏差越大，不影响渲染。
+/// 渲染宽度全部由内容自适应（Shrink），本估算服务于拖拽命中几何的插入位判定
+/// （标题栏 tab 条起点/宽度、面板标签条插入索引）与弹层定宽（插件列表）；
+/// 与真实 shaping 存在逐字符累积的估宽偏差，不影响渲染。
 pub fn estimate_text_width(text: &str, font_size: f32) -> f32 {
     text.chars().map(|c| estimate_char_w(c, font_size)).sum()
 }
@@ -296,6 +296,27 @@ pub(crate) enum PopupState {
     PluginList { entries: Vec<atelyx_view::render::PopupEntry<Message>> },
 }
 
+/// 菜单条目左右内衬（与 `ui::menu` 的行内边距同口径）。
+const PLUGIN_LIST_PAD_X: f32 = 24.0;
+/// 「当前」角标两侧的行内间距合计（行 spacing 6 × 2）。
+const PLUGIN_LIST_NOTE_GAP: f32 = 12.0;
+
+/// 插件列表弹层宽度：按最长条目估宽（内衬 + 可选「当前」角标 + 滚动条占位），夹在 176..360。
+fn plugin_list_width(entries: &[atelyx_view::render::PopupEntry<Message>]) -> f32 {
+    let note_w = estimate_text_width("当前", pal::fs_micro());
+    entries
+        .iter()
+        .map(|entry| {
+            let note = if entry.current { note_w + PLUGIN_LIST_NOTE_GAP } else { 0.0 };
+            estimate_text_width(&entry.label, pal::fs_caption())
+                + note
+                + PLUGIN_LIST_PAD_X
+                + scroll::SCROLLBAR_W
+        })
+        .fold(176.0, f32::max)
+        .min(360.0)
+}
+
 impl PopupState {
     fn width(&self) -> f32 {
         match self {
@@ -349,7 +370,7 @@ impl PopupState {
             // 居中模态不走锚点几何，估高由各自 overlay 钳制
             PopupState::LicenseInfo => crate::settings_view::LICENSE_CARD_WIDTH,
             PopupState::HistoryBrowser { .. } => crate::history_browser::CARD_WIDTH,
-            PopupState::PluginList { .. } => 176.0,
+            PopupState::PluginList { entries } => plugin_list_width(entries),
         }
     }
 }
@@ -781,13 +802,15 @@ fn with_overlays<'a>(
 /// 窗口视口尺寸（弹层 / 格式气泡钳制与翻转判据的基准）。
 pub fn viewport_of(app: &App, window: iced::window::Id) -> Size {
     if app.main_id == Some(window) {
-        app.main_size
-    } else {
-        app.os_sizes
-            .get(&window)
-            .copied()
-            .unwrap_or(Size::new(420.0, 560.0))
+        return app.main_size;
     }
+    if let Some(entry) = app.plugin_windows.get(&window) {
+        return entry.size;
+    }
+    app.os_sizes
+        .get(&window)
+        .copied()
+        .unwrap_or(Size::new(420.0, 560.0))
 }
 
 // ===== 标题栏 =====
@@ -3563,6 +3586,9 @@ pub(crate) fn format_ts(ms: i64) -> String {
 
 // ===== 弹层内容 =====
 
+/// 插件列表弹层最多直接展示的行数（超出收进滚动区）。
+const PLUGIN_LIST_MAX_ROWS: usize = 12;
+
 /// 弹层内容构造：按形态产出（元素, 估算高度）。
 fn popup_element<'a>(
     app: &'a App,
@@ -4647,24 +4673,44 @@ fn popup_element<'a>(
         }
         // 居中模态不经锚点渲染（with_overlays 分流到各自 overlay）
         PopupState::HistoryBrowser { .. } | PopupState::LicenseInfo => Vec::new(),
-        // 插件菜单 / 下拉节点：条目由插件界面树带来（选中项带「当前」角标）
-        PopupState::PluginList { entries } => entries
-            .iter()
-            .map(|entry| {
-                (
-                    0usize,
+        // 插件菜单 / 下拉节点：条目由插件界面树带来（选中项带「当前」角标）；
+        // 超出行数上限或视口预算时收进滚动区（弹层不越出窗口）
+        PopupState::PluginList { entries } => {
+            let viewport = viewport_of(app, window);
+            let chrome = pal::POPUP_PAD_Y * 2.0
+                + popup::SHADOW_PAD_TOP
+                + popup::SHADOW_PAD_BOTTOM
+                + pal::VIEWPORT_GAP * 2.0;
+            let budget = (viewport.height - chrome).max(pal::MENU_ITEM_H);
+            let visible_h = (entries.len().min(PLUGIN_LIST_MAX_ROWS) as f32 * pal::MENU_ITEM_H)
+                .min(budget);
+            let scrolls = entries.len() as f32 * pal::MENU_ITEM_H > visible_h;
+            let card_w = plugin_list_width(entries)
+                .min((viewport.width - pal::VIEWPORT_GAP * 2.0).max(0.0));
+            let note_w = estimate_text_width("当前", pal::fs_micro());
+            let rows: Vec<MenuEntry<Message>> = entries
+                .iter()
+                .map(|entry| {
+                    let reserved = PLUGIN_LIST_PAD_X
+                        + if entry.current { PLUGIN_LIST_NOTE_GAP + note_w } else { 0.0 }
+                        + if scrolls { scroll::SCROLLBAR_W } else { 0.0 };
                     MenuEntry::Action {
-                        label: entry.label.clone(),
+                        label: ellipsize(&entry.label, card_w - reserved, pal::fs_caption()),
                         icon: None,
                         danger: entry.danger,
                         disabled: entry.disabled,
                         on_press: (!entry.disabled).then(|| entry.on_press.clone()),
                         note: entry.current.then_some("当前"),
                         hint: None,
-                    },
-                )
-            })
-            .collect(),
+                    }
+                })
+                .collect();
+            if scrolls {
+                vec![(0, MenuEntry::Scroll { entries: rows, height: visible_h })]
+            } else {
+                rows.into_iter().map(|entry| (0, entry)).collect()
+            }
+        }
     };
     crate::ui::menu::pane_view(entries, pane, window)
 }

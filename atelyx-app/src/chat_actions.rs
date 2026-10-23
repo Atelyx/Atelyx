@@ -2410,7 +2410,7 @@ fn plugin_model_pick(
     Ok(Some((provider.id.clone(), model.to_string())))
 }
 
-/// 插件图片路径的语法与扩展名校验（隐藏目录拒绝、分隔符归一；存在性由落仓形态各自确认）。
+/// 插件图片路径的语法与扩展名校验（只拦越界、允许隐藏段；存在性由落仓形态各自确认）。
 fn plugin_image_entries(paths: &[String]) -> Result<Vec<(String, String)>, String> {
     let mut entries = Vec::new();
     for (index, raw) in paths.iter().enumerate() {
@@ -2418,7 +2418,7 @@ fn plugin_image_entries(paths: &[String]) -> Result<Vec<(String, String)>, Strin
         if raw.is_empty() {
             return Err(format!("第 {} 张图片路径为空", index + 1));
         }
-        let rel = atelyx_core::vault::validate_tool_path(raw)
+        let rel = atelyx_core::vault::validate_plugin_path(raw)
             .map_err(|e| format!("第 {} 张图片路径不合法：{e}", index + 1))?;
         let name = rel.rsplit('/').next().unwrap_or(&rel);
         let ext = atelyx_core::vault::image_ext_of(name)
@@ -2916,10 +2916,11 @@ mod tests {
             "/abs.png",
             "../escape.png",
             "shots/../../x.png",
-            ".atelyx/secret.png",
             "notes/a.md",
         ] {
             assert!(plugin_image_entries(&[bad.to_string()]).is_err(), "应拒绝：{bad:?}");
         }
+        // 插件自管附件可落在隐藏目录
+        assert!(plugin_image_entries(&[".atelyx/temp/chats/a.png".to_string()]).is_ok());
     }
 }

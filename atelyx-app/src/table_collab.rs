@@ -20,10 +20,12 @@ pub struct Identity<'a> {
     pub color: &'a str,
 }
 
-/// 远端协作者在当前表格上的选区（只收同文件条目；颜色已解析，畸形色回落灰）。
+/// 远端协作者在当前表格上的选区（只收同文件条目；身份色同时保留协议原串与解析值，
+/// 畸形色两者都回落灰）。
 pub struct RemoteSelection {
     pub name: String,
     pub color: iced::Color,
+    pub color_hex: String,
     pub selection: TableSelection,
 }
 
@@ -169,12 +171,14 @@ impl TableCollab {
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_owned();
-                let color = state
-                    .get("color")
-                    .and_then(Value::as_str)
-                    .and_then(crate::layout_view::parse_hex_color)
-                    .unwrap_or(pal::FALLBACK_COLLAB);
-                Some(RemoteSelection { name, color, selection })
+                let (color, color_hex) = match state.get("color").and_then(Value::as_str) {
+                    Some(raw) => match crate::layout_view::parse_hex_color(raw) {
+                        Some(color) => (color, raw.to_string()),
+                        None => (pal::FALLBACK_COLLAB, pal::FALLBACK_COLLAB_COLOR.to_string()),
+                    },
+                    None => (pal::FALLBACK_COLLAB, pal::FALLBACK_COLLAB_COLOR.to_string()),
+                };
+                Some(RemoteSelection { name, color, color_hex, selection })
             })
             .collect();
     }
@@ -313,6 +317,7 @@ mod tests {
         let remote = collab.remote();
         assert_eq!(remote.len(), 1);
         assert_eq!(remote[0].name, "鲍勃");
+        assert_eq!(remote[0].color_hex, "#3d7be0");
         assert_eq!(remote[0].selection, TableSelection::Column("f2".into()));
     }
 
@@ -329,6 +334,7 @@ mod tests {
         collab.apply("p1", &bad_color, now);
         assert_eq!(collab.remote().len(), 1, "颜色畸形只回落颜色，条目仍可见");
         assert_eq!(collab.remote()[0].color, pal::FALLBACK_COLLAB);
+        assert_eq!(collab.remote()[0].color_hex, pal::FALLBACK_COLLAB_COLOR);
 
         assert!(collab.drop_peer("p1"));
         assert!(collab.remote().is_empty());

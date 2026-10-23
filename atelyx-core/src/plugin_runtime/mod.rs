@@ -48,7 +48,7 @@ pub use atelyx_plugin_protocol::method::{
     CollabSendParams, CollabSendQos, CollabSendResult, ContributionSlot, DefineIconParams,
     FileFilter,
     ImageInfoResult, NotificationLevel, ScrollEdge, ScrollToParams, SetTrayItemsParams,
-    ShortcutQueryResult, SurfaceKind, TableField, TableSelection, TableRow,
+    ShortcutQueryResult, SurfaceKind, TableField, TableRemoteSelection, TableSelection, TableRow,
     TableSetCellImageParams, TableSnapshot, TakeoverScope, TrayClickParams, TrayItemSpec,
     WindowOpenParams, WindowUpdateParams,
 };

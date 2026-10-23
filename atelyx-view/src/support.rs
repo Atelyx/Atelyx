@@ -26,11 +26,24 @@ pub fn node_value_text(body: &NodeBody) -> Option<String> {
     }
 }
 
-/// 数字的规范文本（整数不带小数点，其余取最短表示）。
-fn format_number(value: f64) -> String {
-    if value.fract() == 0.0 && value.abs() < 1e15 {
-        format!("{}", value as i64)
-    } else {
-        format!("{value}")
+/// 数字的规范文本：整数不带小数点，小数最多十位并去掉尾零（消掉步进累加的浮点噪声）；
+/// 十位不够表示或数值超出该精度区间时退回最短往返表示。
+pub fn format_number(value: f64) -> String {
+    if value == 0.0 {
+        return "0".to_string();
     }
+    if value.abs() >= 1e15 {
+        return format!("{value}");
+    }
+    if value.fract() == 0.0 {
+        return format!("{}", value as i64);
+    }
+    let trimmed = format!("{value:.10}")
+        .trim_end_matches('0')
+        .trim_end_matches('.')
+        .to_string();
+    if trimmed == "0" || trimmed == "-0" {
+        return format!("{value}");
+    }
+    trimmed
 }

@@ -595,7 +595,7 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
             Task::none()
         }
         PluginsMsg::VaultRead { request_id, path } => {
-            let rel = match tool_path(Some(&path)) {
+            let rel = match plugin_path(Some(&path)) {
                 Ok(rel) => rel,
                 Err(e) => return resolve_vault(app, request_id, Err(e)),
             };
@@ -627,7 +627,7 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
             }
         }
         PluginsMsg::VaultWrite { request_id, path, content } => {
-            let rel = match tool_path(Some(&path)) {
+            let rel = match plugin_path(Some(&path)) {
                 Ok(rel) => rel,
                 Err(e) => return resolve_vault(app, request_id, Err(e)),
             };
@@ -671,7 +671,7 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
             }
         }
         PluginsMsg::VaultReadBinary { request_id, path } => {
-            let rel = match tool_path(Some(&path)) {
+            let rel = match plugin_path(Some(&path)) {
                 Ok(rel) => rel,
                 Err(e) => return resolve_vault(app, request_id, Err(e)),
             };
@@ -706,7 +706,7 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
             }
         }
         PluginsMsg::VaultWriteBinary { request_id, path, bytes } => {
-            let rel = match tool_path(Some(&path)) {
+            let rel = match plugin_path(Some(&path)) {
                 Ok(rel) => rel,
                 Err(e) => return resolve_vault(app, request_id, Err(e)),
             };
@@ -751,7 +751,7 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
             }
         }
         PluginsMsg::VaultList { request_id, path } => {
-            let rel = match tool_path((!path.is_empty()).then_some(path.as_str())) {
+            let rel = match plugin_path((!path.is_empty()).then_some(path.as_str())) {
                 Ok(rel) => rel,
                 Err(e) => return resolve_vault(app, request_id, Err(e)),
             };
@@ -762,7 +762,7 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
                         Task::perform(
                             async move {
                                 run_blocking(move || {
-                                    let children = vault::read_dir_entries(&root, &rel, &exclude)?;
+                                    let children = vault::read_dir_entries_all(&root, &rel, &exclude)?;
                                     Ok(dir_entries_json(&children))
                                 })
                                 .await
@@ -785,7 +785,7 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
             }
         }
         PluginsMsg::VaultExists { request_id, path } => {
-            let rel = match tool_path(Some(&path)) {
+            let rel = match plugin_path(Some(&path)) {
                 Ok(rel) => rel,
                 Err(e) => return resolve_vault(app, request_id, Err(e)),
             };
@@ -816,7 +816,7 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
             }
         }
         PluginsMsg::VaultImageInfo { request_id, path } => {
-            let rel = match tool_path(Some(&path)) {
+            let rel = match plugin_path(Some(&path)) {
                 Ok(rel) => rel,
                 Err(e) => return resolve_vault(app, request_id, Err(e)),
             };
@@ -869,11 +869,26 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
         }
         PluginsMsg::TableSnapshot { request_id } => {
             let snapshot: atelyx_core::plugin_runtime::TableSnapshot = match &app.table {
-                Some(session) => atelyx_core::plugin_runtime::table::snapshot(
-                    &session.file,
-                    &session.data,
-                    session.view.selection.as_ref(),
-                ),
+                Some(session) => {
+                    let remotes: Vec<atelyx_core::plugin_runtime::table::RemoteSelection<'_>> = app
+                        .table_collab
+                        .as_ref()
+                        .map(|collab| collab.remote())
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|remote| atelyx_core::plugin_runtime::table::RemoteSelection {
+                            name: &remote.name,
+                            color: &remote.color_hex,
+                            selection: &remote.selection,
+                        })
+                        .collect();
+                    atelyx_core::plugin_runtime::table::snapshot(
+                        &session.file,
+                        &session.data,
+                        session.view.selection.as_ref(),
+                        &remotes,
+                    )
+                }
                 None => atelyx_core::plugin_runtime::TableSnapshot::default(),
             };
             let result = serde_json::to_value(snapshot)
@@ -885,10 +900,10 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
 }
 
 /// 仓库相对路径校验：`None` = 仓库根（仅列目录允许根路径）。
-fn tool_path(path: Option<&str>) -> Result<String, String> {
+fn plugin_path(path: Option<&str>) -> Result<String, String> {
     match path {
         None => Ok(String::new()),
-        Some(path) => vault::validate_tool_path(path),
+        Some(path) => vault::validate_plugin_path(path),
     }
 }
 

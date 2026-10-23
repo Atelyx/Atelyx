@@ -245,6 +245,7 @@ const SECTIONS: &[Section] = &[
         items: items!(
             "method.rs": "TableSnapshot",
             "method.rs": "TableSelection",
+            "method.rs": "TableRemoteSelection",
             "method.rs": "TableField",
             "method.rs": "TableRow",
             "method.rs": "TableUpdateCellParams",

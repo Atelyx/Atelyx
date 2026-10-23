@@ -1,24 +1,44 @@
 //! 表格服务面的纯映射：将宿主表格真源转成协议的只读快照形态。
 //! 只做形状转换，不读写磁盘——写入路径由壳的表格会话与补丁 / 保存链承担。
 
-use atelyx_plugin_protocol::method::{TableField, TableRow, TableSelection, TableSnapshot};
+use atelyx_plugin_protocol::method::{
+    TableField, TableRemoteSelection, TableRow, TableSelection, TableSnapshot,
+};
 
 use crate::table_ops::TableSelection as SourceSelection;
 use crate::vault::{TableField as SourceField, TableFile, TableRow as SourceRow};
 
-/// 构建某表格的只读快照：字段带 id / 名称 / 类型 / 选项 / 列宽，行带 id / 值集 / 单元格样式，
-/// 另附用户当前选区（快照要能还原「用户看到的样子」，不只是数据本身）。
+/// 远端协作者选区的宿主输入形态（色值为身份色原串）。
+pub struct RemoteSelection<'a> {
+    pub name: &'a str,
+    pub color: &'a str,
+    pub selection: &'a SourceSelection,
+}
+
+/// 构建某表格的只读快照：稳定 id 供插件跨改名引用，字段带 id / 名称 / 类型 / 选项 / 列宽，
+/// 行带 id / 值集 / 单元格样式，另附本端与远端协作者的当前选区
+/// （快照要能还原「用户看到的样子」，不只是数据本身）。
 pub fn snapshot(
     path: &str,
     file: &TableFile,
     selection: Option<&SourceSelection>,
+    remotes: &[RemoteSelection<'_>],
 ) -> TableSnapshot {
     TableSnapshot {
         open: true,
+        id: Some(file.id.clone()),
         path: Some(path.to_string()),
         fields: file.fields.iter().map(field).collect(),
         rows: file.rows.iter().map(row).collect(),
         selection: selection.map(selection_of),
+        remote_selections: remotes
+            .iter()
+            .map(|remote| TableRemoteSelection {
+                name: remote.name.to_string(),
+                color: remote.color.to_string(),
+                selection: selection_of(remote.selection),
+            })
+            .collect(),
     }
 }
 
@@ -97,8 +117,9 @@ mod tests {
     #[test]
     fn snapshot_maps_fields_rows_and_view_properties() {
         let selection = SourceSelection::Row("r1".into());
-        let snapshot = snapshot("a.atb", &table(), Some(&selection));
+        let snapshot = snapshot("a.atb", &table(), Some(&selection), &[]);
         assert!(snapshot.open);
+        assert_eq!(snapshot.id.as_deref(), Some("t1"));
         assert_eq!(snapshot.path.as_deref(), Some("a.atb"));
         assert_eq!(snapshot.fields.len(), 1);
         assert_eq!(snapshot.fields[0].field_type, "singleSelect");
@@ -115,10 +136,26 @@ mod tests {
 
     #[test]
     fn snapshot_without_selection_stays_empty() {
-        let snapshot = snapshot("a.atb", &table(), None);
+        let snapshot = snapshot("a.atb", &table(), None, &[]);
         assert_eq!(snapshot.selection, None);
         let wire = serde_json::to_value(&snapshot).unwrap();
         assert!(wire.get("selection").is_none(), "无选区时字段缺省");
+        assert!(wire.get("remoteSelections").is_none(), "无人协同时远端选区缺省");
+    }
+
+    #[test]
+    fn snapshot_maps_remote_selections() {
+        let remote = SourceSelection::Cell { row_id: "r1".into(), field_id: "f1".into() };
+        let remotes = [RemoteSelection { name: "鲍勃", color: "#3d7be0", selection: &remote }];
+        let snapshot = snapshot("a.atb", &table(), None, &remotes);
+        assert_eq!(
+            snapshot.remote_selections,
+            vec![TableRemoteSelection {
+                name: "鲍勃".into(),
+                color: "#3d7be0".into(),
+                selection: TableSelection::Cell { row_id: "r1".into(), field_id: "f1".into() },
+            }]
+        );
     }
 
     #[test]
@@ -154,7 +191,7 @@ mod tests {
     fn snapshot_carries_empty_options_for_plain_fields() {
         let mut file = table();
         file.fields[0].options = None;
-        let snapshot = snapshot("a.atb", &file, None);
+        let snapshot = snapshot("a.atb", &file, None, &[]);
         assert!(snapshot.fields[0].options.is_empty());
     }
 }

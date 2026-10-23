@@ -674,10 +674,14 @@
       "type": "TableSnapshot",
       "value": {
         "open": true,
+        "id": "t1",
         "path": "plan.atb",
         "fields": [ { "id": "f1", "name": "名称", "type": "text", "options": ["甲", "乙"], "width": 180.0 } ],
         "rows": [ { "id": "r1", "values": { "f1": "甲" }, "styles": { "f1": { "bold": true, "color": "#c0392b" } } } ],
-        "selection": { "kind": "range", "anchorRowId": "r1", "anchorFieldId": "f1", "rowId": "r2", "fieldId": "f2" }
+        "selection": { "kind": "range", "anchorRowId": "r1", "anchorFieldId": "f1", "rowId": "r2", "fieldId": "f2" },
+        "remoteSelections": [
+          { "name": "鲍勃", "color": "#3d7be0", "selection": { "kind": "cell", "rowId": "r1", "fieldId": "f2" } }
+        ]
       }
     },
     {

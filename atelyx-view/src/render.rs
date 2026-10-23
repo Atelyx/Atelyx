@@ -37,6 +37,11 @@ const INPUT_PAD_X: f32 = 8.0;
 const INPUT_PAD_Y: f32 = 6.0;
 /// 多行输入高度。
 const EDITOR_H: f32 = 96.0;
+/// 数字步进按钮的半高（两枚叠成输入框高）。
+const STEP_BTN_H: f32 = 14.0;
+/// 数字步进按钮的图标边长与输入框间距。
+const STEP_ICON_PX: f32 = 10.0;
+const STEP_GAP: f32 = 2.0;
 /// 画布缺省高度（未给 `height` 也未声明撑满时）。
 const CANVAS_DEFAULT_H: f32 = 160.0;
 /// 图标缺省边长。
@@ -51,6 +56,8 @@ pub enum ViewMsg<M> {
     Event { plugin_id: String, surface_id: String, node_id: String, event: ViewEvent },
     /// 单行 / 数字输入的本地编辑（`commit` = Enter 提交，文本为 None）。
     Draft { plugin_id: String, surface_id: String, node_id: String, text: Option<String>, commit: bool },
+    /// 数字输入步进（`up` = 增加一步）。
+    Step { plugin_id: String, surface_id: String, node_id: String, up: bool },
     /// 多行输入的编辑器动作（光标 / 选区 / 输入都由宿主编辑器状态承接）。
     TextEdit { plugin_id: String, surface_id: String, node_id: String, action: text_editor::Action },
     /// 节点悬停进出（交互外观与 `hoverOnly` 图标钮据此切换）。
@@ -558,7 +565,7 @@ where
             } else if multiline.unwrap_or(false) {
                 multiline_input(host, ctx, node, placeholder)
             } else {
-                single_line_input(host, ctx, node, placeholder, password.unwrap_or(false))
+                single_line_input(host, ctx, node, placeholder, password.unwrap_or(false), false)
             }
         }
         NodeBody::NumberInput { placeholder, read_only, .. } => {
@@ -567,7 +574,9 @@ where
                 let value = node_value_text(&node.body).unwrap_or_default();
                 read_only_field(&value, placeholder, false, false)
             } else {
-                single_line_input(host, ctx, node, placeholder, false)
+                // 步进按钮只对声明了 change 的节点出现（没有上行去向的点击无意义）
+                let stepper = declares(node, EventKind::Change);
+                single_line_input(host, ctx, node, placeholder, false, stepper)
             }
         }
         NodeBody::Dropdown { options, selected, placeholder, read_only } => {
@@ -1025,6 +1034,7 @@ fn single_line_input<'a, M, H>(
     node: &'a ViewNode,
     placeholder: &str,
     password: bool,
+    stepper: bool,
 ) -> Element<'a, M>
 where
     M: ViewMessage,
@@ -1062,7 +1072,7 @@ where
                 }),
             }
         });
-    if report.is_deferred() {
+    let input: Element<'a, M> = if report.is_deferred() {
         let plugin_id = ctx.plugin_id.clone();
         let surface_id = ctx.surface_id.clone();
         let node_id = node.id.clone();
@@ -1081,7 +1091,24 @@ where
             .into()
     } else {
         input.into()
+    };
+    if !stepper {
+        return input;
     }
+    let step = |up: bool| {
+        M::view(ViewMsg::Step {
+            plugin_id: ctx.plugin_id.clone(),
+            surface_id: ctx.surface_id.clone(),
+            node_id: node.id.clone(),
+            up,
+        })
+    };
+    let buttons = column![
+        controls::icon_button("chevron-up", STEP_ICON_PX, STEP_BTN_H, Variant::Ghost, Some(step(true)), None),
+        controls::icon_button("chevron-down", STEP_ICON_PX, STEP_BTN_H, Variant::Ghost, Some(step(false)), None),
+    ]
+    .spacing(0.0);
+    row![input, buttons].spacing(STEP_GAP).align_y(Vertical::Center).into()
 }
 
 /// 多行输入（编辑器状态归宿主：插件不改值则光标与选区原地保留）。

@@ -434,7 +434,7 @@ impl Context {
 
     // ---------- table（当前打开表格；写入与宿主编辑同一出口，由宿主合并落盘并广播协作补丁） ----------
 
-    /// 读当前打开表格的只读快照（字段 / 行 / 路径）；未打开表格 = `open: false`。
+    /// 读当前打开表格的只读快照（稳定 id / 路径 / 字段 / 行 / 本端与远端选区）；未打开表格 = `open: false`。
     pub async fn table_snapshot(&self) -> Result<TableSnapshot, RpcError> {
         self.call_null(method::table::SNAPSHOT).await
     }

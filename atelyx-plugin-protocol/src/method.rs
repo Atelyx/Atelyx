@@ -881,6 +881,9 @@ pub enum ChatEvent {
 #[serde(rename_all = "camelCase", default)]
 pub struct TableSnapshot {
     pub open: bool,
+    /// 表格稳定 id（改名 / 移动后不变；未打开表格时缺省）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     /// 当前打开表格的仓库相对路径。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
@@ -891,6 +894,9 @@ pub struct TableSnapshot {
     /// 用户当前选区（未打开表格或无选区时缺省）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selection: Option<TableSelection>,
+    /// 其他协作者的当前选区（不含本端；未打开表格或无人时缺省）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remote_selections: Vec<TableRemoteSelection>,
 }
 
 /// 快照里的字段：id / 名称 / 类型 / 选项 / 列宽。
@@ -936,6 +942,15 @@ pub enum TableSelection {
     Column { field_id: String },
     /// 全表。
     All,
+}
+
+/// 快照里的远端协作者选区：显示名、身份色（`#rrggbb`）与范围。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableRemoteSelection {
+    pub name: String,
+    pub color: String,
+    pub selection: TableSelection,
 }
 
 /// [`table::UPDATE_CELL`] 的 params：`value` 为单元格新值（`null` = 清空；形态随字段类型）。
