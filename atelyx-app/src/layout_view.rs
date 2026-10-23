@@ -3025,7 +3025,13 @@ fn note_view(app: &App, window: iced::window::Id) -> Element<'_, Message> {
                 NoteMode::Edit => edit_view(app),
                 _ => match app.preview_doc.as_ref() {
                     Some(doc) => {
-                        markdown_view::document_view(doc, &app.theme, &app.note_images, app.global.soft_wrap)
+                        markdown_view::document_view(
+                            doc,
+                            &app.theme,
+                            &app.note_images,
+                            app.global.soft_wrap,
+                            app.note_selection.as_ref(),
+                        )
                     }
                     None => placeholder_panel("正在渲染…"),
                 },

@@ -12,7 +12,7 @@ use iced::widget::{column, container, row, space};
 use iced::{alignment, Color, Element, Length, Point, Rectangle, Size, Vector};
 
 use crate::layout_view::estimate_text_width;
-use crate::table_text::{TextLine, WrapCache, LINE_FACTOR};
+use crate::table_text::{measure_live_lines, TextLine, WrapCache, LINE_FACTOR};
 use crate::ui::icon::polylines;
 use crate::ui::palette as pal;
 use crate::ui::text;
@@ -227,6 +227,50 @@ impl TableSession {
             content_h: y + NEW_ROW_H * zoom,
             wrap,
         });
+    }
+
+    /// 在途草稿的即时行高：只重排被编辑行（手动行高的行保持原高；草稿实测不写换行缓存）。
+    pub fn reflow_edit_row(&mut self, row_id: &str, field_id: &str, draft: &str) {
+        let Some(ri) = self.data.rows.iter().position(|r| r.id == row_id) else { return };
+        if self.data.rows[ri].height.is_some() {
+            return;
+        }
+        let zoom = self.view.zoom;
+        let version = self.version;
+        let Some(cache) = self.view.layout.as_mut() else { return };
+        // 数据已重建布局（提交 / 撤销重做）：重建结果即真源，草稿口径不再叠加
+        if cache.version != version || cache.zoom != zoom {
+            return;
+        }
+        let row = &self.data.rows[ri];
+        let mut content = 0.0f32;
+        for (i, field) in self.data.fields.iter().enumerate() {
+            let col_w = cache.col_w[i];
+            let h = if field.id == field_id {
+                live_content_height(field, row, draft, col_w, zoom)
+            } else {
+                cell_content_height(Some(&mut cache.wrap), field, row, row.values.get(&field.id), col_w, zoom)
+            };
+            content = content.max(h);
+        }
+        let h = (content + 2.0 * CELL_PAD_Y * zoom).max(32.0 * zoom);
+        let delta = h - cache.row_h[ri];
+        if delta.abs() < 0.01 {
+            return;
+        }
+        cache.row_h[ri] = h;
+        cache.content_h += delta;
+        for y in &mut cache.row_y[ri + 1..] {
+            *y += delta;
+        }
+        // 行高缩回后内容可能短于当前滚动位：滚到底的视口不悬在内容之外
+        let size = self.view.canvas_size;
+        if size.height > 0.0 {
+            let max_y = geo(self, size).max_scroll_y();
+            if self.view.scroll_y > max_y {
+                self.view.scroll_y = max_y;
+            }
+        }
     }
 }
 
@@ -1017,6 +1061,17 @@ fn cell_content_height(
         Some(wrap) => wrap.lines(&text, size, cell_text_font(&st), wrap_w).len(),
         None => estimate_lines(&text, size, wrap_w).len(),
     };
+    lines as f32 * size * LINE_FACTOR
+}
+
+/// 在途草稿的内容高度（不含上下内衬）：口径同 [`cell_content_height`]，行数按草稿实测且不入缓存。
+fn live_content_height(field: &TableField, row: &TableRow, draft: &str, col_w: f32, zoom: f32) -> f32 {
+    if draft.is_empty() {
+        return 0.0;
+    }
+    let st = table_ops::style_of(row, &field.id);
+    let size = style_size(&st, base_font_size(field) * zoom, zoom).max(1.0);
+    let lines = measure_live_lines(draft, size, cell_text_font(&st), wrap_width(col_w, zoom));
     lines as f32 * size * LINE_FACTOR
 }
 
@@ -3047,6 +3102,55 @@ mod tests {
             .expect("布局实测后行段可取");
         assert!(lines.len() > 1, "放不进一行的正文要折出多行");
         assert_eq!(layout.row_h[1], lines.len() as f32 * size * LINE_FACTOR + 2.0 * CELL_PAD_Y);
+    }
+
+    /// 在途草稿即时撑高：未提交的正文按草稿实测写入行高，后续行与内容总高整体下移。
+    #[test]
+    fn edit_reflow_grows_auto_row() {
+        let mut s = text_session(&["短", "尾"]);
+        let long = "需要折行的很长很长很长很长很长很长很长很长很长的一段中文正文";
+        s.reflow_edit_row("r0", "f1", long);
+        let layout = s.view.layout.as_ref().expect("布局缓存");
+        let lines =
+            measure_live_lines(long, cell_font(), cell_text_font(&CellStyle::default()), wrap_width(120.0, 1.0));
+        assert!(lines > 1, "放不进一行的草稿要折出多行");
+        let want = lines as f32 * cell_font() * LINE_FACTOR + 2.0 * CELL_PAD_Y;
+        assert_eq!(layout.row_h[0], want);
+        assert_eq!(layout.row_y[1], want);
+        assert_eq!(layout.content_h, want + layout.row_h[1] + NEW_ROW_H);
+    }
+
+    /// 删空草稿即时缩回下限高度（行位置与内容总高同步回退）。
+    #[test]
+    fn edit_reflow_shrinks_back_to_floor() {
+        let mut s = text_session(&["短", "尾"]);
+        s.reflow_edit_row("r0", "f1", "需要折行的很长很长很长很长很长很长很长很长很长的一段中文正文");
+        s.reflow_edit_row("r0", "f1", "");
+        let layout = s.view.layout.as_ref().expect("布局缓存");
+        assert_eq!(layout.row_h[0], 32.0);
+        assert_eq!(layout.row_y[1], 32.0);
+    }
+
+    /// 手动拖过行高的行不随输入变化。
+    #[test]
+    fn edit_reflow_keeps_manual_row_height() {
+        let mut s = text_session(&["短", "尾"]);
+        s.data.rows[0].height = Some(80.0);
+        s.rebuild_layout();
+        s.reflow_edit_row("r0", "f1", "需要折行的很长很长很长很长很长很长很长很长很长的一段中文正文");
+        let layout = s.view.layout.as_ref().expect("布局缓存");
+        assert_eq!(layout.row_h[0], 80.0);
+    }
+
+    /// 重建布局丢弃草稿口径：取消编辑后行高回到已落值内容。
+    #[test]
+    fn rebuild_drops_live_draft_height() {
+        let mut s = text_session(&["短", "尾"]);
+        s.reflow_edit_row("r0", "f1", "需要折行的很长很长很长很长很长很长很长很长很长的一段中文正文");
+        s.rebuild_layout();
+        let layout = s.view.layout.as_ref().expect("布局缓存");
+        assert_eq!(layout.row_h[0], 32.0);
+        assert_eq!(layout.row_y[1], 32.0);
     }
 
     /// 1× 时图片按可视区等比铺满并居中（四周遮罩边距不变）。

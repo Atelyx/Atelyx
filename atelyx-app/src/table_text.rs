@@ -88,9 +88,15 @@ fn measure(text: &str, size: f32, font: Font, wrap_w: f32) -> Vec<TextLine> {
         .collect()
 }
 
-/// 单个硬换行段的排版结果：至少一行（空段也占一行高，与编辑浮层同口径）。
-fn measure_segment(segment: &str, size: f32, font: Font, wrap_w: f32) -> Vec<TextLine> {
-    let paragraph = Paragraph::with_text(advanced_text::Text {
+/// 在途草稿的行数：口径同 [`measure`]，但不写缓存——每次按键都是新文本，缓存只会累积草稿变体。
+pub fn measure_live_lines(text: &str, size: f32, font: Font, wrap_w: f32) -> usize {
+    text.split('\n')
+        .map(|segment| layout(segment, size, font, wrap_w).buffer().layout_runs().count().max(1))
+        .sum()
+}
+
+fn layout(segment: &str, size: f32, font: Font, wrap_w: f32) -> Paragraph {
+    Paragraph::with_text(advanced_text::Text {
         content: segment,
         bounds: Size::new(wrap_w, f32::INFINITY),
         size: size.into(),
@@ -102,7 +108,12 @@ fn measure_segment(segment: &str, size: f32, font: Font, wrap_w: f32) -> Vec<Tex
         // 与编辑浮层一致：Advanced 字距；WordOrGlyph 折行使超长词退化为逐字形断，不溢出到邻列
         shaping: advanced_text::Shaping::Advanced,
         wrapping: advanced_text::Wrapping::WordOrGlyph,
-    });
+    })
+}
+
+/// 单个硬换行段的排版结果：至少一行（空段也占一行高，与编辑浮层同口径）。
+fn measure_segment(segment: &str, size: f32, font: Font, wrap_w: f32) -> Vec<TextLine> {
+    let paragraph = layout(segment, size, font, wrap_w);
     let mut lines = Vec::new();
     for run in paragraph.buffer().layout_runs() {
         // 双向文（阿拉伯语 / 希伯来语混排）的字形序与字节序相反、行间还相互嵌套，
@@ -153,6 +164,18 @@ mod tests {
         let lines = line_texts(text, 14.0, 28.0);
         assert!(lines.len() > 1);
         assert_eq!(lines.concat(), text);
+    }
+
+    /// 在途草稿的行数与整段实测同口径（硬换行逐段、空段也占一行）。
+    #[test]
+    fn live_lines_match_measure() {
+        let text = "第一行\n\n第二行很长的内容需要折行折行折行";
+        for wrap_w in [f32::INFINITY, 24.0, 40.0] {
+            assert_eq!(
+                measure_live_lines(text, 14.0, Font::DEFAULT, wrap_w),
+                measure(text, 14.0, Font::DEFAULT, wrap_w).len(),
+            );
+        }
     }
 
     /// 一轮重建收口后只留本轮用过的键；换行宽是键的一部分。

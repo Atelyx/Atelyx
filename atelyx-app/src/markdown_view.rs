@@ -17,6 +17,7 @@ use iced::widget::{
 use iced::{Border, Color, Element, Font, Length, Padding, Size};
 
 use crate::markdown_edit::ParagraphT;
+use crate::markdown_select::{NoteSelection, SelectRun, SelectableRich};
 use crate::ui::text;
 use crate::Message;
 
@@ -124,11 +125,20 @@ pub fn document_view<'a>(
     theme: &iced::Theme,
     images: &'a ImageHandles,
     soft_break: bool,
+    selection: Option<&'a NoteSelection>,
 ) -> Element<'a, Message> {
-    container(document_body_scaled(doc, theme, images, soft_break, 1.0))
-        .width(Length::Fill)
-        .padding(16.0)
-        .into()
+    container(document_body_with(
+        doc,
+        theme,
+        images,
+        soft_break,
+        1.0,
+        BodyStyle::default(),
+        SelectMode::Note(selection),
+    ))
+    .width(Length::Fill)
+    .padding(16.0)
+    .into()
 }
 
 /// 无根留白的正文体，字号按 `scale` 等比缩放（调用方自带边距；画布卡浮层传视口缩放、面板传 1.0）。
@@ -139,7 +149,7 @@ pub fn document_body_scaled<'a>(
     soft_break: bool,
     scale: f32,
 ) -> Element<'a, Message> {
-    document_body_styled(doc, theme, images, soft_break, scale, BodyStyle::default())
+    document_body_with(doc, theme, images, soft_break, scale, BodyStyle::default(), SelectMode::Off)
 }
 
 /// 带整体样式覆盖的正文体（插件 Markdown 节点的字重 / 字色与链接作用域）。
@@ -151,6 +161,28 @@ pub fn document_body_styled<'a>(
     scale: f32,
     body: BodyStyle,
 ) -> Element<'a, Message> {
+    document_body_with(doc, theme, images, soft_break, scale, body, SelectMode::Off)
+}
+
+/// 只读面的拖选档位：笔记只读档可起选（当前选区可空），其余只读面用纯富文本。
+enum SelectMode<'a> {
+    Off,
+    Note(Option<&'a NoteSelection>),
+}
+
+fn document_body_with<'a>(
+    doc: &'a MarkdownDocument,
+    theme: &iced::Theme,
+    images: &'a ImageHandles,
+    soft_break: bool,
+    scale: f32,
+    body: BodyStyle,
+    select: SelectMode<'a>,
+) -> Element<'a, Message> {
+    let (selectable, selection) = match select {
+        SelectMode::Off => (false, None),
+        SelectMode::Note(selection) => (true, selection),
+    };
     let render = Render {
         pal: Palette::from_theme(theme),
         opts: link_options(),
@@ -159,6 +191,8 @@ pub fn document_body_styled<'a>(
         soft_break,
         scale,
         body,
+        selectable,
+        selection,
     };
     let mut body = column![].width(Length::Fill).spacing(0);
     for chunk in render.chunks(&doc.source, &doc.blocks) {
@@ -471,6 +505,8 @@ pub fn edit_rows<'a>(
         soft_break: true,
         scale: 1.0,
         body: BodyStyle::default(),
+        selectable: false,
+        selection: None,
     };
     render.rows(source, blocks)
 }
@@ -487,6 +523,10 @@ struct Render<'a> {
     scale: f32,
     /// 整体样式覆盖（插件正文；缺省 = 主题语义）。
     body: BodyStyle,
+    /// 行内段落可拖选（仅笔记只读档）。
+    selectable: bool,
+    /// 应用层选区（文档源字节区间；随 `selectable` 下发给段落）。
+    selection: Option<&'a NoteSelection>,
 }
 
 impl Render<'_> {
@@ -554,8 +594,9 @@ impl Render<'_> {
             MarkdownBlock::Heading { level, inline, .. } => {
                 let mut st = self.text_style();
                 st.font.weight = iced::font::Weight::Bold;
-                rich(
-                    self.spans(source, inline, st),
+                let runs = self.runs(source, inline, st);
+                self.rich_runs(
+                    &runs,
                     self.heading(*level),
                     1.3,
                     None,
@@ -566,8 +607,9 @@ impl Render<'_> {
                 if let Some(InlineSpan::Image { src, alt, width, height, .. }) = image_only(inline) {
                     self.image_block(src, alt, width.as_deref(), height.as_deref())
                 } else {
-                    rich(
-                        self.spans(source, inline, self.text_style()),
+                    let runs = self.runs(source, inline, self.text_style());
+                    self.rich_runs(
+                        &runs,
                         self.base(),
                         LINE_HEIGHT,
                         None,
@@ -587,8 +629,8 @@ impl Render<'_> {
             }
             MarkdownBlock::MathBlock { tex, .. } => self.source_block(format!("$$\n{tex}\n$$")),
             MarkdownBlock::HtmlBlock { html, .. } => self.source_block(html.clone()),
-            MarkdownBlock::FootnoteDef { label, inline, .. } => {
-                self.footnote(source, label, inline)
+            MarkdownBlock::FootnoteDef { from, label, inline, .. } => {
+                self.footnote(source, *from, label, inline)
             }
         }
     }
@@ -711,8 +753,8 @@ impl Render<'_> {
                     ..self.text_style()
                 };
                 runs = self.runs(source, inline, st);
-                rich(
-                    self.run_spans(runs.clone()),
+                self.rich_runs(
+                    &runs,
                     self.heading(*level),
                     1.3,
                     None,
@@ -724,8 +766,8 @@ impl Render<'_> {
                     self.image_block(src, alt, width.as_deref(), height.as_deref())
                 } else {
                     runs = self.runs(source, inline, self.text_style());
-                    rich(
-                        self.run_spans(runs.clone()),
+                    self.rich_runs(
+                        &runs,
                         self.base(),
                         LINE_HEIGHT,
                         None,
@@ -891,11 +933,14 @@ impl Render<'_> {
             if runs.is_empty() {
                 return (Vec::new(), self.empty_item_filler());
             }
-            let spans = self.run_spans(runs.clone());
-            return (
-                runs,
-                rich(spans, self.base(), LINE_HEIGHT, None, iced::alignment::Horizontal::Left),
+            let content = self.rich_runs(
+                &runs,
+                self.base(),
+                LINE_HEIGHT,
+                None,
+                iced::alignment::Horizontal::Left,
             );
+            return (runs, content);
         }
         let inline = parse_inline(&stripped, 0, stripped.len(), &self.opts);
         if let Some(InlineSpan::Image { src, alt, width, height, .. }) = image_only(&inline) {
@@ -904,11 +949,21 @@ impl Render<'_> {
         if inline.is_empty() {
             return (Vec::new(), self.empty_item_filler());
         }
-        let spans = self.run_spans(self.runs(&stripped, &inline, self.text_style()));
-        (
-            Vec::new(),
-            rich(spans, self.base(), LINE_HEIGHT, None, iced::alignment::Horizontal::Left),
-        )
+        // 剥引用前缀后的文本与源区间不再逐字节对应：选择按整段落项内容区间
+        let mut runs = self.runs(&stripped, &inline, self.text_style());
+        if self.selectable {
+            for run in &mut runs {
+                run.src = (content_from, content_to);
+            }
+        }
+        let content = self.rich_runs(
+            &runs,
+            self.base(),
+            LINE_HEIGHT,
+            None,
+            iced::alignment::Horizontal::Left,
+        );
+        (Vec::new(), content)
     }
 
     /// 空项的内容位：零高占位（行高由标记列决定）。
@@ -1118,6 +1173,8 @@ fn code_body<'a>(code: &str, hit: Option<((usize, usize), f32)>, scale: f32) -> 
                 soft_break: self.soft_break,
                 scale: self.scale,
                 body: self.body.clone(),
+                selectable: self.selectable,
+                selection: self.selection,
             };
             table::column(head, move |row: usize| {
                 let cell = rows.get(row).and_then(|r| r.get(i));
@@ -1145,7 +1202,7 @@ fn code_body<'a>(code: &str, hit: Option<((usize, usize), f32)>, scale: f32) -> 
         align: Option<&String>,
         header: bool,
     ) -> Element<'a, Message> {
-        let spans = match cell {
+        let inline = match cell {
             Some(c) if c.to > c.from => parse_inline(source, c.from, c.to, &self.opts),
             _ => Vec::new(),
         };
@@ -1156,13 +1213,8 @@ fn code_body<'a>(code: &str, hit: Option<((usize, usize), f32)>, scale: f32) -> 
             Some("right") => iced::alignment::Horizontal::Right,
             _ => iced::alignment::Horizontal::Left,
         };
-        container(rich(
-            self.spans(source, &spans, self.text_style()),
-            self.base(),
-            LINE_HEIGHT,
-            None,
-            alignment,
-        ))
+        let runs = self.runs(source, &inline, self.text_style());
+        container(self.rich_runs(&runs, self.base(), LINE_HEIGHT, None, alignment))
         .width(Length::Fill)
         .padding([4.0, 8.0])
         .style(move |_theme: &iced::Theme| container::Style {
@@ -1205,16 +1257,14 @@ fn code_body<'a>(code: &str, hit: Option<((usize, usize), f32)>, scale: f32) -> 
             .into()
     }
 
-    fn footnote<'a>(&self, source: &str, label: &str, inline: &[InlineSpan]) -> Element<'a, Message> {
-        let st = TextStyle { color: Some(self.pal.muted), ..self.text_style() };
-        let mut spans = vec![
-            self.leaf(
-                format!("[{label}]"),
-                TextStyle { color: Some(self.pal.accent), ..self.text_style() },
-            ),
-            self.leaf(" ".to_string(), st),
-        ];
-        spans.extend(self.spans(source, inline, st));
+    fn footnote<'a>(
+        &self,
+        source: &str,
+        from: usize,
+        label: &str,
+        inline: &[InlineSpan],
+    ) -> Element<'a, Message> {
+        let runs = self.footnote_runs(source, from, label, inline);
         wrap_row(
             &[RowWrap::Bar {
                 color: self.pal.border,
@@ -1222,7 +1272,13 @@ fn code_body<'a>(code: &str, hit: Option<((usize, usize), f32)>, scale: f32) -> 
                 pad: 8.0,
                 bg: None,
             }],
-            footnote_content(spans, self.base() * 0.9, self.pal.muted),
+            self.rich_runs(
+                &runs,
+                self.base() * 0.9,
+                LINE_HEIGHT,
+                Some(self.pal.muted),
+                iced::alignment::Horizontal::Left,
+            ),
         )
     }
 
@@ -1429,24 +1485,54 @@ fn code_body<'a>(code: &str, hit: Option<((usize, usize), f32)>, scale: f32) -> 
         }
     }
 
-    /// 片段表 → 渲染 span（与 {@link Render::runs} 同一份走查的渲染侧）。
-    fn run_spans<'a>(&self, runs: Vec<LineRun>) -> Vec<Span<'a, LinkTarget, Font>> {
-        runs.into_iter()
-            .map(|run| {
-                let mut leaf = self.leaf(run.text, run.st);
-                if run.scale != 1.0 {
-                    leaf = leaf.size(self.base() * run.scale);
-                }
-                match run.link {
-                    Some(target) => self.linked(leaf, target.href, target.form),
-                    None => leaf,
-                }
-            })
-            .collect()
+    /// 单个片段 → 渲染 span（与 {@link Render::runs} 同一份走查的渲染侧）。
+    fn run_span<'a>(&self, run: LineRun) -> Span<'a, LinkTarget, Font> {
+        let mut leaf = self.leaf(run.text, run.st);
+        if run.scale != 1.0 {
+            leaf = leaf.size(self.base() * run.scale);
+        }
+        match run.link {
+            Some(target) => self.linked(leaf, target.href, target.form),
+            None => leaf,
+        }
     }
 
-    fn spans<'a>(&self, source: &str, list: &[InlineSpan], st: TextStyle) -> Vec<Span<'a, LinkTarget, Font>> {
-        self.run_spans(self.runs(source, list, st))
+    /// 片段表 → 渲染 span。
+    fn run_spans<'a>(&self, runs: Vec<LineRun>) -> Vec<Span<'a, LinkTarget, Font>> {
+        runs.into_iter().map(|run| self.run_span(run)).collect()
+    }
+
+    /// 片段表 → 富文本件：可拖选档带源区间与选区，其余走只读富文本。
+    fn rich_runs<'a>(
+        &self,
+        runs: &[LineRun],
+        size: f32,
+        line_height: f32,
+        color: Option<Color>,
+        align: alignment::Horizontal,
+    ) -> Element<'a, Message> {
+        if !self.selectable {
+            return rich(self.run_spans(runs.to_vec()), size, line_height, color, align);
+        }
+        let mut spans = Vec::with_capacity(runs.len());
+        let mut srcs = Vec::with_capacity(runs.len());
+        for run in runs {
+            spans.push(self.run_span(run.clone()));
+            srcs.push(SelectRun::new(run.src, run.text.len()));
+        }
+        let mut widget = SelectableRich::new(spans, srcs)
+            .size(size)
+            .line_height(line_height)
+            .align_x(align)
+            .color_maybe(color);
+        if let Some(sel) = self.selection {
+            widget = widget.dragging(sel.dragging);
+            let (from, to) = sel.range();
+            if from < to {
+                widget = widget.selection((from, to));
+            }
+        }
+        widget.into()
     }
 
     /// 交互档或插件正文给链接片段挂触点（纯只读档不挂，链接仅作样式）；
@@ -1592,6 +1678,184 @@ fn collect_walk(source: &str, opts: &ParseOptions, blocks: &[MarkdownBlock], out
     }
 }
 
+/// 选区可见文本（文档顺序）：块间换行、表格单元格制表符；非逐字节对应的片段
+/// （代码 / 公式 / 占位等）按整段取。
+pub fn selected_text(
+    doc: &MarkdownDocument,
+    theme: &iced::Theme,
+    images: &ImageHandles,
+    soft_break: bool,
+    range: (usize, usize),
+) -> String {
+    if range.0 >= range.1 {
+        return String::new();
+    }
+    let render = Render {
+        pal: Palette::from_theme(theme),
+        opts: link_options(),
+        interactive: false,
+        images,
+        soft_break,
+        scale: 1.0,
+        body: BodyStyle::default(),
+        selectable: false,
+        selection: None,
+    };
+    let mut pieces = Vec::new();
+    render.collect_text(&doc.source, &doc.blocks, range, &mut pieces);
+    let mut out = String::new();
+    for (index, piece) in pieces.iter().enumerate() {
+        if index > 0 {
+            out.push_str(pieces[index - 1].sep);
+        }
+        out.push_str(&piece.text);
+    }
+    out.trim_end().to_string()
+}
+
+/// 复制文本片段：`sep` = 与下一段的间隔。
+struct TextPiece {
+    text: String,
+    sep: &'static str,
+}
+
+fn push_text(out: &mut Vec<TextPiece>, text: String, sep: &'static str) {
+    if !text.is_empty() {
+        out.push(TextPiece { text, sep });
+    }
+}
+
+/// 片段表在选区内的可见文本：逐字节对齐的片段取相交部分，替换形态整段取。
+fn selected_runs_text(runs: &[LineRun], range: (usize, usize)) -> String {
+    let mut out = String::new();
+    for run in runs {
+        let (from, to) = run.src;
+        if from == to {
+            // 零宽源（脚注标记等）：落点覆盖到该位置即整段取
+            if range.0 <= from && from < range.1 {
+                out.push_str(&run.text);
+            }
+            continue;
+        }
+        if to <= range.0 || range.1 <= from {
+            continue;
+        }
+        if to - from == run.text.len() {
+            let start = range.0.max(from) - from;
+            let end = range.1.min(to) - from;
+            if let Some(slice) = run.text.get(start..end) {
+                out.push_str(slice);
+            }
+        } else {
+            out.push_str(&run.text);
+        }
+    }
+    out
+}
+
+fn selected_atomic_text(text: &str, src: (usize, usize), range: (usize, usize)) -> String {
+    let hit = if src.0 == src.1 {
+        range.0 <= src.0 && src.0 < range.1
+    } else {
+        src.0 < range.1 && range.0 < src.1
+    };
+    if hit { text.to_string() } else { String::new() }
+}
+
+impl Render<'_> {
+    /// 按块序收集选区可见文本（与渲染同一份行内走查）。
+    fn collect_text(
+        &self,
+        source: &str,
+        blocks: &[MarkdownBlock],
+        range: (usize, usize),
+        out: &mut Vec<TextPiece>,
+    ) {
+        for block in blocks {
+            match block {
+                MarkdownBlock::Heading { inline, .. } | MarkdownBlock::Paragraph { inline, .. } => {
+                    let runs = self.runs(source, inline, self.text_style());
+                    push_text(out, selected_runs_text(&runs, range), "\n");
+                }
+                MarkdownBlock::Blockquote { children, .. } => {
+                    self.collect_text(source, children, range, out);
+                }
+                MarkdownBlock::List { items, .. } => {
+                    for item in items {
+                        let (content_from, content_to) = item_content_range(source, item);
+                        let stripped = strip_quote_marks(&source[content_from..content_to]);
+                        if stripped == source[content_from..content_to] {
+                            let inline = parse_inline(source, content_from, content_to, &self.opts);
+                            let runs = self.runs(source, &inline, self.text_style());
+                            push_text(out, selected_runs_text(&runs, range), "\n");
+                        } else {
+                            // 剥前缀后与源区间不再逐字节对应：整段落项内容区间按可见文本取
+                            let inline = parse_inline(&stripped, 0, stripped.len(), &self.opts);
+                            let text: String = self
+                                .runs(&stripped, &inline, self.text_style())
+                                .iter()
+                                .map(|run| run.text.as_str())
+                                .collect();
+                            push_text(
+                                out,
+                                selected_atomic_text(&text, (content_from, content_to), range),
+                                "\n",
+                            );
+                        }
+                        self.collect_text(source, &item.children, range, out);
+                    }
+                }
+                MarkdownBlock::FencedCode { code, content_from, content_to, .. } => {
+                    push_text(
+                        out,
+                        selected_atomic_text(code, (*content_from, *content_to), range),
+                        "\n",
+                    );
+                }
+                MarkdownBlock::IndentedCode { code, from, to, .. } => {
+                    push_text(out, selected_atomic_text(code, (*from, *to), range), "\n");
+                }
+                MarkdownBlock::Hr { .. } => {}
+                MarkdownBlock::Table { header, rows, .. } => {
+                    for row in std::iter::once(header).chain(rows.iter()) {
+                        let cells: Vec<String> = row
+                            .iter()
+                            .map(|cell| {
+                                if cell.to <= cell.from {
+                                    return String::new();
+                                }
+                                let inline = parse_inline(source, cell.from, cell.to, &self.opts);
+                                let runs = self.runs(source, &inline, self.text_style());
+                                selected_runs_text(&runs, range)
+                            })
+                            .collect();
+                        let text = cells
+                            .into_iter()
+                            .filter(|cell| !cell.is_empty())
+                            .collect::<Vec<_>>()
+                            .join("\t");
+                        push_text(out, text, "\n");
+                    }
+                }
+                MarkdownBlock::MathBlock { tex, from, to } => {
+                    push_text(
+                        out,
+                        selected_atomic_text(&format!("$$\n{tex}\n$$"), (*from, *to), range),
+                        "\n",
+                    );
+                }
+                MarkdownBlock::HtmlBlock { html, from, to } => {
+                    push_text(out, selected_atomic_text(html, (*from, *to), range), "\n");
+                }
+                MarkdownBlock::FootnoteDef { from, label, inline, .. } => {
+                    let runs = self.footnote_runs(source, *from, label, inline);
+                    push_text(out, selected_runs_text(&runs, range), "\n");
+                }
+            }
+        }
+    }
+}
+
 /// 行内富文本（默认字色与行内对齐可选，供引用/脚注的弱化文本与表格单元格对齐用）。
 /// 链接触点常驻：纯只读档的行内片段不带链接，处理器不会触发。
 fn rich<'a>(
@@ -1607,20 +1871,25 @@ fn rich<'a>(
         .line_height(LineHeight::Relative(line_height))
         .align_x(align)
         .width(Length::Fill)
-        .on_link_click(|target: LinkTarget| match target.plugin {
-            Some(scope) => Message::PluginLink {
-                plugin_id: scope.plugin_id,
-                surface_id: scope.surface_id,
-                node_id: scope.node_id,
-                href: target.href,
-                form: target.form,
-            },
-            None => Message::OpenLink(target.href, target.form),
-        });
+        .on_link_click(link_message);
     if let Some(c) = color {
         text = text.color(c);
     }
     text.into()
+}
+
+/// 链接点击：插件正文回发给所属面，其余走默认打开。
+fn link_message(target: LinkTarget) -> Message {
+    match target.plugin {
+        Some(scope) => Message::PluginLink {
+            plugin_id: scope.plugin_id,
+            surface_id: scope.surface_id,
+            node_id: scope.node_id,
+            href: target.href,
+            form: target.form,
+        },
+        None => Message::OpenLink(target.href, target.form),
+    }
 }
 
 /// 空行间距元素：一个源码空行 = 一行高（行高按 `scale` 缩放）。
@@ -1845,6 +2114,32 @@ mod tests {
         let row = rows.iter().find(|r| !r.runs.is_empty()).expect("段落在编辑档有可见片段");
         let laid: String = row.runs.iter().map(|r| without_cr(r.text.clone())).collect();
         assert_eq!(laid, "甲乙\n丙丁");
+    }
+
+    /// 复制走文档可见文本：块间单个换行、列表不带标记、表格单元格制表符。
+    #[test]
+    fn selected_text_walks_visible_content() {
+        let source = "# 标题\n\n正文 abc 结束\n\n- 列表项\n\n| 甲 | 乙 |\n| --- | --- |\n| 1 | 2 |\n";
+        let doc = parse_document(source);
+        let images = ImageHandles::default();
+        let theme = iced::Theme::Dark;
+        let all = selected_text(&doc, &theme, &images, true, (0, source.len()));
+        assert_eq!(all, "标题\n正文 abc 结束\n列表项\n甲\t乙\n1\t2");
+        let start = source.find("abc").expect("选区目标");
+        assert_eq!(selected_text(&doc, &theme, &images, true, (start, start + 3)), "abc");
+    }
+
+    /// 列表项跨引用前缀：复制取渲染可见文本（剥引用标记，不含强调定界符）。
+    #[test]
+    fn selected_text_strips_quote_prefix_and_marks() {
+        let source = "> - **加粗** 项\n>   续行\n";
+        let doc = parse_document(source);
+        let images = ImageHandles::default();
+        let theme = iced::Theme::Dark;
+        assert_eq!(
+            selected_text(&doc, &theme, &images, true, (0, source.len())),
+            "加粗 项\n  续行"
+        );
     }
 
     #[test]

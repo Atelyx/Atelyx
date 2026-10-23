@@ -24,6 +24,7 @@ mod history_browser;
 mod image_clipboard;
 mod layout_view;
 mod markdown_edit;
+mod markdown_select;
 mod markdown_view;
 mod plugin_actions;
 mod plugin_canvas;
@@ -396,6 +397,12 @@ enum Message {
     NoteEnterEdit,
     /// 笔记面板内按压上报（PressRelay 转播；编辑档外点退出据此区分面板内外）。
     NotePressInside,
+    /// 只读档正文拖选起点（文档源字节偏移）。
+    NoteSelectStart(usize),
+    /// 只读档拖选移动中的落点（文档源字节偏移）。
+    NoteSelectTo(usize),
+    /// 只读档复制选区（Ctrl/Cmd+C 未被输入部件捕获时；未命中笔记选区则回落到命令路由）。
+    NoteCopy { key: keyboard::Key, mods: keyboard::Modifiers },
     /// 编辑面事件（部件只上报，正文/光标/选区真相在应用层）。
     Editor(markdown_edit::EditorEvent),
     /// 属性面板消息（frontmatter 类型化编辑）。
@@ -1311,6 +1318,10 @@ pub struct App {
     pub note_mode: NoteMode,
     /// 笔记面板内按压标志（NotePressInside 同批置位，全局 Press 消费）。
     note_press_inside: bool,
+    /// 只读档选区（源字节偏移；预览解析产物重建或面板外按压即清空）。
+    pub note_selection: Option<markdown_select::NoteSelection>,
+    /// 本次按压已由只读档正文拖选接手（全局 Press 据此保留选区）。
+    note_select_seen: bool,
     /// 进编辑档待落光标（只读档双击进入时置位，首个编辑面事件消化）。
     note_edit_caret_pending: bool,
     /// 只读档的解析产物：进入只读档或文件载入时重建，避免每帧重解析。
@@ -1604,6 +1615,8 @@ impl App {
                 autosave_timer: false,
                 note_mode: NoteMode::Read,
                 note_press_inside: false,
+                note_selection: None,
+                note_select_seen: false,
                 note_edit_caret_pending: false,
                 preview_doc: None,
                 note_images: markdown_view::ImageHandles::new(),
@@ -2117,6 +2130,30 @@ impl App {
             Message::NotePressInside => {
                 self.note_press_inside = true;
                 Task::none()
+            }
+            Message::NoteSelectStart(offset) => {
+                self.note_selection = Some(markdown_select::NoteSelection {
+                    anchor: offset,
+                    head: offset,
+                    dragging: true,
+                });
+                self.note_select_seen = true;
+                Task::none()
+            }
+            Message::NoteSelectTo(offset) => {
+                if let Some(sel) = self.note_selection.as_mut() {
+                    if sel.dragging {
+                        sel.head = offset;
+                    }
+                }
+                Task::none()
+            }
+            Message::NoteCopy { key, mods } => {
+                if self.note_mode == NoteMode::Read && self.note_selection.is_some() {
+                    self.copy_note_selection()
+                } else {
+                    self.on_key_command(key, mods)
+                }
             }
             Message::Editor(event) => self.on_editor(event),
             Message::Props(m) => self.on_props(m),
@@ -2837,6 +2874,11 @@ impl App {
                     .is_some_and(|rect| rect.contains(cursor));
                 // 笔记面板内按压标志：同批 widget 消息（PressRelay）先行置位，此处一次性消费
                 let note_press_inside = std::mem::take(&mut self.note_press_inside);
+                // 只读档选区：同批正文拖选起点先行置位；否则本次按压即清空选区
+                let note_select_seen = std::mem::take(&mut self.note_select_seen);
+                if !note_select_seen {
+                    self.note_selection = None;
+                }
                 // 对话输入面外点失焦：同批输入部件按压（Focus 事件）先行置位
                 let chat_press_inside = std::mem::take(&mut self.chat.press_inside);
                 if self.chat.input.focused && !chat_press_inside {
@@ -3044,6 +3086,9 @@ impl App {
                 Task::none()
             }
             Message::Release => {
+                if let Some(sel) = self.note_selection.as_mut() {
+                    sel.dragging = false;
+                }
                 self.press = None;
                 self.tab_press = None;
                 self.file_press = None;
@@ -5826,6 +5871,26 @@ impl App {
         self.refresh_preview();
     }
 
+    /// 只读档选区复制（Ctrl/Cmd+C 未被输入部件捕获时）。
+    fn copy_note_selection(&self) -> Task<Message> {
+        if self.note_mode != NoteMode::Read {
+            return Task::none();
+        }
+        let Some(selection) = self.note_selection.as_ref() else { return Task::none() };
+        let Some(doc) = self.preview_doc.as_ref() else { return Task::none() };
+        let text = markdown_view::selected_text(
+            doc,
+            &self.theme,
+            &self.note_images,
+            self.global.soft_wrap,
+            selection.range(),
+        );
+        if text.is_empty() {
+            return Task::none();
+        }
+        iced::clipboard::write(text)
+    }
+
     /// 进入预览编辑档：不揭示任何块、不持光标，首帧全篇按块渲染。
     fn enter_edit_mode(&mut self) {
         self.note_mode = NoteMode::Edit;
@@ -5838,11 +5903,17 @@ impl App {
 
     /// 只读档的解析产物：进入只读档或文件载入时重建（渲染面不逐帧解析）。
     pub(crate) fn refresh_preview(&mut self) {
+        // 选区按旧正文的源偏移持有：解析产物重建即作废
+        self.note_selection = None;
         if self.note_mode != NoteMode::Read {
             self.preview_doc = None;
             return;
         }
-        let body = strip_frontmatter(&self.note_text).to_string();
+        let mut body = strip_frontmatter(&self.note_text).to_string();
+        // 渲染与拖选共用这份源：`\r` 不占位、不计字符位，行尾风格先归一
+        if body.contains('\r') {
+            body = body.replace("\r\n", "\n").replace('\r', "");
+        }
         let doc = markdown_view::parse_document(&body);
         self.ensure_note_images(&doc);
         self.preview_doc = Some(doc);
@@ -6802,6 +6873,18 @@ impl App {
                     key: keyboard::Key::Named(keyboard::key::Named::Escape),
                     ..
                 }) => Some(Message::Escape(window)),
+                // 只读笔记选区复制：输入部件已捕获的 Ctrl/Cmd+C 走其原生复制；未命中笔记
+                // 选区时在处理器里回落命令路由（表格复制等）
+                Event::Keyboard(keyboard::Event::KeyPressed {
+                    key: keyboard::Key::Character(c),
+                    modifiers,
+                    ..
+                }) if c.eq_ignore_ascii_case("c")
+                    && (modifiers.control() || modifiers.logo())
+                    && status == iced::event::Status::Ignored =>
+                {
+                    Some(Message::NoteCopy { key: keyboard::Key::Character(c), mods: modifiers })
+                }
                 // 命令候选键（撤销/重做/剪贴板/清空 + Ctrl+S/A 兜底）：置于具名键臂之后，
                 // 不抢占 NavKey / CharKey / Tab / Escape 既有路径
                 Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })

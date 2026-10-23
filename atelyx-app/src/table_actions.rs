@@ -74,24 +74,34 @@ fn on_msg_open(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
         tv::TableMsg::Wheel { delta_y, delta_x } => on_wheel(app, delta_y, delta_x),
         tv::TableMsg::Edited(action) => {
             let Some(s) = app.table.as_mut() else { return Task::none() };
-            let Some(edit) = s.view.editing.as_mut() else { return Task::none() };
-            // 仅内容编辑动作视为「已输入」（光标移动/选择不算），区分未输入与输入后删空
-            if action.is_edit() {
-                edit.touched = true;
+            let mut live = None;
+            {
+                let Some(edit) = s.view.editing.as_mut() else { return Task::none() };
+                // 仅内容编辑动作视为「已输入」（光标移动/选择不算），区分未输入与输入后删空
+                let edited = action.is_edit();
+                if edited {
+                    edit.touched = true;
+                }
+                // 编辑器内按压必被 text_editor 捕获（外层观察不到），本消息即「按压在编辑器内」
+                // 的确定性信号：同批全局 Press 靠 editor_inside/press_seen 放行
+                if matches!(
+                    action,
+                    text_editor::Action::Click(_)
+                        | text_editor::Action::Drag(_)
+                        | text_editor::Action::SelectWord
+                        | text_editor::Action::SelectLine
+                ) {
+                    s.view.editor_inside = true;
+                    s.view.press_seen = true;
+                }
+                edit.content.perform(action);
+                if edited {
+                    live = Some((edit.row_id.clone(), edit.field_id.clone(), edit.content.text()));
+                }
             }
-            // 编辑器内按压必被 text_editor 捕获（外层观察不到），本消息即「按压在编辑器内」
-            // 的确定性信号：同批全局 Press 靠 editor_inside/press_seen 放行
-            if matches!(
-                action,
-                text_editor::Action::Click(_)
-                    | text_editor::Action::Drag(_)
-                    | text_editor::Action::SelectWord
-                    | text_editor::Action::SelectLine
-            ) {
-                s.view.editor_inside = true;
-                s.view.press_seen = true;
+            if let Some((row_id, field_id, draft)) = live {
+                s.reflow_edit_row(&row_id, &field_id, &draft);
             }
-            edit.content.perform(action);
             Task::none()
         }
         tv::TableMsg::ShowStyleBar => {
@@ -1844,21 +1854,32 @@ pub fn commit_edit(app: &mut App) {
         return;
     }
     let text = edit.content.text();
-    let Some(field) = s.data.fields.iter().find(|f| f.id == edit.field_id) else { return };
-    let next = match field.field_type.as_str() {
-        "number" | "duration" => {
-            let t = text.trim();
-            if t.is_empty() {
-                None
-            } else {
-                match t.parse::<f64>() {
-                    // 非法输入 = 放弃本次编辑（数据未动，丢弃会话即可）
-                    Ok(n) if n.is_finite() => Some(ops::number_value(n)),
-                    _ => return,
+    let Some(numeric) = s
+        .data
+        .fields
+        .iter()
+        .find(|f| f.id == edit.field_id)
+        .map(|f| matches!(f.field_type.as_str(), "number" | "duration"))
+    else {
+        return;
+    };
+    let next = if numeric {
+        let t = text.trim();
+        if t.is_empty() {
+            None
+        } else {
+            match t.parse::<f64>() {
+                Ok(n) if n.is_finite() => Some(ops::number_value(n)),
+                // 非法输入 = 放弃本次编辑；在途草稿可能已撑高行，重建布局回到已落值口径
+                _ => {
+                    s.rebuild_layout();
+                    clamp_scroll(s);
+                    return;
                 }
             }
         }
-        _ => (!text.is_empty()).then_some(serde_json::Value::String(text)),
+    } else {
+        (!text.is_empty()).then_some(serde_json::Value::String(text))
     };
     // 变化判定与 set_cell_value 同口径（空串 ≈ 缺键等归一化）：否则压入无差异的幽灵撤销步
     let changed = s
@@ -1899,11 +1920,14 @@ fn on_commit_enter(app: &mut App) -> Task<Message> {
 }
 
 /// Esc：取消编辑（草稿仅在编辑器中，数据未动；直接丢弃会话）；清编辑与选区。
+/// 在途草稿可能已撑高行：重建布局回到已落值口径。
 fn cancel_edit(app: &mut App) {
     let Some(s) = app.table.as_mut() else { return };
     s.view.edit_session = None;
     s.view.editing = None;
     s.view.selection = None;
+    s.rebuild_layout();
+    clamp_scroll(s);
 }
 
 // ===== 撤销 =====
