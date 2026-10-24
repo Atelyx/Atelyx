@@ -49,6 +49,9 @@ pub(crate) fn platform_label(token: &str) -> String {
 
 /// 协作在场色缺省值（用户未自定义 collab_color 时的设备标色）。
 pub(crate) const DEFAULT_COLLAB_COLOR: &str = "#30bced";
+/// 协作展示色色池（首次登录随机指派与取色器预设共用）。
+pub(crate) const COLLAB_COLORS: [&str; 7] =
+    ["#e06c75", "#61afef", "#98c379", "#e5c07b", "#c678dd", "#56b6c2", "#d19a66"];
 
 /// 他端结构变更的树刷新合并窗口：连续建删（批量导入等）只刷一次。
 const FS_TREE_REFRESH_COALESCE: std::time::Duration = std::time::Duration::from_millis(600);
@@ -379,14 +382,11 @@ fn on_login_done(
     app.notify(NoticeLevel::Success, "已登录");
     // 协作展示色：首次登录随机指派（远端光标 / 名单；固定 7 色池）
     if app.global.collab_color.is_none() {
-        const COLORS: [&str; 7] = [
-            "#e06c75", "#61afef", "#98c379", "#e5c07b", "#c678dd", "#56b6c2", "#d19a66",
-        ];
-        let pick = COLORS[(std::time::SystemTime::now()
+        let pick = COLLAB_COLORS[(std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.subsec_nanos() as usize)
             .unwrap_or(0))
-            % COLORS.len()];
+            % COLLAB_COLORS.len()];
         app.global.collab_color = Some(pick.to_string());
     }
     // 登录前挂起的目标空间自动续接

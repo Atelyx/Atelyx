@@ -262,7 +262,12 @@ pub(crate) enum PopupState {
     FontPicker { for_table: bool },
     /// 表格：格式气泡下拉（字号 / 字色 / 底色）。
     TableSizeMenu,
-    TableColorMenu { bg: bool },
+    /// 取色器弹层（表格字色/底色、文件夹图标色、协作展示色）。
+    ColorPicker {
+        target: crate::color_picker_actions::ColorTarget,
+        hsv: crate::ui::color_picker::Hsv,
+        hex: String,
+    },
     /// 表格：单选下拉（行 + 字段）。
     TableSelectMenu { row_id: String, field_id: String },
     /// 表格：灯箱图片右键菜单（下载）。
@@ -357,7 +362,7 @@ impl PopupState {
             PopupState::TableMoreMenu => 144.0,
             PopupState::FontPicker { .. } => 240.0,
             PopupState::TableSizeMenu => 96.0,
-            PopupState::TableColorMenu { .. } => 168.0,
+            PopupState::ColorPicker { .. } => crate::ui::color_picker::PANEL_W,
             PopupState::TableSelectMenu { .. } => 144.0,
             PopupState::TableLightboxMenu => 128.0,
             PopupState::TableViewMenu => 96.0,
@@ -2875,16 +2880,10 @@ fn ext_label(name: &str) -> String {
 
 /// 十六进制颜色串（`#rrggbb`）→ Color；非法输入返回 None（回落默认图标色）。
 pub(crate) fn parse_hex_color(hex: &str) -> Option<iced::Color> {
-    let hex = hex.strip_prefix('#')?;
-    if hex.len() != 6 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+    if hex.len() != 7 || !hex.starts_with('#') {
         return None;
     }
-    let value = u32::from_str_radix(hex, 16).ok()?;
-    Some(iced::Color::from_rgb8(
-        ((value >> 16) & 0xff) as u8,
-        ((value >> 8) & 0xff) as u8,
-        (value & 0xff) as u8,
-    ))
+    crate::ui::color_picker::parse_hex(hex)
 }
 
 /// 由子项缓存 + 展开集摊平侧栏行（每层按仓库排序键排列；根子项 depth 从 1 起，
@@ -3779,7 +3778,7 @@ fn popup_element<'a>(
             entries
         }
         PopupState::FileMenu { rel, is_dir, is_root } => {
-            file_menu_entries(app, rel, *is_dir, *is_root)
+            file_menu_entries(app, rel, *is_dir, *is_root, window)
         }
         PopupState::VaultMenu { root } => vault_menu_entries(app, root),
         PopupState::SpaceMenu => space_menu_entries(app, window),
@@ -4389,43 +4388,9 @@ fn popup_element<'a>(
             }
             entries
         }
-        PopupState::TableColorMenu { bg } => {
-            let bg = *bg;
-            let presets: [&str; 10] = if bg {
-                ["#fde2e2", "#fde7d8", "#fdf0cf", "#e3f3e5", "#dcf1f4", "#e0ecfb", "#ece3fa", "#fbe3f0", "#f0e6d8", "#e8e8e8"]
-            } else {
-                ["#e05252", "#e07b39", "#c99a16", "#4fae6a", "#2fa3b3", "#4f8fd0", "#8a5ad0", "#d94f9c", "#8a6d4a", "#8a8a8a"]
-            };
-            let mut entries = vec![(
-                0,
-                MenuEntry::Action {
-                    label: "默认".into(),
-                    icon: None,
-                    danger: false,
-                    disabled: false,
-                    on_press: Some(Message::Table(crate::table_view::TableMsg::SetColor { bg, color: None })),
-                    note: Some("清除"),
-                    hint: None,
-                },
-            )];
-            for hex in presets {
-                entries.push((
-                    0,
-                    MenuEntry::Action {
-                        label: hex.to_string(),
-                        icon: None,
-                        danger: false,
-                        disabled: false,
-                        on_press: Some(Message::Table(crate::table_view::TableMsg::SetColor {
-                            bg,
-                            color: Some(hex.to_string()),
-                        })),
-                        note: None,
-                        hint: None,
-                    },
-                ));
-            }
-            entries
+        PopupState::ColorPicker { target, hsv, hex } => {
+            let (panel, height) = crate::color_picker_actions::panel(app, target, *hsv, hex);
+            vec![(0, MenuEntry::Custom(panel, height))]
         }
         PopupState::TableSelectMenu { row_id, field_id } => {
             let (rid, fid) = (row_id.clone(), field_id.clone());
@@ -5941,6 +5906,7 @@ fn file_menu_entries(
     rel: &str,
     is_dir: bool,
     is_root: bool,
+    window: iced::window::Id,
 ) -> Vec<(usize, MenuEntry<'static, Message>)> {
     let mut entries: Vec<(usize, MenuEntry<Message>)> = Vec::new();
     if is_dir {
@@ -5972,12 +5938,14 @@ fn file_menu_entries(
             Message::DraftStart(rel.to_string(), DraftKind::Folder))));
         if !is_root {
             entries.push((0, MenuEntry::Divider));
-            entries.push((0, MenuEntry::Submenu {
-                label: "图标颜色".into(),
-                icon: Some("palette".into()),
-                disabled: false,
-                pane: 2,
-            }));
+            entries.push((0, MenuEntry::action_icon(
+                "图标颜色",
+                "palette",
+                Message::ColorPicker(crate::color_picker_actions::ColorPickerMsg::OpenFolder {
+                    window,
+                    rel: rel.to_string(),
+                }),
+            )));
             entries.push((0, MenuEntry::Divider));
             entries.push((0, MenuEntry::action_icon("创建副本", "copy",
                 Message::DuplicateEntry(rel.to_string(), true))));
@@ -6018,46 +5986,6 @@ fn file_menu_entries(
             Message::RenameStartFile(rel.to_string()))));
         entries.push((0, MenuEntry::danger("删除", "trash-2",
             Message::DeleteAsk(rel.to_string()))));
-    }
-
-    // pane 2 = 图标颜色色板（预设色 + 当前标注 + 恢复默认）
-    if is_dir && !rel.is_empty() {
-        const PRESETS: [&str; 8] = [
-            "#e05252", "#e07b39", "#e0b436", "#4fae6a", "#2f9e8f", "#4f8fd0", "#7a6fd0", "#c05fa8",
-        ];
-        let current = app.folder_colors.get(rel);
-        for hex in PRESETS {
-            let Some(color) = parse_hex_color(hex) else { continue };
-            let is_current = current == Some(&hex.to_string());
-            let swatch = container(space().width(Length::Fixed(12.0)).height(Length::Fixed(12.0)))
-                .style(move |_t| Style {
-                    background: Some(color.into()),
-                    // 当前色 = 强调描边加粗（子面板无行尾角标，选中态画在色块上）
-                    border: border::rounded(3.0)
-                        .color(if is_current { pal::ACCENT } else { pal::BORDER })
-                        .width(if is_current { 2.0 } else { 1.0 }),
-                    ..Style::default()
-                });
-            let row = row![
-                swatch,
-                text(hex.to_string()).size(pal::fs_micro()).color(pal::TEXT_SECONDARY).font(mono()),
-            ]
-            .spacing(8)
-            .padding(Padding::ZERO.horizontal(12.0))
-            .width(Length::Fill)
-            .align_y(Vertical::Center);
-            entries.push((2, MenuEntry::Custom(iced::widget::button(row)
-                .width(Length::Fill)
-                .style(|_t, status| button::Style {
-                    background: matches!(status, button::Status::Hovered | button::Status::Pressed)
-                        .then_some(pal::HOVER.into()),
-                    ..Default::default()
-                })
-                .on_press(Message::FolderColorSet(rel.to_string(), Some(hex.to_string())))
-                .into(), pal::MENU_ITEM_H)));
-        }
-        entries.push((2, MenuEntry::action_icon("恢复默认", "rotate-ccw",
-            Message::FolderColorSet(rel.to_string(), None))));
     }
 
     // pane 1 = 删除就地确认（无标题行：说明文字 + 菜单项形态的确认/取消；

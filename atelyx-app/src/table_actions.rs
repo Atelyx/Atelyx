@@ -383,9 +383,8 @@ fn on_msg_open(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
             } else {
                 ops::StylePatch { color: ops::KeyOp::Set(color), ..Default::default() }
             };
-            let task = apply_style(app, patch);
-            app.dismiss_popup();
-            task
+            // 取色器选色后弹层保持打开（连续比较）；关闭由外点 / Esc 承担
+            apply_style(app, patch)
         }
         tv::TableMsg::ClearFormat => {
             let task = apply_style(app, clear_format_patch());
@@ -603,7 +602,7 @@ fn on_msg_open(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
             Task::none()
         }
         tv::TableMsg::OpenColorMenu { window, bg } => {
-            open_table_popup(app, window, crate::layout_view::PopupState::TableColorMenu { bg }, None);
+            crate::color_picker_actions::open_table(app, window, bg);
             Task::none()
         }
         tv::TableMsg::PopupDraft(v) => {

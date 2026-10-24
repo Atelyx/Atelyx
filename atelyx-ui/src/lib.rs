@@ -3,6 +3,7 @@
 //! 视觉 token 定义于 `palette`；弹层与菜单是全应用唯一浮层入口，
 //! 右键菜单、下拉、就地确认都经 [`popup`] + [`menu`] 组合。组件对宿主消息类型泛型，库内不定义业务消息。
 
+pub mod color_picker;
 pub mod controls;
 pub mod font;
 pub mod icon;

@@ -19,6 +19,7 @@ mod chat_input;
 mod chat_stream;
 mod app_icon;
 mod chat_view;
+mod color_picker_actions;
 mod commands;
 mod history_browser;
 mod image_clipboard;
@@ -481,6 +482,10 @@ enum Message {
     PromptToggle(String),
     /// 设置/清除文件夹图标颜色（None = 恢复默认）。
     FolderColorSet(String, Option<String>),
+    /// 取色器（表格字色/底色、文件夹图标色、协作展示色）。
+    ColorPicker(color_picker_actions::ColorPickerMsg),
+    /// 协作展示色落盘（远端光标 / 名单取色）。
+    CollabColorSet(String),
     /// 仓库级配置与元数据（config / 提示词标记 / 文件夹颜色）落地（gen 守卫）。
     VaultMetaLoaded(u64, VaultMetaResult),
     /// 提示词标记清单落地（读或写回后的最新清单；gen 守卫）。
@@ -2542,10 +2547,16 @@ impl App {
                 }
                 Task::none()
             }
-            Message::FolderColorSet(rel, color) => {
-                self.dismiss_popup();
-                self.set_folder_color(&rel, color)
+            Message::ColorPicker(msg) => color_picker_actions::update(self, msg),
+            Message::CollabColorSet(color) => {
+                self.global.collab_color = Some(color);
+                // 换色后立即刷新笔记 / 表格在场身份，对端不必等到下一次选区事件
+                space_actions::collab_after_caret(self);
+                space_actions::table_collab_sync(self);
+                self.save_global_now();
+                Task::none()
             }
+            Message::FolderColorSet(rel, color) => self.set_folder_color(&rel, color),
             Message::FolderColorsLoaded(gen, result) => {
                 if gen == self.epoch() {
                     match result {
@@ -6278,15 +6289,21 @@ impl App {
         let Some(root) = self.vault.root().ok() else { return Task::none() };
         let rel = rel.to_string();
         let gen = self.epoch();
+        let writes = self.vault.writes.clone();
         Task::perform(
             async move {
-                let mut colors = vault::read_folder_colors_file(&root)?;
-                match color {
-                    Some(c) => colors.insert(rel, c),
-                    None => colors.remove(&rel),
-                };
-                vault::write_folder_colors_file(&root, &colors)?;
-                vault::read_folder_colors_file(&root)
+                // 读改写在写盘队列执行序内完成：连续换色不会互相覆盖（后提交者胜）
+                writes
+                    .bulk(move || {
+                        let mut colors = vault::read_folder_colors_file(&root)?;
+                        match color {
+                            Some(c) => colors.insert(rel, c),
+                            None => colors.remove(&rel),
+                        };
+                        vault::write_folder_colors_file(&root, &colors)?;
+                        Ok(colors)
+                    })
+                    .await
             },
             move |result| Message::FolderColorsLoaded(gen, result),
         )

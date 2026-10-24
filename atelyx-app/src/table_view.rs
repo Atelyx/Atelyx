@@ -13,6 +13,7 @@ use iced::{alignment, Color, Element, Length, Point, Rectangle, Size, Vector};
 
 use crate::layout_view::estimate_text_width;
 use crate::table_text::{measure_live_lines, TextLine, WrapCache, LINE_FACTOR};
+use crate::ui::color_picker::parse_hex;
 use crate::ui::icon::polylines;
 use crate::ui::palette as pal;
 use crate::ui::text;
@@ -1165,28 +1166,6 @@ fn named_family(value: &str) -> iced::font::Family {
         other => other,
     };
     crate::ui::font::lookup(name).map_or_else(crate::ui::family, iced::font::Family::Name)
-}
-
-/// hex 颜色解析（#RGB / #RRGGBB；非法 = None）。数据来自 .atb 文件值，先验十六进制再切片。
-pub fn parse_hex(s: &str) -> Option<Color> {
-    let s = s.trim_start_matches('#');
-    if !s.chars().all(|c| c.is_ascii_hexdigit()) {
-        return None;
-    }
-    let (r, g, b) = match s.len() {
-        3 => (
-            u8::from_str_radix(&s[0..1].repeat(2), 16).ok()?,
-            u8::from_str_radix(&s[1..2].repeat(2), 16).ok()?,
-            u8::from_str_radix(&s[2..3].repeat(2), 16).ok()?,
-        ),
-        6 => (
-            u8::from_str_radix(&s[0..2], 16).ok()?,
-            u8::from_str_radix(&s[2..4], 16).ok()?,
-            u8::from_str_radix(&s[4..6], 16).ok()?,
-        ),
-        _ => return None,
-    };
-    Some(Color::from_rgb8(r, g, b))
 }
 
 fn style_color(st: &CellStyle) -> Color {

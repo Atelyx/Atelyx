@@ -261,7 +261,7 @@ fn settings_body<'a>(app: &'a App, window: iced::window::Id) -> Element<'a, Mess
 fn settings_tab_body<'a>(app: &'a App, window: iced::window::Id) -> Element<'a, Message> {
     match app.settings_tab.as_str() {
         "general" => general::view(app, window),
-        "collab" => collab_settings_view(app),
+        "collab" => collab_settings_view(app, window),
         "editorPrefs" => editor_prefs::view(app),
         "shortcuts" => shortcuts::view(app, window),
         "plugins" => plugins::view(app),
@@ -346,7 +346,7 @@ fn push_group<'a>(
 }
 
 /// 设置页「多人协作」：登录身份、协作展示色、设备会话管理、退出登录。
-fn collab_settings_view(app: &App) -> Element<'static, Message> {
+fn collab_settings_view(app: &App, window: iced::window::Id) -> Element<'static, Message> {
     let mut col = iced::widget::Column::<Message>::new()
         .spacing(8)
         .padding(Padding::ZERO.horizontal(20.0));
@@ -385,7 +385,7 @@ fn collab_settings_view(app: &App) -> Element<'static, Message> {
                 .spacing(8)
                 .align_y(iced::alignment::Vertical::Center),
             ));
-            // 协作展示色（只读展示：编辑留待外观设置统一收口）
+            // 协作展示色（取色器选色；远端光标 / 名单同源）
             col = col.push(group_head("协作展示色", "远端光标 / 名单", false));
             let color_swatch = app
                 .global
@@ -393,24 +393,31 @@ fn collab_settings_view(app: &App) -> Element<'static, Message> {
                 .clone()
                 .and_then(|hex| parse_hex_color(&hex))
                 .unwrap_or(pal::TEXT_MUTED);
-            col = col.push(card(
-                row![
-                    container(space())
-                        .width(Length::Fixed(12.0))
-                        .height(Length::Fixed(12.0))
-                        .style(move |_t| Style {
-                            background: Some(color_swatch.into()),
-                            border: border::rounded(999.0),
-                            ..Style::default()
-                        }),
-                    text(app.global.collab_color.clone().unwrap_or_else(|| "未指派".into()))
-                        .size(pal::fs_caption())
-                        .color(pal::TEXT_SECONDARY)
-                        .font(mono()),
-                ]
-                .spacing(8)
-                .align_y(iced::alignment::Vertical::Center),
-            ));
+            let swatch_row = row![
+                container(space())
+                    .width(Length::Fixed(12.0))
+                    .height(Length::Fixed(12.0))
+                    .style(move |_t| Style {
+                        background: Some(color_swatch.into()),
+                        border: border::rounded(999.0),
+                        ..Style::default()
+                    }),
+                text(app.global.collab_color.clone().unwrap_or_else(|| "未指派".into()))
+                    .size(pal::fs_caption())
+                    .color(pal::TEXT_SECONDARY)
+                    .font(mono()),
+                space().width(Length::Fill),
+                text("选色").size(pal::fs_micro()).color(pal::ACCENT),
+            ]
+            .spacing(8)
+            .align_y(iced::alignment::Vertical::Center);
+            col = col.push(card(row![button(swatch_row)
+                .width(Length::Fill)
+                .padding(0.0)
+                .style(controls::row_style(false, pal::RADIUS_SM))
+                .on_press(Message::ColorPicker(
+                    crate::color_picker_actions::ColorPickerMsg::OpenCollab { window },
+                ))]));
             // 设备会话
             col = col.push(group_head("设备会话", &format!("{} 台在线记录", app.space_devices.len()), false));
             for d in &app.space_devices {
