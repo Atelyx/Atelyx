@@ -13,10 +13,12 @@ use crate::protocol::method::{
 };
 
 /// 宿主通知处理面。全部 `host:` 通知按方法名分派；实现只需覆盖关心的项。
-/// 通知处理逐个起独立任务（async-trait 盒装 Send future），单个回调卡住不阻塞连接读取；
-/// 因此回调内允许再经 [`Context`] 调宿主（响应由读任务继续消费，不会互等）。
-/// 顺序约定：`on_ready` 之前的宿主通知可能先于它执行，且回调之间无先后保证——
-/// 需要初始化状态的回调必须容忍「尚未 ready」的情形。
+/// 回调按通知到达顺序逐个执行：读线程只入队，单个 worker 顺序消费，因此同一份状态不必
+/// 自己加锁；代价是单个回调卡住会挡住后续通知（弹对话框 / 长请求这类阻塞调用要么容忍
+/// 整体暂停，要么在回调里另起任务自己驱动）。回调里仍可再经 [`Context`] 调宿主——响应
+/// 配对在读线程上，与回调不会互等。
+/// 顺序约定：`on_ready` 之前的宿主通知可能先于它执行——需要初始化状态的回调必须容忍
+/// 「尚未 ready」的情形。
 #[async_trait::async_trait]
 pub trait PluginHandler: Send + Sync + 'static {
     /// 握手完成后调用一次：提交初始界面树、声明订阅都应在这里做。
@@ -159,7 +161,7 @@ mod tests {
     use serde_json::Value;
     use tokio::sync::mpsc;
 
-    use crate::protocol::envelope::{Envelope, RequestId};
+    use crate::protocol::envelope::Envelope;
     use crate::protocol::view::ViewEvent;
     use atelyx_view::view_builders::text;
 
@@ -177,10 +179,7 @@ mod tests {
         let Envelope::Request(request) = envelope else {
             panic!("插件只发请求");
         };
-        let RequestId::Num(id) = request.id else {
-            panic!("请求 id 应为数字");
-        };
-        (id, request.method, request.params)
+        (request.id, request.method, request.params)
     }
 
     fn reply(ctx: &Context, id: u64) {

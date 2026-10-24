@@ -97,7 +97,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::*;
-    use crate::protocol::envelope::{Envelope, RequestId};
+    use crate::protocol::envelope::Envelope;
     use atelyx_view::view_builders::text;
 
     fn test_context() -> (Context, mpsc::Receiver<Envelope>) {
@@ -113,10 +113,7 @@ mod tests {
         let Envelope::Request(request) = envelope else {
             panic!("插件只发请求");
         };
-        let RequestId::Num(id) = request.id else {
-            panic!("请求 id 应为数字");
-        };
-        (id, request.params)
+        (request.id, request.params)
     }
 
     fn reply(ctx: &Context, id: u64, result: Result<Value, RpcError>) {

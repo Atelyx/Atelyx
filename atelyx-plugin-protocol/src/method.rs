@@ -170,6 +170,9 @@ pub mod canvas {
     /// 按 id 增量维护画布清单：更新 / 追加 / 删除单个条目，只上行改动的条目，不必重发整表。
     /// 未提交过清单时以空表为基线（首次也可直接用增量建表）。
     pub const PATCH: &str = "canvas.patch";
+    /// 量算一段文字在给定字号 / 字体下的占位尺寸（画布排版要按真实字宽摆放，不能按字符数估）。
+    /// 纯计算：不改清单、不产生帧、不要求节点存在。
+    pub const MEASURE_TEXT: &str = "canvas.measureText";
     /// 宿主告知插件画布节点的像素尺寸（通知，尺寸变化时发）。
     pub const HOST_RESIZED: &str = "host:canvas.resized";
     /// 宿主按节点声明的 `fps` 发帧拍（通知）：插件收到后提交该帧的绘制内容。
@@ -473,6 +476,43 @@ pub struct CanvasFrameParams {
     pub frame: u64,
     /// 距该画布上一帧的毫秒数（首帧为 0）。动画相位请以帧序号为准，此值只作节拍参考。
     pub delta_ms: u32,
+}
+
+/// [`canvas::MEASURE_TEXT`] 的 params：`size` 为绝对字号（逻辑像素，与画布 `text` 指令同口径）。
+/// 参数面与画布 `text` 指令保持一致（只有字重可调），量出来的宽度才能在画布上复现。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeasureTextParams {
+    pub text: String,
+    pub size: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weight: Option<crate::view::TextWeight>,
+    /// 可用宽度上限：给定即按该宽度换行量算（缺省按单行）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_width: Option<f32>,
+}
+
+impl MeasureTextParams {
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.size.is_finite() || self.size <= 0.0 {
+            return Err("字号必须大于 0".into());
+        }
+        if let Some(max_width) = self.max_width {
+            if !max_width.is_finite() || max_width <= 0.0 {
+                return Err("可用宽度必须大于 0".into());
+            }
+        }
+        Ok(())
+    }
+}
+
+/// [`canvas::MEASURE_TEXT`] 的 result：占位宽高（逻辑像素）与换行后的行数（单行量算恒为 1）。
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeasureTextResult {
+    pub width: f32,
+    pub height: f32,
+    pub lines: u32,
 }
 
 // ---------- layout ----------

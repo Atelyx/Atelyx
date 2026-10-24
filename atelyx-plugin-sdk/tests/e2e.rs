@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use atelyx_plugin_sdk::protocol::envelope::{Envelope, RequestId};
+use atelyx_plugin_sdk::protocol::envelope::Envelope;
 use atelyx_plugin_sdk::protocol::handshake::{InitializeResult, INITIALIZE};
 use atelyx_plugin_sdk::protocol::method::{self, SubmitParams};
 use atelyx_plugin_sdk::protocol::{event, API_VERSION};
@@ -38,7 +38,7 @@ impl Stub {
     }
 
     /// 读到下一条指定方法的请求，返回 (请求 id, params)；应答必须回显该 id。
-    async fn expect_request(&mut self, method: &str) -> (RequestId, Value) {
+    async fn expect_request(&mut self, method: &str) -> (u64, Value) {
         let line = self.next_line().await;
         let envelope = Envelope::parse(line.trim_end()).expect("插件输出应为合法信封");
         match envelope {
@@ -50,7 +50,7 @@ impl Stub {
         }
     }
 
-    async fn reply_ok(&mut self, id: RequestId, result: Value) {
+    async fn reply_ok(&mut self, id: u64, result: Value) {
         self.send(&Envelope::success(id, result)).await;
     }
 }
@@ -295,7 +295,7 @@ async fn host_request_breaks_connection() {
     let (mut child, mut stub) = spawn_stub().await;
     handshake(&mut stub).await;
     consume_initial(&mut stub).await;
-    stub.send(&Envelope::request(RequestId::Num(99), "fs.readText", json!({"path": "x"}))).await;
+    stub.send(&Envelope::request(99, "fs.readText", json!({"path": "x"}))).await;
     let status = tokio::time::timeout(TIMEOUT, child.wait())
         .await
         .expect("等插件退出超时")
@@ -325,4 +325,55 @@ async fn version_mismatch_fails_loudly() {
         .expect("等插件退出超时")
         .expect("wait 失败");
     assert!(!status.success(), "版本不一致应非零退出，实际：{status:?}");
+}
+
+/// 宿主通知按到达顺序逐个回调：连发三条 `stub.ping`，桩必须走完一条（write → read → submit）
+/// 才接下一条。并发回调下会先看到三条 write 挤在一起，顺序无从保证。
+#[tokio::test]
+async fn host_events_run_callbacks_in_arrival_order() {
+    let (mut child, mut stub) = spawn_stub().await;
+    handshake(&mut stub).await;
+    consume_initial(&mut stub).await;
+
+    for payload in 0..3 {
+        stub.send(&Envelope::notification(
+            event::HOST_PUBLISH,
+            json!({ "name": "stub.ping", "payload": payload }),
+        ))
+        .await;
+    }
+
+    // 处理顺序的可观测面：每条通知先 write 再 read（读回的 pong 恒为空，后两条的界面树
+    // 与上次相同而不再提交，故只以 write / read 的交错为判据）
+    let mut seen: Vec<&'static str> = Vec::new();
+    let mut reads = 0;
+    while reads < 3 {
+        let line = stub.next_line().await;
+        let request = match Envelope::parse(line.trim_end()).expect("插件输出应为合法信封") {
+            Envelope::Request(r) => r,
+            other => panic!("应收到请求，实际：{other:?}"),
+        };
+        match request.method.as_str() {
+            m if m == method::state::WRITE => {
+                seen.push("write");
+                stub.reply_ok(request.id, json!({})).await;
+            }
+            m if m == method::state::READ => {
+                seen.push("read");
+                reads += 1;
+                stub.reply_ok(request.id, json!({ "json": {} })).await;
+            }
+            m if m == method::view::SUBMIT => {
+                stub.reply_ok(request.id, json!({ "applied": true })).await;
+            }
+            other => panic!("未知请求：{other}"),
+        }
+    }
+    assert_eq!(
+        seen,
+        ["write", "read", "write", "read", "write", "read"],
+        "三条通知必须一条条走完，不能并行推进"
+    );
+
+    let _ = child.kill().await;
 }

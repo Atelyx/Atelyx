@@ -1639,7 +1639,7 @@ fn ensure_chat_images(app: &mut App) -> iced::Task<Message> {
     let mut tasks = Vec::new();
     for src in srcs {
         if app.note_images.contains_key(&src)
-            || app.note_images_failed.contains(&src)
+            || !app.can_load_image(&src)
             || !app.note_images_inflight.insert(src.clone())
         {
             continue;

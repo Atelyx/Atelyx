@@ -64,7 +64,6 @@ const SECTIONS: &[Section] = &[
             "envelope.rs": "Request",
             "envelope.rs": "Notification",
             "envelope.rs": "Response",
-            "envelope.rs": "RequestId",
             "envelope.rs": "RpcError",
         ),
     },
@@ -118,7 +117,7 @@ const SECTIONS: &[Section] = &[
     },
     Section {
         title: "自绘画布",
-        intro: "画布是树里的叶子控件（占位 + 指针事件 + 可选帧率），内容经 `canvas.submit` 整表提交、`canvas.patch` 按 id 增量维护；坐标一律画布本地逻辑像素、左上原点。",
+        intro: "画布是树里的叶子控件（占位 + 指针事件 + 可选帧率），内容经 `canvas.submit` 整表提交、`canvas.patch` 按 id 增量维护；文字占位经 `canvas.measureText` 量算（不要按字符数估算）；坐标一律画布本地逻辑像素、左上原点。",
         items: items!(
             "view.rs": "CanvasEventKind",
             "view.rs": "MouseButton",
@@ -131,6 +130,8 @@ const SECTIONS: &[Section] = &[
             "method.rs": "CanvasPatchParams",
             "method.rs": "CanvasResizedParams",
             "method.rs": "CanvasFrameParams",
+            "method.rs": "MeasureTextParams",
+            "method.rs": "MeasureTextResult",
         ),
     },
     Section {

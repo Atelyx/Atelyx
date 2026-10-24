@@ -13,8 +13,8 @@ use atelyx_core::plugin_runtime::market::{self, MarketSnapshot};
 use atelyx_core::plugin_runtime::{
     AuditRecord, ClipboardImage, CollabPeer, CollabPeersResult, CollabSendParams, CollabSendQos,
     CollabSendResult, DialogKind, DialogRequest, FileChangeKind, HostRequest, ImageInfoResult,
-    InstallOutcome, NotificationLevel, Permission, PluginEvent, PluginRuntime, PluginStatus,
-    PluginSummary, SetTrayItemsParams, MAX_VAULT_BINARY_BYTES,
+    InstallOutcome, MeasureTextParams, NotificationLevel, Permission, PluginEvent, PluginRuntime,
+    PluginStatus, PluginSummary, SetTrayItemsParams, MAX_VAULT_BINARY_BYTES,
 };
 
 use crate::settings_view::{card, group_head};
@@ -183,6 +183,8 @@ pub enum PluginsMsg {
     VaultExists { request_id: u64, path: String },
     /// 图片固有像素尺寸（只读文件头，不送回内容）。
     VaultImageInfo { request_id: u64, path: String },
+    /// 文字量算（纯计算，按界面字体与控件同源的行高口径）。
+    MeasureText { request_id: u64, params: MeasureTextParams },
     VaultCallDone { request_id: u64, result: Result<serde_json::Value, String> },
     /// 表格只读快照（读壳的表格会话；写走表格消息流）。
     TableSnapshot { request_id: u64 },
@@ -329,6 +331,9 @@ pub fn host_requests_stream(spec: &RuntimeSpec) -> impl iced::futures::Stream<It
                 }
                 HostRequest::VaultImageInfo { request_id, path, .. } => {
                     Message::Plugins(PluginsMsg::VaultImageInfo { request_id, path })
+                }
+                HostRequest::MeasureText { request_id, params, .. } => {
+                    Message::Plugins(PluginsMsg::MeasureText { request_id, params })
                 }
                 HostRequest::TraySetItems { plugin_id, request_id, params } => {
                     Message::Plugins(PluginsMsg::TraySetItems { request_id, plugin_id, params })
@@ -939,6 +944,14 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
                         move |result| Message::Plugins(PluginsMsg::VaultCallDone { request_id, result }),
                     )
                 }
+            }
+        }
+        PluginsMsg::MeasureText { request_id, params } => {
+            let measured =
+                atelyx_view::measure::measure_text(&params.text, params.size, params.weight, params.max_width);
+            match serde_json::to_value(measured) {
+                Ok(value) => resolve_vault(app, request_id, Ok(value)),
+                Err(e) => resolve_vault(app, request_id, Err(format!("量算结果不可序列化：{e}"))),
             }
         }
         PluginsMsg::VaultCallDone { request_id, result } => {

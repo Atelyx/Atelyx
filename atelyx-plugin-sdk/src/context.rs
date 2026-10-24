@@ -11,10 +11,10 @@ use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::connection::PendingMap;
-use crate::protocol::envelope::{Envelope, RequestId, RpcError};
+use crate::protocol::envelope::{Envelope, RpcError};
 use crate::protocol::event::{SubscribeParams, SubscribeResult};
 use crate::protocol::method::{self, *};
-use crate::protocol::view::PaddingSpec;
+use crate::protocol::view::{PaddingSpec, TextWeight};
 
 /// 常规能力调用的默认等待上限（读文件 / 起进程 / 通知等宿主侧可预期的操作）。
 pub const CALL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -100,7 +100,7 @@ impl Context {
         let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         self.inner.pending.lock().unwrap().insert(id, tx);
-        let envelope = Envelope::request(RequestId::Num(id), method, params);
+        let envelope = Envelope::request(id, method, params);
         if self.inner.out_tx.send(envelope).await.is_err() {
             self.inner.pending.lock().unwrap().remove(&id);
             return Err(RpcError::failed(format!("调用 {method} 失败：连接已结束")));
@@ -175,6 +175,20 @@ impl Context {
             remove,
         };
         self.call_typed(method::canvas::PATCH, &params).await
+    }
+
+    /// 量算一段文字的占位尺寸：`size` 为绝对字号（与画布 `text` 指令同口径），`max_width`
+    /// 给定即按该宽度换行。画布排版按真实字宽摆放，不要按字符数估算。
+    /// 纯计算调用，不改清单也不产生帧；同一段文字反复量算时请自行缓存。
+    pub async fn measure_text(
+        &self,
+        text: &str,
+        size: f32,
+        weight: Option<TextWeight>,
+        max_width: Option<f32>,
+    ) -> Result<MeasureTextResult, RpcError> {
+        let params = MeasureTextParams { text: text.into(), size, weight, max_width };
+        self.call_typed(method::canvas::MEASURE_TEXT, &params).await
     }
 
     /// 注册一个贡献点，使其出现在宿主对应入口（面板 / 表格视图 / 设置页）。

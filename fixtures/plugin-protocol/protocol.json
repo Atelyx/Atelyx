@@ -1004,6 +1004,31 @@
           ]
         }
       }
+    },
+    {
+      "name": "canvas.measureText params",
+      "type": "MeasureTextParams",
+      "value": { "text": "模型目录 /models", "size": 13.0, "weight": "medium", "maxWidth": 240.0 }
+    },
+    {
+      "name": "canvas.measureText params (single line)",
+      "type": "MeasureTextParams",
+      "value": { "text": "12 tok/s", "size": 13.0 }
+    },
+    {
+      "name": "canvas.measureText result",
+      "type": "MeasureTextResult",
+      "value": { "width": 68.5, "height": 31.25, "lines": 2 }
+    },
+    {
+      "name": "image source (local url)",
+      "type": "ImageSource",
+      "value": { "type": "url", "url": "http://127.0.0.1:8188/view?filename=a.png", "local": true }
+    },
+    {
+      "name": "image source (file)",
+      "type": "ImageSource",
+      "value": { "type": "file", "path": "C:/Users/me/Desktop/a.png" }
     }
   ]
 }

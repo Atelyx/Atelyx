@@ -469,8 +469,10 @@ enum Message {
     Calendar(calendar_actions::CalendarMsg),
     /// 打开链接（外链 / 仓库路径 / wiki）。
     OpenLink(String, LinkForm),
-    /// 笔记图片字节落地（gen 守卫 + src；失败进失败集回落占位，不重试）。
+    /// 图片字节落地（gen 守卫 + 内容键；失败按退避重试，用尽次数回落占位）。
     ImageLoaded(u64, String, Result<Vec<u8>, String>),
+    /// 一次失败重试到点（gen 守卫）：重扫插件界面里仍缺句柄的来源。
+    ImageRetryDue(u64),
     /// 文件面板排序方式切换（落仓库 config 的 fileExplorerSort）。
     SetSort(String),
     /// 创建同目录副本（文件字节复制 / 文件夹递归复制）。
@@ -1134,6 +1136,33 @@ impl ui::UiHost for Message {
     }
 }
 
+/// 图片载入失败记账：失败次数与下次可重试时刻。
+///
+/// 载入失败的常见原因是「内容还没就绪」——插件刚提交缩略图、异步写完的文件尚未落盘、外链
+/// 短暂不可达。一次失败即本会话放弃会让占位永久空白，故退避重试（1s / 2s，共三次尝试），
+/// 用尽才放弃；放弃后的记项仍在表里，重开文档或切仓库清表时才重来。
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ImageRetry {
+    attempts: u32,
+    retry_at: Instant,
+}
+
+impl ImageRetry {
+    /// 尝试次数上限（含首次）：用尽即本会话放弃，占位回落空白。
+    const MAX_ATTEMPTS: u32 = 3;
+
+    /// 第 `attempts` 次失败后的退避：1s、2s。上限与 [`ImageRetry::MAX_ATTEMPTS`] 对齐，
+    /// 指数只在这里出现一次，不再各自写一遍。
+    fn backoff(attempts: u32) -> std::time::Duration {
+        let shift = attempts.saturating_sub(1).min(Self::MAX_ATTEMPTS - 1);
+        std::time::Duration::from_millis(1000u64 << shift)
+    }
+
+    fn exhausted(&self) -> bool {
+        self.attempts >= Self::MAX_ATTEMPTS
+    }
+}
+
 pub struct App {
     /// 布局状态真源（core 模型；磁盘格式由 schema 版本标识）。
     pub ui: AppUiState,
@@ -1217,6 +1246,8 @@ pub struct App {
     pub plugin_markdown: HashMap<plugin_actions::InputKey, plugin_actions::MarkdownNode>,
     /// 悬停中的插件节点（键 = 插件 id + 面 id + 节点 id；`hoverOnly` 图标钮据此显隐）。
     pub plugin_hovered: HashSet<plugin_actions::InputKey>,
+    /// 已向插件日志报告过未注册图标名的（插件 id, 名字）：同一条只报一次，避免逐键提交刷爆日志。
+    pub plugin_icon_warnings: HashSet<(String, String)>,
     /// 插件面的键盘焦点（全局单槽：OS 只给聚焦窗口发键盘，窗口失焦即清除）。
     pub plugin_focus: Option<plugin_actions::PluginFocus>,
     /// 画布帧拍是否还在飞（同一时刻只推一拍，慢插件不积压帧任务）。
@@ -1375,7 +1406,7 @@ pub struct App {
     /// 图片句柄代数：句柄入表或整表清空即自增，自绘画布据此作废已缓存的几何。
     pub note_image_epoch: u64,
     note_images_inflight: HashSet<String>,
-    note_images_failed: HashSet<String>,
+    note_images_failed: HashMap<String, ImageRetry>,
     /// ensure_image_srcs 收集的载入任务（update 收尾统一 chain，调用点不必逐个穿 Task）。
     image_loads: Option<Task<Message>>,
     /// 防抖落盘：有未写盘的模型变更。
@@ -1616,6 +1647,7 @@ impl App {
                 plugin_canvases: HashMap::new(),
                 plugin_markdown: HashMap::new(),
                 plugin_hovered: HashSet::new(),
+                plugin_icon_warnings: HashSet::new(),
                 plugin_focus: None,
                 plugin_canvas_pumping: false,
                 plugin_takeovers: HashMap::new(),
@@ -1667,7 +1699,7 @@ impl App {
                 note_image_sizes: HashMap::new(),
                 note_image_epoch: 0,
                 note_images_inflight: HashSet::new(),
-                note_images_failed: HashSet::new(),
+                note_images_failed: HashMap::new(),
                 image_loads: None,
                 file_sort: "mtime-desc".to_string(),
                 exclude_folders: Vec::new(),
@@ -2413,24 +2445,53 @@ impl App {
             Message::OpenLink(href, form) => self.open_link(&href, form),
             Message::ImageLoaded(gen, key, result) => {
                 self.note_images_inflight.remove(&key);
-                if gen == self.epoch() {
-                    match result {
-                        Ok(bytes) => {
-                            // 画布 contain / cover 需要原图尺寸，装载点顺手记下（解码失败不入表）
-                            let size = crate::canvas_actions::image_dimensions(&bytes);
-                            if size.0 > 0 && size.1 > 0 {
-                                self.note_image_sizes.insert(key.clone(), size);
-                            }
-                            self.note_images.insert(key, iced::widget::image::Handle::from_bytes(bytes));
-                            self.note_image_epoch = self.note_image_epoch.wrapping_add(1);
+                if gen != self.epoch() {
+                    return Task::none();
+                }
+                match result {
+                    Ok(bytes) => {
+                        self.note_images_failed.remove(&key);
+                        // 画布 contain / cover 需要原图尺寸，装载点顺手记下（解码失败不入表）
+                        let size = crate::canvas_actions::image_dimensions(&bytes);
+                        if size.0 > 0 && size.1 > 0 {
+                            self.note_image_sizes.insert(key.clone(), size);
                         }
-                        // 失败进失败集：占位回落且本次会话不重试（避免滚动反复发起）
-                        Err(_) => {
-                            self.note_images_failed.insert(key);
+                        self.note_images.insert(key, iced::widget::image::Handle::from_bytes(bytes));
+                        self.note_image_epoch = self.note_image_epoch.wrapping_add(1);
+                        Task::none()
+                    }
+                    // 失败按退避重排一次重试：内容可能只是还没就绪（插件刚落盘的缩略图、
+                    // 异步写完的附件）。用尽次数后回落占位并停手，避免滚动反复发起。
+                    Err(_) => {
+                        let retry = match self.note_images_failed.get(&key) {
+                            Some(previous) => ImageRetry {
+                                attempts: previous.attempts + 1,
+                                retry_at: Instant::now() + ImageRetry::backoff(previous.attempts + 1),
+                            },
+                            None => ImageRetry {
+                                attempts: 1,
+                                retry_at: Instant::now() + ImageRetry::backoff(1),
+                            },
+                        };
+                        let wait = retry.retry_at.saturating_duration_since(Instant::now());
+                        let exhausted = retry.exhausted();
+                        self.note_images_failed.insert(key, retry);
+                        if exhausted {
+                            Task::none()
+                        } else {
+                            Task::perform(async move { tokio::time::sleep(wait).await }, move |_| {
+                                Message::ImageRetryDue(gen)
+                            })
                         }
                     }
                 }
-                Task::none()
+            }
+            Message::ImageRetryDue(gen) => {
+                if gen == self.epoch() {
+                    crate::plugin_actions::ensure_images(self)
+                } else {
+                    Task::none()
+                }
             }
             Message::SetSort(key) => {
                 self.file_sort = key.clone();
@@ -6107,6 +6168,14 @@ impl App {
         self.ensure_image_srcs(srcs);
     }
 
+    /// 该内容键的图片是否可以发起载入：未失败，或失败已过退避且仍有重试余量。
+    pub(crate) fn can_load_image(&self, key: &str) -> bool {
+        match self.note_images_failed.get(key) {
+            None => true,
+            Some(retry) => !retry.exhausted() && Instant::now() >= retry.retry_at,
+        }
+    }
+
     /// 一组图片 src 的按需载入：缺句柄且未在途/未失败的 src 发起读盘（仓库相对路径）或
     /// 公网策略下载（http/https）任务，任务经 update 收尾统一链出。失败不重试（失败集）。
     pub(crate) fn ensure_image_srcs(&mut self, srcs: Vec<String>) {
@@ -6118,7 +6187,7 @@ impl App {
         let mut tasks = Vec::new();
         for src in srcs {
             if self.note_images.contains_key(&src)
-                || self.note_images_failed.contains(&src)
+                || !self.can_load_image(&src)
                 || !self.note_images_inflight.insert(src.clone())
             {
                 continue;

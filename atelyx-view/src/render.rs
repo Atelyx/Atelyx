@@ -21,7 +21,7 @@ use iced::{Color, Element, Length, Padding, Rectangle, Renderer, Size, Theme, Ve
 use atelyx_plugin_protocol::view::{
     Align, Axis, BoxSize, ButtonVariant, CanvasEventKind, CardTone, ColorSpec, ControlSize,
     EventKind, EventValue, ImageFit, ImageSource, Justify, Key as ViewKey, KeyAction, Modifiers as ViewModifiers,
-    NamedKey, NodeBody, PaddingSpec, ReportMode, RowHeight, SizeSpec, Surface, TextFamily, TextWeight,
+    NamedKey, NodeBody, PaddingSpec, ReportMode, RowHeight, SizeSpec, Surface,
     ViewEvent, ViewNode,
 };
 use atelyx_ui::controls::{self, Variant};
@@ -29,6 +29,7 @@ use atelyx_ui::palette as pal;
 use atelyx_ui::scroll;
 use atelyx_ui::text;
 
+use crate::measure::text_font;
 use crate::support::{declares, node_value_text, report_mode};
 use crate::truncated_text::TruncatedText;
 
@@ -1409,26 +1410,6 @@ pub fn token_color(token: atelyx_plugin_protocol::view::ColorToken) -> Color {
     }
 }
 
-/// 字体族与字重 → 字体（等宽族始终取系统等宽字体，不随界面字体族设置变化）。
-fn text_font(weight: Option<TextWeight>, family: Option<TextFamily>) -> iced::Font {
-    let base = match family {
-        Some(TextFamily::Mono) => atelyx_ui::font::mono(),
-        _ => atelyx_ui::regular(),
-    };
-    iced::Font {
-        weight: weight.map(weight_of).unwrap_or(iced::font::Weight::Normal),
-        ..base
-    }
-}
-
-fn weight_of(weight: TextWeight) -> iced::font::Weight {
-    match weight {
-        TextWeight::Normal => iced::font::Weight::Normal,
-        TextWeight::Medium => iced::font::Weight::Medium,
-        TextWeight::SemiBold => iced::font::Weight::Semibold,
-    }
-}
-
 fn content_fit(fit: ImageFit) -> iced::ContentFit {
     match fit {
         ImageFit::Contain => iced::ContentFit::Contain,
@@ -2106,7 +2087,7 @@ fn pointer_position(event: &iced::Event, cursor: mouse::Cursor) -> Option<iced::
 #[cfg(test)]
 mod tests {
     use super::*;
-    use atelyx_plugin_protocol::view::ColorToken;
+    use atelyx_plugin_protocol::view::{ColorToken, TextFamily, TextWeight};
 
     #[test]
     fn node_keys_are_stable_and_distinct() {
@@ -2155,8 +2136,14 @@ mod tests {
 
     #[test]
     fn weight_maps_to_real_font_weights() {
-        assert_eq!(weight_of(TextWeight::Medium), iced::font::Weight::Medium);
-        assert_eq!(weight_of(TextWeight::SemiBold), iced::font::Weight::Semibold);
+        assert_eq!(
+            text_font(Some(TextWeight::Medium), None).weight,
+            iced::font::Weight::Medium
+        );
+        assert_eq!(
+            text_font(Some(TextWeight::SemiBold), None).weight,
+            iced::font::Weight::Semibold
+        );
         // 等宽族：换族但不动字重
         let mono = text_font(Some(TextWeight::Normal), Some(TextFamily::Mono));
         assert!(matches!(mono.family, iced::font::Family::Monospace));

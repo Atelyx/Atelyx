@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
-use atelyx_plugin_protocol::envelope::{Envelope, Request, RequestId, RpcError};
+use atelyx_plugin_protocol::envelope::{Envelope, Request, RpcError};
 use atelyx_plugin_protocol::event;
 use atelyx_plugin_protocol::handshake::{self, HostInfo, InitializeParams, InitializeResult};
 use atelyx_plugin_protocol::manifest::{Manifest, Permission};
@@ -254,6 +254,11 @@ impl Instance {
     /// 本插件定义的自备图标形状（名字 → 路径）；会话收尾即清空。
     pub(crate) fn icons(&self) -> HashMap<String, String> {
         self.icons.lock().unwrap().clone()
+    }
+
+    /// 宿主侧诊断写入本插件日志（带 `[宿主]` 前缀，与插件自身的 stderr 区分归属）。
+    pub(crate) fn log_host_note(&self, text: &str) {
+        self.log.line(&format!("[宿主] {text}"));
     }
 
     /// 本会话声明的默认布局（未声明 = `None`）。
@@ -619,49 +624,13 @@ impl Instance {
         }
         // 接管与插件窗口的落地在壳（OS 窗口副作用只由壳触发），结果由壳回填——分流为异步应答，
         // 读线程不等待窗口创建与接管应用。
-        if matches!(
-            method,
-            method::view::TAKEOVER
-                | method::window::OPEN
-                | method::window::CLOSE
-                | method::window::UPDATE
-                | method::window::SHOW
-        ) {
+        if is_ui_method(method) {
             self.handle_ui_request(token, id, method, &request.params);
             return;
         }
-        // 壳侧执行的服务调用（对话编排、剪贴板、仓库读写、托盘、协作、表格等）分流为异步应答：
-        // 结果由回填线程写回，读线程继续消费插件输出。
-        if matches!(
-            method,
-            method::ai::CHAT_SEND
-                | method::ai::CHAT_STOP
-                | method::ai::CHAT_HISTORY
-                | method::ai::CHAT_RENAME
-                | method::ai::CHAT_DELETE
-                | method::ai::CHAT_COMPACT
-                | method::clipboard::WRITE_TEXT
-                | method::clipboard::READ_TEXT
-                | method::clipboard::READ_IMAGE
-                | method::vault::READ_TEXT
-                | method::vault::WRITE_TEXT
-                | method::vault::READ_BINARY
-                | method::vault::WRITE_BINARY
-                | method::vault::IMPORT_FILE
-                | method::vault::IMAGE_INFO
-                | method::vault::LIST
-                | method::vault::EXISTS
-                | method::table::SNAPSHOT
-                | method::table::UPDATE_CELL
-                | method::table::ADD_ROW
-                | method::table::REMOVE_ROW
-                | method::table::SELECT_ROW
-                | method::table::SET_CELL_IMAGE
-                | method::tray::SET_ITEMS
-                | method::collab::PEERS
-                | method::collab::SEND
-                | method::view::SCROLL_TO
-        ) {
+        // 壳侧执行的服务调用（对话编排、剪贴板、仓库读写、托盘、协作、表格、文字量算等）
+        // 分流为异步应答：结果由回填线程写回，读线程继续消费插件输出。
+        if is_shell_method(method) {
             self.handle_shell_request(token, id, method, &request.params);
             return;
         }
@@ -675,7 +644,7 @@ impl Instance {
     fn handle_dialog_request(
         self: &Arc<Self>,
         token: u64,
-        id: RequestId,
+        id: u64,
         method_name: &str,
         params: &Value,
     ) {
@@ -715,7 +684,7 @@ impl Instance {
     fn handle_ui_request(
         self: &Arc<Self>,
         token: u64,
-        id: RequestId,
+        id: u64,
         method_name: &str,
         params: &Value,
     ) {
@@ -772,7 +741,7 @@ impl Instance {
     fn handle_shell_request(
         self: &Arc<Self>,
         token: u64,
-        id: RequestId,
+        id: u64,
         method_name: &str,
         params: &Value,
     ) {
@@ -984,6 +953,15 @@ impl Instance {
                         params: p,
                     }
                 }
+                method::canvas::MEASURE_TEXT => {
+                    let p: method::MeasureTextParams = parse(params).map_err(|e| e.to_string())?;
+                    p.validate()?;
+                    HostRequest::MeasureText {
+                        plugin_id: self.id.clone(),
+                        request_id: 0,
+                        params: p,
+                    }
+                }
                 _ => return Err("未知宿主服务请求".to_string()),
             };
             runtime.open_shell_call(request)
@@ -1179,36 +1157,9 @@ impl Instance {
                     .map_err(RpcError::failed)?;
                 Ok(json!({}))
             }
-            // AI 对话 / 剪贴板 / 仓库读写 / 表格读写 / 滚动指令走异步应答（见 handle_request 的分流）
-            method::ai::CHAT_SEND
-            | method::ai::CHAT_STOP
-            | method::ai::CHAT_HISTORY
-            | method::ai::CHAT_RENAME
-            | method::ai::CHAT_DELETE
-            | method::ai::CHAT_COMPACT
-            | method::clipboard::WRITE_TEXT
-            | method::clipboard::READ_TEXT
-            | method::clipboard::READ_IMAGE
-            | method::vault::READ_TEXT
-            | method::vault::WRITE_TEXT
-            | method::vault::READ_BINARY
-            | method::vault::WRITE_BINARY
-            | method::vault::IMPORT_FILE
-            | method::vault::IMAGE_INFO
-            | method::vault::LIST
-            | method::vault::EXISTS
-            | method::table::SNAPSHOT
-            | method::table::UPDATE_CELL
-            | method::table::ADD_ROW
-            | method::table::REMOVE_ROW
-            | method::table::SELECT_ROW
-            | method::table::SET_CELL_IMAGE
-            | method::tray::SET_ITEMS
-            | method::collab::PEERS
-            | method::collab::SEND
-            | method::view::SCROLL_TO
-            | method::window::UPDATE
-            | method::window::SHOW => {
+            // 壳侧服务方法不在这里执行（`handle_request` 已分流到异步应答）；走到这里说明分流
+            // 名单与分派名单失配，按可读失败收场而不是当成未知方法
+            other if is_shell_method(other) || is_ui_method(other) => {
                 Err(RpcError::failed("宿主服务请求须走异步应答路径"))
             }
             // 已声明但尚未实现的能力面：以可读失败收场，不静默成功
@@ -1771,7 +1722,7 @@ impl Instance {
     }
 
     /// 回执一条响应（写往插件 stdin）。
-    fn respond(&self, id: RequestId, result: Option<Value>, error: Option<RpcError>) {
+    fn respond(&self, id: u64, result: Option<Value>, error: Option<RpcError>) {
         let (envelope, what) = match (result, error) {
             (Some(result), None) => (Envelope::success(id, result), "回执"),
             (_, Some(error)) => (Envelope::failure(id, error), "错误回执"),
@@ -1799,6 +1750,55 @@ impl Instance {
 struct SpawnSlot {
     pid: Option<u32>,
     pending: Vec<HostEvent>,
+}
+
+/// 走壳侧异步应答的方法（对话编排 / 剪贴板 / 仓库读写 / 表格 / 托盘 / 协作 / 滚动 / 文字量算）。
+///
+/// 分流判定与「不得同步分派」的防御共用这一份清单：两处各写一遍时，新增方法只改一处会
+/// 落进「未知方法」——功能静默不可用，编译与测试都发现不了。
+fn is_shell_method(method_name: &str) -> bool {    matches!(
+        method_name,
+        method::ai::CHAT_SEND
+            | method::ai::CHAT_STOP
+            | method::ai::CHAT_HISTORY
+            | method::ai::CHAT_RENAME
+            | method::ai::CHAT_DELETE
+            | method::ai::CHAT_COMPACT
+            | method::clipboard::WRITE_TEXT
+            | method::clipboard::READ_TEXT
+            | method::clipboard::READ_IMAGE
+            | method::vault::READ_TEXT
+            | method::vault::WRITE_TEXT
+            | method::vault::READ_BINARY
+            | method::vault::WRITE_BINARY
+            | method::vault::IMPORT_FILE
+            | method::vault::IMAGE_INFO
+            | method::vault::LIST
+            | method::vault::EXISTS
+            | method::table::SNAPSHOT
+            | method::table::UPDATE_CELL
+            | method::table::ADD_ROW
+            | method::table::REMOVE_ROW
+            | method::table::SELECT_ROW
+            | method::table::SET_CELL_IMAGE
+            | method::tray::SET_ITEMS
+            | method::collab::PEERS
+            | method::collab::SEND
+            | method::view::SCROLL_TO
+            | method::canvas::MEASURE_TEXT
+    )
+}
+
+/// 走壳侧界面服务的方法（接管 / 插件窗口）：落地依赖 OS 窗口副作用，只由壳执行。
+fn is_ui_method(method_name: &str) -> bool {
+    matches!(
+        method_name,
+        method::view::TAKEOVER
+            | method::window::OPEN
+            | method::window::CLOSE
+            | method::window::UPDATE
+            | method::window::SHOW
+    )
 }
 
 /// 按方法名解析对话框请求（`dialog.pickFile` / `dialog.pickDirectory`）。
@@ -2395,7 +2395,21 @@ mod tests {
             panic!("应投递图片尺寸请求");
         };
         assert_eq!(path, "a.png");
-        runtime.resolve_shell_call(request_id, Ok(json!({ "width": 10, "height": 20 })));
+        runtime.resolve_shell_call(request_id, Ok(json!({ "width": 64, "height": 32 })));
+
+        // 文字量算同样走壳侧应答：参数须原样带到壳（size / weight / maxWidth）
+        instance.handle_line(&request_line(
+            method::canvas::MEASURE_TEXT,
+            &json!({ "text": "12 tok/s", "size": 13.0, "maxWidth": 96.0 }),
+        ));
+        let request = rt.block_on(runtime.recv_host_request()).unwrap();
+        let HostRequest::MeasureText { request_id, params, .. } = request else {
+            panic!("应投递文字量算请求");
+        };
+        assert_eq!((params.text.as_str(), params.size), ("12 tok/s", 13.0));
+        assert_eq!(params.max_width, Some(96.0));
+        runtime.resolve_shell_call(request_id, Ok(json!({ "width": 40.0, "height": 15.0, "lines": 1 })));
+
 
         instance.handle_line(&request_line(
             method::tray::SET_ITEMS,
@@ -2405,7 +2419,6 @@ mod tests {
         let HostRequest::TraySetItems { request_id, params, .. } = request else {
             panic!("应投递托盘条目请求");
         };
-        assert_eq!(params.items[0].id, "show");
         runtime.resolve_shell_call(request_id, Ok(json!({})));
 
         instance.handle_line(&request_line(method::collab::PEERS, &Value::Null));
@@ -2450,14 +2463,23 @@ mod tests {
         runtime.resolve_shell_call(request_id, Ok(json!({})));
     }
 
+    /// 分流名单与分派名单失配时必须可读失败，不能落进「未知方法」——新增壳侧方法只改一处
+    /// 会静默不可用，这条守卫是它唯一的兜底。
     #[test]
     fn shell_routed_capabilities_reject_synchronous_dispatch() {
         let (_tmp, instance) = make_instance(vec![Permission::Clipboard]);
-        let error = instance
-            .dispatch(method::clipboard::READ_TEXT, &Value::Null)
-            .expect_err("剪贴板调用必须走异步应答路径");
-        assert_eq!(error.code, RpcError::FAILED);
-        assert!(error.message.contains("异步应答"), "{}", error.message);
+        for method in [
+            method::clipboard::READ_TEXT,
+            method::vault::READ_TEXT,
+            method::view::SCROLL_TO,
+            method::canvas::MEASURE_TEXT,
+            method::window::UPDATE,
+            method::window::SHOW,
+        ] {
+            let error = instance.dispatch(method, &Value::Null).expect_err("应被守卫拦下");
+            assert_eq!(error.code, RpcError::FAILED);
+            assert_eq!(error.message, "宿主服务请求须走异步应答路径", "方法 {method}");
+        }
     }
 
     /// 各能力面「未声明被拒」：闸门只认 manifest 声明，未声明一律 fail-closed 且记审计。

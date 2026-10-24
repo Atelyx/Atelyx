@@ -394,7 +394,59 @@ pub fn refresh_projection(app: &mut App) -> Task<Message> {
         }
     }
     app.plugin_canvases.retain(|key, _| canvas_keys.contains(key));
+    report_unknown_icons(app);
     ensure_images(app)
+}
+
+/// 树里引用的图标名（内置名或 `<插件 id>::<名>` 限定名）。
+fn collect_icon_names<'a>(node: &'a ViewNode, out: &mut Vec<&'a str>) {
+    match &node.body {
+        NodeBody::IconButton { icon, .. } | NodeBody::Icon { name: icon, .. } => out.push(icon),
+        NodeBody::Button { icon: Some(icon), .. } | NodeBody::Menu { icon: Some(icon), .. } => {
+            out.push(icon);
+        }
+        _ => {}
+    }
+    for child in &node.children {
+        collect_icon_names(child, out);
+    }
+}
+
+/// 把未注册的图标名写进插件日志（同一条只报一次）。
+///
+/// 渲染侧对未知名画方框占位，但占位本身说不清原因——「名字写错」与「自备图形忘了
+/// `view.defineIcon`」都长成同一个方框，故在投影时补一条可定位的记录。
+fn report_unknown_icons(app: &mut App) {
+    let mut unknown: Vec<(String, String)> = Vec::new();
+    for ((plugin_id, _), tree) in &app.plugin_trees {
+        let mut names = Vec::new();
+        collect_icon_names(tree, &mut names);
+        for name in names {
+            let key = (plugin_id.clone(), name.to_string());
+            // 已报过的先短路：内置表与自备表的比较不便宜，别让每次提交都跑一遍
+            if app.plugin_icon_warnings.contains(&key) || unknown.contains(&key) {
+                continue;
+            }
+            if crate::ui::icon::is_builtin(name)
+                || crate::ui::icon::is_dynamic(&format!("{plugin_id}::{name}"))
+            {
+                continue;
+            }
+            unknown.push(key);
+        }
+    }
+    for (plugin_id, name) in unknown {
+        let written = app.plugins.log_to_plugin(
+            &plugin_id,
+            &format!(
+                "界面引用了未注册的图标「{name}」，按占位方框渲染：内置名取自宿主图标表，自备名须先 view.defineIcon"
+            ),
+        );
+        // 只有真的落盘才记账：写不进去（插件未装载）时保留待报，恢复后补一次
+        if written {
+            app.plugin_icon_warnings.insert((plugin_id, name));
+        }
+    }
 }
 
 /// 重建自备图标注册表：先清空再按当前有界面的插件全量注册（插件停用 / 卸载后不留孤儿）。
@@ -669,8 +721,10 @@ fn collect_canvas_nodes(node: &ViewNode, out: &mut Vec<String>) {
 
 // ===== 界面图片 =====
 
-/// 界面图片来源的内容键：私有目录取绝对路径（与仓库相对路径取值域不重叠，仓库来源沿仓库口径）；
-/// 远程来源以 URL 本身作键（笔记外链图片走同一缓存）。
+/// 界面图片来源的内容键：各来源取值域互不重叠——私有目录与单机绝对路径都取绝对路径
+/// （后者加 `file:` 前缀，与相对路径隔开），仓库来源沿仓库相对路径口径；远程来源以 URL 作键，
+/// 本机策略加 `local:` 前缀——同一地址在两种策略下走不同的出网守卫，共用一个键会让内网图
+/// 被公网口径命中（笔记外链图片走公网口径）。
 pub(crate) fn image_key(app: &App, plugin_id: &str, source: &ImageSource) -> Option<String> {
     match source {
         ImageSource::Private { path } => {
@@ -678,7 +732,12 @@ pub(crate) fn image_key(app: &App, plugin_id: &str, source: &ImageSource) -> Opt
             Some(safe_private_path(&dir, path)?.to_string_lossy().into_owned())
         }
         ImageSource::Vault { path } => (!path.is_empty()).then(|| path.clone()),
-        ImageSource::Url { url } => is_remote_url(url).then(|| url.clone()),
+        ImageSource::Url { url, local } => is_remote_url(url).then(|| match local {
+            Some(true) => format!("local:{url}"),
+            _ => url.clone(),
+        }),
+        // 前缀隔开取值域：相对路径（`vault`）与绝对路径（`file` / 私有目录）不得互为键
+        ImageSource::File { path } => (!path.is_empty()).then(|| format!("file:{path}")),
     }
 }
 
@@ -701,7 +760,7 @@ fn safe_private_path(dir: &Path, rel: &str) -> Option<PathBuf> {
 
 /// 界面图片按需载入：缺句柄且未在途 / 未失败的来源发起读盘或下载任务。
 /// 句柄与笔记图片共用同一缓存（同来源即同字节，键不重叠）。
-fn ensure_images(app: &mut App) -> Task<Message> {
+pub(crate) fn ensure_images(app: &mut App) -> Task<Message> {
     // markdown 节点的块级图片走笔记图片同一条载入链（渲染端按 src 取同一句柄表）
     let markdown_srcs: Vec<String> = app
         .plugin_markdown
@@ -734,7 +793,7 @@ fn ensure_images(app: &mut App) -> Task<Message> {
     let mut tasks = Vec::new();
     for (key, source) in pending {
         if app.note_images.contains_key(&key)
-            || app.note_images_failed.contains(&key)
+            || !app.can_load_image(&key)
             || !app.note_images_inflight.insert(key.clone())
         {
             continue;
@@ -744,12 +803,20 @@ fn ensure_images(app: &mut App) -> Task<Message> {
     Task::batch(tasks)
 }
 
-/// 单张界面图片的载入任务：私有来源直接读文件，仓库来源沿用笔记图片的本地 / 空间分派，
-/// 远程来源走公网策略下载并缓存。
+/// 单张界面图片的载入任务：私有目录来源与单机绝对路径直接读文件，仓库来源沿用笔记图片的
+/// 本地 / 空间分派，远程来源按声明的策略下载并缓存。
 fn load_image(app: &App, gen: u64, key: String, source: ImageSource) -> Task<Message> {
     match source {
         ImageSource::Private { .. } => {
             let path = PathBuf::from(&key);
+            Task::perform(
+                async move { std::fs::read(&path).map_err(|e| format!("读插件图片失败：{e}")) },
+                move |result| Message::ImageLoaded(gen, key, result),
+            )
+        }
+        // 键带 `file:` 前缀（与仓库相对路径隔开取值域），读盘用来源里的原始路径
+        ImageSource::File { path } => {
+            let path = PathBuf::from(path);
             Task::perform(
                 async move { std::fs::read(&path).map_err(|e| format!("读插件图片失败：{e}")) },
                 move |result| Message::ImageLoaded(gen, key, result),
@@ -770,10 +837,16 @@ fn load_image(app: &App, gen: u64, key: String, source: ImageSource) -> Task<Mes
                 None => Task::none(),
             }
         }
-        ImageSource::Url { .. } => {
-            let url = key.clone();
+        ImageSource::Url { url, local } => {
+            let local = local.unwrap_or(false);
             Task::perform(
-                async move { atelyx_core::remote_image::fetch_external_image(&url).await },
+                async move {
+                    if local {
+                        atelyx_core::remote_image::fetch_local_image(&url).await
+                    } else {
+                        atelyx_core::remote_image::fetch_external_image(&url).await
+                    }
+                },
                 move |result| Message::ImageLoaded(gen, key, result),
             )
         }

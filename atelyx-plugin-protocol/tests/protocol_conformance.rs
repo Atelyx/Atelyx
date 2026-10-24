@@ -1,7 +1,7 @@
 //! 协议编码对拍：快照（`fixtures/plugin-protocol/protocol.json`）= 唯一期望源。
 //! 信封行冻结逐字节编码；ViewNode 与握手冻结字段形状。改协议 = 显式改快照并升版本。
 
-use atelyx_plugin_protocol::envelope::{Envelope, RequestId};
+use atelyx_plugin_protocol::envelope::Envelope;
 use atelyx_plugin_protocol::event::{
     ChatChangedPayload, FileChangedPayload, TableChangedPayload, VaultSwitchPayload,
 };
@@ -12,7 +12,8 @@ use atelyx_plugin_protocol::method::{
     ChatSendParams, ChatSessionParams, CollabMessageParams, CollabPeersResult,
     CollabSendParams, CollabSendResult, DefineIconParams, DocCloseParams, DocOpenParams,
     HttpRequestParams,
-    HttpResult, ImageInfoResult, ImportFileParams, ListResult, PathParams, PickFileParams, PickedPath,
+    HttpResult, ImageInfoResult, ImportFileParams, ListResult, MeasureTextParams,
+    MeasureTextResult, PathParams, PickFileParams, PickedPath,
     ProcessEventParams, RegisterParams, RegisterShortcutParams, RegisterToolParams,
     ScrollToParams, SetTrayItemsParams,
     ShortcutQueryParams, ShortcutQueryResult,
@@ -171,19 +172,17 @@ fn host_prefix_is_reserved() {
     assert!(!atelyx_plugin_protocol::is_host_method("hostile.method"));
 }
 
-/// 请求 id 数字与字符串两形态都要能落回 [`RequestId`]。
+/// 请求 id 只认数字：字符串 id 与显式 null 都按形态非法拒绝。
 #[test]
-fn request_id_untagged_forms() {
+fn request_id_must_be_numeric() {
     let by_num = Envelope::parse(r#"{"jsonrpc":"2.0","id":3,"method":"m"}"#).unwrap();
-    assert_eq!(
-        by_num,
-        Envelope::request(RequestId::Num(3), "m", Value::Null)
-    );
-    let by_str = Envelope::parse(r#"{"jsonrpc":"2.0","id":"a-1","method":"m"}"#).unwrap();
-    assert_eq!(
-        by_str,
-        Envelope::request(RequestId::Str("a-1".into()), "m", Value::Null)
-    );
+    assert_eq!(by_num, Envelope::request(3, "m", Value::Null));
+    for bad in [
+        r#"{"jsonrpc":"2.0","id":"a-1","method":"m"}"#,
+        r#"{"jsonrpc":"2.0","id":null,"method":"m"}"#,
+    ] {
+        assert!(Envelope::parse(bad).is_err(), "应拒绝：{bad}");
+    }
 }
 
 /// 能力面类型的 wire 形状逐域冻结：快照值反序列化再序列化必须与快照一致
@@ -272,6 +271,11 @@ fn method_type_shapes_are_frozen() {
             "CollabSendParams" => frozen_roundtrip::<CollabSendParams>(&value),
             "CollabSendResult" => frozen_roundtrip::<CollabSendResult>(&value),
             "CollabMessageParams" => frozen_roundtrip::<CollabMessageParams>(&value),
+            "MeasureTextParams" => frozen_roundtrip::<MeasureTextParams>(&value),
+            "MeasureTextResult" => frozen_roundtrip::<MeasureTextResult>(&value),
+            "ImageSource" => {
+                frozen_roundtrip::<atelyx_plugin_protocol::view::ImageSource>(&value)
+            }
             other => panic!("语料 {name}: 未知类型 {other}"),
         };
         assert!(ok, "语料 {name}: 编码与快照不一致");

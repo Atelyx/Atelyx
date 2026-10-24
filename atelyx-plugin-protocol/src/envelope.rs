@@ -8,14 +8,6 @@ use serde::{Deserialize, Serialize};
 use serde::de::Error as _;
 use serde_json::Value;
 
-/// 请求 id：JSON-RPC 允许数字或字符串；本协议自己发起的请求一律用递增数字。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum RequestId {
-    Num(u64),
-    Str(String),
-}
-
 /// 错误码：-32700..-32603 为 JSON-RPC 规范保留段；-32001..-32099 为本协议自定义段。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RpcError {
@@ -53,7 +45,8 @@ impl std::fmt::Display for RpcError {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Request {
     pub jsonrpc: &'static str,
-    pub id: RequestId,
+    /// 请求 id：本协议只认数字（发起方自增，单调不复用）。
+    pub id: u64,
     pub method: String,
     #[serde(skip_serializing_if = "Value::is_null")]
     pub params: Value,
@@ -70,7 +63,7 @@ pub struct Notification {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Response {
     pub jsonrpc: &'static str,
-    pub id: RequestId,
+    pub id: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -79,7 +72,7 @@ pub struct Response {
 
 /// 一行信封的三种形态。解析失败给出可读原因（含行首片段），不静默丢弃。
 ///
-/// 行为契约：显式 `"id": null` 按通知解析（本协议不使用 null id）；响应携带 `params`
+/// 行为契约：`id` 必须是数字（字符串 id 与显式 `null` 都按形态非法拒绝）；响应携带 `params`
 /// 视为形态非法拒绝；空行是否跳过由读循环决定（协议只承诺「空行解析必报错」）。
 #[derive(Clone, Debug, PartialEq)]
 pub enum Envelope {
@@ -100,7 +93,7 @@ impl Envelope {
     pub const JSONRPC: &'static str = "2.0";
 
     /// 构造插件→宿主（或宿主→插件，方法带 `host:` 前缀）的请求。
-    pub fn request(id: RequestId, method: impl Into<String>, params: Value) -> Self {
+    pub fn request(id: u64, method: impl Into<String>, params: Value) -> Self {
         Self::Request(Request { jsonrpc: Self::JSONRPC, id, method: method.into(), params })
     }
 
@@ -108,11 +101,11 @@ impl Envelope {
         Self::Notification(Notification { jsonrpc: Self::JSONRPC, method: method.into(), params })
     }
 
-    pub fn success(id: RequestId, result: Value) -> Self {
+    pub fn success(id: u64, result: Value) -> Self {
         Self::Response(Response { jsonrpc: Self::JSONRPC, id, result: Some(result), error: None })
     }
 
-    pub fn failure(id: RequestId, error: RpcError) -> Self {
+    pub fn failure(id: u64, error: RpcError) -> Self {
         Self::Response(Response { jsonrpc: Self::JSONRPC, id, result: None, error: Some(error) })
     }
 
@@ -122,16 +115,19 @@ impl Envelope {
         #[serde(deny_unknown_fields)]
         struct Raw {
             jsonrpc: String,
-            #[serde(default, skip_serializing_if = "Option::is_none")]
-            id: Option<RequestId>,
-            #[serde(default, skip_serializing_if = "Option::is_none")]
-            method: Option<String>,
-            #[serde(default)]
+            /// 五个字段一律「出现即收下原值，再逐个判形态」，不用 `Option<T>` 直接承载：
+            /// `Option<T>` 会把显式 `null` 读成 `None`，与「字段缺失」混为一谈——`id` / `method`
+            /// 会因此绕过形态判定，`result` 则会把合法的 `"result": null` 判成缺字段。
+            #[serde(default, deserialize_with = "present_value")]
+            id: Option<Value>,
+            #[serde(default, deserialize_with = "present_value")]
+            method: Option<Value>,
+            #[serde(default, deserialize_with = "present_value")]
             params: Option<Value>,
-            #[serde(default)]
+            #[serde(default, deserialize_with = "present_value")]
             result: Option<Value>,
-            #[serde(default)]
-            error: Option<RpcError>,
+            #[serde(default, deserialize_with = "present_value")]
+            error: Option<Value>,
         }
         let raw: Raw = match serde_json::from_str(line) {
             Ok(raw) => raw,
@@ -146,7 +142,29 @@ impl Envelope {
         if raw.jsonrpc != Self::JSONRPC {
             return Err(illegal(&format!("jsonrpc 字段必须为 \"2.0\"，实际 {:?}", raw.jsonrpc)));
         }
-        match (raw.id, raw.method, raw.result, raw.error) {
+        let id = match raw.id {
+            None => None,
+            Some(Value::Null) => return Err(illegal("id 不得为 null")),
+            Some(Value::Number(number)) => match number.as_u64() {
+                Some(id) => Some(id),
+                None => return Err(illegal("id 须为非负整数")),
+            },
+            Some(_) => return Err(illegal("id 须为数字")),
+        };
+        let method = match raw.method {
+            None => None,
+            Some(Value::String(method)) => Some(method),
+            Some(_) => return Err(illegal("method 须为字符串")),
+        };
+        let error = match raw.error {
+            None => None,
+            Some(Value::Null) => return Err(illegal("error 不得为 null")),
+            Some(value) => match serde_json::from_value::<RpcError>(value) {
+                Ok(error) => Some(error),
+                Err(e) => return Err(illegal(&format!("error 形态非法：{e}"))),
+            },
+        };
+        match (id, method, raw.result, error) {
             (Some(id), Some(method), None, None) => Ok(Self::Request(Request {
                 jsonrpc: Self::JSONRPC,
                 id,
@@ -158,6 +176,7 @@ impl Envelope {
                 method,
                 params: raw.params.unwrap_or(Value::Null),
             })),
+            // result 为 null 是合法的空结果；result 与 error 仍须二选一
             (Some(id), None, result, error) if result.is_some() ^ error.is_some() => {
                 if raw.params.is_some() {
                     return Err(illegal("响应不得携带 params"));
@@ -165,7 +184,7 @@ impl Envelope {
                 Ok(Self::Response(Response { jsonrpc: Self::JSONRPC, id, result, error }))
             }
             _ => Err(illegal(
-                "信封形态非法：请求须有 id+method；响应须有 id 且 result/error 二选一；通知须有 method 且无 id",
+                "信封形态非法：请求须有数字 id + 字符串 method；响应须有 id 且 result/error 二选一；通知须有 method 且无 id",
             )),
         }
     }
@@ -181,6 +200,11 @@ impl Envelope {
     }
 }
 
+/// 把「字段出现了」与「字段的值是什么」分开：字段存在即 `Some`（哪怕值是 null）。
+fn present_value<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<Value>, D::Error> {
+    Value::deserialize(deserializer).map(Some)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -188,10 +212,10 @@ mod tests {
     #[test]
     fn roundtrip_three_forms() {
         let cases = [
-            Envelope::request(RequestId::Num(1), "fs.read", serde_json::json!({"path": "/a"})),
+            Envelope::request(1, "fs.read", serde_json::json!({"path": "/a"})),
             Envelope::notification("host:event", serde_json::json!({"name": "vault:switch"})),
-            Envelope::success(RequestId::Num(7), serde_json::json!({"ok": true})),
-            Envelope::failure(RequestId::Str("x".into()), RpcError::permission_denied("未声明 fs")),
+            Envelope::success(7, serde_json::json!({"ok": true})),
+            Envelope::failure(8, RpcError::permission_denied("未声明 fs")),
         ];
         for case in cases {
             let line = case.to_line();
@@ -208,9 +232,21 @@ mod tests {
             r#"{"jsonrpc":"2.0","method":"m","id":1,"extra":true}"#,
             // 响应混入 params：形态非法，必须响亮拒绝
             r#"{"jsonrpc":"2.0","id":1,"result":{},"params":{}}"#,
+            // id 只认数字：字符串 id 与显式 null 都不是本协议的形态
+            r#"{"jsonrpc":"2.0","id":"a-1","method":"m"}"#,
+            r#"{"jsonrpc":"2.0","id":null,"method":"m"}"#,
+            r#"{"jsonrpc":"2.0","id":null,"result":{}}"#,
         ] {
             assert!(Envelope::parse(bad).is_err(), "应拒绝：{bad}");
         }
+    }
+
+    /// 结果为 null 的响应必须能往返：宿主用 `success(id, Value::Null)` 应答无返回值的调用。
+    #[test]
+    fn null_result_roundtrips() {
+        let line = Envelope::success(5, Value::Null).to_line();
+        assert_eq!(line, r#"{"jsonrpc":"2.0","id":5,"result":null}"#);
+        assert_eq!(Envelope::parse(&line).unwrap(), Envelope::success(5, Value::Null));
     }
 
     #[test]
@@ -222,7 +258,7 @@ mod tests {
     /// 解析不依赖输入的生命周期：owned 行文本必须能走通（流式读取的唯一形态）。
     #[test]
     fn parse_accepts_owned_lines() {
-        let owned = format!("{}\n", Envelope::success(RequestId::Num(1), serde_json::json!({})).to_line());
+        let owned = format!("{}\n", Envelope::success(1, serde_json::json!({})).to_line());
         assert!(Envelope::parse(owned.trim_end()).is_ok());
     }
 }

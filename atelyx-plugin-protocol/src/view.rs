@@ -823,13 +823,6 @@ impl Rgba {
     }
 }
 
-impl<'de> Deserialize<'de> for Rgba {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let text = String::deserialize(deserializer)?;
-        Self::parse(&text).map_err(serde::de::Error::custom)
-    }
-}
-
 impl Serialize for Rgba {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(&self.to_hex())
@@ -974,13 +967,23 @@ pub enum ImageFit {
 }
 
 /// 图片来源：`private` = 插件私有目录内相对路径；`vault` = 仓库根相对路径（宿主按仓库内容读取，
-/// 协作空间走同构内容面）；`url` = http(s) 地址（宿主按公网策略下载并缓存，仅公网可达）。
+/// 协作空间走同构内容面）；`url` = http(s) 地址（缺省按公网策略下载并缓存，`local` 改为本机 /
+/// 局域网策略）；`file` = 本机绝对路径（插件自己读得到的文件，交给宿主显示）。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum ImageSource {
     Private { path: String },
     Vault { path: String },
-    Url { url: String },
+    Url {
+        url: String,
+        /// 按本机 / 局域网策略取图：放行回环与私网、仅拒链路本地与广播（插件连接本机服务时用）。
+        /// 缺省 = 公网策略（拒回环与私网）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        local: Option<bool>,
+    },
+    /// 本机绝对路径。渲染层的图源不做权限门禁（与 `private` / `vault` 同口径），宿主按
+    /// 原路径读盘显示；插件要读它的内容本来就能经 `fs` 自己读，这里不增加也不收紧范围。
+    File { path: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1804,8 +1807,16 @@ mod tests {
                 serde_json::json!({ "type": "vault", "path": "b.png" }),
             ),
             (
-                ImageSource::Url { url: "https://example.com/c.png".into() },
+                ImageSource::Url { url: "https://example.com/c.png".into(), local: None },
                 serde_json::json!({ "type": "url", "url": "https://example.com/c.png" }),
+            ),
+            (
+                ImageSource::Url { url: "http://127.0.0.1:8188/view".into(), local: Some(true) },
+                serde_json::json!({ "type": "url", "url": "http://127.0.0.1:8188/view", "local": true }),
+            ),
+            (
+                ImageSource::File { path: "/tmp/d.png".into() },
+                serde_json::json!({ "type": "file", "path": "/tmp/d.png" }),
             ),
         ] {
             assert_eq!(serde_json::to_value(&source).unwrap(), wire);

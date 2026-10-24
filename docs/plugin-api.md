@@ -147,7 +147,7 @@ pub struct HostInfo {
 // atelyx-plugin-protocol/src/envelope.rs
 /// 一行信封的三种形态。解析失败给出可读原因（含行首片段），不静默丢弃。
 ///
-/// 行为契约：显式 `"id": null` 按通知解析（本协议不使用 null id）；响应携带 `params`
+/// 行为契约：`id` 必须是数字（字符串 id 与显式 `null` 都按形态非法拒绝）；响应携带 `params`
 /// 视为形态非法拒绝；空行是否跳过由读循环决定（协议只承诺「空行解析必报错」）。
 pub enum Envelope {
     Request(Request),
@@ -160,7 +160,8 @@ pub enum Envelope {
 // atelyx-plugin-protocol/src/envelope.rs
 pub struct Request {
     pub jsonrpc: &'static str,
-    pub id: RequestId,
+    /// 请求 id：本协议只认数字（发起方自增，单调不复用）。
+    pub id: u64,
     pub method: String,
     #[serde(skip_serializing_if = "Value::is_null")]
     pub params: Value,
@@ -181,21 +182,11 @@ pub struct Notification {
 // atelyx-plugin-protocol/src/envelope.rs
 pub struct Response {
     pub jsonrpc: &'static str,
-    pub id: RequestId,
+    pub id: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<RpcError>,
-}
-```
-
-```rust
-// atelyx-plugin-protocol/src/envelope.rs
-/// 请求 id：JSON-RPC 允许数字或字符串；本协议自己发起的请求一律用递增数字。
-#[serde(untagged)]
-pub enum RequestId {
-    Num(u64),
-    Str(String),
 }
 ```
 
@@ -792,12 +783,22 @@ pub enum ImageFit {
 ```rust
 // atelyx-plugin-protocol/src/view.rs
 /// 图片来源：`private` = 插件私有目录内相对路径；`vault` = 仓库根相对路径（宿主按仓库内容读取，
-/// 协作空间走同构内容面）；`url` = http(s) 地址（宿主按公网策略下载并缓存，仅公网可达）。
+/// 协作空间走同构内容面）；`url` = http(s) 地址（缺省按公网策略下载并缓存，`local` 改为本机 /
+/// 局域网策略）；`file` = 本机绝对路径（插件自己读得到的文件，交给宿主显示）。
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum ImageSource {
     Private { path: String },
     Vault { path: String },
-    Url { url: String },
+    Url {
+        url: String,
+        /// 按本机 / 局域网策略取图：放行回环与私网、仅拒链路本地与广播（插件连接本机服务时用）。
+        /// 缺省 = 公网策略（拒回环与私网）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        local: Option<bool>,
+    },
+    /// 本机绝对路径。渲染层的图源不做权限门禁（与 `private` / `vault` 同口径），宿主按
+    /// 原路径读盘显示；插件要读它的内容本来就能经 `fs` 自己读，这里不增加也不收紧范围。
+    File { path: String },
 }
 ```
 
@@ -1049,7 +1050,7 @@ pub struct ViewEventParams {
 
 ## 5. 自绘画布
 
-画布是树里的叶子控件（占位 + 指针事件 + 可选帧率），内容经 `canvas.submit` 整表提交、`canvas.patch` 按 id 增量维护；坐标一律画布本地逻辑像素、左上原点。
+画布是树里的叶子控件（占位 + 指针事件 + 可选帧率），内容经 `canvas.submit` 整表提交、`canvas.patch` 按 id 增量维护；文字占位经 `canvas.measureText` 量算（不要按字符数估算）；坐标一律画布本地逻辑像素、左上原点。
 
 ```rust
 // atelyx-plugin-protocol/src/view.rs
@@ -1247,6 +1248,33 @@ pub struct CanvasFrameParams {
     pub frame: u64,
     /// 距该画布上一帧的毫秒数（首帧为 0）。动画相位请以帧序号为准，此值只作节拍参考。
     pub delta_ms: u32,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`canvas::MEASURE_TEXT`] 的 params：`size` 为绝对字号（逻辑像素，与画布 `text` 指令同口径）。
+/// 参数面与画布 `text` 指令保持一致（只有字重可调），量出来的宽度才能在画布上复现。
+#[serde(rename_all = "camelCase")]
+pub struct MeasureTextParams {
+    pub text: String,
+    pub size: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weight: Option<crate::view::TextWeight>,
+    /// 可用宽度上限：给定即按该宽度换行量算（缺省按单行）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_width: Option<f32>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`canvas::MEASURE_TEXT`] 的 result：占位宽高（逻辑像素）与换行后的行数（单行量算恒为 1）。
+#[serde(rename_all = "camelCase")]
+pub struct MeasureTextResult {
+    pub width: f32,
+    pub height: f32,
+    pub lines: u32,
 }
 ```
 
@@ -1724,6 +1752,9 @@ pub mod canvas {
     /// 按 id 增量维护画布清单：更新 / 追加 / 删除单个条目，只上行改动的条目，不必重发整表。
     /// 未提交过清单时以空表为基线（首次也可直接用增量建表）。
     pub const PATCH: &str = "canvas.patch";
+    /// 量算一段文字在给定字号 / 字体下的占位尺寸（画布排版要按真实字宽摆放，不能按字符数估）。
+    /// 纯计算：不改清单、不产生帧、不要求节点存在。
+    pub const MEASURE_TEXT: &str = "canvas.measureText";
     /// 宿主告知插件画布节点的像素尺寸（通知，尺寸变化时发）。
     pub const HOST_RESIZED: &str = "host:canvas.resized";
     /// 宿主按节点声明的 `fps` 发帧拍（通知）：插件收到后提交该帧的绘制内容。

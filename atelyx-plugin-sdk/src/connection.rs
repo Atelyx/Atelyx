@@ -11,7 +11,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::context::Context;
 use crate::handler::{dispatch, PluginHandler};
-use crate::protocol::envelope::{Envelope, RequestId, RpcError};
+use crate::protocol::envelope::{Envelope, Notification, RpcError};
 use crate::protocol::handshake::{self, InitializeParams, InitializeResult, PluginInfo};
 use crate::protocol::API_VERSION;
 
@@ -45,8 +45,8 @@ pub struct Connection {
 
 impl Connection {
     /// 以给定流建立连接并完成握手。返回连接与能力面上下文；插件随后的全部交互经 `ctx`。
-    /// 握手失败即返回错误，此时读写任务已启动——错误被吞掉重试会泄漏持有流的任务；
-    /// 常规用法（[`run_stdio`]）失败即进程退出，不存在重试。
+    /// 握手失败即返回错误，此时读写任务与通知分发任务都已启动——错误被吞掉重试会泄漏
+    /// 持有流的任务；常规用法（[`run_stdio`]）失败即进程退出，不存在重试。
     pub async fn bind<R, W, H>(input: R, output: W, plugin: PluginInfo, handler: Arc<H>) -> Result<(Connection, Context), ConnectError>
     where
         R: AsyncRead + Unpin + Send + 'static,
@@ -59,7 +59,8 @@ impl Connection {
 
         // 读任务必须先于握手启动：握手应答本身要靠读任务配对回送，先后颠倒即互等死锁
         let (closed_tx, closed_rx) = oneshot::channel();
-        spawn_reader(input, handler, ctx.clone(), closed_tx);
+        let notify_tx = spawn_notify_worker(handler.clone(), ctx.clone());
+        spawn_reader(input, ctx.clone(), notify_tx, closed_tx);
 
         Self::handshake(&ctx, &plugin).await?;
         Ok((Self { closed_rx }, ctx))
@@ -110,15 +111,35 @@ fn spawn_writer<W: AsyncWrite + Unpin + Send + 'static>(mut output: W, mut rx: m
     });
 }
 
-/// 读任务：EOF 或协议违规即结束并收场在途调用。宿主通知逐个分发，单个 handler 卡住不阻塞
-/// 读取（逐通知起独立任务，回调间无顺序保证）。
-fn spawn_reader<R, H>(input: R, handler: Arc<H>, ctx: Context, closed_tx: oneshot::Sender<ConnectionOutcome>)
-where
+/// 通知分发任务：按到达顺序逐个执行回调，插件不必自己加锁维持顺序。
+///
+/// 读循环只负责入队，因此单个回调卡住（比如在回调里等宿主应答）既不拖住读取，也不会与响应
+/// 配对互等死锁——配对仍在读循环上。代价是队头阻塞：一个慢回调会挡住其后全部通知。
+/// 连接结束后不保证队列排空——宿主已关闭，剩下的通知没有执行意义，主进程随即可退出。
+fn spawn_notify_worker<H: PluginHandler + 'static>(
+    handler: Arc<H>,
+    ctx: Context,
+) -> mpsc::UnboundedSender<Notification> {
+    let (tx, mut rx) = mpsc::unbounded_channel::<Notification>();
+    tokio::spawn(async move {
+        while let Some(notification) = rx.recv().await {
+            dispatch(&*handler, &ctx, &notification.method, notification.params).await;
+        }
+    });
+    tx
+}
+
+/// 读任务：EOF 或协议违规即结束并收场在途调用；通知交给分发任务按序执行。
+fn spawn_reader<R>(
+    input: R,
+    ctx: Context,
+    notify_tx: mpsc::UnboundedSender<Notification>,
+    closed_tx: oneshot::Sender<ConnectionOutcome>,
+) where
     R: AsyncRead + Unpin + Send + 'static,
-    H: crate::handler::PluginHandler + 'static,
 {
     tokio::spawn(async move {
-        let outcome = pump(input, &handler, &ctx).await;
+        let outcome = pump(input, &ctx, &notify_tx).await;
         // 在途调用全部收场：连接已死，不能让调用方悬等
         for (_, sender) in ctx.drain_pending() {
             let reason = match &outcome {
@@ -131,10 +152,13 @@ where
     });
 }
 
-async fn pump<R, H>(input: R, handler: &Arc<H>, ctx: &Context) -> ConnectionOutcome
+async fn pump<R>(
+    input: R,
+    ctx: &Context,
+    notify_tx: &mpsc::UnboundedSender<Notification>,
+) -> ConnectionOutcome
 where
     R: AsyncRead + Unpin,
-    H: crate::handler::PluginHandler + 'static,
 {
     let mut reader = BufReader::new(input);
     let mut buf = Vec::new();
@@ -158,28 +182,21 @@ where
             Envelope::Response(response) => {
                 // 配对不到条目的响应 = 调用方已超时放弃：迟到结果丢弃并留痕，不断链
                 // （id 单调不复用，不存在误配对的歧义；断链反而是对一次慢调用的不成比例惩罚）
-                match response.id {
-                    RequestId::Num(n) => match ctx.remove_pending(n) {
-                        Some(sender) => {
-                            let _ = sender.send(match (response.result, response.error) {
-                                (Some(result), _) => Ok(result),
-                                (None, Some(error)) => Err(error),
-                                (None, None) => Err(RpcError::failed("响应缺少 result 与 error")),
-                            });
-                        }
-                        None => eprintln!("丢弃迟到的响应（调用已超时）：id = {n}"),
-                    },
-                    RequestId::Str(s) => {
-                        eprintln!("丢弃字符串 id 的响应（本协议请求 id 一律为数字）：id = {s}");
+                match ctx.remove_pending(response.id) {
+                    Some(sender) => {
+                        let _ = sender.send(match (response.result, response.error) {
+                            (Some(result), _) => Ok(result),
+                            (None, Some(error)) => Err(error),
+                            (None, None) => Err(RpcError::failed("响应缺少 result 与 error")),
+                        });
                     }
+                    None => eprintln!("丢弃迟到的响应（调用已超时）：id = {}", response.id),
                 }
             }
-            Envelope::Notification(n) => {
-                let handler = handler.clone();
-                let task_ctx = ctx.clone();
-                tokio::spawn(async move {
-                    dispatch(&*handler, &task_ctx, &n.method, n.params).await;
-                });
+            Envelope::Notification(notification) => {
+                if notify_tx.send(notification).is_err() {
+                    return ConnectionOutcome::Abnormal("通知分发任务已结束".to_string());
+                }
             }
             // 协议约定宿主→插件只有通知；收到请求说明对端不讲这套协议，断链比带病运行可靠
             Envelope::Request(request) => {

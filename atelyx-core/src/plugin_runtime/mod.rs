@@ -51,7 +51,8 @@ pub use atelyx_plugin_protocol::method::{
     ChatStopParams, ClipboardImage, CollabMessageParams, CollabPeer, CollabPeersResult,
     CollabSendParams, CollabSendQos, CollabSendResult, ContributionSlot, DefineIconParams,
     FileFilter,
-    ImageInfoResult, NotificationLevel, ScrollEdge, ScrollToParams, SetTrayItemsParams,
+    ImageInfoResult, MeasureTextParams, MeasureTextResult, NotificationLevel, ScrollEdge,
+    ScrollToParams, SetTrayItemsParams,
     ShortcutQueryResult, SurfaceKind, TableField, TableRemoteSelection, TableSelection, TableRow,
     TableSetCellImageParams, TableSnapshot, TakeoverScope, TrayClickParams, TrayItemSpec,
     WindowOpenParams, WindowUpdateParams,
@@ -235,6 +236,8 @@ pub enum HostRequest {
     },
     /// 插件请求把某可滚动容器（list / scroll）滚到一端（滚动位置归壳的控件态）。
     ScrollTo { plugin_id: String, request_id: u64, params: method::ScrollToParams },
+    /// 插件请求量算一段文字的占位尺寸（字体度量归壳的界面组件层）。
+    MeasureText { plugin_id: String, request_id: u64, params: method::MeasureTextParams },
     /// 插件请求运行时改一个已打开窗口的属性（壳侧 OS 窗口副作用）。
     WindowUpdate { plugin_id: String, request_id: u64, params: method::WindowUpdateParams },
     /// 插件请求重新显示一个因失焦被隐藏的窗口。
@@ -522,6 +525,7 @@ impl PluginRuntime {
             | HostRequest::TableSelectRow { .. }
             | HostRequest::TableSetCellImage { .. }
             | HostRequest::ScrollTo { .. }
+            | HostRequest::MeasureText { .. }
             | HostRequest::VaultImageInfo { .. }
             | HostRequest::TraySetItems { .. }
             | HostRequest::CollabPeers { .. }
@@ -674,6 +678,11 @@ impl PluginRuntime {
                 params,
             },
             HostRequest::ScrollTo { plugin_id, params, .. } => HostRequest::ScrollTo {
+                plugin_id,
+                request_id,
+                params,
+            },
+            HostRequest::MeasureText { plugin_id, params, .. } => HostRequest::MeasureText {
                 plugin_id,
                 request_id,
                 params,
@@ -1018,6 +1027,20 @@ impl PluginRuntime {
             .get(plugin_id)
             .map(|i| i.icons())
             .unwrap_or_default()
+    }
+
+    /// 向某插件的运行日志追加一条宿主侧诊断（如界面树引用了未注册的图标名）。
+    /// 返回是否真正写入：实例不在（未启用 / 已卸载 / 装载失败）时无处落盘，调用方据此
+    /// 决定是否保留重试，而不是把「写不进去」当成「已报告」。
+    pub fn log_to_plugin(&self, plugin_id: &str, text: &str) -> bool {
+        let instance = self.instances.lock().unwrap().get(plugin_id).cloned();
+        match instance {
+            Some(instance) => {
+                instance.log_host_note(text);
+                true
+            }
+            None => false,
+        }
     }
 
     /// 告知插件某画布节点当前的像素尺寸（`host:canvas.resized`；尺寸变化时发）。
@@ -1494,6 +1517,7 @@ fn request_plugin_id(request: &HostRequest) -> &str {
         | HostRequest::TableSelectRow { plugin_id, .. }
         | HostRequest::TableSetCellImage { plugin_id, .. }
         | HostRequest::ScrollTo { plugin_id, .. }
+        | HostRequest::MeasureText { plugin_id, .. }
         | HostRequest::WindowUpdate { plugin_id, .. }
         | HostRequest::WindowShow { plugin_id, .. }
         | HostRequest::ChatRename { plugin_id, .. }

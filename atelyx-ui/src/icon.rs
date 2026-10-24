@@ -112,8 +112,15 @@ where
         bounds: Rectangle,
         _cursor: iced::mouse::Cursor,
     ) -> Vec<canvas::Geometry> {
-        let Some(subpaths) = CACHE.get().and_then(|m| m.get(self.name)) else {
-            return vec![];
+        let missing;
+        let subpaths = match CACHE.get().and_then(|m| m.get(self.name)) {
+            Some(found) => found,
+            None => {
+                // 名字未命中（写错 / 自备图形未注册）：画方框占位而不是留白——
+                // 空白会让「名字写错」看起来像「控件没渲染」，排查方向完全错位
+                missing = rounded_rect(4.0, 4.0, 16.0, 16.0, 3.0);
+                &missing
+            }
         };
         let mut frame = canvas::Frame::new(renderer, bounds.size());
         // 24 单位视框 → size 见方，居中
