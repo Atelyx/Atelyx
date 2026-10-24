@@ -181,7 +181,7 @@ async fn chat_contract_roundtrip_via_plugin() {
         async move {
             AgentHub::start(
                 &hub,
-                run_store,
+                atelyx_core::ai::agent::RunPersist::Store(run_store),
                 events,
                 run_session,
                 None,
@@ -231,7 +231,9 @@ async fn chat_contract_roundtrip_via_plugin() {
                 | RunEvent::ToolStart { message_id, .. }
                 | RunEvent::ToolEnd { message_id, .. }
                 | RunEvent::Finished { message_id, .. }
-                | RunEvent::Failed { message_id, .. } => message_id.clone(),
+                | RunEvent::Failed { message_id, .. }
+                | RunEvent::Snapshot { message_id, .. }
+                | RunEvent::MessageRemoved { message_id, .. } => message_id.clone(),
             };
             let chat_event = match &event {
                 RunEvent::Finished { reason, .. } => {

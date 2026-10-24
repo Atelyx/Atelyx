@@ -1498,6 +1498,9 @@ pub struct VaultConfig {
     /// 场景列表是应用级的（ui-state.json），id 悬挂（场景已删）由调用方解析守卫忽略。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entry_scene_id: Option<String>,
+    /// 画布对话产出自动落卡（正文 / 图片 / 写文件 → 卡并连血缘线；缺省 true = 开启）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canvas_auto_materialize: Option<bool>,
 }
 
 /// 路径（相对 `.atelyx/`）与读写的唯一出口：命令层不自行拼路径，避免两处口径漂移。

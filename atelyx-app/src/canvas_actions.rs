@@ -7,8 +7,8 @@ use iced::Task;
 use serde_json::{json, Value};
 
 use crate::canvas_view::{
-    hit_card, hit_resize_handle, node_size, world_from_screen, CanvasMsg, CanvasSession, DragKind, RefContent,
-    SaveReason, View, CARD_HEADER_H, CARD_MIN_H, CARD_MIN_W,
+    hit_card, hit_link_handle, hit_resize_handle, node_size, world_from_screen, CanvasMsg,
+    CanvasSession, DragKind, RefContent, SaveReason, View, CARD_HEADER_H, CARD_MIN_H, CARD_MIN_W,
 };
 pub(crate) use crate::canvas_view::{LoadOut, RefRaw};
 use crate::{recent_view, vault, App, Message, RepoKind};
@@ -19,7 +19,8 @@ const HISTORY_COALESCE_MS: i64 = 60_000;
 /// 打开 .atlx（脏拦截已由 gate 处理）：置「上次打开」、清旧会话、走载入链。
 pub fn open_canvas(app: &mut App, rel: &str) -> Task<Message> {
     app.ui.last_canvas_file = Some(rel.to_string());
-    // 清掉上一画布会话：载入在途期间不留旧数据（防串画布写盘）
+    // 清掉上一画布会话：先停掉卡内 run，载入在途期间不留旧数据（防串画布写盘）
+    crate::canvas_chat::detach_canvas(app);
     app.canvas = None;
     app.history_kind = atelyx_core::history::HistoryKind::Canvas;
     app.schedule_persist();
@@ -79,7 +80,7 @@ fn on_loaded(app: &mut App, gen: u64, file: String, result: Result<LoadOut, Stri
                         }
                         RefContent::Image { handle, width, height }
                     }
-                    RefRaw::Table { summary } => RefContent::Table { summary },
+                    RefRaw::Table { summary, body } => RefContent::Table { summary, body },
                     RefRaw::Binary => RefContent::Binary,
                     RefRaw::Missing => RefContent::Missing,
                 };
@@ -87,6 +88,8 @@ fn on_loaded(app: &mut App, gen: u64, file: String, result: Result<LoadOut, Stri
             }
             // 打开即呈现全貌（覆盖变换渲染；首个指针事件收口进会话状态）
             session.request_fit();
+            // 旧会话（重载 / 回滚后重读）的卡内 run 与面板绑定先收口
+            crate::canvas_chat::detach_canvas(app);
             app.canvas = Some(session);
             // 内容载入成功即登记最近打开（本地与空间模式同链回执）
             recent_view::record(app, &file, recent_view::RecentKind::Canvas);
@@ -196,10 +199,125 @@ fn read_ref_local(root: &std::path::Path, path: &str, kind: RefKind) -> RefRaw {
         RefKind::Table => match vault::read_table_file(abs.as_path()) {
             Ok(tb) => RefRaw::Table {
                 summary: format!("{} 字段 · {} 行", tb.fields.len(), tb.rows.len()),
+                body: atelyx_core::table_ops::table_to_text(&tb),
             },
             Err(_) => RefRaw::Missing,
         },
     }
+}
+
+/// 按路径扩展名判定读取口径（产出落卡后的新引用按此补内容）。
+fn ref_kind_of_path(path: &str) -> RefKind {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    if atelyx_core::vault::image_ext_of(name).is_some() {
+        return RefKind::Image;
+    }
+    match name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()) {
+        Some(e) if e == "atb" => RefKind::Table,
+        Some(e) if e == "md" => RefKind::Text,
+        _ => RefKind::Media,
+    }
+}
+
+/// 补读新增引用（本地产出落卡后调用；空间模式走服务端端点）。只读视图缓存，不动数据。
+pub(crate) fn load_refs(app: &App, paths: Vec<String>) -> Task<Message> {
+    if paths.is_empty() {
+        return Task::none();
+    }
+    let gen = app.epoch();
+    if matches!(app.repo_kind, RepoKind::Space(_)) {
+        let Some(session) = crate::space_actions::session_of(app) else {
+            return Task::none();
+        };
+        let client = session.client;
+        let space_id = session.space_id;
+        return Task::perform(
+            async move {
+                let mut out: HashMap<String, RefRaw> = HashMap::new();
+                for path in paths {
+                    let raw = match ref_kind_of_path(&path) {
+                        RefKind::Image => match client.get_file_bytes(&space_id, &path).await {
+                            Ok(bytes) => {
+                                let (width, height) = image_dimensions(&bytes);
+                                RefRaw::Image { bytes, width, height }
+                            }
+                            Err(_) => RefRaw::Missing,
+                        },
+                        RefKind::Table => match client.get_file_text(&space_id, &path).await {
+                            Ok(t) => serde_json::from_str::<atelyx_core::vault::TableFile>(&t)
+                                .map(|tb| RefRaw::Table {
+                                    summary: format!("{} 字段 · {} 行", tb.fields.len(), tb.rows.len()),
+                                    body: atelyx_core::table_ops::table_to_text(&tb),
+                                })
+                                .unwrap_or(RefRaw::Missing),
+                            Err(_) => RefRaw::Missing,
+                        },
+                        RefKind::Text | RefKind::Media => match client.get_file_text(&space_id, &path).await {
+                            Ok(t) => RefRaw::Text(t),
+                            Err(_) => RefRaw::Missing,
+                        },
+                    };
+                    out.insert(path, raw);
+                }
+                out
+            },
+            move |refs| Message::Canvas(CanvasMsg::RefsLoaded(gen, refs)),
+        );
+    }
+    let Ok(root) = app.vault.root() else { return Task::none() };
+    Task::perform(
+        async move {
+            tokio::task::spawn_blocking(move || {
+                let mut out = HashMap::new();
+                for path in paths {
+                    let raw = read_ref_local(&root, &path, ref_kind_of_path(&path));
+                    out.insert(path, raw);
+                }
+                out
+            })
+            .await
+            .unwrap_or_default()
+        },
+        move |refs| Message::Canvas(CanvasMsg::RefsLoaded(gen, refs)),
+    )
+}
+
+/// 补读回执：合并引用缓存 + 重建文本卡正文（产出落卡的新笔记能直接显示）。
+fn on_refs_loaded(app: &mut App, gen: u64, refs: HashMap<String, RefRaw>) -> Task<Message> {
+    if gen != app.epoch() {
+        return Task::none();
+    }
+    let Some(session) = app.canvas.as_mut() else { return Task::none() };
+    for (path, raw) in refs {
+        let content = match raw {
+            RefRaw::Text(t) => RefContent::Text(t),
+            RefRaw::Image { bytes, width, height } => {
+                let handle = iced::widget::image::Handle::from_bytes(bytes);
+                app.note_images.insert(path.clone(), handle.clone());
+                app.note_image_epoch = app.note_image_epoch.wrapping_add(1);
+                if width > 0 && height > 0 {
+                    app.note_image_sizes.insert(path.clone(), (width, height));
+                }
+                RefContent::Image { handle, width, height }
+            }
+            RefRaw::Table { summary, body } => RefContent::Table { summary, body },
+            RefRaw::Binary => RefContent::Binary,
+            RefRaw::Missing => RefContent::Missing,
+        };
+        session.view.refs.insert(path, content);
+    }
+    let text_raw: HashMap<String, RefRaw> = session
+        .view
+        .refs
+        .iter()
+        .filter_map(|(path, content)| match content {
+            RefContent::Text(body) => Some((path.clone(), RefRaw::Text(body.clone()))),
+            _ => None,
+        })
+        .collect();
+    session.view.text_docs = prepare_text_docs(&session.data, &text_raw);
+    session.redraw();
+    Task::none()
 }
 
 /// 对话卡消息流 markdown 预解析（载入时一次性；只读流消息不变）。
@@ -430,9 +548,20 @@ fn record_canvas_history(app: &App, content: &str) -> Task<Message> {
 
 /// 画布消息入口（对称表格 on_msg；数据版本变化由主循环判脏排自动保存）。
 pub fn on_msg(app: &mut App, msg: CanvasMsg) -> Task<Message> {
+    crate::canvas_chat::sync_card_chats(app);
     match msg {
         CanvasMsg::Loaded(gen, file, result) => on_loaded(app, gen, file, result),
         CanvasMsg::Saved(gen, file, reason, result, frozen) => on_saved(app, gen, file, reason, result, frozen),
+        CanvasMsg::Chat(msg) => crate::canvas_chat::on_msg(app, msg),
+        CanvasMsg::Hover(hover) => {
+            let Some(s) = app.canvas.as_mut() else { return Task::none() };
+            if s.view.hover != hover {
+                s.view.hover = hover;
+                s.redraw();
+            }
+            Task::none()
+        }
+        CanvasMsg::RefsLoaded(gen, refs) => on_refs_loaded(app, gen, refs),
         CanvasMsg::Press { pos, size } => on_press(app, pos, size),
         CanvasMsg::PanPress { pos, size } => on_pan_press(app, pos, size),
         CanvasMsg::Move { pos, size } => on_move(app, pos, size),
@@ -484,6 +613,8 @@ fn on_pan_press(app: &mut App, pos: iced::Point, size: iced::Size) -> Task<Messa
 }
 
 fn on_press(app: &mut App, pos: iced::Point, size: iced::Size) -> Task<Message> {
+    // 画布空白 / 卡体按压 = 输入面外点：对话卡草稿让出焦点
+    crate::canvas_chat::clear_card_focus(app);
     let Some(s) = app.canvas.as_mut() else { return Task::none() };
     commit_fit(s, size);
     let view = View::of(&s.view);
@@ -497,6 +628,24 @@ fn on_press(app: &mut App, pos: iced::Point, size: iced::Size) -> Task<Message> 
             start: (pos.x, pos.y),
             orig,
         });
+        s.redraw();
+        return Task::none();
+    }
+    // 连接点优先于卡体：悬停 / 选中的资产卡右侧圆点 = 拖线起手
+    if let Some(source) = hit_link_handle(
+        &s.data,
+        s.view.hover.as_deref(),
+        &s.view.selection,
+        view.zoom,
+        world,
+    ) {
+        s.view.selection = vec![source.clone()];
+        s.view.drag = Some(crate::canvas_view::DragState {
+            kind: DragKind::Link(source),
+            start: (pos.x, pos.y),
+            orig: HashMap::new(),
+        });
+        s.view.link_to = Some((pos.x, pos.y));
         s.redraw();
         return Task::none();
     }
@@ -535,6 +684,14 @@ fn on_move(app: &mut App, pos: iced::Point, size: iced::Size) -> Task<Message> {
     commit_fit(s, size);
     // 先取出拖拽会话（克隆轻量字段），再变更会话状态
     let Some(drag) = s.view.drag.as_ref().map(|d| (d.kind.clone(), d.start, d.orig.clone())) else {
+        // 非拖拽：刷新悬停卡（连接点显形条件）
+        let view = View::of(&s.view);
+        let world = world_from_screen(&view, pos.x, pos.y);
+        let hover = hit_card(&s.data, world).map(|i| s.data.nodes[i].id.clone());
+        if hover != s.view.hover {
+            s.view.hover = hover;
+            s.redraw();
+        }
         return Task::none();
     };
     let (kind, start, orig) = drag;
@@ -577,22 +734,44 @@ fn on_move(app: &mut App, pos: iced::Point, size: iced::Size) -> Task<Message> {
             s.save_error = None;
             s.view.content_cache.clear();
         }
+        DragKind::Link(_) => {
+            s.view.link_to = Some((pos.x, pos.y));
+            s.redraw();
+        }
     }
     Task::none()
 }
 
 fn on_release(app: &mut App) -> Task<Message> {
-    let Some(s) = app.canvas.as_mut() else { return Task::none() };
-    // 卡 / resize 松手 = 拖拽期内容变化正式收口：版本自增触发主循环排自动保存；
-    // 平移不产生数据变更
-    let data_drag = matches!(
-        s.view.drag.as_ref().map(|d| &d.kind),
-        Some(DragKind::Card) | Some(DragKind::Resize(_))
-    );
-    s.view.drag = None;
-    if data_drag {
-        s.version += 1;
-        s.redraw();
+    // 拖线收口：先取出会话与落点，再改画布数据（append_card_ref 要可变借用 App）
+    let mut link: Option<(String, String)> = None;
+    {
+        let Some(s) = app.canvas.as_mut() else { return Task::none() };
+        let to = s.view.link_to;
+        let drag = s.view.drag.take();
+        s.view.link_to = None;
+        match drag.map(|d| d.kind) {
+            Some(DragKind::Link(source)) => {
+                let Some((x, y)) = to else { return Task::none() };
+                let view = View::of(&s.view);
+                let world = world_from_screen(&view, x, y);
+                if let Some(i) = hit_card(&s.data, world) {
+                    let target = &s.data.nodes[i];
+                    if target.node_type == "conversation" && target.id != source {
+                        link = Some((target.id.clone(), source));
+                    }
+                }
+            }
+            Some(DragKind::Card) | Some(DragKind::Resize(_)) => {
+                // 卡 / resize 松手 = 拖拽期内容变化正式收口：版本自增触发主循环排自动保存
+                s.version += 1;
+                s.redraw();
+            }
+            _ => {}
+        }
+    }
+    if let Some((target, source)) = link {
+        crate::canvas_chat::append_card_ref(app, &target, &source);
     }
     Task::none()
 }

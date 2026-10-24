@@ -7,6 +7,8 @@ pub enum RefKind {
     Table,
     Canvas,
     Dir,
+    /// 画布内已有卡（正文注入按卡类型另行映射，不进「引用文件」路径块）。
+    Card,
 }
 
 impl RefKind {
@@ -17,6 +19,7 @@ impl RefKind {
             RefKind::Table => "表格",
             RefKind::Canvas => "画布",
             RefKind::Dir => "文件夹",
+            RefKind::Card => "卡片",
         }
     }
 
@@ -27,6 +30,7 @@ impl RefKind {
             RefKind::Table => "table",
             RefKind::Canvas => "canvas",
             RefKind::Dir => "dir",
+            RefKind::Card => "card",
         }
     }
 
@@ -37,6 +41,7 @@ impl RefKind {
             "table" => Some(RefKind::Table),
             "canvas" => Some(RefKind::Canvas),
             "dir" => Some(RefKind::Dir),
+            "card" => Some(RefKind::Card),
             _ => None,
         }
     }
@@ -116,9 +121,13 @@ pub fn make_label(path: &str, taken: &[(&str, &str)]) -> String {
 /// 一条已登记引用（消息 refs 字段的内存形态）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RefEntry {
+    /// 文件 / 目录路径；画布内文本卡无文件时取节点 id（只作去重身份）。
     pub path: String,
     pub label: String,
     pub kind: RefKind,
+    /// 画布卡引用：来源节点 id（消息 refs 落盘为 `nodeId`，消费判定按它命中）。
+    /// 文本卡引用笔记文件时同样带 node_id（标签按「笔记」注入路径块）。
+    pub node_id: Option<String>,
 }
 
 impl RefEntry {
@@ -133,6 +142,8 @@ impl RefEntry {
 pub struct RefHit {
     pub path: String,
     pub kind: RefKind,
+    /// 画布卡引用的来源节点 id（文件引用为 None）。
+    pub node_id: Option<String>,
     /// 命中文本的字节起点（`#` 处）。
     pub start: usize,
     /// 命中文本的字节长度。
@@ -147,6 +158,7 @@ pub fn scan_hits(text: &str, refs: &[RefEntry]) -> Vec<RefHit> {
             text.find(&r.tag_text()).map(|start| RefHit {
                 path: r.path.clone(),
                 kind: r.kind,
+                node_id: r.node_id.clone(),
                 start,
                 len: r.tag_text().len(),
             })
@@ -175,14 +187,16 @@ fn block_path(kind: RefKind, path: &str) -> String {
 }
 
 /// 消息开头「引用文件」路径块（含尾随空行；命中按出现顺序、同路径去重）。
+/// 画布卡引用由调用方按卡类型另行注入，不出现在路径块。
 pub fn reference_path_block(hits: &[RefHit]) -> String {
     let mut lines: Vec<String> = Vec::new();
     let mut seen: Vec<&str> = Vec::new();
     for h in hits {
-        if !seen.contains(&h.path.as_str()) {
-            seen.push(&h.path);
-            lines.push(format!("- {}", block_path(h.kind, &h.path)));
+        if h.kind == RefKind::Card || seen.contains(&h.path.as_str()) {
+            continue;
         }
+        seen.push(&h.path);
+        lines.push(format!("- {}", block_path(h.kind, &h.path)));
     }
     if lines.is_empty() {
         return String::new();
@@ -232,6 +246,7 @@ mod tests {
             path: path.into(),
             label: label.into(),
             kind,
+            node_id: None,
         }
     }
 
@@ -292,6 +307,19 @@ mod tests {
     }
 
     #[test]
+    fn card_hits_carry_source_node_id() {
+        let mut card = entry("node-1", RefKind::Card, "需求卡");
+        card.node_id = Some("node-1".into());
+        let hits = scan_hits("看 #卡片：需求卡 的内容", &[card]);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].kind, RefKind::Card);
+        assert_eq!(hits[0].node_id.as_deref(), Some("node-1"));
+        // 纯文件引用没有节点身份
+        let hits = scan_hits("#笔记：a.md", &[entry("a.md", RefKind::Note, "a.md")]);
+        assert_eq!(hits[0].node_id, None);
+    }
+
+    #[test]
     fn scan_hits_drop_unregistered_hash_text() {
         let refs = vec![entry("a/笔记.md", RefKind::Note, "笔记.md")];
         let hits = scan_hits("正文里的话题 #随手记 不是引用", &refs);
@@ -314,9 +342,11 @@ mod tests {
     #[test]
     fn path_block_dedupes_and_marks_dirs() {
         let hits = vec![
-            RefHit { path: "a.md".into(), kind: RefKind::Note, start: 0, len: 1 },
-            RefHit { path: "素材".into(), kind: RefKind::Dir, start: 1, len: 1 },
-            RefHit { path: "a.md".into(), kind: RefKind::Note, start: 2, len: 1 },
+            RefHit { path: "a.md".into(), kind: RefKind::Note, node_id: None, start: 0, len: 1 },
+            RefHit { path: "素材".into(), kind: RefKind::Dir, node_id: None, start: 1, len: 1 },
+            RefHit { path: "a.md".into(), kind: RefKind::Note, node_id: None, start: 2, len: 1 },
+            // 画布卡引用不进路径块（正文已按卡类型注入）
+            RefHit { path: "node-1".into(), kind: RefKind::Card, node_id: Some("node-1".into()), start: 3, len: 1 },
         ];
         let block = reference_path_block(&hits);
         assert_eq!(block, "[引用文件：\n- a.md\n- 素材/\n]\n\n");

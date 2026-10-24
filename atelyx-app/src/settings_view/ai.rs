@@ -268,6 +268,8 @@ pub enum AiMsg {
     // 模型服务
     NamingModePick(NamingMode),
     NamingModelPick(Option<(String, String)>),
+    /// 画布对话产出自动落卡开关。
+    CanvasMaterializeToggle,
     // Agent
     AgentSelect(String),
     AgentNew,
@@ -767,6 +769,14 @@ pub fn update(app: &mut App, msg: AiMsg) -> Task<Message> {
             app.patch_repo_config(serde_json::json!({
                 "autoNamingModel": { "providerId": pid, "model": mid },
             }))
+        }
+        AiMsg::CanvasMaterializeToggle => {
+            if readonly(app) {
+                return Task::none();
+            }
+            let next = !app.repo_config.canvas_auto_materialize.unwrap_or(true);
+            app.repo_config.canvas_auto_materialize = Some(next);
+            app.patch_repo_config(serde_json::json!({ "canvasAutoMaterialize": next }))
         }
 
         // ---- Agent ----
@@ -1601,6 +1611,15 @@ fn models_view(app: &App, window: iced::window::Id) -> Element<'static, Message>
         );
         col = col.push(super::setting_row("命名模型", "话题命名一般用小模型；跟随所选 = 用对话时选择的模型", model_trigger));
     }
+    col = col.push(super::group_head("画布", "", true));
+    col = col.push(super::setting_row(
+        "对话产出自动落卡",
+        "回复正文 / 图片 / Agent 写出的文件在对话卡旁生成卡片并连血缘线；Agent 读取的文件也会补引用卡",
+        controls::toggle(
+            app.repo_config.canvas_auto_materialize.unwrap_or(true),
+            (!ro).then(|| Message::Ai(AiMsg::CanvasMaterializeToggle)),
+        ),
+    ));
     scroll::v(container(col).padding(Padding::ZERO.bottom(24.0)))
         .width(Length::Fill)
         .height(Length::Fill)

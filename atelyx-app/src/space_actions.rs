@@ -857,6 +857,7 @@ fn clear_session_state(app: &mut App) {
     app.expand_pending = 0;
     app.rename_notice = None;
     app.table = None;
+    crate::canvas_chat::detach_canvas(app);
     app.canvas = None;
     // 表格在场随容器切换作废（旧空间的通道身份不再有效；对端靠名册剔除与超时收尾）
     app.table_collab = None;
@@ -1836,6 +1837,7 @@ pub fn space_load_canvas(app: &App, rel: &str) -> Task<Message> {
                         Ok(t) => serde_json::from_str::<atelyx_core::vault::TableFile>(&t)
                             .map(|tb| canvas_actions::RefRaw::Table {
                                 summary: format!("{} 字段 · {} 行", tb.fields.len(), tb.rows.len()),
+                                body: atelyx_core::table_ops::table_to_text(&tb),
                             })
                             .unwrap_or(canvas_actions::RefRaw::Missing),
                         Err(_) => canvas_actions::RefRaw::Missing,

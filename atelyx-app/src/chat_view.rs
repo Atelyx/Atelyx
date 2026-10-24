@@ -263,8 +263,14 @@ fn top_bar(app: &App, window: iced::window::Id) -> iced::Element<'_, Message> {
     }
     // 手动重新生成标题：紧贴会话标题右侧（有会话且非流式时可用；
     // 命名在途 = 转圈动画且不可再点，完成前禁止重复触发）
+    let canvas_bound = app
+        .chat
+        .active
+        .as_deref()
+        .and_then(crate::canvas_chat::node_of_session)
+        .is_some();
     if let Some(session_id) = app.chat.active.clone() {
-        if !is_streaming(app) {
+        if !is_streaming(app) && !canvas_bound {
             if app.chat.renaming.contains(&session_id) {
                 // 转圈：UiTick 100ms 一拍递增 spin_tick，视图按计数取旋转角
                 let angle = app.chat.spin_tick as f32 * SPIN_STEP_RAD;
@@ -355,24 +361,36 @@ fn top_bar(app: &App, window: iced::window::Id) -> iced::Element<'_, Message> {
 
 fn active_title(app: &App) -> String {
     match &app.chat.active {
-        Some(id) => app
-            .chat
-            .sessions
-            .iter()
-            .find(|s| s["id"] == json!(id))
-            .and_then(|s| s.get("title").and_then(Value::as_str))
-            .unwrap_or("新对话")
-            .to_string(),
+        Some(id) => {
+            // 画布卡会话：标题取卡（内嵌 title / 首条 user 消息前缀）
+            if let Some(node) = crate::canvas_chat::node_of_session(id) {
+                return app
+                    .canvas
+                    .as_ref()
+                    .and_then(|s| s.data.nodes.iter().find(|n| n.id == node))
+                    .map(crate::canvas_chat::card_title)
+                    .unwrap_or_else(|| "画布对话".to_string());
+            }
+            app.chat
+                .sessions
+                .iter()
+                .find(|s| s["id"] == json!(id))
+                .and_then(|s| s.get("title").and_then(Value::as_str))
+                .unwrap_or("新对话")
+                .to_string()
+        }
         None => "新对话".to_string(),
     }
 }
 
 fn is_streaming(app: &App) -> bool {
-    app.chat
-        .active
-        .as_deref()
-        .map(|id| app.chat.streaming.contains(id))
-        .unwrap_or(false)
+    let Some(id) = app.chat.active.as_deref() else {
+        return false;
+    };
+    if let Some(node) = crate::canvas_chat::node_of_session(id) {
+        return crate::canvas_chat::is_streaming(app, node);
+    }
+    app.chat.streaming.contains(id)
 }
 
 // ===== 消息流 =====
@@ -381,11 +399,25 @@ fn message_flow(app: &App, window: iced::window::Id) -> iced::Element<'_, Messag
     let Some(session_id) = app.chat.active.clone() else {
         return empty_flow();
     };
-    let Some(session) = app.chat.sessions.iter().find(|s| s["id"] == json!(session_id)) else {
-        return empty_flow();
-    };
-    let Some(messages) = session.get("messages").and_then(Value::as_array) else {
-        return empty_flow();
+    // 画布卡会话：消息 / 压缩注解直接取节点数据；展开集也归卡（双视图同步）
+    let canvas_node = crate::canvas_chat::node_of_session(&session_id).map(str::to_string);
+    let (session, messages, canvas_view) = if let Some(node_id) = canvas_node.as_deref() {
+        let Some(session) = app.canvas.as_ref() else { return empty_flow() };
+        let Some(node) = session.data.nodes.iter().find(|n| n.id == node_id) else {
+            return empty_flow();
+        };
+        let Some(messages) = node.data.get("messages").and_then(Value::as_array) else {
+            return empty_flow();
+        };
+        (&node.data, messages.as_slice(), Some(&session.view))
+    } else {
+        let Some(session) = app.chat.sessions.iter().find(|s| s["id"] == json!(session_id)) else {
+            return empty_flow();
+        };
+        let Some(messages) = session.get("messages").and_then(Value::as_array) else {
+            return empty_flow();
+        };
+        (session, messages.as_slice(), None)
     };
     if messages.is_empty() {
         return empty_flow();
@@ -401,14 +433,18 @@ fn message_flow(app: &App, window: iced::window::Id) -> iced::Element<'_, Messag
     let ctx = crate::chat_stream::StreamCtx {
         docs: &app.chat.docs,
         images: &app.note_images,
-        expanded: &app.chat.expanded,
+        expanded: canvas_view.map_or(&app.chat.expanded, |v| &v.expanded),
         theme: &app.theme,
         scale: 1.0,
         actions: Some(actions),
         streaming_id,
-        toggle: crate::chat_stream::ToggleRoute::Panel,
-        selectable: true,
-        selection: app.chat.selection.as_ref(),
+        toggle: if canvas_node.is_some() {
+            crate::chat_stream::ToggleRoute::Canvas
+        } else {
+            crate::chat_stream::ToggleRoute::Panel
+        },
+        selectable: canvas_node.is_none(),
+        selection: canvas_node.is_none().then_some(app.chat.selection.as_ref()).flatten(),
     };
     let col = crate::chat_stream::message_column(messages, session, ctx);
     // 覆盖层恒定 Stack 承载、按需追加：显隐不换型（Scrollable ↔ Stack 换型会整树重建、丢滚动位置）
@@ -522,22 +558,23 @@ fn is_last_message(app: &App, m: &Value) -> bool {
     let Some(session_id) = &app.chat.active else {
         return false;
     };
-    app.chat
-        .sessions
-        .iter()
-        .find(|s| s["id"] == json!(session_id))
-        .and_then(|s| s.get("messages").and_then(Value::as_array))
-        .and_then(|ms| ms.last())
-        .map(|last| last.get("id").and_then(Value::as_str) == m.get("id").and_then(Value::as_str))
-        .unwrap_or(false)
+    let last = if crate::canvas_chat::node_of_session(session_id).is_some() {
+        crate::canvas_chat::messages_of(app, session_id).and_then(|ms| ms.last())
+    } else {
+        app.chat
+            .sessions
+            .iter()
+            .find(|s| s["id"] == json!(session_id))
+            .and_then(|s| s.get("messages").and_then(Value::as_array))
+            .and_then(|ms| ms.last())
+    };
+    last.map(|last| {
+        last.get("id").and_then(Value::as_str) == m.get("id").and_then(Value::as_str)
+    })
+    .unwrap_or(false)
 }
 
 // ===== 输入区 =====
-
-/// 自绘输入面事件的 Elm 路由。
-fn chat_input_msg(event: crate::chat_input::InputEvent) -> Message {
-    Message::Chat(ChatMsg::Input(event))
-}
 
 fn input_area(app: &App, window: iced::window::Id) -> iced::Element<'_, Message> {
     let streaming = is_streaming(app);
@@ -574,24 +611,48 @@ fn input_area(app: &App, window: iced::window::Id) -> iced::Element<'_, Message>
             crate::layout_view::PopupState::ChatPlusMenu,
             0.0,
         ));
-    let tool_row = row![
-        plus_btn,
-        agent_trigger(app, window),
-        model_select_trigger(app, window),
-        Space::new().width(Length::Fill),
-        send_btn,
-    ]
-    .spacing(6)
-    .align_y(iced::alignment::Vertical::Center);
+    // 画布卡会话：Agent / 模型由卡节点配置，面板侧不再给选择入口
+    let canvas_bound = app
+        .chat
+        .active
+        .as_deref()
+        .and_then(crate::canvas_chat::node_of_session)
+        .is_some();
+    let tool_row = if canvas_bound {
+        row![
+            text("画布对话卡".to_string())
+                .size(pal::fs_micro())
+                .color(pal::TEXT_MUTED),
+            Space::new().width(Length::Fill),
+            send_btn,
+        ]
+        .spacing(6)
+        .align_y(iced::alignment::Vertical::Center)
+    } else {
+        row![
+            plus_btn,
+            agent_trigger(app, window),
+            model_select_trigger(app, window),
+            Space::new().width(Length::Fill),
+            send_btn,
+        ]
+        .spacing(6)
+        .align_y(iced::alignment::Vertical::Center)
+    };
 
     // 自绘输入面（# 标签高亮 / 整标签交互由部件托管）
+    let placeholder = if canvas_bound {
+        "输入消息到画布对话卡，Enter 发送"
+    } else {
+        "输入消息，Enter 发送，Shift+Enter 换行"
+    };
     let surface = crate::chat_input::Input::new(
         &app.chat.input,
         &app.chat.mention_refs,
-        chat_input_msg,
+        crate::chat_input::InputRoute::Panel,
     )
     .picker_open(app.chat.mention_picker.is_some())
-    .placeholder("输入消息，Enter 发送，Shift+Enter 换行");
+    .placeholder(placeholder);
     let surface = container(iced::Element::new(surface))
         .width(Length::Fill)
         .padding(Padding::ZERO.left(2.0).right(2.0).top(8.0));
@@ -633,19 +694,26 @@ fn input_area(app: &App, window: iced::window::Id) -> iced::Element<'_, Message>
 fn mention_picker_view<'a>(
     picker: &'a crate::chat_actions::MentionPicker,
 ) -> iced::Element<'a, Message> {
-    let rows = picker.candidates.iter().enumerate().map(|(i, (rel, is_dir))| {
+    let rows = picker.candidates.iter().enumerate().map(|(i, target)| {
         let selected = i == picker.selected;
-        let icon_name = if *is_dir {
-            "folder"
-        } else {
-            match atelyx_core::ai::refs::kind_of_file(rel) {
-                Some(atelyx_core::ai::refs::RefKind::Table) => "table",
-                Some(atelyx_core::ai::refs::RefKind::Canvas) => "layers",
-                _ => "file-text",
+        let (icon_name, label, dir) = match target {
+            crate::chat_actions::MentionTarget::Vault { rel, is_dir } => {
+                let icon_name = if *is_dir {
+                    "folder"
+                } else {
+                    match atelyx_core::ai::refs::kind_of_file(rel) {
+                        Some(atelyx_core::ai::refs::RefKind::Table) => "table",
+                        Some(atelyx_core::ai::refs::RefKind::Canvas) => "layers",
+                        _ => "file-text",
+                    }
+                };
+                let label = rel.rsplit('/').next().unwrap_or(rel).to_string();
+                let dir = rel.rsplit_once('/').map(|(d, _)| d.to_string());
+                (icon_name, label, dir)
             }
+            // 面板不列画布卡候选（该入口只在画布卡输入面出现）
+            crate::chat_actions::MentionTarget::Card { node_id } => ("box", node_id.clone(), None),
         };
-        let label = rel.rsplit('/').next().unwrap_or(rel).to_string();
-        let dir = rel.rsplit_once('/').map(|(d, _)| d.to_string());
         let press = Message::Chat(ChatMsg::MentionPick(i));
         let row_content = row![
             icon(icon_name, 12.0, if selected { pal::ACCENT } else { pal::TEXT_SECONDARY }),

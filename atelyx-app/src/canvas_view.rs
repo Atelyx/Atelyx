@@ -111,6 +111,27 @@ pub(crate) fn node_size(n: &atelyx_core::vault::CanvasFileNode) -> (f64, f64) {
     (n.width.unwrap_or(dw), n.height.unwrap_or(dh))
 }
 
+/// 从起始点向下搜索不与现有卡相交的落点（世界坐标；分组长矩形也参与避让）。
+/// 逐行下移固定步长直到无重叠；始终有解，不做上界。
+pub fn find_free_spot(
+    nodes: &[atelyx_core::vault::CanvasFileNode],
+    start: (f64, f64),
+    size: (f64, f64),
+    step: f64,
+) -> (f64, f64) {
+    let overlaps = |x: f64, y: f64| {
+        nodes.iter().any(|n| {
+            let (w, h) = node_size(n);
+            x < n.x + w && x + size.0 > n.x && y < n.y + h && y + size.1 > n.y
+        })
+    };
+    let mut y = start.1;
+    while overlaps(start.0, y) {
+        y += step;
+    }
+    (start.0, y)
+}
+
 /// 适应视图变换（纯函数）：全部内容卡包围盒装入视口，无卡 = 复位原点。
 pub fn fit_transform(
     nodes: &[atelyx_core::vault::CanvasFileNode],
@@ -163,6 +184,13 @@ pub struct CanvasSession {
 impl CanvasSession {
     pub fn new(file: String, data: atelyx_core::vault::CanvasFile) -> Self {
         let saved = data.clone();
+        let mut view = CanvasViewState::default();
+        // 每张对话卡一份运行态（草稿 / 引用 / 附件 / 流式）；节点集合变化由 sync_card_chats 对齐
+        for n in &data.nodes {
+            if n.node_type == "conversation" {
+                view.card_chat.insert(n.id.clone(), crate::canvas_chat::CardChat::default());
+            }
+        }
         Self {
             file,
             data,
@@ -170,7 +198,7 @@ impl CanvasSession {
             dirty: false,
             save_error: None,
             version: 1,
-            view: CanvasViewState::default(),
+            view,
         }
     }
 
@@ -220,8 +248,12 @@ pub struct CanvasViewState {
     pub fit_pending: bool,
     /// 选中卡 id（单选）。
     pub selection: Vec<String>,
-    /// 进行中的拖拽会话（平移 / 卡拖动 / resize）。
+    /// 悬停卡 id（连接点只在悬停 / 选中的卡上显形）。
+    pub hover: Option<String>,
+    /// 进行中的拖拽会话（平移 / 卡拖动 / resize / 拖线）。
     pub drag: Option<DragState>,
+    /// 拖线中的光标屏幕坐标（仅拖线会话使用）。
+    pub link_to: Option<(f32, f32)>,
     /// 对话卡折叠块展开集（键 = 消息 id + 步骤序）。
     pub expanded: HashSet<String>,
     /// 对话卡消息流 markdown 解析缓存（键 = 源哈希；载入时一次性预解析）。
@@ -230,6 +262,8 @@ pub struct CanvasViewState {
     pub text_docs: HashMap<String, atelyx_core::markdown::MarkdownDocument>,
     /// 卡引用内容缓存（键 = 仓库相对路径；载入后异步回填）。
     pub refs: HashMap<String, RefContent>,
+    /// 对话卡运行态（键 = 卡节点 id）。
+    pub card_chat: HashMap<String, crate::canvas_chat::CardChat>,
     /// 网格层缓存（随平移缩放失效）。
     pub grid_cache: canvas::Cache,
     /// 内容层缓存（随数据或视图态变化失效）。
@@ -243,11 +277,14 @@ impl Default for CanvasViewState {
             pan: (40.0, 40.0),
             fit_pending: false,
             selection: Vec::new(),
+            hover: None,
             drag: None,
+            link_to: None,
             expanded: HashSet::new(),
             docs: HashMap::new(),
             text_docs: HashMap::new(),
             refs: HashMap::new(),
+            card_chat: HashMap::new(),
             grid_cache: canvas::Cache::new(),
             content_cache: canvas::Cache::new(),
         }
@@ -270,6 +307,8 @@ pub enum DragKind {
     Card,
     /// 右下角 resize（松手落盘）。
     Resize(String),
+    /// 从卡右侧连接点拖线（松手落在对话卡 = 建引用边）。
+    Link(String),
 }
 
 /// 卡引用内容（载入后异步回填；媒体字节转句柄在回执侧完成）。
@@ -282,8 +321,8 @@ pub enum RefContent {
         width: u32,
         height: u32,
     },
-    /// 表格薄卡摘要（字段数 · 行数）。
-    Table { summary: String },
+    /// 表格薄卡摘要（字段数 · 行数）+ 注入用的整表文本。
+    Table { summary: String, body: String },
     /// 二进制附件（非文本、非图片，只显示占位说明）。
     Binary,
     /// 引用缺失（外部删除 / 读取失败）。
@@ -321,6 +360,32 @@ pub fn hit_resize_handle(
         let (w, h) = node_size(n);
         let (hx, hy) = (n.x + w, n.y + h);
         if world.0 >= hx - tol && world.0 <= hx + tol && world.1 >= hy - tol && world.1 <= hy + tol {
+            return Some(n.id.clone());
+        }
+    }
+    None
+}
+
+/// 右侧连接点命中（仅悬停 / 选中的非分组、非对话卡有连接点）。
+pub fn hit_link_handle(
+    canvas: &atelyx_core::vault::CanvasFile,
+    hover: Option<&str>,
+    selection: &[String],
+    zoom: f32,
+    world: (f64, f64),
+) -> Option<String> {
+    let tol = 6.0 / zoom as f64;
+    for n in canvas.nodes.iter().rev() {
+        if matches!(n.node_type.as_str(), "group" | "conversation") {
+            continue;
+        }
+        let active = hover == Some(n.id.as_str()) || selection.iter().any(|s| s == &n.id);
+        if !active {
+            continue;
+        }
+        let (w, h) = node_size(n);
+        let (cx, cy) = (n.x + w, n.y + h / 2.0);
+        if (world.0 - cx).abs() <= tol && (world.1 - cy).abs() <= tol {
             return Some(n.id.clone());
         }
     }
@@ -378,28 +443,89 @@ pub fn edge_endpoints(
     ))
 }
 
-/// 数据流连线是否已被消费：目标对话卡任一消息的引用（旧格式 refs[].nodeId）命中来源卡。
-/// `directed != false` 即数据流连线（磁盘缺省 = 数据流）。
-pub fn edge_consumed(canvas: &atelyx_core::vault::CanvasFile, e: &atelyx_core::vault::CanvasFileEdge) -> bool {
+/// 连线语义：关联（手工、可删）/ 资产引用（源 → 对话，虚实表达消费）/ 产出血缘（对话 → 资产）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeRole {
+    Association,
+    /// 资产 → 对话：虚线未消费 / 实线已消费
+    Reference { consumed: bool },
+    /// 对话 → 资产：产出血缘，恒实线
+    Lineage,
+    /// 其它有向边（资产 ↔ 资产等）：金色实线，无消费语义
+    Flow,
+}
+
+/// 判定一条连线的语义（磁盘 `directed` 缺省 = 数据流）。
+/// 引用边虚 = 尚未注入该资产；产出边恒实线（无消费语义）。
+pub fn edge_role(canvas: &atelyx_core::vault::CanvasFile, e: &atelyx_core::vault::CanvasFileEdge) -> EdgeRole {
     if e.directed == Some(false) {
-        return false;
+        return EdgeRole::Association;
     }
-    let Some(target) = canvas.nodes.iter().find(|n| n.id == e.target) else {
-        return false;
-    };
-    if target.node_type != "conversation" {
-        return false;
+    let source_is_conversation = canvas
+        .nodes
+        .iter()
+        .find(|n| n.id == e.source)
+        .is_some_and(|n| n.node_type == "conversation");
+    let target = canvas.nodes.iter().find(|n| n.id == e.target);
+    match target {
+        Some(t) if t.node_type == "conversation" && !source_is_conversation => {
+            EdgeRole::Reference { consumed: reference_consumed(canvas, t, e) }
+        }
+        _ if source_is_conversation => EdgeRole::Lineage,
+        _ => EdgeRole::Flow,
     }
+}
+
+/// 资产是否已被目标对话消费：消息 refs 的 nodeId、附件的 sourceNodeId，
+/// 或 Agent 实际读取过来源卡引用的文件（read_file 工具步命中）。
+fn reference_consumed(
+    canvas: &atelyx_core::vault::CanvasFile,
+    target: &atelyx_core::vault::CanvasFileNode,
+    e: &atelyx_core::vault::CanvasFileEdge,
+) -> bool {
     let Some(messages) = target.data.get("messages").and_then(Value::as_array) else {
         return false;
     };
+    let source_file = canvas
+        .nodes
+        .iter()
+        .find(|n| n.id == e.source)
+        .and_then(|n| n.data.get("file").and_then(Value::as_str));
     messages.iter().any(|m| {
-        m.get("refs")
+        let by_ref = m
+            .get("refs")
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
-            .any(|r| r.get("nodeId").and_then(Value::as_str) == Some(e.source.as_str()))
+            .any(|r| r.get("nodeId").and_then(Value::as_str) == Some(e.source.as_str()));
+        let by_attachment = m
+            .get("attachments")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .any(|a| a.get("sourceNodeId").and_then(Value::as_str) == Some(e.source.as_str()));
+        let by_read = source_file.is_some_and(|file| message_read_file(m, file));
+        by_ref || by_attachment || by_read
     })
+}
+
+/// 消息的工具步里是否实际读取过该文件（`read_file` 的 `args.path` 命中）。
+fn message_read_file(message: &Value, file: &str) -> bool {
+    message
+        .get("steps")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|s| s.get("kind").and_then(Value::as_str) == Some("tool"))
+        .any(|s| {
+            let run = s.get("run");
+            run.and_then(|r| r.get("name")).and_then(Value::as_str) == Some("read_file")
+                && run
+                    .and_then(|r| r.get("args"))
+                    .and_then(|a| a.get("path"))
+                    .and_then(Value::as_str)
+                    == Some(file)
+        })
 }
 
 /// 连线是否为数据流连线（directed 缺省 = 数据流）。
@@ -427,6 +553,12 @@ pub enum CanvasMsg {
     FitView,
     /// 对话卡折叠块开合（键 = 消息 id + 步骤序）。
     StreamToggle(String),
+    /// 对话卡运行态消息（输入 / 发送 / 引用 / 附件 / 分支等）。
+    Chat(crate::canvas_chat::CanvasChatMsg),
+    /// 悬停卡变化（指针移出画布时清空连接点与拖入路由）。
+    Hover(Option<String>),
+    /// 新引用卡正文 / 图片载入回执（产出落卡后按需补内容）。
+    RefsLoaded(u64, HashMap<String, RefRaw>),
 }
 
 /// 载入产物：画布数据 + 预解析的 markdown 文档（对话消息流 / 文本卡正文）+ 引用内容。
@@ -446,7 +578,7 @@ pub enum RefRaw {
     Text(String),
     /// 图片字节 + 像素尺寸（解码失败 = 0，回执侧按占位绘制）。
     Image { bytes: Vec<u8>, width: u32, height: u32 },
-    Table { summary: String },
+    Table { summary: String, body: String },
     /// 存在但既非文本也非图片（二进制附件）。
     Binary,
     Missing,
@@ -507,6 +639,10 @@ impl canvas::Program<Message> for WorldLayer<'_> {
                     }))
                 })
             }
+            // 指针移出画布：连接点与「拖入落到哪张卡」的路由依据同时清空
+            Ev::Mouse(iced::mouse::Event::CursorLeft) => Some(
+                iced::widget::Action::publish(Message::Canvas(CanvasMsg::Hover(None))),
+            ),
             Ev::Mouse(iced::mouse::Event::ButtonReleased(
                 iced::mouse::Button::Left | iced::mouse::Button::Middle,
             )) => {
@@ -559,14 +695,25 @@ impl canvas::Program<Message> for WorldLayer<'_> {
         };
         if let Some(drag) = &self.session.view.drag {
             return match drag.kind {
-                DragKind::Pan => iced::mouse::Interaction::Grabbing,
-                DragKind::Card => iced::mouse::Interaction::Grabbing,
+                DragKind::Pan | DragKind::Card => iced::mouse::Interaction::Grabbing,
                 DragKind::Resize(_) => iced::mouse::Interaction::ResizingDiagonallyUp,
+                DragKind::Link(_) => iced::mouse::Interaction::Crosshair,
             };
         }
         let world = self.view.world(p.x, p.y);
         if hit_resize_handle(&self.session.data, &self.session.view.selection, self.view.zoom, world).is_some() {
             return iced::mouse::Interaction::ResizingDiagonallyUp;
+        }
+        if hit_link_handle(
+            &self.session.data,
+            self.session.view.hover.as_deref(),
+            &self.session.view.selection,
+            self.view.zoom,
+            world,
+        )
+        .is_some()
+        {
+            return iced::mouse::Interaction::Crosshair;
         }
         if hit_card(&self.session.data, world).is_some() {
             return iced::mouse::Interaction::Grab;
@@ -646,7 +793,30 @@ fn draw_world(session: &CanvasSession, view: &View, frame: &mut Frame) {
             continue;
         }
         let (w, h) = session.card_size(n);
-        draw_card(session, view, frame, n, w, h, sel.contains(n.id.as_str()));
+        let link_handle = session.view.hover.as_deref() == Some(n.id.as_str())
+            || sel.contains(n.id.as_str());
+        draw_card(session, view, frame, n, w, h, sel.contains(n.id.as_str()), link_handle);
+    }
+
+    // 拖线预览：来源卡右缘连接点 → 光标
+    if let Some(DragState { kind: DragKind::Link(source), .. }) = &session.view.drag {
+        if let Some(to) = session.view.link_to {
+            if let Some(n) = session.data.nodes.iter().find(|n| &n.id == source) {
+                let (w, h) = session.card_size(n);
+                let (sx, sy) = view.screen(n.x + w, n.y + h / 2.0);
+                let (tx, ty) = to;
+                let path = Path::line(Point::new(sx, sy), Point::new(tx, ty));
+                frame.stroke(
+                    &path,
+                    Stroke {
+                        style: canvas::Style::Solid(pal::ACCENT),
+                        width: 1.6,
+                        line_dash: LineDash { segments: &[4.0, 3.0], offset: 0 },
+                        ..Stroke::default()
+                    },
+                );
+            }
+        }
     }
 }
 
@@ -745,11 +915,14 @@ fn draw_edge(session: &CanvasSession, view: &View, frame: &mut Frame, e: &atelyx
         p.move_to(p0);
         p.bezier_curve_to(c0, c1, p1);
     });
-    let (color, width, dash) = if is_dataflow(e) {
-        let consumed = edge_consumed(&session.data, e);
-        (pal::ACCENT, if consumed { 1.8 } else { 1.4 }, !consumed)
-    } else {
-        (pal::BORDER_STRONG, 1.2, false)
+    let role = edge_role(&session.data, e);
+    let (color, width, dash) = match role {
+        EdgeRole::Association => (pal::BORDER_STRONG, 1.2, false),
+        // 引用边：未消费虚线 / 已消费实线；产出边恒实线
+        EdgeRole::Reference { consumed: false } => (pal::ACCENT, 1.4, true),
+        EdgeRole::Reference { consumed: true } => (pal::ACCENT, 1.8, false),
+        EdgeRole::Lineage => (pal::ACCENT, 1.6, false),
+        EdgeRole::Flow => (pal::ACCENT, 1.4, false),
     };
     frame.stroke(
         &path,
@@ -854,6 +1027,7 @@ fn draw_card(
     w: f64,
     h: f64,
     selected: bool,
+    link_handle: bool,
 ) {
     let (sx, sy) = view.screen(n.x, n.y);
     let (sw, sh) = (w as f32 * view.zoom, h as f32 * view.zoom);
@@ -918,12 +1092,23 @@ fn draw_card(
             pal::ACCENT,
         );
     }
+    // 拖线连接点（右侧中点；悬停 / 选中的资产卡显形）
+    if link_handle && n.node_type != "conversation" {
+        frame.fill(
+            &Path::circle(Point::new(sx + sw, sy + sh / 2.0), 4.5),
+            pal::ACCENT,
+        );
+        frame.stroke(
+            &Path::circle(Point::new(sx + sw, sy + sh / 2.0), 4.5),
+            Stroke { style: canvas::Style::Solid(pal::BG_SECONDARY), width: 1.5, ..Stroke::default() },
+        );
+    }
 }
 
 /// 卡头部（图标名 + 标题）。
 fn card_head(n: &atelyx_core::vault::CanvasFileNode) -> (&'static str, String) {
     match n.node_type.as_str() {
-        "conversation" => ("message-square", n.data.get("title").and_then(Value::as_str).unwrap_or("对话").to_string()),
+        "conversation" => ("message-square", crate::canvas_chat::card_title(n)),
         "text" => match n.data.get("file").and_then(Value::as_str) {
             Some(f) => ("sticky-note", file_title(f)),
             None => ("align-left", n.data.get("title").and_then(Value::as_str).unwrap_or("文本").to_string()),
@@ -1013,7 +1198,7 @@ fn draw_card_body(
         "table" => {
             let f = n.data.get("file").and_then(Value::as_str).unwrap_or("");
             match session.view.refs.get(f) {
-                Some(RefContent::Table { summary }) => {
+                Some(RefContent::Table { summary, .. }) => {
                     draw_hint(frame, &format!("双击打开表格 · {summary}"), area, size, pal::TEXT_SECONDARY)
                 }
                 Some(RefContent::Missing) => draw_hint(frame, "引用表格缺失", area, size, pal::DANGER),
@@ -1156,7 +1341,7 @@ pub fn canvas_view<'a>(app: &'a App, window: iced::window::Id) -> Element<'a> {
         };
         let world: Element<'_> = WorldLayer { session, view }.into();
         let mut layered = stack![world];
-        for overlay in card_overlays(app, session, view, viewport) {
+        for overlay in card_overlays(app, session, view, viewport, window) {
             layered = layered.push(overlay);
         }
         column![toolbar(session, window, viewport, view.zoom), layered.width(Length::Fill).height(Length::Fill)]
@@ -1187,11 +1372,31 @@ fn toolbar<'a>(session: &'a CanvasSession, window: iced::window::Id, viewport: S
         space().width(Length::Shrink).into()
     };
     let zoom_msg = |factor| Message::Canvas(CanvasMsg::Zoom { factor, size: viewport });
+    // 选中的对话卡：可打开到 AI 面板（同一会话双视图）
+    let open_in_panel = session
+        .view
+        .selection
+        .first()
+        .and_then(|id| session.data.nodes.iter().find(|n| &n.id == id))
+        .filter(|n| n.node_type == "conversation")
+        .map(|n| {
+            controls::icon_button(
+                "message-square",
+                13.0,
+                24.0,
+                controls::Variant::Ghost,
+                Some(Message::Canvas(CanvasMsg::Chat(
+                    crate::canvas_chat::CanvasChatMsg::OpenInPanel(n.id.clone()),
+                ))),
+                Some((window, "在 AI 面板打开".into())),
+            )
+        });
 
     row![
         space().width(Length::Fill),
         dirty_pill,
         save_state,
+        open_in_panel,
         controls::icon_button("maximize", 13.0, 24.0, controls::Variant::Ghost,
             Some(Message::Canvas(CanvasMsg::FitView)), Some((window, "适应视图".into()))),
         controls::icon_button("zoom-in", 13.0, 24.0, controls::Variant::Ghost,
@@ -1214,6 +1419,7 @@ fn card_overlays<'a>(
     session: &'a CanvasSession,
     view: View,
     viewport: Size,
+    window: iced::window::Id,
 ) -> Vec<Element<'a>> {
     let (vw, vh) = (viewport.width, viewport.height);
     let mut out = Vec::with_capacity(session.data.nodes.len());
@@ -1228,27 +1434,7 @@ fn card_overlays<'a>(
             None
         } else {
             match n.node_type.as_str() {
-                "conversation" => n
-                    .data
-                    .get("messages")
-                    .and_then(Value::as_array)
-                    .filter(|messages| !messages.is_empty())
-                    .map(|messages| {
-                        // 消息流与面板同管线；展开态 / 解析缓存归画布视图状态（键为消息 id，与面板不撞）
-                        let ctx = crate::chat_stream::StreamCtx {
-                            docs: &session.view.docs,
-                            images: &app.note_images,
-                            expanded: &session.view.expanded,
-                            theme: &app.theme,
-                            scale: view.zoom,
-                            actions: None,
-                            streaming_id: None,
-                            toggle: crate::chat_stream::ToggleRoute::Canvas,
-                            selectable: false,
-                            selection: None,
-                        };
-                        crate::chat_stream::message_column(messages, &n.data, ctx)
-                    }),
+                "conversation" => conversation_card_overlay(app, session, n, view.zoom, window),
                 "text" => session.view.text_docs.get(&n.id).map(|doc| {
                     // 正文复用笔记只读渲染，字号按视口缩放等比例（原生控件无整体缩放能力）
                     crate::markdown_view::document_body_scaled(
@@ -1264,17 +1450,22 @@ fn card_overlays<'a>(
         };
         out.push(match inner {
             Some(inner) => {
-                let body = scroll::v_scaled(
-                    container(inner)
+                let content = container(inner)
+                    .width(Length::Fill)
+                    .padding(Padding::ZERO.right(4.0 * view.zoom));
+                // 对话卡自带消息滚动区与固定输入行，外层不能再包滚动（否则输入行随正文滚走、
+                // 回底命令打到被压缩的内层）；文本卡由外层滚动承载整篇正文。
+                let body: Element<'_> = if n.node_type == "conversation" {
+                    content.height(Length::Fill).into()
+                } else {
+                    scroll::v_scaled(content, view.zoom)
                         .width(Length::Fill)
-                        .padding(Padding::ZERO.right(4.0 * view.zoom)),
-                    view.zoom,
-                )
-                .width(Length::Fill)
-                .height(Length::Fill);
+                        .height(Length::Fill)
+                        .into()
+                };
                 // 浮层自身不捕获按下：空白处按下落到画布层，由画布统一做命中与拖动
                 // （正文里代码复制等按钮仍各自响应）
-                place_card_overlay(body.into(), sx, sy, sw, sh, view.zoom)
+                place_card_overlay(body, sx, sy, sw, sh, view.zoom)
             }
             None => space().width(Length::Shrink).height(Length::Shrink).into(),
         });
@@ -1301,6 +1492,385 @@ fn place_card_overlay<'a>(
         Point::new(sx + pad, sy + top),
         Size::new((sw - pad).max(0.0), (sh - top - bottom).max(0.0)),
     )
+    .into()
+}
+
+/// 对话卡浮层：消息流（只读渲染段 + 操作行）+ # 候选 / 附件托盘 / 输入行。
+/// 输入面复用面板自绘部件（按卡草稿路由），字号随视口缩放。
+fn conversation_card_overlay<'a>(
+    app: &'a App,
+    session: &'a CanvasSession,
+    n: &'a atelyx_core::vault::CanvasFileNode,
+    zoom: f32,
+    window: iced::window::Id,
+) -> Option<Element<'a>> {
+    use crate::canvas_chat::CanvasChatMsg;
+    let chat = session.view.card_chat.get(&n.id)?;
+    let messages = n
+        .data
+        .get("messages")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let streaming_id = chat
+        .streaming
+        .then(|| messages.last())
+        .flatten()
+        .and_then(|m| m.get("id").and_then(Value::as_str));
+    let last_id = messages
+        .last()
+        .and_then(|m| m.get("id").and_then(Value::as_str).map(str::to_string));
+    let streaming = chat.streaming;
+    let action_node = n.id.clone();
+    let actions: crate::chat_stream::ActionsHook<'a> = Box::new(move |m, is_assistant| {
+        card_action_row(app, &action_node, window, m, is_assistant, streaming, last_id.as_deref())
+    });
+    let ctx = crate::chat_stream::StreamCtx {
+        docs: &session.view.docs,
+        images: &app.note_images,
+        expanded: &session.view.expanded,
+        theme: &app.theme,
+        scale: zoom,
+        actions: Some(actions),
+        streaming_id,
+        toggle: crate::chat_stream::ToggleRoute::Canvas,
+        selectable: false,
+        selection: None,
+    };
+    let flow_inner: Element<'_> = if messages.is_empty() {
+        container(text("输入消息开始对话").size((pal::fs_caption() * zoom).max(9.0)).color(pal::TEXT_MUTED))
+            .padding(Padding::new((10.0 * zoom).max(4.0)))
+            .into()
+    } else {
+        crate::chat_stream::message_column(messages, &n.data, ctx)
+    };
+    let flow_node = n.id.clone();
+    let flow = scroll::v_scaled(container(flow_inner).width(Length::Fill), zoom)
+        .id(crate::canvas_chat::flow_id(&n.id))
+        .on_scroll(move |v| {
+            Message::Canvas(CanvasMsg::Chat(CanvasChatMsg::FlowScrolled {
+                node: flow_node.clone(),
+                y: v.relative_offset().y,
+            }))
+        })
+        .width(Length::Fill)
+        .height(Length::Fill);
+
+    let mut col = column![].spacing((3.0 * zoom).max(1.0)).width(Length::Fill).height(Length::Fill);
+    if let Some(error) = &chat.error {
+        let clear = Message::Canvas(CanvasMsg::Chat(CanvasChatMsg::ClearError(n.id.clone())));
+        col = col.push(
+            container(
+                row![
+                    text(layout_view::ellipsize(error, 200.0 * zoom, (pal::fs_micro() * zoom).max(8.0)))
+                        .size((pal::fs_micro() * zoom).max(8.0))
+                        .color(pal::DANGER)
+                        .width(Length::Fill),
+                    controls::icon_button(
+                        "x",
+                        (11.0 * zoom).clamp(9.0, 14.0),
+                        (20.0 * zoom).clamp(16.0, 24.0),
+                        controls::Variant::Ghost,
+                        Some(clear),
+                        Some((window, "清除提示".to_string())),
+                    ),
+                ]
+                .align_y(alignment::Vertical::Center),
+            )
+            .width(Length::Fill)
+            .padding(Padding::ZERO.horizontal((4.0 * zoom).max(2.0))),
+        );
+    }
+    col = col.push(flow);
+    if let Some(picker) = &chat.mention_picker {
+        col = col.push(card_mention_picker(picker, &n.id, zoom, &session.data.nodes));
+    }
+    if !chat.pending_images.is_empty() {
+        col = col.push(card_image_tray(chat, &n.id, zoom));
+    }
+    col = col.push(card_input_row(chat, n, zoom, window));
+    Some(col.into())
+}
+
+/// 卡内消息操作行（复制 / 回到此处 / 分支 / 重新生成）。
+fn card_action_row<'a>(
+    app: &'a App,
+    node_id: &str,
+    window: iced::window::Id,
+    m: &Value,
+    is_assistant: bool,
+    streaming: bool,
+    last_id: Option<&str>,
+) -> Element<'a> {
+    use crate::canvas_chat::CanvasChatMsg;
+    let content = m.get("content").and_then(Value::as_str).unwrap_or("");
+    let display = m
+        .get("displayContent")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(content);
+    let message_id = m.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+    let confirm = app
+        .canvas
+        .as_ref()
+        .and_then(|s| s.view.card_chat.get(node_id))
+        .and_then(|c| c.rollback_confirm.as_deref())
+        == Some(message_id.as_str());
+    let mut row = row![].spacing(2);
+    if !display.is_empty() {
+        row = row.push(controls::icon_button(
+            "copy",
+            12.0,
+            22.0,
+            controls::Variant::Ghost,
+            Some(Message::CopyCode(display.to_string())),
+            Some((window, "复制".to_string())),
+        ));
+    }
+    if is_assistant && !content.is_empty() && !content.starts_with("[错误]") && !streaming {
+        row = row.push(controls::icon_button(
+            "corner-up-left",
+            12.0,
+            22.0,
+            controls::Variant::Ghost,
+            Some(Message::Canvas(CanvasMsg::Chat(CanvasChatMsg::Rollback {
+                node: node_id.to_string(),
+                message_id: message_id.clone(),
+            }))),
+            Some((window, "回到此处（该消息之后转为新话题）".to_string())),
+        ));
+        row = row.push(controls::icon_button(
+            "columns-2",
+            12.0,
+            22.0,
+            controls::Variant::Ghost,
+            Some(Message::Canvas(CanvasMsg::Chat(CanvasChatMsg::Branch {
+                node: node_id.to_string(),
+                message_id: message_id.clone(),
+            }))),
+            Some((window, "分支为新对话卡".to_string())),
+        ));
+        if last_id == Some(message_id.as_str()) {
+            row = row.push(controls::icon_button(
+                "refresh-cw",
+                12.0,
+                22.0,
+                controls::Variant::Ghost,
+                Some(Message::Canvas(CanvasMsg::Chat(CanvasChatMsg::Regenerate(
+                    node_id.to_string(),
+                )))),
+                Some((window, "重新生成回复".to_string())),
+            ));
+        }
+    }
+    if confirm {
+        row = row.push(
+            iced::widget::button(text("确认回滚？").size(pal::fs_micro()).color(pal::DANGER))
+                .padding(4.0)
+                .style(controls::row_style(false, pal::RADIUS_XS))
+                .on_press(Message::Canvas(CanvasMsg::Chat(CanvasChatMsg::Rollback {
+                    node: node_id.to_string(),
+                    message_id: message_id.clone(),
+                }))),
+        );
+        row = row.push(
+            iced::widget::button(text("取消").size(pal::fs_micro()).color(pal::TEXT_MUTED))
+                .padding(4.0)
+                .style(controls::row_style(false, pal::RADIUS_XS))
+                .on_press(Message::Canvas(CanvasMsg::Chat(CanvasChatMsg::RollbackCancel(
+                    node_id.to_string(),
+                )))),
+        );
+    }
+    row.into()
+}
+
+/// 卡内 # 候选浮层（画布卡在前、仓库文件在后；字号随缩放）。
+fn card_mention_picker<'a>(
+    picker: &'a crate::chat_actions::MentionPicker,
+    node_id: &str,
+    zoom: f32,
+    nodes: &'a [atelyx_core::vault::CanvasFileNode],
+) -> Element<'a> {
+    use crate::canvas_chat::CanvasChatMsg;
+    let size = (pal::fs_caption() * zoom).max(9.0);
+    let rows = picker.candidates.iter().enumerate().map(|(i, target)| {
+        let selected = i == picker.selected;
+        let (icon_name, label) = match target {
+            crate::chat_actions::MentionTarget::Card { node_id: id } => {
+                let title = nodes
+                    .iter()
+                    .find(|n| &n.id == id)
+                    .map(crate::canvas_chat::card_title)
+                    .unwrap_or_else(|| id.clone());
+                ("box", title)
+            }
+            crate::chat_actions::MentionTarget::Vault { rel, is_dir } => {
+                let icon_name = if *is_dir {
+                    "folder"
+                } else {
+                    match atelyx_core::ai::refs::kind_of_file(rel) {
+                        Some(atelyx_core::ai::refs::RefKind::Table) => "table",
+                        Some(atelyx_core::ai::refs::RefKind::Canvas) => "layers",
+                        _ => "file-text",
+                    }
+                };
+                (icon_name, rel.rsplit('/').next().unwrap_or(rel).to_string())
+            }
+        };
+        iced::widget::button(
+            container(
+                row![
+                    icon(icon_name, (12.0 * zoom).clamp(9.0, 13.0), if selected {
+                        pal::ACCENT
+                    } else {
+                        pal::TEXT_SECONDARY
+                    }),
+                    text(label).size(size).color(if selected {
+                        pal::TEXT_PRIMARY
+                    } else {
+                        pal::TEXT_SECONDARY
+                    }),
+                ]
+                .spacing((4.0 * zoom).max(2.0))
+                .align_y(alignment::Vertical::Center),
+            )
+            .width(Length::Fill)
+            .padding(Padding::new((6.0 * zoom).max(2.0)).vertical((3.0 * zoom).max(1.0))),
+        )
+        .width(Length::Fill)
+        .style(move |_, _| iced::widget::button::Style {
+            background: selected.then(|| pal::ACCENT_SOFT.into()),
+            ..Default::default()
+        })
+        .on_press(Message::Canvas(CanvasMsg::Chat(CanvasChatMsg::MentionPick {
+            node: node_id.to_string(),
+            index: i,
+        })))
+    });
+    container(column(rows.map(Element::from)).spacing(0).width(Length::Fill))
+        .width(Length::Fill)
+        .max_height((180.0 * zoom).max(56.0))
+        .style(|_| container::Style {
+            background: Some(pal::BG_SECONDARY.into()),
+            border: iced::border::Border {
+                width: 0.5,
+                radius: pal::RADIUS_MD.into(),
+                color: pal::BORDER,
+            },
+            ..Default::default()
+        })
+        .into()
+}
+
+/// 卡内附件托盘（一行缩略名 chip，点击移除）。
+fn card_image_tray<'a>(
+    chat: &'a crate::canvas_chat::CardChat,
+    node_id: &str,
+    zoom: f32,
+) -> Element<'a> {
+    use crate::canvas_chat::CanvasChatMsg;
+    let size = (pal::fs_micro() * zoom).max(8.0);
+    let chips = chat.pending_images.iter().enumerate().map(|(i, img)| {
+        iced::widget::button(
+            row![
+                icon("image", (10.0 * zoom).clamp(8.0, 12.0), pal::TEXT_SECONDARY),
+                text(img.file_name.clone()).size(size).color(pal::TEXT_SECONDARY),
+                icon("x", (9.0 * zoom).clamp(7.0, 11.0), pal::TEXT_MUTED),
+            ]
+            .spacing((3.0 * zoom).max(1.0))
+            .align_y(alignment::Vertical::Center),
+        )
+        .padding(Padding::new((5.0 * zoom).max(2.0)).vertical((2.0 * zoom).max(1.0)))
+        .style(controls::row_style(false, pal::RADIUS_XS))
+        .on_press(Message::Canvas(CanvasMsg::Chat(CanvasChatMsg::RemoveAttachment {
+            node: node_id.to_string(),
+            index: i,
+        })))
+    });
+    row(chips.map(Element::from))
+        .spacing((4.0 * zoom).max(1.0))
+        .width(Length::Fill)
+        .into()
+}
+
+/// 卡内输入行：+ / 附件 / 输入面 / 发送（或停止）。
+fn card_input_row<'a>(
+    chat: &'a crate::canvas_chat::CardChat,
+    n: &'a atelyx_core::vault::CanvasFileNode,
+    zoom: f32,
+    window: iced::window::Id,
+) -> Element<'a> {
+    use crate::canvas_chat::CanvasChatMsg;
+    let icon_size = (12.0 * zoom).clamp(9.0, 14.0);
+    let btn = (22.0 * zoom).clamp(17.0, 26.0);
+    let plus = controls::icon_button(
+        "plus",
+        icon_size,
+        btn,
+        controls::Variant::Ghost,
+        Some(Message::Canvas(CanvasMsg::Chat(CanvasChatMsg::TriggerMention(
+            n.id.clone(),
+        )))),
+        Some((window, "添加上下文".to_string())),
+    );
+    let attach = controls::icon_button(
+        "paperclip",
+        icon_size,
+        btn,
+        controls::Variant::Ghost,
+        Some(Message::Canvas(CanvasMsg::Chat(CanvasChatMsg::PickFiles(
+            n.id.clone(),
+        )))),
+        Some((window, "上传附件".to_string())),
+    );
+    let send = if chat.streaming {
+        controls::icon_button(
+            "square",
+            icon_size,
+            btn,
+            controls::Variant::Secondary,
+            Some(Message::Canvas(CanvasMsg::Chat(CanvasChatMsg::Stop(n.id.clone())))),
+            Some((window, "停止生成".to_string())),
+        )
+    } else {
+        controls::icon_button(
+            "arrow-up",
+            icon_size,
+            btn,
+            controls::Variant::Primary,
+            Some(Message::Canvas(CanvasMsg::Chat(CanvasChatMsg::Send(n.id.clone())))),
+            Some((window, "发送（Enter）".to_string())),
+        )
+    };
+    let input = crate::chat_input::Input::new(
+        &chat.draft,
+        &chat.mention_refs,
+        crate::chat_input::InputRoute::Card(n.id.clone()),
+    )
+    .picker_open(chat.mention_picker.is_some())
+    .placeholder("输入消息，Enter 发送")
+    .scale(zoom);
+    container(
+        row![
+            plus,
+            attach,
+            container(Element::new(input)).width(Length::Fill),
+            send,
+        ]
+        .spacing((4.0 * zoom).max(1.0))
+        .align_y(alignment::Vertical::Bottom),
+    )
+    .width(Length::Fill)
+    .padding(Padding::new((2.0 * zoom).max(1.0)))
+    .style(|_| container::Style {
+        border: iced::border::Border {
+            width: 0.5,
+            radius: pal::RADIUS_SM.into(),
+            color: pal::BORDER,
+        },
+        ..Default::default()
+    })
     .into()
 }
 
@@ -1534,10 +2104,12 @@ pub fn props_panel(app: &App) -> iced::Element<'static, Message> {
                 };
                 let (_, o_title) = card_head(o);
                 let dir = if self_is_source { "→" } else { "←" };
-                let tag = if is_dataflow(e) {
-                    if edge_consumed(&session.data, e) { "数据流·已消费" } else { "数据流·未消费" }
-                } else {
-                    "关联"
+                let tag = match edge_role(&session.data, e) {
+                    EdgeRole::Association => "关联",
+                    EdgeRole::Reference { consumed: true } => "数据流·已消费",
+                    EdgeRole::Reference { consumed: false } => "数据流·未消费",
+                    EdgeRole::Lineage => "数据流·产出",
+                    EdgeRole::Flow => "数据流",
                 };
                 edges.push(format!("{tag} {dir} {o_title}"));
             }
@@ -1680,6 +2252,10 @@ mod tests {
         assert_eq!(x1, 300.0);
     }
 
+    fn role(c: &CanvasFile) -> EdgeRole {
+        edge_role(c, &c.edges[0])
+    }
+
     #[test]
     fn consumption_by_refs_node_id() {
         let mut conv = node("conv", "conversation", 300.0, 0.0, Some(200.0), Some(200.0));
@@ -1688,7 +2264,7 @@ mod tests {
             vec![node("src", "text", 0.0, 0.0, Some(100.0), Some(100.0)), conv],
             vec![edge("e", "src", "conv")],
         );
-        assert!(edge_consumed(&c, &c.edges[0]));
+        assert_eq!(role(&c), EdgeRole::Reference { consumed: true });
         // 无消息 = 未消费
         let mut conv2 = node("conv", "conversation", 300.0, 0.0, Some(200.0), Some(200.0));
         conv2.data = json!({ "messages": [] });
@@ -1696,7 +2272,7 @@ mod tests {
             vec![node("src", "text", 0.0, 0.0, Some(100.0), Some(100.0)), conv2],
             vec![edge("e", "src", "conv")],
         );
-        assert!(!edge_consumed(&c2, &c2.edges[0]));
+        assert_eq!(role(&c2), EdgeRole::Reference { consumed: false });
         // 关联连线无消费语义
         let mut e2 = edge("e", "src", "conv");
         e2.directed = Some(false);
@@ -1707,7 +2283,76 @@ mod tests {
             ],
             vec![e2],
         );
-        assert!(!edge_consumed(&c3, &c3.edges[0]));
+        assert_eq!(role(&c3), EdgeRole::Association);
+    }
+
+    #[test]
+    fn lineage_edges_are_solid_and_reads_count_as_consumed() {
+        // 对话 → 资产：产出血缘边恒实线（即使目标不是对话）
+        let c = canvas(
+            vec![
+                node("conv", "conversation", 0.0, 0.0, Some(200.0), Some(200.0)),
+                node("out", "text", 300.0, 0.0, Some(100.0), Some(100.0)),
+            ],
+            vec![edge("e", "conv", "out")],
+        );
+        assert_eq!(role(&c), EdgeRole::Lineage);
+        // Agent 实际读取过来源文件 = 已消费（引用卡补齐已读边）
+        let mut src = node("src", "text", 0.0, 0.0, Some(100.0), Some(100.0));
+        src.data = json!({ "file": "笔记/a.md" });
+        let mut conv = node("conv", "conversation", 300.0, 0.0, Some(200.0), Some(200.0));
+        conv.data = json!({ "messages": [ { "id": "m1", "role": "assistant", "content": "", "steps": [ { "kind": "tool", "run": { "id": "t1", "name": "read_file", "args": { "path": "笔记/a.md" } } } ] } ] });
+        let c2 = canvas(vec![src, conv], vec![edge("e", "src", "conv")]);
+        assert_eq!(role(&c2), EdgeRole::Reference { consumed: true });
+        // 资产 ↔ 资产的有向边不冒充「产出」语义
+        let c3 = canvas(
+            vec![
+                node("a", "text", 0.0, 0.0, Some(100.0), Some(100.0)),
+                node("b", "text", 300.0, 0.0, Some(100.0), Some(100.0)),
+            ],
+            vec![edge("e", "a", "b")],
+        );
+        assert_eq!(role(&c3), EdgeRole::Flow);
+    }
+
+    #[test]
+    fn free_spot_moves_down_until_no_overlap() {
+        let c = canvas(
+            vec![
+                node("a", "text", 0.0, 0.0, Some(100.0), Some(100.0)),
+                node("b", "text", 0.0, 120.0, Some(100.0), Some(100.0)),
+            ],
+            vec![],
+        );
+        // 起点与 a 重叠 → 下移到 b 之下（120 + 100 = 220）
+        let spot = find_free_spot(&c.nodes, (0.0, 0.0), (100.0, 100.0), 10.0);
+        assert!(spot.1 >= 220.0);
+    }
+
+    #[test]
+    fn link_handle_only_on_hovered_or_selected_asset() {
+        let c = canvas(
+            vec![
+                node("a", "text", 0.0, 0.0, Some(100.0), Some(100.0)),
+                node("conv", "conversation", 200.0, 0.0, Some(100.0), Some(100.0)),
+            ],
+            vec![],
+        );
+        let at = (100.0, 50.0);
+        // 未悬停 / 未选中：无连接点
+        assert_eq!(hit_link_handle(&c, None, &[], 1.0, at), None);
+        // 悬停命中
+        assert_eq!(hit_link_handle(&c, Some("a"), &[], 1.0, at).as_deref(), Some("a"));
+        // 选中也可命中
+        assert_eq!(
+            hit_link_handle(&c, None, &["a".to_string()], 1.0, at).as_deref(),
+            Some("a")
+        );
+        // 对话卡没有连接点（只有资产卡可作引用来源）
+        assert_eq!(
+            hit_link_handle(&c, Some("conv"), &[], 1.0, (300.0, 50.0)),
+            None
+        );
     }
 
     #[test]

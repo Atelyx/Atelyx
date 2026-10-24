@@ -405,6 +405,37 @@ pub fn build_region_tsv(fields: &[TableField], rows: &[TableRow], region: &Regio
         .join("\n")
 }
 
+/// 整表 → TSV 文本（首行字段名、其后逐行取值；值内 \t/\n 压成空格保结构）。
+/// 供对话上下文注入与表格快照使用，不承担展示排版。
+pub fn table_to_text(table: &TableFile) -> String {
+    let cell = |v: Option<&Value>| {
+        if v.is_some_and(is_image_value) {
+            return "[图片]".to_string();
+        }
+        cell_to_clipboard_text(v).replace(['\t', '\n'], " ")
+    };
+    let mut lines: Vec<String> = Vec::with_capacity(table.rows.len() + 1);
+    lines.push(
+        table
+            .fields
+            .iter()
+            .map(|f| f.name.replace(['\t', '\n'], " "))
+            .collect::<Vec<_>>()
+            .join("\t"),
+    );
+    for row in &table.rows {
+        lines.push(
+            table
+                .fields
+                .iter()
+                .map(|f| cell(row.values.get(&f.id)))
+                .collect::<Vec<_>>()
+                .join("\t"),
+        );
+    }
+    lines.join("\n")
+}
+
 /// 剪贴板 TSV → 值网格：\r\n 归一、制表符分列，末尾换行的空尾行剔除。
 /// 纯 TSV 不处理引号/内嵌换行（外部 Excel 带内嵌换行的格会拆行）。
 pub fn parse_tsv(text: &str) -> Vec<Vec<String>> {
@@ -887,6 +918,33 @@ pub fn restore(table: &mut TableFile, snap: TableSnapshot) {
 mod tests {
     use super::*;
     use crate::vault::TableFile;
+
+    #[test]
+    fn table_to_text_renders_header_rows_and_image_cells() {
+        let table = TableFile {
+            schema: String::new(),
+            id: "t".into(),
+            title: "表".into(),
+            fields: vec![
+                TableField { id: "f1".into(), name: "名称".into(), field_type: "text".into(), options: None, width: None, calc_type: None },
+                TableField { id: "f2".into(), name: "图".into(), field_type: "image".into(), options: None, width: None, calc_type: None },
+            ],
+            rows: vec![TableRow {
+                id: "r1".into(),
+                values: [
+                    ("f1".to_string(), Value::String("甲".into())),
+                    ("f2".to_string(), Value::Array(vec![Value::String("素材/a.png".into())])),
+                ]
+                .into_iter()
+                .collect(),
+                height: None,
+                styles: None,
+            }],
+            created_at: 0,
+            updated_at: 0,
+        };
+        assert_eq!(table_to_text(&table), "名称\t图\n甲\t[图片]");
+    }
 
     #[test]
     fn 选区跨端json往返且未知形态丢弃() {

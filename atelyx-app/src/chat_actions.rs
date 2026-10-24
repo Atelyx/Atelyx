@@ -60,7 +60,7 @@ fn store() -> &'static Arc<SessionStore> {
     })
 }
 
-fn hub() -> &'static Arc<AgentHub> {
+pub(crate) fn hub() -> &'static Arc<AgentHub> {
     HUB.get_or_init(|| Arc::new(AgentHub::new()))
 }
 
@@ -77,7 +77,7 @@ pub fn scroll_flow_bottom() -> iced::Task<Message> {
     )
 }
 
-fn run_event_channel() -> &'static EventSlot<RunEvent> {
+pub(crate) fn run_event_channel() -> &'static EventSlot<RunEvent> {
     RUN_EVENTS.get_or_init(|| {
         let (tx, rx) = mpsc::unbounded_channel();
         (tx, std::sync::Mutex::new(Some(rx)))
@@ -231,6 +231,10 @@ impl ChatState {
     /// 解析缓存按「本会话 ∪ 当前显示会话」收敛——流式期间正文每拍换哈希，只增不删会让
     /// 长对话把整段历史常驻内存；而后台会话的节流刷新不得清掉正在显示的会话缓存。
     fn refresh_session(&mut self, session_id: &str) {
+        // 画布卡会话：消息真源在节点 data.messages，解析缓存由画布侧同步
+        if crate::canvas_chat::node_of_session(session_id).is_some() {
+            return;
+        }
         let store = store();
         let messages = store.session_messages(session_id);
         match messages {
@@ -299,7 +303,14 @@ impl ChatState {
                         }
                     }
                 }
-                if self.docs.len() > used.len() {
+                // 面板可同时绑定画布会话：其解析键不在 store 投影里，收敛会误删；
+                // 画布会话显示期间暂不裁剪（切回 store 会话时由下一次刷新收敛）。
+                let active_is_canvas = self
+                    .active
+                    .as_deref()
+                    .and_then(crate::canvas_chat::node_of_session)
+                    .is_some();
+                if !active_is_canvas && self.docs.len() > used.len() {
                     self.docs.retain(|hash, _| used.contains(hash));
                 }
                 // 选区按正文源偏移持有：所选正文被替换（流式增长 / 消息变化）后偏移失效
@@ -374,7 +385,7 @@ pub enum ChatMsg {
     },
     /// 从托盘移除一张待发送图片（下标）。
     RemoveAttachment(usize),
-    /// 外部文件拖入窗口（是否纳用由编排按当前布局是否开着对话面板判定）。
+    /// 外部文件拖入窗口（优先落到悬停的对话卡，否则按对话面板是否开着判定）。
     FileDropped { window: iced::window::Id, path: std::path::PathBuf },
     Send,
     Stop,
@@ -604,7 +615,7 @@ pub fn flush_sessions() -> iced::Task<Message> {
 /// `for_run`：辅助调用（压缩 / 命名）不消费提示词，传 false 跳过提示词解析，
 /// 空间模式下带提示词文件的 Agent 不因此报错。
 /// `model_pick`：调用方显式指定的（供应商 id, 模型 id）；None = 面板当前选择。
-fn resolve_run_config(
+pub(crate) fn resolve_run_config(
     app: &App,
     agent_id: Option<&str>,
     space_prompt: Option<String>,
@@ -765,7 +776,7 @@ fn key_scope(app: &App) -> Option<String> {
 }
 
 /// 工具执行环境：按容器身份选仓库访问后端（本地 = 仓库根 + 写盘队列；空间 = 服务端客户端）。
-fn tool_ctx(app: &App) -> ToolCtx {
+pub(crate) fn tool_ctx(app: &App) -> ToolCtx {
     let repo = match &app.repo_kind {
         RepoKind::Local => RepoAccess::Local {
             root: app.vault_root.clone().unwrap_or_default(),
@@ -984,7 +995,10 @@ fn update_inner(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
             iced::Task::none()
         }
         ChatMsg::FileDropped { window, path } => {
-            if crate::layout_view::window_has_view(app, "aichat")
+            // 画布对话卡悬停 / 选中优先：拖到卡输入面 = 该卡附件
+            if let Some(node) = crate::canvas_chat::hovered_conversation(app) {
+                crate::canvas_chat::add_attachments(app, &node, vec![path]);
+            } else if crate::layout_view::window_has_view(app, "aichat")
                 && app.main_id.is_some_and(|main| main == window)
             {
                 add_attachments(app, vec![path]);
@@ -1217,19 +1231,32 @@ pub(crate) fn doc_key(source: &str, mention_sig: &[String]) -> u64 {
     source_hash(&format!("{source}\u{1}{}", mention_sig.join("\u{1}")))
 }
 
-fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
 }
 
-fn uuid_v4() -> String {
+pub(crate) fn uuid_v4() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
 /// 发送 / 重生成共用入口：空间模式先取 Agent 提示词文件，取回后回到本入口执行本体。
 fn chat_entry(app: &mut App, action: PendingChatAction) -> iced::Task<Message> {
+    // 画布卡会话：提示词按卡片 Agent 在卡侧预取，这里不按面板 Agent 先取一次
+    if let Some(node) = app
+        .chat
+        .active
+        .as_deref()
+        .and_then(crate::canvas_chat::node_of_session)
+        .map(str::to_string)
+    {
+        return match action {
+            PendingChatAction::Send => crate::canvas_chat::send_from_panel(app, &node),
+            PendingChatAction::Regenerate => crate::canvas_chat::regenerate_card(app, &node),
+        };
+    }
     if app.chat.pending_prompt.is_none() {
         if let Some(task) = prompt_prefetch(app, action) {
             return task;
@@ -1247,6 +1274,9 @@ fn regenerate_now(app: &mut App, space_prompt: Option<String>) -> iced::Task<Mes
     let Some(session_id) = app.chat.active.clone() else {
         return iced::Task::none();
     };
+    if let Some(node) = crate::canvas_chat::node_of_session(&session_id).map(str::to_string) {
+        return crate::canvas_chat::regenerate_card(app, &node);
+    }
     if app.chat.streaming.contains(&session_id) || app.chat.compacting.is_some() {
         return iced::Task::none();
     }
@@ -1341,15 +1371,22 @@ pub(crate) fn message_refs(message: &Value) -> Vec<ai_refs::RefEntry> {
         .map(|refs| {
             refs.iter()
                 .filter_map(|r| {
-                    let path = r.get("path").and_then(Value::as_str)?;
+                    let node_id = r.get("nodeId").and_then(Value::as_str).map(str::to_string);
+                    // 画布卡引用只有 nodeId；文件引用只有 path
+                    let path = r
+                        .get("path")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                        .or_else(|| node_id.clone())?;
                     let label = r.get("label").and_then(Value::as_str)?;
                     let kind = ai_refs::RefKind::parse_key(
                         r.get("refKind").and_then(Value::as_str).unwrap_or(""),
                     )?;
                     Some(ai_refs::RefEntry {
-                        path: path.to_string(),
+                        path,
                         label: label.to_string(),
                         kind,
+                        node_id,
                     })
                 })
                 .collect()
@@ -1358,6 +1395,16 @@ pub(crate) fn message_refs(message: &Value) -> Vec<ai_refs::RefEntry> {
 }
 
 fn send_now(app: &mut App, space_prompt: Option<String>) -> iced::Task<Message> {
+    // 面板绑定画布卡会话：输入落到卡片真源（同一会话双视图）
+    if let Some(node) = app
+        .chat
+        .active
+        .as_deref()
+        .and_then(crate::canvas_chat::node_of_session)
+        .map(str::to_string)
+    {
+        return crate::canvas_chat::send_from_panel(app, &node);
+    }
     let display = app.chat.input.text.trim().to_string();
     let images = std::mem::take(&mut app.chat.pending_images);
     let refs = std::mem::take(&mut app.chat.mention_refs);
@@ -1460,7 +1507,7 @@ pub struct SendPayload {
 }
 
 /// 附件落盘后端（本地写盘队列 / 空间端点）。
-enum ImageBackend {
+pub(crate) enum ImageBackend {
     Local {
         root: std::path::PathBuf,
         queue: atelyx_core::write_queue::WriteQueue,
@@ -1471,7 +1518,7 @@ enum ImageBackend {
     },
 }
 
-fn image_backend(app: &App) -> Result<ImageBackend, String> {
+pub(crate) fn image_backend(app: &App) -> Result<ImageBackend, String> {
     match &app.repo_kind {
         RepoKind::Space(_) => {
             let session =
@@ -1491,7 +1538,7 @@ fn image_backend(app: &App) -> Result<ImageBackend, String> {
 /// 托盘图片逐张落临时区（`img-<nanoid>.<ext>` 每次新文件名，重发不覆盖），
 /// 返回消息 attachments 元数据（路径引用；字节不进消息）。
 /// 任一张失败 = 已处理图片与余量整体原样带回（托盘恢复原样，不产生半发消息）。
-async fn materialize_images(
+pub(crate) async fn materialize_images(
     backend: ImageBackend,
     session_id: String,
     images: Vec<PendingImage>,
@@ -1666,6 +1713,13 @@ fn ensure_chat_images(app: &mut App) -> iced::Task<Message> {
 
 // ===== 输入面与 # 引用 =====
 
+/// # 引用候选：仓库文件 / 目录或画布内已有卡。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MentionTarget {
+    Vault { rel: String, is_dir: bool },
+    Card { node_id: String },
+}
+
 /// # 引用候选浮层状态。
 pub struct MentionPicker {
     /// 触发 `#` 的字节位置。
@@ -1674,8 +1728,8 @@ pub struct MentionPicker {
     pub query: String,
     /// 键盘选中行。
     pub selected: usize,
-    /// 过滤后的候选（仓库相对路径 + 是否目录）。
-    pub candidates: Vec<(String, bool)>,
+    /// 过滤后的候选（画布卡排在前，其后为仓库文件与目录）。
+    pub candidates: Vec<MentionTarget>,
 }
 
 /// 候选条数上限（超出只显示前 N 条，继续键入收窄）。
@@ -1688,6 +1742,8 @@ fn on_input(app: &mut App, event: chat_input::InputEvent) -> iced::Task<Message>
             app.chat.input.focused = true;
             // 同批全局按压消息据此判定「按压在输入面内」
             app.chat.press_inside = true;
+            // 面板输入取得焦点 = 画布卡输入面让出
+            crate::canvas_chat::clear_card_focus(app);
         }
         chat_input::InputEvent::Edited { text, caret, anchor } => {
             app.chat.input.apply_edited(text, caret, anchor);
@@ -1774,13 +1830,13 @@ fn sync_mention_picker(app: &mut App) {
 
 /// 从文件树缓存收集引用候选（md / atb / atlx 文件与目录；隐藏与排除目录不在
 /// 缓存内自然缺席），按查询子串过滤（不区分大小写），文件树序（同级目录在前）。
-fn mention_candidates(app: &App, query: &str) -> Vec<(String, bool)> {
+pub(crate) fn mention_candidates(app: &App, query: &str) -> Vec<MentionTarget> {
     let mut out = Vec::new();
     collect_candidates(app, "", query, &mut out);
     out
 }
 
-fn collect_candidates(app: &App, dir: &str, query: &str, out: &mut Vec<(String, bool)>) {
+fn collect_candidates(app: &App, dir: &str, query: &str, out: &mut Vec<MentionTarget>) {
     if out.len() >= MENTION_CANDIDATE_CAP {
         return;
     }
@@ -1790,7 +1846,7 @@ fn collect_candidates(app: &App, dir: &str, query: &str, out: &mut Vec<(String, 
         let hit = query.is_empty()
             || child.rel.to_lowercase().contains(&query.to_lowercase());
         if hit {
-            out.push((child.rel.clone(), child.is_dir));
+            out.push(MentionTarget::Vault { rel: child.rel.clone(), is_dir: child.is_dir });
             if out.len() >= MENTION_CANDIDATE_CAP {
                 return;
             }
@@ -1806,7 +1862,7 @@ fn commit_mention(app: &mut App, index: usize) {
     let Some(picker) = app.chat.mention_picker.as_ref() else {
         return;
     };
-    let Some((rel, is_dir)) = picker.candidates.get(index).cloned() else {
+    let Some(MentionTarget::Vault { rel, is_dir }) = picker.candidates.get(index).cloned() else {
         return;
     };
     let kind = if is_dir {
@@ -1838,7 +1894,7 @@ fn commit_mention(app: &mut App, index: usize) {
     next.push_str(&text[to..]);
     let caret_after = at + tag.len();
     if !app.chat.mention_refs.iter().any(|r| r.path == rel) {
-        app.chat.mention_refs.push(ai_refs::RefEntry { path: rel, label, kind });
+        app.chat.mention_refs.push(ai_refs::RefEntry { path: rel, label, kind, node_id: None });
     }
     app.chat.input.apply_edited(next, caret_after, caret_after);
     app.chat.mention_picker = None;
@@ -1901,7 +1957,7 @@ fn add_attachments(app: &mut App, paths: Vec<std::path::PathBuf>) {
 }
 
 /// 扩展名 → MIME（托盘四类图片）。
-fn image_mime(ext: &str) -> String {
+pub(crate) fn image_mime(ext: &str) -> String {
     match ext {
         "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",
@@ -1943,7 +1999,15 @@ fn start_run(
     let events = run_event_channel().0.clone();
     iced::Task::future(async move {
         if let Err(e) = hub
-            .start(store, events, session_id.clone(), compaction, config, history, ctx)
+            .start(
+                agent::RunPersist::Store(store),
+                events,
+                session_id.clone(),
+                compaction,
+                config,
+                history,
+                ctx,
+            )
             .await
         {
             let _ = run_event_channel().0.send(RunEvent::Failed {
@@ -1961,6 +2025,10 @@ fn rollback(app: &mut App, message_id: &str) -> iced::Task<Message> {
     let Some(session_id) = app.chat.active.clone() else {
         return iced::Task::none();
     };
+    if let Some(node) = crate::canvas_chat::node_of_session(&session_id).map(str::to_string) {
+        crate::canvas_chat::rollback_card(app, &node, message_id);
+        return iced::Task::none();
+    }
     if app.chat.streaming.contains(&session_id) {
         return iced::Task::none();
     }
@@ -2084,6 +2152,10 @@ fn transcript_excerpt(messages: &[Value]) -> String {
 
 fn on_run_event(app: &mut App, event: RunEvent) -> iced::Task<Message> {
     let session_id = event_session(&event).to_string();
+    // 画布卡会话：消息真源在节点 data.messages，由画布侧应用快照
+    if crate::canvas_chat::node_of_session(&session_id).is_some() {
+        return crate::canvas_chat::on_run_event(app, event);
+    }
     // 贴底跟随只对当前显示的会话生效（并行 run 不打扰别的会话视图）
     let follow =
         app.chat.follow_bottom && app.chat.active.as_deref() == Some(session_id.as_str());
@@ -2149,6 +2221,8 @@ fn on_run_event(app: &mut App, event: RunEvent) -> iced::Task<Message> {
             }
             tail(follow)
         }
+        // 直写快照（画布卡会话）：面板投影不消费，由画布侧应用
+        RunEvent::Snapshot { .. } | RunEvent::MessageRemoved { .. } => iced::Task::none(),
     }
 }
 
@@ -2160,7 +2234,9 @@ fn event_session(event: &RunEvent) -> &str {
         | RunEvent::ToolStart { session_id, .. }
         | RunEvent::ToolEnd { session_id, .. }
         | RunEvent::Finished { session_id, .. }
-        | RunEvent::Failed { session_id, .. } => session_id,
+        | RunEvent::Failed { session_id, .. }
+        | RunEvent::Snapshot { session_id, .. }
+        | RunEvent::MessageRemoved { session_id, .. } => session_id,
     }
 }
 
@@ -2589,7 +2665,15 @@ fn plugin_chat_send_now(
     let runtime = app.plugins.clone();
     iced::Task::future(async move {
         let result = match hub
-            .start(store, events, session_id.clone(), compaction, config, history, ctx)
+            .start(
+                agent::RunPersist::Store(store),
+                events,
+                session_id.clone(),
+                compaction,
+                config,
+                history,
+                ctx,
+            )
             .await
         {
             Ok(message_id) => Ok(json!({ "sessionId": session_id, "messageId": message_id })),
@@ -2802,7 +2886,9 @@ fn forward_plugin_event(app: &mut App, event: &RunEvent, due: bool) {
         | RunEvent::ToolStart { message_id, .. }
         | RunEvent::ToolEnd { message_id, .. }
         | RunEvent::Finished { message_id, .. }
-        | RunEvent::Failed { message_id, .. } => message_id.clone(),
+        | RunEvent::Failed { message_id, .. }
+        | RunEvent::Snapshot { message_id, .. }
+        | RunEvent::MessageRemoved { message_id, .. } => message_id.clone(),
     };
     let chat_event = match event {
         RunEvent::Finished { .. } | RunEvent::Failed { .. } => {

@@ -159,6 +159,13 @@ pub enum InputEvent {
     PickerClose,
 }
 
+/// 输入面事件去向：面板草稿或某张画布卡草稿。
+#[derive(Clone, Debug)]
+pub enum InputRoute {
+    Panel,
+    Card(String),
+}
+
 /// 自绘输入面部件。
 pub struct Input<'a> {
     pub draft: &'a Draft,
@@ -167,18 +174,27 @@ pub struct Input<'a> {
     /// 候选浮层开启：方向 / Enter / Esc 转交浮层。
     pub picker_open: bool,
     pub placeholder: &'a str,
-    pub handler: fn(InputEvent) -> Message,
+    pub route: InputRoute,
+    /// 渲染缩放（画布卡随视口缩放；面板传 1.0）。
+    pub scale: f32,
 }
 
 impl<'a> Input<'a> {
-    pub fn new(draft: &'a Draft, refs: &'a [RefEntry], handler: fn(InputEvent) -> Message) -> Self {
+    pub fn new(draft: &'a Draft, refs: &'a [RefEntry], route: InputRoute) -> Self {
         Self {
             draft,
             refs,
             picker_open: false,
             placeholder: "",
-            handler,
+            route,
+            scale: 1.0,
         }
+    }
+
+    /// 渲染缩放（字号与可视高度等比；命中几何随段落重建）。
+    pub fn scale(mut self, scale: f32) -> Self {
+        self.scale = scale.max(0.1);
+        self
     }
 
     pub fn picker_open(mut self, open: bool) -> Self {
@@ -192,7 +208,13 @@ impl<'a> Input<'a> {
     }
 
     fn publish(&self, shell: &mut Shell<'_, Message>, event: InputEvent) {
-        shell.publish((self.handler)(event));
+        let message = match &self.route {
+            InputRoute::Panel => Message::Chat(crate::chat_actions::ChatMsg::Input(event)),
+            InputRoute::Card(node) => Message::Canvas(crate::canvas_view::CanvasMsg::Chat(
+                crate::canvas_chat::CanvasChatMsg::Input { node: node.clone(), event },
+            )),
+        };
+        shell.publish(message);
         shell.capture_event();
         shell.request_redraw();
     }
@@ -524,7 +546,7 @@ impl Widget<Message, Theme, iced::Renderer> for Input<'_> {
     ) -> layout::Node {
         layout::sized(limits, Length::Fill, Length::Shrink, |limits| {
             let width = limits.max().width;
-            let size = pal::fs_body();
+            let size = pal::fs_body() * self.scale;
             let text = &self.draft.text;
             let line_px = size * LINE_FACTOR;
             let state = tree.state.downcast_mut::<InputState>();
@@ -554,7 +576,9 @@ impl Widget<Message, Theme, iced::Renderer> for Input<'_> {
                 .paragraph
                 .as_ref()
                 .map_or(line_px, |p| p.min_bounds().height);
-            let height = content_h.clamp(MIN_HEIGHT, MAX_HEIGHT);
+            let min_h = (MIN_HEIGHT * self.scale).max(24.0);
+            let max_h = (MAX_HEIGHT * self.scale).max(min_h);
+            let height = content_h.clamp(min_h, max_h);
             // 滚动夹回可视区
             if let Some(p) = state.paragraph.as_ref() {
                 let max_scroll = (p.min_bounds().height - height).max(0.0);

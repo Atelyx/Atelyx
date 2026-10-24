@@ -3,6 +3,7 @@
 //! `crate::vault` 定义，本目录内模块只经其函数读写。
 
 pub mod agent;
+pub mod canvas_refs;
 
 /// 参数生成中的合成工具步 id 前缀（流式占位行；收敛时 running 态归一为已中断）。
 pub const PENDING_RUN_ID_PREFIX: &str = "pending:";

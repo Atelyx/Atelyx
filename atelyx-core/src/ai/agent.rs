@@ -102,6 +102,22 @@ pub enum RunEvent {
         message_id: String,
         error: String,
     },
+    /// 直写模式的整条消息快照（编排方据此把流式拍写进自有真源；存储模式不发）。
+    Snapshot {
+        session_id: String,
+        message_id: String,
+        message: Value,
+        rev: u64,
+    },
+    /// 直写模式的占位消息移除（空回复中断；编排方据此删掉空气泡）。
+    MessageRemoved { session_id: String, message_id: String },
+}
+
+/// run 的落点：会话存储（面板 / 插件会话）或直写（画布卡由编排方持有真源）。
+#[derive(Clone)]
+pub enum RunPersist {
+    Store(Arc<SessionStore>),
+    Direct,
 }
 
 // ===== 步骤与展示行 =====
@@ -406,12 +422,12 @@ impl AgentHub {
         }
     }
 
-    /// 启动 run：注册取消信号 → 占位 assistant 消息落真源 → 起循环任务。
-    /// 返回占位 assistant 消息 id（编排方回执发起方用）。会话已有活跃 run 时拒绝（run 不变量）。
+    /// 启动 run：注册取消信号 → 占位 assistant 消息落真源（存储模式）或随 Started 下发快照（直写模式）
+    /// → 起循环任务。返回占位 assistant 消息 id（编排方回执发起方用）。会话已有活跃 run 时拒绝（run 不变量）。
     #[allow(clippy::too_many_arguments)]
     pub async fn start(
         self: &Arc<Self>,
-        store: Arc<SessionStore>,
+        persist: RunPersist,
         events: tokio::sync::mpsc::UnboundedSender<RunEvent>,
         session_id: String,
         compaction: Option<Value>,
@@ -430,36 +446,47 @@ impl AgentHub {
             runs.insert(session_id.clone(), (cancel_tx, run_id.clone()));
         }
         let created_at = now_ms();
-        // 占位 assistant 消息即落真源（模型可见即已记录的起点）
-        let commit = store.commit(CommitBatch {
-            appends: vec![AppendBatch {
-                session_id: session_id.clone(),
-                messages: vec![json!({
-                    "id": message_id,
-                    "role": "assistant",
-                    "content": "",
-                    "createdAt": created_at,
-                })],
-            }],
-            ..Default::default()
+        let placeholder = json!({
+            "id": message_id,
+            "role": "assistant",
+            "content": "",
+            "createdAt": created_at,
         });
-        if let Err(e) = commit {
-            self.runs
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(&session_id);
-            return Err(format!("会话占位消息写入失败：{e}"));
+        // 存储模式占位即落真源（模型可见即已记录的起点）；直写模式由编排方持真源，随 Started 后快照下发
+        if let RunPersist::Store(store) = &persist {
+            let commit = store.commit(CommitBatch {
+                appends: vec![AppendBatch {
+                    session_id: session_id.clone(),
+                    messages: vec![placeholder.clone()],
+                }],
+                ..Default::default()
+            });
+            if let Err(e) = commit {
+                self.runs
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&session_id);
+                return Err(format!("会话占位消息写入失败：{e}"));
+            }
         }
         let _ = events.send(RunEvent::Started {
             session_id: session_id.clone(),
             message_id: message_id.clone(),
         });
+        if matches!(persist, RunPersist::Direct) {
+            let _ = events.send(RunEvent::Snapshot {
+                session_id: session_id.clone(),
+                message_id: message_id.clone(),
+                message: placeholder,
+                rev: 0,
+            });
+        }
         let hub = Arc::clone(self);
         let sid = session_id.clone();
         let reply_message_id = message_id.clone();
         tokio::spawn(async move {
             run_loop(RunParams {
-                store,
+                persist,
                 events,
                 session_id: sid.clone(),
                 message_id,
@@ -482,7 +509,7 @@ impl AgentHub {
 }
 
 struct RunParams {
-    store: Arc<SessionStore>,
+    persist: RunPersist,
     events: tokio::sync::mpsc::UnboundedSender<RunEvent>,
     session_id: String,
     message_id: String,
@@ -514,17 +541,46 @@ impl RunState {
         Value::Array(self.steps.iter().map(Step::to_value).collect())
     }
 
-    fn commit_patch(&self, store: &SessionStore, session_id: &str, message_id: &str) {
-        let _ = store.commit(CommitBatch {
-            patches: vec![PatchEntry {
-                session_id: session_id.to_string(),
-                message_id: message_id.to_string(),
-                rev: self.rev,
-                content: Some(self.content.clone()),
-                steps: Some(self.steps_value()),
-            }],
-            ..Default::default()
-        });
+    fn commit_patch(
+        &self,
+        persist: &RunPersist,
+        events: &tokio::sync::mpsc::UnboundedSender<RunEvent>,
+        session_id: &str,
+        message_id: &str,
+        created_at: i64,
+    ) {
+        match persist {
+            RunPersist::Store(store) => {
+                let _ = store.commit(CommitBatch {
+                    patches: vec![PatchEntry {
+                        session_id: session_id.to_string(),
+                        message_id: message_id.to_string(),
+                        rev: self.rev,
+                        content: Some(self.content.clone()),
+                        steps: Some(self.steps_value()),
+                    }],
+                    ..Default::default()
+                });
+            }
+            // 直写：整条消息快照交编排方写自有真源（与存储模式的补丁同节拍）
+            RunPersist::Direct => {
+                let mut message = json!({
+                    "id": message_id,
+                    "role": "assistant",
+                    "content": self.content,
+                    "createdAt": created_at,
+                });
+                if !self.steps.is_empty() {
+                    message["steps"] = self.steps_value();
+                }
+                let _ = events.send(RunEvent::Snapshot {
+                    session_id: session_id.to_string(),
+                    message_id: message_id.to_string(),
+                    message,
+                    rev: self.rev,
+                });
+            }
+        }
     }
 }
 
@@ -533,7 +589,7 @@ const ABORTED: &str = "__aborted__";
 /// 主循环：请求 → 增量 → 工具轮 → 再请求，直至不再调工具 / 中断 / 失败。
 async fn run_loop(p: RunParams) {
     let RunParams {
-        store,
+        persist,
         events,
         session_id,
         message_id,
@@ -576,7 +632,7 @@ async fn run_loop(p: RunParams) {
         Ok(client) => client,
         Err(e) => {
             // 出网守卫客户端构建失败：按 run 失败收场（不回落无守卫客户端）
-            finalize_interrupted(&store, &session_id, &message_id, created_at, &mut state, &e);
+            finalize_interrupted(&persist, &events, &session_id, &message_id, created_at, &mut state, &e);
             let _ = events.send(RunEvent::Failed {
                 session_id,
                 message_id,
@@ -592,7 +648,7 @@ async fn run_loop(p: RunParams) {
         let steps_base = state.steps.len(); // 本轮工具行的起点（回填线上历史用）
         let mut last_commit = std::time::Instant::now() - std::time::Duration::from_millis(50);
         state.rev += 1;
-        state.commit_patch(&store, &session_id, &message_id);
+        state.commit_patch(&persist, &events, &session_id, &message_id, created_at);
         // 本轮流式累积：正文增量进 narrations（工具轮叙述），完整调用收集在 calls
         let round_text = Arc::new(Mutex::new(String::new()));
         let calls: Arc<Mutex<Vec<(usize, ToolCall)>>> = Arc::new(Mutex::new(Vec::new()));
@@ -614,7 +670,7 @@ async fn run_loop(p: RunParams) {
                     if last_commit.elapsed() >= std::time::Duration::from_millis(50) {
                         last_commit = std::time::Instant::now();
                         state.content = round_text.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                        state.commit_patch(&store, &session_id, &message_id);
+                        state.commit_patch(&persist, &events, &session_id, &message_id, created_at);
                     }
                     let _ = events.send(RunEvent::TextDelta {
                         session_id: session_id.clone(),
@@ -626,7 +682,7 @@ async fn run_loop(p: RunParams) {
                     state.push_reasoning(&t);
                     if last_commit.elapsed() >= std::time::Duration::from_millis(50) {
                         last_commit = std::time::Instant::now();
-                        state.commit_patch(&store, &session_id, &message_id);
+                        state.commit_patch(&persist, &events, &session_id, &message_id, created_at);
                     }
                     let _ = events.send(RunEvent::ReasoningDelta {
                         session_id: session_id.clone(),
@@ -638,7 +694,7 @@ async fn run_loop(p: RunParams) {
                     ensure_pending_row(&mut state, index, name, &args_delta);
                     if last_commit.elapsed() >= std::time::Duration::from_millis(50) {
                         last_commit = std::time::Instant::now();
-                        state.commit_patch(&store, &session_id, &message_id);
+                        state.commit_patch(&persist, &events, &session_id, &message_id, created_at);
                     }
                 }
                 StreamEvent::ToolCall { index, call } => {
@@ -677,7 +733,7 @@ async fn run_loop(p: RunParams) {
             // 最终轮：正文 = 本轮叙述增量
             state.content = std::mem::take(&mut *round_text.lock().unwrap_or_else(|e| e.into_inner()));
             state.rev += 1;
-            state.commit_patch(&store, &session_id, &message_id);
+            state.commit_patch(&persist, &events, &session_id, &message_id, created_at);
             break Ok(());
         }
         // 叙述增量固化为叙述步：插到本轮首个工具行之前（保持发生顺序）
@@ -697,7 +753,7 @@ async fn run_loop(p: RunParams) {
         // 逐个执行：parallel_safe 段并发（上限 MAX_PARALLEL_TOOLS），读写段串行屏障
         execute_calls(&ctx, &done_calls, &mut state, &events, &session_id, &message_id).await;
         state.rev += 1;
-        state.commit_patch(&store, &session_id, &message_id);
+        state.commit_patch(&persist, &events, &session_id, &message_id, created_at);
         // 工具结果回填线上历史（下一轮请求可见；只取本轮起点之后的工具行）
         llm_history.push(LlmMessage::Assistant {
             content: if narration.is_empty() { None } else { Some(narration) },
@@ -729,7 +785,7 @@ async fn run_loop(p: RunParams) {
             });
         }
         Err(e) => {
-            finalize_interrupted(&store, &session_id, &message_id, created_at, &mut state, &e);
+            finalize_interrupted(&persist, &events, &session_id, &message_id, created_at, &mut state, &e);
             if e == ABORTED {
                 let _ = events.send(RunEvent::Finished {
                     session_id,
@@ -945,10 +1001,11 @@ fn settle_tool_row(
 
 /// 中断 / 失败收敛：running 行归一为已中断；空占位移除；失败以 `[错误]` 落正文。
 fn finalize_interrupted(
-    store: &SessionStore,
+    persist: &RunPersist,
+    events: &tokio::sync::mpsc::UnboundedSender<RunEvent>,
     session_id: &str,
     message_id: &str,
-    _created_at: i64,
+    created_at: i64,
     state: &mut RunState,
     error: &str,
 ) {
@@ -964,20 +1021,30 @@ fn finalize_interrupted(
     }
     if aborted && state.content.is_empty() && state.steps.is_empty() {
         // 空占位移除（决定清理：不可见内容不留垃圾行）
-        let _ = store.commit(CommitBatch {
-            message_removals: vec![crate::ai::session::MessageRemoval {
-                session_id: session_id.to_string(),
-                message_id: message_id.to_string(),
-            }],
-            ..Default::default()
-        });
+        match persist {
+            RunPersist::Store(store) => {
+                let _ = store.commit(CommitBatch {
+                    message_removals: vec![crate::ai::session::MessageRemoval {
+                        session_id: session_id.to_string(),
+                        message_id: message_id.to_string(),
+                    }],
+                    ..Default::default()
+                });
+            }
+            RunPersist::Direct => {
+                let _ = events.send(RunEvent::MessageRemoved {
+                    session_id: session_id.to_string(),
+                    message_id: message_id.to_string(),
+                });
+            }
+        }
         return;
     }
     if !aborted && state.content.is_empty() {
         state.content = format!("[错误]{error}");
     }
     state.rev += 1;
-    state.commit_patch(store, session_id, message_id);
+    state.commit_patch(persist, events, session_id, message_id, created_at);
 }
 
 fn stream_error_text(e: crate::ai::stream::StreamError) -> String {
@@ -1100,6 +1167,23 @@ pub fn clean_title(raw: &str) -> String {
 mod tests {
     use super::*;
     use crate::ai::stream::request_body;
+
+    #[test]
+    fn direct_mode_emits_full_message_snapshots() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let state = RunState { steps: Vec::new(), content: "你好".into(), rev: 3 };
+        state.commit_patch(&RunPersist::Direct, &tx, "s1", "m1", 7);
+        match rx.try_recv() {
+            Ok(RunEvent::Snapshot { session_id, message_id, message, rev }) => {
+                assert_eq!((session_id.as_str(), message_id.as_str(), rev), ("s1", "m1", 3));
+                assert_eq!(message["content"], json!("你好"));
+                assert_eq!(message["createdAt"], json!(7));
+                // 空步骤不写键（消费方按缺键与空数组等价处理）
+                assert!(message.get("steps").is_none());
+            }
+            other => panic!("直写模式应发快照：{other:?}"),
+        }
+    }
 
     #[test]
     fn same_round_tool_calls_share_one_assistant_message() {

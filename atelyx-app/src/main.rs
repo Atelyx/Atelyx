@@ -13,6 +13,7 @@ mod calendar_heat;
 mod calendar_month;
 mod calendar_view;
 mod canvas_actions;
+mod canvas_chat;
 mod canvas_view;
 mod chat_actions;
 mod chat_input;
@@ -2598,7 +2599,12 @@ impl App {
                 task
             }
             Message::VaultMetaLoaded(_, Err(_)) => Task::none(),
-            Message::Chat(msg) => chat_actions::update(self, msg),
+            Message::Chat(msg) => {
+                let task = chat_actions::update(self, msg);
+                // 画布卡会话的 run 快照经 Chat 通道进入，落卡后同样要排自动保存
+                self.schedule_canvas_save();
+                task
+            }
             Message::Noop => Task::none(),
             Message::FileRowPress { window, rel, is_dir } => {
                 // 拖拽会话 / 弹层 / 重命名输入期间不接纳新候选
@@ -3034,6 +3040,28 @@ impl App {
                 if self.chat.input.focused && !chat_press_inside {
                     self.chat.input.focused = false;
                 }
+                // 画布卡输入面同理：按压在卡输入面内（Focus 事件同批置位）保持焦点，否则失焦
+                if let Some(s) = self.canvas.as_mut() {
+                    let focused: Option<String> = s
+                        .view
+                        .card_chat
+                        .iter()
+                        .find(|(_, c)| c.draft.focused)
+                        .map(|(id, _)| id.clone());
+                    if let Some(id) = focused {
+                        let inside = s
+                            .view
+                            .card_chat
+                            .get_mut(&id)
+                            .map(|c| std::mem::take(&mut c.press_inside))
+                            .unwrap_or(false);
+                        if !inside {
+                            if let Some(c) = s.view.card_chat.get_mut(&id) {
+                                c.draft.focused = false;
+                            }
+                        }
+                    }
+                }
                 // 表格焦点：同批表格面按压（画布或菜单，widget 消息先行）已置 press_seen = 保持聚焦；
                 // 否则本次按压在表格面之外 = 失焦（键盘分派随之让位）
                 if let Some(s) = &mut self.table {
@@ -3310,13 +3338,8 @@ impl App {
             }
             Message::Canvas(msg) => {
                 // 数据版本变化 = 画布编辑：与表格同口径推迟自动保存期限（拖拽中不排，松手收口）
-                let version_before = self.canvas.as_ref().map(|c| c.version);
                 let task = canvas_actions::on_msg(self, msg);
-                if self.canvas.as_ref().is_some_and(|c| {
-                    c.dirty && c.version != version_before.unwrap_or(0) && c.view.drag.is_none()
-                }) {
-                    self.autosave_deadline = Some(Instant::now() + AUTOSAVE_DEBOUNCE);
-                }
+                self.schedule_canvas_save();
                 task
             }
             Message::TableImagesLoaded(gen, results) => {
@@ -4562,6 +4585,18 @@ impl App {
         self.persist_dirty = true;
     }
 
+    /// 画布脏数据排自动保存：流式期间已有期限时不再后推，让 500ms 后落一次中间态。
+    pub(crate) fn schedule_canvas_save(&mut self) {
+        let Some(canvas) = self.canvas.as_ref() else { return };
+        if !canvas.dirty || canvas.view.drag.is_some() {
+            return;
+        }
+        let streaming = canvas.view.card_chat.values().any(|chat| chat.streaming);
+        if !streaming || self.autosave_deadline.is_none() {
+            self.autosave_deadline = Some(Instant::now() + AUTOSAVE_DEBOUNCE);
+        }
+    }
+
     /// 会话世代：core 在每次切换仓库时自增；在途任务的回调据此判定是否过期。
     pub(crate) fn epoch(&self) -> u64 {
         self.vault
@@ -4785,7 +4820,8 @@ impl App {
         self.rename_notice = None;
         // 表格会话随仓库切换清空（载入在途不留旧数据）
         self.table = None;
-        // 画布会话随仓库切换清空（载入在途不留旧数据）
+        // 画布会话随仓库切换清空（先停卡内 run，载入在途不留旧数据）
+        canvas_chat::detach_canvas(self);
         self.canvas = None;
         // 仓库级配置会话态随切仓清空（VaultMetaLoaded 落地后回填）
         self.exclude_folders.clear();
@@ -4907,6 +4943,7 @@ impl App {
             }
             "canvas" => {
                 self.ui.last_canvas_file = None;
+                canvas_chat::detach_canvas(self);
                 self.canvas = None;
                 self.history.clear();
                 if matches!(self.repo_kind, RepoKind::Space(_)) {
@@ -5746,6 +5783,7 @@ impl App {
                 });
                 if hit_canvas {
                     self.ui.last_canvas_file = None;
+                    canvas_chat::detach_canvas(self);
                     self.canvas = None;
                     if matches!(self.repo_kind, RepoKind::Space(_)) {
                         space_actions::send_presence(self);
