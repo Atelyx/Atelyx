@@ -926,12 +926,13 @@ pub enum ImageFit {
 }
 
 /// 图片来源：`private` = 插件私有目录内相对路径；`vault` = 仓库根相对路径（宿主按仓库内容读取，
-/// 协作空间走同构内容面）。协议不提供任意 URL 直取。
+/// 协作空间走同构内容面）；`url` = http(s) 地址（宿主按公网策略下载并缓存，仅公网可达）。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum ImageSource {
     Private { path: String },
     Vault { path: String },
+    Url { url: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1655,5 +1656,26 @@ mod tests {
         assert_eq!(json["kind"], "scroll");
         assert_eq!(json["maxOffset"], 96.0);
         assert_eq!(serde_json::from_value::<ViewEvent>(json).unwrap(), event);
+    }
+
+    #[test]
+    fn image_source_variants_carry_their_locator() {
+        for (source, wire) in [
+            (
+                ImageSource::Private { path: "a.png".into() },
+                serde_json::json!({ "type": "private", "path": "a.png" }),
+            ),
+            (
+                ImageSource::Vault { path: "b.png".into() },
+                serde_json::json!({ "type": "vault", "path": "b.png" }),
+            ),
+            (
+                ImageSource::Url { url: "https://example.com/c.png".into() },
+                serde_json::json!({ "type": "url", "url": "https://example.com/c.png" }),
+            ),
+        ] {
+            assert_eq!(serde_json::to_value(&source).unwrap(), wire);
+            assert_eq!(serde_json::from_value::<ImageSource>(wire).unwrap(), source);
+        }
     }
 }

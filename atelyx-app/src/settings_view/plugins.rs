@@ -12,9 +12,9 @@ use iced::{border, widget::container::Style, Element, Length, Padding, Task};
 use atelyx_core::plugin_runtime::market::{self, MarketSnapshot};
 use atelyx_core::plugin_runtime::{
     AuditRecord, ClipboardImage, CollabPeer, CollabPeersResult, CollabSendParams, CollabSendQos,
-    CollabSendResult, DialogKind, DialogRequest, HostRequest, ImageInfoResult, InstallOutcome,
-    NotificationLevel, Permission, PluginEvent, PluginRuntime, PluginStatus, PluginSummary,
-    SetTrayItemsParams, MAX_VAULT_BINARY_BYTES,
+    CollabSendResult, DialogKind, DialogRequest, FileChangeKind, HostRequest, ImageInfoResult,
+    InstallOutcome, NotificationLevel, Permission, PluginEvent, PluginRuntime, PluginStatus,
+    PluginSummary, SetTrayItemsParams, MAX_VAULT_BINARY_BYTES,
 };
 
 use crate::settings_view::{card, group_head};
@@ -38,6 +38,8 @@ const CONFIRM_CARD_WIDTH: f32 = 380.0;
 /// 日志模态卡宽与日志区固定高度。
 const LOG_CARD_WIDTH: f32 = 620.0;
 const LOG_MAX_H: f32 = 360.0;
+/// 协作空间单文件上限（服务端强制；大文件导入在本地先挡一道，免把超限内容读进内存）。
+const SPACE_MAX_FILE_BYTES: usize = 50 * 1024 * 1024;
 
 /// 插件页模式：已安装列表 / 市场浏览。
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
@@ -168,6 +170,15 @@ pub enum PluginsMsg {
     VaultWrite { request_id: u64, path: String, content: String },
     VaultReadBinary { request_id: u64, path: String },
     VaultWriteBinary { request_id: u64, path: String, bytes: Vec<u8> },
+    /// 大文件导入：`source` 为插件私有目录内的绝对路径（运行时已校验并规范化）。
+    VaultImportFile { request_id: u64, path: String, source: String },
+    /// 写入完成：成功后广播 `vault:file.changed`（Created / Updated）再回填。
+    VaultWriteDone {
+        request_id: u64,
+        rel: String,
+        created: bool,
+        result: Result<serde_json::Value, String>,
+    },
     VaultList { request_id: u64, path: String },
     VaultExists { request_id: u64, path: String },
     /// 图片固有像素尺寸（只读文件头，不送回内容）。
@@ -197,6 +208,14 @@ pub fn runtime_stream(spec: &RuntimeSpec) -> impl iced::futures::Stream<Item = M
     let runtime = spec.0.clone();
     iced::stream::channel(64, async move |mut output| {
         let mut events = runtime.subscribe_events();
+        // 广播不保留历史：先订阅再补发已存档的默认布局声明，避免插件启动快于订阅而丢声明
+        for event in runtime.declared_default_layouts() {
+            let _ = iced::futures::SinkExt::send(
+                &mut output,
+                Message::PluginEvent(Box::new(event)),
+            )
+            .await;
+        }
         loop {
             match events.recv().await {
                 Ok(event) => {
@@ -298,6 +317,9 @@ pub fn host_requests_stream(spec: &RuntimeSpec) -> impl iced::futures::Stream<It
                 }
                 HostRequest::VaultWriteBinary { request_id, path, bytes, .. } => {
                     Message::Plugins(PluginsMsg::VaultWriteBinary { request_id, path, bytes })
+                }
+                HostRequest::VaultImportFile { request_id, path, source, .. } => {
+                    Message::Plugins(PluginsMsg::VaultImportFile { request_id, path, source })
                 }
                 HostRequest::VaultList { request_id, path, .. } => {
                     Message::Plugins(PluginsMsg::VaultList { request_id, path })
@@ -642,30 +664,34 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
                 crate::RepoKind::Local => match app.vault.root() {
                     Ok(root) => {
                         let writes = app.vault.writes.clone();
+                        let done_rel = rel.clone();
                         Task::perform(
                             async move {
-                                let target = run_blocking(move || vault::safe_join(&root, &rel, true)).await?;
+                                let target =
+                                    run_blocking(move || vault::safe_join(&root, &rel, true)).await?;
+                                // 「是否新建」由写盘队列在执行序内判定，回执用于区分广播的 Created / Updated
                                 writes
-                                    .write(target, content)
+                                    .write_reporting_created(target, content)
                                     .await
-                                    .map(|_| serde_json::json!({}))
+                                    .map(|created| (serde_json::json!({}), created))
                             },
-                            move |result| Message::Plugins(PluginsMsg::VaultCallDone { request_id, result }),
+                            move |result| vault_write_done(request_id, done_rel, result),
                         )
                     }
                     Err(e) => resolve_vault(app, request_id, Err(e)),
                 },
                 crate::RepoKind::Space(space) => {
                     let (client, space_id) = (space.client.clone(), space.space_id.clone());
+                    let done_rel = rel.clone();
                     Task::perform(
                         async move {
                             client
                                 .put_file_text(&space_id, &rel, &content)
                                 .await
-                                .map(|_| serde_json::json!({}))
+                                .map(|created| (serde_json::json!({}), created))
                                 .map_err(|e| e.to_string())
                         },
-                        move |result| Message::Plugins(PluginsMsg::VaultCallDone { request_id, result }),
+                        move |result| vault_write_done(request_id, done_rel, result),
                     )
                 }
             }
@@ -721,31 +747,94 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
                 crate::RepoKind::Local => match app.vault.root() {
                     Ok(root) => {
                         let writes = app.vault.writes.clone();
+                        let done_rel = rel.clone();
                         Task::perform(
                             async move {
                                 let target =
                                     run_blocking(move || vault::safe_join(&root, &rel, true)).await?;
                                 writes
-                                    .write_bytes(target, bytes)
+                                    .write_bytes_reporting_created(target, bytes)
                                     .await
-                                    .map(|_| serde_json::json!({}))
+                                    .map(|created| (serde_json::json!({}), created))
                             },
-                            move |result| Message::Plugins(PluginsMsg::VaultCallDone { request_id, result }),
+                            move |result| vault_write_done(request_id, done_rel, result),
                         )
                     }
                     Err(e) => resolve_vault(app, request_id, Err(e)),
                 },
                 crate::RepoKind::Space(space) => {
                     let (client, space_id) = (space.client.clone(), space.space_id.clone());
+                    let done_rel = rel.clone();
                     Task::perform(
                         async move {
                             client
                                 .put_file_bytes(&space_id, &rel, &bytes)
                                 .await
-                                .map(|_| serde_json::json!({}))
+                                .map(|created| (serde_json::json!({}), created))
                                 .map_err(|e| e.to_string())
                         },
-                        move |result| Message::Plugins(PluginsMsg::VaultCallDone { request_id, result }),
+                        move |result| vault_write_done(request_id, done_rel, result),
+                    )
+                }
+            }
+        }
+        PluginsMsg::VaultImportFile { request_id, path, source } => {
+            let rel = match plugin_path(Some(&path)) {
+                Ok(rel) => rel,
+                Err(e) => return resolve_vault(app, request_id, Err(e)),
+            };
+            if let Some(open) = open_file_conflict(app, &rel) {
+                return resolve_vault(
+                    app,
+                    request_id,
+                    Err(format!("文件正在编辑器中打开，拒绝写入：{open}")),
+                );
+            }
+            match app.repo_kind.clone() {
+                crate::RepoKind::Local => match app.vault.root() {
+                    Ok(root) => {
+                        let writes = app.vault.writes.clone();
+                        let done_rel = rel.clone();
+                        Task::perform(
+                            async move {
+                                let target =
+                                    run_blocking(move || vault::safe_join(&root, &rel, true)).await?;
+                                let source = std::path::PathBuf::from(source);
+                                writes
+                                    .write_from_file(target, source)
+                                    .await
+                                    .map(|created| (serde_json::json!({}), created))
+                            },
+                            move |result| vault_write_done(request_id, done_rel, result),
+                        )
+                    }
+                    Err(e) => resolve_vault(app, request_id, Err(e)),
+                },
+                crate::RepoKind::Space(space) => {
+                    let (client, space_id) = (space.client.clone(), space.space_id.clone());
+                    let done_rel = rel.clone();
+                    Task::perform(
+                        async move {
+                            let bytes = run_blocking(move || {
+                                let source = std::path::PathBuf::from(&source);
+                                let meta = std::fs::metadata(&source)
+                                    .map_err(|e| format!("读取导入源失败：{e}"))?;
+                                if meta.len() > SPACE_MAX_FILE_BYTES as u64 {
+                                    return Err(format!(
+                                        "文件超过协作空间单文件上限（{} MiB）",
+                                        SPACE_MAX_FILE_BYTES / 1024 / 1024
+                                    ));
+                                }
+                                std::fs::read(&source).map_err(|e| format!("读取导入源失败：{e}"))
+                            })
+                            .await?;
+                            client
+                                .put_file_bytes(&space_id, &rel, &bytes)
+                                .await
+                                .map(|created| (serde_json::json!({}), created))
+                                .map_err(|e| e.to_string())
+                        },
+                        move |result| vault_write_done(request_id, done_rel, result),
                     )
                 }
             }
@@ -776,8 +865,13 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
                     let (client, space_id) = (space.client.clone(), space.space_id.clone());
                     Task::perform(
                         async move {
-                            let tree = client.tree(&space_id).await.map_err(|e| e.to_string())?;
-                            Ok(dir_entries_json(&crate::space_actions::children_of_tree(&tree, &rel)))
+                            // 插件面与本地同口径：隐藏项可见（.tmp 残留由服务端过滤）
+                            let dir = (!rel.is_empty()).then_some(rel.as_str());
+                            let tree = client
+                                .tree_including_hidden(&space_id, dir)
+                                .await
+                                .map_err(|e| e.to_string())?;
+                            Ok(dir_entries_json(&crate::space_actions::children_of_tree(&tree, "")))
                         },
                         move |result| Message::Plugins(PluginsMsg::VaultCallDone { request_id, result }),
                     )
@@ -806,8 +900,10 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
                     let (client, space_id) = (space.client.clone(), space.space_id.clone());
                     Task::perform(
                         async move {
-                            let tree = client.tree(&space_id).await.map_err(|e| e.to_string())?;
-                            let exists = crate::space_actions::tree_has_file(&tree, &rel);
+                            let exists = client
+                                .file_exists(&space_id, &rel)
+                                .await
+                                .map_err(|e| e.to_string())?;
                             Ok(serde_json::json!({ "exists": exists }))
                         },
                         move |result| Message::Plugins(PluginsMsg::VaultCallDone { request_id, result }),
@@ -846,6 +942,17 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
             }
         }
         PluginsMsg::VaultCallDone { request_id, result } => {
+            resolve_vault(app, request_id, result)
+        }
+        PluginsMsg::VaultWriteDone { request_id, rel, created, result } => {
+            // 只推宿主发起的写入；失败不广播（文件未被改动）
+            if result.is_ok() {
+                let kind = match created {
+                    true => FileChangeKind::Created,
+                    false => FileChangeKind::Updated,
+                };
+                app.plugins.on_file_changed(&rel, kind, None);
+            }
             resolve_vault(app, request_id, result)
         }
         PluginsMsg::TraySetItems { request_id, plugin_id, params } => {
@@ -930,6 +1037,19 @@ fn resolve_vault(
 ) -> Task<Message> {
     app.plugins.resolve_shell_call(request_id, result);
     Task::none()
+}
+
+/// 写入任务的完成消息：`created` 决定广播 `vault:file.changed` 的 Created / Updated。
+fn vault_write_done(
+    request_id: u64,
+    rel: String,
+    result: Result<(serde_json::Value, bool), String>,
+) -> Message {
+    let (result, created) = match result {
+        Ok((value, created)) => (Ok(value), created),
+        Err(e) => (Err(e), false),
+    };
+    Message::Plugins(PluginsMsg::VaultWriteDone { request_id, rel, result, created })
 }
 
 /// 写入目标是否正由编辑器持有：壳的会话里保留着该文件的内存副本，插件覆盖会与之竞争。
@@ -1225,10 +1345,11 @@ pub fn on_event(app: &mut App, event: PluginEvent) {
                 _ => {}
             }
         }
-        // 界面 / 贡献 / AI 工具变化由壳的投影刷新统一处理（见 main.rs 的事件分支）
+        // 界面 / 贡献 / AI 工具 / 默认布局声明由壳的投影与布局接线统一处理（见 main.rs 的事件分支）
         PluginEvent::ViewSubmitted { .. }
         | PluginEvent::ContributionsChanged { .. }
-        | PluginEvent::AiToolsChanged { .. } => {}
+        | PluginEvent::AiToolsChanged { .. }
+        | PluginEvent::DefaultLayoutDeclared { .. } => {}
     }
     if list_changed && app.settings_open && app.settings_tab == "plugins" {
         refresh(app);

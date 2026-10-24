@@ -924,6 +924,42 @@
         "peerId": "2",
         "peerName": "林"
       }
+    },
+    {
+      "name": "view.scrollTo params (offset)",
+      "type": "ScrollToParams",
+      "value": { "surfaceId": "panel", "nodeId": "log", "offset": 0.25 }
+    },
+    {
+      "name": "vault.importFile params",
+      "type": "ImportFileParams",
+      "value": { "path": "attachments/big.bin", "source": "C:/Users/demo/plugins/comfyui/data/models/big.bin" }
+    },
+    {
+      "name": "vault:file.changed payload (updated)",
+      "type": "FileChangedPayload",
+      "value": { "path": "notes/a.md", "kind": "updated" }
+    },
+    {
+      "name": "vault:file.changed payload (renamed)",
+      "type": "FileChangedPayload",
+      "value": { "path": "notes/b.md", "kind": "renamed", "oldPath": "notes/a.md" }
+    },
+    {
+      "name": "layout.declareDefaultLayout params",
+      "type": "DeclareDefaultLayoutParams",
+      "value": {
+        "name": "工作台",
+        "spec": {
+          "kind": "split",
+          "direction": "horizontal",
+          "sizes": [0.3, 0.7],
+          "children": [
+            { "kind": "panel", "views": ["plugin:com.example.studio:panel"] },
+            { "kind": "panel", "views": ["note", "table"] }
+          ]
+        }
+      }
     }
   ]
 }

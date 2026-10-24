@@ -41,6 +41,12 @@ pub mod window {
     pub const HOST_HIDDEN: &str = "host:window.hidden";
 }
 
+/// 当前场景的布局面：插件声明自己期望的默认布局，宿主在首次启用时摆进当前场景。
+pub mod layout {
+    /// 声明默认布局（每个插件至多生效一次；用户可自行改名 / 删除）。
+    pub const DECLARE_DEFAULT: &str = "layout.declareDefaultLayout";
+}
+
 pub mod fs {
     pub const PRIVATE_DIR: &str = "fs.privateDir";
     pub const READ_TEXT: &str = "fs.readText";
@@ -69,8 +75,10 @@ pub mod vault {
     pub const WRITE_TEXT: &str = "vault.writeText";
     /// 读二进制文件（base64；单次上限见宿主实现，超限可读失败）。
     pub const READ_BINARY: &str = "vault.readBinary";
-    /// 写二进制文件（base64；父目录自动创建；正在编辑器中打开的文件拒写）。
+    /// 写二进制文件（base64；父目录自动创建；正在编辑器中打开的文件拒写；单次上限 32 MiB）。
     pub const WRITE_BINARY: &str = "vault.writeBinary";
+    /// 把插件私有目录里的一个文件收进仓库（大文件走这条：字节不进 RPC 载荷）。
+    pub const IMPORT_FILE: &str = "vault.importFile";
     /// 读图片的像素宽高（png / jpeg / gif / bmp / webp），不返回文件内容。
     pub const IMAGE_INFO: &str = "vault.imageInfo";
     pub const LIST: &str = "vault.list";
@@ -281,13 +289,31 @@ pub enum ScrollEdge {
     End,
 }
 
-/// `view.scrollTo` 的 params：把某可滚动节点（`list` / `scroll`）滚到一端。
+/// `view.scrollTo` 的 params：把某可滚动节点（`list` / `scroll`）滚到某处。
+/// `edge` 与 `offset` 二选一，同时给出或都不给即拒收。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScrollToParams {
     pub surface_id: String,
     pub node_id: String,
-    pub edge: ScrollEdge,
+    /// 滚到主轴一端。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edge: Option<ScrollEdge>,
+    /// 按比例定位：0 = 起点、1 = 终点（越界与内容不足一屏时由控件钳制）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<f32>,
+}
+
+impl ScrollToParams {
+    pub fn validate(&self) -> Result<(), String> {
+        match (self.edge, self.offset) {
+            (Some(_), None) => Ok(()),
+            (None, Some(offset)) if offset.is_finite() => Ok(()),
+            (None, Some(_)) => Err("滚动位置不是有限数值".to_string()),
+            (None, None) => Err("需要 edge 或 offset".to_string()),
+            (Some(_), Some(_)) => Err("edge 与 offset 不能同时给出".to_string()),
+        }
+    }
 }
 
 /// `window.update` 的 params：运行时改一个已打开窗口的属性（缺省字段不动）。至少给一项。
@@ -418,6 +444,17 @@ pub struct CanvasSubmitParams {
     pub commands: Vec<crate::canvas::DrawCommand>,
 }
 
+// ---------- layout ----------
+
+/// `layout.declareDefaultLayout` 的 params：给宿主一套默认面板布局。`name` 为布局名
+/// （与既有布局重名时宿主追加序号），`spec` 只描述结构与视图 kind。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeclareDefaultLayoutParams {
+    pub name: String,
+    pub spec: crate::layout::LayoutSpecNode,
+}
+
 // ---------- fs ----------
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -459,6 +496,15 @@ pub struct WriteTextParams {
 pub struct WriteBinaryParams {
     pub path: String,
     pub base64: String,
+}
+
+/// [`vault::IMPORT_FILE`] 的 params：`path` 为仓库相对目标，`source` 为插件私有目录内的绝对路径。
+/// 复制语义：落库成功后源文件仍归插件，由插件自行清理。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportFileParams {
+    pub path: String,
+    pub source: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1286,5 +1332,24 @@ mod tests {
             serde_json::to_value(CollabPeersResult::default()).unwrap(),
             serde_json::json!({ "connected": false })
         );
+    }
+
+    #[test]
+    fn scroll_to_requires_exactly_one_of_edge_and_offset() {
+        let base = |edge: Option<ScrollEdge>, offset: Option<f32>| ScrollToParams {
+            surface_id: "panel".into(),
+            node_id: "log".into(),
+            edge,
+            offset,
+        };
+        assert!(base(Some(ScrollEdge::Start), None).validate().is_ok());
+        assert!(base(None, Some(0.5)).validate().is_ok());
+        assert!(base(None, Some(f32::NAN)).validate().is_err());
+        assert!(base(None, None).validate().is_err());
+        assert!(base(Some(ScrollEdge::End), Some(0.5)).validate().is_err());
+        // 缺省字段不落线
+        let wire = serde_json::to_value(base(None, Some(0.5))).unwrap();
+        assert_eq!(wire["offset"], 0.5);
+        assert!(wire.get("edge").is_none());
     }
 }

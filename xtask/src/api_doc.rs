@@ -152,6 +152,20 @@ const SECTIONS: &[Section] = &[
         ),
     },
     Section {
+        title: "默认布局",
+        intro: "插件声明自己期望的默认布局：宿主在插件首次启用时摆进当前场景，之后改名 / 删除都不再补回。\
+`views` 填视图 kind（本插件贡献为 `plugin:<插件 id>:<贡献 id>`）。",
+        items: items!(
+            "method.rs": "layout",
+            "method.rs": "DeclareDefaultLayoutParams",
+            "layout.rs": "LayoutSpecNode",
+            "layout.rs": "MAX_NAME_BYTES",
+            "layout.rs": "MAX_DEPTH",
+            "layout.rs": "MAX_PANELS",
+            "layout.rs": "MAX_VIEWS_PER_PANEL",
+        ),
+    },
+    Section {
         title: "能力面方法名",
         intro: "每个模块是一类能力面的方法名常量，与 `permissions` 里的能力声明一一对应；\
 未声明能力的调用会被宿主拒绝并记入审计。",
@@ -185,6 +199,7 @@ const SECTIONS: &[Section] = &[
             "method.rs": "BinaryContent",
             "method.rs": "WriteTextParams",
             "method.rs": "WriteBinaryParams",
+            "method.rs": "ImportFileParams",
             "method.rs": "ExistsResult",
             "method.rs": "ImageInfoResult",
             "method.rs": "ListResult",
@@ -280,6 +295,8 @@ const SECTIONS: &[Section] = &[
             "event.rs": "TableChangedPayload",
             "event.rs": "ChatChangedPayload",
             "event.rs": "ChatChangeKind",
+            "event.rs": "FileChangedPayload",
+            "event.rs": "FileChangeKind",
             "event.rs": "PublishParams",
             "event.rs": "SubscribeParams",
             "event.rs": "SubscribeResult",

@@ -786,8 +786,15 @@ fn on_saved(
     result: Result<(), String>,
     frozen: TableFile,
 ) -> Task<Message> {
-    // 身份守卫：gen + 文件路径双校验（防串表回执）
-    if gen != app.epoch() || !app.table.as_ref().is_some_and(|s| s.file == file) {
+    // 身份守卫：gen 过期回执作废；写盘成功先广播文件变更（切换文件后回执也须落地事件），
+    // 再按当前会话身份决定是否结算
+    if gen != app.epoch() {
+        return Task::none();
+    }
+    if result.is_ok() {
+        app.plugins.on_file_changed(&file, atelyx_core::plugin_runtime::FileChangeKind::Updated, None);
+    }
+    if !app.table.as_ref().is_some_and(|s| s.file == file) {
         return Task::none();
     }
     match result {
@@ -2221,7 +2228,7 @@ fn import_images(app: &mut App, row_id: String, field_id: String, files: Vec<(St
                 let mut failed = skipped;
                 for (rel, bytes) in jobs {
                     match client.put_file_bytes(&space_id, &rel, &bytes).await {
-                        Ok(()) => rels.push(rel),
+                        Ok(_) => rels.push(rel),
                         Err(_) => failed += 1,
                     }
                 }

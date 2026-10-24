@@ -38,8 +38,10 @@ use instance::Instance;
 pub use ai_tools::{PluginToolOutput, PluginToolSpec};
 pub use atelyx_plugin_protocol::canvas::{CanvasColor, CanvasPoint, DrawCommand};
 pub use atelyx_plugin_protocol::event::{
-    ChatChangeKind, ChatChangedPayload, TableChangedPayload, VaultSwitchPayload,
+    ChatChangeKind, ChatChangedPayload, FileChangeKind, FileChangedPayload, TableChangedPayload,
+    VaultSwitchPayload,
 };
+pub use atelyx_plugin_protocol::layout::LayoutSpecNode;
 pub use atelyx_plugin_protocol::manifest::{DocTypeRegistration, Permission};
 pub use atelyx_plugin_protocol::method::{
     CanvasResizedParams, ChatEvent, ChatEventParams, ChatHistoryParams, ChatHistoryResult,
@@ -98,6 +100,8 @@ pub enum PluginEvent {
     ContributionsChanged { id: String },
     /// 某插件注册的 AI 工具变化（注册 / 撤销 / 随会话收尾清空）。
     AiToolsChanged { id: String },
+    /// 插件声明了自己的默认布局（壳在首次启用时摆进当前场景，之后不再重复）。
+    DefaultLayoutDeclared { id: String, name: String, spec: LayoutSpecNode },
 }
 
 /// 一个已注册的贡献点（菜单与标签渲染用）。
@@ -141,8 +145,9 @@ pub struct DialogRequest {
     pub filters: Vec<FileFilter>,
 }
 
-/// 仓库二进制单次读写上限：内容面数据走 JSON 单行传输，过大的文件应由插件用 `fs` 自行处理
-/// （那条面不承载宿主内容真源）。超限以可读失败收场，不做截断。
+/// 仓库二进制单次读写上限：内容面数据走 JSON 单行传输，一条消息的峰值内存是载荷的数倍，
+/// 超限以可读失败收场，不做截断。更大的文件用 `vault.importFile`——字节留在插件磁盘上，
+/// 由宿主按路径收进仓库，不进 RPC 载荷。
 pub const MAX_VAULT_BINARY_BYTES: usize = 32 * 1024 * 1024;
 
 /// 二进制负载的 wire 形态（`{ "base64": ... }`，与 `fs.readBinary` 同编码）。
@@ -195,6 +200,9 @@ pub enum HostRequest {
     VaultReadBinary { plugin_id: String, request_id: u64, path: String },
     /// 插件请求写当前仓库内一个二进制文件（`bytes` 已在分派处解码并校验大小）。
     VaultWriteBinary { plugin_id: String, request_id: u64, path: String, bytes: Vec<u8> },
+    /// 插件请求把私有目录内的一个文件收进仓库：`source` 已在分派处校验并规范化为绝对路径，
+    /// 路径校验与打开中文件保护由壳执行（复制语义，源文件不删）。
+    VaultImportFile { plugin_id: String, request_id: u64, path: String, source: String },
     /// 插件请求读剪贴板中的图片（结果以 [`ClipboardImage`] 形态回填，无图 = `null`）。
     ClipboardReadImage { plugin_id: String, request_id: u64 },
     /// 插件请求列当前仓库内一个目录（空路径 = 仓库根）。
@@ -502,6 +510,7 @@ impl PluginRuntime {
             | HostRequest::VaultWriteText { .. }
             | HostRequest::VaultReadBinary { .. }
             | HostRequest::VaultWriteBinary { .. }
+            | HostRequest::VaultImportFile { .. }
             | HostRequest::VaultList { .. }
             | HostRequest::VaultExists { .. }
             | HostRequest::TableSnapshot { .. }
@@ -604,6 +613,14 @@ impl PluginRuntime {
                 request_id,
                 path,
             },
+            HostRequest::VaultImportFile { plugin_id, path, source, .. } => {
+                HostRequest::VaultImportFile {
+                    plugin_id,
+                    request_id,
+                    path,
+                    source,
+                }
+            }
             HostRequest::VaultWriteBinary { plugin_id, path, bytes, .. } => {
                 HostRequest::VaultWriteBinary {
                     plugin_id,
@@ -1263,6 +1280,44 @@ impl PluginRuntime {
         self.broadcast_event(event::name::TABLE_CHANGED, &payload);
     }
 
+    /// 广播仓库内文件变更给订阅了 `vault:file.changed` 的运行中插件。只覆盖宿主发起的写入
+    /// （保存 / 新建 / 删除 / 改名 / 插件经 `vault` 写），外部程序直接改磁盘不发。
+    pub fn on_file_changed(self: &Arc<Self>, path: &str, kind: FileChangeKind, old_path: Option<&str>) {
+        let payload = FileChangedPayload {
+            path: path.to_string(),
+            kind,
+            old_path: old_path.map(str::to_string),
+        };
+        self.broadcast_event(event::name::VAULT_FILE_CHANGED, &payload);
+    }
+
+    /// 某插件声明的默认布局（未声明 = `None`；崩溃重启后重开进程会重新声明）。
+    pub fn declared_default_layout(&self, plugin_id: &str) -> Option<(String, LayoutSpecNode)> {
+        self.instances
+            .lock()
+            .unwrap()
+            .get(plugin_id)
+            .and_then(|instance| instance.default_layout())
+    }
+
+    /// 运行中插件已存档的全部默认布局声明：广播不保留历史，壳的事件订阅建立晚于插件
+    /// 启动时靠这份快照补发，避免声明落在订阅之前而永久丢失。
+    pub fn declared_default_layouts(&self) -> Vec<PluginEvent> {
+        self.instances
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|instance| instance.status() == PluginStatus::Running)
+            .filter_map(|instance| {
+                instance.default_layout().map(|(name, spec)| PluginEvent::DefaultLayoutDeclared {
+                    id: instance.id.clone(),
+                    name,
+                    spec,
+                })
+            })
+            .collect()
+    }
+
     /// 广播会话变更给订阅了 `ai:chat.changed` 的运行中插件。不缓存补发：订阅者需要当前
     /// 状态时用 `ai.chat.history` 拉取。
     pub fn on_chat_changed(self: &Arc<Self>, session_id: &str, kind: ChatChangeKind) {
@@ -1403,6 +1458,7 @@ fn request_plugin_id(request: &HostRequest) -> &str {
         | HostRequest::VaultWriteText { plugin_id, .. }
         | HostRequest::VaultReadBinary { plugin_id, .. }
         | HostRequest::VaultWriteBinary { plugin_id, .. }
+        | HostRequest::VaultImportFile { plugin_id, .. }
         | HostRequest::VaultList { plugin_id, .. }
         | HostRequest::VaultExists { plugin_id, .. }
         | HostRequest::TableSnapshot { plugin_id, .. }

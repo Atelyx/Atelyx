@@ -57,7 +57,9 @@ use atelyx_core::layout::{
     LayoutOp, WindowBounds, UI_STATE_SCHEMA,
 };
 use atelyx_core::markdown::{LinkForm, MarkdownDocument};
-use atelyx_core::plugin_runtime::{PluginEvent, PluginRuntime, PluginStatus, SurfaceKind};
+use atelyx_core::plugin_runtime::{
+    FileChangeKind, PluginEvent, PluginRuntime, PluginStatus, SurfaceKind,
+};
 use atelyx_core::vault;
 use atelyx_core::vault_refs;
 use iced::widget::{space, text_editor};
@@ -388,7 +390,7 @@ enum Message {
     Edited(text_editor::Action),
     Save,
     /// 携带保存发起时冻结的内容与保存动机：落地后与编辑器现值比对，区分保存完成与在途新编辑。
-    Saved(u64, String, SaveReason, Result<(), String>),
+    Saved(u64, String, String, SaveReason, Result<(), String>),
     /// 自动保存防抖定时器到期（单定时器链，见 chain_autosave_timer）。
     AutosaveTick,
     /// 切换 note 视图模式（只读 / 预览编辑 / 源码）。
@@ -750,6 +752,8 @@ enum Message {
 #[derive(Debug, Clone)]
 pub enum FollowUp {
     None,
+    /// 新建文件 / 文件夹 / 副本：落点供 `vault:file.changed` 广播。
+    Created { rel: String },
     /// 改名/移动：打开中笔记按前缀跟随；`rewritten` = 引用同步代写的笔记（打开中需重读）。
     Renamed { from: String, to: String, rewritten: Vec<String> },
     /// 删除：命中打开中笔记即清空编辑器。
@@ -2056,10 +2060,11 @@ impl App {
                 }
                 Task::none()
             }
-            Message::Saved(gen, saved, reason, Ok(())) => {
+            Message::Saved(gen, rel, saved, reason, Ok(())) => {
                 if gen != self.epoch() {
                     return Task::none();
                 }
+                self.plugins.on_file_changed(&rel, FileChangeKind::Updated, None);
                 self.save_error = None;
                 let proceed = match reason {
                     SaveReason::Flush => {
@@ -2093,7 +2098,7 @@ impl App {
                 // 落盘即记历史版本（edit；内容 no-op 由记录侧跳过），随后刷新版本列表
                 proceed.chain(self.record_note_history(saved))
             }
-            Message::Saved(_, _, reason, Err(e)) => {
+            Message::Saved(_, _, _, reason, Err(e)) => {
                 self.settle_history_restore(false);
                 // flush 被保存失败打断：动作不放行（放行会丢弃未落盘内容），挂起输入保留待重试
                 if matches!(reason, SaveReason::Flush) {
@@ -3387,6 +3392,9 @@ impl App {
                         }
                     }
                 }
+                if let PluginEvent::DefaultLayoutDeclared { id, .. } = event.as_ref() {
+                    task = task.chain(plugin_actions::apply_declared_default_layout(self, id));
+                }
                 settings_view::plugins::on_event(self, *event);
                 // 运行时事件（界面提交 / 贡献变化 / 状态变化）后重投影：树与贡献都取最新快照
                 task.chain(plugin_actions::refresh_projection(self))
@@ -3721,7 +3729,12 @@ impl App {
                 Task::perform(
                     async move { vault::delete_folder(&root, &rel_task, false).map(|r| (r.needs_confirm, r.item_count)) },
                     move |result| match result {
-                        Ok((false, _)) => Message::OpDone(gen, parent_of(&rel), Ok(rel), FollowUp::None),
+                        Ok((false, _)) => Message::OpDone(
+                            gen,
+                            parent_of(&rel),
+                            Ok(rel.clone()),
+                            FollowUp::Deleted { rel, is_dir: true },
+                        ),
                         Ok((true, n)) => Message::FolderCounted(rel, n),
                         Err(e) => Message::OpDone(gen, parent_of(&rel), Err(e), FollowUp::None),
                     },
@@ -3813,6 +3826,23 @@ impl App {
                 }
                 if !matches!(follow, FollowUp::Renamed { .. }) {
                     self.notify(NoticeLevel::Success, "完成");
+                }
+                // 宿主发起的文件操作成功后广播（改名按去重后的实际落点；原地改名不重复告知）
+                match &follow {
+                    FollowUp::Created { rel } => {
+                        self.plugins.on_file_changed(rel, FileChangeKind::Created, None);
+                    }
+                    FollowUp::Renamed { from, to, .. } if from != to => {
+                        self.plugins.on_file_changed(
+                            to,
+                            FileChangeKind::Renamed,
+                            Some(from.as_str()),
+                        );
+                    }
+                    FollowUp::Deleted { rel, .. } => {
+                        self.plugins.on_file_changed(rel, FileChangeKind::Deleted, None);
+                    }
+                    _ => {}
                 }
                 self.apply_follow(&follow);
                 // 引用同步代写了打开中的笔记（rewritten 键 = 落盘后路径，与跟随后的
@@ -4510,12 +4540,13 @@ impl App {
         let content = self.note_text.clone();
         let saved = content.clone();
         let queue = self.vault.writes.clone();
+        let rel_for_done = rel.clone();
         Task::perform(
             async move {
                 let path = vault::safe_join(&root, &rel, false)?;
                 queue.write(path, content).await
             },
-            move |result| Message::Saved(gen, saved, reason, result),
+            move |result| Message::Saved(gen, rel_for_done, saved, reason, result),
         )
     }
 
@@ -5468,6 +5499,7 @@ impl App {
     fn apply_follow(&mut self, follow: &FollowUp) {
         match follow {
             FollowUp::None => {}
+            FollowUp::Created { .. } => {}
             FollowUp::Renamed { from, to, .. } => {
                 // 展开集路径跟随（目录改名/移动；文件路径不会成为展开键，前缀判空转无害）
                 let prefix = format!("{from}/");
@@ -5711,7 +5743,13 @@ impl App {
                                     }
                                 }
                             },
-                            move |result| Message::OpDone(gen, parent, result, FollowUp::None),
+                            move |result| {
+                                let follow = match &result {
+                                    Ok(rel) => FollowUp::Created { rel: rel.clone() },
+                                    Err(_) => FollowUp::None,
+                                };
+                                Message::OpDone(gen, parent, result, follow)
+                            },
                         )
             }
             RenameTarget::File(old) => {
@@ -6159,7 +6197,13 @@ impl App {
                     Ok(new_rel)
                 }
             },
-            move |result| Message::OpDone(gen, parent, result, FollowUp::None),
+            move |result| {
+                let follow = match &result {
+                    Ok(rel) => FollowUp::Created { rel: rel.clone() },
+                    Err(_) => FollowUp::None,
+                };
+                Message::OpDone(gen, parent, result, follow)
+            },
         )
     }
 

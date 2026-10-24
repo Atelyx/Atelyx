@@ -69,6 +69,7 @@ pub fn build_app(state: ServerState) -> Router {
         .route("/api/invites/accept", post(spaces::accept_invite))
         // 内容（真源在服务器文件树）
         .route("/api/spaces/{space_id}/tree", get(content::tree))
+        .route("/api/spaces/{space_id}/stat", get(content::stat_path))
         .route(
             "/api/spaces/{space_id}/file",
             get(content::read_file).put(content::write_file).delete(content::delete_file),

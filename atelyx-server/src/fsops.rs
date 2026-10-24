@@ -80,9 +80,10 @@ pub fn has_hidden_segment(rel: &str) -> bool {
     rel.split('/').any(|seg| seg.starts_with('.') && !seg.is_empty() && seg != "." && seg != "..")
 }
 
-/// 相对路径（单段）是否被全树过滤：隐藏项与原子写 `.tmp` 中间产物。
-fn is_excluded_name(name: &str) -> bool {
-    (name.starts_with('.') && name.len() > 1) || name.ends_with(".tmp")
+/// 相对路径（单段）是否被全树过滤：隐藏项与原子写 `.tmp` 中间产物（目录同名不滤，
+/// 与个人仓库按扩展名只滤文件的口径一致）。
+fn is_excluded_name(name: &str, is_dir: bool) -> bool {
+    (name.starts_with('.') && name.len() > 1) || (!is_dir && name.ends_with(".tmp"))
 }
 
 /// 单段名是否命中团队排除名单（任意层级同名项不显示、不被索引；与客户端个人仓库的
@@ -99,6 +100,25 @@ pub fn read_dir_filtered(
     rel: &str,
     exclude_folders: &[String],
 ) -> Result<Vec<(String, bool)>, String> {
+    read_dir_with(dir, rel, exclude_folders, false)
+}
+
+/// 读取目录条目（插件列举用）：放行 `.` 开头的隐藏项，原子写残留（`.tmp` 文件）与团队
+/// 排除名单仍过滤——与个人仓库的插件列举口径一致。
+pub fn read_dir_including_hidden(
+    dir: &Path,
+    rel: &str,
+    exclude_folders: &[String],
+) -> Result<Vec<(String, bool)>, String> {
+    read_dir_with(dir, rel, exclude_folders, true)
+}
+
+fn read_dir_with(
+    dir: &Path,
+    rel: &str,
+    exclude_folders: &[String],
+    include_hidden: bool,
+) -> Result<Vec<(String, bool)>, String> {
     let mut out: Vec<(String, bool)> = vec![];
     for entry in std::fs::read_dir(dir).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
@@ -106,10 +126,18 @@ pub fn read_dir_filtered(
             Some(n) => n.to_string(),
             None => continue,
         };
-        if is_excluded_name(&name) || is_excluded_folder(&name, exclude_folders) {
+        if is_excluded_folder(&name, exclude_folders) {
             continue;
         }
         let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        // `.tmp` 是原子写残留：无论是否列举隐藏项都不出现
+        let skip = match include_hidden {
+            true => !is_dir && name.ends_with(".tmp"),
+            false => is_excluded_name(&name, is_dir),
+        };
+        if skip {
+            continue;
+        }
         let child_rel = if rel.is_empty() { name.clone() } else { format!("{rel}/{name}") };
         out.push((child_rel, is_dir));
     }

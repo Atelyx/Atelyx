@@ -17,6 +17,7 @@ use atelyx_core::space_client::{
     self, AcceptAck, InviteInfo, MemberInfo, SpaceClient, SpaceError, SpaceRole, SpaceSummary,
 };
 use atelyx_core::credentials;
+use atelyx_core::plugin_runtime::FileChangeKind;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -1465,7 +1466,14 @@ fn on_note_saved(
     app.space_note_save_inflight = false;
     let queued = std::mem::take(&mut app.space_note_save_flush_queued);
     // 世代 + 文件身份双守卫：保存期间切换文件后，旧文件回执不得回填新文件的编辑面与合流基线
-    if gen != app.epoch() || app.ui.last_note_file.as_deref() != Some(rel) {
+    // （世代过期作废；文件身份不符仍要广播已落盘事件，切换文件不改变服务端已写入的事实）
+    if gen != app.epoch() {
+        return Task::none();
+    }
+    if result.is_ok() {
+        app.plugins.on_file_changed(rel, FileChangeKind::Updated, None);
+    }
+    if app.ui.last_note_file.as_deref() != Some(rel) {
         return Task::none();
     }
     let mut task = Task::none();
@@ -1707,6 +1715,18 @@ fn on_table_patch_done(
 ) -> Task<Message> {
     if gen != app.epoch() {
         return Task::none();
+    }
+    if result.is_ok() {
+        // 补丁带 title 时服务端已按标题改名：对端按 Renamed 跟随路径
+        if new_file != file {
+            app.plugins.on_file_changed(
+                &new_file,
+                FileChangeKind::Renamed,
+                Some(file.as_str()),
+            );
+        } else {
+            app.plugins.on_file_changed(&new_file, FileChangeKind::Updated, None);
+        }
     }
     // 身份守卫：gen + 文件路径（或标题漂移后的新路径）双校验
     if !app.table.as_ref().is_some_and(|s| s.file == file || s.file == new_file) {
@@ -1951,6 +1971,18 @@ fn on_canvas_patch_done(
 ) -> Task<Message> {
     if gen != app.epoch() {
         return Task::none();
+    }
+    if result.is_ok() {
+        // 补丁带 title 时服务端已按标题改名：对端按 Renamed 跟随路径
+        if new_file != file {
+            app.plugins.on_file_changed(
+                &new_file,
+                FileChangeKind::Renamed,
+                Some(file.as_str()),
+            );
+        } else {
+            app.plugins.on_file_changed(&new_file, FileChangeKind::Updated, None);
+        }
     }
     // 身份守卫：gen + 文件路径（或标题漂移后的新路径）双校验
     if !app.canvas.as_ref().is_some_and(|s| s.file == file || s.file == new_file) {
@@ -2446,12 +2478,16 @@ pub fn space_create_entry(app: &mut App, dir: &str, kind: DraftKind, name: &str)
             let rel = if dir.is_empty() { candidate.clone() } else { format!("{dir}/{candidate}") };
             match kind {
                 DraftKind::Folder => client.create_folder(&space_id, &rel).await,
-                _ => client.put_file_text(&space_id, &rel, &initial).await,
+                _ => client.put_file_text(&space_id, &rel, &initial).await.map(|_| ()),
             }?;
             Ok::<_, SpaceError>(rel)
         },
         move |result| {
-            Message::OpDone(gen, dir_for_cb, result.map_err(err_text), crate::FollowUp::None)
+            let follow = match &result {
+                Ok(rel) => crate::FollowUp::Created { rel: rel.clone() },
+                Err(_) => crate::FollowUp::None,
+            };
+            Message::OpDone(gen, dir_for_cb, result.map_err(err_text), follow)
         },
     )
 }
@@ -2700,7 +2736,11 @@ pub fn space_duplicate_entry(app: &mut App, rel: &str, is_dir: bool) -> Task<Mes
         },
         move |result| {
             let parent = parent_of(&rel_for_cb);
-            Message::OpDone(gen, parent, result.map_err(err_text), crate::FollowUp::None)
+            let follow = match &result {
+                Ok(rel) => crate::FollowUp::Created { rel: rel.clone() },
+                Err(_) => crate::FollowUp::None,
+            };
+            Message::OpDone(gen, parent, result.map_err(err_text), follow)
         },
     )
 }

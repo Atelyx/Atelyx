@@ -30,8 +30,9 @@ use crate::plugin_process::{EventSink, PluginProcessHost, ProcessEvent as HostEv
 
 use super::{capability, child_process, fs, http, log, shortcut};
 use super::{
-    AuditRecord, Contribution, DialogKind, DialogRequest, HostRequest, PaddingSpec, PluginEvent,
-    PluginRuntime, PluginStatus, SurfaceKind, ViewEvent, ViewNode, MAX_VAULT_BINARY_BYTES,
+    AuditRecord, Contribution, DialogKind, DialogRequest, HostRequest, LayoutSpecNode, PaddingSpec,
+    PluginEvent, PluginRuntime, PluginStatus, SurfaceKind, ViewEvent, ViewNode,
+    MAX_VAULT_BINARY_BYTES,
 };
 
 /// 崩溃判定窗口：窗口内累计达到 [`CRASH_LIMIT`] 即熔断。
@@ -92,6 +93,8 @@ pub(crate) struct Instance {
     icons: Mutex<HashMap<String, String>>,
     view_submits: AtomicU64,
     crash_times: Mutex<Vec<Instant>>,
+    /// 本会话声明的默认布局（重启后插件重新声明）。
+    default_layout: Mutex<Option<(String, LayoutSpecNode)>>,
     /// 本插件日志（插件 stderr、协议违规与生命周期失败的唯一可查落点）。
     log: Arc<log::LogSink>,
 }
@@ -146,6 +149,7 @@ impl Instance {
             icons: Mutex::new(HashMap::new()),
             view_submits: AtomicU64::new(0),
             crash_times: Mutex::new(Vec::new()),
+            default_layout: Mutex::new(None),
             log,
         })
     }
@@ -208,6 +212,11 @@ impl Instance {
     /// 本插件定义的自备图标形状（名字 → 路径）；会话收尾即清空。
     pub(crate) fn icons(&self) -> HashMap<String, String> {
         self.icons.lock().unwrap().clone()
+    }
+
+    /// 本会话声明的默认布局（未声明 = `None`）。
+    pub(crate) fn default_layout(&self) -> Option<(String, LayoutSpecNode)> {
+        self.default_layout.lock().unwrap().clone()
     }
 
     /// 手动重试前清零崩溃计数（否则窗口内的旧崩溃会立刻把新会话判为熔断）。
@@ -318,6 +327,8 @@ impl Instance {
         let contributions_dropped = !self.contributions.lock().unwrap().is_empty();
         self.contributions.lock().unwrap().clear();
         self.icons.lock().unwrap().clear();
+        // 默认布局声明属于本次会话：插件重启后重新声明，不让旧规格跨会话生效
+        *self.default_layout.lock().unwrap() = None;
         for child in self.children.take_all() {
             if let Err(e) = self.process_host.kill_process_tree(child) {
                 eprintln!("[plugin {}] 结束子进程 {child} 失败：{e}", self.id);
@@ -593,6 +604,7 @@ impl Instance {
                 | method::vault::WRITE_TEXT
                 | method::vault::READ_BINARY
                 | method::vault::WRITE_BINARY
+                | method::vault::IMPORT_FILE
                 | method::vault::IMAGE_INFO
                 | method::vault::LIST
                 | method::vault::EXISTS
@@ -804,6 +816,17 @@ impl Instance {
                         bytes,
                     }
                 }
+                method::vault::IMPORT_FILE => {
+                    let p: method::ImportFileParams = parse(params).map_err(|e| e.to_string())?;
+                    // 源文件校验在此做：壳只认绝对路径，不理解插件目录布局
+                    let source = self.import_source(&p.source)?;
+                    HostRequest::VaultImportFile {
+                        plugin_id: self.id.clone(),
+                        request_id: 0,
+                        path: p.path,
+                        source,
+                    }
+                }
                 method::vault::EXISTS => {
                     let p: method::PathParams = parse(params).map_err(|e| e.to_string())?;
                     HostRequest::VaultExists {
@@ -887,6 +910,7 @@ impl Instance {
                 }
                 method::view::SCROLL_TO => {
                     let p: method::ScrollToParams = parse(params).map_err(|e| e.to_string())?;
+                    p.validate()?;
                     HostRequest::ScrollTo {
                         plugin_id: self.id.clone(),
                         request_id: 0,
@@ -1021,6 +1045,9 @@ impl Instance {
                 Ok(json!({ "entries": entries }))
             }
 
+            // ---------- 布局声明 ----------
+            method::layout::DECLARE_DEFAULT => self.on_declare_default_layout(token, params),
+
             // ---------- process ----------
             method::process::SPAWN => {
                 let p: method::SpawnParams = parse(params)?;
@@ -1122,6 +1149,7 @@ impl Instance {
             | method::vault::WRITE_TEXT
             | method::vault::READ_BINARY
             | method::vault::WRITE_BINARY
+            | method::vault::IMPORT_FILE
             | method::vault::IMAGE_INFO
             | method::vault::LIST
             | method::vault::EXISTS
@@ -1178,7 +1206,10 @@ impl Instance {
         let p: event::SubscribeParams = parse(params)?;
         if !matches!(
             p.name.as_str(),
-            event::name::VAULT_SWITCH | event::name::TABLE_CHANGED | event::name::AI_CHAT_CHANGED
+            event::name::VAULT_SWITCH
+                | event::name::TABLE_CHANGED
+                | event::name::AI_CHAT_CHANGED
+                | event::name::VAULT_FILE_CHANGED
         ) {
             return Err(RpcError::failed(format!("未知事件名：{}", p.name)));
         }
@@ -1196,6 +1227,55 @@ impl Instance {
             }
         }
         Ok(json!({ "subscribed": true }))
+    }
+
+    /// 校验并规范化导入源：必须是插件私有目录（`<插件目录>/data`）内的既有普通文件。
+    /// 解析符号链接后按真实落点判定包含关系，链接指向目录外即拒收。
+    fn import_source(&self, source: &str) -> Result<String, String> {
+        if source.trim().is_empty() {
+            return Err("导入源路径不能为空".to_string());
+        }
+        let private = fs::private_dir(&self.state_dir)?;
+        let root = std::fs::canonicalize(&private)
+            .map_err(|e| format!("插件私有目录不可达（{private}）：{e}"))?;
+        let real = std::fs::canonicalize(source)
+            .map_err(|e| format!("导入源不存在或不可访问（{source}）：{e}"))?;
+        if !real.starts_with(&root) {
+            return Err("导入源必须位于插件私有目录内".to_string());
+        }
+        let meta = std::fs::metadata(&real).map_err(|e| format!("读取导入源失败：{e}"))?;
+        if !meta.is_file() {
+            return Err("导入源不是文件".to_string());
+        }
+        Ok(real.to_string_lossy().into_owned())
+    }
+
+    /// 声明默认布局：只存档并广播给壳，是否摆进场景、摆进哪个场景由壳决定。
+    fn on_declare_default_layout(
+        self: &Arc<Self>,
+        token: u64,
+        params: &Value,
+    ) -> Result<Value, RpcError> {
+        let p: method::DeclareDefaultLayoutParams = parse(params)?;
+        if !crate::layout::layout_spec_name_valid(&p.name) {
+            return Err(RpcError::failed("布局名不能为空且不超过长度上限"));
+        }
+        if !crate::layout::layout_spec_valid(&p.spec) {
+            return Err(RpcError::failed(
+                "布局规格非法：检查方向、尺寸、面板与视图数量",
+            ));
+        }
+        self.with_session(token, || {
+            *self.default_layout.lock().unwrap() = Some((p.name.clone(), p.spec.clone()));
+            Ok(())
+        })
+        .map_err(RpcError::failed)?;
+        let _ = self.events.send(PluginEvent::DefaultLayoutDeclared {
+            id: self.id.clone(),
+            name: p.name,
+            spec: p.spec,
+        });
+        Ok(json!({}))
     }
 
     /// 校验并接收界面树：只校验与存档，渲染由宿主界面层承担。surfaceId 为空即拒。
@@ -1657,7 +1737,7 @@ fn decode_vault_binary(base64_text: &str, limit: usize) -> Result<Vec<u8>, Strin
         .map_err(|e| format!("base64 解码失败：{e}"))?;
     if bytes.len() > limit {
         return Err(format!(
-            "内容超过仓库二进制上限（{} MiB），请改用 fs",
+            "内容超过单次载荷上限（{} MiB），大文件请用 vault.importFile 按路径导入",
             limit / (1024 * 1024)
         ));
     }
@@ -1738,6 +1818,7 @@ mod tests {
             event::name::VAULT_SWITCH,
             event::name::TABLE_CHANGED,
             event::name::AI_CHAT_CHANGED,
+            event::name::VAULT_FILE_CHANGED,
         ] {
             let ack = instance
                 .dispatch(event::SUBSCRIBE, &json!({ "name": name }))
@@ -2158,7 +2239,18 @@ mod tests {
         let HostRequest::ScrollTo { request_id, params, .. } = request else {
             panic!("应投递滚动指令");
         };
-        assert_eq!(params.edge, method::ScrollEdge::End);
+        assert_eq!(params.edge, Some(method::ScrollEdge::End));
+        runtime.resolve_shell_call(request_id, Ok(json!({})));
+
+        instance.handle_line(&request_line(
+            method::view::SCROLL_TO,
+            &json!({ "surfaceId": "panel", "nodeId": "log", "offset": 0.25 }),
+        ));
+        let request = rt.block_on(runtime.recv_host_request()).unwrap();
+        let HostRequest::ScrollTo { request_id, params, .. } = request else {
+            panic!("应投递滚动指令");
+        };
+        assert_eq!((params.edge, params.offset), (None, Some(0.25)));
         runtime.resolve_shell_call(request_id, Ok(json!({})));
 
         instance.handle_line(&request_line(method::vault::IMAGE_INFO, &json!({ "path": "a.png" })));
@@ -2781,5 +2873,100 @@ mod tests {
             .expect_err("会话失效后不得再登记工具调用");
         assert!(error.contains("插件未运行"), "{error}");
         assert!(runtime.tool_calls.lock().unwrap().is_empty(), "被拒的调用不得落表");
+    }
+
+    /// 导入源只能是插件私有目录内的既有文件：目录外、目录本身、空路径都拒收。
+    #[test]
+    fn import_source_must_be_a_file_inside_private_dir() {
+        let (tmp, instance) = make_instance(vec![Permission::Vault, Permission::Fs]);
+        let private = fs::private_dir(&instance.state_dir).unwrap();
+        let inside = PathBuf::from(&private).join("staged.bin");
+        std::fs::write(&inside, b"abc").unwrap();
+        let resolved = instance.import_source(inside.to_str().unwrap()).expect("私有目录内的文件可导入");
+        assert_eq!(PathBuf::from(&resolved), std::fs::canonicalize(&inside).unwrap());
+
+        let outside = tmp.join("outside.bin");
+        std::fs::write(&outside, b"abc").unwrap();
+        let err = instance.import_source(outside.to_str().unwrap()).expect_err("目录外文件应拒收");
+        assert!(err.contains("私有目录"), "{err}");
+        assert!(instance.import_source("   ").is_err(), "空路径应拒收");
+        assert!(instance.import_source(&private).is_err(), "目录本身不是可导入的文件");
+        assert!(instance
+            .import_source(inside.join("missing").to_str().unwrap())
+            .is_err(), "不存在的源文件应拒收");
+    }
+
+    /// 导入请求路由到壳：源路径已规范化为绝对路径，目标路径原样带上。
+    #[test]
+    fn import_file_routes_to_shell() {
+        let tmp = TempDir::new("instance-import-file");
+        let runtime = PluginRuntime::new(tmp.to_path_buf());
+        let (_t, instance) = make_instance(vec![Permission::Vault, Permission::Fs]);
+        instance.attach_runtime(&runtime);
+        runtime
+            .instances
+            .lock()
+            .unwrap()
+            .insert("com.example.demo".to_string(), instance.clone());
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let private = fs::private_dir(&instance.state_dir).unwrap();
+        let staged = PathBuf::from(&private).join("big.bin");
+        std::fs::write(&staged, b"0123").unwrap();
+        instance.handle_line(&request_line(
+            method::vault::IMPORT_FILE,
+            &json!({ "source": staged.to_str().unwrap(), "path": "media/big.bin" }),
+        ));
+        let request = rt.block_on(runtime.recv_host_request()).unwrap();
+        let HostRequest::VaultImportFile { request_id, path, source, .. } = request else {
+            panic!("应投递文件导入请求");
+        };
+        assert_eq!(path, "media/big.bin");
+        assert_eq!(PathBuf::from(&source), std::fs::canonicalize(&staged).unwrap());
+        assert_eq!(std::fs::read(&source).unwrap(), b"0123", "宿主按源路径读取内容");
+        runtime.resolve_shell_call(request_id, Ok(json!({})));
+    }
+
+    /// 默认布局：合法规格存档并广播给壳；非法名 / 非法规格拒收且不覆盖已存档值。
+    #[test]
+    fn declare_default_layout_validates_and_broadcasts() {
+        let (_tmp, instance, mut rx) = make_instance_with_events(Vec::new());
+        let spec = json!({
+            "kind": "split",
+            "direction": "horizontal",
+            "children": [
+                { "kind": "panel", "views": ["files"] },
+                { "kind": "panel", "views": ["note", "aichat"] }
+            ],
+            "sizes": [30, 70]
+        });
+        instance
+            .dispatch(
+                method::layout::DECLARE_DEFAULT,
+                &json!({ "name": "LLaMA", "spec": spec }),
+            )
+            .expect("合法布局应被接收");
+        let (name, stored) = instance.default_layout().expect("应存档");
+        assert_eq!(name, "LLaMA");
+        assert!(matches!(stored, LayoutSpecNode::Split { .. }));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(PluginEvent::DefaultLayoutDeclared { id, name, .. })
+                if id == "com.example.demo" && name == "LLaMA"
+        ));
+
+        for bad in [
+            json!({ "name": "  ", "spec": spec }),
+            json!({ "name": "空面板", "spec": { "kind": "panel", "views": [] } }),
+        ] {
+            assert!(
+                instance.dispatch(method::layout::DECLARE_DEFAULT, &bad).is_err(),
+                "应拒绝：{bad}"
+            );
+        }
+        assert_eq!(instance.default_layout().unwrap().0, "LLaMA", "拒收不得覆盖已存档布局");
     }
 }

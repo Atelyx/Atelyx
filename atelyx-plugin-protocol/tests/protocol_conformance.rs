@@ -3,7 +3,7 @@
 
 use atelyx_plugin_protocol::envelope::{Envelope, RequestId};
 use atelyx_plugin_protocol::event::{
-    ChatChangedPayload, TableChangedPayload, VaultSwitchPayload,
+    ChatChangedPayload, FileChangedPayload, TableChangedPayload, VaultSwitchPayload,
 };
 use atelyx_plugin_protocol::handshake::{self, InitializeParams, InitializeResult};
 use atelyx_plugin_protocol::method::{
@@ -11,7 +11,7 @@ use atelyx_plugin_protocol::method::{
     ChatSendParams, ChatSessionParams, CollabMessageParams, CollabPeersResult,
     CollabSendParams, CollabSendResult, DefineIconParams, DocCloseParams, DocOpenParams,
     HttpRequestParams,
-    HttpResult, ImageInfoResult, ListResult, PathParams, PickFileParams, PickedPath,
+    HttpResult, ImageInfoResult, ImportFileParams, ListResult, PathParams, PickFileParams, PickedPath,
     ProcessEventParams, RegisterParams, RegisterShortcutParams, RegisterToolParams,
     ScrollToParams, SetTrayItemsParams,
     ShortcutQueryParams, ShortcutQueryResult,
@@ -237,6 +237,11 @@ fn method_type_shapes_are_frozen() {
             "TableRowIdParams" => frozen_roundtrip::<TableRowIdParams>(&value),
             "DefineIconParams" => frozen_roundtrip::<DefineIconParams>(&value),
             "ScrollToParams" => frozen_roundtrip::<ScrollToParams>(&value),
+            "ImportFileParams" => frozen_roundtrip::<ImportFileParams>(&value),
+            "FileChangedPayload" => frozen_roundtrip::<FileChangedPayload>(&value),
+            "DeclareDefaultLayoutParams" => {
+                frozen_roundtrip::<atelyx_plugin_protocol::method::DeclareDefaultLayoutParams>(&value)
+            }
             "CanvasResizedParams" => frozen_roundtrip::<CanvasResizedParams>(&value),
             "WindowUpdateParams" => frozen_roundtrip::<WindowUpdateParams>(&value),
             "WindowIdParams" => frozen_roundtrip::<WindowIdParams>(&value),
@@ -262,6 +267,22 @@ fn method_type_shapes_are_frozen() {
         };
         assert!(ok, "语料 {name}: 编码与快照不一致");
     }
+}
+
+/// 滚动定位二选一：`edge` 与 `offset` 同时给出或都不给都不成立。
+#[test]
+fn scroll_to_requires_exactly_one_locator() {
+    let base = |edge, offset| ScrollToParams {
+        surface_id: "panel".into(),
+        node_id: "log".into(),
+        edge,
+        offset,
+    };
+    assert!(base(Some(atelyx_plugin_protocol::method::ScrollEdge::End), None).validate().is_ok());
+    assert!(base(None, Some(0.5)).validate().is_ok());
+    assert!(base(None, None).validate().is_err());
+    assert!(base(Some(atelyx_plugin_protocol::method::ScrollEdge::Start), Some(0.5)).validate().is_err());
+    assert!(base(None, Some(f32::NAN)).validate().is_err());
 }
 
 fn frozen_roundtrip<T: DeserializeOwned + Serialize>(value: &Value) -> bool {

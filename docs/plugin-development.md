@@ -234,14 +234,14 @@ token 随主题与界面字号设置联动，自定义色由插件自负对比�
 - 列的宽度收缩配 `size.maxWidth` 与 `align`，就能做居中的窄阅读列表或内容自适应的右对齐气泡；工具行的左右分布用 `justify: "spaceBetween"`；
 - `grid` 两种列法：`columns` 固定列数，`minColumnWidth` 按可用宽度自动换列（面板变窄时不会把各列一起挤扁），同时给定时后者只作列数上限；都不给按单列。`rowHeight` 取数字像素或 `"content"`（按内容高度）——缺省按列宽 1:1 定行高，「标签 + 单行控件」这类短内容会被拉成方格；
 - `card` 的底色档 `tone`（`default` / `muted` / `accentSoft` / `transparent`）、圆角 `radius`、边框开关 `bordered` 可调。**当前状态命中某个交互外观档时，底色与边框由该档提供**，卡片自身的 `tone` / `accent` / `bordered` / `radius` 让位（避免两层底色互相盖住）；当前状态没有对应档位时仍按卡片自身的档位绘制；分组内轻分割用 `divider`；`stack` 把子节点叠起来（后提交的在上，可做「画布当底 + 控件叠其上」）；
-- `image` 的 `width` / `height`：数字 = 固定像素，`"fill"` = 占满父容器该轴，`"shrink"` / 不给按原图尺寸；`fit` 决定尺寸内的适配方式（缺省 `contain`——不裁切不拉伸、留空边；`cover` 铺满并裁掉溢出；`fill` 拉伸），要看原图长宽用 `ctx.vault_image_info(path)` 取；声明 `click` 事件即成为可点击图片（大图预览入口）；
+- `image` 的 `width` / `height`：数字 = 固定像素，`"fill"` = 占满父容器该轴，`"shrink"` / 不给按原图尺寸；`fit` 决定尺寸内的适配方式（缺省 `contain`——不裁切不拉伸、留空边；`cover` 铺满并裁掉溢出；`fill` 拉伸），要看原图长宽用 `ctx.vault_image_info(path)` 取；来源三档——`ImageSource::Private { path }`（插件私有目录相对路径）、`ImageSource::Vault { path }`（仓库相对路径）、`ImageSource::Url { url }`（http(s) 地址，宿主按公网策略下载并缓存，画布图片贴片同源）；声明 `click` 事件即成为可点击图片（大图预览入口）；
 - `iconButton` 的图标名默认取自宿主内置形状表（lucide 线性图标）；先用 `ctx.define_icon(name, path)` 登记自备的 24x24 描边路径，即可用自己的图形（`size` 档 `sm`/`md`/`lg`，`variant` 复用按钮档位，`hoverOnly` 悬停才显示）；同一批自备名也可用作贡献注册的 `icon`（面板标签头 / 设置 tab / 文档类型图标）；
 - `icon` 是纯装饰图标（空态、状态行、标题前的标记），不接受点击；需要可点的图标用 `iconButton`。`button` 可给 `icon` 做「图标 + 文字」的主按钮；
 - `progress` 的 `girth` 是轨道粗细（px，缺省 30 的粗条；细进度条写 `3` / `4`），`tone` 是完成段颜色（缺省主题强调色）；
 - `markdown` 的 `content` 用笔记同源解析器渲染，`size` 是整体字号倍率，`weight` / `color` 覆盖基础字重与文字色（标题与加粗片段恒为加粗，链接与代码块语义色不受影响）；正文里的链接可点击，宿主按形态默认打开（外链 / wiki / 仓库路径），节点声明 `linkClick` 时同时回发链接点击事件；
 - `menu` 的 `label` 与 `icon` 可并存（并存为紧凑的「图标 + 文字」触发钮），只给 `label` 才是全宽下拉钮；条目可标 `current`（宿主在条目前画勾）；
 - `overlay` 是面内浮层：唯一子节点即浮层内容，宿主把它铺满整个插件面——一层遮罩 + 居中内容。**节点在树里就是打开**，从树里移除即关闭；挂在哪个容器下效果都一样（不参与父容器排版），多个浮层按树序叠放、后出现的盖在上面。遮罩拦下所有指针事件（下层既不响应点击也不滚动）；声明 `click` 时点击遮罩（内容之外）回发点击事件，用来收起浮层。`scrim` 换底色（缺省主题遮罩，`"transparent"` 只拦截不画底）。浮层不改写键盘与焦点，也不能作根节点；弹层类界面（大图预览 / 确认框 / 表单）用它，不要用 `stack` 模拟；
-- 可滚动容器（`list` / `scroll`）用 `ctx.scroll_to(surface, node, ScrollEdge::End)` 滚到主轴一端，无需插件自己维护滚动状态；`scroll` 的 `direction` 决定子项排布与滚动主轴（`horizontal` = 子项排成行并横向滚动），`height` 给定即收住自身高度（把横向图条嵌进纵向内容流），缺省占满父容器剩余高度；
+- 可滚动容器（`list` / `scroll`）用 `ctx.scroll_to(surface, node, ScrollEdge::End)` 滚到主轴一端，或用 `ctx.scroll_to_offset(surface, node, 0.5)` 按比例定位（0 = 起点、1 = 终点），无需插件自己维护滚动状态；`scroll` 的 `direction` 决定子项排布与滚动主轴（`horizontal` = 子项排成行并横向滚动），`height` 给定即收住自身高度（把横向图条嵌进纵向内容流），缺省占满父容器剩余高度；
 - 输入控件（`textInput` / `numberInput` / `dropdown` / `checkbox`）给 `readOnly: true` 即保留控件外观展示只读值，不接受编辑、不产生事件；`numberInput` 声明 `step`（正数，缺省 1）且带 `change` 事件时，输入框右侧出现上下步进按钮，点击按步长增减并受 `min` / `max` 约束；`dropdown` 的候选弹层随最长选项自适应宽度，选项多时在弹层内滚动；
 - 滚动位置：给 `list` / `scroll` 节点声明 `scroll` 事件，宿主就回发 `{ offset, maxOffset }`（主轴当前偏移与可滚动余量，`offset >= maxOffset` 即停在末端）。内容不足一屏没有可滚动余量，不会发事件。「用户停在底部才跟随最新」「滚离底部时露出回底入口」都按这一对值判断，不用插件自己记账。
 
@@ -333,7 +333,7 @@ ctx.submit_canvas("main", "board", commands).await?;   // 整发整换，空清�
 | --- | --- |
 | `state` | 按插件隔离的自持 JSON，落 `<插件目录>/data/state.json`；损坏时宿主先备份原文再降级 |
 | `fs` | `private_dir()` 给私有数据目录；其余接受**任意绝对路径**，父目录自动创建 |
-| `vault` | 路径相对当前仓库根，不能越出仓库；隐藏段可访问（插件自管附件可放 `.atelyx/temp/`），本地仓库 `vault_list` 同口径列出隐藏项，协作空间内容树不索引隐藏项（`vault_list` / `vault_exists` 对隐藏路径不可见，按精确路径读写仍可用）；**正被编辑器打开的文件拒写**。文本与二进制两条通道，二进制单次上限 32 MiB（更大的文件请用 `fs`）。`vault_image_info` 只解文件头给出图片固有像素尺寸（png / jpeg / gif / bmp / webp），不送回文件内容 |
+| `vault` | 路径相对当前仓库根，不能越出仓库；隐藏段可访问（插件自管附件可放 `.atelyx/temp/`），本地仓库与协作空间的 `vault_list` / `vault_exists` 同口径保留隐藏项（原子写残留 `.tmp` 除外）；**正被编辑器打开的文件拒写**。文本与二进制两条通道，二进制单次上限 32 MiB；更大的文件先落到插件私有目录再用 `vault_import_file` 让宿主按路径收进仓库（字节不进 RPC，源文件须在私有目录内，复制语义，见 §8.9）。`vault_image_info` 只解文件头给出图片固有像素尺寸（png / jpeg / gif / bmp / webp），不送回文件内容 |
 | `table` | 读写当前打开的表格。真源在宿主，写入与用户编辑同一出口（合并落盘 + 协作补丁）；**禁止**用 `fs` 旁路读写 `.atb`。快照含稳定表格 id、列宽、行内单元格样式、用户当前选区与其他协作者选区（显示名 + 身份色）；向图片字段写图片用 `table_set_cell_image`（图片先经 `vault_write_binary` 落仓库，再传仓库相对路径） |
 | `notification` | 应用内通知条 |
 | `shortcuts` | 系统级全局快捷键（如 `Shift+Alt+E`）；被占用时注册返回可读错误，停用自动注销；同一组键重复注册幂等，触发上报的是最后一次注册的写法。`query_shortcut` 可事前问某键位是否被占用（`owner` 为占用方插件 id；被系统 / 其他应用占用时为缺省） |
@@ -437,11 +437,13 @@ async fn on_tool_call(&self, ctx: &Context, params: ToolCallParams) {
 ctx.subscribe("vault:switch").await?;    // 容器切换（本地仓库 / 协作空间 / 换仓库）
 ctx.subscribe("table:changed").await?;   // 当前打开表格变更
 ctx.subscribe("ai:chat.changed").await?; // AI 会话内容变更（含对话面板里的改动）
+ctx.subscribe("vault:file.changed").await?; // 仓库文件被宿主写入（保存 / 新建 / 删除 / 改名）
 ```
 
 - `vault:switch` 只在声明了 `keepMountedOnVaultSwitch` 时才有意义：未声明的插件在收到它之前就被宿主重载了。payload：`{ kind: "local", root }` 或 `{ kind: "space", spaceId }`。
 - `ai:chat.changed` payload：`{ sessionId, kind }`，`kind` 为 `created` / `messages` / `meta` / `deleted`（新会话、消息增减、标题或 Agent 等元数据变化、删除）。只在变更提交后广播、不补发历史，需要当前内容用 `ctx.chat_history` 重读。
 - `table:changed` payload 是当前表格的仓库相对路径；订阅时会先补发一次当前状态（迟到订阅不丢当前表格）。
+- `vault:file.changed` payload：`{ path, kind, oldPath? }`，`kind` 为 `created` / `updated` / `deleted` / `renamed`（改名另带旧路径）。只覆盖**宿主发起的写入**——壳自身保存 / 新建 / 复制 / 删除 / 改名与插件经 `vault` 的写入；外部程序直接改磁盘不发，需要感知外部改动仍要按 mtime 轮询。删除目录只发目录本身一条，其下文件不逐条发（按前缀作废缓存，需要明细就重新列举）。
 
 ### 8.6 系统托盘
 
@@ -479,6 +481,47 @@ ctx.collab_send_ephemeral("cursor", payload, None).await?;
   - 可靠档：断线期间的广播由服务端短期缓存并在重连后补投（缓存有容量上限，超出后补不回来），适合内容类增量；定向单播不缓存、不补投。
   - 瞬时档：不缓存、不补投、不占房间序号，延迟最低；对端断线期间发出的消息**不会**在重连后补达。把本端状态整份重发即可自愈——变化时发、空闲时按十几秒的节奏重发一次，对端据此判断你在场；对端消失后你那份状态会在半分钟内自然过期，不必发「离开」也能收敛。
 - 需要可靠的共享请落在仓库内容上，这两档都只适合在线协作期的状态同步。
+
+### 8.8 默认布局声明
+
+插件可以声明一套默认面板分栏，首次启用时宿主自动摆进当前场景：
+
+```rust
+use atelyx_plugin_sdk::protocol::layout::LayoutSpecNode;
+use atelyx_plugin_sdk::protocol::view::Axis;
+
+ctx.declare_default_layout(
+    "控制台",
+    LayoutSpecNode::Split {
+        direction: Axis::Horizontal,
+        children: vec![
+            LayoutSpecNode::Panel { views: vec!["files".into()] },
+            LayoutSpecNode::Panel { views: vec!["note".into(), "aichat".into()] },
+        ],
+        sizes: vec![30.0, 70.0],
+    },
+).await?;
+```
+
+- `spec` 是分割树：`split { direction: "horizontal" | "vertical", children, sizes }` 或 `panel { views }`；`views` 写视图 kind——本插件的面板贡献为 `plugin:<插件 id>:<贡献 id>`，内置视图用 `canvas` / `note` / `table` / `files` / `search` / `aichat` 等，首个为激活标签。
+- 只摆一次：宿主在 `ui-state.json` 记账，用户改名 / 删除后不会再补回；首次启用时当前场景已含规格里的任一视图则只记账不新建，避免与用户已摆好的界面重复。
+- 布局名与既有布局重名时宿主追加序号并激活新布局；规格超限（深度 16、面板 32、单面板视图 16、名字 64 字节）或非法即拒收。
+
+### 8.9 大文件进仓库
+
+超过单次载荷上限（32 MiB）的文件不走字节通道：先落到插件私有目录，再让宿主按路径收进去。
+
+```rust
+let dir = ctx.private_dir().await?;                          // <插件目录>/data
+let staged = format!("{dir}/download.bin");                  // 自己的进程用 std::fs 写即可
+ctx.vault_import_file("models/big.bin", &staged).await?;     // 宿主原子落库（本地复制 / 空间上传）
+ctx.remove(&staged).await.ok();                              // 导完自己清掉暂存
+```
+
+- 源文件必须在 `<插件目录>/data` 内（解析符号链接后按真实落点判定），目录外一律拒收——`vault` 不替插件读仓库外的路径，要读别处仍走 `fs`。`private_dir()` 与删除都属 `fs` 面，`permissions` 里要同时声明 `vault` 与 `fs`。
+- 复制语义：落库成功后源文件仍在，要清理自己删（大文件建议导完即删，别把私有目录撑爆）。
+- 不受单次 32 MiB 上限约束，也不按默认 30s 调用超时判失败；协作空间仍受服务端单文件上限（默认 50 MB）。
+- 目标路径规则与 `vault_write_binary` 相同：仓库相对、父目录自动创建、正在编辑器中打开的文件拒写。
 
 ## 9. 构建与打包
 

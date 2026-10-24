@@ -3356,3 +3356,88 @@ async fn ws_ephemeral_forwarding_and_close_handshake() {
         }
     }
 }
+
+/// 树默认过滤隐藏项；`includeHidden=1` 放行 `.` 开头条目（原子写残留 `.tmp` 仍不出现）。
+#[tokio::test]
+async fn tree_include_hidden_lists_dot_entries_but_not_tmp() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+    let space_id = setup_two_members(&ctx, "alice", "bob").await;
+    let a = login_as(&ctx, "alice").await;
+    let url = format!("/api/spaces/{space_id}/file");
+    for path in [".hidden/secret.md", "visible.md", "pending.tmp"] {
+        let (status, _) = ctx.put(&url, Some(&a), json!({ "path": path, "content": "x" })).await;
+        assert_eq!(status, 200, "写入应成功：{path}");
+    }
+    let (status, tree) = ctx.get(&format!("/api/spaces/{space_id}/tree"), Some(&a), &[]).await;
+    assert_eq!(status, 200);
+    let text = tree.to_string();
+    assert!(!text.contains(".hidden"), "默认树过滤隐藏项：{text}");
+    assert!(!text.contains("pending.tmp"), "默认树过滤原子写残留：{text}");
+    assert!(text.contains("visible.md"), "普通条目恒可见：{text}");
+
+    let (status, tree) = ctx
+        .get(&format!("/api/spaces/{space_id}/tree"), Some(&a), &[("includeHidden", "1")])
+        .await;
+    assert_eq!(status, 200);
+    let text = tree.to_string();
+    assert!(text.contains(".hidden") && text.contains("secret.md"), "隐藏目录应列出：{text}");
+    assert!(!text.contains("pending.tmp"), ".tmp 残留不进树：{text}");
+}
+
+/// 树查询的 `includeHidden` 只认 1/true/0/false；`dir` 限定子树；`stat` 按文件判存在性。
+#[tokio::test]
+async fn tree_scope_and_stat_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+    let space_id = setup_two_members(&ctx, "alice", "bob").await;
+    let a = login_as(&ctx, "alice").await;
+    let url = format!("/api/spaces/{space_id}/file");
+    for path in [".hidden/secret.md", "sub/a.md", "other.md"] {
+        let (status, _) = ctx.put(&url, Some(&a), json!({ "path": path, "content": "x" })).await;
+        assert_eq!(status, 200, "写入应成功：{path}");
+    }
+
+    let (status, tree) = ctx
+        .get(&format!("/api/spaces/{space_id}/tree"), Some(&a), &[("includeHidden", "0")])
+        .await;
+    assert_eq!(status, 200);
+    assert!(!tree.to_string().contains(".hidden"), "includeHidden=0 仍过滤隐藏项");
+
+    let (status, _) = ctx
+        .get(&format!("/api/spaces/{space_id}/tree"), Some(&a), &[("includeHidden", "maybe")])
+        .await;
+    assert_eq!(status, 400, "非法布尔值应拒绝");
+
+    let (status, tree) = ctx
+        .get(
+            &format!("/api/spaces/{space_id}/tree"),
+            Some(&a),
+            &[("includeHidden", "true"), ("dir", "sub")],
+        )
+        .await;
+    assert_eq!(status, 200);
+    let text = tree.to_string();
+    assert!(text.contains("a.md"), "子树条目应列出：{text}");
+    assert!(!text.contains("other.md"), "子树之外不得出现：{text}");
+
+    for (path, expected) in [("other.md", true), ("missing.md", false), ("sub", false)] {
+        let (status, body) = ctx
+            .get(
+                &format!("/api/spaces/{space_id}/stat"),
+                Some(&a),
+                &[("path", path)],
+            )
+            .await;
+        assert_eq!(status, 200, "stat 应成功：{path}");
+        assert_eq!(body["exists"], expected, "stat 判定错误：{path}");
+    }
+    let (status, _) = ctx
+        .get(
+            &format!("/api/spaces/{space_id}/stat"),
+            Some(&a),
+            &[("path", "../escape.md")],
+        )
+        .await;
+    assert_eq!(status, 400, "越界路径应拒绝");
+}

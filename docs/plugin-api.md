@@ -785,11 +785,12 @@ pub enum ImageFit {
 ```rust
 // atelyx-plugin-protocol/src/view.rs
 /// 图片来源：`private` = 插件私有目录内相对路径；`vault` = 仓库根相对路径（宿主按仓库内容读取，
-/// 协作空间走同构内容面）。协议不提供任意 URL 直取。
+/// 协作空间走同构内容面）；`url` = http(s) 地址（宿主按公网策略下载并缓存，仅公网可达）。
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum ImageSource {
     Private { path: String },
     Vault { path: String },
+    Url { url: String },
 }
 ```
 
@@ -1234,12 +1235,18 @@ pub enum ScrollEdge {
 
 ```rust
 // atelyx-plugin-protocol/src/method.rs
-/// `view.scrollTo` 的 params：把某可滚动节点（`list` / `scroll`）滚到一端。
+/// `view.scrollTo` 的 params：把某可滚动节点（`list` / `scroll`）滚到某处。
+/// `edge` 与 `offset` 二选一，同时给出或都不给即拒收。
 #[serde(rename_all = "camelCase")]
 pub struct ScrollToParams {
     pub surface_id: String,
     pub node_id: String,
-    pub edge: ScrollEdge,
+    /// 滚到主轴一端。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edge: Option<ScrollEdge>,
+    /// 按比例定位：0 = 起点、1 = 终点（越界与内容不足一屏时由控件钳制）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<f32>,
 }
 ```
 
@@ -1333,7 +1340,71 @@ pub struct WindowClosedParams {
 }
 ```
 
-## 7. 能力面方法名
+## 7. 默认布局
+
+插件声明自己期望的默认布局：宿主在插件首次启用时摆进当前场景，之后改名 / 删除都不再补回。`views` 填视图 kind（本插件贡献为 `plugin:<插件 id>:<贡献 id>`）。
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 当前场景的布局面：插件声明自己期望的默认布局，宿主在首次启用时摆进当前场景。
+pub mod layout {
+    /// 声明默认布局（每个插件至多生效一次；用户可自行改名 / 删除）。
+    pub const DECLARE_DEFAULT: &str = "layout.declareDefaultLayout";
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// `layout.declareDefaultLayout` 的 params：给宿主一套默认面板布局。`name` 为布局名
+/// （与既有布局重名时宿主追加序号），`spec` 只描述结构与视图 kind。
+#[serde(rename_all = "camelCase")]
+pub struct DeclareDefaultLayoutParams {
+    pub name: String,
+    pub spec: crate::layout::LayoutSpecNode,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/layout.rs
+/// 插件默认布局规格节点（`layout.declareDefaultLayout` 载荷）。
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum LayoutSpecNode {
+    /// 分割节点：方向 + 子树 + 占比。
+    Split {
+        direction: crate::view::Axis,
+        children: Vec<LayoutSpecNode>,
+        sizes: Vec<f64>,
+    },
+    /// 面板节点：按顺序放置的视图 kind（首个为激活标签）。
+    Panel { views: Vec<String> },
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/layout.rs
+/// 默认布局名的字节上限（多字节字符按字节计）。
+pub const MAX_NAME_BYTES: usize = 64;
+```
+
+```rust
+// atelyx-plugin-protocol/src/layout.rs
+/// 规格树的深度上限。
+pub const MAX_DEPTH: usize = 16;
+```
+
+```rust
+// atelyx-plugin-protocol/src/layout.rs
+/// 规格树的面板数上限。
+pub const MAX_PANELS: usize = 32;
+```
+
+```rust
+// atelyx-plugin-protocol/src/layout.rs
+/// 单个面板的视图数上限。
+pub const MAX_VIEWS_PER_PANEL: usize = 16;
+```
+
+## 8. 能力面方法名
 
 每个模块是一类能力面的方法名常量，与 `permissions` 里的能力声明一一对应；未声明能力的调用会被宿主拒绝并记入审计。
 
@@ -1414,8 +1485,10 @@ pub mod vault {
     pub const WRITE_TEXT: &str = "vault.writeText";
     /// 读二进制文件（base64；单次上限见宿主实现，超限可读失败）。
     pub const READ_BINARY: &str = "vault.readBinary";
-    /// 写二进制文件（base64；父目录自动创建；正在编辑器中打开的文件拒写）。
+    /// 写二进制文件（base64；父目录自动创建；正在编辑器中打开的文件拒写；单次上限 32 MiB）。
     pub const WRITE_BINARY: &str = "vault.writeBinary";
+    /// 把插件私有目录里的一个文件收进仓库（大文件走这条：字节不进 RPC 载荷）。
+    pub const IMPORT_FILE: &str = "vault.importFile";
     /// 读图片的像素宽高（png / jpeg / gif / bmp / webp），不返回文件内容。
     pub const IMAGE_INFO: &str = "vault.imageInfo";
     pub const LIST: &str = "vault.list";
@@ -1573,7 +1646,7 @@ pub mod collab {
 }
 ```
 
-## 8. 能力面负载：文件、进程与系统服务
+## 9. 能力面负载：文件、进程与系统服务
 
 上表方法的 params / result 形态（`path` 在 `fs` 面是绝对路径，在 `vault` 面是仓库相对路径）。
 
@@ -1627,6 +1700,17 @@ pub struct WriteTextParams {
 pub struct WriteBinaryParams {
     pub path: String,
     pub base64: String,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`vault::IMPORT_FILE`] 的 params：`path` 为仓库相对目标，`source` 为插件私有目录内的绝对路径。
+/// 复制语义：落库成功后源文件仍归插件，由插件自行清理。
+#[serde(rename_all = "camelCase")]
+pub struct ImportFileParams {
+    pub path: String,
+    pub source: String,
 }
 ```
 
@@ -1923,7 +2007,7 @@ pub struct HttpResult {
 }
 ```
 
-## 9. 能力面负载：文档与对话
+## 10. 能力面负载：文档与对话
 
 领域文档实例、AI 对话与工具桥的负载形态。
 
@@ -2146,7 +2230,7 @@ pub struct ToolResultParams {
 }
 ```
 
-## 10. 能力面负载：表格
+## 11. 能力面负载：表格
 
 表格面读写当前打开的表格；真源在宿主会话，插件不得旁路读写 `.atb`。
 
@@ -2280,7 +2364,7 @@ pub struct TableSetCellImageParams {
 }
 ```
 
-## 11. 能力面负载：托盘与协作
+## 12. 能力面负载：托盘与协作
 
 系统托盘条目与空间内插件间消息的负载形态；两类能力的可用性都随宿主平台与容器类型而变。
 
@@ -2395,7 +2479,7 @@ pub struct CollabMessageParams {
 }
 ```
 
-## 12. 宿主广播事件
+## 13. 宿主广播事件
 
 插件经 `event.subscribe` 声明订阅的事件名与载荷；未上表的名字宿主拒绝订阅。
 
@@ -2422,6 +2506,9 @@ pub mod name {
     pub const TABLE_CHANGED: &str = "table:changed";
     /// 会话语义变更（流式增量不广播）。payload 见 [`ChatChangedPayload`]。
     pub const AI_CHAT_CHANGED: &str = "ai:chat.changed";
+    /// 仓库内文件变更（宿主保存 / 新建 / 删除 / 改名 / 插件经 `vault` 写入）。只覆盖宿主发起的
+    /// 写入，外部程序直接改磁盘不发。payload 见 [`FileChangedPayload`]。
+    pub const VAULT_FILE_CHANGED: &str = "vault:file.changed";
 }
 ```
 
@@ -2464,6 +2551,31 @@ pub enum ChatChangeKind {
     Messages,
     Meta,
     Deleted,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/event.rs
+/// [`name::VAULT_FILE_CHANGED`] 的 payload：仓库相对路径 + 变更种类（改名另带旧路径）。
+#[serde(rename_all = "camelCase")]
+pub struct FileChangedPayload {
+    pub path: String,
+    pub kind: FileChangeKind,
+    /// 改名 / 移动前的路径（其余种类缺省）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub old_path: Option<String>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/event.rs
+/// 文件变更种类：新建 / 内容写入 / 删除 / 改名或移动。
+#[serde(rename_all = "camelCase")]
+pub enum FileChangeKind {
+    Created,
+    Updated,
+    Deleted,
+    Renamed,
 }
 ```
 

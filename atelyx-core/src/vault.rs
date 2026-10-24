@@ -2235,8 +2235,35 @@ pub fn atomic_write(path: &Path, content: &str) -> Result<(), String> {
 /// pub：附件二进制与插件外部文件命令的写盘复用（保证全项目同一 durability 语义）。
 pub fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let tmp = write_tmp(path, bytes)?;
-    std::fs::rename(&tmp, path).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp);
+    commit_tmp(&tmp, path)
+}
+
+/// 从既有文件原子落库（目标同目录生成 tmp 后 copy 再 rename，跨卷也不影响原子性；
+/// 用于把插件暂存的大文件收进仓库）。`source` 必须在调用期间保持存在。
+pub fn atomic_write_from_file(path: &Path, source: &Path) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let tmp = tmp_path(path);
+    let copy = || -> std::io::Result<()> {
+        let mut src = std::fs::File::open(source)?;
+        let mut dst = std::fs::File::create(&tmp)?;
+        std::io::copy(&mut src, &mut dst)?;
+        dst.sync_all()
+    };
+    match copy() {
+        Ok(()) => commit_tmp(&tmp, path),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(e.to_string())
+        }
+    }
+}
+
+/// tmp 落正：rename 覆盖目标 + fsync 父目录；失败清理 tmp。
+fn commit_tmp(tmp: &Path, path: &Path) -> Result<(), String> {
+    std::fs::rename(tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(tmp);
         format!("写入失败：{e}")
     })?;
     sync_parent_dir(path);
@@ -2246,18 +2273,23 @@ pub fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> Result<(), String> {
 /// 进程内单调序号：SystemTime 不可用时（uniq 恒 0）仍避免并发写同一目标共用同一 tmp 名。
 static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
+/// 目标同目录的唯一临时文件名（纳秒时间戳 + 进程内序号，并发写不交叉同一 tmp）。
+fn tmp_path(path: &Path) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    PathBuf::from(format!("{}.{}.{}.tmp", path.display(), nanos, seq))
+}
+
 /// 写临时文件（建父目录 → 写入 → fsync），返回 tmp 路径；写入期任一步失败即清理 tmp。
 fn write_tmp(path: &Path, content: &[u8]) -> Result<PathBuf, String> {
     use std::io::Write;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let tmp = PathBuf::from(format!("{}.{}.{}.tmp", path.display(), nanos, seq));
+    let tmp = tmp_path(path);
     let write = || -> std::io::Result<()> {
         let mut f = std::fs::File::create(&tmp)?;
         f.write_all(content)?;

@@ -11,7 +11,7 @@ use std::path::{Component, Path, PathBuf};
 use iced::widget::text_editor;
 use iced::{Task, window};
 
-use atelyx_core::layout::{self, LayoutNode};
+use atelyx_core::layout::{self, LayoutNode, LayoutOp};
 use atelyx_core::markdown::LinkForm;
 use atelyx_core::plugin_runtime::{
     CanvasPointer, Contribution, ContributionSlot, DrawCommand, EventKind, EventValue, ImageSource,
@@ -576,7 +576,8 @@ fn collect_canvas_nodes(node: &ViewNode, out: &mut Vec<String>) {
 
 // ===== 界面图片 =====
 
-/// 界面图片来源的内容键：私有目录取绝对路径（与仓库相对路径取值域不重叠，仓库来源沿仓库口径）。
+/// 界面图片来源的内容键：私有目录取绝对路径（与仓库相对路径取值域不重叠，仓库来源沿仓库口径）；
+/// 远程来源以 URL 本身作键（笔记外链图片走同一缓存）。
 pub(crate) fn image_key(app: &App, plugin_id: &str, source: &ImageSource) -> Option<String> {
     match source {
         ImageSource::Private { path } => {
@@ -584,7 +585,12 @@ pub(crate) fn image_key(app: &App, plugin_id: &str, source: &ImageSource) -> Opt
             Some(safe_private_path(&dir, path)?.to_string_lossy().into_owned())
         }
         ImageSource::Vault { path } => (!path.is_empty()).then(|| path.clone()),
+        ImageSource::Url { url } => is_remote_url(url).then(|| url.clone()),
     }
+}
+
+fn is_remote_url(url: &str) -> bool {
+    url.starts_with("http://") || url.starts_with("https://")
 }
 
 /// 私有文件路径（拒收绝对路径与 `..` 段，限制在插件私有目录内）。
@@ -645,7 +651,8 @@ fn ensure_images(app: &mut App) -> Task<Message> {
     Task::batch(tasks)
 }
 
-/// 单张界面图片的载入任务：私有来源直接读文件，仓库来源沿用笔记图片的本地 / 空间分派。
+/// 单张界面图片的载入任务：私有来源直接读文件，仓库来源沿用笔记图片的本地 / 空间分派，
+/// 远程来源走公网策略下载并缓存。
 fn load_image(app: &App, gen: u64, key: String, source: ImageSource) -> Task<Message> {
     match source {
         ImageSource::Private { .. } => {
@@ -669,6 +676,13 @@ fn load_image(app: &App, gen: u64, key: String, source: ImageSource) -> Task<Mes
                 }
                 None => Task::none(),
             }
+        }
+        ImageSource::Url { .. } => {
+            let url = key.clone();
+            Task::perform(
+                async move { atelyx_core::remote_image::fetch_external_image(&url).await },
+                move |result| Message::ImageLoaded(gen, key, result),
+            )
         }
     }
 }
@@ -1001,13 +1015,24 @@ pub fn on_scroll_to(
     }
     app.plugins.resolve_shell_call(request_id, Ok(serde_json::json!({})));
     let id = atelyx_view::render::scroll_id(&plugin_id, &params.surface_id, &params.node_id);
-    match params.edge {
-        // `RelativeOffset` 按比例定位：START = 0（顶端 / 最左）、END = 1（底端 / 最右），由控件钳到真实末端
-        ScrollEdge::Start => iced::widget::operation::snap_to(
-            id,
-            iced::widget::operation::RelativeOffset::START,
-        ),
-        ScrollEdge::End => iced::widget::operation::snap_to_end(id),
+    if let Some(edge) = params.edge {
+        return match edge {
+            // `RelativeOffset` 按比例定位：START = 0（顶端 / 最左）、END = 1（底端 / 最右），由控件钳到真实末端
+            ScrollEdge::Start => {
+                iced::widget::operation::snap_to(id, iced::widget::operation::RelativeOffset::START)
+            }
+            ScrollEdge::End => iced::widget::operation::snap_to_end(id),
+        };
+    }
+    match params.offset {
+        Some(offset) => {
+            let offset = offset.clamp(0.0, 1.0);
+            iced::widget::operation::snap_to(
+                id,
+                iced::widget::operation::RelativeOffset { x: offset, y: offset },
+            )
+        }
+        None => Task::none(),
     }
 }
 
@@ -1067,6 +1092,43 @@ pub fn resync_surfaces_on_running(app: &mut App, plugin_id: &str) {
             app.plugins.notify_doc_open(plugin_id, &doc.surface_id, &doc.path);
         }
     }
+}
+
+// ===== 插件默认布局 =====
+
+/// 首次启用插件时把其声明的默认布局摆进当前场景：每插件只摆一次（`plugin_layouts_applied`
+/// 记账并随 ui-state 落盘，用户改名 / 删除后不再补回）。当前场景任一布局或撕裂窗口已含
+/// 规格中的视图则只记账不新建，避免与用户已摆好的插件面重复。
+pub fn apply_declared_default_layout(app: &mut App, plugin_id: &str) -> Task<Message> {
+    if app.ui.plugin_layouts_applied.iter().any(|id| id == plugin_id) {
+        return Task::none();
+    }
+    let Some((name, spec)) = app.plugins.declared_default_layout(plugin_id) else {
+        return Task::none();
+    };
+    app.ui.plugin_layouts_applied.push(plugin_id.to_string());
+    app.schedule_persist();
+    if layout::layout_spec_views(&spec).iter().any(|view| scene_has_view(app, view)) {
+        return Task::none();
+    }
+    app.apply(LayoutOp::AddLayoutFromSpec { name, spec })
+}
+
+/// 视图是否已在当前场景的任一布局（含主页）或撕裂窗口中。
+fn scene_has_view(app: &App, view: &str) -> bool {
+    let scene = layout::active_scene(&app.ui);
+    let trees = std::iter::once(&scene.home_layout.tree)
+        .chain(scene.layouts.iter().map(|l| &l.tree));
+    trees.into_iter().any(|tree| {
+        let mut tabs = Vec::new();
+        layout::collect_tabs(tree, &mut tabs);
+        tabs.iter().any(|t| t.view == view)
+    }) || app
+        .ui
+        .detached_windows
+        .iter()
+        .flat_map(|w| &w.tabs)
+        .any(|t| t.view == view)
 }
 
 // ===== 领域文档类型 =====

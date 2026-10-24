@@ -529,6 +529,37 @@ impl SpaceClient {
             .await
     }
 
+    /// 文件树含隐藏项（插件仓库能力面）：`.` 开头的条目也返回，原子写残留仍被服务端过滤。
+    /// `dir` 限定只列某个子目录（`None` = 仓库根）。
+    pub async fn tree_including_hidden(
+        &self,
+        space_id: &str,
+        dir: Option<&str>,
+    ) -> Result<Vec<TreeNode>, SpaceError> {
+        let mut url = format!("/api/spaces/{space_id}/tree?includeHidden=1");
+        if let Some(dir) = dir {
+            url.push_str(&format!("&dir={}", urlencode_component(dir)));
+        }
+        self.send_json(reqwest::Method::GET, &url, None::<&serde_json::Value>)
+            .await
+    }
+
+    /// 文件是否存在（插件仓库能力面：隐藏段可见；只判文件，不读内容）。
+    pub async fn file_exists(&self, space_id: &str, path: &str) -> Result<bool, SpaceError> {
+        let resp = self
+            .get(&format!(
+                "/api/spaces/{space_id}/stat?path={}",
+                urlencode_component(path)
+            ))
+            .await?;
+        #[derive(Deserialize)]
+        struct StatBody {
+            exists: bool,
+        }
+        let body: StatBody = resp.json().await.map_err(|e| SpaceError::Network(format!("响应解析失败：{e}")))?;
+        Ok(body.exists)
+    }
+
     /// 读文本文件（非 UTF-8 字节按替换字符容错；encoding 缺省即文本，服务端无 text 值）。
     pub async fn get_file_text(&self, space_id: &str, path: &str) -> Result<String, SpaceError> {
         let resp = self
@@ -566,21 +597,25 @@ impl SpaceClient {
     }
 
     /// 写文本文件（原子写，自动建父目录；单文件 50MB 限额由服务端强制）。
-    pub async fn put_file_text(&self, space_id: &str, path: &str, content: &str) -> Result<(), SpaceError> {
+    /// 返回是否新建（服务端在写锁内判定存在性）。
+    pub async fn put_file_text(&self, space_id: &str, path: &str, content: &str) -> Result<bool, SpaceError> {
         self.put_file_raw(space_id, path, content.as_bytes(), false).await
     }
 
-    /// 写二进制文件（base64 编码上行）。
-    pub async fn put_file_bytes(&self, space_id: &str, path: &str, bytes: &[u8]) -> Result<(), SpaceError> {
+    /// 写二进制文件（base64 编码上行）。返回是否新建。
+    pub async fn put_file_bytes(&self, space_id: &str, path: &str, bytes: &[u8]) -> Result<bool, SpaceError> {
         self.put_file_raw(space_id, path, bytes, true).await
     }
 
-    async fn put_file_raw(&self, space_id: &str, path: &str, bytes: &[u8], base64_enc: bool) -> Result<(), SpaceError> {
+    async fn put_file_raw(&self, space_id: &str, path: &str, bytes: &[u8], base64_enc: bool) -> Result<bool, SpaceError> {
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
         struct WriteAck {
             #[allow(dead_code)]
             updated_at: i64,
+            /// 缺省 false：对端未返回该字段时按覆盖写处理。
+            #[serde(default)]
+            created: bool,
         }
         let content = if base64_enc {
             base64::engine::general_purpose::STANDARD.encode(bytes)
@@ -597,7 +632,7 @@ impl SpaceClient {
             }),
         )
         .await
-        .map(|_| ())
+        .map(|ack| ack.created)
     }
 
     pub async fn delete_file(&self, space_id: &str, path: &str) -> Result<(), SpaceError> {

@@ -17,6 +17,9 @@ pub mod name {
     pub const TABLE_CHANGED: &str = "table:changed";
     /// 会话语义变更（流式增量不广播）。payload 见 [`ChatChangedPayload`]。
     pub const AI_CHAT_CHANGED: &str = "ai:chat.changed";
+    /// 仓库内文件变更（宿主保存 / 新建 / 删除 / 改名 / 插件经 `vault` 写入）。只覆盖宿主发起的
+    /// 写入，外部程序直接改磁盘不发。payload 见 [`FileChangedPayload`]。
+    pub const VAULT_FILE_CHANGED: &str = "vault:file.changed";
 }
 
 /// [`name::VAULT_SWITCH`] 的 payload（`kind` 与字段名均 camelCase，与协议其余类型同一口径）。
@@ -53,6 +56,27 @@ pub enum ChatChangeKind {
     Deleted,
 }
 
+/// [`name::VAULT_FILE_CHANGED`] 的 payload：仓库相对路径 + 变更种类（改名另带旧路径）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileChangedPayload {
+    pub path: String,
+    pub kind: FileChangeKind,
+    /// 改名 / 移动前的路径（其余种类缺省）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub old_path: Option<String>,
+}
+
+/// 文件变更种类：新建 / 内容写入 / 删除 / 改名或移动。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum FileChangeKind {
+    Created,
+    Updated,
+    Deleted,
+    Renamed,
+}
+
 /// 宿主广播的通知 params（[`HOST_PUBLISH`]）。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -73,4 +97,31 @@ pub struct SubscribeParams {
 #[serde(rename_all = "camelCase")]
 pub struct SubscribeResult {
     pub subscribed: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_changed_payload_uses_camel_case_and_omits_missing_old_path() {
+        let updated = FileChangedPayload {
+            path: "notes/a.md".into(),
+            kind: FileChangeKind::Updated,
+            old_path: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&updated).unwrap(),
+            serde_json::json!({ "path": "notes/a.md", "kind": "updated" })
+        );
+        let renamed = FileChangedPayload {
+            path: "notes/b.md".into(),
+            kind: FileChangeKind::Renamed,
+            old_path: Some("notes/a.md".into()),
+        };
+        assert_eq!(
+            serde_json::to_value(&renamed).unwrap(),
+            serde_json::json!({ "path": "notes/b.md", "kind": "renamed", "oldPath": "notes/a.md" })
+        );
+    }
 }

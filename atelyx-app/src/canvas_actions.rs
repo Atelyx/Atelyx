@@ -335,8 +335,15 @@ fn on_saved(
     result: Result<(), String>,
     frozen: atelyx_core::vault::CanvasFile,
 ) -> Task<Message> {
-    // 身份守卫：gen + 文件路径双校验（防串画布回执）
-    if gen != app.epoch() || !app.canvas.as_ref().is_some_and(|s| s.file == file) {
+    // 身份守卫：gen 过期回执作废；写盘成功先广播文件变更（切换文件后回执也须落地事件），
+    // 再按当前会话身份决定是否结算
+    if gen != app.epoch() {
+        return Task::none();
+    }
+    if result.is_ok() {
+        app.plugins.on_file_changed(&file, atelyx_core::plugin_runtime::FileChangeKind::Updated, None);
+    }
+    if !app.canvas.as_ref().is_some_and(|s| s.file == file) {
         return Task::none();
     }
     match result {

@@ -22,7 +22,7 @@ pub(crate) fn permission_for(name: &str) -> Option<Permission> {
         fs::PRIVATE_DIR | fs::READ_TEXT | fs::WRITE_TEXT | fs::READ_BINARY | fs::WRITE_BINARY
         | fs::REMOVE | fs::EXISTS | fs::LIST => Some(Fs),
         vault::READ_TEXT | vault::WRITE_TEXT | vault::READ_BINARY | vault::WRITE_BINARY
-        | vault::IMAGE_INFO | vault::LIST | vault::EXISTS => Some(Vault),
+        | vault::IMPORT_FILE | vault::IMAGE_INFO | vault::LIST | vault::EXISTS => Some(Vault),
         table::SNAPSHOT | table::UPDATE_CELL | table::ADD_ROW | table::REMOVE_ROW
         | table::SELECT_ROW | table::SET_CELL_IMAGE => Some(Table),
         process::SPAWN | process::WRITE_STDIN | process::CLOSE_STDIN | process::KILL => Some(Process),

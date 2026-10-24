@@ -15,23 +15,62 @@ use serde_json::json;
 
 use crate::access::{join_err, member_root, write_root};
 use crate::auth::AuthUser;
-use crate::fsops::{atomic_write, file_mtime_secs, read_dir_filtered, JoinError, RESERVED_MEDIA_DIR};
+use crate::fsops::{
+    atomic_write, file_mtime_secs, read_dir_filtered, read_dir_including_hidden, JoinError,
+    RESERVED_MEDIA_DIR,
+};
 use crate::state::{bad_request, internal, max_file_bytes, not_found, ServerState};
 use crate::{ApiError, ApiResult};
 
 /// 单文件字节上限（局域网传输与内存呈现的合理上限；过大单文件拖累服务端内存与同步）。
 pub const MAX_FILE_BYTES: usize = 50 * 1024 * 1024;
 
-/// 全仓库文件树（嵌套；隐藏目录与 `.tmp` 原子写产物不出现，与客户端文件面板同过滤）。
+/// 文件树查询参数。
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TreeQuery {
+    /// 是否列出 `.` 开头的隐藏项（插件仓库能力面；缺省 = 文件面板口径）。
+    #[serde(default, deserialize_with = "de_flag")]
+    include_hidden: bool,
+    /// 只列该子目录（仓库相对路径；缺省 = 仓库根）。
+    #[serde(default)]
+    dir: Option<String>,
+}
+
+/// 查询串布尔：兼容 `1`/`true`（反序列化默认只认 `true`/`false`）。
+fn de_flag<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = String::deserialize(deserializer)?;
+    match raw.as_str() {
+        "1" | "true" => Ok(true),
+        "0" | "false" => Ok(false),
+        other => Err(serde::de::Error::custom(format!("非法布尔值：{other}"))),
+    }
+}
+
+/// 全仓库文件树（嵌套；隐藏目录与 `.tmp` 原子写产物默认不出现，与客户端文件面板同过滤）。
+/// `includeHidden=1` 时放行隐藏项（`.tmp` 仍挡）；`dir` 只列该子目录（插件按目录列举时
+/// 不必拉整棵树）。
 pub async fn tree(
     State(state): State<ServerState>,
     user: AuthUser,
     Path(space_id): Path<String>,
+    Query(query): Query<TreeQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let root = member_root(&state, &space_id, &user)?;
     // 团队层排除文件夹：任意层级同名目录不进树（与个人仓库 `excludeFolders` 同语义）
     let exclude = crate::meta::space_exclusions(state.data_dir(), &space_id);
-    let nodes = list_tree_in(&root.0, "", &exclude).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let dir = query.dir.unwrap_or_default();
+    if !dir.is_empty() {
+        let path = root.join(&dir, false).map_err(join_err)?;
+        if !path.is_dir() {
+            return Err(not_found("目录不存在"));
+        }
+    }
+    let nodes = list_tree_in(&root.0, &dir, &exclude, query.include_hidden)
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(serde_json::to_value(nodes).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?))
 }
 
@@ -45,12 +84,25 @@ struct TreeNode {
     children: Vec<TreeNode>,
 }
 
-fn list_tree_in(root: &std::path::Path, rel: &str, exclude_folders: &[String]) -> Result<Vec<TreeNode>, String> {
+fn list_tree_in(
+    root: &std::path::Path,
+    rel: &str,
+    exclude_folders: &[String],
+    include_hidden: bool,
+) -> Result<Vec<TreeNode>, String> {
     let dir = if rel.is_empty() { root.to_path_buf() } else { root.join(rel) };
+    let entries = match include_hidden {
+        true => read_dir_including_hidden(&dir, rel, exclude_folders),
+        false => read_dir_filtered(&dir, rel, exclude_folders),
+    }?;
     let mut nodes: Vec<TreeNode> = vec![];
-    for (child_rel, is_dir) in read_dir_filtered(&dir, rel, exclude_folders)? {
+    for (child_rel, is_dir) in entries {
         let path = root.join(&child_rel);
-        let children = if is_dir { list_tree_in(root, &child_rel, exclude_folders)? } else { vec![] };
+        let children = if is_dir {
+            list_tree_in(root, &child_rel, exclude_folders, include_hidden)?
+        } else {
+            vec![]
+        };
         nodes.push(TreeNode {
             name: child_rel.rsplit('/').next().unwrap_or(&child_rel).to_string(),
             path: child_rel,
@@ -113,6 +165,25 @@ pub async fn read_file(
     }
 }
 
+/// 路径存在性（插件仓库能力面：隐藏段可见；只判文件，不读内容）。
+pub async fn stat_path(
+    State(state): State<ServerState>,
+    user: AuthUser,
+    Path(space_id): Path<String>,
+    Query(query): Query<FilePathQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if query.path.is_empty() {
+        return Err(bad_request("路径不能为空"));
+    }
+    let root = member_root(&state, &space_id, &user)?;
+    match root.join(&query.path, false) {
+        Ok(path) => Ok(Json(json!({ "exists": path.is_file() }))),
+        // 父目录不存在 = 文件不存在（与读取同口径）
+        Err(JoinError::NotFound(_)) => Ok(Json(json!({ "exists": false }))),
+        Err(e @ JoinError::Invalid(_)) => Err(bad_request(&e.to_string())),
+    }
+}
+
 /// 写文本文件（原子写；自动建父目录；路径已存在目录则拒绝）。与补丁端点共用每路径写锁，
 /// 同路径并发写严格按到达序落地。
 pub async fn write_file(
@@ -162,7 +233,8 @@ pub async fn write_file(
     }
     let updated_at = file_mtime_secs(&path);
     tracing::info!(space_id = %space_id, path = %body.path, bytes = bytes.len(), "内容写入");
-    Ok(Json(json!({ "updatedAt": updated_at })).into_response())
+    // `created` 供客户端区分新建 / 覆盖（前者另发结构变更广播）
+    Ok(Json(json!({ "updatedAt": updated_at, "created": !pre_exists })).into_response())
 }
 
 #[derive(Deserialize)]

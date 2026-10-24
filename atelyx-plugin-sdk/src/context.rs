@@ -189,8 +189,35 @@ impl Context {
 
     /// 把一个可滚动容器（`list` / `scroll`）滚到一端。目标节点须在当前树里且为可滚动容器。
     pub async fn scroll_to(&self, surface_id: &str, node_id: &str, edge: ScrollEdge) -> Result<(), RpcError> {
-        let params = ScrollToParams { surface_id: surface_id.into(), node_id: node_id.into(), edge };
+        let params = ScrollToParams {
+            surface_id: surface_id.into(),
+            node_id: node_id.into(),
+            edge: Some(edge),
+            offset: None,
+        };
         self.call_unit(method::view::SCROLL_TO, &params).await
+    }
+
+    /// 按比例滚动：`offset` 0 = 起点、1 = 终点（越界与内容不足一屏时由宿主钳制）。
+    pub async fn scroll_to_offset(&self, surface_id: &str, node_id: &str, offset: f32) -> Result<(), RpcError> {
+        let params = ScrollToParams {
+            surface_id: surface_id.into(),
+            node_id: node_id.into(),
+            edge: None,
+            offset: Some(offset),
+        };
+        self.call_unit(method::view::SCROLL_TO, &params).await
+    }
+
+    /// 声明本插件的默认布局：宿主在首次启用时摆进当前场景，之后改名 / 删除都不再补回。
+    /// 重名由宿主追加序号；规格结构非法由宿主可读拒绝。
+    pub async fn declare_default_layout(
+        &self,
+        name: &str,
+        spec: crate::protocol::layout::LayoutSpecNode,
+    ) -> Result<(), RpcError> {
+        let params = DeclareDefaultLayoutParams { name: name.into(), spec };
+        self.call_unit(method::layout::DECLARE_DEFAULT, &params).await
     }
 
     /// 按 id 撤销自己的一个贡献点（未注册的 id 报可读错误）。
@@ -413,6 +440,17 @@ impl Context {
         let base64_text = base64::engine::general_purpose::STANDARD.encode(bytes);
         let params = WriteBinaryParams { path: path.into(), base64: base64_text };
         self.call_unit(method::vault::WRITE_BINARY, &params).await
+    }
+
+    /// 把插件私有目录里的一个文件收进仓库（大文件走这条：字节不进 RPC 载荷）。
+    /// `source` 为 [`Self::private_dir`] 下的绝对路径，`path` 为仓库相对目标。
+    /// 复制语义——源文件落库后仍在，需清理就用 `fs` 删除；不受单次载荷上限约束，
+    /// 也不按默认调用超时判失败（大文件与协作空间上传耗时由宿主实际进展决定）。
+    pub async fn vault_import_file(&self, path: &str, source: &str) -> Result<(), RpcError> {
+        let params = ImportFileParams { path: path.into(), source: source.into() };
+        self.call_typed_unbounded::<_, Value>(method::vault::IMPORT_FILE, &params)
+            .await
+            .map(|_| ())
     }
 
     pub async fn vault_list(&self, path: &str) -> Result<Vec<FsEntry>, RpcError> {

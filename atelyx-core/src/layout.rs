@@ -2,6 +2,11 @@
 //! 主页/默认布局构建 + normalize/形状守卫。模型与磁盘格式由壳侧复用；
 //! 磁盘路径与窗口副作用由壳侧提供，本模块不碰磁盘与窗口。
 
+use atelyx_plugin_protocol::layout::{
+    LayoutSpecNode, MAX_DEPTH as SPEC_MAX_DEPTH, MAX_NAME_BYTES as SPEC_MAX_NAME_BYTES,
+    MAX_PANELS as SPEC_MAX_PANELS, MAX_VIEWS_PER_PANEL as SPEC_MAX_VIEWS_PER_PANEL,
+};
+use atelyx_plugin_protocol::view::Axis;
 use nanoid::nanoid;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -176,6 +181,9 @@ pub struct AppUiState {
     /// single 槽手动胜者覆盖（槽 → 钉住的贡献 id；由壳侧维护并 patch 到本模块）。
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub slot_winner_overrides: HashMap<String, String>,
+    /// 已自动摆过默认布局的插件 id（每插件只摆一次；用户改名 / 删除后不再补回）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plugin_layouts_applied: Vec<String>,
 }
 
 /// ui-state.json 的 schema 版本（格式变更直接升版，旧文件按默认态处理）。
@@ -283,6 +291,8 @@ pub enum LayoutOp {
     SetLayoutSizes { split_id: String, sizes: Vec<f64> },
     /// 新建布局（单个空面板占位），命名「布局 N」自动去重，并激活。
     AddLayout,
+    /// 按插件声明的默认布局规格新建布局并激活（重名追加序号）。
+    AddLayoutFromSpec { name: String, spec: LayoutSpecNode },
     /// 重命名布局（主页固定不可重命名）。
     RenameLayout { id: String, name: String },
     /// 删除布局（主页固定不可删；场景内最后一个不可删）。
@@ -1057,37 +1067,7 @@ pub fn regenerate_ids(node: &LayoutNode) -> LayoutNode {
 
 // ===== 插件默认布局规格 =====
 
-/// 插件默认布局规格节点（`ctx.layout.declareDefaultLayout` 载荷）。插件只描述结构与视图 kind，
-/// 面板/标签 id 由宿主实例化时生成——插件不经手 nanoid。
-#[derive(Deserialize, Debug, Clone, PartialEq)]
-#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
-pub enum LayoutSpecNode {
-    /// 分割节点：方向 + 子树 + 占比（尺寸规则与 `LayoutNode::Split` 一致）。
-    #[serde(rename = "split")]
-    Split {
-        #[serde(rename = "direction")]
-        direction: String,
-        #[serde(rename = "children")]
-        children: Vec<LayoutSpecNode>,
-        #[serde(rename = "sizes")]
-        sizes: Vec<f64>,
-    },
-    /// 面板节点：按顺序放置的视图 kind（首个为激活标签）。
-    #[serde(rename = "panel")]
-    Panel {
-        #[serde(rename = "views")]
-        views: Vec<String>,
-    },
-}
-
-/// 规格形状上限：插件声明的默认布局与用户布局同受形状守卫约束，防病态规格撑爆布局树。
-const SPEC_MAX_DEPTH: usize = 16;
-const SPEC_MAX_PANELS: usize = 32;
-const SPEC_MAX_VIEWS_PER_PANEL: usize = 16;
-/// 默认布局名的字节上限（多字节字符按字节计，与 plugin_id_valid 的口径一致）。
-pub const SPEC_MAX_NAME_BYTES: usize = 64;
-
-/// 校验规格：方向合法、各 Split 尺寸形状合法、每个面板视图非空、深度/面板数在上限内。
+/// 校验规格：各 Split 尺寸形状合法、每个面板视图非空、深度/面板数在上限内。
 pub fn layout_spec_valid(node: &LayoutSpecNode) -> bool {
     fn check(node: &LayoutSpecNode, depth: usize, panels: &mut usize) -> bool {
         if depth > SPEC_MAX_DEPTH {
@@ -1101,15 +1081,20 @@ pub fn layout_spec_valid(node: &LayoutSpecNode) -> bool {
                     && views.len() <= SPEC_MAX_VIEWS_PER_PANEL
                     && views.iter().all(|v| !v.is_empty())
             }
-            LayoutSpecNode::Split { direction, children, sizes } => {
-                (direction == "horizontal" || direction == "vertical")
-                    && sizes_valid_for(sizes, children.len())
+            LayoutSpecNode::Split { children, sizes, .. } => {
+                sizes_valid_for(sizes, children.len())
                     && children.iter().all(|c| check(c, depth + 1, panels))
             }
         }
     }
     let mut panels = 0usize;
     check(node, 0, &mut panels)
+}
+
+/// 默认布局名合法：去空白后非空且不超字节上限。
+pub fn layout_spec_name_valid(name: &str) -> bool {
+    let trimmed = name.trim();
+    !trimmed.is_empty() && trimmed.len() <= SPEC_MAX_NAME_BYTES
 }
 
 /// 收集规格中的全部视图 kind（「用户布局已含插件视图」守卫的扫描面）。
@@ -1135,7 +1120,11 @@ pub fn instantiate_layout_spec(node: &LayoutSpecNode) -> LayoutNode {
         }
         LayoutSpecNode::Split { direction, children, sizes } => LayoutNode::Split {
             id: nanoid!(),
-            direction: direction.clone(),
+            direction: match direction {
+                Axis::Horizontal => "horizontal",
+                Axis::Vertical => "vertical",
+            }
+            .to_string(),
             children: children.iter().map(instantiate_layout_spec).collect(),
             sizes: sizes.clone(),
         },
@@ -1421,6 +1410,23 @@ pub fn apply_layout_op(ui: &mut AppUiState, op: &LayoutOp) -> LayoutOpResult {
             ui.active_layout_id = Some(new_id);
             ui.focused_panel_id = None;
         }
+        LayoutOp::AddLayoutFromSpec { name, spec } => {
+            let new_id = {
+                let scene = active_scene_mut(ui);
+                let names: Vec<String> = scene.layouts.iter().map(|l| l.name.clone()).collect();
+                let layout = WorkspaceLayout {
+                    id: nanoid::nanoid!(),
+                    name: unique_layout_name(&names, name.trim()),
+                    tree: instantiate_layout_spec(spec),
+                };
+                let new_id = layout.id.clone();
+                scene.layouts.push(layout);
+                scene.active_layout_id = Some(new_id.clone());
+                new_id
+            };
+            ui.active_layout_id = Some(new_id);
+            ui.focused_panel_id = None;
+        }
         LayoutOp::RenameLayout { id, name } => {
             if id == HOME_LAYOUT_ID {
                 return result;
@@ -1574,6 +1580,9 @@ pub fn op_passes_shape_check(ui: &AppUiState, op: &LayoutOp) -> bool {
     match op {
         LayoutOp::SetLayoutSizes { split_id, sizes } => split_children_count(&active_layout(ui).tree, split_id)
             .is_some_and(|n| sizes_valid_for(sizes, n)),
+        LayoutOp::AddLayoutFromSpec { name, spec } => {
+            layout_spec_name_valid(name) && layout_spec_valid(spec)
+        }
         _ => true,
     }
 }
@@ -1955,27 +1964,22 @@ mod tests {
     fn layout_spec_validation() {
         assert!(layout_spec_valid(&spec_panel(&["note"])));
         assert!(layout_spec_valid(&LayoutSpecNode::Split {
-            direction: "horizontal".into(),
+            direction: Axis::Horizontal,
             children: vec![spec_panel(&["files"]), spec_panel(&["note", "aichat"])],
             sizes: vec![30.0, 70.0],
         }));
-        // 方向非法 / 空视图 / 尺寸形状非法 / 空面板
-        assert!(!layout_spec_valid(&LayoutSpecNode::Split {
-            direction: "diagonal".into(),
-            children: vec![spec_panel(&["note"])],
-            sizes: vec![100.0],
-        }));
+        // 空视图 / 尺寸形状非法 / 空面板
         assert!(!layout_spec_valid(&spec_panel(&[""])));
         assert!(!layout_spec_valid(&spec_panel(&[])));
         assert!(!layout_spec_valid(&LayoutSpecNode::Split {
-            direction: "horizontal".into(),
+            direction: Axis::Horizontal,
             children: vec![spec_panel(&["note"]), spec_panel(&["aichat"])],
             sizes: vec![50.0],
         }));
         // 深度超限
         let mut deep = spec_panel(&["note"]);
         for _ in 0..(SPEC_MAX_DEPTH + 2) {
-            deep = LayoutSpecNode::Split { direction: "horizontal".into(), children: vec![deep], sizes: vec![50.0, 50.0] };
+            deep = LayoutSpecNode::Split { direction: Axis::Horizontal, children: vec![deep], sizes: vec![50.0, 50.0] };
         }
         assert!(!layout_spec_valid(&deep));
     }
@@ -1983,7 +1987,7 @@ mod tests {
     #[test]
     fn instantiate_layout_spec_generates_ids_and_active_tab() {
         let spec = LayoutSpecNode::Split {
-            direction: "vertical".into(),
+            direction: Axis::Vertical,
             children: vec![spec_panel(&["files"]), spec_panel(&["note", "aichat"])],
             sizes: vec![20.0, 80.0],
         };
@@ -2014,7 +2018,7 @@ mod tests {
     #[test]
     fn layout_spec_views_collects_panels() {
         let spec = LayoutSpecNode::Split {
-            direction: "horizontal".into(),
+            direction: Axis::Horizontal,
             children: vec![spec_panel(&["files"]), spec_panel(&["note", "aichat"])],
             sizes: vec![50.0, 50.0],
         };
@@ -2028,5 +2032,33 @@ mod tests {
         assert_eq!(unique_layout_name(&names, "画布"), "画布 2");
         let names = vec!["画布".to_string(), "画布 2".to_string(), "画布 3".to_string()];
         assert_eq!(unique_layout_name(&names, "画布"), "画布 4");
+    }
+
+    #[test]
+    fn add_layout_from_spec_dedups_name_and_activates() {
+        let mut ui = ui_with(two_panels_horizontal());
+        let _ = apply_layout_op(
+            &mut ui,
+            &LayoutOp::AddLayoutFromSpec { name: "L".into(), spec: spec_panel(&["note"]) },
+        );
+        let added = ui.scenes[0].layouts.last().unwrap();
+        assert_eq!(added.name, "L 2", "与既有布局重名时追加序号");
+        assert_eq!(ui.scenes[0].active_layout_id.as_deref(), Some(added.id.as_str()));
+        assert_eq!(ui.active_layout_id.as_deref(), Some(added.id.as_str()));
+        assert!(ui.focused_panel_id.is_none());
+        let tabs = match &added.tree {
+            LayoutNode::Panel { tabs, .. } => tabs.iter().map(|t| t.view.as_str()).collect::<Vec<_>>(),
+            _ => panic!("单面板规格应实例化为面板"),
+        };
+        assert_eq!(tabs, vec!["note"]);
+        // 空白名与非法规格不进模型
+        assert!(!op_passes_shape_check(
+            &ui,
+            &LayoutOp::AddLayoutFromSpec { name: " ".into(), spec: spec_panel(&["note"]) }
+        ));
+        assert!(!op_passes_shape_check(
+            &ui,
+            &LayoutOp::AddLayoutFromSpec { name: "空视图".into(), spec: spec_panel(&[]) }
+        ));
     }
 }

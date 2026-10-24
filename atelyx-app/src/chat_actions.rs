@@ -1514,6 +1514,7 @@ async fn materialize_images(
             ImageBackend::Space { client, space_id } => client
                 .put_file_bytes(space_id, &rel, &img.bytes)
                 .await
+                .map(|_| ())
                 .map_err(|e| e.to_string()),
         };
         if let Err(e) = write {
