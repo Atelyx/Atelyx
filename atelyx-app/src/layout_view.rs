@@ -12,6 +12,7 @@ use iced::alignment::{Horizontal, Vertical};
 use iced::widget::text::{LineHeight, Wrapping};
 use iced::widget::{button, column, container, mouse_area, row, scrollable, space, stack, text_editor, text_input, Stack};
 use iced::{Color, Element, Length, Padding, Point, Rectangle, Size, border, widget::container::Style};
+use serde_json::Value;
 
 use atelyx_core::global_config::RecentVault;
 use atelyx_core::layout::{self, AppUiState, LayoutNode, TabItem};
@@ -252,6 +253,16 @@ pub(crate) enum PopupState {
     TableRowMenu { row_id: String },
     /// 表格：添加字段（输入 + 类型列表）。
     TableAddField,
+    /// 画布：卡右键。
+    CanvasCardMenu { node_id: String },
+    /// 画布：分组右键（改色 / 改名 / 收起展开）。
+    CanvasGroupMenu { node_id: String },
+    /// 画布：多选右键（批量删除 / 复制 / 编组）。
+    CanvasMultiMenu,
+    /// 画布：空白右键（粘贴 / 新建分组）。
+    CanvasBlankMenu { x: f64, y: f64 },
+    /// 画布：分组改名（内联输入）。
+    CanvasGroupRename { node_id: String },
     /// 表格：状态栏计算类型。
     TableStatMenu { field_id: String },
     /// 表格：全选角钮右键。
@@ -360,6 +371,11 @@ impl PopupState {
             PopupState::TableStatMenu { .. } => 128.0,
             PopupState::TableSelectAllMenu => 160.0,
             PopupState::TableMoreMenu => 144.0,
+            PopupState::CanvasCardMenu { .. } => 144.0,
+            PopupState::CanvasGroupMenu { .. } => 160.0,
+            PopupState::CanvasMultiMenu => 144.0,
+            PopupState::CanvasBlankMenu { .. } => 144.0,
+            PopupState::CanvasGroupRename { .. } => 200.0,
             PopupState::FontPicker { .. } => 240.0,
             PopupState::TableSizeMenu => 96.0,
             PopupState::ColorPicker { .. } => crate::ui::color_picker::PANEL_W,
@@ -4276,6 +4292,206 @@ fn popup_element<'a>(
             }
             entries
         }
+        PopupState::CanvasCardMenu { node_id } => {
+            let node = app
+                .canvas
+                .as_ref()
+                .and_then(|s| s.data.nodes.iter().find(|n| &n.id == node_id));
+            let mut entries = vec![(
+                0,
+                MenuEntry::action_icon("复制", "copy", canvas_menu(crate::canvas_view::CanvasMenuAction::CopySelection)),
+            )];
+            match node.map(|n| n.node_type.as_str()) {
+                Some("conversation") => {
+                    entries.push((
+                        0,
+                        MenuEntry::action_icon(
+                            "在 AI 面板打开",
+                            "message-square",
+                            canvas_menu(crate::canvas_view::CanvasMenuAction::OpenInPanel(node_id.clone())),
+                        ),
+                    ));
+                }
+                Some("table") | Some("text") => {
+                    if let Some(rel) = node.and_then(|n| n.data.get("file")).and_then(Value::as_str) {
+                        let label = if node.is_some_and(|n| n.node_type == "table") {
+                            "打开表格"
+                        } else {
+                            "打开笔记"
+                        };
+                        entries.push((0, MenuEntry::action_icon(label, "external-link", Message::OpenFile(rel.to_string()))));
+                    }
+                }
+                _ => {}
+            }
+            entries.push((
+                2,
+                MenuEntry::danger("删除", "trash-2", canvas_menu(crate::canvas_view::CanvasMenuAction::DeleteSelection)),
+            ));
+            entries
+        }
+        PopupState::CanvasGroupMenu { node_id } => {
+            let group = app
+                .canvas
+                .as_ref()
+                .and_then(|s| s.data.nodes.iter().find(|n| &n.id == node_id));
+            let collapsed = group
+                .and_then(|n| n.data.get("collapsed"))
+                .and_then(Value::as_bool)
+                == Some(true);
+            let current = group
+                .and_then(|n| n.data.get("color"))
+                .and_then(Value::as_str)
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(0);
+            let mut entries = vec![
+                (
+                    0,
+                    MenuEntry::Submenu {
+                        label: "颜色".into(),
+                        icon: Some("palette".into()),
+                        disabled: false,
+                        pane: 1,
+                    },
+                ),
+                (
+                    0,
+                    MenuEntry::action_icon(
+                        "重命名",
+                        "pencil",
+                        canvas_menu(crate::canvas_view::CanvasMenuAction::GroupRenameStart { node: node_id.clone() }),
+                    ),
+                ),
+                (
+                    0,
+                    MenuEntry::action_icon(
+                        if collapsed { "展开" } else { "收起" },
+                        if collapsed { "chevrons-up-down" } else { "chevrons-down-up" },
+                        canvas_menu(crate::canvas_view::CanvasMenuAction::ToggleCollapse { node: node_id.clone() }),
+                    ),
+                ),
+                (
+                    2,
+                    // 删组只删容器：成员卡保留（成员判定是空间关系）
+                    MenuEntry::danger("删除分组", "trash-2", canvas_menu(crate::canvas_view::CanvasMenuAction::DeleteSelection)),
+                ),
+            ];
+            // 颜色子面板（pane 1）：色板行 + 当前色角标
+            for (i, color) in crate::ui::palette::CANVAS_GROUP_COLORS.iter().enumerate() {
+                let idx = i + 1;
+                let swatch = container(space().width(12.0).height(12.0)).style(move |_| {
+                    iced::widget::container::Style {
+                        background: Some((*color).into()),
+                        border: iced::border::rounded(3.0).color(crate::ui::palette::BORDER),
+                        ..Default::default()
+                    }
+                });
+                entries.push((
+                    1,
+                    MenuEntry::Custom(
+                        iced::widget::button(
+                            row![
+                                swatch,
+                                text(if idx == current {
+                                    format!("色 {idx}（当前）")
+                                } else {
+                                    format!("色 {idx}")
+                                })
+                                .size(pal::fs_caption()),
+                            ]
+                                .spacing(8)
+                                .align_y(iced::alignment::Vertical::Center),
+                        )
+                        .padding(Padding::ZERO.horizontal(12.0).vertical(5.0))
+                        .width(Length::Fill)
+                        .style(|t, s| controls::row_style(false, pal::RADIUS_SM)(t, s))
+                        .on_press(canvas_menu(crate::canvas_view::CanvasMenuAction::GroupColor {
+                            node: node_id.clone(),
+                            index: idx,
+                        }))
+                        .into(),
+                        28.0,
+                    ),
+                ));
+            }
+            entries
+        }
+        PopupState::CanvasMultiMenu => vec![
+            (
+                0,
+                MenuEntry::action_icon("复制", "copy", canvas_menu(crate::canvas_view::CanvasMenuAction::CopySelection)),
+            ),
+            (
+                0,
+                MenuEntry::action_icon(
+                    "创建分组",
+                    "layers",
+                    canvas_menu(crate::canvas_view::CanvasMenuAction::CreateGroupFromSelection),
+                ),
+            ),
+            (
+                2,
+                MenuEntry::danger("删除", "trash-2", canvas_menu(crate::canvas_view::CanvasMenuAction::DeleteSelection)),
+            ),
+        ],
+        PopupState::CanvasBlankMenu { x, y } => vec![
+            (
+                0,
+                MenuEntry::action_icon(
+                    "粘贴",
+                    "clipboard-paste",
+                    canvas_menu(crate::canvas_view::CanvasMenuAction::Paste),
+                ),
+            ),
+            (
+                0,
+                MenuEntry::action_icon(
+                    "新建分组",
+                    "layers",
+                    canvas_menu(crate::canvas_view::CanvasMenuAction::CreateGroupAt { x: *x, y: *y }),
+                ),
+            ),
+        ],
+        PopupState::CanvasGroupRename { node_id } => {
+            let current = app
+                .canvas
+                .as_ref()
+                .and_then(|s| s.data.nodes.iter().find(|n| &n.id == node_id))
+                .and_then(|n| n.data.get("label"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let draft = app
+                .canvas
+                .as_ref()
+                .and_then(|s| s.view.group_rename.as_ref())
+                .filter(|(id, _)| id == node_id)
+                .map(|(_, d)| d.clone())
+                .unwrap_or_else(|| current.clone());
+            vec![
+                (0, MenuEntry::Custom(canvas_rename_input(&draft), 30.0)),
+                (
+                    0,
+                    MenuEntry::action(
+                        "重命名",
+                        canvas_menu(crate::canvas_view::CanvasMenuAction::GroupRenameCommit {
+                            node: node_id.clone(),
+                            name: draft,
+                        }),
+                    ),
+                ),
+                (
+                    0,
+                    MenuEntry::Custom(
+                        popup_hint(&format!(
+                            "当前：{}",
+                            if current.is_empty() { "（未命名）" } else { current.as_str() }
+                        )),
+                        18.0,
+                    ),
+                ),
+            ]
+        }
         PopupState::TableStatMenu { field_id } => {
             let fid = field_id.clone();
             let field = app
@@ -4735,6 +4951,22 @@ fn popup_element<'a>(
 /// 表格弹层内联输入（草稿 = 表格弹层草稿；提交由菜单项动作携带）。
 fn table_popup_input(draft: &str) -> Element<'static, Message> {
     popup_text_input("名称", draft, |v| Message::Table(crate::table_view::TableMsg::PopupDraft(v)))
+}
+
+/// 画布右键菜单动作消息。
+fn canvas_menu(action: crate::canvas_view::CanvasMenuAction) -> Message {
+    Message::Canvas(crate::canvas_view::CanvasMsg::Menu(action))
+}
+
+/// 画布分组改名输入（提交由菜单项动作携带草稿；每次渲染重建携带最新草稿）。
+fn canvas_rename_input(draft: &str) -> Element<'static, Message> {
+    text_input("分组名称", draft)
+        .size(pal::fs_caption())
+        .font(crate::ui::regular())
+        .padding(Padding::ZERO.horizontal(12.0).vertical(6.0))
+        .on_input(|v| Message::Canvas(crate::canvas_view::CanvasMsg::GroupRenameDraft(v)))
+        .style(|_theme, status| controls::form_input_style(status))
+        .into()
 }
 
 /// 弹层内联输入（单行；提交由菜单项动作携带草稿）。
@@ -6110,31 +6342,43 @@ pub enum DropZone {
 
 /// 枚举全部窗口的可停靠面板矩形（拖拽会话期间位置尺寸视为稳定）。
 /// 指定窗口当前是否渲染表格视图（活动标签 view = "table"；表格视图全局唯一，同时只在一窗渲染）。
-pub fn window_shows_table(app: &App, window: iced::window::Id) -> bool {
-    let active_is_table = |tabs: &[atelyx_core::layout::TabItem], active: Option<&str>| {
+/// 窗口当前活动视图是否为指定类型（主窗扫描活动布局树；撕裂窗查其标签）。
+fn window_shows_view(app: &App, window: iced::window::Id, view: &str) -> bool {
+    let active_is = |tabs: &[atelyx_core::layout::TabItem], active: Option<&str>| {
         active
             .and_then(|tid| tabs.iter().find(|t| t.id == tid))
-            .is_some_and(|t| t.view == "table")
+            .is_some_and(|t| t.view == view)
     };
     if app.main_id == Some(window) {
-        fn scan(node: &atelyx_core::layout::LayoutNode) -> bool {
+        fn scan(node: &atelyx_core::layout::LayoutNode, view: &str) -> bool {
             match node {
                 atelyx_core::layout::LayoutNode::Panel { tabs, active_tab_id, .. } => {
                     active_tab_id
                         .as_deref()
                         .and_then(|tid| tabs.iter().find(|t| t.id == tid))
-                        .is_some_and(|t| t.view == "table")
+                        .is_some_and(|t| t.view == view)
                 }
-                atelyx_core::layout::LayoutNode::Split { children, .. } => children.iter().any(scan),
+                atelyx_core::layout::LayoutNode::Split { children, .. } => {
+                    children.iter().any(|n| scan(n, view))
+                }
             }
         }
-        scan(&atelyx_core::layout::active_layout(&app.ui).tree)
+        scan(&atelyx_core::layout::active_layout(&app.ui).tree, view)
     } else {
         app.detached_os
             .get(&window)
             .and_then(|model_id| app.ui.detached_windows.iter().find(|w| &w.id == model_id))
-            .is_some_and(|w| active_is_table(&w.tabs, w.active_tab_id.as_deref()))
+            .is_some_and(|w| active_is(&w.tabs, w.active_tab_id.as_deref()))
     }
+}
+
+pub fn window_shows_table(app: &App, window: iced::window::Id) -> bool {
+    window_shows_view(app, window, "table")
+}
+
+/// 窗口当前活动视图是否为画布（画布键盘命令的作用域判定用）。
+pub fn window_shows_canvas(app: &App, window: iced::window::Id) -> bool {
+    window_shows_view(app, window, "canvas")
 }
 
 pub fn panel_zones(app: &App) -> Vec<PanelZone> {

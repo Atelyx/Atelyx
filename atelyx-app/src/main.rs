@@ -3432,6 +3432,13 @@ impl App {
                         s.view.selection = None;
                     }
                     space_actions::table_collab_sync(self);
+                } else if layout_view::window_shows_canvas(self, window) {
+                    // 画布 Esc = 清选中（拖拽会话随松手自然收口）
+                    if let Some(s) = &mut self.canvas {
+                        s.view.selection.clear();
+                        s.view.guides.clear();
+                        s.redraw();
+                    }
                 }
                 Task::none()
             }
@@ -6798,9 +6805,16 @@ impl App {
                         }
                     }
                 }
+                commands::Scope::Canvas => {
+                    if canvas_actions::key_ready(self) {
+                        if let Some(msg) = canvas_actions::canvas_key_msg(*id) {
+                            return self.handle(Message::Canvas(msg));
+                        }
+                    }
+                }
             }
         }
-        // 重做别名：redo 未被重定义时 mod+shift+z 沿用（编辑面聚焦走部件内注入，表格直接分派）
+        // 重做别名：redo 未被重定义时 mod+shift+z 沿用（编辑面聚焦走部件内注入，表格 / 画布直接分派）
         if (mods.control() || mods.logo())
             && mods.shift()
             && !mods.alt()
@@ -6814,17 +6828,36 @@ impl App {
             {
                 return self.handle(Message::Table(tv::TableMsg::Redo));
             }
+            if canvas_actions::key_ready(self)
+                && commands::redo_alias_active(&self.global.command_shortcuts, commands::Scope::Canvas)
+            {
+                return self.handle(Message::Canvas(crate::canvas_view::CanvasMsg::Key(
+                    crate::canvas_view::CanvasKey::Redo,
+                )));
+            }
         }
-        // 退格 = 清空选区的既有别名（清空键位保持默认 delete 且表格持焦点时沿用）
+        // 退格 = 删除选中的既有别名（清空 / 删除键位保持默认 delete 时沿用）
+        let clear_binding = |id: commands::CommandId| {
+            resolved
+                .iter()
+                .find(|(c, _)| *c == id)
+                .map(|(_, b)| b.clone())
+        };
         if mods.is_empty()
             && matches!(key, keyboard::Key::Named(keyboard::key::Named::Backspace))
-            && resolved
-                .iter()
-                .find(|(c, _)| *c == commands::CommandId::TableClear)
-                .is_some_and(|(_, b)| b == "delete")
-            && self.table.as_ref().is_some_and(|t| t.view.focused)
         {
-            return self.handle(Message::Table(tv::TableMsg::ClearSelection));
+            if clear_binding(commands::CommandId::TableClear).as_deref() == Some("delete")
+                && self.table.as_ref().is_some_and(|t| t.view.focused)
+            {
+                return self.handle(Message::Table(tv::TableMsg::ClearSelection));
+            }
+            if clear_binding(commands::CommandId::CanvasClear).as_deref() == Some("delete")
+                && canvas_actions::key_ready(self)
+            {
+                return self.handle(Message::Canvas(crate::canvas_view::CanvasMsg::Key(
+                    crate::canvas_view::CanvasKey::DeleteSelection,
+                )));
+            }
         }
         if (mods.control() || mods.logo()) && !mods.alt() {
             if let keyboard::Key::Character(c) = &key {

@@ -3,6 +3,7 @@
 //! 命中几何是世界空间纯函数。
 
 use std::collections::{HashMap, HashSet};
+use std::time::Instant;
 
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::mouse;
@@ -54,6 +55,26 @@ const GRID_STEP: f64 = 100.0;
 const PREVIEW_LINES: usize = 7;
 /// 工具条高度（屏幕像素）。
 const TOOLBAR_H: f32 = 36.0;
+/// 网格吸附步长（世界坐标）。
+pub(crate) const SNAP_GRID: f64 = 16.0;
+/// 对齐参考线吸附阈值（世界坐标）。
+const ALIGN_TOL: f64 = 6.0;
+/// 框选起手最小位移（屏幕像素；低于 = 原地点击清选，不进框选）。
+pub(crate) const MARQUEE_MIN: f32 = 4.0;
+/// 创建分组时成员包围盒的外扩（世界坐标）。
+pub(crate) const GROUP_PAD: f64 = 24.0;
+/// 收起分组的折叠小卡尺寸（世界坐标；磁盘几何保持原值，展开即恢复）。
+const COLLAPSED_GROUP_W: f64 = 180.0;
+const COLLAPSED_GROUP_H: f64 = 46.0;
+/// 撤销栈深度（快照式，对称表格）。
+pub(crate) const UNDO_DEPTH: usize = 50;
+/// 小地图尺寸与视口边距（屏幕像素）。
+pub(crate) const MINIMAP_W: f32 = 180.0;
+pub(crate) const MINIMAP_H: f32 = 120.0;
+const MINIMAP_MARGIN: f32 = 12.0;
+/// 双击判定：两次按下的最大间隔与最大位移。
+const DOUBLE_CLICK_MS: u128 = 400;
+const DOUBLE_CLICK_TOL: f32 = 5.0;
 
 /// 画布保存动机（与表格 SaveReason 同构）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,7 +153,165 @@ pub fn find_free_spot(
     (start.0, y)
 }
 
-/// 适应视图变换（纯函数）：全部内容卡包围盒装入视口，无卡 = 复位原点。
+// ===== 分组与显示几何（纯函数） =====
+
+/// 卡显示尺寸：收起分组 = 折叠小卡尺寸，其余 = 磁盘几何（`node_size`）。
+/// 收起只是显示形态——width/height 不改磁盘，展开即恢复原尺寸。
+pub fn display_size(n: &atelyx_core::vault::CanvasFileNode) -> (f64, f64) {
+    if n.node_type == "group" && n.data.get("collapsed").and_then(Value::as_bool) == Some(true) {
+        (COLLAPSED_GROUP_W, COLLAPSED_GROUP_H)
+    } else {
+        node_size(n)
+    }
+}
+
+/// 节点中心点（世界坐标，按显示尺寸）。
+fn node_center(n: &atelyx_core::vault::CanvasFileNode) -> (f64, f64) {
+    let (w, h) = display_size(n);
+    (n.x + w / 2.0, n.y + h / 2.0)
+}
+
+/// 分组是否收起（data.collapsed，缺省展开）。
+fn group_collapsed(g: &atelyx_core::vault::CanvasFileNode) -> bool {
+    g.node_type == "group" && g.data.get("collapsed").and_then(Value::as_bool) == Some(true)
+}
+
+/// 卡所属分组的下标（成员中心点落在组矩形内；多组重叠取后声明者）。
+/// 分组自身不属于任何组（不嵌套）。成员判定按磁盘几何（展开矩形）：
+/// 收起只改显示形态，不改归属。
+pub fn group_of(nodes: &[atelyx_core::vault::CanvasFileNode], node_id: &str) -> Option<usize> {
+    let n = nodes.iter().find(|n| n.id == node_id)?;
+    if n.node_type == "group" {
+        return None;
+    }
+    let (cx, cy) = node_center(n);
+    nodes.iter().rposition(|g| {
+        g.node_type == "group" && {
+            let (w, h) = node_size(g);
+            cx >= g.x && cx <= g.x + w && cy >= g.y && cy <= g.y + h
+        }
+    })
+}
+
+/// 分组的成员 id 列表（成员判定 = 中心点在组矩形内，纯空间关系不落盘）。
+pub fn group_members(nodes: &[atelyx_core::vault::CanvasFileNode], group_id: &str) -> Vec<String> {
+    nodes
+        .iter()
+        .filter(|n| {
+            n.node_type != "group"
+                && group_of(nodes, &n.id).is_some_and(|i| nodes[i].id == group_id)
+        })
+        .map(|n| n.id.clone())
+        .collect()
+}
+
+/// 卡是否被收起分组隐藏（成员所属组处于收起态；隐藏 = 不绘制、不命中、浮层不建）。
+pub fn hidden_by_collapsed(nodes: &[atelyx_core::vault::CanvasFileNode], node_id: &str) -> bool {
+    group_of(nodes, node_id).is_some_and(|i| group_collapsed(&nodes[i]))
+}
+
+/// 框选命中：显示矩形与选择矩形相交的卡（不含分组——组是容器，单击可选中）。
+pub fn marquee_hit(
+    nodes: &[atelyx_core::vault::CanvasFileNode],
+    rect: (f64, f64, f64, f64),
+) -> Vec<String> {
+    let (rx, ry, rw, rh) = rect;
+    nodes
+        .iter()
+        .filter(|n| {
+            if n.node_type == "group" || hidden_by_collapsed(nodes, &n.id) {
+                return false;
+            }
+            let (w, h) = display_size(n);
+            n.x < rx + rw && n.x + w > rx && n.y < ry + rh && n.y + h > ry
+        })
+        .map(|n| n.id.clone())
+        .collect()
+}
+
+/// 对齐参考线（世界坐标的竖线 / 横线）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Guide {
+    pub vertical: bool,
+    pub at: f64,
+}
+
+/// 拖动吸附结果：位移修正量与生效参考线。
+#[derive(Debug, Clone, PartialEq)]
+pub struct SnapOutcome {
+    pub dx: f64,
+    pub dy: f64,
+    pub guides: Vec<Guide>,
+}
+
+/// 拖动吸附（纯函数）：移动集包围盒的左 / 中 / 右对静态节点的边 / 中心线全配对做参考线
+/// 吸附（阈值内取最近，两轴独立），该轴无参考线时坐标取整到网格。
+pub fn snap_move(
+    statics: &[(f64, f64, f64, f64)],
+    bbox: (f64, f64, f64, f64),
+) -> SnapOutcome {
+    let (bx, by, bw, bh) = bbox;
+    let (m_xs, m_ys) = ([bx, bx + bw / 2.0, bx + bw], [by, by + bh / 2.0, by + bh]);
+    let mut best_x: Option<(f64, f64)> = None;
+    let mut best_y: Option<(f64, f64)> = None;
+    for &(sx, sy, sw, sh) in statics {
+        let s_xs = [sx, sx + sw / 2.0, sx + sw];
+        let s_ys = [sy, sy + sh / 2.0, sy + sh];
+        for &m in &m_xs {
+            for &s in &s_xs {
+                let d = s - m;
+                if d.abs() <= ALIGN_TOL && best_x.is_none_or(|(bd, _)| d.abs() < bd.abs()) {
+                    best_x = Some((d, s));
+                }
+            }
+        }
+        for &m in &m_ys {
+            for &s in &s_ys {
+                let d = s - m;
+                if d.abs() <= ALIGN_TOL && best_y.is_none_or(|(bd, _)| d.abs() < bd.abs()) {
+                    best_y = Some((d, s));
+                }
+            }
+        }
+    }
+    let mut guides = Vec::new();
+    let dx = match best_x {
+        Some((d, line)) => {
+            guides.push(Guide { vertical: true, at: line });
+            d
+        }
+        None => (bx / SNAP_GRID).round() * SNAP_GRID - bx,
+    };
+    let dy = match best_y {
+        Some((d, line)) => {
+            guides.push(Guide { vertical: false, at: line });
+            d
+        }
+        None => (by / SNAP_GRID).round() * SNAP_GRID - by,
+    };
+    SnapOutcome { dx, dy, guides }
+}
+
+/// resize 网格取整（钳最小尺寸后取整到网格）。
+pub fn snap_size(w: f64, h: f64) -> (f64, f64) {
+    let snap = |v: f64, min: f64| ((v / SNAP_GRID).round() * SNAP_GRID).max(min);
+    (snap(w, CARD_MIN_W), snap(h, CARD_MIN_H))
+}
+
+/// 矩形集包围盒 (x, y, w, h)；空集 = 原点零尺寸。
+pub fn bbox_of_rects(rects: &[(f64, f64, f64, f64)]) -> (f64, f64, f64, f64) {
+    let Some(&(x0, y0, _, _)) = rects.first() else {
+        return (0.0, 0.0, 0.0, 0.0);
+    };
+    let (bx0, by0, bx1, by1) = rects
+        .iter()
+        .fold((x0, y0, x0, y0), |(ax0, ay0, ax1, ay1), (x, y, w, h)| {
+            (ax0.min(*x), ay0.min(*y), ax1.max(x + w), ay1.max(y + h))
+        });
+    (bx0, by0, bx1 - bx0, by1 - by0)
+}
+
+/// 适应视图变换（纯函数）：全部可见内容卡包围盒装入视口（分组与收起组隐藏成员不计），无卡 = 复位原点。
 pub fn fit_transform(
     nodes: &[atelyx_core::vault::CanvasFileNode],
     card_size: impl Fn(&atelyx_core::vault::CanvasFileNode) -> (f64, f64),
@@ -141,7 +320,7 @@ pub fn fit_transform(
 ) -> (f32, (f32, f32)) {
     let mut bounds: Option<(f64, f64, f64, f64)> = None;
     for n in nodes {
-        if n.node_type == "group" {
+        if n.node_type == "group" || hidden_by_collapsed(nodes, &n.id) {
             continue;
         }
         let (w, h) = card_size(n);
@@ -202,9 +381,9 @@ impl CanvasSession {
         }
     }
 
-    /// 卡显示尺寸。
+    /// 卡显示尺寸（收起分组 = 折叠小卡尺寸）。
     pub fn card_size(&self, n: &atelyx_core::vault::CanvasFileNode) -> (f64, f64) {
-        node_size(n)
+        display_size(n)
     }
 
     /// 数据已变更：置脏 + 版本自增 + 内容缓存失效。
@@ -264,6 +443,17 @@ pub struct CanvasViewState {
     pub refs: HashMap<String, RefContent>,
     /// 对话卡运行态（键 = 卡节点 id）。
     pub card_chat: HashMap<String, crate::canvas_chat::CardChat>,
+    /// 撤销栈（快照式；对话卡流式生成中不接撤销 / 重做）。
+    pub undo: Vec<CanvasSnapshot>,
+    pub redo: Vec<CanvasSnapshot>,
+    /// 拖动中的对齐参考线（世界坐标；松手清空）。
+    pub guides: Vec<Guide>,
+    /// 框选中光标的屏幕坐标（仅框选会话使用）。
+    pub marquee_to: Option<(f32, f32)>,
+    /// 分组改名弹层草稿（节点 id，草稿）。
+    pub group_rename: Option<(String, String)>,
+    /// 最近一次上报的视口尺寸（粘贴落位与小地图跳转用；首帧指针事件前无值）。
+    pub viewport: (f32, f32),
     /// 网格层缓存（随平移缩放失效）。
     pub grid_cache: canvas::Cache,
     /// 内容层缓存（随数据或视图态变化失效）。
@@ -285,6 +475,12 @@ impl Default for CanvasViewState {
             text_docs: HashMap::new(),
             refs: HashMap::new(),
             card_chat: HashMap::new(),
+            undo: Vec::new(),
+            redo: Vec::new(),
+            guides: Vec::new(),
+            marquee_to: None,
+            group_rename: None,
+            viewport: (1.0, 1.0),
             grid_cache: canvas::Cache::new(),
             content_cache: canvas::Cache::new(),
         }
@@ -297,18 +493,29 @@ pub struct DragState {
     pub start: (f32, f32),
     /// 起始几何（id → (x, y, width, height)）。
     pub orig: HashMap<String, (f64, f64, f64, f64)>,
+    /// 拖拽期是否实际改写过几何（松手判定「无操作回退快照」用；点击不动 = false）。
+    pub mutated: bool,
 }
 
 #[derive(Clone)]
 pub enum DragKind {
-    /// 空白处拖拽 = 平移视口。
+    /// 中键拖拽 = 平移视口。
     Pan,
-    /// 卡拖动（松手落盘）。
+    /// 空白左键拖拽 = 框选（base = 起手时已选中的卡，Shift 框选并入）。
+    Marquee { base: Vec<String> },
+    /// 卡 / 分组拖动（松手落盘；分组拖动 orig 含成员几何联动平移）。
     Card,
-    /// 右下角 resize（松手落盘）。
+    /// 右下角 resize（松手落盘；仅单选有把手）。
     Resize(String),
     /// 从卡右侧连接点拖线（松手落在对话卡 = 建引用边）。
     Link(String),
+}
+
+/// 撤销单元：节点与连线全量快照。消息内嵌在节点 data 里随快照走（剥离即丢数据）。
+#[derive(Clone)]
+pub struct CanvasSnapshot {
+    pub nodes: Vec<atelyx_core::vault::CanvasFileNode>,
+    pub edges: Vec<atelyx_core::vault::CanvasFileEdge>,
 }
 
 /// 卡引用内容（载入后异步回填；媒体字节转句柄在回执侧完成）。
@@ -331,33 +538,37 @@ pub enum RefContent {
 
 // ===== 命中几何（世界空间纯函数） =====
 
-/// 命中判定：顶层卡优先（数组逆序），分组最低优先（组内卡可点穿）。返回节点下标。
+/// 命中判定：顶层卡优先（数组逆序），分组最低优先（组内卡可点穿）。
+/// 收起分组的成员不参与命中（不可见）。返回节点下标。
 pub fn hit_card(canvas: &atelyx_core::vault::CanvasFile, world: (f64, f64)) -> Option<usize> {
     let contains = |n: &atelyx_core::vault::CanvasFileNode| {
-        let (w, h) = node_size(n);
+        let (w, h) = display_size(n);
         world.0 >= n.x && world.0 <= n.x + w && world.1 >= n.y && world.1 <= n.y + h
     };
     // 分组置于其后判定（组矩形内的卡优先）
     canvas
         .nodes
         .iter()
-        .rposition(|n| n.node_type != "group" && contains(n))
+        .rposition(|n| n.node_type != "group" && !hidden_by_collapsed(&canvas.nodes, &n.id) && contains(n))
         .or_else(|| canvas.nodes.iter().rposition(|n| n.node_type == "group" && contains(n)))
 }
 
-/// 右下角 resize 把手命中（仅选中卡有把手；世界坐标容差按缩放反推屏幕像素）。
+/// 右下角 resize 把手命中（仅单选卡有把手——多选不提供批量缩放；世界容差按缩放反推屏幕像素）。
 pub fn hit_resize_handle(
     canvas: &atelyx_core::vault::CanvasFile,
     selection: &[String],
     zoom: f32,
     world: (f64, f64),
 ) -> Option<String> {
+    if selection.len() != 1 {
+        return None;
+    }
     let tol = HANDLE_SIZE as f64 / zoom as f64;
     for n in canvas.nodes.iter().rev() {
         if n.node_type == "group" || !selection.iter().any(|s| s == &n.id) {
             continue;
         }
-        let (w, h) = node_size(n);
+        let (w, h) = display_size(n);
         let (hx, hy) = (n.x + w, n.y + h);
         if world.0 >= hx - tol && world.0 <= hx + tol && world.1 >= hy - tol && world.1 <= hy + tol {
             return Some(n.id.clone());
@@ -366,7 +577,7 @@ pub fn hit_resize_handle(
     None
 }
 
-/// 右侧连接点命中（仅悬停 / 选中的非分组、非对话卡有连接点）。
+/// 右侧连接点命中（仅悬停 / 选中的非分组、非对话卡有连接点；收起组成员不可见不命中）。
 pub fn hit_link_handle(
     canvas: &atelyx_core::vault::CanvasFile,
     hover: Option<&str>,
@@ -376,14 +587,16 @@ pub fn hit_link_handle(
 ) -> Option<String> {
     let tol = 6.0 / zoom as f64;
     for n in canvas.nodes.iter().rev() {
-        if matches!(n.node_type.as_str(), "group" | "conversation") {
+        if matches!(n.node_type.as_str(), "group" | "conversation")
+            || hidden_by_collapsed(&canvas.nodes, &n.id)
+        {
             continue;
         }
         let active = hover == Some(n.id.as_str()) || selection.iter().any(|s| s == &n.id);
         if !active {
             continue;
         }
-        let (w, h) = node_size(n);
+        let (w, h) = display_size(n);
         let (cx, cy) = (n.x + w, n.y + h / 2.0);
         if (world.0 - cx).abs() <= tol && (world.1 - cy).abs() <= tol {
             return Some(n.id.clone());
@@ -422,25 +635,44 @@ fn nearest_side(x: f64, y: f64, w: f64, h: f64, toward: (f64, f64)) -> &'static 
     }
 }
 
-/// 连线两端锚点（世界坐标）：句柄缺失时按对端方向取最近侧。
+/// 连线两端锚点（世界坐标）：端点藏在收起组内时聚到组边缘（按对端方向取最近边），
+/// 句柄缺失时按对端方向取最近侧。
 pub fn edge_endpoints(
     canvas: &atelyx_core::vault::CanvasFile,
     e: &atelyx_core::vault::CanvasFileEdge,
 ) -> Option<((f64, f64), (f64, f64))> {
     let s = canvas.nodes.iter().find(|n| n.id == e.source)?;
     let t = canvas.nodes.iter().find(|n| n.id == e.target)?;
-    let (sw, sh) = node_size(s);
-    let (tw, th) = node_size(t);
-    let s_side = handle_side(&e.source_handle)
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| nearest_side(s.x, s.y, sw, sh, (t.x + tw / 2.0, t.y + th / 2.0)).to_string());
-    let t_side = handle_side(&e.target_handle)
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| nearest_side(t.x, t.y, tw, th, (s.x + sw / 2.0, s.y + sh / 2.0)).to_string());
-    Some((
-        anchor_of(s.x, s.y, sw, sh, &s_side),
-        anchor_of(t.x, t.y, tw, th, &t_side),
-    ))
+    let endpoint = |n: &atelyx_core::vault::CanvasFileNode,
+                    other: &atelyx_core::vault::CanvasFileNode,
+                    handle: &Option<String>| {
+        if let Some(gi) = group_of(&canvas.nodes, &n.id) {
+            let g = &canvas.nodes[gi];
+            if group_collapsed(g) {
+                let (ow, oh) = display_size(other);
+                let toward = (other.x + ow / 2.0, other.y + oh / 2.0);
+                let (w, h) = display_size(g);
+                return anchor_of(g.x, g.y, w, h, nearest_side(g.x, g.y, w, h, toward));
+            }
+        }
+        let (w, h) = display_size(n);
+        let side = handle_side(handle)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| {
+                let (ow, oh) = display_size(other);
+                nearest_side(n.x, n.y, w, h, (other.x + ow / 2.0, other.y + oh / 2.0)).to_string()
+            });
+        anchor_of(n.x, n.y, w, h, &side)
+    };
+    Some((endpoint(s, t, &e.source_handle), endpoint(t, s, &e.target_handle)))
+}
+
+/// 连线两端是否都藏在同一收起组内（组内成员互连的边随成员一起隐藏，绘制时整条跳过）。
+pub fn edge_hidden(canvas: &atelyx_core::vault::CanvasFile, e: &atelyx_core::vault::CanvasFileEdge) -> bool {
+    match (group_of(&canvas.nodes, &e.source), group_of(&canvas.nodes, &e.target)) {
+        (Some(si), Some(ti)) => si == ti && group_collapsed(&canvas.nodes[si]),
+        _ => false,
+    }
 }
 
 /// 连线语义：关联（手工、可删）/ 资产引用（源 → 对话，虚实表达消费）/ 产出血缘（对话 → 资产）。
@@ -544,6 +776,10 @@ pub enum CanvasMsg {
     Press { pos: Point, size: Size },
     /// 中键按下 = 平移起手（不改变选中；卡上也可起手平移）。
     PanPress { pos: Point, size: Size },
+    /// 右键 = 上下文菜单起手（命中判定在动作侧；拖拽会话进行中忽略）。
+    Context { window: iced::window::Id, pos: Point, size: Size },
+    /// 双击（分组标题改名 / 组体收起展开 / 表格卡与笔记卡打开）。
+    DoublePress { window: iced::window::Id, pos: Point, size: Size },
     Move { pos: Point, size: Size },
     Release,
     Wheel { delta_y: f32, delta_x: f32, pos: Point, size: Size },
@@ -559,6 +795,46 @@ pub enum CanvasMsg {
     Hover(Option<String>),
     /// 新引用卡正文 / 图片载入回执（产出落卡后按需补内容）。
     RefsLoaded(u64, HashMap<String, RefRaw>),
+    /// 右键菜单动作（菜单按压先关弹层再执行）。
+    Menu(CanvasMenuAction),
+    /// 粘贴回执（系统剪贴板文本；非画布格式忽略）。
+    PasteText(String),
+    /// 键盘命令（commands::Scope::Canvas 分派）。
+    Key(CanvasKey),
+    /// 分组改名弹层输入草稿。
+    GroupRenameDraft(String),
+    /// 小地图跳转：把世界点 (x, y) 置于视口中心（viewport = 小地图部件装配时的视口尺寸，
+    /// 适应视图待收口与视口记录都按它走——小地图点击不经过世界层指针事件）。
+    MinimapSeek { x: f64, y: f64, viewport: (f32, f32) },
+}
+
+/// 画布键盘命令。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CanvasKey {
+    Undo,
+    Redo,
+    Copy,
+    Paste,
+    SelectAll,
+    DeleteSelection,
+}
+
+/// 右键菜单动作。
+#[derive(Debug, Clone)]
+pub enum CanvasMenuAction {
+    DeleteSelection,
+    CopySelection,
+    Paste,
+    /// 以选中卡包围盒建组（外扩 GROUP_PAD）。
+    CreateGroupFromSelection,
+    /// 空白处新建空组（世界坐标落点）。
+    CreateGroupAt { x: f64, y: f64 },
+    GroupColor { node: String, index: usize },
+    /// 打开分组改名弹层（草稿在会话视图态）。
+    GroupRenameStart { node: String },
+    GroupRenameCommit { node: String, name: String },
+    ToggleCollapse { node: String },
+    OpenInPanel(String),
 }
 
 /// 载入产物：画布数据 + 预解析的 markdown 文档（对话消息流 / 文本卡正文）+ 引用内容。
@@ -586,19 +862,27 @@ pub enum RefRaw {
 
 // ===== 部件 =====
 
-/// 画布世界层自绘部件（State = ()；会话态在 App.canvas，视口由视图组装传入——
+/// 画布世界层自绘部件（会话态在 App.canvas，视口由视图组装传入——
 /// 适应视图待收口期间为适配变换，与后续提交值同源，显示不跳变）。
 pub struct WorldLayer<'a> {
     pub session: &'a CanvasSession,
     pub view: View,
+    /// 右键菜单 / 双击改名弹层的锚定窗口。
+    pub window: iced::window::Id,
+}
+
+/// 世界层自绘态：双击判定（上次左键按下的时刻与位置；存 tree::State 跨帧保留）。
+#[derive(Default)]
+pub struct ClickState {
+    last: Option<(Instant, Point)>,
 }
 
 impl canvas::Program<Message> for WorldLayer<'_> {
-    type State = ();
+    type State = ClickState;
 
     fn update(
         &self,
-        _state: &mut Self::State,
+        state: &mut Self::State,
         event: &canvas::Event,
         bounds: Rectangle,
         cursor: iced::mouse::Cursor,
@@ -606,8 +890,54 @@ impl canvas::Program<Message> for WorldLayer<'_> {
         use canvas::Event as Ev;
         match event {
             Ev::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)) => {
+                let p = cursor.position_in(bounds)?;
+                // 双击判定：短间隔 + 近距 = DoublePress，否则普通 Press（选择 / 拖拽起手）
+                let now = Instant::now();
+                let double = state
+                    .last
+                    .take_if(|(t, last)| {
+                        now.duration_since(*t).as_millis() < DOUBLE_CLICK_MS
+                            && last.distance(p) <= DOUBLE_CLICK_TOL
+                    })
+                    .is_some();
+                state.last = Some((now, p));
+                let msg = if double {
+                    // 双击落在把手 / 连接点上 = 连续拖拽起手，不按双击打开处理
+                    let world = self.view.world(p.x, p.y);
+                    let on_handle = hit_resize_handle(
+                        &self.session.data,
+                        &self.session.view.selection,
+                        self.view.zoom,
+                        world,
+                    )
+                    .is_some()
+                        || hit_link_handle(
+                            &self.session.data,
+                            self.session.view.hover.as_deref(),
+                            &self.session.view.selection,
+                            self.view.zoom,
+                            world,
+                        )
+                        .is_some();
+                    if on_handle {
+                        Message::Canvas(CanvasMsg::Press { pos: p, size: bounds.size() })
+                    } else {
+                        Message::Canvas(CanvasMsg::DoublePress {
+                            window: self.window,
+                            pos: p,
+                            size: bounds.size(),
+                        })
+                    }
+                } else {
+                    Message::Canvas(CanvasMsg::Press { pos: p, size: bounds.size() })
+                };
+                Some(iced::widget::Action::publish(msg).and_capture())
+            }
+            // 右键 = 上下文菜单起手
+            Ev::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Right)) => {
                 cursor.position_in(bounds).map(|p| {
-                    iced::widget::Action::publish(Message::Canvas(CanvasMsg::Press {
+                    iced::widget::Action::publish(Message::Canvas(CanvasMsg::Context {
+                        window: self.window,
                         pos: p,
                         size: bounds.size(),
                     }))
@@ -679,7 +1009,7 @@ impl canvas::Program<Message> for WorldLayer<'_> {
             draw_grid(&self.view, frame, bounds.size());
         });
         let content = self.session.view.content_cache.draw(renderer, bounds.size(), |frame| {
-            draw_world(self.session, &self.view, frame);
+            draw_world(self.session, &self.view, frame, bounds.size());
         });
         vec![grid, content]
     }
@@ -696,8 +1026,8 @@ impl canvas::Program<Message> for WorldLayer<'_> {
         if let Some(drag) = &self.session.view.drag {
             return match drag.kind {
                 DragKind::Pan | DragKind::Card => iced::mouse::Interaction::Grabbing,
+                DragKind::Marquee { .. } | DragKind::Link(_) => iced::mouse::Interaction::Crosshair,
                 DragKind::Resize(_) => iced::mouse::Interaction::ResizingDiagonallyUp,
-                DragKind::Link(_) => iced::mouse::Interaction::Crosshair,
             };
         }
         let world = self.view.world(p.x, p.y);
@@ -769,8 +1099,9 @@ fn draw_grid(view: &View, frame: &mut Frame, size: Size) {
     }
 }
 
-/// 内容层：分组 → 连线 → 卡（数据序，后画者在上）。
-fn draw_world(session: &CanvasSession, view: &View, frame: &mut Frame) {
+/// 内容层：分组 → 连线 → 卡（数据序，后画者在上）→ 框选与参考线。
+fn draw_world(session: &CanvasSession, view: &View, frame: &mut Frame, size: Size) {
+    let (frame_width, frame_height) = (size.width, size.height);
     let sel: HashSet<&str> = session.view.selection.iter().map(|s| s.as_str()).collect();
 
     // 分组背景（组内卡之上无内容，先画沉底）
@@ -782,20 +1113,64 @@ fn draw_world(session: &CanvasSession, view: &View, frame: &mut Frame) {
         draw_group(frame, view, n, w, h, sel.contains(n.id.as_str()));
     }
 
-    // 连线
+    // 连线（组内成员互连的边随收起隐藏）
     for e in &session.data.edges {
+        if edge_hidden(&session.data, e) {
+            continue;
+        }
         draw_edge(session, view, frame, e);
     }
 
-    // 卡（非分组，数据序）
+    // 卡（非分组，数据序；收起分组成员隐藏）
     for n in &session.data.nodes {
-        if n.node_type == "group" {
+        if n.node_type == "group" || hidden_by_collapsed(&session.data.nodes, &n.id) {
             continue;
         }
         let (w, h) = session.card_size(n);
         let link_handle = session.view.hover.as_deref() == Some(n.id.as_str())
             || sel.contains(n.id.as_str());
-        draw_card(session, view, frame, n, w, h, sel.contains(n.id.as_str()), link_handle);
+        // resize 把手仅单选卡（多选不提供批量缩放）
+        let resize_handle = sel.contains(n.id.as_str()) && session.view.selection.len() == 1;
+        draw_card(session, view, frame, n, w, h, sel.contains(n.id.as_str()), link_handle, resize_handle);
+    }
+
+    // 框选矩形（屏幕坐标：起点 → 光标）
+    if let Some(DragState { kind: DragKind::Marquee { .. }, start, .. }) = &session.view.drag {
+        if let Some((tx, ty)) = session.view.marquee_to {
+            let rect = Path::rectangle(
+                Point::new(start.0.min(tx), start.1.min(ty)),
+                Size::new((tx - start.0).abs(), (ty - start.1).abs()),
+            );
+            frame.fill(&rect, iced::Color { a: 0.08, ..pal::ACCENT });
+            frame.stroke(
+                &rect,
+                Stroke {
+                    style: canvas::Style::Solid(pal::ACCENT),
+                    width: 1.0,
+                    ..Stroke::default()
+                },
+            );
+        }
+    }
+
+    // 对齐参考线（世界坐标线横贯视口）
+    for g in &session.view.guides {
+        let line = if g.vertical {
+            let x = view.screen(g.at, 0.0).0;
+            Path::line(Point::new(x, 0.0), Point::new(x, frame_height))
+        } else {
+            let y = view.screen(0.0, g.at).1;
+            Path::line(Point::new(0.0, y), Point::new(frame_width, y))
+        };
+        frame.stroke(
+            &line,
+            Stroke {
+                style: canvas::Style::Solid(pal::ACCENT),
+                width: 1.0,
+                line_dash: LineDash { segments: &[4.0, 3.0], offset: 0 },
+                ..Stroke::default()
+            },
+        );
     }
 
     // 拖线预览：来源卡右缘连接点 → 光标
@@ -845,6 +1220,7 @@ fn top_rounded_rect(x: f32, y: f32, w: f32, h: f32, r: f32) -> Path {
 const GROUP_DASH: [f32; 2] = [6.0, 4.0];
 
 /// 分组：半透明色块 + 虚线描边 + 顶部标题行（组色 25% 底、主文字色标题）。
+/// 收起态 = 折叠小卡（显示尺寸已按收起换算）：整卡组色 25% 底、标题垂直居中。
 fn draw_group(frame: &mut Frame, view: &View, n: &atelyx_core::vault::CanvasFileNode, w: f64, h: f64, selected: bool) {
     let (sx, sy) = view.screen(n.x, n.y);
     let (sw, sh) = (w as f32 * view.zoom, h as f32 * view.zoom);
@@ -853,8 +1229,10 @@ fn draw_group(frame: &mut Frame, view: &View, n: &atelyx_core::vault::CanvasFile
     }
     let z = view.zoom;
     let color = group_color(n.data.get("color").and_then(Value::as_str));
+    let collapsed = n.data.get("collapsed").and_then(Value::as_bool) == Some(true);
     let rect = rounded_rect(sx, sy, sw, sh, GROUP_RADIUS * z);
-    frame.fill(&rect, iced::Color { a: 0.12, ..color });
+    // 收起整卡即标题行：底色直接 25%，不叠涂（半透明叠涂会显深色带）
+    frame.fill(&rect, iced::Color { a: if collapsed { 0.25 } else { 0.12 }, ..color });
     let border_color = if selected { pal::ACCENT } else { color };
     frame.stroke(
         &rect,
@@ -865,26 +1243,38 @@ fn draw_group(frame: &mut Frame, view: &View, n: &atelyx_core::vault::CanvasFile
             ..Stroke::default()
         },
     );
-    // 标题行：组色 25% 底（顶部两角随容器圆角、底边平直，与下方组底不叠涂出深色带）
-    let head_h = (CARD_HEADER_H * z).min(sh);
-    let head = top_rounded_rect(sx, sy, sw, head_h, GROUP_RADIUS * z);
-    frame.fill(&head, iced::Color { a: 0.25, ..color });
-    let label = n.data.get("label").and_then(Value::as_str).unwrap_or("");
-    if !label.is_empty() {
-        let size = pal::fs_body() * z;
-        frame.fill_text(canvas::Text {
-            content: layout_view::ellipsize(label, sw - CARD_PAD * 2.0 * z, size),
-            position: Point::new(sx + CARD_PAD * z, sy + (head_h - size * 1.3) / 2.0),
-            max_width: f32::INFINITY,
-            color: pal::TEXT_PRIMARY,
-            size: size.into(),
-            line_height: iced::advanced::text::LineHeight::Relative(1.3),
-            font: crate::ui::bold(),
-            align_x: iced::advanced::text::Alignment::Left,
-            align_y: alignment::Vertical::Top,
-            shaping: Shaping::Advanced,
-        });
+    if !collapsed {
+        // 标题行：组色 25% 底（顶部两角随容器圆角、底边平直，与下方组底不叠涂出深色带）
+        let head_h = (CARD_HEADER_H * z).min(sh);
+        let head = top_rounded_rect(sx, sy, sw, head_h, GROUP_RADIUS * z);
+        frame.fill(&head, iced::Color { a: 0.25, ..color });
     }
+    let label = n.data.get("label").and_then(Value::as_str).unwrap_or("");
+    // 空标题画占位（哑色），不画空串
+    let (content, title_color) = if label.is_empty() {
+        ("分组", pal::TEXT_MUTED)
+    } else {
+        (label, pal::TEXT_PRIMARY)
+    };
+    let size = pal::fs_body() * z;
+    let ty = if collapsed {
+        sy + (sh - size * 1.3) / 2.0
+    } else {
+        let head_h = (CARD_HEADER_H * z).min(sh);
+        sy + (head_h - size * 1.3) / 2.0
+    };
+    frame.fill_text(canvas::Text {
+        content: layout_view::ellipsize(content, (sw - CARD_PAD * 2.0 * z).max(0.0), size),
+        position: Point::new(sx + CARD_PAD * z, ty),
+        max_width: f32::INFINITY,
+        color: title_color,
+        size: size.into(),
+        line_height: iced::advanced::text::LineHeight::Relative(1.3),
+        font: crate::ui::bold(),
+        align_x: iced::advanced::text::Alignment::Left,
+        align_y: alignment::Vertical::Top,
+        shaping: Shaping::Advanced,
+    });
 }
 
 /// 数字色板索引（"1"-"6"）→ 分组色（磁盘 data.color 缺省 / 越界 = 中性灰）。
@@ -955,7 +1345,7 @@ fn draw_edge(session: &CanvasSession, view: &View, frame: &mut Frame, e: &atelyx
     }
 }
 
-/// 连线端所属侧（句柄缺失回落最近侧的再推导）。
+/// 连线端所属侧（句柄缺失回落最近侧的再推导）；端点已聚合到收起组边缘时按组取侧。
 fn edge_side(session: &CanvasSession, e: &atelyx_core::vault::CanvasFileEdge, source: bool) -> &'static str {
     let (id, handle) = if source {
         (&e.source, &e.source_handle)
@@ -965,6 +1355,24 @@ fn edge_side(session: &CanvasSession, e: &atelyx_core::vault::CanvasFileEdge, so
     let Some(n) = session.data.nodes.iter().find(|n| &n.id == id) else {
         return "right";
     };
+    if let Some(gi) = group_of(&session.data.nodes, id) {
+        let g = &session.data.nodes[gi];
+        if group_collapsed(g) {
+            let (gw, gh) = display_size(g);
+            let other_id = if source { &e.target } else { &e.source };
+            let toward = session
+                .data
+                .nodes
+                .iter()
+                .find(|n| &n.id == other_id)
+                .map(|o| {
+                    let (ow, oh) = display_size(o);
+                    (o.x + ow / 2.0, o.y + oh / 2.0)
+                })
+                .unwrap_or((g.x, g.y));
+            return nearest_side(g.x, g.y, gw, gh, toward);
+        }
+    }
     if let Some(side) = handle_side(handle) {
         return match side {
             "left" => "left",
@@ -1019,6 +1427,7 @@ fn draw_arrow(frame: &mut Frame, tip: Point, dir: (f32, f32), color: Color) {
 }
 
 /// 卡框体：背景 + 头部（图标 + 标题）+ 选中描边与 resize 把手；正文按类型分派。
+#[expect(clippy::too_many_arguments)]
 fn draw_card(
     session: &CanvasSession,
     view: &View,
@@ -1028,6 +1437,7 @@ fn draw_card(
     h: f64,
     selected: bool,
     link_handle: bool,
+    resize_handle: bool,
 ) {
     let (sx, sy) = view.screen(n.x, n.y);
     let (sw, sh) = (w as f32 * view.zoom, h as f32 * view.zoom);
@@ -1084,8 +1494,8 @@ fn draw_card(
         Rectangle::new(Point::new(sx + CARD_PAD * z, body_y + CARD_PAD * z), body.max(Size::ZERO)),
     );
 
-    // 选中 resize 把手（右下角）
-    if selected {
+    // 选中 resize 把手（右下角，仅单选）
+    if resize_handle {
         let hs = HANDLE_SIZE;
         frame.fill(
             &Path::rectangle(Point::new(sx + sw - hs, sy + sh - hs), Size::new(hs, hs)),
@@ -1339,11 +1749,12 @@ pub fn canvas_view<'a>(app: &'a App, window: iced::window::Id) -> Element<'a> {
         } else {
             View::of(&session.view)
         };
-        let world: Element<'_> = WorldLayer { session, view }.into();
+        let world: Element<'_> = WorldLayer { session, view, window }.into();
         let mut layered = stack![world];
         for overlay in card_overlays(app, session, view, viewport, window) {
             layered = layered.push(overlay);
         }
+        layered = layered.push(minimap_layer(session, view, viewport));
         column![toolbar(session, window, viewport, view.zoom), layered.width(Length::Fill).height(Length::Fill)]
             .width(Length::Fill)
             .height(Length::Fill)
@@ -1356,7 +1767,16 @@ pub fn canvas_view<'a>(app: &'a App, window: iced::window::Id) -> Element<'a> {
 
 /// 工具条：统计 + 保存态 + 缩放钮（以视口中心为锚）；`zoom` 传本帧生效缩放（适应视图待收口时为适配值）。
 fn toolbar<'a>(session: &'a CanvasSession, window: iced::window::Id, viewport: Size, zoom: f32) -> Element<'a> {
-    let stats = format!("{} 卡 · {} 连线", session.data.nodes.len(), session.data.edges.len());
+    let stats = if session.view.selection.is_empty() {
+        format!("{} 卡 · {} 连线", session.data.nodes.len(), session.data.edges.len())
+    } else {
+        format!(
+            "{} 卡 · {} 连线 · 已选 {}",
+            session.data.nodes.len(),
+            session.data.edges.len(),
+            session.view.selection.len()
+        )
+    };
     let zoom_label = format!("{}%", (zoom * 100.0).round() as i32);
     let dirty_pill = if session.dirty {
         controls::status_pill(controls::PillStatus::Pending, "未保存")
@@ -1428,8 +1848,9 @@ fn card_overlays<'a>(
         let (sx, sy) = view.screen(n.x, n.y);
         let (sw, sh) = (w as f32 * view.zoom, h as f32 * view.zoom);
         // 完全越出视口的卡不建正文；每张卡仍占一个槽位，Stack 按子级下标复用树状态，
-        // 动态增删层会让后续卡的滚动位置串到别的卡上
-        let offscreen = sx + sw < 0.0 || sy + sh < 0.0 || sx > vw || sy > vh;
+        // 动态增删层会让后续卡的滚动位置串到别的卡上（收起分组的隐藏成员同此槽位处理）
+        let hidden = hidden_by_collapsed(&session.data.nodes, &n.id);
+        let offscreen = hidden || sx + sw < 0.0 || sy + sh < 0.0 || sx > vw || sy > vh;
         let inner: Option<Element<'a>> = if offscreen {
             None
         } else {
@@ -2039,6 +2460,224 @@ impl<'a> From<ClipLayer<'a>> for Element<'a> {
     }
 }
 
+// ===== 小地图 =====
+
+/// 小地图映射（纯函数）：可见节点包围盒等比缩放居中到小地图（比例钳上限，防小画布放大失真）。
+/// 返回 (scale, (ox, oy))：minimap = world × scale + offset（offset 已并入包围盒平移）。
+fn minimap_transform(rects: &[(f64, f64, f64, f64)]) -> (f64, (f64, f64)) {
+    if rects.is_empty() {
+        return (0.0, (0.0, 0.0));
+    }
+    let (bx0, by0, bx1, by1) = rects.iter().fold(
+        (f64::MAX, f64::MAX, f64::MIN, f64::MIN),
+        |(x0, y0, x1, y1), (x, y, w, h)| {
+            (x0.min(*x), y0.min(*y), x1.max(x + w), y1.max(y + h))
+        },
+    );
+    let pad = 8.0;
+    let avail_w = (MINIMAP_W - pad * 2.0).max(1.0) as f64;
+    let avail_h = (MINIMAP_H - pad * 2.0).max(1.0) as f64;
+    let scale = (avail_w / (bx1 - bx0).max(1.0))
+        .min(avail_h / (by1 - by0).max(1.0))
+        .min(0.5);
+    let ox = (MINIMAP_W as f64 - (bx1 - bx0) * scale) / 2.0 - bx0 * scale;
+    let oy = (MINIMAP_H as f64 - (by1 - by0) * scale) / 2.0 - by0 * scale;
+    (scale, (ox, oy))
+}
+
+/// 小地图可见矩形集（世界坐标）：收起分组的隐藏成员不计。
+fn visible_rects(canvas: &atelyx_core::vault::CanvasFile) -> Vec<(f64, f64, f64, f64)> {
+    canvas
+        .nodes
+        .iter()
+        .filter(|n| n.node_type == "group" || !hidden_by_collapsed(canvas.nodes.as_slice(), &n.id))
+        .map(|n| {
+            let (w, h) = display_size(n);
+            (n.x, n.y, w, h)
+        })
+        .collect()
+}
+
+/// 小地图部件：全画布缩略（组色块 / 卡矩形 / 选中高亮 / 视口框），点击与拖动跳转视口中心。
+struct Minimap<'a> {
+    session: &'a CanvasSession,
+    view: View,
+    viewport: Size,
+}
+
+/// 小地图自绘态：拖拽跳转进行中（存 tree::State 跨帧保留）。
+#[derive(Default)]
+struct MinimapState {
+    dragging: bool,
+}
+
+impl Minimap<'_> {
+    /// 小地图点 → 世界点（映射的逆变换）。
+    fn world_at(&self, scale: f64, offset: (f64, f64), p: Point) -> (f64, f64) {
+        (
+            (p.x as f64 - offset.0) / scale,
+            (p.y as f64 - offset.1) / scale,
+        )
+    }
+
+    fn seek_msg(&self, p: Point) -> Option<Message> {
+        let (scale, offset) = minimap_transform(&visible_rects(&self.session.data));
+        if scale <= 0.0 {
+            // 空画布无可映射内容：不发布（除零会产生 inf 坐标）
+            return None;
+        }
+        let (x, y) = self.world_at(scale, offset, p);
+        Some(Message::Canvas(CanvasMsg::MinimapSeek {
+            x,
+            y,
+            viewport: (self.viewport.width, self.viewport.height),
+        }))
+    }
+}
+
+impl canvas::Program<Message> for Minimap<'_> {
+    type State = MinimapState;
+
+    fn update(
+        &self,
+        state: &mut Self::State,
+        event: &canvas::Event,
+        bounds: Rectangle,
+        cursor: iced::mouse::Cursor,
+    ) -> Option<iced::widget::Action<Message>> {
+        use canvas::Event as Ev;
+        match event {
+            Ev::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)) => {
+                let p = cursor.position_in(bounds)?;
+                state.dragging = true;
+                self.seek_msg(p).map(|m| iced::widget::Action::publish(m).and_capture())
+            }
+            Ev::Mouse(iced::mouse::Event::CursorMoved { .. }) if state.dragging => {
+                // 拖拽捕获期间光标可越出小地图：绝对坐标换算回 bounds 相对
+                let p = cursor.position().map(|a| Point::new(a.x - bounds.x, a.y - bounds.y))?;
+                self.seek_msg(p).map(|m| iced::widget::Action::publish(m).and_capture())
+            }
+            Ev::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left)) if state.dragging => {
+                state.dragging = false;
+                Some(iced::widget::Action::capture())
+            }
+            // 小地图上的滚轮就地吞掉：不透传到底层世界层（防光标扫过时缩放画布）
+            Ev::Mouse(iced::mouse::Event::WheelScrolled { .. }) if cursor.position_in(bounds).is_some() => {
+                Some(iced::widget::Action::capture())
+            }
+            _ => None,
+        }
+    }
+
+    fn draw(
+        &self,
+        _state: &Self::State,
+        renderer: &iced::Renderer,
+        _theme: &iced::Theme,
+        bounds: Rectangle,
+        _cursor: iced::mouse::Cursor,
+    ) -> Vec<canvas::Geometry> {
+        // 小画布逐帧直绘（几十个矩形，不值一层 Cache）
+        let mut frame = Frame::new(renderer, bounds.size());
+        let (scale, offset) = minimap_transform(&visible_rects(&self.session.data));
+        if scale > 0.0 {
+            let sel: HashSet<&str> = self.session.view.selection.iter().map(|s| s.as_str()).collect();
+            let at = |n: &atelyx_core::vault::CanvasFileNode| {
+                let (w, h) = display_size(n);
+                let (x, y) = (
+                    (n.x * scale + offset.0) as f32,
+                    (n.y * scale + offset.1) as f32,
+                );
+                (
+                    x,
+                    y,
+                    ((w * scale) as f32).max(2.0),
+                    ((h * scale) as f32).max(2.0),
+                )
+            };
+            for n in &self.session.data.nodes {
+                if n.node_type != "group" {
+                    continue;
+                }
+                let (x, y, w, h) = at(n);
+                frame.fill(
+                    &rounded_rect(x, y, w, h, 3.0),
+                    iced::Color { a: 0.45, ..group_color(n.data.get("color").and_then(Value::as_str)) },
+                );
+            }
+            for n in &self.session.data.nodes {
+                if n.node_type == "group" || hidden_by_collapsed(&self.session.data.nodes, &n.id) {
+                    continue;
+                }
+                let (x, y, w, h) = at(n);
+                let color = if sel.contains(n.id.as_str()) { pal::ACCENT } else { pal::BORDER_STRONG };
+                frame.fill(&Path::rectangle(Point::new(x, y), Size::new(w, h)), color);
+            }
+            // 视口框：屏幕视口四角逆变换到世界再映射进小地图
+            let (wx0, wy0) = self.view.world(0.0, 0.0);
+            let (wx1, wy1) = self.view.world(self.viewport.width, self.viewport.height);
+            let (x0, y0) = (wx0 * scale + offset.0, wy0 * scale + offset.1);
+            let (x1, y1) = (wx1 * scale + offset.0, wy1 * scale + offset.1);
+            frame.stroke(
+                &Path::rectangle(
+                    Point::new(x0 as f32, y0 as f32),
+                    Size::new(((x1 - x0) as f32).max(2.0), ((y1 - y0) as f32).max(2.0)),
+                ),
+                Stroke {
+                    style: canvas::Style::Solid(pal::ACCENT),
+                    width: 1.5,
+                    ..Stroke::default()
+                },
+            );
+        }
+        vec![frame.into_geometry()]
+    }
+
+    fn mouse_interaction(
+        &self,
+        _state: &Self::State,
+        bounds: Rectangle,
+        cursor: iced::mouse::Cursor,
+    ) -> iced::mouse::Interaction {
+        // 区域外必须返回 None：上层若恒报非 None，Stack 会把光标对下层部件置为
+        // levitating，世界层的命中判定将全部落空
+        if cursor.is_over(bounds) {
+            iced::mouse::Interaction::Pointer
+        } else {
+            iced::mouse::Interaction::None
+        }
+    }
+}
+
+/// 小地图浮层：右下角固定尺寸，容器自带底色与描边。
+/// 外层对齐容器填满视口但只在内容矩形产生交互（小地图部件自身区域化 interaction）。
+fn minimap_layer<'a>(session: &'a CanvasSession, view: View, viewport: Size) -> Element<'a> {
+    let inner = container(Canvas::new(Minimap { session, view, viewport }))
+        .width(Length::Fixed(MINIMAP_W))
+        .height(Length::Fixed(MINIMAP_H))
+        .style(|_| container::Style {
+            background: Some(pal::BG_OVERLAY.into()),
+            border: iced::border::Border {
+                width: 1.0,
+                radius: pal::RADIUS_SM.into(),
+                color: pal::BORDER,
+            },
+            ..Default::default()
+        });
+    container(inner)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(alignment::Horizontal::Right)
+        .align_y(alignment::Vertical::Bottom)
+        .padding(Padding {
+            top: 0.0,
+            right: MINIMAP_MARGIN,
+            bottom: MINIMAP_MARGIN,
+            left: 0.0,
+        })
+        .into()
+}
+
 // ===== 属性面板画布区 =====
 
 /// 属性行（标签 + 值）。
@@ -2377,5 +3016,159 @@ mod tests {
         let big = vec![node("a", "text", 0.0, 0.0, Some(20000.0), Some(10000.0))];
         let (zoom2, _) = fit_transform(&big, size, 800.0, 600.0);
         assert!((zoom2 - MIN_ZOOM).abs() < 1e-6 || zoom2 < 1.0);
+    }
+
+    fn group(id: &str, x: f64, y: f64, w: f64, h: f64, collapsed: bool) -> CanvasFileNode {
+        let mut n = node(id, "group", x, y, Some(w), Some(h));
+        n.data = if collapsed { json!({ "collapsed": true }) } else { json!({}) };
+        n
+    }
+
+    #[test]
+    fn collapsed_group_displays_small_and_keeps_disk_geometry() {
+        let g = group("g", 100.0, 100.0, 500.0, 400.0, true);
+        assert_eq!(display_size(&g), (COLLAPSED_GROUP_W, COLLAPSED_GROUP_H));
+        // 磁盘几何不动：展开（缺省）恢复原尺寸
+        assert_eq!(node_size(&g), (500.0, 400.0));
+        let open = group("g", 100.0, 100.0, 500.0, 400.0, false);
+        assert_eq!(display_size(&open), (500.0, 400.0));
+    }
+
+    #[test]
+    fn group_membership_by_center_point() {
+        let c = canvas(
+            vec![
+                group("g", 0.0, 0.0, 300.0, 300.0, false),
+                node("in", "text", 50.0, 50.0, Some(100.0), Some(100.0)),
+                node("out", "text", 400.0, 400.0, Some(100.0), Some(100.0)),
+            ],
+            vec![],
+        );
+        // 中心 (100, 100) 在组内
+        assert_eq!(group_of(&c.nodes, "in").map(|i| c.nodes[i].id.as_str()), Some("g"));
+        assert_eq!(group_of(&c.nodes, "out"), None);
+        // 分组自身不属于任何组
+        assert_eq!(group_of(&c.nodes, "g"), None);
+        let members = group_members(&c.nodes, "g");
+        assert_eq!(members, vec!["in".to_string()]);
+    }
+
+    #[test]
+    fn overlapping_groups_last_declared_wins() {
+        let c = canvas(
+            vec![
+                group("g1", 0.0, 0.0, 300.0, 300.0, false),
+                group("g2", 100.0, 0.0, 300.0, 300.0, false),
+                node("mid", "text", 150.0, 100.0, Some(100.0), Some(100.0)),
+            ],
+            vec![],
+        );
+        // 中心 (200, 150) 落在两组重叠区：后声明者认领
+        assert_eq!(group_of(&c.nodes, "mid").map(|i| c.nodes[i].id.as_str()), Some("g2"));
+    }
+
+    #[test]
+    fn hidden_members_skip_hit_marquee_and_fit() {
+        let c = canvas(
+            vec![
+                group("g", 0.0, 0.0, 500.0, 500.0, true),
+                node("m", "text", 50.0, 50.0, Some(100.0), Some(100.0)),
+            ],
+            vec![edge("e", "m", "g")],
+        );
+        // 隐藏成员不可命中
+        assert_eq!(hit_card(&c, (60.0, 60.0)).map(|i| c.nodes[i].id.as_str()), None);
+        // 组自身按折叠小卡命中
+        assert_eq!(hit_card(&c, (80.0, 20.0)).map(|i| c.nodes[i].id.as_str()), Some("g"));
+        // 框选不含隐藏成员
+        assert!(marquee_hit(&c.nodes, (0.0, 0.0, 400.0, 400.0)).is_empty());
+        // 适应视图忽略隐藏成员与分组：无可见卡 = 复位
+        let (zoom, pan) = fit_transform(&c.nodes, node_size, 800.0, 600.0);
+        assert_eq!((zoom, pan), (1.0, (400.0, 300.0)));
+    }
+
+    #[test]
+    fn marquee_hit_intersects_and_excludes_groups() {
+        let c = canvas(
+            vec![
+                group("g", 0.0, 0.0, 500.0, 500.0, false),
+                node("a", "text", 10.0, 10.0, Some(100.0), Some(100.0)),
+                node("b", "text", 400.0, 400.0, Some(100.0), Some(100.0)),
+            ],
+            vec![],
+        );
+        let hit = marquee_hit(&c.nodes, (0.0, 0.0, 150.0, 150.0));
+        assert_eq!(hit, vec!["a".to_string()]);
+        // 相交（不要求包含）也算命中
+        let partial = marquee_hit(&c.nodes, (50.0, 50.0, 100.0, 100.0));
+        assert_eq!(partial, vec!["a".to_string()]);
+        // 分组不进框选
+        let all = marquee_hit(&c.nodes, (0.0, 0.0, 900.0, 900.0));
+        assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn snap_move_aligns_to_edges_and_centers() {
+        // 静态卡锚点 = 左 1000 / 中 1050 / 右 1100
+        let statics = vec![(1000.0, 1000.0, 100.0, 100.0)];
+        // 移动盒左缘 1094 距静态右缘 1100 差 6 → 贴齐
+        let out = snap_move(&statics, (1094.0, 0.0, 100.0, 100.0));
+        assert!((out.dx - 6.0).abs() < 1e-9);
+        assert_eq!(out.guides, vec![Guide { vertical: true, at: 1100.0 }]);
+        // 中线对齐：宽 60 的移动盒中心 1050 对静态中心（无参考线时网格取整会修正 +4，
+        // 参考线优先生效为 0）
+        let out = snap_move(&statics, (1020.0, 0.0, 60.0, 60.0));
+        assert!(out.dx.abs() < 1e-9);
+        assert_eq!(out.guides, vec![Guide { vertical: true, at: 1050.0 }]);
+        // 阈值外不吸附
+        let out = snap_move(&statics, (1200.0, 0.0, 100.0, 100.0));
+        assert!(out.guides.is_empty());
+    }
+
+    #[test]
+    fn snap_move_falls_back_to_grid() {
+        let out = snap_move(&[], (33.0, 47.0, 50.0, 50.0));
+        // 无参考线：坐标取整到 16px 网格
+        assert!((out.dx - (-1.0)).abs() < 1e-9);
+        assert!((out.dy - 1.0).abs() < 1e-9);
+        assert!(out.guides.is_empty());
+    }
+
+    #[test]
+    fn snap_size_rounds_and_clamps() {
+        assert_eq!(snap_size(121.0, 70.0), (128.0, 80.0));
+        // 低于最小尺寸钳回
+        assert_eq!(snap_size(3.0, 3.0), (CARD_MIN_W, CARD_MIN_H));
+    }
+
+    #[test]
+    fn edges_aggregate_to_collapsed_group_edge() {
+        let mut conv = node("conv", "conversation", 1000.0, 100.0, Some(200.0), Some(200.0));
+        conv.data = json!({ "messages": [] });
+        let c = canvas(
+            vec![
+                group("g", 0.0, 0.0, 500.0, 500.0, true),
+                node("m", "text", 50.0, 50.0, Some(100.0), Some(100.0)),
+                conv,
+            ],
+            vec![edge("e", "m", "conv")],
+        );
+        // 收起组成员端点聚到组矩形边缘（右缘中点，朝对端方向）
+        let ((sx, sy), _) = edge_endpoints(&c, &c.edges[0]).unwrap();
+        let g = &c.nodes[0];
+        assert_eq!(
+            (sx, sy),
+            (g.x + COLLAPSED_GROUP_W, g.y + COLLAPSED_GROUP_H / 2.0)
+        );
+        // 组内成员互连的边整条隐藏
+        let c2 = canvas(
+            vec![
+                group("g", 0.0, 0.0, 500.0, 500.0, true),
+                node("a", "text", 50.0, 50.0, Some(100.0), Some(100.0)),
+                node("b", "text", 200.0, 50.0, Some(100.0), Some(100.0)),
+            ],
+            vec![edge("e", "a", "b")],
+        );
+        assert!(edge_hidden(&c2, &c2.edges[0]));
     }
 }

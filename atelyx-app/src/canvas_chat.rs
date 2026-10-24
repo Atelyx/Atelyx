@@ -187,6 +187,16 @@ pub fn detach_canvas(app: &mut App) {
     }
 }
 
+/// 单卡离场（删除卡）：停该卡 run，面板绑定此卡则解绑。
+pub fn detach_node(app: &mut App, node_id: &str) {
+    chat_actions::hub().stop(&session_id(node_id));
+    if app.chat.active.as_deref() == Some(session_id(node_id).as_str()) {
+        app.chat.active = None;
+        app.chat.selection = None;
+        app.chat.rollback_confirm = None;
+    }
+}
+
 /// 对齐卡运行态与节点集合：新增对话节点补默认态，已删节点停 run 并清态。
 pub fn sync_card_chats(app: &mut App) {
     let Some(session) = app.canvas.as_mut() else { return };

@@ -1,20 +1,27 @@
-//! 画布动作：打开 / 载入 / 保存链与消息处理（本地路径；对称表格模式；空间模式在 space_actions）。
+//! 画布动作：打开 / 载入 / 保存链 / 白板交互与消息处理（本地路径；对称表格模式；空间模式在 space_actions）。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
 
 use iced::Task;
 use serde_json::{json, Value};
 
+use atelyx_core::vault::CanvasFileNode;
+
 use crate::canvas_view::{
-    hit_card, hit_link_handle, hit_resize_handle, node_size, world_from_screen, CanvasMsg,
-    CanvasSession, DragKind, RefContent, SaveReason, View, CARD_HEADER_H, CARD_MIN_H, CARD_MIN_W,
+    bbox_of_rects, display_size, group_members, hidden_by_collapsed, hit_card, hit_link_handle,
+    hit_resize_handle, marquee_hit, snap_move, snap_size, world_from_screen, CanvasKey,
+    CanvasMenuAction, CanvasMsg, CanvasSession, CanvasSnapshot, DragKind, GROUP_PAD, RefContent,
+    SaveReason, View, CARD_HEADER_H, MARQUEE_MIN, SNAP_GRID, UNDO_DEPTH,
 };
 pub(crate) use crate::canvas_view::{LoadOut, RefRaw};
-use crate::{recent_view, vault, App, Message, RepoKind};
+use crate::layout_view::{PopupOpen, PopupState};
+use crate::{chat_actions, recent_view, vault, App, Message, RepoKind};
 
 /// 画布历史记版合并窗口（与表格 / 空间侧口径一致）。
 const HISTORY_COALESCE_MS: i64 = 60_000;
+/// 粘贴整组避让的纵向搜索步长（世界坐标，同产出落卡）。
+const PASTE_SPOT_STEP: f64 = 24.0;
 
 /// 打开 .atlx（脏拦截已由 gate 处理）：置「上次打开」、清旧会话、走载入链。
 pub fn open_canvas(app: &mut App, rel: &str) -> Task<Message> {
@@ -564,6 +571,8 @@ pub fn on_msg(app: &mut App, msg: CanvasMsg) -> Task<Message> {
         CanvasMsg::RefsLoaded(gen, refs) => on_refs_loaded(app, gen, refs),
         CanvasMsg::Press { pos, size } => on_press(app, pos, size),
         CanvasMsg::PanPress { pos, size } => on_pan_press(app, pos, size),
+        CanvasMsg::Context { window, pos, size } => on_context(app, window, pos, size),
+        CanvasMsg::DoublePress { window, pos, size } => on_double_press(app, window, pos, size),
         CanvasMsg::Move { pos, size } => on_move(app, pos, size),
         CanvasMsg::Release => on_release(app),
         CanvasMsg::Wheel { delta_y, delta_x, pos, size } => on_wheel(app, delta_y, delta_x, pos, size),
@@ -589,11 +598,48 @@ pub fn on_msg(app: &mut App, msg: CanvasMsg) -> Task<Message> {
             s.redraw();
             Task::none()
         }
+        CanvasMsg::Menu(action) => {
+            // 菜单条目来源：先关弹层再执行（对称表格 Menu）；窗口取自弹层（改名弹层需重开）
+            let window = app.popup.as_ref().map(|(w, _)| *w);
+            app.dismiss_popup();
+            on_menu(app, window, action)
+        }
+        CanvasMsg::PasteText(text) => on_paste(app, text),
+        CanvasMsg::Key(key) => on_key(app, key),
+        CanvasMsg::GroupRenameDraft(text) => {
+            if let Some((_, draft)) = app
+                .canvas
+                .as_mut()
+                .and_then(|s| s.view.group_rename.as_mut())
+            {
+                *draft = text;
+            }
+            Task::none()
+        }
+        CanvasMsg::MinimapSeek { x, y, viewport } => {
+            let Some(s) = app.canvas.as_mut() else { return Task::none() };
+            // 空画布映射无解：小地图侧已不发 seek，此处再挡一道（防 inf 坐标进会话态）
+            if !x.is_finite() || !y.is_finite() {
+                return Task::none();
+            }
+            if s.view.fit_pending {
+                s.apply_fit(viewport.0, viewport.1);
+            }
+            s.view.viewport = viewport;
+            let (vw, vh) = viewport;
+            s.view.pan.0 = vw / 2.0 - x as f32 * s.view.zoom;
+            s.view.pan.1 = vh / 2.0 - y as f32 * s.view.zoom;
+            s.view.grid_cache.clear();
+            s.redraw();
+            Task::none()
+        }
     }
 }
 
 /// 提交待收口的适应视图（首个携带视口尺寸的指针事件；与视图层覆盖渲染同一纯函数）。
+/// 顺带记录视口尺寸（粘贴落位 / 小地图跳转用）。
 fn commit_fit(s: &mut CanvasSession, size: iced::Size) {
+    s.view.viewport = (size.width, size.height);
     if s.view.fit_pending {
         s.apply_fit(size.width, size.height);
     }
@@ -607,6 +653,7 @@ fn on_pan_press(app: &mut App, pos: iced::Point, size: iced::Size) -> Task<Messa
         kind: DragKind::Pan,
         start: (pos.x, pos.y),
         orig: HashMap::new(),
+        mutated: false,
     });
     s.redraw();
     Task::none()
@@ -615,18 +662,21 @@ fn on_pan_press(app: &mut App, pos: iced::Point, size: iced::Size) -> Task<Messa
 fn on_press(app: &mut App, pos: iced::Point, size: iced::Size) -> Task<Message> {
     // 画布空白 / 卡体按压 = 输入面外点：对话卡草稿让出焦点
     crate::canvas_chat::clear_card_focus(app);
+    let shift = app.mods.shift();
     let Some(s) = app.canvas.as_mut() else { return Task::none() };
     commit_fit(s, size);
     let view = View::of(&s.view);
     let world = world_from_screen(&view, pos.x, pos.y);
-    // resize 把手优先（仅当前选中卡有把手）
+    // resize 把手优先（仅单选卡有把手）
     if let Some(id) = hit_resize_handle(&s.data, &s.view.selection, view.zoom, world) {
+        push_undo(s);
         let orig = geometry_of(&s.data, &id);
         s.view.selection = vec![id.clone()];
         s.view.drag = Some(crate::canvas_view::DragState {
             kind: DragKind::Resize(id),
             start: (pos.x, pos.y),
             orig,
+            mutated: false,
         });
         s.redraw();
         return Task::none();
@@ -644,6 +694,7 @@ fn on_press(app: &mut App, pos: iced::Point, size: iced::Size) -> Task<Message> 
             kind: DragKind::Link(source),
             start: (pos.x, pos.y),
             orig: HashMap::new(),
+            mutated: false,
         });
         s.view.link_to = Some((pos.x, pos.y));
         s.redraw();
@@ -652,26 +703,53 @@ fn on_press(app: &mut App, pos: iced::Point, size: iced::Size) -> Task<Message> 
     match hit_card(&s.data, world) {
         Some(i) => {
             let (id, node_type) = (s.data.nodes[i].id.clone(), s.data.nodes[i].node_type.clone());
-            s.view.selection = vec![id.clone()];
-            // 分组为静态容器不参与拖动；正文走原生浮层的卡（对话 / 文本）卡体按下只选中，拖动从卡头起手
+            if shift {
+                // Shift+点击 = 切换选中（多选），不起拖拽
+                match s.view.selection.iter().position(|x| x == &id) {
+                    Some(p) => {
+                        s.view.selection.remove(p);
+                    }
+                    None => s.view.selection.push(id),
+                }
+                s.redraw();
+                return Task::none();
+            }
+            // 点在已选集内 = 保持多选拖动整集；点在集外 = 单选
+            let already = s.view.selection.iter().any(|x| x == &id);
+            if !already {
+                s.view.selection = vec![id.clone()];
+            }
+            // 分组不拖体（拖组整体即组头）；正文走原生浮层的卡（对话 / 文本）卡体按下
+            // 只选中，拖动从卡头起手
             let overlay_body = matches!(node_type.as_str(), "conversation" | "text")
                 && world.1 > s.data.nodes[i].y + CARD_HEADER_H as f64;
-            if node_type != "group" && !overlay_body {
-                let orig = geometry_of(&s.data, &id);
+            if !overlay_body {
+                push_undo(s);
+                let orig = drag_geometry(&s.data, &s.view.selection);
                 s.view.drag = Some(crate::canvas_view::DragState {
                     kind: DragKind::Card,
                     start: (pos.x, pos.y),
                     orig,
+                    mutated: false,
                 });
             }
             s.redraw();
         }
         None => {
-            s.view.selection.clear();
+            // 空白按压 = 框选起手（Shift 框选并入原选中）；平移走中键
+            let base = if shift {
+                std::mem::take(&mut s.view.selection)
+            } else {
+                s.view.selection = Vec::new();
+                Vec::new()
+            };
+            s.view.guides.clear();
+            s.view.marquee_to = Some((pos.x, pos.y));
             s.view.drag = Some(crate::canvas_view::DragState {
-                kind: DragKind::Pan,
+                kind: DragKind::Marquee { base },
                 start: (pos.x, pos.y),
                 orig: HashMap::new(),
+                mutated: false,
             });
             s.redraw();
         }
@@ -705,31 +783,71 @@ fn on_move(app: &mut App, pos: iced::Point, size: iced::Size) -> Task<Message> {
             s.view.grid_cache.clear();
             s.redraw();
         }
+        DragKind::Marquee { base } => {
+            s.view.marquee_to = Some((pos.x, pos.y));
+            // 实时选中：光标世界矩形相交卡 ∪ 起手选中（Shift 框选）
+            let view = View::of(&s.view);
+            let (ax, ay) = world_from_screen(&view, start.0, start.1);
+            let (bx, by) = world_from_screen(&view, pos.x, pos.y);
+            let mut hit = marquee_hit(&s.data.nodes, (ax.min(bx), ay.min(by), (ax - bx).abs(), (ay - by).abs()));
+            for id in base {
+                if !hit.contains(&id) {
+                    hit.push(id);
+                }
+            }
+            s.view.selection = hit;
+            s.redraw();
+        }
         DragKind::Card => {
-            let (dx, dy) = (
-                ((pos.x - start.0) / s.view.zoom) as f64,
-                ((pos.y - start.1) / s.view.zoom) as f64,
-            );
+            let raw_dx = ((pos.x - start.0) / s.view.zoom) as f64;
+            let raw_dy = ((pos.y - start.1) / s.view.zoom) as f64;
+            // 零位移不动手（点击不触发吸附跳变）
+            if raw_dx == 0.0 && raw_dy == 0.0 {
+                return Task::none();
+            }
+            // 移动集包围盒对静态节点吸附：参考线优先，无则网格取整
+            let rects: Vec<(f64, f64, f64, f64)> = orig.values().copied().collect();
+            let (bx, by, bw, bh) = bbox_of_rects(&rects);
+            let moving: HashSet<&str> = orig.keys().map(|id| id.as_str()).collect();
+            let statics: Vec<(f64, f64, f64, f64)> = s
+                .data
+                .nodes
+                .iter()
+                .filter(|n| {
+                    !moving.contains(n.id.as_str()) && !hidden_by_collapsed(&s.data.nodes, &n.id)
+                })
+                .map(|n| {
+                    let (w, h) = display_size(n);
+                    (n.x, n.y, w, h)
+                })
+                .collect();
+            let snap = snap_move(&statics, (bx + raw_dx, by + raw_dy, bw, bh));
+            let (dx, dy) = (raw_dx + snap.dx, raw_dy + snap.dy);
             for (id, o) in &orig {
                 if let Some(n) = s.data.nodes.iter_mut().find(|n| &n.id == id) {
                     n.x = o.0 + dx;
                     n.y = o.1 + dy;
                 }
             }
+            s.view.guides = snap.guides;
+            mark_drag_mutated(s);
             // 拖动中只改内存 + 重绘：置脏但不排保存（松手收口才触发落盘期限）
             s.dirty = true;
             s.save_error = None;
             s.view.content_cache.clear();
         }
         DragKind::Resize(id) => {
-            let (dx, dy) = (
-                ((pos.x - start.0) / s.view.zoom) as f64,
-                ((pos.y - start.1) / s.view.zoom) as f64,
-            );
-            if let (Some(n), Some(o)) = (s.data.nodes.iter_mut().find(|n| n.id == id), orig.get(&id)) {
-                n.width = Some((o.2 + dx).max(CARD_MIN_W));
-                n.height = Some((o.3 + dy).max(CARD_MIN_H));
+            let raw_dx = ((pos.x - start.0) / s.view.zoom) as f64;
+            let raw_dy = ((pos.y - start.1) / s.view.zoom) as f64;
+            if raw_dx == 0.0 && raw_dy == 0.0 {
+                return Task::none();
             }
+            if let (Some(n), Some(o)) = (s.data.nodes.iter_mut().find(|n| n.id == id), orig.get(&id)) {
+                let (w, h) = snap_size(o.2 + raw_dx, o.3 + raw_dy);
+                n.width = Some(w);
+                n.height = Some(h);
+            }
+            mark_drag_mutated(s);
             s.dirty = true;
             s.save_error = None;
             s.view.content_cache.clear();
@@ -742,15 +860,34 @@ fn on_move(app: &mut App, pos: iced::Point, size: iced::Size) -> Task<Message> {
     Task::none()
 }
 
+/// 标记拖拽会话已改写几何（松手判定无操作回退用）。
+fn mark_drag_mutated(s: &mut CanvasSession) {
+    if let Some(d) = s.view.drag.as_mut() {
+        d.mutated = true;
+    }
+}
+
 fn on_release(app: &mut App) -> Task<Message> {
     // 拖线收口：先取出会话与落点，再改画布数据（append_card_ref 要可变借用 App）
     let mut link: Option<(String, String)> = None;
     {
         let Some(s) = app.canvas.as_mut() else { return Task::none() };
         let to = s.view.link_to;
-        let drag = s.view.drag.take();
+        let marquee_end = s.view.marquee_to;
+        let (kind, mutated, base, start) = match s.view.drag.take() {
+            Some(d) => {
+                let base = match &d.kind {
+                    DragKind::Marquee { base } => Some(base.clone()),
+                    _ => None,
+                };
+                (Some(d.kind), d.mutated, base, Some(d.start))
+            }
+            None => (None, false, None, None),
+        };
         s.view.link_to = None;
-        match drag.map(|d| d.kind) {
+        s.view.marquee_to = None;
+        s.view.guides.clear();
+        match kind {
             Some(DragKind::Link(source)) => {
                 let Some((x, y)) = to else { return Task::none() };
                 let view = View::of(&s.view);
@@ -763,9 +900,23 @@ fn on_release(app: &mut App) -> Task<Message> {
                 }
             }
             Some(DragKind::Card) | Some(DragKind::Resize(_)) => {
-                // 卡 / resize 松手 = 拖拽期内容变化正式收口：版本自增触发主循环排自动保存
-                s.version += 1;
+                if mutated {
+                    // 拖拽期内容变化正式收口：版本自增触发主循环排自动保存
+                    s.version += 1;
+                } else {
+                    // 起手未动 = 无操作：丢弃起手快照（点击不产生撤销单元）
+                    s.view.undo.pop();
+                }
                 s.redraw();
+            }
+            Some(DragKind::Marquee { .. }) => {
+                // 原地按下-松开（位移低于阈值）= 点击空白：还原起手选中，不产生框选
+                if let (Some((sx, sy)), Some((tx, ty))) = (start, marquee_end) {
+                    if (tx - sx).abs() < MARQUEE_MIN && (ty - sy).abs() < MARQUEE_MIN {
+                        s.view.selection = base.unwrap_or_default();
+                        s.redraw();
+                    }
+                }
             }
             _ => {}
         }
@@ -808,22 +959,618 @@ fn zoom_at(view: &mut crate::canvas_view::CanvasViewState, cursor: iced::Point, 
     view.zoom = next;
 }
 
-/// 卡起始几何快照（拖拽会话用；width/height 按显示尺寸展开，resize 以显示尺寸为基准）。
+/// 卡起始几何快照（width/height 按显示尺寸展开，resize 以显示尺寸为基准）。
 fn geometry_of(canvas: &atelyx_core::vault::CanvasFile, id: &str) -> HashMap<String, (f64, f64, f64, f64)> {
     canvas
         .nodes
         .iter()
         .find(|n| n.id == id)
         .map(|n| {
-            let (w, h) = node_size(n);
+            let (w, h) = display_size(n);
             HashMap::from([(n.id.clone(), (n.x, n.y, w, h))])
         })
         .unwrap_or_default()
 }
 
+/// 拖动几何快照：选中集 ∪ 选中分组的成员（收起态成员随组平移，展开后相对位置不变；
+/// 单选拖组与多选混拖共用此口径，成员不因组移动而掉组）。
+fn drag_geometry(
+    canvas: &atelyx_core::vault::CanvasFile,
+    selection: &[String],
+) -> HashMap<String, (f64, f64, f64, f64)> {
+    let mut ids: Vec<String> = selection.to_vec();
+    for id in selection {
+        if canvas.nodes.iter().any(|n| n.id == *id && n.node_type == "group") {
+            for m in group_members(&canvas.nodes, id) {
+                if !ids.contains(&m) {
+                    ids.push(m);
+                }
+            }
+        }
+    }
+    canvas
+        .nodes
+        .iter()
+        .filter(|n| ids.iter().any(|id| id == &n.id))
+        .map(|n| {
+            let (w, h) = display_size(n);
+            (n.id.clone(), (n.x, n.y, w, h))
+        })
+        .collect()
+}
+
+// ===== 撤销（快照式，对称表格） =====
+
+/// 当前数据快照。
+fn current_snapshot(s: &CanvasSession) -> CanvasSnapshot {
+    CanvasSnapshot { nodes: s.data.nodes.clone(), edges: s.data.edges.clone() }
+}
+
+/// 压入撤销快照（变更前调用；新快照清空重做栈）。
+pub(crate) fn push_undo(s: &mut CanvasSession) {
+    s.view.redo.clear();
+    push_snapshot(s);
+}
+
+/// 压入快照并维持栈深上限（重做路径回填撤销栈用，不动重做栈）。
+fn push_snapshot(s: &mut CanvasSession) {
+    s.view.undo.push(current_snapshot(s));
+    if s.view.undo.len() > UNDO_DEPTH {
+        s.view.undo.remove(0);
+    }
+}
+
+/// 恢复快照：置脏 + 版本自增（主循环排自动保存），选中收敛到仍存在的卡。
+fn restore_snapshot(s: &mut CanvasSession, snap: CanvasSnapshot) {
+    s.data.nodes = snap.nodes;
+    s.data.edges = snap.edges;
+    s.view.selection.retain(|id| s.data.nodes.iter().any(|n| &n.id == id));
+    s.view.hover = None;
+    s.touch();
+}
+
+/// 任一对话卡在流式（含 Hub 在途 run）：数据回滚类操作（撤销 / 重做）不接，
+/// 防 run 直写消息与快照回滚互相踩。
+fn any_streaming(s: &CanvasSession) -> bool {
+    s.view.card_chat.values().any(|c| c.streaming)
+        || s
+            .data
+            .nodes
+            .iter()
+            .filter(|n| n.node_type == "conversation")
+            .any(|n| chat_actions::hub().is_running(&crate::canvas_chat::session_id(&n.id)))
+}
+
+fn undo(app: &mut App) -> Task<Message> {
+    let Some(s) = app.canvas.as_mut() else { return Task::none() };
+    if any_streaming(s) {
+        return Task::none();
+    }
+    let Some(snap) = s.view.undo.pop() else { return Task::none() };
+    s.view.redo.push(current_snapshot(s));
+    restore_snapshot(s, snap);
+    Task::none()
+}
+
+fn redo(app: &mut App) -> Task<Message> {
+    let Some(s) = app.canvas.as_mut() else { return Task::none() };
+    if any_streaming(s) {
+        return Task::none();
+    }
+    let Some(snap) = s.view.redo.pop() else { return Task::none() };
+    push_snapshot(s);
+    restore_snapshot(s, snap);
+    Task::none()
+}
+
+// ===== 键盘命令 =====
+
+/// 画布键盘命令就绪：画布在场 + 无弹层 + 卡输入面未聚焦 +
+/// 最近按压窗口（缺省主窗）的活动视图是画布（键盘随焦点窗口走）。
+pub(crate) fn key_ready(app: &App) -> bool {
+    let Some(s) = app.canvas.as_ref() else { return false };
+    // 拖拽 / 框选会话进行中不接键盘命令（中途回滚与几何改写互相踩）
+    if app.popup.is_some()
+        || s.view.drag.is_some()
+        || s.view.card_chat.values().any(|c| c.draft.focused)
+    {
+        return false;
+    }
+    app.focused_window
+        .or(app.main_id)
+        .is_some_and(|w| crate::layout_view::window_shows_canvas(app, w))
+}
+
+/// commands::CommandId → 画布键盘消息（非画布命令 = None）。
+pub(crate) fn canvas_key_msg(id: crate::commands::CommandId) -> Option<CanvasMsg> {
+    use crate::commands::CommandId as C;
+    Some(CanvasMsg::Key(match id {
+        C::CanvasUndo => CanvasKey::Undo,
+        C::CanvasRedo => CanvasKey::Redo,
+        C::CanvasCopy => CanvasKey::Copy,
+        C::CanvasPaste => CanvasKey::Paste,
+        C::CanvasSelectAll => CanvasKey::SelectAll,
+        C::CanvasClear => CanvasKey::DeleteSelection,
+        _ => return None,
+    }))
+}
+
+fn on_key(app: &mut App, key: CanvasKey) -> Task<Message> {
+    match key {
+        CanvasKey::Undo => undo(app),
+        CanvasKey::Redo => redo(app),
+        CanvasKey::Copy => copy_selection(app),
+        CanvasKey::Paste => iced::clipboard::read()
+            .map(|t| Message::Canvas(CanvasMsg::PasteText(t.unwrap_or_default()))),
+        CanvasKey::SelectAll => {
+            select_all(app);
+            Task::none()
+        }
+        CanvasKey::DeleteSelection => delete_selection(app),
+    }
+}
+
+/// 全选可见卡（不含分组——组是容器，单击可选中）。
+fn select_all(app: &mut App) {
+    let Some(s) = app.canvas.as_mut() else { return };
+    s.view.selection = s
+        .data
+        .nodes
+        .iter()
+        .filter(|n| n.node_type != "group" && !hidden_by_collapsed(&s.data.nodes, &n.id))
+        .map(|n| n.id.clone())
+        .collect();
+    s.redraw();
+}
+
+/// 删除选中：组只删容器（成员保留），卡连带关联边与卡内 run。
+fn delete_selection(app: &mut App) -> Task<Message> {
+    let Some(s) = app.canvas.as_mut() else { return Task::none() };
+    if s.view.selection.is_empty() {
+        return Task::none();
+    }
+    push_undo(s);
+    let ids: HashSet<String> = s.view.selection.drain(..).collect();
+    let removed_conversations: Vec<String> = s
+        .data
+        .nodes
+        .iter()
+        .filter(|n| n.node_type == "conversation" && ids.contains(&n.id))
+        .map(|n| n.id.clone())
+        .collect();
+    s.data.nodes.retain(|n| !ids.contains(&n.id));
+    s.data.edges.retain(|e| !ids.contains(&e.source) && !ids.contains(&e.target));
+    s.touch();
+    for id in removed_conversations {
+        // 停 run + 解绑面板同会话视图（card_chat 运行态由 sync_card_chats 收敛）
+        crate::canvas_chat::detach_node(app, &id);
+    }
+    Task::none()
+}
+
+// ===== 复制粘贴 =====
+
+/// 复制选中卡为带标记 JSON（组是容器不复制；对话卡消息全量随卡）。
+/// 跨画布粘贴同格式可用；外部文本进画布被忽略。
+fn copy_selection(app: &mut App) -> Task<Message> {
+    let Some(s) = app.canvas.as_ref() else { return Task::none() };
+    let mut cards = Vec::new();
+    for n in &s.data.nodes {
+        if n.node_type == "group" || !s.view.selection.iter().any(|sel| sel == &n.id) {
+            continue;
+        }
+        match serde_json::to_value(n) {
+            Ok(v) => cards.push(v),
+            // 坐标含 NaN 等非法值：整次复制放弃并提示，不写半截剪贴板
+            Err(e) => {
+                app.notify(crate::NoticeLevel::Error, format!("复制失败：{e}"));
+                return Task::none();
+            }
+        }
+    }
+    if cards.is_empty() {
+        return Task::none();
+    }
+    let payload = json!({ "atelyxCanvas": 1, "cards": cards });
+    iced::clipboard::write(payload.to_string())
+}
+
+/// 粘贴回执：解析带标记 JSON → 新 id（对话消息 id 一并重生成）→ 视口中心落位
+/// （网格取整 + 逐行下移避让）→ 选中新卡。非画布格式忽略。
+fn on_paste(app: &mut App, text: String) -> Task<Message> {
+    let Some(s) = app.canvas.as_mut() else { return Task::none() };
+    let Ok(payload) = serde_json::from_str::<Value>(&text) else {
+        return Task::none();
+    };
+    if payload.get("atelyxCanvas").and_then(Value::as_u64) != Some(1) {
+        return Task::none();
+    }
+    let Some(cards) = payload.get("cards").and_then(Value::as_array) else {
+        return Task::none();
+    };
+    let parsed: Result<Vec<CanvasFileNode>, _> =
+        cards.iter().cloned().map(serde_json::from_value).collect();
+    let Ok(mut nodes) = parsed else {
+        return Task::none();
+    };
+    if nodes.is_empty() {
+        return Task::none();
+    }
+    // 新节点 id；对话消息 id 重生成防多副本同 id（消息内 refs 的 nodeId 保留原指向：
+    // 消费判定按 id 匹配不命中 = 未消费，不产生错误数据）
+    for n in &mut nodes {
+        if n.node_type == "conversation" {
+            if let Some(msgs) = n.data.get_mut("messages").and_then(Value::as_array_mut) {
+                for m in msgs {
+                    if let Some(mid) = m.get_mut("id") {
+                        *mid = Value::String(chat_actions::uuid_v4());
+                    }
+                }
+            }
+        }
+        n.id = chat_actions::uuid_v4();
+    }
+    // 落位：粘贴集包围盒左上对到视口中心（网格取整），整组逐行下移避让现有节点
+    let rects: Vec<(f64, f64, f64, f64)> = nodes
+        .iter()
+        .map(|n| {
+            let (w, h) = display_size(n);
+            (n.x, n.y, w, h)
+        })
+        .collect();
+    let (bx0, by0, bw, bh) = bbox_of_rects(&rects);
+    let (vw, vh) = s.view.viewport;
+    let view = View::of(&s.view);
+    let (cx, cy) = world_from_screen(&view, vw / 2.0, vh / 2.0);
+    let tx = ((cx - bw / 2.0) / SNAP_GRID).round() * SNAP_GRID;
+    let mut ty = ((cy - bh / 2.0) / SNAP_GRID).round() * SNAP_GRID;
+    while s.data.nodes.iter().any(|n| {
+        let (w, h) = display_size(n);
+        tx < n.x + w && tx + bw > n.x && ty < n.y + h && ty + bh > n.y
+    }) {
+        ty += PASTE_SPOT_STEP;
+    }
+    let (dx, dy) = (tx - bx0, ty - by0);
+    for n in &mut nodes {
+        n.x += dx;
+        n.y += dy;
+    }
+    {
+        let Some(s) = app.canvas.as_mut() else { return Task::none() };
+        push_undo(s);
+        let ids: Vec<String> = nodes.iter().map(|n| n.id.clone()).collect();
+        s.data.nodes.extend(nodes);
+        s.view.selection = ids;
+        s.touch();
+    }
+    // 新对话卡运行态即时对齐（否则输入面要等下一条画布消息才出现）
+    crate::canvas_chat::sync_card_chats(app);
+    Task::none()
+}
+
+// ===== 右键菜单与分组 =====
+
+/// 右键菜单起手：命中卡（未选中则单选）→ 按形态选菜单；空白 = 清选 + 空白菜单。
+fn on_context(
+    app: &mut App,
+    window: iced::window::Id,
+    pos: iced::Point,
+    size: iced::Size,
+) -> Task<Message> {
+    crate::canvas_chat::clear_card_focus(app);
+    let Some(s) = app.canvas.as_mut() else { return Task::none() };
+    if s.view.drag.is_some() {
+        return Task::none();
+    }
+    commit_fit(s, size);
+    let view = View::of(&s.view);
+    let world = world_from_screen(&view, pos.x, pos.y);
+    let state = match hit_card(&s.data, world) {
+        Some(i) => {
+            let (id, node_type) = (s.data.nodes[i].id.clone(), s.data.nodes[i].node_type.clone());
+            if !s.view.selection.iter().any(|x| x == &id) {
+                s.view.selection = vec![id.clone()];
+                s.redraw();
+            }
+            // 多选优先：含组的批量选中右键任一成员都出批量菜单（删除 / 编组作用整个选中集）
+            if s.view.selection.len() > 1 {
+                PopupState::CanvasMultiMenu
+            } else if node_type == "group" {
+                PopupState::CanvasGroupMenu { node_id: id }
+            } else {
+                PopupState::CanvasCardMenu { node_id: id }
+            }
+        }
+        None => {
+            s.view.selection.clear();
+            s.redraw();
+            PopupState::CanvasBlankMenu { x: world.0, y: world.1 }
+        }
+    };
+    // 锚点取窗口坐标（pos 是画布部件局部坐标，弹层按窗口视口定位）；经 PopupOpen 统一复位 pane
+    let point = app.cursor_for(window);
+    Task::done(Message::PopupOpen(window, PopupOpen { point, flip_y: None, state, min_width: 0.0 }))
+}
+
+/// 右键菜单动作执行（弹层已由 Menu 入口关闭）。
+fn on_menu(app: &mut App, window: Option<iced::window::Id>, action: CanvasMenuAction) -> Task<Message> {
+    match action {
+        CanvasMenuAction::DeleteSelection => delete_selection(app),
+        CanvasMenuAction::CopySelection => copy_selection(app),
+        CanvasMenuAction::Paste => iced::clipboard::read()
+            .map(|t| Message::Canvas(CanvasMsg::PasteText(t.unwrap_or_default()))),
+        CanvasMenuAction::CreateGroupFromSelection => {
+            create_group_from_selection(app);
+            Task::none()
+        }
+        CanvasMenuAction::CreateGroupAt { x, y } => {
+            create_group_at(app, x, y);
+            Task::none()
+        }
+        CanvasMenuAction::GroupColor { node, index } => {
+            set_group_color(app, &node, index);
+            Task::none()
+        }
+        CanvasMenuAction::GroupRenameStart { node } => {
+            let Some(w) = window else { return Task::none() };
+            let point = app.cursor_for(w);
+            group_rename_start(app, node, w, point)
+        }
+        CanvasMenuAction::GroupRenameCommit { node, name } => {
+            group_rename_commit(app, node, name);
+            Task::none()
+        }
+        CanvasMenuAction::ToggleCollapse { node } => {
+            toggle_collapse(app, &node);
+            Task::none()
+        }
+        CanvasMenuAction::OpenInPanel(id) => crate::canvas_chat::on_msg(
+            app,
+            crate::canvas_chat::CanvasChatMsg::OpenInPanel(id),
+        ),
+    }
+}
+
+/// 双击：分组标题 = 改名、组体 = 收起 / 展开；表格卡 / 笔记引用卡 = 打开文件。
+fn on_double_press(
+    app: &mut App,
+    window: iced::window::Id,
+    pos: iced::Point,
+    size: iced::Size,
+) -> Task<Message> {
+    crate::canvas_chat::clear_card_focus(app);
+    enum Double {
+        Rename(String),
+        Collapse(String),
+        Open(String),
+    }
+    let hit = {
+        let Some(s) = app.canvas.as_mut() else { return Task::none() };
+        commit_fit(s, size);
+        let view = View::of(&s.view);
+        let world = world_from_screen(&view, pos.x, pos.y);
+        let Some(i) = hit_card(&s.data, world) else { return Task::none() };
+        let (id, node_type) = (s.data.nodes[i].id.clone(), s.data.nodes[i].node_type.clone());
+        match node_type.as_str() {
+            "group" if world.1 <= s.data.nodes[i].y + CARD_HEADER_H as f64 => Double::Rename(id),
+            "group" => Double::Collapse(id),
+            "table" | "text" => {
+                // 表格卡双击开表、笔记引用卡双击开笔记（画布内文本无双开形态）
+                match s.data.nodes[i].data.get("file").and_then(Value::as_str) {
+                    Some(f) => Double::Open(f.to_string()),
+                    None => return Task::none(),
+                }
+            }
+            _ => return Task::none(),
+        }
+    };
+    match hit {
+        Double::Rename(node) => {
+            // 弹层锚点用窗口坐标（pos 是画布部件局部坐标）
+            let point = app.cursor_for(window);
+            group_rename_start(app, node, window, point)
+        }
+        Double::Collapse(node) => {
+            toggle_collapse(app, &node);
+            Task::none()
+        }
+        Double::Open(rel) => Task::done(Message::OpenFile(rel)),
+    }
+}
+
+/// 现有组数轮转色号（"1"-"6"）。
+fn next_group_color(canvas: &atelyx_core::vault::CanvasFile) -> usize {
+    let count = canvas.nodes.iter().filter(|n| n.node_type == "group").count();
+    count % crate::ui::palette::CANVAS_GROUP_COLORS.len() + 1
+}
+
+/// 以选中卡建组：包围盒外扩 GROUP_PAD，成员按中心点自动归属（纯空间判定不落盘）。
+fn create_group_from_selection(app: &mut App) {
+    let Some(s) = app.canvas.as_mut() else { return };
+    let rects: Vec<(f64, f64, f64, f64)> = s
+        .data
+        .nodes
+        .iter()
+        .filter(|n| n.node_type != "group" && s.view.selection.iter().any(|sel| sel == &n.id))
+        .map(|n| {
+            let (w, h) = display_size(n);
+            (n.x, n.y, w, h)
+        })
+        .collect();
+    if rects.is_empty() {
+        return;
+    }
+    push_undo(s);
+    let (x0, y0, w, h) = bbox_of_rects(&rects);
+    let group = CanvasFileNode {
+        id: chat_actions::uuid_v4(),
+        node_type: "group".into(),
+        x: x0 - GROUP_PAD,
+        y: y0 - GROUP_PAD,
+        width: Some(w + GROUP_PAD * 2.0),
+        height: Some(h + GROUP_PAD * 2.0),
+        data: json!({ "color": next_group_color(&s.data).to_string() }),
+    };
+    let gid = group.id.clone();
+    s.data.nodes.push(group);
+    s.view.selection = vec![gid];
+    s.touch();
+}
+
+/// 空白处新建空组（尺寸缺省 = 类型默认，落点网格取整）。
+fn create_group_at(app: &mut App, x: f64, y: f64) {
+    let Some(s) = app.canvas.as_mut() else { return };
+    push_undo(s);
+    let group = CanvasFileNode {
+        id: chat_actions::uuid_v4(),
+        node_type: "group".into(),
+        x: (x / SNAP_GRID).round() * SNAP_GRID,
+        y: (y / SNAP_GRID).round() * SNAP_GRID,
+        width: None,
+        height: None,
+        data: json!({ "color": next_group_color(&s.data).to_string() }),
+    };
+    let gid = group.id.clone();
+    s.data.nodes.push(group);
+    s.view.selection = vec![gid];
+    s.touch();
+}
+
+/// 分组改色（data.color = "1"-"6"）。
+fn set_group_color(app: &mut App, node_id: &str, index: usize) {
+    let Some(s) = app.canvas.as_mut() else { return };
+    if !s
+        .data
+        .nodes
+        .iter()
+        .any(|n| n.id == node_id && n.node_type == "group")
+    {
+        return;
+    }
+    push_undo(s);
+    if let Some(n) = s.data.nodes.iter_mut().find(|n| n.id == node_id) {
+        if let Some(obj) = n.data.as_object_mut() {
+            obj.insert("color".into(), Value::String(index.to_string()));
+        }
+    }
+    s.touch();
+}
+
+/// 分组收起 / 展开（data.collapsed；展开态删字段回缺省）。
+fn toggle_collapse(app: &mut App, node_id: &str) {
+    let Some(s) = app.canvas.as_mut() else { return };
+    let Some(g) = s
+        .data
+        .nodes
+        .iter()
+        .find(|n| n.id == node_id && n.node_type == "group")
+    else {
+        return;
+    };
+    let collapsing = g.data.get("collapsed").and_then(Value::as_bool) != Some(true);
+    push_undo(s);
+    if let Some(n) = s.data.nodes.iter_mut().find(|n| n.id == node_id) {
+        if let Some(obj) = n.data.as_object_mut() {
+            if collapsing {
+                obj.insert("collapsed".into(), Value::Bool(true));
+            } else {
+                obj.remove("collapsed");
+            }
+        }
+    }
+    if collapsing {
+        // 隐藏成员不再可见：从选中集移除（防删除 / 复制作用于不可见卡）
+        let nodes = &s.data.nodes;
+        s.view
+            .selection
+            .retain(|id| !hidden_by_collapsed(nodes, id));
+    }
+    s.touch();
+}
+
+/// 分组改名：初始化弹层草稿并打开（锚点 = 给定屏幕点）。
+fn group_rename_start(
+    app: &mut App,
+    node: String,
+    window: iced::window::Id,
+    point: iced::Point,
+) -> Task<Message> {
+    let label = app
+        .canvas
+        .as_ref()
+        .and_then(|s| s.data.nodes.iter().find(|n| n.id == node))
+        .and_then(|n| n.data.get("label"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    if let Some(s) = app.canvas.as_mut() {
+        s.view.group_rename = Some((node.clone(), label));
+    }
+    Task::done(Message::PopupOpen(
+        window,
+        PopupOpen {
+            point,
+            flip_y: None,
+            state: PopupState::CanvasGroupRename { node_id: node },
+            min_width: 0.0,
+        },
+    ))
+}
+
+/// 分组改名提交（空名回占位：不落空串，删字段）。
+fn group_rename_commit(app: &mut App, node: String, name: String) {
+    let name = name.trim().to_string();
+    let Some(s) = app.canvas.as_mut() else { return };
+    if !s
+        .data
+        .nodes
+        .iter()
+        .any(|n| n.id == node && n.node_type == "group")
+    {
+        return;
+    }
+    push_undo(s);
+    if let Some(n) = s.data.nodes.iter_mut().find(|n| n.id == node) {
+        if let Some(obj) = n.data.as_object_mut() {
+            if name.is_empty() {
+                obj.remove("label");
+            } else {
+                obj.insert("label".into(), Value::String(name));
+            }
+        }
+    }
+    s.view.group_rename = None;
+    s.touch();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 撤销栈语义：变更前 push 清重做栈（新分支生效），重做回填不清重做栈
+    /// （多步重做不被单步清空）。
+    #[test]
+    fn 撤销栈压入与重做回填语义() {
+        let empty = atelyx_core::vault::CanvasFile {
+            schema: "atelyx-canvas/v1".into(),
+            id: "c1".into(),
+            title: "t".into(),
+            nodes: vec![],
+            edges: vec![],
+            created_at: 0,
+            updated_at: 0,
+        };
+        let mut s = CanvasSession::new("t.atlx".into(), empty);
+        push_undo(&mut s);
+        push_undo(&mut s);
+        assert_eq!(s.view.undo.len(), 2);
+        assert!(s.view.redo.is_empty());
+        // 重做路径回填：撤销栈加深，重做栈不动
+        s.view.redo.push(current_snapshot(&s));
+        push_snapshot(&mut s);
+        assert_eq!(s.view.undo.len(), 3);
+        assert_eq!(s.view.redo.len(), 1);
+    }
 
     /// 引用读取口径：文件存在但读不出文本 = 二进制占位，路径不存在 = 缺失降级。
     #[test]

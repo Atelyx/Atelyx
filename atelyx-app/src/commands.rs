@@ -12,6 +12,8 @@ pub enum Scope {
     Note,
     /// 表格画布。
     Table,
+    /// 画布白板。
+    Canvas,
 }
 
 /// 键位规则（录制校验）。
@@ -23,7 +25,7 @@ pub enum Rule {
     NoMod,
 }
 
-/// 可重映射命令（现役 note + table 两域；id 持久化为 `note.undo` 形态）。
+/// 可重映射命令（现役 note + table + canvas 三域；id 持久化为 `note.undo` 形态）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CommandId {
     NoteUndo,
@@ -34,6 +36,12 @@ pub enum CommandId {
     TableCut,
     TablePaste,
     TableClear,
+    CanvasUndo,
+    CanvasRedo,
+    CanvasCopy,
+    CanvasPaste,
+    CanvasSelectAll,
+    CanvasClear,
 }
 
 impl CommandId {
@@ -47,6 +55,12 @@ impl CommandId {
         CommandId::TableCut,
         CommandId::TablePaste,
         CommandId::TableClear,
+        CommandId::CanvasUndo,
+        CommandId::CanvasRedo,
+        CommandId::CanvasCopy,
+        CommandId::CanvasPaste,
+        CommandId::CanvasSelectAll,
+        CommandId::CanvasClear,
     ];
 
     /// 持久化 id（global.json 键）。
@@ -60,6 +74,12 @@ impl CommandId {
             CommandId::TableCut => "table.cut",
             CommandId::TablePaste => "table.paste",
             CommandId::TableClear => "table.clear",
+            CommandId::CanvasUndo => "canvas.undo",
+            CommandId::CanvasRedo => "canvas.redo",
+            CommandId::CanvasCopy => "canvas.copy",
+            CommandId::CanvasPaste => "canvas.paste",
+            CommandId::CanvasSelectAll => "canvas.selectall",
+            CommandId::CanvasClear => "canvas.clear",
         }
     }
 
@@ -70,37 +90,46 @@ impl CommandId {
     pub fn scope(self) -> Scope {
         match self {
             CommandId::NoteUndo | CommandId::NoteRedo => Scope::Note,
+            CommandId::CanvasUndo
+            | CommandId::CanvasRedo
+            | CommandId::CanvasCopy
+            | CommandId::CanvasPaste
+            | CommandId::CanvasSelectAll
+            | CommandId::CanvasClear => Scope::Canvas,
             _ => Scope::Table,
         }
     }
 
     pub fn rule(self) -> Rule {
         match self {
-            CommandId::TableClear => Rule::NoMod,
+            CommandId::TableClear | CommandId::CanvasClear => Rule::NoMod,
             _ => Rule::RequireMod,
         }
     }
 
     pub fn default_binding(self) -> &'static str {
         match self {
-            CommandId::NoteUndo | CommandId::TableUndo => "mod+z",
-            CommandId::NoteRedo | CommandId::TableRedo => "mod+y",
-            CommandId::TableCopy => "mod+c",
+            CommandId::NoteUndo | CommandId::TableUndo | CommandId::CanvasUndo => "mod+z",
+            CommandId::NoteRedo | CommandId::TableRedo | CommandId::CanvasRedo => "mod+y",
+            CommandId::TableCopy | CommandId::CanvasCopy => "mod+c",
             CommandId::TableCut => "mod+x",
-            CommandId::TablePaste => "mod+v",
-            CommandId::TableClear => "delete",
+            CommandId::TablePaste | CommandId::CanvasPaste => "mod+v",
+            CommandId::CanvasSelectAll => "mod+a",
+            CommandId::TableClear | CommandId::CanvasClear => "delete",
         }
     }
 
     /// 展示名（快捷键设置行；归属由分组标题承载，不含领域前缀）。
     pub fn label(self) -> &'static str {
         match self {
-            CommandId::NoteUndo | CommandId::TableUndo => "撤销",
-            CommandId::NoteRedo | CommandId::TableRedo => "重做",
-            CommandId::TableCopy => "复制",
+            CommandId::NoteUndo | CommandId::TableUndo | CommandId::CanvasUndo => "撤销",
+            CommandId::NoteRedo | CommandId::TableRedo | CommandId::CanvasRedo => "重做",
+            CommandId::TableCopy | CommandId::CanvasCopy => "复制",
             CommandId::TableCut => "剪切",
-            CommandId::TablePaste => "粘贴",
+            CommandId::TablePaste | CommandId::CanvasPaste => "粘贴",
             CommandId::TableClear => "清空选区",
+            CommandId::CanvasSelectAll => "全选",
+            CommandId::CanvasClear => "删除选中",
         }
     }
 }
@@ -111,6 +140,7 @@ impl Scope {
         match self {
             Scope::Note => "笔记",
             Scope::Table => "表格",
+            Scope::Canvas => "画布",
         }
     }
 }
@@ -319,6 +349,7 @@ pub fn redo_alias_active(overrides: &HashMap<String, String>, scope: Scope) -> b
     let (undo_key, redo_key) = match scope {
         Scope::Note => (CommandId::NoteUndo.key(), CommandId::NoteRedo.key()),
         Scope::Table => (CommandId::TableUndo.key(), CommandId::TableRedo.key()),
+        Scope::Canvas => (CommandId::CanvasUndo.key(), CommandId::CanvasRedo.key()),
     };
     !overrides.contains_key(redo_key)
         && overrides
