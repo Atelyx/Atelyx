@@ -1199,7 +1199,7 @@ pub struct CanvasUpsert {
 
 ```rust
 // atelyx-plugin-protocol/src/method.rs
-/// `canvas.submit` 的 params：清单整发整换，空清单 = 清空画布。
+/// `canvas.submit` 的 params：整表重建（空清单 = 清空画布），此前经增量建立的 id 槽一并丢弃。
 #[serde(rename_all = "camelCase")]
 pub struct CanvasSubmitParams {
     pub surface_id: String,
