@@ -143,7 +143,7 @@ impl Context {
             .await
     }
 
-    /// 提交一份画布指令清单（整发整换，空清单 = 清空画布）。目标节点须在当前界面树里
+    /// 提交一份画布指令清单（整表重建，空清单 = 清空画布）。目标节点须在当前界面树里
     /// 且为 canvas 节点，否则宿主可读拒绝；指令合法性由宿主校验（结果在错误里带指令下标）。
     pub async fn submit_canvas(
         &self,
@@ -157,6 +157,24 @@ impl Context {
             commands,
         };
         self.call_typed(method::canvas::SUBMIT, &params).await
+    }
+
+    /// 按 id 增量维护画布清单：只发变动的条目，`upsert` 命中已有 id 即原位替换、未命中追加到末尾，
+    /// `remove` 删除。须先经 [`Context::submit_canvas`] 建立清单（整表提交会丢掉 id 槽）。
+    pub async fn patch_canvas(
+        &self,
+        surface_id: &str,
+        node_id: &str,
+        upsert: Vec<crate::protocol::canvas::CanvasUpsert>,
+        remove: Vec<String>,
+    ) -> Result<SubmitResult, RpcError> {
+        let params = crate::protocol::method::CanvasPatchParams {
+            surface_id: surface_id.into(),
+            node_id: node_id.into(),
+            upsert,
+            remove,
+        };
+        self.call_typed(method::canvas::PATCH, &params).await
     }
 
     /// 注册一个贡献点，使其出现在宿主对应入口（面板 / 表格视图 / 设置页）。

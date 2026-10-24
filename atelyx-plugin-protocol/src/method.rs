@@ -165,9 +165,15 @@ pub mod doc {
 
 pub mod canvas {
     /// 插件提交一份绘图指令清单到某个画布节点。宿主合帧应用（渲染每帧只取最新一份）。
+    /// 整表重建：清单里的条目都没有 id，此前经 `PATCH` 建立的增量条目一并丢弃。
     pub const SUBMIT: &str = "canvas.submit";
+    /// 按 id 增量维护画布清单：更新 / 追加 / 删除单个条目，只上行改动的条目，不必重发整表。
+    /// 未提交过清单时以空表为基线（首次也可直接用增量建表）。
+    pub const PATCH: &str = "canvas.patch";
     /// 宿主告知插件画布节点的像素尺寸（通知，尺寸变化时发）。
     pub const HOST_RESIZED: &str = "host:canvas.resized";
+    /// 宿主按节点声明的 `fps` 发帧拍（通知）：插件收到后提交该帧的绘制内容。
+    pub const HOST_FRAME: &str = "host:canvas.frame";
 }
 
 pub mod ai {
@@ -434,7 +440,7 @@ pub struct ViewEventParams {
     pub event: crate::view::ViewEvent,
 }
 
-/// `canvas.submit` 的 params：清单整发整换（无增量协议），空清单 = 清空画布。
+/// `canvas.submit` 的 params：清单整发整换，空清单 = 清空画布。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CanvasSubmitParams {
@@ -442,6 +448,31 @@ pub struct CanvasSubmitParams {
     /// 目标画布节点 id（须在当前 `view.submit` 树里且为 canvas 节点）。
     pub node_id: String,
     pub commands: Vec<crate::canvas::DrawCommand>,
+}
+
+/// `canvas.patch` 的 params：按 id 更新 / 追加 / 删除条目，次序按 `upsert` 在前、`remove` 在后。
+/// 同一 `id` 不得在同一请求里既 upsert 又 remove（语义有歧义，直接拒收）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CanvasPatchParams {
+    pub surface_id: String,
+    pub node_id: String,
+    #[serde(default)]
+    pub upsert: Vec<crate::canvas::CanvasUpsert>,
+    #[serde(default)]
+    pub remove: Vec<String>,
+}
+
+/// [`canvas::HOST_FRAME`] 的 params：一帧的拍号与距上一帧的间隔，插件据此推进动画相位。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CanvasFrameParams {
+    pub surface_id: String,
+    pub node_id: String,
+    /// 该画布的帧序号（从 0 起，宿主按画布记账）。
+    pub frame: u64,
+    /// 距该画布上一帧的毫秒数（首帧为 0）。动画相位请以帧序号为准，此值只作节拍参考。
+    pub delta_ms: u32,
 }
 
 // ---------- layout ----------

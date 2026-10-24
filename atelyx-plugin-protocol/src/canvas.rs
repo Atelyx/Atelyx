@@ -98,6 +98,38 @@ pub enum DrawCommand {
     },
 }
 
+/// 画布帧率上限（`canvas` 节点的 `fps` 上限，也是宿主调度帧通知的最细节拍）。
+pub const MAX_CANVAS_FPS: u16 = 120;
+
+/// 增量提交的一项：按 `id` 更新已有指令，或追加到清单末尾（`id` 由插件自定，同一画布内唯一）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CanvasUpsert {
+    pub id: String,
+    pub command: DrawCommand,
+}
+
+/// 增量条目的 `id` 上限（字节）。id 只在单块画布内定位，不需要长键。
+pub(crate) const MAX_UPSERT_ID_LEN: usize = 64;
+
+/// 增量条目校验：`id` 非空、不超过 64 字节且不含控制字符，指令本身与整表提交同口径
+/// （逐条校验 + `fill` / `stroke` 至少声明其一）。
+pub fn validate_upsert(item: &CanvasUpsert) -> Result<(), String> {
+    if item.id.trim().is_empty() {
+        return Err("增量条目的 id 不能为空".into());
+    }
+    if item.id.len() > MAX_UPSERT_ID_LEN {
+        return Err(format!("增量条目的 id 不得超过 {MAX_UPSERT_ID_LEN} 字节"));
+    }
+    if item.id.chars().any(char::is_control) {
+        return Err("增量条目的 id 不得含控制字符".into());
+    }
+    item.command.validate()?;
+    if !item.command.has_paint() {
+        return Err("fill 与 stroke 至少声明其一".into());
+    }
+    Ok(())
+}
+
 impl DrawCommand {
     fn validate(&self) -> Result<(), String> {
         match self {
@@ -230,6 +262,33 @@ mod tests {
             serde_json::to_value(rgba).unwrap(),
             serde_json::json!({"type": "rgba", "rgba": [16, 32, 64, 255]})
         );
+    }
+
+    #[test]
+    fn upsert_ids_are_validated() {
+        let command = DrawCommand::Line {
+            x1: 0.0,
+            y1: 0.0,
+            x2: 10.0,
+            y2: 10.0,
+            stroke: CanvasColor::Rgba { rgba: [0, 0, 0, 255] },
+            width: 1.0,
+        };
+        assert!(validate_upsert(&CanvasUpsert { id: "row-1".into(), command: command.clone() }).is_ok());
+        assert!(validate_upsert(&CanvasUpsert { id: "  ".into(), command: command.clone() }).is_err());
+        assert!(validate_upsert(&CanvasUpsert { id: "a\nb".into(), command: command.clone() }).is_err());
+        assert!(
+            validate_upsert(&CanvasUpsert { id: "x".repeat(MAX_UPSERT_ID_LEN + 1), command: command.clone() }).is_err()
+        );
+        let broken = DrawCommand::Line {
+            x1: 0.0,
+            y1: 0.0,
+            x2: 1.0,
+            y2: 1.0,
+            stroke: CanvasColor::Rgba { rgba: [0, 0, 0, 255] },
+            width: 0.0,
+        };
+        assert!(validate_upsert(&CanvasUpsert { id: "row-1".into(), command: broken }).is_err(), "指令本身的校验不被 id 校验盖过");
     }
 
     #[test]

@@ -7,7 +7,8 @@ use atelyx_plugin_protocol::event::{
 };
 use atelyx_plugin_protocol::handshake::{self, InitializeParams, InitializeResult};
 use atelyx_plugin_protocol::method::{
-    CanvasResizedParams, CanvasSubmitParams, ChatHistoryParams, ChatRenameParams,
+    CanvasFrameParams, CanvasPatchParams, CanvasResizedParams, CanvasSubmitParams, ChatHistoryParams,
+    ChatRenameParams,
     ChatSendParams, ChatSessionParams, CollabMessageParams, CollabPeersResult,
     CollabSendParams, CollabSendResult, DefineIconParams, DocCloseParams, DocOpenParams,
     HttpRequestParams,
@@ -109,7 +110,13 @@ fn view_tree_shape_is_frozen() {
     let menu = find(&tree, "more").unwrap();
     assert!(matches!(&menu.body, NodeBody::Menu { items, .. } if items.len() == 2));
     let canvas = find(&tree, "board").unwrap();
-    assert!(matches!(&canvas.body, NodeBody::Canvas { mouse_events, .. } if mouse_events.len() == 6));
+    assert!(matches!(&canvas.body, NodeBody::Canvas { mouse_events, fps: Some(60), .. } if mouse_events.len() == 6));
+    // 右键与键盘焦点：画布节点同时声明三者，成为可聚焦节点
+    assert_eq!(
+        canvas.events,
+        vec![EventKind::SecondaryClick, EventKind::Key, EventKind::Focus, EventKind::Blur]
+    );
+    assert!(canvas.focusable());
     // 浮层：唯一子节点即浮层内容，遮罩色走 ColorSpec 自定义色轨
     let layer = find(&tree, "modalLayer").unwrap();
     assert!(matches!(&layer.body, NodeBody::Overlay { scrim: Some(_) } if layer.children.len() == 1));
@@ -220,6 +227,8 @@ fn method_type_shapes_are_frozen() {
             "UnregisterParams" => frozen_roundtrip::<UnregisterParams>(&value),
             "ViewEventParams" => frozen_roundtrip::<ViewEventParams>(&value),
             "CanvasSubmitParams" => frozen_roundtrip::<CanvasSubmitParams>(&value),
+            "CanvasPatchParams" => frozen_roundtrip::<CanvasPatchParams>(&value),
+            "CanvasFrameParams" => frozen_roundtrip::<CanvasFrameParams>(&value),
             "DocOpenParams" => frozen_roundtrip::<DocOpenParams>(&value),
             "DocCloseParams" => frozen_roundtrip::<DocCloseParams>(&value),
             "TakeoverParams" => frozen_roundtrip::<TakeoverParams>(&value),

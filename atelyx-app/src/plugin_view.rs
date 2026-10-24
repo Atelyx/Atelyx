@@ -128,6 +128,9 @@ impl ViewMessage for Message {
             ViewMsg::Hover { plugin_id, surface_id, node_id, entered } => {
                 Message::PluginHover { plugin_id, surface_id, node_id, entered }
             }
+            ViewMsg::Focus { window, plugin_id, surface_id, node_id, focused } => {
+                Message::PluginFocus { window, plugin_id, surface_id, node_id, focused }
+            }
             ViewMsg::WindowDrag(window) => Message::PluginWindowDrag(window),
             ViewMsg::OpenList { window, entries } => Message::PluginList { window, entries },
         }
@@ -141,10 +144,16 @@ fn state_key(plugin_id: &str, surface_id: &str, node_id: &str) -> (String, Strin
 
 impl ViewHost<Message> for App {
     fn node_state(&self, key: &NodeKey<'_>, need: StateNeed<'_>) -> NodeState<'_> {
-        let empty = NodeState { hovered: false, text: None, editor: None };
+        let empty = NodeState { hovered: false, focused: false, text: None, editor: None };
         let key = state_key(key.plugin_id, key.surface_id, key.node_id);
         match need {
-            StateNeed::Hover => NodeState { hovered: self.plugin_hovered.contains(&key), ..empty },
+            StateNeed::Interaction => NodeState {
+                hovered: self.plugin_hovered.contains(&key),
+                focused: self.plugin_focus.as_ref().is_some_and(|focus| {
+                    focus.plugin_id == key.0 && focus.surface_id == key.1 && focus.node_id == key.2
+                }),
+                ..empty
+            },
             StateNeed::TextInput { plugin_value } => NodeState {
                 text: self
                     .plugin_drafts

@@ -177,8 +177,8 @@ async fn main() {
 界面提交由 SDK 托管：
 
 - `ctx.ui().mount(surfaceId, build)` 登记这一面的构建器——`build` 只读当前状态并返回整棵树；重复挂载同一面即替换构建器。
-- `ctx.ui().notify(surfaceId)` 触发一次「构建 → 与上次成功提交的树比较 → 未变跳过」，返回 `Ok(false)` 表示没有提交。事件处理里改完状态调它即可，不需要自己保存上次提交的树。
-- 面重新挂载时 SDK 先强制重发一次树再回调 `on_surface_attached`；该回调只补树以外的内容（如画布指令清单），不要在这里重复整树。
+- `ctx.ui().notify(surfaceId)` 触发一次「构建 → 与上次成功提交的树比较 → 未变跳过」，返回 `Ok(false)` 表示没有提交。节点事件与画布尺寸变化的回调返回后 SDK 会自动调它（见 5.4），需要提前上行时自己调；不需要自己保存上次提交的树。
+- 面重新挂载时 SDK 先强制重发一次树再回调 `on_surface_attached`，回调之后再自动提交一次；该回调只需补树以外的内容（如画布指令清单）。
 - 构建器在 SDK 内同步执行，读状态用短锁、不要跨 `await` 持锁。
 
 三条容易踩的规则：
@@ -247,16 +247,18 @@ token 随主题与界面字号设置联动，自定义色由插件自负对比�
 
 ### 5.2 事件与取值
 
-节点在 `events` 里声明了哪几种，宿主才回发哪几种（`click` / `change` / `submit` / `linkClick` / `scroll`，`focus` / `blur` 为保留种类、当前无控件产出）。事件值按控件定型：
+节点在 `events` 里声明了哪几种，宿主才回发哪几种。事件值按控件定型：
 
 - `click` 对任何节点生效（含容器）；点击落在子控件上时由子控件优先处理，父节点收不到该次点击；
+- `secondaryClick` 是右键，与 `click` 相互独立（可只声明右键）：在节点矩形内按下右键即回发，通常用来弹菜单——改状态让树里出现一个 `overlay` 菜单即可；
+- `focus` / `blur` / `key` 走键盘焦点通道（见 [5.5](#55-键盘焦点与按键)）；
 - 文本类 → 字符串；`submit` 只在单行输入回车时触发；
 - 数字输入 → 数值（不可解析为数值不发事件；清空 → `null`，与 0 区分）；
 - 勾选 → 布尔；下拉 → 选中项**下标**；菜单条目 → 条目的 `action` 字符串；
 - 滚动容器（`list` / `scroll`）→ `{ offset, maxOffset }`（主轴当前偏移与可滚动余量）；
 - `markdown` 链接点击 → `{ href, form }`（`form` 为 `external` / `wiki` / `path`；可新建与未识别链接不可点，不产生事件）；`href` 是源文本原样（未解码，wiki 即笔记名），声明与否不影响宿主默认打开。
 
-三者的完整声明见 [API 参考 · 视图事件与指针](plugin-api.md#4-视图事件与指针)。
+各事件的完整声明见 [API 参考 · 视图事件与指针](plugin-api.md#4-视图事件与指针)。
 
 ### 5.3 输入上报：两种模式，二选一
 
@@ -282,11 +284,39 @@ token 随主题与界面字号设置联动，自定义色由插件自负对比�
 
 界面按整棵树重发，宿主按键 diff（纵向容器按节点 id 复用控件态）。所以：结构尽量稳定、节点 id 稳定且唯一；不要把值编码进 id。
 
-### 5.5 面外层内边距
+**SDK 会替你重发**：`on_view_event` / `on_canvas_resized` 回调返回后，SDK 按该面的构建器重建并提交树（与上次提交相同则不上行）。所以回调里只改状态，不必手动 `notify`；需要提前上行（例如先把界面切成「加载中」再去 await 长任务）时才自己调 `ctx.ui().notify(面 id)`。
+
+三个例外，它们都按帧到达，逐帧重建整树是纯浪费：
+
+- `on_canvas_frame`（画布帧拍）只更新画布内容，不触发树重发；
+- `scroll` 与画布指针（`pointerMove` 等）事件不触发树重发——它们几乎不改结构，要重发请自己 `notify`；
+- 没挂 `mount` 的面没有构建器，也就没有自动提交。
+
+### 5.5 键盘焦点与按键
+
+节点在 `events` 里声明 `focus` / `blur` / `key` 任一项即**可聚焦**（输入控件自己管键盘，单行 / 数字输入声明 `focus` / `blur` / `key` 会被宿主拒收）。语义：
+
+- 在节点矩形内按下（左键 / 右键 / 触摸）即取得焦点，在别处按下即释放；同一时刻全局只有一个节点收键盘，窗口失焦也会释放；
+- 取得与释放按声明回发 `focus` / `blur`（声明了才发）；
+- 持焦点时，**无命令修饰**的按键回发 `key`：`{ key, action, modifiers }`，`key` 是 `{ "type": "named", "name": "arrowLeft" }` 或 `{ "type": "character", "text": "A" }`（字符按布局产出，Shift 影响大小写与符号），`action` 为 `press` / `release`。带 Ctrl / Alt / Super 的组合键一律归宿主（保存与快捷键），插件收不到；
+- 宿主自己的方向键导航 / Enter / Esc 等全局按键在插件持有键盘时**整体让位**，Esc 也先给插件——所以「Esc 关预览」这类手势可以直接做；接管态的退出另有常驻浮层入口，不会被卡住。
+
+想让键盘用户看见焦点，给节点配 `interaction.focused` 外观档（取档顺序：禁用 > 激活 > 焦点 > 悬停 > 常态）：
+
+```jsonc
+{ "id": "preview", "kind": "canvas", "events": ["key", "secondaryClick"],
+  "interaction": { "normal": { "border": "border" }, "focused": { "border": "accent" } } }
+```
+
+`key` 只在持焦点时到达，所以插件要先让用户能点到这个节点（例如列表行自己也声明 `click`）。方向键分页这类交互建议同时提供屏上按钮，触摸用户没有键盘。
+
+一处组合要避开：**声明 `key` 的节点里不要再嵌输入控件**。焦点热区在外层先接按键，输入框自己也会处理，同一个字符会被两边各消费一次——要「容器级快捷键 + 内部表单」时，把快捷键放到相邻的列表 / 画布节点上。
+
+### 5.6 面外层内边距
 
 面板、表格视图与设置页这三个面，宿主默认在根树外层加 12/10 的内边距；整页接管与插件窗口不加。注册贡献时给 `padding` 可改这个值：数字 = 四边等距（`0` 即贴边），也可按轴 `{ "horizontal": 16, "vertical": 8 }` 或按边 `{ "top": 4, "right": 0, "bottom": 4, "left": 0 }` 声明。需要贴边的内容也可放进接管面或窗口面；面板里不要自带同样的外边距（会叠加）。
 
-### 5.6 组合配方（先拼，再加控件）
+### 5.7 组合配方（先拼，再加控件）
 
 宿主只提供基元与节点级能力，常用形态直接组合出来。SDK 的 `presets` 模块已把这批组合做成函数，
 优先用它；需要自定义时按表里的组合关系拼：
@@ -310,8 +340,11 @@ token 随主题与界面字号设置联动，自定义色由插件自负对比�
 画布是树里的叶子控件（`kind: "canvas"`），负责占位与指针事件；内容单独提交：
 
 ```rust
-ctx.submit_canvas("main", "board", commands).await?;   // 整发整换，空清单 = 清空
+ctx.submit_canvas("main", "board", commands).await?;   // 整表重建，空清单 = 清空
+ctx.patch_canvas("main", "board", upsert, remove).await?;   // 按 id 增量：只发变动的条目
 ```
+
+增量条目的 `id` 由你自己定（同一块画布内唯一，≤64 字节），`upsert` 命中已有 id 即原位替换、未命中追加到末尾，`remove` 删除。整表提交会丢掉此前建立的 id 槽，所以常见写法是：先 `submit_canvas` 提交骨架，之后每帧只 `patch_canvas` 改动的那几条（网格里的一个格子、跟手的一根播放头）。
 
 指令集是封闭枚举：线 / 矩形（含圆角）/ 路径（折线·多边形）/ 圆 / 文字 / 图片贴片，`fill` 与 `stroke` 至少给一个。图片贴片的 `fit` 缺省 = 按给定矩形拉伸；`contain` / `cover` 走等比（cover 的溢出部分裁掉），原图长宽用 `ctx.vault_image_info(path)` 取。字段与校验规则见 [API 参考 · 自绘画布](plugin-api.md#5-自绘画布)（`DrawCommand`）。
 
@@ -323,11 +356,26 @@ ctx.submit_canvas("main", "board", commands).await?;   // 整发整换，空清�
 
 两条限制：按住拖出画布不会丢事件（绝对坐标换算，抬起为止）；画布文字永远绘制在所有图形之上，需要被图形遮盖的文字请改用树里的 `text` 控件分层。
 
+**要动画就声明帧率**：节点给 `fps`（1–120）后，宿主按该节拍回发 `host:canvas.frame { surfaceId, nodeId, frame, deltaMs }`，SDK 把它转成 `on_canvas_frame` 回调；在回调里提这一帧的内容即可：
+
+```rust
+fn board(fps: u16) -> ViewNode { /* kind: "canvas", fps */ }
+
+async fn on_canvas_frame(&self, ctx: &Context, frame: CanvasFrameParams) {
+    let x = playhead_x(self.state(), frame.frame);
+    let _ = ctx.patch_canvas(&frame.surface_id, &frame.node_id,
+        vec![CanvasUpsert { id: "playhead".into(), command: line(x, 0.0, x, 200.0, accent()) }],
+        Vec::new()).await;
+}
+```
+
+`frame` 从 0 起自增，`deltaMs` 是距上一帧的实际间隔（首帧 0）——算相位用 `frame` 更稳。帧拍**不触发界面树重发**（逐帧重建树是纯浪费），只更新画布内容。不声明 `fps` 就不会有帧回调，也不会有周期唤醒；播放停止后把 `fps` 从树里去掉即可停拍。落后多拍时宿主只补一帧并对齐当前时刻，不会追一堆过期帧。
+
 ## 7. 能力面
 
 在 `permissions` 里声明后，SDK 的 `Context` 对应方法才可用；未声明调用会返回可读错误（`能力未声明`）并计入设置页的「被拒调用」审计。
 
-每个权限名对应的 SDK 方法与协议方法名、params / result 形态，以 [API 参考 · 能力面方法名](plugin-api.md#7-能力面方法名) 为准。这里只记各自的边界与坑：
+每个权限名对应的 SDK 方法与协议方法名、params / result 形态，以 [API 参考 · 能力面方法名](plugin-api.md#8-能力面方法名) 为准。这里只记各自的边界与坑：
 
 | 权限 | 边界与约束 |
 | --- | --- |

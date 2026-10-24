@@ -34,6 +34,16 @@ impl ViewNode {
         self.children.iter().find_map(|child| child.find(node_id))
     }
 
+    /// 是否可成为键盘焦点：声明了 `focus` / `blur` / `key` 任一项。输入控件自己管键盘，恒不可聚焦。
+    pub fn focusable(&self) -> bool {
+        if matches!(self.body, NodeBody::TextInput { .. } | NodeBody::NumberInput { .. }) {
+            return false;
+        }
+        self.events
+            .iter()
+            .any(|kind| matches!(kind, EventKind::Focus | EventKind::Blur | EventKind::Key))
+    }
+
     /// 宿主挂载前的结构校验：id 非空且全树唯一、叶子无 children、浮层有且仅有一个内容子节点、
     /// 弹性权重为正、图标名非空、文本行数上限为正、容器尺寸不为负。
     pub fn validate(&self) -> Result<(), String> {
@@ -71,6 +81,32 @@ impl ViewNode {
         if let Some(size) = self.body.size() {
             if let Some(slot) = size.negative_slot() {
                 return Err(format!("节点 {} 的 {} 不能为负", self.id, slot));
+            }
+        }
+        if let NodeBody::Canvas { fps, .. } = &self.body {
+            if let Some(fps) = fps {
+                if !(1..=crate::canvas::MAX_CANVAS_FPS).contains(fps) {
+                    return Err(format!(
+                        "画布节点 {} 的 fps 须在 1–{} 之间",
+                        self.id,
+                        crate::canvas::MAX_CANVAS_FPS
+                    ));
+                }
+            }
+        }
+        // 输入控件自己承接键盘（光标 / 选区 / 组合串），焦点与按键声明会和控件内部处理互相截断
+        if matches!(self.body, NodeBody::TextInput { .. } | NodeBody::NumberInput { .. }) {
+            if let Some(kind) = self
+                .events
+                .iter()
+                .find(|kind| matches!(kind, EventKind::Focus | EventKind::Blur | EventKind::Key))
+            {
+                let name = match kind {
+                    EventKind::Focus => "focus",
+                    EventKind::Blur => "blur",
+                    _ => "key",
+                };
+                return Err(format!("输入控件 {} 不得声明 {name} 事件（键盘由控件自身承接）", self.id));
             }
         }
         for child in &self.children {
@@ -372,6 +408,10 @@ pub enum NodeBody {
         height: Option<f32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         fill: Option<bool>,
+        /// 目标帧率（1–120）：声明后宿主按该节拍回发 `host:canvas.frame`，插件逐帧提交绘制内容；
+        /// 缺省不订阅，静态画布不产生帧开销。不要求帧回调的插件不要声明。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fps: Option<u16>,
     },
     /// 分隔线：主题弱边界色的 1px 水平线（分组容器内的轻分割）。
     Divider {},
@@ -625,7 +665,7 @@ impl<'de> Deserialize<'de> for RowHeight {
 }
 
 /// 交互外观（节点的 `interaction`）：决定该节点的命中与状态着色。
-/// 交互态按「禁用 > 激活 > 悬停 > 常态」取第一个已声明且命中的档位；该档未声明时继续往后找，最终落到常态（连常态也没有则不绘制外观）。
+/// 交互态按「禁用 > 激活 > 焦点 > 悬停 > 常态」取第一个已声明且命中的档位；该档未声明时继续往后找，最终落到常态（连常态也没有则不绘制外观）。
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Interaction {
@@ -638,6 +678,9 @@ pub struct Interaction {
     /// 悬停外观（鼠标进入节点矩形）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hover: Option<Surface>,
+    /// 键盘焦点外观（节点持有键盘焦点时；键盘用户据此看见当前目标）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focused: Option<Surface>,
     /// 激活外观（列表选中项、当前 tab）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active: Option<Surface>,
@@ -657,14 +700,19 @@ impl Interaction {
         self.state() != InteractionState::Disabled
     }
 
-    /// 当前应绘制的外观：禁用 / 激活 / 悬停 / 常态依次取第一个命中的档位。
-    /// 激活优先于悬停——选中项在指针下仍保留选中底色与描边，不因悬停丢失选中态。
-    pub fn appearance(&self, hovered: bool) -> Option<&Surface> {
+    /// 当前应绘制的外观：禁用 / 激活 / 焦点 / 悬停 / 常态依次取第一个命中的档位。
+    /// 激活优先于焦点——选中项持有焦点时仍保留选中底色与描边；焦点优先于悬停。
+    pub fn appearance(&self, hovered: bool, focused: bool) -> Option<&Surface> {
         if !self.interactive() {
             return self.disabled.as_ref().or(self.normal.as_ref());
         }
         if self.state() == InteractionState::Active {
             if let Some(surface) = &self.active {
+                return Some(surface);
+            }
+        }
+        if focused {
+            if let Some(surface) = &self.focused {
                 return Some(surface);
             }
         }
@@ -1001,20 +1049,100 @@ impl ReportMode {
 }
 
 /// 节点事件种类：声明在 [`ViewNode::events`] 里宿主才回发，未声明的事件不上行（省流量、省误触）。
+///
+/// 声明 `focus` / `blur` / `key` 任一项即把节点标为**可聚焦**：在该节点上按下即取得键盘焦点，
+/// 在别处按下即失去；同一面内至多一个节点持有焦点，同一窗口同一时刻至多一个面接收键盘。
+/// 输入类控件（单行 / 多行 / 数字）自己管键盘，不得声明 `key`（提交时拒收）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum EventKind {
     Click,
+    /// 右键在节点矩形内按下（与 `click` 相互独立，可同时声明）。
+    /// 画布节点自带带按键的指针事件，右键用 `mouseEvents` 的 `pointerDown` 即可；两者都声明时
+    /// 一次右键会各回发一次。
+    SecondaryClick,
     Change,
     Submit,
+    /// 取得键盘焦点（仅可聚焦节点）。
     Focus,
+    /// 失去键盘焦点（仅可聚焦节点）。
     Blur,
+    /// 键盘按键（仅可聚焦节点）：持焦点期间回发全部**无命令修饰**的按键，带 Ctrl / Alt / Super
+    /// 的组合键归宿主、不上行。按键本身不做逐键声明——需要更细的筛选由插件在回调里判。
+    Key,
     /// Markdown 正文内的链接点击（仅 `markdown` 节点；宿主默认打开行为不受声明影响）。
     LinkClick,
     /// 滚动位置变化（仅 `scroll` / `list` 节点）：滚动时回发当前偏移与可滚动余量；
     /// 内容不足一屏时没有滚动，不发事件。
     Scroll,
 }
+
+/// 键盘焦点事件与按键的归属：`Press` 含系统重复按键（长按方向键逐次到达），`Release` 在抬起时到达。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum KeyAction {
+    Press,
+    Release,
+}
+
+/// 按键：具名键（功能键与编辑键）或可打印字符。字符按布局产出（与用户所见一致），
+/// 大小写与符号跟随 Shift，因此 `a` 与 `A` 是两个值、`1` 与 `!` 也是两个值。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum Key {
+    Named { name: NamedKey },
+    Character { text: String },
+}
+
+/// 具名键。可打印字符走 [`Key::Character`]；这里放不可打印的编辑 / 功能键，外加空格
+/// （它与编辑语义绑定，且布局差异下字符形态不稳定）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum NamedKey {
+    Escape,
+    Enter,
+    Tab,
+    Space,
+    Backspace,
+    Delete,
+    Insert,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    ArrowUp,
+    ArrowDown,
+    ArrowLeft,
+    ArrowRight,
+    F1,
+    F2,
+    F3,
+    F4,
+    F5,
+    F6,
+    F7,
+    F8,
+    F9,
+    F10,
+    F11,
+    F12,
+}
+
+/// 修饰键状态（按键发生时的快照）：`control` = Ctrl（macOS 的 Control，不含 Command），
+/// `meta` = Windows / Super / Command 键。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Modifiers {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shift: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub control: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub alt: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub meta: bool,
+}
+
 
 /// 宿主回发给插件的事件负载。`change`/`submit` 携带新值；菜单条目选择复用 `change`，
 /// 值为条目的 `action` 文本（[`EventValue::Text`]）。
@@ -1023,10 +1151,14 @@ pub enum EventKind {
 #[serde(rename_all_fields = "camelCase")]
 pub enum ViewEvent {
     Click,
+    SecondaryClick,
     Change { value: EventValue },
     Submit { value: EventValue },
     Focus,
     Blur,
+    /// 键盘按键（仅声明 `key` 的可聚焦节点）：`key` 为按键本身，`action` 区分按下 / 抬起，
+    /// `modifiers` 为当时的修饰键快照。
+    Key { key: Key, action: KeyAction, modifiers: Modifiers },
     /// Markdown 链接点击（仅声明 `linkClick` 的节点）。`href` 为源文本原样（未解码；
     /// wiki 为笔记名），`form` 与宿主笔记链接解析同一口径。
     LinkClick { href: String, form: LinkForm },
@@ -1329,28 +1461,29 @@ mod tests {
             state: Some(InteractionState::Active),
             normal: Some(normal),
             hover: Some(hover),
+            focused: None,
             active: Some(active),
             disabled: None,
         };
-        assert_eq!(spec.appearance(false), Some(&active));
+        assert_eq!(spec.appearance(false, false), Some(&active));
         // 激活优先于悬停：选中项在指针下仍保留选中外观
-        assert_eq!(spec.appearance(true), Some(&active));
+        assert_eq!(spec.appearance(true, false), Some(&active));
 
         // 未激活时悬停取悬停档
         let plain = Interaction { state: None, ..spec.clone() };
-        assert_eq!(plain.appearance(false), Some(&normal));
-        assert_eq!(plain.appearance(true), Some(&hover));
+        assert_eq!(plain.appearance(false, false), Some(&normal));
+        assert_eq!(plain.appearance(true, false), Some(&hover));
 
         // 未声明悬停档：悬停时沿用常态
         let no_hover = Interaction { state: None, hover: None, ..spec.clone() };
-        assert_eq!(no_hover.appearance(true), Some(&normal));
+        assert_eq!(no_hover.appearance(true, false), Some(&normal));
 
         // 禁用：不接受交互，外观取禁用档（缺省回落常态）
         let disabled = Interaction { state: Some(InteractionState::Disabled), ..spec.clone() };
         assert!(!disabled.interactive());
-        assert_eq!(disabled.appearance(true), Some(&normal));
+        assert_eq!(disabled.appearance(true, false), Some(&normal));
         let disabled_styled = Interaction { disabled: Some(hover), ..disabled };
-        assert_eq!(disabled_styled.appearance(true), Some(&hover));
+        assert_eq!(disabled_styled.appearance(true, false), Some(&hover));
     }
 
     #[test]
@@ -1372,6 +1505,7 @@ mod tests {
                 radius: Some(6.0),
             }),
             hover: None,
+            focused: None,
             active: None,
             disabled: None,
         });
@@ -1676,6 +1810,95 @@ mod tests {
         ] {
             assert_eq!(serde_json::to_value(&source).unwrap(), wire);
             assert_eq!(serde_json::from_value::<ImageSource>(wire).unwrap(), source);
+        }
+    }
+
+    #[test]
+    fn secondary_click_and_key_events_roundtrip() {
+        assert_eq!(serde_json::to_value(EventKind::SecondaryClick).unwrap(), serde_json::json!("secondaryClick"));
+        assert_eq!(serde_json::to_value(EventKind::Key).unwrap(), serde_json::json!("key"));
+
+        assert_eq!(serde_json::to_value(ViewEvent::SecondaryClick).unwrap(), serde_json::json!({ "kind": "secondaryClick" }));
+
+        let named = ViewEvent::Key {
+            key: Key::Named { name: NamedKey::ArrowLeft },
+            action: KeyAction::Press,
+            modifiers: Modifiers { shift: true, ..Modifiers::default() },
+        };
+        let wire = serde_json::to_value(&named).unwrap();
+        assert_eq!(wire["kind"], "key");
+        assert_eq!(wire["key"], serde_json::json!({ "type": "named", "name": "arrowLeft" }));
+        assert_eq!(wire["action"], "press");
+        assert_eq!(wire["modifiers"], serde_json::json!({ "shift": true }), "未按下的修饰键不落字段");
+        assert_eq!(serde_json::from_value::<ViewEvent>(wire).unwrap(), named);
+
+        let character = ViewEvent::Key {
+            key: Key::Character { text: "A".into() },
+            action: KeyAction::Release,
+            modifiers: Modifiers::default(),
+        };
+        let wire = serde_json::to_value(&character).unwrap();
+        assert_eq!(wire["key"], serde_json::json!({ "type": "character", "text": "A" }));
+        assert_eq!(wire["modifiers"], serde_json::json!({}));
+        assert_eq!(serde_json::from_value::<ViewEvent>(wire).unwrap(), character);
+    }
+
+    #[test]
+    fn focused_appearance_sits_between_active_and_hover() {
+        let focused = Surface { background: Some(ColorSpec::Token(ColorToken::Accent)), ..Surface::default() };
+        let hover = Surface { background: Some(ColorSpec::Token(ColorToken::Surface)), ..Surface::default() };
+        let spec = Interaction {
+            state: None,
+            normal: None,
+            hover: Some(hover),
+            focused: Some(focused),
+            active: None,
+            disabled: None,
+        };
+        assert_eq!(spec.appearance(false, true), Some(&focused));
+        assert_eq!(spec.appearance(true, true), Some(&focused), "焦点优先于悬停");
+        assert_eq!(spec.appearance(true, false), Some(&hover));
+
+        let without_focus = Interaction { focused: None, ..spec.clone() };
+        assert_eq!(without_focus.appearance(true, true), Some(&hover), "未声明焦点档时落到悬停档");
+
+        let wire = serde_json::to_value(&spec).unwrap();
+        assert!(wire.get("focused").is_some());
+        assert_eq!(serde_json::from_value::<Interaction>(wire).unwrap(), spec);
+    }
+
+    #[test]
+    fn focusable_is_declared_by_events_and_refused_on_inputs() {
+        let mut node = leaf("board", NodeBody::Canvas { mouse_events: vec![], height: None, fill: None, fps: None });
+        assert!(!node.focusable());
+        node.events = vec![EventKind::Click];
+        assert!(!node.focusable(), "只声明 click 不算可聚焦");
+        node.events = vec![EventKind::Key];
+        assert!(node.focusable());
+        node.events = vec![EventKind::Focus];
+        assert!(node.focusable());
+
+        let mut input = leaf(
+            "query",
+            NodeBody::TextInput {
+                value: String::new(),
+                placeholder: None,
+                multiline: None,
+                password: None,
+                read_only: None,
+                report: None,
+            },
+        );
+        input.events = vec![EventKind::Key];
+        assert!(!input.focusable());
+        assert!(input.validate().unwrap_err().contains("不得声明 key"));
+    }
+
+    #[test]
+    fn canvas_fps_out_of_range_is_refused() {
+        for (fps, ok) in [(Some(0u16), false), (Some(1), true), (Some(120), true), (Some(121), false), (None, true)] {
+            let node = leaf("board", NodeBody::Canvas { mouse_events: vec![], height: None, fill: None, fps });
+            assert_eq!(node.validate().is_ok(), ok, "fps = {fps:?}");
         }
     }
 }

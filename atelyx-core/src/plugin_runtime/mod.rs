@@ -3,6 +3,7 @@
 //! 的单一广播通道进入壳的 update。进程创建与清理一律经 [`crate::plugin_process`]。
 
 mod ai_tools;
+mod canvas_list;
 mod capability;
 mod child_process;
 mod fs;
@@ -36,6 +37,7 @@ use instance::Instance;
 
 /// 协议类型再导出：壳只依赖 `atelyx-core`，不直接依赖协议 crate。
 pub use ai_tools::{PluginToolOutput, PluginToolSpec};
+pub use canvas_list::CanvasList;
 pub use atelyx_plugin_protocol::canvas::{CanvasColor, CanvasPoint, DrawCommand};
 pub use atelyx_plugin_protocol::event::{
     ChatChangeKind, ChatChangedPayload, FileChangeKind, FileChangedPayload, TableChangedPayload,
@@ -992,7 +994,7 @@ impl PluginRuntime {
         plugin_id: &str,
         surface_id: &str,
         node_id: &str,
-    ) -> Option<std::sync::Arc<Vec<DrawCommand>>> {
+    ) -> Option<std::sync::Arc<CanvasList>> {
         self.instances
             .lock()
             .unwrap()
@@ -1023,6 +1025,30 @@ impl PluginRuntime {
         let instance = self.instances.lock().unwrap().get(plugin_id).cloned();
         if let Some(instance) = instance {
             instance.notify_canvas_resized(surface_id, node_id, width, height);
+        }
+    }
+
+    /// 回发键盘焦点变化（`host:view.event` 的 `focus` / `blur`）。插件未在跑时静默丢弃。
+    pub fn notify_plugin_focus(&self, plugin_id: &str, surface_id: &str, node_id: &str, focused: bool) {
+        let instance = self.instances.lock().unwrap().get(plugin_id).cloned();
+        if let Some(instance) = instance {
+            instance.notify_plugin_focus(surface_id, node_id, focused);
+        }
+    }
+
+    /// 是否有画布在等帧（壳据此决定要不要挂帧节拍：没有动画时不产生周期唤醒）。
+    pub fn has_animated_canvas(&self) -> bool {
+        // 只读判定，锁内直接遍历（避免每次调用都克隆实例表）
+        let instances = self.instances.lock().unwrap();
+        instances.values().any(|instance| instance.has_animated_canvas())
+    }
+
+    /// 推一次帧节拍：给到期的画布各发一条 `host:canvas.frame`（壳的帧 tick 调）。
+    /// 不持实例表锁下发通知——写插件 stdin 可能阻塞，锁住会让别的调用排队。
+    pub fn pump_canvas_frames(&self, now: std::time::Instant) {
+        let instances: Vec<Arc<Instance>> = self.instances.lock().unwrap().values().cloned().collect();
+        for instance in instances {
+            instance.pump_frames(now);
         }
     }
 

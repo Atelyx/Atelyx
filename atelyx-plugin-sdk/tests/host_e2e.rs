@@ -191,11 +191,12 @@ fn wait_canvas(
     runtime: &PluginRuntime,
     id: &str,
     want: impl Fn(&[DrawCommand]) -> bool,
-) -> std::sync::Arc<Vec<DrawCommand>> {
+) -> std::sync::Arc<atelyx_core::plugin_runtime::CanvasList> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         if let Some(list) = runtime.surface_canvas(id, "panel", "board") {
-            if want(&list) {
+            let commands: Vec<DrawCommand> = list.commands().cloned().collect();
+            if want(&commands) {
                 return list;
             }
         }

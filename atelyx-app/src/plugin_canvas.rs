@@ -10,8 +10,8 @@ use iced::widget::canvas::{self, Canvas, Path as CanvasPath, Stroke, Text as Can
 use iced::{Color, Element, Length, Point, Rectangle};
 
 use atelyx_core::plugin_runtime::{
-    CanvasColor, CanvasEventKind, CanvasPointer, DrawCommand, ImageFit, ImageSource, MouseButton,
-    TextWeight,
+    CanvasColor, CanvasEventKind, CanvasList, CanvasPointer, DrawCommand, ImageFit, ImageSource,
+    MouseButton, TextWeight,
 };
 use atelyx_view::render::token_color;
 
@@ -68,7 +68,7 @@ pub struct PluginCanvas<'a> {
     /// 树节点 id 在渲染期取自投影树，进入部件时收拢为自有值。
     pub node_id: String,
     /// 最新指令清单（`None` = 未提交过；`Some(空)` = 清空画布）。
-    pub list: Option<&'a Arc<Vec<DrawCommand>>>,
+    pub list: Option<&'a Arc<CanvasList>>,
     pub mouse_events: Vec<CanvasEventKind>,
 }
 
@@ -219,10 +219,11 @@ impl canvas::Program<Message> for PluginCanvas<'_> {
                 reported.2,
             );
         }
-        let commands: &[DrawCommand] = self.list.map(|list| list.as_slice()).unwrap_or(&[]);
         let geometry = state.cache.draw(renderer, bounds.size(), |frame| {
-            for command in commands {
-                execute(frame, command, self);
+            if let Some(list) = self.list {
+                for command in list.commands() {
+                    execute(frame, command, self);
+                }
             }
         });
         vec![geometry]

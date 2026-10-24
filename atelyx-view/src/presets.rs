@@ -116,6 +116,7 @@ pub fn list_item<'a>(id: impl Into<NodeId<'a>>, children: Vec<ViewNode>, selecte
     item.interaction = Some(Interaction {
         state: Some(if selected { InteractionState::Active } else { InteractionState::Normal }),
         normal: Some(surface(None, None, 6.0)),
+        focused: None,
         hover: Some(surface(Some(ColorToken::Hover.into()), None, 6.0)),
         active: Some(surface(
             Some(ColorToken::AccentSoft.into()),
@@ -153,6 +154,7 @@ pub fn chip<'a>(id: impl Into<NodeId<'a>>, label: impl Into<String>, tone: Tone)
     item.interaction = Some(Interaction {
         state: None,
         normal: Some(surface(Some(tone.soft()), None, 10.0)),
+        focused: None,
         hover: None,
         active: None,
         disabled: None,
@@ -177,6 +179,7 @@ pub fn alert<'a>(id: impl Into<NodeId<'a>>, tone: Tone, children: Vec<ViewNode>)
     block.interaction = Some(Interaction {
         state: None,
         normal: Some(surface(Some(tone.soft()), Some(tone.solid()), 6.0)),
+        focused: None,
         hover: None,
         active: None,
         disabled: None,
@@ -214,6 +217,7 @@ pub fn tabs<'a>(id: impl Into<NodeId<'a>>, entries: &[(&str, &str)], active: &st
             item.interaction = Some(Interaction {
                 state: Some(if current { InteractionState::Active } else { InteractionState::Normal }),
                 normal: Some(surface(None, None, 6.0)),
+                focused: None,
                 hover: Some(surface(Some(ColorToken::Hover.into()), None, 6.0)),
                 active: Some(surface(Some(ColorToken::AccentSoft.into()), None, 6.0)),
                 disabled: None,
@@ -256,6 +260,7 @@ pub fn status_dot<'a>(id: impl Into<NodeId<'a>>, tone: Tone) -> ViewNode {
     dot.interaction = Some(Interaction {
         state: None,
         normal: Some(surface(Some(tone.solid()), None, 4.0)),
+        focused: None,
         hover: None,
         active: None,
         disabled: None,
@@ -402,16 +407,16 @@ mod tests {
         let spec = selected.interaction.expect("列表项必须带交互外观");
         assert_eq!(spec.state(), InteractionState::Active);
         assert_eq!(
-            spec.appearance(false),
-            spec.appearance(true),
+            spec.appearance(false, false),
+            spec.appearance(true, false),
             "选中项在指针下仍保留选中外观"
         );
 
         let plain = list_item("row2", child(), false);
         let spec = plain.interaction.expect("列表项必须带交互外观");
         assert_ne!(
-            spec.appearance(false),
-            spec.appearance(true),
+            spec.appearance(false, false),
+            spec.appearance(true, false),
             "未选中项须有悬停反馈"
         );
     }
@@ -421,7 +426,7 @@ mod tests {
         let chip_node = chip("c", "新", Tone::Warning);
         let spec = chip_node.interaction.expect("徽标需自带底色");
         assert_eq!(
-            spec.appearance(false).and_then(|surface| surface.background),
+            spec.appearance(false, false).and_then(|surface| surface.background),
             Some(Tone::Warning.soft())
         );
         let label = chip_node.children.first().expect("徽标应有标签文本");

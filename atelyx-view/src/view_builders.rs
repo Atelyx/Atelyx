@@ -354,9 +354,23 @@ pub fn menu<'a>(id: impl Into<NodeId<'a>>, label: &str, items: Vec<MenuItem>) ->
 }
 
 /// 自绘画布节点：`mouse_events` 声明要接收的指针事件子集（未声明不上行）。
-/// 内容经 `Context::submit_canvas` 提交指令清单，命中由插件按指令几何自算。
+/// 内容经 `Context::submit_canvas` / `Context::patch_canvas` 提交指令清单，命中由插件按指令几何自算。
+/// 静态画布不声明帧率；需要逐帧重绘时用 [`animated_canvas`]。
 pub fn canvas<'a>(id: impl Into<NodeId<'a>>, mouse_events: Vec<CanvasEventKind>) -> ViewNode {
-    node(id, NodeBody::Canvas { mouse_events, height: None, fill: None })
+    canvas_with_fps(id, mouse_events, None)
+}
+
+/// 要动画的画布：声明目标帧率后宿主按该节拍回发 `host:canvas.frame`，插件在回调里提交当帧内容。
+pub fn animated_canvas<'a>(
+    id: impl Into<NodeId<'a>>,
+    mouse_events: Vec<CanvasEventKind>,
+    fps: u16,
+) -> ViewNode {
+    canvas_with_fps(id, mouse_events, Some(fps))
+}
+
+fn canvas_with_fps<'a>(id: impl Into<NodeId<'a>>, mouse_events: Vec<CanvasEventKind>, fps: Option<u16>) -> ViewNode {
+    node(id, NodeBody::Canvas { mouse_events, height: None, fill: None, fps })
 }
 
 /// 拖动热区：自身不渲染内容，用户在其占位区域内按下即由宿主发起整窗拖动

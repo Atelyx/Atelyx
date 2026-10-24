@@ -211,6 +211,8 @@ pub fn find_node<'a>(tree: &'a ViewNode, node_id: &str) -> Option<&'a ViewNode> 
 fn event_kind(event: &ViewEvent) -> Option<EventKind> {
     match event {
         ViewEvent::Click => Some(EventKind::Click),
+        ViewEvent::SecondaryClick => Some(EventKind::SecondaryClick),
+        ViewEvent::Key { .. } => Some(EventKind::Key),
         ViewEvent::Change { .. } => Some(EventKind::Change),
         ViewEvent::Submit { .. } => Some(EventKind::Submit),
         ViewEvent::Focus => Some(EventKind::Focus),
@@ -427,6 +429,13 @@ pub fn drop_node_state(app: &mut App, plugin_id: &str, surface_id: &str) {
         .retain(|key, _| !(key.0 == plugin_id && key.1 == surface_id));
     app.plugin_hovered
         .retain(|key| !(key.0 == plugin_id && key.1 == surface_id));
+    if app
+        .plugin_focus
+        .as_ref()
+        .is_some_and(|focus| focus.plugin_id == plugin_id && focus.surface_id == surface_id)
+    {
+        app.plugin_focus = None;
+    }
 }
 
 /// 撤掉树里已不存在的节点上的草稿、编辑器与悬停态。
@@ -438,6 +447,90 @@ fn prune_node_state(app: &mut App, plugin_id: &str, surface_id: &str, tree: &Vie
     app.plugin_draft_seq.retain(|key, _| alive(key));
     app.plugin_editors.retain(|key, _| alive(key));
     app.plugin_hovered.retain(|key| alive(key));
+    sync_focus_with_tree(app, plugin_id, surface_id, tree);
+}
+
+/// 树刷新后校正焦点：节点被摘掉或不再可聚焦即释放（否则键盘停在一个接不住它的位置上），
+/// 仍可聚焦则按新树重算「是否吃键盘」——声明在 `submit` 里可变，快照过期会让宿主与插件互相让位。
+fn sync_focus_with_tree(app: &mut App, plugin_id: &str, surface_id: &str, tree: &ViewNode) {
+    let Some(focus) = app.plugin_focus.as_ref() else { return };
+    if focus.plugin_id != plugin_id || focus.surface_id != surface_id {
+        return;
+    }
+    match find_node(tree, focus.node_id.as_str()).filter(|node| node.focusable()) {
+        Some(node) => {
+            let takes_keys = declares(node, EventKind::Key);
+            if let Some(focus) = app.plugin_focus.as_mut() {
+                focus.takes_keys = takes_keys;
+            }
+        }
+        None => app.plugin_focus = None,
+    }
+}
+
+/// 插件面的键盘焦点：同一时刻全局至多一个节点收键盘（OS 只给聚焦窗口发键盘，故不做按窗口分槽）。
+#[derive(Clone, Debug, PartialEq)]
+pub struct PluginFocus {
+    pub window: window::Id,
+    pub plugin_id: String,
+    pub surface_id: String,
+    pub node_id: String,
+    /// 该节点是否声明了 `key`：只声明 `focus` / `blur` 的节点拿到焦点，但键盘仍归宿主。
+    pub takes_keys: bool,
+}
+
+/// 键盘焦点请求：设 / 清插件面的键盘焦点并按节点声明回发 `focus` / `blur`。
+/// 互斥由按下事件天然给出——一次按下会通知所有可聚焦节点，只有光标所在的那个请求聚焦，
+/// 当前已聚焦的节点请求释放。
+pub fn on_plugin_focus(
+    app: &mut App,
+    window: window::Id,
+    plugin_id: String,
+    surface_id: String,
+    node_id: String,
+    focused: bool,
+) {
+    let current = app.plugin_focus.clone();
+    if !focused {
+        let holds = current.as_ref().is_some_and(|focus| {
+            focus.plugin_id == plugin_id && focus.surface_id == surface_id && focus.node_id == node_id
+        });
+        if holds {
+            app.plugin_focus = None;
+            app.plugins.notify_plugin_focus(&plugin_id, &surface_id, &node_id, false);
+        }
+        return;
+    }
+    let takes_keys = app
+        .plugin_trees
+        .get(&(plugin_id.clone(), surface_id.clone()))
+        .and_then(|tree| find_node(tree, node_id.as_str()))
+        .is_some_and(|node| declares(node, EventKind::Key));
+    let next = PluginFocus { window, plugin_id, surface_id, node_id, takes_keys };
+    if current.as_ref() == Some(&next) {
+        return;
+    }
+    if let Some(previous) = current {
+        app.plugins
+            .notify_plugin_focus(&previous.plugin_id, &previous.surface_id, &previous.node_id, false);
+    }
+    app.plugins.notify_plugin_focus(&next.plugin_id, &next.surface_id, &next.node_id, true);
+    app.plugin_focus = Some(next);
+}
+
+/// 清掉属于该窗口的键盘焦点（窗口失焦 / 关闭）。
+pub fn release_plugin_focus(app: &mut App, window: window::Id) {
+    let Some(focus) = app.plugin_focus.clone() else { return };
+    if focus.window != window {
+        return;
+    }
+    app.plugin_focus = None;
+    app.plugins.notify_plugin_focus(&focus.plugin_id, &focus.surface_id, &focus.node_id, false);
+}
+
+/// 宿主键盘是否让位：焦点节点声明了 `key` 事件即由插件消费无命令修饰的按键与 Esc。
+pub fn plugin_takes_keyboard(app: &App) -> bool {
+    app.plugin_focus.as_ref().is_some_and(|focus| focus.takes_keys)
 }
 
 /// 单行 / 数字输入的草稿同步：记下插件当前值，非逐键上报时值变了即接管本机文本。
@@ -629,7 +722,7 @@ fn ensure_images(app: &mut App) -> Task<Message> {
         }
     }
     for ((plugin_id, _, _), list) in &app.plugin_canvases {
-        for command in list.iter() {
+        for command in list.commands() {
             if let DrawCommand::Image { source, .. } = command {
                 if let Some(key) = image_key(app, plugin_id, source) {
                     pending.push((key, source.clone()));

@@ -258,6 +258,10 @@ const MIN_WINDOW_SIZE: Size = Size::new(1100.0, 760.0);
 /// 防抖落盘周期：期间多次模型变更合并为一次写盘（拖宽/拖拽等连续操作不逐帧写）。
 const PERSIST_TICK: std::time::Duration = std::time::Duration::from_millis(800);
 
+/// 画布帧拍的调度粒度（125 Hz，覆盖协议允许的最高帧率）：具体节拍由各画布声明的 fps 决定，
+/// 此值只决定检查密度——比它更慢会让 120 fps 的声明退化成按检查密度发帧。
+const CANVAS_FRAME_TICK: std::time::Duration = std::time::Duration::from_millis(8);
+
 /// 自动保存防抖：最近一次内容变更后停止输入该时长才写回（尾沿 debounce，单定时器链续排）。
 pub(crate) const AUTOSAVE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(500);
 
@@ -320,6 +324,18 @@ pub(crate) fn now_secs() -> u64 {
 /// 命令候选键形态：Ctrl/Cmd + 单字符（撤销/重做/剪贴板类），或命名键（任意修饰，
 /// 覆盖 NoMod 清空类与其余注册表键位）。全局订阅不持 App 状态，是否命中与消费
 /// 由处理器按录制态与作用域焦点自守卫。
+/// 宿主的键盘派生消息：插件节点持有键盘时一律不处理（按键已由界面层上行给插件）。
+/// 只列**无命令修饰**的键盘来源项——带 Ctrl / Alt / Super 的组合键归宿主（`KeyCommand` / `CopyKey`
+/// 因此不在此列），鼠标、窗口与定时消息也不受插件焦点影响。
+fn is_host_keyboard_message(message: &Message) -> bool {
+    match message {
+        Message::NavKey(..) | Message::EnterKey | Message::Escape(_) => true,
+        Message::Table(table_view::TableMsg::NavKey(_) | table_view::TableMsg::CharKey(_)) => true,
+        Message::Props(properties_view::PropsMsg::CommitMove(_)) => true,
+        _ => false,
+    }
+}
+
 fn command_key_candidate(key: &keyboard::Key, mods: keyboard::Modifiers) -> bool {
     match key {
         keyboard::Key::Character(c) => c.len() == 1 && (mods.control() || mods.logo()),
@@ -652,6 +668,18 @@ enum Message {
         node_id: String,
         entered: bool,
     },
+    /// 插件节点请求 / 释放键盘焦点（同一时刻全局至多一个节点收键盘）。
+    PluginFocus {
+        window: window::Id,
+        plugin_id: String,
+        surface_id: String,
+        node_id: String,
+        focused: bool,
+    },
+    /// 画布帧节拍：给声明了帧率的画布各发一帧（只在有动画画布时订阅）。
+    PluginCanvasTick,
+    /// 一拍帧通知已写完（复位在飞标记）。
+    PluginCanvasPumped,
     /// 全接管标题栏的拖动热区被按下（宿主代执行整窗拖动）。
     PluginWindowDrag(window::Id),
     /// 退出接管（常驻退出入口 / Esc）。
@@ -1184,11 +1212,15 @@ pub struct App {
     pub plugin_editors: HashMap<plugin_actions::InputKey, plugin_actions::EditorState>,
     /// 画布节点的最新绘图指令清单投影（键 = 插件 id + 面 id + 节点 id；随树投影刷新）。
     pub plugin_canvases:
-        HashMap<plugin_actions::InputKey, std::sync::Arc<Vec<atelyx_core::plugin_runtime::DrawCommand>>>,
+        HashMap<plugin_actions::InputKey, std::sync::Arc<atelyx_core::plugin_runtime::CanvasList>>,
     /// markdown 节点的解析投影（键 = 插件 id + 面 id + 节点 id；源码不变不重解析）。
     pub plugin_markdown: HashMap<plugin_actions::InputKey, plugin_actions::MarkdownNode>,
     /// 悬停中的插件节点（键 = 插件 id + 面 id + 节点 id；`hoverOnly` 图标钮据此显隐）。
     pub plugin_hovered: HashSet<plugin_actions::InputKey>,
+    /// 插件面的键盘焦点（全局单槽：OS 只给聚焦窗口发键盘，窗口失焦即清除）。
+    pub plugin_focus: Option<plugin_actions::PluginFocus>,
+    /// 画布帧拍是否还在飞（同一时刻只推一拍，慢插件不积压帧任务）。
+    pub plugin_canvas_pumping: bool,
     /// 各窗口的接管态（键 = OS 窗口 id；布局真源不动，退出即恢复）。
     pub plugin_takeovers: HashMap<window::Id, plugin_actions::TakeoverActive>,
     /// 插件窗口记账（键 = OS 窗口 id；随窗口关闭 / 插件停用收尾）。
@@ -1584,6 +1616,8 @@ impl App {
                 plugin_canvases: HashMap::new(),
                 plugin_markdown: HashMap::new(),
                 plugin_hovered: HashSet::new(),
+                plugin_focus: None,
+                plugin_canvas_pumping: false,
                 plugin_takeovers: HashMap::new(),
                 plugin_windows: HashMap::new(),
                 doc_open: None,
@@ -1847,6 +1881,10 @@ impl App {
     }
 
     fn handle(&mut self, message: Message) -> Task<Message> {
+        // 键盘焦点在插件节点上时宿主的键盘派生消息一律不处理：按键已由界面层上行给插件
+        if plugin_actions::plugin_takes_keyboard(self) && is_host_keyboard_message(&message) {
+            return Task::none();
+        }
         match message {
             Message::WindowOpened(id) => {
                 if self.main_id.is_none() {
@@ -1878,6 +1916,7 @@ impl App {
                 }
             }
             Message::WindowClosed(id) => {
+                plugin_actions::release_plugin_focus(self, id);
                 if self.main_id == Some(id) {
                     // 主窗关闭即退出：显式收尾插件运行时（停全部插件并结束托管进程树）
                     self.plugins.shutdown();
@@ -2670,6 +2709,7 @@ impl App {
                 self.apply(LayoutOp::SetDetachedWindowPinned { window_id, pinned: !pinned })
             }
             Message::DetachedFocusLost(os_id) => {
+                plugin_actions::release_plugin_focus(self, os_id);
                 // 插件窗口：声明 hide_on_blur 的隐藏（浮窗形态）
                 if self.plugin_windows.contains_key(&os_id) {
                     return plugin_actions::on_plugin_window_blur(self, os_id);
@@ -3457,6 +3497,27 @@ impl App {
                 } else {
                     self.plugin_hovered.remove(&key);
                 }
+                Task::none()
+            }
+            Message::PluginFocus { window, plugin_id, surface_id, node_id, focused } => {
+                plugin_actions::on_plugin_focus(self, window, plugin_id, surface_id, node_id, focused);
+                Task::none()
+            }
+            Message::PluginCanvasTick => {
+                // 帧拍只推通知、不等插件回执；写出插件 stdin 交给线程池——管道写满时阻塞的是任务线程，
+                // 不能是 UI 线程。上一拍还在写就不再起新任务：否则慢插件会让帧排成一队、顺序也不保证
+                if self.plugin_canvas_pumping {
+                    return Task::none();
+                }
+                self.plugin_canvas_pumping = true;
+                let plugins = self.plugins.clone();
+                Task::perform(
+                    async move { plugins.pump_canvas_frames(std::time::Instant::now()) },
+                    |_| Message::PluginCanvasPumped,
+                )
+            }
+            Message::PluginCanvasPumped => {
+                self.plugin_canvas_pumping = false;
                 Task::none()
             }
             Message::PluginWindowDrag(id) => {
@@ -6904,6 +6965,12 @@ impl App {
             iced::time::every(PERSIST_TICK).map(|_| Message::PersistTick),
             if need_tick {
                 iced::time::every(std::time::Duration::from_millis(100)).map(|_| Message::UiTick)
+            } else {
+                Subscription::none()
+            },
+            // 画布帧拍：只有存在声明了帧率的画布时才挂（静态画布不产生周期唤醒）
+            if self.plugins.has_animated_canvas() {
+                iced::time::every(CANVAS_FRAME_TICK).map(|_| Message::PluginCanvasTick)
             } else {
                 Subscription::none()
             },

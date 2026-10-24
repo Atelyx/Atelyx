@@ -9,6 +9,7 @@ use iced::advanced::widget::tree;
 use iced::advanced::Renderer as _;
 use iced::advanced::{overlay, renderer, Clipboard, Shell, Widget};
 use iced::alignment::{Horizontal, Vertical};
+use iced::keyboard;
 use iced::mouse;
 use iced::touch;
 use iced::widget::{
@@ -19,8 +20,9 @@ use iced::{Color, Element, Length, Padding, Rectangle, Renderer, Size, Theme, Ve
 
 use atelyx_plugin_protocol::view::{
     Align, Axis, BoxSize, ButtonVariant, CanvasEventKind, CardTone, ColorSpec, ControlSize,
-    EventKind, EventValue, ImageFit, ImageSource, Justify, NodeBody, PaddingSpec, ReportMode,
-    RowHeight, SizeSpec, Surface, TextFamily, TextWeight, ViewEvent, ViewNode,
+    EventKind, EventValue, ImageFit, ImageSource, Justify, Key as ViewKey, KeyAction, Modifiers as ViewModifiers,
+    NamedKey, NodeBody, PaddingSpec, ReportMode, RowHeight, SizeSpec, Surface, TextFamily, TextWeight,
+    ViewEvent, ViewNode,
 };
 use atelyx_ui::controls::{self, Variant};
 use atelyx_ui::palette as pal;
@@ -62,6 +64,8 @@ pub enum ViewMsg<M> {
     TextEdit { plugin_id: String, surface_id: String, node_id: String, action: text_editor::Action },
     /// 节点悬停进出（交互外观与 `hoverOnly` 图标钮据此切换）。
     Hover { plugin_id: String, surface_id: String, node_id: String, entered: bool },
+    /// 键盘焦点变化请求：`focused` 为真即把该节点设为所在面的键盘目标，为假即释放（仅当它当前持有时）。
+    Focus { window: iced::window::Id, plugin_id: String, surface_id: String, node_id: String, focused: bool },
     /// 拖动热区按下：宿主发起整窗拖动。
     WindowDrag(iced::window::Id),
     /// 打开菜单 / 下拉弹层。
@@ -92,17 +96,19 @@ pub struct NodeKey<'a> {
 
 /// 节点渲染需要的状态种类：只取该节点真正用到的部分，避免每次渲染克隆无关数据。
 pub enum StateNeed<'a> {
-    /// 仅悬停态。
-    Hover,
+    /// 悬停与键盘焦点（交互外观与悬停才显示的图标钮据此切换）。
+    Interaction,
     /// 单行 / 数字输入：需要合并草稿后的显示值。
     TextInput { plugin_value: &'a str },
     /// 多行输入：需要宿主编辑器状态。
     Multiline,
 }
 
-/// 节点瞬时状态（悬停 / 输入显示值 / 多行编辑器）。
+/// 节点瞬时状态（悬停 / 键盘焦点 / 输入显示值 / 多行编辑器）。
 pub struct NodeState<'a> {
     pub hovered: bool,
+    /// 该节点是否持有键盘焦点（同一面至多一个节点）。
+    pub focused: bool,
     /// 单行 / 数字输入的显示值（宿主已合并本机草稿）。
     pub text: Option<Cow<'a, str>>,
     pub editor: Option<&'a text_editor::Content>,
@@ -309,20 +315,50 @@ where
     // 按钮与图标钮自身承接按下（含按下态外观），此处不再重复挂命中
     let on_press = (enabled && !owns_press).then(|| click(ctx, node)).flatten();
     let wants_hover = enabled && wants_hover;
-    if on_press.is_none() && !wants_hover {
-        return element;
+    if on_press.is_some() || wants_hover {
+        let mut area = mouse_area(element);
+        if wants_hover {
+            area = area
+                .on_enter(hover_msg(ctx, &node.id, true))
+                .on_exit(hover_msg(ctx, &node.id, false));
+        }
+        element = match on_press {
+            Some(message) => area.on_press(message).interaction(mouse::Interaction::Pointer).into(),
+            None => area.into(),
+        };
     }
-    let mut area = mouse_area(element);
-    if wants_hover {
-        area = area
-            .on_enter(hover_msg(ctx, &node.id, true))
-            .on_exit(hover_msg(ctx, &node.id, false));
-    }
-    match on_press {
-        Some(message) => area.on_press(message).interaction(mouse::Interaction::Pointer).into(),
-        None => area.into(),
-    }
+    with_node_hit(host, ctx, node, element)
 }
+
+/// 节点的指针与键盘接线：右键按住回发、可聚焦节点接焦点请求与键盘按键。
+/// 不需要这两种能力的节点原样返回，不加中间层（不改变既有布局与命中）。
+fn with_node_hit<'a, M, H>(host: &H, ctx: &Ctx, node: &'a ViewNode, inner: Element<'a, M>) -> Element<'a, M>
+where
+    M: ViewMessage,
+    H: ViewHost<M>,
+{
+    let focusable = node.focusable() && interaction_enabled(node);
+    let on_secondary =
+        declares(node, EventKind::SecondaryClick).then(|| node_event(ctx, &node.id, ViewEvent::SecondaryClick));
+    if !focusable && on_secondary.is_none() {
+        return inner;
+    }
+    let on_key: Option<Box<dyn Fn(ViewEvent) -> M + 'a>> = declares(node, EventKind::Key).then(|| {
+        let ctx = ctx.clone();
+        let node_id = node.id.clone();
+        Box::new(move |event: ViewEvent| node_event(&ctx, &node_id, event)) as Box<dyn Fn(ViewEvent) -> M>
+    });
+    NodeHit {
+        inner,
+        on_secondary,
+        on_focus: focusable.then(|| focus_msg(ctx, &node.id, true)),
+        on_blur: focusable.then(|| focus_msg(ctx, &node.id, false)),
+        on_key,
+        focused: focusable && focused(host, ctx, &node.id),
+    }
+    .into()
+}
+
 
 /// 节点当前状态命中的交互外观（禁用 / 激活 / 悬停 / 常态依次取第一个已声明的档位）。
 fn current_surface<M, H>(host: &H, ctx: &Ctx, node: &ViewNode) -> Option<Surface>
@@ -332,7 +368,8 @@ where
 {
     let spec = node.interaction.as_ref()?;
     let hovered = spec.hover.is_some() && hovered(host, ctx, &node.id);
-    spec.appearance(hovered).copied()
+    let focused = spec.focused.is_some() && focused(host, ctx, &node.id);
+    spec.appearance(hovered, focused).copied()
 }
 
 /// 节点是否接受交互（`interaction.state` 为 `disabled` 时关掉点击与悬停）。
@@ -717,7 +754,7 @@ where
                 (None, None) => controls::dropdown_trigger("…", Length::Fill, open),
             }
         }
-        NodeBody::Canvas { mouse_events, height, fill } => {
+        NodeBody::Canvas { mouse_events, height, fill, .. } => {
             let canvas = host.canvas(CanvasRequest {
                 window: ctx.window,
                 plugin_id: &ctx.plugin_id,
@@ -1287,11 +1324,38 @@ where
     H: ViewHost<M>,
     M: Clone + 'static,
 {
+    interaction_state(host, ctx, node_id).hovered
+}
+
+/// 某节点是否持有键盘焦点（交互外观的焦点档与键盘热区据此工作）。
+fn focused<M, H>(host: &H, ctx: &Ctx, node_id: &str) -> bool
+where
+    H: ViewHost<M>,
+    M: Clone + 'static,
+{
+    interaction_state(host, ctx, node_id).focused
+}
+
+fn interaction_state<'a, M, H>(host: &'a H, ctx: &Ctx, node_id: &str) -> NodeState<'a>
+where
+    H: ViewHost<M>,
+    M: Clone + 'static,
+{
     host.node_state(
         &NodeKey { plugin_id: &ctx.plugin_id, surface_id: &ctx.surface_id, node_id },
-        StateNeed::Hover,
+        StateNeed::Interaction,
     )
-    .hovered
+}
+
+/// 焦点请求消息：`focused` 为假即释放（宿主只在它确为当前焦点时清）。
+fn focus_msg<M: ViewMessage>(ctx: &Ctx, node_id: &str, focused: bool) -> M {
+    M::view(ViewMsg::Focus {
+        window: ctx.window,
+        plugin_id: ctx.plugin_id.clone(),
+        surface_id: ctx.surface_id.clone(),
+        node_id: node_id.to_string(),
+        focused,
+    })
 }
 
 /// 悬停进出消息。
@@ -1534,6 +1598,251 @@ impl<'a, Message: Clone + 'static> Widget<Message, Theme, Renderer> for NodeBox<
 impl<'a, Message: Clone + 'static> From<NodeBox<'a, Message>> for Element<'a, Message> {
     fn from(node: NodeBox<'a, Message>) -> Self {
         Element::new(node)
+    }
+}
+
+/// 节点的指针与键盘热区：布局完全委托子项，只做三件事——右键按下回发、按下时请求 / 释放键盘焦点、
+/// 持焦点时把按键上行给插件并截住（同一窗口的宿主快捷键与输入控件不再重复消费）。
+struct NodeHit<'a, Message> {
+    inner: Element<'a, Message>,
+    on_secondary: Option<Message>,
+    on_focus: Option<Message>,
+    on_blur: Option<Message>,
+    on_key: Option<Box<dyn Fn(ViewEvent) -> Message + 'a>>,
+    /// 渲染期快照：该节点此刻是否持有键盘焦点。
+    focused: bool,
+}
+
+impl<'a, Message: Clone + 'static> Widget<Message, Theme, Renderer> for NodeHit<'a, Message> {
+    fn size(&self) -> Size<Length> {
+        self.inner.as_widget().size()
+    }
+
+    fn size_hint(&self) -> Size<Length> {
+        self.inner.as_widget().size_hint()
+    }
+
+    fn state(&self) -> tree::State {
+        tree::State::new(())
+    }
+
+    fn children(&self) -> Vec<tree::Tree> {
+        vec![tree::Tree::new(self.inner.as_widget())]
+    }
+
+    fn diff(&self, tree: &mut tree::Tree) {
+        tree.diff_children(std::slice::from_ref(&self.inner));
+    }
+
+    fn layout(&mut self, tree: &mut tree::Tree, renderer: &Renderer, limits: &Limits) -> Node {
+        let child = self.inner.as_widget_mut().layout(&mut tree.children[0], renderer, limits);
+        let size = child.size();
+        Node::with_children(size, vec![child])
+    }
+
+    fn operate(
+        &mut self,
+        tree: &mut tree::Tree,
+        layout: Layout<'_>,
+        renderer: &Renderer,
+        operation: &mut dyn iced::advanced::widget::Operation,
+    ) {
+        let Some(child) = layout.children().next() else { return };
+        self.inner.as_widget_mut().operate(&mut tree.children[0], child, renderer, operation);
+    }
+
+    fn update(
+        &mut self,
+        tree: &mut tree::Tree,
+        event: &iced::Event,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        renderer: &Renderer,
+        clipboard: &mut dyn Clipboard,
+        shell: &mut Shell<'_, Message>,
+        viewport: &Rectangle,
+    ) {
+        let Some(child) = layout.children().next() else { return };
+        // 先让子项处理（点击 / 输入 / 更深的焦点热区），再按「未被消费」决定自己的动作：
+        // 命中最内层的可聚焦节点先取得焦点并截住事件，祖先不再重复抢
+        self.inner.as_widget_mut().update(
+            &mut tree.children[0],
+            event,
+            child,
+            cursor,
+            renderer,
+            clipboard,
+            shell,
+            viewport,
+        );
+        if !shell.is_event_captured() {
+            self.update_hit(event, layout.bounds(), cursor, shell);
+        }
+    }
+
+    fn draw(
+        &self,
+        tree: &tree::Tree,
+        renderer: &mut Renderer,
+        theme: &Theme,
+        style: &renderer::Style,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+    ) {
+        let Some(child) = layout.children().next() else { return };
+        self.inner.as_widget().draw(&tree.children[0], renderer, theme, style, child, cursor, viewport);
+    }
+
+    fn mouse_interaction(
+        &self,
+        tree: &tree::Tree,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+        renderer: &Renderer,
+    ) -> mouse::Interaction {
+        let Some(child) = layout.children().next() else { return mouse::Interaction::None };
+        self.inner.as_widget().mouse_interaction(&tree.children[0], child, cursor, viewport, renderer)
+    }
+
+    fn overlay<'b>(
+        &'b mut self,
+        tree: &'b mut tree::Tree,
+        layout: Layout<'b>,
+        renderer: &Renderer,
+        viewport: &Rectangle,
+        translation: Vector,
+    ) -> Option<overlay::Element<'b, Message, Theme, Renderer>> {
+        let child = layout.children().next()?;
+        self.inner
+            .as_widget_mut()
+            .overlay(&mut tree.children[0], child, renderer, viewport, translation)
+    }
+}
+
+impl<Message: Clone + 'static> NodeHit<'_, Message> {
+    /// 热区自己的处理：按下判定焦点与右键、持焦点时上行按键。
+    /// 命中时一律截住该次按下（与 `mouse_area` 的子项优先同向），祖先与兄弟的同类热区不再抢焦点。
+    fn update_hit(&self, event: &iced::Event, bounds: Rectangle, cursor: mouse::Cursor, shell: &mut Shell<'_, Message>) {
+        let over = cursor.is_over(bounds);
+        match event {
+            iced::Event::Mouse(mouse::Event::ButtonPressed(button)) => {
+                if over {
+                    if self.on_focus.is_some() {
+                        publish(shell, self.on_focus.as_ref());
+                        shell.capture_event();
+                    }
+                    if *button == mouse::Button::Right && self.on_secondary.is_some() {
+                        publish(shell, self.on_secondary.as_ref());
+                        shell.capture_event();
+                    }
+                } else if self.focused {
+                    publish(shell, self.on_blur.as_ref());
+                }
+            }
+            iced::Event::Touch(touch::Event::FingerPressed { .. }) => {
+                if !over {
+                    if self.focused {
+                        publish(shell, self.on_blur.as_ref());
+                    }
+                } else if self.on_focus.is_some() {
+                    publish(shell, self.on_focus.as_ref());
+                    shell.capture_event();
+                }
+            }
+            iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
+                self.publish_key(key, *modifiers, KeyAction::Press, shell);
+            }
+            iced::Event::Keyboard(keyboard::Event::KeyReleased { key, modifiers, .. }) => {
+                self.publish_key(key, *modifiers, KeyAction::Release, shell);
+            }
+            _ => {}
+        }
+    }
+
+    /// 持焦点时上行按键：带命令修饰的组合键归宿主（保存 / 快捷键），不在这里截。
+    fn publish_key(
+        &self,
+        key: &keyboard::Key,
+        modifiers: keyboard::Modifiers,
+        action: KeyAction,
+        shell: &mut Shell<'_, Message>,
+    ) {
+        if !self.focused || modifiers.control() || modifiers.alt() || modifiers.logo() {
+            return;
+        }
+        let Some(on_key) = &self.on_key else { return };
+        let Some(key) = protocol_key(key) else { return };
+        let event = ViewEvent::Key { key, action, modifiers: protocol_modifiers(modifiers) };
+        shell.publish(on_key(event));
+        shell.capture_event();
+    }
+}
+
+fn publish<Message: Clone>(shell: &mut Shell<'_, Message>, message: Option<&Message>) {
+    if let Some(message) = message {
+        shell.publish(message.clone());
+    }
+}
+
+/// iced 按键 → 协议按键：只上行功能键 / 编辑键 / 字符，其余（修饰键自身、媒体键等）不上行。
+fn protocol_key(key: &keyboard::Key) -> Option<ViewKey> {
+    match key {
+        keyboard::Key::Named(named) => protocol_named(*named).map(|name| ViewKey::Named { name }),
+        keyboard::Key::Character(text) if !text.is_empty() => {
+            Some(ViewKey::Character { text: text.to_string() })
+        }
+        _ => None,
+    }
+}
+
+fn protocol_named(named: keyboard::key::Named) -> Option<NamedKey> {
+    use keyboard::key::Named as N;
+    Some(match named {
+        N::Escape => NamedKey::Escape,
+        N::Enter => NamedKey::Enter,
+        N::Tab => NamedKey::Tab,
+        N::Space => NamedKey::Space,
+        N::Backspace => NamedKey::Backspace,
+        N::Delete => NamedKey::Delete,
+        N::Insert => NamedKey::Insert,
+        N::Home => NamedKey::Home,
+        N::End => NamedKey::End,
+        N::PageUp => NamedKey::PageUp,
+        N::PageDown => NamedKey::PageDown,
+        N::ArrowUp => NamedKey::ArrowUp,
+        N::ArrowDown => NamedKey::ArrowDown,
+        N::ArrowLeft => NamedKey::ArrowLeft,
+        N::ArrowRight => NamedKey::ArrowRight,
+        N::F1 => NamedKey::F1,
+        N::F2 => NamedKey::F2,
+        N::F3 => NamedKey::F3,
+        N::F4 => NamedKey::F4,
+        N::F5 => NamedKey::F5,
+        N::F6 => NamedKey::F6,
+        N::F7 => NamedKey::F7,
+        N::F8 => NamedKey::F8,
+        N::F9 => NamedKey::F9,
+        N::F10 => NamedKey::F10,
+        N::F11 => NamedKey::F11,
+        N::F12 => NamedKey::F12,
+        _ => return None,
+    })
+}
+
+fn protocol_modifiers(modifiers: keyboard::Modifiers) -> ViewModifiers {
+    ViewModifiers {
+        shift: modifiers.shift(),
+        control: modifiers.control(),
+        alt: modifiers.alt(),
+        meta: modifiers.logo(),
+    }
+}
+
+impl<'a, Message: Clone + 'static> From<NodeHit<'a, Message>> for Element<'a, Message> {
+    fn from(hit: NodeHit<'a, Message>) -> Self {
+        Element::new(hit)
     }
 }
 

@@ -386,7 +386,9 @@
           "wheel",
           "doubleClick"
         ],
-        "fill": true
+        "fill": true,
+        "fps": 60,
+        "events": ["secondaryClick", "key", "focus", "blur"]
       },
       {
         "id": "modalLayer",
@@ -860,6 +862,48 @@
       "name": "view event scroll",
       "type": "ViewEvent",
       "value": { "kind": "scroll", "offset": 24.0, "maxOffset": 96.0 }
+    },
+    {
+      "name": "view event secondary click",
+      "type": "ViewEvent",
+      "value": { "kind": "secondaryClick" }
+    },
+    {
+      "name": "view event key named",
+      "type": "ViewEvent",
+      "value": {
+        "kind": "key",
+        "key": { "type": "named", "name": "arrowLeft" },
+        "action": "press",
+        "modifiers": { "shift": true }
+      }
+    },
+    {
+      "name": "view event key character",
+      "type": "ViewEvent",
+      "value": {
+        "kind": "key",
+        "key": { "type": "character", "text": "A" },
+        "action": "release",
+        "modifiers": {}
+      }
+    },
+    {
+      "name": "canvas.patch params",
+      "type": "CanvasPatchParams",
+      "value": {
+        "surfaceId": "panel",
+        "nodeId": "board",
+        "upsert": [
+          { "id": "playhead", "command": { "kind": "line", "x1": 12.0, "y1": 0.0, "x2": 12.0, "y2": 40.0, "stroke": { "type": "token", "name": "accent" }, "width": 2.0 } }
+        ],
+        "remove": ["grid-row-3"]
+      }
+    },
+    {
+      "name": "host:canvas.frame params",
+      "type": "CanvasFrameParams",
+      "value": { "surfaceId": "panel", "nodeId": "board", "frame": 42, "deltaMs": 17 }
     },
     {
       "name": "tray.setItems params",

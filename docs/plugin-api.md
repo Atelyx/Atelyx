@@ -529,6 +529,10 @@ pub enum NodeBody {
         height: Option<f32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         fill: Option<bool>,
+        /// 目标帧率（1–120）：声明后宿主按该节拍回发 `host:canvas.frame`，插件逐帧提交绘制内容；
+        /// 缺省不订阅，静态画布不产生帧开销。不要求帧回调的插件不要声明。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fps: Option<u16>,
     },
     /// 分隔线：主题弱边界色的 1px 水平线（分组容器内的轻分割）。
     Divider {},
@@ -615,7 +619,7 @@ pub enum RowHeight {
 ```rust
 // atelyx-plugin-protocol/src/view.rs
 /// 交互外观（节点的 `interaction`）：决定该节点的命中与状态着色。
-/// 交互态按「禁用 > 激活 > 悬停 > 常态」取第一个已声明且命中的档位；该档未声明时继续往后找，最终落到常态（连常态也没有则不绘制外观）。
+/// 交互态按「禁用 > 激活 > 焦点 > 悬停 > 常态」取第一个已声明且命中的档位；该档未声明时继续往后找，最终落到常态（连常态也没有则不绘制外观）。
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Interaction {
     /// 当前状态：缺省 `normal`。
@@ -627,6 +631,9 @@ pub struct Interaction {
     /// 悬停外观（鼠标进入节点矩形）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hover: Option<Surface>,
+    /// 键盘焦点外观（节点持有键盘焦点时；键盘用户据此看见当前目标）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focused: Option<Surface>,
     /// 激活外观（列表选中项、当前 tab）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active: Option<Surface>,
@@ -874,13 +881,26 @@ pub enum ReportMode {
 ```rust
 // atelyx-plugin-protocol/src/view.rs
 /// 节点事件种类：声明在 [`ViewNode::events`] 里宿主才回发，未声明的事件不上行（省流量、省误触）。
+///
+/// 声明 `focus` / `blur` / `key` 任一项即把节点标为**可聚焦**：在该节点上按下即取得键盘焦点，
+/// 在别处按下即失去；同一面内至多一个节点持有焦点，同一窗口同一时刻至多一个面接收键盘。
+/// 输入类控件（单行 / 多行 / 数字）自己管键盘，不得声明 `key`（提交时拒收）。
 #[serde(rename_all = "camelCase")]
 pub enum EventKind {
     Click,
+    /// 右键在节点矩形内按下（与 `click` 相互独立，可同时声明）。
+    /// 画布节点自带带按键的指针事件，右键用 `mouseEvents` 的 `pointerDown` 即可；两者都声明时
+    /// 一次右键会各回发一次。
+    SecondaryClick,
     Change,
     Submit,
+    /// 取得键盘焦点（仅可聚焦节点）。
     Focus,
+    /// 失去键盘焦点（仅可聚焦节点）。
     Blur,
+    /// 键盘按键（仅可聚焦节点）：持焦点期间回发全部**无命令修饰**的按键，带 Ctrl / Alt / Super
+    /// 的组合键归宿主、不上行。按键本身不做逐键声明——需要更细的筛选由插件在回调里判。
+    Key,
     /// Markdown 正文内的链接点击（仅 `markdown` 节点；宿主默认打开行为不受声明影响）。
     LinkClick,
     /// 滚动位置变化（仅 `scroll` / `list` 节点）：滚动时回发当前偏移与可滚动余量；
@@ -897,10 +917,14 @@ pub enum EventKind {
 #[serde(rename_all_fields = "camelCase")]
 pub enum ViewEvent {
     Click,
+    SecondaryClick,
     Change { value: EventValue },
     Submit { value: EventValue },
     Focus,
     Blur,
+    /// 键盘按键（仅声明 `key` 的可聚焦节点）：`key` 为按键本身，`action` 区分按下 / 抬起，
+    /// `modifiers` 为当时的修饰键快照。
+    Key { key: Key, action: KeyAction, modifiers: Modifiers },
     /// Markdown 链接点击（仅声明 `linkClick` 的节点）。`href` 为源文本原样（未解码；
     /// wiki 为笔记名），`form` 与宿主笔记链接解析同一口径。
     LinkClick { href: String, form: LinkForm },
@@ -909,6 +933,80 @@ pub enum ViewEvent {
     /// 滚动位置（仅声明 `scroll` 的 `scroll` / `list` 节点）：`offset` = 主轴当前偏移，
     /// `max_offset` = 主轴可滚动余量；`offset >= max_offset` 即停在末端。
     Scroll { offset: f32, max_offset: f32 },
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/view.rs
+/// 按键：具名键（功能键与编辑键）或可打印字符。字符按布局产出（与用户所见一致），
+/// 大小写与符号跟随 Shift，因此 `a` 与 `A` 是两个值、`1` 与 `!` 也是两个值。
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum Key {
+    Named { name: NamedKey },
+    Character { text: String },
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/view.rs
+/// 具名键。可打印字符走 [`Key::Character`]；这里放不可打印的编辑 / 功能键，外加空格
+/// （它与编辑语义绑定，且布局差异下字符形态不稳定）。
+#[serde(rename_all = "camelCase")]
+pub enum NamedKey {
+    Escape,
+    Enter,
+    Tab,
+    Space,
+    Backspace,
+    Delete,
+    Insert,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    ArrowUp,
+    ArrowDown,
+    ArrowLeft,
+    ArrowRight,
+    F1,
+    F2,
+    F3,
+    F4,
+    F5,
+    F6,
+    F7,
+    F8,
+    F9,
+    F10,
+    F11,
+    F12,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/view.rs
+/// 键盘焦点事件与按键的归属：`Press` 含系统重复按键（长按方向键逐次到达），`Release` 在抬起时到达。
+#[serde(rename_all = "camelCase")]
+pub enum KeyAction {
+    Press,
+    Release,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/view.rs
+/// 修饰键状态（按键发生时的快照）：`control` = Ctrl（macOS 的 Control，不含 Command），
+/// `meta` = Windows / Super / Command 键。
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Modifiers {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shift: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub control: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub alt: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub meta: bool,
 }
 ```
 
@@ -951,7 +1049,7 @@ pub struct ViewEventParams {
 
 ## 5. 自绘画布
 
-画布是树里的叶子控件（占位 + 指针事件），内容经 `canvas.submit` 整发整换；坐标一律画布本地逻辑像素、左上原点。
+画布是树里的叶子控件（占位 + 指针事件 + 可选帧率），内容经 `canvas.submit` 整表提交、`canvas.patch` 按 id 增量维护；坐标一律画布本地逻辑像素、左上原点。
 
 ```rust
 // atelyx-plugin-protocol/src/view.rs
@@ -1091,14 +1189,38 @@ pub enum DrawCommand {
 ```
 
 ```rust
+// atelyx-plugin-protocol/src/canvas.rs
+/// 增量提交的一项：按 `id` 更新已有指令，或追加到清单末尾（`id` 由插件自定，同一画布内唯一）。
+pub struct CanvasUpsert {
+    pub id: String,
+    pub command: DrawCommand,
+}
+```
+
+```rust
 // atelyx-plugin-protocol/src/method.rs
-/// `canvas.submit` 的 params：清单整发整换（无增量协议），空清单 = 清空画布。
+/// `canvas.submit` 的 params：清单整发整换，空清单 = 清空画布。
 #[serde(rename_all = "camelCase")]
 pub struct CanvasSubmitParams {
     pub surface_id: String,
     /// 目标画布节点 id（须在当前 `view.submit` 树里且为 canvas 节点）。
     pub node_id: String,
     pub commands: Vec<crate::canvas::DrawCommand>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// `canvas.patch` 的 params：按 id 更新 / 追加 / 删除条目，次序按 `upsert` 在前、`remove` 在后。
+/// 同一 `id` 不得在同一请求里既 upsert 又 remove（语义有歧义，直接拒收）。
+#[serde(rename_all = "camelCase")]
+pub struct CanvasPatchParams {
+    pub surface_id: String,
+    pub node_id: String,
+    #[serde(default)]
+    pub upsert: Vec<crate::canvas::CanvasUpsert>,
+    #[serde(default)]
+    pub remove: Vec<String>,
 }
 ```
 
@@ -1111,6 +1233,20 @@ pub struct CanvasResizedParams {
     pub node_id: String,
     pub width: f32,
     pub height: f32,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`canvas::HOST_FRAME`] 的 params：一帧的拍号与距上一帧的间隔，插件据此推进动画相位。
+#[serde(rename_all = "camelCase")]
+pub struct CanvasFrameParams {
+    pub surface_id: String,
+    pub node_id: String,
+    /// 该画布的帧序号（从 0 起，宿主按画布记账）。
+    pub frame: u64,
+    /// 距该画布上一帧的毫秒数（首帧为 0）。动画相位请以帧序号为准，此值只作节拍参考。
+    pub delta_ms: u32,
 }
 ```
 
@@ -1583,9 +1719,15 @@ pub mod doc {
 // atelyx-plugin-protocol/src/method.rs
 pub mod canvas {
     /// 插件提交一份绘图指令清单到某个画布节点。宿主合帧应用（渲染每帧只取最新一份）。
+    /// 整表重建：清单里的条目都没有 id，此前经 `PATCH` 建立的增量条目一并丢弃。
     pub const SUBMIT: &str = "canvas.submit";
+    /// 按 id 增量维护画布清单：更新 / 追加 / 删除单个条目，只上行改动的条目，不必重发整表。
+    /// 未提交过清单时以空表为基线（首次也可直接用增量建表）。
+    pub const PATCH: &str = "canvas.patch";
     /// 宿主告知插件画布节点的像素尺寸（通知，尺寸变化时发）。
     pub const HOST_RESIZED: &str = "host:canvas.resized";
+    /// 宿主按节点声明的 `fps` 发帧拍（通知）：插件收到后提交该帧的绘制内容。
+    pub const HOST_FRAME: &str = "host:canvas.frame";
 }
 ```
 

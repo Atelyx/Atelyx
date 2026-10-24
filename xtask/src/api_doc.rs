@@ -107,6 +107,10 @@ const SECTIONS: &[Section] = &[
             "view.rs": "ReportMode",
             "view.rs": "EventKind",
             "view.rs": "ViewEvent",
+            "view.rs": "Key",
+            "view.rs": "NamedKey",
+            "view.rs": "KeyAction",
+            "view.rs": "Modifiers",
             "view.rs": "LinkForm",
             "view.rs": "EventValue",
             "method.rs": "ViewEventParams",
@@ -114,8 +118,7 @@ const SECTIONS: &[Section] = &[
     },
     Section {
         title: "自绘画布",
-        intro: "画布是树里的叶子控件（占位 + 指针事件），内容经 `canvas.submit` 整发整换；\
-坐标一律画布本地逻辑像素、左上原点。",
+        intro: "画布是树里的叶子控件（占位 + 指针事件 + 可选帧率），内容经 `canvas.submit` 整表提交、`canvas.patch` 按 id 增量维护；坐标一律画布本地逻辑像素、左上原点。",
         items: items!(
             "view.rs": "CanvasEventKind",
             "view.rs": "MouseButton",
@@ -123,8 +126,11 @@ const SECTIONS: &[Section] = &[
             "canvas.rs": "CanvasColor",
             "canvas.rs": "CanvasPoint",
             "canvas.rs": "DrawCommand",
+            "canvas.rs": "CanvasUpsert",
             "method.rs": "CanvasSubmitParams",
+            "method.rs": "CanvasPatchParams",
             "method.rs": "CanvasResizedParams",
+            "method.rs": "CanvasFrameParams",
         ),
     },
     Section {
