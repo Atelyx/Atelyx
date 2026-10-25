@@ -125,6 +125,14 @@ impl NoteCollab {
         Some(&self.doc.as_ref()?.tag)
     }
 
+    /// 当前基线通告帧（基线正文 + 文档当前全文；未打开 = None）。重连后重发用。
+    pub fn baseline_frame(&self) -> Option<Vec<u8>> {
+        let active = self.doc.as_ref()?;
+        let txn = active.doc.transact();
+        let current = active.ytext.get_string(&txn);
+        Some(encode_note_baseline(&active.tag, &active.baseline_text, &current))
+    }
+
     /// 文档正文真值（未打开 = None）。
     pub fn current_text(&self) -> Option<String> {
         let active = self.doc.as_ref()?;
@@ -428,12 +436,7 @@ impl NoteCollab {
             }
         }
         self.baseline_reply_at.insert(file.to_owned(), now);
-        let active = self.doc.as_ref()?;
-        let current = {
-            let txn = active.doc.transact();
-            active.ytext.get_string(&txn)
-        };
-        Some(encode_note_baseline(&active.tag, &active.baseline_text, &current))
+        self.baseline_frame()
     }
 
     // ---------- 序号与黑名单 ----------
@@ -683,6 +686,26 @@ mod tests {
         assert!(StateVector::decode_v1(sv).is_ok());
         // open 的 seed 在挂订阅前注入，outbox 无残留
         assert!(nc.outbox.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn 基线帧重发与打开成果一致_关闭后不产帧() {
+        let mut nc = NoteCollab::new("a".to_owned());
+        let opened = nc.open("f.md", "v1\n");
+        assert_eq!(nc.baseline_frame(), Some(opened.baseline_frame));
+        // 本地编辑后重发的基线帧带文档当前全文，基线正文保持不变
+        assert!(nc.local_edit("v1改\n").is_some());
+        let Some(NoteFrame::Baseline { tag, baseline_text, current_text }) =
+            nc.baseline_frame().and_then(|f| decode_note_payload(&f))
+        else {
+            panic!("活动文档应能产出基线帧");
+        };
+        assert_eq!(tag, *nc.tag().unwrap());
+        assert_eq!(baseline_text, "v1\n");
+        assert_eq!(current_text, "v1改\n");
+        nc.close();
+        assert!(nc.baseline_frame().is_none());
+        assert!(nc.sync_step1().is_none());
     }
 
     #[test]

@@ -1327,12 +1327,7 @@ pub fn space_load_note(app: &App, rel: &str) -> Task<Message> {
     let space_id = session.space_id;
     Task::perform(
         async move { client.get_file_text(&space_id, &rel).await },
-        move |result| {
-            Message::FileLoaded(
-                gen,
-                result.map(|text| (rel_for_cb, text)).map_err(err_text),
-            )
-        },
+        move |result| Message::FileLoaded(gen, rel_for_cb, result.map_err(err_text)),
     )
 }
 
@@ -3450,23 +3445,11 @@ fn on_remote_canvas_patch(
     crate::canvas_actions::load_refs(app, ref_paths)
 }
 
-/// 绑定当前打开笔记到协作文档（打开 / 换文件 / 重连后调用）：基线通告 + 握手 + 在场身份。
-pub fn collab_bind_note(app: &mut App) {
-    let Some(rel) = app.ui.last_note_file.clone() else { return };
-    if app
-        .note_collab_file
-        .as_deref()
-        .is_some_and(|f| f == rel && app.note_collab.is_some())
-    {
-        // 重连场景：文档还在，重发握手与在场身份（对端旧条目将在 30s 过期）
-        let note_frames = app
-            .note_collab
-            .as_mut()
-            .and_then(|nc| nc.sync_step1())
-            .into_iter()
-            .collect();
-        send_note_frames(app, &rel, note_frames);
-        resend_note_presence(app);
+/// 笔记正文载入成功后绑定协作文档：换文件建新基线并通告，同文件重发基线通告与握手。
+/// 建文档必须先有正文——以未载入的空正文建基线会让对端采纳空文本。
+pub fn collab_note_loaded(app: &mut App, rel: &str) {
+    if app.note_collab_file.as_deref() == Some(rel) && app.note_collab.is_some() {
+        collab_note_resume(app);
         send_presence(app);
         return;
     }
@@ -3476,14 +3459,29 @@ pub fn collab_bind_note(app: &mut App) {
         let nc = app
             .note_collab
             .get_or_insert_with(|| atelyx_core::note_collab::NoteCollab::new(author));
-        nc.open(&rel, &text)
+        nc.open(rel, &text)
     };
-    app.note_collab_file = Some(rel.clone());
+    app.note_collab_file = Some(rel.to_owned());
     let frames = vec![outcome.baseline_frame, outcome.sync_step1];
-    send_note_frames(app, &rel, frames);
+    send_note_frames(app, rel, frames);
     // 在场身份：换文件时 state.file 变化即生效，对端按 file 过滤自然不画旧文件光标
-    sync_note_presence(app, &rel);
+    sync_note_presence(app, rel);
     send_presence(app);
+}
+
+/// 连接就绪 / 重连：已有文档才重发基线与握手（没有文档 = 正文尚未载入，由载入回执建文档）。
+fn collab_note_resume(app: &mut App) {
+    let Some(rel) = app.note_collab_file.clone() else { return };
+    let Some(nc) = app.note_collab.as_mut() else { return };
+    let mut frames = Vec::new();
+    if let Some(frame) = nc.baseline_frame() {
+        frames.push(frame);
+    }
+    if let Some(step1) = nc.sync_step1() {
+        frames.push(step1);
+    }
+    send_note_frames(app, &rel, frames);
+    resend_note_presence(app);
 }
 
 fn collab_author() -> String {
@@ -3584,7 +3582,8 @@ fn on_space_event(app: &mut App, event: atelyx_core::collab::SpaceEvent) -> Task
             app.space_own_peer_id = Some(peer_id);
             app.space_connected = true;
             app.notify(NoticeLevel::Success, "协作已连接");
-            collab_bind_note(app);
+            collab_note_resume(app);
+            send_presence(app);
             // 重连后表格身份帧与当前选区重发（对端旧条目将在超时后过期）
             let now = std::time::Instant::now();
             if let Some(frame) = app.table_collab.as_mut().and_then(|c| c.resend(now)) {

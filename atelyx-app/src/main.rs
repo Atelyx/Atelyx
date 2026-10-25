@@ -413,7 +413,8 @@ enum Message {
     /// gen = 发起任务时的仓库世代；回调落地前与当前世代比对，过期即丢弃。
     ChildrenLoaded(String, u64, Result<Vec<vault::DirChild>, String>),
     OpenFile(String),
-    FileLoaded(u64, Result<(String, String), String>),
+    /// rel 恒为请求目标：成功与失败回执都按它与当前打开文件比对，过期回执不得动编辑面。
+    FileLoaded(u64, String, Result<String, String>),
     Edited(text_editor::Action),
     Save,
     /// 携带保存发起时冻结的内容与保存动机：落地后与编辑器现值比对，区分保存完成与在途新编辑。
@@ -2030,7 +2031,7 @@ impl App {
                 Task::none()
             }
             Message::OpenFile(rel) => self.gate(PendingAfterFlush::OpenFile(rel)),
-            Message::FileLoaded(gen, Ok((rel, text))) => {
+            Message::FileLoaded(gen, rel, Ok(text)) => {
                 if gen != self.epoch() || self.ui.last_note_file.as_deref() != Some(rel.as_str()) {
                     return Task::none();
                 }
@@ -2054,13 +2055,18 @@ impl App {
                 self.refresh_preview();
                 self.refresh_edit();
                 self.notify(NoticeLevel::Success, "已打开");
-                // 空间模式：笔记接入协作文档（基线通告 + 握手 + 身份帧）
+                // 空间模式：笔记接入协作文档（内容已就位，基线通告 + 握手 + 身份帧）
                 if matches!(self.repo_kind, RepoKind::Space(_)) {
-                    space_actions::collab_bind_note(self);
+                    space_actions::collab_note_loaded(self, &rel);
                 }
                 self.refresh_backlinks().chain(self.reload_history())
             }
-            Message::FileLoaded(_, Err(e)) => {
+            Message::FileLoaded(gen, rel, Err(e)) => {
+                // 只有当前文件、当前世代的载入失败才清编辑面：过期回执（快速连点文件 /
+                // 切仓库）不得把已打开笔记的正文清空
+                if gen != self.epoch() || self.ui.last_note_file.as_deref() != Some(rel.as_str()) {
+                    return Task::none();
+                }
                 // 载入失败必须清空编辑器：last_note_file 已指向新文件，残留旧内容
                 // 会让 Ctrl+S 把旧内容写进新路径；空间合流基线与协作绑定同样不得残留
                 self.note_text.clear();
@@ -7065,15 +7071,15 @@ impl App {
         };
         let gen = self.epoch();
         let rel = rel.to_string();
+        let rel_for_cb = rel.clone();
         Task::perform(
             async move {
                 let path = vault::safe_join(&root, &rel, false)?;
                 let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
-                let text = String::from_utf8(bytes)
-                    .map_err(|_| "非 UTF-8 文本文件，暂不支持打开".to_string())?;
-                Ok((rel, text))
+                String::from_utf8(bytes)
+                    .map_err(|_| "非 UTF-8 文本文件，暂不支持打开".to_string())
             },
-            move |result| Message::FileLoaded(gen, result),
+            move |result| Message::FileLoaded(gen, rel_for_cb, result),
         )
     }
 
