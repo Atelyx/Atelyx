@@ -861,6 +861,8 @@ fn clear_session_state(app: &mut App) {
     app.canvas = None;
     // 表格在场随容器切换作废（旧空间的通道身份不再有效；对端靠名册剔除与超时收尾）
     app.table_collab = None;
+    // 画布在场同理（detach_canvas 已清锁与卡运行态，通道状态一并作废）
+    app.canvas_collab = None;
     app.space_note_flushed = None;
     app.space_note_save_inflight = false;
     app.space_note_save_flush_queued = false;
@@ -3158,6 +3160,9 @@ fn clear_remote_presence(app: &mut App) {
     if let Some(collab) = app.table_collab.as_mut() {
         collab.clear_remotes();
     }
+    if let Some(collab) = app.canvas_collab.as_mut() {
+        collab.clear_remotes();
+    }
     app.remote_cursors.clear();
 }
 
@@ -3192,6 +3197,257 @@ fn send_table_frame(app: &App, payload: serde_json::Value) {
             target_peer_id: None,
         },
     );
+}
+
+// ===== 画布协作（presence + canvas-patch 合入） =====
+
+/// 画布在场同步：进入 / 切换 / 关闭与选中、对话卡锁、流式变化都从这里收口
+/// （事件与 tick 共用，幂等）。锁的失效收敛也在此：失焦且无草稿且不在流式的锁释放。
+pub(crate) fn canvas_collab_sync(app: &mut App) {
+    let in_space = matches!(app.repo_kind, crate::RepoKind::Space(_));
+    sweep_canvas_locks(app);
+    // 高频路径（指针移动）无变化直接返回：不构造上行状态
+    if app.space_connected && in_space {
+        if let (Some(session), Some(collab)) = (app.canvas.as_ref(), app.canvas_collab.as_ref()) {
+            let (name, color) = local_identity(app);
+            let streaming: Vec<&str> = session
+                .view
+                .card_chat
+                .iter()
+                .filter(|(_, c)| c.streaming)
+                .map(|(id, _)| id.as_str())
+                .collect();
+            if collab.matches_presence(
+                (&name, &color),
+                &session.file,
+                &session.view.selection,
+                &session.view.locks,
+                &streaming,
+            ) {
+                return;
+            }
+        }
+    }
+    let want = if in_space {
+        app.canvas.as_ref().map(|s| (s.file.clone(), canvas_presence_of(s)))
+    } else {
+        None
+    };
+    let Some((file, (selection, locked, streaming))) = want else {
+        // 离开画布 / 非空间容器：有在场记录就发离场帧
+        if let Some(mut collab) = app.canvas_collab.take() {
+            if let Some(frame) = collab.leave(Instant::now()) {
+                send_canvas_frame(app, frame);
+            }
+        }
+        return;
+    };
+    if !app.space_connected {
+        // 连接不可用：保留在场状态（重连后同一 clientID 整份重发覆盖），只清远端条目
+        if let Some(collab) = app.canvas_collab.as_mut() {
+            collab.clear_remotes();
+        }
+        return;
+    }
+    let now = Instant::now();
+    let (name, color) = local_identity(app);
+    let identity = crate::canvas_collab::Identity { name: &name, color: &color };
+    let collab = app
+        .canvas_collab
+        .get_or_insert_with(crate::canvas_collab::CanvasCollab::new);
+    if let Some(frame) = collab.update(now, &identity, &file, selection, locked, streaming) {
+        send_canvas_frame(app, frame);
+    }
+}
+
+/// 对话卡锁失效收敛（幂等）：失焦且无草稿且不在流式的锁释放；卡已删除的锁一并摘除。
+/// 草稿未清空就失焦时锁保留（草稿是未完成内容，对端不该插手），清空后自然释放。
+fn sweep_canvas_locks(app: &mut App) {
+    let Some(session) = app.canvas.as_mut() else { return };
+    let view = &mut session.view;
+    view.locks.retain(|id, _| {
+        view.card_chat
+            .get(id)
+            .is_some_and(|c| c.streaming || c.draft.focused || !c.draft.text.is_empty())
+    });
+}
+
+/// 本端在场状态（选区原序、锁按 id 序保证上行帧稳定、流式卡 id 序）。
+fn canvas_presence_of(
+    s: &crate::canvas_view::CanvasSession,
+) -> (Vec<String>, Vec<(String, i64)>, Vec<String>) {
+    let mut locked: Vec<(String, i64)> =
+        s.view.locks.iter().map(|(k, v)| (k.clone(), *v)).collect();
+    locked.sort();
+    let mut streaming: Vec<String> = s
+        .view
+        .card_chat
+        .iter()
+        .filter(|(_, c)| c.streaming)
+        .map(|(id, _)| id.clone())
+        .collect();
+    streaming.sort();
+    (s.view.selection.clone(), locked, streaming)
+}
+
+/// UiTick 搭载：远端超时剔除、限频补发、空闲保活（连接不可用时不发上行）。
+pub(crate) fn canvas_collab_tick(app: &mut App) {
+    canvas_collab_sync(app);
+    let connected = app.space_connected;
+    let now = Instant::now();
+    let mut frames = Vec::new();
+    if let Some(collab) = app.canvas_collab.as_mut() {
+        collab.refresh(now);
+        if let Some(frame) = collab.flush(now) {
+            frames.push(frame);
+        }
+        if connected {
+            if let Some(frame) = collab.keepalive_if_due(now) {
+                frames.push(frame);
+            }
+        }
+    }
+    for frame in frames {
+        send_canvas_frame(app, frame);
+    }
+}
+
+fn send_canvas_frame(app: &App, payload: serde_json::Value) {
+    send_cmd(
+        app,
+        atelyx_core::collab::SpaceCmd::Ephemeral {
+            channel: crate::canvas_collab::CHANNEL.to_string(),
+            payload,
+            target_peer_id: None,
+        },
+    );
+}
+
+/// 对话卡编辑锁的持有方（本端视角）。
+pub(crate) enum LockHolder {
+    /// 无任何锁声明。
+    Free,
+    /// 本端持有（锁主判定含本端声明）。
+    Mine,
+    /// 对端持有（携带对方名签与成员色，供只读呈现）。
+    Peer { name: String, color_hex: String },
+}
+
+/// 对话卡锁主判定：收齐本端声明与对端 presence 声明，since 最小者持有
+/// （core 纯函数保证各端判定一致）。本端 peerId 未分配时本端声明不参与。
+pub(crate) fn conversation_lock_holder(app: &App, node_id: &str) -> LockHolder {
+    let mut claims: Vec<atelyx_core::canvas_collab::LockClaim> = Vec::new();
+    if let (Some(pid), Some(since)) = (
+        app.space_own_peer_id.as_deref(),
+        app.canvas.as_ref().and_then(|s| s.view.locks.get(node_id)),
+    ) {
+        claims.push(atelyx_core::canvas_collab::LockClaim {
+            peer_id: pid.to_string(),
+            since: *since,
+        });
+    }
+    let remotes = app.canvas_collab.as_ref().map(|c| c.remote()).unwrap_or(&[]);
+    for p in remotes {
+        if let Some(since) = p.locks(node_id) {
+            claims.push(atelyx_core::canvas_collab::LockClaim {
+                peer_id: p.peer_id.clone(),
+                since,
+            });
+        }
+    }
+    let Some(owner) = atelyx_core::canvas_collab::compute_lock_owner(&claims) else {
+        return LockHolder::Free;
+    };
+    if Some(owner.as_str()) == app.space_own_peer_id.as_deref() {
+        return LockHolder::Mine;
+    }
+    match remotes.iter().find(|p| p.peer_id == owner) {
+        Some(p) => LockHolder::Peer { name: p.name.clone(), color_hex: p.color_hex.clone() },
+        // 锁主声明来自已消失的连接（条目尚未超时）：按无锁处理防幽灵锁
+        None => LockHolder::Free,
+    }
+}
+
+/// 本端是否可占对话卡编辑锁（空间模式可写身份；本地单机与只读身份无锁语义）。
+pub(crate) fn canvas_lockable(app: &App) -> bool {
+    matches!(app.repo_kind, crate::RepoKind::Space(_))
+        && session_of(app).is_some_and(|s| s.role.can_write())
+}
+
+/// 远端画布补丁（帧语义同表格：自声落地帧跳过；landed = 服务端已落盘）。
+/// 双基线合入：data 与保存基线一并推进（对话卡消息按卡做未落盘保护），远端内容不再被
+/// 本端保存重发（防回环），本端未落盘编辑的补丁保持只含本端增量（防膨胀）；合入不置脏。
+fn on_remote_canvas_patch(
+    app: &mut App,
+    peer_id: Option<String>,
+    file: String,
+    patch: serde_json::Value,
+    landed: bool,
+) -> Task<Message> {
+    if peer_id.is_some() && peer_id == app.space_own_peer_id {
+        return Task::none();
+    }
+    let opened = app.canvas.as_ref().map(|s| s.file.clone());
+    if opened.as_deref() != Some(file.as_str()) {
+        return Task::none();
+    }
+    let Ok(p) = serde_json::from_value::<atelyx_core::vault::CanvasPatch>(patch) else {
+        return Task::none();
+    };
+    // 防串画布：补丁 id 与文件 id 不符即丢（服务端落地帧已仲裁，透传帧信任 file 匹配）
+    if app.canvas.as_ref().is_some_and(|s| p.id != s.data.id) {
+        return Task::none();
+    }
+    let (mut ref_paths, conversation_ids, text_changed) = {
+        let Some(s) = app.canvas.as_mut() else { return Task::none() };
+        let outcome = atelyx_core::canvas_collab::apply_remote_patch(&mut s.data, &mut s.saved, &p, landed);
+        s.version += 1;
+        s.view.content_cache.clear();
+        // 远端改动合入后撤销栈整体作废：栈内快照会把协作者刚落盘的内容一并回滚并随下次保存广播
+        s.view.undo.clear();
+        s.view.redo.clear();
+        // 选中 / 悬停 / 改名目标收敛到仍存在的卡
+        s.view.selection.retain(|id| s.data.nodes.iter().any(|n| &n.id == id));
+        if s.view.hover.as_ref().is_some_and(|id| !s.data.nodes.iter().any(|n| &n.id == id)) {
+            s.view.hover = None;
+        }
+        if s
+            .view
+            .group_rename
+            .as_ref()
+            .is_some_and(|(id, _)| !s.data.nodes.iter().any(|n| &n.id == id))
+        {
+            s.view.group_rename = None;
+        }
+        // 持锁卡被远端删除：防御性释放（锁模型下不应发生）
+        for id in &outcome.removed_node_ids {
+            s.view.locks.remove(id);
+        }
+        (
+            outcome.ref_paths,
+            outcome.upserted_conversations,
+            p.upsert_nodes.iter().any(|n| n.node_type == "text"),
+        )
+    };
+    ref_paths.sort();
+    ref_paths.dedup();
+    crate::canvas_chat::sync_card_chats(app);
+    if !conversation_ids.is_empty() {
+        // 消息流解析缓存随新消息重建；面板绑定了被更新卡时跟随刷新
+        if let Some(s) = app.canvas.as_mut() {
+            crate::canvas_chat::refresh_card_docs(s, "");
+        }
+        for id in &conversation_ids {
+            crate::canvas_chat::refresh_panel_if_bound(app, id);
+        }
+    }
+    if text_changed {
+        if let Some(s) = app.canvas.as_mut() {
+            crate::canvas_actions::rebuild_text_docs(s);
+        }
+    }
+    // 引用内容补读：新卡 / 远端换引用 / 笔记正文可能已变（回执重建文本卡正文缓存）
+    crate::canvas_actions::load_refs(app, ref_paths)
 }
 
 /// 绑定当前打开笔记到协作文档（打开 / 换文件 / 重连后调用）：基线通告 + 握手 + 在场身份。
@@ -3335,6 +3591,11 @@ fn on_space_event(app: &mut App, event: atelyx_core::collab::SpaceEvent) -> Task
                 send_table_frame(app, frame);
             }
             table_collab_sync(app);
+            // 画布在场同理（选中 / 对话卡锁 / 流式）
+            if let Some(frame) = app.canvas_collab.as_mut().and_then(|c| c.resend(now)) {
+                send_canvas_frame(app, frame);
+            }
+            canvas_collab_sync(app);
             Task::none()
         }
         E::Peers(list) => {
@@ -3364,6 +3625,11 @@ fn on_space_event(app: &mut App, event: atelyx_core::collab::SpaceEvent) -> Task
                     collab.drop_peer(peer);
                 }
             }
+            if let Some(collab) = app.canvas_collab.as_mut() {
+                for peer in &gone {
+                    collab.drop_peer(peer);
+                }
+            }
             Task::none()
         }
         E::Presence { peer_id, presence } => {
@@ -3378,6 +3644,9 @@ fn on_space_event(app: &mut App, event: atelyx_core::collab::SpaceEvent) -> Task
         }
         E::TablePatch { peer_id, file, patch, landed } => {
             on_remote_table_patch(app, peer_id, file, patch, landed)
+        }
+        E::CanvasPatch { peer_id, file, patch, landed } => {
+            on_remote_canvas_patch(app, peer_id, file, patch, landed)
         }
         E::MetaChanged { key } => {
             if !matches!(app.repo_kind, crate::RepoKind::Space(_)) {
@@ -3416,6 +3685,10 @@ fn on_space_event(app: &mut App, event: atelyx_core::collab::SpaceEvent) -> Task
             let now = std::time::Instant::now();
             if channel == crate::table_collab::CHANNEL {
                 if let Some(collab) = app.table_collab.as_mut() {
+                    collab.apply(&peer_id, &payload, now);
+                }
+            } else if channel == crate::canvas_collab::CHANNEL {
+                if let Some(collab) = app.canvas_collab.as_mut() {
                     collab.apply(&peer_id, &payload, now);
                 }
             } else if channel == crate::note_collab_channel::CHANNEL {

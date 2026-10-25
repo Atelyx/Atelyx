@@ -327,6 +327,20 @@ fn on_refs_loaded(app: &mut App, gen: u64, refs: HashMap<String, RefRaw>) -> Tas
     Task::none()
 }
 
+/// 文本卡正文解析缓存全量重建（载入 / 引用补读 / 远端补丁替换文本卡后调用）。
+pub(crate) fn rebuild_text_docs(session: &mut CanvasSession) {
+    let text_raw: HashMap<String, RefRaw> = session
+        .view
+        .refs
+        .iter()
+        .filter_map(|(path, content)| match content {
+            RefContent::Text(body) => Some((path.clone(), RefRaw::Text(body.clone()))),
+            _ => None,
+        })
+        .collect();
+    session.view.text_docs = prepare_text_docs(&session.data, &text_raw);
+}
+
 /// 对话卡消息流 markdown 预解析（载入时一次性；只读流消息不变）。
 pub(crate) fn prepare_docs(
     canvas: &atelyx_core::vault::CanvasFile,
@@ -1125,12 +1139,31 @@ fn select_all(app: &mut App) {
 
 /// 删除选中：组只删容器（成员保留），卡连带关联边与卡内 run。
 fn delete_selection(app: &mut App) -> Task<Message> {
-    let Some(s) = app.canvas.as_mut() else { return Task::none() };
+    let Some(s) = app.canvas.as_ref() else { return Task::none() };
     if s.view.selection.is_empty() {
         return Task::none();
     }
+    // 被对端独占编辑的对话卡不可删：静默跳过，不阻断其余选中卡的删除
+    let locked_by_peer: Vec<String> = s
+        .view
+        .selection
+        .iter()
+        .filter(|id| {
+            matches!(
+                crate::space_actions::conversation_lock_holder(app, id),
+                crate::space_actions::LockHolder::Peer { .. }
+            )
+        })
+        .cloned()
+        .collect();
+    let Some(s) = app.canvas.as_mut() else { return Task::none() };
     push_undo(s);
-    let ids: HashSet<String> = s.view.selection.drain(..).collect();
+    let ids: HashSet<String> = s
+        .view
+        .selection
+        .drain(..)
+        .filter(|id| !locked_by_peer.contains(id))
+        .collect();
     let removed_conversations: Vec<String> = s
         .data
         .nodes

@@ -161,6 +161,15 @@ fn card_chat<'a>(app: &'a App, node_id: &str) -> Option<&'a CardChat> {
     app.canvas.as_ref()?.view.card_chat.get(node_id)
 }
 
+/// 被对端独占编辑的卡不接受任何消息写入（发送 / 重生成 / 回滚 / 分支同源守卫；
+/// UI 已按只读呈现，此为锁传播窗口的兜底）。
+fn locked_by_peer(app: &App, node_id: &str) -> bool {
+    matches!(
+        crate::space_actions::conversation_lock_holder(app, node_id),
+        crate::space_actions::LockHolder::Peer { .. }
+    )
+}
+
 /// 当前是否有活跃 run（Hub 注册表为准）或卡片在流式态。
 pub fn is_streaming(app: &App, node_id: &str) -> bool {
     card_chat(app, node_id).is_some_and(|c| c.streaming)
@@ -403,6 +412,12 @@ fn on_input(app: &mut App, node_id: &str, event: crate::chat_input::InputEvent) 
         }
         InputEvent::Edited { text, caret, anchor } => {
             chat.draft.apply_edited(text, caret, anchor);
+            // 首次真实输入占锁（幂等，已有锁不刷新 since）：只读身份与单机不占
+            if crate::space_actions::canvas_lockable(app) {
+                if let Some(s) = app.canvas.as_mut() {
+                    s.acquire_lock(node_id, crate::now_millis());
+                }
+            }
         }
         InputEvent::Select { caret, anchor } => {
             chat.draft.caret = caret;
@@ -813,6 +828,10 @@ fn send_with(
         restore_inputs(app, node_id, origin, images, refs);
         return Task::none();
     }
+    if locked_by_peer(app, node_id) {
+        restore_inputs(app, node_id, origin, images, refs);
+        return Task::none();
+    }
     if display.is_empty() && images.is_empty() {
         restore_inputs(app, node_id, origin, images, refs);
         return Task::none();
@@ -1186,7 +1205,7 @@ fn card_injection(app: &App, hits: &[ai_refs::RefHit], conversation: &str) -> (S
 }
 
 fn regenerate(app: &mut App, node_id: &str) -> Task<Message> {
-    if is_streaming(app, node_id) {
+    if is_streaming(app, node_id) || locked_by_peer(app, node_id) {
         return Task::none();
     }
     let Some(session) = app.canvas.as_mut() else { return Task::none() };
@@ -1297,7 +1316,7 @@ fn rebuild_user_content(app: &App, message: &mut Value) {
 }
 
 fn rollback(app: &mut App, node_id: &str, message_id: &str) {
-    if is_streaming(app, node_id) {
+    if is_streaming(app, node_id) || locked_by_peer(app, node_id) {
         return;
     }
     let Some(session) = app.canvas.as_mut() else { return };
@@ -1319,6 +1338,9 @@ fn rollback(app: &mut App, node_id: &str, message_id: &str) {
 }
 
 fn branch(app: &mut App, node_id: &str, message_id: &str) -> Task<Message> {
+    if locked_by_peer(app, node_id) {
+        return Task::none();
+    }
     let Some(session) = app.canvas.as_mut() else { return Task::none() };
     let Some(messages) = messages_of_session(session, node_id) else { return Task::none() };
     let Some(idx) = messages
@@ -1793,7 +1815,7 @@ fn replace_messages(session: &mut CanvasSession, node_id: &str, messages: &[Valu
 }
 
 /// 画布消息正文的 markdown 解析缓存（多张对话卡共用一份；按全部卡的哈希收敛）。
-fn refresh_card_docs(session: &mut CanvasSession, _node_id: &str) {
+pub(crate) fn refresh_card_docs(session: &mut CanvasSession, _node_id: &str) {
     let mut docs = std::mem::take(&mut session.view.docs);
     let mut used: HashSet<u64> = HashSet::new();
     for n in &session.data.nodes {

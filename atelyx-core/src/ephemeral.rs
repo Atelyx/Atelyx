@@ -21,6 +21,8 @@ static NEXT_CLIENT: AtomicU64 = AtomicU64::new(1);
 /// 远端条目（壳层视图）。
 pub struct RemoteState {
     pub client_id: u64,
+    /// 上报该条目的连接 id（锁声明等按连接归属判定用）。
+    pub peer_id: String,
     pub state: Value,
 }
 
@@ -172,7 +174,7 @@ impl EphemeralChannel {
             .remotes
             .iter()
             .map(|(id, entry)| {
-                (*id, RemoteState { client_id: *id, state: entry.state.clone() })
+                (*id, RemoteState { client_id: *id, peer_id: entry.peer_id.clone(), state: entry.state.clone() })
             })
             .collect();
         list.sort_by_key(|(id, _)| *id);

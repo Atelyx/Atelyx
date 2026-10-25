@@ -406,6 +406,11 @@ impl CanvasSession {
         self.redraw();
     }
 
+    /// 对话卡首次真实输入占锁（幂等，已有锁不刷新 since）。
+    pub fn acquire_lock(&mut self, node_id: &str, now_ms: i64) {
+        self.view.locks.entry(node_id.to_string()).or_insert(now_ms);
+    }
+
     /// 以已知视口尺寸提交适应视图。
     pub fn apply_fit(&mut self, vw: f32, vh: f32) {
         let (zoom, pan) = fit_transform(&self.data.nodes, |n| self.card_size(n), vw, vh);
@@ -443,6 +448,8 @@ pub struct CanvasViewState {
     pub refs: HashMap<String, RefContent>,
     /// 对话卡运行态（键 = 卡节点 id）。
     pub card_chat: HashMap<String, crate::canvas_chat::CardChat>,
+    /// 本端持有的对话卡编辑锁（nodeId → 占锁时刻毫秒；锁主判定 = since 最小者）。
+    pub locks: HashMap<String, i64>,
     /// 撤销栈（快照式；对话卡流式生成中不接撤销 / 重做）。
     pub undo: Vec<CanvasSnapshot>,
     pub redo: Vec<CanvasSnapshot>,
@@ -475,6 +482,7 @@ impl Default for CanvasViewState {
             text_docs: HashMap::new(),
             refs: HashMap::new(),
             card_chat: HashMap::new(),
+            locks: HashMap::new(),
             undo: Vec::new(),
             redo: Vec::new(),
             guides: Vec::new(),
@@ -869,6 +877,8 @@ pub struct WorldLayer<'a> {
     pub view: View,
     /// 右键菜单 / 双击改名弹层的锚定窗口。
     pub window: iced::window::Id,
+    /// 远端协作者在场条目（选中描边 / 名签 / 流式指示；非空间为空切片）。
+    pub remote: &'a [crate::canvas_collab::RemotePeer],
 }
 
 /// 世界层自绘态：双击判定（上次左键按下的时刻与位置；存 tree::State 跨帧保留）。
@@ -1009,7 +1019,7 @@ impl canvas::Program<Message> for WorldLayer<'_> {
             draw_grid(&self.view, frame, bounds.size());
         });
         let content = self.session.view.content_cache.draw(renderer, bounds.size(), |frame| {
-            draw_world(self.session, &self.view, frame, bounds.size());
+            draw_world(self.session, &self.view, frame, bounds.size(), self.remote);
         });
         vec![grid, content]
     }
@@ -1099,8 +1109,14 @@ fn draw_grid(view: &View, frame: &mut Frame, size: Size) {
     }
 }
 
-/// 内容层：分组 → 连线 → 卡（数据序，后画者在上）→ 框选与参考线。
-fn draw_world(session: &CanvasSession, view: &View, frame: &mut Frame, size: Size) {
+/// 内容层：分组 → 连线 → 卡（数据序，后画者在上）→ 远端在场 → 框选与参考线。
+fn draw_world(
+    session: &CanvasSession,
+    view: &View,
+    frame: &mut Frame,
+    size: Size,
+    remote: &[crate::canvas_collab::RemotePeer],
+) {
     let (frame_width, frame_height) = (size.width, size.height);
     let sel: HashSet<&str> = session.view.selection.iter().map(|s| s.as_str()).collect();
 
@@ -1133,6 +1149,9 @@ fn draw_world(session: &CanvasSession, view: &View, frame: &mut Frame, size: Siz
         let resize_handle = sel.contains(n.id.as_str()) && session.view.selection.len() == 1;
         draw_card(session, view, frame, n, w, h, sel.contains(n.id.as_str()), link_handle, resize_handle);
     }
+
+    // 远端在场：对端选中描边与名签、流式生成指示
+    draw_remote_presence(session, view, frame, remote);
 
     // 框选矩形（屏幕坐标：起点 → 光标）
     if let Some(DragState { kind: DragKind::Marquee { .. }, start, .. }) = &session.view.drag {
@@ -1218,6 +1237,116 @@ fn top_rounded_rect(x: f32, y: f32, w: f32, h: f32, r: f32) -> Path {
 
 /// 分组虚线描边的间隔（屏幕像素；不随缩放，低缩放下不致虚线不可见）。
 const GROUP_DASH: [f32; 2] = [6.0, 4.0];
+
+/// 远端在场绘制：对端选中的卡画成员色描边（首个选中卡带名签胶囊）；
+/// 对端流式生成中的对话卡在卡头右缘画成员色圆点与「生成中」标注。
+fn draw_remote_presence(
+    session: &CanvasSession,
+    view: &View,
+    frame: &mut Frame,
+    remote: &[crate::canvas_collab::RemotePeer],
+) {
+    for peer in remote {
+        let mut tagged = false;
+        for id in &peer.selection {
+            let Some(n) = session.data.nodes.iter().find(|n| &n.id == id) else { continue };
+            if n.node_type == "group" || hidden_by_collapsed(&session.data.nodes, &n.id) {
+                continue;
+            }
+            let (w, h) = session.card_size(n);
+            let (sx, sy) = view.screen(n.x, n.y);
+            let (sw, sh) = (w as f32 * view.zoom, h as f32 * view.zoom);
+            if sw < 2.0 || sh < 2.0 {
+                continue;
+            }
+            let halo = (2.0 * view.zoom).max(1.5);
+            let rect = rounded_rect(sx - halo, sy - halo, sw + halo * 2.0, sh + halo * 2.0, CARD_RADIUS * view.zoom);
+            frame.stroke(
+                &rect,
+                Stroke { style: canvas::Style::Solid(peer.color), width: 2.0, ..Stroke::default() },
+            );
+            if !tagged {
+                tagged = true;
+                draw_name_tag(frame, view, sx, sy, &peer.name, peer.color);
+            }
+        }
+        for id in &peer.streaming {
+            let Some(n) = session.data.nodes.iter().find(|n| &n.id == id) else { continue };
+            if n.node_type != "conversation" || hidden_by_collapsed(&session.data.nodes, &n.id) {
+                continue;
+            }
+            let (w, h) = session.card_size(n);
+            let (sx, sy) = view.screen(n.x, n.y);
+            let (sw, sh) = (w as f32 * view.zoom, h as f32 * view.zoom);
+            if sw < 2.0 {
+                continue;
+            }
+            draw_streaming_badge(frame, view, sx, sy, sw, sh, peer.color);
+        }
+    }
+}
+
+/// 名签胶囊（卡左上角外沿；成员色底 + 亮字，字宽按全角保守估算）。
+fn draw_name_tag(frame: &mut Frame, view: &View, sx: f32, sy: f32, name: &str, color: iced::Color) {
+    let z = view.zoom;
+    let size = (pal::fs_micro() * z).max(8.0);
+    let pad_x = (6.0 * z).max(4.0);
+    let w = name.chars().count() as f32 * size + pad_x * 2.0;
+    let h = size * 1.3 + (6.0 * z).max(4.0);
+    let y = sy - h - (4.0 * z).max(3.0);
+    frame.fill(&rounded_rect(sx, y, w, h, h / 2.0), color);
+    frame.fill_text(CanvasText {
+        content: name.to_string(),
+        position: Point::new(sx + pad_x, y + (h - size * 1.3) / 2.0),
+        max_width: f32::INFINITY,
+        color: pal::TEXT_PRIMARY,
+        size: size.into(),
+        line_height: iced::advanced::text::LineHeight::Relative(1.3),
+        font: crate::ui::bold(),
+        align_x: iced::advanced::text::Alignment::Left,
+        align_y: alignment::Vertical::Top,
+        shaping: Shaping::Advanced,
+    });
+}
+
+/// 流式生成标注（卡头右缘；不透明底胶囊，压住过长的标题尾也保持可读）。
+fn draw_streaming_badge(
+    frame: &mut Frame,
+    view: &View,
+    sx: f32,
+    sy: f32,
+    sw: f32,
+    sh: f32,
+    color: iced::Color,
+) {
+    let z = view.zoom;
+    let head_h = (CARD_HEADER_H * z).min(sh);
+    let size = (pal::fs_micro() * z).max(8.0);
+    let dot_r = (3.0 * z).max(2.0);
+    let pad = (5.0 * z).max(3.0);
+    let text_w = size * 3.0;
+    let w = pad + dot_r * 2.0 + pad + text_w + pad;
+    let h = size * 1.3 + (4.0 * z).max(3.0);
+    let (x, y) = (sx + sw - w - pad, sy + (head_h - h) / 2.0);
+    frame.fill(&rounded_rect(x, y, w, h, h / 2.0), pal::BG_TERTIARY);
+    let cy = y + h / 2.0;
+    frame.fill(
+        &Path::circle(Point::new(x + pad + dot_r, cy), dot_r),
+        color,
+    );
+    frame.fill_text(CanvasText {
+        content: "生成中".to_string(),
+        position: Point::new(x + pad + dot_r * 2.0 + pad, y + (h - size * 1.3) / 2.0),
+        max_width: f32::INFINITY,
+        color: pal::TEXT_SECONDARY,
+        size: size.into(),
+        line_height: iced::advanced::text::LineHeight::Relative(1.3),
+        font: crate::ui::regular(),
+        align_x: iced::advanced::text::Alignment::Left,
+        align_y: alignment::Vertical::Top,
+        shaping: Shaping::Advanced,
+    });
+}
 
 /// 分组：半透明色块 + 虚线描边 + 顶部标题行（组色 25% 底、主文字色标题）。
 /// 收起态 = 折叠小卡（显示尺寸已按收起换算）：整卡组色 25% 底、标题垂直居中。
@@ -1749,7 +1878,13 @@ pub fn canvas_view<'a>(app: &'a App, window: iced::window::Id) -> Element<'a> {
         } else {
             View::of(&session.view)
         };
-        let world: Element<'_> = WorldLayer { session, view, window }.into();
+        let world: Element<'_> = WorldLayer {
+            session,
+            view,
+            window,
+            remote: app.canvas_collab.as_ref().map(|c| c.remote()).unwrap_or(&[]),
+        }
+        .into();
         let mut layered = stack![world];
         for overlay in card_overlays(app, session, view, viewport, window) {
             layered = layered.push(overlay);
@@ -2003,6 +2138,23 @@ fn conversation_card_overlay<'a>(
         );
     }
     col = col.push(flow);
+    // 被对端独占编辑：候选浮层 / 附件托盘 / 输入面一并收敛为只读提示条
+    // （卡头与消息流保持可看；发送等已同源守卫）
+    if let crate::space_actions::LockHolder::Peer { name, color_hex } =
+        crate::space_actions::conversation_lock_holder(app, &n.id)
+    {
+        let color = crate::layout_view::parse_hex_color(&color_hex).unwrap_or(pal::FALLBACK_COLLAB);
+        col = col.push(
+            container(
+                text(format!("{name} 编辑中"))
+                    .size((pal::fs_caption() * zoom).max(9.0))
+                    .color(color),
+            )
+            .width(Length::Fill)
+            .padding(Padding::new((6.0 * zoom).max(3.0))),
+        );
+        return Some(col.into());
+    }
     if let Some(picker) = &chat.mention_picker {
         col = col.push(card_mention_picker(picker, &n.id, zoom, &session.data.nodes));
     }

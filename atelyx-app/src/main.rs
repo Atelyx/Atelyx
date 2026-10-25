@@ -39,6 +39,7 @@ mod space_actions;
 mod table_actions;
 mod table_collab;
 mod note_collab_channel;
+mod canvas_collab;
 mod table_text;
 mod table_view;
 mod text_preedit;
@@ -320,6 +321,14 @@ pub(crate) fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// 当前 unix 毫秒（对话卡编辑锁的 since 取值）。
+pub(crate) fn now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
 }
 
@@ -1179,6 +1188,8 @@ pub struct App {
     pub table_collab: Option<table_collab::TableCollab>,
     /// 画布会话（对称表格会话；None = 未打开）。
     pub canvas: Option<canvas_view::CanvasSession>,
+    /// 画布实时在场（选中 / 对话卡锁 / 流式上行 + 远端条目；None = 不在任何画布上）。
+    pub canvas_collab: Option<canvas_collab::CanvasCollab>,
     /// flush 放行后待续的动作（笔记 / 表格 / 画布任一脏时挂起，全部落盘后执行）。
     pub(crate) flush_pending: Option<PendingAfterFlush>,
     /// 键盘修饰态（Ctrl+滚轮缩放判定源）。
@@ -1757,6 +1768,7 @@ impl App {
                 history_kind: atelyx_core::history::HistoryKind::Note,
                 table: None,
                 canvas: None,
+                canvas_collab: None,
                 flush_pending: None,
                 mods: keyboard::Modifiers::default(),
                 table_popup_draft: String::new(),
@@ -2554,6 +2566,7 @@ impl App {
                 // 换色后立即刷新笔记 / 表格在场身份，对端不必等到下一次选区事件
                 space_actions::collab_after_caret(self);
                 space_actions::table_collab_sync(self);
+                space_actions::canvas_collab_sync(self);
                 self.save_global_now();
                 Task::none()
             }
@@ -2962,6 +2975,8 @@ impl App {
                 space_actions::note_presence_flush(self);
                 // 表格在场：远端超时剔除、限频补发、空闲保活
                 space_actions::table_collab_tick(self);
+                // 画布在场：同上（选中 / 对话卡锁 / 流式）
+                space_actions::canvas_collab_tick(self);
                 // 重名提醒条 3s 过期
                 if self
                     .rename_notice
@@ -3340,6 +3355,8 @@ impl App {
                 // 数据版本变化 = 画布编辑：与表格同口径推迟自动保存期限（拖拽中不排，松手收口）
                 let task = canvas_actions::on_msg(self, msg);
                 self.schedule_canvas_save();
+                // 在场状态可能随本条消息变化（选中 / 对话卡锁 / 流式 / 开关卡）：幂等收口
+                space_actions::canvas_collab_sync(self);
                 task
             }
             Message::TableImagesLoaded(gen, results) => {
@@ -3439,6 +3456,7 @@ impl App {
                         s.view.guides.clear();
                         s.redraw();
                     }
+                    space_actions::canvas_collab_sync(self);
                 }
                 Task::none()
             }

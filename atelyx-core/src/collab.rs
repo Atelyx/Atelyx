@@ -108,6 +108,8 @@ pub enum SpaceEvent {
     /// peerId；None = 服务端落地广播且发起者无房间连接。`landed` = 服务端真源已含本补丁
     /// （HTTP 落地广播帧标记；WS 透传帧不带）——壳据此推进保存基线，peerId 匹配本端时跳过合入。
     TablePatch { peer_id: Option<String>, file: String, patch: Value, landed: bool },
+    /// 画布增量补丁（帧形状与分发语义同 [`SpaceEvent::TablePatch`]）。
+    CanvasPatch { peer_id: Option<String>, file: String, patch: Value, landed: bool },
     /// 团队元数据变更（只带键名，值由壳回读磁盘真源）。
     MetaChanged { key: String },
     Renamed { old_path: String, new_path: String },
@@ -701,6 +703,15 @@ async fn handle_text_frame(
             let landed = frame.get("landed").and_then(Value::as_bool).unwrap_or(false);
             deliver(events.send(SpaceEvent::TablePatch { peer_id, file, patch, landed }).await)
         }
+        "canvas-patch" => {
+            let Some(file) = str_field(&frame, "file") else {
+                return FrameFlow::Continue;
+            };
+            let peer_id = frame.get("peerId").and_then(peer_id_string);
+            let patch = frame.get("patch").cloned().unwrap_or(Value::Null);
+            let landed = frame.get("landed").and_then(Value::as_bool).unwrap_or(false);
+            deliver(events.send(SpaceEvent::CanvasPatch { peer_id, file, patch, landed }).await)
+        }
         "ephemeral" => {
             let (Some(peer_id), Some(channel)) = (
                 frame.get("peerId").and_then(peer_id_string),
@@ -755,7 +766,7 @@ async fn handle_text_frame(
             }
             flush_plugin_contiguous(state, events).await
         }
-        // canvas-patch / 未知类型：泵不承载
+        // 未知类型：泵不承载
         _ => FrameFlow::Continue,
     }
 }
@@ -1242,7 +1253,7 @@ mod tests {
     }
 
     /// 下行帧映射：presence / 瞬时通道 / WS 透传与服务端落地（带 landed）的 table-patch /
-    /// meta-changed / renamed / resync。
+    /// canvas-patch / meta-changed / renamed / resync。
     #[tokio::test]
     async fn downstream_frames_map_to_events() {
         let (base, server) = spawn_handshake_server(|mut ws| async move {
@@ -1250,6 +1261,8 @@ mod tests {
             send_json(&mut ws, json!({"type": "ephemeral", "peerId": 3, "channel": "host.table", "payload": {"clientId": 7, "clock": 1, "state": null}})).await;
             send_json(&mut ws, json!({"type": "table-patch", "peerId": 2, "file": "t.atb", "patch": {"ops": 1}})).await;
             send_json(&mut ws, json!({"type": "table-patch", "peerId": 1, "file": "t.atb", "patch": {"ops": 2}, "landed": true})).await;
+            send_json(&mut ws, json!({"type": "canvas-patch", "peerId": 2, "file": "c.atlx", "patch": {"upsertNodes": []}})).await;
+            send_json(&mut ws, json!({"type": "canvas-patch", "file": "c.atlx", "patch": {"upsertNodes": []}, "landed": true})).await;
             send_json(&mut ws, json!({"type": "meta-changed", "key": "calendar"})).await;
             send_json(&mut ws, json!({"type": "renamed", "payload": {"oldPath": "a.md", "newPath": "b/a.md"}})).await;
             send_json(&mut ws, json!({"type": "resync"})).await;
@@ -1289,6 +1302,24 @@ mod tests {
                 peer_id: Some("1".to_string()),
                 file: "t.atb".to_string(),
                 patch: json!({"ops": 2}),
+                landed: true,
+            }
+        );
+        assert_eq!(
+            recv_event(&mut events).await,
+            SpaceEvent::CanvasPatch {
+                peer_id: Some("2".to_string()),
+                file: "c.atlx".to_string(),
+                patch: json!({"upsertNodes": []}),
+                landed: false,
+            }
+        );
+        assert_eq!(
+            recv_event(&mut events).await,
+            SpaceEvent::CanvasPatch {
+                peer_id: None,
+                file: "c.atlx".to_string(),
+                patch: json!({"upsertNodes": []}),
                 landed: true,
             }
         );
