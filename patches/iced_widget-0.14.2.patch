@@ -1,6 +1,8 @@
+diff --git a/src/keyed/column.rs b/src/keyed/column.rs
+index f98c58b..af3dacd 100644
 --- a/src/keyed/column.rs
 +++ b/src/keyed/column.rs
-@@ -231,7 +231,7 @@
+@@ -231,7 +231,7 @@ where
          tree::diff_children_custom_with_search(
              children,
              &self.children,
@@ -9,15 +11,40 @@
              |index| {
                  self.keys.get(index).or_else(|| self.keys.last()).copied()
                      != Some(state.keys[index])
+diff --git a/src/text_editor.rs b/src/text_editor.rs
+index ceddb89..81a5133 100644
 --- a/src/text_editor.rs
 +++ b/src/text_editor.rs
-@@ -1361,6 +1361,14 @@
+@@ -784,11 +784,17 @@ where
+                         shell.request_redraw();
+                     }
+                     Ime::Preedit { content, selection } => {
+-                        state.preedit = Some(input_method::Preedit {
+-                            content,
+-                            selection,
+-                            text_size: self.text_size,
+-                        });
++                        // 空组合串 = 组合已取消（部分输入法静止态也持续发送）：存成 None，
++                        // 否则按键处理把空组合当成组合中，回车 / 退格等按键全被丢弃
++                        state.preedit = if content.is_empty() {
++                            None
++                        } else {
++                            Some(input_method::Preedit {
++                                content,
++                                selection,
++                                text_size: self.text_size,
++                            })
++                        };
+ 
+                         shell.request_redraw();
+                     }
+@@ -1361,6 +1367,14 @@ impl<Message> Update<Message> {
                  text,
                  ..
              }) => {
 +                // IME 组合中的回车是确认候选：不进键位绑定（自定义提交会先于
 +                // Ime::Commit 上屏触发），组合结束由 Closed 清空 preedit
-+                if state.preedit.is_some()
++                if state.preedit.as_ref().is_some_and(|preedit| !preedit.content.is_empty())
 +                    && matches!(key, keyboard::Key::Named(key::Named::Enter))
 +                {
 +                    return None;
@@ -26,9 +53,11 @@
                  let status = if state.focus.is_some() {
                      Status::Focused {
                          is_hovered: cursor.is_over(bounds),
+diff --git a/src/text_input.rs b/src/text_input.rs
+index 9c80dfd..3e80860 100644
 --- a/src/text_input.rs
 +++ b/src/text_input.rs
-@@ -1049,9 +1049,13 @@
+@@ -1049,9 +1049,13 @@ where
  
                      match modified_key.as_ref() {
                          keyboard::Key::Named(key::Named::Enter) => {
@@ -37,7 +66,7 @@
 -                                shell.capture_event();
 +                            // IME 组合中的回车是确认候选：提交内容等随后的 Ime::Commit
 +                            // 上屏，不触发 on_submit
-+                            if state.preedit.is_none() {
++                            if state.preedit.as_ref().is_none_or(|p| p.content.is_empty()) {
 +                                if let Some(on_submit) = self.on_submit.clone() {
 +                                    shell.publish(on_submit);
 +                                    shell.capture_event();
@@ -45,3 +74,26 @@
                              }
                          }
                          keyboard::Key::Named(key::Named::Backspace) => {
+@@ -1278,11 +1282,17 @@ where
+                     let state = state::<Renderer>(tree);
+ 
+                     if state.is_focused.is_some() {
+-                        state.preedit = Some(input_method::Preedit {
+-                            content: content.to_owned(),
+-                            selection: selection.clone(),
+-                            text_size: self.size,
+-                        });
++                        // 空组合串 = 组合已取消（部分输入法静止态也持续发送）：存成 None，
++                        // 否则按键处理把空组合当成组合中，回车 / 退格等按键全被丢弃
++                        state.preedit = if content.is_empty() {
++                            None
++                        } else {
++                            Some(input_method::Preedit {
++                                content: content.to_owned(),
++                                selection: selection.clone(),
++                                text_size: self.size,
++                            })
++                        };
+ 
+                         shell.request_redraw();
+                     }

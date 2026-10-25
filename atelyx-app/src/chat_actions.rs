@@ -28,6 +28,7 @@ use atelyx_core::plugin_runtime::{
 };
 
 use crate::chat_input;
+use crate::text_preedit;
 use crate::Message;
 use crate::App;
 use crate::RepoKind;
@@ -1769,7 +1770,7 @@ fn on_input(app: &mut App, event: chat_input::InputEvent) -> iced::Task<Message>
             sync_mention_picker(app);
         }
         chat_input::InputEvent::Preedit(preedit) => {
-            app.chat.input.preedit = preedit;
+            app.chat.input.preedit = text_preedit::normalize(preedit);
         }
         chat_input::InputEvent::Send => return chat_entry(app, PendingChatAction::Send),
         chat_input::InputEvent::Undo => {

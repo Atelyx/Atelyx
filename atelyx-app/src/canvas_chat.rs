@@ -14,6 +14,7 @@ use atelyx_core::ai::{
 };
 
 use crate::canvas_view::{CanvasMsg, CanvasSession, RefContent};
+use crate::text_preedit;
 use crate::chat_actions::{self, MentionPicker, MentionTarget, PendingImage};
 use crate::{App, Message, RepoKind};
 
@@ -468,7 +469,7 @@ fn on_input(app: &mut App, node_id: &str, event: crate::chat_input::InputEvent) 
             chat.draft.caret = caret;
             chat.draft.anchor = anchor;
         }
-        InputEvent::Preedit(preedit) => chat.draft.preedit = preedit,
+        InputEvent::Preedit(preedit) => chat.draft.preedit = text_preedit::normalize(preedit),
         InputEvent::Undo => chat.draft.undo_step(),
         InputEvent::Redo => chat.draft.redo_step(),
         InputEvent::Send => {

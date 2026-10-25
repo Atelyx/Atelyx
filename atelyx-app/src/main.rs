@@ -7040,7 +7040,7 @@ impl App {
                 Task::none()
             }
             E::Preedit(preedit) => {
-                self.edit.preedit = preedit;
+                self.edit.preedit = text_preedit::normalize(preedit);
                 Task::none()
             }
         }

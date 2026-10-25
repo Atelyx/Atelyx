@@ -37,6 +37,10 @@ iced 依赖栈拉到含上游 #4341 的 winit 发布版后，删除本补丁、�
 - `text_input.rs` / `text_editor.rs`：IME 组合中的回车是确认候选（`KeyPressed` 先于
   `Ime::Commit` 送达），原样触发 `on_submit` / 键位绑定会把未上屏的组合串当一次提交。
   组合期（preedit 挂起）的 Enter 不进提交路径，文本由随后的 `Ime::Commit` 上屏。
+- `text_input.rs` / `text_editor.rs`：空组合串按「组合已取消」处理（清成 `None`）。winit
+  以 `Ime::Preedit("")` 表示组合结束，fcitx5 等输入法在静止态也会持续重发；原样存成
+  空 preedit 会让上面那处回车判定与整段按键处理把常态误判为组合中（回车 / 退格全失效，
+  文字仍能经 `Ime::Commit` 进入）。
 
 iced 升级到含 #3488 修复的版本后，删除本补丁、物化目录与根 `Cargo.toml` 的
 `[patch.crates-io]` 条目。

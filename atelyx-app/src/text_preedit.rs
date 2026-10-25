@@ -5,6 +5,12 @@ use std::ops::Range;
 
 use crate::markdown_view::is_cr;
 
+/// 组合串归一：空串等同未组合。winit 以空组合串表示「组合已取消」，输入法静止态还会重发，
+/// 原样存成 `Some("")` 会让按键处理误判为组合中（回车 / 退格等非组合按键全被挡掉）。
+pub(crate) fn normalize(preedit: Option<String>) -> Option<String> {
+    preedit.filter(|p| !p.is_empty())
+}
+
 /// 组合串的位置：插入点（排版字符下标）与串长（字符数）。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Composed {
@@ -72,8 +78,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn compose_inserts_preedit_at_caret() {
-        let at = Composed::new(3, Some("ni"));
+    fn compose_inserts_preedit_at_caret() {        let at = Composed::new(3, Some("ni"));
         assert_eq!(compose("abcdef", at, Some("ni")).as_ref(), "abcnidef");
         assert_eq!(compose("abc", at, None).as_ref(), "abc");
     }
@@ -98,5 +103,13 @@ mod tests {
         assert_eq!(at.index(4), 6);
         assert_eq!(at.caret(3), 5);
         assert_eq!(at.caret(4), 6);
+    }
+
+    /// 输入法静止态会送空组合串：必须归成「未组合」，否则编辑面把所有按键当成组合中丢弃。
+    #[test]
+    fn empty_preedit_means_no_composition() {
+        assert_eq!(normalize(Some(String::new())), None);
+        assert_eq!(normalize(Some("ni".to_string())).as_deref(), Some("ni"));
+        assert_eq!(normalize(None), None);
     }
 }
