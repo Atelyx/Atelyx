@@ -1283,7 +1283,7 @@ fn on_paste(app: &mut App, text: String) -> Task<Message> {
 
 // ===== 右键菜单与分组 =====
 
-/// 右键菜单起手：命中卡（未选中则单选）→ 按形态选菜单；空白 = 清选 + 空白菜单。
+/// 右键菜单起手：命中卡（未选中则单选）→ 按形态选菜单；空白 = 空白菜单（选中保留）。
 fn on_context(
     app: &mut App,
     window: iced::window::Id,
@@ -1314,11 +1314,8 @@ fn on_context(
                 PopupState::CanvasCardMenu { node_id: id }
             }
         }
-        None => {
-            s.view.selection.clear();
-            s.redraw();
-            PopupState::CanvasBlankMenu { x: world.0, y: world.1 }
-        }
+        // 空白不清选中：菜单「复制」作用于当前选中集（左键原地点击仍清选）
+        None => PopupState::CanvasBlankMenu { x: world.0, y: world.1 },
     };
     // 锚点取窗口坐标（pos 是画布部件局部坐标，弹层按窗口视口定位）；经 PopupOpen 统一复位 pane
     let point = app.cursor_for(window);
@@ -1355,6 +1352,14 @@ fn on_menu(app: &mut App, window: Option<iced::window::Id>, action: CanvasMenuAc
         }
         CanvasMenuAction::ToggleCollapse { node } => {
             toggle_collapse(app, &node);
+            Task::none()
+        }
+        CanvasMenuAction::CreateConversationAt { x, y } => {
+            create_conversation_at(app, x, y);
+            Task::none()
+        }
+        CanvasMenuAction::CreateTextAt { x, y } => {
+            create_text_at(app, x, y);
             Task::none()
         }
         CanvasMenuAction::OpenInPanel(id) => crate::canvas_chat::on_msg(
@@ -1467,6 +1472,39 @@ fn create_group_at(app: &mut App, x: f64, y: f64) {
     s.data.nodes.push(group);
     s.view.selection = vec![gid];
     s.touch();
+}
+
+/// 空白处新建对话卡（缺省尺寸；Agent 与模型不指定 = 发送时回落内置「对话」与仓库默认模型）。
+fn create_conversation_at(app: &mut App, x: f64, y: f64) {
+    create_card_at(app, "conversation", json!({}), x, y);
+}
+
+/// 空白处新建画布内文本卡（正文空，随 `.atlx` 内嵌）。
+fn create_text_at(app: &mut App, x: f64, y: f64) {
+    create_card_at(app, "text", json!({ "title": "文本", "bodyMd": "" }), x, y);
+}
+
+/// 落点网格取整建卡并选中（尺寸按类型缺省回落）。
+fn create_card_at(app: &mut App, node_type: &str, data: Value, x: f64, y: f64) {
+    let Some(s) = app.canvas.as_mut() else { return };
+    push_undo(s);
+    let node = CanvasFileNode {
+        id: chat_actions::uuid_v4(),
+        node_type: node_type.into(),
+        x: (x / SNAP_GRID).round() * SNAP_GRID,
+        y: (y / SNAP_GRID).round() * SNAP_GRID,
+        width: None,
+        height: None,
+        data,
+    };
+    let id = node.id.clone();
+    s.data.nodes.push(node);
+    s.view.selection = vec![id];
+    s.touch();
+    if node_type == "conversation" {
+        // 新对话卡运行态即时对齐（否则输入面要等下一条画布消息才出现）
+        crate::canvas_chat::sync_card_chats(app);
+    }
 }
 
 /// 分组改色（data.color = "1"-"6"）。

@@ -46,6 +46,15 @@ const GROUP_RADIUS: f32 = 14.0;
 pub(crate) const CARD_HEADER_H: f32 = 30.0;
 /// 卡内边距（世界坐标）。
 const CARD_PAD: f32 = 10.0;
+/// 对话卡头控制段（流式标注 + 压缩）额定宽（屏幕像素 @ zoom 1）：
+/// 标题省略与头控制浮层锚定共用 [`header_ctrl_reserve`] 一份口径。
+const HEADER_CTRL_W: f32 = 64.0;
+
+/// 对话卡头控制段占宽：额定宽按缩放取值，窄卡钳到留出最短标题（26 = 图标位，24 = 最短标题）。
+fn header_ctrl_reserve(sw: f32, zoom: f32) -> f32 {
+    let max = (sw - 26.0 * zoom - 24.0 * zoom).max(0.0);
+    (HEADER_CTRL_W * zoom).min(max)
+}
 /// 卡可缩放到的最小尺寸（世界坐标）。
 pub(crate) const CARD_MIN_W: f64 = 120.0;
 pub(crate) const CARD_MIN_H: f64 = 80.0;
@@ -837,6 +846,10 @@ pub enum CanvasMenuAction {
     CreateGroupFromSelection,
     /// 空白处新建空组（世界坐标落点）。
     CreateGroupAt { x: f64, y: f64 },
+    /// 空白处新建对话卡（世界坐标落点，网格取整）。
+    CreateConversationAt { x: f64, y: f64 },
+    /// 空白处新建画布内文本卡（正文空，随 `.atlx` 内嵌）。
+    CreateTextAt { x: f64, y: f64 },
     GroupColor { node: String, index: usize },
     /// 打开分组改名弹层（草稿在会话视图态）。
     GroupRenameStart { node: String },
@@ -1599,8 +1612,14 @@ fn draw_card(
     draw_icon_glyph(frame, icon_name, sx + 9.0 * z, sy + (head_h - 12.0 * z) / 2.0, 12.0 * z, pal::TEXT_MUTED);
     let title_size = pal::fs_caption() * z;
     let title_x = sx + 26.0 * z;
+    // 对话卡头右段留给压缩控制（浮层见 card_overlays），标题省略到控制段前
+    let title_limit = if n.node_type == "conversation" {
+        (sx + sw - title_x - 8.0 * z - header_ctrl_reserve(sw, z)).max(0.0)
+    } else {
+        (sx + sw - title_x - 8.0 * z).max(0.0)
+    };
     frame.fill_text(CanvasText {
-        content: layout_view::ellipsize(&title, (sx + sw - title_x - 8.0 * z).max(0.0), title_size),
+        content: layout_view::ellipsize(&title, title_limit, title_size),
         position: Point::new(title_x, sy + (head_h - title_size * 1.3) / 2.0),
         max_width: f32::INFINITY,
         color: pal::TEXT_PRIMARY,
@@ -2026,6 +2045,34 @@ fn card_overlays<'a>(
             None => space().width(Length::Shrink).height(Length::Shrink).into(),
         });
     }
+    // 对话卡头控制浮层（流式标注 / 压缩）为第二组：与正文浮层同序各占一槽，
+    // 不可见卡以空位占槽，保证 Stack 槽位只随节点集合增减
+    for n in &session.data.nodes {
+        let slot: Element<'_> = if n.node_type == "conversation"
+            && !hidden_by_collapsed(&session.data.nodes, &n.id)
+        {
+            let (w, _) = session.card_size(n);
+            let (sx, sy) = view.screen(n.x, n.y);
+            let sw = w as f32 * view.zoom;
+            let reserve = header_ctrl_reserve(sw, view.zoom);
+            let head_h = CARD_HEADER_H * view.zoom;
+            let offscreen = sw < 2.0 || reserve <= 0.0 || sx + sw < 0.0 || sy + head_h < 0.0 || sx > vw || sy > vh;
+            if offscreen {
+                space().width(Length::Shrink).height(Length::Shrink).into()
+            } else {
+                let controls = crate::chat_composer::card_header_controls(app, window, n, view.zoom);
+                ClipLayer::new(
+                    controls,
+                    Point::new(sx + sw - reserve, sy),
+                    Size::new(reserve, head_h),
+                )
+                .into()
+            }
+        } else {
+            space().width(Length::Shrink).height(Length::Shrink).into()
+        };
+        out.push(slot);
+    }
     out
 }
 
@@ -2111,6 +2158,34 @@ fn conversation_card_overlay<'a>(
         })
         .width(Length::Fill)
         .height(Length::Fill);
+    // 回底浮钮恒定 Stack 承载、按需追加：显隐不换型（Scrollable ↔ Stack 换型会整树重建、丢滚动位置）
+    let mut layered = stack![flow].width(Length::Fill).height(Length::Fill);
+    if !chat.follow_bottom && !messages.is_empty() {
+        layered = layered.push(
+            container(
+                iced::widget::button(
+                    row![
+                        icon("chevron-down", (11.0 * zoom).clamp(8.0, 13.0), pal::TEXT_SECONDARY),
+                        text("回到底部".to_string())
+                            .size((pal::fs_micro() * zoom).max(8.0))
+                            .color(pal::TEXT_SECONDARY),
+                    ]
+                    .spacing((4.0 * zoom).max(1.0)),
+                )
+                .padding(Padding::new(10.0 * zoom).vertical(5.0 * zoom))
+                .style(controls::row_style(false, 999.0))
+                .on_press(Message::Canvas(CanvasMsg::Chat(CanvasChatMsg::ScrollBottom(
+                    n.id.clone(),
+                )))),
+            )
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(alignment::Horizontal::Center)
+            .align_y(alignment::Vertical::Bottom)
+            .padding(Padding::ZERO.bottom((8.0 * zoom).max(3.0))),
+        );
+    }
+    let flow: Element<'_> = layered.into();
 
     let mut col = column![].spacing((3.0 * zoom).max(1.0)).width(Length::Fill).height(Length::Fill);
     if let Some(error) = &chat.error {
@@ -2155,13 +2230,11 @@ fn conversation_card_overlay<'a>(
         );
         return Some(col.into());
     }
-    if let Some(picker) = &chat.mention_picker {
-        col = col.push(card_mention_picker(picker, &n.id, zoom, &session.data.nodes));
+    // 输入区 = 共享组装器（# 候选 / 附件托盘 / 输入盒），与面板同一套渲染与路由
+    let scope = crate::chat_composer::ComposerScope::Card { node: n.id.clone() };
+    if let Some(composer) = crate::chat_composer::composer(app, window, &scope, zoom) {
+        col = col.push(composer);
     }
-    if !chat.pending_images.is_empty() {
-        col = col.push(card_image_tray(chat, &n.id, zoom));
-    }
-    col = col.push(card_input_row(chat, n, zoom, window));
     Some(col.into())
 }
 
@@ -2256,195 +2329,6 @@ fn card_action_row<'a>(
         );
     }
     row.into()
-}
-
-/// 卡内 # 候选浮层（画布卡在前、仓库文件在后；字号随缩放）。
-fn card_mention_picker<'a>(
-    picker: &'a crate::chat_actions::MentionPicker,
-    node_id: &str,
-    zoom: f32,
-    nodes: &'a [atelyx_core::vault::CanvasFileNode],
-) -> Element<'a> {
-    use crate::canvas_chat::CanvasChatMsg;
-    let size = (pal::fs_caption() * zoom).max(9.0);
-    let rows = picker.candidates.iter().enumerate().map(|(i, target)| {
-        let selected = i == picker.selected;
-        let (icon_name, label) = match target {
-            crate::chat_actions::MentionTarget::Card { node_id: id } => {
-                let title = nodes
-                    .iter()
-                    .find(|n| &n.id == id)
-                    .map(crate::canvas_chat::card_title)
-                    .unwrap_or_else(|| id.clone());
-                ("box", title)
-            }
-            crate::chat_actions::MentionTarget::Vault { rel, is_dir } => {
-                let icon_name = if *is_dir {
-                    "folder"
-                } else {
-                    match atelyx_core::ai::refs::kind_of_file(rel) {
-                        Some(atelyx_core::ai::refs::RefKind::Table) => "table",
-                        Some(atelyx_core::ai::refs::RefKind::Canvas) => "layers",
-                        _ => "file-text",
-                    }
-                };
-                (icon_name, rel.rsplit('/').next().unwrap_or(rel).to_string())
-            }
-        };
-        iced::widget::button(
-            container(
-                row![
-                    icon(icon_name, (12.0 * zoom).clamp(9.0, 13.0), if selected {
-                        pal::ACCENT
-                    } else {
-                        pal::TEXT_SECONDARY
-                    }),
-                    text(label).size(size).color(if selected {
-                        pal::TEXT_PRIMARY
-                    } else {
-                        pal::TEXT_SECONDARY
-                    }),
-                ]
-                .spacing((4.0 * zoom).max(2.0))
-                .align_y(alignment::Vertical::Center),
-            )
-            .width(Length::Fill)
-            .padding(Padding::new((6.0 * zoom).max(2.0)).vertical((3.0 * zoom).max(1.0))),
-        )
-        .width(Length::Fill)
-        .style(move |_, _| iced::widget::button::Style {
-            background: selected.then(|| pal::ACCENT_SOFT.into()),
-            ..Default::default()
-        })
-        .on_press(Message::Canvas(CanvasMsg::Chat(CanvasChatMsg::MentionPick {
-            node: node_id.to_string(),
-            index: i,
-        })))
-    });
-    container(column(rows.map(Element::from)).spacing(0).width(Length::Fill))
-        .width(Length::Fill)
-        .max_height((180.0 * zoom).max(56.0))
-        .style(|_| container::Style {
-            background: Some(pal::BG_SECONDARY.into()),
-            border: iced::border::Border {
-                width: 0.5,
-                radius: pal::RADIUS_MD.into(),
-                color: pal::BORDER,
-            },
-            ..Default::default()
-        })
-        .into()
-}
-
-/// 卡内附件托盘（一行缩略名 chip，点击移除）。
-fn card_image_tray<'a>(
-    chat: &'a crate::canvas_chat::CardChat,
-    node_id: &str,
-    zoom: f32,
-) -> Element<'a> {
-    use crate::canvas_chat::CanvasChatMsg;
-    let size = (pal::fs_micro() * zoom).max(8.0);
-    let chips = chat.pending_images.iter().enumerate().map(|(i, img)| {
-        iced::widget::button(
-            row![
-                icon("image", (10.0 * zoom).clamp(8.0, 12.0), pal::TEXT_SECONDARY),
-                text(img.file_name.clone()).size(size).color(pal::TEXT_SECONDARY),
-                icon("x", (9.0 * zoom).clamp(7.0, 11.0), pal::TEXT_MUTED),
-            ]
-            .spacing((3.0 * zoom).max(1.0))
-            .align_y(alignment::Vertical::Center),
-        )
-        .padding(Padding::new((5.0 * zoom).max(2.0)).vertical((2.0 * zoom).max(1.0)))
-        .style(controls::row_style(false, pal::RADIUS_XS))
-        .on_press(Message::Canvas(CanvasMsg::Chat(CanvasChatMsg::RemoveAttachment {
-            node: node_id.to_string(),
-            index: i,
-        })))
-    });
-    row(chips.map(Element::from))
-        .spacing((4.0 * zoom).max(1.0))
-        .width(Length::Fill)
-        .into()
-}
-
-/// 卡内输入行：+ / 附件 / 输入面 / 发送（或停止）。
-fn card_input_row<'a>(
-    chat: &'a crate::canvas_chat::CardChat,
-    n: &'a atelyx_core::vault::CanvasFileNode,
-    zoom: f32,
-    window: iced::window::Id,
-) -> Element<'a> {
-    use crate::canvas_chat::CanvasChatMsg;
-    let icon_size = (12.0 * zoom).clamp(9.0, 14.0);
-    let btn = (22.0 * zoom).clamp(17.0, 26.0);
-    let plus = controls::icon_button(
-        "plus",
-        icon_size,
-        btn,
-        controls::Variant::Ghost,
-        Some(Message::Canvas(CanvasMsg::Chat(CanvasChatMsg::TriggerMention(
-            n.id.clone(),
-        )))),
-        Some((window, "添加上下文".to_string())),
-    );
-    let attach = controls::icon_button(
-        "paperclip",
-        icon_size,
-        btn,
-        controls::Variant::Ghost,
-        Some(Message::Canvas(CanvasMsg::Chat(CanvasChatMsg::PickFiles(
-            n.id.clone(),
-        )))),
-        Some((window, "上传附件".to_string())),
-    );
-    let send = if chat.streaming {
-        controls::icon_button(
-            "square",
-            icon_size,
-            btn,
-            controls::Variant::Secondary,
-            Some(Message::Canvas(CanvasMsg::Chat(CanvasChatMsg::Stop(n.id.clone())))),
-            Some((window, "停止生成".to_string())),
-        )
-    } else {
-        controls::icon_button(
-            "arrow-up",
-            icon_size,
-            btn,
-            controls::Variant::Primary,
-            Some(Message::Canvas(CanvasMsg::Chat(CanvasChatMsg::Send(n.id.clone())))),
-            Some((window, "发送（Enter）".to_string())),
-        )
-    };
-    let input = crate::chat_input::Input::new(
-        &chat.draft,
-        &chat.mention_refs,
-        crate::chat_input::InputRoute::Card(n.id.clone()),
-    )
-    .picker_open(chat.mention_picker.is_some())
-    .placeholder("输入消息，Enter 发送")
-    .scale(zoom);
-    container(
-        row![
-            plus,
-            attach,
-            container(Element::new(input)).width(Length::Fill),
-            send,
-        ]
-        .spacing((4.0 * zoom).max(1.0))
-        .align_y(alignment::Vertical::Bottom),
-    )
-    .width(Length::Fill)
-    .padding(Padding::new((2.0 * zoom).max(1.0)))
-    .style(|_| container::Style {
-        border: iced::border::Border {
-            width: 0.5,
-            radius: pal::RADIUS_SM.into(),
-            color: pal::BORDER,
-        },
-        ..Default::default()
-    })
-    .into()
 }
 
 /// 越界裁剪层：内容按固定尺寸锚到自身坐标系中的任意位置（可为负），

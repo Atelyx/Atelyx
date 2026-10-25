@@ -16,6 +16,7 @@ mod canvas_actions;
 mod canvas_chat;
 mod canvas_view;
 mod chat_actions;
+mod chat_composer;
 mod chat_input;
 mod chat_stream;
 mod app_icon;

@@ -44,6 +44,16 @@ pub enum CanvasChatMsg {
     ClearError(String),
     FlowScrolled { node: String, y: f32 },
     OpenInPanel(String),
+    /// 卡 Agent 选择（写节点 `data.agentId`；随 `.atlx` 持久化，面板绑定态同源）。
+    AgentPick { node: String, agent: Option<String> },
+    /// 卡模型选择（`providerId` + `model` 成对写；None = 移除回落仓库默认）。
+    ModelPick { node: String, pick: Option<(String, String)> },
+    /// 卡推理等级选择（写节点 `data.reasoningEffort`）。
+    EffortPick { node: String, effort: Option<String> },
+    /// 卡会话压缩（摘要写节点 `data.compaction`，消息本体不动）。
+    Compact(String),
+    /// 卡消息流一键回底。
+    ScrollBottom(String),
     /// 空间模式 Agent 提示词取回（续跑发送）。
     PromptReady { gen: u64, node: String, result: Result<String, String> },
     /// 空间模式重生成的提示词取回。
@@ -69,6 +79,8 @@ pub struct CardChat {
     pub follow_bottom: bool,
     /// 回滚二段确认（messageId）。
     pub rollback_confirm: Option<String>,
+    /// 卡会话压缩在途（摘要回执前不再接受新压缩）。
+    pub compacting: bool,
     /// 空间模式提示词预取在途（回执后续跑发送）。
     pending_send: Option<SendPlan>,
     /// 空间模式重生成的待跑历史（提示词取回后启动）。
@@ -259,10 +271,14 @@ pub fn on_msg(app: &mut App, msg: CanvasChatMsg) -> Task<Message> {
             Task::none()
         }
         CanvasChatMsg::TriggerMention(node) => {
+            app.dismiss_popup();
             trigger_mention(app, &node);
             Task::none()
         }
-        CanvasChatMsg::PickFiles(node) => pick_files(app, node),
+        CanvasChatMsg::PickFiles(node) => {
+            app.dismiss_popup();
+            pick_files(app, node)
+        }
         CanvasChatMsg::FilesPicked { node, paths } => {
             add_attachments(app, &node, paths);
             Task::none()
@@ -331,6 +347,35 @@ pub fn on_msg(app: &mut App, msg: CanvasChatMsg) -> Task<Message> {
         CanvasChatMsg::OpenInPanel(node) => {
             open_in_panel(app, &node);
             Task::none()
+        }
+        CanvasChatMsg::AgentPick { node, agent } => {
+            app.dismiss_popup();
+            set_card_config(app, &node, "agentId", agent.map(Value::String));
+            Task::none()
+        }
+        CanvasChatMsg::ModelPick { node, pick } => {
+            // 供应商与模型成对写入；跟随默认 = 两键一并移除
+            app.dismiss_popup();
+            set_card_config(
+                app,
+                &node,
+                "providerId",
+                pick.as_ref().map(|(p, _)| Value::String(p.clone())),
+            );
+            set_card_config(app, &node, "model", pick.map(|(_, m)| Value::String(m)));
+            Task::none()
+        }
+        CanvasChatMsg::EffortPick { node, effort } => {
+            app.dismiss_popup();
+            set_card_config(app, &node, "reasoningEffort", effort.map(Value::String));
+            Task::none()
+        }
+        CanvasChatMsg::Compact(node) => compact_card(app, &node),
+        CanvasChatMsg::ScrollBottom(node) => {
+            if let Some(chat) = app.canvas.as_mut().and_then(|s| s.view.card_chat.get_mut(&node)) {
+                chat.follow_bottom = true;
+            }
+            scroll_bottom(&node)
         }
         CanvasChatMsg::PromptReady { gen, node, result } => {
             let Some(plan) = app
@@ -508,7 +553,7 @@ fn sync_mention_picker(app: &mut App, node_id: &str) {
 }
 
 /// 候选：画布内可引用卡优先（文本 / 媒体 / 表格），其后仓库文件与目录。
-fn card_candidates(app: &App, node_id: &str, query: &str) -> Vec<MentionTarget> {
+pub(crate) fn card_candidates(app: &App, node_id: &str, query: &str) -> Vec<MentionTarget> {
     let mut out = Vec::new();
     let lower = query.to_lowercase();
     if let Some(session) = &app.canvas {
@@ -607,22 +652,23 @@ fn commit_mention(app: &mut App, node_id: &str, index: usize) {
     }
 }
 
+/// 来源卡引用的路径身份与引用种类（笔记卡 = 路径 + Note；其余 = Card，
+/// 画布内文本卡以节点 id 作路径身份）。
+fn card_ref_identity(target_node: &atelyx_core::vault::CanvasFileNode) -> (String, ai_refs::RefKind) {
+    let file = target_node.data.get("file").and_then(Value::as_str);
+    match (target_node.node_type.as_str(), file) {
+        // 笔记引用：标签用「笔记」，注入走路径块；nodeId 仍登记用于消费判定
+        ("text", Some(f)) => (f.to_string(), ai_refs::RefKind::Note),
+        (_, Some(f)) => (f.to_string(), ai_refs::RefKind::Card),
+        (_, None) => (target_node.id.clone(), ai_refs::RefKind::Card),
+    }
+}
+
 /// 把来源卡引用插入对话卡草稿，并确保「来源 → 对话」数据流边（未消费虚线）。
 pub fn append_card_ref(app: &mut App, conversation: &str, source: &str) {
     let Some(target_node) = node(app, source).cloned() else { return };
     let title = card_ref_title(&target_node);
-    let (path, kind) = if target_node.node_type == "text" {
-        match target_node.data.get("file").and_then(Value::as_str) {
-            // 笔记引用：标签用「笔记」，注入走路径块；nodeId 仍登记用于消费判定
-            Some(f) => (f.to_string(), ai_refs::RefKind::Note),
-            None => (source.to_string(), ai_refs::RefKind::Card),
-        }
-    } else {
-        match target_node.data.get("file").and_then(Value::as_str) {
-            Some(f) => (f.to_string(), ai_refs::RefKind::Card),
-            None => (source.to_string(), ai_refs::RefKind::Card),
-        }
-    };
+    let (path, kind) = card_ref_identity(&target_node);
     let Some(session) = app.canvas.as_mut() else { return };
     let chat = session
         .view
@@ -653,6 +699,48 @@ pub fn append_card_ref(app: &mut App, conversation: &str, source: &str) {
     });
     chat.mention_picker = None;
     ensure_edge(app, source, conversation);
+}
+
+/// 面板绑定卡会话的候选落地：把来源卡引用登记进面板草稿并建数据流边（与卡内同语义）。
+pub fn append_card_ref_to_panel(app: &mut App, source: &str) {
+    let Some(target_node) = node(app, source).cloned() else { return };
+    let Some(conversation) = app
+        .chat
+        .active
+        .as_deref()
+        .and_then(node_of_session)
+        .map(str::to_string)
+    else {
+        return;
+    };
+    let (path, kind) = card_ref_identity(&target_node);
+    let title = card_ref_title(&target_node);
+    if app.chat.mention_refs.iter().any(|r| r.node_id.as_deref() == Some(source)) {
+        app.chat.mention_picker = None;
+        return;
+    }
+    let taken: Vec<(&str, &str)> = app
+        .chat
+        .mention_refs
+        .iter()
+        .map(|r| (r.path.as_str(), r.label.as_str()))
+        .collect();
+    let label = unique_card_label(&title, &taken);
+    let tag = format!("#{}：{} ", kind.prefix(), label);
+    let at = app
+        .chat
+        .mention_picker
+        .as_ref()
+        .map_or(app.chat.input.caret, |p| p.at);
+    insert_tag(&mut app.chat.input, at, &tag);
+    app.chat.mention_refs.push(ai_refs::RefEntry {
+        path,
+        label,
+        kind,
+        node_id: Some(source.to_string()),
+    });
+    app.chat.mention_picker = None;
+    ensure_edge(app, source, &conversation);
 }
 
 fn unique_card_label(title: &str, taken: &[(&str, &str)]) -> String {
@@ -1377,6 +1465,121 @@ fn branch(app: &mut App, node_id: &str, message_id: &str) -> Task<Message> {
         .or_default()
         .follow_bottom = true;
     Task::none()
+}
+
+// ===== 卡配置与压缩 =====
+
+/// 写卡节点配置（Agent / 模型 / 推理等级）：value None = 移除键回落默认。
+/// 被对端独占编辑的卡不写（配置属卡内容，锁作用范围内不落盘）。
+fn set_card_config(app: &mut App, node_id: &str, key: &str, value: Option<Value>) {
+    if locked_by_peer(app, node_id) {
+        return;
+    }
+    let Some(session) = app.canvas.as_mut() else { return };
+    let Some(n) = session
+        .data
+        .nodes
+        .iter_mut()
+        .find(|n| n.id == node_id && n.node_type == "conversation")
+    else {
+        return;
+    };
+    let Some(obj) = n.data.as_object_mut() else { return };
+    let next = value.unwrap_or(Value::Null);
+    if obj.get(key) == Some(&next) {
+        return;
+    }
+    if next.is_null() {
+        obj.remove(key);
+    } else {
+        obj.insert(key.into(), next);
+    }
+    session.touch();
+}
+
+/// 卡会话压缩：全部消息折进检查点（≥2 条），摘要写节点 `data.compaction`（非破坏）。
+fn compact_card(app: &mut App, node_id: &str) -> Task<Message> {
+    if is_streaming(app, node_id) || locked_by_peer(app, node_id) {
+        return Task::none();
+    }
+    if app
+        .canvas
+        .as_ref()
+        .and_then(|s| s.view.card_chat.get(node_id))
+        .is_some_and(|c| c.compacting)
+    {
+        return Task::none();
+    }
+    let Some(messages) = app
+        .canvas
+        .as_ref()
+        .and_then(|s| messages_of_session(s, node_id))
+        .map(Vec::from)
+    else {
+        return Task::none();
+    };
+    if messages.len() < 2 {
+        set_error(app, node_id, "对话内容太少，无需压缩".to_string());
+        return Task::none();
+    }
+    let Some((agent_id, model_pick, effort)) = card_run_pick(app, node_id) else {
+        return Task::none();
+    };
+    let pick = model_pick.as_ref().map(|(p, m)| (p.as_str(), m.as_str()));
+    let config = match chat_actions::resolve_run_config(app, agent_id.as_deref(), None, false, pick) {
+        Ok(mut c) => {
+            c.reasoning_effort = effort;
+            c
+        }
+        Err(e) => {
+            set_error(app, node_id, e);
+            return Task::none();
+        }
+    };
+    let compaction = node(app, node_id)
+        .and_then(|n| n.data.get("compaction").cloned())
+        .filter(|c| !c.is_null());
+    if let Some(chat) = app.canvas.as_mut().and_then(|s| s.view.card_chat.get_mut(node_id)) {
+        chat.compacting = true;
+    }
+    chat_actions::compact_task(session_id(node_id), config, &messages, compaction)
+}
+
+/// 卡会话压缩回执：摘要写节点 `data.compaction`（锚点 = 回执时的末条消息），失败提示进卡。
+pub(crate) fn compact_done(app: &mut App, node_id: &str, result: Option<String>) {
+    if let Some(chat) = app.canvas.as_mut().and_then(|s| s.view.card_chat.get_mut(node_id)) {
+        chat.compacting = false;
+    }
+    let summary_empty = result.as_ref().is_some_and(|s| s.trim().is_empty());
+    let Some(summary) = result.filter(|s| !s.trim().is_empty()) else {
+        let message = if summary_empty { "压缩失败：摘要为空" } else { "压缩失败" };
+        set_error(app, node_id, message.to_string());
+        return;
+    };
+    let Some(session) = app.canvas.as_mut() else { return };
+    let anchor_count = messages_of_session(session, node_id)
+        .and_then(|ms| ms.last())
+        .and_then(|m| m.get("id").and_then(Value::as_str).map(|id| id.to_string()))
+        .map(|anchor| {
+            let count = messages_of_session(session, node_id).map_or(0, |ms| ms.len());
+            (anchor, count)
+        });
+    let Some((anchor, count)) = anchor_count else { return };
+    let Some(node) = session.data.nodes.iter_mut().find(|n| n.id == node_id) else { return };
+    if let Some(obj) = node.data.as_object_mut() {
+        obj.insert(
+            "compaction".into(),
+            json!({
+                "summary": summary,
+                "upToMessageId": anchor,
+                "messageCount": count,
+                "createdAt": chat_actions::now_ms(),
+            }),
+        );
+    }
+    session.touch();
+    refresh_card_docs(session, node_id);
+    refresh_panel_if_bound(app, node_id);
 }
 
 // ===== run 事件 =====

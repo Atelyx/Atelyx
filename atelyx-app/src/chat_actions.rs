@@ -980,10 +980,14 @@ fn update_inner(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
             iced::Task::none()
         }
         ChatMsg::TriggerMention => {
+            app.dismiss_popup();
             trigger_mention(app);
             iced::Task::none()
         }
-        ChatMsg::UploadAttachment => upload_attachment(),
+        ChatMsg::UploadAttachment => {
+            app.dismiss_popup();
+            upload_attachment()
+        }
         ChatMsg::AttachmentsPicked(paths) => {
             add_attachments(app, paths);
             iced::Task::none()
@@ -1129,53 +1133,63 @@ fn update_inner(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
         ChatMsg::AidDone(kind, session_id, result) => {
             match kind {
                 AidKind::Compact => {
-                    app.chat.compacting = None;
-                    if let Some(summary) = result {
-                        if !summary.trim().is_empty() {
-                            let anchor = app
-                                .chat
-                                .session_mut(&session_id)
-                                .and_then(|s| {
-                                    s.get_mut("messages")
-                                        .and_then(Value::as_array_mut)
-                                        .and_then(|ms| ms.last().cloned())
-                                })
-                                .and_then(|m| m.get("id").and_then(Value::as_str).map(str::to_string));
-                            if let Some(anchor) = anchor {
-                                let count = app
+                    // 画布卡会话：摘要写节点 data.compaction，错误提示进卡；
+                    // 压缩中标志各自持有（面板标志不被卡会话回执误清）
+                    if let Some(node) =
+                        crate::canvas_chat::node_of_session(&session_id).map(str::to_string)
+                    {
+                        crate::canvas_chat::compact_done(app, &node, result);
+                    } else {
+                        app.chat.compacting = None;
+                        if let Some(summary) = result {
+                            if !summary.trim().is_empty() {
+                                let anchor = app
                                     .chat
                                     .session_mut(&session_id)
-                                    .and_then(|s| s.get("messages").and_then(Value::as_array))
-                                    .map(|ms| ms.len())
-                                    .unwrap_or(0);
-                                match store().commit(CommitBatch {
-                                    metas: vec![MetaPatch {
-                                        id: session_id.clone(),
-                                        title: None,
-                                        agent_id: None,
-                                        compaction: Some(json!({
-                                            "summary": summary,
-                                            "upToMessageId": anchor,
-                                            "messageCount": count,
-                                            "createdAt": now_ms(),
-                                        })),
-                                        updated_at: None,
-                                    }],
-                                    ..Default::default()
-                                }) {
-                                    Ok(()) => {
-                                        app.plugins.on_chat_changed(&session_id, ChatChangeKind::Messages)
-                                    }
-                                    Err(e) => {
-                                        app.chat.error = Some(format!("压缩摘要写入失败：{e}"))
+                                    .and_then(|s| {
+                                        s.get_mut("messages")
+                                            .and_then(Value::as_array_mut)
+                                            .and_then(|ms| ms.last().cloned())
+                                    })
+                                    .and_then(|m| {
+                                        m.get("id").and_then(Value::as_str).map(str::to_string)
+                                    });
+                                if let Some(anchor) = anchor {
+                                    let count = app
+                                        .chat
+                                        .session_mut(&session_id)
+                                        .and_then(|s| s.get("messages").and_then(Value::as_array))
+                                        .map(|ms| ms.len())
+                                        .unwrap_or(0);
+                                    match store().commit(CommitBatch {
+                                        metas: vec![MetaPatch {
+                                            id: session_id.clone(),
+                                            title: None,
+                                            agent_id: None,
+                                            compaction: Some(json!({
+                                                "summary": summary,
+                                                "upToMessageId": anchor,
+                                                "messageCount": count,
+                                                "createdAt": now_ms(),
+                                            })),
+                                            updated_at: None,
+                                        }],
+                                        ..Default::default()
+                                    }) {
+                                        Ok(()) => app
+                                            .plugins
+                                            .on_chat_changed(&session_id, ChatChangeKind::Messages),
+                                        Err(e) => {
+                                            app.chat.error = Some(format!("压缩摘要写入失败：{e}"))
+                                        }
                                     }
                                 }
+                            } else {
+                                app.chat.error = Some("压缩失败：摘要为空".to_string());
                             }
                         } else {
-                            app.chat.error = Some("压缩失败：摘要为空".to_string());
+                            app.chat.error = Some("压缩失败".to_string());
                         }
-                    } else {
-                        app.chat.error = Some("压缩失败".to_string());
                     }
                 }
                 AidKind::AutoRename => {
@@ -1799,8 +1813,15 @@ fn sync_mention_picker(app: &mut App) {
         .mention_picker
         .as_ref()
         .is_some_and(|p| p.at == at);
+    // 绑定画布卡会话时候选与卡内一致（画布卡在前），其余只列仓库文件与目录
+    let candidates_of = |app: &App| -> Vec<MentionTarget> {
+        match app.chat.active.as_deref().and_then(crate::canvas_chat::node_of_session) {
+            Some(node) => crate::canvas_chat::card_candidates(app, node, &query),
+            None => mention_candidates(app, &query),
+        }
+    };
     if !same_trigger {
-        let candidates = mention_candidates(app, &query);
+        let candidates = candidates_of(app);
         app.chat.mention_picker = (!candidates.is_empty())
             .then_some(MentionPicker { at, query, selected: 0, candidates });
         return;
@@ -1811,7 +1832,7 @@ fn sync_mention_picker(app: &mut App) {
         .as_ref()
         .is_some_and(|p| p.query != query);
     if stale {
-        let candidates = mention_candidates(app, &query);
+        let candidates = candidates_of(app);
         if let Some(p) = app.chat.mention_picker.as_mut() {
             p.query = query;
             p.candidates = candidates;
@@ -1862,7 +1883,14 @@ fn commit_mention(app: &mut App, index: usize) {
     let Some(picker) = app.chat.mention_picker.as_ref() else {
         return;
     };
-    let Some(MentionTarget::Vault { rel, is_dir }) = picker.candidates.get(index).cloned() else {
+    let Some(target) = picker.candidates.get(index).cloned() else {
+        return;
+    };
+    let MentionTarget::Vault { rel, is_dir } = target else {
+        // 画布卡目标：登记卡引用并建数据流边（面板绑定卡会话候选）
+        if let MentionTarget::Card { node_id } = target {
+            crate::canvas_chat::append_card_ref_to_panel(app, &node_id);
+        }
         return;
     };
     let kind = if is_dir {
@@ -2089,8 +2117,20 @@ fn compact(app: &mut App, session_id: &str) -> iced::Task<Message> {
         return iced::Task::none();
     }
     let compaction = session.get("compaction").cloned().filter(|c| !c.is_null());
+    app.chat.compacting = Some(session_id.to_string());
+    compact_task(session_id.to_string(), config, &messages, compaction)
+}
+
+/// 压缩任务：按既有检查点重建转写并请求摘要，回执 `ChatMsg::AidDone(Compact, ...)`。
+/// 压缩中标志由调用方自持（面板 = `ChatState.compacting`，卡 = 卡运行态）。
+pub(crate) fn compact_task(
+    session_key: String,
+    config: RunConfig,
+    messages: &[Value],
+    compaction: Option<Value>,
+) -> iced::Task<Message> {
     let mut transcript = String::new();
-    for m in agent::history_to_llm_messages(&messages, compaction.as_ref()) {
+    for m in agent::history_to_llm_messages(messages, compaction.as_ref()) {
         match m {
             LlmMessage::User { parts, .. } => {
                 transcript.push_str(&format!("用户：{}\n\n", parts.join("\n")));
@@ -2112,11 +2152,9 @@ fn compact(app: &mut App, session_id: &str) -> iced::Task<Message> {
             LlmMessage::System { .. } => {}
         }
     }
-    app.chat.compacting = Some(session_id.to_string());
-    let sid = session_id.to_string();
     iced::Task::future(async move {
         let Some(client) = agent::aid_client(&config.base_url) else {
-            return Message::Chat(ChatMsg::AidDone(AidKind::Compact, sid, None));
+            return Message::Chat(ChatMsg::AidDone(AidKind::Compact, session_key, None));
         };
         let summary = agent::compact_summary(
             &client,
@@ -2126,7 +2164,7 @@ fn compact(app: &mut App, session_id: &str) -> iced::Task<Message> {
             &transcript,
         )
         .await;
-        Message::Chat(ChatMsg::AidDone(AidKind::Compact, sid, summary))
+        Message::Chat(ChatMsg::AidDone(AidKind::Compact, session_key, summary))
     })
 }
 

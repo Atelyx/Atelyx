@@ -3,7 +3,7 @@
 
 use iced::widget::{button, column, container, mouse_area, row, space, stack, Space};
 use iced::widget::container::Style;
-use iced::{border, Length, Padding};
+use iced::{Length, Padding};
 use serde_json::{json, Value};
 
 use crate::chat_actions::ChatMsg;
@@ -383,7 +383,8 @@ fn active_title(app: &App) -> String {
     }
 }
 
-fn is_streaming(app: &App) -> bool {
+/// 当前激活会话是否在流式（画布卡会话读卡运行态，面板会话读 Hub 注册表）。
+pub(crate) fn is_streaming(app: &App) -> bool {
     let Some(id) = app.chat.active.as_deref() else {
         return false;
     };
@@ -577,263 +578,18 @@ fn is_last_message(app: &App, m: &Value) -> bool {
 // ===== 输入区 =====
 
 fn input_area(app: &App, window: iced::window::Id) -> iced::Element<'_, Message> {
-    let streaming = is_streaming(app);
-    let send_btn = if streaming {
-        controls::icon_button(
-            "square",
-            14.0,
-            28.0,
-            controls::Variant::Secondary,
-            Some(Message::Chat(ChatMsg::Stop)),
-            Some((window, "停止生成".to_string())),
-        )
-    } else {
-        controls::icon_button(
-            "arrow-up",
-            14.0,
-            28.0,
-            controls::Variant::Primary,
-            Some(Message::Chat(ChatMsg::Send)),
-            Some((window, "发送（Enter）".to_string())),
-        )
-    };
-    // 工具排（盒子内底部，与输入面同属一块、不画分隔线）：左 + / Agent / 模型；右 发送 / 停止
-    let plus_open = app
-        .popup
-        .as_ref()
-        .is_some_and(|(_, open)| matches!(open.state, crate::layout_view::PopupState::ChatPlusMenu));
-    let plus_btn = button(icon("plus", 13.0, if plus_open { pal::ACCENT } else { pal::TEXT_SECONDARY }))
-        .padding(Padding::new(6.0).vertical(4.0))
-        .style(controls::row_style(false, pal::RADIUS_XS))
-        .on_press(crate::layout_view::btn_popup_min(
-            window,
-            app.cursor_for(window),
-            crate::layout_view::PopupState::ChatPlusMenu,
-            0.0,
-        ));
-    // 画布卡会话：Agent / 模型由卡节点配置，面板侧不再给选择入口
-    let canvas_bound = app
-        .chat
-        .active
-        .as_deref()
-        .and_then(crate::canvas_chat::node_of_session)
-        .is_some();
-    let tool_row = if canvas_bound {
-        row![
-            text("画布对话卡".to_string())
-                .size(pal::fs_micro())
-                .color(pal::TEXT_MUTED),
-            Space::new().width(Length::Fill),
-            send_btn,
-        ]
-        .spacing(6)
-        .align_y(iced::alignment::Vertical::Center)
-    } else {
-        row![
-            plus_btn,
-            agent_trigger(app, window),
-            model_select_trigger(app, window),
-            Space::new().width(Length::Fill),
-            send_btn,
-        ]
-        .spacing(6)
-        .align_y(iced::alignment::Vertical::Center)
-    };
-
-    // 自绘输入面（# 标签高亮 / 整标签交互由部件托管）
-    let placeholder = if canvas_bound {
-        "输入消息到画布对话卡，Enter 发送"
-    } else {
-        "输入消息，Enter 发送，Shift+Enter 换行"
-    };
-    let surface = crate::chat_input::Input::new(
-        &app.chat.input,
-        &app.chat.mention_refs,
-        crate::chat_input::InputRoute::Panel,
-    )
-    .picker_open(app.chat.mention_picker.is_some())
-    .placeholder(placeholder);
-    let surface = container(iced::Element::new(surface))
-        .width(Length::Fill)
-        .padding(Padding::ZERO.left(2.0).right(2.0).top(8.0));
-
-    // 输入盒内纵向三段：# 候选浮层（打开时）→ 输入面 → 工具排
-    let mut inner = column![].spacing(0).width(Length::Fill);
-    if let Some(picker) = &app.chat.mention_picker {
-        inner = inner.push(mention_picker_view(picker));
-    }
-    inner = inner.push(surface);
-    inner = inner.push(container(tool_row).width(Length::Fill).padding(Padding::ZERO.top(4.0)));
-    let input_box = container(inner)
-        .width(Length::Fill)
-        .padding(Padding::new(8.0))
-        .style(|_| container::Style {
-            background: Some(pal::BG_SUNKEN.into()),
-            border: border::Border {
-                width: 0.5,
-                radius: pal::RADIUS_MD.into(),
-                color: pal::BORDER,
-            },
-            ..Default::default()
-        });
-
-    // 输入区不铺底色：只一条 1px 上边线 + 图片托盘行（非空时）+ 输入盒本体
+    // 输入区不铺底色：只一条 1px 上边线 + 共享输入组装器（托盘 / # 候选 / 输入盒）；
+    // 绑定画布卡会话与普通会话同一套渲染，配置目标随会话指向卡
     let mut area = column![controls::h_divider_subtle()].width(Length::Fill);
-    if !app.chat.pending_images.is_empty() {
-        area = area.push(image_tray(app));
+    if let Some(composer) =
+        crate::chat_composer::composer(app, window, &crate::chat_composer::ComposerScope::Panel, 1.0)
+    {
+        area = area.push(
+            container(composer)
+                .width(Length::Fill)
+                .padding(Padding::new(12.0).top(8.0).bottom(10.0)),
+        );
     }
-    area = area.push(
-        container(input_box)
-            .width(Length::Fill)
-            .padding(Padding::new(12.0).top(8.0).bottom(10.0)),
-    );
     container(area).width(Length::Fill).into()
 }
 
-/// # 引用候选浮层：输入面上方弹出（锚在输入盒顶部，随候选行数自高）。
-fn mention_picker_view<'a>(
-    picker: &'a crate::chat_actions::MentionPicker,
-) -> iced::Element<'a, Message> {
-    let rows = picker.candidates.iter().enumerate().map(|(i, target)| {
-        let selected = i == picker.selected;
-        let (icon_name, label, dir) = match target {
-            crate::chat_actions::MentionTarget::Vault { rel, is_dir } => {
-                let icon_name = if *is_dir {
-                    "folder"
-                } else {
-                    match atelyx_core::ai::refs::kind_of_file(rel) {
-                        Some(atelyx_core::ai::refs::RefKind::Table) => "table",
-                        Some(atelyx_core::ai::refs::RefKind::Canvas) => "layers",
-                        _ => "file-text",
-                    }
-                };
-                let label = rel.rsplit('/').next().unwrap_or(rel).to_string();
-                let dir = rel.rsplit_once('/').map(|(d, _)| d.to_string());
-                (icon_name, label, dir)
-            }
-            // 面板不列画布卡候选（该入口只在画布卡输入面出现）
-            crate::chat_actions::MentionTarget::Card { node_id } => ("box", node_id.clone(), None),
-        };
-        let press = Message::Chat(ChatMsg::MentionPick(i));
-        let row_content = row![
-            icon(icon_name, 12.0, if selected { pal::ACCENT } else { pal::TEXT_SECONDARY }),
-            text(label)
-                .size(pal::fs_caption())
-                .color(if selected { pal::TEXT_PRIMARY } else { pal::TEXT_SECONDARY }),
-            dir.map(|d| text(d).size(pal::fs_micro()).color(pal::TEXT_MUTED)),
-        ]
-        .spacing(6)
-        .align_y(iced::alignment::Vertical::Center);
-        button(container(row_content).width(Length::Fill))
-            .padding(Padding::new(10.0).vertical(4.0))
-            .style(move |_, _| iced::widget::button::Style {
-                background: if selected { Some(pal::ACCENT_SOFT.into()) } else { None },
-                ..Default::default()
-            })
-            .on_press(press)
-    });
-    let list = container(
-        scroll::v(column(rows.map(iced::Element::from)).spacing(0).width(Length::Fill))
-            .height(iced::Length::Shrink)
-            .width(Length::Fill),
-    )
-    .max_height(224.0);
-    container(list)
-        .width(Length::Fill)
-        .style(|_| container::Style {
-            background: Some(pal::BG_SECONDARY.into()),
-            border: border::Border {
-                width: 0.5,
-                radius: pal::RADIUS_MD.into(),
-                color: pal::BORDER,
-            },
-            ..Default::default()
-        })
-        .into()
-}
-
-/// 待发送图片托盘：输入盒上方一行缩略图 chip（点击移除）。
-fn image_tray(app: &App) -> iced::Element<'_, Message> {
-    let chips = app.chat.pending_images.iter().enumerate().map(|(i, img)| {
-        let remove = Message::Chat(ChatMsg::RemoveAttachment(i));
-        let name = img.file_name.clone();
-        button(
-            row![
-                icon("image", 12.0, pal::TEXT_SECONDARY),
-                text(name).size(pal::fs_micro()).color(pal::TEXT_SECONDARY),
-                icon("x", 10.0, pal::TEXT_MUTED),
-            ]
-            .spacing(4)
-            .align_y(iced::alignment::Vertical::Center),
-        )
-        .padding(Padding::new(8.0).vertical(3.0))
-        .style(controls::row_style(false, pal::RADIUS_XS))
-        .on_press(remove)
-    });
-    container(scroll::v(row(chips.map(iced::Element::from)).spacing(6)))
-        .width(Length::Fill)
-        .padding(Padding::new(12.0).top(8.0).bottom(0.0))
-        .into()
-}
-
-fn agent_label(app: &App) -> String {
-    let id = app.chat.active_agent_id();
-    match id {
-        Some(id) => app
-            .agents
-            .iter()
-            .find(|a| a.id == id)
-            .map(|a| a.name.clone())
-            .unwrap_or(id),
-        None => "对话".to_string(),
-    }
-}
-
-fn agent_trigger(app: &App, window: iced::window::Id) -> iced::Element<'static, Message> {
-    button(
-        row![
-            icon("bot", 12.0, pal::TEXT_SECONDARY),
-            text(agent_label(app)).size(pal::fs_micro()).color(pal::TEXT_SECONDARY),
-            icon("chevron-down", 10.0, pal::TEXT_MUTED),
-        ]
-        .spacing(4)
-        .align_y(iced::alignment::Vertical::Center),
-    )
-    .padding(Padding::new(6.0).vertical(3.0))
-    .style(controls::row_style(false, pal::RADIUS_XS))
-    .on_press(crate::layout_view::btn_popup_min(
-        window,
-        app.cursor_for(window),
-        crate::layout_view::PopupState::ChatAgentMenu,
-        0.0,
-    ))
-    .into()
-}
-
-/// 模型/推理等级复合触发钮：显示「模型 · 等级」，两级菜单分别设置（面板级覆盖，正交）。
-fn model_select_trigger(app: &App, window: iced::window::Id) -> iced::Element<'static, Message> {
-    button(
-        row![
-            icon("sparkles", 12.0, pal::TEXT_SECONDARY),
-            text(format!(
-                "{} · {}",
-                crate::layout_view::chat_model_trigger_label(app),
-                crate::layout_view::chat_effort_label(app)
-            ))
-            .size(pal::fs_micro())
-            .color(pal::TEXT_SECONDARY),
-            icon("chevron-down", 10.0, pal::TEXT_MUTED),
-        ]
-        .spacing(4)
-        .align_y(iced::alignment::Vertical::Center),
-    )
-    .padding(Padding::new(6.0).vertical(3.0))
-    .style(controls::row_style(false, pal::RADIUS_XS))
-    .on_press(crate::layout_view::btn_popup_min(
-        window,
-        app.cursor_for(window),
-        crate::layout_view::PopupState::ChatModelMenu,
-        0.0,
-    ))
-    .into()
-}

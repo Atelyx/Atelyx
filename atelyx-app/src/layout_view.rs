@@ -287,13 +287,13 @@ pub(crate) enum PopupState {
     TableViewMenu,
     /// 设置-AI：话题命名模型下拉。
     AiModelMenu,
-    /// AI 对话面板：模型下拉（面板级覆盖；不指定 = 跟随仓库默认）。
-    ChatModelMenu,
-    /// AI 对话面板：输入区「+」菜单（添加上下文 / 上传附件）。
-    ChatPlusMenu,
+    /// AI 对话：模型 / 推理等级两级菜单；scope = 写入目标（面板覆盖或画布卡节点配置）。
+    ChatModelMenu { scope: crate::chat_composer::ConfigScope },
+    /// AI 对话：输入区「+」菜单（添加上下文 / 上传附件）；scope = 草稿作用域。
+    ChatPlusMenu { scope: crate::chat_composer::ComposerScope },
     /// AI 对话面板：推理等级下拉（面板级覆盖；跟随默认 = 不发送推理参数）。
-    /// AI 对话面板：Agent 下拉（会话级 agentId；含缺省「对话」）。
-    ChatAgentMenu,
+    /// AI 对话：Agent 下拉（scope = 写入目标；缺省「对话」）。
+    ChatAgentMenu { scope: crate::chat_composer::ConfigScope },
     /// 设置-AI：话题自动命名模式。
     AiNamingMenu,
     /// 设置-AI：Agent 系统提示词选择。
@@ -388,9 +388,9 @@ impl PopupState {
             PopupState::TableViewMenu => 96.0,
             // AI 设置：模型 id / 笔记名可能较长，给足一行的宽度
             PopupState::AiModelMenu => 224.0,
-            PopupState::ChatModelMenu => 224.0,
-            PopupState::ChatAgentMenu => 200.0,
-            PopupState::ChatPlusMenu => 176.0,
+            PopupState::ChatModelMenu { .. } => 224.0,
+            PopupState::ChatAgentMenu { .. } => 200.0,
+            PopupState::ChatPlusMenu { .. } => 176.0,
             PopupState::AiNamingMenu => 144.0,
             PopupState::AiAgentPromptMenu => 208.0,
             PopupState::AiProviderDeleteMenu | PopupState::AiAgentDeleteMenu => 208.0,
@@ -4491,24 +4491,60 @@ fn popup_element<'a>(
                 MenuEntry::danger("删除", "trash-2", canvas_menu(crate::canvas_view::CanvasMenuAction::DeleteSelection)),
             ),
         ],
-        PopupState::CanvasBlankMenu { x, y } => vec![
-            (
+        PopupState::CanvasBlankMenu { x, y } => {
+            let mut entries = vec![
+                (
+                    0,
+                    MenuEntry::action_icon(
+                        "新建对话卡",
+                        "message-square",
+                        canvas_menu(crate::canvas_view::CanvasMenuAction::CreateConversationAt {
+                            x: *x,
+                            y: *y,
+                        }),
+                    ),
+                ),
+                (
+                    0,
+                    MenuEntry::action_icon(
+                        "新建文本卡",
+                        "align-left",
+                        canvas_menu(crate::canvas_view::CanvasMenuAction::CreateTextAt {
+                            x: *x,
+                            y: *y,
+                        }),
+                    ),
+                ),
+                (
+                    0,
+                    MenuEntry::action_icon(
+                        "新建分组",
+                        "layers",
+                        canvas_menu(crate::canvas_view::CanvasMenuAction::CreateGroupAt { x: *x, y: *y }),
+                    ),
+                ),
+            ];
+            // 右键空白不清选中：有选中时提供复制（与卡菜单 / Ctrl+C 同剪贴板口径，可跨画布粘贴）
+            if app.canvas.as_ref().is_some_and(|s| !s.view.selection.is_empty()) {
+                entries.push((
+                    0,
+                    MenuEntry::action_icon(
+                        "复制",
+                        "copy",
+                        canvas_menu(crate::canvas_view::CanvasMenuAction::CopySelection),
+                    ),
+                ));
+            }
+            entries.push((
                 0,
                 MenuEntry::action_icon(
                     "粘贴",
                     "clipboard-paste",
                     canvas_menu(crate::canvas_view::CanvasMenuAction::Paste),
                 ),
-            ),
-            (
-                0,
-                MenuEntry::action_icon(
-                    "新建分组",
-                    "layers",
-                    canvas_menu(crate::canvas_view::CanvasMenuAction::CreateGroupAt { x: *x, y: *y }),
-                ),
-            ),
-        ],
+            ));
+            entries
+        }
         PopupState::CanvasGroupRename { node_id } => {
             let current = app
                 .canvas
@@ -4789,42 +4825,99 @@ fn popup_element<'a>(
             }
             entries
         }
-        PopupState::ChatAgentMenu => {
+        PopupState::ChatAgentMenu { scope } => {
             // 未选过 = 内置「对话」生效；名册由装载时种子补齐，恒含「对话」
-            let current = app
-                .chat
-                .active_agent_id()
-                .unwrap_or_else(|| atelyx_core::vault::BUILTIN_AGENT_CHAT_ID.to_string());
+            let current = match scope {
+                crate::chat_composer::ConfigScope::Panel => app
+                    .chat
+                    .active_agent_id()
+                    .unwrap_or_else(|| atelyx_core::vault::BUILTIN_AGENT_CHAT_ID.to_string()),
+                crate::chat_composer::ConfigScope::Card { node } => card_agent_id(app, node)
+                    .unwrap_or_else(|| atelyx_core::vault::BUILTIN_AGENT_CHAT_ID.to_string()),
+            };
+            let pick = |id: String| match scope {
+                crate::chat_composer::ConfigScope::Panel => Message::Chat(
+                    crate::chat_actions::ChatMsg::AgentPick(Some(id)),
+                ),
+                crate::chat_composer::ConfigScope::Card { node } => Message::Canvas(
+                    crate::canvas_view::CanvasMsg::Chat(crate::canvas_chat::CanvasChatMsg::AgentPick {
+                        node: node.clone(),
+                        agent: Some(id),
+                    }),
+                ),
+            };
             let mut entries: Vec<(usize, MenuEntry<Message>)> = Vec::new();
             for agent in &app.agents {
-                let pick = Message::Chat(crate::chat_actions::ChatMsg::AgentPick(Some(
-                    agent.id.clone(),
-                )));
+                let press = pick(agent.id.clone());
                 entries.push((
                     0,
                     if current == agent.id {
-                        MenuEntry::Checked { label: agent.name.clone(), on_press: pick }
+                        MenuEntry::Checked { label: agent.name.clone(), on_press: press }
                     } else {
-                        MenuEntry::action(agent.name.clone(), pick)
+                        MenuEntry::action(agent.name.clone(), press)
                     },
                 ));
             }
             entries
         }
-        PopupState::ChatPlusMenu => {
-            let add_ctx = Message::Chat(crate::chat_actions::ChatMsg::TriggerMention);
-            let upload = Message::Chat(crate::chat_actions::ChatMsg::UploadAttachment);
+        PopupState::ChatPlusMenu { scope } => {
+            let add_ctx = match scope {
+                crate::chat_composer::ComposerScope::Panel => {
+                    Message::Chat(crate::chat_actions::ChatMsg::TriggerMention)
+                }
+                crate::chat_composer::ComposerScope::Card { node } => Message::Canvas(
+                    crate::canvas_view::CanvasMsg::Chat(
+                        crate::canvas_chat::CanvasChatMsg::TriggerMention(node.clone()),
+                    ),
+                ),
+            };
+            let upload = match scope {
+                crate::chat_composer::ComposerScope::Panel => {
+                    Message::Chat(crate::chat_actions::ChatMsg::UploadAttachment)
+                }
+                crate::chat_composer::ComposerScope::Card { node } => Message::Canvas(
+                    crate::canvas_view::CanvasMsg::Chat(
+                        crate::canvas_chat::CanvasChatMsg::PickFiles(node.clone()),
+                    ),
+                ),
+            };
             vec![
                 (0, MenuEntry::action("添加上下文", add_ctx)),
                 (0, MenuEntry::action("上传附件", upload)),
             ]
         }
-        PopupState::ChatModelMenu => {
+        PopupState::ChatModelMenu { scope } => {
             // 两级菜单（pane 0 根 / 1 模型 / 2 推理等级）：模型与等级为正交覆盖。
             // 条目元组首元素是 pane 归属标签，pane_view 按当前 pane 过滤——必须与所在面板同值
             match pane {
                 2 => {
-                    let current = app.chat.effort.clone();
+                    let (current, pick): (
+                        Option<String>,
+                        Box<dyn Fn(Option<String>) -> Message>,
+                    ) = match scope {
+                        crate::chat_composer::ConfigScope::Panel => (
+                            app.chat.effort.clone(),
+                            Box::new(|v: Option<String>| {
+                                Message::Chat(crate::chat_actions::ChatMsg::EffortPicked(v))
+                            }),
+                        ),
+                        crate::chat_composer::ConfigScope::Card { node } => {
+                            let node = node.clone();
+                            (
+                                card_effort(app, &node),
+                                Box::new(move |v: Option<String>| {
+                                    Message::Canvas(
+                                        crate::canvas_view::CanvasMsg::Chat(
+                                            crate::canvas_chat::CanvasChatMsg::EffortPick {
+                                                node: node.clone(),
+                                                effort: v,
+                                            },
+                                        ),
+                                    )
+                                }),
+                            )
+                        }
+                    };
                     [
                         (None, "默认"),
                         (Some("off".to_string()), "关闭"),
@@ -4834,9 +4927,7 @@ fn popup_element<'a>(
                     ]
                     .into_iter()
                     .map(|(value, label)| {
-                        let pick = Message::Chat(crate::chat_actions::ChatMsg::EffortPicked(
-                            value.clone(),
-                        ));
+                        let pick = pick(value.clone());
                         let is_current = current == value;
                         (
                             2,
@@ -4849,27 +4940,47 @@ fn popup_element<'a>(
                     })
                     .collect::<Vec<_>>()
                 }
-                1 => chat_model_entries(app).into_iter().map(|(_, e)| (1, e)).collect(),
-                _ => vec![
-                    (
-                        0,
-                        MenuEntry::Submenu {
-                            label: format!("模型：{}", chat_model_trigger_label(app)),
-                            icon: None,
-                            disabled: false,
-                            pane: 1,
-                        },
-                    ),
-                    (
-                        0,
-                        MenuEntry::Submenu {
-                            label: format!("推理等级：{}", chat_effort_label(app)),
-                            icon: None,
-                            disabled: false,
-                            pane: 2,
-                        },
-                    ),
-                ],
+                1 => match scope {
+                    crate::chat_composer::ConfigScope::Panel => {
+                        chat_model_entries(app).into_iter().map(|(_, e)| (1, e)).collect()
+                    }
+                    crate::chat_composer::ConfigScope::Card { node } => canvas_card_model_entries(app, node)
+                        .into_iter()
+                        .map(|(_, e)| (1, e))
+                        .collect(),
+                },
+                _ => {
+                    let (model_label, effort_label) = match scope {
+                        crate::chat_composer::ConfigScope::Panel => (
+                            chat_model_trigger_label(app),
+                            chat_effort_label(app),
+                        ),
+                        crate::chat_composer::ConfigScope::Card { node } => (
+                            canvas_card_model_label(app, node),
+                            canvas_card_effort_label(app, node),
+                        ),
+                    };
+                    vec![
+                        (
+                            0,
+                            MenuEntry::Submenu {
+                                label: format!("模型：{model_label}"),
+                                icon: None,
+                                disabled: false,
+                                pane: 1,
+                            },
+                        ),
+                        (
+                            0,
+                            MenuEntry::Submenu {
+                                label: format!("推理等级：{effort_label}"),
+                                icon: None,
+                                disabled: false,
+                                pane: 2,
+                            },
+                        ),
+                    ]
+                }
             }
         }
         PopupState::AiNamingMenu => {
@@ -5060,14 +5171,47 @@ pub(crate) fn chat_model_trigger_label(app: &App) -> String {
     let Some(v) = &app.chat.model_override else {
         return "选择模型".to_string();
     };
-    let (pid, model) = match (
+    match (
         v.get("providerId").and_then(serde_json::Value::as_str),
         v.get("model").and_then(serde_json::Value::as_str),
     ) {
-        (Some(pid), Some(model)) => (pid, model),
-        _ => return "选择模型".to_string(),
-    };
-    // 昵称取自覆盖所指向的供应商（同名模型跨供应商昵称可能不同）；供应商已删回落 id
+        (Some(pid), Some(model)) => model_pick_label(app, pid, model),
+        _ => "选择模型".to_string(),
+    }
+}
+
+/// 画布卡当前生效模型显示名：卡指定优先，回落仓库默认模型；未配置 = 提示文案。
+pub(crate) fn canvas_card_model_label(app: &App, node_id: &str) -> String {
+    match card_model_pick(app, node_id) {
+        Some((pid, model)) => model_pick_label(app, &pid, &model),
+        None => "选择模型".to_string(),
+    }
+}
+
+/// 卡模型选择：节点 `providerId` + `model` 成对有效优先，回落仓库默认模型。
+fn card_model_pick(app: &App, node_id: &str) -> Option<(String, String)> {
+    let specified = app
+        .canvas
+        .as_ref()
+        .and_then(|s| s.data.nodes.iter().find(|n| n.id == node_id))
+        .and_then(|n| match (
+            n.data.get("providerId").and_then(serde_json::Value::as_str),
+            n.data.get("model").and_then(serde_json::Value::as_str),
+        ) {
+            (Some(p), Some(m)) if !p.is_empty() && !m.is_empty() => {
+                Some((p.to_string(), m.to_string()))
+            }
+            _ => None,
+        });
+    specified.or_else(|| match (&app.repo_config.model, &app.repo_config.model_provider_id) {
+        (Some(m), Some(p)) => Some((p.clone(), m.clone())),
+        _ => None,
+    })
+}
+
+/// 模型显示名（昵称；同名模型跨供应商时带供应商名消歧，供应商已删回落 id）。
+fn model_pick_label(app: &App, pid: &str, model: &str) -> String {
+    // 昵称取自所指向的供应商（同名模型跨供应商昵称可能不同）
     let display = app
         .repo_config
         .providers
@@ -5100,13 +5244,101 @@ pub(crate) fn chat_model_trigger_label(app: &App) -> String {
 
 /// 面板推理等级显示名（触发器/根菜单行用；未选 = 默认）。
 pub(crate) fn chat_effort_label(app: &App) -> &'static str {
-    match app.chat.effort.as_deref() {
+    effort_label(app.chat.effort.as_deref())
+}
+
+/// 画布卡推理等级显示名（节点 `data.reasoningEffort`；未设 = 默认）。
+pub(crate) fn canvas_card_effort_label(app: &App, node_id: &str) -> &'static str {
+    effort_label(card_effort(app, node_id).as_deref())
+}
+
+/// 推理等级线格式 → 显示名。
+fn effort_label(effort: Option<&str>) -> &'static str {
+    match effort {
         Some("off") => "关闭",
         Some("low") => "低",
         Some("medium") => "中",
         Some("high") => "高",
         _ => "默认",
     }
+}
+
+/// 卡节点 Agent id（`data.agentId`）。
+fn card_agent_id(app: &App, node_id: &str) -> Option<String> {
+    app.canvas
+        .as_ref()
+        .and_then(|s| s.data.nodes.iter().find(|n| n.id == node_id))
+        .and_then(|n| n.data.get("agentId").and_then(serde_json::Value::as_str))
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// 卡节点推理等级（线格式；未设 = None）。
+fn card_effort(app: &App, node_id: &str) -> Option<String> {
+    app.canvas
+        .as_ref()
+        .and_then(|s| s.data.nodes.iter().find(|n| n.id == node_id))
+        .and_then(|n| {
+            n.data
+                .get("reasoningEffort")
+                .and_then(serde_json::Value::as_str)
+        })
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// 卡模型子面板条目：跟随默认（卡有指定时）+ 按供应商分组的模型清单。
+fn canvas_card_model_entries(app: &App, node_id: &str) -> Vec<(usize, MenuEntry<'static, Message>)> {
+    use crate::canvas_chat::CanvasChatMsg;
+    use crate::canvas_view::CanvasMsg;
+    let pick = |p: String, m: String| {
+        Message::Canvas(CanvasMsg::Chat(CanvasChatMsg::ModelPick {
+            node: node_id.to_string(),
+            pick: Some((p, m)),
+        }))
+    };
+    let current = card_model_pick(app, node_id);
+    // 卡已指定模型时提供「跟随默认」（移除节点级指定）
+    let card_has_model = app
+        .canvas
+        .as_ref()
+        .and_then(|s| s.data.nodes.iter().find(|n| n.id == node_id))
+        .is_some_and(|n| {
+            n.data.get("model").and_then(serde_json::Value::as_str).is_some_and(|m| !m.is_empty())
+        });
+    let mut entries: Vec<(usize, MenuEntry<'static, Message>)> = Vec::new();
+    if card_has_model {
+        entries.push((
+            0,
+            MenuEntry::action(
+                "跟随默认",
+                Message::Canvas(CanvasMsg::Chat(CanvasChatMsg::ModelPick {
+                    node: node_id.to_string(),
+                    pick: None,
+                })),
+            ),
+        ));
+    }
+    for p in app.repo_config.providers.iter().flatten() {
+        if p.models.is_empty() {
+            continue;
+        }
+        entries.push((0, MenuEntry::Group(p.name.clone())));
+        for m in &p.models {
+            let is_current =
+                current.as_ref().is_some_and(|(provider, model)| provider == &p.id && model == &m.id);
+            let press = pick(p.id.clone(), m.id.clone());
+            entries.push((0, if is_current {
+                MenuEntry::Checked { label: model_display(m), on_press: press }
+            } else {
+                MenuEntry::action(model_display(m), press)
+            }));
+        }
+    }
+    if entries.len() == usize::from(card_has_model) {
+        entries.push((0, MenuEntry::Custom(popup_hint("先在「供应商」添加模型"), 18.0)));
+    }
+    entries
 }
 
 /// 面板模型子面板条目：按供应商分组，昵称显示。
