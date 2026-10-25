@@ -207,7 +207,11 @@ pub fn divider<'a>(id: impl Into<NodeId<'a>>) -> ViewNode {
 }
 
 pub fn scroll<'a>(id: impl Into<NodeId<'a>>, children: Vec<ViewNode>) -> ViewNode {
-    node(id, NodeBody::Scroll { direction: None, gap: None, height: None }).with_children(children)
+    node(
+        id,
+        NodeBody::Scroll { direction: None, gap: None, height: None, follow_end: None },
+    )
+    .with_children(children)
 }
 
 /// 固定列数网格。
@@ -239,7 +243,7 @@ pub fn grid_min<'a>(id: impl Into<NodeId<'a>>, min_column_width: f32, children: 
 }
 
 pub fn list<'a>(id: impl Into<NodeId<'a>>, children: Vec<ViewNode>) -> ViewNode {
-    node(id, NodeBody::List { gap: None }).with_children(children)
+    node(id, NodeBody::List { gap: None, follow_end: None }).with_children(children)
 }
 
 pub fn text<'a>(id: impl Into<NodeId<'a>>, content: impl Into<String>) -> ViewNode {

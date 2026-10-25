@@ -25,8 +25,12 @@ use crate::{App, Message};
 /// 壳侧插件视图 kind 前缀（内置视图词汇不被插件占用；插件 id 与贡献 id 都不含 `:`）。
 const KIND_PREFIX: &str = "plugin:";
 
-/// 多行输入在 `commit` 档位下的静默提交间隔：编辑器没有提交信号，输入停顿即视为一段输入结束。
+/// 多行输入在 `commit` 档位下的静默提交间隔：未声明 `submit` 时编辑器没有提交信号，
+/// 输入停顿即视为一段输入结束。
 const EDITOR_COMMIT_MS: u64 = 600;
+
+/// 贴底判定容差（逻辑像素）：滚动偏移距终点在此范围内即视为仍在跟随。
+const FOLLOW_END_EPSILON: f32 = 0.5;
 
 // ===== 视图 kind 编解码 =====
 
@@ -395,7 +399,45 @@ pub fn refresh_projection(app: &mut App) -> Task<Message> {
     }
     app.plugin_canvases.retain(|key, _| canvas_keys.contains(key));
     report_unknown_icons(app);
-    ensure_images(app)
+    Task::batch([ensure_images(app), follow_snap_tasks(app)])
+}
+
+/// 树投影后把仍在跟底的滚动容器滚到终点（内容增高即跟到新终点）。
+fn follow_snap_tasks(app: &App) -> Task<Message> {
+    let mut tasks = Vec::new();
+    for ((plugin_id, surface_id), tree) in &app.plugin_trees {
+        let mut nodes = Vec::new();
+        collect_follow_nodes(tree, &mut nodes);
+        for node_id in nodes {
+            let key = (plugin_id.clone(), surface_id.clone(), node_id);
+            if app.plugin_follow_released.contains(&key) {
+                continue;
+            }
+            tasks.push(iced::widget::operation::snap_to_end(
+                atelyx_view::render::scroll_id(&key.0, &key.1, &key.2),
+            ));
+        }
+    }
+    Task::batch(tasks)
+}
+
+fn collect_follow_nodes(node: &ViewNode, out: &mut Vec<String>) {
+    if follows_end(&node.body) {
+        out.push(node.id.clone());
+    }
+    for child in &node.children {
+        collect_follow_nodes(child, out);
+    }
+}
+
+/// 节点是否声明贴底跟随。
+fn follows_end(body: &NodeBody) -> bool {
+    match body {
+        NodeBody::Scroll { follow_end, .. } | NodeBody::List { follow_end, .. } => {
+            follow_end.unwrap_or(false)
+        }
+        _ => false,
+    }
 }
 
 /// 树里引用的图标名（内置名或 `<插件 id>::<名>` 限定名）。
@@ -475,6 +517,8 @@ pub fn drop_node_state(app: &mut App, plugin_id: &str, surface_id: &str) {
         .retain(|key, _| !(key.0 == plugin_id && key.1 == surface_id));
     app.plugin_editors
         .retain(|key, _| !(key.0 == plugin_id && key.1 == surface_id));
+    app.plugin_follow_released
+        .retain(|key| !(key.0 == plugin_id && key.1 == surface_id));
     app.plugin_canvases
         .retain(|key, _| !(key.0 == plugin_id && key.1 == surface_id));
     app.plugin_markdown
@@ -499,6 +543,11 @@ fn prune_node_state(app: &mut App, plugin_id: &str, surface_id: &str, tree: &Vie
     app.plugin_draft_seq.retain(|key, _| alive(key));
     app.plugin_editors.retain(|key, _| alive(key));
     app.plugin_hovered.retain(|key| alive(key));
+    app.plugin_follow_released.retain(|key| {
+        key.0 != plugin_id
+            || key.1 != surface_id
+            || find_node(tree, key.2.as_str()).is_some_and(|node| follows_end(&node.body))
+    });
     sync_focus_with_tree(app, plugin_id, surface_id, tree);
 }
 
@@ -882,6 +931,8 @@ pub struct PluginWindowActive {
     pub window_key: String,
     /// 窗口标题（`window.open` 声明），OS 标题栏按它取。
     pub title: String,
+    /// 系统窗口边框；`false` 时宿主补标题栏与窗口控制。
+    pub decorations: bool,
     pub hide_on_blur: bool,
     /// 最近一次已知窗口尺寸（开窗声明 + `window.update` 与 OS 调整事件共同维护）：
     /// `window.update` 只改一维时另一维取它。
@@ -997,8 +1048,10 @@ pub fn on_window_open(
         params.height.unwrap_or(640.0).max(120.0),
     );
     let always_on_top = params.always_on_top.unwrap_or(false);
+    let decorations = params.decorations.unwrap_or(true);
     let mut settings = iced::window::Settings {
         size,
+        decorations,
         exit_on_close_request: true,
         icon: crate::app_icon::window_icon(),
         ..iced::window::Settings::default()
@@ -1016,6 +1069,7 @@ pub fn on_window_open(
             plugin_id: plugin_id.clone(),
             window_key: params.id.clone(),
             title: params.title.clone(),
+            decorations,
             hide_on_blur,
             size,
             always_on_top,
@@ -1171,7 +1225,7 @@ pub fn on_scroll_to(
         .get(&(plugin_id.clone(), params.surface_id.clone()))
         .and_then(|tree| find_node(tree, &params.node_id))
         .map(|node| node.body.clone());
-    let scrollable = matches!(node, Some(NodeBody::List { .. }) | Some(NodeBody::Scroll { .. }));
+    let scrollable = matches!(&node, Some(NodeBody::List { .. }) | Some(NodeBody::Scroll { .. }));
     if !scrollable {
         app.plugins.resolve_shell_call(
             request_id,
@@ -1180,6 +1234,19 @@ pub fn on_scroll_to(
         return Task::none();
     }
     app.plugins.resolve_shell_call(request_id, Ok(serde_json::json!({})));
+    if node.as_ref().is_some_and(follows_end) {
+        let key = (plugin_id.clone(), params.surface_id.clone(), params.node_id.clone());
+        let at_end = match (params.edge, params.offset) {
+            (Some(ScrollEdge::End), _) => true,
+            (_, Some(offset)) => offset.clamp(0.0, 1.0) >= 1.0,
+            _ => false,
+        };
+        if at_end {
+            app.plugin_follow_released.remove(&key);
+        } else {
+            app.plugin_follow_released.insert(key);
+        }
+    }
     let id = atelyx_view::render::scroll_id(&plugin_id, &params.surface_id, &params.node_id);
     if let Some(edge) = params.edge {
         return match edge {
@@ -1625,6 +1692,39 @@ pub fn on_editor_flush(
     Task::none()
 }
 
+/// 多行编辑器提交键：把整段内容按上报档位回发 `change`，并按声明回发 `submit`。
+/// 待上报的防抖拍次一并作废（提交已带走最新内容）。
+pub fn on_editor_submit(
+    app: &mut App,
+    plugin_id: String,
+    surface_id: String,
+    node_id: String,
+) -> Task<Message> {
+    let key = (plugin_id.clone(), surface_id.clone(), node_id.clone());
+    let found = app
+        .plugin_trees
+        .get(&(plugin_id.clone(), surface_id.clone()))
+        .and_then(|tree| find_node(tree, &node_id))
+        .map(|node| (node.body.clone(), node.events.clone()));
+    let Some((body, events)) = found else {
+        return Task::none();
+    };
+    if !matches!(body, NodeBody::TextInput { multiline: Some(true), .. })
+        || !events.contains(&EventKind::Submit)
+    {
+        return Task::none();
+    }
+    let Some(state) = app.plugin_editors.get_mut(&key) else {
+        return Task::none();
+    };
+    let text = state.content.text();
+    state.reported = text.clone();
+    state.baseline = text.clone();
+    app.plugin_draft_seq.remove(&key);
+    let mode = report_mode(&body);
+    report_input_value(app, &plugin_id, &surface_id, &node_id, &body, &events, &text, mode)
+}
+
 /// 把输入文本上报为事件：延迟档位发 `change`（数字转数值），按声明发 `submit`。
 /// 不可解析为数值时不发事件（与逐键路径同口径）。
 fn report_input_value(
@@ -1670,6 +1770,17 @@ pub fn on_view_event(
     let Some((body, events)) = found else {
         return Task::none();
     };
+    // 跟底状态先于事件声明判定：只声明 followEnd 的容器也要据此脱钩 / 恢复
+    if let ViewEvent::Scroll { offset, max_offset } = &event {
+        if follows_end(&body) {
+            let key = (plugin_id.clone(), surface_id.clone(), node_id.clone());
+            if max_offset - offset <= FOLLOW_END_EPSILON {
+                app.plugin_follow_released.remove(&key);
+            } else {
+                app.plugin_follow_released.insert(key);
+            }
+        }
+    }
     let event = match event {
         // 输入类节点：文本先进本机草稿（显示值来源），数字节点转成数值型事件值
         ViewEvent::Change { value: EventValue::Text(text) } if is_input(&body) => {
@@ -1743,11 +1854,12 @@ pub fn on_text_edit(
     action: text_editor::Action,
 ) -> Task<Message> {
     let key = (plugin_id.clone(), surface_id.clone(), node_id.clone());
-    let declares_change = app
+    let (declares_change, declares_submit) = app
         .plugin_trees
         .get(&(plugin_id.clone(), surface_id.clone()))
         .and_then(|tree| find_node(tree, &node_id))
-        .is_some_and(|node| declares(node, EventKind::Change));
+        .map(|node| (declares(node, EventKind::Change), declares(node, EventKind::Submit)))
+        .unwrap_or((false, false));
     let Some(state) = app.plugin_editors.get_mut(&key) else {
         return Task::none();
     };
@@ -1762,6 +1874,8 @@ pub fn on_text_edit(
             return Task::none();
         }
         let delay = match mode {
+            // 声明提交键时由 Enter 上报，不做静默拍
+            ReportMode::Commit if declares_submit => return Task::none(),
             ReportMode::Debounced(ms) if ms > 0 => u64::from(ms),
             _ => EDITOR_COMMIT_MS,
         };

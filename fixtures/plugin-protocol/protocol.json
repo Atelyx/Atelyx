@@ -292,12 +292,14 @@
               {
                 "label": "重载",
                 "action": "reload",
-                "current": true
+                "current": true,
+                "group": "维护"
               },
               {
                 "label": "清除",
                 "action": "purge",
-                "danger": true
+                "danger": true,
+                "group": "维护"
               }
             ],
             "events": [
@@ -320,6 +322,7 @@
             "id": "log",
             "kind": "list",
             "gap": 2.0,
+            "followEnd": true,
             "children": [
               {
                 "id": "log1",
@@ -1029,6 +1032,53 @@
       "name": "image source (file)",
       "type": "ImageSource",
       "value": { "type": "file", "path": "C:/Users/me/Desktop/a.png" }
+    },
+    {
+      "name": "vault.rename params",
+      "type": "VaultRenameParams",
+      "value": { "from": "笔记/a.md", "to": "归档/a.md" }
+    },
+    {
+      "name": "clipboard.writeImage params",
+      "type": "ClipboardWriteImageParams",
+      "value": { "base64": "iVBORw0KGgo=" }
+    },
+    {
+      "name": "ai.models result",
+      "type": "AiModelsResult",
+      "value": {
+        "providers": [
+          {
+            "id": "openai",
+            "name": "OpenAI",
+            "models": [{ "id": "gpt-4o", "nickname": "4o" }]
+          }
+        ],
+        "current": { "providerId": "openai", "model": "gpt-4o" }
+      }
+    },
+    {
+      "name": "ai.agents result",
+      "type": "AiAgentsResult",
+      "value": {
+        "agents": [{ "id": "chat", "name": "对话", "builtin": true }],
+        "current": "chat"
+      }
+    },
+    {
+      "name": "ai.models result (empty)",
+      "type": "AiModelsResult",
+      "value": {}
+    },
+    {
+      "name": "ai.agents result (empty)",
+      "type": "AiAgentsResult",
+      "value": {}
+    },
+    {
+      "name": "window.open params (undecorated)",
+      "type": "WindowOpenParams",
+      "value": { "id": "palette", "title": "命令面板", "decorations": false }
     }
   ]
 }

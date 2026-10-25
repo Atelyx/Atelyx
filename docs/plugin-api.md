@@ -316,6 +316,11 @@ pub enum NodeBody {
         /// 缺省占满父容器剩余高度。节点声明 `scroll` 事件即上报滚动位置。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         height: Option<f32>,
+        /// 贴底跟随：用户停在终点时，内容增高后自动跟到新的终点；用户往回滚即脱钩，
+        /// 再滚回终点自动恢复。`view.scrollTo(end)` 也会恢复跟随（其它位置则脱钩）。
+        /// 缺省 false。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        follow_end: Option<bool>,
     },
     /// 网格：`columns` 固定列数；`min_column_width` 按可用宽度换列（`columns` 同时给定时作列数上限）。
     /// 二者都缺省按单列渲染。`row_height` 缺省按列宽 1:1 定行高。
@@ -335,6 +340,9 @@ pub enum NodeBody {
     List {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         gap: Option<f32>,
+        /// 贴底跟随（语义同 [`NodeBody::Scroll`] 的 `followEnd`）；缺省 false。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        follow_end: Option<bool>,
     },
     Text {
         content: String,
@@ -384,7 +392,8 @@ pub enum NodeBody {
         value: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         placeholder: Option<String>,
-        /// 多行：宿主按多行编辑器渲染，Enter 换行（`submit` 事件只对单行生效）。
+        /// 多行：宿主按多行编辑器渲染。声明 `submit` 时 Enter 提交、Shift+Enter 换行；
+        /// 未声明时 Enter 换行。单行恒按 Enter 提交。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         multiline: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -528,7 +537,7 @@ pub enum NodeBody {
     /// 分隔线：主题弱边界色的 1px 水平线（分组容器内的轻分割）。
     Divider {},
     /// 拖动热区：自身不渲染任何内容，用户在其占位区域内按下即由宿主发起整窗拖动
-    /// （全接管时插件自绘标题栏的拖动把手）。事件不回发。
+    /// （全接管或无系统边框的插件窗口里自绘标题栏的拖动把手）。事件不回发。
     DragRegion {},
 }
 ```
@@ -816,6 +825,9 @@ pub struct MenuItem {
     /// 当前项标记（宿主在条目前画勾）：用于「历史会话列表」这类单选菜单。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current: Option<bool>,
+    /// 分组名（单层）：相邻同名条目归入同一组，宿主在组首画一次组标题；无分组条目独立成行。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
 }
 ```
 
@@ -872,7 +884,8 @@ pub struct EdgesPadding {
 pub enum ReportMode {
     /// 逐键上报。
     Immediate,
-    /// 提交时上报：单行按 Enter、多行按 Ctrl+Enter，或控件失去焦点时回发 `change`。
+    /// 提交时上报：单行按 Enter；多行在停止输入后上报，声明 `submit` 时按 Enter 立即上报
+    /// （Enter 另发 `submit`，Shift+Enter 换行）。
     Commit,
     /// 停顿上报：停止编辑 `Debounced` 毫秒后回发 `change`（毫秒为 0 按 [`ReportMode::Immediate`] 处理）。
     Debounced(u32),
@@ -1457,6 +1470,10 @@ pub struct WindowOpenParams {
     /// 失焦即收起（隐藏窗口，从托盘 / 快捷键等入口再唤起是插件自己的事）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hide_on_blur: Option<bool>,
+    /// 系统窗口边框；缺省 true。`false` 时由宿主提供标题栏与窗口控制（拖动 / 最小化 /
+    /// 最大化 / 关闭），插件内容占满剩余区域。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decorations: Option<bool>,
 }
 ```
 
@@ -1599,6 +1616,8 @@ pub mod view {
 // atelyx-plugin-protocol/src/method.rs
 pub mod window {
     /// 插件请求打开一个独立窗口承载自己的界面树（声明的 `id` 即该窗口面的 `surfaceId`）。
+    /// 缺省用系统窗口边框；`decorations: false` 时去掉系统边框，由宿主提供标题栏
+    /// （标题 / 拖动 / 最小化 / 最大化 / 关闭）。
     pub const OPEN: &str = "window.open";
     /// 插件关闭自己打开的一个窗口。
     pub const CLOSE: &str = "window.close";
@@ -1657,6 +1676,12 @@ pub mod vault {
     pub const IMAGE_INFO: &str = "vault.imageInfo";
     pub const LIST: &str = "vault.list";
     pub const EXISTS: &str = "vault.exists";
+    /// 删除一个仓库相对路径（文件或文件夹；文件夹连同内容递归删除）。仓库根不可删。
+    /// 被编辑面打开或被当前画布节点引用的文件拒删。
+    pub const REMOVE: &str = "vault.remove";
+    /// 把一个仓库相对路径改名 / 移动到另一路径（文件或文件夹；目标不存在，父目录自动创建）。
+    /// 引用同步：`.md` 内部链接与画布文件引用随改；源文件被编辑面打开或被当前画布节点引用时拒绝。
+    pub const RENAME: &str = "vault.rename";
 }
 ```
 
@@ -1714,6 +1739,8 @@ pub mod clipboard {
     pub const READ_TEXT: &str = "clipboard.readText";
     /// 读剪贴板中的图片（PNG，base64；无图片时字段缺省）。
     pub const READ_IMAGE: &str = "clipboard.readImage";
+    /// 写一张 PNG 图片到剪贴板（base64；单次上限 32 MiB，解码失败或超限即拒绝）。
+    pub const WRITE_IMAGE: &str = "clipboard.writeImage";
 }
 ```
 
@@ -1774,6 +1801,11 @@ pub mod ai {
     pub const CHAT_STOP: &str = "ai.chat.stop";
     /// 读当前激活仓库的会话清单或单会话消息历史。
     pub const CHAT_HISTORY: &str = "ai.chat.history";
+    /// 读当前仓库可用的模型清单（按供应商分组，只含 id / 名称，不含地址与密钥）
+    /// 与面板当前的模型选择。
+    pub const MODELS: &str = "ai.models";
+    /// 读当前仓库可用的 Agent 清单（内置 + 仓库自定义）与面板当前生效的 Agent。
+    pub const AGENTS: &str = "ai.agents";
     /// 重命名一个会话（写其元数据标题）。
     pub const CHAT_RENAME: &str = "ai.chat.rename";
     /// 删除一个会话（连同其消息文件）。
@@ -1902,6 +1934,16 @@ pub struct ExistsResult {
 pub struct ImageInfoResult {
     pub width: u32,
     pub height: u32,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`vault::RENAME`] 的 params：`from` / `to` 均为仓库相对路径，`to` 不可已存在。
+#[serde(rename_all = "camelCase")]
+pub struct VaultRenameParams {
+    pub from: String,
+    pub to: String,
 }
 ```
 
@@ -2106,6 +2148,15 @@ pub struct ClipboardImageResult {
     /// 剪贴板里没有图片时整个字段缺省（与「有图片但为空」不做区分——空图片不成立）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<ClipboardImage>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`clipboard::WRITE_IMAGE`] 的 params：PNG 字节的 base64。
+#[serde(rename_all = "camelCase")]
+pub struct ClipboardWriteImageParams {
+    pub base64: String,
 }
 ```
 
@@ -2329,6 +2380,74 @@ pub struct ChatHistoryResult {
     pub sessions: Vec<ChatSessionSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<ChatSessionWire>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+#[serde(rename_all = "camelCase")]
+pub struct AiModel {
+    /// 模型名（`ChatSendParams.model` 的取值）。
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nickname: Option<String>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 一个供应商及其模型（不含地址与密钥）。
+#[serde(rename_all = "camelCase")]
+pub struct AiModelProvider {
+    pub id: String,
+    pub name: String,
+    pub models: Vec<AiModel>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 面板当前的模型选择（供应商 id + 模型名）。
+#[serde(rename_all = "camelCase")]
+pub struct AiModelPick {
+    pub provider_id: String,
+    pub model: String,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`ai::MODELS`] 的 result：`current` = 面板当前选择，未显式选择时缺省。
+#[serde(rename_all = "camelCase")]
+pub struct AiModelsResult {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub providers: Vec<AiModelProvider>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<AiModelPick>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 一个可用 Agent（内置 + 仓库自定义）。
+#[serde(rename_all = "camelCase")]
+pub struct AiAgent {
+    pub id: String,
+    pub name: String,
+    /// 预置 Agent（不可删除，可改配置）。
+    pub builtin: bool,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`ai::AGENTS`] 的 result：`current` = 面板当前生效的 Agent id，无生效项时缺省。
+#[serde(rename_all = "camelCase")]
+pub struct AiAgentsResult {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agents: Vec<AiAgent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<String>,
 }
 ```
 

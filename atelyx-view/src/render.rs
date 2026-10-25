@@ -63,6 +63,8 @@ pub enum ViewMsg<M> {
     Step { plugin_id: String, surface_id: String, node_id: String, up: bool },
     /// 多行输入的编辑器动作（光标 / 选区 / 输入都由宿主编辑器状态承接）。
     TextEdit { plugin_id: String, surface_id: String, node_id: String, action: text_editor::Action },
+    /// 多行输入按下提交键（Enter）。
+    EditorSubmit { plugin_id: String, surface_id: String, node_id: String },
     /// 节点悬停进出（交互外观与 `hoverOnly` 图标钮据此切换）。
     Hover { plugin_id: String, surface_id: String, node_id: String, entered: bool },
     /// 键盘焦点变化请求：`focused` 为真即把该节点设为所在面的键盘目标，为假即释放（仅当它当前持有时）。
@@ -79,12 +81,14 @@ pub trait ViewMessage: Clone + 'static + atelyx_ui::UiHost {
 }
 
 /// 插件菜单 / 下拉的弹层条目：标签 + 选中标记 + 点击要回发的消息。
+/// `group` 只在菜单里生效：连续同组条目归到一个分组头下（`None` = 无分组）。
 #[derive(Debug, Clone)]
 pub struct PopupEntry<M> {
     pub label: String,
     pub current: bool,
     pub disabled: bool,
     pub danger: bool,
+    pub group: Option<String>,
     pub on_press: M,
 }
 
@@ -498,7 +502,7 @@ where
                 element
             }
         }
-        NodeBody::Scroll { direction, gap, height } => {
+        NodeBody::Scroll { direction, gap, height, follow_end } => {
             let spacing = gap.unwrap_or(DEFAULT_GAP);
             let axis = direction.unwrap_or(Axis::Vertical);
             let inner: Element<M> = match axis {
@@ -516,7 +520,7 @@ where
             .id(node_scroll_id(ctx, &node.id))
             .width(Length::Fill)
             .height(height.map_or(Length::Fill, Length::Fixed));
-            if declares(node, EventKind::Scroll) {
+            if declares(node, EventKind::Scroll) || follow_end.unwrap_or(false) {
                 scroll = scroll.on_scroll(scroll_report(ctx, &node.id, axis));
             }
             scroll.into()
@@ -530,7 +534,7 @@ where
             gap.unwrap_or(DEFAULT_GAP),
             *row_height,
         ),
-        NodeBody::List { gap } => {
+        NodeBody::List { gap, follow_end } => {
             let mut list = scroll::v(
                 keyed_column(children(host, ctx, node, None))
                     .width(Length::Fill)
@@ -540,7 +544,7 @@ where
             .id(node_scroll_id(ctx, &node.id))
             .width(Length::Fill)
             .height(Length::Fill);
-            if declares(node, EventKind::Scroll) {
+            if declares(node, EventKind::Scroll) || follow_end.unwrap_or(false) {
                 list = list.on_scroll(scroll_report(ctx, &node.id, Axis::Vertical));
             }
             list.into()
@@ -631,6 +635,7 @@ where
                     current: *selected == Some(index as u32),
                     disabled: false,
                     danger: false,
+                    group: None,
                     on_press: node_event(ctx, &node.id, ViewEvent::Change { value: EventValue::Number(index as f64) }),
                 })
                 .collect();
@@ -733,6 +738,7 @@ where
                     current: item.current.unwrap_or(false),
                     disabled: item.disabled.unwrap_or(false),
                     danger: item.danger.unwrap_or(false),
+                    group: item.group.clone(),
                     on_press: node_event(&ctx, &node.id, ViewEvent::Change { value: EventValue::Text(item.action.clone()) }),
                 })
                 .collect();
@@ -1179,7 +1185,7 @@ where
         ctx.surface_id.clone(),
         node.id.clone(),
     );
-    text_editor(state)
+    let mut editor = text_editor(state)
         .placeholder(placeholder)
         .size(pal::fs_ui())
         .font(atelyx_ui::regular())
@@ -1197,8 +1203,39 @@ where
             surface_id: surface_id.clone(),
             node_id: node_id.clone(),
             action,
-        }))
-        .into()
+        }));
+    if declares(node, EventKind::Submit) {
+        let (plugin_id, surface_id, node_id) = (
+            ctx.plugin_id.clone(),
+            ctx.surface_id.clone(),
+            node.id.clone(),
+        );
+        editor = editor.key_binding(move |press| {
+            multiline_key_binding(press, M::view(ViewMsg::EditorSubmit {
+                plugin_id: plugin_id.clone(),
+                surface_id: surface_id.clone(),
+                node_id: node_id.clone(),
+            }))
+        });
+    }
+    editor.into()
+}
+
+/// 声明 `submit` 的多行输入键位：聚焦时无修饰 Enter 发提交消息，其余（含 Shift+Enter
+/// 换行）走编辑器默认绑定。键盘事件会下发到树内所有编辑器，未聚焦时须交回默认绑定
+/// （它按焦点判据返回空）。
+fn multiline_key_binding<M>(
+    press: text_editor::KeyPress,
+    submit: M,
+) -> Option<text_editor::Binding<M>> {
+    use iced::keyboard::{key::Named, Key};
+    let focused = matches!(press.status, text_editor::Status::Focused { .. });
+    match &press.key {
+        Key::Named(Named::Enter) if focused && press.modifiers.is_empty() => {
+            Some(text_editor::Binding::Custom(submit))
+        }
+        _ => text_editor::Binding::from_key_press(press),
+    }
 }
 
 /// 界面图片：句柄已载入则呈现，否则给可读占位（载入任务由宿主发起）。
@@ -2194,5 +2231,62 @@ mod tests {
             found.iter().map(|node| node.id.as_str()).collect::<Vec<_>>(),
             ["first", "nested", "second"]
         );
+    }
+
+    fn key_press(key: keyboard::Key, modifiers: keyboard::Modifiers) -> text_editor::KeyPress {
+        text_editor::KeyPress {
+            key: key.clone(),
+            modified_key: key,
+            physical_key: keyboard::key::Physical::Unidentified(
+                keyboard::key::NativeCode::Unidentified,
+            ),
+            modifiers,
+            text: None,
+            status: text_editor::Status::Focused { is_hovered: false },
+        }
+    }
+
+    /// 多行提交键：无修饰 Enter 提交，带修饰（Shift/Ctrl）与其余键位保持编辑器默认语义。
+    #[test]
+    fn multiline_enter_submits_unless_shifted() {
+        let enter = || key_press(keyboard::Key::Named(keyboard::key::Named::Enter), keyboard::Modifiers::default());
+        assert_eq!(
+            multiline_key_binding(enter(), "submit"),
+            Some(text_editor::Binding::Custom("submit"))
+        );
+        assert_eq!(
+            multiline_key_binding(
+                key_press(
+                    keyboard::Key::Named(keyboard::key::Named::Enter),
+                    keyboard::Modifiers::SHIFT,
+                ),
+                "submit",
+            ),
+            Some(text_editor::Binding::Enter)
+        );
+        assert_eq!(
+            multiline_key_binding(
+                key_press(
+                    keyboard::Key::Named(keyboard::key::Named::Enter),
+                    keyboard::Modifiers::CTRL,
+                ),
+                "submit",
+            ),
+            Some(text_editor::Binding::Enter)
+        );
+        assert_eq!(
+            multiline_key_binding(
+                key_press(
+                    keyboard::Key::Named(keyboard::key::Named::Backspace),
+                    keyboard::Modifiers::default(),
+                ),
+                "submit",
+            ),
+            Some(text_editor::Binding::Backspace)
+        );
+        // 事件会广播给树内所有编辑器：未聚焦的提交输入不能截获 Enter
+        let mut unfocused = enter();
+        unfocused.status = text_editor::Status::Active;
+        assert_eq!(multiline_key_binding(unfocused, "submit"), None);
     }
 }

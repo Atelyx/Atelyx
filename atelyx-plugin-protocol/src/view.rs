@@ -204,6 +204,11 @@ pub enum NodeBody {
         /// 缺省占满父容器剩余高度。节点声明 `scroll` 事件即上报滚动位置。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         height: Option<f32>,
+        /// 贴底跟随：用户停在终点时，内容增高后自动跟到新的终点；用户往回滚即脱钩，
+        /// 再滚回终点自动恢复。`view.scrollTo(end)` 也会恢复跟随（其它位置则脱钩）。
+        /// 缺省 false。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        follow_end: Option<bool>,
     },
     /// 网格：`columns` 固定列数；`min_column_width` 按可用宽度换列（`columns` 同时给定时作列数上限）。
     /// 二者都缺省按单列渲染。`row_height` 缺省按列宽 1:1 定行高。
@@ -223,6 +228,9 @@ pub enum NodeBody {
     List {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         gap: Option<f32>,
+        /// 贴底跟随（语义同 [`NodeBody::Scroll`] 的 `followEnd`）；缺省 false。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        follow_end: Option<bool>,
     },
     Text {
         content: String,
@@ -272,7 +280,8 @@ pub enum NodeBody {
         value: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         placeholder: Option<String>,
-        /// 多行：宿主按多行编辑器渲染，Enter 换行（`submit` 事件只对单行生效）。
+        /// 多行：宿主按多行编辑器渲染。声明 `submit` 时 Enter 提交、Shift+Enter 换行；
+        /// 未声明时 Enter 换行。单行恒按 Enter 提交。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         multiline: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -416,7 +425,7 @@ pub enum NodeBody {
     /// 分隔线：主题弱边界色的 1px 水平线（分组容器内的轻分割）。
     Divider {},
     /// 拖动热区：自身不渲染任何内容，用户在其占位区域内按下即由宿主发起整窗拖动
-    /// （全接管时插件自绘标题栏的拖动把手）。事件不回发。
+    /// （全接管或无系统边框的插件窗口里自绘标题栏的拖动把手）。事件不回发。
     DragRegion {},
 }
 
@@ -999,11 +1008,21 @@ pub struct MenuItem {
     /// 当前项标记（宿主在条目前画勾）：用于「历史会话列表」这类单选菜单。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current: Option<bool>,
+    /// 分组名（单层）：相邻同名条目归入同一组，宿主在组首画一次组标题；无分组条目独立成行。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
 }
 
 impl MenuItem {
     pub fn new(label: impl Into<String>, action: impl Into<String>) -> Self {
-        Self { label: label.into(), action: action.into(), disabled: None, danger: None, current: None }
+        Self {
+            label: label.into(),
+            action: action.into(),
+            disabled: None,
+            danger: None,
+            current: None,
+            group: None,
+        }
     }
 
     pub fn disabled(mut self) -> Self {
@@ -1021,6 +1040,12 @@ impl MenuItem {
         self.current = Some(true);
         self
     }
+
+    /// 归入一个分组（相邻同名条目共用组标题）。
+    pub fn group(mut self, group: impl Into<String>) -> Self {
+        self.group = Some(group.into());
+        self
+    }
 }
 
 /// 输入控件的上报档位：决定宿主何时把用户输入回发给插件。
@@ -1033,7 +1058,8 @@ impl MenuItem {
 pub enum ReportMode {
     /// 逐键上报。
     Immediate,
-    /// 提交时上报：单行按 Enter、多行按 Ctrl+Enter，或控件失去焦点时回发 `change`。
+    /// 提交时上报：单行按 Enter；多行在停止输入后上报，声明 `submit` 时按 Enter 立即上报
+    /// （Enter 另发 `submit`，Shift+Enter 换行）。
     Commit,
     /// 停顿上报：停止编辑 `Debounced` 毫秒后回发 `change`（毫秒为 0 按 [`ReportMode::Immediate`] 处理）。
     Debounced(u32),
@@ -1768,9 +1794,11 @@ mod tests {
             direction: Some(Axis::Horizontal),
             gap: Some(8.0),
             height: Some(120.0),
+            follow_end: Some(true),
         };
         let json = serde_json::to_value(&scroll).unwrap();
         assert_eq!(json["height"], 120.0);
+        assert_eq!(json["followEnd"], true);
         assert_eq!(serde_json::from_value::<NodeBody>(json).unwrap(), scroll);
 
         let grid = NodeBody::Grid {

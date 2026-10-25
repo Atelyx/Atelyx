@@ -49,3 +49,7 @@ dirs = "6"
 # exe 文件图标（资源管理器 / 开始菜单 / 快捷方式显示；任务栏图标由窗口图标承担）
 [build-dependencies]
 winresource = "0.1"
+
+[dev-dependencies]
+# 临时仓库夹具（与 core 测试同源；仅测试构建启用）
+atelyx-core = { path = "../atelyx-core", features = ["test-support"] }

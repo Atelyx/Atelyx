@@ -33,7 +33,7 @@ use super::{capability, child_process, fs, http, log, shortcut};
 use super::{
     AuditRecord, Contribution, DialogKind, DialogRequest, HostRequest, LayoutSpecNode, PaddingSpec,
     PluginEvent, PluginRuntime, PluginStatus, SurfaceKind, ViewEvent, ViewNode,
-    MAX_VAULT_BINARY_BYTES,
+    MAX_CLIPBOARD_IMAGE_BYTES, MAX_VAULT_BINARY_BYTES,
 };
 
 /// 崩溃判定窗口：窗口内累计达到 [`CRASH_LIMIT`] 即熔断。
@@ -768,6 +768,14 @@ impl Instance {
                     request_id: 0,
                     params: parse(params).map_err(|e| e.to_string())?,
                 },
+                method::ai::MODELS => HostRequest::AiModels {
+                    plugin_id: self.id.clone(),
+                    request_id: 0,
+                },
+                method::ai::AGENTS => HostRequest::AiAgents {
+                    plugin_id: self.id.clone(),
+                    request_id: 0,
+                },
                 method::clipboard::WRITE_TEXT => {
                     let p: method::TextPayload = parse(params).map_err(|e| e.to_string())?;
                     HostRequest::ClipboardWrite {
@@ -784,6 +792,16 @@ impl Instance {
                     plugin_id: self.id.clone(),
                     request_id: 0,
                 },
+                method::clipboard::WRITE_IMAGE => {
+                    let p: method::ClipboardWriteImageParams =
+                        parse(params).map_err(|e| e.to_string())?;
+                    let bytes = decode_clipboard_image(&p.base64)?;
+                    HostRequest::ClipboardWriteImage {
+                        plugin_id: self.id.clone(),
+                        request_id: 0,
+                        bytes,
+                    }
+                }
                 method::vault::READ_TEXT => {
                     let p: method::PathParams = parse(params).map_err(|e| e.to_string())?;
                     HostRequest::VaultReadText {
@@ -845,6 +863,23 @@ impl Instance {
                         plugin_id: self.id.clone(),
                         request_id: 0,
                         path: p.path,
+                    }
+                }
+                method::vault::REMOVE => {
+                    let p: method::PathParams = parse(params).map_err(|e| e.to_string())?;
+                    HostRequest::VaultRemove {
+                        plugin_id: self.id.clone(),
+                        request_id: 0,
+                        path: p.path,
+                    }
+                }
+                method::vault::RENAME => {
+                    let p: method::VaultRenameParams = parse(params).map_err(|e| e.to_string())?;
+                    HostRequest::VaultRename {
+                        plugin_id: self.id.clone(),
+                        request_id: 0,
+                        from: p.from,
+                        to: p.to,
                     }
                 }
                 method::vault::IMAGE_INFO => {
@@ -1764,9 +1799,12 @@ fn is_shell_method(method_name: &str) -> bool {    matches!(
             | method::ai::CHAT_RENAME
             | method::ai::CHAT_DELETE
             | method::ai::CHAT_COMPACT
+            | method::ai::MODELS
+            | method::ai::AGENTS
             | method::clipboard::WRITE_TEXT
             | method::clipboard::READ_TEXT
             | method::clipboard::READ_IMAGE
+            | method::clipboard::WRITE_IMAGE
             | method::vault::READ_TEXT
             | method::vault::WRITE_TEXT
             | method::vault::READ_BINARY
@@ -1775,6 +1813,8 @@ fn is_shell_method(method_name: &str) -> bool {    matches!(
             | method::vault::IMAGE_INFO
             | method::vault::LIST
             | method::vault::EXISTS
+            | method::vault::REMOVE
+            | method::vault::RENAME
             | method::table::SNAPSHOT
             | method::table::UPDATE_CELL
             | method::table::ADD_ROW
@@ -1876,6 +1916,27 @@ fn decode_vault_binary(base64_text: &str, limit: usize) -> Result<Vec<u8>, Strin
             "内容超过单次载荷上限（{} MiB），大文件请用 vault.importFile 按路径导入",
             limit / (1024 * 1024)
         ));
+    }
+    Ok(bytes)
+}
+
+/// 解码剪贴板图片负载并判上限。超限即拒绝，不缩放也不截断。
+fn decode_clipboard_image(base64_text: &str) -> Result<Vec<u8>, String> {
+    let too_large = || {
+        format!(
+            "图片超过单次载荷上限（{} MiB）",
+            MAX_CLIPBOARD_IMAGE_BYTES / (1024 * 1024)
+        )
+    };
+    // base64 每 4 字符编码 3 字节：先按编码长度挡在解码分配之前
+    if base64_text.len() > MAX_CLIPBOARD_IMAGE_BYTES / 3 * 4 + 4 {
+        return Err(too_large());
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(base64_text)
+        .map_err(|e| format!("base64 解码失败：{e}"))?;
+    if bytes.len() > MAX_CLIPBOARD_IMAGE_BYTES {
+        return Err(too_large());
     }
     Ok(bytes)
 }
@@ -2023,6 +2084,19 @@ mod tests {
         let err = decode_vault_binary(&ok, 2).expect_err("超限应拒绝");
         assert!(err.contains("上限"), "{err}");
         assert!(decode_vault_binary("不是 base64", 3).is_err());
+    }
+
+    #[test]
+    fn clipboard_image_decode_rejects_invalid_and_oversized_payloads() {
+        use base64::Engine;
+        let ok = base64::engine::general_purpose::STANDARD.encode([0u8, 1, 2]);
+        assert_eq!(decode_clipboard_image(&ok).unwrap(), vec![0, 1, 2]);
+        let err = decode_clipboard_image("不是 base64").expect_err("非法 base64 应拒绝");
+        assert!(err.contains("base64"), "{err}");
+        // 编码长度超限在解码分配之前就被挡住
+        let oversized = "A".repeat(MAX_CLIPBOARD_IMAGE_BYTES / 3 * 4 + 5);
+        let err = decode_clipboard_image(&oversized).expect_err("超限应拒绝");
+        assert!(err.contains("上限"), "{err}");
     }
 
     #[test]
@@ -2297,6 +2371,50 @@ mod tests {
         };
         runtime.resolve_shell_call(request_id, Ok(json!({})));
 
+        instance.handle_line(&request_line(
+            method::clipboard::WRITE_IMAGE,
+            &json!({ "base64": "AAEC" }),
+        ));
+        let request = rt.block_on(runtime.recv_host_request()).unwrap();
+        let HostRequest::ClipboardWriteImage { request_id, bytes, .. } = request else {
+            panic!("应投递剪贴板写图请求");
+        };
+        assert_eq!(bytes, vec![0, 1, 2]);
+        runtime.resolve_shell_call(request_id, Ok(json!({})));
+
+        instance.handle_line(&request_line(method::ai::MODELS, &Value::Null));
+        let request = rt.block_on(runtime.recv_host_request()).unwrap();
+        let HostRequest::AiModels { request_id, .. } = request else {
+            panic!("应投递模型清单请求");
+        };
+        runtime.resolve_shell_call(request_id, Ok(json!({ "providers": [] })));
+
+        instance.handle_line(&request_line(method::ai::AGENTS, &Value::Null));
+        let request = rt.block_on(runtime.recv_host_request()).unwrap();
+        let HostRequest::AiAgents { request_id, .. } = request else {
+            panic!("应投递 Agent 清单请求");
+        };
+        runtime.resolve_shell_call(request_id, Ok(json!({})));
+
+        instance.handle_line(&request_line(method::vault::REMOVE, &json!({ "path": "旧.md" })));
+        let request = rt.block_on(runtime.recv_host_request()).unwrap();
+        let HostRequest::VaultRemove { request_id, path, .. } = request else {
+            panic!("应投递仓库删除请求");
+        };
+        assert_eq!(path, "旧.md");
+        runtime.resolve_shell_call(request_id, Ok(json!({})));
+
+        instance.handle_line(&request_line(
+            method::vault::RENAME,
+            &json!({ "from": "旧.md", "to": "新.md" }),
+        ));
+        let request = rt.block_on(runtime.recv_host_request()).unwrap();
+        let HostRequest::VaultRename { request_id, from, to, .. } = request else {
+            panic!("应投递仓库改名请求");
+        };
+        assert_eq!((from.as_str(), to.as_str()), ("旧.md", "新.md"));
+        runtime.resolve_shell_call(request_id, Ok(json!({})));
+
         instance.handle_line(&request_line(method::vault::LIST, &json!({ "path": "" })));
         let request = rt.block_on(runtime.recv_host_request()).unwrap();
         let HostRequest::VaultList { request_id, path, .. } = request else {
@@ -2416,7 +2534,7 @@ mod tests {
             &json!({ "items": [{ "id": "show", "label": "显示" }] }),
         ));
         let request = rt.block_on(runtime.recv_host_request()).unwrap();
-        let HostRequest::TraySetItems { request_id, params, .. } = request else {
+        let HostRequest::TraySetItems { request_id, .. } = request else {
             panic!("应投递托盘条目请求");
         };
         runtime.resolve_shell_call(request_id, Ok(json!({})));

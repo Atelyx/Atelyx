@@ -337,6 +337,16 @@ impl Context {
         .await
     }
 
+    /// 读当前仓库可用的模型清单（按供应商分组，只含 id / 名称）与面板当前的模型选择。
+    pub async fn ai_models(&self) -> Result<AiModelsResult, RpcError> {
+        self.call_null(method::ai::MODELS).await
+    }
+
+    /// 读当前仓库可用的 Agent 清单（内置 + 仓库自定义）与面板当前生效的 Agent。
+    pub async fn ai_agents(&self) -> Result<AiAgentsResult, RpcError> {
+        self.call_null(method::ai::AGENTS).await
+    }
+
     /// 重命名一个会话（写其元数据标题；标题空白或会话不存在报可读错误）。
     pub async fn chat_rename(&self, session_id: &str, title: &str) -> Result<(), RpcError> {
         let params = ChatRenameParams { session_id: session_id.into(), title: title.into() };
@@ -500,6 +510,19 @@ impl Context {
     /// 读图片的固有像素尺寸（png / jpeg / gif / bmp / webp）；只取文件头，不送回文件内容。
     pub async fn vault_image_info(&self, path: &str) -> Result<ImageInfoResult, RpcError> {
         self.call_typed(method::vault::IMAGE_INFO, &PathParams { path: path.into() }).await
+    }
+
+    /// 删除仓库内文件或文件夹（文件夹连同内容递归删除；仓库根不可删）。
+    /// 被编辑面打开或被当前画布节点引用的文件由宿主拒绝，错误可读。
+    pub async fn vault_remove(&self, path: &str) -> Result<(), RpcError> {
+        self.call_unit(method::vault::REMOVE, &PathParams { path: path.into() }).await
+    }
+
+    /// 改名 / 移动仓库内文件或文件夹：`to` 不可已存在，父目录自动创建。
+    /// `.md` 内部链接与画布文件引用随改名同步改写；源文件被编辑面打开或被当前画布节点引用时由宿主拒绝。
+    pub async fn vault_rename(&self, from: &str, to: &str) -> Result<(), RpcError> {
+        let params = VaultRenameParams { from: from.into(), to: to.into() };
+        self.call_unit(method::vault::RENAME, &params).await
     }
 
     // ---------- table（当前打开表格；写入与宿主编辑同一出口，由宿主合并落盘并广播协作补丁） ----------
@@ -692,6 +715,14 @@ impl Context {
     pub async fn clipboard_read_image(&self) -> Result<Option<ClipboardImage>, RpcError> {
         let result: ClipboardImageResult = self.call_null(method::clipboard::READ_IMAGE).await?;
         Ok(result.image)
+    }
+
+    /// 写一张 PNG 图片到剪贴板；`png` 为完整 PNG 字节。单次上限 32 MiB，
+    /// 解码失败或超限由宿主可读拒绝。
+    pub async fn clipboard_write_image(&self, png: &[u8]) -> Result<(), RpcError> {
+        use base64::Engine;
+        let base64 = base64::engine::general_purpose::STANDARD.encode(png);
+        self.call_unit(method::clipboard::WRITE_IMAGE, &ClipboardWriteImageParams { base64 }).await
     }
 
     /// 选择文件：等待用户交互，不设等待上限（取消对话框会立即返回 `None`）。

@@ -33,7 +33,7 @@ pub fn rename_note_synced(
     let new_file = normalize_rel(new_file)?;
     let (old_file, new_file) = (old_file.as_str(), new_file.as_str());
     let pending = collect_canvas_updates(root, &mut |canvas| {
-        update_refs_in_canvas(canvas, old_file, new_file)
+        remap_canvas_refs(canvas, old_file, new_file)
     })?;
     let pending_md = collect_md_link_updates(root, exclude, &mut |span: &str| {
         let Some(path) = vault::markdown_link_path(span) else {
@@ -82,7 +82,7 @@ pub fn rename_folder_synced(
     let (old_dir, new_dir) = (old_dir.as_str(), new_dir.as_str());
     vault::rename_folder(root, old_dir, new_dir)?;
     let pending = match collect_canvas_updates(root, &mut |canvas| {
-        remap_dir_refs_in_canvas(canvas, old_dir, new_dir)
+        remap_canvas_refs(canvas, old_dir, new_dir)
     }) {
         Ok(p) => p,
         Err(e) => {
@@ -183,38 +183,30 @@ fn ref_field_of(node_type: &str) -> Option<&'static str> {
     }
 }
 
-/// 更新单个 .atlx 内节点引用（内存中）：file/systemPromptFile 命中值替换，返回是否有变更。
-/// 笔记/附件/表格三类引用统一走此函数——旧路径按扩展名天然互斥，合并后行为等价。
-fn update_refs_in_canvas(canvas: &mut CanvasFile, old_file: &str, new_file: &str) -> bool {
+/// 把一处改名 / 移动反映到画布节点引用（内存中）：精确路径与目录前缀两种匹配都试，
+/// 每个引用只改写一次（`new_rel` 落在 `old_rel` 内部时不会被前缀匹配二次改写）。
+/// 返回是否有变更；改名事务（笔记 / 文件夹）与协作空间的链接改写共用。
+pub fn remap_canvas_refs(canvas: &mut CanvasFile, old_rel: &str, new_rel: &str) -> bool {
+    let (Ok(old_rel), Ok(new_rel)) = (normalize_rel(old_rel), normalize_rel(new_rel)) else {
+        return false;
+    };
+    let old_prefix = format!("{old_rel}/");
     let mut changed = false;
     for node in &mut canvas.nodes {
         let Some(field) = ref_field_of(&node.node_type) else { continue };
         let Some(obj) = node.data.as_object_mut() else { continue };
-        if obj.get(field).and_then(|v| v.as_str()) == Some(old_file) {
-            obj.insert(field.to_string(), serde_json::Value::String(new_file.to_string()));
-            changed = true;
-        }
-    }
-    changed
-}
-
-/// 更新单个 .atlx 内的目录前缀引用（内存中）：位于 `old/` 下的引用替换为 `new/` + 剩余部分。
-/// 前缀含尾斜杠，防误匹配 `a` 命中 `ab/x.md`。
-fn remap_dir_refs_in_canvas(canvas: &mut CanvasFile, old_dir: &str, new_dir: &str) -> bool {
-    let old_prefix = format!("{old_dir}/");
-    let mut changed = false;
-    for node in &mut canvas.nodes {
-        let Some(obj) = node.data.as_object_mut() else { continue };
-        let Some(field) = ref_field_of(&node.node_type) else { continue };
-        if let Some(path) = obj.get(field).and_then(|v| v.as_str()) {
-            if let Some(rest) = path.strip_prefix(&old_prefix) {
-                obj.insert(
-                    field.to_string(),
-                    serde_json::Value::String(format!("{new_dir}/{rest}")),
-                );
-                changed = true;
-            }
-        }
+        let Some(path) = obj.get(field).and_then(|v| v.as_str()).map(str::to_string) else {
+            continue;
+        };
+        let mapped = if path == old_rel {
+            new_rel.clone()
+        } else if let Some(rest) = path.strip_prefix(&old_prefix) {
+            format!("{new_rel}/{rest}")
+        } else {
+            continue;
+        };
+        obj.insert(field.to_string(), serde_json::Value::String(mapped));
+        changed = true;
     }
     changed
 }
@@ -374,6 +366,40 @@ mod tests {
         assert_eq!(c, "看 [它](new/a.md)");
         assert!(root.join("new/sub/b.md").exists());
         assert!(!root.join("old").exists());
+    }
+
+    #[test]
+    fn remap_canvas_refs_matches_exact_and_dir_prefix() {
+        let mut canvas: CanvasFile = serde_json::from_str(
+            r#"{"schema":"atelyx-canvas/v1","id":"c1","title":"c","nodes":[
+                {"id":"n1","type":"text","x":0,"y":0,"data":{"file":"old/a.md"}},
+                {"id":"n2","type":"media","x":0,"y":0,"data":{"file":"old"}},
+                {"id":"n3","type":"conversation","x":0,"y":0,"data":{"systemPromptFile":"older/a.md"}}
+            ],"edges":[]}"#,
+        )
+        .unwrap();
+        assert!(remap_canvas_refs(&mut canvas, "old", "new"));
+        assert_eq!(canvas.nodes[0].data["file"], "new/a.md");
+        // 目录自身被直接引用（如媒体目录）也命中
+        assert_eq!(canvas.nodes[1].data["file"], "new");
+        // 前缀含尾斜杠：`older/` 不被 `old` 误改
+        assert_eq!(canvas.nodes[2].data["systemPromptFile"], "older/a.md");
+        assert!(!remap_canvas_refs(&mut canvas, "old", "new"), "二次改写应无变更");
+    }
+
+    #[test]
+    fn remap_canvas_refs_does_not_double_apply_into_itself() {
+        let mut canvas: CanvasFile = serde_json::from_str(
+            r#"{"schema":"atelyx-canvas/v1","id":"c1","title":"c","nodes":[
+                {"id":"n1","type":"media","x":0,"y":0,"data":{"file":"old"}},
+                {"id":"n2","type":"text","x":0,"y":0,"data":{"file":"old/a.md"}}
+            ],"edges":[]}"#,
+        )
+        .unwrap();
+        assert!(remap_canvas_refs(&mut canvas, "old/", "old/sub"));
+        // 目录自身引用命中精确匹配后，不再被前缀匹配追加一层
+        assert_eq!(canvas.nodes[0].data["file"], "old/sub");
+        assert_eq!(canvas.nodes[1].data["file"], "old/sub/a.md");
     }
 
     #[test]

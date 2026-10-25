@@ -633,6 +633,8 @@ enum Message {
     PluginDraftFlush { plugin_id: String, surface_id: String, node_id: String, seq: u64 },
     /// 多行编辑器静默到期：把整段内容上报给插件（`seq` 过期即丢弃）。
     PluginEditorFlush { plugin_id: String, surface_id: String, node_id: String, seq: u64 },
+    /// 多行编辑器提交键（Enter）：按上报档位回发 change，并按声明回发 submit。
+    PluginEditorSubmit { plugin_id: String, surface_id: String, node_id: String },
     /// 插件正文链接点击（回发 linkClick 后按宿主默认行为打开）。
     PluginLink {
         plugin_id: String,
@@ -960,6 +962,10 @@ enum PendingAfterFlush {
     /// 文件树拖拽移动（挂起输入先落盘，防代写被未落盘内容回写覆盖）。
     MoveEntry { from: String, is_dir: bool, to_dir: String },
     RenameFile(RenameState),
+    /// 插件发起的仓库删除（挂起输入先落盘，与文件树删除同一口径）。
+    PluginVaultRemove { request_id: u64, path: String },
+    /// 插件发起的仓库改名/移动（引用同步代写链接文件，挂起输入先落盘防代写被回写覆盖）。
+    PluginVaultRename { request_id: u64, from: String, to: String },
     /// 从空间列表进入指定协作空间（会话恢复可能弹登录层）。
     SelectSpace { server_url: String, space_id: String, name: String },
     /// 安装就绪的更新包（挂起输入先落盘，安装器替换文件不丢未保存内容）。
@@ -1257,6 +1263,8 @@ pub struct App {
     pub plugin_draft_seq: HashMap<plugin_actions::InputKey, u64>,
     /// 多行输入的本机编辑器状态（内容与光标归宿主所有）。
     pub plugin_editors: HashMap<plugin_actions::InputKey, plugin_actions::EditorState>,
+    /// 贴底跟随已脱钩的滚动节点（用户往回滚后暂停跟随；滚回终点恢复）。
+    pub plugin_follow_released: HashSet<plugin_actions::InputKey>,
     /// 画布节点的最新绘图指令清单投影（键 = 插件 id + 面 id + 节点 id；随树投影刷新）。
     pub plugin_canvases:
         HashMap<plugin_actions::InputKey, std::sync::Arc<atelyx_core::plugin_runtime::CanvasList>>,
@@ -1662,6 +1670,7 @@ impl App {
                 plugin_drafts: HashMap::new(),
                 plugin_draft_seq: HashMap::new(),
                 plugin_editors: HashMap::new(),
+                plugin_follow_released: HashSet::new(),
                 plugin_canvases: HashMap::new(),
                 plugin_markdown: HashMap::new(),
                 plugin_hovered: HashSet::new(),
@@ -3580,6 +3589,9 @@ impl App {
             Message::PluginEditorFlush { plugin_id, surface_id, node_id, seq } => {
                 plugin_actions::on_editor_flush(self, plugin_id, surface_id, node_id, seq)
             }
+            Message::PluginEditorSubmit { plugin_id, surface_id, node_id } => {
+                plugin_actions::on_editor_submit(self, plugin_id, surface_id, node_id)
+            }
             Message::PluginLink { plugin_id, surface_id, node_id, href, form } => {
                 plugin_actions::on_link_click(self, plugin_id, surface_id, node_id, href, form)
             }
@@ -3647,8 +3659,12 @@ impl App {
                 Task::none()
             }
             Message::PluginWindowDrag(id) => {
-                // 拖动热区只在工作区窗口的接管态生效（普通面板里的 dragRegion 不拖宿主窗口）
-                if self.plugin_takeovers.contains_key(&id) {
+                // 拖动热区只在接管态或无系统边框的插件窗口生效（普通面板里的 dragRegion 不拖宿主窗口）
+                let undecorated_plugin = self
+                    .plugin_windows
+                    .get(&id)
+                    .is_some_and(|entry| !entry.decorations);
+                if self.plugin_takeovers.contains_key(&id) || undecorated_plugin {
                     window::drag(id)
                 } else {
                     Task::none()
@@ -4046,20 +4062,7 @@ impl App {
                 // 目录改名/移动：children 缓存按前缀跟随（展开集已在 apply_follow 换路，
                 // 缓存不跟随会让移动后的已展开目录显示「展开但空」）
                 if let FollowUp::Renamed { from, to, .. } = &follow {
-                    let prefix = format!("{from}/");
-                    self.children = self
-                        .children
-                        .drain()
-                        .map(|(k, v)| {
-                            if k == *from {
-                                (to.clone(), v)
-                            } else if let Some(rest) = k.strip_prefix(&prefix) {
-                                (format!("{to}/{rest}"), v)
-                            } else {
-                                (k, v)
-                            }
-                        })
-                        .collect();
+                    self.follow_children_cache(from, to);
                 }
                 // 空间模式 children 切片自整树缓存：结构变更后必须先拉新树，
                 // 否则切片复用旧树（新建文件不显示）；Renamed 的源/目标目录已含在整树内
@@ -4650,6 +4653,15 @@ impl App {
         if self.table.as_ref().is_some_and(|t| t.view.editing.is_some()) {
             table_actions::commit_edit(self);
         }
+        // 在途的插件结构变更将被更晚的 pending 取代：先回填可读错误，插件调用不悬挂
+        if let Some(
+            PendingAfterFlush::PluginVaultRemove { request_id, .. }
+            | PendingAfterFlush::PluginVaultRename { request_id, .. },
+        ) = &self.flush_pending
+        {
+            self.plugins
+                .resolve_shell_call(*request_id, Err("被更晚的宿主操作取代，请重试".into()));
+        }
         if self.any_dirty() {
             self.flush_pending = Some(pending);
             return self.flush_dirty_now();
@@ -4710,6 +4722,13 @@ impl App {
             }
             PendingAfterFlush::RenameFile(r) => self.commit_file_rename(r),
             PendingAfterFlush::MoveEntry { from, is_dir, to_dir } => self.move_entry(&from, is_dir, &to_dir),
+            PendingAfterFlush::PluginVaultRemove { request_id, path } => {
+                // 脏拦截已过：直接执行（不得再经 gate，否则空脏判定重复放行成环）
+                settings_view::plugins::execute_vault_remove(self, request_id, path)
+            }
+            PendingAfterFlush::PluginVaultRename { request_id, from, to } => {
+                settings_view::plugins::execute_vault_rename(self, request_id, from, to)
+            }
             PendingAfterFlush::SelectSpace { server_url, space_id, name } => {
                 // 脏拦截已过：直接进入（不得再经 gate，否则空脏判定重复放行成环）
                 space_actions::handle(
@@ -5834,6 +5853,24 @@ impl App {
                 }
             }
         }
+    }
+
+    /// 目录改名/移动后的文件树子目录缓存按前缀换路（精确命中与 `from/` 前缀两种）。
+    fn follow_children_cache(&mut self, from: &str, to: &str) {
+        let prefix = format!("{from}/");
+        self.children = self
+            .children
+            .drain()
+            .map(|(k, v)| {
+                if k == from {
+                    (to.to_string(), v)
+                } else if let Some(rest) = k.strip_prefix(&prefix) {
+                    (format!("{to}/{rest}"), v)
+                } else {
+                    (k, v)
+                }
+            })
+            .collect();
     }
 
     /// 仓库文件总数（排除隐藏/排除夹的树扫描；打开仓库后一次）。

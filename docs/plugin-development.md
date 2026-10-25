@@ -239,11 +239,12 @@ token 随主题与界面字号设置联动，自定义色由插件自负对比�
 - `icon` 是纯装饰图标（空态、状态行、标题前的标记），不接受点击；需要可点的图标用 `iconButton`。`button` 可给 `icon` 做「图标 + 文字」的主按钮；
 - `progress` 的 `girth` 是轨道粗细（px，缺省 30 的粗条；细进度条写 `3` / `4`），`tone` 是完成段颜色（缺省主题强调色）；
 - `markdown` 的 `content` 用笔记同源解析器渲染，`size` 是整体字号倍率，`weight` / `color` 覆盖基础字重与文字色（标题与加粗片段恒为加粗，链接与代码块语义色不受影响）；正文里的链接可点击，宿主按形态默认打开（外链 / wiki / 仓库路径），节点声明 `linkClick` 时同时回发链接点击事件；
-- `menu` 的 `label` 与 `icon` 可并存（并存为紧凑的「图标 + 文字」触发钮），只给 `label` 才是全宽下拉钮；条目可标 `current`（宿主在条目前画勾）；
+- `menu` 的 `label` 与 `icon` 可并存（并存为紧凑的「图标 + 文字」触发钮），只给 `label` 才是全宽下拉钮；条目可标 `current`（宿主在条目前画勾）；条目可给 `group`：相邻同名条目归入一组，宿主在组首画一次组标题（分组是单层的，按顺序聚合，不必给全量同组条目排序）；
 - `overlay` 是面内浮层：唯一子节点即浮层内容，宿主把它铺满整个插件面——一层遮罩 + 居中内容。**节点在树里就是打开**，从树里移除即关闭；挂在哪个容器下效果都一样（不参与父容器排版），多个浮层按树序叠放、后出现的盖在上面。遮罩拦下所有指针事件（下层既不响应点击也不滚动）；声明 `click` 时点击遮罩（内容之外）回发点击事件，用来收起浮层。`scrim` 换底色（缺省主题遮罩，`"transparent"` 只拦截不画底）。浮层不改写键盘与焦点，也不能作根节点；弹层类界面（大图预览 / 确认框 / 表单）用它，不要用 `stack` 模拟；
 - 可滚动容器（`list` / `scroll`）用 `ctx.scroll_to(surface, node, ScrollEdge::End)` 滚到主轴一端，或用 `ctx.scroll_to_offset(surface, node, 0.5)` 按比例定位（0 = 起点、1 = 终点），无需插件自己维护滚动状态；`scroll` 的 `direction` 决定子项排布与滚动主轴（`horizontal` = 子项排成行并横向滚动），`height` 给定即收住自身高度（把横向图条嵌进纵向内容流），缺省占满父容器剩余高度；
 - 输入控件（`textInput` / `numberInput` / `dropdown` / `checkbox`）给 `readOnly: true` 即保留控件外观展示只读值，不接受编辑、不产生事件；`numberInput` 声明 `step`（正数，缺省 1）且带 `change` 事件时，输入框右侧出现上下步进按钮，点击按步长增减并受 `min` / `max` 约束；`dropdown` 的候选弹层随最长选项自适应宽度，选项多时在弹层内滚动；
-- 滚动位置：给 `list` / `scroll` 节点声明 `scroll` 事件，宿主就回发 `{ offset, maxOffset }`（主轴当前偏移与可滚动余量，`offset >= maxOffset` 即停在末端）。内容不足一屏没有可滚动余量，不会发事件。「用户停在底部才跟随最新」「滚离底部时露出回底入口」都按这一对值判断，不用插件自己记账。
+- 滚动位置：给 `list` / `scroll` 节点声明 `scroll` 事件，宿主就回发 `{ offset, maxOffset }`（主轴当前偏移与可滚动余量，`offset >= maxOffset` 即停在末端）。内容不足一屏没有可滚动余量，不会发事件。要做回底入口等交互时按这一对值判断，不用插件自己记账；
+- 贴底跟随：容器声明 `followEnd: true` 即由宿主保持贴底——用户停在终点时内容增高自动跟到新终点，往回滚即脱钩、滚回终点自动恢复（`scroll_to` 到终点同样恢复、到其它位置脱钩）。只声明 `followEnd` 也会被宿主观察，不必再声明 `scroll` 事件；插件自己要判断位置时再加 `scroll`。
 
 ### 5.2 事件与取值
 
@@ -252,7 +253,7 @@ token 随主题与界面字号设置联动，自定义色由插件自负对比�
 - `click` 对任何节点生效（含容器）；点击落在子控件上时由子控件优先处理，父节点收不到该次点击；
 - `secondaryClick` 是右键，与 `click` 相互独立（可只声明右键）：在节点矩形内按下右键即回发，通常用来弹菜单——改状态让树里出现一个 `overlay` 菜单即可；
 - `focus` / `blur` / `key` 走键盘焦点通道（见 [5.5](#55-键盘焦点与按键)）；
-- 文本类 → 字符串；`submit` 只在单行输入回车时触发；
+- 文本类 → 字符串；`submit`：单行输入回车即触发，多行输入声明 `submit` 时 Enter 触发（Shift+Enter 换行，未声明则 Enter 换行）；
 - 数字输入 → 数值（不可解析为数值不发事件；清空 → `null`，与 0 区分）；
 - 勾选 → 布尔；下拉 → 选中项**下标**；菜单条目 → 条目的 `action` 字符串；
 - 滚动容器（`list` / `scroll`）→ `{ offset, maxOffset }`（主轴当前偏移与可滚动余量）；
@@ -273,7 +274,7 @@ token 随主题与界面字号设置联动，自定义色由插件自负对比�
 | `report` | 何时回发 `change` |
 | --- | --- |
 | 缺省 / `"immediate"` | 每次编辑 |
-| `"commit"` | 单行按 Enter；多行输入停顿约 600ms（编辑器没有提交信号） |
+| `"commit"` | 单行按 Enter；多行声明 `submit` 时按 Enter（迟到的静默拍作废），未声明时停顿约 600ms |
 | `{"debounced": 300}` | 停止编辑 300ms 后 |
 
 步进按钮的点击是离散动作，不受 `report` 约束：按下即回发 `change`。
@@ -383,11 +384,11 @@ async fn on_canvas_frame(&self, ctx: &Context, frame: CanvasFrameParams) {
 | --- | --- |
 | `state` | 按插件隔离的自持 JSON，落 `<插件目录>/data/state.json`；损坏时宿主先备份原文再降级 |
 | `fs` | `private_dir()` 给私有数据目录；其余接受**任意绝对路径**，父目录自动创建 |
-| `vault` | 路径相对当前仓库根，不能越出仓库；隐藏段可访问（插件自管附件可放 `.atelyx/temp/`），本地仓库与协作空间的 `vault_list` / `vault_exists` 同口径保留隐藏项（原子写残留 `.tmp` 除外）；**正被编辑器打开的文件拒写**。文本与二进制两条通道，二进制单次上限 32 MiB；更大的文件先落到插件私有目录再用 `vault_import_file` 让宿主按路径收进仓库（字节不进 RPC，源文件须在私有目录内，复制语义，见 §8.9）。`vault_image_info` 只解文件头给出图片固有像素尺寸（png / jpeg / gif / bmp / webp），不送回文件内容 |
+| `vault` | 路径相对当前仓库根，不能越出仓库；隐藏段可访问（插件自管附件可放 `.atelyx/temp/`），本地仓库与协作空间的 `vault_list` / `vault_exists` 同口径保留隐藏项（原子写残留 `.tmp` 除外）；**正被编辑器打开的文件拒写**。文本与二进制两条通道，二进制单次上限 32 MiB；更大的文件先落到插件私有目录再用 `vault_import_file` 让宿主按路径收进仓库（字节不进 RPC，源文件须在私有目录内，复制语义，见 §8.9）。`vault_image_info` 只解文件头给出图片固有像素尺寸（png / jpeg / gif / bmp / webp），不送回文件内容。结构变更用 `vault_rename(from, to)` / `vault_remove(path)`：文件或文件夹（递归），`to` 不可已存在、文件夹不可移入自身、仓库根不可删；改名会同步 `.md` 内部链接与画布节点引用。**路径正被笔记 / 表格 / 画布 / 插件文档打开，或被当前画布引用时拒收**——这些持有者仍按旧路径工作，放行后写回会产生幽灵文件，先关闭对应面再操作 |
 | `table` | 读写当前打开的表格。真源在宿主，写入与用户编辑同一出口（合并落盘 + 协作补丁）；**禁止**用 `fs` 旁路读写 `.atb`。快照含稳定表格 id、列宽、行内单元格样式、用户当前选区与其他协作者选区（显示名 + 身份色）；向图片字段写图片用 `table_set_cell_image`（图片先经 `vault_write_binary` 落仓库，再传仓库相对路径） |
 | `notification` | 应用内通知条 |
 | `shortcuts` | 系统级全局快捷键（如 `Shift+Alt+E`）；被占用时注册返回可读错误，停用自动注销；同一组键重复注册幂等，触发上报的是最后一次注册的写法。`query_shortcut` 可事前问某键位是否被占用（`owner` 为占用方插件 id；被系统 / 其他应用占用时为缺省） |
-| `clipboard` | 文本与图片（图片为 PNG + 尺寸，由宿主读系统剪贴板） |
+| `clipboard` | 文本读写、图片读取（PNG + 尺寸，由宿主读系统剪贴板）与图片写入（`clipboard_write_image(&png)`，PNG 载荷单次 32 MiB，解码后的像素量再挡一次；失败返回可读错误） |
 | `dialog` | 系统对话框，等用户交互不设上限；取消返回 `None` |
 | `http` | 便利层：目标地址、方法、大小、超时全由插件自负，宿主不设限。响应体以 base64 返回；大文件请插件进程自己直连 |
 | `process` | 托管子进程：输出与退出经 `host:process.event` 转发；停用 / 崩溃 / 卸载时连同子孙进程一起结束 |
@@ -417,6 +418,7 @@ let params = WindowOpenParams {
     title: "命令面板".into(),
     width: Some(560.0), height: Some(360.0),
     always_on_top: Some(true), skip_taskbar: Some(true), hide_on_blur: Some(true),
+    decorations: None,          // Some(false) = 去掉系统边框，由宿主补标题栏（标题 / 拖动 / 最小化 / 最大化 / 关闭）
 };
 ctx.window_open(params).await?;   // 内容用 mount("palette", build) 登记后 notify("palette") 提交
 // 运行时改尺寸 / 置顶（只给一维时另一维取现值；「不进任务栏」只能在开窗时给）
@@ -426,7 +428,7 @@ ctx.window_close("palette").await?;
 ctx.window_show("palette").await?;
 ```
 
-`title` 就是 OS 标题栏显示的文字。仍开着的同一 id 会被拒，但**插件请求关闭后可以立刻用同 id 重开**——`window_close` 的回执表示「关闭已受理」，不必等系统销毁完成。用户关窗时宿主先发 `host:window.closed`（`{ id }`）、再发 `host:surface.detached`（`kind: "window"`）；插件自己请求的关闭只发后者。`hideOnBlur` 是「隐藏窗口」而非关闭：宿主隐藏时发 `host:window.hidden`，插件可用 `window_show` 重新显示。
+`title` 就是窗口标题：有系统边框时作为 OS 标题栏文字，`decorations: Some(false)` 时由宿主画在自己的标题栏上（附带拖动、双击切换最大化、最小化 / 最大化 / 关闭），插件内容占满标题栏以下的区域——此时不必再用 `dragRegion` 自己造标题栏。仍开着的同一 id 会被拒，但**插件请求关闭后可以立刻用同 id 重开**——`window_close` 的回执表示「关闭已受理」，不必等系统销毁完成。用户关窗时宿主先发 `host:window.closed`（`{ id }`）、再发 `host:surface.detached`（`kind: "window"`）；插件自己请求的关闭只发后者。`hideOnBlur` 是「隐藏窗口」而非关闭：宿主隐藏时发 `host:window.hidden`，插件可用 `window_show` 重新显示。
 
 ### 8.3 领域文档类型
 
@@ -456,6 +458,10 @@ let sent = ctx.chat_send_with(ChatSendParams {
     images: vec!["attachments/error.png".into()],
     ..ChatSendParams::default()
 }).await?;
+
+// 枚举可用项（自建选择器用）：模型按供应商分组、Agent 含内置与仓库自定义，各带面板当前选择
+let models = ctx.ai_models().await?;   // providers: [{ id, name, models: [{ id, nickname }] }], current
+let agents = ctx.ai_agents().await?;   // agents: [{ id, name, builtin }], current
 
 // 注册一个 Agent 可调用的工具
 ctx.register_tool("echo.search", "在笔记里搜索", json!({

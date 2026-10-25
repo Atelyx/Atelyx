@@ -125,6 +125,9 @@ impl ViewMessage for Message {
             ViewMsg::TextEdit { plugin_id, surface_id, node_id, action } => {
                 Message::PluginTextEdit { plugin_id, surface_id, node_id, action }
             }
+            ViewMsg::EditorSubmit { plugin_id, surface_id, node_id } => {
+                Message::PluginEditorSubmit { plugin_id, surface_id, node_id }
+            }
             ViewMsg::Hover { plugin_id, surface_id, node_id, entered } => {
                 Message::PluginHover { plugin_id, surface_id, node_id, entered }
             }

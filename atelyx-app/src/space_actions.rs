@@ -2606,46 +2606,69 @@ pub fn space_commit_rename(app: &mut App, r: RenameState) -> Task<Message> {
             // 树现拉（不复用面板缓存）：改名/移动后引用改写要基于最新全库清单，空间树
             // 未就绪时也不静默零执行
             let tree = client.tree(&space_id).await?;
-            rewrite_links_after_rename(&client, &space_id, &tree, &old_rel, &new_rel).await;
-            Ok::<_, SpaceError>(new_rel)
+            let rewritten =
+                rewrite_links_after_rename(&client, &space_id, &tree, &old_rel, &new_rel).await;
+            Ok::<_, SpaceError>((new_rel, rewritten))
         },
         move |result| match result {
-            Ok(full) => Message::OpDone(
+            Ok((full, rewritten)) => Message::OpDone(
                 gen,
                 parent_of(&old_for_cb),
                 Ok(full.clone()),
-                crate::FollowUp::Renamed { from: old_for_cb, to: full, rewritten: Vec::new() },
+                crate::FollowUp::Renamed { from: old_for_cb, to: full, rewritten },
             ),
             Err(e) => Message::OpDone(gen, parent_of(&old_for_cb), Err(err_text(e)), crate::FollowUp::None),
         },
     )
 }
 
-/// 全库 .md 引用改写：逐文件读 → 重写 → 有变化才写回。尽力而为：单文件失败跳过。
-async fn rewrite_links_after_rename(
+/// 全库引用改写：`.md` 链接与 `.atlx` 节点引用逐文件读 → 重写 → 有变化才写回。
+/// 尽力而为：单文件失败跳过。返回已成功写回的 `.md` 路径（调用方据此重载打开中的笔记）。
+pub(crate) async fn rewrite_links_after_rename(
     client: &SpaceClient,
     space_id: &str,
     tree: &[space_client::TreeNode],
     old_rel: &str,
     new_rel: &str,
-) {
-    let mut md_paths = Vec::new();
-    collect_md_paths(tree, &mut md_paths);
-    for path in md_paths {
+) -> Vec<String> {
+    let mut paths = Vec::new();
+    collect_paths_with_ext(tree, ".md", &mut paths);
+    let mut written = Vec::new();
+    for path in paths {
         if path == old_rel || path == new_rel {
             continue;
         }
         let Ok(text) = client.get_file_text(space_id, &path).await else { continue };
         let Some(rewritten) = rewrite_note_links(&text, old_rel, new_rel) else { continue };
-        let _ = client.put_file_text(space_id, &path, &rewritten).await;
+        if client.put_file_text(space_id, &path, &rewritten).await.is_ok() {
+            written.push(path);
+        }
     }
+    let mut canvases = Vec::new();
+    collect_paths_with_ext(tree, ".atlx", &mut canvases);
+    for path in canvases {
+        if path == old_rel || path == new_rel {
+            continue;
+        }
+        let Ok(text) = client.get_file_text(space_id, &path).await else { continue };
+        let Ok(mut canvas) = serde_json::from_str::<atelyx_core::vault::CanvasFile>(&text) else {
+            continue;
+        };
+        if !atelyx_core::vault_refs::remap_canvas_refs(&mut canvas, old_rel, new_rel) {
+            continue;
+        }
+        canvas.updated_at = atelyx_core::vault::now_secs();
+        let Ok(json) = serde_json::to_string_pretty(&canvas) else { continue };
+        let _ = client.put_file_text(space_id, &path, &json).await;
+    }
+    written
 }
 
-fn collect_md_paths(tree: &[space_client::TreeNode], out: &mut Vec<String>) {
+fn collect_paths_with_ext(tree: &[space_client::TreeNode], ext: &str, out: &mut Vec<String>) {
     for n in tree {
         if n.is_dir {
-            collect_md_paths(&n.children, out);
-        } else if n.path.ends_with(".md") {
+            collect_paths_with_ext(&n.children, ext, out);
+        } else if n.path.ends_with(ext) {
             out.push(n.path.clone());
         }
     }

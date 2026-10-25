@@ -11,7 +11,8 @@ use iced::{border, widget::container::Style, Element, Length, Padding, Task};
 
 use atelyx_core::plugin_runtime::market::{self, MarketSnapshot};
 use atelyx_core::plugin_runtime::{
-    AuditRecord, ClipboardImage, CollabPeer, CollabPeersResult, CollabSendParams, CollabSendQos,
+    AiAgent, AiAgentsResult, AiModel, AiModelPick, AiModelProvider, AiModelsResult, AuditRecord,
+    ClipboardImage, CollabPeer, CollabPeersResult, CollabSendParams, CollabSendQos,
     CollabSendResult, DialogKind, DialogRequest, FileChangeKind, HostRequest, ImageInfoResult,
     InstallOutcome, MeasureTextParams, NotificationLevel, Permission, PluginEvent, PluginRuntime,
     PluginStatus, PluginSummary, SetTrayItemsParams, MAX_VAULT_BINARY_BYTES,
@@ -74,6 +75,13 @@ pub struct MarketOutcome {
 pub enum MarketResult {
     UpToDate(String),
     Installed(MarketOutcome),
+}
+
+/// 插件发起的仓库结构变更：成功后广播 `vault:file.changed` 并刷新宿主文件树。
+#[derive(Clone, Debug)]
+pub enum VaultChange {
+    Removed { rel: String },
+    Renamed { from: String, to: String },
 }
 
 /// 插件页状态（列表缓存 + 详情 + 卸载二段确认 + 安装在途 + 市场快照与筛选）。
@@ -165,6 +173,9 @@ pub enum PluginsMsg {
     /// 剪贴板图片（arboard 在阻塞线程池读，编成 PNG 后 base64 回填）。
     ClipboardReadImage { request_id: u64 },
     ClipboardImageDone { request_id: u64, result: Result<Option<ClipboardImage>, String> },
+    /// 写剪贴板图片（运行时已解码并校验单次上限；壳再解成 RGBA 交给剪贴板线程）。
+    ClipboardWriteImage { request_id: u64, bytes: Vec<u8> },
+    ClipboardImageWritten { request_id: u64, result: Result<(), String> },
     /// 仓库读写（本地仓库直接落盘；协作空间转发服务端）。`VaultCallDone` 统一回填。
     VaultRead { request_id: u64, path: String },
     VaultWrite { request_id: u64, path: String, content: String },
@@ -181,11 +192,24 @@ pub enum PluginsMsg {
     },
     VaultList { request_id: u64, path: String },
     VaultExists { request_id: u64, path: String },
+    /// 删除（文件夹递归；仓库根拒绝）与重命名 / 移动（目标不可已存在；引用跟随）。
+    VaultRemove { request_id: u64, path: String },
+    VaultRename { request_id: u64, from: String, to: String },
+    /// 结构变更回执：成功先广播 `vault:file.changed` 并刷新宿主文件树再回填。
+    VaultChangeDone {
+        request_id: u64,
+        change: VaultChange,
+        rewritten: Vec<String>,
+        result: Result<serde_json::Value, String>,
+    },
     /// 图片固有像素尺寸（只读文件头，不送回内容）。
     VaultImageInfo { request_id: u64, path: String },
     /// 文字量算（纯计算，按界面字体与控件同源的行高口径）。
     MeasureText { request_id: u64, params: MeasureTextParams },
     VaultCallDone { request_id: u64, result: Result<serde_json::Value, String> },
+    /// AI 模型 / Agent 清单（读仓库配置与面板当前选择）。
+    AiModels { request_id: u64 },
+    AiAgents { request_id: u64 },
     /// 表格只读快照（读壳的表格会话；写走表格消息流）。
     TableSnapshot { request_id: u64 },
     /// 系统托盘条目整发整换（空清单 = 收起该插件条目）。
@@ -308,6 +332,15 @@ pub fn host_requests_stream(spec: &RuntimeSpec) -> impl iced::futures::Stream<It
                 HostRequest::ClipboardReadImage { request_id, .. } => {
                     Message::Plugins(PluginsMsg::ClipboardReadImage { request_id })
                 }
+                HostRequest::ClipboardWriteImage { request_id, bytes, .. } => {
+                    Message::Plugins(PluginsMsg::ClipboardWriteImage { request_id, bytes })
+                }
+                HostRequest::AiModels { request_id, .. } => {
+                    Message::Plugins(PluginsMsg::AiModels { request_id })
+                }
+                HostRequest::AiAgents { request_id, .. } => {
+                    Message::Plugins(PluginsMsg::AiAgents { request_id })
+                }
                 HostRequest::VaultReadText { request_id, path, .. } => {
                     Message::Plugins(PluginsMsg::VaultRead { request_id, path })
                 }
@@ -328,6 +361,12 @@ pub fn host_requests_stream(spec: &RuntimeSpec) -> impl iced::futures::Stream<It
                 }
                 HostRequest::VaultExists { request_id, path, .. } => {
                     Message::Plugins(PluginsMsg::VaultExists { request_id, path })
+                }
+                HostRequest::VaultRemove { request_id, path, .. } => {
+                    Message::Plugins(PluginsMsg::VaultRemove { request_id, path })
+                }
+                HostRequest::VaultRename { request_id, from, to, .. } => {
+                    Message::Plugins(PluginsMsg::VaultRename { request_id, from, to })
                 }
                 HostRequest::VaultImageInfo { request_id, path, .. } => {
                     Message::Plugins(PluginsMsg::VaultImageInfo { request_id, path })
@@ -618,6 +657,15 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
         ),
         PluginsMsg::ClipboardImageDone { request_id, result } => {
             let result = result.map(atelyx_core::plugin_runtime::clipboard_image_payload);
+            app.plugins.resolve_shell_call(request_id, result);
+            Task::none()
+        }
+        PluginsMsg::ClipboardWriteImage { request_id, bytes } => Task::perform(
+            async move { run_blocking(move || write_clipboard_image(&bytes)).await },
+            move |result| Message::Plugins(PluginsMsg::ClipboardImageWritten { request_id, result }),
+        ),
+        PluginsMsg::ClipboardImageWritten { request_id, result } => {
+            let result = result.map(|_| serde_json::json!({}));
             app.plugins.resolve_shell_call(request_id, result);
             Task::none()
         }
@@ -916,6 +964,64 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
                 }
             }
         }
+        PluginsMsg::VaultRemove { request_id, path } => {
+            vault_change_gated(
+                app,
+                request_id,
+                crate::PendingAfterFlush::PluginVaultRemove { request_id, path },
+            )
+        }
+        PluginsMsg::VaultRename { request_id, from, to } => {
+            vault_change_gated(
+                app,
+                request_id,
+                crate::PendingAfterFlush::PluginVaultRename { request_id, from, to },
+            )
+        }
+        PluginsMsg::VaultChangeDone { request_id, change, rewritten, result } => {
+            if result.is_err() {
+                app.plugins.resolve_shell_call(request_id, result);
+                return Task::none();
+            }
+            match &change {
+                VaultChange::Removed { rel } => {
+                    app.plugins.on_file_changed(rel, FileChangeKind::Deleted, None);
+                }
+                VaultChange::Renamed { from, to } => {
+                    app.plugins
+                        .on_file_changed(to, FileChangeKind::Renamed, Some(from.as_str()));
+                    // 展开集 / 打开中文件路径与文件树子目录缓存跟随（与文件树改名同一口径）
+                    app.apply_follow(&crate::FollowUp::Renamed {
+                        from: from.clone(),
+                        to: to.clone(),
+                        rewritten: Vec::new(),
+                    });
+                    app.follow_children_cache(from, to);
+                }
+            }
+            // 引用同步代写了打开中的笔记：磁盘正文已变，重读对齐——结构变更经 gate
+            // 已先 flush，此刻无未落盘输入可丢
+            let open = app.ui.last_note_file.clone();
+            let reload = open.filter(|path| rewritten.iter().any(|rel| rel == path));
+            let refresh = refresh_after_vault_change(app, &change);
+            app.plugins.resolve_shell_call(request_id, result);
+            match reload {
+                Some(path) => refresh.chain(app.load_note(&path)),
+                None => refresh,
+            }
+        }
+        PluginsMsg::AiModels { request_id } => {
+            let result = serde_json::to_value(ai_models(app))
+                .map_err(|e| format!("模型清单序列化失败：{e}"));
+            app.plugins.resolve_shell_call(request_id, result);
+            Task::none()
+        }
+        PluginsMsg::AiAgents { request_id } => {
+            let result = serde_json::to_value(ai_agents(app))
+                .map_err(|e| format!("Agent 清单序列化失败：{e}"));
+            app.plugins.resolve_shell_call(request_id, result);
+            Task::none()
+        }
         PluginsMsg::VaultImageInfo { request_id, path } => {
             let rel = match plugin_path(Some(&path)) {
                 Ok(rel) => rel,
@@ -1063,6 +1169,362 @@ fn vault_write_done(
         Err(e) => (Err(e), false),
     };
     Message::Plugins(PluginsMsg::VaultWriteDone { request_id, rel, result, created })
+}
+
+/// 重命名任务的完成消息：引用改写清单随回执带回（打开中的笔记据此重读）。
+fn renamed_done(
+    request_id: u64,
+    change: VaultChange,
+    result: Result<(serde_json::Value, Vec<String>), String>,
+) -> PluginsMsg {
+    let (result, rewritten) = match result {
+        Ok((value, rewritten)) => (Ok(value), rewritten),
+        Err(e) => (Err(e), Vec::new()),
+    };
+    PluginsMsg::VaultChangeDone { request_id, change, rewritten, result }
+}
+
+/// 仓库结构变更经 gate 放行：挂起输入先落盘（与文件树删除/改名同一口径，无脏零成本直通），
+/// 引用同步的代写与重读才有「无未落盘输入」前提。已有 flush 动作在途时不排队：
+/// 可读拒绝，插件稍后重试。
+fn vault_change_gated(
+    app: &mut App,
+    request_id: u64,
+    pending: crate::PendingAfterFlush,
+) -> Task<Message> {
+    if app.flush_pending.is_some() {
+        return resolve_vault(app, request_id, Err("宿主保存进行中，请稍后重试".into()));
+    }
+    app.gate(pending)
+}
+
+/// gate 放行后的仓库删除执行体（挂起输入已落盘）。
+pub(crate) fn execute_vault_remove(
+    app: &mut App,
+    request_id: u64,
+    path: String,
+) -> Task<Message> {
+    let rel = match plugin_path(Some(&path)) {
+        Ok(rel) => rel,
+        Err(e) => return resolve_vault(app, request_id, Err(e)),
+    };
+    if let Some(blocked) = vault_change_conflict(app, &rel) {
+        return resolve_vault(app, request_id, Err(blocked));
+    }
+    let change = VaultChange::Removed { rel: rel.clone() };
+    match app.repo_kind.clone() {
+        crate::RepoKind::Local => match app.vault.root() {
+            Ok(root) => Task::perform(
+                async move { run_blocking(move || remove_local(&root, &rel)).await },
+                move |result| {
+                    Message::Plugins(PluginsMsg::VaultChangeDone {
+                        request_id,
+                        change,
+                        rewritten: Vec::new(),
+                        result,
+                    })
+                },
+            ),
+            Err(e) => resolve_vault(app, request_id, Err(e)),
+        },
+        crate::RepoKind::Space(space) => {
+            let (client, space_id) = (space.client.clone(), space.space_id.clone());
+            Task::perform(
+                async move { remove_space(&client, &space_id, &rel).await },
+                move |result| {
+                    Message::Plugins(PluginsMsg::VaultChangeDone {
+                        request_id,
+                        change,
+                        rewritten: Vec::new(),
+                        result,
+                    })
+                },
+            )
+        }
+    }
+}
+
+/// gate 放行后的仓库改名/移动执行体（挂起输入已落盘，引用代写基于完整磁盘内容）。
+pub(crate) fn execute_vault_rename(
+    app: &mut App,
+    request_id: u64,
+    from: String,
+    to: String,
+) -> Task<Message> {
+    let from = match plugin_path(Some(&from)) {
+        Ok(rel) => rel,
+        Err(e) => return resolve_vault(app, request_id, Err(e)),
+    };
+    let to = match plugin_path(Some(&to)) {
+        Ok(rel) => rel,
+        Err(e) => return resolve_vault(app, request_id, Err(e)),
+    };
+    if from == to {
+        return resolve_vault(app, request_id, Ok(serde_json::json!({})));
+    }
+    for target in [&from, &to] {
+        if let Some(blocked) = vault_change_conflict(app, target) {
+            return resolve_vault(app, request_id, Err(blocked));
+        }
+    }
+    let change = VaultChange::Renamed { from: from.clone(), to: to.clone() };
+    match app.repo_kind.clone() {
+        crate::RepoKind::Local => match app.vault.root() {
+            Ok(root) => {
+                let exclude = app.vault.exclude_folders().unwrap_or_default();
+                Task::perform(
+                    async move {
+                        run_blocking(move || rename_local(&root, &exclude, &from, &to)).await
+                    },
+                    move |result| Message::Plugins(renamed_done(request_id, change, result)),
+                )
+            }
+            Err(e) => resolve_vault(app, request_id, Err(e)),
+        },
+        crate::RepoKind::Space(space) => {
+            let (client, space_id) = (space.client.clone(), space.space_id.clone());
+            Task::perform(
+                async move { rename_space(&client, &space_id, &from, &to).await },
+                move |result| Message::Plugins(renamed_done(request_id, change, result)),
+            )
+        }
+    }
+}
+
+/// 结构变更后刷新宿主文件面：本地按父目录重读子项，空间拉整树；再重建笔记清单、
+/// 标签词表与反链。
+fn refresh_after_vault_change(app: &mut App, change: &VaultChange) -> Task<Message> {
+    let mut task = if matches!(app.repo_kind, crate::RepoKind::Space(_)) {
+        crate::space_actions::refresh_space_tree(app)
+    } else {
+        match change {
+            VaultChange::Removed { rel } => app.load_children(&crate::parent_of(rel)),
+            VaultChange::Renamed { from, to } => app
+                .load_children(&crate::parent_of(from))
+                .chain(app.load_children(&crate::parent_of(to))),
+        }
+    };
+    task = task
+        .chain(app.refresh_note_files())
+        .chain(app.refresh_tag_vocab())
+        .chain(app.refresh_backlinks());
+    // 改名同步了提示词标记与 Agent 的提示词引用
+    if matches!(change, VaultChange::Renamed { .. }) {
+        task = task.chain(app.load_vault_meta());
+    }
+    task
+}
+
+/// 删除 / 重命名前的会话冲突：目标或其子路径正在编辑器中打开，或被当前画布引用。
+/// 这两类持有者都在内存里保留旧路径，宿主变更会与之竞争（写回幽灵文件 / 覆盖改写后的引用）。
+fn vault_change_conflict(app: &App, rel: &str) -> Option<String> {
+    let target = rel.replace('\\', "/");
+    let prefix = format!("{target}/");
+    let open = [
+        app.ui.last_note_file.as_deref(),
+        app.table.as_ref().map(|t| t.file.as_str()),
+        app.canvas.as_ref().map(|c| c.file.as_str()),
+        app.doc_open.as_ref().map(|d| d.path.as_str()),
+    ];
+    if let Some(path) = open.into_iter().flatten().find(|path| {
+        let path = path.replace('\\', "/");
+        path == target || path.starts_with(&prefix)
+    }) {
+        return Some(format!("路径正在编辑器中打开，拒绝操作：{path}"));
+    }
+    let canvas = app.canvas.as_ref()?;
+    for node in &canvas.data.nodes {
+        let field = match node.node_type.as_str() {
+            "text" | "media" | "table" => "file",
+            "conversation" => "systemPromptFile",
+            _ => continue,
+        };
+        let Some(path) = node.data.get(field).and_then(serde_json::Value::as_str) else { continue };
+        if path == target || path.starts_with(&prefix) {
+            return Some(format!("路径正被画布「{}」引用，拒绝操作：{path}", canvas.data.title));
+        }
+    }
+    None
+}
+
+/// 本地删除：按磁盘事实判定文件 / 文件夹；表图片附件随表私有，删除后尽力清理。
+fn remove_local(root: &std::path::Path, rel: &str) -> Result<serde_json::Value, String> {
+    let target = vault::safe_join(root, rel, false)
+        .map_err(|e| format!("路径不可用（{rel}）：{e}"))?;
+    let meta = std::fs::metadata(&target)
+        .map_err(|e| format!("路径不存在或不可访问（{rel}）：{e}"))?;
+    let is_dir = meta.is_dir();
+    let attachments = vault::table_attachment_dirs(root, rel, is_dir);
+    if is_dir {
+        vault::delete_folder(root, rel, true)?;
+    } else {
+        vault::delete_vault_file(root, rel)?;
+    }
+    vault::purge_table_attachments(attachments);
+    Ok(serde_json::json!({}))
+}
+
+/// 本地重命名 / 移动：目标不可已存在（case-only 改名豁免），引用由 core 事务同步。
+fn rename_local(
+    root: &std::path::Path,
+    exclude: &[String],
+    from: &str,
+    to: &str,
+) -> Result<(serde_json::Value, Vec<String>), String> {
+    let source = vault::safe_join(root, from, false)
+        .map_err(|e| format!("源路径不可用（{from}）：{e}"))?;
+    let meta = std::fs::metadata(&source)
+        .map_err(|e| format!("源路径不存在或不可访问（{from}）：{e}"))?;
+    let is_dir = meta.is_dir();
+    if is_dir && to.starts_with(&format!("{from}/")) {
+        return Err("不能把文件夹移动到自身内部".to_string());
+    }
+    // case-only 改名不查重：Windows 的存在性判断大小写不敏感，会把源自身当占用
+    if !to.eq_ignore_ascii_case(from) {
+        let occupied = vault::safe_join(root, to, false).is_ok_and(|path| path.exists());
+        if occupied {
+            return Err(format!("目标已存在：{to}"));
+        }
+    }
+    let sync = if is_dir {
+        atelyx_core::vault_refs::rename_folder_synced(root, exclude, from, to)?
+    } else {
+        atelyx_core::vault_refs::rename_note_synced(root, exclude, from, to)?
+    };
+    Ok((serde_json::json!({}), sync.rewritten))
+}
+
+/// 空间删除：按整树（含隐藏项）判定条目种类；文件夹递归删除。
+async fn remove_space(
+    client: &atelyx_core::space_client::SpaceClient,
+    space_id: &str,
+    rel: &str,
+) -> Result<serde_json::Value, String> {
+    let tree = client
+        .tree_including_hidden(space_id, None)
+        .await
+        .map_err(|e| e.to_string())?;
+    let is_dir = find_tree_entry(&tree, rel)
+        .map(|node| node.is_dir)
+        .ok_or_else(|| format!("路径不存在：{rel}"))?;
+    if is_dir {
+        client
+            .delete_folder(space_id, rel, true)
+            .await
+            .map_err(|e| e.to_string())?;
+    } else {
+        client.delete_file(space_id, rel).await.map_err(|e| e.to_string())?;
+    }
+    Ok(serde_json::json!({}))
+}
+
+/// 空间重命名 / 移动：目标不可已存在；改名后按最新整树改写全库 .md 链接。
+async fn rename_space(
+    client: &atelyx_core::space_client::SpaceClient,
+    space_id: &str,
+    from: &str,
+    to: &str,
+) -> Result<(serde_json::Value, Vec<String>), String> {
+    let tree = client
+        .tree_including_hidden(space_id, None)
+        .await
+        .map_err(|e| e.to_string())?;
+    let is_dir = find_tree_entry(&tree, from)
+        .map(|node| node.is_dir)
+        .ok_or_else(|| format!("源路径不存在：{from}"))?;
+    if is_dir && to.starts_with(&format!("{from}/")) {
+        return Err("不能把文件夹移动到自身内部".to_string());
+    }
+    if find_tree_entry(&tree, to).is_some() {
+        return Err(format!("目标已存在：{to}"));
+    }
+    client.rename_file(space_id, from, to).await.map_err(|e| e.to_string())?;
+    let tree = client.tree(space_id).await.map_err(|e| e.to_string())?;
+    let rewritten =
+        crate::space_actions::rewrite_links_after_rename(client, space_id, &tree, from, to).await;
+    Ok((serde_json::json!({}), rewritten))
+}
+
+fn find_tree_entry<'a>(
+    tree: &'a [atelyx_core::space_client::TreeNode],
+    rel: &str,
+) -> Option<&'a atelyx_core::space_client::TreeNode> {
+    for node in tree {
+        if node.path == rel {
+            return Some(node);
+        }
+        if let Some(found) = find_tree_entry(&node.children, rel) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// 模型清单：只出 id / 名称与面板当前选择（地址与密钥不出宿主）。
+fn ai_models(app: &App) -> AiModelsResult {
+    let providers = app
+        .repo_config
+        .providers
+        .iter()
+        .flatten()
+        .map(|provider| AiModelProvider {
+            id: provider.id.clone(),
+            name: provider.name.clone(),
+            models: provider
+                .models
+                .iter()
+                .map(|model| AiModel {
+                    id: model.id.clone(),
+                    nickname: model.nickname.clone(),
+                })
+                .collect(),
+        })
+        .collect();
+    let current = app.chat.model_override.as_ref().and_then(|value| {
+        Some(AiModelPick {
+            provider_id: value.get("providerId")?.as_str()?.to_string(),
+            model: value.get("model")?.as_str()?.to_string(),
+        })
+    });
+    AiModelsResult { providers, current }
+}
+
+/// Agent 清单；面板无显式选择时按生效值回落内置「对话」。
+fn ai_agents(app: &App) -> AiAgentsResult {
+    let agents = app
+        .agents
+        .iter()
+        .map(|agent| AiAgent {
+            id: agent.id.clone(),
+            name: agent.name.clone(),
+            builtin: agent.builtin.unwrap_or(false),
+        })
+        .collect();
+    let current = app
+        .chat
+        .active_agent_id()
+        .or_else(|| Some(atelyx_core::vault::BUILTIN_AGENT_CHAT_ID.to_string()));
+    AiAgentsResult { agents, current }
+}
+
+/// 解码后 RGBA 容量上限：压缩载荷限额挡不住解压炸弹，按像素尺寸先挡一道。
+const MAX_CLIPBOARD_IMAGE_RGBA_BYTES: u64 = 256 * 1024 * 1024;
+
+/// PNG 字节 → 系统剪贴板（解码与写剪贴板都在阻塞线程池执行）。
+fn write_clipboard_image(bytes: &[u8]) -> Result<(), String> {
+    let reader = image::ImageReader::with_format(
+        std::io::Cursor::new(bytes),
+        image::ImageFormat::Png,
+    );
+    let (width, height) = reader
+        .into_dimensions()
+        .map_err(|e| format!("解码图片失败：{e}"))?;
+    if u64::from(width) * u64::from(height) * 4 > MAX_CLIPBOARD_IMAGE_RGBA_BYTES {
+        return Err("图片像素过多，无法写入剪贴板".to_string());
+    }
+    let image = image::load_from_memory_with_format(bytes, image::ImageFormat::Png)
+        .map_err(|e| format!("解码图片失败：{e}"))?;
+    crate::image_clipboard::write_image(width, height, image.to_rgba8().into_raw())
 }
 
 /// 写入目标是否正由编辑器持有：壳的会话里保留着该文件的内存副本，插件覆盖会与之竞争。
@@ -2140,5 +2602,66 @@ fn permission_label(permission: Permission) -> &'static str {
         Permission::Collab => "协作",
         Permission::Ai => "AI",
         Permission::Dialog => "对话框",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{remove_local, rename_local};
+    use atelyx_core::vault::test_support::TempDir;
+
+    fn write(root: &std::path::Path, rel: &str, content: &str) {
+        let path = root.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, content).unwrap();
+    }
+
+    #[test]
+    fn rename_local_rewrites_links_and_canvas_refs() {
+        let tmp = TempDir::new("plugin-rename");
+        let root = &*tmp;
+        write(root, "a.md", "正文");
+        write(root, "b.md", "看 [它](a.md)");
+        write(
+            root,
+            "c.atlx",
+            r#"{"schema":"atelyx-canvas/v1","id":"c1","title":"c","nodes":[{"id":"n1","type":"text","x":0,"y":0,"data":{"file":"a.md"}}],"edges":[]}"#,
+        );
+        let (_, rewritten) = rename_local(root, &[], "a.md", "dir/a.md").unwrap();
+        assert_eq!(rewritten, vec!["b.md".to_string()]);
+        assert!(root.join("dir/a.md").exists());
+        assert!(!root.join("a.md").exists());
+        let canvas = std::fs::read_to_string(root.join("c.atlx")).unwrap();
+        assert!(canvas.contains(r#""file": "dir/a.md""#), "{canvas}");
+    }
+
+    #[test]
+    fn rename_local_rejects_occupied_target_and_keeps_source() {
+        let tmp = TempDir::new("plugin-rename-occupied");
+        let root = &*tmp;
+        write(root, "a.md", "源");
+        write(root, "dir/a.md", "既有");
+        assert!(rename_local(root, &[], "a.md", "dir/a.md").is_err());
+        assert_eq!(std::fs::read_to_string(root.join("a.md")).unwrap(), "源");
+        assert_eq!(std::fs::read_to_string(root.join("dir/a.md")).unwrap(), "既有");
+    }
+
+    #[test]
+    fn rename_local_rejects_moving_folder_into_itself() {
+        let tmp = TempDir::new("plugin-rename-nested");
+        let root = &*tmp;
+        write(root, "dir/a.md", "内容");
+        assert!(rename_local(root, &[], "dir", "dir/sub").is_err());
+        assert!(root.join("dir/a.md").exists());
+    }
+
+    #[test]
+    fn remove_local_deletes_folder_recursively_and_rejects_root() {
+        let tmp = TempDir::new("plugin-remove");
+        let root = &*tmp;
+        write(root, "dir/sub/a.md", "内容");
+        remove_local(root, "dir").unwrap();
+        assert!(!root.join("dir").exists());
+        assert!(remove_local(root, "").is_err(), "仓库根不可删");
     }
 }

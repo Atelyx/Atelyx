@@ -319,10 +319,11 @@ const PLUGIN_LIST_PAD_X: f32 = 24.0;
 /// 「当前」角标两侧的行内间距合计（行 spacing 6 × 2）。
 const PLUGIN_LIST_NOTE_GAP: f32 = 12.0;
 
-/// 插件列表弹层宽度：按最长条目估宽（内衬 + 可选「当前」角标 + 滚动条占位），夹在 176..360。
+/// 插件列表弹层宽度：按最长条目（含分组头）估宽（内衬 + 可选「当前」角标 + 滚动条占位），
+/// 夹在 176..360。
 fn plugin_list_width(entries: &[atelyx_view::render::PopupEntry<Message>]) -> f32 {
     let note_w = estimate_text_width("当前", pal::fs_micro());
-    entries
+    let mut width = entries
         .iter()
         .map(|entry| {
             let note = if entry.current { note_w + PLUGIN_LIST_NOTE_GAP } else { 0.0 };
@@ -331,8 +332,11 @@ fn plugin_list_width(entries: &[atelyx_view::render::PopupEntry<Message>]) -> f3
                 + PLUGIN_LIST_PAD_X
                 + scroll::SCROLLBAR_W
         })
-        .fold(176.0, f32::max)
-        .min(360.0)
+        .fold(176.0, f32::max);
+    for group in entries.iter().filter_map(|entry| entry.group.as_deref()) {
+        width = width.max(estimate_text_width(group, pal::fs_micro()) + PLUGIN_LIST_PAD_X);
+    }
+    width.min(360.0)
 }
 
 impl PopupState {
@@ -507,12 +511,65 @@ pub fn takeover_view<'a>(
 }
 
 /// 插件窗口：面树铺满整窗，弹层 / 悬停提示 / 通知沿用工作区覆盖层（窗口内下拉与菜单依赖它）。
+/// 声明无系统边框时由宿主补标题栏与窗口控制。
 pub fn plugin_window_view<'a>(app: &'a App, window: iced::window::Id) -> Element<'a, Message> {
     let Some(entry) = app.plugin_windows.get(&window) else {
         return space().into();
     };
     let content = crate::plugin_view::window_view(app, window, entry);
-    with_overlays(app, window, content)
+    let base = if entry.decorations {
+        content
+    } else {
+        plugin_window_chrome(window, &entry.title, content)
+    };
+    with_overlays(app, window, base)
+}
+
+/// 无系统边框插件窗口标题栏：标题截断宽度上限与标题左缘内边距。
+const PLUGIN_TITLEBAR_TITLE_W: f32 = 240.0;
+const PLUGIN_TITLEBAR_PAD_X: f32 = 12.0;
+
+/// 无系统边框的插件窗口标题栏：标题与空白区整体可拖（双击 = 最大化切换），
+/// 右侧最小化 / 最大化 / 关闭。
+fn plugin_window_chrome<'a>(
+    window: iced::window::Id,
+    title: &str,
+    content: Element<'a, Message>,
+) -> Element<'a, Message> {
+    let titlebar = container(
+        row![
+            mouse_area(
+                row![
+                    text(ellipsize(title, PLUGIN_TITLEBAR_TITLE_W, pal::fs_caption()))
+                        .size(pal::fs_caption())
+                        .color(pal::TEXT_SECONDARY),
+                    space().width(Length::Fill).height(Length::Fill),
+                ]
+                .height(Length::Fill)
+                .align_y(Vertical::Center),
+            )
+            .on_press(Message::TitleBarPress(window)),
+            controls::window_button(controls::WindowButtonKind::Minimize, Message::WindowMinimize(window)),
+            controls::window_button(controls::WindowButtonKind::Maximize, Message::WindowMaximizeToggle(window)),
+            controls::window_button(controls::WindowButtonKind::Close, Message::WindowCloseRequested(window)),
+        ]
+        .height(Length::Fill)
+        .align_y(Vertical::Center),
+    )
+    .width(Length::Fill)
+    .height(Length::Fixed(pal::TITLEBAR_H))
+    .padding(Padding::ZERO.left(PLUGIN_TITLEBAR_PAD_X))
+    .style(|_t| Style {
+        background: Some(pal::BG_SECONDARY.into()),
+        ..Style::default()
+    });
+    column![
+        titlebar,
+        container(content).width(Length::Fill).height(Length::Fill),
+    ]
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
 }
 
 /// 接管视图的退出浮层与覆盖层组装（base 之上叠右上角常驻退出入口，
@@ -4915,29 +4972,43 @@ fn popup_element<'a>(
                 + popup::SHADOW_PAD_BOTTOM
                 + pal::VIEWPORT_GAP * 2.0;
             let budget = (viewport.height - chrome).max(pal::MENU_ITEM_H);
-            let visible_h = (entries.len().min(PLUGIN_LIST_MAX_ROWS) as f32 * pal::MENU_ITEM_H)
-                .min(budget);
-            let scrolls = entries.len() as f32 * pal::MENU_ITEM_H > visible_h;
             let card_w = plugin_list_width(entries)
                 .min((viewport.width - pal::VIEWPORT_GAP * 2.0).max(0.0));
+            // 分组头只在组名变化处插入：连续同组的条目共用一头，None 组不插
+            let group_headers = entries
+                .windows(2)
+                .filter(|pair| pair[1].group.is_some() && pair[1].group != pair[0].group)
+                .count()
+                + usize::from(entries.first().is_some_and(|entry| entry.group.is_some()));
+            let natural_h = entries.len() as f32 * pal::MENU_ITEM_H
+                + group_headers as f32 * pal::MENU_GROUP_H;
+            let visible_h = natural_h
+                .min(PLUGIN_LIST_MAX_ROWS as f32 * pal::MENU_ITEM_H)
+                .min(budget);
+            let scrolls = natural_h > visible_h;
             let note_w = estimate_text_width("当前", pal::fs_micro());
-            let rows: Vec<MenuEntry<Message>> = entries
-                .iter()
-                .map(|entry| {
-                    let reserved = PLUGIN_LIST_PAD_X
-                        + if entry.current { PLUGIN_LIST_NOTE_GAP + note_w } else { 0.0 }
-                        + if scrolls { scroll::SCROLLBAR_W } else { 0.0 };
-                    MenuEntry::Action {
-                        label: ellipsize(&entry.label, card_w - reserved, pal::fs_caption()),
-                        icon: None,
-                        danger: entry.danger,
-                        disabled: entry.disabled,
-                        on_press: (!entry.disabled).then(|| entry.on_press.clone()),
-                        note: entry.current.then_some("当前"),
-                        hint: None,
+            let mut rows: Vec<MenuEntry<Message>> = Vec::with_capacity(entries.len() + group_headers);
+            let mut last_group: Option<&str> = None;
+            for entry in entries {
+                if let Some(group) = entry.group.as_deref() {
+                    if last_group != Some(group) {
+                        rows.push(MenuEntry::Group(group.to_string()));
                     }
-                })
-                .collect();
+                }
+                last_group = entry.group.as_deref();
+                let reserved = PLUGIN_LIST_PAD_X
+                    + if entry.current { PLUGIN_LIST_NOTE_GAP + note_w } else { 0.0 }
+                    + if scrolls { scroll::SCROLLBAR_W } else { 0.0 };
+                rows.push(MenuEntry::Action {
+                    label: ellipsize(&entry.label, card_w - reserved, pal::fs_caption()),
+                    icon: None,
+                    danger: entry.danger,
+                    disabled: entry.disabled,
+                    on_press: (!entry.disabled).then(|| entry.on_press.clone()),
+                    note: entry.current.then_some("当前"),
+                    hint: None,
+                });
+            }
             if scrolls {
                 vec![(0, MenuEntry::Scroll { entries: rows, height: visible_h })]
             } else {

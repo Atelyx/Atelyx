@@ -28,6 +28,8 @@ pub mod view {
 
 pub mod window {
     /// 插件请求打开一个独立窗口承载自己的界面树（声明的 `id` 即该窗口面的 `surfaceId`）。
+    /// 缺省用系统窗口边框；`decorations: false` 时去掉系统边框，由宿主提供标题栏
+    /// （标题 / 拖动 / 最小化 / 最大化 / 关闭）。
     pub const OPEN: &str = "window.open";
     /// 插件关闭自己打开的一个窗口。
     pub const CLOSE: &str = "window.close";
@@ -83,6 +85,12 @@ pub mod vault {
     pub const IMAGE_INFO: &str = "vault.imageInfo";
     pub const LIST: &str = "vault.list";
     pub const EXISTS: &str = "vault.exists";
+    /// 删除一个仓库相对路径（文件或文件夹；文件夹连同内容递归删除）。仓库根不可删。
+    /// 被编辑面打开或被当前画布节点引用的文件拒删。
+    pub const REMOVE: &str = "vault.remove";
+    /// 把一个仓库相对路径改名 / 移动到另一路径（文件或文件夹；目标不存在，父目录自动创建）。
+    /// 引用同步：`.md` 内部链接与画布文件引用随改；源文件被编辑面打开或被当前画布节点引用时拒绝。
+    pub const RENAME: &str = "vault.rename";
 }
 
 /// 协作空间内的插件消息：按「通道」隔离，宿主把插件 id 作为通道前缀，
@@ -144,6 +152,8 @@ pub mod clipboard {
     pub const READ_TEXT: &str = "clipboard.readText";
     /// 读剪贴板中的图片（PNG，base64；无图片时字段缺省）。
     pub const READ_IMAGE: &str = "clipboard.readImage";
+    /// 写一张 PNG 图片到剪贴板（base64；单次上限 32 MiB，解码失败或超限即拒绝）。
+    pub const WRITE_IMAGE: &str = "clipboard.writeImage";
 }
 
 pub mod dialog {
@@ -189,6 +199,11 @@ pub mod ai {
     pub const CHAT_STOP: &str = "ai.chat.stop";
     /// 读当前激活仓库的会话清单或单会话消息历史。
     pub const CHAT_HISTORY: &str = "ai.chat.history";
+    /// 读当前仓库可用的模型清单（按供应商分组，只含 id / 名称，不含地址与密钥）
+    /// 与面板当前的模型选择。
+    pub const MODELS: &str = "ai.models";
+    /// 读当前仓库可用的 Agent 清单（内置 + 仓库自定义）与面板当前生效的 Agent。
+    pub const AGENTS: &str = "ai.agents";
     /// 重命名一个会话（写其元数据标题）。
     pub const CHAT_RENAME: &str = "ai.chat.rename";
     /// 删除一个会话（连同其消息文件）。
@@ -419,6 +434,10 @@ pub struct WindowOpenParams {
     /// 失焦即收起（隐藏窗口，从托盘 / 快捷键等入口再唤起是插件自己的事）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hide_on_blur: Option<bool>,
+    /// 系统窗口边框；缺省 true。`false` 时由宿主提供标题栏与窗口控制（拖动 / 最小化 /
+    /// 最大化 / 关闭），插件内容占满剩余区域。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decorations: Option<bool>,
 }
 
 /// `window.close` 的 params。
@@ -567,6 +586,14 @@ pub struct WriteTextParams {
 pub struct WriteBinaryParams {
     pub path: String,
     pub base64: String,
+}
+
+/// [`vault::RENAME`] 的 params：`from` / `to` 均为仓库相对路径，`to` 不可已存在。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultRenameParams {
+    pub from: String,
+    pub to: String,
 }
 
 /// [`vault::IMPORT_FILE`] 的 params：`path` 为仓库相对目标，`source` 为插件私有目录内的绝对路径。
@@ -741,6 +768,13 @@ pub struct ClipboardImageResult {
     /// 剪贴板里没有图片时整个字段缺省（与「有图片但为空」不做区分——空图片不成立）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<ClipboardImage>,
+}
+
+/// [`clipboard::WRITE_IMAGE`] 的 params：PNG 字节的 base64。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipboardWriteImageParams {
+    pub base64: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -930,6 +964,62 @@ pub struct ChatHistoryResult {
     pub sessions: Vec<ChatSessionSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<ChatSessionWire>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiModel {
+    /// 模型名（`ChatSendParams.model` 的取值）。
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nickname: Option<String>,
+}
+
+/// 一个供应商及其模型（不含地址与密钥）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiModelProvider {
+    pub id: String,
+    pub name: String,
+    pub models: Vec<AiModel>,
+}
+
+/// 面板当前的模型选择（供应商 id + 模型名）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiModelPick {
+    pub provider_id: String,
+    pub model: String,
+}
+
+/// [`ai::MODELS`] 的 result：`current` = 面板当前选择，未显式选择时缺省。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiModelsResult {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub providers: Vec<AiModelProvider>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<AiModelPick>,
+}
+
+/// 一个可用 Agent（内置 + 仓库自定义）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiAgent {
+    pub id: String,
+    pub name: String,
+    /// 预置 Agent（不可删除，可改配置）。
+    pub builtin: bool,
+}
+
+/// [`ai::AGENTS`] 的 result：`current` = 面板当前生效的 Agent id，无生效项时缺省。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiAgentsResult {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agents: Vec<AiAgent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<String>,
 }
 
 /// [`ai::REGISTER_TOOL`] 的 params：`name` 为模型可见的工具名（字母 / 数字 / `_` / `-`，

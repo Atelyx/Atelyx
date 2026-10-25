@@ -276,6 +276,14 @@ fn method_type_shapes_are_frozen() {
             "ImageSource" => {
                 frozen_roundtrip::<atelyx_plugin_protocol::view::ImageSource>(&value)
             }
+            "VaultRenameParams" => {
+                frozen_roundtrip::<atelyx_plugin_protocol::method::VaultRenameParams>(&value)
+            }
+            "ClipboardWriteImageParams" => {
+                frozen_roundtrip::<atelyx_plugin_protocol::method::ClipboardWriteImageParams>(&value)
+            }
+            "AiModelsResult" => frozen_roundtrip::<atelyx_plugin_protocol::method::AiModelsResult>(&value),
+            "AiAgentsResult" => frozen_roundtrip::<atelyx_plugin_protocol::method::AiAgentsResult>(&value),
             other => panic!("语料 {name}: 未知类型 {other}"),
         };
         assert!(ok, "语料 {name}: 编码与快照不一致");

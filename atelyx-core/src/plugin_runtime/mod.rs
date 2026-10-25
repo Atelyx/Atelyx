@@ -46,6 +46,7 @@ pub use atelyx_plugin_protocol::event::{
 pub use atelyx_plugin_protocol::layout::LayoutSpecNode;
 pub use atelyx_plugin_protocol::manifest::{DocTypeRegistration, Permission};
 pub use atelyx_plugin_protocol::method::{
+    AiAgent, AiAgentsResult, AiModel, AiModelPick, AiModelProvider, AiModelsResult,
     CanvasResizedParams, ChatEvent, ChatEventParams, ChatHistoryParams, ChatHistoryResult,
     ChatRenameParams, ChatSendParams, ChatSessionParams, ChatSessionSummary, ChatSessionWire,
     ChatStopParams, ClipboardImage, CollabMessageParams, CollabPeer, CollabPeersResult,
@@ -153,6 +154,9 @@ pub struct DialogRequest {
 /// 由宿主按路径收进仓库，不进 RPC 载荷。
 pub const MAX_VAULT_BINARY_BYTES: usize = 32 * 1024 * 1024;
 
+/// 剪贴板图片单次写入上限（PNG 字节）：超限拒绝，不做缩放或截断。
+pub const MAX_CLIPBOARD_IMAGE_BYTES: usize = 32 * 1024 * 1024;
+
 /// 二进制负载的 wire 形态（`{ "base64": ... }`，与 `fs.readBinary` 同编码）。
 pub fn binary_payload(bytes: &[u8]) -> Value {
     serde_json::json!({ "base64": encode_base64(bytes) })
@@ -191,6 +195,10 @@ pub enum HostRequest {
     ChatStop { plugin_id: String, request_id: u64, params: method::ChatStopParams },
     /// 插件请求读会话清单或单会话消息历史。
     ChatHistory { plugin_id: String, request_id: u64, params: method::ChatHistoryParams },
+    /// 插件请求读可用模型清单与面板当前选择。
+    AiModels { plugin_id: String, request_id: u64 },
+    /// 插件请求读 Agent 清单与面板当前生效项。
+    AiAgents { plugin_id: String, request_id: u64 },
     /// 插件请求写系统剪贴板（壳在 Elm 循环外执行，结果经 [`PluginRuntime::resolve_shell_call`] 回填）。
     ClipboardWrite { plugin_id: String, request_id: u64, text: String },
     /// 插件请求读系统剪贴板（无文本内容时回空串）。
@@ -208,8 +216,14 @@ pub enum HostRequest {
     VaultImportFile { plugin_id: String, request_id: u64, path: String, source: String },
     /// 插件请求读剪贴板中的图片（结果以 [`ClipboardImage`] 形态回填，无图 = `null`）。
     ClipboardReadImage { plugin_id: String, request_id: u64 },
+    /// 插件请求写一张 PNG 图片到系统剪贴板（`bytes` 已在分派处解码并校验大小）。
+    ClipboardWriteImage { plugin_id: String, request_id: u64, bytes: Vec<u8> },
     /// 插件请求列当前仓库内一个目录（空路径 = 仓库根）。
     VaultList { plugin_id: String, request_id: u64, path: String },
+    /// 插件请求删除仓库内一个路径（文件或文件夹；仓库根不可删）。
+    VaultRemove { plugin_id: String, request_id: u64, path: String },
+    /// 插件请求改名 / 移动仓库内一个路径（`from` / `to` 均为仓库相对路径）。
+    VaultRename { plugin_id: String, request_id: u64, from: String, to: String },
     /// 插件请求判定当前仓库内一个文件是否存在。
     VaultExists { plugin_id: String, request_id: u64, path: String },
     /// 插件请求读当前打开表格的只读快照（真源在壳的表格会话）。
@@ -508,9 +522,12 @@ impl PluginRuntime {
             | HostRequest::ChatRename { .. }
             | HostRequest::ChatDelete { .. }
             | HostRequest::ChatCompact { .. }
+            | HostRequest::AiModels { .. }
+            | HostRequest::AiAgents { .. }
             | HostRequest::ClipboardWrite { .. }
             | HostRequest::ClipboardRead { .. }
             | HostRequest::ClipboardReadImage { .. }
+            | HostRequest::ClipboardWriteImage { .. }
             | HostRequest::VaultReadText { .. }
             | HostRequest::VaultWriteText { .. }
             | HostRequest::VaultReadBinary { .. }
@@ -518,6 +535,8 @@ impl PluginRuntime {
             | HostRequest::VaultImportFile { .. }
             | HostRequest::VaultList { .. }
             | HostRequest::VaultExists { .. }
+            | HostRequest::VaultRemove { .. }
+            | HostRequest::VaultRename { .. }
             | HostRequest::TableSnapshot { .. }
             | HostRequest::TableUpdateCell { .. }
             | HostRequest::TableAddRow { .. }
@@ -590,6 +609,14 @@ impl PluginRuntime {
                 request_id,
                 params,
             },
+            HostRequest::AiModels { plugin_id, .. } => HostRequest::AiModels {
+                plugin_id,
+                request_id,
+            },
+            HostRequest::AiAgents { plugin_id, .. } => HostRequest::AiAgents {
+                plugin_id,
+                request_id,
+            },
             HostRequest::ClipboardWrite { plugin_id, text, .. } => HostRequest::ClipboardWrite {
                 plugin_id,
                 request_id,
@@ -603,6 +630,13 @@ impl PluginRuntime {
                 plugin_id,
                 request_id,
             },
+            HostRequest::ClipboardWriteImage { plugin_id, bytes, .. } => {
+                HostRequest::ClipboardWriteImage {
+                    plugin_id,
+                    request_id,
+                    bytes,
+                }
+            }
             HostRequest::VaultReadText { plugin_id, path, .. } => HostRequest::VaultReadText {
                 plugin_id,
                 request_id,
@@ -644,6 +678,17 @@ impl PluginRuntime {
                 plugin_id,
                 request_id,
                 path,
+            },
+            HostRequest::VaultRemove { plugin_id, path, .. } => HostRequest::VaultRemove {
+                plugin_id,
+                request_id,
+                path,
+            },
+            HostRequest::VaultRename { plugin_id, from, to, .. } => HostRequest::VaultRename {
+                plugin_id,
+                request_id,
+                from,
+                to,
             },
             HostRequest::TableSnapshot { plugin_id, .. } => HostRequest::TableSnapshot {
                 plugin_id,
@@ -734,9 +779,9 @@ impl PluginRuntime {
         Ok(rx)
     }
 
-    /// 壳侧回填一次服务调用的结果（AI 对话：会话 / 消息 id、清单或历史；剪贴板：文本或图片；
-    /// 仓库：文件内容 / 写入完成 / 目录清单 / 存在性 / 图片尺寸；表格：快照与写入回执；
-    /// 托盘：条目已应用；协作：在场清单 / 消息已投递）。失败带可读原因。
+    /// 壳侧回填一次服务调用的结果（AI 对话：会话 / 消息 id、清单或历史、模型 / Agent 清单；
+    /// 剪贴板：文本或图片；仓库：文件内容 / 写入完成 / 目录清单 / 存在性 / 图片尺寸 / 改名与删除回执；
+    /// 表格：快照与写入回执；托盘：条目已应用；协作：在场清单 / 消息已投递）。失败带可读原因。
     pub fn resolve_shell_call(&self, request_id: u64, result: Result<Value, String>) {
         let waiter = self.shell_calls.lock().unwrap().remove(&request_id);
         if let Some((_, tx)) = waiter {
@@ -1523,6 +1568,11 @@ fn request_plugin_id(request: &HostRequest) -> &str {
         | HostRequest::ChatRename { plugin_id, .. }
         | HostRequest::ChatDelete { plugin_id, .. }
         | HostRequest::ChatCompact { plugin_id, .. }
+        | HostRequest::AiModels { plugin_id, .. }
+        | HostRequest::AiAgents { plugin_id, .. }
+        | HostRequest::ClipboardWriteImage { plugin_id, .. }
+        | HostRequest::VaultRemove { plugin_id, .. }
+        | HostRequest::VaultRename { plugin_id, .. }
         | HostRequest::VaultImageInfo { plugin_id, .. }
         | HostRequest::TraySetItems { plugin_id, .. }
         | HostRequest::CollabPeers { plugin_id, .. }
@@ -1712,6 +1762,7 @@ mod tests {
                 always_on_top: None,
                 skip_taskbar: None,
                 hide_on_blur: None,
+                decorations: None,
             },
         ).unwrap();
         let other = runtime
@@ -1734,6 +1785,7 @@ mod tests {
             always_on_top: None,
             skip_taskbar: None,
             hide_on_blur: None,
+            decorations: None,
         }
     }
 

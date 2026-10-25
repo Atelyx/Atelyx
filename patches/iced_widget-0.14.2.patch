@@ -1,6 +1,5 @@
-diff -ruN a/src/keyed/column.rs b/src/keyed/column.rs
---- a/src/keyed/column.rs	2026-10-15 00:07:33.377734200 +0800
-+++ b/src/keyed/column.rs	2026-10-15 00:07:33.415285700 +0800
+--- a/src/keyed/column.rs
++++ b/src/keyed/column.rs
 @@ -231,7 +231,7 @@
          tree::diff_children_custom_with_search(
              children,
@@ -10,3 +9,39 @@ diff -ruN a/src/keyed/column.rs b/src/keyed/column.rs
              |index| {
                  self.keys.get(index).or_else(|| self.keys.last()).copied()
                      != Some(state.keys[index])
+--- a/src/text_editor.rs
++++ b/src/text_editor.rs
+@@ -1361,6 +1361,14 @@
+                 text,
+                 ..
+             }) => {
++                // IME 组合中的回车是确认候选：不进键位绑定（自定义提交会先于
++                // Ime::Commit 上屏触发），组合结束由 Closed 清空 preedit
++                if state.preedit.is_some()
++                    && matches!(key, keyboard::Key::Named(key::Named::Enter))
++                {
++                    return None;
++                }
++
+                 let status = if state.focus.is_some() {
+                     Status::Focused {
+                         is_hovered: cursor.is_over(bounds),
+--- a/src/text_input.rs
++++ b/src/text_input.rs
+@@ -1049,9 +1049,13 @@
+ 
+                     match modified_key.as_ref() {
+                         keyboard::Key::Named(key::Named::Enter) => {
+-                            if let Some(on_submit) = self.on_submit.clone() {
+-                                shell.publish(on_submit);
+-                                shell.capture_event();
++                            // IME 组合中的回车是确认候选：提交内容等随后的 Ime::Commit
++                            // 上屏，不触发 on_submit
++                            if state.preedit.is_none() {
++                                if let Some(on_submit) = self.on_submit.clone() {
++                                    shell.publish(on_submit);
++                                    shell.capture_event();
++                                }
+                             }
+                         }
+                         keyboard::Key::Named(key::Named::Backspace) => {

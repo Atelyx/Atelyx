@@ -2494,8 +2494,11 @@ pub fn rename_folder(root: &Path, old_dir: &str, new_dir: &str) -> Result<(), St
     if !old_path.is_dir() {
         return Err(format!("目录不存在：{}", old_dir));
     }
-    // 目标已存在拒绝（防覆盖丢数据；调用方已防重名，此处兜底并发/外部创建）
-    if new_path.exists() {
+    // 目标已存在拒绝（防覆盖丢数据；调用方已防重名，此处兜底并发/外部创建）。
+    // 豁免 case-only 重命名（`dir`→`Dir`）：大小写不敏感文件系统上 exists() 解析到同一目录，
+    // 两个 canonicalize 都成功且相等才豁免；任一失败（身份不明）不豁免，宁可拒绝不可覆盖
+    let same_file = same_physical_file(&old_path, &new_path);
+    if new_path.exists() && !same_file {
         return Err(format!("目标目录已存在：{}", new_dir));
     }
     std::fs::rename(&old_path, &new_path).map_err(|e| e.to_string())
@@ -4310,8 +4313,30 @@ mod safe_join_tests {
 #[cfg(test)]
 mod copy_folder_tests {
     use super::copy_folder;
+    use super::rename_folder;
     use super::test_support::TempDir;
     use std::path::Path;
+
+    /// 目录 case-only 改名（`dir`→`Dir`）：大小写不敏感文件系统上 exists() 解析到自身，
+    /// 须豁免占用检查而不是拒绝。改名结果按 read_dir 的真实目录名校验（exists 对
+    /// 大小写变体恒真，判不出改名是否生效）。
+    #[test]
+    fn rename_folder_allows_case_only_rename() {
+        let root = TempDir::new("rename-dir-case");
+        std::fs::create_dir_all(root.join("dir/sub")).unwrap();
+        std::fs::write(root.join("dir/sub/a.md"), "内容").unwrap();
+        rename_folder(&root, "dir", "Dir").unwrap();
+        assert!(root.join("Dir/sub/a.md").exists());
+        let names: Vec<String> = std::fs::read_dir(&*root)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(names.contains(&"Dir".to_string()) && !names.contains(&"dir".to_string()));
+        // 真占用仍拒绝：同名不同物不可覆盖
+        std::fs::create_dir_all(root.join("other")).unwrap();
+        assert!(rename_folder(&root, "Dir", "other").is_err());
+        assert!(root.join("Dir/sub/a.md").exists());
+    }
 
     #[test]
     fn copies_files_and_subdirs() {

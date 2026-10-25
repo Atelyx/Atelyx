@@ -22,7 +22,8 @@ pub(crate) fn permission_for(name: &str) -> Option<Permission> {
         fs::PRIVATE_DIR | fs::READ_TEXT | fs::WRITE_TEXT | fs::READ_BINARY | fs::WRITE_BINARY
         | fs::REMOVE | fs::EXISTS | fs::LIST => Some(Fs),
         vault::READ_TEXT | vault::WRITE_TEXT | vault::READ_BINARY | vault::WRITE_BINARY
-        | vault::IMPORT_FILE | vault::IMAGE_INFO | vault::LIST | vault::EXISTS => Some(Vault),
+        | vault::IMPORT_FILE | vault::IMAGE_INFO | vault::LIST | vault::EXISTS | vault::REMOVE
+        | vault::RENAME => Some(Vault),
         table::SNAPSHOT | table::UPDATE_CELL | table::ADD_ROW | table::REMOVE_ROW
         | table::SELECT_ROW | table::SET_CELL_IMAGE => Some(Table),
         process::SPAWN | process::WRITE_STDIN | process::CLOSE_STDIN | process::KILL => Some(Process),
@@ -30,13 +31,15 @@ pub(crate) fn permission_for(name: &str) -> Option<Permission> {
         notification::SHOW => Some(Notification),
         tray::SET_ITEMS => Some(Tray),
         shortcut::REGISTER | shortcut::UNREGISTER | shortcut::QUERY => Some(Shortcuts),
-        clipboard::WRITE_TEXT | clipboard::READ_TEXT | clipboard::READ_IMAGE => Some(Clipboard),
+        clipboard::WRITE_TEXT | clipboard::READ_TEXT | clipboard::READ_IMAGE
+        | clipboard::WRITE_IMAGE => Some(Clipboard),
         dialog::PICK_FILE | dialog::PICK_DIRECTORY => Some(Dialog),
         http::REQUEST => Some(Http),
         collab::PEERS | collab::SEND => Some(Collab),
         window::OPEN | window::CLOSE | window::UPDATE | window::SHOW => Some(Window),
         ai::CHAT_SEND | ai::CHAT_STOP | ai::CHAT_HISTORY | ai::CHAT_RENAME | ai::CHAT_DELETE
-        | ai::CHAT_COMPACT | ai::REGISTER_TOOL | ai::UNREGISTER_TOOL | ai::TOOL_RESULT => Some(Ai),
+        | ai::CHAT_COMPACT | ai::MODELS | ai::AGENTS | ai::REGISTER_TOOL | ai::UNREGISTER_TOOL
+        | ai::TOOL_RESULT => Some(Ai),
         _ => None,
     }
 }
@@ -85,6 +88,11 @@ mod tests {
         assert_eq!(permission_for(method::vault::WRITE_TEXT), Some(Permission::Vault));
         assert_eq!(permission_for(method::vault::READ_BINARY), Some(Permission::Vault));
         assert_eq!(permission_for(method::vault::WRITE_BINARY), Some(Permission::Vault));
+        assert_eq!(permission_for(method::vault::REMOVE), Some(Permission::Vault));
+        assert_eq!(permission_for(method::vault::RENAME), Some(Permission::Vault));
+        assert_eq!(permission_for(method::clipboard::WRITE_IMAGE), Some(Permission::Clipboard));
+        assert_eq!(permission_for(method::ai::MODELS), Some(Permission::Ai));
+        assert_eq!(permission_for(method::ai::AGENTS), Some(Permission::Ai));
         assert_eq!(permission_for(method::table::SNAPSHOT), Some(Permission::Table));
         assert_eq!(permission_for(method::table::UPDATE_CELL), Some(Permission::Table));
         assert_eq!(permission_for(method::table::ADD_ROW), Some(Permission::Table));
