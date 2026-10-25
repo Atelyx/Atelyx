@@ -81,6 +81,8 @@ use layout_view::{
 
 /// 撕裂窗口建窗参数：bounds 恢复位置 + 条目 OS 选项（不进任务栏）；无系统边框。
 fn panel_settings(w: &DetachedWindow) -> Settings {
+    // 非 Windows 不动 platform_specific：mut 只在该平台分支下需要
+    #[cfg_attr(not(windows), allow(unused_mut))]
     let mut settings = Settings {
         size: Size::new(w.bounds.width.max(200.0) as f32, w.bounds.height.max(160.0) as f32),
         min_size: Some(PANEL_MIN_SIZE),
@@ -275,9 +277,9 @@ fn app_data_dir() -> Option<PathBuf> {
     let base = std::env::var("APPDATA").ok().map(PathBuf::from);
     #[cfg(not(windows))]
     let base = std::env::var("XDG_DATA_HOME")
+        .ok()
         .map(PathBuf::from)
-        .or_else(|_| std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".local/share")))
-        .ok();
+        .or_else(|| std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".local/share")));
     // 拼接写在 cfg 之外：紧跟 cfg 块的 `.map(...)` 会被同一条 cfg 一并裁掉，Windows 上会静默
     // 退回未加标识符的裸目录（应用级文件与插件根随之漂移）
     base.map(|d| d.join("com.atelyx.desktop"))
