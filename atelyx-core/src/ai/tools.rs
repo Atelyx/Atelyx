@@ -1223,7 +1223,7 @@ mod tests {
     async fn path_guards_reject_escape_and_absolute() {
         let dir = TempDir::new("ai-tools");
         let ctx = ctx(&dir);
-        for bad in ["../逃逸.md", "C:\\abs.md", "/abs.md", "a/../../b.md"] {
+        for bad in ["../逃逸.md", "C:\\abs.md", "/abs.md", "a/../../b.md", "..\\逃逸.md", "C:abs.md"] {
             let r = execute(&ctx, "write_file", json!({ "path": bad, "content": "x" })).await;
             assert!(r.is_error, "{bad} 应被拒绝");
         }

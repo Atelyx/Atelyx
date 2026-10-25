@@ -520,25 +520,50 @@ fn validate_relative_path(file: &str) -> Result<PathBuf, String> {
     Ok(clean)
 }
 
-/// AI 工具路径校验：在通用相对路径校验之上拒绝隐藏段（`.atelyx` / `.git` 等——仓库配置与
+/// 跨平台相对路径归一：`\` 与 `/` 同作分隔符，退掉 `.` 段与重复分隔符，拒绝空路径 /
+/// 绝对路径 / `..` 段 / 盘符前缀；返回以 `/` 分隔的净化路径（`"."` 归为空串，由调用方按根处理）。
+/// 内容路径在 Windows 与 Linux 客户端之间共享，两端口径必须一致：盘符前缀在 Unix 上
+/// 只是普通文件名，落进共享内容后 Windows 客户端会解析成绝对路径。
+pub fn normalize_relative_path(rel: &str) -> Result<String, String> {
+    if rel.is_empty() {
+        return Err("非法路径：空路径".to_string());
+    }
+    let text = rel.replace('\\', "/");
+    if text.starts_with('/') {
+        return Err(format!("非法路径：绝对路径 ({rel})"));
+    }
+    let mut segs: Vec<&str> = Vec::new();
+    for seg in text.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => return Err(format!("非法路径：含越界段 ({rel})")),
+            s if is_drive_prefix(s) => return Err(format!("非法路径：盘符前缀 ({rel})")),
+            s => segs.push(s),
+        }
+    }
+    Ok(segs.join("/"))
+}
+
+/// 段是否为盘符形态（`C:` / `C:x.md`）：Windows 上非法或绝对，Unix 上只是普通名字。
+fn is_drive_prefix(seg: &str) -> bool {
+    let bytes = seg.as_bytes();
+    bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic()
+}
+
+/// AI 工具路径校验：在跨平台相对路径归一之上拒绝隐藏段（`.atelyx` / `.git` 等——仓库配置与
 /// 密钥所在处不对 AI 工具开放），返回以 `/` 分隔的净化相对路径（空间端点直接使用该形态）。
 pub fn validate_tool_path(rel: &str) -> Result<String, String> {
-    let clean = validate_relative_path(rel)?;
-    let text = clean.to_string_lossy().replace('\\', "/");
+    let text = normalize_relative_path(rel)?;
     if has_hidden_segment(&text) {
         return Err(format!("路径不可访问（隐藏目录不对 AI 工具开放）：{rel}"));
     }
     Ok(text)
 }
 
-/// 插件能力面路径校验：只拦越界（绝对路径 / `..`），隐藏目录可访问——插件自管的临时附件
-/// 就落在 `.atelyx/temp/` 下。返回以 `/` 分隔的净化相对路径（空间端点直接使用该形态）。
+/// 插件能力面路径校验：只拦越界（绝对路径 / `..` / 盘符前缀），隐藏目录可访问——插件自管的
+/// 临时附件就落在 `.atelyx/temp/` 下。返回以 `/` 分隔的净化相对路径（空间端点直接使用该形态）。
 pub fn validate_plugin_path(rel: &str) -> Result<String, String> {
-    let clean = validate_relative_path(rel)?;
-    let text = clean.to_string_lossy().replace('\\', "/");
-    // 反斜杠在 Unix 上是普通字符：归一后重新校验，防 `..\x` 变成越界路径
-    let clean = validate_relative_path(&text)?;
-    Ok(clean.to_string_lossy().replace('\\', "/"))
+    normalize_relative_path(rel)
 }
 
 /// 校验相对路径安全并 join 仓库根，返回绝对路径（安全 12）。
@@ -3651,6 +3676,12 @@ mod hidden_segment_tests {
         assert!(validate_plugin_path(r"..\x").is_err(), "反斜杠形态的越界段同样拒绝");
         assert!(validate_plugin_path("/x").is_err());
         assert!(validate_plugin_path("").is_err());
+        // 反斜杠按分隔符归一：同期路径形如 `附件\图.png` 与 `附件/图.png` 同义
+        assert_eq!(validate_plugin_path(r"附件\图.png").unwrap(), "附件/图.png");
+        // 盘符前缀在 Unix 上只是普通文件名，但共享内容到了 Windows 会被解析成绝对路径
+        assert!(validate_plugin_path(r"C:\x.md").is_err(), "盘符前缀两端口径一致拒绝");
+        assert!(validate_plugin_path("C:x.md").is_err());
+        assert!(validate_plugin_path(r"a\C:\x.md").is_err(), "非首段的盘符形态同样拒绝");
     }
 
     #[test]

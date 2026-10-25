@@ -11,6 +11,8 @@ use atelyx_core::plugin_runtime::TrayItemSpec;
 const EVENT_BUFFER: usize = 16;
 
 /// 托盘选择去向：插件条目交插件自己，宿主条目由壳处理。
+/// 事件只在 Windows 托盘线程里产生，其余平台保留类型让调用方不分叉。
+#[cfg_attr(not(windows), allow(dead_code))]
 #[derive(Clone, Debug, PartialEq)]
 pub enum TrayEvent {
     PluginClick { plugin_id: String, item_id: String },
@@ -538,6 +540,8 @@ mod platform {
 
     use super::TrayEvent;
 
+    /// 桩只为对齐 Windows 侧的调用形状，字段无人读取。
+    #[allow(dead_code)]
     pub(super) enum Cmd {
         SetItems { plugin_id: String, items: Vec<TrayItemSpec> },
         RemovePlugin { plugin_id: String },

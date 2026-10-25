@@ -342,7 +342,10 @@ async fn path_traversal_and_invalid_paths_rejected() {
     let (_, body) = ctx.post("/api/spaces", Some(&a_token), json!({ "name": "s" })).await;
     let space_id = body["spaceId"].as_str().unwrap().to_string();
 
-    for bad in ["../escape.md", "a/../../escape.md", "/abs.md", "C:\\x.md", ""] {
+    for bad in [
+        "../escape.md", "a/../../escape.md", "/abs.md", "C:\\x.md", "",
+        "..\\escape.md", "C:x.md",
+    ] {
         let (status, _) = ctx
             .put(&format!("/api/spaces/{space_id}/file"), Some(&a_token), json!({ "path": bad, "content": "x" }))
             .await;

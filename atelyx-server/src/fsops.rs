@@ -4,7 +4,7 @@
 //! （组件过滤 + 父目录 canonicalize 双保险，文件级符号链接由存在性检查 + canonicalize 兜底）。
 
 use std::fmt;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 /// join 失败的两种性质：`Invalid` = 语义拒绝（穿越/绝对路径/越界，HTTP 400）；
 /// `NotFound` = 父目录不存在（HTTP 404，与「文件不存在」同口径）。
@@ -37,18 +37,21 @@ impl SpaceRoot {
         if rel.is_empty() {
             return Err(invalid("非法路径：空路径".to_string()));
         }
-        let p = Path::new(rel);
-        if p.is_absolute() {
+        // 与客户端同一口径：反斜杠先按分隔符归一，再判绝对 / 越界 / 盘符前缀——
+        // Unix 上 `C:\x.md` 只是普通文件名，收下后 Windows 客户端会解析成绝对路径
+        let text = rel.replace('\\', "/");
+        if text.starts_with('/') {
             return Err(invalid(format!("非法路径：绝对路径 ({rel})")));
         }
         let mut clean = PathBuf::new();
-        for c in p.components() {
-            match c {
-                Component::Normal(seg) => clean.push(seg),
-                Component::CurDir => {}
-                Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                    return Err(invalid(format!("非法路径：含越界段 ({rel})")));
+        for seg in text.split('/') {
+            match seg {
+                "" | "." => {}
+                ".." => return Err(invalid(format!("非法路径：含越界段 ({rel})"))),
+                s if is_drive_prefix(s) => {
+                    return Err(invalid(format!("非法路径：盘符前缀 ({rel})")))
                 }
+                s => clean.push(s),
             }
         }
         let joined = self.0.join(&clean);
@@ -73,6 +76,12 @@ impl SpaceRoot {
         }
         Ok(joined)
     }
+}
+
+/// 段是否为盘符形态（`C:` / `C:x.md`）：Windows 上非法或绝对，Unix 上只是普通名字。
+fn is_drive_prefix(seg: &str) -> bool {
+    let bytes = seg.as_bytes();
+    bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic()
 }
 
 /// 相对路径是否含隐藏段（`.` 前缀段，`.`/`..` 不算——后者由路径安全校验按越界拒绝）。
