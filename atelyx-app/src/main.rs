@@ -460,6 +460,8 @@ enum Message {
     WikiPick(usize),
     /// 搜索面板查询词输入。
     SearchInput(String),
+    /// 搜索面板清空查询词（清空后回焦到输入框）。
+    SearchClear,
     /// 历史版本列表落地（gen 守卫 + kind/文件身份守卫：版本快照随文件绑定，串台会跨文件回滚）。
     HistoryLoaded(u64, atelyx_core::history::HistoryKind, String, Vec<atelyx_core::history::HistoryVersion>),
     /// 历史记录弹层（打开 / 展开预览 / 回滚二段确认）。
@@ -2477,6 +2479,13 @@ impl App {
             Message::SearchInput(s) => {
                 self.search_query = s;
                 Task::none()
+            }
+            Message::SearchClear => {
+                self.search_query.clear();
+                // 点击清空钮会把输入焦点移走：清空后回焦，可直接继续输入
+                iced::widget::operation::focus(iced::widget::Id::new(
+                    layout_view::SEARCH_INPUT_ID,
+                ))
             }
             Message::HistoryLoaded(gen, kind, rel, mut versions) => {
                 // 身份守卫：版本快照随 kind+文件绑定（弹层显式指定，或当前上下文同源），

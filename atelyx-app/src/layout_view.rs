@@ -1693,7 +1693,7 @@ fn view_content<'a>(app: &'a App, window: iced::window::Id, kind: &str) -> Eleme
     match kind {
         "files" => files_view(app),
         "note" => note_view(app, window),
-        "search" => search_view(app),
+        "search" => search_view(app, window),
         "inspector" => inspector_view(app, window),
         "table" => crate::table_view::table_view(app, window),
         "canvas" => crate::canvas_view::canvas_view(app, window),
@@ -1983,89 +1983,239 @@ fn merge_peers(peers: &[atelyx_core::collab::PeerInfo]) -> Vec<PeerRow> {
     rows
 }
 
-/// 搜索视图：模式下拉（按文件名可用；全局/按标签为占位禁用）+ 实时过滤 + 结果行点击打开。
-fn search_view(app: &App) -> Element<'_, Message> {
-    let mode_chip = |label: &'static str, enabled: bool| {
-        let color = if enabled { pal::TEXT_PRIMARY } else { pal::TEXT_MUTED };
-        button(text(label).size(pal::fs_micro()).color(color))
+// ===== 搜索面板 =====
+
+/// 结果行左右内衬（行体本身满宽，悬停底一直铺到滚动条内缘）。
+const SEARCH_ROW_PAD_X: f32 = 8.0;
+/// 结果行纵向内衬。
+const SEARCH_ROW_PAD_Y: f32 = 5.0;
+/// 结果行主次行间距。
+const SEARCH_ROW_LINE_GAP: f32 = 1.0;
+/// 结果行图标边长与图标到文字的间距（次行缩进量由此派生，与主行首字对齐）。
+const SEARCH_ROW_ICON: f32 = 13.0;
+const SEARCH_ROW_GAP: f32 = 6.0;
+/// 单次渲染的结果行上限：列表非虚拟化，上限即渲染预算（超出在计数行说明）。
+const SEARCH_MAX_ROWS: usize = 200;
+/// 清空钮边长（空查询时同一尺寸占位，输入框宽度不随清空钮显隐变化）。
+const SEARCH_CLEAR_BOX: f32 = 20.0;
+/// 搜索输入框 id（清空后回焦到它）。
+pub(crate) const SEARCH_INPUT_ID: &str = "search-input";
+
+/// 结果行渲染快照：文字可用宽在布局期才知道，故先把命中项取成自持数据再进 `responsive`。
+struct SearchHit {
+    rel: String,
+    name: String,
+    /// 所在文件夹（仓库根下的文件为空串 = 不出次行）。
+    parent: String,
+    icon: Cow<'static, str>,
+    /// 有面板内打开面（附件没有，行不挂点击）。
+    openable: bool,
+}
+
+/// 搜索视图：模式胶囊 + 查询输入（固定在顶部）+ 结果列表（滚动条贴面板右缘）。
+fn search_view(app: &App, window: iced::window::Id) -> Element<'_, Message> {
+    let hits_all = atelyx_core::vault::search_file_hits(&app.note_files, &app.search_query);
+    let total = hits_all.len();
+    let hits: Vec<SearchHit> = hits_all
+        .iter()
+        .take(SEARCH_MAX_ROWS)
+        .map(|&i| {
+            let (rel, name) = &app.note_files[i];
+            SearchHit {
+                rel: rel.clone(),
+                name: name.clone(),
+                parent: rel.rsplit_once('/').map(|(dir, _)| dir.to_string()).unwrap_or_default(),
+                icon: file_icon(app, name),
+                // 图片附件由画布媒体卡承载，笔记面读不了二进制：这类行只呈现、不挂点击
+                openable: atelyx_core::vault::image_ext_of(name).is_none(),
+            }
+        })
+        .collect();
+
+    let mut header = column![search_mode_row(window), search_input_row(&app.search_query, window)]
+        .spacing(6);
+    if let Some(count) = search_count_label(total, hits.len(), &app.search_query) {
+        header = header.push(text(count).size(pal::fs_micro()).color(pal::TEXT_MUTED));
+    }
+    let header = container(header)
+        .width(Length::Fill)
+        .padding(Padding::ZERO.top(8.0).horizontal(8.0).bottom(6.0));
+
+    let body: Element<'static, Message> = if app.note_files.is_empty() {
+        controls::empty_state(
+            "files",
+            "还没有可搜索的文件",
+            "在文件面板打开仓库后，在这里按名称检索",
+            None,
+        )
+    } else if total == 0 {
+        controls::empty_state(
+            "search",
+            "无匹配文件",
+            "换个关键词，或输入所在文件夹的名字",
+            None,
+        )
+    } else {
+        let list = iced::widget::responsive(move |size| {
+            // 行文字可用宽 = 列表宽（已扣掉滚动条占位）- 行内衬 - 图标列
+            let name_w =
+                (size.width - SEARCH_ROW_PAD_X * 2.0 - SEARCH_ROW_ICON - SEARCH_ROW_GAP).max(0.0);
+            let mut col = iced::widget::Column::<Message>::new()
+                .width(Length::Fill)
+                // 列表底部留白：末行不贴面板下缘
+                .padding(Padding::ZERO.bottom(8.0));
+            for hit in &hits {
+                col = col.push(search_row(hit, name_w, window));
+            }
+            col.into()
+        })
+        .width(Length::Fill)
+        .height(Length::Shrink);
+        scroll::v(list).width(Length::Fill).height(Length::Fill).into()
+    };
+
+    column![header, controls::h_divider_subtle(), body]
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+}
+
+/// 计数行：空白查询给文件总数，有查询给命中数；超渲染上限说明只列前几条。
+/// 无文件 / 无匹配由空态承载，此处不出行。
+fn search_count_label(total: usize, shown: usize, query: &str) -> Option<String> {
+    if total == 0 {
+        return None;
+    }
+    Some(if query.trim().is_empty() {
+        format!("共 {total} 个文件")
+    } else if shown < total {
+        format!("{total} 个结果，仅列前 {shown} 个")
+    } else {
+        format!("{total} 个结果")
+    })
+}
+
+/// 模式胶囊：当前档位实底；未实现档位只有文字（不可点，悬停说明原因）。
+fn search_mode_row(window: iced::window::Id) -> Element<'static, Message> {
+    let chip = |label: &'static str, active: bool| {
+        let (fg, bg) = if active {
+            (pal::TEXT_PRIMARY, Some(pal::BG_TERTIARY))
+        } else {
+            (pal::TEXT_MUTED, None)
+        };
+        container(text(label).size(pal::fs_micro()).color(fg))
             .padding(Padding::ZERO.horizontal(8.0).vertical(3.0))
-            .style(move |_t, _s| button::Style {
-                background: Some(pal::BG_TERTIARY.into()),
+            .style(move |_t| Style {
+                background: bg.map(Into::into),
                 border: border::rounded(pal::RADIUS_SM),
-                text_color: color,
-                ..button::Style::default()
+                ..Style::default()
             })
     };
-    let mut rows = iced::widget::Column::<Message>::new().spacing(2);
-    let q = app.search_query.trim().to_lowercase();
-    let matched: Vec<(String, String)> = app
-        .note_files
-        .iter()
-        .filter(|(_, name)| q.is_empty() || name.to_lowercase().contains(&q))
-        .cloned()
-        .collect();
-    let empty = matched.is_empty();
-    for (rel, name) in matched {
-        let is_note = rel.ends_with(".md");
-        let open = is_note.then(|| Message::OpenFile(rel.clone()));
-        rows = rows.push(
-            button(
-                row![
-                    icon(if is_note { "file-text" } else { "paperclip" }, 12.0, pal::TEXT_MUTED),
-                    text(name.clone()).size(pal::fs_caption()).color(pal::TEXT_PRIMARY),
-                    space(),
-                    text(rel.clone()).size(pal::fs_micro()).color(pal::TEXT_MUTED),
-                ]
-                .spacing(6),
-            )
-            .width(Length::Fill)
-            .padding(Padding::ZERO.horizontal(8.0).vertical(4.0))
-            .style(|_t, status| button::Style {
-                background: matches!(status, button::Status::Hovered | button::Status::Pressed)
-                    .then_some(pal::HOVER.into()),
-                ..button::Style::default()
-            })
-            .on_press_maybe(open),
+    let mut modes = row![chip("按文件名", true)].spacing(4);
+    for (label, tip) in [
+        ("全局搜索", "暂未实现：搜索正文内容"),
+        ("按标签搜索", "暂未实现：按标签筛选文件"),
+    ] {
+        modes = modes.push(
+            mouse_area(chip(label, false))
+                .on_enter(Message::Ui(crate::ui::UiMsg::HoverTip {
+                    window,
+                    label: tip.to_string(),
+                    box_px: 22.0,
+                }))
+                .on_exit(Message::Ui(crate::ui::UiMsg::HoverTipEnd {
+                    window,
+                    label: tip.to_string(),
+                })),
         );
     }
-    if empty {
-        rows = rows.push(
-            text(if app.note_files.is_empty() { "打开仓库后可搜索文件" } else { "无匹配文件" })
+    modes.into()
+}
+
+/// 输入行：输入框满宽 + 固定宽度清空位（清空钮出现与否不改变输入框宽度）。
+fn search_input_row(query: &str, window: iced::window::Id) -> Element<'static, Message> {
+    let input = iced::widget::text_input("输入文件名过滤…", query)
+        .id(iced::widget::Id::new(SEARCH_INPUT_ID))
+        .size(pal::fs_caption())
+        .font(crate::ui::regular())
+        .padding(Padding::ZERO.horizontal(8.0).vertical(4.0))
+        .width(Length::Fill)
+        .on_input(Message::SearchInput)
+        .style(|_theme, status| text_input::Style {
+            background: pal::BG_SUNKEN.into(),
+            border: border::rounded(pal::RADIUS_SM)
+                .color(if matches!(status, text_input::Status::Focused { .. }) { pal::ACCENT } else { pal::BORDER })
+                .width(1.0),
+            icon: pal::TEXT_MUTED,
+            placeholder: pal::INPUT_PLACEHOLDER,
+            value: pal::TEXT_PRIMARY,
+            selection: pal::SELECTION,
+        });
+    let clear: Element<'static, Message> = if query.is_empty() {
+        space().width(Length::Fixed(SEARCH_CLEAR_BOX)).into()
+    } else {
+        controls::icon_button(
+            "x",
+            12.0,
+            SEARCH_CLEAR_BOX,
+            Variant::Ghost,
+            Some(Message::SearchClear),
+            Some((window, "清空".to_string())),
+        )
+    };
+    row![input, clear].spacing(4).align_y(Vertical::Center).into()
+}
+
+/// 结果行：主行文件名（超宽省略）+ 次行所在文件夹（缩进到文件名首字）；可打开者整行可点，
+/// 附件没有面板内打开面，只呈现不响应点击。
+fn search_row(hit: &SearchHit, name_w: f32, window: iced::window::Id) -> Element<'static, Message> {
+    // 不可打开 ≡ 禁用态：文字降一级，与列表里其它禁用表达一致
+    let name_color = if hit.openable { pal::TEXT_PRIMARY } else { pal::TEXT_MUTED };
+    let mut lines = column![
+        row![
+            icon(hit.icon.as_ref(), SEARCH_ROW_ICON, pal::TEXT_MUTED),
+            text(ellipsize(&hit.name, name_w, pal::fs_caption()))
                 .size(pal::fs_caption())
-                .color(pal::TEXT_MUTED),
-        );
-    }
-    container(
-        column![
-            row![
-                mode_chip("按文件名", true),
-                mode_chip("全局搜索", false),
-                mode_chip("按标签搜索", false),
-            ]
-            .spacing(4),
-            iced::widget::text_input("输入文件名过滤…", &app.search_query)
-                .size(pal::fs_caption())
-                .font(crate::ui::regular())
-                .padding(Padding::ZERO.horizontal(8.0).vertical(4.0))
-                .on_input(Message::SearchInput)
-                .style(|_theme, status| text_input::Style {
-                    background: pal::BG_SUNKEN.into(),
-                    border: border::rounded(pal::RADIUS_SM)
-                        .color(if matches!(status, text_input::Status::Focused { .. }) { pal::ACCENT } else { pal::BORDER })
-                        .width(1.0),
-                    icon: pal::TEXT_MUTED,
-                    placeholder: pal::INPUT_PLACEHOLDER,
-                    value: pal::TEXT_PRIMARY,
-                    selection: pal::SELECTION,
-                }),
-            scroll::v(rows).width(Length::Fill).height(Length::Fill),
+                .color(name_color),
         ]
-        .spacing(8),
-    )
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .padding(8.0)
-    .into()
+        .spacing(SEARCH_ROW_GAP)
+        .align_y(Vertical::Center),
+    ]
+    .spacing(SEARCH_ROW_LINE_GAP);
+    if !hit.parent.is_empty() {
+        // 次行与主行首字对齐，可用宽相应减去图标列
+        let parent_w = (name_w - SEARCH_ROW_ICON - SEARCH_ROW_GAP).max(0.0);
+        lines = lines.push(
+            container(
+                text(ellipsize(&hit.parent, parent_w, pal::fs_micro()))
+                    .size(pal::fs_micro())
+                    .color(pal::TEXT_MUTED),
+            )
+            .padding(Padding::ZERO.left(SEARCH_ROW_ICON + SEARCH_ROW_GAP)),
+        );
+    }
+    let pad = Padding::ZERO.horizontal(SEARCH_ROW_PAD_X).vertical(SEARCH_ROW_PAD_Y);
+    let body: Element<'static, Message> = if hit.openable {
+        button(lines)
+            .width(Length::Fill)
+            .padding(pad)
+            .style(controls::row_style(false, pal::RADIUS_SM))
+            .on_press(Message::OpenFile(hit.rel.clone()))
+            .into()
+    } else {
+        container(lines).width(Length::Fill).padding(pad).into()
+    };
+    // 悬停给完整相对路径：行内文件名与所在文件夹都可能被省略号截断。
+    // 提示锚在光标下方「半行高 + 4」处，故按双行行高给锚点。
+    let tip = hit.rel.clone();
+    mouse_area(body)
+        .on_enter(Message::Ui(crate::ui::UiMsg::HoverTip {
+            window,
+            label: tip.clone(),
+            box_px: 40.0,
+        }))
+        .on_exit(Message::Ui(crate::ui::UiMsg::HoverTipEnd { window, label: tip }))
+        .into()
 }
 
 /// 属性面板视图：画布正作为激活标签展示（任一窗口前台）= 画布属性区，否则笔记属性
@@ -3054,7 +3204,9 @@ fn file_icon(app: &App, name: &str) -> Cow<'static, str> {
 /// 内置扩展名图标映射（无 app 上下文的调用点用）。
 fn file_icon_base(name: &str) -> &'static str {
     let lower = name.to_lowercase();
-    if lower.ends_with(".atlx") {
+    if atelyx_core::vault::image_ext_of(&lower).is_some() {
+        "image"
+    } else if lower.ends_with(".atlx") {
         "palette"
     } else if lower.ends_with(".canvas") {
         "layout-dashboard"

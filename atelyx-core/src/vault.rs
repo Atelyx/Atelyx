@@ -2869,6 +2869,85 @@ pub fn aggregate_tag_counts(index: &TagIndex) -> Vec<TagRow> {
     rows
 }
 
+/// 在 `(相对路径, 文件名)` 清单上按查询词检索：大小写不敏感，文件名命中优先于仅路径命中
+/// （前缀 > 包含 > 仅路径命中），同档保持传入顺序（清单本身即树序）。
+/// 空白查询 = 全部命中、原序返回。返回下标，由调用方决定渲染上限。
+pub fn search_file_hits(files: &[(String, String)], query: &str) -> Vec<usize> {
+    /// 命中档位 = 排序键。
+    #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    enum Rank {
+        NamePrefix,
+        NameContains,
+        PathContains,
+    }
+
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return (0..files.len()).collect();
+    }
+    let mut ranked: Vec<(Rank, usize)> = Vec::new();
+    for (i, (rel, name)) in files.iter().enumerate() {
+        let name = name.to_lowercase();
+        let rank = if name.starts_with(&q) {
+            Rank::NamePrefix
+        } else if name.contains(&q) {
+            Rank::NameContains
+        } else if rel.to_lowercase().contains(&q) {
+            Rank::PathContains
+        } else {
+            continue;
+        };
+        ranked.push((rank, i));
+    }
+    ranked.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    ranked.into_iter().map(|(_, i)| i).collect()
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::search_file_hits;
+
+    fn files(items: &[(&str, &str)]) -> Vec<(String, String)> {
+        items.iter().map(|(rel, name)| (rel.to_string(), name.to_string())).collect()
+    }
+
+    #[test]
+    fn blank_query_returns_all_in_tree_order() {
+        let f = files(&[("b.md", "b.md"), ("a.md", "a.md")]);
+        assert_eq!(search_file_hits(&f, ""), vec![0, 1]);
+        // 只含空白的查询等同空查询（输入框里敲空格不该把结果清空）
+        assert_eq!(search_file_hits(&f, "   "), vec![0, 1]);
+    }
+
+    #[test]
+    fn ranks_name_prefix_then_name_contains_then_path_hit() {
+        let f = files(&[
+            ("归档/会议纪要.md", "会议纪要.md"),
+            ("周报/2026-10.md", "2026-10.md"),
+            ("项目/周报归档/2025.md", "2025.md"),
+            ("周报汇总.md", "周报汇总.md"),
+            ("杂项/关于周报的思考.md", "关于周报的思考.md"),
+            ("其它/无关.md", "无关.md"),
+        ]);
+        // 前缀命中 → 名称包含 → 仅路径命中（同档保持树序），无关项剔除
+        assert_eq!(search_file_hits(&f, "周报"), vec![3, 4, 1, 2]);
+    }
+
+    #[test]
+    fn matches_case_insensitively() {
+        let f = files(&[("Logs/Report.md", "Report.md")]);
+        assert_eq!(search_file_hits(&f, "REPORT"), vec![0]);
+        assert_eq!(search_file_hits(&f, "logs"), vec![0]);
+    }
+
+    #[test]
+    fn path_hit_only_when_name_misses() {
+        let f = files(&[("notes/todo.md", "todo.md")]);
+        // 「notes」只在目录名里：仍命中，且不会因为匹配到路径而升级为名称档
+        assert_eq!(search_file_hits(&f, "notes"), vec![0]);
+    }
+}
+
 /// 提取一篇笔记的全部标签：frontmatter `tags` + 正文内联 `#标签`（去重）。
 fn extract_note_tags(content: &str) -> HashSet<String> {
     let mut tags: HashSet<String> = HashSet::new();
