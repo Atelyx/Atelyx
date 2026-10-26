@@ -931,7 +931,15 @@ pub fn titlebar_tab_strip(app: &App) -> (f32, Vec<(String, String, f32)>) {
     )];
     if let Some(scene) = app.active_scene() {
         for l in &scene.layouts {
-            out.push((l.id.clone(), l.name.clone(), layout_tab_width(&l.name)));
+            // 改名在途的 tab 按输入内容定宽（与渲染同源，见 layout_tab_edit_width）
+            let width = match &app.rename {
+                Some(r) => match &r.target {
+                    RenameTarget::Layout(rid) if rid == &l.id => layout_tab_edit_width(&r.value),
+                    _ => layout_tab_width(&l.name),
+                },
+                None => layout_tab_width(&l.name),
+            };
+            out.push((l.id.clone(), l.name.clone(), width));
         }
     }
     (4.0 + brand_w + 4.0, out)
@@ -942,18 +950,66 @@ fn layout_tab_width(name: &str) -> f32 {
     (estimate_text_width(name, 12.0) + 20.0).clamp(48.0, 120.0)
 }
 
+/// 布局 tab 改名编辑态宽度：按当前输入随内容增长，钳制 140–260（提交后收回正常宽度）。
+fn layout_tab_edit_width(value: &str) -> f32 {
+    (estimate_text_width(value, 12.0) + 20.0).clamp(140.0, 260.0)
+}
+
+/// 布局 tab 条释放插入位：光标在标题栏区域且越过条带起点时，命中标签中点之前为插入位
+/// （内容坐标随滚动偏移平移）；条带外 = None（落位取消）。插入位标渲染与释放落点共用本判定。
+pub fn titlebar_tab_insert(app: &App, local: Point) -> Option<usize> {
+    if local.y > UiMetrics::TITLEBAR_H {
+        return None;
+    }
+    let (strip_x, tabs) = titlebar_tab_strip(app);
+    if local.x < strip_x {
+        return None;
+    }
+    let mut x = strip_x - app.titlebar_tab_scroll_x;
+    for (i, (_, _, w)) in tabs.iter().enumerate() {
+        if local.x < x + w / 2.0 {
+            return Some(i);
+        }
+        x += w + 4.0;
+    }
+    Some(tabs.len())
+}
+
 fn titlebar<'a>(app: &'a App, window: iced::window::Id) -> Element<'a, Message> {
     let cursor = app.cursor_for(window);
 
-    // 布局 tab 条
-    let mut tabs = row![].spacing(4);
-    let home_active = app.ui.active_layout_id.as_deref() == Some(layout::HOME_LAYOUT_ID);
-    tabs = tabs.push(layout_tab(app, "主页", layout::HOME_LAYOUT_ID, home_active, window, cursor));
+    // 布局 tab 条；布局 tab 拖拽悬停时按与释放落点同一判定渲染插入位标
+    let insert_at = match app.drag.as_ref() {
+        Some(d)
+            if d.from_panel.is_none() && d.from_detached.is_none() && d.cursor_window == window =>
+        {
+            app.os_positions.get(&window).and_then(|wpos| {
+                let local = Point::new(d.current.x - wpos.x, d.current.y - wpos.y);
+                titlebar_tab_insert(app, local)
+            })
+        }
+        _ => None,
+    };
+    let mut entries: Vec<(String, String, bool)> = vec![(
+        "主页".to_string(),
+        layout::HOME_LAYOUT_ID.to_string(),
+        app.ui.active_layout_id.as_deref() == Some(layout::HOME_LAYOUT_ID),
+    )];
     if let Some(scene) = app.active_scene() {
         for l in &scene.layouts {
             let is_active = app.ui.active_layout_id.as_deref() == Some(l.id.as_str());
-            tabs = tabs.push(layout_tab(app, &l.name.clone(), &l.id.clone(), is_active, window, cursor));
+            entries.push((l.name.clone(), l.id.clone(), is_active));
         }
+    }
+    let mut tabs = row![].spacing(4);
+    for (i, (name, id, active)) in entries.iter().enumerate() {
+        if insert_at == Some(i) {
+            tabs = tabs.push(titlebar_insert_marker());
+        }
+        tabs = tabs.push(layout_tab(app, name, id, *active, window, cursor));
+    }
+    if insert_at == Some(entries.len()) {
+        tabs = tabs.push(titlebar_insert_marker());
     }
     let tabs = scrollable(container(row![tabs,
         controls::icon_button("plus", 13.0, 28.0, Variant::SubtleBg,
@@ -1062,7 +1118,7 @@ fn titlebar<'a>(app: &'a App, window: iced::window::Id) -> Element<'a, Message> 
 
 /// 标题栏布局 tab（宽度随内容自适应；激活/重命名在途 = 三档底 + 底部金条
 /// （左右缩进 8 圆头）；点击激活（拖拽会话期间忽略）、按下上报拖拽候选（主页除外）、
-/// 右键 = tab 菜单、双击 = 重命名）。
+/// 右键 = tab 菜单、双击 = 重命名；名称被省略时悬停显示全称）。
 fn layout_tab(
     app: &App,
     name: &str,
@@ -1072,29 +1128,28 @@ fn layout_tab(
     cursor: Point,
 ) -> Element<'static, Message> {
     let text_color = if active { pal::TEXT_PRIMARY } else { pal::TEXT_SECONDARY };
-    // 重命名在途 = 与激活态同款高亮（底色 + 金下边），无论该 tab 是否激活；
-    // 输入框需要定宽，仅编辑态退回估宽定宽
-    let renaming = matches!(
-        &app.rename,
-        Some(r) if r.target == RenameTarget::Layout(id.to_string())
-    );
-    let highlighted = active || renaming;
-    let edit_width = layout_tab_width(name);
-    let text_area: Element<'static, Message> = if renaming {
-        controls::inline_input(
+    // 重命名在途 = 与激活态同款高亮（底色 + 金下边），无论该 tab 是否激活
+    let draft = app.rename.as_ref().and_then(|r| match &r.target {
+        RenameTarget::Layout(lid) if lid == id => Some(r.value.as_str()),
+        _ => None,
+    });
+    let highlighted = active || draft.is_some();
+    let display = ellipsize(name, UiMetrics::TAB_TEXT_MAX_W, 12.0);
+    let truncated = draft.is_none() && display != name;
+    let text_area: Element<'static, Message> = match draft {
+        Some(value) => controls::inline_input(
             iced::widget::Id::new(controls::INLINE_RENAME_INPUT),
             "新名称",
-            &app.rename.as_ref().map(|r| r.value.clone()).unwrap_or_default(),
-            edit_width - 20.0,
+            value,
+            layout_tab_edit_width(value) - 20.0,
             Message::LayoutRenameInput,
             Message::LayoutRenameCommit,
             Message::RenamePressInside,
-        )
-    } else {
-        text(ellipsize(name, UiMetrics::TAB_TEXT_MAX_W, 12.0).to_string())
+        ),
+        None => text(display)
             .size(pal::fs_caption())
             .color(text_color)
-            .into()
+            .into(),
     };
     // 列外套一层撑满的容器，列内的 Fill 才拿到真实高度
     let content = container(column![
@@ -1129,37 +1184,22 @@ fn layout_tab(
             ..Style::default()
         });
 
-    if id != layout::HOME_LAYOUT_ID {
-        // 按下候选经 PressReporter 上报（主页固定不可拖不挂）；右键/双击照常
-        return controls::PressReporter::new(
-            mouse_area(
-                // 显式零内边距：估宽（layout_tab_width）按内容记账，默认内边距会让命中几何偏窄
-                button(underline)
-                    .padding(0.0)
-                    .style(move |_t, status| button::Style {
-                        background: (!highlighted
-                            && matches!(status, button::Status::Hovered | button::Status::Pressed))
-                        .then_some(pal::BG_TERTIARY.into()),
-                        border: border::rounded(pal::RADIUS_SM),
-                        ..Default::default()
-                    })
-                    .on_press(Message::LayoutActivate(id.to_string())),
-            )
-            .on_double_click(Message::LayoutRenameStart(id.to_string()))
-            .on_right_press(ctx_popup(
-                window,
-                cursor,
-                PopupState::LayoutTabMenu { layout_id: id.to_string() },
-            ))
-            .into(),
-            Message::LayoutTabPress {
-                layout_id: id.to_string(),
-                name: name.to_string(),
-            },
-        )
-        .into();
+    // 主页固定不可拖、不可右键、不可双击改名
+    if id == layout::HOME_LAYOUT_ID {
+        return button(underline)
+            .padding(0.0)
+            .style(move |_t, status| button::Style {
+                background: (!highlighted
+                    && matches!(status, button::Status::Hovered | button::Status::Pressed))
+                .then_some(pal::BG_TERTIARY.into()),
+                border: border::rounded(pal::RADIUS_SM),
+                ..Default::default()
+            })
+            .on_press(Message::LayoutActivate(id.to_string()))
+            .into();
     }
-    mouse_area(
+    // 显式零内边距：估宽（layout_tab_width）按内容记账，默认内边距会让命中几何偏窄
+    let area = mouse_area(
         button(underline)
             .padding(0.0)
             .style(move |_t, status| button::Style {
@@ -1171,7 +1211,32 @@ fn layout_tab(
             })
             .on_press(Message::LayoutActivate(id.to_string())),
     )
-    .on_double_click(Message::LayoutRenameStart(id.to_string()))
+    .on_right_press(ctx_popup(
+        window,
+        cursor,
+        PopupState::LayoutTabMenu { layout_id: id.to_string() },
+    ));
+    // 省略号截断时悬停给完整名称（改名前先能看清叫什么）
+    let area = if truncated {
+        let tip = name.to_string();
+        area.on_enter(Message::Ui(crate::ui::UiMsg::HoverTip {
+            window,
+            label: tip.clone(),
+            box_px: 28.0,
+        }))
+        .on_exit(Message::Ui(crate::ui::UiMsg::HoverTipEnd { window, label: tip }))
+    } else {
+        area
+    };
+    // 按下候选经 PressReporter 上报：拖拽候选与双击改名都按该按下时序判定
+    // （按钮先捕获左键按下，mouse_area 对已捕获事件跳过，双击回调不会触发）
+    controls::PressReporter::new(
+        area.into(),
+        Message::LayoutTabPress {
+            layout_id: id.to_string(),
+            name: name.to_string(),
+        },
+    )
     .into()
 }
 
@@ -1486,6 +1551,11 @@ fn insertion_marker() -> Element<'static, Message> {
             ..Style::default()
         })
         .into()
+}
+
+/// 标题栏布局 tab 条的插入位标记（高度同 tab 盒，条带行内不参与拉伸）。
+fn titlebar_insert_marker() -> Element<'static, Message> {
+    container(insertion_marker()).height(Length::Fixed(28.0)).into()
 }
 
 /// drop 指示覆盖层：中部 = 强调 22% 填充块 + 60% 1px 外框圆角 4；四边缘 = 12% 条带

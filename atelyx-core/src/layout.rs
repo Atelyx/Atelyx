@@ -1146,6 +1146,19 @@ pub fn unique_layout_name(names: &[String], base: &str) -> String {
     }
 }
 
+/// 布局改名的最终名称：去首尾空白；空白或目标不在场景内 = None；
+/// 与同场景主页及其它布局重名时追加序号（目标自身不参与比对）。
+pub fn renamed_layout_name(scene: &Scene, id: &str, requested: &str) -> Option<String> {
+    let trimmed = requested.trim();
+    if trimmed.is_empty() || !scene.layouts.iter().any(|l| l.id == id) {
+        return None;
+    }
+    let names: Vec<String> = std::iter::once(scene.home_layout.name.clone())
+        .chain(scene.layouts.iter().filter(|l| l.id != id).map(|l| l.name.clone()))
+        .collect();
+    Some(unique_layout_name(&names, trimmed))
+}
+
 
 // ===== 布局操作应用（唯一变更入口）=====
 
@@ -1431,16 +1444,12 @@ pub fn apply_layout_op(ui: &mut AppUiState, op: &LayoutOp) -> LayoutOpResult {
             if id == HOME_LAYOUT_ID {
                 return result;
             }
-            let trimmed = name.trim();
-            if trimmed.is_empty() {
-                return result;
-            }
             let scene = active_scene_mut(ui);
-            for l in &mut scene.layouts {
-                if l.id == *id {
-                    l.name = trimmed.to_string();
-                    break;
-                }
+            let Some(final_name) = renamed_layout_name(scene, id, name) else {
+                return result;
+            };
+            if let Some(l) = scene.layouts.iter_mut().find(|l| l.id == *id) {
+                l.name = final_name;
             }
         }
         LayoutOp::DeleteLayout { id } => {
@@ -2060,5 +2069,28 @@ mod tests {
             &ui,
             &LayoutOp::AddLayoutFromSpec { name: "空视图".into(), spec: spec_panel(&[]) }
         ));
+    }
+
+    #[test]
+    fn rename_layout_dedups_against_home_and_other_layouts() {
+        let mut ui = ui_with(two_panels_horizontal());
+        let _ = apply_layout_op(&mut ui, &LayoutOp::AddLayout); // 布局 1
+        let second = ui.scenes[0].layouts.last().unwrap().id.clone();
+        // 首尾空白剥掉
+        let _ = apply_layout_op(&mut ui, &LayoutOp::RenameLayout { id: second.clone(), name: " 设计 ".into() });
+        assert_eq!(ui.scenes[0].layouts.last().unwrap().name, "设计");
+        // 与其它布局重名 = 追加序号
+        let _ = apply_layout_op(&mut ui, &LayoutOp::RenameLayout { id: second.clone(), name: "L".into() });
+        assert_eq!(ui.scenes[0].layouts.last().unwrap().name, "L 2");
+        // 与主页重名同样让位（标签条里主页恒在）
+        let _ = apply_layout_op(&mut ui, &LayoutOp::RenameLayout { id: second, name: "主页".into() });
+        assert_eq!(ui.scenes[0].layouts.last().unwrap().name, "主页 2");
+        // 空白名与主页自身改名不进模型
+        let before = ui.scenes[0].layouts.last().unwrap().name.clone();
+        let _ = apply_layout_op(&mut ui, &LayoutOp::RenameLayout { id: "l1".into(), name: "   ".into() });
+        assert_eq!(ui.scenes[0].layouts[0].name, "L");
+        let _ = apply_layout_op(&mut ui, &LayoutOp::RenameLayout { id: HOME_LAYOUT_ID.into(), name: "首页".into() });
+        assert_eq!(ui.scenes[0].home_layout.name, "主页");
+        assert_eq!(ui.scenes[0].layouts.last().unwrap().name, before);
     }
 }

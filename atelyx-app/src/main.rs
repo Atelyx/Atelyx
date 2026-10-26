@@ -261,6 +261,10 @@ fn main() -> iced::Result {
 const DEFAULT_WINDOW_SIZE: Size = Size::new(1440.0, 900.0);
 /// 主窗口最小大小（逻辑像素）。
 const MIN_WINDOW_SIZE: Size = Size::new(1100.0, 760.0);
+
+/// 双击判定窗口：同一目标两次按压的间隔上限（标题栏空白最大化与布局 tab 改名共用）。
+const DOUBLE_CLICK_MS: u128 = 350;
+
 /// 防抖落盘周期：期间多次模型变更合并为一次写盘（拖宽/拖拽等连续操作不逐帧写）。
 const PERSIST_TICK: std::time::Duration = std::time::Duration::from_millis(800);
 
@@ -843,9 +847,11 @@ fn parent_of(rel: &str) -> String {
     }
 }
 
-/// 行内重命名输入挂焦点：输入行随本帧视图重建挂载，操作在重建后的树上执行。
+/// 行内重命名输入挂焦点并全选：输入行随本帧视图重建挂载，操作在重建后的树上执行；
+/// 进入即整体替换，避免在原名末尾追加。
 fn rename_focus_task() -> Task<Message> {
-    iced::widget::operation::focus(iced::widget::Id::new(ui::controls::INLINE_RENAME_INPUT))
+    let id = iced::widget::Id::new(ui::controls::INLINE_RENAME_INPUT);
+    iced::widget::operation::focus(id.clone()).chain(iced::widget::operation::select_all(id))
 }
 
 /// 在系统文件管理器中定位路径：目录 = 打开该目录，文件 = 打开所在目录并选中该项。
@@ -1543,6 +1549,8 @@ pub struct App {
     pub rename: Option<RenameState>,
     /// 上次标题栏空白按下（窗口 id + 时刻；双击最大化判定）。
     last_titlebar_press: Option<(window::Id, Instant)>,
+    /// 上次布局 tab 按下（tab id + 时刻；双击进入改名判定）。
+    layout_tab_last_press: Option<(String, Instant)>,
     /// 标题栏布局条横向滚动偏移（拖拽命中几何与渲染对齐）。
     titlebar_tab_scroll_x: f32,
     /// 各面板标签条横向滚动偏移（同上；key = 面板 id）。
@@ -1851,6 +1859,7 @@ impl App {
                 expanded_by_vault: HashMap::new(),
                 rename: None,
                 last_titlebar_press: None,
+                layout_tab_last_press: None,
                 titlebar_tab_scroll_x: 0.0,
                 panel_tab_scroll_x: HashMap::new(),
                 backlinks: Vec::new(),
@@ -2834,6 +2843,30 @@ impl App {
                 Task::none()
             }
             Message::LayoutTabPress { layout_id, name } => {
+                // 双击改名：同 tab 两次按下间隔在判定窗口内（标题栏空白双击同口径）；
+                // 这次按压随后会作为全局 Press 到达，由 begin_layout_rename 置行内按压吞掉
+                if self.drag.is_none() {
+                    let now = Instant::now();
+                    let double = self
+                        .layout_tab_last_press
+                        .take_if(|(id, t)| {
+                            id == &layout_id && now.duration_since(*t).as_millis() < DOUBLE_CLICK_MS
+                        })
+                        .is_some();
+                    if double {
+                        self.layout_tab_last_press = None;
+                        return self.begin_layout_rename(layout_id, true);
+                    }
+                    self.layout_tab_last_press = Some((layout_id.clone(), now));
+                }
+                // 该 tab 改名在途：按压（含输入框上的拖选）不得转成拖标签手势
+                if self
+                    .rename
+                    .as_ref()
+                    .is_some_and(|r| r.target == RenameTarget::Layout(layout_id.clone()))
+                {
+                    return Task::none();
+                }
                 self.tab_press = Some(TabPress {
                     window: self.main_id.unwrap_or(iced::window::Id::unique()),
                     source: PressSource::Layout { layout_id, name },
@@ -2984,16 +3017,24 @@ impl App {
                 }
                 self.apply(LayoutOp::ActivateLayout { id })
             }
-            Message::LayoutNew => self.apply(LayoutOp::AddLayout),
-            Message::LayoutRenameStart(id) => {
-                let name = self
+            Message::LayoutNew => {
+                let task = self.apply(LayoutOp::AddLayout);
+                // 新建即命名：生成「布局 N」后直接进入编辑，名字全选可整体替换
+                let Some(id) = self.ui.active_layout_id.clone() else { return task };
+                if id == layout::HOME_LAYOUT_ID {
+                    return task;
+                }
+                let Some(name) = self
                     .active_scene()
                     .and_then(|s| s.layouts.iter().find(|l| l.id == id))
                     .map(|l| l.name.clone())
-                    .unwrap_or_default();
+                else {
+                    return task;
+                };
                 self.rename = Some(self.rename_state(RenameTarget::Layout(id), name));
-                rename_focus_task()
+                task.chain(rename_focus_task())
             }
+            Message::LayoutRenameStart(id) => self.begin_layout_rename(id, false),
             Message::LayoutRenameInput(value) => {
                 if let Some(r) = &mut self.rename {
                     r.value = value;
@@ -3005,7 +3046,34 @@ impl App {
                 // 去重提醒条的渲染位置跟随改名发起处：标题发起 = 标题下方，否则文件树
                 self.rename_origin_at_title = r.from_title;
                 match r.target {
-                    RenameTarget::Layout(id) => self.apply(LayoutOp::RenameLayout { id, name: r.value }),
+                    RenameTarget::Layout(id) => {
+                        // 目标在编辑期间被删 = 静默退出（不能误报成空名）
+                        let Some(current_name) = self
+                            .active_scene()
+                            .and_then(|s| s.layouts.iter().find(|l| l.id == id))
+                            .map(|l| l.name.clone())
+                        else {
+                            return Task::none();
+                        };
+                        let Some(final_name) = self
+                            .active_scene()
+                            .and_then(|s| layout::renamed_layout_name(s, &id, &r.value))
+                        else {
+                            self.notify(NoticeLevel::Warning, "布局名称不能为空");
+                            return Task::none();
+                        };
+                        // 名称未变 = 只退出编辑，不写盘
+                        if current_name == final_name {
+                            return Task::none();
+                        }
+                        if final_name != r.value.trim() {
+                            self.notify(
+                                NoticeLevel::Warning,
+                                format!("已有同名布局，已重命名为「{final_name}」"),
+                            );
+                        }
+                        self.apply(LayoutOp::RenameLayout { id, name: final_name })
+                    }
                     RenameTarget::Scene(id) => self.apply(LayoutOp::RenameScene { id, name: r.value }),
                     RenameTarget::File(_) | RenameTarget::Folder(_) | RenameTarget::Draft { .. } => {
                         // 改名/移动一律过 gate：除「目标 = 打开中笔记」外，链接到该笔记的打开中笔记
@@ -3249,13 +3317,14 @@ impl App {
                     return Task::none();
                 }
                 // 行内重命名失焦提交：按压不在输入行内 = 提交（Enter 同路径）；
-                // 判定窗口 = 输入框所在窗口（标题就地改名可在撕裂窗口）
+                // 判定窗口 = 输入框所在窗口（标题就地改名可在撕裂窗口）。同步提交：
+                // 同一按压随后可能触发新建/切标签，延迟提交会取到它们改写后的会话
                 let rename_window = self.rename.as_ref().map(|r| r.window);
                 if rename_window.is_some() {
                     if self.rename_press_inside {
                         self.rename_press_inside = false;
                     } else if rename_window == Some(id) {
-                        return Task::perform(async {}, |_| Message::LayoutRenameCommit);
+                        return self.update(Message::LayoutRenameCommit);
                     }
                 }
                 // 日历日程标题编辑失焦提交：按压不在输入行内 = 提交（Enter 同路径；编辑会话至多一个）
@@ -3386,23 +3455,33 @@ impl App {
                 if self.drag.is_some() {
                     if let Some(wpos) = self.os_positions.get(&id) {
                         let global = Point::new(wpos.x + pos.x, wpos.y + pos.y);
+                        let is_layout_drag = self
+                            .drag
+                            .as_ref()
+                            .is_some_and(|d| d.from_panel.is_none() && d.from_detached.is_none());
                         if let Some(d) = self.drag.as_mut() {
                             d.current = global;
                             d.cursor_window = id;
                         }
-                        let zones = layout_view::panel_zones(self);
-                        self.drag_hover = zones
-                            .iter()
-                            .find(|z| z.rect.contains(global))
-                            .map(|zone| DragHover {
-                                // 撕裂窗口无面板树：整体 = 加标签 / 头部 = 排序两态（无边缘分割）
-                                kind: match layout_view::drop_zone_at(zone, global) {
-                                    layout_view::DropZone::Tab => layout_view::DropZone::Tab,
-                                    _ if zone.detached_id.is_some() => layout_view::DropZone::Center,
-                                    kind => kind,
-                                },
-                                zone: zone.clone(),
-                            });
+                        // 布局 tab 拖拽只在标题栏条带内落位（插入位标由视图按同一算法渲染），
+                        // 面板 / 撕裂窗口的落点指示不参与
+                        if is_layout_drag {
+                            self.drag_hover = None;
+                        } else {
+                            let zones = layout_view::panel_zones(self);
+                            self.drag_hover = zones
+                                .iter()
+                                .find(|z| z.rect.contains(global))
+                                .map(|zone| DragHover {
+                                    // 撕裂窗口无面板树：整体 = 加标签 / 头部 = 排序两态（无边缘分割）
+                                    kind: match layout_view::drop_zone_at(zone, global) {
+                                        layout_view::DropZone::Tab => layout_view::DropZone::Tab,
+                                        _ if zone.detached_id.is_some() => layout_view::DropZone::Center,
+                                        kind => kind,
+                                    },
+                                    zone: zone.clone(),
+                                });
+                        }
                     }
                     return Task::none();
                 }
@@ -3510,11 +3589,13 @@ impl App {
                 Task::none()
             }
             Message::TitleBarPress(id) => {
-                // 双击（350ms 内同窗口两次空白按下）= 最大化切换；否则进入窗口拖拽
+                // 双击（判定窗口内同窗口两次空白按下）= 最大化切换；否则进入窗口拖拽
                 let now = Instant::now();
                 let double = self
                     .last_titlebar_press
-                    .take_if(|(w, t)| *w == id && now.duration_since(*t).as_millis() < 350)
+                    .take_if(|(w, t)| {
+                        *w == id && now.duration_since(*t).as_millis() < DOUBLE_CLICK_MS
+                    })
                     .is_some();
                 self.last_titlebar_press = Some((id, now));
                 if double {
@@ -4560,26 +4641,13 @@ impl App {
     /// 四边缘 = 分割落点、桌面 = 撕出新窗口。
     fn resolve_drop(&mut self, d: DragSession, hover: Option<DragHover>) -> Task<Message> {
         // 布局 tab 拖拽（无宿主面板）：落回标题栏 tab 条 = 排序，其余取消
-        // （titlebar_tab_strip 返回主窗口本地坐标，光标须换算回本地）
+        // （titlebar_tab_insert 返回主窗口本地坐标下的插入位，光标须换算回本地）
         if d.from_panel.is_none() && d.from_detached.is_none() {
             if let Some(main_id) = self.main_id {
                 if let Some(wpos) = self.os_positions.get(&main_id) {
                     let local = Point::new(d.current.x - wpos.x, d.current.y - wpos.y);
-                    if local.y <= UiMetrics::TITLEBAR_H {
-                        let (strip_x, tabs) = layout_view::titlebar_tab_strip(self);
-                        if local.x >= strip_x {
-                            // 插入位 = 命中标签中点之前（内容坐标随滚动偏移平移）
-                            let mut insert = tabs.len();
-                            let mut x = strip_x - self.titlebar_tab_scroll_x;
-                            for (i, (_, _, w)) in tabs.iter().enumerate() {
-                                if local.x < x + w / 2.0 {
-                                    insert = i;
-                                    break;
-                                }
-                                x += w + 4.0;
-                            }
-                            return Task::done(Message::LayoutDropped(d.layout_from, insert));
-                        }
+                    if let Some(insert) = layout_view::titlebar_tab_insert(self, local) {
+                        return Task::done(Message::LayoutDropped(d.layout_from, insert));
                     }
                 }
             }
@@ -6061,6 +6129,38 @@ impl App {
             window: self.main_id.unwrap_or_else(iced::window::Id::unique),
             from_title: false,
         }
+    }
+
+    /// 进入布局改名会话：`from_press` = 由同一按压触发（tab 双击），
+    /// 该按压随后的全局 Press 须按行内按压吞掉，否则会话刚建立就被失焦提交。
+    fn begin_layout_rename(&mut self, id: String, from_press: bool) -> Task<Message> {
+        if id == layout::HOME_LAYOUT_ID {
+            return Task::none();
+        }
+        self.dismiss_popup();
+        // 同一布局已在改名 = 双击落在输入框里，保留草稿不重置
+        if self.rename.as_ref().is_some_and(|r| r.target == RenameTarget::Layout(id.clone())) {
+            return Task::none();
+        }
+        // 另起改名：弹层内按压不触发失焦提交，先结算在途草稿，避免静默丢弃
+        let commit = if self.rename.is_some() {
+            self.update(Message::LayoutRenameCommit)
+        } else {
+            Task::none()
+        };
+        let Some(name) = self
+            .active_scene()
+            .and_then(|s| s.layouts.iter().find(|l| l.id == id))
+            .map(|l| l.name.clone())
+        else {
+            return commit;
+        };
+        if from_press {
+            self.rename_press_inside = true;
+        }
+        self.rename = Some(self.rename_state(RenameTarget::Layout(id), name));
+        // 焦点先于结算任务：结算可能含等待落盘的 gate，不应延后输入聚焦
+        rename_focus_task().chain(commit)
     }
 
     /// 文件树重命名/新建草稿提交：按目标种类分派到 core 的写入口；
