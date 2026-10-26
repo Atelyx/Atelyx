@@ -6,7 +6,7 @@
 use iced::widget::{button, column, container, mouse_area, row, space, text_input};
 use iced::{Color, Element, Length, Padding, Theme, border, widget::container::Style};
 
-use super::icon::{icon, icon_resolved};
+use super::icon::{icon, icon_resolved, icon_stroke};
 use super::palette as pal;
 use super::{bold, regular, text};
 use super::{UiHost, UiMsg};
@@ -628,28 +628,46 @@ pub fn badge<M: 'static>(label: impl Into<String>, bg: Color, fg: Color) -> Elem
 }
 
 /// 复选框三态（全选 / 部分 / 空）。
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum CheckState {
     On,
     Partial,
     Off,
 }
 
-/// 复选框（lucide 形状：✓ 全选 / — 部分 / □ 空；`on_press` None = 禁用展示）。
+/// 复选框：三态共用同一个方框（已选 = 金框金勾 / 部分选中 = 金框横线 / 未选 = 实色灰框）。
+///
+/// 空心画法（方框只描边、不填底）：勾与横线都在框内，切换三态时框的位置与尺寸不变。
+/// `on_press` 为 None = 只作展示，不给悬停反馈——行本身可点时按下由外层承担。
 pub fn checkbox<M: Clone + 'static>(state: CheckState, on_press: Option<M>) -> Element<'static, M> {
-    let (glyph, color) = match state {
-        CheckState::On => ("check", pal::ACCENT),
-        CheckState::Partial => ("minus", pal::ACCENT),
-        CheckState::Off => ("square", pal::TEXT_MUTED),
+    // 方框边长；框内图形 11px 配 2.4 单位描边 ≈ 1px 视觉线宽，与框线同档。
+    const BOX: f32 = 15.0;
+    let (frame, glyph) = match state {
+        CheckState::On => (pal::ACCENT, Some("check")),
+        CheckState::Partial => (pal::ACCENT, Some("minus")),
+        CheckState::Off => (pal::TEXT_MUTED, None),
     };
-    let widget = button(icon(glyph, 13.0, color))
-        .padding(2.0)
-        .style(|_t, status| button::Style {
-            background: matches!(status, button::Status::Hovered | button::Status::Pressed)
-                .then_some(pal::HOVER.into()),
-            border: border::rounded(3.0),
-            ..Default::default()
+    let mark: Element<'static, M> = match glyph {
+        Some(name) => icon_stroke(name, 11.0, pal::ACCENT, 2.4),
+        None => space().into(),
+    };
+    let boxed = container(mark)
+        .width(Length::Fixed(BOX))
+        .height(Length::Fixed(BOX))
+        .align_x(iced::Alignment::Center)
+        .align_y(iced::Alignment::Center)
+        .style(move |_t| Style {
+            background: None,
+            border: border::Border { color: frame, width: 1.0, radius: 4.0.into() },
+            ..Style::default()
         });
+    // 无 on_press 时按钮状态恒为 Disabled，样式闭包不会画悬停底。
+    let widget = button(boxed).padding(2.0).style(|_t, status| button::Style {
+        background: matches!(status, button::Status::Hovered | button::Status::Pressed)
+            .then_some(pal::HOVER.into()),
+        border: border::rounded(3.0),
+        ..Default::default()
+    });
     match on_press {
         Some(m) => widget.on_press(m),
         None => widget,

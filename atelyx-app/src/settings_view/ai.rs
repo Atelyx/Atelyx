@@ -1847,7 +1847,8 @@ fn agent_form(app: &App, a: &vault::AgentConfig, window: iced::window::Id) -> El
     col.into()
 }
 
-/// 一类工具的勾选块：分组头整行可点折叠，复选框只切全选 / 全不选；单工具分类不设分组头。
+/// 一类工具的勾选块：分组头（折叠 + 整类开关 + 已选计数）+ 子项整行勾选。
+/// 单工具分类不出分组头（组名与唯一工具名重复），只出与分组头同列的整行勾选。
 fn tool_category_block<'a>(
     app: &App,
     tools: &[String],
@@ -1858,18 +1859,14 @@ fn tool_category_block<'a>(
 ) -> Element<'a, Message> {
     if items.len() == 1 {
         let (id, name) = &items[0];
-        let on = tools.iter().any(|x| x == id);
-        let line = row![
-            controls::checkbox(
-                if on { controls::CheckState::On } else { controls::CheckState::Off },
-                (!ro).then(|| Message::Ai(AiMsg::AgentToolToggle(id.clone()))),
-            ),
-            text(name.clone()).size(pal::fs_caption()).color(pal::TEXT_SECONDARY),
-        ]
-        .spacing(6)
-        .align_y(iced::alignment::Vertical::Center);
-        return container(line).padding(Padding::ZERO.horizontal(8.0).top(4.0)).into();
+        return tool_row(
+            tool_state(tools, id),
+            name,
+            (!ro).then(|| Message::Ai(AiMsg::AgentToolToggle(id.clone()))),
+            tool_note(app, id),
+        );
     }
+    let (hit, total) = checked_count(tools, items);
     let collapsed = app.ai.collapsed_cats.get(index).copied().unwrap_or(true);
     let head = row![
         icon(
@@ -1877,49 +1874,99 @@ fn tool_category_block<'a>(
             12.0,
             pal::TEXT_MUTED
         ),
-        controls::checkbox(state_of(tools, items), (!ro).then(|| Message::Ai(AiMsg::AgentCategoryToggle(index)))),
+        controls::checkbox(
+            state_of(tools, items),
+            (!ro).then(|| Message::Ai(AiMsg::AgentCategoryToggle(index))),
+        ),
         text(label.to_string())
             .size(pal::fs_caption())
             .color(pal::TEXT_PRIMARY)
             .font(crate::ui::bold()),
+        space().width(Length::Fill),
+        text(format!("{hit}/{total}"))
+            .size(pal::fs_micro())
+            .color(pal::TEXT_MUTED)
+            .font(crate::ui::mono()),
     ]
     .spacing(6)
-    .align_y(iced::alignment::Vertical::Center);
+    .align_y(iced::alignment::Vertical::Center)
+    .width(Length::Fill);
     let mut col = column![iced::widget::mouse_area(
-        container(head).padding(Padding::ZERO.horizontal(8.0).top(4.0)).width(Length::Fill),
+        container(head).padding(Padding::ZERO.horizontal(8.0).vertical(3.0)).width(Length::Fill),
     )
     .on_press(Message::Ai(AiMsg::AgentCatCollapse(index)))];
     if collapsed {
         return col.into();
     }
     for (id, name) in items {
-        let on = tools.iter().any(|x| x == id);
-        let mut tool_line = row![
-            controls::checkbox(
-                if on { controls::CheckState::On } else { controls::CheckState::Off },
-                (!ro).then(|| Message::Ai(AiMsg::AgentToolToggle(id.clone()))),
-            ),
-            text(name.clone()).size(pal::fs_caption()).color(pal::TEXT_SECONDARY),
-        ]
-        .spacing(6)
-        .align_y(iced::alignment::Vertical::Center);
-        if id == "web_search" && !app.ai.search_ready {
-            tool_line = tool_line.push(
-                text("（未配置搜索源，发送时自动降级）")
-                    .size(pal::fs_micro())
-                    .color(pal::TEXT_MUTED),
-            );
-        }
-        col = col.push(container(tool_line).padding(Padding::ZERO.left(20.0)));
+        col = col.push(tool_row(
+            tool_state(tools, id),
+            name,
+            (!ro).then(|| Message::Ai(AiMsg::AgentToolToggle(id.clone()))),
+            tool_note(app, id),
+        ));
     }
     col.into()
 }
 
-fn state_of(tools: &[String], items: &[(String, String)]) -> controls::CheckState {
+/// 单个工具的勾选行：与分组头同一列缩进（12 = 分组头箭头位），整行可点、悬停高亮。
+/// 勾选框只作展示，按下由整行承担——避免行与框两个命中区互相抢。
+fn tool_row<'a>(
+    state: controls::CheckState,
+    name: &str,
+    on_press: Option<Message>,
+    note: Option<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    let mut line = row![
+        space().width(Length::Fixed(12.0)),
+        controls::checkbox(state, None),
+        text(name.to_string()).size(pal::fs_caption()).color(pal::TEXT_SECONDARY),
+    ]
+    .spacing(6)
+    .align_y(iced::alignment::Vertical::Center);
+    if let Some(note) = note {
+        line = line.push(note);
+    }
+    let row_btn = button(line)
+        .width(Length::Fill)
+        .padding(Padding::ZERO.horizontal(8.0).vertical(3.0))
+        .style(controls::row_style(false, pal::RADIUS_XS));
+    match on_press {
+        Some(m) => row_btn.on_press(m).into(),
+        None => row_btn.into(),
+    }
+}
+
+/// 工具行尾附注：联网搜索未配置搜索源时说明发送即降级。
+fn tool_note(app: &App, id: &str) -> Option<Element<'static, Message>> {
+    (id == "web_search" && !app.ai.search_ready).then(|| {
+        text("（未配置搜索源，发送时自动降级）")
+            .size(pal::fs_micro())
+            .color(pal::TEXT_MUTED)
+            .into()
+    })
+}
+
+/// 一类工具的已选数 / 总数。
+fn checked_count(tools: &[String], items: &[(String, String)]) -> (usize, usize) {
     let hit = items.iter().filter(|(id, _)| tools.iter().any(|x| x == id)).count();
+    (hit, items.len())
+}
+
+/// 单个工具的三态（只有开 / 关；部分选中只属于分组头）。
+fn tool_state(tools: &[String], id: &str) -> controls::CheckState {
+    if tools.iter().any(|x| x == id) {
+        controls::CheckState::On
+    } else {
+        controls::CheckState::Off
+    }
+}
+
+fn state_of(tools: &[String], items: &[(String, String)]) -> controls::CheckState {
+    let (hit, total) = checked_count(tools, items);
     if hit == 0 {
         controls::CheckState::Off
-    } else if hit == items.len() {
+    } else if hit == total {
         controls::CheckState::On
     } else {
         controls::CheckState::Partial
@@ -1995,4 +2042,37 @@ fn search_view(app: &App, window: iced::window::Id) -> Element<'static, Message>
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn items(ids: &[&str]) -> Vec<(String, String)> {
+        ids.iter().map(|id| (id.to_string(), tool_label(id))).collect()
+    }
+
+    fn tools(ids: &[&str]) -> Vec<String> {
+        ids.iter().map(|id| id.to_string()).collect()
+    }
+
+    #[test]
+    fn group_state_tracks_partial_selection() {
+        let group = items(&["read_file", "write_file"]);
+        assert_eq!(checked_count(&tools(&[]), &group), (0, 2));
+        assert_eq!(state_of(&tools(&[]), &group), controls::CheckState::Off);
+        assert_eq!(state_of(&tools(&["read_file"]), &group), controls::CheckState::Partial);
+        assert_eq!(
+            state_of(&tools(&["read_file", "write_file"]), &group),
+            controls::CheckState::On
+        );
+    }
+
+    #[test]
+    fn group_state_ignores_tools_outside_the_group() {
+        let group = items(&["read_file"]);
+        assert_eq!(checked_count(&tools(&["web_search"]), &group), (0, 1));
+        assert_eq!(state_of(&tools(&["web_search"]), &group), controls::CheckState::Off);
+        assert_eq!(state_of(&tools(&["read_file", "web_search"]), &group), controls::CheckState::On);
+    }
 }
