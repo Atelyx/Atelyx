@@ -1043,10 +1043,12 @@ fn cell_content_height(
     col_w: f32,
     zoom: f32,
 ) -> f32 {
-    let Some(v) = v else { return 0.0 };
+    // 图片字段恒按图片区计高：缺键与空图片值同口径，行高不取决于「曾否存过图」
     if field.field_type == "image" {
-        return image_area_height(v, col_w, zoom);
+        let empty = serde_json::json!({ "images": [] });
+        return image_area_height(v.unwrap_or(&empty), col_w, zoom);
     }
+    let Some(v) = v else { return 0.0 };
     let st = table_ops::style_of(row, &field.id);
     let size = style_size(&st, base_font_size(field) * zoom, zoom).max(1.0);
     let text = match v.as_str() {
@@ -1076,7 +1078,8 @@ fn live_content_height(field: &TableField, row: &TableRow, draft: &str, col_w: f
     lines as f32 * size * LINE_FACTOR
 }
 
-/// 图片单元格高度（轮播 = 主图区 + 多图队列条；九宫格 = 方块行高累计 + 内衬）。
+/// 图片单元格高度（轮播 = 主图区 + 多图队列条；九宫格 = 方块行高累计 + 内衬；
+/// 空值（含缺键）= 整格添加热区的一档高度）。
 fn image_area_height(v: &serde_json::Value, col_w: f32, zoom: f32) -> f32 {
     let images = table_ops::image_entries(v);
     if images.is_empty() {
@@ -2134,7 +2137,8 @@ fn draw_image_cell(
     v: Option<&serde_json::Value>,
     hover: Option<Point>,
 ) {
-    let Some(v) = v else { return };
+    let empty = serde_json::json!({ "images": [] });
+    let v = v.unwrap_or(&empty);
     let view = &session.view;
     let field = &session.data.fields[c];
     let row = &session.data.rows[r];
