@@ -512,10 +512,16 @@ enum Message {
     ConfigSaved(u64, Result<(), String>),
     /// 文件行按压（拖拽候选；由行 mouse_area 上报，超阈值转正拖拽会话）。
     FileRowPress { window: window::Id, rel: String, is_dir: bool },
-    /// 拖拽悬停进入可落点（文件夹行 / 仓库行；无会话时忽略）。
-    FileDragEnter { rel: String, is_dir: bool },
-    /// 拖拽悬停离开可落点。
-    FileDragExit { rel: String },
+    /// 拖拽悬停进入某行 / 落点区（可放与否由会话与目标共同判定；无会话时忽略）。
+    FileDragEnter { drop: FileDropKey, rel: String, is_dir: bool },
+    /// 拖拽悬停离开某行 / 落点区（`drop` 与进入时一致才清除）。
+    FileDragExit { drop: FileDropKey },
+    /// 在系统文件管理器中显示条目（目录 = 打开，文件 = 打开所在目录并选中）。
+    RevealEntry { rel: String, is_dir: bool },
+    /// 复制条目路径到系统剪贴板（absolute = 绝对路径，否则仓库内相对路径）。
+    CopyEntryPath { rel: String, absolute: bool },
+    /// 文件树结构刷新（工具栏刷新钮；本地重读展开集，空间整树重拉）。
+    FileTreeRefresh,
     /// 切换任务勾选框（携带列表项源起点）。
     ToggleTask(usize),
     /// 复制代码块正文到系统剪贴板。
@@ -799,14 +805,30 @@ enum Message {
     Update(update::UpdateMsg),
 }
 
+/// 文件树拖拽悬停区：进出配对凭它区分同目标的相邻落点区（三处根落点区都指向仓库根）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FileDropKey {
+    /// 文件树行（值为相对路径）。
+    Row(String),
+    /// 行的侧缝（值为该行相对路径 + 左右侧；缝隙指向仓库根）。
+    Gutter { rel: String, right: bool },
+    /// 激活仓库行。
+    Vault,
+    /// 激活协作空间行。
+    Space,
+    /// 列表下方空白落点区。
+    Bottom,
+}
+
 /// 文件操作成功后对打开中笔记的跟随语义。
 #[derive(Debug, Clone)]
 pub enum FollowUp {
     None,
     /// 新建文件 / 文件夹 / 副本：落点供 `vault:file.changed` 广播。
     Created { rel: String },
-    /// 改名/移动：打开中笔记按前缀跟随；`rewritten` = 引用同步代写的笔记（打开中需重读）。
-    Renamed { from: String, to: String, rewritten: Vec<String> },
+    /// 改名/移动：打开中笔记按前缀跟随；`rewritten` = 引用同步代写的笔记（打开中需重读）；
+    /// `announce` = 成功出提示（移动要回执，改名由行内输入自证）。
+    Renamed { from: String, to: String, rewritten: Vec<String>, announce: bool },
     /// 删除：命中打开中笔记即清空编辑器。
     Deleted { rel: String, is_dir: bool },
 }
@@ -822,6 +844,63 @@ fn parent_of(rel: &str) -> String {
 /// 行内重命名输入挂焦点：输入行随本帧视图重建挂载，操作在重建后的树上执行。
 fn rename_focus_task() -> Task<Message> {
     iced::widget::operation::focus(iced::widget::Id::new(ui::controls::INLINE_RENAME_INPUT))
+}
+
+/// 在系统文件管理器中定位路径：目录 = 打开该目录，文件 = 打开所在目录并选中该项。
+/// Linux 无统一选中语义，一律打开所在目录。
+fn reveal_in_file_manager(path: &Path, is_dir: bool) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let mut cmd = std::process::Command::new("explorer");
+        if is_dir {
+            cmd.arg(path);
+        } else {
+            // explorer 自行解析命令行：`/select,<路径>` 必须作为一条原始参数传入
+            cmd.raw_arg(format!("/select,\"{}\"", path.display()));
+        }
+        let _ = cmd.spawn();
+    }
+    #[cfg(not(windows))]
+    {
+        let target = if is_dir { path } else { path.parent().unwrap_or(path) };
+        let _ = std::process::Command::new("xdg-open").arg(target).spawn();
+    }
+}
+
+/// 拖拽落点拒绝原因（驱动 ghost 文案）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DropReject {
+    /// 目标不是目录（文件行）。
+    NotADir,
+    /// 目标就是源目录本身：落下去是原地不动。
+    SameDir,
+    /// 目标是自身 / 自身子树 / 自身祖先。
+    SelfTree,
+}
+
+/// 拖拽落点判定：`target`（相对路径，`""` = 仓库根）能否接收当前拖拽会话。
+/// 目录行与根落点区可收；文件行不接受拖入，自身 / 自身子树 / 自身祖先 / 源目录本身
+/// 落下去都是原地 no-op。
+fn file_drop_check(
+    from: &str,
+    from_is_dir: bool,
+    target: &str,
+    target_is_dir: bool,
+) -> Result<(), DropReject> {
+    if !target_is_dir {
+        return Err(DropReject::NotADir);
+    }
+    if parent_of(from) == target {
+        return Err(DropReject::SameDir);
+    }
+    if target == from
+        || (from_is_dir
+            && (target.starts_with(&format!("{from}/")) || from.starts_with(&format!("{target}/"))))
+    {
+        return Err(DropReject::SelfTree);
+    }
+    Ok(())
 }
 
 /// 目录相对路径 + 条目名拼完整相对路径（dir = "" 即根）。
@@ -1534,7 +1613,7 @@ pub struct App {
     file_press: Option<FilePress>,
     /// 文件树拖拽会话（笔记/文件夹移动）。
     pub file_drag: Option<FileDrag>,
-    /// 拖拽悬停中的落点（文件夹相对路径；None = 不在可落点上）。
+    /// 拖拽悬停中的落点（目标目录相对路径，`""` = 仓库根；None = 不在可落点上）。
     pub file_drag_target: Option<String>,
 }
 
@@ -1555,7 +1634,7 @@ struct FilePress {
     is_dir: bool,
 }
 
-/// 文件树拖拽会话（ghost 跟随光标；释放落入文件夹行即移动）。
+/// 文件树拖拽会话（ghost 跟随光标；释放落入文件夹行 / 根落点区即移动）。
 pub struct FileDrag {
     pub from: String,
     pub is_dir: bool,
@@ -1564,6 +1643,19 @@ pub struct FileDrag {
     /// 全局光标（源窗口位置 + 本地坐标）。
     pub current: Point,
     pub cursor_window: window::Id,
+    /// 悬停中的不可落点（目标相对路径 + 拒绝原因）：只驱动提示，不参与释放判定。
+    pub reject: Option<(String, DropReject)>,
+    /// 悬停折叠目录的自动展开挂起（目录相对路径 + 进入时刻；由 UI 心跳到点展开）。
+    pub spring: Option<(String, Instant)>,
+    /// 当前悬停区（进出配对：只有同一区的离开才清除落点与提示）。
+    pub hover: Option<FileDropKey>,
+}
+
+impl FileDrag {
+    /// 该行当前是否为被拒落点（返回原因）。
+    pub fn reject_at(&self, rel: &str) -> Option<DropReject> {
+        self.reject.as_ref().filter(|(r, _)| r == rel).map(|(_, why)| *why)
+    }
 }
 
 /// 双链候选会话：`from` = 触发符（`[[` / `【【`）之后的正文偏移，查询词随编辑推进。
@@ -2644,25 +2736,39 @@ impl App {
                 }
                 Task::none()
             }
-            Message::FileDragEnter { rel, is_dir } => {
-                if let Some(d) = &self.file_drag {
-                    if is_dir {
-                        // 拒绝落进自身、自身子树与自身祖先（均构成原地 no-op）
-                        let into_self = d.is_dir
-                            && (rel == d.from
-                                || rel.starts_with(&format!("{}/", d.from))
-                                || d.from.starts_with(&format!("{rel}/")));
-                        if !into_self {
-                            self.file_drag_target = Some(rel);
-                        }
+            Message::FileDragEnter { drop, rel, is_dir } => {
+                let Some(d) = self.file_drag.as_ref() else { return Task::none() };
+                let verdict = file_drop_check(&d.from, d.is_dir, &rel, is_dir);
+                // 折叠目录悬停 = 自动展开候选（离开或换目标即作废；根落点区不是行，不参与）
+                let collapsed =
+                    !rel.is_empty() && !self.ui.file_explorer_expanded.iter().any(|e| e == &rel);
+                let Some(d) = self.file_drag.as_mut() else { return Task::none() };
+                d.hover = Some(drop);
+                match verdict {
+                    Ok(()) => {
+                        self.file_drag_target = Some(rel.clone());
+                        d.reject = None;
+                        d.spring = collapsed.then(|| (rel, Instant::now()));
+                    }
+                    Err(why) => {
+                        self.file_drag_target = None;
+                        d.reject = Some((rel, why));
+                        d.spring = None;
                     }
                 }
                 Task::none()
             }
-            Message::FileDragExit { rel } => {
-                if self.file_drag_target.as_deref() == Some(rel.as_str()) {
-                    self.file_drag_target = None;
+            Message::FileDragExit { drop } => {
+                // 只认当前悬停区的离开：相邻区（两侧缝 / 下方落点区）同指仓库根，
+                // 按目标清除会被后到的离开误清
+                let Some(d) = self.file_drag.as_mut() else { return Task::none() };
+                if d.hover.as_ref() != Some(&drop) {
+                    return Task::none();
                 }
+                d.hover = None;
+                d.reject = None;
+                d.spring = None;
+                self.file_drag_target = None;
                 Task::none()
             }
             Message::ToggleTask(item_from) => {
@@ -2972,6 +3078,8 @@ impl App {
             Message::UiTick => {
                 chat_actions::on_ui_tick(self);
                 self.notifications.retain(|n| !n.expired());
+                // 拖拽悬停折叠目录到点自动展开（展开后该行不再是候选，避免反复触发）
+                let spring = self.spring_open_dir();
                 // 表格图片长按检查（拖拽排序激活）
                 table_actions::check_long_press(self);
                 // 远端光标过期剔除节流（1s）：对端崩溃/断网无离场帧，靠通道超时惰性剔除
@@ -3030,9 +3138,9 @@ impl App {
                 }
                 // 下载进度刷新搭载同一心跳：Downloading 时派发 ProgressTick 读暂存刷入
                 if matches!(self.update, update::UpdateState::Downloading { .. }) {
-                    return Task::done(Message::Update(update::UpdateMsg::ProgressTick));
+                    return spring.chain(Task::done(Message::Update(update::UpdateMsg::ProgressTick)));
                 }
-                Task::none()
+                spring
             }
             Message::WindowResized(id, size) => {
                 if self.main_id == Some(id) {
@@ -3236,6 +3344,9 @@ impl App {
                             label,
                             current,
                             cursor_window: id,
+                            reject: None,
+                            spring: None,
+                            hover: None,
                         });
                         self.file_drag_target = None;
                         return Task::none();
@@ -3974,17 +4085,42 @@ impl App {
                 }
             }
             Message::RevealVaultAt(root) => {
-                let path = PathBuf::from(root);
-                #[cfg(windows)]
-                {
-                    let _ = std::process::Command::new("explorer").arg(&path).spawn();
-                }
-                #[cfg(not(windows))]
-                {
-                    let _ = std::process::Command::new("xdg-open").arg(&path).spawn();
-                }
+                reveal_in_file_manager(Path::new(&root), true);
                 Task::none()
             }
+            Message::RevealEntry { rel, is_dir } => {
+                let Some(root) = self.vault.root().ok() else { return Task::none() };
+                let path = if rel.is_empty() {
+                    root
+                } else {
+                    match vault::safe_join(&root, &rel, false) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            self.notify(NoticeLevel::Error, e);
+                            return Task::none();
+                        }
+                    }
+                };
+                reveal_in_file_manager(&path, is_dir);
+                Task::none()
+            }
+            Message::CopyEntryPath { rel, absolute } => {
+                let text = if absolute {
+                    let Some(root) = self.vault.root().ok() else { return Task::none() };
+                    match vault::safe_join(&root, &rel, false) {
+                        Ok(p) => p.to_string_lossy().into_owned(),
+                        Err(e) => {
+                            self.notify(NoticeLevel::Error, e);
+                            return Task::none();
+                        }
+                    }
+                } else {
+                    rel
+                };
+                self.notify(NoticeLevel::Success, "已复制路径");
+                iced::clipboard::write(text)
+            }
+            Message::FileTreeRefresh => self.refresh_file_tree(),
             Message::RemoveVaultAsk(root) => {
                 // 进弹层确认 pane（与删除确认同形）：条目留在当前菜单内二段确认
                 self.remove_vault_confirm = Some(root);
@@ -4030,7 +4166,20 @@ impl App {
                         *to = final_rel;
                     }
                 }
-                if !matches!(follow, FollowUp::Renamed { .. }) {
+                if let FollowUp::Renamed { to, announce, .. } = &follow {
+                    if *announce {
+                        let dir = parent_of(to);
+                        self.notify(
+                            NoticeLevel::Success,
+                            if dir.is_empty() {
+                                "已移到根目录".to_string()
+                            } else {
+                                let name = dir.rsplit('/').next().unwrap_or(&dir);
+                                format!("已移到「{name}」")
+                            },
+                        );
+                    }
+                } else {
                     self.notify(NoticeLevel::Success, "完成");
                 }
                 // 宿主发起的文件操作成功后广播（改名按去重后的实际落点；原地改名不重复告知）
@@ -6041,7 +6190,7 @@ impl App {
                             gen,
                             parent,
                             Ok(full.clone()),
-                            FollowUp::Renamed { from: old, to: full, rewritten },
+                            FollowUp::Renamed { from: old, to: full, rewritten, announce: false },
                         ),
                         Err(e) => Message::OpDone(gen, parent, Err(e), FollowUp::None),
                     },
@@ -6092,7 +6241,7 @@ impl App {
                             gen,
                             parent,
                             Ok(full.clone()),
-                            FollowUp::Renamed { from: old_dir, to: full, rewritten },
+                            FollowUp::Renamed { from: old_dir, to: full, rewritten, announce: false },
                         ),
                         Err(e) => Message::OpDone(gen, parent, Err(e), FollowUp::None),
                     },
@@ -6463,11 +6612,54 @@ impl App {
         )
     }
 
+    /// 文件树结构刷新（工具栏刷新钮）：磁盘无监听，外部改动只能靠这里与切仓库感知。
+    /// 本地 = 目录缓存整体重读（按当前展开集）+ 文件计数与笔记名册重取；
+    /// 空间 = 整树重拉（服务端真源，切片缓存由回执重建）。
+    fn refresh_file_tree(&mut self) -> Task<Message> {
+        if matches!(self.repo_kind, RepoKind::Space(_)) {
+            return space_actions::refresh_space_tree(self);
+        }
+        if self.vault_root.is_none() {
+            return Task::none();
+        }
+        let expanded = self.ui.file_explorer_expanded.clone();
+        // 展开集外的目录缓存先丢弃（收起状态看不到，避免留下过期切片）；
+        // 可见目录保留旧值到重读回执，刷新期间不闪空
+        self.children.retain(|dir, _| expanded.contains(dir));
+        let mut task = Task::none();
+        for dir in expanded {
+            task = task.chain(self.load_children(&dir));
+        }
+        task.chain(self.count_files()).chain(self.refresh_note_files())
+    }
+
+    /// 拖拽悬停折叠目录到点自动展开：让「移进折叠目录的下一层」不必先松手再展开。
+    /// 展开后该行不再是候选（`spring` 清空），落点保持为该目录。
+    fn spring_open_dir(&mut self) -> Task<Message> {
+        const SPRING: std::time::Duration = std::time::Duration::from_millis(600);
+        let Some(d) = self.file_drag.as_mut() else { return Task::none() };
+        let Some((dir, at)) = d.spring.clone() else { return Task::none() };
+        if at.elapsed() < SPRING {
+            return Task::none();
+        }
+        d.spring = None;
+        if self.ui.file_explorer_expanded.iter().any(|e| e == &dir) {
+            return Task::none();
+        }
+        self.ui.file_explorer_expanded.push(dir.clone());
+        self.schedule_persist();
+        if self.children.contains_key(&dir) {
+            Task::none()
+        } else {
+            self.load_children(&dir)
+        }
+    }
+
     /// 拖拽释放落点 → 移动（挂起输入先落盘：引用同步会代写打开中的笔记，防回写覆盖）。
     fn resolve_file_drop(&mut self, d: FileDrag) -> Task<Message> {
         let Some(target_dir) = self.file_drag_target.take() else { return Task::none() };
-        let from_dir = parent_of(&d.from);
-        if target_dir == from_dir {
+        // 释放前按同一判据复核：视图重建滞后可能让落点停在不可放的位置
+        if file_drop_check(&d.from, d.is_dir, &target_dir, true).is_err() {
             return Task::none();
         }
         self.gate(PendingAfterFlush::MoveEntry {
@@ -6522,7 +6714,7 @@ impl App {
                     gen,
                     to_dir,
                     Ok(full.clone()),
-                    FollowUp::Renamed { from, to: full, rewritten },
+                    FollowUp::Renamed { from, to: full, rewritten, announce: true },
                 ),
                 Err(e) => Message::OpDone(gen, to_dir, Err(e), FollowUp::None),
             },
@@ -7161,12 +7353,14 @@ impl App {
 
     fn subscription(&self) -> Subscription<Message> {
         // 心跳仅在有待过期通知、提醒条在途、悬停提示在途（距离收起判定）、编辑面聚焦、
-        // 笔记 / 表格在场有待发状态或有对端（补发 / 保活 / 远端剔除搭载）、表格图片长按候选
-        // 或快捷键页展示中（冲突警示两态闪烁）时挂载
+        // 文件拖拽悬停折叠目录（自动展开判定）、笔记 / 表格在场有待发状态或有对端
+        // （补发 / 保活 / 远端剔除搭载）、表格图片长按候选或快捷键页展示中（冲突警示两态闪烁）时挂载
         let need_tick = !self.notifications.is_empty()
             || self.rename_notice.is_some()
             || self.tooltip.is_some()
             || self.edit.focused
+            // 文件拖拽悬停折叠目录：自动展开挂起需心跳到点判定
+            || self.file_drag.as_ref().is_some_and(|d| d.spring.is_some())
             // 笔记在场：有待发状态或有对端时需要周期拍；单人无对端不挂拍，避免空闲被 10Hz 重绘
             || self
                 .note_collab_channel
@@ -7427,4 +7621,65 @@ fn space_pump_stream(
             .await;
         }
     })
+}
+
+#[cfg(test)]
+mod file_drop_tests {
+    use super::{file_drop_check, DropReject};
+
+    #[test]
+    fn accepts_other_folders_and_root() {
+        // 文件 → 别的文件夹 / 根
+        assert_eq!(file_drop_check("a.md", false, "docs", true), Ok(()));
+        assert_eq!(file_drop_check("docs/a.md", false, "", true), Ok(()));
+        // 文件夹 → 别的文件夹 / 根
+        assert_eq!(file_drop_check("docs", true, "notes", true), Ok(()));
+        assert_eq!(file_drop_check("docs/a", true, "", true), Ok(()));
+        // 名称前缀相同但不是子树：仍可放
+        assert_eq!(file_drop_check("docs", true, "docs2", true), Ok(()));
+    }
+
+    #[test]
+    fn rejects_file_rows() {
+        assert_eq!(
+            file_drop_check("a.md", false, "b.md", false),
+            Err(DropReject::NotADir)
+        );
+        assert_eq!(
+            file_drop_check("docs", true, "docs/b.md", false),
+            Err(DropReject::NotADir)
+        );
+    }
+
+    #[test]
+    fn rejects_self_subtree_and_ancestor() {
+        assert_eq!(
+            file_drop_check("docs", true, "docs", true),
+            Err(DropReject::SelfTree)
+        );
+        assert_eq!(
+            file_drop_check("docs", true, "docs/sub", true),
+            Err(DropReject::SelfTree)
+        );
+        assert_eq!(
+            file_drop_check("docs/sub", true, "docs", true),
+            Err(DropReject::SameDir)
+        );
+    }
+
+    #[test]
+    fn rejects_source_dir_itself() {
+        assert_eq!(
+            file_drop_check("a.md", false, "", true),
+            Err(DropReject::SameDir)
+        );
+        assert_eq!(
+            file_drop_check("docs/a.md", false, "docs", true),
+            Err(DropReject::SameDir)
+        );
+        assert_eq!(
+            file_drop_check("docs", true, "", true),
+            Err(DropReject::SameDir)
+        );
+    }
 }

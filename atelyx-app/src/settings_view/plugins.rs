@@ -995,6 +995,7 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
                         from: from.clone(),
                         to: to.clone(),
                         rewritten: Vec::new(),
+                        announce: false,
                     });
                     app.follow_children_cache(from, to);
                 }

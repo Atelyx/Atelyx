@@ -842,14 +842,21 @@ fn with_overlays<'a>(
                 } else {
                     file_icon(app, &drag.label)
                 };
-                let hint = app.file_drag_target.as_ref().map(|dir| {
-                    if dir.is_empty() {
-                        "移到根目录".to_string()
-                    } else {
-                        let name = dir.rsplit('/').next().unwrap_or(dir);
-                        format!("移动到「{name}」")
-                    }
-                });
+                let reject = drag.reject.as_ref().map(|(_, why)| *why);
+                let hint = match reject {
+                    Some(crate::DropReject::NotADir) => Some("只能放进文件夹".to_string()),
+                    Some(crate::DropReject::SameDir) => Some("已在此目录".to_string()),
+                    Some(crate::DropReject::SelfTree) => Some("不能放进自身".to_string()),
+                    None => app.file_drag_target.as_ref().map(|dir| {
+                        if dir.is_empty() {
+                            "移到根目录".to_string()
+                        } else {
+                            let name = dir.rsplit('/').next().unwrap_or(dir);
+                            format!("移动到「{name}」")
+                        }
+                    }),
+                };
+                let reject = reject.is_some();
                 let mut card = column![
                     row![
                         icon_resolved(&icon_name, 13.0, pal::TEXT_PRIMARY, 1.5),
@@ -860,14 +867,18 @@ fn with_overlays<'a>(
                 .spacing(2);
                 if let Some(hint) = hint {
                     card = card.push(
-                        text(hint).size(pal::fs_micro()).color(pal::TEXT_SECONDARY),
+                        text(hint)
+                            .size(pal::fs_micro())
+                            .color(if reject { pal::DANGER } else { pal::TEXT_SECONDARY }),
                     );
                 }
                 let ghost = container(card)
                     .padding(Padding::ZERO.horizontal(10.0).vertical(4.0))
-                    .style(|_t| Style {
+                    .style(move |_t| Style {
                         background: Some(pal::BG_OVERLAY.into()),
-                        border: border::rounded(pal::RADIUS_SM).color(pal::ACCENT).width(1.0),
+                        border: border::rounded(pal::RADIUS_SM)
+                            .color(if reject { pal::DANGER } else { pal::ACCENT })
+                            .width(1.0),
                         ..Style::default()
                     });
                 let positioned = container(ghost)
@@ -2324,9 +2335,60 @@ struct TreeRow {
     guides: Vec<f32>,
 }
 
+/// 行侧缝宽度：条目不满宽的视觉留白，同时是拖拽回仓库根的落点。
+const FILE_GUTTER: f32 = 8.0;
+
+/// 行侧缝（根落点）：行体两侧各一条，自下而上每一行都有，任意滚动位置都能放下。
+fn root_seam(rel: &str, right: bool) -> Element<'static, Message> {
+    let key = crate::FileDropKey::Gutter { rel: rel.to_string(), right };
+    mouse_area(space().width(Length::Fixed(FILE_GUTTER)).height(Length::Fill))
+        .on_enter(Message::FileDragEnter {
+            drop: key.clone(),
+            rel: String::new(),
+            is_dir: true,
+        })
+        .on_exit(Message::FileDragExit { drop: key })
+        .into()
+}
+
+/// 列表下方空白的根落点（仅拖拽会话渲染；悬停 = 释放后移到仓库根）。
+fn root_drop_zone(app: &App) -> Element<'static, Message> {
+    let hovered = app
+        .file_drag
+        .as_ref()
+        .is_some_and(|d| d.hover == Some(crate::FileDropKey::Bottom));
+    let label = if hovered { "松手移到根目录" } else { "移到根目录" };
+    let zone = container(
+        text(label)
+            .size(pal::fs_caption())
+            .color(if hovered { pal::ACCENT } else { pal::TEXT_MUTED }),
+    )
+    .width(Length::Fill)
+    .height(Length::Fixed(120.0))
+    .align_x(Horizontal::Center)
+    .align_y(Vertical::Center)
+    .style(move |_t| Style {
+        background: hovered.then_some(pal::ACCENT_SOFT.into()),
+        border: border::rounded(pal::RADIUS_SM)
+            .color(if hovered { pal::ACCENT } else { pal::TEXT_MUTED.scale_alpha(0.45) })
+            .width(1.0),
+        ..Style::default()
+    });
+    mouse_area(zone)
+        .on_enter(Message::FileDragEnter {
+            drop: crate::FileDropKey::Bottom,
+            rel: String::new(),
+            is_dir: true,
+        })
+        .on_exit(Message::FileDragExit { drop: crate::FileDropKey::Bottom })
+        .into()
+}
+
 fn files_view(app: &App) -> Element<'_, Message> {
     let window = app.main_id.unwrap_or(iced::window::Id::unique());
     let cursor = app.cursor_for(window);
+    // 树可刷新 = 已在容器内（本地仓库或协作空间）
+    let in_repo = app.vault_root.is_some() || matches!(app.repo_kind, crate::RepoKind::Space(_));
 
     // 工具条（未开仓库也渲染：空态文案指向工具条的打开按钮）
     let (expand_icon, expand_label) = if app.expand_all {
@@ -2343,6 +2405,8 @@ fn files_view(app: &App) -> Element<'_, Message> {
             controls::icon_button("arrow-up-down", 14.0, controls::ICON_MD, Variant::Ghost,
                 Some(btn_popup(window, cursor, PopupState::SortMenu)), Some((window, "排序方式".into()))),
             space().width(Length::Fill),
+            controls::icon_button("refresh-cw", 14.0, controls::ICON_MD, Variant::Ghost,
+                in_repo.then_some(Message::FileTreeRefresh), Some((window, "重新读取文件树".into()))),
             controls::icon_button(expand_icon, 14.0, controls::ICON_MD, Variant::Ghost,
                 Some(Message::ExpandAllToggle), Some((window, expand_label.into()))),
         ]
@@ -2449,7 +2513,7 @@ fn files_view(app: &App) -> Element<'_, Message> {
             }
             crate::RepoKind::Local => false,
         };
-        tree_col = tree_col.push(space_row(window, cursor, s, active, &expanded));
+        tree_col = tree_col.push(space_row(app, window, cursor, s, active, &expanded));
         if !active {
             continue;
         }
@@ -2478,14 +2542,15 @@ fn files_view(app: &App) -> Element<'_, Message> {
         }
     }
 
+    // 拖拽会话：列表下方空白 = 根落点（行侧缝之外的第二个通道；非拖拽期不渲染）
+    if app.file_drag.is_some() && in_repo {
+        tree_col = tree_col.push(root_drop_zone(app));
+    }
+
     let body = mouse_area(
-        scroll::v(
-            container(tree_col)
-                .width(Length::Fill)
-                .padding(Padding::ZERO.horizontal(4.0)),
-        )
-        .width(Length::Fill)
-        .height(Length::Fill),
+        scroll::v(container(tree_col).width(Length::Fill))
+            .width(Length::Fill)
+            .height(Length::Fill),
     );
     // 空白处右键 = 在激活仓库/空间根目录新建（未激活时无根可建，不挂菜单）
     let tree: Element<'static, Message> = if app.vault_root.is_some()
@@ -2517,8 +2582,13 @@ fn vault_row(
     expanded: &HashSet<&str>,
 ) -> Element<'static, Message> {
     let vault_open = active && expanded.contains("");
-    // 拖拽悬停激活仓库行 = 移入根：底色加深提示可放入
-    let drag_target = active && app.file_drag_target.as_deref() == Some("");
+    // 拖拽悬停激活仓库行 = 移入根：底色加深提示可放入（根被拒时转警示色）
+    let hovered = app
+        .file_drag
+        .as_ref()
+        .is_some_and(|d| d.hover == Some(crate::FileDropKey::Vault));
+    let drag_target = active && hovered && app.file_drag_target.as_deref() == Some("");
+    let rejected = active && hovered && app.file_drag.as_ref().is_some_and(|d| d.reject_at("").is_some());
     let row = row![
         icon(
             if vault_open { "chevron-down" } else { "chevron-right" },
@@ -2540,11 +2610,15 @@ fn vault_row(
         .height(Length::Fixed(32.0))
         .align_y(Vertical::Center)
         .style(move |_t| Style {
-            // 激活行 = 强调淡底（拖拽落点更深）；非激活行透明（悬停高亮由按钮样式给）
-            background: Some(if active {
-                if drag_target { pal::ACCENT.scale_alpha(0.35) } else { pal::ACCENT.scale_alpha(0.2) }
-            } else {
+            // 激活行 = 强调淡底（拖拽落点更深 / 根被拒 = 警示色）；非激活行透明
+            background: Some(if !active {
                 Color::TRANSPARENT
+            } else if rejected {
+                pal::DANGER_SOFT
+            } else if drag_target {
+                pal::ACCENT.scale_alpha(0.35)
+            } else {
+                pal::ACCENT.scale_alpha(0.2)
             }
             .into()),
             border: border::rounded(pal::RADIUS_SM),
@@ -2569,8 +2643,12 @@ fn vault_row(
     // 悬停提示完整路径；文件拖拽会话中悬停激活仓库行 = 落点上报（拖至该行 = 移入根）
     let row_elem = if app.file_drag.is_some() && active {
         row_elem
-            .on_enter(Message::FileDragEnter { rel: String::new(), is_dir: true })
-            .on_exit(Message::FileDragExit { rel: String::new() })
+            .on_enter(Message::FileDragEnter {
+                drop: crate::FileDropKey::Vault,
+                rel: String::new(),
+                is_dir: true,
+            })
+            .on_exit(Message::FileDragExit { drop: crate::FileDropKey::Vault })
     } else {
         let path = vault.root.clone();
         row_elem
@@ -2581,8 +2659,11 @@ fn vault_row(
             }))
             .on_exit(Message::Ui(crate::ui::UiMsg::HoverTipEnd { window, label: path }))
     };
-    row_elem
+    let row_elem: Element<'static, Message> = row_elem
         .on_right_press(ctx_popup(window, cursor, PopupState::VaultMenu { root: vault.root.clone() }))
+        .into();
+    row![root_seam("", false), row_elem, root_seam("", true)]
+        .height(Length::Fixed(32.0))
         .into()
 }
 
@@ -2640,6 +2721,7 @@ pub(crate) fn collab_pill_row(members: &[(iced::Color, String)]) -> Element<'sta
 
 /// 最近空间行（与仓库行同构：激活行就地展开文件树；云图标 + 空间名）。
 fn space_row(
+    app: &App,
     window: iced::window::Id,
     cursor: Point,
     space: &atelyx_core::global_config::RecentSpace,
@@ -2662,12 +2744,28 @@ fn space_row(
     .padding(Padding::ZERO.horizontal(8.0).vertical(4.0))
     .width(Length::Fill);
 
+    // 拖拽悬停激活空间行 = 移入根：底色加深提示可放入（根被拒时转警示色）
+    let hovered = app
+        .file_drag
+        .as_ref()
+        .is_some_and(|d| d.hover == Some(crate::FileDropKey::Space));
+    let drag_target = active && hovered && app.file_drag_target.as_deref() == Some("");
+    let rejected = active && hovered && app.file_drag.as_ref().is_some_and(|d| d.reject_at("").is_some());
     let content = container(row)
         .width(Length::Fill)
         .height(Length::Fixed(32.0))
         .align_y(Vertical::Center)
         .style(move |_t| Style {
-            background: Some(if active { pal::ACCENT.scale_alpha(0.2) } else { Color::TRANSPARENT }.into()),
+            background: Some(if !active {
+                Color::TRANSPARENT
+            } else if rejected {
+                pal::DANGER_SOFT
+            } else if drag_target {
+                pal::ACCENT.scale_alpha(0.35)
+            } else {
+                pal::ACCENT.scale_alpha(0.2)
+            }
+            .into()),
             border: border::rounded(pal::RADIUS_SM),
             ..Style::default()
         });
@@ -2682,7 +2780,7 @@ fn space_row(
             from_boot: false,
         })
     };
-    mouse_area(
+    let row_elem = mouse_area(
         button(content)
             .width(Length::Fill)
             .style(|_t, status| button::Style {
@@ -2691,25 +2789,35 @@ fn space_row(
                 ..Default::default()
             })
             .on_press(on_press),
-    )
-    .on_enter(Message::Ui(crate::ui::UiMsg::HoverTip {
-        window,
-        label: format!("{} · {}", space.name, space.server_url),
-        box_px: 32.0,
-    }))
-    .on_exit(Message::Ui(crate::ui::UiMsg::HoverTipEnd {
-        window,
-        label: format!("{} · {}", space.name, space.server_url),
-    }))
-    .on_right_press(ctx_popup(
-        window,
-        cursor,
-        PopupState::SpaceRowMenu {
-            server_url: space.server_url.clone(),
-            space_id: space.space_id.clone(),
-        },
-    ))
-    .into()
+    );
+    // 文件拖拽会话中悬停激活空间行 = 落点上报（拖至该行 = 移入根）
+    let row_elem = if app.file_drag.is_some() && active {
+        row_elem
+            .on_enter(Message::FileDragEnter {
+                drop: crate::FileDropKey::Space,
+                rel: String::new(),
+                is_dir: true,
+            })
+            .on_exit(Message::FileDragExit { drop: crate::FileDropKey::Space })
+    } else {
+        let label = format!("{} · {}", space.name, space.server_url);
+        row_elem
+            .on_enter(Message::Ui(crate::ui::UiMsg::HoverTip { window, label: label.clone(), box_px: 32.0 }))
+            .on_exit(Message::Ui(crate::ui::UiMsg::HoverTipEnd { window, label }))
+    };
+    let row_elem: Element<'static, Message> = row_elem
+        .on_right_press(ctx_popup(
+            window,
+            cursor,
+            PopupState::SpaceRowMenu {
+                server_url: space.server_url.clone(),
+                space_id: space.space_id.clone(),
+            },
+        ))
+        .into();
+    row![root_seam("", false), row_elem, root_seam("", true)]
+        .height(Length::Fixed(32.0))
+        .into()
 }
 
 /// 目录/文件行（行高 32、缩进 12+16×depth、展开指示线；激活文件 = 金淡底 + 左缘 2px 金轨）。
@@ -2762,7 +2870,17 @@ fn tree_row_element(
         );
     }
 
-    let bg = if r.active || drag_target { pal::ACCENT_SOFT } else { iced::Color::TRANSPARENT };
+    let rejected = app
+        .file_drag
+        .as_ref()
+        .is_some_and(|d| d.reject_at(r.rel.as_str()).is_some());
+    let bg = if rejected {
+        pal::DANGER_SOFT
+    } else if r.active || drag_target {
+        pal::ACCENT_SOFT
+    } else {
+        iced::Color::TRANSPARENT
+    };
     let active = r.active;
     // 行体：底色 + 圆角
     let row_body = container(content)
@@ -2809,17 +2927,23 @@ fn tree_row_element(
             .on_press(msg),
     )
     .on_right_press(Message::PopupOpen(window, PopupOpen { point: cursor, flip_y: None, state, min_width: 0.0 }));
-    let row = if r.is_dir {
-        row.on_enter(Message::FileDragEnter { rel: r.rel.clone(), is_dir: true })
-            .on_exit(Message::FileDragExit { rel: r.rel.clone() })
-    } else {
-        row
-    };
-    controls::PressReporter::new(
+    // 拖拽悬停：目录行 = 可落点，文件行 = 拒绝提示（都上报，判定在会话侧）
+    let row = row
+        .on_enter(Message::FileDragEnter {
+            drop: crate::FileDropKey::Row(r.rel.clone()),
+            rel: r.rel.clone(),
+            is_dir: r.is_dir,
+        })
+        .on_exit(Message::FileDragExit { drop: crate::FileDropKey::Row(r.rel.clone()) });
+    let row: Element<'static, Message> = controls::PressReporter::new(
         row.into(),
         Message::FileRowPress { window, rel: r.rel.clone(), is_dir: r.is_dir },
     )
-    .into()
+    .into();
+    // 两侧缝 = 仓库根落点（行体不占满宽度，拖到缝隙即移到根）
+    row![root_seam(&r.rel, false), row, root_seam(&r.rel, true)]
+        .height(Length::Fixed(32.0))
+        .into()
 }
 
 /// 行内叠加竖线（宽 `w` px、左偏移 `x`；行体之上的叠层画法）。
@@ -2870,7 +2994,7 @@ fn draft_input_row(app: &App, depth: usize) -> Element<'static, Message> {
     )
     .width(Length::Fill)
     .height(Length::Fixed(32.0))
-    .padding(Padding::ZERO.left(12.0 + depth as f32 * 16.0).right(8.0))
+    .padding(Padding::ZERO.left(12.0 + depth as f32 * 16.0 + FILE_GUTTER).right(8.0 + FILE_GUTTER))
     .align_y(Vertical::Center)
     .into()
 }
@@ -2902,7 +3026,7 @@ fn file_inline_input(app: &App, r: &TreeRow) -> Option<Element<'static, Message>
         )
         .width(Length::Fill)
         .height(Length::Fixed(32.0))
-        .padding(Padding::ZERO.left(indent).right(8.0))
+        .padding(Padding::ZERO.left(indent + FILE_GUTTER).right(8.0 + FILE_GUTTER))
         .align_y(Vertical::Center)
         .into(),
     )
@@ -6436,6 +6560,46 @@ fn space_invite_entries(
 
 /// 文件树右键菜单：文件夹 / 文件 / 根空白；删除 = 应用层确认流
 /// （文件进确认 pane；文件夹先计数——空目录直接删、非空带条目数进确认 pane）。
+/// 本机路径类菜单条目（复制绝对 / 相对路径、在系统文件管理器中显示）。
+/// 协作空间的内容在服务端、没有本机路径，整组不出现；根行的相对路径无意义，不列。
+/// 调用方按返回值是否为空决定是否插入分组分隔线（空组不留悬空线）。
+fn path_menu_entries(
+    app: &App,
+    rel: &str,
+    is_dir: bool,
+) -> Vec<(usize, MenuEntry<'static, Message>)> {
+    if matches!(app.repo_kind, crate::RepoKind::Space(_)) {
+        return Vec::new();
+    }
+    let mut out = vec![(
+        0,
+        MenuEntry::action_icon(
+            "复制绝对路径",
+            "link",
+            Message::CopyEntryPath { rel: rel.to_string(), absolute: true },
+        ),
+    )];
+    if !rel.is_empty() {
+        out.push((
+            0,
+            MenuEntry::action_icon(
+                "复制相对路径",
+                "link",
+                Message::CopyEntryPath { rel: rel.to_string(), absolute: false },
+            ),
+        ));
+    }
+    out.push((
+        0,
+        MenuEntry::action_icon(
+            "在文件管理器中显示",
+            "folder-open",
+            Message::RevealEntry { rel: rel.to_string(), is_dir },
+        ),
+    ));
+    out
+}
+
 fn file_menu_entries(
     app: &App,
     rel: &str,
@@ -6485,10 +6649,22 @@ fn file_menu_entries(
             entries.push((0, MenuEntry::action_icon("创建副本", "copy",
                 Message::DuplicateEntry(rel.to_string(), true))));
             entries.push((0, MenuEntry::Divider));
+            let path_entries = path_menu_entries(app, rel, true);
+            if !path_entries.is_empty() {
+                entries.extend(path_entries);
+                entries.push((0, MenuEntry::Divider));
+            }
             entries.push((0, MenuEntry::action_icon("重命名", "pencil",
                 Message::RenameStartFolder(rel.to_string()))));
             entries.push((0, MenuEntry::danger("删除", "trash-2",
                 Message::FolderDeleteAsk(rel.to_string()))));
+        } else {
+            // 根行没有条目本身：只给本机路径类（相对路径无意义，由 helper 略去）
+            let path_entries = path_menu_entries(app, rel, true);
+            if !path_entries.is_empty() {
+                entries.push((0, MenuEntry::Divider));
+                entries.extend(path_entries);
+            }
         }
     } else {
         let lower = rel.to_lowercase();
@@ -6517,6 +6693,11 @@ fn file_menu_entries(
         entries.push((0, MenuEntry::action_icon("创建副本", "copy",
             Message::DuplicateEntry(rel.to_string(), false))));
         entries.push((0, MenuEntry::Divider));
+        let path_entries = path_menu_entries(app, rel, false);
+        if !path_entries.is_empty() {
+            entries.extend(path_entries);
+            entries.push((0, MenuEntry::Divider));
+        }
         entries.push((0, MenuEntry::action_icon("重命名", "pencil",
             Message::RenameStartFile(rel.to_string()))));
         entries.push((0, MenuEntry::danger("删除", "trash-2",
