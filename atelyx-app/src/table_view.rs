@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use iced::widget::canvas::{self, Canvas, LineCap, LineDash, LineJoin, Path, Stroke};
 use iced::widget::text_editor;
-use iced::widget::{column, container, row, space};
+use iced::widget::{column, container, opaque, row, space};
 use iced::{alignment, Color, Element, Length, Point, Rectangle, Size, Vector};
 
 use crate::layout_view::estimate_text_width;
@@ -2599,11 +2599,12 @@ pub fn format_bar_overlay<'a>(
     ]
     .spacing(BAR_ITEM_GAP)
     .padding(iced::Padding::ZERO.horizontal(BAR_PAD_X).vertical(BAR_PAD_Y));
-    let bar = container(bar).style(|_t| iced::widget::container::Style {
+    // 气泡矩形内的按下不穿透到表格画布：内边距 / 按钮间隙按下若落到画布会改选区并收起气泡
+    let bar = opaque(container(bar).style(|_t| iced::widget::container::Style {
         background: Some(pal::BG_OVERLAY.into()),
         border: iced::border::rounded(pal::RADIUS_SM).color(pal::BORDER_STRONG).width(1.0),
         ..Default::default()
-    });
+    }));
     Some(
         container(bar)
             .width(Length::Fill)

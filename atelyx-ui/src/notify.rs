@@ -6,7 +6,7 @@
 use std::time::{Duration, Instant};
 
 use iced::alignment::{Horizontal, Vertical};
-use iced::widget::{button, column, container, row, space};
+use iced::widget::{button, column, container, opaque, row, space};
 use iced::{Color, Element, Length, Padding, border, widget::container::Style};
 
 use super::icon::icon;
@@ -150,7 +150,8 @@ fn card<'a, M: Clone + 'a + 'static>(n: &'a Notification<M>, on_dismiss: M) -> E
             border: border::rounded(pal::RADIUS_SM).color(pal::BORDER).width(1.0),
             ..Style::default()
         });
-    container(shadow_wrap)
+    // 卡片本体吞掉按下（opaque）：文案 / 内边距上的点击不穿透到下层内容
+    container(opaque(shadow_wrap))
         .padding(Padding { left: 3.0, top: 1.0, right: 3.0, bottom: 8.0 })
         .style(|_t| Style {
             background: Some(Color::BLACK.scale_alpha(0.35).into()),

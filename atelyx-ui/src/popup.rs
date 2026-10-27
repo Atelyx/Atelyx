@@ -2,7 +2,7 @@
 //! 覆盖元素由调用方作为追加子叠在窗口内容 Stack 上，Esc 由应用层键盘订阅路由。
 
 use iced::alignment::{Horizontal, Vertical};
-use iced::widget::{container, mouse_area, space, stack};
+use iced::widget::{container, mouse_area, opaque, space, stack};
 use iced::{Color, Element, Length, Padding, Point, Size, border, widget::container::Style};
 
 use super::palette as pal;
@@ -64,14 +64,18 @@ pub fn overlay<'a, M: Clone + 'a>(
     on_dismiss: M,
 ) -> Element<'a, M> {
     let capture = mouse_area(space().width(Length::Fill).height(Length::Fill)).on_press(on_dismiss);
-    let popup = container(content)
-        .width(Length::Fixed(geom.w))
-        .style(move |_t| Style {
-            background: Some(pal::BG_OVERLAY.into()),
-            border: border::rounded(pal::RADIUS_MD).color(pal::BORDER).width(1.0),
-            ..Style::default()
-        });
-    let shadow_wrap = container(popup)
+    // 卡片矩形内的按下由 opaque 截住：卡片非控件区域（内边距 / 条目间空白）
+    // 不穿透到捕获层，外点判定只按卡片矩形（阴影环仍算外点）。
+    let card = opaque(
+        container(content)
+            .width(Length::Fixed(geom.w))
+            .style(move |_t| Style {
+                background: Some(pal::BG_OVERLAY.into()),
+                border: border::rounded(pal::RADIUS_MD).color(pal::BORDER).width(1.0),
+                ..Style::default()
+            }),
+    );
+    let shadow_wrap = container(card)
         .padding(Padding {
             left: SHADOW_PAD_LEFT,
             top: SHADOW_PAD_TOP,
@@ -113,7 +117,8 @@ pub fn modal_overlay_with<'a, M: Clone + 'a>(close: M, card: Element<'a, M>) -> 
             }),
     )
     .on_press(close);
-    let shadow_wrap = container(card)
+    // 同 overlay：卡片矩形内按下不穿透遮罩（阴影环仍算外点）。
+    let shadow_wrap = container(opaque(card))
         .padding(Padding {
             left: SHADOW_PAD_LEFT,
             top: SHADOW_PAD_TOP,
