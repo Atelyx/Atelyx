@@ -11,6 +11,8 @@ path = "src/main.rs"
 [dependencies]
 # 核心能力（仓库存储/原子写/目录过滤）：与壳共享同一实现
 atelyx-core = { path = "../atelyx-core" }
+# 功能模块契约：视图注册表 + Pack 接口 + 宿主能力面
+atelyx-pack = { path = "../atelyx-pack" }
 # 界面组件库：调色板 / 字体 / 图标 / 基元控件 / 弹层 / 滚动容器
 atelyx-ui = { path = "../atelyx-ui" }
 # 界面树构建与渲染：插件 ViewNode 树 → iced 控件

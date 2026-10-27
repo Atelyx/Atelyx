@@ -48,24 +48,6 @@ impl UiMetrics {
     pub const RESIZE_CORNER: f32 = 18.0;
 }
 
-/// 内置视图渲染函数签名：视图元数据在 `atelyx_core::views`，实现按 id 挂在此处。
-type ViewProvider = for<'a> fn(&'a App, iced::window::Id) -> Element<'a, Message>;
-
-/// 视图 id → 渲染函数的装配表（顺序与注册表一致，失配由单测拦截）。
-const VIEW_PROVIDERS: &[(&str, ViewProvider)] = &[
-    ("canvas", crate::canvas_view::canvas_view),
-    ("note", note_view),
-    ("table", crate::table_view::table_view),
-    ("files", files_view),
-    ("search", search_view),
-    ("inspector", inspector_view),
-    ("aichat", crate::chat_view::chat_view),
-    ("collabroom", collab_room_view),
-    ("calendar", crate::calendar_view::calendar_view),
-    ("repohistory", crate::repohistory_view::repohistory_view),
-    ("recent", crate::recent_view::recent_view),
-];
-
 /// 内置视图显示名（面板头标签）；插件面板取贡献 label，贡献缺失（未装 / 停用）回落插件 id。
 pub fn view_label(app: &App, kind: &str) -> String {
     if let Some(desc) = app.views.get(kind) {
@@ -1737,20 +1719,18 @@ fn note_status_pill(app: &App) -> Option<Element<'static, Message>> {
     }
 }
 
-/// 按视图 kind 分派内容（内置视图按 kind；插件面板按贡献 kind 走 ViewNode 解释渲染）。
+/// 按视图 kind 分派内容（内置视图经装配根取内容；插件面板按贡献 kind 走 ViewNode 解释渲染）。
 fn view_content<'a>(app: &'a App, window: iced::window::Id, kind: &str) -> Element<'a, Message> {
     if crate::plugin_actions::parse_view_kind(kind).is_some() {
         return crate::plugin_view::panel_view(app, window, kind);
     }
-    VIEW_PROVIDERS
-        .iter()
-        .find(|(id, _)| *id == kind)
-        .map(|(_, render)| render(app, window))
+    app.packs
+        .view(kind, app, window)
         .unwrap_or_else(|| placeholder_view(app, kind))
 }
 
 /// 协作房间视图：连接状态头部 + 空间成员名册 + 在线设备（打开文件可点开）+ 设置入口。
-fn collab_room_view(app: &App, _window: iced::window::Id) -> Element<'_, Message> {
+pub(crate) fn collab_room_view(app: &App, _window: iced::window::Id) -> Element<'_, Message> {
     let mut col = iced::widget::Column::<Message>::new()
         .spacing(6)
         .padding(Padding::ZERO.horizontal(12.0).vertical(10.0));
@@ -2056,7 +2036,7 @@ struct SearchHit {
 }
 
 /// 搜索视图：模式胶囊 + 查询输入（固定在顶部）+ 结果列表（滚动条贴面板右缘）。
-fn search_view(app: &App, window: iced::window::Id) -> Element<'_, Message> {
+pub(crate) fn search_view(app: &App, window: iced::window::Id) -> Element<'_, Message> {
     let hits_all = atelyx_core::vault::search_file_hits(&app.note_files, &app.search_query);
     let total = hits_all.len();
     let hits: Vec<SearchHit> = hits_all
@@ -2263,7 +2243,7 @@ fn search_row(hit: &SearchHit, name_w: f32, window: iced::window::Id) -> Element
 
 /// 属性面板视图：画布正作为激活标签展示（任一窗口前台）= 画布属性区，否则笔记属性
 /// （与编辑器属性区同一组件，改动经同一保存链落盘）。
-fn inspector_view<'a>(app: &'a App, window: iced::window::Id) -> Element<'a, Message> {
+pub(crate) fn inspector_view<'a>(app: &'a App, window: iced::window::Id) -> Element<'a, Message> {
     // 画布属性只在画布处于前台时呈现：其他标签在前台时不得被画布属性顶掉
     if app.canvas.is_some() && view_displayed(app, "canvas") {
         return crate::canvas_view::props_panel(app);
@@ -2577,7 +2557,7 @@ fn root_drop_zone(app: &App) -> Element<'static, Message> {
         .into()
 }
 
-fn files_view(app: &App, _window: iced::window::Id) -> Element<'_, Message> {
+pub(crate) fn files_view(app: &App, _window: iced::window::Id) -> Element<'_, Message> {
     let window = app.main_id.unwrap_or(iced::window::Id::unique());
     let cursor = app.cursor_for(window);
     // 树可刷新 = 已在容器内（本地仓库或协作空间）
@@ -3336,7 +3316,7 @@ pub fn file_label(rel: &str) -> String {
 }
 
 /// note 视图：工具条（模式分段 + ···菜单）+ 对应档位的内容面。
-fn note_view(app: &App, window: iced::window::Id) -> Element<'_, Message> {
+pub(crate) fn note_view(app: &App, window: iced::window::Id) -> Element<'_, Message> {
     if app.ui.last_note_file.is_none() {
         return controls::view_placeholder(
             "file-text",
@@ -7217,16 +7197,6 @@ pub fn drop_zone_at(zone: &PanelZone, global: iced::Point) -> DropZone {
 mod tests {
     use super::{device_meta_line, merge_peers, file_label, truncate_to_width};
     use atelyx_core::collab::PeerInfo;
-
-    /// 注册表与装配表必须一一对应：登记了却没有渲染函数 = 打开是占位，
-    /// 有渲染函数却没登记 = 选择器里选不到。两侧同序，便于并排核对。
-    #[test]
-    fn registry_matches_view_providers() {
-        let registry = atelyx_core::views::ViewRegistry::builtin();
-        let registered: Vec<&str> = registry.iter().map(|desc| desc.id).collect();
-        let wired: Vec<&str> = super::VIEW_PROVIDERS.iter().map(|(id, _)| *id).collect();
-        assert_eq!(registered, wired);
-    }
 
     /// 固定度量：每字符 1 单位（截断只按字符数收缩，与字体 shaping 解耦）。
     fn per_char(s: &str) -> f32 {

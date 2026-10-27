@@ -32,6 +32,5 @@ pub mod table_xlsx;
 pub mod updater;
 pub mod vault;
 pub mod vault_refs;
-pub mod views;
 pub mod web;
 pub mod write_queue;
