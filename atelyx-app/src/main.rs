@@ -1278,6 +1278,8 @@ impl ImageRetry {
 pub struct App {
     /// 布局状态真源（core 模型；磁盘格式由 schema 版本标识）。
     pub ui: AppUiState,
+    /// 视图注册表（元数据真源；登记序即菜单与选择器的呈现序，启动装配期一次登记，运行期只读）。
+    pub views: atelyx_core::views::ViewRegistry,
     vault: Arc<vault::VaultState>,
     /// 打开的表格会话（数据 + 保存基线 + 视图态；None = 未打开）。
     pub table: Option<table_view::TableSession>,
@@ -1744,6 +1746,7 @@ impl App {
         }
         let mut app = Self {
                 ui: load_ui_state(),
+                views: atelyx_core::views::ViewRegistry::builtin(),
                 vault: Arc::new(vault::VaultState::default()),
                 theme: ui::palette::app_theme(),
                 notifications: Vec::new(),

@@ -48,31 +48,28 @@ impl UiMetrics {
     pub const RESIZE_CORNER: f32 = 18.0;
 }
 
-/// 内置视图 kind 顺序（右键菜单/选择器的呈现序）。
-pub const VIEW_KINDS: &[&str] = &[
-    "canvas", "note", "table", "files", "search", "inspector", "aichat", "collabroom",
-    "calendar", "repohistory", "recent",
+/// 内置视图渲染函数签名：视图元数据在 `atelyx_core::views`，实现按 id 挂在此处。
+type ViewProvider = for<'a> fn(&'a App, iced::window::Id) -> Element<'a, Message>;
+
+/// 视图 id → 渲染函数的装配表（顺序与注册表一致，失配由单测拦截）。
+const VIEW_PROVIDERS: &[(&str, ViewProvider)] = &[
+    ("canvas", crate::canvas_view::canvas_view),
+    ("note", note_view),
+    ("table", crate::table_view::table_view),
+    ("files", files_view),
+    ("search", search_view),
+    ("inspector", inspector_view),
+    ("aichat", crate::chat_view::chat_view),
+    ("collabroom", collab_room_view),
+    ("calendar", crate::calendar_view::calendar_view),
+    ("repohistory", crate::repohistory_view::repohistory_view),
+    ("recent", crate::recent_view::recent_view),
 ];
 
 /// 内置视图显示名（面板头标签）；插件面板取贡献 label，贡献缺失（未装 / 停用）回落插件 id。
 pub fn view_label(app: &App, kind: &str) -> String {
-    let builtin = match kind {
-        "canvas" => "画布",
-        "note" => "笔记",
-        "table" => "表格",
-        "files" => "文件",
-        "search" => "搜索",
-        "inspector" => "属性",
-        "aichat" => "AI 对话",
-        "collabroom" => "协作房间",
-        "calendar" => "日历",
-        "repohistory" => "仓库历史",
-        "recent" => "最近打开",
-        "empty" => "空面板",
-        _ => "",
-    };
-    if !builtin.is_empty() {
-        return builtin.to_string();
+    if let Some(desc) = app.views.get(kind) {
+        return desc.label.to_string();
     }
     if let Some((plugin_id, id)) = crate::plugin_actions::parse_view_kind(kind) {
         return crate::plugin_actions::contribution(app, plugin_id, id)
@@ -85,23 +82,8 @@ pub fn view_label(app: &App, kind: &str) -> String {
 /// 内置视图图标（lucide 名）；插件面板取贡献 icon（内置名或自备图形限定名）；
 /// 未知 kind 拼图。
 pub fn view_icon(app: &App, kind: &str) -> Cow<'static, str> {
-    let builtin = match kind {
-        "canvas" => Some("palette"),
-        "note" => Some("file-text"),
-        "table" => Some("table"),
-        "files" => Some("files"),
-        "search" => Some("search"),
-        "inspector" => Some("info"),
-        "aichat" => Some("sparkles"),
-        "collabroom" => Some("users"),
-        "calendar" => Some("calendar-days"),
-        "repohistory" => Some("history"),
-        "recent" => Some("clock"),
-        "empty" => Some("layout-template"),
-        _ => None,
-    };
-    if let Some(name) = builtin {
-        return Cow::Borrowed(name);
+    if let Some(desc) = app.views.get(kind) {
+        return Cow::Borrowed(desc.icon);
     }
     if let Some((plugin_id, id)) = crate::plugin_actions::parse_view_kind(kind) {
         return crate::plugin_actions::contribution_icon(app, plugin_id, id);
@@ -111,7 +93,7 @@ pub fn view_icon(app: &App, kind: &str) -> Cow<'static, str> {
 
 /// 可选视图 kind 清单：内置视图 + 已注册的插件面板贡献（壳侧命名空间化 kind）。
 pub fn available_view_kinds(app: &App) -> Vec<String> {
-    let mut kinds: Vec<String> = VIEW_KINDS.iter().map(|kind| (*kind).to_string()).collect();
+    let mut kinds: Vec<String> = app.views.iter().map(|desc| desc.id.to_string()).collect();
     kinds.extend(
         crate::plugin_actions::contributions_of(app, ContributionSlot::Panel)
             .map(|c| crate::plugin_actions::view_kind(&c.plugin_id, &c.id)),
@@ -1760,24 +1742,15 @@ fn view_content<'a>(app: &'a App, window: iced::window::Id, kind: &str) -> Eleme
     if crate::plugin_actions::parse_view_kind(kind).is_some() {
         return crate::plugin_view::panel_view(app, window, kind);
     }
-    match kind {
-        "files" => files_view(app),
-        "note" => note_view(app, window),
-        "search" => search_view(app, window),
-        "inspector" => inspector_view(app, window),
-        "table" => crate::table_view::table_view(app, window),
-        "canvas" => crate::canvas_view::canvas_view(app, window),
-        "aichat" => crate::chat_view::chat_view(app, window),
-        "collabroom" => collab_room_view(app),
-        "recent" => crate::recent_view::recent_view(app),
-        "repohistory" => crate::repohistory_view::repohistory_view(app, window),
-        "calendar" => crate::calendar_view::calendar_view(app, window),
-        kind => placeholder_view(app, kind),
-    }
+    VIEW_PROVIDERS
+        .iter()
+        .find(|(id, _)| *id == kind)
+        .map(|(_, render)| render(app, window))
+        .unwrap_or_else(|| placeholder_view(app, kind))
 }
 
 /// 协作房间视图：连接状态头部 + 空间成员名册 + 在线设备（打开文件可点开）+ 设置入口。
-fn collab_room_view(app: &App) -> Element<'_, Message> {
+fn collab_room_view(app: &App, _window: iced::window::Id) -> Element<'_, Message> {
     let mut col = iced::widget::Column::<Message>::new()
         .spacing(6)
         .padding(Padding::ZERO.horizontal(12.0).vertical(10.0));
@@ -2604,7 +2577,7 @@ fn root_drop_zone(app: &App) -> Element<'static, Message> {
         .into()
 }
 
-fn files_view(app: &App) -> Element<'_, Message> {
+fn files_view(app: &App, _window: iced::window::Id) -> Element<'_, Message> {
     let window = app.main_id.unwrap_or(iced::window::Id::unique());
     let cursor = app.cursor_for(window);
     // 树可刷新 = 已在容器内（本地仓库或协作空间）
@@ -7244,6 +7217,16 @@ pub fn drop_zone_at(zone: &PanelZone, global: iced::Point) -> DropZone {
 mod tests {
     use super::{device_meta_line, merge_peers, file_label, truncate_to_width};
     use atelyx_core::collab::PeerInfo;
+
+    /// 注册表与装配表必须一一对应：登记了却没有渲染函数 = 打开是占位，
+    /// 有渲染函数却没登记 = 选择器里选不到。两侧同序，便于并排核对。
+    #[test]
+    fn registry_matches_view_providers() {
+        let registry = atelyx_core::views::ViewRegistry::builtin();
+        let registered: Vec<&str> = registry.iter().map(|desc| desc.id).collect();
+        let wired: Vec<&str> = super::VIEW_PROVIDERS.iter().map(|(id, _)| *id).collect();
+        assert_eq!(registered, wired);
+    }
 
     /// 固定度量：每字符 1 单位（截断只按字符数收缩，与字体 shaping 解耦）。
     fn per_char(s: &str) -> f32 {

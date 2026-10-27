@@ -203,7 +203,7 @@ pub(crate) fn relative_ts(secs: i64, now: i64) -> String {
 }
 
 /// 最近打开视图：按当前仓库身份过滤，行点击打开（复用 OpenFile，按扩展名分流笔记/表格/画布）。
-pub fn recent_view(app: &App) -> Element<'_, Message> {
+pub fn recent_view(app: &App, _window: iced::window::Id) -> Element<'_, Message> {
     let Some(key) = vault_key_of(app) else {
         return controls::empty_state("clock", "未打开仓库", "打开仓库后显示", None);
     };
