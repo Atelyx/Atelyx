@@ -154,8 +154,8 @@ const SECTIONS: &[Section] = &[
         ),
     },
     Section {
-        title: "纯查询：量算与主题",
-        intro: "纯计算调用，不改界面也不产生帧；同一段文字反复量算时插件应自行缓存结果。",
+        title: "纯查询：量算、主题与 Markdown",
+        intro: "纯计算调用，不改界面也不产生帧；同一段文字反复量算、同一段 Markdown 反复解析时插件应自行缓存结果。",
         items: items!(
             "method.rs": "query",
             "method.rs": "MAX_MEASURE_ITEMS",
@@ -166,6 +166,11 @@ const SECTIONS: &[Section] = &[
             "method.rs": "ThemeColors",
             "method.rs": "FontSizes",
             "method.rs": "Radii",
+            "method.rs": "MAX_MARKDOWN_BYTES",
+            "method.rs": "MarkdownParams",
+            "method.rs": "MarkdownResult",
+            "method.rs": "MarkdownBlock",
+            "method.rs": "MarkdownSpan",
         ),
     },
     Section {

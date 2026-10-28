@@ -1565,7 +1565,7 @@ fn block_math_ranges(source: &str) -> Vec<RangeInfo> {
     out
 }
 
-pub(super) fn block_from(b: &MarkdownBlock) -> usize {
+pub fn block_from(b: &MarkdownBlock) -> usize {
     match b {
         MarkdownBlock::Heading { from, .. }
         | MarkdownBlock::Paragraph { from, .. }

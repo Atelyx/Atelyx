@@ -353,7 +353,7 @@ ctx.patch_canvas("main", "board", upsert, remove).await?;   // 按 id 增量：�
 
 坐标一律画布本地逻辑像素、左上原点，宿主不做坐标变换（平移缩放由插件算好坐标）。颜色双轨：`{ "type": "token", "name": "accent" }` 跟主题，`{ "type": "rgba", "rgba": [r,g,b,a] }` 用于内容谱系色（连线分类、播放头等）。
 
-指针事件在节点的 `mouseEvents` 里声明要收的子集：`pointerDown` / `pointerMove` / `pointerUp` / `pointerLeave` / `wheel` / `doubleClick`。`wheel` 增量沿用设备单位（滚轮为行、触控板为像素，正 = 向下 / 向右）；双击由宿主判定（同键二次按下、500ms 内、位移 < 4 像素）。命中测试由插件按指令几何自算——宿主只负责把事件送到画布。
+指针事件在节点的 `mouseEvents` 里声明要收的子集：`pointerDown` / `pointerMove` / `pointerUp` / `pointerLeave` / `wheel` / `doubleClick`。`wheel` 增量统一为像素（宿主把滚轮「行」折算成像素，正 = 向下 / 向右）；双击由宿主判定（同键二次按下、500ms 内、位移 < 4 像素）。命中测试由插件按指令几何自算——宿主只负责把事件送到画布。
 
 画布节点用 `height` 指定高度、或用 `fill: true` 占满父容器剩余空间。宿主在画布尺寸变化时回发 `host:canvas.resized { surfaceId, nodeId, width, height }`（尺寸不变不发），插件据此对齐绘制坐标与滚动范围——不必再按名义宽度兜底。
 
@@ -396,7 +396,7 @@ ctx.submit_frame("main", frame(commands, hits)).await?;   // 整帧替换，空�
 
 ### 6.2 SDK 控件层（推荐写法）
 
-不想自己算坐标与命中区，就用 `atelyx-plugin-sdk::frame_ui`：控件（按钮 / 输入框 / 下拉 / 勾选 / 文字 / 滚动）编译成绘制指令，悬停 / 按下 / 焦点 / 文本编辑（光标、选区、输入法组合串、复制粘贴、清空、Tab 切换）都在控件层里。宿主仍然只收帧，不认识控件。
+不想自己算坐标与命中区，就用 `atelyx-plugin-sdk::frame_ui`：控件（按钮 / 输入框 / 下拉 / 勾选 / 文字 / 徽标 / 图标钮 / 进度条 / 卡片 / Markdown / 滚动）编译成绘制指令，悬停 / 按下 / 焦点 / 文本编辑（光标、选区、输入法组合串、复制粘贴、清空、Tab 切换）都在控件层里。宿主仍然只收帧，不认识控件。
 
 一个面持一个 `FrameUi`，按两阶段出帧：
 
@@ -458,11 +458,11 @@ impl PluginHandler for Echo {
 
 几条用法约定：
 
-- **两阶段**：`event` 把原始输入翻成 `Click` / `Text`（完整新值）/ `Select`（选项下标）/ `Focus`，并且已就地更新光标、选区、焦点与滚动；插件改完自己的状态后 **立即** `render`，这一帧才是改后的样子。帧内容不会自动提交（与界面树托管不同）。
+- **两阶段**：`event` 把原始输入翻成 `Click` / `Text`（完整新值）/ `Submit`（输入框回车）/ `Select`（选项下标）/ `Focus` / `Scroll`（滚动偏移与可滚余量），并且已就地更新光标、选区、焦点与滚动；插件改完自己的状态后 **立即** `render`，这一帧才是改后的样子。帧内容不会自动提交（与界面树托管不同）。
 - **`value_of` 每次现读**：输入框的值以插件状态为准。`event(ctx, input, |id| ...)` 的闭包按 id 返回当前值（返回 `None` 即非输入框），编辑永远从这里出发，不要缓存上一帧的字符串。
 - **`render` 的闭包会被调用多次**：文字宽度缺项时先按估算排、向宿主量算后重建，最多 3 轮。闭包必须只读状态（不要在里面改状态、发请求）。
 - **输入框的最终值要写回**：收到 `UiEvent::Text { id, value }` 就把 `value` 存进自己的状态；不写回的话下一次渲染还是旧值。
-- **`Focus { focused: false }`** 可以拿来提交「失焦才生效」的字段（例如数字输入的越界归一）。
+- **`Focus { focused: false }`** 可以拿来提交「失焦才生效」的字段（例如数字输入的越界归一）；`Submit { id }` 是单行输入框的回车，检索 / 写回设置这类动作挂这里。
 - **主题只取一次**：首次 `render` 会查 `query.theme` 拿字号 / 圆角 / 主题色，宿主主题变了不会通知；面重新挂载时新建 `FrameUi` 即可重取。
 - **尺寸**：`FrameUi` 记下宿主回发的 `Resize`，按它排版；宿主首次绘制前用缺省尺寸。
 
@@ -470,19 +470,31 @@ impl PluginHandler for Echo {
 
 | 控件 | 说明 |
 | --- | --- |
-| `text(content, role)` | 单行、超出按宽度省略；`role` = `Heading` / `Label` / `FieldLabel` / `Caption` / `Value` |
+| `text(content, role)` | 单行、超出按宽度省略；`role` = `Title` / `Heading` / `Label` / `FieldLabel` / `Caption` / `Value` |
+| `text_styled(content, TextStyle)` | 按样式绘制：`TextStyle::new(role).color(token).mono().wrap()`（等宽、换行、语义色） |
 | `caption` / `field_label` | 按可用宽度换行的小号说明 / 字段标签 |
-| `button` / `ghost_button` | 常规底 / 无底色按钮，点击回 `Click { id }` |
-| `text_input(id, value, placeholder)` | 单行输入框；`text_input_sized` 固定宽 |
+| `button` / `ghost_button` / `button_enabled` | 常规底 / 无底色按钮（`_enabled` 变体禁用时不承接点击），点击回 `Click { id }` |
+| `text_input(id, value, placeholder)` | 单行输入框；`text_input_sized` 固定宽；`text_input_password` 密文显示；回车回 `Submit { id }` |
 | `select(id, options, selected)` | 下拉；点击回 `Select { id, index }`（选项**就地展开**撑开后续内容） |
 | `checkbox(id, checked, label)` | 勾选，点击回 `Click { id }`（勾选值由插件自己翻转） |
-| `scroll(id, gap, ...)` / `list(id, gap, ...)` | 滚动容器（吃父容器剩余高度；子项按块对齐滚动，只画视口内的整块） |
-| `rule()` / `spacer(h)` | 分隔线 / 固定高度空白 |
-| `column(gap, ...)` / `row(gap, ...)` | 纵向 / 横向容器；横向行里撑满子项吃剩余宽度、收缩子项按内容宽 |
+| `chip(label, color)` | 小号圆角徽标（计数 / 状态标签），不承接点击 |
+| `icon_button(id, Icon)` | 方形图标钮；内置 `Copy` / `Refresh` / `Eraser` / `Download` / `Search` / `HardDrive` / `Wrench` / `FileText` / `Box`，点击回 `Click { id }`；`icon(Icon)` 是同样的形状但不承接点击 |
+| `progress(value)` | 0–1 的进度条 |
+| `card(id, selected, ...)` | 整块可点卡片（选中档强调底色与描边），点击回 `Click { id }`、右键回 `RightClick { id }`；子项按列排布，子控件压住卡片自身的命中 |
+| `panel(...)` | 圆角表面容器（承接子项，不承接点击） |
+| `notice(text, color)` | 提示块：整行底色 + 语义色描边与文字 |
+| `markdown(content)` | 只读 Markdown：块由宿主解析（`query.markdown`），控件层按宽度折行并画列表标记 / 引用条 / 代码底 |
+| `scroll(id, gap, ...)` / `list(id, gap, ...)` | 滚动容器（吃父容器剩余高度；按像素连续滚动，只画视口内的子项），滚轮回 `Scroll { id, offset, max_offset }`；右下角细滚动条可直接拖动（按下即跳转、拖动即跟随） |
+| `scroll_sized(id, height, gap, follow_end, ...)` | 定高滚动区；`follow_end` 时上一帧停在终点就跟到新终点，由关转开的那一帧跳到终点 |
+| `rule()` / `spacer(h)` / `grow()` | 分隔线 / 固定高度空白 / 吃剩余宽度的弹簧 |
+| `pad(horizontal, vertical, ...)` | 内边距容器：子项按列排布并整体内缩（滚动区要贴面板边缘、内容又要留白时用） |
+| `column(gap, ...)` / `row(gap, ...)` / `row_fill(gap, ...)` | 纵向 / 横向容器；`row_fill` 占满剩余高度，子项里的滚动区各拿整行高度（并排分栏各自滚动） |
 
-边界的两条（指令集没有裁剪，也画不了覆盖式浮层）：下拉就地展开而不是浮在内容上；滚动按内容块边界对齐，滚出视口的块整块不画——长内容请拆成行放进 `scroll` / `list`。
+边界的两条（指令集没有裁剪，也画不了覆盖式浮层）：下拉就地展开而不是浮在内容上；滚动按像素连续，滚出视口的子项不画——长内容请拆成行放进 `scroll` / `list`。
 
 `role` 与控件高度跟随宿主的主题与字号：不要自己写死色值和像素。需要自绘时仍可退回 [`ctx.submit_frame`]，两者用同一个通道，不要混用一个面。
+
+Markdown 内容不要自己解析：`ui.markdown(text)` 首次出现时会向宿主发一次 `query.markdown`（按原文缓存，内容不变不重取），拿回结构化块后由控件层排版——宿主与插件共用笔记的同一套解析语义。
 
 ## 7. 能力面
 

@@ -18,9 +18,15 @@ pub(crate) struct Metrics {
     cache: HashMap<Key, MeasureTextResult>,
     misses: Vec<MeasureItem>,
     missed: HashSet<Key>,
+    /// 量算落地代次：真实字宽一变，按旧字宽排出的 Markdown 版面即作废。
+    epoch: u64,
 }
 
 impl Metrics {
+    pub(crate) fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
     /// 取量算结果：未命中时按估算值排版并登记待量算。
     pub(crate) fn measure(&mut self, text: &str, spec: FontSpec, max_width: Option<f32>) -> MeasureTextResult {
         let key = key_of(text, spec, max_width);
@@ -59,9 +65,14 @@ impl Metrics {
 
     /// 落地一批量算结果：`items` 与 `sizes` 一一对应（宿主可能少回，按较短者取）。
     pub(crate) fn apply(&mut self, items: &[MeasureItem], sizes: &[MeasureTextResult]) {
+        let mut landed = false;
         for (item, size) in items.iter().zip(sizes) {
             let key = key_of(&item.text, FontSpec { size: item.size, weight: item.weight, family: item.family }, item.max_width);
             self.cache.insert(key, *size);
+            landed = true;
+        }
+        if landed {
+            self.epoch += 1;
         }
     }
 }

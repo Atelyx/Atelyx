@@ -1093,7 +1093,7 @@ pub enum MouseButton {
 ```rust
 // atelyx-plugin-protocol/src/view.rs
 /// 画布指针事件负载。坐标 = 节点本地逻辑像素、左上原点；
-/// wheel 增量沿用设备单位（滚轮为行、触控板为像素），正 = 向下 / 向右（Web 惯例，宿主已完成方向换算）。
+/// wheel 增量统一为像素（宿主已把滚轮「行」折算成像素），正 = 向下 / 向右（Web 惯例，宿主已完成方向换算）。
 #[serde(tag = "kind", rename_all = "camelCase")]
 #[serde(rename_all_fields = "camelCase")]
 pub enum CanvasPointer {
@@ -1435,7 +1435,7 @@ pub enum FrameInput {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         hit: Option<String>,
     },
-    /// 滚轮增量沿用设备单位（滚轮为行、触控板为像素），正 = 向下 / 向右（Web 惯例，宿主已完成方向换算）。
+    /// 滚轮增量统一为像素（宿主已把滚轮「行」折算成像素），正 = 向下 / 向右（Web 惯例，宿主已完成方向换算）。
     Wheel {
         x: f32,
         y: f32,
@@ -1513,9 +1513,9 @@ pub struct FrameTickParams {
 }
 ```
 
-## 7. 纯查询：量算与主题
+## 7. 纯查询：量算、主题与 Markdown
 
-纯计算调用，不改界面也不产生帧；同一段文字反复量算时插件应自行缓存结果。
+纯计算调用，不改界面也不产生帧；同一段文字反复量算、同一段 Markdown 反复解析时插件应自行缓存结果。
 
 ```rust
 // atelyx-plugin-protocol/src/method.rs
@@ -1525,6 +1525,8 @@ pub mod query {
     pub const MEASURE: &str = "query.measure";
     /// 取宿主主题表（颜色 / 字号档 / 圆角档），插件据此与宿主观感一致。
     pub const THEME: &str = "query.theme";
+    /// 把 Markdown 文本转成结构化块（与笔记同一套解析语义），排版与绘制仍归插件。
+    pub const MARKDOWN: &str = "query.markdown";
 }
 ```
 
@@ -1627,6 +1629,88 @@ pub struct Radii {
     pub xs: f32,
     pub sm: f32,
     pub md: f32,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 单次转换的源文本上限（字节）：超限按可读错误拒绝，插件应自行分段。
+pub const MAX_MARKDOWN_BYTES: usize = 512 * 1024;
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`query::MARKDOWN`] 的 params：交给宿主按笔记同一套解析语义转成结构化块。
+/// 宿主只做解析（块与行内片段），排版与绘制仍归插件。
+#[serde(rename_all = "camelCase")]
+pub struct MarkdownParams {
+    pub content: String,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`query::MARKDOWN`] 的 result：按源序排列的块。
+#[serde(rename_all = "camelCase")]
+pub struct MarkdownResult {
+    pub blocks: Vec<MarkdownBlock>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 块：`depth` 为嵌套层数（列表 / 引用内部块递增），由插件换算缩进。
+/// 表格单元格只给纯文本（单元格行内样式不展开）。
+#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(rename_all_fields = "camelCase")]
+pub enum MarkdownBlock {
+    Heading {
+        level: u8,
+        depth: u32,
+        spans: Vec<MarkdownSpan>,
+    },
+    Paragraph {
+        depth: u32,
+        spans: Vec<MarkdownSpan>,
+    },
+    /// 列表项：`index` 对有序列表取源里的序号（`3.` 就是 3），无序列表恒为 1；`ordered` 决定画圆点还是序号。
+    ListItem {
+        depth: u32,
+        ordered: bool,
+        index: u32,
+        spans: Vec<MarkdownSpan>,
+    },
+    /// 引用段落：插件在左侧画竖条。
+    Quote {
+        depth: u32,
+        spans: Vec<MarkdownSpan>,
+    },
+    Code {
+        depth: u32,
+        lang: String,
+        content: String,
+    },
+    /// 表格：`rows[0]` 是表头行，其余为数据行；单元格只给纯文本。
+    Table {
+        depth: u32,
+        rows: Vec<Vec<String>>,
+    },
+    Divider,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 行内片段：同一段文字里的样式差异（字重、等宽、链接目标）。
+#[serde(rename_all = "camelCase")]
+pub struct MarkdownSpan {
+    pub text: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub strong: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub code: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<String>,
 }
 ```
 

@@ -1,11 +1,12 @@
 //! 帧构建：容器先把子项收进来，再按最终矩形摆放并绘制。
 //! 每个控件的绘制闭包在拿到自己的矩形后写指令、命中区与布局记录——输入路由只认布局记录。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use atelyx_plugin_protocol::canvas::DrawCommand;
 use atelyx_plugin_protocol::frame::{FrameRect, HitCursor, HitRegion, SurfaceFrame};
+use atelyx_plugin_protocol::method::MarkdownBlock;
 
 use super::geom::Rect;
 use super::metrics::Metrics;
@@ -23,6 +24,12 @@ pub(crate) struct BuildCtx<'a> {
     pub focusables: Vec<String>,
     pub ime: Option<Rect>,
     pub scrolls: HashMap<String, f32>,
+    pub scroll_max: HashMap<String, f32>,
+    pub follow_prev: HashMap<String, bool>,
+    /// 本帧用到但缓存里没有的 Markdown 原文：出帧后由驱动去取，取到即重建。
+    pub markdown_misses: Vec<String>,
+    /// 本帧用到的 Markdown 原文：缓存按它收敛，不随历史内容累积。
+    pub markdown_used: HashSet<String>,
 }
 
 pub(crate) struct BuildOut {
@@ -30,6 +37,10 @@ pub(crate) struct BuildOut {
     pub layouts: HashMap<String, Layout>,
     pub focusables: Vec<String>,
     pub scrolls: HashMap<String, f32>,
+    pub scroll_max: HashMap<String, f32>,
+    pub follow_prev: HashMap<String, bool>,
+    pub markdown_misses: Vec<String>,
+    pub markdown_used: HashSet<String>,
     pub metrics: Metrics,
     pub misses: bool,
 }
@@ -46,6 +57,24 @@ impl<'a> BuildCtx<'a> {
             focusables: Vec::new(),
             ime: None,
             scrolls: state.scroll.clone(),
+            scroll_max: state.scroll_max.clone(),
+            follow_prev: state.follow_prev.clone(),
+            markdown_misses: Vec::new(),
+            markdown_used: HashSet::new(),
+        }
+    }
+
+    /// 取一段 Markdown 的解析块；缺项时记一次并按空块出这一帧，取到后重建。
+    pub(crate) fn markdown_blocks(&mut self, content: &str) -> Vec<MarkdownBlock> {
+        self.markdown_used.insert(content.to_string());
+        match self.state.markdown.get(content) {
+            Some(blocks) => blocks.clone(),
+            None => {
+                if !self.markdown_misses.iter().any(|miss| miss == content) {
+                    self.markdown_misses.push(content.to_string());
+                }
+                Vec::new()
+            }
         }
     }
 
@@ -83,6 +112,10 @@ impl<'a> BuildCtx<'a> {
             layouts: self.layouts,
             focusables: self.focusables,
             scrolls: self.scrolls,
+            scroll_max: self.scroll_max,
+            follow_prev: self.follow_prev,
+            markdown_misses: self.markdown_misses,
+            markdown_used: self.markdown_used,
             metrics: self.metrics,
             misses,
         }
@@ -145,12 +178,26 @@ impl<'c, 'a> Ui<'c, 'a> {
     pub fn row(&mut self, gap: f32, build: impl FnOnce(&mut Ui<'_, 'a>)) {
         let mut sub = Ui { ctx: &mut *self.ctx, clip: self.clip, items: Vec::new() };
         build(&mut sub);
-        self.items.push(row_item(sub.items, gap));
+        self.items.push(row_item(sub.items, gap, false));
+    }
+
+    /// 占满剩余高度的横向容器：子项若声明吃满高度（滚动区）即拿到整行高度，用于并排分栏各自滚动。
+    pub fn row_fill(&mut self, gap: f32, build: impl FnOnce(&mut Ui<'_, 'a>)) {
+        let mut sub = Ui { ctx: &mut *self.ctx, clip: self.clip, items: Vec::new() };
+        build(&mut sub);
+        self.items.push(row_item(sub.items, gap, true));
     }
 }
 
-/// 根布局：与纵向容器同构，占满整个面并按裁剪矩形收敛。
-pub(crate) fn layout_root(ctx: &mut BuildCtx<'_>, items: Vec<Item>, rect: Rect) {
+/// 根布局：单个根容器高过面时按面高收住——撑满子项（滚动区）拿面的剩余高度，
+/// 而不是按内容高铺开（否则内容一超屏，滚动区就没有视口）。较矮的根子项保持自身高度。
+pub(crate) fn layout_root(ctx: &mut BuildCtx<'_>, mut items: Vec<Item>, rect: Rect) {
+    if items.len() == 1 {
+        let intrinsic = child_height(&items[0], &mut ctx.metrics, rect.w);
+        if intrinsic >= rect.h {
+            items[0].fill_height = true;
+        }
+    }
     draw_column(ctx, &items, rect, rect, 0.0);
 }
 
@@ -186,7 +233,7 @@ pub(crate) fn column_height(items: &[Item], metrics: &mut Metrics, width: f32, g
     total + gap * items.len().saturating_sub(1) as f32
 }
 
-fn draw_column(ctx: &mut BuildCtx<'_>, items: &[Item], rect: Rect, clip: Rect, gap: f32) {
+pub(crate) fn draw_column(ctx: &mut BuildCtx<'_>, items: &[Item], rect: Rect, clip: Rect, gap: f32) {
     let widths: Vec<f32> = items.iter().map(|item| child_width(item, &mut ctx.metrics, rect.w)).collect();
     let heights: Vec<f32> = items
         .iter()
@@ -216,12 +263,12 @@ fn draw_column(ctx: &mut BuildCtx<'_>, items: &[Item], rect: Rect, clip: Rect, g
     }
 }
 
-fn row_item(items: Vec<Item>, gap: f32) -> Item {
+fn row_item(items: Vec<Item>, gap: f32, fill_height: bool) -> Item {
     let shared = Rc::new(items);
     let for_size = Rc::clone(&shared);
     Item {
         width: Width::Fill,
-        fill_height: false,
+        fill_height,
         height: Box::new(move |metrics, width| {
             let slots = row_slots(&for_size, metrics, width, gap);
             slots.total_height
@@ -270,7 +317,8 @@ fn draw_row(ctx: &mut BuildCtx<'_>, items: &[Item], rect: Rect, clip: Rect, gap:
     let slots = row_slots(items, &mut ctx.metrics, rect.w, gap);
     let mut x = rect.x;
     for (index, item) in items.iter().enumerate() {
-        let height = slots.heights[index].min(rect.h);
+        // 吃满高度的子项（滚动区）拿走整行高度，否则按内容高并在行内垂直居中
+        let height = if item.fill_height { rect.h } else { slots.heights[index].min(rect.h) };
         let child = Rect::new(x, rect.y + (rect.h - height) / 2.0, slots.widths[index], height);
         let visible = child.intersect(clip);
         if !visible.is_empty() {

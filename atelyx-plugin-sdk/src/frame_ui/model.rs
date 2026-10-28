@@ -2,10 +2,14 @@
 //! 布局记录是输入路由的唯一依据——宿主只回发命中 id 与坐标，语义由这里解释。
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
+use atelyx_plugin_protocol::frame::SurfaceFrame;
+use atelyx_plugin_protocol::method::MarkdownBlock;
 use atelyx_plugin_protocol::view::{TextFamily, TextWeight};
 
 use super::geom::Rect;
+use super::markdown;
 use super::metrics::Metrics;
 use super::theme::Theme;
 
@@ -25,10 +29,12 @@ pub(crate) enum Layout {
     Input { inner: Rect, font: FontSpec, value: String },
     Select { options: usize },
     Checkbox,
-    /// `stops` = 内容块边界（滚动位置只落这些位置，避免半块露出）。
-    Scroll { viewport: Rect, content: f32, stops: Vec<f32> },
+    /// `content` = 内容总高（可滚动余量 = 内容高 - 视口高）。
+    Scroll { viewport: Rect, content: f32 },
     /// 展开的下拉选项行（内部命中 id，插件看不到）。
     Option { select: String, index: usize },
+    /// 滚动条：按下 / 拖动按纵向落点换算偏移（内部命中 id，插件看不到）。
+    ScrollBar { scroll: String, track: Rect, thumb: f32, max_offset: f32 },
 }
 
 /// 单个输入框的编辑态（文本本身由插件持有，这里只记光标与选区）。
@@ -65,10 +71,23 @@ pub(crate) struct UiState {
     pub focusables: Vec<String>,
     pub hovered: Option<String>,
     pub press: Option<Press>,
+    /// 正在拖动的滚动条（滚动容器 id）：移动时按纵向落点改偏移，抬起即解除。
+    pub drag_bar: Option<String>,
     pub focus: Option<String>,
     pub inputs: HashMap<String, InputState>,
     pub selects: HashMap<String, SelectState>,
     pub scroll: HashMap<String, f32>,
+    /// 各滚动容器上一帧的可滚动余量（贴底跟随据此判断「上一帧是否停在终点」）。
+    pub scroll_max: HashMap<String, f32>,
+    /// 各滚动容器上一帧是否声明贴底跟随（由关转开的那一帧跳到终点）。
+    pub follow_prev: HashMap<String, bool>,
+    /// `query.markdown` 的结果缓存（按原文取，内容不变即不重取）。
+    pub markdown: HashMap<String, Vec<MarkdownBlock>>,
+    /// Markdown 版面缓存（键含内容、宽度与量算代次）：滚动时长内容不必每帧重排。
+    pub markdown_layouts: Arc<markdown::LayoutCache>,
+    /// 上次已提交的帧与所在面：同内容帧不再提交（宿主每收一帧都要重投影并整窗重绘）。
+    /// 面重新挂载时宿主会再发一次 `Resize`，据此清空——否则重挂后同内容帧被吞，面会停在空态。
+    pub submitted: Option<(String, SurfaceFrame)>,
 }
 
 impl Default for UiState {
@@ -82,10 +101,16 @@ impl Default for UiState {
             focusables: Vec::new(),
             hovered: None,
             press: None,
+            drag_bar: None,
             focus: None,
             inputs: HashMap::new(),
             selects: HashMap::new(),
             scroll: HashMap::new(),
+            scroll_max: HashMap::new(),
+            follow_prev: HashMap::new(),
+            markdown: HashMap::new(),
+            markdown_layouts: Arc::default(),
+            submitted: None,
         }
     }
 }
@@ -96,6 +121,11 @@ impl UiState {
         self.inputs.retain(|id, _| self.layouts.contains_key(id));
         self.selects.retain(|id, _| self.layouts.contains_key(id));
         self.scroll.retain(|id, _| self.layouts.contains_key(id));
+        self.scroll_max.retain(|id, _| self.layouts.contains_key(id));
+        self.follow_prev.retain(|id, _| self.layouts.contains_key(id));
+        if self.drag_bar.as_ref().is_some_and(|id| !self.layouts.contains_key(id)) {
+            self.drag_bar = None;
+        }
         if self.focus.as_ref().is_some_and(|id| !self.layouts.contains_key(id)) {
             self.focus = None;
         }

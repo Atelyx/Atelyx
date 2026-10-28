@@ -1158,6 +1158,26 @@
         "fontSizes": { "micro": 11.0, "caption": 12.0, "ui": 13.0, "body": 14.0, "h2": 16.0, "h1": 20.0 },
         "radii": { "xs": 4.0, "sm": 6.0, "md": 10.0 }
       }
+    },
+    {
+      "name": "query.markdown params",
+      "type": "MarkdownParams",
+      "value": { "content": "# 标题\n\n正文" }
+    },
+    {
+      "name": "query.markdown result",
+      "type": "MarkdownResult",
+      "value": {
+        "blocks": [
+          { "kind": "heading", "level": 2, "depth": 0, "spans": [{ "text": "标题", "strong": true }] },
+          { "kind": "paragraph", "depth": 1, "spans": [{ "text": "正文" }, { "text": "代码", "code": true }, { "text": "链接", "link": "https://example.com" }] },
+          { "kind": "listItem", "depth": 0, "ordered": true, "index": 2, "spans": [{ "text": "第二项" }] },
+          { "kind": "quote", "depth": 1, "spans": [{ "text": "引用" }] },
+          { "kind": "code", "depth": 0, "lang": "rust", "content": "let a = 1;" },
+          { "kind": "table", "depth": 0, "rows": [["甲", "乙"], ["1", "2"]] },
+          { "kind": "divider" }
+        ]
+      }
     }
   ]
 }

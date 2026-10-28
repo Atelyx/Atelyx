@@ -181,7 +181,7 @@ pub enum FrameInput {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         hit: Option<String>,
     },
-    /// 滚轮增量沿用设备单位（滚轮为行、触控板为像素），正 = 向下 / 向右（Web 惯例，宿主已完成方向换算）。
+    /// 滚轮增量统一为像素（宿主已把滚轮「行」折算成像素），正 = 向下 / 向右（Web 惯例，宿主已完成方向换算）。
     Wheel {
         x: f32,
         y: f32,

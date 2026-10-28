@@ -169,8 +169,12 @@ impl canvas::Program<Message> for PluginCanvas<'_> {
                 // iced 把全窗口鼠标事件广播给所有 widget：只认光标落在画布内的滚轮（防跨面板串扰）
                 let point = cursor.position_in(bounds)?;
                 let (dx, dy) = match delta {
-                    // iced 沿 winit（正 = 向上 / 向左）；协议按 Web 惯例（正 = 向下 / 向右），取反换算
-                    iced::mouse::ScrollDelta::Lines { x, y } | iced::mouse::ScrollDelta::Pixels { x, y } => (-x, -y),
+                    // iced 沿 winit（正 = 向上 / 向左）；协议按 Web 惯例（正 = 向下 / 向右），取反换算。
+                    // 行增量按宿主同一口径折算成像素：协议只认像素，插件不必区分设备
+                    iced::mouse::ScrollDelta::Lines { x, y } => {
+                        (-x * crate::canvas_view::WHEEL_LINE_PX, -y * crate::canvas_view::WHEEL_LINE_PX)
+                    }
+                    iced::mouse::ScrollDelta::Pixels { x, y } => (-x, -y),
                 };
                 self.declared(CanvasEventKind::Wheel)
                     // 声明了 wheel 即画布消费滚轮（如缩放），外层滚动容器不再同帧滚动

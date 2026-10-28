@@ -2,11 +2,13 @@
 //! 原始输入解释成语义事件。用法是两阶段——先 [`FrameUi::event`] 拿事件、插件改自己的状态，
 //! 再 [`FrameUi::render`] 声明并提交一帧；帧永远是「事件之后」的状态。
 //!
-//! 文字量算缺失时 `render` 内部批量补齐并重建（最多 [`MAX_MEASURE_PASSES`] 遍），插件不必感知。
+//! 文字量算与 Markdown 块缺失时 `render` 内部补齐并重建（最多 [`MAX_REBUILD_PASSES`] 遍），插件不必感知。
 
 mod build;
 mod geom;
+mod icons;
 mod input;
+mod markdown;
 mod metrics;
 mod model;
 mod text;
@@ -20,22 +22,32 @@ use atelyx_plugin_protocol::method::MAX_MEASURE_ITEMS;
 use crate::Context;
 
 pub use build::Ui;
-pub use widgets::TextRole;
+pub use icons::Icon;
+pub use widgets::{TextRole, TextStyle};
 
-/// 一次 `render` 内最多补几轮量算：缺项按估算先排，量算一到即重建。
-const MAX_MEASURE_PASSES: usize = 3;
+/// 一次 `render` 内最多补几轮缺项（文字量算 / Markdown 块）：补齐后按最新数据重建。
+const MAX_REBUILD_PASSES: usize = 3;
+
+/// Markdown 解析缓存条数上限：超出即按「本帧用到」收敛，避免长期运行的插件按历史内容累积。
+const MAX_MARKDOWN_CACHE: usize = 8;
 
 /// 原始输入解释出的语义事件。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum UiEvent {
-    /// 按钮 / 勾选框被点击（勾选框的勾选值由插件自己翻转）。
+    /// 按钮 / 勾选框 / 卡片被点击（勾选框的勾选值由插件自己翻转）。
     Click { id: String },
+    /// 右键落在某控件上（不改焦点；插件可据此展开行内菜单或走快捷动作）。
+    RightClick { id: String },
     /// 输入框值变化：插件把新值写回自己的状态再重渲染。
     Text { id: String, value: String },
+    /// 输入框回车（提交语义由插件定，例如检索或写回设置）。
+    Submit { id: String },
     /// 下拉选中一项（`index` 是声明时给出的选项下标）。
     Select { id: String, index: usize },
     /// 键盘焦点进入 / 离开某控件（输入框可据此提交草稿）。
     Focus { id: String, focused: bool },
+    /// 滚动容器偏移变化：`offset` 为当前偏移，`max_offset` 为可滚动余量（滚到底翻页这类判断用）。
+    Scroll { id: String, offset: f32, max_offset: f32 },
 }
 
 /// 一个面的控件层状态与驱动：交互态、量算缓存与主题都随它跨帧保留。
@@ -100,8 +112,32 @@ impl FrameUi {
             self.state.layouts = out.layouts;
             self.state.focusables = out.focusables;
             self.state.scroll = out.scrolls;
+            self.state.scroll_max = out.scroll_max;
+            self.state.follow_prev = out.follow_prev;
+            // Markdown 缓存按条数上限收敛：滚出视口的内容不再算「本帧用到」，不能被立即剪掉
+            if self.state.markdown.len() > MAX_MARKDOWN_CACHE {
+                self.state.markdown.retain(|content, _| out.markdown_used.contains(content));
+            }
             self.state.prune();
-            if out.misses && passes < MAX_MEASURE_PASSES {
+            if !out.markdown_misses.is_empty() {
+                for content in out.markdown_misses {
+                    match ctx.markdown(&content).await {
+                        Ok(result) => {
+                            self.state.markdown.insert(content, result.blocks);
+                        }
+                        Err(err) => {
+                            // 失败也落缓存（空块）：否则每帧都把同一内容当缺项重试，白耗往返
+                            eprintln!("Markdown 解析失败，按空块出这一帧：{err}");
+                            self.state.markdown.insert(content, Vec::new());
+                        }
+                    }
+                }
+                if passes < MAX_REBUILD_PASSES {
+                    passes += 1;
+                    continue;
+                }
+            }
+            if out.misses && passes < MAX_REBUILD_PASSES {
                 let misses = self.state.metrics.take_misses();
                 if let Err(err) = self.fill_metrics(ctx, misses).await {
                     eprintln!("量算失败，按估算字宽出这一帧：{err}");
@@ -112,7 +148,18 @@ impl FrameUi {
             out.frame
                 .validate()
                 .map_err(|err| RpcError::failed(format!("面 {surface_id} 的帧不合法：{err}")))?;
-            ctx.submit_frame(surface_id, out.frame).await?;
+            // 同内容帧不再提交：宿主每收一帧都要重投影并整窗重绘，指针移动这类「没改画面」的输入
+            // 会按设备上报频率把宿主拖到重绘风暴里
+            let same = self
+                .state
+                .submitted
+                .as_ref()
+                .is_some_and(|(id, frame)| id == surface_id && *frame == out.frame);
+            if same {
+                return Ok(());
+            }
+            ctx.submit_frame(surface_id, out.frame.clone()).await?;
+            self.state.submitted = Some((surface_id.to_string(), out.frame));
             return Ok(());
         }
     }
@@ -251,6 +298,18 @@ mod tests {
             self.requests.push(request.method.clone());
             let result = match request.method.as_str() {
                 m if m == method::query::THEME => serde_json::to_value(theme_result()).unwrap(),
+                m if m == method::query::MARKDOWN => {
+                    let params: atelyx_plugin_protocol::method::MarkdownParams =
+                        serde_json::from_value(request.params).unwrap();
+                    assert!(!params.content.is_empty());
+                    serde_json::json!({
+                        "blocks": [{
+                            "kind": "paragraph",
+                            "depth": 0,
+                            "spans": [{ "text": "正文" }]
+                        }]
+                    })
+                }
                 m if m == method::query::MEASURE => {
                     let params: MeasureBatchParams = serde_json::from_value(request.params).unwrap();
                     let sizes: Vec<MeasureTextResult> = params
@@ -488,7 +547,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wheel_scrolls_by_content_block_boundaries() {
+    async fn wheel_scrolls_content_out_of_the_viewport() {
         let mut bench = Bench::new(200.0, 120.0).await;
         let build = |ui: &mut build::Ui<'_, '_>| {
             ui.scroll("list", 4.0, |s| {
@@ -501,11 +560,11 @@ mod tests {
         assert!(has_hit(&frame, "row0"), "起始位置第一行完整可见");
 
         bench
-            .event(FrameInput::Wheel { x: 100.0, y: 60.0, delta_x: 0.0, delta_y: 2.0, hit: None })
+            .event(FrameInput::Wheel { x: 100.0, y: 60.0, delta_x: 0.0, delta_y: 100.0, hit: None })
             .await;
         let frame = bench.render(build).await.unwrap();
-        assert!(!has_hit(&frame, "row0"), "滚出视口的整块不再可命中");
-        assert!(has_hit(&frame, "row1"));
+        assert!(!has_hit(&frame, "row0"), "滚出视口的行不再可命中");
+        assert!(has_hit(&frame, "row5"), "滚到底后最后一行可见");
     }
 
     #[tokio::test]
@@ -517,8 +576,13 @@ mod tests {
             vec![method::query::THEME.to_string(), method::query::MEASURE.to_string(), method::frame::SUBMIT.to_string()],
             "缺项先量算一轮再提交"
         );
+        let measures = bench.requests.iter().filter(|m| **m == method::query::MEASURE).count();
         bench.render(|ui| ui.text("中文说明", TextRole::Label)).await.unwrap();
-        assert_eq!(bench.requests.last().map(String::as_str), Some(method::frame::SUBMIT), "同文字不再量算");
+        assert_eq!(
+            bench.requests.iter().filter(|m| **m == method::query::MEASURE).count(),
+            measures,
+            "同文字不再量算"
+        );
     }
 
     #[tokio::test]
@@ -575,6 +639,182 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn wheel_at_the_followed_end_keeps_the_bottom() {
+        let mut bench = Bench::new(200.0, 120.0).await;
+        let build = |ui: &mut build::Ui<'_, '_>| {
+            ui.scroll_sized("logs", 60.0, 4.0, true, |s| {
+                for index in 0..4 {
+                    s.button(format!("row{index}"), format!("行{index}"));
+                }
+            });
+        };
+        bench.render(build).await.unwrap();
+        let events = bench
+            .event(FrameInput::Wheel { x: 100.0, y: 60.0, delta_x: 0.0, delta_y: 2.0, hit: None })
+            .await;
+        assert!(events.is_empty(), "已在终点时继续向下滚不产生偏移变化：{events:?}");
+        let frame = bench.render(build).await.unwrap();
+        assert!(has_hit(&frame, "row3"), "贴底不被块吸附拉回");
+    }
+
+    #[tokio::test]
+    async fn right_click_reports_the_hit_without_taking_focus() {
+        let mut bench = Bench::new(240.0, 120.0).await;
+        bench.render(|ui| ui.text_input("host", "abc", "")).await.unwrap();
+        let events = bench
+            .event(FrameInput::PointerDown {
+                x: 20.0,
+                y: 10.0,
+                button: MouseButton::Right,
+                hit: Some("host".into()),
+            })
+            .await;
+        assert_eq!(events, vec![UiEvent::RightClick { id: "host".into() }]);
+        let events = bench.event(key(NamedKey::Backspace)).await;
+        assert!(events.is_empty(), "右键不取焦点");
+    }
+
+    #[tokio::test]
+    async fn password_input_draws_masks_instead_of_the_value() {
+        let mut bench = Bench::new(240.0, 120.0).await;
+        let frame = bench.render(|ui| ui.text_input_password("secret", "hunter2", "")).await.unwrap();
+        let painted = texts(&frame);
+        assert!(!painted.iter().any(|text| text == "hunter2"), "值不得出现在绘制指令里");
+        assert!(painted.iter().any(|text| text.contains('•')));
+    }
+
+    #[tokio::test]
+    async fn card_lets_inner_controls_take_the_hit() {
+        let mut bench = Bench::new(240.0, 160.0).await;
+        let frame = bench
+            .render(|ui| {
+                ui.card("row", false, |body| body.icon_button("inner", Icon::Copy));
+            })
+            .await
+            .unwrap();
+        let top = frame.hits.last().expect("应有命中区");
+        assert_eq!(top.id, "inner", "卡片命中先登记，子控件压在上面");
+    }
+
+    #[tokio::test]
+    async fn scrollbar_drag_moves_the_offset() {
+        let mut bench = Bench::new(200.0, 120.0).await;
+        let build = |ui: &mut build::Ui<'_, '_>| {
+            ui.scroll("list", 4.0, |s| {
+                for index in 0..8 {
+                    s.button(format!("row{index}"), format!("行{index}"));
+                }
+            });
+        };
+        let frame = bench.render(build).await.unwrap();
+        assert!(frame.hits.iter().any(|hit| hit.id == "list::bar"), "内容超一屏时给滚动条命中区");
+
+        let events = bench
+            .event(FrameInput::PointerDown {
+                x: 198.0,
+                y: 60.0,
+                button: MouseButton::Left,
+                hit: Some("list::bar".into()),
+            })
+            .await;
+        let UiEvent::Scroll { offset, max_offset, .. } = &events[0] else {
+            panic!("按下滚动条应回滚动位置：{events:?}");
+        };
+        assert!(*offset > 0.0 && *offset < *max_offset, "落在轨道中部：{offset}/{max_offset}");
+
+        let events = bench
+            .event(FrameInput::PointerMove { x: 198.0, y: 400.0, hit: None })
+            .await;
+        let UiEvent::Scroll { offset, max_offset, .. } = &events[0] else {
+            panic!("拖动滚动条应回滚动位置：{events:?}");
+        };
+        assert!((*offset - *max_offset).abs() < 0.5, "拖到底即最大偏移：{offset}/{max_offset}");
+
+        bench
+            .event(FrameInput::PointerUp { x: 198.0, y: 400.0, button: MouseButton::Left, hit: None })
+            .await;
+        let events = bench
+            .event(FrameInput::PointerMove { x: 198.0, y: 60.0, hit: None })
+            .await;
+        assert!(events.is_empty(), "抬起后不再按拖动处理");
+    }
+
+    #[tokio::test]
+    async fn wheel_reaches_panes_and_a_fixed_log_area() {
+        let mut bench = Bench::new(400.0, 600.0).await;
+        let build = |ui: &mut build::Ui<'_, '_>| {
+            ui.column(8.0, |c| {
+                c.pad(12.0, 10.0, |p| p.row(8.0, |r| r.button("start", "启动")));
+                c.row_fill(10.0, |row| {
+                    row.scroll("left", 6.0, |s| {
+                        for index in 0..10 {
+                            s.button(format!("l{index}"), "模型");
+                        }
+                    });
+                    row.scroll("right", 8.0, |s| {
+                        for index in 0..30 {
+                            s.button(format!("r{index}"), "参数");
+                        }
+                    });
+                });
+                c.scroll_sized("logs", 220.0, 2.0, true, |s| {
+                    for index in 0..50 {
+                        s.text(format!("log{index}"), TextRole::Caption);
+                    }
+                });
+            });
+        };
+        bench.render(build).await.unwrap();
+
+        // 左栏（x 在面板左半）
+        let events = bench
+            .event(FrameInput::Wheel { x: 100.0, y: 300.0, delta_x: 0.0, delta_y: 40.0, hit: None })
+            .await;
+        assert!(
+            matches!(events.first(), Some(UiEvent::Scroll { id, .. }) if id == "left"),
+            "左栏滚动应命中：{events:?}"
+        );
+
+        // 右侧参数栏
+        let events = bench
+            .event(FrameInput::Wheel { x: 300.0, y: 300.0, delta_x: 0.0, delta_y: 40.0, hit: None })
+            .await;
+        assert!(
+            matches!(events.first(), Some(UiEvent::Scroll { id, .. }) if id == "right"),
+            "右栏滚动应命中：{events:?}"
+        );
+
+        // 底部日志区（固定高度，贴底）
+        let events = bench
+            .event(FrameInput::Wheel { x: 200.0, y: 580.0, delta_x: 0.0, delta_y: -40.0, hit: None })
+            .await;
+        assert!(
+            matches!(events.first(), Some(UiEvent::Scroll { id, .. }) if id == "logs"),
+            "日志区滚动应命中：{events:?}"
+        );
+    }
+
+    /// 没改画面内容的重复出帧不该再提交：宿主每收一帧都要重投影并整窗重绘，
+    /// 指针移动这类高频输入会把宿主拖进重绘风暴。
+    #[tokio::test]
+    async fn identical_frames_are_not_resubmitted() {
+        let mut bench = Bench::new(200.0, 120.0).await;
+        let build = |ui: &mut build::Ui<'_, '_>| ui.button("go", "启动");
+        bench.render(build).await.unwrap();
+        let submitted = bench.frames.len();
+        bench.render(build).await.unwrap();
+        assert_eq!(bench.frames.len(), submitted, "同内容帧不得重复提交");
+
+        bench.render(|ui| ui.button("go", "停止")).await.unwrap();
+        assert_eq!(bench.frames.len(), submitted + 1, "内容变了仍要提交");
+
+        // 重挂后宿主手里未必还有上一帧：尺寸输入到达即让去重失效
+        bench.event(FrameInput::Resize { width: 200.0, height: 120.0 }).await;
+        bench.render(|ui| ui.button("go", "停止")).await.unwrap();
+        assert_eq!(bench.frames.len(), submitted + 2, "重挂后同内容帧不得被吞");
+    }
+
+    #[tokio::test]
     async fn duplicate_control_ids_are_rejected_before_submitting() {
         let mut bench = Bench::new(200.0, 120.0).await;
         let error = bench
@@ -586,5 +826,132 @@ mod tests {
             .unwrap_err();
         assert!(error.message.contains("重复"), "{}", error.message);
         assert!(bench.frames.is_empty(), "非法帧不提交");
+    }
+
+    #[tokio::test]
+    async fn enter_submits_the_focused_input() {
+        let mut bench = Bench::new(240.0, 120.0).await;
+        bench.render(|ui| ui.text_input("q", "模型", "")).await.unwrap();
+        bench.set_value("q", "模型");
+        bench
+            .event(FrameInput::PointerDown { x: 20.0, y: 10.0, button: MouseButton::Left, hit: Some("q".into()) })
+            .await;
+        let events = bench.event(key(NamedKey::Enter)).await;
+        assert_eq!(events, vec![UiEvent::Submit { id: "q".into() }], "回车只报提交，不改值");
+    }
+
+    #[tokio::test]
+    async fn wheel_reports_the_scroll_offset_of_the_container() {
+        let mut bench = Bench::new(200.0, 120.0).await;
+        let build = |ui: &mut build::Ui<'_, '_>| {
+            ui.scroll("list", 4.0, |s| {
+                for index in 0..6 {
+                    s.button(format!("row{index}"), format!("行{index}"));
+                }
+            });
+        };
+        bench.render(build).await.unwrap();
+        let events = bench
+            .event(FrameInput::Wheel { x: 100.0, y: 60.0, delta_x: 0.0, delta_y: 80.0, hit: None })
+            .await;
+        let UiEvent::Scroll { id, offset, max_offset } = &events[0] else {
+            panic!("滚轮应上报滚动位置：{events:?}");
+        };
+        assert_eq!(id, "list");
+        assert!(*offset > 0.0 && *max_offset > 0.0);
+    }
+
+    /// 大块列表（卡片高过一格滚轮）也必须跟着滚轮走：偏移按像素累加，不吸附到块边界。
+    #[tokio::test]
+    async fn wheel_moves_a_list_of_tall_cards() {
+        let mut bench = Bench::new(240.0, 200.0).await;
+        let build = |ui: &mut build::Ui<'_, '_>| {
+            ui.scroll("cards", 10.0, |s| {
+                for index in 0..8 {
+                    s.card(format!("c{index}"), false, |card| {
+                        card.text(format!("模型 {index}"), TextRole::Label);
+                    });
+                }
+            });
+        };
+        bench.render(build).await.unwrap();
+        let events = bench
+            .event(FrameInput::Wheel { x: 120.0, y: 100.0, delta_x: 0.0, delta_y: 40.0, hit: None })
+            .await;
+        let Some(UiEvent::Scroll { offset, max_offset, .. }) = events.first() else {
+            panic!("一格滚轮就要动：{events:?}");
+        };
+        assert!((*offset - 40.0).abs() < 0.5, "偏移按像素累加，实际 {offset}");
+        assert!(*max_offset > *offset);
+    }
+
+    #[tokio::test]
+    async fn sized_scroll_follows_the_end_when_new_rows_arrive() {
+        let mut bench = Bench::new(200.0, 120.0).await;
+        let build = |ui: &mut build::Ui<'_, '_>| {
+            ui.scroll_sized("logs", 60.0, 4.0, true, |s| {
+                for index in 0..4 {
+                    s.button(format!("row{index}"), format!("行{index}"));
+                }
+            });
+        };
+        let frame = bench.render(build).await.unwrap();
+        assert!(!has_hit(&frame, "row0"), "贴底跟随首帧即停在终点");
+        assert!(has_hit(&frame, "row3"), "最新一行可见");
+    }
+
+    #[tokio::test]
+    async fn markdown_is_fetched_once_and_painted_in_the_frame() {
+        let mut bench = Bench::new(240.0, 160.0).await;
+        let frame = bench.render(|ui| ui.markdown("# 标题")).await.unwrap();
+        assert!(frame.commands.iter().any(|command| matches!(
+            command,
+            DrawCommand::Text { content, .. } if content == "正文"
+        )));
+        bench.render(|ui| ui.markdown("# 标题")).await.unwrap();
+        assert_eq!(
+            bench.requests.iter().filter(|method| method.as_str() == method::query::MARKDOWN).count(),
+            1,
+            "同内容只取一次"
+        );
+    }
+
+    #[tokio::test]
+    async fn fill_row_gives_a_sized_scroll_the_whole_row_height() {
+        let mut bench = Bench::new(400.0, 200.0).await;
+        let frame = bench
+            .render(|ui| {
+                ui.row_fill(8.0, |row| {
+                    row.scroll("left", 4.0, |s| {
+                        for index in 0..8 {
+                            s.button(format!("l{index}"), "左栏");
+                        }
+                    });
+                    row.scroll("right", 4.0, |s| s.button("r0", "右栏"));
+                });
+            })
+            .await
+            .unwrap();
+        let left = frame.hits.iter().find(|hit| hit.id == "l0").expect("左栏应有可见行");
+        let right = frame.hits.iter().find(|hit| hit.id == "r0").expect("右栏应有可见行");
+        assert!(left.x < 5.0 && right.x > 190.0, "两栏各占一半宽度：{left:?} / {right:?}");
+        assert!(left.y < 100.0, "滚动区拿到整行高度，内容从顶部落位：{left:?}");
+    }
+
+    #[tokio::test]
+    async fn badge_progress_and_icon_button_declare_their_hits() {
+        let mut bench = Bench::new(240.0, 160.0).await;
+        let frame = bench
+            .render(|ui| {
+                ui.column(6.0, |c| {
+                    c.chip("3 个", atelyx_plugin_protocol::view::ColorToken::Accent);
+                    c.progress(0.5);
+                    c.icon_button("copy", Icon::Copy);
+                });
+            })
+            .await
+            .unwrap();
+        assert!(has_hit(&frame, "copy"));
+        assert!(texts(&frame).iter().any(|text| text == "3 个"));
     }
 }

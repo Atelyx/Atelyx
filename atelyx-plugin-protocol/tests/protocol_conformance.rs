@@ -294,6 +294,12 @@ fn method_type_shapes_are_frozen() {
                 frozen_roundtrip::<atelyx_plugin_protocol::method::MeasureBatchResult>(&value)
             }
             "ThemeResult" => frozen_roundtrip::<atelyx_plugin_protocol::method::ThemeResult>(&value),
+            "MarkdownParams" => {
+                frozen_roundtrip::<atelyx_plugin_protocol::method::MarkdownParams>(&value)
+            }
+            "MarkdownResult" => {
+                frozen_roundtrip::<atelyx_plugin_protocol::method::MarkdownResult>(&value)
+            }
             other => panic!("语料 {name}: 未知类型 {other}"),
         };
         assert!(ok, "语料 {name}: 编码与快照不一致");

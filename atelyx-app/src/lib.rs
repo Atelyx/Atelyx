@@ -1385,6 +1385,10 @@ pub struct App {
     /// 各面的最新整面帧（键 = 插件 id + 面 id；有帧时帧胜出、优先于树渲染）。
     pub plugin_frames:
         HashMap<(String, String), std::sync::Arc<atelyx_core::plugin_runtime::SurfaceFrame>>,
+    /// 各面帧的提交序号（缓存失效键）：帧对象地址会被分配器复用，不能拿来判定「换没换帧」。
+    pub plugin_frame_stamps: HashMap<(String, String), u64>,
+    /// 帧提交序号的发号器（每换一帧 +1）。
+    pub(crate) plugin_frame_stamp_seq: u64,
     /// markdown 节点的解析投影（键 = 插件 id + 面 id + 节点 id；源码不变不重解析）。
     pub plugin_markdown: HashMap<plugin_actions::InputKey, plugin_actions::MarkdownNode>,
     /// 悬停中的插件节点（键 = 插件 id + 面 id + 节点 id；`hoverOnly` 图标钮据此显隐）。
@@ -1815,6 +1819,8 @@ impl App {
                 plugin_follow_released: HashSet::new(),
                 plugin_canvases: HashMap::new(),
                 plugin_frames: HashMap::new(),
+                plugin_frame_stamps: HashMap::new(),
+                plugin_frame_stamp_seq: 0,
                 plugin_markdown: HashMap::new(),
                 plugin_hovered: HashSet::new(),
                 plugin_icon_warnings: HashSet::new(),

@@ -38,8 +38,8 @@ fn surface_identity(plugin_id: &str, surface_id: &str) -> u64 {
 /// 部件跨帧状态（存 `tree::State`）：绘制缓存 + 拖拽 / 悬停 / 双击判定 + 输入法开关。
 struct FrameState {
     cache: canvas::Cache,
-    /// 上次绘制用的帧清单标识（Arc 指针地址，0 = 无帧）；变化即清缓存。
-    frame_key: Cell<usize>,
+    /// 上次绘制用的帧提交序号（0 = 未记录）；变化即清缓存。
+    stamp: Cell<u64>,
     /// 上次绘制用的界面字体族变更计数。
     font_epoch: Cell<u64>,
     /// 上次绘制用的界面图片句柄代数。
@@ -63,7 +63,7 @@ impl Default for FrameState {
     fn default() -> Self {
         Self {
             cache: canvas::Cache::new(),
-            frame_key: Cell::new(0),
+            stamp: Cell::new(0),
             font_epoch: Cell::new(0),
             image_epoch: Cell::new(0),
             reported: Cell::new(None),
@@ -89,11 +89,6 @@ pub struct PluginFrame<'a> {
 }
 
 impl PluginFrame<'_> {
-    /// 本面是否要键盘：声明 `keys` 收按键，声明 `ime` 收输入法；都不声明则按压不取焦。
-    fn wants_keyboard(&self) -> bool {
-        self.frame.keys || self.frame.ime.is_some()
-    }
-
     fn identity(&self) -> u64 {
         surface_identity(&self.plugin_id, &self.surface_id)
     }
@@ -189,7 +184,7 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginFrame<'_> {
                         }
                     }
                     state.inside.set(false);
-                    if self.focused && self.wants_keyboard() {
+                    if self.focused {
                         shell.publish(self.focus_message(false));
                         shell.request_redraw();
                     }
@@ -217,8 +212,9 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginFrame<'_> {
                 state.pressed.set(Some(mouse_button));
                 state.inside.set(true);
                 state.last_point.set(Some(point));
-                if self.wants_keyboard() && !self.focused {
-                    // 取焦先于按下：插件处理按下时即可按「已聚焦」更新编辑态
+                // 按下即取焦：插件往往要等这次点击处理完才在下一帧声明 `keys` / `ime`，
+                // 若等声明才取焦，用户得点第二次才拿得到键盘。按键与输入法仍按帧声明转发。
+                if !self.focused {
                     self.send(FrameInput::Focus { focused: true });
                     shell.publish(self.focus_message(true));
                     // 聚焦后须再绘一帧：输入法在绘制期启用
@@ -284,8 +280,12 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginFrame<'_> {
                     return;
                 };
                 let (dx, dy) = match delta {
-                    // iced 沿 winit（正 = 向上 / 向左）；协议按 Web 惯例（正 = 向下 / 向右），取反换算
-                    mouse::ScrollDelta::Lines { x, y } | mouse::ScrollDelta::Pixels { x, y } => (-x, -y),
+                    // iced 沿 winit（正 = 向上 / 向左）；协议按 Web 惯例（正 = 向下 / 向右），取反换算。
+                    // 行增量按宿主同一口径折算成像素：协议只认像素，插件不必区分设备
+                    mouse::ScrollDelta::Lines { x, y } => {
+                        (-x * crate::canvas_view::WHEEL_LINE_PX, -y * crate::canvas_view::WHEEL_LINE_PX)
+                    }
+                    mouse::ScrollDelta::Pixels { x, y } => (-x, -y),
                 };
                 self.send(FrameInput::Wheel {
                     x: point.x,
@@ -415,15 +415,21 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginFrame<'_> {
             return;
         }
         let state = tree.state.downcast_ref::<FrameState>();
-        let frame_key = Arc::as_ptr(self.frame) as usize;
+        // 帧提交序号变化即清绘制缓存：帧对象地址会被分配器复用，不能拿地址判「换没换帧」
+        let stamp = self
+            .app
+            .plugin_frame_stamps
+            .get(&(self.plugin_id.clone(), self.surface_id.clone()))
+            .copied()
+            .unwrap_or(0);
         let epoch = crate::ui::epoch();
         let image_epoch = self.app.note_image_epoch;
-        if state.frame_key.get() != frame_key
+        if state.stamp.get() != stamp
             || state.font_epoch.get() != epoch
             || state.image_epoch.get() != image_epoch
         {
             state.cache.clear();
-            state.frame_key.set(frame_key);
+            state.stamp.set(stamp);
             state.font_epoch.set(epoch);
             state.image_epoch.set(image_epoch);
         }

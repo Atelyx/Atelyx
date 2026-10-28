@@ -9,9 +9,6 @@ use super::text;
 use crate::frame_ui::UiEvent;
 use crate::Context;
 
-/// 滚轮一格折算的滚动距离（宿主按设备单位回发，行与像素都由同一系数近似）。
-const WHEEL_STEP: f32 = 24.0;
-
 /// 一条输入对应的语义事件；改完状态后由插件调用 `render` 提交新一帧。
 pub(crate) async fn handle(
     state: &mut UiState,
@@ -21,12 +18,19 @@ pub(crate) async fn handle(
 ) -> Vec<UiEvent> {
     let mut events = Vec::new();
     match input {
-        FrameInput::PointerDown { x, button, hit, .. } => {
-            pointer_down(state, ctx, *x, *button, hit.as_deref(), &value_of, &mut events).await;
+        FrameInput::PointerDown { x, y, button, hit, .. } => {
+            if *button == MouseButton::Right {
+                // 右键不改焦点与按下态：只把落点控件报给插件（行内右键菜单 / 快捷动作）
+                if let Some(id) = hit.as_deref() {
+                    events.push(UiEvent::RightClick { id: id.to_string() });
+                }
+            } else {
+                pointer_down(state, ctx, *x, *y, *button, hit.as_deref(), &value_of, &mut events).await;
+            }
         }
         FrameInput::PointerUp { hit, .. } => pointer_up(state, hit.as_deref(), &mut events),
-        FrameInput::DoubleClick { x, button, hit, .. } => {
-            pointer_down(state, ctx, *x, *button, hit.as_deref(), &value_of, &mut events).await;
+        FrameInput::DoubleClick { x, y, button, hit, .. } => {
+            pointer_down(state, ctx, *x, *y, *button, hit.as_deref(), &value_of, &mut events).await;
             if let Some(id) = hit.as_deref().filter(|id| matches!(state.layouts.get(*id), Some(Layout::Input { .. }))) {
                 if let Some(value) = value_of(id) {
                     let item = state.inputs.entry(id.to_string()).or_default();
@@ -35,12 +39,16 @@ pub(crate) async fn handle(
                 }
             }
         }
-        FrameInput::PointerMove { x, hit, .. } => {
+        FrameInput::PointerMove { x, y, hit, .. } => {
             state.hovered = hit.clone();
-            pointer_move(state, ctx, *x, hit.as_deref(), &value_of).await;
+            pointer_move(state, ctx, *x, *y, hit.as_deref(), &value_of, &mut events).await;
         }
         FrameInput::PointerLeave => state.hovered = None,
-        FrameInput::Wheel { x, y, delta_y, .. } => wheel(state, *x, *y, *delta_y),
+        FrameInput::Wheel { x, y, delta_y, .. } => {
+            if let Some(event) = wheel(state, *x, *y, *delta_y) {
+                events.push(event);
+            }
+        }
         FrameInput::Key { key, action, modifiers, text } => {
             if *action == atelyx_plugin_protocol::view::KeyAction::Press {
                 key_press(state, ctx, key, *modifiers, text.as_deref(), &value_of, &mut events).await;
@@ -49,6 +57,7 @@ pub(crate) async fn handle(
         FrameInput::Text { text, composing, .. } => ime_text(state, text, *composing, &value_of, &mut events),
         FrameInput::Focus { focused } => {
             state.press = None;
+            state.drag_bar = None;
             state.hovered = None;
             if !*focused {
                 // 宿主收走了面焦点（点了面外）：带走的光标与组合串一并作废
@@ -60,7 +69,11 @@ pub(crate) async fn handle(
                 }
             }
         }
-        FrameInput::Resize { width, height } => state.size = (*width, *height),
+        FrameInput::Resize { width, height } => {
+            state.size = (*width, *height);
+            // 面重新挂载（或真改尺寸）时宿主手里未必还有上一帧：同内容去重必须从这里失效
+            state.submitted = None;
+        }
     }
     events
 }
@@ -70,6 +83,7 @@ async fn pointer_down(
     state: &mut UiState,
     ctx: &Context,
     x: f32,
+    y: f32,
     button: MouseButton,
     hit: Option<&str>,
     value_of: &impl Fn(&str) -> Option<String>,
@@ -122,10 +136,19 @@ async fn pointer_down(
             state.press = Some(Press { id: id.to_string(), from_input: false });
         }
         Layout::Scroll { .. } => state.press = None,
+        Layout::ScrollBar { scroll, track, thumb, max_offset } => {
+            // 滚动条按下即可跳转，并进入拖动：移动继续按落点改偏移
+            state.press = None;
+            state.drag_bar = Some(scroll.clone());
+            let offset = bar_offset(track, thumb, max_offset, y);
+            state.scroll.insert(scroll.clone(), offset);
+            events.push(UiEvent::Scroll { id: scroll, offset, max_offset });
+        }
     }
 }
 
 fn pointer_up(state: &mut UiState, hit: Option<&str>, events: &mut Vec<UiEvent>) {
+    state.drag_bar = None;
     let Some(press) = state.press.take() else {
         return;
     };
@@ -154,13 +177,28 @@ fn pointer_up(state: &mut UiState, hit: Option<&str>, events: &mut Vec<UiEvent>)
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn pointer_move(
     state: &mut UiState,
     ctx: &Context,
     x: f32,
+    y: f32,
     hit: Option<&str>,
     value_of: &impl Fn(&str) -> Option<String>,
+    events: &mut Vec<UiEvent>,
 ) {
+    if let Some(scroll) = state.drag_bar.clone() {
+        let bar = super::widgets::scrollbar_id(&scroll);
+        if let Some(Layout::ScrollBar { track, thumb, max_offset, .. }) = state.layouts.get(&bar).cloned() {
+            let offset = bar_offset(track, thumb, max_offset, y);
+            if (state.scroll.get(&scroll).copied().unwrap_or(0.0) - offset).abs() >= 0.01 {
+                state.scroll.insert(scroll.clone(), offset);
+                events.push(UiEvent::Scroll { id: scroll, offset, max_offset });
+            }
+            return;
+        }
+        state.drag_bar = None;
+    }
     let Some(press) = state.press.clone().filter(|press| press.from_input) else {
         return;
     };
@@ -177,24 +215,34 @@ async fn pointer_move(
     }
 }
 
-fn wheel(state: &mut UiState, x: f32, y: f32, delta_y: f32) {
-    let target = state.layouts.iter().find_map(|(id, layout)| match layout {
-        Layout::Scroll { viewport, content, stops } if viewport.contains(x, y) => {
-            Some((id.clone(), *content, *viewport, stops.clone()))
-        }
-        _ => None,
-    });
-    let Some((id, content, viewport, stops)) = target else {
-        return;
-    };
+/// 滚动条落点 → 偏移：按滑块中心随指针走，钳到可滚动区间。
+fn bar_offset(track: Rect, thumb: f32, max_offset: f32, y: f32) -> f32 {
+    let travel = (track.h - thumb).max(1.0);
+    let ratio = ((y - track.y - thumb / 2.0) / travel).clamp(0.0, 1.0);
+    ratio * max_offset
+}
+
+/// 滚轮改滚动偏移：增量是像素（宿主已把「行」换算成像素），按光标所在的最内层滚动容器走。
+fn wheel(state: &mut UiState, x: f32, y: f32, delta_y: f32) -> Option<UiEvent> {
+    // 嵌套滚动区取面积最小者（最内层）：否则滚动会作用到外层容器上
+    let (id, content, viewport) = state
+        .layouts
+        .iter()
+        .filter_map(|(id, layout)| match layout {
+            Layout::Scroll { viewport, content } if viewport.contains(x, y) => {
+                Some((id.clone(), *content, *viewport))
+            }
+            _ => None,
+        })
+        .min_by(|a, b| (a.2.w * a.2.h).total_cmp(&(b.2.w * b.2.h)))?;
     let max_offset = (content - viewport.h).max(0.0);
     let current = state.scroll.get(&id).copied().unwrap_or(0.0);
-    let desired = (current + delta_y * WHEEL_STEP).clamp(0.0, max_offset);
-    let snapped = stops
-        .iter()
-        .copied()
-        .fold(0.0_f32, |best, stop| if (stop - desired).abs() < (best - desired).abs() { stop } else { best });
-    state.scroll.insert(id, snapped.min(max_offset));
+    let next = (current + delta_y).clamp(0.0, max_offset);
+    if (next - current).abs() < 0.01 {
+        return None;
+    }
+    state.scroll.insert(id.clone(), next);
+    Some(UiEvent::Scroll { id, offset: next, max_offset })
 }
 
 async fn key_press(
@@ -231,6 +279,11 @@ async fn key_press(
             }
             _ => {}
         }
+        return;
+    }
+    // 单行输入的回车是「提交」而非编辑：值由插件回读，语义（检索 / 写回设置）由插件定
+    if matches!(key, Key::Named { name: NamedKey::Enter }) && matches!(layout, Layout::Input { .. }) {
+        events.push(UiEvent::Submit { id });
         return;
     }
     match layout {

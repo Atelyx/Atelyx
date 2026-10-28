@@ -375,6 +375,12 @@ pub fn refresh_projection(app: &mut App) -> Task<Message> {
         // 整面帧接管该面：树不再渲染，树侧本地态（草稿 / 编辑会话 / 画布清单 / 节点焦点）一并撤掉，
         // 免得不显示的节点继续吃键盘、也不让每次提交重投影一棵用不上的树
         if let Some(frame) = app.plugins.surface_frame(&plugin_id, &surface_id) {
+            // 帧换了才发新序号：帧对象地址会被分配器复用，缓存必须按序号失效（否则滚动 / 重排后画面不刷新）
+            let changed = app.plugin_frames.get(&key).is_none_or(|old| !std::sync::Arc::ptr_eq(old, &frame));
+            if changed {
+                app.plugin_frame_stamp_seq += 1;
+                app.plugin_frame_stamps.insert(key.clone(), app.plugin_frame_stamp_seq);
+            }
             frames.insert(key.clone(), frame);
             let lost_focus = app.plugin_focus.clone().filter(|focus| {
                 focus.plugin_id == plugin_id && focus.surface_id == surface_id
@@ -419,20 +425,24 @@ pub fn refresh_projection(app: &mut App) -> Task<Message> {
     }
     app.plugin_canvases.retain(|key, _| canvas_keys.contains(key));
     app.plugin_frames = frames;
+    app.plugin_frame_stamps
+        .retain(|key, _| app.plugin_frames.contains_key(key));
     sync_frame_focus(app);
     report_unknown_icons(app);
     Task::batch([ensure_images(app), follow_snap_tasks(app)])
 }
 
-/// 帧投影刷新后校正焦点：面已不挂或帧不再声明 `keys` / `ime` 即释放，
-/// 否则宿主键盘停在一个不再接收按键的面上。
+/// 帧投影刷新后校正焦点：面已不挂即释放。
+///
+/// 不按「帧当前是否声明 `keys` / `ime`」释放：插件常在收到点击后才把输入框聚焦、下一帧才声明，
+/// 中途任何一次投影都可能在声明到达前把刚取到的焦点收走。按键与输入法的转发本来就按帧声明门控，
+/// 焦点槽多留一会不会漏键。
 fn sync_frame_focus(app: &mut App) {
     let Some(focus) = app.plugin_frame_focus.clone() else { return };
-    let wanted = app
+    let mounted = app
         .plugin_frames
-        .get(&(focus.plugin_id.clone(), focus.surface_id.clone()))
-        .is_some_and(|frame| frame.keys || frame.ime.is_some());
-    if !wanted {
+        .contains_key(&(focus.plugin_id.clone(), focus.surface_id.clone()));
+    if !mounted {
         app.plugin_frame_focus = None;
         notify_frame_focus(app, &focus.plugin_id, &focus.surface_id, false);
     }

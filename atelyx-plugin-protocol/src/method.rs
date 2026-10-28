@@ -205,6 +205,8 @@ pub mod query {
     pub const MEASURE: &str = "query.measure";
     /// 取宿主主题表（颜色 / 字号档 / 圆角档），插件据此与宿主观感一致。
     pub const THEME: &str = "query.theme";
+    /// 把 Markdown 文本转成结构化块（与笔记同一套解析语义），排版与绘制仍归插件。
+    pub const MARKDOWN: &str = "query.markdown";
 }
 
 pub mod ai {
@@ -665,6 +667,88 @@ pub struct Radii {
     pub xs: f32,
     pub sm: f32,
     pub md: f32,
+}
+
+// ---------- markdown ----------
+
+/// 单次转换的源文本上限（字节）：超限按可读错误拒绝，插件应自行分段。
+pub const MAX_MARKDOWN_BYTES: usize = 512 * 1024;
+
+/// [`query::MARKDOWN`] 的 params：交给宿主按笔记同一套解析语义转成结构化块。
+/// 宿主只做解析（块与行内片段），排版与绘制仍归插件。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarkdownParams {
+    pub content: String,
+}
+
+impl MarkdownParams {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.content.len() > MAX_MARKDOWN_BYTES {
+            return Err(format!("Markdown 文本不得超过 {MAX_MARKDOWN_BYTES} 字节"));
+        }
+        Ok(())
+    }
+}
+
+/// [`query::MARKDOWN`] 的 result：按源序排列的块。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarkdownResult {
+    pub blocks: Vec<MarkdownBlock>,
+}
+
+/// 行内片段：同一段文字里的样式差异（字重、等宽、链接目标）。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarkdownSpan {
+    pub text: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub strong: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub code: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<String>,
+}
+
+/// 块：`depth` 为嵌套层数（列表 / 引用内部块递增），由插件换算缩进。
+/// 表格单元格只给纯文本（单元格行内样式不展开）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(rename_all_fields = "camelCase")]
+pub enum MarkdownBlock {
+    Heading {
+        level: u8,
+        depth: u32,
+        spans: Vec<MarkdownSpan>,
+    },
+    Paragraph {
+        depth: u32,
+        spans: Vec<MarkdownSpan>,
+    },
+    /// 列表项：`index` 对有序列表取源里的序号（`3.` 就是 3），无序列表恒为 1；`ordered` 决定画圆点还是序号。
+    ListItem {
+        depth: u32,
+        ordered: bool,
+        index: u32,
+        spans: Vec<MarkdownSpan>,
+    },
+    /// 引用段落：插件在左侧画竖条。
+    Quote {
+        depth: u32,
+        spans: Vec<MarkdownSpan>,
+    },
+    Code {
+        depth: u32,
+        lang: String,
+        content: String,
+    },
+    /// 表格：`rows[0]` 是表头行，其余为数据行；单元格只给纯文本。
+    Table {
+        depth: u32,
+        rows: Vec<Vec<String>>,
+    },
+    Divider,
 }
 
 // ---------- layout ----------

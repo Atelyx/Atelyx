@@ -7,7 +7,7 @@ mod inline;
 mod parse;
 mod types;
 
-pub use parse::{parse_inline, parse_markdown};
+pub use parse::{block_from, parse_inline, parse_markdown};
 pub use types::{
     InlineSpan, LinkForm, MarkdownBlock, MarkdownDocument, MarkdownListItem, MarkdownTableCell,
     MentionCandidate, ParseOptions, RangeInfo,

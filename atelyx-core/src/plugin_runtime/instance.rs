@@ -1065,6 +1065,12 @@ impl Instance {
             method::canvas::SUBMIT => self.on_canvas_submit(token, params),
             method::canvas::PATCH => self.on_canvas_patch(token, params),
             method::frame::SUBMIT => self.on_frame_submit(token, params),
+            method::query::MARKDOWN => {
+                let p: method::MarkdownParams = parse(params)?;
+                p.validate().map_err(RpcError::failed)?;
+                let result = super::markdown::blocks(&p.content);
+                serde_json::to_value(result).map_err(|e| RpcError::failed(e.to_string()))
+            }
             method::state::READ => {
                 let json = capability::read_state(&self.state_dir).map_err(RpcError::failed)?;
                 Ok(json!({ "json": json }))

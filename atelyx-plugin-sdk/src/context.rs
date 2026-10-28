@@ -206,6 +206,13 @@ impl Context {
         self.call_typed(method::query::THEME, &Value::Null).await
     }
 
+    /// 把 Markdown 文本交给宿主按笔记同一套语义解析成结构化块；排版与绘制仍由插件完成。
+    /// 内容不变时结果也不变，插件应按内容缓存，不必逐帧往返。
+    pub async fn markdown(&self, content: &str) -> Result<MarkdownResult, RpcError> {
+        let params = MarkdownParams { content: content.into() };
+        self.call_typed(method::query::MARKDOWN, &params).await
+    }
+
     /// 提交整面帧：整发整换该面的绘制指令、命中区与输入声明（空指令 = 清空绘制）。
     /// 帧与该面的界面树互斥：提交帧后宿主只渲染帧（树存档保留但不渲染，树内画布节拍停掉），
     /// 再提交一次界面树即交还控件通道并撤掉帧。
