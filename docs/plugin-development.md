@@ -12,7 +12,7 @@ Atelyx 的插件是一个**独立进程**：宿主启动它、通过标准输入
 | --- | --- |
 | 插件 = 原生可执行文件 | 宿主按 `plugin.json` 里的 `entry` 启动它，不带参数，工作目录 = 插件目录 |
 | 通道 = stdin / stdout 上的 JSON-RPC 2.0（NDJSON） | stdout **只能**是协议信封；日志一律走 stderr |
-| 界面 = 声明式控件树 | 插件提交 `ViewNode` 树或画布绘图指令，宿主解释渲染；插件进程里没有 UI 代码 |
+| 界面 = 控件树或整面帧 | 插件提交 `ViewNode` 树、画布绘图指令或整面帧（推荐用 SDK 控件层，见 6.2）；宿主解释 / 执行，插件进程里没有宿主 UI 代码 |
 | 能力面按声明开放 | `plugin.json` 的 `permissions` 未声明就调用，宿主拒绝并记审计（fail-closed） |
 | 信任模型 = 本地程序 | 宿主不做沙箱：插件本来就能读写文件、起进程、联网。「权限」是透明度与审计口径，不是隔离边界 |
 | 一个插件一个进程 | 宿主多窗口共享同一份进程；进程从启动到停用是一个「会话」 |
@@ -197,6 +197,8 @@ async fn main() {
 ## 5. 界面（ViewNode）
 
 一棵树 = 根节点 + 子节点。`id` 在同一棵树里必须唯一（宿主按 id 做控件态复用与事件回传）；容器节点才能带 `children`；节点要回发的事件写在 `events` 里。Rust SDK 里用 `NodeId` 常量定义 id，构建与事件匹配共用同一份定义。
+
+> 整面自绘与 SDK 控件层（按钮 / 输入框 / 下拉 / 勾选 / 滚动）见 [6.2](#62-sdk-控件层推荐写法)；本节是控件树通道的写法。
 
 ```json
 {
@@ -391,6 +393,96 @@ ctx.submit_frame("main", frame(commands, hits)).await?;   // 整帧替换，空�
 - **帧率**：`fps`（1–120）与画布同口径，节拍回 `host:frame.tick { frame, deltaMs }`，SDK 转成 `on_frame_tick`。
 
 指令集与树内画布同源，且不含裁剪 / 变换 / 阴影——需要时自己换算坐标或预渲染成图片。帧输入与帧拍回调都**不**自动重发，状态变了在回调里提交新帧。
+
+### 6.2 SDK 控件层（推荐写法）
+
+不想自己算坐标与命中区，就用 `atelyx-plugin-sdk::frame_ui`：控件（按钮 / 输入框 / 下拉 / 勾选 / 文字 / 滚动）编译成绘制指令，悬停 / 按下 / 焦点 / 文本编辑（光标、选区、输入法组合串、复制粘贴、清空、Tab 切换）都在控件层里。宿主仍然只收帧，不认识控件。
+
+一个面持一个 `FrameUi`，按两阶段出帧：
+
+```rust
+use std::sync::atomic::{AtomicU32, Ordering};
+use atelyx_plugin_sdk::frame_ui::{FrameUi, TextRole, Ui, UiEvent};
+use atelyx_plugin_sdk::protocol::frame::FrameInputParams;
+use atelyx_plugin_sdk::protocol::method::ContributionSlot;
+use atelyx_plugin_sdk::{Context, PluginHandler};
+
+struct Echo {
+    ui: tokio::sync::Mutex<FrameUi>,
+    clicks: AtomicU32,
+}
+
+impl Echo {
+    async fn render(&self, ctx: &atelyx_plugin_sdk::Context) {
+        let clicks = self.clicks.load(Ordering::SeqCst);
+        let mut ui = self.ui.lock().await;
+        if let Err(e) = ui.render(ctx, "main", move |ui| build(ui, clicks)).await {
+            eprintln!("提交设置面失败：{e}");
+        }
+    }
+}
+
+fn build(ui: &mut Ui<'_, '_>, clicks: u32) {
+    ui.scroll("main-scroll", 8.0, |c| {
+        c.text("你好，Atelyx", TextRole::Heading);
+        c.text(format!("点击次数：{clicks}"), TextRole::Label);
+        c.button("ping", "点我");
+    });
+}
+
+#[async_trait::async_trait]
+impl PluginHandler for Echo {
+    async fn on_ready(&self, ctx: &Context) {
+        let _ = ctx.register(ContributionSlot::Panel, "main", "Echo", None, None).await;
+        // 宿主首次绘制后才知道真实尺寸，先按缺省尺寸出一帧
+        self.render(ctx).await;
+    }
+
+    /// 帧输入按到达顺序逐条处理：先出事件、改状态，再重画。
+    async fn on_frame_input(&self, ctx: &Context, params: FrameInputParams) {
+        let events = {
+            let mut ui = self.ui.lock().await;
+            ui.event(ctx, &params.input, |_| None).await
+        };
+        for event in events {
+            if let UiEvent::Click { id } = event {
+                if id == "ping" {
+                    self.clicks.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }
+        self.render(ctx).await;
+    }
+}
+```
+
+几条用法约定：
+
+- **两阶段**：`event` 把原始输入翻成 `Click` / `Text`（完整新值）/ `Select`（选项下标）/ `Focus`，并且已就地更新光标、选区、焦点与滚动；插件改完自己的状态后 **立即** `render`，这一帧才是改后的样子。帧内容不会自动提交（与界面树托管不同）。
+- **`value_of` 每次现读**：输入框的值以插件状态为准。`event(ctx, input, |id| ...)` 的闭包按 id 返回当前值（返回 `None` 即非输入框），编辑永远从这里出发，不要缓存上一帧的字符串。
+- **`render` 的闭包会被调用多次**：文字宽度缺项时先按估算排、向宿主量算后重建，最多 3 轮。闭包必须只读状态（不要在里面改状态、发请求）。
+- **输入框的最终值要写回**：收到 `UiEvent::Text { id, value }` 就把 `value` 存进自己的状态；不写回的话下一次渲染还是旧值。
+- **`Focus { focused: false }`** 可以拿来提交「失焦才生效」的字段（例如数字输入的越界归一）。
+- **主题只取一次**：首次 `render` 会查 `query.theme` 拿字号 / 圆角 / 主题色，宿主主题变了不会通知；面重新挂载时新建 `FrameUi` 即可重取。
+- **尺寸**：`FrameUi` 记下宿主回发的 `Resize`，按它排版；宿主首次绘制前用缺省尺寸。
+
+控件与布局：
+
+| 控件 | 说明 |
+| --- | --- |
+| `text(content, role)` | 单行、超出按宽度省略；`role` = `Heading` / `Label` / `FieldLabel` / `Caption` / `Value` |
+| `caption` / `field_label` | 按可用宽度换行的小号说明 / 字段标签 |
+| `button` / `ghost_button` | 常规底 / 无底色按钮，点击回 `Click { id }` |
+| `text_input(id, value, placeholder)` | 单行输入框；`text_input_sized` 固定宽 |
+| `select(id, options, selected)` | 下拉；点击回 `Select { id, index }`（选项**就地展开**撑开后续内容） |
+| `checkbox(id, checked, label)` | 勾选，点击回 `Click { id }`（勾选值由插件自己翻转） |
+| `scroll(id, gap, ...)` / `list(id, gap, ...)` | 滚动容器（吃父容器剩余高度；子项按块对齐滚动，只画视口内的整块） |
+| `rule()` / `spacer(h)` | 分隔线 / 固定高度空白 |
+| `column(gap, ...)` / `row(gap, ...)` | 纵向 / 横向容器；横向行里撑满子项吃剩余宽度、收缩子项按内容宽 |
+
+边界的两条（指令集没有裁剪，也画不了覆盖式浮层）：下拉就地展开而不是浮在内容上；滚动按内容块边界对齐，滚出视口的块整块不画——长内容请拆成行放进 `scroll` / `list`。
+
+`role` 与控件高度跟随宿主的主题与字号：不要自己写死色值和像素。需要自绘时仍可退回 [`ctx.submit_frame`]，两者用同一个通道，不要混用一个面。
 
 ## 7. 能力面
 

@@ -7,6 +7,7 @@ pub mod canvas_builders;
 pub mod connection;
 pub mod context;
 pub mod frame_builders;
+pub mod frame_ui;
 pub mod handler;
 pub mod ui;
 
