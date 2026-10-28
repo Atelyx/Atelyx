@@ -1093,7 +1093,7 @@ pub enum MouseButton {
 ```rust
 // atelyx-plugin-protocol/src/view.rs
 /// 画布指针事件负载。坐标 = 节点本地逻辑像素、左上原点；
-/// wheel 增量为行数，正 = 向下 / 向右（Web 惯例，宿主负责与平台滚动方向换算）。
+/// wheel 增量沿用设备单位（滚轮为行、触控板为像素），正 = 向下 / 向右（Web 惯例，宿主已完成方向换算）。
 #[serde(tag = "kind", rename_all = "camelCase")]
 #[serde(rename_all_fields = "camelCase")]
 pub enum CanvasPointer {
@@ -1129,6 +1129,17 @@ pub enum CanvasColor {
 pub struct CanvasPoint {
     pub x: f32,
     pub y: f32,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/canvas.rs
+/// 文字水平对齐：以 `maxWidth` 为对齐区域、`x` 为区域左缘，按量算出的整段宽度换算（换行后段内各行仍左对齐）。
+#[serde(rename_all = "camelCase")]
+pub enum TextAlign {
+    Start,
+    Center,
+    End,
 }
 ```
 
@@ -1177,8 +1188,8 @@ pub enum DrawCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stroke_width: Option<f32>,
     },
-    /// 文字以 (x, y) 为左上角。宿主 canvas 的文字永远绘制在所有图层之上（图形引擎限制），
-    /// 插件若需文字被后续图形遮盖，应改用宿主原生 Text 控件分层。
+    /// 文字以 (x, y) 为左上角。给 `maxWidth` 时按该宽度换行并作为对齐区域（`x` 为区域左缘）；
+    /// `align` 只在给了 `maxWidth` 时成立，缺省 `start`。
     Text {
         x: f32,
         y: f32,
@@ -1187,6 +1198,14 @@ pub enum DrawCommand {
         color: CanvasColor,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         weight: Option<TextWeight>,
+        /// 字体族：`ui` 跟随界面字体（缺省），`mono` 用系统等宽族。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        family: Option<TextFamily>,
+        /// 可用宽度：给定即按该宽度换行，并作为 `align` 的对齐区域。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_width: Option<f32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        align: Option<TextAlign>,
     },
     /// 图片贴片：绘制在给定矩形内。`fit` 缺省 = 拉伸填满；`contain` 等比完整可见（留空边），
     /// `cover` 等比覆盖并裁剪溢出部分。
@@ -1267,13 +1286,16 @@ pub struct CanvasFrameParams {
 ```rust
 // atelyx-plugin-protocol/src/method.rs
 /// [`canvas::MEASURE_TEXT`] 的 params：`size` 为绝对字号（逻辑像素，与画布 `text` 指令同口径）。
-/// 参数面与画布 `text` 指令保持一致（只有字重可调），量出来的宽度才能在画布上复现。
+/// 参数面与画布 `text` 指令保持一致，量出来的宽度才能在画布上复现。
 #[serde(rename_all = "camelCase")]
 pub struct MeasureTextParams {
     pub text: String,
     pub size: f32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub weight: Option<crate::view::TextWeight>,
+    /// 字体族：`ui` 跟随界面字体（缺省），`mono` 用系统等宽族。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub family: Option<crate::view::TextFamily>,
     /// 可用宽度上限：给定即按该宽度换行量算（缺省按单行）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_width: Option<f32>,
@@ -1291,7 +1313,324 @@ pub struct MeasureTextResult {
 }
 ```
 
-## 6. 贡献点与窗口面
+## 6. 整面帧
+
+整面帧把面的绘制与输入整体交给插件：`frame.submit` 提交指令清单 + 命中区 + 输入声明，宿主只按几何绘制并把原始输入原样回发；与同面的界面树互斥，面按最后提交的通道渲染。
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 面帧：整个面交给插件自绘（与 `view.submit` 互斥，面以最后提交的为准）。
+pub mod frame {
+    /// 插件提交一份整面帧（指令清单 + 命中区 + 输入法光标 + 键盘 / 帧率声明）。整帧替换。
+    pub const SUBMIT: &str = "frame.submit";
+    /// 宿主回发原始输入（通知）：指针 / 滚轮 / 按键 / 输入法 / 焦点 / 尺寸。
+    pub const HOST_INPUT: &str = "host:frame.input";
+    /// 宿主按面声明的帧率发帧拍（通知）：插件收到后提交该帧的内容。
+    pub const HOST_TICK: &str = "host:frame.tick";
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/frame.rs
+/// 一面一帧的完整内容。
+#[serde(rename_all = "camelCase")]
+pub struct SurfaceFrame {
+    pub commands: Vec<DrawCommand>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hits: Vec<HitRegion>,
+    /// 声明后宿主承接输入法：组合串与提交文本经 [`FrameInput::Text`] 回发，光标与候选窗按此矩形定位。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ime: Option<FrameRect>,
+    /// 声明后宿主把键盘交给本面：指针按下取焦，随后全部按键（含修饰键组合）经 [`FrameInput::Key`] 回发。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub keys: bool,
+    /// 帧率（1–120）：声明后宿主按该节拍回发 `host:frame.tick`；缺省不推帧。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fps: Option<u16>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/frame.rs
+/// 命中区：矩形 + 标识 + 光标形状。同帧内按声明序叠放（后声明的在上）。
+/// 宿主把落在其上的指针事件的 `hit` 填成该 id，插件按 id 自行解释语义。
+#[serde(rename_all = "camelCase")]
+pub struct HitRegion {
+    /// 插件自定义的命中标识，同帧内唯一。
+    pub id: String,
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    /// 缺省 = 系统默认箭头。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<HitCursor>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/frame.rs
+/// 命中区光标形状（悬停时的鼠标指针）。
+#[serde(rename_all = "camelCase")]
+pub enum HitCursor {
+    #[default]
+    Default,
+    Pointer,
+    Text,
+    Grab,
+    Grabbing,
+    Crosshair,
+    NotAllowed,
+    ResizeHorizontal,
+    ResizeVertical,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/frame.rs
+/// 面本地矩形（输入法光标 / 候选框锚点）。
+#[serde(rename_all = "camelCase")]
+pub struct FrameRect {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/frame.rs
+/// 宿主回发的原始输入。坐标 = 面本地逻辑像素；`hit` 为命中的命中区 id（未命中缺省）。
+/// 插件按帧自行维护交互状态（悬停 / 按下 / 焦点 / 滚动位置 / 文本编辑）。
+#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(rename_all_fields = "camelCase")]
+pub enum FrameInput {
+    PointerDown {
+        x: f32,
+        y: f32,
+        button: MouseButton,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hit: Option<String>,
+    },
+    PointerUp {
+        x: f32,
+        y: f32,
+        button: MouseButton,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hit: Option<String>,
+    },
+    PointerMove {
+        x: f32,
+        y: f32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hit: Option<String>,
+    },
+    /// 指针离开本面（从内到外边沿触发一次）。
+    PointerLeave,
+    /// 同键二次按下（间隔与位移都在宿主阈值内），插件无需自己算。
+    DoubleClick {
+        x: f32,
+        y: f32,
+        button: MouseButton,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hit: Option<String>,
+    },
+    /// 滚轮增量沿用设备单位（滚轮为行、触控板为像素），正 = 向下 / 向右（Web 惯例，宿主已完成方向换算）。
+    Wheel {
+        x: f32,
+        y: f32,
+        delta_x: f32,
+        delta_y: f32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hit: Option<String>,
+    },
+    /// 键盘：`text` 为该键在输入法提交后可插入的文本（字符键才有，宿主已滤掉控制字符）。
+    Key {
+        key: Key,
+        action: KeyAction,
+        modifiers: Modifiers,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
+    },
+    /// 输入法：`composing` = 组合串更新（空串 = 组合结束，不插入文本），
+    /// 否则 `text` 为已提交的文本；`caret` 为组合期的光标字节位；`candidates` 为候选窗锚点矩形。
+    Text {
+        text: String,
+        composing: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caret: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        candidates: Option<FrameRect>,
+    },
+    /// 焦点进入 / 离开本面（按下即取焦，按在面外即失焦）。
+    Focus { focused: bool },
+    /// 面尺寸变化（逻辑像素）：插件据此重排并重绘。
+    Resize { width: f32, height: f32 },
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/frame.rs
+/// 命中区数量上限（单帧）。
+pub const MAX_HITS: usize = 4096;
+```
+
+```rust
+// atelyx-plugin-protocol/src/frame.rs
+/// 命中区 id 上限（字节）。
+pub const MAX_HIT_ID_LEN: usize = 64;
+```
+
+```rust
+// atelyx-plugin-protocol/src/frame.rs
+/// `frame.submit` 的 params：整面重建（一帧即当前完整界面，未提交过的面显示占位）。
+#[serde(rename_all = "camelCase")]
+pub struct FrameSubmitParams {
+    pub surface_id: String,
+    #[serde(flatten)]
+    pub frame: SurfaceFrame,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/frame.rs
+/// `host:frame.input` 的 params。
+#[serde(rename_all = "camelCase")]
+pub struct FrameInputParams {
+    pub surface_id: String,
+    pub input: FrameInput,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/frame.rs
+/// `host:frame.tick` 的 params：帧序号与距上一帧的毫秒数（首帧为 0）。
+#[serde(rename_all = "camelCase")]
+pub struct FrameTickParams {
+    pub surface_id: String,
+    pub frame: u64,
+    pub delta_ms: u32,
+}
+```
+
+## 7. 纯查询：量算与主题
+
+纯计算调用，不改界面也不产生帧；同一段文字反复量算时插件应自行缓存结果。
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 纯查询：不改界面、不产生帧。
+pub mod query {
+    /// 批量量算文字占位尺寸（排版按真实字宽摆放，不能按字符数估）。
+    pub const MEASURE: &str = "query.measure";
+    /// 取宿主主题表（颜色 / 字号档 / 圆角档），插件据此与宿主观感一致。
+    pub const THEME: &str = "query.theme";
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 单次批量量算的条目上限。
+pub const MAX_MEASURE_ITEMS: usize = 512;
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`query::MEASURE`] 的一条：字段与 [`MeasureTextParams`] 同口径。
+#[serde(rename_all = "camelCase")]
+pub struct MeasureItem {
+    pub text: String,
+    pub size: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weight: Option<crate::view::TextWeight>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub family: Option<crate::view::TextFamily>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_width: Option<f32>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`query::MEASURE`] 的 params：一次量算多段文字（排一屏文本的量算往返要落在单批里）。
+#[serde(rename_all = "camelCase")]
+pub struct MeasureBatchParams {
+    pub items: Vec<MeasureItem>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`query::MEASURE`] 的 result：顺序与 params 的 `items` 一一对应。
+#[serde(rename_all = "camelCase")]
+pub struct MeasureBatchResult {
+    pub sizes: Vec<MeasureTextResult>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`query::THEME`] 的 result：颜色 / 字号档 / 圆角档（值随用户的主题与字号设置变化）。
+#[serde(rename_all = "camelCase")]
+pub struct ThemeResult {
+    pub colors: ThemeColors,
+    pub font_sizes: FontSizes,
+    pub radii: Radii,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 主题色：十六进制 `#rrggbb` / `#rrggbbaa`，字段名与 [`crate::view::ColorToken`] 的 wire 名一致。
+#[serde(rename_all = "camelCase")]
+pub struct ThemeColors {
+    pub text: String,
+    pub text_secondary: String,
+    pub text_muted: String,
+    pub accent: String,
+    pub accent_soft: String,
+    pub danger: String,
+    pub danger_soft: String,
+    pub success: String,
+    pub success_soft: String,
+    pub warning: String,
+    pub warning_soft: String,
+    pub surface: String,
+    pub surface_muted: String,
+    pub surface_sunken: String,
+    pub hover: String,
+    pub border: String,
+    pub border_strong: String,
+    pub transparent: String,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 字号档（绝对逻辑像素）：`micro` / `caption` / `ui` / `body` / `h2` / `h1`。
+#[serde(rename_all = "camelCase")]
+pub struct FontSizes {
+    pub micro: f32,
+    pub caption: f32,
+    pub ui: f32,
+    pub body: f32,
+    pub h2: f32,
+    pub h1: f32,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 圆角档（逻辑像素）。
+#[serde(rename_all = "camelCase")]
+pub struct Radii {
+    pub xs: f32,
+    pub sm: f32,
+    pub md: f32,
+}
+```
+
+## 8. 贡献点与窗口面
 
 贡献点决定插件界面出现在哪里；`surfaceId` 即贡献 id（插件窗口与文档实例另有宿主分配的 id）。
 
@@ -1521,7 +1860,7 @@ pub struct WindowClosedParams {
 }
 ```
 
-## 7. 默认布局
+## 9. 默认布局
 
 插件声明自己期望的默认布局：宿主在插件首次启用时摆进当前场景，之后改名 / 删除都不再补回。`views` 填视图 kind（本插件贡献为 `plugin:<插件 id>:<贡献 id>`）。
 
@@ -1585,7 +1924,7 @@ pub const MAX_PANELS: usize = 32;
 pub const MAX_VIEWS_PER_PANEL: usize = 16;
 ```
 
-## 8. 能力面方法名
+## 10. 能力面方法名
 
 每个模块是一类能力面的方法名常量，与 `permissions` 里的能力声明一一对应；未声明能力的调用会被宿主拒绝并记入审计。
 
@@ -1851,7 +2190,7 @@ pub mod collab {
 }
 ```
 
-## 9. 能力面负载：文件、进程与系统服务
+## 11. 能力面负载：文件、进程与系统服务
 
 上表方法的 params / result 形态（`path` 在 `fs` 面是绝对路径，在 `vault` 面是仓库相对路径）。
 
@@ -2231,7 +2570,7 @@ pub struct HttpResult {
 }
 ```
 
-## 10. 能力面负载：文档与对话
+## 12. 能力面负载：文档与对话
 
 领域文档实例、AI 对话与工具桥的负载形态。
 
@@ -2522,7 +2861,7 @@ pub struct ToolResultParams {
 }
 ```
 
-## 11. 能力面负载：表格
+## 13. 能力面负载：表格
 
 表格面读写当前打开的表格；真源在宿主会话，插件不得旁路读写 `.atb`。
 
@@ -2656,7 +2995,7 @@ pub struct TableSetCellImageParams {
 }
 ```
 
-## 12. 能力面负载：托盘与协作
+## 14. 能力面负载：托盘与协作
 
 系统托盘条目与空间内插件间消息的负载形态；两类能力的可用性都随宿主平台与容器类型而变。
 
@@ -2771,7 +3110,7 @@ pub struct CollabMessageParams {
 }
 ```
 
-## 13. 宿主广播事件
+## 15. 宿主广播事件
 
 插件经 `event.subscribe` 声明订阅的事件名与载荷；未上表的名字宿主拒绝订阅。
 

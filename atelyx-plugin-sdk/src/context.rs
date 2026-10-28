@@ -14,7 +14,7 @@ use crate::connection::PendingMap;
 use crate::protocol::envelope::{Envelope, RpcError};
 use crate::protocol::event::{SubscribeParams, SubscribeResult};
 use crate::protocol::method::{self, *};
-use crate::protocol::view::{PaddingSpec, TextWeight};
+use crate::protocol::view::{PaddingSpec, TextFamily, TextWeight};
 
 /// 常规能力调用的默认等待上限（读文件 / 起进程 / 通知等宿主侧可预期的操作）。
 pub const CALL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -185,10 +185,40 @@ impl Context {
         text: &str,
         size: f32,
         weight: Option<TextWeight>,
+        family: Option<TextFamily>,
         max_width: Option<f32>,
     ) -> Result<MeasureTextResult, RpcError> {
-        let params = MeasureTextParams { text: text.into(), size, weight, max_width };
+        let params = MeasureTextParams { text: text.into(), size, weight, family, max_width };
         self.call_typed(method::canvas::MEASURE_TEXT, &params).await
+    }
+
+    /// 一次量算多段文字（排一屏文本的往返落在单批里，上限见协议 `MAX_MEASURE_ITEMS`）。
+    pub async fn measure_batch(
+        &self,
+        items: Vec<MeasureItem>,
+    ) -> Result<MeasureBatchResult, RpcError> {
+        let params = MeasureBatchParams { items };
+        self.call_typed(method::query::MEASURE, &params).await
+    }
+
+    /// 取宿主主题：颜色 / 字号档 / 圆角档随用户设置变化，供插件绘制对齐宿主外观。
+    pub async fn query_theme(&self) -> Result<ThemeResult, RpcError> {
+        self.call_typed(method::query::THEME, &Value::Null).await
+    }
+
+    /// 提交整面帧：整发整换该面的绘制指令、命中区与输入声明（空指令 = 清空绘制）。
+    /// 帧与该面的界面树互斥：提交帧后宿主只渲染帧（树存档保留但不渲染，树内画布节拍停掉），
+    /// 再提交一次界面树即交还控件通道并撤掉帧。
+    pub async fn submit_frame(
+        &self,
+        surface_id: &str,
+        frame: crate::protocol::frame::SurfaceFrame,
+    ) -> Result<SubmitResult, RpcError> {
+        let params = crate::protocol::frame::FrameSubmitParams {
+            surface_id: surface_id.into(),
+            frame,
+        };
+        self.call_typed(method::frame::SUBMIT, &params).await
     }
 
     /// 注册一个贡献点，使其出现在宿主对应入口（面板 / 表格视图 / 设置页）。

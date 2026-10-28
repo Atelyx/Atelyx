@@ -70,7 +70,17 @@ pub fn draw_text(
     size: f32,
     color: CanvasColor,
 ) -> DrawCommand {
-    DrawCommand::Text { x, y, content: content.into(), size, color, weight: None }
+    DrawCommand::Text {
+        x,
+        y,
+        content: content.into(),
+        size,
+        color,
+        weight: None,
+        family: None,
+        max_width: None,
+        align: None,
+    }
 }
 
 pub fn draw_text_weighted(
@@ -81,7 +91,17 @@ pub fn draw_text_weighted(
     color: CanvasColor,
     weight: TextWeight,
 ) -> DrawCommand {
-    DrawCommand::Text { x, y, content: content.into(), size, color, weight: Some(weight) }
+    DrawCommand::Text {
+        x,
+        y,
+        content: content.into(),
+        size,
+        color,
+        weight: Some(weight),
+        family: None,
+        max_width: None,
+        align: None,
+    }
 }
 
 /// 图片贴片，按给定矩形绘制（缺省拉伸填满，比例由插件自己保持）。

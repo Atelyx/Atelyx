@@ -189,6 +189,24 @@ pub mod canvas {
     pub const HOST_FRAME: &str = "host:canvas.frame";
 }
 
+/// 面帧：整个面交给插件自绘（与 `view.submit` 互斥，面以最后提交的为准）。
+pub mod frame {
+    /// 插件提交一份整面帧（指令清单 + 命中区 + 输入法光标 + 键盘 / 帧率声明）。整帧替换。
+    pub const SUBMIT: &str = "frame.submit";
+    /// 宿主回发原始输入（通知）：指针 / 滚轮 / 按键 / 输入法 / 焦点 / 尺寸。
+    pub const HOST_INPUT: &str = "host:frame.input";
+    /// 宿主按面声明的帧率发帧拍（通知）：插件收到后提交该帧的内容。
+    pub const HOST_TICK: &str = "host:frame.tick";
+}
+
+/// 纯查询：不改界面、不产生帧。
+pub mod query {
+    /// 批量量算文字占位尺寸（排版按真实字宽摆放，不能按字符数估）。
+    pub const MEASURE: &str = "query.measure";
+    /// 取宿主主题表（颜色 / 字号档 / 圆角档），插件据此与宿主观感一致。
+    pub const THEME: &str = "query.theme";
+}
+
 pub mod ai {
     /// 插件发起 / 续聊一轮对话（须声明 `ai` 权限）。回执 = run 已就位，事件随后经
     /// [`HOST_CHAT_EVENT`] 流达。会话 = 仓库普通会话（主面板可见）；可指定 Agent / 模型 /
@@ -498,7 +516,7 @@ pub struct CanvasFrameParams {
 }
 
 /// [`canvas::MEASURE_TEXT`] 的 params：`size` 为绝对字号（逻辑像素，与画布 `text` 指令同口径）。
-/// 参数面与画布 `text` 指令保持一致（只有字重可调），量出来的宽度才能在画布上复现。
+/// 参数面与画布 `text` 指令保持一致，量出来的宽度才能在画布上复现。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MeasureTextParams {
@@ -506,6 +524,9 @@ pub struct MeasureTextParams {
     pub size: f32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub weight: Option<crate::view::TextWeight>,
+    /// 字体族：`ui` 跟随界面字体（缺省），`mono` 用系统等宽族。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub family: Option<crate::view::TextFamily>,
     /// 可用宽度上限：给定即按该宽度换行量算（缺省按单行）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_width: Option<f32>,
@@ -532,6 +553,118 @@ pub struct MeasureTextResult {
     pub width: f32,
     pub height: f32,
     pub lines: u32,
+}
+
+/// 单次批量量算的条目上限。
+pub const MAX_MEASURE_ITEMS: usize = 512;
+
+/// [`query::MEASURE`] 的一条：字段与 [`MeasureTextParams`] 同口径。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeasureItem {
+    pub text: String,
+    pub size: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weight: Option<crate::view::TextWeight>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub family: Option<crate::view::TextFamily>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_width: Option<f32>,
+}
+
+impl MeasureItem {
+    fn validate(&self) -> Result<(), String> {
+        if !self.size.is_finite() || self.size <= 0.0 {
+            return Err("字号必须大于 0".into());
+        }
+        if let Some(max_width) = self.max_width {
+            if !max_width.is_finite() || max_width <= 0.0 {
+                return Err("可用宽度必须大于 0".into());
+            }
+        }
+        Ok(())
+    }
+}
+
+/// [`query::MEASURE`] 的 params：一次量算多段文字（排一屏文本的量算往返要落在单批里）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeasureBatchParams {
+    pub items: Vec<MeasureItem>,
+}
+
+impl MeasureBatchParams {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.items.len() > MAX_MEASURE_ITEMS {
+            return Err(format!("单次量算不得超过 {MAX_MEASURE_ITEMS} 条"));
+        }
+        for (index, item) in self.items.iter().enumerate() {
+            item.validate()
+                .map_err(|e| format!("第 {index} 条：{e}"))?;
+        }
+        Ok(())
+    }
+}
+
+/// [`query::MEASURE`] 的 result：顺序与 params 的 `items` 一一对应。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeasureBatchResult {
+    pub sizes: Vec<MeasureTextResult>,
+}
+
+/// [`query::THEME`] 的 result：颜色 / 字号档 / 圆角档（值随用户的主题与字号设置变化）。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThemeResult {
+    pub colors: ThemeColors,
+    pub font_sizes: FontSizes,
+    pub radii: Radii,
+}
+
+/// 主题色：十六进制 `#rrggbb` / `#rrggbbaa`，字段名与 [`crate::view::ColorToken`] 的 wire 名一致。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThemeColors {
+    pub text: String,
+    pub text_secondary: String,
+    pub text_muted: String,
+    pub accent: String,
+    pub accent_soft: String,
+    pub danger: String,
+    pub danger_soft: String,
+    pub success: String,
+    pub success_soft: String,
+    pub warning: String,
+    pub warning_soft: String,
+    pub surface: String,
+    pub surface_muted: String,
+    pub surface_sunken: String,
+    pub hover: String,
+    pub border: String,
+    pub border_strong: String,
+    pub transparent: String,
+}
+
+/// 字号档（绝对逻辑像素）：`micro` / `caption` / `ui` / `body` / `h2` / `h1`。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FontSizes {
+    pub micro: f32,
+    pub caption: f32,
+    pub ui: f32,
+    pub body: f32,
+    pub h2: f32,
+    pub h1: f32,
+}
+
+/// 圆角档（逻辑像素）。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Radii {
+    pub xs: f32,
+    pub sm: f32,
+    pub md: f32,
 }
 
 // ---------- layout ----------

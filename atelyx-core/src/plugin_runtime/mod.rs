@@ -38,7 +38,8 @@ use instance::Instance;
 /// 协议类型再导出：壳只依赖 `atelyx-core`，不直接依赖协议 crate。
 pub use ai_tools::{PluginToolOutput, PluginToolSpec};
 pub use canvas_list::CanvasList;
-pub use atelyx_plugin_protocol::canvas::{CanvasColor, CanvasPoint, DrawCommand};
+pub use atelyx_plugin_protocol::canvas::{CanvasColor, CanvasPoint, DrawCommand, TextAlign};
+pub use atelyx_plugin_protocol::frame::{FrameInput, FrameRect, HitCursor, HitRegion, SurfaceFrame};
 pub use atelyx_plugin_protocol::event::{
     ChatChangeKind, ChatChangedPayload, FileChangeKind, FileChangedPayload, TableChangedPayload,
     VaultSwitchPayload,
@@ -52,17 +53,19 @@ pub use atelyx_plugin_protocol::method::{
     ChatStopParams, ClipboardImage, CollabMessageParams, CollabPeer, CollabPeersResult,
     CollabSendParams, CollabSendQos, CollabSendResult, ContributionSlot, DefineIconParams,
     FileFilter,
-    ImageInfoResult, MeasureTextParams, MeasureTextResult, NotificationLevel, ScrollEdge,
+    FontSizes, ImageInfoResult, MeasureBatchParams, MeasureBatchResult, MeasureItem,
+    MeasureTextParams, MeasureTextResult, NotificationLevel, Radii, ScrollEdge,
     ScrollToParams, SetTrayItemsParams,
     ShortcutQueryResult, SurfaceKind, TableField, TableRemoteSelection, TableSelection, TableRow,
-    TableSetCellImageParams, TableSnapshot, TakeoverScope, TrayClickParams, TrayItemSpec,
-    WindowOpenParams, WindowUpdateParams,
+    TableSetCellImageParams, TableSnapshot, TakeoverScope, ThemeColors, ThemeResult, TrayClickParams,
+    TrayItemSpec, WindowOpenParams, WindowUpdateParams,
 };
 pub use atelyx_plugin_protocol::view::{
     Align, AxesPadding, Axis, BoxSize, ButtonVariant, CanvasEventKind, CanvasPointer, CardTone,
     ColorSpec,
     ColorToken, ControlSize, EdgesPadding, EventKind, EventValue, ImageFit, ImageSource, Interaction,
-    InteractionState, Justify, LinkForm as ProtocolLinkForm, MenuItem, MouseButton, NodeBody,
+    InteractionState, Justify, Key, KeyAction, LinkForm as ProtocolLinkForm, MenuItem, Modifiers,
+    MouseButton, NamedKey, NodeBody,
     PaddingSpec, ReportMode, RowHeight, Rgba, SizeSpec, Surface, TextFamily, TextWeight, ViewEvent,
     ViewNode,
 };
@@ -98,7 +101,8 @@ pub enum PluginEvent {
     StatusChanged { id: String, status: PluginStatus },
     Notification { id: String, title: String, body: Option<String>, level: NotificationLevel },
     PermissionDenied { id: String, method: String, detail: String },
-    /// 某插件提交了新的界面树（树本身经 [`PluginRuntime::surface_tree`] 取；丢帧不影响最终渲染）。
+    /// 某插件提交了新的界面（界面树或整面帧，经 [`PluginRuntime::surface_tree`] /
+    /// [`PluginRuntime::surface_frame`] 取；丢帧不影响最终渲染）。
     ViewSubmitted { id: String },
     /// 某插件的贡献注册表变化（注册 / 撤销 / 随会话收尾清空）。
     ContributionsChanged { id: String },
@@ -252,6 +256,10 @@ pub enum HostRequest {
     ScrollTo { plugin_id: String, request_id: u64, params: method::ScrollToParams },
     /// 插件请求量算一段文字的占位尺寸（字体度量归壳的界面组件层）。
     MeasureText { plugin_id: String, request_id: u64, params: method::MeasureTextParams },
+    /// 插件请求批量量算文字（`query.measure`）：逐条给出宽度 / 行高 / 行数。
+    MeasureBatch { plugin_id: String, request_id: u64, params: method::MeasureBatchParams },
+    /// 插件请求当前主题的颜色 / 字号档 / 圆角档（`query.theme`）。
+    QueryTheme { plugin_id: String, request_id: u64 },
     /// 插件请求运行时改一个已打开窗口的属性（壳侧 OS 窗口副作用）。
     WindowUpdate { plugin_id: String, request_id: u64, params: method::WindowUpdateParams },
     /// 插件请求重新显示一个因失焦被隐藏的窗口。
@@ -289,7 +297,7 @@ pub struct PluginSummary {
     pub load_error: Option<String>,
     /// 被拒的能力调用条数。
     pub denied: usize,
-    /// 已接收的界面树提交次数。
+    /// 已接收的界面提交次数（界面树与整面帧都计入）。
     pub view_submits: u64,
     /// 安装来源目录（本地目录安装时记下的绝对路径；zip / 市场安装为 `None`）。
     pub source: Option<String>,
@@ -545,6 +553,8 @@ impl PluginRuntime {
             | HostRequest::TableSetCellImage { .. }
             | HostRequest::ScrollTo { .. }
             | HostRequest::MeasureText { .. }
+            | HostRequest::MeasureBatch { .. }
+            | HostRequest::QueryTheme { .. }
             | HostRequest::VaultImageInfo { .. }
             | HostRequest::TraySetItems { .. }
             | HostRequest::CollabPeers { .. }
@@ -731,6 +741,15 @@ impl PluginRuntime {
                 plugin_id,
                 request_id,
                 params,
+            },
+            HostRequest::MeasureBatch { plugin_id, params, .. } => HostRequest::MeasureBatch {
+                plugin_id,
+                request_id,
+                params,
+            },
+            HostRequest::QueryTheme { plugin_id, .. } => HostRequest::QueryTheme {
+                plugin_id,
+                request_id,
             },
             HostRequest::ChatRename { plugin_id, params, .. } => HostRequest::ChatRename {
                 plugin_id,
@@ -1042,6 +1061,19 @@ impl PluginRuntime {
             .and_then(|i| i.surface_tree(surface_id))
     }
 
+    /// 取某插件某面的整面帧（未提交 / 已清除时为 `None`）。
+    pub fn surface_frame(
+        &self,
+        plugin_id: &str,
+        surface_id: &str,
+    ) -> Option<std::sync::Arc<atelyx_plugin_protocol::frame::SurfaceFrame>> {
+        self.instances
+            .lock()
+            .unwrap()
+            .get(plugin_id)
+            .and_then(|i| i.surface_frame(surface_id))
+    }
+
     /// 取某插件某面某画布节点的最新绘图指令清单（整发整换；未提交 / 已清除时为 `None`）。
     pub fn surface_canvas(
         &self,
@@ -1096,6 +1128,19 @@ impl PluginRuntime {
         }
     }
 
+    /// 回发一条整面帧的原始输入（`host:frame.input`）。插件未在跑时静默丢弃。
+    pub fn notify_frame_input(
+        &self,
+        plugin_id: &str,
+        surface_id: &str,
+        input: &atelyx_plugin_protocol::frame::FrameInput,
+    ) {
+        let instance = self.instances.lock().unwrap().get(plugin_id).cloned();
+        if let Some(instance) = instance {
+            instance.notify_frame_input(surface_id, input);
+        }
+    }
+
     /// 回发键盘焦点变化（`host:view.event` 的 `focus` / `blur`）。插件未在跑时静默丢弃。
     pub fn notify_plugin_focus(&self, plugin_id: &str, surface_id: &str, node_id: &str, focused: bool) {
         let instance = self.instances.lock().unwrap().get(plugin_id).cloned();
@@ -1104,16 +1149,16 @@ impl PluginRuntime {
         }
     }
 
-    /// 是否有画布在等帧（壳据此决定要不要挂帧节拍：没有动画时不产生周期唤醒）。
-    pub fn has_animated_canvas(&self) -> bool {
+    /// 是否有画布或整面帧在等帧（壳据此决定要不要挂帧节拍：没有动画时不产生周期唤醒）。
+    pub fn has_frame_ticks(&self) -> bool {
         // 只读判定，锁内直接遍历（避免每次调用都克隆实例表）
         let instances = self.instances.lock().unwrap();
-        instances.values().any(|instance| instance.has_animated_canvas())
+        instances.values().any(|instance| instance.has_frame_ticks())
     }
 
-    /// 推一次帧节拍：给到期的画布各发一条 `host:canvas.frame`（壳的帧 tick 调）。
+    /// 推一次帧节拍：给到期的画布与整面帧各发一条帧通知（壳的帧 tick 调）。
     /// 不持实例表锁下发通知——写插件 stdin 可能阻塞，锁住会让别的调用排队。
-    pub fn pump_canvas_frames(&self, now: std::time::Instant) {
+    pub fn pump_frame_ticks(&self, now: std::time::Instant) {
         let instances: Vec<Arc<Instance>> = self.instances.lock().unwrap().values().cloned().collect();
         for instance in instances {
             instance.pump_frames(now);
@@ -1563,6 +1608,8 @@ fn request_plugin_id(request: &HostRequest) -> &str {
         | HostRequest::TableSetCellImage { plugin_id, .. }
         | HostRequest::ScrollTo { plugin_id, .. }
         | HostRequest::MeasureText { plugin_id, .. }
+        | HostRequest::MeasureBatch { plugin_id, .. }
+        | HostRequest::QueryTheme { plugin_id, .. }
         | HostRequest::WindowUpdate { plugin_id, .. }
         | HostRequest::WindowShow { plugin_id, .. }
         | HostRequest::ChatRename { plugin_id, .. }

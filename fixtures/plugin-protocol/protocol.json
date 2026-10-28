@@ -1079,6 +1079,85 @@
       "name": "window.open params (undecorated)",
       "type": "WindowOpenParams",
       "value": { "id": "palette", "title": "命令面板", "decorations": false }
+    },
+    {
+      "name": "frame.submit params",
+      "type": "FrameSubmitParams",
+      "value": {
+        "surfaceId": "board",
+        "commands": [
+          { "kind": "rect", "x": 0.0, "y": 0.0, "w": 240.0, "h": 72.0, "fill": { "type": "token", "name": "surface" }, "stroke": null },
+          { "kind": "text", "x": 8.0, "y": 8.0, "content": "计数器 3", "size": 14.0, "color": { "type": "token", "name": "text" }, "family": "mono", "maxWidth": 120.0, "align": "center" }
+        ],
+        "hits": [{ "id": "inc", "x": 160.0, "y": 16.0, "w": 32.0, "h": 32.0, "cursor": "pointer" }],
+        "ime": { "x": 12.0, "y": 40.0, "w": 1.0, "h": 18.0 },
+        "keys": true,
+        "fps": 30
+      }
+    },
+    {
+      "name": "host:frame.input pointer",
+      "type": "FrameInputParams",
+      "value": {
+        "surfaceId": "board",
+        "input": { "kind": "pointerDown", "x": 170.0, "y": 20.0, "button": "left", "hit": "inc" }
+      }
+    },
+    {
+      "name": "host:frame.input ime",
+      "type": "FrameInputParams",
+      "value": {
+        "surfaceId": "board",
+        "input": { "kind": "text", "text": "zhong", "composing": true, "caret": 5, "candidates": { "x": 12.0, "y": 58.0, "w": 1.0, "h": 18.0 } }
+      }
+    },
+    {
+      "name": "host:frame.tick",
+      "type": "FrameTickParams",
+      "value": { "surfaceId": "board", "frame": 12, "deltaMs": 16 }
+    },
+    {
+      "name": "query.measure params",
+      "type": "MeasureBatchParams",
+      "value": {
+        "items": [
+          { "text": "计数器", "size": 14.0, "weight": "semiBold", "family": "mono", "maxWidth": 96.0 },
+          { "text": "ok", "size": 12.0 }
+        ]
+      }
+    },
+    {
+      "name": "query.measure result",
+      "type": "MeasureBatchResult",
+      "value": { "sizes": [{ "width": 42.0, "height": 18.0, "lines": 1 }, { "width": 14.0, "height": 16.0, "lines": 1 }] }
+    },
+    {
+      "name": "query.theme result",
+      "type": "ThemeResult",
+      "value": {
+        "colors": {
+          "text": "#e0ddd6",
+          "textSecondary": "#aba9a2",
+          "textMuted": "#918f88",
+          "accent": "#e0a94e",
+          "accentSoft": "#e0a94e24",
+          "danger": "#e8776c",
+          "dangerSoft": "#e8776c24",
+          "success": "#5fbf8b",
+          "successSoft": "#5fbf8b24",
+          "warning": "#efc75e",
+          "warningSoft": "#efc75e24",
+          "surface": "#1b1e23",
+          "surfaceMuted": "#23272e",
+          "surfaceSunken": "#0c0d10",
+          "hover": "#23272e",
+          "border": "#2e333a",
+          "borderStrong": "#383d44",
+          "transparent": "#00000000"
+        },
+        "fontSizes": { "micro": 11.0, "caption": 12.0, "ui": 13.0, "body": 14.0, "h2": 16.0, "h1": 20.0 },
+        "radii": { "xs": 4.0, "sm": 6.0, "md": 10.0 }
+      }
     }
   ]
 }

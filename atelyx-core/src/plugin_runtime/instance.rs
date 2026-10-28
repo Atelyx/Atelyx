@@ -20,7 +20,7 @@ use atelyx_plugin_protocol::method::{
     self, ContributionSlot, RegisterParams, SurfaceAttachedParams, SurfaceDetachedParams,
     UnregisterParams, ViewEventParams,
 };
-use atelyx_plugin_protocol::{canvas, view, API_VERSION};
+use atelyx_plugin_protocol::{canvas, frame, view, API_VERSION};
 use base64::Engine;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -86,10 +86,14 @@ pub(crate) struct Instance {
     denied: Mutex<Vec<AuditRecord>>,
     /// 各面最新界面树（surface id → 树）；会话收尾一并清除（撤贡献）。
     surfaces: Mutex<HashMap<String, ViewNode>>,
+    /// 各面整面帧（surface id → 帧）；与界面树独立存档，渲染时帧优先。会话收尾一并清除。
+    frames: Mutex<HashMap<String, Arc<frame::SurfaceFrame>>>,
     /// 各面画布节点的最新绘图指令清单（整发整换，合帧应用）。
     canvases: CanvasLists,
     /// 声明了帧率的画布节点（(面 id, 节点 id) → 节拍）；随界面树同步。
     frame_clocks: Mutex<HashMap<(String, String), FrameClock>>,
+    /// 声明了帧率的整面帧（面 id → 节拍）；随帧提交同步。
+    surface_clocks: Mutex<HashMap<String, FrameClock>>,
     /// 已注册贡献点（按注册序）；id 插件内唯一，撤销按 id 摘除。
     contributions: Mutex<Vec<ContributionEntry>>,
     /// 插件经 `view.defineIcon` 定义的自备图标形状（名字 → 24x24 描边路径）；随会话收尾清除。
@@ -185,8 +189,10 @@ impl Instance {
             subscriptions: Mutex::new(HashSet::new()),
             denied: Mutex::new(Vec::new()),
             surfaces: Mutex::new(HashMap::new()),
+            frames: Mutex::new(HashMap::new()),
             canvases: Mutex::new(HashMap::new()),
             frame_clocks: Mutex::new(HashMap::new()),
+            surface_clocks: Mutex::new(HashMap::new()),
             contributions: Mutex::new(Vec::new()),
             icons: Mutex::new(HashMap::new()),
             view_submits: AtomicU64::new(0),
@@ -219,6 +225,11 @@ impl Instance {
     /// 某面的最新界面树（会话收尾即清空，插件未提交过 = `None`）。
     pub(crate) fn surface_tree(&self, surface_id: &str) -> Option<ViewNode> {
         self.surfaces.lock().unwrap().get(surface_id).cloned()
+    }
+
+    /// 某面的整面帧（会话收尾即清空；与界面树都提交过时宿主按帧渲染）。
+    pub(crate) fn surface_frame(&self, surface_id: &str) -> Option<Arc<frame::SurfaceFrame>> {
+        self.frames.lock().unwrap().get(surface_id).cloned()
     }
 
     /// 某面某画布节点的最新绘图指令清单（整发整换；会话收尾即清空）。
@@ -372,6 +383,9 @@ impl Instance {
         let canvases_dropped = !self.canvases.lock().unwrap().is_empty();
         self.canvases.lock().unwrap().clear();
         self.frame_clocks.lock().unwrap().clear();
+        let frames_dropped = !self.frames.lock().unwrap().is_empty();
+        self.frames.lock().unwrap().clear();
+        self.surface_clocks.lock().unwrap().clear();
         let contributions_dropped = !self.contributions.lock().unwrap().is_empty();
         self.contributions.lock().unwrap().clear();
         self.icons.lock().unwrap().clear();
@@ -388,7 +402,7 @@ impl Instance {
         self.fail_pending_shell_calls("插件已停止，宿主调用已取消");
         self.release_ai_tools();
         // 界面与贡献变化广播给壳：壳据此停下已停插件界面的渲染并清掉菜单条目
-        if surfaces_dropped || canvases_dropped {
+        if surfaces_dropped || canvases_dropped || frames_dropped {
             let _ = self.events.send(PluginEvent::ViewSubmitted { id: self.id.clone() });
         }
         if contributions_dropped {
@@ -997,6 +1011,19 @@ impl Instance {
                         params: p,
                     }
                 }
+                method::query::MEASURE => {
+                    let p: method::MeasureBatchParams = parse(params).map_err(|e| e.to_string())?;
+                    p.validate()?;
+                    HostRequest::MeasureBatch {
+                        plugin_id: self.id.clone(),
+                        request_id: 0,
+                        params: p,
+                    }
+                }
+                method::query::THEME => HostRequest::QueryTheme {
+                    plugin_id: self.id.clone(),
+                    request_id: 0,
+                },
                 _ => return Err("未知宿主服务请求".to_string()),
             };
             runtime.open_shell_call(request)
@@ -1037,6 +1064,7 @@ impl Instance {
             method::view::DEFINE_ICON => self.on_define_icon(token, params),
             method::canvas::SUBMIT => self.on_canvas_submit(token, params),
             method::canvas::PATCH => self.on_canvas_patch(token, params),
+            method::frame::SUBMIT => self.on_frame_submit(token, params),
             method::state::READ => {
                 let json = capability::read_state(&self.state_dir).map_err(RpcError::failed)?;
                 Ok(json!({ "json": json }))
@@ -1339,6 +1367,9 @@ impl Instance {
             }
             clocks.retain(|(surface_id, _), _| surface_id != &p.surface_id);
             clocks.extend(next_clocks);
+            // 提交界面树即交还控件通道：同面已有的整面帧连同它的帧节拍一并撤掉
+            self.frames.lock().unwrap().remove(&p.surface_id);
+            self.surface_clocks.lock().unwrap().remove(&p.surface_id);
             surfaces.insert(p.surface_id.clone(), p.tree);
             self.view_submits.fetch_add(1, Ordering::Relaxed);
             Ok(())
@@ -1386,6 +1417,46 @@ impl Instance {
             let current = canvases.get(&key).cloned().unwrap_or_default();
             let next = current.patched(&p.upsert, &p.remove)?;
             canvases.insert(key, Arc::new(next));
+            Ok(())
+        })
+        .map_err(RpcError::failed)?;
+        let _ = self.events.send(PluginEvent::ViewSubmitted { id: self.id.clone() });
+        Ok(json!({ "applied": true }))
+    }
+
+    /// 校验并接收整面帧：指令逐条、命中区与帧率一并校验；整发整换。
+    /// 面帧不依赖界面树（自绘面没有控件树），存档与会话闸门同口径。
+    fn on_frame_submit(self: &Arc<Self>, token: u64, params: &Value) -> Result<Value, RpcError> {
+        let p: frame::FrameSubmitParams = parse(params)?;
+        if p.surface_id.trim().is_empty() {
+            return Err(RpcError::failed("surfaceId 不能为空"));
+        }
+        p.frame.validate().map_err(RpcError::failed)?;
+        let surface_id = p.surface_id;
+        let submitted = Arc::new(p.frame);
+        self.with_session(token, || {
+            let mut clocks = self.surface_clocks.lock().unwrap();
+            // 帧率未变的面沿用原钟：帧序号与节拍相位不因内容更新而重置
+            match submitted.fps {
+                Some(fps) => {
+                    let clock = match clocks.get(&surface_id) {
+                        Some(clock) if clock.fps == fps => *clock,
+                        _ => FrameClock::new(fps, Instant::now()),
+                    };
+                    clocks.insert(surface_id.clone(), clock);
+                }
+                None => {
+                    clocks.remove(&surface_id);
+                }
+            }
+            drop(clocks);
+            // 帧接管该面：树内画布已不渲染，同面的画布节拍一并停掉
+            self.frame_clocks
+                .lock()
+                .unwrap()
+                .retain(|(surface, _), _| surface != &surface_id);
+            self.frames.lock().unwrap().insert(surface_id, submitted);
+            self.view_submits.fetch_add(1, Ordering::Relaxed);
             Ok(())
         })
         .map_err(RpcError::failed)?;
@@ -1484,6 +1555,8 @@ impl Instance {
                 return Err(format!("未注册的贡献 id：{}", p.id));
             }
             self.surfaces.lock().unwrap().remove(&p.id);
+            self.frames.lock().unwrap().remove(&p.id);
+            self.surface_clocks.lock().unwrap().remove(&p.id);
             self.canvases
                 .lock()
                 .unwrap()
@@ -1628,12 +1701,24 @@ impl Instance {
         self.notify_view_event(surface_id, node_id, event);
     }
 
-    /// 是否有画布在收帧（壳据此决定要不要挂帧节拍：没有动画时不产生周期唤醒）。
-    pub(crate) fn has_animated_canvas(&self) -> bool {
-        !self.frame_clocks.lock().unwrap().is_empty()
+    /// 回发一条整面帧的原始输入（`host:frame.input`）。
+    pub(crate) fn notify_frame_input(&self, surface_id: &str, input: &frame::FrameInput) {
+        let params = frame::FrameInputParams {
+            surface_id: surface_id.to_string(),
+            input: input.clone(),
+        };
+        self.notify(method::frame::HOST_INPUT, &params);
     }
 
-    /// 推一次帧节拍：到期的画布各发一条 `host:canvas.frame`。
+    /// 是否有画布或整面帧在收帧（壳据此决定要不要挂帧节拍：没有动画时不产生周期唤醒）。
+    pub(crate) fn has_frame_ticks(&self) -> bool {
+        if !self.frame_clocks.lock().unwrap().is_empty() {
+            return true;
+        }
+        !self.surface_clocks.lock().unwrap().is_empty()
+    }
+
+    /// 推一次帧节拍：到期的画布发 `host:canvas.frame`，到期的整面帧发 `host:frame.tick`。
     pub(crate) fn pump_frames(&self, now: Instant) {
         let due: Vec<((String, String), u64, u32)> = {
             let mut clocks = self.frame_clocks.lock().unwrap();
@@ -1648,6 +1733,20 @@ impl Instance {
         for ((surface_id, node_id), frame, delta_ms) in due {
             let params = method::CanvasFrameParams { surface_id, node_id, frame, delta_ms };
             self.notify(method::canvas::HOST_FRAME, &params);
+        }
+        let due: Vec<(String, u64, u32)> = {
+            let mut clocks = self.surface_clocks.lock().unwrap();
+            let mut due = Vec::new();
+            for (surface_id, clock) in clocks.iter_mut() {
+                if let Some((frame, delta_ms)) = clock.take_due(now) {
+                    due.push((surface_id.clone(), frame, delta_ms));
+                }
+            }
+            due
+        };
+        for (surface_id, frame, delta_ms) in due {
+            let params = frame::FrameTickParams { surface_id, frame, delta_ms };
+            self.notify(method::frame::HOST_TICK, &params);
         }
     }
 
@@ -1826,6 +1925,8 @@ fn is_shell_method(method_name: &str) -> bool {    matches!(
             | method::collab::SEND
             | method::view::SCROLL_TO
             | method::canvas::MEASURE_TEXT
+            | method::query::MEASURE
+            | method::query::THEME
     )
 }
 
@@ -2528,6 +2629,26 @@ mod tests {
         assert_eq!(params.max_width, Some(96.0));
         runtime.resolve_shell_call(request_id, Ok(json!({ "width": 40.0, "height": 15.0, "lines": 1 })));
 
+        // 批量量算与主题查询同样走壳侧应答：条目原样带到壳
+        instance.handle_line(&request_line(
+            method::query::MEASURE,
+            &json!({ "items": [{ "text": "ab", "size": 12.0 }, { "text": "中文", "size": 14.0, "family": "mono" }] }),
+        ));
+        let request = rt.block_on(runtime.recv_host_request()).unwrap();
+        let HostRequest::MeasureBatch { request_id, params, .. } = request else {
+            panic!("应投递批量量算请求");
+        };
+        assert_eq!(params.items.len(), 2);
+        assert_eq!(params.items[1].family, Some(view::TextFamily::Mono));
+        runtime.resolve_shell_call(request_id, Ok(json!({ "sizes": [] })));
+
+        instance.handle_line(&request_line(method::query::THEME, &Value::Null));
+        let request = rt.block_on(runtime.recv_host_request()).unwrap();
+        let HostRequest::QueryTheme { request_id, .. } = request else {
+            panic!("应投递主题查询请求");
+        };
+        runtime.resolve_shell_call(request_id, Ok(json!({})));
+
 
         instance.handle_line(&request_line(
             method::tray::SET_ITEMS,
@@ -2591,6 +2712,8 @@ mod tests {
             method::vault::READ_TEXT,
             method::view::SCROLL_TO,
             method::canvas::MEASURE_TEXT,
+            method::query::MEASURE,
+            method::query::THEME,
             method::window::UPDATE,
             method::window::SHOW,
         ] {
@@ -3088,7 +3211,7 @@ mod tests {
     #[test]
     fn canvas_frame_clocks_follow_declared_fps() {
         let (_tmp, instance) = make_instance(Vec::new());
-        assert!(!instance.has_animated_canvas(), "没有界面树时没有节拍");
+        assert!(!instance.has_frame_ticks(), "没有界面树时没有节拍");
         instance
             .dispatch(
                 method::view::SUBMIT,
@@ -3100,7 +3223,7 @@ mod tests {
                 }}),
             )
             .unwrap();
-        assert!(instance.has_animated_canvas(), "只有声明 fps 的画布挂节拍");
+        assert!(instance.has_frame_ticks(), "只有声明 fps 的画布挂节拍");
 
         let start = Instant::now();
         let mut clock = FrameClock::new(10, start);
@@ -3127,7 +3250,7 @@ mod tests {
                 }}),
             )
             .unwrap();
-        assert!(!instance.has_animated_canvas(), "树里不再声明 fps 即摘掉节拍");
+        assert!(!instance.has_frame_ticks(), "树里不再声明 fps 即摘掉节拍");
     }
 
     /// 界面树重发不重置帧序号与节拍（只有帧率变了才重开一只钟）。
@@ -3174,9 +3297,94 @@ mod tests {
                 }}),
             )
             .unwrap();
-        assert!(instance.has_animated_canvas());
+        assert!(instance.has_frame_ticks());
+        instance
+            .dispatch(method::frame::SUBMIT, &frame_params(json!([]), Some(60)))
+            .unwrap();
         instance.dispatch(method::view::UNREGISTER, &json!({ "id": "main" })).unwrap();
-        assert!(!instance.has_animated_canvas(), "贡献撤销后该面不再收帧");
+        assert!(!instance.has_frame_ticks(), "贡献撤销后该面不再收帧");
+        assert!(instance.surface_frame("main").is_none(), "撤销的面不得留下整面帧");
+    }
+
+    fn frame_params(hits: Value, fps: Option<u16>) -> Value {
+        let mut params = json!({ "surfaceId": "main", "commands": [], "hits": hits });
+        if let Some(fps) = fps {
+            params["fps"] = json!(fps);
+        }
+        params
+    }
+
+    /// 面帧整发整换：非法帧不改写存档；帧接管后重发界面树即交还控件通道（帧与帧节拍一并撤掉）。
+    #[test]
+    fn frame_submit_replaces_and_tree_submit_clears_it() {
+        let (_tmp, instance, mut rx) = make_instance_with_events(Vec::new());
+        let hit = json!({ "id": "inc", "x": 0.0, "y": 0.0, "w": 40.0, "h": 24.0 });
+        instance
+            .dispatch(method::frame::SUBMIT, &frame_params(json!([hit]), Some(30)))
+            .expect("合法帧应被接收");
+        assert!(instance.surface_frame("main").is_some());
+        assert!(rx.try_recv().is_ok(), "帧提交应广播界面变化");
+        assert!(instance.has_frame_ticks());
+
+        let duplicate = json!([
+            { "id": "inc", "x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0 },
+            { "id": "inc", "x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0 }
+        ]);
+        assert!(
+            instance.dispatch(method::frame::SUBMIT, &frame_params(duplicate, None)).is_err(),
+            "命中区 id 重复应被拒"
+        );
+        assert!(instance.surface_frame("main").is_some(), "被拒的提交不得改写存档");
+
+        instance
+            .dispatch(
+                method::view::SUBMIT,
+                &json!({ "surfaceId": "main", "tree": { "id": "root", "kind": "text", "content": "x" } }),
+            )
+            .unwrap();
+        assert!(instance.surface_frame("main").is_none(), "提交界面树即撤掉同面帧");
+        assert!(!instance.has_frame_ticks(), "帧节拍随帧一同撤掉");
+    }
+
+    /// 面帧节拍按声明帧率推进；同帧率重发沿用原钟，帧率变了 / 不再声明则重开或摘掉。
+    #[test]
+    fn surface_frame_clocks_follow_declared_fps() {
+        let (_tmp, instance) = make_instance(Vec::new());
+        let submit = |fps: Option<u16>| {
+            instance
+                .dispatch(method::frame::SUBMIT, &frame_params(json!([]), fps))
+                .unwrap();
+        };
+        submit(Some(10));
+        instance.pump_frames(Instant::now() + Duration::from_millis(120));
+        let frame_after_tick = instance.surface_clocks.lock().unwrap()["main"].frame;
+        assert_eq!(frame_after_tick, 1, "到期应推进一帧");
+
+        submit(Some(10));
+        assert_eq!(
+            instance.surface_clocks.lock().unwrap()["main"].frame,
+            frame_after_tick,
+            "内容更新不得把帧序号打回 0"
+        );
+
+        submit(Some(30));
+        assert_eq!(instance.surface_clocks.lock().unwrap()["main"].frame, 0, "帧率变了即重开一只钟");
+
+        submit(None);
+        assert!(!instance.has_frame_ticks(), "不再声明帧率即摘掉节拍");
+        assert!(instance.surface_frame("main").is_some(), "摘节拍不影响帧内容本身");
+    }
+
+    /// 会话收尾清空整面帧（停用 / 崩溃 / 卸载后不得留下可渲染的旧帧）。
+    #[test]
+    fn teardown_drops_frames() {
+        let (_tmp, instance) = make_instance(Vec::new());
+        instance
+            .dispatch(method::frame::SUBMIT, &frame_params(json!([]), Some(60)))
+            .unwrap();
+        instance.release_resources();
+        assert!(instance.surface_frame("main").is_none());
+        assert!(!instance.has_frame_ticks());
     }
 
     /// 树重发清掉已消失节点的清单；重复提交覆盖同一节点；空清单 = 清空画布；收尾清全部。

@@ -5,6 +5,7 @@
 pub mod canvas;
 pub mod envelope;
 pub mod event;
+pub mod frame;
 pub mod handshake;
 pub mod layout;
 pub mod manifest;

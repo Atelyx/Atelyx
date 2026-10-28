@@ -1,4 +1,5 @@
-//! 插件面渲染适配：面取树、空态占位与宿主状态读取在此，树解释与控件绑定在 [`atelyx_view::render`]。
+//! 插件面渲染适配：面取整面帧 / 树、空态占位与宿主状态读取在此，树解释与控件绑定在
+//! [`atelyx_view::render`]，整面帧执行在 [`crate::plugin_frame`]。
 //! 宿主经 [`ViewHost`] 提供节点瞬时状态与外部元素（Markdown / 图片 / 画布），经 [`ViewMessage`]
 //! 把渲染期消息接回壳的消息类型；本模块不参与布局与命中判定。
 
@@ -34,6 +35,16 @@ pub fn window_view<'a>(
     entry: &crate::plugin_actions::PluginWindowActive,
 ) -> Element<'a, Message> {
     let key = (entry.plugin_id.clone(), entry.window_key.clone());
+    if let Some(frame) = app.plugin_frames.get(&key) {
+        return crate::plugin_frame::frame_view(
+            app,
+            window,
+            &entry.plugin_id,
+            &entry.window_key,
+            frame,
+            Padding::ZERO,
+        );
+    }
     match app.plugin_trees.get(&key) {
         Some(tree) => render::surface(
             app,
@@ -59,6 +70,16 @@ pub fn takeover_content<'a>(
     surface_id: &str,
 ) -> Element<'a, Message> {
     let key = (plugin_id.to_string(), surface_id.to_string());
+    if let Some(frame) = app.plugin_frames.get(&key) {
+        return crate::plugin_frame::frame_view(
+            app,
+            window,
+            plugin_id,
+            surface_id,
+            frame,
+            Padding::ZERO,
+        );
+    }
     match app.plugin_trees.get(&key) {
         Some(tree) => {
             render::surface(app, window, plugin_id, surface_id, tree, Padding::ZERO)
@@ -89,6 +110,16 @@ pub(crate) fn surface_view<'a>(
         Some(pad) => padding_of(pad),
         None => Padding::ZERO.horizontal(12.0).vertical(10.0),
     };
+    if let Some(frame) = app.plugin_frames.get(&key) {
+        return crate::plugin_frame::frame_view(
+            app,
+            window,
+            plugin_id,
+            surface_id,
+            frame,
+            outer_pad,
+        );
+    }
     match app.plugin_trees.get(&key) {
         Some(tree) => {
             render::surface(app, window, plugin_id, surface_id, tree, outer_pad)

@@ -351,13 +351,13 @@ ctx.patch_canvas("main", "board", upsert, remove).await?;   // 按 id 增量：�
 
 坐标一律画布本地逻辑像素、左上原点，宿主不做坐标变换（平移缩放由插件算好坐标）。颜色双轨：`{ "type": "token", "name": "accent" }` 跟主题，`{ "type": "rgba", "rgba": [r,g,b,a] }` 用于内容谱系色（连线分类、播放头等）。
 
-指针事件在节点的 `mouseEvents` 里声明要收的子集：`pointerDown` / `pointerMove` / `pointerUp` / `pointerLeave` / `wheel` / `doubleClick`。`wheel` 增量是行数（正 = 向下 / 向右）；双击由宿主判定（同键二次按下、500ms 内、位移 < 4 像素）。命中测试由插件按指令几何自算——宿主只负责把事件送到画布。
+指针事件在节点的 `mouseEvents` 里声明要收的子集：`pointerDown` / `pointerMove` / `pointerUp` / `pointerLeave` / `wheel` / `doubleClick`。`wheel` 增量沿用设备单位（滚轮为行、触控板为像素，正 = 向下 / 向右）；双击由宿主判定（同键二次按下、500ms 内、位移 < 4 像素）。命中测试由插件按指令几何自算——宿主只负责把事件送到画布。
 
 画布节点用 `height` 指定高度、或用 `fill: true` 占满父容器剩余空间。宿主在画布尺寸变化时回发 `host:canvas.resized { surfaceId, nodeId, width, height }`（尺寸不变不发），插件据此对齐绘制坐标与滚动范围——不必再按名义宽度兜底。
 
 两条限制：按住拖出画布不会丢事件（绝对坐标换算，抬起为止）；画布文字永远绘制在所有图形之上，需要被图形遮盖的文字请改用树里的 `text` 控件分层。
 
-**摆文字先量宽**：画布里的文字按指令坐标原样绘制，宿主不做排版，所以「这段字有多宽」要自己算——但不要按字符数估算（中文、西文、等宽混排差得很远）。`ctx.measure_text(text, size, weight, max_width)` 用与 `text` 控件同一套字体与行高量算，回 `{ width, height, lines }`：给 `max_width` 就按该宽度换行量算，行数一并返回；不给按单行量。`size` 是绝对字号（与画布 `text` 指令同口径）。它是纯计算请求，不改清单也不产生帧，但仍然是往返一次——同一段文字反复要用的（行高、列宽、省略位置）自己缓存，别在帧回调里每帧量。
+**摆文字先量宽**：画布里的文字按指令坐标原样绘制，宿主不做排版，所以「这段字有多宽」要自己算——但不要按字符数估算（中文、西文、等宽混排差得很远）。`ctx.measure_text(text, size, weight, family, max_width)` 用与 `text` 控件同一套字体与行高量算，回 `{ width, height, lines }`：给 `max_width` 就按该宽度换行量算，行数一并返回；不给按单行量。`size` 是绝对字号（与画布 `text` 指令同口径）。一屏文字用 `ctx.measure_batch(items)` 一次量完（单次至多 512 条，结果按顺序对应），`ctx.query_theme()` 取主题色 / 字号档 / 圆角档。这些都是纯计算请求，不改清单也不产生帧，但仍然是往返一次——同一段文字反复要用的（行高、列宽、省略位置）自己缓存，别在帧回调里每帧量。
 
 **要动画就声明帧率**：节点给 `fps`（1–120）后，宿主按该节拍回发 `host:canvas.frame { surfaceId, nodeId, frame, deltaMs }`，SDK 把它转成 `on_canvas_frame` 回调；在回调里提这一帧的内容即可：
 
@@ -373,6 +373,24 @@ async fn on_canvas_frame(&self, ctx: &Context, frame: CanvasFrameParams) {
 ```
 
 `frame` 从 0 起自增，`deltaMs` 是距上一帧的实际间隔（首帧 0）——算相位用 `frame` 更稳。帧拍**不触发界面树重发**（逐帧重建树是纯浪费），只更新画布内容。不声明 `fps` 就不会有帧回调，也不会有周期唤醒；播放停止后把 `fps` 从树里去掉即可停拍。落后多拍时宿主只补一帧并对齐当前时刻，不会追一堆过期帧。
+
+### 6.1 整面帧（面自绘）
+
+画布只是树里的一个节点，布局仍由宿主排；要把整个面（面板 / 接管面 / 插件窗口）连布局一起自己画，用整面帧：
+
+```rust
+ctx.submit_frame("main", frame(commands, hits)).await?;   // 整帧替换，空指令 = 空面
+```
+
+提交帧后宿主只渲染帧、不再解释该面的控件树（树存档保留但不显示）；再提交一次界面树（`ctx.ui().notify`）即交还控件通道。同一个面走哪条通道由最后提交的一方决定。
+
+- **命中区**：`hits` = 矩形 + 自定 id + 光标形状；按下 / 抬起 / 移动 / 双击 / 滚轮都带 `hit`（后声明的压住先声明的）。宿主不懂语义，只按几何命中并换指针形状。
+- **原始输入**：`host:frame.input` 原样回发，SDK 转成 `on_frame_input`；载荷按 `kind` 区分 `pointerDown` / `pointerUp` / `pointerMove` / `pointerLeave` / `doubleClick` / `wheel` / `key` / `text` / `focus` / `resize`。
+- **键盘与输入法**：帧声明 `keys` 才收按键（指针按下取焦，按在面外即失焦）；声明 `ime`（附组合期光标矩形）才收组合串与提交文本，候选窗由宿主按该矩形定位。两者都不声明时键盘仍归宿主。
+- **尺寸**：宿主在绘制时按面实际分配尺寸回发 `resize`，按它重排。
+- **帧率**：`fps`（1–120）与画布同口径，节拍回 `host:frame.tick { frame, deltaMs }`，SDK 转成 `on_frame_tick`。
+
+指令集与树内画布同源，且不含裁剪 / 变换 / 阴影——需要时自己换算坐标或预渲染成图片。帧输入与帧拍回调都**不**自动重发，状态变了在回调里提交新帧。
 
 ## 7. 能力面
 

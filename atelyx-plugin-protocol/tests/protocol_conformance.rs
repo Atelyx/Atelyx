@@ -284,6 +284,16 @@ fn method_type_shapes_are_frozen() {
             }
             "AiModelsResult" => frozen_roundtrip::<atelyx_plugin_protocol::method::AiModelsResult>(&value),
             "AiAgentsResult" => frozen_roundtrip::<atelyx_plugin_protocol::method::AiAgentsResult>(&value),
+            "FrameSubmitParams" => frozen_roundtrip::<atelyx_plugin_protocol::frame::FrameSubmitParams>(&value),
+            "FrameInputParams" => frozen_roundtrip::<atelyx_plugin_protocol::frame::FrameInputParams>(&value),
+            "FrameTickParams" => frozen_roundtrip::<atelyx_plugin_protocol::frame::FrameTickParams>(&value),
+            "MeasureBatchParams" => {
+                frozen_roundtrip::<atelyx_plugin_protocol::method::MeasureBatchParams>(&value)
+            }
+            "MeasureBatchResult" => {
+                frozen_roundtrip::<atelyx_plugin_protocol::method::MeasureBatchResult>(&value)
+            }
+            "ThemeResult" => frozen_roundtrip::<atelyx_plugin_protocol::method::ThemeResult>(&value),
             other => panic!("语料 {name}: 未知类型 {other}"),
         };
         assert!(ok, "语料 {name}: 编码与快照不一致");

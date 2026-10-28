@@ -14,8 +14,9 @@ use atelyx_core::plugin_runtime::{
     AiAgent, AiAgentsResult, AiModel, AiModelPick, AiModelProvider, AiModelsResult, AuditRecord,
     ClipboardImage, CollabPeer, CollabPeersResult, CollabSendParams, CollabSendQos,
     CollabSendResult, DialogKind, DialogRequest, FileChangeKind, HostRequest, ImageInfoResult,
-    InstallOutcome, MeasureTextParams, NotificationLevel, Permission, PluginEvent, PluginRuntime,
-    PluginStatus, PluginSummary, SetTrayItemsParams, MAX_VAULT_BINARY_BYTES,
+    InstallOutcome, MeasureBatchParams, MeasureBatchResult, MeasureTextParams, NotificationLevel,
+    Permission, PluginEvent, PluginRuntime, PluginStatus, PluginSummary, SetTrayItemsParams,
+    ThemeResult, MAX_VAULT_BINARY_BYTES,
 };
 
 use crate::settings_view::{card, group_head};
@@ -206,6 +207,10 @@ pub enum PluginsMsg {
     VaultImageInfo { request_id: u64, path: String },
     /// 文字量算（纯计算，按界面字体与控件同源的行高口径）。
     MeasureText { request_id: u64, params: MeasureTextParams },
+    /// 批量文字量算（`query.measure`）：顺序与请求条目一一对应。
+    MeasureBatch { request_id: u64, params: MeasureBatchParams },
+    /// 主题查询（`query.theme`）：颜色 / 字号档 / 圆角档。
+    QueryTheme { request_id: u64 },
     VaultCallDone { request_id: u64, result: Result<serde_json::Value, String> },
     /// AI 模型 / Agent 清单（读仓库配置与面板当前选择）。
     AiModels { request_id: u64 },
@@ -373,6 +378,12 @@ pub fn host_requests_stream(spec: &RuntimeSpec) -> impl iced::futures::Stream<It
                 }
                 HostRequest::MeasureText { request_id, params, .. } => {
                     Message::Plugins(PluginsMsg::MeasureText { request_id, params })
+                }
+                HostRequest::MeasureBatch { request_id, params, .. } => {
+                    Message::Plugins(PluginsMsg::MeasureBatch { request_id, params })
+                }
+                HostRequest::QueryTheme { request_id, .. } => {
+                    Message::Plugins(PluginsMsg::QueryTheme { request_id })
                 }
                 HostRequest::TraySetItems { plugin_id, request_id, params } => {
                     Message::Plugins(PluginsMsg::TraySetItems { request_id, plugin_id, params })
@@ -1054,11 +1065,41 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
             }
         }
         PluginsMsg::MeasureText { request_id, params } => {
-            let measured =
-                atelyx_view::measure::measure_text(&params.text, params.size, params.weight, params.max_width);
+            let measured = atelyx_view::measure::measure_text(
+                &params.text,
+                params.size,
+                params.weight,
+                params.family,
+                params.max_width,
+            );
             match serde_json::to_value(measured) {
                 Ok(value) => resolve_vault(app, request_id, Ok(value)),
                 Err(e) => resolve_vault(app, request_id, Err(format!("量算结果不可序列化：{e}"))),
+            }
+        }
+        PluginsMsg::MeasureBatch { request_id, params } => {
+            let sizes = params
+                .items
+                .iter()
+                .map(|item| {
+                    atelyx_view::measure::measure_text(
+                        &item.text,
+                        item.size,
+                        item.weight,
+                        item.family,
+                        item.max_width,
+                    )
+                })
+                .collect();
+            match serde_json::to_value(MeasureBatchResult { sizes }) {
+                Ok(value) => resolve_vault(app, request_id, Ok(value)),
+                Err(e) => resolve_vault(app, request_id, Err(format!("量算结果不可序列化：{e}"))),
+            }
+        }
+        PluginsMsg::QueryTheme { request_id } => {
+            match serde_json::to_value(theme_result()) {
+                Ok(value) => resolve_vault(app, request_id, Ok(value)),
+                Err(e) => resolve_vault(app, request_id, Err(format!("主题结果不可序列化：{e}"))),
             }
         }
         PluginsMsg::VaultCallDone { request_id, result } => {
@@ -1147,6 +1188,52 @@ fn dir_entries_json(children: &[vault::DirChild]) -> serde_json::Value {
         })
         .collect();
     serde_json::json!({ "entries": entries })
+}
+
+/// 主题查询结果：颜色取界面 token（十六进制导出）、字号档与圆角档取界面常量。
+fn theme_result() -> ThemeResult {
+    use atelyx_core::plugin_runtime::{ColorToken, FontSizes, Radii, ThemeColors};
+
+    fn hex(token: ColorToken) -> String {
+        let [r, g, b, a] = atelyx_view::render::token_color(token).into_rgba8();
+        if a == u8::MAX {
+            format!("#{r:02x}{g:02x}{b:02x}")
+        } else {
+            format!("#{r:02x}{g:02x}{b:02x}{a:02x}")
+        }
+    }
+
+    ThemeResult {
+        colors: ThemeColors {
+            text: hex(ColorToken::Text),
+            text_secondary: hex(ColorToken::TextSecondary),
+            text_muted: hex(ColorToken::TextMuted),
+            accent: hex(ColorToken::Accent),
+            accent_soft: hex(ColorToken::AccentSoft),
+            danger: hex(ColorToken::Danger),
+            danger_soft: hex(ColorToken::DangerSoft),
+            success: hex(ColorToken::Success),
+            success_soft: hex(ColorToken::SuccessSoft),
+            warning: hex(ColorToken::Warning),
+            warning_soft: hex(ColorToken::WarningSoft),
+            surface: hex(ColorToken::Surface),
+            surface_muted: hex(ColorToken::SurfaceMuted),
+            surface_sunken: hex(ColorToken::SurfaceSunken),
+            hover: hex(ColorToken::Hover),
+            border: hex(ColorToken::Border),
+            border_strong: hex(ColorToken::BorderStrong),
+            transparent: hex(ColorToken::Transparent),
+        },
+        font_sizes: FontSizes {
+            micro: pal::fs_micro(),
+            caption: pal::fs_caption(),
+            ui: pal::fs_ui(),
+            body: pal::fs_body(),
+            h2: pal::fs_h2(),
+            h1: pal::fs_h1(),
+        },
+        radii: Radii { xs: pal::RADIUS_XS, sm: pal::RADIUS_SM, md: pal::RADIUS_MD },
+    }
 }
 
 /// 回填一次仓库调用并结束消息处理。

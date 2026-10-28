@@ -18,6 +18,7 @@ pub fn measure_text(
     content: &str,
     size: f32,
     weight: Option<TextWeight>,
+    family: Option<TextFamily>,
     max_width: Option<f32>,
 ) -> MeasureTextResult {
     let line_height = LineHeight::default().to_absolute(Pixels(size)).0;
@@ -30,7 +31,7 @@ pub fn measure_text(
         bounds: Size::new(max_width.unwrap_or(f32::INFINITY), f32::INFINITY),
         size: Pixels(size),
         line_height: LineHeight::default(),
-        font: text_font(weight, None),
+        font: text_font(weight, family),
         align_x: Alignment::Default,
         align_y: Vertical::Top,
         shaping: Shaping::default(),
@@ -74,9 +75,9 @@ mod tests {
 
     #[test]
     fn single_line_width_grows_with_content_and_size() {
-        let short = measure_text("ab", 14.0, None, None);
-        let long = measure_text("abcdef", 14.0, None, None);
-        let larger = measure_text("ab", 28.0, None, None);
+        let short = measure_text("ab", 14.0, None, None, None);
+        let long = measure_text("abcdef", 14.0, None, None, None);
+        let larger = measure_text("ab", 28.0, None, None, None);
         assert_eq!(short.lines, 1);
         assert!(long.width > short.width, "字多则更宽");
         assert!(larger.width > short.width, "字号大则更宽");
@@ -86,8 +87,8 @@ mod tests {
     #[test]
     fn max_width_wraps_and_respects_the_limit() {
         let text = "把这段足够长的中文按较窄的宽度换行之后再量一次尺寸";
-        let single = measure_text(text, 14.0, None, None);
-        let wrapped = measure_text(text, 14.0, None, Some(60.0));
+        let single = measure_text(text, 14.0, None, None, None);
+        let wrapped = measure_text(text, 14.0, None, None, Some(60.0));
         assert!(single.lines == 1);
         assert!(wrapped.lines > 1, "窄宽度下应换行：{wrapped:?}");
         assert!(wrapped.width <= 60.5, "换行后宽度不得超过给定上限：{wrapped:?}");
@@ -96,7 +97,7 @@ mod tests {
 
     #[test]
     fn empty_text_still_takes_one_line() {
-        let empty = measure_text("", 14.0, None, Some(100.0));
+        let empty = measure_text("", 14.0, None, None, Some(100.0));
         assert_eq!(empty.lines, 1);
         assert_eq!(empty.width, 0.0);
     }

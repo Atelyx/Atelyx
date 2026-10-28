@@ -4,6 +4,7 @@ use serde_json::Value;
 
 use crate::context::Context;
 use crate::protocol::event::PublishParams;
+use crate::protocol::frame::{FrameInputParams, FrameTickParams};
 use crate::protocol::view::ViewEvent;
 use crate::protocol::method::{
     CanvasFrameParams, CanvasResizedParams, ChatEventParams, CollabMessageParams, DocCloseParams,
@@ -48,6 +49,11 @@ pub trait PluginHandler: Send + Sync + 'static {
     async fn on_collab_message(&self, _ctx: &Context, _params: CollabMessageParams) {}
     /// 对话事件流（`host:ai.chat.event`）：快照节流拍 + 终态 + 命名结果。
     async fn on_chat_event(&self, _ctx: &Context, _params: ChatEventParams) {}
+    /// 整面帧的原始输入（`host:frame.input`）：指针 / 滚轮 / 键盘 / 输入法 / 焦点 / 尺寸。
+    /// 帧输入不触发界面树自动提交——状态变化后由插件自行 `submit_frame`。
+    async fn on_frame_input(&self, _ctx: &Context, _params: FrameInputParams) {}
+    /// 整面帧的帧拍（`host:frame.tick`）：帧声明了 `fps` 才有，两拍之间应提交新内容。
+    async fn on_frame_tick(&self, _ctx: &Context, _params: FrameTickParams) {}
 
     /// 工具调用（`host:ai.toolCall`）：须用同一 `callId` 经 [`Context::tool_result`] 回报结果。
     /// 默认回报「未处理」错误，宿主不必等到调用超时。
@@ -147,6 +153,8 @@ pub(crate) async fn dispatch<H: PluginHandler + ?Sized>(
         m::window::HOST_HIDDEN => typed!(WindowIdParams, |p| handler.on_window_hidden(ctx, p)),
         m::canvas::HOST_RESIZED => typed!(CanvasResizedParams, |p| canvas_resized(handler, ctx, p)),
         m::canvas::HOST_FRAME => typed!(CanvasFrameParams, |p| handler.on_canvas_frame(ctx, p)),
+        m::frame::HOST_INPUT => typed!(FrameInputParams, |p| handler.on_frame_input(ctx, p)),
+        m::frame::HOST_TICK => typed!(FrameTickParams, |p| handler.on_frame_tick(ctx, p)),
         m::tray::HOST_CLICK => typed!(TrayClickParams, |p| handler.on_tray_click(ctx, p)),
         m::collab::HOST_MESSAGE => typed!(CollabMessageParams, |p| handler.on_collab_message(ctx, p)),
         m::ai::HOST_CHAT_EVENT => typed!(ChatEventParams, |p| handler.on_chat_event(ctx, p)),
@@ -320,5 +328,40 @@ mod tests {
         .await;
         assert_eq!(watcher.0.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert!(rx.try_recv().is_err(), "帧拍不应触发界面树提交");
+    }
+
+    /// 整面帧的原始输入只走自己的回调，不触发界面树提交（帧内容由插件显式提交）。
+    struct FrameInputWatcher(std::sync::Mutex<Vec<String>>);
+
+    #[async_trait::async_trait]
+    impl PluginHandler for FrameInputWatcher {
+        async fn on_ready(&self, _ctx: &Context) {}
+        async fn on_frame_input(&self, _ctx: &Context, params: crate::protocol::frame::FrameInputParams) {
+            assert_eq!(params.surface_id, "panel");
+            let crate::protocol::frame::FrameInput::PointerDown { x, hit, .. } = params.input else {
+                panic!("应为指针按下");
+            };
+            self.0.lock().unwrap().push(format!("{x}:{}", hit.unwrap_or_default()));
+        }
+    }
+
+    #[tokio::test]
+    async fn frame_input_maps_to_its_own_callback() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let ctx = Context::new(tx);
+        ctx.ui().mount("panel", || text("root", "同")).await;
+        let watcher = FrameInputWatcher(std::sync::Mutex::new(Vec::new()));
+        dispatch(
+            &watcher,
+            &ctx,
+            crate::protocol::method::frame::HOST_INPUT,
+            serde_json::json!({
+                "surfaceId": "panel",
+                "input": { "kind": "pointerDown", "x": 12.0, "y": 8.0, "button": "left", "hit": "inc" },
+            }),
+        )
+        .await;
+        assert_eq!(watcher.0.lock().unwrap().as_slice(), ["12:inc"]);
+        assert!(rx.try_recv().is_err(), "帧输入不应触发界面树提交");
     }
 }

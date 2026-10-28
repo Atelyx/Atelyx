@@ -6,22 +6,19 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use iced::widget::canvas::{self, Canvas, Path as CanvasPath, Stroke, Text as CanvasText};
-use iced::{Color, Element, Length, Point, Rectangle};
+use iced::widget::canvas::{self, Canvas};
+use iced::{Element, Length, Point, Rectangle};
 
-use atelyx_core::plugin_runtime::{
-    CanvasColor, CanvasEventKind, CanvasList, CanvasPointer, DrawCommand, ImageFit, ImageSource,
-    MouseButton, TextWeight,
-};
-use atelyx_view::render::token_color;
+use atelyx_core::plugin_runtime::{CanvasEventKind, CanvasList, CanvasPointer, MouseButton};
 
 use crate::plugin_actions;
+use crate::plugin_paint::{self, PaintCtx};
 use crate::{App, Message};
 
-/// 双击判定：同键二次按下的最大间隔。
-const DOUBLE_CLICK_MS: u64 = 500;
+/// 双击判定：同键二次按下的最大间隔（画布节点与整面帧同口径）。
+pub(crate) const DOUBLE_CLICK_MS: u64 = 500;
 /// 双击判定：两次按下间的最大位移（逻辑像素；拖动不算双击）。
-const DOUBLE_CLICK_SLOP: f32 = 4.0;
+pub(crate) const DOUBLE_CLICK_SLOP: f32 = 4.0;
 
 /// 部件跨帧状态（存 `tree::State`，随树投影存活）：缓存 + 拖拽 / 悬停 / 双击判定。
 /// iced 每帧重建部件，本状态必须全部走内部可变性（`Program::draw` 只拿到共享引用）。
@@ -221,9 +218,11 @@ impl canvas::Program<Message> for PluginCanvas<'_> {
         }
         let geometry = state.cache.draw(renderer, bounds.size(), |frame| {
             if let Some(list) = self.list {
-                for command in list.commands() {
-                    execute(frame, command, self);
-                }
+                plugin_paint::execute(
+                    frame,
+                    list.commands(),
+                    &PaintCtx { app: self.app, plugin_id: &self.plugin_id },
+                );
             }
         });
         vec![geometry]
@@ -236,8 +235,8 @@ impl<'a> From<PluginCanvas<'a>> for Element<'a, Message> {
     }
 }
 
-/// 节点身份哈希（FNV-1a；仅用于"是不是同一个画布节点"的判重，不参与协议）。
-fn node_identity(node_id: &str) -> u64 {
+/// 节点身份哈希（FNV-1a；绘制面按它判定「是不是同一个节点」，不参与协议）。
+pub(crate) fn node_identity(node_id: &str) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in node_id.as_bytes() {
         hash ^= u64::from(*byte);
@@ -247,161 +246,24 @@ fn node_identity(node_id: &str) -> u64 {
 }
 
 /// 两点距离平方（双击位移阈值比较用，免开方）。
-fn distance_sq(a: Point, b: Point) -> f32 {
+pub(crate) fn distance_sq(a: Point, b: Point) -> f32 {
     let dx = a.x - b.x;
     let dy = a.y - b.y;
     dx * dx + dy * dy
 }
 
 /// 拖拽中的本地点：光标在窗口内即可换算（允许拖出画布采点，抬起为止）。
-fn drag_point(cursor: iced::mouse::Cursor, bounds: Rectangle) -> Option<Point> {
+pub(crate) fn drag_point(cursor: iced::mouse::Cursor, bounds: Rectangle) -> Option<Point> {
     let absolute = cursor.position()?;
     Some(Point::new(absolute.x - bounds.x, absolute.y - bounds.y))
 }
 
-fn mouse_button(button: iced::mouse::Button) -> Option<MouseButton> {
+/// 指针按钮 → 协议按钮（协议没有的侧键不转发）。
+pub(crate) fn mouse_button(button: iced::mouse::Button) -> Option<MouseButton> {
     match button {
         iced::mouse::Button::Left => Some(MouseButton::Left),
         iced::mouse::Button::Right => Some(MouseButton::Right),
         iced::mouse::Button::Middle => Some(MouseButton::Middle),
         _ => None,
     }
-}
-
-/// 执行一条绘图指令。图片来源句柄未就绪（载入中或不可用）时跳过该条，不阻塞其余指令。
-fn execute(frame: &mut canvas::Frame, command: &DrawCommand, widget: &PluginCanvas<'_>) {
-    match command {
-        DrawCommand::Line { x1, y1, x2, y2, stroke, width } => {
-            let path = CanvasPath::line(Point::new(*x1, *y1), Point::new(*x2, *y2));
-            frame.stroke(&path, stroke_of(color(*stroke), *width));
-        }
-        DrawCommand::Rect { x, y, w, h, fill, stroke, stroke_width, corner_radius } => {
-            let top_left = Point::new(*x, *y);
-            let size = iced::Size::new(*w, *h);
-            let radius = corner_radius.filter(|r| *r > 0.0);
-            if let Some(fill) = fill {
-                match radius {
-                    Some(radius) => frame.fill(&CanvasPath::rounded_rectangle(top_left, size, radius.into()), color(*fill)),
-                    None => frame.fill_rectangle(top_left, size, color(*fill)),
-                }
-            }
-            if let Some(stroke) = stroke {
-                let width = stroke_width.unwrap_or(1.0);
-                match radius {
-                    Some(radius) => frame.stroke(&CanvasPath::rounded_rectangle(top_left, size, radius.into()), stroke_of(color(*stroke), width)),
-                    None => frame.stroke_rectangle(top_left, size, stroke_of(color(*stroke), width)),
-                }
-            }
-        }
-        DrawCommand::Path { points, closed, fill, stroke, stroke_width } => {
-            let path = polyline(points, *closed);
-            if let Some(fill) = fill {
-                frame.fill(&path, color(*fill));
-            }
-            if let Some(stroke) = stroke {
-                frame.stroke(&path, stroke_of(color(*stroke), stroke_width.unwrap_or(1.0)));
-            }
-        }
-        DrawCommand::Circle { cx, cy, r, fill, stroke, stroke_width } => {
-            let path = CanvasPath::circle(Point::new(*cx, *cy), *r);
-            if let Some(fill) = fill {
-                frame.fill(&path, color(*fill));
-            }
-            if let Some(stroke) = stroke {
-                frame.stroke(&path, stroke_of(color(*stroke), stroke_width.unwrap_or(1.0)));
-            }
-        }
-        DrawCommand::Text { x, y, content, size, color: text_color, weight } => {
-            frame.fill_text(CanvasText {
-                content: content.clone(),
-                position: Point::new(*x, *y),
-                color: color(*text_color),
-                size: (*size).into(),
-                font: weight.map(font_of).unwrap_or_else(crate::ui::regular),
-                // 缺省 Shaping::Auto 已覆盖 CJK 文本
-                ..CanvasText::default()
-            });
-        }
-        DrawCommand::Image { source, x, y, w, h, fit } => {
-            let Some((handle, source_size)) = image_handle(widget, source) else {
-                return;
-            };
-            let target = Rectangle::new(Point::new(*x, *y), iced::Size::new(*w, *h));
-            let fit = fit.unwrap_or(ImageFit::Fill);
-            // 原图尺寸未就绪（或解码失败）：按拉伸绘制，等比尺寸无从计算
-            let Some((source_w, source_h)) = source_size.filter(|(w, h)| *w > 0 && *h > 0) else {
-                frame.draw_image(target, &handle);
-                return;
-            };
-            let (source_w, source_h) = (source_w as f32, source_h as f32);
-            let scale = match fit {
-                ImageFit::Fill => None,
-                ImageFit::Contain => Some((w / source_w).min(h / source_h)),
-                ImageFit::Cover => Some((w / source_w).max(h / source_h)),
-            };
-            let Some(scale) = scale else {
-                frame.draw_image(target, &handle);
-                return;
-            };
-            let draw_w = source_w * scale;
-            let draw_h = source_h * scale;
-            let rect = Rectangle::new(
-                Point::new(x + (w - draw_w) / 2.0, y + (h - draw_h) / 2.0),
-                iced::Size::new(draw_w, draw_h),
-            );
-            // cover 的溢出部分裁到目标框；contain 的绘制框本就不超出
-            if fit == ImageFit::Cover {
-                frame.with_clip(target, |frame| frame.draw_image(rect, &handle));
-            } else {
-                frame.draw_image(rect, &handle);
-            }
-        }
-    }
-}
-
-fn polyline(points: &[atelyx_core::plugin_runtime::CanvasPoint], closed: bool) -> CanvasPath {
-    CanvasPath::new(|path| {
-        let mut points = points.iter();
-        if let Some(first) = points.next() {
-            path.move_to(Point::new(first.x, first.y));
-        }
-        for point in points {
-            path.line_to(Point::new(point.x, point.y));
-        }
-        if closed {
-            path.close();
-        }
-    })
-}
-
-fn image_handle(
-    widget: &PluginCanvas<'_>,
-    source: &ImageSource,
-) -> Option<(iced::widget::image::Handle, Option<(u32, u32)>)> {
-    let key = plugin_actions::image_key(widget.app, &widget.plugin_id, source)?;
-    let handle = widget.app.note_images.get(&key).cloned()?;
-    Some((handle, widget.app.note_image_sizes.get(&key).copied()))
-}
-
-fn color(value: CanvasColor) -> Color {
-    match value {
-        CanvasColor::Token { name } => token_color(name),
-        CanvasColor::Rgba { rgba: [r, g, b, a] } => Color::from_rgba8(r, g, b, f32::from(a) / 255.0),
-    }
-}
-
-/// 字重 → 字体（同 [`atelyx_view::render`] 的控件口径）；系统族缺该字重时由字体库匹配最近一档。
-pub(crate) fn font_of(weight: TextWeight) -> iced::Font {
-    iced::Font {
-        weight: match weight {
-            TextWeight::Normal => iced::font::Weight::Normal,
-            TextWeight::Medium => iced::font::Weight::Medium,
-            TextWeight::SemiBold => iced::font::Weight::Semibold,
-        },
-        ..crate::ui::regular()
-    }
-}
-
-fn stroke_of(color: Color, width: f32) -> Stroke<'static> {
-    Stroke { style: canvas::Style::Solid(color), width: width.max(0.1), ..Stroke::default() }
 }

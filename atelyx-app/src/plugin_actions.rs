@@ -5,7 +5,7 @@
 //! 由 [`refresh_projection`] 随运行时事件刷新；渲染在 [`crate::plugin_view`]。
 
 use std::borrow::Cow;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 
 use iced::widget::text_editor;
@@ -14,9 +14,9 @@ use iced::{Task, window};
 use atelyx_core::layout::{self, LayoutNode, LayoutOp};
 use atelyx_core::markdown::LinkForm;
 use atelyx_core::plugin_runtime::{
-    CanvasPointer, Contribution, ContributionSlot, DrawCommand, EventKind, EventValue, ImageSource,
-    NodeBody, ProtocolLinkForm, ReportMode, ScrollEdge, ScrollToParams, SurfaceKind, TakeoverScope,
-    ViewEvent, ViewNode, WindowOpenParams, WindowUpdateParams,
+    CanvasPointer, Contribution, ContributionSlot, DrawCommand, EventKind, EventValue, FrameInput,
+    ImageSource, NodeBody, ProtocolLinkForm, ReportMode, ScrollEdge, ScrollToParams, SurfaceKind,
+    TakeoverScope, ViewEvent, ViewNode, WindowOpenParams, WindowUpdateParams,
 };
 use atelyx_view::support::{declares, format_number, node_value_text, report_mode};
 
@@ -369,8 +369,28 @@ pub fn refresh_projection(app: &mut App) -> Task<Message> {
         surfaces.push((doc.plugin_id.clone(), doc.surface_id.clone()));
     }
     let mut canvas_keys = HashSet::new();
+    let mut frames = HashMap::new();
     for (plugin_id, surface_id) in surfaces {
         let key = (plugin_id.clone(), surface_id.clone());
+        // 整面帧接管该面：树不再渲染，树侧本地态（草稿 / 编辑会话 / 画布清单 / 节点焦点）一并撤掉，
+        // 免得不显示的节点继续吃键盘、也不让每次提交重投影一棵用不上的树
+        if let Some(frame) = app.plugins.surface_frame(&plugin_id, &surface_id) {
+            frames.insert(key.clone(), frame);
+            let lost_focus = app.plugin_focus.clone().filter(|focus| {
+                focus.plugin_id == plugin_id && focus.surface_id == surface_id
+            });
+            drop_tree_state(app, &plugin_id, &surface_id);
+            // 焦点槽已清，插件侧也要知道节点失焦（否则退回控件通道时它还当自己拿着焦点）
+            if let Some(focus) = lost_focus {
+                app.plugins.notify_plugin_focus(
+                    &focus.plugin_id,
+                    &focus.surface_id,
+                    &focus.node_id,
+                    false,
+                );
+            }
+            continue;
+        }
         match app.plugins.surface_tree(&plugin_id, &surface_id) {
             Some(tree) => {
                 sync_drafts(app, &plugin_id, &surface_id, &tree);
@@ -381,7 +401,7 @@ pub fn refresh_projection(app: &mut App) -> Task<Message> {
             }
             None => {
                 app.plugin_trees.remove(&key);
-                drop_node_state(app, &plugin_id, &surface_id);
+                drop_tree_state(app, &plugin_id, &surface_id);
             }
         }
         // 画布清单投影：树里每个 canvas 节点取最新清单（收尾 / 树重发的孤儿清单不投影）
@@ -398,8 +418,24 @@ pub fn refresh_projection(app: &mut App) -> Task<Message> {
         }
     }
     app.plugin_canvases.retain(|key, _| canvas_keys.contains(key));
+    app.plugin_frames = frames;
+    sync_frame_focus(app);
     report_unknown_icons(app);
     Task::batch([ensure_images(app), follow_snap_tasks(app)])
+}
+
+/// 帧投影刷新后校正焦点：面已不挂或帧不再声明 `keys` / `ime` 即释放，
+/// 否则宿主键盘停在一个不再接收按键的面上。
+fn sync_frame_focus(app: &mut App) {
+    let Some(focus) = app.plugin_frame_focus.clone() else { return };
+    let wanted = app
+        .plugin_frames
+        .get(&(focus.plugin_id.clone(), focus.surface_id.clone()))
+        .is_some_and(|frame| frame.keys || frame.ime.is_some());
+    if !wanted {
+        app.plugin_frame_focus = None;
+        notify_frame_focus(app, &focus.plugin_id, &focus.surface_id, false);
+    }
 }
 
 /// 树投影后把仍在跟底的滚动容器滚到终点（内容增高即跟到新终点）。
@@ -509,8 +545,22 @@ fn sync_plugin_icons(app: &App) {
     }
 }
 
-/// 撤掉某面的本地草稿、多行编辑器、画布清单与树投影（面移除 / 插件停用）。
+/// 撤掉某面的本地草稿、多行编辑器、画布清单、整面帧与树投影（面移除 / 插件停用）。
 pub fn drop_node_state(app: &mut App, plugin_id: &str, surface_id: &str) {
+    drop_tree_state(app, plugin_id, surface_id);
+    let key = (plugin_id.to_string(), surface_id.to_string());
+    app.plugin_frames.remove(&key);
+    if app
+        .plugin_frame_focus
+        .as_ref()
+        .is_some_and(|focus| focus.plugin_id == plugin_id && focus.surface_id == surface_id)
+    {
+        app.plugin_frame_focus = None;
+    }
+}
+
+/// 撤掉某面的控件树侧投影；整面帧独立存活（帧-only 面本就没有树）。
+fn drop_tree_state(app: &mut App, plugin_id: &str, surface_id: &str) {
     app.plugin_trees
         .remove(&(plugin_id.to_string(), surface_id.to_string()));
     app.plugin_drafts
@@ -580,6 +630,14 @@ pub struct PluginFocus {
     pub takes_keys: bool,
 }
 
+/// 整面帧的键盘焦点（与 [`PluginFocus`] 互斥：同一时刻全局至多一处收键盘）。
+#[derive(Clone, Debug, PartialEq)]
+pub struct FrameFocus {
+    pub window: window::Id,
+    pub plugin_id: String,
+    pub surface_id: String,
+}
+
 /// 键盘焦点请求：设 / 清插件面的键盘焦点并按节点声明回发 `focus` / `blur`。
 /// 互斥由按下事件天然给出——一次按下会通知所有可聚焦节点，只有光标所在的那个请求聚焦，
 /// 当前已聚焦的节点请求释放。
@@ -615,12 +673,52 @@ pub fn on_plugin_focus(
         app.plugins
             .notify_plugin_focus(&previous.plugin_id, &previous.surface_id, &previous.node_id, false);
     }
+    release_frame_focus(app, window);
     app.plugins.notify_plugin_focus(&next.plugin_id, &next.surface_id, &next.node_id, true);
     app.plugin_focus = Some(next);
 }
 
-/// 清掉属于该窗口的键盘焦点（窗口失焦 / 关闭）。
+/// 整面帧的焦点请求：设 / 清帧焦点，与树节点焦点互斥。
+/// 取焦通知由帧部件在按下前直接回发（先于 `PointerDown`），这里只同步宿主焦点槽与树侧释放。
+pub fn on_frame_focus(
+    app: &mut App,
+    window: window::Id,
+    plugin_id: String,
+    surface_id: String,
+    focused: bool,
+) {
+    let current = app.plugin_frame_focus.clone();
+    if !focused {
+        let holds = current
+            .as_ref()
+            .is_some_and(|focus| focus.plugin_id == plugin_id && focus.surface_id == surface_id);
+        if holds {
+            app.plugin_frame_focus = None;
+            notify_frame_focus(app, &plugin_id, &surface_id, false);
+        }
+        return;
+    }
+    let next = FrameFocus { window, plugin_id: plugin_id.clone(), surface_id: surface_id.clone() };
+    if current.as_ref() == Some(&next) {
+        return;
+    }
+    if let Some(previous) = current {
+        notify_frame_focus(app, &previous.plugin_id, &previous.surface_id, false);
+    }
+    if let Some(node_focus) = app.plugin_focus.take() {
+        app.plugins.notify_plugin_focus(
+            &node_focus.plugin_id,
+            &node_focus.surface_id,
+            &node_focus.node_id,
+            false,
+        );
+    }
+    app.plugin_frame_focus = Some(next);
+}
+
+/// 清掉属于该窗口的键盘焦点（窗口失焦 / 关闭）；树节点与整面帧一并释放。
 pub fn release_plugin_focus(app: &mut App, window: window::Id) {
+    release_frame_focus(app, window);
     let Some(focus) = app.plugin_focus.clone() else { return };
     if focus.window != window {
         return;
@@ -629,9 +727,33 @@ pub fn release_plugin_focus(app: &mut App, window: window::Id) {
     app.plugins.notify_plugin_focus(&focus.plugin_id, &focus.surface_id, &focus.node_id, false);
 }
 
-/// 宿主键盘是否让位：焦点节点声明了 `key` 事件即由插件消费无命令修饰的按键与 Esc。
+fn release_frame_focus(app: &mut App, window: window::Id) {
+    let Some(focus) = app.plugin_frame_focus.clone() else { return };
+    if focus.window != window {
+        return;
+    }
+    app.plugin_frame_focus = None;
+    notify_frame_focus(app, &focus.plugin_id, &focus.surface_id, false);
+}
+
+fn notify_frame_focus(app: &App, plugin_id: &str, surface_id: &str, focused: bool) {
+    app.plugins
+        .notify_frame_input(plugin_id, surface_id, &FrameInput::Focus { focused });
+}
+
+/// 宿主键盘是否让位：树节点声明了 `key`，或整面帧声明了 `keys` 并持有焦点
+/// （只声明 `ime` 的帧只收组合文本，按键仍归宿主）。
 pub fn plugin_takes_keyboard(app: &App) -> bool {
-    app.plugin_focus.as_ref().is_some_and(|focus| focus.takes_keys)
+    app.plugin_focus.as_ref().is_some_and(|focus| focus.takes_keys) || frame_takes_keyboard(app)
+}
+
+/// 整面帧是否收全部按键（含命令组合）：持有焦点的面按最新帧的 `keys` 声明判定。
+pub fn frame_takes_keyboard(app: &App) -> bool {
+    app.plugin_frame_focus.as_ref().is_some_and(|focus| {
+        app.plugin_frames
+            .get(&(focus.plugin_id.clone(), focus.surface_id.clone()))
+            .is_some_and(|frame| frame.keys)
+    })
 }
 
 /// 单行 / 数字输入的草稿同步：记下插件当前值，非逐键上报时值变了即接管本机文本。
@@ -831,12 +953,19 @@ pub(crate) fn ensure_images(app: &mut App) -> Task<Message> {
     }
     for ((plugin_id, _, _), list) in &app.plugin_canvases {
         for command in list.commands() {
-            if let DrawCommand::Image { source, .. } = command {
+            collect_draw_images(std::slice::from_ref(command), &mut |source| {
                 if let Some(key) = image_key(app, plugin_id, source) {
                     pending.push((key, source.clone()));
                 }
-            }
+            });
         }
+    }
+    for ((plugin_id, _), frame) in &app.plugin_frames {
+        collect_draw_images(&frame.commands, &mut |source| {
+            if let Some(key) = image_key(app, plugin_id, source) {
+                pending.push((key, source.clone()));
+            }
+        });
     }
     let gen = app.epoch();
     let mut tasks = Vec::new();
@@ -908,6 +1037,18 @@ fn collect_image_sources<'a>(node: &'a ViewNode, out: &mut Vec<&'a ImageSource>)
     }
     for child in &node.children {
         collect_image_sources(child, out);
+    }
+}
+
+/// 绘图指令里要预载的图片来源。
+fn collect_draw_images<'a>(
+    commands: &'a [DrawCommand],
+    visit: &mut impl FnMut(&'a ImageSource),
+) {
+    for command in commands {
+        if let DrawCommand::Image { source, .. } = command {
+            visit(source);
+        }
     }
 }
 

@@ -1258,7 +1258,7 @@ pub enum MouseButton {
 }
 
 /// 画布指针事件负载。坐标 = 节点本地逻辑像素、左上原点；
-/// wheel 增量为行数，正 = 向下 / 向右（Web 惯例，宿主负责与平台滚动方向换算）。
+/// wheel 增量沿用设备单位（滚轮为行、触控板为像素），正 = 向下 / 向右（Web 惯例，宿主已完成方向换算）。
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 #[serde(rename_all_fields = "camelCase")]

@@ -3,10 +3,19 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::view::{ColorToken, ImageFit, ImageSource, TextWeight};
+use crate::view::{ColorToken, ImageFit, ImageSource, TextFamily, TextWeight};
 
 fn default_stroke_width() -> f32 {
     1.0
+}
+
+/// 文字水平对齐：以 `maxWidth` 为对齐区域、`x` 为区域左缘，按量算出的整段宽度换算（换行后段内各行仍左对齐）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TextAlign {
+    Start,
+    Center,
+    End,
 }
 
 /// 颜色：主题 token（跟随宿主主题）或插件自带 RGBA（内容谱系色，如连线分类、播放头高亮）。
@@ -74,8 +83,8 @@ pub enum DrawCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stroke_width: Option<f32>,
     },
-    /// 文字以 (x, y) 为左上角。宿主 canvas 的文字永远绘制在所有图层之上（图形引擎限制），
-    /// 插件若需文字被后续图形遮盖，应改用宿主原生 Text 控件分层。
+    /// 文字以 (x, y) 为左上角。给 `maxWidth` 时按该宽度换行并作为对齐区域（`x` 为区域左缘）；
+    /// `align` 只在给了 `maxWidth` 时成立，缺省 `start`。
     Text {
         x: f32,
         y: f32,
@@ -84,6 +93,14 @@ pub enum DrawCommand {
         color: CanvasColor,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         weight: Option<TextWeight>,
+        /// 字体族：`ui` 跟随界面字体（缺省），`mono` 用系统等宽族。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        family: Option<TextFamily>,
+        /// 可用宽度：给定即按该宽度换行，并作为 `align` 的对齐区域。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_width: Option<f32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        align: Option<TextAlign>,
     },
     /// 图片贴片：绘制在给定矩形内。`fit` 缺省 = 拉伸填满；`contain` 等比完整可见（留空边），
     /// `cover` 等比覆盖并裁剪溢出部分。
@@ -152,7 +169,16 @@ impl DrawCommand {
                 ensure_non_negative(*r, "圆半径")?;
                 ensure_positive(stroke_width.unwrap_or(1.0), "描边宽")
             }
-            Self::Text { size, .. } => ensure_positive(*size, "字号"),
+            Self::Text { size, max_width, align, .. } => {
+                ensure_positive(*size, "字号")?;
+                if let Some(max_width) = max_width {
+                    ensure_positive(*max_width, "文字可用宽度")?;
+                }
+                if align.is_some() && max_width.is_none() {
+                    return Err("文字对齐须与 maxWidth 同时给出".into());
+                }
+                Ok(())
+            }
             Self::Image { w, h, .. } => {
                 ensure_non_negative(*w, "贴片宽")?;
                 ensure_non_negative(*h, "贴片高")
@@ -185,14 +211,14 @@ pub fn validate_commands(commands: &[DrawCommand]) -> Result<(), String> {
 }
 
 fn ensure_non_negative(value: f32, name: &str) -> Result<(), String> {
-    if value.is_nan() || value < 0.0 {
+    if !value.is_finite() || value < 0.0 {
         return Err(format!("{name}不可为负"));
     }
     Ok(())
 }
 
 fn ensure_positive(value: f32, name: &str) -> Result<(), String> {
-    if value.is_nan() || value <= 0.0 {
+    if !value.is_finite() || value <= 0.0 {
         return Err(format!("{name}必须大于 0"));
     }
     Ok(())
@@ -314,5 +340,32 @@ mod tests {
         let wire = serde_json::to_value(&contain).unwrap();
         assert_eq!(wire["fit"], "contain");
         assert_eq!(serde_json::from_value::<DrawCommand>(wire).unwrap(), contain);
+    }
+
+    fn text(max_width: Option<f32>, align: Option<TextAlign>) -> DrawCommand {
+        DrawCommand::Text {
+            x: 0.0,
+            y: 0.0,
+            content: "示例".into(),
+            size: 14.0,
+            color: CanvasColor::Token { name: ColorToken::Text },
+            weight: Some(TextWeight::SemiBold),
+            family: Some(TextFamily::Mono),
+            max_width,
+            align,
+        }
+    }
+
+    #[test]
+    fn text_alignment_requires_a_width() {
+        assert!(validate_commands(&[text(None, None)]).is_ok());
+        assert!(validate_commands(&[text(Some(100.0), Some(TextAlign::Center))]).is_ok());
+        let err = validate_commands(&[text(None, Some(TextAlign::End))]).unwrap_err();
+        assert!(err.contains("maxWidth"), "对齐缺宽度须拒收：{err}");
+        assert!(validate_commands(&[text(Some(0.0), None)]).is_err());
+        // 可选字段缺省不落线
+        let wire = serde_json::to_value(text(None, None)).unwrap();
+        assert!(wire.get("maxWidth").is_none() && wire.get("align").is_none());
+        assert_eq!(wire["family"], "mono");
     }
 }
