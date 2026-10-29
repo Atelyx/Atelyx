@@ -386,9 +386,7 @@ version = "0.6.3"
 dependencies = [
  "arboard",
  "atelyx-core",
- "atelyx-pack",
  "atelyx-ui",
- "atelyx-view",
  "dirs",
  "iced",
  "image",
@@ -437,13 +435,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "atelyx-pack"
-version = "0.1.0"
-dependencies = [
- "iced",
-]
-
-[[package]]
 name = "atelyx-plugin-protocol"
 version = "0.1.0"
 dependencies = [
@@ -459,7 +450,6 @@ dependencies = [
  "async-trait",
  "atelyx-core",
  "atelyx-plugin-protocol",
- "atelyx-view",
  "base64 0.22.1",
  "serde",
  "serde_json",
@@ -473,15 +463,6 @@ version = "0.1.0"
 dependencies = [
  "iced",
  "windows 0.62.2",
-]
-
-[[package]]
-name = "atelyx-view"
-version = "0.1.0"
-dependencies = [
- "atelyx-plugin-protocol",
- "atelyx-ui",
- "iced",
 ]
 
 [[package]]

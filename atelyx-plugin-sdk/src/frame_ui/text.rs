@@ -1,6 +1,6 @@
 //! 输入框内的文字排布：用量算宽度换算光标 / 选区 / 省略，并在光标超出可见宽度时水平滚动窗口。
 
-use atelyx_plugin_protocol::canvas::{CanvasColor, DrawCommand, TextAlign};
+use atelyx_plugin_protocol::paint::{PaintColor, DrawCommand, TextAlign};
 
 use super::build::BuildCtx;
 use super::metrics::Metrics;
@@ -117,7 +117,7 @@ pub(crate) fn paint(
     ctx: &mut BuildCtx<'_>,
     content: &str,
     spec: FontSpec,
-    color: CanvasColor,
+    color: PaintColor,
     x: f32,
     y: f32,
     max_width: Option<f32>,

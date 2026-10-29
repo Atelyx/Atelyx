@@ -1,7 +1,7 @@
 ﻿//! 原始输入 → 语义事件：指针按命中 id 与上次布局解释成点击 / 聚焦，键盘与输入法落到聚焦控件上编辑。
 
 use atelyx_plugin_protocol::frame::FrameInput;
-use atelyx_plugin_protocol::view::{Key, Modifiers, MouseButton, NamedKey};
+use atelyx_plugin_protocol::frame::{Key, Modifiers, MouseButton, NamedKey};
 
 use super::geom::Rect;
 use super::model::{FontSpec, InputState, Layout, Press, UiState};
@@ -50,7 +50,7 @@ pub(crate) async fn handle(
             }
         }
         FrameInput::Key { key, action, modifiers, text } => {
-            if *action == atelyx_plugin_protocol::view::KeyAction::Press {
+            if *action == atelyx_plugin_protocol::frame::KeyAction::Press {
                 key_press(state, ctx, key, *modifiers, text.as_deref(), &value_of, &mut events).await;
             }
         }

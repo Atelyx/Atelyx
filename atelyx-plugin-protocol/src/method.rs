@@ -7,27 +7,19 @@ use serde_json::Value;
 // ---------- 方法名常量 ----------
 
 pub mod view {
-    /// 插件提交一棵界面树到某个面（面板 / 窗口 / 接管区 / 文档实例）。宿主校验后按键 diff 挂载。
-    pub const SUBMIT: &str = "view.submit";
     /// 插件注册一个贡献点（面板 / 表格视图 / 设置页），使其出现在宿主对应的入口里。
     pub const REGISTER: &str = "view.register";
     /// 插件按 id 撤销自己的一个贡献点。
     pub const UNREGISTER: &str = "view.unregister";
-    /// 插件定义一枚自备图标形状（24x24 网格的描边路径），此后按名字在贡献与控件里引用。
-    pub const DEFINE_ICON: &str = "view.defineIcon";
-    /// 把一个可滚动容器（list / scroll）滚到一端。目标节点须在当前树里且为可滚动容器。
-    pub const SCROLL_TO: &str = "view.scrollTo";
     /// 插件请求接管当前聚焦窗口（整页 / 全接管）。宿主按窗应用，退出入口由宿主常驻提供。
     pub const TAKEOVER: &str = "view.takeover";
-    /// 宿主回发节点事件（通知）。
-    pub const HOST_EVENT: &str = "host:view.event";
     /// 宿主告知插件某个面已就绪 / 已移除（通知）。
     pub const HOST_ATTACHED: &str = "host:surface.attached";
     pub const HOST_DETACHED: &str = "host:surface.detached";
 }
 
 pub mod window {
-    /// 插件请求打开一个独立窗口承载自己的界面树（声明的 `id` 即该窗口面的 `surfaceId`）。
+    /// 插件请求打开一个独立窗口承载自己的面（声明的 `id` 即该窗口面的 `surfaceId`）。
     /// 缺省用系统窗口边框；`decorations: false` 时去掉系统边框，由宿主提供标题栏
     /// （标题 / 拖动 / 最小化 / 最大化 / 关闭）。
     pub const OPEN: &str = "window.open";
@@ -37,6 +29,8 @@ pub mod window {
     pub const UPDATE: &str = "window.update";
     /// 插件重新显示一个因失焦被隐藏的窗口（`hideOnBlur` 的唤起回路）。
     pub const SHOW: &str = "window.show";
+    /// 插件请求拖动承载某个面的窗口（自绘标题栏走这里：宿主接管拖动，插件不必自己算窗口坐标）。
+    pub const BEGIN_DRAG: &str = "window.beginDrag";
     /// 宿主告知插件某个窗口已被用户关闭（通知）。
     pub const HOST_CLOSED: &str = "host:window.closed";
     /// 宿主告知插件某个窗口因失焦被收起（通知）；插件可用 [`SHOW`] 重新显示。
@@ -167,29 +161,13 @@ pub mod http {
 
 pub mod doc {
     /// 用户打开了插件注册的领域文档类型文件（通知）。`surfaceId` 为宿主分配的实例面标识，
-    /// 插件据此以 `view.submit` 提交该文档实例的界面树。
+    /// 插件据此以 `frame.submit` 提交该文档实例的界面。
     pub const HOST_OPEN: &str = "host:doc.open";
-    /// 文档实例已关闭 / 已切换走（通知）。插件此后不得再向该 surfaceId 提交树。
+    /// 文档实例已关闭 / 已切换走（通知）。插件此后不得再向该 surfaceId 提交帧。
     pub const HOST_CLOSE: &str = "host:doc.close";
 }
 
-pub mod canvas {
-    /// 插件提交一份绘图指令清单到某个画布节点。宿主合帧应用（渲染每帧只取最新一份）。
-    /// 整表重建：清单里的条目都没有 id，此前经 `PATCH` 建立的增量条目一并丢弃。
-    pub const SUBMIT: &str = "canvas.submit";
-    /// 按 id 增量维护画布清单：更新 / 追加 / 删除单个条目，只上行改动的条目，不必重发整表。
-    /// 未提交过清单时以空表为基线（首次也可直接用增量建表）。
-    pub const PATCH: &str = "canvas.patch";
-    /// 量算一段文字在给定字号 / 字体下的占位尺寸（画布排版要按真实字宽摆放，不能按字符数估）。
-    /// 纯计算：不改清单、不产生帧、不要求节点存在。
-    pub const MEASURE_TEXT: &str = "canvas.measureText";
-    /// 宿主告知插件画布节点的像素尺寸（通知，尺寸变化时发）。
-    pub const HOST_RESIZED: &str = "host:canvas.resized";
-    /// 宿主按节点声明的 `fps` 发帧拍（通知）：插件收到后提交该帧的绘制内容。
-    pub const HOST_FRAME: &str = "host:canvas.frame";
-}
-
-/// 面帧：整个面交给插件自绘（与 `view.submit` 互斥，面以最后提交的为准）。
+/// 面帧：整个面交给插件自绘，一帧即当前完整界面。
 pub mod frame {
     /// 插件提交一份整面帧（指令清单 + 命中区 + 输入法光标 + 键盘 / 帧率声明）。整帧替换。
     pub const SUBMIT: &str = "frame.submit";
@@ -205,8 +183,13 @@ pub mod query {
     pub const MEASURE: &str = "query.measure";
     /// 取宿主主题表（颜色 / 字号档 / 圆角档），插件据此与宿主观感一致。
     pub const THEME: &str = "query.theme";
+}
+
+/// Markdown 解析：内容不变则结果不变，插件应按原文缓存，不必逐帧往返。
+pub mod markdown {
     /// 把 Markdown 文本转成结构化块（与笔记同一套解析语义），排版与绘制仍归插件。
-    pub const MARKDOWN: &str = "query.markdown";
+    /// 服务名 `markdown`、方法 `parse`，因此外部提供者可以整体替换解析实现。
+    pub const PARSE: &str = "markdown.parse";
 }
 
 pub mod ai {
@@ -271,13 +254,7 @@ pub struct SurfaceDetachedParams {
     pub surface_id: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SubmitParams {
-    pub surface_id: String,
-    pub tree: crate::view::ViewNode,
-}
-
+/// 界面提交类方法的回执（`frame.submit` 等）：`applied` = 宿主已接受并生效。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SubmitResult {
@@ -292,12 +269,55 @@ pub enum ContributionSlot {
     Panel,
     /// 表格编辑器工具条「视图」下拉条目。
     TableView,
-    /// 设置页顶层 tab（注册即挂载：宿主立即回 `host:surface.attached`，插件常驻设置树）。
+    /// 设置页顶层 tab（注册即挂载：宿主立即回 `host:surface.attached`，插件常驻设置面）。
     Settings,
 }
 
+/// 内边距声明：数字 = 四边等距；`{horizontal, vertical}` = 分轴；`{top, right, bottom, left}` = 分边。
+/// 两个对象形态都不接受未声明字段，避免分边写法被分轴形态吞掉。
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PaddingSpec {
+    All(f32),
+    Axes(AxesPadding),
+    Edges(EdgesPadding),
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AxesPadding {
+    #[serde(default)]
+    pub horizontal: f32,
+    #[serde(default)]
+    pub vertical: f32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EdgesPadding {
+    #[serde(default)]
+    pub top: f32,
+    #[serde(default)]
+    pub right: f32,
+    #[serde(default)]
+    pub bottom: f32,
+    #[serde(default)]
+    pub left: f32,
+}
+
+impl PaddingSpec {
+    /// 四边取值（上 / 右 / 下 / 左）；宿主据此校验并换算成自身布局类型。
+    pub fn edges(self) -> [f32; 4] {
+        match self {
+            Self::All(value) => [value; 4],
+            Self::Axes(axes) => [axes.vertical, axes.horizontal, axes.vertical, axes.horizontal],
+            Self::Edges(edges) => [edges.top, edges.right, edges.bottom, edges.left],
+        }
+    }
+}
+
 /// `view.register` 的 params：声明一个贡献点。`id` 插件内唯一且不得含 `:`（宿主的面标识以它作分隔），
-/// 同时是该面挂载后的 `surfaceId`；`icon` 为宿主内置形状名或 `view.defineIcon` 定义的自备名
+/// 同时是该面挂载后的 `surfaceId`；`icon` 为宿主内置形状名或插件自备形状名
 /// （内置名优先），缺省 / 未注册时宿主用拼图图标。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -307,57 +327,10 @@ pub struct RegisterParams {
     pub label: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
-    /// 面外壳内边距：数字 = 四边等距，也可按轴 / 按边声明（见 [`crate::view::PaddingSpec`]）；
+    /// 面外壳内边距：数字 = 四边等距，也可按轴 / 按边声明（见 [`PaddingSpec`]）；
     /// 0 = 贴边，缺省 = 宿主默认。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub padding: Option<crate::view::PaddingSpec>,
-}
-
-/// `view.defineIcon` 的 params：定义一枚自备图标形状，此后按 `name` 在贡献注册与图标钮里引用。
-/// `path` 为 24x24 网格的描边路径（与宿主形状表同口径）；名字须为字母 / 数字 / `_` / `-` 且不与
-/// 宿主内置形状重名。定义随插件会话收尾清除。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DefineIconParams {
-    pub name: String,
-    pub path: String,
-}
-
-/// 可滚动容器的主轴一端（[`view::SCROLL_TO`] 的 `edge`）。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum ScrollEdge {
-    /// 纵向容器 = 顶部；横向容器 = 最左。
-    Start,
-    /// 纵向容器 = 底部；横向容器 = 最右。
-    End,
-}
-
-/// `view.scrollTo` 的 params：把某可滚动节点（`list` / `scroll`）滚到某处。
-/// `edge` 与 `offset` 二选一，同时给出或都不给即拒收。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ScrollToParams {
-    pub surface_id: String,
-    pub node_id: String,
-    /// 滚到主轴一端。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub edge: Option<ScrollEdge>,
-    /// 按比例定位：0 = 起点、1 = 终点（越界与内容不足一屏时由控件钳制）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub offset: Option<f32>,
-}
-
-impl ScrollToParams {
-    pub fn validate(&self) -> Result<(), String> {
-        match (self.edge, self.offset) {
-            (Some(_), None) => Ok(()),
-            (None, Some(offset)) if offset.is_finite() => Ok(()),
-            (None, Some(_)) => Err("滚动位置不是有限数值".to_string()),
-            (None, None) => Err("需要 edge 或 offset".to_string()),
-            (Some(_), Some(_)) => Err("edge 与 offset 不能同时给出".to_string()),
-        }
-    }
+    pub padding: Option<PaddingSpec>,
 }
 
 /// `window.update` 的 params：运行时改一个已打开窗口的属性（缺省字段不动）。至少给一项。
@@ -399,16 +372,6 @@ pub struct ShortcutQueryResult {
     pub owner: Option<String>,
 }
 
-/// `host:canvas.resized` 的 params：画布节点当前的像素尺寸（逻辑像素），尺寸变化时发。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CanvasResizedParams {
-    pub surface_id: String,
-    pub node_id: String,
-    pub width: f32,
-    pub height: f32,
-}
-
 /// `view.unregister` 的 params：按 id 撤销自己的贡献；id 未注册时报可读错误。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -426,7 +389,7 @@ pub enum TakeoverScope {
 }
 
 /// `view.takeover` 的 params：把本插件的一个贡献面接管到当前聚焦窗口。`surfaceId` 须为
-/// 已注册的贡献 id（与该面共享同一棵提交树）；退出接管入口由宿主常驻提供，插件无需声明退路。
+/// 已注册的贡献 id（接管的就是该面自己的整面帧）；退出接管入口由宿主常驻提供，插件无需声明退路。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TakeoverParams {
@@ -474,81 +437,14 @@ pub struct WindowClosedParams {
     pub id: String,
 }
 
+/// `window.beginDrag` 的 params：要拖动的窗口按承载该面的窗口解析（插件窗口 / 接管面 / 所在面板）。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ViewEventParams {
+pub struct WindowDragParams {
     pub surface_id: String,
-    pub node_id: String,
-    pub event: crate::view::ViewEvent,
 }
 
-/// `canvas.submit` 的 params：整表重建（空清单 = 清空画布），此前经增量建立的 id 槽一并丢弃。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CanvasSubmitParams {
-    pub surface_id: String,
-    /// 目标画布节点 id（须在当前 `view.submit` 树里且为 canvas 节点）。
-    pub node_id: String,
-    pub commands: Vec<crate::canvas::DrawCommand>,
-}
-
-/// `canvas.patch` 的 params：按 id 更新 / 追加 / 删除条目，次序按 `upsert` 在前、`remove` 在后。
-/// 同一 `id` 不得在同一请求里既 upsert 又 remove（语义有歧义，直接拒收）。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CanvasPatchParams {
-    pub surface_id: String,
-    pub node_id: String,
-    #[serde(default)]
-    pub upsert: Vec<crate::canvas::CanvasUpsert>,
-    #[serde(default)]
-    pub remove: Vec<String>,
-}
-
-/// [`canvas::HOST_FRAME`] 的 params：一帧的拍号与距上一帧的间隔，插件据此推进动画相位。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CanvasFrameParams {
-    pub surface_id: String,
-    pub node_id: String,
-    /// 该画布的帧序号（从 0 起，宿主按画布记账）。
-    pub frame: u64,
-    /// 距该画布上一帧的毫秒数（首帧为 0）。动画相位请以帧序号为准，此值只作节拍参考。
-    pub delta_ms: u32,
-}
-
-/// [`canvas::MEASURE_TEXT`] 的 params：`size` 为绝对字号（逻辑像素，与画布 `text` 指令同口径）。
-/// 参数面与画布 `text` 指令保持一致，量出来的宽度才能在画布上复现。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MeasureTextParams {
-    pub text: String,
-    pub size: f32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub weight: Option<crate::view::TextWeight>,
-    /// 字体族：`ui` 跟随界面字体（缺省），`mono` 用系统等宽族。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub family: Option<crate::view::TextFamily>,
-    /// 可用宽度上限：给定即按该宽度换行量算（缺省按单行）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_width: Option<f32>,
-}
-
-impl MeasureTextParams {
-    pub fn validate(&self) -> Result<(), String> {
-        if !self.size.is_finite() || self.size <= 0.0 {
-            return Err("字号必须大于 0".into());
-        }
-        if let Some(max_width) = self.max_width {
-            if !max_width.is_finite() || max_width <= 0.0 {
-                return Err("可用宽度必须大于 0".into());
-            }
-        }
-        Ok(())
-    }
-}
-
-/// [`canvas::MEASURE_TEXT`] 的 result：占位宽高（逻辑像素）与换行后的行数（单行量算恒为 1）。
+/// [`query::MEASURE`] 的 result：占位宽高（逻辑像素）与换行后的行数（单行量算恒为 1）。
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MeasureTextResult {
@@ -560,16 +456,16 @@ pub struct MeasureTextResult {
 /// 单次批量量算的条目上限。
 pub const MAX_MEASURE_ITEMS: usize = 512;
 
-/// [`query::MEASURE`] 的一条：字段与 [`MeasureTextParams`] 同口径。
+/// [`query::MEASURE`] 的一条：字段与 [`MeasureBatchParams`] 的条目同口径。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MeasureItem {
     pub text: String,
     pub size: f32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub weight: Option<crate::view::TextWeight>,
+    pub weight: Option<crate::paint::TextWeight>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub family: Option<crate::view::TextFamily>,
+    pub family: Option<crate::paint::TextFamily>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_width: Option<f32>,
 }
@@ -624,7 +520,7 @@ pub struct ThemeResult {
     pub radii: Radii,
 }
 
-/// 主题色：十六进制 `#rrggbb` / `#rrggbbaa`，字段名与 [`crate::view::ColorToken`] 的 wire 名一致。
+/// 主题色：十六进制 `#rrggbb` / `#rrggbbaa`，字段名与 [`crate::paint::ColorToken`] 的 wire 名一致。
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThemeColors {
@@ -674,7 +570,7 @@ pub struct Radii {
 /// 单次转换的源文本上限（字节）：超限按可读错误拒绝，插件应自行分段。
 pub const MAX_MARKDOWN_BYTES: usize = 512 * 1024;
 
-/// [`query::MARKDOWN`] 的 params：交给宿主按笔记同一套解析语义转成结构化块。
+/// [`markdown::PARSE`] 的 params：交给宿主按笔记同一套解析语义转成结构化块。
 /// 宿主只做解析（块与行内片段），排版与绘制仍归插件。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -691,7 +587,7 @@ impl MarkdownParams {
     }
 }
 
-/// [`query::MARKDOWN`] 的 result：按源序排列的块。
+/// [`markdown::PARSE`] 的 result：按源序排列的块。
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MarkdownResult {
@@ -1060,7 +956,7 @@ pub struct HttpResult {
 pub struct DocOpenParams {
     /// 仓库容器内的相对路径（本地仓库）或服务端内容路径（协作空间），与 vault 口径一致。
     pub path: String,
-    /// 宿主为本实例分配的面标识：插件据此以 `view.submit` 提交该文档实例的界面树。
+    /// 宿主为本实例分配的面标识：插件据此以 `frame.submit` 提交该文档实例的界面。
     pub surface_id: String,
 }
 
@@ -1553,6 +1449,32 @@ pub struct CollabMessageParams {
     pub peer_name: Option<String>,
 }
 
+
+/// 内置能力目录：服务名 → 它提供的方法（全名，形如 `vault.readText`）。
+///
+/// 这是「能力只有一种描述方式」的落地：方法名本身就是 `服务.方法`，目录按第一个 `.` 切分即得；
+/// `host:` 方法的宿主→插件通知不在其列（那不是插件可调用的能力）。条目引用常量而非字面量，
+/// 改名 / 删除常量会直接编译失败，目录不会悄悄漂移。
+pub const BUILTIN_SERVICES: &[(&str, &[&str])] = &[
+    ("fs", &[fs::PRIVATE_DIR, fs::READ_TEXT, fs::WRITE_TEXT, fs::READ_BINARY, fs::WRITE_BINARY, fs::REMOVE, fs::EXISTS, fs::LIST]),
+    ("process", &[process::SPAWN, process::WRITE_STDIN, process::CLOSE_STDIN, process::KILL]),
+    ("vault", &[vault::READ_TEXT, vault::WRITE_TEXT, vault::READ_BINARY, vault::WRITE_BINARY, vault::IMPORT_FILE, vault::IMAGE_INFO, vault::LIST, vault::EXISTS, vault::REMOVE, vault::RENAME]),
+    ("collab", &[collab::PEERS, collab::SEND]),
+    ("table", &[table::SNAPSHOT, table::UPDATE_CELL, table::ADD_ROW, table::REMOVE_ROW, table::SELECT_ROW, table::SET_CELL_IMAGE]),
+    ("state", &[state::READ, state::WRITE]),
+    ("notification", &[notification::SHOW]),
+    ("tray", &[tray::SET_ITEMS]),
+    ("shortcut", &[shortcut::REGISTER, shortcut::UNREGISTER, shortcut::QUERY]),
+    ("clipboard", &[clipboard::WRITE_TEXT, clipboard::READ_TEXT, clipboard::READ_IMAGE, clipboard::WRITE_IMAGE]),
+    ("dialog", &[dialog::PICK_FILE, dialog::PICK_DIRECTORY]),
+    ("http", &[http::REQUEST]),
+    // 工具名册与结果回报是宿主记账，不是可由外部提供者接管的能力，故不在目录里
+    ("ai", &[ai::CHAT_SEND, ai::CHAT_STOP, ai::CHAT_HISTORY, ai::MODELS, ai::AGENTS, ai::CHAT_RENAME, ai::CHAT_DELETE, ai::CHAT_COMPACT]),
+    ("window", &[window::OPEN, window::CLOSE, window::UPDATE, window::SHOW, window::BEGIN_DRAG]),
+    ("query", &[query::MEASURE, query::THEME]),
+    ("markdown", &[markdown::PARSE]),
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1712,22 +1634,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn scroll_to_requires_exactly_one_of_edge_and_offset() {
-        let base = |edge: Option<ScrollEdge>, offset: Option<f32>| ScrollToParams {
-            surface_id: "panel".into(),
-            node_id: "log".into(),
-            edge,
-            offset,
-        };
-        assert!(base(Some(ScrollEdge::Start), None).validate().is_ok());
-        assert!(base(None, Some(0.5)).validate().is_ok());
-        assert!(base(None, Some(f32::NAN)).validate().is_err());
-        assert!(base(None, None).validate().is_err());
-        assert!(base(Some(ScrollEdge::End), Some(0.5)).validate().is_err());
-        // 缺省字段不落线
-        let wire = serde_json::to_value(base(None, Some(0.5))).unwrap();
-        assert_eq!(wire["offset"], 0.5);
-        assert!(wire.get("edge").is_none());
-    }
 }

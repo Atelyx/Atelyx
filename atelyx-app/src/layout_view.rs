@@ -20,7 +20,7 @@ use atelyx_core::plugin_runtime::ContributionSlot;
 
 use crate::settings_view::ai;
 use crate::ui::controls::{self, Variant};
-use crate::ui::icon::{icon, icon_resolved};
+use crate::ui::icon::{icon, icon_stroke};
 use crate::ui::menu::MenuEntry;
 use crate::ui::palette as pal;
 use crate::ui::{mono, text};
@@ -48,39 +48,20 @@ impl UiMetrics {
     pub const RESIZE_CORNER: f32 = 18.0;
 }
 
-/// 内置视图显示名（面板头标签）；插件面板取贡献 label，贡献缺失（未装 / 停用）回落插件 id。
+/// 视图显示名（面板头标签）：注册表的一条查询——内置与插件条目同一条路径。
+/// 未在册（贡献随插件停用消失）回落到插件 id。
 pub fn view_label(app: &App, kind: &str) -> String {
-    if let Some(desc) = app.views.get(kind) {
-        return desc.label.to_string();
-    }
-    if let Some((plugin_id, id)) = crate::plugin_actions::parse_view_kind(kind) {
-        return crate::plugin_actions::contribution(app, plugin_id, id)
-            .map(|c| c.label.clone())
-            .unwrap_or_else(|| plugin_id.to_string());
-    }
-    kind.to_string()
+    app.registry.label(kind)
 }
 
-/// 内置视图图标（lucide 名）；插件面板取贡献 icon（内置名或自备图形限定名）；
-/// 未知 kind 拼图。
+/// 视图图标（壳内 lucide 名）：注册表的一条查询；未在册回落拼图。
 pub fn view_icon(app: &App, kind: &str) -> Cow<'static, str> {
-    if let Some(desc) = app.views.get(kind) {
-        return Cow::Borrowed(desc.icon);
-    }
-    if let Some((plugin_id, id)) = crate::plugin_actions::parse_view_kind(kind) {
-        return crate::plugin_actions::contribution_icon(app, plugin_id, id);
-    }
-    Cow::Borrowed("puzzle")
+    app.registry.icon(kind)
 }
 
-/// 可选视图 kind 清单：内置视图 + 已注册的插件面板贡献（壳侧命名空间化 kind）。
+/// 可选视图 kind 清单：注册表里启用中的面板视图（登记序：内置在前、插件在后）。
 pub fn available_view_kinds(app: &App) -> Vec<String> {
-    let mut kinds: Vec<String> = app.views.iter().map(|desc| desc.id.to_string()).collect();
-    kinds.extend(
-        crate::plugin_actions::contributions_of(app, ContributionSlot::Panel)
-            .map(|c| crate::plugin_actions::view_kind(&c.plugin_id, &c.id)),
-    );
-    kinds
+    app.registry.views().map(|entry| entry.id.clone()).collect()
 }
 
 /// 估宽的单字符口径（估宽与表格行内换行估算共用：两处漂移即行高/命中失配）。
@@ -274,33 +255,6 @@ pub(crate) enum PopupState {
     HistoryBrowser { kind: atelyx_core::history::HistoryKind, file: String },
     /// 只读正文 / 对话消息的选区右键菜单（复制）。
     SelectionMenu { target: crate::markdown_select::SelectionTarget },
-    /// 插件菜单 / 下拉节点的弹层（条目由插件界面树带来，点击回发节点事件）。
-    PluginList { entries: Vec<atelyx_view::render::PopupEntry<Message>> },
-}
-
-/// 菜单条目左右内衬（与 `ui::menu` 的行内边距同口径）。
-const PLUGIN_LIST_PAD_X: f32 = 24.0;
-/// 「当前」角标两侧的行内间距合计（行 spacing 6 × 2）。
-const PLUGIN_LIST_NOTE_GAP: f32 = 12.0;
-
-/// 插件列表弹层宽度：按最长条目（含分组头）估宽（内衬 + 可选「当前」角标 + 滚动条占位），
-/// 夹在 176..360。
-fn plugin_list_width(entries: &[atelyx_view::render::PopupEntry<Message>]) -> f32 {
-    let note_w = estimate_text_width("当前", pal::fs_micro());
-    let mut width = entries
-        .iter()
-        .map(|entry| {
-            let note = if entry.current { note_w + PLUGIN_LIST_NOTE_GAP } else { 0.0 };
-            estimate_text_width(&entry.label, pal::fs_caption())
-                + note
-                + PLUGIN_LIST_PAD_X
-                + scroll::SCROLLBAR_W
-        })
-        .fold(176.0, f32::max);
-    for group in entries.iter().filter_map(|entry| entry.group.as_deref()) {
-        width = width.max(estimate_text_width(group, pal::fs_micro()) + PLUGIN_LIST_PAD_X);
-    }
-    width.min(360.0)
 }
 
 impl PopupState {
@@ -362,7 +316,6 @@ impl PopupState {
             // 居中模态不走锚点几何，估高由各自 overlay 钳制
             PopupState::LicenseInfo => crate::settings_view::LICENSE_CARD_WIDTH,
             PopupState::HistoryBrowser { .. } => crate::history_browser::CARD_WIDTH,
-            PopupState::PluginList { entries } => plugin_list_width(entries),
         }
     }
 }
@@ -451,7 +404,7 @@ pub fn main_view<'a>(app: &'a App, window: iced::window::Id) -> Element<'a, Mess
 }
 
 /// 接管视图（按窗生效）：page = 宿主标题栏与状态栏保留、内容区归插件；full = 整窗归插件呈现
-/// （含标题栏区域：拖动由插件 dragRegion 热区发起、缩放沿用边缘命中带、关闭走宿主关窗拦截链）。
+/// （含标题栏区域：缩放沿用边缘命中带、关闭走宿主关窗拦截链）。
 /// 右上角退出入口常驻（Esc 为后备）。接管期间布局真源不动，退出即恢复原视图。
 pub fn takeover_view<'a>(
     app: &'a App,
@@ -772,7 +725,7 @@ fn with_overlays<'a>(
                 let local = Point::new(drag.current.x - wpos.x, drag.current.y - wpos.y);
                 let ghost = container(
                     row![
-                        icon_resolved(&view_icon(app, &drag.view), 13.0, pal::TEXT_PRIMARY, 1.5),
+                        icon_stroke(&view_icon(app, &drag.view), 13.0, pal::TEXT_PRIMARY, 1.5),
                         text(drag.label.clone()).size(pal::fs_caption()).color(pal::TEXT_PRIMARY),
                     ]
                     .spacing(6),
@@ -823,7 +776,7 @@ fn with_overlays<'a>(
                 let reject = reject.is_some();
                 let mut card = column![
                     row![
-                        icon_resolved(&icon_name, 13.0, pal::TEXT_PRIMARY, 1.5),
+                        icon_stroke(&icon_name, 13.0, pal::TEXT_PRIMARY, 1.5),
                         text(drag.label.clone()).size(pal::fs_caption()).color(pal::TEXT_PRIMARY),
                     ]
                     .spacing(6),
@@ -1592,7 +1545,7 @@ fn panel_tab<'a>(
 
     let text_color = if active { pal::TEXT_PRIMARY } else { pal::TEXT_SECONDARY };
     let mut label_row = row![].spacing(4);
-    label_row = label_row.push(icon_resolved(&view_icon(app, &t.view), 13.0, text_color, 1.5));
+    label_row = label_row.push(icon_stroke(&view_icon(app, &t.view), 13.0, text_color, 1.5));
     label_row = label_row.push(
         text(ellipsize(&label, UiMetrics::TAB_TEXT_MAX_W, 12.0))
             .size(pal::fs_caption())
@@ -1719,14 +1672,28 @@ fn note_status_pill(app: &App) -> Option<Element<'static, Message>> {
     }
 }
 
-/// 按视图 kind 分派内容（内置视图经装配根取内容；插件面板按贡献 kind 走 ViewNode 解释渲染）。
+/// 按视图 kind 分派内容（停用的内置视图先给占位；内置视图按 id 查渲染表；插件面板按整面帧渲染）。
 fn view_content<'a>(app: &'a App, window: iced::window::Id, kind: &str) -> Element<'a, Message> {
+    let disabled_builtin = app
+        .registry
+        .get(kind)
+        .is_some_and(|entry| entry.source.is_builtin() && !entry.enabled);
+    if disabled_builtin {
+        return disabled_view(app, kind);
+    }
     if crate::plugin_actions::parse_view_kind(kind).is_some() {
         return crate::plugin_view::panel_view(app, window, kind);
     }
-    app.packs
-        .view(kind, app, window)
-        .unwrap_or_else(|| placeholder_view(app, kind))
+    crate::pack::render(kind, app, window).unwrap_or_else(|| placeholder_view(app, kind))
+}
+
+/// 停用视图的占位：标签保留（不关标签、不动布局），内容区说明去哪儿重新启用。
+fn disabled_view(app: &App, kind: &str) -> Element<'static, Message> {
+    controls::view_placeholder(
+        &view_icon(app, kind),
+        view_label(app, kind),
+        "此视图已停用：在 设置 → 插件 → 内置条目 里重新启用后恢复".to_string(),
+    )
 }
 
 /// 协作房间视图：连接状态头部 + 空间成员名册 + 在线设备（打开文件可点开）+ 设置入口。
@@ -2317,7 +2284,7 @@ pub fn detached_view<'a>(
                 .is_some_and(|d| crate::plugin_actions::doc_view_kind(&d.plugin_id, &d.contribution_id) == t.view);
         let text_color = if active { pal::TEXT_PRIMARY } else { pal::TEXT_SECONDARY };
         let mut label_row = row![].spacing(4);
-        label_row = label_row.push(icon_resolved(&view_icon(app, &t.view), 13.0, text_color, 1.5));
+        label_row = label_row.push(icon_stroke(&view_icon(app, &t.view), 13.0, text_color, 1.5));
         label_row = label_row.push(
             text(ellipsize(&label, UiMetrics::TAB_TEXT_MAX_W, 12.0))
                 .size(pal::fs_caption())
@@ -3031,7 +2998,7 @@ fn tree_row_element(
             pal::TEXT_MUTED,
         ));
     }
-    content = content.push(icon_resolved(&icon_name, 14.0, icon_color, 1.5));
+    content = content.push(icon_stroke(&icon_name, 14.0, icon_color, 1.5));
     content = content.push(text(r.name.clone()).size(pal::fs_caption()).color(name_color));
     if !r.is_dir {
         content = content.push(space().width(Length::Fill));
@@ -3207,15 +3174,15 @@ fn file_inline_input(app: &App, r: &TreeRow) -> Option<Element<'static, Message>
 
 fn file_icon(app: &App, name: &str) -> Cow<'static, str> {
     // 插件领域文档类型按注册图标呈现（扩展名大小写不敏感），其余走内置映射
-    // （投影缓存随贡献刷新，避免文件树逐行渲染时重查运行时）
+    // （注册表随贡献刷新，避免文件树逐行渲染时重查运行时）
     if let Some(ext) = name.rsplit('.').next() {
         if let Some(info) = app
-            .plugin_doc_types
+            .registry
+            .doc_types()
             .iter()
             .find(|i| i.registration.extension.eq_ignore_ascii_case(ext))
         {
             return crate::plugin_actions::plugin_icon_key(
-                &info.plugin_id,
                 Some(&info.registration.icon),
                 "paperclip",
             );
@@ -3979,9 +3946,6 @@ pub(crate) fn format_ts(ms: i64) -> String {
 }
 
 // ===== 弹层内容 =====
-
-/// 插件列表弹层最多直接展示的行数（超出收进滚动区）。
-const PLUGIN_LIST_MAX_ROWS: usize = 12;
 
 /// 弹层内容构造：按形态产出（元素, 估算高度）。
 fn popup_element<'a>(
@@ -5080,10 +5044,11 @@ fn popup_element<'a>(
                     MenuEntry::action("表格", grid)
                 },
             )];
-            let views: Vec<(String, String)> =
-                crate::plugin_actions::contributions_of(app, ContributionSlot::TableView)
-                    .map(|c| (c.label.clone(), crate::plugin_actions::view_kind(&c.plugin_id, &c.id)))
-                    .collect();
+            let views: Vec<(String, String)> = app
+                .registry
+                .views_in(ContributionSlot::TableView)
+                .map(|entry| (entry.label.clone(), entry.id.clone()))
+                .collect();
             if !views.is_empty() {
                 entries.push((0, MenuEntry::Divider));
                 for (label, kind) in views {
@@ -5373,58 +5338,6 @@ fn popup_element<'a>(
         }
         // 居中模态不经锚点渲染（with_overlays 分流到各自 overlay）
         PopupState::HistoryBrowser { .. } | PopupState::LicenseInfo => Vec::new(),
-        // 插件菜单 / 下拉节点：条目由插件界面树带来（选中项带「当前」角标）；
-        // 超出行数上限或视口预算时收进滚动区（弹层不越出窗口）
-        PopupState::PluginList { entries } => {
-            let viewport = viewport_of(app, window);
-            let chrome = pal::POPUP_PAD_Y * 2.0
-                + popup::SHADOW_PAD_TOP
-                + popup::SHADOW_PAD_BOTTOM
-                + pal::VIEWPORT_GAP * 2.0;
-            let budget = (viewport.height - chrome).max(pal::MENU_ITEM_H);
-            let card_w = plugin_list_width(entries)
-                .min((viewport.width - pal::VIEWPORT_GAP * 2.0).max(0.0));
-            // 分组头只在组名变化处插入：连续同组的条目共用一头，None 组不插
-            let group_headers = entries
-                .windows(2)
-                .filter(|pair| pair[1].group.is_some() && pair[1].group != pair[0].group)
-                .count()
-                + usize::from(entries.first().is_some_and(|entry| entry.group.is_some()));
-            let natural_h = entries.len() as f32 * pal::MENU_ITEM_H
-                + group_headers as f32 * pal::MENU_GROUP_H;
-            let visible_h = natural_h
-                .min(PLUGIN_LIST_MAX_ROWS as f32 * pal::MENU_ITEM_H)
-                .min(budget);
-            let scrolls = natural_h > visible_h;
-            let note_w = estimate_text_width("当前", pal::fs_micro());
-            let mut rows: Vec<MenuEntry<Message>> = Vec::with_capacity(entries.len() + group_headers);
-            let mut last_group: Option<&str> = None;
-            for entry in entries {
-                if let Some(group) = entry.group.as_deref() {
-                    if last_group != Some(group) {
-                        rows.push(MenuEntry::Group(group.to_string()));
-                    }
-                }
-                last_group = entry.group.as_deref();
-                let reserved = PLUGIN_LIST_PAD_X
-                    + if entry.current { PLUGIN_LIST_NOTE_GAP + note_w } else { 0.0 }
-                    + if scrolls { scroll::SCROLLBAR_W } else { 0.0 };
-                rows.push(MenuEntry::Action {
-                    label: ellipsize(&entry.label, card_w - reserved, pal::fs_caption()),
-                    icon: None,
-                    danger: entry.danger,
-                    disabled: entry.disabled,
-                    on_press: (!entry.disabled).then(|| entry.on_press.clone()),
-                    note: entry.current.then_some("当前"),
-                    hint: None,
-                });
-            }
-            if scrolls {
-                vec![(0, MenuEntry::Scroll { entries: rows, height: visible_h })]
-            } else {
-                rows.into_iter().map(|entry| (0, entry)).collect()
-            }
-        }
     };
     crate::ui::menu::pane_view(entries, pane, window)
 }
@@ -6789,7 +6702,7 @@ fn file_menu_entries(
             Message::DraftStart(rel.to_string(), DraftKind::Note))));
         entries.push((0, MenuEntry::action_icon("新建表格", "table", Message::DraftStart(rel.to_string(), crate::DraftKind::Table))));
         // 插件领域文档类型的新建入口（扩展名 / 标签 / 图标取自插件注册）
-        for info in &app.plugin_doc_types {
+        for info in app.registry.doc_types() {
             let extension = info.registration.extension.clone();
             let label = format!("新建{}", info.registration.label);
             entries.push((
@@ -6797,7 +6710,6 @@ fn file_menu_entries(
                 MenuEntry::action_icon(
                     &label,
                     crate::plugin_actions::plugin_icon_key(
-                        &info.plugin_id,
                         Some(&info.registration.icon),
                         "file-text",
                     ),

@@ -14,7 +14,8 @@ use crate::connection::PendingMap;
 use crate::protocol::envelope::{Envelope, RpcError};
 use crate::protocol::event::{SubscribeParams, SubscribeResult};
 use crate::protocol::method::{self, *};
-use crate::protocol::view::{PaddingSpec, TextFamily, TextWeight};
+use crate::protocol::method::PaddingSpec;
+use crate::protocol::service;
 
 /// 常规能力调用的默认等待上限（读文件 / 起进程 / 通知等宿主侧可预期的操作）。
 pub const CALL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -29,7 +30,6 @@ struct Inner {
     out_tx: mpsc::Sender<Envelope>,
     pending: PendingMap,
     next_id: AtomicU64,
-    ui: crate::ui::Registry,
 }
 
 impl Context {
@@ -39,22 +39,8 @@ impl Context {
                 out_tx,
                 pending: Arc::new(Mutex::new(std::collections::HashMap::new())),
                 next_id: AtomicU64::new(1),
-                ui: crate::ui::Registry::default(),
             }),
         }
-    }
-
-    /// 界面树托管句柄：挂「状态 → 树」构建器、按面通知提交（见 [`crate::ui::Ui`]）。
-    pub fn ui(&self) -> crate::ui::Ui<'_> {
-        crate::ui::Ui::new(self)
-    }
-
-    pub(crate) fn ui_registry(&self) -> &crate::ui::Registry {
-        &self.inner.ui
-    }
-
-    pub(crate) fn ui_slot(&self, surface_id: &str) -> Option<Arc<crate::ui::Slot>> {
-        self.inner.ui.lock().unwrap().get(surface_id).cloned()
     }
 
     /// 读任务收场在途调用时取走整表（drain）。
@@ -130,68 +116,6 @@ impl Context {
         serde_json::from_value(raw).map_err(|e| RpcError::failed(format!("{method} 应答不可解析：{e}")))
     }
 
-    // ---------- view / event ----------
-
-    /// 界面树的底层提交口（仅供 [`crate::ui`] 的托管循环使用）：插件侧经 `Ui::mount` / `Ui::notify` 提交。
-    pub(crate) async fn submit_view(
-        &self,
-        surface_id: &str,
-        tree: crate::protocol::view::ViewNode,
-    ) -> Result<SubmitResult, RpcError> {
-        tree.validate().map_err(RpcError::failed)?;
-        self.call_typed(method::view::SUBMIT, &SubmitParams { surface_id: surface_id.into(), tree })
-            .await
-    }
-
-    /// 提交一份画布指令清单（整表重建，空清单 = 清空画布）。目标节点须在当前界面树里
-    /// 且为 canvas 节点，否则宿主可读拒绝；指令合法性由宿主校验（结果在错误里带指令下标）。
-    pub async fn submit_canvas(
-        &self,
-        surface_id: &str,
-        node_id: &str,
-        commands: Vec<crate::protocol::canvas::DrawCommand>,
-    ) -> Result<SubmitResult, RpcError> {
-        let params = crate::protocol::method::CanvasSubmitParams {
-            surface_id: surface_id.into(),
-            node_id: node_id.into(),
-            commands,
-        };
-        self.call_typed(method::canvas::SUBMIT, &params).await
-    }
-
-    /// 按 id 增量维护画布清单：只发变动的条目，`upsert` 命中已有 id 即原位替换、未命中追加到末尾，
-    /// `remove` 删除。须先经 [`Context::submit_canvas`] 建立清单（整表提交会丢掉 id 槽）。
-    pub async fn patch_canvas(
-        &self,
-        surface_id: &str,
-        node_id: &str,
-        upsert: Vec<crate::protocol::canvas::CanvasUpsert>,
-        remove: Vec<String>,
-    ) -> Result<SubmitResult, RpcError> {
-        let params = crate::protocol::method::CanvasPatchParams {
-            surface_id: surface_id.into(),
-            node_id: node_id.into(),
-            upsert,
-            remove,
-        };
-        self.call_typed(method::canvas::PATCH, &params).await
-    }
-
-    /// 量算一段文字的占位尺寸：`size` 为绝对字号（与画布 `text` 指令同口径），`max_width`
-    /// 给定即按该宽度换行。画布排版按真实字宽摆放，不要按字符数估算。
-    /// 纯计算调用，不改清单也不产生帧；同一段文字反复量算时请自行缓存。
-    pub async fn measure_text(
-        &self,
-        text: &str,
-        size: f32,
-        weight: Option<TextWeight>,
-        family: Option<TextFamily>,
-        max_width: Option<f32>,
-    ) -> Result<MeasureTextResult, RpcError> {
-        let params = MeasureTextParams { text: text.into(), size, weight, family, max_width };
-        self.call_typed(method::canvas::MEASURE_TEXT, &params).await
-    }
-
     /// 一次量算多段文字（排一屏文本的往返落在单批里，上限见协议 `MAX_MEASURE_ITEMS`）。
     pub async fn measure_batch(
         &self,
@@ -210,12 +134,10 @@ impl Context {
     /// 内容不变时结果也不变，插件应按内容缓存，不必逐帧往返。
     pub async fn markdown(&self, content: &str) -> Result<MarkdownResult, RpcError> {
         let params = MarkdownParams { content: content.into() };
-        self.call_typed(method::query::MARKDOWN, &params).await
+        self.call_typed(method::markdown::PARSE, &params).await
     }
 
     /// 提交整面帧：整发整换该面的绘制指令、命中区与输入声明（空指令 = 清空绘制）。
-    /// 帧与该面的界面树互斥：提交帧后宿主只渲染帧（树存档保留但不渲染，树内画布节拍停掉），
-    /// 再提交一次界面树即交还控件通道并撤掉帧。
     pub async fn submit_frame(
         &self,
         surface_id: &str,
@@ -249,35 +171,6 @@ impl Context {
         self.call_unit(method::view::REGISTER, &params).await
     }
 
-    /// 定义一枚自备图标形状（24x24 网格描边路径），此后按名字在贡献注册与图标钮里引用。
-    /// 名字须为字母 / 数字 / `_` / `-`；同名重复定义即原地更新；随插件会话收尾清除。
-    pub async fn define_icon(&self, name: &str, path: &str) -> Result<(), RpcError> {
-        let params = DefineIconParams { name: name.into(), path: path.into() };
-        self.call_unit(method::view::DEFINE_ICON, &params).await
-    }
-
-    /// 把一个可滚动容器（`list` / `scroll`）滚到一端。目标节点须在当前树里且为可滚动容器。
-    pub async fn scroll_to(&self, surface_id: &str, node_id: &str, edge: ScrollEdge) -> Result<(), RpcError> {
-        let params = ScrollToParams {
-            surface_id: surface_id.into(),
-            node_id: node_id.into(),
-            edge: Some(edge),
-            offset: None,
-        };
-        self.call_unit(method::view::SCROLL_TO, &params).await
-    }
-
-    /// 按比例滚动：`offset` 0 = 起点、1 = 终点（越界与内容不足一屏时由宿主钳制）。
-    pub async fn scroll_to_offset(&self, surface_id: &str, node_id: &str, offset: f32) -> Result<(), RpcError> {
-        let params = ScrollToParams {
-            surface_id: surface_id.into(),
-            node_id: node_id.into(),
-            edge: None,
-            offset: Some(offset),
-        };
-        self.call_unit(method::view::SCROLL_TO, &params).await
-    }
-
     /// 声明本插件的默认布局：宿主在首次启用时摆进当前场景，之后改名 / 删除都不再补回。
     /// 重名由宿主追加序号；规格结构非法由宿主可读拒绝。
     pub async fn declare_default_layout(
@@ -294,6 +187,13 @@ impl Context {
         self.call_unit(method::view::UNREGISTER, &UnregisterParams { id: id.into() }).await
     }
 
+    /// 拖动承载某个面的窗口：自绘标题栏按下时调用，宿主接管拖动手势（插件不必自己算窗口坐标）。
+    /// 面先按接管面 / 插件窗口解析，解析不到即拖动当前聚焦窗口。
+    pub async fn begin_window_drag(&self, surface_id: &str) -> Result<(), RpcError> {
+        let params = crate::protocol::method::WindowDragParams { surface_id: surface_id.into() };
+        self.call_unit(method::window::BEGIN_DRAG, &params).await
+    }
+
     /// 请求把本插件的一个贡献面接管到当前聚焦窗口（整页 / 全接管）。`surface_id` 须为已注册的
     /// 贡献 id；退出接管入口由宿主常驻提供，接管期间布局真源不动，退出即恢复原布局。
     pub async fn takeover(&self, scope: TakeoverScope, surface_id: &str) -> Result<(), RpcError> {
@@ -304,8 +204,8 @@ impl Context {
         .await
     }
 
-    /// 打开一个独立窗口承载自己的界面树：`id` 插件内唯一且不得含 `:`，同时是该窗口面的
-    /// surfaceId（树经 `ctx.ui().mount(id, build)` 登记后由 `notify` 提交）。重复 id 或宿主不可开窗由宿主可读拒绝。
+    /// 打开一个独立窗口承载自己的整面帧：`id` 插件内唯一且不得含 `:`，同时是该窗口面的
+    /// surfaceId（插件随后用 `frame.submit` 提交该面）。重复 id 或宿主不可开窗由宿主可读拒绝。
     pub async fn window_open(&self, params: WindowOpenParams) -> Result<(), RpcError> {
         self.call_unit(method::window::OPEN, &params).await
     }
@@ -444,6 +344,72 @@ impl Context {
     pub async fn subscribe(&self, name: &str) -> Result<bool, RpcError> {
         let result: SubscribeResult = self.call_typed(crate::protocol::event::SUBSCRIBE, &SubscribeParams { name: name.into() }).await?;
         Ok(result.subscribed)
+    }
+
+    // ---------- 能力总线（服务目录 / 跨插件提供者） ----------
+
+    /// 枚举在册服务：服务名、活动提供者的版本与方法名、是否可替换、其余候选。
+    pub async fn service_list(&self) -> Result<service::ListResult, RpcError> {
+        self.call_null(service::method::LIST).await
+    }
+
+    /// 按「服务 + 方法」调用：`params` 就是目标方法自己的入参，应答就是该方法的结果。
+    /// 与直接调用 `服务.方法` 等价——活动提供者是内置实现时两者落到同一实现。
+    pub async fn service_call(
+        &self,
+        service_name: &str,
+        method_name: &str,
+        params: Value,
+    ) -> Result<Value, RpcError> {
+        let call = service::CallParams {
+            service: service_name.into(),
+            method: method_name.into(),
+            params,
+        };
+        let value = serde_json::to_value(&call)
+            .map_err(|e| RpcError::failed(format!("service.call params 序列化失败：{e}")))?;
+        self.call_raw(service::method::CALL, value).await
+    }
+
+    /// 声明本插件提供某个服务的若干方法（方法名不含服务前缀）——收到
+    /// [`crate::PluginHandler::on_service_call`] 后按方法名执行。
+    ///
+    /// 登记不等于生效：同一服务同时只有一个活动提供者，已有内置实现的服务只成为候选，
+    /// 是否顶替由用户在设置页决定；目录里没有的服务首个提供者即活动提供者。
+    pub async fn register_service(&self, service_name: &str, methods: &[&str]) -> Result<(), RpcError> {
+        let params = service::RegisterParams {
+            service: service_name.into(),
+            version: None,
+            methods: methods.iter().map(|name| (*name).to_string()).collect(),
+        };
+        self.call_unit(service::method::REGISTER, &params).await
+    }
+
+    /// 撤销本插件对某个服务的登记（活动提供者撤销即回落内置实现）。
+    pub async fn unregister_service(&self, service_name: &str) -> Result<(), RpcError> {
+        let params = service::UnregisterParams { service: service_name.into() };
+        self.call_unit(service::method::UNREGISTER, &params).await
+    }
+
+    /// 回报一次服务调用的结果：`call_id` 原样带回 [`crate::PluginHandler::on_service_call`] 收到的值，
+    /// `result` 即目标方法的结果。调用已超时 / 提供者已下线或不归本插件时报可读错误。
+    pub async fn service_result(&self, call_id: &str, result: Value) -> Result<(), RpcError> {
+        let params = service::ResultParams {
+            call_id: call_id.into(),
+            result: Some(result),
+            error: None,
+        };
+        self.call_unit(service::method::RESULT, &params).await
+    }
+
+    /// 回报一次服务调用失败：`error` 为可读原因，调用方收到的就是这条原因。
+    pub async fn service_error(&self, call_id: &str, error: &str) -> Result<(), RpcError> {
+        let params = service::ResultParams {
+            call_id: call_id.into(),
+            result: None,
+            error: Some(error.into()),
+        };
+        self.call_unit(service::method::RESULT, &params).await
     }
 
     // ---------- fs ----------

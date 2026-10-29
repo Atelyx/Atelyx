@@ -32,12 +32,13 @@ mod markdown_select;
 mod markdown_view;
 mod pack;
 mod plugin_actions;
-mod plugin_canvas;
+mod plugin_theme;
 mod plugin_frame;
 mod plugin_paint;
 mod plugin_view;
 mod properties_view;
 mod recent_view;
+mod registry;
 mod repohistory_view;
 mod settings_view;
 mod space_actions;
@@ -347,7 +348,7 @@ pub(crate) fn now_millis() -> i64 {
 /// 命令候选键形态：Ctrl/Cmd + 单字符（撤销/重做/剪贴板类），或命名键（任意修饰，
 /// 覆盖 NoMod 清空类与其余注册表键位）。全局订阅不持 App 状态，是否命中与消费
 /// 由处理器按录制态与作用域焦点自守卫。
-/// 宿主的键盘派生消息：插件节点持有键盘时一律不处理（按键已由界面层上行给插件）。
+/// 宿主的键盘派生消息（整面帧持有键盘时一律不处理）。
 /// 只列**无命令修饰**的键盘来源项——带 Ctrl / Alt / Super 的组合键归宿主（`KeyCommand` / `CopyKey`
 /// 因此不在此列），鼠标、窗口与定时消息也不受插件焦点影响。
 fn is_host_keyboard_message(message: &Message) -> bool {
@@ -639,47 +640,6 @@ enum Message {
     PluginEvent(Box<PluginEvent>),
     /// 托盘选择（插件条目回发 `host:tray.click`，宿主条目由壳处理）。
     Tray(tray::TrayEvent),
-    /// 插件界面节点事件（点击 / 变更 / 提交）。
-    PluginView {
-        plugin_id: String,
-        surface_id: String,
-        node_id: String,
-        event: atelyx_core::plugin_runtime::ViewEvent,
-    },
-    /// 输入框本地编辑（非逐键上报档位）：只写草稿，`commit` 为真时把它上报给插件。
-    PluginDraft {
-        plugin_id: String,
-        surface_id: String,
-        node_id: String,
-        /// `None` = 取草稿里的本机当前值（提交时用，控件提交信号只带固定消息）。
-        text: Option<String>,
-        commit: bool,
-    },
-    /// 数字输入步进：按节点声明的 step 增减当前值，立即按 change 上报。
-    PluginStep { plugin_id: String, surface_id: String, node_id: String, up: bool },
-    /// 防抖到期：把该节点的草稿上报给插件（`seq` 过期即丢弃）。
-    PluginDraftFlush { plugin_id: String, surface_id: String, node_id: String, seq: u64 },
-    /// 多行编辑器静默到期：把整段内容上报给插件（`seq` 过期即丢弃）。
-    PluginEditorFlush { plugin_id: String, surface_id: String, node_id: String, seq: u64 },
-    /// 多行编辑器提交键（Enter）：按上报档位回发 change，并按声明回发 submit。
-    PluginEditorSubmit { plugin_id: String, surface_id: String, node_id: String },
-    /// 插件正文链接点击（回发 linkClick 后按宿主默认行为打开）。
-    PluginLink {
-        plugin_id: String,
-        surface_id: String,
-        node_id: String,
-        href: String,
-        form: LinkForm,
-    },
-    /// 插件菜单 / 下拉节点被按下：用光标锚点打开弹层。
-    PluginList { window: window::Id, entries: Vec<atelyx_view::render::PopupEntry<Message>> },
-    /// 插件多行输入的编辑器动作。
-    PluginTextEdit {
-        plugin_id: String,
-        surface_id: String,
-        node_id: String,
-        action: text_editor::Action,
-    },
     /// 插件请求接管聚焦窗口（壳应用后经运行时回填插件）。
     PluginTakeoverAsk {
         request_id: u64,
@@ -703,40 +663,19 @@ enum Message {
     },
     /// 插件请求重新显示一个因失焦被隐藏的窗口。
     PluginWindowShow { request_id: u64, plugin_id: String, window_key: String },
-    /// 插件请求把某可滚动容器滚到一端。
-    PluginScrollTo {
-        request_id: u64,
-        plugin_id: String,
-        params: atelyx_core::plugin_runtime::ScrollToParams,
-    },
-    /// 插件节点悬停进出（`hoverOnly` 图标钮的显隐开关）。
-    PluginHover {
-        plugin_id: String,
-        surface_id: String,
-        node_id: String,
-        entered: bool,
-    },
-    /// 插件节点请求 / 释放键盘焦点（同一时刻全局至多一个节点收键盘）。
-    PluginFocus {
-        window: window::Id,
-        plugin_id: String,
-        surface_id: String,
-        node_id: String,
-        focused: bool,
-    },
-    /// 整面帧的焦点请求 / 释放（与节点焦点互斥）。
+    /// 插件请求拖动承载某面的窗口（自绘标题栏）。
+    PluginWindowBeginDrag { request_id: u64, plugin_id: String, surface_id: String },
+    /// 整面帧的焦点请求 / 释放。
     PluginFrameFocus {
         window: window::Id,
         plugin_id: String,
         surface_id: String,
         focused: bool,
     },
-    /// 帧节拍：给声明了帧率的画布与整面帧各发一条帧通知（只在有动画面时订阅）。
+    /// 帧节拍：给声明了帧率的整面帧发一条帧通知（只在有动画面时订阅）。
     PluginFrameTick,
     /// 一拍帧通知已写完（复位在飞标记）。
     PluginFramePumped,
-    /// 全接管标题栏的拖动热区被按下（宿主代执行整窗拖动）。
-    PluginWindowDrag(window::Id),
     /// 退出接管（常驻退出入口 / Esc）。
     PluginExitTakeover(window::Id),
     /// 窗口获得焦点（接管请求作用域 = 最近聚焦窗口）。
@@ -1298,10 +1237,9 @@ impl ImageRetry {
 pub struct App {
     /// 布局状态真源（core 模型；磁盘格式由 schema 版本标识）。
     pub ui: AppUiState,
-    /// 视图注册表（元数据索引；登记序即菜单与选择器的呈现序，启动装配期一次登记，运行期只读）。
-    pub views: atelyx_pack::ViewRegistry,
-    /// 装配根：宿主认识的全部功能模块（启动后只读，视图内容经此分派）。
-    pub(crate) packs: crate::pack::Packs,
+    /// 唯一注册表（视图 / 服务 / 文档类型；选择器、标签与设置页只读它）。
+    /// 启动装配期与投影刷新时整体重建，运行期只读。
+    pub registry: crate::registry::Registry,
     vault: Arc<vault::VaultState>,
     /// 打开的表格会话（数据 + 保存基线 + 视图态；None = 未打开）。
     pub table: Option<table_view::TableSession>,
@@ -1369,35 +1307,14 @@ pub struct App {
     pub plugin_table_surfaces: HashSet<(String, String)>,
     /// 最近一次广播 `table:changed` 时的表格路径（身份差分用；None = 广播过「无打开表格」）。
     pub table_event_path: Option<String>,
-    /// 已挂面的最新界面树投影（键 = 插件 id + 面 id）。
-    pub plugin_trees: HashMap<(String, String), atelyx_core::plugin_runtime::ViewNode>,
-    /// 单行 / 数字输入的宿主草稿（键 = 插件 id + 面 id + 节点 id）。
-    pub plugin_drafts: HashMap<plugin_actions::InputKey, plugin_actions::InputDraft>,
-    /// 防抖上报的序号：同节点每次编辑递增，过期拍到达即丢弃。
-    pub plugin_draft_seq: HashMap<plugin_actions::InputKey, u64>,
-    /// 多行输入的本机编辑器状态（内容与光标归宿主所有）。
-    pub plugin_editors: HashMap<plugin_actions::InputKey, plugin_actions::EditorState>,
-    /// 贴底跟随已脱钩的滚动节点（用户往回滚后暂停跟随；滚回终点恢复）。
-    pub plugin_follow_released: HashSet<plugin_actions::InputKey>,
-    /// 画布节点的最新绘图指令清单投影（键 = 插件 id + 面 id + 节点 id；随树投影刷新）。
-    pub plugin_canvases:
-        HashMap<plugin_actions::InputKey, std::sync::Arc<atelyx_core::plugin_runtime::CanvasList>>,
-    /// 各面的最新整面帧（键 = 插件 id + 面 id；有帧时帧胜出、优先于树渲染）。
+    /// 各面的最新整面帧（键 = 插件 id + 面 id）。
     pub plugin_frames:
         HashMap<(String, String), std::sync::Arc<atelyx_core::plugin_runtime::SurfaceFrame>>,
     /// 各面帧的提交序号（缓存失效键）：帧对象地址会被分配器复用，不能拿来判定「换没换帧」。
     pub plugin_frame_stamps: HashMap<(String, String), u64>,
     /// 帧提交序号的发号器（每换一帧 +1）。
     pub(crate) plugin_frame_stamp_seq: u64,
-    /// markdown 节点的解析投影（键 = 插件 id + 面 id + 节点 id；源码不变不重解析）。
-    pub plugin_markdown: HashMap<plugin_actions::InputKey, plugin_actions::MarkdownNode>,
-    /// 悬停中的插件节点（键 = 插件 id + 面 id + 节点 id；`hoverOnly` 图标钮据此显隐）。
-    pub plugin_hovered: HashSet<plugin_actions::InputKey>,
-    /// 已向插件日志报告过未注册图标名的（插件 id, 名字）：同一条只报一次，避免逐键提交刷爆日志。
-    pub plugin_icon_warnings: HashSet<(String, String)>,
-    /// 插件面的键盘焦点（全局单槽：OS 只给聚焦窗口发键盘，窗口失焦即清除）。
-    pub plugin_focus: Option<plugin_actions::PluginFocus>,
-    /// 整面帧的键盘焦点（与 `plugin_focus` 互斥：同一时刻全局至多一处收键盘）。
+    /// 整面帧的键盘焦点（全局单槽：OS 只给聚焦窗口发键盘，窗口失焦即清除）。
     pub plugin_frame_focus: Option<plugin_actions::FrameFocus>,
     /// 帧拍是否还在飞（同一时刻只推一拍，慢插件不积压帧任务）。
     pub plugin_frame_pumping: bool,
@@ -1407,8 +1324,6 @@ pub struct App {
     pub plugin_windows: HashMap<window::Id, plugin_actions::PluginWindowActive>,
     /// 打开中的插件文档实例（单实例；切换文件即换实例）。
     pub doc_open: Option<plugin_actions::DocOpenInstance>,
-    /// 全部已安装插件注册的领域文档类型投影（随贡献刷新；文件树图标与新建菜单读它）。
-    pub plugin_doc_types: Vec<atelyx_core::plugin_runtime::DocTypeInfo>,
     /// 最近聚焦的窗口（插件接管请求的作用域）。
     pub focused_window: Option<window::Id>,
     /// 市场索引缓存落盘路径（应用数据目录不可用时为 None：不缓存，市场仅内存展示）。
@@ -1775,16 +1690,9 @@ impl App {
                 manual: false,
             })));
         }
-        let packs = crate::pack::Packs::new();
-        let mut views = atelyx_pack::ViewRegistry::default();
-        for desc in packs.views() {
-            // 重复或空 id 是装配期错误（会在菜单里丢项），由 `pack` 的单测锁住
-            let _ = views.register(*desc);
-        }
         let mut app = Self {
                 ui: load_ui_state(),
-                views,
-                packs,
+                registry: crate::registry::Registry::default(),
                 vault: Arc::new(vault::VaultState::default()),
                 theme: ui::palette::app_theme(),
                 notifications: Vec::new(),
@@ -1812,25 +1720,14 @@ impl App {
                 plugin_settings_surfaces: HashSet::new(),
                 plugin_table_surfaces: HashSet::new(),
                 table_event_path: None,
-                plugin_trees: HashMap::new(),
-                plugin_drafts: HashMap::new(),
-                plugin_draft_seq: HashMap::new(),
-                plugin_editors: HashMap::new(),
-                plugin_follow_released: HashSet::new(),
-                plugin_canvases: HashMap::new(),
                 plugin_frames: HashMap::new(),
                 plugin_frame_stamps: HashMap::new(),
                 plugin_frame_stamp_seq: 0,
-                plugin_markdown: HashMap::new(),
-                plugin_hovered: HashSet::new(),
-                plugin_icon_warnings: HashSet::new(),
-                plugin_focus: None,
                 plugin_frame_focus: None,
                 plugin_frame_pumping: false,
                 plugin_takeovers: HashMap::new(),
                 plugin_windows: HashMap::new(),
                 doc_open: None,
-                plugin_doc_types: Vec::new(),
                 focused_window: None,
                 market_cache_path,
                 ai_sub_tab: "providers".into(),
@@ -1983,6 +1880,7 @@ impl App {
         app.plugins.scan();
         app.plugins.start_enabled();
         plugin_actions::sync_surfaces(&mut app);
+        plugin_actions::rebuild_registry(&mut app);
         boot = boot.chain(plugin_actions::refresh_projection(&mut app));
         (app, boot)
     }
@@ -2092,11 +1990,7 @@ impl App {
     }
 
     fn handle(&mut self, message: Message) -> Task<Message> {
-        // 键盘焦点在插件节点上时宿主的键盘派生消息一律不处理：按键已由界面层上行给插件
-        if plugin_actions::plugin_takes_keyboard(self) && is_host_keyboard_message(&message) {
-            return Task::none();
-        }
-        // 整面帧声明 keys 时连命令组合也归它：宿主的快捷键动作同样让位
+        // 整面帧声明 keys 时连命令组合也归它：宿主的键盘派生消息与快捷键动作同样让位
         if plugin_actions::frame_takes_keyboard(self) && is_frame_keyboard_message(&message) {
             return Task::none();
         }
@@ -3823,45 +3717,14 @@ impl App {
                 if let PluginEvent::DefaultLayoutDeclared { id, .. } = event.as_ref() {
                     task = task.chain(plugin_actions::apply_declared_default_layout(self, id));
                 }
+                let frames_only = matches!(event.as_ref(), PluginEvent::ViewSubmitted { .. });
                 settings_view::plugins::on_event(self, *event);
-                // 运行时事件（界面提交 / 贡献变化 / 状态变化）后重投影：树与贡献都取最新快照
-                task.chain(plugin_actions::refresh_projection(self))
-            }
-            Message::PluginView { plugin_id, surface_id, node_id, event } => {
-                plugin_actions::on_view_event(self, plugin_id, surface_id, node_id, event)
-            }
-            Message::PluginDraft { plugin_id, surface_id, node_id, text, commit } => {
-                plugin_actions::on_draft(self, plugin_id, surface_id, node_id, text, commit)
-            }
-            Message::PluginStep { plugin_id, surface_id, node_id, up } => {
-                plugin_actions::on_step(self, plugin_id, surface_id, node_id, up)
-            }
-            Message::PluginDraftFlush { plugin_id, surface_id, node_id, seq } => {
-                plugin_actions::on_draft_flush(self, plugin_id, surface_id, node_id, seq)
-            }
-            Message::PluginEditorFlush { plugin_id, surface_id, node_id, seq } => {
-                plugin_actions::on_editor_flush(self, plugin_id, surface_id, node_id, seq)
-            }
-            Message::PluginEditorSubmit { plugin_id, surface_id, node_id } => {
-                plugin_actions::on_editor_submit(self, plugin_id, surface_id, node_id)
-            }
-            Message::PluginLink { plugin_id, surface_id, node_id, href, form } => {
-                plugin_actions::on_link_click(self, plugin_id, surface_id, node_id, href, form)
-            }
-            Message::PluginList { window, entries } => {
-                let point = self.cursor_for(window);
-                Task::done(Message::PopupOpen(
-                    window,
-                    PopupOpen {
-                        point: Point::new(point.x, point.y + 16.0),
-                        flip_y: Some(point.y - 12.0),
-                        state: PopupState::PluginList { entries },
-                        min_width: 0.0,
-                    },
-                ))
-            }
-            Message::PluginTextEdit { plugin_id, surface_id, node_id, action } => {
-                plugin_actions::on_text_edit(self, plugin_id, surface_id, node_id, action)
+                // 帧提交只重投影取帧（帧率驱动下不逐帧重建注册表）；其余事件连注册表一起重建
+                task.chain(if frames_only {
+                    plugin_actions::refresh_frames(self)
+                } else {
+                    plugin_actions::refresh_projection(self)
+                })
             }
             Message::PluginTakeoverAsk { request_id, plugin_id, scope, surface_id } => {
                 plugin_actions::on_takeover_request(self, request_id, plugin_id, scope, surface_id)
@@ -3878,21 +3741,8 @@ impl App {
             Message::PluginWindowShow { request_id, plugin_id, window_key } => {
                 plugin_actions::on_window_show(self, request_id, plugin_id, window_key)
             }
-            Message::PluginScrollTo { request_id, plugin_id, params } => {
-                plugin_actions::on_scroll_to(self, request_id, plugin_id, params)
-            }
-            Message::PluginHover { plugin_id, surface_id, node_id, entered } => {
-                let key = (plugin_id, surface_id, node_id);
-                if entered {
-                    self.plugin_hovered.insert(key);
-                } else {
-                    self.plugin_hovered.remove(&key);
-                }
-                Task::none()
-            }
-            Message::PluginFocus { window, plugin_id, surface_id, node_id, focused } => {
-                plugin_actions::on_plugin_focus(self, window, plugin_id, surface_id, node_id, focused);
-                Task::none()
+            Message::PluginWindowBeginDrag { request_id, plugin_id, surface_id } => {
+                plugin_actions::on_window_begin_drag(self, request_id, plugin_id, surface_id)
             }
             Message::PluginFrameFocus { window, plugin_id, surface_id, focused } => {
                 plugin_actions::on_frame_focus(self, window, plugin_id, surface_id, focused);
@@ -3914,18 +3764,6 @@ impl App {
             Message::PluginFramePumped => {
                 self.plugin_frame_pumping = false;
                 Task::none()
-            }
-            Message::PluginWindowDrag(id) => {
-                // 拖动热区只在接管态或无系统边框的插件窗口生效（普通面板里的 dragRegion 不拖宿主窗口）
-                let undecorated_plugin = self
-                    .plugin_windows
-                    .get(&id)
-                    .is_some_and(|entry| !entry.decorations);
-                if self.plugin_takeovers.contains_key(&id) || undecorated_plugin {
-                    window::drag(id)
-                } else {
-                    Task::none()
-                }
             }
             Message::PluginExitTakeover(id) => plugin_actions::exit_takeover(self, id),
             Message::WindowFocused(id) => {
@@ -5061,7 +4899,8 @@ impl App {
         }
         if let Some(extension) = rel.rsplit('.').next() {
             if self
-                .plugin_doc_types
+                .registry
+                .doc_types()
                 .iter()
                 .any(|info| info.registration.extension.eq_ignore_ascii_case(extension))
             {

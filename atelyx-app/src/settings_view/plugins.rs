@@ -1,6 +1,7 @@
-//! 设置-插件：已安装列表 / 启停 / 卸载 / 本地与 zip 安装 / 详情（版本、权限、失败与被拒原因）
-//! / 市场（官方索引浏览 / 安装 / 更新）。
-//! 列表与状态来自 `atelyx_core::plugin_runtime`（运行时为进程内单例，壳持有 `Arc`）。
+//! 设置-插件：已安装列表 / 启停 / 卸载 / 本地与 zip 安装 / 详情（版本、声明权限、失败原因、
+//! 用到但未声明的调用）/ 市场（官方索引浏览 / 安装 / 更新）。
+//! 列表与状态来自 `atelyx_core::plugin_runtime`（运行时为进程内单例，壳持有 `Arc`）；
+//! 「内置条目」区块（内置视图停用与服务提供者切换）读壳的唯一注册表。
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -14,11 +15,12 @@ use atelyx_core::plugin_runtime::{
     AiAgent, AiAgentsResult, AiModel, AiModelPick, AiModelProvider, AiModelsResult, AuditRecord,
     ClipboardImage, CollabPeer, CollabPeersResult, CollabSendParams, CollabSendQos,
     CollabSendResult, DialogKind, DialogRequest, FileChangeKind, HostRequest, ImageInfoResult,
-    InstallOutcome, MeasureBatchParams, MeasureBatchResult, MeasureTextParams, NotificationLevel,
+    InstallOutcome, MeasureBatchParams, MeasureBatchResult, NotificationLevel,
     Permission, PluginEvent, PluginRuntime, PluginStatus, PluginSummary, SetTrayItemsParams,
-    ThemeResult, MAX_VAULT_BINARY_BYTES,
+    MAX_VAULT_BINARY_BYTES,
 };
 
+use crate::registry::{Entry, EntryKind};
 use crate::settings_view::{card, group_head};
 use crate::ui::controls;
 use crate::ui::icon::icon;
@@ -33,7 +35,7 @@ const MS_PER_SEC: u64 = 1000;
 
 /// 插件详情模态卡宽。
 const DETAIL_CARD_WIDTH: f32 = 460.0;
-/// 被拒调用记录区固定滚动高度（避免长列表把模态撑出窗口）。
+/// 能力调用记录区固定滚动高度（避免长列表把模态撑出窗口）。
 const DETAIL_AUDIT_MAX_H: f32 = 200.0;
 /// 市场安装确认模态卡宽。
 const CONFIRM_CARD_WIDTH: f32 = 380.0;
@@ -123,6 +125,10 @@ pub enum PluginsMsg {
     Refresh,
     /// 启用 / 停用。
     Toggle(String, bool),
+    /// 内置条目：停用 / 启用内置视图（停用后选择器不再列出，已开的标签显示停用占位）。
+    SetBuiltinEnabled(String, bool),
+    /// 服务目录：切换活动提供者（`None` = 回落内置实现）。
+    SetServiceProvider(String, Option<String>),
     /// 熔断后手动重试。
     Retry(String),
     /// 卸载二段确认（进入 / 确认 / 取消）。
@@ -205,8 +211,6 @@ pub enum PluginsMsg {
     },
     /// 图片固有像素尺寸（只读文件头，不送回内容）。
     VaultImageInfo { request_id: u64, path: String },
-    /// 文字量算（纯计算，按界面字体与控件同源的行高口径）。
-    MeasureText { request_id: u64, params: MeasureTextParams },
     /// 批量文字量算（`query.measure`）：顺序与请求条目一一对应。
     MeasureBatch { request_id: u64, params: MeasureBatchParams },
     /// 主题查询（`query.theme`）：颜色 / 字号档 / 圆角档。
@@ -288,8 +292,8 @@ pub fn host_requests_stream(spec: &RuntimeSpec) -> impl iced::futures::Stream<It
                 HostRequest::WindowShow { plugin_id, request_id, window_id } => {
                     Message::PluginWindowShow { request_id, plugin_id, window_key: window_id }
                 }
-                HostRequest::ScrollTo { plugin_id, request_id, params } => {
-                    Message::PluginScrollTo { request_id, plugin_id, params }
+                HostRequest::WindowBeginDrag { plugin_id, request_id, surface_id } => {
+                    Message::PluginWindowBeginDrag { request_id, plugin_id, surface_id }
                 }
                 HostRequest::ChatSend { plugin_id, request_id, params } => Message::Chat(
                     crate::chat_actions::ChatMsg::PluginSend { request_id, plugin_id, params },
@@ -376,9 +380,6 @@ pub fn host_requests_stream(spec: &RuntimeSpec) -> impl iced::futures::Stream<It
                 HostRequest::VaultImageInfo { request_id, path, .. } => {
                     Message::Plugins(PluginsMsg::VaultImageInfo { request_id, path })
                 }
-                HostRequest::MeasureText { request_id, params, .. } => {
-                    Message::Plugins(PluginsMsg::MeasureText { request_id, params })
-                }
                 HostRequest::MeasureBatch { request_id, params, .. } => {
                     Message::Plugins(PluginsMsg::MeasureBatch { request_id, params })
                 }
@@ -447,6 +448,25 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
                 app.notify(NoticeLevel::Error, format!("插件操作失败：{e}"));
             }
             refresh(app);
+            Task::none()
+        }
+        PluginsMsg::SetBuiltinEnabled(id, on) => {
+            let disabled = &mut app.ui.disabled_views;
+            if on {
+                disabled.retain(|view| view != &id);
+            } else if !disabled.iter().any(|view| view == &id) {
+                disabled.push(id);
+            }
+            app.schedule_persist();
+            // 停用态在注册表里是 enabled 投影，改完即重建（选择器与标签都读它）
+            crate::plugin_actions::rebuild_registry(app);
+            Task::none()
+        }
+        PluginsMsg::SetServiceProvider(service, provider) => {
+            match app.plugins.set_service_provider(&service, provider.as_deref()) {
+                Ok(()) => crate::plugin_actions::rebuild_registry(app),
+                Err(e) => app.notify(NoticeLevel::Error, format!("切换提供者失败：{e}")),
+            }
             Task::none()
         }
         PluginsMsg::Retry(id) => {
@@ -1064,25 +1084,12 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
                 }
             }
         }
-        PluginsMsg::MeasureText { request_id, params } => {
-            let measured = atelyx_view::measure::measure_text(
-                &params.text,
-                params.size,
-                params.weight,
-                params.family,
-                params.max_width,
-            );
-            match serde_json::to_value(measured) {
-                Ok(value) => resolve_vault(app, request_id, Ok(value)),
-                Err(e) => resolve_vault(app, request_id, Err(format!("量算结果不可序列化：{e}"))),
-            }
-        }
         PluginsMsg::MeasureBatch { request_id, params } => {
             let sizes = params
                 .items
                 .iter()
                 .map(|item| {
-                    atelyx_view::measure::measure_text(
+                    crate::plugin_theme::measure_text(
                         &item.text,
                         item.size,
                         item.weight,
@@ -1097,7 +1104,7 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
             }
         }
         PluginsMsg::QueryTheme { request_id } => {
-            match serde_json::to_value(theme_result()) {
+            match serde_json::to_value(crate::plugin_theme::theme_result()) {
                 Ok(value) => resolve_vault(app, request_id, Ok(value)),
                 Err(e) => resolve_vault(app, request_id, Err(format!("主题结果不可序列化：{e}"))),
             }
@@ -1188,52 +1195,6 @@ fn dir_entries_json(children: &[vault::DirChild]) -> serde_json::Value {
         })
         .collect();
     serde_json::json!({ "entries": entries })
-}
-
-/// 主题查询结果：颜色取界面 token（十六进制导出）、字号档与圆角档取界面常量。
-fn theme_result() -> ThemeResult {
-    use atelyx_core::plugin_runtime::{ColorToken, FontSizes, Radii, ThemeColors};
-
-    fn hex(token: ColorToken) -> String {
-        let [r, g, b, a] = atelyx_view::render::token_color(token).into_rgba8();
-        if a == u8::MAX {
-            format!("#{r:02x}{g:02x}{b:02x}")
-        } else {
-            format!("#{r:02x}{g:02x}{b:02x}{a:02x}")
-        }
-    }
-
-    ThemeResult {
-        colors: ThemeColors {
-            text: hex(ColorToken::Text),
-            text_secondary: hex(ColorToken::TextSecondary),
-            text_muted: hex(ColorToken::TextMuted),
-            accent: hex(ColorToken::Accent),
-            accent_soft: hex(ColorToken::AccentSoft),
-            danger: hex(ColorToken::Danger),
-            danger_soft: hex(ColorToken::DangerSoft),
-            success: hex(ColorToken::Success),
-            success_soft: hex(ColorToken::SuccessSoft),
-            warning: hex(ColorToken::Warning),
-            warning_soft: hex(ColorToken::WarningSoft),
-            surface: hex(ColorToken::Surface),
-            surface_muted: hex(ColorToken::SurfaceMuted),
-            surface_sunken: hex(ColorToken::SurfaceSunken),
-            hover: hex(ColorToken::Hover),
-            border: hex(ColorToken::Border),
-            border_strong: hex(ColorToken::BorderStrong),
-            transparent: hex(ColorToken::Transparent),
-        },
-        font_sizes: FontSizes {
-            micro: pal::fs_micro(),
-            caption: pal::fs_caption(),
-            ui: pal::fs_ui(),
-            body: pal::fs_body(),
-            h2: pal::fs_h2(),
-            h1: pal::fs_h1(),
-        },
-        radii: Radii { xs: pal::RADIUS_XS, sm: pal::RADIUS_SM, md: pal::RADIUS_MD },
-    }
 }
 
 /// 回填一次仓库调用并结束消息处理。
@@ -1908,10 +1869,11 @@ pub fn on_event(app: &mut App, event: PluginEvent) {
                 _ => {}
             }
         }
-        // 界面 / 贡献 / AI 工具 / 默认布局声明由壳的投影与布局接线统一处理（见 main.rs 的事件分支）
+        // 界面 / 贡献 / AI 工具 / 服务目录 / 默认布局声明由壳的投影与布局接线统一处理（见 lib.rs 的事件分支）
         PluginEvent::ViewSubmitted { .. }
         | PluginEvent::ContributionsChanged { .. }
         | PluginEvent::AiToolsChanged { .. }
+        | PluginEvent::ServiceChanged { .. }
         | PluginEvent::DefaultLayoutDeclared { .. } => {}
     }
     if list_changed && app.settings_open && app.settings_tab == "plugins" {
@@ -1924,6 +1886,7 @@ fn refresh(app: &mut App) {
     if let Some(id) = app.plugins_state.detail.clone() {
         app.plugins_state.detail_audit = app.plugins.audit(&id);
     }
+    crate::plugin_actions::rebuild_registry(app);
 }
 
 /// 安装完成提示：内容已落位。重启失败与「还没启用」给出不同下一步——两者都不是安装失败。
@@ -2070,6 +2033,8 @@ fn installed_group(app: &App) -> Element<'static, Message> {
         .spacing(8)
         .align_y(iced::alignment::Vertical::Center),
     ));
+    col = col.push(group_head("内置条目", "可停用；插件接管服务时在下方切换", false));
+    col = col.push(builtin_group(app));
     col = col.push(group_head("已安装", &format!("共 {} 个", installed.len()), false));
     if installed.is_empty() {
         col = col.push(controls::empty_state(
@@ -2083,6 +2048,79 @@ fn installed_group(app: &App) -> Element<'static, Message> {
         col = col.push(plugin_card(app, summary));
     }
     col.into()
+}
+
+/// 内置条目：内置视图（图标 + 名称 + 启停开关），以及有外部提供者的服务（切换 / 回落）。
+/// 没有外部提供者的服务是平台自带能力，只在插件开发时经能力总线取用，不在此列出。
+fn builtin_group(app: &App) -> Element<'static, Message> {
+    let mut rows: Vec<Element<'static, Message>> = app
+        .registry
+        .all()
+        .filter(|entry| entry.kind == EntryKind::View && entry.source.is_builtin())
+        .map(builtin_view_row)
+        .collect();
+    rows.extend(
+        app.registry
+            .services()
+            .filter(|entry| entry.provider.is_some() || !entry.candidates.is_empty())
+            .map(service_row),
+    );
+    stacked_card(rows)
+}
+
+/// 内置视图行：停用开关（停用后选择器不再列出，已开的标签落停用占位）。
+fn builtin_view_row(entry: &Entry) -> Element<'static, Message> {
+    row![
+        icon(entry.icon.as_ref(), 14.0, pal::TEXT_SECONDARY),
+        text(entry.label.clone()).size(pal::fs_body()).color(pal::TEXT_PRIMARY),
+        text(entry.id.clone()).size(pal::fs_caption()).color(pal::TEXT_MUTED),
+        space().width(Length::Fill),
+        controls::toggle(
+            entry.enabled,
+            Some(Message::Plugins(PluginsMsg::SetBuiltinEnabled(
+                entry.id.clone(),
+                !entry.enabled
+            ))),
+        ),
+    ]
+    .spacing(8)
+    .align_y(iced::alignment::Vertical::Center)
+    .into()
+}
+
+/// 服务行：活动提供者与方法数一行显示；候选可切换，外部提供者在任时可回落内置。
+fn service_row(entry: &Entry) -> Element<'static, Message> {
+    let mut line = row![
+        icon(entry.icon.as_ref(), 14.0, pal::TEXT_SECONDARY),
+        text(entry.label.clone()).size(pal::fs_body()).color(pal::TEXT_PRIMARY),
+        text(entry.detail.clone()).size(pal::fs_caption()).color(pal::TEXT_MUTED),
+    ]
+    .spacing(8)
+    .align_y(iced::alignment::Vertical::Center);
+    if !entry.replaceable {
+        line = line.push(controls::badge("不可替换", pal::BG_TERTIARY, pal::TEXT_MUTED));
+    }
+    line = line.push(space().width(Length::Fill));
+    for candidate in &entry.candidates {
+        line = line.push(controls::btn(
+            format!("切换到 {candidate}"),
+            &controls::btn_sm(),
+            controls::Variant::Ghost,
+            Some(Message::Plugins(PluginsMsg::SetServiceProvider(
+                entry.id.clone(),
+                Some(candidate.clone()),
+            ))),
+        ));
+    }
+    if entry.replaceable && entry.builtin && entry.provider.is_some() {
+        line = line.push(controls::btn(
+            "回落内置",
+            &controls::btn_sm(),
+            controls::Variant::Ghost,
+            Some(Message::Plugins(PluginsMsg::SetServiceProvider(entry.id.clone(), None))),
+        ));
+    }
+    line.into()
 }
 
 /// 市场页：搜索 / 刷新 / 类型筛选 + 条目卡片（徽标 / 安装 / 更新）。
@@ -2406,7 +2444,7 @@ pub fn overlay(app: &App, window: iced::window::Id) -> Option<Element<'static, M
     Some(detail_modal(app, window, summary))
 }
 
-/// 插件详情模态：版本 / 协议版本 / 权限清单 / 提交与被拒计数 / 被拒调用记录。
+/// 插件详情模态：版本 / 协议版本 / 声明权限 / 提交计数 / 用到但未声明的调用记录。
 fn detail_modal(app: &App, window: iced::window::Id, summary: &PluginSummary) -> Element<'static, Message> {
     let header = row![
         icon("puzzle", 14.0, pal::TEXT_SECONDARY),
@@ -2436,8 +2474,8 @@ fn detail_modal(app: &App, window: iced::window::Id, summary: &PluginSummary) ->
     let mut rows: Vec<Element<'static, Message>> = Vec::new();
     rows.push(
         text(format!(
-            "版本 {} · 协议 apiVersion {} · 已提交界面 {} 次 · 被拒调用 {} 次",
-            summary.version, summary.api_version, summary.view_submits, summary.denied
+            "版本 {} · 协议 apiVersion {} · 已提交界面 {} 次 · 未声明但实际使用的调用 {} 条",
+            summary.version, summary.api_version, summary.submits, summary.undeclared
         ))
         .size(pal::fs_caption())
         .color(pal::TEXT_MUTED)
@@ -2482,31 +2520,44 @@ fn detail_modal(app: &App, window: iced::window::Id, summary: &PluginSummary) ->
     }
     rows.push(perms.into());
 
-    // 被拒调用记录条数不定：定高内滚动，避免长列表把模态撑出窗口
+    // 调用记录条数不定：定高内滚动，避免长列表把模态撑出窗口
+    rows.push(
+        text("能力调用记录（未声明 = manifest 未声明但实际用到）")
+            .size(pal::fs_caption())
+            .color(pal::TEXT_SECONDARY)
+            .into(),
+    );
     let mut audit = Column::new().spacing(4);
     if app.plugins_state.detail_audit.is_empty() {
         audit = audit.push(
-            text("暂无被拒调用记录")
+            text("暂无能力调用记录")
                 .size(pal::fs_caption())
                 .color(pal::TEXT_MUTED),
         );
     } else {
         for record in &app.plugins_state.detail_audit {
-            let detail = if record.detail.is_empty() {
-                String::new()
-            } else {
-                format!("（{}）", record.detail)
-            };
-            audit = audit.push(
+            let mut line = row![
                 text(format!(
-                    "{}  {}{}",
+                    "{}  {}",
                     layout_view::format_ts(record.at.saturating_mul(MS_PER_SEC) as i64),
-                    record.method,
-                    detail
+                    record.method
                 ))
                 .size(pal::fs_caption())
                 .color(pal::TEXT_SECONDARY),
-            );
+            ]
+            .spacing(6)
+            .align_y(iced::alignment::Vertical::Center);
+            if !record.declared {
+                line = line.push(controls::badge("未声明", pal::BG_TERTIARY, pal::WARNING));
+            }
+            if !record.detail.is_empty() {
+                line = line.push(
+                    text(format!("（{}）", record.detail))
+                        .size(pal::fs_caption())
+                        .color(pal::TEXT_MUTED),
+                );
+            }
+            audit = audit.push(line);
         }
     }
     rows.push(

@@ -27,7 +27,7 @@ globset = "0.4"
 # 表格 xlsx 导出（table_xlsx）
 rust_xlsxwriter = "0.89"
 base64 = "0.22"
-# 插件协议类型（宿主运行时：信封解析、握手、能力面方法、ViewNode 树）
+# 插件协议类型（宿主运行时：信封解析、握手、能力面方法、整面帧与绘制指令）
 atelyx-plugin-protocol = { path = "../atelyx-plugin-protocol" }
 # 插件安装（plugin_runtime）：zip 解压（仅 deflate；防御见 install.rs）
 zip = { version = "2", default-features = false, features = ["deflate"] }

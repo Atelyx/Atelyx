@@ -116,7 +116,7 @@ where
         let subpaths = match CACHE.get().and_then(|m| m.get(self.name)) {
             Some(found) => found,
             None => {
-                // 名字未命中（写错 / 自备图形未注册）：画方框占位而不是留白——
+                // 名字未命中（写错）：画方框占位而不是留白——
                 // 空白会让「名字写错」看起来像「控件没渲染」，排查方向完全错位
                 missing = rounded_rect(4.0, 4.0, 16.0, 16.0, 3.0);
                 &missing
@@ -165,106 +165,6 @@ where
 /// 图标名归一：命中形状表返回 'static 名，未知 / 空串返回空（画空图标）。
 pub fn icon_name(name: &str) -> &'static str {
     icons::NAMES.iter().copied().find(|n| *n == name).unwrap_or("")
-}
-
-/// 名字是否命中宿主内置形状表。
-pub fn is_builtin(name: &str) -> bool {
-    icons::NAMES.contains(&name)
-}
-
-/// 自备图形注册表（进程内单例）：限定名（`<插件 id>::<名字>`）→ 展平折线。
-static DYNAMIC: OnceLock<std::sync::Mutex<HashMap<String, std::sync::Arc<svgpath::FlatShapes>>>> =
-    OnceLock::new();
-
-fn dynamic_map() -> &'static std::sync::Mutex<HashMap<String, std::sync::Arc<svgpath::FlatShapes>>> {
-    DYNAMIC.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
-}
-
-/// 注册一枚自备图形（路径解析失败即存空折线，绘制为空）。
-pub fn register_dynamic(key: &str, path: &str) {
-    let flat = std::sync::Arc::new(svgpath::flatten_path(path));
-    dynamic_map().lock().unwrap().insert(key.to_string(), flat);
-}
-
-/// 清空全部自备图形（投影刷新前整体重建，插件停用后不留孤儿）。
-pub fn reset_dynamic() {
-    dynamic_map().lock().unwrap().clear();
-}
-
-/// 限定名是否已注册自备图形（注册表随投影刷新整体重建，渲染时即最新）。
-pub fn is_dynamic(key: &str) -> bool {
-    dynamic_map().lock().unwrap().contains_key(key)
-}
-
-/// 自备图形部件：与内置图标同口径描边绘制（24 单位视框）。
-pub struct ShapeIcon {
-    pub polylines: std::sync::Arc<svgpath::FlatShapes>,
-    pub color: Color,
-    pub stroke_units: f32,
-}
-
-impl<Message> canvas::Program<Message> for ShapeIcon
-where
-    Message: 'static,
-{
-    type State = ();
-
-    fn draw(
-        &self,
-        _state: &Self::State,
-        renderer: &iced::Renderer,
-        _theme: &iced::Theme,
-        bounds: Rectangle,
-        _cursor: iced::mouse::Cursor,
-    ) -> Vec<canvas::Geometry> {
-        let mut frame = canvas::Frame::new(renderer, bounds.size());
-        let k = frame.width() / 24.0;
-        let offset = Vector::new((frame.width() - 24.0 * k) / 2.0, (frame.height() - 24.0 * k) / 2.0);
-        let stroke = Stroke {
-            style: canvas::Style::Solid(self.color),
-            width: self.stroke_units,
-            line_cap: LineCap::Round,
-            line_join: LineJoin::Round,
-            line_dash: LineDash { segments: &[], offset: 0 },
-        };
-        frame.with_save(|f| {
-            f.translate(offset);
-            f.scale(k);
-            for poly in self.polylines.iter() {
-                if poly.len() < 2 {
-                    continue;
-                }
-                let path = Path::new(|p| {
-                    p.move_to(Point::new(poly[0][0], poly[0][1]));
-                    for pt in &poly[1..] {
-                        p.line_to(Point::new(pt[0], pt[1]));
-                    }
-                });
-                f.stroke(&path, stroke);
-            }
-        });
-        vec![frame.into_geometry()]
-    }
-}
-
-/// 图标元素：`key` 命中内置形状表即用内置，否则按限定名取插件自备图形；都没有画空。
-/// `key` 为内置名（如 `play`）或限定名（如 `com.a.panel::my-shape`）。
-pub fn icon_resolved<Message: 'static>(
-    key: &str,
-    size: f32,
-    color: Color,
-    stroke_units: f32,
-) -> Element<'static, Message> {
-    if is_builtin(key) {
-        return icon_stroke(key, size, color, stroke_units);
-    }
-    let Some(polylines) = dynamic_map().lock().unwrap().get(key).cloned() else {
-        return icon_stroke("", size, color, stroke_units);
-    };
-    Canvas::new(ShapeIcon { polylines, color, stroke_units })
-        .width(Length::Fixed(size))
-        .height(Length::Fixed(size))
-        .into()
 }
 
 /// 图标元素（`size` 见方、缺省 1.5 单位描边；未知图标名画空）。

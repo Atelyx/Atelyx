@@ -3,6 +3,14 @@
 
 use serde::{Deserialize, Serialize};
 
+/// 分割方向。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Axis {
+    Horizontal,
+    Vertical,
+}
+
 /// 默认布局名的字节上限（多字节字符按字节计）。
 pub const MAX_NAME_BYTES: usize = 64;
 /// 规格树的深度上限。
@@ -18,7 +26,7 @@ pub const MAX_VIEWS_PER_PANEL: usize = 16;
 pub enum LayoutSpecNode {
     /// 分割节点：方向 + 子树 + 占比。
     Split {
-        direction: crate::view::Axis,
+        direction: Axis,
         children: Vec<LayoutSpecNode>,
         sizes: Vec<f64>,
     },

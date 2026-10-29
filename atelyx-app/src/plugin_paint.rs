@@ -1,11 +1,11 @@
-//! 插件绘制指令执行：整面帧与树内画布节点共用一套解释（图元 / 文字 / 图片），
+//! 插件绘制指令执行：整面帧的图元 / 文字 / 图片共用一套解释，
 //! 坐标一律相对当前绘制坐标系；图片按插件身份与来源取宿主已载入的句柄。
 
 use iced::widget::canvas::{self, Path as CanvasPath, Stroke, Text as CanvasText};
 use iced::{Color, Point, Rectangle, Size};
 
 use atelyx_core::plugin_runtime::{
-    CanvasColor, CanvasPoint, DrawCommand, ImageFit, ImageSource, TextAlign, TextFamily, TextWeight,
+    PaintColor, PaintPoint, DrawCommand, ImageFit, ImageSource, TextAlign, TextFamily, TextWeight,
 };
 
 use crate::App;
@@ -81,7 +81,7 @@ fn execute_one(frame: &mut canvas::Frame, command: &DrawCommand, ctx: &PaintCtx<
                 position: Point::new(text_x(*x, content, *size, *weight, *family, *max_width, *align), *y),
                 color: color(*text_color),
                 size: (*size).into(),
-                font: atelyx_view::measure::text_font(*weight, *family),
+                font: crate::plugin_theme::text_font(*weight, *family),
                 max_width: max_width.unwrap_or(f32::INFINITY),
                 // 缺省 Shaping::Auto 已覆盖 CJK 文本
                 ..CanvasText::default()
@@ -139,7 +139,7 @@ fn text_x(
     let (Some(max_width), Some(align)) = (max_width, align) else {
         return x;
     };
-    let width = atelyx_view::measure::measure_text(content, size, weight, family, Some(max_width)).width;
+    let width = crate::plugin_theme::measure_text(content, size, weight, family, Some(max_width)).width;
     match align {
         TextAlign::Start => x,
         TextAlign::Center => x + (max_width - width) / 2.0,
@@ -147,7 +147,7 @@ fn text_x(
     }
 }
 
-fn polyline(points: &[CanvasPoint], closed: bool) -> CanvasPath {
+fn polyline(points: &[PaintPoint], closed: bool) -> CanvasPath {
     CanvasPath::new(|path| {
         let mut points = points.iter();
         if let Some(first) = points.next() {
@@ -172,10 +172,10 @@ fn image_handle(
     Some((handle, ctx.app.note_image_sizes.get(&key).copied()))
 }
 
-fn color(value: CanvasColor) -> Color {
+fn color(value: PaintColor) -> Color {
     match value {
-        CanvasColor::Token { name } => atelyx_view::render::token_color(name),
-        CanvasColor::Rgba { rgba: [r, g, b, a] } => Color::from_rgba8(r, g, b, f32::from(a) / 255.0),
+        PaintColor::Token { name } => crate::plugin_theme::token_color(name),
+        PaintColor::Rgba { rgba: [r, g, b, a] } => Color::from_rgba8(r, g, b, f32::from(a) / 255.0),
     }
 }
 

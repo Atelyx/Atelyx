@@ -24,15 +24,50 @@ use atelyx_core::plugin_runtime::{
     NamedKey, SurfaceFrame,
 };
 
-use crate::plugin_canvas::{
-    distance_sq, drag_point, mouse_button, node_identity, DOUBLE_CLICK_MS, DOUBLE_CLICK_SLOP,
-};
 use crate::plugin_paint::{self, PaintCtx};
 use crate::{App, Message};
 
+/// 双击判定：同键二次按下的最大间隔。
+const DOUBLE_CLICK_MS: u64 = 500;
+/// 双击判定：两次按下间的最大位移（逻辑像素；拖动不算双击）。
+const DOUBLE_CLICK_SLOP: f32 = 4.0;
+
+/// 标识哈希（FNV-1a；面 / 面 id 的身份判定用，不参与协议）。
+fn hash_id(value: &str) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in value.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
 /// 面身份哈希（FNV 混合；仅用于判定「同一个面的尺寸是否变过」，不参与协议）。
 fn surface_identity(plugin_id: &str, surface_id: &str) -> u64 {
-    node_identity(plugin_id) ^ node_identity(surface_id).rotate_left(17)
+    hash_id(plugin_id) ^ hash_id(surface_id).rotate_left(17)
+}
+
+/// 两点距离平方（双击位移阈值比较用，免开方）。
+fn distance_sq(a: Point, b: Point) -> f32 {
+    let dx = a.x - b.x;
+    let dy = a.y - b.y;
+    dx * dx + dy * dy
+}
+
+/// 拖拽中的面本地坐标：光标在窗口内即可换算（允许拖出面采点，抬起为止）。
+fn drag_point(cursor: mouse::Cursor, bounds: Rectangle) -> Option<Point> {
+    let absolute = cursor.position()?;
+    Some(Point::new(absolute.x - bounds.x, absolute.y - bounds.y))
+}
+
+/// 指针按钮 → 协议按钮（协议没有的侧键不转发）。
+fn mouse_button(button: mouse::Button) -> Option<MouseButton> {
+    match button {
+        mouse::Button::Left => Some(MouseButton::Left),
+        mouse::Button::Right => Some(MouseButton::Right),
+        mouse::Button::Middle => Some(MouseButton::Middle),
+        _ => None,
+    }
 }
 
 /// 部件跨帧状态（存 `tree::State`）：绘制缓存 + 拖拽 / 悬停 / 双击判定 + 输入法开关。

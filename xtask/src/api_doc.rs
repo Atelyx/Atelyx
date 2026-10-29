@@ -68,77 +68,60 @@ const SECTIONS: &[Section] = &[
         ),
     },
     Section {
-        title: "界面控件树",
-        intro: "插件提交的声明式控件树：容器带 `children`，叶子不带；`id` 在同一棵树内唯一，\
-事件按节点 `events` 声明回发。",
+        title: "能力总线",
+        intro: "能力按「服务 + 方法」登记：方法名本身就是 `服务.方法`，所以目录按第一个 `.` 切分即得。内置实现是出厂的活动提供者；外部提供者登记后只成为候选，切换由用户决定。`service.call` 是名字要到运行时才知道时的信封形态，与直接调用同名方法解析到同一条目、同一个实现。",
         items: items!(
-            "view.rs": "ViewNode",
-            "view.rs": "NodeBody",
-            "view.rs": "Align",
-            "view.rs": "Justify",
-            "view.rs": "Axis",
-            "view.rs": "BoxSize",
-            "view.rs": "SizeSpec",
-            "view.rs": "RowHeight",
-            "view.rs": "Interaction",
-            "view.rs": "InteractionState",
-            "view.rs": "Surface",
-            "view.rs": "ColorSpec",
-            "view.rs": "Rgba",
-            "view.rs": "TextFamily",
-            "view.rs": "TextWeight",
-            "view.rs": "ColorToken",
-            "view.rs": "ButtonVariant",
-            "view.rs": "CardTone",
-            "view.rs": "ControlSize",
-            "view.rs": "ImageFit",
-            "view.rs": "ImageSource",
-            "view.rs": "MenuItem",
-            "view.rs": "PaddingSpec",
-            "view.rs": "AxesPadding",
-            "view.rs": "EdgesPadding",
+            "service.rs": "method",
+            "service.rs": "SERVICE_VERSION",
+            "service.rs": "MAX_METHOD_NAME",
+            "service.rs": "MAX_METHODS_PER_SERVICE",
+            "service.rs": "RegisterParams",
+            "service.rs": "UnregisterParams",
+            "service.rs": "ServiceInfo",
+            "service.rs": "ListResult",
+            "service.rs": "CallParams",
+            "service.rs": "HostCallParams",
+            "service.rs": "ResultParams",
+            "service.rs": "ChangedParams",
+            "service.rs": "error",
+            "method.rs": "BUILTIN_SERVICES",
         ),
     },
     Section {
-        title: "视图事件与指针",
-        intro: "宿主回发给插件的事件种类与取值形态；画布指针事件单列在下一节。",
+        title: "绘制指令",
+        intro: "插件把界面画成指令：一条指令一个形状或一段文字，坐标是面本地逻辑像素、左上原点。\
+指令集封闭，`fill` 与 `stroke` 至少声明其一；命中由命中区（见下一节）表达，绘制指令本身不带交互语义。",
         items: items!(
-            "view.rs": "ReportMode",
-            "view.rs": "EventKind",
-            "view.rs": "ViewEvent",
-            "view.rs": "Key",
-            "view.rs": "NamedKey",
-            "view.rs": "KeyAction",
-            "view.rs": "Modifiers",
-            "view.rs": "LinkForm",
-            "view.rs": "EventValue",
-            "method.rs": "ViewEventParams",
-        ),
-    },
-    Section {
-        title: "自绘画布",
-        intro: "画布是树里的叶子控件（占位 + 指针事件 + 可选帧率），内容经 `canvas.submit` 整表提交、`canvas.patch` 按 id 增量维护；文字占位经 `canvas.measureText` 量算（不要按字符数估算）；坐标一律画布本地逻辑像素、左上原点。",
-        items: items!(
-            "view.rs": "CanvasEventKind",
-            "view.rs": "MouseButton",
-            "view.rs": "CanvasPointer",
-            "canvas.rs": "CanvasColor",
-            "canvas.rs": "CanvasPoint",
-            "canvas.rs": "TextAlign",
-            "canvas.rs": "DrawCommand",
-            "canvas.rs": "CanvasUpsert",
-            "method.rs": "CanvasSubmitParams",
-            "method.rs": "CanvasPatchParams",
-            "method.rs": "CanvasResizedParams",
-            "method.rs": "CanvasFrameParams",
-            "method.rs": "MeasureTextParams",
+            "paint.rs": "DrawCommand",
+            "paint.rs": "PaintColor",
+            "paint.rs": "PaintPoint",
+            "paint.rs": "TextAlign",
+            "paint.rs": "TextFamily",
+            "paint.rs": "TextWeight",
+            "paint.rs": "ColorToken",
+            "paint.rs": "ImageFit",
+            "paint.rs": "ImageSource",
+            "paint.rs": "MAX_FPS",
+            "method.rs": "query",
+            "method.rs": "markdown",
+            "method.rs": "MAX_MEASURE_ITEMS",
+            "method.rs": "MeasureItem",
+            "method.rs": "MeasureBatchParams",
+            "method.rs": "MeasureBatchResult",
             "method.rs": "MeasureTextResult",
+            "method.rs": "ThemeResult",
+            "method.rs": "ThemeColors",
+            "method.rs": "FontSizes",
+            "method.rs": "Radii",
+            "method.rs": "PaddingSpec",
+            "method.rs": "AxesPadding",
+            "method.rs": "EdgesPadding",
         ),
     },
     Section {
-        title: "整面帧",
-        intro: "整面帧把面的绘制与输入整体交给插件：`frame.submit` 提交指令清单 + 命中区 + 输入声明，\
-宿主只按几何绘制并把原始输入原样回发；与同面的界面树互斥，面按最后提交的通道渲染。",
+        title: "整面帧与输入事件",
+        intro: "`frame.submit` 一帧即该面的完整界面（指令 + 命中区 + 输入声明），宿主只按几何绘制并把原始\
+输入经 `host:frame.input` 原样回发；插件按帧自行维护悬停 / 按下 / 焦点 / 滚动 / 文本编辑状态。",
         items: items!(
             "method.rs": "frame",
             "frame.rs": "SurfaceFrame",
@@ -151,21 +134,11 @@ const SECTIONS: &[Section] = &[
             "frame.rs": "FrameSubmitParams",
             "frame.rs": "FrameInputParams",
             "frame.rs": "FrameTickParams",
-        ),
-    },
-    Section {
-        title: "纯查询：量算、主题与 Markdown",
-        intro: "纯计算调用，不改界面也不产生帧；同一段文字反复量算、同一段 Markdown 反复解析时插件应自行缓存结果。",
-        items: items!(
-            "method.rs": "query",
-            "method.rs": "MAX_MEASURE_ITEMS",
-            "method.rs": "MeasureItem",
-            "method.rs": "MeasureBatchParams",
-            "method.rs": "MeasureBatchResult",
-            "method.rs": "ThemeResult",
-            "method.rs": "ThemeColors",
-            "method.rs": "FontSizes",
-            "method.rs": "Radii",
+            "frame.rs": "MouseButton",
+            "frame.rs": "Key",
+            "frame.rs": "NamedKey",
+            "frame.rs": "KeyAction",
+            "frame.rs": "Modifiers",
             "method.rs": "MAX_MARKDOWN_BYTES",
             "method.rs": "MarkdownParams",
             "method.rs": "MarkdownResult",
@@ -181,13 +154,9 @@ const SECTIONS: &[Section] = &[
             "method.rs": "SurfaceKind",
             "method.rs": "SurfaceAttachedParams",
             "method.rs": "SurfaceDetachedParams",
-            "method.rs": "SubmitParams",
             "method.rs": "SubmitResult",
             "method.rs": "RegisterParams",
             "method.rs": "UnregisterParams",
-            "method.rs": "DefineIconParams",
-            "method.rs": "ScrollEdge",
-            "method.rs": "ScrollToParams",
             "method.rs": "TakeoverScope",
             "method.rs": "TakeoverParams",
             "method.rs": "WindowOpenParams",
@@ -195,6 +164,7 @@ const SECTIONS: &[Section] = &[
             "method.rs": "WindowUpdateParams",
             "method.rs": "WindowIdParams",
             "method.rs": "WindowClosedParams",
+            "method.rs": "WindowDragParams",
         ),
     },
     Section {
@@ -205,6 +175,7 @@ const SECTIONS: &[Section] = &[
             "method.rs": "layout",
             "method.rs": "DeclareDefaultLayoutParams",
             "layout.rs": "LayoutSpecNode",
+            "layout.rs": "Axis",
             "layout.rs": "MAX_NAME_BYTES",
             "layout.rs": "MAX_DEPTH",
             "layout.rs": "MAX_PANELS",
@@ -214,7 +185,7 @@ const SECTIONS: &[Section] = &[
     Section {
         title: "能力面方法名",
         intro: "每个模块是一类能力面的方法名常量，与 `permissions` 里的能力声明一一对应；\
-未声明能力的调用会被宿主拒绝并记入审计。",
+声明用于公示与审计，不是拦截：插件是原生进程，能力面上的限制只作便利层语义。",
         items: items!(
             "method.rs": "view",
             "method.rs": "window",
@@ -229,7 +200,6 @@ const SECTIONS: &[Section] = &[
             "method.rs": "dialog",
             "method.rs": "http",
             "method.rs": "doc",
-            "method.rs": "canvas",
             "method.rs": "ai",
             "method.rs": "tray",
             "method.rs": "collab",
@@ -411,6 +381,10 @@ fn extract_item(source: &str, name: &str) -> Result<String, String> {
         .copied()
         .filter(|line| !line.starts_with("#[derive("))
         .collect();
+    // 抽取边界必须停在项本身：落进测试模块说明收尾符没认出（`];` / `}`），会把它整段贴进对外文档
+    if body.iter().any(|line| line.trim_start().starts_with("#[cfg(test)]")) {
+        return Err(format!("{name} 的抽取结果越过了项边界（落进了测试模块），抽取收尾符需修正"));
+    }
     // 括号配平作为抽取边界的完整性校验：文档注释里的花括号不参与统计
     let code: Vec<&&str> = body
         .iter()
@@ -442,10 +416,15 @@ fn is_item_header(line: &str, name: &str) -> bool {
     })
 }
 
-/// 项的收尾行：单行项到 `;` 为止，其余到列 0 的 `}`。
+/// 项的收尾行：单行项到 `;` 为止；数组 / 元组这类常量到列 0 的 `];` 为止；
+/// 其余（结构体 / 枚举 / 模块）到列 0 的 `}`。
 fn item_end(lines: &[&str], header: usize) -> Option<usize> {
-    if lines[header].trim_end().ends_with(';') {
+    let first = lines[header].trim_end();
+    if first.ends_with(';') {
         return Some(header);
+    }
+    if first.ends_with("= &[") || first.ends_with("= [") {
+        return (header + 1..lines.len()).find(|&index| lines[index] == "];");
     }
     (header + 1..lines.len()).find(|&index| lines[index] == "}")
 }

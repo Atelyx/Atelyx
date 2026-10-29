@@ -1,8 +1,156 @@
-//! 整面帧构建辅助：命中区、输入法锚点与帧外壳的薄构造器；图元复用 [`crate::canvas_builders`]。
-//! 命中判断由宿主按几何完成，插件只按回发的命中 id 解释语义。
+//! 整面帧构建辅助：绘制指令的薄构造器 + 帧外壳（命中区 / 输入法锚点 / 键盘与帧率声明）。
+//! 命中判断由宿主按几何完成，插件只按回发的命中 id 解释语义；坐标一律面本地逻辑像素。
 
-use crate::protocol::canvas::DrawCommand;
 use crate::protocol::frame::{FrameRect, HitCursor, HitRegion, SurfaceFrame};
+use crate::protocol::paint::{
+    ColorToken, DrawCommand, ImageFit, ImageSource, PaintColor, PaintPoint, TextAlign, TextWeight,
+};
+
+/// 主题 token 颜色。
+pub fn token(name: ColorToken) -> PaintColor {
+    PaintColor::Token { name }
+}
+
+/// 自带 RGBA 颜色（`[r, g, b, a]`，各 0~255）。
+pub fn rgba(r: u8, g: u8, b: u8, a: u8) -> PaintColor {
+    PaintColor::Rgba { rgba: [r, g, b, a] }
+}
+
+fn pt(x: f32, y: f32) -> PaintPoint {
+    PaintPoint { x, y }
+}
+
+pub fn line(x1: f32, y1: f32, x2: f32, y2: f32, stroke: PaintColor) -> DrawCommand {
+    DrawCommand::Line { x1, y1, x2, y2, stroke, width: 1.0 }
+}
+
+/// 矩形：`fill` 与 `stroke` 至少给其一。
+pub fn rect(
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    fill: Option<PaintColor>,
+    stroke: Option<PaintColor>,
+) -> DrawCommand {
+    DrawCommand::Rect { x, y, w, h, fill, stroke, stroke_width: None, corner_radius: None }
+}
+
+/// 圆角矩形（`radius` 为四角半径）：`fill` 与 `stroke` 至少给其一。
+pub fn rounded_rect(
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    radius: f32,
+    fill: Option<PaintColor>,
+    stroke: Option<PaintColor>,
+) -> DrawCommand {
+    DrawCommand::Rect { x, y, w, h, fill, stroke, stroke_width: None, corner_radius: Some(radius) }
+}
+
+/// 折线 / 多边形：`closed` 闭合末点与起点；`fill` 与 `stroke` 至少给其一。
+pub fn path(
+    points: Vec<(f32, f32)>,
+    closed: bool,
+    fill: Option<PaintColor>,
+    stroke: Option<PaintColor>,
+) -> DrawCommand {
+    DrawCommand::Path {
+        points: points.into_iter().map(|(x, y)| pt(x, y)).collect(),
+        closed,
+        fill,
+        stroke,
+        stroke_width: None,
+    }
+}
+
+/// 圆：`fill` 与 `stroke` 至少给其一。
+pub fn circle(
+    cx: f32,
+    cy: f32,
+    r: f32,
+    fill: Option<PaintColor>,
+    stroke: Option<PaintColor>,
+) -> DrawCommand {
+    DrawCommand::Circle { cx, cy, r, fill, stroke, stroke_width: None }
+}
+
+/// 文字：`(x, y)` 为左上角。文字恒绘制在形状之上。
+pub fn text(x: f32, y: f32, content: impl Into<String>, size: f32, color: PaintColor) -> DrawCommand {
+    DrawCommand::Text {
+        x,
+        y,
+        content: content.into(),
+        size,
+        color,
+        weight: None,
+        family: None,
+        max_width: None,
+        align: None,
+    }
+}
+
+pub fn text_weighted(
+    x: f32,
+    y: f32,
+    content: impl Into<String>,
+    size: f32,
+    color: PaintColor,
+    weight: TextWeight,
+) -> DrawCommand {
+    DrawCommand::Text {
+        x,
+        y,
+        content: content.into(),
+        size,
+        color,
+        weight: Some(weight),
+        family: None,
+        max_width: None,
+        align: None,
+    }
+}
+
+/// 按宽度换行并给对齐区域的文字（`align` 只在给了 `max_width` 时成立）。
+pub fn text_wrapped(
+    x: f32,
+    y: f32,
+    content: impl Into<String>,
+    size: f32,
+    color: PaintColor,
+    max_width: f32,
+    align: Option<TextAlign>,
+) -> DrawCommand {
+    DrawCommand::Text {
+        x,
+        y,
+        content: content.into(),
+        size,
+        color,
+        weight: None,
+        family: None,
+        max_width: Some(max_width),
+        align,
+    }
+}
+
+/// 图片贴片，按给定矩形绘制（缺省拉伸填满，比例由插件自己保持）。
+pub fn image_tile(source: ImageSource, x: f32, y: f32, w: f32, h: f32) -> DrawCommand {
+    DrawCommand::Image { source, x, y, w, h, fit: None }
+}
+
+/// 图片贴片，按 `fit` 在矩形内等比适配（`contain` 留边 / `cover` 裁切）。
+pub fn image_tile_fit(
+    source: ImageSource,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    fit: ImageFit,
+) -> DrawCommand {
+    DrawCommand::Image { source, x, y, w, h, fit: Some(fit) }
+}
 
 /// 命中区（光标缺省 = 系统箭头）。
 pub fn hit(id: impl Into<String>, x: f32, y: f32, w: f32, h: f32) -> HitRegion {

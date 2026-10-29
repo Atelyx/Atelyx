@@ -49,392 +49,21 @@
       "line": "{\"jsonrpc\":\"2.0\",\"id\":9,\"error\":{\"code\":-32001,\"message\":\"能力未声明：fs.readText\"}}"
     }
   ],
-  "viewTree": {
-    "id": "root",
-    "kind": "column",
-    "gap": 8.0,
-    "padding": 12.0,
-    "crossAlign": "start",
-    "align": "center",
-    "size": {
-      "maxWidth": 640.0
-    },
-    "children": [
-      {
-        "id": "title",
-        "kind": "text",
-        "content": "模型管理",
-        "size": 1.25,
-        "weight": "semiBold",
-        "color": "text",
-        "align": "center",
-        "family": "ui"
-      },
-      {
-        "id": "speed",
-        "kind": "text",
-        "content": "1.20 GB/s",
-        "color": "#e0a94e",
-        "family": "mono",
-        "wrap": false,
-        "maxLines": 1
-      },
-      {
-        "id": "guide",
-        "kind": "markdown",
-        "content": "## 使用说明\n\n- 支持 **强调** 与 `行内代码`\n- [链接按仓库路径解析](notes/a.md)",
-        "size": 0.75,
-        "weight": "medium",
-        "color": "textSecondary",
-        "family": "mono",
-        "events": [
-          "linkClick"
-        ]
-      },
-      {
-        "id": "query",
-        "kind": "textInput",
-        "value": "示例文本",
-        "placeholder": "输入…",
-        "events": [
-          "submit"
-        ]
-      },
-      {
-        "id": "size",
-        "kind": "numberInput",
-        "min": 1.0,
-        "max": 100.0,
-        "step": 1.0,
-        "readOnly": true,
-        "events": [
-          "change"
-        ]
-      },
-      {
-        "id": "engine",
-        "kind": "dropdown",
-        "options": [
-          "a",
-          "b"
-        ],
-        "selected": 0,
-        "events": [
-          "change"
-        ]
-      },
-      {
-        "id": "flag",
-        "kind": "checkbox",
-        "checked": true,
-        "label": "自动启动",
-        "events": [
-          "change"
-        ]
-      },
-      {
-        "id": "tools",
-        "kind": "row",
-        "gap": 6.0,
-        "justify": "spaceBetween",
-        "crossAlign": "center",
-        "size": {
-          "width": "fill"
-        },
-        "children": [
-          {
-            "id": "shot",
-            "kind": "iconButton",
-            "icon": "camera",
-            "tooltip": "截图",
-            "size": "md",
-            "variant": "ghost",
-            "hoverOnly": true,
-            "events": [
-              "click"
-            ]
-          },
-          {
-            "id": "go",
-            "kind": "button",
-            "label": "开始",
-            "icon": "refresh",
-            "variant": "primary",
-            "size": "lg",
-            "events": [
-              "click"
-            ]
-          },
-          {
-            "id": "load",
-            "kind": "progress",
-            "value": 0.4,
-            "girth": 4.0,
-            "tone": "accent"
-          }
-        ]
-      },
-      {
-        "id": "badge",
-        "kind": "row",
-        "gap": 6.0,
-        "crossAlign": "center",
-        "size": {
-          "width": "shrink",
-          "height": 24.0,
-          "minWidth": 64.0,
-          "maxWidth": 240.0
-        },
-        "interaction": {
-          "state": "active",
-          "normal": {
-            "background": "surface",
-            "border": "border",
-            "radius": 6.0
-          },
-          "hover": {
-            "background": "hover"
-          },
-          "active": {
-            "background": "accentSoft",
-            "border": "accent"
-          }
-        },
-        "events": [
-          "click"
-        ],
-        "children": [
-          {
-            "id": "badgeIcon",
-            "kind": "icon",
-            "name": "circle-check",
-            "size": 12.0,
-            "color": "success"
-          },
-          {
-            "id": "badgeText",
-            "kind": "text",
-            "content": "就绪",
-            "size": 0.75
-          }
-        ]
-      },
-      {
-        "id": "panes",
-        "kind": "row",
-        "gap": 8.0,
-        "size": {
-          "width": "fill",
-          "height": "fill",
-          "minHeight": 120.0
-        },
-        "children": [
-          {
-            "id": "leftPane",
-            "grow": 35,
-            "kind": "column",
-            "size": {
-              "width": "fill"
-            },
-            "children": [
-              {
-                "id": "leftHint",
-                "kind": "text",
-                "content": "列表"
-              }
-            ]
-          },
-          {
-            "id": "rightPane",
-            "grow": 65,
-            "kind": "column",
-            "size": {
-              "width": "fill"
-            },
-            "children": [
-              {
-                "id": "rightHint",
-                "kind": "text",
-                "content": "详情"
-              }
-            ]
-          }
-        ]
-      },
-      {
-        "id": "paneGrid",
-        "kind": "grid",
-        "columns": 2,
-        "minColumnWidth": 160.0,
-        "gap": 6.0,
-        "rowHeight": "content",
-        "children": [
-          {
-            "id": "last",
-            "kind": "image",
-            "source": {
-              "type": "private",
-              "path": "shots/last.png"
-            },
-            "fit": "contain",
-            "width": "fill",
-            "height": 90.0,
-            "events": [
-              "click"
-            ]
-          },
-          {
-            "id": "more",
-            "kind": "menu",
-            "label": "更多",
-            "icon": "ellipsis",
-            "items": [
-              {
-                "label": "重载",
-                "action": "reload",
-                "current": true,
-                "group": "维护"
-              },
-              {
-                "label": "清除",
-                "action": "purge",
-                "danger": true,
-                "group": "维护"
-              }
-            ],
-            "events": [
-              "change"
-            ]
-          }
-        ]
-      },
-      {
-        "id": "scroller",
-        "kind": "scroll",
-        "direction": "vertical",
-        "gap": 4.0,
-        "height": 240.0,
-        "events": [
-          "scroll"
-        ],
-        "children": [
-          {
-            "id": "log",
-            "kind": "list",
-            "gap": 2.0,
-            "followEnd": true,
-            "children": [
-              {
-                "id": "log1",
-                "kind": "text",
-                "content": "已加载"
-              },
-              {
-                "id": "log2",
-                "kind": "text",
-                "content": "就绪",
-                "color": "textMuted"
-              }
-            ]
-          }
-        ]
-      },
-      {
-        "id": "info",
-        "kind": "card",
-        "gap": 4.0,
-        "tone": "accentSoft",
-        "radius": 12.0,
-        "bordered": false,
-        "align": "end",
-        "size": {
-          "width": "shrink"
-        },
-        "children": [
-          {
-            "id": "infoText",
-            "kind": "text",
-            "content": "运行中"
-          }
-        ]
-      },
-      {
-        "id": "overlay",
-        "kind": "stack",
-        "children": [
-          {
-            "id": "overlayBoard",
-            "kind": "canvas",
-            "height": 120.0
-          },
-          {
-            "id": "overlayHint",
-            "kind": "text",
-            "content": "浮层"
-          }
-        ]
-      },
-      {
-        "id": "sep",
-        "kind": "divider"
-      },
-      {
-        "id": "board",
-        "kind": "canvas",
-        "mouseEvents": [
-          "pointerDown",
-          "pointerMove",
-          "pointerUp",
-          "pointerLeave",
-          "wheel",
-          "doubleClick"
-        ],
-        "fill": true,
-        "fps": 60,
-        "events": ["secondaryClick", "key", "focus", "blur"]
-      },
-      {
-        "id": "modalLayer",
-        "kind": "overlay",
-        "scrim": "#00000099",
-        "events": ["click"],
-        "children": [
-          {
-            "id": "modalCard",
-            "kind": "card",
-            "gap": 4.0,
-            "size": { "width": 320.0, "height": "shrink" },
-            "children": [
-              {
-                "id": "modalText",
-                "kind": "text",
-                "content": "大图预览"
-              },
-              {
-                "id": "modalClose",
-                "kind": "button",
-                "label": "关闭",
-                "variant": "ghost",
-                "events": ["click"]
-              }
-            ]
-          }
-        ]
-      },
-      {
-        "id": "titleDrag",
-        "kind": "dragRegion"
-      }
-    ]
-  },
   "handshake": {
     "params": {
       "apiVersion": 1,
-      "plugin": { "id": "com.atelyx.echo", "name": "Echo", "version": "0.1.0" }
+      "plugin": {
+        "id": "com.atelyx.echo",
+        "name": "Echo",
+        "version": "0.1.0"
+      }
     },
     "result": {
       "apiVersion": 1,
-      "host": { "name": "Atelyx", "version": "0.6.0" }
+      "host": {
+        "name": "Atelyx",
+        "version": "0.6.0"
+      }
     }
   },
   "manifest": {
@@ -443,54 +72,109 @@
     "version": "1.2.0",
     "apiVersion": 1,
     "minHostVersion": "0.4.0",
-    "entry": { "windows": "bin/studio.exe", "linux": "bin/studio" },
-    "permissions": ["fs", "process", "notification"],
+    "entry": {
+      "windows": "bin/studio.exe",
+      "linux": "bin/studio"
+    },
+    "permissions": [
+      "fs",
+      "process",
+      "notification"
+    ],
     "singleton": true,
     "keepMountedOnVaultSwitch": false,
     "docTypeRegistrations": [
-      { "extension": "board", "label": "画板", "icon": "layout-dashboard", "surface": "board-view" }
+      {
+        "extension": "board",
+        "label": "画板",
+        "icon": "layout-dashboard",
+        "surface": "board-view"
+      }
     ]
   },
   "methods": [
     {
       "name": "fs.readText params",
       "type": "PathParams",
-      "value": { "path": "C:/repo/notes/a.md" }
+      "value": {
+        "path": "C:/repo/notes/a.md"
+      }
     },
     {
       "name": "fs.list result",
       "type": "ListResult",
-      "value": { "entries": [ { "name": "a.md", "kind": "file" }, { "name": "sub", "kind": "dir" } ] }
+      "value": {
+        "entries": [
+          {
+            "name": "a.md",
+            "kind": "file"
+          },
+          {
+            "name": "sub",
+            "kind": "dir"
+          }
+        ]
+      }
     },
     {
       "name": "process.spawn params",
       "type": "SpawnParams",
-      "value": { "program": "sample-service", "args": ["--port", "8080"], "cwd": "C:/svc", "env": { "A": "1" } }
+      "value": {
+        "program": "sample-service",
+        "args": [
+          "--port",
+          "8080"
+        ],
+        "cwd": "C:/svc",
+        "env": {
+          "A": "1"
+        }
+      }
     },
     {
       "name": "process event",
       "type": "ProcessEventParams",
-      "value": { "pid": 42, "event": { "kind": "stdout", "data": "ok" } }
+      "value": {
+        "pid": 42,
+        "event": {
+          "kind": "stdout",
+          "data": "ok"
+        }
+      }
     },
     {
       "name": "notification.show params",
       "type": "ShowNotificationParams",
-      "value": { "title": "完成", "body": "已退出", "level": "success" }
+      "value": {
+        "title": "完成",
+        "body": "已退出",
+        "level": "success"
+      }
     },
     {
       "name": "shortcut.register params",
       "type": "RegisterShortcutParams",
-      "value": { "accelerator": "Shift+Alt+E" }
+      "value": {
+        "accelerator": "Shift+Alt+E"
+      }
     },
     {
       "name": "clipboard payload",
       "type": "TextPayload",
-      "value": { "text": "x" }
+      "value": {
+        "text": "x"
+      }
     },
     {
       "name": "clipboard.readImage result",
       "type": "ClipboardImageResult",
-      "value": { "image": { "base64": "iVBORw0KGgo=", "width": 2, "height": 1 } }
+      "value": {
+        "image": {
+          "base64": "iVBORw0KGgo=",
+          "width": 2,
+          "height": 1
+        }
+      }
     },
     {
       "name": "clipboard.readImage result (no image)",
@@ -500,154 +184,179 @@
     {
       "name": "vault.readBinary result",
       "type": "BinaryContent",
-      "value": { "base64": "AAEC" }
+      "value": {
+        "base64": "AAEC"
+      }
     },
     {
       "name": "vault.writeBinary params",
       "type": "WriteBinaryParams",
-      "value": { "path": "assets/logo.png", "base64": "AAEC" }
+      "value": {
+        "path": "assets/logo.png",
+        "base64": "AAEC"
+      }
     },
     {
       "name": "vault.readText result",
       "type": "TextContent",
-      "value": { "content": "正文" }
+      "value": {
+        "content": "正文"
+      }
     },
     {
       "name": "vault.writeText params",
       "type": "WriteTextParams",
-      "value": { "path": "notes/a.md", "content": "正文" }
+      "value": {
+        "path": "notes/a.md",
+        "content": "正文"
+      }
     },
     {
       "name": "dialog.pickFile params",
       "type": "PickFileParams",
-      "value": { "title": "选择", "save": false, "defaultPath": "C:/a", "filters": [ { "name": "PNG", "extensions": ["png"] } ] }
-    },
-    {
-      "name": "dialog.pickFile result",
-      "type": "PickedPath",
-      "value": { "path": "C:/a/b.png" }
-    },
-    {
-      "name": "http.request params",
-      "type": "HttpRequestParams",
-      "value": { "method": "GET", "url": "http://127.0.0.1:8188", "headers": { "A": "b" }, "timeoutMs": 5000 }
-    },
-    {
-      "name": "http.request result",
-      "type": "HttpResult",
-      "value": { "status": 200, "headers": { "Content-Type": "application/json" }, "bodyBase64": "e30=" }
-    },
-    {
-      "name": "view.register params (panel registration)",
-      "type": "RegisterParams",
-      "value": { "slot": "panel", "id": "com.atelyx.llama.models", "label": "模型", "icon": "box" }
-    },
-    {
-      "name": "view.register params (tableView slot, icon omitted)",
-      "type": "RegisterParams",
-      "value": { "slot": "tableView", "id": "com.atelyx.table.timeline", "label": "时间线" }
-    },
-    {
-      "name": "view.unregister params",
-      "type": "UnregisterParams",
-      "value": { "id": "com.atelyx.llama.models" }
-    },
-    {
-      "name": "view surface attached",
-      "type": "SurfaceAttachedParams",
-      "value": { "surfaceId": "main", "kind": "panel" }
-    },
-    {
-      "name": "view event params",
-      "type": "ViewEventParams",
-      "value": { "surfaceId": "main", "nodeId": "go", "event": { "kind": "change", "value": "start" } }
-    },
-    {
-      "name": "view event null value",
-      "type": "ViewEventParams",
-      "value": { "surfaceId": "main", "nodeId": "size", "event": { "kind": "change", "value": null } }
-    },
-    {
-      "name": "doc.open params",
-      "type": "DocOpenParams",
-      "value": { "path": "docs/board", "surfaceId": "doc:1" }
-    },
-    {
-      "name": "doc.close params",
-      "type": "DocCloseParams",
-      "value": { "path": "docs/board", "surfaceId": "doc:1" }
-    },
-    {
-      "name": "view.takeover params",
-      "type": "TakeoverParams",
-      "value": { "scope": "page", "surfaceId": "main" }
-    },
-    {
-      "name": "window.open params",
-      "type": "WindowOpenParams",
-      "value": { "id": "chat-float", "title": "快捷对话", "width": 360.0, "height": 480.0, "alwaysOnTop": true, "skipTaskbar": true, "hideOnBlur": true }
-    },
-    {
-      "name": "window.close params",
-      "type": "WindowCloseParams",
-      "value": { "id": "chat-float" }
-    },
-    {
-      "name": "window.closed params",
-      "type": "WindowClosedParams",
-      "value": { "id": "chat-float" }
-    },
-    {
-      "name": "vault:switch payload (local)",
-      "type": "VaultSwitchPayload",
-      "value": { "kind": "local", "root": "C:/repo" }
-    },
-    {
-      "name": "vault:switch payload (space)",
-      "type": "VaultSwitchPayload",
-      "value": { "kind": "space", "spaceId": "space-1" }
-    },
-    {
-      "name": "canvas.submit params",
-      "type": "CanvasSubmitParams",
       "value": {
-        "surfaceId": "panel",
-        "nodeId": "board",
-        "commands": [
-          { "kind": "line", "x1": 0.0, "y1": 0.5, "x2": 10.0, "y2": 0.5, "stroke": { "type": "token", "name": "accent" }, "width": 2.0 },
-          { "kind": "rect", "x": 1.0, "y": 2.0, "w": 8.0, "h": 4.0, "fill": null, "stroke": { "type": "rgba", "rgba": [200, 64, 64, 255] }, "strokeWidth": 1.5, "cornerRadius": 2.0 },
-          { "kind": "path", "points": [ { "x": 0.0, "y": 0.0 }, { "x": 4.5, "y": 5.0 }, { "x": 9.0, "y": 0.0 } ], "closed": true, "fill": { "type": "token", "name": "success" }, "stroke": null },
-          { "kind": "circle", "cx": 5.0, "cy": 5.0, "r": 3.0, "fill": null, "stroke": { "type": "token", "name": "textMuted" } },
-          { "kind": "text", "x": 1.0, "y": 1.0, "content": "播放头", "size": 12.0, "color": { "type": "token", "name": "text" }, "weight": "medium" },
-          { "kind": "image", "source": { "type": "vault", "path": "assets/tile.png" }, "x": 0.0, "y": 0.0, "w": 16.0, "h": 16.0, "fit": "cover" }
+        "title": "选择",
+        "save": false,
+        "defaultPath": "C:/a",
+        "filters": [
+          {
+            "name": "PNG",
+            "extensions": [
+              "png"
+            ]
+          }
         ]
       }
     },
     {
-      "name": "view event canvas pointer",
-      "type": "ViewEventParams",
+      "name": "dialog.pickFile result",
+      "type": "PickedPath",
       "value": {
-        "surfaceId": "panel",
-        "nodeId": "board",
-        "event": { "kind": "canvas", "pointer": { "kind": "down", "x": 12.5, "y": 3.0, "button": "left" } }
+        "path": "C:/a/b.png"
       }
     },
     {
-      "name": "view event canvas wheel",
-      "type": "ViewEventParams",
+      "name": "http.request params",
+      "type": "HttpRequestParams",
       "value": {
-        "surfaceId": "panel",
-        "nodeId": "board",
-        "event": { "kind": "canvas", "pointer": { "kind": "wheel", "x": 8.0, "y": 8.0, "deltaX": 0.0, "deltaY": 1.0 } }
+        "method": "GET",
+        "url": "http://127.0.0.1:8188",
+        "headers": {
+          "A": "b"
+        },
+        "timeoutMs": 5000
       }
     },
     {
-      "name": "view event canvas double click",
-      "type": "ViewEventParams",
+      "name": "http.request result",
+      "type": "HttpResult",
       "value": {
-        "surfaceId": "panel",
-        "nodeId": "board",
-        "event": { "kind": "canvas", "pointer": { "kind": "doubleClick", "x": 8.0, "y": 8.0, "button": "left" } }
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "bodyBase64": "e30="
+      }
+    },
+    {
+      "name": "view.register params (panel registration)",
+      "type": "RegisterParams",
+      "value": {
+        "slot": "panel",
+        "id": "com.atelyx.llama.models",
+        "label": "模型",
+        "icon": "box"
+      }
+    },
+    {
+      "name": "view.register params (tableView slot, icon omitted)",
+      "type": "RegisterParams",
+      "value": {
+        "slot": "tableView",
+        "id": "com.atelyx.table.timeline",
+        "label": "时间线"
+      }
+    },
+    {
+      "name": "view.unregister params",
+      "type": "UnregisterParams",
+      "value": {
+        "id": "com.atelyx.llama.models"
+      }
+    },
+    {
+      "name": "view surface attached",
+      "type": "SurfaceAttachedParams",
+      "value": {
+        "surfaceId": "main",
+        "kind": "panel"
+      }
+    },
+    {
+      "name": "doc.open params",
+      "type": "DocOpenParams",
+      "value": {
+        "path": "docs/board",
+        "surfaceId": "doc:1"
+      }
+    },
+    {
+      "name": "doc.close params",
+      "type": "DocCloseParams",
+      "value": {
+        "path": "docs/board",
+        "surfaceId": "doc:1"
+      }
+    },
+    {
+      "name": "view.takeover params",
+      "type": "TakeoverParams",
+      "value": {
+        "scope": "page",
+        "surfaceId": "main"
+      }
+    },
+    {
+      "name": "window.open params",
+      "type": "WindowOpenParams",
+      "value": {
+        "id": "chat-float",
+        "title": "快捷对话",
+        "width": 360.0,
+        "height": 480.0,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "hideOnBlur": true
+      }
+    },
+    {
+      "name": "window.close params",
+      "type": "WindowCloseParams",
+      "value": {
+        "id": "chat-float"
+      }
+    },
+    {
+      "name": "window.closed params",
+      "type": "WindowClosedParams",
+      "value": {
+        "id": "chat-float"
+      }
+    },
+    {
+      "name": "vault:switch payload (local)",
+      "type": "VaultSwitchPayload",
+      "value": {
+        "kind": "local",
+        "root": "C:/repo"
+      }
+    },
+    {
+      "name": "vault:switch payload (space)",
+      "type": "VaultSwitchPayload",
+      "value": {
+        "kind": "space",
+        "spaceId": "space-1"
       }
     },
     {
@@ -656,23 +365,45 @@
       "value": {
         "name": "find_notes",
         "description": "按关键词搜索仓库笔记",
-        "parameters": { "type": "object", "properties": { "q": { "type": "string" } }, "required": ["q"] }
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "q": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "q"
+          ]
+        }
       }
     },
     {
       "name": "ai.unregisterTool params",
       "type": "UnregisterToolParams",
-      "value": { "name": "find_notes" }
+      "value": {
+        "name": "find_notes"
+      }
     },
     {
       "name": "host:ai.toolCall params",
       "type": "ToolCallParams",
-      "value": { "callId": "tool-1", "name": "find_notes", "arguments": { "q": "周报" } }
+      "value": {
+        "callId": "tool-1",
+        "name": "find_notes",
+        "arguments": {
+          "q": "周报"
+        }
+      }
     },
     {
       "name": "ai.toolResult params",
       "type": "ToolResultParams",
-      "value": { "callId": "tool-1", "content": "命中 2 条", "isError": false }
+      "value": {
+        "callId": "tool-1",
+        "content": "命中 2 条",
+        "isError": false
+      }
     },
     {
       "name": "table.snapshot result",
@@ -681,98 +412,166 @@
         "open": true,
         "id": "t1",
         "path": "plan.atb",
-        "fields": [ { "id": "f1", "name": "名称", "type": "text", "options": ["甲", "乙"], "width": 180.0 } ],
-        "rows": [ { "id": "r1", "values": { "f1": "甲" }, "styles": { "f1": { "bold": true, "color": "#c0392b" } } } ],
-        "selection": { "kind": "range", "anchorRowId": "r1", "anchorFieldId": "f1", "rowId": "r2", "fieldId": "f2" },
+        "fields": [
+          {
+            "id": "f1",
+            "name": "名称",
+            "type": "text",
+            "options": [
+              "甲",
+              "乙"
+            ],
+            "width": 180.0
+          }
+        ],
+        "rows": [
+          {
+            "id": "r1",
+            "values": {
+              "f1": "甲"
+            },
+            "styles": {
+              "f1": {
+                "bold": true,
+                "color": "#c0392b"
+              }
+            }
+          }
+        ],
+        "selection": {
+          "kind": "range",
+          "anchorRowId": "r1",
+          "anchorFieldId": "f1",
+          "rowId": "r2",
+          "fieldId": "f2"
+        },
         "remoteSelections": [
-          { "name": "鲍勃", "color": "#3d7be0", "selection": { "kind": "cell", "rowId": "r1", "fieldId": "f2" } }
+          {
+            "name": "鲍勃",
+            "color": "#3d7be0",
+            "selection": {
+              "kind": "cell",
+              "rowId": "r1",
+              "fieldId": "f2"
+            }
+          }
         ]
       }
     },
     {
       "name": "table.snapshot result (no open table)",
       "type": "TableSnapshot",
-      "value": { "open": false }
+      "value": {
+        "open": false
+      }
     },
     {
       "name": "table.updateCell params",
       "type": "TableUpdateCellParams",
-      "value": { "rowId": "r1", "fieldId": "f1", "value": null }
+      "value": {
+        "rowId": "r1",
+        "fieldId": "f1",
+        "value": null
+      }
     },
     {
       "name": "table.addRow result",
       "type": "TableAddRowResult",
-      "value": { "rowId": "r9" }
+      "value": {
+        "rowId": "r9"
+      }
     },
     {
       "name": "table.selectRow params",
       "type": "TableRowIdParams",
-      "value": { "rowId": "r1" }
+      "value": {
+        "rowId": "r1"
+      }
     },
     {
       "name": "table:changed payload",
       "type": "TableChangedPayload",
-      "value": { "path": "plan.atb" }
+      "value": {
+        "path": "plan.atb"
+      }
     },
     {
       "name": "view.register params (custom surface padding)",
       "type": "RegisterParams",
-      "value": { "slot": "panel", "id": "com.atelyx.llama.models", "label": "模型", "padding": 0.0 }
-    },
-    {
-      "name": "view.defineIcon params",
-      "type": "DefineIconParams",
-      "value": { "name": "model-chip", "path": "M4 4h16v16H4z" }
-    },
-    {
-      "name": "view.scrollTo params",
-      "type": "ScrollToParams",
-      "value": { "surfaceId": "panel", "nodeId": "log", "edge": "end" }
-    },
-    {
-      "name": "host:canvas.resized params",
-      "type": "CanvasResizedParams",
-      "value": { "surfaceId": "panel", "nodeId": "board", "width": 640.0, "height": 360.0 }
+      "value": {
+        "slot": "panel",
+        "id": "com.atelyx.llama.models",
+        "label": "模型",
+        "padding": 0.0
+      }
     },
     {
       "name": "window.update params",
       "type": "WindowUpdateParams",
-      "value": { "id": "chat-float", "width": 400.0, "alwaysOnTop": false }
+      "value": {
+        "id": "chat-float",
+        "width": 400.0,
+        "alwaysOnTop": false
+      }
     },
     {
       "name": "window.show params",
       "type": "WindowIdParams",
-      "value": { "id": "chat-float" }
+      "value": {
+        "id": "chat-float"
+      }
     },
     {
       "name": "shortcut.query params",
       "type": "ShortcutQueryParams",
-      "value": { "accelerator": "Shift+Alt+E" }
+      "value": {
+        "accelerator": "Shift+Alt+E"
+      }
     },
     {
       "name": "shortcut.query result",
       "type": "ShortcutQueryResult",
-      "value": { "available": false, "owner": "com.atelyx.llama" }
+      "value": {
+        "available": false,
+        "owner": "com.atelyx.llama"
+      }
     },
     {
       "name": "table.setCellImage params",
       "type": "TableSetCellImageParams",
-      "value": { "rowId": "r1", "fieldId": "f2", "images": ["assets/a.png"], "display": "grid" }
+      "value": {
+        "rowId": "r1",
+        "fieldId": "f2",
+        "images": [
+          "assets/a.png"
+        ],
+        "display": "grid"
+      }
     },
     {
       "name": "ai.chat.history params (paged search)",
       "type": "ChatHistoryParams",
-      "value": { "sessionId": "s1", "limit": 20, "offset": 5, "query": "周报" }
+      "value": {
+        "sessionId": "s1",
+        "limit": 20,
+        "offset": 5,
+        "query": "周报"
+      }
     },
     {
       "name": "ai.chat.rename params",
       "type": "ChatRenameParams",
-      "value": { "sessionId": "s1", "title": "周报总结" }
+      "value": {
+        "sessionId": "s1",
+        "title": "周报总结"
+      }
     },
     {
       "name": "ai.chat.delete params",
       "type": "ChatSessionParams",
-      "value": { "sessionId": "s1" }
+      "value": {
+        "sessionId": "s1"
+      }
     },
     {
       "name": "ai.chat.send params (agent + model + images)",
@@ -783,63 +582,57 @@
         "agentId": "builtin-chat",
         "model": "gpt-4o-mini",
         "providerId": "p1",
-        "images": ["assets/a.png"]
+        "images": [
+          "assets/a.png"
+        ]
       }
     },
     {
       "name": "ai.chat.send params (minimal)",
       "type": "ChatSendParams",
-      "value": { "text": "你好" }
+      "value": {
+        "text": "你好"
+      }
     },
     {
       "name": "ai:chat.changed payload (created)",
       "type": "ChatChangedPayload",
-      "value": { "sessionId": "s1", "kind": "created" }
+      "value": {
+        "sessionId": "s1",
+        "kind": "created"
+      }
     },
     {
       "name": "ai:chat.changed payload (messages)",
       "type": "ChatChangedPayload",
-      "value": { "sessionId": "s1", "kind": "messages" }
+      "value": {
+        "sessionId": "s1",
+        "kind": "messages"
+      }
     },
     {
       "name": "ai:chat.changed payload (meta)",
       "type": "ChatChangedPayload",
-      "value": { "sessionId": "s1", "kind": "meta" }
+      "value": {
+        "sessionId": "s1",
+        "kind": "meta"
+      }
     },
     {
       "name": "ai:chat.changed payload (deleted)",
       "type": "ChatChangedPayload",
-      "value": { "sessionId": "s1", "kind": "deleted" }
-    },
-    {
-      "name": "view.event link click",
-      "type": "ViewEvent",
-      "value": { "kind": "linkClick", "href": "notes/a.md", "form": "path" }
-    },
-    {
-      "name": "view.event link click (wiki)",
-      "type": "ViewEvent",
-      "value": { "kind": "linkClick", "href": "周报", "form": "wiki" }
-    },
-    {
-      "name": "view.event link click (external)",
-      "type": "ViewEvent",
-      "value": { "kind": "linkClick", "href": "https://example.com/a?b=1", "form": "external" }
-    },
-    {
-      "name": "link form create",
-      "type": "LinkForm",
-      "value": "create"
-    },
-    {
-      "name": "link form plain",
-      "type": "LinkForm",
-      "value": "plain"
+      "value": {
+        "sessionId": "s1",
+        "kind": "deleted"
+      }
     },
     {
       "name": "vault.imageInfo result",
       "type": "ImageInfoResult",
-      "value": { "width": 1920, "height": 1080 }
+      "value": {
+        "width": 1920,
+        "height": 1080
+      }
     },
     {
       "name": "view.register params (axis padding)",
@@ -848,7 +641,10 @@
         "slot": "panel",
         "id": "com.atelyx.chat",
         "label": "对话",
-        "padding": { "horizontal": 8.0, "vertical": 4.0 }
+        "padding": {
+          "horizontal": 8.0,
+          "vertical": 4.0
+        }
       }
     },
     {
@@ -858,75 +654,44 @@
         "slot": "settings",
         "id": "com.atelyx.chat.settings",
         "label": "对话",
-        "padding": { "top": 12.0, "right": 8.0, "bottom": 12.0, "left": 8.0 }
+        "padding": {
+          "top": 12.0,
+          "right": 8.0,
+          "bottom": 12.0,
+          "left": 8.0
+        }
       }
-    },
-    {
-      "name": "view event scroll",
-      "type": "ViewEvent",
-      "value": { "kind": "scroll", "offset": 24.0, "maxOffset": 96.0 }
-    },
-    {
-      "name": "view event secondary click",
-      "type": "ViewEvent",
-      "value": { "kind": "secondaryClick" }
-    },
-    {
-      "name": "view event key named",
-      "type": "ViewEvent",
-      "value": {
-        "kind": "key",
-        "key": { "type": "named", "name": "arrowLeft" },
-        "action": "press",
-        "modifiers": { "shift": true }
-      }
-    },
-    {
-      "name": "view event key character",
-      "type": "ViewEvent",
-      "value": {
-        "kind": "key",
-        "key": { "type": "character", "text": "A" },
-        "action": "release",
-        "modifiers": {}
-      }
-    },
-    {
-      "name": "canvas.patch params",
-      "type": "CanvasPatchParams",
-      "value": {
-        "surfaceId": "panel",
-        "nodeId": "board",
-        "upsert": [
-          { "id": "playhead", "command": { "kind": "line", "x1": 12.0, "y1": 0.0, "x2": 12.0, "y2": 40.0, "stroke": { "type": "token", "name": "accent" }, "width": 2.0 } }
-        ],
-        "remove": ["grid-row-3"]
-      }
-    },
-    {
-      "name": "host:canvas.frame params",
-      "type": "CanvasFrameParams",
-      "value": { "surfaceId": "panel", "nodeId": "board", "frame": 42, "deltaMs": 17 }
     },
     {
       "name": "tray.setItems params",
       "type": "SetTrayItemsParams",
       "value": {
         "items": [
-          { "id": "show", "label": "打开面板" },
-          { "id": "pause", "label": "暂停监听", "enabled": false }
+          {
+            "id": "show",
+            "label": "打开面板"
+          },
+          {
+            "id": "pause",
+            "label": "暂停监听",
+            "enabled": false
+          }
         ]
       }
     },
     {
       "name": "tray.setItems params (clear)",
       "type": "SetTrayItemsParams",
-      "value": { "items": [] }
+      "value": {
+        "items": []
+      }
     },
     {
       "name": "host:tray.click params",
       "type": "TrayClickParams",
-      "value": { "id": "show" }
+      "value": {
+        "id": "show"
+      }
     },
     {
       "name": "collab.peers result",
@@ -934,63 +699,98 @@
       "value": {
         "connected": true,
         "selfId": "1",
-        "peers": [ { "peerId": "2", "name": "林" }, { "peerId": "3" } ]
+        "peers": [
+          {
+            "peerId": "2",
+            "name": "林"
+          },
+          {
+            "peerId": "3"
+          }
+        ]
       }
     },
     {
       "name": "collab.peers result (disconnected)",
       "type": "CollabPeersResult",
-      "value": { "connected": false }
+      "value": {
+        "connected": false
+      }
     },
     {
       "name": "collab.send params",
       "type": "CollabSendParams",
-      "value": { "channel": "cursor", "payload": { "line": 3, "col": 8 } }
+      "value": {
+        "channel": "cursor",
+        "payload": {
+          "line": 3,
+          "col": 8
+        }
+      }
     },
     {
       "name": "collab.send params (targeted)",
       "type": "CollabSendParams",
-      "value": { "channel": "chat", "payload": "hi", "targetPeerId": "2" }
+      "value": {
+        "channel": "chat",
+        "payload": "hi",
+        "targetPeerId": "2"
+      }
     },
     {
       "name": "collab.send params (ephemeral)",
       "type": "CollabSendParams",
-      "value": { "channel": "cursor", "payload": { "line": 9 }, "qos": "ephemeral" }
+      "value": {
+        "channel": "cursor",
+        "payload": {
+          "line": 9
+        },
+        "qos": "ephemeral"
+      }
     },
     {
       "name": "collab.send result",
       "type": "CollabSendResult",
-      "value": { "queued": true }
+      "value": {
+        "queued": true
+      }
     },
     {
       "name": "host:collab.message params",
       "type": "CollabMessageParams",
       "value": {
         "channel": "cursor",
-        "payload": { "line": 3 },
+        "payload": {
+          "line": 3
+        },
         "peerId": "2",
         "peerName": "林"
       }
     },
     {
-      "name": "view.scrollTo params (offset)",
-      "type": "ScrollToParams",
-      "value": { "surfaceId": "panel", "nodeId": "log", "offset": 0.25 }
-    },
-    {
       "name": "vault.importFile params",
       "type": "ImportFileParams",
-      "value": { "path": "attachments/big.bin", "source": "C:/Users/demo/plugins/comfyui/data/models/big.bin" }
+      "value": {
+        "path": "attachments/big.bin",
+        "source": "C:/Users/demo/plugins/comfyui/data/models/big.bin"
+      }
     },
     {
       "name": "vault:file.changed payload (updated)",
       "type": "FileChangedPayload",
-      "value": { "path": "notes/a.md", "kind": "updated" }
+      "value": {
+        "path": "notes/a.md",
+        "kind": "updated"
+      }
     },
     {
       "name": "vault:file.changed payload (renamed)",
       "type": "FileChangedPayload",
-      "value": { "path": "notes/b.md", "kind": "renamed", "oldPath": "notes/a.md" }
+      "value": {
+        "path": "notes/b.md",
+        "kind": "renamed",
+        "oldPath": "notes/a.md"
+      }
     },
     {
       "name": "layout.declareDefaultLayout params",
@@ -1000,48 +800,59 @@
         "spec": {
           "kind": "split",
           "direction": "horizontal",
-          "sizes": [0.3, 0.7],
+          "sizes": [
+            0.3,
+            0.7
+          ],
           "children": [
-            { "kind": "panel", "views": ["plugin:com.example.studio:panel"] },
-            { "kind": "panel", "views": ["note", "table"] }
+            {
+              "kind": "panel",
+              "views": [
+                "plugin:com.example.studio:panel"
+              ]
+            },
+            {
+              "kind": "panel",
+              "views": [
+                "note",
+                "table"
+              ]
+            }
           ]
         }
       }
     },
     {
-      "name": "canvas.measureText params",
-      "type": "MeasureTextParams",
-      "value": { "text": "模型目录 /models", "size": 13.0, "weight": "medium", "maxWidth": 240.0 }
-    },
-    {
-      "name": "canvas.measureText params (single line)",
-      "type": "MeasureTextParams",
-      "value": { "text": "12 tok/s", "size": 13.0 }
-    },
-    {
-      "name": "canvas.measureText result",
-      "type": "MeasureTextResult",
-      "value": { "width": 68.5, "height": 31.25, "lines": 2 }
-    },
-    {
       "name": "image source (local url)",
       "type": "ImageSource",
-      "value": { "type": "url", "url": "http://127.0.0.1:8188/view?filename=a.png", "local": true }
+      "value": {
+        "type": "url",
+        "url": "http://127.0.0.1:8188/view?filename=a.png",
+        "local": true
+      }
     },
     {
       "name": "image source (file)",
       "type": "ImageSource",
-      "value": { "type": "file", "path": "C:/Users/me/Desktop/a.png" }
+      "value": {
+        "type": "file",
+        "path": "C:/Users/me/Desktop/a.png"
+      }
     },
     {
       "name": "vault.rename params",
       "type": "VaultRenameParams",
-      "value": { "from": "笔记/a.md", "to": "归档/a.md" }
+      "value": {
+        "from": "笔记/a.md",
+        "to": "归档/a.md"
+      }
     },
     {
       "name": "clipboard.writeImage params",
       "type": "ClipboardWriteImageParams",
-      "value": { "base64": "iVBORw0KGgo=" }
+      "value": {
+        "base64": "iVBORw0KGgo="
+      }
     },
     {
       "name": "ai.models result",
@@ -1051,17 +862,31 @@
           {
             "id": "openai",
             "name": "OpenAI",
-            "models": [{ "id": "gpt-4o", "nickname": "4o" }]
+            "models": [
+              {
+                "id": "gpt-4o",
+                "nickname": "4o"
+              }
+            ]
           }
         ],
-        "current": { "providerId": "openai", "model": "gpt-4o" }
+        "current": {
+          "providerId": "openai",
+          "model": "gpt-4o"
+        }
       }
     },
     {
       "name": "ai.agents result",
       "type": "AiAgentsResult",
       "value": {
-        "agents": [{ "id": "chat", "name": "对话", "builtin": true }],
+        "agents": [
+          {
+            "id": "chat",
+            "name": "对话",
+            "builtin": true
+          }
+        ],
         "current": "chat"
       }
     },
@@ -1078,7 +903,11 @@
     {
       "name": "window.open params (undecorated)",
       "type": "WindowOpenParams",
-      "value": { "id": "palette", "title": "命令面板", "decorations": false }
+      "value": {
+        "id": "palette",
+        "title": "命令面板",
+        "decorations": false
+      }
     },
     {
       "name": "frame.submit params",
@@ -1086,11 +915,118 @@
       "value": {
         "surfaceId": "board",
         "commands": [
-          { "kind": "rect", "x": 0.0, "y": 0.0, "w": 240.0, "h": 72.0, "fill": { "type": "token", "name": "surface" }, "stroke": null },
-          { "kind": "text", "x": 8.0, "y": 8.0, "content": "计数器 3", "size": 14.0, "color": { "type": "token", "name": "text" }, "family": "mono", "maxWidth": 120.0, "align": "center" }
+          {
+            "kind": "rect",
+            "x": 0.0,
+            "y": 0.0,
+            "w": 240.0,
+            "h": 72.0,
+            "fill": {
+              "type": "token",
+              "name": "surface"
+            },
+            "stroke": null
+          },
+          {
+            "kind": "line",
+            "x1": 0.0,
+            "y1": 48.0,
+            "x2": 240.0,
+            "y2": 48.0,
+            "stroke": {
+              "type": "rgba",
+              "rgba": [
+                128,
+                128,
+                128,
+                255
+              ]
+            },
+            "width": 1.0
+          },
+          {
+            "kind": "path",
+            "points": [
+              {
+                "x": 8.0,
+                "y": 56.0
+              },
+              {
+                "x": 16.0,
+                "y": 64.0
+              },
+              {
+                "x": 24.0,
+                "y": 56.0
+              }
+            ],
+            "fill": null,
+            "stroke": {
+              "type": "token",
+              "name": "accent"
+            }
+          },
+          {
+            "kind": "circle",
+            "cx": 40.0,
+            "cy": 60.0,
+            "r": 4.0,
+            "fill": {
+              "type": "token",
+              "name": "accent"
+            },
+            "stroke": null
+          },
+          {
+            "kind": "text",
+            "x": 8.0,
+            "y": 8.0,
+            "content": "计数器 3",
+            "size": 14.0,
+            "color": {
+              "type": "token",
+              "name": "text"
+            },
+            "family": "mono",
+            "maxWidth": 120.0,
+            "align": "center"
+          },
+          {
+            "kind": "image",
+            "source": {
+              "type": "vault",
+              "path": "assets/logo.png"
+            },
+            "x": 200.0,
+            "y": 8.0,
+            "w": 24.0,
+            "h": 24.0,
+            "fit": "contain"
+          }
         ],
-        "hits": [{ "id": "inc", "x": 160.0, "y": 16.0, "w": 32.0, "h": 32.0, "cursor": "pointer" }],
-        "ime": { "x": 12.0, "y": 40.0, "w": 1.0, "h": 18.0 },
+        "hits": [
+          {
+            "id": "panel",
+            "x": 0.0,
+            "y": 0.0,
+            "w": 240.0,
+            "h": 72.0
+          },
+          {
+            "id": "inc",
+            "x": 160.0,
+            "y": 16.0,
+            "w": 32.0,
+            "h": 32.0,
+            "cursor": "pointer"
+          }
+        ],
+        "ime": {
+          "x": 12.0,
+          "y": 40.0,
+          "w": 1.0,
+          "h": 18.0
+        },
         "keys": true,
         "fps": 30
       }
@@ -1100,7 +1036,13 @@
       "type": "FrameInputParams",
       "value": {
         "surfaceId": "board",
-        "input": { "kind": "pointerDown", "x": 170.0, "y": 20.0, "button": "left", "hit": "inc" }
+        "input": {
+          "kind": "pointerDown",
+          "x": 170.0,
+          "y": 20.0,
+          "button": "left",
+          "hit": "inc"
+        }
       }
     },
     {
@@ -1108,28 +1050,65 @@
       "type": "FrameInputParams",
       "value": {
         "surfaceId": "board",
-        "input": { "kind": "text", "text": "zhong", "composing": true, "caret": 5, "candidates": { "x": 12.0, "y": 58.0, "w": 1.0, "h": 18.0 } }
+        "input": {
+          "kind": "text",
+          "text": "zhong",
+          "composing": true,
+          "caret": 5,
+          "candidates": {
+            "x": 12.0,
+            "y": 58.0,
+            "w": 1.0,
+            "h": 18.0
+          }
+        }
       }
     },
     {
       "name": "host:frame.tick",
       "type": "FrameTickParams",
-      "value": { "surfaceId": "board", "frame": 12, "deltaMs": 16 }
+      "value": {
+        "surfaceId": "board",
+        "frame": 12,
+        "deltaMs": 16
+      }
     },
     {
       "name": "query.measure params",
       "type": "MeasureBatchParams",
       "value": {
         "items": [
-          { "text": "计数器", "size": 14.0, "weight": "semiBold", "family": "mono", "maxWidth": 96.0 },
-          { "text": "ok", "size": 12.0 }
+          {
+            "text": "计数器",
+            "size": 14.0,
+            "weight": "semiBold",
+            "family": "mono",
+            "maxWidth": 96.0
+          },
+          {
+            "text": "ok",
+            "size": 12.0
+          }
         ]
       }
     },
     {
       "name": "query.measure result",
       "type": "MeasureBatchResult",
-      "value": { "sizes": [{ "width": 42.0, "height": 18.0, "lines": 1 }, { "width": 14.0, "height": 16.0, "lines": 1 }] }
+      "value": {
+        "sizes": [
+          {
+            "width": 42.0,
+            "height": 18.0,
+            "lines": 1
+          },
+          {
+            "width": 14.0,
+            "height": 16.0,
+            "lines": 1
+          }
+        ]
+      }
     },
     {
       "name": "query.theme result",
@@ -1155,28 +1134,251 @@
           "borderStrong": "#383d44",
           "transparent": "#00000000"
         },
-        "fontSizes": { "micro": 11.0, "caption": 12.0, "ui": 13.0, "body": 14.0, "h2": 16.0, "h1": 20.0 },
-        "radii": { "xs": 4.0, "sm": 6.0, "md": 10.0 }
+        "fontSizes": {
+          "micro": 11.0,
+          "caption": 12.0,
+          "ui": 13.0,
+          "body": 14.0,
+          "h2": 16.0,
+          "h1": 20.0
+        },
+        "radii": {
+          "xs": 4.0,
+          "sm": 6.0,
+          "md": 10.0
+        }
       }
     },
     {
       "name": "query.markdown params",
       "type": "MarkdownParams",
-      "value": { "content": "# 标题\n\n正文" }
+      "value": {
+        "content": "# 标题\n\n正文"
+      }
     },
     {
       "name": "query.markdown result",
       "type": "MarkdownResult",
       "value": {
         "blocks": [
-          { "kind": "heading", "level": 2, "depth": 0, "spans": [{ "text": "标题", "strong": true }] },
-          { "kind": "paragraph", "depth": 1, "spans": [{ "text": "正文" }, { "text": "代码", "code": true }, { "text": "链接", "link": "https://example.com" }] },
-          { "kind": "listItem", "depth": 0, "ordered": true, "index": 2, "spans": [{ "text": "第二项" }] },
-          { "kind": "quote", "depth": 1, "spans": [{ "text": "引用" }] },
-          { "kind": "code", "depth": 0, "lang": "rust", "content": "let a = 1;" },
-          { "kind": "table", "depth": 0, "rows": [["甲", "乙"], ["1", "2"]] },
-          { "kind": "divider" }
+          {
+            "kind": "heading",
+            "level": 2,
+            "depth": 0,
+            "spans": [
+              {
+                "text": "标题",
+                "strong": true
+              }
+            ]
+          },
+          {
+            "kind": "paragraph",
+            "depth": 1,
+            "spans": [
+              {
+                "text": "正文"
+              },
+              {
+                "text": "代码",
+                "code": true
+              },
+              {
+                "text": "链接",
+                "link": "https://example.com"
+              }
+            ]
+          },
+          {
+            "kind": "listItem",
+            "depth": 0,
+            "ordered": true,
+            "index": 2,
+            "spans": [
+              {
+                "text": "第二项"
+              }
+            ]
+          },
+          {
+            "kind": "quote",
+            "depth": 1,
+            "spans": [
+              {
+                "text": "引用"
+              }
+            ]
+          },
+          {
+            "kind": "code",
+            "depth": 0,
+            "lang": "rust",
+            "content": "let a = 1;"
+          },
+          {
+            "kind": "table",
+            "depth": 0,
+            "rows": [
+              [
+                "甲",
+                "乙"
+              ],
+              [
+                "1",
+                "2"
+              ]
+            ]
+          },
+          {
+            "kind": "divider"
+          }
         ]
+      }
+    },
+    {
+      "name": "service.register params",
+      "type": "ServiceRegisterParams",
+      "value": {
+        "service": "markdown",
+        "version": 1,
+        "methods": [
+          "parse"
+        ]
+      }
+    },
+    {
+      "name": "service.list result",
+      "type": "ServiceListResult",
+      "value": {
+        "services": [
+          {
+            "service": "markdown",
+            "version": 1,
+            "methods": [
+              "parse"
+            ],
+            "replaceable": true,
+            "candidates": [
+              "com.example.parser"
+            ]
+          },
+          {
+            "service": "vault",
+            "version": 1,
+            "methods": [
+              "readText",
+              "writeText"
+            ],
+            "replaceable": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "service.call params",
+      "type": "ServiceCallParams",
+      "value": {
+        "service": "vault",
+        "method": "readText",
+        "params": {
+          "path": "notes/a.md"
+        }
+      }
+    },
+    {
+      "name": "host:service.call params",
+      "type": "HostServiceCallParams",
+      "value": {
+        "callId": "svc-7",
+        "service": "markdown",
+        "method": "parse",
+        "params": {
+          "content": "# A"
+        }
+      }
+    },
+    {
+      "name": "service.result params",
+      "type": "ServiceResultParams",
+      "value": {
+        "callId": "svc-7",
+        "result": {
+          "blocks": []
+        }
+      }
+    },
+    {
+      "name": "service.result params (error)",
+      "type": "ServiceResultParams",
+      "value": {
+        "callId": "svc-8",
+        "error": "provider_unavailable：提供者已停用"
+      }
+    },
+    {
+      "name": "host:service.changed params",
+      "type": "ServiceChangedParams",
+      "value": {
+        "service": "markdown",
+        "provider": "com.example.parser",
+        "available": true
+      }
+    },
+    {
+      "name": "host:frame.input key",
+      "type": "FrameInputParams",
+      "value": {
+        "surfaceId": "board",
+        "input": {
+          "kind": "key",
+          "key": {
+            "type": "named",
+            "name": "arrowDown"
+          },
+          "action": "press",
+          "modifiers": {
+            "shift": true
+          },
+          "text": "↓"
+        }
+      }
+    },
+    {
+      "name": "host:frame.input wheel",
+      "type": "FrameInputParams",
+      "value": {
+        "surfaceId": "board",
+        "input": {
+          "kind": "wheel",
+          "x": 12.0,
+          "y": 40.0,
+          "deltaX": 0.0,
+          "deltaY": 48.0,
+          "hit": "inc"
+        }
+      }
+    },
+    {
+      "name": "host:frame.input focus",
+      "type": "FrameInputParams",
+      "value": {
+        "surfaceId": "board",
+        "input": {
+          "kind": "focus",
+          "focused": true
+        }
+      }
+    },
+    {
+      "name": "host:frame.input resize",
+      "type": "FrameInputParams",
+      "value": {
+        "surfaceId": "board",
+        "input": {
+          "kind": "resize",
+          "width": 640.0,
+          "height": 480.0
+        }
       }
     }
   ]

@@ -6,10 +6,9 @@ use atelyx_plugin_protocol::layout::{
     LayoutSpecNode, MAX_DEPTH as SPEC_MAX_DEPTH, MAX_NAME_BYTES as SPEC_MAX_NAME_BYTES,
     MAX_PANELS as SPEC_MAX_PANELS, MAX_VIEWS_PER_PANEL as SPEC_MAX_VIEWS_PER_PANEL,
 };
-use atelyx_plugin_protocol::view::Axis;
+use atelyx_plugin_protocol::layout::Axis;
 use nanoid::nanoid;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 // ===== 类型（ui-state.json / 布局磁盘契约）=====
 
@@ -178,12 +177,12 @@ pub struct AppUiState {
     /// 最近打开的文件（跨仓库、去重置顶、上限截断；结构由壳侧自持，本模块原样透传）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recent_files: Vec<serde_json::Value>,
-    /// single 槽手动胜者覆盖（槽 → 钉住的贡献 id；由壳侧维护并 patch 到本模块）。
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub slot_winner_overrides: HashMap<String, String>,
     /// 已自动摆过默认布局的插件 id（每插件只摆一次；用户改名 / 删除后不再补回）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub plugin_layouts_applied: Vec<String>,
+    /// 已停用的内置视图 id（选择器不再列出；已打开的标签保留并显示停用占位）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disabled_views: Vec<String>,
 }
 
 /// ui-state.json 的 schema 版本（格式变更直接升版，旧文件按默认态处理）。
@@ -340,10 +339,6 @@ pub struct UiStatePatch {
     pub focused_panel_id: Option<Option<String>>,
     #[serde(default)]
     pub recent_files: Option<Vec<serde_json::Value>>,
-    /// 钉住表整表替换：JSON `{}` = 清空全部；JSON null 经 serde 解为外层 None（= 不改），
-    /// 与 de_patch_clearable 字段（null = 定向清除）语义不同——删键发整表，不在此发 null。
-    #[serde(default)]
-    pub slot_winner_overrides: Option<HashMap<String, String>>,
 }
 
 /// 可清除补丁字段的反序列化：JSON `null` = 显式清除（外层 Some + 内层 None），
@@ -1812,32 +1807,21 @@ mod tests {
         assert!(serde_json::from_str::<UiStatePatch>(r#"{"lastCanvasFile": 42}"#).is_err());
     }
 
-    #[test]
-    fn ui_state_patch_slot_winner_overrides_roundtrip() {
-        // 壳侧把「single 槽手动胜者」整表 patch 进来（壳侧权威字段），原样合并落盘。
-        let p: UiStatePatch = serde_json::from_str(
-            r#"{"slotWinnerOverrides": {"empty/canvas": "com.a:empty/canvas"}}"#,
-        )
-        .unwrap();
-        assert_eq!(
-            p.slot_winner_overrides.as_ref().and_then(|m| m.get("empty/canvas")),
-            Some(&"com.a:empty/canvas".to_string())
-        );
-        // 字段缺失 = 不修改
-        let p: UiStatePatch = serde_json::from_str(r#"{}"#).unwrap();
-        assert!(p.slot_winner_overrides.is_none());
-        // 空表 = 清空全部（删键发整表 `{}`）
-        let p: UiStatePatch = serde_json::from_str(r#"{"slotWinnerOverrides": {}}"#).unwrap();
-        assert_eq!(p.slot_winner_overrides, Some(HashMap::new()));
 
-        // AppUiState 磁盘往返：空表省略、非空保留（camelCase 键）。
-        let ui: AppUiState = serde_json::from_str(
-            r#"{"schema":"atelyx-ui-state/v2","slotWinnerOverrides":{"empty/canvas":"com.b:empty/canvas"}}"#,
-        )
-        .unwrap();
-        assert_eq!(ui.slot_winner_overrides.get("empty/canvas").map(String::as_str), Some("com.b:empty/canvas"));
+    #[test]
+    fn ui_state_disabled_views_roundtrip() {
+        // 停用表是可缺省的新字段：缺省省略、非空按 camelCase 键往返。
+        let empty = serde_json::to_string(&AppUiState::default()).unwrap();
+        assert!(!empty.contains("disabledViews"), "空表不落盘：{empty}");
+        let ui: AppUiState =
+            serde_json::from_str(r#"{"schema":"atelyx-ui-state/v2","disabledViews":["note"]}"#)
+                .unwrap();
+        assert_eq!(ui.disabled_views, ["note"]);
         let serialized = serde_json::to_string(&ui).unwrap();
-        assert!(serialized.contains(r#""slotWinnerOverrides":{"empty/canvas":"com.b:empty/canvas"}"#));
+        assert!(serialized.contains(r#""disabledViews":["note"]"#));
+        // 旧文件没有该字段：按空表处理
+        let old: AppUiState = serde_json::from_str(r#"{"schema":"atelyx-ui-state/v2"}"#).unwrap();
+        assert!(old.disabled_views.is_empty());
     }
 
     #[test]

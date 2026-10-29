@@ -3,12 +3,13 @@
 
 use std::sync::{Arc, Mutex};
 
-use atelyx_plugin_sdk::canvas_builders::{draw_text, rect, token};
+use atelyx_plugin_sdk::frame_builders::{rect, text as draw_text, token};
 use atelyx_plugin_sdk::frame_builders::{fps, frame, hit, ime, ime_rect, keys};
-use atelyx_plugin_sdk::protocol::canvas::DrawCommand;
+use atelyx_plugin_sdk::protocol::paint::DrawCommand;
 use atelyx_plugin_sdk::protocol::frame::{FrameInput, FrameInputParams, FrameTickParams};
 use atelyx_plugin_sdk::protocol::method::ContributionSlot;
-use atelyx_plugin_sdk::protocol::view::{ColorToken, Key};
+use atelyx_plugin_sdk::protocol::frame::Key;
+use atelyx_plugin_sdk::protocol::paint::ColorToken;
 use atelyx_plugin_sdk::{run_stdio, Context, PluginHandler, PluginInfo};
 
 /// 面板贡献 id，同时是该面挂载后的 surfaceId。

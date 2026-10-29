@@ -3,7 +3,7 @@
 //! 的单一广播通道进入壳的 update。进程创建与清理一律经 [`crate::plugin_process`]。
 
 mod ai_tools;
-mod canvas_list;
+
 mod capability;
 mod child_process;
 mod fs;
@@ -16,6 +16,7 @@ mod manifest;
 mod markdown;
 /// 市场数据源（公开给壳：索引拉取 / 缓存 / Release 取数）。
 pub mod market;
+mod service_dir;
 mod shortcut;
 /// 表格服务面的纯映射（公开给壳：表格真源 → 协议只读快照）。
 pub mod table;
@@ -23,7 +24,7 @@ pub mod table;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use atelyx_plugin_protocol::event;
 use atelyx_plugin_protocol::manifest::Manifest;
@@ -35,40 +36,38 @@ use crate::plugin_process::PluginProcessHost;
 
 use ai_tools::ToolCallWait;
 use instance::Instance;
+use service_dir::{ServiceCallWait, ServiceDir};
 
 /// 协议类型再导出：壳只依赖 `atelyx-core`，不直接依赖协议 crate。
 pub use ai_tools::{PluginToolOutput, PluginToolSpec};
-pub use canvas_list::CanvasList;
-pub use atelyx_plugin_protocol::canvas::{CanvasColor, CanvasPoint, DrawCommand, TextAlign};
-pub use atelyx_plugin_protocol::frame::{FrameInput, FrameRect, HitCursor, HitRegion, SurfaceFrame};
+pub use atelyx_plugin_protocol::frame::{
+    FrameInput, FrameRect, HitCursor, HitRegion, Key, KeyAction, Modifiers, MouseButton, NamedKey,
+    SurfaceFrame,
+};
+pub use atelyx_plugin_protocol::paint::{
+    ColorToken, DrawCommand, ImageFit, ImageSource, PaintColor, PaintPoint, TextAlign, TextFamily,
+    TextWeight,
+};
 pub use atelyx_plugin_protocol::event::{
     ChatChangeKind, ChatChangedPayload, FileChangeKind, FileChangedPayload, TableChangedPayload,
     VaultSwitchPayload,
 };
 pub use atelyx_plugin_protocol::layout::LayoutSpecNode;
 pub use atelyx_plugin_protocol::manifest::{DocTypeRegistration, Permission};
+/// 能力总线的对外契约类型（服务清单 / 登记参数 / 错误原因）。
+pub use atelyx_plugin_protocol::service;
 pub use atelyx_plugin_protocol::method::{
     AiAgent, AiAgentsResult, AiModel, AiModelPick, AiModelProvider, AiModelsResult,
-    CanvasResizedParams, ChatEvent, ChatEventParams, ChatHistoryParams, ChatHistoryResult,
+    AxesPadding, BUILTIN_SERVICES,
+    ChatEvent, ChatEventParams, ChatHistoryParams, ChatHistoryResult,
     ChatRenameParams, ChatSendParams, ChatSessionParams, ChatSessionSummary, ChatSessionWire,
     ChatStopParams, ClipboardImage, CollabMessageParams, CollabPeer, CollabPeersResult,
-    CollabSendParams, CollabSendQos, CollabSendResult, ContributionSlot, DefineIconParams,
-    FileFilter,
+    CollabSendParams, CollabSendQos, CollabSendResult, ContributionSlot, EdgesPadding, FileFilter,
     FontSizes, ImageInfoResult, MeasureBatchParams, MeasureBatchResult, MeasureItem,
-    MeasureTextParams, MeasureTextResult, NotificationLevel, Radii, ScrollEdge,
-    ScrollToParams, SetTrayItemsParams,
-    ShortcutQueryResult, SurfaceKind, TableField, TableRemoteSelection, TableSelection, TableRow,
-    TableSetCellImageParams, TableSnapshot, TakeoverScope, ThemeColors, ThemeResult, TrayClickParams,
-    TrayItemSpec, WindowOpenParams, WindowUpdateParams,
-};
-pub use atelyx_plugin_protocol::view::{
-    Align, AxesPadding, Axis, BoxSize, ButtonVariant, CanvasEventKind, CanvasPointer, CardTone,
-    ColorSpec,
-    ColorToken, ControlSize, EdgesPadding, EventKind, EventValue, ImageFit, ImageSource, Interaction,
-    InteractionState, Justify, Key, KeyAction, LinkForm as ProtocolLinkForm, MenuItem, Modifiers,
-    MouseButton, NamedKey, NodeBody,
-    PaddingSpec, ReportMode, RowHeight, Rgba, SizeSpec, Surface, TextFamily, TextWeight, ViewEvent,
-    ViewNode,
+    MeasureTextResult, NotificationLevel, PaddingSpec, Radii,
+    SetTrayItemsParams, ShortcutQueryResult, SurfaceKind, TableField, TableRemoteSelection,
+    TableSelection, TableRow, TableSetCellImageParams, TableSnapshot, TakeoverScope, ThemeColors,
+    ThemeResult, TrayClickParams, TrayItemSpec, WindowOpenParams, WindowUpdateParams,
 };
 
 /// 插件运行状态。
@@ -86,29 +85,35 @@ pub enum PluginStatus {
     Failed(String),
 }
 
-/// 一条被拒的能力调用（审计记录）。
+/// 一条能力调用记录（审计）。调用一律执行，记录用于设置页区分「声明能力」与「实际用到但未声明」。
 #[derive(Clone, Debug)]
 pub struct AuditRecord {
+    /// 调用的方法名（`service.call` 记规范化后的完整方法名）。
     pub method: String,
     /// 调用携带的路径（无则空串）。
     pub detail: String,
     /// 记录时刻（unix 秒）。
     pub at: u64,
+    /// 该方法所属能力在 manifest 里声明过（false = 实际用到但未声明）。
+    pub declared: bool,
 }
 
-/// 运行时 → 壳的广播事件（状态 / 通知 / 拒调用 / 界面与贡献变化；允许落后丢帧）。
+/// 运行时 → 壳的广播事件（状态 / 通知 / 未声明调用 / 界面与贡献变化；允许落后丢帧）。
 #[derive(Clone, Debug)]
 pub enum PluginEvent {
     StatusChanged { id: String, status: PluginStatus },
     Notification { id: String, title: String, body: Option<String>, level: NotificationLevel },
+    /// 某插件用到了未在 manifest 声明过的能力：调用照常执行，这里只做知情提示
+    /// （同一方法每次会话只广播第一次，避免提示刷屏）。
     PermissionDenied { id: String, method: String, detail: String },
-    /// 某插件提交了新的界面（界面树或整面帧，经 [`PluginRuntime::surface_tree`] /
-    /// [`PluginRuntime::surface_frame`] 取；丢帧不影响最终渲染）。
+    /// 某插件提交了新的整面帧（壳经 [`PluginRuntime::surface_frame`] 取；丢帧不影响最终渲染）。
     ViewSubmitted { id: String },
     /// 某插件的贡献注册表变化（注册 / 撤销 / 随会话收尾清空）。
     ContributionsChanged { id: String },
     /// 某插件注册的 AI 工具变化（注册 / 撤销 / 随会话收尾清空）。
     AiToolsChanged { id: String },
+    /// 服务目录变化（登记 / 撤销 / 切换提供者 / 提供者下线回落）：壳据此重建注册表的服务区。
+    ServiceChanged { id: String },
     /// 插件声明了自己的默认布局（壳在首次启用时摆进当前场景，之后不再重复）。
     DefaultLayoutDeclared { id: String, name: String, spec: LayoutSpecNode },
 }
@@ -253,10 +258,6 @@ pub enum HostRequest {
         request_id: u64,
         params: method::TableSetCellImageParams,
     },
-    /// 插件请求把某可滚动容器（list / scroll）滚到一端（滚动位置归壳的控件态）。
-    ScrollTo { plugin_id: String, request_id: u64, params: method::ScrollToParams },
-    /// 插件请求量算一段文字的占位尺寸（字体度量归壳的界面组件层）。
-    MeasureText { plugin_id: String, request_id: u64, params: method::MeasureTextParams },
     /// 插件请求批量量算文字（`query.measure`）：逐条给出宽度 / 行高 / 行数。
     MeasureBatch { plugin_id: String, request_id: u64, params: method::MeasureBatchParams },
     /// 插件请求当前主题的颜色 / 字号档 / 圆角档（`query.theme`）。
@@ -265,6 +266,8 @@ pub enum HostRequest {
     WindowUpdate { plugin_id: String, request_id: u64, params: method::WindowUpdateParams },
     /// 插件请求重新显示一个因失焦被隐藏的窗口。
     WindowShow { plugin_id: String, request_id: u64, window_id: String },
+    /// 插件请求拖动承载某面的窗口（自绘标题栏）。
+    WindowBeginDrag { plugin_id: String, request_id: u64, surface_id: String },
     /// 插件请求重命名一个会话（写元数据标题）。
     ChatRename { plugin_id: String, request_id: u64, params: method::ChatRenameParams },
     /// 插件请求删除一个会话（连同其消息文件）。
@@ -296,10 +299,10 @@ pub struct PluginSummary {
     pub status: PluginStatus,
     /// 不可装载的可读原因（None = 可装载）。
     pub load_error: Option<String>,
-    /// 被拒的能力调用条数。
-    pub denied: usize,
-    /// 已接收的界面提交次数（界面树与整面帧都计入）。
-    pub view_submits: u64,
+    /// 实际用到但未在 manifest 声明过的能力调用条数。
+    pub undeclared: usize,
+    /// 已接收的整面帧提交次数。
+    pub submits: u64,
     /// 安装来源目录（本地目录安装时记下的绝对路径；zip / 市场安装为 `None`）。
     pub source: Option<String>,
 }
@@ -364,6 +367,13 @@ pub struct PluginRuntime {
     /// 在途 AI 工具调用：callId → 等待项。
     tool_calls: Mutex<HashMap<String, ToolCallWait>>,
     next_tool_call_id: AtomicU64,
+    /// 服务目录：服务名 → 活动提供者与候选（能力总线的单例型语义）。
+    services: Mutex<ServiceDir>,
+    /// 在途跨插件服务调用：callId → (提供者 id, 结果回传通道)。
+    service_calls: Mutex<HashMap<String, ServiceCallWait>>,
+    next_service_call_id: AtomicU64,
+    /// 跨插件转发的执行器（首次转发时建立；读线程上没有 tokio 上下文可借）。
+    service_runtime: OnceLock<tokio::runtime::Handle>,
     /// 当前容器身份（见 [`PluginRuntime::on_vault_switch`]）：同一容器重复进入不动作，据此判别首次激活。
     container: Mutex<Option<String>>,
     /// 最近一次 `table:changed` 广播的表格路径：插件迟到订阅时补发当前状态（否则订阅前的
@@ -402,6 +412,10 @@ impl PluginRuntime {
             tools: Mutex::new(HashMap::new()),
             tool_calls: Mutex::new(HashMap::new()),
             next_tool_call_id: AtomicU64::new(1),
+            services: Mutex::new(ServiceDir::new()),
+            service_calls: Mutex::new(HashMap::new()),
+            next_service_call_id: AtomicU64::new(1),
+            service_runtime: OnceLock::new(),
             container: Mutex::new(None),
             current_table: Mutex::new(None),
             discovered: Mutex::new(HashMap::new()),
@@ -519,6 +533,9 @@ impl PluginRuntime {
                 request_id,
                 params,
             },
+            HostRequest::WindowBeginDrag { plugin_id, surface_id, .. } => {
+                HostRequest::WindowBeginDrag { plugin_id, request_id, surface_id }
+            }
             HostRequest::WindowShow { plugin_id, window_id, .. } => HostRequest::WindowShow {
                 plugin_id,
                 request_id,
@@ -552,8 +569,6 @@ impl PluginRuntime {
             | HostRequest::TableRemoveRow { .. }
             | HostRequest::TableSelectRow { .. }
             | HostRequest::TableSetCellImage { .. }
-            | HostRequest::ScrollTo { .. }
-            | HostRequest::MeasureText { .. }
             | HostRequest::MeasureBatch { .. }
             | HostRequest::QueryTheme { .. }
             | HostRequest::VaultImageInfo { .. }
@@ -729,16 +744,6 @@ impl PluginRuntime {
                 row_id,
             },
             HostRequest::TableSetCellImage { plugin_id, params, .. } => HostRequest::TableSetCellImage {
-                plugin_id,
-                request_id,
-                params,
-            },
-            HostRequest::ScrollTo { plugin_id, params, .. } => HostRequest::ScrollTo {
-                plugin_id,
-                request_id,
-                params,
-            },
-            HostRequest::MeasureText { plugin_id, params, .. } => HostRequest::MeasureText {
                 plugin_id,
                 request_id,
                 params,
@@ -945,6 +950,18 @@ impl PluginRuntime {
         })
     }
 
+    /// 插件请求拖动承载某面的窗口（面归属的窗口由壳解析）。
+    fn begin_window_drag(&self, plugin_id: &str, surface_id: &str) -> Result<std::sync::mpsc::Receiver<Result<(), String>>, String> {
+        if surface_id.trim().is_empty() {
+            return Err("surfaceId 不能为空".to_string());
+        }
+        self.open_ui_call(HostRequest::WindowBeginDrag {
+            plugin_id: plugin_id.to_string(),
+            request_id: 0,
+            surface_id: surface_id.to_string(),
+        })
+    }
+
     // ---------- 领域文档类型 ----------
 
     /// 全部已安装插件注册的领域文档类型（按插件 id + 扩展名排序；文件树 / 新建菜单 / 打开路由用）。
@@ -1053,16 +1070,7 @@ impl PluginRuntime {
         }
     }
 
-    /// 取某插件某个面的最新界面树（从未提交 / 已随会话收尾清除时为 `None`）。
-    pub fn surface_tree(&self, plugin_id: &str, surface_id: &str) -> Option<ViewNode> {
-        self.instances
-            .lock()
-            .unwrap()
-            .get(plugin_id)
-            .and_then(|i| i.surface_tree(surface_id))
-    }
 
-    /// 取某插件某面的整面帧（未提交 / 已清除时为 `None`）。
     pub fn surface_frame(
         &self,
         plugin_id: &str,
@@ -1075,39 +1083,7 @@ impl PluginRuntime {
             .and_then(|i| i.surface_frame(surface_id))
     }
 
-    /// 取某插件某面某画布节点的最新绘图指令清单（整发整换；未提交 / 已清除时为 `None`）。
-    pub fn surface_canvas(
-        &self,
-        plugin_id: &str,
-        surface_id: &str,
-        node_id: &str,
-    ) -> Option<std::sync::Arc<CanvasList>> {
-        self.instances
-            .lock()
-            .unwrap()
-            .get(plugin_id)
-            .and_then(|i| i.surface_canvas(surface_id, node_id))
-    }
-
-    /// 回发一条界面事件给插件。插件未在跑时静默丢弃（对端已不在）。
-    pub fn send_view_event(&self, plugin_id: &str, surface_id: &str, node_id: &str, event: ViewEvent) {
-        let instance = self.instances.lock().unwrap().get(plugin_id).cloned();
-        if let Some(instance) = instance {
-            instance.notify_view_event(surface_id, node_id, event);
-        }
-    }
-
-    /// 某插件定义的自备图标形状（名字 → 24x24 描边路径）；未定义 / 已随会话清除 = 空表。
-    pub fn plugin_icons(&self, plugin_id: &str) -> HashMap<String, String> {
-        self.instances
-            .lock()
-            .unwrap()
-            .get(plugin_id)
-            .map(|i| i.icons())
-            .unwrap_or_default()
-    }
-
-    /// 向某插件的运行日志追加一条宿主侧诊断（如界面树引用了未注册的图标名）。
+    /// 向某插件的运行日志追加一条宿主侧诊断（如帧里引用了未注册的图片源）。
     /// 返回是否真正写入：实例不在（未启用 / 已卸载 / 装载失败）时无处落盘，调用方据此
     /// 决定是否保留重试，而不是把「写不进去」当成「已报告」。
     pub fn log_to_plugin(&self, plugin_id: &str, text: &str) -> bool {
@@ -1121,14 +1097,6 @@ impl PluginRuntime {
         }
     }
 
-    /// 告知插件某画布节点当前的像素尺寸（`host:canvas.resized`；尺寸变化时发）。
-    pub fn notify_canvas_resized(&self, plugin_id: &str, surface_id: &str, node_id: &str, width: f32, height: f32) {
-        let instance = self.instances.lock().unwrap().get(plugin_id).cloned();
-        if let Some(instance) = instance {
-            instance.notify_canvas_resized(surface_id, node_id, width, height);
-        }
-    }
-
     /// 回发一条整面帧的原始输入（`host:frame.input`）。插件未在跑时静默丢弃。
     pub fn notify_frame_input(
         &self,
@@ -1139,14 +1107,6 @@ impl PluginRuntime {
         let instance = self.instances.lock().unwrap().get(plugin_id).cloned();
         if let Some(instance) = instance {
             instance.notify_frame_input(surface_id, input);
-        }
-    }
-
-    /// 回发键盘焦点变化（`host:view.event` 的 `focus` / `blur`）。插件未在跑时静默丢弃。
-    pub fn notify_plugin_focus(&self, plugin_id: &str, surface_id: &str, node_id: &str, focused: bool) {
-        let instance = self.instances.lock().unwrap().get(plugin_id).cloned();
-        if let Some(instance) = instance {
-            instance.notify_plugin_focus(surface_id, node_id, focused);
         }
     }
 
@@ -1232,8 +1192,8 @@ impl PluginRuntime {
                         enabled: entry.enabled,
                         status: instance.map(|i| i.status()).unwrap_or(PluginStatus::Stopped),
                         load_error: entry.manifest.as_ref().err().cloned(),
-                        denied: instance.map(|i| i.denied_count()).unwrap_or(0),
-                        view_submits: instance.map(|i| i.view_submits()).unwrap_or(0),
+                        undeclared: instance.map(|i| i.undeclared_count()).unwrap_or(0),
+                        submits: instance.map(|i| i.submits()).unwrap_or(0),
                         source: None,
                     }
                 })
@@ -1361,6 +1321,7 @@ impl PluginRuntime {
         self.fail_all_ui_calls("宿主已退出");
         self.fail_all_shell_calls("宿主已退出");
         self.fail_all_tool_calls("宿主已退出");
+        self.fail_all_service_calls("宿主已退出");
         self.process_host.shutdown_children();
     }
 
@@ -1607,12 +1568,11 @@ fn request_plugin_id(request: &HostRequest) -> &str {
         | HostRequest::TableRemoveRow { plugin_id, .. }
         | HostRequest::TableSelectRow { plugin_id, .. }
         | HostRequest::TableSetCellImage { plugin_id, .. }
-        | HostRequest::ScrollTo { plugin_id, .. }
-        | HostRequest::MeasureText { plugin_id, .. }
         | HostRequest::MeasureBatch { plugin_id, .. }
         | HostRequest::QueryTheme { plugin_id, .. }
         | HostRequest::WindowUpdate { plugin_id, .. }
         | HostRequest::WindowShow { plugin_id, .. }
+        | HostRequest::WindowBeginDrag { plugin_id, .. }
         | HostRequest::ChatRename { plugin_id, .. }
         | HostRequest::ChatDelete { plugin_id, .. }
         | HostRequest::ChatCompact { plugin_id, .. }

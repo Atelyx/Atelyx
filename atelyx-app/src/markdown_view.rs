@@ -56,29 +56,11 @@ const CODE_MAX_LINES: usize = 18;
 /// 任务项标记列宽（勾选框所在窄列）。普通项的列宽按源码标记串实测，见 `item_marker_width`。
 const LIST_MARKER_W: f32 = 20.0;
 
-/// 可点的链接目标（外链 / 仓库路径 / wiki）；`plugin` 非空 = 来自插件正文，
-/// 点击除默认打开外还向该插件的面回发 `linkClick`。
+/// 可点的链接目标（外链 / 仓库路径 / wiki）。
 #[derive(Clone)]
 pub struct LinkTarget {
     pub href: String,
     pub form: LinkForm,
-    pub plugin: Option<PluginLinkScope>,
-}
-
-/// 插件正文的归属（点击事件回发时定位插件、面与节点）。
-#[derive(Clone)]
-pub struct PluginLinkScope {
-    pub plugin_id: String,
-    pub surface_id: String,
-    pub node_id: String,
-}
-
-/// 正文整体样式覆盖：基础字体 / 文字色与插件链接作用域（缺省 = 主题语义）。
-#[derive(Clone, Default)]
-pub struct BodyStyle {
-    pub font: Option<Font>,
-    pub color: Option<Color>,
-    pub link_scope: Option<PluginLinkScope>,
 }
 
 /// 行内可见片段：可见文本 + 该文本对应的源区间 + 样式。
@@ -135,7 +117,6 @@ pub fn document_view<'a>(
         images,
         soft_break,
         1.0,
-        BodyStyle::default(),
         SelectMode::Note(selection),
     ))
     .width(Length::Fill)
@@ -151,19 +132,7 @@ pub fn document_body_scaled<'a>(
     soft_break: bool,
     scale: f32,
 ) -> Element<'a, Message> {
-    document_body_with(doc, theme, images, soft_break, scale, BodyStyle::default(), SelectMode::Off)
-}
-
-/// 带整体样式覆盖的正文体（插件 Markdown 节点的字重 / 字色与链接作用域）。
-pub fn document_body_styled<'a>(
-    doc: &'a MarkdownDocument,
-    theme: &iced::Theme,
-    images: &'a ImageHandles,
-    soft_break: bool,
-    scale: f32,
-    body: BodyStyle,
-) -> Element<'a, Message> {
-    document_body_with(doc, theme, images, soft_break, scale, body, SelectMode::Off)
+    document_body_with(doc, theme, images, soft_break, scale, SelectMode::Off)
 }
 
 /// 对话正文体（可拖选）：`scope` 标识本消息段，`selection` 为应用层选区（按段隔离）。
@@ -182,7 +151,6 @@ pub fn document_body_select<'a>(
         images,
         soft_break,
         scale,
-        BodyStyle::default(),
         SelectMode::Chat { scope, selection },
     )
 }
@@ -211,7 +179,6 @@ fn document_body_with<'a>(
     images: &'a ImageHandles,
     soft_break: bool,
     scale: f32,
-    body: BodyStyle,
     select: SelectMode<'a>,
 ) -> Element<'a, Message> {
     let render = Render {
@@ -221,7 +188,6 @@ fn document_body_with<'a>(
         images,
         soft_break,
         scale,
-        body,
         select,
     };
     let mut body = column![].width(Length::Fill).spacing(0);
@@ -534,7 +500,6 @@ pub fn edit_rows<'a>(
         images,
         soft_break: true,
         scale: 1.0,
-        body: BodyStyle::default(),
         select: SelectMode::Off,
     };
     render.rows(source, blocks)
@@ -550,8 +515,6 @@ struct Render<'a> {
     soft_break: bool,
     /// 字号与行高倍数（画布卡浮层按视口缩放；面板与编辑面传 1.0）。
     scale: f32,
-    /// 整体样式覆盖（插件正文；缺省 = 主题语义）。
-    body: BodyStyle,
     /// 行内段落拖选档位（含应用层选区；随档位下发给段落）。
     select: SelectMode<'a>,
 }
@@ -573,13 +536,9 @@ impl Render<'_> {
         heading_size(level) * self.scale
     }
 
-    /// 行内基础样式：字体与字色可被插件正文整体覆盖，其余从默认值起。
+    /// 行内基础样式：正文字体、颜色随主题语义。
     fn text_style(&self) -> TextStyle {
-        TextStyle {
-            font: self.body.font.unwrap_or_else(crate::ui::regular),
-            color: self.body.color,
-            ..TextStyle::base()
-        }
+        TextStyle { font: crate::ui::regular(), ..TextStyle::base() }
     }
 
     /// 块序列：每块附源区间与前置空行数（间距由调用方按空行数补行高）。
@@ -1202,7 +1161,6 @@ fn code_body<'a>(code: &str, hit: Option<((usize, usize), f32)>, scale: f32) -> 
                 images,
                 soft_break: self.soft_break,
                 scale: self.scale,
-                body: self.body.clone(),
                 select: self.select,
             };
             table::column(head, move |row: usize| {
@@ -1407,7 +1365,7 @@ fn code_body<'a>(code: &str, hit: Option<((usize, usize), f32)>, scale: f32) -> 
                             src,
                             st: inner,
                             scale: 1.0,
-                            link: Some(LinkTarget { href: href.clone(), form: *form, plugin: None }),
+                            link: Some(LinkTarget { href: href.clone(), form: *form }),
                         });
                     }
                     LinkForm::Create => {
@@ -1423,7 +1381,7 @@ fn code_body<'a>(code: &str, hit: Option<((usize, usize), f32)>, scale: f32) -> 
                     src: Self::aligned_src(source, *from, *to, label),
                     st: inner,
                     scale: 1.0,
-                    link: Some(LinkTarget { href: href.clone(), form: LinkForm::External, plugin: None }),
+                    link: Some(LinkTarget { href: href.clone(), form: LinkForm::External }),
                 });
             }
             InlineSpan::Wiki { from, to, target, label } => {
@@ -1433,7 +1391,7 @@ fn code_body<'a>(code: &str, hit: Option<((usize, usize), f32)>, scale: f32) -> 
                     src: Self::aligned_src(source, *from, *to, label),
                     st: inner,
                     scale: 1.0,
-                    link: Some(LinkTarget { href: target.clone(), form: LinkForm::Wiki, plugin: None }),
+                    link: Some(LinkTarget { href: target.clone(), form: LinkForm::Wiki }),
                 });
             }
             // 图片以替代文字占位（不加载图片字节）
@@ -1572,16 +1530,15 @@ fn code_body<'a>(code: &str, hit: Option<((usize, usize), f32)>, scale: f32) -> 
         widget.into()
     }
 
-    /// 交互档或插件正文给链接片段挂触点（纯只读档不挂，链接仅作样式）；
-    /// 插件正文的触点带上面的归属，点击时回发 `linkClick`。
+    /// 交互档给链接片段挂触点（纯只读档不挂，链接仅作样式）。
     fn linked<'a>(
         &self,
         leaf: Span<'a, LinkTarget, Font>,
         href: String,
         form: LinkForm,
     ) -> Span<'a, LinkTarget, Font> {
-        if self.interactive || self.body.link_scope.is_some() {
-            leaf.link(LinkTarget { href, form, plugin: self.body.link_scope.clone() })
+        if self.interactive {
+            leaf.link(LinkTarget { href, form })
         } else {
             leaf
         }
@@ -1734,7 +1691,6 @@ pub fn selected_text(
         images,
         soft_break,
         scale: 1.0,
-        body: BodyStyle::default(),
         select: SelectMode::Off,
     };
     let mut pieces = Vec::new();
@@ -1914,18 +1870,9 @@ fn rich<'a>(
     text.into()
 }
 
-/// 链接点击：插件正文回发给所属面，其余走默认打开。
+/// 链接点击：按目标形态打开。
 fn link_message(target: LinkTarget) -> Message {
-    match target.plugin {
-        Some(scope) => Message::PluginLink {
-            plugin_id: scope.plugin_id,
-            surface_id: scope.surface_id,
-            node_id: scope.node_id,
-            href: target.href,
-            form: target.form,
-        },
-        None => Message::OpenLink(target.href, target.form),
-    }
+    Message::OpenLink(target.href, target.form)
 }
 
 /// 空行间距元素：一个源码空行 = 一行高（行高按 `scale` 缩放）。

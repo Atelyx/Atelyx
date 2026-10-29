@@ -1,7 +1,7 @@
 //! 图标钮用的内置图标：按 24x24 网格定义描边形状，绘制时缩放到目标矩形。
 //! 只收插件界面常用的几枚——要用别的形状时插件可以在自绘里直接写指令。
 
-use atelyx_plugin_protocol::canvas::{CanvasColor, CanvasPoint, DrawCommand};
+use atelyx_plugin_protocol::paint::{PaintColor, PaintPoint, DrawCommand};
 
 use super::build::BuildCtx;
 use super::geom::Rect;
@@ -23,10 +23,10 @@ pub enum Icon {
 /// 图标线宽（24x24 网格下的描边宽度）。
 const STROKE: f32 = 2.0;
 
-pub(crate) fn draw(ctx: &mut BuildCtx<'_>, icon: Icon, rect: Rect, color: CanvasColor) {
+pub(crate) fn draw(ctx: &mut BuildCtx<'_>, icon: Icon, rect: Rect, color: PaintColor) {
     let scale = rect.w / 24.0;
     let width = (STROKE * scale).max(1.0);
-    let point = |x: f32, y: f32| CanvasPoint { x: rect.x + x * scale, y: rect.y + y * scale };
+    let point = |x: f32, y: f32| PaintPoint { x: rect.x + x * scale, y: rect.y + y * scale };
     let line = |ctx: &mut BuildCtx<'_>, x1: f32, y1: f32, x2: f32, y2: f32| {
         ctx.draw(DrawCommand::Line {
             x1: rect.x + x1 * scale,

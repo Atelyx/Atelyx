@@ -32,17 +32,16 @@ Atelyx 是一款以人为本的可拓展桌面工作台：对话、笔记、表�
 | --- | --- |
 | `atelyx-app/` | iced 桌面壳：窗口与布局、编辑器与各功能视图、插件面适配 |
 | `atelyx-ui/` | 界面组件库：调色板、字体、图标、基元控件、浮层与菜单 |
-| `atelyx-view/` | 插件界面树：构建辅助与预制件（默认档）+ 宿主侧解释渲染（`render` 特性） |
 | `atelyx-core/` | UI 无关核心：仓库存储、Markdown 与 frontmatter 解析、会话与布局模型、插件宿主运行时、进程托管 |
-| `atelyx-plugin-protocol/` | 插件协议契约：握手、JSON-RPC 信封、ViewNode 界面树、manifest |
-| `atelyx-plugin-sdk/` | 插件侧 SDK：连接泵、能力面代理、界面树托管 |
+| `atelyx-plugin-protocol/` | 插件协议契约：握手、JSON-RPC 信封、整面帧与绘制指令、能力总线、manifest |
+| `atelyx-plugin-sdk/` | 插件侧 SDK：连接泵、能力面代理、绘制指令构造、控件层 |
 | `atelyx-server/` | 协作服务端（独立 Cargo 工程，不进 workspace） |
 
-依赖方向：`atelyx-app` → `atelyx-core` + `atelyx-view`（`render`）+ `atelyx-ui`；`atelyx-view` → `atelyx-plugin-protocol`，渲染档再加 `atelyx-ui`；`atelyx-plugin-sdk` → `atelyx-plugin-protocol` + `atelyx-view` 构建档。`atelyx-core` 无 GUI 依赖；`atelyx-server` 不被任何 crate 依赖，客户端只经 HTTP/WS 访问。
+依赖方向：`atelyx-app` → `atelyx-core` + `atelyx-ui`；`atelyx-plugin-sdk` → `atelyx-plugin-protocol`；`atelyx-core` → `atelyx-plugin-protocol`。`atelyx-core` 无 GUI 依赖；`atelyx-server` 不被任何 crate 依赖，客户端只经 HTTP/WS 访问。
 
 ## 插件开发
 
-插件是独立进程：宿主启动它，经 stdin/stdout 上的 JSON-RPC 与它通信；界面由插件提交声明式控件树或绘图指令，宿主负责渲染。语言不限，官方提供 Rust SDK。
+插件是独立进程：宿主启动它，经 stdin/stdout 上的 JSON-RPC 与它通信；界面由插件提交整面帧（绘制指令），宿主按几何命中并回发原始输入。语言不限，官方提供 Rust SDK。
 
 - 上手、构建打包、本地调试与上架：见 [插件开发文档](docs/plugin-development.md)。
 - 逐字段 / 逐方法的契约：[插件 API 参考](docs/plugin-api.md)（由协议源码生成，改协议后重跑 `cargo run -p xtask -- docs`）。

@@ -10,7 +10,7 @@ use atelyx_core::plugin_runtime::ContributionSlot;
 
 use crate::layout_view::{PopupOpen, PopupState, format_ts, parse_hex_color};
 use crate::ui::controls;
-use crate::ui::icon::{icon, icon_resolved};
+use crate::ui::icon::{icon, icon_stroke};
 use crate::ui::palette as pal;
 use crate::ui::scroll;
 use crate::ui::{bold, mono, text};
@@ -66,7 +66,7 @@ fn settings_item_dyn(id: &str, label: &str, icon_name: &str, active_tab: &str) -
     let active = id == active_tab;
     button(
         row![
-            icon_resolved(icon_name, 14.0, if active { pal::ACCENT } else { pal::TEXT_SECONDARY }, 1.5),
+            icon_stroke(icon_name, 14.0, if active { pal::ACCENT } else { pal::TEXT_SECONDARY }, 1.5),
             text(label.to_string())
                 .size(pal::fs_caption())
                 .color(if active { pal::ACCENT } else { pal::TEXT_SECONDARY })
@@ -103,17 +103,12 @@ pub fn settings_view<'a>(app: &'a App, window: iced::window::Id) -> Element<'a, 
     };
     let active = app.settings_tab.as_str();
     let mut nav = column![].spacing(4);
-    // 插件设置 tab：运行中插件的设置贡献（label/icon 取自注册），与应用级设置并列
-    let plugin_items: Vec<(String, String, Cow<'static, str>)> =
-        crate::plugin_actions::contributions_of(app, ContributionSlot::Settings)
-            .map(|c| {
-                (
-                    crate::plugin_actions::view_kind(&c.plugin_id, &c.id),
-                    c.label.clone(),
-                    crate::plugin_actions::contribution_icon(app, &c.plugin_id, &c.id),
-                )
-            })
-            .collect();
+    // 插件设置 tab：运行中插件的设置贡献（label/icon 取自注册表），与应用级设置并列
+    let plugin_items: Vec<(String, String, Cow<'static, str>)> = app
+        .registry
+        .views_in(ContributionSlot::Settings)
+        .map(|entry| (entry.id.clone(), entry.label.clone(), entry.icon.clone()))
+        .collect();
     nav = push_group(nav, "应用级", "全局共享", false, APP_SETTINGS, active);
     if !plugin_items.is_empty() {
         nav = nav.push(container(controls::h_divider_subtle()).padding(Padding::ZERO.top(8.0).bottom(4.0)));

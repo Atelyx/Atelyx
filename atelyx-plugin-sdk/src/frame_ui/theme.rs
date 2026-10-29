@@ -1,9 +1,9 @@
 //! 控件默认样式：字号 / 圆角随宿主主题（`query.theme`），颜色一律走主题 token；
 //! 控件高度与内边距是 SDK 常量，与宿主表单控件同档，保证观感一致。
 
-use atelyx_plugin_protocol::canvas::CanvasColor;
+use atelyx_plugin_protocol::paint::PaintColor;
 use atelyx_plugin_protocol::method::{FontSizes, Radii, ThemeColors, ThemeResult};
-use atelyx_plugin_protocol::view::ColorToken;
+use atelyx_plugin_protocol::paint::ColorToken;
 
 /// 常规按钮高度（宿主 `btn_md`）。
 pub const BUTTON_H: f32 = 32.0;
@@ -46,10 +46,10 @@ impl From<ThemeResult> for Theme {
 
 impl Theme {
     /// 文本选区底色：宿主 `SELECTION` = 强调色 25% 不透明；accent 不可解析时退回强调软底。
-    pub(crate) fn selection(&self) -> CanvasColor {
+    pub(crate) fn selection(&self) -> PaintColor {
         match parse_hex(&self.colors.accent) {
-            Some([r, g, b, _]) => CanvasColor::Rgba { rgba: [r, g, b, 64] },
-            None => CanvasColor::Token { name: ColorToken::AccentSoft },
+            Some([r, g, b, _]) => PaintColor::Rgba { rgba: [r, g, b, 64] },
+            None => PaintColor::Token { name: ColorToken::AccentSoft },
         }
     }
 }
@@ -65,8 +65,8 @@ fn parse_hex(value: &str) -> Option<[u8; 4]> {
     }
 }
 
-pub(crate) fn token(name: ColorToken) -> CanvasColor {
-    CanvasColor::Token { name }
+pub(crate) fn token(name: ColorToken) -> PaintColor {
+    PaintColor::Token { name }
 }
 
 #[cfg(test)]
@@ -79,12 +79,12 @@ mod tests {
             colors: ThemeColors { accent: "#e0a94e".into(), ..ThemeColors::default() },
             ..Theme::default()
         };
-        assert_eq!(theme.selection(), CanvasColor::Rgba { rgba: [0xe0, 0xa9, 0x4e, 64] });
+        assert_eq!(theme.selection(), PaintColor::Rgba { rgba: [0xe0, 0xa9, 0x4e, 64] });
     }
 
     #[test]
     fn unparsable_accent_falls_back_to_the_soft_token() {
         let theme = Theme::default();
-        assert_eq!(theme.selection(), CanvasColor::Token { name: ColorToken::AccentSoft });
+        assert_eq!(theme.selection(), PaintColor::Token { name: ColorToken::AccentSoft });
     }
 }

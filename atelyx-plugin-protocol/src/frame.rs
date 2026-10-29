@@ -3,8 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::canvas::{validate_commands, DrawCommand, MAX_CANVAS_FPS};
-use crate::view::{Key, KeyAction, Modifiers, MouseButton};
+use crate::paint::{validate_commands, DrawCommand, MAX_FPS};
 
 /// 命中区数量上限（单帧）。
 pub const MAX_HITS: usize = 4096;
@@ -98,8 +97,8 @@ impl SurfaceFrame {
             ensure_rect(ime.x, ime.y, ime.w, ime.h, "输入法光标")?;
         }
         if let Some(fps) = self.fps {
-            if !(1..=MAX_CANVAS_FPS).contains(&fps) {
-                return Err(format!("帧率须在 1–{MAX_CANVAS_FPS} 之间"));
+            if !(1..=MAX_FPS).contains(&fps) {
+                return Err(format!("帧率须在 1–{MAX_FPS} 之间"));
             }
         }
         Ok(())
@@ -143,6 +142,81 @@ pub struct FrameSubmitParams {
     pub surface_id: String,
     #[serde(flatten)]
     pub frame: SurfaceFrame,
+}
+
+/// 键盘焦点事件与按键的归属：`Press` 含系统重复按键（长按方向键逐次到达），`Release` 在抬起时到达。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum KeyAction {
+    Press,
+    Release,
+}
+
+/// 按键：具名键（功能键与编辑键）或可打印字符。字符按布局产出（与用户所见一致），
+/// 大小写与符号跟随 Shift，因此 `a` 与 `A` 是两个值、`1` 与 `!` 也是两个值。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum Key {
+    Named { name: NamedKey },
+    Character { text: String },
+}
+
+/// 具名键。可打印字符走 [`Key::Character`]；这里放不可打印的编辑 / 功能键，外加空格
+/// （它与编辑语义绑定，且布局差异下字符形态不稳定）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum NamedKey {
+    Escape,
+    Enter,
+    Tab,
+    Space,
+    Backspace,
+    Delete,
+    Insert,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    ArrowUp,
+    ArrowDown,
+    ArrowLeft,
+    ArrowRight,
+    F1,
+    F2,
+    F3,
+    F4,
+    F5,
+    F6,
+    F7,
+    F8,
+    F9,
+    F10,
+    F11,
+    F12,
+}
+
+/// 修饰键状态（按键发生时的快照）：`control` = Ctrl（macOS 的 Control，不含 Command），
+/// `meta` = Windows / Super / Command 键。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Modifiers {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shift: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub control: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub alt: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub meta: bool,
+}
+
+/// 鼠标按键。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MouseButton {
+    Left,
+    Right,
+    Middle,
 }
 
 /// 宿主回发的原始输入。坐标 = 面本地逻辑像素；`hit` 为命中的命中区 id（未命中缺省）。
@@ -234,7 +308,7 @@ pub struct FrameTickParams {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::canvas::{CanvasColor, TextAlign};
+    use crate::paint::{ColorToken, PaintColor, TextAlign};
 
     fn hit(id: &str, x: f32, y: f32, w: f32, h: f32) -> HitRegion {
         HitRegion { id: id.into(), x, y, w, h, cursor: None }
@@ -248,7 +322,7 @@ mod tests {
                 y: 0.0,
                 content: "计数器".into(),
                 size: 14.0,
-                color: CanvasColor::Token { name: crate::view::ColorToken::Text },
+                color: PaintColor::Token { name: ColorToken::Text },
                 weight: None,
                 family: None,
                 max_width: Some(80.0),
@@ -282,7 +356,7 @@ mod tests {
             y: 0.0,
             content: "x".into(),
             size: 0.0,
-            color: CanvasColor::Token { name: crate::view::ColorToken::Text },
+            color: PaintColor::Token { name: ColorToken::Text },
             weight: None,
             family: None,
             max_width: None,

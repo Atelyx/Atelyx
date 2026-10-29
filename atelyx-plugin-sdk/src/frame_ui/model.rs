@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use atelyx_plugin_protocol::frame::SurfaceFrame;
 use atelyx_plugin_protocol::method::MarkdownBlock;
-use atelyx_plugin_protocol::view::{TextFamily, TextWeight};
+use atelyx_plugin_protocol::paint::{TextFamily, TextWeight};
 
 use super::geom::Rect;
 use super::markdown;
@@ -81,7 +81,7 @@ pub(crate) struct UiState {
     pub scroll_max: HashMap<String, f32>,
     /// 各滚动容器上一帧是否声明贴底跟随（由关转开的那一帧跳到终点）。
     pub follow_prev: HashMap<String, bool>,
-    /// `query.markdown` 的结果缓存（按原文取，内容不变即不重取）。
+    /// `markdown.parse` 的结果缓存（按原文取，内容不变即不重取）。
     pub markdown: HashMap<String, Vec<MarkdownBlock>>,
     /// Markdown 版面缓存（键含内容、宽度与量算代次）：滚动时长内容不必每帧重排。
     pub markdown_layouts: Arc<markdown::LayoutCache>,

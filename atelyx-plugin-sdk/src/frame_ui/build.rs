@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use atelyx_plugin_protocol::canvas::DrawCommand;
+use atelyx_plugin_protocol::paint::DrawCommand;
 use atelyx_plugin_protocol::frame::{FrameRect, HitCursor, HitRegion, SurfaceFrame};
 use atelyx_plugin_protocol::method::MarkdownBlock;
 

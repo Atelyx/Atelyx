@@ -18,7 +18,8 @@ pub struct RpcError {
 }
 
 impl RpcError {
-    /// 能力未在 manifest 声明：fail-closed 拒绝，`message` 带可读原因。
+    /// 保留码位：宿主当前不返回它（能力声明不构成拦截）。服务调用的失败回 `FAILED`，
+    /// `data.reason` 取 `service::error` 里的可读原因码。
     pub const PERMISSION_DENIED: i64 = -32001;
     /// 能力已声明但执行失败：`message` 为可读原因，`data` 可携带结构化细节。
     pub const FAILED: i64 = -32002;

@@ -197,13 +197,13 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use atelyx_plugin_protocol::canvas::DrawCommand;
+    use atelyx_plugin_protocol::paint::DrawCommand;
     use atelyx_plugin_protocol::envelope::Envelope;
     use atelyx_plugin_protocol::frame::{FrameInput, FrameSubmitParams, SurfaceFrame};
     use atelyx_plugin_protocol::method::{
         self, FontSizes, MeasureBatchParams, MeasureTextResult, Radii, TextPayload, ThemeColors, ThemeResult,
     };
-    use atelyx_plugin_protocol::view::{Key, KeyAction, Modifiers, MouseButton, NamedKey};
+    use atelyx_plugin_protocol::frame::{Key, KeyAction, Modifiers, MouseButton, NamedKey};
     use tokio::sync::mpsc;
 
     use super::*;
@@ -298,7 +298,7 @@ mod tests {
             self.requests.push(request.method.clone());
             let result = match request.method.as_str() {
                 m if m == method::query::THEME => serde_json::to_value(theme_result()).unwrap(),
-                m if m == method::query::MARKDOWN => {
+                m if m == method::markdown::PARSE => {
                     let params: atelyx_plugin_protocol::method::MarkdownParams =
                         serde_json::from_value(request.params).unwrap();
                     assert!(!params.content.is_empty());
@@ -910,7 +910,7 @@ mod tests {
         )));
         bench.render(|ui| ui.markdown("# 标题")).await.unwrap();
         assert_eq!(
-            bench.requests.iter().filter(|method| method.as_str() == method::query::MARKDOWN).count(),
+            bench.requests.iter().filter(|method| method.as_str() == method::markdown::PARSE).count(),
             1,
             "同内容只取一次"
         );
@@ -944,7 +944,7 @@ mod tests {
         let frame = bench
             .render(|ui| {
                 ui.column(6.0, |c| {
-                    c.chip("3 个", atelyx_plugin_protocol::view::ColorToken::Accent);
+                    c.chip("3 个", atelyx_plugin_protocol::paint::ColorToken::Accent);
                     c.progress(0.5);
                     c.icon_button("copy", Icon::Copy);
                 });

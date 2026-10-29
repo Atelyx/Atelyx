@@ -1,116 +1,76 @@
-//! 装配根：宿主认识的全部功能模块。
-//!
-//! 加一个 Pack = 在 [`Packs`] 加一个字段，并在 `views` / `view` 各加一条分派。
-//! 这里是唯一允许出现领域视图名的地方——布局层只按 id 查，不认识任何具体视图。
+//! 内置视图：条目（id / 名称 / 图标）是注册表的输入数据，渲染函数按同一 id 分派。
+//! 注册表条目是纯数据，渲染函数另立一张表（[`RENDERERS`]），单测锁住两张表 id 一一对应。
+//! 布局层只按 id 查注册表；视图内部按 id 关联是渲染细节，不外泄到布局。
 
-use atelyx_pack::{HostCtx, Pack, ViewDescriptor};
 use iced::window;
 use iced::Element;
 
-use crate::layout_view::{collab_room_view, files_view, inspector_view, note_view, search_view};
+use crate::registry::BuiltinView;
 use crate::{App, Message};
 
 /// 内置视图渲染函数签名。
 type ViewProvider = for<'a> fn(&'a App, window::Id) -> Element<'a, Message>;
 
-/// 内置视图：元数据与渲染函数同一行，顺序即呈现序。
-const BUILTIN_VIEWS: &[(ViewDescriptor, ViewProvider)] = &[
-    (
-        ViewDescriptor { id: "canvas", label: "画布", icon: "palette" },
-        crate::canvas_view::canvas_view,
-    ),
-    (ViewDescriptor { id: "note", label: "笔记", icon: "file-text" }, note_view),
-    (ViewDescriptor { id: "table", label: "表格", icon: "table" }, crate::table_view::table_view),
-    (ViewDescriptor { id: "files", label: "文件", icon: "files" }, files_view),
-    (ViewDescriptor { id: "search", label: "搜索", icon: "search" }, search_view),
-    (ViewDescriptor { id: "inspector", label: "属性", icon: "info" }, inspector_view),
-    (
-        ViewDescriptor { id: "aichat", label: "AI 对话", icon: "sparkles" },
-        crate::chat_view::chat_view,
-    ),
-    (ViewDescriptor { id: "collabroom", label: "协作房间", icon: "users" }, collab_room_view),
-    (
-        ViewDescriptor { id: "calendar", label: "日历", icon: "calendar-days" },
-        crate::calendar_view::calendar_view,
-    ),
-    (
-        ViewDescriptor { id: "repohistory", label: "仓库历史", icon: "history" },
-        crate::repohistory_view::repohistory_view,
-    ),
-    (ViewDescriptor { id: "recent", label: "最近打开", icon: "clock" }, crate::recent_view::recent_view),
+/// 内置视图条目：顺序即选择器与标签菜单的呈现序。
+pub(crate) const BUILTIN_VIEWS: &[BuiltinView] = &[
+    BuiltinView { id: "canvas", label: "画布", icon: "palette" },
+    BuiltinView { id: "note", label: "笔记", icon: "file-text" },
+    BuiltinView { id: "table", label: "表格", icon: "table" },
+    BuiltinView { id: "files", label: "文件", icon: "files" },
+    BuiltinView { id: "search", label: "搜索", icon: "search" },
+    BuiltinView { id: "inspector", label: "属性", icon: "info" },
+    BuiltinView { id: "aichat", label: "AI 对话", icon: "sparkles" },
+    BuiltinView { id: "collabroom", label: "协作房间", icon: "users" },
+    BuiltinView { id: "calendar", label: "日历", icon: "calendar-days" },
+    BuiltinView { id: "repohistory", label: "仓库历史", icon: "history" },
+    BuiltinView { id: "recent", label: "最近打开", icon: "clock" },
 ];
 
-/// 内置功能模块：视图全部编译在壳内，`view` 只做 id → 渲染函数的分派。
-struct BuiltinPack {
-    /// 元数据从 [`BUILTIN_VIEWS`] 摊平，呈现序与表一致。
-    views: Vec<ViewDescriptor>,
-}
+/// 内置视图 id → 渲染函数。与 [`BUILTIN_VIEWS`] 同 id 对齐（单测锁住）。
+const RENDERERS: &[(&str, ViewProvider)] = &[
+    ("canvas", crate::canvas_view::canvas_view),
+    ("note", crate::layout_view::note_view),
+    ("table", crate::table_view::table_view),
+    ("files", crate::layout_view::files_view),
+    ("search", crate::layout_view::search_view),
+    ("inspector", crate::layout_view::inspector_view),
+    ("aichat", crate::chat_view::chat_view),
+    ("collabroom", crate::layout_view::collab_room_view),
+    ("calendar", crate::calendar_view::calendar_view),
+    ("repohistory", crate::repohistory_view::repohistory_view),
+    ("recent", crate::recent_view::recent_view),
+];
 
-impl BuiltinPack {
-    fn new() -> Self {
-        Self { views: BUILTIN_VIEWS.iter().map(|(desc, _)| *desc).collect() }
-    }
-}
-
-/// 宿主类型即 `HostCtx` 的实现者：内置 Pack 拿到的 `&App` 是它的能力面全集。
-impl HostCtx for App {}
-
-impl Pack<App> for BuiltinPack {
-    type Msg = Message;
-
-    fn views(&self) -> &[ViewDescriptor] {
-        &self.views
-    }
-
-    fn view<'a>(
-        &'a self,
-        id: &str,
-        host: &'a App,
-        window: window::Id,
-    ) -> Option<Element<'a, Message>> {
-        BUILTIN_VIEWS.iter().find(|(desc, _)| desc.id == id).map(|(_, render)| render(host, window))
-    }
-}
-
-/// 装配根：宿主向各模块取视图的唯一入口。
-pub(crate) struct Packs {
-    builtin: BuiltinPack,
-}
-
-impl Packs {
-    pub(crate) fn new() -> Self {
-        Self { builtin: BuiltinPack::new() }
-    }
-
-    /// 各模块贡献的视图元数据（按模块登记序拼接）。
-    pub(crate) fn views(&self) -> &[ViewDescriptor] {
-        self.builtin.views()
-    }
-
-    /// 按 id 取视图内容；不属于任何模块时 `None`（调用方落占位）。
-    pub(crate) fn view<'a>(
-        &'a self,
-        id: &str,
-        host: &'a App,
-        window: window::Id,
-    ) -> Option<Element<'a, Message>> {
-        self.builtin.view(id, host, window)
-    }
+/// 按 id 取内置视图内容；不属于内置表时 `None`（调用方落占位）。
+pub(crate) fn render<'a>(
+    id: &str,
+    app: &'a App,
+    window: window::Id,
+) -> Option<Element<'a, Message>> {
+    RENDERERS
+        .iter()
+        .find(|(view, _)| *view == id)
+        .map(|(_, render)| render(app, window))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use atelyx_pack::ViewRegistry;
+    use std::collections::HashSet;
 
-    /// 内置视图 id 非空且唯一：装配期重复登记会被静默跳过（菜单里少一项），此处按数量锁住。
+    /// 每条内置视图条目都有渲染函数，且没有指向不存在条目的渲染分派。
     #[test]
-    fn builtin_views_register_cleanly() {
-        let pack = BuiltinPack::new();
-        let mut registry = ViewRegistry::default();
-        for desc in pack.views() {
-            registry.register(*desc).unwrap_or_else(|_| panic!("视图 id 重复或为空：{}", desc.id));
+    fn builtin_view_entries_and_renderers_align() {
+        let entry_ids: HashSet<&str> = BUILTIN_VIEWS.iter().map(|view| view.id).collect();
+        let renderer_ids: HashSet<&str> = RENDERERS.iter().map(|(id, _)| *id).collect();
+        assert_eq!(entry_ids.len(), BUILTIN_VIEWS.len(), "内置视图 id 重复");
+        assert_eq!(renderer_ids.len(), RENDERERS.len(), "渲染分派 id 重复");
+        for view in BUILTIN_VIEWS {
+            assert!(!view.id.is_empty(), "内置视图 id 不能为空");
+            assert!(renderer_ids.contains(view.id), "内置视图 {} 没有渲染函数", view.id);
         }
-        assert_eq!(registry.len(), pack.views().len());
+        for (id, _) in RENDERERS {
+            assert!(entry_ids.contains(id), "渲染分派 {id} 没有对应的注册表条目");
+        }
     }
 }

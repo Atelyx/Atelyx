@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 
 use atelyx_plugin_protocol::method::{MeasureItem, MeasureTextResult};
-use atelyx_plugin_protocol::view::{TextFamily, TextWeight};
+use atelyx_plugin_protocol::paint::{TextFamily, TextWeight};
 
 use super::model::FontSpec;
 
@@ -28,7 +28,9 @@ impl Metrics {
     }
 
     /// 取量算结果：未命中时按估算值排版并登记待量算。
+    /// 换行宽度钳到至少 1 像素：宿主拒收 `max_width <= 0` 的条目（整批丢失，估算也会除零）。
     pub(crate) fn measure(&mut self, text: &str, spec: FontSpec, max_width: Option<f32>) -> MeasureTextResult {
+        let max_width = max_width.map(|width| width.max(1.0));
         let key = key_of(text, spec, max_width);
         if let Some(hit) = self.cache.get(&key) {
             return *hit;

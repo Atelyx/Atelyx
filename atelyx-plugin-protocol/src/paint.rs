@@ -1,15 +1,14 @@
-//! 画布显示清单：插件提交绘图指令，宿主 canvas 逐条执行并转发指针事件；命中由插件按指令几何自算。
-//! 指令集为封闭枚举，扩容随协议升版；坐标一律节点本地逻辑像素、左上原点。
+//! 绘制指令集：插件把界面画成指令，宿主逐条执行。指令集为封闭枚举，扩容随协议升版；
+//! 坐标一律面本地逻辑像素、左上原点。命中由插件声明的命中区（见 [`crate::frame`]）表达，
+//! 绘制指令本身不带交互语义。
 
 use serde::{Deserialize, Serialize};
 
-use crate::view::{ColorToken, ImageFit, ImageSource, TextFamily, TextWeight};
+/// 帧率上限（帧声明的 `fps` 上限，也是宿主调度帧通知的最细节拍）。
+pub const MAX_FPS: u16 = 120;
 
-fn default_stroke_width() -> f32 {
-    1.0
-}
-
-/// 文字水平对齐：以 `maxWidth` 为对齐区域、`x` 为区域左缘，按量算出的整段宽度换算（换行后段内各行仍左对齐）。
+/// 文字水平对齐：以 `maxWidth` 为对齐区域、`x` 为区域左缘，按量算出的整段宽度换算
+/// （换行后段内各行仍左对齐）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum TextAlign {
@@ -18,11 +17,87 @@ pub enum TextAlign {
     End,
 }
 
+/// 字体族：界面字体（跟随用户设置）或系统等宽族。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TextFamily {
+    Ui,
+    Mono,
+}
+
+/// 字重三档。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TextWeight {
+    Normal,
+    Medium,
+    SemiBold,
+}
+
+/// 主题 token：取色引用宿主调色板，主题变化时自动跟随。
+/// `accentSoft` / `warningSoft` / `dangerSoft` / `successSoft` 为对应语义色的低饱和底，
+/// `surface*` / `hover` / `border*` 为层次底色与边界。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ColorToken {
+    Text,
+    TextSecondary,
+    TextMuted,
+    Accent,
+    AccentSoft,
+    Danger,
+    DangerSoft,
+    Success,
+    SuccessSoft,
+    Warning,
+    WarningSoft,
+    /// 内嵌表面（比面板底色深一档：输入框、内嵌卡片）。
+    Surface,
+    /// 次级表面（面板头 / 工具条底）。
+    SurfaceMuted,
+    /// 最深表面（内陷区域）。
+    SurfaceSunken,
+    /// 悬停反馈底色。
+    Hover,
+    Border,
+    BorderStrong,
+    /// 无底色 / 无边框。
+    Transparent,
+}
+
+/// 图片填充方式：`contain` 等比完整可见（留空边），`cover` 等比覆盖并裁剪溢出，缺省 = 拉伸填满。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ImageFit {
+    Contain,
+    Cover,
+    Fill,
+}
+
+/// 图片来源：`private` = 插件私有目录内相对路径；`vault` = 仓库根相对路径（宿主按仓库内容读取，
+/// 协作空间走同构内容面）；`url` = http(s) 地址（缺省按公网策略下载并缓存，`local` 改为本机 /
+/// 局域网策略）；`file` = 本机绝对路径（插件自己读得到的文件，交给宿主显示）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum ImageSource {
+    Private { path: String },
+    Vault { path: String },
+    Url {
+        url: String,
+        /// 按本机 / 局域网策略取图：放行回环与私网、仅拒链路本地与广播。
+        /// 缺省 = 公网策略（拒回环与私网）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        local: Option<bool>,
+    },
+    /// 本机绝对路径。插件要读它的内容本来就能经 `fs` 自己读，这里不增加也不收紧范围。
+    File { path: String },
+}
+
 /// 颜色：主题 token（跟随宿主主题）或插件自带 RGBA（内容谱系色，如连线分类、播放头高亮）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 #[serde(rename_all_fields = "camelCase")]
-pub enum CanvasColor {
+pub enum PaintColor {
     Token {
         name: ColorToken,
     },
@@ -34,12 +109,17 @@ pub enum CanvasColor {
 
 /// 二维坐标点（逻辑像素）。
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-pub struct CanvasPoint {
+pub struct PaintPoint {
     pub x: f32,
     pub y: f32,
 }
 
-/// 绘图指令。`fill` 与 `stroke` 至少声明其一；`stroke_width` 只在 `stroke` 存在时生效（缺省 1.0）。
+fn default_stroke_width() -> f32 {
+    1.0
+}
+
+/// 绘图指令。矩形 / 路径 / 圆：`fill` 与 `stroke` 至少声明其一，`stroke_width` 只在 `stroke`
+/// 存在时生效（缺省 1.0）；线只有 `stroke`（字段名 `width`）；文字与图片没有描边概念。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 #[serde(rename_all_fields = "camelCase")]
@@ -49,7 +129,7 @@ pub enum DrawCommand {
         y1: f32,
         x2: f32,
         y2: f32,
-        stroke: CanvasColor,
+        stroke: PaintColor,
         #[serde(default = "default_stroke_width")]
         width: f32,
     },
@@ -58,19 +138,19 @@ pub enum DrawCommand {
         y: f32,
         w: f32,
         h: f32,
-        fill: Option<CanvasColor>,
-        stroke: Option<CanvasColor>,
+        fill: Option<PaintColor>,
+        stroke: Option<PaintColor>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stroke_width: Option<f32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         corner_radius: Option<f32>,
     },
     Path {
-        points: Vec<CanvasPoint>,
+        points: Vec<PaintPoint>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         closed: bool,
-        fill: Option<CanvasColor>,
-        stroke: Option<CanvasColor>,
+        fill: Option<PaintColor>,
+        stroke: Option<PaintColor>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stroke_width: Option<f32>,
     },
@@ -78,8 +158,8 @@ pub enum DrawCommand {
         cx: f32,
         cy: f32,
         r: f32,
-        fill: Option<CanvasColor>,
-        stroke: Option<CanvasColor>,
+        fill: Option<PaintColor>,
+        stroke: Option<PaintColor>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stroke_width: Option<f32>,
     },
@@ -90,10 +170,9 @@ pub enum DrawCommand {
         y: f32,
         content: String,
         size: f32,
-        color: CanvasColor,
+        color: PaintColor,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         weight: Option<TextWeight>,
-        /// 字体族：`ui` 跟随界面字体（缺省），`mono` 用系统等宽族。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         family: Option<TextFamily>,
         /// 可用宽度：给定即按该宽度换行，并作为 `align` 的对齐区域。
@@ -102,8 +181,7 @@ pub enum DrawCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         align: Option<TextAlign>,
     },
-    /// 图片贴片：绘制在给定矩形内。`fit` 缺省 = 拉伸填满；`contain` 等比完整可见（留空边），
-    /// `cover` 等比覆盖并裁剪溢出部分。
+    /// 图片贴片：绘制在给定矩形内。
     Image {
         source: ImageSource,
         x: f32,
@@ -115,44 +193,10 @@ pub enum DrawCommand {
     },
 }
 
-/// 画布帧率上限（`canvas` 节点的 `fps` 上限，也是宿主调度帧通知的最细节拍）。
-pub const MAX_CANVAS_FPS: u16 = 120;
-
-/// 增量提交的一项：按 `id` 更新已有指令，或追加到清单末尾（`id` 由插件自定，同一画布内唯一）。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct CanvasUpsert {
-    pub id: String,
-    pub command: DrawCommand,
-}
-
-/// 增量条目的 `id` 上限（字节）。id 只在单块画布内定位，不需要长键。
-pub(crate) const MAX_UPSERT_ID_LEN: usize = 64;
-
-/// 增量条目校验：`id` 非空、不超过 64 字节且不含控制字符，指令本身与整表提交同口径
-/// （逐条校验 + `fill` / `stroke` 至少声明其一）。
-pub fn validate_upsert(item: &CanvasUpsert) -> Result<(), String> {
-    if item.id.trim().is_empty() {
-        return Err("增量条目的 id 不能为空".into());
-    }
-    if item.id.len() > MAX_UPSERT_ID_LEN {
-        return Err(format!("增量条目的 id 不得超过 {MAX_UPSERT_ID_LEN} 字节"));
-    }
-    if item.id.chars().any(char::is_control) {
-        return Err("增量条目的 id 不得含控制字符".into());
-    }
-    item.command.validate()?;
-    if !item.command.has_paint() {
-        return Err("fill 与 stroke 至少声明其一".into());
-    }
-    Ok(())
-}
-
 impl DrawCommand {
     fn validate(&self) -> Result<(), String> {
         match self {
-            Self::Line { width, .. } => {
-                ensure_positive(*width, "线宽")
-            }
+            Self::Line { width, .. } => ensure_positive(*width, "线宽"),
             Self::Rect { w, h, stroke_width, corner_radius, .. } => {
                 ensure_non_negative(*w, "矩形宽")?;
                 ensure_non_negative(*h, "矩形高")?;
@@ -200,9 +244,7 @@ impl DrawCommand {
 /// 清单整体校验：逐条报可读错误（错误信息带指令下标，插件可定位到条）。
 pub fn validate_commands(commands: &[DrawCommand]) -> Result<(), String> {
     for (index, command) in commands.iter().enumerate() {
-        command
-            .validate()
-            .map_err(|e| format!("第 {index} 条指令：{e}"))?;
+        command.validate().map_err(|e| format!("第 {index} 条指令：{e}"))?;
         if !command.has_paint() {
             return Err(format!("第 {index} 条指令：fill 与 stroke 至少声明其一"));
         }
@@ -228,13 +270,27 @@ fn ensure_positive(value: f32, name: &str) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    fn rgba(v: [u8; 4]) -> Option<CanvasColor> {
-        Some(CanvasColor::Rgba { rgba: v })
+    fn rgba(v: [u8; 4]) -> Option<PaintColor> {
+        Some(PaintColor::Rgba { rgba: v })
+    }
+
+    fn text(max_width: Option<f32>, align: Option<TextAlign>) -> DrawCommand {
+        DrawCommand::Text {
+            x: 0.0,
+            y: 0.0,
+            content: "示例".into(),
+            size: 14.0,
+            color: PaintColor::Token { name: ColorToken::Text },
+            weight: Some(TextWeight::SemiBold),
+            family: Some(TextFamily::Mono),
+            max_width,
+            align,
+        }
     }
 
     #[test]
     fn validation_reports_indexed_errors() {
-        assert!(validate_commands(&[]).is_ok(), "空清单 = 清空画布，合法");
+        assert!(validate_commands(&[]).is_ok(), "空清单 = 空面，合法");
         assert!(validate_commands(&[DrawCommand::Rect {
             x: 0.0,
             y: 0.0,
@@ -255,10 +311,12 @@ mod tests {
             stroke: None,
             stroke_width: None,
         };
-        assert!(validate_commands(std::slice::from_ref(&empty)).unwrap_err().contains("至少声明其一"));
+        assert!(validate_commands(std::slice::from_ref(&empty))
+            .unwrap_err()
+            .contains("至少声明其一"));
 
         let short = DrawCommand::Path {
-            points: vec![CanvasPoint { x: 0.0, y: 0.0 }],
+            points: vec![PaintPoint { x: 0.0, y: 0.0 }],
             closed: false,
             fill: None,
             stroke: rgba([0, 0, 0, 255]),
@@ -278,43 +336,16 @@ mod tests {
 
     #[test]
     fn color_encoding_is_frozen() {
-        let token = CanvasColor::Token { name: ColorToken::Accent };
+        let token = PaintColor::Token { name: ColorToken::Accent };
         assert_eq!(
             serde_json::to_value(token).unwrap(),
             serde_json::json!({"type": "token", "name": "accent"})
         );
-        let rgba = CanvasColor::Rgba { rgba: [16, 32, 64, 255] };
+        let rgba = PaintColor::Rgba { rgba: [16, 32, 64, 255] };
         assert_eq!(
             serde_json::to_value(rgba).unwrap(),
             serde_json::json!({"type": "rgba", "rgba": [16, 32, 64, 255]})
         );
-    }
-
-    #[test]
-    fn upsert_ids_are_validated() {
-        let command = DrawCommand::Line {
-            x1: 0.0,
-            y1: 0.0,
-            x2: 10.0,
-            y2: 10.0,
-            stroke: CanvasColor::Rgba { rgba: [0, 0, 0, 255] },
-            width: 1.0,
-        };
-        assert!(validate_upsert(&CanvasUpsert { id: "row-1".into(), command: command.clone() }).is_ok());
-        assert!(validate_upsert(&CanvasUpsert { id: "  ".into(), command: command.clone() }).is_err());
-        assert!(validate_upsert(&CanvasUpsert { id: "a\nb".into(), command: command.clone() }).is_err());
-        assert!(
-            validate_upsert(&CanvasUpsert { id: "x".repeat(MAX_UPSERT_ID_LEN + 1), command: command.clone() }).is_err()
-        );
-        let broken = DrawCommand::Line {
-            x1: 0.0,
-            y1: 0.0,
-            x2: 1.0,
-            y2: 1.0,
-            stroke: CanvasColor::Rgba { rgba: [0, 0, 0, 255] },
-            width: 0.0,
-        };
-        assert!(validate_upsert(&CanvasUpsert { id: "row-1".into(), command: broken }).is_err(), "指令本身的校验不被 id 校验盖过");
     }
 
     #[test]
@@ -329,31 +360,10 @@ mod tests {
             fit: None,
         };
         assert!(serde_json::to_value(&stretch).unwrap().get("fit").is_none(), "缺省不落字段");
-        let contain = DrawCommand::Image {
-            source,
-            x: 0.0,
-            y: 0.0,
-            w: 10.0,
-            h: 10.0,
-            fit: Some(ImageFit::Contain),
-        };
+        let contain = DrawCommand::Image { source, x: 0.0, y: 0.0, w: 10.0, h: 10.0, fit: Some(ImageFit::Contain) };
         let wire = serde_json::to_value(&contain).unwrap();
         assert_eq!(wire["fit"], "contain");
         assert_eq!(serde_json::from_value::<DrawCommand>(wire).unwrap(), contain);
-    }
-
-    fn text(max_width: Option<f32>, align: Option<TextAlign>) -> DrawCommand {
-        DrawCommand::Text {
-            x: 0.0,
-            y: 0.0,
-            content: "示例".into(),
-            size: 14.0,
-            color: CanvasColor::Token { name: ColorToken::Text },
-            weight: Some(TextWeight::SemiBold),
-            family: Some(TextFamily::Mono),
-            max_width,
-            align,
-        }
     }
 
     #[test]
@@ -363,7 +373,6 @@ mod tests {
         let err = validate_commands(&[text(None, Some(TextAlign::End))]).unwrap_err();
         assert!(err.contains("maxWidth"), "对齐缺宽度须拒收：{err}");
         assert!(validate_commands(&[text(Some(0.0), None)]).is_err());
-        // 可选字段缺省不落线
         let wire = serde_json::to_value(text(None, None)).unwrap();
         assert!(wire.get("maxWidth").is_none() && wire.get("align").is_none());
         assert_eq!(wire["family"], "mono");

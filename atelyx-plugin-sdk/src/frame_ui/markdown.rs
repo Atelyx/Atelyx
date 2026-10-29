@@ -3,9 +3,9 @@
 
 use std::sync::{Arc, Mutex};
 
-use atelyx_plugin_protocol::canvas::{CanvasColor, DrawCommand};
+use atelyx_plugin_protocol::paint::{PaintColor, DrawCommand};
 use atelyx_plugin_protocol::method::{MarkdownBlock, MarkdownSpan};
-use atelyx_plugin_protocol::view::{ColorToken, TextFamily, TextWeight};
+use atelyx_plugin_protocol::paint::{ColorToken, TextFamily, TextWeight};
 
 use super::build::BuildCtx;
 use super::geom::Rect;
@@ -41,7 +41,7 @@ struct Line {
 
 struct Shape {
     rect: Rect,
-    fill: Option<CanvasColor>,
+    fill: Option<PaintColor>,
 }
 
 struct Layout {

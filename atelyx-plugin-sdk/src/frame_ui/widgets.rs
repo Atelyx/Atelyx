@@ -4,9 +4,9 @@
 use std::rc::Rc;
 use std::sync::Arc;
 
-use atelyx_plugin_protocol::canvas::{CanvasPoint, DrawCommand, TextAlign};
+use atelyx_plugin_protocol::paint::{PaintPoint, DrawCommand, TextAlign};
 use atelyx_plugin_protocol::frame::HitCursor;
-use atelyx_plugin_protocol::view::{ColorToken, TextFamily, TextWeight};
+use atelyx_plugin_protocol::paint::{ColorToken, TextFamily, TextWeight};
 
 use super::build::{child_height, child_width, column_height, draw_column, BuildCtx, Item, Ui, Width};
 use super::geom::Rect;
@@ -711,9 +711,9 @@ impl<'c, 'a> Ui<'c, 'a> {
                 });
                 if checked && box_rect == box_visible {
                     let glyph = [
-                        CanvasPoint { x: box_rect.x + 3.0, y: box_rect.y + 7.5 },
-                        CanvasPoint { x: box_rect.x + 6.0, y: box_rect.y + 10.5 },
-                        CanvasPoint { x: box_rect.x + 11.5, y: box_rect.y + 4.0 },
+                        PaintPoint { x: box_rect.x + 3.0, y: box_rect.y + 7.5 },
+                        PaintPoint { x: box_rect.x + 6.0, y: box_rect.y + 10.5 },
+                        PaintPoint { x: box_rect.x + 11.5, y: box_rect.y + 4.0 },
                     ];
                     ctx.draw(DrawCommand::Path {
                         points: glyph.to_vec(),
@@ -791,7 +791,7 @@ impl<'c, 'a> Ui<'c, 'a> {
         });
     }
 
-    /// 只读 Markdown：块由宿主解析（`query.markdown`），排版与绘制在这里；
+    /// 只读 Markdown：块由宿主解析（`markdown.parse`），排版与绘制在这里；
     /// 首次出现时该帧为空，取到解析结果后自动重建。版面按内容缓存，滚动不重排。
     pub fn markdown(&mut self, content: impl Into<String>) {
         let content = content.into();
@@ -869,9 +869,9 @@ fn draw_chevron(ctx: &mut BuildCtx<'_>, trigger: Rect, visible: Rect) {
     let cx = trigger.right() - PAD_X - 4.0;
     let cy = trigger.y + trigger.h / 2.0;
     let points = vec![
-        CanvasPoint { x: cx - 4.0, y: cy - 2.0 },
-        CanvasPoint { x: cx, y: cy + 2.0 },
-        CanvasPoint { x: cx + 4.0, y: cy - 2.0 },
+        PaintPoint { x: cx - 4.0, y: cy - 2.0 },
+        PaintPoint { x: cx, y: cy + 2.0 },
+        PaintPoint { x: cx + 4.0, y: cy - 2.0 },
     ];
     ctx.draw(DrawCommand::Path {
         points,
@@ -988,12 +988,17 @@ fn draw_input_text(
         );
         return;
     }
-    // 密文框只把值换成掩码字符（每颗一个字），光标 / 选区按字符数换算成掩码串里的字节位
+    // 密文框只把值换成掩码字符（每颗一个字），光标 / 选区按字符数换算成掩码串里的字节位。
+    // 插件换值时旧光标可能落在多字节字符内部，故按字符起点计数，不直接切字节。
     let display;
     let (caret, anchor) = if masked {
         let chars = value.chars().count();
         display = "•".repeat(chars);
-        let to_masked = |byte: usize| value[..byte.min(value.len())].chars().count() * "•".len();
+        let mask_width = "•".len();
+        let to_masked = |byte: usize| {
+            let byte = byte.min(value.len());
+            value.char_indices().take_while(|(index, _)| *index < byte).count() * mask_width
+        };
         let caret = if focused { to_masked(state.caret) } else { 0 };
         let anchor = if focused { to_masked(state.anchor) } else { 0 };
         (caret, anchor)

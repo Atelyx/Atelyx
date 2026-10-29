@@ -15,12 +15,13 @@ use std::time::{Duration, Instant};
 use atelyx_plugin_protocol::envelope::{Envelope, Request, RpcError};
 use atelyx_plugin_protocol::event;
 use atelyx_plugin_protocol::handshake::{self, HostInfo, InitializeParams, InitializeResult};
-use atelyx_plugin_protocol::manifest::{Manifest, Permission};
+use atelyx_plugin_protocol::manifest::Manifest;
 use atelyx_plugin_protocol::method::{
     self, ContributionSlot, RegisterParams, SurfaceAttachedParams, SurfaceDetachedParams,
-    UnregisterParams, ViewEventParams,
+    UnregisterParams,
 };
-use atelyx_plugin_protocol::{canvas, frame, view, API_VERSION};
+use atelyx_plugin_protocol::service::{self, CallParams, ResultParams};
+use atelyx_plugin_protocol::{frame, API_VERSION};
 use base64::Engine;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -28,12 +29,12 @@ use serde_json::{json, Value};
 
 use crate::plugin_process::{EventSink, PluginProcessHost, ProcessEvent as HostEvent};
 
-use super::canvas_list::{animated_canvases, CanvasList};
 use super::{capability, child_process, fs, http, log, shortcut};
+use super::service_dir::{Forward, ServiceTarget};
 use super::{
     AuditRecord, Contribution, DialogKind, DialogRequest, HostRequest, LayoutSpecNode, PaddingSpec,
-    PluginEvent, PluginRuntime, PluginStatus, SurfaceKind, ViewEvent, ViewNode,
-    MAX_CLIPBOARD_IMAGE_BYTES, MAX_VAULT_BINARY_BYTES,
+    PluginEvent, PluginRuntime, PluginStatus, SurfaceKind, MAX_CLIPBOARD_IMAGE_BYTES,
+    MAX_VAULT_BINARY_BYTES,
 };
 
 /// 崩溃判定窗口：窗口内累计达到 [`CRASH_LIMIT`] 即熔断。
@@ -83,31 +84,24 @@ pub(crate) struct Instance {
     /// 状态转换互斥：手工启停与退避重启在此串行，杜绝双启动。
     transition: Mutex<()>,
     subscriptions: Mutex<HashSet<String>>,
-    denied: Mutex<Vec<AuditRecord>>,
-    /// 各面最新界面树（surface id → 树）；会话收尾一并清除（撤贡献）。
-    surfaces: Mutex<HashMap<String, ViewNode>>,
-    /// 各面整面帧（surface id → 帧）；与界面树独立存档，渲染时帧优先。会话收尾一并清除。
+    /// 能力调用审计（声明与否都执行；未声明的记 `declared: false`）。
+    audits: Mutex<Vec<AuditRecord>>,
+    /// 本次会话里出现过「用到但未声明」的方法名（提示只发一次）与累计条数（不受审计列表截断影响）。
+    undeclared_methods: Mutex<HashSet<String>>,
+    undeclared_calls: AtomicU64,
+    /// 各面整面帧（surface id → 帧）；会话收尾一并清除。
     frames: Mutex<HashMap<String, Arc<frame::SurfaceFrame>>>,
-    /// 各面画布节点的最新绘图指令清单（整发整换，合帧应用）。
-    canvases: CanvasLists,
-    /// 声明了帧率的画布节点（(面 id, 节点 id) → 节拍）；随界面树同步。
-    frame_clocks: Mutex<HashMap<(String, String), FrameClock>>,
     /// 声明了帧率的整面帧（面 id → 节拍）；随帧提交同步。
     surface_clocks: Mutex<HashMap<String, FrameClock>>,
     /// 已注册贡献点（按注册序）；id 插件内唯一，撤销按 id 摘除。
     contributions: Mutex<Vec<ContributionEntry>>,
-    /// 插件经 `view.defineIcon` 定义的自备图标形状（名字 → 24x24 描边路径）；随会话收尾清除。
-    icons: Mutex<HashMap<String, String>>,
-    view_submits: AtomicU64,
+    submits: AtomicU64,
     crash_times: Mutex<Vec<Instant>>,
     /// 本会话声明的默认布局（重启后插件重新声明）。
     default_layout: Mutex<Option<(String, LayoutSpecNode)>>,
     /// 本插件日志（插件 stderr、协议违规与生命周期失败的唯一可查落点）。
     log: Arc<log::LogSink>,
 }
-
-/// 画布节点 → 指令清单存档（(面 id, 节点 id) → 清单）。
-type CanvasLists = Mutex<HashMap<(String, String), Arc<CanvasList>>>;
 
 /// 一个画布节点的帧节拍：声明了 `fps` 才有，宿主按它决定什么时候发 `host:canvas.frame`。
 #[derive(Clone, Copy, Debug)]
@@ -187,15 +181,13 @@ impl Instance {
             generation: AtomicU64::new(0),
             transition: Mutex::new(()),
             subscriptions: Mutex::new(HashSet::new()),
-            denied: Mutex::new(Vec::new()),
-            surfaces: Mutex::new(HashMap::new()),
+            audits: Mutex::new(Vec::new()),
+            undeclared_methods: Mutex::new(HashSet::new()),
+            undeclared_calls: AtomicU64::new(0),
             frames: Mutex::new(HashMap::new()),
-            canvases: Mutex::new(HashMap::new()),
-            frame_clocks: Mutex::new(HashMap::new()),
             surface_clocks: Mutex::new(HashMap::new()),
             contributions: Mutex::new(Vec::new()),
-            icons: Mutex::new(HashMap::new()),
-            view_submits: AtomicU64::new(0),
+            submits: AtomicU64::new(0),
             crash_times: Mutex::new(Vec::new()),
             default_layout: Mutex::new(None),
             log,
@@ -211,38 +203,21 @@ impl Instance {
     }
 
     pub(crate) fn audit(&self) -> Vec<AuditRecord> {
-        self.denied.lock().unwrap().clone()
+        self.audits.lock().unwrap().clone()
     }
 
-    pub(crate) fn denied_count(&self) -> usize {
-        self.denied.lock().unwrap().len()
+    /// 实际用到但未声明过的调用条数（声明过的调用也进审计，但不计入这里）。
+    pub(crate) fn undeclared_count(&self) -> usize {
+        self.undeclared_calls.load(Ordering::Relaxed) as usize
     }
 
-    pub(crate) fn view_submits(&self) -> u64 {
-        self.view_submits.load(Ordering::Relaxed)
+    pub(crate) fn submits(&self) -> u64 {
+        self.submits.load(Ordering::Relaxed)
     }
 
-    /// 某面的最新界面树（会话收尾即清空，插件未提交过 = `None`）。
-    pub(crate) fn surface_tree(&self, surface_id: &str) -> Option<ViewNode> {
-        self.surfaces.lock().unwrap().get(surface_id).cloned()
-    }
-
-    /// 某面的整面帧（会话收尾即清空；与界面树都提交过时宿主按帧渲染）。
+    /// 某面的整面帧（会话收尾即清空）。
     pub(crate) fn surface_frame(&self, surface_id: &str) -> Option<Arc<frame::SurfaceFrame>> {
         self.frames.lock().unwrap().get(surface_id).cloned()
-    }
-
-    /// 某面某画布节点的最新绘图指令清单（整发整换；会话收尾即清空）。
-    pub(crate) fn surface_canvas(
-        &self,
-        surface_id: &str,
-        node_id: &str,
-    ) -> Option<Arc<CanvasList>> {
-        self.canvases
-            .lock()
-            .unwrap()
-            .get(&(surface_id.to_string(), node_id.to_string()))
-            .cloned()
     }
 
     /// 本插件已注册贡献点（补上插件 id）。
@@ -260,11 +235,6 @@ impl Instance {
                 padding: entry.padding,
             })
             .collect()
-    }
-
-    /// 本插件定义的自备图标形状（名字 → 路径）；会话收尾即清空。
-    pub(crate) fn icons(&self) -> HashMap<String, String> {
-        self.icons.lock().unwrap().clone()
     }
 
     /// 宿主侧诊断写入本插件日志（带 `[宿主]` 前缀，与插件自身的 stderr 区分归属）。
@@ -372,37 +342,40 @@ impl Instance {
     }
 
     /// 收掉随插件记账的宿主资源：托管子进程、已注册的全局快捷键、在途的对话框请求、本会话订阅
-    /// 与界面贡献（各面树 + 贡献注册）。停用 / 失败 / 崩溃 / 卸载四条路径共用——漏掉任何一条都会
-    /// 留下孤儿服务、永久悬挂的调用，或让已停插件的界面继续对外呈现。
+    /// 与界面贡献。停用 / 失败 / 崩溃 / 卸载四条路径共用——漏掉任何一条都会留下孤儿进程、
+    /// 永久悬挂的调用，或让已停插件的界面继续对外呈现。
     fn release_resources(&self) {
-        // 与资源获取互斥：本段跑完之后到达的登记一律被 [`Instance::with_session`] 拒掉
-        let _gate = self.resources.lock().unwrap();
-        self.subscriptions.lock().unwrap().clear();
-        let surfaces_dropped = !self.surfaces.lock().unwrap().is_empty();
-        self.surfaces.lock().unwrap().clear();
-        let canvases_dropped = !self.canvases.lock().unwrap().is_empty();
-        self.canvases.lock().unwrap().clear();
-        self.frame_clocks.lock().unwrap().clear();
-        let frames_dropped = !self.frames.lock().unwrap().is_empty();
-        self.frames.lock().unwrap().clear();
-        self.surface_clocks.lock().unwrap().clear();
-        let contributions_dropped = !self.contributions.lock().unwrap().is_empty();
-        self.contributions.lock().unwrap().clear();
-        self.icons.lock().unwrap().clear();
-        // 默认布局声明属于本次会话：插件重启后重新声明，不让旧规格跨会话生效
-        *self.default_layout.lock().unwrap() = None;
-        for child in self.children.take_all() {
-            if let Err(e) = self.process_host.kill_process_tree(child) {
-                eprintln!("[plugin {}] 结束子进程 {child} 失败：{e}", self.id);
+        let frames_dropped;
+        let contributions_dropped;
+        {
+            // 与资源获取互斥：本段跑完之后到达的登记一律被 [`Instance::with_session`] 拒掉
+            let _gate = self.resources.lock().unwrap();
+            self.subscriptions.lock().unwrap().clear();
+            self.undeclared_methods.lock().unwrap().clear();
+            self.undeclared_calls.store(0, Ordering::Relaxed);
+            frames_dropped = !self.frames.lock().unwrap().is_empty();
+            self.frames.lock().unwrap().clear();
+            self.surface_clocks.lock().unwrap().clear();
+            contributions_dropped = !self.contributions.lock().unwrap().is_empty();
+            self.contributions.lock().unwrap().clear();
+            // 默认布局声明属于本次会话：插件重启后重新声明，不让旧规格跨会话生效
+            *self.default_layout.lock().unwrap() = None;
+            for child in self.children.take_all() {
+                if let Err(e) = self.process_host.kill_process_tree(child) {
+                    eprintln!("[plugin {}] 结束子进程 {child} 失败：{e}", self.id);
+                }
             }
+            self.shortcuts.release_plugin(&self.id);
+            self.fail_pending_dialogs("插件已停止，对话框已取消");
+            self.fail_pending_ui_calls("插件已停止，界面服务请求已取消");
+            self.fail_pending_shell_calls("插件已停止，宿主调用已取消");
+            self.release_ai_tools();
         }
-        self.shortcuts.release_plugin(&self.id);
-        self.fail_pending_dialogs("插件已停止，对话框已取消");
-        self.fail_pending_ui_calls("插件已停止，界面服务请求已取消");
-        self.fail_pending_shell_calls("插件已停止，宿主调用已取消");
-        self.release_ai_tools();
+        // 服务回落要向其余插件各写一次 stdin，不能持资源闸门：插件不读 stdin 时管道满会阻塞，
+        // 停用（壳 UI 线程触发）会连同界面一起卡住
+        self.release_services();
         // 界面与贡献变化广播给壳：壳据此停下已停插件界面的渲染并清掉菜单条目
-        if surfaces_dropped || canvases_dropped || frames_dropped {
+        if frames_dropped {
             let _ = self.events.send(PluginEvent::ViewSubmitted { id: self.id.clone() });
         }
         if contributions_dropped {
@@ -441,6 +414,37 @@ impl Instance {
             runtime.clear_tools_of(&self.id);
             runtime.fail_tool_calls_of(&self.id, "插件已停止，工具调用已取消");
         }
+    }
+
+    /// 摘除本插件的服务登记（活动提供者消失即回落内置）并让以它为提供者的在途调用立即失败。
+    fn release_services(&self) {
+        let runtime = self.runtime.lock().unwrap().clone();
+        if let Some(runtime) = runtime.upgrade() {
+            runtime.drop_plugin_services(&self.id);
+            runtime.fail_service_calls_of(&self.id);
+        }
+    }
+
+    /// 下发一次服务调用请求（`host:service.call`）：提供者须用同一 `callId` 经 `service.result` 回报。
+    pub(crate) fn notify_service_call(
+        &self,
+        call_id: &str,
+        service_name: &str,
+        method_name: &str,
+        params: Value,
+    ) {
+        let params = service::HostCallParams {
+            call_id: call_id.to_string(),
+            service: service_name.to_string(),
+            method: method_name.to_string(),
+            params,
+        };
+        self.notify(service::method::HOST_CALL, &params);
+    }
+
+    /// 广播活动提供者的变化（`host:service.changed`）。进程不在跑时由写端静默丢弃。
+    pub(crate) fn notify_service_changed(&self, params: &service::ChangedParams) {
+        self.notify(service::method::HOST_CHANGED, params);
     }
 
     /// 下发一条对话事件（`host:ai.chat.event`）。
@@ -618,38 +622,92 @@ impl Instance {
     fn handle_request(self: &Arc<Self>, token: u64, request: Request) {
         let method = request.method.as_str();
         let id = request.id;
-        if let Some(permission) = capability::permission_for(method) {
-            if !self.manifest.permissions.contains(&permission) {
-                self.record_denied(method, &request.params);
-                self.respond(
-                    id,
-                    None,
-                    Some(RpcError::permission_denied(format!("能力未声明：{method}"))),
-                );
-                return;
+        self.record_audit(method, &request.params);
+        // `service.call` 是「名字要到运行时才知道」的信封：先按目录定落点，内置提供者把方法名
+        // 规范化后与直接调用同名方法走同一条分派，外部提供者转发。
+        if method == service::method::CALL {
+            self.handle_service_call(token, id, &request.params);
+            return;
+        }
+        self.route_request(token, id, method, &request.params);
+    }
+
+    /// 把一条请求落到实现：对话框 / 界面 / 壳侧服务分流为异步应答；活动提供者是外部插件的
+    /// 普通方法转发出去；其余同步分派。
+    fn route_request(self: &Arc<Self>, token: u64, id: u64, method: &str, params: &Value) {
+        // 普通方法先过目录：外部提供者顶替某服务后，直接调 `vault.readText` 的老插件同样被
+        // 路由到它；没有顶替则维持本地内置实现。转发判定必须早于壳侧分流——被顶替的方法
+        // 本来就是壳侧实现的那些。
+        if let Some((service_name, method_name)) = PluginRuntime::split_service(method) {
+            if let Ok(runtime) = self.runtime_upgrade() {
+                match runtime.forward_to(service_name, method_name) {
+                    Forward::Local => {}
+                    Forward::Undeclared => {
+                        let error = PluginRuntime::undeclared_service_method(service_name, method_name);
+                        self.respond(id, None, Some(error));
+                        return;
+                    }
+                    Forward::Plugin(provider) => {
+                        runtime.forward_service_call(
+                            self,
+                            id,
+                            &provider,
+                            service_name,
+                            method_name,
+                            params.clone(),
+                        );
+                        return;
+                    }
+                }
             }
         }
         // 对话框由用户决定耗时（无上限），不能在读线程上等：分流为异步应答（结果由回填线程写回），
         // 读线程继续消费插件输出——否则对话框期间插件输出与退出上报都被拖住。
         // （http 有明确超时上限，按顺序处理不破「读线程串行处理请求」这条既有语义。）
         if method == method::dialog::PICK_FILE || method == method::dialog::PICK_DIRECTORY {
-            self.handle_dialog_request(token, id, method, &request.params);
+            self.handle_dialog_request(token, id, method, params);
             return;
         }
         // 接管与插件窗口的落地在壳（OS 窗口副作用只由壳触发），结果由壳回填——分流为异步应答，
         // 读线程不等待窗口创建与接管应用。
         if is_ui_method(method) {
-            self.handle_ui_request(token, id, method, &request.params);
+            self.handle_ui_request(token, id, method, params);
             return;
         }
         // 壳侧执行的服务调用（对话编排、剪贴板、仓库读写、托盘、协作、表格、文字量算等）
         // 分流为异步应答：结果由回填线程写回，读线程继续消费插件输出。
         if is_shell_method(method) {
-            self.handle_shell_request(token, id, method, &request.params);
+            self.handle_shell_request(token, id, method, params);
             return;
         }
-        match self.dispatch_for_session(token, method, &request.params) {
+        match self.dispatch_for_session(token, method, params) {
             Ok(value) => self.respond(id, Some(value), None),
+            Err(error) => self.respond(id, None, Some(error)),
+        }
+    }
+
+    /// 一次 `service.call`：先校验服务 / 方法与活动提供者的声明，再用。内置提供者按规范化后的
+    /// 完整方法名重走 [`Instance::route_request`]（与直接调用同名方法同一条分支，不复制实现）。
+    fn handle_service_call(self: &Arc<Self>, token: u64, id: u64, params: &Value) {
+        let call: CallParams = match parse(params) {
+            Ok(call) => call,
+            Err(error) => {
+                self.respond(id, None, Some(error));
+                return;
+            }
+        };
+        let runtime = match self.runtime_upgrade() {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                self.respond(id, None, Some(error));
+                return;
+            }
+        };
+        match runtime.service_target(call) {
+            Ok(ServiceTarget::Builtin { wire, params }) => self.route_request(token, id, &wire, &params),
+            Ok(ServiceTarget::Plugin { provider, service, method, params }) => {
+                runtime.forward_service_call(self, id, &provider, &service, &method, params);
+            }
             Err(error) => self.respond(id, None, Some(error)),
         }
     }
@@ -732,6 +790,10 @@ impl Instance {
                 method::window::SHOW => {
                     let p: method::WindowIdParams = parse(params).map_err(|e| e.to_string())?;
                     runtime.show_plugin_window(&self.id, &p.id)
+                }
+                method::window::BEGIN_DRAG => {
+                    let p: method::WindowDragParams = parse(params).map_err(|e| e.to_string())?;
+                    runtime.begin_window_drag(&self.id, &p.surface_id)
                 }
                 _ => Err("未知界面服务请求".to_string()),
             }
@@ -969,15 +1031,6 @@ impl Instance {
                         params: p,
                     }
                 }
-                method::view::SCROLL_TO => {
-                    let p: method::ScrollToParams = parse(params).map_err(|e| e.to_string())?;
-                    p.validate()?;
-                    HostRequest::ScrollTo {
-                        plugin_id: self.id.clone(),
-                        request_id: 0,
-                        params: p,
-                    }
-                }
                 method::ai::CHAT_RENAME => {
                     let p: method::ChatRenameParams = parse(params).map_err(|e| e.to_string())?;
                     HostRequest::ChatRename {
@@ -997,15 +1050,6 @@ impl Instance {
                 method::ai::CHAT_COMPACT => {
                     let p: method::ChatSessionParams = parse(params).map_err(|e| e.to_string())?;
                     HostRequest::ChatCompact {
-                        plugin_id: self.id.clone(),
-                        request_id: 0,
-                        params: p,
-                    }
-                }
-                method::canvas::MEASURE_TEXT => {
-                    let p: method::MeasureTextParams = parse(params).map_err(|e| e.to_string())?;
-                    p.validate()?;
-                    HostRequest::MeasureText {
                         plugin_id: self.id.clone(),
                         request_id: 0,
                         params: p,
@@ -1052,20 +1096,56 @@ impl Instance {
     fn dispatch_for_session(
         self: &Arc<Self>,
         token: u64,
-        method: &str,
+        method_name: &str,
         params: &Value,
     ) -> Result<Value, RpcError> {
-        match method {
+        match method_name {
+            // ---------- 能力总线 ----------
+            // 登记 / 撤销走会话闸门：与其它资源获取同口径，收尾跑完之后到达的登记不得复活服务。
+            service::method::REGISTER => {
+                let p: service::RegisterParams = parse(params)?;
+                let runtime = self.runtime_upgrade()?;
+                self.with_session(token, || runtime.register_service(&self.id, p))
+                    .map_err(RpcError::failed)?;
+                Ok(json!({}))
+            }
+            service::method::UNREGISTER => {
+                let p: service::UnregisterParams = parse(params)?;
+                let runtime = self.runtime_upgrade()?;
+                self.with_session(token, || runtime.unregister_service(&self.id, &p.service))
+                    .map_err(RpcError::failed)?;
+                Ok(json!({}))
+            }
+            service::method::LIST => {
+                let runtime = self.runtime_upgrade()?;
+                serde_json::to_value(runtime.service_list())
+                    .map_err(|e| RpcError::failed(format!("应答序列化失败：{e}")))
+            }
+            service::method::RESULT => {
+                let p: ResultParams = parse(params)?;
+                self.runtime_upgrade()?
+                    .resolve_service_call(&self.id, p)
+                    .map_err(RpcError::failed)?;
+                Ok(json!({}))
+            }
+            _ => self.dispatch_builtin(token, method_name, params),
+        }
+    }
+
+    /// 按方法名落到内置实现（与 `service.call` 规范化后的名字共用这一条分派）。
+    fn dispatch_builtin(
+        self: &Arc<Self>,
+        token: u64,
+        name: &str,
+        params: &Value,
+    ) -> Result<Value, RpcError> {
+        match name {
             handshake::INITIALIZE => self.on_initialize(params),
             event::SUBSCRIBE => self.on_subscribe(params),
-            method::view::SUBMIT => self.on_submit(token, params),
             method::view::REGISTER => self.on_register(token, params),
             method::view::UNREGISTER => self.on_unregister(token, params),
-            method::view::DEFINE_ICON => self.on_define_icon(token, params),
-            method::canvas::SUBMIT => self.on_canvas_submit(token, params),
-            method::canvas::PATCH => self.on_canvas_patch(token, params),
             method::frame::SUBMIT => self.on_frame_submit(token, params),
-            method::query::MARKDOWN => {
+            method::markdown::PARSE => {
                 let p: method::MarkdownParams = parse(params)?;
                 p.validate().map_err(RpcError::failed)?;
                 let result = super::markdown::blocks(&p.content);
@@ -1342,96 +1422,8 @@ impl Instance {
         Ok(json!({}))
     }
 
-    /// 校验并接收界面树：只校验与存档，渲染由宿主界面层承担。surfaceId 为空即拒。
-    /// 存档与贡献登记都在会话闸门内——收尾跑完之后到达的提交不得让已停插件的界面继续存活。
-    fn on_submit(self: &Arc<Self>, token: u64, params: &Value) -> Result<Value, RpcError> {
-        let p: method::SubmitParams = parse(params)?;
-        if p.surface_id.trim().is_empty() {
-            return Err(RpcError::failed("surfaceId 不能为空"));
-        }
-        view::ViewNode::validate(&p.tree).map_err(RpcError::failed)?;
-        self.with_session(token, || {
-            let mut surfaces = self.surfaces.lock().unwrap();
-            // 树整发整换：新树里已不存在的画布节点，其清单随之清除（清单存档不得比界面树活得久）
-            let mut canvases = self.canvases.lock().unwrap();
-            canvases.retain(|(surface_id, node_id), _| {
-                surface_id != &p.surface_id || has_canvas_node(&p.tree, node_id)
-            });
-            // 帧节拍随树同步：只有本次树里声明了 fps 的画布继续收帧，其余摘掉；
-            // 帧率未变的节点沿用原钟——否则任何界面更新都会把帧序号与节拍相位打回起点
-            let animated = animated_canvases(&p.tree);
-            let mut clocks = self.frame_clocks.lock().unwrap();
-            let now = Instant::now();
-            let mut next_clocks = HashMap::new();
-            for (node_id, fps) in animated {
-                let key = (p.surface_id.clone(), node_id);
-                let clock = match clocks.get(&key) {
-                    Some(clock) if clock.fps == fps => *clock,
-                    _ => FrameClock::new(fps, now),
-                };
-                next_clocks.insert(key, clock);
-            }
-            clocks.retain(|(surface_id, _), _| surface_id != &p.surface_id);
-            clocks.extend(next_clocks);
-            // 提交界面树即交还控件通道：同面已有的整面帧连同它的帧节拍一并撤掉
-            self.frames.lock().unwrap().remove(&p.surface_id);
-            self.surface_clocks.lock().unwrap().remove(&p.surface_id);
-            surfaces.insert(p.surface_id.clone(), p.tree);
-            self.view_submits.fetch_add(1, Ordering::Relaxed);
-            Ok(())
-        })
-        .map_err(RpcError::failed)?;
-        let _ = self.events.send(PluginEvent::ViewSubmitted { id: self.id.clone() });
-        Ok(json!({ "applied": true }))
-    }
-
-    /// 校验并接收画布指令清单：面须已有界面树、节点须在树里且为 canvas 节点，指令逐条校验。
-    /// 清单整发整换，空清单 = 清空画布；存档与会话闸门同口径（收尾后到达的提交不得让清单复活）。
-    fn on_canvas_submit(self: &Arc<Self>, token: u64, params: &Value) -> Result<Value, RpcError> {
-        let p: method::CanvasSubmitParams = parse(params)?;
-        canvas::validate_commands(&p.commands).map_err(RpcError::failed)?;
-        let (surface_id, node_id) = (p.surface_id, p.node_id);
-        let list = CanvasList::from_commands(p.commands);
-        self.with_session(token, move || {
-            self.require_canvas_node(&surface_id, &node_id)?;
-            self.canvases
-                .lock()
-                .unwrap()
-                .insert((surface_id, node_id), Arc::new(list));
-            Ok(())
-        })
-        .map_err(RpcError::failed)?;
-        let _ = self.events.send(PluginEvent::ViewSubmitted { id: self.id.clone() });
-        Ok(json!({ "applied": true }))
-    }
-
-    /// 按 id 增量维护画布清单：只上行改动的条目，宿主在原清单上增删改（绘制顺序保持不变）。
-    /// 须先经 `canvas.submit` 建立清单；整表提交会丢弃此前经增量建立的 id 槽。
-    fn on_canvas_patch(self: &Arc<Self>, token: u64, params: &Value) -> Result<Value, RpcError> {
-        let p: method::CanvasPatchParams = parse(params)?;
-        if p.upsert.is_empty() && p.remove.is_empty() {
-            return Err(RpcError::failed("增量提交没有任何条目"));
-        }
-        for (index, item) in p.upsert.iter().enumerate() {
-            canvas::validate_upsert(item).map_err(|e| RpcError::failed(format!("第 {index} 条增量：{e}")))?;
-        }
-        self.with_session(token, move || {
-            self.require_canvas_node(&p.surface_id, &p.node_id)?;
-            let key = (p.surface_id, p.node_id);
-            let mut canvases = self.canvases.lock().unwrap();
-            // 未提交过清单时的基线是空表：增量只往里加条目（清空画布仍走 submit）
-            let current = canvases.get(&key).cloned().unwrap_or_default();
-            let next = current.patched(&p.upsert, &p.remove)?;
-            canvases.insert(key, Arc::new(next));
-            Ok(())
-        })
-        .map_err(RpcError::failed)?;
-        let _ = self.events.send(PluginEvent::ViewSubmitted { id: self.id.clone() });
-        Ok(json!({ "applied": true }))
-    }
-
     /// 校验并接收整面帧：指令逐条、命中区与帧率一并校验；整发整换。
-    /// 面帧不依赖界面树（自绘面没有控件树），存档与会话闸门同口径。
+    /// 存档与会话闸门同口径——收尾后到达的提交不得让已停插件的界面继续存活。
     fn on_frame_submit(self: &Arc<Self>, token: u64, params: &Value) -> Result<Value, RpcError> {
         let p: frame::FrameSubmitParams = parse(params)?;
         if p.surface_id.trim().is_empty() {
@@ -1456,39 +1448,13 @@ impl Instance {
                 }
             }
             drop(clocks);
-            // 帧接管该面：树内画布已不渲染，同面的画布节拍一并停掉
-            self.frame_clocks
-                .lock()
-                .unwrap()
-                .retain(|(surface, _), _| surface != &surface_id);
             self.frames.lock().unwrap().insert(surface_id, submitted);
-            self.view_submits.fetch_add(1, Ordering::Relaxed);
+            self.submits.fetch_add(1, Ordering::Relaxed);
             Ok(())
         })
         .map_err(RpcError::failed)?;
         let _ = self.events.send(PluginEvent::ViewSubmitted { id: self.id.clone() });
         Ok(json!({ "applied": true }))
-    }
-
-    /// 画布写入的前置条件：面已有界面树、节点在树里且是画布（两个写入口共用）。
-    fn require_canvas_node(&self, surface_id: &str, node_id: &str) -> Result<(), String> {
-        if surface_id.trim().is_empty() {
-            return Err("surfaceId 不能为空".into());
-        }
-        if node_id.trim().is_empty() {
-            return Err("nodeId 不能为空".into());
-        }
-        let surfaces = self.surfaces.lock().unwrap();
-        let tree = surfaces
-            .get(surface_id)
-            .ok_or_else(|| format!("面尚未提交界面树：{surface_id}"))?;
-        let node = tree
-            .find(node_id)
-            .ok_or_else(|| format!("画布节点不在当前界面树里：{node_id}"))?;
-        if !matches!(node.body, view::NodeBody::Canvas { .. }) {
-            return Err(format!("节点不是画布：{node_id}"));
-        }
-        Ok(())
     }
 
     /// 注册一个贡献点：id 插件内唯一、非空且不含 `:`（宿主的面标识以它作命名空间分隔）。
@@ -1528,29 +1494,7 @@ impl Instance {
         Ok(json!({}))
     }
 
-    /// 定义一枚自备图标形状：名字须为字母 / 数字 / `_` / `-` 且不超过 64，路径非空。
-    /// 同名重复定义即原地更新。定义是界面通道（不占权限声明），随会话收尾清除。
-    fn on_define_icon(self: &Arc<Self>, token: u64, params: &Value) -> Result<Value, RpcError> {
-        let p: method::DefineIconParams = parse(params)?;
-        if !valid_icon_name(&p.name) {
-            return Err(RpcError::failed(format!(
-                "图标名非法（字母 / 数字 / `_` / `-`，最长 64）：{}",
-                p.name
-            )));
-        }
-        if p.path.trim().is_empty() {
-            return Err(RpcError::failed("图标路径不能为空"));
-        }
-        self.with_session(token, || {
-            self.icons.lock().unwrap().insert(p.name, p.path);
-            Ok(())
-        })
-        .map_err(RpcError::failed)?;
-        let _ = self.events.send(PluginEvent::ContributionsChanged { id: self.id.clone() });
-        Ok(json!({}))
-    }
 
-    /// 撤销一个贡献点并撤掉它的界面树；未注册的 id 报可读错误。
     fn on_unregister(self: &Arc<Self>, token: u64, params: &Value) -> Result<Value, RpcError> {
         let p: UnregisterParams = parse(params)?;
         self.with_session(token, || {
@@ -1560,17 +1504,8 @@ impl Instance {
             if contributions.len() == before {
                 return Err(format!("未注册的贡献 id：{}", p.id));
             }
-            self.surfaces.lock().unwrap().remove(&p.id);
             self.frames.lock().unwrap().remove(&p.id);
             self.surface_clocks.lock().unwrap().remove(&p.id);
-            self.canvases
-                .lock()
-                .unwrap()
-                .retain(|(surface_id, _), _| surface_id != &p.id);
-            self.frame_clocks
-                .lock()
-                .unwrap()
-                .retain(|(surface_id, _), _| surface_id != &p.id);
             Ok(())
         })
         .map_err(RpcError::failed)?;
@@ -1660,54 +1595,12 @@ impl Instance {
         self.notify(method::tray::HOST_CLICK, &params);
     }
 
-    /// 转投一条同空间对等插件的消息（`host:collab.message`）。通道名由发送方填写，
-    /// 未声明 `collab` 的插件不收（与能力面同一条闸门）。
+    /// 转投一条同空间对等插件的消息（`host:collab.message`）。通道名由发送方填写；
+    /// 这是宿主下发，权限只做公示不拦截，故不记入调用审计。
     pub(crate) fn notify_collab_message(&self, params: &method::CollabMessageParams) {
-        if !self.manifest.permissions.contains(&Permission::Collab) {
-            return;
-        }
         self.notify(method::collab::HOST_MESSAGE, params);
     }
 
-    /// 回发一条节点界面事件（`host:view.event`）。
-    pub(crate) fn notify_view_event(&self, surface_id: &str, node_id: &str, event: ViewEvent) {
-        let params = ViewEventParams {
-            surface_id: surface_id.to_string(),
-            node_id: node_id.to_string(),
-            event,
-        };
-        self.notify(method::view::HOST_EVENT, &params);
-    }
-
-    /// 回发画布节点当前的像素尺寸（`host:canvas.resized`；尺寸变化时发）。
-    pub(crate) fn notify_canvas_resized(&self, surface_id: &str, node_id: &str, width: f32, height: f32) {
-        let params = method::CanvasResizedParams {
-            surface_id: surface_id.to_string(),
-            node_id: node_id.to_string(),
-            width,
-            height,
-        };
-        self.notify(method::canvas::HOST_RESIZED, &params);
-    }
-
-    /// 回发键盘焦点变化（`host:view.event` 的 `focus` / `blur`）：节点未声明对应事件时静默不发。
-    pub(crate) fn notify_plugin_focus(&self, surface_id: &str, node_id: &str, focused: bool) {
-        let kind = if focused { view::EventKind::Focus } else { view::EventKind::Blur };
-        let declared = {
-            let surfaces = self.surfaces.lock().unwrap();
-            surfaces
-                .get(surface_id)
-                .and_then(|tree| tree.find(node_id))
-                .is_some_and(|node| node.events.contains(&kind))
-        };
-        if !declared {
-            return;
-        }
-        let event = if focused { ViewEvent::Focus } else { ViewEvent::Blur };
-        self.notify_view_event(surface_id, node_id, event);
-    }
-
-    /// 回发一条整面帧的原始输入（`host:frame.input`）。
     pub(crate) fn notify_frame_input(&self, surface_id: &str, input: &frame::FrameInput) {
         let params = frame::FrameInputParams {
             surface_id: surface_id.to_string(),
@@ -1716,30 +1609,13 @@ impl Instance {
         self.notify(method::frame::HOST_INPUT, &params);
     }
 
-    /// 是否有画布或整面帧在收帧（壳据此决定要不要挂帧节拍：没有动画时不产生周期唤醒）。
+    /// 是否有面在收帧（壳据此决定要不要挂帧节拍：没有动画时不产生周期唤醒）。
     pub(crate) fn has_frame_ticks(&self) -> bool {
-        if !self.frame_clocks.lock().unwrap().is_empty() {
-            return true;
-        }
         !self.surface_clocks.lock().unwrap().is_empty()
     }
 
-    /// 推一次帧节拍：到期的画布发 `host:canvas.frame`，到期的整面帧发 `host:frame.tick`。
+    /// 推一次帧节拍：到期的整面帧发 `host:frame.tick`。
     pub(crate) fn pump_frames(&self, now: Instant) {
-        let due: Vec<((String, String), u64, u32)> = {
-            let mut clocks = self.frame_clocks.lock().unwrap();
-            let mut due = Vec::new();
-            for ((surface_id, node_id), clock) in clocks.iter_mut() {
-                if let Some((frame, delta_ms)) = clock.take_due(now) {
-                    due.push(((surface_id.clone(), node_id.clone()), frame, delta_ms));
-                }
-            }
-            due
-        };
-        for ((surface_id, node_id), frame, delta_ms) in due {
-            let params = method::CanvasFrameParams { surface_id, node_id, frame, delta_ms };
-            self.notify(method::canvas::HOST_FRAME, &params);
-        }
         let due: Vec<(String, u64, u32)> = {
             let mut clocks = self.surface_clocks.lock().unwrap();
             let mut due = Vec::new();
@@ -1841,28 +1717,70 @@ impl Instance {
         self.notify(method::ai::HOST_TOOL_CALL, &params);
     }
 
-    fn record_denied(&self, method: &str, params: &Value) {
-        let detail = params
-            .get("path")
+    /// 记录一条能力调用。声明与否都执行——记录只提供知情：设置页据此区分「声明能力」与
+    /// 「实际用到但未声明」。未声明的首次出现额外广播一次（同一方法不重复打扰）。
+    fn record_audit(&self, method_name: &str, params: &Value) {
+        let (name, target) = audit_subject(method_name, params);
+        let permission = capability::permission_for(&name);
+        // 只有占权限类的方法与能力总线入口进审计：界面 / 订阅这类时序方法不触碰宿主资源
+        if permission.is_none() && method_name != service::method::CALL {
+            return;
+        }
+        let declared = permission.map_or(true, |p| self.manifest.permissions.contains(&p));
+        let detail = target
+            .and_then(|inner| inner.get("path"))
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
-        {
-            let mut denied = self.denied.lock().unwrap();
-            denied.push(AuditRecord { method: method.to_string(), detail: detail.clone(), at: now_secs() });
-            if denied.len() > MAX_AUDIT {
-                denied.remove(0);
+        let first_undeclared = {
+            let mut audits = self.audits.lock().unwrap();
+            audits.push(AuditRecord {
+                method: name.clone(),
+                detail: detail.clone(),
+                at: now_secs(),
+                declared,
+            });
+            if audits.len() > MAX_AUDIT {
+                audits.remove(0);
             }
+            if declared {
+                false
+            } else {
+                self.undeclared_calls.fetch_add(1, Ordering::Relaxed);
+                // 去重表独立于审计列表：列表按条数截断，被挤掉的旧记录不该让提示重发
+                self.undeclared_methods.lock().unwrap().insert(name.clone())
+            }
+        };
+        if first_undeclared {
+            let _ = self.events.send(PluginEvent::PermissionDenied {
+                id: self.id.clone(),
+                method: name,
+                detail,
+            });
         }
-        let _ = self.events.send(PluginEvent::PermissionDenied {
-            id: self.id.clone(),
-            method: method.to_string(),
-            detail,
-        });
     }
 
     /// 回执一条响应（写往插件 stdin）。
-    fn respond(&self, id: u64, result: Option<Value>, error: Option<RpcError>) {
+    /// 本会话的运行令牌（每次启停递增；跨会话的迟到结果据此丢弃）。
+    pub(crate) fn run_token(&self) -> u64 {
+        self.run_token.load(Ordering::SeqCst)
+    }
+
+    /// 只在发起时的那次会话仍有效时回执：插件重启后同 id 的旧应答不得落进新会话。
+    pub(crate) fn respond_if_current(
+        &self,
+        token: u64,
+        id: u64,
+        result: Option<Value>,
+        error: Option<RpcError>,
+    ) {
+        if self.run_token() != token || !self.session_active.load(Ordering::SeqCst) {
+            return;
+        }
+        self.respond(id, result, error);
+    }
+
+    pub(crate) fn respond(&self, id: u64, result: Option<Value>, error: Option<RpcError>) {
         let (envelope, what) = match (result, error) {
             (Some(result), None) => (Envelope::success(id, result), "回执"),
             (_, Some(error)) => (Envelope::failure(id, error), "错误回执"),
@@ -1896,7 +1814,8 @@ struct SpawnSlot {
 ///
 /// 分流判定与「不得同步分派」的防御共用这一份清单：两处各写一遍时，新增方法只改一处会
 /// 落进「未知方法」——功能静默不可用，编译与测试都发现不了。
-fn is_shell_method(method_name: &str) -> bool {    matches!(
+fn is_shell_method(method_name: &str) -> bool {
+    matches!(
         method_name,
         method::ai::CHAT_SEND
             | method::ai::CHAT_STOP
@@ -1929,8 +1848,6 @@ fn is_shell_method(method_name: &str) -> bool {    matches!(
             | method::tray::SET_ITEMS
             | method::collab::PEERS
             | method::collab::SEND
-            | method::view::SCROLL_TO
-            | method::canvas::MEASURE_TEXT
             | method::query::MEASURE
             | method::query::THEME
     )
@@ -1945,6 +1862,7 @@ fn is_ui_method(method_name: &str) -> bool {
             | method::window::CLOSE
             | method::window::UPDATE
             | method::window::SHOW
+            | method::window::BEGIN_DRAG
     )
 }
 
@@ -1992,18 +1910,6 @@ fn record_crash(times: &mut Vec<Instant>, now: Instant) -> usize {
     times.retain(|t| now.duration_since(*t) < CRASH_WINDOW);
     times.push(now);
     times.len()
-}
-
-/// 自备图标名的形态：字母 / 数字 / `_` / `-`，非空且不超过 64。
-fn valid_icon_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= 64
-        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-}
-
-/// 树里是否存在指定 id 的 canvas 节点（树重发时清理孤儿清单的判据）。
-fn has_canvas_node(tree: &ViewNode, node_id: &str) -> bool {
-    tree.find(node_id).is_some_and(|node| matches!(node.body, view::NodeBody::Canvas { .. }))
 }
 
 /// 解析 params。缺省 params（信封里 `params` 为 null）按空对象处理：全可选入参的方法
@@ -2055,13 +1961,23 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
+/// 审计对象：`service.call` 记规范化后的完整方法名，并给出目标方法自己的入参（取路径用）。
+fn audit_subject<'a>(method_name: &str, params: &'a Value) -> (String, Option<&'a Value>) {
+    if method_name == service::method::CALL {
+        let service_name = params.get("service").and_then(Value::as_str).unwrap_or_default();
+        let target = params.get("method").and_then(Value::as_str).unwrap_or_default();
+        if !service_name.is_empty() && !target.is_empty() {
+            return (format!("{service_name}.{target}"), params.get("params"));
+        }
+    }
+    (method_name.to_string(), Some(params))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::vault::test_support::TempDir;
     use atelyx_plugin_protocol::manifest::{Entry, Permission};
-    use atelyx_plugin_protocol::method::TakeoverScope;
-    use atelyx_plugin_protocol::view::NodeBody;
 
     #[allow(unused_imports)]
     use super::super::HostRequest;
@@ -2080,11 +1996,23 @@ mod tests {
         Arc<Instance>,
         tokio::sync::broadcast::Receiver<PluginEvent>,
     ) {
+        make_named_instance_with_events("com.example.demo", permissions)
+    }
+
+    /// 同 [`make_instance_with_events`]，但用给定的插件 id（跨插件路由要用两个不同 id 的实例）。
+    fn make_named_instance_with_events(
+        id: &str,
+        permissions: Vec<Permission>,
+    ) -> (
+        TempDir,
+        Arc<Instance>,
+        tokio::sync::broadcast::Receiver<PluginEvent>,
+    ) {
         let tmp = TempDir::new("plugin-instance");
-        let dir = tmp.join("com.example.demo");
+        let dir = tmp.join(id);
         std::fs::create_dir_all(&dir).unwrap();
         let manifest = Manifest {
-            id: "com.example.demo".into(),
+            id: id.into(),
             name: "Demo".into(),
             version: "1.0.0".into(),
             api_version: API_VERSION,
@@ -2234,32 +2162,53 @@ mod tests {
         assert!(matches!(instance.status(), PluginStatus::Failed(_)));
     }
 
+    /// 未声明不拦执行：调用照常落地，审计记 `declared: false`（设置页据此提示「用到但未声明」）。
     #[test]
-    fn undeclared_capability_is_denied_and_audited() {
-        let (_tmp, instance) = make_instance(Vec::new());
-        instance.handle_line(
-            r#"{"jsonrpc":"2.0","id":1,"method":"fs.readText","params":{"path":"C:/x"}}"#,
-        );
-        assert_eq!(instance.denied_count(), 1, "未声明的能力调用必须被拒并留下记录");
+    fn undeclared_capability_still_executes_and_is_audited() {
+        let (tmp, instance) = make_instance(Vec::new());
+        let file = tmp.join("note.txt").to_string_lossy().into_owned();
+        instance.handle_line(&request_line(
+            method::fs::WRITE_TEXT,
+            &json!({ "path": file, "content": "hi" }),
+        ));
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "hi", "未声明也照常执行");
+        assert_eq!(instance.undeclared_count(), 1, "未声明要留痕");
         let audit = instance.audit();
-        assert_eq!(audit[0].method, "fs.readText");
-        assert_eq!(audit[0].detail, "C:/x");
+        assert_eq!(audit[0].method, method::fs::WRITE_TEXT);
+        assert_eq!(audit[0].detail, file);
+        assert!(!audit[0].declared, "未声明的调用必须能被认出来");
+    }
+
+    /// 声明过的调用同样进审计，但不计入「未声明」计数，也不广播提示。
+    #[test]
+    fn declared_capability_is_audited_without_a_warning() {
+        let (tmp, instance, mut rx) = make_instance_with_events(vec![Permission::Fs]);
+        let file = tmp.join("note.txt").to_string_lossy().into_owned();
+        instance.handle_line(&request_line(
+            method::fs::WRITE_TEXT,
+            &json!({ "path": file, "content": "hi" }),
+        ));
+        let audit = instance.audit();
+        assert_eq!(audit[0].method, method::fs::WRITE_TEXT);
+        assert!(audit[0].declared);
+        assert_eq!(instance.undeclared_count(), 0);
+        assert!(rx.try_recv().is_err(), "声明过的调用不产生未声明提示");
     }
 
     #[test]
-    fn undeclared_window_call_is_denied_and_audited() {
+    fn undeclared_window_call_is_audited() {
         let (_tmp, instance) = make_instance(Vec::new());
         instance.handle_line(&request_line(
             method::window::OPEN,
             &json!({ "id": "w", "title": "窗口" }),
         ));
-        assert_eq!(instance.denied_count(), 1, "未声明 window 能力的开窗请求必须被拒并留记录");
+        assert_eq!(instance.undeclared_count(), 1, "未声明 window 能力的开窗请求要留痕");
         assert_eq!(instance.audit()[0].method, method::window::OPEN);
+        assert!(!instance.audit()[0].declared);
     }
 
     #[test]
-    fn undeclared_ai_calls_are_denied_and_audited() {
-        // ai 权限 fail-closed：send / stop / history 逐项未声明被拒并留审计
+    fn undeclared_ai_calls_are_audited() {
         let (_tmp, instance) = make_instance(Vec::new());
         for (name, params) in [
             (method::ai::CHAT_SEND, json!({ "text": "你好" })),
@@ -2268,90 +2217,33 @@ mod tests {
         ] {
             instance.handle_line(&request_line(name, &params));
         }
-        assert_eq!(
-            instance.denied_count(),
-            3,
-            "未声明 ai 能力的三方法必须全部被拒并留记录"
-        );
+        assert_eq!(instance.undeclared_count(), 3, "未声明 ai 能力的三方法都要留痕");
         for record in instance.audit() {
             assert!(record.method.starts_with("ai.chat."));
+            assert!(!record.declared);
         }
     }
 
+    /// `service.call` 的审计记规范化后的完整方法名（目标方法自己的权限类决定 `declared`）。
     #[test]
-    fn takeover_and_window_requests_route_to_shell_and_resolve() {
-        let tmp = TempDir::new("instance-ui-request");
+    fn service_call_is_audited_under_its_normalized_name() {
+        let tmp = TempDir::new("instance-service-audit");
         let runtime = PluginRuntime::new(tmp.to_path_buf());
-        let (_t, instance) = make_instance(vec![Permission::Window]);
+        let (_t, instance) = make_instance(Vec::new());
         instance.attach_runtime(&runtime);
-        // 界面服务请求的目标校验（贡献注册）查运行时实例表：手工构造的实例须先登记
-        runtime
-            .instances
-            .lock()
-            .unwrap()
-            .insert("com.example.demo".to_string(), instance.clone());
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-
-        // 接管要求目标贡献已注册：先注册再请求
-        instance
-            .dispatch(method::view::REGISTER, &json!({ "slot": "panel", "id": "main", "label": "主面" }))
-            .expect("贡献注册应成功");
+        let file = tmp.join("note.txt").to_string_lossy().into_owned();
+        std::fs::write(&file, "hello").unwrap();
         instance.handle_line(&request_line(
-            method::view::TAKEOVER,
-            &json!({ "scope": "full", "surfaceId": "main" }),
+            service::method::CALL,
+            &json!({ "service": "fs", "method": "readText", "params": { "path": file } }),
         ));
-        let request = rt.block_on(runtime.recv_host_request()).unwrap();
-        let HostRequest::Takeover { request_id, scope, surface_id, .. } = request else {
-            panic!("应投递接管请求");
-        };
-        assert_eq!(scope, TakeoverScope::Full);
-        assert_eq!(surface_id, "main");
-        runtime.resolve_ui_call(request_id, Ok(()));
-
-        instance.handle_line(&request_line(
-            method::window::OPEN,
-            &json!({ "id": "float", "title": "浮窗", "alwaysOnTop": true }),
-        ));
-        let request = rt.block_on(runtime.recv_host_request()).unwrap();
-        let HostRequest::OpenWindow { request_id, params, .. } = request else {
-            panic!("应投递开窗请求");
-        };
-        assert_eq!(params.id, "float");
-        assert_eq!(params.always_on_top, Some(true));
-        runtime.resolve_ui_call(request_id, Err("窗口数量已达上限".to_string()));
-
-        instance.handle_line(&request_line(method::window::CLOSE, &json!({ "id": "float" })));
-        let request = rt.block_on(runtime.recv_host_request()).unwrap();
-        let HostRequest::CloseWindow { request_id, window_id, .. } = request else {
-            panic!("应投递关窗请求");
-        };
-        assert_eq!(window_id, "float");
-        runtime.resolve_ui_call(request_id, Ok(()));
-
-        instance.handle_line(&request_line(
-            method::window::UPDATE,
-            &json!({ "id": "float", "height": 520.0, "alwaysOnTop": false }),
-        ));
-        let request = rt.block_on(runtime.recv_host_request()).unwrap();
-        let HostRequest::WindowUpdate { request_id, params, .. } = request else {
-            panic!("应投递窗口更新请求");
-        };
-        assert_eq!(params.height, Some(520.0));
-        assert_eq!(params.always_on_top, Some(false));
-        runtime.resolve_ui_call(request_id, Ok(()));
-
-        instance.handle_line(&request_line(method::window::SHOW, &json!({ "id": "float" })));
-        let request = rt.block_on(runtime.recv_host_request()).unwrap();
-        let HostRequest::WindowShow { window_id, .. } = request else {
-            panic!("应投递窗口显示请求");
-        };
-        assert_eq!(window_id, "float");
+        let audit = instance.audit();
+        assert_eq!(audit[0].method, "fs.readText", "总线调用按目标方法名记");
+        assert_eq!(audit[0].detail, file);
+        assert!(!audit[0].declared, "目标方法的权限类未声明");
     }
 
-    /// AI 对话三方法路由到壳并可回填（已声明 ai 权限；声明缺失走 fail-closed 被拒测试）。
+    /// AI 对话三方法路由到壳并可回填。
     #[test]
     fn chat_requests_route_to_shell_and_resolve() {
         let tmp = TempDir::new("instance-chat-request");
@@ -2393,345 +2285,9 @@ mod tests {
         runtime.resolve_shell_call(request_id, Err("会话 s1 不存在".to_string()));
     }
 
-    /// 壳侧服务请求路由到壳：request 落到宿主通道，结果经统一回填接口送回。
+    /// 各能力面未声明也执行：审计留痕，且不再以 `PERMISSION_DENIED` 收场。
     #[test]
-    fn shell_side_service_requests_route_and_resolve() {
-        let tmp = TempDir::new("instance-shell-request");
-        let runtime = PluginRuntime::new(tmp.to_path_buf());
-        let (_t, instance) = make_instance(vec![
-            Permission::Clipboard,
-            Permission::Vault,
-            Permission::Table,
-            Permission::Ai,
-            Permission::Tray,
-            Permission::Collab,
-        ]);
-        instance.attach_runtime(&runtime);
-        runtime
-            .instances
-            .lock()
-            .unwrap()
-            .insert("com.example.demo".to_string(), instance.clone());
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-
-        instance.handle_line(&request_line(method::clipboard::READ_TEXT, &Value::Null));
-        let request = rt.block_on(runtime.recv_host_request()).unwrap();
-        let HostRequest::ClipboardRead { request_id, .. } = request else {
-            panic!("应投递剪贴板读取请求");
-        };
-        runtime.resolve_shell_call(request_id, Ok(json!({ "text": "hi" })));
-
-        instance.handle_line(&request_line(method::clipboard::WRITE_TEXT, &json!({ "text": "hi" })));
-        let request = rt.block_on(runtime.recv_host_request()).unwrap();
-        let HostRequest::ClipboardWrite { request_id, text, .. } = request else {
-            panic!("应投递剪贴板写入请求");
-        };
-        assert_eq!(text, "hi");
-        runtime.resolve_shell_call(request_id, Ok(json!({})));
-
-        instance.handle_line(&request_line(method::vault::READ_TEXT, &json!({ "path": "a.md" })));
-        let request = rt.block_on(runtime.recv_host_request()).unwrap();
-        let HostRequest::VaultReadText { request_id, path, .. } = request else {
-            panic!("应投递仓库读取请求");
-        };
-        assert_eq!(path, "a.md");
-        runtime.resolve_shell_call(request_id, Ok(json!({ "content": "正文" })));
-
-        instance.handle_line(&request_line(
-            method::vault::WRITE_TEXT,
-            &json!({ "path": "a.md", "content": "正文" }),
-        ));
-        let request = rt.block_on(runtime.recv_host_request()).unwrap();
-        let HostRequest::VaultWriteText { request_id, path, content, .. } = request else {
-            panic!("应投递仓库写入请求");
-        };
-        assert_eq!((path.as_str(), content.as_str()), ("a.md", "正文"));
-        runtime.resolve_shell_call(request_id, Ok(json!({})));
-
-        instance.handle_line(&request_line(method::vault::READ_BINARY, &json!({ "path": "a.png" })));
-        let request = rt.block_on(runtime.recv_host_request()).unwrap();
-        let HostRequest::VaultReadBinary { request_id, path, .. } = request else {
-            panic!("应投递仓库二进制读取请求");
-        };
-        assert_eq!(path, "a.png");
-        runtime.resolve_shell_call(request_id, Ok(crate::plugin_runtime::binary_payload(&[1, 2])));
-
-        instance.handle_line(&request_line(
-            method::vault::WRITE_BINARY,
-            &json!({ "path": "a.png", "base64": "AAEC" }),
-        ));
-        let request = rt.block_on(runtime.recv_host_request()).unwrap();
-        let HostRequest::VaultWriteBinary { request_id, path, bytes, .. } = request else {
-            panic!("应投递仓库二进制写入请求");
-        };
-        assert_eq!(path, "a.png");
-        assert_eq!(bytes, vec![0, 1, 2]);
-        runtime.resolve_shell_call(request_id, Ok(json!({})));
-
-        instance.handle_line(&request_line(method::clipboard::READ_IMAGE, &Value::Null));
-        let request = rt.block_on(runtime.recv_host_request()).unwrap();
-        let HostRequest::ClipboardReadImage { request_id, .. } = request else {
-            panic!("应投递剪贴板读图请求");
-        };
-        runtime.resolve_shell_call(request_id, Ok(json!({})));
-
-        instance.handle_line(&request_line(
-            method::clipboard::WRITE_IMAGE,
-            &json!({ "base64": "AAEC" }),
-        ));
-        let request = rt.block_on(runtime.recv_host_request()).unwrap();
-        let HostRequest::ClipboardWriteImage { request_id, bytes, .. } = request else {
-            panic!("应投递剪贴板写图请求");
-        };
-        assert_eq!(bytes, vec![0, 1, 2]);
-        runtime.resolve_shell_call(request_id, Ok(json!({})));
-
-        instance.handle_line(&request_line(method::ai::MODELS, &Value::Null));
-        let request = rt.block_on(runtime.recv_host_request()).unwrap();
-        let HostRequest::AiModels { request_id, .. } = request else {
-            panic!("应投递模型清单请求");
-        };
-        runtime.resolve_shell_call(request_id, Ok(json!({ "providers": [] })));
-
-        instance.handle_line(&request_line(method::ai::AGENTS, &Value::Null));
-        let request = rt.block_on(runtime.recv_host_request()).unwrap();
-        let HostRequest::AiAgents { request_id, .. } = request else {
-            panic!("应投递 Agent 清单请求");
-        };
-        runtime.resolve_shell_call(request_id, Ok(json!({})));
-
-        instance.handle_line(&request_line(method::vault::REMOVE, &json!({ "path": "旧.md" })));
-        let request = rt.block_on(runtime.recv_host_request()).unwrap();
-        let HostRequest::VaultRemove { request_id, path, .. } = request else {
-            panic!("应投递仓库删除请求");
-        };
-        assert_eq!(path, "旧.md");
-        runtime.resolve_shell_call(request_id, Ok(json!({})));
-
-        instance.handle_line(&request_line(
-            method::vault::RENAME,
-            &json!({ "from": "旧.md", "to": "新.md" }),
-        ));
-        let request = rt.block_on(runtime.recv_host_request()).unwrap();
-        let HostRequest::VaultRename { request_id, from, to, .. } = request else {
-            panic!("应投递仓库改名请求");
-        };
-        assert_eq!((from.as_str(), to.as_str()), ("旧.md", "新.md"));
-        runtime.resolve_shell_call(request_id, Ok(json!({})));
-
-        instance.handle_line(&request_line(method::vault::LIST, &json!({ "path": "" })));
-        let request = rt.block_on(runtime.recv_host_request()).unwrap();
-        let HostRequest::VaultList { request_id, path, .. } = request else {
-            panic!("应投递目录列举请求");
-        };
-        assert_eq!(path, "");
-        runtime.resolve_shell_call(request_id, Ok(json!({ "entries": [] })));
-
-        instance.handle_line(&request_line(method::vault::EXISTS, &json!({ "path": "a.md" })));
-        let request = rt.block_on(runtime.recv_host_request()).unwrap();
-        let HostRequest::VaultExists { request_id, path, .. } = request else {
-            panic!("应投递存在性请求");
-        };
-        assert_eq!(path, "a.md");
-        runtime.resolve_shell_call(request_id, Ok(json!({ "exists": true })));
-
-        instance.handle_line(&request_line(method::table::SNAPSHOT, &Value::Null));
-        let request = rt.block_on(runtime.recv_host_request()).unwrap();
-        let HostRequest::TableSnapshot { request_id, .. } = request else {
-            panic!("应投递表格快照请求");
-        };
-        runtime.resolve_shell_call(request_id, Ok(json!({ "open": false })));
-
-        instance.handle_line(&request_line(
-            method::table::UPDATE_CELL,
-            &json!({ "rowId": "r1", "fieldId": "f1", "value": "甲" }),
-        ));
-        let request = rt.block_on(runtime.recv_host_request()).unwrap();
-        let HostRequest::TableUpdateCell { request_id, row_id, field_id, value, .. } = request else {
-            panic!("应投递逐格写请求");
-        };
-        assert_eq!((row_id.as_str(), field_id.as_str()), ("r1", "f1"));
-        assert_eq!(value, json!("甲"));
-        runtime.resolve_shell_call(request_id, Ok(json!({})));
-
-        instance.handle_line(&request_line(method::table::ADD_ROW, &Value::Null));
-        let request = rt.block_on(runtime.recv_host_request()).unwrap();
-        let HostRequest::TableAddRow { request_id, .. } = request else {
-            panic!("应投递新增行请求");
-        };
-        runtime.resolve_shell_call(request_id, Ok(json!({ "rowId": "r9" })));
-
-        instance.handle_line(&request_line(method::table::REMOVE_ROW, &json!({ "rowId": "r1" })));
-        let request = rt.block_on(runtime.recv_host_request()).unwrap();
-        let HostRequest::TableRemoveRow { request_id, row_id, .. } = request else {
-            panic!("应投递删行请求");
-        };
-        assert_eq!(row_id, "r1");
-        runtime.resolve_shell_call(request_id, Ok(json!({})));
-
-        instance.handle_line(&request_line(method::table::SELECT_ROW, &json!({ "rowId": "r1" })));
-        let request = rt.block_on(runtime.recv_host_request()).unwrap();
-        let HostRequest::TableSelectRow { request_id, row_id, .. } = request else {
-            panic!("应投递选行请求");
-        };
-        assert_eq!(row_id, "r1");
-        runtime.resolve_shell_call(request_id, Ok(json!({})));
-
-        instance.handle_line(&request_line(
-            method::table::SET_CELL_IMAGE,
-            &json!({ "rowId": "r1", "fieldId": "f2", "images": ["assets/a.png"], "display": "grid" }),
-        ));
-        let request = rt.block_on(runtime.recv_host_request()).unwrap();
-        let HostRequest::TableSetCellImage { request_id, params, .. } = request else {
-            panic!("应投递图片单元格写入请求");
-        };
-        assert_eq!(params.images, vec!["assets/a.png"]);
-        assert_eq!(params.display.as_deref(), Some("grid"));
-        runtime.resolve_shell_call(request_id, Ok(json!({})));
-
-        instance.handle_line(&request_line(
-            method::view::SCROLL_TO,
-            &json!({ "surfaceId": "panel", "nodeId": "log", "edge": "end" }),
-        ));
-        let request = rt.block_on(runtime.recv_host_request()).unwrap();
-        let HostRequest::ScrollTo { request_id, params, .. } = request else {
-            panic!("应投递滚动指令");
-        };
-        assert_eq!(params.edge, Some(method::ScrollEdge::End));
-        runtime.resolve_shell_call(request_id, Ok(json!({})));
-
-        instance.handle_line(&request_line(
-            method::view::SCROLL_TO,
-            &json!({ "surfaceId": "panel", "nodeId": "log", "offset": 0.25 }),
-        ));
-        let request = rt.block_on(runtime.recv_host_request()).unwrap();
-        let HostRequest::ScrollTo { request_id, params, .. } = request else {
-            panic!("应投递滚动指令");
-        };
-        assert_eq!((params.edge, params.offset), (None, Some(0.25)));
-        runtime.resolve_shell_call(request_id, Ok(json!({})));
-
-        instance.handle_line(&request_line(method::vault::IMAGE_INFO, &json!({ "path": "a.png" })));
-        let request = rt.block_on(runtime.recv_host_request()).unwrap();
-        let HostRequest::VaultImageInfo { request_id, path, .. } = request else {
-            panic!("应投递图片尺寸请求");
-        };
-        assert_eq!(path, "a.png");
-        runtime.resolve_shell_call(request_id, Ok(json!({ "width": 64, "height": 32 })));
-
-        // 文字量算同样走壳侧应答：参数须原样带到壳（size / weight / maxWidth）
-        instance.handle_line(&request_line(
-            method::canvas::MEASURE_TEXT,
-            &json!({ "text": "12 tok/s", "size": 13.0, "maxWidth": 96.0 }),
-        ));
-        let request = rt.block_on(runtime.recv_host_request()).unwrap();
-        let HostRequest::MeasureText { request_id, params, .. } = request else {
-            panic!("应投递文字量算请求");
-        };
-        assert_eq!((params.text.as_str(), params.size), ("12 tok/s", 13.0));
-        assert_eq!(params.max_width, Some(96.0));
-        runtime.resolve_shell_call(request_id, Ok(json!({ "width": 40.0, "height": 15.0, "lines": 1 })));
-
-        // 批量量算与主题查询同样走壳侧应答：条目原样带到壳
-        instance.handle_line(&request_line(
-            method::query::MEASURE,
-            &json!({ "items": [{ "text": "ab", "size": 12.0 }, { "text": "中文", "size": 14.0, "family": "mono" }] }),
-        ));
-        let request = rt.block_on(runtime.recv_host_request()).unwrap();
-        let HostRequest::MeasureBatch { request_id, params, .. } = request else {
-            panic!("应投递批量量算请求");
-        };
-        assert_eq!(params.items.len(), 2);
-        assert_eq!(params.items[1].family, Some(view::TextFamily::Mono));
-        runtime.resolve_shell_call(request_id, Ok(json!({ "sizes": [] })));
-
-        instance.handle_line(&request_line(method::query::THEME, &Value::Null));
-        let request = rt.block_on(runtime.recv_host_request()).unwrap();
-        let HostRequest::QueryTheme { request_id, .. } = request else {
-            panic!("应投递主题查询请求");
-        };
-        runtime.resolve_shell_call(request_id, Ok(json!({})));
-
-
-        instance.handle_line(&request_line(
-            method::tray::SET_ITEMS,
-            &json!({ "items": [{ "id": "show", "label": "显示" }] }),
-        ));
-        let request = rt.block_on(runtime.recv_host_request()).unwrap();
-        let HostRequest::TraySetItems { request_id, .. } = request else {
-            panic!("应投递托盘条目请求");
-        };
-        runtime.resolve_shell_call(request_id, Ok(json!({})));
-
-        instance.handle_line(&request_line(method::collab::PEERS, &Value::Null));
-        let request = rt.block_on(runtime.recv_host_request()).unwrap();
-        let HostRequest::CollabPeers { request_id, .. } = request else {
-            panic!("应投递协作在场清单请求");
-        };
-        runtime.resolve_shell_call(request_id, Ok(json!({ "connected": false })));
-
-        instance.handle_line(&request_line(
-            method::collab::SEND,
-            &json!({ "channel": "chat", "payload": { "n": 1 }, "targetPeerId": "2" }),
-        ));
-        let request = rt.block_on(runtime.recv_host_request()).unwrap();
-        let HostRequest::CollabSend { request_id, params, .. } = request else {
-            panic!("应投递协作消息请求");
-        };
-        assert_eq!(params.channel, "chat");
-        assert_eq!(params.target_peer_id.as_deref(), Some("2"));
-        runtime.resolve_shell_call(request_id, Ok(json!({ "queued": true })));
-
-        instance.handle_line(&request_line(method::ai::CHAT_RENAME, &json!({ "sessionId": "s1", "title": "周报" })));
-        let request = rt.block_on(runtime.recv_host_request()).unwrap();
-        let HostRequest::ChatRename { request_id, params, .. } = request else {
-            panic!("应投递重命名请求");
-        };
-        assert_eq!(params.title, "周报");
-        runtime.resolve_shell_call(request_id, Ok(json!({})));
-
-        instance.handle_line(&request_line(method::ai::CHAT_DELETE, &json!({ "sessionId": "s1" })));
-        let request = rt.block_on(runtime.recv_host_request()).unwrap();
-        let HostRequest::ChatDelete { request_id, .. } = request else {
-            panic!("应投递删除请求");
-        };
-        runtime.resolve_shell_call(request_id, Ok(json!({})));
-
-        instance.handle_line(&request_line(method::ai::CHAT_COMPACT, &json!({ "sessionId": "s1" })));
-        let request = rt.block_on(runtime.recv_host_request()).unwrap();
-        let HostRequest::ChatCompact { request_id, .. } = request else {
-            panic!("应投递压缩请求");
-        };
-        runtime.resolve_shell_call(request_id, Ok(json!({})));
-    }
-
-    /// 分流名单与分派名单失配时必须可读失败，不能落进「未知方法」——新增壳侧方法只改一处
-    /// 会静默不可用，这条守卫是它唯一的兜底。
-    #[test]
-    fn shell_routed_capabilities_reject_synchronous_dispatch() {
-        let (_tmp, instance) = make_instance(vec![Permission::Clipboard]);
-        for method in [
-            method::clipboard::READ_TEXT,
-            method::vault::READ_TEXT,
-            method::view::SCROLL_TO,
-            method::canvas::MEASURE_TEXT,
-            method::query::MEASURE,
-            method::query::THEME,
-            method::window::UPDATE,
-            method::window::SHOW,
-        ] {
-            let error = instance.dispatch(method, &Value::Null).expect_err("应被守卫拦下");
-            assert_eq!(error.code, RpcError::FAILED);
-            assert_eq!(error.message, "宿主服务请求须走异步应答路径", "方法 {method}");
-        }
-    }
-
-    /// 各能力面「未声明被拒」：闸门只认 manifest 声明，未声明一律 fail-closed 且记审计。
-    #[test]
-    fn undeclared_calls_of_each_face_are_denied() {
+    fn undeclared_calls_of_each_face_are_audited_not_denied() {
         let cases: [(Permission, &str, Value); 9] = [
             // 入参一律取「必然执行失败但不会真的落盘 / 出网 / 弹框」的形态
             (Permission::Process, method::process::SPAWN, json!({ "program": "atelyx-no-such-program" })),
@@ -2745,17 +2301,18 @@ mod tests {
             (Permission::Ai, method::ai::CHAT_RENAME, json!({ "sessionId": "s1", "title": "T" })),
         ];
         for (permission, method_name, params) in cases {
-            // 未声明：拒绝并留痕（响应写往不存在的插件进程，观测点在审计记录）
+            // 未声明：照常进入执行路径并留痕（响应写往不存在的插件进程，观测点在审计记录）
             let (_tmp, undeclared) = make_instance(Vec::new());
             undeclared.handle_line(&request_line(method_name, &params));
-            assert_eq!(undeclared.denied_count(), 1, "{method_name} 未声明必须被拒并留痕");
-            // 已声明：进入真实执行路径（不再被闸门挡下）
+            assert_eq!(undeclared.undeclared_count(), 1, "{method_name} 未声明要留痕");
+            assert!(!undeclared.audit()[0].declared);
+            // 已声明：同一条执行路径，只是审计标为已声明
             let (_tmp2, declared) = make_instance(vec![permission]);
             let error = declared.dispatch(method_name, &params).expect_err("入参不成立，应报执行错误");
             assert_ne!(
                 error.code,
                 RpcError::PERMISSION_DENIED,
-                "{method_name} 已声明却仍被闸门拒绝"
+                "{method_name} 的执行路径不该出现权限拒绝"
             );
         }
     }
@@ -2864,23 +2421,299 @@ mod tests {
         assert!(instance.dispatch("nope.method", &Value::Null).is_err());
     }
 
-    /// 自备图标定义：名字 / 路径校验通过即登记，随会话收尾清除。
+    /// `service.call` 的内置路径与直接调用同一条实现；未知服务 / 未知方法都以错误原因常量收场。
     #[test]
-    fn define_icon_validates_and_clears_on_teardown() {
-        let (_tmp, instance) = make_instance(Vec::new());
-        instance
-            .dispatch(method::view::DEFINE_ICON, &json!({ "name": "model-chip", "path": "M4 4h16v16H4z" }))
-            .expect("合法自备图标应被登记");
-        assert_eq!(instance.icons().get("model-chip").map(String::as_str), Some("M4 4h16v16H4z"));
-        for bad in [
-            json!({ "name": "", "path": "M4 4" }),
-            json!({ "name": "has space", "path": "M4 4" }),
-            json!({ "name": "ok", "path": "   " }),
-        ] {
-            assert!(instance.dispatch(method::view::DEFINE_ICON, &bad).is_err(), "应拒绝：{bad}");
+    fn service_call_resolves_to_the_builtin_dispatch() {
+        let tmp = TempDir::new("instance-service-call");
+        let runtime = PluginRuntime::new(tmp.to_path_buf());
+        let (_t, instance) = make_instance(Vec::new());
+        instance.attach_runtime(&runtime);
+
+        let direct = instance
+            .dispatch(method::markdown::PARSE, &json!({ "content": "# A" }))
+            .expect("直接调用应成功");
+        // 生产路径（`handle_service_call`）就是把目录决议出的内置落点重新交给同一条分派
+        let target = runtime
+            .service_target(service::CallParams {
+                service: "markdown".into(),
+                method: "parse".into(),
+                params: json!({ "content": "# A" }),
+            })
+            .expect("内置服务应可决议");
+        let ServiceTarget::Builtin { wire, params } = target else {
+            panic!("内置实现应落在本地分派");
+        };
+        let via = instance.dispatch(&wire, &params).expect("总线调用应成功");
+        assert_eq!(direct, via, "内置路径与直接调用必须落到同一实现");
+
+        let unknown_service = runtime
+            .service_target(service::CallParams {
+                service: "nope".into(),
+                method: "x".into(),
+                params: Value::Null,
+            })
+            .expect_err("未知服务应失败");
+        assert!(unknown_service.message.contains(service::error::UNKNOWN_SERVICE));
+        let unknown_method = runtime
+            .service_target(service::CallParams {
+                service: "markdown".into(),
+                method: "nope".into(),
+                params: Value::Null,
+            })
+            .expect_err("未知方法应失败");
+        assert!(unknown_method.message.contains(service::error::UNKNOWN_METHOD));
+        let bus = runtime
+            .service_target(service::CallParams {
+                service: "service".into(),
+                method: "list".into(),
+                params: Value::Null,
+            })
+            .expect_err("总线命名空间不是服务");
+        assert!(bus.message.contains(service::error::UNKNOWN_SERVICE));
+    }
+
+    /// 活动提供者是外部插件时普通方法与 `service.call` 都转发；提供者下线即回落内置。
+    #[tokio::test]
+    async fn external_provider_takes_over_vault_routing() {
+        let tmp = TempDir::new("instance-service-forward");
+        let runtime = PluginRuntime::new(tmp.to_path_buf());
+        let (_t, provider, _provider_events) =
+            make_named_instance_with_events("com.example.provider", Vec::new());
+        provider.attach_runtime(&runtime);
+        provider.set_status(PluginStatus::Running);
+        provider.session_active.store(true, Ordering::SeqCst);
+        runtime
+            .instances
+            .lock()
+            .unwrap()
+            .insert(provider.id.clone(), provider.clone());
+        runtime
+            .register_service(
+                &provider.id,
+                service::RegisterParams {
+                    service: "vault".into(),
+                    version: None,
+                    methods: vec!["readText".into()],
+                },
+            )
+            .expect("登记应成功");
+        let provider_of = |runtime: &PluginRuntime| {
+            runtime
+                .service_list()
+                .services
+                .iter()
+                .find(|s| s.service == "vault")
+                .and_then(|s| s.provider.clone())
+        };
+        assert_eq!(provider_of(&runtime), None, "登记不自动顶替内置");
+        runtime
+            .set_service_provider("vault", Some(&provider.id))
+            .expect("切换应成功");
+        assert_eq!(provider_of(&runtime).as_deref(), Some(provider.id.as_str()));
+
+        let (_t2, caller, _caller_events) =
+            make_named_instance_with_events("com.example.caller", Vec::new());
+        caller.attach_runtime(&runtime);
+        runtime
+            .instances
+            .lock()
+            .unwrap()
+            .insert(caller.id.clone(), caller.clone());
+
+        // 普通方法走转发：在途条目按提供者记账，别家回报不得认领
+        caller.handle_line(&request_line(
+            method::vault::READ_TEXT,
+            &json!({ "path": "notes/a.md" }),
+        ));
+        let call_id = wait_service_call(&runtime).await;
+        assert!(
+            runtime
+                .resolve_service_call(
+                    &caller.id,
+                    service::ResultParams {
+                        call_id: call_id.clone(),
+                        result: Some(json!({ "content": "外部提供者应答" })),
+                        error: None,
+                    },
+                )
+                .is_err(),
+            "他插件的回报不得认领本插件的调用"
+        );
+        // `service.call` 同样走外部提供者
+        caller.handle_line(&request_line(
+            service::method::CALL,
+            &json!({ "service": "vault", "method": "readText", "params": { "path": "notes/b.md" } }),
+        ));
+        let second = wait_service_call_other_than(&runtime, &call_id).await;
+        for id in [call_id, second] {
+            runtime
+                .resolve_service_call(
+                    &provider.id,
+                    service::ResultParams {
+                        call_id: id,
+                        result: Some(json!({ "content": "外部提供者应答" })),
+                        error: None,
+                    },
+                )
+                .expect("提供者回报应被接受");
         }
-        instance.stop();
-        assert!(instance.icons().is_empty(), "收尾后自备图标应清空");
+
+        // 提供者下线：登记摘除、活动回落内置
+        provider.stop();
+        assert_eq!(provider_of(&runtime), None);
+    }
+
+    /// 在途调用遇提供者停用立即以 `provider_unavailable` 收场，不等 30 秒超时。
+    #[tokio::test]
+    async fn in_flight_call_fails_when_provider_stops() {
+        let tmp = TempDir::new("instance-service-failover");
+        let runtime = PluginRuntime::new(tmp.to_path_buf());
+        let (_t, provider, _events) =
+            make_named_instance_with_events("com.example.provider", Vec::new());
+        provider.attach_runtime(&runtime);
+        provider.set_status(PluginStatus::Running);
+        provider.session_active.store(true, Ordering::SeqCst);
+        runtime
+            .instances
+            .lock()
+            .unwrap()
+            .insert(provider.id.clone(), provider.clone());
+        runtime
+            .register_service(
+                &provider.id,
+                service::RegisterParams {
+                    service: "vault".into(),
+                    version: None,
+                    methods: vec!["readText".into()],
+                },
+            )
+            .expect("登记应成功");
+        runtime
+            .set_service_provider("vault", Some(&provider.id))
+            .expect("切换应成功");
+
+        let (_t2, caller, _caller_events) =
+            make_named_instance_with_events("com.example.caller", Vec::new());
+        caller.attach_runtime(&runtime);
+        runtime
+            .instances
+            .lock()
+            .unwrap()
+            .insert(caller.id.clone(), caller.clone());
+        caller.handle_line(&request_line(
+            method::vault::READ_TEXT,
+            &json!({ "path": "notes/a.md" }),
+        ));
+        let call_id = wait_service_call(&runtime).await;
+
+        provider.stop();
+        assert!(
+            runtime.service_calls.lock().unwrap().is_empty(),
+            "提供者停用后在途调用立即收场，不留在表里等超时"
+        );
+        let late = runtime
+            .resolve_service_call(
+                &provider.id,
+                service::ResultParams {
+                    call_id,
+                    result: Some(json!({ "content": "迟到" })),
+                    error: None,
+                },
+            )
+            .expect_err("收场后的回报应被丢弃");
+        assert!(late.contains("已收场"), "应可读说明迟到：{late}");
+    }
+
+    /// 分组方法名（`ai.chat.send`）经能力总线调用与直接调用落到同一实现。
+    #[test]
+    fn grouped_ai_methods_resolve_through_the_bus() {
+        let tmp = TempDir::new("instance-service-grouped");
+        let runtime = PluginRuntime::new(tmp.to_path_buf());
+        let target = runtime
+            .service_target(service::CallParams {
+                service: "ai".into(),
+                method: "chat.send".into(),
+                params: json!({ "sessionId": "s1", "text": "hi" }),
+            })
+            .expect("分组方法应可决议");
+        let ServiceTarget::Builtin { wire, .. } = target else {
+            panic!("出厂活动提供者是内置实现");
+        };
+        assert_eq!(wire, method::ai::CHAT_SEND, "总线调用规范化回直接调用的 wire 名");
+        // 工具名册与结果回报是宿主记账，不在能力目录里，也经不了总线调用
+        let tool_result = runtime
+            .service_target(service::CallParams {
+                service: "ai".into(),
+                method: "toolResult".into(),
+                params: Value::Null,
+            })
+            .expect_err("回报方法不是可调用能力");
+        assert!(tool_result.message.contains(service::error::UNKNOWN_METHOD));
+    }
+
+    /// `ai` 被外部提供者顶替后，工具名册与回报仍由宿主处理，不被提供者截走。
+    #[test]
+    fn host_owned_ai_methods_are_never_forwarded() {
+        let tmp = TempDir::new("instance-service-host-owned");
+        let runtime = PluginRuntime::new(tmp.to_path_buf());
+        runtime
+            .register_service(
+                "com.example.provider",
+                service::RegisterParams {
+                    service: "ai".into(),
+                    version: None,
+                    methods: vec!["chat.send".into(), "toolResult".into(), "registerTool".into()],
+                },
+            )
+            .expect("登记应成功");
+        runtime
+            .set_service_provider("ai", Some("com.example.provider"))
+            .expect("切换应成功");
+        assert_eq!(
+            runtime.forward_to("ai", "chat.send"),
+            Forward::Plugin("com.example.provider".into()),
+            "对话能力可以被外部提供者接管"
+        );
+        for (service_name, method_name) in [
+            ("ai", "toolResult"),
+            ("ai", "registerTool"),
+            ("ai", "unregisterTool"),
+        ] {
+            assert_eq!(
+                runtime.forward_to(service_name, method_name),
+                Forward::Local,
+                "{service_name}.{method_name} 是宿主保留方法"
+            );
+        }
+    }
+
+    /// 等在途服务调用落表（转发任务被调度后才登记）。
+    async fn wait_service_call(runtime: &PluginRuntime) -> String {
+        for _ in 0..100 {
+            if let Some(id) = runtime.service_calls.lock().unwrap().keys().next() {
+                return id.clone();
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("服务调用未在预期时间内登记");
+    }
+
+    /// 等一个不同于 `existing` 的在途服务调用（两笔调用同时在途时用）。
+    async fn wait_service_call_other_than(runtime: &PluginRuntime, existing: &str) -> String {
+        for _ in 0..100 {
+            let found = runtime
+                .service_calls
+                .lock()
+                .unwrap()
+                .keys()
+                .find(|id| id.as_str() != existing)
+                .cloned();
+            if let Some(id) = found {
+                return id;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("第二笔服务调用未在预期时间内登记");
     }
 
     /// 快捷键占用查询：无 OS 层时以可读失败收场（与注册同一原因），非法加速键亦拒。
@@ -2895,16 +2728,6 @@ mod tests {
             instance.dispatch(method::shortcut::QUERY, &json!({ "accelerator": "不认识的键" })).is_err(),
             "非法加速键应被拒"
         );
-    }
-
-    /// 运行时时序方法（界面通道）不占权限：未声明任何能力的插件也能定义图标 / 发滚动指令。
-    #[test]
-    fn interface_channel_methods_need_no_permission() {
-        let (_tmp, instance) = make_instance(Vec::new());
-        instance
-            .dispatch(method::view::DEFINE_ICON, &json!({ "name": "chip", "path": "M4 4h4v4H4z" }))
-            .expect("定义图标不占权限声明");
-        assert_eq!(instance.denied_count(), 0);
     }
 
     #[test]
@@ -2971,414 +2794,12 @@ mod tests {
         assert_eq!(instance.status(), PluginStatus::Running);
     }
 
-    #[test]
-    fn view_submit_validates_tree_and_requires_surface() {
-        let (_tmp, instance) = make_instance(Vec::new());
-        let tree = json!({ "id": "root", "kind": "text", "content": "x" });
-        instance
-            .dispatch(method::view::SUBMIT, &json!({ "surfaceId": "main", "tree": tree }))
-            .expect("合法界面树应被接收");
-        assert_eq!(instance.view_submits(), 1);
-        assert!(
-            instance
-                .dispatch(method::view::SUBMIT, &json!({ "surfaceId": "", "tree": tree }))
-                .is_err(),
-            "surfaceId 为空应被拒"
-        );
-    }
-
-    /// 界面树按面存档（壳据此渲染最新树）；重复提交覆盖同一面。
-    #[test]
-    fn submitted_trees_are_stored_per_surface() {
-        let (_tmp, instance) = make_instance(Vec::new());
-        let tree = |content: &str| json!({ "id": "root", "kind": "text", "content": content });
-        instance
-            .dispatch(method::view::SUBMIT, &json!({ "surfaceId": "panel", "tree": tree("一") }))
-            .unwrap();
-        instance
-            .dispatch(method::view::SUBMIT, &json!({ "surfaceId": "other", "tree": tree("二") }))
-            .unwrap();
-        instance
-            .dispatch(method::view::SUBMIT, &json!({ "surfaceId": "panel", "tree": tree("三") }))
-            .unwrap();
-        let stored = |id: &str| match instance.surface_tree(id) {
-            Some(ViewNode { body: NodeBody::Text { content, .. }, .. }) => content,
-            other => panic!("面 {id} 的树应存在且为文本节点，实际：{other:?}"),
-        };
-        assert_eq!(stored("panel"), "三", "重复提交应覆盖同一面的旧树");
-        assert_eq!(stored("other"), "二");
-        assert!(instance.surface_tree("missing").is_none());
-    }
-
-    /// 贡献注册：登记成功、重复 id 与非法 id 被拒、撤销后消失。
-    #[test]
-    fn contributions_register_and_unregister() {
-        let (_tmp, instance) = make_instance(Vec::new());
-        let panel = json!({ "slot": "panel", "id": "models", "label": "模型", "icon": "box" });
-        instance.dispatch(method::view::REGISTER, &panel).expect("面板注册应成功");
-        instance
-            .dispatch(method::view::REGISTER, &json!({ "slot": "tableView", "id": "timeline", "label": "时间线" }))
-            .expect("表格视图注册应成功");
-        let listed = instance.contributions();
-        assert_eq!(listed.len(), 2);
-        assert_eq!(listed[0].id, "models");
-        assert_eq!(listed[0].slot, ContributionSlot::Panel);
-        assert_eq!(listed[0].icon.as_deref(), Some("box"));
-        assert_eq!(listed[0].plugin_id, "com.example.demo");
-
-        // 重复 id 与非法的空 id / 含 `:` 的 id 一律可读拒绝
-        for bad in [
-            panel.clone(),
-            json!({ "slot": "panel", "id": "  ", "label": "空" }),
-            json!({ "slot": "panel", "id": "a:b", "label": "分隔符" }),
-            json!({ "slot": "panel", "id": "blank", "label": " " }),
-        ] {
-            assert!(instance.dispatch(method::view::REGISTER, &bad).is_err(), "应拒绝：{bad}");
-        }
-
-        instance
-            .dispatch(method::view::UNREGISTER, &json!({ "id": "models" }))
-            .expect("撤销应成功");
-        assert_eq!(instance.contributions().len(), 1);
-        assert!(
-            instance.dispatch(method::view::UNREGISTER, &json!({ "id": "models" })).is_err(),
-            "撤销未注册的 id 应报可读错误"
-        );
-    }
-
-    /// 会话收尾清空界面树与贡献注册：停用 / 崩溃 / 卸载后壳不该再看到已停插件的界面。
-    #[test]
-    fn teardown_drops_surfaces_and_contributions() {
-        let (_tmp, instance) = make_instance(Vec::new());
-        instance
-            .dispatch(method::view::REGISTER, &json!({ "slot": "panel", "id": "main", "label": "面板" }))
-            .unwrap();
-        instance
-            .dispatch(
-                method::view::SUBMIT,
-                &json!({ "surfaceId": "main", "tree": json!({ "id": "root", "kind": "text", "content": "x" }) }),
-            )
-            .unwrap();
-        instance.stop();
-        assert!(instance.surface_tree("main").is_none(), "收尾后界面树应清空");
-        assert!(instance.contributions().is_empty(), "收尾后贡献注册应清空");
-    }
-
-    /// 会话闸门同样覆盖界面登记：令牌换代后到达的提交 / 注册一律作废（不得让已停插件的界面存活）。
-    #[test]
-    fn stale_session_view_registration_is_refused() {
-        let (_tmp, instance) = make_instance(Vec::new());
-        let stale = instance.run_token.load(Ordering::SeqCst) + 1;
-        let tree = json!({ "id": "root", "kind": "text", "content": "x" });
-        for (method_name, params) in [
-            (method::view::SUBMIT, json!({ "surfaceId": "main", "tree": tree })),
-            (method::view::REGISTER, json!({ "slot": "panel", "id": "main", "label": "面板" })),
-        ] {
-            let error = instance
-                .dispatch_for_session(stale, method_name, &params)
-                .expect_err("旧会话的界面登记应被拒");
-            assert!(error.message.contains("会话已结束"), "{method_name}: {}", error.message);
-        }
-        assert!(instance.surface_tree("main").is_none());
-        assert!(instance.contributions().is_empty());
-    }
-
-    /// 画布清单提交：面须已有树、节点须在树里且为 canvas、指令逐条校验；存档按 (面, 节点) 键合帧覆盖。
-    #[test]
-    fn canvas_submit_requires_canvas_node_in_tree() {
-        let (_tmp, instance) = make_instance(Vec::new());
-        let canvas_tree = || {
-            json!({ "id": "root", "kind": "column", "children": [
-                { "id": "board", "kind": "canvas", "mouseEvents": ["pointerDown"] },
-                { "id": "hint", "kind": "text", "content": "x" }
-            ]})
-        };
-        let commands = json!([
-            { "kind": "line", "x1": 0.0, "y1": 0.0, "x2": 5.0, "y2": 5.0, "stroke": { "type": "rgba", "rgba": [0, 0, 0, 255] } }
-        ]);
-        let submit = |node_id: &str| {
-            json!({ "surfaceId": "main", "nodeId": node_id, "commands": commands })
-        };
-        assert!(
-            instance.dispatch(method::canvas::SUBMIT, &submit("board")).is_err(),
-            "面没有界面树时应被拒"
-        );
-        instance
-            .dispatch(method::view::SUBMIT, &json!({ "surfaceId": "main", "tree": canvas_tree() }))
-            .unwrap();
-        assert!(
-            instance.dispatch(method::canvas::SUBMIT, &submit("missing")).is_err(),
-            "节点不在树里应被拒"
-        );
-        assert!(
-            instance.dispatch(method::canvas::SUBMIT, &submit("hint")).is_err(),
-            "非 canvas 节点应被拒"
-        );
-        instance.dispatch(method::canvas::SUBMIT, &submit("board")).expect("合法提交应被接收");
-        assert_eq!(instance.surface_canvas("main", "board").unwrap().len(), 1);
-        assert!(instance.surface_canvas("main", "hint").is_none());
-
-        let bad = json!({ "surfaceId": "main", "nodeId": "board", "commands": [
-            { "kind": "circle", "cx": 0.0, "cy": 0.0, "r": 1.0, "fill": null, "stroke": null }
-        ]});
-        assert!(
-            instance.dispatch(method::canvas::SUBMIT, &bad).is_err(),
-            "无填充也无描边的指令应被拒"
-        );
-        assert_eq!(instance.surface_canvas("main", "board").unwrap().len(), 1, "被拒的提交不得改写存档");
-    }
-
-    /// 增量提交按 id 增删改、不动绘制顺序；整表提交丢掉 id 槽；冲突与空增量拒收。
-    #[test]
-    fn canvas_patch_maintains_entries_by_id() {
-        let (_tmp, instance) = make_instance(Vec::new());
-        instance
-            .dispatch(
-                method::view::SUBMIT,
-                &json!({ "surfaceId": "main", "tree": {
-                    "id": "root", "kind": "column", "children": [ { "id": "board", "kind": "canvas" } ]
-                }}),
-            )
-            .unwrap();
-        let line = |y: f32| {
-            json!({ "kind": "line", "x1": 0.0, "y1": y, "x2": 5.0, "y2": y, "stroke": { "type": "rgba", "rgba": [0, 0, 0, 255] } })
-        };
-        let patch = |upsert: Value, remove: Value| {
-            json!({ "surfaceId": "main", "nodeId": "board", "upsert": upsert, "remove": remove })
-        };
-        instance
-            .dispatch(
-                method::canvas::SUBMIT,
-                &json!({ "surfaceId": "main", "nodeId": "board", "commands": [line(0.0)] }),
-            )
-            .unwrap();
-
-        instance
-            .dispatch(method::canvas::PATCH, &patch(json!([
-                { "id": "a", "command": line(1.0) },
-                { "id": "b", "command": line(2.0) }
-            ]), json!([])))
-            .unwrap();
-        assert_eq!(instance.surface_canvas("main", "board").unwrap().len(), 3, "未命中的 id 追加到末尾");
-
-        instance
-            .dispatch(method::canvas::PATCH, &patch(json!([{ "id": "a", "command": line(9.0) }]), json!(["b"])))
-            .unwrap();
-        let list = instance.surface_canvas("main", "board").unwrap();
-        assert_eq!(list.len(), 2);
-        let last = list.commands().last().unwrap();
-        assert_eq!(
-            last,
-            &canvas::DrawCommand::Line {
-                x1: 0.0,
-                y1: 9.0,
-                x2: 5.0,
-                y2: 9.0,
-                stroke: canvas::CanvasColor::Rgba { rgba: [0, 0, 0, 255] },
-                width: 1.0,
-            },
-            "原 id 的条目原位替换"
-        );
-
-        assert!(
-            instance.dispatch(method::canvas::PATCH, &patch(json!([]), json!([]))).is_err(),
-            "空增量没有意义，应被拒"
-        );
-        assert!(
-            instance
-                .dispatch(method::canvas::PATCH, &patch(json!([{ "id": "c", "command": line(1.0) }]), json!(["c"])))
-                .is_err(),
-            "同一 id 既写又删应被拒"
-        );
-        assert_eq!(instance.surface_canvas("main", "board").unwrap().len(), 2, "被拒的增量不得改写存档");
-
-        instance
-            .dispatch(
-                method::canvas::SUBMIT,
-                &json!({ "surfaceId": "main", "nodeId": "board", "commands": [line(0.0)] }),
-            )
-            .unwrap();
-        assert_eq!(
-            instance.surface_canvas("main", "board").unwrap().len(),
-            1,
-            "整表提交只留本次的条目"
-        );
-        instance
-            .dispatch(method::canvas::PATCH, &patch(json!([]), json!(["a"])))
-            .unwrap();
-        assert_eq!(
-            instance.surface_canvas("main", "board").unwrap().len(),
-            1,
-            "整表提交后旧的 id 槽已消失，删除幂等"
-        );
-    }
-
-    /// 帧节拍只在声明 fps 的画布上挂，按帧率到期，落后时不补发中间帧。
-    #[test]
-    fn canvas_frame_clocks_follow_declared_fps() {
-        let (_tmp, instance) = make_instance(Vec::new());
-        assert!(!instance.has_frame_ticks(), "没有界面树时没有节拍");
-        instance
-            .dispatch(
-                method::view::SUBMIT,
-                &json!({ "surfaceId": "main", "tree": {
-                    "id": "root", "kind": "column", "children": [
-                        { "id": "board", "kind": "canvas", "fps": 10 },
-                        { "id": "static", "kind": "canvas" }
-                    ]
-                }}),
-            )
-            .unwrap();
-        assert!(instance.has_frame_ticks(), "只有声明 fps 的画布挂节拍");
-
-        let start = Instant::now();
-        let mut clock = FrameClock::new(10, start);
-        assert_eq!(clock.take_due(start), None, "未到节拍不发");
-        assert_eq!(clock.take_due(start + Duration::from_millis(100)), Some((0, 0)), "首帧 delta 为 0");
-        assert_eq!(clock.take_due(start + Duration::from_millis(120)), None);
-        assert_eq!(
-            clock.take_due(start + Duration::from_millis(200)),
-            Some((1, 100)),
-            "按上一帧计时"
-        );
-        assert_eq!(
-            clock.take_due(start + Duration::from_millis(640)),
-            Some((2, 440)),
-            "落后多拍时只发一帧并对齐当前时刻"
-        );
-        assert_eq!(clock.take_due(start + Duration::from_millis(740)), Some((3, 100)));
-
-        instance
-            .dispatch(
-                method::view::SUBMIT,
-                &json!({ "surfaceId": "main", "tree": {
-                    "id": "root", "kind": "column", "children": [ { "id": "board", "kind": "canvas" } ]
-                }}),
-            )
-            .unwrap();
-        assert!(!instance.has_frame_ticks(), "树里不再声明 fps 即摘掉节拍");
-    }
-
-    /// 界面树重发不重置帧序号与节拍（只有帧率变了才重开一只钟）。
-    #[test]
-    fn canvas_frame_clocks_survive_tree_resubmit() {
-        let (_tmp, instance) = make_instance(Vec::new());
-        let tree = |fps: u16| {
-            json!({ "surfaceId": "main", "tree": {
-                "id": "root", "kind": "column", "children": [ { "id": "board", "kind": "canvas", "fps": fps } ]
-            }})
-        };
-        instance.dispatch(method::view::SUBMIT, &tree(10)).unwrap();
-        let key = ("main".to_string(), "board".to_string());
-        let start = Instant::now();
-        instance.pump_frames(start + Duration::from_millis(120));
-        let frame_after_tick = instance.frame_clocks.lock().unwrap()[&key].frame;
-        assert_eq!(frame_after_tick, 1, "到期应推进一帧");
-
-        instance.dispatch(method::view::SUBMIT, &tree(10)).unwrap();
-        let clock = instance.frame_clocks.lock().unwrap()[&key];
-        assert_eq!(clock.frame, frame_after_tick, "界面重发不得把帧序号打回 0");
-        assert!(clock.last.is_some(), "上一帧时刻要保留，delta 才连续");
-
-        let same_instant = instance.frame_clocks.lock().unwrap()[&key].next;
-        instance.dispatch(method::view::SUBMIT, &tree(30)).unwrap();
-        let clock = instance.frame_clocks.lock().unwrap()[&key];
-        assert_eq!(clock.frame, 0, "帧率变了即重开一只钟");
-        assert_eq!(clock.fps, 30);
-        assert_ne!(clock.next, same_instant);
-    }
-
-    /// 撤销贡献要连带摘掉该面的帧节拍（否则订阅判据恒真、帧通知对已消失的面继续发）。
-    #[test]
-    fn unregister_drops_frame_clocks() {
-        let (_tmp, instance) = make_instance(Vec::new());
-        instance
-            .dispatch(method::view::REGISTER, &json!({ "slot": "panel", "id": "main", "label": "主面" }))
-            .unwrap();
-        instance
-            .dispatch(
-                method::view::SUBMIT,
-                &json!({ "surfaceId": "main", "tree": {
-                    "id": "root", "kind": "column", "children": [ { "id": "board", "kind": "canvas", "fps": 60 } ]
-                }}),
-            )
-            .unwrap();
-        assert!(instance.has_frame_ticks());
-        instance
-            .dispatch(method::frame::SUBMIT, &frame_params(json!([]), Some(60)))
-            .unwrap();
-        instance.dispatch(method::view::UNREGISTER, &json!({ "id": "main" })).unwrap();
-        assert!(!instance.has_frame_ticks(), "贡献撤销后该面不再收帧");
-        assert!(instance.surface_frame("main").is_none(), "撤销的面不得留下整面帧");
-    }
-
     fn frame_params(hits: Value, fps: Option<u16>) -> Value {
         let mut params = json!({ "surfaceId": "main", "commands": [], "hits": hits });
         if let Some(fps) = fps {
             params["fps"] = json!(fps);
         }
         params
-    }
-
-    /// 面帧整发整换：非法帧不改写存档；帧接管后重发界面树即交还控件通道（帧与帧节拍一并撤掉）。
-    #[test]
-    fn frame_submit_replaces_and_tree_submit_clears_it() {
-        let (_tmp, instance, mut rx) = make_instance_with_events(Vec::new());
-        let hit = json!({ "id": "inc", "x": 0.0, "y": 0.0, "w": 40.0, "h": 24.0 });
-        instance
-            .dispatch(method::frame::SUBMIT, &frame_params(json!([hit]), Some(30)))
-            .expect("合法帧应被接收");
-        assert!(instance.surface_frame("main").is_some());
-        assert!(rx.try_recv().is_ok(), "帧提交应广播界面变化");
-        assert!(instance.has_frame_ticks());
-
-        let duplicate = json!([
-            { "id": "inc", "x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0 },
-            { "id": "inc", "x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0 }
-        ]);
-        assert!(
-            instance.dispatch(method::frame::SUBMIT, &frame_params(duplicate, None)).is_err(),
-            "命中区 id 重复应被拒"
-        );
-        assert!(instance.surface_frame("main").is_some(), "被拒的提交不得改写存档");
-
-        instance
-            .dispatch(
-                method::view::SUBMIT,
-                &json!({ "surfaceId": "main", "tree": { "id": "root", "kind": "text", "content": "x" } }),
-            )
-            .unwrap();
-        assert!(instance.surface_frame("main").is_none(), "提交界面树即撤掉同面帧");
-        assert!(!instance.has_frame_ticks(), "帧节拍随帧一同撤掉");
-    }
-
-    /// 面帧节拍按声明帧率推进；同帧率重发沿用原钟，帧率变了 / 不再声明则重开或摘掉。
-    #[test]
-    fn surface_frame_clocks_follow_declared_fps() {
-        let (_tmp, instance) = make_instance(Vec::new());
-        let submit = |fps: Option<u16>| {
-            instance
-                .dispatch(method::frame::SUBMIT, &frame_params(json!([]), fps))
-                .unwrap();
-        };
-        submit(Some(10));
-        instance.pump_frames(Instant::now() + Duration::from_millis(120));
-        let frame_after_tick = instance.surface_clocks.lock().unwrap()["main"].frame;
-        assert_eq!(frame_after_tick, 1, "到期应推进一帧");
-
-        submit(Some(10));
-        assert_eq!(
-            instance.surface_clocks.lock().unwrap()["main"].frame,
-            frame_after_tick,
-            "内容更新不得把帧序号打回 0"
-        );
-
-        submit(Some(30));
-        assert_eq!(instance.surface_clocks.lock().unwrap()["main"].frame, 0, "帧率变了即重开一只钟");
-
-        submit(None);
-        assert!(!instance.has_frame_ticks(), "不再声明帧率即摘掉节拍");
-        assert!(instance.surface_frame("main").is_some(), "摘节拍不影响帧内容本身");
     }
 
     /// 会话收尾清空整面帧（停用 / 崩溃 / 卸载后不得留下可渲染的旧帧）。
@@ -3391,45 +2812,6 @@ mod tests {
         instance.release_resources();
         assert!(instance.surface_frame("main").is_none());
         assert!(!instance.has_frame_ticks());
-    }
-
-    /// 树重发清掉已消失节点的清单；重复提交覆盖同一节点；空清单 = 清空画布；收尾清全部。
-    #[test]
-    fn canvas_lists_follow_the_tree_lifecycle() {
-        let (_tmp, instance) = make_instance(Vec::new());
-        let tree = |with_second: bool| {
-            let mut children = vec![json!({ "id": "board", "kind": "canvas" })];
-            if with_second {
-                children.push(json!({ "id": "second", "kind": "canvas" }));
-            }
-            json!({ "id": "root", "kind": "column", "children": children })
-        };
-        let submit_canvas = |node_id: &str, count: usize| {
-            let commands: Vec<Value> = (0..count)
-                .map(|_| json!({ "kind": "circle", "cx": 1.0, "cy": 1.0, "r": 1.0, "fill": { "type": "rgba", "rgba": [1, 2, 3, 4] } }))
-                .collect();
-            json!({ "surfaceId": "main", "nodeId": node_id, "commands": commands })
-        };
-        instance
-            .dispatch(method::view::SUBMIT, &json!({ "surfaceId": "main", "tree": tree(true) }))
-            .unwrap();
-        instance.dispatch(method::canvas::SUBMIT, &submit_canvas("board", 1)).unwrap();
-        instance.dispatch(method::canvas::SUBMIT, &submit_canvas("second", 2)).unwrap();
-        instance.dispatch(method::canvas::SUBMIT, &submit_canvas("board", 3)).unwrap();
-        assert_eq!(instance.surface_canvas("main", "board").unwrap().len(), 3, "同节点重复提交应覆盖");
-        assert_eq!(instance.surface_canvas("main", "second").unwrap().len(), 2);
-
-        // 树重发后 second 不在树里：清单随树清除；空清单 = 清空 board（存档仍在）
-        instance
-            .dispatch(method::view::SUBMIT, &json!({ "surfaceId": "main", "tree": tree(false) }))
-            .unwrap();
-        assert!(instance.surface_canvas("main", "second").is_none(), "孤儿清单应随树清除");
-        instance.dispatch(method::canvas::SUBMIT, &submit_canvas("board", 0)).unwrap();
-        let cleared = instance.surface_canvas("main", "board").unwrap();
-        assert_eq!(cleared.len(), 0, "空清单 = 清空画布");
-
-        instance.stop();
-        assert!(instance.surface_canvas("main", "board").is_none(), "收尾后清单应清空");
     }
 
     /// 等在途工具调用落表（发起任务被调度后才登记）。

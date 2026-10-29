@@ -20,7 +20,8 @@ pub struct Manifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_host_version: Option<String>,
     pub entry: Entry,
-    /// 能力声明清单：未声明的能力调用一律被宿主拒绝（fail-closed）。
+    /// 能力声明清单：用于向用户公示与审计，不拦截调用——插件是原生进程，闸门拦住的是
+    /// 守规矩的插件。宿主据此标出「用到但未声明」的调用。
     pub permissions: Vec<Permission>,
     /// 进程型插件的单实例约束（多窗口共享同一宿主运行时全局单例）。
     pub singleton: bool,
@@ -80,10 +81,10 @@ pub struct DocTypeRegistration {
     /// 不带点的扩展名（如 `board`）。
     pub extension: String,
     pub label: String,
-    /// 宿主内置形状名或经 `view.defineIcon` 定义的自备名（内置名优先）。
+    /// 宿主内置形状名（未知名回落拼图）。
     pub icon: String,
-    /// 承载该文档实例界面树的贡献 id（插件须同时以 `view.register` 注册同名贡献，
-    /// `slot` 为面板）；打开该扩展名文件时宿主按文件实例分配 surfaceId 并通知插件提交树。
+    /// 承载该文档实例的贡献 id（插件须同时以 `view.register` 注册同名贡献，
+    /// `slot` 为面板）；打开该扩展名文件时宿主分配 surfaceId 并通知插件提交整面帧。
     pub surface: String,
 }
 

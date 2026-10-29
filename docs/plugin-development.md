@@ -1,6 +1,6 @@
 # Atelyx 插件开发
 
-Atelyx 的插件是一个**独立进程**：宿主启动它、通过标准输入输出与它说话；它把界面描述成一份声明式的数据交给宿主渲染。没有 WebView，也没有内置的 JS 运行时——插件可以用任何能读写 stdio 的语言写，本文以 Rust + 官方 SDK 为例。
+Atelyx 的插件是一个**独立进程**：宿主启动它、通过标准输入输出与它说话；它把整个面画成一份帧（绘制指令 + 命中区）交给宿主执行，宿主再把原始输入原样回发。没有 WebView，也没有内置的 JS 运行时——插件可以用任何能读写 stdio 的语言写，本文以 Rust + 官方 SDK 为例。
 
 本文讲**怎么做**：插件形态、15 分钟跑起来的最小实现、界面与能力面的用法、构建打包、本地调试，以及上架到内置市场。逐字段、逐方法的契约在 [API 参考](plugin-api.md)——那份文档由协议源码生成，总会与当前版本一致。
 
@@ -12,26 +12,22 @@ Atelyx 的插件是一个**独立进程**：宿主启动它、通过标准输入
 | --- | --- |
 | 插件 = 原生可执行文件 | 宿主按 `plugin.json` 里的 `entry` 启动它，不带参数，工作目录 = 插件目录 |
 | 通道 = stdin / stdout 上的 JSON-RPC 2.0（NDJSON） | stdout **只能**是协议信封；日志一律走 stderr |
-| 界面 = 控件树或整面帧 | 插件提交 `ViewNode` 树、画布绘图指令或整面帧（推荐用 SDK 控件层，见 6.2）；宿主解释 / 执行，插件进程里没有宿主 UI 代码 |
-| 能力面按声明开放 | `plugin.json` 的 `permissions` 未声明就调用，宿主拒绝并记审计（fail-closed） |
-| 信任模型 = 本地程序 | 宿主不做沙箱：插件本来就能读写文件、起进程、联网。「权限」是透明度与审计口径，不是隔离边界 |
+| 界面 = 一整面帧 | 插件提交 `frame.submit`（绘制指令 + 命中区 + 输入声明），宿主按几何绘制并把原始输入经 `host:frame.input` 回发；插件进程里没有宿主 UI 代码，控件只存在于 SDK 控件层 |
+| 能力 = 服务 + 方法 | 内置能力（`vault` / `ai` / `fs` …）与插件提供的服务走同一条总线，方法名即 `服务.方法`（见 7） |
+| `permissions` = 公示与审计 | 声明用于告诉用户这份插件会碰哪些宿主资源；调用本身不按声明拦截，未声明的调用照常执行但记为「未声明」并在设置页可见 |
+| 信任模型 = 本地程序 | 宿主不做沙箱：插件本来就能读写文件、起进程、联网。声明是透明度与审计口径，不是隔离边界 |
 | 一个插件一个进程 | 宿主多窗口共享同一份进程；进程从启动到停用是一个「会话」 |
 
-生命周期：启用即启动 → 握手（`initialize`，10 秒内未完成判失败）→ 运行 → 停用 / 崩溃 / 卸载。崩溃按 `1s → 2s → 4s → 8s …`（上限 30s）退避重启，60 秒内崩 5 次熔断，用户在设置页可手动重试。停用会结束**整棵**进程树，并收掉插件经能力面创建的一切（托管子进程、全局热键、托盘条目、打开的窗口、注册的 AI 工具）。
+生命周期：启用即启动 → 握手（`initialize`，10 秒内未完成判失败）→ 运行 → 停用 / 崩溃 / 卸载。崩溃按 `1s → 2s → 4s → 8s …`（上限 30s）退避重启，60 秒内崩 5 次熔断，用户在设置页可手动重试。停用会结束**整棵**进程树，并收掉插件经能力面创建的一切（托管子进程、全局热键、托盘条目、打开的窗口、注册的 AI 工具、登记的服务）。
 
 ## 2. 环境准备
 
 - Rust 1.85+（`edition = "2021"`）。其它语言也能写插件：只要实现同样的 NDJSON 信封即可，但官方只提供 Rust SDK。
-- SDK 与协议目前**未发布到 crates.io**，以 git 依赖宿主仓库：
+- SDK 与协议目前**未发布到 crates.io**，以 git 依赖宿主仓库；同时开发宿主与插件时改用本地路径更快：
 
 ```toml
 atelyx-plugin-sdk = { git = "https://github.com/Atelyx/Atelyx" }
-```
-
-同时开发宿主与插件时，用本地路径更快：
-
-```toml
-atelyx-plugin-sdk = { path = "../Atelyx/atelyx-plugin-sdk" }
+# atelyx-plugin-sdk = { path = "../Atelyx/atelyx-plugin-sdk" }
 ```
 
 ## 3. 最小插件
@@ -95,66 +91,68 @@ lto = true
 ### 3.4 `src/main.rs`
 
 ```rust
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU32, Ordering};
 
-use atelyx_plugin_sdk::protocol::method::{
-    ContributionSlot, NotificationLevel, SurfaceAttachedParams, ViewEventParams,
-};
-use atelyx_plugin_sdk::protocol::view::{ButtonVariant, EventKind};
-use atelyx_plugin_sdk::view_builders::{button, column, text, NodeExt, NodeId};
+use atelyx_plugin_sdk::frame_ui::{FrameUi, TextRole, UiEvent};
+use atelyx_plugin_sdk::protocol::frame::FrameInputParams;
+use atelyx_plugin_sdk::protocol::method::{ContributionSlot, SurfaceAttachedParams};
 use atelyx_plugin_sdk::{run_stdio, Context, PluginHandler, PluginInfo};
 
-/// 节点 id 与事件匹配共用同一份定义，改名只改常量一处。
-const PANEL: NodeId<'static> = NodeId::new("main");
-const PING: NodeId<'static> = NodeId::new("ping");
+/// 面板贡献 id，同时是该面的 surfaceId。
+const PANEL: &str = "main";
 
 struct Echo {
-    clicks: Arc<Mutex<u32>>,
+    /// 一个面持一个控件层：交互态、量算缓存与主题都随它跨帧保留。
+    ui: tokio::sync::Mutex<FrameUi>,
+    clicks: AtomicU32,
+}
+
+impl Echo {
+    /// 出帧 = 提交：状态怎么变，界面就怎么变；帧不会被自动重发。
+    async fn render(&self, ctx: &Context) {
+        let clicks = self.clicks.load(Ordering::SeqCst);
+        let mut ui = self.ui.lock().await;
+        let drawn = ui.render(ctx, PANEL, |ui| {
+            ui.column(8.0, |c| {
+                c.text("你好，Atelyx", TextRole::Heading);
+                c.text(format!("点击次数：{clicks}"), TextRole::Label);
+                c.button("ping", "点我");
+            });
+        });
+        if let Err(e) = drawn.await {
+            eprintln!("提交面帧失败：{e}");
+        }
+    }
 }
 
 #[async_trait::async_trait]
 impl PluginHandler for Echo {
-    /// 握手完成：注册贡献点、订阅事件、登记界面构建器都放这里。
+    /// 握手完成：注册贡献点、登记服务、提交订阅与首帧都放这里。
     async fn on_ready(&self, ctx: &Context) {
-        if let Err(e) = ctx
-            .register(ContributionSlot::Panel, PANEL.as_str(), "Echo", None, None)
-            .await
-        {
+        if let Err(e) = ctx.register(ContributionSlot::Panel, PANEL, "Echo", None, None).await {
             eprintln!("注册贡献失败：{e}");
         }
-        let clicks = Arc::clone(&self.clicks);
-        ctx.ui()
-            .mount(PANEL.as_str(), move || {
-                let clicks = *clicks.lock().unwrap();
-                column(
-                    "root",
-                    vec![
-                        text("hello", "你好，Atelyx"),
-                        text("clicks", format!("点击次数：{clicks}")),
-                        button(PING.as_str(), "点我", ButtonVariant::Primary)
-                            .with_events(vec![EventKind::Click]),
-                    ],
-                )
-            })
-            .await;
+        self.render(ctx).await;
     }
 
-    /// 面进入布局（面板被添加 / 插件重启后重发）。SDK 已重发界面树，这里只补树以外的内容。
-    async fn on_surface_attached(&self, _ctx: &Context, params: SurfaceAttachedParams) {
-        eprintln!("面已挂载：{}", params.surface_id);
+    /// 面重新进入布局（面板被重新添加 / 插件重启）：补交当前这一帧。
+    async fn on_surface_attached(&self, ctx: &Context, params: SurfaceAttachedParams) {
+        if params.surface_id == PANEL { self.render(ctx).await; }
     }
 
-    /// 节点事件：只有 events 里声明过的种类才会到达。
-    async fn on_view_event(&self, ctx: &Context, params: ViewEventParams) {
-        if params.node_id == PING {
-            *self.clicks.lock().unwrap() += 1;
-            if let Err(e) = ctx.ui().notify(PANEL.as_str()).await {
-                eprintln!("提交界面失败：{e}");
+    /// 原始输入按到达顺序逐条进来：先出语义事件并改状态，再重画。
+    async fn on_frame_input(&self, ctx: &Context, params: FrameInputParams) {
+        if params.surface_id != PANEL { return; }
+        let events = {
+            let mut ui = self.ui.lock().await;
+            ui.event(ctx, &params.input, |_| None).await
+        };
+        for event in events {
+            if let UiEvent::Click { id } = event {
+                if id == "ping" { self.clicks.fetch_add(1, Ordering::SeqCst); }
             }
-            let _ = ctx
-                .notify("Echo", Some("按钮被点击"), NotificationLevel::Info)
-                .await;
         }
+        self.render(ctx).await;
     }
 }
 
@@ -165,7 +163,7 @@ async fn main() {
         name: "Echo".into(),
         version: "0.1.0".into(),
     };
-    let plugin = Echo { clicks: Arc::new(Mutex::new(0)) };
+    let plugin = Echo { ui: tokio::sync::Mutex::new(FrameUi::new()), clicks: AtomicU32::new(0) };
     // 连接结束分两种：宿主关闭 stdin（正常退出，返回 Ok）/ 协议违规或读写失败（Err，非零码退出）
     if let Err(e) = run_stdio(info, plugin).await {
         eprintln!("连接异常结束：{e}");
@@ -174,18 +172,12 @@ async fn main() {
 }
 ```
 
-界面提交由 SDK 托管：
-
-- `ctx.ui().mount(surfaceId, build)` 登记这一面的构建器——`build` 只读当前状态并返回整棵树；重复挂载同一面即替换构建器。
-- `ctx.ui().notify(surfaceId)` 触发一次「构建 → 与上次成功提交的树比较 → 未变跳过」，返回 `Ok(false)` 表示没有提交。节点事件与画布尺寸变化的回调返回后 SDK 会自动调它（见 5.4），需要提前上行时自己调；不需要自己保存上次提交的树。
-- 面重新挂载时 SDK 先强制重发一次树再回调 `on_surface_attached`，回调之后再自动提交一次；该回调只需补树以外的内容（如画布指令清单）。
-- 构建器在 SDK 内同步执行，读状态用短锁、不要跨 `await` 持锁。
-
-三条容易踩的规则：
+四条容易踩的规则：
 
 1. **stdout 只允许协议**。`println!` 一行就足以让宿主判定「输出非协议内容」并停掉插件；调试输出用 `eprintln!`（进插件日志）。
-2. **事件要先声明**。`ViewNode.events` 里没有 `click`，按了就什么都不会发生。
-3. **`on_ready` 里别做长耗时阻塞**。握手回执由 SDK 发出，但 `on_ready` 之后的调用都在同一个连接上；需要长时间准备的工作放 `tokio::spawn`。
+2. **帧要自己提交**。帧不自动重发：改完状态不 `render`，界面就停在上一帧；面重新挂载也一样，靠 `on_surface_attached` 补一帧。
+3. **输入要先声明**。帧里没有命中区，指针事件就没有 `hit`；没有 `keys` / `ime`，键盘与输入法不进你的回调（见 5.3）。
+4. **`on_ready` 里别做长耗时阻塞**。握手回执由 SDK 发出，但 `on_ready` 之后的调用都在同一个连接上；需要长时间准备的工作放 `tokio::spawn`。
 
 ## 4. 通道与调用约定
 
@@ -194,260 +186,203 @@ async fn main() {
 - 迟到 / 超时：调用超时只代表「本次调用放弃」，宿主侧业务可能仍在进行（`ai.chat.send` 这类有副作用的调用尤其如此），需要时用查询方法核对。
 - 宿主退出：stdin 被关闭，`run_stdio` 返回 `Ok`，插件应正常退出；此时宿主已结束整棵进程树，不要试图常驻。
 
-## 5. 界面（ViewNode）
+## 5. 界面：画一帧
 
-一棵树 = 根节点 + 子节点。`id` 在同一棵树里必须唯一（宿主按 id 做控件态复用与事件回传）；容器节点才能带 `children`；节点要回发的事件写在 `events` 里。Rust SDK 里用 `NodeId` 常量定义 id，构建与事件匹配共用同一份定义。
-
-> 整面自绘与 SDK 控件层（按钮 / 输入框 / 下拉 / 勾选 / 滚动）见 [6.2](#62-sdk-控件层推荐写法)；本节是控件树通道的写法。
+一个面一份帧，`frame.submit` 一次交齐绘制内容、命中区与输入声明：
 
 ```json
 {
-  "id": "root", "kind": "column", "gap": 8, "padding": 12,
-  "children": [
-    { "id": "title", "kind": "text", "content": "标题", "weight": "semiBold" },
-    { "id": "go", "kind": "button", "label": "执行", "variant": "primary", "events": ["click"] }
-  ]
+  "surfaceId": "main",
+  "commands": [
+    { "kind": "rect", "x": 12, "y": 12, "w": 120, "h": 32,
+      "fill": { "type": "token", "name": "surface" },
+      "stroke": { "type": "token", "name": "border" }, "cornerRadius": 6 },
+    { "kind": "text", "x": 28, "y": 20, "content": "点我", "size": 13, "color": { "type": "token", "name": "text" } }
+  ],
+  "hits": [{ "id": "ping", "x": 12, "y": 12, "w": 120, "h": 32, "cursor": "pointer" }],
+  "keys": true
 }
 ```
 
-### 5.1 控件
+三条固定语义：
 
-控件集：`column` / `row` / `card` / `stack` / `overlay` / `scroll` / `grid` / `list` / `text` / `markdown` / `textInput` / `numberInput` / `dropdown` / `checkbox` / `button` / `iconButton` / `icon` / `image` / `progress` / `menu` / `divider` / `canvas` / `dragRegion`。每个 `kind` 的字段与语义以 [API 参考 · 界面控件树](plugin-api.md#3-界面控件树) 为准（含 `NodeBody` 的完整声明）。
+- **整帧替换**：这一帧就是该面此刻的完整界面，没画的东西就没了；空指令 = 空面。要改任何一处都重发整帧，宿主不做增量。
+- **没有提交过的面显示占位**（「等待插件提交界面」）；贡献注册了但一直不提交，用户看到的就是这块占位。
+- 帧只描述画面与几何，**宿主不理解语义**（哪个矩形是按钮、点下去该做什么，全在插件里），并在提交时校验：指令逐条（错误带指令下标）、命中区 id 非空且唯一、矩形有限非负、`fps` 在 1–120。不合法的帧整份拒收，不会半帧生效。
 
-控件之上还有四个**节点级能力**，写在节点上（与 `kind` 并列）：
+### 5.1 绘制指令
 
-- `size`（`column` / `row` / `card`）：自身尺寸 `{ width, height, minWidth, maxWidth, minHeight, maxHeight }`。`width` / `height` 取 `"fill"` / `"shrink"` / 数字像素；缺省列与卡片占满宽、行按内容收缩（行内有 `grow` 子项或声明了 `justify` 时按占满宽布局）。**上下限只对固定或收缩尺寸的子项生效**：流体子项（`"fill"` 或按 `grow` 分配）的空间由父容器分配，此时声明上下限不参与布局。
-- `grow`：在父级行 / 列 / 网格里按权重分剩余空间，`grow: 35` 与 `grow: 65` 就是 35% 与 65%。带 `grow` 子项的行会自动占满宽度、列会自动占满高度（否则没有剩余空间可分配）；交叉轴尺寸仍由子项自己的 `size` 决定。
-- `interaction`：交互外观与状态，`{ state, normal, hover, active, disabled }`，每一档给 `{ background, border, radius }`。取档顺序 **禁用 > 激活 > 悬停 > 常态**，某档没声明就继续往后找、最终取常态；`state: "disabled"` 下不接受点击与悬停。列表选中项写 `state: "active"`，配 `active` 底色与描边即可——选中项在指针下仍保留选中外观，不会被悬停态盖掉。按钮与图标钮自带底色与按下态，`interaction` 在它们身上只决定可用性（`state: "disabled"` 即不可点）。
-- `events` 里的 `click` 对任何节点生效（容器也行），可点击的节点鼠标呈指针；点击落在子控件上时由子控件优先处理。按钮与图标钮的按下由控件自身处理，不必再包一层。
+指令集是封闭枚举，六种：`line` / `rect`（含圆角）/ `path` / `circle` / `text` / `image`。SDK 提供薄构造器：
 
-取色（`color`、`interaction` 各档的 `background` / `border`、`icon.color`、`progress.tone`）统一两种写法：
-
-- 主题 token：`text` / `textSecondary` / `textMuted` / `accent` / `accentSoft` / `success` / `successSoft` / `warning` / `warningSoft` / `danger` / `dangerSoft` / `surface` / `surfaceMuted` / `surfaceSunken` / `hover` / `border` / `borderStrong` / `transparent`；
-- 自定义色：`#rgb` / `#rgba` / `#rrggbb` / `#rrggbbaa`。
-
-token 随主题与界面字号设置联动，自定义色由插件自负对比度（写错色值或拼错 token 会被拒收，不会静默回退成默认色）。
-
-排版（`text` / `markdown`）：`family` 取 `"ui"`（跟随界面字体，缺省）或 `"mono"`（系统等宽族，数值、路径、日志按位列对齐）；`weight` 取 `normal` / `medium` / `semiBold`，系统字体族缺该字重时由字体库匹配最近一档；`text.wrap: false` 单行不换行（长标签不把行撑高；不给 `maxLines` 时超长文本会溢出节点框）；`text.maxLines` 限制渲染行数（至少 1），超出时宿主按实际排版在最后一行补省略号，长文件名 / 路径 / 单行标签用它收口，不要自己按字符数截断。
-
-其余约定：
-
-- `text` 的 `size` 是**字号倍率**（相对界面基准正文，缺省 1.0），写 `1.5` 即放大一半并跟随用户字号缩放；`align` 给水平对齐（`end` 右对齐气泡、`center` 居中标题），**声明了 `align` 才占满父容器宽度**，不给就按内容宽度收缩；
-- 列的宽度收缩配 `size.maxWidth` 与 `align`，就能做居中的窄阅读列表或内容自适应的右对齐气泡；工具行的左右分布用 `justify: "spaceBetween"`；
-- `grid` 两种列法：`columns` 固定列数，`minColumnWidth` 按可用宽度自动换列（面板变窄时不会把各列一起挤扁），同时给定时后者只作列数上限；都不给按单列。`rowHeight` 取数字像素或 `"content"`（按内容高度）——缺省按列宽 1:1 定行高，「标签 + 单行控件」这类短内容会被拉成方格；
-- `card` 的底色档 `tone`（`default` / `muted` / `accentSoft` / `transparent`）、圆角 `radius`、边框开关 `bordered` 可调。**当前状态命中某个交互外观档时，底色与边框由该档提供**，卡片自身的 `tone` / `accent` / `bordered` / `radius` 让位（避免两层底色互相盖住）；当前状态没有对应档位时仍按卡片自身的档位绘制；分组内轻分割用 `divider`；`stack` 把子节点叠起来（后提交的在上，可做「画布当底 + 控件叠其上」）；
-- `image` 的 `width` / `height`：数字 = 固定像素，`"fill"` = 占满父容器该轴，`"shrink"` / 不给按原图尺寸；`fit` 决定尺寸内的适配方式（缺省 `contain`——不裁切不拉伸、留空边；`cover` 铺满并裁掉溢出；`fill` 拉伸），要看原图长宽用 `ctx.vault_image_info(path)` 取；来源四档——`ImageSource::Private { path }`（插件私有目录相对路径）、`ImageSource::Vault { path }`（仓库相对路径）、`ImageSource::Url { url, local }`（http(s) 地址，缺省按公网策略下载并缓存；`local: true` 走本机 / 局域网策略，可访问 `127.0.0.1` 这类本地服务）、`ImageSource::File { path }`（本机绝对路径，与你 `fs` 能读的范围同口径）；声明 `click` 事件即成为可点击图片（大图预览入口）；
-- `iconButton` 的图标名默认取自宿主内置形状表（lucide 线性图标）；先用 `ctx.define_icon(name, path)` 登记自备的 24x24 描边路径，即可用自己的图形（`size` 档 `sm`/`md`/`lg`，`variant` 复用按钮档位，`hoverOnly` 悬停才显示）；同一批自备名也可用作贡献注册的 `icon`（面板标签头 / 设置 tab / 文档类型图标）；
-- `icon` 是纯装饰图标（空态、状态行、标题前的标记），不接受点击；需要可点的图标用 `iconButton`。`button` 可给 `icon` 做「图标 + 文字」的主按钮；
-- `progress` 的 `girth` 是轨道粗细（px，缺省 30 的粗条；细进度条写 `3` / `4`），`tone` 是完成段颜色（缺省主题强调色）；
-- `markdown` 的 `content` 用笔记同源解析器渲染，`size` 是整体字号倍率，`weight` / `color` 覆盖基础字重与文字色（标题与加粗片段恒为加粗，链接与代码块语义色不受影响）；正文里的链接可点击，宿主按形态默认打开（外链 / wiki / 仓库路径），节点声明 `linkClick` 时同时回发链接点击事件；
-- `menu` 的 `label` 与 `icon` 可并存（并存为紧凑的「图标 + 文字」触发钮），只给 `label` 才是全宽下拉钮；条目可标 `current`（宿主在条目前画勾）；条目可给 `group`：相邻同名条目归入一组，宿主在组首画一次组标题（分组是单层的，按顺序聚合，不必给全量同组条目排序）；
-- `overlay` 是面内浮层：唯一子节点即浮层内容，宿主把它铺满整个插件面——一层遮罩 + 居中内容。**节点在树里就是打开**，从树里移除即关闭；挂在哪个容器下效果都一样（不参与父容器排版），多个浮层按树序叠放、后出现的盖在上面。遮罩拦下所有指针事件（下层既不响应点击也不滚动）；声明 `click` 时点击遮罩（内容之外）回发点击事件，用来收起浮层。`scrim` 换底色（缺省主题遮罩，`"transparent"` 只拦截不画底）。浮层不改写键盘与焦点，也不能作根节点；弹层类界面（大图预览 / 确认框 / 表单）用它，不要用 `stack` 模拟；
-- 可滚动容器（`list` / `scroll`）用 `ctx.scroll_to(surface, node, ScrollEdge::End)` 滚到主轴一端，或用 `ctx.scroll_to_offset(surface, node, 0.5)` 按比例定位（0 = 起点、1 = 终点），无需插件自己维护滚动状态；`scroll` 的 `direction` 决定子项排布与滚动主轴（`horizontal` = 子项排成行并横向滚动），`height` 给定即收住自身高度（把横向图条嵌进纵向内容流），缺省占满父容器剩余高度；
-- 输入控件（`textInput` / `numberInput` / `dropdown` / `checkbox`）给 `readOnly: true` 即保留控件外观展示只读值，不接受编辑、不产生事件；`numberInput` 声明 `step`（正数，缺省 1）且带 `change` 事件时，输入框右侧出现上下步进按钮，点击按步长增减并受 `min` / `max` 约束；`dropdown` 的候选弹层随最长选项自适应宽度，选项多时在弹层内滚动；
-- 滚动位置：给 `list` / `scroll` 节点声明 `scroll` 事件，宿主就回发 `{ offset, maxOffset }`（主轴当前偏移与可滚动余量，`offset >= maxOffset` 即停在末端）。内容不足一屏没有可滚动余量，不会发事件。要做回底入口等交互时按这一对值判断，不用插件自己记账；
-- 贴底跟随：容器声明 `followEnd: true` 即由宿主保持贴底——用户停在终点时内容增高自动跟到新终点，往回滚即脱钩、滚回终点自动恢复（`scroll_to` 到终点同样恢复、到其它位置脱钩）。只声明 `followEnd` 也会被宿主观察，不必再声明 `scroll` 事件；插件自己要判断位置时再加 `scroll`。
-
-### 5.2 事件与取值
-
-节点在 `events` 里声明了哪几种，宿主才回发哪几种。事件值按控件定型：
-
-- `click` 对任何节点生效（含容器）；点击落在子控件上时由子控件优先处理，父节点收不到该次点击；
-- `secondaryClick` 是右键，与 `click` 相互独立（可只声明右键）：在节点矩形内按下右键即回发，通常用来弹菜单——改状态让树里出现一个 `overlay` 菜单即可；
-- `focus` / `blur` / `key` 走键盘焦点通道（见 [5.5](#55-键盘焦点与按键)）；
-- 文本类 → 字符串；`submit`：单行输入回车即触发，多行输入声明 `submit` 时 Enter 触发（Shift+Enter 换行，未声明则 Enter 换行）；
-- 数字输入 → 数值（不可解析为数值不发事件；清空 → `null`，与 0 区分）；
-- 勾选 → 布尔；下拉 → 选中项**下标**；菜单条目 → 条目的 `action` 字符串；
-- 滚动容器（`list` / `scroll`）→ `{ offset, maxOffset }`（主轴当前偏移与可滚动余量）；
-- `markdown` 链接点击 → `{ href, form }`（`form` 为 `external` / `wiki` / `path`；可新建与未识别链接不可点，不产生事件）；`href` 是源文本原样（未解码，wiki 即笔记名），声明与否不影响宿主默认打开。
-
-各事件的完整声明见 [API 参考 · 视图事件与指针](plugin-api.md#4-视图事件与指针)。
-
-### 5.3 输入上报：两种模式，二选一
-
-**逐键（缺省）**：用户每次编辑都回发 `change`，插件须把**刚收到的值原样写回**新树——宿主按「插件值是否等于已上报值」判断能否显示本机文本，不回写表现为输入框打不进字。插件写入**另一个值**时接管显示。
-
-**非逐键**：输入控件声明 `report` 后，输入值完全由宿主本地持有并显示，**插件不需要回显**，树里的值可以是旧的：
-
-```jsonc
-{ "kind": "textInput", "id": "query", "value": "上次提交的词", "report": "commit", "events": ["change"] }
-```
-
-| `report` | 何时回发 `change` |
-| --- | --- |
-| 缺省 / `"immediate"` | 每次编辑 |
-| `"commit"` | 单行按 Enter；多行声明 `submit` 时按 Enter（迟到的静默拍作废），未声明时停顿约 600ms |
-| `{"debounced": 300}` | 停止编辑 300ms 后 |
-
-步进按钮的点击是离散动作，不受 `report` 约束：按下即回发 `change`。
-
-非逐键模式下，宿主只在插件下发的值**发生变化**时接管输入；值没变就重发树不会打断正在输入的内容。多行输入另按「既不同于本机当前文本、也不同于已上报值」判断，避免重建编辑器时丢光标。
-
-### 5.4 重发与 diff
-
-界面按整棵树重发，宿主按键 diff（纵向容器按节点 id 复用控件态）。所以：结构尽量稳定、节点 id 稳定且唯一；不要把值编码进 id。
-
-**SDK 会替你重发**：`on_view_event` / `on_canvas_resized` 回调返回后，SDK 按该面的构建器重建并提交树（与上次提交相同则不上行）。所以回调里只改状态，不必手动 `notify`；需要提前上行（例如先把界面切成「加载中」再去 await 长任务）时才自己调 `ctx.ui().notify(面 id)`。
-
-三个例外，它们都按帧到达，逐帧重建整树是纯浪费：
-
-- `on_canvas_frame`（画布帧拍）只更新画布内容，不触发树重发；
-- `scroll` 与画布指针（`pointerMove` 等）事件不触发树重发——它们几乎不改结构，要重发请自己 `notify`；
-- 没挂 `mount` 的面没有构建器，也就没有自动提交。
-
-### 5.5 键盘焦点与按键
-
-节点在 `events` 里声明 `focus` / `blur` / `key` 任一项即**可聚焦**（输入控件自己管键盘，单行 / 数字输入声明 `focus` / `blur` / `key` 会被宿主拒收）。语义：
-
-- 在节点矩形内按下（左键 / 右键 / 触摸）即取得焦点，在别处按下即释放；同一时刻全局只有一个节点收键盘，窗口失焦也会释放；
-- 取得与释放按声明回发 `focus` / `blur`（声明了才发）；
-- 持焦点时，**无命令修饰**的按键回发 `key`：`{ key, action, modifiers }`，`key` 是 `{ "type": "named", "name": "arrowLeft" }` 或 `{ "type": "character", "text": "A" }`（字符按布局产出，Shift 影响大小写与符号），`action` 为 `press` / `release`。带 Ctrl / Alt / Super 的组合键一律归宿主（保存与快捷键），插件收不到；
-- 宿主自己的方向键导航 / Enter / Esc 等**无命令修饰**的全局按键在插件持有键盘时**整体让位**，Esc 也先给插件——所以「Esc 关预览」这类手势可以直接做；接管态的退出另有常驻浮层入口，不会被卡住。
-
-想让键盘用户看见焦点，给节点配 `interaction.focused` 外观档（取档顺序：禁用 > 激活 > 焦点 > 悬停 > 常态）：
-
-```jsonc
-{ "id": "preview", "kind": "canvas", "events": ["key", "secondaryClick"],
-  "interaction": { "normal": { "border": "border" }, "focused": { "border": "accent" } } }
-```
-
-`key` 只在持焦点时到达，所以插件要先让用户能点到这个节点（例如列表行自己也声明 `click`）。方向键分页这类交互建议同时提供屏上按钮，触摸用户没有键盘。
-
-一处组合要避开：**声明 `key` 的节点里不要再嵌输入控件**。焦点热区在外层先接按键，输入框自己也会处理，同一个字符会被两边各消费一次——要「容器级快捷键 + 内部表单」时，把快捷键放到相邻的列表 / 画布节点上。
-
-### 5.6 面外层内边距
-
-面板、表格视图与设置页这三个面，宿主默认在根树外层加 12/10 的内边距；整页接管与插件窗口不加。注册贡献时给 `padding` 可改这个值：数字 = 四边等距（`0` 即贴边），也可按轴 `{ "horizontal": 16, "vertical": 8 }` 或按边 `{ "top": 4, "right": 0, "bottom": 4, "left": 0 }` 声明。需要贴边的内容也可放进接管面或窗口面；面板里不要自带同样的外边距（会叠加）。
-
-### 5.7 组合配方（先拼，再加控件）
-
-宿主只提供基元与节点级能力，常用形态直接组合出来。SDK 的 `presets` 模块已把这批组合做成函数，
-优先用它；需要自定义时按表里的组合关系拼：
-
-| 形态 | 组合 | SDK |
+| 指令 | 构造器 | 要点 |
 | --- | --- | --- |
-| 可点列表项 | `row` + `interaction`（悬停 / 选中档）+ 调用方声明 `click` | `presets::list_item` |
-| 徽标 / chip | `row` + 收缩宽 + 交互外观取语义软底 + 圆角 + 小号 `text` | `presets::chip` |
-| 提示块 | `column` + 交互外观（软底 + 同色描边） | `presets::alert` |
-| tab 条 | 一排 `row` 条目，当前项 `state: "active"`，各带 `click` | `presets::tabs` |
-| 状态点 | 空 `row` + 8×8 尺寸 + 实色底 + 圆角 | `presets::status_dot` |
-| 表单行 | `row` + 定宽标签列 + 控件 `grow: 1` | `presets::field_row` |
-| 空态 | `column` + `icon` + 两行居中 `text` | `presets::empty_state` |
-| 左右分栏 | 行占满宽高，两栏 `grow` 写 35 / 65 | 手写 |
-| 状态行 | `row` + `status_dot` + `text`（数值用 `mono`） | 手写 |
-
-拼不出来的形态才值得回到宿主侧讨论——一个诉求一个控件会让协议与渲染分支同时膨胀。
-
-## 6. 自绘画布
-
-画布是树里的叶子控件（`kind: "canvas"`），负责占位与指针事件；内容单独提交：
+| 线 | `line(x1, y1, x2, y2, stroke)` | 线宽固定 1；要更粗自己拼 `DrawCommand::Line { width, .. }` |
+| 矩形 | `rect(x, y, w, h, fill, stroke)` / `rounded_rect(…, radius, fill, stroke)` | `radius` 四角同值 |
+| 路径 | `path(points, closed, fill, stroke)` | 至少 2 点；`closed` 闭合首尾（多边形填充用它） |
+| 圆 | `circle(cx, cy, r, fill, stroke)` | 圆心 + 半径 |
+| 文字 | `text(x, y, content, size, color)` | `(x, y)` 是**左上角** |
+| 图片 | `image_tile(source, x, y, w, h)` / `image_tile_fit(…, fit)` | 缺省按矩形拉伸；`contain` / `cover` 等比 |
 
 ```rust
-ctx.submit_canvas("main", "board", commands).await?;   // 整表重建，空清单 = 清空
-ctx.patch_canvas("main", "board", upsert, remove).await?;   // 按 id 增量：只发变动的条目
-```
+use atelyx_plugin_sdk::frame_builders::{
+    circle, frame, hit_with_cursor, keys, line, rect, rounded_rect, text, text_wrapped, token,
+};
+use atelyx_plugin_sdk::protocol::frame::{HitCursor, SurfaceFrame};
+use atelyx_plugin_sdk::protocol::paint::ColorToken;
 
-增量条目的 `id` 由你自己定（同一块画布内唯一，≤64 字节），`upsert` 命中已有 id 即原位替换、未命中追加到末尾，`remove` 删除。整表提交会丢掉此前建立的 id 槽，所以常见写法是：先 `submit_canvas` 提交骨架，之后每帧只 `patch_canvas` 改动的那几条（网格里的一个格子、跟手的一根播放头）。
-
-指令集是封闭枚举：线 / 矩形（含圆角）/ 路径（折线·多边形）/ 圆 / 文字 / 图片贴片，`fill` 与 `stroke` 至少给一个。图片贴片的 `fit` 缺省 = 按给定矩形拉伸；`contain` / `cover` 走等比（cover 的溢出部分裁掉），原图长宽用 `ctx.vault_image_info(path)` 取。字段与校验规则见 [API 参考 · 自绘画布](plugin-api.md#5-自绘画布)（`DrawCommand`）。
-
-坐标一律画布本地逻辑像素、左上原点，宿主不做坐标变换（平移缩放由插件算好坐标）。颜色双轨：`{ "type": "token", "name": "accent" }` 跟主题，`{ "type": "rgba", "rgba": [r,g,b,a] }` 用于内容谱系色（连线分类、播放头等）。
-
-指针事件在节点的 `mouseEvents` 里声明要收的子集：`pointerDown` / `pointerMove` / `pointerUp` / `pointerLeave` / `wheel` / `doubleClick`。`wheel` 增量统一为像素（宿主把滚轮「行」折算成像素，正 = 向下 / 向右）；双击由宿主判定（同键二次按下、500ms 内、位移 < 4 像素）。命中测试由插件按指令几何自算——宿主只负责把事件送到画布。
-
-画布节点用 `height` 指定高度、或用 `fill: true` 占满父容器剩余空间。宿主在画布尺寸变化时回发 `host:canvas.resized { surfaceId, nodeId, width, height }`（尺寸不变不发），插件据此对齐绘制坐标与滚动范围——不必再按名义宽度兜底。
-
-两条限制：按住拖出画布不会丢事件（绝对坐标换算，抬起为止）；画布文字永远绘制在所有图形之上，需要被图形遮盖的文字请改用树里的 `text` 控件分层。
-
-**摆文字先量宽**：画布里的文字按指令坐标原样绘制，宿主不做排版，所以「这段字有多宽」要自己算——但不要按字符数估算（中文、西文、等宽混排差得很远）。`ctx.measure_text(text, size, weight, family, max_width)` 用与 `text` 控件同一套字体与行高量算，回 `{ width, height, lines }`：给 `max_width` 就按该宽度换行量算，行数一并返回；不给按单行量。`size` 是绝对字号（与画布 `text` 指令同口径）。一屏文字用 `ctx.measure_batch(items)` 一次量完（单次至多 512 条，结果按顺序对应），`ctx.query_theme()` 取主题色 / 字号档 / 圆角档。这些都是纯计算请求，不改清单也不产生帧，但仍然是往返一次——同一段文字反复要用的（行高、列宽、省略位置）自己缓存，别在帧回调里每帧量。
-
-**要动画就声明帧率**：节点给 `fps`（1–120）后，宿主按该节拍回发 `host:canvas.frame { surfaceId, nodeId, frame, deltaMs }`，SDK 把它转成 `on_canvas_frame` 回调；在回调里提这一帧的内容即可：
-
-```rust
-fn board(fps: u16) -> ViewNode { /* kind: "canvas", fps */ }
-
-async fn on_canvas_frame(&self, ctx: &Context, frame: CanvasFrameParams) {
-    let x = playhead_x(self.state(), frame.frame);
-    let _ = ctx.patch_canvas(&frame.surface_id, &frame.node_id,
-        vec![CanvasUpsert { id: "playhead".into(), command: line(x, 0.0, x, 200.0, accent()) }],
-        Vec::new()).await;
+fn frame_of(size: (f32, f32), clicks: u32) -> SurfaceFrame {
+    let (w, h) = size;
+    let surface = frame(
+        vec![
+            rect(0.0, 0.0, w, h, Some(token(ColorToken::SurfaceSunken)), None),
+            rounded_rect(12.0, 12.0, 120.0, 32.0, 6.0,
+                Some(token(ColorToken::Surface)), Some(token(ColorToken::Border))),
+            text(28.0, 20.0, format!("点我 {clicks}"), 13.0, token(ColorToken::Text)),
+            circle(w - 24.0, 28.0, 6.0, Some(token(ColorToken::Accent)), None),
+            line(12.0, 56.0, w - 12.0, 56.0, token(ColorToken::Border)),
+            text_wrapped(12.0, 64.0, "长说明按可用宽度换行", 12.0,
+                token(ColorToken::TextMuted), w - 24.0, None),
+        ],
+        vec![hit_with_cursor("ping", 12.0, 12.0, 120.0, 32.0, HitCursor::Pointer)],
+    );
+    keys(surface)   // 需要键盘才声明，见 5.3
 }
 ```
 
-`frame` 从 0 起自增，`deltaMs` 是距上一帧的实际间隔（首帧 0）——算相位用 `frame` 更稳。帧拍**不触发界面树重发**（逐帧重建树是纯浪费），只更新画布内容。不声明 `fps` 就不会有帧回调，也不会有周期唤醒；播放停止后把 `fps` 从树里去掉即可停拍。落后多拍时宿主只补一帧并对齐当前时刻，不会追一堆过期帧。
+- **坐标是面本地逻辑像素、左上原点**。宿主不做坐标变换，也不做裁剪 / 变换 / 阴影：要滚动就自己减偏移，要裁剪就自己按矩形收敛坐标，要阴影就预渲染成图片贴上来。
+- `fill` 与 `stroke` 至少给其一（都不给是空指令，会被拒收）；`strokeWidth` 只在有描边时生效，缺省 1。
+- **文字永远画在所有形状之上**，与指令顺序无关。需要「被形状盖住的文字」，只能用图片或换一种画法。
+- 字号 `size` 是绝对逻辑像素（与 `query.measure` 同口径），不是倍率；`weight` 取 `normal` / `medium` / `semiBold`，`family` 取 `ui`（缺省，跟随界面字体）或 `mono`。
+- 文字给 `maxWidth` 才换行，`align`（`start` / `center` / `end`）只在给了 `maxWidth` 时成立——对齐区域是 `x` 起、宽 `maxWidth` 的矩形。不给 `maxWidth` 就单行原样绘制，超长部分不截断、直接溢出。
+- **颜色两轨**：`token(ColorToken::…)` 跟主题（`text` / `textSecondary` / `textMuted` / `accent` / `accentSoft` / `success` / `warning` / `danger` 及其 `…Soft` / `surface` / `surfaceMuted` / `surfaceSunken` / `hover` / `border` / `borderStrong` / `transparent`），`rgba(r, g, b, a)` 用于内容谱系色（连线分类、播放头）。
+- 图片来源四档：`ImageSource::Private { path }`（插件私有目录相对路径）、`Vault { path }`（仓库相对路径）、`Url { url, local }`（`local: true` 走本机 / 局域网策略）、`File { path }`（本机绝对路径）。原图长宽用 `ctx.vault_image_info(path)` 取。
 
-### 6.1 整面帧（面自绘）
+### 5.2 命中区
 
-画布只是树里的一个节点，布局仍由宿主排；要把整个面（面板 / 接管面 / 插件窗口）连布局一起自己画，用整面帧：
+`hits` 是矩形 + 自定 id + 光标形状，宿主只做几何命中：指针落在哪个命中区上，就把该事件里的 `hit` 填成那个 id，语义由插件解释。
+
+- id 同帧内唯一、非空、≤64 字节，单帧最多 4096 个；**后声明的压住先声明的**（同一坐标落在多个矩形上取最后声明的那条）——要「卡片整块可点、里面的图标钮还能单独点」，先声明卡片、后声明图标钮。
+- `cursor` 决定悬停时的指针（`default` / `pointer` / `text` / `grab` / `grabbing` / `crosshair` / `notAllowed` / `resizeHorizontal` / `resizeVertical`），缺省是系统箭头；命中区与绘制指令互不相干——画了按钮忘了声明命中区，它就只是张图，反过来看不见的命中区也能接住点击（热区）。
+
+### 5.3 输入
+
+宿主把原始输入经 `host:frame.input` 回发，SDK 转成 `on_frame_input`，载荷按 `kind` 区分：
+
+| `kind` | 字段 | 说明 |
+| --- | --- | --- |
+| `pointerDown` / `pointerUp` | `x` `y` `button` `hit` | 左 / 右 / 中键；抬起时 `hit` 是抬起点所在的命中区 |
+| `pointerMove` | `x` `y` `hit` | 悬停中只在面内发；按住拖出面外仍继续发（绝对坐标） |
+| `pointerLeave` | 无 | 从面内移到面外触发一次 |
+| `doubleClick` | 同按下 | 宿主判定（同键、500ms 内、位移 < 4px）；**第二次按下不再单独发 `pointerDown`** |
+| `wheel` | `x` `y` `deltaX` `deltaY` `hit` | 像素增量（宿主已把「行」折成 40px），正 = 向下 / 向右 |
+| `key` | `key` `action` `modifiers` `text` | `key` 是 `{ "type": "named", "name": "arrowLeft" }` 或 `{ "type": "character", "text": "A" }`；`action` = `press` / `release`（长按会连发 press）；`modifiers` 是 `shift` / `control` / `alt` / `meta` 快照 |
+| `text` | `text` `composing` `caret` `candidates` | 输入法：`composing: true` 是组合串更新（空串 = 组合结束，不插入文本），`false` 是已提交文本；`candidates` 是候选窗锚点 |
+| `focus` | `focused` | 指针在面内按下即取焦，按到面外即失焦 |
+| `resize` | `width` `height` | 面的实际分配尺寸变化时发一次，按它重排 |
+
+三种声明决定你收什么：
+
+- `keys: true` 才收 `key`。**声明后键盘整体归本面**：连 Ctrl / Alt / Super 组合也回发给你，宿主自己的快捷键在此期间让位。只在真有键盘交互（绘图板、编辑器、命令面板）时声明。
+- `ime: { x, y, w, h }` 才收 `text`，该矩形是输入光标位置，宿主据此摆放候选窗。**不声明就收不到中文**——输入框必须声明它。
+- `fps: 30` 才收 `host:frame.tick { frame, deltaMs }`（1–120）。`frame` 从 0 起自增，`deltaMs` 是距上一拍的实际间隔（首帧 0）；落后多拍时宿主只补一拍。不声明就没有周期唤醒，动画停了下一次出帧把 `fps` 去掉即停拍。
+
+帧输入与帧拍都**不会**自动重发帧：回调里改完状态要自己提交新的一帧。
+
+### 5.4 文字量算与主题
+
+指令里的文字按 `(x, y)` 原样绘制，宿主不做排版，所以「这段字有多宽」要自己算。**不要按字符数估**：中文近似 1 字宽、西文只有一半左右，混排会错位。
 
 ```rust
-ctx.submit_frame("main", frame(commands, hits)).await?;   // 整帧替换，空指令 = 空面
+use atelyx_plugin_sdk::protocol::method::MeasureItem;
+
+let items = vec![
+    MeasureItem { text: "标题".into(), size: 14.0, weight: None, family: None, max_width: None },
+    MeasureItem { text: "说明文字".into(), size: 12.0, weight: None, family: None, max_width: Some(240.0) },
+];
+let sizes = ctx.measure_batch(items).await?.sizes;   // 顺序与入参一一对应：width / height / lines
 ```
 
-提交帧后宿主只渲染帧、不再解释该面的控件树（树存档保留但不显示）；再提交一次界面树（`ctx.ui().notify`）即交还控件通道。同一个面走哪条通道由最后提交的一方决定。
+- 单批最多 **512** 条；给 `max_width` 就按该宽度换行量算并回行数，不给按单行量。一屏文字攒成一批量完，别一条一个往返。
+- 结果按「文本 + 字号 + 字重 + 字体族 + 可用宽度」缓存，同一段字反复要用的（行高、列宽、省略位置）自己存住，别在帧回调里每帧量。
+- `ctx.query_theme()` 取宿主主题：`colors`（各 token 的 `#rrggbb`）、`fontSizes`（`micro` / `caption` / `ui` / `body` / `h2` / `h1`）、`radii`（`xs` / `sm` / `md`）。主题变了没有通知通道，面重新挂载时重取。
 
-- **命中区**：`hits` = 矩形 + 自定 id + 光标形状；按下 / 抬起 / 移动 / 双击 / 滚轮都带 `hit`（后声明的压住先声明的）。宿主不懂语义，只按几何命中并换指针形状。
-- **原始输入**：`host:frame.input` 原样回发，SDK 转成 `on_frame_input`；载荷按 `kind` 区分 `pointerDown` / `pointerUp` / `pointerMove` / `pointerLeave` / `doubleClick` / `wheel` / `key` / `text` / `focus` / `resize`。
-- **键盘与输入法**：帧声明 `keys` 才收按键（指针按下取焦，按在面外即失焦）；声明 `ime`（附组合期光标矩形）才收组合串与提交文本，候选窗由宿主按该矩形定位。两者都不声明时键盘仍归宿主。
-- **尺寸**：宿主在绘制时按面实际分配尺寸回发 `resize`，按它重排。
-- **帧率**：`fps`（1–120）与画布同口径，节拍回 `host:frame.tick { frame, deltaMs }`，SDK 转成 `on_frame_tick`。
+### 5.5 控件层（推荐写法）
 
-指令集与树内画布同源，且不含裁剪 / 变换 / 阴影——需要时自己换算坐标或预渲染成图片。帧输入与帧拍回调都**不**自动重发，状态变了在回调里提交新帧。
+不想自己算坐标、命中区与文本编辑，用 `atelyx_plugin_sdk::frame_ui`：控件编译成绘制指令与命中区，悬停 / 按下 / 焦点 / 光标 / 选区 / 输入法组合串 / 复制粘贴 / Tab 切换都在控件层里。宿主仍然只收帧，不认识控件。
 
-### 6.2 SDK 控件层（推荐写法）
-
-不想自己算坐标与命中区，就用 `atelyx-plugin-sdk::frame_ui`：控件（按钮 / 输入框 / 下拉 / 勾选 / 文字 / 徽标 / 图标钮 / 进度条 / 卡片 / Markdown / 滚动）编译成绘制指令，悬停 / 按下 / 焦点 / 文本编辑（光标、选区、输入法组合串、复制粘贴、清空、Tab 切换）都在控件层里。宿主仍然只收帧，不认识控件。
-
-一个面持一个 `FrameUi`，按两阶段出帧：
+一个面持一个 `FrameUi`，按两阶段出帧：**先把输入翻成事件并改状态，再声明控件**。
 
 ```rust
-use std::sync::atomic::{AtomicU32, Ordering};
-use atelyx_plugin_sdk::frame_ui::{FrameUi, TextRole, Ui, UiEvent};
+use std::sync::Mutex;
+
+use atelyx_plugin_sdk::frame_ui::{FrameUi, Icon, TextRole, UiEvent};
 use atelyx_plugin_sdk::protocol::frame::FrameInputParams;
-use atelyx_plugin_sdk::protocol::method::ContributionSlot;
 use atelyx_plugin_sdk::{Context, PluginHandler};
 
-struct Echo {
+#[derive(Default)]
+struct TodoState { items: Vec<String>, draft: String }
+
+struct Todo {
     ui: tokio::sync::Mutex<FrameUi>,
-    clicks: AtomicU32,
+    state: Mutex<TodoState>,
 }
 
-impl Echo {
-    async fn render(&self, ctx: &atelyx_plugin_sdk::Context) {
-        let clicks = self.clicks.load(Ordering::SeqCst);
+impl Todo {
+    async fn render(&self, ctx: &Context) {
+        let (items, draft) = {
+            let state = self.state.lock().unwrap();
+            (state.items.clone(), state.draft.clone())
+        };
         let mut ui = self.ui.lock().await;
-        if let Err(e) = ui.render(ctx, "main", move |ui| build(ui, clicks)).await {
-            eprintln!("提交设置面失败：{e}");
+        let drawn = ui.render(ctx, "main", |ui| {
+            ui.column(8.0, |c| {
+                c.text("待办", TextRole::Heading);
+                c.text_input("draft", draft.clone(), "输入后回车添加");
+                if items.is_empty() { c.caption("还没有条目"); }
+                c.scroll("list", 4.0, |s| {
+                    for (index, item) in items.iter().enumerate() {
+                        s.row(6.0, |r| {
+                            r.text(item.clone(), TextRole::Value);
+                            r.grow();
+                            r.icon_button(format!("del-{index}"), Icon::Eraser);
+                        });
+                    }
+                });
+            });
+        });
+        if let Err(e) = drawn.await {
+            eprintln!("提交面帧失败：{e}");
         }
     }
 }
 
-fn build(ui: &mut Ui<'_, '_>, clicks: u32) {
-    ui.scroll("main-scroll", 8.0, |c| {
-        c.text("你好，Atelyx", TextRole::Heading);
-        c.text(format!("点击次数：{clicks}"), TextRole::Label);
-        c.button("ping", "点我");
-    });
-}
-
 #[async_trait::async_trait]
-impl PluginHandler for Echo {
-    async fn on_ready(&self, ctx: &Context) {
-        let _ = ctx.register(ContributionSlot::Panel, "main", "Echo", None, None).await;
-        // 宿主首次绘制后才知道真实尺寸，先按缺省尺寸出一帧
-        self.render(ctx).await;
-    }
+impl PluginHandler for Todo {
+    async fn on_ready(&self, ctx: &Context) { self.render(ctx).await; }
 
-    /// 帧输入按到达顺序逐条处理：先出事件、改状态，再重画。
     async fn on_frame_input(&self, ctx: &Context, params: FrameInputParams) {
+        // 输入框的值以插件状态为准：先取一份快照，闭包里别再取同一把锁
+        let draft = self.state.lock().unwrap().draft.clone();
         let events = {
             let mut ui = self.ui.lock().await;
-            ui.event(ctx, &params.input, |_| None).await
+            ui.event(ctx, &params.input, move |id| (id == "draft").then(|| draft.clone())).await
         };
-        for event in events {
-            if let UiEvent::Click { id } = event {
-                if id == "ping" {
-                    self.clicks.fetch_add(1, Ordering::SeqCst);
+        // 改状态的作用域要先收掉：出帧还要再取一次锁，不能带过去
+        {
+            let mut state = self.state.lock().unwrap();
+            for event in events {
+                match event {
+                    UiEvent::Text { value, .. } => state.draft = value,
+                    UiEvent::Submit { .. } if !state.draft.is_empty() => {
+                        let draft = std::mem::take(&mut state.draft);
+                        state.items.push(draft);
+                    }
+                    UiEvent::Click { id } if id.starts_with("del-") => {
+                        if let Ok(index) = id[4..].parse::<usize>() {
+                            if index < state.items.len() { state.items.remove(index); }
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -458,47 +393,59 @@ impl PluginHandler for Echo {
 
 几条用法约定：
 
-- **两阶段**：`event` 把原始输入翻成 `Click` / `Text`（完整新值）/ `Submit`（输入框回车）/ `Select`（选项下标）/ `Focus` / `Scroll`（滚动偏移与可滚余量），并且已就地更新光标、选区、焦点与滚动；插件改完自己的状态后 **立即** `render`，这一帧才是改后的样子。帧内容不会自动提交（与界面树托管不同）。
-- **`value_of` 每次现读**：输入框的值以插件状态为准。`event(ctx, input, |id| ...)` 的闭包按 id 返回当前值（返回 `None` 即非输入框），编辑永远从这里出发，不要缓存上一帧的字符串。
-- **`render` 的闭包会被调用多次**：文字宽度缺项时先按估算排、向宿主量算后重建，最多 3 轮。闭包必须只读状态（不要在里面改状态、发请求）。
-- **输入框的最终值要写回**：收到 `UiEvent::Text { id, value }` 就把 `value` 存进自己的状态；不写回的话下一次渲染还是旧值。
-- **`Focus { focused: false }`** 可以拿来提交「失焦才生效」的字段（例如数字输入的越界归一）；`Submit { id }` 是单行输入框的回车，检索 / 写回设置这类动作挂这里。
-- **主题只取一次**：首次 `render` 会查 `query.theme` 拿字号 / 圆角 / 主题色，宿主主题变了不会通知；面重新挂载时新建 `FrameUi` 即可重取。
-- **尺寸**：`FrameUi` 记下宿主回发的 `Resize`，按它排版；宿主首次绘制前用缺省尺寸。
+- **`event` 已经把交互态就地更新**（焦点、光标、选区、组合串、滚动位置），返回的是语义事件：`Click` / `RightClick` / `Text`（完整新值）/ `Submit`（输入框回车）/ `Select`（选项下标）/ `Focus` / `Scroll`（偏移与可滚余量）。插件只改自己的业务状态。
+- **`value_of` 每次现读**：`event(ctx, input, |id| …)` 按 id 返回输入框当前值，编辑永远从事实出发；**`Text` 要写回**，收到 `UiEvent::Text { value, .. }` 就存进自己的状态，不写回下一帧还是旧值。
+- **`render` 的闭包会被调用多次**（文字量算缺项时先按估算排、量完重建，最多 3 轮）：闭包必须只读状态，不要在里面改状态或发请求。
+- **内容相同的帧不会重复提交**：指针移动这类没改画面的输入不会把宿主拖进重绘风暴，不必自己判重。
+- **主题只取一次**：首次 `render` 查 `query.theme` 拿字号 / 圆角 / 颜色；面重新挂载时新建一个 `FrameUi` 即重取。**尺寸**由宿主回发的 `resize` 决定并按它排版，首次绘制前用缺省尺寸（首帧可能偏窄，`resize` 一到就重排）。
 
-控件与布局：
+控件（细节以源码文档注释为准）：
 
 | 控件 | 说明 |
 | --- | --- |
-| `text(content, role)` | 单行、超出按宽度省略；`role` = `Title` / `Heading` / `Label` / `FieldLabel` / `Caption` / `Value` |
+| `text(content, role)` | 单行、超出按宽度省略；`role` = `Title` / `Heading` / `Label` / `FieldLabel` / `Caption` / `Value`，字号与颜色由角色定。`caption` / `field_label` 是同角色的换行版（按可用宽度折行） |
 | `text_styled(content, TextStyle)` | 按样式绘制：`TextStyle::new(role).color(token).mono().wrap()`（等宽、换行、语义色） |
-| `caption` / `field_label` | 按可用宽度换行的小号说明 / 字段标签 |
-| `button` / `ghost_button` / `button_enabled` | 常规底 / 无底色按钮（`_enabled` 变体禁用时不承接点击），点击回 `Click { id }` |
-| `text_input(id, value, placeholder)` | 单行输入框；`text_input_sized` 固定宽；`text_input_password` 密文显示；回车回 `Submit { id }` |
-| `select(id, options, selected)` | 下拉；点击回 `Select { id, index }`（选项**就地展开**撑开后续内容） |
+| `button` / `ghost_button` / `button_enabled` / `ghost_button_enabled` | 常规底 / 无底色 / 带禁用态，点击回 `Click { id }` |
+| `text_input(id, value, placeholder)` | 单行输入框；`text_input_sized` 固定宽，`text_input_password` 密文；回车回 `Submit { id }` |
+| `select(id, options, selected)` | 下拉；选中回 `Select { id, index }`，展开时**就地撑开**后续内容 |
 | `checkbox(id, checked, label)` | 勾选，点击回 `Click { id }`（勾选值由插件自己翻转） |
 | `chip(label, color)` | 小号圆角徽标（计数 / 状态标签），不承接点击 |
-| `icon_button(id, Icon)` | 方形图标钮；内置 `Copy` / `Refresh` / `Eraser` / `Download` / `Search` / `HardDrive` / `Wrench` / `FileText` / `Box`，点击回 `Click { id }`；`icon(Icon)` 是同样的形状但不承接点击 |
+| `icon_button(id, Icon)` / `icon(Icon)` | 方形图标钮（回 `Click`）/ 纯装饰图标；内置 `Copy` / `Refresh` / `Eraser` / `Download` / `Search` / `HardDrive` / `Wrench` / `FileText` / `Box` |
 | `progress(value)` | 0–1 的进度条 |
-| `card(id, selected, ...)` | 整块可点卡片（选中档强调底色与描边），点击回 `Click { id }`、右键回 `RightClick { id }`；子项按列排布，子控件压住卡片自身的命中 |
-| `panel(...)` | 圆角表面容器（承接子项，不承接点击） |
+| `card(id, selected, ...)` | 整块可点卡片（选中档强调底色与描边），回 `Click` / `RightClick`；子控件压住卡片的命中 |
+| `panel(...)` | 圆角表面容器，承接子项、不承接点击 |
 | `notice(text, color)` | 提示块：整行底色 + 语义色描边与文字 |
-| `markdown(content)` | 只读 Markdown：块由宿主解析（`query.markdown`），控件层按宽度折行并画列表标记 / 引用条 / 代码底 |
-| `scroll(id, gap, ...)` / `list(id, gap, ...)` | 滚动容器（吃父容器剩余高度；按像素连续滚动，只画视口内的子项），滚轮回 `Scroll { id, offset, max_offset }`；右下角细滚动条可直接拖动（按下即跳转、拖动即跟随） |
-| `scroll_sized(id, height, gap, follow_end, ...)` | 定高滚动区；`follow_end` 时上一帧停在终点就跟到新终点，由关转开的那一帧跳到终点 |
+| `markdown(content)` | 只读 Markdown：块由宿主解析（`markdown.parse`），控件层按宽度折行并画列表标记 / 引用条 / 代码底 |
+| `scroll(id, gap, ...)` / `list(id, gap, ...)` | 滚动容器（吃父容器剩余高度，只画视口内的子项），滚轮回 `Scroll { id, offset, max_offset }`，右下细滚动条可拖 |
+| `scroll_sized(id, height, gap, follow_end, ...)` | 定高滚动区；`follow_end` 时停在终点就跟到新终点（日志、消息流） |
 | `rule()` / `spacer(h)` / `grow()` | 分隔线 / 固定高度空白 / 吃剩余宽度的弹簧 |
-| `pad(horizontal, vertical, ...)` | 内边距容器：子项按列排布并整体内缩（滚动区要贴面板边缘、内容又要留白时用） |
-| `column(gap, ...)` / `row(gap, ...)` / `row_fill(gap, ...)` | 纵向 / 横向容器；`row_fill` 占满剩余高度，子项里的滚动区各拿整行高度（并排分栏各自滚动） |
+| `pad(horizontal, vertical, ...)` | 内边距容器：子项按列排布并整体内缩（滚动条要贴边、内容又要留白时用） |
+| `column(gap, ...)` / `row(gap, ...)` / `row_fill(gap, ...)` | 纵向 / 横向 / 占满剩余高度的横向容器（并排分栏各自滚动） |
 
-边界的两条（指令集没有裁剪，也画不了覆盖式浮层）：下拉就地展开而不是浮在内容上；滚动按像素连续，滚出视口的子项不画——长内容请拆成行放进 `scroll` / `list`。
+Markdown 不要自己解析：`ui.markdown(text)` 首次出现时向宿主发一次 `markdown.parse`，按原文缓存（缓存有限，滚出视野的旧内容会被收敛掉），内容不变不重取。
 
-`role` 与控件高度跟随宿主的主题与字号：不要自己写死色值和像素。需要自绘时仍可退回 [`ctx.submit_frame`]，两者用同一个通道，不要混用一个面。
+三条边界：指令集没有裁剪，所以下拉就地展开而不是浮在内容上、也没有覆盖式浮层——长内容拆行放进 `scroll` / `list`；无障碍基本没有（自绘帧对读屏器只是一块区域，键鼠可达性要自己保证）；观感一致性靠 SDK 默认样式，不要写死色值和像素。
 
-Markdown 内容不要自己解析：`ui.markdown(text)` 首次出现时会向宿主发一次 `query.markdown`（按原文缓存，内容不变不重取），拿回结构化块后由控件层排版——宿主与插件共用笔记的同一套解析语义。
+要自带 GUI 运行时的插件可以自己创建系统窗口跑自有渲染（不走 `window.open`），但那种界面不参与工作台组合：没有面板 dock、没有标签页，宿主主题与快捷键也不生效，插件一停就跟着消失。想留在工作台里，就走帧。
 
-## 7. 能力面
+### 5.6 自绘标题栏与无边框窗口
 
-在 `permissions` 里声明后，SDK 的 `Context` 对应方法才可用；未声明调用会返回可读错误（`能力未声明`）并计入设置页的「被拒调用」审计。
+全接管面与插件窗口可以自绘标题栏。拖动不要自己算窗口坐标，把按下交给宿主：
+
+```rust
+// 标题栏的命中区收到 pointerDown 后
+ctx.begin_window_drag("main").await?;   // 宿主接管拖动手势
+```
+
+面在插件窗口 / 接管面里就拖那个窗口；解析不到时拖当前聚焦窗口。缩放沿用窗口边缘，关闭走宿主关窗链。插件窗口用 `window.open` 开且 `decorations: false` 时，宿主自己补一条标题栏（标题 / 拖动 / 最小化 / 最大化 / 关闭），不必再自己造。
+
+### 5.7 面外层内边距
+
+面板、表格视图与设置页这三个面，宿主默认在帧外留 12/10 的内边距；接管面与插件窗口不加。注册贡献时给 `padding` 可改这个值：数字 = 四边等距（`0` 即贴边），也可按轴 `{ "horizontal": 16, "vertical": 8 }` 或按边 `{ "top": 4, "right": 0, "bottom": 4, "left": 0 }` 声明。要贴边的内容放进接管面或窗口面；面板里不要自带同样的外边距（会叠加）。
+
+## 6. 能力面
+
+`plugin.json` 的 `permissions` 是**公示与审计**口径，不是开关：调用本身不按声明拦截，未声明的调用照常执行，但会被记为「未声明」——插件详情页的「能力调用记录」里能看见，首次出现还会给用户弹一条提示。所以声明要写全：漏写不会让功能坏掉，但会让用户看到一条不该出现的记录。
 
 每个权限名对应的 SDK 方法与协议方法名、params / result 形态，以 [API 参考 · 能力面方法名](plugin-api.md#8-能力面方法名) 为准。这里只记各自的边界与坑：
 
@@ -521,6 +468,55 @@ Markdown 内容不要自己解析：`ui.markdown(text)` 首次出现时会向宿
 
 `vault` 的读写**必须**经能力面：直接改盘会绕过写盘队列与协作通道，属于内容丢失级缺陷。
 
+## 7. 能力总线（服务）
+
+能力只有一种描述方式：**服务 + 方法**。方法名本身就是 `服务.方法`——`vault.readText` 是服务 `vault` 的方法 `readText`，SDK 的 `ctx.vault_read_text(...)` 与 `ctx.call_raw("vault.readText", …)` 落到同一条目录条目、同一个实现。
+
+```rust
+let dir = ctx.service_list().await?;   // 每个条目：service / version / methods / provider / replaceable / candidates
+let text = ctx.service_call("vault", "readText", json!({ "path": "notes/a.md" })).await?;
+```
+
+- `service_list` 是目录：`provider` 缺省表示当前由内置实现承载，给了值就是提供它的插件 id；`candidates` 是其余候选；`replaceable: false` 表示这个服务不允许被顶替。
+- `service_call` 只是「名字要到运行时才知道」时的调用形态（例如让用户在下拉里选服务再调）；名字写死的场合直接用 `Context` 的定型方法，等价且更省心。
+
+### 7.1 做提供者
+
+```rust
+use serde_json::json;
+use atelyx_plugin_sdk::protocol::service::HostCallParams;
+
+#[async_trait::async_trait]
+impl PluginHandler for Demo {
+    async fn on_ready(&self, ctx: &Context) {
+        if let Err(e) = ctx.register_service("demo", &["echo"]).await {
+            eprintln!("登记服务失败：{e}");
+        }
+    }
+
+    /// 本插件是 demo 的活动提供者时，宿主把调用转到这里；用同一个 callId 回报。
+    async fn on_service_call(&self, ctx: &Context, params: HostCallParams) {
+        let replied = match params.method.as_str() {
+            "echo" => ctx.service_result(&params.call_id, json!({ "echo": params.params })).await,
+            other => ctx.service_error(&params.call_id, &format!("unknown_method：{other}")).await,
+        };
+        if let Err(e) = replied {
+            eprintln!("回报服务调用失败：{e}");
+        }
+    }
+}
+```
+
+- **登记不等于生效**：同一服务同时只有一个活动提供者。已有内置实现的服务（`vault` / `ai` / `markdown` …）登记后只成为候选，是否顶替由用户在设置页决定；目录里没有的服务，首个提供者即活动提供者。调用方最终拿到的是**你回报的那份数据**：`service_result` 给结果、`service_error` 给可读原因，二者都带调用方的 `callId`；不实现 `on_service_call` 时默认回报「本插件不提供该服务」，宿主不必等到超时。
+- 30 秒不回报按 `timeout` 失败；**停用 / 崩溃 / 卸载时在途调用以 `provider_unavailable` 失败**，之后的调用回落内置实现（没有内置实现就成了 `unknown_service`）。`host:service.changed` 广播活动提供者变化（`{ service, provider, available }`，`provider` 缺省 = 内置），要靠「本插件现在是否生效」改界面就覆写 `on_service_changed`。
+- **不要在自己的 `on_service_call` 里等自己提供的方法**：宿主通知与这条调用走同一个通知 worker，会自锁。要自检就 `tokio::spawn` 到别的任务里调。
+
+### 7.2 不能做的
+
+- 不能登记宿主的通道命名空间：`service` / `view` / `frame` / `layout` / `event` / `doc`。这些是界面提交与事件通路的入口，被接管等于把插件自己从界面上摘掉，登记时直接拒收。
+- 不能替换 `query`：字体与主题取的是宿主 OS 与用户设置资源，外置后宿主自身外观会和设置脱节。
+- `markdown.parse` **可以**被替换（解析语义与宿主笔记同源即可）。替换生效后，已经按原文缓存过解析结果的内容不会自动重取——重建 `FrameUi` 或内容变化才会再取一次。
+
 ## 8. 进阶
 
 ### 8.1 接管窗口
@@ -530,7 +526,7 @@ ctx.takeover(TakeoverScope::Page, "main").await?;   // 内容区归插件，宿�
 ctx.takeover(TakeoverScope::Full, "main").await?;   // 整窗归插件（含标题栏区域）
 ```
 
-`surfaceId` 必须是已注册贡献的 id（与该面共享同一棵树）。接管按窗口生效：布局真源不动，退出即恢复原视图。全接管时插件自绘标题栏——拖动用 `dragRegion` 热区（宿主代执行），缩放沿用窗口边缘，关闭走宿主关窗链；退出入口由宿主常驻（右上角按钮 + Esc）。
+`surfaceId` 必须是已注册贡献的 id——该面的帧原样接管过去。接管按窗口生效：布局真源不动，退出即恢复原视图。全接管时插件自绘标题栏：标题栏的命中区收到按下后调 `ctx.begin_window_drag("main")` 交给宿主拖动手势，缩放沿用窗口边缘，关闭走宿主关窗链；退出入口由宿主常驻（右上角按钮 + Esc）。
 
 ### 8.2 插件窗口
 
@@ -542,7 +538,7 @@ let params = WindowOpenParams {
     always_on_top: Some(true), skip_taskbar: Some(true), hide_on_blur: Some(true),
     decorations: None,          // Some(false) = 去掉系统边框，由宿主补标题栏（标题 / 拖动 / 最小化 / 最大化 / 关闭）
 };
-ctx.window_open(params).await?;   // 内容用 mount("palette", build) 登记后 notify("palette") 提交
+ctx.window_open(params).await?;   // 窗口内容同样是帧：ui.render(ctx, "palette", ...) 提交
 // 运行时改尺寸 / 置顶（只给一维时另一维取现值；「不进任务栏」只能在开窗时给）
 ctx.window_update(WindowUpdateParams { id: "palette".into(), width: Some(640.0), height: None, always_on_top: None }).await?;
 ctx.window_close("palette").await?;
@@ -550,7 +546,7 @@ ctx.window_close("palette").await?;
 ctx.window_show("palette").await?;
 ```
 
-`title` 就是窗口标题：有系统边框时作为 OS 标题栏文字，`decorations: Some(false)` 时由宿主画在自己的标题栏上（附带拖动、双击切换最大化、最小化 / 最大化 / 关闭），插件内容占满标题栏以下的区域——此时不必再用 `dragRegion` 自己造标题栏。仍开着的同一 id 会被拒，但**插件请求关闭后可以立刻用同 id 重开**——`window_close` 的回执表示「关闭已受理」，不必等系统销毁完成。用户关窗时宿主先发 `host:window.closed`（`{ id }`）、再发 `host:surface.detached`（`kind: "window"`）；插件自己请求的关闭只发后者。`hideOnBlur` 是「隐藏窗口」而非关闭：宿主隐藏时发 `host:window.hidden`，插件可用 `window_show` 重新显示。
+`title` 就是窗口标题：有系统边框时作为 OS 标题栏文字，`decorations: Some(false)` 时由宿主画在自己的标题栏上（附带拖动、双击切换最大化、最小化 / 最大化 / 关闭），插件内容占满标题栏以下的区域——此时不必再用命中区自己造标题栏。仍开着的同一 id 会被拒，但**插件请求关闭后可以立刻用同 id 重开**——`window_close` 的回执表示「关闭已受理」，不必等系统销毁完成。用户关窗时宿主先发 `host:window.closed`（`{ id }`）、再发 `host:surface.detached`（`kind: "window"`）；插件自己请求的关闭只发后者。`hideOnBlur` 是「隐藏窗口」而非关闭：宿主隐藏时发 `host:window.hidden`，插件可用 `window_show` 重新显示。
 
 ### 8.3 领域文档类型
 
@@ -562,7 +558,7 @@ ctx.window_show("palette").await?;
 ]
 ```
 
-`surface` 必须同时用 `view.register` 注册为 `panel` 贡献。用户打开这类文件时宿主发 `host:doc.open { surfaceId, path }`，插件按 `surfaceId` 提交文档界面树；关闭或换文件时先发 `host:doc.close`。同一时间至多一个打开的插件文档（切换文件即换实例）；文件被删除或切仓库也会关闭。同一扩展名被多个插件注册时按插件 id 取第一个并提示。
+`surface` 必须同时用 `view.register` 注册为 `panel` 贡献。用户打开这类文件时宿主发 `host:doc.open { surfaceId, path }`，插件按 `surfaceId` 提交这一面的帧；关闭或换文件时先发 `host:doc.close`。同一时间至多一个打开的插件文档（切换文件即换实例）；文件被删除或切仓库也会关闭。同一扩展名被多个插件注册时按插件 id 取第一个并提示。
 
 ### 8.4 AI 总线
 
@@ -665,8 +661,7 @@ ctx.collab_send_ephemeral("cursor", payload, None).await?;
 插件可以声明一套默认面板分栏，首次启用时宿主自动摆进当前场景：
 
 ```rust
-use atelyx_plugin_sdk::protocol::layout::LayoutSpecNode;
-use atelyx_plugin_sdk::protocol::view::Axis;
+use atelyx_plugin_sdk::protocol::layout::{Axis, LayoutSpecNode};
 
 ctx.declare_default_layout(
     "控制台",
@@ -746,11 +741,15 @@ Linux 上宿主会为入口补可执行位（zip 不保留权限位也不影响�
 | 启用后立刻「启动失败：插件未在 10 秒内完成握手」 | 没有走 `run_stdio`、进程启动即退出、或 `main` 前就阻塞了 |
 | 「输出非协议内容」并停机 | stdout 上出现了非协议的行（`println!`、第三方库日志） |
 | 安装了但面板菜单里没有条目 | 没有 `view.register`，或注册失败（看日志） |
-| 按钮点击没反应 | 节点 `events` 没声明 `click`，或 `on_view_event` 没处理该节点 id |
-| 图标显示成空方框 | 图标名写错了：内置名取自宿主形状表，自备名要先 `view.defineIcon`（同名才算注册）。宿主在插件日志里记了一条 `[宿主] 界面引用了未注册的图标…` |
-| 输入框打字被打断 / 光标乱跳 | 逐键模式下插件在 `change` 回填时写入了与收到值不同的值（宿主据此判定接管）；改用 `report` 非逐键上报即可避免 |
-| 声明了 `report` 但界面不刷新 | 该档位只在提交/停顿后回发一次 `change`，检查是否漏了 `submit` 事件或停顿时长是否过长 |
-| 「能力未声明」 | `plugin.json` 的 `permissions` 少了对应项 |
+| 面一直显示「等待插件提交界面」 | 没提交帧，或提交的 `surfaceId` 与贡献 id 不一致（面按贡献 id 取帧） |
+| 界面停在旧内容 | 改了状态没重新提交帧——帧不自动重发，回调里要自己 `render` / `submit_frame` |
+| 点了没反应 | 帧里没声明该处的命中区、`hit` 的 id 与处理分支不一致，或点击被后声明的命中区抢走 |
+| 中文打不进 / 收不到按键 | 帧没声明 `ime`（输入法）/ `keys`（按键）；输入框聚焦后要重新出帧才会带上 `ime` 光标 |
+| 文字重叠或错位 | 没走 `query.measure` 而按字符数估宽；换行只在给了 `maxWidth` 时成立 |
+| 声明的快捷键被界面吞掉 | 帧声明了 `keys`：键盘整体归本面（含 Ctrl / Alt 组合），只在真有键盘交互时声明 |
+| 插件详情页出现「未声明」记录 | `permissions` 漏了对应项：调用照常执行，但会被记为未声明并提示用户 |
+| `service.call` 报 `provider_unavailable` | 提供者没启用、已停用 / 崩溃，或活动提供者已被用户切回内置 |
+| `service.register` 被拒 | 服务名落在宿主通道命名空间（`view` / `frame` / …），或该服务不可替换（`query`） |
 | 安装被拒「含宿主保留路径」 | 包里有 `data/`、`logs/` 等宿主保留名 |
 | 安装被拒「入口文件不在安装内容里」 | 入口被源目录的 `.gitignore` 排除了（常见于产物目录被忽略） |
 | 安装被拒「压缩比过高」 | 打包了大体积高压缩比的文本 / 数据文件 |
@@ -774,7 +773,7 @@ Linux 上宿主会为入口补可执行位（zip 不保留权限位也不影响�
 ## 12. 兼容性
 
 - `apiVersion` 是硬闸门：宿主只接受完全相等的版本，版本不符的插件响亮拒绝，不做兼容推断。破坏性变更是否递增版本号以宿主 1.0.0 为界——之前不递增（握手仍要求严格相等，插件随宿主更新重建即对齐），之后必须递增。
-- 控件集、事件、贡献槽位、画布指令都是封闭枚举，扩容随协议升版；未知取值会被拒绝而不是被忽略。
+- 绘制指令、输入形态、贡献槽位、服务方法名都是封闭枚举 / 受限形状，扩容随协议升版；未知取值会被拒绝而不是被忽略。
 - 宿主正式发布 1.0.0 之前不承诺向后兼容：协议形状直接改，插件随宿主重建即对齐（`apiVersion` 仍要求严格相等）。
-- SDK 的 `PluginHandler` 新增通知回调都带缺省实现，不重写即忽略。
+- SDK 的 `PluginHandler` 新增通知回调都带缺省实现，不重写即忽略；`frame_ui` 的控件与容器新增不影响既有调用。
 - 插件应把「宿主关闭 stdin」当作正常退出信号，不要依赖宿主发来的额外终止通知。
