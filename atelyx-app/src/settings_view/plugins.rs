@@ -7,7 +7,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use iced::widget::{container, row, scrollable, space, Column};
+use iced::widget::text::Wrapping;
+use iced::widget::{button, container, row, scrollable, space, Column};
 use iced::{border, widget::container::Style, Element, Length, Padding, Task};
 
 use atelyx_core::plugin_runtime::market::{self, MarketSnapshot};
@@ -28,21 +29,24 @@ use crate::ui::icon::icon;
 use crate::ui::notify::Level as NoticeLevel;
 use crate::ui::palette as pal;
 use crate::ui::scroll;
-use crate::ui::{bold, text};
+use crate::ui::{bold, mono, text};
 use crate::{layout_view, vault, App, Message};
 
 /// 数据落盘时刻格式化用的毫秒口径（审计记录为 unix 秒）。
 const MS_PER_SEC: u64 = 1000;
 
-/// 插件详情模态卡宽。
-const DETAIL_CARD_WIDTH: f32 = 460.0;
+/// 插件详情模态卡宽（日志页要放下等宽日志行）。
+const DETAIL_CARD_WIDTH: f32 = 620.0;
+/// 内置插件详情模态卡宽（只有视图 / 服务列表，窄一档）。
+const BUILTIN_CARD_WIDTH: f32 = 520.0;
 /// 能力调用记录区固定滚动高度（避免长列表把模态撑出窗口）。
-const DETAIL_AUDIT_MAX_H: f32 = 200.0;
+const DETAIL_AUDIT_MAX_H: f32 = 180.0;
+/// 日志面板固定高度。
+const LOG_PANEL_H: f32 = 360.0;
+/// 日志路径行的横向占位（模态左右内衬 + 复制图标 / 间距 / 按钮内衬），算可用字宽时扣除。
+const LOG_PATH_CHROME_W: f32 = 24.0 + 26.0;
 /// 市场安装确认模态卡宽。
 const CONFIRM_CARD_WIDTH: f32 = 380.0;
-/// 日志模态卡宽与日志区固定高度。
-const LOG_CARD_WIDTH: f32 = 620.0;
-const LOG_MAX_H: f32 = 360.0;
 /// 协作空间单文件上限（服务端强制；大文件导入在本地先挡一道，免把超限内容读进内存）。
 const SPACE_MAX_FILE_BYTES: usize = 50 * 1024 * 1024;
 
@@ -54,6 +58,14 @@ pub enum PluginsMode {
     Installed,
     /// 官方索引浏览（搜索 / 类型筛选 / 安装 / 更新）。
     Market,
+}
+
+/// 插件详情分页：概览与运行日志，同一模态内切换。
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DetailTab {
+    #[default]
+    Overview,
+    Log,
 }
 
 /// 待确认的市场安装目标。
@@ -117,9 +129,16 @@ pub struct PluginsState {
     pub market_type: Option<String>,
     /// 非官方插件的安装确认目标。
     pub confirm_install: Option<MarketInstallAsk>,
-    /// 日志模态的目标插件 id（`Some` = 日志模态打开）与读到的内容。
-    pub log_target: Option<String>,
+    /// 详情页当前分页。
+    pub detail_tab: DetailTab,
+    /// 日志读取纪元：回执只认发起时的那一代，清空与重新读取都会推进它。
+    pub log_seq: u64,
+    /// 日志页读到的尾部（`None` = 读取中）。
     pub log_text: Option<String>,
+    /// 日志读取失败的原因（`Some` = 显示失败态而非「暂无日志」）。
+    pub log_error: Option<String>,
+    /// 清空日志的二段确认。
+    pub log_clear_ask: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -154,11 +173,18 @@ pub enum PluginsMsg {
     /// 打开 / 关闭内置插件（进程内）详情。
     BuiltinDetail(String),
     BuiltinDetailClose,
-    /// 日志模态：打开并读尾部 / 关闭。
-    LogOpen(String),
-    LogClose,
-    /// 日志读取回执（带目标 id：连开两个插件时先发的读取不能覆盖后一个的显示）。
-    LogLoaded { id: String, text: String },
+    /// 详情分页切换（切到日志页即读尾部）。
+    DetailTab(DetailTab),
+    /// 日志页：重读尾部 / 清空二段确认（进入 / 取消 / 执行）/ 清空回执。
+    LogRefresh,
+    LogClearAsk,
+    LogClearCancel,
+    LogClear(String),
+    LogCleared(String, Result<(), String>),
+    /// 复制日志文件路径（点击路径行）。
+    CopyLogPath(String),
+    /// 日志读取回执（带目标 id 与纪元：先发的读取不能覆盖已切换插件或已清空的显示）。
+    LogLoaded { id: String, seq: u64, result: Result<String, String> },
     /// 壳侧服务请求：替插件弹系统对话框（选定的路径经 `resolve_dialog` 回填给等待中的调用）。
     DialogAsk { request_id: u64, dialog: DialogRequest },
     DialogDone { request_id: u64, path: Option<String> },
@@ -583,11 +609,9 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
             match result {
                 Ok(()) => {
                     app.plugins_state.detail = None;
-                    // 日志模态跟着插件走：已卸载的插件没有日志可看
-                    if app.plugins_state.log_target.as_deref() == Some(id.as_str()) {
-                        app.plugins_state.log_target = None;
-                        app.plugins_state.log_text = None;
-                    }
+                    app.plugins_state.log_text = None;
+                    app.plugins_state.log_error = None;
+                    app.plugins_state.log_clear_ask = false;
                     app.notify(NoticeLevel::Success, format!("已卸载 {id}"));
                 }
                 Err(e) => app.notify(NoticeLevel::Error, format!("卸载失败：{e}")),
@@ -599,10 +623,17 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
             app.plugins_state.detail_audit = app.plugins.audit(&id);
             app.plugins_state.detail = Some(id);
             app.plugins_state.builtin_detail = None;
+            app.plugins_state.detail_tab = DetailTab::Overview;
+            app.plugins_state.log_text = None;
+            app.plugins_state.log_error = None;
+            app.plugins_state.log_clear_ask = false;
             Task::none()
         }
         PluginsMsg::DetailClose => {
             app.plugins_state.detail = None;
+            app.plugins_state.log_text = None;
+            app.plugins_state.log_error = None;
+            app.plugins_state.log_clear_ask = false;
             Task::none()
         }
         PluginsMsg::BuiltinDetail(id) => {
@@ -614,29 +645,75 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
             app.plugins_state.builtin_detail = None;
             Task::none()
         }
-        PluginsMsg::LogOpen(id) => {
-            app.plugins_state.log_target = Some(id.clone());
-            app.plugins_state.log_text = None;
+        PluginsMsg::DetailTab(tab) => {
+            app.plugins_state.detail_tab = tab;
+            app.plugins_state.log_clear_ask = false;
+            match tab {
+                DetailTab::Overview => Task::none(),
+                DetailTab::Log => load_log(app),
+            }
+        }
+        PluginsMsg::LogRefresh => load_log(app),
+        PluginsMsg::LogClearAsk => {
+            app.plugins_state.log_clear_ask = true;
+            Task::none()
+        }
+        PluginsMsg::LogClearCancel => {
+            app.plugins_state.log_clear_ask = false;
+            Task::none()
+        }
+        PluginsMsg::LogClear(id) => {
+            app.plugins_state.log_clear_ask = false;
             let runtime = app.plugins.clone();
             let for_task = id.clone();
             Task::perform(
-                async move {
-                    run_blocking(move || Ok(runtime.log_tail(&for_task)))
-                        .await
-                        .unwrap_or_default()
-                },
-                move |text| Message::Plugins(PluginsMsg::LogLoaded { id, text }),
+                async move { run_blocking(move || runtime.clear_log(&for_task)).await },
+                move |result| Message::Plugins(PluginsMsg::LogCleared(id.clone(), result)),
             )
         }
-        PluginsMsg::LogClose => {
-            app.plugins_state.log_target = None;
-            app.plugins_state.log_text = None;
-            Task::none()
+        PluginsMsg::LogCleared(id, result) => {
+            match result {
+                Ok(()) => {
+                    // 清空即推进纪元：清空前发起的读取回执一律作废
+                    app.plugins_state.log_seq = app.plugins_state.log_seq.wrapping_add(1);
+                    app.plugins_state.log_error = None;
+                    if app.plugins_state.detail.as_deref() == Some(id.as_str())
+                        && app.plugins_state.detail_tab == DetailTab::Log
+                    {
+                        // 插件可能已写入新行：按磁盘再读一次才是当前真相
+                        load_log(app)
+                    } else {
+                        app.plugins_state.log_text = None;
+                        Task::none()
+                    }
+                }
+                Err(e) => {
+                    app.notify(NoticeLevel::Error, format!("清空日志失败：{e}"));
+                    Task::none()
+                }
+            }
         }
-        PluginsMsg::LogLoaded { id, text } => {
-            // 目标已换（连开另一个插件）或模态已关：这次读取的结果不再对应屏幕上的内容
-            if app.plugins_state.log_target.as_deref() == Some(id.as_str()) {
-                app.plugins_state.log_text = Some(text);
+        PluginsMsg::CopyLogPath(path) => {
+            app.notify(NoticeLevel::Success, "已复制日志路径");
+            iced::clipboard::write(path).map(|_: ()| Message::Noop)
+        }
+        PluginsMsg::LogLoaded { id, seq, result } => {
+            // 详情已换插件、换分页，或读取已被清空 / 后来的读取取代：这次回执不作数
+            if app.plugins_state.log_seq != seq
+                || app.plugins_state.detail.as_deref() != Some(id.as_str())
+                || app.plugins_state.detail_tab != DetailTab::Log
+            {
+                return Task::none();
+            }
+            match result {
+                Ok(text) => {
+                    app.plugins_state.log_text = Some(text);
+                    app.plugins_state.log_error = None;
+                }
+                Err(e) => {
+                    app.plugins_state.log_text = None;
+                    app.plugins_state.log_error = Some(e);
+                }
             }
             Task::none()
         }
@@ -1988,6 +2065,23 @@ fn refresh(app: &mut App) {
     crate::plugin_actions::rebuild_registry(app);
 }
 
+/// 读详情当前插件的日志尾部（异步；回执按插件 id 与纪元对号入座，详见 `LogLoaded`）。
+fn load_log(app: &mut App) -> Task<Message> {
+    let Some(id) = app.plugins_state.detail.clone() else {
+        return Task::none();
+    };
+    app.plugins_state.log_seq = app.plugins_state.log_seq.wrapping_add(1);
+    let seq = app.plugins_state.log_seq;
+    app.plugins_state.log_text = None;
+    app.plugins_state.log_error = None;
+    app.plugins_state.log_clear_ask = false;
+    let runtime = app.plugins.clone();
+    let for_task = id.clone();
+    Task::perform(run_blocking(move || runtime.log_tail(&for_task)), move |result| {
+        Message::Plugins(PluginsMsg::LogLoaded { id, seq, result })
+    })
+}
+
 /// 安装完成提示：内容已落位。重启失败与「还没启用」给出不同下一步——两者都不是安装失败。
 fn notify_installed(app: &mut App, outcome: &InstallOutcome, done: &str) {
     let enabled = app
@@ -2557,9 +2651,6 @@ pub fn overlay(app: &App, window: iced::window::Id) -> Option<Element<'static, M
     if let Some(ask) = &app.plugins_state.confirm_install {
         return Some(install_confirm_modal(ask));
     }
-    if let Some(id) = app.plugins_state.log_target.clone() {
-        return Some(log_modal(app, window, &id));
-    }
     if let Some(id) = app.plugins_state.builtin_detail.as_ref() {
         return Some(builtin_detail_modal(app, window, id));
     }
@@ -2567,44 +2658,53 @@ pub fn overlay(app: &App, window: iced::window::Id) -> Option<Element<'static, M
     let summary = app.plugins_state.list.iter().find(|p| &p.id == id)?;
     Some(detail_modal(app, window, summary))
 }
-/// 插件详情模态：版本 / 协议版本 / 声明权限 / 提交计数 / 用到但未声明的调用记录。
+/// 插件详情模态：概览（版本 / 声明能力 / 调用记录）与运行日志两页。
 fn detail_modal(app: &App, window: iced::window::Id, summary: &PluginSummary) -> Element<'static, Message> {
-    let header = row![
-        icon("puzzle", 14.0, pal::TEXT_SECONDARY),
-        text(format!("{}（{}）", summary.name, summary.id))
-            .size(pal::fs_body())
-            .color(pal::TEXT_PRIMARY)
-            .font(bold()),
-        space().width(Length::Fill),
-        controls::btn(
-            "日志",
-            &controls::btn_sm(),
-            controls::Variant::Ghost,
-            Some(Message::Plugins(PluginsMsg::LogOpen(summary.id.clone()))),
-        ),
-        controls::icon_button(
-            "x",
-            14.0,
-            26.0,
-            controls::Variant::Ghost,
-            Some(Message::Plugins(PluginsMsg::DetailClose)),
-            Some((window, "关闭".into())),
-        ),
-    ]
-    .spacing(8)
-    .align_y(iced::alignment::Vertical::Center);
-
-    let mut rows: Vec<Element<'static, Message>> = Vec::new();
-    rows.push(
-        text(format!(
-            "版本 {} · 协议 apiVersion {} · 已提交界面 {} 次 · 未声明但实际使用的调用 {} 条",
-            summary.version, summary.api_version, summary.submits, summary.undeclared
-        ))
-        .size(pal::fs_caption())
-        .color(pal::TEXT_MUTED)
-        .into(),
+    let (status, status_color) = status_label(&summary.status);
+    let header = modal_title(
+        "puzzle",
+        summary.name.clone(),
+        summary.id.clone(),
+        Some((status, status_color)),
+        Message::Plugins(PluginsMsg::DetailClose),
+        window,
     );
+    let tabs = controls::segmented_tabs(
+        &[("overview", "概览"), ("log", "日志")],
+        match app.plugins_state.detail_tab {
+            DetailTab::Overview => "overview",
+            DetailTab::Log => "log",
+        },
+        |id| {
+            Message::Plugins(PluginsMsg::DetailTab(if id == "log" {
+                DetailTab::Log
+            } else {
+                DetailTab::Overview
+            }))
+        },
+    );
+    let body = match app.plugins_state.detail_tab {
+        DetailTab::Overview => detail_overview(app, summary),
+        DetailTab::Log => detail_log(app, summary),
+    };
+    let content = Column::new()
+        .spacing(10)
+        .padding(12.0)
+        .push(header)
+        .push(tabs)
+        .push(controls::h_divider_subtle())
+        .push(body);
+    modal_card(DETAIL_CARD_WIDTH, content.into(), Message::Plugins(PluginsMsg::DetailClose))
+}
 
+/// 概览页：键值概况 + 声明能力徽标 + 能力调用记录。
+fn detail_overview(app: &App, summary: &PluginSummary) -> Element<'static, Message> {
+    let mut rows: Vec<Element<'static, Message>> = vec![
+        meta_row("版本", summary.version.clone()),
+        meta_row("协议", format!("apiVersion {}", summary.api_version)),
+        meta_row("界面提交", format!("{} 次", summary.submits)),
+        meta_row("未声明调用", format!("{} 条", summary.undeclared)),
+    ];
     let mut flags: Vec<&str> = Vec::new();
     if summary.singleton {
         flags.push("单实例");
@@ -2613,41 +2713,42 @@ fn detail_modal(app: &App, window: iced::window::Id, summary: &PluginSummary) ->
         flags.push("切仓库保持挂载");
     }
     if !flags.is_empty() {
-        rows.push(
-            text(format!("声明：{}", flags.join(" · ")))
-                .size(pal::fs_caption())
-                .color(pal::TEXT_MUTED)
-                .into(),
-        );
+        rows.push(meta_row("运行声明", flags.join(" · ")));
     }
     if let Some(source) = &summary.source {
+        rows.push(meta_row("安装来源", source.clone()));
+    }
+
+    rows.push(section_head("声明能力", Some(summary.permissions.len())));
+    if summary.permissions.is_empty() {
         rows.push(
-            text(format!("安装来源：{source}"))
+            text("未声明任何能力")
                 .size(pal::fs_caption())
                 .color(pal::TEXT_MUTED)
                 .into(),
         );
-    }
-
-    let mut perms = row![
-        text("声明能力").size(pal::fs_caption()).color(pal::TEXT_SECONDARY),
-    ]
-    .spacing(6)
-    .align_y(iced::alignment::Vertical::Center);
-    if summary.permissions.is_empty() {
-        perms = perms.push(controls::badge("未声明", pal::BG_TERTIARY, pal::TEXT_MUTED));
     } else {
-        for permission in &summary.permissions {
-            perms = perms.push(controls::badge(permission_label(*permission), pal::BG_TERTIARY, pal::TEXT_SECONDARY));
+        for chunk in summary.permissions.chunks(5) {
+            let mut line = row![].spacing(6);
+            for permission in chunk {
+                line = line.push(controls::badge(
+                    permission_label(*permission),
+                    pal::BG_TERTIARY,
+                    pal::TEXT_SECONDARY,
+                ));
+            }
+            rows.push(line.into());
         }
     }
-    rows.push(perms.into());
 
-    // 调用记录条数不定：定高内滚动，避免长列表把模态撑出窗口
+    rows.push(section_head(
+        "能力调用记录",
+        Some(app.plugins_state.detail_audit.len()),
+    ));
     rows.push(
-        text("能力调用记录（未声明 = manifest 未声明但实际用到）")
+        text("未声明 = manifest 未声明但实际用到")
             .size(pal::fs_caption())
-            .color(pal::TEXT_SECONDARY)
+            .color(pal::TEXT_MUTED)
             .into(),
     );
     let mut audit = Column::new().spacing(4);
@@ -2660,22 +2761,23 @@ fn detail_modal(app: &App, window: iced::window::Id, summary: &PluginSummary) ->
     } else {
         for record in &app.plugins_state.detail_audit {
             let mut line = row![
-                text(format!(
-                    "{}  {}",
-                    layout_view::format_ts(record.at.saturating_mul(MS_PER_SEC) as i64),
-                    record.method
-                ))
-                .size(pal::fs_caption())
-                .color(pal::TEXT_SECONDARY),
+                text(layout_view::format_ts(record.at.saturating_mul(MS_PER_SEC) as i64))
+                    .size(pal::fs_caption())
+                    .color(pal::TEXT_MUTED)
+                    .font(mono()),
+                text(record.method.clone())
+                    .size(pal::fs_caption())
+                    .color(pal::TEXT_SECONDARY)
+                    .font(mono()),
             ]
-            .spacing(6)
+            .spacing(8)
             .align_y(iced::alignment::Vertical::Center);
             if !record.declared {
                 line = line.push(controls::badge("未声明", pal::BG_TERTIARY, pal::WARNING));
             }
             if !record.detail.is_empty() {
                 line = line.push(
-                    text(format!("（{}）", record.detail))
+                    text(record.detail.clone())
                         .size(pal::fs_caption())
                         .color(pal::TEXT_MUTED),
                 );
@@ -2683,22 +2785,245 @@ fn detail_modal(app: &App, window: iced::window::Id, summary: &PluginSummary) ->
             audit = audit.push(line);
         }
     }
-    rows.push(
-        scroll::v(audit)
-            .width(Length::Fill)
-            .height(Length::Fixed(DETAIL_AUDIT_MAX_H))
-            .into(),
-    );
+    rows.push(panel(
+        scroll::v(audit).width(Length::Fill).height(Length::Fill).into(),
+        DETAIL_AUDIT_MAX_H,
+    ));
+    Column::with_children(rows).spacing(6).into()
+}
 
-    let content = Column::with_children(
-        std::iter::once(header.into())
-            .chain(std::iter::once(controls::h_divider_subtle()))
-            .chain(rows)
-            .collect::<Vec<Element<'static, Message>>>(),
-    )
-    .spacing(10)
-    .padding(12.0);
-    modal_card(DETAIL_CARD_WIDTH, content.into(), Message::Plugins(PluginsMsg::DetailClose))
+/// 日志页：路径 + 刷新 / 清空 + 等宽日志面板。
+fn detail_log(app: &App, summary: &PluginSummary) -> Element<'static, Message> {
+    let has_log = app
+        .plugins_state
+        .log_text
+        .as_deref()
+        .is_some_and(|text| !text.trim().is_empty());
+    let mut actions = row![]
+        .spacing(6)
+        .align_y(iced::alignment::Vertical::Center)
+        .push(controls::btn(
+            "刷新",
+            &controls::btn_sm(),
+            controls::Variant::Ghost,
+            Some(Message::Plugins(PluginsMsg::LogRefresh)),
+        ));
+    actions = if app.plugins_state.log_clear_ask {
+        actions
+            .push(controls::btn(
+                "取消",
+                &controls::btn_sm(),
+                controls::Variant::Ghost,
+                Some(Message::Plugins(PluginsMsg::LogClearCancel)),
+            ))
+            .push(controls::btn(
+                "确认清空",
+                &controls::btn_sm(),
+                controls::Variant::Danger,
+                Some(Message::Plugins(PluginsMsg::LogClear(summary.id.clone()))),
+            ))
+    } else {
+        // 没有日志可清时不亮按钮：空点一下只会让人以为没反应
+        actions.push(controls::btn(
+            "清空",
+            &controls::btn_sm(),
+            controls::Variant::Ghost,
+            has_log.then_some(Message::Plugins(PluginsMsg::LogClearAsk)),
+        ))
+    };
+    let head = row![
+        text("运行日志")
+            .size(pal::fs_caption())
+            .color(pal::TEXT_SECONDARY),
+        space().width(Length::Fill),
+        actions,
+    ]
+    .spacing(8)
+    .align_y(iced::alignment::Vertical::Center);
+    let path = app.plugins.log_path(&summary.id).unwrap_or_default();
+    let body: Element<'static, Message> =
+        match (&app.plugins_state.log_error, &app.plugins_state.log_text) {
+            (Some(err), _) => controls::empty_state(
+                "triangle-alert",
+                "读取失败",
+                err.clone(),
+                Some(("重试".to_string(), Message::Plugins(PluginsMsg::LogRefresh))),
+            ),
+            (None, Some(lines)) if !lines.trim().is_empty() => scroll::v(
+                text(lines.clone())
+                    .size(pal::fs_caption())
+                    .color(pal::TEXT_SECONDARY)
+                    .font(mono()),
+            )
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into(),
+            (None, Some(_)) => controls::empty_state(
+                "file-text",
+                "暂无日志",
+                "插件 stderr、协议违规与生命周期失败会写在这里",
+                None,
+            ),
+            (None, None) => controls::empty_state("loader-circle", "读取中…", "正在读取日志尾部", None),
+        };
+    Column::new()
+        .spacing(8)
+        .push(head)
+        .push(log_path_row(&path))
+        .push(panel(body, LOG_PANEL_H))
+        .into()
+}
+
+/// 日志路径行：单行省略显示，点击复制完整路径（悬停有底色）。
+fn log_path_row(path: &str) -> Element<'static, Message> {
+    if path.is_empty() {
+        return text("日志文件未就绪")
+            .size(pal::fs_caption())
+            .color(pal::TEXT_MUTED)
+            .into();
+    }
+    let shown = elide_path(path, path_budget_em());
+    let label = row![
+        icon("copy", 12.0, pal::TEXT_MUTED),
+        text(shown)
+            .size(pal::fs_caption())
+            .color(pal::TEXT_MUTED)
+            .font(mono())
+            .wrapping(Wrapping::None),
+    ]
+    .spacing(6)
+    .align_y(iced::alignment::Vertical::Center);
+    button(label)
+        .padding(Padding::ZERO.horizontal(4.0).vertical(2.0))
+        .style(controls::row_style(false, pal::RADIUS_XS))
+        .on_press(Message::Plugins(PluginsMsg::CopyLogPath(path.to_string())))
+        .into()
+}
+
+/// 路径可用的单行宽度（em）：模态内宽扣掉左右内衬、复制图标与间距。
+fn path_budget_em() -> f32 {
+    (DETAIL_CARD_WIDTH - LOG_PATH_CHROME_W) / pal::fs_caption()
+}
+
+/// 路径单行省略：按估算字宽从中间收起，保留盘符附近前缀与文件名。
+/// 估算按等宽字推进（ASCII 约 0.62em、CJK 1em），与 UI 层比例字估宽不同源，勿混用。
+fn elide_path(path: &str, budget_em: f32) -> String {
+    let width = |ch: char| if ch.is_ascii() { 0.62 } else { 1.0 };
+    if path.chars().map(width).sum::<f32>() <= budget_em {
+        return path.to_string();
+    }
+    let head_budget = 8.0_f32.min(budget_em / 3.0);
+    let tail_budget = (budget_em - head_budget - 0.8).max(0.0);
+    let mut head = String::new();
+    let mut used = 0.0;
+    for ch in path.chars() {
+        let w = width(ch);
+        if used + w > head_budget {
+            break;
+        }
+        head.push(ch);
+        used += w;
+    }
+    // 两头预算之和小于总预算：若两段重叠即覆盖整串、宽度必不超预算，早已原样返回
+    let mut tail: Vec<char> = Vec::new();
+    let mut used = 0.0;
+    for ch in path.chars().rev() {
+        let w = width(ch);
+        if used + w > tail_budget {
+            break;
+        }
+        tail.push(ch);
+        used += w;
+    }
+    format!("{head}…{}", tail.into_iter().rev().collect::<String>())
+}
+
+/// 模态标题：图标 + 名称（副行 id）+ 可选状态徽标 + 关闭钮。
+fn modal_title(
+    icon_name: &str,
+    title: String,
+    subtitle: String,
+    status: Option<(&str, iced::Color)>,
+    close: Message,
+    window: iced::window::Id,
+) -> Element<'static, Message> {
+    let mut head = row![
+        icon(icon_name, 14.0, pal::TEXT_SECONDARY),
+        Column::new()
+            .spacing(2)
+            .push(
+                text(title)
+                    .size(pal::fs_body())
+                    .color(pal::TEXT_PRIMARY)
+                    .font(bold()),
+            )
+            .push(
+                text(subtitle)
+                    .size(pal::fs_caption())
+                    .color(pal::TEXT_MUTED),
+            ),
+    ]
+    .spacing(8)
+    .align_y(iced::alignment::Vertical::Center);
+    head = head.push(space().width(Length::Fill));
+    if let Some((label, color)) = status {
+        head = head.push(controls::badge(label, pal::BG_TERTIARY, color));
+    }
+    head.push(controls::icon_button(
+        "x",
+        14.0,
+        26.0,
+        controls::Variant::Ghost,
+        Some(close),
+        Some((window, "关闭".into())),
+    ))
+    .into()
+}
+
+/// 概况键值行：标签定宽，值紧跟其后。
+fn meta_row(label: &'static str, value: String) -> Element<'static, Message> {
+    row![
+        text(label)
+            .size(pal::fs_caption())
+            .color(pal::TEXT_MUTED)
+            .width(Length::Fixed(72.0)),
+        text(value)
+            .size(pal::fs_caption())
+            .color(pal::TEXT_SECONDARY),
+    ]
+    .spacing(8)
+    .into()
+}
+
+/// 模态内小节标题：标题 + 可选计数徽标。
+fn section_head(label: &'static str, count: Option<usize>) -> Element<'static, Message> {
+    let mut line = row![text(label)
+        .size(pal::fs_caption())
+        .color(pal::TEXT_SECONDARY)]
+    .spacing(6)
+    .align_y(iced::alignment::Vertical::Center);
+    if let Some(count) = count {
+        line = line.push(controls::badge(
+            count.to_string(),
+            pal::BG_TERTIARY,
+            pal::TEXT_MUTED,
+        ));
+    }
+    line.into()
+}
+
+/// 模态内下沉面板：固定高度，内容超出即内部滚动。
+fn panel(content: Element<'static, Message>, height: f32) -> Element<'static, Message> {
+    container(content)
+        .width(Length::Fill)
+        .height(Length::Fixed(height))
+        .padding(8)
+        .style(|_t| Style {
+            background: Some(pal::BG_SUNKEN.into()),
+            border: border::rounded(pal::RADIUS_SM).color(pal::BORDER).width(1.0),
+            ..Style::default()
+        })
+        .into()
 }
 
 /// 内置插件（进程内）详情模态：它提供的视图与服务；服务行可就地切换 / 回落提供者。
@@ -2716,62 +3041,39 @@ fn builtin_detail_modal(app: &App, window: iced::window::Id, id: &str) -> Elemen
         ]
         .into();
     };
-    let header = row![
-        icon(plugin.icon.as_ref(), 14.0, pal::TEXT_SECONDARY),
-        text(format!("{}（{}）", plugin.label, plugin.id))
-            .size(pal::fs_body())
-            .color(pal::TEXT_PRIMARY)
-            .font(bold()),
-        space().width(Length::Fill),
-        controls::icon_button(
-            "x",
-            14.0,
-            26.0,
-            controls::Variant::Ghost,
-            Some(Message::Plugins(PluginsMsg::BuiltinDetailClose)),
-            Some((window, "关闭".into())),
-        ),
-    ]
-    .spacing(8)
-    .align_y(iced::alignment::Vertical::Center);
-
-    let mut rows: Vec<Element<'static, Message>> = Vec::new();
-    rows.push(
-        text(if plugin.id == PLATFORM_PLUGIN {
-            "平台自救面：设置入口、通知、对话框与 query 服务一直取用，不可停用。"
-        } else {
-            "随应用分发：停用后其视图离开选择器、服务离开能力总线。"
-        })
-        .size(pal::fs_caption())
-        .color(pal::TEXT_MUTED)
-        .into(),
+    let header = modal_title(
+        plugin.icon.as_ref(),
+        plugin.label.clone(),
+        plugin.id.clone(),
+        None,
+        Message::Plugins(PluginsMsg::BuiltinDetailClose),
+        window,
     );
+
     let views: Vec<&Entry> = app
         .registry
         .all()
         .filter(|entry| entry.kind == EntryKind::View && entry.source.plugin_id() == plugin.id)
         .collect();
-    if !views.is_empty() {
-        rows.push(
-            text("提供的视图")
-                .size(pal::fs_caption())
-                .color(pal::TEXT_SECONDARY)
-                .into(),
-        );
-        rows.extend(views.into_iter().map(builtin_view_row));
-    }
     let services: Vec<&Entry> = app
         .registry
         .services()
         .filter(|entry| entry.source.plugin_id() == plugin.id)
         .collect();
+    let mut rows: Vec<Element<'static, Message>> = vec![text(if plugin.id == PLATFORM_PLUGIN {
+        "平台自救面：设置入口、通知、对话框与 query 服务一直取用，不可停用。"
+    } else {
+        "随应用分发：停用后其视图离开选择器、服务离开能力总线。"
+    })
+    .size(pal::fs_caption())
+    .color(pal::TEXT_MUTED)
+    .into()];
+    if !views.is_empty() {
+        rows.push(section_head("提供的视图", Some(views.len())));
+        rows.extend(views.into_iter().map(builtin_view_row));
+    }
     if !services.is_empty() {
-        rows.push(
-            text("提供的服务")
-                .size(pal::fs_caption())
-                .color(pal::TEXT_SECONDARY)
-                .into(),
-        );
+        rows.push(section_head("提供的服务", Some(services.len())));
         rows.extend(services.into_iter().map(service_row));
     }
 
@@ -2781,80 +3083,13 @@ fn builtin_detail_modal(app: &App, window: iced::window::Id, id: &str) -> Elemen
             .chain(rows)
             .collect::<Vec<Element<'static, Message>>>(),
     )
-    .spacing(10)
+    .spacing(8)
     .padding(12.0);
     modal_card(
-        DETAIL_CARD_WIDTH,
+        BUILTIN_CARD_WIDTH,
         content.into(),
         Message::Plugins(PluginsMsg::BuiltinDetailClose),
     )
-}
-
-/// 插件日志模态：插件 stderr、协议违规与生命周期失败（宿主没有控制台，这里是唯一可查处）。
-fn log_modal(app: &App, window: iced::window::Id, id: &str) -> Element<'static, Message> {
-    let title = app
-        .plugins_state
-        .list
-        .iter()
-        .find(|p| p.id == id)
-        .map(|p| p.name.clone())
-        .unwrap_or_else(|| id.to_string());
-    let header = row![
-        icon("file-text", 14.0, pal::TEXT_SECONDARY),
-        text(format!("{title} 日志"))
-            .size(pal::fs_body())
-            .color(pal::TEXT_PRIMARY)
-            .font(bold()),
-        space().width(Length::Fill),
-        controls::btn(
-            "刷新",
-            &controls::btn_sm(),
-            controls::Variant::Ghost,
-            Some(Message::Plugins(PluginsMsg::LogOpen(id.to_string()))),
-        ),
-        controls::icon_button(
-            "x",
-            14.0,
-            26.0,
-            controls::Variant::Ghost,
-            Some(Message::Plugins(PluginsMsg::LogClose)),
-            Some((window, "关闭".into())),
-        ),
-    ]
-    .spacing(8)
-    .align_y(iced::alignment::Vertical::Center);
-
-    let body: Element<'static, Message> = match &app.plugins_state.log_text {
-        Some(lines) if !lines.trim().is_empty() => scroll::v(
-            text(lines.clone())
-                .size(pal::fs_caption())
-                .color(pal::TEXT_SECONDARY),
-        )
-        .width(Length::Fill)
-        .height(Length::Fixed(LOG_MAX_H))
-        .into(),
-        Some(_) => text("暂无日志")
-            .size(pal::fs_caption())
-            .color(pal::TEXT_MUTED)
-            .into(),
-        None => text("读取中…")
-            .size(pal::fs_caption())
-            .color(pal::TEXT_MUTED)
-            .into(),
-    };
-
-    let content = Column::new()
-        .spacing(10)
-        .padding(12.0)
-        .push(header)
-        .push(controls::h_divider_subtle())
-        .push(
-            text(app.plugins.log_path(id).unwrap_or_default())
-                .size(pal::fs_caption())
-                .color(pal::TEXT_MUTED),
-        )
-        .push(body);
-    modal_card(LOG_CARD_WIDTH, content.into(), Message::Plugins(PluginsMsg::LogClose))
 }
 
 /// 市场安装确认模态（非官方插件；官方插件直接安装，不经此窗）。
@@ -2958,7 +3193,31 @@ fn permission_label(permission: Permission) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{remove_local, rename_local};
+    use super::{elide_path, remove_local, rename_local};
+
+    #[test]
+    fn elide_path_keeps_drive_and_file_name() {
+        let path = r"C:\Users\35264\AppData\Roaming\com.atelyx.desktop\plugins\com.atelyx.calendar\logs\runtime.log";
+        let shown = elide_path(path, 42.0);
+        assert!(shown.chars().count() < path.chars().count(), "{shown}");
+        assert!(shown.contains('…'), "{shown}");
+        assert!(shown.starts_with(r"C:\Users"), "{shown}");
+        assert!(shown.ends_with("runtime.log"), "{shown}");
+        assert_eq!(elide_path(r"C:\a.log", 42.0), r"C:\a.log", "放得下就原样显示");
+    }
+
+    #[test]
+    fn elide_path_does_not_repeat_cjk_middle() {
+        let path = r"C:\Users\张三\AppData\Roaming\com.atelyx.desktop\plugins\com.atelyx.calendar\logs\runtime.log";
+        let shown = elide_path(path, 42.0);
+        let (head, tail) = shown.split_once('…').expect("应省略中段");
+        assert!(path.starts_with(head) && path.ends_with(tail), "{shown}");
+        // 头的字符数加尾的字符数少于原路径：两头不重叠、不出重复片段
+        assert!(
+            head.chars().count() + tail.chars().count() < path.chars().count(),
+            "{shown}"
+        );
+    }
     use atelyx_core::vault::test_support::TempDir;
 
     fn write(root: &std::path::Path, rel: &str, content: &str) {

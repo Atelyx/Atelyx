@@ -160,7 +160,7 @@ fn crash_restarts_then_circuit_breaks() {
     assert_eq!(status, PluginStatus::CircuitBroken);
 
     // 崩溃过程落进插件日志（正式构建没有控制台，日志是唯一可查处）
-    let log = runtime.log_tail(&id);
+    let log = runtime.log_tail(&id).expect("读取日志应成功");
     assert!(log.contains("[进程] 意外退出"), "日志应含退出记录：{log}");
     assert!(log.contains("[熔断]"), "日志应含熔断记录：{log}");
 

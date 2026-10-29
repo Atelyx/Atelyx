@@ -1370,9 +1370,19 @@ impl PluginRuntime {
             .unwrap_or_default()
     }
 
-    /// 某插件日志的尾部（详情页展示；没有日志 = 空串）。
-    pub fn log_tail(&self, id: &str) -> String {
+    /// 某插件日志的尾部（详情页展示；没有日志 = 空串，读取失败返回原因）。
+    pub fn log_tail(&self, id: &str) -> Result<String, String> {
         log::tail(&layout::log_file(&self.root, id))
+    }
+
+    /// 清空某插件的运行日志（当前文件与轮转出的上一代）。
+    /// 实例在跑时经它的日志写端清：先关写端再删，避免删掉打开中的文件后它继续写进不可见句柄。
+    pub fn clear_log(&self, id: &str) -> Result<(), String> {
+        let instance = self.instances.lock().unwrap().get(id).cloned();
+        match instance {
+            Some(instance) => instance.clear_log(),
+            None => log::clear_file(&layout::log_file(&self.root, id)),
+        }
     }
 
     /// 某插件日志文件的路径（设置页展示位置；未安装 = `None`）。

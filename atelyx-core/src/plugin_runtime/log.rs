@@ -39,6 +39,14 @@ impl LogSink {
         self.state.lock().unwrap().file = None;
     }
 
+    /// 清空日志：先关写端再删文件（Windows 上打开中的文件删不掉），下次写入重建。
+    pub(crate) fn clear(&self) -> Result<(), String> {
+        let mut state = self.state.lock().unwrap();
+        state.file = None;
+        state.written = 0;
+        clear_file(&self.path)
+    }
+
     /// 追加一行（自动补本地时间戳与换行）。尾部空白由写端归一，插件原样输出里的换行按行拆开。
     pub(crate) fn line(&self, text: &str) {
         let text = text.trim_end();
@@ -82,25 +90,51 @@ fn open(path: &Path) -> Option<File> {
 
 /// 轮转：当前文件改名 `.1`（覆盖上一代），失败也继续写新文件——日志写不进去不影响插件运行。
 fn rotate(path: &Path) {
-    let backup = path.with_file_name(format!("{}.1", super::layout::LOG_FILE));
+    let backup = backup_path(path);
     let _ = std::fs::remove_file(&backup);
     let _ = std::fs::rename(path, &backup);
 }
 
-/// 读日志末尾（最多 [`TAIL_BYTES`]，从完整行起算，超长单行截断）。无日志 = 空串。
-pub(crate) fn tail(path: &Path) -> String {
-    let Ok(mut file) = File::open(path) else {
-        return String::new();
+/// 上一代日志路径（轮转出的 `.1`）。
+fn backup_path(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(super::layout::LOG_FILE);
+    path.with_file_name(format!("{name}.1"))
+}
+
+/// 删除日志文件与上一代（写端不在场的清空路径；不存在视为已清空，其余失败逐个汇报）。
+pub(crate) fn clear_file(path: &Path) -> Result<(), String> {
+    let mut failed: Vec<String> = Vec::new();
+    for target in [path.to_path_buf(), backup_path(path)] {
+        match std::fs::remove_file(&target) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => failed.push(format!("{}：{e}", target.display())),
+        }
+    }
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("无法删除（{}）", failed.join("；")))
+    }
+}
+
+/// 读日志末尾（最多 [`TAIL_BYTES`]，从完整行起算，超长单行截断）。无日志 = 空串，读取失败返回原因。
+pub(crate) fn tail(path: &Path) -> Result<String, String> {
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(String::new()),
+        Err(e) => return Err(format!("打开日志失败：{e}")),
     };
     let len = file.metadata().map(|m| m.len()).unwrap_or(0);
     let start = len.saturating_sub(TAIL_BYTES);
-    if file.seek(SeekFrom::Start(start)).is_err() {
-        return String::new();
-    }
+    file.seek(SeekFrom::Start(start))
+        .map_err(|e| format!("定位日志失败：{e}"))?;
     let mut raw = Vec::new();
-    if file.read_to_end(&mut raw).is_err() {
-        return String::new();
-    }
+    file.read_to_end(&mut raw)
+        .map_err(|e| format!("读取日志失败：{e}"))?;
     let text = String::from_utf8_lossy(&raw);
     // 从中间截取时首行可能是半行：丢掉它（该行上半截已不可读，展示半行只会误导）
     let text = if start == 0 {
@@ -108,10 +142,11 @@ pub(crate) fn tail(path: &Path) -> String {
     } else {
         text.split_once('\n').map(|(_, rest)| rest).unwrap_or_default()
     };
-    text.lines()
+    Ok(text
+        .lines()
         .map(truncate_line)
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("\n"))
 }
 
 fn truncate_line(line: &str) -> String {
@@ -155,11 +190,11 @@ mod tests {
         let sink = LogSink::new(path.clone());
         sink.line("[stderr] 第一行\n");
         sink.line("第二行");
-        let text = tail(&path);
+        let text = tail(&path).unwrap();
         assert!(text.contains("[stderr] 第一行"), "{text}");
         assert!(text.contains("第二行"), "{text}");
         // 空行不写、无日志文件读取为空串
-        assert_eq!(tail(&tmp.join("missing.log")), "");
+        assert_eq!(tail(&tmp.join("missing.log")).unwrap(), "");
     }
 
     #[test]
@@ -183,9 +218,26 @@ mod tests {
         let path = tmp.join("runtime.log");
         let sink = LogSink::new(path.clone());
         sink.line(&"y".repeat(MAX_LINE_CHARS + 100));
-        let text = tail(&path);
+        let text = tail(&path).unwrap();
         assert!(text.ends_with('…'), "超长行应截断：{text}");
         // 时间戳前缀计入行宽：整行（含省略号）等于展示上限 + 1
         assert_eq!(text.chars().count(), MAX_LINE_CHARS + 1);
+    }
+
+    #[test]
+    fn clear_drops_current_and_rotated_then_writes_fresh() {
+        let tmp = TempDir::new("plugin-log-clear");
+        let path = tmp.join("logs").join("runtime.log");
+        let sink = LogSink::new(path.clone());
+        sink.line("第一行");
+        let backup = backup_path(&path);
+        std::fs::write(&backup, "上一代\n").unwrap();
+        sink.clear().unwrap();
+        assert!(!path.exists(), "清空后当前文件应删除");
+        assert!(!backup.exists(), "上一代也应删除");
+        // 写端已关，下一次写入重建空文件；清空不误删后续内容
+        sink.line("第二行");
+        let text = tail(&path).unwrap();
+        assert!(text.contains("第二行") && !text.contains("第一行"), "{text}");
     }
 }

@@ -242,6 +242,11 @@ impl Instance {
         self.log.line(&format!("[宿主] {text}"));
     }
 
+    /// 清空本插件日志（当前文件与轮转出的上一代）；写端由日志自己关闭后重建。
+    pub(crate) fn clear_log(&self) -> Result<(), String> {
+        self.log.clear()
+    }
+
     /// 本会话声明的默认布局（未声明 = `None`）。
     pub(crate) fn default_layout(&self) -> Option<(String, LayoutSpecNode)> {
         self.default_layout.lock().unwrap().clone()
