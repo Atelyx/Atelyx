@@ -128,24 +128,18 @@ fn draw_grid(canvas: &mut Canvas<'_, '_>, grid: &Grid) {
         );
         let selected = days == grid.selected;
         let today = days == grid.today;
-        let fill = if selected {
-            Some(token(ColorToken::AccentSoft))
-        } else if canvas.hovered(&id) {
-            Some(token(ColorToken::Hover))
-        } else {
-            None
-        };
-        let stroke = today.then(|| token(ColorToken::Accent));
-        canvas.draw(DrawCommand::Rect {
-            x: cell.x,
-            y: cell.y,
-            w: cell.w,
-            h: cell.h,
-            fill,
-            stroke,
-            stroke_width: stroke.map(|_| 1.0),
-            corner_radius: Some(4.0),
-        });
+        if let Some(paint) = cell_paint(selected, canvas.hovered(&id), today) {
+            canvas.draw(DrawCommand::Rect {
+                x: cell.x,
+                y: cell.y,
+                w: cell.w,
+                h: cell.h,
+                fill: paint.fill,
+                stroke: paint.stroke,
+                stroke_width: paint.stroke.map(|_| 1.0),
+                corner_radius: Some(4.0),
+            });
+        }
         let number = day.to_string();
         let (_, number_h) = canvas.measure(&number, grid.micro);
         let number_color = if selected || today { token(ColorToken::Accent) } else { token(ColorToken::Text) };
@@ -207,9 +201,35 @@ fn token(name: ColorToken) -> PaintColor {
     PaintColor::Token { name }
 }
 
+/// 日格矩形的底色与描边；三者都没有时不画——协议要求 `fill` 与 `stroke` 至少声明其一。
+struct CellPaint {
+    fill: Option<PaintColor>,
+    stroke: Option<PaintColor>,
+}
+
+fn cell_paint(selected: bool, hovered: bool, today: bool) -> Option<CellPaint> {
+    let fill = if selected {
+        Some(token(ColorToken::AccentSoft))
+    } else if hovered {
+        Some(token(ColorToken::Hover))
+    } else {
+        None
+    };
+    let stroke = today.then(|| token(ColorToken::Accent));
+    (fill.is_some() || stroke.is_some()).then_some(CellPaint { fill, stroke })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quiet_day_cells_emit_no_rect() {
+        assert!(cell_paint(false, false, false).is_none(), "无选中 / 悬停 / 今天时不画矩形");
+        assert!(cell_paint(true, false, false).is_some());
+        assert!(cell_paint(false, true, false).is_some());
+        assert!(cell_paint(false, false, true).is_some(), "今天只有描边也要画");
+    }
 
     #[test]
     fn colors_parse_only_hex_literals() {
