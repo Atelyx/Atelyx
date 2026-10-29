@@ -50,11 +50,14 @@ struct Layout {
     height: f32,
 }
 
+/// 排版缓存键：内容指纹 + 宽度位型 + 量算代次。
+type CacheKey = (u64, u32, u64);
+
 /// 跨帧排版缓存：同一段 Markdown 在滚动时按宽度反复重排是纯浪费——
 /// 长 README 每帧重排整段会把滚动拖成个位数帧率。键含量算代次，真实字宽一落地即重排。
 /// 用 `Mutex` 而非 `RefCell`：`FrameUi` 要能跨线程持有（插件在异步任务里驱动出帧）。
 pub(crate) struct LayoutCache {
-    entries: Mutex<Vec<((u64, u32, u64), Arc<Layout>)>>,
+    entries: Mutex<Vec<(CacheKey, Arc<Layout>)>>,
 }
 
 /// 缓存条数上限：一段内容在不同宽度（含滚动条占位前后）各留几份即可。
@@ -67,7 +70,7 @@ impl Default for LayoutCache {
 }
 
 impl LayoutCache {
-    fn hit(&self, key: (u64, u32, u64)) -> Option<Arc<Layout>> {
+    fn hit(&self, key: CacheKey) -> Option<Arc<Layout>> {
         let mut entries = self.entries.lock().unwrap();
         let index = entries.iter().position(|(entry, _)| *entry == key)?;
         let found = entries.remove(index);
@@ -76,7 +79,7 @@ impl LayoutCache {
         Some(layout)
     }
 
-    fn store(&self, key: (u64, u32, u64), layout: Arc<Layout>) {
+    fn store(&self, key: CacheKey, layout: Arc<Layout>) {
         let mut entries = self.entries.lock().unwrap();
         entries.insert(0, (key, layout));
         entries.truncate(MAX_LAYOUTS);

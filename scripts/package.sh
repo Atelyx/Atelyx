@@ -8,6 +8,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 dist="$repo_root/target/dist"
+presets_stage="$repo_root/target/preset-plugins"
 notices="$repo_root/docs/THIRD_PARTY_NOTICES.md"
 icon="$repo_root/atelyx-app/assets/icons/icon.ico"
 nsi="$repo_root/distribution/nsis/installer.nsi"
@@ -51,6 +52,7 @@ package_windows() {
     -DLICENSE="$(win_path "$repo_root/LICENSE")" \
     -DNOTICES="$(win_path "$notices")" \
     -DICON="$(win_path "$icon")" \
+    -DPRESETS="$(win_path "$presets_stage")" \
     -DOUTFILE="$(win_path "$dist/Atelyx_${version}_x64-setup.exe")" \
     "$(win_path "$nsi")" >"$log"; then
     echo "错误：makensis 编译失败，日志尾部：" >&2
@@ -72,6 +74,11 @@ stage_payload() {
   install -Dm644 "$icons/64x64.png" "$stage/usr/share/icons/hicolor/64x64/apps/atelyx.png"
   install -Dm644 "$icons/128x128.png" "$stage/usr/share/icons/hicolor/128x128/apps/atelyx.png"
   install -Dm644 "$icons/128x128@2x.png" "$stage/usr/share/icons/hicolor/256x256/apps/atelyx.png"
+  # 预置插件落 usr/lib/atelyx/preset-plugins（应用按 exe 相对路径 ../lib/atelyx/preset-plugins 查找）
+  if [ -d "$presets_stage" ]; then
+    mkdir -p "$stage/usr/lib/atelyx/preset-plugins"
+    cp -R "$presets_stage/." "$stage/usr/lib/atelyx/preset-plugins/"
+  fi
 }
 
 package_deb() {
@@ -138,6 +145,10 @@ package_linux() {
 mkdir -p "$dist"
 echo "==> cargo build -p atelyx-app --release（版本 $version）"
 cargo build -p atelyx-app --release
+
+rm -rf "$presets_stage"
+echo "==> bash scripts/build-plugins.sh（预置插件）"
+bash "$repo_root/scripts/build-plugins.sh" "$presets_stage" release
 
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN*) package_windows ;;

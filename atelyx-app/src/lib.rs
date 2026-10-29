@@ -67,7 +67,7 @@ use atelyx_core::layout::{
 };
 use atelyx_core::markdown::{LinkForm, MarkdownDocument};
 use atelyx_core::plugin_runtime::{
-    FileChangeKind, PluginEvent, PluginRuntime, PluginStatus, SurfaceKind,
+    EditorSelection, FileChangeKind, PluginEvent, PluginRuntime, PluginStatus, SurfaceKind,
 };
 use atelyx_core::vault;
 use atelyx_core::vault_refs;
@@ -298,6 +298,15 @@ fn app_data_dir() -> Option<PathBuf> {
 /// ui-state.json 落盘路径（应用级 UI 状态）。
 fn ui_state_path() -> Option<PathBuf> {
     app_data_dir().map(|d| d.join("ui-state.json"))
+}
+
+/// 发行包内的预置插件目录：Windows 安装目录下 `preset-plugins/`，Linux 安装布局在
+/// `<exe>/../lib/atelyx/preset-plugins`。取第一个存在的。
+fn bundled_presets_dir() -> Option<PathBuf> {
+    let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    [exe_dir.join("preset-plugins"), exe_dir.join("../lib/atelyx/preset-plugins")]
+        .into_iter()
+        .find(|dir| dir.is_dir())
 }
 
 /// global.json 落盘路径（应用级全局配置：最近仓库列表）。
@@ -1876,9 +1885,27 @@ impl App {
                     .insert(root.clone(), app.ui.file_explorer_expanded.clone());
             }
         }
+        // 随包预置插件：发行包内的预置目录补进用户插件根（首装启用、随包升级，用户卸过的不装回）。
+        // 这里只补内容，启动交给随后的 scan + start_enabled
+        if let Some(data) = app_data_dir() {
+            if let Some(bundled) = bundled_presets_dir() {
+                match app.plugins.sync_presets(&bundled, &data.join("preset-plugins.json")) {
+                    Ok(report) => {
+                        for (id, reason) in report.failed {
+                            app.notify(NoticeLevel::Warning, format!("预置插件 {id} 同步失败：{reason}"));
+                        }
+                    }
+                    Err(e) => app.notify(NoticeLevel::Warning, format!("预置插件同步失败：{e}")),
+                }
+            }
+        }
         // 插件运行时：扫描已安装清单并启动已启用插件；布局里现存的插件面就绪即通知
         app.plugins.scan();
         app.plugins.start_enabled();
+        // 内置插件的停用态要落到能力总线：停用插件的内置服务不进目录（外部候选可接手）
+        for plugin in app.ui.disabled_plugins.clone() {
+            app.plugins.set_builtin_owner_enabled(&plugin, false);
+        }
         plugin_actions::sync_surfaces(&mut app);
         plugin_actions::rebuild_registry(&mut app);
         boot = boot.chain(plugin_actions::refresh_projection(&mut app));
@@ -6862,6 +6889,35 @@ impl App {
         self.edit.caret = a + text.len();
         self.edit.anchor = self.edit.caret;
         self.after_edit();
+    }
+
+    /// 插件视角的当前选区：偏移相对正文（frontmatter 之后）。阅读态与未打开笔记都回空选区。
+    pub(crate) fn editor_selection(&self) -> EditorSelection {
+        let path = self.ui.last_note_file.clone();
+        if self.note_mode != NoteMode::Edit {
+            return EditorSelection::empty(path);
+        }
+        let body = self.edit_body();
+        let (from, to) = self.edit.selection();
+        let from = from.min(body.len());
+        let to = to.min(body.len()).max(from);
+        EditorSelection { path, text: body[from..to].to_string(), from, to }
+    }
+
+    /// 插件替换当前选区（空串 = 删除选区）。走与键入同一出口：撤销栈、置脏与自动保存期限一致。
+    pub(crate) fn editor_replace_selection(&mut self, text: String) -> Result<(), String> {
+        if self.ui.last_note_file.is_none() {
+            return Err("未打开笔记".to_string());
+        }
+        if self.note_mode != NoteMode::Edit {
+            return Err("笔记不在编辑状态".to_string());
+        }
+        if text.is_empty() {
+            self.delete_selection();
+        } else {
+            self.edit_insert(text);
+        }
+        Ok(())
     }
 
     /// 退格：先删选区；否则空列表项整段标记；再否则删前一个字符。

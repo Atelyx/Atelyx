@@ -580,6 +580,35 @@ impl Context {
         self.call_unit(method::table::SET_CELL_IMAGE, &params).await
     }
 
+    // ---------- calendar / history（当前仓库的日程与活动密度） ----------
+
+    /// 读当前仓库的日程（按日期升序）。
+    pub async fn calendar_list(&self) -> Result<Vec<CalendarItem>, RpcError> {
+        let result: CalendarListResult = self.call_null(method::calendar::LIST).await?;
+        Ok(result.items)
+    }
+
+    /// 新增一条日程：`id` / `createdAt` 由宿主补齐，回执是补齐后的条目（未给 `color` 按强调色显示）。
+    pub async fn calendar_add(&self, params: &CalendarAddParams) -> Result<CalendarItem, RpcError> {
+        self.call_typed(method::calendar::ADD, params).await
+    }
+
+    /// 改写一条日程（只改给出的字段；`note` 给空串 = 清空备注）。
+    pub async fn calendar_update(&self, params: &CalendarUpdateParams) -> Result<(), RpcError> {
+        self.call_unit(method::calendar::UPDATE, params).await
+    }
+
+    /// 删除一条日程（不存在报可读错误）。
+    pub async fn calendar_remove(&self, id: &str) -> Result<(), RpcError> {
+        self.call_unit(method::calendar::REMOVE, &CalendarIdParams { id: id.into() }).await
+    }
+
+    /// 按天聚合的仓库活动（新建 / 修改 / 删除的文件计数），按天升序。
+    pub async fn history_activity(&self) -> Result<Vec<DayActivity>, RpcError> {
+        let result: HistoryActivityResult = self.call_null(method::history::ACTIVITY).await?;
+        Ok(result.days)
+    }
+
     // ---------- process ----------
 
     pub async fn spawn(

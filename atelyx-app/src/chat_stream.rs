@@ -48,6 +48,8 @@ pub struct StreamCtx<'a> {
     pub scale: f32,
     /// 消息操作按钮行钩子（None = 只读流）。
     pub actions: Option<ActionsHook<'a>>,
+    /// markdown 解析能力是否可用：笔记插件停用后正文回落纯文本（渲染只用得到内置实现）。
+    pub markdown: bool,
     /// 流式中的消息 id（None = 无流式态；画布只读流恒 None）。
     pub streaming_id: Option<&'a str>,
     /// 折叠块开合的消息路由。
@@ -546,7 +548,8 @@ fn doc_by_key<'a>(
     static EMPTY_IMAGES: std::sync::OnceLock<crate::markdown_view::ImageHandles> =
         std::sync::OnceLock::new();
     let images = EMPTY_IMAGES.get_or_init(std::collections::HashMap::new);
-    match ctx.docs.get(&key) {
+    let doc = ctx.markdown.then(|| ctx.docs.get(&key)).flatten();
+    match doc {
         Some(doc) if ctx.selectable => crate::markdown_view::document_body_select(
             doc,
             ctx.theme,

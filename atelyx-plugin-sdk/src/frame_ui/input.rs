@@ -2,6 +2,7 @@
 
 use atelyx_plugin_protocol::frame::FrameInput;
 use atelyx_plugin_protocol::frame::{Key, Modifiers, MouseButton, NamedKey};
+use atelyx_plugin_protocol::method::MAX_MEASURE_ITEMS;
 
 use super::geom::Rect;
 use super::model::{FontSpec, InputState, Layout, Press, UiState};
@@ -30,12 +31,26 @@ pub(crate) async fn handle(
         }
         FrameInput::PointerUp { hit, .. } => pointer_up(state, hit.as_deref(), &mut events),
         FrameInput::DoubleClick { x, y, button, hit, .. } => {
-            pointer_down(state, ctx, *x, *y, *button, hit.as_deref(), &value_of, &mut events).await;
-            if let Some(id) = hit.as_deref().filter(|id| matches!(state.layouts.get(*id), Some(Layout::Input { .. }))) {
-                if let Some(value) = value_of(id) {
-                    let item = state.inputs.entry(id.to_string()).or_default();
-                    item.caret = value.len();
-                    item.anchor = 0;
+            if *button == MouseButton::Right {
+                // 右键双击按一次右键处理：不改焦点与按下态
+                if let Some(id) = hit.as_deref() {
+                    events.push(UiEvent::RightClick { id: id.to_string() });
+                }
+            } else {
+                pointer_down(state, ctx, *x, *y, *button, hit.as_deref(), &value_of, &mut events).await;
+                if let Some(id) = hit
+                    .as_deref()
+                    .filter(|id| matches!(state.layouts.get(*id), Some(Layout::Input { .. } | Layout::TextArea { .. })))
+                {
+                    if let Some(value) = value_of(id) {
+                        let item = state.inputs.entry(id.to_string()).or_default();
+                        item.caret = value.len();
+                        item.anchor = 0;
+                    }
+                }
+                // 双击先按一次按下处理（聚焦 / 置按下态），再单独上报
+                if let Some(id) = hit.as_deref() {
+                    events.push(UiEvent::DoubleClick { id: id.to_string() });
                 }
             }
         }
@@ -121,6 +136,16 @@ async fn pointer_down(
             item.preedit.clear();
             state.press = Some(Press { id: id.to_string(), from_input: true });
         }
+        Layout::TextArea { inner, font, value: shown, .. } => {
+            // 可视首行取决于落点前的光标所在行：先按旧光标换算，再改光标与焦点
+            let current = value_of(id).unwrap_or(shown);
+            let was_focused = state.focus.as_deref() == Some(id);
+            let old = state.inputs.get(id).map(|item| item.caret).unwrap_or(0);
+            let caret = area_caret_at(state, ctx, inner, font, &current, x, y, old, was_focused).await;
+            state.inputs.insert(id.to_string(), InputState { caret, anchor: caret, preedit: String::new() });
+            set_focus(state, Some(id.to_string()), value_of, events);
+            state.press = Some(Press { id: id.to_string(), from_input: true });
+        }
         Layout::Select { .. } => {
             set_focus(state, Some(id.to_string()), value_of, events);
             let select = state.selects.entry(id.to_string()).or_default();
@@ -132,7 +157,7 @@ async fn pointer_down(
             set_focus(state, Some(id.to_string()), value_of, events);
             state.press = Some(Press { id: id.to_string(), from_input: false });
         }
-        Layout::Button | Layout::Option { .. } => {
+        Layout::Button | Layout::Option { .. } | Layout::Custom => {
             state.press = Some(Press { id: id.to_string(), from_input: false });
         }
         Layout::Scroll { .. } => state.press = None,
@@ -161,7 +186,7 @@ fn pointer_up(state: &mut UiState, hit: Option<&str>, events: &mut Vec<UiEvent>)
         Nothing,
     }
     let outcome = match state.layouts.get(&press.id) {
-        Some(Layout::Button) | Some(Layout::Checkbox) => Outcome::Click,
+        Some(Layout::Button) | Some(Layout::Checkbox) | Some(Layout::Custom) => Outcome::Click,
         Some(Layout::Option { select, index, .. }) => Outcome::Select { select: select.clone(), index: *index },
         _ => Outcome::Nothing,
     };
@@ -205,11 +230,21 @@ async fn pointer_move(
     if hit != Some(press.id.as_str()) {
         return;
     }
-    let Some(Layout::Input { inner, font, value: shown, .. }) = state.layouts.get(&press.id).cloned() else {
+    let Some(layout) = state.layouts.get(&press.id).cloned() else {
         return;
     };
-    let current = value_of(&press.id).unwrap_or(shown);
-    let caret = caret_at(state, ctx, inner, font, &current, x).await;
+    let caret = match layout {
+        Layout::Input { inner, font, value: shown } => {
+            let current = value_of(&press.id).unwrap_or(shown);
+            caret_at(state, ctx, inner, font, &current, x).await
+        }
+        Layout::TextArea { inner, font, value: shown, .. } => {
+            let current = value_of(&press.id).unwrap_or(shown);
+            let old = state.inputs.get(&press.id).map(|item| item.caret).unwrap_or(0);
+            area_caret_at(state, ctx, inner, font, &current, x, y, old, true).await
+        }
+        _ => return,
+    };
     if let Some(item) = state.inputs.get_mut(&press.id) {
         item.caret = caret;
     }
@@ -271,7 +306,7 @@ async fn key_press(
                     select.open = false;
                 }
             }
-            Layout::Input { .. } => {
+            Layout::Input { .. } | Layout::TextArea { .. } => {
                 if let Some(item) = state.inputs.get_mut(&id) {
                     item.preedit.clear();
                 }
@@ -281,10 +316,18 @@ async fn key_press(
         }
         return;
     }
-    // 单行输入的回车是「提交」而非编辑：值由插件回读，语义（检索 / 写回设置）由插件定
-    if matches!(key, Key::Named { name: NamedKey::Enter }) && matches!(layout, Layout::Input { .. }) {
-        events.push(UiEvent::Submit { id });
-        return;
+    // 单行输入的回车是「提交」而非编辑：值由插件回读，语义（检索 / 写回设置）由插件定。
+    // 多行输入只有声明了回车提交才有此语义，Shift+回车仍是换行。
+    if matches!(key, Key::Named { name: NamedKey::Enter }) {
+        let submits = match &layout {
+            Layout::Input { .. } => true,
+            Layout::TextArea { enter_submits, .. } => *enter_submits && !modifiers.shift,
+            _ => false,
+        };
+        if submits {
+            events.push(UiEvent::Submit { id });
+            return;
+        }
     }
     match layout {
         Layout::Select { options, .. } => select_key(state, &id, options, key, events),
@@ -293,7 +336,10 @@ async fn key_press(
                 events.push(UiEvent::Click { id });
             }
         }
-        Layout::Input { .. } => edit_key(state, ctx, &id, key, modifiers, text, value_of, events).await,
+        Layout::Input { .. } => edit_key(state, ctx, &id, key, modifiers, text, value_of, events, None).await,
+        Layout::TextArea { inner, font, .. } => {
+            edit_key(state, ctx, &id, key, modifiers, text, value_of, events, Some((inner, font))).await
+        }
         _ => {}
     }
 }
@@ -352,6 +398,7 @@ async fn edit_key(
     text: Option<&str>,
     value_of: &impl Fn(&str) -> Option<String>,
     events: &mut Vec<UiEvent>,
+    area: Option<(Rect, FontSpec)>,
 ) {
     let Some(current) = current_value(state, id, value_of) else {
         return;
@@ -392,11 +439,25 @@ async fn edit_key(
         }
         return;
     }
+    if let Some((inner, font)) = area {
+        // 多行的上下键与行首尾按可视行走：按整篇首尾跳会跨过一整段
+        if let Key::Named { name: NamedKey::ArrowUp | NamedKey::ArrowDown } = key {
+            let up = matches!(key, Key::Named { name: NamedKey::ArrowUp });
+            move_vertical(state, ctx, id, &current, inner, font, up, modifiers.shift).await;
+            return;
+        }
+        if let Key::Named { name: NamedKey::Home | NamedKey::End } = key {
+            let end = matches!(key, Key::Named { name: NamedKey::End });
+            move_line_edge(state, ctx, id, &current, inner, font, end, modifiers.shift).await;
+            return;
+        }
+    }
     let edit = match key {
         Key::Character { .. } => text.map(|text| Edit::Insert(text.to_string())),
         Key::Named { name } => match name {
             NamedKey::Backspace => Some(Edit::Backspace),
             NamedKey::Delete => Some(Edit::Delete),
+            NamedKey::Enter => area.map(|_| Edit::Insert("\n".to_string())),
             NamedKey::ArrowLeft => Some(Edit::Left { extend: modifiers.shift }),
             NamedKey::ArrowRight => Some(Edit::Right { extend: modifiers.shift }),
             NamedKey::Home => Some(Edit::Home { extend: modifiers.shift }),
@@ -422,7 +483,7 @@ fn ime_text(
     let Some(id) = state.focus.clone() else {
         return;
     };
-    if !matches!(state.layouts.get(&id), Some(Layout::Input { .. })) {
+    if !matches!(state.layouts.get(&id), Some(Layout::Input { .. } | Layout::TextArea { .. })) {
         return;
     }
     if composing {
@@ -551,7 +612,7 @@ fn current_value(state: &UiState, id: &str, value_of: &impl Fn(&str) -> Option<S
         return Some(value);
     }
     match state.layouts.get(id) {
-        Some(Layout::Input { value, .. }) => Some(value.clone()),
+        Some(Layout::Input { value, .. } | Layout::TextArea { value, .. }) => Some(value.clone()),
         _ => None,
     }
 }
@@ -564,6 +625,24 @@ fn selection(value: &str, state: Option<&InputState>) -> Option<(usize, usize)> 
     (caret != anchor).then(|| (caret.min(anchor), caret.max(anchor)))
 }
 
+/// 先把值按可用宽度排一遍，补齐缺的量算：光标落点与选区延伸要按真实字宽换算。
+async fn refill(state: &mut UiState, ctx: &Context, value: &str, font: FontSpec, width: f32) {
+    text::lines(&mut state.metrics, value, font, width);
+    if !state.metrics.has_misses() {
+        return;
+    }
+    let misses = state.metrics.take_misses();
+    for chunk in misses.chunks(MAX_MEASURE_ITEMS) {
+        match ctx.measure_batch(chunk.to_vec()).await {
+            Ok(result) => state.metrics.apply(chunk, &result.sizes),
+            Err(err) => {
+                eprintln!("量算失败，按估算字宽落光标：{err}");
+                break;
+            }
+        }
+    }
+}
+
 async fn caret_at(
     state: &mut UiState,
     ctx: &Context,
@@ -572,17 +651,8 @@ async fn caret_at(
     value: &str,
     x: f32,
 ) -> usize {
-    let mut widths = text::prefix_widths(&mut state.metrics, value, font);
-    if state.metrics.has_misses() {
-        let misses = state.metrics.take_misses();
-        match ctx.measure_batch(misses.clone()).await {
-            Ok(result) => {
-                state.metrics.apply(&misses, &result.sizes);
-                widths = text::prefix_widths(&mut state.metrics, value, font);
-            }
-            Err(err) => eprintln!("量算失败，按估算字宽落光标：{err}"),
-        }
-    }
+    refill(state, ctx, value, font, inner.w).await;
+    let widths = text::prefix_widths(&mut state.metrics, value, font);
     let points = text::boundaries(value);
     let target = (x - inner.x).max(0.0);
     let mut best = 0usize;
@@ -592,6 +662,94 @@ async fn caret_at(
         }
     }
     points[best]
+}
+
+/// 多行输入的落点换算：`focused` 决定纵向平移量（未聚焦时画面停在前几行）。
+#[allow(clippy::too_many_arguments)]
+async fn area_caret_at(
+    state: &mut UiState,
+    ctx: &Context,
+    inner: Rect,
+    font: FontSpec,
+    value: &str,
+    x: f32,
+    y: f32,
+    old_caret: usize,
+    focused: bool,
+) -> usize {
+    refill(state, ctx, value, font, inner.w).await;
+    let lines = text::lines(&mut state.metrics, value, font, inner.w);
+    let line_height = state.metrics.measure("", font, None).height.max(1.0);
+    let top = if focused {
+        text::top_line(text::line_of(&lines, text::snap(value, old_caret)), line_height, inner.h)
+    } else {
+        0
+    };
+    let row = ((y - inner.y).max(0.0) / line_height) as usize;
+    let line = lines[(top + row).min(lines.len().saturating_sub(1))];
+    let offset = text::caret_at_x(&mut state.metrics, &value[line.start..line.end], font, (x - inner.x).max(0.0));
+    line.start + offset
+}
+
+/// 上下键跨可视行移动：保持横向落点，首行再上移到文首、末行再下移到文末。
+#[allow(clippy::too_many_arguments)]
+async fn move_vertical(
+    state: &mut UiState,
+    ctx: &Context,
+    id: &str,
+    value: &str,
+    inner: Rect,
+    font: FontSpec,
+    up: bool,
+    extend: bool,
+) {
+    refill(state, ctx, value, font, inner.w).await;
+    let lines = text::lines(&mut state.metrics, value, font, inner.w);
+    let item = state.inputs.entry(id.to_string()).or_default();
+    let caret = text::snap(value, item.caret);
+    let index = text::line_of(&lines, caret);
+    let line = lines[index];
+    let x = text::offset_in_line(&mut state.metrics, &value[line.start..line.end], font, caret.saturating_sub(line.start));
+    let target = if up {
+        index.checked_sub(1)
+    } else {
+        (index + 1 < lines.len()).then_some(index + 1)
+    };
+    let Some(target) = target else {
+        item.caret = if up { 0 } else { value.len() };
+        if !extend {
+            item.anchor = item.caret;
+        }
+        return;
+    };
+    let target = lines[target];
+    let offset = text::caret_at_x(&mut state.metrics, &value[target.start..target.end], font, x);
+    item.caret = target.start + offset;
+    if !extend {
+        item.anchor = item.caret;
+    }
+}
+
+/// 行首 / 行尾键：落在光标所在可视行的两端，而不是整篇首尾。
+#[allow(clippy::too_many_arguments)]
+async fn move_line_edge(
+    state: &mut UiState,
+    ctx: &Context,
+    id: &str,
+    value: &str,
+    inner: Rect,
+    font: FontSpec,
+    end: bool,
+    extend: bool,
+) {
+    refill(state, ctx, value, font, inner.w).await;
+    let lines = text::lines(&mut state.metrics, value, font, inner.w);
+    let item = state.inputs.entry(id.to_string()).or_default();
+    let index = text::line_of(&lines, text::snap(value, item.caret));
+    item.caret = if end { lines[index].end } else { lines[index].start };
+    if !extend {
+        item.anchor = item.caret;
+    }
 }
 
 fn move_focus(
@@ -641,7 +799,7 @@ fn set_focus(
         events.push(UiEvent::Focus { id: old, focused: false });
     }
     if let Some(id) = target {
-        if matches!(state.layouts.get(&id), Some(Layout::Input { .. })) {
+        if matches!(state.layouts.get(&id), Some(Layout::Input { .. } | Layout::TextArea { .. })) {
             let len = value_of(&id).map(|value| value.len()).unwrap_or(0);
             let item = state
                 .inputs
@@ -720,5 +878,16 @@ mod tests {
         assert_eq!(value, "a中d");
         let item = state.inputs.get("field").unwrap();
         assert_eq!((item.caret, item.anchor), (4, 4), "光标落在插入内容之后");
+    }
+
+    #[test]
+    fn newline_is_inserted_at_the_caret() {
+        let mut state = UiState::default();
+        let item = state.inputs.entry("body".into()).or_default();
+        item.caret = 2;
+        item.anchor = 2;
+        let value = apply_edit(&mut state, "body", "abcd", Edit::Insert("\n".into())).unwrap();
+        assert_eq!(value, "ab\ncd");
+        assert_eq!(state.inputs.get("body").unwrap().caret, 3);
     }
 }

@@ -1,4 +1,4 @@
-//! 唯一注册表：内置视图、插件贡献、在册服务与领域文档类型收在同一份快照里。
+//! 唯一注册表：内置插件的视图 / 服务、外部插件贡献、领域文档类型收在同一份快照里。
 //! 条目是纯数据，渲染留在 [`crate::pack`] 的渲染表按 id 分派；本模块不依赖 `App`，
 //! 测试直接喂快照。
 
@@ -12,22 +12,31 @@ use atelyx_core::plugin_runtime::{
 /// 条目类别：视图与服务各成一片，查询与展示共用同一结构。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EntryKind {
-    /// 可停靠的视图（内置视图与插件面板 / 表格视图 / 设置页贡献）。
+    /// 可停靠的视图（内置插件与外部插件的面板 / 表格视图 / 设置页贡献）。
     View,
-    /// 能力总线服务（内置实现与外部提供者）。
+    /// 能力总线服务（内置插件实现与外部提供者）。
     Service,
 }
 
-/// 条目来源：查询与渲染走同一路径；只有「内置条目」区块列表与停用占位按来源区分。
+/// 条目归属：哪个插件提供它，以及该插件是随应用分发还是外部安装。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Source {
-    Builtin,
+    /// 预置插件（随应用分发）；视图由壳内渲染表出图。
+    Builtin(String),
+    /// 外部安装的插件。
     Plugin(String),
 }
 
 impl Source {
     pub fn is_builtin(&self) -> bool {
-        matches!(self, Source::Builtin)
+        matches!(self, Source::Builtin(_))
+    }
+
+    /// 提供该条目的插件 id。
+    pub fn plugin_id(&self) -> &str {
+        match self {
+            Source::Builtin(plugin) | Source::Plugin(plugin) => plugin,
+        }
     }
 }
 
@@ -41,9 +50,9 @@ pub struct Entry {
     /// 壳内形状表里的图标名；未知已回落到 `puzzle`。静态名不分配（渲染每帧都读）。
     pub icon: Cow<'static, str>,
     pub source: Source,
-    /// 有槽位的视图（面板 / 表格视图 / 设置页）；内置视图与其它类别为 `None`。
+    /// 有槽位的视图（面板 / 表格视图 / 设置页）；预置插件视图与其它类别为 `None`。
     pub slot: Option<ContributionSlot>,
-    /// 可选 / 可用：内置视图看 `ui.disabled_views`，插件条目看插件启用态，服务恒可用。
+    /// 可选 / 可用：内置插件条目看 `ui.disabled_plugins` 与所在服务是否在目录里，外部插件看启用态。
     pub enabled: bool,
     /// 能否被外部提供者替换。平台自救面（`query` 服务）与视图 / 文档类型恒 false——
     /// 视图没有提供者切换面。
@@ -54,11 +63,11 @@ pub struct Entry {
     pub provider: Option<String>,
     /// 服务：其余候选提供者（切换目标，不含活动提供者）；其它类别为空。
     pub candidates: Vec<String>,
-    /// 服务：是否有内置实现可回落；其它类别为 false。
+    /// 服务：是否有可回落的内置实现（归属插件停用即 false）；其它类别为 false。
     pub builtin: bool,
 }
 
-/// 内置视图条目的登记数据（`pack` 的表用它声明，注册表把它原样摊平进条目）。
+/// 内置插件的一个视图贡献。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BuiltinView {
     pub id: &'static str,
@@ -66,43 +75,73 @@ pub struct BuiltinView {
     pub icon: &'static str,
 }
 
+/// 内置插件条目的登记数据（`pack` 的表用它声明，注册表把它摊平进条目）。
+/// 与外部插件同构：启停按插件整体生效，视图只是它提供的一种贡献。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BuiltinPlugin {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub icon: &'static str,
+    pub views: &'static [BuiltinView],
+}
+
+/// 注册表里的内置插件（设置页按它分组显示）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BuiltinPluginInfo {
+    pub id: String,
+    pub label: String,
+    pub icon: Cow<'static, str>,
+    pub enabled: bool,
+}
+
 /// 建表快照：注册表只认这些数据，不认 `App` 的字段布局。
 pub struct Snapshot<'a> {
-    pub builtin_views: &'a [BuiltinView],
+    pub builtin_plugins: &'a [BuiltinPlugin],
     pub contributions: &'a [Contribution],
     pub doc_types: &'a [DocTypeInfo],
     pub services: &'a [ServiceInfo],
     pub plugins: &'a [PluginSummary],
-    pub disabled_views: &'a [String],
+    pub disabled_plugins: &'a [String],
 }
 
 /// 注册表：条目按登记序（视图在前、服务在后），装配期与投影刷新时整体重建，运行期只读。
 #[derive(Debug, Default)]
 pub struct Registry {
     entries: Vec<Entry>,
+    builtin_plugins: Vec<BuiltinPluginInfo>,
     /// 领域文档类型按扩展名路由，不进选择器；保存完整注册以便打开 / 新建 / 图标共用一处。
     doc_types: Vec<DocTypeInfo>,
 }
 
 impl Registry {
-    /// 按快照建表：内置视图 → 插件贡献 → 服务；文档类型另存一份。
+    /// 按快照建表：内置插件 → 插件贡献 → 服务；文档类型另存一份。
     pub fn build(snapshot: Snapshot<'_>) -> Self {
         let mut entries: Vec<Entry> = Vec::new();
-        for view in snapshot.builtin_views {
-            entries.push(Entry {
-                id: view.id.to_string(),
-                kind: EntryKind::View,
-                label: view.label.to_string(),
-                icon: Cow::Borrowed(view.icon),
-                source: Source::Builtin,
-                slot: None,
-                enabled: !snapshot.disabled_views.iter().any(|id| id == view.id),
-                replaceable: false,
-                detail: String::new(),
-                provider: None,
-                candidates: Vec::new(),
-                builtin: false,
+        let mut builtin_plugins = Vec::new();
+        for plugin in snapshot.builtin_plugins {
+            let enabled = !snapshot.disabled_plugins.iter().any(|id| id == plugin.id);
+            builtin_plugins.push(BuiltinPluginInfo {
+                id: plugin.id.to_string(),
+                label: plugin.label.to_string(),
+                icon: Cow::Borrowed(plugin.icon),
+                enabled,
             });
+            for view in plugin.views {
+                entries.push(Entry {
+                    id: view.id.to_string(),
+                    kind: EntryKind::View,
+                    label: view.label.to_string(),
+                    icon: Cow::Borrowed(view.icon),
+                    source: Source::Builtin(plugin.id.to_string()),
+                    slot: None,
+                    enabled,
+                    replaceable: false,
+                    detail: String::new(),
+                    provider: None,
+                    candidates: Vec::new(),
+                    builtin: false,
+                });
+            }
         }
         for contribution in snapshot.contributions {
             entries.push(Entry {
@@ -121,16 +160,19 @@ impl Registry {
             });
         }
         for info in snapshot.services {
-            let builtin = BUILTIN_SERVICES.iter().any(|(name, _)| *name == info.service);
+            let owner = service_owner(&info.service);
+            let builtin = owner.is_some_and(|owner| {
+                !snapshot.disabled_plugins.iter().any(|id| id == owner)
+            });
             entries.push(Entry {
                 id: info.service.clone(),
                 kind: EntryKind::Service,
                 label: info.service.clone(),
                 icon: Cow::Borrowed("layers"),
-                source: match &info.provider {
-                    // 外部提供者接管了没有内置实现的服务 = 该服务由插件带进来
-                    Some(provider) if !builtin => Source::Plugin(provider.clone()),
-                    _ => Source::Builtin,
+                source: match owner {
+                    Some(owner) => Source::Builtin(owner.to_string()),
+                    // 外部插件带进来的服务：归属在册的提供者
+                    None => Source::Plugin(info.provider.clone().unwrap_or_default()),
                 },
                 slot: None,
                 enabled: true,
@@ -141,7 +183,7 @@ impl Registry {
                 builtin,
             });
         }
-        Self { entries, doc_types: snapshot.doc_types.to_vec() }
+        Self { entries, builtin_plugins, doc_types: snapshot.doc_types.to_vec() }
     }
 
     /// 按视图 id 查条目（不看启用态：停用视图的标签仍要显示名称与图标）。
@@ -162,6 +204,11 @@ impl Registry {
     /// 领域文档类型注册（扩展名路由 / 新建菜单 / 文件树图标共用这一份）。
     pub fn doc_types(&self) -> &[DocTypeInfo] {
         &self.doc_types
+    }
+
+    /// 内置插件（设置页按它分组：每组带自己的视图与服务条目）。
+    pub fn builtin_plugins(&self) -> &[BuiltinPluginInfo] {
+        &self.builtin_plugins
     }
 
     /// 条目标签；未登记时回落到插件 id（贡献随插件停用消失），再回落原始 id。
@@ -206,10 +253,18 @@ impl Registry {
         self.entries.iter().filter(|entry| entry.kind == EntryKind::Service)
     }
 
-    /// 全部条目（设置页「内置条目」区块按类别自行筛）。
+    /// 全部条目（设置页按类别自行筛选）。
     pub fn all(&self) -> impl Iterator<Item = &Entry> {
         self.entries.iter()
     }
+}
+
+/// 服务的内置归属插件；`None` = 目录里没有该服务的内置实现。
+fn service_owner(name: &str) -> Option<&'static str> {
+    BUILTIN_SERVICES
+        .iter()
+        .find(|(service, _, _)| *service == name)
+        .map(|(_, owner, _)| *owner)
 }
 
 /// 插件是否启用：注册表里没有该插件（贡献与启用标记不同步的瞬间）按可用处理，
@@ -232,8 +287,21 @@ mod tests {
     use super::*;
     use atelyx_core::plugin_runtime::PluginStatus;
 
-    fn builtin_view() -> BuiltinView {
-        BuiltinView { id: "note", label: "笔记", icon: "file-text" }
+    fn builtin_plugins() -> [BuiltinPlugin; 2] {
+        [
+            BuiltinPlugin {
+                id: "atelyx.notes",
+                label: "笔记",
+                icon: "file-text",
+                views: &[BuiltinView { id: "note", label: "笔记", icon: "file-text" }],
+            },
+            BuiltinPlugin {
+                id: "atelyx.tables",
+                label: "表格",
+                icon: "table",
+                views: &[BuiltinView { id: "table", label: "表格", icon: "table" }],
+            },
+        ]
     }
 
     fn contribution() -> Contribution {
@@ -262,6 +330,7 @@ mod tests {
             undeclared: 0,
             submits: 0,
             source: None,
+            preset: false,
         }
     }
 
@@ -276,8 +345,8 @@ mod tests {
         }
     }
 
-    fn registry(enabled: bool, disabled_views: &[String]) -> Registry {
-        let views = [builtin_view(), BuiltinView { id: "table", label: "表格", icon: "table" }];
+    fn registry(enabled: bool, disabled_plugins: &[String]) -> Registry {
+        let builtin_plugins = builtin_plugins();
         let contributions = [contribution()];
         let plugins = [plugin_summary(enabled)];
         let services = [
@@ -286,19 +355,19 @@ mod tests {
             service("table", None, true),
         ];
         Registry::build(Snapshot {
-            builtin_views: &views,
+            builtin_plugins: &builtin_plugins,
             contributions: &contributions,
             doc_types: &[],
             services: &services,
             plugins: &plugins,
-            disabled_views,
+            disabled_plugins,
         })
     }
 
     #[test]
     fn builtin_and_plugin_entries_share_one_shape() {
         let registry = registry(true, &[]);
-        let builtin = registry.get("note").expect("内置视图在册");
+        let builtin = registry.get("note").expect("预置插件视图在册");
         let plugin = registry.get("plugin:com.a:models").expect("插件视图在册");
         assert_eq!(builtin.kind, EntryKind::View);
         assert_eq!(plugin.kind, EntryKind::View);
@@ -311,16 +380,18 @@ mod tests {
         assert_eq!(registry.label("plugin:com.a:models"), "模型面板");
         assert_eq!(registry.icon("plugin:com.a:models"), "layers");
         assert!(matches!(plugin.source, Source::Plugin(ref id) if id == "com.a"));
+        assert_eq!(builtin.source.plugin_id(), "atelyx.notes");
         assert!(builtin.source.is_builtin());
     }
 
     #[test]
-    fn disabled_view_leaves_other_entries_intact() {
-        let registry = registry(true, &["note".to_string()]);
+    fn disabled_plugin_hides_its_views_and_leaves_other_plugins_intact() {
+        let registry = registry(true, &["atelyx.notes".to_string()]);
         let ids: Vec<&str> = registry.views().map(|entry| entry.id.as_str()).collect();
-        assert_eq!(ids, ["table", "plugin:com.a:models"], "停用的视图不再进选择器");
+        assert_eq!(ids, ["table", "plugin:com.a:models"], "停用插件不再进选择器");
         assert!(!registry.get("note").expect("条目仍保留").enabled);
         assert_eq!(registry.label("note"), "笔记", "停用后标签仍可读");
+        assert!(registry.get("table").expect("同组外的视图不受影响").enabled);
         assert_eq!(registry.services().count(), 3, "停用视图不动服务区");
     }
 
@@ -338,7 +409,7 @@ mod tests {
     #[test]
     fn view_and_service_namespaces_stay_separate() {
         let registry = registry(true, &[]);
-        // `table` 既是内置视图也是服务：两个查询各取本位，互不遮蔽
+        // `table` 既是预置插件视图也是服务：两个查询各取本位，互不遮蔽
         assert_eq!(registry.get("table").expect("视图").kind, EntryKind::View);
         assert_eq!(registry.service("table").expect("服务").kind, EntryKind::Service);
         assert!(registry.get("vault").is_none(), "服务名不冒充视图");
@@ -348,7 +419,7 @@ mod tests {
     #[test]
     fn platform_entries_are_not_replaceable() {
         let registry = registry(true, &[]);
-        assert!(!registry.get("note").expect("内置视图").replaceable);
+        assert!(!registry.get("note").expect("预置插件视图").replaceable);
         assert!(!registry.get("plugin:com.a:models").expect("插件视图").replaceable);
         let query = registry.service("query").expect("query 在册");
         assert!(!query.replaceable, "平台自救面不可替换");
@@ -363,13 +434,34 @@ mod tests {
         let disabled = registry(false, &[]);
         assert!(!disabled.get("plugin:com.a:models").expect("贡献仍在册").enabled);
         assert!(disabled.views().all(|entry| entry.id != "plugin:com.a:models"));
-        assert!(disabled.get("note").expect("内置视图不受影响").enabled);
+        assert!(disabled.get("note").expect("预置插件视图不受影响").enabled);
     }
 
     #[test]
-    fn disabled_builtin_views_are_marked_at_build_time() {
-        let registry = registry(true, &["note".to_string()]);
+    fn disabled_plugins_are_marked_at_build_time() {
+        let registry = registry(true, &["atelyx.notes".to_string()]);
+        let notes = registry
+            .builtin_plugins()
+            .iter()
+            .find(|plugin| plugin.id == "atelyx.notes")
+            .expect("内置插件在册");
+        assert!(!notes.enabled);
         assert!(!registry.get("note").expect("在册").enabled);
         assert!(registry.views().all(|entry| entry.id != "note"));
+        assert!(registry.builtin_plugins().iter().any(|plugin| plugin.id == "atelyx.tables" && plugin.enabled));
+    }
+
+    #[test]
+    fn services_belong_to_their_builtin_plugin() {
+        let registry = registry(true, &[]);
+        let markdown = registry.service("markdown");
+        // 目录里没有 markdown（本测试快照只喂了三项服务），归属仍从内置目录取
+        assert!(markdown.is_none());
+        let table = registry.service("table").expect("table 在册");
+        assert_eq!(table.source, Source::Builtin("atelyx.tables".into()));
+        let query = registry.service("query").expect("query 在册");
+        assert_eq!(query.source, Source::Builtin("atelyx.platform".into()));
+        let vault = registry.service("vault").expect("vault 在册");
+        assert_eq!(vault.source.plugin_id(), "atelyx.platform");
     }
 }

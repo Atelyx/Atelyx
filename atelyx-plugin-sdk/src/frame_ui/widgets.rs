@@ -4,11 +4,11 @@
 use std::rc::Rc;
 use std::sync::Arc;
 
-use atelyx_plugin_protocol::paint::{PaintPoint, DrawCommand, TextAlign};
+use atelyx_plugin_protocol::paint::{PaintPoint, DrawCommand, ImageFit, ImageSource, TextAlign};
 use atelyx_plugin_protocol::frame::HitCursor;
 use atelyx_plugin_protocol::paint::{ColorToken, TextFamily, TextWeight};
 
-use super::build::{child_height, child_width, column_height, draw_column, BuildCtx, Item, Ui, Width};
+use super::build::{child_height, child_width, column_height, draw_column, BuildCtx, Canvas, Item, Ui, Width};
 use super::geom::Rect;
 use super::model::{FontSpec, InputState, Layout};
 use super::text;
@@ -27,6 +27,9 @@ const CARD_PAD: f32 = 9.0;
 const CARD_GAP: f32 = 5.0;
 /// 提示块的内边距。
 const NOTICE_PAD: f32 = 8.0;
+
+/// 多行输入框的垂直内边距。
+const AREA_PAD_Y: f32 = 6.0;
 
 /// 文字角色（字号 / 字重 / 颜色一并由主题决定）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -228,6 +231,36 @@ impl<'c, 'a> Ui<'c, 'a> {
                     return;
                 }
                 super::icons::draw(ctx, icon, rect, theme::token(ColorToken::TextMuted));
+            }),
+        });
+    }
+
+    /// 图片贴片：撑满宽度、固定高（缺省拉伸填满）。
+    pub fn image(&mut self, source: ImageSource, height: f32) {
+        self.image_kind(source, height, None);
+    }
+
+    /// 图片贴片（指定填充方式）：`cover` 等比覆盖、`contain` 等比留边。
+    pub fn image_fit(&mut self, source: ImageSource, height: f32, fit: ImageFit) {
+        self.image_kind(source, height, Some(fit));
+    }
+
+    fn image_kind(&mut self, source: ImageSource, height: f32, fit: Option<ImageFit>) {
+        self.push(Item {
+            width: Width::Fill,
+            fill_height: false,
+            height: Box::new(move |_, _| height),
+            draw: Box::new(move |ctx, rect, clip| {
+                let visible = rect.intersect(clip);
+                if visible.is_empty() {
+                    return;
+                }
+                // 拉伸按可见区绘制（与裁剪等价）；等比方式换框会改变缩放比例，只能整片画
+                let (x, y, w, h) = match fit {
+                    None => (visible.x, visible.y, visible.w, visible.h),
+                    Some(_) => (rect.x, rect.y, rect.w, rect.h),
+                };
+                ctx.draw(DrawCommand::Image { source: source.clone(), x, y, w, h, fit });
             }),
         });
     }
@@ -614,6 +647,52 @@ impl<'c, 'a> Ui<'c, 'a> {
         });
     }
 
+    /// 多行输入框（撑满父宽、固定高）：软换行与显式换行都排，回车插入换行，
+    /// 光标超出内框时逐行纵向跟随。
+    pub fn text_area(&mut self, id: impl Into<String>, value: impl Into<String>, placeholder: impl Into<String>, height: f32) {
+        self.text_area_kind(id.into(), value.into(), placeholder.into(), height, false);
+    }
+
+    /// 多行输入框（回车提交、Shift+回车换行）：聊天输入这类「回车即发送」的用法。
+    pub fn text_area_submit(
+        &mut self,
+        id: impl Into<String>,
+        value: impl Into<String>,
+        placeholder: impl Into<String>,
+        height: f32,
+    ) {
+        self.text_area_kind(id.into(), value.into(), placeholder.into(), height, true);
+    }
+
+    fn text_area_kind(&mut self, id: String, value: String, placeholder: String, height: f32, enter_submits: bool) {
+        let theme = self.ctx().theme.clone();
+        let font = FontSpec { size: theme.sizes.caption, weight: None, family: None };
+        let for_layout = value.clone();
+        self.push(Item {
+            width: Width::Fill,
+            fill_height: false,
+            height: Box::new(move |_, _| height),
+            draw: Box::new(move |ctx, rect, clip| {
+                let visible = rect.intersect(clip);
+                if visible.is_empty() {
+                    return;
+                }
+                let focused = ctx.focused(&id);
+                draw_field(ctx, &theme, visible, focused);
+                let inner = Rect::new(
+                    rect.x + PAD_X,
+                    rect.y + AREA_PAD_Y,
+                    (rect.w - PAD_X * 2.0).max(1.0),
+                    (rect.h - AREA_PAD_Y * 2.0).max(1.0),
+                );
+                draw_area_text(ctx, &id, &value, &placeholder, font, inner, focused, &theme, visible);
+                ctx.hit(&id, visible, HitCursor::Text);
+                ctx.record(&id, Layout::TextArea { inner, font, value: for_layout.clone(), enter_submits });
+                ctx.focusables.push(id.clone());
+            }),
+        });
+    }
+
     /// 下拉：展开时就地撑开后续内容（指令集没有覆盖绘制，浮层会被下层文字穿透）。
     pub fn select(&mut self, id: impl Into<String>, options: Vec<String>, selected: usize) {
         let id = id.into();
@@ -754,6 +833,12 @@ impl<'c, 'a> Ui<'c, 'a> {
         self.scroll_kind(id.into(), None, gap, false, build);
     }
 
+    /// 撑满父容器剩余高度的滚动区；`follow_end` 语义与 [`Ui::scroll_sized`] 一致——
+    /// 上一帧停在终点就跟到新终点，用户往回滚即脱钩。
+    pub fn scroll_follow(&mut self, id: impl Into<String>, gap: f32, follow_end: bool, build: impl FnOnce(&mut Ui<'_, 'a>)) {
+        self.scroll_kind(id.into(), None, gap, follow_end, build);
+    }
+
     /// 定高滚动区：`follow_end` 时，上一帧停在终点就自动跟到新的终点（新内容到达即贴底），
     /// 用户往回滚即脱钩。
     pub fn scroll_sized(
@@ -807,6 +892,32 @@ impl<'c, 'a> Ui<'c, 'a> {
                 super::markdown::height(&cache, metrics, &theme, key, &for_height, width)
             }),
             draw: Box::new(move |ctx, rect, clip| super::markdown::paint(ctx, key, &blocks, rect, clip)),
+        });
+    }
+
+    /// 自绘块：撑满宽度、固定高；闭包拿画布写指令并按子区登记命中。
+    pub fn canvas(&mut self, height: f32, draw: impl Fn(&mut Canvas<'_, '_>) + 'static) {
+        self.canvas_kind(Width::Fill, height, Box::new(draw));
+    }
+
+    /// 定宽自绘块（行内自绘小块）。
+    pub fn canvas_sized(&mut self, width: f32, height: f32, draw: impl Fn(&mut Canvas<'_, '_>) + 'static) {
+        self.canvas_kind(Width::Fixed(width), height, Box::new(draw));
+    }
+
+    fn canvas_kind(&mut self, width: Width, height: f32, draw: Box<dyn for<'s, 't> Fn(&mut Canvas<'s, 't>)>) {
+        self.push(Item {
+            width,
+            fill_height: false,
+            height: Box::new(move |_, _| height),
+            draw: Box::new(move |ctx, rect, clip| {
+                let visible = rect.intersect(clip);
+                if visible.is_empty() {
+                    return;
+                }
+                let mut canvas = Canvas::new(ctx, rect, visible);
+                draw(&mut canvas);
+            }),
         });
     }
 }
@@ -1053,6 +1164,110 @@ fn draw_input_text(
             corner_radius: None,
         });
         ctx.ime = Some(Rect::new(inner.x + window.caret, baseline, 1.0, line_height));
+    }
+}
+
+/// 多行输入的文字、选区与光标：逐可视行绘制，纵向平移量只由光标行决定（见 `text::top_line`）。
+#[allow(clippy::too_many_arguments)]
+fn draw_area_text(
+    ctx: &mut BuildCtx<'_>,
+    id: &str,
+    value: &str,
+    placeholder: &str,
+    font: FontSpec,
+    inner: Rect,
+    focused: bool,
+    theme: &Theme,
+    clip: Rect,
+) {
+    let default_state = InputState::default();
+    let state = ctx.state.inputs.get(id).unwrap_or(&default_state);
+    let line_height = ctx.metrics.measure("", font, None).height.max(1.0);
+    if value.is_empty() && state.preedit.is_empty() && !focused {
+        text::paint(
+            ctx,
+            placeholder,
+            font,
+            theme::token(ColorToken::TextMuted),
+            inner.x,
+            inner.y,
+            Some(inner.w),
+            Some(TextAlign::Start),
+            clip,
+        );
+        return;
+    }
+    let lines = text::lines(&mut ctx.metrics, value, font, inner.w);
+    let caret = text::snap(value, state.caret);
+    let anchor = text::snap(value, state.anchor);
+    let caret_index = text::line_of(&lines, caret);
+    let top = if focused { text::top_line(caret_index, line_height, inner.h) } else { 0 };
+    let shift = inner.y - top as f32 * line_height;
+    let (from, to) = (caret.min(anchor), caret.max(anchor));
+    for (index, line) in lines.iter().enumerate().skip(top) {
+        let y = shift + index as f32 * line_height;
+        if y >= clip.bottom() {
+            break;
+        }
+        if y + line_height <= clip.y {
+            continue;
+        }
+        let segment = &value[line.start..line.end];
+        if focused && from != to && line.start < to && line.end > from {
+            let low = from.max(line.start) - line.start;
+            let high = to.min(line.end) - line.start;
+            let x1 = inner.x + text::offset_in_line(&mut ctx.metrics, segment, font, low);
+            let x2 = if to > line.end {
+                inner.right()
+            } else {
+                inner.x + text::offset_in_line(&mut ctx.metrics, segment, font, high)
+            };
+            let band = Rect::new(x1, y, (x2 - x1).max(1.0), line_height);
+            if band.intersect(clip) == band {
+                ctx.draw(DrawCommand::Rect {
+                    x: band.x,
+                    y: band.y,
+                    w: band.w,
+                    h: band.h,
+                    fill: Some(theme.selection()),
+                    stroke: None,
+                    stroke_width: None,
+                    corner_radius: None,
+                });
+            }
+        }
+        if !segment.is_empty() {
+            text::paint(ctx, segment, font, theme::token(ColorToken::Text), inner.x, y, None, None, clip);
+        }
+    }
+    let caret_line = lines[caret_index];
+    let caret_x = inner.x + text::offset_in_line(&mut ctx.metrics, &value[caret_line.start..caret_line.end], font, caret - caret_line.start);
+    let caret_y = shift + caret_index as f32 * line_height;
+    if !state.preedit.is_empty() {
+        text::paint(
+            ctx,
+            &state.preedit,
+            font,
+            theme::token(ColorToken::Accent),
+            caret_x,
+            caret_y,
+            Some((inner.right() - caret_x).max(1.0)),
+            None,
+            clip,
+        );
+    }
+    if focused && caret_y >= clip.y && caret_y + line_height <= clip.bottom() + 0.5 {
+        ctx.draw(DrawCommand::Rect {
+            x: caret_x,
+            y: caret_y,
+            w: 1.0,
+            h: line_height,
+            fill: Some(theme::token(ColorToken::Accent)),
+            stroke: None,
+            stroke_width: None,
+            corner_radius: None,
+        });
+        ctx.ime = Some(Rect::new(caret_x, caret_y, 1.0, line_height));
     }
 }
 

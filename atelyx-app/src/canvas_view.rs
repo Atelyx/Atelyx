@@ -1996,6 +1996,7 @@ fn card_overlays<'a>(
     window: iced::window::Id,
 ) -> Vec<Element<'a>> {
     let (vw, vh) = (viewport.width, viewport.height);
+    let markdown_builtin = app.plugins.service_is_builtin("markdown");
     let mut out = Vec::with_capacity(session.data.nodes.len());
     for n in &session.data.nodes {
         let (w, h) = session.card_size(n);
@@ -2011,7 +2012,14 @@ fn card_overlays<'a>(
             match n.node_type.as_str() {
                 "conversation" => conversation_card_overlay(app, session, n, view.zoom, window),
                 "text" => session.view.text_docs.get(&n.id).map(|doc| {
-                    // 正文复用笔记只读渲染，字号按视口缩放等比例（原生控件无整体缩放能力）
+                    // 正文复用笔记只读渲染，字号按视口缩放等比例（原生控件无整体缩放能力）；
+                    // 笔记插件停用后 markdown 能力不在总线上，回落原文
+                    if !markdown_builtin {
+                        return text(doc.source.clone())
+                            .size(pal::fs_body() * view.zoom)
+                            .color(pal::TEXT_PRIMARY)
+                            .into();
+                    }
                     crate::markdown_view::document_body_scaled(
                         doc,
                         &app.theme,
@@ -2135,6 +2143,7 @@ fn conversation_card_overlay<'a>(
         theme: &app.theme,
         scale: zoom,
         actions: Some(actions),
+        markdown: app.plugins.service_is_builtin("markdown"),
         streaming_id,
         toggle: crate::chat_stream::ToggleRoute::Canvas,
         selectable: false,

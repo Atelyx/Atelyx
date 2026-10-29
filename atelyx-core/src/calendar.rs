@@ -4,29 +4,14 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+/// 手动日程条目：磁盘契约与能力面（`calendar.*`）共用同一形态。
+pub use atelyx_plugin_protocol::method::CalendarItem;
+
 /// 日程存储文件 schema 版本（读侧不校验，仅写盘落字段）。
 pub const CALENDAR_SCHEMA: &str = "atelyx-calendar/v1";
 
 /// 手动日程存储文件（仓库级相对路径）。
 pub const CALENDAR_FILE: &str = ".atelyx/calendar.json";
-
-/// 手动日程条目（date 为本地日期 `YYYY-MM-DD`；color 为 hex，缺省 = 默认强调色）。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CalendarItem {
-    #[serde(default)]
-    pub id: String,
-    #[serde(default)]
-    pub date: String,
-    #[serde(default)]
-    pub title: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub note: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub color: Option<String>,
-    #[serde(default)]
-    pub created_at: i64,
-}
 
 #[derive(Serialize, Deserialize, Default)]
 struct CalendarFile {

@@ -647,6 +647,11 @@ impl Instance {
                         self.respond(id, None, Some(error));
                         return;
                     }
+                    Forward::Unavailable => {
+                        let error = PluginRuntime::unavailable_service(service_name);
+                        self.respond(id, None, Some(error));
+                        return;
+                    }
                     Forward::Plugin(provider) => {
                         runtime.forward_service_call(
                             self,
@@ -1068,6 +1073,54 @@ impl Instance {
                     plugin_id: self.id.clone(),
                     request_id: 0,
                 },
+                method::editor::SELECTION => HostRequest::EditorSelection {
+                    plugin_id: self.id.clone(),
+                    request_id: 0,
+                },
+                method::editor::REPLACE_SELECTION => {
+                    let p: method::EditorReplaceParams = parse(params).map_err(|e| e.to_string())?;
+                    p.validate()?;
+                    HostRequest::EditorReplaceSelection {
+                        plugin_id: self.id.clone(),
+                        request_id: 0,
+                        text: p.text,
+                    }
+                }
+                method::calendar::LIST => HostRequest::CalendarList {
+                    plugin_id: self.id.clone(),
+                    request_id: 0,
+                },
+                method::calendar::ADD => {
+                    let p: method::CalendarAddParams = parse(params).map_err(|e| e.to_string())?;
+                    p.validate()?;
+                    HostRequest::CalendarAdd {
+                        plugin_id: self.id.clone(),
+                        request_id: 0,
+                        params: p,
+                    }
+                }
+                method::calendar::UPDATE => {
+                    let p: method::CalendarUpdateParams = parse(params).map_err(|e| e.to_string())?;
+                    p.validate()?;
+                    HostRequest::CalendarUpdate {
+                        plugin_id: self.id.clone(),
+                        request_id: 0,
+                        params: p,
+                    }
+                }
+                method::calendar::REMOVE => {
+                    let p: method::CalendarIdParams = parse(params).map_err(|e| e.to_string())?;
+                    p.validate()?;
+                    HostRequest::CalendarRemove {
+                        plugin_id: self.id.clone(),
+                        request_id: 0,
+                        params: p,
+                    }
+                }
+                method::history::ACTIVITY => HostRequest::HistoryActivity {
+                    plugin_id: self.id.clone(),
+                    request_id: 0,
+                },
                 _ => return Err("未知宿主服务请求".to_string()),
             };
             runtime.open_shell_call(request)
@@ -1354,6 +1407,7 @@ impl Instance {
                 | event::name::TABLE_CHANGED
                 | event::name::AI_CHAT_CHANGED
                 | event::name::VAULT_FILE_CHANGED
+                | event::name::CALENDAR_CHANGED
         ) {
             return Err(RpcError::failed(format!("未知事件名：{}", p.name)));
         }
@@ -1850,6 +1904,13 @@ fn is_shell_method(method_name: &str) -> bool {
             | method::collab::SEND
             | method::query::MEASURE
             | method::query::THEME
+            | method::editor::SELECTION
+            | method::editor::REPLACE_SELECTION
+            | method::calendar::LIST
+            | method::calendar::ADD
+            | method::calendar::UPDATE
+            | method::calendar::REMOVE
+            | method::history::ACTIVITY
     )
 }
 
@@ -2051,6 +2112,7 @@ mod tests {
             event::name::TABLE_CHANGED,
             event::name::AI_CHAT_CHANGED,
             event::name::VAULT_FILE_CHANGED,
+            event::name::CALENDAR_CHANGED,
         ] {
             let ack = instance
                 .dispatch(event::SUBSCRIBE, &json!({ "name": name }))
@@ -2685,6 +2747,24 @@ mod tests {
                 "{service_name}.{method_name} 是宿主保留方法"
             );
         }
+    }
+
+    /// 归属插件停用后，直接调它的方法（不经 `service.call`）也不能落到本地实现。
+    #[test]
+    fn a_disabled_owner_blocks_direct_service_methods() {
+        let tmp = TempDir::new("instance-service-blocked");
+        let runtime = PluginRuntime::new(tmp.to_path_buf());
+        runtime.set_builtin_owner_enabled("atelyx.notes", false);
+        assert_eq!(runtime.forward_to("markdown", "parse"), Forward::Unavailable);
+        assert!(runtime
+            .service_target(service::CallParams {
+                service: "markdown".into(),
+                method: "parse".into(),
+                params: Value::Null,
+            })
+            .is_err_and(|error| error.message.contains(service::error::UNKNOWN_SERVICE)));
+        runtime.set_builtin_owner_enabled("atelyx.notes", true);
+        assert_eq!(runtime.forward_to("markdown", "parse"), Forward::Local, "重新启用即回到内置分派");
     }
 
     /// 等在途服务调用落表（转发任务被调度后才登记）。

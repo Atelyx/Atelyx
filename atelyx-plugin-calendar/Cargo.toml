@@ -1,0 +1,18 @@
+[package]
+name = "atelyx-plugin-calendar"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Atelyx 日历插件：按月查看与编辑仓库日程"
+license = "Apache-2.0"
+
+[dependencies]
+atelyx-plugin-protocol = { version = "0.1.0", path = "../atelyx-plugin-protocol" }
+atelyx-plugin-sdk = { version = "0.1.0", path = "../atelyx-plugin-sdk" }
+# 本地日期（今天 / 月网格起点）取系统时区，日期数学本身由 date 模块自算
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "macros"] }
+async-trait = "0.1"
+
+[dev-dependencies]
+serde_json = "1"

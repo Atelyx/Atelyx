@@ -27,6 +27,9 @@ pub(crate) enum Layout {
     Button,
     /// `inner` = 文字可写区域（已扣除水平内边距），值取绘制时的快照。
     Input { inner: Rect, font: FontSpec, value: String },
+    /// 多行输入框：`inner` = 文字区（已扣除内边距），软换行与显式换行都按它排布。
+    /// `enter_submits` 为真时回车提交（Shift+回车换行），否则回车插入换行。
+    TextArea { inner: Rect, font: FontSpec, value: String, enter_submits: bool },
     Select { options: usize },
     Checkbox,
     /// `content` = 内容总高（可滚动余量 = 内容高 - 视口高）。
@@ -35,6 +38,8 @@ pub(crate) enum Layout {
     Option { select: String, index: usize },
     /// 滚动条：按下 / 拖动按纵向落点换算偏移（内部命中 id，插件看不到）。
     ScrollBar { scroll: String, track: Rect, thumb: f32, max_offset: f32 },
+    /// 自绘子区：语义与按钮一致（按下再抬起算一次点击）。
+    Custom,
 }
 
 /// 单个输入框的编辑态（文本本身由插件持有，这里只记光标与选区）。

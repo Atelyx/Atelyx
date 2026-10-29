@@ -4,13 +4,13 @@
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use atelyx_plugin_protocol::paint::DrawCommand;
+use atelyx_plugin_protocol::paint::{DrawCommand, PaintColor};
 use atelyx_plugin_protocol::frame::{FrameRect, HitCursor, HitRegion, SurfaceFrame};
 use atelyx_plugin_protocol::method::MarkdownBlock;
 
 use super::geom::Rect;
 use super::metrics::Metrics;
-use super::model::{Layout, UiState};
+use super::model::{FontSpec, Layout, UiState};
 use super::theme::Theme;
 
 /// 一帧的绘制上下文：指令 / 命中区 / 布局记录与量算都在这里，绘制结束后整批交回。
@@ -122,6 +122,78 @@ impl<'a> BuildCtx<'a> {
     }
 }
 
+/// 自绘画布：区域与裁剪由容器给定，闭包里画指令并登记子区命中。
+/// 指令集没有裁剪，超出 `visible()` 的内容由闭包自己收住；子区命中按声明逆序取最上面的一个。
+pub struct Canvas<'c, 'a> {
+    ctx: &'c mut BuildCtx<'a>,
+    rect: Rect,
+    clip: Rect,
+}
+
+impl<'c, 'a> Canvas<'c, 'a> {
+    pub(crate) fn new(ctx: &'c mut BuildCtx<'a>, rect: Rect, clip: Rect) -> Self {
+        Self { ctx, rect, clip }
+    }
+
+    /// 控件在本帧拿到的完整矩形。
+    pub fn area(&self) -> Rect {
+        self.rect
+    }
+
+    /// 与容器裁剪相交后的可见矩形；为空时闭包不会被执行。
+    pub fn visible(&self) -> Rect {
+        self.rect.intersect(self.clip)
+    }
+
+    pub fn draw(&mut self, command: DrawCommand) {
+        self.ctx.draw(command);
+    }
+
+    /// 登记可点击子区：命中时上报 `Click` / `DoubleClick` / `RightClick`，并参与悬停态。
+    /// 子区裁到可见范围内：滚出视口的部分不该继续吃点击。
+    pub fn hit(&mut self, id: &str, area: Rect, cursor: HitCursor) {
+        let area = area.intersect(self.visible());
+        if area.is_empty() {
+            return;
+        }
+        self.ctx.hit(id, area, cursor);
+        self.ctx.record(id, Layout::Custom);
+    }
+
+    pub fn hovered(&self, id: &str) -> bool {
+        self.ctx.hovered(id)
+    }
+
+    pub fn pressed(&self, id: &str) -> bool {
+        self.ctx.pressed(id)
+    }
+
+    pub fn focused(&self, id: &str) -> bool {
+        self.ctx.focused(id)
+    }
+
+    /// 单行文字的宽高：缺项先按估算值排版，量算落地后自动重建。
+    pub fn measure(&mut self, text: &str, size: f32) -> (f32, f32) {
+        let result = self.ctx.metrics.measure(text, FontSpec { size, weight: None, family: None }, None);
+        (result.width, result.height)
+    }
+
+    /// 一段单行文字，`(x, y)` 为左上角。
+    pub fn text(&mut self, content: impl Into<String>, x: f32, y: f32, size: f32, color: PaintColor) {
+        self.ctx.draw(DrawCommand::Text {
+            x,
+            y,
+            content: content.into(),
+            size,
+            color,
+            weight: None,
+            family: None,
+            max_width: None,
+            align: None,
+        });
+    }
+}
+
 /// 子项宽度声明：固定宽、撑满（父容器给多少算多少）、按内容收缩。
 pub(crate) enum Width {
     Fixed(f32),
@@ -165,6 +237,21 @@ impl<'c, 'a> Ui<'c, 'a> {
 
     pub(crate) fn ctx(&mut self) -> &mut BuildCtx<'a> {
         self.ctx
+    }
+
+    /// 某控件本帧是否被悬停（自绘外观按状态变化时读）。
+    pub fn hovered(&self, id: &str) -> bool {
+        self.ctx.hovered(id)
+    }
+
+    /// 某控件本帧是否被按下。
+    pub fn pressed(&self, id: &str) -> bool {
+        self.ctx.pressed(id)
+    }
+
+    /// 某控件本帧是否持有焦点。
+    pub fn focused(&self, id: &str) -> bool {
+        self.ctx.focused(id)
     }
 
     /// 纵向容器：子项按声明序自上而下，`gap` 为间距。

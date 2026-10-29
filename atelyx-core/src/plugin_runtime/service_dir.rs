@@ -36,7 +36,7 @@ const NON_REPLACEABLE: &[&str] = &["query"];
 const HOST_OWNED: &[&str] =
     &[method::ai::REGISTER_TOOL, method::ai::UNREGISTER_TOOL, method::ai::TOOL_RESULT];
 
-/// 活动提供者。内置实现恒可用；外部提供者按插件 id 记。
+/// 活动提供者：内置实现（归属插件停用期间不可用）或某个外部插件。
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Active {
     Builtin,
@@ -51,25 +51,47 @@ pub(crate) struct Provider {
     pub methods: Vec<String>,
 }
 
-/// 目录条目：内置方法集合（`None` = 该服务没有内置实现）、候选与当前活动提供者。
+/// 目录条目：内置方法集合（`None` = 该服务没有内置实现）、归属插件、候选与当前活动提供者。
 #[derive(Clone, Debug)]
 struct Entry {
+    /// 内置实现的归属插件；`None` = 只有外部提供者的服务。
+    owner: Option<String>,
     builtin: Option<Vec<String>>,
+    /// 归属插件是否启用：停用即内置实现退出目录，外部候选可继续提供服务。
+    builtin_enabled: bool,
     candidates: Vec<Provider>,
     active: Active,
     replaceable: bool,
 }
 
 impl Entry {
+    /// 内置实现当下是否可用（没有实现或归属插件被停用都算不可用）。
+    fn builtin_available(&self) -> bool {
+        self.builtin.is_some() && self.builtin_enabled
+    }
+
+    /// 目录里还有没有可用提供者。
+    fn available(&self) -> bool {
+        self.builtin_available() || !self.candidates.is_empty()
+    }
+
+    /// 内置实现被归属插件停用、又没有外部候选接手：服务仍在册但暂时没人能应答。
+    fn blocked(&self) -> bool {
+        self.builtin.is_some() && !self.builtin_available() && self.candidates.is_empty()
+    }
+
     /// 摘掉一个候选。它正是活动提供者时按「内置优先，其次首个剩余候选」重选；
-    /// 返回 `false` = 该条目已没有任何可用提供者（服务不可用，条目应从目录移除）。
+    /// 返回 `false` = 该条目已没有任何提供者（外部带进来的服务，条目应从目录移除）。
     fn remove_provider(&mut self, plugin_id: &str) -> bool {
         self.candidates.retain(|candidate| candidate.plugin_id != plugin_id);
         if matches!(&self.active, Active::Plugin(id) if id == plugin_id) {
-            self.active = if self.builtin.is_some() {
+            self.active = if self.builtin_available() {
                 Active::Builtin
             } else if let Some(first) = self.candidates.first() {
                 Active::Plugin(first.plugin_id.clone())
+            } else if self.builtin.is_some() {
+                // 归属插件停用中：保留内置登记，重新启用即可恢复
+                Active::Builtin
             } else {
                 return false;
             };
@@ -79,9 +101,10 @@ impl Entry {
 
     fn info(&self, name: &str) -> ServiceInfo {
         let (version, methods, provider) = match &self.active {
-            Active::Builtin => {
+            Active::Builtin if self.builtin_available() => {
                 (SERVICE_VERSION, self.builtin.clone().unwrap_or_default(), None)
             }
+            Active::Builtin => (SERVICE_VERSION, Vec::new(), None),
             Active::Plugin(id) => {
                 match self.candidates.iter().find(|candidate| &candidate.plugin_id == id) {
                     Some(candidate) => {
@@ -123,6 +146,8 @@ pub(crate) enum Forward {
     Local,
     /// 外部提供者没声明该方法。
     Undeclared,
+    /// 内置实现随归属插件停用，且没有候选接手：方法仍在册但无人应答。
+    Unavailable,
     Plugin(String),
 }
 
@@ -139,17 +164,19 @@ pub(crate) struct ServiceDir {
 }
 
 impl ServiceDir {
-    /// 按内置能力目录建出出厂状态：每个内置服务由内置实现承载。
+    /// 按内置能力目录建出出厂状态：每个内置服务由所属插件的内置实现承载。
     pub(crate) fn new() -> Self {
         let entries = method::BUILTIN_SERVICES
             .iter()
-            .map(|(name, methods)| {
+            .map(|(name, owner, methods)| {
                 let methods: Vec<String> = methods
                     .iter()
                     .map(|full| method_segment(full).to_string())
                     .collect();
                 let entry = Entry {
+                    owner: Some((*owner).to_string()),
                     builtin: Some(methods),
+                    builtin_enabled: true,
                     candidates: Vec::new(),
                     active: Active::Builtin,
                     replaceable: !NON_REPLACEABLE.contains(name),
@@ -158,6 +185,29 @@ impl ServiceDir {
             })
             .collect();
         Self { entries }
+    }
+
+    /// 切换内置插件启用态：它的内置实现随之进出目录；活动提供者恰好是内置实现时，
+    /// 停用按「首个外部候选接任，否则暂不可用」处置。返回受影响的服务名（升序）。
+    /// 平台插件的服务不可停用：宿主自身（设置页、笔记与画布）一直取用它们。
+    pub(crate) fn set_owner_enabled(&mut self, owner: &str, enabled: bool) -> Vec<String> {
+        if owner == method::PLATFORM_PLUGIN {
+            return Vec::new();
+        }
+        let mut affected = Vec::new();
+        for (name, entry) in &mut self.entries {
+            if entry.owner.as_deref() != Some(owner) || entry.builtin_enabled == enabled {
+                continue;
+            }
+            entry.builtin_enabled = enabled;
+            if !enabled && matches!(entry.active, Active::Builtin) {
+                if let Some(first) = entry.candidates.first() {
+                    entry.active = Active::Plugin(first.plugin_id.clone());
+                }
+            }
+            affected.push(name.clone());
+        }
+        affected
     }
 
     /// 登记一个外部提供者。已有内置实现的服务只成为候选（不静默顶替）；目录里没有的服务
@@ -194,6 +244,13 @@ impl ServiceDir {
                     Some(existing) => *existing = provider,
                     None => entry.candidates.push(provider),
                 }
+                // 归属插件停用期间内置实现不在场：候选就是唯一提供者，登记即接任
+                if matches!(entry.active, Active::Builtin) && !entry.builtin_available() {
+                    if let Some(first) = entry.candidates.first().map(|c| c.plugin_id.clone()) {
+                        entry.active = Active::Plugin(first);
+                        return Ok(true);
+                    }
+                }
                 // 候选变化不算活动提供者变化：订阅方不必重建
                 Ok(false)
             }
@@ -201,7 +258,9 @@ impl ServiceDir {
                 self.entries.insert(
                     params.service.clone(),
                     Entry {
+                        owner: None,
                         builtin: None,
+                        builtin_enabled: true,
                         candidates: vec![provider],
                         active: Active::Plugin(plugin_id.to_string()),
                         replaceable: true,
@@ -256,8 +315,12 @@ impl ServiceDir {
                 entry.active = Active::Plugin(plugin_id.to_string());
             }
             None => {
-                if entry.builtin.is_none() {
-                    return Err(format!("服务 {service_name} 没有内置实现，不能回落"));
+                if !entry.builtin_available() {
+                    return Err(if entry.builtin.is_some() {
+                        format!("服务 {service_name} 的内置实现所属插件已停用，不能回落")
+                    } else {
+                        format!("服务 {service_name} 没有内置实现，不能回落")
+                    });
                 }
                 entry.active = Active::Builtin;
             }
@@ -287,12 +350,18 @@ impl ServiceDir {
 
     pub(crate) fn route(&self, service_name: &str) -> Route {
         match self.entries.get(service_name) {
-            None => Route::Missing,
-            Some(entry) => match &entry.active {
-                Active::Builtin => Route::Builtin,
+            Some(entry) if entry.available() => match &entry.active {
+                Active::Builtin if entry.builtin_available() => Route::Builtin,
+                Active::Builtin => Route::Missing,
                 Active::Plugin(id) => Route::Plugin(id.clone()),
             },
+            _ => Route::Missing,
         }
+    }
+
+    /// 服务是否处于「在册但暂不可用」：归属插件停用，外部候选也没接手。
+    pub(crate) fn blocked(&self, service_name: &str) -> bool {
+        self.entries.get(service_name).is_some_and(Entry::blocked)
     }
 
     /// 内置实现是否声明了该方法（`false` = 该服务没有内置实现或没有这个方法）。
@@ -333,9 +402,10 @@ impl ServiceDir {
                 service: service_name.to_string(),
                 provider: match &entry.active {
                     Active::Builtin => None,
-                    Active::Plugin(id) => Some(id.clone()),
+                    Active::Plugin(id) if entry.available() => Some(id.clone()),
+                    Active::Plugin(_) => None,
                 },
-                available: true,
+                available: entry.available(),
             },
         }
     }
@@ -345,6 +415,7 @@ impl ServiceDir {
             services: self
                 .entries
                 .iter()
+                .filter(|(_, entry)| entry.available())
                 .map(|(name, entry)| entry.info(name))
                 .collect(),
         }
@@ -421,6 +492,17 @@ impl PluginRuntime {
         Ok(())
     }
 
+    /// 服务当前是否在目录里（内置实现所属插件停用且无外部候选接手时为 `false`）。
+    pub fn service_available(&self, service_name: &str) -> bool {
+        !matches!(self.services.lock().unwrap().route(service_name), Route::Missing)
+    }
+
+    /// 服务当前是否由内置实现承载（外部提供者接管或服务不可用时为 `false`）。
+    /// 壳内同步渲染只能用内置实现：外部提供者是跨进程异步往返，赶不上一帧。
+    pub fn service_is_builtin(&self, service_name: &str) -> bool {
+        matches!(self.services.lock().unwrap().route(service_name), Route::Builtin)
+    }
+
     /// 在册服务快照（按服务名排序）。
     pub fn service_list(&self) -> ListResult {
         self.services.lock().unwrap().list()
@@ -441,6 +523,15 @@ impl PluginRuntime {
             self.broadcast_service_changed(&[service_name.to_string()]);
         }
         Ok(())
+    }
+
+    /// 切换内置插件启用态：它名下的服务随之进出能力总线。壳的内置插件开关走这里。
+    /// 返回受影响的服务名。
+    pub fn set_builtin_owner_enabled(&self, owner: &str, enabled: bool) -> Vec<String> {
+        let affected = self.services.lock().unwrap().set_owner_enabled(owner, enabled);
+        self.announce_service_dir(owner);
+        self.broadcast_service_changed(&affected);
+        affected
     }
 
     /// 摘掉某插件的全部服务登记（停用 / 崩溃 / 卸载），返回受影响的服务名。
@@ -469,6 +560,9 @@ impl PluginRuntime {
         }
         let dir = self.services.lock().unwrap();
         match dir.route(&call.service) {
+            Route::Missing if dir.blocked(&call.service) => {
+                Err(Self::unavailable_service(&call.service))
+            }
             Route::Missing => Err(service_error(
                 service::error::UNKNOWN_SERVICE,
                 format!("服务未登记：{}", call.service),
@@ -514,6 +608,8 @@ impl PluginRuntime {
                     Forward::Undeclared
                 }
             }
+            // 归属插件停用时不能落到本地实现：那里的分派还认这些方法
+            Route::Missing if dir.blocked(service_name) => Forward::Unavailable,
             _ => Forward::Local,
         }
     }
@@ -523,6 +619,14 @@ impl PluginRuntime {
         service_error(
             service::error::UNKNOWN_METHOD,
             format!("{service_name} 未提供方法 {method_name}"),
+        )
+    }
+
+    /// 服务在册但暂无人应答（归属插件已停用）的可读错误。
+    pub(crate) fn unavailable_service(service_name: &str) -> RpcError {
+        service_error(
+            service::error::UNKNOWN_SERVICE,
+            format!("服务 {service_name} 暂不可用：其归属插件已停用"),
         )
     }
 
@@ -753,7 +857,7 @@ mod tests {
     fn builtin_catalog_splits_at_the_first_dot() {
         let dir = ServiceDir::new();
         assert!(!dir.entries.is_empty(), "内置目录不能为空");
-        for (service_name, methods) in method::BUILTIN_SERVICES {
+        for (service_name, _, methods) in method::BUILTIN_SERVICES {
             assert_eq!(dir.route(service_name), Route::Builtin, "{service_name} 出厂即内置");
             for full in *methods {
                 let (prefix, tail) = full.split_once('.').expect("内置方法名带服务前缀");
@@ -844,5 +948,76 @@ mod tests {
         assert!(dir.unregister("com.a", "nope").is_err(), "未登记的服务");
         dir.unregister("com.a", "demo").unwrap();
         assert_eq!(dir.route("demo"), Route::Missing);
+    }
+
+    #[test]
+    fn disabling_a_builtin_owner_takes_its_services_off_the_bus() {
+        let mut dir = ServiceDir::new();
+        assert_eq!(dir.route("markdown"), Route::Builtin);
+        assert_eq!(
+            dir.set_owner_enabled("atelyx.notes", false),
+            vec!["editor".to_string(), "markdown".to_string()],
+            "笔记插件的全部服务一并离开"
+        );
+        assert_eq!(dir.route("markdown"), Route::Missing, "归属插件停用后服务不可用");
+        assert_eq!(dir.route("editor"), Route::Missing);
+        assert!(dir.blocked("markdown"), "在册但暂不可用与「从未登记」要能区分");
+        assert!(!dir.blocked("vault"), "平台插件的方法不受停用影响");
+        assert!(dir.list().services.iter().all(|service| service.service != "markdown"));
+        assert!(!dir.changed("markdown").available);
+
+        assert_eq!(
+            dir.set_owner_enabled("atelyx.notes", true),
+            vec!["editor".to_string(), "markdown".to_string()]
+        );
+        assert_eq!(dir.route("markdown"), Route::Builtin, "重新启用即恢复");
+        assert!(!dir.blocked("markdown"));
+        assert!(dir.list().services.iter().any(|service| service.service == "markdown"));
+    }
+
+    #[test]
+    fn the_platform_owner_is_never_disabled() {
+        let mut dir = ServiceDir::new();
+        assert!(dir.set_owner_enabled(method::PLATFORM_PLUGIN, false).is_empty());
+        assert_eq!(dir.route("vault"), Route::Builtin, "宿主自救面不随停用离开");
+        assert_eq!(dir.route("query"), Route::Builtin);
+    }
+
+    #[test]
+    fn a_disabled_owner_yields_to_an_external_candidate() {
+        let mut dir = ServiceDir::new();
+        dir.register("com.a", &params("markdown", &["parse"])).unwrap();
+        dir.set_owner_enabled("atelyx.notes", false);
+        assert_eq!(dir.route("markdown"), Route::Plugin("com.a".into()), "外部候选接任");
+        assert_eq!(info(&dir.list(), "markdown").provider.as_deref(), Some("com.a"));
+
+        dir.drop_plugin("com.a");
+        assert_eq!(dir.route("markdown"), Route::Missing, "候选也没了即不可用");
+        dir.set_owner_enabled("atelyx.notes", true);
+        assert_eq!(dir.route("markdown"), Route::Builtin, "内置登记留位，启用即恢复");
+    }
+
+    #[test]
+    fn a_candidate_registered_after_the_owner_is_disabled_takes_over() {
+        let mut dir = ServiceDir::new();
+        dir.set_owner_enabled("atelyx.notes", false);
+        assert!(dir.blocked("markdown"));
+        assert!(
+            dir.register("com.a", &params("markdown", &["parse"])).unwrap(),
+            "内置实现不在场时登记即接任，要广播活动提供者变化"
+        );
+        assert_eq!(dir.route("markdown"), Route::Plugin("com.a".into()));
+        assert!(!dir.blocked("markdown"));
+        assert!(
+            !dir.register("com.b", &params("markdown", &["parse"])).unwrap(),
+            "已有提供者时后来者只是候选"
+        );
+        assert_eq!(dir.route("markdown"), Route::Plugin("com.a".into()));
+
+        dir.unregister("com.a", "markdown").unwrap();
+        assert_eq!(dir.route("markdown"), Route::Plugin("com.b".into()), "剩余候选接任");
+        dir.unregister("com.b", "markdown").unwrap();
+        assert_eq!(dir.route("markdown"), Route::Missing, "候选退出后回到暂不可用");
+        assert!(dir.blocked("markdown"), "内置登记仍在册，重新启用即恢复");
     }
 }

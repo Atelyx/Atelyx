@@ -393,7 +393,7 @@ impl PluginHandler for Todo {
 
 几条用法约定：
 
-- **`event` 已经把交互态就地更新**（焦点、光标、选区、组合串、滚动位置），返回的是语义事件：`Click` / `RightClick` / `Text`（完整新值）/ `Submit`（输入框回车）/ `Select`（选项下标）/ `Focus` / `Scroll`（偏移与可滚余量）。插件只改自己的业务状态。
+- **`event` 已经把交互态就地更新**（焦点、光标、选区、组合串、滚动位置），返回的是语义事件：`Click` / `RightClick` / `Text`（完整新值）/ `Submit`（单行输入框回车）/ `Select`（选项下标）/ `Focus` / `Scroll`（偏移与可滚余量）。插件只改自己的业务状态。
 - **`value_of` 每次现读**：`event(ctx, input, |id| …)` 按 id 返回输入框当前值，编辑永远从事实出发；**`Text` 要写回**，收到 `UiEvent::Text { value, .. }` 就存进自己的状态，不写回下一帧还是旧值。
 - **`render` 的闭包会被调用多次**（文字量算缺项时先按估算排、量完重建，最多 3 轮）：闭包必须只读状态，不要在里面改状态或发请求。
 - **内容相同的帧不会重复提交**：指针移动这类没改画面的输入不会把宿主拖进重绘风暴，不必自己判重。
@@ -407,6 +407,7 @@ impl PluginHandler for Todo {
 | `text_styled(content, TextStyle)` | 按样式绘制：`TextStyle::new(role).color(token).mono().wrap()`（等宽、换行、语义色） |
 | `button` / `ghost_button` / `button_enabled` / `ghost_button_enabled` | 常规底 / 无底色 / 带禁用态，点击回 `Click { id }` |
 | `text_input(id, value, placeholder)` | 单行输入框；`text_input_sized` 固定宽，`text_input_password` 密文；回车回 `Submit { id }` |
+| `text_area(id, value, placeholder, height)` | 多行输入框：软换行与显式换行都排，回车**插入换行**不回 `Submit`，上下键 / 行首尾键按可视行走，光标超出内框时纵向跟随。`text_area_submit` 是回车提交、Shift+回车换行的变体（聊天输入） |
 | `select(id, options, selected)` | 下拉；选中回 `Select { id, index }`，展开时**就地撑开**后续内容 |
 | `checkbox(id, checked, label)` | 勾选，点击回 `Click { id }`（勾选值由插件自己翻转） |
 | `chip(label, color)` | 小号圆角徽标（计数 / 状态标签），不承接点击 |
@@ -507,7 +508,7 @@ impl PluginHandler for Demo {
 }
 ```
 
-- **登记不等于生效**：同一服务同时只有一个活动提供者。已有内置实现的服务（`vault` / `ai` / `markdown` …）登记后只成为候选，是否顶替由用户在设置页决定；目录里没有的服务，首个提供者即活动提供者。调用方最终拿到的是**你回报的那份数据**：`service_result` 给结果、`service_error` 给可读原因，二者都带调用方的 `callId`；不实现 `on_service_call` 时默认回报「本插件不提供该服务」，宿主不必等到超时。
+- **登记不等于生效**：同一服务同时只有一个活动提供者。已有内置实现的服务（`vault` / `ai` / `markdown` …）登记后只成为候选，是否顶替由用户在设置页决定；内置实现的归属插件停用期间该实现不在场，此时登记的候选直接接任（用户重新启用归属插件后再由设置页决定）；目录里没有的服务，首个提供者即活动提供者。调用方最终拿到的是**你回报的那份数据**：`service_result` 给结果、`service_error` 给可读原因，二者都带调用方的 `callId`；不实现 `on_service_call` 时默认回报「本插件不提供该服务」，宿主不必等到超时。
 - 30 秒不回报按 `timeout` 失败；**停用 / 崩溃 / 卸载时在途调用以 `provider_unavailable` 失败**，之后的调用回落内置实现（没有内置实现就成了 `unknown_service`）。`host:service.changed` 广播活动提供者变化（`{ service, provider, available }`，`provider` 缺省 = 内置），要靠「本插件现在是否生效」改界面就覆写 `on_service_changed`。
 - **不要在自己的 `on_service_call` 里等自己提供的方法**：宿主通知与这条调用走同一个通知 worker，会自锁。要自检就 `tokio::spawn` 到别的任务里调。
 
@@ -676,7 +677,7 @@ ctx.declare_default_layout(
 ).await?;
 ```
 
-- `spec` 是分割树：`split { direction: "horizontal" | "vertical", children, sizes }` 或 `panel { views }`；`views` 写视图 kind——本插件的面板贡献为 `plugin:<插件 id>:<贡献 id>`，内置视图用 `canvas` / `note` / `table` / `files` / `search` / `aichat` 等，首个为激活标签。
+- `spec` 是分割树：`split { direction: "horizontal" | "vertical", children, sizes }` 或 `panel { views }`；`views` 写视图 kind——本插件的面板贡献为 `plugin:<插件 id>:<贡献 id>`，预置插件的视图用 `canvas` / `note` / `table` / `files` / `search` / `aichat` 等，首个为激活标签。
 - 只摆一次：宿主在 `ui-state.json` 记账，用户改名 / 删除后不会再补回；首次启用时当前场景已含规格里的任一视图则只记账不新建，避免与用户已摆好的界面重复。
 - 布局名与既有布局重名时宿主追加序号并激活新布局；规格超限（深度 16、面板 32、单面板视图 16、名字 64 字节）或非法即拒收。
 

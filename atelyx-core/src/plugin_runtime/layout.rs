@@ -8,6 +8,7 @@
 //!     previous/<ts>/      宿主管理：上一代内容（只留一代，供回退）
 //!     enabled             宿主管理：启用标记（空文件；存在即启用）
 //!     source              宿主管理：安装来源（本地目录安装时记下的绝对路径，供「从来源更新」）
+//!     preset              宿主管理：随包预置标记（空文件；存在即这一代内容来自发行包）
 //!   _tmp-<唯一名>/        安装临时目录（下划线开头，反域名 id 不可能与之相撞；安装结束即清）
 //! ```
 //! 顶层只有插件目录，无隐藏目录约定；宿主保留插件目录内的顶层名 [`RESERVED_TOP_LEVEL`]
@@ -18,7 +19,8 @@ use std::path::{Path, PathBuf};
 use atelyx_plugin_protocol::manifest::MANIFEST_FILE;
 
 /// 宿主在插件目录内保留的顶层名（安装时拒收插件自带同名内容）。
-pub(crate) const RESERVED_TOP_LEVEL: [&str; 5] = ["data", "logs", "previous", "enabled", "source"];
+pub(crate) const RESERVED_TOP_LEVEL: [&str; 6] =
+    ["data", "logs", "previous", "enabled", "source", "preset"];
 /// 换代时**原位保留**的宿主管理项：描述内容之外的状态（私有数据、日志、启用标记）。
 /// 来源记录（`source`）描述的是当前内容从哪来，随内容换代——旧来源留在上一代里自然失效。
 pub(crate) const PRESERVED_ON_UPDATE: [&str; 4] = ["data", "logs", "previous", "enabled"];
@@ -61,6 +63,19 @@ pub(crate) fn read_source(root: &Path, id: &str) -> Option<String> {
     let text = std::fs::read_to_string(source_file(root, id)).ok()?;
     let text = text.trim();
     (!text.is_empty()).then(|| text.to_string())
+}
+
+/// 随包预置标记文件名（插件目录顶层，空文件）：这一代内容来自发行包。
+pub(crate) const PRESET_NAME: &str = "preset";
+
+/// 随包预置标记 `<root>/<id>/preset`。
+pub(crate) fn preset_file(root: &Path, id: &str) -> PathBuf {
+    plugin_dir(root, id).join(PRESET_NAME)
+}
+
+/// 该插件是否为随包预置（标记随内容换代：改用目录 / zip / 市场内容安装后自然消失）。
+pub(crate) fn is_preset(root: &Path, id: &str) -> bool {
+    preset_file(root, id).is_file()
 }
 
 /// 上一代内容根 `<root>/<id>/previous`（其下按代次分子目录，只保留一代）。

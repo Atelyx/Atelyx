@@ -192,6 +192,31 @@ pub mod markdown {
     pub const PARSE: &str = "markdown.parse";
 }
 
+pub mod calendar {
+    /// 当前仓库的日程（按日期、创建时间与 id 排序）。
+    pub const LIST: &str = "calendar.list";
+    /// 新增一条日程；缺省字段由宿主补齐。
+    pub const ADD: &str = "calendar.add";
+    /// 改写一条日程（只改给出的字段）。
+    pub const UPDATE: &str = "calendar.update";
+    /// 删除一条日程。
+    pub const REMOVE: &str = "calendar.remove";
+}
+
+pub mod history {
+    /// 按天聚合的仓库活动：新建 / 修改 / 删除的文件数合计。
+    pub const ACTIVITY: &str = "history.activity";
+}
+
+/// 编辑器：当前打开笔记的选区读写（由笔记插件提供，其他插件据此做「改写选中内容」这类动作）。
+/// 只在编辑状态有意义；阅读态选区不属于编辑器能力。
+pub mod editor {
+    /// 读当前文档路径与选区（无选区时 `from == to`、`text` 为空）。
+    pub const SELECTION: &str = "editor.selection";
+    /// 用给定文本替换当前选区（空串 = 删除选区）；写入经笔记同一套保存链。
+    pub const REPLACE_SELECTION: &str = "editor.replaceSelection";
+}
+
 pub mod ai {
     /// 插件发起 / 续聊一轮对话（须声明 `ai` 权限）。回执 = run 已就位，事件随后经
     /// [`HOST_CHAT_EVENT`] 流达。会话 = 仓库普通会话（主面板可见）；可指定 Agent / 模型 /
@@ -563,6 +588,194 @@ pub struct Radii {
     pub xs: f32,
     pub sm: f32,
     pub md: f32,
+}
+
+// ---------- editor ----------
+
+/// 单次替换文本的字节上限（超限按可读错误拒绝）。
+pub const MAX_EDITOR_TEXT_BYTES: usize = 512 * 1024;
+
+/// [`editor::SELECTION`] 的 result：当前文档与选区。
+/// `path` 缺省 = 未打开笔记；`from` / `to` 是正文字节偏移（frontmatter 之后的部分）。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditorSelection {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    pub text: String,
+    pub from: usize,
+    pub to: usize,
+}
+
+impl EditorSelection {
+    /// 阅读态或未打开笔记时的空选区（`path` 仍带回当前文档）。
+    pub fn empty(path: Option<String>) -> Self {
+        Self { path, text: String::new(), from: 0, to: 0 }
+    }
+}
+
+/// [`editor::REPLACE_SELECTION`] 的 params：替换文本（空串 = 删除当前选区）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditorReplaceParams {
+    pub text: String,
+}
+
+impl EditorReplaceParams {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.text.len() > MAX_EDITOR_TEXT_BYTES {
+            return Err(format!("替换文本不得超过 {MAX_EDITOR_TEXT_BYTES} 字节"));
+        }
+        Ok(())
+    }
+}
+
+// ---------- calendar ----------
+
+/// 一条日程（`date` 为本地日期 `YYYY-MM-DD`；`color` 为 hex，缺省 = 默认强调色）。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalendarItem {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub date: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    /// 创建时刻（Unix 毫秒），同日条目按它排序。
+    #[serde(default)]
+    pub created_at: i64,
+}
+
+/// 标题字符上限（超限按可读错误拒绝）。
+pub const MAX_CALENDAR_TITLE_CHARS: usize = 200;
+
+/// `YYYY-MM-DD` 形态校验（只查形状与范围，不查该日是否存在）。
+pub(crate) fn is_calendar_date(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+        return false;
+    }
+    let digits = |range: std::ops::Range<usize>| {
+        bytes[range].iter().all(u8::is_ascii_digit)
+    };
+    if !(digits(0..4) && digits(5..7) && digits(8..10)) {
+        return false;
+    }
+    let month: u32 = value[5..7].parse().unwrap_or(0);
+    let day: u32 = value[8..10].parse().unwrap_or(0);
+    (1..=12).contains(&month) && (1..=31).contains(&day)
+}
+
+fn validate_calendar_title(title: &str) -> Result<(), String> {
+    if title.chars().count() > MAX_CALENDAR_TITLE_CHARS {
+        return Err(format!("标题不得超过 {MAX_CALENDAR_TITLE_CHARS} 字"));
+    }
+    Ok(())
+}
+
+/// [`calendar::LIST`] 的 result：当前仓库的日程（按开始日期排序）。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalendarListResult {
+    pub items: Vec<CalendarItem>,
+}
+
+/// [`calendar::ADD`] 的 params：`id` / `createdAt` 由宿主补齐；`color` 未给出即按强调色显示。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalendarAddParams {
+    pub date: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+}
+
+impl CalendarAddParams {
+    pub fn validate(&self) -> Result<(), String> {
+        if !is_calendar_date(&self.date) {
+            return Err(format!("日期须为 YYYY-MM-DD：{}", self.date));
+        }
+        if self.title.trim().is_empty() {
+            return Err("标题不能为空".to_string());
+        }
+        validate_calendar_title(&self.title)
+    }
+}
+
+/// [`calendar::UPDATE`] 的 params：只改给出的字段（`None` = 保持原值；空串清空备注）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalendarUpdateParams {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub date: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+}
+
+impl CalendarUpdateParams {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.id.is_empty() {
+            return Err("id 不能为空".to_string());
+        }
+        if let Some(date) = &self.date {
+            if !is_calendar_date(date) {
+                return Err(format!("日期须为 YYYY-MM-DD：{date}"));
+            }
+        }
+        if let Some(title) = &self.title {
+            if title.trim().is_empty() {
+                return Err("标题不能为空".to_string());
+            }
+            validate_calendar_title(title)?;
+        }
+        Ok(())
+    }
+}
+
+/// [`calendar::REMOVE`] 的 params。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalendarIdParams {
+    pub id: String,
+}
+
+impl CalendarIdParams {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.id.is_empty() {
+            return Err("id 不能为空".to_string());
+        }
+        Ok(())
+    }
+}
+
+// ---------- history ----------
+
+/// 一天的活动计数（`day` = 自纪元天数）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DayActivity {
+    pub day: i64,
+    pub count: u32,
+}
+
+/// [`history::ACTIVITY`] 的 result：按天升序的活动计数。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryActivityResult {
+    pub days: Vec<DayActivity>,
 }
 
 // ---------- markdown ----------
@@ -1449,30 +1662,36 @@ pub struct CollabMessageParams {
     pub peer_name: Option<String>,
 }
 
+/// 平台自身的内置插件 id：存储、协作、出网这类基础能力归它，不可停用。
+pub const PLATFORM_PLUGIN: &str = "atelyx.platform";
 
-/// 内置能力目录：服务名 → 它提供的方法（全名，形如 `vault.readText`）。
+/// 内置能力目录：服务名 → 归属插件 → 它提供的方法（全名，形如 `vault.readText`）。
 ///
 /// 这是「能力只有一种描述方式」的落地：方法名本身就是 `服务.方法`，目录按第一个 `.` 切分即得；
 /// `host:` 方法的宿主→插件通知不在其列（那不是插件可调用的能力）。条目引用常量而非字面量，
-/// 改名 / 删除常量会直接编译失败，目录不会悄悄漂移。
-pub const BUILTIN_SERVICES: &[(&str, &[&str])] = &[
-    ("fs", &[fs::PRIVATE_DIR, fs::READ_TEXT, fs::WRITE_TEXT, fs::READ_BINARY, fs::WRITE_BINARY, fs::REMOVE, fs::EXISTS, fs::LIST]),
-    ("process", &[process::SPAWN, process::WRITE_STDIN, process::CLOSE_STDIN, process::KILL]),
-    ("vault", &[vault::READ_TEXT, vault::WRITE_TEXT, vault::READ_BINARY, vault::WRITE_BINARY, vault::IMPORT_FILE, vault::IMAGE_INFO, vault::LIST, vault::EXISTS, vault::REMOVE, vault::RENAME]),
-    ("collab", &[collab::PEERS, collab::SEND]),
-    ("table", &[table::SNAPSHOT, table::UPDATE_CELL, table::ADD_ROW, table::REMOVE_ROW, table::SELECT_ROW, table::SET_CELL_IMAGE]),
-    ("state", &[state::READ, state::WRITE]),
-    ("notification", &[notification::SHOW]),
-    ("tray", &[tray::SET_ITEMS]),
-    ("shortcut", &[shortcut::REGISTER, shortcut::UNREGISTER, shortcut::QUERY]),
-    ("clipboard", &[clipboard::WRITE_TEXT, clipboard::READ_TEXT, clipboard::READ_IMAGE, clipboard::WRITE_IMAGE]),
-    ("dialog", &[dialog::PICK_FILE, dialog::PICK_DIRECTORY]),
-    ("http", &[http::REQUEST]),
+/// 改名 / 删除常量会直接编译失败，目录不会悄悄漂移。服务随归属插件启停：停用笔记插件后
+/// 别的插件调不到 `markdown`，除非另有外部提供者接管。
+pub const BUILTIN_SERVICES: &[(&str, &str, &[&str])] = &[
+    ("fs", PLATFORM_PLUGIN, &[fs::PRIVATE_DIR, fs::READ_TEXT, fs::WRITE_TEXT, fs::READ_BINARY, fs::WRITE_BINARY, fs::REMOVE, fs::EXISTS, fs::LIST]),
+    ("process", PLATFORM_PLUGIN, &[process::SPAWN, process::WRITE_STDIN, process::CLOSE_STDIN, process::KILL]),
+    ("vault", PLATFORM_PLUGIN, &[vault::READ_TEXT, vault::WRITE_TEXT, vault::READ_BINARY, vault::WRITE_BINARY, vault::IMPORT_FILE, vault::IMAGE_INFO, vault::LIST, vault::EXISTS, vault::REMOVE, vault::RENAME]),
+    ("collab", PLATFORM_PLUGIN, &[collab::PEERS, collab::SEND]),
+    ("table", "atelyx.tables", &[table::SNAPSHOT, table::UPDATE_CELL, table::ADD_ROW, table::REMOVE_ROW, table::SELECT_ROW, table::SET_CELL_IMAGE]),
+    ("state", PLATFORM_PLUGIN, &[state::READ, state::WRITE]),
+    ("notification", PLATFORM_PLUGIN, &[notification::SHOW]),
+    ("tray", PLATFORM_PLUGIN, &[tray::SET_ITEMS]),
+    ("shortcut", PLATFORM_PLUGIN, &[shortcut::REGISTER, shortcut::UNREGISTER, shortcut::QUERY]),
+    ("clipboard", PLATFORM_PLUGIN, &[clipboard::WRITE_TEXT, clipboard::READ_TEXT, clipboard::READ_IMAGE, clipboard::WRITE_IMAGE]),
+    ("dialog", PLATFORM_PLUGIN, &[dialog::PICK_FILE, dialog::PICK_DIRECTORY]),
+    ("http", PLATFORM_PLUGIN, &[http::REQUEST]),
     // 工具名册与结果回报是宿主记账，不是可由外部提供者接管的能力，故不在目录里
-    ("ai", &[ai::CHAT_SEND, ai::CHAT_STOP, ai::CHAT_HISTORY, ai::MODELS, ai::AGENTS, ai::CHAT_RENAME, ai::CHAT_DELETE, ai::CHAT_COMPACT]),
-    ("window", &[window::OPEN, window::CLOSE, window::UPDATE, window::SHOW, window::BEGIN_DRAG]),
-    ("query", &[query::MEASURE, query::THEME]),
-    ("markdown", &[markdown::PARSE]),
+    ("ai", "atelyx.ai", &[ai::CHAT_SEND, ai::CHAT_STOP, ai::CHAT_HISTORY, ai::MODELS, ai::AGENTS, ai::CHAT_RENAME, ai::CHAT_DELETE, ai::CHAT_COMPACT]),
+    ("window", PLATFORM_PLUGIN, &[window::OPEN, window::CLOSE, window::UPDATE, window::SHOW, window::BEGIN_DRAG]),
+    ("query", PLATFORM_PLUGIN, &[query::MEASURE, query::THEME]),
+    ("markdown", "atelyx.notes", &[markdown::PARSE]),
+    ("editor", "atelyx.notes", &[editor::SELECTION, editor::REPLACE_SELECTION]),
+    ("calendar", "atelyx.calendar", &[calendar::LIST, calendar::ADD, calendar::UPDATE, calendar::REMOVE]),
+    ("history", "atelyx.history", &[history::ACTIVITY]),
 ];
 
 #[cfg(test)]
@@ -1632,6 +1851,50 @@ mod tests {
             serde_json::to_value(CollabPeersResult::default()).unwrap(),
             serde_json::json!({ "connected": false })
         );
+    }
+
+    #[test]
+    fn calendar_params_validate_shape_and_defaults() {
+        let ok = CalendarAddParams {
+            date: "2026-10-30".into(),
+            title: "会议".into(),
+            note: None,
+            color: None,
+        };
+        assert!(ok.validate().is_ok());
+        assert_eq!(
+            serde_json::to_value(&ok).unwrap(),
+            serde_json::json!({ "date": "2026-10-30", "title": "会议" })
+        );
+        for date in ["2026-1-1", "2026-13-01", "2026-10-32", " 2026-10-30"] {
+            let bad = CalendarAddParams { date: date.into(), ..ok.clone() };
+            assert!(bad.validate().is_err(), "应拒绝日期：{date}");
+        }
+        let blank = CalendarAddParams { title: "  ".into(), ..ok.clone() };
+        assert!(blank.validate().is_err());
+        let long = CalendarAddParams {
+            title: "字".repeat(MAX_CALENDAR_TITLE_CHARS + 1),
+            ..ok
+        };
+        assert!(long.validate().is_err());
+
+        // 未给出的字段不落线（更新语义：缺省 = 保持原值）
+        let update = CalendarUpdateParams {
+            id: "ev-1".into(),
+            date: None,
+            title: Some("改".into()),
+            note: None,
+            color: None,
+        };
+        assert!(update.validate().is_ok());
+        assert_eq!(
+            serde_json::to_value(&update).unwrap(),
+            serde_json::json!({ "id": "ev-1", "title": "改" })
+        );
+        assert!(CalendarUpdateParams { id: String::new(), ..update }.validate().is_err());
+
+        assert!(CalendarIdParams { id: "ev-1".into() }.validate().is_ok());
+        assert!(CalendarIdParams { id: String::new() }.validate().is_err());
     }
 
 }

@@ -20,6 +20,9 @@ pub mod name {
     /// 仓库内文件变更（宿主保存 / 新建 / 删除 / 改名 / 插件经 `vault` 写入）。只覆盖宿主发起的
     /// 写入，外部程序直接改磁盘不发。payload 见 [`FileChangedPayload`]。
     pub const VAULT_FILE_CHANGED: &str = "vault:file.changed";
+    /// 当前仓库的日程变更（视图编辑、插件经 `calendar.*` 写入，本地与协作空间同口径）。
+    /// payload 为空对象：日程量小，订阅方重新 `calendar.list` 取最新清单。
+    pub const CALENDAR_CHANGED: &str = "calendar:changed";
 }
 
 /// [`name::VAULT_SWITCH`] 的 payload（`kind` 与字段名均 camelCase，与协议其余类型同一口径）。

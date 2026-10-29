@@ -2,12 +2,16 @@
 //! 增删改与读写序、活动密度缓存装载；日期数学与视图渲染分别在 calendar_grid / calendar_view。
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use iced::{Task, widget::operation::focus};
 
 use atelyx_core::calendar::{self, CalendarItem};
 use atelyx_core::history::day_key;
+use atelyx_core::plugin_runtime::{CalendarAddParams, CalendarListResult, CalendarUpdateParams};
 use atelyx_core::space_client::{SpaceClient, SpaceError};
+use serde_json::Value;
 
 use crate::calendar_grid;
 use crate::repohistory_view;
@@ -119,7 +123,27 @@ pub struct CalendarState {
     pub activity: Option<Result<HashMap<i64, u32>, String>>,
     /// 活动密度装载在途。
     pub activity_loading: bool,
+    /// 日程写锁：视图变更与插件调用的读改写共用一把，空间模式的并发 PATCH 不会互相覆盖。
+    pub write_lock: Arc<tokio::sync::Mutex<()>>,
 }
+
+/// 插件发起的日程调用（`calendar.*`）。
+#[derive(Clone, Debug)]
+pub enum CalendarCall {
+    List,
+    Add(CalendarAddParams),
+    Update(CalendarUpdateParams),
+    Remove(String),
+}
+
+impl CalendarCall {
+    fn writes(&self) -> bool {
+        !matches!(self, Self::List)
+    }
+}
+
+/// 插件新增日程的会话内序号：同毫秒的多次新增也要拿到不同 id。
+static PLUGIN_ITEM_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// 日历视图消息。
 #[derive(Debug, Clone)]
@@ -150,6 +174,16 @@ pub enum CalendarMsg {
     Committed(u64, u64, Result<Vec<CalendarItem>, String>),
     /// 本地活动密度装载回执（gen 守卫）。
     ActivityLoaded(u64, Result<HashMap<i64, u32>, String>),
+    /// 插件日程调用（`calendar.*`）。
+    PluginCall { request_id: u64, call: CalendarCall },
+    /// 插件日程调用回执：`items` 为写后清单（list 与失败为 None），用于收敛视图会话。
+    PluginDone {
+        request_id: u64,
+        gen: u64,
+        rev: u64,
+        items: Option<Vec<CalendarItem>>,
+        result: Result<Value, String>,
+    },
 }
 
 /// 日历消息处理。
@@ -219,6 +253,10 @@ pub fn on_msg(app: &mut App, msg: CalendarMsg) -> Task<Message> {
         CalendarMsg::Loaded(gen, rev, result) => on_loaded(app, gen, rev, result),
         CalendarMsg::Committed(gen, rev, result) => on_committed(app, gen, rev, result),
         CalendarMsg::ActivityLoaded(gen, result) => on_activity(app, gen, result),
+        CalendarMsg::PluginCall { request_id, call } => plugin_call(app, request_id, call),
+        CalendarMsg::PluginDone { request_id, gen, rev, items, result } => {
+            on_plugin_done(app, request_id, gen, rev, items, result)
+        }
     }
 }
 
@@ -343,16 +381,12 @@ fn load_activity(app: &mut App) -> Task<Message> {
 
 /// 写权限检查（viewer 只读 / 本地仓库未开 = 拦截并提示）。
 fn ensure_writer(app: &mut App) -> bool {
-    match &app.repo_kind {
-        RepoKind::Space(s) if !s.role.can_write() => {
-            app.notify(NoticeLevel::Warning, "只读身份无法修改日程");
+    match write_blocked(app) {
+        Some(reason) => {
+            app.notify(NoticeLevel::Warning, reason);
             false
         }
-        RepoKind::Local if app.vault.root().is_err() => {
-            app.notify(NoticeLevel::Warning, "仓库未打开");
-            false
-        }
-        _ => true,
+        None => true,
     }
 }
 
@@ -375,9 +409,11 @@ fn commit_op(app: &mut App, op: CalendarOp) -> Task<Message> {
 fn write_local(app: &App, op: CalendarOp) -> Task<Message> {
     let Ok((root, _, _)) = app.vault.session_snapshot() else { return Task::none() };
     let queue = app.vault.writes.clone();
+    let lock = app.calendar.write_lock.clone();
     let (gen, rev) = (app.epoch(), app.calendar.ops);
     Task::perform(
         async move {
+            let _guard = lock.lock().await;
             queue
                 .bulk(move || {
                     let mut items = calendar::read_calendar(&root)?;
@@ -399,11 +435,13 @@ fn flush_space(app: &mut App) -> Task<Message> {
     let Some(session) = space_actions::session_of(app) else { return Task::none() };
     app.calendar.space_writing = true;
     let ops = std::mem::take(&mut app.calendar.pending_ops);
+    let lock = app.calendar.write_lock.clone();
     let (gen, rev) = (app.epoch(), app.calendar.ops);
     let client = session.client;
     let space_id = session.space_id;
     Task::perform(
         async move {
+            let _guard = lock.lock().await;
             let mut items = space_read_for_write(&client, &space_id).await?;
             for op in &ops {
                 apply_op(&mut items, op);
@@ -416,6 +454,230 @@ fn flush_space(app: &mut App) -> Task<Message> {
         },
         move |result| Message::Calendar(CalendarMsg::Committed(gen, rev, result)),
     )
+}
+
+/// 插件日程调用入口：写操作与视图变更共用写锁，读改写都基于最新真源。
+fn plugin_call(app: &mut App, request_id: u64, call: CalendarCall) -> Task<Message> {
+    if call.writes() {
+        if let Some(reason) = write_blocked(app) {
+            app.plugins.resolve_shell_call(request_id, Err(reason.to_string()));
+            return Task::none();
+        }
+    }
+    let (gen, rev) = (app.epoch(), app.calendar.ops);
+    let lock = app.calendar.write_lock.clone();
+    match &app.repo_kind {
+        RepoKind::Space(session) => {
+            let client = session.client.clone();
+            let space_id = session.space_id.clone();
+            Task::perform(
+                async move {
+                    let _guard = lock.lock().await;
+                    plugin_call_space(&client, &space_id, call).await
+                },
+                move |(result, items)| {
+                    Message::Calendar(CalendarMsg::PluginDone {
+                        request_id,
+                        gen,
+                        rev,
+                        items,
+                        result,
+                    })
+                },
+            )
+        }
+        RepoKind::Local => {
+            let state = app.vault.clone();
+            let queue = app.vault.writes.clone();
+            Task::perform(
+                async move {
+                    let _guard = lock.lock().await;
+                    plugin_call_local(state, queue, call).await
+                },
+                move |(result, items)| {
+                    Message::Calendar(CalendarMsg::PluginDone {
+                        request_id,
+                        gen,
+                        rev,
+                        items,
+                        result,
+                    })
+                },
+            )
+        }
+    }
+}
+
+/// 写操作的拦截原因（只读身份 / 仓库未打开）；读调用不受限。
+fn write_blocked(app: &App) -> Option<&'static str> {
+    match &app.repo_kind {
+        RepoKind::Space(session) if !session.role.can_write() => Some("只读身份无法修改日程"),
+        RepoKind::Local if app.vault.root().is_err() => Some("仓库未打开"),
+        _ => None,
+    }
+}
+
+async fn plugin_call_local(
+    state: Arc<atelyx_core::vault::VaultState>,
+    queue: atelyx_core::write_queue::WriteQueue,
+    call: CalendarCall,
+) -> (Result<Value, String>, Option<Vec<CalendarItem>>) {
+    if matches!(call, CalendarCall::List) {
+        let read = tokio::task::spawn_blocking(move || {
+            let (root, _, _) = state.session_snapshot()?;
+            calendar::read_calendar(&root)
+        })
+        .await
+        .map_err(|e| e.to_string())
+        .and_then(|r| r);
+        return match read {
+            Ok(items) => (list_payload(&items), None),
+            Err(e) => (Err(e), None),
+        };
+    }
+    let root = tokio::task::spawn_blocking(move || {
+        state.session_snapshot().map(|(root, _, _)| root)
+    })
+    .await
+    .map_err(|e| e.to_string())
+    .and_then(|r| r);
+    let root = match root {
+        Ok(root) => root,
+        Err(e) => return (Err(e), None),
+    };
+    match queue
+        .bulk(move || {
+            let mut items = calendar::read_calendar(&root)?;
+            let value = apply_call(&mut items, &call)?;
+            calendar::write_calendar(&root, &items)?;
+            Ok((value, items))
+        })
+        .await
+    {
+        Ok((value, items)) => (Ok(value), Some(items)),
+        Err(e) => (Err(e), None),
+    }
+}
+
+async fn plugin_call_space(
+    client: &SpaceClient,
+    space_id: &str,
+    call: CalendarCall,
+) -> (Result<Value, String>, Option<Vec<CalendarItem>>) {
+    if matches!(call, CalendarCall::List) {
+        return match space_read(client, space_id).await {
+            Ok(items) => (list_payload(&items), None),
+            Err(e) => (Err(e), None),
+        };
+    }
+    let outcome: Result<(Value, Vec<CalendarItem>), String> = async {
+        let mut items = space_read_for_write(client, space_id).await?;
+        let value = apply_call(&mut items, &call)?;
+        client
+            .team_meta_patch(
+                space_id,
+                &[(META_KEY.to_string(), calendar::calendar_json(&items)?)],
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok((value, items))
+    }
+    .await;
+    match outcome {
+        Ok((value, items)) => (Ok(value), Some(items)),
+        Err(e) => (Err(e), None),
+    }
+}
+
+/// 在真源清单上应用一次写调用，返回给调用方的回执（add 回新条目，其余回空对象）。
+fn apply_call(items: &mut Vec<CalendarItem>, call: &CalendarCall) -> Result<Value, String> {
+    match call {
+        CalendarCall::List => Ok(serde_json::json!({})),
+        CalendarCall::Add(p) => {
+            let now_ms = crate::now_secs() as i64 * 1000;
+            let item = CalendarItem {
+                id: next_item_id(now_ms, PLUGIN_ITEM_SEQ.fetch_add(1, Ordering::Relaxed)),
+                date: p.date.clone(),
+                title: p.title.trim().to_string(),
+                note: p.note.clone(),
+                color: p.color.clone(),
+                created_at: now_ms,
+            };
+            *items = calendar::upsert(items, item.clone());
+            serde_json::to_value(item).map_err(|e| e.to_string())
+        }
+        CalendarCall::Update(p) => {
+            let Some(slot) = items.iter_mut().find(|it| it.id == p.id) else {
+                return Err(format!("日程不存在：{}", p.id));
+            };
+            if let Some(date) = &p.date {
+                slot.date = date.clone();
+            }
+            if let Some(title) = &p.title {
+                slot.title = title.trim().to_string();
+            }
+            // 空串 = 清空备注（与「未给出 = 保持原值」区分）
+            if let Some(note) = &p.note {
+                slot.note = (!note.is_empty()).then(|| note.clone());
+            }
+            if let Some(color) = &p.color {
+                slot.color = Some(color.clone());
+            }
+            Ok(serde_json::json!({}))
+        }
+        CalendarCall::Remove(id) => {
+            if !items.iter().any(|it| it.id == *id) {
+                return Err(format!("日程不存在：{id}"));
+            }
+            *items = calendar::remove(items, id);
+            Ok(serde_json::json!({}))
+        }
+    }
+}
+
+/// `calendar.list` 的回执：按日期、创建时间与 id 稳定排序。
+fn list_payload(items: &[CalendarItem]) -> Result<Value, String> {
+    let mut sorted = items.to_vec();
+    sorted.sort_by(|a, b| {
+        a.date
+            .cmp(&b.date)
+            .then(a.created_at.cmp(&b.created_at))
+            .then(a.id.cmp(&b.id))
+    });
+    serde_json::to_value(CalendarListResult { items: sorted }).map_err(|e| e.to_string())
+}
+
+/// 插件写回执：成功且期间没有更新的变更时，写后清单即当前真源，视图会话据此收敛并作废在途读；
+/// 写失败回读真源，防止写到一半的磁盘内容与视图脱节。
+fn on_plugin_done(
+    app: &mut App,
+    request_id: u64,
+    gen: u64,
+    rev: u64,
+    items: Option<Vec<CalendarItem>>,
+    result: Result<Value, String>,
+) -> Task<Message> {
+    let mut follow = Task::none();
+    if gen == app.epoch() {
+        match &result {
+            Ok(_) => {
+                if let Some(items) = items {
+                    if rev == app.calendar.ops {
+                        app.calendar.items = items;
+                        app.calendar.ready = true;
+                        app.calendar.ops += 1;
+                    } else {
+                        // 期间又落了别的变更：本回执的清单可能已被覆盖，按磁盘重读收敛
+                        follow = reload(app);
+                    }
+                    app.plugins.on_calendar_changed();
+                }
+            }
+            Err(_) => follow = reload(app),
+        }
+    }
+    app.plugins.resolve_shell_call(request_id, result);
+    follow
 }
 
 fn add_from_draft(app: &mut App) -> Task<Message> {
@@ -527,6 +789,7 @@ fn on_committed(app: &mut App, gen: u64, rev: u64, result: Result<Vec<CalendarIt
                 app.calendar.items = items;
                 app.calendar.ready = true;
             }
+            app.plugins.on_calendar_changed();
             flush_space(app)
         }
         Err(e) => {
@@ -607,6 +870,70 @@ mod tests {
         assert!(apply_op(&mut items, &CalendarOp::CycleColor("a".into())));
         assert_eq!(items[0].color.as_deref(), Some(color_hex(0).as_str()));
         assert!(!apply_op(&mut items, &CalendarOp::CycleColor("zz".into())));
+    }
+
+    #[test]
+    fn plugin_calls_round_trip_against_the_source_list() {
+        let mut items = Vec::new();
+        let added = apply_call(
+            &mut items,
+            &CalendarCall::Add(CalendarAddParams {
+                date: "2026-10-30".into(),
+                title: "  会议  ".into(),
+                note: None,
+                color: None,
+            }),
+        )
+        .unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].title, "会议", "标题两端空白不落盘");
+        let id = items[0].id.clone();
+        assert_eq!(added["id"], id.as_str());
+        assert_eq!(added["date"], "2026-10-30");
+
+        apply_call(
+            &mut items,
+            &CalendarCall::Update(CalendarUpdateParams {
+                id: id.clone(),
+                date: Some("2026-11-01".into()),
+                title: Some("改".into()),
+                note: Some(String::new()),
+                color: Some("#112233".into()),
+            }),
+        )
+        .unwrap();
+        assert_eq!(items[0].date, "2026-11-01");
+        assert_eq!(items[0].title, "改");
+        assert_eq!(items[0].note, None, "空串清空备注");
+        assert_eq!(items[0].color.as_deref(), Some("#112233"));
+
+        let missing = apply_call(
+            &mut items,
+            &CalendarCall::Update(CalendarUpdateParams {
+                id: "zz".into(),
+                date: None,
+                title: Some("x".into()),
+                note: None,
+                color: None,
+            }),
+        )
+        .unwrap_err();
+        assert!(missing.contains("不存在"), "{missing}");
+
+        apply_call(&mut items, &CalendarCall::Remove(id.clone())).unwrap();
+        assert!(items.is_empty());
+        assert!(apply_call(&mut items, &CalendarCall::Remove(id)).is_err());
+    }
+
+    #[test]
+    fn plugin_list_payload_sorts_by_date() {
+        let items = vec![
+            CalendarItem { date: "2026-02-01".into(), created_at: 2, ..item("b", "x") },
+            CalendarItem { date: "2026-01-01".into(), created_at: 1, ..item("a", "x") },
+        ];
+        let payload = list_payload(&items).unwrap();
+        assert_eq!(payload["items"][0]["id"], "a");
+        assert_eq!(payload["items"][1]["id"], "b");
     }
 
     #[test]

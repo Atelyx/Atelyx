@@ -180,9 +180,9 @@ pub struct AppUiState {
     /// 已自动摆过默认布局的插件 id（每插件只摆一次；用户改名 / 删除后不再补回）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub plugin_layouts_applied: Vec<String>,
-    /// 已停用的内置视图 id（选择器不再列出；已打开的标签保留并显示停用占位）。
+    /// 已停用的内置插件 id（其视图不再进选择器、服务离开能力总线；已打开的标签保留并显示停用占位）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub disabled_views: Vec<String>,
+    pub disabled_plugins: Vec<String>,
 }
 
 /// ui-state.json 的 schema 版本（格式变更直接升版，旧文件按默认态处理）。
@@ -1809,19 +1809,20 @@ mod tests {
 
 
     #[test]
-    fn ui_state_disabled_views_roundtrip() {
+    fn ui_state_disabled_plugins_roundtrip() {
         // 停用表是可缺省的新字段：缺省省略、非空按 camelCase 键往返。
         let empty = serde_json::to_string(&AppUiState::default()).unwrap();
-        assert!(!empty.contains("disabledViews"), "空表不落盘：{empty}");
-        let ui: AppUiState =
-            serde_json::from_str(r#"{"schema":"atelyx-ui-state/v2","disabledViews":["note"]}"#)
-                .unwrap();
-        assert_eq!(ui.disabled_views, ["note"]);
+        assert!(!empty.contains("disabledPlugins"), "空表不落盘：{empty}");
+        let ui: AppUiState = serde_json::from_str(
+            r#"{"schema":"atelyx-ui-state/v2","disabledPlugins":["atelyx.notes"]}"#,
+        )
+        .unwrap();
+        assert_eq!(ui.disabled_plugins, ["atelyx.notes"]);
         let serialized = serde_json::to_string(&ui).unwrap();
-        assert!(serialized.contains(r#""disabledViews":["note"]"#));
+        assert!(serialized.contains(r#""disabledPlugins":["atelyx.notes"]"#));
         // 旧文件没有该字段：按空表处理
         let old: AppUiState = serde_json::from_str(r#"{"schema":"atelyx-ui-state/v2"}"#).unwrap();
-        assert!(old.disabled_views.is_empty());
+        assert!(old.disabled_plugins.is_empty());
     }
 
     #[test]

@@ -1672,7 +1672,7 @@ fn note_status_pill(app: &App) -> Option<Element<'static, Message>> {
     }
 }
 
-/// 按视图 kind 分派内容（停用的内置视图先给占位；内置视图按 id 查渲染表；插件面板按整面帧渲染）。
+/// 按视图 kind 分派内容（所属内置插件停用时先给占位；预置插件视图按 id 查渲染表；插件面板按整面帧渲染）。
 fn view_content<'a>(app: &'a App, window: iced::window::Id, kind: &str) -> Element<'a, Message> {
     let disabled_builtin = app
         .registry
@@ -1692,7 +1692,7 @@ fn disabled_view(app: &App, kind: &str) -> Element<'static, Message> {
     controls::view_placeholder(
         &view_icon(app, kind),
         view_label(app, kind),
-        "此视图已停用：在 设置 → 插件 → 内置条目 里重新启用后恢复".to_string(),
+        "所属内置插件已停用：在 设置 → 插件 → 内置插件 里重新启用后恢复".to_string(),
     )
 }
 

@@ -438,6 +438,7 @@ fn message_flow(app: &App, window: iced::window::Id) -> iced::Element<'_, Messag
         theme: &app.theme,
         scale: 1.0,
         actions: Some(actions),
+        markdown: app.plugins.service_is_builtin("markdown"),
         streaming_id,
         toggle: if canvas_node.is_some() {
             crate::chat_stream::ToggleRoute::Canvas

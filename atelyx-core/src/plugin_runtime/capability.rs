@@ -19,8 +19,8 @@ use serde_json::Value;
 pub(crate) fn permission_for(name: &str) -> Option<Permission> {
     use Permission::*;
     use method::{
-        ai, clipboard, collab, dialog, fs, http, notification, process, shortcut, state, table, tray,
-        vault, window,
+        ai, calendar, clipboard, collab, dialog, editor, fs, history, http, notification, process,
+        shortcut, state, table, tray, vault, window,
     };
     match name {
         fs::PRIVATE_DIR | fs::READ_TEXT | fs::WRITE_TEXT | fs::READ_BINARY | fs::WRITE_BINARY
@@ -40,6 +40,11 @@ pub(crate) fn permission_for(name: &str) -> Option<Permission> {
         dialog::PICK_FILE | dialog::PICK_DIRECTORY => Some(Dialog),
         http::REQUEST => Some(Http),
         collab::PEERS | collab::SEND => Some(Collab),
+        // 读写当前笔记的选区即读写用户正文，按仓库内容权限归类
+        editor::SELECTION | editor::REPLACE_SELECTION => Some(Vault),
+        // 日程与活动统计取自当前仓库内容，同样按仓库内容权限归类
+        calendar::LIST | calendar::ADD | calendar::UPDATE | calendar::REMOVE => Some(Vault),
+        history::ACTIVITY => Some(Vault),
         window::OPEN | window::CLOSE | window::UPDATE | window::SHOW | window::BEGIN_DRAG => Some(Window),
         ai::CHAT_SEND | ai::CHAT_STOP | ai::CHAT_HISTORY | ai::CHAT_RENAME | ai::CHAT_DELETE
         | ai::CHAT_COMPACT | ai::MODELS | ai::AGENTS | ai::REGISTER_TOOL | ai::UNREGISTER_TOOL
@@ -131,6 +136,13 @@ mod tests {
         assert_eq!(permission_for(method::tray::SET_ITEMS), Some(Permission::Tray));
         assert_eq!(permission_for(method::collab::PEERS), Some(Permission::Collab));
         assert_eq!(permission_for(method::collab::SEND), Some(Permission::Collab));
+        assert_eq!(permission_for(method::editor::SELECTION), Some(Permission::Vault));
+        assert_eq!(permission_for(method::editor::REPLACE_SELECTION), Some(Permission::Vault));
+        assert_eq!(permission_for(method::calendar::LIST), Some(Permission::Vault));
+        assert_eq!(permission_for(method::calendar::ADD), Some(Permission::Vault));
+        assert_eq!(permission_for(method::calendar::UPDATE), Some(Permission::Vault));
+        assert_eq!(permission_for(method::calendar::REMOVE), Some(Permission::Vault));
+        assert_eq!(permission_for(method::history::ACTIVITY), Some(Permission::Vault));
         // 纯文本变换与能力总线入口不占权限类（调用照常执行，审计按各自归类记录）
         assert_eq!(permission_for(method::markdown::PARSE), None);
         for name in [

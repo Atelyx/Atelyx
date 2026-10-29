@@ -22,6 +22,8 @@ use atelyx_plugin_protocol::method::MAX_MEASURE_ITEMS;
 use crate::Context;
 
 pub use build::Ui;
+pub use build::Canvas;
+pub use geom::Rect;
 pub use icons::Icon;
 pub use widgets::{TextRole, TextStyle};
 
@@ -36,6 +38,8 @@ const MAX_MARKDOWN_CACHE: usize = 8;
 pub enum UiEvent {
     /// 按钮 / 勾选框 / 卡片被点击（勾选框的勾选值由插件自己翻转）。
     Click { id: String },
+    /// 双击落在某控件上（在此之前已按一次按下处理：聚焦输入框并全选）。随后的抬起仍会另出 `Click`。
+    DoubleClick { id: String },
     /// 右键落在某控件上（不改焦点；插件可据此展开行内菜单或走快捷动作）。
     RightClick { id: String },
     /// 输入框值变化：插件把新值写回自己的状态再重渲染。
@@ -53,6 +57,7 @@ pub enum UiEvent {
 /// 一个面的控件层状态与驱动：交互态、量算缓存与主题都随它跨帧保留。
 pub struct FrameUi {
     state: model::UiState,
+    fps: Option<u16>,
 }
 
 impl Default for FrameUi {
@@ -63,12 +68,18 @@ impl Default for FrameUi {
 
 impl FrameUi {
     pub fn new() -> Self {
-        Self { state: model::UiState::default() }
+        Self { state: model::UiState::default(), fps: None }
     }
 
     /// 面最近一次上报的逻辑尺寸；宿主首次绘制后才可信。
     pub fn size(&self) -> (f32, f32) {
         self.state.size
+    }
+
+    /// 声明宿主帧拍频率（1–120）：声明后宿主按该节拍回发 `host:frame.tick`，
+    /// 插件的播放 / 动画在帧拍里推进并重渲染；`None` = 不推帧拍。
+    pub fn set_fps(&mut self, fps: Option<u16>) {
+        self.fps = fps;
     }
 
     /// 解释一条宿主输入：翻成语义事件并把交互态（焦点 / 光标 / 选区 / 滚动）就地更新。
@@ -98,7 +109,7 @@ impl FrameUi {
         let mut passes = 0usize;
         loop {
             let metrics = std::mem::take(&mut self.state.metrics);
-            let out = {
+            let mut out = {
                 let mut ctxb = build::BuildCtx::new(&theme, metrics, &self.state);
                 let items = {
                     let mut ui = build::Ui::new(&mut ctxb, area);
@@ -108,6 +119,7 @@ impl FrameUi {
                 build::layout_root(&mut ctxb, items, area);
                 ctxb.finish()
             };
+            out.frame.fps = self.fps;
             self.state.metrics = out.metrics;
             self.state.layouts = out.layouts;
             self.state.focusables = out.focusables;
@@ -197,9 +209,9 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use atelyx_plugin_protocol::paint::DrawCommand;
+    use atelyx_plugin_protocol::paint::{ColorToken, DrawCommand, ImageFit, ImageSource, PaintColor};
     use atelyx_plugin_protocol::envelope::Envelope;
-    use atelyx_plugin_protocol::frame::{FrameInput, FrameSubmitParams, SurfaceFrame};
+    use atelyx_plugin_protocol::frame::{FrameInput, FrameSubmitParams, HitCursor, SurfaceFrame};
     use atelyx_plugin_protocol::method::{
         self, FontSizes, MeasureBatchParams, MeasureTextResult, Radii, TextPayload, ThemeColors, ThemeResult,
     };
@@ -444,6 +456,56 @@ mod tests {
 
         let events = bench.event(key(NamedKey::Backspace)).await;
         assert_eq!(events, vec![UiEvent::Text { id: "host".into(), value: String::new() }]);
+    }
+
+    #[tokio::test]
+    async fn text_area_breaks_on_enter_and_moves_by_rows() {
+        let mut bench = Bench::new(120.0, 200.0).await;
+        let frame = bench.render(|ui| ui.text_area("body", "line1\nline2", "写点什么", 60.0)).await.unwrap();
+        assert_eq!(texts(&frame), vec!["line1".to_string(), "line2".to_string()], "显式换行各占一行");
+        assert!(has_hit(&frame, "body"));
+
+        let events = bench
+            .event(FrameInput::PointerDown { x: 100.0, y: 30.0, button: MouseButton::Left, hit: Some("body".into()) })
+            .await;
+        assert!(events.iter().any(|event| matches!(event, UiEvent::Focus { id, focused: true } if id == "body")));
+
+        // 多行的回车是插入换行，不是单行的「提交」
+        let events = bench.event(key(NamedKey::Enter)).await;
+        assert_eq!(events, vec![UiEvent::Text { id: "body".into(), value: "line1\nline2\n".into() }]);
+
+        bench.set_value("body", "line1\nline2\n");
+        let frame = bench.render(|ui| ui.text_area("body", "line1\nline2\n", "", 60.0)).await.unwrap();
+        assert!(frame.ime.is_some(), "聚焦的多行框声明输入法光标");
+
+        // 光标在末尾空行：上键回到上一行的同一横向位置
+        let events = bench.event(key(NamedKey::ArrowUp)).await;
+        assert!(events.is_empty(), "上下键只挪光标");
+        let events = bench.event(typed("X")).await;
+        assert_eq!(events, vec![UiEvent::Text { id: "body".into(), value: "line1\nXline2\n".into() }]);
+    }
+
+    #[tokio::test]
+    async fn submit_text_area_sends_on_enter_and_breaks_on_shift_enter() {
+        let mut bench = Bench::new(200.0, 160.0).await;
+        bench.render(|ui| ui.text_area_submit("draft", "hi", "输入问题", 48.0)).await.unwrap();
+        bench
+            .event(FrameInput::PointerDown { x: 190.0, y: 20.0, button: MouseButton::Left, hit: Some("draft".into()) })
+            .await;
+
+        let shift = Modifiers { shift: true, ..Modifiers::default() };
+        let events = bench
+            .event(FrameInput::Key {
+                key: Key::Named { name: NamedKey::Enter },
+                action: KeyAction::Press,
+                modifiers: shift,
+                text: None,
+            })
+            .await;
+        assert_eq!(events, vec![UiEvent::Text { id: "draft".into(), value: "hi\n".into() }], "Shift+回车换行");
+
+        let events = bench.event(key(NamedKey::Enter)).await;
+        assert_eq!(events, vec![UiEvent::Submit { id: "draft".into() }], "回车提交不插换行");
     }
 
     #[tokio::test]
@@ -953,5 +1015,87 @@ mod tests {
             .unwrap();
         assert!(has_hit(&frame, "copy"));
         assert!(texts(&frame).iter().any(|text| text == "3 个"));
+    }
+
+    #[tokio::test]
+    async fn double_click_selects_the_input_and_reports_its_own_event() {
+        let mut bench = Bench::new(240.0, 120.0).await;
+        bench.render(|ui| ui.text_input("host", "abc", "")).await.unwrap();
+        bench.set_value("host", "abc");
+
+        let events = bench
+            .event(FrameInput::DoubleClick { x: 20.0, y: 10.0, button: MouseButton::Left, hit: Some("host".into()) })
+            .await;
+        assert!(events.iter().any(|event| matches!(event, UiEvent::Focus { id, focused: true } if id == "host")));
+        assert_eq!(events.last(), Some(&UiEvent::DoubleClick { id: "host".into() }));
+
+        let events = bench.event(key(NamedKey::Backspace)).await;
+        assert_eq!(events, vec![UiEvent::Text { id: "host".into(), value: String::new() }], "双击选中整个值");
+
+        let events = bench
+            .event(FrameInput::DoubleClick { x: 20.0, y: 10.0, button: MouseButton::Right, hit: Some("host".into()) })
+            .await;
+        assert_eq!(events, vec![UiEvent::RightClick { id: "host".into() }], "右键双击不按左键双击处理");
+    }
+
+    #[tokio::test]
+    async fn canvas_draws_text_and_routes_sub_area_clicks_and_hover() {
+        let mut bench = Bench::new(200.0, 120.0).await;
+        let build = |ui: &mut build::Ui<'_, '_>| {
+            ui.canvas(60.0, |c| {
+                let area = c.area();
+                let fill = if c.hovered("cell") { ColorToken::Accent } else { ColorToken::Surface };
+                c.draw(DrawCommand::Rect {
+                    x: area.x,
+                    y: area.y,
+                    w: area.w,
+                    h: area.h,
+                    fill: Some(PaintColor::Token { name: fill }),
+                    stroke: None,
+                    stroke_width: None,
+                    corner_radius: None,
+                });
+                c.text("日", area.x + 4.0, area.y + 4.0, 12.0, PaintColor::Token { name: ColorToken::Text });
+                c.hit("cell", Rect::new(area.x, area.y, 40.0, 40.0), HitCursor::Pointer);
+            });
+        };
+        let frame = bench.render(build).await.unwrap();
+        assert!(has_hit(&frame, "cell"));
+        assert!(texts(&frame).iter().any(|text| text == "日"));
+
+        let events = bench.click_and_collect("cell").await;
+        assert_eq!(events, vec![UiEvent::Click { id: "cell".into() }]);
+
+        bench
+            .event(FrameInput::PointerMove { x: 5.0, y: 5.0, hit: Some("cell".into()) })
+            .await;
+        let frame = bench.render(build).await.unwrap();
+        assert!(frame.commands.iter().any(|command| matches!(
+            command,
+            DrawCommand::Rect { fill: Some(PaintColor::Token { name: ColorToken::Accent }), .. }
+        )), "悬停态反映在自绘外观里");
+    }
+
+    #[tokio::test]
+    async fn image_declares_a_tile_with_the_requested_fit() {
+        let mut bench = Bench::new(200.0, 120.0).await;
+        let frame = bench
+            .render(|ui| ui.image_fit(ImageSource::Vault { path: "a.png".into() }, 80.0, ImageFit::Cover))
+            .await
+            .unwrap();
+        assert!(frame.commands.iter().any(|command| matches!(
+            command,
+            DrawCommand::Image { fit: Some(ImageFit::Cover), w, h, .. } if *w == 200.0 && *h == 80.0
+        )));
+    }
+
+    #[tokio::test]
+    async fn declared_fps_rides_on_every_frame() {
+        let mut bench = Bench::new(200.0, 120.0).await;
+        let frame = bench.render(|ui| ui.text("静止", TextRole::Label)).await.unwrap();
+        assert_eq!(frame.fps, None, "未声明即不推帧拍");
+        bench.ui.lock().await.set_fps(Some(30));
+        let frame = bench.render(|ui| ui.text("播放中", TextRole::Label)).await.unwrap();
+        assert_eq!(frame.fps, Some(30));
     }
 }

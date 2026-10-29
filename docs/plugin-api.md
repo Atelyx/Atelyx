@@ -370,29 +370,33 @@ pub mod error {
 
 ```rust
 // atelyx-plugin-protocol/src/method.rs
-/// 内置能力目录：服务名 → 它提供的方法（全名，形如 `vault.readText`）。
+/// 内置能力目录：服务名 → 归属插件 → 它提供的方法（全名，形如 `vault.readText`）。
 ///
 /// 这是「能力只有一种描述方式」的落地：方法名本身就是 `服务.方法`，目录按第一个 `.` 切分即得；
 /// `host:` 方法的宿主→插件通知不在其列（那不是插件可调用的能力）。条目引用常量而非字面量，
-/// 改名 / 删除常量会直接编译失败，目录不会悄悄漂移。
-pub const BUILTIN_SERVICES: &[(&str, &[&str])] = &[
-    ("fs", &[fs::PRIVATE_DIR, fs::READ_TEXT, fs::WRITE_TEXT, fs::READ_BINARY, fs::WRITE_BINARY, fs::REMOVE, fs::EXISTS, fs::LIST]),
-    ("process", &[process::SPAWN, process::WRITE_STDIN, process::CLOSE_STDIN, process::KILL]),
-    ("vault", &[vault::READ_TEXT, vault::WRITE_TEXT, vault::READ_BINARY, vault::WRITE_BINARY, vault::IMPORT_FILE, vault::IMAGE_INFO, vault::LIST, vault::EXISTS, vault::REMOVE, vault::RENAME]),
-    ("collab", &[collab::PEERS, collab::SEND]),
-    ("table", &[table::SNAPSHOT, table::UPDATE_CELL, table::ADD_ROW, table::REMOVE_ROW, table::SELECT_ROW, table::SET_CELL_IMAGE]),
-    ("state", &[state::READ, state::WRITE]),
-    ("notification", &[notification::SHOW]),
-    ("tray", &[tray::SET_ITEMS]),
-    ("shortcut", &[shortcut::REGISTER, shortcut::UNREGISTER, shortcut::QUERY]),
-    ("clipboard", &[clipboard::WRITE_TEXT, clipboard::READ_TEXT, clipboard::READ_IMAGE, clipboard::WRITE_IMAGE]),
-    ("dialog", &[dialog::PICK_FILE, dialog::PICK_DIRECTORY]),
-    ("http", &[http::REQUEST]),
+/// 改名 / 删除常量会直接编译失败，目录不会悄悄漂移。服务随归属插件启停：停用笔记插件后
+/// 别的插件调不到 `markdown`，除非另有外部提供者接管。
+pub const BUILTIN_SERVICES: &[(&str, &str, &[&str])] = &[
+    ("fs", PLATFORM_PLUGIN, &[fs::PRIVATE_DIR, fs::READ_TEXT, fs::WRITE_TEXT, fs::READ_BINARY, fs::WRITE_BINARY, fs::REMOVE, fs::EXISTS, fs::LIST]),
+    ("process", PLATFORM_PLUGIN, &[process::SPAWN, process::WRITE_STDIN, process::CLOSE_STDIN, process::KILL]),
+    ("vault", PLATFORM_PLUGIN, &[vault::READ_TEXT, vault::WRITE_TEXT, vault::READ_BINARY, vault::WRITE_BINARY, vault::IMPORT_FILE, vault::IMAGE_INFO, vault::LIST, vault::EXISTS, vault::REMOVE, vault::RENAME]),
+    ("collab", PLATFORM_PLUGIN, &[collab::PEERS, collab::SEND]),
+    ("table", "atelyx.tables", &[table::SNAPSHOT, table::UPDATE_CELL, table::ADD_ROW, table::REMOVE_ROW, table::SELECT_ROW, table::SET_CELL_IMAGE]),
+    ("state", PLATFORM_PLUGIN, &[state::READ, state::WRITE]),
+    ("notification", PLATFORM_PLUGIN, &[notification::SHOW]),
+    ("tray", PLATFORM_PLUGIN, &[tray::SET_ITEMS]),
+    ("shortcut", PLATFORM_PLUGIN, &[shortcut::REGISTER, shortcut::UNREGISTER, shortcut::QUERY]),
+    ("clipboard", PLATFORM_PLUGIN, &[clipboard::WRITE_TEXT, clipboard::READ_TEXT, clipboard::READ_IMAGE, clipboard::WRITE_IMAGE]),
+    ("dialog", PLATFORM_PLUGIN, &[dialog::PICK_FILE, dialog::PICK_DIRECTORY]),
+    ("http", PLATFORM_PLUGIN, &[http::REQUEST]),
     // 工具名册与结果回报是宿主记账，不是可由外部提供者接管的能力，故不在目录里
-    ("ai", &[ai::CHAT_SEND, ai::CHAT_STOP, ai::CHAT_HISTORY, ai::MODELS, ai::AGENTS, ai::CHAT_RENAME, ai::CHAT_DELETE, ai::CHAT_COMPACT]),
-    ("window", &[window::OPEN, window::CLOSE, window::UPDATE, window::SHOW, window::BEGIN_DRAG]),
-    ("query", &[query::MEASURE, query::THEME]),
-    ("markdown", &[markdown::PARSE]),
+    ("ai", "atelyx.ai", &[ai::CHAT_SEND, ai::CHAT_STOP, ai::CHAT_HISTORY, ai::MODELS, ai::AGENTS, ai::CHAT_RENAME, ai::CHAT_DELETE, ai::CHAT_COMPACT]),
+    ("window", PLATFORM_PLUGIN, &[window::OPEN, window::CLOSE, window::UPDATE, window::SHOW, window::BEGIN_DRAG]),
+    ("query", PLATFORM_PLUGIN, &[query::MEASURE, query::THEME]),
+    ("markdown", "atelyx.notes", &[markdown::PARSE]),
+    ("editor", "atelyx.notes", &[editor::SELECTION, editor::REPLACE_SELECTION]),
+    ("calendar", "atelyx.calendar", &[calendar::LIST, calendar::ADD, calendar::UPDATE, calendar::REMOVE]),
+    ("history", "atelyx.history", &[history::ACTIVITY]),
 ];
 ```
 
@@ -1590,6 +1594,40 @@ pub mod doc {
 
 ```rust
 // atelyx-plugin-protocol/src/method.rs
+/// 编辑器：当前打开笔记的选区读写（由笔记插件提供，其他插件据此做「改写选中内容」这类动作）。
+/// 只在编辑状态有意义；阅读态选区不属于编辑器能力。
+pub mod editor {
+    /// 读当前文档路径与选区（无选区时 `from == to`、`text` 为空）。
+    pub const SELECTION: &str = "editor.selection";
+    /// 用给定文本替换当前选区（空串 = 删除选区）；写入经笔记同一套保存链。
+    pub const REPLACE_SELECTION: &str = "editor.replaceSelection";
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+pub mod calendar {
+    /// 当前仓库的日程（按日期、创建时间与 id 排序）。
+    pub const LIST: &str = "calendar.list";
+    /// 新增一条日程；缺省字段由宿主补齐。
+    pub const ADD: &str = "calendar.add";
+    /// 改写一条日程（只改给出的字段）。
+    pub const UPDATE: &str = "calendar.update";
+    /// 删除一条日程。
+    pub const REMOVE: &str = "calendar.remove";
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+pub mod history {
+    /// 按天聚合的仓库活动：新建 / 修改 / 删除的文件数合计。
+    pub const ACTIVITY: &str = "history.activity";
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
 pub mod ai {
     /// 插件发起 / 续聊一轮对话（须声明 `ai` 权限）。回执 = run 已就位，事件随后经
     /// [`HOST_CHAT_EVENT`] 流达。会话 = 仓库普通会话（主面板可见）；可指定 Agent / 模型 /
@@ -2057,6 +2095,35 @@ pub struct DocCloseParams {
 
 ```rust
 // atelyx-plugin-protocol/src/method.rs
+/// 单次替换文本的字节上限（超限按可读错误拒绝）。
+pub const MAX_EDITOR_TEXT_BYTES: usize = 512 * 1024;
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`editor::SELECTION`] 的 result：当前文档与选区。
+/// `path` 缺省 = 未打开笔记；`from` / `to` 是正文字节偏移（frontmatter 之后的部分）。
+#[serde(rename_all = "camelCase")]
+pub struct EditorSelection {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    pub text: String,
+    pub from: usize,
+    pub to: usize,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`editor::REPLACE_SELECTION`] 的 params：替换文本（空串 = 删除当前选区）。
+#[serde(rename_all = "camelCase")]
+pub struct EditorReplaceParams {
+    pub text: String,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
 /// [`ai::CHAT_SEND`] 的 params：`session_id` 缺省 = 新建会话；非缺省 = 在该会话续聊
 /// （会话须存在于当前仓库，否则可读拒绝）。同会话已有活跃 run 时拒绝（每会话单 run）。
 #[serde(rename_all = "camelCase")]
@@ -2455,7 +2522,107 @@ pub struct TableSetCellImageParams {
 }
 ```
 
-## 12. 能力面负载：托盘与协作
+## 12. 能力面负载：日程与活动
+
+日程读写与按天活动统计；两者都取自当前仓库（本地文件 / 空间团队 meta），与宿主视图同一真源。
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 一条日程（`date` 为本地日期 `YYYY-MM-DD`；`color` 为 hex，缺省 = 默认强调色）。
+#[serde(rename_all = "camelCase")]
+pub struct CalendarItem {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub date: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    /// 创建时刻（Unix 毫秒），同日条目按它排序。
+    #[serde(default)]
+    pub created_at: i64,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`calendar::LIST`] 的 result：当前仓库的日程（按开始日期排序）。
+#[serde(rename_all = "camelCase")]
+pub struct CalendarListResult {
+    pub items: Vec<CalendarItem>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`calendar::ADD`] 的 params：`id` / `createdAt` 由宿主补齐；`color` 未给出即按强调色显示。
+#[serde(rename_all = "camelCase")]
+pub struct CalendarAddParams {
+    pub date: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`calendar::UPDATE`] 的 params：只改给出的字段（`None` = 保持原值；空串清空备注）。
+#[serde(rename_all = "camelCase")]
+pub struct CalendarUpdateParams {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub date: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`calendar::REMOVE`] 的 params。
+#[serde(rename_all = "camelCase")]
+pub struct CalendarIdParams {
+    pub id: String,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 标题字符上限（超限按可读错误拒绝）。
+pub const MAX_CALENDAR_TITLE_CHARS: usize = 200;
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 一天的活动计数（`day` = 自纪元天数）。
+#[serde(rename_all = "camelCase")]
+pub struct DayActivity {
+    pub day: i64,
+    pub count: u32,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`history::ACTIVITY`] 的 result：按天升序的活动计数。
+#[serde(rename_all = "camelCase")]
+pub struct HistoryActivityResult {
+    pub days: Vec<DayActivity>,
+}
+```
+
+## 13. 能力面负载：托盘与协作
 
 系统托盘条目与空间内插件间消息的负载形态；两类能力的可用性都随宿主平台与容器类型而变。
 
@@ -2570,7 +2737,7 @@ pub struct CollabMessageParams {
 }
 ```
 
-## 13. 宿主广播事件
+## 14. 宿主广播事件
 
 插件经 `event.subscribe` 声明订阅的事件名与载荷；未上表的名字宿主拒绝订阅。
 
@@ -2600,6 +2767,9 @@ pub mod name {
     /// 仓库内文件变更（宿主保存 / 新建 / 删除 / 改名 / 插件经 `vault` 写入）。只覆盖宿主发起的
     /// 写入，外部程序直接改磁盘不发。payload 见 [`FileChangedPayload`]。
     pub const VAULT_FILE_CHANGED: &str = "vault:file.changed";
+    /// 当前仓库的日程变更（视图编辑、插件经 `calendar.*` 写入，本地与协作空间同口径）。
+    /// payload 为空对象：日程量小，订阅方重新 `calendar.list` 取最新清单。
+    pub const CALENDAR_CHANGED: &str = "calendar:changed";
 }
 ```
 

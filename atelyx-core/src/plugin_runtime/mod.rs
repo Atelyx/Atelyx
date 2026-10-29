@@ -16,6 +16,7 @@ mod manifest;
 mod markdown;
 /// 市场数据源（公开给壳：索引拉取 / 缓存 / Release 取数）。
 pub mod market;
+mod preset;
 mod service_dir;
 mod shortcut;
 /// 表格服务面的纯映射（公开给壳：表格真源 → 协议只读快照）。
@@ -56,9 +57,13 @@ pub use atelyx_plugin_protocol::layout::LayoutSpecNode;
 pub use atelyx_plugin_protocol::manifest::{DocTypeRegistration, Permission};
 /// 能力总线的对外契约类型（服务清单 / 登记参数 / 错误原因）。
 pub use atelyx_plugin_protocol::service;
+/// 随包预置插件同步的结果。
+pub use preset::PresetSyncReport;
 pub use atelyx_plugin_protocol::method::{
     AiAgent, AiAgentsResult, AiModel, AiModelPick, AiModelProvider, AiModelsResult,
-    AxesPadding, BUILTIN_SERVICES,
+    AxesPadding, BUILTIN_SERVICES, PLATFORM_PLUGIN, EditorReplaceParams, EditorSelection,
+    CalendarAddParams, CalendarIdParams, CalendarItem, CalendarListResult, CalendarUpdateParams,
+    DayActivity, HistoryActivityResult,
     ChatEvent, ChatEventParams, ChatHistoryParams, ChatHistoryResult,
     ChatRenameParams, ChatSendParams, ChatSessionParams, ChatSessionSummary, ChatSessionWire,
     ChatStopParams, ClipboardImage, CollabMessageParams, CollabPeer, CollabPeersResult,
@@ -282,6 +287,20 @@ pub enum HostRequest {
     CollabPeers { plugin_id: String, request_id: u64 },
     /// 插件请求向同空间的对等插件发一条消息。
     CollabSend { plugin_id: String, request_id: u64, params: method::CollabSendParams },
+    /// 插件请求当前打开笔记的选区（真源在壳的编辑面会话）。
+    EditorSelection { plugin_id: String, request_id: u64 },
+    /// 插件请求用给定文本替换当前选区（空串 = 删除选区；写入经笔记同一套保存链）。
+    EditorReplaceSelection { plugin_id: String, request_id: u64, text: String },
+    /// 插件请求当前仓库的日程清单（本地文件 / 空间团队 meta，与日历视图同一真源）。
+    CalendarList { plugin_id: String, request_id: u64 },
+    /// 插件请求新增一条日程（结果回带宿主补齐后的条目）。
+    CalendarAdd { plugin_id: String, request_id: u64, params: method::CalendarAddParams },
+    /// 插件请求改写一条日程（只改给出的字段）。
+    CalendarUpdate { plugin_id: String, request_id: u64, params: method::CalendarUpdateParams },
+    /// 插件请求删除一条日程。
+    CalendarRemove { plugin_id: String, request_id: u64, params: method::CalendarIdParams },
+    /// 插件请求按天聚合的仓库活动（只有本地仓库有本地历史侧文件）。
+    HistoryActivity { plugin_id: String, request_id: u64 },
 }
 
 /// 插件列表项（设置页渲染用）。
@@ -305,6 +324,8 @@ pub struct PluginSummary {
     pub submits: u64,
     /// 安装来源目录（本地目录安装时记下的绝对路径；zip / 市场安装为 `None`）。
     pub source: Option<String>,
+    /// 随包预置：内容由发行包的 `preset-plugins/` 铺盘（设置页归入内置插件）。
+    pub preset: bool,
 }
 
 /// 一次安装的结果：内容已落位。`start_error` = 曾启用的插件未能用新内容启动——
@@ -574,7 +595,14 @@ impl PluginRuntime {
             | HostRequest::VaultImageInfo { .. }
             | HostRequest::TraySetItems { .. }
             | HostRequest::CollabPeers { .. }
-            | HostRequest::CollabSend { .. } => {
+            | HostRequest::CollabSend { .. }
+            | HostRequest::EditorSelection { .. }
+            | HostRequest::EditorReplaceSelection { .. }
+            | HostRequest::CalendarList { .. }
+            | HostRequest::CalendarAdd { .. }
+            | HostRequest::CalendarUpdate { .. }
+            | HostRequest::CalendarRemove { .. }
+            | HostRequest::HistoryActivity { .. } => {
                 return Err("界面服务请求形态不符".to_string())
             }
         };
@@ -790,6 +818,44 @@ impl PluginRuntime {
                 plugin_id,
                 request_id,
                 params,
+            },
+            HostRequest::EditorSelection { plugin_id, .. } => HostRequest::EditorSelection {
+                plugin_id,
+                request_id,
+            },
+            HostRequest::EditorReplaceSelection { plugin_id, text, .. } => {
+                HostRequest::EditorReplaceSelection {
+                    plugin_id,
+                    request_id,
+                    text,
+                }
+            }
+            HostRequest::CalendarList { plugin_id, .. } => HostRequest::CalendarList {
+                plugin_id,
+                request_id,
+            },
+            HostRequest::CalendarAdd { plugin_id, params, .. } => HostRequest::CalendarAdd {
+                plugin_id,
+                request_id,
+                params,
+            },
+            HostRequest::CalendarUpdate { plugin_id, params, .. } => {
+                HostRequest::CalendarUpdate {
+                    plugin_id,
+                    request_id,
+                    params,
+                }
+            }
+            HostRequest::CalendarRemove { plugin_id, params, .. } => {
+                HostRequest::CalendarRemove {
+                    plugin_id,
+                    request_id,
+                    params,
+                }
+            }
+            HostRequest::HistoryActivity { plugin_id, .. } => HostRequest::HistoryActivity {
+                plugin_id,
+                request_id,
             },
             _ => return Err("壳侧服务请求形态不符".to_string()),
         };
@@ -1195,13 +1261,15 @@ impl PluginRuntime {
                         undeclared: instance.map(|i| i.undeclared_count()).unwrap_or(0),
                         submits: instance.map(|i| i.submits()).unwrap_or(0),
                         source: None,
+                        preset: false,
                     }
                 })
                 .collect()
         };
-        // 安装来源是磁盘事实（不进 discovered 缓存）：出锁后再读，不持锁做 I/O
+        // 安装来源与预置标记是磁盘事实（不进 discovered 缓存）：出锁后再读，不持锁做 I/O
         for summary in &mut summaries {
             summary.source = layout::read_source(&self.root, &summary.id);
+            summary.preset = layout::is_preset(&self.root, &summary.id);
         }
         summaries
     }
@@ -1253,6 +1321,12 @@ impl PluginRuntime {
     ) -> Result<InstallOutcome, String> {
         let id = install::install_from_zip(&self.root, zip_path, expected_id)?;
         self.after_install(&id)
+    }
+
+    /// 同步随包预置插件：`bundled` = 发行包内插件目录，`marker` = 记录装过哪些预置项的标记文件。
+    /// 首装即启用，已装的仅在随包版本更新时替换；只落位内容，不启动进程。
+    pub fn sync_presets(&self, bundled: &Path, marker: &Path) -> Result<PresetSyncReport, String> {
+        preset::sync(&self.root, bundled, marker)
     }
 
     /// 用上次的安装来源目录重新安装（开发回路：构建产物更新后一键重装并重启）。
@@ -1390,6 +1464,11 @@ impl PluginRuntime {
             old_path: old_path.map(str::to_string),
         };
         self.broadcast_event(event::name::VAULT_FILE_CHANGED, &payload);
+    }
+
+    /// 广播当前仓库的日程变更（视图编辑与插件写入同口径）。日程量小，日历插件收到后重新取清单。
+    pub fn on_calendar_changed(self: &Arc<Self>) {
+        self.broadcast_event(event::name::CALENDAR_CHANGED, &serde_json::json!({}));
     }
 
     /// 某插件声明的默认布局（未声明 = `None`；崩溃重启后重开进程会重新声明）。
@@ -1584,7 +1663,14 @@ fn request_plugin_id(request: &HostRequest) -> &str {
         | HostRequest::VaultImageInfo { plugin_id, .. }
         | HostRequest::TraySetItems { plugin_id, .. }
         | HostRequest::CollabPeers { plugin_id, .. }
-        | HostRequest::CollabSend { plugin_id, .. } => plugin_id,
+        | HostRequest::CollabSend { plugin_id, .. }
+        | HostRequest::EditorSelection { plugin_id, .. }
+        | HostRequest::EditorReplaceSelection { plugin_id, .. }
+        | HostRequest::CalendarList { plugin_id, .. }
+        | HostRequest::CalendarAdd { plugin_id, .. }
+        | HostRequest::CalendarUpdate { plugin_id, .. }
+        | HostRequest::CalendarRemove { plugin_id, .. }
+        | HostRequest::HistoryActivity { plugin_id, .. } => plugin_id,
     }
 }
 

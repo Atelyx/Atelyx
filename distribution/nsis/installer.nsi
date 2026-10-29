@@ -1,5 +1,5 @@
 ﻿; Atelyx Windows 安装器（NSIS 3.x，per-machine 安装）。
-; 版本与各输入路径由 scripts/package.sh 经 -D 注入：VERSION / EXE / LICENSE / NOTICES / ICON / OUTFILE。
+; 版本与各输入路径由 scripts/package.sh 经 -D 注入：VERSION / EXE / LICENSE / NOTICES / ICON / OUTFILE / PRESETS。
 Unicode true
 ManifestDPIAware true
 RequestExecutionLevel admin
@@ -42,6 +42,12 @@ Section "Install"
   File "/oname=LICENSE" "${LICENSE}"
   File "/oname=THIRD_PARTY_NOTICES.md" "${NOTICES}"
 
+  ; 随包预置插件：装到独立目录，由应用首次启动时装进用户插件根（用户卸载过的不再装回）
+  ; 先清旧目录：升级时已不在包里的预置项不能残留（残留会被下次启动重新装进用户插件根）
+  RMDir /r "$INSTDIR\preset-plugins"
+  SetOutPath "$INSTDIR\preset-plugins"
+  File /r "${PRESETS}\*"
+
   ; 快捷方式面向全体用户：开始菜单 + 桌面
   CreateDirectory "$SMPROGRAMS\Atelyx"
   CreateShortcut "$SMPROGRAMS\Atelyx\Atelyx.lnk" "$INSTDIR\atelyx.exe"
@@ -68,6 +74,7 @@ Section "Uninstall"
   Delete "$INSTDIR\LICENSE"
   Delete "$INSTDIR\THIRD_PARTY_NOTICES.md"
   Delete "$INSTDIR\uninstall.exe"
+  RMDir /r "$INSTDIR\preset-plugins"
   RMDir "$INSTDIR"
   Delete "$SMPROGRAMS\Atelyx\Atelyx.lnk"
   RMDir "$SMPROGRAMS\Atelyx"

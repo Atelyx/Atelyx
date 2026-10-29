@@ -1,0 +1,13 @@
+{
+  "id": "com.atelyx.calendar",
+  "name": "日历",
+  "version": "0.1.0",
+  "apiVersion": 1,
+  "entry": {
+    "windows": "atelyx-plugin-calendar.exe",
+    "linux": "atelyx-plugin-calendar"
+  },
+  "permissions": ["vault"],
+  "singleton": true,
+  "keepMountedOnVaultSwitch": false
+}

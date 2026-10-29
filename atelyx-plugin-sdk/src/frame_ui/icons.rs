@@ -18,6 +18,9 @@ pub enum Icon {
     Wrench,
     FileText,
     Box,
+    ChevronLeft,
+    ChevronRight,
+    X,
 }
 
 /// 图标线宽（24x24 网格下的描边宽度）。
@@ -149,6 +152,12 @@ pub(crate) fn draw(ctx: &mut BuildCtx<'_>, icon: Icon, rect: Rect, color: PaintC
             poly(ctx, &[(3.0, 7.0), (12.0, 3.0), (21.0, 7.0), (21.0, 17.0), (12.0, 21.0), (3.0, 17.0)], true);
             poly(ctx, &[(3.0, 7.0), (12.0, 11.0), (21.0, 7.0)], false);
             line(ctx, 12.0, 11.0, 12.0, 21.0);
+        }
+        Icon::ChevronLeft => poly(ctx, &[(15.0, 5.0), (8.0, 12.0), (15.0, 19.0)], false),
+        Icon::ChevronRight => poly(ctx, &[(9.0, 5.0), (16.0, 12.0), (9.0, 19.0)], false),
+        Icon::X => {
+            line(ctx, 6.0, 6.0, 18.0, 18.0);
+            line(ctx, 18.0, 6.0, 6.0, 18.0);
         }
     }
 }

@@ -30,6 +30,16 @@ const GIT_DIR: &str = ".git";
 /// 记下源目录绝对路径（`source`），供「从来源更新」再次安装；内容先落临时目录，校验与入口
 /// 权限就位后才动旧版本。发布内容按源目录的 `.gitignore` 取（见 [`copy_published_tree`]）。
 pub(crate) fn install_from_dir(root: &Path, src: &Path) -> Result<String, String> {
+    stage_dir(root, src, true, false)
+}
+
+/// 从随包预置目录安装：与目录安装同一套校验与落位，但不记来源——预置内容不提供
+/// 「从来源更新」，更新由随包版本同步驱动；落预置标记，设置页据此把它归入内置插件。
+pub(crate) fn install_bundled(root: &Path, src: &Path) -> Result<String, String> {
+    stage_dir(root, src, false, true)
+}
+
+fn stage_dir(root: &Path, src: &Path, record_source: bool, preset: bool) -> Result<String, String> {
     let manifest = manifest::read_manifest(src)?;
     let id = manifest.id.clone();
     let source = source_outside_root(root, src)?;
@@ -40,10 +50,16 @@ pub(crate) fn install_from_dir(root: &Path, src: &Path) -> Result<String, String
         reject_reserved(&temp)?;
         require_staged_entry(&temp, &manifest)?;
         grant_entry_execute(&temp, &manifest)?;
-        // 来源记录写进暂存内容：与这一代内容一起落位，换代时随旧内容一起轮换掉
-        let recorded = source.to_string_lossy();
-        std::fs::write(temp.join(layout::SOURCE_NAME), recorded.as_bytes())
-            .map_err(|e| format!("记录安装来源失败：{e}"))?;
+        if record_source {
+            // 来源记录写进暂存内容：与这一代内容一起落位，换代时随旧内容一起轮换掉
+            let recorded = source.to_string_lossy();
+            std::fs::write(temp.join(layout::SOURCE_NAME), recorded.as_bytes())
+                .map_err(|e| format!("记录安装来源失败：{e}"))?;
+        }
+        if preset {
+            std::fs::write(temp.join(layout::PRESET_NAME), b"")
+                .map_err(|e| format!("写入预置标记失败：{e}"))?;
+        }
         place(root, &id, &temp)
     })();
     if staged.is_err() {
@@ -629,6 +645,19 @@ mod tests {
         // 来源记规范化绝对路径（相对路径在后续「从来源更新」时才不会随工作目录漂移）
         let recorded = layout::read_source(&root, &id).expect("应记录安装来源");
         assert_eq!(PathBuf::from(recorded), dunce::canonicalize(&src).unwrap());
+        assert!(!layout::is_preset(&root, &id), "目录安装不是预置");
+    }
+
+    #[test]
+    fn a_dir_install_over_a_preset_drops_its_marker() {
+        let tmp = TempDir::new("plugin-install-over-preset");
+        let root = plugin_root(&tmp);
+        let src = tmp.join("src");
+        make_plugin(&src, "com.example.demo");
+        install_bundled(&root, &src).unwrap();
+        assert!(layout::is_preset(&root, "com.example.demo"), "随包安装落预置标记");
+        install_from_dir(&root, &src).unwrap();
+        assert!(!layout::is_preset(&root, "com.example.demo"), "用户自装内容不再算内置插件");
     }
 
     #[test]
