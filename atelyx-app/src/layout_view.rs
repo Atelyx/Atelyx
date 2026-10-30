@@ -1300,17 +1300,18 @@ pub fn render_node<'a>(
     }
 }
 
-/// 分割把手（宽 4px；悬停 = 强调色 50%）；光标形态 col-resize / row-resize。
+/// 分割把手（粗 4px；悬停 = 强调色 50%）；光标形态 col-resize / row-resize。
 fn divider(hovered: bool, horizontal: bool) -> Element<'static, Message> {
     let interaction = if horizontal {
         iced::mouse::Interaction::ResizingColumn
     } else {
         iced::mouse::Interaction::ResizingRow
     };
+    let (width, height) = divider_size(horizontal);
     mouse_area(
         container(space())
-            .width(Length::Fixed(UiMetrics::DIVIDER_W))
-            .height(Length::Fill)
+            .width(width)
+            .height(height)
             .style(move |_t| Style {
                 background: if hovered {
                     Some(pal::ACCENT.scale_alpha(0.5).into())
@@ -1322,6 +1323,16 @@ fn divider(hovered: bool, horizontal: bool) -> Element<'static, Message> {
     )
     .interaction(interaction)
     .into()
+}
+
+/// 把手轴向尺寸：左右分割为竖条（宽 4px 撑满高），上下分割为横条（撑满宽 高 4px）。
+/// 厚度不能取 Fill——会被同轴的面板占比挤成约 1px。
+fn divider_size(horizontal: bool) -> (Length, Length) {
+    if horizontal {
+        (Length::Fixed(UiMetrics::DIVIDER_W), Length::Fill)
+    } else {
+        (Length::Fill, Length::Fixed(UiMetrics::DIVIDER_W))
+    }
 }
 
 /// 面板：标签条（底色 + 1px 底线 + 激活标签盖线）+ 内容区；拖拽悬停期叠 drop 指示。
@@ -7107,8 +7118,18 @@ pub fn drop_zone_at(zone: &PanelZone, global: iced::Point) -> DropZone {
 
 #[cfg(test)]
 mod tests {
-    use super::{device_meta_line, merge_peers, file_label, truncate_to_width};
+    use super::{
+        device_meta_line, divider_size, file_label, merge_peers, truncate_to_width, UiMetrics,
+    };
     use atelyx_core::collab::PeerInfo;
+    use iced::Length;
+
+    #[test]
+    fn divider_thickness_follows_split_axis() {
+        let bar = Length::Fixed(UiMetrics::DIVIDER_W);
+        assert_eq!(divider_size(true), (bar, Length::Fill));
+        assert_eq!(divider_size(false), (Length::Fill, bar));
+    }
 
     /// 固定度量：每字符 1 单位（截断只按字符数收缩，与字体 shaping 解耦）。
     fn per_char(s: &str) -> f32 {
