@@ -9,7 +9,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use atelyx_plugin_protocol::envelope::{Envelope, Request, RpcError};
@@ -98,6 +98,8 @@ pub(crate) struct Instance {
     undeclared_calls: AtomicU64,
     /// 各面整面帧（surface id → 帧）；会话收尾一并清除。
     frames: Mutex<HashMap<String, Arc<frame::SurfaceFrame>>>,
+    /// 新帧落地信号：与 `frames` 同一把锁配对，供绘制期同步等新帧（见 [`Instance::wait_frame`]）。
+    frame_signal: Condvar,
     /// 声明了帧率的整面帧（面 id → 节拍）；随帧提交同步。
     surface_clocks: Mutex<HashMap<String, FrameClock>>,
     /// 整面帧共享内存区域：握手时建，扩容换新，会话收尾释放。
@@ -209,6 +211,7 @@ impl Instance {
             undeclared_methods: Mutex::new(HashSet::new()),
             undeclared_calls: AtomicU64::new(0),
             frames: Mutex::new(HashMap::new()),
+            frame_signal: Condvar::new(),
             surface_clocks: Mutex::new(HashMap::new()),
             frame_region: FrameRegionStore::new(&manifest_id),
             resize_gates: Mutex::new(HashMap::new()),
@@ -245,6 +248,30 @@ impl Instance {
     /// 某面的整面帧（会话收尾即清空）。
     pub(crate) fn surface_frame(&self, surface_id: &str) -> Option<Arc<frame::SurfaceFrame>> {
         self.frames.lock().unwrap().get(surface_id).cloned()
+    }
+
+    /// 等某面出现一张不同于 `seen` 的新帧（壳改宽那一拍同步取新帧用）。
+    /// 超时、该面已无可渲染帧（会话收尾 / 面被撤销）时返回 `None`：调用方按手上的帧画。
+    pub(crate) fn wait_frame(
+        &self,
+        surface_id: &str,
+        seen: &Arc<frame::SurfaceFrame>,
+        timeout: Duration,
+    ) -> Option<Arc<frame::SurfaceFrame>> {
+        let deadline = Instant::now() + timeout;
+        let mut frames = self.frames.lock().unwrap();
+        loop {
+            match frames.get(surface_id) {
+                Some(frame) if !Arc::ptr_eq(frame, seen) => return Some(frame.clone()),
+                Some(_) => {}
+                None => return None,
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return None;
+            }
+            frames = self.frame_signal.wait_timeout(frames, deadline - now).ok()?.0;
+        }
     }
 
     /// 本插件已注册贡献点（补上插件 id）。
@@ -392,6 +419,7 @@ impl Instance {
             self.undeclared_calls.store(0, Ordering::Relaxed);
             frames_dropped = !self.frames.lock().unwrap().is_empty();
             self.frames.lock().unwrap().clear();
+            self.frame_signal.notify_all();
             self.surface_clocks.lock().unwrap().clear();
             self.resize_gates.lock().unwrap().clear();
             self.frame_region.release();
@@ -1572,6 +1600,7 @@ impl Instance {
             }
             drop(clocks);
             self.frames.lock().unwrap().insert(surface_id.clone(), submitted);
+            self.frame_signal.notify_all();
             self.submits.fetch_add(1, Ordering::Relaxed);
             Ok(())
         })
@@ -1639,6 +1668,7 @@ impl Instance {
             }
             self.frames.lock().unwrap().remove(&p.id);
             self.surface_clocks.lock().unwrap().remove(&p.id);
+            self.frame_signal.notify_all();
             Ok(())
         })
         .map_err(RpcError::failed)?;

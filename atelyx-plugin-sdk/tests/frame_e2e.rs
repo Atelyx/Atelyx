@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use atelyx_core::plugin_runtime::{
     DrawCommand, FrameInput, Key, KeyAction, Modifiers, MouseButton, PluginRuntime, PluginStatus,
+    SurfaceFrame,
 };
 use atelyx_core::vault::test_support::TempDir;
 use atelyx_plugin_sdk::protocol::manifest::MANIFEST_FILE;
@@ -55,6 +56,10 @@ fn frame_text(runtime: &PluginRuntime, id: &str) -> String {
     let Some(frame) = runtime.surface_frame(id, "frame") else {
         return String::new();
     };
+    frame_text_of(&frame)
+}
+
+fn frame_text_of(frame: &SurfaceFrame) -> String {
     let mut out = String::new();
     for command in &frame.commands {
         if let DrawCommand::Text { content, .. } = command {
@@ -186,4 +191,35 @@ fn frame_submit_and_raw_input_roundtrip() {
 
     runtime.set_enabled(&id, false).expect("停用应成功");
     assert!(runtime.surface_frame(&id, "frame").is_none(), "停用后不得留下可渲染的旧帧");
+}
+
+/// 改宽同帧取帧：宿主发完尺寸能直接等到按新尺寸排好的帧；没有新帧时按时返回，
+/// 插件不在运行态时立即返回（壳据此退回按手上的帧画）。
+#[test]
+fn resize_wait_returns_the_frame_for_the_new_size() {
+    let tmp = TempDir::new("plugin-frame-wait");
+    let (runtime, id) = install_frame_stub(&tmp);
+    let before = runtime.surface_frame(&id, "frame").expect("应有面帧");
+
+    send(&runtime, &id, FrameInput::Resize { width: 360.0, height: 300.0 });
+    let fresh = runtime
+        .wait_surface_frame(&id, "frame", &before, Duration::from_secs(5))
+        .expect("改宽后应等到新帧");
+    assert!(!std::sync::Arc::ptr_eq(&fresh, &before), "等到的必须是一张新帧");
+    assert!(frame_text_of(&fresh).contains("尺寸：360x300"), "新帧必须按新尺寸排");
+
+    // 已是最新帧：没有新提交就按时返回，不把调用方一直挂着
+    let started = Instant::now();
+    assert!(runtime
+        .wait_surface_frame(&id, "frame", &fresh, Duration::from_millis(100))
+        .is_none());
+    assert!(started.elapsed() >= Duration::from_millis(100));
+
+    // 停用后不会有回帧：立即返回
+    runtime.set_enabled(&id, false).expect("停用应成功");
+    let started = Instant::now();
+    assert!(runtime
+        .wait_surface_frame(&id, "frame", &fresh, Duration::from_secs(5))
+        .is_none());
+    assert!(started.elapsed() < Duration::from_secs(1), "不在跑时不得空等");
 }

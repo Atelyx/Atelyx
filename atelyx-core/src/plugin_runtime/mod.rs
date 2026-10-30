@@ -1151,6 +1151,23 @@ impl PluginRuntime {
             .and_then(|i| i.surface_frame(surface_id))
     }
 
+    /// 等某面出现一张不同于 `seen` 的新帧：壳在改宽那一拍同步取新帧，好在同一拍里画进去，
+    /// 不然插件内容永远比分割线慢一帧。插件不在运行态时立即返回 `None`（不会有回帧），
+    /// 超时同样返回 `None`，调用方按手上的帧画。
+    pub fn wait_surface_frame(
+        &self,
+        plugin_id: &str,
+        surface_id: &str,
+        seen: &std::sync::Arc<atelyx_plugin_protocol::frame::SurfaceFrame>,
+        timeout: std::time::Duration,
+    ) -> Option<std::sync::Arc<atelyx_plugin_protocol::frame::SurfaceFrame>> {
+        let instance = self.instances.lock().unwrap().get(plugin_id).cloned()?;
+        if !matches!(instance.status(), PluginStatus::Running) {
+            return None;
+        }
+        instance.wait_frame(surface_id, seen, timeout)
+    }
+
     /// 向某插件的运行日志追加一条宿主侧诊断（如帧里引用了未注册的图片源）。
     /// 返回是否真正写入：实例不在（未启用 / 已卸载 / 装载失败）时无处落盘，调用方据此
     /// 决定是否保留重试，而不是把「写不进去」当成「已报告」。

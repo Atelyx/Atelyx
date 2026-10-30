@@ -3,7 +3,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use iced::advanced::clipboard::Clipboard;
 use iced::advanced::input_method::{Event as ImeEvent, InputMethod, Purpose};
@@ -31,6 +31,9 @@ use crate::{App, Message};
 const DOUBLE_CLICK_MS: u64 = 500;
 /// 双击判定：两次按下间的最大位移（逻辑像素；拖动不算双击）。
 const DOUBLE_CLICK_SLOP: f32 = 4.0;
+/// 改宽那一拍等插件新帧的上限：插件回帧实测往返 0.5 ms 以内，留出余量给重排重的面。
+/// 超时即按手上的帧画（下一拍再换新帧），不把 UI 线程压在慢插件上。
+const RESIZE_FRAME_WAIT: Duration = Duration::from_millis(4);
 
 /// 标识哈希（FNV-1a；面 / 面 id 的身份判定用，不参与协议）。
 fn hash_id(value: &str) -> u64 {
@@ -81,6 +84,8 @@ struct FrameState {
     image_epoch: Cell<u64>,
     /// 上次上报给插件的面身份与尺寸（逻辑像素）；变化即回发 `Resize`。
     reported: Cell<Option<(u64, f32, f32)>>,
+    /// 改宽等帧超时过：暂停同步等帧，免得慢插件每拍都白等；新帧到达即恢复。
+    resize_wait_paused: Cell<bool>,
     /// 本部件当前承载的面身份：变化即说明换了面，指针瞬态一律作废。
     identity: Cell<u64>,
     /// 按下中的键（`None` = 未按下）：抬笔只认这一个键，中途混按其它键不会错发 `PointerUp`。
@@ -102,6 +107,7 @@ impl Default for FrameState {
             font_epoch: Cell::new(0),
             image_epoch: Cell::new(0),
             reported: Cell::new(None),
+            resize_wait_paused: Cell::new(false),
             identity: Cell::new(0),
             pressed: Cell::new(None),
             inside: Cell::new(false),
@@ -459,7 +465,8 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginFrame<'_> {
             .unwrap_or(0);
         let epoch = crate::ui::epoch();
         let image_epoch = self.app.note_image_epoch;
-        if state.stamp.get() != stamp
+        let frame_changed = state.stamp.get() != stamp;
+        if frame_changed
             || state.font_epoch.get() != epoch
             || state.image_epoch.get() != image_epoch
         {
@@ -467,17 +474,37 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginFrame<'_> {
             state.stamp.set(stamp);
             state.font_epoch.set(epoch);
             state.image_epoch.set(image_epoch);
+            if frame_changed {
+                // 新帧已落地：上次改宽没等到帧的面恢复同步等帧
+                state.resize_wait_paused.set(false);
+            }
         }
-        // 面身份或尺寸变化即上报插件：绘制拿到的是真实分配尺寸，这是插件重排的唯一来源
+        // 面身份或尺寸变化即上报插件：绘制拿到的是真实分配尺寸，这是插件重排的唯一来源。
+        // 插件在另一进程，新尺寸的帧要一个往返才回来；这一拍就等它回来画进去——否则画出的内容
+        // 永远是上一拍尺寸的，拖动时字样与右对齐项明显拖在分割线后面。命中区仍按投影里的那一帧
+        // 算（新帧下一拍才进投影），拖动中指针压在分割把手上，不会落在面内。
+        let mut resized = None;
         let reported = (self.identity(), bounds.width, bounds.height);
         if state.reported.get() != Some(reported) {
             state.reported.set(Some(reported));
             self.send(FrameInput::Resize { width: bounds.width, height: bounds.height });
+            if !state.resize_wait_paused.get() {
+                match self.app.plugins.wait_surface_frame(
+                    &self.plugin_id,
+                    &self.surface_id,
+                    self.frame,
+                    RESIZE_FRAME_WAIT,
+                ) {
+                    Some(frame) => resized = Some(frame),
+                    None => state.resize_wait_paused.set(true),
+                }
+            }
         }
-        let geometry = state.cache.draw(renderer, bounds.size(), |frame| {
+        let frame = resized.as_ref().unwrap_or(self.frame);
+        let geometry = state.cache.draw(renderer, bounds.size(), |canvas| {
             plugin_paint::execute(
-                frame,
-                &self.frame.commands,
+                canvas,
+                &frame.commands,
                 &PaintCtx { app: self.app, plugin_id: &self.plugin_id },
             );
         });
