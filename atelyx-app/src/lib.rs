@@ -1630,7 +1630,7 @@ pub struct WikiPicker {
 impl App {
     /// 编辑面是否持键盘：属性槽位输入激活时键盘归属性面板，直到 Enter/Tab/Esc 退出。
     pub(crate) fn edit_surface_focused(&self) -> bool {
-        self.edit.focused && self.props.editing.is_none() && self.props.adding.is_none()
+        self.edit.focused && self.props.editing.is_none()
     }
 
     fn boot() -> (Self, Task<Message>) {
@@ -2394,7 +2394,7 @@ impl App {
             }
             Message::NavKey(horizontal, positive) => {
                 // 属性输入：↑↓ 走候选高亮（左右仍是输入框光标），不落到分割把手
-                if self.props.editing.is_some() || self.props.adding.is_some() {
+                if self.props.editing.is_some() {
                     if horizontal {
                         return Task::none();
                     }
@@ -3264,7 +3264,7 @@ impl App {
                 // 面板内按压由控件自身动作先提交（切槽 / 删除等），此处只处理外点。
                 // 须先于弹层早退消费：弹层开着时按压仍应结算属性输入
                 let props_press_inside = std::mem::take(&mut self.props.press_inside);
-                if (self.props.editing.is_some() || self.props.adding.is_some()) && !props_press_inside {
+                if self.props.editing.is_some() && !props_press_inside {
                     self.finish_props_edit();
                 }
                 // 弹层打开期间按压交由捕获层处理（外点关闭），不触发拖拽手势
@@ -3596,9 +3596,7 @@ impl App {
                 } else if self.plugin_takeovers.contains_key(&window) {
                     // 接管窗口：弹层已关（上一分支），Esc = 退出接管（退出入口常驻，Esc 是后备通道）
                     return plugin_actions::exit_takeover(self, window);
-                } else if self.main_id == Some(window)
-                    && (self.props.editing.is_some() || self.props.adding.is_some())
-                {
+                } else if self.main_id == Some(window) && self.props.editing.is_some() {
                     return self.on_props(PropsMsg::CancelSlot);
                 } else if self.rename.as_ref().is_some_and(|r| r.window == window) {
                     // 行内重命名 Esc = 取消

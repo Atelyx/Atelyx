@@ -47,6 +47,8 @@ pub const BORDER: Color = rgb(0x2e, 0x33, 0x3a);
 pub const BORDER_STRONG: Color = rgb(0x38, 0x3d, 0x44);
 /// 悬停底色
 pub const HOVER: Color = rgb(0x23, 0x27, 0x2e);
+/// 三级底（`BG_TERTIARY`）卡片内的悬停底：HOVER 与卡片底同色，卡内改叠一档白光。
+pub const HOVER_LIFT: Color = rgba(255, 255, 255, 0.06);
 
 // ===== 表单 =====
 /// 输入框占位文字色
