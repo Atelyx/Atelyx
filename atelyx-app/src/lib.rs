@@ -745,7 +745,7 @@ enum Message {
     InterfaceFontSet(Option<String>),
     /// 设置-通用：自动恢复上次打开文件开关。
     AutoRestoreToggle,
-    /// 设置-通用：自动检查更新开关（启动静默检查的开关源）。
+    /// 设置-通用：自动检查更新开关（启动与运行期轮询的开关源）。
     AutoUpdateToggle,
     /// 设置-通用：开机自启开关（写系统启动项；失败提示并回读真实状态）。
     AutostartToggle,
@@ -1343,6 +1343,14 @@ pub struct App {
     update_progress: Arc<Mutex<(u64, u64)>>,
     /// 当前检查是否手动发起（Checked 回执据此决定提示方式）。
     update_manual_check: bool,
+    /// 在途检查标志：定时轮询与手动入口共用，避免并发发起。
+    update_check_in_flight: bool,
+    /// 本次运行已跳过的版本（自动检查不再提示；手动检查不受限）。
+    update_skipped: Option<String>,
+    /// 本次运行已提示过「无安装包」的版本（自动检查同一版本只提示一次）。
+    update_no_asset_notice: Option<String>,
+    /// 更新流程常驻通知的 id（通知 × 据此识别为跳过）。
+    update_notice_id: Option<u64>,
     /// 最近一次发起的切仓目标：flush 回放时只有与它一致才执行，防快速点选落到非最后目标。
     vault_switch_target: Option<PathBuf>,
     /// 从列表移除的确认态（目标仓库根；弹层确认 pane 数据源）。
@@ -1677,10 +1685,8 @@ impl App {
                 from_boot: true,
             })));
         }
-        // 启动静默检查更新（autoUpdate 开启时；debug 构建跳过，避免开发期噪音）
-        if !cfg!(debug_assertions)
-            && update::UpdateState::Idle.can_auto_check(global.auto_update)
-        {
+        // 启动静默检查更新（开关与开发构建口径由更新处理器统一判定）
+        if global.auto_update {
             boot = boot.chain(Task::done(Message::Update(update::UpdateMsg::Check {
                 manual: false,
             })));
@@ -1737,6 +1743,10 @@ impl App {
                 update_download_dir: update_download_dir(),
                 update_progress: Arc::new(Mutex::new((0, 0))),
                 update_manual_check: false,
+                update_check_in_flight: false,
+                update_skipped: None,
+                update_no_asset_notice: None,
+                update_notice_id: None,
                 vault_switch_target: None,
                 remove_vault_confirm: None,
                 vault_root: None,
@@ -1910,7 +1920,7 @@ impl App {
     }
 
     /// 置换更新流程的常驻通知（同一时刻至多一条：先移除旧常驻条再置入）。
-    /// 动作表以分配到的通知 id 合成（[跳过] / [稍后] 等关闭动作需要它）。
+    /// 动作表以分配到的通知 id 合成（[稍后] 等关闭动作需要它）。
     fn set_update_notice(
         &mut self,
         level: NoticeLevel,
@@ -1926,11 +1936,13 @@ impl App {
         n.progress = progress;
         n.actions = actions(id);
         self.notifications.push(n);
+        self.update_notice_id = Some(id);
     }
 
     /// 移除更新流程的常驻通知（置入新常驻条前同样先走这里）。
     fn dismiss_update_notice(&mut self) {
         self.notifications.retain(|n| !n.persistent);
+        self.update_notice_id = None;
     }
 
     /// 世代内的光标位置（按下事件不带坐标，命中判定用最近位置）。
@@ -3851,6 +3863,10 @@ impl App {
             Message::AutoUpdateToggle => {
                 self.global.auto_update = !self.global.auto_update;
                 self.save_global_now();
+                // 打开开关立即查一次，不必等下个轮询周期
+                if self.global.auto_update && !cfg!(debug_assertions) {
+                    return Task::done(Message::Update(update::UpdateMsg::Check { manual: false }));
+                }
                 Task::none()
             }
             Message::AutostartToggle => {
@@ -5670,6 +5686,18 @@ impl App {
                 Task::none()
             }
             ui::UiMsg::NotifyDismiss(id) => {
+                // 更新通知的 × 等同「跳过」：本次运行不再自动提示该版本
+                if self.update_notice_id == Some(id) {
+                    let skipped = match &self.update {
+                        update::UpdateState::Available { version, .. } => Some(version.clone()),
+                        _ => None,
+                    };
+                    if let Some(version) = skipped {
+                        self.update_skipped = Some(version);
+                        self.update = update::UpdateState::Idle;
+                    }
+                    self.update_notice_id = None;
+                }
                 self.notifications.retain(|n| n.id != id);
                 Task::none()
             }
@@ -5681,50 +5709,94 @@ impl App {
         use update::UpdateMsg;
         match msg {
             UpdateMsg::Check { manual } => {
-                if !self.update.start_check() {
+                // 在途检查升级为手动来源：回执按手动口径反馈，不重复发请求
+                if self.update_check_in_flight {
+                    if manual {
+                        self.update_manual_check = true;
+                        self.update.start_check();
+                    }
+                    return Task::none();
+                }
+                let allowed = if manual {
+                    self.update.start_check()
+                } else {
+                    !cfg!(debug_assertions) && self.update.can_auto_check(self.global.auto_update)
+                };
+                if !allowed {
                     return Task::none();
                 }
                 self.update_manual_check = manual;
+                self.update_check_in_flight = true;
                 Task::perform(atelyx_core::updater::latest_release(), |result| {
                     Message::Update(UpdateMsg::Checked(result))
                 })
             }
             UpdateMsg::Checked(result) => {
-                let manual = self.update_manual_check;
+                let manual = std::mem::take(&mut self.update_manual_check);
+                self.update_check_in_flight = false;
+                // 检查期间关掉了开关：自动结果不再打扰
+                if !manual && !self.global.auto_update {
+                    return Task::none();
+                }
                 match result {
-                    Ok(release) => match self.update.finish_check(env!("CARGO_PKG_VERSION"), release) {
-                        Ok(()) => {
-                            if let update::UpdateState::Available { version, .. } = &self.update {
-                                let version = version.clone();
+                    Ok(release) => {
+                        match self.update.apply_check(
+                            env!("CARGO_PKG_VERSION"),
+                            self.update_skipped.as_deref(),
+                            release,
+                            manual,
+                        ) {
+                            Some(update::CheckOutcome::Available { version }) => {
+                                let skip = version.clone();
                                 self.set_update_notice(
                                     NoticeLevel::Info,
                                     format!("发现新版本 {version}"),
                                     None,
-                                    |id| {
+                                    move |_| {
                                         vec![
                                             ("下载".into(), Message::Update(UpdateMsg::Download)),
-                                            ("跳过".into(), Message::Ui(ui::UiMsg::NotifyDismiss(id))),
+                                            ("跳过".into(), Message::Update(UpdateMsg::Skip { version: skip })),
                                         ]
                                     },
                                 );
-                            } else if manual {
+                            }
+                            // 有新版本但本机平台无安装包：手动检查转开发布页，静默检查同一版本只提示一次
+                            Some(update::CheckOutcome::NoAsset { version, page }) => {
+                                let reported =
+                                    self.update_no_asset_notice.as_deref() == Some(version.as_str());
+                                self.update_no_asset_notice = Some(version);
+                                if manual {
+                                    return self.open_link(&page, LinkForm::External);
+                                }
+                                if !reported {
+                                    self.notify(NoticeLevel::Info, "发现新版本，请到发布页下载");
+                                }
+                            }
+                            Some(update::CheckOutcome::UpToDate) if manual => {
                                 self.notify(NoticeLevel::Info, "已是最新版本");
                             }
+                            Some(update::CheckOutcome::UpToDate) | None => {}
                         }
-                        // 有新版本但本机平台无安装包：手动检查转开发布页，静默检查仅提示
-                        Err(page) => {
-                            if manual {
-                                return self.open_link(&page, LinkForm::External);
-                            }
-                            self.notify(NoticeLevel::Info, "发现新版本，请到发布页下载");
-                        }
-                    },
+                    }
                     Err(e) => {
                         self.update.fail_check();
                         if manual {
                             self.notify(NoticeLevel::Error, e);
                         }
                     }
+                }
+                Task::none()
+            }
+            UpdateMsg::Skip { version } => {
+                // 只处理当前可下载版本；被更高版本替换后的迟到消息直接丢弃
+                let current = match &self.update {
+                    update::UpdateState::Available { version, .. } => Some(version.clone()),
+                    _ => None,
+                };
+                if current.as_deref() == Some(version.as_str()) {
+                    self.update_skipped = Some(version);
+                    self.update = update::UpdateState::Idle;
+                    self.dismiss_update_notice();
                 }
                 Task::none()
             }
@@ -7412,6 +7484,13 @@ impl App {
             });
         Subscription::batch([
             iced::time::every(PERSIST_TICK).map(|_| Message::PersistTick),
+            // 运行期轮询：开着自动检查且非开发构建时按固定间隔静默检查
+            if self.global.auto_update && !cfg!(debug_assertions) {
+                iced::time::every(update::POLL_INTERVAL)
+                    .map(|_| Message::Update(update::UpdateMsg::Check { manual: false }))
+            } else {
+                Subscription::none()
+            },
             if need_tick {
                 iced::time::every(std::time::Duration::from_millis(100)).map(|_| Message::UiTick)
             } else {

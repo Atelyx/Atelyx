@@ -94,7 +94,7 @@ pub struct GlobalConfig {
     pub font_family: Option<String>,
     /// 启动恢复上次打开的文件。
     pub auto_restore: bool,
-    /// 启动静默检查更新。
+    /// 自动检查更新（启动与运行期轮询）。
     pub auto_update: bool,
     /// 宽松换行：段内单个换行渲染为换行（关闭 = 按 Markdown 标准需空行换行）。
     pub soft_wrap: bool,

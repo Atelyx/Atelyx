@@ -43,7 +43,7 @@ pub fn view(app: &App, window: iced::window::Id) -> Element<'static, Message> {
     ));
     col = col.push(setting_row(
         "自动检查更新",
-        "启动时静默检查新版本",
+        "启动时与运行期间静默检查新版本",
         controls::toggle(app.global.auto_update, Some(Message::AutoUpdateToggle)),
     ));
     col = col.push(group_head("系统", "", false));
