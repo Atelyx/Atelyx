@@ -73,6 +73,31 @@ impl LogSink {
     }
 }
 
+/// 装载时比对上次装载的版本：版本变了即清空日志，同一版本重复装载不动日志。
+/// 上一版本的输出留着只会把两代行为混在一起，无从判断新版本出了什么问题。
+pub(crate) fn reset_on_version_change(sink: &LogSink, marker: &Path, version: &str) {
+    let version = version.trim();
+    let previous = std::fs::read_to_string(marker)
+        .ok()
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty());
+    if previous.as_deref() == Some(version) {
+        return;
+    }
+    if previous.is_some() {
+        if let Err(e) = sink.clear() {
+            sink.line(&format!("[宿主] 清空上一版本日志失败：{e}"));
+            return;
+        }
+    }
+    if let Some(parent) = marker.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = std::fs::write(marker, version) {
+        sink.line(&format!("[宿主] 记录装载版本失败：{e}"));
+    }
+}
+
 fn report(state: &mut State, path: &Path, what: &str) {
     if state.reported {
         return;
@@ -222,6 +247,25 @@ mod tests {
         assert!(text.ends_with('…'), "超长行应截断：{text}");
         // 时间戳前缀计入行宽：整行（含省略号）等于展示上限 + 1
         assert_eq!(text.chars().count(), MAX_LINE_CHARS + 1);
+    }
+
+    #[test]
+    fn a_version_change_clears_the_log() {
+        let tmp = TempDir::new("plugin-log-version");
+        let path = tmp.join("logs").join("runtime.log");
+        let marker = tmp.join("logs").join("loaded-version");
+        let sink = LogSink::new(path.clone());
+
+        reset_on_version_change(&sink, &marker, "1.0.0");
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "1.0.0");
+        sink.line("旧版本输出");
+
+        reset_on_version_change(&sink, &marker, "1.0.0");
+        assert!(tail(&path).unwrap().contains("旧版本输出"), "同一版本不清日志");
+
+        reset_on_version_change(&sink, &marker, "1.1.0");
+        assert_eq!(tail(&path).unwrap(), "", "版本变化应清空日志");
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "1.1.0");
     }
 
     #[test]

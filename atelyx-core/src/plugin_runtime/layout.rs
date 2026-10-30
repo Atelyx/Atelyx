@@ -50,6 +50,14 @@ pub(crate) fn log_file_in(plugin_dir: &Path) -> PathBuf {
     plugin_dir.join("logs").join(LOG_FILE)
 }
 
+/// 上次装载版本记录文件名（插件目录 `logs/` 内，宿主写）。
+pub(crate) const LOADED_VERSION_FILE: &str = "loaded-version";
+
+/// 上次装载版本记录 `<root>/<id>/logs/loaded-version`：与日志同处保留区，换代后仍在。
+pub(crate) fn loaded_version_file(plugin_dir: &Path) -> PathBuf {
+    plugin_dir.join("logs").join(LOADED_VERSION_FILE)
+}
+
 /// 安装来源文件名（插件目录顶层，内容 = 源目录绝对路径）。
 pub(crate) const SOURCE_NAME: &str = "source";
 

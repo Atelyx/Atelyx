@@ -1885,8 +1885,8 @@ impl App {
                     .insert(root.clone(), app.ui.file_explorer_expanded.clone());
             }
         }
-        // 随包预置插件：发行包内的预置目录补进用户插件根（首装启用、随包升级，用户卸过的不装回）。
-        // 这里只补内容，启动交给随后的 scan + start_enabled
+        // 随包预置插件：发行包内的预置目录补进用户插件根（首装启用；版本更新或内容变化即替换，
+        // 用户卸过的不装回）。这里只补内容，启动交给随后的 scan + start_enabled
         if let Some(data) = app_data_dir() {
             if let Some(bundled) = bundled_presets_dir() {
                 match app.plugins.sync_presets(&bundled, &data.join("preset-plugins.json")) {

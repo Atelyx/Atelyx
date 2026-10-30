@@ -312,6 +312,11 @@ impl Instance {
             self.set_status(PluginStatus::Failed(reason.clone()));
             return Err(reason);
         };
+        log::reset_on_version_change(
+            &self.log,
+            &super::layout::loaded_version_file(&self.dir),
+            &self.manifest.version,
+        );
         let program = self.dir.join(entry).to_string_lossy().into_owned();
         let cwd = self.dir.to_string_lossy().into_owned();
         // 领本次运行的令牌：此后旧进程的输出与事件一律按令牌丢弃

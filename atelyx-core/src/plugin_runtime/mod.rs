@@ -1326,7 +1326,7 @@ impl PluginRuntime {
     }
 
     /// 同步随包预置插件：`bundled` = 发行包内插件目录，`marker` = 记录装过哪些预置项的标记文件。
-    /// 首装即启用，已装的仅在随包版本更新时替换；只落位内容，不启动进程。
+    /// 首装即启用，已装在随包版本更新或内容变化时替换；只落位内容，不启动进程。
     pub fn sync_presets(&self, bundled: &Path, marker: &Path) -> Result<PresetSyncReport, String> {
         preset::sync(&self.root, bundled, marker)
     }
@@ -1568,10 +1568,11 @@ impl PluginRuntime {
     fn after_install(self: &Arc<Self>, id: &str) -> Result<InstallOutcome, String> {
         let was_enabled = layout::is_enabled(&self.root, id);
         self.scan();
-        if let Some(instance) = self.instances.lock().unwrap().get(id).cloned() {
+        // 内容换代后旧实例的清单与目录内容都已过期：丢掉它，重启时按新清单重建
+        // （崩溃计数一并归零，重装后的首次启动不会直接落进熔断）。
+        let previous = self.instances.lock().unwrap().remove(id);
+        if let Some(instance) = previous {
             instance.stop();
-            // 新内容有新机会：旧崩溃计数不能让重装后的首次启动直接落进熔断
-            instance.reset_crash_history();
         }
         let start_error = if was_enabled { self.start_by_id(id).err() } else { None };
         Ok(InstallOutcome { id: id.to_string(), start_error })
