@@ -151,16 +151,15 @@ impl<'c, 'a> Ui<'c, 'a> {
                     corner_radius: Some(theme.radii.xs),
                 });
                 let shown = text::elide(&mut ctx.metrics, &label, font, (rect.w - CHIP_PAD_X * 2.0).max(0.0));
-                let height = ctx.metrics.measure(&shown, font, None).height;
-                text::paint(
+                let height = text::line_height(&mut ctx.metrics, font);
+                text::paint_line(
                     ctx,
                     &shown,
                     font,
                     theme::token(color),
                     rect.x + CHIP_PAD_X,
                     rect.y + (rect.h - height) / 2.0,
-                    None,
-                    None,
+                    height,
                     visible,
                 );
             }),
@@ -422,17 +421,16 @@ impl<'c, 'a> Ui<'c, 'a> {
                     ColorToken::Text
                 });
                 let shown = text::elide(&mut ctx.metrics, &label, font, (rect.w - BUTTON_PAD_X * 2.0).max(0.0));
-                let width = ctx.metrics.width(&shown, font);
-                let height = ctx.metrics.measure(&shown, font, None).height;
-                text::paint(
+                let width = text::advance(&mut ctx.metrics, &shown, font);
+                let height = text::line_height(&mut ctx.metrics, font);
+                text::paint_line(
                     ctx,
                     &shown,
                     font,
                     text_color,
                     rect.x + (rect.w - width) / 2.0,
                     rect.y + (rect.h - height) / 2.0,
-                    None,
-                    None,
+                    height,
                     visible,
                 );
                 if enabled {
@@ -568,7 +566,8 @@ impl<'c, 'a> Ui<'c, 'a> {
             width: Width::Fill,
             fill_height: false,
             height: Box::new(move |metrics, width| {
-                metrics.measure(&for_height, font, Some((width - NOTICE_PAD * 2.0).max(1.0))).height + NOTICE_PAD * 2.0
+                text::wrapped_height(metrics, &for_height, font, (width - NOTICE_PAD * 2.0).max(1.0))
+                    + NOTICE_PAD * 2.0
             }),
             draw: Box::new(move |ctx, rect, clip| {
                 let visible = rect.intersect(clip);
@@ -586,17 +585,20 @@ impl<'c, 'a> Ui<'c, 'a> {
                     corner_radius: Some(theme.radii.sm),
                 });
                 let inner = Rect::new(rect.x + NOTICE_PAD, rect.y + NOTICE_PAD, (rect.w - NOTICE_PAD * 2.0).max(1.0), rect.h);
-                text::paint(
-                    ctx,
-                    &text,
-                    font,
-                    theme::token(color),
-                    inner.x,
-                    inner.y,
-                    Some(inner.w),
-                    Some(TextAlign::Start),
-                    visible,
-                );
+                let lines = text::wrap_lines(&mut ctx.metrics, &text, font, inner.w);
+                let line_height = text::line_height(&mut ctx.metrics, font);
+                for (index, line) in lines.into_iter().enumerate() {
+                    text::paint_line(
+                        ctx,
+                        line,
+                        font,
+                        theme::token(color),
+                        inner.x,
+                        inner.y + index as f32 * line_height,
+                        line_height,
+                        visible,
+                    );
+                }
             }),
         });
     }
@@ -719,16 +721,15 @@ impl<'c, 'a> Ui<'c, 'a> {
                     draw_field(ctx, &theme, trigger_visible, focused);
                     let current = options.get(selected).map(String::as_str).unwrap_or("");
                     let label = text::elide(&mut ctx.metrics, current, font, (trigger.w - PAD_X * 2.0 - 16.0).max(0.0));
-                    let height = ctx.metrics.measure(&label, font, None).height;
-                    text::paint(
+                    let height = text::line_height(&mut ctx.metrics, font);
+                    text::paint_line(
                         ctx,
                         &label,
                         font,
                         theme::token(ColorToken::Text),
                         trigger.x + PAD_X,
                         trigger.y + (INPUT_H - height) / 2.0,
-                        None,
-                        None,
+                        height,
                         trigger_visible,
                     );
                     draw_chevron(ctx, trigger, trigger_visible);
@@ -804,16 +805,15 @@ impl<'c, 'a> Ui<'c, 'a> {
                 }
                 let text_x = box_rect.right() + 8.0;
                 let shown = text::elide(&mut ctx.metrics, &label, font, (rect.right() - text_x).max(0.0));
-                let height = ctx.metrics.measure(&shown, font, None).height;
-                text::paint(
+                let height = text::line_height(&mut ctx.metrics, font);
+                text::paint_line(
                     ctx,
                     &shown,
                     font,
                     theme::token(ColorToken::Text),
                     text_x,
                     rect.y + (rect.h - height) / 2.0,
-                    None,
-                    None,
+                    height,
                     visible,
                 );
                 ctx.hit(&id, visible, HitCursor::Pointer);
@@ -930,7 +930,7 @@ fn text_item(content: String, spec: FontSpec, color: ColorToken, wrap: bool) -> 
         width: Width::Fill,
         fill_height: false,
         height: if wrap {
-            Box::new(move |metrics, width| metrics.measure(&for_wrap_height, spec, Some(width)).height)
+            Box::new(move |metrics, width| text::wrapped_height(metrics, &for_wrap_height, spec, width))
         } else {
             Box::new(move |metrics, _| metrics.measure(&for_line_height, spec, None).height)
         },
@@ -940,20 +940,25 @@ fn text_item(content: String, spec: FontSpec, color: ColorToken, wrap: bool) -> 
                 return;
             }
             if wrap {
-                text::paint(
-                    ctx,
-                    &for_draw,
-                    spec,
-                    theme::token(color),
-                    rect.x,
-                    rect.y,
-                    Some(rect.w),
-                    Some(TextAlign::Start),
-                    visible,
-                );
+                // 插件自己切行：宿主按宽度量算整段会在改宽时为每一行登记一次量算
+                let lines = text::wrap_lines(&mut ctx.metrics, &for_draw, spec, rect.w);
+                let line_height = text::line_height(&mut ctx.metrics, spec);
+                for (index, line) in lines.into_iter().enumerate() {
+                    text::paint_line(
+                        ctx,
+                        line,
+                        spec,
+                        theme::token(color),
+                        rect.x,
+                        rect.y + index as f32 * line_height,
+                        line_height,
+                        visible,
+                    );
+                }
             } else {
                 let shown = text::elide(&mut ctx.metrics, &for_draw, spec, rect.w);
-                text::paint(ctx, &shown, spec, theme::token(color), rect.x, rect.y, None, None, visible);
+                let line_height = text::line_height(&mut ctx.metrics, spec);
+                text::paint_line(ctx, &shown, spec, theme::token(color), rect.x, rect.y, line_height, visible);
             }
         }),
     }
@@ -1044,16 +1049,15 @@ fn draw_menu(
             });
         }
         let shown = text::elide(&mut ctx.metrics, option, font, (row.w - PAD_X * 2.0).max(0.0));
-        let height = ctx.metrics.measure(&shown, font, None).height;
-        text::paint(
+        let height = text::line_height(&mut ctx.metrics, font);
+        text::paint_line(
             ctx,
             &shown,
             font,
             theme::token(ColorToken::Text),
             row.x + PAD_X,
             row.y + (row.h - height) / 2.0,
-            None,
-            None,
+            height,
             row_visible,
         );
         let option_id = option_hit_id(id, index);

@@ -159,8 +159,8 @@ pub(crate) fn paint(ctx: &mut BuildCtx<'_>, content: u64, blocks: &[MarkdownBloc
         }
         let mut x = rect.x + line.x;
         for run in &line.runs {
-            let width = ctx.metrics.width(&run.text, run.spec);
-            text::paint(ctx, &run.text, run.spec, theme::token(run.color), x, y, None, None, clip);
+            let width = text::advance(&mut ctx.metrics, &run.text, run.spec);
+            text::paint_line(ctx, &run.text, run.spec, theme::token(run.color), x, y, line.height, clip);
             x += width;
         }
     }
@@ -344,13 +344,12 @@ fn push_text(
 ) {
     let mut rest = text;
     while !rest.is_empty() {
-        let width = metrics.width(rest, run.spec);
-        if width <= *remaining {
+        let (take, width) = fit_prefix(metrics, rest, run.spec, remaining.max(0.0));
+        if take == rest.len() {
             current.push(Run { text: rest.to_string(), spec: run.spec, color: run.color });
-            *remaining -= width;
+            *remaining = (*remaining - width).max(0.0);
             return;
         }
-        let take = fit_prefix(metrics, rest, run.spec, remaining.max(0.0));
         if take == 0 {
             // 极窄的一行连一个字符都放不下：当前行没有内容就丢弃这段，避免死循环
             if current.is_empty() {
@@ -367,23 +366,18 @@ fn push_text(
     }
 }
 
-/// 在 `available` 宽度内能放下的最长前缀字节数（至少一个字符；放不下任何字符时为 0）。
-fn fit_prefix(metrics: &mut Metrics, text: &str, spec: FontSpec, available: f32) -> usize {
-    if available <= 0.0 {
-        return 0;
-    }
-    let points: Vec<usize> = text.char_indices().map(|(index, _)| index).chain(std::iter::once(text.len())).collect();
-    let mut low = 0usize;
-    let mut high = points.len() - 1;
-    while low < high {
-        let mid = (low + high).div_ceil(2);
-        if metrics.width(&text[..points[mid]], spec) <= available {
-            low = mid;
-        } else {
-            high = mid - 1;
+/// 在 `available` 宽度内能放下的最长前缀（字节数）与该前缀字宽。
+/// 字宽逐字累加而非量算整段前缀：量算键只有「字 + 字型」，拖动改宽不会随排版位置重新量算。
+fn fit_prefix(metrics: &mut Metrics, text: &str, spec: FontSpec, available: f32) -> (usize, f32) {
+    let mut width = 0.0;
+    for (index, ch) in text.char_indices() {
+        let advance = metrics.char_width(ch, spec);
+        if width + advance > available {
+            return (index, width);
         }
+        width += advance;
     }
-    points[low]
+    (text.len(), width)
 }
 
 #[cfg(test)]
@@ -409,6 +403,55 @@ mod tests {
         assert!(Arc::ptr_eq(&first, &again), "同内容同宽度应命中缓存");
         let narrower = laid_out(&cache, &mut metrics, &theme, key, &paragraph(), 120.0);
         assert!(!Arc::ptr_eq(&first, &narrower), "宽度变了要按新宽度重排");
+    }
+
+    /// 拖动改宽只该按新宽度重排，不该为此重新量算文字：
+    /// 量算键若随排版位置变化，长 Markdown 每改一像素都要把整段重新量一遍，宿主界面被量算往返堵死。
+    #[test]
+    fn resizing_does_not_queue_new_measurements() {
+        use atelyx_plugin_protocol::method::MeasureTextResult;
+
+        fn span(text: &str) -> MarkdownSpan {
+            MarkdownSpan { text: text.to_string(), strong: false, code: false, link: None }
+        }
+
+        let long = "一段用于验证排版宽度的普通正文，包含中文与 ASCII 混排 abc 123。".repeat(30);
+        let blocks = vec![
+            MarkdownBlock::Heading { level: 2, depth: 0, spans: vec![span("标题")] },
+            MarkdownBlock::Paragraph { depth: 0, spans: vec![span(&long)] },
+            MarkdownBlock::ListItem { depth: 0, ordered: false, index: 1, spans: vec![span("列表条目文本")] },
+            MarkdownBlock::Quote { depth: 0, spans: vec![span(&long)] },
+            MarkdownBlock::Code {
+                depth: 0,
+                lang: String::new(),
+                content: "let value = compute(); // a code line long enough to be elided\n".repeat(8),
+            },
+            MarkdownBlock::Table {
+                depth: 0,
+                rows: vec![vec!["column".into(), "value".into()], vec!["alpha".into(), "1".into()]],
+            },
+        ];
+        let theme = Theme::default();
+        let mut metrics = Metrics::default();
+        let cache = LayoutCache::default();
+
+        let _ = laid_out(&cache, &mut metrics, &theme, 3, &blocks, 360.0);
+        let first = metrics.take_misses();
+        assert!(!first.is_empty(), "首帧应登记量算");
+        let sizes: Vec<MeasureTextResult> = first
+            .iter()
+            .map(|item| {
+                let width: f32 = item.text.chars().map(|ch| if ch.is_ascii() { 0.55 } else { 1.0 }).sum::<f32>() * item.size;
+                MeasureTextResult { width, height: item.size * 1.5, lines: 1 }
+            })
+            .collect();
+        metrics.apply(&first, &sizes);
+
+        for width in [360.0_f32, 359.0, 358.0, 300.0, 420.0] {
+            let _ = laid_out(&cache, &mut metrics, &theme, 3, &blocks, width);
+            let misses = metrics.take_misses();
+            assert!(misses.is_empty(), "改宽到 {width} 后不得再登记量算，实际 {} 条", misses.len());
+        }
     }
 
     #[test]

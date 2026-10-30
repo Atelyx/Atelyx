@@ -236,7 +236,6 @@ impl FrameUi {
 mod tests {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
-    use std::time::Duration;
 
     use atelyx_plugin_protocol::paint::{ColorToken, DrawCommand, ImageFit, ImageSource, PaintColor};
     use atelyx_plugin_protocol::envelope::Envelope;
@@ -370,18 +369,15 @@ mod tests {
             self.values.lock().unwrap().insert(id.to_string(), value.to_string());
         }
 
-        async fn drive<T>(&mut self, task: tokio::task::JoinHandle<T>) -> T {
+        async fn drive<T>(&mut self, mut task: tokio::task::JoinHandle<T>) -> T {
             loop {
-                if task.is_finished() {
-                    return task.await.expect("任务不应 panic");
-                }
                 tokio::select! {
                     envelope = self.rx.recv() => {
                         if let Some(envelope) = envelope {
                             self.reply(envelope);
                         }
                     }
-                    _ = tokio::time::sleep(Duration::from_millis(2)) => {}
+                    result = &mut task => return result.expect("任务不应 panic"),
                 }
             }
         }
@@ -806,6 +802,36 @@ mod tests {
             measures,
             "同文字不再量算"
         );
+    }
+
+    /// 换行文字的高度曾在改宽时按新宽度重新量算：一屏日志每拖一像素就是几百条量算，
+    /// 宿主逐条同步排版会把 UI 线程堵住。改宽后不得再登记量算。
+    #[tokio::test]
+    async fn resizing_wrapped_text_queues_no_measurements() {
+        let mut bench = Bench::new(260.0, 200.0).await;
+        let lines: Vec<String> = (0..120)
+            .map(|index| format!("[{index:04}] 普通输出行，包含中英文混排 abc 123 与足够触发换行的说明文字"))
+            .collect();
+        let build = move |ui: &mut build::Ui<'_, '_>| {
+            ui.scroll_sized("logs", 180.0, 2.0, false, |list| {
+                for line in &lines {
+                    list.text_styled(line, TextStyle::new(TextRole::Caption).wrap());
+                }
+            });
+        };
+        bench.render(build.clone()).await.unwrap();
+        let first = bench.requests.iter().filter(|m| **m == method::query::MEASURE).count();
+        assert!(first > 0, "首帧应登记量算");
+
+        for width in [260.0_f32, 259.0, 258.0, 200.0, 320.0] {
+            bench.event(FrameInput::Resize { width, height: 200.0 }).await;
+            bench.render(build.clone()).await.unwrap();
+            assert_eq!(
+                bench.requests.iter().filter(|m| **m == method::query::MEASURE).count(),
+                first,
+                "改宽到 {width} 后不得再登记量算"
+            );
+        }
     }
 
     #[tokio::test]

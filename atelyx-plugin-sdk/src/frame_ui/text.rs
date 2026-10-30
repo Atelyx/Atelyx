@@ -154,27 +154,70 @@ pub(crate) fn elide(metrics: &mut Metrics, text: &str, spec: FontSpec, available
     if metrics.width(text, spec) <= available {
         return text.to_string();
     }
-    let ellipsis = "…";
-    let ellipsis_width = metrics.width(ellipsis, spec);
+    let ellipsis_width = metrics.width("…", spec);
     if ellipsis_width > available {
         return String::new();
     }
-    let points = boundaries(text);
-    let mut low = 0usize;
-    let mut high = points.len() - 1;
-    while low < high {
-        let mid = (low + high).div_ceil(2);
-        let width = metrics.width(&text[..points[mid]], spec) + ellipsis_width;
-        if width <= available {
-            low = mid;
-        } else {
-            high = mid - 1;
+    // 逐字累加定前缀：量算键只有「字 + 字型」，改宽不会按排版位置重新量算。
+    // 超出可用宽度的字也照样取一次字宽，后面的宽度变宽时不再补量。
+    let mut width = 0.0;
+    let mut end = 0usize;
+    let mut fits = true;
+    for (index, ch) in text.char_indices() {
+        let advance = metrics.char_width(ch, spec);
+        if fits {
+            if width + advance + ellipsis_width > available {
+                fits = false;
+            } else {
+                width += advance;
+                end = index + ch.len_utf8();
+            }
         }
     }
-    format!("{}…", &text[..points[low]])
+    if end == text.len() {
+        return text.to_string();
+    }
+    format!("{}…", &text[..end])
 }
 
-/// 单行文字绘制：`max_width` 给定时文字按该宽度换行。
+/// 软换行切行：逐字累加宽度（量算键只有「字 + 字型」，与可用宽度无关），每行至少一个字，空段落占一行。
+/// 由插件自己切行绘制，宿主就不必按宽度量算整段——改宽不会为一屏文字重新登记量算。
+pub(crate) fn wrap_lines<'a>(metrics: &mut Metrics, text: &'a str, spec: FontSpec, width: f32) -> Vec<&'a str> {
+    let width = width.max(1.0);
+    let mut out = Vec::new();
+    for paragraph in text.split('\n') {
+        let mut start = 0usize;
+        let mut used = 0.0;
+        for (index, ch) in paragraph.char_indices() {
+            let advance = metrics.char_width(ch, spec);
+            if used + advance > width && index > start {
+                out.push(&paragraph[start..index]);
+                start = index;
+                used = 0.0;
+            }
+            used += advance;
+        }
+        out.push(&paragraph[start..]);
+    }
+    out
+}
+
+/// 单行高度：软换行的整块高度按行数累加。
+pub(crate) fn line_height(metrics: &mut Metrics, spec: FontSpec) -> f32 {
+    metrics.measure("", spec, None).height.max(spec.size * 1.2)
+}
+
+/// 单行宽度（逐字累加）：用于居中摆放已省略的标签，不按整串登记量算。
+pub(crate) fn advance(metrics: &mut Metrics, text: &str, spec: FontSpec) -> f32 {
+    text.chars().map(|ch| metrics.char_width(ch, spec)).sum()
+}
+
+/// 软换行后的整块高度。
+pub(crate) fn wrapped_height(metrics: &mut Metrics, text: &str, spec: FontSpec, width: f32) -> f32 {
+    wrap_lines(metrics, text, spec, width).len() as f32 * line_height(metrics, spec)
+}
+
+/// 单行文字绘制：`max_width` 给定时文字按该宽度换行（只用于输入框这类定宽单行控件）。
 /// 指令集没有裁剪：文字按整块判断，垂直方向不完整落在可见区内即不画（半截文字会串到相邻区域）。
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn paint(
@@ -202,6 +245,35 @@ pub(crate) fn paint(
         family: spec.family,
         max_width,
         align,
+    });
+}
+
+/// 已定高的一行文字：高度由调用方给出，不按行文本量算。
+/// 软换行 / 省略后的行文本随可用宽度变化，按文本量算会在改宽时为每一行登记新条目。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn paint_line(
+    ctx: &mut BuildCtx<'_>,
+    content: &str,
+    spec: FontSpec,
+    color: PaintColor,
+    x: f32,
+    y: f32,
+    height: f32,
+    clip: super::geom::Rect,
+) {
+    if y < clip.y || y + height > clip.bottom() + 0.5 {
+        return;
+    }
+    ctx.draw(DrawCommand::Text {
+        x,
+        y,
+        content: content.to_string(),
+        size: spec.size,
+        color,
+        weight: spec.weight,
+        family: spec.family,
+        max_width: None,
+        align: None,
     });
 }
 

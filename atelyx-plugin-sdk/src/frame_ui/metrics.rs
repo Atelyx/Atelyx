@@ -9,6 +9,8 @@ use atelyx_plugin_protocol::paint::{TextFamily, TextWeight};
 use super::model::FontSpec;
 
 type Key = (String, u32, u8, u8, Option<u32>);
+/// 单字字宽键：字 / 字号 / 字重 / 字体族（与可用宽度无关——逐字累加才不随换行宽度生键）。
+type CharKey = (u32, u32, u8, u8);
 
 /// 缓存条数上限：超出即整体清空（键含文本，长期运行的插件会按历史值累积）。
 const MAX_MEASURED: usize = 4096;
@@ -18,6 +20,10 @@ pub(crate) struct Metrics {
     cache: HashMap<Key, MeasureTextResult>,
     misses: Vec<MeasureItem>,
     missed: HashSet<Key>,
+    /// 逐字字宽：换行 / 省略按它累加，键与排版宽度无关，拖动改宽不会重新量算。
+    chars: HashMap<CharKey, f32>,
+    char_misses: Vec<MeasureItem>,
+    char_missed: HashSet<CharKey>,
     /// 量算落地代次：真实字宽一变，按旧字宽排出的 Markdown 版面即作废。
     epoch: u64,
 }
@@ -52,30 +58,69 @@ impl Metrics {
         self.measure(text, spec, None).width
     }
 
+    /// 单个字符的字宽：换行与省略按它逐字累加，键空间只有「用到的字 × 字型」，与排版宽度无关。
+    pub(crate) fn char_width(&mut self, ch: char, spec: FontSpec) -> f32 {
+        let key = char_key(ch, spec);
+        if let Some(hit) = self.chars.get(&key) {
+            return *hit;
+        }
+        if self.char_missed.insert(key) {
+            self.char_misses.push(MeasureItem {
+                text: ch.to_string(),
+                size: spec.size,
+                weight: spec.weight,
+                family: spec.family,
+                max_width: None,
+            });
+        }
+        estimate_char(ch, spec.size)
+    }
+
     pub(crate) fn has_misses(&self) -> bool {
-        !self.misses.is_empty()
+        !self.misses.is_empty() || !self.char_misses.is_empty()
     }
 
     /// 取走本轮的待量算条目（并按存活条数上限收紧缓存）。
     pub(crate) fn take_misses(&mut self) -> Vec<MeasureItem> {
         self.missed.clear();
+        self.char_missed.clear();
         if self.cache.len() > MAX_MEASURED {
             self.cache.clear();
         }
-        std::mem::take(&mut self.misses)
+        let mut out = std::mem::take(&mut self.misses);
+        out.append(&mut self.char_misses);
+        out
     }
 
     /// 落地一批量算结果：`items` 与 `sizes` 一一对应（宿主可能少回，按较短者取）。
+    /// 只有不带可用宽度的量算会改变 Markdown 版面（字宽 / 行高 / 整行宽），带宽度的是控件自身高度，不动版面代次。
     pub(crate) fn apply(&mut self, items: &[MeasureItem], sizes: &[MeasureTextResult]) {
-        let mut landed = false;
+        let mut layout_changed = false;
         for (item, size) in items.iter().zip(sizes) {
-            let key = key_of(&item.text, FontSpec { size: item.size, weight: item.weight, family: item.family }, item.max_width);
-            self.cache.insert(key, *size);
-            landed = true;
+            let spec = FontSpec { size: item.size, weight: item.weight, family: item.family };
+            self.cache.insert(key_of(&item.text, spec, item.max_width), *size);
+            if item.max_width.is_none() {
+                layout_changed = true;
+                if let Some(ch) = single_char(&item.text) {
+                    self.chars.insert(char_key(ch, spec), size.width);
+                }
+            }
         }
-        if landed {
+        if layout_changed {
             self.epoch += 1;
         }
+    }
+}
+
+fn char_key(ch: char, spec: FontSpec) -> CharKey {
+    (ch as u32, spec.size.to_bits(), weight_code(spec.weight), family_code(spec.family))
+}
+
+fn single_char(text: &str) -> Option<char> {
+    let mut chars = text.chars();
+    match (chars.next(), chars.next()) {
+        (Some(ch), None) => Some(ch),
+        _ => None,
     }
 }
 
@@ -109,7 +154,7 @@ fn family_code(family: Option<TextFamily>) -> u8 {
 /// 估算：ASCII 按 0.55 字宽，其余按 1 字宽；行高取 1.2 倍字号。
 /// 只用于量算落地前的这一两帧，真实字宽一到即被替换。
 fn estimate(text: &str, size: f32, max_width: Option<f32>) -> MeasureTextResult {
-    let width: f32 = text.chars().map(|c| if c.is_ascii() { 0.55 } else { 1.0 }).sum::<f32>() * size;
+    let width: f32 = text.chars().map(|c| estimate_char(c, size)).sum();
     let line_height = size * 1.2;
     match max_width {
         Some(limit) if width > limit => {
@@ -118,6 +163,11 @@ fn estimate(text: &str, size: f32, max_width: Option<f32>) -> MeasureTextResult 
         }
         _ => MeasureTextResult { width, height: line_height, lines: 1 },
     }
+}
+
+/// 单字估算字宽，与 [`estimate`] 同一口径。
+fn estimate_char(ch: char, size: f32) -> f32 {
+    size * if ch.is_ascii() { 0.55 } else { 1.0 }
 }
 
 #[cfg(test)]
