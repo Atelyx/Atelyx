@@ -216,18 +216,12 @@ pub fn refresh_frames(app: &mut App) -> Task<Message> {
         let Some(frame) = app.plugins.surface_frame(&plugin_id, &surface_id) else {
             continue;
         };
-        // 帧换了才发新序号：帧对象地址会被分配器复用，缓存必须按序号失效（否则滚动 / 重排后画面不刷新）
-        let changed = app.plugin_frames.get(&key).is_none_or(|old| !std::sync::Arc::ptr_eq(old, &frame));
-        if changed {
-            app.plugin_frame_stamp_seq += 1;
-            app.plugin_frame_stamps.insert(key.clone(), app.plugin_frame_stamp_seq);
-        }
         frames.insert(key, frame);
     }
     app.plugin_frames = frames;
-    app.plugin_frame_stamps
-        .retain(|key, _| app.plugin_frames.contains_key(key));
     sync_frame_focus(app);
+    // 这次投影已经覆盖到最新帧，心跳里不再重复补
+    let _ = app.plugins.take_observed_pending();
     ensure_images(app)
 }
 
@@ -299,11 +293,13 @@ pub fn release_plugin_focus(app: &mut App, window: window::Id) {
 
 /// 整面帧是否收全部按键（含命令组合）：持有焦点的面按最新帧的 `keys` 声明判定。
 pub fn frame_takes_keyboard(app: &App) -> bool {
-    app.plugin_frame_focus.as_ref().is_some_and(|focus| {
-        app.plugin_frames
-            .get(&(focus.plugin_id.clone(), focus.surface_id.clone()))
-            .is_some_and(|frame| frame.keys)
-    })
+    let Some(focus) = app.plugin_frame_focus.as_ref() else {
+        return false;
+    };
+    app.plugins
+        .surface_frame(&focus.plugin_id, &focus.surface_id)
+        .or_else(|| app.plugin_frames.get(&(focus.plugin_id.clone(), focus.surface_id.clone())).cloned())
+        .is_some_and(|frame| frame.keys)
 }
 
 // ===== 界面图片 =====

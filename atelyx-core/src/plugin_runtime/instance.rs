@@ -97,9 +97,11 @@ pub(crate) struct Instance {
     undeclared_methods: Mutex<HashSet<String>>,
     undeclared_calls: AtomicU64,
     /// 各面整面帧（surface id → 帧）；会话收尾一并清除。
-    frames: Mutex<HashMap<String, Arc<frame::SurfaceFrame>>>,
-    /// 新帧落地信号：与 `frames` 同一把锁配对，供绘制期同步等新帧（见 [`Instance::wait_frame`]）。
+    frames: Mutex<FrameStore>,
+    /// 新帧落地信号：与 `frames` 同一把锁配对，供绘制期同步等新帧（见 [`Instance::finish_frame_wait`]）。
     frame_signal: Condvar,
+    /// 有帧被绘制期同步取走后置位，壳在心跳里据此补一次投影。
+    observed_pending: AtomicBool,
     /// 声明了帧率的整面帧（面 id → 节拍）；随帧提交同步。
     surface_clocks: Mutex<HashMap<String, FrameClock>>,
     /// 整面帧共享内存区域：握手时建，扩容换新，会话收尾释放。
@@ -116,6 +118,15 @@ pub(crate) struct Instance {
     default_layout: Mutex<Option<(String, LayoutSpecNode)>>,
     /// 本插件日志（插件 stderr、协议违规与生命周期失败的唯一可查落点）。
     log: Arc<log::LogSink>,
+}
+
+/// 各面已落地的整面帧与正在等帧的面。
+#[derive(Default)]
+struct FrameStore {
+    frames: HashMap<String, Arc<frame::SurfaceFrame>>,
+    /// 已登记等帧的面 → 等帧前画在屏幕上的那一帧：登记期间退回的帧由等帧方取走画上，
+    /// 不再另发一条通知（否则每拍都会多一次整窗重建）。
+    waiting: HashMap<String, Arc<frame::SurfaceFrame>>,
 }
 
 /// 一个画布节点的帧节拍：声明了 `fps` 才有，宿主按它决定什么时候发 `host:canvas.frame`。
@@ -210,8 +221,9 @@ impl Instance {
             audits: Mutex::new(Vec::new()),
             undeclared_methods: Mutex::new(HashSet::new()),
             undeclared_calls: AtomicU64::new(0),
-            frames: Mutex::new(HashMap::new()),
+            frames: Mutex::new(FrameStore::default()),
             frame_signal: Condvar::new(),
+            observed_pending: AtomicBool::new(false),
             surface_clocks: Mutex::new(HashMap::new()),
             frame_region: FrameRegionStore::new(&manifest_id),
             resize_gates: Mutex::new(HashMap::new()),
@@ -247,31 +259,52 @@ impl Instance {
 
     /// 某面的整面帧（会话收尾即清空）。
     pub(crate) fn surface_frame(&self, surface_id: &str) -> Option<Arc<frame::SurfaceFrame>> {
-        self.frames.lock().unwrap().get(surface_id).cloned()
+        self.frames.lock().unwrap().frames.get(surface_id).cloned()
     }
 
-    /// 等某面出现一张不同于 `seen` 的新帧（壳改宽那一拍同步取新帧用）。
-    /// 超时、该面已无可渲染帧（会话收尾 / 面被撤销）时返回 `None`：调用方按手上的帧画。
-    pub(crate) fn wait_frame(
+    /// 登记一次改宽等帧。须在向插件发 `Resize` 之前登记：登记期间退回的帧由
+    /// [`Instance::finish_frame_wait`] 取走并画上，提交路径不再发通知。
+    pub(crate) fn begin_frame_wait(&self, surface_id: &str, seen: Arc<frame::SurfaceFrame>) {
+        self.frames.lock().unwrap().waiting.insert(surface_id.to_string(), seen);
+    }
+
+    /// 等某面出现一张不同于登记时画面的新帧（改宽那一拍同步取新帧用）。
+    /// 超时、未登记、该面已无可渲染帧时返回 `None`：调用方按手上的帧画。
+    pub(crate) fn finish_frame_wait(
         &self,
         surface_id: &str,
-        seen: &Arc<frame::SurfaceFrame>,
         timeout: Duration,
     ) -> Option<Arc<frame::SurfaceFrame>> {
         let deadline = Instant::now() + timeout;
-        let mut frames = self.frames.lock().unwrap();
+        let mut store = self.frames.lock().unwrap();
+        let seen = store.waiting.get(surface_id).cloned()?;
         loop {
-            match frames.get(surface_id) {
-                Some(frame) if !Arc::ptr_eq(frame, seen) => return Some(frame.clone()),
+            match store.frames.get(surface_id) {
+                Some(frame) if !Arc::ptr_eq(frame, &seen) => {
+                    let frame = frame.clone();
+                    store.waiting.remove(surface_id);
+                    drop(store);
+                    self.observed_pending.store(true, Ordering::Relaxed);
+                    return Some(frame);
+                }
                 Some(_) => {}
-                None => return None,
+                None => {
+                    store.waiting.remove(surface_id);
+                    return None;
+                }
             }
             let now = Instant::now();
             if now >= deadline {
+                store.waiting.remove(surface_id);
                 return None;
             }
-            frames = self.frame_signal.wait_timeout(frames, deadline - now).ok()?.0;
+            store = self.frame_signal.wait_timeout(store, deadline - now).ok()?.0;
         }
+    }
+
+    /// 取走「有帧被同步取走」的待补投影标记。
+    pub(crate) fn take_observed_pending(&self) -> bool {
+        self.observed_pending.swap(false, Ordering::Relaxed)
     }
 
     /// 本插件已注册贡献点（补上插件 id）。
@@ -417,8 +450,13 @@ impl Instance {
             self.subscriptions.lock().unwrap().clear();
             self.undeclared_methods.lock().unwrap().clear();
             self.undeclared_calls.store(0, Ordering::Relaxed);
-            frames_dropped = !self.frames.lock().unwrap().is_empty();
-            self.frames.lock().unwrap().clear();
+            {
+                let mut store = self.frames.lock().unwrap();
+                frames_dropped = !store.frames.is_empty();
+                store.frames.clear();
+                store.waiting.clear();
+            }
+            self.observed_pending.store(false, Ordering::Relaxed);
             self.frame_signal.notify_all();
             self.surface_clocks.lock().unwrap().clear();
             self.resize_gates.lock().unwrap().clear();
@@ -1597,30 +1635,37 @@ impl Instance {
             .map_err(|e| RpcError::failed(format!("帧内容不合法：{e}")))?;
         let surface_id = p.surface_id;
         let submitted = Arc::new(frame);
-        self.with_session(token, || {
-            let mut clocks = self.surface_clocks.lock().unwrap();
-            // 帧率未变的面沿用原钟：帧序号与节拍相位不因内容更新而重置
-            match submitted.fps {
-                Some(fps) => {
-                    let clock = match clocks.get(&surface_id) {
-                        Some(clock) if clock.fps == fps => *clock,
-                        _ => FrameClock::new(fps, Instant::now()),
-                    };
-                    clocks.insert(surface_id.clone(), clock);
+        let claimed = self
+            .with_session(token, || {
+                let mut clocks = self.surface_clocks.lock().unwrap();
+                // 帧率未变的面沿用原钟：帧序号与节拍相位不因内容更新而重置
+                match submitted.fps {
+                    Some(fps) => {
+                        let clock = match clocks.get(&surface_id) {
+                            Some(clock) if clock.fps == fps => *clock,
+                            _ => FrameClock::new(fps, Instant::now()),
+                        };
+                        clocks.insert(surface_id.clone(), clock);
+                    }
+                    None => {
+                        clocks.remove(&surface_id);
+                    }
                 }
-                None => {
-                    clocks.remove(&surface_id);
-                }
-            }
-            drop(clocks);
-            self.frames.lock().unwrap().insert(surface_id.clone(), submitted);
-            self.frame_signal.notify_all();
-            self.submits.fetch_add(1, Ordering::Relaxed);
-            Ok(())
-        })
-        .map_err(RpcError::failed)?;
+                drop(clocks);
+                let mut store = self.frames.lock().unwrap();
+                store.frames.insert(surface_id.clone(), submitted);
+                // 有绘制期等帧登记：这一帧由它取走画上，不再发通知（发一条就是一次整窗重建）
+                let claimed = store.waiting.contains_key(&surface_id);
+                drop(store);
+                self.frame_signal.notify_all();
+                self.submits.fetch_add(1, Ordering::Relaxed);
+                Ok(claimed)
+            })
+            .map_err(RpcError::failed)?;
         self.resize_acked(&surface_id);
-        let _ = self.events.send(PluginEvent::ViewSubmitted { id: self.id.clone() });
+        if !claimed {
+            let _ = self.events.send(PluginEvent::ViewSubmitted { id: self.id.clone() });
+        }
         Ok(json!({ "applied": true }))
     }
 
@@ -1680,7 +1725,11 @@ impl Instance {
             if contributions.len() == before {
                 return Err(format!("未注册的贡献 id：{}", p.id));
             }
-            self.frames.lock().unwrap().remove(&p.id);
+            {
+                let mut store = self.frames.lock().unwrap();
+                store.frames.remove(&p.id);
+                store.waiting.remove(&p.id);
+            }
             self.surface_clocks.lock().unwrap().remove(&p.id);
             self.frame_signal.notify_all();
             Ok(())
@@ -3136,6 +3185,60 @@ mod tests {
         assert!(instance.surface_frame("main").is_none());
         assert!(!instance.has_frame_ticks());
         assert!(!std::path::Path::new(&info.path).exists(), "区域文件随会话释放");
+    }
+
+    /// 绘制期登记的等帧会取走退回的帧：登记期间的提交不发通知，超时后到达的帧照常通知。
+    #[test]
+    fn claimed_frame_is_not_broadcast_and_a_timeout_falls_back_to_notice() {
+        let (_tmp, instance, mut events) = make_instance_with_events(Vec::new());
+        let info = instance.frame_region.ensure().unwrap();
+        let file = std::fs::OpenOptions::new().read(true).write(true).open(&info.path).unwrap();
+        let mut map = unsafe {
+            memmap2::MmapOptions::new().len(info.byte_len()).map_mut(&file).unwrap()
+        };
+        let submit = |map: &mut memmap2::MmapMut, slot: u32, seq: u64| {
+            let frame = frame::SurfaceFrame::default();
+            let payload = frame_codec::encode(&frame);
+            frame_region::write_slot(map, &info, slot, seq, &payload).unwrap();
+            instance
+                .dispatch(
+                    method::frame::SUBMIT_SHARED,
+                    &json!({
+                        "surfaceId": "main",
+                        "generation": info.generation,
+                        "slot": slot,
+                        "seq": seq,
+                        "len": payload.len(),
+                    }),
+                )
+                .unwrap();
+        };
+
+        // 没人等帧：提交照常通知壳
+        submit(&mut map, 0, 2);
+        let first = instance.surface_frame("main").unwrap();
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            PluginEvent::ViewSubmitted { .. }
+        ));
+
+        // 登记等帧期间的提交由等待方取走，不再通知
+        instance.begin_frame_wait("main", first.clone());
+        submit(&mut map, 1, 2);
+        assert!(events.try_recv().is_err(), "登记期间的帧不得再发通知");
+        let second = instance.finish_frame_wait("main", Duration::from_millis(200)).unwrap();
+        assert!(!Arc::ptr_eq(&first, &second));
+        assert!(instance.take_observed_pending(), "取走即标记待补投影");
+        assert!(!instance.take_observed_pending());
+
+        // 等帧超时会撤掉登记：之后退回的帧仍要通知
+        instance.begin_frame_wait("main", second);
+        assert!(instance.finish_frame_wait("main", Duration::from_millis(1)).is_none());
+        submit(&mut map, 0, 4);
+        assert!(
+            matches!(events.try_recv().unwrap(), PluginEvent::ViewSubmitted { .. }),
+            "超时后到达的帧照常通知"
+        );
     }
 
     /// 尺寸突发只保留最新一笔在途：回执放行下一笔，空闲后兜底线程退出。

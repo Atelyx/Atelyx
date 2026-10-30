@@ -1311,10 +1311,6 @@ pub struct App {
     /// 各面的最新整面帧（键 = 插件 id + 面 id）。
     pub plugin_frames:
         HashMap<(String, String), std::sync::Arc<atelyx_core::plugin_runtime::SurfaceFrame>>,
-    /// 各面帧的提交序号（缓存失效键）：帧对象地址会被分配器复用，不能拿来判定「换没换帧」。
-    pub plugin_frame_stamps: HashMap<(String, String), u64>,
-    /// 帧提交序号的发号器（每换一帧 +1）。
-    pub(crate) plugin_frame_stamp_seq: u64,
     /// 整面帧的键盘焦点（全局单槽：OS 只给聚焦窗口发键盘，窗口失焦即清除）。
     pub plugin_frame_focus: Option<plugin_actions::FrameFocus>,
     /// 帧拍是否还在飞（同一时刻只推一拍，慢插件不积压帧任务）。
@@ -1720,8 +1716,6 @@ impl App {
                 plugin_table_surfaces: HashSet::new(),
                 table_event_path: None,
                 plugin_frames: HashMap::new(),
-                plugin_frame_stamps: HashMap::new(),
-                plugin_frame_stamp_seq: 0,
                 plugin_frame_focus: None,
                 plugin_frame_pumping: false,
                 plugin_takeovers: HashMap::new(),
@@ -3082,7 +3076,14 @@ impl App {
                 // 主页面板懒加载搭载：历史面板缓存失效时聚合，最近打开条目按节流校验存在性
                 let lazy = repohistory_view::tick(self)
                     .chain(recent_view::tick(self))
-                    .chain(space_actions::members_tick(self));
+                    .chain(space_actions::members_tick(self))
+                    // 绘制期同步取走的帧不走通知：投影可能落后，心跳里补一次
+                    // （图片载入与键位声明读的是投影缓存）
+                    .chain(if self.plugins.take_observed_pending() {
+                        plugin_actions::refresh_frames(self)
+                    } else {
+                        Task::none()
+                    });
                 if !self.persist_dirty {
                     return lazy;
                 }
@@ -3177,22 +3178,25 @@ impl App {
             Message::WindowResized(id, size) => {
                 if self.main_id == Some(id) {
                     self.main_size = size;
-                    return Task::none();
-                }
-                // 插件窗口：记账里的尺寸随 OS 调整更新（`window.update` 只改一维时取它）
-                if let Some(entry) = self.plugin_windows.get_mut(&id) {
+                } else if let Some(entry) = self.plugin_windows.get_mut(&id) {
+                    // 插件窗口：记账里的尺寸随 OS 调整更新（`window.update` 只改一维时取它）
                     entry.size = size;
-                    return Task::none();
+                } else {
+                    // 撕裂窗口尺寸回写模型 bounds（OS 窗口事件 = bounds 唯一写者）
+                    self.os_sizes.insert(id, size);
+                    if let Some(model_id) = self.detached_os.get(&id) {
+                        if let Some(w) =
+                            self.ui.detached_windows.iter_mut().find(|w| w.id == *model_id)
+                        {
+                            w.bounds.width = size.width as f64;
+                            w.bounds.height = size.height as f64;
+                            self.schedule_persist();
+                        }
+                    }
                 }
-                // 撕裂窗口尺寸回写模型 bounds（OS 窗口事件 = bounds 唯一写者）
-                self.os_sizes.insert(id, size);
-                let Some(model_id) = self.detached_os.get(&id) else { return Task::none() };
-                if let Some(w) = self.ui.detached_windows.iter_mut().find(|w| w.id == *model_id) {
-                    w.bounds.width = size.width as f64;
-                    w.bounds.height = size.height as f64;
-                    self.schedule_persist();
-                }
-                Task::none()
+                // 拖动窗口边缘时插件帧在绘制期被取走、不再发通知：这一拍把投影补上
+                // （事件本身已经触发重建，补投影不多花一次）
+                plugin_actions::refresh_frames(self)
             }
             Message::Press(id) => {
                 // 焦点窗口跟踪（接管请求作用域 = 最近按压的窗口）
@@ -3479,7 +3483,8 @@ impl App {
                     return self.resolve_file_drop(d);
                 }
                 if self.divider.take().is_some() {
-                    return Task::none();
+                    // 拖动期间的帧在绘制期被取走、不再发通知：收手时把投影补上
+                    return plugin_actions::refresh_frames(self);
                 }
                 let Some(d) = self.drag.take() else {
                     self.drag_hover = None;
