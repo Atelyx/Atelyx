@@ -3,7 +3,8 @@
 
 use atelyx_plugin_protocol::envelope::Envelope;
 use atelyx_plugin_protocol::event::{
-    ChatChangedPayload, FileChangedPayload, TableChangedPayload, VaultSwitchPayload,
+    ChatChangedPayload, FileChangedPayload, SpaceMetaChangedPayload, TableChangedPayload,
+    VaultSwitchPayload,
 };
 use atelyx_plugin_protocol::handshake::{self, InitializeParams, InitializeResult};
 use atelyx_plugin_protocol::frame::{FrameRegionRequest, FrameSubmitSharedParams, SurfaceFrame};
@@ -276,6 +277,25 @@ fn method_type_shapes_are_frozen() {
             "CollabSendParams" => frozen_roundtrip::<CollabSendParams>(&value),
             "CollabSendResult" => frozen_roundtrip::<CollabSendResult>(&value),
             "CollabMessageParams" => frozen_roundtrip::<CollabMessageParams>(&value),
+            "CollabMetaGetParams" => frozen_roundtrip::<
+                atelyx_plugin_protocol::method::CollabMetaGetParams,
+            >(&value),
+            "CollabMetaResult" => {
+                frozen_roundtrip::<atelyx_plugin_protocol::method::CollabMetaResult>(&value)
+            }
+            "CollabMetaPatchParams" => frozen_roundtrip::<
+                atelyx_plugin_protocol::method::CollabMetaPatchParams,
+            >(&value),
+            "SpaceMetaChangedPayload" => frozen_roundtrip::<SpaceMetaChangedPayload>(&value),
+            "HistoryDayParams" => {
+                frozen_roundtrip::<atelyx_plugin_protocol::method::HistoryDayParams>(&value)
+            }
+            "HistoryDayResult" => {
+                frozen_roundtrip::<atelyx_plugin_protocol::method::HistoryDayResult>(&value)
+            }
+            "HistoryOpenParams" => {
+                frozen_roundtrip::<atelyx_plugin_protocol::method::HistoryOpenParams>(&value)
+            }
             "MeasureTextResult" => frozen_roundtrip::<MeasureTextResult>(&value),
             "ImageSource" => {
                 frozen_roundtrip::<atelyx_plugin_protocol::paint::ImageSource>(&value)

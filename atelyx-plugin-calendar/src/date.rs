@@ -1,7 +1,7 @@
-//! 日历日期数学：公历与自纪元天数互转、月网格推导与本地「今天」。
-//! 口径与宿主日历一致（纯公历；本地日界取系统时区）。
+//! 日历日期数学：公历与自纪元天数互转、月网格推导与本地时间换算。
+//! 纯公历；本地日界取系统时区，与宿主历史归日同一口径。
 
-use chrono::{Datelike, Local};
+use chrono::{Datelike, Local, TimeZone, Timelike};
 
 /// 平年各月天数（闰二月另判）。
 const MONTH_DAYS: [u32; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
@@ -10,6 +10,11 @@ const MONTH_DAYS: [u32; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
 pub fn today() -> i64 {
     let date = Local::now().date_naive();
     days_from_civil(date.year() as i64, date.month(), date.day())
+}
+
+/// 本地当下的 Unix 毫秒（新建日程的创建时刻）。
+pub fn now_ms() -> i64 {
+    Local::now().timestamp_millis()
 }
 
 /// 自纪元天数 → (年, 月, 日)（proleptic Gregorian civil 算法）。
@@ -73,6 +78,14 @@ pub fn month_cells(y: i64, m: u32) -> Vec<Option<u32>> {
         .collect()
 }
 
+/// 以 (base_y, base_m) 为中心的 `months` 个月（旧→新；调用方传奇数，导航月居中）。
+pub fn month_window_around(base_y: i64, base_m: u32, months: u32) -> Vec<(i64, u32)> {
+    let half = months.saturating_sub(1) as i32 / 2;
+    (0..months as i32)
+        .map(|i| month_add(base_y, base_m, i - half))
+        .collect()
+}
+
 /// `YYYY-MM-DD` → 自纪元天数（形态或范围非法 = `None`）。
 pub fn parse_date(s: &str) -> Option<i64> {
     let bytes = s.as_bytes();
@@ -92,22 +105,33 @@ pub fn parse_date(s: &str) -> Option<i64> {
     Some(days_from_civil(y, m, d))
 }
 
-/// 自纪元天数 → `YYYY-MM-DD`（`calendar.*` 的日期格式）。
+/// 自纪元天数 → `YYYY-MM-DD`（日程 `date` 字段的存储格式）。
 pub fn date_string(days: i64) -> String {
     let (y, m, d) = civil_from_days(days);
     format!("{y:04}-{m:02}-{d:02}")
 }
 
-/// 月份标题（带年份，跨年翻月不混）。
-pub fn month_title(y: i64, m: u32) -> String {
-    format!("{y} 年 {m} 月")
+/// 热力图月块标签（一月带年份，防跨年窗口混淆）。
+pub fn month_label(y: i64, m: u32) -> String {
+    if m == 1 {
+        format!("{y}年1月")
+    } else {
+        format!("{m}月")
+    }
 }
 
-/// 选中日的标题（如 `10 月 29 日 周三`）。
-pub fn day_title(days: i64) -> String {
-    const WEEKDAYS: [&str; 7] = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
+/// 选中日的标题（如 `10月29日`）。
+pub fn day_label(days: i64) -> String {
     let (_, m, d) = civil_from_days(days);
-    format!("{m} 月 {d} 日 {}", WEEKDAYS[weekday_mon0(days) as usize])
+    format!("{m}月{d}日")
+}
+
+/// Unix 毫秒 → 本地 `(时, 分)`；超出可表示范围的时刻按 `(0, 0)`。
+pub fn time_hm(ts_ms: i64) -> (u32, u32) {
+    match Local.timestamp_millis_opt(ts_ms).single() {
+        Some(time) => (time.hour(), time.minute()),
+        None => (0, 0),
+    }
 }
 
 #[cfg(test)]
@@ -150,5 +174,36 @@ mod tests {
         assert_eq!(month_add(2026, 12, 1), (2027, 1));
         assert_eq!(month_add(2026, 1, -1), (2025, 12));
         assert_eq!(month_add(2026, 6, -18), (2024, 12));
+    }
+
+    #[test]
+    fn month_window_is_centered_and_ordered() {
+        assert_eq!(
+            month_window_around(2026, 10, 3),
+            [(2026, 9), (2026, 10), (2026, 11)]
+        );
+        let window = month_window_around(2026, 1, 13);
+        assert_eq!(window.len(), 13);
+        assert_eq!(window[6], (2026, 1), "导航月居中");
+        assert_eq!(window[0], (2025, 7));
+        assert_eq!(window[12], (2026, 7));
+    }
+
+    #[test]
+    fn labels_carry_the_year_only_when_needed() {
+        assert_eq!(month_label(2027, 1), "2027年1月");
+        assert_eq!(month_label(2026, 10), "10月");
+        assert_eq!(day_label(days_from_civil(2026, 10, 29)), "10月29日");
+    }
+
+    #[test]
+    fn local_time_uses_the_machine_zone() {
+        let stamp = Local
+            .with_ymd_and_hms(2026, 10, 30, 9, 5, 0)
+            .single()
+            .unwrap()
+            .timestamp_millis();
+        assert_eq!(time_hm(stamp), (9, 5));
+        assert_eq!(time_hm(i64::MAX), (0, 0), "不可表示的毫秒按零值");
     }
 }

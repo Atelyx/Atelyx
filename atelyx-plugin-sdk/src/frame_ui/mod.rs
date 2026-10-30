@@ -61,6 +61,16 @@ pub enum UiEvent {
     Focus { id: String, focused: bool },
     /// 滚动容器偏移变化：`offset` 为当前偏移，`max_offset` 为可滚动余量（滚到底翻页这类判断用）。
     Scroll { id: String, offset: f32, max_offset: f32 },
+    /// 自绘子区上的拖拽越过起拖阈值（此后的抬起不再出 `Click`）。
+    DragStart { id: String },
+    /// 拖拽中：`dx` / `dy` 是从按下点的累计位移。
+    Drag { id: String, dx: f32, dy: f32 },
+    /// 拖拽结束（抬起时的累计位移）：插件据此落结果。
+    DragEnd { id: String, dx: f32, dy: f32 },
+    /// 拖拽被取消（Esc 或面失去焦点）：插件回退拖拽期间的预览。
+    DragCancel { id: String },
+    /// Esc 落在聚焦的输入框：先于 `Focus { focused: false }` 上报，插件据此放弃编辑草稿而不是提交。
+    Cancel { id: String },
 }
 
 /// 一个面的控件层状态与驱动：交互态、量算缓存与主题都随它跨帧保留。
@@ -89,6 +99,25 @@ impl FrameUi {
     /// 插件的播放 / 动画在帧拍里推进并重渲染；`None` = 不推帧拍。
     pub fn set_fps(&mut self, fps: Option<u16>) {
         self.fps = fps;
+    }
+
+    /// 程序化聚焦输入框（如点开行内编辑）：光标与选区落到 `value` 末尾。已聚焦时不重复置位，
+    /// 也不产生 `Focus` 事件（那是宿主输入的解释结果，插件自己知道刚聚焦了谁）。
+    /// 须在 `render` 声明该输入框之前调用——构建布局后 `prune` 会清掉未出现在帧里的焦点。
+    pub fn focus_input(&mut self, id: &str, value: &str) {
+        if self.state.focus.as_deref() == Some(id) {
+            return;
+        }
+        if let Some(old) = self.state.focus.take() {
+            if let Some(item) = self.state.inputs.get_mut(&old) {
+                item.preedit.clear();
+            }
+        }
+        let len = value.len();
+        self.state
+            .inputs
+            .insert(id.to_string(), model::InputState { caret: len, anchor: len, preedit: String::new() });
+        self.state.focus = Some(id.to_string());
     }
 
     /// 解释一条宿主输入：翻成语义事件并把交互态（焦点 / 光标 / 选区 / 滚动）就地更新。
@@ -132,6 +161,7 @@ impl FrameUi {
             self.state.metrics = out.metrics;
             self.state.layouts = out.layouts;
             self.state.focusables = out.focusables;
+            self.state.draggables = out.draggables;
             self.state.scroll = out.scrolls;
             self.state.scroll_max = out.scroll_max;
             self.state.follow_prev = out.follow_prev;
@@ -468,6 +498,7 @@ mod tests {
             colors: ThemeColors { accent: "#e0a94e".into(), ..ThemeColors::default() },
             font_sizes: FontSizes { micro: 11.0, caption: 12.0, ui: 13.0, body: 14.0, h2: 16.0, h1: 20.0 },
             radii: Radii { xs: 4.0, sm: 6.0, md: 10.0 },
+            event_colors: vec!["#e06c75".into()],
         }
     }
 
@@ -1261,6 +1292,121 @@ mod tests {
             command,
             DrawCommand::Rect { fill: Some(PaintColor::Token { name: ColorToken::Accent }), .. }
         )), "悬停态反映在自绘外观里");
+    }
+
+    #[tokio::test]
+    async fn custom_sub_area_drag_reports_deltas_and_suppresses_click() {
+        let mut bench = Bench::new(200.0, 120.0).await;
+        bench
+            .render(|ui| {
+                ui.canvas(40.0, |c| {
+                    let area = c.area();
+                    c.hit("strip", Rect::new(area.x, area.y, area.w, area.h), HitCursor::Grab);
+                });
+            })
+            .await
+            .unwrap();
+        let down = FrameInput::PointerDown { x: 20.0, y: 10.0, button: MouseButton::Left, hit: Some("strip".into()) };
+        assert!(bench.event(down.clone()).await.is_empty(), "按下不起拖");
+
+        let events = bench
+            .event(FrameInput::PointerMove { x: 22.0, y: 10.0, hit: Some("strip".into()) })
+            .await;
+        assert!(events.is_empty(), "位移未过阈值仍按点击解释：{events:?}");
+
+        let events = bench
+            .event(FrameInput::PointerMove { x: 60.0, y: 10.0, hit: None })
+            .await;
+        assert_eq!(
+            events,
+            vec![
+                UiEvent::DragStart { id: "strip".into() },
+                UiEvent::Drag { id: "strip".into(), dx: 40.0, dy: 0.0 },
+            ],
+            "拖出子区也继续上报累计位移"
+        );
+
+        let events = bench
+            .event(FrameInput::PointerUp { x: 60.0, y: 14.0, button: MouseButton::Left, hit: None })
+            .await;
+        assert_eq!(
+            events,
+            vec![UiEvent::DragEnd { id: "strip".into(), dx: 40.0, dy: 4.0 }],
+            "起拖后的抬起只报结束，不再算点击"
+        );
+
+        assert!(bench.event(down).await.is_empty());
+        assert!(bench
+            .event(FrameInput::PointerMove { x: 23.0, y: 10.0, hit: Some("strip".into()) })
+            .await
+            .is_empty());
+        let events = bench
+            .event(FrameInput::PointerUp { x: 23.0, y: 10.0, button: MouseButton::Left, hit: Some("strip".into()) })
+            .await;
+        assert_eq!(events, vec![UiEvent::Click { id: "strip".into() }], "未过阈值仍是点击");
+    }
+
+    #[tokio::test]
+    async fn pointer_sub_area_jitter_stays_a_click() {
+        let mut bench = Bench::new(200.0, 120.0).await;
+        bench
+            .render(|ui| {
+                ui.canvas(40.0, |c| {
+                    let area = c.area();
+                    c.hit("cell", Rect::new(area.x, area.y, area.w, area.h), HitCursor::Pointer);
+                });
+            })
+            .await
+            .unwrap();
+        bench
+            .event(FrameInput::PointerDown { x: 20.0, y: 10.0, button: MouseButton::Left, hit: Some("cell".into()) })
+            .await;
+        let events = bench
+            .event(FrameInput::PointerMove { x: 26.0, y: 10.0, hit: Some("cell".into()) })
+            .await;
+        assert!(events.is_empty(), "非拖动光标不上报拖拽：{events:?}");
+        let events = bench
+            .event(FrameInput::PointerUp { x: 26.0, y: 10.0, button: MouseButton::Left, hit: Some("cell".into()) })
+            .await;
+        assert_eq!(events, vec![UiEvent::Click { id: "cell".into() }], "普通点选区的小抖动仍算点击");
+    }
+
+    #[tokio::test]
+    async fn escape_cancels_a_started_drag_then_an_input_edit() {
+        let mut bench = Bench::new(200.0, 120.0).await;
+        bench
+            .render(|ui| {
+                ui.canvas(40.0, |c| {
+                    let area = c.area();
+                    c.hit("strip", Rect::new(area.x, area.y, area.w, area.h), HitCursor::Grab);
+                });
+            })
+            .await
+            .unwrap();
+        bench
+            .event(FrameInput::PointerDown { x: 20.0, y: 10.0, button: MouseButton::Left, hit: Some("strip".into()) })
+            .await;
+        bench
+            .event(FrameInput::PointerMove { x: 80.0, y: 10.0, hit: None })
+            .await;
+
+        let events = bench.event(key(NamedKey::Escape)).await;
+        assert_eq!(events, vec![UiEvent::DragCancel { id: "strip".into() }]);
+        let events = bench
+            .event(FrameInput::PointerUp { x: 80.0, y: 10.0, button: MouseButton::Left, hit: None })
+            .await;
+        assert!(events.is_empty(), "取消后的抬起不再报拖拽：{events:?}");
+
+        bench.render(|ui| ui.text_input("q", "abc", "")).await.unwrap();
+        bench
+            .event(FrameInput::PointerDown { x: 20.0, y: 10.0, button: MouseButton::Left, hit: Some("q".into()) })
+            .await;
+        let events = bench.event(key(NamedKey::Escape)).await;
+        assert_eq!(
+            events,
+            vec![UiEvent::Cancel { id: "q".into() }, UiEvent::Focus { id: "q".into(), focused: false }],
+            "Esc 先报取消再离焦，插件据此放弃草稿"
+        );
     }
 
     #[tokio::test]

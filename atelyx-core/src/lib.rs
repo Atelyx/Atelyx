@@ -6,7 +6,6 @@
 pub mod ai;
 pub mod collab;
 pub mod credentials;
-pub mod calendar;
 pub mod canvas_collab;
 pub mod ephemeral;
 pub mod filesearch;

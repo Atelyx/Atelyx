@@ -5,7 +5,10 @@ use iced::alignment::Vertical;
 use iced::widget::{button, column, container, row, space};
 use iced::{Element, Length, Padding, Task};
 
-use atelyx_core::history::HistoryKind;
+use atelyx_core::history::{HistoryAction, HistoryKind};
+use atelyx_core::plugin_runtime::{
+    DayActivity, HistoryActivityResult, HistoryDayEntry, HistoryDayResult,
+};
 use atelyx_core::space_client::HistoryAggregate;
 
 use crate::space_actions;
@@ -32,6 +35,13 @@ pub struct RepoHistoryGroup {
     pub kind: HistoryKind,
     pub file: String,
     pub versions: Vec<RepoVersionRow>,
+}
+
+/// 历史聚合缓存：分组列表 + 全量版本时间戳（按日计数用，不受条目流条数上限影响）。
+#[derive(Debug, Clone)]
+pub struct RepoHistory {
+    pub groups: Vec<RepoHistoryGroup>,
+    pub timestamps: Vec<i64>,
 }
 
 /// 本地侧文件聚合 → 分组（collect_all 版本为旧→新，展示前按时间新→旧重排；空侧文件丢弃）。
@@ -86,8 +96,8 @@ pub fn groups_from_space(agg: HistoryAggregate) -> Vec<RepoHistoryGroup> {
     groups
 }
 
-/// 服务端 kind 字段 → HistoryKind（未知值丢弃条目，不臆造归类）。
-fn parse_kind(s: &str) -> Option<HistoryKind> {
+/// wire kind 字段 → HistoryKind（未知值 `None`：聚合条目丢弃、历史打开请求回绝）。
+pub(crate) fn parse_kind(s: &str) -> Option<HistoryKind> {
     match s {
         "note" => Some(HistoryKind::Note),
         "canvas" => Some(HistoryKind::Canvas),
@@ -96,13 +106,53 @@ fn parse_kind(s: &str) -> Option<HistoryKind> {
     }
 }
 
-/// 服务端 action 字段 → HistoryAction（服务端仅写 edit/restore，其余按 edit 展示）。
-fn parse_action(s: &str) -> atelyx_core::history::HistoryAction {
-    if s == "restore" {
-        atelyx_core::history::HistoryAction::Restore
-    } else {
-        atelyx_core::history::HistoryAction::Edit
+/// HistoryKind → wire kind 字段（与服务端聚合同一取值域）。
+pub(crate) fn kind_key(kind: HistoryKind) -> &'static str {
+    match kind {
+        HistoryKind::Note => "note",
+        HistoryKind::Canvas => "canvas",
+        HistoryKind::Table => "table",
     }
+}
+
+/// HistoryAction → wire action 字段。
+pub(crate) fn action_key(action: HistoryAction) -> &'static str {
+    match action {
+        HistoryAction::Edit => "edit",
+        HistoryAction::Restore => "restore",
+    }
+}
+
+/// 服务端 action 字段 → HistoryAction（服务端仅写 edit/restore，其余按 edit 展示）。
+fn parse_action(s: &str) -> HistoryAction {
+    if s == "restore" {
+        HistoryAction::Restore
+    } else {
+        HistoryAction::Edit
+    }
+}
+
+/// 当日版本记录（按本地日界过滤，ts 毫秒；day = 自纪元天数），新→旧。
+pub(crate) fn day_entries(groups: &[RepoHistoryGroup], day: i64) -> Vec<HistoryDayEntry> {
+    let mut out: Vec<HistoryDayEntry> = groups
+        .iter()
+        .flat_map(|group| {
+            group
+                .versions
+                .iter()
+                .filter(|version| atelyx_core::history::day_key(version.ts) == day)
+                .map(move |version| HistoryDayEntry {
+                    kind: kind_key(group.kind).to_string(),
+                    file: group.file.clone(),
+                    ts: version.ts,
+                    action: action_key(version.action).to_string(),
+                    author_name: version.author_name.clone(),
+                    summary: version.summary.clone(),
+                })
+        })
+        .collect();
+    out.sort_by_key(|entry| std::cmp::Reverse(entry.ts));
+    out
 }
 
 /// 当前仓库容器是否就绪（本地仓库根可用 / 空间会话在位；仓库历史与日历共用）。
@@ -123,7 +173,9 @@ pub fn load(app: &mut App) -> Task<Message> {
             let space_id = session.space_id.clone();
             Task::perform(
                 async move {
-                    client.history_aggregate(&space_id).await.map(groups_from_space).map_err(|e| e.to_string())
+                    let agg = client.history_aggregate(&space_id).await.map_err(|e| e.to_string())?;
+                    let timestamps = agg.timestamps.clone();
+                    Ok(RepoHistory { groups: groups_from_space(agg), timestamps })
                 },
                 move |result| Message::RepoHistoryLoaded(gen, result),
             )
@@ -134,7 +186,15 @@ pub fn load(app: &mut App) -> Task<Message> {
                 async move {
                     tokio::task::spawn_blocking(move || {
                         let (root, _, _) = state.session_snapshot()?;
-                        atelyx_core::history::collect_all(&root).map(groups_from_local)
+                        atelyx_core::history::collect_all(&root).map(|files| {
+                            let groups = groups_from_local(files);
+                            // 本地无条目上限：分组里就是全量版本
+                            let timestamps = groups
+                                .iter()
+                                .flat_map(|group| group.versions.iter().map(|version| version.ts))
+                                .collect();
+                            RepoHistory { groups, timestamps }
+                        })
                     })
                     .await
                     .map_err(|e| e.to_string())
@@ -146,15 +206,13 @@ pub fn load(app: &mut App) -> Task<Message> {
     }
 }
 
-/// PersistTick 搭载：面板展示中且缓存失效（None）时发起聚合
-/// （日历视图的天详情与活动密度复用同一份缓存，展示中同样触发）。
+/// PersistTick 搭载：面板展示中且缓存失效（None）时发起聚合（共用该缓存的插件按日查询
+/// 在缓存缺失时由查询本身发起，见 `history.day` 的宿主处理）。
 pub fn tick(app: &mut App) -> Task<Message> {
     if app.repo_history_loading || app.repo_history.is_some() {
         return Task::none();
     }
-    let shown = layout_view::view_displayed(app, "repohistory")
-        || layout_view::view_displayed(app, "calendar");
-    if !container_ready(app) || !shown {
+    if !container_ready(app) || !layout_view::view_displayed(app, "repohistory") {
         return Task::none();
     }
     load(app)
@@ -170,20 +228,57 @@ pub fn refresh(app: &mut App) -> Task<Message> {
 }
 
 /// 聚合落地（gen 守卫）：成功缓存列表；失败缓存 Err 并提示（仅手动刷新重试，
-/// 不回退 None——周期重试失败会刷屏）。
-pub fn on_loaded(app: &mut App, gen: u64, result: Result<Vec<RepoHistoryGroup>, String>) -> Task<Message> {
+/// 不回退 None——周期重试失败会刷屏）。等这份缓存的按日查询在此一并回填。
+pub fn on_loaded(app: &mut App, gen: u64, result: Result<RepoHistory, String>) -> Task<Message> {
     app.repo_history_loading = false;
     if gen != app.epoch() {
         return Task::none();
     }
+    let pending = std::mem::take(&mut app.plugins_state.pending_history_day);
+    let pending_activity = std::mem::take(&mut app.plugins_state.pending_history_activity);
     match result {
-        Ok(groups) => app.repo_history = Some(Ok(groups)),
+        Ok(history) => {
+            for (request_id, day) in pending {
+                let entries = day_entries(&history.groups, day);
+                app.plugins.resolve_shell_call(request_id, history_day_json(entries));
+            }
+            for request_id in pending_activity {
+                let activity = activity_json(&history.timestamps);
+                app.plugins.resolve_shell_call(request_id, activity);
+            }
+            app.repo_history = Some(Ok(history));
+        }
         Err(e) => {
+            for (request_id, _) in pending {
+                app.plugins.resolve_shell_call(request_id, Err(format!("历史聚合失败：{e}")));
+            }
+            for request_id in pending_activity {
+                app.plugins
+                    .resolve_shell_call(request_id, Err(format!("历史聚合失败：{e}")));
+            }
             app.repo_history = Some(Err(e.clone()));
             app.notify(NoticeLevel::Error, format!("历史聚合失败：{e}"));
         }
     }
     Task::none()
+}
+
+/// 按日查询的宿主回执（`history.day`）；序列化失败带回可读原因。
+pub(crate) fn history_day_json(entries: Vec<HistoryDayEntry>) -> Result<serde_json::Value, String> {
+    serde_json::to_value(HistoryDayResult { entries })
+        .map_err(|e| format!("历史结果不可序列化：{e}"))
+}
+
+/// 按天聚合的活动计数（`history.activity` 的协作空间口径）：版本时间戳按本地日界归日。
+pub(crate) fn activity_json(timestamps: &[i64]) -> Result<serde_json::Value, String> {
+    let mut counts: std::collections::BTreeMap<i64, u32> = std::collections::BTreeMap::new();
+    for ts in timestamps {
+        *counts.entry(atelyx_core::history::day_key(*ts)).or_default() += 1;
+    }
+    let days: Vec<DayActivity> =
+        counts.into_iter().map(|(day, count)| DayActivity { day, count }).collect();
+    serde_json::to_value(HistoryActivityResult { days })
+        .map_err(|e| format!("活动统计不可序列化：{e}"))
 }
 
 /// 仓库历史视图：文件组卡片列表 + 组头（图标 + 文件名 + 全路径 + 版本数徽标）。
@@ -198,13 +293,13 @@ pub fn repohistory_view(app: &App, window: iced::window::Id) -> Element<'_, Mess
             e.clone(),
             Some(("重试".into(), Message::RepoHistoryRefresh)),
         ),
-        Some(Ok(groups)) if groups.is_empty() => controls::empty_state(
+        Some(Ok(history)) if history.groups.is_empty() => controls::empty_state(
             "history",
             "暂无历史记录",
             "暂无版本记录",
             None,
         ),
-        Some(Ok(groups)) => group_list(groups, window),
+        Some(Ok(history)) => group_list(&history.groups, window),
         // None = 未加载或在途（发起即置 loading，此分支只持续到下个 tick）
         None => {
             text(if app.repo_history_loading { "加载中…" } else { "暂无历史记录" })
@@ -276,8 +371,8 @@ fn group_card(g: &RepoHistoryGroup, window: iced::window::Id) -> Element<'static
     .into()
 }
 
-/// kind → 行首图标（仓库历史行与日历天详情行共用）。
-pub(crate) fn kind_icon(kind: HistoryKind) -> &'static str {
+/// kind → 行首图标。
+fn kind_icon(kind: HistoryKind) -> &'static str {
     match kind {
         HistoryKind::Note => "file-text",
         HistoryKind::Table => "table",

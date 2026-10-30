@@ -193,6 +193,8 @@ pub const HOME_LAYOUT_ID: &str = "home";
 pub const DEFAULT_SCENE_ID: &str = "default";
 /// 最近打开文件列表上限。
 pub const MAX_RECENT_FILES: usize = 50;
+/// 预置日历插件的面板视图 id（`plugin:<插件 id>:<贡献 id>`）：主页模板与旧布局迁移共用。
+pub const CALENDAR_VIEW: &str = "plugin:com.atelyx.calendar:calendar";
 
 // ===== 布局操作命令参数（壳侧逐条映射到 LayoutOp）=====
 
@@ -353,8 +355,9 @@ where
 
 /// 归一化（normalize = 模型不变量的唯一修复点：种子化 + 形状修复 + 激活态有效；
 /// 运行期各处直信这些不变量，不再各自兜底）：
-/// schema 补齐 + 场景列表非空 + 默认场景固定置顶 + 各场景布局非空 + 各 Split/主页尺寸形状修复
-/// + 各场景激活记忆有效 + 激活场景/激活布局有效 + 撕裂窗口过滤 + 最近打开截断。
+/// schema 补齐 + 场景列表非空 + 默认场景固定置顶 + 各场景布局非空 + 旧视图 id 迁移
+/// + 各 Split/主页尺寸形状修复 + 各场景激活记忆有效 + 激活场景/激活布局有效 + 撕裂窗口过滤
+/// + 最近打开截断。
 pub fn normalize(ui: &mut AppUiState) {
     ui.schema = UI_STATE_SCHEMA.to_string();
     // 默认场景恒存在且固定置顶（缺失即补入：新装/文件按默认态处理/手改可造）
@@ -364,6 +367,10 @@ pub fn normalize(ui: &mut AppUiState) {
         if scene.layouts.is_empty() {
             scene.layouts = vec![create_blank_layout(&scene.name)];
         }
+        for layout in &mut scene.layouts {
+            migrate_tree_view_ids(&mut layout.tree);
+        }
+        migrate_tree_view_ids(&mut scene.home_layout.tree);
         // 尺寸形状修复：磁盘上的坏值（长度不符/负值/全零）会被按越界值渲染，
         // 而形状守卫只拦新写入、不会覆盖既有坏值 → 该 Split 的拖宽永远只发坏帧而被拒。
         for layout in &mut scene.layouts {
@@ -395,8 +402,35 @@ pub fn normalize(ui: &mut AppUiState) {
     }
     // 撕裂窗口过滤空条目（tabs 非空；损坏条目在 serde 层已整文件回退）
     ui.detached_windows.retain(|w| !w.tabs.is_empty());
+    for window in &mut ui.detached_windows {
+        for tab in &mut window.tabs {
+            migrate_view_id(&mut tab.view);
+        }
+    }
     if ui.recent_files.len() > MAX_RECENT_FILES {
         ui.recent_files.truncate(MAX_RECENT_FILES);
+    }
+}
+
+/// 旧布局里的 `calendar` 视图 id 改写为插件面 id（旧 id 已无渲染器）。
+fn migrate_view_id(view: &mut ViewKind) {
+    if view == "calendar" {
+        *view = CALENDAR_VIEW.to_string();
+    }
+}
+
+fn migrate_tree_view_ids(node: &mut LayoutNode) {
+    match node {
+        LayoutNode::Panel { tabs, .. } => {
+            for tab in tabs {
+                migrate_view_id(&mut tab.view);
+            }
+        }
+        LayoutNode::Split { children, .. } => {
+            for child in children {
+                migrate_tree_view_ids(child);
+            }
+        }
     }
 }
 
@@ -477,7 +511,7 @@ pub fn create_home_layout() -> WorkspaceLayout {
                 LayoutNode::Split {
                     id: nanoid!(),
                     direction: "vertical".to_string(),
-                    children: vec![create_panel("calendar"), create_panel("repohistory")],
+                    children: vec![create_panel(CALENDAR_VIEW), create_panel("repohistory")],
                     sizes: vec![55.0, 45.0],
                 },
             ],
@@ -1666,6 +1700,38 @@ mod tests {
         // 根即该面板（单面板树）不可关闭
         let root = panel("p1", &["files"]);
         assert!(close_panel_op(&root, "p1").is_none());
+    }
+
+    fn views_of_tabs(tabs: &[TabItem]) -> Vec<String> {
+        tabs.iter().map(|tab| tab.view.clone()).collect()
+    }
+
+    #[test]
+    fn normalize_migrates_legacy_calendar_view() {
+        // 旧 id 已无渲染器：归一化原地改写，位置与锁定态保留
+        let mut ui = ui_with(panel("p1", &["calendar", "note"]));
+        ui.scenes[0].home_layout.tree = panel("h1", &["calendar"]);
+        ui.detached_windows.push(DetachedWindow {
+            id: "w1".into(),
+            tabs: vec![TabItem { id: "t1".into(), view: "calendar".into(), locked: true }],
+            active_tab_id: Some("t1".into()),
+            bounds: WindowBounds { x: 0.0, y: 0.0, width: 100.0, height: 100.0, scale: 1.0 },
+            hidden: false,
+            restore_on_launch: true,
+            options: WindowOptions::default(),
+            pinned: false,
+        });
+
+        normalize(&mut ui);
+
+        let views = |tree: &LayoutNode| match tree {
+            LayoutNode::Panel { tabs, .. } => views_of_tabs(tabs),
+            _ => panic!("expected panel"),
+        };
+        assert_eq!(views(&scene_layouts(&ui)[0].tree), [CALENDAR_VIEW, "note"]);
+        assert_eq!(views(&ui.scenes[0].home_layout.tree), [CALENDAR_VIEW]);
+        assert_eq!(views_of_tabs(&ui.detached_windows[0].tabs), [CALENDAR_VIEW]);
+        assert!(ui.detached_windows[0].tabs[0].locked, "迁移不动锁定态");
     }
 
     #[test]

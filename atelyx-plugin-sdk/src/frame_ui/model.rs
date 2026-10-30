@@ -68,6 +68,16 @@ pub(crate) struct Press {
     pub from_input: bool,
 }
 
+/// 自绘子区的拖拽会话：位移越过阈值才算开始，`dx` / `dy` 是从按下点的累计位移。
+#[derive(Clone, Debug)]
+pub(crate) struct Drag {
+    pub id: String,
+    pub origin: (f32, f32),
+    pub dx: f32,
+    pub dy: f32,
+    pub started: bool,
+}
+
 pub(crate) struct UiState {
     pub size: (f32, f32),
     pub theme: Option<Theme>,
@@ -78,6 +88,10 @@ pub(crate) struct UiState {
     pub press: Option<Press>,
     /// 正在拖动的滚动条（滚动容器 id）：移动时按纵向落点改偏移，抬起即解除。
     pub drag_bar: Option<String>,
+    /// 按下在自绘子区上的拖拽候选：移动越过阈值后上报拖拽事件。
+    pub drag: Option<Drag>,
+    /// 上一帧光标声明为拖动形态的子区：只有按下这些子区才建拖拽候选。
+    pub draggables: std::collections::HashSet<String>,
     pub focus: Option<String>,
     pub inputs: HashMap<String, InputState>,
     pub selects: HashMap<String, SelectState>,
@@ -109,6 +123,8 @@ impl Default for UiState {
             hovered: None,
             press: None,
             drag_bar: None,
+            drag: None,
+            draggables: std::collections::HashSet::new(),
             focus: None,
             inputs: HashMap::new(),
             selects: HashMap::new(),
@@ -131,8 +147,12 @@ impl UiState {
         self.scroll.retain(|id, _| self.layouts.contains_key(id));
         self.scroll_max.retain(|id, _| self.layouts.contains_key(id));
         self.follow_prev.retain(|id, _| self.layouts.contains_key(id));
+        self.draggables.retain(|id| self.layouts.contains_key(id));
         if self.drag_bar.as_ref().is_some_and(|id| !self.layouts.contains_key(id)) {
             self.drag_bar = None;
+        }
+        if self.drag.as_ref().is_some_and(|drag| !self.layouts.contains_key(&drag.id)) {
+            self.drag = None;
         }
         if self.focus.as_ref().is_some_and(|id| !self.layouts.contains_key(id)) {
             self.focus = None;

@@ -7,12 +7,6 @@
 //! 进程入口在 `main.rs`，只调 [`run`]。
 
 mod autostart;
-mod calendar_actions;
-mod calendar_day;
-mod calendar_grid;
-mod calendar_heat;
-mod calendar_month;
-mod calendar_view;
 mod canvas_actions;
 mod canvas_chat;
 mod canvas_view;
@@ -502,15 +496,13 @@ enum Message {
     /// 最近打开条目失效剔除（确认缺失的 (vaultKey, file) 对）。
     RecentPruned(Vec<(String, String)>),
     /// 仓库历史聚合落地（gen 守卫）。
-    RepoHistoryLoaded(u64, Result<Vec<repohistory_view::RepoHistoryGroup>, String>),
+    RepoHistoryLoaded(u64, Result<repohistory_view::RepoHistory, String>),
     /// 仓库历史面板刷新（失效重取）。
     RepoHistoryRefresh,
     /// AI 对话面板消息（会话 / run 事件 / 编排）。
     Chat(chat_actions::ChatMsg),
     /// 无操作（后台任务回执无界面变化时的统一落点）。
     Noop,
-    /// 日历视图消息（日程增删改 / 月份导航 / 装载回执）。
-    Calendar(calendar_actions::CalendarMsg),
     /// 打开链接（外链 / 仓库路径 / wiki）。
     OpenLink(String, LinkForm),
     /// 图片字节落地（gen 守卫 + 内容键；失败按退避重试，用尽次数回落占位）。
@@ -1541,11 +1533,9 @@ pub struct App {
     /// 回滚已发起、等待保存链稳定落盘的一次性标志（成功回执消费并提示，失败/切容器清除）。
     pub(crate) history_restore_pending: bool,
     /// 仓库历史面板缓存（None = 未加载/已失效；Err = 加载失败待手动刷新）。
-    pub repo_history: Option<Result<Vec<repohistory_view::RepoHistoryGroup>, String>>,
+    pub repo_history: Option<Result<repohistory_view::RepoHistory, String>>,
     /// 仓库历史聚合在途。
     pub repo_history_loading: bool,
-    /// 日历视图会话态（日程清单 / 月导航 / 活动密度缓存）。
-    pub calendar: calendar_actions::CalendarState,
     /// 最近打开条目存在性校验的上次发起时刻（视图展示期节流）。
     recent_checked_at: Option<Instant>,
     /// 设置-编辑器：重建内部链接会话态。
@@ -1829,7 +1819,6 @@ impl App {
                 history_confirm: None,
                 repo_history: None,
                 repo_history_loading: false,
-                calendar: calendar_actions::CalendarState::default(),
                 recent_checked_at: None,
                 rebuild_links: settings_view::editor::RebuildLinksState::Idle,
                 history_kind: atelyx_core::history::HistoryKind::Note,
@@ -2541,8 +2530,6 @@ impl App {
                 }
                 // 侧文件有新版本：面板聚合缓存失效，下个 tick 重取（展示中）
                 self.repo_history = None;
-                // 日历活动密度随记版失效（版本与 mtime 计数已变）
-                calendar_actions::invalidate_activity(self);
                 if gen == self.epoch() {
                     self.reload_history()
                 } else {
@@ -2557,7 +2544,6 @@ impl App {
             }
             Message::RepoHistoryLoaded(gen, result) => repohistory_view::on_loaded(self, gen, result),
             Message::RepoHistoryRefresh => repohistory_view::refresh(self),
-            Message::Calendar(m) => calendar_actions::on_msg(self, m),
             Message::OpenLink(href, form) => self.open_link(&href, form),
             Message::ImageLoaded(gen, key, result) => {
                 self.note_images_inflight.remove(&key);
@@ -3093,10 +3079,9 @@ impl App {
                 self.apply(LayoutOp::DeleteScene { id })
             }
             Message::PersistTick => {
-                // 主页面板懒加载搭载：历史面板缓存失效时聚合，最近打开条目按节流校验存在性，日历按需装载
+                // 主页面板懒加载搭载：历史面板缓存失效时聚合，最近打开条目按节流校验存在性
                 let lazy = repohistory_view::tick(self)
                     .chain(recent_view::tick(self))
-                    .chain(calendar_actions::tick(self))
                     .chain(space_actions::members_tick(self));
                 if !self.persist_dirty {
                     return lazy;
@@ -3297,16 +3282,6 @@ impl App {
                         return self.update(Message::LayoutRenameCommit);
                     }
                 }
-                // 日历日程标题编辑失焦提交：按压不在输入行内 = 提交（Enter 同路径；编辑会话至多一个）
-                if self.calendar.edit.is_some() {
-                    if self.calendar.press_inside {
-                        self.calendar.press_inside = false;
-                    } else {
-                        return Task::perform(async {}, |_| {
-                            Message::Calendar(calendar_actions::CalendarMsg::EditCommit)
-                        });
-                    }
-                }
                 // 表格编辑器失焦提交：按压不在编辑器浮层内 = 提交（同批 widget 消息已先置 editor_inside）
                 if self.table.as_ref().is_some_and(|t| t.view.editing.is_some()) {
                     if self.table.as_ref().is_some_and(|t| t.view.editor_inside) {
@@ -3486,7 +3461,6 @@ impl App {
                 self.press = None;
                 self.tab_press = None;
                 self.file_press = None;
-                calendar_actions::finish_heat_drag(self);
                 // 表格手势悬挂清理：松手在画布外时画布收不到 Release（按压会话作废，
                 // 防下一次无关移动触发幽灵灯箱/翻页/框选；画布内松手已在同批先行消费）
                 if let Some(s) = self.table.as_mut() {
@@ -3609,8 +3583,6 @@ impl App {
                     && (self.props.editing.is_some() || self.props.adding.is_some())
                 {
                     return self.on_props(PropsMsg::CancelSlot);
-                } else if self.calendar.edit.take().is_some() {
-                    // 日历日程标题编辑 Esc = 取消（草稿丢弃）
                 } else if self.rename.as_ref().is_some_and(|r| r.window == window) {
                     // 行内重命名 Esc = 取消
                     self.rename = None;
@@ -5039,8 +5011,8 @@ impl App {
         // 仓库历史面板缓存随切仓失效（进面板后重取）
         self.repo_history = None;
         self.repo_history_loading = false;
-        // 日历会话态随切仓重置（日程 / 选中天 / 活动密度一并重取）
-        self.calendar = calendar_actions::CalendarState::default();
+        // 等聚合落地的按日查询随切仓作废：逐个回绝，插件调用不会悬着
+        settings_view::plugins::fail_pending_history_day(self, "仓库已切换");
         self.rebuild_links = settings_view::editor::RebuildLinksState::Idle;
         // 展开集按仓库独立：切走时记忆当前仓库的集合，切回时恢复；全新进入（无记忆）保底展开根行
         self.ui.file_explorer_expanded = match self.expanded_by_vault.get(&path) {

@@ -5,10 +5,13 @@ use atelyx_plugin_protocol::frame::{Key, Modifiers, MouseButton, NamedKey};
 use atelyx_plugin_protocol::method::MAX_MEASURE_ITEMS;
 
 use super::geom::Rect;
-use super::model::{FontSpec, InputState, Layout, Press, UiState};
+use super::model::{Drag, FontSpec, InputState, Layout, Press, UiState};
 use super::text;
 use crate::frame_ui::UiEvent;
 use crate::Context;
+
+/// 自绘子区起拖的最小位移（逻辑像素）：小于它仍按点击 / 双击解释。
+const DRAG_THRESHOLD: f32 = 4.0;
 
 /// 一条输入对应的语义事件；改完状态后由插件调用 `render` 提交新一帧。
 pub(crate) async fn handle(
@@ -29,7 +32,7 @@ pub(crate) async fn handle(
                 pointer_down(state, ctx, *x, *y, *button, hit.as_deref(), &value_of, &mut events).await;
             }
         }
-        FrameInput::PointerUp { hit, .. } => pointer_up(state, hit.as_deref(), &mut events),
+        FrameInput::PointerUp { x, y, hit, .. } => pointer_up(state, *x, *y, hit.as_deref(), &mut events),
         FrameInput::DoubleClick { x, y, button, hit, .. } => {
             if *button == MouseButton::Right {
                 // 右键双击按一次右键处理：不改焦点与按下态
@@ -74,6 +77,10 @@ pub(crate) async fn handle(
             state.press = None;
             state.drag_bar = None;
             state.hovered = None;
+            // 面失去焦点时拖拽不会再收到抬起：已起拖的会话按取消收尾
+            if let Some(drag) = state.drag.take().filter(|drag| drag.started) {
+                events.push(UiEvent::DragCancel { id: drag.id });
+            }
             if !*focused {
                 // 宿主收走了面焦点（点了面外）：带走的光标与组合串一并作废
                 if let Some(id) = state.focus.take() {
@@ -109,6 +116,8 @@ async fn pointer_down(
     if button != MouseButton::Left {
         return;
     }
+    // 新的一次按下换掉上一轮拖拽候选：拖拽只在同一次按下内成立
+    state.drag = None;
     let Some(id) = hit else {
         close_selects(state, None);
         set_focus(state, None, value_of, events);
@@ -159,8 +168,21 @@ async fn pointer_down(
             set_focus(state, Some(id.to_string()), value_of, events);
             state.press = Some(Press { id: id.to_string(), from_input: false });
         }
-        Layout::Button | Layout::Option { .. } | Layout::Custom => {
+        Layout::Button | Layout::Option { .. } => {
             state.press = Some(Press { id: id.to_string(), from_input: false });
+        }
+        Layout::Custom => {
+            state.press = Some(Press { id: id.to_string(), from_input: false });
+            // 只有光标声明为拖动形态的子区才吃拖拽；普通点选区的小抖动仍按点击解释
+            if state.draggables.contains(id) {
+                state.drag = Some(Drag {
+                    id: id.to_string(),
+                    origin: (x, y),
+                    dx: 0.0,
+                    dy: 0.0,
+                    started: false,
+                });
+            }
         }
         Layout::Scroll { .. } => state.press = None,
         Layout::ScrollBar { scroll, track, thumb, max_offset } => {
@@ -174,8 +196,20 @@ async fn pointer_down(
     }
 }
 
-fn pointer_up(state: &mut UiState, hit: Option<&str>, events: &mut Vec<UiEvent>) {
+fn pointer_up(state: &mut UiState, x: f32, y: f32, hit: Option<&str>, events: &mut Vec<UiEvent>) {
     state.drag_bar = None;
+    // 已起拖的会话以抬起收尾：插件据累计位移落结果，这次抬起不再算点击
+    if let Some(drag) = state.drag.take() {
+        if drag.started {
+            state.press = None;
+            events.push(UiEvent::DragEnd {
+                id: drag.id,
+                dx: x - drag.origin.0,
+                dy: y - drag.origin.1,
+            });
+            return;
+        }
+    }
     let Some(press) = state.press.take() else {
         return;
     };
@@ -225,6 +259,20 @@ async fn pointer_move(
             return;
         }
         state.drag_bar = None;
+    }
+    // 自绘子区的拖拽不看落点命中：手指常常拖出子区，位移才是语义
+    if let Some(mut drag) = state.drag.take() {
+        drag.dx = x - drag.origin.0;
+        drag.dy = y - drag.origin.1;
+        if !drag.started && drag.dx.abs().max(drag.dy.abs()) >= DRAG_THRESHOLD {
+            drag.started = true;
+            events.push(UiEvent::DragStart { id: drag.id.clone() });
+        }
+        if drag.started {
+            events.push(UiEvent::Drag { id: drag.id.clone(), dx: drag.dx, dy: drag.dy });
+        }
+        state.drag = Some(drag);
+        return;
     }
     let Some(press) = state.press.clone().filter(|press| press.from_input) else {
         return;
@@ -295,6 +343,14 @@ async fn key_press(
         move_focus(state, modifiers.shift, value_of, events);
         return;
     }
+    // 拖拽中的 Esc 先取消拖拽（未起拖的候选只清掉，不影响后续按键语义）
+    if matches!(key, Key::Named { name: NamedKey::Escape }) {
+        if let Some(drag) = state.drag.take().filter(|drag| drag.started) {
+            state.press = None;
+            events.push(UiEvent::DragCancel { id: drag.id });
+            return;
+        }
+    }
     let Some(id) = state.focus.clone() else {
         return;
     };
@@ -312,6 +368,8 @@ async fn key_press(
                 if let Some(item) = state.inputs.get_mut(&id) {
                     item.preedit.clear();
                 }
+                // 先报取消再离焦：插件靠这个顺序区分「放弃草稿」与「失焦提交」
+                events.push(UiEvent::Cancel { id: id.clone() });
                 set_focus(state, None, value_of, events);
             }
             _ => {}

@@ -254,6 +254,26 @@ pub fn day_key(ts_ms: i64) -> i64 {
     day_key_with(ts_ms, local_utc_offset_ms())
 }
 
+/// 本地日历日字符串（`YYYY-MM-DD`）→ 自纪元天数，与 [`day_key`] 同口径。
+/// 形状或历法非法（月超 12、日超当月天数）返回 `None`。
+pub fn parse_day(value: &str) -> Option<i64> {
+    let (year, rest) = value.split_once('-')?;
+    let (month, day) = rest.split_once('-')?;
+    let digits = |s: &str, len: usize| -> Option<i64> {
+        if s.len() != len || !s.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        s.parse().ok()
+    };
+    let (year, month, day) = (digits(year, 4)?, digits(month, 2)?, digits(day, 2)?);
+    if !(1..=12).contains(&month) {
+        return None;
+    }
+    let days = crate::frontmatter::days_from_civil(year, month, day);
+    // 往返校验吸收日超当月天数（2 月 31 日会进位到下月）
+    (crate::frontmatter::civil_from_days(days) == (year, month, day)).then_some(days)
+}
+
 /// 毫秒时间戳 → 本地时刻 (时, 分)（当日版本行的展示粒度）。
 pub fn local_time_hm(ts_ms: i64) -> (u32, u32) {
     let secs = (ts_ms + local_utc_offset_ms()).div_euclid(1000).rem_euclid(86_400);
@@ -739,5 +759,21 @@ mod tests {
         // 负时刻（1970 前）同样按偏移归日
         assert_eq!(day_key_with(-1, 0), -1);
         assert_eq!(day_key_with(-8 * 3_600_000 - 1, 8 * 3_600_000), -1);
+    }
+
+    #[test]
+    fn parse_day_matches_day_key_and_rejects_impossible_dates() {
+        assert_eq!(parse_day("1970-01-01"), Some(0));
+        assert_eq!(parse_day("2026-10-30"), Some(day_key_with(1_793_318_400_000, 0)));
+        assert_eq!(parse_day("2024-02-29"), Some(19_782));
+        // 形状 / 历法非法一律 None：不臆造折日
+        assert_eq!(parse_day("2026-2-30"), None);
+        assert_eq!(parse_day("2026-13-01"), None);
+        assert_eq!(parse_day("2026-02-30"), None);
+        assert_eq!(parse_day("2026-00-10"), None);
+        assert_eq!(parse_day("2026-10-00"), None);
+        assert_eq!(parse_day("2026/10/30"), None);
+        assert_eq!(parse_day("2026-10-30T00:00"), None);
+        assert_eq!(parse_day(""), None);
     }
 }

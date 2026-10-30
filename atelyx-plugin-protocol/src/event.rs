@@ -20,9 +20,9 @@ pub mod name {
     /// 仓库内文件变更（宿主保存 / 新建 / 删除 / 改名 / 插件经 `vault` 写入）。只覆盖宿主发起的
     /// 写入，外部程序直接改磁盘不发。payload 见 [`FileChangedPayload`]。
     pub const VAULT_FILE_CHANGED: &str = "vault:file.changed";
-    /// 当前仓库的日程变更（视图编辑、插件经 `calendar.*` 写入，本地与协作空间同口径）。
-    /// payload 为空对象：日程量小，订阅方重新 `calendar.list` 取最新清单。
-    pub const CALENDAR_CHANGED: &str = "calendar:changed";
+    /// 协作空间团队元数据的某个键变更（任何成员经 `collab.metaPatch` 或宿主写入）。
+    /// payload 见 [`SpaceMetaChangedPayload`]；订阅方按 `key` 过滤后重取该键。
+    pub const SPACE_META_CHANGED: &str = "space:meta.changed";
 }
 
 /// [`name::VAULT_SWITCH`] 的 payload（`kind` 与字段名均 camelCase，与协议其余类型同一口径）。
@@ -30,7 +30,12 @@ pub mod name {
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum VaultSwitchPayload {
     Local { root: String },
-    Space { space_id: String },
+    /// `can_write` = 当前身份在空间内可写（viewer 只读；写操作仍由服务端终审）。
+    Space {
+        space_id: String,
+        #[serde(default)]
+        can_write: bool,
+    },
 }
 
 /// [`name::TABLE_CHANGED`] 的 payload：当前打开表格的仓库相对路径（无打开表格 = 缺省）。
@@ -68,6 +73,13 @@ pub struct FileChangedPayload {
     /// 改名 / 移动前的路径（其余种类缺省）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub old_path: Option<String>,
+}
+
+/// [`name::SPACE_META_CHANGED`] 的 payload：变更的键名（团队元数据单键）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpaceMetaChangedPayload {
+    pub key: String,
 }
 
 /// 文件变更种类：新建 / 内容写入 / 删除 / 改名或移动。
@@ -126,5 +138,16 @@ mod tests {
             serde_json::to_value(&renamed).unwrap(),
             serde_json::json!({ "path": "notes/b.md", "kind": "renamed", "oldPath": "notes/a.md" })
         );
+    }
+
+    #[test]
+    fn space_payloads_carry_write_role_and_meta_key() {
+        let space = VaultSwitchPayload::Space { space_id: "space-1".into(), can_write: true };
+        assert_eq!(
+            serde_json::to_value(&space).unwrap(),
+            serde_json::json!({ "kind": "space", "spaceId": "space-1", "canWrite": true })
+        );
+        let meta = SpaceMetaChangedPayload { key: "calendar".into() };
+        assert_eq!(serde_json::to_value(&meta).unwrap(), serde_json::json!({ "key": "calendar" }));
     }
 }

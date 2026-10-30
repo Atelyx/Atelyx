@@ -382,7 +382,7 @@ pub const BUILTIN_SERVICES: &[(&str, &str, &[&str])] = &[
     ("fs", PLATFORM_PLUGIN, &[fs::PRIVATE_DIR, fs::READ_TEXT, fs::WRITE_TEXT, fs::READ_BINARY, fs::WRITE_BINARY, fs::REMOVE, fs::EXISTS, fs::LIST]),
     ("process", PLATFORM_PLUGIN, &[process::SPAWN, process::WRITE_STDIN, process::CLOSE_STDIN, process::KILL]),
     ("vault", PLATFORM_PLUGIN, &[vault::READ_TEXT, vault::WRITE_TEXT, vault::READ_BINARY, vault::WRITE_BINARY, vault::IMPORT_FILE, vault::IMAGE_INFO, vault::LIST, vault::EXISTS, vault::REMOVE, vault::RENAME]),
-    ("collab", PLATFORM_PLUGIN, &[collab::PEERS, collab::SEND]),
+    ("collab", PLATFORM_PLUGIN, &[collab::PEERS, collab::SEND, collab::META_GET, collab::META_PATCH]),
     ("table", "atelyx.tables", &[table::SNAPSHOT, table::UPDATE_CELL, table::ADD_ROW, table::REMOVE_ROW, table::SELECT_ROW, table::SET_CELL_IMAGE]),
     ("state", PLATFORM_PLUGIN, &[state::READ, state::WRITE]),
     ("notification", PLATFORM_PLUGIN, &[notification::SHOW]),
@@ -397,8 +397,7 @@ pub const BUILTIN_SERVICES: &[(&str, &str, &[&str])] = &[
     ("query", PLATFORM_PLUGIN, &[query::MEASURE, query::THEME]),
     ("markdown", "atelyx.notes", &[markdown::PARSE]),
     ("editor", "atelyx.notes", &[editor::SELECTION, editor::REPLACE_SELECTION]),
-    ("calendar", "atelyx.calendar", &[calendar::LIST, calendar::ADD, calendar::UPDATE, calendar::REMOVE]),
-    ("history", "atelyx.history", &[history::ACTIVITY]),
+    ("history", "atelyx.history", &[history::ACTIVITY, history::DAY, history::OPEN]),
 ];
 ```
 
@@ -686,12 +685,16 @@ pub struct MeasureTextResult {
 
 ```rust
 // atelyx-plugin-protocol/src/method.rs
-/// [`query::THEME`] 的 result：颜色 / 字号档 / 圆角档（值随用户的主题与字号设置变化）。
+/// [`query::THEME`] 的 result：颜色 / 字号档 / 圆角档 / 事件色板
+/// （值随用户的主题与字号设置变化）。
 #[serde(rename_all = "camelCase")]
 pub struct ThemeResult {
     pub colors: ThemeColors,
     pub font_sizes: FontSizes,
     pub radii: Radii,
+    /// 事件条目可选色板（十六进制，宿主界面同序）；插件按它给用户选色。
+    #[serde(default)]
+    pub event_colors: Vec<String>,
 }
 ```
 
@@ -1862,23 +1865,13 @@ pub mod editor {
 
 ```rust
 // atelyx-plugin-protocol/src/method.rs
-pub mod calendar {
-    /// 当前仓库的日程（按日期、创建时间与 id 排序）。
-    pub const LIST: &str = "calendar.list";
-    /// 新增一条日程；缺省字段由宿主补齐。
-    pub const ADD: &str = "calendar.add";
-    /// 改写一条日程（只改给出的字段）。
-    pub const UPDATE: &str = "calendar.update";
-    /// 删除一条日程。
-    pub const REMOVE: &str = "calendar.remove";
-}
-```
-
-```rust
-// atelyx-plugin-protocol/src/method.rs
 pub mod history {
     /// 按天聚合的仓库活动：新建 / 修改 / 删除的文件数合计。
     pub const ACTIVITY: &str = "history.activity";
+    /// 本地某一天的版本记录（本地历史侧文件 / 空间聚合，宿主统一按本地日界归日）。
+    pub const DAY: &str = "history.day";
+    /// 在宿主界面打开某个文件的历史弹层（版本列表与回滚由宿主承载）。
+    pub const OPEN: &str = "history.open";
 }
 ```
 
@@ -1932,13 +1925,17 @@ pub mod tray {
 
 ```rust
 // atelyx-plugin-protocol/src/method.rs
-/// 协作空间内的插件消息：按「通道」隔离，宿主把插件 id 作为通道前缀，
-/// 同空间的同插件实例互通（跨空间不达、不可抢占他人通道）。
+/// 协作空间内的插件消息与团队元数据：消息按「通道」隔离，宿主把插件 id 作为通道前缀，
+/// 同空间的同插件实例互通（跨空间不达、不可抢占他人通道）；元数据是空间团队层共享键值。
 pub mod collab {
     /// 当前空间的连接状态与在场成员清单（不含自己）。
     pub const PEERS: &str = "collab.peers";
     /// 向同空间的对等插件发一条消息：缺省广播给全部对端，给了目标即单播。
     pub const SEND: &str = "collab.send";
+    /// 读当前空间的团队元数据（`key` 缺省 = 全部键）。团队所有插件共享同一份键空间。
+    pub const META_GET: &str = "collab.metaGet";
+    /// 按键写当前空间的团队元数据：只改给出的键，其余键保持原值。
+    pub const META_PATCH: &str = "collab.metaPatch";
     /// 对端消息到达（通知）。
     pub const HOST_MESSAGE: &str = "host:collab.message";
 }
@@ -2778,9 +2775,27 @@ pub struct TableSetCellImageParams {
 }
 ```
 
-## 13. 能力面负载：日程与活动
+## 13. 日历服务（插件提供）
 
-日程读写与按天活动统计；两者都取自当前仓库（本地文件 / 空间团队 meta），与宿主视图同一真源。
+日程读写由预置插件 `com.atelyx.calendar` 以 `calendar` 服务开放，宿主不内置实现：调用方经 `service.call` 传 `service = calendar` 与下列方法名，或直接调 `calendar.<方法>`——两条路径落到同一登记。插件停用时该服务随之消失，调用方收到「服务不可用」。日程真源随容器走（本地仓库 `.atelyx/calendar.json` / 协作空间团队 meta）。
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 日历服务（由日历插件提供）：方法名即 `calendar.<方法>`，也可经 `service.call` 以
+/// `service = calendar` 调用。日程真源随容器走（本地仓库 / 协作空间团队 meta），插件不自留副本。
+pub mod calendar {
+    /// 服务名。
+    pub const SERVICE: &str = "calendar";
+    /// 当前仓库的日程（按日期、创建时间与 id 排序）。
+    pub const LIST: &str = "list";
+    /// 新增一条日程；`id` 与创建时刻由服务补齐。
+    pub const ADD: &str = "add";
+    /// 改写一条日程（只改给出的字段）。
+    pub const UPDATE: &str = "update";
+    /// 删除一条日程。
+    pub const REMOVE: &str = "remove";
+}
+```
 
 ```rust
 // atelyx-plugin-protocol/src/method.rs
@@ -2814,7 +2829,7 @@ pub struct CalendarListResult {
 
 ```rust
 // atelyx-plugin-protocol/src/method.rs
-/// [`calendar::ADD`] 的 params：`id` / `createdAt` 由宿主补齐；`color` 未给出即按强调色显示。
+/// [`calendar::ADD`] 的 params：`id` / `createdAt` 由日历服务补齐；`color` 未给出即按强调色显示。
 #[serde(rename_all = "camelCase")]
 pub struct CalendarAddParams {
     pub date: String,
@@ -2859,6 +2874,10 @@ pub struct CalendarIdParams {
 pub const MAX_CALENDAR_TITLE_CHARS: usize = 200;
 ```
 
+## 14. 能力面负载：仓库活动
+
+按天聚合的文件活动计数与当日版本记录；取自当前仓库（本地历史侧文件 / 空间聚合），按本地日界归日。
+
 ```rust
 // atelyx-plugin-protocol/src/method.rs
 /// 一天的活动计数（`day` = 自纪元天数）。
@@ -2878,7 +2897,57 @@ pub struct HistoryActivityResult {
 }
 ```
 
-## 14. 能力面负载：托盘与协作
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`history::DAY`] 的 params：`day` 为本地日期 `YYYY-MM-DD`。
+#[serde(rename_all = "camelCase")]
+pub struct HistoryDayParams {
+    pub day: String,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 一条当日版本记录：`kind` / `action` 取宿主历史侧文件的取值域（`note` / `canvas` / `table`、
+/// `edit` / `restore`）；`file` 为仓库相对路径，`ts` 为毫秒时间戳。
+#[serde(rename_all = "camelCase")]
+pub struct HistoryDayEntry {
+    pub kind: String,
+    pub file: String,
+    pub ts: i64,
+    pub action: String,
+    pub author_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`history::DAY`] 的 result：按时间新→旧排列。
+#[serde(rename_all = "camelCase")]
+pub struct HistoryDayResult {
+    pub entries: Vec<HistoryDayEntry>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 历史弹层支持的文件类型。
+pub const HISTORY_KINDS: &[&str] = &["note", "canvas", "table"];
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`history::OPEN`] 的 params：打开某文件的宿主历史弹层。
+#[serde(rename_all = "camelCase")]
+pub struct HistoryOpenParams {
+    pub kind: String,
+    pub file: String,
+}
+```
+
+## 15. 能力面负载：托盘与协作
 
 系统托盘条目与空间内插件间消息的负载形态；两类能力的可用性都随宿主平台与容器类型而变。
 
@@ -2993,7 +3062,57 @@ pub struct CollabMessageParams {
 }
 ```
 
-## 15. 宿主广播事件
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 团队元数据键的字节上限。
+pub const MAX_META_KEY_BYTES: usize = 200;
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 团队元数据单键值的字节上限（与服务端默认单键上限同口径）。
+pub const MAX_META_VALUE_BYTES: usize = 10 * 1024 * 1024;
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`collab::META_GET`] 的 params：`key` 缺省 = 读全部键。
+#[serde(rename_all = "camelCase")]
+pub struct CollabMetaGetParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 团队元数据快照：键 → UTF-8 文本值（键按字典序，读全量时输出稳定）。
+#[serde(rename_all = "camelCase")]
+pub struct CollabMetaResult {
+    pub values: std::collections::BTreeMap<String, String>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 一次按键写入。
+#[serde(rename_all = "camelCase")]
+pub struct CollabMetaEntry {
+    pub key: String,
+    pub value: String,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`collab::META_PATCH`] 的 params：只写给出的键，未列出的键保持原值。
+#[serde(rename_all = "camelCase")]
+pub struct CollabMetaPatchParams {
+    pub entries: Vec<CollabMetaEntry>,
+}
+```
+
+## 16. 宿主广播事件
 
 插件经 `event.subscribe` 声明订阅的事件名与载荷；未上表的名字宿主拒绝订阅。
 
@@ -3023,9 +3142,9 @@ pub mod name {
     /// 仓库内文件变更（宿主保存 / 新建 / 删除 / 改名 / 插件经 `vault` 写入）。只覆盖宿主发起的
     /// 写入，外部程序直接改磁盘不发。payload 见 [`FileChangedPayload`]。
     pub const VAULT_FILE_CHANGED: &str = "vault:file.changed";
-    /// 当前仓库的日程变更（视图编辑、插件经 `calendar.*` 写入，本地与协作空间同口径）。
-    /// payload 为空对象：日程量小，订阅方重新 `calendar.list` 取最新清单。
-    pub const CALENDAR_CHANGED: &str = "calendar:changed";
+    /// 协作空间团队元数据的某个键变更（任何成员经 `collab.metaPatch` 或宿主写入）。
+    /// payload 见 [`SpaceMetaChangedPayload`]；订阅方按 `key` 过滤后重取该键。
+    pub const SPACE_META_CHANGED: &str = "space:meta.changed";
 }
 ```
 
@@ -3035,7 +3154,12 @@ pub mod name {
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum VaultSwitchPayload {
     Local { root: String },
-    Space { space_id: String },
+    /// `can_write` = 当前身份在空间内可写（viewer 只读；写操作仍由服务端终审）。
+    Space {
+        space_id: String,
+        #[serde(default)]
+        can_write: bool,
+    },
 }
 ```
 
@@ -3093,6 +3217,15 @@ pub enum FileChangeKind {
     Updated,
     Deleted,
     Renamed,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/event.rs
+/// [`name::SPACE_META_CHANGED`] 的 payload：变更的键名（团队元数据单键）。
+#[serde(rename_all = "camelCase")]
+pub struct SpaceMetaChangedPayload {
+    pub key: String,
 }
 ```
 

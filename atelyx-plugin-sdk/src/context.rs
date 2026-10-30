@@ -684,33 +684,26 @@ impl Context {
         self.call_unit(method::table::SET_CELL_IMAGE, &params).await
     }
 
-    // ---------- calendar / history（当前仓库的日程与活动密度） ----------
-
-    /// 读当前仓库的日程（按日期升序）。
-    pub async fn calendar_list(&self) -> Result<Vec<CalendarItem>, RpcError> {
-        let result: CalendarListResult = self.call_null(method::calendar::LIST).await?;
-        Ok(result.items)
-    }
-
-    /// 新增一条日程：`id` / `createdAt` 由宿主补齐，回执是补齐后的条目（未给 `color` 按强调色显示）。
-    pub async fn calendar_add(&self, params: &CalendarAddParams) -> Result<CalendarItem, RpcError> {
-        self.call_typed(method::calendar::ADD, params).await
-    }
-
-    /// 改写一条日程（只改给出的字段；`note` 给空串 = 清空备注）。
-    pub async fn calendar_update(&self, params: &CalendarUpdateParams) -> Result<(), RpcError> {
-        self.call_unit(method::calendar::UPDATE, params).await
-    }
-
-    /// 删除一条日程（不存在报可读错误）。
-    pub async fn calendar_remove(&self, id: &str) -> Result<(), RpcError> {
-        self.call_unit(method::calendar::REMOVE, &CalendarIdParams { id: id.into() }).await
-    }
+    // ---------- history（当前仓库的活动密度与版本） ----------
 
     /// 按天聚合的仓库活动（新建 / 修改 / 删除的文件计数），按天升序。
     pub async fn history_activity(&self) -> Result<Vec<DayActivity>, RpcError> {
         let result: HistoryActivityResult = self.call_null(method::history::ACTIVITY).await?;
         Ok(result.days)
+    }
+
+    /// 某一天（`YYYY-MM-DD`）的仓库历史版本记录，按时间新→旧。按需拉取，不在订阅事件里推送。
+    pub async fn history_day(&self, day: &str) -> Result<Vec<HistoryDayEntry>, RpcError> {
+        let params = HistoryDayParams { day: day.into() };
+        let result: HistoryDayResult = self.call_typed(method::history::DAY, &params).await?;
+        Ok(result.entries)
+    }
+
+    /// 打开某文件的仓库历史弹层（宿主在当前聚焦窗口展示）；`kind` 取 `note` / `canvas` / `table`。
+    /// 回执 = 已受理，弹层内的操作不再回报。
+    pub async fn history_open(&self, kind: &str, file: &str) -> Result<(), RpcError> {
+        let params = HistoryOpenParams { kind: kind.into(), file: file.into() };
+        self.call_unit(method::history::OPEN, &params).await
     }
 
     // ---------- process ----------
@@ -833,6 +826,23 @@ impl Context {
             qos,
         };
         self.call_typed(method::collab::SEND, &params).await
+    }
+
+    /// 读当前空间的团队元数据：`key = None` 读全部键。团队同空间的所有插件共享同一份键空间，
+    /// 键缺省即无数据；仅协作空间可用，本地仓库回可读错误。
+    pub async fn collab_meta_get(&self, key: Option<&str>) -> Result<CollabMetaResult, RpcError> {
+        let params = CollabMetaGetParams { key: key.map(Into::into) };
+        self.call_typed(method::collab::META_GET, &params).await
+    }
+
+    /// 按键写当前空间的团队元数据（只改给出的键，其余键保持原值）；成员经
+    /// `space:meta.changed` 得知变更。只读身份与本地仓库回可读错误。
+    pub async fn collab_meta_patch(
+        &self,
+        entries: Vec<CollabMetaEntry>,
+    ) -> Result<(), RpcError> {
+        let params = CollabMetaPatchParams { entries };
+        self.call_unit(method::collab::META_PATCH, &params).await
     }
 
     // ---------- clipboard / dialog / http ----------

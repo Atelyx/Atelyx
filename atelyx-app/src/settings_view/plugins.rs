@@ -14,13 +14,14 @@ use iced::{border, widget::container::Style, Element, Length, Padding, Task};
 use atelyx_core::plugin_runtime::market::{self, MarketSnapshot};
 use atelyx_core::plugin_runtime::{
     AiAgent, AiAgentsResult, AiModel, AiModelPick, AiModelProvider, AiModelsResult, AuditRecord,
-    ClipboardImage, CollabPeer, CollabPeersResult, CollabSendParams, CollabSendQos,
-    CollabSendResult, DayActivity, DialogKind, DialogRequest,
-    FileChangeKind, HistoryActivityResult, HostRequest, ImageInfoResult, InstallOutcome,
-    MeasureBatchParams, MeasureBatchResult, NotificationLevel, Permission, PluginEvent,
-    PluginRuntime, PluginStatus, PluginSummary, SetTrayItemsParams, MAX_VAULT_BINARY_BYTES,
-    PLATFORM_PLUGIN,
+    ClipboardImage, CollabMetaGetParams, CollabMetaPatchParams, CollabMetaResult, CollabPeer,
+    CollabPeersResult, CollabSendParams, CollabSendQos, CollabSendResult, DayActivity,
+    DialogKind, DialogRequest, FileChangeKind, HistoryActivityResult, HistoryDayParams,
+    HistoryOpenParams, HostRequest, ImageInfoResult, InstallOutcome, MeasureBatchParams,
+    MeasureBatchResult, NotificationLevel, Permission, PluginEvent, PluginRuntime, PluginStatus,
+    PluginSummary, SetTrayItemsParams, MAX_VAULT_BINARY_BYTES, PLATFORM_PLUGIN,
 };
+use atelyx_core::space_client::SpaceError;
 
 use crate::registry::{BuiltinPluginInfo, Entry, EntryKind};
 use crate::settings_view::{card, group_head};
@@ -139,6 +140,10 @@ pub struct PluginsState {
     pub log_error: Option<String>,
     /// 清空日志的二段确认。
     pub log_clear_ask: bool,
+    /// 等仓库历史聚合落地的按日查询（请求 id, 自纪元天数）：聚合落地或容器切换时结算。
+    pub pending_history_day: Vec<(u64, i64)>,
+    /// 等仓库历史聚合落地的活动统计（请求 id，协作空间口径）。
+    pub pending_history_activity: Vec<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -266,6 +271,14 @@ pub enum PluginsMsg {
     /// 按天聚合的仓库活动（`history.activity`）。
     HistoryActivity { request_id: u64 },
     HistoryActivityDone { request_id: u64, result: Result<serde_json::Value, String> },
+    /// 某一天的仓库历史版本（`history.day`）：缓存在手即答，否则并入聚合后再回填。
+    HistoryDay { request_id: u64, params: HistoryDayParams },
+    /// 打开某文件的仓库历史弹层（`history.open`，在聚焦的工作区窗口打开；回执 = 已受理）。
+    HistoryOpen { request_id: u64, params: HistoryOpenParams },
+    /// 协作空间团队元数据（仅在协作空间可用；写入只改给出的键）。
+    CollabMetaGet { request_id: u64, params: CollabMetaGetParams },
+    CollabMetaPatch { request_id: u64, params: CollabMetaPatchParams },
+    CollabMetaDone { request_id: u64, result: Result<serde_json::Value, String> },
 }
 
 /// 订阅标识：运行时 `Arc` 指针哈希（同一运行时不重建订阅流）。
@@ -440,30 +453,18 @@ pub fn host_requests_stream(spec: &RuntimeSpec) -> impl iced::futures::Stream<It
                 HostRequest::EditorReplaceSelection { request_id, text, .. } => {
                     Message::Plugins(PluginsMsg::EditorReplaceSelection { request_id, text })
                 }
-                HostRequest::CalendarList { request_id, .. } => Message::Calendar(
-                    crate::calendar_actions::CalendarMsg::PluginCall {
-                        request_id,
-                        call: crate::calendar_actions::CalendarCall::List,
-                    },
-                ),
-                HostRequest::CalendarAdd { request_id, params, .. } => Message::Calendar(
-                    crate::calendar_actions::CalendarMsg::PluginCall {
-                        request_id,
-                        call: crate::calendar_actions::CalendarCall::Add(params),
-                    },
-                ),
-                HostRequest::CalendarUpdate { request_id, params, .. } => Message::Calendar(
-                    crate::calendar_actions::CalendarMsg::PluginCall {
-                        request_id,
-                        call: crate::calendar_actions::CalendarCall::Update(params),
-                    },
-                ),
-                HostRequest::CalendarRemove { request_id, params, .. } => Message::Calendar(
-                    crate::calendar_actions::CalendarMsg::PluginCall {
-                        request_id,
-                        call: crate::calendar_actions::CalendarCall::Remove(params.id),
-                    },
-                ),
+                HostRequest::CollabMetaGet { request_id, params, .. } => {
+                    Message::Plugins(PluginsMsg::CollabMetaGet { request_id, params })
+                }
+                HostRequest::CollabMetaPatch { request_id, params, .. } => {
+                    Message::Plugins(PluginsMsg::CollabMetaPatch { request_id, params })
+                }
+                HostRequest::HistoryDay { request_id, params, .. } => {
+                    Message::Plugins(PluginsMsg::HistoryDay { request_id, params })
+                }
+                HostRequest::HistoryOpen { request_id, params, .. } => {
+                    Message::Plugins(PluginsMsg::HistoryOpen { request_id, params })
+                }
                 HostRequest::HistoryActivity { request_id, .. } => {
                     Message::Plugins(PluginsMsg::HistoryActivity { request_id })
                 }
@@ -1254,35 +1255,152 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
             resolve_vault(app, request_id, result)
         }
         PluginsMsg::HistoryActivity { request_id } => {
-            if !matches!(app.repo_kind, crate::RepoKind::Local) {
-                app.plugins.resolve_shell_call(
-                    request_id,
-                    Err("协作空间没有本地历史侧文件，活动统计仅支持本地仓库".to_string()),
+            // 本地仓走侧文件计数（磁盘事实）；协作空间用历史聚合的版本条数，聚合未在手就排队等落地
+            if matches!(app.repo_kind, crate::RepoKind::Local) {
+                let state = app.vault.clone();
+                return Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            let (root, exclude, _) = state.session_snapshot()?;
+                            let counts = atelyx_core::history::activity_by_day(&root, &exclude);
+                            let mut days: Vec<DayActivity> = counts
+                                .into_iter()
+                                .map(|(day, count)| DayActivity { day, count })
+                                .collect();
+                            days.sort_by_key(|day| day.day);
+                            serde_json::to_value(HistoryActivityResult { days })
+                                .map_err(|e| e.to_string())
+                        })
+                        .await
+                        .map_err(|e| e.to_string())
+                        .and_then(|r| r)
+                    },
+                    move |result| Message::Plugins(PluginsMsg::HistoryActivityDone { request_id, result }),
                 );
+            }
+            if let Some(cached) = &app.repo_history {
+                let result = match cached {
+                    Ok(history) => crate::repohistory_view::activity_json(&history.timestamps),
+                    Err(e) => Err(format!("历史聚合失败：{e}")),
+                };
+                return resolve_vault(app, request_id, result);
+            }
+            if !crate::repohistory_view::container_ready(app) {
+                return resolve_vault(app, request_id, Err("未打开仓库".into()));
+            }
+            app.plugins_state.pending_history_activity.push(request_id);
+            if app.repo_history_loading {
                 return Task::none();
             }
-            let state = app.vault.clone();
-            Task::perform(
-                async move {
-                    tokio::task::spawn_blocking(move || {
-                        let (root, exclude, _) = state.session_snapshot()?;
-                        let counts = atelyx_core::history::activity_by_day(&root, &exclude);
-                        let mut days: Vec<DayActivity> = counts
-                            .into_iter()
-                            .map(|(day, count)| DayActivity { day, count })
-                            .collect();
-                        days.sort_by_key(|day| day.day);
-                        serde_json::to_value(HistoryActivityResult { days })
-                            .map_err(|e| e.to_string())
-                    })
-                    .await
-                    .map_err(|e| e.to_string())
-                    .and_then(|r| r)
-                },
-                move |result| Message::Plugins(PluginsMsg::HistoryActivityDone { request_id, result }),
-            )
+            crate::repohistory_view::load(app)
         }
         PluginsMsg::HistoryActivityDone { request_id, result } => {
+            resolve_vault(app, request_id, result)
+        }
+        PluginsMsg::HistoryDay { request_id, params } => {
+            let Some(day) = atelyx_core::history::parse_day(&params.day) else {
+                return resolve_vault(app, request_id, Err(format!("日期非法：{}", params.day)));
+            };
+            // 聚合缓存在手即答；缺失则挂起并等下一次落地回填（未在途才发起）
+            if let Some(cached) = &app.repo_history {
+                let result = match cached {
+                    Ok(history) => crate::repohistory_view::history_day_json(
+                        crate::repohistory_view::day_entries(&history.groups, day),
+                    ),
+                    Err(e) => Err(format!("历史聚合失败：{e}")),
+                };
+                return resolve_vault(app, request_id, result);
+            }
+            if !crate::repohistory_view::container_ready(app) {
+                return resolve_vault(app, request_id, Err("未打开仓库".into()));
+            }
+            app.plugins_state.pending_history_day.push((request_id, day));
+            if app.repo_history_loading {
+                return Task::none();
+            }
+            crate::repohistory_view::load(app)
+        }
+        PluginsMsg::HistoryOpen { request_id, params } => {
+            let opened = (|| -> Result<_, String> {
+                if !crate::repohistory_view::container_ready(app) {
+                    return Err("未打开仓库".to_string());
+                }
+                let kind = crate::repohistory_view::parse_kind(&params.kind)
+                    .ok_or_else(|| format!("未知的历史类型：{}", params.kind))?;
+                let file = vault::validate_plugin_path(&params.file)?;
+                // 历史弹层挂在工作区窗口上：插件窗口没有工作区 chrome
+                let window = app
+                    .focused_window
+                    .filter(|id| app.main_id == Some(*id) || app.detached_os.contains_key(id))
+                    .ok_or_else(|| "没有可打开历史的工作区窗口".to_string())?;
+                Ok((window, kind, file))
+            })();
+            match opened {
+                Ok((window, kind, file)) => {
+                    app.plugins.resolve_shell_call(request_id, Ok(serde_json::json!({})));
+                    crate::history_browser::open(app, window, kind, file)
+                }
+                Err(e) => resolve_vault(app, request_id, Err(e)),
+            }
+        }
+        PluginsMsg::CollabMetaGet { request_id, params } => {
+            let Some(session) = crate::space_actions::session_of(app) else {
+                return resolve_vault(
+                    app,
+                    request_id,
+                    Err("协作依赖协作空间：当前不是协作空间".to_string()),
+                );
+            };
+            let (client, space_id) = (session.client, session.space_id);
+            let single = params.key.is_some();
+            Task::perform(
+                async move {
+                    let values = match client.team_meta_get(&space_id, params.key.as_deref()).await {
+                        Ok(meta) => meta.values,
+                        // 404 单键 = 键不存在（按空值答）；全量读只剩空间已不存在一种解释
+                        Err(SpaceError::NotFound) if single => Default::default(),
+                        Err(SpaceError::NotFound) => {
+                            return Err("空间不存在或已失去访问权限".to_string())
+                        }
+                        Err(e) => return Err(e.to_string()),
+                    };
+                    serde_json::to_value(CollabMetaResult { values: values.into_iter().collect() })
+                        .map_err(|e| format!("团队元数据不可序列化：{e}"))
+                },
+                move |result| Message::Plugins(PluginsMsg::CollabMetaDone { request_id, result }),
+            )
+        }
+        PluginsMsg::CollabMetaPatch { request_id, params } => {
+            let Some(session) = crate::space_actions::session_of(app) else {
+                return resolve_vault(
+                    app,
+                    request_id,
+                    Err("协作依赖协作空间：当前不是协作空间".to_string()),
+                );
+            };
+            if !session.role.can_write() {
+                return resolve_vault(
+                    app,
+                    request_id,
+                    Err("该空间为只读身份，无法修改团队元数据".to_string()),
+                );
+            }
+            let (client, space_id) = (session.client, session.space_id);
+            let values: Vec<(String, String)> =
+                params.entries.into_iter().map(|entry| (entry.key, entry.value)).collect();
+            Task::perform(
+                async move {
+                    client
+                        .team_meta_patch(&space_id, &values)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    Ok(serde_json::json!({}))
+                },
+                move |result| Message::Plugins(PluginsMsg::CollabMetaDone { request_id, result }),
+            )
+        }
+        PluginsMsg::CollabMetaDone { request_id, result } => {
+            // 键变更由服务端向空间成员广播（含本端）后经 `space:meta.changed` 送达订阅插件
             resolve_vault(app, request_id, result)
         }
         PluginsMsg::VaultCallDone { request_id, result } => {
@@ -1381,6 +1499,16 @@ fn resolve_vault(
 ) -> Task<Message> {
     app.plugins.resolve_shell_call(request_id, result);
     Task::none()
+}
+
+/// 回绝挂起的历史查询（容器切换后旧查询的前提已不存在，不结算会让插件调用永远挂起）。
+pub(crate) fn fail_pending_history_day(app: &mut App, reason: &str) {
+    for (request_id, _) in std::mem::take(&mut app.plugins_state.pending_history_day) {
+        app.plugins.resolve_shell_call(request_id, Err(reason.to_string()));
+    }
+    for request_id in std::mem::take(&mut app.plugins_state.pending_history_activity) {
+        app.plugins.resolve_shell_call(request_id, Err(reason.to_string()));
+    }
 }
 
 /// 写入任务的完成消息：`created` 决定广播 `vault:file.changed` 的 Created / Updated。

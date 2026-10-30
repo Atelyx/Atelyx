@@ -362,7 +362,82 @@
       "type": "VaultSwitchPayload",
       "value": {
         "kind": "space",
-        "spaceId": "space-1"
+        "spaceId": "space-1",
+        "canWrite": true
+      }
+    },
+    {
+      "name": "space:meta.changed payload",
+      "type": "SpaceMetaChangedPayload",
+      "value": {
+        "key": "calendar"
+      }
+    },
+    {
+      "name": "collab.metaGet params",
+      "type": "CollabMetaGetParams",
+      "value": {
+        "key": "calendar"
+      }
+    },
+    {
+      "name": "collab.metaGet result",
+      "type": "CollabMetaResult",
+      "value": {
+        "values": {
+          "calendar": "{\"schema\":\"atelyx-calendar/v1\",\"items\":[]}",
+          "notes": "theme"
+        }
+      }
+    },
+    {
+      "name": "collab.metaPatch params",
+      "type": "CollabMetaPatchParams",
+      "value": {
+        "entries": [
+          {
+            "key": "calendar",
+            "value": "{\"schema\":\"atelyx-calendar/v1\",\"items\":[]}"
+          }
+        ]
+      }
+    },
+    {
+      "name": "history.day params",
+      "type": "HistoryDayParams",
+      "value": {
+        "day": "2026-10-30"
+      }
+    },
+    {
+      "name": "history.day result",
+      "type": "HistoryDayResult",
+      "value": {
+        "entries": [
+          {
+            "kind": "note",
+            "file": "notes/a.md",
+            "ts": 1790000000000,
+            "action": "edit",
+            "authorName": "作者",
+            "summary": "补充说明"
+          },
+          {
+            "kind": "table",
+            "file": "sheets/b.atb",
+            "ts": 1789900000000,
+            "action": "restore",
+            "authorName": "作者"
+          }
+        ]
+      }
+    },
+    {
+      "name": "history.open params",
+      "type": "HistoryOpenParams",
+      "value": {
+        "kind": "note",
+        "file": "notes/a.md"
       }
     },
     {
@@ -1179,7 +1254,16 @@
           "xs": 4.0,
           "sm": 6.0,
           "md": 10.0
-        }
+        },
+        "eventColors": [
+          "#e06c75",
+          "#61afef",
+          "#98c379",
+          "#e5c07b",
+          "#c678dd",
+          "#56b6c2",
+          "#d19a66"
+        ]
       }
     },
     {

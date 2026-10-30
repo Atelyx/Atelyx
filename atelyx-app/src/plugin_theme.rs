@@ -92,10 +92,10 @@ pub fn token_color(token: ColorToken) -> Color {
     }
 }
 
-/// 主题查询结果：颜色取界面 token（十六进制导出）、字号档与圆角档取界面常量。
+/// 主题查询结果：颜色取界面 token（十六进制导出）、字号档与圆角档取界面常量、事件色板同调色板。
 pub fn theme_result() -> ThemeResult {
-    fn hex(token: ColorToken) -> String {
-        let [r, g, b, a] = token_color(token).into_rgba8();
+    fn hex(color: Color) -> String {
+        let [r, g, b, a] = color.into_rgba8();
         if a == u8::MAX {
             format!("#{r:02x}{g:02x}{b:02x}")
         } else {
@@ -105,24 +105,24 @@ pub fn theme_result() -> ThemeResult {
 
     ThemeResult {
         colors: ThemeColors {
-            text: hex(ColorToken::Text),
-            text_secondary: hex(ColorToken::TextSecondary),
-            text_muted: hex(ColorToken::TextMuted),
-            accent: hex(ColorToken::Accent),
-            accent_soft: hex(ColorToken::AccentSoft),
-            danger: hex(ColorToken::Danger),
-            danger_soft: hex(ColorToken::DangerSoft),
-            success: hex(ColorToken::Success),
-            success_soft: hex(ColorToken::SuccessSoft),
-            warning: hex(ColorToken::Warning),
-            warning_soft: hex(ColorToken::WarningSoft),
-            surface: hex(ColorToken::Surface),
-            surface_muted: hex(ColorToken::SurfaceMuted),
-            surface_sunken: hex(ColorToken::SurfaceSunken),
-            hover: hex(ColorToken::Hover),
-            border: hex(ColorToken::Border),
-            border_strong: hex(ColorToken::BorderStrong),
-            transparent: hex(ColorToken::Transparent),
+            text: hex(token_color(ColorToken::Text)),
+            text_secondary: hex(token_color(ColorToken::TextSecondary)),
+            text_muted: hex(token_color(ColorToken::TextMuted)),
+            accent: hex(token_color(ColorToken::Accent)),
+            accent_soft: hex(token_color(ColorToken::AccentSoft)),
+            danger: hex(token_color(ColorToken::Danger)),
+            danger_soft: hex(token_color(ColorToken::DangerSoft)),
+            success: hex(token_color(ColorToken::Success)),
+            success_soft: hex(token_color(ColorToken::SuccessSoft)),
+            warning: hex(token_color(ColorToken::Warning)),
+            warning_soft: hex(token_color(ColorToken::WarningSoft)),
+            surface: hex(token_color(ColorToken::Surface)),
+            surface_muted: hex(token_color(ColorToken::SurfaceMuted)),
+            surface_sunken: hex(token_color(ColorToken::SurfaceSunken)),
+            hover: hex(token_color(ColorToken::Hover)),
+            border: hex(token_color(ColorToken::Border)),
+            border_strong: hex(token_color(ColorToken::BorderStrong)),
+            transparent: hex(token_color(ColorToken::Transparent)),
         },
         font_sizes: FontSizes {
             micro: pal::fs_micro(),
@@ -133,6 +133,7 @@ pub fn theme_result() -> ThemeResult {
             h1: pal::fs_h1(),
         },
         radii: Radii { xs: pal::RADIUS_XS, sm: pal::RADIUS_SM, md: pal::RADIUS_MD },
+        event_colors: pal::EVENT_COLORS.iter().map(|color| hex(*color)).collect(),
     }
 }
 
@@ -185,5 +186,9 @@ mod tests {
         let [r, g, b, _] = token_color(ColorToken::Accent).into_rgba8();
         assert_eq!(theme.colors.accent, format!("#{r:02x}{g:02x}{b:02x}"));
         assert_eq!(theme.colors.transparent, "#00000000");
+        // 事件色板与界面同序：插件按索引取色即宿主日程色
+        assert_eq!(theme.event_colors.len(), pal::EVENT_COLORS.len());
+        let [r, g, b, _] = pal::EVENT_COLORS[0].into_rgba8();
+        assert_eq!(theme.event_colors[0], format!("#{r:02x}{g:02x}{b:02x}"));
     }
 }

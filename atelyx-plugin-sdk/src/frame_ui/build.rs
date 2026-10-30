@@ -30,6 +30,8 @@ pub(crate) struct BuildCtx<'a> {
     pub markdown_misses: Vec<String>,
     /// 本帧用到的 Markdown 原文：缓存按它收敛，不随历史内容累积。
     pub markdown_used: HashSet<String>,
+    /// 光标声明为拖动形态的子区：按下它们才建拖拽候选。
+    pub draggables: HashSet<String>,
 }
 
 pub(crate) struct BuildOut {
@@ -43,6 +45,8 @@ pub(crate) struct BuildOut {
     pub markdown_used: HashSet<String>,
     pub metrics: Metrics,
     pub misses: bool,
+    /// 光标声明为拖动形态的子区：按下它们才建拖拽候选。
+    pub draggables: HashSet<String>,
 }
 
 impl<'a> BuildCtx<'a> {
@@ -61,6 +65,7 @@ impl<'a> BuildCtx<'a> {
             follow_prev: state.follow_prev.clone(),
             markdown_misses: Vec::new(),
             markdown_used: HashSet::new(),
+            draggables: HashSet::new(),
         }
     }
 
@@ -84,6 +89,12 @@ impl<'a> BuildCtx<'a> {
 
     pub(crate) fn hit(&mut self, id: &str, rect: Rect, cursor: HitCursor) {
         self.hits.push(HitRegion { id: id.to_string(), x: rect.x, y: rect.y, w: rect.w, h: rect.h, cursor: Some(cursor) });
+        if matches!(
+            cursor,
+            HitCursor::Grab | HitCursor::Grabbing | HitCursor::ResizeHorizontal | HitCursor::ResizeVertical
+        ) {
+            self.draggables.insert(id.to_string());
+        }
     }
 
     pub(crate) fn record(&mut self, id: &str, layout: Layout) {
@@ -118,6 +129,7 @@ impl<'a> BuildCtx<'a> {
             markdown_used: self.markdown_used,
             metrics: self.metrics,
             misses,
+            draggables: self.draggables,
         }
     }
 }
@@ -149,7 +161,9 @@ impl<'c, 'a> Canvas<'c, 'a> {
         self.ctx.draw(command);
     }
 
-    /// 登记可点击子区：命中时上报 `Click` / `DoubleClick` / `RightClick`，并参与悬停态。
+    /// 登记可点击子区：命中时上报 `Click` / `DoubleClick` / `RightClick`；光标为 `Grab` /
+    /// `Grabbing` / 单向缩放时该子区还可拖动——位移越过起拖阈值后改报 `DragStart` / `Drag` /
+    /// `DragEnd`（此后的抬起不再算点击）。`Pointer` 这类普通光标下的小抖动仍按点击解释。
     /// 子区裁到可见范围内：滚出视口的部分不该继续吃点击。
     pub fn hit(&mut self, id: &str, area: Rect, cursor: HitCursor) {
         let area = area.intersect(self.visible());

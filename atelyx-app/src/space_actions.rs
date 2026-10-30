@@ -800,6 +800,7 @@ pub fn enter_space(app: &mut App, session: SpaceSession, from_boot: bool) -> Tas
     // 容器已换：未声明保活的插件重载、声明的收到 vault:switch（旧容器上下文此刻起失效）
     app.plugins.on_vault_switch(atelyx_core::plugin_runtime::VaultSwitchPayload::Space {
         space_id: session.space_id.clone(),
+        can_write: session.role.can_write(),
     });
     clear_session_state(app);
     app.space_tree = None;
@@ -880,8 +881,8 @@ fn clear_session_state(app: &mut App) {
     // 仓库历史面板缓存随容器切换失效（进面板后重取）
     app.repo_history = None;
     app.repo_history_loading = false;
-    // 日历会话态随容器切换重置（日程 / 选中天 / 活动密度一并重取）
-    app.calendar = crate::calendar_actions::CalendarState::default();
+    // 等聚合落地的按日查询随容器作废：逐个回绝，插件调用不会悬着
+    crate::settings_view::plugins::fail_pending_history_day(app, "仓库已切换");
     app.rebuild_links = crate::settings_view::editor::RebuildLinksState::Idle;
     app.remote_cursors.clear();
     // 仓库级配置基线与 AI 编辑态随容器切换清空（VaultMetaLoaded 落地后回填），
@@ -3679,18 +3680,9 @@ fn on_space_event(app: &mut App, event: atelyx_core::collab::SpaceEvent) -> Task
             if !matches!(app.repo_kind, crate::RepoKind::Space(_)) {
                 return Task::none();
             }
-            // 日历日程落在团队 meta：他人变更到达时重载（不在展示中则仅失效，保留导航态）
-            let calendar_task = if key == crate::calendar_actions::META_KEY {
-                if layout_view::view_displayed(app, "calendar") {
-                    crate::calendar_actions::reload(app)
-                } else {
-                    app.calendar.ready = false;
-                    Task::none()
-                }
-            } else {
-                Task::none()
-            };
-            calendar_task.chain(load_space_meta(app))
+            // 团队元数据键变更（本端写入经服务端回声与成员远端推送同路送达）：订阅插件按 key 重取
+            app.plugins.on_space_meta_changed(&key);
+            load_space_meta(app)
         }
         E::Renamed { old_path, new_path } => {
             on_space_renamed(app, &old_path, &new_path)

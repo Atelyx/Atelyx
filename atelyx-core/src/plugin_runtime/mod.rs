@@ -51,8 +51,8 @@ pub use atelyx_plugin_protocol::paint::{
     TextWeight,
 };
 pub use atelyx_plugin_protocol::event::{
-    ChatChangeKind, ChatChangedPayload, FileChangeKind, FileChangedPayload, TableChangedPayload,
-    VaultSwitchPayload,
+    ChatChangeKind, ChatChangedPayload, FileChangeKind, FileChangedPayload,
+    SpaceMetaChangedPayload, TableChangedPayload, VaultSwitchPayload,
 };
 pub use atelyx_plugin_protocol::layout::LayoutSpecNode;
 pub use atelyx_plugin_protocol::manifest::{DocTypeRegistration, Permission};
@@ -64,7 +64,8 @@ pub use atelyx_plugin_protocol::method::{
     AiAgent, AiAgentsResult, AiModel, AiModelPick, AiModelProvider, AiModelsResult,
     AxesPadding, BUILTIN_SERVICES, PLATFORM_PLUGIN, EditorReplaceParams, EditorSelection,
     CalendarAddParams, CalendarIdParams, CalendarItem, CalendarListResult, CalendarUpdateParams,
-    DayActivity, HistoryActivityResult,
+    CollabMetaEntry, CollabMetaGetParams, CollabMetaPatchParams, CollabMetaResult, DayActivity,
+    HistoryActivityResult, HistoryDayEntry, HistoryDayParams, HistoryDayResult, HistoryOpenParams,
     ChatEvent, ChatEventParams, ChatHistoryParams, ChatHistoryResult,
     ChatRenameParams, ChatSendParams, ChatSessionParams, ChatSessionSummary, ChatSessionWire,
     ChatStopParams, ClipboardImage, CollabMessageParams, CollabPeer, CollabPeersResult,
@@ -292,14 +293,14 @@ pub enum HostRequest {
     EditorSelection { plugin_id: String, request_id: u64 },
     /// 插件请求用给定文本替换当前选区（空串 = 删除选区；写入经笔记同一套保存链）。
     EditorReplaceSelection { plugin_id: String, request_id: u64, text: String },
-    /// 插件请求当前仓库的日程清单（本地文件 / 空间团队 meta，与日历视图同一真源）。
-    CalendarList { plugin_id: String, request_id: u64 },
-    /// 插件请求新增一条日程（结果回带宿主补齐后的条目）。
-    CalendarAdd { plugin_id: String, request_id: u64, params: method::CalendarAddParams },
-    /// 插件请求改写一条日程（只改给出的字段）。
-    CalendarUpdate { plugin_id: String, request_id: u64, params: method::CalendarUpdateParams },
-    /// 插件请求删除一条日程。
-    CalendarRemove { plugin_id: String, request_id: u64, params: method::CalendarIdParams },
+    /// 插件请求读当前空间的团队元数据（`key` 缺省 = 全部键；仅协作空间可用）。
+    CollabMetaGet { plugin_id: String, request_id: u64, params: method::CollabMetaGetParams },
+    /// 插件请求按键写当前空间的团队元数据（只改给出的键；只读身份由壳拒绝）。
+    CollabMetaPatch { plugin_id: String, request_id: u64, params: method::CollabMetaPatchParams },
+    /// 插件请求某一天（本地日期 `YYYY-MM-DD`）的仓库历史版本记录。
+    HistoryDay { plugin_id: String, request_id: u64, params: method::HistoryDayParams },
+    /// 插件请求打开某文件的仓库历史弹层（界面动作，回执 = 已受理）。
+    HistoryOpen { plugin_id: String, request_id: u64, params: method::HistoryOpenParams },
     /// 插件请求按天聚合的仓库活动（只有本地仓库有本地历史侧文件）。
     HistoryActivity { plugin_id: String, request_id: u64 },
 }
@@ -398,6 +399,8 @@ pub struct PluginRuntime {
     service_runtime: OnceLock<tokio::runtime::Handle>,
     /// 当前容器身份（见 [`PluginRuntime::on_vault_switch`]）：同一容器重复进入不动作，据此判别首次激活。
     container: Mutex<Option<String>>,
+    /// 最近一次切容器 payload：迟到订阅 `vault:switch` 的插件由此补发当前容器身份。
+    last_vault_switch: Mutex<Option<VaultSwitchPayload>>,
     /// 最近一次 `table:changed` 广播的表格路径：插件迟到订阅时补发当前状态（否则订阅前的
     /// 广播已丢失，插件只能盲等下一次变更）。
     current_table: Mutex<Option<String>>,
@@ -440,6 +443,7 @@ impl PluginRuntime {
             next_service_call_id: AtomicU64::new(1),
             service_runtime: OnceLock::new(),
             container: Mutex::new(None),
+            last_vault_switch: Mutex::new(None),
             current_table: Mutex::new(None),
             discovered: Mutex::new(HashMap::new()),
             instances: Mutex::new(HashMap::new()),
@@ -598,12 +602,12 @@ impl PluginRuntime {
             | HostRequest::TraySetItems { .. }
             | HostRequest::CollabPeers { .. }
             | HostRequest::CollabSend { .. }
+            | HostRequest::CollabMetaGet { .. }
+            | HostRequest::CollabMetaPatch { .. }
             | HostRequest::EditorSelection { .. }
             | HostRequest::EditorReplaceSelection { .. }
-            | HostRequest::CalendarList { .. }
-            | HostRequest::CalendarAdd { .. }
-            | HostRequest::CalendarUpdate { .. }
-            | HostRequest::CalendarRemove { .. }
+            | HostRequest::HistoryDay { .. }
+            | HostRequest::HistoryOpen { .. }
             | HostRequest::HistoryActivity { .. } => {
                 return Err("界面服务请求形态不符".to_string())
             }
@@ -821,6 +825,18 @@ impl PluginRuntime {
                 request_id,
                 params,
             },
+            HostRequest::CollabMetaGet { plugin_id, params, .. } => HostRequest::CollabMetaGet {
+                plugin_id,
+                request_id,
+                params,
+            },
+            HostRequest::CollabMetaPatch { plugin_id, params, .. } => {
+                HostRequest::CollabMetaPatch {
+                    plugin_id,
+                    request_id,
+                    params,
+                }
+            }
             HostRequest::EditorSelection { plugin_id, .. } => HostRequest::EditorSelection {
                 plugin_id,
                 request_id,
@@ -832,29 +848,16 @@ impl PluginRuntime {
                     text,
                 }
             }
-            HostRequest::CalendarList { plugin_id, .. } => HostRequest::CalendarList {
-                plugin_id,
-                request_id,
-            },
-            HostRequest::CalendarAdd { plugin_id, params, .. } => HostRequest::CalendarAdd {
+            HostRequest::HistoryDay { plugin_id, params, .. } => HostRequest::HistoryDay {
                 plugin_id,
                 request_id,
                 params,
             },
-            HostRequest::CalendarUpdate { plugin_id, params, .. } => {
-                HostRequest::CalendarUpdate {
-                    plugin_id,
-                    request_id,
-                    params,
-                }
-            }
-            HostRequest::CalendarRemove { plugin_id, params, .. } => {
-                HostRequest::CalendarRemove {
-                    plugin_id,
-                    request_id,
-                    params,
-                }
-            }
+            HostRequest::HistoryOpen { plugin_id, params, .. } => HostRequest::HistoryOpen {
+                plugin_id,
+                request_id,
+                params,
+            },
             HostRequest::HistoryActivity { plugin_id, .. } => HostRequest::HistoryActivity {
                 plugin_id,
                 request_id,
@@ -1438,11 +1441,14 @@ impl PluginRuntime {
 
     /// 切仓库容器（本地仓库 ↔ 协作空间 / 换仓库）后的插件侧处置：
     /// 声明 `keepMountedOnVaultSwitch` 的插件保持挂载，订阅了 `vault:switch` 的收到新容器身份；
-    /// 未声明的插件由宿主重载（停进程再起）——它拿的旧仓库上下文已失效。
+    /// 未声明的插件由宿主重载（停进程再起）——它拿的旧仓库上下文已失效，新进程订阅时由缓存补发。
     ///
-    /// 两种情形不动作：容器未变（同一仓库被再次选中）；首次激活（启动自动进入）——那一刻插件刚由
-    /// 宿主启动、本就没有旧容器上下文，重载纯属白起一次，而广播仍是保活插件得知容器身份的唯一来源。
+    /// 容器未变（同一仓库被再次选中）不动作；首次激活（启动自动进入）不重载——那一刻插件刚由
+    /// 宿主启动、本就没有旧容器上下文，但运行中的订阅者仍要收到容器身份（它们往往早于切换就
+    /// 已订阅，错过了订阅时的补发）。
     pub fn on_vault_switch(self: &Arc<Self>, payload: VaultSwitchPayload) {
+        // 后到的订阅者（含切容器后被重载的新进程）靠这份缓存补发容器身份
+        *self.last_vault_switch.lock().unwrap() = Some(payload.clone());
         let identity = container_identity(&payload);
         let first_activation = {
             let mut container = self.container.lock().unwrap();
@@ -1459,10 +1465,8 @@ impl PluginRuntime {
             if instance.status() != PluginStatus::Running {
                 continue;
             }
-            if !instance.keep_mounted_on_vault_switch() {
-                if first_activation {
-                    continue;
-                }
+            // 未声明保活的实例换容器时重载：新进程订阅时由缓存补发当前容器身份
+            if !instance.keep_mounted_on_vault_switch() && !first_activation {
                 instance.stop();
                 if let Err(e) = instance.start() {
                     eprintln!("[plugin {}] 切仓库重载失败：{e}", instance.id);
@@ -1495,9 +1499,16 @@ impl PluginRuntime {
         self.broadcast_event(event::name::VAULT_FILE_CHANGED, &payload);
     }
 
-    /// 广播当前仓库的日程变更（视图编辑与插件写入同口径）。日程量小，日历插件收到后重新取清单。
-    pub fn on_calendar_changed(self: &Arc<Self>) {
-        self.broadcast_event(event::name::CALENDAR_CHANGED, &serde_json::json!({}));
+    /// 广播协作空间团队元数据的键变更（宿主写入与成员远端推送同口径）。订阅方按 `key`
+    /// 重取该键；元数据只在协作空间存在，本地仓库无此事件。
+    pub fn on_space_meta_changed(self: &Arc<Self>, key: &str) {
+        let payload = SpaceMetaChangedPayload { key: key.to_string() };
+        self.broadcast_event(event::name::SPACE_META_CHANGED, &payload);
+    }
+
+    /// 最近一次切容器的 payload（迟到订阅 `vault:switch` 时补发）。
+    pub(crate) fn current_vault_switch(&self) -> Option<VaultSwitchPayload> {
+        self.last_vault_switch.lock().unwrap().clone()
     }
 
     /// 某插件声明的默认布局（未声明 = `None`；崩溃重启后重开进程会重新声明）。
@@ -1647,7 +1658,7 @@ impl PluginRuntime {
 fn container_identity(payload: &VaultSwitchPayload) -> String {
     match payload {
         VaultSwitchPayload::Local { root } => format!("local:{root}"),
-        VaultSwitchPayload::Space { space_id } => format!("space:{space_id}"),
+        VaultSwitchPayload::Space { space_id, .. } => format!("space:{space_id}"),
     }
 }
 
@@ -1694,12 +1705,12 @@ fn request_plugin_id(request: &HostRequest) -> &str {
         | HostRequest::TraySetItems { plugin_id, .. }
         | HostRequest::CollabPeers { plugin_id, .. }
         | HostRequest::CollabSend { plugin_id, .. }
+        | HostRequest::CollabMetaGet { plugin_id, .. }
+        | HostRequest::CollabMetaPatch { plugin_id, .. }
         | HostRequest::EditorSelection { plugin_id, .. }
         | HostRequest::EditorReplaceSelection { plugin_id, .. }
-        | HostRequest::CalendarList { plugin_id, .. }
-        | HostRequest::CalendarAdd { plugin_id, .. }
-        | HostRequest::CalendarUpdate { plugin_id, .. }
-        | HostRequest::CalendarRemove { plugin_id, .. }
+        | HostRequest::HistoryDay { plugin_id, .. }
+        | HostRequest::HistoryOpen { plugin_id, .. }
         | HostRequest::HistoryActivity { plugin_id, .. } => plugin_id,
     }
 }

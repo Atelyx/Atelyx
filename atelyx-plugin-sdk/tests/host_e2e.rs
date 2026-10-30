@@ -184,29 +184,23 @@ fn vault_switch_reloads_plugin_without_keep_mounted() {
     let (_tmp, runtime, id, state_path) = install_ready_stub(false);
 
     runtime.on_vault_switch(VaultSwitchPayload::Local { root: "/vaults/first".into() });
-    std::thread::sleep(Duration::from_secs(1));
+    wait_state_contains(&state_path, "/vaults/first");
     assert_eq!(submits_of(&runtime, &id), 1, "首次激活不该重载插件");
-    assert!(
-        std::fs::read_to_string(&state_path).is_err(),
-        "未声明保活的插件不该收到 vault:switch"
-    );
 
     // 同一容器再次进入：容器身份未变，同样不动作
     runtime.on_vault_switch(VaultSwitchPayload::Local { root: "/vaults/first".into() });
     std::thread::sleep(Duration::from_secs(1));
     assert_eq!(submits_of(&runtime, &id), 1, "同一容器重复进入不该重载插件");
 
-    // 换容器：未声明保活的插件由宿主重载（停进程再起 → 重新提交整面帧）
+    // 换容器：未声明保活的插件由宿主重载（停进程再起 → 重新提交整面帧），
+    // 新进程订阅后由宿主补发当前容器身份
     runtime.on_vault_switch(VaultSwitchPayload::Local { root: "/vaults/other".into() });
     assert_eq!(wait_submits(&runtime, &id, 2), 2, "换容器应重载插件一次");
-    assert!(
-        std::fs::read_to_string(&state_path).is_err(),
-        "未声明保活的插件始终不该收到 vault:switch"
-    );
+    wait_state_contains(&state_path, "/vaults/other");
 }
 
 /// 切仓库容器：声明保活的插件不重载，订阅者在每次容器更换时收到 vault:switch 并把容器身份写进
-/// 自持数据（首次激活即送达——这是保活插件得知当前容器的唯一来源）。
+/// 自持数据；订阅晚于切换的插件由宿主补发当前容器身份（这是插件得知当前容器的唯一来源）。
 #[test]
 fn vault_switch_keeps_mounted_subscriber_informed() {
     let (_tmp, runtime, id, state_path) = install_ready_stub(true);

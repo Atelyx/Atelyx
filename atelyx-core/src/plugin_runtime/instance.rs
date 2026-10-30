@@ -1060,6 +1060,25 @@ impl Instance {
                         params: p,
                     }
                 }
+                method::collab::META_GET => {
+                    let p: method::CollabMetaGetParams = parse(params).map_err(|e| e.to_string())?;
+                    p.validate()?;
+                    HostRequest::CollabMetaGet {
+                        plugin_id: self.id.clone(),
+                        request_id: 0,
+                        params: p,
+                    }
+                }
+                method::collab::META_PATCH => {
+                    let p: method::CollabMetaPatchParams =
+                        parse(params).map_err(|e| e.to_string())?;
+                    p.validate()?;
+                    HostRequest::CollabMetaPatch {
+                        plugin_id: self.id.clone(),
+                        request_id: 0,
+                        params: p,
+                    }
+                }
                 method::table::SNAPSHOT => HostRequest::TableSnapshot {
                     plugin_id: self.id.clone(),
                     request_id: 0,
@@ -1153,41 +1172,28 @@ impl Instance {
                         text: p.text,
                     }
                 }
-                method::calendar::LIST => HostRequest::CalendarList {
-                    plugin_id: self.id.clone(),
-                    request_id: 0,
-                },
-                method::calendar::ADD => {
-                    let p: method::CalendarAddParams = parse(params).map_err(|e| e.to_string())?;
-                    p.validate()?;
-                    HostRequest::CalendarAdd {
-                        plugin_id: self.id.clone(),
-                        request_id: 0,
-                        params: p,
-                    }
-                }
-                method::calendar::UPDATE => {
-                    let p: method::CalendarUpdateParams = parse(params).map_err(|e| e.to_string())?;
-                    p.validate()?;
-                    HostRequest::CalendarUpdate {
-                        plugin_id: self.id.clone(),
-                        request_id: 0,
-                        params: p,
-                    }
-                }
-                method::calendar::REMOVE => {
-                    let p: method::CalendarIdParams = parse(params).map_err(|e| e.to_string())?;
-                    p.validate()?;
-                    HostRequest::CalendarRemove {
-                        plugin_id: self.id.clone(),
-                        request_id: 0,
-                        params: p,
-                    }
-                }
                 method::history::ACTIVITY => HostRequest::HistoryActivity {
                     plugin_id: self.id.clone(),
                     request_id: 0,
                 },
+                method::history::DAY => {
+                    let p: method::HistoryDayParams = parse(params).map_err(|e| e.to_string())?;
+                    p.validate()?;
+                    HostRequest::HistoryDay {
+                        plugin_id: self.id.clone(),
+                        request_id: 0,
+                        params: p,
+                    }
+                }
+                method::history::OPEN => {
+                    let p: method::HistoryOpenParams = parse(params).map_err(|e| e.to_string())?;
+                    p.validate()?;
+                    HostRequest::HistoryOpen {
+                        plugin_id: self.id.clone(),
+                        request_id: 0,
+                        params: p,
+                    }
+                }
                 _ => return Err("未知宿主服务请求".to_string()),
             };
             runtime.open_shell_call(request)
@@ -1486,7 +1492,7 @@ impl Instance {
                 | event::name::TABLE_CHANGED
                 | event::name::AI_CHAT_CHANGED
                 | event::name::VAULT_FILE_CHANGED
-                | event::name::CALENDAR_CHANGED
+                | event::name::SPACE_META_CHANGED
         ) {
             return Err(RpcError::failed(format!("未知事件名：{}", p.name)));
         }
@@ -1500,6 +1506,14 @@ impl Instance {
                         event::name::TABLE_CHANGED,
                         &event::TableChangedPayload { path: Some(path) },
                     );
+                }
+            }
+        }
+        // 晚于切换的订阅者（切容器后被重载的新进程、切换后才启动的插件）靠补发得知当前容器身份
+        if p.name == event::name::VAULT_SWITCH {
+            if let Ok(runtime) = self.runtime_upgrade() {
+                if let Some(payload) = runtime.current_vault_switch() {
+                    self.notify_domain_event(event::name::VAULT_SWITCH, &payload);
                 }
             }
         }
@@ -2116,15 +2130,15 @@ fn is_shell_method(method_name: &str) -> bool {
             | method::tray::SET_ITEMS
             | method::collab::PEERS
             | method::collab::SEND
+            | method::collab::META_GET
+            | method::collab::META_PATCH
             | method::query::MEASURE
             | method::query::THEME
             | method::editor::SELECTION
             | method::editor::REPLACE_SELECTION
-            | method::calendar::LIST
-            | method::calendar::ADD
-            | method::calendar::UPDATE
-            | method::calendar::REMOVE
             | method::history::ACTIVITY
+            | method::history::DAY
+            | method::history::OPEN
     )
 }
 
@@ -2328,7 +2342,7 @@ mod tests {
             event::name::TABLE_CHANGED,
             event::name::AI_CHAT_CHANGED,
             event::name::VAULT_FILE_CHANGED,
-            event::name::CALENDAR_CHANGED,
+            event::name::SPACE_META_CHANGED,
         ] {
             let ack = instance
                 .dispatch(event::SUBSCRIBE, &json!({ "name": name }))

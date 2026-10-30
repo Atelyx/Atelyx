@@ -87,13 +87,17 @@ pub mod vault {
     pub const RENAME: &str = "vault.rename";
 }
 
-/// 协作空间内的插件消息：按「通道」隔离，宿主把插件 id 作为通道前缀，
-/// 同空间的同插件实例互通（跨空间不达、不可抢占他人通道）。
+/// 协作空间内的插件消息与团队元数据：消息按「通道」隔离，宿主把插件 id 作为通道前缀，
+/// 同空间的同插件实例互通（跨空间不达、不可抢占他人通道）；元数据是空间团队层共享键值。
 pub mod collab {
     /// 当前空间的连接状态与在场成员清单（不含自己）。
     pub const PEERS: &str = "collab.peers";
     /// 向同空间的对等插件发一条消息：缺省广播给全部对端，给了目标即单播。
     pub const SEND: &str = "collab.send";
+    /// 读当前空间的团队元数据（`key` 缺省 = 全部键）。团队所有插件共享同一份键空间。
+    pub const META_GET: &str = "collab.metaGet";
+    /// 按键写当前空间的团队元数据：只改给出的键，其余键保持原值。
+    pub const META_PATCH: &str = "collab.metaPatch";
     /// 对端消息到达（通知）。
     pub const HOST_MESSAGE: &str = "host:collab.message";
 }
@@ -194,20 +198,28 @@ pub mod markdown {
     pub const PARSE: &str = "markdown.parse";
 }
 
+/// 日历服务（由日历插件提供）：方法名即 `calendar.<方法>`，也可经 `service.call` 以
+/// `service = calendar` 调用。日程真源随容器走（本地仓库 / 协作空间团队 meta），插件不自留副本。
 pub mod calendar {
+    /// 服务名。
+    pub const SERVICE: &str = "calendar";
     /// 当前仓库的日程（按日期、创建时间与 id 排序）。
-    pub const LIST: &str = "calendar.list";
-    /// 新增一条日程；缺省字段由宿主补齐。
-    pub const ADD: &str = "calendar.add";
+    pub const LIST: &str = "list";
+    /// 新增一条日程；`id` 与创建时刻由服务补齐。
+    pub const ADD: &str = "add";
     /// 改写一条日程（只改给出的字段）。
-    pub const UPDATE: &str = "calendar.update";
+    pub const UPDATE: &str = "update";
     /// 删除一条日程。
-    pub const REMOVE: &str = "calendar.remove";
+    pub const REMOVE: &str = "remove";
 }
 
 pub mod history {
     /// 按天聚合的仓库活动：新建 / 修改 / 删除的文件数合计。
     pub const ACTIVITY: &str = "history.activity";
+    /// 本地某一天的版本记录（本地历史侧文件 / 空间聚合，宿主统一按本地日界归日）。
+    pub const DAY: &str = "history.day";
+    /// 在宿主界面打开某个文件的历史弹层（版本列表与回滚由宿主承载）。
+    pub const OPEN: &str = "history.open";
 }
 
 /// 编辑器：当前打开笔记的选区读写（由笔记插件提供，其他插件据此做「改写选中内容」这类动作）。
@@ -538,13 +550,17 @@ pub struct MeasureBatchResult {
     pub sizes: Vec<MeasureTextResult>,
 }
 
-/// [`query::THEME`] 的 result：颜色 / 字号档 / 圆角档（值随用户的主题与字号设置变化）。
+/// [`query::THEME`] 的 result：颜色 / 字号档 / 圆角档 / 事件色板
+/// （值随用户的主题与字号设置变化）。
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThemeResult {
     pub colors: ThemeColors,
     pub font_sizes: FontSizes,
     pub radii: Radii,
+    /// 事件条目可选色板（十六进制，宿主界面同序）；插件按它给用户选色。
+    #[serde(default)]
+    pub event_colors: Vec<String>,
 }
 
 /// 主题色：十六进制 `#rrggbb` / `#rrggbbaa`，字段名与 [`crate::paint::ColorToken`] 的 wire 名一致。
@@ -687,7 +703,7 @@ pub struct CalendarListResult {
     pub items: Vec<CalendarItem>,
 }
 
-/// [`calendar::ADD`] 的 params：`id` / `createdAt` 由宿主补齐；`color` 未给出即按强调色显示。
+/// [`calendar::ADD`] 的 params：`id` / `createdAt` 由日历服务补齐；`color` 未给出即按强调色显示。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CalendarAddParams {
@@ -778,6 +794,66 @@ pub struct DayActivity {
 #[serde(rename_all = "camelCase")]
 pub struct HistoryActivityResult {
     pub days: Vec<DayActivity>,
+}
+
+/// [`history::DAY`] 的 params：`day` 为本地日期 `YYYY-MM-DD`。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryDayParams {
+    pub day: String,
+}
+
+impl HistoryDayParams {
+    pub fn validate(&self) -> Result<(), String> {
+        if !is_calendar_date(&self.day) {
+            return Err(format!("日期须为 YYYY-MM-DD：{}", self.day));
+        }
+        Ok(())
+    }
+}
+
+/// 一条当日版本记录：`kind` / `action` 取宿主历史侧文件的取值域（`note` / `canvas` / `table`、
+/// `edit` / `restore`）；`file` 为仓库相对路径，`ts` 为毫秒时间戳。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryDayEntry {
+    pub kind: String,
+    pub file: String,
+    pub ts: i64,
+    pub action: String,
+    pub author_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+}
+
+/// [`history::DAY`] 的 result：按时间新→旧排列。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryDayResult {
+    pub entries: Vec<HistoryDayEntry>,
+}
+
+/// 历史弹层支持的文件类型。
+pub const HISTORY_KINDS: &[&str] = &["note", "canvas", "table"];
+
+/// [`history::OPEN`] 的 params：打开某文件的宿主历史弹层。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryOpenParams {
+    pub kind: String,
+    pub file: String,
+}
+
+impl HistoryOpenParams {
+    pub fn validate(&self) -> Result<(), String> {
+        if !HISTORY_KINDS.contains(&self.kind.as_str()) {
+            return Err(format!("未知的历史类型：{}", self.kind));
+        }
+        if self.file.trim().is_empty() {
+            return Err("文件路径不能为空".to_string());
+        }
+        Ok(())
+    }
 }
 
 // ---------- markdown ----------
@@ -1664,6 +1740,98 @@ pub struct CollabMessageParams {
     pub peer_name: Option<String>,
 }
 
+/// 团队元数据键的字节上限。
+pub const MAX_META_KEY_BYTES: usize = 200;
+/// 团队元数据单键值的字节上限（与服务端默认单键上限同口径）。
+pub const MAX_META_VALUE_BYTES: usize = 10 * 1024 * 1024;
+
+/// 团队元数据键的合法形态（与服务端同一套分段规则：按 `/` 分段，段内仅字母数字与 `- _ .`，
+/// 段不得为空 / 为 `.` / `..` / 以 `.` 开头或结尾；Windows 保留设备名由服务端另行拒绝）。
+fn validate_meta_key(key: &str) -> Result<(), String> {
+    if key.is_empty() {
+        return Err("键不能为空".to_string());
+    }
+    if key.len() > MAX_META_KEY_BYTES {
+        return Err(format!("键不得超过 {MAX_META_KEY_BYTES} 字节"));
+    }
+    for segment in key.split('/') {
+        if segment.is_empty() {
+            return Err(format!("键不得含空段：{key}"));
+        }
+        if segment == "." || segment == ".." {
+            return Err(format!("键含非法段：{key}"));
+        }
+        if segment.starts_with('.') || segment.ends_with('.') {
+            return Err(format!("键段不得以 . 开头或结尾：{key}"));
+        }
+        if !segment
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        {
+            return Err(format!("键含非法字符（仅允许字母数字 - _ . /）：{key}"));
+        }
+    }
+    Ok(())
+}
+
+/// [`collab::META_GET`] 的 params：`key` 缺省 = 读全部键。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollabMetaGetParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+}
+
+impl CollabMetaGetParams {
+    pub fn validate(&self) -> Result<(), String> {
+        match &self.key {
+            Some(key) => validate_meta_key(key),
+            None => Ok(()),
+        }
+    }
+}
+
+/// 团队元数据快照：键 → UTF-8 文本值（键按字典序，读全量时输出稳定）。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollabMetaResult {
+    pub values: std::collections::BTreeMap<String, String>,
+}
+
+/// 一次按键写入。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollabMetaEntry {
+    pub key: String,
+    pub value: String,
+}
+
+/// [`collab::META_PATCH`] 的 params：只写给出的键，未列出的键保持原值。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollabMetaPatchParams {
+    pub entries: Vec<CollabMetaEntry>,
+}
+
+impl CollabMetaPatchParams {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.entries.is_empty() {
+            return Err("至少给出一个键".to_string());
+        }
+        let mut seen = std::collections::HashSet::new();
+        for entry in &self.entries {
+            validate_meta_key(&entry.key)?;
+            if entry.value.len() > MAX_META_VALUE_BYTES {
+                return Err(format!("键 {} 的值不得超过 {MAX_META_VALUE_BYTES} 字节", entry.key));
+            }
+            if !seen.insert(entry.key.as_str()) {
+                return Err(format!("键重复：{}", entry.key));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// 平台自身的内置插件 id：存储、协作、出网这类基础能力归它，不可停用。
 pub const PLATFORM_PLUGIN: &str = "atelyx.platform";
 
@@ -1677,7 +1845,7 @@ pub const BUILTIN_SERVICES: &[(&str, &str, &[&str])] = &[
     ("fs", PLATFORM_PLUGIN, &[fs::PRIVATE_DIR, fs::READ_TEXT, fs::WRITE_TEXT, fs::READ_BINARY, fs::WRITE_BINARY, fs::REMOVE, fs::EXISTS, fs::LIST]),
     ("process", PLATFORM_PLUGIN, &[process::SPAWN, process::WRITE_STDIN, process::CLOSE_STDIN, process::KILL]),
     ("vault", PLATFORM_PLUGIN, &[vault::READ_TEXT, vault::WRITE_TEXT, vault::READ_BINARY, vault::WRITE_BINARY, vault::IMPORT_FILE, vault::IMAGE_INFO, vault::LIST, vault::EXISTS, vault::REMOVE, vault::RENAME]),
-    ("collab", PLATFORM_PLUGIN, &[collab::PEERS, collab::SEND]),
+    ("collab", PLATFORM_PLUGIN, &[collab::PEERS, collab::SEND, collab::META_GET, collab::META_PATCH]),
     ("table", "atelyx.tables", &[table::SNAPSHOT, table::UPDATE_CELL, table::ADD_ROW, table::REMOVE_ROW, table::SELECT_ROW, table::SET_CELL_IMAGE]),
     ("state", PLATFORM_PLUGIN, &[state::READ, state::WRITE]),
     ("notification", PLATFORM_PLUGIN, &[notification::SHOW]),
@@ -1692,8 +1860,7 @@ pub const BUILTIN_SERVICES: &[(&str, &str, &[&str])] = &[
     ("query", PLATFORM_PLUGIN, &[query::MEASURE, query::THEME]),
     ("markdown", "atelyx.notes", &[markdown::PARSE]),
     ("editor", "atelyx.notes", &[editor::SELECTION, editor::REPLACE_SELECTION]),
-    ("calendar", "atelyx.calendar", &[calendar::LIST, calendar::ADD, calendar::UPDATE, calendar::REMOVE]),
-    ("history", "atelyx.history", &[history::ACTIVITY]),
+    ("history", "atelyx.history", &[history::ACTIVITY, history::DAY, history::OPEN]),
 ];
 
 #[cfg(test)]
@@ -1899,4 +2066,85 @@ mod tests {
         assert!(CalendarIdParams { id: String::new() }.validate().is_err());
     }
 
+    #[test]
+    fn collab_meta_keys_follow_the_server_shape() {
+        assert!(CollabMetaGetParams { key: None }.validate().is_ok());
+        for good in ["calendar", "app/board", "a-b_c.d", "Team1/notes"] {
+            assert!(
+                CollabMetaGetParams { key: Some(good.into()) }.validate().is_ok(),
+                "应接受键：{good}"
+            );
+        }
+        for bad in [
+            "",
+            "a//b",
+            ".hidden",
+            "a/./b",
+            "a/..",
+            "key.",
+            "带中文",
+            "a:b",
+            &"k".repeat(MAX_META_KEY_BYTES + 1),
+        ] {
+            assert!(
+                CollabMetaGetParams { key: Some(bad.into()) }.validate().is_err(),
+                "应拒绝键：{bad}"
+            );
+        }
+        let ok = CollabMetaPatchParams {
+            entries: vec![CollabMetaEntry { key: "calendar".into(), value: "{}".into() }],
+        };
+        assert!(ok.validate().is_ok());
+        assert!(CollabMetaPatchParams { entries: vec![] }.validate().is_err());
+        let dup = CollabMetaPatchParams {
+            entries: vec![
+                CollabMetaEntry { key: "a".into(), value: "1".into() },
+                CollabMetaEntry { key: "a".into(), value: "2".into() },
+            ],
+        };
+        assert!(dup.validate().unwrap_err().contains("重复"));
+    }
+
+    #[test]
+    fn history_day_and_open_validate_shape() {
+        assert!(HistoryDayParams { day: "2026-10-30".into() }.validate().is_ok());
+        assert!(HistoryDayParams { day: "2026-10-3".into() }.validate().is_err());
+        let open = HistoryOpenParams { kind: "note".into(), file: "notes/a.md".into() };
+        assert!(open.validate().is_ok());
+        assert!(HistoryOpenParams { kind: "pdf".into(), ..open.clone() }.validate().is_err());
+        assert!(HistoryOpenParams { file: " ".into(), ..open }.validate().is_err());
+        let entry = HistoryDayEntry {
+            kind: "note".into(),
+            file: "notes/a.md".into(),
+            ts: 1_700_000_000_000,
+            action: "edit".into(),
+            author_name: "作者".into(),
+            summary: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&entry).unwrap(),
+            serde_json::json!({
+                "kind": "note",
+                "file": "notes/a.md",
+                "ts": 1_700_000_000_000_i64,
+                "action": "edit",
+                "authorName": "作者"
+            }),
+            "缺省摘要不落线"
+        );
+    }
+
+    #[test]
+    fn theme_result_carries_event_colors() {
+        let theme = ThemeResult {
+            event_colors: vec!["#112233".into()],
+            ..ThemeResult::default()
+        };
+        let wire = serde_json::to_value(&theme).unwrap();
+        assert_eq!(wire["eventColors"], serde_json::json!(["#112233"]));
+        let mut legacy = serde_json::to_value(ThemeResult::default()).unwrap();
+        legacy.as_object_mut().unwrap().remove("eventColors");
+        let old: ThemeResult = serde_json::from_value(legacy).unwrap();
+        assert!(old.event_colors.is_empty(), "旧宿主不带色板时按空清单");
+    }
 }

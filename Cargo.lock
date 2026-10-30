@@ -443,6 +443,7 @@ dependencies = [
  "atelyx-plugin-protocol",
  "atelyx-plugin-sdk",
  "chrono",
+ "serde",
  "serde_json",
  "tokio",
 ]

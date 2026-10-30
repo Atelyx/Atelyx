@@ -21,6 +21,7 @@ pub enum Icon {
     ChevronLeft,
     ChevronRight,
     X,
+    Trash,
 }
 
 /// 图标线宽（24x24 网格下的描边宽度）。
@@ -158,6 +159,16 @@ pub(crate) fn draw(ctx: &mut BuildCtx<'_>, icon: Icon, rect: Rect, color: PaintC
         Icon::X => {
             line(ctx, 6.0, 6.0, 18.0, 18.0);
             line(ctx, 18.0, 6.0, 6.0, 18.0);
+        }
+        // 垃圾桶：桶盖横线 + 提手 + 桶身 + 两道竖线
+        Icon::Trash => {
+            line(ctx, 4.0, 7.0, 20.0, 7.0);
+            line(ctx, 9.0, 7.0, 9.0, 4.0);
+            line(ctx, 9.0, 4.0, 15.0, 4.0);
+            line(ctx, 15.0, 4.0, 15.0, 7.0);
+            poly(ctx, &[(6.0, 7.0), (7.0, 20.0), (17.0, 20.0), (18.0, 7.0)], false);
+            line(ctx, 10.0, 11.0, 10.0, 16.0);
+            line(ctx, 14.0, 11.0, 14.0, 16.0);
         }
     }
 }

@@ -7,7 +7,7 @@
     "windows": "atelyx-plugin-calendar.exe",
     "linux": "atelyx-plugin-calendar"
   },
-  "permissions": ["vault"],
+  "permissions": ["vault", "collab"],
   "singleton": true,
   "keepMountedOnVaultSwitch": false
 }
