@@ -17,6 +17,8 @@ atelyx-plugin-protocol = { version = "0.1.0", path = "../atelyx-plugin-protocol"
 serde = { version = "1", default-features = false }
 serde_json = "1"
 base64 = "0.22"
+# 整面帧共享内存映射（插件写入宿主创建的帧区域）
+memmap2 = "0.9"
 # 连接泵：stdin/stdout 读写（io-util/io-std）、读写任务与超时（rt/sync/time/macros）；
 # rt-multi-thread 让插件的 #[tokio::main] 开箱即用
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time", "macros", "io-util", "io-std"] }

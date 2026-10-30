@@ -135,13 +135,24 @@ fn ensure_rect(x: f32, y: f32, w: f32, h: f32, name: &str) -> Result<(), String>
     Ok(())
 }
 
-/// `frame.submit` 的 params：整面重建（一帧即当前完整界面，未提交过的面显示占位）。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// `frame.submitShared` 的 params：帧内容写在共享内存的 `slot` 槽里，信封只带定位与校验信息。
+/// 宿主按 `generation` 拒绝过期映射，按 `seq` / `len` 校验槽内内容是否仍是本次写入。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct FrameSubmitParams {
+pub struct FrameSubmitSharedParams {
     pub surface_id: String,
-    #[serde(flatten)]
-    pub frame: SurfaceFrame,
+    pub generation: u64,
+    pub slot: u32,
+    pub seq: u64,
+    pub len: u32,
+}
+
+/// `frame.region` 的 params：帧超出当前槽容量时请求宿主换一份更大的区域。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FrameRegionRequest {
+    /// 本次至少要能放下的帧字节数；实际容量按倍增取到不小于它的值。
+    pub min_bytes: u32,
 }
 
 /// 键盘焦点事件与按键的归属：`Press` 含系统重复按键（长按方向键逐次到达），`Release` 在抬起时到达。
@@ -377,28 +388,28 @@ mod tests {
     }
 
     #[test]
-    fn frame_wire_shape_is_flat_and_defaults_are_omitted() {
-        let params = FrameSubmitParams {
+    fn shared_submit_params_carry_locator_only() {
+        let params = FrameSubmitSharedParams {
             surface_id: "board".into(),
-            frame: SurfaceFrame {
-                commands: vec![],
-                hits: vec![HitRegion {
-                    id: "cell-1".into(),
-                    x: 1.0,
-                    y: 2.0,
-                    w: 3.0,
-                    h: 4.0,
-                    cursor: Some(HitCursor::Pointer),
-                }],
-                ..SurfaceFrame::default()
-            },
+            generation: 3,
+            slot: 1,
+            seq: 8,
+            len: 128,
         };
         let wire = serde_json::to_value(&params).unwrap();
-        assert_eq!(wire["surfaceId"], "board");
-        assert!(wire.get("frame").is_none(), "帧内容平铺在 params 上");
-        assert_eq!(wire["hits"][0]["cursor"], "pointer");
-        assert!(wire.get("keys").is_none() && wire.get("ime").is_none());
-        assert_eq!(serde_json::from_value::<FrameSubmitParams>(wire).unwrap(), params);
+        assert_eq!(
+            wire,
+            serde_json::json!({
+                "surfaceId": "board",
+                "generation": 3,
+                "slot": 1,
+                "seq": 8,
+                "len": 128
+            })
+        );
+        assert_eq!(serde_json::from_value::<FrameSubmitSharedParams>(wire).unwrap(), params);
+        let request = FrameRegionRequest { min_bytes: 4096 };
+        assert_eq!(serde_json::to_value(request).unwrap(), serde_json::json!({ "minBytes": 4096 }));
     }
 
     #[test]

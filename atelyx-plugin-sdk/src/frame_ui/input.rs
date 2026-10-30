@@ -88,6 +88,8 @@ pub(crate) async fn handle(
             state.size = (*width, *height);
             // 面重新挂载（或真改尺寸）时宿主手里未必还有上一帧：同内容去重必须从这里失效
             state.submitted = None;
+            // 下一帧先按估算字宽交一版，拖动中的尺寸变化不必等量算往返
+            state.resize_pending = true;
         }
     }
     events

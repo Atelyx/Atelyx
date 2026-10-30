@@ -21,7 +21,7 @@ use atelyx_plugin_protocol::method::{
     UnregisterParams,
 };
 use atelyx_plugin_protocol::service::{self, CallParams, ResultParams};
-use atelyx_plugin_protocol::{frame, API_VERSION};
+use atelyx_plugin_protocol::{frame, frame_codec, API_VERSION};
 use base64::Engine;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -30,6 +30,7 @@ use serde_json::{json, Value};
 use crate::plugin_process::{EventSink, PluginProcessHost, ProcessEvent as HostEvent};
 
 use super::{capability, child_process, fs, http, log, shortcut};
+use super::frame_region::FrameRegionStore;
 use super::service_dir::{Forward, ServiceTarget};
 use super::{
     AuditRecord, Contribution, DialogKind, DialogRequest, HostRequest, LayoutSpecNode, PaddingSpec,
@@ -48,6 +49,12 @@ const BACKOFF_MAX: Duration = Duration::from_secs(30);
 const MAX_AUDIT: usize = 50;
 /// 握手截止：启动后超过此时长仍未收到 `initialize` 即判失败（不留「假运行中」）。
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+/// 尺寸变更兜底：新帧回执迟迟不来时，等这么久就把最新一笔尺寸再发一次。
+const RESIZE_FALLBACK: Duration = Duration::from_millis(150);
+/// 尺寸变更放弃：自最后一笔尺寸下发起超过此时长仍无新帧，判定该面不会再回帧，闸门就此撤掉。
+const RESIZE_GIVE_UP: Duration = Duration::from_secs(2);
+/// stdin 写失败记日志的最小间隔：帧拍 / 输入高频失败时不重复写满插件日志。
+const WRITE_ERROR_NOTE_INTERVAL: Duration = Duration::from_secs(5);
 
 /// 宿主自报信息（握手回应）。
 const HOST_NAME: &str = "Atelyx";
@@ -93,6 +100,12 @@ pub(crate) struct Instance {
     frames: Mutex<HashMap<String, Arc<frame::SurfaceFrame>>>,
     /// 声明了帧率的整面帧（面 id → 节拍）；随帧提交同步。
     surface_clocks: Mutex<HashMap<String, FrameClock>>,
+    /// 整面帧共享内存区域：握手时建，扩容换新，会话收尾释放。
+    frame_region: FrameRegionStore,
+    /// 各面的尺寸变更闸门：拖动中的中间尺寸只保留最新一笔，等新帧回执或兜底到点再放下一笔。
+    resize_gates: Mutex<HashMap<String, ResizeGate>>,
+    /// 上一次「stdin 写入失败」记日志的时刻（限频用）。
+    last_write_error: Mutex<Option<Instant>>,
     /// 已注册贡献点（按注册序）；id 插件内唯一，撤销按 id 摘除。
     contributions: Mutex<Vec<ContributionEntry>>,
     submits: AtomicU64,
@@ -150,6 +163,16 @@ struct ContributionEntry {
     padding: Option<PaddingSpec>,
 }
 
+/// 一个面的尺寸变更闸门：拖动中的中间尺寸只留最新一笔，等新帧回执或兜底到点再放下一笔。
+#[derive(Default)]
+struct ResizeGate {
+    pending: Option<(f32, f32)>,
+    /// 已发出的那笔的发出时刻；兜底定时器据此判断该重发还是撤闸。
+    in_flight: Option<Instant>,
+    /// 该面是否已有兜底定时器：有则后续派发只更新在途时刻，不再起线程。
+    timer_active: bool,
+}
+
 impl Instance {
     pub(crate) fn new(
         manifest: Manifest,
@@ -161,8 +184,9 @@ impl Instance {
         events: tokio::sync::broadcast::Sender<PluginEvent>,
     ) -> Arc<Self> {
         let log = Arc::new(log::LogSink::new(super::layout::log_file_in(&dir)));
+        let manifest_id = manifest.id.clone();
         Arc::new(Self {
-            id: manifest.id.clone(),
+            id: manifest_id.clone(),
             manifest,
             dir,
             state_dir,
@@ -186,6 +210,9 @@ impl Instance {
             undeclared_calls: AtomicU64::new(0),
             frames: Mutex::new(HashMap::new()),
             surface_clocks: Mutex::new(HashMap::new()),
+            frame_region: FrameRegionStore::new(&manifest_id),
+            resize_gates: Mutex::new(HashMap::new()),
+            last_write_error: Mutex::new(None),
             contributions: Mutex::new(Vec::new()),
             submits: AtomicU64::new(0),
             crash_times: Mutex::new(Vec::new()),
@@ -361,6 +388,8 @@ impl Instance {
             frames_dropped = !self.frames.lock().unwrap().is_empty();
             self.frames.lock().unwrap().clear();
             self.surface_clocks.lock().unwrap().clear();
+            self.resize_gates.lock().unwrap().clear();
+            self.frame_region.release();
             contributions_dropped = !self.contributions.lock().unwrap().is_empty();
             self.contributions.lock().unwrap().clear();
             // 默认布局声明属于本次会话：插件重启后重新声明，不让旧规格跨会话生效
@@ -376,8 +405,8 @@ impl Instance {
             self.fail_pending_shell_calls("插件已停止，宿主调用已取消");
             self.release_ai_tools();
         }
-        // 服务回落要向其余插件各写一次 stdin，不能持资源闸门：插件不读 stdin 时管道满会阻塞，
-        // 停用（壳 UI 线程触发）会连同界面一起卡住
+        // 服务回落要向其余插件各写一次 stdin：投递只入队不阻塞，放在闸门外是为缩短本实例持闸时间，
+        // 不与其它实例的写入路径互等
         self.release_services();
         // 界面与贡献变化广播给壳：壳据此停下已停插件界面的渲染并清掉菜单条目
         if frames_dropped {
@@ -1198,11 +1227,12 @@ impl Instance {
         params: &Value,
     ) -> Result<Value, RpcError> {
         match name {
-            handshake::INITIALIZE => self.on_initialize(params),
+            handshake::INITIALIZE => self.on_initialize(token, params),
             event::SUBSCRIBE => self.on_subscribe(params),
             method::view::REGISTER => self.on_register(token, params),
             method::view::UNREGISTER => self.on_unregister(token, params),
-            method::frame::SUBMIT => self.on_frame_submit(token, params),
+            method::frame::SUBMIT_SHARED => self.on_frame_submit(token, params),
+            method::frame::REGION => self.on_frame_region(token, params),
             method::markdown::PARSE => {
                 let p: method::MarkdownParams = parse(params)?;
                 p.validate().map_err(RpcError::failed)?;
@@ -1377,7 +1407,7 @@ impl Instance {
         }
     }
 
-    fn on_initialize(self: &Arc<Self>, params: &Value) -> Result<Value, RpcError> {
+    fn on_initialize(self: &Arc<Self>, token: u64, params: &Value) -> Result<Value, RpcError> {
         let p: InitializeParams = parse(params)?;
         if !handshake::compatible(p.api_version, API_VERSION) {
             let reason = format!("协议版本不匹配：插件 {}，宿主 {API_VERSION}", p.api_version);
@@ -1394,12 +1424,23 @@ impl Instance {
             "[握手] 完成（插件 {} v{}，apiVersion {}）",
             p.plugin.name, p.plugin.version, p.api_version
         ));
+        // 建区域与收尾同在资源闸门内：迟到的握手不得在收尾之后留下无人回收的映射与临时文件
+        let region = match self.with_session(token, || Ok::<_, String>(self.frame_region.ensure())) {
+            Ok(Ok(info)) => info,
+            Ok(Err(reason)) => {
+                let message = format!("帧共享内存准备失败：{reason}");
+                self.fail(message);
+                return Err(RpcError::failed("帧共享内存准备失败"));
+            }
+            Err(reason) => return Err(RpcError::failed(reason)),
+        };
         let result = InitializeResult {
             api_version: API_VERSION,
             host: HostInfo {
                 name: HOST_NAME.to_string(),
                 version: self.host_version.clone(),
             },
+            frame_region: region,
         };
         serde_json::to_value(result).map_err(|e| RpcError::failed(format!("握手应答序列化失败：{e}")))
     }
@@ -1481,16 +1522,34 @@ impl Instance {
         Ok(json!({}))
     }
 
-    /// 校验并接收整面帧：指令逐条、命中区与帧率一并校验；整发整换。
+    /// 从共享内存取帧并接收：内容解码、指令 / 命中区 / 帧率一并校验后整发整换。
     /// 存档与会话闸门同口径——收尾后到达的提交不得让已停插件的界面继续存活。
+    ///
+    /// 序号对不上（写入被后续提交覆盖 / 读取时正在写）时整帧丢弃并回 `applied: false`：
+    /// 这是并发路径的正常结果，不是插件错误，是否重发由插件按下一帧自行决定。
     fn on_frame_submit(self: &Arc<Self>, token: u64, params: &Value) -> Result<Value, RpcError> {
-        let p: frame::FrameSubmitParams = parse(params)?;
+        let p: frame::FrameSubmitSharedParams = parse(params)?;
         if p.surface_id.trim().is_empty() {
             return Err(RpcError::failed("surfaceId 不能为空"));
         }
-        p.frame.validate().map_err(RpcError::failed)?;
+        // 拷贝在会话闸门内（映射可能被收尾或扩容换掉），解码与校验在闸门外完成
+        let bytes = self
+            .with_session(token, || self.frame_region.read(&p))
+            .map_err(RpcError::failed)?;
+        let Some(bytes) = bytes else {
+            self.log_host_note(&format!(
+                "丢弃错位帧（面 {}，槽 {}，序号 {}）",
+                p.surface_id, p.slot, p.seq
+            ));
+            return Ok(json!({ "applied": false }));
+        };
+        let frame = frame_codec::decode(&bytes)
+            .map_err(|e| RpcError::failed(format!("帧解码失败：{e}")))?;
+        frame
+            .validate()
+            .map_err(|e| RpcError::failed(format!("帧内容不合法：{e}")))?;
         let surface_id = p.surface_id;
-        let submitted = Arc::new(p.frame);
+        let submitted = Arc::new(frame);
         self.with_session(token, || {
             let mut clocks = self.surface_clocks.lock().unwrap();
             // 帧率未变的面沿用原钟：帧序号与节拍相位不因内容更新而重置
@@ -1507,13 +1566,23 @@ impl Instance {
                 }
             }
             drop(clocks);
-            self.frames.lock().unwrap().insert(surface_id, submitted);
+            self.frames.lock().unwrap().insert(surface_id.clone(), submitted);
             self.submits.fetch_add(1, Ordering::Relaxed);
             Ok(())
         })
         .map_err(RpcError::failed)?;
+        self.resize_acked(&surface_id);
         let _ = self.events.send(PluginEvent::ViewSubmitted { id: self.id.clone() });
         Ok(json!({ "applied": true }))
+    }
+
+    /// 帧超出当前槽容量时换一份更大的区域；容量已够则原样返回（幂等）。
+    fn on_frame_region(&self, token: u64, params: &Value) -> Result<Value, RpcError> {
+        let p: frame::FrameRegionRequest = parse(params)?;
+        let info = self
+            .with_session(token, || self.frame_region.grow(p.min_bytes))
+            .map_err(RpcError::failed)?;
+        serde_json::to_value(info).map_err(|e| RpcError::failed(format!("区域描述序列化失败：{e}")))
     }
 
     /// 注册一个贡献点：id 插件内唯一、非空且不含 `:`（宿主的面标识以它作命名空间分隔）。
@@ -1660,12 +1729,107 @@ impl Instance {
         self.notify(method::collab::HOST_MESSAGE, params);
     }
 
-    pub(crate) fn notify_frame_input(&self, surface_id: &str, input: &frame::FrameInput) {
+    pub(crate) fn notify_frame_input(self: &Arc<Self>, surface_id: &str, input: &frame::FrameInput) {
+        let frame::FrameInput::Resize { width, height } = input else {
+            // 其它输入前先把积压的最新尺寸发出去：插件按新尺寸命中，不会拿旧尺寸处理新坐标
+            self.flush_pending_resize(surface_id);
+            self.send_frame_input(surface_id, input);
+            return;
+        };
+        self.on_resize(surface_id, *width, *height);
+    }
+
+    /// 把待发尺寸立即发出（不再等新帧回执或兜底定时器）。
+    fn flush_pending_resize(self: &Arc<Self>, surface_id: &str) {
+        let mut gates = self.resize_gates.lock().unwrap();
+        let Some(gate) = gates.get_mut(surface_id) else {
+            return;
+        };
+        if gate.pending.is_some() {
+            self.dispatch_resize(surface_id, gate);
+        }
+    }
+
+    fn send_frame_input(&self, surface_id: &str, input: &frame::FrameInput) {
         let params = frame::FrameInputParams {
             surface_id: surface_id.to_string(),
             input: input.clone(),
         };
         self.notify(method::frame::HOST_INPUT, &params);
+    }
+
+    /// 尺寸变更合流：只保留最新一笔，在途回执回来之前不再逐条下发（拖动中的中间尺寸没有意义）。
+    fn on_resize(self: &Arc<Self>, surface_id: &str, width: f32, height: f32) {
+        let mut gates = self.resize_gates.lock().unwrap();
+        let gate = gates.entry(surface_id.to_string()).or_default();
+        gate.pending = Some((width, height));
+        if gate.in_flight.is_none() {
+            self.dispatch_resize(surface_id, gate);
+        }
+    }
+
+    /// 发最新待发尺寸并挂兜底：新帧回执到来就提前放行下一笔，回执不来则到点重发。
+    fn dispatch_resize(self: &Arc<Self>, surface_id: &str, gate: &mut ResizeGate) {
+        let Some((width, height)) = gate.pending.take() else {
+            return;
+        };
+        gate.in_flight = Some(Instant::now());
+        let start_timer = !gate.timer_active;
+        gate.timer_active = true;
+        self.send_frame_input(surface_id, &frame::FrameInput::Resize { width, height });
+        if start_timer {
+            self.spawn_resize_timer(surface_id.to_string());
+        }
+    }
+
+    /// 每个面至多一条兜底线程：有在途尺寸时每 150 ms 看一次，闸门空下来即退出。
+    fn spawn_resize_timer(self: &Arc<Self>, surface_id: String) {
+        let weak = Arc::downgrade(self);
+        std::thread::spawn(move || loop {
+            std::thread::sleep(RESIZE_FALLBACK);
+            let Some(instance) = weak.upgrade() else {
+                return;
+            };
+            if !instance.resize_fallback(&surface_id) {
+                return;
+            }
+        });
+    }
+
+    /// 兜底一拍：同一笔在途尺寸未回帧时把最新待发尺寸补发出去。返回是否需要继续等。
+    fn resize_fallback(self: &Arc<Self>, surface_id: &str) -> bool {
+        let mut gates = self.resize_gates.lock().unwrap();
+        let Some(gate) = gates.get_mut(surface_id) else {
+            return false;
+        };
+        let Some(sent_at) = gate.in_flight else {
+            gate.timer_active = false;
+            return false;
+        };
+        if sent_at.elapsed() >= RESIZE_GIVE_UP {
+            // 该面一直不回新帧：最后一笔尺寸照发，闸门撤掉，下次尺寸变化重新开闸
+            let last = gate.pending.take();
+            gates.remove(surface_id);
+            drop(gates);
+            if let Some((width, height)) = last {
+                self.send_frame_input(surface_id, &frame::FrameInput::Resize { width, height });
+            }
+            return false;
+        }
+        if gate.pending.is_some() {
+            self.dispatch_resize(surface_id, gate);
+        }
+        true
+    }
+
+    /// 新帧落地即是尺寸的确认：在途那笔结束，有更新的尺寸就立刻发下一笔。
+    fn resize_acked(self: &Arc<Self>, surface_id: &str) {
+        let mut gates = self.resize_gates.lock().unwrap();
+        let Some(gate) = gates.get_mut(surface_id) else {
+            return;
+        };
+        gate.in_flight = None;
+        self.dispatch_resize(surface_id, gate);
     }
 
     /// 是否有面在收帧（壳据此决定要不要挂帧节拍：没有动画时不产生周期唤醒）。
@@ -1848,7 +2012,7 @@ impl Instance {
         self.write_envelope(envelope, what);
     }
 
-    /// 写一条信封到插件 stdin。进程已停时静默丢弃（对端已不在）；写失败只留诊断输出。
+    /// 写一条信封到插件 stdin。进程已停时静默丢弃（对端已不在）；写失败按限频记入插件日志。
     fn write_envelope(&self, envelope: Envelope, what: &str) {
         let pid = self.pid.load(Ordering::SeqCst) as u32;
         if pid == 0 {
@@ -1856,9 +2020,19 @@ impl Instance {
         }
         let mut line = envelope.to_line();
         line.push('\n');
-        if let Err(e) = self.process_host.write_stdin(pid, &line) {
-            eprintln!("[plugin {}] {what}写入失败：{e}", self.id);
+        if let Err(e) = self.process_host.send_stdin(pid, &line) {
+            self.note_write_failure(what, &e);
         }
+    }
+
+    fn note_write_failure(&self, what: &str, reason: &str) {
+        let mut last = self.last_write_error.lock().unwrap();
+        if last.is_some_and(|at| at.elapsed() < WRITE_ERROR_NOTE_INTERVAL) {
+            return;
+        }
+        *last = Some(Instant::now());
+        drop(last);
+        self.log_host_note(&format!("{what}未送达：{reason}"));
     }
 }
 
@@ -2043,6 +2217,8 @@ fn audit_subject<'a>(method_name: &str, params: &'a Value) -> (String, Option<&'
 mod tests {
     use super::*;
     use crate::vault::test_support::TempDir;
+    use atelyx_plugin_protocol::frame_codec;
+    use atelyx_plugin_protocol::frame_region;
     use atelyx_plugin_protocol::manifest::{Entry, Permission};
 
     #[allow(unused_imports)]
@@ -2879,24 +3055,90 @@ mod tests {
         assert_eq!(instance.status(), PluginStatus::Running);
     }
 
-    fn frame_params(hits: Value, fps: Option<u16>) -> Value {
-        let mut params = json!({ "surfaceId": "main", "commands": [], "hits": hits });
-        if let Some(fps) = fps {
-            params["fps"] = json!(fps);
-        }
-        params
-    }
-
-    /// 会话收尾清空整面帧（停用 / 崩溃 / 卸载后不得留下可渲染的旧帧）。
+    /// 会话收尾清空整面帧并释放共享内存（停用 / 崩溃 / 卸载后不得留下可渲染的旧帧）。
     #[test]
-    fn teardown_drops_frames() {
+    fn teardown_drops_frames_and_the_region() {
         let (_tmp, instance) = make_instance(Vec::new());
+        let info = instance.frame_region.ensure().unwrap();
+        let frame = frame::SurfaceFrame { fps: Some(60), ..frame::SurfaceFrame::default() };
+        let file = std::fs::OpenOptions::new().read(true).write(true).open(&info.path).unwrap();
+        let mut map = unsafe {
+            memmap2::MmapOptions::new().len(info.byte_len()).map_mut(&file).unwrap()
+        };
+        let payload = frame_codec::encode(&frame);
+        frame_region::write_slot(&mut map, &info, 0, 2, &payload).unwrap();
+        drop(map);
         instance
-            .dispatch(method::frame::SUBMIT, &frame_params(json!([]), Some(60)))
+            .dispatch(
+                method::frame::SUBMIT_SHARED,
+                &json!({
+                    "surfaceId": "main",
+                    "generation": info.generation,
+                    "slot": 0,
+                    "seq": 2,
+                    "len": payload.len(),
+                }),
+            )
             .unwrap();
+        assert!(instance.surface_frame("main").is_some());
+        assert!(instance.has_frame_ticks());
+
         instance.release_resources();
         assert!(instance.surface_frame("main").is_none());
         assert!(!instance.has_frame_ticks());
+        assert!(!std::path::Path::new(&info.path).exists(), "区域文件随会话释放");
+    }
+
+    /// 尺寸突发只保留最新一笔在途：回执放行下一笔，空闲后兜底线程退出。
+    #[test]
+    fn resize_burst_keeps_one_in_flight_and_the_latest_pending() {
+        let (_tmp, instance) = make_instance(Vec::new());
+        instance.on_resize("panel", 100.0, 100.0);
+        instance.on_resize("panel", 110.0, 120.0);
+        instance.on_resize("panel", 130.0, 140.0);
+        {
+            let gates = instance.resize_gates.lock().unwrap();
+            let gate = gates.get("panel").unwrap();
+            assert!(gate.in_flight.is_some(), "首笔立即发出");
+            assert_eq!(gate.pending, Some((130.0, 140.0)), "拖动中的中间尺寸被最新一笔覆盖");
+            assert!(gate.timer_active, "每个面至多一条兜底线程");
+        }
+
+        instance.resize_acked("panel");
+        {
+            let gates = instance.resize_gates.lock().unwrap();
+            let gate = gates.get("panel").unwrap();
+            assert!(gate.in_flight.is_some(), "回帧即放行最新一笔");
+            assert!(gate.pending.is_none());
+        }
+
+        instance.resize_acked("panel");
+        assert!(!instance.resize_fallback("panel"), "没有在途尺寸即停兜底");
+        assert!(
+            !instance.resize_gates.lock().unwrap().get("panel").unwrap().timer_active,
+            "空闲后定时器退出，下次尺寸变化重新起线程"
+        );
+    }
+
+    /// 超过放弃时限仍无新帧：最后一笔尺寸照发并撤闸，下次尺寸变化重新开闸。
+    #[test]
+    fn resize_gate_gives_up_after_the_deadline() {
+        let (_tmp, instance) = make_instance(Vec::new());
+        instance.on_resize("panel", 100.0, 100.0);
+        {
+            let mut gates = instance.resize_gates.lock().unwrap();
+            let gate = gates.get_mut("panel").unwrap();
+            gate.in_flight = Some(Instant::now() - RESIZE_GIVE_UP - Duration::from_millis(1));
+            gate.pending = Some((120.0, 130.0));
+        }
+        assert!(!instance.resize_fallback("panel"), "撤闸后兜底线程退出");
+        assert!(
+            !instance.resize_gates.lock().unwrap().contains_key("panel"),
+            "闸门撤掉，下次尺寸变化重建"
+        );
+
+        instance.on_resize("panel", 140.0, 150.0);
+        assert!(instance.resize_gates.lock().unwrap().get("panel").unwrap().in_flight.is_some());
     }
 
     /// 等在途工具调用落表（发起任务被调度后才登记）。

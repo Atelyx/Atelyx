@@ -10,6 +10,11 @@ use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 
+use atelyx_plugin_protocol::frame::FrameSubmitSharedParams;
+use atelyx_plugin_protocol::frame_codec;
+use atelyx_plugin_protocol::frame_region::{self, FrameRegionInfo};
+use memmap2::{MmapMut, MmapOptions};
+
 use crate::connection::PendingMap;
 use crate::protocol::envelope::{Envelope, RpcError};
 use crate::protocol::event::{SubscribeParams, SubscribeResult};
@@ -30,15 +35,83 @@ struct Inner {
     out_tx: mpsc::Sender<Envelope>,
     pending: PendingMap,
     next_id: AtomicU64,
+    /// 握手应答给出的帧共享内存；提交一律走它，未就绪时提交直接报错。
+    frame_region: Mutex<Option<Arc<tokio::sync::Mutex<FrameRegionState>>>>,
+}
+
+/// 当前区域与它的映射：映射按需重建，失败后下一次提交重试（宿主已换区时旧映射已不可用）。
+struct FrameRegionState {
+    info: FrameRegionInfo,
+    client: Option<FrameRegionClient>,
+}
+
+impl FrameRegionState {
+    fn client(&mut self) -> Result<&mut FrameRegionClient, RpcError> {
+        if self.client.is_none() {
+            let client = FrameRegionClient::attach(self.info.clone())
+                .map_err(|e| RpcError::failed(format!("帧共享内存映射失败：{e}")))?;
+            self.client = Some(client);
+        }
+        Ok(self.client.as_mut().expect("映射刚补齐"))
+    }
+}
+
+/// 帧共享内存的插件侧句柄：独占映射，写入端同时只占一槽。
+struct FrameRegionClient {
+    info: FrameRegionInfo,
+    map: MmapMut,
+    next_seq: u64,
+    next_slot: u32,
+}
+
+impl FrameRegionClient {
+    fn attach(info: FrameRegionInfo) -> Result<Self, String> {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&info.path)
+            .map_err(|e| format!("打开帧区域 {} 失败：{e}", info.path))?;
+        let map = unsafe { MmapOptions::new().len(info.byte_len()).map_mut(&file) }
+            .map_err(|e| format!("映射帧区域失败：{e}"))?;
+        frame_region::validate_region(&map, &info)?;
+        Ok(Self { info, map, next_seq: 2, next_slot: 0 })
+    }
+
+    /// 下一笔写入的槽位与序号（序号从 2 起、每次 +2，奇数留给写入中间态）。
+    fn next_position(&mut self) -> (u32, u64) {
+        let slot = self.next_slot % self.info.slot_count;
+        self.next_slot = self.next_slot.wrapping_add(1);
+        let seq = self.next_seq;
+        self.next_seq = self.next_seq.wrapping_add(2);
+        (slot, seq)
+    }
 }
 
 impl Context {
+    /// 接上握手应答里的帧共享内存：映射与区域头校验一次完成，此后首帧即可写。
+    pub(crate) fn attach_frame_region(&self, info: FrameRegionInfo) -> Result<(), String> {
+        let client = FrameRegionClient::attach(info.clone())?;
+        let state = FrameRegionState { info, client: Some(client) };
+        *self.inner.frame_region.lock().unwrap() = Some(Arc::new(tokio::sync::Mutex::new(state)));
+        Ok(())
+    }
+
+    fn frame_region(&self) -> Result<Arc<tokio::sync::Mutex<FrameRegionState>>, RpcError> {
+        self.inner
+            .frame_region
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| RpcError::failed("帧共享内存未就绪：连接未完成握手"))
+    }
+
     pub(crate) fn new(out_tx: mpsc::Sender<Envelope>) -> Self {
         Self {
             inner: Arc::new(Inner {
                 out_tx,
                 pending: Arc::new(Mutex::new(std::collections::HashMap::new())),
                 next_id: AtomicU64::new(1),
+                frame_region: Mutex::new(None),
             }),
         }
     }
@@ -138,16 +211,47 @@ impl Context {
     }
 
     /// 提交整面帧：整发整换该面的绘制指令、命中区与输入声明（空指令 = 清空绘制）。
+    ///
+    /// 帧写进握手时建立的共享内存区域，须先完成握手；帧超出当前槽容量时自动发一次 `frame.region`
+    /// 扩容并换映射，扩容失败按可读错误返回、下一次提交重试。同一 `Context` 上的提交串行送达宿主。
+    /// 回执 `applied = false` 表示帧在槽内被后续写入覆盖（宿主整帧丢弃），按需重发即可。
     pub async fn submit_frame(
         &self,
         surface_id: &str,
         frame: crate::protocol::frame::SurfaceFrame,
     ) -> Result<SubmitResult, RpcError> {
-        let params = crate::protocol::frame::FrameSubmitParams {
+        let region = self.frame_region()?;
+        let mut state = region.lock().await;
+        let payload = frame_codec::encode(&frame);
+        if payload.len() > state.info.slot_capacity as usize {
+            let info = self.grow_frame_region(payload.len()).await?;
+            // 宿主换区后旧代次不再可读：直接丢掉旧映射，按新描述重接（接不上则下次提交再试）
+            if info.generation != state.info.generation {
+                state.info = info;
+                state.client = None;
+            }
+        }
+        let info = state.info.clone();
+        let client = state.client()?;
+        let (slot, seq) = client.next_position();
+        frame_region::write_slot(&mut client.map, &info, slot, seq, &payload)
+            .map_err(|e| RpcError::failed(format!("写入帧共享内存失败：{e}")))?;
+        let params = FrameSubmitSharedParams {
             surface_id: surface_id.into(),
-            frame,
+            generation: info.generation,
+            slot,
+            seq,
+            len: payload.len() as u32,
         };
-        self.call_typed(method::frame::SUBMIT, &params).await
+        self.call_typed(method::frame::SUBMIT_SHARED, &params).await
+    }
+
+    /// 帧超出当前槽容量：请宿主换一份更大的区域并接上新映射。
+    async fn grow_frame_region(&self, min_bytes: usize) -> Result<FrameRegionInfo, RpcError> {
+        let min_bytes = u32::try_from(min_bytes)
+            .map_err(|_| RpcError::failed("帧过大：长度超出区域上限"))?;
+        let params = crate::protocol::frame::FrameRegionRequest { min_bytes };
+        self.call_typed(method::frame::REGION, &params).await
     }
 
     /// 注册一个贡献点，使其出现在宿主对应入口（面板 / 表格视图 / 设置页）。
@@ -205,7 +309,7 @@ impl Context {
     }
 
     /// 打开一个独立窗口承载自己的整面帧：`id` 插件内唯一且不得含 `:`，同时是该窗口面的
-    /// surfaceId（插件随后用 `frame.submit` 提交该面）。重复 id 或宿主不可开窗由宿主可读拒绝。
+    /// surfaceId（插件随后用 `frame.submitShared` 提交该面）。重复 id 或宿主不可开窗由宿主可读拒绝。
     pub async fn window_open(&self, params: WindowOpenParams) -> Result<(), RpcError> {
         self.call_unit(method::window::OPEN, &params).await
     }

@@ -161,7 +161,7 @@ pub mod http {
 
 pub mod doc {
     /// 用户打开了插件注册的领域文档类型文件（通知）。`surfaceId` 为宿主分配的实例面标识，
-    /// 插件据此以 `frame.submit` 提交该文档实例的界面。
+    /// 插件据此以 `frame.submitShared` 提交该文档实例的界面。
     pub const HOST_OPEN: &str = "host:doc.open";
     /// 文档实例已关闭 / 已切换走（通知）。插件此后不得再向该 surfaceId 提交帧。
     pub const HOST_CLOSE: &str = "host:doc.close";
@@ -169,8 +169,10 @@ pub mod doc {
 
 /// 面帧：整个面交给插件自绘，一帧即当前完整界面。
 pub mod frame {
-    /// 插件提交一份整面帧（指令清单 + 命中区 + 输入法光标 + 键盘 / 帧率声明）。整帧替换。
-    pub const SUBMIT: &str = "frame.submit";
+    /// 插件提交一份整面帧：内容写在共享内存槽里，params 只带槽位定位与校验信息。整帧替换。
+    pub const SUBMIT_SHARED: &str = "frame.submitShared";
+    /// 帧超出当前槽容量时请求宿主换一份更大的共享内存区域（应答 = 新区域描述）。
+    pub const REGION: &str = "frame.region";
     /// 宿主回发原始输入（通知）：指针 / 滚轮 / 按键 / 输入法 / 焦点 / 尺寸。
     pub const HOST_INPUT: &str = "host:frame.input";
     /// 宿主按面声明的帧率发帧拍（通知）：插件收到后提交该帧的内容。
@@ -279,7 +281,7 @@ pub struct SurfaceDetachedParams {
     pub surface_id: String,
 }
 
-/// 界面提交类方法的回执（`frame.submit` 等）：`applied` = 宿主已接受并生效。
+/// 界面提交类方法的回执（`frame.submitShared`）：`applied` = 宿主已接受并生效。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SubmitResult {
@@ -1169,7 +1171,7 @@ pub struct HttpResult {
 pub struct DocOpenParams {
     /// 仓库容器内的相对路径（本地仓库）或服务端内容路径（协作空间），与 vault 口径一致。
     pub path: String,
-    /// 宿主为本实例分配的面标识：插件据此以 `frame.submit` 提交该文档实例的界面。
+    /// 宿主为本实例分配的面标识：插件据此以 `frame.submitShared` 提交该文档实例的界面。
     pub surface_id: String,
 }
 

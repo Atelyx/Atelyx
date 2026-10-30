@@ -65,6 +65,15 @@ fn frame_text(runtime: &PluginRuntime, id: &str) -> String {
     out
 }
 
+/// 夹具自报的尺寸变更次数：宿主的尺寸合并看得见的效果就是它涨得比输入慢。
+fn resize_count(runtime: &PluginRuntime, id: &str) -> u64 {
+    frame_text(runtime, id)
+        .lines()
+        .find_map(|line| line.strip_prefix("尺寸变更："))
+        .and_then(|count| count.trim().parse().ok())
+        .expect("夹具应报告尺寸变更次数")
+}
+
 /// 轮询等帧文字含指定片段（帧按输入重发，最终内容即最后状态）。
 fn wait_text(runtime: &PluginRuntime, id: &str, needle: &str) {
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -94,14 +103,14 @@ fn frame_submit_and_raw_input_roundtrip() {
     assert_eq!(frame.fps, Some(4));
     let ids: Vec<&str> = frame.hits.iter().map(|hit| hit.id.as_str()).collect();
     assert_eq!(ids, ["surface", "inc", "clear", "field"]);
-    assert_eq!(frame.hit_at(20.0, 180.0), Some("inc"), "后声明的命中区优先");
+    assert_eq!(frame.hit_at(20.0, 200.0), Some("inc"), "后声明的命中区优先");
 
     // 点击：宿主按命中区填 id，插件按 id 自增并重发整帧
-    let hit = frame.hit_at(20.0, 180.0).map(str::to_string);
+    let hit = frame.hit_at(20.0, 200.0).map(str::to_string);
     send(
         &runtime,
         &id,
-        FrameInput::PointerDown { x: 20.0, y: 180.0, button: MouseButton::Left, hit },
+        FrameInput::PointerDown { x: 20.0, y: 200.0, button: MouseButton::Left, hit },
     );
     wait_text(&runtime, &id, "计数：1");
 
@@ -150,6 +159,15 @@ fn frame_submit_and_raw_input_roundtrip() {
     // 尺寸：插件按宿主上报的分配尺寸重排
     send(&runtime, &id, FrameInput::Resize { width: 400.0, height: 300.0 });
     wait_text(&runtime, &id, "尺寸：400x300");
+
+    // 尺寸突发：宿主只保留最新一笔尺寸，插件不必逐条重排
+    let before = resize_count(&runtime, &id);
+    for step in 1..=20 {
+        send(&runtime, &id, FrameInput::Resize { width: 400.0 + step as f32, height: 300.0 });
+    }
+    wait_text(&runtime, &id, "尺寸：420x300");
+    let seen = resize_count(&runtime, &id) - before;
+    assert!(seen <= 4, "突发期间只应收到少量最新尺寸，实际 {seen} 次");
 
     // 焦点：按下取焦、面外按下失焦都由宿主判定后回发
     send(&runtime, &id, FrameInput::Focus { focused: true });

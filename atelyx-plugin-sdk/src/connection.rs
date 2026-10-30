@@ -24,6 +24,8 @@ pub enum ConnectError {
     Handshake(String),
     #[error("协议版本不一致：插件 {plugin}，宿主 {host}")]
     VersionMismatch { plugin: u32, host: u32 },
+    #[error("帧共享内存不可用：{0}")]
+    FrameRegion(String),
     #[error("连接异常结束：{0}")]
     Abnormal(String),
 }
@@ -45,8 +47,8 @@ pub struct Connection {
 
 impl Connection {
     /// 以给定流建立连接并完成握手。返回连接与能力面上下文；插件随后的全部交互经 `ctx`。
-    /// 握手失败即返回错误，此时读写任务与通知分发任务都已启动——错误被吞掉重试会泄漏
-    /// 持有流的任务；常规用法（[`run_stdio`]）失败即进程退出，不存在重试。
+    /// 握手失败或帧共享内存映射失败都直接返回错误，此时读写任务与通知分发任务都已启动——
+    /// 错误被吞掉重试会泄漏持有流的任务；常规用法（[`run_stdio`]）失败即进程退出，不存在重试。
     pub async fn bind<R, W, H>(input: R, output: W, plugin: PluginInfo, handler: Arc<H>) -> Result<(Connection, Context), ConnectError>
     where
         R: AsyncRead + Unpin + Send + 'static,
@@ -62,7 +64,10 @@ impl Connection {
         let notify_tx = spawn_notify_worker(handler.clone(), ctx.clone());
         spawn_reader(input, ctx.clone(), notify_tx, closed_tx);
 
-        Self::handshake(&ctx, &plugin).await?;
+        let result = Self::handshake(&ctx, &plugin).await?;
+        // 首帧之前映射必须就绪：接不上就拒绝启动，不让插件带着「提交必失败」跑起来
+        ctx.attach_frame_region(result.frame_region)
+            .map_err(ConnectError::FrameRegion)?;
         Ok((Self { closed_rx }, ctx))
     }
 

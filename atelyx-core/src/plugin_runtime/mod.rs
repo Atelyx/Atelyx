@@ -7,6 +7,7 @@ mod ai_tools;
 mod capability;
 mod child_process;
 mod fs;
+mod frame_region;
 mod http;
 mod install;
 mod instance;
@@ -414,6 +415,7 @@ impl PluginRuntime {
     /// 建立运行时并显式给出宿主产品版本（`minHostVersion` 校验与握手自报都用它）。
     pub fn with_host_version(root: PathBuf, host_version: impl Into<String>) -> Arc<Self> {
         layout::sweep_temp(&root);
+        frame_region::sweep_stale_regions();
         let (events, _) = tokio::sync::broadcast::channel(256);
         let (host_requests, host_requests_rx) = tokio::sync::mpsc::unbounded_channel();
         let runtime = Arc::new(Self {
@@ -1184,7 +1186,7 @@ impl PluginRuntime {
     }
 
     /// 推一次帧节拍：给到期的画布与整面帧各发一条帧通知（壳的帧 tick 调）。
-    /// 不持实例表锁下发通知——写插件 stdin 可能阻塞，锁住会让别的调用排队。
+    /// 先在锁内取一份实例快照再下发，表锁不跟着每个插件的通知走。
     pub fn pump_frame_ticks(&self, now: std::time::Instant) {
         let instances: Vec<Arc<Instance>> = self.instances.lock().unwrap().values().cloned().collect();
         for instance in instances {

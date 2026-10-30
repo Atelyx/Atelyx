@@ -124,7 +124,8 @@ mod tests {
         // 运行时时序方法不占权限
         assert_eq!(permission_for("initialize"), None);
         assert_eq!(permission_for(method::view::REGISTER), None);
-        assert_eq!(permission_for(method::frame::SUBMIT), None, "整面帧是界面通道，不占权限声明");
+        assert_eq!(permission_for(method::frame::SUBMIT_SHARED), None, "整面帧是界面通道，不占权限声明");
+        assert_eq!(permission_for(method::frame::REGION), None, "帧区域扩容是界面通道，不占权限声明");
         assert_eq!(permission_for(method::window::UPDATE), Some(Permission::Window));
         assert_eq!(permission_for(method::window::SHOW), Some(Permission::Window));
         assert_eq!(permission_for(method::shortcut::QUERY), Some(Permission::Shortcuts));

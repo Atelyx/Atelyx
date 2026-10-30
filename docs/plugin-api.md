@@ -132,6 +132,8 @@ pub struct PluginInfo {
 pub struct InitializeResult {
     pub api_version: u32,
     pub host: HostInfo,
+    /// 整面帧共享内存区域：插件按它映射，此后每次提交只走这条通路。
+    pub frame_region: FrameRegionInfo,
 }
 ```
 
@@ -784,14 +786,16 @@ pub struct EdgesPadding {
 
 ## 5. 整面帧与输入事件
 
-`frame.submit` 一帧即该面的完整界面（指令 + 命中区 + 输入声明），宿主只按几何绘制并把原始输入经 `host:frame.input` 原样回发；插件按帧自行维护悬停 / 按下 / 焦点 / 滚动 / 文本编辑状态。
+`frame.submitShared` 一帧即该面的完整界面（指令 + 命中区 + 输入声明），帧内容写进共享内存槽位，信封只带槽位坐标；宿主只按几何绘制并把原始输入经 `host:frame.input` 原样回发，插件按帧自行维护悬停 / 按下 / 焦点 / 滚动 / 文本编辑状态。
 
 ```rust
 // atelyx-plugin-protocol/src/method.rs
 /// 面帧：整个面交给插件自绘，一帧即当前完整界面。
 pub mod frame {
-    /// 插件提交一份整面帧（指令清单 + 命中区 + 输入法光标 + 键盘 / 帧率声明）。整帧替换。
-    pub const SUBMIT: &str = "frame.submit";
+    /// 插件提交一份整面帧：内容写在共享内存槽里，params 只带槽位定位与校验信息。整帧替换。
+    pub const SUBMIT_SHARED: &str = "frame.submitShared";
+    /// 帧超出当前槽容量时请求宿主换一份更大的共享内存区域（应答 = 新区域描述）。
+    pub const REGION: &str = "frame.region";
     /// 宿主回发原始输入（通知）：指针 / 滚轮 / 按键 / 输入法 / 焦点 / 尺寸。
     pub const HOST_INPUT: &str = "host:frame.input";
     /// 宿主按面声明的帧率发帧拍（通知）：插件收到后提交该帧的内容。
@@ -952,12 +956,25 @@ pub const MAX_HIT_ID_LEN: usize = 64;
 
 ```rust
 // atelyx-plugin-protocol/src/frame.rs
-/// `frame.submit` 的 params：整面重建（一帧即当前完整界面，未提交过的面显示占位）。
+/// `frame.submitShared` 的 params：帧内容写在共享内存的 `slot` 槽里，信封只带定位与校验信息。
+/// 宿主按 `generation` 拒绝过期映射，按 `seq` / `len` 校验槽内内容是否仍是本次写入。
 #[serde(rename_all = "camelCase")]
-pub struct FrameSubmitParams {
+pub struct FrameSubmitSharedParams {
     pub surface_id: String,
-    #[serde(flatten)]
-    pub frame: SurfaceFrame,
+    pub generation: u64,
+    pub slot: u32,
+    pub seq: u64,
+    pub len: u32,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/frame.rs
+/// `frame.region` 的 params：帧超出当前槽容量时请求宿主换一份更大的区域。
+#[serde(rename_all = "camelCase")]
+pub struct FrameRegionRequest {
+    /// 本次至少要能放下的帧字节数；实际容量按倍增取到不小于它的值。
+    pub min_bytes: u32,
 }
 ```
 
@@ -1149,9 +1166,248 @@ pub struct MarkdownSpan {
 }
 ```
 
-## 6. 贡献点与窗口面
+## 6. 帧共享内存
 
-贡献点决定插件界面出现在哪里；`surfaceId` 即贡献 id（插件窗口与文档实例另有宿主分配的 id）。
+握手应答给出区域描述（路径 / 代次 / 槽数 / 槽容量）：插件把编码后的帧写进一个槽位，再以`frame.submitShared` 报告槽位坐标。区域文件全部小端：64 字节区域头（魔数 `ATLXFRM\0` / 版本 / 槽数 /槽容量 / 代次 / 头长 / 槽步长），每槽 16 字节槽头（序号 u64、长度 u32）+ 槽容量。写入顺序是「序号置奇 →写长度与内容 → 序号置偶」，序号取非零偶数、每次 +2；宿主首尾序号一致才认这一帧，撕裂或错位的整帧丢弃。帧超出槽容量时用 `frame.region` 请求扩容，宿主换新文件并递增代次，旧代次的提交一律拒绝。
+
+```rust
+// atelyx-plugin-protocol/src/frame_region.rs
+/// 一个共享内存区域的描述（握手应答与 `frame.region` 扩容应答同形）。
+#[serde(rename_all = "camelCase")]
+pub struct FrameRegionInfo {
+    /// 区域文件绝对路径（宿主建在系统临时目录；插件按此映射）。
+    pub path: String,
+    /// 代次：每次扩容或新会话换新文件并递增；提交时原样带回，宿主据此拒绝过期映射。
+    pub generation: u64,
+    pub slot_count: u32,
+    /// 每槽可写的最大帧字节数。
+    pub slot_capacity: u32,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/frame_region.rs
+/// 区域头魔数（8 字节）。
+pub const REGION_MAGIC: [u8; 8] = *b"ATLXFRM\0";
+```
+
+```rust
+// atelyx-plugin-protocol/src/frame_region.rs
+/// 区域布局版本：字段含义变化即递增，双端不一致按不可用报错。
+pub const REGION_VERSION: u32 = 1;
+```
+
+```rust
+// atelyx-plugin-protocol/src/frame_region.rs
+/// 区域头长度。
+pub const REGION_HEADER_SIZE: usize = 64;
+```
+
+```rust
+// atelyx-plugin-protocol/src/frame_region.rs
+/// 槽头长度。
+pub const SLOT_HEADER_SIZE: usize = 16;
+```
+
+```rust
+// atelyx-plugin-protocol/src/frame_region.rs
+/// 槽数：写入端同时只占一槽，其余留作宿主读取与紧邻两次提交的隔离。
+pub const SLOT_COUNT: u32 = 4;
+```
+
+```rust
+// atelyx-plugin-protocol/src/frame_region.rs
+/// 槽容量（字节）：帧只装绘制指令与图片来源，不装图片像素。
+pub const SLOT_CAPACITY: u32 = 256 * 1024;
+```
+
+```rust
+// atelyx-plugin-protocol/src/frame_region.rs
+/// 槽容量上限：超出即报可读错误，不再扩容。
+pub const MAX_SLOT_CAPACITY: u32 = 16 * 1024 * 1024;
+```
+
+```rust
+// atelyx-plugin-protocol/src/frame_region.rs
+/// 填区域头：调用方须已把文件扩到 [`FrameRegionInfo::byte_len`]，且槽位从全零起步（新建文件即全零，
+/// 槽序号从 2 起递增，全零槽不会被误认）。
+///
+/// 布局（全部小端）：64 字节区域头（魔数 / 版本 / 槽数 / 槽容量 / 代次 / 头长 / 槽步长）→
+/// 每槽 16 字节槽头（序号 u64、长度 u32）+ 定长槽容量。
+///
+/// 只写区域头，槽区不动；缓冲不足或槽数 / 槽容量越界即报错。
+pub fn init_region(map: &mut [u8], info: &FrameRegionInfo) -> Result<(), String> {
+    info.check_layout()?;
+    let len = info.byte_len();
+    if map.len() < len {
+        return Err(format!("区域缓冲不足：需要 {len} 字节，实际 {}", map.len()));
+    }
+    map[..REGION_HEADER_SIZE].fill(0);
+    map[MAGIC_OFFSET..MAGIC_OFFSET + REGION_MAGIC.len()].copy_from_slice(&REGION_MAGIC);
+    write_u32(map, VERSION_OFFSET, REGION_VERSION);
+    write_u32(map, SLOT_COUNT_OFFSET, info.slot_count);
+    write_u32(map, SLOT_CAPACITY_OFFSET, info.slot_capacity);
+    write_u64(map, GENERATION_OFFSET, info.generation);
+    write_u32(map, HEADER_SIZE_OFFSET, REGION_HEADER_SIZE as u32);
+    write_u32(map, SLOT_STRIDE_OFFSET, info.slot_stride() as u32);
+    Ok(())
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/frame_region.rs
+/// 校验区域头与描述一致（映射端开箱即用的一次把关）。
+///
+/// 缓冲不足、魔数 / 版本 / 代次不符或槽数与步长和描述不同即报错。
+pub fn validate_region(map: &[u8], info: &FrameRegionInfo) -> Result<(), String> {
+    info.check_layout()?;
+    let len = info.byte_len();
+    if map.len() < len {
+        return Err(format!("区域文件不足：需要 {len} 字节，实际 {}", map.len()));
+    }
+    if map[MAGIC_OFFSET..MAGIC_OFFSET + REGION_MAGIC.len()] != REGION_MAGIC {
+        return Err("区域魔数不符".into());
+    }
+    let version = read_u32(map, VERSION_OFFSET);
+    if version != REGION_VERSION {
+        return Err(format!("区域版本不符：文件 {version}，宿主 {REGION_VERSION}"));
+    }
+    let slot_count = read_u32(map, SLOT_COUNT_OFFSET);
+    let capacity = read_u32(map, SLOT_CAPACITY_OFFSET);
+    let generation = read_u64(map, GENERATION_OFFSET);
+    let header_size = read_u32(map, HEADER_SIZE_OFFSET);
+    let stride = read_u32(map, SLOT_STRIDE_OFFSET);
+    if generation != info.generation {
+        return Err(format!("区域代次不符：文件 {generation}，描述 {}", info.generation));
+    }
+    if slot_count != info.slot_count
+        || capacity != info.slot_capacity
+        || header_size as usize != REGION_HEADER_SIZE
+        || stride as usize != info.slot_stride()
+    {
+        return Err(format!(
+            "区域头与描述不一致：槽数 {slot_count}，槽容量 {capacity}，槽头 {header_size}，步长 {stride}"
+        ));
+    }
+    Ok(())
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/frame_region.rs
+/// 把一帧编码后的内容写进槽位：序号必须是大于零的偶数。
+///
+/// 区域头与描述不符、槽位越界、内容超出槽容量或序号非法即报错，槽内内容不动。
+pub fn write_slot(
+    map: &mut [u8],
+    info: &FrameRegionInfo,
+    slot: u32,
+    seq: u64,
+    payload: &[u8],
+) -> Result<(), String> {
+    validate_region(map, info)?;
+    if seq == 0 || seq % 2 != 0 {
+        return Err(format!("槽序号须为非零偶数：{seq}"));
+    }
+    let (header, content) =
+        info.slot_offsets(slot).ok_or_else(|| format!("槽位越界：{slot}"))?;
+    if payload.len() > info.slot_capacity as usize {
+        return Err(format!(
+            "帧超出槽容量：{} > {}",
+            payload.len(),
+            info.slot_capacity
+        ));
+    }
+    // 先置奇数宣告写入中，再写长度与内容；释放栅栏确保读者看到偶数序号时内容已落地
+    write_u64(map, header + SLOT_SEQ_OFFSET, seq - 1);
+    fence(Ordering::SeqCst);
+    write_u32(map, header + SLOT_LEN_OFFSET, payload.len() as u32);
+    map[content..content + payload.len()].copy_from_slice(payload);
+    fence(Ordering::Release);
+    write_u64(map, header + SLOT_SEQ_OFFSET, seq);
+    Ok(())
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/frame_region.rs
+/// 读一槽内容：序号对得上且首尾一致才返回 `Some`。
+///
+/// 写入进行中 / 被后续写入覆盖返回 `None`（按错位丢弃）；区域头与描述不符、序号非法、槽位或
+/// 长度越界、槽内长度与提交不符即报错。
+pub fn read_slot(
+    map: &[u8],
+    info: &FrameRegionInfo,
+    slot: u32,
+    seq: u64,
+    len: u32,
+) -> Result<Option<Vec<u8>>, String> {
+    validate_region(map, info)?;
+    if seq == 0 || seq % 2 != 0 {
+        return Err(format!("槽序号须为非零偶数：{seq}"));
+    }
+    let (header, content) =
+        info.slot_offsets(slot).ok_or_else(|| format!("槽位越界：{slot}"))?;
+    if len > info.slot_capacity {
+        return Err(format!("帧长度越界：{len} > {}", info.slot_capacity));
+    }
+    let before = read_u64(map, header + SLOT_SEQ_OFFSET);
+    if before != seq || before % 2 != 0 {
+        return Ok(None);
+    }
+    fence(Ordering::Acquire);
+    let stored_len = read_u32(map, header + SLOT_LEN_OFFSET);
+    let payload = map[content..content + len as usize].to_vec();
+    fence(Ordering::Acquire);
+    let after = read_u64(map, header + SLOT_SEQ_OFFSET);
+    if after != before {
+        // 读的过程中被后续写入整槽覆盖：内容已不可信，按错位丢弃（不是插件错误）
+        return Ok(None);
+    }
+    if stored_len != len {
+        return Err(format!("槽内长度与提交不符：槽内 {stored_len}，提交 {len}"));
+    }
+    Ok(Some(payload))
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/frame_codec.rs
+/// 把一帧编成字节序列。
+pub fn encode(frame: &SurfaceFrame) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&MAGIC);
+    out.push(VERSION);
+    encode_frame(&mut out, frame);
+    out
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/frame_codec.rs
+/// 从字节序列还原一帧：魔数 / 版本 / 长度对不上或内容截断都返回可读错误。
+pub fn decode(bytes: &[u8]) -> Result<SurfaceFrame, String> {
+    if bytes.len() < MAGIC.len() + 1 {
+        return Err("帧编码过短".into());
+    }
+    if bytes[..MAGIC.len()] != MAGIC {
+        return Err("帧编码魔数不符".into());
+    }
+    if bytes[MAGIC.len()] != VERSION {
+        return Err(format!("帧编码版本不符：{}", bytes[MAGIC.len()]));
+    }
+    let mut reader = Reader { buf: bytes, pos: MAGIC.len() + 1 };
+    let frame = decode_frame(&mut reader)?;
+    if reader.pos != bytes.len() {
+        return Err(format!("帧编码尾部有多余字节：{}", bytes.len() - reader.pos));
+    }
+    Ok(frame)
+}
+```
+
+## 7. 贡献点与窗口面
+
+贡献点决定插件界面出现在哪里；`surfaceId` 即贡献 id（文档实例另由宿主分配 id，插件窗口面由 `window.open` 的 `id` 指定）。
 
 ```rust
 // atelyx-plugin-protocol/src/method.rs
@@ -1201,7 +1457,7 @@ pub struct SurfaceDetachedParams {
 
 ```rust
 // atelyx-plugin-protocol/src/method.rs
-/// 界面提交类方法的回执（`frame.submit` 等）：`applied` = 宿主已接受并生效。
+/// 界面提交类方法的回执（`frame.submitShared`）：`applied` = 宿主已接受并生效。
 #[serde(rename_all = "camelCase")]
 pub struct SubmitResult {
     pub applied: bool,
@@ -1339,7 +1595,7 @@ pub struct WindowDragParams {
 }
 ```
 
-## 7. 默认布局
+## 8. 默认布局
 
 插件声明自己期望的默认布局：宿主在插件首次启用时摆进当前场景，之后改名 / 删除都不再补回。`views` 填视图 kind（本插件贡献为 `plugin:<插件 id>:<贡献 id>`）。
 
@@ -1413,7 +1669,7 @@ pub const MAX_PANELS: usize = 32;
 pub const MAX_VIEWS_PER_PANEL: usize = 16;
 ```
 
-## 8. 能力面方法名
+## 9. 能力面方法名
 
 每个模块是一类能力面的方法名常量，与 `permissions` 里的能力声明一一对应；声明用于公示与审计，不是拦截：插件是原生进程，能力面上的限制只作便利层语义。
 
@@ -1585,7 +1841,7 @@ pub mod http {
 // atelyx-plugin-protocol/src/method.rs
 pub mod doc {
     /// 用户打开了插件注册的领域文档类型文件（通知）。`surfaceId` 为宿主分配的实例面标识，
-    /// 插件据此以 `frame.submit` 提交该文档实例的界面。
+    /// 插件据此以 `frame.submitShared` 提交该文档实例的界面。
     pub const HOST_OPEN: &str = "host:doc.open";
     /// 文档实例已关闭 / 已切换走（通知）。插件此后不得再向该 surfaceId 提交帧。
     pub const HOST_CLOSE: &str = "host:doc.close";
@@ -1688,7 +1944,7 @@ pub mod collab {
 }
 ```
 
-## 9. 能力面负载：文件、进程与系统服务
+## 10. 能力面负载：文件、进程与系统服务
 
 上表方法的 params / result 形态（`path` 在 `fs` 面是绝对路径，在 `vault` 面是仓库相对路径）。
 
@@ -2068,7 +2324,7 @@ pub struct HttpResult {
 }
 ```
 
-## 10. 能力面负载：文档与对话
+## 11. 能力面负载：文档与对话
 
 领域文档实例、AI 对话与工具桥的负载形态。
 
@@ -2078,7 +2334,7 @@ pub struct HttpResult {
 pub struct DocOpenParams {
     /// 仓库容器内的相对路径（本地仓库）或服务端内容路径（协作空间），与 vault 口径一致。
     pub path: String,
-    /// 宿主为本实例分配的面标识：插件据此以 `frame.submit` 提交该文档实例的界面。
+    /// 宿主为本实例分配的面标识：插件据此以 `frame.submitShared` 提交该文档实例的界面。
     pub surface_id: String,
 }
 ```
@@ -2388,7 +2644,7 @@ pub struct ToolResultParams {
 }
 ```
 
-## 11. 能力面负载：表格
+## 12. 能力面负载：表格
 
 表格面读写当前打开的表格；真源在宿主会话，插件不得旁路读写 `.atb`。
 
@@ -2522,7 +2778,7 @@ pub struct TableSetCellImageParams {
 }
 ```
 
-## 12. 能力面负载：日程与活动
+## 13. 能力面负载：日程与活动
 
 日程读写与按天活动统计；两者都取自当前仓库（本地文件 / 空间团队 meta），与宿主视图同一真源。
 
@@ -2622,7 +2878,7 @@ pub struct HistoryActivityResult {
 }
 ```
 
-## 13. 能力面负载：托盘与协作
+## 14. 能力面负载：托盘与协作
 
 系统托盘条目与空间内插件间消息的负载形态；两类能力的可用性都随宿主平台与容器类型而变。
 
@@ -2737,7 +2993,7 @@ pub struct CollabMessageParams {
 }
 ```
 
-## 14. 宿主广播事件
+## 15. 宿主广播事件
 
 插件经 `event.subscribe` 声明订阅的事件名与载荷；未上表的名字宿主拒绝订阅。
 

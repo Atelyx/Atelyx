@@ -58,9 +58,9 @@ pub struct PluginProcessHost {
     /// 在册的直接子进程 pid（pid 即它自建的进程组 id）。仅 Unix 用：退出前按组结束。
     #[cfg(unix)]
     groups: Mutex<HashSet<u32>>,
-    /// 在册进程的 stdin 写端（pid → 管道写端）。进程退出时由守望线程按**句柄身份**摘除（防 pid
-    /// 复用误摘新进程的条目）；写路径只在取句柄时短暂持有此锁，阻塞 I/O 持的是条目自己的锁。
-    stdins: Mutex<HashMap<u32, Arc<Mutex<ChildStdin>>>>,
+    /// 在册进程的 stdin 投递口（pid → 写线程入口）。进程退出时由守望线程按**句柄身份**摘除
+    /// （防 pid 复用误摘新进程的条目）；写入一律入队，真正的阻塞 I/O 在每进程自己的写线程上。
+    stdins: Mutex<HashMap<u32, Arc<Outbox>>>,
     /// 已开始退出收尾：此后的启动一律拒绝，否则新进程会落在收尾之后、逃过清理。
     ///
     /// 正常退出路径上窗口已全部销毁、不会再有插件代码运行，此标志是防「收尾与新启动交叉」的
@@ -97,10 +97,7 @@ impl PluginProcessHost {
         let pid = child.id();
         // 守望线程只持 Weak：强引用归注册表与写入路径——否则 close_stdin（仅从注册表摘除）后
         // 守望线程的强引用仍拖着写端，对端永远等不到 EOF
-        let stdin_entry = child
-            .stdin
-            .take()
-            .map(|stdin| Arc::new(Mutex::new(stdin)));
+        let stdin_entry = child.stdin.take().map(|stdin| Arc::new(spawn_stdin_writer(pid, stdin)));
         if let Some(entry) = &stdin_entry {
             self.stdins.lock().unwrap().insert(pid, entry.clone());
         }
@@ -218,29 +215,53 @@ impl PluginProcessHost {
     #[cfg(not(unix))]
     fn release(&self, _pid: u32) {}
 
-    /// 向在册进程写入 stdin。
+    /// 向在册进程写入 stdin 并等写线程确认（调用方需要知道这一笔是否真的写进去了）。
     ///
-    /// 取句柄后立即释放注册表锁，阻塞 I/O 只持**条目自己的锁**——对端不读而管道写满时
-    /// `write_all` 会无限期阻塞，绝不能让这层阻塞扩散到注册表（否则其它进程的启动/收尾全卡）。
-    /// 同一进程的并发写按条目锁串行（保序）；对已退出进程写入按注册表缺席/写错误两条路径报可读错误。
+    /// 同一进程的并发写按投递序串行；队列满（插件长期不读）时在这里等空位，形成背压。
+    /// 界面路径一律走不等回执的 [`send_stdin`]，不会被慢插件拖住。
     pub fn write_stdin(&self, pid: u32, data: &str) -> Result<(), String> {
-        let entry = {
-            let stdins = self.stdins.lock().unwrap();
-            stdins.get(&pid).cloned()
-        };
-        let Some(entry) = entry else {
-            return Err(format!("进程 {pid} 不存在或 stdin 已关闭，无法写入"));
-        };
-        let result = entry
-            .lock()
-            .unwrap()
-            .write_all(data.as_bytes())
-            .map_err(|e| format!("写入进程 {pid} 的 stdin 失败：{e}"));
-        if result.is_err() {
-            // 写失败（对端已关、管道断开）按句柄身份摘除，让后续写入落到「不存在」同一条错误路径
+        let entry = self.outbox(pid)?;
+        let (ack_tx, ack_rx) = std::sync::mpsc::channel();
+        let pending = Outgoing { line: data.to_string(), ack: Some(ack_tx) };
+        if entry.tx.send(pending).is_err() {
             self.remove_stdin_if(pid, &entry);
+            return Err(format!("进程 {pid} 的 stdin 已关闭，无法写入"));
         }
-        result
+        match ack_rx.recv() {
+            Ok(result) => {
+                if result.is_err() {
+                    // 写失败（对端已关、管道断开）按句柄身份摘除，让后续写入落到「不存在」同一条错误路径
+                    self.remove_stdin_if(pid, &entry);
+                }
+                result
+            }
+            Err(_) => {
+                self.remove_stdin_if(pid, &entry);
+                Err(format!("写入进程 {pid} 的 stdin 失败：写线程已退出"))
+            }
+        }
+    }
+
+    /// 投递一笔 stdin 写入后立即返回（不等写线程）：宿主下发帧拍 / 输入通知走这条路径，
+    /// 插件暂时不读输入时也不会拖住调用线程；队列满则丢弃本笔并报错，由调用方留痕。
+    pub fn send_stdin(&self, pid: u32, data: &str) -> Result<(), String> {
+        let entry = self.outbox(pid)?;
+        match entry.tx.try_send(Outgoing { line: data.to_string(), ack: None }) {
+            Ok(()) => Ok(()),
+            // 队列满 = 插件长期不读 stdin：丢掉这笔记下来，不把宿主内存堆成无界积压
+            Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                Err(format!("进程 {pid} 的 stdin 积压，通知未投递"))
+            }
+            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                self.remove_stdin_if(pid, &entry);
+                Err(format!("进程 {pid} 的 stdin 已关闭，无法写入"))
+            }
+        }
+    }
+
+    fn outbox(&self, pid: u32) -> Result<Arc<Outbox>, String> {
+        let entry = self.stdins.lock().unwrap().get(&pid).cloned();
+        entry.ok_or_else(|| format!("进程 {pid} 不存在或 stdin 已关闭，无法写入"))
     }
 
     /// 关闭在册进程的 stdin（对端读到 EOF，长驻 helper 据此知道输入结束）。
@@ -253,7 +274,7 @@ impl PluginProcessHost {
     ///
     /// 按句柄身份而不是按 pid 盲摘：Unix 上 `wait` 收尸后 pid 立即可被复用，若新进程恰好拿到
     /// 同一 pid 并已入册，旧守望线程按 pid 摘除会砍掉**新进程**的写端。
-    fn remove_stdin_if(&self, pid: u32, entry: &Arc<Mutex<ChildStdin>>) {
+    fn remove_stdin_if(&self, pid: u32, entry: &Arc<Outbox>) {
         let mut stdins = self.stdins.lock().unwrap();
         if stdins
             .get(&pid)
@@ -420,6 +441,48 @@ fn discard(child: &mut Child) {
     let _ = child.wait();
 }
 
+/// 队列上限：插件长期不读 stdin 时最多积压这么多条，超出后即发即忘的通知被丢弃并留痕。
+const OUTBOX_CAPACITY: usize = 1024;
+
+/// stdin 投递口：写线程独占管道写端，调用方只入队（需要确认时带上应答通道）。
+struct Outbox {
+    tx: std::sync::mpsc::SyncSender<Outgoing>,
+}
+
+struct Outgoing {
+    line: String,
+    ack: Option<std::sync::mpsc::Sender<Result<(), String>>>,
+}
+
+/// 起一个写线程：同一进程的写入按投递序串行，管道写满时阻塞的也只有这条线程。
+/// 写入失败即退出并丢弃接收端，此后投递方立刻拿到「已关闭」，不会静默丢消息。
+/// 投递口全部释放（`close_stdin` 或进程收尾）后线程退出，写端随之 drop，对端读到 EOF。
+fn spawn_stdin_writer(pid: u32, mut stdin: ChildStdin) -> Outbox {
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Outgoing>(OUTBOX_CAPACITY);
+    std::thread::spawn(move || {
+        for msg in rx {
+            let result = stdin
+                .write_all(msg.line.as_bytes())
+                .and_then(|_| stdin.flush())
+                .map_err(|e| format!("写入进程 {pid} 的 stdin 失败：{e}"));
+            match result {
+                Ok(()) => {
+                    if let Some(ack) = msg.ack {
+                        let _ = ack.send(Ok(()));
+                    }
+                }
+                Err(e) => {
+                    if let Some(ack) = msg.ack {
+                        let _ = ack.send(Err(e));
+                    }
+                    break;
+                }
+            }
+        }
+    });
+    Outbox { tx }
+}
+
 /// 进程守望：等进程结束 → 处置在册条目 → 等输出读完 → 上报退出。
 ///
 /// 退出上报排在输出之后：聚合型调用（`ctx.shell.exec`）以退出事件为结果落地时刻，
@@ -428,7 +491,7 @@ fn discard(child: &mut Child) {
 fn supervise(
     mut child: Child,
     pid: u32,
-    stdin_entry: Option<std::sync::Weak<Mutex<ChildStdin>>>,
+    stdin_entry: Option<std::sync::Weak<Outbox>>,
     sink: EventSink,
     host: Arc<PluginProcessHost>,
 ) {
@@ -841,6 +904,31 @@ mod tests {
         assert_eq!(wait_terminated(&seen), Some(0), "进程应已退出");
         let err = host.write_stdin(pid, "late\n").expect_err("退出后写入 stdin 必须报错");
         assert!(err.contains(&pid.to_string()), "错误原因应指明 pid：{err}");
+    }
+
+    /// 插件长期不读 stdin：队列填满后投递立即报错，不把宿主内存堆成无界积压。
+    #[test]
+    fn stdin_backlog_reports_full_queue() {
+        let host = Arc::new(PluginProcessHost::new());
+        let (seen, sink) = event_recorder();
+        let (program, args) = long_running_program();
+        let pid = host.spawn(&program, &args, None, None, sink).expect("启动进程失败");
+
+        // 先塞一笔大到写线程会卡在管道上的数据，后续小消息就只能留在队列里
+        let big = "x".repeat(1024 * 1024);
+        host.send_stdin(pid, &big).expect("首笔应进入队列");
+        let mut full = None;
+        for _ in 0..2048 {
+            if let Err(err) = host.send_stdin(pid, "tick\n") {
+                full = Some(err);
+                break;
+            }
+        }
+        let err = full.expect("投递足够多后队列应满");
+        assert!(err.contains("积压"), "错误应说明积压：{err}");
+
+        let _ = host.kill_process_tree(pid);
+        assert!(wait_any_terminated(&seen), "收尾应结束进程");
     }
 
     /// 长时间运行、只能被外部终止的进程（供单树终止测试）。

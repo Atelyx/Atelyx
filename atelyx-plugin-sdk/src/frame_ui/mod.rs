@@ -33,6 +33,15 @@ const MAX_REBUILD_PASSES: usize = 3;
 /// Markdown 解析缓存条数上限：超出即按「本帧用到」收敛，避免长期运行的插件按历史内容累积。
 const MAX_MARKDOWN_CACHE: usize = 8;
 
+fn check_frame(
+    surface_id: &str,
+    frame: &atelyx_plugin_protocol::frame::SurfaceFrame,
+) -> Result<(), RpcError> {
+    frame
+        .validate()
+        .map_err(|err| RpcError::failed(format!("面 {surface_id} 的帧不合法：{err}")))
+}
+
 /// 原始输入解释出的语义事件。
 #[derive(Clone, Debug, PartialEq)]
 pub enum UiEvent {
@@ -131,6 +140,14 @@ impl FrameUi {
                 self.state.markdown.retain(|content, _| out.markdown_used.contains(content));
             }
             self.state.prune();
+            // 尺寸刚变且本帧还有缺项：先按估算字宽交一帧（拖动跟手），量算补齐后再交精确帧
+            if std::mem::take(&mut self.state.resize_pending)
+                && (out.misses || !out.markdown_misses.is_empty())
+            {
+                check_frame(surface_id, &out.frame)?;
+                self.submit_if_changed(ctx, surface_id, out.frame.clone())
+                    .await?;
+            }
             if !out.markdown_misses.is_empty() {
                 for content in out.markdown_misses {
                     match ctx.markdown(&content).await {
@@ -157,23 +174,35 @@ impl FrameUi {
                 passes += 1;
                 continue;
             }
-            out.frame
-                .validate()
-                .map_err(|err| RpcError::failed(format!("面 {surface_id} 的帧不合法：{err}")))?;
-            // 同内容帧不再提交：宿主每收一帧都要重投影并整窗重绘，指针移动这类「没改画面」的输入
-            // 会按设备上报频率把宿主拖到重绘风暴里
-            let same = self
-                .state
-                .submitted
-                .as_ref()
-                .is_some_and(|(id, frame)| id == surface_id && *frame == out.frame);
-            if same {
-                return Ok(());
-            }
-            ctx.submit_frame(surface_id, out.frame.clone()).await?;
-            self.state.submitted = Some((surface_id.to_string(), out.frame));
+            check_frame(surface_id, &out.frame)?;
+            self.submit_if_changed(ctx, surface_id, out.frame).await?;
             return Ok(());
         }
+    }
+
+    /// 同内容帧不再提交：宿主每收一帧都要重投影并整窗重绘，指针移动这类「没改画面」的输入
+    /// 会按设备上报频率把宿主拖到重绘风暴里。
+    ///
+    /// 只有宿主确认 `applied` 才记为已提交：错位被丢的帧不能挡住后续同内容提交。
+    async fn submit_if_changed(
+        &mut self,
+        ctx: &Context,
+        surface_id: &str,
+        frame: atelyx_plugin_protocol::frame::SurfaceFrame,
+    ) -> Result<(), RpcError> {
+        let same = self
+            .state
+            .submitted
+            .as_ref()
+            .is_some_and(|(id, submitted)| id == surface_id && submitted == &frame);
+        if same {
+            return Ok(());
+        }
+        let result = ctx.submit_frame(surface_id, frame.clone()).await?;
+        if result.applied {
+            self.state.submitted = Some((surface_id.to_string(), frame));
+        }
+        Ok(())
     }
 
     /// 主题只取一次：宿主主题变化没有通知通道，插件可在面重新挂载时重建 `FrameUi` 重取。
@@ -211,7 +240,14 @@ mod tests {
 
     use atelyx_plugin_protocol::paint::{ColorToken, DrawCommand, ImageFit, ImageSource, PaintColor};
     use atelyx_plugin_protocol::envelope::Envelope;
-    use atelyx_plugin_protocol::frame::{FrameInput, FrameSubmitParams, HitCursor, SurfaceFrame};
+    use atelyx_plugin_protocol::frame::{
+        FrameRegionRequest, FrameSubmitSharedParams, FrameInput, HitCursor, SurfaceFrame,
+    };
+    use atelyx_plugin_protocol::frame_codec;
+    use atelyx_plugin_protocol::frame_region::{self, FrameRegionInfo, SLOT_CAPACITY};
+    use memmap2::{Mmap, MmapOptions};
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use atelyx_plugin_protocol::method::{
         self, FontSizes, MeasureBatchParams, MeasureTextResult, Radii, TextPayload, ThemeColors, ThemeResult,
     };
@@ -229,19 +265,66 @@ mod tests {
         clipboard: Arc<Mutex<String>>,
         frames: Vec<SurfaceFrame>,
         requests: Vec<String>,
+        region: FrameRegionInfo,
+        region_map: Option<Mmap>,
+        region_paths: Vec<PathBuf>,
+    }
+
+    /// 测试用的共享内存区域：真文件 + 真映射，读写路径与宿主一致。
+    fn test_region(capacity: u32, generation: u64) -> (FrameRegionInfo, Mmap, PathBuf) {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "atelyx-sdk-test-{}-{}.bin",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let info = FrameRegionInfo {
+            path: path.to_string_lossy().into_owned(),
+            generation,
+            ..FrameRegionInfo::new_layout(capacity)
+        };
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .expect("创建测试区域文件失败");
+        file.set_len(info.byte_len() as u64).expect("设置测试区域长度失败");
+        let mut map = unsafe { MmapOptions::new().len(info.byte_len()).map_mut(&file).expect("映射测试区域失败") };
+        frame_region::init_region(&mut map, &info).expect("初始化测试区域头失败");
+        map.flush().expect("刷写测试区域头失败");
+        drop(map);
+        let map = unsafe { MmapOptions::new().len(info.byte_len()).map(&file).expect("映射测试区域失败") };
+        (info, map, path)
+    }
+
+    impl Drop for Bench {
+        fn drop(&mut self) {
+            // 先释放测试侧映射再删文件；删不掉由系统清理临时目录
+            self.region_map.take();
+            for path in &self.region_paths {
+                let _ = std::fs::remove_file(path);
+            }
+        }
     }
 
     impl Bench {
         async fn new(width: f32, height: f32) -> Self {
             let (tx, rx) = mpsc::channel(64);
+            let (region, region_map, path) = test_region(SLOT_CAPACITY, 1);
+            let ctx = Context::new(tx);
+            ctx.attach_frame_region(region.clone()).expect("测试区域应可接上");
             let mut bench = Self {
-                ctx: Context::new(tx),
+                ctx,
                 rx,
                 ui: Arc::new(tokio::sync::Mutex::new(FrameUi::new())),
                 values: Arc::default(),
                 clipboard: Arc::default(),
                 frames: Vec::new(),
                 requests: Vec::new(),
+                region,
+                region_map: Some(region_map),
+                region_paths: vec![path],
             };
             // 面尺寸只在宿主首次绘制时上报，测试里直接喂一次 Resize
             bench.event(FrameInput::Resize { width, height }).await;
@@ -335,11 +418,34 @@ mod tests {
                         .collect();
                     serde_json::json!({ "sizes": sizes })
                 }
-                m if m == method::frame::SUBMIT => {
-                    let params: FrameSubmitParams = serde_json::from_value(request.params).unwrap();
-                    params.frame.validate().expect("SDK 出帧必须合法");
-                    self.frames.push(params.frame);
+                m if m == method::frame::SUBMIT_SHARED => {
+                    let params: FrameSubmitSharedParams = serde_json::from_value(request.params).unwrap();
+                    assert_eq!(params.generation, self.region.generation, "提交须带当前代次");
+                    let bytes = frame_region::read_slot(
+                        self.region_map.as_ref().unwrap(),
+                        &self.region,
+                        params.slot,
+                        params.seq,
+                        params.len,
+                    )
+                    .expect("槽位与长度应合法")
+                    .expect("提交已返回，槽内内容须完整");
+                    let frame = frame_codec::decode(&bytes).expect("槽内应是合法帧编码");
+                    frame.validate().expect("SDK 出帧必须合法");
+                    self.frames.push(frame);
                     serde_json::json!({ "applied": true })
+                }
+                m if m == method::frame::REGION => {
+                    let req: FrameRegionRequest = serde_json::from_value(request.params).unwrap();
+                    let mut capacity = self.region.slot_capacity;
+                    while capacity < req.min_bytes {
+                        capacity = capacity.saturating_mul(2);
+                    }
+                    let (info, map, path) = test_region(capacity, self.region.generation + 1);
+                    self.region_paths.push(path);
+                    self.region = info.clone();
+                    self.region_map = Some(map);
+                    serde_json::to_value(info).unwrap()
                 }
                 m if m == method::clipboard::READ_TEXT => {
                     serde_json::to_value(TextPayload { text: self.clipboard.lock().unwrap().clone() }).unwrap()
@@ -630,13 +736,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resize_submits_an_estimate_then_a_refined_frame() {
+        let mut bench = Bench::new(200.0, 160.0).await;
+        let build = |ui: &mut build::Ui<'_, '_>| {
+            ui.row(0.0, |r| {
+                r.chip("abcdef", ColorToken::Accent);
+                r.chip("尾巴", ColorToken::Accent);
+            });
+        };
+        bench.render(build).await.unwrap();
+        assert_eq!(bench.frames.len(), 2, "先按估算交一版，量算补齐后再交精确帧");
+        assert_ne!(bench.frames[0], bench.frames[1], "精确帧与估算帧不同");
+        assert_eq!(
+            bench.requests,
+            vec![
+                method::query::THEME.to_string(),
+                method::frame::SUBMIT_SHARED.to_string(),
+                method::query::MEASURE.to_string(),
+                method::frame::SUBMIT_SHARED.to_string(),
+            ]
+        );
+    }
+
+    /// 帧超过槽容量时走 `frame.region` 换新区域：扩容 → 重新映射 → 按新代次写槽提交。
+    #[tokio::test]
+    async fn oversized_frame_grows_the_region_and_rewrites() {
+        let mut bench = Bench::new(200.0, 160.0).await;
+        let commands = (0..5000)
+            .map(|index| DrawCommand::Text {
+                x: 0.0,
+                y: index as f32,
+                content: format!("{index:0>64}"),
+                size: 12.0,
+                color: PaintColor::Token { name: ColorToken::Text },
+                weight: None,
+                family: None,
+                max_width: None,
+                align: None,
+            })
+            .collect();
+        let frame = SurfaceFrame { commands, ..SurfaceFrame::default() };
+        let ctx = bench.ctx.clone();
+        let task = tokio::spawn(async move { ctx.submit_frame("panel", frame).await });
+        let result = bench.drive(task).await.unwrap();
+        assert!(result.applied, "扩容后应正常受理");
+        assert!(bench.region.slot_capacity > SLOT_CAPACITY, "槽容量应已翻倍");
+        assert_eq!(bench.region.generation, 2, "扩容换代");
+        assert_eq!(bench.frames.len(), 1);
+        assert_eq!(bench.region_paths.len(), 2, "旧区域文件记入待删清单");
+    }
+
+    #[tokio::test]
     async fn measurement_misses_are_batched_once_and_then_cached() {
         let mut bench = Bench::new(200.0, 160.0).await;
         bench.render(|ui| ui.text("中文说明", TextRole::Label)).await.unwrap();
         assert_eq!(
             bench.requests,
-            vec![method::query::THEME.to_string(), method::query::MEASURE.to_string(), method::frame::SUBMIT.to_string()],
-            "缺项先量算一轮再提交"
+            vec![
+                method::query::THEME.to_string(),
+                method::frame::SUBMIT_SHARED.to_string(),
+                method::query::MEASURE.to_string(),
+            ],
+            "估算帧先交，量算补齐后画面不变就不再交"
         );
         let measures = bench.requests.iter().filter(|m| **m == method::query::MEASURE).count();
         bench.render(|ui| ui.text("中文说明", TextRole::Label)).await.unwrap();

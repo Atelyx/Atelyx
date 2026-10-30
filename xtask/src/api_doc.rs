@@ -120,8 +120,9 @@ const SECTIONS: &[Section] = &[
     },
     Section {
         title: "整面帧与输入事件",
-        intro: "`frame.submit` 一帧即该面的完整界面（指令 + 命中区 + 输入声明），宿主只按几何绘制并把原始\
-输入经 `host:frame.input` 原样回发；插件按帧自行维护悬停 / 按下 / 焦点 / 滚动 / 文本编辑状态。",
+        intro: "`frame.submitShared` 一帧即该面的完整界面（指令 + 命中区 + 输入声明），帧内容写进共享内存\
+槽位，信封只带槽位坐标；宿主只按几何绘制并把原始输入经 `host:frame.input` 原样回发，插件按帧自行维护\
+悬停 / 按下 / 焦点 / 滚动 / 文本编辑状态。",
         items: items!(
             "method.rs": "frame",
             "frame.rs": "SurfaceFrame",
@@ -131,7 +132,8 @@ const SECTIONS: &[Section] = &[
             "frame.rs": "FrameInput",
             "frame.rs": "MAX_HITS",
             "frame.rs": "MAX_HIT_ID_LEN",
-            "frame.rs": "FrameSubmitParams",
+            "frame.rs": "FrameSubmitSharedParams",
+            "frame.rs": "FrameRegionRequest",
             "frame.rs": "FrameInputParams",
             "frame.rs": "FrameTickParams",
             "frame.rs": "MouseButton",
@@ -147,8 +149,32 @@ const SECTIONS: &[Section] = &[
         ),
     },
     Section {
+        title: "帧共享内存",
+        intro: "握手应答给出区域描述（路径 / 代次 / 槽数 / 槽容量）：插件把编码后的帧写进一个槽位，再以\
+`frame.submitShared` 报告槽位坐标。区域文件全部小端：64 字节区域头（魔数 `ATLXFRM\\0` / 版本 / 槽数 /\
+槽容量 / 代次 / 头长 / 槽步长），每槽 16 字节槽头（序号 u64、长度 u32）+ 槽容量。写入顺序是「序号置奇 →\
+写长度与内容 → 序号置偶」，序号取非零偶数、每次 +2；宿主首尾序号一致才认这一帧，撕裂或错位的整帧丢弃。\
+帧超出槽容量时用 `frame.region` 请求扩容，宿主换新文件并递增代次，旧代次的提交一律拒绝。",
+        items: items!(
+            "frame_region.rs": "FrameRegionInfo",
+            "frame_region.rs": "REGION_MAGIC",
+            "frame_region.rs": "REGION_VERSION",
+            "frame_region.rs": "REGION_HEADER_SIZE",
+            "frame_region.rs": "SLOT_HEADER_SIZE",
+            "frame_region.rs": "SLOT_COUNT",
+            "frame_region.rs": "SLOT_CAPACITY",
+            "frame_region.rs": "MAX_SLOT_CAPACITY",
+            "frame_region.rs": "init_region",
+            "frame_region.rs": "validate_region",
+            "frame_region.rs": "write_slot",
+            "frame_region.rs": "read_slot",
+            "frame_codec.rs": "encode",
+            "frame_codec.rs": "decode",
+        ),
+    },
+    Section {
         title: "贡献点与窗口面",
-        intro: "贡献点决定插件界面出现在哪里；`surfaceId` 即贡献 id（插件窗口与文档实例另有宿主分配的 id）。",
+        intro: "贡献点决定插件界面出现在哪里；`surfaceId` 即贡献 id（文档实例另由宿主分配 id，插件窗口面由 `window.open` 的 `id` 指定）。",
         items: items!(
             "method.rs": "ContributionSlot",
             "method.rs": "SurfaceKind",
@@ -425,7 +451,7 @@ fn is_item_header(line: &str, name: &str) -> bool {
     let Some(rest) = line.strip_prefix("pub ") else {
         return false;
     };
-    ["struct ", "enum ", "mod ", "const "].iter().any(|kind| {
+    ["struct ", "enum ", "mod ", "const ", "fn "].iter().any(|kind| {
         rest.strip_prefix(kind).is_some_and(|tail| {
             let ident: String = tail
                 .chars()

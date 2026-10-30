@@ -1,10 +1,12 @@
 //! Atelyx 插件协议：宿主与插件进程之间的对外契约。
 //! 握手校验 API 版本；信封为 JSON-RPC 2.0 over NDJSON；绘制指令、输入事件、能力方法与事件
-//! 均为封闭枚举 + 版本号，破坏性变更必须升 [`API_VERSION`]（握手失败即响亮拒绝）。
+//! 均为封闭枚举 + 版本号，契约冻结后的破坏性变更必须升 [`API_VERSION`]（握手失败即响亮拒绝）。
 
 pub mod envelope;
 pub mod event;
 pub mod frame;
+pub mod frame_codec;
+pub mod frame_region;
 pub mod handshake;
 pub mod layout;
 pub mod manifest;

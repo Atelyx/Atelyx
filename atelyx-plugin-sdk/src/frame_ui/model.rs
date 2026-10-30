@@ -93,6 +93,8 @@ pub(crate) struct UiState {
     /// 上次已提交的帧与所在面：同内容帧不再提交（宿主每收一帧都要重投影并整窗重绘）。
     /// 面重新挂载时宿主会再发一次 `Resize`，据此清空——否则重挂后同内容帧被吞，面会停在空态。
     pub submitted: Option<(String, SurfaceFrame)>,
+    /// 尺寸刚变、下一帧还没交：让 `render` 先按估算字宽交一帧，不再等量算往返。
+    pub resize_pending: bool,
 }
 
 impl Default for UiState {
@@ -116,6 +118,7 @@ impl Default for UiState {
             markdown: HashMap::new(),
             markdown_layouts: Arc::default(),
             submitted: None,
+            resize_pending: false,
         }
     }
 }

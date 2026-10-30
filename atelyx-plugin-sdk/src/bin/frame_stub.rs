@@ -24,6 +24,7 @@ struct Model {
     offset: f32,
     tick: u64,
     size: (f32, f32),
+    resizes: u64,
     focused: bool,
 }
 
@@ -37,6 +38,7 @@ impl Default for Model {
             offset: 0.0,
             tick: 0,
             size: (320.0, 280.0),
+            resizes: 0,
             focused: false,
         }
     }
@@ -63,27 +65,28 @@ impl Model {
             draw_text(12.0, 52.0, format!("组合：{}", self.composing), 13.0, muted.clone()),
             draw_text(12.0, 72.0, format!("键：{}", self.last_key), 13.0, muted.clone()),
             draw_text(12.0, 92.0, format!("尺寸：{w:.0}x{h:.0}"), 13.0, muted.clone()),
-            draw_text(12.0, 112.0, format!("滚动：{:.0}", self.offset), 13.0, muted.clone()),
-            draw_text(12.0, 132.0, format!("帧：{}", self.tick), 13.0, muted.clone()),
-            draw_text(12.0, 152.0, format!("焦点：{}", self.focused), 13.0, muted),
-            rect(12.0, 176.0, 90.0, 28.0, Some(token(ColorToken::AccentSoft)), Some(border.clone())),
-            draw_text(34.0, 184.0, "加一", 13.0, token(ColorToken::Accent)),
-            rect(112.0, 176.0, 70.0, 28.0, Some(token(ColorToken::SurfaceMuted)), Some(border.clone())),
-            draw_text(128.0, 184.0, "清空", 13.0, text.clone()),
-            rect(12.0, 214.0, w - 24.0, 30.0, Some(field), Some(border)),
+            draw_text(12.0, 108.0, format!("尺寸变更：{}", self.resizes), 13.0, muted.clone()),
+            draw_text(12.0, 128.0, format!("滚动：{:.0}", self.offset), 13.0, muted.clone()),
+            draw_text(12.0, 148.0, format!("帧：{}", self.tick), 13.0, muted.clone()),
+            draw_text(12.0, 168.0, format!("焦点：{}", self.focused), 13.0, muted),
+            rect(12.0, 192.0, 90.0, 28.0, Some(token(ColorToken::AccentSoft)), Some(border.clone())),
+            draw_text(34.0, 200.0, "加一", 13.0, token(ColorToken::Accent)),
+            rect(112.0, 192.0, 70.0, 28.0, Some(token(ColorToken::SurfaceMuted)), Some(border.clone())),
+            draw_text(128.0, 200.0, "清空", 13.0, text.clone()),
+            rect(12.0, 230.0, w - 24.0, 30.0, Some(field), Some(border)),
             draw_text(
                 18.0,
-                222.0,
+                238.0,
                 format!("{}{}", self.typed, self.composing),
                 13.0,
                 text,
             ),
             // 视口：一条随滚轮下移的标记线
-            rect(12.0, 252.0, w - 24.0, 4.0, Some(token(ColorToken::TextMuted)), None),
+            rect(12.0, 268.0, w - 24.0, 4.0, Some(token(ColorToken::TextMuted)), None),
         ];
         out.push(rect(
             12.0 + self.offset,
-            248.0,
+            264.0,
             6.0,
             12.0,
             Some(token(ColorToken::Accent)),
@@ -96,12 +99,12 @@ impl Model {
         let (w, _) = self.size;
         let hits = vec![
             hit("surface", 0.0, 0.0, w, self.size.1),
-            hit("inc", 12.0, 176.0, 90.0, 28.0),
-            hit("clear", 112.0, 176.0, 70.0, 28.0),
-            hit("field", 12.0, 214.0, w - 24.0, 30.0),
+            hit("inc", 12.0, 192.0, 90.0, 28.0),
+            hit("clear", 112.0, 192.0, 70.0, 28.0),
+            hit("field", 12.0, 230.0, w - 24.0, 30.0),
         ];
         let base = frame(self.commands(), hits);
-        fps(ime(keys(base), ime_rect(18.0, 222.0, 2.0, 18.0)), 4)
+        fps(ime(keys(base), ime_rect(18.0, 238.0, 2.0, 18.0)), 4)
     }
 }
 
@@ -179,7 +182,11 @@ impl PluginHandler for FrameStub {
                 .await
             }
             FrameInput::Resize { width, height } => {
-                self.apply(ctx, |m| m.size = (width, height)).await
+                self.apply(ctx, |m| {
+                    m.size = (width, height);
+                    m.resizes += 1;
+                })
+                .await
             }
             _ => {}
         }

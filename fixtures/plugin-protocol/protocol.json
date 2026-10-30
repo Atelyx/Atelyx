@@ -63,6 +63,12 @@
       "host": {
         "name": "Atelyx",
         "version": "0.6.0"
+      },
+      "frameRegion": {
+        "path": "C:/Users/demo/AppData/Local/Temp/atelyx-frame-4242-com-atelyx-board-3-1700000000000000000-0.bin",
+        "generation": 3,
+        "slotCount": 4,
+        "slotCapacity": 262144
       }
     }
   },
@@ -910,10 +916,9 @@
       }
     },
     {
-      "name": "frame.submit params",
-      "type": "FrameSubmitParams",
+      "name": "surface frame",
+      "type": "SurfaceFrame",
       "value": {
-        "surfaceId": "board",
         "commands": [
           {
             "kind": "rect",
@@ -1029,6 +1034,34 @@
         },
         "keys": true,
         "fps": 30
+      }
+    },
+    {
+      "name": "frame.submitShared params",
+      "type": "FrameSubmitSharedParams",
+      "value": {
+        "surfaceId": "board",
+        "generation": 3,
+        "slot": 1,
+        "seq": 4,
+        "len": 2048
+      }
+    },
+    {
+      "name": "frame.region params",
+      "type": "FrameRegionRequest",
+      "value": {
+        "minBytes": 1048576
+      }
+    },
+    {
+      "name": "frame.region result",
+      "type": "FrameRegionInfo",
+      "value": {
+        "path": "C:/Users/demo/AppData/Local/Temp/atelyx-frame-4242-com-atelyx-board-3-1700000000000000000-0.bin",
+        "generation": 3,
+        "slotCount": 4,
+        "slotCapacity": 262144
       }
     },
     {
