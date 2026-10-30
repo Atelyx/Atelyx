@@ -1,6 +1,6 @@
 [package]
 name = "atelyx-app"
-version = "0.6.3"
+version = "0.6.4"
 edition = "2021"
 
 # 可执行文件定名 atelyx（安装器 / 快捷方式 / 任务栏进程名的统一基准）。
