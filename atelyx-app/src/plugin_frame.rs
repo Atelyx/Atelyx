@@ -1,5 +1,5 @@
 //! 插件整面帧部件：执行帧的绘制指令清单，按命中区回发原始指针 / 键盘 / 输入法输入。
-//! 坐标一律面本地逻辑像素；绘制缓存按「帧清单 Arc 指针 + 尺寸 + 字体族变更计数 + 图片句柄代数」失效。
+//! 坐标一律面本地逻辑像素；形状与图片按帧缓存几何，文字按段落缓存跨帧复用。
 
 use std::cell::{Cell, RefCell};
 use std::sync::Arc;
@@ -79,6 +79,8 @@ fn mouse_button(button: mouse::Button) -> Option<MouseButton> {
 /// 部件跨帧状态（存 `tree::State`）：绘制缓存 + 拖拽 / 悬停 / 双击判定 + 输入法开关。
 struct FrameState {
     cache: canvas::Cache,
+    /// 已排版的文字段落：内容不变跨帧复用，改宽 / 滚动 / 悬停不重新成形。
+    texts: RefCell<plugin_paint::TextCache>,
     /// 上次绘制的帧：按 Arc 身份判换帧。持有引用，帧对象地址不会被分配器复用。
     painted: RefCell<Option<Arc<SurfaceFrame>>>,
     /// 上次绘制用的界面字体族变更计数。
@@ -107,6 +109,7 @@ impl Default for FrameState {
     fn default() -> Self {
         Self {
             cache: canvas::Cache::new(),
+            texts: RefCell::new(plugin_paint::TextCache::default()),
             painted: RefCell::new(None),
             font_epoch: Cell::new(0),
             image_epoch: Cell::new(0),
@@ -217,6 +220,7 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginFrame<'_> {
             *state.last_press.borrow_mut() = None;
             state.painted.borrow_mut().take();
             state.cache.clear();
+            state.texts.borrow_mut().clear();
             state.resize_wait_until.set(None);
         }
         match event {
@@ -526,6 +530,10 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginFrame<'_> {
             || state.image_epoch.get() != image_epoch
         {
             state.cache.clear();
+            if state.font_epoch.get() != epoch {
+                // 字体族变了：段落按旧字族排的版，整体作废
+                state.texts.borrow_mut().clear();
+            }
             state.font_epoch.set(epoch);
             state.image_epoch.set(image_epoch);
             if frame_changed {
@@ -533,7 +541,7 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginFrame<'_> {
             }
         }
         let geometry = state.cache.draw(renderer, bounds.size(), |canvas| {
-            plugin_paint::execute(
+            plugin_paint::execute_shapes(
                 canvas,
                 &frame.commands,
                 &PaintCtx { app: self.app, plugin_id: &self.plugin_id },
@@ -542,6 +550,10 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginFrame<'_> {
         renderer.with_translation(Vector::new(bounds.x, bounds.y), |renderer| {
             renderer.draw_geometry(geometry);
         });
+        state
+            .texts
+            .borrow_mut()
+            .draw(renderer, &frame.commands, bounds);
     }
 
     fn mouse_interaction(
