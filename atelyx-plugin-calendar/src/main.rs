@@ -18,7 +18,7 @@ use atelyx_plugin_protocol::event::{
 use atelyx_plugin_protocol::frame::FrameInputParams;
 use atelyx_plugin_protocol::method::{
     calendar, CalendarAddParams, CalendarIdParams, CalendarUpdateParams, ContributionSlot,
-    PaddingSpec, SurfaceAttachedParams, SurfaceDetachedParams, MAX_CALENDAR_TITLE_CHARS,
+    SurfaceAttachedParams, SurfaceDetachedParams, MAX_CALENDAR_TITLE_CHARS,
 };
 use atelyx_plugin_protocol::service::HostCallParams;
 use atelyx_plugin_sdk::frame_ui::{FrameUi, UiEvent};
@@ -365,7 +365,7 @@ impl PluginHandler for CalendarPlugin {
                 PANEL,
                 "日历",
                 Some("calendar-days"),
-                Some(PaddingSpec::All(12.0)),
+                None,
             )
             .await
         {

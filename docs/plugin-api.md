@@ -1480,7 +1480,7 @@ pub struct RegisterParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
     /// 面外壳内边距：数字 = 四边等距，也可按轴 / 按边声明（见 [`PaddingSpec`]）；
-    /// 0 = 贴边，缺省 = 宿主默认。
+    /// 缺省 / 0 = 贴边。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub padding: Option<PaddingSpec>,
 }

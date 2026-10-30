@@ -1,5 +1,5 @@
 //! 插件面渲染适配：按 surfaceId 取整面帧交给 [`crate::plugin_frame`]，未提交 / 插件不可用时给
-//! 可读占位。面外壳内边距取自贡献声明（缺省用宿主默认），本模块不参与布局与命中判定。
+//! 可读占位。面外壳内边距取自贡献声明（缺省贴边），本模块不参与布局与命中判定。
 
 use iced::{Element, Padding};
 
@@ -74,10 +74,7 @@ pub(crate) fn surface_view<'a>(
         );
     };
     let key = (plugin_id.to_string(), surface_id.to_string());
-    let outer_pad = match contribution.padding {
-        Some(pad) => padding_of(pad),
-        None => Padding::ZERO.horizontal(12.0).vertical(10.0),
-    };
+    let outer_pad = contribution.padding.map(padding_of).unwrap_or(Padding::ZERO);
     match app.plugin_frames.get(&key) {
         Some(frame) => {
             crate::plugin_frame::frame_view(app, window, plugin_id, surface_id, frame, outer_pad)

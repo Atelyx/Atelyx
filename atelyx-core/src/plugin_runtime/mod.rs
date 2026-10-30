@@ -136,7 +136,7 @@ pub struct Contribution {
     /// 宿主图标形状表里的图标名；插件未声明时为 `None`（宿主回落拼图）。
     pub icon: Option<String>,
     /// 面外壳内边距，只作用于面板 / 设置 / 表格视图这类有宿主外壳的面；
-    /// `None` = 宿主默认（左右 12、上下 10）。插件窗口与接管面无宿主外壳内边距。
+    /// `None` = 贴边（宿主不加内边距）。插件窗口与接管面无宿主外壳内边距。
     pub padding: Option<PaddingSpec>,
 }
 

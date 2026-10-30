@@ -256,7 +256,7 @@ impl Context {
 
     /// 注册一个贡献点，使其出现在宿主对应入口（面板 / 表格视图 / 设置页）。
     /// `id` 插件内唯一且不得含 `:`，同时是该面挂载后的 surfaceId；重复或非法 id 由宿主可读拒绝。
-    /// `padding` = 面外壳内边距（0 = 贴边；缺省用宿主默认），按四边等距或分轴 / 分边声明。
+    /// `padding` = 面外壳内边距（缺省 / 0 = 贴边），按四边等距或分轴 / 分边声明。
     pub async fn register(
         &self,
         slot: ContributionSlot,
