@@ -34,7 +34,7 @@ pub(crate) fn install_from_dir(root: &Path, src: &Path) -> Result<String, String
 }
 
 /// 从随包预置目录安装：与目录安装同一套校验与落位，但不记来源——预置内容不提供
-/// 「从来源更新」，更新由随包版本同步驱动；落预置标记，设置页据此把它归入内置插件。
+/// 「从来源更新」，更新由随包内容同步驱动；落预置标记，设置页据此把它归入内置插件。
 pub(crate) fn install_bundled(root: &Path, src: &Path) -> Result<String, String> {
     stage_dir(root, src, false, true)
 }

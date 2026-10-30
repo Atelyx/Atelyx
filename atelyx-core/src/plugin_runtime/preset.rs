@@ -2,9 +2,10 @@
 //! 只补装与升级，不覆盖用户的选择——停用保持停用，卸载过的不再装回（标记文件记录装过的 id）。
 
 use std::collections::BTreeSet;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::Path;
 
-use atelyx_plugin_protocol::manifest::parse_semver;
+use atelyx_plugin_protocol::manifest::{parse_semver, Manifest, MANIFEST_FILE};
 use serde::{Deserialize, Serialize};
 
 use super::{install, layout, manifest};
@@ -27,7 +28,7 @@ struct Marker {
     installed: BTreeSet<String>,
 }
 
-/// 逐条同步 `bundled` 里的插件目录：未装过的首装并置启用，已装的仅在随包版本更新时替换。
+/// 逐条同步 `bundled` 里的插件目录：未装过的首装并置启用，已装在随包版本更新或内容变化时替换。
 /// `marker` 读不出或结构不认识即整体放弃（宁可本次不装，也不能把用户卸过的装回）。
 pub(crate) fn sync(
     root: &Path,
@@ -62,7 +63,7 @@ pub(crate) fn sync(
                     continue;
                 }
             };
-            if is_newer(&bundled_manifest.version, &installed_manifest.version) {
+            if replaces(&dir, &bundled_manifest, &installed_dir, &installed_manifest) {
                 match install::install_bundled(root, &dir) {
                     Ok(_) => report.updated.push(id.clone()),
                     Err(e) => {
@@ -123,6 +124,41 @@ fn write_marker(path: &Path, installed: &BTreeSet<String>) -> Result<(), String>
         .map_err(|e| format!("预置插件标记序列化失败：{e}"))?;
     crate::vault::atomic_write(path, &text)
         .map_err(|e| format!("写入预置插件标记失败：{e}"))
+}
+
+/// 已装副本是否该换成随包内容：随包版本更高，或版本相同但内容不同。
+/// 版本号未必随每次内容变化（开发构建常驻同一版本），只比版本会让新产物一直留在随包目录里。
+fn replaces(
+    bundled_dir: &Path,
+    bundled: &Manifest,
+    installed_dir: &Path,
+    installed: &Manifest,
+) -> bool {
+    if is_newer(&bundled.version, &installed.version) {
+        return true;
+    }
+    same_version(&bundled.version, &installed.version)
+        && content_fingerprint(bundled_dir, bundled) != content_fingerprint(installed_dir, installed)
+}
+
+/// 两版是否同一版本：都可解析按语义版本比（`1.0` 与 `1.0.0` 同版），否则按字面。
+fn same_version(bundled: &str, installed: &str) -> bool {
+    match (parse_semver(bundled), parse_semver(installed)) {
+        (Some(bundled), Some(installed)) => bundled == installed,
+        _ => bundled == installed,
+    }
+}
+
+/// 内容指纹：manifest 与当前平台入口的字节。任一侧读不出（缺文件等）只得 `None`，
+/// 与另一侧不等即触发替换——坏掉的一侧由安装链按既有规则报错或修复。
+fn content_fingerprint(dir: &Path, manifest: &Manifest) -> Option<u64> {
+    let manifest_bytes = std::fs::read(dir.join(MANIFEST_FILE)).ok()?;
+    let entry = dir.join(manifest.entry.for_current_platform()?);
+    let entry_bytes = std::fs::read(entry).ok()?;
+    let mut hasher = DefaultHasher::new();
+    manifest_bytes.hash(&mut hasher);
+    entry_bytes.hash(&mut hasher);
+    Some(hasher.finish())
 }
 
 /// 随包条目是否比已装的新：版本串都可解析按语义版本比，任一不可解析则「不同即新」
@@ -222,6 +258,22 @@ mod tests {
         assert!(data.join("state.json").is_file(), "私有数据随升级保留");
         let installed = manifest::read_manifest(&layout::plugin_dir(&root, "com.a.one")).unwrap();
         assert_eq!(installed.version, "1.1.0");
+    }
+
+    #[test]
+    fn a_rebuilt_bundle_at_the_same_version_replaces_the_installed_copy() {
+        let (_tmp, root, bundled, marker) = fixture("preset-same-version-rebuild");
+        let source = bundled.join("com.a.one");
+        seed_plugin(&source, "com.a.one", "1.0.0");
+        sync(&root, &bundled, &marker).unwrap();
+        layout::set_enabled(&root, "com.a.one", false).unwrap();
+
+        std::fs::write(source.join(entry_name()), b"rebuilt").unwrap();
+        let report = sync(&root, &bundled, &marker).unwrap();
+        assert_eq!(report.updated, ["com.a.one"]);
+        let installed = layout::plugin_dir(&root, "com.a.one").join(entry_name());
+        assert_eq!(std::fs::read(installed).unwrap(), b"rebuilt");
+        assert!(!layout::is_enabled(&root, "com.a.one"), "内容替换不改用户的停用选择");
     }
 
     #[test]
