@@ -11,6 +11,12 @@ use super::model::FontSpec;
 type Key = (String, u32, u8, u8, Option<u32>);
 /// 单字字宽键：字 / 字号 / 字重 / 字体族（与可用宽度无关——逐字累加才不随换行宽度生键）。
 type CharKey = (u32, u32, u8, u8);
+/// 字型键：字号 / 字重 / 字体族（不带文本，按字型索引 ASCII 字宽表）。
+type SpecCode = u64;
+
+/// ASCII 字宽表：换行逐字取宽是每帧热点，按字型一张定长表查下标，比逐字元组哈希快一个量级。
+const ASCII_LEN: usize = 128;
+const UNMEASURED: f32 = f32::NAN;
 
 /// 缓存条数上限：超出即整体清空（键含文本，长期运行的插件会按历史值累积）。
 const MAX_MEASURED: usize = 4096;
@@ -20,8 +26,13 @@ pub(crate) struct Metrics {
     cache: HashMap<Key, MeasureTextResult>,
     misses: Vec<MeasureItem>,
     missed: HashSet<Key>,
-    /// 逐字字宽：换行 / 省略按它累加，键与排版宽度无关，拖动改宽不会重新量算。
+    /// 非 ASCII 字宽：键与排版宽度无关，拖动改宽不会重新量算。
     chars: HashMap<CharKey, f32>,
+    /// ASCII 字宽表，按字型索引；缺项为 [`UNMEASURED`]。只增不删，下标稳定。
+    ascii: Vec<[f32; ASCII_LEN]>,
+    ascii_index: HashMap<SpecCode, usize>,
+    /// 最近用过的字型表下标：同一字型连续排版时不查表。
+    ascii_hot: Option<(SpecCode, usize)>,
     char_misses: Vec<MeasureItem>,
     char_missed: HashSet<CharKey>,
     /// 量算落地代次：真实字宽一变，按旧字宽排出的 Markdown 版面即作废。
@@ -60,10 +71,25 @@ impl Metrics {
 
     /// 单个字符的字宽：换行与省略按它逐字累加，键空间只有「用到的字 × 字型」，与排版宽度无关。
     pub(crate) fn char_width(&mut self, ch: char, spec: FontSpec) -> f32 {
+        if let Some(slot) = ascii_slot(ch) {
+            let measured = self.ascii_table(spec_code(spec))[slot];
+            if measured.is_finite() {
+                return measured;
+            }
+            self.miss_char(ch, spec);
+            return estimate_char(ch, spec.size);
+        }
         let key = char_key(ch, spec);
         if let Some(hit) = self.chars.get(&key) {
             return *hit;
         }
+        self.miss_char(ch, spec);
+        estimate_char(ch, spec.size)
+    }
+
+    /// 登记一个待量算的字（同一字型下同一字只登记一次）。
+    fn miss_char(&mut self, ch: char, spec: FontSpec) {
+        let key = char_key(ch, spec);
         if self.char_missed.insert(key) {
             self.char_misses.push(MeasureItem {
                 text: ch.to_string(),
@@ -73,7 +99,22 @@ impl Metrics {
                 max_width: None,
             });
         }
-        estimate_char(ch, spec.size)
+    }
+
+    /// 取该字型的 ASCII 字宽表（不在最热位置时就地换入）。
+    fn ascii_table(&mut self, code: SpecCode) -> &mut [f32; ASCII_LEN] {
+        let index = match self.ascii_hot {
+            Some((hot, index)) if hot == code => index,
+            _ => {
+                let index = *self.ascii_index.entry(code).or_insert_with(|| {
+                    self.ascii.push([UNMEASURED; ASCII_LEN]);
+                    self.ascii.len() - 1
+                });
+                self.ascii_hot = Some((code, index));
+                index
+            }
+        };
+        &mut self.ascii[index]
     }
 
     pub(crate) fn has_misses(&self) -> bool {
@@ -102,7 +143,12 @@ impl Metrics {
             if item.max_width.is_none() {
                 layout_changed = true;
                 if let Some(ch) = single_char(&item.text) {
-                    self.chars.insert(char_key(ch, spec), size.width);
+                    match ascii_slot(ch) {
+                        Some(slot) => self.ascii_table(spec_code(spec))[slot] = size.width,
+                        None => {
+                            self.chars.insert(char_key(ch, spec), size.width);
+                        }
+                    }
                 }
             }
         }
@@ -114,6 +160,18 @@ impl Metrics {
 
 fn char_key(ch: char, spec: FontSpec) -> CharKey {
     (ch as u32, spec.size.to_bits(), weight_code(spec.weight), family_code(spec.family))
+}
+
+/// ASCII 字符在字型表里的下标；非 ASCII 返回 `None`（走逐字哈希表）。
+fn ascii_slot(ch: char) -> Option<usize> {
+    ch.is_ascii().then_some(ch as usize)
+}
+
+fn spec_code(spec: FontSpec) -> SpecCode {
+    let size = u64::from(spec.size.to_bits());
+    let weight = u64::from(weight_code(spec.weight));
+    let family = u64::from(family_code(spec.family));
+    (size << 16) | (weight << 8) | family
 }
 
 fn single_char(text: &str) -> Option<char> {
@@ -190,6 +248,20 @@ mod tests {
         let measured = metrics.measure("ab", spec(12.0), None);
         assert_eq!(measured.width, 13.0, "量算落地后取真实字宽");
         assert!(!metrics.has_misses());
+    }
+
+    #[test]
+    fn ascii_widths_are_served_per_font_spec() {
+        let mut metrics = Metrics::default();
+        assert!((metrics.char_width('a', spec(12.0)) - 6.6).abs() < 1e-4, "未量算时按估算");
+        assert_eq!(metrics.take_misses().len(), 1, "同一字型下的同一个字只量算一次");
+
+        let items = vec![MeasureItem { text: "a".into(), size: 12.0, weight: None, family: None, max_width: None }];
+        metrics.apply(&items, &[MeasureTextResult { width: 7.0, height: 14.0, lines: 1 }]);
+        assert_eq!(metrics.char_width('a', spec(12.0)), 7.0, "量算落地后 ASCII 走字型表");
+        assert!(!metrics.has_misses(), "同一字型不再登记");
+        let other_size = metrics.char_width('a', spec(20.0));
+        assert!((other_size - 11.0).abs() < 1e-4, "其他字号仍是自己的估算值");
     }
 
     #[test]

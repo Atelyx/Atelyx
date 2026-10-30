@@ -183,23 +183,36 @@ pub(crate) fn elide(metrics: &mut Metrics, text: &str, spec: FontSpec, available
 /// 软换行切行：逐字累加宽度（量算键只有「字 + 字型」，与可用宽度无关），每行至少一个字，空段落占一行。
 /// 由插件自己切行绘制，宿主就不必按宽度量算整段——改宽不会为一屏文字重新登记量算。
 pub(crate) fn wrap_lines<'a>(metrics: &mut Metrics, text: &'a str, spec: FontSpec, width: f32) -> Vec<&'a str> {
-    let width = width.max(1.0);
     let mut out = Vec::new();
+    wrap_each(metrics, text, spec, width, |start, end| out.push(&text[start..end]));
+    out
+}
+
+/// 贪心切行，把每行的字节区间交给 `emit`：要行表就收集切片，只定高就数次数（不分配行表）。
+fn wrap_each(
+    metrics: &mut Metrics,
+    text: &str,
+    spec: FontSpec,
+    width: f32,
+    mut emit: impl FnMut(usize, usize),
+) {
+    let width = width.max(1.0);
+    let mut offset = 0usize;
     for paragraph in text.split('\n') {
         let mut start = 0usize;
         let mut used = 0.0;
         for (index, ch) in paragraph.char_indices() {
             let advance = metrics.char_width(ch, spec);
             if used + advance > width && index > start {
-                out.push(&paragraph[start..index]);
+                emit(offset + start, offset + index);
                 start = index;
                 used = 0.0;
             }
             used += advance;
         }
-        out.push(&paragraph[start..]);
+        emit(offset + start, offset + paragraph.len());
+        offset += paragraph.len() + 1;
     }
-    out
 }
 
 /// 单行高度：软换行的整块高度按行数累加。
@@ -212,9 +225,11 @@ pub(crate) fn advance(metrics: &mut Metrics, text: &str, spec: FontSpec) -> f32 
     text.chars().map(|ch| metrics.char_width(ch, spec)).sum()
 }
 
-/// 软换行后的整块高度。
+/// 软换行后的整块高度：只数行数，不建行表。
 pub(crate) fn wrapped_height(metrics: &mut Metrics, text: &str, spec: FontSpec, width: f32) -> f32 {
-    wrap_lines(metrics, text, spec, width).len() as f32 * line_height(metrics, spec)
+    let mut lines = 0usize;
+    wrap_each(metrics, text, spec, width, |_, _| lines += 1);
+    lines as f32 * line_height(metrics, spec)
 }
 
 /// 单行文字绘制：`max_width` 给定时文字按该宽度换行（只用于输入框这类定宽单行控件）。
@@ -298,6 +313,28 @@ mod tests {
             lines(&mut metrics, "a\nb\n", font(), 100.0),
             vec![Line { start: 0, end: 1 }, Line { start: 2, end: 3 }, Line { start: 4, end: 4 }]
         );
+    }
+
+    #[test]
+    fn wrap_lines_break_at_the_estimated_width() {
+        let mut metrics = Metrics::default();
+        // 量算未落地时按估算字宽：ASCII 每字 5.5px，22px 一行装四个字
+        assert_eq!(wrap_lines(&mut metrics, "abcdefgh", font(), 22.0), vec!["abcd", "efgh"]);
+        assert_eq!(wrap_lines(&mut metrics, "ab\ncd", font(), 22.0), vec!["ab", "cd"], "显式换行照切");
+        assert_eq!(wrap_lines(&mut metrics, "", font(), 22.0), vec![""], "空段落也占一行");
+    }
+
+    #[test]
+    fn wrapped_height_counts_the_same_lines_as_the_line_table() {
+        let mut metrics = Metrics::default();
+        for width in [1.0_f32, 12.0, 40.0, 100.0, 1000.0] {
+            for text in ["", "abcd", "a\nb\n", "中英混排 abc 123 中英混排", "换行\n\n空白"] {
+                let lines = wrap_lines(&mut metrics, text, font(), width).len() as f32;
+                let expected = lines * line_height(&mut metrics, font());
+                let counted = wrapped_height(&mut metrics, text, font(), width);
+                assert_eq!(counted, expected, "width={width} text={text:?}");
+            }
+        }
     }
 
     #[test]
