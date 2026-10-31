@@ -258,10 +258,7 @@ pub fn clear_card_focus(app: &mut App) {
 
 pub fn on_msg(app: &mut App, msg: CanvasChatMsg) -> Task<Message> {
     match msg {
-        CanvasChatMsg::Input { node, event } => {
-            on_input(app, &node, event);
-            Task::none()
-        }
+        CanvasChatMsg::Input { node, event } => on_input(app, &node, event),
         CanvasChatMsg::MentionPick { node, index } => {
             if let Some(chat) = app.canvas.as_mut().and_then(|s| s.view.card_chat.get_mut(&node)) {
                 chat.press_inside = true;
@@ -273,8 +270,7 @@ pub fn on_msg(app: &mut App, msg: CanvasChatMsg) -> Task<Message> {
         }
         CanvasChatMsg::TriggerMention(node) => {
             app.dismiss_popup();
-            trigger_mention(app, &node);
-            Task::none()
+            trigger_mention(app, &node)
         }
         CanvasChatMsg::PickFiles(node) => {
             app.dismiss_popup();
@@ -433,14 +429,14 @@ pub fn on_msg(app: &mut App, msg: CanvasChatMsg) -> Task<Message> {
     }
 }
 
-fn on_input(app: &mut App, node_id: &str, event: crate::chat_input::InputEvent) {
+fn on_input(app: &mut App, node_id: &str, event: crate::chat_input::InputEvent) -> Task<Message> {
     use crate::chat_input::InputEvent;
     let Some(chat) = app
         .canvas
         .as_mut()
         .and_then(|s| s.view.card_chat.get_mut(node_id))
     else {
-        return;
+        return Task::none();
     };
     match event {
         InputEvent::Focus => {
@@ -484,6 +480,7 @@ fn on_input(app: &mut App, node_id: &str, event: crate::chat_input::InputEvent) 
                     p.selected = next.rem_euclid(len as i32) as usize;
                 }
             }
+            return card_mention_follow(app, node_id);
         }
         InputEvent::PickerCommit => {
             let selected = chat.mention_picker.as_ref().map_or(0, |p| p.selected);
@@ -493,12 +490,12 @@ fn on_input(app: &mut App, node_id: &str, event: crate::chat_input::InputEvent) 
         InputEvent::PickerClose => chat.mention_picker = None,
     }
     let node = node_id.to_string();
-    sync_mention_picker(app, &node);
+    sync_mention_picker(app, &node)
 }
 
 // ===== # 引用候选 =====
 
-fn sync_mention_picker(app: &mut App, node_id: &str) {
+fn sync_mention_picker(app: &mut App, node_id: &str) -> Task<Message> {
     // 先只读取出触发态与查询串（候选收集要读整张画布与文件树）
     let Some((at, query, same_trigger, stale)) = app
         .canvas
@@ -520,7 +517,7 @@ fn sync_mention_picker(app: &mut App, node_id: &str) {
         {
             chat.mention_picker = None;
         }
-        return;
+        return Task::none();
     };
     let candidates = card_candidates(app, node_id, &query);
     let Some(chat) = app
@@ -528,7 +525,7 @@ fn sync_mention_picker(app: &mut App, node_id: &str) {
         .as_mut()
         .and_then(|s| s.view.card_chat.get_mut(node_id))
     else {
-        return;
+        return Task::none();
     };
     if !same_trigger {
         chat.mention_picker = (!candidates.is_empty()).then_some(MentionPicker {
@@ -551,6 +548,27 @@ fn sync_mention_picker(app: &mut App, node_id: &str) {
     {
         chat.mention_picker = None;
     }
+    card_mention_follow(app, node_id)
+}
+
+/// 卡内候选浮层的跟滚任务（滚动区随卡缩放；浮层未开启时无事可做）。
+fn card_mention_follow(app: &App, node_id: &str) -> Task<Message> {
+    let Some(session) = app.canvas.as_ref() else {
+        return Task::none();
+    };
+    let Some(picker) = session
+        .view
+        .card_chat
+        .get(node_id)
+        .and_then(|chat| chat.mention_picker.as_ref())
+    else {
+        return Task::none();
+    };
+    crate::chat_composer::mention_follow(
+        &crate::chat_composer::ComposerScope::Card { node: node_id.to_string() },
+        picker,
+        session.view.zoom,
+    )
 }
 
 /// 候选：画布内可引用卡优先（文本 / 媒体 / 表格），其后仓库文件与目录。
@@ -769,13 +787,13 @@ fn insert_tag(draft: &mut crate::chat_input::Draft, at: usize, tag: &str) {
     draft.apply_edited(next, caret_after, caret_after);
 }
 
-fn trigger_mention(app: &mut App, node_id: &str) {
+fn trigger_mention(app: &mut App, node_id: &str) -> Task<Message> {
     let Some(chat) = app
         .canvas
         .as_mut()
         .and_then(|s| s.view.card_chat.get_mut(node_id))
     else {
-        return;
+        return Task::none();
     };
     chat.draft.focused = true;
     app.chat.input.focused = false;
@@ -785,7 +803,7 @@ fn trigger_mention(app: &mut App, node_id: &str) {
     text.push('#');
     text.push_str(&chat.draft.text[b..]);
     chat.draft.apply_edited(text, a + 1, a + 1);
-    sync_mention_picker(app, node_id);
+    sync_mention_picker(app, node_id)
 }
 
 /// 确保一条数据流边（同一源/目标只留一条，手绘关联边不参与去重）。

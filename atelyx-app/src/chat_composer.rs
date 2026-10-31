@@ -2,8 +2,8 @@
 //! （草稿 / 引用 / 附件归作用域；Agent 与模型配置按写入目标落到面板覆盖或卡节点配置）。
 
 use iced::widget::text::Wrapping;
-use iced::widget::{button, column, container, row, Space};
-use iced::{border, Length, Padding};
+use iced::widget::{button, column, container, operation, row, scrollable, Space};
+use iced::{border, Length, Padding, Task};
 use serde_json::Value;
 
 use crate::canvas_view::CanvasMsg;
@@ -18,6 +18,10 @@ const PICKER_ROW_PAD_Y: f32 = 5.0;
 const PICKER_ROW_LINE_GAP: f32 = 1.0;
 const PICKER_ICON: f32 = 12.0;
 const PICKER_ROW_GAP: f32 = 6.0;
+/// 浮层列表最大高度（缩放前）。
+const PICKER_MAX_H: f32 = 224.0;
+/// 文字行高倍率（iced 文本默认 `LineHeight::Relative(1.3)`，估算行高随之）。
+const PICKER_LINE_RATIO: f32 = 1.3;
 /// 画布卡候选的次行标注（卡片没有所在文件夹）。
 const CARD_SUB_LABEL: &str = "画布卡片";
 
@@ -330,7 +334,7 @@ fn mention_picker_view<'a>(
         let sub_w = (name_w - indent).max(0.0);
         let rows = picker.candidates.iter().enumerate().map(|(i, target)| {
             let selected = i == picker.selected;
-            let (icon_name, name, sub) = match target {
+            let (icon_name, name) = match target {
                 MentionTarget::Vault { rel, is_dir } => {
                     let icon_name = if *is_dir {
                         "folder"
@@ -342,8 +346,7 @@ fn mention_picker_view<'a>(
                         }
                     };
                     let name = rel.rsplit('/').next().unwrap_or(rel).to_string();
-                    let sub = rel.rsplit_once('/').map(|(d, _)| d.to_string());
-                    (icon_name, name, sub)
+                    (icon_name, name)
                 }
                 MentionTarget::Card { node_id } => {
                     let title = app
@@ -352,7 +355,7 @@ fn mention_picker_view<'a>(
                         .and_then(|cvs| cvs.data.nodes.iter().find(|n| &n.id == node_id))
                         .map(crate::canvas_chat::card_title)
                         .unwrap_or_else(|| node_id.clone());
-                    ("box", title, Some(CARD_SUB_LABEL.to_string()))
+                    ("box", title)
                 }
             };
             let press = match &card_node {
@@ -377,10 +380,10 @@ fn mention_picker_view<'a>(
                 .align_y(iced::alignment::Vertical::Center),
             ]
             .spacing((PICKER_ROW_LINE_GAP * s).max(1.0));
-            if let Some(sub) = sub.filter(|d| !d.is_empty()) {
+            if let Some(sub) = picker_row_sub(target) {
                 lines = lines.push(
                     container(
-                        text(crate::layout_view::ellipsize(&sub, sub_w, fs_sub))
+                        text(crate::layout_view::ellipsize(sub, sub_w, fs_sub))
                             .size(fs_sub)
                             .wrapping(Wrapping::None)
                             .color(pal::TEXT_MUTED),
@@ -398,9 +401,9 @@ fn mention_picker_view<'a>(
     })
     .height(Length::Shrink);
     let list = container(
-        scroll::v(list).height(Length::Shrink).width(Length::Fill),
+        scroll::v(list).id(mention_scroll_id(scope)).height(Length::Shrink).width(Length::Fill),
     )
-    .max_height(224.0 * s);
+    .max_height(PICKER_MAX_H * s);
     container(list)
         .width(Length::Fill)
         .style(|_| container::Style {
@@ -413,6 +416,59 @@ fn mention_picker_view<'a>(
             ..Default::default()
         })
         .into()
+}
+
+/// 候选浮层滚动区 id：面板与任一画布卡各一份（同屏并存时不互相定位）。
+pub(crate) fn mention_scroll_id(scope: &ComposerScope) -> iced::widget::Id {
+    match scope {
+        ComposerScope::Panel => iced::widget::Id::new("chat-mention"),
+        ComposerScope::Card { node } => {
+            iced::widget::Id::from(format!("chat-mention-card:{node}"))
+        }
+    }
+}
+
+/// 选中项跟滚：把选中行带回可视区（未溢出、选中行本就在可视区内时不移动）。
+pub(crate) fn mention_follow(
+    scope: &ComposerScope,
+    picker: &MentionPicker,
+    scale: f32,
+) -> Task<Message> {
+    let heights: Vec<f32> = picker.candidates.iter().map(|t| picker_row_h(t, scale)).collect();
+    let y = follow_ratio(&heights, picker.selected, PICKER_MAX_H * scale);
+    operation::snap_to(mention_scroll_id(scope), scrollable::RelativeOffset { x: 0.0, y })
+}
+
+/// 候选行高（与浮层行排布同源：内衬 + 文字行高，次行另加行距）。
+fn picker_row_h(target: &MentionTarget, scale: f32) -> f32 {
+    let pad_y = (PICKER_ROW_PAD_Y * scale).max(2.0);
+    let mut h = pad_y * 2.0 + (pal::fs_caption() * scale).max(9.0) * PICKER_LINE_RATIO;
+    if picker_row_sub(target).is_some() {
+        let gap = (PICKER_ROW_LINE_GAP * scale).max(1.0);
+        h += gap + (pal::fs_micro() * scale).max(8.0) * PICKER_LINE_RATIO;
+    }
+    h
+}
+
+/// 候选的次行文本：仓库文件取所在文件夹（仓库根下的文件没有次行），画布卡给固定标注。
+fn picker_row_sub(target: &MentionTarget) -> Option<&str> {
+    match target {
+        MentionTarget::Vault { rel, .. } => rel.rsplit_once('/').map(|(dir, _)| dir),
+        MentionTarget::Card { .. } => Some(CARD_SUB_LABEL),
+    }
+}
+
+/// 选中行跟滚的相对位置：滚动量取「选中行底缘贴到可视区底缘」，未越过时不滚。
+/// 行高逐行累加（候选分单行 / 双行，不能按等行高折算）。
+fn follow_ratio(heights: &[f32], selected: usize, viewport: f32) -> f32 {
+    let total: f32 = heights.iter().sum();
+    let range = total - viewport;
+    if heights.is_empty() || range <= 0.0 {
+        return 0.0;
+    }
+    let selected = selected.min(heights.len() - 1);
+    let bottom: f32 = heights[..=selected].iter().sum();
+    ((bottom - viewport).max(0.0) / range).clamp(0.0, 1.0)
 }
 
 /// 待发送图片托盘：输入盒上方一行缩略图 chip（点击移除）。
@@ -506,4 +562,46 @@ pub fn card_header_controls<'a>(
         .align_y(iced::alignment::Vertical::Center)
         .padding(Padding::ZERO.right((8.0 * s).max(2.0)))
         .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 选中行在首屏内不滚、越过底缘后按行贴底、末条滚到最底。
+    #[test]
+    fn follow_ratio_keeps_selection_visible() {
+        let rows = [20.0f32; 10];
+        assert_eq!(follow_ratio(&rows, 0, 60.0), 0.0);
+        assert_eq!(follow_ratio(&rows, 2, 60.0), 0.0, "选中行仍整行在可视区内");
+        // 第 4 行底缘越界 = 只滚一行，不是整屏
+        let ratio = follow_ratio(&rows, 3, 60.0);
+        assert!((ratio - 20.0 / 140.0).abs() < 1e-6, "越界一行滚一行：{ratio}");
+        assert_eq!(follow_ratio(&rows, 9, 60.0), 1.0, "末条滚到底");
+        assert_eq!(follow_ratio(&rows, 5, 400.0), 0.0, "未溢出不滚");
+        assert_eq!(follow_ratio(&[], 0, 60.0), 0.0);
+    }
+
+    /// 单行与双行混排时按各自行高累加，不能按等行高折算。
+    #[test]
+    fn follow_ratio_accumulates_mixed_row_heights() {
+        let rows = [26.0, 42.0, 26.0, 42.0];
+        // 可视 68 = 26 + 42：选中第 2 行恰好贴底，不必滚
+        assert_eq!(follow_ratio(&rows, 1, 68.0), 0.0);
+        // 末行底缘 136，可视 68 → 滚到底
+        assert_eq!(follow_ratio(&rows, 3, 68.0), 1.0);
+    }
+
+    /// 次行只在有内容时出现：仓库根下的文件单行，卡片恒双行。
+    #[test]
+    fn sub_line_only_for_nested_files_and_cards() {
+        let file = |rel: &str| MentionTarget::Vault { rel: rel.into(), is_dir: false };
+        assert_eq!(picker_row_sub(&file("甲.md")), None);
+        assert_eq!(picker_row_sub(&file("笔记/乙.md")), Some("笔记"));
+        assert_eq!(
+            picker_row_sub(&MentionTarget::Card { node_id: "n1".into() }),
+            Some(CARD_SUB_LABEL)
+        );
+        assert!(picker_row_h(&file("笔记/乙.md"), 1.0) > picker_row_h(&file("甲.md"), 1.0));
+    }
 }

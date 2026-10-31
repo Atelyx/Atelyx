@@ -982,8 +982,7 @@ fn update_inner(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
         }
         ChatMsg::TriggerMention => {
             app.dismiss_popup();
-            trigger_mention(app);
-            iced::Task::none()
+            trigger_mention(app)
         }
         ChatMsg::UploadAttachment => {
             app.dismiss_popup();
@@ -1740,12 +1739,12 @@ fn on_input(app: &mut App, event: chat_input::InputEvent) -> iced::Task<Message>
         }
         chat_input::InputEvent::Edited { text, caret, anchor } => {
             app.chat.input.apply_edited(text, caret, anchor);
-            sync_mention_picker(app);
+            return sync_mention_picker(app);
         }
         chat_input::InputEvent::Select { caret, anchor } => {
             app.chat.input.caret = caret;
             app.chat.input.anchor = anchor;
-            sync_mention_picker(app);
+            return sync_mention_picker(app);
         }
         chat_input::InputEvent::Preedit(preedit) => {
             app.chat.input.preedit = text_preedit::normalize(preedit);
@@ -1753,11 +1752,11 @@ fn on_input(app: &mut App, event: chat_input::InputEvent) -> iced::Task<Message>
         chat_input::InputEvent::Send => return chat_entry(app, PendingChatAction::Send),
         chat_input::InputEvent::Undo => {
             app.chat.input.undo_step();
-            sync_mention_picker(app);
+            return sync_mention_picker(app);
         }
         chat_input::InputEvent::Redo => {
             app.chat.input.redo_step();
-            sync_mention_picker(app);
+            return sync_mention_picker(app);
         }
         chat_input::InputEvent::PickerNav(delta) => {
             if let Some(p) = &mut app.chat.mention_picker {
@@ -1767,6 +1766,7 @@ fn on_input(app: &mut App, event: chat_input::InputEvent) -> iced::Task<Message>
                     p.selected = next.rem_euclid(len as i32) as usize;
                 }
             }
+            return panel_mention_follow(app);
         }
         chat_input::InputEvent::PickerCommit => {
             let selected = app.chat.mention_picker.as_ref().map_or(0, |p| p.selected);
@@ -1778,11 +1778,12 @@ fn on_input(app: &mut App, event: chat_input::InputEvent) -> iced::Task<Message>
 }
 
 /// 候选浮层状态机：光标前的 `#` 触发段激活 = 开启（或刷新查询）；退出触发段 = 关闭。
-fn sync_mention_picker(app: &mut App) {
+/// 返回跟滚任务（候选重算后把选中行带回可视区）。
+fn sync_mention_picker(app: &mut App) -> iced::Task<Message> {
     let draft = &app.chat.input;
     let Some(at) = draft.active_mention_at() else {
         app.chat.mention_picker = None;
-        return;
+        return iced::Task::none();
     };
     let caret = draft.caret.min(draft.text.len());
     let query = draft.text[at + 1..caret].to_string();
@@ -1803,7 +1804,7 @@ fn sync_mention_picker(app: &mut App) {
         let candidates = candidates_of(app);
         app.chat.mention_picker = (!candidates.is_empty())
             .then_some(MentionPicker { at, query, selected: 0, candidates });
-        return;
+        return panel_mention_follow(app);
     }
     let stale = app
         .chat
@@ -1826,6 +1827,19 @@ fn sync_mention_picker(app: &mut App) {
     {
         app.chat.mention_picker = None;
     }
+    panel_mention_follow(app)
+}
+
+/// 面板候选浮层的跟滚任务（未开启候选时无事可做）。
+fn panel_mention_follow(app: &App) -> iced::Task<Message> {
+    let Some(picker) = &app.chat.mention_picker else {
+        return iced::Task::none();
+    };
+    crate::chat_composer::mention_follow(
+        &crate::chat_composer::ComposerScope::Panel,
+        picker,
+        1.0,
+    )
 }
 
 /// 引用候选：打开中的文件（笔记 / 表格 / 画布）置顶，其余按文件树缓存序（md / atb / atlx
@@ -1924,7 +1938,7 @@ fn commit_mention(app: &mut App, index: usize) {
 }
 
 /// 工具栏「添加上下文」：光标处插入 `#` 并唤起候选浮层（与键入同状态）。
-fn trigger_mention(app: &mut App) {
+fn trigger_mention(app: &mut App) -> iced::Task<Message> {
     let draft = &mut app.chat.input;
     draft.focused = true;
     let (a, b) = draft.selection();
@@ -1934,7 +1948,7 @@ fn trigger_mention(app: &mut App) {
     text.push_str(&draft.text[b..]);
     let caret_after = a + 1;
     draft.apply_edited(text, caret_after, caret_after);
-    sync_mention_picker(app);
+    sync_mention_picker(app)
 }
 
 /// 工具栏「上传附件」：系统文件选择器（图片过滤），选中文件进待发送托盘。
