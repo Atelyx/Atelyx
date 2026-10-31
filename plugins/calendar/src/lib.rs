@@ -22,7 +22,7 @@ use atelyx_plugin_protocol::method::{
 };
 use atelyx_plugin_protocol::service::HostCallParams;
 use atelyx_plugin_sdk::frame_ui::{FrameUi, UiEvent};
-use atelyx_plugin_sdk::{run_stdio, Context, PluginHandler, PluginInfo};
+use atelyx_plugin_sdk::{Context, PluginHandler, PluginInfo};
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::model::{Model, Palette, PANEL};
@@ -46,6 +46,15 @@ struct CalendarPlugin {
 }
 
 impl CalendarPlugin {
+    fn new() -> Self {
+        Self {
+            model: Mutex::new(Model::new()),
+            ui: AsyncMutex::new(FrameUi::new()),
+            seq: AtomicU64::new(0),
+            attached: Mutex::new(false),
+        }
+    }
+
     fn backend(&self) -> Result<Backend, String> {
         self.model.lock().unwrap().backend().ok_or_else(|| "仓库未打开".to_string())
     }
@@ -57,7 +66,7 @@ impl CalendarPlugin {
     async fn apply_theme(&self, ctx: &Context) {
         match ctx.query_theme().await {
             Ok(theme) => self.model.lock().unwrap().set_palette(Palette::from_theme(&theme)),
-            Err(error) => eprintln!("取宿主主题失败，按缺省样式绘制：{error}"),
+            Err(error) => ctx.log_error(&format!("取宿主主题失败，按缺省样式绘制：{error}")),
         }
     }
 
@@ -116,7 +125,7 @@ impl CalendarPlugin {
         match self.commit(ctx, mutation).await {
             Ok(value) => Ok(empty_when_none(value)),
             Err(CommitError::Unrefreshed(error)) => {
-                eprintln!("日程已写入但读回失败：{error}");
+                ctx.log_error(&format!("日程已写入但读回失败：{error}"));
                 Ok(serde_json::json!({}))
             }
             Err(CommitError::Rejected(error)) => Err(error),
@@ -137,7 +146,7 @@ impl CalendarPlugin {
             .render(ctx, PANEL, move |frame| ui::frame(frame, &snapshot))
             .await
         {
-            eprintln!("提交日历面板失败：{error}");
+            ctx.log_error(&format!("提交日历面板失败：{error}"));
         }
     }
 
@@ -146,7 +155,7 @@ impl CalendarPlugin {
             Ok(VaultSwitchPayload::Local { .. }) => Backend::Local,
             Ok(VaultSwitchPayload::Space { can_write, .. }) => Backend::Space { can_write },
             Err(error) => {
-                eprintln!("仓库切换载荷不可解析：{error}");
+                ctx.log_error(&format!("仓库切换载荷不可解析：{error}"));
                 return;
             }
         };
@@ -166,7 +175,7 @@ impl CalendarPlugin {
         let payload = match serde_json::from_value::<FileChangedPayload>(payload.clone()) {
             Ok(payload) => payload,
             Err(error) => {
-                eprintln!("文件变更载荷不可解析：{error}");
+                ctx.log_error(&format!("文件变更载荷不可解析：{error}"));
                 return;
             }
         };
@@ -199,7 +208,7 @@ impl CalendarPlugin {
         let payload = match serde_json::from_value::<SpaceMetaChangedPayload>(payload.clone()) {
             Ok(payload) => payload,
             Err(error) => {
-                eprintln!("团队元数据变更载荷不可解析：{error}");
+                ctx.log_error(&format!("团队元数据变更载荷不可解析：{error}"));
                 return;
             }
         };
@@ -369,10 +378,10 @@ impl PluginHandler for CalendarPlugin {
             )
             .await
         {
-            eprintln!("注册日历面板失败：{error}");
+            ctx.log_error(&format!("注册日历面板失败：{error}"));
         }
         if let Err(error) = ctx.register_service(calendar::SERVICE, &SERVICE_METHODS).await {
-            eprintln!("登记日历服务失败：{error}");
+            ctx.log_error(&format!("登记日历服务失败：{error}"));
         }
         for name in [
             event::name::VAULT_SWITCH,
@@ -380,7 +389,7 @@ impl PluginHandler for CalendarPlugin {
             event::name::SPACE_META_CHANGED,
         ] {
             if let Err(error) = ctx.subscribe(name).await {
-                eprintln!("订阅 {name} 失败：{error}");
+                ctx.log_error(&format!("订阅 {name} 失败：{error}"));
             }
         }
         self.apply_theme(ctx).await;
@@ -522,41 +531,41 @@ impl PluginHandler for CalendarPlugin {
             Err(error) => ctx.service_error(&params.call_id, &error).await,
         };
         if let Err(error) = response {
-            eprintln!("回报服务调用结果失败：{error}");
+            ctx.log_error(&format!("回报服务调用结果失败：{error}"));
         }
         self.render(ctx).await;
     }
 }
 
-#[tokio::main]
-async fn main() {
-    let plugin = CalendarPlugin {
-        model: Mutex::new(Model::new()),
-        ui: AsyncMutex::new(FrameUi::new()),
-        seq: AtomicU64::new(0),
-        attached: Mutex::new(false),
-    };
-    let info = PluginInfo {
-        id: PLUGIN_ID.into(),
-        name: "日历".into(),
-        version: env!("CARGO_PKG_VERSION").into(),
-    };
-    if let Err(error) = run_stdio(info, plugin).await {
-        eprintln!("日历插件退出：{error}");
-        std::process::exit(1);
-    }
+#[no_mangle]
+pub extern "C" fn atelyx_plugin_api() -> *const atelyx_plugin_sdk::abi::PluginApi {
+    atelyx_plugin_sdk::in_process::plugin_api(
+        || PluginInfo {
+            id: PLUGIN_ID.into(),
+            name: "日历".into(),
+            version: env!("CARGO_PKG_VERSION").into(),
+        },
+        || Box::new(CalendarPlugin::new()),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// 随包安装读取的是 `plugin.json`，与进程自报的身份必须一致。
+    /// 随包安装读取的是 `plugin.json`，与动态库导出的身份、ABI 版本必须一致。
     #[test]
     fn manifest_matches_the_crate_identity() {
         let manifest: serde_json::Value =
             serde_json::from_str(include_str!("../plugin.json")).unwrap();
         assert_eq!(manifest["id"], PLUGIN_ID);
         assert_eq!(manifest["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(manifest["abiVersion"], atelyx_plugin_sdk::abi::ABI_VERSION);
+        let (platform, entry) = if cfg!(windows) {
+            ("windows", "atelyx_plugin_calendar.dll")
+        } else {
+            ("linux", "libatelyx_plugin_calendar.so")
+        };
+        assert_eq!(manifest["entry"][platform], entry);
     }
 }

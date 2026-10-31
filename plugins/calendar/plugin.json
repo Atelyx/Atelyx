@@ -3,9 +3,10 @@
   "name": "日历",
   "version": "0.1.0",
   "apiVersion": 1,
+  "abiVersion": 1,
   "entry": {
-    "windows": "atelyx-plugin-calendar.exe",
-    "linux": "atelyx-plugin-calendar"
+    "windows": "atelyx_plugin_calendar.dll",
+    "linux": "libatelyx_plugin_calendar.so"
   },
   "permissions": ["vault", "collab"],
   "singleton": true,

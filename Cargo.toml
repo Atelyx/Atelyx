@@ -6,7 +6,7 @@ members = [
     "atelyx-ui",
     "atelyx-plugin-protocol",
     "atelyx-plugin-sdk",
-    "atelyx-plugin-calendar",
+    "plugins/calendar",
     "atelyx-plugin-abi",
     "atelyx-plugin-host",
     "atelyx-plugin-sample",

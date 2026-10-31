@@ -29,6 +29,9 @@ rust_xlsxwriter = "0.89"
 base64 = "0.22"
 # 插件协议类型（宿主运行时：信封解析、握手、能力面方法、整面帧与绘制指令）
 atelyx-plugin-protocol = { path = "../atelyx-plugin-protocol" }
+# 同进程插件 ABI 与加载：动态库实例、帧复制与宿主回调
+atelyx-plugin-abi = { path = "../atelyx-plugin-abi" }
+atelyx-plugin-host = { path = "../atelyx-plugin-host" }
 # 整面帧共享内存映射（宿主只读映射插件写入的区域）
 memmap2 = "0.9"
 # 插件安装（plugin_runtime）：zip 解压（仅 deflate；防御见 install.rs）

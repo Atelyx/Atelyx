@@ -39,6 +39,14 @@ pub(crate) fn read_manifest(dir: &Path) -> Result<Manifest, String> {
             manifest.api_version
         ));
     }
+    if let Some(abi) = manifest.abi_version {
+        if abi != atelyx_plugin_abi::ABI_VERSION {
+            return Err(format!(
+                "ABI 版本不匹配：插件 abiVersion {abi}，宿主 {}",
+                atelyx_plugin_abi::ABI_VERSION
+            ));
+        }
+    }
     let entry = manifest
         .entry
         .for_current_platform()

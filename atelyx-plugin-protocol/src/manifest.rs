@@ -16,6 +16,9 @@ pub struct Manifest {
     pub version: String,
     /// 协议版本，必须等于宿主的 [`crate::API_VERSION`]。
     pub api_version: u32,
+    /// 同进程动态库 ABI 版本；给出即按 cdylib 装载，缺省仍是进程插件。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub abi_version: Option<u32>,
     /// 最低宿主版本（语义化版本，如 `0.4.0`）；缺省 = 不限。宿主低于它即拒绝装载。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_host_version: Option<String>,
@@ -30,7 +33,7 @@ pub struct Manifest {
     pub doc_type_registrations: Vec<DocTypeRegistration>,
 }
 
-/// 按平台的可执行入口（相对插件目录的路径）。缺失 = 该平台不支持。
+/// 按平台的入口（可执行文件或动态库，相对插件目录的路径）。缺失 = 该平台不支持。
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Entry {

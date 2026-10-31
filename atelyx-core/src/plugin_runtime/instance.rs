@@ -20,6 +20,7 @@ use atelyx_plugin_protocol::method::{
     self, ContributionSlot, RegisterParams, SurfaceAttachedParams, SurfaceDetachedParams,
     UnregisterParams,
 };
+use atelyx_plugin_protocol::frame_region::FrameRegionInfo;
 use atelyx_plugin_protocol::service::{self, CallParams, ResultParams};
 use atelyx_plugin_protocol::{frame, frame_codec, API_VERSION};
 use base64::Engine;
@@ -27,9 +28,11 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::{json, Value};
 
+use atelyx_plugin_host::HostCall;
+
 use crate::plugin_process::{EventSink, PluginProcessHost, ProcessEvent as HostEvent};
 
-use super::{capability, child_process, fs, http, log, shortcut};
+use super::{abi, capability, child_process, fs, http, log, shortcut};
 use super::frame_region::FrameRegionStore;
 use super::service_dir::{Forward, ServiceTarget};
 use super::{
@@ -118,6 +121,8 @@ pub(crate) struct Instance {
     default_layout: Mutex<Option<(String, LayoutSpecNode)>>,
     /// 本插件日志（插件 stderr、协议违规与生命周期失败的唯一可查落点）。
     log: Arc<log::LogSink>,
+    /// 动态库传输；进程插件始终为空。
+    abi: abi::AbiSession,
 }
 
 /// 各面已落地的整面帧与正在等帧的面。
@@ -233,7 +238,12 @@ impl Instance {
             crash_times: Mutex::new(Vec::new()),
             default_layout: Mutex::new(None),
             log,
+            abi: abi::AbiSession::default(),
         })
+    }
+
+    fn is_abi(&self) -> bool {
+        self.manifest.abi_version.is_some()
     }
 
     pub(crate) fn attach_runtime(&self, runtime: &Arc<PluginRuntime>) {
@@ -377,11 +387,14 @@ impl Instance {
             &super::layout::loaded_version_file(&self.dir),
             &self.manifest.version,
         );
-        let program = self.dir.join(entry).to_string_lossy().into_owned();
-        let cwd = self.dir.to_string_lossy().into_owned();
-        // 领本次运行的令牌：此后旧进程的输出与事件一律按令牌丢弃
+        // 领本次运行的令牌：此后上一次会话的输出与事件一律按令牌丢弃
         let token = self.run_token.fetch_add(1, Ordering::SeqCst) + 1;
         self.handshaken.store(false, Ordering::SeqCst);
+        if self.is_abi() {
+            return self.start_abi(token, entry);
+        }
+        let program = self.dir.join(entry).to_string_lossy().into_owned();
+        let cwd = self.dir.to_string_lossy().into_owned();
         let instance = self.clone();
         let sink: EventSink = Arc::new(move |event| instance.handle_process_event(token, event));
         let pid = self
@@ -401,6 +414,66 @@ impl Instance {
         Ok(())
     }
 
+    /// 启动动态库插件：库在本实例内跨启停保留；加载库是同步的，建实例与握手放到后台线程，
+    /// 宿主调用线程不等待插件初始化（与进程插件同一口径，失败经状态与日志呈现）。
+    fn start_abi(self: &Arc<Self>, token: u64, entry: &str) -> Result<(), String> {
+        let path = self.dir.join(entry);
+        let library = match self.abi.library() {
+            Some(library) => library,
+            None => match atelyx_plugin_host::PluginLibrary::load(&path) {
+                Ok(library) => {
+                    let library = Arc::new(library);
+                    self.abi.set_library(library.clone());
+                    library
+                }
+                Err(error) => {
+                    self.set_status(PluginStatus::Failed(error.clone()));
+                    self.log.line(&format!("[失败] {error}"));
+                    return Err(error);
+                }
+            },
+        };
+        self.session_active.store(true, Ordering::SeqCst);
+        // 会话先就绪再广播 Running：壳收到 Running 会重发已挂面的 attached，早于 begin_session 会被丢掉
+        self.abi.begin_session(token);
+        self.set_status(PluginStatus::Running);
+        let host: Arc<dyn atelyx_plugin_host::Host> =
+            Arc::new(abi::InstanceHost::new(self, token));
+        let instance = self.clone();
+        let entry = entry.to_string();
+        std::thread::spawn(move || match library.create(host) {
+            Ok(plugin) => {
+                if instance.abi.install(plugin, token) {
+                    instance.log.line(&format!("[启动] 动态库已加载（入口 {entry}）"));
+                }
+            }
+            Err(error) => instance.fail_abi_start(token, error),
+        });
+        // 只持弱引用：卸载后实例应随最后一个引用释放，不因握手截止线程多留十秒
+        let watchdog = Arc::downgrade(self);
+        std::thread::spawn(move || {
+            std::thread::sleep(HANDSHAKE_TIMEOUT);
+            if let Some(instance) = watchdog.upgrade() {
+                instance.check_handshake(token);
+            }
+        });
+        Ok(())
+    }
+
+    /// 后台建实例失败：仅在本次运行仍有效时落失败状态；停用 / 换代后的迟到失败不覆盖新会话。
+    fn fail_abi_start(self: &Arc<Self>, token: u64, error: String) {
+        let _guard = self.transition.lock().unwrap();
+        if self.run_token.load(Ordering::SeqCst) != token {
+            return;
+        }
+        self.release_resources();
+        self.session_active.store(false, Ordering::SeqCst);
+        self.abi.shutdown();
+        self.set_status(PluginStatus::Failed(error.clone()));
+        self.log.line(&format!("[失败] {error}"));
+        self.log.close();
+    }
+
     /// 停止插件：作废在途退避重启与本次运行的陈旧输出，并结束整棵进程树。
     pub(crate) fn stop(&self) {
         let _guard = self.transition.lock().unwrap();
@@ -412,17 +485,47 @@ impl Instance {
         if self.status() != PluginStatus::Stopped {
             self.log.line("[生命周期] 已停止");
         }
-        self.teardown();
+        if self.is_abi() {
+            // 先让在途调用以可读失败收场（此时插件还活着，回执能送达），再停 worker
+            self.release_resources();
+            self.abi.shutdown();
+            self.log.close();
+        } else {
+            self.teardown();
+        }
         self.set_status(PluginStatus::Stopped);
     }
 
     /// 判定为不可装载 / 握手失败：置 `Failed` 并结束进程（避免僵死连接）。
-    fn fail(self: &Arc<Self>, reason: String) {
+    /// `token` 是引发失败的会话令牌；取到启停锁后令牌已被取代就不再动新会话。
+    fn fail(self: &Arc<Self>, token: u64, reason: String) {
+        let _guard = self.transition.lock().unwrap();
+        if self.run_token.load(Ordering::SeqCst) != token {
+            return;
+        }
         self.log.line(&format!("[失败] {reason}"));
         self.session_active.store(false, Ordering::SeqCst);
         self.set_status(PluginStatus::Failed(reason));
         self.run_token.fetch_add(1, Ordering::SeqCst);
-        self.teardown();
+        if self.is_abi() {
+            // 先作废会话：销毁可能卡在插件的 worker 上，期间迟到的建实例结果不得再装入。
+            self.abi.invalidate(token);
+            self.release_resources();
+            // 销毁会等插件的 worker / 泵线程退出：另起线程收尾，当前调用先返回。
+            // 收尾前复查世代：期间已被重新启用（start 换代）就不再动新会话。
+            let generation = self.generation.load(Ordering::SeqCst);
+            let instance = self.clone();
+            std::thread::spawn(move || {
+                let _guard = instance.transition.lock().unwrap();
+                if instance.generation.load(Ordering::SeqCst) != generation {
+                    return;
+                }
+                instance.abi.shutdown();
+                instance.log.close();
+            });
+        } else {
+            self.teardown();
+        }
     }
 
     /// 结束插件进程树（pid = 0 时跳过）并收掉随插件记账的宿主资源。
@@ -538,6 +641,26 @@ impl Instance {
         method_name: &str,
         params: Value,
     ) {
+        if self.is_abi() {
+            let Some(id) = self.abi.begin_service_call(call_id.to_string()) else {
+                self.fail_service_call(call_id, "插件已停止，服务调用已取消");
+                return;
+            };
+            let params = serde_json::to_string(&params).unwrap_or_else(|_| "null".into());
+            let state = self.abi.service_call(id, service_name, method_name, &params);
+            if let abi::CallState::Delivered = state {
+                return;
+            }
+            if let Some(call_id) = self.abi.finish_service_call(id) {
+                // 初始化窗口里没装入的实例不是「已停止」：分开写，排障才看得准
+                let reason = match state {
+                    abi::CallState::Starting => "插件尚未就绪，服务调用已取消",
+                    _ => "插件已停止，服务调用已取消",
+                };
+                self.fail_service_call(&call_id, reason);
+            }
+            return;
+        }
         let params = service::HostCallParams {
             call_id: call_id.to_string(),
             service: service_name.to_string(),
@@ -586,15 +709,23 @@ impl Instance {
         register()
     }
 
-    /// 握手截止检查：令牌已被取代 / 已握手 / 已不在运行态时都不动作。
+    /// 启动截止检查：令牌已被取代 / 已完成启动 / 已不在运行态时都不动作。
+    /// 进程插件以握手完成为准；动态库插件以实例装入为准（`create` 里还包含 `on_ready`）。
     fn check_handshake(self: &Arc<Self>, token: u64) {
         if token != self.run_token.load(Ordering::SeqCst)
-            || self.handshaken.load(Ordering::SeqCst)
             || self.status() != PluginStatus::Running
         {
             return;
         }
-        self.fail(format!("插件未在 {} 秒内完成握手", HANDSHAKE_TIMEOUT.as_secs()));
+        let (ready, what) = if self.is_abi() {
+            (self.abi.ready(), "启动")
+        } else {
+            (self.handshaken.load(Ordering::SeqCst), "握手")
+        };
+        if ready {
+            return;
+        }
+        self.fail(token, format!("插件未在 {} 秒内完成{what}", HANDSHAKE_TIMEOUT.as_secs()));
     }
 
     fn set_status(&self, status: PluginStatus) {
@@ -648,7 +779,7 @@ impl Instance {
             Err(e) => {
                 // 违规行原样落日志：stdout 被日志污染是插件最常见的一类故障
                 self.log.line(&format!("[协议] 非信封输出（已停机）：{line}"));
-                self.fail(format!("插件输出非协议内容（stdout 只允许 JSON-RPC 信封）：{e}"));
+                self.fail(token, format!("插件输出非协议内容（stdout 只允许 JSON-RPC 信封）：{e}"));
                 return;
             }
         };
@@ -1496,12 +1627,20 @@ impl Instance {
         let p: InitializeParams = parse(params)?;
         if !handshake::compatible(p.api_version, API_VERSION) {
             let reason = format!("协议版本不匹配：插件 {}，宿主 {API_VERSION}", p.api_version);
-            self.fail(reason);
+            if self.is_abi() {
+                self.log.line(&format!("[失败] {reason}"));
+            } else {
+                self.fail(token, reason);
+            }
             return Err(RpcError::failed("协议版本不匹配"));
         }
         if p.plugin.id != self.id {
             let reason = format!("插件自报 id {} 与安装 id {} 不一致", p.plugin.id, self.id);
-            self.fail(reason);
+            if self.is_abi() {
+                self.log.line(&format!("[失败] {reason}"));
+            } else {
+                self.fail(token, reason);
+            }
             return Err(RpcError::failed("插件自报 id 与安装 id 不一致"));
         }
         self.handshaken.store(true, Ordering::SeqCst);
@@ -1509,15 +1648,20 @@ impl Instance {
             "[握手] 完成（插件 {} v{}，apiVersion {}）",
             p.plugin.name, p.plugin.version, p.api_version
         ));
-        // 建区域与收尾同在资源闸门内：迟到的握手不得在收尾之后留下无人回收的映射与临时文件
-        let region = match self.with_session(token, || Ok::<_, String>(self.frame_region.ensure())) {
-            Ok(Ok(info)) => info,
-            Ok(Err(reason)) => {
-                let message = format!("帧共享内存准备失败：{reason}");
-                self.fail(message);
-                return Err(RpcError::failed("帧共享内存准备失败"));
+        // 同进程插件整帧走 typed 回调，不建共享内存区域；进程插件仍按原通路建区。
+        let region = if self.is_abi() {
+            FrameRegionInfo { path: String::new(), generation: 0, slot_count: 0, slot_capacity: 0 }
+        } else {
+            // 建区域与收尾同在资源闸门内：迟到的握手不得在收尾之后留下无人回收的映射与临时文件
+            match self.with_session(token, || Ok::<_, String>(self.frame_region.ensure())) {
+                Ok(Ok(info)) => info,
+                Ok(Err(reason)) => {
+                    let message = format!("帧共享内存准备失败：{reason}");
+                    self.fail(token, message);
+                    return Err(RpcError::failed("帧共享内存准备失败"));
+                }
+                Err(reason) => return Err(RpcError::failed(reason)),
             }
-            Err(reason) => return Err(RpcError::failed(reason)),
         };
         let result = InitializeResult {
             api_version: API_VERSION,
@@ -1639,10 +1783,23 @@ impl Instance {
         };
         let frame = frame_codec::decode(&bytes)
             .map_err(|e| RpcError::failed(format!("帧解码失败：{e}")))?;
+        self.accept_frame(token, p.surface_id, frame)?;
+        Ok(json!({ "applied": true }))
+    }
+
+    /// 接收一帧（共享内存与 ABI 两个来源共用）：校验后整发整换并推进帧钟。
+    fn accept_frame(
+        self: &Arc<Self>,
+        token: u64,
+        surface_id: String,
+        frame: frame::SurfaceFrame,
+    ) -> Result<(), RpcError> {
+        if surface_id.trim().is_empty() {
+            return Err(RpcError::failed("surfaceId 不能为空"));
+        }
         frame
             .validate()
             .map_err(|e| RpcError::failed(format!("帧内容不合法：{e}")))?;
-        let surface_id = p.surface_id;
         let submitted = Arc::new(frame);
         let claimed = self
             .with_session(token, || {
@@ -1675,7 +1832,125 @@ impl Instance {
         if !claimed {
             let _ = self.events.send(PluginEvent::ViewSubmitted { id: self.id.clone() });
         }
-        Ok(json!({ "applied": true }))
+        Ok(())
+    }
+
+    /// ABI 回调送来的帧：复制已在宿主库完成，这里只做协议投影与校验。
+    pub(crate) fn accept_abi_frame(self: &Arc<Self>, token: u64, surface: &str, frame: atelyx_plugin_host::Frame) {
+        if token != self.run_token.load(Ordering::SeqCst)
+            || !self.session_active.load(Ordering::SeqCst)
+        {
+            return;
+        }
+        if let Err(error) = self.accept_frame(token, surface.to_string(), abi::frame_from_host(frame)) {
+            self.log_host_note(&format!("丢弃插件帧：{error}"));
+        }
+    }
+
+    pub(crate) fn request_redraw_abi(&self, token: u64) {
+        if token != self.run_token.load(Ordering::SeqCst) {
+            return;
+        }
+        let _ = self.events.send(PluginEvent::ViewSubmitted { id: self.id.clone() });
+    }
+
+    pub(crate) fn log_abi(&self, token: u64, level: u32, message: &str) {
+        // 与进程插件同一口径：换代后的迟到输出一律丢弃
+        if token != self.run_token.load(Ordering::SeqCst) {
+            return;
+        }
+        let prefix = if level == atelyx_plugin_abi::LOG_ERROR { "[插件错误]" } else { "[插件]" };
+        self.log.line(&format!("{prefix} {message}"));
+    }
+
+    pub(crate) fn subscribe_abi(&self, token: u64, name: &str) {
+        let result = self.with_session(token, || {
+            self.on_subscribe(&json!({ "name": name })).map_err(|error| error.to_string())
+        });
+        if let Err(reason) = result {
+            self.log_host_note(&format!("订阅 {name} 失败：{reason}"));
+        }
+    }
+
+    /// 插件 → 宿主的通用调用：落点与进程插件完全相同（权限 / 服务目录 / 壳回填）。
+    pub(crate) fn handle_abi_call(self: &Arc<Self>, token: u64, call: HostCall) {
+        if token != self.run_token.load(Ordering::SeqCst)
+            || !self.session_active.load(Ordering::SeqCst)
+        {
+            call.reply(false, "插件会话已结束");
+            return;
+        }
+        let params = if call.params.trim().is_empty() {
+            Value::Null
+        } else {
+            match serde_json::from_str(&call.params) {
+                Ok(params) => params,
+                Err(error) => {
+                    call.reply(false, &format!("params 不是合法 JSON：{error}"));
+                    return;
+                }
+            }
+        };
+        let id = call.request_id;
+        let method = call.method.clone();
+        if !self.abi.register_call(call) {
+            return;
+        }
+        let handling = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.handle_request(
+                token,
+                Request { jsonrpc: Envelope::JSONRPC, id, method, params },
+            );
+        }));
+        if handling.is_err() {
+            self.log_host_note("宿主处理插件调用时 panic，已按失败回执");
+            self.respond(id, None, Some(RpcError::failed("宿主内部错误")));
+        }
+    }
+
+    /// 插件回报一次服务调用；登记时分配的 ABI 序号换回运行时 callId。
+    pub(crate) fn reply_abi_service(&self, token: u64, call_id: u64, ok: bool, payload: &str) {
+        if token != self.run_token.load(Ordering::SeqCst) {
+            return;
+        }
+        let Some(call_id) = self.abi.finish_service_call(call_id) else {
+            self.log_host_note(&format!("服务回执已收场（序号 {call_id}）"));
+            return;
+        };
+        let (result, error) = if ok {
+            if payload.trim().is_empty() {
+                (Some(Value::Null), None)
+            } else {
+                match serde_json::from_str::<Value>(payload) {
+                    Ok(value) => (Some(value), None),
+                    Err(error) => (None, Some(format!("回执不是合法 JSON：{error}"))),
+                }
+            }
+        } else {
+            (None, Some(payload.to_string()))
+        };
+        let Ok(runtime) = self.runtime_upgrade() else { return };
+        if let Err(error) = runtime.resolve_service_call(
+            &self.id,
+            ResultParams { call_id, result, error },
+        ) {
+            self.log_host_note(&format!("送达服务回执失败：{error}"));
+        }
+    }
+
+    /// 让服务调用在调用方侧以可读失败结束（插件已停 / 转投时实例已收场）。
+    fn fail_service_call(&self, call_id: &str, error: &str) {
+        let Ok(runtime) = self.runtime_upgrade() else { return };
+        if let Err(error) = runtime.resolve_service_call(
+            &self.id,
+            ResultParams {
+                call_id: call_id.to_string(),
+                result: None,
+                error: Some(error.to_string()),
+            },
+        ) {
+            self.log_host_note(&format!("结束服务调用失败：{error}"));
+        }
     }
 
     /// 帧超出当前槽容量时换一份更大的区域；容量已够则原样返回（幂等）。
@@ -1858,6 +2133,10 @@ impl Instance {
     }
 
     fn send_frame_input(&self, surface_id: &str, input: &frame::FrameInput) {
+        if self.is_abi() {
+            self.abi.send_input(surface_id, input);
+            return;
+        }
         let params = frame::FrameInputParams {
             surface_id: surface_id.to_string(),
             input: input.clone(),
@@ -1957,6 +2236,10 @@ impl Instance {
             due
         };
         for (surface_id, frame, delta_ms) in due {
+            if self.is_abi() {
+                self.abi.send_tick(&surface_id, frame, delta_ms);
+                continue;
+            }
             let params = frame::FrameTickParams { surface_id, frame, delta_ms };
             self.notify(method::frame::HOST_TICK, &params);
         }
@@ -1970,12 +2253,20 @@ impl Instance {
 
     /// 告知插件某个面已挂载（`host:surface.attached`）。
     pub(crate) fn notify_surface_attached(&self, surface_id: &str, kind: SurfaceKind) {
+        if self.is_abi() {
+            self.abi.attach(surface_id, surface_kind_code(kind));
+            return;
+        }
         let params = SurfaceAttachedParams { surface_id: surface_id.to_string(), kind };
         self.notify(method::view::HOST_ATTACHED, &params);
     }
 
     /// 告知插件某个面已移除（`host:surface.detached`）。
     pub(crate) fn notify_surface_detached(&self, surface_id: &str) {
+        if self.is_abi() {
+            self.abi.detach(surface_id);
+            return;
+        }
         let params = SurfaceDetachedParams { surface_id: surface_id.to_string() };
         self.notify(method::view::HOST_DETACHED, &params);
     }
@@ -2111,6 +2402,18 @@ impl Instance {
     }
 
     pub(crate) fn respond(&self, id: u64, result: Option<Value>, error: Option<RpcError>) {
+        if self.is_abi() {
+            let (ok, payload) = match (result, error) {
+                (Some(result), None) => {
+                    let payload = serde_json::to_string(&result).unwrap_or_else(|_| "null".into());
+                    (true, payload)
+                }
+                (_, Some(error)) => (false, error.message),
+                (None, None) => (true, "null".into()),
+            };
+            let _ = self.abi.reply(id, ok, &payload);
+            return;
+        }
         let (envelope, what) = match (result, error) {
             (Some(result), None) => (Envelope::success(id, result), "回执"),
             (_, Some(error)) => (Envelope::failure(id, error), "错误回执"),
@@ -2119,8 +2422,17 @@ impl Instance {
         self.write_envelope(envelope, what);
     }
 
-    /// 写一条信封到插件 stdin。进程已停时静默丢弃（对端已不在）；写失败按限频记入插件日志。
+    /// 向插件下发一条信封：进程写 stdin（已停时静默丢弃），动态库走 typed 通知。
+    /// 写失败按限频记入插件日志。
     fn write_envelope(&self, envelope: Envelope, what: &str) {
+        if self.is_abi() {
+            if let Envelope::Notification(notification) = envelope {
+                let payload = serde_json::to_string(&notification.params)
+                    .unwrap_or_else(|_| "null".into());
+                self.abi.notify(&notification.method, &payload);
+            }
+            return;
+        }
         let pid = self.pid.load(Ordering::SeqCst) as u32;
         if pid == 0 {
             return;
@@ -2320,6 +2632,19 @@ fn audit_subject<'a>(method_name: &str, params: &'a Value) -> (String, Option<&'
         }
     }
     (method_name.to_string(), Some(params))
+}
+
+/// 面的类型码（与 `atelyx-plugin-abi` 的 `SURFACE_*` 对齐）。
+fn surface_kind_code(kind: SurfaceKind) -> u32 {
+    use atelyx_plugin_abi as abi;
+    match kind {
+        SurfaceKind::Panel => abi::SURFACE_PANEL,
+        SurfaceKind::Window => abi::SURFACE_WINDOW,
+        SurfaceKind::Page => abi::SURFACE_PAGE,
+        SurfaceKind::Takeover => abi::SURFACE_TAKEOVER,
+        SurfaceKind::Settings => abi::SURFACE_SETTINGS,
+        SurfaceKind::TableView => abi::SURFACE_TABLE_VIEW,
+    }
 }
 
 #[cfg(test)]

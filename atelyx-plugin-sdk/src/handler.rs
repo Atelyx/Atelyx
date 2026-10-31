@@ -1,4 +1,4 @@
-//! 宿主通知的插件侧处理面：一个 trait 承接全部 `host:` 通知，未知通知落到 stderr（失败可见）。
+//! 宿主通知的插件侧处理面：一个 trait 承接全部 `host:` 通知，未知通知写插件日志（失败可见）。
 
 use serde_json::Value;
 
@@ -23,6 +23,10 @@ use crate::protocol::service::{self, ChangedParams, HostCallParams};
 pub trait PluginHandler: Send + Sync + 'static {
     /// 握手完成后调用一次：注册贡献点、提交首帧、声明订阅都应在这里做。
     async fn on_ready(&self, ctx: &Context);
+
+    /// 同进程插件销毁前调用一次：停掉插件自建线程、释放其持有的 [`Context`] 克隆。
+    /// 实例销毁后残留的线程与句柄不会随进程退出被回收；进程插件随进程结束，不会收到这个回调。
+    async fn on_shutdown(&self, _ctx: &Context) {}
 
     /// 面重新进入布局（面板被添加 / 插件重启后重发）：补交该面当前的一帧。
     async fn on_surface_attached(&self, _ctx: &Context, _params: SurfaceAttachedParams) {}
@@ -71,9 +75,9 @@ pub trait PluginHandler: Send + Sync + 'static {
     /// 需要据此更新「本插件提供的服务是否生效」的界面时覆盖它；默认忽略。
     async fn on_service_changed(&self, _ctx: &Context, _params: ChangedParams) {}
 
-    /// 未知通知：默认写 stderr（宿主把插件 stderr 归入诊断输出）。
-    async fn on_unknown_notification(&self, _ctx: &Context, method: &str, params: Value) {
-        eprintln!("插件收到未知的宿主通知：{method}：{params}");
+    /// 未知通知：默认写插件日志（同进程进宿主运行日志，进程插件写 stderr）。
+    async fn on_unknown_notification(&self, ctx: &Context, method: &str, params: Value) {
+        ctx.log_error(&format!("插件收到未知的宿主通知：{method}：{params}"));
     }
 }
 

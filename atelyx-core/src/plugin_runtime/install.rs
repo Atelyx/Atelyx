@@ -156,6 +156,21 @@ pub(crate) fn uninstall(root: &Path, id: &str) -> Result<(), String> {
     remove_dir_all_with_retry(&layout::plugin_dir(root, id))
 }
 
+/// 删不掉时把目录移进安装临时区：已加载的动态库会占用入口文件，移走目录比删除更可能成功；
+/// 残留目录下次启动由 [`layout::sweep_temp`] 清理。
+pub(crate) fn retire(root: &Path, id: &str) -> Result<(), String> {
+    let dir = layout::plugin_dir(root, id);
+    if !dir.exists() {
+        return Ok(());
+    }
+    let trash = layout::temp_dir(root);
+    std::fs::rename(&dir, &trash)
+        .map_err(|e| format!("删除失败且无法移走插件目录，重启后请重试：{e}"))?;
+    // 动态库仍被占用时删不干净，留给启动扫尾；能删就当场清掉
+    let _ = std::fs::remove_dir_all(&trash);
+    Ok(())
+}
+
 /// 把已就绪的 `staged` 目录落位为 `<root>/<id>/`：旧内容轮换进 `previous/<ts>/`（只留一代），
 /// 宿主状态项（`data/` `logs/` 与启用标记）原位保留。落位失败即回滚到轮换前状态。
 fn place(root: &Path, id: &str, staged: &Path) -> Result<(), String> {

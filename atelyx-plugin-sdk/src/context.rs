@@ -31,12 +31,45 @@ pub struct Context {
     inner: Arc<Inner>,
 }
 
+/// 同进程宿主的帧提交：帧在这一层直接编成 ABI 指令，不落共享内存。
+pub(crate) type FrameSubmit =
+    Arc<dyn Fn(&str, crate::protocol::frame::SurfaceFrame) -> Result<SubmitResult, RpcError> + Send + Sync>;
+
+/// 同进程宿主的服务回执：`call_id` 来自宿主发起的服务调用，直接走 ABI 回执。
+pub(crate) type ServiceReply =
+    Arc<dyn Fn(&str, bool, &str) -> Result<(), RpcError> + Send + Sync>;
+
+/// 同进程宿主的日志落点（进程插件写 stderr，由宿主归档）。
+pub(crate) type LogSink = Arc<dyn Fn(&str) + Send + Sync>;
+
+/// 只持有在途调用表的句柄：同进程泵用它回填宿主应答，不拖住发送端关闭。
+#[derive(Clone)]
+pub(crate) struct PendingHandle {
+    pending: PendingMap,
+}
+
+impl PendingHandle {
+    pub(crate) fn remove(&self, id: u64) -> Option<oneshot::Sender<Result<Value, RpcError>>> {
+        self.pending.lock().unwrap().remove(&id)
+    }
+
+    pub(crate) fn drain(&self) -> std::collections::HashMap<u64, oneshot::Sender<Result<Value, RpcError>>> {
+        std::mem::take(&mut *self.pending.lock().unwrap())
+    }
+}
+
 struct Inner {
     out_tx: mpsc::Sender<Envelope>,
     pending: PendingMap,
     next_id: AtomicU64,
     /// 握手应答给出的帧共享内存；提交一律走它，未就绪时提交直接报错。
     frame_region: Mutex<Option<Arc<tokio::sync::Mutex<FrameRegionState>>>>,
+    /// 同进程传输的帧提交器；`Some` 时优先于共享内存。
+    frame_submit: Option<FrameSubmit>,
+    /// 同进程传输的服务回执器；`Some` 时服务结果不再走 `service.result` 请求。
+    service_reply: Option<ServiceReply>,
+    /// 同进程传输的日志落点；`None` 时写 stderr。
+    log: Option<LogSink>,
 }
 
 /// 当前区域与它的映射：映射按需重建，失败后下一次提交重试（宿主已换区时旧映射已不可用）。
@@ -106,12 +139,34 @@ impl Context {
     }
 
     pub(crate) fn new(out_tx: mpsc::Sender<Envelope>) -> Self {
+        Self::build(out_tx, None, None, None)
+    }
+
+    /// 同进程传输：请求仍走信封通道，帧、服务回执与日志直接交给宿主。
+    pub(crate) fn new_in_process(
+        out_tx: mpsc::Sender<Envelope>,
+        submit: FrameSubmit,
+        service_reply: ServiceReply,
+        log: LogSink,
+    ) -> Self {
+        Self::build(out_tx, Some(submit), Some(service_reply), Some(log))
+    }
+
+    fn build(
+        out_tx: mpsc::Sender<Envelope>,
+        frame_submit: Option<FrameSubmit>,
+        service_reply: Option<ServiceReply>,
+        log: Option<LogSink>,
+    ) -> Self {
         Self {
             inner: Arc::new(Inner {
                 out_tx,
                 pending: Arc::new(Mutex::new(std::collections::HashMap::new())),
                 next_id: AtomicU64::new(1),
                 frame_region: Mutex::new(None),
+                frame_submit,
+                service_reply,
+                log,
             }),
         }
     }
@@ -119,6 +174,18 @@ impl Context {
     /// 读任务收场在途调用时取走整表（drain）。
     pub(crate) fn drain_pending(&self) -> std::collections::HashMap<u64, oneshot::Sender<Result<Value, RpcError>>> {
         std::mem::take(&mut *self.inner.pending.lock().unwrap())
+    }
+
+    pub(crate) fn pending_handle(&self) -> PendingHandle {
+        PendingHandle { pending: self.inner.pending.clone() }
+    }
+
+    /// 写一条插件错误日志：同进程插件进宿主运行日志，进程插件写 stderr（宿主归入诊断输出）。
+    pub fn log_error(&self, message: &str) {
+        match &self.inner.log {
+            Some(log) => log(message),
+            None => eprintln!("{message}"),
+        }
     }
 
     /// 按请求 id 摘除一个在途调用（响应配对用）。
@@ -212,14 +279,16 @@ impl Context {
 
     /// 提交整面帧：整发整换该面的绘制指令、命中区与输入声明（空指令 = 清空绘制）。
     ///
-    /// 帧写进握手时建立的共享内存区域，须先完成握手；帧超出当前槽容量时自动发一次 `frame.region`
-    /// 扩容并换映射，扩容失败按可读错误返回、下一次提交重试。同一 `Context` 上的提交串行送达宿主。
+    /// 进程插件把帧写进握手时建立的共享内存区域，须先完成握手；同进程插件直接交宿主复制。
     /// 回执 `applied = false` 表示帧在槽内被后续写入覆盖（宿主整帧丢弃），按需重发即可。
     pub async fn submit_frame(
         &self,
         surface_id: &str,
         frame: crate::protocol::frame::SurfaceFrame,
     ) -> Result<SubmitResult, RpcError> {
+        if let Some(submit) = &self.inner.frame_submit {
+            return submit(surface_id, frame);
+        }
         let region = self.frame_region()?;
         let mut state = region.lock().await;
         let payload = frame_codec::encode(&frame);
@@ -506,8 +575,13 @@ impl Context {
     }
 
     /// 回报一次服务调用的结果：`call_id` 原样带回 [`crate::PluginHandler::on_service_call`] 收到的值，
-    /// `result` 即目标方法的结果。调用已超时 / 提供者已下线或不归本插件时报可读错误。
+    /// `result` 即目标方法的结果。进程承载下，调用已超时 / 提供者已下线或不归本插件时报可读错误；
+    /// 同进程承载的回执直接交给宿主，宿主丢弃时不再回报。
     pub async fn service_result(&self, call_id: &str, result: Value) -> Result<(), RpcError> {
+        if let Some(reply) = &self.inner.service_reply {
+            let payload = serde_json::to_string(&result).unwrap_or_else(|_| "null".into());
+            return reply(call_id, true, &payload);
+        }
         let params = service::ResultParams {
             call_id: call_id.into(),
             result: Some(result),
@@ -518,6 +592,9 @@ impl Context {
 
     /// 回报一次服务调用失败：`error` 为可读原因，调用方收到的就是这条原因。
     pub async fn service_error(&self, call_id: &str, error: &str) -> Result<(), RpcError> {
+        if let Some(reply) = &self.inner.service_reply {
+            return reply(call_id, false, error);
+        }
         let params = service::ResultParams {
             call_id: call_id.into(),
             result: None,

@@ -13,6 +13,8 @@ exclude = ["src/bin", "tests"]
 [dependencies]
 # version 供 crates.io 解析，path 供仓库内直接构建（打包时 path 会被去掉）
 atelyx-plugin-protocol = { version = "0.1.0", path = "../atelyx-plugin-protocol" }
+# 同进程后端：导出 ABI 函数表并直接提交帧
+atelyx-plugin-abi = { version = "0.1.0", path = "../atelyx-plugin-abi" }
 # Context 的定型调用借 serde 的 Serialize/DeserializeOwned trait（不用 derive）
 serde = { version = "1", default-features = false }
 serde_json = "1"

@@ -8,9 +8,12 @@ pub mod context;
 pub mod frame_builders;
 pub mod frame_ui;
 pub mod handler;
+pub mod in_process;
 
 /// 协议类型再导出：插件代码只依赖本 crate。
 pub use atelyx_plugin_protocol as protocol;
+/// ABI 类型再导出：同进程插件导出函数表时使用。
+pub use atelyx_plugin_abi as abi;
 pub use connection::{run_stdio, ConnectError, Connection};
 pub use context::Context;
 pub use handler::PluginHandler;

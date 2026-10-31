@@ -2,6 +2,7 @@
 //! 运行时为进程内单例（壳持 `Arc`，多窗口共享）；插件事件经 [`PluginRuntime::subscribe_events`]
 //! 的单一广播通道进入壳的 update。进程创建与清理一律经 [`crate::plugin_process`]。
 
+mod abi;
 mod ai_tools;
 
 mod capability;
@@ -1474,7 +1475,9 @@ impl PluginRuntime {
         if let Some(instance) = instance {
             instance.stop();
         }
-        install::uninstall(&self.root, id)?;
+        if let Err(error) = install::uninstall(&self.root, id) {
+            install::retire(&self.root, id).map_err(|retire| format!("{error}；{retire}"))?;
+        }
         self.scan();
         Ok(())
     }
