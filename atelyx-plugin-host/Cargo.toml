@@ -1,0 +1,13 @@
+[package]
+name = "atelyx-plugin-host"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+atelyx-plugin-abi = { path = "../atelyx-plugin-abi" }
+libloading = "0.8"
+
+[[bin]]
+name = "sample-host"
+path = "src/bin/sample_host.rs"

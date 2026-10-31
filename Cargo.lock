@@ -436,6 +436,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "atelyx-plugin-abi"
+version = "0.1.0"
+
+[[package]]
 name = "atelyx-plugin-calendar"
 version = "0.1.0"
 dependencies = [
@@ -449,12 +453,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "atelyx-plugin-host"
+version = "0.1.0"
+dependencies = [
+ "atelyx-plugin-abi",
+ "libloading",
+]
+
+[[package]]
 name = "atelyx-plugin-protocol"
 version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "atelyx-plugin-sample"
+version = "0.1.0"
+dependencies = [
+ "atelyx-plugin-abi",
 ]
 
 [[package]]
