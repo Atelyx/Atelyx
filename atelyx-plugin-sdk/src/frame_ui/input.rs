@@ -21,6 +21,7 @@ pub(crate) async fn handle(
     value_of: impl Fn(&str) -> Option<String>,
 ) -> Vec<UiEvent> {
     let mut events = Vec::new();
+    let before = caret_snapshot(state);
     match input {
         FrameInput::PointerDown { x, y, button, hit, .. } => {
             if *button == MouseButton::Right {
@@ -46,9 +47,11 @@ pub(crate) async fn handle(
                     .filter(|id| matches!(state.layouts.get(*id), Some(Layout::Input { .. } | Layout::TextArea { .. })))
                 {
                     if let Some(value) = value_of(id) {
+                        let at = state.inputs.get(id).map(|item| item.caret).unwrap_or(0);
+                        let (start, end) = word_range(&value, at);
                         let item = state.inputs.entry(id.to_string()).or_default();
-                        item.caret = value.len();
-                        item.anchor = 0;
+                        item.caret = end;
+                        item.anchor = start;
                     }
                 }
                 // 双击先按一次按下处理（聚焦 / 置按下态），再单独上报
@@ -99,7 +102,31 @@ pub(crate) async fn handle(
             state.resize_pending = true;
         }
     }
+    // 只有选移动（没改文本）才单独报光标：改了文本的那一条已经带着新值，
+    // 插件回读光标即可；但光标离开 `#` 触发段这类场景文本不变，浮层要靠这条收起
+    let text_changed = events.iter().any(|event| matches!(event, UiEvent::Text { .. }));
+    let after = caret_snapshot(state);
+    if !text_changed {
+        if let Some((id, caret, anchor)) = after {
+            // 焦点换了另有 Focus 事件，不必再报一次光标
+            let changed = before
+                .map(|(before_id, before_caret, before_anchor)| {
+                    before_id == id && (before_caret != caret || before_anchor != anchor)
+                })
+                .unwrap_or(false);
+            if changed {
+                events.insert(0, UiEvent::Caret { id, caret, anchor });
+            }
+        }
+    }
     events
+}
+
+/// 当前聚焦输入框的 (id, 光标, 选区锚点)。
+fn caret_snapshot(state: &UiState) -> Option<(String, usize, usize)> {
+    let id = state.focus.clone()?;
+    let item = state.inputs.get(&id)?;
+    Some((id, item.caret, item.anchor))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -147,13 +174,22 @@ async fn pointer_down(
             item.preedit.clear();
             state.press = Some(Press { id: id.to_string(), from_input: true });
         }
-        Layout::TextArea { inner, font, value: shown, .. } => {
+        Layout::TextArea { inner, font, value: shown, marks, .. } => {
             // 可视首行取决于落点前的光标所在行：先按旧光标换算，再改光标与焦点
             let current = value_of(id).unwrap_or(shown);
             let was_focused = state.focus.as_deref() == Some(id);
             let old = state.inputs.get(id).map(|item| item.caret).unwrap_or(0);
-            let caret = area_caret_at(state, ctx, inner, font, &current, x, y, old, was_focused).await;
-            state.inputs.insert(id.to_string(), InputState { caret, anchor: caret, preedit: String::new() });
+            let caret =
+                area_caret_at(state, ctx, id, inner, font, &current, x, y, old, was_focused).await;
+            // 点在标记（`#` 引用标签这类整段实体）内部 = 整段选中，之后一个退格删掉整条
+            let (caret, anchor) = match mark_at(&marks, caret) {
+                Some((start, end)) => (end, start),
+                None => (caret, caret),
+            };
+            let scroll = state.inputs.get(id).map(|item| item.scroll).unwrap_or(0.0);
+            state
+                .inputs
+                .insert(id.to_string(), InputState { caret, anchor, scroll, ..InputState::default() });
             set_focus(state, Some(id.to_string()), value_of, events);
             state.press = Some(Press { id: id.to_string(), from_input: true });
         }
@@ -291,7 +327,7 @@ async fn pointer_move(
         Layout::TextArea { inner, font, value: shown, .. } => {
             let current = value_of(&press.id).unwrap_or(shown);
             let old = state.inputs.get(&press.id).map(|item| item.caret).unwrap_or(0);
-            area_caret_at(state, ctx, inner, font, &current, x, y, old, true).await
+            area_caret_at(state, ctx, &press.id, inner, font, &current, x, y, old, true).await
         }
         _ => return,
     };
@@ -312,6 +348,26 @@ fn wheel(state: &mut UiState, x: f32, y: f32, delta_y: f32) -> Option<UiEvent> {
     // 浮层打开时滚轮只作用于浮层内：落点不在浮层上即丢弃，也不把滚动漏给下层列表
     if !state.overlays.is_empty() && !state.overlays.iter().any(|rect| rect.contains(x, y)) {
         return None;
+    }
+    // 光标落在内容超出一屏的多行输入框上：滚轮先滚输入框内部（与原生输入面一致）
+    let area = state
+        .layouts
+        .iter()
+        .filter_map(|(id, layout)| match layout {
+            Layout::TextArea { inner, font, value, .. } if inner.contains(x, y) => {
+                Some((id.clone(), *inner, *font, value.clone()))
+            }
+            _ => None,
+        })
+        .min_by(|a, b| (a.1.w * a.1.h).total_cmp(&(b.1.w * b.1.h)));
+    if let Some((id, inner, font, value)) = area {
+        let content = text::wrapped_height(&mut state.metrics, &value, font, inner.w);
+        let max_offset = (content - inner.h).max(0.0);
+        if max_offset > 0.5 {
+            let item = state.inputs.entry(id).or_default();
+            item.scroll = (item.scroll + delta_y).clamp(0.0, max_offset);
+            return None;
+        }
     }
     // 嵌套滚动区取面积最小者（最内层）：否则滚动会作用到外层容器上
     let (id, content, viewport) = state
@@ -409,9 +465,12 @@ async fn key_press(
                 events.push(UiEvent::Click { id });
             }
         }
-        Layout::Input { .. } => edit_key(state, ctx, &id, key, modifiers, text, value_of, events, None).await,
-        Layout::TextArea { inner, font, .. } => {
-            edit_key(state, ctx, &id, key, modifiers, text, value_of, events, Some((inner, font))).await
+        Layout::Input { .. } => {
+            edit_key(state, ctx, &id, key, modifiers, text, value_of, events, None).await
+        }
+        Layout::TextArea { inner, font, marks, .. } => {
+            let area = AreaCtx { inner, font, marks };
+            edit_key(state, ctx, &id, key, modifiers, text, value_of, events, Some(&area)).await
         }
         _ => {}
     }
@@ -471,7 +530,7 @@ async fn edit_key(
     text: Option<&str>,
     value_of: &impl Fn(&str) -> Option<String>,
     events: &mut Vec<UiEvent>,
-    area: Option<(Rect, FontSpec)>,
+    area: Option<&AreaCtx>,
 ) {
     let Some(current) = current_value(state, id, value_of) else {
         return;
@@ -499,6 +558,16 @@ async fn edit_key(
                         events.push(UiEvent::Text { id: id.to_string(), value });
                     }
                 }
+                "z" => {
+                    if let Some(value) = step_history(state, id, &current, false) {
+                        events.push(UiEvent::Text { id: id.to_string(), value });
+                    }
+                }
+                "y" => {
+                    if let Some(value) = step_history(state, id, &current, true) {
+                        events.push(UiEvent::Text { id: id.to_string(), value });
+                    }
+                }
                 "v" => match ctx.clipboard_read().await {
                     Ok(text) => {
                         if let Some(value) = insert(state, id, &current, &text) {
@@ -512,7 +581,8 @@ async fn edit_key(
         }
         return;
     }
-    if let Some((inner, font)) = area {
+    if let Some(area) = area {
+        let (inner, font) = (area.inner, area.font);
         // 多行的上下键与行首尾按可视行走：按整篇首尾跳会跨过一整段
         if let Key::Named { name: NamedKey::ArrowUp | NamedKey::ArrowDown } = key {
             let up = matches!(key, Key::Named { name: NamedKey::ArrowUp });
@@ -524,6 +594,24 @@ async fn edit_key(
             move_line_edge(state, ctx, id, &current, inner, font, end, modifiers.shift).await;
             return;
         }
+        // 标记边界上的退格 / 删除 = 整段删掉（与整段选中的交互对齐，逐字拆标签没有意义）
+        if let Key::Named { name: NamedKey::Backspace | NamedKey::Delete } = key {
+            let item = state.inputs.get(id);
+            let caret = item.map_or(0, |item| item.caret.min(current.len()));
+            let anchor = item.map_or(0, |item| item.anchor.min(current.len()));
+            let target = match key {
+                Key::Named { name: NamedKey::Backspace } => {
+                    mark_ending_at(&area.marks, caret).filter(|_| caret == anchor)
+                }
+                _ => mark_starting_at(&area.marks, caret).filter(|_| caret == anchor),
+            };
+            if let Some((from, to)) = target {
+                if let Some(value) = apply_edit(state, id, &current, Edit::Cut { from, to }) {
+                    events.push(UiEvent::Text { id: id.to_string(), value });
+                }
+                return;
+            }
+        }
     }
     let edit = match key {
         Key::Character { .. } => text.map(|text| Edit::Insert(text.to_string())),
@@ -531,8 +619,14 @@ async fn edit_key(
             NamedKey::Backspace => Some(Edit::Backspace),
             NamedKey::Delete => Some(Edit::Delete),
             NamedKey::Enter => area.map(|_| Edit::Insert("\n".to_string())),
-            NamedKey::ArrowLeft => Some(Edit::Left { extend: modifiers.shift }),
-            NamedKey::ArrowRight => Some(Edit::Right { extend: modifiers.shift }),
+            NamedKey::ArrowLeft => Some(Edit::Left {
+                extend: modifiers.shift,
+                word: modifiers.control,
+            }),
+            NamedKey::ArrowRight => Some(Edit::Right {
+                extend: modifiers.shift,
+                word: modifiers.control,
+            }),
             NamedKey::Home => Some(Edit::Home { extend: modifiers.shift }),
             NamedKey::End => Some(Edit::End { extend: modifiers.shift }),
             NamedKey::Space => Some(Edit::Insert(" ".to_string())),
@@ -578,12 +672,37 @@ fn ime_text(
     }
 }
 
+/// 多行输入在编辑键上要用的布局信息：可视区与标记区间。
+struct AreaCtx {
+    inner: Rect,
+    font: FontSpec,
+    marks: Vec<(usize, usize)>,
+}
+
+/// 光标落在哪个标记内部（严格在两端之间）。
+fn mark_at(marks: &[(usize, usize)], caret: usize) -> Option<(usize, usize)> {
+    marks.iter().copied().find(|(start, end)| caret > *start && caret < *end)
+}
+
+/// 光标恰在标记末尾（退格整段删）。
+fn mark_ending_at(marks: &[(usize, usize)], caret: usize) -> Option<(usize, usize)> {
+    marks.iter().copied().find(|(_, end)| *end == caret)
+}
+
+/// 光标恰在标记开头（Delete 整段删）。
+fn mark_starting_at(marks: &[(usize, usize)], caret: usize) -> Option<(usize, usize)> {
+    marks.iter().copied().find(|(start, _)| *start == caret)
+}
+
 enum Edit {
     Insert(String),
     Backspace,
     Delete,
-    Left { extend: bool },
-    Right { extend: bool },
+    /// 直接切除区间（标记整段删除用）。
+    Cut { from: usize, to: usize },
+    /// `word` = 按词跳（Ctrl+左右）。
+    Left { extend: bool, word: bool },
+    Right { extend: bool, word: bool },
     Home { extend: bool },
     End { extend: bool },
 }
@@ -594,6 +713,18 @@ fn apply_edit(state: &mut UiState, id: &str, value: &str, edit: Edit) -> Option<
     let anchor = boundary(value, item.anchor.min(value.len()));
     match edit {
         Edit::Insert(text) => insert(state, id, value, &text),
+        Edit::Cut { from, to } => {
+            let from = boundary(value, from.min(value.len()));
+            let to = boundary(value, to.min(value.len()));
+            if from == to {
+                return None;
+            }
+            let item = state.inputs.entry(id.to_string()).or_default();
+            push_history(item, value);
+            item.caret = from;
+            item.anchor = from;
+            Some(format!("{}{}", &value[..from], &value[to..]))
+        }
         Edit::Backspace => {
             let (from, to) = if caret != anchor { (caret.min(anchor), caret.max(anchor)) } else {
                 (prev_boundary(value, caret), caret)
@@ -602,6 +733,7 @@ fn apply_edit(state: &mut UiState, id: &str, value: &str, edit: Edit) -> Option<
                 return None;
             }
             let item = state.inputs.entry(id.to_string()).or_default();
+            push_history(item, value);
             item.caret = from;
             item.anchor = from;
             Some(format!("{}{}", &value[..from], &value[to..]))
@@ -614,30 +746,39 @@ fn apply_edit(state: &mut UiState, id: &str, value: &str, edit: Edit) -> Option<
                 return None;
             }
             let item = state.inputs.entry(id.to_string()).or_default();
+            push_history(item, value);
             item.caret = from;
             item.anchor = from;
             Some(format!("{}{}", &value[..from], &value[to..]))
         }
-        Edit::Left { extend } => {
+        Edit::Left { extend, word } => {
             let item = state.inputs.entry(id.to_string()).or_default();
             if !extend && caret != anchor {
                 item.caret = caret.min(anchor);
                 item.anchor = item.caret;
             } else {
-                item.caret = prev_boundary(value, caret);
+                item.caret = if word {
+                    word_edge(value, caret, true)
+                } else {
+                    prev_boundary(value, caret)
+                };
                 if !extend {
                     item.anchor = item.caret;
                 }
             }
             None
         }
-        Edit::Right { extend } => {
+        Edit::Right { extend, word } => {
             let item = state.inputs.entry(id.to_string()).or_default();
             if !extend && caret != anchor {
                 item.caret = caret.max(anchor);
                 item.anchor = item.caret;
             } else {
-                item.caret = next_boundary(value, caret);
+                item.caret = if word {
+                    word_edge(value, caret, false)
+                } else {
+                    next_boundary(value, caret)
+                };
                 if !extend {
                     item.anchor = item.caret;
                 }
@@ -669,6 +810,10 @@ fn insert(state: &mut UiState, id: &str, value: &str, text: &str) -> Option<Stri
     let caret = boundary(value, item.caret.min(value.len()));
     let anchor = boundary(value, item.anchor.min(value.len()));
     let (from, to) = (caret.min(anchor), caret.max(anchor));
+    if text.is_empty() && from == to {
+        return None;
+    }
+    push_history(item, value);
     let mut next = String::with_capacity(value.len() + text.len());
     next.push_str(&value[..from]);
     next.push_str(text);
@@ -688,6 +833,112 @@ fn current_value(state: &UiState, id: &str, value_of: &impl Fn(&str) -> Option<S
         Some(Layout::Input { value, .. } | Layout::TextArea { value, .. }) => Some(value.clone()),
         _ => None,
     }
+}
+
+/// 撤销栈深度上限：满即淘汰最旧（全量快照，再深也只是内存）。
+const UNDO_DEPTH: usize = 200;
+
+/// 记一笔撤销快照（文本变了才记），并作废重做栈。
+fn push_history(item: &mut InputState, value: &str) {
+    item.undo.push((value.to_string(), item.caret));
+    if item.undo.len() > UNDO_DEPTH {
+        item.undo.remove(0);
+    }
+    item.redo.clear();
+}
+
+/// 撤销 / 重做一步：返回要写回的新值（无可撤销时返回 `None`）。
+fn step_history(state: &mut UiState, id: &str, value: &str, redo: bool) -> Option<String> {
+    let item = state.inputs.entry(id.to_string()).or_default();
+    let from = if redo { item.redo.pop() } else { item.undo.pop() }?;
+    let back = (value.to_string(), item.caret);
+    if redo {
+        item.undo.push(back);
+    } else {
+        item.redo.push(back);
+    }
+    let (value, caret) = from;
+    item.caret = boundary(&value, caret.min(value.len()));
+    item.anchor = item.caret;
+    Some(value)
+}
+
+/// 按词跳：`backward` 先跳过空白再回退到词首，否则前进到词尾。
+fn word_edge(text: &str, caret: usize, backward: bool) -> usize {
+    let mut i = caret.min(text.len());
+    while !text.is_char_boundary(i) {
+        i = if backward { i.saturating_sub(1) } else { i + 1 };
+    }
+    if backward {
+        while let Some((at, ch)) = text[..i].char_indices().next_back() {
+            if ch.is_whitespace() {
+                i = at;
+            } else {
+                break;
+            }
+        }
+        while let Some((at, ch)) = text[..i].char_indices().next_back() {
+            if !ch.is_whitespace() {
+                i = at;
+            } else {
+                break;
+            }
+        }
+    } else {
+        while let Some(ch) = text[i..].chars().next() {
+            if !ch.is_whitespace() {
+                break;
+            }
+            i += ch.len_utf8();
+        }
+        while let Some(ch) = text[i..].chars().next() {
+            if ch.is_whitespace() {
+                break;
+            }
+            i += ch.len_utf8();
+        }
+    }
+    i
+}
+
+/// 双击选词：命中位在词内或词边界取相邻词（右侧优先），空白段取该空白段。
+fn word_range(text: &str, caret: usize) -> (usize, usize) {
+    let mut at = caret.min(text.len());
+    while !text.is_char_boundary(at) {
+        at = at.saturating_sub(1);
+    }
+    let forward_word = text[at..].chars().next().is_some_and(|ch| !ch.is_whitespace());
+    let backward_word = text[..at].chars().next_back().is_some_and(|ch| !ch.is_whitespace());
+    let mut start = at;
+    let mut end = at;
+    if !forward_word && !backward_word {
+        while let Some(ch) = text[end..].chars().next().filter(|ch| ch.is_whitespace()) {
+            end += ch.len_utf8();
+        }
+        while let Some((before, ch)) = text[..start].char_indices().next_back() {
+            if ch.is_whitespace() {
+                start = before;
+            } else {
+                break;
+            }
+        }
+        return (start, end);
+    }
+    if forward_word {
+        while let Some(ch) = text[end..].chars().next().filter(|ch| !ch.is_whitespace()) {
+            end += ch.len_utf8();
+        }
+    }
+    if backward_word {
+        while let Some((before, ch)) = text[..start].char_indices().next_back() {
+            if !ch.is_whitespace() {
+                start = before;
+            } else {
+                break;
+            }
+        }
+    }
+    (start, end)
 }
 
 /// 选区字节范围（无选区或越界时为空）。
@@ -737,11 +988,12 @@ async fn caret_at(
     points[best]
 }
 
-/// 多行输入的落点换算：`focused` 决定纵向平移量（未聚焦时画面停在前几行）。
+/// 多行输入的落点换算：纵向偏移与绘制同一口径（用户滚动值 + 光标跟随，整行吸附）。
 #[allow(clippy::too_many_arguments)]
 async fn area_caret_at(
     state: &mut UiState,
     ctx: &Context,
+    id: &str,
     inner: Rect,
     font: FontSpec,
     value: &str,
@@ -753,11 +1005,16 @@ async fn area_caret_at(
     refill(state, ctx, value, font, inner.w).await;
     let lines = text::lines(&mut state.metrics, value, font, inner.w);
     let line_height = state.metrics.measure("", font, None).height.max(1.0);
-    let top = if focused {
-        text::top_line(text::line_of(&lines, text::snap(value, old_caret)), line_height, inner.h)
-    } else {
-        0
-    };
+    let stored = state.inputs.get(id).map(|item| item.scroll).unwrap_or(0.0);
+    let scroll = text::area_scroll(
+        stored,
+        text::line_of(&lines, text::snap(value, old_caret)),
+        line_height,
+        inner.h,
+        lines.len(),
+        focused,
+    );
+    let top = (scroll / line_height).round() as usize;
     let row = ((y - inner.y).max(0.0) / line_height) as usize;
     let line = lines[(top + row).min(lines.len().saturating_sub(1))];
     let offset = text::caret_at_x(&mut state.metrics, &value[line.start..line.end], font, (x - inner.x).max(0.0));
@@ -877,7 +1134,7 @@ fn set_focus(
             let item = state
                 .inputs
                 .entry(id.clone())
-                .or_insert_with(|| InputState { caret: len, anchor: len, preedit: String::new() });
+                .or_insert_with(|| InputState { caret: len, anchor: len, ..InputState::default() });
             item.preedit.clear();
         }
         events.push(UiEvent::Focus { id: id.clone(), focused: true });
@@ -929,6 +1186,28 @@ fn next_boundary(value: &str, index: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn word_edges_stop_at_whitespace() {
+        assert_eq!(word_edge("hello world", 11, true), 6);
+        assert_eq!(word_edge("hello world", 0, false), 5);
+        assert_eq!(word_edge("中文 词", 9, true), 0);
+        assert_eq!(word_edge("中文 词", 10, true), 7);
+        assert_eq!(word_edge("中文 词", 7, false), 10);
+        // 词中位置先拼回词首 / 词尾
+        assert_eq!(word_edge("one two", 5, true), 4);
+        assert_eq!(word_edge("one two", 5, false), 7);
+    }
+
+    #[test]
+    fn word_range_covers_the_token_under_the_caret() {
+        assert_eq!(word_range("你好 世界", 0), (0, 6));
+        assert_eq!(word_range("你好 世界", 3), (0, 6));
+        assert_eq!(word_range("你好 世界", 6), (0, 6));
+        assert_eq!(word_range("你好 世界", 7), (7, 13));
+        // 空白段：向两侧取整段空白
+        assert_eq!(word_range("a  b", 2), (1, 3));
+    }
 
     #[test]
     fn boundaries_step_by_one_char() {

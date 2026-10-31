@@ -41,7 +41,7 @@ pub(crate) fn permission_for(name: &str) -> Option<Permission> {
         http::REQUEST | http::STREAM_OPEN | http::STREAM_CANCEL => Some(Http),
         collab::PEERS | collab::SEND | collab::META_GET | collab::META_PATCH => Some(Collab),
         // 读写当前笔记的选区即读写用户正文，按仓库内容权限归类
-        editor::SELECTION | editor::REPLACE_SELECTION => Some(Vault),
+        editor::SELECTION | editor::REPLACE_SELECTION | editor::OPEN_FILES => Some(Vault),
         // 活动统计取自当前仓库内容，同样按仓库内容权限归类
         history::ACTIVITY | history::DAY | history::OPEN => Some(Vault),
         window::OPEN | window::CLOSE | window::UPDATE | window::SHOW | window::BEGIN_DRAG

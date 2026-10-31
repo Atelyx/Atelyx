@@ -594,6 +594,8 @@ pub enum ColorToken {
     BorderStrong,
     /// 无底色 / 无边框。
     Transparent,
+    /// 浮层表面（菜单 / 提示条底，比面板底亮一档）。
+    SurfaceOverlay,
 }
 ```
 
@@ -835,6 +837,11 @@ pub mod frame {
 /// 一面一帧的完整内容。
 #[serde(rename_all = "camelCase")]
 pub struct SurfaceFrame {
+    /// 本帧按多大尺寸排版。宿主据此判定这张帧是否对得上当前面尺寸——改宽期间手里那帧常常
+    /// 还是上一拍宽度排的，直接画出来右对齐项与滚动条就会停在旧边缘。
+    /// 缺省 = 未声明，宿主无从判定，只能按「拿到什么画什么」处理。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<FrameSize>,
     pub commands: Vec<DrawCommand>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hits: Vec<HitRegion>,
@@ -1420,11 +1427,12 @@ pub fn decode(bytes: &[u8]) -> Result<SurfaceFrame, String> {
     if bytes[..MAGIC.len()] != MAGIC {
         return Err("帧编码魔数不符".into());
     }
-    if bytes[MAGIC.len()] != VERSION {
-        return Err(format!("帧编码版本不符：{}", bytes[MAGIC.len()]));
+    let version = bytes[MAGIC.len()];
+    if !(1..=VERSION).contains(&version) {
+        return Err(format!("帧编码版本不符：{version}"));
     }
     let mut reader = Reader { buf: bytes, pos: MAGIC.len() + 1 };
-    let frame = decode_frame(&mut reader)?;
+    let frame = decode_frame(&mut reader, version)?;
     if reader.pos != bytes.len() {
         return Err(format!("帧编码尾部有多余字节：{}", bytes.len() - reader.pos));
     }
@@ -1907,6 +1915,8 @@ pub mod editor {
     pub const SELECTION: &str = "editor.selection";
     /// 用给定文本替换当前选区（空串 = 删除选区）；写入经笔记同一套保存链。
     pub const REPLACE_SELECTION: &str = "editor.replaceSelection";
+    /// 读当前打开的文件（仓库相对路径，按打开顺序）。候选列表这类要「打开中的优先」的界面用。
+    pub const OPEN_FILES: &str = "editor.openFiles";
 }
 ```
 
@@ -3570,6 +3580,11 @@ pub mod name {
     pub const TABLE_SELECTION_CHANGED: &str = "table:selection.changed";
     /// 会话语义变更（流式增量不广播）。payload 见 [`ChatChangedPayload`]。
     pub const AI_CHAT_CHANGED: &str = "ai:chat.changed";
+    /// 会话真源整体重载完成（换仓 / 空间装载），订阅方应整体重取。
+    /// payload 见 [`ChatReloadedPayload`]。
+    pub const AI_CHAT_RELOAD: &str = "ai:chat.reload";
+    /// 会话落盘状态变化（失败置位 / 恢复）。payload 见 [`ChatPersistChangedPayload`]。
+    pub const AI_CHAT_PERSIST: &str = "ai:chat.persist";
     /// 仓库内文件变更（宿主保存 / 新建 / 删除 / 改名 / 插件经 `vault` 写入）。只覆盖宿主发起的
     /// 写入，外部程序直接改磁盘不发。payload 见 [`FileChangedPayload`]。
     pub const VAULT_FILE_CHANGED: &str = "vault:file.changed";
@@ -3630,25 +3645,18 @@ pub struct TableSelectionChangedPayload {
 pub struct ChatChangedPayload {
     pub session_id: String,
     pub kind: ChatChangeKind,
-    /// `persist` 变更的当前落盘失败（`None` = 已恢复）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub persist_error: Option<crate::chat::ChatPersistError>,
 }
 ```
 
 ```rust
 // atelyx-plugin-protocol/src/event.rs
-/// 会话变更种类：创建 / 消息列表变化 / 元数据变化 / 删除 / 真源整体重载 / 落盘状态变化。
+/// 会话变更种类：创建 / 消息列表变化 / 元数据变化 / 删除。
 #[serde(rename_all = "camelCase")]
 pub enum ChatChangeKind {
     Created,
     Messages,
     Meta,
     Deleted,
-    /// 会话真源已重新装载（换仓 / 空间装载完成）：`sessionId` 为空，订阅方应整体重取。
-    Reload,
-    /// 落盘失败置位 / 恢复：`sessionId` 为空，载荷带当前 `persistError`。
-    Persist,
 }
 ```
 

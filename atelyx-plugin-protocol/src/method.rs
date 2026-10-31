@@ -253,6 +253,8 @@ pub mod editor {
     pub const SELECTION: &str = "editor.selection";
     /// 用给定文本替换当前选区（空串 = 删除选区）；写入经笔记同一套保存链。
     pub const REPLACE_SELECTION: &str = "editor.replaceSelection";
+    /// 读当前打开的文件（仓库相对路径，按打开顺序）。候选列表这类要「打开中的优先」的界面用。
+    pub const OPEN_FILES: &str = "editor.openFiles";
 }
 
 pub mod ai {
@@ -674,6 +676,14 @@ pub struct Radii {
 
 /// 单次替换文本的字节上限（超限按可读错误拒绝）。
 pub const MAX_EDITOR_TEXT_BYTES: usize = 512 * 1024;
+
+/// [`editor::OPEN_FILES`] 的 result：当前打开的文件（仓库相对路径，按打开顺序）。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditorOpenFiles {
+    #[serde(default)]
+    pub paths: Vec<String>,
+}
 
 /// [`editor::SELECTION`] 的 result：当前文档与选区。
 /// `path` 缺省 = 未打开笔记；`from` / `to` 是正文字节偏移（frontmatter 之后的部分）。

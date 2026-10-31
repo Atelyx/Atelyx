@@ -20,6 +20,11 @@ pub mod name {
     pub const TABLE_SELECTION_CHANGED: &str = "table:selection.changed";
     /// 会话语义变更（流式增量不广播）。payload 见 [`ChatChangedPayload`]。
     pub const AI_CHAT_CHANGED: &str = "ai:chat.changed";
+    /// 会话真源整体重载完成（换仓 / 空间装载），订阅方应整体重取。
+    /// payload 见 [`ChatReloadedPayload`]。
+    pub const AI_CHAT_RELOAD: &str = "ai:chat.reload";
+    /// 会话落盘状态变化（失败置位 / 恢复）。payload 见 [`ChatPersistChangedPayload`]。
+    pub const AI_CHAT_PERSIST: &str = "ai:chat.persist";
     /// 仓库内文件变更（宿主保存 / 新建 / 删除 / 改名 / 插件经 `vault` 写入）。只覆盖宿主发起的
     /// 写入，外部程序直接改磁盘不发。payload 见 [`FileChangedPayload`]。
     pub const VAULT_FILE_CHANGED: &str = "vault:file.changed";
@@ -72,12 +77,22 @@ pub struct TableSelectionChangedPayload {
 pub struct ChatChangedPayload {
     pub session_id: String,
     pub kind: ChatChangeKind,
-    /// `persist` 变更的当前落盘失败（`None` = 已恢复）。
+}
+
+/// [`name::AI_CHAT_RELOAD`] 的 payload：当前无字段，保留结构体便于扩展。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ChatReloadedPayload {}
+
+/// [`name::AI_CHAT_PERSIST`] 的 payload：当前落盘失败（`None` = 已恢复）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatPersistChangedPayload {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub persist_error: Option<crate::chat::ChatPersistError>,
 }
 
-/// 会话变更种类：创建 / 消息列表变化 / 元数据变化 / 删除 / 真源整体重载 / 落盘状态变化。
+/// 会话变更种类：创建 / 消息列表变化 / 元数据变化 / 删除。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ChatChangeKind {
@@ -85,10 +100,6 @@ pub enum ChatChangeKind {
     Messages,
     Meta,
     Deleted,
-    /// 会话真源已重新装载（换仓 / 空间装载完成）：`sessionId` 为空，订阅方应整体重取。
-    Reload,
-    /// 落盘失败置位 / 恢复：`sessionId` 为空，载荷带当前 `persistError`。
-    Persist,
 }
 
 /// [`name::VAULT_FILE_CHANGED`] 的 payload：仓库相对路径 + 变更种类（改名另带旧路径）。
@@ -151,6 +162,30 @@ pub struct SubscribeResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chat_events_carry_their_own_payload() {
+        // 真源重载无字段；落盘恢复 = 空对象，插件按「无 persistError」清掉提示
+        assert_eq!(
+            serde_json::to_value(ChatReloadedPayload::default()).unwrap(),
+            serde_json::json!({})
+        );
+        let recovered: ChatPersistChangedPayload = serde_json::from_str("{}").unwrap();
+        assert!(recovered.persist_error.is_none(), "缺字段 = 已恢复");
+        let failed: ChatPersistChangedPayload = serde_json::from_value(serde_json::json!({
+            "persistError": { "message": "磁盘只读", "at": 1 }
+        }))
+        .unwrap();
+        assert_eq!(failed.persist_error.map(|error| error.message).as_deref(), Some("磁盘只读"));
+        assert_eq!(
+            serde_json::to_value(ChatChangedPayload {
+                session_id: "s1".into(),
+                kind: ChatChangeKind::Meta,
+            })
+            .unwrap(),
+            serde_json::json!({ "sessionId": "s1", "kind": "meta" })
+        );
+    }
 
     #[test]
     fn file_changed_payload_uses_camel_case_and_omits_missing_old_path() {

@@ -10,8 +10,8 @@ use atelyx_plugin_host::{
     self as host, Command, Host, HostCall, ImageSource, PluginInstance, PluginLibrary,
 };
 use atelyx_plugin_protocol::frame::{
-    FrameInput, FrameRect, HitCursor, HitRegion, Key, KeyAction, Modifiers, MouseButton, NamedKey,
-    SurfaceFrame,
+    FrameInput, FrameRect, FrameSize, HitCursor, HitRegion, Key, KeyAction, Modifiers, MouseButton,
+    NamedKey, SurfaceFrame,
 };
 use atelyx_plugin_protocol::paint::{
     ColorToken, DrawCommand, ImageFit, PaintColor, PaintPoint, PaintShadow, TextAlign, TextFamily,
@@ -636,6 +636,7 @@ fn named_key_code(key: NamedKey) -> u32 {
 /// ABI 复制来的帧 → 宿主协议帧；指令集在这里对齐，后续绘制管线不区分来源。
 pub(super) fn frame_from_host(frame: host::Frame) -> SurfaceFrame {
     SurfaceFrame {
+        size: frame.size.map(|(w, h)| FrameSize { w, h }),
         commands: frame.commands.into_iter().map(command_from_host).collect(),
         hits: frame
             .hits
@@ -758,6 +759,7 @@ fn token_from_code(code: u32) -> Option<ColorToken> {
         abi::TOKEN_BORDER => ColorToken::Border,
         abi::TOKEN_BORDER_STRONG => ColorToken::BorderStrong,
         abi::TOKEN_TRANSPARENT => ColorToken::Transparent,
+        abi::TOKEN_SURFACE_OVERLAY => ColorToken::SurfaceOverlay,
         _ => return None,
     })
 }
@@ -857,6 +859,7 @@ mod tests {
     #[test]
     fn host_frame_projects_to_protocol_frame() {
         let frame = host::Frame {
+            size: Some((800.0, 600.0)),
             commands: vec![
                 host::Command::Rect {
                     x: 1.0,

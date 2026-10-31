@@ -155,6 +155,10 @@ pub struct Model {
     pub refs: Vec<RefEntry>,
     pub files: Vec<FileEntry>,
     pub files_ready: bool,
+    /// 当前打开的文件（仓库相对路径，按打开顺序）：候选置顶用。
+    pub open_files: Vec<String>,
+    /// 候选刚展开、打开文件清单还没取：下一拍向宿主取一次。
+    pub open_files_stale: bool,
     pub images: Vec<PendingImage>,
     pub picker: Option<Picker>,
     pub agents: Vec<AgentRow>,
@@ -164,6 +168,12 @@ pub struct Model {
     pub model_pick: Option<(String, String)>,
     pub effort: Option<String>,
     pub menu: Option<Menu>,
+    /// 最近一次指针按下位置（面本地）：菜单锚点取它。
+    pub pointer: Option<(f32, f32)>,
+    /// 当前菜单的锚点；子菜单沿用同一触发点。
+    pub menu_anchor: Option<(f32, f32)>,
+    /// 命名 / 压缩进行中的转圈相位（宿主帧拍推进）。
+    pub spin_tick: u32,
 }
 
 impl Default for Model {
@@ -198,6 +208,8 @@ impl Model {
             refs: Vec::new(),
             files: Vec::new(),
             files_ready: false,
+            open_files: Vec::new(),
+            open_files_stale: false,
             images: Vec::new(),
             picker: None,
             agents: Vec::new(),
@@ -206,6 +218,9 @@ impl Model {
             model_pick: None,
             effort: None,
             menu: None,
+            pointer: None,
+            menu_anchor: None,
+            spin_tick: 0,
         }
     }
 
@@ -242,6 +257,9 @@ impl Model {
         self.model_pick = None;
         self.effort = None;
         self.menu = None;
+        self.pointer = None;
+        self.menu_anchor = None;
+        self.spin_tick = 0;
     }
 
     pub fn apply_list(&mut self, list: ChatHistoryResult) {
@@ -460,6 +478,8 @@ impl Model {
     /// 草稿 / 光标 → # 候选：`#` 后到光标之间不含空白即视为查询串。
     pub fn refresh_picker(&mut self, caret: usize) {
         let caret = caret.min(self.draft.len());
+        // 这一拍之前候选是不是已经开着：只有「刚展开」才值得向宿主取一次打开文件清单
+        let was_open = self.picker.is_some();
         self.picker = None;
         if !self.files_ready {
             return;
@@ -483,8 +503,20 @@ impl Model {
             .filter(|file| file.path.to_lowercase().contains(&needle))
             .collect();
         hits.sort_by_key(|file| {
-            let name = file_name(&file.path).to_lowercase();
-            (!name.starts_with(&needle), !name.contains(&needle), file.path.len())
+            // 打开中的文件置顶并按打开顺序排，其余按「名称前缀 > 名称包含 > 路径长度」
+            match self.open_files.iter().position(|path| path == &file.path) {
+                Some(index) => (0u8, index, 0u8, 0u8, 0usize),
+                None => {
+                    let name = file_name(&file.path).to_lowercase();
+                    (
+                        1,
+                        0,
+                        u8::from(!name.starts_with(&needle)),
+                        u8::from(!name.contains(&needle)),
+                        file.path.len(),
+                    )
+                }
+            }
         });
         let candidates = hits
             .into_iter()
@@ -504,6 +536,9 @@ impl Model {
             return;
         }
         self.picker = Some(Picker { hash, caret, candidates, selected: 0 });
+        if !was_open {
+            self.open_files_stale = true;
+        }
     }
 
     /// 键盘巡航候选（↑↓ 环绕）。
@@ -553,6 +588,31 @@ impl Model {
         next.push_str(&self.draft[picker.caret.min(self.draft.len())..]);
         let caret_after = picker.hash + tag.len();
         Some((next, caret_after))
+    }
+
+    /// 草稿里已登记引用的标签区间（字节）：每条引用取首个实例，重叠的让位。
+    /// 与宿主同一个口径——标签文本就是插进草稿的那段字面量。
+    pub fn marks(&self) -> Vec<(usize, usize)> {
+        let mut found: Vec<(usize, usize)> = self
+            .refs
+            .iter()
+            .filter_map(|entry| {
+                let tag = format!("#{}：{}", entry.kind.prefix(), entry.label);
+                self.draft
+                    .find(&tag)
+                    .map(|start| (start, start + tag.len()))
+            })
+            .collect();
+        found.sort_by_key(|(start, _)| *start);
+        let mut out: Vec<(usize, usize)> = Vec::new();
+        let mut prev_end = 0usize;
+        for (start, end) in found {
+            if start >= prev_end {
+                prev_end = end;
+                out.push((start, end));
+            }
+        }
+        out
     }
 
     /// 在光标处插入 `#` 并唤起候选（工具栏入口）。
@@ -684,6 +744,23 @@ mod tests {
         assert_eq!(caret, next.len());
         assert_eq!(model.refs.len(), 1);
         assert!(model.refs[0].label.ends_with("方案.md"));
+    }
+
+    #[test]
+    fn marks_cover_committed_tags_only() {
+        let mut model = picker_model();
+        model.draft = "看看 #方案".into();
+        model.refresh_picker(model.draft.len());
+        let (next, _) = model.pick_ref(0).expect("应能选中");
+        model.draft = next;
+        let tag = format!("#笔记：{}", model.refs[0].label);
+        let start = model.draft.find(&tag).expect("标签就在草稿里");
+        assert_eq!(model.marks(), vec![(start, start + tag.len())]);
+        // 未登记的 `#随手记` 不是引用
+        model.draft = format!("#随手记 和 {tag}");
+        assert_eq!(model.marks().len(), 1);
+        model.draft = "没有引用".into();
+        assert!(model.marks().is_empty());
     }
 
     #[test]

@@ -14,11 +14,11 @@ use atelyx_plugin_protocol::chat::{
     AppendBatch, CommitBatch, MetaPatch, OverridesPatch, SessionDef, TruncateEntry,
 };
 use atelyx_plugin_protocol::event::{
-    self, ChatChangeKind, ChatChangedPayload, FileChangeKind, FileChangedPayload,
-    FileDropPayload, PublishParams,
+    self, ChatChangeKind, ChatChangedPayload, ChatPersistChangedPayload, FileChangeKind,
+    FileChangedPayload, FileDropPayload, PublishParams,
 };
 use atelyx_plugin_protocol::frame::{
-    FrameInput, FrameInputParams, Key, KeyAction, NamedKey,
+    FrameInput, FrameInputParams, FrameTickParams, Key, KeyAction, NamedKey,
 };
 use atelyx_plugin_protocol::method::{
     ChatEvent, ChatEventParams, ChatRef, ChatSendParams, ContributionSlot, FileFilter, FsEntryKind,
@@ -63,6 +63,10 @@ impl AiPanelPlugin {
         }
         let snapshot = self.model.lock().unwrap().clone();
         let mut frame_ui = self.ui.lock().await;
+        // 命名 / 压缩进行中才要帧拍，其余时间不推帧
+        frame_ui.set_fps(
+            (snapshot.active_renaming() || snapshot.active_compacting()).then_some(10),
+        );
         if let Err(error) = frame_ui.render(ctx, PANEL, |frame| ui::frame(frame, &snapshot)).await {
             ctx.log_error(&format!("提交对话面板失败：{error}"));
         }
@@ -675,6 +679,7 @@ impl AiPanelPlugin {
         let Key::Named { name } = key else {
             return false;
         };
+        let mut moved = None;
         let edit = {
             let mut model = self.model.lock().unwrap();
             if model.picker.is_none() {
@@ -683,10 +688,12 @@ impl AiPanelPlugin {
             match name {
                 NamedKey::ArrowUp => {
                     model.move_picker(-1);
+                    moved = model.picker_selected();
                     None
                 }
                 NamedKey::ArrowDown => {
                     model.move_picker(1);
+                    moved = model.picker_selected();
                     None
                 }
                 NamedKey::Escape => {
@@ -706,8 +713,20 @@ impl AiPanelPlugin {
                 _ => return false,
             }
         };
-        if let Some((value, caret)) = edit {
-            self.ui.lock().await.set_input(DRAFT, &value, caret);
+        let scroll = moved.and_then(|index| {
+            let model = self.model.lock().unwrap();
+            model
+                .picker
+                .as_ref()
+                .map(|picker| crate::ui::picker_scroll_offset(picker, index))
+        });
+        {
+            let mut frame_ui = self.ui.lock().await;
+            if let Some((value, caret)) = edit {
+                frame_ui.set_input(DRAFT, &value, caret);
+            } else if let Some(offset) = scroll {
+                frame_ui.scroll_to("picker", offset);
+            }
         }
         true
     }
@@ -715,6 +734,35 @@ impl AiPanelPlugin {
     async fn handle_input(&self, ctx: &Context, params: FrameInputParams) {
         if params.surface_id != PANEL {
             return;
+        }
+        // 菜单锚点 = 触发钮的点击点（与宿主弹层同一套锚定口径：顶边贴指针，放不下向上翻）
+        if let FrameInput::PointerDown { x, y, .. }
+        | FrameInput::PointerUp { x, y, .. }
+        | FrameInput::DoubleClick { x, y, .. } = &params.input
+        {
+            self.model.lock().unwrap().pointer = Some((*x, *y));
+        }
+        // Esc 先关浮层（候选 / 菜单），没有浮层时才交给输入框取消编辑
+        if let FrameInput::Key {
+            key: Key::Named { name: NamedKey::Escape },
+            action: KeyAction::Press,
+            ..
+        } = &params.input
+        {
+            let closed = {
+                let mut model = self.model.lock().unwrap();
+                let open = model.menu.is_some() || model.picker.is_some();
+                if open {
+                    model.menu = None;
+                    model.menu_anchor = None;
+                    model.picker = None;
+                }
+                open
+            };
+            if closed {
+                self.render(ctx).await;
+                return;
+            }
         }
         if self.handle_picker_key(&params.input).await {
             self.render(ctx).await;
@@ -748,12 +796,17 @@ impl AiPanelPlugin {
                         let caret = caret.unwrap_or(model.draft.len());
                         model.refresh_picker(caret);
                     }
+                    // 只有选在动（点进标签整段选中、方向键移动）：候选浮层要跟着开合
+                    UiEvent::Caret { id, caret, .. } if id == DRAFT => {
+                        model.refresh_picker(caret);
+                    }
                     UiEvent::Text { id, value } if id == "search" => {
                         model.search = value;
                     }
                     UiEvent::Submit { id } if id == DRAFT => actions.push(Action::Send),
                     UiEvent::Cancel { .. } => {
                         model.menu = None;
+                        model.menu_anchor = None;
                         model.picker = None;
                     }
                     UiEvent::Scroll { id, offset, max_offset } if id == crate::model::FLOW => {
@@ -766,6 +819,17 @@ impl AiPanelPlugin {
         if let Some((value, caret)) = edit {
             let mut frame_ui = self.ui.lock().await;
             frame_ui.set_input(DRAFT, &value, caret);
+        }
+        // 候选刚展开：取一次当前打开的文件，让它们按打开顺序置顶（取不到就按原顺序）
+        let stale = { self.model.lock().unwrap().open_files_stale };
+        if stale {
+            let paths = ctx.open_files().await.unwrap_or_default();
+            let mut model = self.model.lock().unwrap();
+            model.open_files = paths;
+            model.open_files_stale = false;
+            if let Some(caret) = model.picker.as_ref().map(|picker| picker.caret) {
+                model.refresh_picker(caret);
+            }
         }
         for action in actions {
             self.perform(ctx, action).await;
@@ -851,6 +915,15 @@ fn on_click(
     actions: &mut Vec<Action>,
     edit: &mut Option<(String, usize)>,
 ) {
+    // 浮层内的空白按压由浮层兜底命中（`@overlay:*`）承接：不当作外点
+    if id.starts_with("@overlay:") {
+        return;
+    }
+    if id == "popup-backdrop" {
+        model.menu = None;
+        model.menu_anchor = None;
+        return;
+    }
     let menu_click = matches!(
         id,
         "plus-menu" | "agent-menu" | "model-menu" | "open-model" | "open-effort"
@@ -859,6 +932,7 @@ fn on_click(
         || id.starts_with("effort:");
     if !menu_click {
         model.menu = None;
+        model.menu_anchor = None;
     }
     if !id.starts_with("pick:") {
         model.picker = None;
@@ -893,25 +967,28 @@ fn on_click(
         "compact" => actions.push(Action::Compact),
         "regen-title" => actions.push(Action::Retitle),
         "plus-menu" => {
-            model.menu = if model.menu == Some(model::Menu::Plus) {
-                None
+            if model.menu == Some(model::Menu::Plus) {
+                model.menu = None;
             } else {
-                Some(model::Menu::Plus)
-            };
+                model.menu = Some(model::Menu::Plus);
+                model.menu_anchor = model.pointer;
+            }
         }
         "agent-menu" => {
-            model.menu = if model.menu == Some(model::Menu::Agent) {
-                None
+            if model.menu == Some(model::Menu::Agent) {
+                model.menu = None;
             } else {
-                Some(model::Menu::Agent)
-            };
+                model.menu = Some(model::Menu::Agent);
+                model.menu_anchor = model.pointer;
+            }
         }
         "model-menu" => {
-            model.menu = if model.menu == Some(model::Menu::ModelRoot) {
-                None
+            if model.menu == Some(model::Menu::ModelRoot) {
+                model.menu = None;
             } else {
-                Some(model::Menu::ModelRoot)
-            };
+                model.menu = Some(model::Menu::ModelRoot);
+                model.menu_anchor = model.pointer;
+            }
         }
         "open-model" => model.menu = Some(model::Menu::ModelList),
         "open-effort" => model.menu = Some(model::Menu::Effort),
@@ -1090,6 +1167,8 @@ impl PluginHandler for AiPanelPlugin {
         for name in [
             atelyx_plugin_protocol::method::ai::HOST_CHAT_EVENT,
             event::name::AI_CHAT_CHANGED,
+            event::name::AI_CHAT_RELOAD,
+            event::name::AI_CHAT_PERSIST,
             event::name::VAULT_SWITCH,
             event::name::VAULT_FILE_CHANGED,
             event::name::WINDOW_FILE_DROP,
@@ -1108,7 +1187,8 @@ impl PluginHandler for AiPanelPlugin {
             return;
         }
         *self.attached.lock().unwrap() = true;
-        *self.ui.lock().await = FrameUi::new();
+        // 重挂只重取主题，保留宿主已上报的尺寸（否则首帧按占位尺寸画、等 resize 再跳）
+        self.ui.lock().await.refresh_theme();
         self.load_choices(ctx).await;
         if !self.model.lock().unwrap().files_ready {
             self.load_files(ctx).await;
@@ -1188,6 +1268,25 @@ impl PluginHandler for AiPanelPlugin {
                     self.render(ctx).await;
                 }
             }
+            event::name::AI_CHAT_RELOAD => {
+                // 会话真源已换：整体重取，旧展示与输入态一并作废
+                self.model.lock().unwrap().reset();
+                self.load_choices(ctx).await;
+                self.load_files(ctx).await;
+                self.load_all(ctx).await;
+                self.render(ctx).await;
+            }
+            event::name::AI_CHAT_PERSIST => {
+                let Ok(payload) =
+                    serde_json::from_value::<ChatPersistChangedPayload>(params.payload.clone())
+                else {
+                    ctx.log_error("会话落盘状态载荷不可解析");
+                    return;
+                };
+                let message = payload.persist_error.map(|error| error.message);
+                self.model.lock().unwrap().set_persist_error(message);
+                self.render(ctx).await;
+            }
             event::name::AI_CHAT_CHANGED => {
                 let Ok(payload) =
                     serde_json::from_value::<ChatChangedPayload>(params.payload.clone())
@@ -1195,21 +1294,6 @@ impl PluginHandler for AiPanelPlugin {
                     ctx.log_error("会话变更载荷不可解析");
                     return;
                 };
-                if payload.kind == ChatChangeKind::Reload {
-                    // 会话真源已换：整体重取，旧展示与输入态一并作废
-                    self.model.lock().unwrap().reset();
-                    self.load_choices(ctx).await;
-                    self.load_files(ctx).await;
-                    self.load_all(ctx).await;
-                    self.render(ctx).await;
-                    return;
-                }
-                if payload.kind == ChatChangeKind::Persist {
-                    let message = payload.persist_error.map(|error| error.message);
-                    self.model.lock().unwrap().set_persist_error(message);
-                    self.render(ctx).await;
-                    return;
-                }
                 let active = self.model.lock().unwrap().active.clone();
                 if payload.kind == ChatChangeKind::Deleted {
                     self.model.lock().unwrap().remove_session(&payload.session_id);
@@ -1274,6 +1358,17 @@ impl PluginHandler for AiPanelPlugin {
                 self.model.lock().unwrap().set_title(&params.session_id, title);
             }
         }
+        self.render(ctx).await;
+    }
+
+    async fn on_frame_tick(&self, ctx: &Context, _params: FrameTickParams) {
+        {
+            let mut model = self.model.lock().unwrap();
+            if model.active_renaming() || model.active_compacting() {
+                model.spin_tick = model.spin_tick.wrapping_add(1);
+            }
+        }
+        // 动画结束后仍要出一帧撤掉 fps：否则宿主按上一帧的声明一直推帧
         self.render(ctx).await;
     }
 

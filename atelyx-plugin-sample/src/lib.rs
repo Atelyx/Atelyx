@@ -254,6 +254,9 @@ impl Worker {
             ime: AbiRect::empty_at(0.0, 0.0),
             keys: 0,
             fps: 0,
+            has_size: 0,
+            layout_w: 0.0,
+            layout_h: 0.0,
         };
         unsafe {
             (self.host().submit_frame)(self.host().ctx, AbiStr::new(&self.surface), &frame);

@@ -32,8 +32,9 @@ pub(crate) struct BuildCtx<'a> {
     pub markdown_used: HashSet<String>,
     /// 光标声明为拖动形态的子区：按下它们才建拖拽候选。
     pub draggables: HashSet<String>,
-    /// 浮层：主内容布局完成后按声明序绘制，指令与命中区都压在主内容之上。
-    pub overlays: Vec<(Rect, Vec<Item>)>,
+    /// 浮层：主内容布局完成后按声明序绘制，指令与命中区都压在主内容之上；
+    /// 布尔 = 是否拦截滚轮（弹层拦截，角标 / 浮钮这类被动浮层不拦）。
+    pub overlays: Vec<(Rect, Vec<Item>, bool)>,
     /// 已布局的浮层区域（随帧交给状态，供滚轮隔离判定）。
     pub overlay_rects: Vec<Rect>,
     /// 正在绘制浮层：滚动容器据此记入 `overlay_scrolls`（滚轮隔离）。
@@ -136,7 +137,14 @@ impl<'a> BuildCtx<'a> {
         let ime = self.ime.map(|r| FrameRect { x: r.x, y: r.y, w: r.w, h: r.h });
         let misses = self.metrics.has_misses();
         BuildOut {
-            frame: SurfaceFrame { commands: self.commands, hits: self.hits, ime, keys, fps: None },
+            frame: SurfaceFrame {
+                size: None,
+                commands: self.commands,
+                hits: self.hits,
+                ime,
+                keys,
+                fps: None,
+            },
             layouts: self.layouts,
             focusables: self.focusables,
             scrolls: self.scrolls,
@@ -398,10 +406,19 @@ impl<'c, 'a> Ui<'c, 'a> {
     /// 浮层：内容按纵向容器排在 `rect` 内，主内容布局完成后整体追加绘制与命中区。
     /// 整块登记点击兜底（子项命中优先），空白处不穿透到下层；有浮层时滚轮只作用于浮层内的滚动区。
     pub fn overlay(&mut self, rect: Rect, build: impl FnOnce(&mut Ui<'_, 'a>)) {
+        self.overlay_kind(rect, true, build);
+    }
+
+    /// 被动浮层：绘制与命中同 [`Ui::overlay`]，但不拦截滚轮（浮钮 / 角标这类不应挡住下层滚动）。
+    pub fn overlay_passive(&mut self, rect: Rect, build: impl FnOnce(&mut Ui<'_, 'a>)) {
+        self.overlay_kind(rect, false, build);
+    }
+
+    fn overlay_kind(&mut self, rect: Rect, blocks_wheel: bool, build: impl FnOnce(&mut Ui<'_, 'a>)) {
         let mut sub = Ui::new(&mut *self.ctx, rect);
         build(&mut sub);
         let items = sub.into_items();
-        self.ctx.overlays.push((rect, items));
+        self.ctx.overlays.push((rect, items, blocks_wheel));
     }
 }
 
@@ -421,8 +438,10 @@ pub(crate) fn layout_root(ctx: &mut BuildCtx<'_>, mut items: Vec<Item>, rect: Re
 pub(crate) fn layout_overlays(ctx: &mut BuildCtx<'_>) {
     let overlays = std::mem::take(&mut ctx.overlays);
     ctx.in_overlay = true;
-    for (index, (rect, items)) in overlays.into_iter().enumerate() {
-        ctx.overlay_rects.push(rect);
+    for (index, (rect, items, blocks_wheel)) in overlays.into_iter().enumerate() {
+        if blocks_wheel {
+            ctx.overlay_rects.push(rect);
+        }
         // 浮层整块承接点击：子项随后登记，命中优先于这块兜底
         ctx.hit(&format!("@overlay:{index}"), rect, HitCursor::Default);
         draw_column(ctx, &items, rect, rect, 0.0);

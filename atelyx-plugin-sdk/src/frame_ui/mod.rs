@@ -18,7 +18,7 @@ mod theme;
 mod widgets;
 
 use atelyx_plugin_protocol::envelope::RpcError;
-use atelyx_plugin_protocol::frame::FrameInput;
+use atelyx_plugin_protocol::frame::{FrameInput, FrameSize};
 use atelyx_plugin_protocol::method::MAX_MEASURE_ITEMS;
 
 use crate::Context;
@@ -27,7 +27,7 @@ pub use build::Ui;
 pub use build::Canvas;
 pub use geom::Rect;
 pub use icons::Icon;
-pub use widgets::{BoxStyle, BoxWidth, Edges, TextRole, TextStyle};
+pub use widgets::{AreaHeight, BoxStyle, BoxWidth, Edges, TextRole, TextStyle};
 
 /// 一次 `render` 内最多补几轮缺项（文字量算 / Markdown 块）：补齐后按最新数据重建。
 const MAX_REBUILD_PASSES: usize = 3;
@@ -55,6 +55,8 @@ pub enum UiEvent {
     RightClick { id: String },
     /// 输入框值变化：插件把新值写回自己的状态再重渲染。
     Text { id: String, value: String },
+    /// 输入框光标 / 选区变化（文本未必变）：插件据此重算与光标位置相关的浮层（如 `#` 候选）。
+    Caret { id: String, caret: usize, anchor: usize },
     /// 输入框回车（提交语义由插件定，例如检索或写回设置）。
     Submit { id: String },
     /// 下拉选中一项（`index` 是声明时给出的选项下标）。
@@ -97,6 +99,12 @@ impl FrameUi {
         self.state.size
     }
 
+    /// 面重挂：丢弃主题与依赖主题的版面缓存，尺寸 / 滚动 / 焦点保留；
+    /// 下次 `render` 会重新查询宿主主题。
+    pub fn refresh_theme(&mut self) {
+        self.state.refresh_theme();
+    }
+
     /// 声明宿主帧拍频率（1–120）：声明后宿主按该节拍回发 `host:frame.tick`，
     /// 插件的播放 / 动画在帧拍里推进并重渲染；`None` = 不推帧拍。
     pub fn set_fps(&mut self, fps: Option<u16>) {
@@ -118,13 +126,21 @@ impl FrameUi {
         let len = value.len();
         self.state
             .inputs
-            .insert(id.to_string(), model::InputState { caret: len, anchor: len, preedit: String::new() });
+            .insert(
+                id.to_string(),
+                model::InputState { caret: len, anchor: len, ..model::InputState::default() },
+            );
         self.state.focus = Some(id.to_string());
     }
 
     /// 把滚动容器直接拉到底（回到底部浮钮这类动作）；下一帧贴底跟随继续生效。
     pub fn scroll_to_end(&mut self, id: &str) {
         self.state.scroll.insert(id.to_string(), f32::MAX);
+    }
+
+    /// 把滚动容器定位到指定偏移（候选键盘巡航这类动作）；落帧时按内容高度钳制。
+    pub fn scroll_to(&mut self, id: &str, offset: f32) {
+        self.state.scroll.insert(id.to_string(), offset.max(0.0));
     }
 
     /// 某输入框当前光标与选区的字节偏移（`None` = 该输入框不在本帧或未交互过）。
@@ -138,7 +154,10 @@ impl FrameUi {
         let caret = caret.min(value.len());
         self.state
             .inputs
-            .insert(id.to_string(), model::InputState { caret, anchor: caret, preedit: String::new() });
+            .insert(
+                id.to_string(),
+                model::InputState { caret, anchor: caret, ..model::InputState::default() },
+            );
     }
 
     /// 解释一条宿主输入：翻成语义事件并把交互态（焦点 / 光标 / 选区 / 滚动）就地更新。
@@ -162,6 +181,8 @@ impl FrameUi {
         build: impl Fn(&mut Ui<'_, '_>),
     ) -> Result<(), RpcError> {
         self.ensure_theme(ctx).await;
+        // 收到首个尺寸前也要出帧：宿主只在有帧时才创建绘制部件，而部件正是上报尺寸的一端，
+        // 在这里拦住就等于两头互等。首帧按占位尺寸排，宿主不会把它画出来（帧带排版尺寸）。
         let theme = self.state.theme.clone().expect("主题已在 ensure_theme 中落地");
         let size = self.state.size;
         let area = geom::Rect::new(0.0, 0.0, size.0, size.1);
@@ -180,6 +201,9 @@ impl FrameUi {
                 ctxb.finish()
             };
             out.frame.fps = self.fps;
+            // 帧带上本帧的排版尺寸：改宽期间宿主手里的帧常常是上一拍宽度排的，
+            // 只有声明了尺寸，宿主才能把这种帧认出来不画
+            out.frame.size = Some(FrameSize { w: size.0, h: size.1 });
             self.state.metrics = out.metrics;
             self.state.layouts = out.layouts;
             self.state.focusables = out.focusables;
@@ -291,7 +315,9 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
-    use atelyx_plugin_protocol::paint::{ColorToken, DrawCommand, ImageFit, ImageSource, PaintColor};
+    use atelyx_plugin_protocol::paint::{
+        ColorToken, DrawCommand, ImageFit, ImageSource, PaintColor, TextWeight,
+    };
     use atelyx_plugin_protocol::envelope::Envelope;
     use atelyx_plugin_protocol::frame::{
         FrameRegionRequest, FrameSubmitSharedParams, FrameInput, HitCursor, SurfaceFrame,
@@ -363,11 +389,19 @@ mod tests {
 
     impl Bench {
         async fn new(width: f32, height: f32) -> Self {
+            let mut bench = Self::without_size().await;
+            // 面尺寸只在宿主首次绘制时上报，测试里直接喂一次 Resize
+            bench.event(FrameInput::Resize { width, height }).await;
+            bench
+        }
+
+        /// 还没收到宿主尺寸的基准：验证「首个 resize 之前也能出帧」这条约束。
+        async fn without_size() -> Self {
             let (tx, rx) = mpsc::channel(64);
             let (region, region_map, path) = test_region(SLOT_CAPACITY, 1);
             let ctx = Context::new(tx);
             ctx.attach_frame_region(region.clone()).expect("测试区域应可接上");
-            let mut bench = Self {
+            let bench = Self {
                 ctx,
                 rx,
                 ui: Arc::new(tokio::sync::Mutex::new(FrameUi::new())),
@@ -379,8 +413,6 @@ mod tests {
                 region_map: Some(region_map),
                 region_paths: vec![path],
             };
-            // 面尺寸只在宿主首次绘制时上报，测试里直接喂一次 Resize
-            bench.event(FrameInput::Resize { width, height }).await;
             bench
         }
 
@@ -711,7 +743,11 @@ mod tests {
 
         // 光标在末尾空行：上键回到上一行的同一横向位置
         let events = bench.event(key(NamedKey::ArrowUp)).await;
-        assert!(events.is_empty(), "上下键只挪光标");
+        assert_eq!(
+            events,
+            vec![UiEvent::Caret { id: "body".into(), caret: 6, anchor: 6 }],
+            "上下键只挪光标"
+        );
         let events = bench.event(typed("X")).await;
         assert_eq!(events, vec![UiEvent::Text { id: "body".into(), value: "line1\nXline2\n".into() }]);
     }
@@ -1354,6 +1390,104 @@ mod tests {
         assert!(texts(&frame).iter().any(|text| text == "3 个"));
     }
 
+    /// 首个尺寸到达之前也必须出帧：宿主只在有帧时才创建绘制部件，而部件正是上报尺寸的一端，
+    /// 在这里不出帧就是两头互等（面板恒不加载）。
+    #[tokio::test]
+    async fn render_before_the_first_resize_still_submits_a_frame() {
+        let mut bench = Bench::without_size().await;
+        bench.render(|ui| ui.text("hi", TextRole::Body)).await.unwrap();
+        let frame = bench.frames.last().expect("应提交一帧").clone();
+        assert_eq!(
+            frame.size,
+            Some(crate::protocol::frame::FrameSize { w: 320.0, h: 400.0 }),
+            "按缺省占位尺寸排并如实声明"
+        );
+    }
+
+    #[tokio::test]
+    async fn undo_history_restores_the_previous_value() {
+        let mut bench = Bench::new(240.0, 120.0).await;
+        bench.render(|ui| ui.text_input("host", "", "")).await.unwrap();
+        bench.set_value("host", "");
+        bench
+            .event(FrameInput::PointerDown {
+                x: 20.0,
+                y: 10.0,
+                button: MouseButton::Left,
+                hit: Some("host".into()),
+            })
+            .await;
+
+        let events = bench.event(typed("a")).await;
+        assert_eq!(events, vec![UiEvent::Text { id: "host".into(), value: "a".into() }]);
+        bench.set_value("host", "a");
+        let events = bench.event(typed("b")).await;
+        assert_eq!(events, vec![UiEvent::Text { id: "host".into(), value: "ab".into() }]);
+        bench.set_value("host", "ab");
+
+        let control = Modifiers { control: true, ..Modifiers::default() };
+        let undo = FrameInput::Key {
+            key: Key::Character { text: "z".into() },
+            action: KeyAction::Press,
+            modifiers: control,
+            text: None,
+        };
+        assert_eq!(
+            bench.event(undo.clone()).await,
+            vec![UiEvent::Text { id: "host".into(), value: "a".into() }],
+            "撤销回上一笔"
+        );
+        bench.set_value("host", "a");
+        assert_eq!(
+            bench.event(undo.clone()).await,
+            vec![UiEvent::Text { id: "host".into(), value: String::new() }],
+            "再撤销回空"
+        );
+        bench.set_value("host", "");
+        let redo = FrameInput::Key {
+            key: Key::Character { text: "y".into() },
+            action: KeyAction::Press,
+            modifiers: control,
+            text: None,
+        };
+        assert_eq!(
+            bench.event(redo).await,
+            vec![UiEvent::Text { id: "host".into(), value: "a".into() }],
+            "重做前进一笔"
+        );
+    }
+
+    #[tokio::test]
+    async fn double_click_selects_the_word_under_the_pointer() {
+        let mut bench = Bench::new(240.0, 120.0).await;
+        bench.render(|ui| ui.text_input("host", "alpha beta", "")).await.unwrap();
+        bench.set_value("host", "alpha beta");
+        bench
+            .event(FrameInput::PointerDown {
+                x: 20.0,
+                y: 10.0,
+                button: MouseButton::Left,
+                hit: Some("host".into()),
+            })
+            .await;
+        // 落在第一个词上：双击只选中该词
+        let events = bench
+            .event(FrameInput::DoubleClick {
+                x: 12.0,
+                y: 10.0,
+                button: MouseButton::Left,
+                hit: Some("host".into()),
+            })
+            .await;
+        assert!(events.iter().any(|event| matches!(event, UiEvent::DoubleClick { .. })));
+        bench.set_value("host", "alpha beta");
+        assert_eq!(
+            bench.event(key(NamedKey::Backspace)).await,
+            vec![UiEvent::Text { id: "host".into(), value: " beta".into() }],
+            "双击选中的是词，不是一个字符"
+        );
+    }
+
     #[tokio::test]
     async fn double_click_selects_the_input_and_reports_its_own_event() {
         let mut bench = Bench::new(240.0, 120.0).await;
@@ -1550,5 +1684,168 @@ mod tests {
         bench.ui.lock().await.set_fps(Some(30));
         let frame = bench.render(|ui| ui.text("播放中", TextRole::Label)).await.unwrap();
         assert_eq!(frame.fps, Some(30));
+    }
+
+    #[tokio::test]
+    async fn scroll_max_hugs_short_content_and_caps_tall_content() {
+        let mut bench = Bench::new(300.0, 300.0).await;
+        let frame = bench
+            .render(|ui| {
+                ui.column(0.0, |c| {
+                    c.scroll_max("short", 120.0, 0.0, |s| s.text("单行", TextRole::Label));
+                    c.button("after-short", "后");
+                });
+            })
+            .await
+            .unwrap();
+        assert!(!has_hit(&frame, "short::bar"), "短内容不出滚动条");
+        let short_y = frame.hits.iter().find(|hit| hit.id == "after-short").expect("后续控件").y;
+        assert!(short_y < 40.0, "短内容按自身高度收住：{short_y}");
+
+        let mut bench = Bench::new(300.0, 300.0).await;
+        let frame = bench
+            .render(|ui| {
+                ui.column(0.0, |c| {
+                    c.scroll_max("tall", 120.0, 0.0, |s| {
+                        for index in 0..30 {
+                            s.text(format!("行{index}"), TextRole::Label);
+                        }
+                    });
+                    c.button("after-tall", "后");
+                });
+            })
+            .await
+            .unwrap();
+        assert!(has_hit(&frame, "tall::bar"), "超过限高出现滚动条");
+        let tall_y = frame.hits.iter().find(|hit| hit.id == "after-tall").expect("后续控件").y;
+        assert!((tall_y - 120.0).abs() < 2.0, "超过限高按限高收住：{tall_y}");
+    }
+
+    #[tokio::test]
+    async fn fill_spacer_centers_the_column_content() {
+        let mut bench = Bench::new(200.0, 200.0).await;
+        let frame = bench
+            .render(|ui| {
+                ui.fill_column(0.0, |c| {
+                    c.fill_spacer();
+                    c.text("居中", TextRole::Label);
+                    c.fill_spacer();
+                });
+            })
+            .await
+            .unwrap();
+        let y = frame
+            .commands
+            .iter()
+            .find_map(|command| match command {
+                DrawCommand::Text { y, .. } => Some(*y),
+                _ => None,
+            })
+            .expect("居中文字");
+        let line_height = 13.0 * 1.2;
+        assert!((y - (200.0 - line_height) / 2.0).abs() < 1.5, "上下弹簧均分剩余高度：{y}");
+    }
+
+    #[tokio::test]
+    async fn text_style_weight_overrides_the_role_default() {
+        let mut bench = Bench::new(200.0, 80.0).await;
+        let frame = bench
+            .render(|ui| {
+                ui.text_styled(
+                    "加粗",
+                    TextStyle::new(TextRole::Body).weight(TextWeight::SemiBold),
+                );
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            frame.commands.first(),
+            Some(DrawCommand::Text { weight: Some(TextWeight::SemiBold), .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn passive_overlay_does_not_block_the_wheel() {
+        fn build(ui: &mut build::Ui<'_, '_>, passive: bool) {
+            ui.scroll_sized("list", 60.0, 0.0, false, |s| {
+                for index in 0..10 {
+                    s.button(format!("row{index}"), format!("行{index}"));
+                }
+            });
+            if passive {
+                ui.overlay_passive(Rect::new(0.0, 0.0, 200.0, 160.0), |layer| {
+                    layer.hit_area("badge");
+                });
+            } else {
+                ui.overlay(Rect::new(0.0, 0.0, 200.0, 160.0), |layer| {
+                    layer.hit_area("popup");
+                });
+            }
+        }
+        let mut bench = Bench::new(200.0, 160.0).await;
+        bench.render(|ui| build(ui, true)).await.unwrap();
+        let events = bench
+            .event(FrameInput::Wheel { x: 100.0, y: 30.0, delta_x: 0.0, delta_y: 40.0, hit: None })
+            .await;
+        assert!(
+            matches!(events.as_slice(), [UiEvent::Scroll { id, .. }] if id == "list"),
+            "被动浮层不拦滚轮：{events:?}"
+        );
+
+        let mut bench = Bench::new(200.0, 160.0).await;
+        bench.render(|ui| build(ui, false)).await.unwrap();
+        let events = bench
+            .event(FrameInput::Wheel { x: 100.0, y: 30.0, delta_x: 0.0, delta_y: 40.0, hit: None })
+            .await;
+        assert!(events.is_empty(), "阻挡浮层期间滚轮不落到下层：{events:?}");
+    }
+
+    #[tokio::test]
+    async fn refresh_theme_keeps_the_reported_size() {
+        let bench = Bench::new(320.0, 240.0).await;
+        assert_eq!(bench.ui.lock().await.size(), (320.0, 240.0));
+        bench.ui.lock().await.refresh_theme();
+        assert_eq!(bench.ui.lock().await.size(), (320.0, 240.0), "重挂不清尺寸");
+    }
+
+    #[tokio::test]
+    async fn boxed_can_paint_a_shadow() {
+        let mut bench = Bench::new(200.0, 100.0).await;
+        let frame = bench
+            .render(|ui| {
+                ui.boxed(
+                    BoxWidth::Fixed(120.0),
+                    BoxStyle::new(Some(ColorToken::Surface), None, 10.0).shadow(
+                        atelyx_plugin_protocol::paint::PaintShadow {
+                            offset_x: 0.0,
+                            offset_y: 6.0,
+                            blur: 18.0,
+                            color: PaintColor::Rgba { rgba: [0, 0, 0, 90] },
+                        },
+                    ),
+                    Edges::all(8.0),
+                    0.0,
+                    |body| body.text("浮层", TextRole::Label),
+                );
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            frame.commands.first(),
+            Some(DrawCommand::Rect { shadow: Some(_), .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn spinner_paints_a_rotating_arc() {
+        let mut bench = Bench::new(100.0, 60.0).await;
+        let frame = bench
+            .render(|ui| ui.spinner(20.0, ColorToken::TextMuted, 0.5))
+            .await
+            .unwrap();
+        assert!(matches!(
+            frame.commands.first(),
+            Some(DrawCommand::Path { points, stroke: Some(_), .. }) if points.len() == 25
+        ));
     }
 }

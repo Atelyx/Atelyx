@@ -37,6 +37,7 @@ pub const TOKEN_HOVER: u32 = 15;
 pub const TOKEN_BORDER: u32 = 16;
 pub const TOKEN_BORDER_STRONG: u32 = 17;
 pub const TOKEN_TRANSPARENT: u32 = 18;
+pub const TOKEN_SURFACE_OVERLAY: u32 = 19;
 
 pub const WEIGHT_NORMAL: u32 = 0;
 pub const WEIGHT_MEDIUM: u32 = 1;
@@ -302,6 +303,11 @@ pub struct AbiFrame {
     pub keys: u8,
     /// 帧率（0 = 不推帧拍）。
     pub fps: u32,
+    /// 非 0 = 声明了排版尺寸（`layout_w` / `layout_h` 有效）。
+    pub has_size: u8,
+    /// 本帧按多大宽排版；宿主据此认出「上一拍宽度排的旧帧」。
+    pub layout_w: f32,
+    pub layout_h: f32,
 }
 
 /// 一条原始输入；坐标面本地，滚轮增量统一为像素。

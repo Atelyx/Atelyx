@@ -53,7 +53,8 @@ pub use atelyx_plugin_protocol::paint::{
     TextFamily, TextWeight,
 };
 pub use atelyx_plugin_protocol::event::{
-    ChatChangeKind, ChatChangedPayload, FileChangeKind, FileChangedPayload, FileDropPayload,
+    ChatChangeKind, ChatChangedPayload, ChatPersistChangedPayload, ChatReloadedPayload,
+    FileChangeKind, FileChangedPayload, FileDropPayload,
     SpaceMetaChangedPayload, TableChangedPayload, TableSelectionChangedPayload, VaultSwitchPayload,
 };
 pub use atelyx_plugin_protocol::chat::ChatPersistError;
@@ -67,7 +68,8 @@ pub use atelyx_plugin_protocol::method::run as ai_run;
 pub use preset::PresetSyncReport;
 pub use atelyx_plugin_protocol::method::{
     AiAgent, AiAgentsResult, AiModel, AiModelPick, AiModelProvider, AiModelsResult,
-    AxesPadding, BUILTIN_SERVICES, PLATFORM_PLUGIN, EditorReplaceParams, EditorSelection,
+    AxesPadding, BUILTIN_SERVICES, PLATFORM_PLUGIN, EditorOpenFiles, EditorReplaceParams,
+    EditorSelection,
     CalendarAddParams, CalendarIdParams, CalendarItem, CalendarListResult, CalendarUpdateParams,
     CollabMetaEntry, CollabMetaGetParams, CollabMetaPatchParams, CollabMetaResult, DayActivity,
     HistoryActivityResult, HistoryDayEntry, HistoryDayParams, HistoryDayResult, HistoryOpenParams,
@@ -323,6 +325,8 @@ pub enum HostRequest {
     CollabSend { plugin_id: String, request_id: u64, params: method::CollabSendParams },
     /// 插件请求当前打开笔记的选区（真源在壳的编辑面会话）。
     EditorSelection { plugin_id: String, request_id: u64 },
+    /// 插件请求当前打开的文件清单（仓库相对路径，按打开顺序）。
+    EditorOpenFiles { plugin_id: String, request_id: u64 },
     /// 插件请求用给定文本替换当前选区（空串 = 删除选区；写入经笔记同一套保存链）。
     EditorReplaceSelection { plugin_id: String, request_id: u64, text: String },
     /// 插件请求读当前空间的团队元数据（`key` 缺省 = 全部键；仅协作空间可用）。
@@ -442,6 +446,9 @@ pub struct PluginRuntime {
     /// 最近一次 `table:changed` 广播的表格路径：插件迟到订阅时补发当前状态（否则订阅前的
     /// 广播已丢失，插件只能盲等下一次变更）。
     current_table: Mutex<Option<String>>,
+    /// 各面最近一次由宿主绘制期实测上报的尺寸：插件晚于首次绘制才就绪（或重启）时，
+    /// 挂载后据此补发一次，插件首帧不至于按自己的占位尺寸排版。
+    surface_sizes: Mutex<HashMap<(String, String), (f32, f32)>>,
     discovered: Mutex<HashMap<String, Discovered>>,
     instances: Mutex<HashMap<String, Arc<Instance>>>,
 }
@@ -488,6 +495,7 @@ impl PluginRuntime {
             container: Mutex::new(None),
             last_vault_switch: Mutex::new(None),
             current_table: Mutex::new(None),
+            surface_sizes: Mutex::new(HashMap::new()),
             discovered: Mutex::new(HashMap::new()),
             instances: Mutex::new(HashMap::new()),
         });
@@ -670,6 +678,7 @@ impl PluginRuntime {
             | HostRequest::CollabMetaGet { .. }
             | HostRequest::CollabMetaPatch { .. }
             | HostRequest::EditorSelection { .. }
+            | HostRequest::EditorOpenFiles { .. }
             | HostRequest::EditorReplaceSelection { .. }
             | HostRequest::HistoryDay { .. }
             | HostRequest::HistoryOpen { .. }
@@ -920,6 +929,10 @@ impl PluginRuntime {
                 }
             }
             HostRequest::EditorSelection { plugin_id, .. } => HostRequest::EditorSelection {
+                plugin_id,
+                request_id,
+            },
+            HostRequest::EditorOpenFiles { plugin_id, .. } => HostRequest::EditorOpenFiles {
                 plugin_id,
                 request_id,
             },
@@ -1275,19 +1288,22 @@ impl PluginRuntime {
         }
     }
 
-    /// 等登记过的面出现一张新帧（改宽那一拍同步取新帧用）。插件不在运行态、未登记、
-    /// 超时都返回 `None`，调用方按手上的帧画。
+    /// 等登记过的面出现一张「按 `size` 排版」的新帧（改宽那一拍同步取新帧用）。
+    /// 改宽期间插件手里可能还有上一拍宽度的帧，按尺寸过滤才不会把那种帧当成新帧画上去
+    /// （画上去的表现就是右对齐项与滚动条停在旧边缘）。未声明尺寸的帧不参与过滤。
+    /// 插件不在运行态、未登记、超时都返回 `None`，调用方按手上的帧画。
     pub fn finish_surface_wait(
         &self,
         plugin_id: &str,
         surface_id: &str,
+        size: (f32, f32),
         timeout: std::time::Duration,
     ) -> Option<std::sync::Arc<atelyx_plugin_protocol::frame::SurfaceFrame>> {
         let instance = self.instances.lock().unwrap().get(plugin_id).cloned()?;
         if !matches!(instance.status(), PluginStatus::Running) {
             return None;
         }
-        instance.finish_frame_wait(surface_id, timeout)
+        instance.finish_frame_wait(surface_id, Some(size), timeout)
     }
 
     /// 等某面出现一张不同于 `seen` 的新帧（登记与等待一步完成，供不需要抢先登记的调用方与测试）。
@@ -1303,7 +1319,7 @@ impl PluginRuntime {
             return None;
         }
         instance.begin_frame_wait(surface_id, seen.clone());
-        instance.finish_frame_wait(surface_id, timeout)
+        instance.finish_frame_wait(surface_id, None, timeout)
     }
 
     /// 是否有帧被绘制期同步取走、投影尚未补齐。壳在心跳里据此补一次投影
@@ -1339,6 +1355,14 @@ impl PluginRuntime {
         surface_id: &str,
         input: &atelyx_plugin_protocol::frame::FrameInput,
     ) {
+        // 面尺寸先记在运行时上：插件此刻未在跑（启动中 / 重启中）时这一笔会丢掉，
+        // 挂载后由 `notify_surface_attached` 补发，插件首帧就能按真实尺寸排。
+        if let atelyx_plugin_protocol::frame::FrameInput::Resize { width, height } = input {
+            self.surface_sizes
+                .lock()
+                .unwrap()
+                .insert((plugin_id.to_string(), surface_id.to_string()), (*width, *height));
+        }
         let instance = self.instances.lock().unwrap().get(plugin_id).cloned();
         if let Some(instance) = instance {
             instance.notify_frame_input(surface_id, input);
@@ -1379,10 +1403,21 @@ impl PluginRuntime {
     }
 
     /// 告知插件某个面已挂载（贡献标签出现在布局里）。插件未在跑时静默丢弃。
+    /// 该面此前被绘制过就把尺寸一并补发：插件挂载后才起（或中途重启）时，否则它只能按
+    /// 自己的占位尺寸出首帧，画面要等下一次真实改宽才纠正。
     pub fn notify_surface_attached(&self, plugin_id: &str, surface_id: &str, kind: SurfaceKind) {
         let instance = self.instances.lock().unwrap().get(plugin_id).cloned();
         if let Some(instance) = instance {
             instance.notify_surface_attached(surface_id, kind);
+            let size = self
+                .surface_sizes
+                .lock()
+                .unwrap()
+                .get(&(plugin_id.to_string(), surface_id.to_string()))
+                .copied();
+            if let Some((width, height)) = size {
+                instance.replay_surface_size(surface_id, width, height);
+            }
         }
     }
 
@@ -1705,22 +1740,13 @@ impl PluginRuntime {
     /// 广播会话变更给订阅了 `ai:chat.changed` 的运行中插件。不缓存补发：订阅者需要当前
     /// 状态时用 `ai.chat.history` 拉取。
     pub fn on_chat_changed(self: &Arc<Self>, session_id: &str, kind: ChatChangeKind) {
-        let payload = ChatChangedPayload {
-            session_id: session_id.to_string(),
-            kind,
-            persist_error: None,
-        };
+        let payload = ChatChangedPayload { session_id: session_id.to_string(), kind };
         self.broadcast_event(event::name::AI_CHAT_CHANGED, &payload);
     }
 
     /// 会话真源重新装载完成：通知订阅方整体重取（换仓 / 空间装载）。
     pub fn on_chat_store_reloaded(self: &Arc<Self>) {
-        let payload = ChatChangedPayload {
-            session_id: String::new(),
-            kind: ChatChangeKind::Reload,
-            persist_error: None,
-        };
-        self.broadcast_event(event::name::AI_CHAT_CHANGED, &payload);
+        self.broadcast_event(event::name::AI_CHAT_RELOAD, &ChatReloadedPayload::default());
     }
 
     /// 会话落盘状态变化：订阅方按载荷更新错误提示（`None` = 已恢复）。
@@ -1728,12 +1754,10 @@ impl PluginRuntime {
         self: &Arc<Self>,
         error: Option<atelyx_plugin_protocol::chat::ChatPersistError>,
     ) {
-        let payload = ChatChangedPayload {
-            session_id: String::new(),
-            kind: ChatChangeKind::Persist,
-            persist_error: error,
-        };
-        self.broadcast_event(event::name::AI_CHAT_CHANGED, &payload);
+        self.broadcast_event(
+            event::name::AI_CHAT_PERSIST,
+            &ChatPersistChangedPayload { persist_error: error },
+        );
     }
 
     /// 外部文件拖入窗口：把绝对路径广播给订阅方（是否接收由插件按自身界面状态决定）。
@@ -1951,6 +1975,7 @@ fn request_plugin_id(request: &HostRequest) -> &str {
         | HostRequest::CollabMetaGet { plugin_id, .. }
         | HostRequest::CollabMetaPatch { plugin_id, .. }
         | HostRequest::EditorSelection { plugin_id, .. }
+        | HostRequest::EditorOpenFiles { plugin_id, .. }
         | HostRequest::EditorReplaceSelection { plugin_id, .. }
         | HostRequest::HistoryDay { plugin_id, .. }
         | HostRequest::HistoryOpen { plugin_id, .. }

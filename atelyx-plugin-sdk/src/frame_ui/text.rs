@@ -124,11 +124,29 @@ pub(crate) fn line_of(lines: &[Line], caret: usize) -> usize {
     lines.iter().position(|line| caret <= line.end).unwrap_or(lines.len().saturating_sub(1))
 }
 
-/// 多行输入的可视首行：光标行超出内框时整体上移，让光标行贴住底边。
-/// 只取决于光标行，因此滚动位置无需跨帧保存。
-pub(crate) fn top_line(caret_line: usize, line_height: f32, height: f32) -> usize {
-    let visible = (height / line_height.max(1.0)).floor().max(1.0) as usize;
-    (caret_line + 1).saturating_sub(visible)
+/// 多行输入的纵向偏移：用户滚动的偏移 + 光标跟随，按整行吸附。
+/// 吸附是必需的：指令集没有裁剪，半截露在框边的行会整行消失，看着像掉字。
+pub(crate) fn area_scroll(
+    stored: f32,
+    caret_line: usize,
+    line_height: f32,
+    view_height: f32,
+    line_count: usize,
+    focused: bool,
+) -> f32 {
+    let line_height = line_height.max(1.0);
+    let content = line_count as f32 * line_height;
+    let max = (content - view_height).max(0.0);
+    let mut scroll = stored.clamp(0.0, max);
+    if focused {
+        let top = caret_line as f32 * line_height;
+        if top < scroll {
+            scroll = top;
+        } else if top + line_height > scroll + view_height {
+            scroll = top + line_height - view_height;
+        }
+    }
+    (((scroll / line_height).ceil() * line_height).clamp(0.0, max)).max(0.0)
 }
 
 /// 行内字节位 → 相对行首的横向位置。
@@ -246,7 +264,13 @@ pub(crate) fn paint(
     align: Option<TextAlign>,
     clip: super::geom::Rect,
 ) {
-    let height = ctx.metrics.measure(content, spec, max_width).height.max(spec.size * 1.2);
+    // 高度按逐字宽累计的行数算：改宽不会为整段文字登记新的量算条目，
+    // 绘制期也就不会向宿主发请求（宿主正在等这一帧时会互相卡住）
+    let height = match max_width {
+        Some(width) => wrapped_height(&mut ctx.metrics, content, spec, width),
+        None => line_height(&mut ctx.metrics, spec),
+    }
+    .max(spec.size * 1.2);
     if y < clip.y || y + height > clip.bottom() + 0.5 {
         return;
     }
@@ -338,10 +362,15 @@ mod tests {
     }
 
     #[test]
-    fn top_line_keeps_the_caret_row_in_view() {
-        assert_eq!(top_line(0, 10.0, 35.0), 0);
-        assert_eq!(top_line(3, 10.0, 35.0), 1, "第 4 行超出 3 行高的内框时上移一行");
-        assert_eq!(top_line(7, 10.0, 10.0), 7);
+    fn area_scroll_keeps_the_caret_row_in_view_and_snaps_to_lines() {
+        // 3 行高的内框：第 4 行（下标 3）露出时整体上移一行
+        assert_eq!(area_scroll(0.0, 0, 10.0, 35.0, 10, true), 0.0);
+        assert_eq!(area_scroll(0.0, 3, 10.0, 35.0, 10, true), 10.0, "露出第 4 行下缘 5px，吸附到整行");
+        assert_eq!(area_scroll(0.0, 9, 10.0, 35.0, 10, true), 65.0, "末行贴底，不越过可滚动余量");
+        // 未聚焦时保留用户滚动值，不跟光标走
+        assert_eq!(area_scroll(30.0, 0, 10.0, 35.0, 10, false), 30.0);
+        // 内容不足一屏时不滚
+        assert_eq!(area_scroll(30.0, 0, 10.0, 200.0, 10, true), 0.0);
     }
 
     #[test]

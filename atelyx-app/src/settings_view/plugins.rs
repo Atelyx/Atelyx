@@ -266,6 +266,8 @@ pub enum PluginsMsg {
     CollabSend { request_id: u64, plugin_id: String, params: CollabSendParams },
     /// 当前笔记选区（编辑态才有内容；未打开笔记或阅读态回空选区）。
     EditorSelection { request_id: u64 },
+    /// 当前打开的文件清单（仓库相对路径，按打开顺序）。
+    EditorOpenFiles { request_id: u64 },
     /// 用给定文本替换当前选区（空串 = 删除选区）。
     EditorReplaceSelection { request_id: u64, text: String },
     /// 按天聚合的仓库活动（`history.activity`）。
@@ -488,6 +490,9 @@ pub fn host_requests_stream(spec: &RuntimeSpec) -> impl iced::futures::Stream<It
                 }
                 HostRequest::EditorSelection { request_id, .. } => {
                     Message::Plugins(PluginsMsg::EditorSelection { request_id })
+                }
+                HostRequest::EditorOpenFiles { request_id, .. } => {
+                    Message::Plugins(PluginsMsg::EditorOpenFiles { request_id })
                 }
                 HostRequest::EditorReplaceSelection { request_id, text, .. } => {
                     Message::Plugins(PluginsMsg::EditorReplaceSelection { request_id, text })
@@ -1283,6 +1288,13 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
                 Ok(value) => resolve_vault(app, request_id, Ok(value)),
                 Err(e) => resolve_vault(app, request_id, Err(format!("主题结果不可序列化：{e}"))),
             }
+        }
+        PluginsMsg::EditorOpenFiles { request_id } => {
+            let result = serde_json::to_value(atelyx_core::plugin_runtime::EditorOpenFiles {
+                paths: crate::space_actions::open_file_paths(app),
+            })
+            .map_err(|e| format!("打开文件清单不可序列化：{e}"));
+            resolve_vault(app, request_id, result)
         }
         PluginsMsg::EditorSelection { request_id } => {
             let result = serde_json::to_value(app.editor_selection())

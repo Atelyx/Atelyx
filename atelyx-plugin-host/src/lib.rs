@@ -99,6 +99,8 @@ pub struct Frame {
     pub ime: Option<Rect>,
     pub keys: bool,
     pub fps: u32,
+    /// 本帧排版尺寸（未声明为 `None`）。
+    pub size: Option<(f32, f32)>,
 }
 
 impl Frame {
@@ -129,6 +131,7 @@ impl Frame {
             ime: (frame.has_ime != 0).then(|| rect(frame.ime)),
             keys: frame.keys != 0,
             fps: frame.fps,
+            size: (frame.has_size != 0).then_some((frame.layout_w, frame.layout_h)),
         })
     }
 }
@@ -649,6 +652,9 @@ mod tests {
             ime: abi::AbiRect::empty_at(0.0, 0.0),
             keys: 1,
             fps: 30,
+            has_size: 0,
+            layout_w: 0.0,
+            layout_h: 0.0,
         };
         let owned = unsafe { Frame::try_from_abi(&frame) }.unwrap();
         drop(text);
@@ -742,6 +748,9 @@ mod tests {
             ime: abi::AbiRect::filled(4.0, 5.0, 6.0, 18.0, 0.0, abi::AbiColor::TRANSPARENT),
             keys: 0,
             fps: 0,
+            has_size: 0,
+            layout_w: 0.0,
+            layout_h: 0.0,
         };
         let owned = unsafe { Frame::try_from_abi(&frame) }.unwrap();
         let Command::Line { x1, y1, x2, y2, stroke, width } = &owned.commands[0] else {
@@ -784,6 +793,9 @@ mod tests {
                 ime: abi::AbiRect::empty_at(0.0, 0.0),
                 keys: 0,
                 fps: 0,
+                has_size: 0,
+                layout_w: 0.0,
+                layout_h: 0.0,
             };
             let error = unsafe { Frame::try_from_abi(&frame) }.unwrap_err();
             assert!(error.contains(needle), "{error}");

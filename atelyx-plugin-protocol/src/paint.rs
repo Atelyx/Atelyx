@@ -63,6 +63,8 @@ pub enum ColorToken {
     BorderStrong,
     /// 无底色 / 无边框。
     Transparent,
+    /// 浮层表面（菜单 / 提示条底，比面板底亮一档）。
+    SurfaceOverlay,
 }
 
 /// 图片填充方式：`contain` 等比完整可见（留空边），`cover` 等比覆盖并裁剪溢出，缺省 = 拉伸填满。

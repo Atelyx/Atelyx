@@ -428,43 +428,49 @@ impl PluginHandler for Todo {
 
 几条用法约定：
 
-- **`event` 已经把交互态就地更新**（焦点、光标、选区、组合串、滚动位置），返回的是语义事件：`Click` / `RightClick` / `Text`（完整新值）/ `Submit`（单行输入框回车）/ `Select`（选项下标）/ `Focus` / `Scroll`（偏移与可滚余量）。插件只改自己的业务状态。
+- **`event` 已经把交互态就地更新**（焦点、光标、选区、组合串、滚动位置），返回的是语义事件：`Click` / `RightClick` / `Text`（完整新值）/ `Caret`（光标或选区变了而文本没变）/ `Submit`（单行输入框回车）/ `Select`（选项下标）/ `Focus` / `Scroll`（偏移与可滚余量）。插件只改自己的业务状态；候选浮层这类跟光标位置走的面要在 `Caret` 上重算。
 - **`value_of` 每次现读**：`event(ctx, input, |id| …)` 按 id 返回输入框当前值，编辑永远从事实出发；**`Text` 要写回**，收到 `UiEvent::Text { value, .. }` 就存进自己的状态，不写回下一帧还是旧值。
 - **`render` 的闭包会被调用多次**（文字量算缺项时先按估算排、量完重建，最多 3 轮）：闭包必须只读状态，不要在里面改状态或发请求。
 - **内容相同的帧不会重复提交**：指针移动这类没改画面的输入不会把宿主拖进重绘风暴，不必自己判重。
-- **尺寸变化立即跟手**：`resize` 到了而文字量算还没补齐时，`render` 会先按估算字宽交一帧，量算落地后再交精确帧（画面没变则不再交）。宿主同一面同时只等一笔尺寸回帧，拖动中的中间尺寸只留最新一笔；拖动持续而插件迟迟不回帧时按 150ms 重发最新尺寸，2 秒仍无新帧就撤掉等待、等下一次尺寸变化。
-- **主题只取一次**：首次 `render` 查 `query.theme` 拿字号 / 圆角 / 颜色；面重新挂载时新建一个 `FrameUi` 即重取。**尺寸**由宿主回发的 `resize` 决定并按它排版，首次绘制前用缺省尺寸（首帧可能偏窄，`resize` 一到就重排）。
+- **尺寸变化立即跟手**：`resize` 到了而文字量算还没补齐时，`render` 会先按估算字宽交一帧，量算落地后再交精确帧（画面没变则不再交）。宿主拖动中每一拍的新尺寸都会立刻下发，同时在途的尺寸最多两笔：额度内的尺寸各走一趟，插件回帧慢时只保留最新一笔、回帧即补发（形成背压，不会堆成无界队列）；迟迟不回帧时按 150ms 重发最新尺寸，2 秒仍无新帧就撤掉等待、等下一次尺寸变化。
+- **每帧自带排版尺寸**：`SurfaceFrame::size` 声明这一帧是按多大尺寸排的。宿主只画与当前面尺寸一致的帧（未声明的帧不参与判定）——拖动中新尺寸的帧还在路上时，手上那张旧宽度画面（右对齐项与滚动条停在旧边缘）不会被当成新帧画出来。`FrameUi::render` 会自动填这个字段，手写帧（`frame_builders`）要么自己填、要么保持缺省。
+- **主题只取一次**：首次 `render` 查 `query.theme` 拿字号 / 圆角 / 颜色；面重新挂载时调 `FrameUi::refresh_theme()` 重取，**不要重建 `FrameUi`**——重建会把已上报的尺寸丢回占位值。**尺寸**由宿主回发的 `resize` 决定并按它排版；宿主在绘制期按面实测尺寸上报，面挂载时（含插件晚于首次绘制才就绪、运行中重启）再补发一次。收到首个 `resize` 之前按默认尺寸出帧即可——宿主不会把这张帧画出来（帧带排版尺寸，尺寸对不上不画），拿到真实尺寸后重排的帧才会上屏，第一张画面就是对的。
 
 控件（细节以源码文档注释为准）：
 
 | 控件 | 说明 |
 | --- | --- |
 | `text(content, role)` | 单行、超出按宽度省略；`role` = `Title` / `Heading` / `Label` / `FieldLabel` / `Caption` / `Value`，字号与颜色由角色定。`caption` / `field_label` 是同角色的换行版（按可用宽度折行） |
-| `text_styled(content, TextStyle)` | 按样式绘制：`TextStyle::new(role).color(token).mono().wrap()`（等宽、换行、语义色） |
+| `text_styled(content, TextStyle)` | 按样式绘制：`TextStyle::new(role).color(token).weight(TextWeight::SemiBold).mono().wrap()`（等宽、换行、字重、语义色） |
 | `button` / `ghost_button` / `button_enabled` / `ghost_button_enabled` | 常规底 / 无底色 / 带禁用态，点击回 `Click { id }` |
 | `text_input(id, value, placeholder)` | 单行输入框；`text_input_sized` 固定宽，`text_input_password` 密文；回车回 `Submit { id }` |
 | `text_area(id, value, placeholder, height)` | 多行输入框：软换行与显式换行都排，回车**插入换行**不回 `Submit`，上下键 / 行首尾键按可视行走，光标超出内框时纵向跟随。`text_area_submit` 是回车提交、Shift+回车换行的变体（聊天输入） |
+| 输入框键位 | 单行 / 多行共用：Enter（单行即 `Submit`，多行按声明的语义）、Shift+Enter 换行、↑↓ 按行移动、Home / End 行首尾、Ctrl+Home / End 整篇首尾、Ctrl+← / → 按词跳、Ctrl+A / C / X / V 全选与剪贴板、Ctrl+Z / Ctrl+Y 撤销与重做、双击选词。选区用 Shift+方向键扩展 |
+| `text_area_submit_auto(id, value, placeholder, min, max, size, Edges, marks)` | 自适应高度的回车提交输入框：内容在 `min`–`max` 之间长高（按整行取，框边不切半截字），超出上限后框内滚动并带细条、滚轮先滚框内。`marks` 是标记区间（字节）：整段浅强调底高亮、点进去整段选中、边界退格 / Delete 整段删除——`#` 引用标签这类实体用它。排布依赖它高度的浮层用 `auto_area_height(...)` 取同一口径的高度 |
 | `select(id, options, selected)` | 下拉；选中回 `Select { id, index }`，展开时**就地撑开**后续内容 |
 | `checkbox(id, checked, label)` | 勾选，点击回 `Click { id }`（勾选值由插件自己翻转） |
 | `chip(label, color)` | 小号圆角徽标（计数 / 状态标签），不承接点击 |
 | `icon_button(id, Icon)` / `icon(Icon)` | 方形图标钮（回 `Click`）/ 纯装饰图标；内置 `Copy` / `Refresh` / `Eraser` / `Download` / `Search` / `HardDrive` / `Wrench` / `FileText` / `Box` |
 | `progress(value)` | 0–1 的进度条 |
+| `spinner(size, color, phase)` | 转圈指示：画四分之三圆弧，`phase` 为旋转弧度，按帧拍推进（进行中状态用） |
 | `card(id, selected, ...)` | 整块可点卡片（选中档强调底色与描边），回 `Click` / `RightClick`；子控件压住卡片的命中 |
 | `card_with_shadow(id, selected, shadow, ...)` | 同上并给卡片加投影（`shadow(offsetX, offsetY, blur, color)` 构造） |
-| `overlay(rect, ...)` | 覆盖层：子项按 `rect` 浮在主内容之后绘制，整块承接点击（子控件优先，空白处不穿透下层）；打开期间滚轮只落到浮层内声明过的滚动容器 |
+| `overlay(rect, ...)` | 覆盖层：子项按 `rect` 浮在主内容之后绘制，整块承接点击（子控件优先，空白处不穿透下层）；打开期间滚轮只落到浮层内声明过的滚动容器。`overlay_passive` 同样绘制与命中，但不拦滚轮（浮钮 / 角标这类不该挡住下层滚动） |
 | `panel(...)` | 圆角表面容器，承接子项、不承接点击 |
 | `notice(text, color)` | 提示块：整行底色 + 语义色描边与文字 |
 | `markdown(content)` | 只读 Markdown：块由宿主解析（`markdown.parse`），控件层按宽度折行并画列表标记 / 引用条 / 代码底 |
 | `scroll(id, gap, ...)` / `list(id, gap, ...)` | 滚动容器（吃父容器剩余高度，只画视口内的子项），滚轮回 `Scroll { id, offset, max_offset }`，右下细滚动条可拖 |
 | `virtual_scroll(id, len, gap, follow_end, viewport_hint, estimate_h, key, build)` | 虚拟滚动列表：只为视口附近构造条目，屏外用上一帧实测高与 `estimate_h` 估算总高；`key` 稳定标识条目（长消息流、日志用，条目多时比 `scroll` 快一个量级） |
-| `boxed(width, BoxStyle, Edges, gap, ...)` | 通用表面容器：底色 / 边框 / 圆角 / 四边内边距 / 间距可配，宽度撑满或固定（气泡、步骤卡、输入盒） |
+| `boxed(width, BoxStyle, Edges, gap, ...)` | 通用表面容器：底色 / 边框 / 圆角 / 四边内边距 / 间距可配，宽度撑满或固定（气泡、步骤卡、输入盒）；`BoxStyle::shadow(...)` 给浮层加投影 |
 | `click_row(id, Edges, radius, selected, enabled, ...)` / `click_box(...)` | 无边框可点行 / 定宽可点块：选中与悬停出底色，用于会话行、折叠块头、工具排触发钮 |
 | `icon_named(name, size, color)` / `icon_button_named(...)` / `icon_button_filled(...)` | 按 lucide 名称绘制图标（表内形状与宿主同一份数据），可指定图标边长与命中盒边长；实心钮用于发送 / 停止 |
 | `stack(...)` / `center_column(...)` / `row_fit(...)` | 层叠容器（后声明压住先声明）/ 水平居中列 / 收缩宽度行（行内右对齐按钮组） |
 | `image_sized(source, w, h, fit)` / `bar(w, color)` / `hit_area(id)` | 固定尺寸图片、竖向色条、透明命中区（浮层背板） |
 | `text_styled_fit(content, TextStyle)` | 按内容定宽的单行文字（行内标题与摘要紧跟在前一项后，不被拉成整行） |
-| `scroll_sized(id, height, gap, follow_end, ...)` | 定高滚动区；`follow_end` 时停在终点就跟到新终点（日志、消息流） |
-| `rule()` / `spacer(h)` / `grow()` | 分隔线 / 固定高度空白 / 吃剩余宽度的弹簧 |
+| `text_width(text, role)` / `text_height(role)` | 量算单行文字的宽 / 行高（菜单行、候选行这类要自估行高的布局用） |
+| `scroll_sized(id, height, gap, follow_end, ...)` | 定高滚动区；`follow_end` 时停在终点就跟到新终点（日志、消息流）。`FrameUi::scroll_to_end(id)` 直接回底，`scroll_to(id, offset)` 定位到指定偏移（键盘巡航选中项跟滚） |
+| `scroll_max(id, max_height, gap, ...)` | 限高滚动区：高度随内容收缩，超过上限才出现滚动条（候选浮层按条数收高） |
+| `rule()` / `spacer(h)` / `fill_spacer()` / `grow()` | 分隔线 / 固定高度空白 / 吃剩余高度的弹簧（空态上下居中、尾部推到底）/ 吃剩余宽度的弹簧 |
 | `pad(horizontal, vertical, ...)` | 内边距容器：子项按列排布并整体内缩（滚动条要贴边、内容又要留白时用） |
 | `column(gap, ...)` / `row(gap, ...)` / `row_fill(gap, ...)` | 纵向 / 横向 / 占满剩余高度的横向容器（并排分栏各自滚动） |
 
@@ -502,6 +508,7 @@ ctx.begin_window_drag("main").await?;   // 宿主接管拖动手势
 | `state` | 按插件隔离的自持 JSON，落 `<插件目录>/data/state.json`；损坏时宿主先备份原文再降级 |
 | `fs` | `private_dir()` 给私有数据目录；其余接受**任意绝对路径**，父目录自动创建 |
 | `vault` | 路径相对当前仓库根，不能越出仓库；隐藏段可访问（插件自管附件可放 `.atelyx/temp/`），本地仓库与协作空间的 `vault_list` / `vault_exists` 同口径保留隐藏项（原子写残留 `.tmp` 除外）；**正被编辑器打开的文件拒写**。文本与二进制两条通道，二进制单次上限 32 MiB；更大的文件先落到插件私有目录再用 `vault_import_file` 让宿主按路径收进仓库（字节不进 RPC，源文件须在私有目录内，复制语义，见 §8.9）。`vault_image_info` 只解文件头给出图片固有像素尺寸（png / jpeg / gif / bmp / webp），不送回文件内容。结构变更用 `vault_rename(from, to)` / `vault_remove(path)`：文件或文件夹（递归），`to` 不可已存在、文件夹不可移入自身、仓库根不可删；改名会同步 `.md` 内部链接与画布节点引用。**路径正被笔记 / 表格 / 画布 / 插件文档打开，或被当前画布引用时拒收**——这些持有者仍按旧路径工作，放行后写回会产生幽灵文件，先关闭对应面再操作 |
+| `editor` | 当前笔记的选区读写：`editor_selection()` 取文档路径、选区字节区间与选中文本（阅读态 / 未打开笔记回空选区），`editor_replace_selection(text)` 替换选区（空串 = 删除，走笔记同一套保存链）；`open_files()` 取当前打开的文件（仓库相对路径，按打开顺序），候选列表这类「打开中的优先」的界面用它置顶 |
 | `table` | 读写当前打开的表格。真源在宿主，写入与用户编辑同一出口（合并落盘 + 协作补丁）；**禁止**用 `fs` 旁路读写 `.atb`。快照含稳定表格 id、列宽、行内单元格样式、用户当前选区与其他协作者选区（显示名 + 身份色）；向图片字段写图片用 `table_set_cell_image`（图片先经 `vault_write_binary` 落仓库，再传仓库相对路径） |
 | `notification` | 应用内通知条 |
 | `shortcuts` | 系统级全局快捷键（如 `Shift+Alt+E`）；被占用时注册返回可读错误，停用自动注销；同一组键重复注册幂等，触发上报的是最后一次注册的写法。`query_shortcut` 可事前问某键位是否被占用（`owner` 为占用方插件 id；被系统 / 其他应用占用时为缺省） |
@@ -671,12 +678,14 @@ ctx.subscribe("table:changed").await?;   // 当前打开表格变更
 ctx.subscribe("table:selection.changed").await?; // 当前表格选区移动（本端与协作者）
 ctx.subscribe("host:ai.chat.event").await?; // 对话事件（发起对话前必须订阅）
 ctx.subscribe("ai:chat.changed").await?; // AI 会话内容变更（含对话面板里的改动）
+ctx.subscribe("ai:chat.reload").await?;  // 会话真源整体重载完成（换仓 / 空间装载）
+ctx.subscribe("ai:chat.persist").await?; // 会话落盘失败置位 / 恢复
 ctx.subscribe("vault:file.changed").await?; // 仓库文件被宿主写入（保存 / 新建 / 删除 / 改名）
 ctx.subscribe("window:file.drop").await?; // 外部文件拖入窗口（绝对路径）
 ```
 
 - `vault:switch` 只在声明了 `keepMountedOnVaultSwitch` 时才有意义：未声明的插件在收到它之前就被宿主重载了。payload：`{ kind: "local", root }` 或 `{ kind: "space", spaceId }`。
-- `ai:chat.changed` payload：`{ sessionId, kind, persistError? }`，`kind` 为 `created` / `messages` / `meta` / `deleted`（新会话、消息增减、标题或 Agent 等元数据变化、删除），`reload` 表示会话真源整体重载（换仓 / 空间装载完成），`persist` 表示落盘失败置位 / 恢复；`reload` 与 `persist` 的 `sessionId` 为空，后者由 `persistError`（`None` = 已恢复）承载状态。只在变更提交后广播、不补发历史，需要当前内容用 `ctx.chat_history` 重读。
+- `ai:chat.changed` payload：`{ sessionId, kind }`，`kind` 为 `created` / `messages` / `meta` / `deleted`（新会话、消息增减、标题或 Agent 等元数据变化、删除）。只在变更提交后广播、不补发历史，需要当前内容用 `ctx.chat_history` 重读。真源重载与落盘状态走独立事件：`ai:chat.reload`（无字段，收到后整体重取）与 `ai:chat.persist`（`{ persistError? }`，`None` = 已恢复）。
 - `table:changed` payload 是当前表格的仓库相对路径；订阅时会先补发一次当前状态（迟到订阅不丢当前表格）。
 - `table:selection.changed` payload：`{ path?, selection?, remoteSelections? }`——当前表格路径、本端选区与协作者选区（`name` / `color`（`#rrggbb`）/ `selection`），选区形态为 `cell` / `range` / `row` / `column` / `all`。内容不变、只有选区移动也发；没有打开表格时用空载荷通知一次。载荷直接带选区，不必为一次拖选重取快照。
 - `vault:file.changed` payload：`{ path, kind, oldPath? }`，`kind` 为 `created` / `updated` / `deleted` / `renamed`（改名另带旧路径）。只覆盖**宿主发起的写入**——壳自身保存 / 新建 / 复制 / 删除 / 改名与插件经 `vault` 的写入；外部程序直接改磁盘不发，需要感知外部改动仍要按 mtime 轮询。删除目录只发目录本身一条，其下文件不逐条发（按前缀作废缓存，需要明细就重新列举）。

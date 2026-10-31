@@ -604,6 +604,7 @@ struct FrameBuffer {
     ime: Option<abi::AbiRect>,
     keys: bool,
     fps: u32,
+    size: Option<(f32, f32)>,
 }
 
 impl FrameBuffer {
@@ -618,6 +619,7 @@ impl FrameBuffer {
             }),
             keys: frame.keys,
             fps: frame.fps.map(u32::from).unwrap_or(0),
+            size: frame.size.map(|size| (size.w, size.h)),
         };
         for command in &frame.commands {
             buffer.command(command);
@@ -650,6 +652,9 @@ impl FrameBuffer {
             ime: self.ime.unwrap_or_else(|| abi::AbiRect::empty_at(0.0, 0.0)),
             keys: self.keys as u8,
             fps: self.fps,
+            has_size: self.size.is_some() as u8,
+            layout_w: self.size.map(|size| size.0).unwrap_or(0.0),
+            layout_h: self.size.map(|size| size.1).unwrap_or(0.0),
         }
     }
 
@@ -830,6 +835,7 @@ fn token_code(name: ColorToken) -> u32 {
         ColorToken::Border => abi::TOKEN_BORDER,
         ColorToken::BorderStrong => abi::TOKEN_BORDER_STRONG,
         ColorToken::Transparent => abi::TOKEN_TRANSPARENT,
+        ColorToken::SurfaceOverlay => abi::TOKEN_SURFACE_OVERLAY,
     }
 }
 
@@ -895,6 +901,7 @@ mod tests {
 
     fn surface_frame() -> SurfaceFrame {
         SurfaceFrame {
+            size: Some(crate::protocol::frame::FrameSize { w: 320.0, h: 200.0 }),
             commands: vec![
                 DrawCommand::Line {
                     x1: 0.0,

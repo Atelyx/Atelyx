@@ -5,7 +5,9 @@ use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use atelyx_plugin_protocol::paint::{PaintPoint, DrawCommand, ImageFit, ImageSource, PaintShadow, TextAlign};
+use atelyx_plugin_protocol::paint::{
+    DrawCommand, ImageFit, ImageSource, PaintPoint, PaintShadow, TextAlign,
+};
 use atelyx_plugin_protocol::frame::HitCursor;
 use atelyx_plugin_protocol::paint::{ColorToken, TextFamily, TextWeight};
 
@@ -31,6 +33,14 @@ const NOTICE_PAD: f32 = 8.0;
 
 /// 多行输入框的垂直内边距。
 const AREA_PAD_Y: f32 = 6.0;
+
+/// 滚动区高度：撑满父容器剩余 / 定高 / 随内容收缩到上限。
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ScrollHeight {
+    Fill,
+    Fixed(f32),
+    Max(f32),
+}
 
 /// 文字角色（字号 / 字重 / 颜色一并由主题决定）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,13 +86,22 @@ impl TextRole {
     }
 }
 
-/// 文字样式：角色定字号与字重，颜色 / 等宽 / 换行按需覆写。
+/// 文字样式：角色定字号与字重，颜色 / 字重 / 等宽 / 换行按需覆写。
 #[derive(Clone, Copy, Debug)]
 pub struct TextStyle {
     role: TextRole,
     color: Option<ColorToken>,
+    weight: Option<TextWeight>,
     mono: bool,
     wrap: bool,
+}
+
+/// 多行输入框的高度策略：定高，或随内容在上下限之间长高（超出上限后框内滚动）。
+#[derive(Clone, Copy, Debug)]
+pub enum AreaHeight {
+    Fixed(f32),
+    /// `min` / `max` 指文字区高度（不含内边距）。
+    Auto { min: f32, max: f32 },
 }
 
 /// 四边内边距。
@@ -104,22 +123,28 @@ impl Edges {
     }
 }
 
-/// 容器外观：底色 / 边框 / 圆角都取主题 token。
+/// 容器外观：底色 / 边框 / 圆角都取主题 token，可带投影（浮层压住下层内容）。
 #[derive(Clone, Copy, Debug)]
 pub struct BoxStyle {
     pub fill: Option<ColorToken>,
     pub border: Option<ColorToken>,
     pub border_width: f32,
     pub radius: f32,
+    pub shadow: Option<PaintShadow>,
 }
 
 impl BoxStyle {
     pub fn new(fill: Option<ColorToken>, border: Option<ColorToken>, radius: f32) -> Self {
-        Self { fill, border, border_width: 1.0, radius }
+        Self { fill, border, border_width: 1.0, radius, shadow: None }
     }
 
     pub fn hairline(mut self) -> Self {
         self.border_width = 0.5;
+        self
+    }
+
+    pub fn shadow(mut self, shadow: PaintShadow) -> Self {
+        self.shadow = Some(shadow);
         self
     }
 }
@@ -133,11 +158,17 @@ pub enum BoxWidth {
 
 impl TextStyle {
     pub fn new(role: TextRole) -> Self {
-        Self { role, color: None, mono: false, wrap: false }
+        Self { role, color: None, weight: None, mono: false, wrap: false }
     }
 
     pub fn color(mut self, color: ColorToken) -> Self {
         self.color = Some(color);
+        self
+    }
+
+    /// 覆写角色默认字重（空态标题这类需要更重的单行文字）。
+    pub fn weight(mut self, weight: TextWeight) -> Self {
+        self.weight = Some(weight);
         self
     }
 
@@ -155,6 +186,9 @@ impl TextStyle {
 
     fn resolve(self, theme: &Theme) -> (FontSpec, ColorToken) {
         let (mut spec, color) = self.role.resolve(theme);
+        if let Some(weight) = self.weight {
+            spec.weight = Some(weight);
+        }
         if self.mono {
             spec.family = Some(TextFamily::Mono);
         }
@@ -572,6 +606,39 @@ impl<'c, 'a> Ui<'c, 'a> {
         });
     }
 
+    /// 转圈指示：`phase` 为旋转弧度（插件按帧拍推进）；画四分之三圆弧，尺寸固定为正方形。
+    pub fn spinner(&mut self, size: f32, color: ColorToken, phase: f32) {
+        let stroke = (size / 14.0 * 1.5).max(1.0);
+        self.push(Item {
+            width: Width::Fixed(size),
+            fill_height: false,
+            height: Box::new(move |_, _| size),
+            draw: Box::new(move |ctx, rect, clip| {
+                let visible = rect.intersect(clip);
+                if visible.is_empty() {
+                    return;
+                }
+                let radius = (size - stroke) / 2.0;
+                let cx = rect.x + size / 2.0;
+                let cy = rect.y + size / 2.0;
+                let sweep = std::f32::consts::FRAC_PI_2 * 3.0;
+                let points = (0..=24)
+                    .map(|step| {
+                        let angle = phase + sweep * step as f32 / 24.0;
+                        PaintPoint { x: cx + radius * angle.cos(), y: cy + radius * angle.sin() }
+                    })
+                    .collect();
+                ctx.draw(DrawCommand::Path {
+                    points,
+                    closed: false,
+                    fill: None,
+                    stroke: Some(theme::token(color)),
+                    stroke_width: Some(stroke),
+                });
+            }),
+        });
+    }
+
     /// 竖向色条：占满行高（会话激活轨、状态条）。
     pub fn bar(&mut self, width: f32, color: ColorToken) {
         self.push(Item {
@@ -604,6 +671,16 @@ impl<'c, 'a> Ui<'c, 'a> {
             width: Width::Fill,
             fill_height: false,
             height: Box::new(move |_, _| height),
+            draw: Box::new(|_, _, _| {}),
+        });
+    }
+
+    /// 纵向弹簧：与同列其它撑满项均分父容器剩余高度（内容上下居中、把尾部推到列底）。
+    pub fn fill_spacer(&mut self) {
+        self.push(Item {
+            width: Width::Fill,
+            fill_height: true,
+            height: Box::new(|_, _| 0.0),
             draw: Box::new(|_, _, _| {}),
         });
     }
@@ -847,7 +924,7 @@ impl<'c, 'a> Ui<'c, 'a> {
                         stroke: style.border.map(theme::token),
                         stroke_width: style.border.map(|_| style.border_width),
                         corner_radius: Some(style.radius),
-                        shadow: None,
+                        shadow: style.shadow,
                     });
                 }
                 let inner = Rect::new(
@@ -1004,6 +1081,33 @@ impl<'c, 'a> Ui<'c, 'a> {
         self.ctx.metrics.width(text, font)
     }
 
+    /// 角色的字号（标题 / 正文 / 说明等档位）：自绘控件要按同档字号排布时用。
+    pub fn role_size(&mut self, role: TextRole) -> f32 {
+        let (font, _) = role.resolve(self.ctx().theme);
+        font.size
+    }
+
+    /// 单行文字行高（按角色取字号与字重）：菜单行、候选行这类自估行高的布局用。
+    pub fn text_height(&mut self, role: TextRole) -> f32 {
+        let (font, _) = role.resolve(self.ctx().theme);
+        text::line_height(&mut self.ctx().metrics, font)
+    }
+
+    /// 自适应多行输入框的实际高度（与 `text_area_submit_auto` 同口径）：
+    /// 依赖输入区高度排布浮层 / 浮钮的调用方据此算位置。
+    pub fn auto_area_height(
+        &mut self,
+        value: &str,
+        role: TextRole,
+        width: f32,
+        min: f32,
+        max: f32,
+        pad: Edges,
+    ) -> f32 {
+        let (font, _) = role.resolve(self.ctx().theme);
+        auto_area_height(&mut self.ctx().metrics, value, font, width, min, max, pad)
+    }
+
     /// 面板：圆角表面容器（承接子项，不承接点击）。
     pub fn panel(&mut self, build: impl FnOnce(&mut Ui<'_, 'a>)) {
         let theme = self.ctx().theme.clone();
@@ -1139,18 +1243,19 @@ impl<'c, 'a> Ui<'c, 'a> {
         });
     }
 
-    /// 多行输入框（撑满父宽、固定高）：软换行与显式换行都排，回车插入换行，
-    /// 光标超出内框时逐行纵向跟随。
+    /// 多行输入框（撑满父宽、定高）：软换行与显式换行都排，回车插入换行，
+    /// 光标超出内框时纵向跟随。
     pub fn text_area(&mut self, id: impl Into<String>, value: impl Into<String>, placeholder: impl Into<String>, height: f32) {
         self.text_area_kind(
             id.into(),
             value.into(),
             placeholder.into(),
-            height,
+            AreaHeight::Fixed(height),
             false,
             None,
             false,
             Edges::symmetric(PAD_X, AREA_PAD_Y),
+            Vec::new(),
         );
     }
 
@@ -1166,11 +1271,12 @@ impl<'c, 'a> Ui<'c, 'a> {
             id.into(),
             value.into(),
             placeholder.into(),
-            height,
+            AreaHeight::Fixed(height),
             true,
             None,
             false,
             Edges::symmetric(PAD_X, AREA_PAD_Y),
+            Vec::new(),
         );
     }
 
@@ -1188,11 +1294,39 @@ impl<'c, 'a> Ui<'c, 'a> {
             id.into(),
             value.into(),
             placeholder.into(),
-            height,
+            AreaHeight::Fixed(height),
             true,
             Some(font_size),
             true,
             pad,
+            Vec::new(),
+        );
+    }
+
+    /// 自适应高度的无底色多行输入框（回车提交）：内容在 `min`–`max` 之间长高，超出后在框内滚动。
+    /// 正文里被登记为标记的区间（如 `#` 引用标签）以强调浅底高亮，点进去整段选中、边界退格整段删除。
+    #[allow(clippy::too_many_arguments)]
+    pub fn text_area_submit_auto(
+        &mut self,
+        id: impl Into<String>,
+        value: impl Into<String>,
+        placeholder: impl Into<String>,
+        min: f32,
+        max: f32,
+        font_size: f32,
+        pad: Edges,
+        marks: Vec<(usize, usize)>,
+    ) {
+        self.text_area_kind(
+            id.into(),
+            value.into(),
+            placeholder.into(),
+            AreaHeight::Auto { min, max },
+            true,
+            Some(font_size),
+            true,
+            pad,
+            marks,
         );
     }
 
@@ -1202,19 +1336,27 @@ impl<'c, 'a> Ui<'c, 'a> {
         id: String,
         value: String,
         placeholder: String,
-        height: f32,
+        height: AreaHeight,
         enter_submits: bool,
         font_size: Option<f32>,
         bare: bool,
         pad: Edges,
+        marks: Vec<(usize, usize)>,
     ) {
         let theme = self.ctx().theme.clone();
         let font = FontSpec { size: font_size.unwrap_or(theme.sizes.caption), weight: None, family: None };
         let for_layout = value.clone();
+        let for_height = value.clone();
+        let for_marks = marks.clone();
         self.push(Item {
             width: Width::Fill,
             fill_height: false,
-            height: Box::new(move |_, _| height),
+            height: Box::new(move |metrics, width| match height {
+                AreaHeight::Fixed(height) => height,
+                AreaHeight::Auto { min, max } => {
+                    auto_area_height(metrics, &for_height, font, width, min, max, pad)
+                }
+            }),
             draw: Box::new(move |ctx, rect, clip| {
                 let visible = rect.intersect(clip);
                 if visible.is_empty() {
@@ -1230,9 +1372,29 @@ impl<'c, 'a> Ui<'c, 'a> {
                     (rect.w - pad.left - pad.right).max(1.0),
                     (rect.h - pad.top - pad.bottom).max(1.0),
                 );
-                draw_area_text(ctx, &id, &value, &placeholder, font, inner, focused, &theme, visible);
+                draw_area_text(
+                    ctx,
+                    &id,
+                    &value,
+                    &placeholder,
+                    font,
+                    inner,
+                    focused,
+                    &theme,
+                    visible,
+                    &marks,
+                );
                 ctx.hit(&id, visible, HitCursor::Text);
-                ctx.record(&id, Layout::TextArea { inner, font, value: for_layout.clone(), enter_submits });
+                ctx.record(
+                    &id,
+                    Layout::TextArea {
+                        inner,
+                        font,
+                        value: for_layout.clone(),
+                        enter_submits,
+                        marks: for_marks.clone(),
+                    },
+                );
                 ctx.focusables.push(id.clone());
             }),
         });
@@ -1370,18 +1532,18 @@ impl<'c, 'a> Ui<'c, 'a> {
 
     /// 滚动容器：高度吃满父容器剩余空间；内容按块滚动，滚出视口的块整块不画。
     pub fn scroll(&mut self, id: impl Into<String>, gap: f32, build: impl FnOnce(&mut Ui<'_, 'a>)) {
-        self.scroll_kind(id.into(), None, gap, false, build);
+        self.scroll_kind(id.into(), ScrollHeight::Fill, gap, false, build);
     }
 
     /// 行列表：与 [`Ui::scroll`] 同构（子项按行/块边界对齐滚动）。
     pub fn list(&mut self, id: impl Into<String>, gap: f32, build: impl FnOnce(&mut Ui<'_, 'a>)) {
-        self.scroll_kind(id.into(), None, gap, false, build);
+        self.scroll_kind(id.into(), ScrollHeight::Fill, gap, false, build);
     }
 
     /// 撑满父容器剩余高度的滚动区；`follow_end` 语义与 [`Ui::scroll_sized`] 一致——
     /// 上一帧停在终点就跟到新终点，用户往回滚即脱钩。
     pub fn scroll_follow(&mut self, id: impl Into<String>, gap: f32, follow_end: bool, build: impl FnOnce(&mut Ui<'_, 'a>)) {
-        self.scroll_kind(id.into(), None, gap, follow_end, build);
+        self.scroll_kind(id.into(), ScrollHeight::Fill, gap, follow_end, build);
     }
 
     /// 定高滚动区：`follow_end` 时，上一帧停在终点就自动跟到新的终点（新内容到达即贴底），
@@ -1394,13 +1556,24 @@ impl<'c, 'a> Ui<'c, 'a> {
         follow_end: bool,
         build: impl FnOnce(&mut Ui<'_, 'a>),
     ) {
-        self.scroll_kind(id.into(), Some(height), gap, follow_end, build);
+        self.scroll_kind(id.into(), ScrollHeight::Fixed(height), gap, follow_end, build);
+    }
+
+    /// 限高滚动区：高度随内容收缩，超过 `max_height` 才出现滚动条（候选这类按条数收高的浮层）。
+    pub fn scroll_max(
+        &mut self,
+        id: impl Into<String>,
+        max_height: f32,
+        gap: f32,
+        build: impl FnOnce(&mut Ui<'_, 'a>),
+    ) {
+        self.scroll_kind(id.into(), ScrollHeight::Max(max_height), gap, false, build);
     }
 
     fn scroll_kind(
         &mut self,
         id: String,
-        height: Option<f32>,
+        height: ScrollHeight,
         gap: f32,
         follow_end: bool,
         build: impl FnOnce(&mut Ui<'_, 'a>),
@@ -1412,10 +1585,16 @@ impl<'c, 'a> Ui<'c, 'a> {
         let for_size = Rc::clone(&shared);
         self.push(Item {
             width: Width::Fill,
-            fill_height: height.is_none(),
+            fill_height: height == ScrollHeight::Fill,
             height: Box::new(move |metrics, width| match height {
-                Some(height) => height,
-                None => column_height(&for_size, metrics, width, gap),
+                ScrollHeight::Fill | ScrollHeight::Max(_) => {
+                    let content = column_height(&for_size, metrics, width, gap);
+                    match height {
+                        ScrollHeight::Max(max) => content.min(max),
+                        _ => content,
+                    }
+                }
+                ScrollHeight::Fixed(height) => height,
             }),
             draw: Box::new(move |ctx, rect, clip| draw_scroll(ctx, &shared, &id, rect, clip, gap, follow_end)),
         });
@@ -1859,32 +2038,45 @@ fn draw_area_text(
     focused: bool,
     theme: &Theme,
     clip: Rect,
+    marks: &[(usize, usize)],
 ) {
     let default_state = InputState::default();
     let state = ctx.state.inputs.get(id).unwrap_or(&default_state);
     let line_height = ctx.metrics.measure("", font, None).height.max(1.0);
-    if value.is_empty() && state.preedit.is_empty() && !focused {
+    let line_x = inner.x;
+    // 空草稿恒显示占位符（取到焦点时也不消失），与原生输入框一致
+    if value.is_empty() && state.preedit.is_empty() {
         text::paint(
             ctx,
             placeholder,
             font,
             theme::token(ColorToken::TextMuted),
-            inner.x,
+            line_x,
             inner.y,
             Some(inner.w),
             Some(TextAlign::Start),
             clip,
         );
+        if focused {
+            draw_area_caret(ctx, line_x, inner.y, line_height, clip);
+        }
         return;
     }
     let lines = text::lines(&mut ctx.metrics, value, font, inner.w);
     let caret = text::snap(value, state.caret);
     let anchor = text::snap(value, state.anchor);
     let caret_index = text::line_of(&lines, caret);
-    let top = if focused { text::top_line(caret_index, line_height, inner.h) } else { 0 };
-    let shift = inner.y - top as f32 * line_height;
+    let scroll = text::area_scroll(
+        state.scroll,
+        caret_index,
+        line_height,
+        inner.h,
+        lines.len(),
+        focused,
+    );
+    let shift = inner.y - scroll;
     let (from, to) = (caret.min(anchor), caret.max(anchor));
-    for (index, line) in lines.iter().enumerate().skip(top) {
+    for (index, line) in lines.iter().enumerate() {
         let y = shift + index as f32 * line_height;
         if y >= clip.bottom() {
             break;
@@ -1893,17 +2085,48 @@ fn draw_area_text(
             continue;
         }
         let segment = &value[line.start..line.end];
+        // 标记区间（`#` 引用标签这类整段实体）先画浅底，正文与选区压在其上
+        for (mark_start, mark_end) in marks {
+            let (mark_start, mark_end) = (*mark_start.min(mark_end), *mark_end.max(mark_start));
+            if mark_end <= line.start || mark_start >= line.end {
+                continue;
+            }
+            let low = mark_start.max(line.start) - line.start;
+            let high = mark_end.min(line.end) - line.start;
+            let x1 = line_x + text::offset_in_line(&mut ctx.metrics, segment, font, low);
+            let x2 = line_x + text::offset_in_line(&mut ctx.metrics, segment, font, high);
+            let band = Rect::new(
+                x1,
+                y + line_height * 0.15,
+                (x2 - x1).max(1.0),
+                line_height * 0.85,
+            );
+            if !band.covered_by(clip) {
+                continue;
+            }
+            ctx.draw(DrawCommand::Rect {
+                x: band.x,
+                y: band.y,
+                w: band.w,
+                h: band.h,
+                fill: Some(theme::token(ColorToken::AccentSoft)),
+                stroke: None,
+                stroke_width: None,
+                corner_radius: Some(2.0),
+                shadow: None,
+            });
+        }
         if focused && from != to && line.start < to && line.end > from {
             let low = from.max(line.start) - line.start;
             let high = to.min(line.end) - line.start;
-            let x1 = inner.x + text::offset_in_line(&mut ctx.metrics, segment, font, low);
+            let x1 = line_x + text::offset_in_line(&mut ctx.metrics, segment, font, low);
             let x2 = if to > line.end {
                 inner.right()
             } else {
-                inner.x + text::offset_in_line(&mut ctx.metrics, segment, font, high)
+                line_x + text::offset_in_line(&mut ctx.metrics, segment, font, high)
             };
             let band = Rect::new(x1, y, (x2 - x1).max(1.0), line_height);
-            if band.intersect(clip) == band {
+            if band.covered_by(clip) {
                 ctx.draw(DrawCommand::Rect {
                     x: band.x,
                     y: band.y,
@@ -1918,11 +2141,17 @@ fn draw_area_text(
             }
         }
         if !segment.is_empty() {
-            text::paint(ctx, segment, font, theme::token(ColorToken::Text), inner.x, y, None, None, clip);
+            text::paint(ctx, segment, font, theme::token(ColorToken::Text), line_x, y, None, None, clip);
         }
     }
     let caret_line = lines[caret_index];
-    let caret_x = inner.x + text::offset_in_line(&mut ctx.metrics, &value[caret_line.start..caret_line.end], font, caret - caret_line.start);
+    let caret_x = line_x
+        + text::offset_in_line(
+            &mut ctx.metrics,
+            &value[caret_line.start..caret_line.end],
+            font,
+            caret - caret_line.start,
+        );
     let caret_y = shift + caret_index as f32 * line_height;
     if !state.preedit.is_empty() {
         text::paint(
@@ -1937,20 +2166,71 @@ fn draw_area_text(
             clip,
         );
     }
-    if focused && caret_y >= clip.y && caret_y + line_height <= clip.bottom() + 0.5 {
+    if focused {
+        draw_area_caret(ctx, caret_x, caret_y, line_height, clip);
+    }
+    // 内容超出可视高度：贴右缘的细条指示当前位置（浅色，不抢正文）
+    let content = lines.len() as f32 * line_height;
+    if content > inner.h + 0.5 {
+        let track = (inner.h - 8.0).max(1.0);
+        let thumb = (track * inner.h / content).max(24.0).min(track);
+        let max = (content - inner.h).max(1.0);
+        let top = inner.y + 4.0 + (scroll / max) * (track - thumb);
         ctx.draw(DrawCommand::Rect {
-            x: caret_x,
-            y: caret_y,
-            w: 1.0,
-            h: line_height,
-            fill: Some(theme::token(ColorToken::Accent)),
+            x: inner.right() - 4.0,
+            y: top,
+            w: 3.0,
+            h: thumb,
+            fill: Some(theme::token(ColorToken::Border)),
             stroke: None,
             stroke_width: None,
-            corner_radius: None,
+            corner_radius: Some(1.5),
             shadow: None,
         });
-        ctx.ime = Some(Rect::new(caret_x, caret_y, 1.0, line_height));
     }
+}
+
+/// 自适应多行输入框的实际高度（含内边距）：文字区按整行取，
+/// 视口高度与内容高度同为行高整数倍时滚动永远停在整行上，框边不会切出半截文字。
+pub(crate) fn auto_area_height(
+    metrics: &mut super::metrics::Metrics,
+    value: &str,
+    font: FontSpec,
+    width: f32,
+    min: f32,
+    max: f32,
+    pad: Edges,
+) -> f32 {
+    let line_height = text::line_height(metrics, font);
+    let inner_w = (width - pad.left - pad.right).max(1.0);
+    let content = text::wrapped_height(metrics, value, font, inner_w);
+    let cap = (max / line_height).floor().max(1.0) * line_height;
+    content.min(cap).max(min.min(cap)) + pad.top + pad.bottom
+}
+
+/// 输入框光标：一像素竖条 + 输入法候选窗锚点（框外不画）。
+fn draw_area_caret(
+    ctx: &mut BuildCtx<'_>,
+    x: f32,
+    y: f32,
+    line_height: f32,
+    clip: Rect,
+) {
+    if y < clip.y || y + line_height > clip.bottom() + 0.5 {
+        return;
+    }
+    ctx.draw(DrawCommand::Rect {
+        x,
+        y,
+        w: 1.0,
+        h: line_height,
+        fill: Some(theme::token(ColorToken::Accent)),
+        stroke: None,
+        stroke_width: None,
+        corner_radius: None,
+        shadow: None,
+    });
+    ctx.ime = Some(Rect::new(x, y, 1.0, line_height));
 }
 
 /// 滚动条宽度（与宿主内嵌滚动条同宽）与内容让位。

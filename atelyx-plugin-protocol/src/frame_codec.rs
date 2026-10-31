@@ -2,14 +2,15 @@
 //! 长度前缀），不依赖自描述格式。编码按穷举写（漏一个变体即编译失败），解码按标签分派、
 //! 未知标签报可读错误；布局变更必须同时升版本号，否则两端会静默错读。
 
-use crate::frame::{FrameRect, HitCursor, HitRegion, SurfaceFrame};
+use crate::frame::{FrameRect, FrameSize, HitCursor, HitRegion, SurfaceFrame};
 use crate::paint::{
     ColorToken, DrawCommand, ImageFit, ImageSource, PaintColor, PaintPoint, PaintShadow, TextAlign,
     TextFamily, TextWeight,
 };
 
 const MAGIC: [u8; 4] = *b"ATXF";
-const VERSION: u8 = 1;
+/// 当前编码版本。2 起帧尾带排版尺寸；解码仍接受 1（缺尺寸 = 未声明）。
+const VERSION: u8 = 2;
 
 /// 把一帧编成字节序列。
 pub fn encode(frame: &SurfaceFrame) -> Vec<u8> {
@@ -28,11 +29,12 @@ pub fn decode(bytes: &[u8]) -> Result<SurfaceFrame, String> {
     if bytes[..MAGIC.len()] != MAGIC {
         return Err("帧编码魔数不符".into());
     }
-    if bytes[MAGIC.len()] != VERSION {
-        return Err(format!("帧编码版本不符：{}", bytes[MAGIC.len()]));
+    let version = bytes[MAGIC.len()];
+    if !(1..=VERSION).contains(&version) {
+        return Err(format!("帧编码版本不符：{version}"));
     }
     let mut reader = Reader { buf: bytes, pos: MAGIC.len() + 1 };
-    let frame = decode_frame(&mut reader)?;
+    let frame = decode_frame(&mut reader, version)?;
     if reader.pos != bytes.len() {
         return Err(format!("帧编码尾部有多余字节：{}", bytes.len() - reader.pos));
     }
@@ -65,6 +67,14 @@ fn encode_frame(out: &mut Vec<u8>, frame: &SurfaceFrame) {
         Some(fps) => {
             out.push(1);
             out.extend_from_slice(&fps.to_le_bytes());
+        }
+        None => out.push(0),
+    }
+    match frame.size {
+        Some(size) => {
+            out.push(1);
+            put_f32(out, size.w);
+            put_f32(out, size.h);
         }
         None => out.push(0),
     }
@@ -177,7 +187,7 @@ fn encode_source(out: &mut Vec<u8>, source: &ImageSource) {
     }
 }
 
-fn decode_frame(reader: &mut Reader<'_>) -> Result<SurfaceFrame, String> {
+fn decode_frame(reader: &mut Reader<'_>, version: u8) -> Result<SurfaceFrame, String> {
     let count = reader.count()?;
     let mut commands = Vec::new();
     for _ in 0..count {
@@ -204,7 +214,11 @@ fn decode_frame(reader: &mut Reader<'_>) -> Result<SurfaceFrame, String> {
         true => Some(reader.u16()?),
         false => None,
     };
-    Ok(SurfaceFrame { commands, hits, ime, keys, fps })
+    let size = match version >= 2 && reader.bool()? {
+        true => Some(FrameSize { w: reader.f32()?, h: reader.f32()? }),
+        false => None,
+    };
+    Ok(SurfaceFrame { size, commands, hits, ime, keys, fps })
 }
 
 fn decode_command(reader: &mut Reader<'_>) -> Result<DrawCommand, String> {
@@ -296,6 +310,7 @@ pub(crate) fn token_code(token: ColorToken) -> u8 {
         ColorToken::Border => 15,
         ColorToken::BorderStrong => 16,
         ColorToken::Transparent => 17,
+        ColorToken::SurfaceOverlay => 18,
     }
 }
 
@@ -319,6 +334,7 @@ pub(crate) fn decode_token(code: u8) -> Result<ColorToken, String> {
         15 => ColorToken::Border,
         16 => ColorToken::BorderStrong,
         17 => ColorToken::Transparent,
+        18 => ColorToken::SurfaceOverlay,
         other => return Err(format!("未知主题色：{other}")),
     })
 }
@@ -579,6 +595,7 @@ mod tests {
 
     fn sample() -> SurfaceFrame {
         SurfaceFrame {
+            size: Some(FrameSize { w: 640.0, h: 480.0 }),
             commands: vec![
                 DrawCommand::Line {
                     x1: 1.0,
@@ -685,6 +702,7 @@ mod tests {
     #[test]
     fn wire_layout_is_frozen() {
         let frame = SurfaceFrame {
+            size: Some(FrameSize { w: 800.0, h: 600.0 }),
             commands: vec![
                 DrawCommand::Rect {
                     x: 1.0,
@@ -725,10 +743,10 @@ mod tests {
         assert_eq!(
             hex(&bytes),
             concat!(
-                "415458460102000000010000803f00000040000040400000804001000300",
+                "415458460202000000010000803f00000040000040400000804001000300",
                 "00010000c0400004000000000000000003000000e4b8ad00006041010102",
                 "03ff00000000010000000100000061000000000000000000002041000020",
-                "4101020000013c00",
+                "4101020000013c00010000484400001644",
             )
         );
         assert_eq!(decode(&bytes).unwrap(), frame);
@@ -765,6 +783,7 @@ mod tests {
             ColorToken::Border,
             ColorToken::BorderStrong,
             ColorToken::Transparent,
+            ColorToken::SurfaceOverlay,
         ];
         for (index, token) in tokens.into_iter().enumerate() {
             assert_eq!(decode_token(token_code(token)).unwrap(), token);

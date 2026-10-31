@@ -42,11 +42,22 @@ async fn main() {
                         reply(&responder, request_id, serde_json::to_value(theme()).unwrap());
                     }
                     HostRequest::MeasureBatch { request_id, params, .. } => {
+                        // 粗略量算：ASCII 按 0.55 字宽，其余（CJK / 全角）按一字宽
                         let sizes: Vec<MeasureTextResult> = params
                             .items
                             .iter()
                             .map(|item| MeasureTextResult {
-                                width: item.text.chars().count() as f32 * item.size * 0.55,
+                                width: item
+                                    .text
+                                    .chars()
+                                    .map(|ch| {
+                                        if (ch as u32) < 0x1100 {
+                                            item.size * 0.55
+                                        } else {
+                                            item.size
+                                        }
+                                    })
+                                    .sum(),
                                 height: item.size * 1.2,
                                 lines: 1,
                             })
@@ -57,7 +68,18 @@ async fn main() {
                         reply(&responder, request_id, json!({ "providers": [] }));
                     }
                     HostRequest::AiAgents { request_id, .. } => {
-                        reply(&responder, request_id, json!({ "agents": [] }));
+                        reply(
+                            &responder,
+                            request_id,
+                            json!({
+                                "agents": [
+                                    { "id": "chat", "name": "对话", "builtin": true },
+                                    { "id": "agent", "name": "Agent", "builtin": true },
+                                    { "id": "review", "name": "审阅", "builtin": false },
+                                    { "id": "archive", "name": "归档", "builtin": false }
+                                ]
+                            }),
+                        );
                     }
                     HostRequest::ChatHistory { request_id, params, .. } => {
                         if params.session_id.is_some() {
@@ -110,8 +132,20 @@ async fn main() {
                             json!({ "sessionVaultKey": "smoke", "sessions": [] }),
                         );
                     }
-                    HostRequest::VaultList { request_id, .. } => {
-                        reply(&responder, request_id, json!({ "entries": [] }));
+                    HostRequest::VaultList { request_id, path, .. } => {
+                        let entries = if path.is_empty() {
+                            json!([
+                                { "name": "方案.md", "kind": "file" },
+                                { "name": "资料", "kind": "dir" }
+                            ])
+                        } else {
+                            json!([{ "name": "看板.atb", "kind": "file" }])
+                        };
+                        reply(&responder, request_id, json!({ "entries": entries }));
+                    }
+                    // 打开文件：把「资料/看板.atb」报成打开中，候选里它应排到最前
+                    HostRequest::EditorOpenFiles { request_id, .. } => {
+                        reply(&responder, request_id, json!({ "paths": ["资料/看板.atb"] }));
                     }
                     HostRequest::VaultExists { request_id, .. } => {
                         reply(&responder, request_id, json!({ "exists": false }));
@@ -134,11 +168,18 @@ async fn main() {
     wait_status(&runtime, CORE, PluginStatus::Running).await;
 
     runtime.notify_surface_attached(PANEL, SURFACE, SurfaceKind::Panel);
+    // 插件拿到真实尺寸才出首帧（与宿主首绘同步）；这里替宿主补一次尺寸
+    runtime.notify_frame_input(
+        PANEL,
+        SURFACE,
+        &FrameInput::Resize { width: 900.0, height: 700.0 },
+    );
     let frame = wait_frame(&runtime, Duration::from_secs(5)).await.expect("attach 后应有帧");
     println!("面板首帧：{} 条指令，{} 个命中区", frame.commands.len(), frame.hits.len());
-    // 先给一个真实尺寸，否则 0×0 的命中区点不到会话
-    wait_resize(&runtime, 900.0, 700.0).expect("初始尺寸");
     let frame = runtime.surface_frame(PANEL, SURFACE).expect("初始帧");
+    if let Ok(json) = serde_json::to_vec(&*frame) {
+        let _ = std::fs::write("target/ai_frame_empty.json", json);
+    }
     // 打开侧栏，再选中最长的会话，让改宽基准覆盖真实消息流的排版成本
     if let Some(hit) = frame.hits.iter().find(|hit| hit.id == "toggle-sidebar") {
         click_hit(&runtime, hit);
@@ -192,6 +233,34 @@ async fn main() {
     });
     println!("回到底部浮钮：{}", if scrolled_up { "出现" } else { "缺失" });
     if scrolled_up {
+        if let Some(frame) = runtime.surface_frame(PANEL, SURFACE) {
+            if let Ok(json) = serde_json::to_vec(&*frame) {
+                let _ = std::fs::write("target/ai_frame_scrolled.json", json);
+            }
+        }
+        // 浮钮是浮层但不能拦滚轮：再滚一次，内容应继续上移
+        let before = top_message_y(&runtime);
+        runtime.notify_frame_input(
+            PANEL,
+            SURFACE,
+            &FrameInput::Wheel {
+                x: 260.0,
+                y: 300.0,
+                delta_x: 0.0,
+                delta_y: -400.0,
+                hit: None,
+            },
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let after = top_message_y(&runtime);
+        println!(
+            "浮层上方继续滚轮：{}",
+            if matches!((before, after), (Some(b), Some(a)) if a < b) {
+                "通过"
+            } else {
+                "未移动"
+            }
+        );
         if let Some(hit) = runtime
             .surface_frame(PANEL, SURFACE)
             .and_then(|frame| frame.hits.iter().find(|hit| hit.id == "scroll-bottom").cloned())
@@ -234,6 +303,179 @@ async fn main() {
             println!("帧快照：target/ai_frame.json");
         }
     }
+    // # 候选：聚焦输入框敲一个 #，候选贴输入盒内展开；键盘下移一行后应出现滚动位移
+    if let Some(hit) = runtime
+        .surface_frame(PANEL, SURFACE)
+        .and_then(|frame| frame.hits.iter().find(|hit| hit.id == "draft").cloned())
+    {
+        click_hit(&runtime, &hit);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        runtime.notify_frame_input(
+            PANEL,
+            SURFACE,
+            &FrameInput::Key {
+                key: atelyx_plugin_protocol::frame::Key::Character { text: "#".into() },
+                action: atelyx_plugin_protocol::frame::KeyAction::Press,
+                modifiers: atelyx_plugin_protocol::frame::Modifiers::default(),
+                text: Some("#".to_string()),
+            },
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let first_pick = runtime.surface_frame(PANEL, SURFACE).and_then(|frame| {
+            let picks = frame.hits.iter().filter(|hit| hit.id.starts_with("pick:")).count();
+            // 候选顺序：打开中的文件置顶
+            let order: Vec<String> = frame
+                .hits
+                .iter()
+                .filter(|hit| hit.id.starts_with("pick:"))
+                .map(|hit| hit.id.clone())
+                .collect();
+            println!("# 候选：{} 条（顺序 {order:?}）", picks);
+            if let Ok(json) = serde_json::to_vec(&*frame) {
+                let _ = std::fs::write("target/ai_frame_picker.json", json);
+            }
+            frame.hits.iter().find(|hit| hit.id == "pick:0").cloned()
+        });
+        // 点第一条候选：草稿落成完整标签，标签整段有浅强调底；点进标签整段选中、退格整段删除
+        if let Some(pick) = first_pick {
+            click_hit(&runtime, &pick);
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            match runtime.surface_frame(PANEL, SURFACE) {
+                Some(frame) => {
+                    let tag = frame
+                        .commands
+                        .iter()
+                        .find_map(|command| match command {
+                            atelyx_plugin_protocol::paint::DrawCommand::Text { content, .. }
+                                if content.starts_with('#') =>
+                            {
+                                Some(content.clone())
+                            }
+                            _ => None,
+                        });
+                    let marked = frame.commands.iter().any(|command| {
+                        matches!(
+                            command,
+                            atelyx_plugin_protocol::paint::DrawCommand::Rect {
+                                fill: Some(atelyx_plugin_protocol::paint::PaintColor::Token {
+                                    name: atelyx_plugin_protocol::paint::ColorToken::AccentSoft,
+                                }),
+                                ..
+                            }
+                        )
+                    });
+                    println!(
+                        "引用标签：{}；标签高亮：{}",
+                        tag.as_deref().unwrap_or("（未落成）"),
+                        if marked { "有" } else { "无" }
+                    );
+                    if let Ok(json) = serde_json::to_vec(&*frame) {
+                        let _ = std::fs::write("target/ai_frame_tag.json", json);
+                    }
+                    // 点进标签内部（取标签文字左下角往右一点）：整段选中后再退格应整段删掉
+                    if let Some(text) = frame.commands.iter().find_map(|command| match command {
+                        atelyx_plugin_protocol::paint::DrawCommand::Text { x, y, content, .. }
+                            if content.starts_with('#') =>
+                        {
+                            Some((*x, *y, content.clone()))
+                        }
+                        _ => None,
+                    }) {
+                        let (x, y, content) = text;
+                        let at = atelyx_plugin_protocol::frame::HitRegion {
+                            id: "draft".into(),
+                            x: x + 2.0,
+                            y: y + 4.0,
+                            w: 4.0,
+                            h: 4.0,
+                            cursor: None,
+                        };
+                        click_hit(&runtime, &at);
+                        tokio::time::sleep(Duration::from_millis(60)).await;
+                        for _ in 0..content.chars().count().max(1) {
+                            runtime.notify_frame_input(
+                                PANEL,
+                                SURFACE,
+                                &FrameInput::Key {
+                                    key: atelyx_plugin_protocol::frame::Key::Named {
+                                        name: atelyx_plugin_protocol::frame::NamedKey::Backspace,
+                                    },
+                                    action: atelyx_plugin_protocol::frame::KeyAction::Press,
+                                    modifiers: atelyx_plugin_protocol::frame::Modifiers::default(),
+                                    text: None,
+                                },
+                            );
+                        }
+                        tokio::time::sleep(Duration::from_millis(80)).await;
+                        let gone = runtime.surface_frame(PANEL, SURFACE).is_some_and(|frame| {
+                            !frame.commands.iter().any(|command| matches!(
+                                command,
+                                atelyx_plugin_protocol::paint::DrawCommand::Text { content, .. }
+                                    if content.starts_with('#')
+                            ))
+                        });
+                        println!("标签整段删除：{}", if gone { "通过" } else { "未删净" });
+                    }
+                }
+                None => println!("引用标签：未取到帧"),
+            }
+        }
+        // Esc 关候选，再开 Agent 菜单：菜单按内容收高、不出现多余滚动条，外点关闭
+        runtime.notify_frame_input(
+            PANEL,
+            SURFACE,
+            &FrameInput::Key {
+                key: atelyx_plugin_protocol::frame::Key::Named {
+                    name: atelyx_plugin_protocol::frame::NamedKey::Escape,
+                },
+                action: atelyx_plugin_protocol::frame::KeyAction::Press,
+                modifiers: atelyx_plugin_protocol::frame::Modifiers::default(),
+                text: None,
+            },
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        if let Some(hit) = runtime
+            .surface_frame(PANEL, SURFACE)
+            .and_then(|frame| frame.hits.iter().find(|hit| hit.id == "agent-menu").cloned())
+        {
+            click_hit(&runtime, &hit);
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            if let Some(frame) = runtime.surface_frame(PANEL, SURFACE) {
+                let rows = frame.hits.iter().filter(|hit| hit.id.starts_with("agent:")).count();
+                let bar = frame.hits.iter().any(|hit| hit.id == "menu::bar");
+                println!(
+                    "Agent 菜单：{} 行，滚动条{}",
+                    rows,
+                    if bar { "出现（不应出现）" } else { "未出现" }
+                );
+                if let Ok(json) = serde_json::to_vec(&*frame) {
+                    let _ = std::fs::write("target/ai_frame_menu.json", json);
+                }
+            }
+            for input in [
+                FrameInput::PointerDown {
+                    x: 8.0,
+                    y: 8.0,
+                    button: atelyx_core::plugin_runtime::MouseButton::Left,
+                    hit: Some("popup-backdrop".to_string()),
+                },
+                FrameInput::PointerUp {
+                    x: 8.0,
+                    y: 8.0,
+                    button: atelyx_core::plugin_runtime::MouseButton::Left,
+                    hit: Some("popup-backdrop".to_string()),
+                },
+            ] {
+                runtime.notify_frame_input(PANEL, SURFACE, &input);
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let closed = runtime.surface_frame(PANEL, SURFACE).is_some_and(|frame| {
+                !frame.hits.iter().any(|hit| hit.id.starts_with("agent:"))
+                    && !frame.hits.iter().any(|hit| hit.id == "popup-backdrop")
+            });
+            println!("点外关闭菜单：{}", if closed { "通过" } else { "未关闭" });
+        }
+    }
     runtime.notify_surface_detached(PANEL, SURFACE);
     runtime.set_enabled(PANEL, false).expect("停用面板");
     runtime.set_enabled(CORE, false).expect("停用核心");
@@ -266,6 +508,17 @@ async fn resize_latency(runtime: &Arc<PluginRuntime>, base_width: f32, base_heig
         at(0.95),
         samples.last().unwrap()
     );
+}
+
+/// 当前帧里最靠上的消息操作命中纵坐标：滚轮是否让内容上移看它。
+fn top_message_y(runtime: &Arc<PluginRuntime>) -> Option<f32> {
+    let frame = runtime.surface_frame(PANEL, SURFACE)?;
+    frame
+        .hits
+        .iter()
+        .filter(|hit| hit.id.starts_with("copy:") || hit.id.starts_with("rollback:"))
+        .map(|hit| hit.y)
+        .min_by(f32::total_cmp)
 }
 
 fn click_hit(runtime: &Arc<PluginRuntime>, hit: &atelyx_plugin_protocol::frame::HitRegion) {
@@ -328,14 +581,14 @@ fn long_messages() -> Vec<Value> {
             },
             "createdAt": index as i64,
             "steps": if user { json!([]) } else { json!([
-                { "kind": "reasoning", "text": "先确认保存链的时序，再决定追加还是全量重写。" },
+                { "kind": "reasoning", "text": "先确认保存链的时序，再决定是追加还是全量重写；同时核对写盘在途、外部修改与程序化替换三者交叉的先后顺序，避免旧快照覆盖新内容，并为每个失败路径留下可定位的原因与用户可见状态。" },
                 {
                     "kind": "tool",
                     "run": {
                         "name": "read_file",
                         "status": "done",
-                        "argsSummary": "src/chat_actions.rs",
-                        "resultSummary": "1.2 KB",
+                        "argsSummary": "path: src/chat_actions.rs · 1 | --- 2 | tags: 3 | - 开发阶段待补充、待复核",
+                        "resultSummary": "已读回 1.2 KB，包含保存链、基线判定与重试退避的完整说明；改宽后摘要必须按可用宽度省略。",
                         "args": { "path": "src/chat_actions.rs" },
                         "result": "fn example() {}\n"
                     }

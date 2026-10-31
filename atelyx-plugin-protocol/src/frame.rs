@@ -52,10 +52,23 @@ pub struct FrameRect {
     pub h: f32,
 }
 
+/// 帧的排版尺寸（逻辑像素）：插件按这个尺寸算出这一帧。
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FrameSize {
+    pub w: f32,
+    pub h: f32,
+}
+
 /// 一面一帧的完整内容。
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SurfaceFrame {
+    /// 本帧按多大尺寸排版。宿主据此判定这张帧是否对得上当前面尺寸——改宽期间手里那帧常常
+    /// 还是上一拍宽度排的，直接画出来右对齐项与滚动条就会停在旧边缘。
+    /// 缺省 = 未声明，宿主无从判定，只能按「拿到什么画什么」处理。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<FrameSize>,
     pub commands: Vec<DrawCommand>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hits: Vec<HitRegion>,
@@ -95,6 +108,9 @@ impl SurfaceFrame {
         }
         if let Some(ime) = self.ime {
             ensure_rect(ime.x, ime.y, ime.w, ime.h, "输入法光标")?;
+        }
+        if let Some(size) = self.size {
+            ensure_rect(0.0, 0.0, size.w, size.h, "排版尺寸")?;
         }
         if let Some(fps) = self.fps {
             if !(1..=MAX_FPS).contains(&fps) {
@@ -328,6 +344,7 @@ mod tests {
     #[test]
     fn frame_validation_checks_hits_and_commands() {
         let mut frame = SurfaceFrame {
+            size: None,
             commands: vec![DrawCommand::Text {
                 x: 0.0,
                 y: 0.0,

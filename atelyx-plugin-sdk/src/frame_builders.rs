@@ -182,7 +182,7 @@ pub fn ime_rect(x: f32, y: f32, w: f32, h: f32) -> FrameRect {
 
 /// 帧外壳：指令与命中区，不声明按键 / 输入法 / 帧率。
 pub fn frame(commands: Vec<DrawCommand>, hits: Vec<HitRegion>) -> SurfaceFrame {
-    SurfaceFrame { commands, hits, ime: None, keys: false, fps: None }
+    SurfaceFrame { size: None, commands, hits, ime: None, keys: false, fps: None }
 }
 
 /// 声明本面收键盘：指针按下取焦，随后全部按键（含修饰键组合）经 `FrameInput::Key` 回发。

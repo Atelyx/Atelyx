@@ -29,7 +29,14 @@ pub(crate) enum Layout {
     Input { inner: Rect, font: FontSpec, value: String },
     /// 多行输入框：`inner` = 文字区（已扣除内边距），软换行与显式换行都按它排布。
     /// `enter_submits` 为真时回车提交（Shift+回车换行），否则回车插入换行。
-    TextArea { inner: Rect, font: FontSpec, value: String, enter_submits: bool },
+    /// `marks` = 本帧的标记区间（字节），点进去整段选中、边界退格整段删除。
+    TextArea {
+        inner: Rect,
+        font: FontSpec,
+        value: String,
+        enter_submits: bool,
+        marks: Vec<(usize, usize)>,
+    },
     Select { options: usize },
     Checkbox,
     /// `content` = 内容总高（可滚动余量 = 内容高 - 视口高）。
@@ -51,6 +58,12 @@ pub(crate) struct InputState {
     pub anchor: usize,
     /// 输入法组合串（未提交，不进入文本值）。
     pub preedit: String,
+    /// 多行输入的纵向滚动偏移（像素；单行输入恒为 0）。
+    pub scroll: f32,
+    /// 撤销栈（(文本, 光标) 快照；文本变了才压栈）。
+    pub undo: Vec<(String, usize)>,
+    /// 重做栈（撤销时压入；新编辑作废）。
+    pub redo: Vec<(String, usize)>,
 }
 
 /// 下拉的展开态与键盘巡航项。
@@ -150,6 +163,14 @@ impl Default for UiState {
 }
 
 impl UiState {
+    /// 面重挂：主题与依赖主题的版面缓存作废，尺寸与交互态保留（首帧不按占位尺寸排）。
+    pub(crate) fn refresh_theme(&mut self) {
+        self.theme = None;
+        self.submitted = None;
+        self.markdown_layouts = Arc::default();
+        self.virtual_heights = Arc::new(Mutex::new(HashMap::new()));
+    }
+
     /// 删掉本帧已不存在控件的状态：长期运行的插件不该按历史控件累积。
     pub(crate) fn prune(&mut self) {
         self.inputs.retain(|id, _| self.layouts.contains_key(id));

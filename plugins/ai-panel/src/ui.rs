@@ -3,28 +3,118 @@
 
 use serde_json::Value;
 
-use atelyx_plugin_protocol::paint::{ColorToken, ImageFit, ImageSource};
+use atelyx_plugin_protocol::paint::{
+    ColorToken, ImageFit, ImageSource, PaintColor, PaintShadow, TextWeight,
+};
 use atelyx_plugin_sdk::frame_ui::{
     BoxStyle, BoxWidth, Edges, Rect, TextRole, TextStyle, Ui,
 };
 
 use crate::model::{
-    content_of, display_of, message_id_of, role_of, Candidate, Menu, Model, FLOW,
+    content_of, display_of, message_id_of, role_of, Candidate, Menu, Model, Picker, FLOW,
 };
 
 /// 侧栏宽度与并排显示的最小面板宽。
 const SIDEBAR_W: f32 = 228.0;
 const SIDEBAR_INLINE_MIN_W: f32 = 640.0;
-/// 输入盒内文本区高度与图片缩略图边长。
-const INPUT_H: f32 = 72.0;
+/// 输入盒内文字区高度：静止高度与内容超高后的上限（超出后在框内滚动），图片缩略图边长。
+const INPUT_MIN_H: f32 = 96.0;
+const INPUT_MAX_H: f32 = 240.0;
 const THUMB: f32 = 160.0;
-/// 浮层宽度与边距。
+/// 浮层宽度、行高与边距。
 const MENU_PLUS_W: f32 = 176.0;
 const MENU_AGENT_W: f32 = 200.0;
 const MENU_MODEL_W: f32 = 224.0;
 const MENU_EFFORT_W: f32 = 224.0;
-const MENU_ROW_H: f32 = 28.0;
-const MENU_PAD: f32 = 4.0;
+const MENU_ITEM_H: f32 = 28.0;
+const MENU_GROUP_PAD_TOP: f32 = 6.0;
+const MENU_GROUP_PAD_BOTTOM: f32 = 2.0;
+const MENU_ITEM_PAD_X: f32 = 12.0;
+const MENU_PAD_Y: f32 = 4.0;
+/// 弹层与面板边缘的最小间距。
+const POPUP_GAP: f32 = 6.0;
+/// 工具排底边到面板底边的距离（输入区下留白 + 输入盒下内边距 + 工具排高）：菜单向上翻转时贴这条线。
+const TOOL_ROW_BOTTOM: f32 = 10.0 + 8.0 + TOOL_ROW_H;
+/// `#` 候选行高（单行 / 带次行的次行增量）、浮层最大高度与行内尺寸。
+const PICKER_ROW_H: f32 = 25.0;
+const PICKER_SUB_H: f32 = 15.0;
+const PICKER_MAX_H: f32 = 224.0;
+const PICKER_ROW_PAD_X: f32 = 10.0;
+const PICKER_ROW_PAD_Y: f32 = 5.0;
+const PICKER_LINE_GAP: f32 = 1.0;
+const PICKER_ICON: f32 = 12.0;
+const PICKER_ICON_GAP: f32 = 6.0;
+/// 次行相对主行的缩进（= 图标列 + 图标间距）。
+const PICKER_INDENT: f32 = PICKER_ICON + PICKER_ICON_GAP;
+const PICKER_RADIUS: f32 = 6.0;
+/// 输入盒内的工具排高度（发送钮 28px 定行高）。
+const TOOL_ROW_H: f32 = 28.0;
+/// 输入盒内文字区的内边距（左 2 / 上 8 与拆分前的输入面一致）。
+const AREA_PAD: Edges = Edges { left: 2.0, right: 2.0, top: 8.0, bottom: 0.0 };
+/// 输入区的左右留白与输入盒内边距：算文字区可用宽时先扣掉它们。
+const COMPOSER_PAD_X: f32 = 12.0;
+const BOX_PAD: f32 = 8.0;
+/// 附件托盘追加的高度（上留白 + 一行缩略名）。
+const IMAGE_TRAY_H: f32 = 27.0;
+/// 转圈每拍（100ms 一帧）的旋转弧度：约一秒一圈。
+const SPIN_STEP_RAD: f32 = 0.63;
+
+fn spin_phase(model: &Model) -> f32 {
+    model.spin_tick as f32 * SPIN_STEP_RAD
+}
+
+/// 候选行高（单行 / 带次行）：默认字号档下「内衬 + 行高」的取整值，键盘巡航的滚动偏移据此算。
+/// 略偏大是安全的——多滚一点只会让选中行更靠上，不会切掉它。
+fn picker_row_height(candidate: &Candidate) -> f32 {
+    if candidate.sub.is_empty() {
+        PICKER_ROW_H
+    } else {
+        PICKER_ROW_H + PICKER_SUB_H
+    }
+}
+
+fn picker_height(picker: &Picker) -> f32 {
+    picker
+        .candidates
+        .iter()
+        .map(picker_row_height)
+        .sum::<f32>()
+        .min(PICKER_MAX_H)
+}
+
+/// 文字区实际高度（含内边距）：随草稿行数在 `INPUT_MIN_H`–`INPUT_MAX_H` 之间增长。
+fn area_height(ui: &mut Ui<'_, '_>, model: &Model, chat_width: f32) -> f32 {
+    let width = (chat_width - COMPOSER_PAD_X * 2.0 - BOX_PAD * 2.0).max(1.0);
+    ui.auto_area_height(
+        &model.draft,
+        TextRole::Body,
+        width,
+        INPUT_MIN_H,
+        INPUT_MAX_H,
+        AREA_PAD,
+    )
+}
+
+/// 输入区实际占高：浮钮与菜单据此上移，不压住输入盒。
+fn composer_height(ui: &mut Ui<'_, '_>, model: &Model, chat_width: f32) -> f32 {
+    let box_h = BOX_PAD + area_height(ui, model, chat_width) + 4.0 + TOOL_ROW_H + BOX_PAD;
+    1.0 + 8.0 + box_h + 10.0
+        + if model.images.is_empty() { 0.0 } else { IMAGE_TRAY_H }
+        + model.picker.as_ref().map(picker_height).unwrap_or(0.0)
+}
+
+/// 键盘巡航选中的候选：滚动偏移把该行底边带进可见窗口。
+pub(crate) fn picker_scroll_offset(picker: &Picker, selected: usize) -> f32 {
+    let viewport = picker_height(picker);
+    let end = picker
+        .candidates
+        .iter()
+        .take(selected + 1)
+        .map(picker_row_height)
+        .sum::<f32>();
+    (end - viewport).max(0.0)
+}
+
 /// 折叠块摘要单行字符上限。
 const SUMMARY_CHARS: usize = 56;
 
@@ -60,13 +150,12 @@ pub fn frame(ui: &mut Ui<'_, '_>, model: &Model) {
         });
     }
     let left = if model.sidebar_open && !narrow { SIDEBAR_W + 1.0 } else { 0.0 };
-    if model.menu.is_some() || model.picker.is_some() {
-        popup_layer(ui, model, bounds, left);
-    }
     if !model.follow_bottom && !model.messages.is_empty() {
         let width = (bounds.w - left).max(1.0);
-        let rect = Rect::new(left + (width - 96.0) / 2.0, (bounds.h - 152.0).max(0.0), 96.0, 28.0);
-        ui.overlay(rect, |layer| {
+        let y = (bounds.h - composer_height(ui, model, chat_width) - 40.0).max(0.0);
+        let rect = Rect::new(left + (width - 96.0) / 2.0, y, 96.0, 28.0);
+        // 被动浮层：浮钮不拦滚轮，上下翻消息流照常
+        ui.overlay_passive(rect, |layer| {
             layer.click_box(
                 "scroll-bottom",
                 BoxWidth::Fill,
@@ -86,6 +175,13 @@ pub fn frame(ui: &mut Ui<'_, '_>, model: &Model) {
             );
         });
     }
+    if model.menu.is_some() {
+        // 弹层背板：整面承接外点（点外面关菜单），菜单本身随后声明压在上面
+        ui.overlay(Rect::new(0.0, 0.0, bounds.w, bounds.h), |backdrop| {
+            backdrop.hit_area("popup-backdrop");
+        });
+        popup_layer(ui, model, bounds, left);
+    }
 }
 
 fn sidebar(ui: &mut Ui<'_, '_>, model: &Model, width: f32) {
@@ -98,22 +194,21 @@ fn sidebar_body(ui: &mut Ui<'_, '_>, model: &Model) {
         panel.stack(|stack| {
             // 侧栏面板整体吞掉按压，避免落到背板上把侧栏收起
             stack.hit_area("sidebar-swallow");
-            stack.pad(6.0, 6.0, |body| {
-                body.text_input("search", model.search.clone(), "搜索会话");
-                body.spacer(6.0);
-                body.scroll("sessions", 2.0, |list| {
+            // 留白放进滚动内容：滚动条占最右缘一列，内容不压在其下
+            stack.scroll("sessions", 2.0, |list| {
+                list.pad(6.0, 6.0, |body| {
+                    body.text_input("search", model.search.clone(), "搜索会话");
+                    body.spacer(6.0);
                     for session in model.visible_sessions() {
-                        session_row(list, model, session);
+                        session_row(body, model, session);
                     }
                     if model.sessions.is_empty() {
-                        list.pad(8.0, 8.0, |empty| {
-                            let label = if model.search.trim().is_empty() {
-                                "暂无历史会话"
-                            } else {
-                                "没有匹配的会话"
-                            };
-                            empty.caption(label.to_string());
-                        });
+                        let label = if model.search.trim().is_empty() {
+                            "暂无历史会话"
+                        } else {
+                            "没有匹配的会话"
+                        };
+                        body.pad(8.0, 8.0, |empty| empty.caption(label.to_string()));
                     }
                 });
             });
@@ -236,7 +331,7 @@ fn top_bar(ui: &mut Ui<'_, '_>, model: &Model) {
                 }
                 if model.active.is_some() && !model.active_streaming() {
                     if model.active_renaming() {
-                        line.icon_named("loader-circle", 14.0, ColorToken::Accent);
+                        line.spinner(14.0, ColorToken::Accent, spin_phase(model));
                     } else {
                         line.icon_button_named(
                             "regen-title",
@@ -267,13 +362,14 @@ fn top_bar(ui: &mut Ui<'_, '_>, model: &Model) {
                 );
                 if model.active.is_some() && model.messages.len() >= 2 {
                     if model.active_compacting() {
-                        line.icon_button_named(
-                            "compact",
-                            "loader-circle",
-                            13.0,
-                            24.0,
-                            ColorToken::TextMuted,
+                        line.click_box(
+                            "compact-progress",
+                            BoxWidth::Fixed(24.0),
+                            Edges::all(5.5),
+                            0.0,
                             false,
+                            false,
+                            |busy| busy.spinner(13.0, ColorToken::TextMuted, spin_phase(model)),
                         );
                     } else {
                         line.icon_button_named(
@@ -308,35 +404,41 @@ fn message_flow(ui: &mut Ui<'_, '_>, model: &Model, chat_width: f32) {
         empty_flow(ui);
         return;
     }
-    let viewport = (ui.bounds().h - 180.0).max(160.0);
-    ui.pad(12.0, 0.0, |flow| {
-        flow.spacer(12.0);
-        flow.virtual_scroll(
-            FLOW,
-            len,
-            10.0,
-            true,
-            viewport,
-            120.0,
-            |index| match marker {
-                Some(marker) if index == marker => u64::MAX,
-                Some(marker) if index > marker => message_key(model, index - 1),
-                _ => message_key(model, index),
-            },
-            |item, index| match marker {
-                Some(marker) if index == marker => compaction_marker(item, model),
+    let viewport = (ui.bounds().h - 37.0 - composer_height(ui, model, chat_width)).max(160.0);
+    // 滚动条贴面右缘：内容留白放进每条消息，右界落在轨道左侧
+    ui.virtual_scroll(
+        FLOW,
+        len,
+        10.0,
+        true,
+        viewport,
+        120.0,
+        |index| match marker {
+            Some(marker) if index == marker => u64::MAX,
+            Some(marker) if index > marker => message_key(model, index - 1),
+            _ => message_key(model, index),
+        },
+        |item, index| {
+            if index == 0 {
+                item.spacer(12.0);
+            }
+            item.pad(12.0, 0.0, |inner| match marker {
+                Some(marker) if index == marker => compaction_marker(inner, model),
                 Some(marker) if index > marker => {
-                    message_block(item, model, &model.messages[index - 1], chat_width)
+                    message_block(inner, model, &model.messages[index - 1], chat_width)
                 }
-                _ => message_block(item, model, &model.messages[index], chat_width),
-            },
-        );
-        flow.spacer(12.0);
-    });
+                _ => message_block(inner, model, &model.messages[index], chat_width),
+            });
+            if index + 1 == len {
+                item.spacer(12.0);
+            }
+        },
+    );
 }
 
 fn empty_flow(ui: &mut Ui<'_, '_>) {
-    ui.column(8.0, |outer| {
+    ui.fill_column(0.0, |outer| {
+        outer.fill_spacer();
         outer.center_column(8.0, |center| {
             center.boxed(
                 BoxWidth::Fixed(40.0),
@@ -353,11 +455,12 @@ fn empty_flow(ui: &mut Ui<'_, '_>) {
                     icon.spacer(11.0);
                 },
             );
-            center.text_styled(
+            center.text_styled_fit(
                 "开始新的 AI 对话",
-                TextStyle::new(TextRole::Heading).color(ColorToken::Text),
+                TextStyle::new(TextRole::Body).weight(TextWeight::SemiBold),
             );
         });
+        outer.fill_spacer();
     });
 }
 
@@ -617,7 +720,7 @@ fn details_block(ui: &mut Ui<'_, '_>, model: &Model, spec: Details<'_>) {
     ui.boxed(
         BoxWidth::Fill,
         BoxStyle::new(Some(ColorToken::SurfaceSunken), Some(ColorToken::Border), 6.0).hairline(),
-        Edges { left: 0.0, right: 0.0, top: 6.0, bottom: 6.0 },
+        Edges::all(0.0),
         0.0,
         |card| {
             card.click_row(
@@ -645,7 +748,8 @@ fn details_block(ui: &mut Ui<'_, '_>, model: &Model, spec: Details<'_>) {
                             if spec.mono_summary {
                                 style = style.mono();
                             }
-                            line.text_styled_fit(one_line(&spec.summary, SUMMARY_CHARS), style);
+                            // 摘要吃掉标题后的剩余宽度并按可用宽省略，不顶到卡片边缘硬截断
+                            line.text_styled(one_line(&spec.summary, SUMMARY_CHARS), style);
                         }
                     });
                 },
@@ -767,13 +871,20 @@ fn composer(ui: &mut Ui<'_, '_>, model: &Model, chat_width: f32) {
             Edges::all(8.0),
             0.0,
             |input| {
-                input.text_area_submit_plain(
+                if let Some(picker) = &model.picker {
+                    picker_box(input, picker, chat_width);
+                }
+                // 引用标签以浅强调底高亮；点进去整段选中、边界退格整段删除由输入面托管
+                let font_size = input.role_size(TextRole::Body);
+                input.text_area_submit_auto(
                     crate::model::DRAFT,
                     model.draft.clone(),
                     "输入消息，Enter 发送，Shift+Enter 换行",
-                    INPUT_H,
-                    14.0,
-                    Edges { left: 2.0, right: 2.0, top: 8.0, bottom: 0.0 },
+                    INPUT_MIN_H,
+                    INPUT_MAX_H,
+                    font_size,
+                    AREA_PAD,
+                    model.marks(),
                 );
                 input.spacer(4.0);
                 tool_row(input, model, chat_width);
@@ -879,126 +990,213 @@ fn image_tray(ui: &mut Ui<'_, '_>, model: &Model) {
     });
 }
 
-fn popup_layer(ui: &mut Ui<'_, '_>, model: &Model, bounds: Rect, left: f32) {
-    let available = (bounds.w - left - 24.0).max(120.0);
-    let (width, rows) = if let Some(picker) = &model.picker {
-        (MENU_MODEL_W.min(available), picker.candidates.len().max(1))
-    } else {
-        match model.menu {
-            Some(Menu::Plus) => (MENU_PLUS_W.min(available), 2),
-            Some(Menu::Agent) => (MENU_AGENT_W.min(available), model.agents.len().max(1)),
-            Some(Menu::ModelRoot) => (MENU_MODEL_W.min(available), 2),
-            Some(Menu::ModelList) => (MENU_MODEL_W.min(available), model.models.len().max(1)),
-            Some(Menu::Effort) => (MENU_EFFORT_W.min(available), 5),
-            None => (0.0, 0),
-        }
-    };
-    if width <= 0.0 {
-        return;
+/// 菜单行高：行内文字与图标垂直居中在 28px 定高里；字号放大时按文字高撑开。
+fn menu_item_height(ui: &mut Ui<'_, '_>) -> f32 {
+    ui.text_height(TextRole::Caption).max(12.0).max(MENU_ITEM_H)
+}
+
+fn menu_group_height(ui: &mut Ui<'_, '_>) -> f32 {
+    ui.text_height(TextRole::Micro) + MENU_GROUP_PAD_TOP + MENU_GROUP_PAD_BOTTOM
+}
+
+fn menu_width(menu: Menu) -> f32 {
+    match menu {
+        Menu::Plus => MENU_PLUS_W,
+        Menu::Agent => MENU_AGENT_W,
+        Menu::ModelRoot | Menu::ModelList => MENU_MODEL_W,
+        Menu::Effort => MENU_EFFORT_W,
     }
-    let max_height = (bounds.h - 180.0).max(60.0);
-    let row_h = if model.picker.is_some() { 44.0 } else { MENU_ROW_H };
-    let height = (rows as f32 * row_h + MENU_PAD * 2.0).min(max_height);
-    let x = (left + 12.0).min((bounds.w - width).max(0.0));
-    let tray = if model.images.is_empty() { 0.0 } else { 32.0 };
-    let y = (bounds.h - 140.0 - tray - height).max(0.0);
-    ui.overlay(Rect::new(x, y, width, height), |panel| {
+}
+
+/// 菜单内容高：与绘制同一口径逐行累加，弹层高度按它收缩（短菜单不出现滚动条）。
+fn menu_body_height(ui: &mut Ui<'_, '_>, model: &Model, menu: Menu) -> f32 {
+    let item = menu_item_height(ui);
+    match menu {
+        Menu::Plus | Menu::ModelRoot => item * 2.0,
+        Menu::Agent => item * model.agents.len().max(1) as f32,
+        Menu::Effort => item * 5.0,
+        Menu::ModelList => {
+            if model.models.is_empty() {
+                return item;
+            }
+            let group = menu_group_height(ui);
+            let mut total = 0.0;
+            let mut provider = "";
+            for row in &model.models {
+                if provider != row.provider_name.as_str() {
+                    provider = row.provider_name.as_str();
+                    total += group;
+                }
+                total += item;
+            }
+            total
+        }
+    }
+}
+
+/// 菜单浮层：顶边贴触发钮的按下点，下方放不下且上方放得下时底边贴工具排上缘翻转；
+/// 高度随内容收缩、超高才滚动。
+fn popup_layer(ui: &mut Ui<'_, '_>, model: &Model, bounds: Rect, left: f32) {
+    let Some(menu_kind) = model.menu else { return };
+    let width = menu_width(menu_kind).min((bounds.w - POPUP_GAP * 2.0).max(1.0));
+    let body = menu_body_height(ui, model, menu_kind);
+    let card_h = (body + MENU_PAD_Y * 2.0).min((bounds.h - POPUP_GAP * 2.0).max(60.0));
+    let (anchor_x, anchor_y) = model
+        .menu_anchor
+        .unwrap_or((left + MENU_ITEM_PAD_X, bounds.h - TOOL_ROW_BOTTOM));
+    let x = anchor_x.clamp(POPUP_GAP, (bounds.w - width - POPUP_GAP).max(POPUP_GAP));
+    let below = anchor_y + card_h;
+    let trigger_top = bounds.h - TOOL_ROW_BOTTOM;
+    let y = if below > bounds.h - POPUP_GAP && trigger_top - card_h >= POPUP_GAP {
+        trigger_top - card_h
+    } else {
+        anchor_y
+    };
+    let y = y.clamp(POPUP_GAP, (bounds.h - card_h - POPUP_GAP).max(POPUP_GAP));
+    let style = BoxStyle::new(Some(ColorToken::SurfaceOverlay), Some(ColorToken::Border), 10.0)
+        .shadow(PaintShadow {
+            offset_x: 0.0,
+            offset_y: 6.0,
+            blur: 18.0,
+            color: PaintColor::Rgba { rgba: [0, 0, 0, 90] },
+        });
+    ui.overlay(Rect::new(x, y, width, card_h), |panel| {
         panel.boxed(
             BoxWidth::Fill,
-            BoxStyle::new(Some(ColorToken::SurfaceMuted), Some(ColorToken::Border), 10.0)
-                .hairline(),
-            Edges::all(MENU_PAD),
+            style,
+            Edges { left: 0.0, right: 0.0, top: MENU_PAD_Y, bottom: MENU_PAD_Y },
             0.0,
-            |menu| {
-                if let Some(picker) = &model.picker {
-                    picker_box(
-                        menu,
-                        picker.candidates.as_slice(),
-                        picker.selected,
-                        height - MENU_PAD * 2.0,
-                    );
-                } else if let Some(menu_kind) = model.menu {
-                    menu_box(menu, model, menu_kind, height - MENU_PAD * 2.0);
-                }
-            },
+            |menu| menu_box(menu, model, menu_kind, card_h - MENU_PAD_Y * 2.0),
         );
     });
 }
 
-fn picker_box(ui: &mut Ui<'_, '_>, candidates: &[Candidate], selected: usize, height: f32) {
-    ui.scroll_sized("picker", height.max(40.0), 0.0, false, |list| {
-        for (index, candidate) in candidates.iter().enumerate() {
-            let (icon, label) = if candidate.is_dir {
-                ("folder", format!("{}/", candidate.name))
+/// `#` 候选：贴在输入盒内、输入面上方，占满可用宽度并按条数收高（超出滚动）。
+/// 条目为双行卡片：主行文件名（按可用宽省略，不换行）+ 次行所在文件夹。
+fn picker_box(ui: &mut Ui<'_, '_>, picker: &Picker, chat_width: f32) {
+    let width = (chat_width - COMPOSER_PAD_X * 2.0 - BOX_PAD * 2.0 - 2.0).max(120.0);
+    let name_w = (width - PICKER_ROW_PAD_X * 2.0 - PICKER_INDENT).max(1.0);
+    let sub_w = (name_w - PICKER_INDENT).max(1.0);
+    let rows: Vec<(&'static str, String, String)> = picker
+        .candidates
+        .iter()
+        .map(|candidate| {
+            let icon = if candidate.is_dir {
+                "folder"
             } else {
-                (icon_of_path(&candidate.path), candidate.name.clone())
+                icon_of_path(&candidate.path)
             };
-            list.click_box(
-                format!("pick:{index}"),
-                BoxWidth::Fill,
-                Edges::symmetric(10.0, 5.0),
-                6.0,
-                index == selected,
-                true,
-                |row| {
-                    row.column(1.0, |lines| {
-                        lines.row(6.0, |line| {
-                            line.icon_named(icon, 12.0, ColorToken::TextSecondary);
-                            line.text_styled(
-                                label.clone(),
-                                TextStyle::new(TextRole::Caption).color(ColorToken::Text),
-                            );
-                        });
-                        if !candidate.sub.is_empty() {
-                            lines.pad(18.0, 0.0, |sub| {
-                                sub.text_styled(
-                                    candidate.sub.clone(),
-                                    TextStyle::new(TextRole::Micro),
-                                );
+            let name = elide(ui, &candidate.name, TextRole::Caption, name_w);
+            let sub = elide(ui, &candidate.sub, TextRole::Micro, sub_w);
+            (icon, name, sub)
+        })
+        .collect();
+    let selected = picker.selected;
+    ui.boxed(
+        BoxWidth::Fill,
+        BoxStyle::new(Some(ColorToken::SurfaceMuted), Some(ColorToken::Border), 10.0).hairline(),
+        Edges::all(0.0),
+        0.0,
+        |panel| {
+            panel.scroll_max("picker", PICKER_MAX_H, 0.0, |list| {
+                for (index, (icon, name, sub)) in rows.into_iter().enumerate() {
+                    let current = index == selected;
+                    list.click_box(
+                        format!("pick:{index}"),
+                        BoxWidth::Fill,
+                        Edges::symmetric(PICKER_ROW_PAD_X, PICKER_ROW_PAD_Y),
+                        PICKER_RADIUS,
+                        current,
+                        true,
+                        |row| {
+                            row.column(PICKER_LINE_GAP, |lines| {
+                                lines.row(PICKER_ICON_GAP, |line| {
+                                    let icon_color = if current {
+                                        ColorToken::Accent
+                                    } else {
+                                        ColorToken::TextSecondary
+                                    };
+                                    line.icon_named(icon, PICKER_ICON, icon_color);
+                                    let style =
+                                        TextStyle::new(TextRole::Caption).color(if current {
+                                            ColorToken::Text
+                                        } else {
+                                            ColorToken::TextSecondary
+                                        });
+                                    line.text_styled(name.clone(), style);
+                                });
+                                if !sub.is_empty() {
+                                    lines.pad(PICKER_INDENT, 0.0, |sub_line| {
+                                        sub_line.text_styled(
+                                            sub.clone(),
+                                            TextStyle::new(TextRole::Micro),
+                                        );
+                                    });
+                                }
                             });
-                        }
-                    });
-                },
-            );
+                        },
+                    );
+                }
+            });
+        },
+    );
+}
+
+/// 按可用宽度省略：放不下时取最长可容纳前缀 + `…`（与宿主同一口径，不换行）。
+fn elide(ui: &mut Ui<'_, '_>, text: &str, role: TextRole, available: f32) -> String {
+    if text.is_empty() || ui.text_width(text, role) <= available {
+        return text.to_string();
+    }
+    let ellipsis = ui.text_width("…", role);
+    if ellipsis > available {
+        return String::new();
+    }
+    let mut end = 0usize;
+    let mut width = 0.0;
+    for (index, ch) in text.char_indices() {
+        let advance = ui.text_width(&text[index..index + ch.len_utf8()], role);
+        if width + advance + ellipsis > available {
+            break;
         }
-    });
+        width += advance;
+        end = index + ch.len_utf8();
+    }
+    format!("{}…", &text[..end])
 }
 
 fn menu_box(ui: &mut Ui<'_, '_>, model: &Model, menu: Menu, height: f32) {
-    match menu {
+    ui.scroll_max("menu", height.max(1.0), 0.0, |list| match menu {
         Menu::Plus => {
-            menu_row(ui, "plus-context", "添加上下文", false, false);
-            menu_row(ui, "plus-attach", "上传附件", false, false);
+            menu_row(list, "plus-context", "添加上下文", false, false);
+            menu_row(list, "plus-attach", "上传附件", false, false);
         }
         Menu::Agent => {
             let current = model.active_agent();
-            ui.scroll_sized("menu", height, 0.0, false, |list| {
-                for agent in &model.agents {
-                    let checked = current.as_deref() == Some(agent.id.as_str())
-                        || (current.is_none() && agent.name == "对话");
-                    menu_row(
-                        list,
-                        &format!("agent:{}", agent.id),
-                        &agent.name,
-                        checked,
-                        false,
-                    );
-                }
-                if model.agents.is_empty() {
-                    list.pad(10.0, 6.0, |empty| empty.caption("Agent 名册尚未读取"));
-                }
-            });
+            for agent in &model.agents {
+                let checked = current.as_deref() == Some(agent.id.as_str())
+                    || (current.is_none() && agent.name == "对话");
+                menu_row(
+                    list,
+                    &format!("agent:{}", agent.id),
+                    &agent.name,
+                    checked,
+                    false,
+                );
+            }
+            if model.agents.is_empty() {
+                menu_note(list, "Agent 名册尚未读取");
+            }
         }
         Menu::ModelRoot => {
             menu_row(
-                ui,
+                list,
                 "open-model",
                 &format!("模型：{}", model.model_label()),
                 false,
                 true,
             );
             menu_row(
-                ui,
+                list,
                 "open-effort",
                 &format!("推理等级：{}", model.effort_label()),
                 false,
@@ -1006,29 +1204,21 @@ fn menu_box(ui: &mut Ui<'_, '_>, model: &Model, menu: Menu, height: f32) {
             );
         }
         Menu::ModelList => {
-            ui.scroll_sized("menu", height, 0.0, false, |list| {
-                let mut provider = "";
-                for (index, row) in model.models.iter().enumerate() {
-                    if provider != row.provider_name.as_str() {
-                        provider = row.provider_name.as_str();
-                        list.pad(10.0, 4.0, |header| header.caption(provider.to_string()));
-                    }
-                    let selected = model
-                        .model_pick
-                        .as_ref()
-                        .is_some_and(|(p, m)| p == &row.provider_id && m == &row.model);
-                    menu_row(
-                        list,
-                        &format!("model:{index}"),
-                        &row.label,
-                        selected,
-                        false,
-                    );
+            let mut provider = "";
+            for (index, row) in model.models.iter().enumerate() {
+                if provider != row.provider_name.as_str() {
+                    provider = row.provider_name.as_str();
+                    menu_group(list, provider);
                 }
-                if model.models.is_empty() {
-                    list.pad(10.0, 6.0, |empty| empty.caption("供应商未配置模型"));
-                }
-            });
+                let selected = model
+                    .model_pick
+                    .as_ref()
+                    .is_some_and(|(p, m)| p == &row.provider_id && m == &row.model);
+                menu_row(list, &format!("model:{index}"), &row.label, selected, false);
+            }
+            if model.models.is_empty() {
+                menu_note(list, "供应商未配置模型");
+            }
         }
         Menu::Effort => {
             for (wire, label) in [
@@ -1042,47 +1232,75 @@ fn menu_box(ui: &mut Ui<'_, '_>, model: &Model, menu: Menu, height: f32) {
                     "default" => model.effort.is_none(),
                     other => model.effort.as_deref() == Some(other),
                 };
-                menu_row(
-                    ui,
-                    &format!("effort:{wire}"),
-                    label,
-                    selected,
-                    false,
-                );
+                menu_row(list, &format!("effort:{wire}"), label, selected, false);
             }
         }
-    }
+    });
 }
 
+/// 菜单行：定高 28（字号放大时按文字高撑开），选中项强调色、行尾对勾；子菜单箭头在行首。
 fn menu_row(ui: &mut Ui<'_, '_>, id: &str, label: &str, checked: bool, submenu: bool) {
+    let line = ui.text_height(TextRole::Caption).max(12.0);
+    let pad_y = ((MENU_ITEM_H - line) / 2.0).max(0.0);
     ui.click_box(
         id,
         BoxWidth::Fill,
-        Edges::symmetric(10.0, 5.5),
-        6.0,
+        Edges { left: MENU_ITEM_PAD_X, right: MENU_ITEM_PAD_X, top: pad_y, bottom: pad_y },
+        0.0,
         false,
         true,
         |row| {
-            row.row(8.0, |line| {
-                if checked {
-                    line.icon_named("check", 12.0, ColorToken::Accent);
-                } else {
-                    line.spacer_width(12.0);
+            row.row(6.0, |line| {
+                if submenu {
+                    line.icon_named("chevron-right", 12.0, ColorToken::TextMuted);
                 }
-                line.text_styled(
+                line.text_styled_fit(
                     label.to_string(),
-                    TextStyle::new(TextRole::Label).color(if checked {
+                    TextStyle::new(TextRole::Caption).color(if checked {
                         ColorToken::Accent
                     } else {
                         ColorToken::Text
                     }),
                 );
-                if submenu {
+                if checked {
                     line.grow();
-                    line.icon_named("chevron-right", 12.0, ColorToken::TextMuted);
+                    line.icon_named("check", 13.0, ColorToken::Accent);
                 }
             });
         },
+    );
+}
+
+/// 分组头：小字灰字，左 12、上 6 / 下 2（与菜单行同宽，不承接点击）。
+fn menu_group(ui: &mut Ui<'_, '_>, label: &str) {
+    ui.boxed(
+        BoxWidth::Fill,
+        BoxStyle::new(None, None, 0.0),
+        Edges {
+            left: MENU_ITEM_PAD_X,
+            right: MENU_ITEM_PAD_X,
+            top: MENU_GROUP_PAD_TOP,
+            bottom: MENU_GROUP_PAD_BOTTOM,
+        },
+        0.0,
+        |group| {
+            group.text_styled_fit(label.to_string(), TextStyle::new(TextRole::Micro));
+        },
+    );
+}
+
+/// 空清单提示行：与菜单行同高，不承接点击。
+fn menu_note(ui: &mut Ui<'_, '_>, label: &str) {
+    let line = ui.text_height(TextRole::Caption).max(12.0);
+    let pad_y = ((MENU_ITEM_H - line) / 2.0).max(0.0);
+    ui.click_box(
+        "menu-note",
+        BoxWidth::Fill,
+        Edges { left: MENU_ITEM_PAD_X, right: MENU_ITEM_PAD_X, top: pad_y, bottom: pad_y },
+        0.0,
+        false,
+        false,
+        |row| row.text_styled_fit(label.to_string(), TextStyle::new(TextRole::Caption)),
     );
 }
 
@@ -1169,5 +1387,45 @@ fn rel_time(timestamp: i64) -> String {
         value if value < 60 * 24 => format!("{} 小时前", value / 60),
         value if value < 60 * 24 * 30 => format!("{} 天前", value / (60 * 24)),
         _ => "更早".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::picker_scroll_offset;
+    use crate::model::{Candidate, Picker};
+
+    fn picker(rows: &[bool]) -> Picker {
+        Picker {
+            hash: 0,
+            caret: 0,
+            selected: 0,
+            candidates: rows
+                .iter()
+                .enumerate()
+                .map(|(index, sub)| Candidate {
+                    path: format!("文件{index}.md"),
+                    is_dir: false,
+                    name: format!("文件{index}.md"),
+                    sub: if *sub { "资料".to_string() } else { String::new() },
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn picker_scroll_keeps_the_selected_row_in_view() {
+        let compact = picker(&[false; 8]);
+        assert_eq!(picker_scroll_offset(&compact, 0), 0.0);
+        assert_eq!(picker_scroll_offset(&compact, 7), 0.0, "八行短条目不到限高，无需滚动");
+
+        let tall = picker(&[true; 8]);
+        assert_eq!(picker_scroll_offset(&tall, 4), 0.0, "首屏五行已容下");
+        assert!(picker_scroll_offset(&tall, 7) > 0.0, "选中超出首屏的行要跟滚");
+        assert_eq!(
+            picker_scroll_offset(&tall, 7),
+            8.0 * 40.0 - 224.0,
+            "末行底边落在视口下缘"
+        );
     }
 }

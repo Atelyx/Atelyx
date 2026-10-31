@@ -56,6 +56,11 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const RESIZE_FALLBACK: Duration = Duration::from_millis(150);
 /// 尺寸变更放弃：自最后一笔尺寸下发起超过此时长仍无新帧，判定该面不会再回帧，闸门就此撤掉。
 const RESIZE_GIVE_UP: Duration = Duration::from_secs(2);
+/// 同时在途的尺寸上限。插件回帧比宿主重绘快得多时（每拍 1–3 ms 对 6–16 ms）每拍都能立刻发；
+/// 插件真慢时这里形成背压，只保留最新一笔，不会把尺寸排成无界队列。
+const MAX_RESIZE_IN_FLIGHT: u8 = 2;
+/// 面尺寸比较的容许误差（逻辑像素）：两端各自取整，1px 内的差不算换尺寸。
+const SIZE_TOLERANCE: f32 = 0.5;
 /// stdin 写失败记日志的最小间隔：帧拍 / 输入高频失败时不重复写满插件日志。
 const WRITE_ERROR_NOTE_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -185,6 +190,12 @@ struct ContributionEntry {
 #[derive(Default)]
 struct ResizeGate {
     pending: Option<(f32, f32)>,
+    /// 已下发、尚未等到任何新帧的尺寸笔数：慢插件靠它形成背压，快插件下一拍就归零。
+    unacked: u8,
+    /// 最近一次真正发出去的尺寸：上一笔迟迟不回帧时按它重发（丢掉的那笔否则再也补不上）。
+    sent: Option<(f32, f32)>,
+    /// 「本轮一直没有回帧」的起点：超过放弃阈值即撤闸停线程（重发会刷新在途时刻，不能用它判）。
+    stale_since: Option<Instant>,
     /// 已发出的那笔的发出时刻；兜底定时器据此判断该重发还是撤闸。
     in_flight: Option<Instant>,
     /// 该面是否已有兜底定时器：有则后续派发只更新在途时刻，不再起线程。
@@ -278,11 +289,12 @@ impl Instance {
         self.frames.lock().unwrap().waiting.insert(surface_id.to_string(), seen);
     }
 
-    /// 等某面出现一张不同于登记时画面的新帧（改宽那一拍同步取新帧用）。
+    /// 等某面出现一张不同于登记时画面、且（给了 `size` 时）按该尺寸排版的新帧。
     /// 超时、未登记、该面已无可渲染帧时返回 `None`：调用方按手上的帧画。
     pub(crate) fn finish_frame_wait(
         &self,
         surface_id: &str,
+        size: Option<(f32, f32)>,
         timeout: Duration,
     ) -> Option<Arc<frame::SurfaceFrame>> {
         let deadline = Instant::now() + timeout;
@@ -290,7 +302,9 @@ impl Instance {
         let seen = store.waiting.get(surface_id).cloned()?;
         loop {
             match store.frames.get(surface_id) {
-                Some(frame) if !Arc::ptr_eq(frame, &seen) => {
+                Some(frame)
+                    if !Arc::ptr_eq(frame, &seen)
+                        && size.is_none_or(|size| laid_out_at(frame, size)) => {
                     let frame = frame.clone();
                     store.waiting.remove(surface_id);
                     drop(store);
@@ -1380,6 +1394,10 @@ impl Instance {
                     plugin_id: self.id.clone(),
                     request_id: 0,
                 },
+                method::editor::OPEN_FILES => HostRequest::EditorOpenFiles {
+                    plugin_id: self.id.clone(),
+                    request_id: 0,
+                },
                 method::editor::REPLACE_SELECTION => {
                     let p: method::EditorReplaceParams = parse(params).map_err(|e| e.to_string())?;
                     p.validate()?;
@@ -1755,6 +1773,8 @@ impl Instance {
                 | event::name::TABLE_CHANGED
                 | event::name::TABLE_SELECTION_CHANGED
                 | event::name::AI_CHAT_CHANGED
+                | event::name::AI_CHAT_RELOAD
+                | event::name::AI_CHAT_PERSIST
                 | event::name::VAULT_FILE_CHANGED
                 | event::name::SPACE_META_CHANGED
                 | event::name::WINDOW_FILE_DROP
@@ -2219,22 +2239,29 @@ impl Instance {
         self.notify(method::frame::HOST_INPUT, &params);
     }
 
-    /// 尺寸变更合流：只保留最新一笔，在途回执回来之前不再逐条下发（拖动中的中间尺寸没有意义）。
+    /// 尺寸变更：最新一笔立刻下发（在途笔数未到上限时）。
+    /// 拖动中每一拍的宽度都要尽快送到插件——等旧尺寸回帧再发下一笔，插件手里的画永远差一拍，
+    /// 右对齐项与滚动条会明显落后于分割线。
     fn on_resize(self: &Arc<Self>, surface_id: &str, width: f32, height: f32) {
         let mut gates = self.resize_gates.lock().unwrap();
         let gate = gates.entry(surface_id.to_string()).or_default();
         gate.pending = Some((width, height));
-        if gate.in_flight.is_none() {
+        if gate.unacked < MAX_RESIZE_IN_FLIGHT {
             self.dispatch_resize(surface_id, gate);
         }
     }
 
-    /// 发最新待发尺寸并挂兜底：新帧回执到来就提前放行下一笔，回执不来则到点重发。
+    /// 发最新待发尺寸并挂兜底：回执不来则到点重发，避免插件漏掉一次尺寸就停在旧宽度。
     fn dispatch_resize(self: &Arc<Self>, surface_id: &str, gate: &mut ResizeGate) {
         let Some((width, height)) = gate.pending.take() else {
             return;
         };
         gate.in_flight = Some(Instant::now());
+        gate.sent = Some((width, height));
+        gate.unacked = gate.unacked.saturating_add(1);
+        if gate.stale_since.is_none() {
+            gate.stale_since = Some(Instant::now());
+        }
         let start_timer = !gate.timer_active;
         gate.timer_active = true;
         self.send_frame_input(surface_id, &frame::FrameInput::Resize { width, height });
@@ -2263,13 +2290,14 @@ impl Instance {
         let Some(gate) = gates.get_mut(surface_id) else {
             return false;
         };
-        let Some(sent_at) = gate.in_flight else {
+        if gate.in_flight.is_none() {
             gate.timer_active = false;
             return false;
-        };
-        if sent_at.elapsed() >= RESIZE_GIVE_UP {
+        }
+        let silent = gate.stale_since.is_some_and(|since| since.elapsed() >= RESIZE_GIVE_UP);
+        if silent {
             // 该面一直不回新帧：最后一笔尺寸照发，闸门撤掉，下次尺寸变化重新开闸
-            let last = gate.pending.take();
+            let last = gate.pending.take().or(gate.sent);
             gates.remove(surface_id);
             drop(gates);
             if let Some((width, height)) = last {
@@ -2277,20 +2305,27 @@ impl Instance {
             }
             return false;
         }
-        if gate.pending.is_some() {
-            self.dispatch_resize(surface_id, gate);
+        // 没有更新的尺寸就按上一笔重发：尺寸那笔可能被插件漏掉，不重发就永远停在旧宽度
+        if gate.pending.is_none() {
+            gate.pending = gate.sent;
         }
+        gate.unacked = 0;
+        self.dispatch_resize(surface_id, gate);
         true
     }
 
-    /// 新帧落地即是尺寸的确认：在途那笔结束，有更新的尺寸就立刻发下一笔。
+    /// 新帧落地即确认在途那笔结束；期间又被新尺寸顶掉时这里只兜住还没发出去的那笔。
     fn resize_acked(self: &Arc<Self>, surface_id: &str) {
         let mut gates = self.resize_gates.lock().unwrap();
         let Some(gate) = gates.get_mut(surface_id) else {
             return;
         };
         gate.in_flight = None;
-        self.dispatch_resize(surface_id, gate);
+        gate.stale_since = None;
+        gate.unacked = gate.unacked.saturating_sub(1);
+        if gate.unacked < MAX_RESIZE_IN_FLIGHT {
+            self.dispatch_resize(surface_id, gate);
+        }
     }
 
     /// 是否有面在收帧（壳据此决定要不要挂帧节拍：没有动画时不产生周期唤醒）。
@@ -2334,6 +2369,13 @@ impl Instance {
         }
         let params = SurfaceAttachedParams { surface_id: surface_id.to_string(), kind };
         self.notify(method::view::HOST_ATTACHED, &params);
+    }
+
+    /// 面刚挂载时补发宿主手里的尺寸：闸门里在途的那笔属于上一轮（面已不在 / 插件已重启），
+    /// 直接清掉后连发，插件首帧即可按真实尺寸排版。
+    pub(crate) fn replay_surface_size(&self, surface_id: &str, width: f32, height: f32) {
+        self.resize_gates.lock().unwrap().remove(surface_id);
+        self.send_frame_input(surface_id, &frame::FrameInput::Resize { width, height });
     }
 
     /// 告知插件某个面已移除（`host:surface.detached`）。
@@ -2539,6 +2581,13 @@ struct SpawnSlot {
 
 /// 走壳侧异步应答的方法（对话编排 / 剪贴板 / 仓库读写 / 表格 / 托盘 / 协作 / 滚动 / 文字量算）。
 ///
+/// 帧是否按 `size` 排版：未声明尺寸的帧不参与判定（老插件按「拿到什么画什么」处理）。
+fn laid_out_at(frame: &frame::SurfaceFrame, size: (f32, f32)) -> bool {
+    frame.size.is_none_or(|laid| {
+        (laid.w - size.0).abs() <= SIZE_TOLERANCE && (laid.h - size.1).abs() <= SIZE_TOLERANCE
+    })
+}
+
 /// 分流判定与「不得同步分派」的防御共用这一份清单：两处各写一遍时，新增方法只改一处会
 /// 落进「未知方法」——功能静默不可用，编译与测试都发现不了。
 fn is_shell_method(method_name: &str) -> bool {
@@ -2585,6 +2634,7 @@ fn is_shell_method(method_name: &str) -> bool {
             | method::query::MEASURE
             | method::query::THEME
             | method::editor::SELECTION
+            | method::editor::OPEN_FILES
             | method::editor::REPLACE_SELECTION
             | method::history::ACTIVITY
             | method::history::DAY
@@ -2848,6 +2898,8 @@ mod tests {
             event::name::TABLE_CHANGED,
             event::name::TABLE_SELECTION_CHANGED,
             event::name::AI_CHAT_CHANGED,
+            event::name::AI_CHAT_RELOAD,
+            event::name::AI_CHAT_PERSIST,
             event::name::VAULT_FILE_CHANGED,
             event::name::SPACE_META_CHANGED,
             event::name::WINDOW_FILE_DROP,
@@ -3701,14 +3753,14 @@ mod tests {
         instance.begin_frame_wait("main", first.clone());
         submit(&mut map, 1, 2);
         assert!(events.try_recv().is_err(), "登记期间的帧不得再发通知");
-        let second = instance.finish_frame_wait("main", Duration::from_millis(200)).unwrap();
+        let second = instance.finish_frame_wait("main", None, Duration::from_millis(200)).unwrap();
         assert!(!Arc::ptr_eq(&first, &second));
         assert!(instance.take_observed_pending(), "取走即标记待补投影");
         assert!(!instance.take_observed_pending());
 
         // 等帧超时会撤掉登记：之后退回的帧仍要通知
         instance.begin_frame_wait("main", second);
-        assert!(instance.finish_frame_wait("main", Duration::from_millis(1)).is_none());
+        assert!(instance.finish_frame_wait("main", None, Duration::from_millis(1)).is_none());
         submit(&mut map, 0, 4);
         assert!(
             matches!(events.try_recv().unwrap(), PluginEvent::ViewSubmitted { .. }),
@@ -3716,9 +3768,9 @@ mod tests {
         );
     }
 
-    /// 尺寸突发只保留最新一笔在途：回执放行下一笔，空闲后兜底线程退出。
+    /// 尺寸突发：在途额度内逐笔立即下发，超出额度只留最新一笔，回帧即补发。
     #[test]
-    fn resize_burst_keeps_one_in_flight_and_the_latest_pending() {
+    fn resize_burst_sends_steps_up_to_the_in_flight_limit() {
         let (_tmp, instance) = make_instance(Vec::new());
         instance.on_resize("panel", 100.0, 100.0);
         instance.on_resize("panel", 110.0, 120.0);
@@ -3726,8 +3778,9 @@ mod tests {
         {
             let gates = instance.resize_gates.lock().unwrap();
             let gate = gates.get("panel").unwrap();
-            assert!(gate.in_flight.is_some(), "首笔立即发出");
-            assert_eq!(gate.pending, Some((130.0, 140.0)), "拖动中的中间尺寸被最新一笔覆盖");
+            assert_eq!(gate.unacked, MAX_RESIZE_IN_FLIGHT, "额度内的两笔立刻发出");
+            assert_eq!(gate.sent, Some((110.0, 120.0)), "第三笔等回帧再补");
+            assert_eq!(gate.pending, Some((130.0, 140.0)), "只保留最新一笔待发");
             assert!(gate.timer_active, "每个面至多一条兜底线程");
         }
 
@@ -3735,10 +3788,11 @@ mod tests {
         {
             let gates = instance.resize_gates.lock().unwrap();
             let gate = gates.get("panel").unwrap();
-            assert!(gate.in_flight.is_some(), "回帧即放行最新一笔");
+            assert_eq!(gate.sent, Some((130.0, 140.0)), "回帧即补发最新一笔");
             assert!(gate.pending.is_none());
         }
 
+        instance.resize_acked("panel");
         instance.resize_acked("panel");
         assert!(!instance.resize_fallback("panel"), "没有在途尺寸即停兜底");
         assert!(
@@ -3755,8 +3809,8 @@ mod tests {
         {
             let mut gates = instance.resize_gates.lock().unwrap();
             let gate = gates.get_mut("panel").unwrap();
-            gate.in_flight = Some(Instant::now() - RESIZE_GIVE_UP - Duration::from_millis(1));
-            gate.pending = Some((120.0, 130.0));
+            // 一直没有回帧：重发会刷新在途时刻，放弃时限看的是「本轮起点」
+            gate.stale_since = Some(Instant::now() - RESIZE_GIVE_UP - Duration::from_millis(1));
         }
         assert!(!instance.resize_fallback("panel"), "撤闸后兜底线程退出");
         assert!(

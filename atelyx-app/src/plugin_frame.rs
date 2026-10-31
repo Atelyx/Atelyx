@@ -31,12 +31,16 @@ use crate::{App, Message};
 const DOUBLE_CLICK_MS: u64 = 500;
 /// 双击判定：两次按下间的最大位移（逻辑像素；拖动不算双击）。
 const DOUBLE_CLICK_SLOP: f32 = 4.0;
-/// 改宽那一拍等插件新帧的上限：插件回帧实测往返 0.5 ms 以内，留出余量给重排重的面。
-/// 超时即按手上的帧画（下一拍再换新帧），不把 UI 线程压在慢插件上。
-const RESIZE_FRAME_WAIT: Duration = Duration::from_millis(4);
-/// 等帧超时后的冷却：这段时间内的尺寸变化不再同步等帧。拖动中慢插件每拍都超时，
-/// 每拍白等一次比「内容晚一个往返」更伤手感。
-const RESIZE_WAIT_COOLDOWN: Duration = Duration::from_millis(500);
+/// 改宽那一拍等插件新帧的下限与上限：实际预算按插件的回帧延迟自适应（见 `FrameState::wait_budget`）。
+/// 下限保证首次改宽也能等到一张按新宽度排好的帧；上限保证慢插件不会把 UI 线程压在这里。
+const RESIZE_WAIT_MIN: Duration = Duration::from_millis(4);
+const RESIZE_WAIT_MAX: Duration = Duration::from_millis(24);
+/// 未测得过回帧延迟时的初始预算（改宽第一拍用）。
+const RESIZE_WAIT_FIRST: Duration = Duration::from_millis(12);
+/// 尺寸上报的抖动阈值（逻辑像素）：不足半像素的变化不值得让插件整面重排。
+const RESIZE_STEP: f32 = 0.5;
+/// 帧声明的排版尺寸与当前面尺寸的容许差：两端各自取整，1px 内的差不算换尺寸。
+const SIZE_TOLERANCE: f32 = 0.5;
 
 /// 标识哈希（FNV-1a；面 / 面 id 的身份判定用，不参与协议）。
 fn hash_id(value: &str) -> u64 {
@@ -90,9 +94,10 @@ struct FrameState {
     image_epoch: Cell<u64>,
     /// 上次上报给插件的面身份与尺寸（逻辑像素）；变化即回发 `Resize`。
     reported: Cell<Option<(u64, f32, f32)>>,
-    /// 改宽等帧超时后的冷却截止：冷却内不再同步等帧。
-    /// 不能在下一帧到达时提前解除——慢插件每拍都会超时，解除等于每拍都白等 4ms。
-    resize_wait_until: Cell<Option<Instant>>,
+    /// 插件回帧延迟的指数平均（微秒）：等帧预算按它自适应，慢插件不会每拍都白等满上限。
+    frame_latency: Cell<Option<u32>>,
+    /// 连续等帧超时次数：到阈值即认定这个面慢，不再逐拍追新帧。
+    slow: Cell<u8>,
     /// 本部件当前承载的面身份：变化即说明换了面，指针瞬态一律作废。
     identity: Cell<u64>,
     /// 按下中的键（`None` = 未按下）：抬笔只认这一个键，中途混按其它键不会错发 `PointerUp`。
@@ -115,7 +120,8 @@ impl Default for FrameState {
             font_epoch: Cell::new(0),
             image_epoch: Cell::new(0),
             reported: Cell::new(None),
-            resize_wait_until: Cell::new(None),
+            frame_latency: Cell::new(None),
+            slow: Cell::new(0),
             identity: Cell::new(0),
             pressed: Cell::new(None),
             inside: Cell::new(false),
@@ -123,6 +129,40 @@ impl Default for FrameState {
             last_press: RefCell::new(None),
             ime_on: Cell::new(false),
         }
+    }
+}
+
+impl FrameState {
+    /// 这一拍等插件新帧的预算：按插件的实际回帧延迟自适应。
+    /// 连续超时说明这个面本来就慢，退回下限——每拍白等满上限比「画面晚一拍」更伤手感。
+    fn wait_budget(&self) -> Duration {
+        if self.slow.get() >= 2 {
+            return RESIZE_WAIT_MIN;
+        }
+        match self.frame_latency.get() {
+            Some(latency) => {
+                let budget = latency.saturating_mul(2) + 1_000;
+                Duration::from_micros(u64::from(budget))
+                    .clamp(RESIZE_WAIT_MIN, RESIZE_WAIT_MAX)
+            }
+            None => RESIZE_WAIT_FIRST,
+        }
+    }
+
+    /// 记一次成功等到新帧：更新延迟指数平均并解除「慢面」判定。
+    fn observe_latency(&self, elapsed: Duration) {
+        let sample = u32::try_from(elapsed.as_micros()).unwrap_or(u32::MAX);
+        let next = match self.frame_latency.get() {
+            Some(latency) => (latency / 4) * 3 + sample / 4,
+            None => sample,
+        };
+        self.frame_latency.set(Some(next));
+        self.slow.set(0);
+    }
+
+    /// 记一次等帧超时：连续超时到阈值后不再追这个面的新帧。
+    fn observe_timeout(&self) {
+        self.slow.set(self.slow.get().saturating_add(1));
     }
 }
 
@@ -222,7 +262,8 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginFrame<'_> {
             state.painted.borrow_mut().take();
             state.caches.borrow().iter().for_each(canvas::Cache::clear);
             state.texts.borrow_mut().clear();
-            state.resize_wait_until.set(None);
+            state.frame_latency.set(None);
+            state.slow.set(0);
         }
         match event {
             Event::Mouse(mouse::Event::ButtonPressed(button)) => {
@@ -483,43 +524,59 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginFrame<'_> {
             .surface_frame(&self.plugin_id, &self.surface_id)
             .unwrap_or_else(|| self.frame.clone());
         // 面身份或尺寸变化即上报插件：绘制拿到的是真实分配尺寸，这是插件重排的唯一来源。
-        // 插件在另一进程，新尺寸的帧要一个往返才回来；这一拍就等它回来画进去——否则画出的内容
-        // 永远是上一拍尺寸的，拖动时字样与右对齐项明显拖在分割线后面。
+        // 插件按新尺寸重排要一个往返才回来；这一拍就等它回来画进去——否则画出的是按上一拍
+        // 宽度排好的帧，右对齐项与滚动条会停在旧边缘（拖动时看起来就是「飘」）。
         let mut resized = None;
+        // 这一拍等过新帧但没等到：要退回上一张画面（不然整面空着）
+        let mut timed_out = false;
+        let size = (bounds.width, bounds.height);
         let reported = (self.identity(), bounds.width, bounds.height);
-        if state.reported.get() != Some(reported) {
+        // 半像素以内的变化不惊动插件：拖动时分割线的小数位抖动会让整面白重排一次
+        let changed = state.reported.get().is_none_or(|(identity, width, height)| {
+            identity != reported.0
+                || (width - reported.1).abs() >= RESIZE_STEP
+                || (height - reported.2).abs() >= RESIZE_STEP
+        });
+        if changed {
             state.reported.set(Some(reported));
-            let now = Instant::now();
-            let cooling =
-                state.resize_wait_until.get().is_some_and(|until| now < until);
-            if cooling {
-                self.send(FrameInput::Resize { width: bounds.width, height: bounds.height });
-            } else {
-                // 等的是「比已画的那一帧更新」：投影可能落后，拿它当基准会立刻返回旧帧
-                let seen = state.painted.borrow().clone().unwrap_or_else(|| current.clone());
-                // 先登记再发尺寸：登记期间回来的帧由这一拍取走画上，不再另发一条通知
-                self.app.plugins.begin_surface_wait(
-                    &self.plugin_id,
-                    &self.surface_id,
-                    seen,
-                );
-                self.send(FrameInput::Resize { width: bounds.width, height: bounds.height });
-                match self.app.plugins.finish_surface_wait(
-                    &self.plugin_id,
-                    &self.surface_id,
-                    RESIZE_FRAME_WAIT,
-                ) {
-                    Some(frame) => {
-                        resized = Some(frame);
-                        state.resize_wait_until.set(None);
-                    }
-                    None => state
-                        .resize_wait_until
-                        .set(Some(now + RESIZE_WAIT_COOLDOWN)),
+            // 等的是「比已画的那一帧更新、且按当前尺寸排好的帧」：投影可能落后，拿它当基准
+            // 会立刻返回旧帧；尺寸又过滤掉拖动中残留在路上的上一拍画面
+            let seen = state.painted.borrow().clone().unwrap_or_else(|| current.clone());
+            // 先登记再发尺寸：登记期间回来的帧由这一拍取走画上，不再另发一条通知
+            self.app
+                .plugins
+                .begin_surface_wait(&self.plugin_id, &self.surface_id, seen);
+            self.send(FrameInput::Resize { width: bounds.width, height: bounds.height });
+            let started = Instant::now();
+            match self.app.plugins.finish_surface_wait(
+                &self.plugin_id,
+                &self.surface_id,
+                size,
+                state.wait_budget(),
+            ) {
+                Some(frame) => {
+                    state.observe_latency(started.elapsed());
+                    resized = Some(frame);
+                }
+                None => {
+                    state.observe_timeout();
+                    timed_out = true;
                 }
             }
         }
         let frame = resized.as_ref().unwrap_or(&current);
+        // 只画按当前面尺寸排好的帧：改宽时手里那帧常是上一拍宽度排的（右对齐项与滚动条停在
+        // 旧边缘），首帧还可能按插件自己的占位尺寸排。已经等过一拍还没等到、且屏幕上本来就有
+        // 内容时退回旧帧（否则整面空着）；从没画过正确帧（刚挂载）就空着等，别先闪一张错的。
+        if !laid_out_at(frame, bounds.width, bounds.height) {
+            let has_content = state.painted.borrow().is_some();
+            if !(timed_out && has_content) {
+                // 没等过新帧就尺寸不符 = 插件还停在旧尺寸（尺寸那笔丢了或它先交了旧画面）：
+                // 再报一次尺寸让它重排，这一拍先不画，新帧到了宿主会重绘
+                self.send(FrameInput::Resize { width: bounds.width, height: bounds.height });
+                return;
+            }
+        }
         // 按已画的那一帧判失效：同步等到的新帧下一拍追进投影时，同一帧不再重画一遍
         let frame_changed = !state
             .painted
@@ -618,6 +675,13 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginFrame<'_> {
             None => mouse::Interaction::None,
         }
     }
+}
+
+/// 帧是否按给定尺寸排版：未声明尺寸的帧不参与判定（老插件按「拿到什么画什么」处理）。
+fn laid_out_at(frame: &Arc<SurfaceFrame>, width: f32, height: f32) -> bool {
+    frame.size.is_none_or(|size| {
+        (size.w - width).abs() <= SIZE_TOLERANCE && (size.h - height).abs() <= SIZE_TOLERANCE
+    })
 }
 
 /// 整面帧渲染入口：铺满可用区域，外层按贡献声明的内边距包裹。

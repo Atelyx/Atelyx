@@ -400,8 +400,8 @@ impl PluginHandler for CalendarPlugin {
             return;
         }
         *self.attached.lock().unwrap() = true;
-        // 重挂是重取主题的唯一时机（控件层按面缓存主题）；焦点与滚动位置随之重置
-        *self.ui.lock().await = FrameUi::new();
+        // 重挂只重取控件层主题，保留宿主已上报的尺寸（尺寸变了宿主会再发 resize）
+        self.ui.lock().await.refresh_theme();
         self.apply_theme(ctx).await;
         self.reload_items(ctx).await;
         self.load_activity(ctx).await;

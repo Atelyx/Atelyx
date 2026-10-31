@@ -89,6 +89,7 @@ pub fn token_color(token: ColorToken) -> Color {
         ColorToken::Border => pal::BORDER,
         ColorToken::BorderStrong => pal::BORDER_STRONG,
         ColorToken::Transparent => Color::TRANSPARENT,
+        ColorToken::SurfaceOverlay => pal::BG_OVERLAY,
     }
 }
 

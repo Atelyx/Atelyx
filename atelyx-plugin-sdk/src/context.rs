@@ -24,6 +24,9 @@ use crate::protocol::service;
 
 /// 常规能力调用的默认等待上限（读文件 / 起进程 / 通知等宿主侧可预期的操作）。
 pub const CALL_TIMEOUT: Duration = Duration::from_secs(30);
+/// 出帧路径上的调用上限（量算 / Markdown 解析）：宿主正等这一帧时会与插件互相卡住，
+/// 上限必须短到「卡一下也要出帧」，按估算排一版继续走。
+pub const RENDER_CALL_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// 可克隆的调用句柄：读任务与插件业务共享同一 pending 表与 id 计数器。
 #[derive(Clone)]
@@ -262,7 +265,18 @@ impl Context {
         items: Vec<MeasureItem>,
     ) -> Result<MeasureBatchResult, RpcError> {
         let params = MeasureBatchParams { items };
-        self.call_typed(method::query::MEASURE, &params).await
+        let value = self
+            .call_with_timeout(method::query::MEASURE, serde_json::to_value(&params).map_err(|e| RpcError::failed(format!("量算参数序列化失败：{e}")))?, RENDER_CALL_TIMEOUT)
+            .await?;
+        serde_json::from_value(value).map_err(|e| RpcError::failed(format!("量算结果解析失败：{e}")))
+    }
+
+    /// 当前打开的文件（仓库相对路径，按打开顺序）：候选列表这类「打开中的优先」的界面用。
+    pub async fn open_files(&self) -> Result<Vec<String>, RpcError> {
+        let value: crate::protocol::method::EditorOpenFiles = self
+            .call_typed(method::editor::OPEN_FILES, &Value::Null)
+            .await?;
+        Ok(value.paths)
     }
 
     /// 取宿主主题：颜色 / 字号档 / 圆角档随用户设置变化，供插件绘制对齐宿主外观。
@@ -274,7 +288,16 @@ impl Context {
     /// 内容不变时结果也不变，插件应按内容缓存，不必逐帧往返。
     pub async fn markdown(&self, content: &str) -> Result<MarkdownResult, RpcError> {
         let params = MarkdownParams { content: content.into() };
-        self.call_typed(method::markdown::PARSE, &params).await
+        let value = self
+            .call_with_timeout(
+                method::markdown::PARSE,
+                serde_json::to_value(&params)
+                    .map_err(|e| RpcError::failed(format!("Markdown 参数序列化失败：{e}")))?,
+                RENDER_CALL_TIMEOUT,
+            )
+            .await?;
+        serde_json::from_value(value)
+            .map_err(|e| RpcError::failed(format!("Markdown 结果解析失败：{e}")))
     }
 
     /// 提交整面帧：整发整换该面的绘制指令、命中区与输入声明（空指令 = 清空绘制）。
