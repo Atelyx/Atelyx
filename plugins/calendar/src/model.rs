@@ -458,7 +458,9 @@ mod tests {
         model.select(date::days_from_civil(2026, 10, 9));
         model.shift_month(1);
         let snapshot = model.snapshot();
-        assert_eq!((snapshot.year, snapshot.month), (2026, 11));
+        // 视图月相对「今天」偏移：断言下月而不是写死年月，避免测试随真实日期过期
+        let (year, month, _) = date::civil_from_days(date::today());
+        assert_eq!((snapshot.year, snapshot.month), date::month_add(year, month, 1));
         assert_eq!(snapshot.selected, Some(date::days_from_civil(2026, 10, 9)));
         model.show_today();
         assert_eq!(model.snapshot().month_title(), {

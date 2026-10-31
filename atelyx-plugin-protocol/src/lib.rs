@@ -2,6 +2,7 @@
 //! 握手校验 API 版本；信封为 JSON-RPC 2.0 over NDJSON；绘制指令、输入事件、能力方法与事件
 //! 均为封闭枚举 + 版本号，契约冻结后的破坏性变更必须升 [`API_VERSION`]（握手失败即响亮拒绝）。
 
+pub mod chat;
 pub mod envelope;
 pub mod event;
 pub mod frame;

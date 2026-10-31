@@ -383,6 +383,12 @@ async fn key_press(
         }
         return;
     }
+    // 输入法组合期回车属于取词：此时不能提交，也不能插入换行（提交文本随后经 Text 到达）。
+    if matches!(key, Key::Named { name: NamedKey::Enter })
+        && state.inputs.get(&id).is_some_and(|item| !item.preedit.is_empty())
+    {
+        return;
+    }
     // 单行输入的回车是「提交」而非编辑：值由插件回读，语义（检索 / 写回设置）由插件定。
     // 多行输入只有声明了回车提交才有此语义，Shift+回车仍是换行。
     if matches!(key, Key::Named { name: NamedKey::Enter }) {

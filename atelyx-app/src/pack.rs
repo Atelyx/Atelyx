@@ -50,12 +50,6 @@ pub(crate) const BUILTIN_PLUGINS: &[BuiltinPlugin] = &[
         views: &[BuiltinView { id: "inspector", label: "属性", icon: "info" }],
     },
     BuiltinPlugin {
-        id: "atelyx.ai",
-        label: "AI 对话",
-        icon: "sparkles",
-        views: &[BuiltinView { id: "aichat", label: "AI 对话", icon: "sparkles" }],
-    },
-    BuiltinPlugin {
         id: "atelyx.collab",
         label: "协作房间",
         icon: "users",
@@ -86,7 +80,6 @@ const RENDERERS: &[(&str, ViewProvider)] = &[
     ("files", crate::layout_view::files_view),
     ("search", crate::layout_view::search_view),
     ("inspector", crate::layout_view::inspector_view),
-    ("aichat", crate::chat_view::chat_view),
     ("collabroom", crate::layout_view::collab_room_view),
     ("repohistory", crate::repohistory_view::repohistory_view),
     ("recent", crate::recent_view::recent_view),

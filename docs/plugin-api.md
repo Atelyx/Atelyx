@@ -393,9 +393,12 @@ pub const BUILTIN_SERVICES: &[(&str, &str, &[&str])] = &[
     ("shortcut", PLATFORM_PLUGIN, &[shortcut::REGISTER, shortcut::UNREGISTER, shortcut::QUERY]),
     ("clipboard", PLATFORM_PLUGIN, &[clipboard::WRITE_TEXT, clipboard::READ_TEXT, clipboard::READ_IMAGE, clipboard::WRITE_IMAGE]),
     ("dialog", PLATFORM_PLUGIN, &[dialog::PICK_FILE, dialog::PICK_DIRECTORY]),
-    ("http", PLATFORM_PLUGIN, &[http::REQUEST]),
-    // 工具名册与结果回报是宿主记账，不是可由外部提供者接管的能力，故不在目录里
-    ("ai", "atelyx.ai", &[ai::CHAT_SEND, ai::CHAT_STOP, ai::CHAT_HISTORY, ai::MODELS, ai::AGENTS, ai::CHAT_RENAME, ai::CHAT_DELETE, ai::CHAT_COMPACT]),
+    ("http", PLATFORM_PLUGIN, &[http::REQUEST, http::STREAM_OPEN, http::STREAM_CANCEL]),
+    // 会话真源是平台数据：归属平台插件，外部提供者不得接管
+    ("chat", PLATFORM_PLUGIN, &[chat::SESSION_READ, chat::SESSION_WRITE, chat::SESSION_SNAPSHOT]),
+    // 工具名册与结果回报是宿主记账，不是可由外部提供者接管的能力，故不在目录里；
+    // 对话门面由宿主编排（核心插件只是被调用的实现），服务归平台自身
+    ("ai", PLATFORM_PLUGIN, &[ai::CHAT_SEND, ai::CHAT_STOP, ai::CHAT_HISTORY, ai::MODELS, ai::AGENTS, ai::CHAT_RENAME, ai::CHAT_DELETE, ai::CHAT_COMPACT, ai::CHAT_TITLE, ai::TOOL_LIST, ai::TOOL_EXECUTE, ai::CHAT_EMIT]),
     ("window", PLATFORM_PLUGIN, &[window::OPEN, window::CLOSE, window::UPDATE, window::SHOW, window::BEGIN_DRAG, window::MINIMIZE, window::TOGGLE_MAXIMIZE]),
     ("query", PLATFORM_PLUGIN, &[query::MEASURE, query::THEME]),
     ("markdown", "atelyx.notes", &[markdown::PARSE]),
@@ -1871,6 +1874,16 @@ pub mod dialog {
 // atelyx-plugin-protocol/src/method.rs
 pub mod http {
     pub const REQUEST: &str = "http.request";
+    /// 打开一条流式出网连接：宿主建连后按块下发 [`HOST_STREAM_CHUNK`]，结束 / 失败经
+    /// [`HOST_STREAM_END`]。地址按供应商口径校验（公网目标拒内网，本机 / 局域网服务放行）；
+    /// [`REQUEST`] 是不过地址校验的便利层。
+    pub const STREAM_OPEN: &str = "http.stream.open";
+    /// 取消一条仍在进行的流式连接（幂等：已结束的流也成功）。
+    pub const STREAM_CANCEL: &str = "http.stream.cancel";
+    /// 流式分片的原始字节（base64；通知）。
+    pub const HOST_STREAM_CHUNK: &str = "host:http.stream.chunk";
+    /// 流式连接结束（正常 / 失败 / 取消；通知）。
+    pub const HOST_STREAM_END: &str = "host:http.stream.end";
 }
 ```
 
@@ -1932,6 +1945,8 @@ pub mod ai {
     pub const CHAT_DELETE: &str = "ai.chat.delete";
     /// 压缩一个会话（把较早消息总结为压缩起点；回执 = 已受理，结果经 `ai.chat.history` 复核）。
     pub const CHAT_COMPACT: &str = "ai.chat.compact";
+    /// 让模型重新生成会话标题（结果写回元数据，并经 [`HOST_CHAT_EVENT`] 发 `Titled`）。
+    pub const CHAT_TITLE: &str = "ai.chat.title";
     /// 对话事件流（通知）：快照节流拍 + 终态 + 命名结果。
     pub const HOST_CHAT_EVENT: &str = "host:ai.chat.event";
     /// 注册一个可被 Agent 调用的工具（名称全局唯一，不得与内置工具或其他插件的工具重名）。
@@ -1943,6 +1958,13 @@ pub mod ai {
     pub const TOOL_RESULT: &str = "ai.toolResult";
     /// 宿主请求插件执行一次工具调用（通知）；插件处理完经 [`TOOL_RESULT`] 回报。
     pub const HOST_TOOL_CALL: &str = "host:ai.toolCall";
+    /// 列当前可用的工具声明（内置 + 已注册插件工具；按调用方给的工具 id 过滤）。
+    pub const TOOL_LIST: &str = "ai.tool.list";
+    /// 执行一次工具调用：内置工具由宿主执行，插件工具转发给提供者。结果即模型可见文本。
+    pub const TOOL_EXECUTE: &str = "ai.tool.execute";
+    /// 插件向宿主发布一条对话事件；宿主点对点发给订阅了 [`HOST_CHAT_EVENT`] 的插件，
+    /// 并经无界通道交给壳侧。
+    pub const CHAT_EMIT: &str = "ai.chat.emit";
 }
 ```
 
@@ -2429,10 +2451,19 @@ pub struct ChatSendParams {
     /// 供应商 id：给 `model` 消歧（同模型多供应商时必填；单独给出 = 拒绝）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_id: Option<String>,
+    /// 推理等级（`low` / `medium` / `high`）；缺省 = 面板当前覆盖值，`off` = 不传该参数。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
     /// 仓库内图片相对路径（png / jpg / jpeg / webp / gif）；逐张校验，任一不可用 = 整条拒绝。
     /// 校验通过后到 run 读取之间文件可能消失：读不到的那张在该轮请求里跳过。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<String>,
+    /// 用户原始输入（未拼引用路径块）；缺省 = `text` 即原文。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_text: Option<String>,
+    /// 正文中登记的 # 引用；宿主按显示文本扫描命中后拼进消息开头。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refs: Vec<ChatRef>,
 }
 ```
 
@@ -2628,6 +2659,8 @@ pub enum ChatEvent {
     Failed { error: String },
     /// 话题自动命名完成（`None` = 命名未启用或失败，插件维持原展示）。
     Titled { title: Option<String> },
+    /// 直写模式的空占位移除（中断且没有产生任何内容）。
+    Removed,
 }
 ```
 
@@ -2675,7 +2708,368 @@ pub struct ToolResultParams {
 }
 ```
 
-## 12. 能力面负载：表格
+## 12. 会话真源、工具桥与流式出网
+
+会话真源由宿主保管：插件用 `chat.session.*` 读写，批次形状与宿主磁盘模型一致。工具桥由宿主记账（名册 / 执行 / 结果回报），对话事件只允许 AI 核心插件经 `ai.chat.emit` 发布。`http.stream.*` 把原始响应分片交给发起插件，由插件自己解析协议。
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 会话真源读写（`chat.session.*`）：宿主保持消息形状与写盘链，插件提交声明式批次。
+pub mod chat {
+    /// 读单个会话（元数据 + 消息）。
+    pub const SESSION_READ: &str = "chat.session.read";
+    /// 提交一个批次（创建 / 元数据 / 追加 / 补丁 / 截断 / 删除 / 覆盖项）。
+    pub const SESSION_WRITE: &str = "chat.session.write";
+    /// 读全仓库快照（会话清单 + 覆盖层 + 落盘失败）。
+    pub const SESSION_SNAPSHOT: &str = "chat.session.snapshot";
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/chat.rs
+/// 新会话登记。`file` 缺省由宿主按会话 id 补齐（插件不需要知道磁盘目录）。
+#[serde(rename_all = "camelCase")]
+pub struct SessionDef {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub file: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction: Option<Value>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    #[serde(default)]
+    pub messages: Vec<Value>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/chat.rs
+/// 既有会话的元数据字段更新（缺省字段不动）。
+#[serde(rename_all = "camelCase")]
+pub struct MetaPatch {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// 双层 Option：外层缺省 = 不动，内层 `None` = 清除（切回默认 Agent）。
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "double_option"
+    )]
+    pub agent_id: Option<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<i64>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/chat.rs
+#[serde(rename_all = "camelCase")]
+pub struct AppendBatch {
+    pub session_id: String,
+    pub messages: Vec<Value>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/chat.rs
+/// 消息内容补丁：`rev` 单调，迟到的旧补丁不覆盖新内容。
+#[serde(rename_all = "camelCase")]
+pub struct PatchEntry {
+    pub session_id: String,
+    pub message_id: String,
+    pub rev: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steps: Option<Value>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/chat.rs
+#[serde(rename_all = "camelCase")]
+pub struct TruncateEntry {
+    pub session_id: String,
+    pub keep_count: usize,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/chat.rs
+/// 会话删除：`removeFiles = false` 只摘除内存登记（磁盘文件已在外部消失的对账路径）。
+#[serde(rename_all = "camelCase")]
+pub struct DeleteEntry {
+    pub session_id: String,
+    #[serde(default = "default_true")]
+    pub remove_files: bool,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/chat.rs
+#[serde(rename_all = "camelCase")]
+pub struct MessageRemoval {
+    pub session_id: String,
+    pub message_id: String,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/chat.rs
+/// 覆盖项更新（双层 Option：外层缺省 = 不动，内层 `None` = 清除覆盖）。
+#[serde(rename_all = "camelCase")]
+pub struct OverridesPatch {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "double_option"
+    )]
+    pub model_override: Option<Option<Value>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "double_option"
+    )]
+    pub effort_override: Option<Option<String>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "double_option"
+    )]
+    pub agent_override: Option<Option<String>>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/chat.rs
+/// 一次提交：登记 / 元数据 / 消息追加 / 内容补丁 / 截断 / 删除 / 覆盖项。
+#[serde(rename_all = "camelCase")]
+pub struct CommitBatch {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub created: Vec<SessionDef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub metas: Vec<MetaPatch>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub appends: Vec<AppendBatch>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub patches: Vec<PatchEntry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub truncations: Vec<TruncateEntry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deletes: Vec<DeleteEntry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub message_removals: Vec<MessageRemoval>,
+    #[serde(default)]
+    pub overrides: OverridesPatch,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/chat.rs
+/// [`crate::method::chat::SESSION_READ`] 的 params。
+#[serde(rename_all = "camelCase")]
+pub struct SessionReadParams {
+    pub session_id: String,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/chat.rs
+/// 单会话读面：元数据 + 消息数组（消息形态与磁盘格式同源）。
+#[serde(rename_all = "camelCase")]
+pub struct SessionRecord {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub file: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction: Option<Value>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    #[serde(default)]
+    pub messages: Vec<Value>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/chat.rs
+/// 落盘失败信息（`message` + 时间戳）。
+#[serde(rename_all = "camelCase")]
+pub struct ChatPersistError {
+    pub message: String,
+    pub at: i64,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/chat.rs
+/// 全仓库读面快照（进仓 / 切仓 / 覆盖层引导）。
+#[serde(rename_all = "camelCase")]
+pub struct ChatStoreSnapshot {
+    #[serde(default)]
+    pub session_vault_key: String,
+    #[serde(default)]
+    pub sessions: Vec<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_override: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort_override: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_override: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persist_error: Option<ChatPersistError>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 一条 # 引用：仓库相对路径 + 显示标签 + 领域类型。
+#[serde(rename_all = "camelCase")]
+pub struct ChatRef {
+    pub path: String,
+    pub label: String,
+    /// 领域类型：`note` / `table` / `canvas` / `dir`。
+    pub ref_kind: String,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 一条工具声明（模型侧 schema）。
+#[serde(rename_all = "camelCase")]
+pub struct ToolDecl {
+    pub name: String,
+    pub description: String,
+    pub parameters: Value,
+    /// 分类：`web` / `file` / `task` / `plugin`。
+    pub category: String,
+    /// 可与其他工具并发执行（读写 / 未知工具串行屏障）。
+    pub parallel_safe: bool,
+    /// 勾选 id（内置工具 = 名称，插件工具 = `plugin:<插件 id>:<工具名>`）。
+    pub selection_id: String,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`ai::TOOL_LIST`] 的 params：缺省 = 全部可用工具。
+#[serde(rename_all = "camelCase")]
+pub struct ToolListParams {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_ids: Vec<String>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`ai::TOOL_LIST`] 的 result。
+#[serde(rename_all = "camelCase")]
+pub struct ToolListResult {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<ToolDecl>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`ai::TOOL_EXECUTE`] 的 params。
+#[serde(rename_all = "camelCase")]
+pub struct ToolExecParams {
+    /// 工具名（内置工具或插件工具；插件工具用注册时的裸名称）。
+    pub name: String,
+    #[serde(default)]
+    pub arguments: Value,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`ai::TOOL_EXECUTE`] 的 result：`content` 即模型可见结果文本。
+#[serde(rename_all = "camelCase")]
+pub struct ToolExecResult {
+    pub content: String,
+    #[serde(default)]
+    pub is_error: bool,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`http::STREAM_OPEN`] 的 params。
+#[serde(rename_all = "camelCase")]
+pub struct HttpStreamOpenParams {
+    /// 调用方指定的流 id（可选）：指定后宿主按该 id 下发分片，插件可先登记接收端再开流。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_id: Option<String>,
+    pub method: String,
+    pub url: String,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub headers: std::collections::BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    /// 空闲超时（毫秒）：超过该时长没有新数据即按失败结束；缺省由宿主设定。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`http::STREAM_OPEN`] 的 result。
+#[serde(rename_all = "camelCase")]
+pub struct HttpStreamOpenResult {
+    pub stream_id: String,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`http::STREAM_CANCEL`] 的 params。
+#[serde(rename_all = "camelCase")]
+pub struct HttpStreamCancelParams {
+    pub stream_id: String,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`http::HOST_STREAM_CHUNK`] 的 params。
+#[serde(rename_all = "camelCase")]
+pub struct HttpStreamChunkParams {
+    pub stream_id: String,
+    /// 原始字节（base64）。
+    pub base64: String,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`http::HOST_STREAM_END`] 的 params：`error` 缺省 = 正常结束；
+/// `cancelled` = 调用方主动取消（`http.stream.cancel` / 插件停用），不是流自然结束；
+/// `status` = 响应状态码（建连成功时给出），供调用方区分鉴权 / 限流等非 2xx 失败。
+#[serde(rename_all = "camelCase")]
+pub struct HttpStreamEndParams {
+    pub stream_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub cancelled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+}
+```
+
+## 13. 能力面负载：表格
 
 表格面读写当前打开的表格；真源在宿主会话，插件不得旁路读写 `.atb`。
 
@@ -2809,7 +3203,7 @@ pub struct TableSetCellImageParams {
 }
 ```
 
-## 13. 日历服务（插件提供）
+## 14. 日历服务（插件提供）
 
 日程读写由预置插件 `com.atelyx.calendar` 以 `calendar` 服务开放，宿主不内置实现：调用方经 `service.call` 传 `service = calendar` 与下列方法名，或直接调 `calendar.<方法>`——两条路径落到同一登记。插件停用时该服务随之消失，调用方收到「服务不可用」。日程真源随容器走（本地仓库 `.atelyx/calendar.json` / 协作空间团队 meta）。
 
@@ -2908,7 +3302,7 @@ pub struct CalendarIdParams {
 pub const MAX_CALENDAR_TITLE_CHARS: usize = 200;
 ```
 
-## 14. 能力面负载：仓库活动
+## 15. 能力面负载：仓库活动
 
 按天聚合的文件活动计数与当日版本记录；取自当前仓库（本地历史侧文件 / 空间聚合），按本地日界归日。
 
@@ -2981,7 +3375,7 @@ pub struct HistoryOpenParams {
 }
 ```
 
-## 15. 能力面负载：托盘与协作
+## 16. 能力面负载：托盘与协作
 
 系统托盘条目与空间内插件间消息的负载形态；两类能力的可用性都随宿主平台与容器类型而变。
 
@@ -3146,7 +3540,7 @@ pub struct CollabMetaPatchParams {
 }
 ```
 
-## 16. 宿主广播事件
+## 17. 宿主广播事件
 
 插件经 `event.subscribe` 声明订阅的事件名与载荷；未上表的名字宿主拒绝订阅。
 
@@ -3182,6 +3576,9 @@ pub mod name {
     /// 协作空间团队元数据的某个键变更（任何成员经 `collab.metaPatch` 或宿主写入）。
     /// payload 见 [`SpaceMetaChangedPayload`]；订阅方按 `key` 过滤后重取该键。
     pub const SPACE_META_CHANGED: &str = "space:meta.changed";
+    /// 外部文件拖入窗口（宿主只转发绝对路径，读取由订阅方经 `fs` 自理）。
+    /// payload 见 [`FileDropPayload`]；未挂载界面的插件应忽略。
+    pub const WINDOW_FILE_DROP: &str = "window:file.drop";
 }
 ```
 
@@ -3233,18 +3630,25 @@ pub struct TableSelectionChangedPayload {
 pub struct ChatChangedPayload {
     pub session_id: String,
     pub kind: ChatChangeKind,
+    /// `persist` 变更的当前落盘失败（`None` = 已恢复）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persist_error: Option<crate::chat::ChatPersistError>,
 }
 ```
 
 ```rust
 // atelyx-plugin-protocol/src/event.rs
-/// 会话变更种类：创建 / 消息列表变化 / 元数据变化 / 删除。
+/// 会话变更种类：创建 / 消息列表变化 / 元数据变化 / 删除 / 真源整体重载 / 落盘状态变化。
 #[serde(rename_all = "camelCase")]
 pub enum ChatChangeKind {
     Created,
     Messages,
     Meta,
     Deleted,
+    /// 会话真源已重新装载（换仓 / 空间装载完成）：`sessionId` 为空，订阅方应整体重取。
+    Reload,
+    /// 落盘失败置位 / 恢复：`sessionId` 为空，载荷带当前 `persistError`。
+    Persist,
 }
 ```
 
@@ -3279,6 +3683,15 @@ pub enum FileChangeKind {
 #[serde(rename_all = "camelCase")]
 pub struct SpaceMetaChangedPayload {
     pub key: String,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/event.rs
+/// [`name::WINDOW_FILE_DROP`] 的 payload：本次拖入的绝对路径（一次事件可含多张图）。
+#[serde(rename_all = "camelCase", default)]
+pub struct FileDropPayload {
+    pub paths: Vec<String>,
 }
 ```
 

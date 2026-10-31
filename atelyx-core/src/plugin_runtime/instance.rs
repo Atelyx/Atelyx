@@ -578,6 +578,9 @@ impl Instance {
             self.fail_pending_ui_calls("插件已停止，界面服务请求已取消");
             self.fail_pending_shell_calls("插件已停止，宿主调用已取消");
             self.release_ai_tools();
+            if let Ok(runtime) = self.runtime_upgrade() {
+                runtime.drop_streams_of(&self.id);
+            }
         }
         // 服务回落要向其余插件各写一次 stdin：投递只入队不阻塞，放在闸门外是为缩短本实例持闸时间，
         // 不与其它实例的写入路径互等
@@ -678,6 +681,16 @@ impl Instance {
     /// 下发一条对话事件（`host:ai.chat.event`）。
     pub(crate) fn notify_chat_event(&self, params: &method::ChatEventParams) {
         self.notify(method::ai::HOST_CHAT_EVENT, params);
+    }
+
+    /// 下发一段流式出网数据（`host:http.stream.chunk`）。
+    pub(crate) fn notify_stream_chunk(&self, params: &method::HttpStreamChunkParams) {
+        self.notify(method::http::HOST_STREAM_CHUNK, params);
+    }
+
+    /// 告知一次流式出网结束（`host:http.stream.end`）。
+    pub(crate) fn notify_stream_end(&self, params: &method::HttpStreamEndParams) {
+        self.notify(method::http::HOST_STREAM_END, params);
     }
 
     /// 在会话闸门内执行一次 OS 资源获取（起子进程 / 注册全局快捷键），锁内复查请求所属的会话令牌。
@@ -1101,6 +1114,25 @@ impl Instance {
                     plugin_id: self.id.clone(),
                     request_id: 0,
                 },
+                method::ai::TOOL_EXECUTE => HostRequest::AiToolExecute {
+                    plugin_id: self.id.clone(),
+                    request_id: 0,
+                    params: parse(params).map_err(|e| e.to_string())?,
+                },
+                method::chat::SESSION_READ => HostRequest::ChatSessionRead {
+                    plugin_id: self.id.clone(),
+                    request_id: 0,
+                    params: parse(params).map_err(|e| e.to_string())?,
+                },
+                method::chat::SESSION_WRITE => HostRequest::ChatSessionWrite {
+                    plugin_id: self.id.clone(),
+                    request_id: 0,
+                    batch: params.clone(),
+                },
+                method::chat::SESSION_SNAPSHOT => HostRequest::ChatSessionSnapshot {
+                    plugin_id: self.id.clone(),
+                    request_id: 0,
+                },
                 method::clipboard::WRITE_TEXT => {
                     let p: method::TextPayload = parse(params).map_err(|e| e.to_string())?;
                     HostRequest::ClipboardWrite {
@@ -1318,6 +1350,14 @@ impl Instance {
                 method::ai::CHAT_COMPACT => {
                     let p: method::ChatSessionParams = parse(params).map_err(|e| e.to_string())?;
                     HostRequest::ChatCompact {
+                        plugin_id: self.id.clone(),
+                        request_id: 0,
+                        params: p,
+                    }
+                }
+                method::ai::CHAT_TITLE => {
+                    let p: method::ChatSessionParams = parse(params).map_err(|e| e.to_string())?;
+                    HostRequest::ChatRetitle {
                         plugin_id: self.id.clone(),
                         request_id: 0,
                         params: p,
@@ -1581,6 +1621,39 @@ impl Instance {
                 serde_json::to_value(result)
                     .map_err(|e| RpcError::failed(format!("应答序列化失败：{e}")))
             }
+            method::http::STREAM_OPEN => {
+                let p: method::HttpStreamOpenParams = parse(params)?;
+                let runtime = self.runtime_upgrade()?;
+                let result = self
+                    .with_session(token, || super::http_stream::open(&runtime, self, p))
+                    .map_err(RpcError::failed)?;
+                serde_json::to_value(result)
+                    .map_err(|e| RpcError::failed(format!("应答序列化失败：{e}")))
+            }
+            method::http::STREAM_CANCEL => {
+                let p: method::HttpStreamCancelParams = parse(params)?;
+                let runtime = self.runtime_upgrade()?;
+                super::http_stream::cancel(&runtime, self, &p.stream_id)
+                    .map_err(RpcError::failed)?;
+                Ok(json!({}))
+            }
+            // ---------- ai 工具与事件 ----------
+            method::ai::TOOL_LIST => {
+                let p: method::ToolListParams = parse(params)?;
+                let runtime = self.runtime_upgrade()?;
+                let result = tool_list(&runtime, &p);
+                serde_json::to_value(result)
+                    .map_err(|e| RpcError::failed(format!("应答序列化失败：{e}")))
+            }
+            method::ai::CHAT_EMIT => {
+                if self.id != method::AI_CORE_PLUGIN {
+                    return Err(RpcError::failed("只有 AI 核心插件可以发布对话事件"));
+                }
+                let p: method::ChatEventParams = parse(params)?;
+                let runtime = self.runtime_upgrade()?;
+                runtime.emit_chat_event(&self.id, p);
+                Ok(json!({}))
+            }
 
             // 对话框走异步应答（见 handle_request 的分流），不经此处同步应答
             method::dialog::PICK_FILE | method::dialog::PICK_DIRECTORY => {
@@ -1684,6 +1757,8 @@ impl Instance {
                 | event::name::AI_CHAT_CHANGED
                 | event::name::VAULT_FILE_CHANGED
                 | event::name::SPACE_META_CHANGED
+                | event::name::WINDOW_FILE_DROP
+                | method::ai::HOST_CHAT_EVENT
         ) {
             return Err(RpcError::failed(format!("未知事件名：{}", p.name)));
         }
@@ -2475,8 +2550,13 @@ fn is_shell_method(method_name: &str) -> bool {
             | method::ai::CHAT_RENAME
             | method::ai::CHAT_DELETE
             | method::ai::CHAT_COMPACT
+            | method::ai::CHAT_TITLE
             | method::ai::MODELS
             | method::ai::AGENTS
+            | method::ai::TOOL_EXECUTE
+            | method::chat::SESSION_READ
+            | method::chat::SESSION_WRITE
+            | method::chat::SESSION_SNAPSHOT
             | method::clipboard::WRITE_TEXT
             | method::clipboard::READ_TEXT
             | method::clipboard::READ_IMAGE
@@ -2510,6 +2590,47 @@ fn is_shell_method(method_name: &str) -> bool {
             | method::history::DAY
             | method::history::OPEN
     )
+}
+
+/// 可用工具声明：内置名册 + 插件注册工具，按调用方给的勾选 id 过滤（空 = 全部）。
+fn tool_list(runtime: &Arc<PluginRuntime>, params: &method::ToolListParams) -> method::ToolListResult {
+    let wanted = |id: &str| {
+        params.tool_ids.is_empty() || params.tool_ids.iter().any(|item| item == id)
+    };
+    let mut tools: Vec<method::ToolDecl> = crate::ai::tools::builtin_tools()
+        .into_iter()
+        .filter(|tool| wanted(tool.name))
+        .map(|tool| {
+            let category = match tool.category {
+                crate::ai::tools::ToolCategory::Web => "web",
+                crate::ai::tools::ToolCategory::File => "file",
+                crate::ai::tools::ToolCategory::Task => "task",
+            };
+            method::ToolDecl {
+                name: tool.name.to_string(),
+                description: tool.description.to_string(),
+                parameters: tool.parameters,
+                category: category.to_string(),
+                parallel_safe: tool.parallel_safe,
+                selection_id: tool.name.to_string(),
+            }
+        })
+        .collect();
+    for spec in runtime.plugin_tools() {
+        let selection_id = spec.selection_id();
+        if !wanted(&selection_id) && !wanted(&spec.name) {
+            continue;
+        }
+        tools.push(method::ToolDecl {
+            name: spec.name,
+            description: spec.description,
+            parameters: spec.parameters,
+            category: "plugin".to_string(),
+            parallel_safe: false,
+            selection_id,
+        });
+    }
+    method::ToolListResult { tools }
 }
 
 /// 走壳侧界面服务的方法（接管 / 插件窗口）：落地依赖 OS 窗口副作用，只由壳执行。
@@ -2729,6 +2850,7 @@ mod tests {
             event::name::AI_CHAT_CHANGED,
             event::name::VAULT_FILE_CHANGED,
             event::name::SPACE_META_CHANGED,
+            event::name::WINDOW_FILE_DROP,
         ] {
             let ack = instance
                 .dispatch(event::SUBSCRIBE, &json!({ "name": name }))

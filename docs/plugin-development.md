@@ -217,9 +217,9 @@ async fn main() {
 
 ## 4. 通道与调用约定
 
-- 插件 → 宿主：一律**请求**，SDK 的 `Context` 方法已经包好；默认等待上限 30 秒（`Context::call_raw`），对话框与 http 不设上限。
+- 插件 → 宿主：一律**请求**，SDK 的 `Context` 方法已经包好；默认等待上限 30 秒（`Context::call_raw`），文件对话框与 `http.request` 不设上限，`http.stream.open` 只等宿主登记回执（建连在后台完成，失败经结束事件下发；空闲超时由 `timeout_ms` 决定）。超时错误码是 `RpcError::TIMEOUT`（`is_timeout()` 可判），语义见下一条。
 - 宿主 → 插件：一律**通知**（`host:` 前缀的方法），由 `PluginHandler` 的对应回调接收。回调**按到达顺序逐个执行**（一条处理完才接下一条），因此改同一份状态不必自己加锁；代价是单个回调卡住会挡住后续通知——弹文件对话框、等长请求这类阻塞调用要么接受「界面整体暂停到用户点完」，要么在回调里另起任务自己驱动。回调可能早于 `on_ready` 到达，依赖初始化结果的逻辑要自带守卫。
-- 迟到 / 超时：调用超时只代表「本次调用放弃」，宿主侧业务可能仍在进行（`ai.chat.send` 这类有副作用的调用尤其如此），需要时用查询方法核对。
+- 迟到 / 超时：调用超时只代表「本次调用放弃」（结果未知），宿主侧业务可能仍在进行，需要时用查询方法核对。超时与「宿主明确拒绝」要分开处理：前者可重试或等待事件，后者是定论。`chat_send` / `chat_compact` / `chat_title` / `tool_execute` / `http.request` 等有副作用或长耗时的入口不设 SDK 等待上限，回执即定论（连接断开除外）。
 - 宿主退出：stdin 被关闭，`run_stdio` 返回 `Ok`，插件应正常退出；此时宿主已结束整棵进程树，不要试图常驻。
 
 ## 5. 界面：画一帧
@@ -456,6 +456,13 @@ impl PluginHandler for Todo {
 | `notice(text, color)` | 提示块：整行底色 + 语义色描边与文字 |
 | `markdown(content)` | 只读 Markdown：块由宿主解析（`markdown.parse`），控件层按宽度折行并画列表标记 / 引用条 / 代码底 |
 | `scroll(id, gap, ...)` / `list(id, gap, ...)` | 滚动容器（吃父容器剩余高度，只画视口内的子项），滚轮回 `Scroll { id, offset, max_offset }`，右下细滚动条可拖 |
+| `virtual_scroll(id, len, gap, follow_end, viewport_hint, estimate_h, key, build)` | 虚拟滚动列表：只为视口附近构造条目，屏外用上一帧实测高与 `estimate_h` 估算总高；`key` 稳定标识条目（长消息流、日志用，条目多时比 `scroll` 快一个量级） |
+| `boxed(width, BoxStyle, Edges, gap, ...)` | 通用表面容器：底色 / 边框 / 圆角 / 四边内边距 / 间距可配，宽度撑满或固定（气泡、步骤卡、输入盒） |
+| `click_row(id, Edges, radius, selected, enabled, ...)` / `click_box(...)` | 无边框可点行 / 定宽可点块：选中与悬停出底色，用于会话行、折叠块头、工具排触发钮 |
+| `icon_named(name, size, color)` / `icon_button_named(...)` / `icon_button_filled(...)` | 按 lucide 名称绘制图标（表内形状与宿主同一份数据），可指定图标边长与命中盒边长；实心钮用于发送 / 停止 |
+| `stack(...)` / `center_column(...)` / `row_fit(...)` | 层叠容器（后声明压住先声明）/ 水平居中列 / 收缩宽度行（行内右对齐按钮组） |
+| `image_sized(source, w, h, fit)` / `bar(w, color)` / `hit_area(id)` | 固定尺寸图片、竖向色条、透明命中区（浮层背板） |
+| `text_styled_fit(content, TextStyle)` | 按内容定宽的单行文字（行内标题与摘要紧跟在前一项后，不被拉成整行） |
 | `scroll_sized(id, height, gap, follow_end, ...)` | 定高滚动区；`follow_end` 时停在终点就跟到新终点（日志、消息流） |
 | `rule()` / `spacer(h)` / `grow()` | 分隔线 / 固定高度空白 / 吃剩余宽度的弹簧 |
 | `pad(horizontal, vertical, ...)` | 内边距容器：子项按列排布并整体内缩（滚动条要贴边、内容又要留白时用） |
@@ -464,6 +471,8 @@ impl PluginHandler for Todo {
 Markdown 不要自己解析：`ui.markdown(text)` 首次出现时向宿主发一次 `markdown.parse`，按原文缓存（缓存有限，滚出视野的旧内容会被收敛掉），内容不变不重取。
 
 三条边界：指令集没有裁剪，滚动只画视口内的子项；需要覆盖主内容的浮层用 `ui.overlay(rect, ...)`（画在主内容之后，打开时滚轮只落到浮层里的滚动区），下拉仍就地展开；无障碍基本没有（自绘帧对读屏器只是一块区域，键鼠可达性要自己保证）；观感一致性靠 SDK 默认样式，不要写死色值和像素。
+
+长列表（消息流、日志）用 `virtual_scroll`：`scroll` 每帧都会把所有条目的高度算一遍，条目上千时改宽会出现 10 ms 级卡顿；`virtual_scroll` 只构造视口附近的条目，屏外高度按上一帧实测值估算。`viewport_hint` 是视口高度的近似值（略小由 overscan 补足），`key` 用稳定 id（消息 id / 日志序号）。
 
 要自带 GUI 运行时的插件可以自己创建系统窗口跑自有渲染（不走 `window.open`），但那种界面不参与工作台组合：没有面板 dock、没有标签页，宿主主题与快捷键也不生效，插件一停就跟着消失。想留在工作台里，就走帧。
 
@@ -498,7 +507,7 @@ ctx.begin_window_drag("main").await?;   // 宿主接管拖动手势
 | `shortcuts` | 系统级全局快捷键（如 `Shift+Alt+E`）；被占用时注册返回可读错误，停用自动注销；同一组键重复注册幂等，触发上报的是最后一次注册的写法。`query_shortcut` 可事前问某键位是否被占用（`owner` 为占用方插件 id；被系统 / 其他应用占用时为缺省） |
 | `clipboard` | 文本读写、图片读取（PNG + 尺寸，由宿主读系统剪贴板）与图片写入（`clipboard_write_image(&png)`，PNG 载荷单次 32 MiB，解码后的像素量再挡一次；失败返回可读错误） |
 | `dialog` | 系统对话框，等用户交互不设上限；取消返回 `None` |
-| `http` | 便利层：目标地址、方法、大小、超时全由插件自负，宿主不设限。响应体以 base64 返回；大文件请插件进程自己直连 |
+| `http` | 便利层。`http.request` 的目标地址、方法、大小、超时全由插件自负，宿主不设限，响应体以 base64 返回；大文件请插件进程自己直连。`http.stream.open` 由宿主建连、按块下发原始字节（base64），地址按供应商口径校验（公网目标拒内网，本机 / 局域网服务放行），空闲超时取 `timeout_ms`（缺省 60 秒），结束经 `on_http_stream_end` 的 `cancelled` 区分主动取消与自然结束 |
 | `process` | 托管子进程：输出与退出经 `host:process.event` 转发；停用 / 崩溃 / 卸载时连同子孙进程一起结束 |
 | `window` | 见 §8.2 |
 | `ai` | 见 §8.4 |
@@ -609,7 +618,9 @@ ctx.window_show("palette").await?;
 ```rust
 use atelyx_plugin_sdk::protocol::method::ChatSendParams;
 
-// 发起对话（会话 = 仓库里的普通会话，对话面板可见）；事件经 on_chat_event 流达
+// 先订阅对话事件（不订阅就收不到 on_chat_event），再发起对话
+ctx.subscribe("host:ai.chat.event").await?;
+// 会话 = 仓库里的普通会话，对话面板可见
 let sent = ctx.chat_send("帮我总结这篇笔记", None).await?;
 
 // 完整参数：指定 Agent / 模型，附带仓库内图片
@@ -636,6 +647,8 @@ ctx.register_tool("echo.search", "在笔记里搜索", json!({
 - `agent_id`：缺省时新建会话用内置「对话」工具集、续聊沿用会话已记录的 Agent；新建会话的记录会写入该 Agent，续聊时只作用于本轮；指定但不在当前仓库名册即拒绝。
 - `model` 缺省沿用对话面板当前选择；同一模型名被多个供应商配置时须给 `provider_id` 消歧（单独给 `provider_id` 拒绝）。
 - `images` 是仓库相对路径（png / jpg / jpeg / webp / gif），逐张校验，任一张不可用即整条拒绝（不部分发送）；`text` 为空时 `images` 必须非空。校验通过后、run 读取前文件仍可能消失，读不到的那张在该轮请求里跳过。
+- 会话真源在宿主：需要自己管理会话的插件（例如对话面板）用 `ctx.chat_session_read` / `chat_session_write` / `chat_session_snapshot`。写入是一个声明式 `CommitBatch`（创建 / 元数据补丁 / 追加 / 消息补丁 / 截断 / 删除 / 覆盖项），宿主在同一把锁内整体应用并走既有写盘链；批次被拒即整体不生效，落盘失败经快照的 `persistError` 反映。
+- 模型流式走 `ctx.http_stream_open`（`http.stream.*`）：宿主建连后原始字节按块到达 `on_http_stream_chunk`，SSE 等协议解析归插件；`on_http_stream_end` 的 `error` / `cancelled` 区分失败与主动取消。
 
 ```rust
 async fn on_tool_call(&self, ctx: &Context, params: ToolCallParams) {
@@ -646,7 +659,8 @@ async fn on_tool_call(&self, ctx: &Context, params: ToolCallParams) {
 
 - 工具名全局唯一（不得与内置工具或其他插件重名），在 Agent 的工具勾选里以 `plugin:<插件 id>:<工具名>` 出现；用户没勾就不派发。
 - 工具调用等待上限 120 秒，超时 / 插件未运行都以错误文本回给模型。
-- 对话事件：`message`（流式快照，整条消息替换）、`finished`（正常收敛或用户中断）、`failed`、`titled`（话题自动命名结果）。
+- 对话事件只发给订阅了 `host:ai.chat.event` 的插件：发起前先 `ctx.subscribe("host:ai.chat.event")`，否则 `on_chat_event` 不会被调用。事件类型：`message`（流式快照，整条消息替换）、`finished`（正常收敛或用户中断）、`failed`、`titled`（话题自动命名结果）、`removed`（中断且未产生内容时占位消息被移除）。
+- `chat_send_with` 不设 SDK 等待上限：宿主要把会话与占位消息落真源后才回执，提前按超时返回会让调用方无法判断消息是否已写入。
 - 停用 / 崩溃 / 卸载自动摘除工具登记，插件不需要自己收尾。
 
 ### 8.5 事件订阅
@@ -655,15 +669,18 @@ async fn on_tool_call(&self, ctx: &Context, params: ToolCallParams) {
 ctx.subscribe("vault:switch").await?;    // 容器切换（本地仓库 / 协作空间 / 换仓库）
 ctx.subscribe("table:changed").await?;   // 当前打开表格变更
 ctx.subscribe("table:selection.changed").await?; // 当前表格选区移动（本端与协作者）
+ctx.subscribe("host:ai.chat.event").await?; // 对话事件（发起对话前必须订阅）
 ctx.subscribe("ai:chat.changed").await?; // AI 会话内容变更（含对话面板里的改动）
 ctx.subscribe("vault:file.changed").await?; // 仓库文件被宿主写入（保存 / 新建 / 删除 / 改名）
+ctx.subscribe("window:file.drop").await?; // 外部文件拖入窗口（绝对路径）
 ```
 
 - `vault:switch` 只在声明了 `keepMountedOnVaultSwitch` 时才有意义：未声明的插件在收到它之前就被宿主重载了。payload：`{ kind: "local", root }` 或 `{ kind: "space", spaceId }`。
-- `ai:chat.changed` payload：`{ sessionId, kind }`，`kind` 为 `created` / `messages` / `meta` / `deleted`（新会话、消息增减、标题或 Agent 等元数据变化、删除）。只在变更提交后广播、不补发历史，需要当前内容用 `ctx.chat_history` 重读。
+- `ai:chat.changed` payload：`{ sessionId, kind, persistError? }`，`kind` 为 `created` / `messages` / `meta` / `deleted`（新会话、消息增减、标题或 Agent 等元数据变化、删除），`reload` 表示会话真源整体重载（换仓 / 空间装载完成），`persist` 表示落盘失败置位 / 恢复；`reload` 与 `persist` 的 `sessionId` 为空，后者由 `persistError`（`None` = 已恢复）承载状态。只在变更提交后广播、不补发历史，需要当前内容用 `ctx.chat_history` 重读。
 - `table:changed` payload 是当前表格的仓库相对路径；订阅时会先补发一次当前状态（迟到订阅不丢当前表格）。
 - `table:selection.changed` payload：`{ path?, selection?, remoteSelections? }`——当前表格路径、本端选区与协作者选区（`name` / `color`（`#rrggbb`）/ `selection`），选区形态为 `cell` / `range` / `row` / `column` / `all`。内容不变、只有选区移动也发；没有打开表格时用空载荷通知一次。载荷直接带选区，不必为一次拖选重取快照。
 - `vault:file.changed` payload：`{ path, kind, oldPath? }`，`kind` 为 `created` / `updated` / `deleted` / `renamed`（改名另带旧路径）。只覆盖**宿主发起的写入**——壳自身保存 / 新建 / 复制 / 删除 / 改名与插件经 `vault` 的写入；外部程序直接改磁盘不发，需要感知外部改动仍要按 mtime 轮询。删除目录只发目录本身一条，其下文件不逐条发（按前缀作废缓存，需要明细就重新列举）。
+- `window:file.drop` payload：`{ paths }`，绝对路径（宿主只转发路径，读取由插件经 `fs` 自理）。广播给所有订阅方，插件按自身界面是否可见决定是否接收。
 
 ### 8.6 系统托盘
 
@@ -715,14 +732,14 @@ ctx.declare_default_layout(
         direction: Axis::Horizontal,
         children: vec![
             LayoutSpecNode::Panel { views: vec!["files".into()] },
-            LayoutSpecNode::Panel { views: vec!["note".into(), "aichat".into()] },
+            LayoutSpecNode::Panel { views: vec!["note".into(), "table".into()] },
         ],
         sizes: vec![30.0, 70.0],
     },
 ).await?;
 ```
 
-- `spec` 是分割树：`split { direction: "horizontal" | "vertical", children, sizes }` 或 `panel { views }`；`views` 写视图 kind——本插件的面板贡献为 `plugin:<插件 id>:<贡献 id>`，预置插件的视图用 `canvas` / `note` / `table` / `files` / `search` / `aichat` 等，首个为激活标签。
+- `spec` 是分割树：`split { direction: "horizontal" | "vertical", children, sizes }` 或 `panel { views }`；`views` 写视图 kind——本插件的面板贡献为 `plugin:<插件 id>:<贡献 id>`；内置的文档视图是 `canvas` / `note` / `table` / `files` / `search`，其余界面（含 AI 对话）都写插件面 id。首个为激活标签。
 - 只摆一次：宿主在 `ui-state.json` 记账，用户改名 / 删除后不会再补回；首次启用时当前场景已含规格里的任一视图则只记账不新建，避免与用户已摆好的界面重复。
 - 布局名与既有布局重名时宿主追加序号并激活新布局；规格超限（深度 16、面板 32、单面板视图 16、名字 64 字节）或非法即拒收。
 

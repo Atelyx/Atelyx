@@ -6,9 +6,9 @@ use crate::context::Context;
 use crate::protocol::event::PublishParams;
 use crate::protocol::frame::{FrameInputParams, FrameTickParams};
 use crate::protocol::method::{
-    ChatEventParams, CollabMessageParams, DocCloseParams, DocOpenParams, ProcessEventParams,
-    ShortcutTriggeredParams, SurfaceAttachedParams, SurfaceDetachedParams, ToolCallParams,
-    TrayClickParams, WindowClosedParams, WindowIdParams,
+    ChatEventParams, CollabMessageParams, DocCloseParams, DocOpenParams, HttpStreamChunkParams,
+    HttpStreamEndParams, ProcessEventParams, ShortcutTriggeredParams, SurfaceAttachedParams,
+    SurfaceDetachedParams, ToolCallParams, TrayClickParams, WindowClosedParams, WindowIdParams,
 };
 use crate::protocol::service::{self, ChangedParams, HostCallParams};
 
@@ -44,7 +44,13 @@ pub trait PluginHandler: Send + Sync + 'static {
     /// 同空间的对等插件发来消息（`host:collab.message`）。
     async fn on_collab_message(&self, _ctx: &Context, _params: CollabMessageParams) {}
     /// 对话事件流（`host:ai.chat.event`）：快照节流拍 + 终态 + 命名结果。
+    /// 只有 `ctx.subscribe("host:ai.chat.event")` 过的插件才收得到。
     async fn on_chat_event(&self, _ctx: &Context, _params: ChatEventParams) {}
+    /// 流式出网的一段原始字节（`host:http.stream.chunk`，base64）。
+    async fn on_http_stream_chunk(&self, _ctx: &Context, _params: HttpStreamChunkParams) {}
+    /// 流式出网结束（`host:http.stream.end`）：`error` 缺省且 `cancelled` 为假 = 正常结束；
+    /// `cancelled` 为真 = 调用方取消或插件停用，不是流自然结束。
+    async fn on_http_stream_end(&self, _ctx: &Context, _params: HttpStreamEndParams) {}
     /// 整面帧的原始输入（`host:frame.input`）：指针 / 滚轮 / 键盘 / 输入法 / 焦点 / 尺寸。
     /// 状态变化后由插件自行 `submit_frame`。
     async fn on_frame_input(&self, _ctx: &Context, _params: FrameInputParams) {}
@@ -118,6 +124,12 @@ pub(crate) async fn dispatch<H: PluginHandler + ?Sized>(
         m::tray::HOST_CLICK => typed!(TrayClickParams, |p| handler.on_tray_click(ctx, p)),
         m::collab::HOST_MESSAGE => typed!(CollabMessageParams, |p| handler.on_collab_message(ctx, p)),
         m::ai::HOST_CHAT_EVENT => typed!(ChatEventParams, |p| handler.on_chat_event(ctx, p)),
+        m::http::HOST_STREAM_CHUNK => {
+            typed!(HttpStreamChunkParams, |p| handler.on_http_stream_chunk(ctx, p))
+        }
+        m::http::HOST_STREAM_END => {
+            typed!(HttpStreamEndParams, |p| handler.on_http_stream_end(ctx, p))
+        }
         m::ai::HOST_TOOL_CALL => typed!(ToolCallParams, |p| handler.on_tool_call(ctx, p)),
         service::method::HOST_CALL => typed!(HostCallParams, |p| handler.on_service_call(ctx, p)),
         service::method::HOST_CHANGED => {

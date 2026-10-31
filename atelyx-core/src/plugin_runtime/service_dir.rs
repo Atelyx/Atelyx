@@ -29,12 +29,20 @@ pub(crate) const SERVICE_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 /// 能力总线自身的命名空间：不是可登记的服务，也不进目录。
 const BUS_NAMESPACE: &str = "service";
 
-/// 不可替换的内置服务：字体与主题取自宿主 OS / 用户设置，外置后宿主自身外观会与设置脱节。
-const NON_REPLACEABLE: &[&str] = &["query"];
+/// 不可替换的内置服务：`query` 的量算与主题取自宿主 OS / 用户设置；`chat` 是会话真源，
+/// 只能由宿主按仓库身份读写。两者外置都会与宿主状态脱节。
+const NON_REPLACEABLE: &[&str] = &["query", "chat"];
 
-/// 宿主保留方法：工具名册与结果回报由宿主记账，服务被外部顶替后也不能被提供者截走。
-const HOST_OWNED: &[&str] =
-    &[method::ai::REGISTER_TOOL, method::ai::UNREGISTER_TOOL, method::ai::TOOL_RESULT];
+/// 宿主保留方法：工具名册、结果回报、工具执行与对话事件由宿主记账，服务被外部顶替后
+/// 也不能被提供者截走。
+const HOST_OWNED: &[&str] = &[
+    method::ai::REGISTER_TOOL,
+    method::ai::UNREGISTER_TOOL,
+    method::ai::TOOL_RESULT,
+    method::ai::TOOL_LIST,
+    method::ai::TOOL_EXECUTE,
+    method::ai::CHAT_EMIT,
+];
 
 /// 活动提供者：内置实现（归属插件停用期间不可用）或某个外部插件。
 #[derive(Clone, Debug, PartialEq)]
@@ -231,7 +239,7 @@ impl ServiceDir {
         };
         match self.entries.get_mut(&params.service) {
             Some(entry) if !entry.replaceable => Err(format!(
-                "服务 `{}` 的提供者不可替换：它取的是宿主 OS 与用户设置资源",
+                "服务 `{}` 的提供者不可替换：它绑定宿主设置或会话真源",
                 params.service
             )),
             Some(entry) => {
@@ -302,7 +310,7 @@ impl ServiceDir {
             Some(plugin_id) => {
                 if !entry.replaceable {
                     return Err(format!(
-                        "服务 `{service_name}` 的提供者不可替换：它取的是宿主 OS 与用户设置资源"
+                        "服务 `{service_name}` 的提供者不可替换：它绑定宿主设置或会话真源"
                     ));
                 }
                 if !entry
@@ -695,6 +703,90 @@ impl PluginRuntime {
         provider_instance.notify_service_call(&call_id, service_name, method_name, params);
     }
 
+    /// 宿主主动调用一个插件的服务（`ai.core` 这类私有服务）：登记在途条目、后台下发并等待
+    /// 回执，结果经返回的通道送达。调用线程（壳的 Elm 循环）不等待插件处理。
+    pub fn call_plugin(
+        self: &Arc<Self>,
+        plugin_id: &str,
+        service_name: &str,
+        method_name: &str,
+        params: Value,
+    ) -> Result<std::sync::mpsc::Receiver<Result<Value, String>>, String> {
+        self.call_plugin_timeout(
+            plugin_id,
+            service_name,
+            method_name,
+            params,
+            SERVICE_CALL_TIMEOUT,
+        )
+    }
+
+    /// 与 [`Self::call_plugin`] 相同，但等待上限由调用方指定（压缩 / 命名等长调用）。
+    pub fn call_plugin_timeout(
+        self: &Arc<Self>,
+        plugin_id: &str,
+        service_name: &str,
+        method_name: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<std::sync::mpsc::Receiver<Result<Value, String>>, String> {
+        let instance = self
+            .instances
+            .lock()
+            .unwrap()
+            .get(plugin_id)
+            .cloned()
+            .ok_or_else(|| format!("插件未运行：{plugin_id}"))?;
+        let call_id = format!(
+            "{plugin_id}-host-{}",
+            self.next_service_call_id.fetch_add(1, Ordering::SeqCst)
+        );
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        self.service_calls.lock().unwrap().insert(
+            call_id.clone(),
+            ServiceCallWait {
+                provider: plugin_id.to_string(),
+                caller: "host".to_string(),
+                tx: reply_tx,
+            },
+        );
+        let (out_tx, out_rx) = std::sync::mpsc::channel();
+        let runtime = Arc::clone(self);
+        let provider = plugin_id.to_string();
+        let service_name = service_name.to_string();
+        let method_name = method_name.to_string();
+        std::thread::Builder::new()
+            .name("atelyx-host-call".into())
+            .spawn(move || {
+                // 下发可能等插件的入口闸门（插件正在处理别的通知）：放到自建线程，不占 Elm 循环
+                instance.notify_service_call(&call_id, &service_name, &method_name, params);
+                let (done_tx, done_rx) = std::sync::mpsc::channel();
+                let handle = runtime.service_handle();
+                let wait_runtime = Arc::clone(&runtime);
+                let wait_id = call_id.clone();
+                handle.spawn(async move {
+                    let result = match tokio::time::timeout(timeout, reply_rx).await {
+                        Ok(Ok(value)) => value,
+                        Ok(Err(_)) => Err(format!("提供者 {provider} 已下线")),
+                        Err(_) => {
+                            wait_runtime.service_calls.lock().unwrap().remove(&wait_id);
+                            Err(format!(
+                                "提供者 {provider} 在 {} 秒内未回报结果",
+                                timeout.as_secs()
+                            ))
+                        }
+                    };
+                    let _ = done_tx.send(result);
+                });
+                let result = done_rx
+                    .recv()
+                    .unwrap_or_else(|_| Err("服务调用已取消".to_string()));
+                let _ = out_tx.send(result);
+            })
+            .map_err(|e| format!("启动宿主调用线程失败：{e}"))?;
+        Ok(out_rx)
+    }
+
     /// 登记一条在途调用（只登记，不下发）：闸门保证提供者正在收尾时不再领新调用。
     /// 返回 `callId`、应答通道与提供者实例（下发由调用方在闸门外写对方 stdin）。
     fn register_service_call(
@@ -808,7 +900,7 @@ impl PluginRuntime {
     /// 跨插件调用的执行器：首次转发时建立一条独立运行时，此后进程内复用。
     /// 转发发生在插件 stdout 读线程上，那里没有 tokio 上下文可借，故自建一条并让一个后台线程
     /// 常驻驱动它（`block_on(pending)` 只负责跑定时器与转发任务）。
-    fn service_handle(&self) -> tokio::runtime::Handle {
+    pub(crate) fn service_handle(&self) -> tokio::runtime::Handle {
         self.service_runtime
             .get_or_init(|| {
                 let (tx, rx) = std::sync::mpsc::channel();

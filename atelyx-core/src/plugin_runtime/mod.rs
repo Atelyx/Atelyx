@@ -10,6 +10,7 @@ mod child_process;
 mod fs;
 mod frame_region;
 mod http;
+mod http_stream;
 mod install;
 mod instance;
 mod layout;
@@ -52,13 +53,16 @@ pub use atelyx_plugin_protocol::paint::{
     TextFamily, TextWeight,
 };
 pub use atelyx_plugin_protocol::event::{
-    ChatChangeKind, ChatChangedPayload, FileChangeKind, FileChangedPayload,
+    ChatChangeKind, ChatChangedPayload, FileChangeKind, FileChangedPayload, FileDropPayload,
     SpaceMetaChangedPayload, TableChangedPayload, TableSelectionChangedPayload, VaultSwitchPayload,
 };
+pub use atelyx_plugin_protocol::chat::ChatPersistError;
 pub use atelyx_plugin_protocol::layout::LayoutSpecNode;
 pub use atelyx_plugin_protocol::manifest::{DocTypeRegistration, Permission};
 /// 能力总线的对外契约类型（服务清单 / 登记参数 / 错误原因）。
 pub use atelyx_plugin_protocol::service;
+/// 宿主与 AI 核心插件之间的私有运行方法名。
+pub use atelyx_plugin_protocol::method::run as ai_run;
 /// 随包预置插件同步的结果。
 pub use preset::PresetSyncReport;
 pub use atelyx_plugin_protocol::method::{
@@ -75,7 +79,10 @@ pub use atelyx_plugin_protocol::method::{
     MeasureTextResult, NotificationLevel, PaddingSpec, Radii,
     SetTrayItemsParams, ShortcutQueryResult, SurfaceKind, TableField, TableRemoteSelection,
     TableSelection, TableRow, TableSetCellImageParams, TableSnapshot, TakeoverScope, ThemeColors,
-    ThemeResult, TrayClickParams, TrayItemSpec, WindowOpenParams, WindowUpdateParams,
+    RunCompactParams, RunConfigWire, RunDirectParams, RunStartParams, RunStartResult,
+    RunStopParams, RunTitleParams, SearchConfigWire, ThemeResult, ToolDecl, ToolExecParams,
+    ToolExecResult, ToolListParams, ToolListResult, TrayClickParams, TrayItemSpec, WindowOpenParams,
+    WindowUpdateParams, AI_CORE_PLUGIN,
 };
 
 /// 插件运行状态。
@@ -120,6 +127,8 @@ pub enum PluginEvent {
     ContributionsChanged { id: String },
     /// 某插件注册的 AI 工具变化（注册 / 撤销 / 随会话收尾清空）。
     AiToolsChanged { id: String },
+    /// AI 核心插件发布了一条对话事件（会话快照 / 终态 / 命名结果）；壳侧据此更新画布卡等宿主界面。
+    AiChatEvent { id: String, params: method::ChatEventParams },
     /// 服务目录变化（登记 / 撤销 / 切换提供者 / 提供者下线回落）：壳据此重建注册表的服务区。
     ServiceChanged { id: String },
     /// 插件声明了自己的默认布局（壳在首次启用时摆进当前场景，之后不再重复）。
@@ -286,6 +295,24 @@ pub enum HostRequest {
     ChatDelete { plugin_id: String, request_id: u64, params: method::ChatSessionParams },
     /// 插件请求压缩一个会话（回执 = 已受理，结果经 `ai.chat.history` 复核）。
     ChatCompact { plugin_id: String, request_id: u64, params: method::ChatSessionParams },
+    /// 插件请求让模型重新生成会话标题。
+    ChatRetitle { plugin_id: String, request_id: u64, params: method::ChatSessionParams },
+    /// 插件请求读单个会话（元数据 + 消息；会话真源在壳）。
+    ChatSessionRead {
+        plugin_id: String,
+        request_id: u64,
+        params: atelyx_plugin_protocol::chat::SessionReadParams,
+    },
+    /// 插件提交会话批次（形状与协议 `chat::CommitBatch` 一致；壳校验后经写盘链落真源）。
+    ChatSessionWrite { plugin_id: String, request_id: u64, batch: Value },
+    /// 插件请求全仓库会话快照（会话清单 + 覆盖层 + 落盘失败）。
+    ChatSessionSnapshot { plugin_id: String, request_id: u64 },
+    /// 插件请求执行一次工具（内置或插件工具；壳侧异步执行后回填）。
+    AiToolExecute {
+        plugin_id: String,
+        request_id: u64,
+        params: method::ToolExecParams,
+    },
     /// 插件请求读当前仓库内一张图片的固有像素尺寸。
     VaultImageInfo { plugin_id: String, request_id: u64, path: String },
     /// 插件请求整发整换自己的托盘菜单（条目存于壳的托盘服务）。
@@ -378,6 +405,9 @@ pub struct PluginRuntime {
     process_host: Arc<PluginProcessHost>,
     shortcuts: Arc<shortcut::Registrar>,
     events: tokio::sync::broadcast::Sender<PluginEvent>,
+    /// 对话事件的无界副本（只给壳）：广播通道落后时终态不能丢。
+    ai_events: tokio::sync::mpsc::UnboundedSender<ChatEventParams>,
+    ai_events_rx: tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<ChatEventParams>>,
     host_requests: tokio::sync::mpsc::UnboundedSender<HostRequest>,
     /// 服务请求接收端（壳侧订阅流持有；见 [`PluginRuntime::recv_host_request`]）。
     host_requests_rx: tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<HostRequest>>,
@@ -402,6 +432,9 @@ pub struct PluginRuntime {
     next_service_call_id: AtomicU64,
     /// 跨插件转发的执行器（首次转发时建立；读线程上没有 tokio 上下文可借）。
     service_runtime: OnceLock<tokio::runtime::Handle>,
+    /// 进行中的流式出网连接：streamId → 归属插件 / 取消位 / 任务句柄。
+    streams: Mutex<HashMap<String, http_stream::StreamEntry>>,
+    next_stream_id: AtomicU64,
     /// 当前容器身份（见 [`PluginRuntime::on_vault_switch`]）：同一容器重复进入不动作，据此判别首次激活。
     container: Mutex<Option<String>>,
     /// 最近一次切容器 payload：迟到订阅 `vault:switch` 的插件由此补发当前容器身份。
@@ -425,6 +458,7 @@ impl PluginRuntime {
         layout::sweep_temp(&root);
         frame_region::sweep_stale_regions();
         let (events, _) = tokio::sync::broadcast::channel(256);
+        let (ai_events, ai_events_rx) = tokio::sync::mpsc::unbounded_channel();
         let (host_requests, host_requests_rx) = tokio::sync::mpsc::unbounded_channel();
         let runtime = Arc::new(Self {
             root,
@@ -432,6 +466,8 @@ impl PluginRuntime {
             process_host: Arc::new(PluginProcessHost::new()),
             shortcuts: shortcut::Registrar::new(),
             events,
+            ai_events,
+            ai_events_rx: tokio::sync::Mutex::new(ai_events_rx),
             host_requests,
             host_requests_rx: tokio::sync::Mutex::new(host_requests_rx),
             dialogs: Mutex::new(HashMap::new()),
@@ -447,6 +483,8 @@ impl PluginRuntime {
             service_calls: Mutex::new(HashMap::new()),
             next_service_call_id: AtomicU64::new(1),
             service_runtime: OnceLock::new(),
+            streams: Mutex::new(HashMap::new()),
+            next_stream_id: AtomicU64::new(1),
             container: Mutex::new(None),
             last_vault_switch: Mutex::new(None),
             current_table: Mutex::new(None),
@@ -466,6 +504,11 @@ impl PluginRuntime {
     /// 订阅运行时事件；壳把它接成订阅流（内层用广播，重复订阅 / 订阅重建都安全）。
     pub fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<PluginEvent> {
         self.events.subscribe()
+    }
+
+    /// 取一条对话事件（壳专用无界通道）：广播通道落后时终态也不会丢。
+    pub async fn recv_ai_chat_event(&self) -> Option<ChatEventParams> {
+        self.ai_events_rx.lock().await.recv().await
     }
 
     /// 取一条待处理的服务请求（对话框等）；壳把它接成订阅流。返回 `None` = 运行时已销毁。
@@ -592,6 +635,11 @@ impl PluginRuntime {
             | HostRequest::ChatRename { .. }
             | HostRequest::ChatDelete { .. }
             | HostRequest::ChatCompact { .. }
+            | HostRequest::ChatRetitle { .. }
+            | HostRequest::ChatSessionRead { .. }
+            | HostRequest::ChatSessionWrite { .. }
+            | HostRequest::ChatSessionSnapshot { .. }
+            | HostRequest::AiToolExecute { .. }
             | HostRequest::AiModels { .. }
             | HostRequest::AiAgents { .. }
             | HostRequest::ClipboardWrite { .. }
@@ -686,6 +734,18 @@ impl PluginRuntime {
                 request_id,
                 params,
             },
+            HostRequest::ChatSessionRead { plugin_id, params, .. } => {
+                HostRequest::ChatSessionRead { plugin_id, request_id, params }
+            }
+            HostRequest::ChatSessionWrite { plugin_id, batch, .. } => {
+                HostRequest::ChatSessionWrite { plugin_id, request_id, batch }
+            }
+            HostRequest::ChatSessionSnapshot { plugin_id, .. } => {
+                HostRequest::ChatSessionSnapshot { plugin_id, request_id }
+            }
+            HostRequest::AiToolExecute { plugin_id, params, .. } => {
+                HostRequest::AiToolExecute { plugin_id, request_id, params }
+            }
             HostRequest::AiModels { plugin_id, .. } => HostRequest::AiModels {
                 plugin_id,
                 request_id,
@@ -823,6 +883,11 @@ impl PluginRuntime {
                 request_id,
                 params,
             },
+            HostRequest::ChatRetitle { plugin_id, params, .. } => HostRequest::ChatRetitle {
+                plugin_id,
+                request_id,
+                params,
+            },
             HostRequest::VaultImageInfo { plugin_id, path, .. } => HostRequest::VaultImageInfo {
                 plugin_id,
                 request_id,
@@ -903,6 +968,11 @@ impl PluginRuntime {
     }
 
     /// 让某插件全部在途壳侧服务调用以可读失败收场（插件停用 / 失败 / 崩溃时调用）。
+    /// 取消某插件名下全部流式出网连接（插件停止 / 崩溃 / 卸载时调用）。
+    pub(crate) fn drop_streams_of(self: &Arc<Self>, plugin_id: &str) {
+        http_stream::drop_plugin(self, plugin_id);
+    }
+
     pub(crate) fn fail_shell_calls_of(&self, plugin_id: &str, reason: &str) {
         let ids: Vec<u64> = {
             let shell_calls = self.shell_calls.lock().unwrap();
@@ -917,18 +987,6 @@ impl PluginRuntime {
             if let Some((_, tx)) = waiter {
                 let _ = tx.send(Err(reason.to_string()));
             }
-        }
-    }
-
-    /// 向发起会话的插件下发一条对话事件（`host:ai.chat.event`）。进程未在跑时静默丢弃
-    /// （插件停用后的 run 不中断——会话归仓库，事件随进程消失）。
-    pub fn notify_chat_event(&self, plugin_id: &str, params: &method::ChatEventParams) {
-        let instance = {
-            let instances = self.instances.lock().unwrap();
-            instances.get(plugin_id).cloned()
-        };
-        if let Some(instance) = instance {
-            instance.notify_chat_event(params);
         }
     }
 
@@ -1650,8 +1708,80 @@ impl PluginRuntime {
         let payload = ChatChangedPayload {
             session_id: session_id.to_string(),
             kind,
+            persist_error: None,
         };
         self.broadcast_event(event::name::AI_CHAT_CHANGED, &payload);
+    }
+
+    /// 会话真源重新装载完成：通知订阅方整体重取（换仓 / 空间装载）。
+    pub fn on_chat_store_reloaded(self: &Arc<Self>) {
+        let payload = ChatChangedPayload {
+            session_id: String::new(),
+            kind: ChatChangeKind::Reload,
+            persist_error: None,
+        };
+        self.broadcast_event(event::name::AI_CHAT_CHANGED, &payload);
+    }
+
+    /// 会话落盘状态变化：订阅方按载荷更新错误提示（`None` = 已恢复）。
+    pub fn on_chat_persist(
+        self: &Arc<Self>,
+        error: Option<atelyx_plugin_protocol::chat::ChatPersistError>,
+    ) {
+        let payload = ChatChangedPayload {
+            session_id: String::new(),
+            kind: ChatChangeKind::Persist,
+            persist_error: error,
+        };
+        self.broadcast_event(event::name::AI_CHAT_CHANGED, &payload);
+    }
+
+    /// 外部文件拖入窗口：把绝对路径广播给订阅方（是否接收由插件按自身界面状态决定）。
+    pub fn on_files_dropped(self: &Arc<Self>, paths: Vec<String>) {
+        if paths.is_empty() {
+            return;
+        }
+        let payload = FileDropPayload { paths };
+        self.broadcast_event(event::name::WINDOW_FILE_DROP, &payload);
+    }
+
+    /// 发布一条对话事件：广播给订阅了 `host:ai.chat.event` 的插件，并交给壳（画布卡等宿主
+    /// 界面按会话 id 过滤）。插件侧只能经 `ai.chat.emit` 发布（宿主在入口处只放行 AI 核心）。
+    pub fn emit_chat_event(
+        self: &Arc<Self>,
+        plugin_id: &str,
+        params: method::ChatEventParams,
+    ) {
+        let targets: Vec<Arc<Instance>> =
+            self.instances.lock().unwrap().values().cloned().collect();
+        for instance in targets {
+            if instance.status() != PluginStatus::Running {
+                continue;
+            }
+            if instance.subscribed_to(method::ai::HOST_CHAT_EVENT) {
+                instance.notify_chat_event(&params);
+            }
+        }
+        let _ = self.ai_events.send(params.clone());
+        let _ = self.events.send(PluginEvent::AiChatEvent {
+            id: plugin_id.to_string(),
+            params,
+        });
+    }
+
+    /// AI 核心异常收场时，替它给仍在途的会话补发失败终态（崩溃没有插件侧收尾机会）。
+    /// 只走事件通道：会话真源由崩溃前最后一次落盘决定，宿主不替插件改写内容。
+    pub fn settle_ai_core_runs(self: &Arc<Self>, sessions: &[String], error: &str) {
+        for session_id in sessions {
+            self.emit_chat_event(
+                method::AI_CORE_PLUGIN,
+                method::ChatEventParams {
+                    session_id: session_id.clone(),
+                    message_id: String::new(),
+                    event: method::ChatEvent::Failed { error: error.to_string() },
+                },
+            );
+        }
     }
 
     /// 领域事件广播：只投给运行中且订阅了该名字的实例（停用 / 崩溃 / 退避中的实例不收）。
@@ -1804,6 +1934,11 @@ fn request_plugin_id(request: &HostRequest) -> &str {
         | HostRequest::ChatRename { plugin_id, .. }
         | HostRequest::ChatDelete { plugin_id, .. }
         | HostRequest::ChatCompact { plugin_id, .. }
+        | HostRequest::ChatRetitle { plugin_id, .. }
+        | HostRequest::ChatSessionRead { plugin_id, .. }
+        | HostRequest::ChatSessionWrite { plugin_id, .. }
+        | HostRequest::ChatSessionSnapshot { plugin_id, .. }
+        | HostRequest::AiToolExecute { plugin_id, .. }
         | HostRequest::AiModels { plugin_id, .. }
         | HostRequest::AiAgents { plugin_id, .. }
         | HostRequest::ClipboardWriteImage { plugin_id, .. }

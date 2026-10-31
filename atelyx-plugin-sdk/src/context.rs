@@ -195,8 +195,8 @@ impl Context {
 
     /// 发请求、等配对响应，受 [`CALL_TIMEOUT`] 约束。
     ///
-    /// 超时 = 本次调用放弃（返回可读错误），宿主侧业务不被取消；其响应迟到时由读端丢弃并留痕
-    /// （见连接泵），不会影响连接与其余调用。
+    /// 超时 = 本次调用放弃（`RpcError::TIMEOUT`，结果未知），宿主侧业务不被取消；其响应迟到时由
+    /// 读端丢弃并留痕（见连接泵），不会影响连接与其余调用。
     pub async fn call_raw(&self, method: &str, params: Value) -> Result<Value, RpcError> {
         self.call_with_timeout(method, params, CALL_TIMEOUT).await
     }
@@ -207,7 +207,7 @@ impl Context {
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => Err(RpcError::failed(format!("调用 {method} 失败：连接已结束"))),
-            Err(_) => Err(RpcError::failed(format!("调用 {method} 超时（{}s）", timeout.as_secs()))),
+            Err(_) => Err(RpcError::timeout(format!("调用 {method} 超时（{}s）", timeout.as_secs()))),
         }
     }
 
@@ -412,10 +412,11 @@ impl Context {
     // ---------- ai ----------
 
     /// 发起 / 续聊一轮 AI 对话（须在 manifest 声明 `ai` 权限）。回执 = run 已就位，
-    /// 流式事件经 [`PluginHandler::on_chat_event`] 流达。模型跟随面板当前选择，Agent 缺省沿用
-    /// 会话或内置「对话」；`session_id` 缺省 = 新建会话。
-    /// 受 [`CALL_TIMEOUT`] 约束：超时后宿主侧 run 可能已启动（事件照常流达），
-    /// 调用方应把超时当作「结果未知」而非「未发送」。
+    /// 流式事件经 [`PluginHandler::on_chat_event`] 流达；调用前须
+    /// `subscribe("host:ai.chat.event")`，否则收不到事件。模型跟随面板当前选择，Agent
+    /// 缺省沿用会话或内置「对话」；`session_id` 缺省 = 新建会话。
+    /// 不设 SDK 等待上限：宿主要把会话与占位消息落真源后才回执，超时提前返回会让调用方
+    /// 无法判断消息是否已写入。
     pub async fn chat_send(&self, text: &str, session_id: Option<&str>) -> Result<ChatSendResult, RpcError> {
         self.chat_send_with(ChatSendParams {
             text: text.into(),
@@ -428,7 +429,7 @@ impl Context {
     /// [`Self::chat_send`] 的完整参数入口：可另指定 Agent、模型、供应商与仓库内图片。
     /// 显式指定的 Agent / 模型须在当前仓库可用，否则宿主可读拒绝。
     pub async fn chat_send_with(&self, params: ChatSendParams) -> Result<ChatSendResult, RpcError> {
-        self.call_typed(method::ai::CHAT_SEND, &params).await
+        self.call_typed_unbounded(method::ai::CHAT_SEND, &params).await
     }
 
     /// 中断一个会话的活跃 run（幂等：无活跃 run 也成功）。
@@ -480,9 +481,17 @@ impl Context {
     }
 
     /// 压缩一个会话（把较早消息总结为压缩起点）。回执 = 已受理，结果经 [`Context::chat_history`] 复核。
+    /// 不设 SDK 等待上限：宿主等核心把摘要写完才回执。
     pub async fn chat_compact(&self, session_id: &str) -> Result<(), RpcError> {
         let params = ChatSessionParams { session_id: session_id.into() };
-        self.call_unit(method::ai::CHAT_COMPACT, &params).await
+        self.call_unit_unbounded(method::ai::CHAT_COMPACT, &params).await
+    }
+
+    /// 让模型重新生成会话标题；结果写回元数据并经 `host:ai.chat.event` 发 `Titled`。
+    /// 不设 SDK 等待上限：命名要等一轮模型调用完成。
+    pub async fn chat_title(&self, session_id: &str) -> Result<(), RpcError> {
+        let params = ChatSessionParams { session_id: session_id.into() };
+        self.call_unit_unbounded(method::ai::CHAT_TITLE, &params).await
     }
 
     /// 注册一个可被 Agent 调用的工具：名称全局唯一（不得与内置工具或其他插件的工具重名），
@@ -522,6 +531,69 @@ impl Context {
             is_error,
         };
         self.call_unit(method::ai::TOOL_RESULT, &params).await
+    }
+
+    // ---------- 会话真源（chat.session.*） ----------
+
+    /// 读单个会话（元数据 + 消息数组）。
+    pub async fn chat_session_read(
+        &self,
+        session_id: &str,
+    ) -> Result<crate::protocol::chat::SessionRecord, RpcError> {
+        let params = crate::protocol::chat::SessionReadParams { session_id: session_id.into() };
+        self.call_typed(method::chat::SESSION_READ, &params).await
+    }
+
+    /// 提交一个会话批次（创建 / 元数据 / 追加 / 补丁 / 截断 / 删除 / 覆盖项）。
+    pub async fn chat_session_write(
+        &self,
+        batch: &crate::protocol::chat::CommitBatch,
+    ) -> Result<(), RpcError> {
+        self.call_unit(method::chat::SESSION_WRITE, batch).await
+    }
+
+    /// 读全仓库会话快照（会话清单 + 覆盖层 + 落盘失败）。
+    pub async fn chat_session_snapshot(
+        &self,
+    ) -> Result<crate::protocol::chat::ChatStoreSnapshot, RpcError> {
+        self.call_null(method::chat::SESSION_SNAPSHOT).await
+    }
+
+    // ---------- 工具执行 ----------
+
+    /// 列可用工具声明；`tool_ids` 为空 = 全部。
+    pub async fn tool_list(&self, tool_ids: Vec<String>) -> Result<Vec<ToolDecl>, RpcError> {
+        let params = ToolListParams { tool_ids };
+        let result: ToolListResult = self.call_typed(method::ai::TOOL_LIST, &params).await?;
+        Ok(result.tools)
+    }
+
+    /// 执行一次工具调用（内置或插件工具）。工具可能等满调用方的超时上限，故不设 SDK 等待上限。
+    pub async fn tool_execute(&self, name: &str, arguments: Value) -> Result<ToolExecResult, RpcError> {
+        let params = ToolExecParams { name: name.into(), arguments };
+        self.call_typed_unbounded(method::ai::TOOL_EXECUTE, &params).await
+    }
+
+    /// 向宿主发布一条对话事件（仅 AI 核心插件可用，宿主广播给订阅方与壳侧）。
+    pub async fn chat_emit(&self, params: ChatEventParams) -> Result<(), RpcError> {
+        self.call_unit(method::ai::CHAT_EMIT, &params).await
+    }
+
+    // ---------- 流式出网 ----------
+
+    /// 打开一条流式连接：返回 streamId；数据经 [`crate::PluginHandler::on_http_stream_chunk`] 流达，
+    /// 结束经 [`crate::PluginHandler::on_http_stream_end`]。
+    pub async fn http_stream_open(
+        &self,
+        params: HttpStreamOpenParams,
+    ) -> Result<HttpStreamOpenResult, RpcError> {
+        self.call_typed(method::http::STREAM_OPEN, &params).await
+    }
+
+    /// 取消一条流式连接（幂等）。
+    pub async fn http_stream_cancel(&self, stream_id: &str) -> Result<(), RpcError> {
+        let params = HttpStreamCancelParams { stream_id: stream_id.into() };
+        self.call_unit(method::http::STREAM_CANCEL, &params).await
     }
 
     pub async fn subscribe(&self, name: &str) -> Result<bool, RpcError> {
@@ -981,5 +1053,15 @@ impl Context {
         let value = serde_json::to_value(params)
             .map_err(|e| RpcError::failed(format!("调用 {method} 失败：params 序列化错误（{e}）")))?;
         self.call_raw(method, value).await.map(|_| ())
+    }
+
+    async fn call_unit_unbounded<P: Serialize>(
+        &self,
+        method: &str,
+        params: &P,
+    ) -> Result<(), RpcError> {
+        let value = serde_json::to_value(params)
+            .map_err(|e| RpcError::failed(format!("调用 {method} 失败：params 序列化错误（{e}）")))?;
+        self.call_unbounded(method, value).await.map(|_| ())
     }
 }

@@ -3457,12 +3457,9 @@ fn on_remote_canvas_patch(
     ref_paths.dedup();
     crate::canvas_chat::sync_card_chats(app);
     if !conversation_ids.is_empty() {
-        // 消息流解析缓存随新消息重建；面板绑定了被更新卡时跟随刷新
+        // 消息流解析缓存随新消息重建
         if let Some(s) = app.canvas.as_mut() {
             crate::canvas_chat::refresh_card_docs(s, "");
-        }
-        for id in &conversation_ids {
-            crate::canvas_chat::refresh_panel_if_bound(app, id);
         }
     }
     if text_changed {

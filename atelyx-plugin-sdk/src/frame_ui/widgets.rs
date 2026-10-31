@@ -1,6 +1,7 @@
 ﻿//! SDK 控件：文字、按钮、输入框、下拉、勾选与滚动容器。
 //! 每个控件在自己的绘制闭包里写指令、命中区与布局记录；外观取主题 token，尺寸与宿主表单控件同档。
 
+use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -44,6 +45,10 @@ pub enum TextRole {
     FieldLabel,
     /// 小号说明（可换行）。
     Caption,
+    /// 极小说明（时间戳、摘要行）。
+    Micro,
+    /// 正文（阅读字号）。
+    Body,
     /// 表单值。
     Value,
 }
@@ -64,6 +69,8 @@ impl TextRole {
                 ColorToken::TextSecondary,
             ),
             TextRole::Caption => (FontSpec { size: sizes.caption, weight: None, family: None }, ColorToken::TextMuted),
+            TextRole::Micro => (FontSpec { size: sizes.micro, weight: None, family: None }, ColorToken::TextMuted),
+            TextRole::Body => (FontSpec { size: sizes.body, weight: None, family: None }, ColorToken::Text),
             TextRole::Value => (FontSpec { size: sizes.ui, weight: None, family: None }, ColorToken::Text),
         }
     }
@@ -76,6 +83,52 @@ pub struct TextStyle {
     color: Option<ColorToken>,
     mono: bool,
     wrap: bool,
+}
+
+/// 四边内边距。
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Edges {
+    pub left: f32,
+    pub right: f32,
+    pub top: f32,
+    pub bottom: f32,
+}
+
+impl Edges {
+    pub fn all(value: f32) -> Self {
+        Self { left: value, right: value, top: value, bottom: value }
+    }
+
+    pub fn symmetric(horizontal: f32, vertical: f32) -> Self {
+        Self { left: horizontal, right: horizontal, top: vertical, bottom: vertical }
+    }
+}
+
+/// 容器外观：底色 / 边框 / 圆角都取主题 token。
+#[derive(Clone, Copy, Debug)]
+pub struct BoxStyle {
+    pub fill: Option<ColorToken>,
+    pub border: Option<ColorToken>,
+    pub border_width: f32,
+    pub radius: f32,
+}
+
+impl BoxStyle {
+    pub fn new(fill: Option<ColorToken>, border: Option<ColorToken>, radius: f32) -> Self {
+        Self { fill, border, border_width: 1.0, radius }
+    }
+
+    pub fn hairline(mut self) -> Self {
+        self.border_width = 0.5;
+        self
+    }
+}
+
+/// 容器宽度：撑满父宽或固定宽度。
+#[derive(Clone, Copy, Debug)]
+pub enum BoxWidth {
+    Fill,
+    Fixed(f32),
 }
 
 impl TextStyle {
@@ -122,6 +175,39 @@ impl<'c, 'a> Ui<'c, 'a> {
         let content = content.into();
         let (spec, color) = style.resolve(self.ctx().theme);
         self.push(text_item(content, spec, color, style.wrap));
+    }
+
+    /// 按内容定宽的单行文字（行内标题 / 摘要这类需要紧跟在前一项后面的文字）。
+    pub fn text_styled_fit(&mut self, content: impl Into<String>, style: TextStyle) {
+        let content = content.into();
+        let (spec, color) = style.resolve(self.ctx().theme);
+        let for_width = content.clone();
+        let for_height = content.clone();
+        let for_draw = content;
+        self.push(Item {
+            width: Width::Fit(Box::new(move |metrics| metrics.width(&for_width, spec))),
+            fill_height: false,
+            height: Box::new(move |metrics, _| {
+                metrics.measure(&for_height, spec, None).height
+            }),
+            draw: Box::new(move |ctx, rect, clip| {
+                let visible = rect.intersect(clip);
+                if visible.is_empty() {
+                    return;
+                }
+                let line_height = text::line_height(&mut ctx.metrics, spec);
+                text::paint_line(
+                    ctx,
+                    &for_draw,
+                    spec,
+                    theme::token(color),
+                    rect.x,
+                    rect.y,
+                    line_height,
+                    visible,
+                );
+            }),
+        });
     }
 
     /// 徽标：小号圆角底色块 + 语义色文字（计数、状态标签）。
@@ -206,6 +292,149 @@ impl<'c, 'a> Ui<'c, 'a> {
                             shadow: None,
                         });
                     }
+                }
+            }),
+        });
+    }
+
+    /// 按 lucide 名称绘制的装饰图标（固定边长）；表外名称不画。
+    pub fn icon_named(&mut self, name: &str, size: f32, color: ColorToken) {
+        let name = name.to_string();
+        self.push(Item {
+            width: Width::Fixed(size),
+            fill_height: false,
+            height: Box::new(move |_, _| size),
+            draw: Box::new(move |ctx, rect, clip| {
+                let visible = rect.intersect(clip);
+                if visible.is_empty() {
+                    return;
+                }
+                super::icons::draw_named(ctx, &name, rect, theme::token(color));
+            }),
+        });
+    }
+
+    /// 按 lucide 名称绘制的图标钮（指定图标边长与命中盒边长）。
+    pub fn icon_button_named(
+        &mut self,
+        id: impl Into<String>,
+        name: &str,
+        icon_px: f32,
+        box_px: f32,
+        color: ColorToken,
+        enabled: bool,
+    ) {
+        let id = id.into();
+        let name = name.to_string();
+        let theme = self.ctx().theme.clone();
+        self.push(Item {
+            width: Width::Fixed(box_px),
+            fill_height: false,
+            height: Box::new(move |_, _| box_px),
+            draw: Box::new(move |ctx, rect, clip| {
+                let visible = rect.intersect(clip);
+                if visible.is_empty() {
+                    return;
+                }
+                if enabled && (ctx.hovered(&id) || ctx.pressed(&id)) {
+                    ctx.draw(DrawCommand::Rect {
+                        x: visible.x,
+                        y: visible.y,
+                        w: visible.w,
+                        h: visible.h,
+                        fill: Some(theme::token(ColorToken::Hover)),
+                        stroke: None,
+                        stroke_width: None,
+                        corner_radius: Some(theme.radii.xs),
+                        shadow: None,
+                    });
+                }
+                let icon = Rect::new(
+                    rect.x + (rect.w - icon_px) / 2.0,
+                    rect.y + (rect.h - icon_px) / 2.0,
+                    icon_px,
+                    icon_px,
+                );
+                let tint = if enabled { color } else { ColorToken::TextMuted };
+                super::icons::draw_named(ctx, &name, icon, theme::token(tint));
+                if enabled {
+                    ctx.hit(&id, visible, HitCursor::Pointer);
+                    ctx.record(&id, Layout::Button);
+                }
+            }),
+        });
+    }
+
+    /// 实心图标钮（主操作 / 停止这类有底色的方钮）。
+    pub fn icon_button_filled(
+        &mut self,
+        id: impl Into<String>,
+        name: &str,
+        icon_px: f32,
+        box_px: f32,
+        background: ColorToken,
+        foreground: ColorToken,
+        enabled: bool,
+    ) {
+        self.icon_button_filled_color(
+            id,
+            name,
+            icon_px,
+            box_px,
+            background,
+            theme::token(foreground),
+            enabled,
+        );
+    }
+
+    /// 同 [`Ui::icon_button_filled`]，图标色可用自带 RGBA（强调底上的深色字）。
+    pub fn icon_button_filled_color(
+        &mut self,
+        id: impl Into<String>,
+        name: &str,
+        icon_px: f32,
+        box_px: f32,
+        background: ColorToken,
+        foreground: atelyx_plugin_protocol::paint::PaintColor,
+        enabled: bool,
+    ) {
+        let id = id.into();
+        let name = name.to_string();
+        let theme = self.ctx().theme.clone();
+        self.push(Item {
+            width: Width::Fixed(box_px),
+            fill_height: false,
+            height: Box::new(move |_, _| box_px),
+            draw: Box::new(move |ctx, rect, clip| {
+                let visible = rect.intersect(clip);
+                if visible.is_empty() {
+                    return;
+                }
+                ctx.draw(DrawCommand::Rect {
+                    x: visible.x,
+                    y: visible.y,
+                    w: visible.w,
+                    h: visible.h,
+                    fill: Some(theme::token(if enabled {
+                        background
+                    } else {
+                        ColorToken::SurfaceMuted
+                    })),
+                    stroke: None,
+                    stroke_width: None,
+                    corner_radius: Some(theme.radii.sm),
+                    shadow: None,
+                });
+                let icon = Rect::new(
+                    rect.x + (rect.w - icon_px) / 2.0,
+                    rect.y + (rect.h - icon_px) / 2.0,
+                    icon_px,
+                    icon_px,
+                );
+                super::icons::draw_named(ctx, &name, icon, foreground);
+                if enabled {
+                    ctx.hit(&id, visible, HitCursor::Pointer);
+                    ctx.record(&id, Layout::Button);
                 }
             }),
         });
@@ -343,12 +572,48 @@ impl<'c, 'a> Ui<'c, 'a> {
         });
     }
 
+    /// 竖向色条：占满行高（会话激活轨、状态条）。
+    pub fn bar(&mut self, width: f32, color: ColorToken) {
+        self.push(Item {
+            width: Width::Fixed(width),
+            fill_height: true,
+            height: Box::new(|_, _| 0.0),
+            draw: Box::new(move |ctx, rect, clip| {
+                let visible = rect.intersect(clip);
+                if visible.is_empty() {
+                    return;
+                }
+                ctx.draw(DrawCommand::Rect {
+                    x: visible.x,
+                    y: visible.y,
+                    w: visible.w,
+                    h: visible.h,
+                    fill: Some(theme::token(color)),
+                    stroke: None,
+                    stroke_width: None,
+                    corner_radius: None,
+                    shadow: None,
+                });
+            }),
+        });
+    }
+
     /// 固定高度的空白。
     pub fn spacer(&mut self, height: f32) {
         self.push(Item {
             width: Width::Fill,
             fill_height: false,
             height: Box::new(move |_, _| height),
+            draw: Box::new(|_, _, _| {}),
+        });
+    }
+
+    /// 固定宽度的行内空白。
+    pub fn spacer_width(&mut self, width: f32) {
+        self.push(Item {
+            width: Width::Fixed(width),
+            fill_height: false,
+            height: Box::new(|_, _| 0.0),
             draw: Box::new(|_, _, _| {}),
         });
     }
@@ -511,10 +776,11 @@ impl<'c, 'a> Ui<'c, 'a> {
         let mut sub = Ui::new(&mut *self.ctx, clip);
         build(&mut sub);
         let shared = Rc::new(sub.into_items());
+        let fill_height = shared.iter().any(|item| item.fill_height);
         let for_size = Rc::clone(&shared);
         self.push(Item {
             width: Width::Fill,
-            fill_height: false,
+            fill_height,
             height: Box::new(move |metrics, width| {
                 column_height(&for_size, metrics, (width - horizontal * 2.0).max(1.0), 0.0) + vertical * 2.0
             }),
@@ -532,6 +798,210 @@ impl<'c, 'a> Ui<'c, 'a> {
                 draw_column(ctx, &shared, inner, visible, 0.0);
             }),
         });
+    }
+
+    /// 通用表面容器：底色 / 边框 / 圆角 / 四边内边距 / 子项间距都可指定。
+    /// 宽度可撑满或固定；子项按列排布，不承接点击。
+    pub fn boxed(
+        &mut self,
+        width: BoxWidth,
+        style: BoxStyle,
+        pad: Edges,
+        gap: f32,
+        build: impl FnOnce(&mut Ui<'_, 'a>),
+    ) {
+        let clip = self.clip;
+        let mut sub = Ui::new(&mut *self.ctx, clip);
+        build(&mut sub);
+        let shared = Rc::new(sub.into_items());
+        let fill_height = shared.iter().any(|item| item.fill_height);
+        let for_size = Rc::clone(&shared);
+        let item_width = match width {
+            BoxWidth::Fill => Width::Fill,
+            BoxWidth::Fixed(width) => Width::Fixed(width),
+        };
+        self.push(Item {
+            width: item_width,
+            fill_height,
+            height: Box::new(move |metrics, width| {
+                column_height(
+                    &for_size,
+                    metrics,
+                    (width - pad.left - pad.right).max(1.0),
+                    gap,
+                ) + pad.top
+                    + pad.bottom
+            }),
+            draw: Box::new(move |ctx, rect, clip| {
+                let visible = rect.intersect(clip);
+                if visible.is_empty() {
+                    return;
+                }
+                if style.fill.is_some() || style.border.is_some() {
+                    ctx.draw(DrawCommand::Rect {
+                        x: visible.x,
+                        y: visible.y,
+                        w: visible.w,
+                        h: visible.h,
+                        fill: style.fill.map(theme::token),
+                        stroke: style.border.map(theme::token),
+                        stroke_width: style.border.map(|_| style.border_width),
+                        corner_radius: Some(style.radius),
+                        shadow: None,
+                    });
+                }
+                let inner = Rect::new(
+                    rect.x + pad.left,
+                    rect.y + pad.top,
+                    (rect.w - pad.left - pad.right).max(1.0),
+                    (rect.h - pad.top - pad.bottom).max(1.0),
+                );
+                let visible = inner.intersect(clip);
+                if !visible.is_empty() {
+                    draw_column(ctx, &shared, inner, visible, gap);
+                }
+            }),
+        });
+    }
+
+    /// 无边框行容器：整行可点，选中 / 悬停出底色（会话行、折叠块头、菜单行）。
+    pub fn click_row(
+        &mut self,
+        id: impl Into<String>,
+        pad: Edges,
+        radius: f32,
+        selected: bool,
+        enabled: bool,
+        build: impl FnOnce(&mut Ui<'_, 'a>),
+    ) {
+        self.click_box(
+            id,
+            BoxWidth::Fill,
+            pad,
+            radius,
+            selected,
+            enabled,
+            build,
+        );
+    }
+
+    /// 定宽 / 撑满的可点无边框容器（工具排触发钮这类按内容定宽的行）。
+    pub fn click_box(
+        &mut self,
+        id: impl Into<String>,
+        width: BoxWidth,
+        pad: Edges,
+        radius: f32,
+        selected: bool,
+        enabled: bool,
+        build: impl FnOnce(&mut Ui<'_, 'a>),
+    ) {
+        let id = id.into();
+        let clip = self.clip;
+        let mut sub = Ui::new(&mut *self.ctx, clip);
+        build(&mut sub);
+        let shared = Rc::new(sub.into_items());
+        let for_size = Rc::clone(&shared);
+        let item_width = match width {
+            BoxWidth::Fill => Width::Fill,
+            BoxWidth::Fixed(width) => Width::Fixed(width),
+        };
+        self.push(Item {
+            width: item_width,
+            fill_height: false,
+            height: Box::new(move |metrics, width| {
+                column_height(
+                    &for_size,
+                    metrics,
+                    (width - pad.left - pad.right).max(1.0),
+                    0.0,
+                ) + pad.top
+                    + pad.bottom
+            }),
+            draw: Box::new(move |ctx, rect, clip| {
+                let visible = rect.intersect(clip);
+                if visible.is_empty() {
+                    return;
+                }
+                let lit = enabled && (ctx.hovered(&id) || ctx.pressed(&id));
+                if selected || lit {
+                    ctx.draw(DrawCommand::Rect {
+                        x: rect.x,
+                        y: rect.y,
+                        w: rect.w,
+                        h: rect.h,
+                        fill: Some(theme::token(if selected {
+                            ColorToken::AccentSoft
+                        } else {
+                            ColorToken::Hover
+                        })),
+                        stroke: None,
+                        stroke_width: None,
+                        corner_radius: Some(radius),
+                        shadow: None,
+                    });
+                }
+                if enabled {
+                    // 先登记容器命中：子项随后登记，按「后声明在上」压住容器
+                    ctx.hit(&id, rect.intersect(clip), HitCursor::Pointer);
+                    ctx.record(&id, Layout::Button);
+                }
+                let inner = Rect::new(
+                    rect.x + pad.left,
+                    rect.y + pad.top,
+                    (rect.w - pad.left - pad.right).max(1.0),
+                    (rect.h - pad.top - pad.bottom).max(1.0),
+                );
+                let visible = inner.intersect(clip);
+                if !visible.is_empty() {
+                    draw_column(ctx, &shared, inner, visible, 0.0);
+                }
+            }),
+        });
+    }
+
+    /// 固定尺寸图片贴片。
+    pub fn image_sized(&mut self, source: ImageSource, width: f32, height: f32, fit: Option<ImageFit>) {
+        self.push(Item {
+            width: Width::Fixed(width),
+            fill_height: false,
+            height: Box::new(move |_, _| height),
+            draw: Box::new(move |ctx, rect, clip| {
+                let visible = rect.intersect(clip);
+                if visible.is_empty() {
+                    return;
+                }
+                let (x, y, w, h) = match fit {
+                    None => (visible.x, visible.y, visible.w, visible.h),
+                    Some(_) => (rect.x, rect.y, rect.w, rect.h),
+                };
+                ctx.draw(DrawCommand::Image { source: source.clone(), x, y, w, h, fit });
+            }),
+        });
+    }
+
+    /// 透明命中区（撑满父容器剩余空间）；用于浮层背板「点外面关闭」。
+    pub fn hit_area(&mut self, id: impl Into<String>) {
+        let id = id.into();
+        self.push(Item {
+            width: Width::Fill,
+            fill_height: true,
+            height: Box::new(|_, _| 0.0),
+            draw: Box::new(move |ctx, rect, clip| {
+                let visible = rect.intersect(clip);
+                if visible.is_empty() {
+                    return;
+                }
+                ctx.hit(&id, visible, HitCursor::Default);
+                ctx.record(&id, Layout::Button);
+            }),
+        });
+    }
+
+    /// 量算单行文字宽高（当前主题字号与字宽）。
+    pub fn text_width(&mut self, text: &str, role: TextRole) -> f32 {
+        let (font, _) = role.resolve(self.ctx().theme);
+        self.ctx.metrics.width(text, font)
     }
 
     /// 面板：圆角表面容器（承接子项，不承接点击）。
@@ -672,7 +1142,16 @@ impl<'c, 'a> Ui<'c, 'a> {
     /// 多行输入框（撑满父宽、固定高）：软换行与显式换行都排，回车插入换行，
     /// 光标超出内框时逐行纵向跟随。
     pub fn text_area(&mut self, id: impl Into<String>, value: impl Into<String>, placeholder: impl Into<String>, height: f32) {
-        self.text_area_kind(id.into(), value.into(), placeholder.into(), height, false);
+        self.text_area_kind(
+            id.into(),
+            value.into(),
+            placeholder.into(),
+            height,
+            false,
+            None,
+            false,
+            Edges::symmetric(PAD_X, AREA_PAD_Y),
+        );
     }
 
     /// 多行输入框（回车提交、Shift+回车换行）：聊天输入这类「回车即发送」的用法。
@@ -683,12 +1162,54 @@ impl<'c, 'a> Ui<'c, 'a> {
         placeholder: impl Into<String>,
         height: f32,
     ) {
-        self.text_area_kind(id.into(), value.into(), placeholder.into(), height, true);
+        self.text_area_kind(
+            id.into(),
+            value.into(),
+            placeholder.into(),
+            height,
+            true,
+            None,
+            false,
+            Edges::symmetric(PAD_X, AREA_PAD_Y),
+        );
     }
 
-    fn text_area_kind(&mut self, id: String, value: String, placeholder: String, height: f32, enter_submits: bool) {
+    /// 无底色多行输入框：外层容器自绘输入盒时用；`font_size` = 正文阅读字号。
+    pub fn text_area_submit_plain(
+        &mut self,
+        id: impl Into<String>,
+        value: impl Into<String>,
+        placeholder: impl Into<String>,
+        height: f32,
+        font_size: f32,
+        pad: Edges,
+    ) {
+        self.text_area_kind(
+            id.into(),
+            value.into(),
+            placeholder.into(),
+            height,
+            true,
+            Some(font_size),
+            true,
+            pad,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn text_area_kind(
+        &mut self,
+        id: String,
+        value: String,
+        placeholder: String,
+        height: f32,
+        enter_submits: bool,
+        font_size: Option<f32>,
+        bare: bool,
+        pad: Edges,
+    ) {
         let theme = self.ctx().theme.clone();
-        let font = FontSpec { size: theme.sizes.caption, weight: None, family: None };
+        let font = FontSpec { size: font_size.unwrap_or(theme.sizes.caption), weight: None, family: None };
         let for_layout = value.clone();
         self.push(Item {
             width: Width::Fill,
@@ -700,12 +1221,14 @@ impl<'c, 'a> Ui<'c, 'a> {
                     return;
                 }
                 let focused = ctx.focused(&id);
-                draw_field(ctx, &theme, visible, focused);
+                if !bare {
+                    draw_field(ctx, &theme, visible, focused);
+                }
                 let inner = Rect::new(
-                    rect.x + PAD_X,
-                    rect.y + AREA_PAD_Y,
-                    (rect.w - PAD_X * 2.0).max(1.0),
-                    (rect.h - AREA_PAD_Y * 2.0).max(1.0),
+                    rect.x + pad.left,
+                    rect.y + pad.top,
+                    (rect.w - pad.left - pad.right).max(1.0),
+                    (rect.h - pad.top - pad.bottom).max(1.0),
                 );
                 draw_area_text(ctx, &id, &value, &placeholder, font, inner, focused, &theme, visible);
                 ctx.hit(&id, visible, HitCursor::Text);
@@ -886,6 +1409,132 @@ impl<'c, 'a> Ui<'c, 'a> {
         let mut sub = Ui::new(&mut *self.ctx, clip);
         build(&mut sub);
         let shared = Rc::new(sub.into_items());
+        let for_size = Rc::clone(&shared);
+        self.push(Item {
+            width: Width::Fill,
+            fill_height: height.is_none(),
+            height: Box::new(move |metrics, width| match height {
+                Some(height) => height,
+                None => column_height(&for_size, metrics, width, gap),
+            }),
+            draw: Box::new(move |ctx, rect, clip| draw_scroll(ctx, &shared, &id, rect, clip, gap, follow_end)),
+        });
+    }
+
+    /// 虚拟滚动列表（撑满父容器剩余高度）：只为视口附近构造条目，屏外条目用上一帧
+    /// 实测高与 `estimate_height` 估算总高。`key` 必须稳定标识条目内容。
+    /// `viewport_hint` 是视口高度的近似值；偏小由 overscan 补足。
+    pub fn virtual_scroll(
+        &mut self,
+        id: impl Into<String>,
+        len: usize,
+        gap: f32,
+        follow_end: bool,
+        viewport_hint: f32,
+        estimate_height: f32,
+        key: impl Fn(usize) -> u64,
+        build_item: impl Fn(&mut Ui<'_, 'a>, usize),
+    ) {
+        self.virtual_scroll_kind(
+            id.into(),
+            None,
+            len,
+            gap,
+            follow_end,
+            viewport_hint,
+            estimate_height,
+            key,
+            build_item,
+        );
+    }
+
+    /// 定高虚拟滚动列表：其余语义同 [`Ui::virtual_scroll`]。
+    pub fn virtual_scroll_sized(
+        &mut self,
+        id: impl Into<String>,
+        height: f32,
+        len: usize,
+        gap: f32,
+        follow_end: bool,
+        viewport_hint: f32,
+        estimate_height: f32,
+        key: impl Fn(usize) -> u64,
+        build_item: impl Fn(&mut Ui<'_, 'a>, usize),
+    ) {
+        self.virtual_scroll_kind(
+            id.into(),
+            Some(height),
+            len,
+            gap,
+            follow_end,
+            viewport_hint,
+            estimate_height,
+            key,
+            build_item,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn virtual_scroll_kind(
+        &mut self,
+        id: String,
+        height: Option<f32>,
+        len: usize,
+        gap: f32,
+        follow_end: bool,
+        viewport_hint: f32,
+        estimate_height: f32,
+        key: impl Fn(usize) -> u64,
+        build_item: impl Fn(&mut Ui<'_, 'a>, usize),
+    ) {
+        let clip = self.clip;
+        let keys: Vec<u64> = (0..len).map(&key).collect();
+        let cache = Arc::clone(&self.ctx.state.virtual_heights);
+        let heights: Vec<f32> = {
+            let mut heights = cache.lock().unwrap();
+            let current: HashSet<u64> = keys.iter().copied().collect();
+            heights.retain(|(list, key), _| list != &id || current.contains(key));
+            keys.iter()
+                .map(|key| heights.get(&(id.clone(), *key)).copied().unwrap_or(estimate_height))
+                .collect()
+        };
+        let max_offset = (virtual_content(&heights, gap) - viewport_hint.max(1.0)).max(0.0);
+        let previous = self.ctx.scrolls.get(&id).copied().unwrap_or(0.0);
+        let previous_max = self.ctx.scroll_max.get(&id).copied().unwrap_or(0.0);
+        let offset = virtual_offset(follow_end, previous, previous_max, max_offset);
+        let plan = virtual_window(&heights, gap, offset, viewport_hint.max(1.0));
+        let mut items = Vec::new();
+        if plan.top > 0.0 {
+            items.push(spacer_item(plan.top));
+        }
+        for index in plan.start..plan.end {
+            let mut one = Ui::new(&mut *self.ctx, clip);
+            build_item(&mut one, index);
+            let children = Rc::new(one.into_items());
+            let cache = Arc::clone(&cache);
+            let list = id.clone();
+            let item_key = keys[index];
+            let for_height = Rc::clone(&children);
+            items.push(Item {
+                width: Width::Fill,
+                fill_height: false,
+                height: Box::new(move |metrics, width| {
+                    let height = column_height(&for_height, metrics, width, 0.0);
+                    cache.lock().unwrap().insert((list.clone(), item_key), height);
+                    height
+                }),
+                draw: Box::new(move |ctx, rect, clip| {
+                    let visible = rect.intersect(clip);
+                    if !visible.is_empty() {
+                        draw_column(ctx, &children, rect, visible, 0.0);
+                    }
+                }),
+            });
+        }
+        if plan.end < len {
+            items.push(spacer_item(plan.bottom.max(0.0)));
+        }
+        let shared = Rc::new(items);
         let for_size = Rc::clone(&shared);
         self.push(Item {
             width: Width::Fill,
@@ -1307,6 +1956,74 @@ fn draw_area_text(
 /// 滚动条宽度（与宿主内嵌滚动条同宽）与内容让位。
 const SCROLLBAR_W: f32 = 8.0;
 
+/// 虚拟列表视口外预构造的余量：滚动与改宽时新条目已在手上，不会先出空白。
+const VIRTUAL_OVERSCAN: f32 = 360.0;
+
+struct VirtualWindow {
+    start: usize,
+    end: usize,
+    top: f32,
+    bottom: f32,
+}
+
+fn spacer_item(height: f32) -> Item {
+    Item {
+        width: Width::Fill,
+        fill_height: false,
+        height: Box::new(move |_, _| height),
+        draw: Box::new(|_, _, _| {}),
+    }
+}
+
+fn virtual_content(heights: &[f32], gap: f32) -> f32 {
+    heights.iter().sum::<f32>() + gap * heights.len().saturating_sub(1) as f32
+}
+
+/// 规划窗口用的偏移：只有上一帧停在终点才继续贴底，用户上翻后停在原偏移。
+fn virtual_offset(follow_end: bool, previous: f32, previous_max: f32, max_offset: f32) -> f32 {
+    if follow_end && previous >= previous_max - 0.5 {
+        max_offset
+    } else {
+        previous.clamp(0.0, max_offset)
+    }
+}
+
+/// 选出与 [offset - overscan, offset + 视口 + overscan] 相交的条目区间，
+/// 并给出上下占位高度（保持总高与估算一致）。
+fn virtual_window(heights: &[f32], gap: f32, offset: f32, viewport: f32) -> VirtualWindow {
+    if heights.is_empty() {
+        return VirtualWindow { start: 0, end: 0, top: 0.0, bottom: 0.0 };
+    }
+    let total = virtual_content(heights, gap);
+    let top_edge = (offset - VIRTUAL_OVERSCAN).max(0.0);
+    let bottom_edge = (offset + viewport + VIRTUAL_OVERSCAN).min(total);
+    let mut position = 0.0;
+    let mut start = heights.len();
+    let mut end = heights.len();
+    for (index, height) in heights.iter().enumerate() {
+        let bottom = position + *height;
+        if start == heights.len() && bottom >= top_edge {
+            start = index;
+        }
+        if position >= bottom_edge {
+            end = index;
+            break;
+        }
+        position = bottom + gap;
+    }
+    if start == heights.len() {
+        start = heights.len() - 1;
+    }
+    let start_position = heights[..start].iter().sum::<f32>() + gap * start as f32;
+    let end_position = heights[..end].iter().sum::<f32>() + gap * end as f32;
+    VirtualWindow {
+        start,
+        end,
+        top: if start > 0 { (start_position - gap).max(0.0) } else { 0.0 },
+        bottom: if end < heights.len() { (total - end_position).max(0.0) } else { 0.0 },
+    }
+}
+
 fn draw_scroll(
     ctx: &mut BuildCtx<'_>,
     items: &[Item],
@@ -1320,11 +2037,14 @@ fn draw_scroll(
     if visible.is_empty() {
         return;
     }
-    // 先按整宽排一遍判断是否溢出；溢出时内容宽度让出滚动条（滚动条占布局空间，不浮在内容上）
+    // 先按整宽判定是否溢出；溢出时内容宽度让出滚动条（滚动条占布局空间，不浮在内容上）
     let wide = scroll_metrics(ctx, items, rect.w, gap);
     let overflow = wide.content > rect.h;
-    let inner_w = if overflow { (rect.w - SCROLLBAR_W).max(1.0) } else { rect.w };
-    let laid = if overflow { scroll_metrics(ctx, items, inner_w, gap) } else { wide };
+    let laid = if overflow {
+        scroll_metrics(ctx, items, (rect.w - SCROLLBAR_W).max(1.0), gap)
+    } else {
+        wide
+    };
     let max_offset = (laid.content - rect.h).max(0.0);
     let previous = ctx.scrolls.get(id).copied().unwrap_or(0.0);
     let previous_max = ctx.scroll_max.get(id).copied().unwrap_or(0.0);
@@ -1422,4 +2142,43 @@ fn draw_scrollbar(ctx: &mut BuildCtx<'_>, id: &str, track: Rect, visible: Rect, 
 /// 滚动条的内部命中 id（插件看不到，也不与控件 id 冲突）。
 pub(crate) fn scrollbar_id(scroll: &str) -> String {
     format!("{scroll}::bar")
+}
+
+#[cfg(test)]
+mod virtual_tests {
+    use super::{virtual_content, virtual_offset, virtual_window};
+
+    #[test]
+    fn window_covers_viewport_with_overscan_and_keeps_total_height() {
+        let heights = vec![100.0; 200];
+        let gap = 10.0;
+        let total = virtual_content(&heights, gap);
+
+        let top = virtual_window(&heights, gap, 0.0, 600.0);
+        assert_eq!(top.start, 0);
+        assert!(top.end > 0 && top.end < 30, "首批只构造视口附近条目：{}", top.end);
+        assert_eq!(top.top, 0.0);
+        assert_eq!(top.bottom, total - top.end as f32 * 110.0);
+
+        let bottom = virtual_window(&heights, gap, total - 600.0, 600.0);
+        assert_eq!(bottom.end, heights.len());
+        assert!(bottom.start > 150, "贴底时跳过屏外头部：{}", bottom.start);
+        assert_eq!(bottom.bottom, 0.0);
+    }
+
+    #[test]
+    fn follow_end_does_not_pull_back_after_user_scrolls_up() {
+        assert_eq!(virtual_offset(true, 0.0, 0.0, 900.0), 900.0, "首次贴底");
+        assert_eq!(virtual_offset(true, 900.0, 900.0, 1200.0), 1200.0, "停在终点继续跟随");
+        assert_eq!(virtual_offset(true, 300.0, 900.0, 1200.0), 300.0, "上翻后保持位置");
+        assert_eq!(virtual_offset(false, 300.0, 900.0, 1200.0), 300.0);
+    }
+
+    #[test]
+    fn tiny_list_lays_out_every_item() {
+        let heights = vec![30.0, 40.0];
+        let window = virtual_window(&heights, 5.0, 0.0, 600.0);
+        assert_eq!((window.start, window.end), (0, 2));
+        assert_eq!((window.top, window.bottom), (0.0, 0.0));
+    }
 }

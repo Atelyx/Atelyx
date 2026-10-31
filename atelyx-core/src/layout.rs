@@ -195,6 +195,8 @@ pub const DEFAULT_SCENE_ID: &str = "default";
 pub const MAX_RECENT_FILES: usize = 50;
 /// 预置日历插件的面板视图 id（`plugin:<插件 id>:<贡献 id>`）：主页模板与旧布局迁移共用。
 pub const CALENDAR_VIEW: &str = "plugin:com.atelyx.calendar:calendar";
+/// 预置 AI 对话插件的面板视图 id：默认布局与旧布局迁移共用。
+pub const AI_PANEL_VIEW: &str = "plugin:atelyx.ai-panel:aichat";
 
 // ===== 布局操作命令参数（壳侧逐条映射到 LayoutOp）=====
 
@@ -412,10 +414,12 @@ pub fn normalize(ui: &mut AppUiState) {
     }
 }
 
-/// 旧布局里的 `calendar` 视图 id 改写为插件面 id（旧 id 已无渲染器）。
+/// 旧布局里的壳内视图 id 改写为插件面 id（这些 id 已无渲染器）。
 fn migrate_view_id(view: &mut ViewKind) {
     if view == "calendar" {
         *view = CALENDAR_VIEW.to_string();
+    } else if view == "aichat" {
+        *view = AI_PANEL_VIEW.to_string();
     }
 }
 
@@ -544,7 +548,7 @@ fn create_default_layouts() -> Vec<WorkspaceLayout> {
     };
     vec![
         build("画布", "files", "canvas", "inspector", (17.0, 83.0), (74.0, 26.0)),
-        build("笔记", "files", "note", "aichat", (19.0, 81.0), (72.0, 28.0)),
+        build("笔记", "files", "note", AI_PANEL_VIEW, (19.0, 81.0), (72.0, 28.0)),
         build("表格", "files", "table", "note", (18.0, 82.0), (77.0, 23.0)),
     ]
 }

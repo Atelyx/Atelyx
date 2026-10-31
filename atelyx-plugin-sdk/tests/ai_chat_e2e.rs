@@ -257,9 +257,9 @@ async fn chat_contract_roundtrip_via_plugin() {
                     atelyx_core::plugin_runtime::ChatEvent::Message { rev, message }
                 }
             };
-            runtime2.notify_chat_event(
+            runtime2.emit_chat_event(
                 &plugin_id,
-                &atelyx_core::plugin_runtime::ChatEventParams {
+                atelyx_core::plugin_runtime::ChatEventParams {
                     session_id: fwd_session.clone(),
                     message_id: message_id.clone(),
                     event: chat_event,

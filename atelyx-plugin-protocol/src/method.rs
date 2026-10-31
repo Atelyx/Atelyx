@@ -165,6 +165,26 @@ pub mod dialog {
 
 pub mod http {
     pub const REQUEST: &str = "http.request";
+    /// 打开一条流式出网连接：宿主建连后按块下发 [`HOST_STREAM_CHUNK`]，结束 / 失败经
+    /// [`HOST_STREAM_END`]。地址按供应商口径校验（公网目标拒内网，本机 / 局域网服务放行）；
+    /// [`REQUEST`] 是不过地址校验的便利层。
+    pub const STREAM_OPEN: &str = "http.stream.open";
+    /// 取消一条仍在进行的流式连接（幂等：已结束的流也成功）。
+    pub const STREAM_CANCEL: &str = "http.stream.cancel";
+    /// 流式分片的原始字节（base64；通知）。
+    pub const HOST_STREAM_CHUNK: &str = "host:http.stream.chunk";
+    /// 流式连接结束（正常 / 失败 / 取消；通知）。
+    pub const HOST_STREAM_END: &str = "host:http.stream.end";
+}
+
+/// 会话真源读写（`chat.session.*`）：宿主保持消息形状与写盘链，插件提交声明式批次。
+pub mod chat {
+    /// 读单个会话（元数据 + 消息）。
+    pub const SESSION_READ: &str = "chat.session.read";
+    /// 提交一个批次（创建 / 元数据 / 追加 / 补丁 / 截断 / 删除 / 覆盖项）。
+    pub const SESSION_WRITE: &str = "chat.session.write";
+    /// 读全仓库快照（会话清单 + 覆盖层 + 落盘失败）。
+    pub const SESSION_SNAPSHOT: &str = "chat.session.snapshot";
 }
 
 pub mod doc {
@@ -256,6 +276,8 @@ pub mod ai {
     pub const CHAT_DELETE: &str = "ai.chat.delete";
     /// 压缩一个会话（把较早消息总结为压缩起点；回执 = 已受理，结果经 `ai.chat.history` 复核）。
     pub const CHAT_COMPACT: &str = "ai.chat.compact";
+    /// 让模型重新生成会话标题（结果写回元数据，并经 [`HOST_CHAT_EVENT`] 发 `Titled`）。
+    pub const CHAT_TITLE: &str = "ai.chat.title";
     /// 对话事件流（通知）：快照节流拍 + 终态 + 命名结果。
     pub const HOST_CHAT_EVENT: &str = "host:ai.chat.event";
     /// 注册一个可被 Agent 调用的工具（名称全局唯一，不得与内置工具或其他插件的工具重名）。
@@ -267,7 +289,34 @@ pub mod ai {
     pub const TOOL_RESULT: &str = "ai.toolResult";
     /// 宿主请求插件执行一次工具调用（通知）；插件处理完经 [`TOOL_RESULT`] 回报。
     pub const HOST_TOOL_CALL: &str = "host:ai.toolCall";
+    /// 列当前可用的工具声明（内置 + 已注册插件工具；按调用方给的工具 id 过滤）。
+    pub const TOOL_LIST: &str = "ai.tool.list";
+    /// 执行一次工具调用：内置工具由宿主执行，插件工具转发给提供者。结果即模型可见文本。
+    pub const TOOL_EXECUTE: &str = "ai.tool.execute";
+    /// 插件向宿主发布一条对话事件；宿主点对点发给订阅了 [`HOST_CHAT_EVENT`] 的插件，
+    /// 并经无界通道交给壳侧。
+    pub const CHAT_EMIT: &str = "ai.chat.emit";
 }
+
+/// 宿主与 AI 核心插件之间的私有服务（`ai.core`）：只由宿主调用，不登记进能力目录。
+pub mod run {
+    pub const SERVICE: &str = "ai.core";
+    /// 起一轮存储型 run（会话由插件落真源）。
+    pub const START: &str = "run.start";
+    /// 起一轮直写型 run（含画布卡：真源归调用方，插件不写会话）。
+    pub const START_DIRECT: &str = "run.startDirect";
+    /// 中断一个会话 / 卡片的活跃 run（幂等）。
+    pub const STOP: &str = "run.stop";
+    /// 压缩一个会话（把较早消息总结为压缩注解）。
+    pub const COMPACT: &str = "run.compact";
+    /// 重新生成会话标题（AI 命名）。
+    pub const TITLE: &str = "run.title";
+    /// 中断全部活跃 run（换仓 / 切空间）。
+    pub const STOP_ALL: &str = "run.stopAll";
+}
+
+/// AI 核心插件的固定 id：宿主把 run 编排交给它，并只接受它发布的对话事件。
+pub const AI_CORE_PLUGIN: &str = "atelyx.ai-core";
 
 // ---------- view / surface ----------
 
@@ -1293,10 +1342,29 @@ pub struct ChatSendParams {
     /// 供应商 id：给 `model` 消歧（同模型多供应商时必填；单独给出 = 拒绝）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_id: Option<String>,
+    /// 推理等级（`low` / `medium` / `high`）；缺省 = 面板当前覆盖值，`off` = 不传该参数。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
     /// 仓库内图片相对路径（png / jpg / jpeg / webp / gif）；逐张校验，任一不可用 = 整条拒绝。
     /// 校验通过后到 run 读取之间文件可能消失：读不到的那张在该轮请求里跳过。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<String>,
+    /// 用户原始输入（未拼引用路径块）；缺省 = `text` 即原文。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_text: Option<String>,
+    /// 正文中登记的 # 引用；宿主按显示文本扫描命中后拼进消息开头。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refs: Vec<ChatRef>,
+}
+
+/// 一条 # 引用：仓库相对路径 + 显示标签 + 领域类型。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatRef {
+    pub path: String,
+    pub label: String,
+    /// 领域类型：`note` / `table` / `canvas` / `dir`。
+    pub ref_kind: String,
 }
 
 /// [`ai::CHAT_SEND`] 的 result：run 已就位；流式事件随后经 [`ai::HOST_CHAT_EVENT`] 流达。
@@ -1496,6 +1564,213 @@ pub enum ChatEvent {
     Failed { error: String },
     /// 话题自动命名完成（`None` = 命名未启用或失败，插件维持原展示）。
     Titled { title: Option<String> },
+    /// 直写模式的空占位移除（中断且没有产生任何内容）。
+    Removed,
+}
+
+/// [`ai::TOOL_LIST`] 的 params：缺省 = 全部可用工具。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolListParams {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_ids: Vec<String>,
+}
+
+/// 一条工具声明（模型侧 schema）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolDecl {
+    pub name: String,
+    pub description: String,
+    pub parameters: Value,
+    /// 分类：`web` / `file` / `task` / `plugin`。
+    pub category: String,
+    /// 可与其他工具并发执行（读写 / 未知工具串行屏障）。
+    pub parallel_safe: bool,
+    /// 勾选 id（内置工具 = 名称，插件工具 = `plugin:<插件 id>:<工具名>`）。
+    pub selection_id: String,
+}
+
+/// [`ai::TOOL_LIST`] 的 result。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolListResult {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<ToolDecl>,
+}
+
+/// [`ai::TOOL_EXECUTE`] 的 params。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolExecParams {
+    /// 工具名（内置工具或插件工具；插件工具用注册时的裸名称）。
+    pub name: String,
+    #[serde(default)]
+    pub arguments: Value,
+}
+
+/// [`ai::TOOL_EXECUTE`] 的 result：`content` 即模型可见结果文本。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolExecResult {
+    pub content: String,
+    #[serde(default)]
+    pub is_error: bool,
+}
+
+// ---------- http 流式 ----------
+
+/// [`http::STREAM_OPEN`] 的 params。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HttpStreamOpenParams {
+    /// 调用方指定的流 id（可选）：指定后宿主按该 id 下发分片，插件可先登记接收端再开流。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_id: Option<String>,
+    pub method: String,
+    pub url: String,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub headers: std::collections::BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    /// 空闲超时（毫秒）：超过该时长没有新数据即按失败结束；缺省由宿主设定。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+}
+
+/// [`http::STREAM_OPEN`] 的 result。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HttpStreamOpenResult {
+    pub stream_id: String,
+}
+
+/// [`http::STREAM_CANCEL`] 的 params。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HttpStreamCancelParams {
+    pub stream_id: String,
+}
+
+/// [`http::HOST_STREAM_CHUNK`] 的 params。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HttpStreamChunkParams {
+    pub stream_id: String,
+    /// 原始字节（base64）。
+    pub base64: String,
+}
+
+/// [`http::HOST_STREAM_END`] 的 params：`error` 缺省 = 正常结束；
+/// `cancelled` = 调用方主动取消（`http.stream.cancel` / 插件停用），不是流自然结束；
+/// `status` = 响应状态码（建连成功时给出），供调用方区分鉴权 / 限流等非 2xx 失败。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HttpStreamEndParams {
+    pub stream_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub cancelled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+}
+
+// ---------- AI run（宿主 ↔ ai-core） ----------
+
+/// 搜索配置（运行前由宿主从仓库 AI 设置解析）。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchConfigWire {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tavily_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub searxng_url: Option<String>,
+}
+
+/// 一轮 run 的完整配置（供应商、模型、提示词、工具与仓库访问范围）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunConfigWire {
+    pub base_url: String,
+    pub api_key: String,
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_ids: Vec<String>,
+    #[serde(default)]
+    pub search: SearchConfigWire,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclude: Vec<String>,
+}
+
+/// [`run::START`] 的 params。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunStartParams {
+    /// 续聊会话；缺省 = 新建。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// 新建会话时写入的 Agent。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    /// 已构造好的 user 消息（含引用路径块、附件与 displayContent）。
+    pub user_message: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction: Option<Value>,
+    pub config: RunConfigWire,
+    /// 自动命名配置；缺省 = 不命名。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub naming: Option<RunConfigWire>,
+}
+
+/// [`run::START`] 的 result。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunStartResult {
+    pub session_id: String,
+    pub message_id: String,
+}
+
+/// [`run::START_DIRECT`] 的 params：真源归调用方，插件只跑循环并发布事件。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunDirectParams {
+    /// 事件归属的会话键（画布卡等合成 id）。
+    pub session_id: String,
+    pub history: Vec<Value>,
+    pub user_message: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction: Option<Value>,
+    pub config: RunConfigWire,
+}
+
+/// [`run::STOP`] 的 params。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunStopParams {
+    pub session_id: String,
+}
+
+/// [`run::COMPACT`] 的 params。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunCompactParams {
+    pub session_id: String,
+    pub config: RunConfigWire,
+}
+
+/// [`run::TITLE`] 的 params。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunTitleParams {
+    pub session_id: String,
+    pub config: RunConfigWire,
 }
 
 // ---------- table ----------
@@ -1866,9 +2141,12 @@ pub const BUILTIN_SERVICES: &[(&str, &str, &[&str])] = &[
     ("shortcut", PLATFORM_PLUGIN, &[shortcut::REGISTER, shortcut::UNREGISTER, shortcut::QUERY]),
     ("clipboard", PLATFORM_PLUGIN, &[clipboard::WRITE_TEXT, clipboard::READ_TEXT, clipboard::READ_IMAGE, clipboard::WRITE_IMAGE]),
     ("dialog", PLATFORM_PLUGIN, &[dialog::PICK_FILE, dialog::PICK_DIRECTORY]),
-    ("http", PLATFORM_PLUGIN, &[http::REQUEST]),
-    // 工具名册与结果回报是宿主记账，不是可由外部提供者接管的能力，故不在目录里
-    ("ai", "atelyx.ai", &[ai::CHAT_SEND, ai::CHAT_STOP, ai::CHAT_HISTORY, ai::MODELS, ai::AGENTS, ai::CHAT_RENAME, ai::CHAT_DELETE, ai::CHAT_COMPACT]),
+    ("http", PLATFORM_PLUGIN, &[http::REQUEST, http::STREAM_OPEN, http::STREAM_CANCEL]),
+    // 会话真源是平台数据：归属平台插件，外部提供者不得接管
+    ("chat", PLATFORM_PLUGIN, &[chat::SESSION_READ, chat::SESSION_WRITE, chat::SESSION_SNAPSHOT]),
+    // 工具名册与结果回报是宿主记账，不是可由外部提供者接管的能力，故不在目录里；
+    // 对话门面由宿主编排（核心插件只是被调用的实现），服务归平台自身
+    ("ai", PLATFORM_PLUGIN, &[ai::CHAT_SEND, ai::CHAT_STOP, ai::CHAT_HISTORY, ai::MODELS, ai::AGENTS, ai::CHAT_RENAME, ai::CHAT_DELETE, ai::CHAT_COMPACT, ai::CHAT_TITLE, ai::TOOL_LIST, ai::TOOL_EXECUTE, ai::CHAT_EMIT]),
     ("window", PLATFORM_PLUGIN, &[window::OPEN, window::CLOSE, window::UPDATE, window::SHOW, window::BEGIN_DRAG, window::MINIMIZE, window::TOGGLE_MAXIMIZE]),
     ("query", PLATFORM_PLUGIN, &[query::MEASURE, query::THEME]),
     ("markdown", "atelyx.notes", &[markdown::PARSE]),

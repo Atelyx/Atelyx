@@ -1,5 +1,5 @@
 //! 画布对话卡编排：每卡草稿 / 引用 / 附件与 run 直写（消息真源在节点 `data.messages`）。
-//! run 循环仍由 core `AgentHub` 执行；本模块只组装请求、应用快照与落卡。
+//! run 由 AI 核心插件执行；本模块只组装请求、应用快照与落卡。
 
 use std::collections::{HashMap, HashSet};
 
@@ -7,7 +7,7 @@ use iced::Task;
 use serde_json::{json, Value};
 
 use atelyx_core::ai::{
-    agent::{RunConfig, RunEvent, RunPersist},
+    agent::{RunConfig, RunEvent},
     canvas_refs::{self, CardContent, CardSource},
     refs as ai_refs,
     stream::ReasoningEffort,
@@ -44,7 +44,6 @@ pub enum CanvasChatMsg {
     Branch { node: String, message_id: String },
     ClearError(String),
     FlowScrolled { node: String, y: f32 },
-    OpenInPanel(String),
     /// 卡 Agent 选择（写节点 `data.agentId`；随 `.atlx` 持久化，面板绑定态同源）。
     AgentPick { node: String, agent: Option<String> },
     /// 卡模型选择（`providerId` + `model` 成对写；None = 移除回落仓库默认）。
@@ -88,13 +87,6 @@ pub struct CardChat {
     pending_regen: Option<Vec<Value>>,
 }
 
-/// 发送草稿来源（失败时归还到原输入面）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SendOrigin {
-    Card,
-    Panel,
-}
-
 /// 两段式发送的续跑包（提示词与附件落盘回执后消费）。
 #[derive(Debug, Clone)]
 pub struct SendPlan {
@@ -105,7 +97,6 @@ pub struct SendPlan {
     agent_id: Option<String>,
     model_pick: Option<(String, String)>,
     effort: Option<ReasoningEffort>,
-    origin: SendOrigin,
     /// 配置在附件落盘前解析（失败即早退，不产生半发消息）。
     config: Option<RunConfig>,
 }
@@ -159,13 +150,6 @@ fn first_line_prefix(text: &str, max: usize) -> String {
     line.chars().take(max).collect()
 }
 
-/// 会话真源里的消息（画布卡：节点 data.messages）。
-pub fn messages_of<'a>(app: &'a App, session_id: &str) -> Option<&'a [Value]> {
-    let node_id = node_of_session(session_id)?;
-    let node = app.canvas.as_ref()?.data.nodes.iter().find(|n| n.id == node_id)?;
-    node.data.get("messages").and_then(Value::as_array).map(Vec::as_slice)
-}
-
 fn node<'a>(app: &'a App, node_id: &str) -> Option<&'a atelyx_core::vault::CanvasFileNode> {
     app.canvas.as_ref()?.data.nodes.iter().find(|n| n.id == node_id)
 }
@@ -183,45 +167,31 @@ fn locked_by_peer(app: &App, node_id: &str) -> bool {
     )
 }
 
-/// 当前是否有活跃 run（Hub 注册表为准）或卡片在流式态。
+/// 当前是否有活跃 run 或卡片在流式态。
 pub fn is_streaming(app: &App, node_id: &str) -> bool {
     card_chat(app, node_id).is_some_and(|c| c.streaming)
-        || chat_actions::hub().is_running(&session_id(node_id))
 }
 
-/// 画布会话离场（切文件 / 切仓库 / 关标签）：停掉全部卡内 run，并解绑面板的同会话视图。
+/// 画布会话离场（切文件 / 切仓库 / 关标签）：停掉全部卡内 run。
 pub fn detach_canvas(app: &mut App) {
-    if let Some(session) = app.canvas.as_ref() {
-        for id in session.view.card_chat.keys() {
-            chat_actions::hub().stop(&session_id(id));
-        }
-    }
-    if app
-        .chat
-        .active
-        .as_deref()
-        .and_then(node_of_session)
-        .is_some()
-    {
-        app.chat.active = None;
-        app.chat.selection = None;
-        app.chat.rollback_confirm = None;
+    let ids: Vec<String> = app
+        .canvas
+        .as_ref()
+        .map(|s| s.view.card_chat.keys().cloned().collect())
+        .unwrap_or_default();
+    for id in ids {
+        chat_actions::stop_run(app, &session_id(&id));
     }
 }
 
-/// 单卡离场（删除卡）：停该卡 run，面板绑定此卡则解绑。
+/// 单卡离场（删除卡）：停该卡 run。
 pub fn detach_node(app: &mut App, node_id: &str) {
-    chat_actions::hub().stop(&session_id(node_id));
-    if app.chat.active.as_deref() == Some(session_id(node_id).as_str()) {
-        app.chat.active = None;
-        app.chat.selection = None;
-        app.chat.rollback_confirm = None;
-    }
+    chat_actions::stop_run(app, &session_id(node_id));
 }
 
 /// 对齐卡运行态与节点集合：新增对话节点补默认态，已删节点停 run 并清态。
 pub fn sync_card_chats(app: &mut App) {
-    let Some(session) = app.canvas.as_mut() else { return };
+    let Some(session) = app.canvas.as_ref() else { return };
     let live: Vec<String> = session
         .data
         .nodes
@@ -236,8 +206,11 @@ pub fn sync_card_chats(app: &mut App) {
         .filter(|id| !live.iter().any(|x| x == *id))
         .cloned()
         .collect();
+    for id in &stale {
+        chat_actions::stop_run(app, &session_id(id));
+    }
+    let Some(session) = app.canvas.as_mut() else { return };
     for id in stale {
-        chat_actions::hub().stop(&session_id(&id));
         session.view.card_chat.remove(&id);
     }
     for id in live {
@@ -264,7 +237,6 @@ pub fn on_msg(app: &mut App, msg: CanvasChatMsg) -> Task<Message> {
                 chat.press_inside = true;
                 chat.draft.focused = true;
             }
-            app.chat.input.focused = false;
             commit_mention(app, &node, index);
             Task::none()
         }
@@ -290,7 +262,7 @@ pub fn on_msg(app: &mut App, msg: CanvasChatMsg) -> Task<Message> {
         }
         CanvasChatMsg::Send(node) => send(app, &node),
         CanvasChatMsg::Stop(node) => {
-            chat_actions::hub().stop(&session_id(&node));
+            chat_actions::stop_run(app, &session_id(&node));
             Task::none()
         }
         CanvasChatMsg::Regenerate(node) => regenerate(app, &node),
@@ -341,10 +313,6 @@ pub fn on_msg(app: &mut App, msg: CanvasChatMsg) -> Task<Message> {
             }
             Task::none()
         }
-        CanvasChatMsg::OpenInPanel(node) => {
-            open_in_panel(app, &node);
-            Task::none()
-        }
         CanvasChatMsg::AgentPick { node, agent } => {
             app.dismiss_popup();
             set_card_config(app, &node, "agentId", agent.map(Value::String));
@@ -389,7 +357,7 @@ pub fn on_msg(app: &mut App, msg: CanvasChatMsg) -> Task<Message> {
             match result {
                 Ok(prompt) => send_now(app, plan, Some(prompt)),
                 Err(e) => {
-                    restore_inputs(app, &node, plan.origin, plan.images, plan.refs);
+                    restore_inputs(app, &node, plan.images, plan.refs);
                     set_error(app, &node, format!("Agent 提示词读取失败，已取消本次发送：{e}"));
                     Task::none()
                 }
@@ -420,7 +388,7 @@ pub fn on_msg(app: &mut App, msg: CanvasChatMsg) -> Task<Message> {
             match result {
                 Ok(attachments) => finish_send(app, *plan, attachments),
                 Err((images, e)) => {
-                    restore_inputs(app, &plan.node, plan.origin, images, plan.refs.clone());
+                    restore_inputs(app, &plan.node, images, plan.refs.clone());
                     app.notify(crate::NoticeLevel::Warning, format!("图片发送失败：{e}"));
                     Task::none()
                 }
@@ -442,8 +410,7 @@ fn on_input(app: &mut App, node_id: &str, event: crate::chat_input::InputEvent) 
         InputEvent::Focus => {
             chat.draft.focused = true;
             chat.press_inside = true;
-            // 面板与其它卡让出焦点（同一时刻只有一个输入面收键盘）
-            app.chat.input.focused = false;
+            // 其它卡让出焦点（同一时刻只有一个输入面收键盘）
             if let Some(session) = app.canvas.as_mut() {
                 for (id, other) in session.view.card_chat.iter_mut() {
                     if id != node_id {
@@ -564,11 +531,7 @@ fn card_mention_follow(app: &App, node_id: &str) -> Task<Message> {
     else {
         return Task::none();
     };
-    crate::chat_composer::mention_follow(
-        &crate::chat_composer::ComposerScope::Card { node: node_id.to_string() },
-        picker,
-        session.view.zoom,
-    )
+    crate::chat_composer::mention_follow(node_id, picker, session.view.zoom)
 }
 
 /// 候选：画布内可引用卡优先（文本 / 媒体 / 表格），其后仓库文件与目录。
@@ -720,48 +683,6 @@ pub fn append_card_ref(app: &mut App, conversation: &str, source: &str) {
     ensure_edge(app, source, conversation);
 }
 
-/// 面板绑定卡会话的候选落地：把来源卡引用登记进面板草稿并建数据流边（与卡内同语义）。
-pub fn append_card_ref_to_panel(app: &mut App, source: &str) {
-    let Some(target_node) = node(app, source).cloned() else { return };
-    let Some(conversation) = app
-        .chat
-        .active
-        .as_deref()
-        .and_then(node_of_session)
-        .map(str::to_string)
-    else {
-        return;
-    };
-    let (path, kind) = card_ref_identity(&target_node);
-    let title = card_ref_title(&target_node);
-    if app.chat.mention_refs.iter().any(|r| r.node_id.as_deref() == Some(source)) {
-        app.chat.mention_picker = None;
-        return;
-    }
-    let taken: Vec<(&str, &str)> = app
-        .chat
-        .mention_refs
-        .iter()
-        .map(|r| (r.path.as_str(), r.label.as_str()))
-        .collect();
-    let label = unique_card_label(&title, &taken);
-    let tag = format!("#{}：{} ", kind.prefix(), label);
-    let at = app
-        .chat
-        .mention_picker
-        .as_ref()
-        .map_or(app.chat.input.caret, |p| p.at);
-    insert_tag(&mut app.chat.input, at, &tag);
-    app.chat.mention_refs.push(ai_refs::RefEntry {
-        path,
-        label,
-        kind,
-        node_id: Some(source.to_string()),
-    });
-    app.chat.mention_picker = None;
-    ensure_edge(app, source, &conversation);
-}
-
 fn unique_card_label(title: &str, taken: &[(&str, &str)]) -> String {
     if !taken.iter().any(|(_, l)| *l == title) {
         return title.to_string();
@@ -796,7 +717,6 @@ fn trigger_mention(app: &mut App, node_id: &str) -> Task<Message> {
         return Task::none();
     };
     chat.draft.focused = true;
-    app.chat.input.focused = false;
     let (a, b) = chat.draft.selection();
     let mut text = String::with_capacity(chat.draft.text.len() - (b - a) + 1);
     text.push_str(&chat.draft.text[..a]);
@@ -908,15 +828,7 @@ fn send(app: &mut App, node_id: &str) -> Task<Message> {
     let display = chat.draft.text.trim().to_string();
     let images = std::mem::take(&mut chat.pending_images);
     let refs = std::mem::take(&mut chat.mention_refs);
-    send_with(app, node_id, display, refs, images, SendOrigin::Card)
-}
-
-/// 面板同会话发送入口（消息落到绑定的画布卡，不写面板会话真源）。
-pub fn send_from_panel(app: &mut App, node_id: &str) -> Task<Message> {
-    let display = app.chat.input.text.trim().to_string();
-    let images = std::mem::take(&mut app.chat.pending_images);
-    let refs = std::mem::take(&mut app.chat.mention_refs);
-    send_with(app, node_id, display, refs, images, SendOrigin::Panel)
+    send_with(app, node_id, display, refs, images)
 }
 
 fn send_with(
@@ -925,22 +837,21 @@ fn send_with(
     display: String,
     refs: Vec<ai_refs::RefEntry>,
     images: Vec<PendingImage>,
-    origin: SendOrigin,
 ) -> Task<Message> {
     let Some(target) = node(app, node_id) else {
-        restore_inputs(app, node_id, origin, images, refs);
+        restore_inputs(app, node_id, images, refs);
         return Task::none();
     };
     if target.node_type != "conversation" || is_streaming(app, node_id) {
-        restore_inputs(app, node_id, origin, images, refs);
+        restore_inputs(app, node_id, images, refs);
         return Task::none();
     }
     if locked_by_peer(app, node_id) {
-        restore_inputs(app, node_id, origin, images, refs);
+        restore_inputs(app, node_id, images, refs);
         return Task::none();
     }
     if display.is_empty() && images.is_empty() {
-        restore_inputs(app, node_id, origin, images, refs);
+        restore_inputs(app, node_id, images, refs);
         return Task::none();
     }
     let (agent_id, model_pick, effort) = card_run_pick(app, node_id).expect("已确认卡存在");
@@ -952,7 +863,6 @@ fn send_with(
         agent_id,
         model_pick,
         effort,
-        origin,
         config: None,
     };
     // 空间模式 Agent 提示词文件在服务端：先取回再续跑
@@ -966,25 +876,16 @@ fn send_with(
 fn restore_inputs(
     app: &mut App,
     node_id: &str,
-    origin: SendOrigin,
     images: Vec<PendingImage>,
     refs: Vec<ai_refs::RefEntry>,
 ) {
-    match origin {
-        SendOrigin::Card => {
-            if let Some(chat) = app
-                .canvas
-                .as_mut()
-                .and_then(|s| s.view.card_chat.get_mut(node_id))
-            {
-                chat.pending_images = images;
-                chat.mention_refs = refs;
-            }
-        }
-        SendOrigin::Panel => {
-            app.chat.pending_images = images;
-            app.chat.mention_refs = refs;
-        }
+    if let Some(chat) = app
+        .canvas
+        .as_mut()
+        .and_then(|s| s.view.card_chat.get_mut(node_id))
+    {
+        chat.pending_images = images;
+        chat.mention_refs = refs;
     }
 }
 
@@ -1062,7 +963,7 @@ fn send_now(app: &mut App, plan: SendPlan, space_prompt: Option<String>) -> Task
     match config_for(app, &plan, space_prompt) {
         Ok(c) => plan.config = Some(c),
         Err(e) => {
-            restore_inputs(app, &plan.node, plan.origin, plan.images.clone(), plan.refs.clone());
+            restore_inputs(app, &plan.node, plan.images.clone(), plan.refs.clone());
             set_error(app, &plan.node, e);
             return Task::none();
         }
@@ -1070,7 +971,7 @@ fn send_now(app: &mut App, plan: SendPlan, space_prompt: Option<String>) -> Task
     let backend = match chat_actions::image_backend(app) {
         Ok(b) => b,
         Err(e) => {
-            restore_inputs(app, &plan.node, plan.origin, plan.images.clone(), plan.refs.clone());
+            restore_inputs(app, &plan.node, plan.images.clone(), plan.refs.clone());
             set_error(app, &plan.node, e);
             return Task::none();
         }
@@ -1094,19 +995,19 @@ fn send_now(app: &mut App, plan: SendPlan, space_prompt: Option<String>) -> Task
 
 /// 附件就绪：固化 user 消息、建引用边、启动直写 run。
 fn finish_send(app: &mut App, plan: SendPlan, attachments: Vec<Value>) -> Task<Message> {
-    let SendPlan { node: node_id, display, refs, images, origin, config, .. } = plan;
+    let SendPlan { node: node_id, display, refs, images, config, .. } = plan;
     let Some(config) = config else {
         set_error(app, &node_id, "发送配置缺失".to_string());
-        restore_inputs(app, &node_id, origin, images, refs);
+        restore_inputs(app, &node_id, images, refs);
         return Task::none();
     };
     if is_streaming(app, &node_id) {
-        restore_inputs(app, &node_id, origin, images, refs);
+        restore_inputs(app, &node_id, images, refs);
         app.notify(crate::NoticeLevel::Warning, "该对话已有回复进行中，消息未发送");
         return Task::none();
     }
     if node(app, &node_id).is_none() {
-        restore_inputs(app, &node_id, origin, images, refs);
+        restore_inputs(app, &node_id, images, refs);
         return Task::none();
     }
     let refs = refs;
@@ -1184,20 +1085,9 @@ fn finish_send(app: &mut App, plan: SendPlan, attachments: Vec<Value>) -> Task<M
         chat.error = None;
         chat.follow_bottom = true;
         chat.streaming = true;
-        match origin {
-            SendOrigin::Card => {
-                chat.draft.clear();
-                chat.mention_picker = None;
-            }
-            SendOrigin::Panel => {}
-        }
+        chat.draft.clear();
+        chat.mention_picker = None;
     }
-    if origin == SendOrigin::Panel {
-        app.chat.input.clear();
-        app.chat.mention_picker = None;
-        app.chat.follow_bottom = true;
-    }
-    refresh_panel_if_bound(app, &node_id);
     let mut task = start_run(app, &node_id, config, history).chain(scroll_bottom(&node_id));
     if !image_paths.is_empty() {
         task = task.chain(crate::canvas_actions::load_refs(app, image_paths));
@@ -1221,26 +1111,65 @@ fn config_for(app: &App, plan: &SendPlan, space_prompt: Option<String>) -> Resul
     Ok(config)
 }
 
-fn start_run(app: &App, node_id: &str, config: RunConfig, history: Vec<Value>) -> Task<Message> {
+fn start_run(app: &App, node_id: &str, config: RunConfig, mut history: Vec<Value>) -> Task<Message> {
     let Some(node) = node(app, node_id) else { return Task::none() };
     let compaction = node.data.get("compaction").cloned().filter(|c| !c.is_null());
-    let ctx = chat_actions::tool_ctx(app);
-    let hub = std::sync::Arc::clone(chat_actions::hub());
-    let events = chat_actions::run_event_channel().0.clone();
+    let Some(user_message) = history.pop() else {
+        return Task::none();
+    };
     let sid = session_id(node_id);
-    Task::future(async move {
-        if let Err(e) = hub
-            .start(RunPersist::Direct, events, sid.clone(), compaction, config, history, ctx)
-            .await
-        {
+    let params = atelyx_core::plugin_runtime::RunDirectParams {
+        session_id: sid.clone(),
+        history,
+        user_message,
+        compaction,
+        config: chat_actions::wire_config(&config),
+    };
+    let params = match serde_json::to_value(params) {
+        Ok(params) => params,
+        Err(error) => {
+            return Task::future(async move {
+                let _ = chat_actions::run_event_channel().0.send(RunEvent::Failed {
+                    session_id: sid,
+                    message_id: String::new(),
+                    error: format!("运行参数序列化失败：{error}"),
+                });
+                Message::Noop
+            });
+        }
+    };
+    match app.plugins.call_plugin(
+        atelyx_core::plugin_runtime::AI_CORE_PLUGIN,
+        atelyx_core::plugin_runtime::ai_run::SERVICE,
+        atelyx_core::plugin_runtime::ai_run::START_DIRECT,
+        params,
+    ) {
+        Ok(rx) => {
+            let events = chat_actions::run_event_channel().0.clone();
+            let sid = session_id(node_id);
+            std::thread::spawn(move || {
+                if let Err(error) = rx
+                    .recv()
+                    .unwrap_or_else(|_| Err("AI 核心未返回受理结果".to_string()))
+                {
+                    let _ = events.send(RunEvent::Failed {
+                        session_id: sid,
+                        message_id: String::new(),
+                        error,
+                    });
+                }
+            });
+            Task::none()
+        }
+        Err(error) => {
             let _ = chat_actions::run_event_channel().0.send(RunEvent::Failed {
                 session_id: sid,
                 message_id: String::new(),
-                error: e,
+                error,
             });
+            Task::none()
         }
-        Message::Noop
-    })
+    }
 }
 
 /// 引用命中 → 卡类型注入内容（图片附件路径单独返回）。
@@ -1393,8 +1322,7 @@ fn begin_regen(
             chat.follow_bottom = true;
         }
     }
-    refresh_panel_if_bound(app, node_id);
-    start_run(app, node_id, config, history)
+        start_run(app, node_id, config, history)
 }
 
 fn regen_config(app: &App, node_id: &str, space_prompt: Option<String>) -> Result<RunConfig, String> {
@@ -1441,8 +1369,7 @@ fn rollback(app: &mut App, node_id: &str, message_id: &str) {
     replace_messages(session, node_id, &keep);
     session.touch();
     refresh_card_docs(session, node_id);
-    refresh_panel_if_bound(app, node_id);
-}
+    }
 
 fn branch(app: &mut App, node_id: &str, message_id: &str) -> Task<Message> {
     if locked_by_peer(app, node_id) {
@@ -1598,8 +1525,7 @@ pub(crate) fn compact_done(app: &mut App, node_id: &str, result: Option<String>)
     }
     session.touch();
     refresh_card_docs(session, node_id);
-    refresh_panel_if_bound(app, node_id);
-}
+    }
 
 // ===== run 事件 =====
 
@@ -1644,16 +1570,8 @@ pub fn on_run_event(app: &mut App, event: RunEvent) -> Task<Message> {
                 .card_chat
                 .get(&node_id)
                 .is_some_and(|c| c.follow_bottom);
-            let panel_bound = app.chat.active.as_deref() == Some(session_id(&node_id).as_str());
-            refresh_panel_if_bound(app, &node_id);
             if follow {
-                let task = scroll_bottom(&node_id);
-                // 面板同会话双开：两边都贴底
-                return if panel_bound {
-                    task.chain(chat_actions::scroll_flow_bottom())
-                } else {
-                    task
-                };
+                return scroll_bottom(&node_id);
             }
         }
         RunEvent::MessageRemoved { .. } => {
@@ -1662,7 +1580,6 @@ pub fn on_run_event(app: &mut App, event: RunEvent) -> Task<Message> {
                 session.touch();
                 refresh_card_docs(session, &node_id);
             }
-            refresh_panel_if_bound(app, &node_id);
         }
         RunEvent::Finished { .. } => {
             let Some(session) = app.canvas.as_mut() else { return Task::none() };
@@ -1671,7 +1588,6 @@ pub fn on_run_event(app: &mut App, event: RunEvent) -> Task<Message> {
                 chat.follow_bottom = true;
             }
             refresh_card_docs(session, &node_id);
-            refresh_panel_if_bound(app, &node_id);
             if let Some(task) = materialize(app, &node_id, &message_id) {
                 return task;
             }
@@ -1685,7 +1601,6 @@ pub fn on_run_event(app: &mut App, event: RunEvent) -> Task<Message> {
                 }
             }
             refresh_card_docs(session, &node_id);
-            refresh_panel_if_bound(app, &node_id);
         }
         _ => {
             // 流式拍由 Snapshot 携带完整消息；增量事件只维持流式态
@@ -1919,52 +1834,16 @@ fn file_card(path: &str) -> Option<(&'static str, f64, f64, Value)> {
     }
 }
 
-// ===== 面板同会话 =====
-
-/// 面板绑定会话的重新生成（委托卡内实现）。
-pub fn regenerate_card(app: &mut App, node_id: &str) -> Task<Message> {
-    regenerate(app, node_id)
-}
-
-/// 面板绑定会话的回到此处（委托卡内实现）。
-pub fn rollback_card(app: &mut App, node_id: &str, message_id: &str) {
-    rollback(app, node_id, message_id);
-}
-
-/// 在 AI 面板打开该卡会话（同一份消息真源的双视图）。
-pub fn open_in_panel(app: &mut App, node_id: &str) {
-    let Some(node) = node(app, node_id) else { return };
-    if node.node_type != "conversation" {
-        return;
-    }
-    if !crate::layout_view::window_has_view(app, "aichat") {
-        app.notify(crate::NoticeLevel::Warning, "先在布局中打开 AI 对话面板");
-        return;
-    }
-    let sid = session_id(node_id);
-    app.chat.active = Some(sid);
-    app.chat.selection = None;
-    app.chat.rollback_confirm = None;
-    app.chat.error = None;
-    app.chat.follow_bottom = true;
-    app.chat.sidebar_open = false;
-    refresh_panel_docs_only(app, node_id);
-}
-
-/// 面板绑定画布会话时同步解析缓存（消息 / 标题由 `messages_of` 直接读卡）。
-pub fn refresh_panel_if_bound(app: &mut App, node_id: &str) {
-    let sid = session_id(node_id);
-    if app.chat.active.as_deref() == Some(sid.as_str()) {
-        refresh_panel_docs_only(app, node_id);
-    }
-}
-
-fn refresh_panel_docs_only(app: &mut App, node_id: &str) {
-    if let Some(session) = &app.canvas {
-        if let Some(messages) = messages_of_session(session, node_id) {
-            cache_docs(messages, &mut app.chat.docs);
-        }
-    }
+/// 仍在运行的画布对话卡会话 id（AI 核心崩溃时由宿主补发失败终态）。
+pub fn streaming_sessions(app: &App) -> Vec<String> {
+    let Some(session) = &app.canvas else { return Vec::new() };
+    session
+        .view
+        .card_chat
+        .iter()
+        .filter(|(_, chat)| chat.streaming)
+        .map(|(node, _)| session_id(node))
+        .collect()
 }
 
 // ===== 状态工具 =====
@@ -2052,11 +1931,6 @@ pub(crate) fn refresh_card_docs(session: &mut CanvasSession, _node_id: &str) {
     session.view.docs = docs;
 }
 
-fn cache_docs(messages: &[Value], docs: &mut HashMap<u64, atelyx_core::markdown::MarkdownDocument>) {
-    let mut used: HashSet<u64> = HashSet::new();
-    collect_docs(messages, docs, &mut used);
-    docs.retain(|k, _| used.contains(k));
-}
 
 fn collect_docs(
     messages: &[Value],
@@ -2158,7 +2032,6 @@ mod tests {
             agent_id: None,
             model_pick: None,
             effort: None,
-            origin: SendOrigin::Card,
             config: None,
         };
         let id = plan.media_session_id();

@@ -38,7 +38,7 @@ pub(crate) fn permission_for(name: &str) -> Option<Permission> {
         clipboard::WRITE_TEXT | clipboard::READ_TEXT | clipboard::READ_IMAGE
         | clipboard::WRITE_IMAGE => Some(Clipboard),
         dialog::PICK_FILE | dialog::PICK_DIRECTORY => Some(Dialog),
-        http::REQUEST => Some(Http),
+        http::REQUEST | http::STREAM_OPEN | http::STREAM_CANCEL => Some(Http),
         collab::PEERS | collab::SEND | collab::META_GET | collab::META_PATCH => Some(Collab),
         // 读写当前笔记的选区即读写用户正文，按仓库内容权限归类
         editor::SELECTION | editor::REPLACE_SELECTION => Some(Vault),
@@ -47,8 +47,10 @@ pub(crate) fn permission_for(name: &str) -> Option<Permission> {
         window::OPEN | window::CLOSE | window::UPDATE | window::SHOW | window::BEGIN_DRAG
         | window::MINIMIZE | window::TOGGLE_MAXIMIZE => Some(Window),
         ai::CHAT_SEND | ai::CHAT_STOP | ai::CHAT_HISTORY | ai::CHAT_RENAME | ai::CHAT_DELETE
-        | ai::CHAT_COMPACT | ai::MODELS | ai::AGENTS | ai::REGISTER_TOOL | ai::UNREGISTER_TOOL
-        | ai::TOOL_RESULT => Some(Ai),
+        | ai::CHAT_COMPACT | ai::CHAT_TITLE | ai::MODELS | ai::AGENTS | ai::REGISTER_TOOL | ai::UNREGISTER_TOOL
+        | ai::TOOL_RESULT | ai::TOOL_LIST | ai::TOOL_EXECUTE | ai::CHAT_EMIT => Some(Ai),
+        method::chat::SESSION_READ | method::chat::SESSION_WRITE
+        | method::chat::SESSION_SNAPSHOT => Some(Ai),
         // 解析只读插件递来的文本，不触碰宿主资源；外部提供者顶替后同理
         method::markdown::PARSE => None,
         // 能力总线入口：实际权限由目标方法自己承担

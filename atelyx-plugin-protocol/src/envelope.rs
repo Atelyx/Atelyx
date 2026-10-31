@@ -23,6 +23,8 @@ impl RpcError {
     pub const PERMISSION_DENIED: i64 = -32001;
     /// 能力已声明但执行失败：`message` 为可读原因，`data` 可携带结构化细节。
     pub const FAILED: i64 = -32002;
+    /// 调用方本地等待超时：宿主侧业务可能已受理，结果未知（不代表未执行）。
+    pub const TIMEOUT: i64 = -32003;
 
     pub fn permission_denied(message: impl Into<String>) -> Self {
         Self { code: Self::PERMISSION_DENIED, message: message.into(), data: None }
@@ -30,6 +32,15 @@ impl RpcError {
 
     pub fn failed(message: impl Into<String>) -> Self {
         Self { code: Self::FAILED, message: message.into(), data: None }
+    }
+
+    /// 本地等待超时（结果未知，调用方不得按「未执行」处理）。
+    pub fn timeout(message: impl Into<String>) -> Self {
+        Self { code: Self::TIMEOUT, message: message.into(), data: None }
+    }
+
+    pub fn is_timeout(&self) -> bool {
+        self.code == Self::TIMEOUT
     }
 }
 

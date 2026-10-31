@@ -1,10 +1,14 @@
 //! 图标钮用的内置图标：按 24x24 网格定义描边形状，绘制时缩放到目标矩形。
 //! 只收插件界面常用的几枚——要用别的形状时插件可以在自绘里直接写指令。
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
+
 use atelyx_plugin_protocol::paint::{PaintColor, PaintPoint, DrawCommand};
 
 use super::build::BuildCtx;
 use super::geom::Rect;
+use super::{lucide, svgpath};
 
 /// 内置图标（24x24 网格）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -206,6 +210,100 @@ pub(crate) fn draw(ctx: &mut BuildCtx<'_>, icon: Icon, rect: Rect, color: PaintC
             });
             line(ctx, 12.0, 7.5, 12.0, 12.0);
             line(ctx, 12.0, 12.0, 16.0, 14.0);
+        }
+    }
+}
+
+enum CachedShape {
+    Polyline(Vec<[f32; 2]>),
+    Circle(f32, f32, f32),
+    Rect(f32, f32, f32, f32, f32),
+    Line([f32; 4]),
+}
+
+/// 图标路径展平结果按名称缓存：同一图标只解析一次，绘制期不再解析 path。
+fn cached(name: &str) -> Option<Arc<Vec<CachedShape>>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, Arc<Vec<CachedShape>>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(shapes) = cache.lock().unwrap().get(name) {
+        return Some(Arc::clone(shapes));
+    }
+    let shapes = lucide::icon(name)?;
+    let mut out = Vec::new();
+    for shape in shapes {
+        match shape {
+            lucide::Shape::Path(data) => {
+                for polyline in svgpath::flatten_path(data) {
+                    if polyline.len() >= 2 {
+                        out.push(CachedShape::Polyline(polyline));
+                    }
+                }
+            }
+            lucide::Shape::Circle(cx, cy, r) => out.push(CachedShape::Circle(*cx, *cy, *r)),
+            lucide::Shape::Rect(x, y, w, h, radius) => {
+                out.push(CachedShape::Rect(*x, *y, *w, *h, *radius));
+            }
+            lucide::Shape::Line(line) => out.push(CachedShape::Line(*line)),
+        }
+    }
+    let out = Arc::new(out);
+    cache.lock().unwrap().insert(name.to_string(), Arc::clone(&out));
+    Some(out)
+}
+
+/// 按 lucide 名称绘制（24×24 视框、2 单位描边）：插件用字符串取图标，
+/// 不必靠扩展枚举；表外的名称不画。
+pub(crate) fn draw_named(ctx: &mut BuildCtx<'_>, name: &str, rect: Rect, color: PaintColor) {
+    let Some(shapes) = cached(name) else {
+        return;
+    };
+    let scale = rect.w / 24.0;
+    let width = (STROKE * scale).max(1.0);
+    let point = |x: f32, y: f32| PaintPoint { x: rect.x + x * scale, y: rect.y + y * scale };
+    for shape in shapes.iter() {
+        match shape {
+            CachedShape::Polyline(polyline) => {
+                ctx.draw(DrawCommand::Path {
+                    points: polyline.iter().map(|[x, y]| point(*x, *y)).collect(),
+                    closed: false,
+                    fill: None,
+                    stroke: Some(color),
+                    stroke_width: Some(width),
+                });
+            }
+            CachedShape::Circle(cx, cy, r) => {
+                ctx.draw(DrawCommand::Circle {
+                    cx: rect.x + cx * scale,
+                    cy: rect.y + cy * scale,
+                    r: r * scale,
+                    fill: None,
+                    stroke: Some(color),
+                    stroke_width: Some(width),
+                });
+            }
+            CachedShape::Rect(x, y, w, h, radius) => {
+                ctx.draw(DrawCommand::Rect {
+                    x: rect.x + x * scale,
+                    y: rect.y + y * scale,
+                    w: w * scale,
+                    h: h * scale,
+                    fill: None,
+                    stroke: Some(color),
+                    stroke_width: Some(width),
+                    corner_radius: Some(radius * scale),
+                    shadow: None,
+                });
+            }
+            CachedShape::Line([x1, y1, x2, y2]) => {
+                ctx.draw(DrawCommand::Line {
+                    x1: rect.x + x1 * scale,
+                    y1: rect.y + y1 * scale,
+                    x2: rect.x + x2 * scale,
+                    y2: rect.y + y2 * scale,
+                    stroke: color,
+                    width,
+                });
+            }
         }
     }
 }

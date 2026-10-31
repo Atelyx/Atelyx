@@ -7,7 +7,7 @@ use iced::{border, Length, Padding, Task};
 use serde_json::Value;
 
 use crate::canvas_view::CanvasMsg;
-use crate::chat_actions::{ChatMsg, MentionPicker, MentionTarget, PendingImage};
+use crate::chat_actions::{MentionPicker, MentionTarget, PendingImage};
 use crate::ui::icon::icon;
 use crate::ui::{controls, palette as pal, scroll, text};
 use crate::{App, Message};
@@ -25,46 +25,12 @@ const PICKER_LINE_RATIO: f32 = 1.3;
 /// 画布卡候选的次行标注（卡片没有所在文件夹）。
 const CARD_SUB_LABEL: &str = "画布卡片";
 
-/// 输入区作用域：决定草稿 / 引用 / 附件托盘与消息动作落在谁身上。
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ComposerScope {
-    /// 面板草稿（普通会话与面板绑定画布卡会话共用；后者的配置目标随会话指向卡）。
-    Panel,
-    /// 画布卡内输入：草稿归卡运行态，配置目标即本卡。
-    Card { node: String },
-}
-
-/// Agent / 模型配置写入目标（与草稿作用域正交：面板绑定卡会话 = 面板草稿 + 卡配置）。
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ConfigScope {
-    /// 写面板级覆盖（模型 / 等级随面板持久化，Agent 写会话 agentId）。
-    Panel,
-    /// 写卡节点配置（`data.agentId` / `providerId` / `model` / `reasoningEffort`，随 `.atlx` 持久化）。
-    Card { node: String },
-}
-
-/// 面板作用域的配置目标：绑定画布卡会话时写卡节点配置，其余写面板覆盖。
-fn config_scope(app: &App, scope: &ComposerScope) -> ConfigScope {
-    match scope {
-        ComposerScope::Card { node } => ConfigScope::Card { node: node.clone() },
-        ComposerScope::Panel => {
-            match app.chat.active.as_deref().and_then(crate::canvas_chat::node_of_session) {
-                Some(node) => ConfigScope::Card { node: node.to_string() },
-                None => ConfigScope::Panel,
-            }
-        }
-    }
-}
-
 /// 配置目标卡是否被对端独占编辑（配置属卡内容，锁作用范围内触发钮禁用）。
-fn config_locked(app: &App, config: &ConfigScope) -> bool {
-    match config {
-        ConfigScope::Panel => false,
-        ConfigScope::Card { node } => matches!(
-            crate::space_actions::conversation_lock_holder(app, node),
-            crate::space_actions::LockHolder::Peer { .. }
-        ),
-    }
+fn config_locked(app: &App, node: &str) -> bool {
+    matches!(
+        crate::space_actions::conversation_lock_holder(app, node),
+        crate::space_actions::LockHolder::Peer { .. }
+    )
 }
 
 /// 输入区整体（# 候选浮层 + 附件托盘 + 输入盒：输入面 + 工具排）。
@@ -72,39 +38,22 @@ fn config_locked(app: &App, config: &ConfigScope) -> bool {
 pub fn composer<'a>(
     app: &'a App,
     window: iced::window::Id,
-    scope: &ComposerScope,
+    node: &str,
     scale: f32,
 ) -> Option<iced::Element<'a, Message>> {
-    let (draft, refs, picker, images, route) = match scope {
-        ComposerScope::Panel => (
-            &app.chat.input,
-            &app.chat.mention_refs,
-            &app.chat.mention_picker,
-            &app.chat.pending_images,
-            crate::chat_input::InputRoute::Panel,
-        ),
-        ComposerScope::Card { node } => {
-            let chat = app.canvas.as_ref()?.view.card_chat.get(node)?;
-            (
-                &chat.draft,
-                &chat.mention_refs,
-                &chat.mention_picker,
-                &chat.pending_images,
-                crate::chat_input::InputRoute::Card(node.clone()),
-            )
-        }
-    };
-    let streaming = match scope {
-        ComposerScope::Card { node } => crate::canvas_chat::is_streaming(app, node),
-        ComposerScope::Panel => crate::chat_view::is_streaming(app),
-    };
+    let chat = app.canvas.as_ref()?.view.card_chat.get(node)?;
+    let draft = &chat.draft;
+    let refs = &chat.mention_refs;
+    let picker = &chat.mention_picker;
+    let images = &chat.pending_images;
+    let streaming = crate::canvas_chat::is_streaming(app, node);
     let s = scale;
     let mut inner = column![].spacing(0).width(Length::Fill);
     if let Some(picker) = picker {
-        inner = inner.push(mention_picker_view(app, picker, scope, s));
+        inner = inner.push(mention_picker_view(app, picker, node, s));
     }
     // 自绘输入面（# 标签高亮 / 整标签交互由部件托管）
-    let surface = crate::chat_input::Input::new(draft, refs, route)
+    let surface = crate::chat_input::Input::new(draft, refs, node.to_string())
         .picker_open(picker.is_some())
         .placeholder("输入消息，Enter 发送，Shift+Enter 换行")
         .scale(s);
@@ -114,7 +63,7 @@ pub fn composer<'a>(
             .padding(Padding::ZERO.left(2.0 * s).right(2.0 * s).top(8.0 * s)),
     );
     inner = inner.push(
-        container(tool_row(app, window, scope, streaming, s))
+        container(tool_row(app, window, node, streaming, s))
             .width(Length::Fill)
             .padding(Padding::ZERO.top(4.0 * s)),
     );
@@ -132,7 +81,7 @@ pub fn composer<'a>(
         });
     let mut col = column![].width(Length::Fill);
     if !images.is_empty() {
-        col = col.push(image_tray(scope, images, s));
+        col = col.push(image_tray(node, images, s));
     }
     col = col.push(input_box);
     Some(col.into())
@@ -142,15 +91,13 @@ pub fn composer<'a>(
 fn tool_row<'a>(
     app: &'a App,
     window: iced::window::Id,
-    scope: &ComposerScope,
+    node: &str,
     streaming: bool,
     s: f32,
 ) -> iced::Element<'a, Message> {
-    let config = config_scope(app, scope);
-    let plus_open = app
-        .popup
-        .as_ref()
-        .is_some_and(|(_, open)| matches!(&open.state, crate::layout_view::PopupState::ChatPlusMenu { scope: open } if *open == *scope));
+    let plus_open = app.popup.as_ref().is_some_and(|(_, open)| {
+        matches!(&open.state, crate::layout_view::PopupState::ChatPlusMenu { node: open } if open == node)
+    });
     let plus_btn = button(icon(
         "plus",
         (13.0 * s).max(8.0),
@@ -161,7 +108,7 @@ fn tool_row<'a>(
     .on_press(crate::layout_view::btn_popup_min(
         window,
         app.cursor_for(window),
-        crate::layout_view::PopupState::ChatPlusMenu { scope: scope.clone() },
+        crate::layout_view::PopupState::ChatPlusMenu { node: node.to_string() },
         0.0,
     ));
     let send_btn = if streaming {
@@ -170,7 +117,7 @@ fn tool_row<'a>(
             (14.0 * s).max(9.0),
             (28.0 * s).max(18.0),
             controls::Variant::Secondary,
-            Some(send_stop_msg(scope, true)),
+            Some(send_stop_msg(node, true)),
             Some((window, "停止生成".to_string())),
         )
     } else {
@@ -179,14 +126,14 @@ fn tool_row<'a>(
             (14.0 * s).max(9.0),
             (28.0 * s).max(18.0),
             controls::Variant::Primary,
-            Some(send_stop_msg(scope, false)),
+            Some(send_stop_msg(node, false)),
             Some((window, "发送（Enter）".to_string())),
         )
     };
     row![
         plus_btn,
-        agent_trigger(app, window, &config, s),
-        model_trigger(app, window, &config, s),
+        agent_trigger(app, window, node, s),
+        model_trigger(app, window, node, s),
         Space::new().width(Length::Fill),
         send_btn,
     ]
@@ -195,36 +142,22 @@ fn tool_row<'a>(
     .into()
 }
 
-fn send_stop_msg(scope: &ComposerScope, stop: bool) -> Message {
-    match scope {
-        ComposerScope::Panel => {
-            if stop {
-                Message::Chat(ChatMsg::Stop)
-            } else {
-                Message::Chat(ChatMsg::Send)
-            }
-        }
-        ComposerScope::Card { node } => {
-            let msg = if stop {
-                crate::canvas_chat::CanvasChatMsg::Stop(node.clone())
-            } else {
-                crate::canvas_chat::CanvasChatMsg::Send(node.clone())
-            };
-            Message::Canvas(CanvasMsg::Chat(msg))
-        }
-    }
+fn send_stop_msg(node: &str, stop: bool) -> Message {
+    let msg = if stop {
+        crate::canvas_chat::CanvasChatMsg::Stop(node.to_string())
+    } else {
+        crate::canvas_chat::CanvasChatMsg::Send(node.to_string())
+    };
+    Message::Canvas(CanvasMsg::Chat(msg))
 }
 
 /// Agent 配置当前显示名（缺省 = 内置「对话」）。
-fn agent_label(app: &App, config: &ConfigScope) -> String {
-    let id = match config {
-        ConfigScope::Panel => app.chat.active_agent_id(),
-        ConfigScope::Card { node } => app
-            .canvas
-            .as_ref()
-            .and_then(|s| s.data.nodes.iter().find(|n| &n.id == node))
-            .and_then(|n| n.data.get("agentId").and_then(Value::as_str).map(str::to_string)),
-    };
+fn agent_label(app: &App, node: &str) -> String {
+    let id = app
+        .canvas
+        .as_ref()
+        .and_then(|s| s.data.nodes.iter().find(|n| n.id == node))
+        .and_then(|n| n.data.get("agentId").and_then(Value::as_str).map(str::to_string));
     match id {
         Some(id) => app
             .agents
@@ -239,14 +172,14 @@ fn agent_label(app: &App, config: &ConfigScope) -> String {
 fn agent_trigger<'a>(
     app: &'a App,
     window: iced::window::Id,
-    config: &ConfigScope,
+    node: &str,
     s: f32,
 ) -> iced::Element<'a, Message> {
-    let locked = config_locked(app, config);
+    let locked = config_locked(app, node);
     button(
         row![
             icon("bot", (12.0 * s).clamp(8.0, 14.0), pal::TEXT_SECONDARY),
-            text(agent_label(app, config))
+            text(agent_label(app, node))
                 .size((pal::fs_micro() * s).max(8.0))
                 .color(pal::TEXT_SECONDARY),
             icon("chevron-down", (10.0 * s).clamp(7.0, 12.0), pal::TEXT_MUTED),
@@ -260,7 +193,7 @@ fn agent_trigger<'a>(
         crate::layout_view::btn_popup_min(
             window,
             app.cursor_for(window),
-            crate::layout_view::PopupState::ChatAgentMenu { scope: config.clone() },
+            crate::layout_view::PopupState::ChatAgentMenu { node: node.to_string() },
             0.0,
         )
     }))
@@ -271,18 +204,12 @@ fn agent_trigger<'a>(
 fn model_trigger<'a>(
     app: &'a App,
     window: iced::window::Id,
-    config: &ConfigScope,
+    node: &str,
     s: f32,
 ) -> iced::Element<'a, Message> {
-    let model = match config {
-        ConfigScope::Panel => crate::layout_view::chat_model_trigger_label(app),
-        ConfigScope::Card { node } => crate::layout_view::canvas_card_model_label(app, node),
-    };
-    let effort = match config {
-        ConfigScope::Panel => crate::layout_view::chat_effort_label(app),
-        ConfigScope::Card { node } => crate::layout_view::canvas_card_effort_label(app, node),
-    };
-    let locked = config_locked(app, config);
+    let model = crate::layout_view::canvas_card_model_label(app, node);
+    let effort = crate::layout_view::canvas_card_effort_label(app, node);
+    let locked = config_locked(app, node);
     button(
         row![
             icon("sparkles", (12.0 * s).clamp(8.0, 14.0), pal::TEXT_SECONDARY),
@@ -300,7 +227,7 @@ fn model_trigger<'a>(
         crate::layout_view::btn_popup_min(
             window,
             app.cursor_for(window),
-            crate::layout_view::PopupState::ChatModelMenu { scope: config.clone() },
+            crate::layout_view::PopupState::ChatModelMenu { node: node.to_string() },
             0.0,
         )
     }))
@@ -313,14 +240,10 @@ fn model_trigger<'a>(
 fn mention_picker_view<'a>(
     app: &'a App,
     picker: &'a MentionPicker,
-    scope: &ComposerScope,
+    node: &str,
     s: f32,
 ) -> iced::Element<'a, Message> {
-    // 候选行的点击消息只差作用域来源：卡作用域把节点 id 取出来，浮层闭包不持有 scope 借用
-    let card_node = match scope {
-        ComposerScope::Panel => None,
-        ComposerScope::Card { node } => Some(node.clone()),
-    };
+    let card_node = node.to_string();
     let pad_x = PICKER_ROW_PAD_X * s;
     let pad_y = (PICKER_ROW_PAD_Y * s).max(2.0);
     let icon_px = (PICKER_ICON * s).clamp(9.0, 14.0);
@@ -358,12 +281,12 @@ fn mention_picker_view<'a>(
                     ("box", title)
                 }
             };
-            let press = match &card_node {
-                None => Message::Chat(ChatMsg::MentionPick(i)),
-                Some(node) => Message::Canvas(CanvasMsg::Chat(
-                    crate::canvas_chat::CanvasChatMsg::MentionPick { node: node.clone(), index: i },
-                )),
-            };
+            let press = Message::Canvas(CanvasMsg::Chat(
+                crate::canvas_chat::CanvasChatMsg::MentionPick {
+                    node: card_node.clone(),
+                    index: i,
+                },
+            ));
             let mut lines = column![
                 row![
                     icon(
@@ -401,7 +324,7 @@ fn mention_picker_view<'a>(
     })
     .height(Length::Shrink);
     let list = container(
-        scroll::v(list).id(mention_scroll_id(scope)).height(Length::Shrink).width(Length::Fill),
+        scroll::v(list).id(mention_scroll_id(node)).height(Length::Shrink).width(Length::Fill),
     )
     .max_height(PICKER_MAX_H * s);
     container(list)
@@ -418,25 +341,20 @@ fn mention_picker_view<'a>(
         .into()
 }
 
-/// 候选浮层滚动区 id：面板与任一画布卡各一份（同屏并存时不互相定位）。
-pub(crate) fn mention_scroll_id(scope: &ComposerScope) -> iced::widget::Id {
-    match scope {
-        ComposerScope::Panel => iced::widget::Id::new("chat-mention"),
-        ComposerScope::Card { node } => {
-            iced::widget::Id::from(format!("chat-mention-card:{node}"))
-        }
-    }
+/// 候选浮层滚动区 id：每张画布卡各一份（同屏并存时不互相定位）。
+pub(crate) fn mention_scroll_id(node: &str) -> iced::widget::Id {
+    iced::widget::Id::from(format!("chat-mention-card:{node}"))
 }
 
 /// 选中项跟滚：把选中行带回可视区（未溢出、选中行本就在可视区内时不移动）。
 pub(crate) fn mention_follow(
-    scope: &ComposerScope,
+    node: &str,
     picker: &MentionPicker,
     scale: f32,
 ) -> Task<Message> {
     let heights: Vec<f32> = picker.candidates.iter().map(|t| picker_row_h(t, scale)).collect();
     let y = follow_ratio(&heights, picker.selected, PICKER_MAX_H * scale);
-    operation::snap_to(mention_scroll_id(scope), scrollable::RelativeOffset { x: 0.0, y })
+    operation::snap_to(mention_scroll_id(node), scrollable::RelativeOffset { x: 0.0, y })
 }
 
 /// 候选行高（与浮层行排布同源：内衬 + 文字行高，次行另加行距）。
@@ -473,17 +391,17 @@ fn follow_ratio(heights: &[f32], selected: usize, viewport: f32) -> f32 {
 
 /// 待发送图片托盘：输入盒上方一行缩略图 chip（点击移除）。
 fn image_tray<'a>(
-    scope: &ComposerScope,
+    node: &str,
     images: &'a [PendingImage],
     s: f32,
 ) -> iced::Element<'a, Message> {
     let chips = images.iter().enumerate().map(|(i, img)| {
-        let remove = match scope {
-            ComposerScope::Panel => Message::Chat(ChatMsg::RemoveAttachment(i)),
-            ComposerScope::Card { node } => Message::Canvas(CanvasMsg::Chat(
-                crate::canvas_chat::CanvasChatMsg::RemoveAttachment { node: node.clone(), index: i },
-            )),
-        };
+        let remove = Message::Canvas(CanvasMsg::Chat(
+            crate::canvas_chat::CanvasChatMsg::RemoveAttachment {
+                node: node.to_string(),
+                index: i,
+            },
+        ));
         let name = img.file_name.clone();
         button(
             row![

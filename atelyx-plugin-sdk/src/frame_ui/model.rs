@@ -2,7 +2,7 @@
 //! 布局记录是输入路由的唯一依据——宿主只回发命中 id 与坐标，语义由这里解释。
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use atelyx_plugin_protocol::frame::SurfaceFrame;
 use atelyx_plugin_protocol::method::MarkdownBlock;
@@ -113,6 +113,9 @@ pub(crate) struct UiState {
     pub overlays: Vec<Rect>,
     /// 浮层内的滚动容器 id：浮层打开时不把滚轮落到下层列表。
     pub overlay_scrolls: std::collections::HashSet<String>,
+    /// 虚拟列表各条目的最近一次实测高（列表 id + 条目 key）：只用于估算屏外条目，
+    /// 改宽后优先按新宽度重排屏内条目。
+    pub virtual_heights: Arc<Mutex<HashMap<(String, u64), f32>>>,
 }
 
 impl Default for UiState {
@@ -141,6 +144,7 @@ impl Default for UiState {
             resize_pending: false,
             overlays: Vec::new(),
             overlay_scrolls: std::collections::HashSet::new(),
+            virtual_heights: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }

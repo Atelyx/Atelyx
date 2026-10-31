@@ -8,9 +8,11 @@ mod build;
 mod geom;
 mod icons;
 mod input;
+mod lucide;
 mod markdown;
 mod metrics;
 mod model;
+mod svgpath;
 mod text;
 mod theme;
 mod widgets;
@@ -25,7 +27,7 @@ pub use build::Ui;
 pub use build::Canvas;
 pub use geom::Rect;
 pub use icons::Icon;
-pub use widgets::{TextRole, TextStyle};
+pub use widgets::{BoxStyle, BoxWidth, Edges, TextRole, TextStyle};
 
 /// 一次 `render` 内最多补几轮缺项（文字量算 / Markdown 块）：补齐后按最新数据重建。
 const MAX_REBUILD_PASSES: usize = 3;
@@ -118,6 +120,25 @@ impl FrameUi {
             .inputs
             .insert(id.to_string(), model::InputState { caret: len, anchor: len, preedit: String::new() });
         self.state.focus = Some(id.to_string());
+    }
+
+    /// 把滚动容器直接拉到底（回到底部浮钮这类动作）；下一帧贴底跟随继续生效。
+    pub fn scroll_to_end(&mut self, id: &str) {
+        self.state.scroll.insert(id.to_string(), f32::MAX);
+    }
+
+    /// 某输入框当前光标与选区的字节偏移（`None` = 该输入框不在本帧或未交互过）。
+    pub fn caret(&self, id: &str) -> Option<(usize, usize)> {
+        self.state.inputs.get(id).map(|item| (item.caret, item.anchor))
+    }
+
+    /// 设置输入框的光标与选区（`value` 只用于把光标夹在文本长度内）；文本本身由插件在
+    /// `render` 时传入。须在 `render` 前调用。
+    pub fn set_input(&mut self, id: &str, value: &str, caret: usize) {
+        let caret = caret.min(value.len());
+        self.state
+            .inputs
+            .insert(id.to_string(), model::InputState { caret, anchor: caret, preedit: String::new() });
     }
 
     /// 解释一条宿主输入：翻成语义事件并把交互态（焦点 / 光标 / 选区 / 滚动）就地更新。
@@ -780,6 +801,27 @@ mod tests {
             .event(FrameInput::Text { text: "中".into(), composing: false, caret: None, candidates: None })
             .await;
         assert_eq!(events, vec![UiEvent::Text { id: "host".into(), value: "中".into() }]);
+    }
+
+    #[tokio::test]
+    async fn enter_during_ime_composition_does_not_submit() {
+        let mut bench = Bench::new(240.0, 120.0).await;
+        bench.render(|ui| ui.text_area_submit("draft", "hi", "", 48.0)).await.unwrap();
+        bench
+            .event(FrameInput::PointerDown { x: 20.0, y: 10.0, button: MouseButton::Left, hit: Some("draft".into()) })
+            .await;
+        bench
+            .event(FrameInput::Text { text: "zhong".into(), composing: true, caret: Some(5), candidates: None })
+            .await;
+
+        let events = bench.event(key(NamedKey::Enter)).await;
+        assert!(events.is_empty(), "组合期回车留给输入法取词，不提交也不换行：{events:?}");
+
+        bench
+            .event(FrameInput::Text { text: "中".into(), composing: false, caret: None, candidates: None })
+            .await;
+        let events = bench.event(key(NamedKey::Enter)).await;
+        assert_eq!(events, vec![UiEvent::Submit { id: "draft".into() }]);
     }
 
     #[tokio::test]

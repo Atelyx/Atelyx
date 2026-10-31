@@ -855,7 +855,6 @@ pub enum CanvasMenuAction {
     GroupRenameStart { node: String },
     GroupRenameCommit { node: String, name: String },
     ToggleCollapse { node: String },
-    OpenInPanel(String),
 }
 
 /// 载入产物：画布数据 + 预解析的 markdown 文档（对话消息流 / 文本卡正文）+ 引用内容。
@@ -1946,31 +1945,10 @@ fn toolbar<'a>(session: &'a CanvasSession, window: iced::window::Id, viewport: S
         space().width(Length::Shrink).into()
     };
     let zoom_msg = |factor| Message::Canvas(CanvasMsg::Zoom { factor, size: viewport });
-    // 选中的对话卡：可打开到 AI 面板（同一会话双视图）
-    let open_in_panel = session
-        .view
-        .selection
-        .first()
-        .and_then(|id| session.data.nodes.iter().find(|n| &n.id == id))
-        .filter(|n| n.node_type == "conversation")
-        .map(|n| {
-            controls::icon_button(
-                "message-square",
-                13.0,
-                24.0,
-                controls::Variant::Ghost,
-                Some(Message::Canvas(CanvasMsg::Chat(
-                    crate::canvas_chat::CanvasChatMsg::OpenInPanel(n.id.clone()),
-                ))),
-                Some((window, "在 AI 面板打开".into())),
-            )
-        });
-
     row![
         space().width(Length::Fill),
         dirty_pill,
         save_state,
-        open_in_panel,
         controls::icon_button("maximize", 13.0, 24.0, controls::Variant::Ghost,
             Some(Message::Canvas(CanvasMsg::FitView)), Some((window, "适应视图".into()))),
         controls::icon_button("zoom-in", 13.0, 24.0, controls::Variant::Ghost,
@@ -2145,9 +2123,6 @@ fn conversation_card_overlay<'a>(
         actions: Some(actions),
         markdown: app.plugins.service_is_builtin("markdown"),
         streaming_id,
-        toggle: crate::chat_stream::ToggleRoute::Canvas,
-        selectable: false,
-        selection: None,
     };
     let flow_inner: Element<'_> = if messages.is_empty() {
         container(text("输入消息开始对话").size((pal::fs_caption() * zoom).max(9.0)).color(pal::TEXT_MUTED))
@@ -2240,8 +2215,7 @@ fn conversation_card_overlay<'a>(
         return Some(col.into());
     }
     // 输入区 = 共享组装器（# 候选 / 附件托盘 / 输入盒），与面板同一套渲染与路由
-    let scope = crate::chat_composer::ComposerScope::Card { node: n.id.clone() };
-    if let Some(composer) = crate::chat_composer::composer(app, window, &scope, zoom) {
+    if let Some(composer) = crate::chat_composer::composer(app, window, &n.id, zoom) {
         col = col.push(composer);
     }
     Some(col.into())

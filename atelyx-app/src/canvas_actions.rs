@@ -1043,16 +1043,10 @@ fn restore_snapshot(s: &mut CanvasSession, snap: CanvasSnapshot) {
     s.touch();
 }
 
-/// 任一对话卡在流式（含 Hub 在途 run）：数据回滚类操作（撤销 / 重做）不接，
+/// 任一对话卡在流式：数据回滚类操作（撤销 / 重做）不接，
 /// 防 run 直写消息与快照回滚互相踩。
 fn any_streaming(s: &CanvasSession) -> bool {
     s.view.card_chat.values().any(|c| c.streaming)
-        || s
-            .data
-            .nodes
-            .iter()
-            .filter(|n| n.node_type == "conversation")
-            .any(|n| chat_actions::hub().is_running(&crate::canvas_chat::session_id(&n.id)))
 }
 
 fn undo(app: &mut App) -> Task<Message> {
@@ -1362,10 +1356,6 @@ fn on_menu(app: &mut App, window: Option<iced::window::Id>, action: CanvasMenuAc
             create_text_at(app, x, y);
             Task::none()
         }
-        CanvasMenuAction::OpenInPanel(id) => crate::canvas_chat::on_msg(
-            app,
-            crate::canvas_chat::CanvasChatMsg::OpenInPanel(id),
-        ),
     }
 }
 

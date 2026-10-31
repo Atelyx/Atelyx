@@ -1,0 +1,14 @@
+{
+  "id": "atelyx.ai-core",
+  "name": "AI 核心",
+  "version": "0.1.0",
+  "apiVersion": 1,
+  "abiVersion": 1,
+  "entry": {
+    "windows": "atelyx_plugin_ai_core.dll",
+    "linux": "libatelyx_plugin_ai_core.so"
+  },
+  "permissions": ["ai", "vault", "http"],
+  "singleton": true,
+  "keepMountedOnVaultSwitch": false
+}

@@ -31,10 +31,12 @@ fn uuid_v4() -> String {
 // ===== 写入批次（编排方 → 仓库的声明式变更）=====
 
 /// 新会话登记（id 由调用方先行确定：发送的附件临时目录归属依赖会话 id）。
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionDef {
     pub id: String,
+    /// 缺省由宿主按会话 id 补齐（跨库调用方不必知道磁盘目录）。
+    #[serde(default)]
     pub file: String,
     #[serde(default)]
     pub title: Option<String>,
@@ -49,14 +51,18 @@ pub struct SessionDef {
 }
 
 /// 既有会话的元数据字段更新（缺省字段不动）。
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MetaPatch {
     pub id: String,
     #[serde(default)]
     pub title: Option<String>,
     /// 双层 Option：外层缺省 = 不动，内层 None = 清除（切回默认 Agent）。
-    #[serde(default)]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "double_option"
+    )]
     pub agent_id: Option<Option<String>>,
     #[serde(default)]
     pub compaction: Option<Value>,
@@ -64,7 +70,7 @@ pub struct MetaPatch {
     pub updated_at: Option<i64>,
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppendBatch {
     #[serde(rename = "sessionId")]
@@ -73,7 +79,7 @@ pub struct AppendBatch {
 }
 
 /// 消息内容补丁（rev 单调：流式补丁乱序到达时，迟到的旧补丁不得覆盖新内容）。
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PatchEntry {
     #[serde(rename = "sessionId")]
@@ -87,7 +93,7 @@ pub struct PatchEntry {
     pub steps: Option<Value>,
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TruncateEntry {
     #[serde(rename = "sessionId")]
@@ -98,7 +104,7 @@ pub struct TruncateEntry {
 
 /// 会话删除：`remove_files` = 连磁盘文件一并删（用户删除）；false = 仅摘除内存登记
 /// （磁盘文件已在外部消失的对账路径）。
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeleteEntry {
     #[serde(rename = "sessionId")]
@@ -108,7 +114,7 @@ pub struct DeleteEntry {
 }
 
 /// 单条消息移除（空占位收敛 / 程序化清理；不影响其余消息）。
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MessageRemoval {
     #[serde(rename = "sessionId")]
@@ -121,21 +127,42 @@ fn default_true() -> bool {
     true
 }
 
+/// 双层 Option 的 JSON 语义：字段缺省 = `None`（不动），显式 `null` = `Some(None)`（清除）。
+fn double_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
+}
+
 /// 覆盖项更新（双层 Option：外层缺省 = 不动，内层 None = 清除覆盖）。
-#[derive(Deserialize, Default)]
+#[derive(Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct OverridesPatch {
-    #[serde(default)]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "double_option"
+    )]
     pub model_override: Option<Option<Value>>,
-    #[serde(default)]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "double_option"
+    )]
     pub effort_override: Option<Option<String>>,
-    #[serde(default)]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "double_option"
+    )]
     pub agent_override: Option<Option<String>>,
 }
 
 /// 一次提交：登记 / 元数据 / 消息追加 / 内容补丁 / 截断 / 删除 / 覆盖项，
 /// 原子校验后一次应用并标记脏；落盘由写链异步追平。
-#[derive(Deserialize, Default)]
+#[derive(Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct CommitBatch {
     #[serde(default)]
@@ -367,6 +394,16 @@ impl SessionStore {
         snapshot_of(&inner)
     }
 
+    /// 面板级覆盖项（模型 / 推理等级 / Agent）：只取这三个字段，不克隆会话集合。
+    pub fn overrides(&self) -> (Option<Value>, Option<String>, Option<String>) {
+        let inner = self.lock();
+        (
+            inner.model_override.clone(),
+            inner.effort_override.clone(),
+            inner.agent_override.clone(),
+        )
+    }
+
     /// 当前仓库内某会话的消息（缺失 = None）。供编排方按需拉取历史（如插件读历史走壳侧）。
     pub fn session_messages(&self, session_id: &str) -> Option<Vec<Value>> {
         let inner = self.lock();
@@ -450,6 +487,48 @@ impl SessionStore {
         Ok(Some(snapshot_of(&inner)))
     }
 
+    /// 离开容器：先落旧真源在途写，再清空后端与内存真源。
+    /// 之后 [`Self::commit`] 回「未装载」——插件无从把消息写进上一个容器。
+    pub fn detach(&self) {
+        // 让在途异步装载作废：慢装载完成时凭过期票不再落状态；本次清空同样要过票，
+        // 否则移出 UI 线程后可能抹掉之后已经装载成功的新容器
+        let ticket = self.begin_load();
+        if self.lock().has_dirty() {
+            self.run_write_cycle();
+        }
+        // 写轮失败仍有脏项：内容随容器离开而不可再写，至少保留错误状态让用户可见
+        let unsaved = self.lock().has_dirty();
+        let _io = self.io_lock.lock().unwrap_or_else(poison);
+        if self.load_seq.load(std::sync::atomic::Ordering::SeqCst) != ticket {
+            return;
+        }
+        let mut inner = self.lock();
+        inner.epoch += 1;
+        inner.backend = None;
+        inner.sessions.clear();
+        inner.model_override = None;
+        inner.effort_override = None;
+        inner.agent_override = None;
+        inner.dirty_messages.clear();
+        inner.dirty_meta.clear();
+        inner.overrides_dirty = false;
+        inner.persisted.clear();
+        inner.change_versions.clear();
+        inner.patch_revs.clear();
+        inner.overrides_version += 1;
+        // 待删文件记着旧后端：成功即已清空；失败留着由写链按退避重试，不落到新容器。
+        // 未写成的消息已无法再写往旧容器，保留 persist_error 让用户看到内容可能未保存。
+        if inner.pending_deletes.is_empty() {
+            if !unsaved {
+                inner.persist_error = None;
+            }
+            inner.last_mark = None;
+            inner.next_retry_at = None;
+            inner.retry_attempt = 0;
+        }
+        self.ack_flush(&mut inner);
+    }
+
     // ===== 提交 =====
 
     /// 编排方变更统一入口：批次校验（未装载 / 会话 id 冲突即整体拒绝）后一次应用并标脏。
@@ -471,7 +550,11 @@ impl SessionStore {
         for def in &batch.created {
             let session = Session {
                 id: def.id.clone(),
-                file: def.file.clone(),
+                file: if def.file.is_empty() {
+                    chat_message_file(&def.id)
+                } else {
+                    def.file.clone()
+                },
                 title: def.title.clone(),
                 agent_id: def.agent_id.clone(),
                 compaction: def.compaction.clone(),
@@ -1396,6 +1479,110 @@ mod tests {
          not-json-at-all\n\
          {\"role\":\"assistant\",\"content\":\"缺 id 派生\"}\n\
          {\"id\":\"b\",\"role\":\"assistant\",\"content\":\"ok\",\"createdAt\":20,\"junk\":1}"
+    }
+
+    /// 离开容器后后端必须摘掉：否则插件还能把消息写进上一个仓库。
+    #[test]
+    fn detach_clears_the_backend_and_rejects_later_writes() {
+        let tmp = TempDir::new("session-detach");
+        let store = SessionStore::new(test_config());
+        store
+            .load(store.begin_load(), local_io(tmp.join("vault")))
+            .expect("装载应成功");
+        store
+            .commit(CommitBatch {
+                created: vec![SessionDef {
+                    id: "s1".into(),
+                    file: String::new(),
+                    title: None,
+                    agent_id: None,
+                    compaction: None,
+                    created_at: 1,
+                    updated_at: 1,
+                    messages: vec![msg("m1", "user", "你好")],
+                }],
+                overrides: OverridesPatch {
+                    model_override: Some(Some(json!({ "providerId": "p", "model": "m" }))),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .expect("提交应成功");
+        assert_eq!(store.snapshot().sessions.len(), 1);
+        assert!(store.overrides().0.is_some());
+
+        store.detach();
+        assert!(store.snapshot().sessions.is_empty());
+        assert!(store.overrides().0.is_none());
+        let error = store
+            .commit(CommitBatch {
+                appends: vec![AppendBatch {
+                    session_id: "s1".into(),
+                    messages: vec![msg("m2", "user", "再写")],
+                }],
+                ..Default::default()
+            })
+            .expect_err("离开容器后不得再写");
+        assert!(error.contains("未装载"), "错误应说明未装载：{error}");
+    }
+
+    /// 插件提交的批次与磁盘模型必须同形：协议形状原样落进 core、再退回协议仍等值。
+    #[test]
+    fn plugin_commit_batch_matches_the_core_model() {
+        use atelyx_plugin_protocol::chat as wire;
+        let incoming = wire::CommitBatch {
+            created: vec![wire::SessionDef {
+                id: "s1".into(),
+                file: String::new(),
+                title: Some("对话".into()),
+                agent_id: Some("daily".into()),
+                compaction: Some(json!({ "upToMessageId": "m1", "summary": "摘要" })),
+                created_at: 1,
+                updated_at: 2,
+                messages: vec![msg("m1", "user", "你好")],
+            }],
+            metas: vec![wire::MetaPatch {
+                id: "s1".into(),
+                title: Some("改名".into()),
+                agent_id: Some(None),
+                compaction: None,
+                updated_at: Some(3),
+            }],
+            appends: vec![wire::AppendBatch {
+                session_id: "s1".into(),
+                messages: vec![msg("m2", "assistant", "回复")],
+            }],
+            patches: vec![wire::PatchEntry {
+                session_id: "s1".into(),
+                message_id: "m2".into(),
+                rev: 4,
+                content: Some("流式".into()),
+                steps: Some(json!([{ "kind": "text", "text": "思考" }])),
+            }],
+            truncations: vec![wire::TruncateEntry {
+                session_id: "s1".into(),
+                keep_count: 1,
+            }],
+            deletes: vec![wire::DeleteEntry {
+                session_id: "s2".into(),
+                remove_files: false,
+            }],
+            message_removals: vec![wire::MessageRemoval {
+                session_id: "s1".into(),
+                message_id: "m9".into(),
+            }],
+            overrides: wire::OverridesPatch {
+                model_override: Some(Some(json!({ "providerId": "p", "model": "m" }))),
+                effort_override: Some(None),
+                agent_override: Some(Some("daily".into())),
+            },
+        };
+        let value = serde_json::to_value(&incoming).expect("协议批次可序列化");
+        let core: CommitBatch = serde_json::from_value(value).expect("core 应接受协议形状");
+        let back: wire::CommitBatch =
+            serde_json::from_value(serde_json::to_value(&core).expect("core 批次可序列化"))
+                .expect("core 输出应能被协议解回");
+        assert_eq!(back, incoming);
     }
 
     #[test]

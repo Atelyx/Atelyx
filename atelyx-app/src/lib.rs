@@ -15,7 +15,6 @@ mod chat_composer;
 mod chat_input;
 mod chat_stream;
 mod app_icon;
-mod chat_view;
 mod color_picker_actions;
 mod commands;
 mod history_browser;
@@ -456,13 +455,11 @@ enum Message {
     /// 只读档拖选移动中的落点（文档源字节偏移）。
     NoteSelectTo(usize),
     /// 对话正文拖选起点（消息段标识 + 段内文档源字节偏移）。
-    ChatSelectStart { scope: markdown_select::SelectScope, offset: usize },
     /// 对话正文拖选移动中的落点（段标识 + 段内偏移）。
-    ChatSelectTo { scope: u64, offset: usize },
     /// 选区复制（Ctrl/Cmd+C 未被输入部件捕获时；未命中选区则回落到命令路由）。
     CopyKey { key: keyboard::Key, mods: keyboard::Modifiers },
     /// 右键菜单「复制」。
-    CopySelection(markdown_select::SelectionTarget),
+    CopySelection,
     /// 编辑面事件（部件只上报，正文/光标/选区真相在应用层）。
     Editor(markdown_edit::EditorEvent),
     /// 属性面板消息（frontmatter 类型化编辑）。
@@ -1737,7 +1734,7 @@ impl App {
                 focused_window: None,
                 market_cache_path,
                 ai_sub_tab: "providers".into(),
-                chat: chat_actions::ChatState::new(),
+                chat: chat_actions::ChatState::default(),
                 repo_config: vault::VaultConfig::default(),
                 agents: Vec::new(),
                 ai: settings_view::ai::AiState::default(),
@@ -2342,41 +2339,16 @@ impl App {
                 }
                 Task::none()
             }
-            Message::ChatSelectStart { scope, offset } => {
-                self.chat.selection = Some(markdown_select::ChatSelection {
-                    scope: scope.id,
-                    doc_key: scope.doc_key,
-                    anchor: offset,
-                    head: offset,
-                    dragging: true,
-                });
-                Task::none()
-            }
-            Message::ChatSelectTo { scope, offset } => {
-                if let Some(sel) = self.chat.selection.as_mut() {
-                    if sel.dragging && sel.scope == scope {
-                        sel.head = offset;
-                    }
-                }
-                Task::none()
-            }
             Message::CopyKey { key, mods } => {
                 if self.note_mode == NoteMode::Read && self.note_selection.is_some() {
                     self.copy_note_selection()
-                } else if let Some(task) = self.chat_copy_task() {
-                    task
                 } else {
                     self.on_key_command(key, mods)
                 }
             }
-            Message::CopySelection(target) => {
+            Message::CopySelection => {
                 self.dismiss_popup();
-                match target {
-                    markdown_select::SelectionTarget::Note => self.copy_note_selection(),
-                    markdown_select::SelectionTarget::Chat => {
-                        self.chat_copy_task().unwrap_or(Task::none())
-                    }
-                }
+                self.copy_note_selection()
             }
             Message::Editor(event) => self.on_editor(event),
             Message::Props(m) => self.on_props(m),
@@ -3130,7 +3102,6 @@ impl App {
                 Task::none()
             }
             Message::UiTick => {
-                chat_actions::on_ui_tick(self);
                 self.notifications.retain(|n| !n.expired());
                 // 拖拽悬停折叠目录到点自动展开（展开后该行不再是候选，避免反复触发）
                 let spring = self.spring_open_dir();
@@ -3231,13 +3202,9 @@ impl App {
                 let note_press_inside = std::mem::take(&mut self.note_press_inside);
                 // 选区右键菜单内按压（外点已在同批先行关闭弹层）：松手时保留选区
                 self.selection_menu_press = self.popup.as_ref().is_some_and(|(w, open)| {
-                    *w == id && matches!(open.state, PopupState::SelectionMenu { .. })
+                    *w == id && matches!(open.state, PopupState::SelectionMenu)
                 });
                 // 对话输入面外点失焦：同批输入部件按压（Focus 事件）先行置位
-                let chat_press_inside = std::mem::take(&mut self.chat.press_inside);
-                if self.chat.input.focused && !chat_press_inside {
-                    self.chat.input.focused = false;
-                }
                 // 画布卡输入面同理：按压在卡输入面内（Focus 事件同批置位）保持焦点，否则失焦
                 if let Some(s) = self.canvas.as_mut() {
                     let focused: Option<String> = s
@@ -3476,13 +3443,6 @@ impl App {
                         self.note_selection = None;
                     }
                 }
-                if let Some(sel) = self.chat.selection.as_mut() {
-                    if sel.dragging {
-                        sel.dragging = false;
-                    } else if !keep {
-                        self.chat.selection = None;
-                    }
-                }
                 self.press = None;
                 self.tab_press = None;
                 self.file_press = None;
@@ -3712,6 +3672,13 @@ impl App {
                 // 插件（重启 / 重新启用后）就绪：已挂的面重新通知，插件据此重建界面；
                 // 停用 / 失败 / 熔断：该插件的窗口随会话收尾关闭（重启退避中不动作）
                 let mut task = Task::none();
+                if let PluginEvent::AiChatEvent { params, .. } = event.as_ref() {
+                    // 流式对话事件只更新对应会话 / 卡片，不进注册表重建
+                    let task = chat_actions::on_ai_chat_event(self, params.clone());
+                    self.schedule_canvas_save();
+                    settings_view::plugins::on_event(self, *event);
+                    return task;
+                }
                 if let PluginEvent::StatusChanged { id, status } = event.as_ref() {
                     if *status == PluginStatus::Running {
                         for (plugin_id, surface_id) in self.plugin_surfaces.iter() {
@@ -3734,6 +3701,17 @@ impl App {
                             .collect();
                         for os in to_close {
                             task = task.chain(window::close(os));
+                        }
+                        // 核心异常退出 / 被停用都没有插件侧收尾：替在途 run 补发失败终态
+                        // （正常停用同样收掉在途 run，避免面板永久停在「回复中」）
+                        if *id == atelyx_core::plugin_runtime::AI_CORE_PLUGIN {
+                            let sessions = chat_actions::in_flight_sessions(self);
+                            if !sessions.is_empty() {
+                                self.plugins.settle_ai_core_runs(
+                                    &sessions,
+                                    "AI 核心已停止，本轮回复中断",
+                                );
+                            }
                         }
                     }
                 }
@@ -4332,7 +4310,10 @@ impl App {
                 // 键盘调整上次拖动过的把手（±2%，双侧钳 12%）；
                 // 门控：编辑面聚焦 / 对话输入聚焦 / 源码档 / 行内重命名在途时方向键属文本操作，不调把手
                 if self.edit.focused
-                    || self.chat.input.focused
+                    || self
+                        .canvas
+                        .as_ref()
+                        .is_some_and(|s| s.view.card_chat.values().any(|c| c.draft.focused))
                     || self.note_mode == NoteMode::Source
                     || self.rename.is_some()
                     || self.popup.is_some()
@@ -6457,24 +6438,6 @@ impl App {
         iced::clipboard::write(text)
     }
 
-    /// 对话正文选区复制：命中非空选区才产出任务，否则交回命令路由（表格复制等）。
-    fn chat_copy_task(&self) -> Option<Task<Message>> {
-        let selection = self.chat.selection?;
-        let (from, to) = selection.range();
-        if from >= to {
-            return None;
-        }
-        let doc = self.chat.docs.get(&selection.doc_key)?;
-        let text = markdown_view::selected_text(
-            doc,
-            &self.theme,
-            &self.note_images,
-            true,
-            (from, to),
-        );
-        (!text.is_empty()).then(|| iced::clipboard::write(text))
-    }
-
     /// 进入预览编辑档：不揭示任何块、不持光标，首帧全篇按块渲染。
     fn enter_edit_mode(&mut self) {
         self.note_mode = NoteMode::Edit;
@@ -7634,8 +7597,8 @@ impl App {
                     Some(Message::Release)
                 }
                 Event::Window(window::Event::FileDropped(path)) => {
-                    // 外部文件拖入：路由到对话面板（是否纳用由编排按当前布局判定）
-                    Some(Message::Chat(chat_actions::ChatMsg::FileDropped { window, path }))
+                    // 外部文件拖入：路由到画布对话卡（面板由插件自理）
+                    Some(Message::Chat(chat_actions::ChatMsg::FileDropped(path)))
                 }
                 _ => None,
             }),

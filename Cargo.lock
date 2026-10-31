@@ -442,6 +442,32 @@ name = "atelyx-plugin-abi"
 version = "0.1.0"
 
 [[package]]
+name = "atelyx-plugin-ai-core"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "atelyx-plugin-protocol",
+ "atelyx-plugin-sdk",
+ "base64 0.22.1",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "atelyx-plugin-ai-panel"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "atelyx-plugin-protocol",
+ "atelyx-plugin-sdk",
+ "serde_json",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "atelyx-plugin-calendar"
 version = "0.1.0"
 dependencies = [

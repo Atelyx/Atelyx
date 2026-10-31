@@ -18,7 +18,7 @@ use iced::{Border, Color, Element, Font, Length, Padding, Size};
 
 use crate::markdown_edit::ParagraphT;
 use crate::markdown_select::{
-    ChatSelection, NoteSelection, SelectRun, SelectScope, SelectableRich,
+    NoteSelection, SelectRun, SelectableRich,
 };
 use crate::ui::text;
 use crate::Message;
@@ -135,36 +135,11 @@ pub fn document_body_scaled<'a>(
     document_body_with(doc, theme, images, soft_break, scale, SelectMode::Off)
 }
 
-/// 对话正文体（可拖选）：`scope` 标识本消息段，`selection` 为应用层选区（按段隔离）。
-pub fn document_body_select<'a>(
-    doc: &'a MarkdownDocument,
-    theme: &iced::Theme,
-    images: &'a ImageHandles,
-    soft_break: bool,
-    scale: f32,
-    scope: SelectScope,
-    selection: Option<&'a ChatSelection>,
-) -> Element<'a, Message> {
-    document_body_with(
-        doc,
-        theme,
-        images,
-        soft_break,
-        scale,
-        SelectMode::Chat { scope, selection },
-    )
-}
-
-/// 只读面的拖选档位：笔记只读档整篇一个文档；对话按消息段各持一份选区
-/// （只读面其余调用方用纯富文本）。
+/// 只读面的拖选档位：笔记只读档整篇一个文档（只读面其余调用方用纯富文本）。
 #[derive(Clone, Copy)]
 enum SelectMode<'a> {
     Off,
     Note(Option<&'a NoteSelection>),
-    Chat {
-        scope: SelectScope,
-        selection: Option<&'a ChatSelection>,
-    },
 }
 
 impl SelectMode<'_> {
@@ -1522,9 +1497,6 @@ fn code_body<'a>(code: &str, hit: Option<((usize, usize), f32)>, scale: f32) -> 
                         widget = widget.selection((from, to));
                     }
                 }
-            }
-            SelectMode::Chat { scope, selection } => {
-                widget = widget.chat_selection(scope, selection);
             }
         }
         widget.into()

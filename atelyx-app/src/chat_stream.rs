@@ -4,14 +4,10 @@
 
 use std::collections::{HashMap, HashSet};
 
-use iced::widget::text::Span;
 use iced::widget::{button, column, container, row};
 use iced::{border, Length, Padding};
 use serde_json::{json, Value};
 
-use crate::chat_actions::ChatMsg;
-use crate::markdown_select::{ChatSelection, SelectRun, SelectScope, SelectableRich};
-use crate::markdown_view::LinkTarget;
 use crate::ui::icon::icon;
 use crate::ui::{controls, palette as pal};
 use crate::ui::scroll;
@@ -20,15 +16,6 @@ use crate::Message;
 
 /// 折叠态摘要的单行字符上限（中英文混排按字符计）。
 const SUMMARY_LINE_CHARS: usize = 56;
-
-/// 折叠块开合的消息路由（开合状态落在谁的视图状态里由调用方定）。
-#[derive(Debug, Clone, Copy)]
-pub enum ToggleRoute {
-    /// 对话面板：`ChatState.expanded`。
-    Panel,
-    /// 画布对话卡：画布会话视图状态。
-    Canvas,
-}
 
 /// 消息操作按钮行钩子：参数 = (消息, 是否 assistant)。只读流传 `None`。
 pub type ActionsHook<'a> =
@@ -52,12 +39,6 @@ pub struct StreamCtx<'a> {
     pub markdown: bool,
     /// 流式中的消息 id（None = 无流式态；画布只读流恒 None）。
     pub streaming_id: Option<&'a str>,
-    /// 折叠块开合的消息路由。
-    pub toggle: ToggleRoute,
-    /// 正文可拖选（对话面板；画布只读流为假）。
-    pub selectable: bool,
-    /// 应用层对话选区（按消息段隔离；`selectable` 为假时不消费）。
-    pub selection: Option<&'a ChatSelection>,
 }
 
 /// 渲染消息列内容（无滚动容器，调用方自包 `scrollable`）：压缩标记 + 逐条消息。
@@ -80,7 +61,7 @@ pub fn message_column<'a>(
             ctx.streaming_id == Some(m.get("id").and_then(Value::as_str).unwrap_or(""));
         let message_id = m.get("id").and_then(Value::as_str).unwrap_or("");
         match m["role"].as_str() {
-            Some("user") => col = col.push(user_bubble(m, part_scope(message_id, 0), &ctx)),
+            Some("user") => col = col.push(user_bubble(m, &ctx)),
             Some("assistant") => {
                 col = col.push(assistant_block(m, is_streaming_msg, message_id, &ctx))
             }
@@ -94,15 +75,6 @@ pub fn message_column<'a>(
         }
     }
     col.into()
-}
-
-/// 消息正文段标识：消息 id + 段序哈希（同一消息内的步骤与正文互不串选）。
-fn part_scope(message_id: &str, part: usize) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    message_id.hash(&mut hasher);
-    part.hash(&mut hasher);
-    hasher.finish()
 }
 
 /// 压缩标记的插入位（消息数组下标；= 长度表示落在列表末尾）；无注解 / 锚点失配 = None。
@@ -161,7 +133,7 @@ fn compaction_marker(session: &Value, scale: f32) -> Option<iced::Element<'stati
 
 /// user 气泡（右对齐、按内容收缩、上限 560px、displayContent 优先；引用标签按
 /// mention 胶囊渲染，图片附件出缩略图行）。
-fn user_bubble<'a>(m: &'a Value, scope: u64, ctx: &StreamCtx<'a>) -> iced::Element<'a, Message> {
+fn user_bubble<'a>(m: &'a Value, ctx: &StreamCtx<'a>) -> iced::Element<'a, Message> {
     // displayContent 存在即以它为正文（可为空——纯图消息）；缺失（旧消息）回落 content
     let source = match m.get("displayContent") {
         Some(Value::String(s)) => s.as_str(),
@@ -174,11 +146,11 @@ fn user_bubble<'a>(m: &'a Value, scope: u64, ctx: &StreamCtx<'a>) -> iced::Eleme
     // 正文：单行纯文本直接按文本渲染（Markdown 整段渲染恒撑满宽度，短句会得到
     // 一个巨大的空盒子）；带引用的消息用 mention 候选解析（胶囊高亮）
     let body: iced::Element<'a, Message> = if !sig.is_empty() {
-        doc_by_key(ctx, source, crate::chat_actions::doc_key(source, &sig), scope)
+        doc_by_key(ctx, source, crate::chat_actions::doc_key(source, &sig))
     } else if is_plain_line(source) {
-        plain_body(ctx, source, scope)
+        plain_body(ctx, source)
     } else {
-        markdown_doc(ctx, source, scope)
+        markdown_doc(ctx, source)
     };
     col = col.push(
         container(body)
@@ -255,8 +227,7 @@ fn assistant_block<'a>(
     let content = m.get("content").and_then(Value::as_str).unwrap_or("");
     let steps = m.get("steps").and_then(Value::as_array);
     let s = ctx.scale;
-    let final_scope = part_scope(message_id, steps.map_or(0, |s| s.len()) + 1);
-    let mut col = column![].spacing(6.0 * s);
+        let mut col = column![].spacing(6.0 * s);
     if let Some(steps) = steps {
         let last_step = steps.len().saturating_sub(1);
         for (idx, s) in steps.iter().enumerate() {
@@ -268,7 +239,7 @@ fn assistant_block<'a>(
                 Some("text") => {
                     let t = s.get("text").and_then(Value::as_str).unwrap_or("");
                     if !t.is_empty() {
-                        col = col.push(markdown_doc(ctx, t, part_scope(message_id, idx + 1)));
+                        col = col.push(markdown_doc(ctx, t));
                     }
                 }
                 Some("tool") => col = col.push(tool_block(ctx, s, &key)),
@@ -283,7 +254,7 @@ fn assistant_block<'a>(
         col = col.push(controls::h_divider_subtle());
     }
     if !content.is_empty() {
-        col = col.push(markdown_doc(ctx, content, final_scope));
+        col = col.push(markdown_doc(ctx, content));
     } else if streaming && steps.map(|ss| ss.is_empty()).unwrap_or(true) {
         col = col.push(text("生成中…").size(pal::fs_caption() * s).color(pal::TEXT_MUTED));
     }
@@ -395,7 +366,7 @@ struct StepBlock<'a> {
 }
 
 /// 可折叠步骤块（思考 / 工具共用）：折叠态一行，展开态正文（超高滚动）。
-/// 展开集由调用方自持（键 = 消息 id + 步骤序），开合经 [`ToggleRoute`] 路由。
+/// 展开集由调用方自持（键 = 消息 id + 步骤序）。
 /// 折叠块摘要单行化：换行折叠为空格 + 按字符数截断加省略号（工具结果天然多行）。
 fn one_line(s: &str, cap_chars: usize) -> String {
     let mut out: String = s.chars().filter(|c| !c.is_control()).take(cap_chars + 1).collect();
@@ -443,12 +414,8 @@ fn details_block<'a>(
         }
         head = head.push(summary_text);
     }
-    let toggle_msg = match ctx.toggle {
-        ToggleRoute::Panel => Message::Chat(ChatMsg::ToggleStep(key.to_string())),
-        ToggleRoute::Canvas => {
-            Message::Canvas(crate::canvas_view::CanvasMsg::StreamToggle(key.to_string()))
-        }
-    };
+    let toggle_msg =
+        Message::Canvas(crate::canvas_view::CanvasMsg::StreamToggle(key.to_string()));
     let header = button(container(head).width(Length::Fill))
         .width(Length::Fill)
         .padding(Padding::ZERO.vertical(5.0 * s))
@@ -504,38 +471,17 @@ fn is_plain_line(source: &str) -> bool {
         && !source.contains(['*', '_', '`', '[', ']', '#', '>', '|', '\\', '~'])
 }
 
-/// 单行纯文本行高：对齐 `text()` 的默认行高，短句气泡的行盒高度不随可拖选档改变。
-const PLAIN_LINE_HEIGHT: f32 = 1.3;
-
-/// 单行纯文本消息体（气泡按内容收缩）：可拖选档用单片段自绘，其余走轻量文本。
-fn plain_body<'a>(ctx: &StreamCtx<'a>, source: &'a str, scope: u64) -> iced::Element<'a, Message> {
-    if !ctx.selectable {
-        return text(source.to_string())
-            .size(pal::fs_body() * ctx.scale)
-            .color(pal::TEXT_PRIMARY)
-            .into();
-    }
-    let scope =
-        SelectScope { id: scope, doc_key: crate::chat_actions::source_hash(source) };
-    SelectableRich::new(
-        vec![Span::<LinkTarget, iced::Font>::new(source).font(crate::ui::regular())],
-        vec![SelectRun::new((0, source.len()), source.len())],
-    )
-    .size(pal::fs_body() * ctx.scale)
-    .line_height(PLAIN_LINE_HEIGHT)
-    .color_maybe(Some(pal::TEXT_PRIMARY))
-    .width(Length::Shrink)
-    .chat_selection(scope, ctx.selection)
-    .into()
+/// 单行纯文本消息体（气泡按内容收缩）。
+fn plain_body<'a>(ctx: &StreamCtx<'a>, source: &'a str) -> iced::Element<'a, Message> {
+    text(source.to_string())
+        .size(pal::fs_body() * ctx.scale)
+        .color(pal::TEXT_PRIMARY)
+        .into()
 }
 
 /// 消息 markdown 渲染（复用阅读面管线；解析缓存由调用方维护，未命中回落纯文本）。
-fn markdown_doc<'a>(
-    ctx: &StreamCtx<'a>,
-    source: &'a str,
-    scope: u64,
-) -> iced::Element<'a, Message> {
-    doc_by_key(ctx, source, crate::chat_actions::source_hash(source), scope)
+fn markdown_doc<'a>(ctx: &StreamCtx<'a>, source: &'a str) -> iced::Element<'a, Message> {
+    doc_by_key(ctx, source, crate::chat_actions::source_hash(source))
 }
 
 /// 按缓存键取解析文档渲染（键由调用方决定：普通 = 源哈希；带引用 = 源 + 引用签名）。
@@ -543,22 +489,12 @@ fn doc_by_key<'a>(
     ctx: &StreamCtx<'a>,
     source: &'a str,
     key: u64,
-    scope: u64,
 ) -> iced::Element<'a, Message> {
     static EMPTY_IMAGES: std::sync::OnceLock<crate::markdown_view::ImageHandles> =
         std::sync::OnceLock::new();
     let images = EMPTY_IMAGES.get_or_init(std::collections::HashMap::new);
     let doc = ctx.markdown.then(|| ctx.docs.get(&key)).flatten();
     match doc {
-        Some(doc) if ctx.selectable => crate::markdown_view::document_body_select(
-            doc,
-            ctx.theme,
-            images,
-            true,
-            ctx.scale,
-            SelectScope { id: scope, doc_key: key },
-            ctx.selection,
-        ),
         Some(doc) => {
             crate::markdown_view::document_body_scaled(doc, ctx.theme, images, true, ctx.scale)
         }

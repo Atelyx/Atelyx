@@ -159,13 +159,6 @@ pub enum InputEvent {
     PickerClose,
 }
 
-/// 输入面事件去向：面板草稿或某张画布卡草稿。
-#[derive(Clone, Debug)]
-pub enum InputRoute {
-    Panel,
-    Card(String),
-}
-
 /// 自绘输入面部件。
 pub struct Input<'a> {
     pub draft: &'a Draft,
@@ -174,19 +167,20 @@ pub struct Input<'a> {
     /// 候选浮层开启：方向 / Enter / Esc 转交浮层。
     pub picker_open: bool,
     pub placeholder: &'a str,
-    pub route: InputRoute,
-    /// 渲染缩放（画布卡随视口缩放；面板传 1.0）。
+    /// 事件归属的对话卡节点 id。
+    pub node: String,
+    /// 渲染缩放（画布卡随视口缩放）。
     pub scale: f32,
 }
 
 impl<'a> Input<'a> {
-    pub fn new(draft: &'a Draft, refs: &'a [RefEntry], route: InputRoute) -> Self {
+    pub fn new(draft: &'a Draft, refs: &'a [RefEntry], node: String) -> Self {
         Self {
             draft,
             refs,
             picker_open: false,
             placeholder: "",
-            route,
+            node,
             scale: 1.0,
         }
     }
@@ -208,12 +202,9 @@ impl<'a> Input<'a> {
     }
 
     fn publish(&self, shell: &mut Shell<'_, Message>, event: InputEvent) {
-        let message = match &self.route {
-            InputRoute::Panel => Message::Chat(crate::chat_actions::ChatMsg::Input(event)),
-            InputRoute::Card(node) => Message::Canvas(crate::canvas_view::CanvasMsg::Chat(
-                crate::canvas_chat::CanvasChatMsg::Input { node: node.clone(), event },
-            )),
-        };
+        let message = Message::Canvas(crate::canvas_view::CanvasMsg::Chat(
+            crate::canvas_chat::CanvasChatMsg::Input { node: self.node.clone(), event },
+        ));
         shell.publish(message);
         shell.capture_event();
         shell.request_redraw();

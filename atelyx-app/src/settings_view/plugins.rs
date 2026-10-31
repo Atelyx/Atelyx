@@ -304,18 +304,30 @@ pub fn runtime_stream(spec: &RuntimeSpec) -> impl iced::futures::Stream<Item = M
             .await;
         }
         loop {
-            match events.recv().await {
-                Ok(event) => {
-                    let _ = iced::futures::SinkExt::send(
-                        &mut output,
-                        Message::PluginEvent(Box::new(event)),
-                    )
-                    .await;
-                }
-                // 广播落后只丢中间事件、连接不失效：继续收后续事件
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            let event = tokio::select! {
+                event = events.recv() => match event {
+                    Ok(event) => event,
+                    // 广播落后只丢中间事件、连接不失效：继续收后续事件
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                },
+                chat = runtime.recv_ai_chat_event() => match chat {
+                    Some(params) => PluginEvent::AiChatEvent {
+                        id: atelyx_core::plugin_runtime::AI_CORE_PLUGIN.to_string(),
+                        params,
+                    },
+                    None => break,
+                },
+            };
+            // 对话事件走上面的无界通道：广播里的副本跳过，避免重复应用
+            if matches!(event, PluginEvent::AiChatEvent { .. }) {
+                continue;
             }
+            let _ = iced::futures::SinkExt::send(
+                &mut output,
+                Message::PluginEvent(Box::new(event)),
+            )
+            .await;
         }
     })
 }
@@ -353,8 +365,8 @@ pub fn host_requests_stream(spec: &RuntimeSpec) -> impl iced::futures::Stream<It
                 HostRequest::WindowBeginDrag { plugin_id, request_id, surface_id } => {
                     Message::PluginWindowBeginDrag { request_id, plugin_id, surface_id }
                 }
-                HostRequest::ChatSend { plugin_id, request_id, params } => Message::Chat(
-                    crate::chat_actions::ChatMsg::PluginSend { request_id, plugin_id, params },
+                HostRequest::ChatSend { plugin_id: _, request_id, params } => Message::Chat(
+                    crate::chat_actions::ChatMsg::PluginSend { request_id, params },
                 ),
                 HostRequest::ChatStop { request_id, params, .. } => Message::Chat(
                     crate::chat_actions::ChatMsg::PluginStop {
@@ -389,6 +401,27 @@ pub fn host_requests_stream(spec: &RuntimeSpec) -> impl iced::futures::Stream<It
                         request_id,
                         session_id: params.session_id,
                     },
+                ),
+                HostRequest::ChatRetitle { request_id, params, .. } => Message::Chat(
+                    crate::chat_actions::ChatMsg::PluginRetitle {
+                        request_id,
+                        session_id: params.session_id,
+                    },
+                ),
+                HostRequest::ChatSessionRead { request_id, params, .. } => Message::Chat(
+                    crate::chat_actions::ChatMsg::PluginSessionRead {
+                        request_id,
+                        session_id: params.session_id,
+                    },
+                ),
+                HostRequest::ChatSessionWrite { request_id, batch, .. } => Message::Chat(
+                    crate::chat_actions::ChatMsg::PluginSessionWrite { request_id, batch },
+                ),
+                HostRequest::ChatSessionSnapshot { request_id, .. } => Message::Chat(
+                    crate::chat_actions::ChatMsg::PluginSessionSnapshot { request_id },
+                ),
+                HostRequest::AiToolExecute { request_id, params, .. } => Message::Chat(
+                    crate::chat_actions::ChatMsg::PluginToolExecute { request_id, params },
                 ),
                 HostRequest::ClipboardWrite { request_id, text, .. } => {
                     Message::Plugins(PluginsMsg::ClipboardWrite { request_id, text })
@@ -1839,7 +1872,7 @@ fn ai_models(app: &App) -> AiModelsResult {
                 .collect(),
         })
         .collect();
-    let current = app.chat.model_override.as_ref().and_then(|value| {
+    let current = crate::chat_actions::chat_overrides().0.as_ref().and_then(|value| {
         Some(AiModelPick {
             provider_id: value.get("providerId")?.as_str()?.to_string(),
             model: value.get("model")?.as_str()?.to_string(),
@@ -1859,9 +1892,8 @@ fn ai_agents(app: &App) -> AiAgentsResult {
             builtin: agent.builtin.unwrap_or(false),
         })
         .collect();
-    let current = app
-        .chat
-        .active_agent_id()
+    let current = crate::chat_actions::chat_overrides()
+        .2
         .or_else(|| Some(atelyx_core::vault::BUILTIN_AGENT_CHAT_ID.to_string()));
     AiAgentsResult { agents, current }
 }
@@ -2184,6 +2216,7 @@ pub fn on_event(app: &mut App, event: PluginEvent) {
         | PluginEvent::ContributionsChanged { .. }
         | PluginEvent::AiToolsChanged { .. }
         | PluginEvent::ServiceChanged { .. }
+        | PluginEvent::AiChatEvent { .. }
         | PluginEvent::DefaultLayoutDeclared { .. } => {}
     }
     if list_changed && app.settings_open && app.settings_tab == "plugins" {

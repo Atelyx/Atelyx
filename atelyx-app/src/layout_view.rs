@@ -232,13 +232,12 @@ pub(crate) enum PopupState {
     TableViewMenu,
     /// 设置-AI：话题命名模型下拉。
     AiModelMenu,
-    /// AI 对话：模型 / 推理等级两级菜单；scope = 写入目标（面板覆盖或画布卡节点配置）。
-    ChatModelMenu { scope: crate::chat_composer::ConfigScope },
-    /// AI 对话：输入区「+」菜单（添加上下文 / 上传附件）；scope = 草稿作用域。
-    ChatPlusMenu { scope: crate::chat_composer::ComposerScope },
-    /// AI 对话面板：推理等级下拉（面板级覆盖；跟随默认 = 不发送推理参数）。
-    /// AI 对话：Agent 下拉（scope = 写入目标；缺省「对话」）。
-    ChatAgentMenu { scope: crate::chat_composer::ConfigScope },
+    /// AI 对话卡：模型 / 推理等级两级菜单（写入卡节点配置）。
+    ChatModelMenu { node: String },
+    /// AI 对话卡：输入区「+」菜单（添加上下文 / 上传附件）。
+    ChatPlusMenu { node: String },
+    /// AI 对话卡：Agent 下拉（缺省「对话」）。
+    ChatAgentMenu { node: String },
     /// 设置-AI：话题自动命名模式。
     AiNamingMenu,
     /// 设置-AI：Agent 系统提示词选择。
@@ -253,8 +252,8 @@ pub(crate) enum PopupState {
     LicenseInfo,
     /// 历史记录弹层（居中模态；kind+file 定位侧文件）。
     HistoryBrowser { kind: atelyx_core::history::HistoryKind, file: String },
-    /// 只读正文 / 对话消息的选区右键菜单（复制）。
-    SelectionMenu { target: crate::markdown_select::SelectionTarget },
+    /// 只读正文的选区右键菜单（复制）。
+    SelectionMenu,
 }
 
 impl PopupState {
@@ -280,7 +279,7 @@ impl PopupState {
             PopupState::SpaceMembers => 320.0,
             PopupState::SpaceInvite => 320.0,
             PopupState::NoteMenu => 144.0,
-            PopupState::SelectionMenu { .. } => 128.0,
+            PopupState::SelectionMenu => 128.0,
             PopupState::PropTypeMenu { .. } => 128.0,
             PopupState::TableCellMenu => 128.0,
             PopupState::TableFieldMenu { .. } => 176.0,
@@ -355,12 +354,8 @@ fn ctx_popup(window: iced::window::Id, cursor: Point, state: PopupState) -> Mess
 }
 
 /// 只读正文右键：选区复制菜单（锚点 = 光标点）。
-pub(crate) fn selection_popup(
-    window: iced::window::Id,
-    cursor: Point,
-    target: crate::markdown_select::SelectionTarget,
-) -> Message {
-    ctx_popup(window, cursor, PopupState::SelectionMenu { target })
+pub(crate) fn selection_popup(window: iced::window::Id, cursor: Point) -> Message {
+    ctx_popup(window, cursor, PopupState::SelectionMenu)
 }
 
 /// 设置-关于：开源许可模态的打开消息（居中模态不走锚点几何）。
@@ -3426,11 +3421,7 @@ pub(crate) fn note_view(app: &App, window: iced::window::Id) -> Element<'_, Mess
                 // 只读档双击正文进预览编辑档（光标落点由编辑面按释放点换算）；右键 = 选区复制菜单
                 mouse_area(scrolled)
                     .on_double_click(Message::NoteEnterEdit)
-                    .on_right_press(selection_popup(
-                        window,
-                        cursor,
-                        crate::markdown_select::SelectionTarget::Note,
-                    ))
+                    .on_right_press(selection_popup(window, cursor))
                     .into()
             }
         }
@@ -4337,22 +4328,12 @@ fn popup_element<'a>(
             (0, MenuEntry::action_icon("粘贴", "clipboard-paste", Message::Table(crate::table_view::TableMsg::Menu(Box::new(crate::table_view::TableMsg::Paste))))),
             (0, MenuEntry::action_icon("格式", "type", Message::Table(crate::table_view::TableMsg::ShowStyleBar))),
         ],
-        PopupState::SelectionMenu { target } => {
-            let has_text = match target {
-                crate::markdown_select::SelectionTarget::Note => {
-                    app.note_mode == NoteMode::Read
-                        && app.note_selection.is_some_and(|s| {
-                            let (from, to) = s.range();
-                            from < to
-                        })
-                }
-                crate::markdown_select::SelectionTarget::Chat => {
-                    app.chat.selection.is_some_and(|s| {
-                        let (from, to) = s.range();
-                        from < to
-                    })
-                }
-            };
+        PopupState::SelectionMenu => {
+            let has_text = app.note_mode == NoteMode::Read
+                && app.note_selection.is_some_and(|s| {
+                    let (from, to) = s.range();
+                    from < to
+                });
             vec![(
                 0,
                 MenuEntry::Action {
@@ -4360,7 +4341,7 @@ fn popup_element<'a>(
                     icon: Some("copy".into()),
                     danger: false,
                     disabled: !has_text,
-                    on_press: has_text.then_some(Message::CopySelection(*target)),
+                    on_press: has_text.then_some(Message::CopySelection),
                     note: None,
                     hint: None,
                 },
@@ -4649,16 +4630,6 @@ fn popup_element<'a>(
                 MenuEntry::action_icon("复制", "copy", canvas_menu(crate::canvas_view::CanvasMenuAction::CopySelection)),
             )];
             match node.map(|n| n.node_type.as_str()) {
-                Some("conversation") => {
-                    entries.push((
-                        0,
-                        MenuEntry::action_icon(
-                            "在 AI 面板打开",
-                            "message-square",
-                            canvas_menu(crate::canvas_view::CanvasMenuAction::OpenInPanel(node_id.clone())),
-                        ),
-                    ));
-                }
                 Some("table") | Some("text") => {
                     if let Some(rel) = node.and_then(|n| n.data.get("file")).and_then(Value::as_str) {
                         let label = if node.is_some_and(|n| n.node_type == "table") {
@@ -5116,26 +5087,17 @@ fn popup_element<'a>(
             }
             entries
         }
-        PopupState::ChatAgentMenu { scope } => {
+        PopupState::ChatAgentMenu { node } => {
             // 未选过 = 内置「对话」生效；名册由装载时种子补齐，恒含「对话」
-            let current = match scope {
-                crate::chat_composer::ConfigScope::Panel => app
-                    .chat
-                    .active_agent_id()
-                    .unwrap_or_else(|| atelyx_core::vault::BUILTIN_AGENT_CHAT_ID.to_string()),
-                crate::chat_composer::ConfigScope::Card { node } => card_agent_id(app, node)
-                    .unwrap_or_else(|| atelyx_core::vault::BUILTIN_AGENT_CHAT_ID.to_string()),
-            };
-            let pick = |id: String| match scope {
-                crate::chat_composer::ConfigScope::Panel => Message::Chat(
-                    crate::chat_actions::ChatMsg::AgentPick(Some(id)),
-                ),
-                crate::chat_composer::ConfigScope::Card { node } => Message::Canvas(
-                    crate::canvas_view::CanvasMsg::Chat(crate::canvas_chat::CanvasChatMsg::AgentPick {
+            let current = card_agent_id(app, node)
+                .unwrap_or_else(|| atelyx_core::vault::BUILTIN_AGENT_CHAT_ID.to_string());
+            let pick = |id: String| {
+                Message::Canvas(crate::canvas_view::CanvasMsg::Chat(
+                    crate::canvas_chat::CanvasChatMsg::AgentPick {
                         node: node.clone(),
                         agent: Some(id),
-                    }),
-                ),
+                    },
+                ))
             };
             let mut entries: Vec<(usize, MenuEntry<Message>)> = Vec::new();
             for agent in &app.agents {
@@ -5151,33 +5113,19 @@ fn popup_element<'a>(
             }
             entries
         }
-        PopupState::ChatPlusMenu { scope } => {
-            let add_ctx = match scope {
-                crate::chat_composer::ComposerScope::Panel => {
-                    Message::Chat(crate::chat_actions::ChatMsg::TriggerMention)
-                }
-                crate::chat_composer::ComposerScope::Card { node } => Message::Canvas(
-                    crate::canvas_view::CanvasMsg::Chat(
-                        crate::canvas_chat::CanvasChatMsg::TriggerMention(node.clone()),
-                    ),
-                ),
-            };
-            let upload = match scope {
-                crate::chat_composer::ComposerScope::Panel => {
-                    Message::Chat(crate::chat_actions::ChatMsg::UploadAttachment)
-                }
-                crate::chat_composer::ComposerScope::Card { node } => Message::Canvas(
-                    crate::canvas_view::CanvasMsg::Chat(
-                        crate::canvas_chat::CanvasChatMsg::PickFiles(node.clone()),
-                    ),
-                ),
-            };
+        PopupState::ChatPlusMenu { node } => {
+            let add_ctx = Message::Canvas(crate::canvas_view::CanvasMsg::Chat(
+                crate::canvas_chat::CanvasChatMsg::TriggerMention(node.clone()),
+            ));
+            let upload = Message::Canvas(crate::canvas_view::CanvasMsg::Chat(
+                crate::canvas_chat::CanvasChatMsg::PickFiles(node.clone()),
+            ));
             vec![
                 (0, MenuEntry::action("添加上下文", add_ctx)),
                 (0, MenuEntry::action("上传附件", upload)),
             ]
         }
-        PopupState::ChatModelMenu { scope } => {
+        PopupState::ChatModelMenu { node } => {
             // 两级菜单（pane 0 根 / 1 模型 / 2 推理等级）：模型与等级为正交覆盖。
             // 条目元组首元素是 pane 归属标签，pane_view 按当前 pane 过滤——必须与所在面板同值
             match pane {
@@ -5185,29 +5133,19 @@ fn popup_element<'a>(
                     let (current, pick): (
                         Option<String>,
                         Box<dyn Fn(Option<String>) -> Message>,
-                    ) = match scope {
-                        crate::chat_composer::ConfigScope::Panel => (
-                            app.chat.effort.clone(),
-                            Box::new(|v: Option<String>| {
-                                Message::Chat(crate::chat_actions::ChatMsg::EffortPicked(v))
+                    ) = {
+                        let node = node.clone();
+                        (
+                            card_effort(app, &node),
+                            Box::new(move |v: Option<String>| {
+                                Message::Canvas(crate::canvas_view::CanvasMsg::Chat(
+                                    crate::canvas_chat::CanvasChatMsg::EffortPick {
+                                        node: node.clone(),
+                                        effort: v,
+                                    },
+                                ))
                             }),
-                        ),
-                        crate::chat_composer::ConfigScope::Card { node } => {
-                            let node = node.clone();
-                            (
-                                card_effort(app, &node),
-                                Box::new(move |v: Option<String>| {
-                                    Message::Canvas(
-                                        crate::canvas_view::CanvasMsg::Chat(
-                                            crate::canvas_chat::CanvasChatMsg::EffortPick {
-                                                node: node.clone(),
-                                                effort: v,
-                                            },
-                                        ),
-                                    )
-                                }),
-                            )
-                        }
+                        )
                     };
                     [
                         (None, "默认"),
@@ -5231,26 +5169,13 @@ fn popup_element<'a>(
                     })
                     .collect::<Vec<_>>()
                 }
-                1 => match scope {
-                    crate::chat_composer::ConfigScope::Panel => {
-                        chat_model_entries(app).into_iter().map(|(_, e)| (1, e)).collect()
-                    }
-                    crate::chat_composer::ConfigScope::Card { node } => canvas_card_model_entries(app, node)
-                        .into_iter()
-                        .map(|(_, e)| (1, e))
-                        .collect(),
-                },
+                1 => canvas_card_model_entries(app, node)
+                    .into_iter()
+                    .map(|(_, e)| (1, e))
+                    .collect(),
                 _ => {
-                    let (model_label, effort_label) = match scope {
-                        crate::chat_composer::ConfigScope::Panel => (
-                            chat_model_trigger_label(app),
-                            chat_effort_label(app),
-                        ),
-                        crate::chat_composer::ConfigScope::Card { node } => (
-                            canvas_card_model_label(app, node),
-                            canvas_card_effort_label(app, node),
-                        ),
-                    };
+                    let model_label = canvas_card_model_label(app, node);
+                    let effort_label = canvas_card_effort_label(app, node);
                     vec![
                         (
                             0,
@@ -5405,20 +5330,6 @@ fn popup_text_input(
         .into()
 }
 
-/// 面板当前生效模型的显示名：覆盖的模型（跨供应商同名带供应商名消歧）；未选择 = 提示文案。
-pub(crate) fn chat_model_trigger_label(app: &App) -> String {
-    let Some(v) = &app.chat.model_override else {
-        return "选择模型".to_string();
-    };
-    match (
-        v.get("providerId").and_then(serde_json::Value::as_str),
-        v.get("model").and_then(serde_json::Value::as_str),
-    ) {
-        (Some(pid), Some(model)) => model_pick_label(app, pid, model),
-        _ => "选择模型".to_string(),
-    }
-}
-
 /// 画布卡当前生效模型显示名：卡指定优先，回落仓库默认模型；未配置 = 提示文案。
 pub(crate) fn canvas_card_model_label(app: &App, node_id: &str) -> String {
     match card_model_pick(app, node_id) {
@@ -5479,11 +5390,6 @@ fn model_pick_label(app: &App, pid: &str, model: &str) -> String {
     } else {
         display
     }
-}
-
-/// 面板推理等级显示名（触发器/根菜单行用；未选 = 默认）。
-pub(crate) fn chat_effort_label(app: &App) -> &'static str {
-    effort_label(app.chat.effort.as_deref())
 }
 
 /// 画布卡推理等级显示名（节点 `data.reasoningEffort`；未设 = 默认）。
@@ -5575,40 +5481,6 @@ fn canvas_card_model_entries(app: &App, node_id: &str) -> Vec<(usize, MenuEntry<
         }
     }
     if entries.len() == usize::from(card_has_model) {
-        entries.push((0, MenuEntry::Custom(popup_hint("先在「供应商」添加模型"), 18.0)));
-    }
-    entries
-}
-
-/// 面板模型子面板条目：按供应商分组，昵称显示。
-fn chat_model_entries(app: &App) -> Vec<(usize, MenuEntry<'static, Message>)> {
-    let current = app.chat.model_override.as_ref().and_then(|v| {
-        let provider = v.get("providerId").and_then(serde_json::Value::as_str)?;
-        let model = v.get("model").and_then(serde_json::Value::as_str)?;
-        Some((provider.to_string(), model.to_string()))
-    });
-    let mut entries: Vec<(usize, MenuEntry<'static, Message>)> = Vec::new();
-    for p in app.repo_config.providers.iter().flatten() {
-        if p.models.is_empty() {
-            continue;
-        }
-        entries.push((0, MenuEntry::Group(p.name.clone())));
-        for m in &p.models {
-            let is_current = current
-                .as_ref()
-                .is_some_and(|(provider, model)| provider == &p.id && model == &m.id);
-            let pick = Message::Chat(crate::chat_actions::ChatMsg::ModelPicked(Some((
-                p.id.clone(),
-                m.id.clone(),
-            ))));
-            entries.push((0, if is_current {
-                MenuEntry::Checked { label: model_display(m), on_press: pick }
-            } else {
-                MenuEntry::action(model_display(m), pick)
-            }));
-        }
-    }
-    if entries.is_empty() {
         entries.push((0, MenuEntry::Custom(popup_hint("先在「供应商」添加模型"), 18.0)));
     }
     entries
@@ -6082,16 +5954,6 @@ fn panel_tab_with_view(app: &App, panel_id: &str, kind: &str) -> Option<String> 
     walk(&layout::active_layout(&app.ui).tree, panel_id, kind)
 }
 
-/// 当前布局内是否存在某视图的面板标签（外部文件拖入的路由判据）。
-pub(crate) fn window_has_view(app: &App, kind: &str) -> bool {
-    fn walk(node: &LayoutNode, kind: &str) -> bool {
-        match node {
-            LayoutNode::Panel { tabs, .. } => tabs.iter().any(|t| t.view == kind),
-            LayoutNode::Split { children, .. } => children.iter().any(|c| walk(c, kind)),
-        }
-    }
-    walk(&layout::active_layout(&app.ui).tree, kind)
-}
 
 /// 最近仓库行菜单：在系统文件管理器中打开 / 从列表移除（激活仓库行不可移除）。
 /// 移除进二段确认 pane（只移出列表，不删磁盘文件）。

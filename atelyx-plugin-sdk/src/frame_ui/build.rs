@@ -292,11 +292,65 @@ impl<'c, 'a> Ui<'c, 'a> {
         self.ctx.focused(id)
     }
 
+    /// 本面的完整矩形（浮层定位用；坐标为面本地逻辑像素）。
+    pub fn bounds(&self) -> Rect {
+        self.clip
+    }
+
     /// 纵向容器：子项按声明序自上而下，`gap` 为间距。
     pub fn column(&mut self, gap: f32, build: impl FnOnce(&mut Ui<'_, 'a>)) {
         let mut sub = Ui { ctx: &mut *self.ctx, clip: self.clip, items: Vec::new() };
         build(&mut sub);
         self.items.push(column_item(sub.items, gap));
+    }
+
+    /// 水平居中的纵向容器（空态、提示块）。
+    pub fn center_column(&mut self, gap: f32, build: impl FnOnce(&mut Ui<'_, 'a>)) {
+        let mut sub = Ui::new(&mut *self.ctx, self.clip);
+        build(&mut sub);
+        let shared = Rc::new(sub.into_items());
+        let for_size = Rc::clone(&shared);
+        self.push(Item {
+            width: Width::Fill,
+            fill_height: false,
+            height: Box::new(move |metrics, width| column_height(&for_size, metrics, width, gap)),
+            draw: Box::new(move |ctx, rect, clip| {
+                let visible = rect.intersect(clip);
+                if visible.is_empty() {
+                    return;
+                }
+                let mut y = rect.y;
+                for item in shared.iter() {
+                    let width = child_width(item, &mut ctx.metrics, rect.w);
+                    let height = child_height(item, &mut ctx.metrics, width);
+                    let child = Rect::new(rect.x + (rect.w - width) / 2.0, y, width, height);
+                    let child_visible = child.intersect(visible);
+                    if !child_visible.is_empty() {
+                        (item.draw)(ctx, child, child_visible);
+                    }
+                    y += height + gap;
+                }
+            }),
+        });
+    }
+
+    /// 撑满面的纵向容器：根节点按面高收住，内部的滚动区拿剩余高度（整页布局用）。
+    pub fn fill_column(&mut self, gap: f32, build: impl FnOnce(&mut Ui<'_, 'a>)) {
+        let mut sub = Ui { ctx: &mut *self.ctx, clip: self.clip, items: Vec::new() };
+        build(&mut sub);
+        let mut item = column_item(sub.items, gap);
+        item.fill_height = true;
+        self.items.push(item);
+    }
+
+    /// 定宽侧栏：在撑满高度的行里占满高，内部撑满子项（滚动区）拿剩余高度。
+    pub fn side(&mut self, width: f32, build: impl FnOnce(&mut Ui<'_, 'a>)) {
+        let mut sub = Ui { ctx: &mut *self.ctx, clip: self.clip, items: Vec::new() };
+        build(&mut sub);
+        let mut item = column_item(sub.items, 0.0);
+        item.width = Width::Fixed(width);
+        item.fill_height = true;
+        self.items.push(item);
     }
 
     /// 横向容器：收缩子项按内容宽，撑满子项均分剩余宽度，子项在行内垂直居中。
@@ -306,11 +360,39 @@ impl<'c, 'a> Ui<'c, 'a> {
         self.items.push(row_item(sub.items, gap, false));
     }
 
+    /// 收缩宽度的横向容器：宽度由子项决定（行内右对齐按钮组）。
+    pub fn row_fit(&mut self, gap: f32, build: impl FnOnce(&mut Ui<'_, 'a>)) {
+        let mut sub = Ui::new(&mut *self.ctx, self.clip);
+        build(&mut sub);
+        let shared = Rc::new(sub.into_items());
+        let for_width = Rc::clone(&shared);
+        let for_height = Rc::clone(&shared);
+        let for_draw = Rc::clone(&shared);
+        self.push(Item {
+            width: Width::Fit(Box::new(move |metrics| {
+                let slots = row_slots(&for_width, metrics, f32::MAX / 4.0, gap);
+                slots.widths.iter().sum::<f32>() + gap * for_width.len().saturating_sub(1) as f32
+            })),
+            fill_height: false,
+            height: Box::new(move |metrics, width| {
+                row_slots(&for_height, metrics, width, gap).total_height
+            }),
+            draw: Box::new(move |ctx, rect, clip| draw_row(ctx, &for_draw, rect, clip, gap)),
+        });
+    }
+
     /// 占满剩余高度的横向容器：子项若声明吃满高度（滚动区）即拿到整行高度，用于并排分栏各自滚动。
     pub fn row_fill(&mut self, gap: f32, build: impl FnOnce(&mut Ui<'_, 'a>)) {
         let mut sub = Ui { ctx: &mut *self.ctx, clip: self.clip, items: Vec::new() };
         build(&mut sub);
         self.items.push(row_item(sub.items, gap, true));
+    }
+
+    /// 层叠容器：子项都从左上角铺开，按声明序绘制（后声明压住先声明，命中同样后优先）。
+    pub fn stack(&mut self, build: impl FnOnce(&mut Ui<'_, 'a>)) {
+        let mut sub = Ui::new(&mut *self.ctx, self.clip);
+        build(&mut sub);
+        self.items.push(stack_item(sub.items));
     }
 
     /// 浮层：内容按纵向容器排在 `rect` 内，主内容布局完成后整体追加绘制与命中区。
@@ -358,6 +440,38 @@ pub(crate) fn child_width(item: &Item, metrics: &mut Metrics, available: f32) ->
 
 pub(crate) fn child_height(item: &Item, metrics: &mut Metrics, width: f32) -> f32 {
     (item.height)(metrics, width)
+}
+
+fn stack_item(items: Vec<Item>) -> Item {
+    let shared = Rc::new(items);
+    let for_size = Rc::clone(&shared);
+    Item {
+        width: Width::Fill,
+        fill_height: true,
+        height: Box::new(move |metrics, width| {
+            for_size
+                .iter()
+                .map(|item| child_height(item, metrics, width))
+                .fold(0.0_f32, f32::max)
+        }),
+        draw: Box::new(move |ctx, rect, clip| draw_stack(ctx, &shared, rect, clip)),
+    }
+}
+
+fn draw_stack(ctx: &mut BuildCtx<'_>, items: &[Item], rect: Rect, clip: Rect) {
+    for item in items {
+        let width = child_width(item, &mut ctx.metrics, rect.w);
+        let height = if item.fill_height {
+            rect.h
+        } else {
+            child_height(item, &mut ctx.metrics, width).min(rect.h)
+        };
+        let child = Rect::new(rect.x, rect.y, width, height);
+        let visible = child.intersect(clip);
+        if !visible.is_empty() {
+            (item.draw)(ctx, child, visible);
+        }
+    }
 }
 
 fn column_item(items: Vec<Item>, gap: f32) -> Item {
@@ -432,22 +546,23 @@ struct RowSlots {
 
 /// 行内槽位：固定 / 收缩子项先占宽，撑满子项均分剩余；行高取子项固有高的最大值。
 fn row_slots(items: &[Item], metrics: &mut Metrics, width: f32, gap: f32) -> RowSlots {
+    let gaps = gap * items.len().saturating_sub(1) as f32;
+    let available = (width - gaps).max(0.0);
     let mut fixed: f32 = 0.0;
     let mut fill_count = 0usize;
     for item in items {
         match &item.width {
-            Width::Fixed(w) => fixed += w,
-            Width::Fit(measure) => fixed += measure(metrics),
+            Width::Fixed(w) => fixed += (*w).min(available),
+            Width::Fit(measure) => fixed += measure(metrics).min(available),
             Width::Fill => fill_count += 1,
         }
     }
-    let gaps = gap * items.len().saturating_sub(1) as f32;
-    let share = if fill_count > 0 { ((width - fixed - gaps).max(0.0)) / fill_count as f32 } else { 0.0 };
+    let share = if fill_count > 0 { (width - fixed - gaps).max(0.0) / fill_count as f32 } else { 0.0 };
     let mut widths = Vec::with_capacity(items.len());
     for item in items {
         widths.push(match &item.width {
-            Width::Fixed(w) => *w,
-            Width::Fit(measure) => measure(metrics),
+            Width::Fixed(w) => (*w).min(available),
+            Width::Fit(measure) => measure(metrics).min(available),
             Width::Fill => share,
         });
     }

@@ -26,6 +26,9 @@ pub mod name {
     /// 协作空间团队元数据的某个键变更（任何成员经 `collab.metaPatch` 或宿主写入）。
     /// payload 见 [`SpaceMetaChangedPayload`]；订阅方按 `key` 过滤后重取该键。
     pub const SPACE_META_CHANGED: &str = "space:meta.changed";
+    /// 外部文件拖入窗口（宿主只转发绝对路径，读取由订阅方经 `fs` 自理）。
+    /// payload 见 [`FileDropPayload`]；未挂载界面的插件应忽略。
+    pub const WINDOW_FILE_DROP: &str = "window:file.drop";
 }
 
 /// [`name::VAULT_SWITCH`] 的 payload（`kind` 与字段名均 camelCase，与协议其余类型同一口径）。
@@ -69,9 +72,12 @@ pub struct TableSelectionChangedPayload {
 pub struct ChatChangedPayload {
     pub session_id: String,
     pub kind: ChatChangeKind,
+    /// `persist` 变更的当前落盘失败（`None` = 已恢复）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persist_error: Option<crate::chat::ChatPersistError>,
 }
 
-/// 会话变更种类：创建 / 消息列表变化 / 元数据变化 / 删除。
+/// 会话变更种类：创建 / 消息列表变化 / 元数据变化 / 删除 / 真源整体重载 / 落盘状态变化。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ChatChangeKind {
@@ -79,6 +85,10 @@ pub enum ChatChangeKind {
     Messages,
     Meta,
     Deleted,
+    /// 会话真源已重新装载（换仓 / 空间装载完成）：`sessionId` 为空，订阅方应整体重取。
+    Reload,
+    /// 落盘失败置位 / 恢复：`sessionId` 为空，载荷带当前 `persistError`。
+    Persist,
 }
 
 /// [`name::VAULT_FILE_CHANGED`] 的 payload：仓库相对路径 + 变更种类（改名另带旧路径）。
@@ -97,6 +107,13 @@ pub struct FileChangedPayload {
 #[serde(rename_all = "camelCase")]
 pub struct SpaceMetaChangedPayload {
     pub key: String,
+}
+
+/// [`name::WINDOW_FILE_DROP`] 的 payload：本次拖入的绝对路径（一次事件可含多张图）。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct FileDropPayload {
+    pub paths: Vec<String>,
 }
 
 /// 文件变更种类：新建 / 内容写入 / 删除 / 改名或移动。
