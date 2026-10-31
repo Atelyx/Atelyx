@@ -1326,12 +1326,12 @@ fn regenerate_now(app: &mut App, space_prompt: Option<String>) -> iced::Task<Mes
     }
     let history = store().session_messages(&session_id).unwrap_or_default();
     let compaction = session.get("compaction").cloned().filter(|c| !c.is_null());
-    // 末条 user 的注入块按当下状态重拼：引用块按 displayContent + refs 重扫
-    //（标签删除 = 作废），打开文件块按当前窗口状态重写；块随请求内联，不改写磁盘消息。
+    // 末条 user 的引用块按当下状态重拼：按 displayContent + refs 重扫（标签删除 = 作废），
+    // 块随请求内联，不改写磁盘消息。
     let mut history = history;
     if let Some(last) = history.last_mut() {
         if last["role"] == json!("user") {
-            rebuild_user_injection(app, last);
+            rebuild_user_injection(last);
         }
     }
     app.chat.refresh_session(&session_id);
@@ -1339,26 +1339,21 @@ fn regenerate_now(app: &mut App, space_prompt: Option<String>) -> iced::Task<Mes
     start_run(config, session_id, compaction, history, app)
 }
 
-/// 重建一条 user 消息的注入内容（重生成路径）：无 refs 的旧消息原样保留；
-/// 有 refs 的按 displayContent 重扫命中，重拼引用路径块与打开文件块。
-fn rebuild_user_injection(app: &App, message: &mut Value) {
-    let refs = message_refs(message);
-    if refs.is_empty() {
-        return;
-    }
-    let display = message
+/// 重建一条 user 消息的引用路径块（重生成路径）：按 displayContent 重扫命中重拼，
+/// 无原始输入可依据的旧消息原样保留。
+fn rebuild_user_injection(message: &mut Value) {
+    let Some(display) = message
         .get("displayContent")
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| message.get("content").and_then(Value::as_str).unwrap_or(""))
-        .to_string();
+        .map(str::to_string)
+    else {
+        return;
+    };
+    let refs = message_refs(message);
     let hits = ai_refs::scan_hits(&display, &refs);
     let mut content = ai_refs::reference_path_block(&hits);
     content.push_str(&display);
-    if let Some(block) = ai_refs::open_files_context_block(&open_files_context(app)) {
-        content.push_str("\n\n");
-        content.push_str(&block);
-    }
     message["content"] = json!(content);
 }
 
@@ -1589,7 +1584,7 @@ pub(crate) async fn materialize_images(
     Ok(attachments)
 }
 
-/// 附件落盘回执：成功 = 注入块落消息并启动 run；失败 = 引用原样归还并通知
+/// 附件落盘回执：成功 = 消息落真源并启动 run；失败 = 引用原样归还并通知
 /// （输入草稿本就未清；落盘成功的临时文件随会话删除回收）。
 fn finish_send(app: &mut App, payload: SendPayload, attachments: Vec<Value>) -> iced::Task<Message> {
     let SendPayload { session_id, config, display, refs } = payload;
@@ -1605,14 +1600,10 @@ fn finish_send(app: &mut App, payload: SendPayload, attachments: Vec<Value>) -> 
     }
     // 历史快照先于追加（user 消息由 run 入参携带；commit 后快照已含新消息，会重复）
     let mut history = store().session_messages(&session_id).unwrap_or_default();
-    // 引用命中（标签被手动删掉 = 该引用作废）→ 路径块 + 打开的文件块随消息持久化
+    // 引用命中（标签被手动删掉 = 该引用作废）→ 路径块随消息持久化
     let hits = ai_refs::scan_hits(&display, &refs);
     let mut content = ai_refs::reference_path_block(&hits);
     content.push_str(&display);
-    if let Some(block) = ai_refs::open_files_context_block(&open_files_context(app)) {
-        content.push_str("\n\n");
-        content.push_str(&block);
-    }
     let refs_json: Vec<Value> = refs
         .iter()
         .filter(|r| hits.iter().any(|h| h.path == r.path))
@@ -1653,19 +1644,6 @@ fn finish_send(app: &mut App, payload: SendPayload, attachments: Vec<Value>) -> 
         .filter(|c| !c.is_null());
     history.push(user_message);
     start_run(config, session_id, compaction, history, app).chain(scroll_flow_bottom())
-}
-
-/// 当前打开的文件（布局模型笔记 / 表格 / 画布三槽位 = 全部窗口正在查看的文件）。
-fn open_files_context(app: &App) -> Vec<ai_refs::OpenFileCtx> {
-    let mut out: Vec<ai_refs::OpenFileCtx> = Vec::new();
-    for slot in [&app.ui.last_note_file, &app.ui.last_table_file, &app.ui.last_canvas_file] {
-        if let Some(path) = slot {
-            if !out.iter().any(|f| &f.path == path) {
-                out.push(ai_refs::OpenFileCtx { path: path.clone(), viewing: true });
-            }
-        }
-    }
-    out
 }
 
 /// 会话消息附件缩略图的按需载入：显示中会话的图片附件缺句柄且未在途/未失败时发起读盘
@@ -1850,33 +1828,49 @@ fn sync_mention_picker(app: &mut App) {
     }
 }
 
-/// 从文件树缓存收集引用候选（md / atb / atlx 文件与目录；隐藏与排除目录不在
-/// 缓存内自然缺席），按查询子串过滤（不区分大小写），文件树序（同级目录在前）。
+/// 引用候选：打开中的文件（笔记 / 表格 / 画布）置顶，其余按文件树缓存序（md / atb / atlx
+/// 文件与目录；隐藏与排除目录不在缓存内自然缺席）。查询按子串过滤（不区分大小写），
+/// 置顶项同样受过滤，已置顶的路径不再在文件树里重复出现。
 pub(crate) fn mention_candidates(app: &App, query: &str) -> Vec<MentionTarget> {
+    let needle = query.to_lowercase();
     let mut out = Vec::new();
-    collect_candidates(app, "", query, &mut out);
+    seed_open_candidates(&crate::space_actions::open_file_paths(app), &needle, &mut out);
+    collect_candidates(app, "", &needle, &mut out);
     out
 }
 
-fn collect_candidates(app: &App, dir: &str, query: &str, out: &mut Vec<MentionTarget>) {
+/// 打开中的文件前置：命中查询者按打开顺序入列，已在列里的路径不再重复。
+fn seed_open_candidates(open: &[String], needle: &str, out: &mut Vec<MentionTarget>) {
+    for rel in open {
+        if (needle.is_empty() || rel.to_lowercase().contains(needle)) && !listed(out, rel) {
+            out.push(MentionTarget::Vault { rel: rel.clone(), is_dir: false });
+        }
+    }
+}
+
+fn collect_candidates(app: &App, dir: &str, needle: &str, out: &mut Vec<MentionTarget>) {
     if out.len() >= MENTION_CANDIDATE_CAP {
         return;
     }
     let mut children = app.children.get(dir).cloned().unwrap_or_default();
     atelyx_core::vault::sort_children(&mut children, &app.file_sort);
     for child in children {
-        let hit = query.is_empty()
-            || child.rel.to_lowercase().contains(&query.to_lowercase());
-        if hit {
+        let hit = needle.is_empty() || child.rel.to_lowercase().contains(needle);
+        if hit && !listed(out, &child.rel) {
             out.push(MentionTarget::Vault { rel: child.rel.clone(), is_dir: child.is_dir });
             if out.len() >= MENTION_CANDIDATE_CAP {
                 return;
             }
         }
         if child.is_dir {
-            collect_candidates(app, &child.rel, query, out);
+            collect_candidates(app, &child.rel, needle, out);
         }
     }
+}
+
+/// 路径是否已在候选里（置顶项与文件树项去重）。
+fn listed(out: &[MentionTarget], rel: &str) -> bool {
+    out.iter().any(|t| matches!(t, MentionTarget::Vault { rel: r, .. } if r == rel))
 }
 
 /// 候选落地：触发段替换为标签文本（尾随空格），路径登记进本草稿引用（同路径只记一条）。
@@ -3068,6 +3062,56 @@ mod tests {
         }
         // 插件自管附件可落在隐藏目录
         assert!(plugin_image_entries(&[".atelyx/temp/chats/a.png".to_string()]).is_ok());
+    }
+
+    /// 重生成只按 displayContent 重拼引用路径块：正文里被删掉的引用标签作废，
+    /// content 里不夹带引用与原文之外的任何注入内容。
+    #[test]
+    fn regenerate_rebuilds_content_from_display_only() {
+        let mut message = json!({
+            "id": "m1",
+            "role": "user",
+            "displayContent": "看这个",
+            "content": "[引用文件：\n- a.md\n]\n\n看这个\n\n<context>\n用户当前打开的文件：\n- 正在查看：`a.md`\n</context>",
+            "refs": [{ "path": "a.md", "label": "a", "refKind": "note" }],
+        });
+        rebuild_user_injection(&mut message);
+        assert_eq!(message["content"], json!("看这个"));
+    }
+
+    /// 没有 displayContent 的老消息无从重拼，content 原样保留。
+    #[test]
+    fn regenerate_keeps_messages_without_display_content() {
+        let mut message = json!({ "id": "m1", "role": "user", "content": "旧正文" });
+        rebuild_user_injection(&mut message);
+        assert_eq!(message["content"], json!("旧正文"));
+    }
+
+    /// 打开中的文件排在候选最前，其余按文件树序追加；同一路径只出现一次，查询同样过滤置顶项。
+    #[test]
+    fn open_files_lead_mention_candidates() {
+        let open = vec!["笔记/甲.md".to_string(), "数据.atb".to_string()];
+        let mut out = Vec::new();
+        seed_open_candidates(&open, "", &mut out);
+        assert_eq!(
+            out,
+            vec![
+                MentionTarget::Vault { rel: "笔记/甲.md".into(), is_dir: false },
+                MentionTarget::Vault { rel: "数据.atb".into(), is_dir: false },
+            ]
+        );
+
+        // 已在列里的路径不重复（文件树递归会再次扫到同一文件）
+        seed_open_candidates(&open, "", &mut out);
+        assert_eq!(out.len(), 2, "已完成列出的路径不再入列");
+
+        // 查询只放过命中的置顶项
+        let mut filtered = Vec::new();
+        seed_open_candidates(&open, "数据", &mut filtered);
+        assert_eq!(
+            filtered,
+            vec![MentionTarget::Vault { rel: "数据.atb".into(), is_dir: false }]
+        );
     }
 
     /// 后台刷新（另一会话）的保留集必须认得在显会话带引用正文的缓存键，

@@ -1,4 +1,4 @@
-//! # 引用与上下文注入的纯逻辑：类型词表、标签生成、命中扫描、注入块拼装。
+//! # 引用注入的纯逻辑：类型词表、标签生成、命中扫描、路径块拼装。
 
 /// 引用目标的形态（决定标签前缀与路径块的目录标注）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -204,32 +204,7 @@ pub fn reference_path_block(hits: &[RefHit]) -> String {
     format!("[引用文件：\n{}\n]\n\n", lines.join("\n"))
 }
 
-/// 一个打开中文件的注入标注（`viewing` = 对话面板所在窗口布局中正在查看）。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OpenFileCtx {
-    pub path: String,
-    pub viewing: bool,
-}
-
-/// 当前打开文件块（拼在末条 user 消息正文之后；无打开文件时不注入）。
-pub fn open_files_context_block(files: &[OpenFileCtx]) -> Option<String> {
-    if files.is_empty() {
-        return None;
-    }
-    let mut lines = vec!["<context>".to_string(), "用户当前打开的文件：".to_string()];
-    for f in files {
-        let marker = if f.viewing { "正在查看" } else { "其他窗口打开" };
-        lines.push(format!("- {marker}：`{}`", f.path));
-    }
-    lines.push(
-        "若与本次对话相关，用 read_file 按路径读取正文；读取之前不要声称已查看过该文件。"
-            .to_string(),
-    );
-    lines.push("</context>".to_string());
-    Some(lines.join("\n"))
-}
-
-/// 系统提示词引导段（Agent 工具名册含 read_file 时追加；与路径块、context 块配套）。
+/// 系统提示词引导段（Agent 工具名册含 read_file 时追加；与路径块配套）。
 pub const FILE_REFERENCE_PROMPT: &str = "以 # 前缀引用的文件是用户明确指定的内容，其相对仓库根路径列在消息开头「引用文件」列表中。需要其内容时用 read_file 工具读取，在读取之前不要声称已查看过该文件。以 / 结尾的引用是目录：先用 list_dir 工具列出其中的内容，再按需 read_file；glob 用于按模式检索文件。以 . 开头的目录/文件（如 .git、.atelyx）不可被 AI 工具访问。已读取过的文件内容在对话历史中，无需重复读取；仅在需要确认内容是否变更时重读。";
 
 /// `#` 是否构成引用触发（行首或前一个字符是空白才弹选择器；`#` 前是正文则只是普通文本）。
@@ -350,26 +325,6 @@ mod tests {
         ];
         let block = reference_path_block(&hits);
         assert_eq!(block, "[引用文件：\n- a.md\n- 素材/\n]\n\n");
-    }
-
-    #[test]
-    fn context_block_marks_viewing_and_other_windows() {
-        let files = vec![
-            OpenFileCtx { path: "a.md".into(), viewing: true },
-            OpenFileCtx { path: "b.atb".into(), viewing: true },
-            OpenFileCtx { path: "c.md".into(), viewing: false },
-        ];
-        let block = open_files_context_block(&files).unwrap();
-        assert!(block.starts_with("<context>\n用户当前打开的文件：\n"));
-        assert!(block.contains("- 正在查看：`a.md`"));
-        assert!(block.contains("- 正在查看：`b.atb`"));
-        assert!(block.contains("- 其他窗口打开：`c.md`"));
-        assert!(block.trim_end().ends_with("</context>"));
-    }
-
-    #[test]
-    fn context_block_absent_without_open_files() {
-        assert!(open_files_context_block(&[]).is_none());
     }
 
     #[test]

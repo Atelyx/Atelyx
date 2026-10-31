@@ -1,6 +1,7 @@
 //! 对话输入区共享组装：面板与画布对话卡同一套输入渲染与动作路由，差异只由作用域决定
 //! （草稿 / 引用 / 附件归作用域；Agent 与模型配置按写入目标落到面板覆盖或卡节点配置）。
 
+use iced::widget::text::Wrapping;
 use iced::widget::{button, column, container, row, Space};
 use iced::{border, Length, Padding};
 use serde_json::Value;
@@ -10,6 +11,15 @@ use crate::chat_actions::{ChatMsg, MentionPicker, MentionTarget, PendingImage};
 use crate::ui::icon::icon;
 use crate::ui::{controls, palette as pal, scroll, text};
 use crate::{App, Message};
+
+/// 候选行尺寸（缩放前；与搜索结果行同口径）。
+const PICKER_ROW_PAD_X: f32 = 10.0;
+const PICKER_ROW_PAD_Y: f32 = 5.0;
+const PICKER_ROW_LINE_GAP: f32 = 1.0;
+const PICKER_ICON: f32 = 12.0;
+const PICKER_ROW_GAP: f32 = 6.0;
+/// 画布卡候选的次行标注（卡片没有所在文件夹）。
+const CARD_SUB_LABEL: &str = "画布卡片";
 
 /// 输入区作用域：决定草稿 / 引用 / 附件托盘与消息动作落在谁身上。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -294,66 +304,101 @@ fn model_trigger<'a>(
 }
 
 /// # 引用候选浮层（输入面上方；画布卡目标与仓库文件混排，字号随缩放）。
+/// 条目为双行卡片：主行文件名（按可用宽省略，不换行）+ 次行所在文件夹；
+/// 键盘选中的项用强调底色，其余项悬停时出浅底反馈。
 fn mention_picker_view<'a>(
     app: &'a App,
     picker: &'a MentionPicker,
     scope: &ComposerScope,
     s: f32,
 ) -> iced::Element<'a, Message> {
-    let rows = picker.candidates.iter().enumerate().map(|(i, target)| {
-        let selected = i == picker.selected;
-        let (icon_name, label, dir) = match target {
-            MentionTarget::Vault { rel, is_dir } => {
-                let icon_name = if *is_dir {
-                    "folder"
-                } else {
-                    match atelyx_core::ai::refs::kind_of_file(rel) {
-                        Some(atelyx_core::ai::refs::RefKind::Table) => "table",
-                        Some(atelyx_core::ai::refs::RefKind::Canvas) => "layers",
-                        _ => "file-text",
-                    }
-                };
-                let label = rel.rsplit('/').next().unwrap_or(rel).to_string();
-                let dir = rel.rsplit_once('/').map(|(d, _)| d.to_string());
-                (icon_name, label, dir)
+    // 候选行的点击消息只差作用域来源：卡作用域把节点 id 取出来，浮层闭包不持有 scope 借用
+    let card_node = match scope {
+        ComposerScope::Panel => None,
+        ComposerScope::Card { node } => Some(node.clone()),
+    };
+    let pad_x = PICKER_ROW_PAD_X * s;
+    let pad_y = (PICKER_ROW_PAD_Y * s).max(2.0);
+    let icon_px = (PICKER_ICON * s).clamp(9.0, 14.0);
+    let gap = (PICKER_ROW_GAP * s).max(2.0);
+    let indent = icon_px + gap;
+    let fs_name = (pal::fs_caption() * s).max(9.0);
+    let fs_sub = (pal::fs_micro() * s).max(8.0);
+    let list = iced::widget::responsive(move |size| {
+        // 主行可用宽 = 浮层宽 − 行内衬 − 图标列；次行再缩进一个图标列
+        let name_w = (size.width - pad_x * 2.0 - indent).max(0.0);
+        let sub_w = (name_w - indent).max(0.0);
+        let rows = picker.candidates.iter().enumerate().map(|(i, target)| {
+            let selected = i == picker.selected;
+            let (icon_name, name, sub) = match target {
+                MentionTarget::Vault { rel, is_dir } => {
+                    let icon_name = if *is_dir {
+                        "folder"
+                    } else {
+                        match atelyx_core::ai::refs::kind_of_file(rel) {
+                            Some(atelyx_core::ai::refs::RefKind::Table) => "table",
+                            Some(atelyx_core::ai::refs::RefKind::Canvas) => "layers",
+                            _ => "file-text",
+                        }
+                    };
+                    let name = rel.rsplit('/').next().unwrap_or(rel).to_string();
+                    let sub = rel.rsplit_once('/').map(|(d, _)| d.to_string());
+                    (icon_name, name, sub)
+                }
+                MentionTarget::Card { node_id } => {
+                    let title = app
+                        .canvas
+                        .as_ref()
+                        .and_then(|cvs| cvs.data.nodes.iter().find(|n| &n.id == node_id))
+                        .map(crate::canvas_chat::card_title)
+                        .unwrap_or_else(|| node_id.clone());
+                    ("box", title, Some(CARD_SUB_LABEL.to_string()))
+                }
+            };
+            let press = match &card_node {
+                None => Message::Chat(ChatMsg::MentionPick(i)),
+                Some(node) => Message::Canvas(CanvasMsg::Chat(
+                    crate::canvas_chat::CanvasChatMsg::MentionPick { node: node.clone(), index: i },
+                )),
+            };
+            let mut lines = column![
+                row![
+                    icon(
+                        icon_name,
+                        icon_px,
+                        if selected { pal::ACCENT } else { pal::TEXT_SECONDARY },
+                    ),
+                    text(crate::layout_view::ellipsize(&name, name_w, fs_name))
+                        .size(fs_name)
+                        .wrapping(Wrapping::None)
+                        .color(if selected { pal::TEXT_PRIMARY } else { pal::TEXT_SECONDARY }),
+                ]
+                .spacing(gap)
+                .align_y(iced::alignment::Vertical::Center),
+            ]
+            .spacing((PICKER_ROW_LINE_GAP * s).max(1.0));
+            if let Some(sub) = sub.filter(|d| !d.is_empty()) {
+                lines = lines.push(
+                    container(
+                        text(crate::layout_view::ellipsize(&sub, sub_w, fs_sub))
+                            .size(fs_sub)
+                            .wrapping(Wrapping::None)
+                            .color(pal::TEXT_MUTED),
+                    )
+                    .padding(Padding::ZERO.left(indent)),
+                );
             }
-            MentionTarget::Card { node_id } => {
-                let title = app
-                    .canvas
-                    .as_ref()
-                    .and_then(|cvs| cvs.data.nodes.iter().find(|n| &n.id == node_id))
-                    .map(crate::canvas_chat::card_title)
-                    .unwrap_or_else(|| node_id.clone());
-                ("box", title, None)
-            }
-        };
-        let press = match scope {
-            ComposerScope::Panel => Message::Chat(ChatMsg::MentionPick(i)),
-            ComposerScope::Card { node } => Message::Canvas(CanvasMsg::Chat(
-                crate::canvas_chat::CanvasChatMsg::MentionPick { node: node.clone(), index: i },
-            )),
-        };
-        let row_content = row![
-            icon(icon_name, (12.0 * s).clamp(9.0, 14.0), if selected { pal::ACCENT } else { pal::TEXT_SECONDARY }),
-            text(label)
-                .size((pal::fs_caption() * s).max(9.0))
-                .color(if selected { pal::TEXT_PRIMARY } else { pal::TEXT_SECONDARY }),
-            dir.map(|d| text(d).size((pal::fs_micro() * s).max(8.0)).color(pal::TEXT_MUTED)),
-        ]
-        .spacing((6.0 * s).max(2.0))
-        .align_y(iced::alignment::Vertical::Center);
-        button(container(row_content).width(Length::Fill))
-            .padding(Padding::new(10.0 * s).vertical(4.0 * s))
-            .style(move |_, _| iced::widget::button::Style {
-                background: selected.then(|| pal::ACCENT_SOFT.into()),
-                ..Default::default()
-            })
-            .on_press(press)
-    });
+            button(container(lines).width(Length::Fill))
+                .width(Length::Fill)
+                .padding(Padding::ZERO.horizontal(pad_x).vertical(pad_y))
+                .style(controls::row_style(selected, pal::RADIUS_SM))
+                .on_press(press)
+        });
+        column(rows.map(iced::Element::from)).spacing(0).width(Length::Fill).into()
+    })
+    .height(Length::Shrink);
     let list = container(
-        scroll::v(column(rows.map(iced::Element::from)).spacing(0).width(Length::Fill))
-            .height(iced::Length::Shrink)
-            .width(Length::Fill),
+        scroll::v(list).height(Length::Shrink).width(Length::Fill),
     )
     .max_height(224.0 * s);
     container(list)
