@@ -248,9 +248,9 @@ fn frame_of(size: (f32, f32), clicks: u32) -> SurfaceFrame {
 }
 ```
 
-- **坐标是面本地逻辑像素、左上原点**。宿主不做坐标变换，也不做裁剪 / 变换 / 阴影：要滚动就自己减偏移，要裁剪就自己按矩形收敛坐标，要阴影就预渲染成图片贴上来。
+- **坐标是面本地逻辑像素、左上原点**。宿主不做坐标变换，指令集也没有裁剪原语：要滚动就自己减偏移，要裁剪就自己按矩形收敛坐标（整帧最终按面边界裁剪，不会画进相邻面板）。矩形要投影时给 `shadow` 字段，用 `shadow(offsetX, offsetY, blur, color)` 构造。
 - `fill` 与 `stroke` 至少给其一（都不给是空指令，会被拒收）；`strokeWidth` 只在有描边时生效，缺省 1。
-- **文字永远画在所有形状之上**，与指令顺序无关。需要「被形状盖住的文字」，只能用图片或换一种画法。
+- **指令严格按声明顺序绘制**：文字与形状交错，投影随矩形画在它的填充与描边之下。要「被形状盖住的文字」，就把形状声明在文字之后；覆盖式浮层用 SDK 的 `overlay`（见 5.5）。
 - 字号 `size` 是绝对逻辑像素（与 `query.measure` 同口径），不是倍率；`weight` 取 `normal` / `medium` / `semiBold`，`family` 取 `ui`（缺省，跟随界面字体）或 `mono`。
 - 文字给 `maxWidth` 才换行，`align`（`start` / `center` / `end`）只在给了 `maxWidth` 时成立——对齐区域是 `x` 起、宽 `maxWidth` 的矩形。不给 `maxWidth` 就单行原样绘制，超长部分不截断、直接溢出。
 - **颜色两轨**：`token(ColorToken::…)` 跟主题（`text` / `textSecondary` / `textMuted` / `accent` / `accentSoft` / `success` / `warning` / `danger` 及其 `…Soft` / `surface` / `surfaceMuted` / `surfaceSunken` / `hover` / `border` / `borderStrong` / `transparent`），`rgba(r, g, b, a)` 用于内容谱系色（连线分类、播放头）。
@@ -414,6 +414,8 @@ impl PluginHandler for Todo {
 | `icon_button(id, Icon)` / `icon(Icon)` | 方形图标钮（回 `Click`）/ 纯装饰图标；内置 `Copy` / `Refresh` / `Eraser` / `Download` / `Search` / `HardDrive` / `Wrench` / `FileText` / `Box` |
 | `progress(value)` | 0–1 的进度条 |
 | `card(id, selected, ...)` | 整块可点卡片（选中档强调底色与描边），回 `Click` / `RightClick`；子控件压住卡片的命中 |
+| `card_with_shadow(id, selected, shadow, ...)` | 同上并给卡片加投影（`shadow(offsetX, offsetY, blur, color)` 构造） |
+| `overlay(rect, ...)` | 覆盖层：子项按 `rect` 浮在主内容之后绘制，整块承接点击（子控件优先，空白处不穿透下层）；打开期间滚轮只落到浮层内声明过的滚动容器 |
 | `panel(...)` | 圆角表面容器，承接子项、不承接点击 |
 | `notice(text, color)` | 提示块：整行底色 + 语义色描边与文字 |
 | `markdown(content)` | 只读 Markdown：块由宿主解析（`markdown.parse`），控件层按宽度折行并画列表标记 / 引用条 / 代码底 |
@@ -425,7 +427,7 @@ impl PluginHandler for Todo {
 
 Markdown 不要自己解析：`ui.markdown(text)` 首次出现时向宿主发一次 `markdown.parse`，按原文缓存（缓存有限，滚出视野的旧内容会被收敛掉），内容不变不重取。
 
-三条边界：指令集没有裁剪，所以下拉就地展开而不是浮在内容上、也没有覆盖式浮层——长内容拆行放进 `scroll` / `list`；无障碍基本没有（自绘帧对读屏器只是一块区域，键鼠可达性要自己保证）；观感一致性靠 SDK 默认样式，不要写死色值和像素。
+三条边界：指令集没有裁剪，滚动只画视口内的子项；需要覆盖主内容的浮层用 `ui.overlay(rect, ...)`（画在主内容之后，打开时滚轮只落到浮层里的滚动区），下拉仍就地展开；无障碍基本没有（自绘帧对读屏器只是一块区域，键鼠可达性要自己保证）；观感一致性靠 SDK 默认样式，不要写死色值和像素。
 
 要自带 GUI 运行时的插件可以自己创建系统窗口跑自有渲染（不走 `window.open`），但那种界面不参与工作台组合：没有面板 dock、没有标签页，宿主主题与快捷键也不生效，插件一停就跟着消失。想留在工作台里，就走帧。
 
@@ -438,7 +440,7 @@ Markdown 不要自己解析：`ui.markdown(text)` 首次出现时向宿主发一
 ctx.begin_window_drag("main").await?;   // 宿主接管拖动手势
 ```
 
-面在插件窗口 / 接管面里就拖那个窗口；解析不到时拖当前聚焦窗口。缩放沿用窗口边缘，关闭走宿主关窗链。插件窗口用 `window.open` 开且 `decorations: false` 时，宿主自己补一条标题栏（标题 / 拖动 / 最小化 / 最大化 / 关闭），不必再自己造。
+面在插件窗口 / 接管面里就拖那个窗口；解析不到时拖当前聚焦窗口。缩放沿用窗口边缘，关闭走宿主关窗链。插件窗口用 `window.open` 开且 `decorations: false` 时，缺省由宿主补一条标题栏（标题 / 拖动 / 最小化 / 最大化 / 关闭）；再给 `titlebar: Some(false)` 就整面归插件，自绘标题栏里的最小化 / 最大化按钮调 `ctx.window_minimize(id)` / `ctx.window_toggle_maximize(id)`。
 
 ### 5.7 面外层内边距
 
@@ -538,16 +540,21 @@ let params = WindowOpenParams {
     width: Some(560.0), height: Some(360.0),
     always_on_top: Some(true), skip_taskbar: Some(true), hide_on_blur: Some(true),
     decorations: None,          // Some(false) = 去掉系统边框，由宿主补标题栏（标题 / 拖动 / 最小化 / 最大化 / 关闭）
+    titlebar: None,             // 仅 decorations: Some(false) 时生效；Some(false) = 标题栏也交给自己画
 };
 ctx.window_open(params).await?;   // 窗口内容同样是帧：ui.render(ctx, "palette", ...) 提交
-// 运行时改尺寸 / 置顶（只给一维时另一维取现值；「不进任务栏」只能在开窗时给）
-ctx.window_update(WindowUpdateParams { id: "palette".into(), width: Some(640.0), height: None, always_on_top: None }).await?;
+// 运行时改尺寸 / 置顶 / 标题（只给一维时另一维取现值；「不进任务栏」只能在开窗时给）
+ctx.window_update(WindowUpdateParams {
+    id: "palette".into(), width: Some(640.0), height: None, always_on_top: None, title: None,
+}).await?;
+ctx.window_minimize("palette").await?;         // 自绘标题栏的最小化钮
+ctx.window_toggle_maximize("palette").await?;  // 自绘标题栏的最大化钮
 ctx.window_close("palette").await?;
 // 因失焦被收起后的唤起回路（宿主收起时会发 host:window.hidden）
 ctx.window_show("palette").await?;
 ```
 
-`title` 就是窗口标题：有系统边框时作为 OS 标题栏文字，`decorations: Some(false)` 时由宿主画在自己的标题栏上（附带拖动、双击切换最大化、最小化 / 最大化 / 关闭），插件内容占满标题栏以下的区域——此时不必再用命中区自己造标题栏。仍开着的同一 id 会被拒，但**插件请求关闭后可以立刻用同 id 重开**——`window_close` 的回执表示「关闭已受理」，不必等系统销毁完成。用户关窗时宿主先发 `host:window.closed`（`{ id }`）、再发 `host:surface.detached`（`kind: "window"`）；插件自己请求的关闭只发后者。`hideOnBlur` 是「隐藏窗口」而非关闭：宿主隐藏时发 `host:window.hidden`，插件可用 `window_show` 重新显示。
+`title` 就是窗口标题：有系统边框时作为 OS 标题栏文字，`decorations: Some(false)` 时由宿主画在自己的标题栏上（附带拖动、双击切换最大化、最小化 / 最大化 / 关闭），插件内容占满标题栏以下的区域。`titlebar: Some(false)` 则宿主连标题栏也不画，整面归插件自绘（拖动 / 最小化 / 最大化 / 关闭见 5.6）。`window_update` 改 `title` 更新宿主自绘标题栏上的文字；系统边框窗口的 OS 标题由系统绘制，运行期不随之变化。仍开着的同一 id 会被拒，但**插件请求关闭后可以立刻用同 id 重开**——`window_close` 的回执表示「关闭已受理」，不必等系统销毁完成。用户关窗时宿主先发 `host:window.closed`（`{ id }`）、再发 `host:surface.detached`（`kind: "window"`）；插件自己请求的关闭只发后者。`hideOnBlur` 是「隐藏窗口」而非关闭：宿主隐藏时发 `host:window.hidden`，插件可用 `window_show` 重新显示。
 
 ### 8.3 领域文档类型
 
@@ -611,6 +618,7 @@ async fn on_tool_call(&self, ctx: &Context, params: ToolCallParams) {
 ```rust
 ctx.subscribe("vault:switch").await?;    // 容器切换（本地仓库 / 协作空间 / 换仓库）
 ctx.subscribe("table:changed").await?;   // 当前打开表格变更
+ctx.subscribe("table:selection.changed").await?; // 当前表格选区移动（本端与协作者）
 ctx.subscribe("ai:chat.changed").await?; // AI 会话内容变更（含对话面板里的改动）
 ctx.subscribe("vault:file.changed").await?; // 仓库文件被宿主写入（保存 / 新建 / 删除 / 改名）
 ```
@@ -618,6 +626,7 @@ ctx.subscribe("vault:file.changed").await?; // 仓库文件被宿主写入（保
 - `vault:switch` 只在声明了 `keepMountedOnVaultSwitch` 时才有意义：未声明的插件在收到它之前就被宿主重载了。payload：`{ kind: "local", root }` 或 `{ kind: "space", spaceId }`。
 - `ai:chat.changed` payload：`{ sessionId, kind }`，`kind` 为 `created` / `messages` / `meta` / `deleted`（新会话、消息增减、标题或 Agent 等元数据变化、删除）。只在变更提交后广播、不补发历史，需要当前内容用 `ctx.chat_history` 重读。
 - `table:changed` payload 是当前表格的仓库相对路径；订阅时会先补发一次当前状态（迟到订阅不丢当前表格）。
+- `table:selection.changed` payload：`{ path?, selection?, remoteSelections? }`——当前表格路径、本端选区与协作者选区（`name` / `color`（`#rrggbb`）/ `selection`），选区形态为 `cell` / `range` / `row` / `column` / `all`。内容不变、只有选区移动也发；没有打开表格时用空载荷通知一次。载荷直接带选区，不必为一次拖选重取快照。
 - `vault:file.changed` payload：`{ path, kind, oldPath? }`，`kind` 为 `created` / `updated` / `deleted` / `renamed`（改名另带旧路径）。只覆盖**宿主发起的写入**——壳自身保存 / 新建 / 复制 / 删除 / 改名与插件经 `vault` 的写入；外部程序直接改磁盘不发，需要感知外部改动仍要按 mtime 轮询。删除目录只发目录本身一条，其下文件不逐条发（按前缀作废缓存，需要明细就重新列举）。
 
 ### 8.6 系统托盘

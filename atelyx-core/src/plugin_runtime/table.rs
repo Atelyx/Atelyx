@@ -61,7 +61,7 @@ fn row(source: &SourceRow) -> TableRow {
 }
 
 /// 选区形态一一对应（宿主会话的选区就是协议的五形态）。
-fn selection_of(source: &SourceSelection) -> TableSelection {
+pub fn selection_of(source: &SourceSelection) -> TableSelection {
     match source {
         SourceSelection::Cell { row_id, field_id } => TableSelection::Cell {
             row_id: row_id.clone(),

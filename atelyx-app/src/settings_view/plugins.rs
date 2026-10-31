@@ -344,6 +344,12 @@ pub fn host_requests_stream(spec: &RuntimeSpec) -> impl iced::futures::Stream<It
                 HostRequest::WindowShow { plugin_id, request_id, window_id } => {
                     Message::PluginWindowShow { request_id, plugin_id, window_key: window_id }
                 }
+                HostRequest::WindowMinimize { plugin_id, request_id, window_id } => {
+                    Message::PluginWindowMinimize { request_id, plugin_id, window_key: window_id }
+                }
+                HostRequest::WindowToggleMaximize { plugin_id, request_id, window_id } => {
+                    Message::PluginWindowToggleMaximize { request_id, plugin_id, window_key: window_id }
+                }
                 HostRequest::WindowBeginDrag { plugin_id, request_id, surface_id } => {
                     Message::PluginWindowBeginDrag { request_id, plugin_id, surface_id }
                 }

@@ -118,6 +118,19 @@ fn default_stroke_width() -> f32 {
     1.0
 }
 
+/// 矩形投影：偏移、模糊半径与颜色。模糊按宿主渲染层的 quad 阴影实现，只对矩形生效。
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PaintShadow {
+    #[serde(default)]
+    pub offset_x: f32,
+    #[serde(default)]
+    pub offset_y: f32,
+    #[serde(default)]
+    pub blur: f32,
+    pub color: PaintColor,
+}
+
 /// 绘图指令。矩形 / 路径 / 圆：`fill` 与 `stroke` 至少声明其一，`stroke_width` 只在 `stroke`
 /// 存在时生效（缺省 1.0）；线只有 `stroke`（字段名 `width`）；文字与图片没有描边概念。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -144,6 +157,9 @@ pub enum DrawCommand {
         stroke_width: Option<f32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         corner_radius: Option<f32>,
+        /// 投影：只对矩形生效，绘制在填充与描边之下。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shadow: Option<PaintShadow>,
     },
     Path {
         points: Vec<PaintPoint>,
@@ -197,11 +213,17 @@ impl DrawCommand {
     fn validate(&self) -> Result<(), String> {
         match self {
             Self::Line { width, .. } => ensure_positive(*width, "线宽"),
-            Self::Rect { w, h, stroke_width, corner_radius, .. } => {
+            Self::Rect { w, h, stroke_width, corner_radius, shadow, .. } => {
                 ensure_non_negative(*w, "矩形宽")?;
                 ensure_non_negative(*h, "矩形高")?;
                 ensure_non_negative(corner_radius.unwrap_or(0.0), "圆角半径")?;
-                ensure_positive(stroke_width.unwrap_or(1.0), "描边宽")
+                ensure_positive(stroke_width.unwrap_or(1.0), "描边宽")?;
+                if let Some(shadow) = shadow {
+                    ensure_finite(shadow.offset_x, "阴影横向偏移")?;
+                    ensure_finite(shadow.offset_y, "阴影纵向偏移")?;
+                    ensure_non_negative(shadow.blur, "阴影模糊半径")?;
+                }
+                Ok(())
             }
             Self::Path { points, stroke_width, .. } => {
                 if points.len() < 2 {
@@ -266,6 +288,13 @@ fn ensure_positive(value: f32, name: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn ensure_finite(value: f32, name: &str) -> Result<(), String> {
+    if !value.is_finite() {
+        return Err(format!("{name}必须是有限数"));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -300,6 +329,7 @@ mod tests {
             stroke: None,
             stroke_width: None,
             corner_radius: None,
+            shadow: None,
         }])
         .is_ok());
 
@@ -346,6 +376,69 @@ mod tests {
             serde_json::to_value(rgba).unwrap(),
             serde_json::json!({"type": "rgba", "rgba": [16, 32, 64, 255]})
         );
+    }
+
+    #[test]
+    fn rect_shadow_is_optional_and_validated() {
+        let shaded = DrawCommand::Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 10.0,
+            h: 10.0,
+            fill: rgba([255, 255, 255, 255]),
+            stroke: None,
+            stroke_width: None,
+            corner_radius: Some(6.0),
+            shadow: Some(PaintShadow {
+                offset_x: 0.0,
+                offset_y: 4.0,
+                blur: 12.0,
+                color: PaintColor::Rgba { rgba: [0, 0, 0, 48] },
+            }),
+        };
+        let wire = serde_json::to_value(&shaded).unwrap();
+        assert_eq!(
+            wire["shadow"],
+            serde_json::json!({
+                "offsetX": 0.0,
+                "offsetY": 4.0,
+                "blur": 12.0,
+                "color": { "type": "rgba", "rgba": [0, 0, 0, 48] }
+            })
+        );
+        assert_eq!(serde_json::from_value::<DrawCommand>(wire).unwrap(), shaded);
+        assert!(validate_commands(&[shaded]).is_ok());
+
+        let negative_blur = DrawCommand::Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 10.0,
+            h: 10.0,
+            fill: rgba([255, 255, 255, 255]),
+            stroke: None,
+            stroke_width: None,
+            corner_radius: None,
+            shadow: Some(PaintShadow {
+                offset_x: 0.0,
+                offset_y: 0.0,
+                blur: -1.0,
+                color: PaintColor::Rgba { rgba: [0, 0, 0, 48] },
+            }),
+        };
+        assert!(validate_commands(&[negative_blur]).is_err());
+
+        let plain = DrawCommand::Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 10.0,
+            h: 10.0,
+            fill: rgba([255, 255, 255, 255]),
+            stroke: None,
+            stroke_width: None,
+            corner_radius: None,
+            shadow: None,
+        };
+        assert!(serde_json::to_value(plain).unwrap().get("shadow").is_none(), "缺省不落字段");
     }
 
     #[test]

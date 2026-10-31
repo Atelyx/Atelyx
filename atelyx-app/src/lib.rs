@@ -656,7 +656,7 @@ enum Message {
     },
     /// 插件请求关闭自己的一个窗口。
     PluginWindowClose { request_id: u64, plugin_id: String, window_key: String },
-    /// 插件请求运行时改一个已打开窗口的属性（尺寸 / 置顶）。
+    /// 插件请求运行时改一个已打开窗口的属性（尺寸 / 置顶 / 标题）。
     PluginWindowUpdate {
         request_id: u64,
         plugin_id: String,
@@ -664,6 +664,10 @@ enum Message {
     },
     /// 插件请求重新显示一个因失焦被隐藏的窗口。
     PluginWindowShow { request_id: u64, plugin_id: String, window_key: String },
+    /// 插件请求最小化自己的一个窗口。
+    PluginWindowMinimize { request_id: u64, plugin_id: String, window_key: String },
+    /// 插件请求切换自己打开窗口的最大化态。
+    PluginWindowToggleMaximize { request_id: u64, plugin_id: String, window_key: String },
     /// 插件请求拖动承载某面的窗口（自绘标题栏）。
     PluginWindowBeginDrag { request_id: u64, plugin_id: String, surface_id: String },
     /// 整面帧的焦点请求 / 释放。
@@ -1308,6 +1312,8 @@ pub struct App {
     pub plugin_table_surfaces: HashSet<(String, String)>,
     /// 最近一次广播 `table:changed` 时的表格路径（身份差分用；None = 广播过「无打开表格」）。
     pub table_event_path: Option<String>,
+    /// 最近一次广播 `table:selection.changed` 的载荷（选区差分用；None = 尚未广播）。
+    pub table_selection_event: Option<atelyx_core::plugin_runtime::TableSelectionChangedPayload>,
     /// 各面的最新整面帧（键 = 插件 id + 面 id）。
     pub plugin_frames:
         HashMap<(String, String), std::sync::Arc<atelyx_core::plugin_runtime::SurfaceFrame>>,
@@ -1721,6 +1727,7 @@ impl App {
                 plugin_settings_surfaces: HashSet::new(),
                 plugin_table_surfaces: HashSet::new(),
                 table_event_path: None,
+                table_selection_event: None,
                 plugin_frames: HashMap::new(),
                 plugin_frame_focus: None,
                 plugin_frame_pumping: false,
@@ -1981,6 +1988,8 @@ impl App {
             task
         };
         self.notify_table_switch();
+        // 选区差分广播：任何消息处理后都可能移动了选区（本地操作 / 协作远端 / 开合切换表格）
+        table_actions::broadcast_selection(self);
         self.chain_autosave_timer(task)
     }
 
@@ -3754,6 +3763,12 @@ impl App {
             }
             Message::PluginWindowShow { request_id, plugin_id, window_key } => {
                 plugin_actions::on_window_show(self, request_id, plugin_id, window_key)
+            }
+            Message::PluginWindowMinimize { request_id, plugin_id, window_key } => {
+                plugin_actions::on_window_minimize(self, request_id, plugin_id, window_key)
+            }
+            Message::PluginWindowToggleMaximize { request_id, plugin_id, window_key } => {
+                plugin_actions::on_window_toggle_maximize(self, request_id, plugin_id, window_key)
             }
             Message::PluginWindowBeginDrag { request_id, plugin_id, surface_id } => {
                 plugin_actions::on_window_begin_drag(self, request_id, plugin_id, surface_id)

@@ -4,7 +4,7 @@
 use std::rc::Rc;
 use std::sync::Arc;
 
-use atelyx_plugin_protocol::paint::{PaintPoint, DrawCommand, ImageFit, ImageSource, TextAlign};
+use atelyx_plugin_protocol::paint::{PaintPoint, DrawCommand, ImageFit, ImageSource, PaintShadow, TextAlign};
 use atelyx_plugin_protocol::frame::HitCursor;
 use atelyx_plugin_protocol::paint::{ColorToken, TextFamily, TextWeight};
 
@@ -149,6 +149,7 @@ impl<'c, 'a> Ui<'c, 'a> {
                     stroke: Some(theme::token(ColorToken::Border)),
                     stroke_width: Some(1.0),
                     corner_radius: Some(theme.radii.xs),
+                    shadow: None,
                 });
                 let shown = text::elide(&mut ctx.metrics, &label, font, (rect.w - CHIP_PAD_X * 2.0).max(0.0));
                 let height = text::line_height(&mut ctx.metrics, font);
@@ -187,6 +188,7 @@ impl<'c, 'a> Ui<'c, 'a> {
                     stroke: None,
                     stroke_width: None,
                     corner_radius: Some(PROGRESS_H / 2.0),
+                    shadow: None,
                 });
                 let filled = rect.w * value;
                 if filled > 0.0 {
@@ -201,6 +203,7 @@ impl<'c, 'a> Ui<'c, 'a> {
                             stroke: None,
                             stroke_width: None,
                             corner_radius: Some(PROGRESS_H / 2.0),
+                            shadow: None,
                         });
                     }
                 }
@@ -285,6 +288,7 @@ impl<'c, 'a> Ui<'c, 'a> {
                         stroke: None,
                         stroke_width: None,
                         corner_radius: Some(theme.radii.sm),
+                        shadow: None,
                     });
                 }
                 let glyph = Rect::new(rect.x + (rect.w - ICON_SIZE) / 2.0, rect.y + (rect.h - ICON_SIZE) / 2.0, ICON_SIZE, ICON_SIZE);
@@ -333,6 +337,7 @@ impl<'c, 'a> Ui<'c, 'a> {
                     stroke: None,
                     stroke_width: None,
                     corner_radius: None,
+                    shadow: None,
                 });
             }),
         });
@@ -411,6 +416,7 @@ impl<'c, 'a> Ui<'c, 'a> {
                         stroke: None,
                         stroke_width: None,
                         corner_radius: Some(theme.radii.sm),
+                        shadow: None,
                     });
                 }
                 let text_color = theme::token(if !enabled {
@@ -443,6 +449,17 @@ impl<'c, 'a> Ui<'c, 'a> {
 
     /// 可点卡片：整块承接点击（选中档强调底色与描边），子项按列排布。
     pub fn card(&mut self, id: impl Into<String>, selected: bool, build: impl FnOnce(&mut Ui<'_, 'a>)) {
+        self.card_with_shadow(id, selected, None, build);
+    }
+
+    /// 带投影的卡片：浮层里的卡片用它压住下层内容（投影先于填充绘制）。
+    pub fn card_with_shadow(
+        &mut self,
+        id: impl Into<String>,
+        selected: bool,
+        shadow: Option<PaintShadow>,
+        build: impl FnOnce(&mut Ui<'_, 'a>),
+    ) {
         let id = id.into();
         let theme = self.ctx().theme.clone();
         let clip = self.clip;
@@ -472,6 +489,7 @@ impl<'c, 'a> Ui<'c, 'a> {
                     stroke: Some(theme::token(if selected { ColorToken::Accent } else { ColorToken::Border })),
                     stroke_width: Some(1.0),
                     corner_radius: Some(theme.radii.sm),
+                    shadow,
                 });
                 // 命中区先于子项登记：宿主按声明逆序取最上面的命中，子控件才不会被子项之后的卡片命中盖住
                 ctx.hit(&id, visible, HitCursor::Pointer);
@@ -544,6 +562,7 @@ impl<'c, 'a> Ui<'c, 'a> {
                     stroke: Some(theme::token(ColorToken::Border)),
                     stroke_width: Some(1.0),
                     corner_radius: Some(theme.radii.sm),
+                    shadow: None,
                 });
                 let inner = Rect::new(
                     rect.x + CARD_PAD,
@@ -583,6 +602,7 @@ impl<'c, 'a> Ui<'c, 'a> {
                     stroke: Some(theme::token(color)),
                     stroke_width: Some(1.0),
                     corner_radius: Some(theme.radii.sm),
+                    shadow: None,
                 });
                 let inner = Rect::new(rect.x + NOTICE_PAD, rect.y + NOTICE_PAD, (rect.w - NOTICE_PAD * 2.0).max(1.0), rect.h);
                 let lines = text::wrap_lines(&mut ctx.metrics, &text, font, inner.w);
@@ -695,7 +715,7 @@ impl<'c, 'a> Ui<'c, 'a> {
         });
     }
 
-    /// 下拉：展开时就地撑开后续内容（指令集没有覆盖绘制，浮层会被下层文字穿透）。
+    /// 下拉：展开时就地撑开后续内容（不做覆盖式浮层，选项与触发钮连续排布）。
     pub fn select(&mut self, id: impl Into<String>, options: Vec<String>, selected: usize) {
         let id = id.into();
         let theme = self.ctx().theme.clone();
@@ -772,6 +792,7 @@ impl<'c, 'a> Ui<'c, 'a> {
                         stroke: None,
                         stroke_width: None,
                         corner_radius: Some(theme.radii.xs),
+                        shadow: None,
                     });
                 }
                 let box_rect = Rect::new(rect.x + 2.0, rect.y + (rect.h - CHECK_BOX) / 2.0, CHECK_BOX, CHECK_BOX);
@@ -788,6 +809,7 @@ impl<'c, 'a> Ui<'c, 'a> {
                     stroke: Some(theme::token(if checked { ColorToken::Accent } else { ColorToken::TextMuted })),
                     stroke_width: Some(1.0),
                     corner_radius: Some(theme.radii.xs),
+                    shadow: None,
                 });
                 if checked && box_rect == box_visible {
                     let glyph = [
@@ -975,6 +997,7 @@ fn draw_field(ctx: &mut BuildCtx<'_>, theme: &Theme, visible: Rect, focused: boo
         stroke: Some(theme::token(if focused { ColorToken::Accent } else { ColorToken::BorderStrong })),
         stroke_width: Some(1.0),
         corner_radius: Some(theme.radii.sm),
+        shadow: None,
     });
 }
 
@@ -1020,6 +1043,7 @@ fn draw_menu(
         stroke: Some(theme::token(ColorToken::Border)),
         stroke_width: Some(1.0),
         corner_radius: Some(theme.radii.sm),
+        shadow: None,
     });
     let hover = ctx.state.selects.get(id).and_then(|state| state.hover);
     let font = FontSpec { size: theme.sizes.caption, weight: None, family: None };
@@ -1046,6 +1070,7 @@ fn draw_menu(
                 stroke: None,
                 stroke_width: None,
                 corner_radius: Some(theme.radii.xs),
+                shadow: None,
             });
         }
         let shown = text::elide(&mut ctx.metrics, option, font, (row.w - PAD_X * 2.0).max(0.0));
@@ -1135,6 +1160,7 @@ fn draw_input_text(
             stroke: None,
             stroke_width: None,
             corner_radius: None,
+            shadow: None,
         });
     }
     let shown = if window.truncated {
@@ -1166,6 +1192,7 @@ fn draw_input_text(
             stroke: None,
             stroke_width: None,
             corner_radius: None,
+            shadow: None,
         });
         ctx.ime = Some(Rect::new(inner.x + window.caret, baseline, 1.0, line_height));
     }
@@ -1237,6 +1264,7 @@ fn draw_area_text(
                     stroke: None,
                     stroke_width: None,
                     corner_radius: None,
+                    shadow: None,
                 });
             }
         }
@@ -1270,6 +1298,7 @@ fn draw_area_text(
             stroke: None,
             stroke_width: None,
             corner_radius: None,
+            shadow: None,
         });
         ctx.ime = Some(Rect::new(caret_x, caret_y, 1.0, line_height));
     }
@@ -1357,6 +1386,7 @@ fn draw_scrollbar(ctx: &mut BuildCtx<'_>, id: &str, track: Rect, visible: Rect, 
         stroke: None,
         stroke_width: None,
         corner_radius: None,
+        shadow: None,
     });
     let thumb_height = (track.h * track.h / content).max(12.0).min(track.h);
     let travel = track.h - thumb_height;
@@ -1383,6 +1413,7 @@ fn draw_scrollbar(ctx: &mut BuildCtx<'_>, id: &str, track: Rect, visible: Rect, 
         stroke: None,
         stroke_width: None,
         corner_radius: None,
+        shadow: None,
     });
     ctx.hit(&bar_id, track_visible, HitCursor::Default);
     ctx.record(&bar_id, Layout::ScrollBar { scroll: id.to_string(), track, thumb: thumb_height, max_offset });

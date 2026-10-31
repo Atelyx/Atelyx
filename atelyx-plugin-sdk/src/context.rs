@@ -319,10 +319,20 @@ impl Context {
         self.call_unit(method::window::CLOSE, &WindowCloseParams { id: id.into() }).await
     }
 
-    /// 运行时改一个已打开窗口的属性（尺寸 / 置顶；至少给一项；「不进任务栏」只能在开窗时声明，
-    /// 窗口不存在报可读错误）。
+    /// 运行时改一个已打开窗口的属性（尺寸 / 置顶 / 标题；至少给一项；「不进任务栏」只能在
+    /// 开窗时声明，窗口不存在报可读错误）。
     pub async fn window_update(&self, params: WindowUpdateParams) -> Result<(), RpcError> {
         self.call_unit(method::window::UPDATE, &params).await
+    }
+
+    /// 最小化自己打开的一个窗口（窗口不存在或 id 为空报可读错误）。
+    pub async fn window_minimize(&self, id: &str) -> Result<(), RpcError> {
+        self.call_unit(method::window::MINIMIZE, &WindowIdParams { id: id.into() }).await
+    }
+
+    /// 切换自己打开窗口的最大化态（窗口不存在或 id 为空报可读错误）。
+    pub async fn window_toggle_maximize(&self, id: &str) -> Result<(), RpcError> {
+        self.call_unit(method::window::TOGGLE_MAXIMIZE, &WindowIdParams { id: id.into() }).await
     }
 
     /// 重新显示一个因失焦被隐藏的窗口（`hideOnBlur` 的唤起回路）。

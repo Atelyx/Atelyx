@@ -92,6 +92,7 @@ fn draw(
                 stroke: None,
                 stroke_width: None,
                 corner_radius: Some(CELL_RADIUS),
+                shadow: None,
             });
             let id = format!("heat:{}", date::date_string(days));
             if canvas.hovered(&id) {

@@ -105,6 +105,7 @@ fn draw(
             stroke,
             stroke_width: stroke.map(|_| 1.0),
             corner_radius: Some(radius_sm),
+            shadow: None,
         });
         let number = day.to_string();
         let (_, number_h) = canvas.measure(&number, caption);
@@ -127,6 +128,7 @@ fn draw(
                 stroke: None,
                 stroke_width: None,
                 corner_radius: Some(radius_xs),
+                shadow: None,
             });
             canvas.draw(DrawCommand::Circle {
                 cx: tile.x + 4.0 + ITEM_DOT / 2.0,

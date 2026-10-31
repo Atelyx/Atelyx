@@ -149,6 +149,7 @@ pub(crate) fn paint(ctx: &mut BuildCtx<'_>, content: u64, blocks: &[MarkdownBloc
                 stroke: None,
                 stroke_width: None,
                 corner_radius: None,
+                shadow: None,
             });
         }
     }

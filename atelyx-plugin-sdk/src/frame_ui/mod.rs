@@ -155,6 +155,7 @@ impl FrameUi {
                     ui.into_items()
                 };
                 build::layout_root(&mut ctxb, items, area);
+                build::layout_overlays(&mut ctxb);
                 ctxb.finish()
             };
             out.frame.fps = self.fps;
@@ -165,6 +166,8 @@ impl FrameUi {
             self.state.scroll = out.scrolls;
             self.state.scroll_max = out.scroll_max;
             self.state.follow_prev = out.follow_prev;
+            self.state.overlays = out.overlays;
+            self.state.overlay_scrolls = out.overlay_scrolls;
             // Markdown 缓存按条数上限收敛：滚出视口的内容不再算「本帧用到」，不能被立即剪掉
             if self.state.markdown.len() > MAX_MARKDOWN_CACHE {
                 self.state.markdown.retain(|content, _| out.markdown_used.contains(content));
@@ -517,6 +520,16 @@ mod tests {
         frame.hits.iter().any(|hit| hit.id == id)
     }
 
+    /// 某个坐标上最后声明的命中（宿主取最上面的一条）。
+    fn top_hit(frame: &SurfaceFrame, x: f32, y: f32) -> Option<&str> {
+        frame
+            .hits
+            .iter()
+            .rev()
+            .find(|hit| x >= hit.x && x <= hit.x + hit.w && y >= hit.y && y <= hit.y + hit.h)
+            .map(|hit| hit.id.as_str())
+    }
+
     fn key(name: NamedKey) -> FrameInput {
         FrameInput::Key { key: Key::Named { name }, action: KeyAction::Press, modifiers: Modifiers::default(), text: None }
     }
@@ -555,6 +568,70 @@ mod tests {
         assert!(texts(&frame).iter().any(|text| text == "服务"));
         assert!(texts(&frame).iter().any(|text| text == "启动"));
         assert!(frame.ime.is_none(), "没有聚焦输入框时不声明输入法光标");
+    }
+
+    #[tokio::test]
+    async fn overlay_draws_after_main_and_owns_the_wheel() {
+        let mut bench = Bench::new(360.0, 300.0).await;
+        let frame = bench
+            .render(|ui| {
+                ui.scroll_sized("main-list", 240.0, 0.0, false, |ui| {
+                    for index in 0..30 {
+                        ui.text(format!("行{index}"), TextRole::Label);
+                    }
+                });
+                ui.overlay(Rect::new(40.0, 40.0, 240.0, 140.0), |ui| {
+                    ui.card("overlay-card", false, |ui| {
+                        ui.scroll_sized("overlay-list", 80.0, 0.0, false, |ui| {
+                            for index in 0..30 {
+                                ui.text(format!("项{index}"), TextRole::Label);
+                            }
+                        });
+                    });
+                });
+            })
+            .await
+            .unwrap();
+
+        let all = texts(&frame);
+        let first_overlay = all.iter().position(|text| text.starts_with('项')).expect("浮层文字");
+        let last_main = all.iter().rposition(|text| text.starts_with('行')).expect("主内容文字");
+        assert!(first_overlay > last_main, "浮层内容整体在主内容之后绘制：{all:?}");
+        assert!(has_hit(&frame, "overlay-card"), "浮层命中区随帧提交");
+
+        let scrolls = bench
+            .event(FrameInput::Wheel { x: 80.0, y: 80.0, delta_x: 0.0, delta_y: 24.0, hit: None })
+            .await;
+        assert!(
+            matches!(scrolls.as_slice(), [UiEvent::Scroll { id, .. }] if id == "overlay-list"),
+            "浮层打开时滚轮只作用于浮层内：{scrolls:?}"
+        );
+
+        let outside = bench
+            .event(FrameInput::Wheel { x: 330.0, y: 100.0, delta_x: 0.0, delta_y: 24.0, hit: None })
+            .await;
+        assert!(outside.is_empty(), "浮层外的滚轮不再落到下层列表：{outside:?}");
+
+        let blank = bench
+            .event(FrameInput::Wheel { x: 270.0, y: 170.0, delta_x: 0.0, delta_y: 24.0, hit: None })
+            .await;
+        assert!(blank.is_empty(), "浮层内、滚动区外的滚轮也不落到下层：{blank:?}");
+    }
+
+    #[tokio::test]
+    async fn overlay_blocks_clicks_outside_its_children() {
+        let mut bench = Bench::new(300.0, 200.0).await;
+        let frame = bench
+            .render(|ui| {
+                ui.button("under", "底层");
+                ui.overlay(Rect::new(20.0, 20.0, 260.0, 160.0), |ui| {
+                    ui.button("floating", "浮层按钮");
+                });
+            })
+            .await
+            .unwrap();
+        assert_eq!(top_hit(&frame, 275.0, 175.0), Some("@overlay:0"), "浮层空白承接点击，不穿透下层");
+        assert_ne!(top_hit(&frame, 5.0, 5.0), Some("@overlay:0"), "浮层外不受它拦截");
     }
 
     #[tokio::test]
@@ -1272,6 +1349,7 @@ mod tests {
                     stroke: None,
                     stroke_width: None,
                     corner_radius: None,
+                    shadow: None,
                 });
                 c.text("日", area.x + 4.0, area.y + 4.0, 12.0, PaintColor::Token { name: ColorToken::Text });
                 c.hit("cell", Rect::new(area.x, area.y, 40.0, 40.0), HitCursor::Pointer);

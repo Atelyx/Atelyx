@@ -328,25 +328,37 @@ pub fn view_placeholder<M: 'static>(
     title: impl Into<String>,
     desc: impl Into<String>,
 ) -> Element<'static, M> {
-    container(
-        column![
-            icon_stroke(icon_name, 64.0, pal::TEXT_MUTED.scale_alpha(0.6), 1.5),
-            text(title.into())
-                .size(pal::fs_h1())
-                .color(pal::TEXT_PRIMARY)
-                .font(bold()),
-            text(desc.into())
-                .size(pal::fs_body())
-                .color(pal::TEXT_MUTED),
-        ]
-        .spacing(16)
-        .align_x(iced::alignment::Horizontal::Center),
-    )
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .center_x(Length::Fill)
-    .center_y(Length::Fill)
-    .into()
+    view_placeholder_action(icon_name, title, desc, None)
+}
+
+/// 同上，可附一个操作（如停用视图的「重新启用」）。
+pub fn view_placeholder_action<M: 'static>(
+    icon_name: &str,
+    title: impl Into<String>,
+    desc: impl Into<String>,
+    action: Option<Element<'static, M>>,
+) -> Element<'static, M> {
+    let mut body = column![
+        icon_stroke(icon_name, 64.0, pal::TEXT_MUTED.scale_alpha(0.6), 1.5),
+        text(title.into())
+            .size(pal::fs_h1())
+            .color(pal::TEXT_PRIMARY)
+            .font(bold()),
+        text(desc.into())
+            .size(pal::fs_body())
+            .color(pal::TEXT_MUTED),
+    ]
+    .spacing(16)
+    .align_x(iced::alignment::Horizontal::Center);
+    if let Some(action) = action {
+        body = body.push(action);
+    }
+    container(body)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .center_x(Length::Fill)
+        .center_y(Length::Fill)
+        .into()
 }
 
 /// 水平分隔线（`subtle` = 次级线色，用于工具条/分组分隔）。

@@ -78,7 +78,8 @@ fn mouse_button(button: mouse::Button) -> Option<MouseButton> {
 
 /// 部件跨帧状态（存 `tree::State`）：绘制缓存 + 拖拽 / 悬停 / 双击判定 + 输入法开关。
 struct FrameState {
-    cache: canvas::Cache,
+    /// 形状段缓存：按绘制步骤下标各持一块，帧内容变化时整体作废。
+    caches: RefCell<Vec<canvas::Cache>>,
     /// 已排版的文字段落：内容不变跨帧复用，改宽 / 滚动 / 悬停不重新成形。
     texts: RefCell<plugin_paint::TextCache>,
     /// 上次绘制的帧：按 Arc 身份判换帧。持有引用，帧对象地址不会被分配器复用。
@@ -108,7 +109,7 @@ struct FrameState {
 impl Default for FrameState {
     fn default() -> Self {
         Self {
-            cache: canvas::Cache::new(),
+            caches: RefCell::new(Vec::new()),
             texts: RefCell::new(plugin_paint::TextCache::default()),
             painted: RefCell::new(None),
             font_epoch: Cell::new(0),
@@ -219,7 +220,7 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginFrame<'_> {
             state.last_point.set(None);
             *state.last_press.borrow_mut() = None;
             state.painted.borrow_mut().take();
-            state.cache.clear();
+            state.caches.borrow().iter().for_each(canvas::Cache::clear);
             state.texts.borrow_mut().clear();
             state.resize_wait_until.set(None);
         }
@@ -529,7 +530,7 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginFrame<'_> {
             || state.font_epoch.get() != epoch
             || state.image_epoch.get() != image_epoch
         {
-            state.cache.clear();
+            state.caches.borrow().iter().for_each(canvas::Cache::clear);
             if state.font_epoch.get() != epoch {
                 // 字体族变了：段落按旧字族排的版，整体作废
                 state.texts.borrow_mut().clear();
@@ -540,20 +541,62 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginFrame<'_> {
                 *state.painted.borrow_mut() = Some(frame.clone());
             }
         }
-        let geometry = state.cache.draw(renderer, bounds.size(), |canvas| {
-            plugin_paint::execute_shapes(
-                canvas,
-                &frame.commands,
-                &PaintCtx { app: self.app, plugin_id: &self.plugin_id },
-            );
+        let steps = plugin_paint::plan(&frame.commands);
+        let ctx = PaintCtx { app: self.app, plugin_id: &self.plugin_id };
+        let mut texts = state.texts.borrow_mut();
+        texts.begin_frame();
+        renderer.with_layer(bounds, |renderer| {
+            let mut caches = state.caches.borrow_mut();
+            if caches.len() < steps.len() {
+                caches.resize_with(steps.len(), canvas::Cache::new);
+            }
+            // iced 在同一图层内按图元类型成批绘制（quad → 三角 → 图片 → 文字）。
+            // 声明顺序与批次序相反（后声明的形状要压住先前的文字 / 图片）时另起图层，
+            // 图层按顺序合成，声明顺序才真正成立；顺批次序的相邻步会被渲染器合并回一层。
+            let mut layer_open = false;
+            let mut max_rank = 0u8;
+            for (slot, step) in steps.iter().enumerate() {
+                let rank = plugin_paint::step_rank(step);
+                if !layer_open || rank < max_rank {
+                    if layer_open {
+                        renderer.end_layer();
+                    }
+                    renderer.start_layer(bounds);
+                    layer_open = true;
+                    max_rank = rank;
+                } else {
+                    max_rank = max_rank.max(rank);
+                }
+                match step {
+                    plugin_paint::PaintStep::Shapes(range) => {
+                        let geometry = caches[slot].draw(renderer, bounds.size(), |canvas| {
+                            plugin_paint::execute_shapes(canvas, &frame.commands, range.clone(), &ctx);
+                        });
+                        renderer.with_translation(Vector::new(bounds.x, bounds.y), |renderer| {
+                            renderer.draw_geometry(geometry);
+                        });
+                    }
+                    plugin_paint::PaintStep::Image(index) => {
+                        let geometry = caches[slot].draw(renderer, bounds.size(), |canvas| {
+                            plugin_paint::execute_shapes(canvas, &frame.commands, *index..*index + 1, &ctx);
+                        });
+                        renderer.with_translation(Vector::new(bounds.x, bounds.y), |renderer| {
+                            renderer.draw_geometry(geometry);
+                        });
+                    }
+                    plugin_paint::PaintStep::Text(index) => {
+                        texts.draw_one(renderer, &frame.commands[*index], bounds);
+                    }
+                    plugin_paint::PaintStep::Shadow(index) => {
+                        plugin_paint::draw_shadow(renderer, bounds, &frame.commands[*index]);
+                    }
+                }
+            }
+            if layer_open {
+                renderer.end_layer();
+            }
         });
-        renderer.with_translation(Vector::new(bounds.x, bounds.y), |renderer| {
-            renderer.draw_geometry(geometry);
-        });
-        state
-            .texts
-            .borrow_mut()
-            .draw(renderer, &frame.commands, bounds);
+        texts.end_frame();
     }
 
     fn mouse_interaction(

@@ -577,6 +577,28 @@
       }
     },
     {
+      "name": "table:selection.changed payload",
+      "type": "TableSelectionChangedPayload",
+      "value": {
+        "path": "plan.atb",
+        "selection": {
+          "kind": "row",
+          "rowId": "r1"
+        },
+        "remoteSelections": [
+          {
+            "name": "鲍勃",
+            "color": "#3d7be0",
+            "selection": {
+              "kind": "cell",
+              "rowId": "r2",
+              "fieldId": "f1"
+            }
+          }
+        ]
+      }
+    },
+    {
       "name": "view.register params (custom surface padding)",
       "type": "RegisterParams",
       "value": {
@@ -592,7 +614,8 @@
       "value": {
         "id": "chat-float",
         "width": 400.0,
-        "alwaysOnTop": false
+        "alwaysOnTop": false,
+        "title": "快捷对话 v2"
       }
     },
     {
@@ -987,7 +1010,8 @@
       "value": {
         "id": "palette",
         "title": "命令面板",
-        "decorations": false
+        "decorations": false,
+        "titlebar": false
       }
     },
     {
@@ -1005,7 +1029,21 @@
               "type": "token",
               "name": "surface"
             },
-            "stroke": null
+            "stroke": null,
+            "shadow": {
+              "offsetX": 0.0,
+              "offsetY": 6.0,
+              "blur": 16.0,
+              "color": {
+                "type": "rgba",
+                "rgba": [
+                  0,
+                  0,
+                  0,
+                  40
+                ]
+              }
+            }
           },
           {
             "kind": "line",

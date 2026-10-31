@@ -22,6 +22,10 @@ pub enum Icon {
     ChevronRight,
     X,
     Trash,
+    Minus,
+    Square,
+    Plus,
+    Clock,
 }
 
 /// 图标线宽（24x24 网格下的描边宽度）。
@@ -62,6 +66,7 @@ pub(crate) fn draw(ctx: &mut BuildCtx<'_>, icon: Icon, rect: Rect, color: PaintC
                 stroke: Some(color),
                 stroke_width: Some(width),
                 corner_radius: Some(2.0 * scale),
+                shadow: None,
             });
             poly(ctx, &[(4.0, 16.0), (4.0, 4.0), (16.0, 4.0)], false);
         }
@@ -109,6 +114,7 @@ pub(crate) fn draw(ctx: &mut BuildCtx<'_>, icon: Icon, rect: Rect, color: PaintC
                 stroke: Some(color),
                 stroke_width: Some(width),
                 corner_radius: Some(2.0 * scale),
+                shadow: None,
             });
             line(ctx, 3.0, 13.0, 21.0, 13.0);
             ctx.draw(DrawCommand::Circle {
@@ -169,6 +175,37 @@ pub(crate) fn draw(ctx: &mut BuildCtx<'_>, icon: Icon, rect: Rect, color: PaintC
             poly(ctx, &[(6.0, 7.0), (7.0, 20.0), (17.0, 20.0), (18.0, 7.0)], false);
             line(ctx, 10.0, 11.0, 10.0, 16.0);
             line(ctx, 14.0, 11.0, 14.0, 16.0);
+        }
+        // 窗口控制（最小化横线 / 最大化方框）与建议图标（加号 / 历史时钟）
+        Icon::Minus => line(ctx, 5.0, 12.0, 19.0, 12.0),
+        Icon::Square => {
+            ctx.draw(DrawCommand::Rect {
+                x: rect.x + 5.0 * scale,
+                y: rect.y + 5.0 * scale,
+                w: 14.0 * scale,
+                h: 14.0 * scale,
+                fill: None,
+                stroke: Some(color),
+                stroke_width: Some(width),
+                corner_radius: None,
+                shadow: None,
+            });
+        }
+        Icon::Plus => {
+            line(ctx, 12.0, 5.0, 12.0, 19.0);
+            line(ctx, 5.0, 12.0, 19.0, 12.0);
+        }
+        Icon::Clock => {
+            ctx.draw(DrawCommand::Circle {
+                cx: rect.x + 12.0 * scale,
+                cy: rect.y + 12.0 * scale,
+                r: 8.0 * scale,
+                fill: None,
+                stroke: Some(color),
+                stroke_width: Some(width),
+            });
+            line(ctx, 12.0, 7.5, 12.0, 12.0);
+            line(ctx, 12.0, 12.0, 16.0, 14.0);
         }
     }
 }

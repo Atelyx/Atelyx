@@ -78,6 +78,7 @@ fn draw_history(canvas: &mut Canvas<'_, '_>, entries: &[HistoryDayEntry], micro:
                 stroke: None,
                 stroke_width: None,
                 corner_radius: Some(radius),
+                shadow: None,
             });
         }
         let y = row.y + (row.h - line_h) / 2.0;
@@ -168,6 +169,7 @@ fn schedule_row(ui: &mut Ui<'_, '_>, snapshot: &Snapshot, item: &CalendarItem) {
                         stroke: None,
                         stroke_width: None,
                         corner_radius: Some(radius),
+                        shadow: None,
                     });
                 }
                 let (_, line_h) = canvas.measure("日", caption);
@@ -209,6 +211,7 @@ fn add_row(ui: &mut Ui<'_, '_>, snapshot: &Snapshot) {
                         stroke: Some(token(ColorToken::Text)),
                         stroke_width: Some(1.0),
                         corner_radius: Some(SWATCH / 2.0),
+                        shadow: None,
                     });
                 }
                 canvas.draw(DrawCommand::Circle {

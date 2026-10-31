@@ -901,6 +901,14 @@ impl Instance {
                     let p: method::WindowIdParams = parse(params).map_err(|e| e.to_string())?;
                     runtime.show_plugin_window(&self.id, &p.id)
                 }
+                method::window::MINIMIZE => {
+                    let p: method::WindowIdParams = parse(params).map_err(|e| e.to_string())?;
+                    runtime.minimize_plugin_window(&self.id, &p.id)
+                }
+                method::window::TOGGLE_MAXIMIZE => {
+                    let p: method::WindowIdParams = parse(params).map_err(|e| e.to_string())?;
+                    runtime.toggle_maximize_plugin_window(&self.id, &p.id)
+                }
                 method::window::BEGIN_DRAG => {
                     let p: method::WindowDragParams = parse(params).map_err(|e| e.to_string())?;
                     runtime.begin_window_drag(&self.id, &p.surface_id)
@@ -1528,6 +1536,7 @@ impl Instance {
             p.name.as_str(),
             event::name::VAULT_SWITCH
                 | event::name::TABLE_CHANGED
+                | event::name::TABLE_SELECTION_CHANGED
                 | event::name::AI_CHAT_CHANGED
                 | event::name::VAULT_FILE_CHANGED
                 | event::name::SPACE_META_CHANGED
@@ -2200,6 +2209,8 @@ fn is_ui_method(method_name: &str) -> bool {
             | method::window::CLOSE
             | method::window::UPDATE
             | method::window::SHOW
+            | method::window::MINIMIZE
+            | method::window::TOGGLE_MAXIMIZE
             | method::window::BEGIN_DRAG
     )
 }
@@ -2389,6 +2400,7 @@ mod tests {
         for name in [
             event::name::VAULT_SWITCH,
             event::name::TABLE_CHANGED,
+            event::name::TABLE_SELECTION_CHANGED,
             event::name::AI_CHAT_CHANGED,
             event::name::VAULT_FILE_CHANGED,
             event::name::SPACE_META_CHANGED,
@@ -3122,6 +3134,22 @@ mod tests {
         // 关闭表格 = 缓存清空，迟到订阅者不再补发旧路径
         runtime.on_table_changed(None);
         assert_eq!(runtime.current_table_path(), None);
+    }
+
+    #[test]
+    fn window_actions_route_to_the_shell() {
+        for name in [
+            method::window::OPEN,
+            method::window::CLOSE,
+            method::window::UPDATE,
+            method::window::SHOW,
+            method::window::MINIMIZE,
+            method::window::TOGGLE_MAXIMIZE,
+            method::window::BEGIN_DRAG,
+        ] {
+            assert!(is_ui_method(name), "{name} 必须走壳侧界面分派");
+            assert!(!is_shell_method(name), "{name} 不得落进壳侧异步服务分派");
+        }
     }
 
     #[test]

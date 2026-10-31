@@ -109,6 +109,10 @@ pub(crate) struct UiState {
     pub submitted: Option<(String, SurfaceFrame)>,
     /// 尺寸刚变、下一帧还没交：让 `render` 先按估算字宽交一帧，不再等量算往返。
     pub resize_pending: bool,
+    /// 上一帧声明的浮层区域：有浮层时滚轮只作用于浮层内的滚动区。
+    pub overlays: Vec<Rect>,
+    /// 浮层内的滚动容器 id：浮层打开时不把滚轮落到下层列表。
+    pub overlay_scrolls: std::collections::HashSet<String>,
 }
 
 impl Default for UiState {
@@ -135,6 +139,8 @@ impl Default for UiState {
             markdown_layouts: Arc::default(),
             submitted: None,
             resize_pending: false,
+            overlays: Vec::new(),
+            overlay_scrolls: std::collections::HashSet::new(),
         }
     }
 }
@@ -148,6 +154,7 @@ impl UiState {
         self.scroll_max.retain(|id, _| self.layouts.contains_key(id));
         self.follow_prev.retain(|id, _| self.layouts.contains_key(id));
         self.draggables.retain(|id| self.layouts.contains_key(id));
+        self.overlay_scrolls.retain(|id| self.layouts.contains_key(id));
         if self.drag_bar.as_ref().is_some_and(|id| !self.layouts.contains_key(id)) {
             self.drag_bar = None;
         }

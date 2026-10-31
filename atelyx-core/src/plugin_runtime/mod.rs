@@ -47,12 +47,12 @@ pub use atelyx_plugin_protocol::frame::{
     SurfaceFrame,
 };
 pub use atelyx_plugin_protocol::paint::{
-    ColorToken, DrawCommand, ImageFit, ImageSource, PaintColor, PaintPoint, TextAlign, TextFamily,
-    TextWeight,
+    ColorToken, DrawCommand, ImageFit, ImageSource, PaintColor, PaintPoint, PaintShadow, TextAlign,
+    TextFamily, TextWeight,
 };
 pub use atelyx_plugin_protocol::event::{
     ChatChangeKind, ChatChangedPayload, FileChangeKind, FileChangedPayload,
-    SpaceMetaChangedPayload, TableChangedPayload, VaultSwitchPayload,
+    SpaceMetaChangedPayload, TableChangedPayload, TableSelectionChangedPayload, VaultSwitchPayload,
 };
 pub use atelyx_plugin_protocol::layout::LayoutSpecNode;
 pub use atelyx_plugin_protocol::manifest::{DocTypeRegistration, Permission};
@@ -273,6 +273,10 @@ pub enum HostRequest {
     WindowUpdate { plugin_id: String, request_id: u64, params: method::WindowUpdateParams },
     /// 插件请求重新显示一个因失焦被隐藏的窗口。
     WindowShow { plugin_id: String, request_id: u64, window_id: String },
+    /// 插件请求最小化自己打开的一个窗口。
+    WindowMinimize { plugin_id: String, request_id: u64, window_id: String },
+    /// 插件请求切换自己打开窗口的最大化态。
+    WindowToggleMaximize { plugin_id: String, request_id: u64, window_id: String },
     /// 插件请求拖动承载某面的窗口（自绘标题栏）。
     WindowBeginDrag { plugin_id: String, request_id: u64, surface_id: String },
     /// 插件请求重命名一个会话（写元数据标题）。
@@ -568,6 +572,18 @@ impl PluginRuntime {
                 request_id,
                 window_id,
             },
+            HostRequest::WindowMinimize { plugin_id, window_id, .. } => HostRequest::WindowMinimize {
+                plugin_id,
+                request_id,
+                window_id,
+            },
+            HostRequest::WindowToggleMaximize { plugin_id, window_id, .. } => {
+                HostRequest::WindowToggleMaximize {
+                    plugin_id,
+                    request_id,
+                    window_id,
+                }
+            }
             HostRequest::Dialog { .. } => return Err("界面服务请求形态不符".to_string()),
             HostRequest::ChatSend { .. }
             | HostRequest::ChatStop { .. }
@@ -999,13 +1015,42 @@ impl PluginRuntime {
         if params.id.trim().is_empty() {
             return Err("窗口 id 不能为空".to_string());
         }
-        if params.width.is_none() && params.height.is_none() && params.always_on_top.is_none() {
+        if params.width.is_none() && params.height.is_none() && params.always_on_top.is_none()
+            && params.title.is_none()
+        {
             return Err("window.update 未给出任何要改的属性".to_string());
+        }
+        if params.title.as_deref().is_some_and(|title| title.trim().is_empty()) {
+            return Err("窗口标题不能为空".to_string());
         }
         self.open_ui_call(HostRequest::WindowUpdate {
             plugin_id: plugin_id.to_string(),
             request_id: 0,
             params,
+        })
+    }
+
+    /// 插件请求最小化自己打开的一个窗口（窗口不存在由壳拒绝并回填）。
+    fn minimize_plugin_window(&self, plugin_id: &str, window_id: &str) -> Result<std::sync::mpsc::Receiver<Result<(), String>>, String> {
+        if window_id.trim().is_empty() {
+            return Err("窗口 id 不能为空".to_string());
+        }
+        self.open_ui_call(HostRequest::WindowMinimize {
+            plugin_id: plugin_id.to_string(),
+            request_id: 0,
+            window_id: window_id.to_string(),
+        })
+    }
+
+    /// 插件请求切换自己打开窗口的最大化态（窗口不存在由壳拒绝并回填）。
+    fn toggle_maximize_plugin_window(&self, plugin_id: &str, window_id: &str) -> Result<std::sync::mpsc::Receiver<Result<(), String>>, String> {
+        if window_id.trim().is_empty() {
+            return Err("窗口 id 不能为空".to_string());
+        }
+        self.open_ui_call(HostRequest::WindowToggleMaximize {
+            plugin_id: plugin_id.to_string(),
+            request_id: 0,
+            window_id: window_id.to_string(),
         })
     }
 
@@ -1246,6 +1291,15 @@ impl PluginRuntime {
         // 只读判定，锁内直接遍历（避免每次调用都克隆实例表）
         let instances = self.instances.lock().unwrap();
         instances.values().any(|instance| instance.has_frame_ticks())
+    }
+
+    /// 是否有运行中的插件订阅表格选区事件（壳据此决定要不要做选区差分广播）。
+    pub fn wants_table_selection_events(&self) -> bool {
+        let instances = self.instances.lock().unwrap();
+        instances.values().any(|instance| {
+            instance.status() == PluginStatus::Running
+                && instance.subscribed_to(event::name::TABLE_SELECTION_CHANGED)
+        })
     }
 
     /// 推一次帧节拍：给到期的画布与整面帧各发一条帧通知（壳的帧 tick 调）。
@@ -1531,6 +1585,12 @@ impl PluginRuntime {
         self.broadcast_event(event::name::TABLE_CHANGED, &payload);
     }
 
+    /// 广播当前打开表格的选区变化（本端点选 / 拖选 / 键盘移动，协作者进入 / 移动 / 离场）。
+    /// 不缓存补发：迟到订阅者用 `table.snapshot` 取当前选区。
+    pub fn on_table_selection_changed(self: &Arc<Self>, payload: TableSelectionChangedPayload) {
+        self.broadcast_event(event::name::TABLE_SELECTION_CHANGED, &payload);
+    }
+
     /// 广播仓库内文件变更给订阅了 `vault:file.changed` 的运行中插件。只覆盖宿主发起的写入
     /// （保存 / 新建 / 删除 / 改名 / 插件经 `vault` 写），外部程序直接改磁盘不发。
     pub fn on_file_changed(self: &Arc<Self>, path: &str, kind: FileChangeKind, old_path: Option<&str>) {
@@ -1735,6 +1795,8 @@ fn request_plugin_id(request: &HostRequest) -> &str {
         | HostRequest::QueryTheme { plugin_id, .. }
         | HostRequest::WindowUpdate { plugin_id, .. }
         | HostRequest::WindowShow { plugin_id, .. }
+        | HostRequest::WindowMinimize { plugin_id, .. }
+        | HostRequest::WindowToggleMaximize { plugin_id, .. }
         | HostRequest::WindowBeginDrag { plugin_id, .. }
         | HostRequest::ChatRename { plugin_id, .. }
         | HostRequest::ChatDelete { plugin_id, .. }
@@ -1941,6 +2003,7 @@ mod tests {
                 skip_taskbar: None,
                 hide_on_blur: None,
                 decorations: None,
+                titlebar: None,
             },
         ).unwrap();
         let other = runtime
@@ -1964,6 +2027,7 @@ mod tests {
             skip_taskbar: None,
             hide_on_blur: None,
             decorations: None,
+            titlebar: None,
         }
     }
 
@@ -1987,6 +2051,7 @@ mod tests {
             width: None,
             height: None,
             always_on_top: None,
+            title: None,
         };
         assert!(runtime.update_plugin_window("com.a", update("  ")).is_err(), "空 id 应被拒");
         assert!(

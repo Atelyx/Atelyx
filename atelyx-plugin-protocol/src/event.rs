@@ -15,6 +15,9 @@ pub mod name {
     /// 当前打开表格的内容变更（打开 / 切换 / 关闭表格、本地编辑结算、协作远端补丁落地）。
     /// payload 见 [`TableChangedPayload`]。
     pub const TABLE_CHANGED: &str = "table:changed";
+    /// 当前打开表格的选区变更（本端点选 / 拖选 / 键盘移动，协作者进入 / 移动 / 离场）。
+    /// 内容不变、只有选区移动时也发。payload 见 [`TableSelectionChangedPayload`]。
+    pub const TABLE_SELECTION_CHANGED: &str = "table:selection.changed";
     /// 会话语义变更（流式增量不广播）。payload 见 [`ChatChangedPayload`]。
     pub const AI_CHAT_CHANGED: &str = "ai:chat.changed";
     /// 仓库内文件变更（宿主保存 / 新建 / 删除 / 改名 / 插件经 `vault` 写入）。只覆盖宿主发起的
@@ -44,6 +47,20 @@ pub enum VaultSwitchPayload {
 pub struct TableChangedPayload {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+}
+
+/// [`name::TABLE_SELECTION_CHANGED`] 的 payload：当前表格路径 + 本端与远端选区。
+/// 无打开表格 = 全缺省。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct TableSelectionChangedPayload {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<crate::method::TableSelection>,
+    /// 其他协作者的当前选区（不含本端）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remote_selections: Vec<crate::method::TableRemoteSelection>,
 }
 
 /// [`name::AI_CHAT_CHANGED`] 的 payload。
@@ -149,5 +166,38 @@ mod tests {
         );
         let meta = SpaceMetaChangedPayload { key: "calendar".into() };
         assert_eq!(serde_json::to_value(&meta).unwrap(), serde_json::json!({ "key": "calendar" }));
+    }
+
+    #[test]
+    fn table_selection_payload_carries_local_and_remote_ranges() {
+        let payload = TableSelectionChangedPayload {
+            path: Some("plan.atb".into()),
+            selection: Some(crate::method::TableSelection::Row { row_id: "r1".into() }),
+            remote_selections: vec![crate::method::TableRemoteSelection {
+                name: "鲍勃".into(),
+                color: "#3d7be0".into(),
+                selection: crate::method::TableSelection::Cell {
+                    row_id: "r2".into(),
+                    field_id: "f1".into(),
+                },
+            }],
+        };
+        assert_eq!(
+            serde_json::to_value(&payload).unwrap(),
+            serde_json::json!({
+                "path": "plan.atb",
+                "selection": { "kind": "row", "rowId": "r1" },
+                "remoteSelections": [{
+                    "name": "鲍勃",
+                    "color": "#3d7be0",
+                    "selection": { "kind": "cell", "rowId": "r2", "fieldId": "f1" }
+                }]
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(TableSelectionChangedPayload::default()).unwrap(),
+            serde_json::json!({}),
+            "无打开表格 = 全缺省"
+        );
     }
 }

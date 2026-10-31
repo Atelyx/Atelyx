@@ -428,13 +428,13 @@ pub fn takeover_view<'a>(
 }
 
 /// 插件窗口：面树铺满整窗，弹层 / 悬停提示 / 通知沿用工作区覆盖层（窗口内下拉与菜单依赖它）。
-/// 声明无系统边框时由宿主补标题栏与窗口控制。
+/// 无系统边框时按声明的标题栏归属决定由宿主补标题栏，还是把整窗交给插件自绘。
 pub fn plugin_window_view<'a>(app: &'a App, window: iced::window::Id) -> Element<'a, Message> {
     let Some(entry) = app.plugin_windows.get(&window) else {
         return space().into();
     };
     let content = crate::plugin_view::window_view(app, window, entry);
-    let base = if entry.decorations {
+    let base = if entry.decorations || !entry.titlebar {
         content
     } else {
         plugin_window_chrome(window, &entry.title, content)
@@ -1698,12 +1698,28 @@ fn view_content<'a>(app: &'a App, window: iced::window::Id, kind: &str) -> Eleme
     crate::pack::render(kind, app, window).unwrap_or_else(|| placeholder_view(app, kind))
 }
 
-/// 停用视图的占位：标签保留（不关标签、不动布局），内容区说明去哪儿重新启用。
+/// 停用视图的占位：标签保留（不关标签、不动布局），内容区就地给重新启用入口。
 fn disabled_view(app: &App, kind: &str) -> Element<'static, Message> {
-    controls::view_placeholder(
+    let plugin_id = app
+        .registry
+        .get(kind)
+        .map(|entry| entry.source.plugin_id().to_string())
+        .unwrap_or_default();
+    let action = (!plugin_id.is_empty()).then(|| {
+        Element::from(controls::btn(
+            "重新启用",
+            &controls::btn_sm(),
+            Variant::Primary,
+            Some(Message::Plugins(
+                crate::settings_view::plugins::PluginsMsg::SetBuiltinPluginEnabled(plugin_id, true),
+            )),
+        ))
+    });
+    controls::view_placeholder_action(
         &view_icon(app, kind),
         view_label(app, kind),
-        "所属内置插件已停用：在 设置 → 插件 → 内置插件 里重新启用后恢复".to_string(),
+        "所属内置插件已停用".to_string(),
+        action,
     )
 }
 

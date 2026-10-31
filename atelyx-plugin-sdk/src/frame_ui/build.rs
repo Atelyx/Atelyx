@@ -32,6 +32,14 @@ pub(crate) struct BuildCtx<'a> {
     pub markdown_used: HashSet<String>,
     /// 光标声明为拖动形态的子区：按下它们才建拖拽候选。
     pub draggables: HashSet<String>,
+    /// 浮层：主内容布局完成后按声明序绘制，指令与命中区都压在主内容之上。
+    pub overlays: Vec<(Rect, Vec<Item>)>,
+    /// 已布局的浮层区域（随帧交给状态，供滚轮隔离判定）。
+    pub overlay_rects: Vec<Rect>,
+    /// 正在绘制浮层：滚动容器据此记入 `overlay_scrolls`（滚轮隔离）。
+    in_overlay: bool,
+    /// 浮层内的滚动容器 id。
+    pub overlay_scrolls: HashSet<String>,
 }
 
 pub(crate) struct BuildOut {
@@ -47,6 +55,8 @@ pub(crate) struct BuildOut {
     pub misses: bool,
     /// 光标声明为拖动形态的子区：按下它们才建拖拽候选。
     pub draggables: HashSet<String>,
+    pub overlays: Vec<Rect>,
+    pub overlay_scrolls: HashSet<String>,
 }
 
 impl<'a> BuildCtx<'a> {
@@ -66,6 +76,10 @@ impl<'a> BuildCtx<'a> {
             markdown_misses: Vec::new(),
             markdown_used: HashSet::new(),
             draggables: HashSet::new(),
+            overlays: Vec::new(),
+            overlay_rects: Vec::new(),
+            in_overlay: false,
+            overlay_scrolls: HashSet::new(),
         }
     }
 
@@ -98,6 +112,9 @@ impl<'a> BuildCtx<'a> {
     }
 
     pub(crate) fn record(&mut self, id: &str, layout: Layout) {
+        if self.in_overlay && matches!(layout, Layout::Scroll { .. }) {
+            self.overlay_scrolls.insert(id.to_string());
+        }
         self.layouts.insert(id.to_string(), layout);
     }
 
@@ -130,6 +147,8 @@ impl<'a> BuildCtx<'a> {
             metrics: self.metrics,
             misses,
             draggables: self.draggables,
+            overlays: self.overlay_rects,
+            overlay_scrolls: self.overlay_scrolls,
         }
     }
 }
@@ -205,6 +224,11 @@ impl<'c, 'a> Canvas<'c, 'a> {
             max_width: None,
             align: None,
         });
+    }
+
+    /// 内置图标：`rect` 是图标的完整方框（形状按方框宽 / 24 缩放），传裁剪后的可见矩形会缩小图形。
+    pub fn icon(&mut self, icon: super::icons::Icon, rect: Rect, color: PaintColor) {
+        super::icons::draw(self.ctx, icon, rect, color);
     }
 }
 
@@ -288,6 +312,15 @@ impl<'c, 'a> Ui<'c, 'a> {
         build(&mut sub);
         self.items.push(row_item(sub.items, gap, true));
     }
+
+    /// 浮层：内容按纵向容器排在 `rect` 内，主内容布局完成后整体追加绘制与命中区。
+    /// 整块登记点击兜底（子项命中优先），空白处不穿透到下层；有浮层时滚轮只作用于浮层内的滚动区。
+    pub fn overlay(&mut self, rect: Rect, build: impl FnOnce(&mut Ui<'_, 'a>)) {
+        let mut sub = Ui::new(&mut *self.ctx, rect);
+        build(&mut sub);
+        let items = sub.into_items();
+        self.ctx.overlays.push((rect, items));
+    }
 }
 
 /// 根布局：单个根容器高过面时按面高收住——撑满子项（滚动区）拿面的剩余高度，
@@ -300,6 +333,19 @@ pub(crate) fn layout_root(ctx: &mut BuildCtx<'_>, mut items: Vec<Item>, rect: Re
         }
     }
     draw_column(ctx, &items, rect, rect, 0.0);
+}
+
+/// 浮层布局：按声明序叠在主内容之后，绘制顺序与命中优先级都压在其上。
+pub(crate) fn layout_overlays(ctx: &mut BuildCtx<'_>) {
+    let overlays = std::mem::take(&mut ctx.overlays);
+    ctx.in_overlay = true;
+    for (index, (rect, items)) in overlays.into_iter().enumerate() {
+        ctx.overlay_rects.push(rect);
+        // 浮层整块承接点击：子项随后登记，命中优先于这块兜底
+        ctx.hit(&format!("@overlay:{index}"), rect, HitCursor::Default);
+        draw_column(ctx, &items, rect, rect, 0.0);
+    }
+    ctx.in_overlay = false;
 }
 
 pub(crate) fn child_width(item: &Item, metrics: &mut Metrics, available: f32) -> f32 {

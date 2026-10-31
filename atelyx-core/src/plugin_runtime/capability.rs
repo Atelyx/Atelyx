@@ -44,7 +44,8 @@ pub(crate) fn permission_for(name: &str) -> Option<Permission> {
         editor::SELECTION | editor::REPLACE_SELECTION => Some(Vault),
         // 活动统计取自当前仓库内容，同样按仓库内容权限归类
         history::ACTIVITY | history::DAY | history::OPEN => Some(Vault),
-        window::OPEN | window::CLOSE | window::UPDATE | window::SHOW | window::BEGIN_DRAG => Some(Window),
+        window::OPEN | window::CLOSE | window::UPDATE | window::SHOW | window::BEGIN_DRAG
+        | window::MINIMIZE | window::TOGGLE_MAXIMIZE => Some(Window),
         ai::CHAT_SEND | ai::CHAT_STOP | ai::CHAT_HISTORY | ai::CHAT_RENAME | ai::CHAT_DELETE
         | ai::CHAT_COMPACT | ai::MODELS | ai::AGENTS | ai::REGISTER_TOOL | ai::UNREGISTER_TOOL
         | ai::TOOL_RESULT => Some(Ai),

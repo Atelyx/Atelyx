@@ -446,10 +446,13 @@ pub struct PluginWindowActive {
     pub plugin_id: String,
     /// 插件声明的窗口 id（= 该窗口面的 surfaceId）。
     pub window_key: String,
-    /// 窗口标题（`window.open` 声明），OS 标题栏按它取。
+    /// 窗口标题（`window.open` 声明，`window.update { title }` 可改）：宿主标题栏与窗口记账按它取。
     pub title: String,
-    /// 系统窗口边框；`false` 时宿主补标题栏与窗口控制。
+    /// 系统窗口边框；`true` 时 OS 画标题栏；`false` 时是否由宿主补标题栏看 `titlebar`。
     pub decorations: bool,
+    /// 无系统边框时标题栏归属：true = 宿主画，false = 插件自绘（宿主不画，插件用 `window.beginDrag`
+    /// 与窗口动作自己实现）。
+    pub titlebar: bool,
     pub hide_on_blur: bool,
     /// 最近一次已知窗口尺寸（开窗声明 + `window.update` 与 OS 调整事件共同维护）：
     /// `window.update` 只改一维时另一维取它。
@@ -565,6 +568,7 @@ pub fn on_window_open(
     );
     let always_on_top = params.always_on_top.unwrap_or(false);
     let decorations = params.decorations.unwrap_or(true);
+    let titlebar = params.titlebar.unwrap_or(true);
     let mut settings = iced::window::Settings {
         size,
         decorations,
@@ -586,6 +590,7 @@ pub fn on_window_open(
             window_key: params.id.clone(),
             title: params.title.clone(),
             decorations,
+            titlebar,
             hide_on_blur,
             size,
             always_on_top,
@@ -690,6 +695,9 @@ pub fn on_window_update(
     app.plugins.resolve_ui_call(request_id, Ok(()));
     let mut task = Task::none();
     if let Some(entry) = app.plugin_windows.get_mut(&os_id) {
+        if let Some(title) = params.title {
+            entry.title = title;
+        }
         let mut size = entry.size;
         if let Some(width) = params.width {
             size.width = width.max(160.0);
@@ -725,6 +733,33 @@ pub fn on_window_show(app: &mut App, request_id: u64, plugin_id: String, window_
     };
     app.plugins.resolve_ui_call(request_id, Ok(()));
     iced::window::set_mode(os_id, iced::window::Mode::Windowed)
+}
+
+/// 插件请求最小化自己打开的窗口。
+pub fn on_window_minimize(app: &mut App, request_id: u64, plugin_id: String, window_key: String) -> Task<Message> {
+    let Some(os_id) = live_plugin_window(app, &plugin_id, &window_key) else {
+        app.plugins
+            .resolve_ui_call(request_id, Err(format!("窗口未打开：{window_key}")));
+        return Task::none();
+    };
+    app.plugins.resolve_ui_call(request_id, Ok(()));
+    iced::window::minimize(os_id, true)
+}
+
+/// 插件请求切换自己打开窗口的最大化态。
+pub fn on_window_toggle_maximize(
+    app: &mut App,
+    request_id: u64,
+    plugin_id: String,
+    window_key: String,
+) -> Task<Message> {
+    let Some(os_id) = live_plugin_window(app, &plugin_id, &window_key) else {
+        app.plugins
+            .resolve_ui_call(request_id, Err(format!("窗口未打开：{window_key}")));
+        return Task::none();
+    };
+    app.plugins.resolve_ui_call(request_id, Ok(()));
+    iced::window::toggle_maximize(os_id)
 }
 
 /// 拖动承载某个面的窗口：面先按接管面 / 插件窗口解析出口，解析不到即用当前聚焦窗口。

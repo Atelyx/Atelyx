@@ -4,7 +4,7 @@
 use atelyx_plugin_protocol::envelope::Envelope;
 use atelyx_plugin_protocol::event::{
     ChatChangedPayload, FileChangedPayload, SpaceMetaChangedPayload, TableChangedPayload,
-    VaultSwitchPayload,
+    TableSelectionChangedPayload, VaultSwitchPayload,
 };
 use atelyx_plugin_protocol::handshake::{self, InitializeParams, InitializeResult};
 use atelyx_plugin_protocol::frame::{FrameRegionRequest, FrameSubmitSharedParams, SurfaceFrame};
@@ -247,6 +247,9 @@ fn method_type_shapes_are_frozen() {
             "WindowClosedParams" => frozen_roundtrip::<WindowClosedParams>(&value),
             "VaultSwitchPayload" => frozen_roundtrip::<VaultSwitchPayload>(&value),
             "TableChangedPayload" => frozen_roundtrip::<TableChangedPayload>(&value),
+            "TableSelectionChangedPayload" => {
+                frozen_roundtrip::<TableSelectionChangedPayload>(&value)
+            }
             "ChatChangedPayload" => frozen_roundtrip::<ChatChangedPayload>(&value),
             "TableSnapshot" => frozen_roundtrip::<TableSnapshot>(&value),
             "TableUpdateCellParams" => frozen_roundtrip::<TableUpdateCellParams>(&value),

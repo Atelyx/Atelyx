@@ -3,7 +3,8 @@
 
 use crate::protocol::frame::{FrameRect, HitCursor, HitRegion, SurfaceFrame};
 use crate::protocol::paint::{
-    ColorToken, DrawCommand, ImageFit, ImageSource, PaintColor, PaintPoint, TextAlign, TextWeight,
+    ColorToken, DrawCommand, ImageFit, ImageSource, PaintColor, PaintPoint, PaintShadow, TextAlign,
+    TextWeight,
 };
 
 /// 主题 token 颜色。
@@ -33,7 +34,7 @@ pub fn rect(
     fill: Option<PaintColor>,
     stroke: Option<PaintColor>,
 ) -> DrawCommand {
-    DrawCommand::Rect { x, y, w, h, fill, stroke, stroke_width: None, corner_radius: None }
+    DrawCommand::Rect { x, y, w, h, fill, stroke, stroke_width: None, corner_radius: None, shadow: None }
 }
 
 /// 圆角矩形（`radius` 为四角半径）：`fill` 与 `stroke` 至少给其一。
@@ -46,7 +47,12 @@ pub fn rounded_rect(
     fill: Option<PaintColor>,
     stroke: Option<PaintColor>,
 ) -> DrawCommand {
-    DrawCommand::Rect { x, y, w, h, fill, stroke, stroke_width: None, corner_radius: Some(radius) }
+    DrawCommand::Rect { x, y, w, h, fill, stroke, stroke_width: None, corner_radius: Some(radius), shadow: None }
+}
+
+/// 矩形投影参数：偏移 / 模糊半径 / 颜色。
+pub fn shadow(offset_x: f32, offset_y: f32, blur: f32, color: PaintColor) -> PaintShadow {
+    PaintShadow { offset_x, offset_y, blur, color }
 }
 
 /// 折线 / 多边形：`closed` 闭合末点与起点；`fill` 与 `stroke` 至少给其一。
@@ -76,7 +82,7 @@ pub fn circle(
     DrawCommand::Circle { cx, cy, r, fill, stroke, stroke_width: None }
 }
 
-/// 文字：`(x, y)` 为左上角。文字恒绘制在形状之上。
+/// 文字：`(x, y)` 为左上角。文字与形状按声明顺序绘制。
 pub fn text(x: f32, y: f32, content: impl Into<String>, size: f32, color: PaintColor) -> DrawCommand {
     DrawCommand::Text {
         x,

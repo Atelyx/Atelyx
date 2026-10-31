@@ -4,8 +4,8 @@
 
 use crate::frame::{FrameRect, HitCursor, HitRegion, SurfaceFrame};
 use crate::paint::{
-    ColorToken, DrawCommand, ImageFit, ImageSource, PaintColor, PaintPoint, TextAlign, TextFamily,
-    TextWeight,
+    ColorToken, DrawCommand, ImageFit, ImageSource, PaintColor, PaintPoint, PaintShadow, TextAlign,
+    TextFamily, TextWeight,
 };
 
 const MAGIC: [u8; 4] = *b"ATXF";
@@ -80,7 +80,7 @@ fn encode_command(out: &mut Vec<u8>, command: &DrawCommand) {
             encode_color(out, stroke);
             put_f32(out, *width);
         }
-        DrawCommand::Rect { x, y, w, h, fill, stroke, stroke_width, corner_radius } => {
+        DrawCommand::Rect { x, y, w, h, fill, stroke, stroke_width, corner_radius, shadow } => {
             out.push(1);
             for value in [x, y, w, h] {
                 put_f32(out, *value);
@@ -89,6 +89,7 @@ fn encode_command(out: &mut Vec<u8>, command: &DrawCommand) {
             put_opt(out, stroke.as_ref(), encode_color);
             put_opt(out, stroke_width.as_ref(), |out, value| put_f32(out, *value));
             put_opt(out, corner_radius.as_ref(), |out, value| put_f32(out, *value));
+            put_opt(out, shadow.as_ref(), encode_shadow);
         }
         DrawCommand::Path { points, closed, fill, stroke, stroke_width } => {
             out.push(2);
@@ -145,6 +146,13 @@ fn encode_color(out: &mut Vec<u8>, color: &PaintColor) {
             out.extend_from_slice(rgba);
         }
     }
+}
+
+fn encode_shadow(out: &mut Vec<u8>, shadow: &PaintShadow) {
+    for value in [shadow.offset_x, shadow.offset_y, shadow.blur] {
+        put_f32(out, value);
+    }
+    encode_color(out, &shadow.color);
 }
 
 fn encode_source(out: &mut Vec<u8>, source: &ImageSource) {
@@ -218,6 +226,7 @@ fn decode_command(reader: &mut Reader<'_>) -> Result<DrawCommand, String> {
             stroke: reader.opt(|r| r.color())?,
             stroke_width: reader.opt(|r| r.f32())?,
             corner_radius: reader.opt(|r| r.f32())?,
+            shadow: reader.opt(|r| r.shadow())?,
         },
         2 => {
             let count = reader.count()?;
@@ -544,6 +553,15 @@ impl<'a> Reader<'a> {
         })
     }
 
+    fn shadow(&mut self) -> Result<PaintShadow, String> {
+        Ok(PaintShadow {
+            offset_x: self.f32()?,
+            offset_y: self.f32()?,
+            blur: self.f32()?,
+            color: self.color()?,
+        })
+    }
+
     fn source(&mut self) -> Result<ImageSource, String> {
         Ok(match self.u8()? {
             0 => ImageSource::Private { path: self.string()? },
@@ -579,6 +597,12 @@ mod tests {
                     stroke: Some(PaintColor::Token { name: ColorToken::Border }),
                     stroke_width: Some(1.5),
                     corner_radius: None,
+                    shadow: Some(PaintShadow {
+                        offset_x: 0.0,
+                        offset_y: 2.0,
+                        blur: 6.0,
+                        color: PaintColor::Rgba { rgba: [0, 0, 0, 32] },
+                    }),
                 },
                 DrawCommand::Path {
                     points: vec![PaintPoint { x: 0.0, y: 1.0 }, PaintPoint { x: 2.0, y: 3.0 }],
@@ -671,6 +695,7 @@ mod tests {
                     stroke: None,
                     stroke_width: None,
                     corner_radius: Some(6.0),
+                    shadow: None,
                 },
                 DrawCommand::Text {
                     x: 0.0,
@@ -699,9 +724,12 @@ mod tests {
         let bytes = encode(&frame);
         assert_eq!(
             hex(&bytes),
-            "415458460102000000010000803f0000004000004040000080400100030000010000c040040000000000000000\
-03000000e4b8ad0000604101010203ff0000000001000000010000006100000000000000000000204100002041010200\
-00013c00"
+            concat!(
+                "415458460102000000010000803f00000040000040400000804001000300",
+                "00010000c0400004000000000000000003000000e4b8ad00006041010102",
+                "03ff00000000010000000100000061000000000000000000002041000020",
+                "4101020000013c00",
+            )
         );
         assert_eq!(decode(&bytes).unwrap(), frame);
     }

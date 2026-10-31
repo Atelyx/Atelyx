@@ -25,8 +25,12 @@ pub mod window {
     pub const OPEN: &str = "window.open";
     /// 插件关闭自己打开的一个窗口。
     pub const CLOSE: &str = "window.close";
-    /// 插件运行时改一个已打开窗口的属性（尺寸 / 置顶；「不进任务栏」只能在开窗时声明）。
+    /// 插件运行时改一个已打开窗口的属性（尺寸 / 置顶 / 标题；「不进任务栏」只能在开窗时声明）。
     pub const UPDATE: &str = "window.update";
+    /// 插件最小化自己打开的一个窗口。
+    pub const MINIMIZE: &str = "window.minimize";
+    /// 插件切换自己打开窗口的最大化态。
+    pub const TOGGLE_MAXIMIZE: &str = "window.toggleMaximize";
     /// 插件重新显示一个因失焦被隐藏的窗口（`hideOnBlur` 的唤起回路）。
     pub const SHOW: &str = "window.show";
     /// 插件请求拖动承载某个面的窗口（自绘标题栏走这里：宿主接管拖动，插件不必自己算窗口坐标）。
@@ -385,6 +389,10 @@ pub struct WindowUpdateParams {
     pub height: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub always_on_top: Option<bool>,
+    /// 改窗口标题：宿主自绘标题栏上的文字立即更新；系统边框窗口的 OS 标题由系统绘制，
+    /// 运行期不随之变化。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
 }
 
 /// `window.show` / `host:window.hidden` 的 params：按插件声明的窗口 id。
@@ -460,6 +468,11 @@ pub struct WindowOpenParams {
     /// 最大化 / 关闭），插件内容占满剩余区域。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decorations: Option<bool>,
+    /// 仅 `decorations: false` 时生效：缺省 true = 宿主画标题栏；false = 不画，插件自绘标题栏
+    /// （拖动走 [`window::BEGIN_DRAG`]，窗口控制走 [`window::MINIMIZE`] / [`window::TOGGLE_MAXIMIZE`]
+    /// / [`window::CLOSE`]）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub titlebar: Option<bool>,
 }
 
 /// `window.close` 的 params。
@@ -1856,7 +1869,7 @@ pub const BUILTIN_SERVICES: &[(&str, &str, &[&str])] = &[
     ("http", PLATFORM_PLUGIN, &[http::REQUEST]),
     // 工具名册与结果回报是宿主记账，不是可由外部提供者接管的能力，故不在目录里
     ("ai", "atelyx.ai", &[ai::CHAT_SEND, ai::CHAT_STOP, ai::CHAT_HISTORY, ai::MODELS, ai::AGENTS, ai::CHAT_RENAME, ai::CHAT_DELETE, ai::CHAT_COMPACT]),
-    ("window", PLATFORM_PLUGIN, &[window::OPEN, window::CLOSE, window::UPDATE, window::SHOW, window::BEGIN_DRAG]),
+    ("window", PLATFORM_PLUGIN, &[window::OPEN, window::CLOSE, window::UPDATE, window::SHOW, window::BEGIN_DRAG, window::MINIMIZE, window::TOGGLE_MAXIMIZE]),
     ("query", PLATFORM_PLUGIN, &[query::MEASURE, query::THEME]),
     ("markdown", "atelyx.notes", &[markdown::PARSE]),
     ("editor", "atelyx.notes", &[editor::SELECTION, editor::REPLACE_SELECTION]),

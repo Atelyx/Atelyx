@@ -94,6 +94,7 @@ const SECTIONS: &[Section] = &[
         items: items!(
             "paint.rs": "DrawCommand",
             "paint.rs": "PaintColor",
+            "paint.rs": "PaintShadow",
             "paint.rs": "PaintPoint",
             "paint.rs": "TextAlign",
             "paint.rs": "TextFamily",
@@ -384,6 +385,7 @@ const SECTIONS: &[Section] = &[
             "event.rs": "name",
             "event.rs": "VaultSwitchPayload",
             "event.rs": "TableChangedPayload",
+            "event.rs": "TableSelectionChangedPayload",
             "event.rs": "ChatChangedPayload",
             "event.rs": "ChatChangeKind",
             "event.rs": "FileChangedPayload",

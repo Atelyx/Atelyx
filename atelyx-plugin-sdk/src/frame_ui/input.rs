@@ -309,12 +309,19 @@ fn bar_offset(track: Rect, thumb: f32, max_offset: f32, y: f32) -> f32 {
 
 /// 滚轮改滚动偏移：增量是像素（宿主已把「行」换算成像素），按光标所在的最内层滚动容器走。
 fn wheel(state: &mut UiState, x: f32, y: f32, delta_y: f32) -> Option<UiEvent> {
+    // 浮层打开时滚轮只作用于浮层内：落点不在浮层上即丢弃，也不把滚动漏给下层列表
+    if !state.overlays.is_empty() && !state.overlays.iter().any(|rect| rect.contains(x, y)) {
+        return None;
+    }
     // 嵌套滚动区取面积最小者（最内层）：否则滚动会作用到外层容器上
     let (id, content, viewport) = state
         .layouts
         .iter()
         .filter_map(|(id, layout)| match layout {
-            Layout::Scroll { viewport, content } if viewport.contains(x, y) => {
+            Layout::Scroll { viewport, content }
+                if viewport.contains(x, y)
+                    && (state.overlays.is_empty() || state.overlay_scrolls.contains(id)) =>
+            {
                 Some((id.clone(), *content, *viewport))
             }
             _ => None,

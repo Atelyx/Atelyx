@@ -20,6 +20,45 @@ use crate::ui::notify::Level as NoticeLevel;
 /// 历史合并窗口（毫秒）。
 const HISTORY_COALESCE_MS: i64 = 60_000;
 
+/// 选区变更广播：无订阅者时不做差分（载荷要克隆路径与协作者名单）。
+/// 调用点在壳的 update 收口，每条消息处理后比较一次（本地操作、协作远端变化、远端超时剔除、
+/// 开合切换表格都经这里）；内容不变、只有选区移动也发。
+pub(crate) fn broadcast_selection(app: &mut App) {
+    if app.table.is_none() && app.table_selection_event.is_none() {
+        return;
+    }
+    if !app.plugins.wants_table_selection_events() {
+        return;
+    }
+    let current = match app.table.as_ref() {
+        Some(session) => atelyx_core::plugin_runtime::TableSelectionChangedPayload {
+            path: Some(session.file.clone()),
+            selection: session.view.selection.as_ref().map(atelyx_core::plugin_runtime::table::selection_of),
+            remote_selections: app
+                .table_collab
+                .as_ref()
+                .map(|collab| {
+                    collab
+                        .remote()
+                        .iter()
+                        .map(|remote| atelyx_core::plugin_runtime::TableRemoteSelection {
+                            name: remote.name.clone(),
+                            color: remote.color_hex.clone(),
+                            selection: atelyx_core::plugin_runtime::table::selection_of(&remote.selection),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        },
+        None => atelyx_core::plugin_runtime::TableSelectionChangedPayload::default(),
+    };
+    if app.table_selection_event.as_ref() == Some(&current) {
+        return;
+    }
+    app.plugins.on_table_selection_changed(current.clone());
+    app.table_selection_event = Some(current);
+}
+
 pub fn on_msg(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
     let task = dispatch(app, msg);
     // 选区可能已变（点选 / 拖选 / 键盘 / 行头列头 / 回滚清空）：全部消息的唯一收口

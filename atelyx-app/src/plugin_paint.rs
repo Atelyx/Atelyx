@@ -1,13 +1,15 @@
-//! 插件绘制指令执行：图元与图片解释成 canvas 几何，图片按插件身份与来源取已载入的句柄。
-//! 文字由 [`TextCache`] 以段落为单位缓存并绘制（内容不变就不重新成形），恒在形状与图片之上。
+//! 插件绘制指令执行：按指令顺序把图元、图片、文字与矩形投影交给渲染器。
+//! 文字走段落缓存（内容不变就不重新成形），与形状按声明序交错，浮层才能压住下层文字。
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::ops::Range;
 
 use iced::advanced::text::paragraph;
 use iced::advanced::text::{
     Alignment, LineHeight, Renderer as _, Shaping, Text as TextDef, Wrapping,
 };
+use iced::advanced::Renderer as _;
 use iced::alignment::Vertical;
 use iced::widget::canvas::{self, Path as CanvasPath, Stroke};
 use iced::{Color, Pixels, Point, Rectangle, Size};
@@ -33,17 +35,91 @@ pub struct PaintCtx<'a> {
     pub plugin_id: &'a str,
 }
 
-/// 按表序执行一批非文字指令（文字恒在形状之上，走 [`TextCache`]）。
+/// 绘制顺序里的一步：形状段按序合批进一块几何，图片 / 文字 / 矩形投影各自成步。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PaintStep {
+    Shapes(Range<usize>),
+    Image(usize),
+    Text(usize),
+    Shadow(usize),
+}
+
+/// 按指令序切成绘制步骤：文字、图片与带投影的矩形是顺序断点，其余形状按相邻段合批。
+pub fn plan(commands: &[DrawCommand]) -> Vec<PaintStep> {
+    let mut steps = Vec::new();
+    let mut start = 0;
+    for (index, command) in commands.iter().enumerate() {
+        let breakpoint = match command {
+            DrawCommand::Text { .. } => Some((PaintStep::Text(index), index + 1)),
+            DrawCommand::Image { .. } => Some((PaintStep::Image(index), index + 1)),
+            DrawCommand::Rect { shadow: Some(_), .. } => Some((PaintStep::Shadow(index), index)),
+            _ => None,
+        };
+        if let Some((step, next)) = breakpoint {
+            if start < index {
+                steps.push(PaintStep::Shapes(start..index));
+            }
+            steps.push(step);
+            // 投影矩形本身仍归入后续形状段：投影先画，填充与描边随后覆盖其上
+            start = next;
+        }
+    }
+    if start < commands.len() {
+        steps.push(PaintStep::Shapes(start..commands.len()));
+    }
+    steps
+}
+
+/// 单图层内的绘制批次序：quad（投影）→ 三角（形状）→ 图片 → 文字。
+/// 声明顺序与批次序相反时必须另起图层，否则后声明的形状会先被画出来。
+pub fn step_rank(step: &PaintStep) -> u8 {
+    match step {
+        PaintStep::Shadow(_) => 0,
+        PaintStep::Shapes(_) => 1,
+        PaintStep::Image(_) => 2,
+        PaintStep::Text(_) => 3,
+    }
+}
+
+/// 按表序执行一段非文字指令（文字由 [`TextCache`] 就地绘制）。
 pub fn execute_shapes<'a>(
     frame: &mut canvas::Frame,
-    commands: impl IntoIterator<Item = &'a DrawCommand>,
+    commands: &'a [DrawCommand],
+    range: Range<usize>,
     ctx: &PaintCtx<'_>,
 ) {
-    for command in commands {
+    for command in &commands[range] {
         if !matches!(command, DrawCommand::Text { .. }) {
             execute_one(frame, command, ctx);
         }
     }
+}
+
+/// 矩形投影交给渲染器的 quad 阴影：只画阴影本身，填充与描边仍走形状段。
+pub fn draw_shadow(renderer: &mut iced::Renderer, bounds: Rectangle, command: &DrawCommand) {
+    let DrawCommand::Rect { x, y, w, h, corner_radius, shadow: Some(shadow), .. } = command else {
+        return;
+    };
+    let color = color(shadow.color);
+    if color.a <= 0.0 {
+        return;
+    }
+    let quad = iced::advanced::renderer::Quad {
+        bounds: Rectangle::new(Point::new(*x, *y), Size::new(*w, *h)),
+        border: iced::Border {
+            radius: corner_radius.unwrap_or(0.0).into(),
+            ..iced::Border::default()
+        },
+        shadow: iced::Shadow {
+            offset: iced::Vector::new(shadow.offset_x, shadow.offset_y),
+            blur_radius: shadow.blur.max(0.0),
+            color,
+        },
+        snap: true,
+    };
+    renderer.with_translation(iced::Vector::new(bounds.x, bounds.y), |renderer| {
+        renderer.fill_quad(quad, iced::Background::Color(Color::TRANSPARENT));
+    });
 }
 
 /// 一条已排版的文字：内容与排版参数不变时直接复用段落，不重新成形。
@@ -75,39 +151,39 @@ impl TextCache {
         self.bytes = 0;
     }
 
-    /// 按指令顺序绘制文字：位置用面本地坐标，接上外壳原点的平移。
-    pub fn draw(
-        &mut self,
-        renderer: &mut iced::Renderer,
-        commands: &[DrawCommand],
-        bounds: Rectangle,
-    ) {
+    /// 开始一帧：段落的最近使用标记按帧推进。
+    pub fn begin_frame(&mut self) {
         self.frame += 1;
-        for command in commands {
-            let DrawCommand::Text {
-                x,
-                y,
-                content,
-                size,
-                color: text_color,
-                weight,
-                family,
-                max_width,
-                align,
-            } = command
-            else {
-                continue;
-            };
-            let (paragraph, width) =
-                self.entry(content, *size, *weight, *family, *max_width);
-            let x = aligned_x(*x, *max_width, *align, width);
-            renderer.fill_paragraph(
-                paragraph,
-                Point::new(bounds.x + x, bounds.y + *y),
-                color(*text_color),
-                bounds,
-            );
-        }
+    }
+
+    /// 就地绘制一条文字指令：位置用面本地坐标，接上外壳原点的平移。
+    pub fn draw_one(&mut self, renderer: &mut iced::Renderer, command: &DrawCommand, bounds: Rectangle) {
+        let DrawCommand::Text {
+            x,
+            y,
+            content,
+            size,
+            color: text_color,
+            weight,
+            family,
+            max_width,
+            align,
+        } = command
+        else {
+            return;
+        };
+        let (paragraph, width) = self.entry(content, *size, *weight, *family, *max_width);
+        let x = aligned_x(*x, *max_width, *align, width);
+        renderer.fill_paragraph(
+            paragraph,
+            Point::new(bounds.x + x, bounds.y + *y),
+            color(*text_color),
+            bounds,
+        );
+    }
+
+    /// 结束一帧：按本帧用到与否收敛缓存。
+    pub fn end_frame(&mut self) {
         self.trim(MAX_TEXT_ENTRIES, MAX_TEXT_BYTES);
     }
 
@@ -239,7 +315,7 @@ fn execute_one(frame: &mut canvas::Frame, command: &DrawCommand, ctx: &PaintCtx<
             let path = CanvasPath::line(Point::new(*x1, *y1), Point::new(*x2, *y2));
             frame.stroke(&path, stroke_of(color(*stroke), *width));
         }
-        DrawCommand::Rect { x, y, w, h, fill, stroke, stroke_width, corner_radius } => {
+        DrawCommand::Rect { x, y, w, h, fill, stroke, stroke_width, corner_radius, .. } => {
             let top_left = Point::new(*x, *y);
             let size = Size::new(*w, *h);
             let radius = corner_radius.filter(|r| *r > 0.0);
@@ -281,7 +357,7 @@ fn execute_one(frame: &mut canvas::Frame, command: &DrawCommand, ctx: &PaintCtx<
                 frame.stroke(&path, stroke_of(color(*stroke), stroke_width.unwrap_or(1.0)));
             }
         }
-        // 文字不在几何缓存里：由 [`TextCache`] 按段落跨帧复用、绘制在形状与图片之上
+        // 文字不在几何缓存里：由 [`TextCache`] 按段落跨帧复用、就地绘制
         DrawCommand::Text { .. } => {}
         DrawCommand::Image { source, x, y, w, h, fit } => {
             let Some((handle, source_size)) = image_handle(ctx, source) else {
@@ -397,5 +473,82 @@ mod tests {
         // 单帧条目本身就超上限：整体清空，下一帧重建
         cache.trim(0, usize::MAX);
         assert_eq!(cache.entries, 0);
+    }
+
+    fn text_command() -> DrawCommand {
+        DrawCommand::Text {
+            x: 0.0,
+            y: 0.0,
+            content: "文字".into(),
+            size: 13.0,
+            color: PaintColor::Rgba { rgba: [0, 0, 0, 255] },
+            weight: None,
+            family: None,
+            max_width: None,
+            align: None,
+        }
+    }
+
+    #[test]
+    fn plan_splits_at_text_and_shadows_in_declaration_order() {
+        let plain = DrawCommand::Circle {
+            cx: 0.0,
+            cy: 0.0,
+            r: 1.0,
+            fill: Some(PaintColor::Rgba { rgba: [0, 0, 0, 255] }),
+            stroke: None,
+            stroke_width: None,
+        };
+        let shadowed = DrawCommand::Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 10.0,
+            h: 10.0,
+            fill: Some(PaintColor::Rgba { rgba: [255, 255, 255, 255] }),
+            stroke: None,
+            stroke_width: None,
+            corner_radius: None,
+            shadow: Some(atelyx_core::plugin_runtime::PaintShadow {
+                offset_x: 0.0,
+                offset_y: 2.0,
+                blur: 4.0,
+                color: PaintColor::Rgba { rgba: [0, 0, 0, 32] },
+            }),
+        };
+        let commands = vec![plain.clone(), text_command(), shadowed, image_command(), plain.clone(), plain];
+        assert_eq!(
+            plan(&commands),
+            vec![
+                PaintStep::Shapes(0..1),
+                PaintStep::Text(1),
+                PaintStep::Shadow(2),
+                PaintStep::Shapes(2..3),
+                PaintStep::Image(3),
+                PaintStep::Shapes(4..6),
+            ],
+            "文字 / 图片就地断段；投影先于矩形填充；其余形状合批"
+        );
+        assert_eq!(
+            [
+                step_rank(&PaintStep::Shadow(0)),
+                step_rank(&PaintStep::Shapes(0..1)),
+                step_rank(&PaintStep::Image(0)),
+                step_rank(&PaintStep::Text(0)),
+            ],
+            [0, 1, 2, 3],
+            "批次序：投影 → 形状 → 图片 → 文字"
+        );
+        assert!(plan(&[]).is_empty(), "空帧 = 空步骤");
+    }
+
+    fn image_command() -> DrawCommand {
+        DrawCommand::Image {
+            source: ImageSource::Vault { path: "a.png".into() },
+            x: 0.0,
+            y: 0.0,
+            w: 4.0,
+            h: 4.0,
+            fit: Some(ImageFit::Contain),
+        }
     }
 }
