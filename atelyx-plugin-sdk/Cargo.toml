@@ -11,6 +11,8 @@ readme = "../README.md"
 exclude = ["src/bin", "tests"]
 
 [dependencies]
+# Markdown 解析（领域库）：插件侧自己解析源码，保留源偏移，不依赖宿主服务
+atelyx-markdown = { version = "0.1.0", path = "../atelyx-markdown" }
 # version 供 crates.io 解析，path 供仓库内直接构建（打包时 path 会被去掉）
 atelyx-plugin-protocol = { version = "0.1.0", path = "../atelyx-plugin-protocol" }
 # 同进程后端：导出 ABI 函数表并直接提交帧

@@ -2,15 +2,20 @@
 //! 每个控件的绘制闭包在拿到自己的矩形后写指令、命中区与布局记录——输入路由只认布局记录。
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::rc::Rc;
 
-use atelyx_plugin_protocol::paint::{DrawCommand, PaintColor};
+use atelyx_plugin_protocol::paint::{ColorToken, DrawCommand, PaintColor};
 use atelyx_plugin_protocol::frame::{FrameRect, HitCursor, HitRegion, SurfaceFrame};
-use atelyx_plugin_protocol::method::MarkdownBlock;
 
 use super::geom::Rect;
 use super::metrics::Metrics;
 use super::model::{FontSpec, Layout, UiState};
+use super::theme;
+
+/// 提示标签的内边距（左右 / 上下）。
+const HINT_PAD_X: f32 = 8.0;
+const HINT_PAD_Y: f32 = 4.0;
 use super::theme::Theme;
 
 /// 一帧的绘制上下文：指令 / 命中区 / 布局记录与量算都在这里，绘制结束后整批交回。
@@ -26,10 +31,6 @@ pub(crate) struct BuildCtx<'a> {
     pub scrolls: HashMap<String, f32>,
     pub scroll_max: HashMap<String, f32>,
     pub follow_prev: HashMap<String, bool>,
-    /// 本帧用到但缓存里没有的 Markdown 原文：出帧后由驱动去取，取到即重建。
-    pub markdown_misses: Vec<String>,
-    /// 本帧用到的 Markdown 原文：缓存按它收敛，不随历史内容累积。
-    pub markdown_used: HashSet<String>,
     /// 光标声明为拖动形态的子区：按下它们才建拖拽候选。
     pub draggables: HashSet<String>,
     /// 浮层：主内容布局完成后按声明序绘制，指令与命中区都压在主内容之上；
@@ -41,6 +42,14 @@ pub(crate) struct BuildCtx<'a> {
     in_overlay: bool,
     /// 浮层内的滚动容器 id。
     pub overlay_scrolls: HashSet<String>,
+    /// 本帧画了靠帧拍推进的动画（自转指示）：驱动据此声明帧拍。
+    pub wants_ticks: bool,
+    /// 本帧内 Markdown 块的序号：块 id 与代码块复制钮的命中都按它区分（插件看不到）。
+    markdown_seq: u32,
+    /// 本帧声明的悬停提示（控件 id → 文字）：随帧交给状态，下一帧的输入路由按它出提示。
+    hints: HashMap<String, String>,
+    /// 本帧画过的只读正文版面：状态留一份，选择命中与复制按它算。
+    pub markdown_seen: Vec<(String, Arc<super::markdown::Layout>)>,
 }
 
 pub(crate) struct BuildOut {
@@ -50,10 +59,14 @@ pub(crate) struct BuildOut {
     pub scrolls: HashMap<String, f32>,
     pub scroll_max: HashMap<String, f32>,
     pub follow_prev: HashMap<String, bool>,
-    pub markdown_misses: Vec<String>,
-    pub markdown_used: HashSet<String>,
     pub metrics: Metrics,
     pub misses: bool,
+    /// 本帧画了自转指示这类靠帧拍推进的动画：驱动据此声明帧拍。
+    pub wants_ticks: bool,
+    /// 本帧声明的悬停提示（控件 id → 文字）：驱动写回状态，供下一帧的输入路由使用。
+    pub hints: HashMap<String, String>,
+    /// 本帧画过的只读正文版面。
+    pub markdown_seen: Vec<(String, Arc<super::markdown::Layout>)>,
     /// 光标声明为拖动形态的子区：按下它们才建拖拽候选。
     pub draggables: HashSet<String>,
     pub overlays: Vec<Rect>,
@@ -74,27 +87,15 @@ impl<'a> BuildCtx<'a> {
             scrolls: state.scroll.clone(),
             scroll_max: state.scroll_max.clone(),
             follow_prev: state.follow_prev.clone(),
-            markdown_misses: Vec::new(),
-            markdown_used: HashSet::new(),
             draggables: HashSet::new(),
             overlays: Vec::new(),
             overlay_rects: Vec::new(),
             in_overlay: false,
             overlay_scrolls: HashSet::new(),
-        }
-    }
-
-    /// 取一段 Markdown 的解析块；缺项时记一次并按空块出这一帧，取到后重建。
-    pub(crate) fn markdown_blocks(&mut self, content: &str) -> Vec<MarkdownBlock> {
-        self.markdown_used.insert(content.to_string());
-        match self.state.markdown.get(content) {
-            Some(blocks) => blocks.clone(),
-            None => {
-                if !self.markdown_misses.iter().any(|miss| miss == content) {
-                    self.markdown_misses.push(content.to_string());
-                }
-                Vec::new()
-            }
+            wants_ticks: false,
+            markdown_seq: 0,
+            hints: HashMap::new(),
+            markdown_seen: Vec::new(),
         }
     }
 
@@ -131,12 +132,74 @@ impl<'a> BuildCtx<'a> {
         self.state.focus.as_deref() == Some(id)
     }
 
+    /// 本帧一个 Markdown 块的内部身份：同帧多块互不冲突，插件无需命名。
+    /// 带上内容指纹：块序因新消息插入而错位时，选择不会悄悄落到另一段文字上。
+    pub(crate) fn next_markdown_id(&mut self, content: u64) -> String {
+        self.markdown_seq += 1;
+        format!("@md:{}:{content:x}", self.markdown_seq)
+    }
+
+    /// 光标此刻是否显形（静默时半秒亮、半秒灭）。
+    pub(crate) fn caret_lit(&self) -> bool {
+        self.state.caret_lit()
+    }
+
+    /// 声明一个控件的悬停提示：指针停够时间后由控件层画在指针下沿（插件不必自己管浮层）。
+    pub(crate) fn declare_hint(&mut self, id: &str, text: &str) {
+        if !text.is_empty() {
+            self.hints.insert(id.to_string(), text.to_string());
+        }
+    }
+
+    /// 提示标签：悬停够久后压在最后画（整块留在面内，贴边时向里收）。
+    pub(crate) fn paint_hint(&mut self) {
+        let Some(label) = self.state.hint_label() else {
+            return;
+        };
+        let Some((pointer_x, pointer_y)) = self.state.pointer else {
+            return;
+        };
+        let spec = FontSpec { size: self.theme.sizes.micro, weight: None, family: None };
+        let line = self.metrics.measure("", spec, None).height.max(spec.size * 1.2);
+        let width = self.metrics.width(&label, spec) + HINT_PAD_X * 2.0;
+        let height = line + HINT_PAD_Y * 2.0;
+        let size = self.state.size;
+        let x = (pointer_x + 10.0).clamp(4.0, (size.0 - width - 4.0).max(4.0));
+        let y = (pointer_y + 18.0).clamp(4.0, (size.1 - height - 4.0).max(4.0));
+        self.draw(DrawCommand::Rect {
+            x,
+            y,
+            w: width,
+            h: height,
+            fill: Some(theme::token(ColorToken::Surface)),
+            stroke: Some(theme::token(ColorToken::Border)),
+            stroke_width: Some(1.0),
+            corner_radius: Some(4.0),
+            shadow: None,
+        });
+        self.draw(DrawCommand::Text {
+            x: x + HINT_PAD_X,
+            y: y + HINT_PAD_Y,
+            content: label,
+            size: spec.size,
+            color: theme::token(ColorToken::TextSecondary),
+            weight: None,
+            family: None,
+            italic: false,
+            max_width: None,
+            align: None,
+        });
+    }
+
     /// 汇总成帧：键盘声明按「本帧有无可聚焦控件」定，输入法光标取聚焦输入框的光标矩形。
     pub(crate) fn finish(self) -> BuildOut {
         let keys = !self.focusables.is_empty();
         let ime = self.ime.map(|r| FrameRect { x: r.x, y: r.y, w: r.w, h: r.h });
         let misses = self.metrics.has_misses();
+        let hints = self.hints;
         BuildOut {
+            hints,
+            markdown_seen: self.markdown_seen,
             frame: SurfaceFrame {
                 size: None,
                 commands: self.commands,
@@ -150,10 +213,9 @@ impl<'a> BuildCtx<'a> {
             scrolls: self.scrolls,
             scroll_max: self.scroll_max,
             follow_prev: self.follow_prev,
-            markdown_misses: self.markdown_misses,
-            markdown_used: self.markdown_used,
             metrics: self.metrics,
             misses,
+            wants_ticks: self.wants_ticks,
             draggables: self.draggables,
             overlays: self.overlay_rects,
             overlay_scrolls: self.overlay_scrolls,
@@ -229,6 +291,7 @@ impl<'c, 'a> Canvas<'c, 'a> {
             color,
             weight: None,
             family: None,
+            italic: false,
             max_width: None,
             align: None,
         });

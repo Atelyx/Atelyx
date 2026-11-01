@@ -1305,99 +1305,13 @@
       }
     },
     {
-      "name": "query.markdown params",
-      "type": "MarkdownParams",
-      "value": {
-        "content": "# 标题\n\n正文"
-      }
-    },
-    {
-      "name": "query.markdown result",
-      "type": "MarkdownResult",
-      "value": {
-        "blocks": [
-          {
-            "kind": "heading",
-            "level": 2,
-            "depth": 0,
-            "spans": [
-              {
-                "text": "标题",
-                "strong": true
-              }
-            ]
-          },
-          {
-            "kind": "paragraph",
-            "depth": 1,
-            "spans": [
-              {
-                "text": "正文"
-              },
-              {
-                "text": "代码",
-                "code": true
-              },
-              {
-                "text": "链接",
-                "link": "https://example.com"
-              }
-            ]
-          },
-          {
-            "kind": "listItem",
-            "depth": 0,
-            "ordered": true,
-            "index": 2,
-            "spans": [
-              {
-                "text": "第二项"
-              }
-            ]
-          },
-          {
-            "kind": "quote",
-            "depth": 1,
-            "spans": [
-              {
-                "text": "引用"
-              }
-            ]
-          },
-          {
-            "kind": "code",
-            "depth": 0,
-            "lang": "rust",
-            "content": "let a = 1;"
-          },
-          {
-            "kind": "table",
-            "depth": 0,
-            "rows": [
-              [
-                "甲",
-                "乙"
-              ],
-              [
-                "1",
-                "2"
-              ]
-            ]
-          },
-          {
-            "kind": "divider"
-          }
-        ]
-      }
-    },
-    {
       "name": "service.register params",
       "type": "ServiceRegisterParams",
       "value": {
-        "service": "markdown",
+        "service": "vault",
         "version": 1,
         "methods": [
-          "parse"
+          "exists"
         ]
       }
     },
@@ -1407,10 +1321,10 @@
       "value": {
         "services": [
           {
-            "service": "markdown",
+            "service": "vault",
             "version": 1,
             "methods": [
-              "parse"
+              "exists"
             ],
             "replaceable": true,
             "candidates": [
@@ -1445,8 +1359,8 @@
       "type": "HostServiceCallParams",
       "value": {
         "callId": "svc-7",
-        "service": "markdown",
-        "method": "parse",
+        "service": "vault",
+        "method": "exists",
         "params": {
           "content": "# A"
         }
@@ -1474,7 +1388,7 @@
       "name": "host:service.changed params",
       "type": "ServiceChangedParams",
       "value": {
-        "service": "markdown",
+        "service": "vault",
         "provider": "com.example.parser",
         "available": true
       }

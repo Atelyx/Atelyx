@@ -379,8 +379,7 @@ pub mod error {
 ///
 /// 这是「能力只有一种描述方式」的落地：方法名本身就是 `服务.方法`，目录按第一个 `.` 切分即得；
 /// `host:` 方法的宿主→插件通知不在其列（那不是插件可调用的能力）。条目引用常量而非字面量，
-/// 改名 / 删除常量会直接编译失败，目录不会悄悄漂移。服务随归属插件启停：停用笔记插件后
-/// 别的插件调不到 `markdown`，除非另有外部提供者接管。
+/// 改名 / 删除常量会直接编译失败，目录不会悄悄漂移。服务随归属插件启停。
 pub const BUILTIN_SERVICES: &[(&str, &str, &[&str])] = &[
     ("fs", PLATFORM_PLUGIN, &[fs::PRIVATE_DIR, fs::READ_TEXT, fs::WRITE_TEXT, fs::READ_BINARY, fs::WRITE_BINARY, fs::REMOVE, fs::EXISTS, fs::LIST]),
     ("process", PLATFORM_PLUGIN, &[process::SPAWN, process::WRITE_STDIN, process::CLOSE_STDIN, process::KILL]),
@@ -401,7 +400,6 @@ pub const BUILTIN_SERVICES: &[(&str, &str, &[&str])] = &[
     ("ai", PLATFORM_PLUGIN, &[ai::CHAT_SEND, ai::CHAT_STOP, ai::CHAT_HISTORY, ai::MODELS, ai::AGENTS, ai::CHAT_RENAME, ai::CHAT_DELETE, ai::CHAT_COMPACT, ai::CHAT_TITLE, ai::TOOL_LIST, ai::TOOL_EXECUTE, ai::CHAT_EMIT]),
     ("window", PLATFORM_PLUGIN, &[window::OPEN, window::CLOSE, window::UPDATE, window::SHOW, window::BEGIN_DRAG, window::MINIMIZE, window::TOGGLE_MAXIMIZE]),
     ("query", PLATFORM_PLUGIN, &[query::MEASURE, query::THEME]),
-    ("markdown", "atelyx.notes", &[markdown::PARSE]),
     ("editor", "atelyx.notes", &[editor::SELECTION, editor::REPLACE_SELECTION]),
     ("history", "atelyx.history", &[history::ACTIVITY, history::DAY, history::OPEN]),
 ];
@@ -472,6 +470,9 @@ pub enum DrawCommand {
         weight: Option<TextWeight>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         family: Option<TextFamily>,
+        /// 斜体：字族没有斜体字形时按合成倾斜绘制（强调正文里的 `*斜体*` 用它）。
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        italic: bool,
         /// 可用宽度：给定即按该宽度换行，并作为 `align` 的对齐区域。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         max_width: Option<f32>,
@@ -645,16 +646,6 @@ pub mod query {
     pub const MEASURE: &str = "query.measure";
     /// 取宿主主题表（颜色 / 字号档 / 圆角档），插件据此与宿主观感一致。
     pub const THEME: &str = "query.theme";
-}
-```
-
-```rust
-// atelyx-plugin-protocol/src/method.rs
-/// Markdown 解析：内容不变则结果不变，插件应按原文缓存，不必逐帧往返。
-pub mod markdown {
-    /// 把 Markdown 文本转成结构化块（与笔记同一套解析语义），排版与绘制仍归插件。
-    /// 服务名 `markdown`、方法 `parse`，因此外部提供者可以整体替换解析实现。
-    pub const PARSE: &str = "markdown.parse";
 }
 ```
 
@@ -1118,88 +1109,6 @@ pub struct Modifiers {
 }
 ```
 
-```rust
-// atelyx-plugin-protocol/src/method.rs
-/// 单次转换的源文本上限（字节）：超限按可读错误拒绝，插件应自行分段。
-pub const MAX_MARKDOWN_BYTES: usize = 512 * 1024;
-```
-
-```rust
-// atelyx-plugin-protocol/src/method.rs
-/// [`markdown::PARSE`] 的 params：交给宿主按笔记同一套解析语义转成结构化块。
-/// 宿主只做解析（块与行内片段），排版与绘制仍归插件。
-#[serde(rename_all = "camelCase")]
-pub struct MarkdownParams {
-    pub content: String,
-}
-```
-
-```rust
-// atelyx-plugin-protocol/src/method.rs
-/// [`markdown::PARSE`] 的 result：按源序排列的块。
-#[serde(rename_all = "camelCase")]
-pub struct MarkdownResult {
-    pub blocks: Vec<MarkdownBlock>,
-}
-```
-
-```rust
-// atelyx-plugin-protocol/src/method.rs
-/// 块：`depth` 为嵌套层数（列表 / 引用内部块递增），由插件换算缩进。
-/// 表格单元格只给纯文本（单元格行内样式不展开）。
-#[serde(tag = "kind", rename_all = "camelCase")]
-#[serde(rename_all_fields = "camelCase")]
-pub enum MarkdownBlock {
-    Heading {
-        level: u8,
-        depth: u32,
-        spans: Vec<MarkdownSpan>,
-    },
-    Paragraph {
-        depth: u32,
-        spans: Vec<MarkdownSpan>,
-    },
-    /// 列表项：`index` 对有序列表取源里的序号（`3.` 就是 3），无序列表恒为 1；`ordered` 决定画圆点还是序号。
-    ListItem {
-        depth: u32,
-        ordered: bool,
-        index: u32,
-        spans: Vec<MarkdownSpan>,
-    },
-    /// 引用段落：插件在左侧画竖条。
-    Quote {
-        depth: u32,
-        spans: Vec<MarkdownSpan>,
-    },
-    Code {
-        depth: u32,
-        lang: String,
-        content: String,
-    },
-    /// 表格：`rows[0]` 是表头行，其余为数据行；单元格只给纯文本。
-    Table {
-        depth: u32,
-        rows: Vec<Vec<String>>,
-    },
-    Divider,
-}
-```
-
-```rust
-// atelyx-plugin-protocol/src/method.rs
-/// 行内片段：同一段文字里的样式差异（字重、等宽、链接目标）。
-#[serde(rename_all = "camelCase")]
-pub struct MarkdownSpan {
-    pub text: String,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub strong: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub code: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub link: Option<String>,
-}
-```
-
 ## 6. 帧共享内存
 
 握手应答给出区域描述（路径 / 代次 / 槽数 / 槽容量）：插件把编码后的帧写进一个槽位，再以`frame.submitShared` 报告槽位坐标。区域文件全部小端：64 字节区域头（魔数 `ATLXFRM\0` / 版本 / 槽数 /槽容量 / 代次 / 头长 / 槽步长），每槽 16 字节槽头（序号 u64、长度 u32）+ 槽容量。写入顺序是「序号置奇 →写长度与内容 → 序号置偶」，序号取非零偶数、每次 +2；宿主首尾序号一致才认这一帧，撕裂或错位的整帧丢弃。帧超出槽容量时用 `frame.region` 请求扩容，宿主换新文件并递增代次，旧代次的提交一律拒绝。
@@ -1428,11 +1337,11 @@ pub fn decode(bytes: &[u8]) -> Result<SurfaceFrame, String> {
         return Err("帧编码魔数不符".into());
     }
     let version = bytes[MAGIC.len()];
-    if !(1..=VERSION).contains(&version) {
+    if version != VERSION {
         return Err(format!("帧编码版本不符：{version}"));
     }
     let mut reader = Reader { buf: bytes, pos: MAGIC.len() + 1 };
-    let frame = decode_frame(&mut reader, version)?;
+    let frame = decode_frame(&mut reader)?;
     if reader.pos != bytes.len() {
         return Err(format!("帧编码尾部有多余字节：{}", bytes.len() - reader.pos));
     }

@@ -15,8 +15,8 @@ pub const PANEL: &str = "aichat";
 pub const FLOW: &str = "flow";
 /// 输入框 id。
 pub const DRAFT: &str = "draft";
-/// # 候选浮层最多列出的条数。
-const PICKER_MAX: usize = 8;
+/// # 候选浮层最多列出的条数（浮层可滚动，取够一屏能翻的量）。
+const PICKER_MAX: usize = 50;
 /// 会话标题缺省文案。
 pub const UNTITLED: &str = "未命名对话";
 
@@ -32,6 +32,13 @@ impl SessionRow {
     pub fn title(&self) -> &str {
         self.title.as_deref().filter(|t| !t.is_empty()).unwrap_or(UNTITLED)
     }
+}
+
+/// 正在改名的那一行：会话 id 与草稿标题。
+#[derive(Clone, Debug)]
+pub struct RenameDraft {
+    pub id: String,
+    pub title: String,
 }
 
 #[derive(Clone, Debug)]
@@ -147,6 +154,8 @@ pub struct Model {
     pub delete_confirm: Option<String>,
     /// 已展开删除操作的会话行（悬停时点「更多」打开）。
     pub session_menu: Option<String>,
+    /// 行内改名草稿（点「重命名」后出现）。
+    pub rename: Option<RenameDraft>,
     pub expanded: HashSet<String>,
     /// 消息流是否停在底部（上翻后出现「回到底部」）。
     pub follow_bottom: bool,
@@ -172,8 +181,6 @@ pub struct Model {
     pub pointer: Option<(f32, f32)>,
     /// 当前菜单的锚点；子菜单沿用同一触发点。
     pub menu_anchor: Option<(f32, f32)>,
-    /// 命名 / 压缩进行中的转圈相位（宿主帧拍推进）。
-    pub spin_tick: u32,
 }
 
 impl Default for Model {
@@ -201,6 +208,7 @@ impl Model {
             search: String::new(),
             delete_confirm: None,
             session_menu: None,
+            rename: None,
             expanded: HashSet::new(),
             follow_bottom: true,
             rollback_confirm: None,
@@ -220,7 +228,6 @@ impl Model {
             menu: None,
             pointer: None,
             menu_anchor: None,
-            spin_tick: 0,
         }
     }
 
@@ -244,6 +251,7 @@ impl Model {
         self.renaming.clear();
         self.delete_confirm = None;
         self.session_menu = None;
+        self.rename = None;
         self.expanded.clear();
         self.follow_bottom = true;
         self.rollback_confirm = None;
@@ -259,7 +267,6 @@ impl Model {
         self.menu = None;
         self.pointer = None;
         self.menu_anchor = None;
-        self.spin_tick = 0;
     }
 
     pub fn apply_list(&mut self, list: ChatHistoryResult) {
@@ -385,6 +392,21 @@ impl Model {
         if self.active.as_deref() == Some(session_id) {
             self.active_title = title;
         }
+    }
+
+    /// 打开行内改名：草稿先填当前标题（未命名会话填空，方便直接输入）。
+    pub fn begin_rename(&mut self, session_id: &str) {
+        let title = self
+            .session(session_id)
+            .and_then(|row| row.title.clone())
+            .unwrap_or_default();
+        self.rename = Some(RenameDraft { id: session_id.to_string(), title });
+        self.session_menu = None;
+        self.delete_confirm = None;
+    }
+
+    pub fn cancel_rename(&mut self) {
+        self.rename = None;
     }
 
     pub fn remove_session(&mut self, session_id: &str) {

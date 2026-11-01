@@ -271,6 +271,8 @@ pub struct AbiCommand {
     pub text_weight: u32,
     pub text_family: u32,
     pub text_align: u32,
+    /// 斜体：字族没有斜体字形时按合成倾斜绘制。
+    pub text_italic: u8,
     pub text_max_width: f32,
     /// 图片：用 `rect` 定位，来源按 `image_source` 解释。
     pub image_source: u32,

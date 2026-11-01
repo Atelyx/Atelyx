@@ -16,7 +16,6 @@ mod instance;
 mod layout;
 mod log;
 mod manifest;
-mod markdown;
 /// 市场数据源（公开给壳：索引拉取 / 缓存 / Release 取数）。
 pub mod market;
 mod preset;

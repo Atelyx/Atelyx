@@ -606,9 +606,17 @@ impl<'c, 'a> Ui<'c, 'a> {
         });
     }
 
-    /// 转圈指示：`phase` 为旋转弧度（插件按帧拍推进）；画四分之三圆弧，尺寸固定为正方形。
-    pub fn spinner(&mut self, size: f32, color: ColorToken, phase: f32) {
+    /// 转圈指示：每拍一转十等分（约一秒一圈），尺寸固定为正方形。
+    /// 相位由控件层的帧拍推进，插件不必自己算角度，也不必自己声明帧拍频率。
+    pub fn spinner(&mut self, size: f32, color: ColorToken) {
+        let phase = self.ctx().state.clock as f32 * (std::f32::consts::TAU / 10.0);
+        self.spinner_at(size, color, phase);
+    }
+
+    /// 指定相位的转圈（弧度）：插件有更强的时间源时用。
+    pub fn spinner_at(&mut self, size: f32, color: ColorToken, phase: f32) {
         let stroke = (size / 14.0 * 1.5).max(1.0);
+        self.ctx().wants_ticks = true;
         self.push(Item {
             width: Width::Fixed(size),
             fill_height: false,
@@ -1097,6 +1105,7 @@ impl<'c, 'a> Ui<'c, 'a> {
     /// 依赖输入区高度排布浮层 / 浮钮的调用方据此算位置。
     pub fn auto_area_height(
         &mut self,
+        id: &str,
         value: &str,
         role: TextRole,
         width: f32,
@@ -1105,7 +1114,11 @@ impl<'c, 'a> Ui<'c, 'a> {
         pad: Edges,
     ) -> f32 {
         let (font, _) = role.resolve(self.ctx().theme);
-        auto_area_height(&mut self.ctx().metrics, value, font, width, min, max, pad)
+        let state = self.ctx().state.inputs.get(id);
+        let caret = state.map_or(value.len(), |item| item.caret.min(value.len()));
+        let preedit = state.map_or("", |item| item.preedit.as_str());
+        let composed = text::compose(value, text::Composed::new(caret, preedit), preedit);
+        auto_area_height(&mut self.ctx().metrics, &composed, font, width, min, max, pad)
     }
 
     /// 面板：圆角表面容器（承接子项，不承接点击）。
@@ -1346,7 +1359,13 @@ impl<'c, 'a> Ui<'c, 'a> {
         let theme = self.ctx().theme.clone();
         let font = FontSpec { size: font_size.unwrap_or(theme.sizes.caption), weight: None, family: None };
         let for_layout = value.clone();
-        let for_height = value.clone();
+        // 组合串也计入高度：拼音还没上屏时输入盒要跟着长高
+        let for_height = {
+            let state = self.ctx().state.inputs.get(&id);
+            let caret = state.map_or(value.len(), |item| item.caret.min(value.len()));
+            let preedit = state.map_or("", |item| item.preedit.as_str());
+            text::compose(&value, text::Composed::new(caret, preedit), preedit).into_owned()
+        };
         let for_marks = marks.clone();
         self.push(Item {
             width: Width::Fill,
@@ -1726,22 +1745,47 @@ impl<'c, 'a> Ui<'c, 'a> {
         });
     }
 
-    /// 只读 Markdown：块由宿主解析（`markdown.parse`），排版与绘制在这里；
-    /// 首次出现时该帧为空，取到解析结果后自动重建。版面按内容缓存，滚动不重排。
+    /// 给控件挂一条悬停提示：指针停够 400ms 由控件层画在指针下沿，插件不必自己管浮层。
+    pub fn hint(&mut self, id: &str, text: &str) {
+        self.ctx().declare_hint(id, text);
+    }
+
+    /// 只读 Markdown：解析（领域库）与排版都在控件层，版面按内容与宽度缓存，滚动不重排。
+    /// 代码块头的「复制」由控件层自持（按下即写剪贴板），插件不必为它接线。
     pub fn markdown(&mut self, content: impl Into<String>) {
+        self.markdown_with(content, Vec::new());
+    }
+
+    /// 带引用候选的只读 Markdown：`#笔记：方案.md` 这类标签按胶囊绘制（对话气泡用）。
+    pub fn markdown_with(
+        &mut self,
+        content: impl Into<String>,
+        mentions: Vec<atelyx_markdown::MentionCandidate>,
+    ) {
         let content = content.into();
-        let blocks = Rc::new(self.ctx().markdown_blocks(&content));
         let theme = self.ctx().theme.clone();
         let cache = Arc::clone(&self.ctx().state.markdown_layouts);
-        let key = super::markdown::content_key(&content);
-        let for_height = Rc::clone(&blocks);
+        let key = super::markdown::content_key(&content, &mentions);
+        let id = self.ctx().next_markdown_id(key);
+        let for_height = content.clone();
+        let height_mentions = mentions.clone();
+        let draw_mentions = mentions;
         self.push(Item {
             width: Width::Fill,
             fill_height: false,
             height: Box::new(move |metrics, width| {
-                super::markdown::height(&cache, metrics, &theme, key, &for_height, width)
+                super::markdown::height(&cache, metrics, &theme, key, &for_height, &height_mentions, width)
             }),
-            draw: Box::new(move |ctx, rect, clip| super::markdown::paint(ctx, key, &blocks, rect, clip)),
+            draw: Box::new(move |ctx, rect, clip| {
+                let visible = rect.intersect(clip);
+                if visible.is_empty() {
+                    return;
+                }
+                super::markdown::paint(ctx, &id, key, &content, &draw_mentions, rect, clip);
+                // 正文可拖选：命中声明为文本形态，按下 / 拖动由输入路由换算成行列
+                ctx.hit(&id, visible, atelyx_plugin_protocol::frame::HitCursor::Text);
+                ctx.record(&id, super::model::Layout::Markdown { rect });
+            }),
         });
     }
 
@@ -1958,8 +2002,11 @@ fn draw_input_text(
     }
     // 密文框只把值换成掩码字符（每颗一个字），光标 / 选区按字符数换算成掩码串里的字节位。
     // 插件换值时旧光标可能落在多字节字符内部，故按字符起点计数，不直接切字节。
-    let display;
-    let (caret, anchor) = if masked {
+    let display: String;
+    let (caret, anchor);
+    // 组合串在掩码框里不参与排版（掩码长度与串长不同源，混排会错位），只在光标处叠画
+    let mut at = text::Composed::default();
+    if masked {
         let chars = value.chars().count();
         display = "•".repeat(chars);
         let mask_width = "•".len();
@@ -1967,15 +2014,16 @@ fn draw_input_text(
             let byte = byte.min(value.len());
             value.char_indices().take_while(|(index, _)| *index < byte).count() * mask_width
         };
-        let caret = if focused { to_masked(state.caret) } else { 0 };
-        let anchor = if focused { to_masked(state.anchor) } else { 0 };
-        (caret, anchor)
+        caret = if focused { to_masked(state.caret) } else { 0 };
+        anchor = if focused { to_masked(state.anchor) } else { 0 };
     } else {
-        display = value.to_string();
-        let caret = if focused { state.caret.min(value.len()) } else { 0 };
-        let anchor = if focused { state.anchor.min(value.len()) } else { 0 };
-        (caret, anchor)
-    };
+        // 组合串作为光标处的临时文字进入排版：后面的字顺次右移
+        let composed = text::Composed::new(text::snap(value, state.caret), &state.preedit);
+        display = text::compose(value, composed, &state.preedit).into_owned();
+        caret = if focused { composed.caret(text::snap(value, state.caret)) } else { 0 };
+        anchor = if focused { composed.index(text::snap(value, state.anchor)) } else { 0 };
+        at = composed;
+    }
     let window = text::window(&mut ctx.metrics, &display, font, inner.w, caret, anchor);
     let whole = field.y >= clip.y && field.bottom() <= clip.bottom() + 0.5;
     if let Some((low, high)) = window.selection.filter(|_| focused && whole) {
@@ -1997,36 +2045,41 @@ fn draw_input_text(
         display[window.start..window.end].to_string()
     };
     text::paint(ctx, &shown, font, theme::token(ColorToken::Text), inner.x, baseline, None, None, clip);
-    if !state.preedit.is_empty() {
-        text::paint(
+    // 组合串换强调色：与正文同字形同位，重画窗口中相交的一段即完成上色
+    let mark = if at.is_active() {
+        overlap(at.span(), &text::Line { start: window.start, end: window.end })
+    } else {
+        None
+    };
+    if let Some((low, high)) = mark {
+        let x = inner.x + text::offset_in_line(&mut ctx.metrics, &shown, font, low - window.start);
+        text::paint_line(
             ctx,
-            &state.preedit,
+            &display[low..high],
             font,
             theme::token(ColorToken::Accent),
-            inner.x + window.caret,
+            x,
             baseline,
-            Some((inner.w - window.caret).max(1.0)),
-            None,
+            line_height,
             clip,
         );
     }
     if focused && whole {
-        ctx.draw(DrawCommand::Rect {
-            x: inner.x + window.caret,
-            y: baseline,
-            w: 1.0,
-            h: line_height,
-            fill: Some(theme::token(ColorToken::Accent)),
-            stroke: None,
-            stroke_width: None,
-            corner_radius: None,
-            shadow: None,
-        });
-        ctx.ime = Some(Rect::new(inner.x + window.caret, baseline, 1.0, line_height));
+        let lit = ctx.caret_lit();
+        draw_caret_bar(ctx, inner.x + window.caret, baseline, line_height, clip, lit);
+        // 候选窗贴组合串起点（串尾由本端自绘）
+        let lead = at.index(text::snap(value, state.caret));
+        let lead_x = if lead >= window.start {
+            inner.x + text::offset_in_line(&mut ctx.metrics, &shown, font, lead - window.start)
+        } else {
+            inner.x
+        };
+        anchor_ime(ctx, lead_x, baseline, line_height, clip);
     }
 }
 
 /// 多行输入的文字、选区与光标：逐可视行绘制，纵向平移量只由光标行决定（见 `text::top_line`）。
+/// 输入法组合串作为光标处的临时文字参与排版（后续字符被推开），以强调色绘制、光标停在串尾。
 #[allow(clippy::too_many_arguments)]
 fn draw_area_text(
     ctx: &mut BuildCtx<'_>,
@@ -2058,13 +2111,18 @@ fn draw_area_text(
             clip,
         );
         if focused {
-            draw_area_caret(ctx, line_x, inner.y, line_height, clip);
+            let lit = ctx.caret_lit();
+            draw_caret_bar(ctx, line_x, inner.y, line_height, clip, lit);
+            anchor_ime(ctx, line_x, inner.y, line_height, clip);
         }
         return;
     }
-    let lines = text::lines(&mut ctx.metrics, value, font, inner.w);
-    let caret = text::snap(value, state.caret);
-    let anchor = text::snap(value, state.anchor);
+    // 组合串作为光标处的临时文字进入排版：后面的字顺次右移、该换行就换行
+    let at = text::Composed::new(text::snap(value, state.caret), &state.preedit);
+    let composed = text::compose(value, at, &state.preedit);
+    let caret = at.caret(text::snap(value, state.caret));
+    let anchor = at.index(text::snap(value, state.anchor));
+    let lines = text::lines(&mut ctx.metrics, &composed, font, inner.w);
     let caret_index = text::line_of(&lines, caret);
     let scroll = text::area_scroll(
         state.scroll,
@@ -2084,15 +2142,16 @@ fn draw_area_text(
         if y + line_height <= clip.y {
             continue;
         }
-        let segment = &value[line.start..line.end];
+        let segment = &composed[line.start..line.end];
         // 标记区间（`#` 引用标签这类整段实体）先画浅底，正文与选区压在其上
         for (mark_start, mark_end) in marks {
             let (mark_start, mark_end) = (*mark_start.min(mark_end), *mark_end.max(mark_start));
-            if mark_end <= line.start || mark_start >= line.end {
+            let (start, end) = (at.index(mark_start), at.index(mark_end));
+            if end <= line.start || start >= line.end {
                 continue;
             }
-            let low = mark_start.max(line.start) - line.start;
-            let high = mark_end.min(line.end) - line.start;
+            let low = start.max(line.start) - line.start;
+            let high = end.min(line.end) - line.start;
             let x1 = line_x + text::offset_in_line(&mut ctx.metrics, segment, font, low);
             let x2 = line_x + text::offset_in_line(&mut ctx.metrics, segment, font, high);
             let band = Rect::new(
@@ -2143,31 +2202,52 @@ fn draw_area_text(
         if !segment.is_empty() {
             text::paint(ctx, segment, font, theme::token(ColorToken::Text), line_x, y, None, None, clip);
         }
+        // 组合串换强调色：与正文同字形同位，重画相交的一段即完成上色
+        if at.is_active() {
+            if let Some((low, high)) = overlap(at.span(), line) {
+                let x = line_x + text::offset_in_line(&mut ctx.metrics, segment, font, low - line.start);
+                text::paint_line(
+                    ctx,
+                    &composed[low..high],
+                    font,
+                    theme::token(ColorToken::Accent),
+                    x,
+                    y,
+                    line_height,
+                    clip,
+                );
+            }
+        }
     }
     let caret_line = lines[caret_index];
     let caret_x = line_x
         + text::offset_in_line(
             &mut ctx.metrics,
-            &value[caret_line.start..caret_line.end],
+            &composed[caret_line.start..caret_line.end],
             font,
             caret - caret_line.start,
         );
     let caret_y = shift + caret_index as f32 * line_height;
-    if !state.preedit.is_empty() {
-        text::paint(
-            ctx,
-            &state.preedit,
-            font,
-            theme::token(ColorToken::Accent),
-            caret_x,
-            caret_y,
-            Some((inner.right() - caret_x).max(1.0)),
-            None,
-            clip,
-        );
-    }
     if focused {
-        draw_area_caret(ctx, caret_x, caret_y, line_height, clip);
+        let lit = ctx.caret_lit();
+        draw_caret_bar(ctx, caret_x, caret_y, line_height, clip, lit);
+        // 候选窗贴组合串起点（串尾由本端自绘）：串变长时候选窗不跟着右移
+        let lead = at.index(text::snap(value, state.caret));
+        let (ime_x, ime_y) = if lead < caret {
+            let lead_index = text::line_of(&lines, lead);
+            let line = lines[lead_index];
+            let x = line_x
+                + text::offset_in_line(
+                    &mut ctx.metrics,
+                    &composed[line.start..line.end],
+                    font,
+                    lead - line.start,
+                );
+            (x, shift + lead_index as f32 * line_height)
+        } else {
+            (caret_x, caret_y)
+        };
+        anchor_ime(ctx, ime_x, ime_y, line_height, clip);
     }
     // 内容超出可视高度：贴右缘的细条指示当前位置（浅色，不抢正文）
     let content = lines.len() as f32 * line_height;
@@ -2190,6 +2270,13 @@ fn draw_area_text(
     }
 }
 
+/// `span` 与一行文本相交的字节区间（无交集 = None）。
+fn overlap(span: std::ops::Range<usize>, line: &text::Line) -> Option<(usize, usize)> {
+    let low = span.start.max(line.start);
+    let high = span.end.min(line.end);
+    (low < high).then_some((low, high))
+}
+
 /// 自适应多行输入框的实际高度（含内边距）：文字区按整行取，
 /// 视口高度与内容高度同为行高整数倍时滚动永远停在整行上，框边不会切出半截文字。
 pub(crate) fn auto_area_height(
@@ -2208,15 +2295,9 @@ pub(crate) fn auto_area_height(
     content.min(cap).max(min.min(cap)) + pad.top + pad.bottom
 }
 
-/// 输入框光标：一像素竖条 + 输入法候选窗锚点（框外不画）。
-fn draw_area_caret(
-    ctx: &mut BuildCtx<'_>,
-    x: f32,
-    y: f32,
-    line_height: f32,
-    clip: Rect,
-) {
-    if y < clip.y || y + line_height > clip.bottom() + 0.5 {
+/// 光标竖条：按闪烁相位显隐；整行不在可见区内时不画（半截竖条会串到相邻区域）。
+fn draw_caret_bar(ctx: &mut BuildCtx<'_>, x: f32, y: f32, line_height: f32, clip: Rect, lit: bool) {
+    if !lit || y < clip.y || y + line_height > clip.bottom() + 0.5 {
         return;
     }
     ctx.draw(DrawCommand::Rect {
@@ -2230,6 +2311,13 @@ fn draw_area_caret(
         corner_radius: None,
         shadow: None,
     });
+}
+
+/// 输入法候选窗锚点：只在光标行可见时给出（宿主据它启用输入法并贴窗）。
+fn anchor_ime(ctx: &mut BuildCtx<'_>, x: f32, y: f32, line_height: f32, clip: Rect) {
+    if y < clip.y || y + line_height > clip.bottom() + 0.5 {
+        return;
+    }
     ctx.ime = Some(Rect::new(x, y, 1.0, line_height));
 }
 

@@ -92,6 +92,7 @@ pub fn text(x: f32, y: f32, content: impl Into<String>, size: f32, color: PaintC
         color,
         weight: None,
         family: None,
+        italic: false,
         max_width: None,
         align: None,
     }
@@ -113,6 +114,7 @@ pub fn text_weighted(
         color,
         weight: Some(weight),
         family: None,
+        italic: false,
         max_width: None,
         align: None,
     }
@@ -136,6 +138,7 @@ pub fn text_wrapped(
         color,
         weight: None,
         family: None,
+        italic: false,
         max_width: Some(max_width),
         align,
     }

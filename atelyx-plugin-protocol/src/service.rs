@@ -246,7 +246,7 @@ mod tests {
     #[test]
     fn changed_payload_omits_the_builtin_provider() {
         let changed =
-            ChangedParams { service: "markdown".into(), provider: None, available: true };
+            ChangedParams { service: "editor".into(), provider: None, available: true };
         let wire = serde_json::to_value(&changed).unwrap();
         assert!(wire.get("provider").is_none(), "内置实现不落 provider 字段");
         assert_eq!(wire["available"], true);

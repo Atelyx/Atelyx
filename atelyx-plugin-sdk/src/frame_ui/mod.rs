@@ -28,12 +28,15 @@ pub use build::Canvas;
 pub use geom::Rect;
 pub use icons::Icon;
 pub use widgets::{AreaHeight, BoxStyle, BoxWidth, Edges, TextRole, TextStyle};
+/// 引用候选（`#笔记：方案.md` 这类标签）：交给 `Ui::markdown_with` 画成胶囊。
+pub use atelyx_markdown::MentionCandidate;
 
 /// 一次 `render` 内最多补几轮缺项（文字量算 / Markdown 块）：补齐后按最新数据重建。
 const MAX_REBUILD_PASSES: usize = 3;
 
-/// Markdown 解析缓存条数上限：超出即按「本帧用到」收敛，避免长期运行的插件按历史内容累积。
-const MAX_MARKDOWN_CACHE: usize = 8;
+/// 控件层自驱动画（光标闪烁、转圈指示）需要的帧拍频率：10 拍/秒。
+/// 声明它只是为了让画面动起来——宿主对同内容帧会去重，闪烁一拍里通常只有相位翻转那几帧真正上屏。
+pub const TICK_HZ: u16 = 10;
 
 fn check_frame(
     surface_id: &str,
@@ -106,9 +109,15 @@ impl FrameUi {
     }
 
     /// 声明宿主帧拍频率（1–120）：声明后宿主按该节拍回发 `host:frame.tick`，
-    /// 插件的播放 / 动画在帧拍里推进并重渲染；`None` = 不推帧拍。
+    /// 插件的播放 / 动画在帧拍里推进并重渲染；`None` = 只按控件层的需要推帧。
+    /// 控件层自己会为光标闪烁与转圈指示要求 [`TICK_HZ`]，这里只用于插件自有的动画。
     pub fn set_fps(&mut self, fps: Option<u16>) {
         self.fps = fps;
+    }
+
+    /// 推进一拍：自转指示的相位由拍数算，插件在 `on_frame_tick` 里调用。
+    pub fn tick(&mut self) {
+        self.state.clock = self.state.clock.wrapping_add(1);
     }
 
     /// 程序化聚焦输入框（如点开行内编辑）：光标与选区落到 `value` 末尾。已聚焦时不重复置位，
@@ -198,9 +207,13 @@ impl FrameUi {
                 };
                 build::layout_root(&mut ctxb, items, area);
                 build::layout_overlays(&mut ctxb);
+                // 提示压在最后：悬停够久才画，浮在所有内容之上
+                ctxb.paint_hint();
                 ctxb.finish()
             };
-            out.frame.fps = self.fps;
+            // 光标闪烁、自转指示与提示等待到点都要按拍推进
+            let animated = out.wants_ticks || self.state.focus.is_some() || self.state.hint_pending();
+            out.frame.fps = self.fps.or(animated.then_some(TICK_HZ));
             // 帧带上本帧的排版尺寸：改宽期间宿主手里的帧常常是上一拍宽度排的，
             // 只有声明了尺寸，宿主才能把这种帧认出来不画
             out.frame.size = Some(FrameSize { w: size.0, h: size.1 });
@@ -212,45 +225,30 @@ impl FrameUi {
             self.state.scroll_max = out.scroll_max;
             self.state.follow_prev = out.follow_prev;
             self.state.overlays = out.overlays;
+            self.state.hints = out.hints;
+            self.state.markdown_last = out.markdown_seen.into_iter().collect();
             self.state.overlay_scrolls = out.overlay_scrolls;
-            // Markdown 缓存按条数上限收敛：滚出视口的内容不再算「本帧用到」，不能被立即剪掉
-            if self.state.markdown.len() > MAX_MARKDOWN_CACHE {
-                self.state.markdown.retain(|content, _| out.markdown_used.contains(content));
-            }
             self.state.prune();
             // 尺寸刚变且本帧还有缺项：先按估算字宽交一帧（拖动跟手），量算补齐后再交精确帧
-            if std::mem::take(&mut self.state.resize_pending)
-                && (out.misses || !out.markdown_misses.is_empty())
-            {
+            if std::mem::take(&mut self.state.resize_pending) && out.misses {
                 check_frame(surface_id, &out.frame)?;
                 self.submit_if_changed(ctx, surface_id, out.frame.clone())
                     .await?;
             }
-            if !out.markdown_misses.is_empty() {
-                for content in out.markdown_misses {
-                    match ctx.markdown(&content).await {
-                        Ok(result) => {
-                            self.state.markdown.insert(content, result.blocks);
-                        }
-                        Err(err) => {
-                            // 失败也落缓存（空块）：否则每帧都把同一内容当缺项重试，白耗往返
-                            eprintln!("Markdown 解析失败，按空块出这一帧：{err}");
-                            self.state.markdown.insert(content, Vec::new());
+            if out.misses && passes < MAX_REBUILD_PASSES {
+                let misses = self.state.metrics.take_misses();
+                match self.fill_metrics(ctx, misses).await {
+                    Ok(()) => {
+                        passes += 1;
+                        continue;
+                    }
+                    // 会话收尾期间量算必然失败：按估算字宽把这一帧交出去即可，不进日志
+                    Err(err) => {
+                        if !err.message.contains("会话已结束") {
+                            eprintln!("量算失败，按估算字宽出这一帧：{err}");
                         }
                     }
                 }
-                if passes < MAX_REBUILD_PASSES {
-                    passes += 1;
-                    continue;
-                }
-            }
-            if out.misses && passes < MAX_REBUILD_PASSES {
-                let misses = self.state.metrics.take_misses();
-                if let Err(err) = self.fill_metrics(ctx, misses).await {
-                    eprintln!("量算失败，按估算字宽出这一帧：{err}");
-                }
-                passes += 1;
-                continue;
             }
             check_frame(surface_id, &out.frame)?;
             self.submit_if_changed(ctx, surface_id, out.frame).await?;
@@ -475,18 +473,6 @@ mod tests {
             self.requests.push(request.method.clone());
             let result = match request.method.as_str() {
                 m if m == method::query::THEME => serde_json::to_value(theme_result()).unwrap(),
-                m if m == method::markdown::PARSE => {
-                    let params: atelyx_plugin_protocol::method::MarkdownParams =
-                        serde_json::from_value(request.params).unwrap();
-                    assert!(!params.content.is_empty());
-                    serde_json::json!({
-                        "blocks": [{
-                            "kind": "paragraph",
-                            "depth": 0,
-                            "spans": [{ "text": "正文" }]
-                        }]
-                    })
-                }
                 m if m == method::query::MEASURE => {
                     let params: MeasureBatchParams = serde_json::from_value(request.params).unwrap();
                     let sizes: Vec<MeasureTextResult> = params
@@ -567,6 +553,14 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// 光标竖条的横坐标（一条高约一行的 1px 细条）。
+    fn caret_bar(frame: &SurfaceFrame) -> Option<f32> {
+        frame.commands.iter().find_map(|command| match command {
+            DrawCommand::Rect { x, w, h, .. } if (*w - 1.0).abs() < f32::EPSILON && *h >= 10.0 => Some(*x),
+            _ => None,
+        })
     }
 
     fn has_hit(frame: &SurfaceFrame, id: &str) -> bool {
@@ -839,6 +833,231 @@ mod tests {
         assert_eq!(events, vec![UiEvent::Text { id: "host".into(), value: "中".into() }]);
     }
 
+    /// 组合串进入排版：光标之后的文字被推开，光标落在串尾、候选窗锚在串首。
+    #[tokio::test]
+    async fn composition_pushes_the_following_text_and_anchors_the_candidates_at_its_head() {
+        let mut bench = Bench::new(320.0, 120.0).await;
+        let build = |ui: &mut build::Ui<'_, '_>| ui.text_area_submit("draft", "abcdef", "", 48.0);
+        bench.render(build).await.unwrap();
+        {
+            let mut ui = bench.ui.lock().await;
+            ui.focus_input("draft", "abcdef");
+            ui.set_input("draft", "abcdef", 3);
+        }
+        bench.set_value("draft", "abcdef");
+        let frame = bench.render(build).await.unwrap();
+        let lit = caret_bar(&frame).expect("聚焦后光标可见");
+
+        bench
+            .event(FrameInput::Text { text: "zhong".into(), composing: true, caret: Some(5), candidates: None })
+            .await;
+        let frame = bench.render(build).await.unwrap();
+        let all = texts(&frame);
+        assert!(all.iter().any(|text| text == "abczhongdef"), "组合串进入正文，后面的字被推开：{all:?}");
+        assert!(all.iter().any(|text| text == "zhong"), "组合串叠强调色：{all:?}");
+        let ime = frame.ime.expect("组合期仍要报候选窗锚点");
+        let after = caret_bar(&frame).expect("组合期光标可见");
+        assert!(ime.x < after, "候选窗贴组合串起点（{}），光标在串尾（{}）", ime.x, after);
+        assert!(after > lit, "光标随组合串推到串尾");
+    }
+
+    /// 组合串也参与换行：窄框里它把后面的内容顶到下一行。
+    #[tokio::test]
+    async fn composition_wraps_like_regular_text() {
+        let mut bench = Bench::new(48.0, 140.0).await;
+        let build = |ui: &mut build::Ui<'_, '_>| ui.text_area_submit("draft", "abcd", "", 90.0);
+        bench.render(build).await.unwrap();
+        {
+            let mut ui = bench.ui.lock().await;
+            ui.focus_input("draft", "abcd");
+            ui.set_input("draft", "abcd", 4);
+        }
+        bench.set_value("draft", "abcd");
+        bench.render(build).await.unwrap();
+
+        bench
+            .event(FrameInput::Text { text: "zhong".into(), composing: true, caret: Some(5), candidates: None })
+            .await;
+        let frame = bench.render(build).await.unwrap();
+        assert!(
+            texts(&frame).iter().any(|text| text.starts_with("abcd")),
+            "组合串接在正文之后而不是替换它：{:?}",
+            texts(&frame)
+        );
+        let accent_rows: Vec<f32> = frame
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                DrawCommand::Text { color: PaintColor::Token { name: ColorToken::Accent }, y, .. } => {
+                    Some(*y)
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            accent_rows.windows(2).any(|pair| (pair[0] - pair[1]).abs() > 1.0),
+            "组合串跟着排版折到下一行：{accent_rows:?}"
+        );
+    }
+
+    /// 组合期点选与按键都归输入法：光标、选区与文本一律不动。
+    #[tokio::test]
+    async fn composition_keeps_the_caret_and_ignores_editing_keys() {
+        let mut bench = Bench::new(320.0, 120.0).await;
+        let build = |ui: &mut build::Ui<'_, '_>| ui.text_area_submit("draft", "abcdef", "", 48.0);
+        bench.render(build).await.unwrap();
+        {
+            let mut ui = bench.ui.lock().await;
+            ui.focus_input("draft", "abcdef");
+            ui.set_input("draft", "abcdef", 3);
+        }
+        bench.set_value("draft", "abcdef");
+        bench.render(build).await.unwrap();
+        bench
+            .event(FrameInput::Text { text: "zhong".into(), composing: true, caret: Some(5), candidates: None })
+            .await;
+
+        bench
+            .event(FrameInput::PointerDown { x: 40.0, y: 10.0, button: MouseButton::Left, hit: Some("draft".into()) })
+            .await;
+        assert_eq!(
+            bench.ui.lock().await.caret("draft").map(|(caret, _)| caret),
+            Some(3),
+            "组合期点选不接管光标"
+        );
+
+        let events = bench.event(key(NamedKey::Backspace)).await;
+        assert!(events.is_empty(), "组合期按键交给输入法：{events:?}");
+        let events = bench.event(typed("x")).await;
+        assert!(events.is_empty(), "组合期的字符由输入法提交，不直接进值：{events:?}");
+    }
+
+    /// 只读正文里拖选后 Ctrl+C：按版面取可见文字写剪贴板（不含 Markdown 标记）。
+    #[tokio::test]
+    async fn dragging_read_only_markdown_selects_text_for_ctrl_c() {
+        let mut bench = Bench::new(320.0, 200.0).await;
+        let build = |ui: &mut build::Ui<'_, '_>| ui.markdown("第一行文字");
+        bench.render(build).await.unwrap();
+        let id = Some(format!("@md:1:{:x}", super::markdown::content_key("第一行文字", &[])));
+        bench
+            .event(FrameInput::PointerDown { x: 4.0, y: 4.0, button: MouseButton::Left, hit: id.clone() })
+            .await;
+        bench
+            .event(FrameInput::PointerMove { x: 200.0, y: 6.0, hit: id.clone() })
+            .await;
+        bench
+            .event(FrameInput::PointerUp { x: 200.0, y: 6.0, button: MouseButton::Left, hit: id })
+            .await;
+        let ctrl = Modifiers { control: true, ..Modifiers::default() };
+        let events = bench
+            .event(FrameInput::Key {
+                key: Key::Character { text: "c".into() },
+                action: KeyAction::Press,
+                modifiers: ctrl,
+                text: None,
+            })
+            .await;
+        assert!(events.is_empty(), "复制不该再给插件报事件：{events:?}");
+        assert_eq!(
+            bench.clipboard.lock().unwrap().as_str(),
+            "第一行文字",
+            "拖选整行后复制应拿到该行文字"
+        );
+    }
+
+    /// 表格 / 代码块混排里拖选整块：命中与取字都不得 panic（同行多列、多个片段行）。
+    #[tokio::test]
+    async fn selecting_across_a_table_and_a_code_block_is_safe() {
+        let source = "| 甲 | 乙 |
+| --- | --- |
+| 1 | 2 |
+
+```rust
+let a = 1;
+```
+
+正文收尾";
+        let mut bench = Bench::new(320.0, 320.0).await;
+        let build = move |ui: &mut build::Ui<'_, '_>| ui.markdown(source);
+        bench.render(build).await.unwrap();
+        let id = Some(format!("@md:1:{:x}", super::markdown::content_key(source, &[])));
+        bench
+            .event(FrameInput::PointerDown { x: 2.0, y: 2.0, button: MouseButton::Left, hit: id.clone() })
+            .await;
+        for y in [10.0_f32, 40.0, 80.0, 140.0, 200.0, 300.0] {
+            bench
+                .event(FrameInput::PointerMove { x: 300.0, y, hit: id.clone() })
+                .await;
+        }
+        bench
+            .event(FrameInput::PointerUp { x: 300.0, y: 300.0, button: MouseButton::Left, hit: id })
+            .await;
+        let ctrl = Modifiers { control: true, ..Modifiers::default() };
+        bench
+            .event(FrameInput::Key {
+                key: Key::Character { text: "c".into() },
+                action: KeyAction::Press,
+                modifiers: ctrl,
+                text: None,
+            })
+            .await;
+        let copied = bench.clipboard.lock().unwrap().clone();
+        assert!(!copied.is_empty(), "跨表格与代码块拖选后应能复制到文字");
+    }
+
+    /// 悬停提示：停够时间才画，等待期间要帧拍；指针移开即消失。
+    #[tokio::test]
+    async fn hovering_a_hinted_control_draws_the_tip_after_the_delay() {
+        let mut bench = Bench::new(240.0, 120.0).await;
+        let build = |ui: &mut build::Ui<'_, '_>| {
+            ui.hint("go", "运行一次");
+            ui.button("go", "运行");
+        };
+        bench.render(build).await.unwrap();
+        bench
+            .event(FrameInput::PointerMove { x: 10.0, y: 10.0, hit: Some("go".into()) })
+            .await;
+        let frame = bench.render(build).await.unwrap();
+        assert!(!texts(&frame).iter().any(|text| text == "运行一次"), "未到点不出提示");
+        assert_eq!(frame.fps, Some(TICK_HZ), "等待到点期间要帧拍");
+
+        {
+            let mut ui = bench.ui.lock().await;
+            if let Some(hint) = ui.state.hint.as_mut() {
+                hint.since = std::time::Instant::now() - std::time::Duration::from_millis(600);
+            }
+        }
+        let frame = bench.render(build).await.unwrap();
+        assert!(texts(&frame).iter().any(|text| text == "运行一次"), "到点后画出提示");
+
+        bench.event(FrameInput::PointerMove { x: 10.0, y: 10.0, hit: None }).await;
+        let frame = bench.render(build).await.unwrap();
+        assert!(!texts(&frame).iter().any(|text| text == "运行一次"), "指针离开即收起");
+    }
+
+    /// 聚焦即按拍推进（光标闪烁），闪烁的暗相只收竖条、不撤输入法锚点。
+    #[tokio::test]
+    async fn focused_input_blinks_the_caret_and_keeps_the_ime_anchor() {
+        let mut bench = Bench::new(240.0, 120.0).await;
+        let build = |ui: &mut build::Ui<'_, '_>| ui.text_area_submit("draft", "abcd", "", 48.0);
+        bench.render(build).await.unwrap();
+        bench.ui.lock().await.focus_input("draft", "abcd");
+        let frame = bench.render(build).await.unwrap();
+        assert_eq!(frame.fps, Some(TICK_HZ), "光标闪烁要帧拍");
+        assert!(caret_bar(&frame).is_some(), "刚聚焦 / 刚编辑时光标可见");
+        assert!(frame.ime.is_some());
+
+        bench.ui.lock().await.state.blink_at =
+            std::time::Instant::now() - std::time::Duration::from_millis(700);
+        let frame = bench.render(build).await.unwrap();
+        assert!(caret_bar(&frame).is_none(), "暗相不画竖条");
+        assert!(frame.ime.is_some(), "暗相仍要报锚点，否则宿主会关掉输入法");
+
+        bench.ui.lock().await.tick();
+        let frame = bench.render(build).await.unwrap();
+        assert!(caret_bar(&frame).is_none(), "帧拍推进不会凭空点亮光标");
+    }
+
     #[tokio::test]
     async fn enter_during_ime_composition_does_not_submit() {
         let mut bench = Bench::new(240.0, 120.0).await;
@@ -953,6 +1172,7 @@ mod tests {
                 color: PaintColor::Token { name: ColorToken::Text },
                 weight: None,
                 family: None,
+                italic: false,
                 max_width: None,
                 align: None,
             })
@@ -1335,19 +1555,24 @@ mod tests {
         assert!(has_hit(&frame, "row3"), "最新一行可见");
     }
 
+    /// 解析在控件层本地完成：首帧就有文字，且不向宿主发任何解析请求。
     #[tokio::test]
-    async fn markdown_is_fetched_once_and_painted_in_the_frame() {
+    async fn markdown_is_laid_out_locally_and_painted_in_the_same_frame() {
         let mut bench = Bench::new(240.0, 160.0).await;
         let frame = bench.render(|ui| ui.markdown("# 标题")).await.unwrap();
-        assert!(frame.commands.iter().any(|command| matches!(
-            command,
-            DrawCommand::Text { content, .. } if content == "正文"
-        )));
+        assert!(
+            frame.commands.iter().any(|command| matches!(
+                command,
+                DrawCommand::Text { content, .. } if content == "标题"
+            )),
+            "首帧即出正文：{:?}",
+            texts(&frame)
+        );
         bench.render(|ui| ui.markdown("# 标题")).await.unwrap();
-        assert_eq!(
-            bench.requests.iter().filter(|method| method.as_str() == method::markdown::PARSE).count(),
-            1,
-            "同内容只取一次"
+        assert!(
+            bench.requests.iter().all(|method| !method.starts_with("markdown.")),
+            "本地解析不该再有宿主往返：{:?}",
+            bench.requests
         );
     }
 
@@ -1837,15 +2062,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn spinner_paints_a_rotating_arc() {
+    async fn spinner_rotates_on_the_frame_clock_and_asks_for_ticks() {
         let mut bench = Bench::new(100.0, 60.0).await;
-        let frame = bench
-            .render(|ui| ui.spinner(20.0, ColorToken::TextMuted, 0.5))
-            .await
-            .unwrap();
+        let frame = bench.render(|ui| ui.spinner(20.0, ColorToken::TextMuted)).await.unwrap();
         assert!(matches!(
             frame.commands.first(),
             Some(DrawCommand::Path { points, stroke: Some(_), .. }) if points.len() == 25
         ));
+        assert_eq!(frame.fps, Some(TICK_HZ), "自转的转圈要自己声明帧拍");
+        let first = arc_start(&frame);
+        bench.ui.lock().await.tick();
+        let frame = bench.render(|ui| ui.spinner(20.0, ColorToken::TextMuted)).await.unwrap();
+        assert_ne!(first, arc_start(&frame), "每拍转一格");
+    }
+
+    /// 转圈指令的起点（相位变化的直接体现）。
+    fn arc_start(frame: &SurfaceFrame) -> (f32, f32) {
+        match frame.commands.first() {
+            Some(DrawCommand::Path { points, .. }) => (points[0].x, points[0].y),
+            other => panic!("首个指令应为圆弧路径：{other:?}"),
+        }
     }
 }

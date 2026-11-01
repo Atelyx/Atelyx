@@ -732,6 +732,7 @@ impl FrameBuffer {
                 color: text_color,
                 weight,
                 family,
+                italic,
                 max_width,
                 align,
             } => {
@@ -743,6 +744,7 @@ impl FrameBuffer {
                 value.text_weight = weight_code(*weight);
                 value.text_family = family_code(*family);
                 value.text_align = align_code(*align);
+                value.text_italic = u8::from(*italic);
                 value.text_max_width = max_width.unwrap_or(0.0);
                 self.commands.push(value);
             }
@@ -779,6 +781,7 @@ fn base(kind: u32, rect: abi::AbiRect) -> abi::AbiCommand {
         text_weight: abi::WEIGHT_NORMAL,
         text_family: abi::FAMILY_UI,
         text_align: abi::ALIGN_START,
+        text_italic: 0,
         text_max_width: 0.0,
         image_source: 0,
         image_path: abi::AbiStr::EMPTY,
@@ -945,6 +948,7 @@ mod tests {
                     color: PaintColor::Token { name: ColorToken::Text },
                     weight: Some(TextWeight::SemiBold),
                     family: Some(TextFamily::Mono),
+                    italic: false,
                     max_width: Some(80.0),
                     align: Some(TextAlign::Center),
                 },

@@ -13,8 +13,8 @@ use atelyx_plugin_protocol::service;
 use serde_json::Value;
 
 /// 方法所属能力面。`None` = 不占权限声明的方法：运行时时序方法（握手 / 事件订阅 / 视图提交 /
-/// 贡献声明 / 接管请求）只编排插件自己的界面与声明，不触碰宿主资源；`markdown.parse` 是纯文本
-/// 变换；能力总线自身的入口（`service.*`）也不属任何能力类——被调用的方法按其自身归类审计。
+/// 贡献声明 / 接管请求）只编排插件自己的界面与声明，不触碰宿主资源；能力总线自身的入口
+/// （`service.*`）也不属任何能力类——被调用的方法按其自身归类审计。
 /// OS 资源消耗型方法（起进程 / 开窗等）一律占权限。
 pub(crate) fn permission_for(name: &str) -> Option<Permission> {
     use Permission::*;
@@ -52,7 +52,6 @@ pub(crate) fn permission_for(name: &str) -> Option<Permission> {
         method::chat::SESSION_READ | method::chat::SESSION_WRITE
         | method::chat::SESSION_SNAPSHOT => Some(Ai),
         // 解析只读插件递来的文本，不触碰宿主资源；外部提供者顶替后同理
-        method::markdown::PARSE => None,
         // 能力总线入口：实际权限由目标方法自己承担
         service::method::REGISTER
         | service::method::UNREGISTER
@@ -147,7 +146,6 @@ mod tests {
         assert_eq!(permission_for(method::history::DAY), Some(Permission::Vault));
         assert_eq!(permission_for(method::history::OPEN), Some(Permission::Vault));
         // 纯文本变换与能力总线入口不占权限类（调用照常执行，审计按各自归类记录）
-        assert_eq!(permission_for(method::markdown::PARSE), None);
         for name in [
             service::method::REGISTER,
             service::method::UNREGISTER,

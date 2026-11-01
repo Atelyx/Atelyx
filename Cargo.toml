@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "atelyx-app",
     "atelyx-core",
+    "atelyx-markdown",
     "atelyx-ui",
     "atelyx-plugin-protocol",
     "atelyx-plugin-sdk",

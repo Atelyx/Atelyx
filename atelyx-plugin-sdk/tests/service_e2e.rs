@@ -112,67 +112,47 @@ fn service_bus_registry_call_and_failover() {
     let tmp = TempDir::new("plugin-service-bus");
     let runtime = PluginRuntime::new(tmp.join("plugins"));
 
-    // 1. 内置目录：vault / markdown 的活动提供者是内置实现
+    // 1. 内置目录：平台服务在册、可替换与不可替换区分开
     let builtin = runtime.service_list();
     let vault = service(&builtin, "vault");
     assert_eq!(vault.provider, None, "内置实现不落 provider");
     assert!(vault.replaceable);
     assert!(vault.methods.iter().any(|name| name == "readText"));
-    let markdown = service(&builtin, "markdown");
-    assert_eq!(markdown.provider, None);
-    assert_eq!(markdown.methods, vec!["parse".to_string()]);
     assert!(!service(&builtin, "query").replaceable, "字体与主题不外置");
 
     // 2. 内置路径对拍：夹具装好后的第一次探针两侧结果一致
     install_service_stub(&tmp, &runtime);
     let first = wait_state(&runtime, STUB_ID, |state| state["probe"].as_u64() == Some(1));
     let builtin_result = assert_paths_agree(&first);
-    assert!(builtin_result["blocks"].is_array(), "内置解析应给出块：{builtin_result}");
-    assert_eq!(service(&runtime.service_list(), "markdown").provider, None);
+    assert!(builtin_result.get("json").is_some(), "内置实现应给出状态：{builtin_result}");
 
-    // 3. 登记 markdown 只成为候选（不静默顶替）；切换后两条路都走外部提供者
+    // 3. 外部服务：新服务由提供者接任，总线调用落到插件自己
     let registered = runtime.service_list();
-    let markdown = service(&registered, "markdown");
-    assert_eq!(markdown.provider, None, "登记不等于生效");
-    assert_eq!(markdown.candidates, vec![STUB_ID.to_string()]);
+    let provided = service(&registered, "stub");
+    assert_eq!(provided.provider.as_deref(), Some(STUB_ID), "无内置实现的服务由提供者接任");
+    let marker = first["provided"]["ok"].clone();
+    assert_eq!(marker["marker"], "stub-stub", "总线调用落到提供者：{marker}");
+    assert_eq!(marker["service"], "stub");
+    assert_eq!(marker["method"], "ping");
+    assert_eq!(marker["params"]["echo"], 1);
+    // 探针读到的是插件自己的自持数据（每轮都在变），这里只要求两条路一致
     let still_builtin = probe(&runtime, 1);
-    assert_eq!(assert_paths_agree(&still_builtin), builtin_result, "顶替前仍是内置实现");
+    assert_paths_agree(&still_builtin);
 
-    runtime
-        .set_service_provider("markdown", Some(STUB_ID))
-        .expect("切换到候选提供者应成功");
-    assert_eq!(
-        service(&runtime.service_list(), "markdown").provider.as_deref(),
-        Some(STUB_ID)
-    );
-    let taken_over = probe(&runtime, 2);
-    let marker = assert_paths_agree(&taken_over);
-    assert_eq!(marker["marker"], "stub-markdown", "两条路都应落到外部提供者：{marker}");
-    assert_eq!(marker["method"], "parse");
-    assert_eq!(marker["params"]["content"], "# A");
-
-    // 4. 提供者停用：登记摘除、活动回落内置；重新启用后只回到候选身份
+    // 4. 提供者停用：服务摘除（没有内置实现可回落），重新启用后再次接任
     runtime.set_enabled(STUB_ID, false).expect("停用应成功");
     wait_status(&runtime, STUB_ID, |status| *status == PluginStatus::Stopped);
-    let after_stop = runtime.service_list();
-    let markdown = service(&after_stop, "markdown");
-    assert_eq!(markdown.provider, None, "活动提供者消失即回落内置");
-    assert!(markdown.candidates.is_empty(), "停用要摘掉候选");
+    assert!(
+        runtime.service_list().services.iter().all(|entry| entry.service != "stub"),
+        "提供者停用后服务离场"
+    );
 
-    // 重新启用：重新登记为候选，但活动提供者仍是内置
     std::fs::remove_file(state_path(&runtime, STUB_ID)).expect("清掉上次会话的探针结果");
     runtime.set_enabled(STUB_ID, true).expect("重新启用应成功");
     wait_status(&runtime, STUB_ID, |status| *status == PluginStatus::Running);
     let restarted = wait_state(&runtime, STUB_ID, |state| state["probe"].as_u64() == Some(1));
-    assert_eq!(
-        assert_paths_agree(&restarted),
-        builtin_result,
-        "回落内置后结果应与最初一致"
-    );
-    let markdown = runtime.service_list();
-    let markdown = service(&markdown, "markdown");
-    assert_eq!(markdown.provider, None, "重新登记不得夺回活动身份");
-    assert_eq!(markdown.candidates, vec![STUB_ID.to_string()]);
+    assert_paths_agree(&restarted);
+    assert_eq!(service(&runtime.service_list(), "stub").provider.as_deref(), Some(STUB_ID));
 
     // 5. 可读拒绝：不可替换服务登记、未知服务、未知方法
     let errors = &restarted["errors"];

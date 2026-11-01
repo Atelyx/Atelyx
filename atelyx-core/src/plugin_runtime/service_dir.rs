@@ -966,7 +966,7 @@ mod tests {
         sorted.sort_unstable();
         assert_eq!(names, sorted);
         assert!(info(&list, "vault").methods.contains(&"readText".to_string()));
-        assert!(info(&list, "markdown").methods.contains(&"parse".to_string()));
+        assert!(info(&list, "editor").methods.contains(&"selection".to_string()));
         assert_eq!(info(&list, "vault").provider, None);
         assert!(!info(&list, "query").replaceable, "字体与主题不外置");
         assert!(info(&list, "vault").replaceable);
@@ -975,21 +975,21 @@ mod tests {
     #[test]
     fn external_registration_is_only_a_candidate() {
         let mut dir = ServiceDir::new();
-        dir.register("com.a", &params("markdown", &["parse"])).unwrap();
-        assert_eq!(dir.route("markdown"), Route::Builtin, "内置服务不得被静默顶替");
-        assert_eq!(info(&dir.list(), "markdown").candidates, vec!["com.a"]);
-        assert!(dir.provider_declares("com.a", "markdown", "parse"));
-        assert!(!dir.provider_declares("com.a", "markdown", "render"));
+        dir.register("com.a", &params("editor", &["selection"])).unwrap();
+        assert_eq!(dir.route("editor"), Route::Builtin, "内置服务不得被静默顶替");
+        assert_eq!(info(&dir.list(), "editor").candidates, vec!["com.a"]);
+        assert!(dir.provider_declares("com.a", "editor", "selection"));
+        assert!(!dir.provider_declares("com.a", "editor", "render"));
 
-        dir.set_active("markdown", Some("com.a")).unwrap();
-        assert_eq!(dir.route("markdown"), Route::Plugin("com.a".into()));
+        dir.set_active("editor", Some("com.a")).unwrap();
+        assert_eq!(dir.route("editor"), Route::Plugin("com.a".into()));
         let listed = dir.list();
-        assert_eq!(info(&listed, "markdown").provider.as_deref(), Some("com.a"));
-        assert!(info(&listed, "markdown").candidates.is_empty());
+        assert_eq!(info(&listed, "editor").provider.as_deref(), Some("com.a"));
+        assert!(info(&listed, "editor").candidates.is_empty());
 
-        dir.set_active("markdown", None).unwrap();
-        assert_eq!(dir.route("markdown"), Route::Builtin);
-        assert!(dir.set_active("markdown", Some("com.b")).is_err(), "非候选不得当活动提供者");
+        dir.set_active("editor", None).unwrap();
+        assert_eq!(dir.route("editor"), Route::Builtin);
+        assert!(dir.set_active("editor", Some("com.b")).is_err(), "非候选不得当活动提供者");
     }
 
     #[test]
@@ -1045,26 +1045,22 @@ mod tests {
     #[test]
     fn disabling_a_builtin_owner_takes_its_services_off_the_bus() {
         let mut dir = ServiceDir::new();
-        assert_eq!(dir.route("markdown"), Route::Builtin);
+        assert_eq!(dir.route("editor"), Route::Builtin);
         assert_eq!(
             dir.set_owner_enabled("atelyx.notes", false),
-            vec!["editor".to_string(), "markdown".to_string()],
+            vec!["editor".to_string()],
             "笔记插件的全部服务一并离开"
         );
-        assert_eq!(dir.route("markdown"), Route::Missing, "归属插件停用后服务不可用");
-        assert_eq!(dir.route("editor"), Route::Missing);
-        assert!(dir.blocked("markdown"), "在册但暂不可用与「从未登记」要能区分");
+        assert_eq!(dir.route("editor"), Route::Missing, "归属插件停用后服务不可用");
+        assert!(dir.blocked("editor"), "在册但暂不可用与「从未登记」要能区分");
         assert!(!dir.blocked("vault"), "平台插件的方法不受停用影响");
-        assert!(dir.list().services.iter().all(|service| service.service != "markdown"));
-        assert!(!dir.changed("markdown").available);
+        assert!(dir.list().services.iter().all(|service| service.service != "editor"));
+        assert!(!dir.changed("editor").available);
 
-        assert_eq!(
-            dir.set_owner_enabled("atelyx.notes", true),
-            vec!["editor".to_string(), "markdown".to_string()]
-        );
-        assert_eq!(dir.route("markdown"), Route::Builtin, "重新启用即恢复");
-        assert!(!dir.blocked("markdown"));
-        assert!(dir.list().services.iter().any(|service| service.service == "markdown"));
+        assert_eq!(dir.set_owner_enabled("atelyx.notes", true), vec!["editor".to_string()]);
+        assert_eq!(dir.route("editor"), Route::Builtin, "重新启用即恢复");
+        assert!(!dir.blocked("editor"));
+        assert!(dir.list().services.iter().any(|service| service.service == "editor"));
     }
 
     #[test]
@@ -1078,38 +1074,38 @@ mod tests {
     #[test]
     fn a_disabled_owner_yields_to_an_external_candidate() {
         let mut dir = ServiceDir::new();
-        dir.register("com.a", &params("markdown", &["parse"])).unwrap();
+        dir.register("com.a", &params("editor", &["selection"])).unwrap();
         dir.set_owner_enabled("atelyx.notes", false);
-        assert_eq!(dir.route("markdown"), Route::Plugin("com.a".into()), "外部候选接任");
-        assert_eq!(info(&dir.list(), "markdown").provider.as_deref(), Some("com.a"));
+        assert_eq!(dir.route("editor"), Route::Plugin("com.a".into()), "外部候选接任");
+        assert_eq!(info(&dir.list(), "editor").provider.as_deref(), Some("com.a"));
 
         dir.drop_plugin("com.a");
-        assert_eq!(dir.route("markdown"), Route::Missing, "候选也没了即不可用");
+        assert_eq!(dir.route("editor"), Route::Missing, "候选也没了即不可用");
         dir.set_owner_enabled("atelyx.notes", true);
-        assert_eq!(dir.route("markdown"), Route::Builtin, "内置登记留位，启用即恢复");
+        assert_eq!(dir.route("editor"), Route::Builtin, "内置登记留位，启用即恢复");
     }
 
     #[test]
     fn a_candidate_registered_after_the_owner_is_disabled_takes_over() {
         let mut dir = ServiceDir::new();
         dir.set_owner_enabled("atelyx.notes", false);
-        assert!(dir.blocked("markdown"));
+        assert!(dir.blocked("editor"));
         assert!(
-            dir.register("com.a", &params("markdown", &["parse"])).unwrap(),
+            dir.register("com.a", &params("editor", &["selection"])).unwrap(),
             "内置实现不在场时登记即接任，要广播活动提供者变化"
         );
-        assert_eq!(dir.route("markdown"), Route::Plugin("com.a".into()));
-        assert!(!dir.blocked("markdown"));
+        assert_eq!(dir.route("editor"), Route::Plugin("com.a".into()));
+        assert!(!dir.blocked("editor"));
         assert!(
-            !dir.register("com.b", &params("markdown", &["parse"])).unwrap(),
+            !dir.register("com.b", &params("editor", &["selection"])).unwrap(),
             "已有提供者时后来者只是候选"
         );
-        assert_eq!(dir.route("markdown"), Route::Plugin("com.a".into()));
+        assert_eq!(dir.route("editor"), Route::Plugin("com.a".into()));
 
-        dir.unregister("com.a", "markdown").unwrap();
-        assert_eq!(dir.route("markdown"), Route::Plugin("com.b".into()), "剩余候选接任");
-        dir.unregister("com.b", "markdown").unwrap();
-        assert_eq!(dir.route("markdown"), Route::Missing, "候选退出后回到暂不可用");
-        assert!(dir.blocked("markdown"), "内置登记仍在册，重新启用即恢复");
+        dir.unregister("com.a", "editor").unwrap();
+        assert_eq!(dir.route("editor"), Route::Plugin("com.b".into()), "剩余候选接任");
+        dir.unregister("com.b", "editor").unwrap();
+        assert_eq!(dir.route("editor"), Route::Missing, "候选退出后回到暂不可用");
+        assert!(dir.blocked("editor"), "内置登记仍在册，重新启用即恢复");
     }
 }

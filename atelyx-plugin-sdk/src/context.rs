@@ -284,22 +284,6 @@ impl Context {
         self.call_typed(method::query::THEME, &Value::Null).await
     }
 
-    /// 把 Markdown 文本交给宿主按笔记同一套语义解析成结构化块；排版与绘制仍由插件完成。
-    /// 内容不变时结果也不变，插件应按内容缓存，不必逐帧往返。
-    pub async fn markdown(&self, content: &str) -> Result<MarkdownResult, RpcError> {
-        let params = MarkdownParams { content: content.into() };
-        let value = self
-            .call_with_timeout(
-                method::markdown::PARSE,
-                serde_json::to_value(&params)
-                    .map_err(|e| RpcError::failed(format!("Markdown 参数序列化失败：{e}")))?,
-                RENDER_CALL_TIMEOUT,
-            )
-            .await?;
-        serde_json::from_value(value)
-            .map_err(|e| RpcError::failed(format!("Markdown 结果解析失败：{e}")))
-    }
-
     /// 提交整面帧：整发整换该面的绘制指令、命中区与输入声明（空指令 = 清空绘制）。
     ///
     /// 进程插件把帧写进握手时建立的共享内存区域，须先完成握手；同进程插件直接交宿主复制。
@@ -1043,6 +1027,18 @@ impl Context {
     pub async fn clipboard_read_image(&self) -> Result<Option<ClipboardImage>, RpcError> {
         let result: ClipboardImageResult = self.call_null(method::clipboard::READ_IMAGE).await?;
         Ok(result.image)
+    }
+
+    /// 读剪贴板里的图片并按 PNG 字节给出（宿主侧是 base64，SDK 负责解码）；没有图片时为 `None`。
+    pub async fn clipboard_read_image_png(&self) -> Result<Option<Vec<u8>>, RpcError> {
+        use base64::Engine;
+        let Some(image) = self.clipboard_read_image().await? else {
+            return Ok(None);
+        };
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(image.base64.as_bytes())
+            .map_err(|e| RpcError::failed(format!("剪贴板图片解码失败：{e}")))?;
+        Ok(Some(bytes))
     }
 
     /// 写一张 PNG 图片到剪贴板；`png` 为完整 PNG 字节。单次上限 32 MiB，

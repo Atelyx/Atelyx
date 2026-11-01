@@ -193,6 +193,9 @@ pub enum DrawCommand {
         weight: Option<TextWeight>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         family: Option<TextFamily>,
+        /// 斜体：字族没有斜体字形时按合成倾斜绘制（强调正文里的 `*斜体*` 用它）。
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        italic: bool,
         /// 可用宽度：给定即按该宽度换行，并作为 `align` 的对齐区域。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         max_width: Option<f32>,
@@ -314,6 +317,7 @@ mod tests {
             color: PaintColor::Token { name: ColorToken::Text },
             weight: Some(TextWeight::SemiBold),
             family: Some(TextFamily::Mono),
+            italic: false,
             max_width,
             align,
         }

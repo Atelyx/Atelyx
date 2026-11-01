@@ -3,15 +3,27 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use atelyx_plugin_protocol::frame::SurfaceFrame;
-use atelyx_plugin_protocol::method::MarkdownBlock;
 use atelyx_plugin_protocol::paint::{TextFamily, TextWeight};
 
 use super::geom::Rect;
 use super::markdown;
 use super::metrics::Metrics;
 use super::theme::Theme;
+
+/// 光标闪烁半周期（毫秒）：静默时先显 500ms、再隐 500ms。
+pub(crate) const BLINK_MS: u128 = 500;
+
+/// 悬停提示的停留时间：指针在同一控件上停够这么久才出提示（与宿主同一节拍）。
+pub(crate) const HINT_DELAY: Duration = Duration::from_millis(400);
+
+/// 静默 `elapsed` 之后光标是否显形。任何编辑 / 光标移动 / 重新聚焦都会把计时清零，
+/// 所以按键的瞬间光标一定是亮的。
+pub(crate) fn caret_lit(elapsed: Duration) -> bool {
+    elapsed.as_millis() % (BLINK_MS * 2) < BLINK_MS
+}
 
 /// 输入框架内文字的火型：字号 + 字重 + 字体族。
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -47,6 +59,10 @@ pub(crate) enum Layout {
     ScrollBar { scroll: String, track: Rect, thumb: f32, max_offset: f32 },
     /// 自绘子区：语义与按钮一致（按下再抬起算一次点击）。
     Custom,
+    /// 控件层自持的复制钮（代码块头）：按下即写剪贴板，插件不必知道这次点击。
+    Copy { text: String },
+    /// 只读 Markdown 块：区内可拖选文字（`rect` 是块的外框，落点按版面换算到行列）。
+    Markdown { rect: Rect },
 }
 
 /// 单个输入框的编辑态（文本本身由插件持有，这里只记光标与选区）。
@@ -91,9 +107,49 @@ pub(crate) struct Drag {
     pub started: bool,
 }
 
+/// 一段文本选择：块 id + 起点 / 终点（行序，行内字节位）。
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct TextSelection {
+    pub id: String,
+    pub anchor: (usize, usize),
+    pub focus: (usize, usize),
+}
+
+impl TextSelection {
+    /// 选择区间的规范序（起点在前）。
+    pub(crate) fn range(&self) -> ((usize, usize), (usize, usize)) {
+        if self.anchor <= self.focus {
+            (self.anchor, self.focus)
+        } else {
+            (self.focus, self.anchor)
+        }
+    }
+}
+
+/// 悬停提示的待发状态：指针停住的那个控件与起始时刻。
+#[derive(Clone, Debug)]
+pub(crate) struct HintHover {
+    pub id: String,
+    pub since: Instant,
+}
+
 pub(crate) struct UiState {
     pub size: (f32, f32),
     pub theme: Option<Theme>,
+    /// 帧拍计数（[`super::FrameUi::tick`] 推进）：自转指示这类动画的相位由它算。
+    pub clock: u32,
+    /// 光标闪烁的计时起点（最近一次编辑 / 光标移动 / 聚焦）。
+    pub blink_at: Instant,
+    /// 本帧声明的悬停提示（控件 id → 提示文字），输入路由按上一帧的这份表决定要不要出提示。
+    pub hints: HashMap<String, String>,
+    /// 指针停住的那个控件与起始时刻（停够 [`HINT_DELAY`] 即出提示）。
+    pub hint: Option<HintHover>,
+    /// 当前文本选择（只在一个 Markdown 块内）。
+    pub selection: Option<TextSelection>,
+    /// 各 Markdown 块最近一次绘制的版面：选择命中与复制按它算。
+    pub markdown_last: HashMap<String, Arc<markdown::Layout>>,
+    /// 最近一次指针位置（面本地）：提示贴指针下沿画。
+    pub pointer: Option<(f32, f32)>,
     pub metrics: Metrics,
     pub layouts: HashMap<String, Layout>,
     pub focusables: Vec<String>,
@@ -113,8 +169,6 @@ pub(crate) struct UiState {
     pub scroll_max: HashMap<String, f32>,
     /// 各滚动容器上一帧是否声明贴底跟随（由关转开的那一帧跳到终点）。
     pub follow_prev: HashMap<String, bool>,
-    /// `markdown.parse` 的结果缓存（按原文取，内容不变即不重取）。
-    pub markdown: HashMap<String, Vec<MarkdownBlock>>,
     /// Markdown 版面缓存（键含内容、宽度与量算代次）：滚动时长内容不必每帧重排。
     pub markdown_layouts: Arc<markdown::LayoutCache>,
     /// 上次已提交的帧与所在面：同内容帧不再提交（宿主每收一帧都要重投影并整窗重绘）。
@@ -137,6 +191,13 @@ impl Default for UiState {
             // 宿主在首次绘制时才回发真实尺寸，这里先给一个可用占位
             size: (320.0, 400.0),
             theme: None,
+            clock: 0,
+            blink_at: Instant::now(),
+            hints: HashMap::new(),
+            hint: None,
+            pointer: None,
+            selection: None,
+            markdown_last: HashMap::new(),
             metrics: Metrics::default(),
             layouts: HashMap::new(),
             focusables: Vec::new(),
@@ -151,7 +212,6 @@ impl Default for UiState {
             scroll: HashMap::new(),
             scroll_max: HashMap::new(),
             follow_prev: HashMap::new(),
-            markdown: HashMap::new(),
             markdown_layouts: Arc::default(),
             submitted: None,
             resize_pending: false,
@@ -163,6 +223,53 @@ impl Default for UiState {
 }
 
 impl UiState {
+    /// 光标重新开始闪烁（从显形起算）：编辑、光标移动、重新聚焦都调它。
+    pub(crate) fn reset_blink(&mut self) {
+        self.blink_at = Instant::now();
+    }
+
+    /// 指针换到另一个控件：提示重新计时；离开提示控件即收起。
+    pub(crate) fn track_hint(&mut self, id: Option<&str>) {
+        let next = id.map(str::to_string);
+        if self.hint.as_ref().map(|hint| hint.id.as_str()) == next.as_deref() {
+            return;
+        }
+        self.hint = next.map(|id| HintHover { id, since: Instant::now() });
+    }
+
+    /// 收起提示（指针离开面 / 面失焦）。
+    pub(crate) fn clear_hint(&mut self) {
+        self.hint = None;
+        self.pointer = None;
+    }
+
+    /// 此刻该画的提示文字：停够 [`HINT_DELAY`] 才算数。
+    pub(crate) fn hint_label(&self) -> Option<String> {
+        let hint = self.hint.as_ref()?;
+        if hint.since.elapsed() < HINT_DELAY {
+            return None;
+        }
+        self.hints.get(&hint.id).cloned().filter(|text| !text.is_empty())
+    }
+
+    /// 提示还在等待到点：驱动据此在等待期间要求帧拍。
+    pub(crate) fn hint_pending(&self) -> bool {
+        self.hint.as_ref().is_some_and(|hint| hint.since.elapsed() < HINT_DELAY)
+    }
+
+    /// 复制选择区内的文字（按版面逐行取，不含 Markdown 标记）。
+    pub(crate) fn selection_text(&self) -> Option<String> {
+        let selection = self.selection.as_ref()?;
+        let layout = self.markdown_last.get(&selection.id)?;
+        let text = markdown::selected_text(layout, selection.range());
+        (!text.trim().is_empty()).then_some(text)
+    }
+
+    /// 光标此刻是否显形。
+    pub(crate) fn caret_lit(&self) -> bool {
+        caret_lit(self.blink_at.elapsed())
+    }
+
     /// 面重挂：主题与依赖主题的版面缓存作废，尺寸与交互态保留（首帧不按占位尺寸排）。
     pub(crate) fn refresh_theme(&mut self) {
         self.theme = None;
@@ -206,5 +313,26 @@ mod tests {
         state.prune();
         assert!(state.inputs.is_empty() && state.selects.is_empty() && state.scroll.is_empty());
         assert!(state.focus.is_none(), "焦点不能留在已消失的控件上");
+    }
+
+    /// 静默半秒显、再半秒隐，循环往复；起点（刚编辑完）必然是亮的。
+    #[test]
+    fn caret_blinks_on_a_one_second_cycle() {
+        assert!(caret_lit(Duration::from_millis(0)));
+        assert!(caret_lit(Duration::from_millis(499)));
+        assert!(!caret_lit(Duration::from_millis(500)));
+        assert!(!caret_lit(Duration::from_millis(999)));
+        assert!(caret_lit(Duration::from_millis(1000)));
+        assert!(!caret_lit(Duration::from_millis(1500)), "第二秒的后半拍是暗相");
+        assert!(caret_lit(Duration::from_millis(2001)));
+    }
+
+    /// 编辑与光标移动把计时清零：光标立刻回到显形相位。
+    #[test]
+    fn editing_restarts_the_blink_cycle() {
+        let mut state = UiState { blink_at: Instant::now() - Duration::from_millis(700), ..UiState::default() };
+        assert!(!state.caret_lit());
+        state.reset_blink();
+        assert!(state.caret_lit());
     }
 }

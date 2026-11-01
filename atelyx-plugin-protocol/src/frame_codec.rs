@@ -9,8 +9,9 @@ use crate::paint::{
 };
 
 const MAGIC: [u8; 4] = *b"ATXF";
-/// 当前编码版本。2 起帧尾带排版尺寸；解码仍接受 1（缺尺寸 = 未声明）。
-const VERSION: u8 = 2;
+/// 当前编码版本：布局一变即升，解码只认这一个版本（两端随宿主重建，不留兼容分支）。
+/// 2 起帧尾带排版尺寸，3 起文字指令带斜体标志。
+const VERSION: u8 = 3;
 
 /// 把一帧编成字节序列。
 pub fn encode(frame: &SurfaceFrame) -> Vec<u8> {
@@ -30,11 +31,11 @@ pub fn decode(bytes: &[u8]) -> Result<SurfaceFrame, String> {
         return Err("帧编码魔数不符".into());
     }
     let version = bytes[MAGIC.len()];
-    if !(1..=VERSION).contains(&version) {
+    if version != VERSION {
         return Err(format!("帧编码版本不符：{version}"));
     }
     let mut reader = Reader { buf: bytes, pos: MAGIC.len() + 1 };
-    let frame = decode_frame(&mut reader, version)?;
+    let frame = decode_frame(&mut reader)?;
     if reader.pos != bytes.len() {
         return Err(format!("帧编码尾部有多余字节：{}", bytes.len() - reader.pos));
     }
@@ -122,7 +123,7 @@ fn encode_command(out: &mut Vec<u8>, command: &DrawCommand) {
             put_opt(out, stroke.as_ref(), encode_color);
             put_opt(out, stroke_width.as_ref(), |out, value| put_f32(out, *value));
         }
-        DrawCommand::Text { x, y, content, size, color, weight, family, max_width, align } => {
+        DrawCommand::Text { x, y, content, size, color, weight, family, italic, max_width, align } => {
             out.push(4);
             put_f32(out, *x);
             put_f32(out, *y);
@@ -133,6 +134,7 @@ fn encode_command(out: &mut Vec<u8>, command: &DrawCommand) {
             put_opt_u8(out, family.map(family_code));
             put_opt(out, max_width.as_ref(), |out, value| put_f32(out, *value));
             put_opt_u8(out, align.map(align_code));
+            out.push(u8::from(*italic));
         }
         DrawCommand::Image { source, x, y, w, h, fit } => {
             out.push(5);
@@ -187,7 +189,7 @@ fn encode_source(out: &mut Vec<u8>, source: &ImageSource) {
     }
 }
 
-fn decode_frame(reader: &mut Reader<'_>, version: u8) -> Result<SurfaceFrame, String> {
+fn decode_frame(reader: &mut Reader<'_>) -> Result<SurfaceFrame, String> {
     let count = reader.count()?;
     let mut commands = Vec::new();
     for _ in 0..count {
@@ -214,7 +216,7 @@ fn decode_frame(reader: &mut Reader<'_>, version: u8) -> Result<SurfaceFrame, St
         true => Some(reader.u16()?),
         false => None,
     };
-    let size = match version >= 2 && reader.bool()? {
+    let size = match reader.bool()? {
         true => Some(FrameSize { w: reader.f32()?, h: reader.f32()? }),
         false => None,
     };
@@ -264,17 +266,19 @@ fn decode_command(reader: &mut Reader<'_>) -> Result<DrawCommand, String> {
             stroke: reader.opt(|r| r.color())?,
             stroke_width: reader.opt(|r| r.f32())?,
         },
-        4 => DrawCommand::Text {
-            x: reader.f32()?,
-            y: reader.f32()?,
-            content: reader.string()?,
-            size: reader.f32()?,
-            color: reader.color()?,
-            weight: reader.opt_u8()?.map(decode_weight).transpose()?,
-            family: reader.opt_u8()?.map(decode_family).transpose()?,
-            max_width: reader.opt(|r| r.f32())?,
-            align: reader.opt_u8()?.map(decode_align).transpose()?,
-        },
+        4 => {
+            let x = reader.f32()?;
+            let y = reader.f32()?;
+            let content = reader.string()?;
+            let size = reader.f32()?;
+            let color = reader.color()?;
+            let weight = reader.opt_u8()?.map(decode_weight).transpose()?;
+            let family = reader.opt_u8()?.map(decode_family).transpose()?;
+            let max_width = reader.opt(|r| r.f32())?;
+            let align = reader.opt_u8()?.map(decode_align).transpose()?;
+            let italic = reader.bool()?;
+            DrawCommand::Text { x, y, content, size, color, weight, family, italic, max_width, align }
+        }
         5 => {
             let source = reader.source()?;
             DrawCommand::Image {
@@ -644,6 +648,7 @@ mod tests {
                     color: PaintColor::Token { name: ColorToken::Text },
                     weight: Some(TextWeight::SemiBold),
                     family: Some(TextFamily::Mono),
+                    italic: false,
                     max_width: Some(120.0),
                     align: Some(TextAlign::Center),
                 },
@@ -723,6 +728,8 @@ mod tests {
                     color: PaintColor::Rgba { rgba: [1, 2, 3, 255] },
                     weight: None,
                     family: None,
+                    // 斜体一位置 true：这一位就是版本 3 与更早版本的差别
+                    italic: true,
                     max_width: None,
                     align: None,
                 },
@@ -743,10 +750,10 @@ mod tests {
         assert_eq!(
             hex(&bytes),
             concat!(
-                "415458460202000000010000803f00000040000040400000804001000300",
-                "00010000c0400004000000000000000003000000e4b8ad00006041010102",
-                "03ff00000000010000000100000061000000000000000000002041000020",
-                "4101020000013c00010000484400001644",
+                "415458460302000000010000803f000000400000404000008040010003000001",
+                "0000c0400004000000000000000003000000e4b8ad0000604101010203ff0000",
+                "0000010100000001000000610000000000000000000020410000204101020000",
+                "013c00010000484400001644",
             )
         );
         assert_eq!(decode(&bytes).unwrap(), frame);

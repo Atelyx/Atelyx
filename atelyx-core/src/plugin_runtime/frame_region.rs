@@ -256,6 +256,7 @@ mod tests {
                 color: PaintColor::Token { name: ColorToken::Text },
                 weight: None,
                 family: None,
+                italic: false,
                 max_width: None,
                 align: None,
             }],

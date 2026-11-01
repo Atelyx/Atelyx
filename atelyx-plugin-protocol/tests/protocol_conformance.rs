@@ -342,12 +342,6 @@ fn method_type_shapes_are_frozen() {
             "ServiceChangedParams" => {
                 frozen_roundtrip::<atelyx_plugin_protocol::service::ChangedParams>(&value)
             }
-            "MarkdownParams" => {
-                frozen_roundtrip::<atelyx_plugin_protocol::method::MarkdownParams>(&value)
-            }
-            "MarkdownResult" => {
-                frozen_roundtrip::<atelyx_plugin_protocol::method::MarkdownResult>(&value)
-            }
             other => panic!("语料 {name}: 未知类型 {other}"),
         };
         assert!(ok, "语料 {name}: 编码与快照不一致");

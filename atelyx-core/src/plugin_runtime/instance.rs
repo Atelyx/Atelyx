@@ -1507,12 +1507,6 @@ impl Instance {
             method::view::UNREGISTER => self.on_unregister(token, params),
             method::frame::SUBMIT_SHARED => self.on_frame_submit(token, params),
             method::frame::REGION => self.on_frame_region(token, params),
-            method::markdown::PARSE => {
-                let p: method::MarkdownParams = parse(params)?;
-                p.validate().map_err(RpcError::failed)?;
-                let result = super::markdown::blocks(&p.content);
-                serde_json::to_value(result).map_err(|e| RpcError::failed(e.to_string()))
-            }
             method::state::READ => {
                 let json = capability::read_state(&self.state_dir).map_err(RpcError::failed)?;
                 Ok(json!({ "json": json }))
@@ -3282,14 +3276,14 @@ mod tests {
         instance.attach_runtime(&runtime);
 
         let direct = instance
-            .dispatch(method::markdown::PARSE, &json!({ "content": "# A" }))
+            .dispatch(method::state::READ, &Value::Null)
             .expect("直接调用应成功");
         // 生产路径（`handle_service_call`）就是把目录决议出的内置落点重新交给同一条分派
         let target = runtime
             .service_target(service::CallParams {
-                service: "markdown".into(),
-                method: "parse".into(),
-                params: json!({ "content": "# A" }),
+                service: "state".into(),
+                method: "read".into(),
+                params: Value::Null,
             })
             .expect("内置服务应可决议");
         let ServiceTarget::Builtin { wire, params } = target else {
@@ -3308,7 +3302,7 @@ mod tests {
         assert!(unknown_service.message.contains(service::error::UNKNOWN_SERVICE));
         let unknown_method = runtime
             .service_target(service::CallParams {
-                service: "markdown".into(),
+                service: "state".into(),
                 method: "nope".into(),
                 params: Value::Null,
             })
@@ -3545,16 +3539,16 @@ mod tests {
         let tmp = TempDir::new("instance-service-blocked");
         let runtime = PluginRuntime::new(tmp.to_path_buf());
         runtime.set_builtin_owner_enabled("atelyx.notes", false);
-        assert_eq!(runtime.forward_to("markdown", "parse"), Forward::Unavailable);
+        assert_eq!(runtime.forward_to("editor", "selection"), Forward::Unavailable);
         assert!(runtime
             .service_target(service::CallParams {
-                service: "markdown".into(),
-                method: "parse".into(),
+                service: "editor".into(),
+                method: "selection".into(),
                 params: Value::Null,
             })
             .is_err_and(|error| error.message.contains(service::error::UNKNOWN_SERVICE)));
         runtime.set_builtin_owner_enabled("atelyx.notes", true);
-        assert_eq!(runtime.forward_to("markdown", "parse"), Forward::Local, "重新启用即回到内置分派");
+        assert_eq!(runtime.forward_to("editor", "selection"), Forward::Local, "重新启用即回到内置分派");
     }
 
     /// 等在途服务调用落表（转发任务被调度后才登记）。

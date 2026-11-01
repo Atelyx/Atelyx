@@ -127,6 +127,7 @@ struct TextEntry {
     size_bits: u32,
     weight: Option<TextWeight>,
     family: Option<TextFamily>,
+    italic: bool,
     max_width_bits: Option<u32>,
     paragraph: paragraph::Plain<TextParagraph>,
     /// 排版后的最小宽度（对齐换算用）。
@@ -166,13 +167,14 @@ impl TextCache {
             color: text_color,
             weight,
             family,
+            italic,
             max_width,
             align,
         } = command
         else {
             return;
         };
-        let (paragraph, width) = self.entry(content, *size, *weight, *family, *max_width);
+        let (paragraph, width) = self.entry(content, *size, *weight, *family, *italic, *max_width);
         let x = aligned_x(*x, *max_width, *align, width);
         renderer.fill_paragraph(
             paragraph,
@@ -194,24 +196,26 @@ impl TextCache {
         size: f32,
         weight: Option<TextWeight>,
         family: Option<TextFamily>,
+        italic: bool,
         max_width: Option<f32>,
     ) -> (&TextParagraph, f32) {
         let size_bits = size.to_bits();
         let max_width_bits = max_width.map(f32::to_bits);
-        let hash = text_hash(content, size_bits, weight, family, max_width_bits);
+        let hash = text_hash(content, size_bits, weight, family, italic, max_width_bits);
         let frame = self.frame;
         let bucket = self.buckets.entry(hash).or_default();
         let index = bucket.iter().position(|entry| {
             entry.size_bits == size_bits
                 && entry.weight == weight
                 && entry.family == family
+                && entry.italic == italic
                 && entry.max_width_bits == max_width_bits
                 && entry.paragraph.content() == content
         });
         let index = match index {
             Some(index) => index,
             None => {
-                let paragraph = build_paragraph(content, size, weight, family, max_width);
+                let paragraph = build_paragraph(content, size, weight, family, italic, max_width);
                 let width = paragraph.min_bounds().width;
                 self.entries += 1;
                 self.bytes += content.len();
@@ -219,6 +223,7 @@ impl TextCache {
                     size_bits,
                     weight,
                     family,
+                    italic,
                     max_width_bits,
                     paragraph,
                     width,
@@ -267,15 +272,22 @@ fn build_paragraph(
     size: f32,
     weight: Option<TextWeight>,
     family: Option<TextFamily>,
+    italic: bool,
     max_width: Option<f32>,
 ) -> paragraph::Plain<TextParagraph> {
     let mut paragraph = paragraph::Plain::default();
+    // 斜体按字型样式给：系统字体族有斜体字面时即用，没有再退正体（指令集不合成倾斜）
+    let font = if italic {
+        iced::Font { style: iced::font::Style::Italic, ..crate::plugin_theme::text_font(weight, family) }
+    } else {
+        crate::plugin_theme::text_font(weight, family)
+    };
     paragraph.update(TextDef {
         content,
         bounds: Size::new(max_width.unwrap_or(f32::INFINITY), f32::INFINITY),
         size: Pixels(size),
         line_height: LineHeight::Relative(1.2),
-        font: crate::plugin_theme::text_font(weight, family),
+        font,
         align_x: Alignment::Default,
         align_y: Vertical::Top,
         shaping: Shaping::default(),
@@ -298,6 +310,7 @@ fn text_hash(
     size_bits: u32,
     weight: Option<TextWeight>,
     family: Option<TextFamily>,
+    italic: bool,
     max_width_bits: Option<u32>,
 ) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -305,6 +318,7 @@ fn text_hash(
     size_bits.hash(&mut hasher);
     weight.map(|weight| weight as u8).hash(&mut hasher);
     family.map(|family| family as u8).hash(&mut hasher);
+    italic.hash(&mut hasher);
     max_width_bits.hash(&mut hasher);
     hasher.finish()
 }
@@ -447,15 +461,15 @@ mod tests {
     #[test]
     fn text_cache_reuses_the_paragraph_of_unchanged_text() {
         let mut cache = TextCache { frame: 1, ..TextCache::default() };
-        let (first, width) = cache.entry("同一段文字", 13.0, None, None, None);
+        let (first, width) = cache.entry("同一段文字", 13.0, None, None, false, None);
         let first: *const TextParagraph = first;
         cache.frame = 2;
-        let (second, width_again) = cache.entry("同一段文字", 13.0, None, None, None);
+        let (second, width_again) = cache.entry("同一段文字", 13.0, None, None, false, None);
         assert_eq!(first, second, "内容与排版参数不变即复用同一段落");
         assert_eq!(width, width_again);
         assert_eq!(cache.entries, 1);
 
-        let _ = cache.entry("另一段文字", 13.0, None, None, None);
+        let _ = cache.entry("另一段文字", 13.0, None, None, false, None);
         assert_eq!(cache.entries, 2, "内容变了才新增条目");
     }
 
@@ -463,10 +477,10 @@ mod tests {
     fn text_cache_trims_entries_unused_by_the_current_frame() {
         let mut cache = TextCache { frame: 1, ..TextCache::default() };
         for index in 0..4 {
-            let _ = cache.entry(&format!("line {index}"), 13.0, None, None, None);
+            let _ = cache.entry(&format!("line {index}"), 13.0, None, None, false, None);
         }
         cache.frame = 2;
-        let _ = cache.entry("keep", 13.0, None, None, None);
+        let _ = cache.entry("keep", 13.0, None, None, false, None);
         cache.trim(3, usize::MAX);
         assert_eq!(cache.entries, 1, "超出上限只留本帧用到的");
 
@@ -484,6 +498,7 @@ mod tests {
             color: PaintColor::Rgba { rgba: [0, 0, 0, 255] },
             weight: None,
             family: None,
+            italic: false,
             max_width: None,
             align: None,
         }

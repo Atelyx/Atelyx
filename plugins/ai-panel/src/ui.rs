@@ -7,11 +7,11 @@ use atelyx_plugin_protocol::paint::{
     ColorToken, ImageFit, ImageSource, PaintColor, PaintShadow, TextWeight,
 };
 use atelyx_plugin_sdk::frame_ui::{
-    BoxStyle, BoxWidth, Edges, Rect, TextRole, TextStyle, Ui,
+    BoxStyle, BoxWidth, Edges, MentionCandidate, Rect, TextRole, TextStyle, Ui,
 };
 
 use crate::model::{
-    content_of, display_of, message_id_of, role_of, Candidate, Menu, Model, Picker, FLOW,
+    content_of, display_of, message_id_of, role_of, Candidate, Menu, Model, Picker, DRAFT, FLOW,
 };
 
 /// 侧栏宽度与并排显示的最小面板宽。
@@ -56,13 +56,6 @@ const COMPOSER_PAD_X: f32 = 12.0;
 const BOX_PAD: f32 = 8.0;
 /// 附件托盘追加的高度（上留白 + 一行缩略名）。
 const IMAGE_TRAY_H: f32 = 27.0;
-/// 转圈每拍（100ms 一帧）的旋转弧度：约一秒一圈。
-const SPIN_STEP_RAD: f32 = 0.63;
-
-fn spin_phase(model: &Model) -> f32 {
-    model.spin_tick as f32 * SPIN_STEP_RAD
-}
-
 /// 候选行高（单行 / 带次行）：默认字号档下「内衬 + 行高」的取整值，键盘巡航的滚动偏移据此算。
 /// 略偏大是安全的——多滚一点只会让选中行更靠上，不会切掉它。
 fn picker_row_height(candidate: &Candidate) -> f32 {
@@ -86,6 +79,7 @@ fn picker_height(picker: &Picker) -> f32 {
 fn area_height(ui: &mut Ui<'_, '_>, model: &Model, chat_width: f32) -> f32 {
     let width = (chat_width - COMPOSER_PAD_X * 2.0 - BOX_PAD * 2.0).max(1.0);
     ui.auto_area_height(
+        DRAFT,
         &model.draft,
         TextRole::Body,
         width,
@@ -217,6 +211,12 @@ fn sidebar_body(ui: &mut Ui<'_, '_>, model: &Model) {
 }
 
 fn session_row(ui: &mut Ui<'_, '_>, model: &Model, session: &crate::model::SessionRow) {
+    if let Some(rename) = model.rename.as_ref().filter(|edit| edit.id == session.id) {
+        ui.pad(2.0, 2.0, |row| {
+            row.text_input(format!("rename-input:{}", session.id), rename.title.clone(), "会话标题");
+        });
+        return;
+    }
     let active = model.active.as_deref() == Some(session.id.as_str());
     let menu_open = model.session_menu.as_deref() == Some(session.id.as_str());
     let confirm = model.delete_confirm.as_deref() == Some(session.id.as_str());
@@ -266,6 +266,14 @@ fn session_row(ui: &mut Ui<'_, '_>, model: &Model, session: &crate::model::Sessi
                         true,
                     );
                 } else if menu_open {
+                    line.icon_button_named(
+                        format!("rename:{}", session.id),
+                        "pen-line",
+                        12.0,
+                        20.0,
+                        ColorToken::TextMuted,
+                        true,
+                    );
                     line.icon_button_named(
                         format!("delete:{}", session.id),
                         "trash-2",
@@ -331,8 +339,9 @@ fn top_bar(ui: &mut Ui<'_, '_>, model: &Model) {
                 }
                 if model.active.is_some() && !model.active_streaming() {
                     if model.active_renaming() {
-                        line.spinner(14.0, ColorToken::Accent, spin_phase(model));
+                        line.spinner(14.0, ColorToken::Accent);
                     } else {
+                        line.hint("regen-title", "重新生成标题");
                         line.icon_button_named(
                             "regen-title",
                             "refresh-cw",
@@ -344,6 +353,7 @@ fn top_bar(ui: &mut Ui<'_, '_>, model: &Model) {
                     }
                 }
                 line.grow();
+                line.hint("new", "新建会话");
                 line.icon_button_named(
                     "new",
                     "file-plus",
@@ -352,6 +362,7 @@ fn top_bar(ui: &mut Ui<'_, '_>, model: &Model) {
                     ColorToken::TextSecondary,
                     true,
                 );
+                line.hint("toggle-sidebar", "历史会话");
                 line.icon_button_named(
                     "toggle-sidebar",
                     "history",
@@ -369,9 +380,10 @@ fn top_bar(ui: &mut Ui<'_, '_>, model: &Model) {
                             0.0,
                             false,
                             false,
-                            |busy| busy.spinner(13.0, ColorToken::TextMuted, spin_phase(model)),
+                            |busy| busy.spinner(13.0, ColorToken::TextMuted),
                         );
                     } else {
+                        line.hint("compact", "压缩会话历史（折叠为摘要，原文保留）");
                         line.icon_button_named(
                             "compact",
                             "layers",
@@ -383,6 +395,7 @@ fn top_bar(ui: &mut Ui<'_, '_>, model: &Model) {
                     }
                 }
                 if error.is_some() {
+                    line.hint("clear-error", "清除提示");
                     line.icon_button_named(
                         "clear-error",
                         "x",
@@ -542,7 +555,7 @@ fn user_block(ui: &mut Ui<'_, '_>, model: &Model, message: &Value, id: &str, cha
                                 TextStyle::new(TextRole::Body).wrap(),
                             );
                         } else {
-                            bubble.markdown(display.to_string());
+                            bubble.markdown_with(display.to_string(), mentions_of(message));
                         }
                     },
                 );
@@ -577,6 +590,30 @@ fn user_block(ui: &mut Ui<'_, '_>, model: &Model, message: &Value, id: &str, cha
             });
         });
     });
+}
+
+/// 消息里的引用 → 解析器的引用候选：标签文本与草稿里插入的那段字面量逐字一致，胶囊才画得准。
+fn mentions_of(message: &Value) -> Vec<MentionCandidate> {
+    message
+        .get("refs")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|reference| {
+            let path = reference.get("path").and_then(Value::as_str)?;
+            let label = reference.get("label").and_then(Value::as_str)?;
+            let prefix = match reference.get("refKind").and_then(Value::as_str) {
+                Some("table") => "表格",
+                Some("canvas") => "画布",
+                Some("dir") => "文件夹",
+                _ => "笔记",
+            };
+            Some(MentionCandidate {
+                key: path.to_string(),
+                label: format!("{prefix}：{label}"),
+            })
+        })
+        .collect()
 }
 
 fn assistant_block(ui: &mut Ui<'_, '_>, model: &Model, message: &Value, id: &str) {
@@ -799,6 +836,7 @@ fn action_items(
     {
         let line = ui;
         if !display.is_empty() {
+            line.hint(&format!("copy:{id}"), "复制");
             line.icon_button_named(
                 format!("copy:{id}"),
                 "copy",
@@ -809,6 +847,7 @@ fn action_items(
             );
         }
         if assistant && !content.is_empty() && !content.starts_with("[错误]") {
+            line.hint(&format!("rollback:{id}"), "回到此处（该消息之后转为新话题）");
             line.icon_button_named(
                 format!("rollback:{id}"),
                 "corner-up-left",
@@ -818,6 +857,7 @@ fn action_items(
                 true,
             );
             let actionable = model.is_last(id) && !model.active_streaming();
+            line.hint(&format!("regen:{id}"), "重新生成回复");
             line.icon_button_named(
                 format!("regen:{id}"),
                 "refresh-cw",
@@ -897,6 +937,7 @@ fn composer(ui: &mut Ui<'_, '_>, model: &Model, chat_width: f32) {
 fn tool_row(ui: &mut Ui<'_, '_>, model: &Model, chat_width: f32) {
     ui.row(6.0, |line| {
         let plus_open = model.menu == Some(Menu::Plus);
+        line.hint("plus-menu", "添加上下文与附件");
         line.icon_button_named(
             "plus-menu",
             "plus",
@@ -905,7 +946,9 @@ fn tool_row(ui: &mut Ui<'_, '_>, model: &Model, chat_width: f32) {
             if plus_open { ColorToken::Accent } else { ColorToken::TextSecondary },
             true,
         );
+        line.hint("agent-menu", "选择 Agent");
         trigger(line, "agent-menu", "bot", model.agent_label(), chat_width);
+        line.hint("model-menu", "模型与推理等级");
         trigger(
             line,
             "model-menu",
@@ -915,6 +958,7 @@ fn tool_row(ui: &mut Ui<'_, '_>, model: &Model, chat_width: f32) {
         );
         line.grow();
         if model.active_streaming() {
+            line.hint("stop", "停止生成");
             line.icon_button_filled(
                 "stop",
                 "square",
@@ -925,6 +969,7 @@ fn tool_row(ui: &mut Ui<'_, '_>, model: &Model, chat_width: f32) {
                 true,
             );
         } else {
+            line.hint("send", "发送（Enter）");
             line.icon_button_filled_color(
                 "send",
                 "arrow-up",

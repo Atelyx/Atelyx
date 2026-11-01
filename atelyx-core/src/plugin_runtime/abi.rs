@@ -697,7 +697,7 @@ fn command_from_host(command: Command) -> DrawCommand {
             stroke: stroke.map(paint_color),
             stroke_width: Some(stroke_width),
         },
-        Command::Text { x, y, content, size, color, weight, family, max_width, align } => {
+        Command::Text { x, y, content, size, color, weight, family, italic, max_width, align } => {
             DrawCommand::Text {
                 x,
                 y,
@@ -706,6 +706,7 @@ fn command_from_host(command: Command) -> DrawCommand {
                 color: paint_color(color),
                 weight: weight_from_code(weight),
                 family: family_from_code(family),
+                italic,
                 max_width,
                 align: align_from_code(align),
             }
@@ -885,6 +886,7 @@ mod tests {
                     color: host::Color::Token(abi::TOKEN_TEXT),
                     weight: abi::WEIGHT_SEMI_BOLD,
                     family: abi::FAMILY_MONO,
+                    italic: false,
                     max_width: Some(80.0),
                     align: abi::ALIGN_CENTER,
                 },

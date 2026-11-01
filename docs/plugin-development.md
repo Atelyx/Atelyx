@@ -458,7 +458,9 @@ impl PluginHandler for Todo {
 | `overlay(rect, ...)` | 覆盖层：子项按 `rect` 浮在主内容之后绘制，整块承接点击（子控件优先，空白处不穿透下层）；打开期间滚轮只落到浮层内声明过的滚动容器。`overlay_passive` 同样绘制与命中，但不拦滚轮（浮钮 / 角标这类不该挡住下层滚动） |
 | `panel(...)` | 圆角表面容器，承接子项、不承接点击 |
 | `notice(text, color)` | 提示块：整行底色 + 语义色描边与文字 |
-| `markdown(content)` | 只读 Markdown：块由宿主解析（`markdown.parse`），控件层按宽度折行并画列表标记 / 引用条 / 代码底 |
+| `markdown(content)` | 只读 Markdown：控件层用领域库解析并排版（标题 / 列表 / 引用 / 代码块含复制钮 / 表格 / 分隔线，行内粗体 / 斜体 / 删除线 / 等宽 / 链接 / 标签胶囊），正文可拖选后 Ctrl+C 复制 |
+| `markdown_with(content, mentions)` | 同上，并把 `#笔记：方案.md` 这类引用标签画成胶囊（`MentionCandidate` 由 SDK 重导出） |
+| `hint(id, text)` | 给控件挂悬停提示：指针停够 400ms 由控件层画在指针下沿 |
 | `scroll(id, gap, ...)` / `list(id, gap, ...)` | 滚动容器（吃父容器剩余高度，只画视口内的子项），滚轮回 `Scroll { id, offset, max_offset }`，右下细滚动条可拖 |
 | `virtual_scroll(id, len, gap, follow_end, viewport_hint, estimate_h, key, build)` | 虚拟滚动列表：只为视口附近构造条目，屏外用上一帧实测高与 `estimate_h` 估算总高；`key` 稳定标识条目（长消息流、日志用，条目多时比 `scroll` 快一个量级） |
 | `boxed(width, BoxStyle, Edges, gap, ...)` | 通用表面容器：底色 / 边框 / 圆角 / 四边内边距 / 间距可配，宽度撑满或固定（气泡、步骤卡、输入盒）；`BoxStyle::shadow(...)` 给浮层加投影 |
@@ -474,7 +476,7 @@ impl PluginHandler for Todo {
 | `pad(horizontal, vertical, ...)` | 内边距容器：子项按列排布并整体内缩（滚动条要贴边、内容又要留白时用） |
 | `column(gap, ...)` / `row(gap, ...)` / `row_fill(gap, ...)` | 纵向 / 横向 / 占满剩余高度的横向容器（并排分栏各自滚动） |
 
-Markdown 不要自己解析：`ui.markdown(text)` 首次出现时向宿主发一次 `markdown.parse`，按原文缓存（缓存有限，滚出视野的旧内容会被收敛掉），内容不变不重取。
+Markdown 不用自己解析：`ui.markdown(text)` 内部用领域库 `atelyx-markdown` 解析（与宿主笔记同一份语义），排版结果按「原文 + 宽度 + 量算代次」缓存，滚动不重排；代码块头的「复制」由控件层自己写剪贴板。
 
 三条边界：指令集没有裁剪，滚动只画视口内的子项；需要覆盖主内容的浮层用 `ui.overlay(rect, ...)`（画在主内容之后，打开时滚轮只落到浮层里的滚动区），下拉仍就地展开；无障碍基本没有（自绘帧对读屏器只是一块区域，键鼠可达性要自己保证）；观感一致性靠 SDK 默认样式，不要写死色值和像素。
 
@@ -570,7 +572,7 @@ impl PluginHandler for Demo {
 
 - 不能登记宿主的通道命名空间：`service` / `view` / `frame` / `layout` / `event` / `doc`。这些是界面提交与事件通路的入口，被接管等于把插件自己从界面上摘掉，登记时直接拒收。
 - 不能替换 `query`：字体与主题取的是宿主 OS 与用户设置资源，外置后宿主自身外观会和设置脱节。
-- `markdown.parse` **可以**被替换（解析语义与宿主笔记同源即可）。替换生效后，已经按原文缓存过解析结果的内容不会自动重取——重建 `FrameUi` 或内容变化才会再取一次。
+- Markdown 解析与排版都在插件侧（领域库 `atelyx-markdown`），不经服务总线，因此没有「解析提供者」可替换。
 
 ## 8. 进阶
 

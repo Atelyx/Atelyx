@@ -353,6 +353,7 @@ mod tests {
                 color: PaintColor::Token { name: ColorToken::Text },
                 weight: None,
                 family: None,
+                italic: false,
                 max_width: Some(80.0),
                 align: Some(TextAlign::Center),
             }],
@@ -387,6 +388,7 @@ mod tests {
             color: PaintColor::Token { name: ColorToken::Text },
             weight: None,
             family: None,
+            italic: false,
             max_width: None,
             align: None,
         }];

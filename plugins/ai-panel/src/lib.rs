@@ -63,10 +63,6 @@ impl AiPanelPlugin {
         }
         let snapshot = self.model.lock().unwrap().clone();
         let mut frame_ui = self.ui.lock().await;
-        // 命名 / 压缩进行中才要帧拍，其余时间不推帧
-        frame_ui.set_fps(
-            (snapshot.active_renaming() || snapshot.active_compacting()).then_some(10),
-        );
         if let Err(error) = frame_ui.render(ctx, PANEL, |frame| ui::frame(frame, &snapshot)).await {
             ctx.log_error(&format!("提交对话面板失败：{error}"));
         }
@@ -235,6 +231,18 @@ impl AiPanelPlugin {
             out.push(rel);
         }
         Ok(out)
+    }
+
+    /// 手动改名：会话真源在宿主，改完重取清单（标题与排序都可能变）。
+    async fn rename(&self, ctx: &Context, session_id: &str, title: &str) {
+        match ctx.chat_rename(session_id, title).await {
+            Ok(()) => {
+                self.model.lock().unwrap().set_title(session_id, Some(title.to_string()));
+                self.load_list(ctx).await;
+            }
+            Err(error) => self.set_error(format!("会话改名失败：{error}")),
+        }
+        self.render(ctx).await;
     }
 
     async fn send(&self, ctx: &Context, request: SendRequest) {
@@ -803,12 +811,27 @@ impl AiPanelPlugin {
                     UiEvent::Text { id, value } if id == "search" => {
                         model.search = value;
                     }
+                    UiEvent::Text { id, value } if id.starts_with("rename-input:") => {
+                        if let Some(rename) = model.rename.as_mut() {
+                            rename.title = value;
+                        }
+                    }
+                    UiEvent::Submit { id } if id.starts_with("rename-input:") => {
+                        if let Some(rename) = model.rename.take() {
+                            let title = rename.title.trim().to_string();
+                            if !title.is_empty() {
+                                actions.push(Action::Rename(rename.id, title));
+                            }
+                        }
+                    }
                     UiEvent::Submit { id } if id == DRAFT => actions.push(Action::Send),
                     UiEvent::Cancel { .. } => {
                         model.menu = None;
                         model.menu_anchor = None;
                         model.picker = None;
+                        model.cancel_rename();
                     }
+                    UiEvent::Focus { focused: false, .. } => model.cancel_rename(),
                     UiEvent::Scroll { id, offset, max_offset } if id == crate::model::FLOW => {
                         model.follow_bottom = offset >= max_offset - 0.5;
                     }
@@ -862,6 +885,7 @@ impl AiPanelPlugin {
             Action::Compact => self.compact(ctx).await,
             Action::Retitle => self.retitle(ctx).await,
             Action::Delete(id) => self.delete(ctx, &id).await,
+            Action::Rename(id, title) => self.rename(ctx, &id, &title).await,
             Action::ScrollBottom => {
                 self.ui.lock().await.scroll_to_end(crate::model::FLOW);
                 self.model.lock().unwrap().follow_bottom = true;
@@ -900,6 +924,7 @@ enum Action {
     Compact,
     Retitle,
     Delete(String),
+    Rename(String, String),
     Copy(String),
     LoadSession(String),
     SetAgent(String),
@@ -1012,6 +1037,8 @@ fn on_click(
                 } else {
                     Some(rest.to_string())
                 };
+            } else if let Some(rest) = id.strip_prefix("rename:") {
+                model.begin_rename(rest);
             } else if let Some(rest) = id.strip_prefix("delete:") {
                 model.session_menu = None;
                 model.delete_confirm = Some(rest.to_string());
@@ -1362,13 +1389,8 @@ impl PluginHandler for AiPanelPlugin {
     }
 
     async fn on_frame_tick(&self, ctx: &Context, _params: FrameTickParams) {
-        {
-            let mut model = self.model.lock().unwrap();
-            if model.active_renaming() || model.active_compacting() {
-                model.spin_tick = model.spin_tick.wrapping_add(1);
-            }
-        }
-        // 动画结束后仍要出一帧撤掉 fps：否则宿主按上一帧的声明一直推帧
+        // 控件层按拍推进转圈相位与光标闪烁；动画停了它会自己撤掉帧拍声明
+        self.ui.lock().await.tick();
         self.render(ctx).await;
     }
 

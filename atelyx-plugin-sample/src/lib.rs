@@ -284,6 +284,7 @@ fn base(kind: u32, rect: AbiRect) -> AbiCommand {
         text_weight: WEIGHT_NORMAL,
         text_family: FAMILY_UI,
         text_align: ALIGN_START,
+        text_italic: 0,
         text_max_width: 0.0,
         image_source: 0,
         image_path: AbiStr::EMPTY,

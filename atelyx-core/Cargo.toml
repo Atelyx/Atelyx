@@ -27,6 +27,8 @@ globset = "0.4"
 # 表格 xlsx 导出（table_xlsx）
 rust_xlsxwriter = "0.89"
 base64 = "0.22"
+# Markdown 解析（领域库，宿主与插件共用；core 以 `markdown` 重导出保持路径）
+atelyx-markdown = { path = "../atelyx-markdown" }
 # 插件协议类型（宿主运行时：信封解析、握手、能力面方法、整面帧与绘制指令）
 atelyx-plugin-protocol = { path = "../atelyx-plugin-protocol" }
 # 同进程插件 ABI 与加载：动态库实例、帧复制与宿主回调

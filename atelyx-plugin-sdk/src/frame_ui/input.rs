@@ -5,7 +5,8 @@ use atelyx_plugin_protocol::frame::{Key, Modifiers, MouseButton, NamedKey};
 use atelyx_plugin_protocol::method::MAX_MEASURE_ITEMS;
 
 use super::geom::Rect;
-use super::model::{Drag, FontSpec, InputState, Layout, Press, UiState};
+use super::metrics::Metrics;
+use super::model::{Drag, FontSpec, InputState, Layout, Press, TextSelection, UiState};
 use super::text;
 use crate::frame_ui::UiEvent;
 use crate::Context;
@@ -62,9 +63,16 @@ pub(crate) async fn handle(
         }
         FrameInput::PointerMove { x, y, hit, .. } => {
             state.hovered = hit.clone();
+            state.pointer = Some((*x, *y));
+            // 只有声明了提示的控件才进入等待；换控件即重新计时
+            let hinted = hit.as_deref().filter(|id| state.hints.contains_key(*id));
+            state.track_hint(hinted);
             pointer_move(state, ctx, *x, *y, hit.as_deref(), &value_of, &mut events).await;
         }
-        FrameInput::PointerLeave => state.hovered = None,
+        FrameInput::PointerLeave => {
+            state.hovered = None;
+            state.clear_hint();
+        }
         FrameInput::Wheel { x, y, delta_y, .. } => {
             if let Some(event) = wheel(state, *x, *y, *delta_y) {
                 events.push(event);
@@ -80,6 +88,7 @@ pub(crate) async fn handle(
             state.press = None;
             state.drag_bar = None;
             state.hovered = None;
+            state.clear_hint();
             // 面失去焦点时拖拽不会再收到抬起：已起拖的会话按取消收尾
             if let Some(drag) = state.drag.take().filter(|drag| drag.started) {
                 events.push(UiEvent::DragCancel { id: drag.id });
@@ -104,8 +113,25 @@ pub(crate) async fn handle(
     }
     // 只有选移动（没改文本）才单独报光标：改了文本的那一条已经带着新值，
     // 插件回读光标即可；但光标离开 `#` 触发段这类场景文本不变，浮层要靠这条收起
+    // 控件层自持的复制钮（代码块头的「复制」）：就地写剪贴板，不把这次点击交给插件
+    let mut kept = Vec::with_capacity(events.len());
+    for event in events {
+        if let UiEvent::Click { id } = &event {
+            if let Some(Layout::Copy { text }) = state.layouts.get(id) {
+                let text = text.clone();
+                clip_write(ctx, &text).await;
+                continue;
+            }
+        }
+        kept.push(event);
+    }
+    let mut events = kept;
     let text_changed = events.iter().any(|event| matches!(event, UiEvent::Text { .. }));
     let after = caret_snapshot(state);
+    // 编辑与光标移动都把闪烁计时清零：按键的瞬间光标一定是亮的
+    if text_changed || before.as_ref() != after.as_ref() {
+        state.reset_blink();
+    }
     if !text_changed {
         if let Some((id, caret, anchor)) = after {
             // 焦点换了另有 Focus 事件，不必再报一次光标
@@ -145,6 +171,13 @@ async fn pointer_down(
     }
     // 新的一次按下换掉上一轮拖拽候选：拖拽只在同一次按下内成立
     state.drag = None;
+    // 点在别处即放弃上一处选择（本块内的按下会在下面重新起选）
+    let keeps_selection = hit
+        .and_then(|id| state.layouts.get(id))
+        .is_some_and(|layout| matches!(layout, Layout::Markdown { .. }));
+    if !keeps_selection {
+        state.selection = None;
+    }
     let Some(id) = hit else {
         close_selects(state, None);
         set_focus(state, None, value_of, events);
@@ -163,6 +196,14 @@ async fn pointer_down(
         _ => None,
     };
     close_selects(state, keep);
+    // 输入法组合期点选会打断组合会话：焦点与光标原样保留，这次按下不接管
+    if matches!(layout, Layout::Input { .. } | Layout::TextArea { .. })
+        && state.focus.as_deref() == Some(id)
+        && state.inputs.get(id).is_some_and(|item| !item.preedit.is_empty())
+    {
+        state.press = None;
+        return;
+    }
     match layout {
         Layout::Input { inner, font, value: shown, .. } => {
             set_focus(state, Some(id.to_string()), value_of, events);
@@ -204,8 +245,14 @@ async fn pointer_down(
             set_focus(state, Some(id.to_string()), value_of, events);
             state.press = Some(Press { id: id.to_string(), from_input: false });
         }
-        Layout::Button | Layout::Option { .. } => {
+        Layout::Button | Layout::Option { .. } | Layout::Copy { .. } => {
             state.press = Some(Press { id: id.to_string(), from_input: false });
+        }
+        Layout::Markdown { rect } => {
+            // 只读正文里按下即起选：拖过多少选多少，同一次按下内延伸
+            let at = markdown_point(state, id, rect, x, y).unwrap_or((0, 0));
+            state.selection = Some(TextSelection { id: id.to_string(), anchor: at, focus: at });
+            state.press = Some(Press { id: id.to_string(), from_input: true });
         }
         Layout::Custom => {
             state.press = Some(Press { id: id.to_string(), from_input: false });
@@ -230,6 +277,13 @@ async fn pointer_down(
             events.push(UiEvent::Scroll { id: scroll, offset, max_offset });
         }
     }
+}
+
+/// 只读正文里的落点 → （行序，行内字节位）：坐标先换算到块本地再按版面命中。
+fn markdown_point(state: &mut UiState, id: &str, rect: Rect, x: f32, y: f32) -> Option<(usize, usize)> {
+    let layout = state.markdown_last.get(id)?.clone();
+    let mut metrics = Metrics::default();
+    super::markdown::hit(&layout, &mut metrics, x - rect.x, y - rect.y)
 }
 
 fn pointer_up(state: &mut UiState, x: f32, y: f32, hit: Option<&str>, events: &mut Vec<UiEvent>) {
@@ -258,7 +312,7 @@ fn pointer_up(state: &mut UiState, x: f32, y: f32, hit: Option<&str>, events: &m
         Nothing,
     }
     let outcome = match state.layouts.get(&press.id) {
-        Some(Layout::Button) | Some(Layout::Checkbox) | Some(Layout::Custom) => Outcome::Click,
+        Some(Layout::Button) | Some(Layout::Checkbox) | Some(Layout::Custom) | Some(Layout::Copy { .. }) => Outcome::Click,
         Some(Layout::Option { select, index, .. }) => Outcome::Select { select: select.clone(), index: *index },
         _ => Outcome::Nothing,
     };
@@ -309,6 +363,19 @@ async fn pointer_move(
         }
         state.drag = Some(drag);
         return;
+    }
+    // 只读正文里按住拖动：落点换算成行列，延伸当前选择
+    if let Some(press) = state.press.clone().filter(|press| press.from_input) {
+        if let Some(Layout::Markdown { rect }) = state.layouts.get(&press.id).cloned() {
+            if hit == Some(press.id.as_str()) {
+                if let Some(at) = markdown_point(state, &press.id, rect, x, y) {
+                    if let Some(selection) = state.selection.as_mut().filter(|sel| sel.id == press.id) {
+                        selection.focus = at;
+                    }
+                }
+            }
+            return;
+        }
     }
     let Some(press) = state.press.clone().filter(|press| press.from_input) else {
         return;
@@ -414,12 +481,26 @@ async fn key_press(
             return;
         }
     }
+    // 只读正文的选择：Ctrl+C 直接复制（不需要输入框聚焦）
+    if modifiers.control
+        && matches!(key, Key::Character { text } if text.eq_ignore_ascii_case("c"))
+    {
+        if let Some(text) = state.selection_text() {
+            clip_write(ctx, &text).await;
+            return;
+        }
+    }
     let Some(id) = state.focus.clone() else {
         return;
     };
     let Some(layout) = state.layouts.get(&id).cloned() else {
         return;
     };
+    // 输入法组合期按键归输入法（取词 / 取消 / 翻页）：焦点、光标与文本一律不动。
+    // 提交文本随后经 `Text` 到达，取消由输入法的闭合事件收尾。
+    if state.inputs.get(&id).is_some_and(|item| !item.preedit.is_empty()) {
+        return;
+    }
     if let Key::Named { name: NamedKey::Escape } = key {
         match layout {
             Layout::Select { .. } => {
@@ -437,12 +518,6 @@ async fn key_press(
             }
             _ => {}
         }
-        return;
-    }
-    // 输入法组合期回车属于取词：此时不能提交，也不能插入换行（提交文本随后经 Text 到达）。
-    if matches!(key, Key::Named { name: NamedKey::Enter })
-        && state.inputs.get(&id).is_some_and(|item| !item.preedit.is_empty())
-    {
         return;
     }
     // 单行输入的回车是「提交」而非编辑：值由插件回读，语义（检索 / 写回设置）由插件定。
@@ -656,6 +731,8 @@ fn ime_text(
     if composing {
         let item = state.inputs.entry(id).or_default();
         item.preedit = text.to_string();
+        // 组合串每变一次都让光标重新显形：正在打字时不该看到光标熄灭
+        state.reset_blink();
         return;
     }
     let Some(current) = current_value(state, &id, value_of) else {
@@ -664,6 +741,7 @@ fn ime_text(
     if let Some(item) = state.inputs.get_mut(&id) {
         item.preedit.clear();
     }
+    state.reset_blink();
     if text.is_empty() {
         return;
     }
@@ -1139,6 +1217,7 @@ fn set_focus(
         }
         events.push(UiEvent::Focus { id: id.clone(), focused: true });
         state.focus = Some(id);
+        state.reset_blink();
     }
 }
 

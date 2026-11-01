@@ -1,5 +1,7 @@
 //! 输入框内的文字排布：用量算宽度换算光标 / 选区 / 省略，并在光标超出可见宽度时水平滚动窗口。
 
+use std::borrow::Cow;
+
 use atelyx_plugin_protocol::paint::{PaintColor, DrawCommand, TextAlign};
 
 use super::build::BuildCtx;
@@ -89,6 +91,65 @@ pub(crate) fn index_of(points: &[usize], caret: usize) -> usize {
 pub(crate) fn snap(value: &str, index: usize) -> usize {
     let points = boundaries(value);
     points[index_of(&points, index.min(value.len()))]
+}
+
+/// 输入法组合串在值里的位置：`insert` 为插入点字节位，`len` 为串的字节长度。
+/// 排版把组合串当成插入点处的临时字符，其后的文字顺次后移——输入拼音时后面的字就是被这样推开的。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Composed {
+    insert: usize,
+    len: usize,
+}
+
+impl Composed {
+    /// `caret` 为插入点（值里的字节位）；空串等同未组合。
+    pub(crate) fn new(caret: usize, preedit: &str) -> Self {
+        Self { insert: caret, len: preedit.len() }
+    }
+
+    pub(crate) fn is_active(&self) -> bool {
+        self.len > 0
+    }
+
+    /// 组合串在排版文本里的字节区间。
+    pub(crate) fn span(&self) -> std::ops::Range<usize> {
+        self.insert..self.insert + self.len
+    }
+
+    /// 值里的字节位 → 排版文本里的字节位（插入点之后整体后移组合串长度）。
+    pub(crate) fn index(&self, byte: usize) -> usize {
+        if byte <= self.insert {
+            byte
+        } else {
+            byte + self.len
+        }
+    }
+
+    /// 光标的排版字节位：落在插入点上时停在串尾，组合串不会被自己盖住。
+    pub(crate) fn caret(&self, byte: usize) -> usize {
+        if byte < self.insert {
+            byte
+        } else {
+            byte + self.len
+        }
+    }
+}
+
+/// 排版文本：组合串插在插入点处；未组合时原样借用。
+/// 插入点落在换行上时退到 `\r` 之前——CRLF 不可拆开。
+pub(crate) fn compose<'a>(value: &'a str, at: Composed, preedit: &str) -> Cow<'a, str> {
+    if preedit.is_empty() {
+        return Cow::Borrowed(value);
+    }
+    let mut split = snap(value, at.insert);
+    if value[split..].starts_with('\n') && split > 0 && value.as_bytes()[split - 1] == b'\r' {
+        split -= 1;
+    }
+    let mut out = String::with_capacity(value.len() + preedit.len());
+    out.push_str(&value[..split]);
+    out.push_str(preedit);
+    out.push_str(&value[split..]);
+    Cow::Owned(out)
 }
 
 /// 软换行后的一行：`[start, end)` 是原文里的字节区间（不含换行符本身）。
@@ -282,6 +343,7 @@ pub(crate) fn paint(
         color,
         weight: spec.weight,
         family: spec.family,
+        italic: false,
         max_width,
         align,
     });
@@ -311,6 +373,7 @@ pub(crate) fn paint_line(
         color,
         weight: spec.weight,
         family: spec.family,
+        italic: false,
         max_width: None,
         align: None,
     });
@@ -377,6 +440,41 @@ mod tests {
     fn snap_rounds_to_char_boundaries() {
         assert_eq!(snap("中文", 4), 3);
         assert_eq!(snap("中文", 99), 6);
+    }
+
+    /// 组合串插在插入点、后续文字顺次后移；未组合时原样借用。
+    #[test]
+    fn compose_pushes_the_tail_after_the_composition() {
+        let at = Composed::new(3, "zhong");
+        assert_eq!(compose("abcdef", at, "zhong").as_ref(), "abczhongdef");
+        assert_eq!(compose("abc", Composed::default(), "").as_ref(), "abc");
+    }
+
+    /// 插入点落在 CRLF 的换行上：组合串退到 `\r` 之前，不把行尾拆开。
+    /// `甲` 占 0..3，`\r\n` 占 3..5，`乙` 从 5 开始。
+    #[test]
+    fn compose_keeps_crlf_together() {
+        let value = "甲\r\n乙";
+        assert_eq!(compose(value, Composed::new(3, "ni"), "ni").as_ref(), "甲ni\r\n乙");
+        assert_eq!(compose(value, Composed::new(5, "ni"), "ni").as_ref(), "甲\r\nni乙");
+    }
+
+    /// 下标换算：插入点及其后的位置整体后移；光标落在插入点上时停在串尾。
+    #[test]
+    fn composed_offsets_shift_only_the_tail() {
+        let at = Composed::new(3, "zhong");
+        assert_eq!(at.span(), 3..8);
+        assert_eq!(at.index(0), 0);
+        assert_eq!(at.index(3), 3, "插入点自身仍在串首之前");
+        assert_eq!(at.index(4), 9);
+        assert_eq!(at.caret(3), 8, "光标停在串尾");
+        assert_eq!(at.caret(2), 2);
+    }
+
+    /// 多字节值里插入点不在字符边界时先收敛到边界，组合串不会切坏字符。
+    #[test]
+    fn compose_snaps_to_a_char_boundary() {
+        assert_eq!(compose("中文", Composed::new(1, "ni"), "ni").as_ref(), "ni中文");
     }
 
     #[test]

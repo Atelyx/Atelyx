@@ -215,13 +215,6 @@ pub mod query {
     pub const THEME: &str = "query.theme";
 }
 
-/// Markdown 解析：内容不变则结果不变，插件应按原文缓存，不必逐帧往返。
-pub mod markdown {
-    /// 把 Markdown 文本转成结构化块（与笔记同一套解析语义），排版与绘制仍归插件。
-    /// 服务名 `markdown`、方法 `parse`，因此外部提供者可以整体替换解析实现。
-    pub const PARSE: &str = "markdown.parse";
-}
-
 /// 日历服务（由日历插件提供）：方法名即 `calendar.<方法>`，也可经 `service.call` 以
 /// `service = calendar` 调用。日程真源随容器走（本地仓库 / 协作空间团队 meta），插件不自留副本。
 pub mod calendar {
@@ -926,88 +919,6 @@ impl HistoryOpenParams {
         }
         Ok(())
     }
-}
-
-// ---------- markdown ----------
-
-/// 单次转换的源文本上限（字节）：超限按可读错误拒绝，插件应自行分段。
-pub const MAX_MARKDOWN_BYTES: usize = 512 * 1024;
-
-/// [`markdown::PARSE`] 的 params：交给宿主按笔记同一套解析语义转成结构化块。
-/// 宿主只做解析（块与行内片段），排版与绘制仍归插件。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MarkdownParams {
-    pub content: String,
-}
-
-impl MarkdownParams {
-    pub fn validate(&self) -> Result<(), String> {
-        if self.content.len() > MAX_MARKDOWN_BYTES {
-            return Err(format!("Markdown 文本不得超过 {MAX_MARKDOWN_BYTES} 字节"));
-        }
-        Ok(())
-    }
-}
-
-/// [`markdown::PARSE`] 的 result：按源序排列的块。
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MarkdownResult {
-    pub blocks: Vec<MarkdownBlock>,
-}
-
-/// 行内片段：同一段文字里的样式差异（字重、等宽、链接目标）。
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MarkdownSpan {
-    pub text: String,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub strong: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub code: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub link: Option<String>,
-}
-
-/// 块：`depth` 为嵌套层数（列表 / 引用内部块递增），由插件换算缩进。
-/// 表格单元格只给纯文本（单元格行内样式不展开）。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
-#[serde(rename_all_fields = "camelCase")]
-pub enum MarkdownBlock {
-    Heading {
-        level: u8,
-        depth: u32,
-        spans: Vec<MarkdownSpan>,
-    },
-    Paragraph {
-        depth: u32,
-        spans: Vec<MarkdownSpan>,
-    },
-    /// 列表项：`index` 对有序列表取源里的序号（`3.` 就是 3），无序列表恒为 1；`ordered` 决定画圆点还是序号。
-    ListItem {
-        depth: u32,
-        ordered: bool,
-        index: u32,
-        spans: Vec<MarkdownSpan>,
-    },
-    /// 引用段落：插件在左侧画竖条。
-    Quote {
-        depth: u32,
-        spans: Vec<MarkdownSpan>,
-    },
-    Code {
-        depth: u32,
-        lang: String,
-        content: String,
-    },
-    /// 表格：`rows[0]` 是表头行，其余为数据行；单元格只给纯文本。
-    Table {
-        depth: u32,
-        rows: Vec<Vec<String>>,
-    },
-    Divider,
 }
 
 // ---------- layout ----------
@@ -2137,8 +2048,7 @@ pub const PLATFORM_PLUGIN: &str = "atelyx.platform";
 ///
 /// 这是「能力只有一种描述方式」的落地：方法名本身就是 `服务.方法`，目录按第一个 `.` 切分即得；
 /// `host:` 方法的宿主→插件通知不在其列（那不是插件可调用的能力）。条目引用常量而非字面量，
-/// 改名 / 删除常量会直接编译失败，目录不会悄悄漂移。服务随归属插件启停：停用笔记插件后
-/// 别的插件调不到 `markdown`，除非另有外部提供者接管。
+/// 改名 / 删除常量会直接编译失败，目录不会悄悄漂移。服务随归属插件启停。
 pub const BUILTIN_SERVICES: &[(&str, &str, &[&str])] = &[
     ("fs", PLATFORM_PLUGIN, &[fs::PRIVATE_DIR, fs::READ_TEXT, fs::WRITE_TEXT, fs::READ_BINARY, fs::WRITE_BINARY, fs::REMOVE, fs::EXISTS, fs::LIST]),
     ("process", PLATFORM_PLUGIN, &[process::SPAWN, process::WRITE_STDIN, process::CLOSE_STDIN, process::KILL]),
@@ -2159,7 +2069,6 @@ pub const BUILTIN_SERVICES: &[(&str, &str, &[&str])] = &[
     ("ai", PLATFORM_PLUGIN, &[ai::CHAT_SEND, ai::CHAT_STOP, ai::CHAT_HISTORY, ai::MODELS, ai::AGENTS, ai::CHAT_RENAME, ai::CHAT_DELETE, ai::CHAT_COMPACT, ai::CHAT_TITLE, ai::TOOL_LIST, ai::TOOL_EXECUTE, ai::CHAT_EMIT]),
     ("window", PLATFORM_PLUGIN, &[window::OPEN, window::CLOSE, window::UPDATE, window::SHOW, window::BEGIN_DRAG, window::MINIMIZE, window::TOGGLE_MAXIMIZE]),
     ("query", PLATFORM_PLUGIN, &[query::MEASURE, query::THEME]),
-    ("markdown", "atelyx.notes", &[markdown::PARSE]),
     ("editor", "atelyx.notes", &[editor::SELECTION, editor::REPLACE_SELECTION]),
     ("history", "atelyx.history", &[history::ACTIVITY, history::DAY, history::OPEN]),
 ];

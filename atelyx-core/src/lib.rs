@@ -15,7 +15,6 @@ pub mod history;
 pub mod history_diff;
 pub mod image_thumb;
 pub mod layout;
-pub mod markdown;
 pub mod merge3;
 pub mod net_guard;
 pub mod note_collab;
@@ -33,3 +32,6 @@ pub mod vault;
 pub mod vault_refs;
 pub mod web;
 pub mod write_queue;
+
+/// Markdown 解析内核（领域库 `atelyx-markdown` 的重导出）：宿主与插件共用同一份语义。
+pub use atelyx_markdown as markdown;
