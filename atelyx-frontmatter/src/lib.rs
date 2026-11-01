@@ -414,7 +414,7 @@ fn timestamp_to_date(s: &str) -> Option<String> {
 }
 
 /// 日期 → 格里历日数（Howard Hinnant 算法；day 0 = 1970-01-01）。
-pub(crate) fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+pub fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
     let era = if y >= 0 { y } else { y - 399 } / 400;
     let yoe = y - era * 400;
@@ -425,7 +425,7 @@ pub(crate) fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
 }
 
 /// 自纪元天数 → 日期（`MM-DD HH:MM:SS` 这类展示格式化复用同一口径，不另写一份历法换算）。
-pub(crate) fn civil_from_days(z: i64) -> (i64, i64, i64) {
+pub fn civil_from_days(z: i64) -> (i64, i64, i64) {
     let z = z + 719468;
     let era = if z >= 0 { z } else { z - 146096 } / 146097;
     let doe = z - era * 146097;

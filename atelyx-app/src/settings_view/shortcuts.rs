@@ -22,8 +22,8 @@ pub fn view(app: &App, window: iced::window::Id) -> Element<'static, Message> {
             .size(pal::fs_micro())
             .color(pal::TEXT_MUTED),
     );
-    // 领域分组卡片（组序随命令注册表：笔记在前；空领域不出组）
-    for scope in [Scope::Note, Scope::Table, Scope::Canvas] {
+    // 领域分组卡片（组序随命令注册表：表格在前；空领域不出组）
+    for scope in [Scope::Table, Scope::Canvas] {
         if resolved.iter().any(|(id, _)| id.scope() == scope) {
             col = col.push(scope_group(app, window, scope, &resolved));
         }

@@ -14,8 +14,7 @@ use crate::ui::notify::Level as NoticeLevel;
 use crate::ui::palette as pal;
 use crate::ui::scroll;
 use crate::ui::text;
-use crate::{App, Message, NoteMode};
-use iced::widget::text_editor;
+use crate::{App, Message};
 
 /// 徽章键（值渲染为 `#` 胶囊流，恒存字符串数组）：仅 tags；aliases / cssclasses 是普通列表。
 pub const BADGE_KEYS: &[&str] = &["tags"];
@@ -163,7 +162,6 @@ pub enum PropsMsg {
         window: iced::window::Id,
         cursor: Point,
     },
-    OpenSourceMode,
     HoverRow(usize),
     UnhoverRow(usize),
     HoverItem(usize, usize),
@@ -173,13 +171,11 @@ pub enum PropsMsg {
 }
 
 /// 属性面板渲染：Some(element) = 应显示面板。
-/// `standalone` = inspector 视图形态（不随源码档隐藏）；note 视图内源码档不渲染。
 pub fn props_panel<'a>(
     app: &'a App,
     window: iced::window::Id,
-    standalone: bool,
 ) -> Option<Element<'a, Message>> {
-    if app.ui.last_note_file.is_none() || (!standalone && app.note_mode == NoteMode::Source) {
+    if app.ui.last_note_file.is_none() {
         return None;
     }
     let parsed = app.props.parsed.as_ref();
@@ -187,28 +183,16 @@ pub fn props_panel<'a>(
     let Some(parsed) = parsed else { return None };
     let cursor = app.cursor_for(window);
     let body: Element<'a, Message> = match parsed {
-        // YAML 解析失败：红条 + 源码模式入口（面板编辑全部禁用，防 stringify 丢弃旧数据）
-        (_data, false) => {
-            let mut bar = row![
-                icon("triangle-alert", 13.0, pal::DANGER),
-                text("YAML 格式错误，属性面板暂不可编辑")
-                    .size(pal::fs_caption())
-                    .color(pal::TEXT_SECONDARY),
-            ];
-            // 笔记面板自持只读 / 编辑 / 源码档，宿主不改它的档位
-            if !app.plugin_note_active {
-                bar = bar.push(space());
-                bar = bar.push(controls::btn(
-                    "打开源码模式",
-                    &btn_tiny(),
-                    controls::Variant::Secondary,
-                    Some(Message::Props(PropsMsg::OpenSourceMode)),
-                ));
-            }
-            bar.spacing(8)
-                .padding(Padding::ZERO.horizontal(16.0).vertical(6.0))
-                .into()
-        }
+        // YAML 解析失败：红条（面板编辑全部禁用，防 stringify 丢弃旧数据）
+        (_data, false) => row![
+            icon("triangle-alert", 13.0, pal::DANGER),
+            text("YAML 格式错误，属性面板暂不可编辑")
+                .size(pal::fs_caption())
+                .color(pal::TEXT_SECONDARY),
+        ]
+        .spacing(8)
+        .padding(Padding::ZERO.horizontal(16.0).vertical(6.0))
+        .into(),
         (data, true) => {
             let Yaml::Map(pairs) = data else { return None };
             props_column(app, window, cursor, pairs).into()
@@ -821,7 +805,7 @@ impl App {
         self.reset_suggest();
     }
 
-    /// 清空槽编辑与面板交互态（切档位 / 撤销重做 / 切文件 / 切仓库）。
+    /// 清空槽编辑与面板交互态（撤销重做 / 切文件 / 切仓库）。
     pub(crate) fn clear_props_edit(&mut self) {
         self.props.editing = None;
         self.props.duplicate = None;
@@ -871,10 +855,6 @@ impl App {
                 self.finish_props_edit();
                 self.props.collapsed = !self.props.collapsed;
                 Task::none()
-            }
-            PropsMsg::OpenSourceMode => {
-                self.clear_props_edit();
-                self.handle(Message::NoteMode(NoteMode::Source))
             }
             PropsMsg::StartEdit(slot, row) => {
                 let pre = self.props_data().and_then(|d| resolve_row(&d, &row));
@@ -1008,15 +988,15 @@ impl App {
                 if self.props.editing.is_some() {
                     return operation::focus(self.props.focus_id.clone());
                 }
-                // 数据取自当前文本而非面板缓存：源码档与缓存滞后的时刻都能拿到真实属性
+                // 数据取自当前文本而非面板缓存：缓存可能滞后
                 let open = frontmatter::block_end(&self.note_text).is_some();
                 if !open && self.note_text.starts_with("---") {
-                    self.notify(NoticeLevel::Info, "属性块未闭合，请先在源码档修正");
+                    self.notify(NoticeLevel::Info, "属性块未闭合，请先修正正文");
                     return Task::none();
                 }
                 let parsed = frontmatter::parse(&self.note_text);
                 if open && !parsed.ok {
-                    self.notify(NoticeLevel::Info, "属性块格式有误，请先在源码档修正");
+                    self.notify(NoticeLevel::Info, "属性块格式有误，请先修正正文");
                     return Task::none();
                 }
                 let mut data = match parsed.data {
@@ -1028,11 +1008,6 @@ impl App {
                 data.push((key.clone(), Yaml::Str(String::new())));
                 let index = data.len() - 1;
                 self.apply_props(data);
-                // 源码档不渲染面板：内容已落盘，用提示替代就地编辑
-                if self.note_mode == NoteMode::Source {
-                    self.notify(NoticeLevel::Info, format!("已添加空属性「{key}」"));
-                    return Task::none();
-                }
                 self.props.collapsed = false;
                 self.props.editing = Some(Slot::Key(index));
                 self.props.draft = key;
@@ -1222,13 +1197,8 @@ impl App {
 
     /// 用新属性数据重写 frontmatter 并走正文保存链（空映射 = 删块回到无 frontmatter 态）。
     fn apply_props(&mut self, data: Vec<(String, Yaml)>) {
-        self.edit.snapshot(&self.note_text);
         let body = crate::strip_frontmatter(&self.note_text).to_string();
         self.note_text = frontmatter::stringify(&Yaml::Map(data), &body);
-        // 源码档的编辑面持有自己的文本副本，重写正文后必须同步，否则下一次按键会把属性块写回旧文本
-        if self.note_mode == NoteMode::Source {
-            self.source_editor = text_editor::Content::with_text(&self.note_text);
-        }
         self.dirty = true;
         self.save_error = None;
         self.autosave_deadline = Some(Instant::now() + crate::AUTOSAVE_DEBOUNCE);

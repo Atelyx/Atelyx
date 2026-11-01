@@ -83,6 +83,9 @@ pub mod vault {
     pub const IMAGE_INFO: &str = "vault.imageInfo";
     pub const LIST: &str = "vault.list";
     pub const EXISTS: &str = "vault.exists";
+    /// 全仓库标签词表（宿主缓存的快照，按出现次数降序、最多 1000 条）：属性标签值候选这类
+    /// 需要「仓库里已有哪些标签」的能力。刚写入的新标签要等宿主下次重建词表才出现。
+    pub const TAGS: &str = "vault.tags";
     /// 删除一个仓库相对路径（文件或文件夹；文件夹连同内容递归删除）。仓库根不可删。
     /// 被编辑面打开或被当前画布节点引用的文件拒删。
     pub const REMOVE: &str = "vault.remove";
@@ -250,6 +253,9 @@ pub mod editor {
     pub const OPEN_FILES: &str = "editor.openFiles";
     /// 让宿主打开一个仓库内文件（按扩展名分流到对应视图；回执 = 已受理）。
     pub const OPEN_FILE: &str = "editor.openFile";
+    /// 读全局编辑偏好（软换行 / 页面内标题 / 正文宽度）；变更时宿主另发
+    /// [`crate::event::name::EDITOR_PREFS_CHANGED`]。
+    pub const PREFS: &str = "editor.prefs";
 }
 
 /// 笔记文档会话：打开 / 编辑 / 保存 / 在场与反链。正文真源、保存链与协作增量都在宿主，
@@ -268,6 +274,9 @@ pub mod note {
     pub const AWARENESS: &str = "note.awareness";
     /// 引用当前笔记的其它笔记（反链）。
     pub const BACKLINKS: &str = "note.backlinks";
+    /// 把当前笔记改名为新的主名（同目录、保留扩展名；引用与历史随宿主既有改名链）。
+    /// 有未落盘修改时拒绝，插件须先 `note.save`。
+    pub const RENAME: &str = "note.rename";
 }
 
 pub mod ai {
@@ -717,6 +726,20 @@ impl EditorSelection {
     }
 }
 
+/// [`editor::PREFS`] 的 result：全局编辑偏好。`content_width` = 正文列最大宽度
+/// （0 = 不限，铺满可用宽度）。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditorPrefs {
+    /// 宽松换行：开 = 段内单个换行保留为换行；关 = 折叠为空格。
+    #[serde(default)]
+    pub soft_wrap: bool,
+    /// 正文列顶部显示文件名（点击就地改名）。
+    #[serde(default)]
+    pub in_page_title: bool,
+    pub content_width: u32,
+}
+
 /// [`editor::REPLACE_SELECTION`] 的 params：替换文本（空串 = 删除当前选区）。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -794,6 +817,30 @@ impl NoteEditParams {
     }
 }
 
+/// [`note::RENAME`] 的 params：当前路径与新主名（不含扩展名）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NoteRenameParams {
+    pub path: String,
+    pub name: String,
+}
+
+impl NoteRenameParams {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.path.trim().is_empty() {
+            return Err("路径不能为空".to_string());
+        }
+        let name = self.name.trim();
+        if name.is_empty() {
+            return Err("文件名不能为空".to_string());
+        }
+        if name.contains(['/', '\\', ':']) {
+            return Err("文件名不能包含路径分隔符".to_string());
+        }
+        Ok(())
+    }
+}
+
 /// [`note::SAVE`] 的 params：`manual` = 手动保存（成功 / 失败均有提示）；缺省 = 自动保存。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -827,6 +874,13 @@ pub struct NoteBacklink {
 #[serde(rename_all = "camelCase")]
 pub struct NoteBacklinksResult {
     pub entries: Vec<NoteBacklink>,
+}
+
+/// [`vault::TAGS`] 的 result：仓库里出现过的标签（按出现次数降序）。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultTagsResult {
+    pub tags: Vec<String>,
 }
 
 // ---------- calendar ----------
@@ -2168,7 +2222,7 @@ pub const PLATFORM_PLUGIN: &str = "atelyx.platform";
 pub const BUILTIN_SERVICES: &[(&str, &str, &[&str])] = &[
     ("fs", PLATFORM_PLUGIN, &[fs::PRIVATE_DIR, fs::READ_TEXT, fs::WRITE_TEXT, fs::READ_BINARY, fs::WRITE_BINARY, fs::REMOVE, fs::EXISTS, fs::LIST]),
     ("process", PLATFORM_PLUGIN, &[process::SPAWN, process::WRITE_STDIN, process::CLOSE_STDIN, process::KILL]),
-    ("vault", PLATFORM_PLUGIN, &[vault::READ_TEXT, vault::WRITE_TEXT, vault::READ_BINARY, vault::WRITE_BINARY, vault::IMPORT_FILE, vault::IMAGE_INFO, vault::LIST, vault::EXISTS, vault::REMOVE, vault::RENAME]),
+    ("vault", PLATFORM_PLUGIN, &[vault::READ_TEXT, vault::WRITE_TEXT, vault::READ_BINARY, vault::WRITE_BINARY, vault::IMPORT_FILE, vault::IMAGE_INFO, vault::LIST, vault::EXISTS, vault::TAGS, vault::REMOVE, vault::RENAME]),
     ("collab", PLATFORM_PLUGIN, &[collab::PEERS, collab::SEND, collab::META_GET, collab::META_PATCH]),
     ("table", "atelyx.tables", &[table::SNAPSHOT, table::UPDATE_CELL, table::ADD_ROW, table::REMOVE_ROW, table::SELECT_ROW, table::SET_CELL_IMAGE]),
     ("state", PLATFORM_PLUGIN, &[state::READ, state::WRITE]),
@@ -2186,9 +2240,9 @@ pub const BUILTIN_SERVICES: &[(&str, &str, &[&str])] = &[
     ("window", PLATFORM_PLUGIN, &[window::OPEN, window::CLOSE, window::UPDATE, window::SHOW, window::BEGIN_DRAG, window::MINIMIZE, window::TOGGLE_MAXIMIZE]),
     ("query", PLATFORM_PLUGIN, &[query::MEASURE, query::THEME]),
     // 编辑器选区读写作用于宿主自持的笔记会话，随平台常驻
-    ("editor", PLATFORM_PLUGIN, &[editor::SELECTION, editor::REPLACE_SELECTION, editor::OPEN_FILES, editor::OPEN_FILE]),
+    ("editor", PLATFORM_PLUGIN, &[editor::SELECTION, editor::REPLACE_SELECTION, editor::OPEN_FILES, editor::OPEN_FILE, editor::PREFS]),
     // 笔记会话是宿主内容真源（保存链 / 协作增量 / 历史），归平台自身，不随插件停用下线
-    ("note", PLATFORM_PLUGIN, &[note::OPEN, note::EDIT, note::SAVE, note::CLOSE, note::AWARENESS, note::BACKLINKS]),
+    ("note", PLATFORM_PLUGIN, &[note::OPEN, note::EDIT, note::SAVE, note::CLOSE, note::AWARENESS, note::BACKLINKS, note::RENAME]),
     ("history", "atelyx.history", &[history::ACTIVITY, history::DAY, history::OPEN]),
 ];
 

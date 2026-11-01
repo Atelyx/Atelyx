@@ -54,7 +54,8 @@ pub use atelyx_plugin_protocol::paint::{
 pub use atelyx_plugin_protocol::event::{
     ChatChangeKind, ChatChangedPayload, ChatPersistChangedPayload, ChatReloadedPayload,
     FileChangeKind, FileChangedPayload, FileDropPayload, NoteChangedPayload,
-    SpaceMetaChangedPayload, TableChangedPayload, TableSelectionChangedPayload, VaultSwitchPayload,
+    NotePresencePayload, NoteRemoteCursor, SpaceMetaChangedPayload, TableChangedPayload,
+    TableSelectionChangedPayload, VaultSwitchPayload,
 };
 pub use atelyx_plugin_protocol::chat::ChatPersistError;
 pub use atelyx_plugin_protocol::layout::LayoutSpecNode;
@@ -67,11 +68,12 @@ pub use atelyx_plugin_protocol::method::run as ai_run;
 pub use preset::PresetSyncReport;
 pub use atelyx_plugin_protocol::method::{
     AiAgent, AiAgentsResult, AiModel, AiModelPick, AiModelProvider, AiModelsResult,
-    AxesPadding, BUILTIN_SERVICES, PLATFORM_PLUGIN, EditorOpenFiles, EditorReplaceParams,
-    EditorSelection,
+    AxesPadding, BUILTIN_SERVICES, PLATFORM_PLUGIN, EditorOpenFiles, EditorPrefs,
+    EditorReplaceParams, EditorSelection,
     CalendarAddParams, CalendarIdParams, CalendarItem, CalendarListResult, CalendarUpdateParams,
     CollabMetaEntry, CollabMetaGetParams, CollabMetaPatchParams, CollabMetaResult, DayActivity,
     HistoryActivityResult, HistoryDayEntry, HistoryDayParams, HistoryDayResult, HistoryOpenParams,
+    NoteRenameParams,
     ChatEvent, ChatEventParams, ChatHistoryParams, ChatHistoryResult,
     ChatRenameParams, ChatSendParams, ChatSessionParams, ChatSessionSummary, ChatSessionWire,
     ChatStopParams, ClipboardImage, CollabMessageParams, CollabPeer, CollabPeersResult,
@@ -84,7 +86,7 @@ pub use atelyx_plugin_protocol::method::{
     RunStopParams, RunTitleParams, SearchConfigWire, ThemeResult, ToolDecl, ToolExecParams,
     ToolExecResult, ToolListParams, ToolListResult, TrayClickParams, TrayItemSpec, WindowOpenParams,
     WindowUpdateParams, NoteAwarenessParams, NoteBacklink, NoteBacklinksResult, NoteEditParams,
-    NoteOpenParams, NoteOpenResult, NoteSaveParams, AI_CORE_PLUGIN,
+    NoteOpenParams, NoteOpenResult, NoteSaveParams, VaultTagsResult, AI_CORE_PLUGIN,
 };
 
 /// 插件运行状态。
@@ -331,6 +333,8 @@ pub enum HostRequest {
     EditorReplaceSelection { plugin_id: String, request_id: u64, text: String },
     /// 插件请求让宿主打开一个仓库内文件（按扩展名分流视图）。
     EditorOpenFile { plugin_id: String, request_id: u64, path: String },
+    /// 插件请求全局编辑偏好（软换行 / 页面内标题 / 正文宽度）。
+    EditorPrefs { plugin_id: String, request_id: u64 },
     /// 插件请求打开一篇笔记（宿主读盘并建立会话，回执 = 正文与可写性）。
     NoteOpen { plugin_id: String, request_id: u64, params: method::NoteOpenParams },
     /// 插件提交一次笔记编辑（完整正文 + 光标 / 选区）。
@@ -347,6 +351,10 @@ pub enum HostRequest {
     },
     /// 插件请求当前笔记的反链。
     NoteBacklinks { plugin_id: String, request_id: u64, path: String },
+    /// 插件请求全仓库标签词表（宿主聚合后按出现次数降序返回）。
+    VaultTags { plugin_id: String, request_id: u64 },
+    /// 插件请求把当前笔记改名为新的主名（宿主编排保存 / 关闭 / 改名 / 重开）。
+    NoteRename { plugin_id: String, request_id: u64, params: method::NoteRenameParams },
     /// 插件请求读当前空间的团队元数据（`key` 缺省 = 全部键；仅协作空间可用）。
     CollabMetaGet { plugin_id: String, request_id: u64, params: method::CollabMetaGetParams },
     /// 插件请求按键写当前空间的团队元数据（只改给出的键；只读身份由壳拒绝）。
@@ -699,12 +707,15 @@ impl PluginRuntime {
             | HostRequest::EditorOpenFiles { .. }
             | HostRequest::EditorReplaceSelection { .. }
             | HostRequest::EditorOpenFile { .. }
+            | HostRequest::EditorPrefs { .. }
             | HostRequest::NoteOpen { .. }
             | HostRequest::NoteEdit { .. }
             | HostRequest::NoteSave { .. }
             | HostRequest::NoteClose { .. }
             | HostRequest::NoteAwareness { .. }
             | HostRequest::NoteBacklinks { .. }
+            | HostRequest::NoteRename { .. }
+            | HostRequest::VaultTags { .. }
             | HostRequest::HistoryDay { .. }
             | HostRequest::HistoryOpen { .. }
             | HostRequest::HistoryActivity { .. } => {
@@ -973,6 +984,10 @@ impl PluginRuntime {
                 request_id,
                 path,
             },
+            HostRequest::EditorPrefs { plugin_id, .. } => HostRequest::EditorPrefs {
+                plugin_id,
+                request_id,
+            },
             HostRequest::NoteOpen { plugin_id, params, .. } => HostRequest::NoteOpen {
                 plugin_id,
                 request_id,
@@ -1003,6 +1018,12 @@ impl PluginRuntime {
                 request_id,
                 path,
             },
+            HostRequest::NoteRename { plugin_id, params, .. } => HostRequest::NoteRename {
+                plugin_id,
+                request_id,
+                params,
+            },
+            HostRequest::VaultTags { plugin_id, .. } => HostRequest::VaultTags { plugin_id, request_id },
             HostRequest::HistoryDay { plugin_id, params, .. } => HostRequest::HistoryDay {
                 plugin_id,
                 request_id,
@@ -1747,6 +1768,16 @@ impl PluginRuntime {
         self.broadcast_event(event::name::TABLE_SELECTION_CHANGED, &payload);
     }
 
+    /// 广播当前笔记的远端协作者光标：订阅方按 `path` 过滤，空清单 = 已无协作者。
+    pub fn on_note_presence(self: &Arc<Self>, payload: NotePresencePayload) {
+        self.broadcast_event(event::name::NOTE_PRESENCE, &payload);
+    }
+
+    /// 广播全局编辑偏好变更（设置页改动时由壳调用）。
+    pub fn on_editor_prefs_changed(self: &Arc<Self>, prefs: EditorPrefs) {
+        self.broadcast_event(event::name::EDITOR_PREFS_CHANGED, &prefs);
+    }
+
     /// 广播当前笔记会话的正文 / 落盘状态变化：订阅方按 `path` 过滤，`text` 给出即替换正文。
     pub fn on_note_changed(self: &Arc<Self>, payload: NoteChangedPayload) {
         self.broadcast_event(event::name::NOTE_CHANGED, &payload);
@@ -2043,12 +2074,15 @@ fn request_plugin_id(request: &HostRequest) -> &str {
         | HostRequest::EditorOpenFiles { plugin_id, .. }
         | HostRequest::EditorReplaceSelection { plugin_id, .. }
         | HostRequest::EditorOpenFile { plugin_id, .. }
+        | HostRequest::EditorPrefs { plugin_id, .. }
         | HostRequest::NoteOpen { plugin_id, .. }
         | HostRequest::NoteEdit { plugin_id, .. }
         | HostRequest::NoteSave { plugin_id, .. }
         | HostRequest::NoteClose { plugin_id, .. }
         | HostRequest::NoteAwareness { plugin_id, .. }
         | HostRequest::NoteBacklinks { plugin_id, .. }
+        | HostRequest::NoteRename { plugin_id, .. }
+        | HostRequest::VaultTags { plugin_id, .. }
         | HostRequest::HistoryDay { plugin_id, .. }
         | HostRequest::HistoryOpen { plugin_id, .. }
         | HostRequest::HistoryActivity { plugin_id, .. } => plugin_id,

@@ -405,6 +405,33 @@ impl<'c, 'a> Ui<'c, 'a> {
         });
     }
 
+    /// 限宽纵向容器：宽度取「可用宽」与 `max_width` 的较小值并水平居中（`max_width <= 0` = 不限）。
+    /// 正文列的行宽偏好用它；子项按列排布。
+    pub fn bounded(&mut self, max_width: f32, build: impl FnOnce(&mut Ui<'_, 'a>)) {
+        let clip = self.clip;
+        let mut sub = Ui::new(&mut *self.ctx, clip);
+        build(&mut sub);
+        let shared = Rc::new(sub.into_items());
+        let fill_height = shared.iter().any(|item| item.fill_height);
+        let for_size = Rc::clone(&shared);
+        self.push(Item {
+            width: Width::Fill,
+            fill_height,
+            height: Box::new(move |metrics, width| {
+                let bound = if max_width > 0.0 { width.min(max_width) } else { width };
+                column_height(&for_size, metrics, bound, 0.0)
+            }),
+            draw: Box::new(move |ctx, rect, clip| {
+                let bound = if max_width > 0.0 { rect.w.min(max_width) } else { rect.w };
+                let inner = Rect::new(rect.x + (rect.w - bound) / 2.0, rect.y, bound, rect.h);
+                let visible = inner.intersect(clip);
+                if !visible.is_empty() {
+                    draw_column(ctx, &shared, inner, visible, 0.0);
+                }
+            }),
+        });
+    }
+
     /// 撑满面的纵向容器：根节点按面高收住，内部的滚动区拿剩余高度（整页布局用）。
     pub fn fill_column(&mut self, gap: f32, build: impl FnOnce(&mut Ui<'_, 'a>)) {
         let mut sub = Ui { ctx: &mut *self.ctx, clip: self.clip, items: Vec::new() };

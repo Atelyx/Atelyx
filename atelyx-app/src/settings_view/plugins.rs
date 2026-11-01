@@ -19,8 +19,8 @@ use atelyx_core::plugin_runtime::{
     DialogKind, DialogRequest, FileChangeKind, HistoryActivityResult, HistoryDayParams,
     HistoryOpenParams, HostRequest, ImageInfoResult, InstallOutcome, MeasureBatchParams,
     MeasureBatchResult, NotificationLevel, Permission, PluginEvent, PluginRuntime, PluginStatus,
-    NoteAwarenessParams, NoteEditParams, NoteOpenParams, NoteSaveParams,
-    PluginSummary, SetTrayItemsParams, MAX_VAULT_BINARY_BYTES, PLATFORM_PLUGIN,
+    NoteAwarenessParams, NoteEditParams, NoteOpenParams, NoteRenameParams, NoteSaveParams,
+    PluginSummary, SetTrayItemsParams, VaultTagsResult, MAX_VAULT_BINARY_BYTES, PLATFORM_PLUGIN,
 };
 use atelyx_core::space_client::SpaceError;
 
@@ -273,8 +273,12 @@ pub enum PluginsMsg {
     EditorReplaceSelection { request_id: u64, text: String },
     /// 让宿主打开一个仓库内文件（按扩展名分流视图）。
     EditorOpenFile { request_id: u64, path: String },
+    /// 全局编辑偏好（软换行 / 页面内标题 / 正文宽度）。
+    EditorPrefs { request_id: u64 },
     /// 打开笔记：宿主读盘并建立会话，回执 = 正文与可写性。
     NoteOpen { request_id: u64, params: NoteOpenParams },
+    /// 把当前笔记改名为新的主名（同目录、保留扩展名）。
+    NoteRename { request_id: u64, params: NoteRenameParams },
     NoteOpenDone {
         request_id: u64,
         gen: u64,
@@ -293,6 +297,8 @@ pub enum PluginsMsg {
     /// 当前笔记的反链。
     NoteBacklinks { request_id: u64, path: String },
     NoteBacklinksDone { request_id: u64, result: Result<serde_json::Value, String> },
+    /// 全仓库标签词表。
+    VaultTags { request_id: u64 },
     /// 按天聚合的仓库活动（`history.activity`）。
     HistoryActivity { request_id: u64 },
     HistoryActivityDone { request_id: u64, result: Result<serde_json::Value, String> },
@@ -523,8 +529,14 @@ pub fn host_requests_stream(spec: &RuntimeSpec) -> impl iced::futures::Stream<It
                 HostRequest::EditorOpenFile { request_id, path, .. } => {
                     Message::Plugins(PluginsMsg::EditorOpenFile { request_id, path })
                 }
+                HostRequest::EditorPrefs { request_id, .. } => {
+                    Message::Plugins(PluginsMsg::EditorPrefs { request_id })
+                }
                 HostRequest::NoteOpen { request_id, params, .. } => {
                     Message::Plugins(PluginsMsg::NoteOpen { request_id, params })
+                }
+                HostRequest::NoteRename { request_id, params, .. } => {
+                    Message::Plugins(PluginsMsg::NoteRename { request_id, params })
                 }
                 HostRequest::NoteEdit { request_id, params, .. } => {
                     Message::Plugins(PluginsMsg::NoteEdit { request_id, params })
@@ -540,6 +552,9 @@ pub fn host_requests_stream(spec: &RuntimeSpec) -> impl iced::futures::Stream<It
                 }
                 HostRequest::NoteBacklinks { request_id, path, .. } => {
                     Message::Plugins(PluginsMsg::NoteBacklinks { request_id, path })
+                }
+                HostRequest::VaultTags { request_id, .. } => {
+                    Message::Plugins(PluginsMsg::VaultTags { request_id })
                 }
                 HostRequest::CollabMetaGet { request_id, params, .. } => {
                     Message::Plugins(PluginsMsg::CollabMetaGet { request_id, params })
@@ -1262,7 +1277,7 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
             let refresh = refresh_after_vault_change(app, &change);
             app.plugins.resolve_shell_call(request_id, result);
             match reload {
-                Some(path) => refresh.chain(app.load_note(&path)),
+                Some(path) => refresh.chain(app.open_file(&path)),
                 None => refresh,
             }
         }
@@ -1340,6 +1355,11 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
             .map_err(|e| format!("打开文件清单不可序列化：{e}"));
             resolve_vault(app, request_id, result)
         }
+        PluginsMsg::EditorPrefs { request_id } => {
+            let result = serde_json::to_value(crate::editor_prefs(app))
+                .map_err(|e| format!("编辑偏好不可序列化：{e}"));
+            resolve_vault(app, request_id, result)
+        }
         PluginsMsg::EditorSelection { request_id } => {
             let result = serde_json::to_value(app.editor_selection())
                 .map_err(|e| format!("选区结果不可序列化：{e}"));
@@ -1361,6 +1381,9 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
         PluginsMsg::NoteOpen { request_id, params } => {
             crate::plugin_note::open(app, request_id, params)
         }
+        PluginsMsg::NoteRename { request_id, params } => {
+            crate::plugin_note::rename(app, request_id, params)
+        }
         PluginsMsg::NoteOpenDone { request_id, gen, path, result, can_write } => {
             crate::plugin_note::open_done(app, request_id, gen, path, result, can_write)
         }
@@ -1380,6 +1403,12 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
             crate::plugin_note::backlinks(app, request_id, path)
         }
         PluginsMsg::NoteBacklinksDone { request_id, result } => {
+            resolve_vault(app, request_id, result)
+        }
+        PluginsMsg::VaultTags { request_id } => {
+            let tags: Vec<String> = app.tag_vocab.iter().map(|row| row.tag.clone()).collect();
+            let result = serde_json::to_value(VaultTagsResult { tags })
+                .map_err(|e| format!("标签词表不可序列化：{e}"));
             resolve_vault(app, request_id, result)
         }
         PluginsMsg::HistoryActivity { request_id } => {
@@ -1689,7 +1718,7 @@ pub(crate) fn execute_vault_remove(
         Ok(rel) => rel,
         Err(e) => return resolve_vault(app, request_id, Err(e)),
     };
-    if let Some(blocked) = vault_change_conflict(app, &rel) {
+    if let Some(blocked) = vault_change_conflict(app, &rel, None) {
         return resolve_vault(app, request_id, Err(blocked));
     }
     let change = VaultChange::Removed { rel: rel.clone() };
@@ -1726,11 +1755,30 @@ pub(crate) fn execute_vault_remove(
 }
 
 /// gate 放行后的仓库改名/移动执行体（挂起输入已落盘，引用代写基于完整磁盘内容）。
+pub(crate) fn execute_vault_rename_allow_open(
+    app: &mut App,
+    request_id: u64,
+    from: String,
+    to: String,
+) -> Task<Message> {
+    execute_vault_rename_inner(app, request_id, from, to, true)
+}
+
 pub(crate) fn execute_vault_rename(
     app: &mut App,
     request_id: u64,
     from: String,
     to: String,
+) -> Task<Message> {
+    execute_vault_rename_inner(app, request_id, from, to, false)
+}
+
+fn execute_vault_rename_inner(
+    app: &mut App,
+    request_id: u64,
+    from: String,
+    to: String,
+    allow_open_note: bool,
 ) -> Task<Message> {
     let from = match plugin_path(Some(&from)) {
         Ok(rel) => rel,
@@ -1743,8 +1791,9 @@ pub(crate) fn execute_vault_rename(
     if from == to {
         return resolve_vault(app, request_id, Ok(serde_json::json!({})));
     }
+    let allowed = allow_open_note.then_some(from.as_str());
     for target in [&from, &to] {
-        if let Some(blocked) = vault_change_conflict(app, target) {
+        if let Some(blocked) = vault_change_conflict(app, target, allowed) {
             return resolve_vault(app, request_id, Err(blocked));
         }
     }
@@ -1772,8 +1821,7 @@ pub(crate) fn execute_vault_rename(
     }
 }
 
-/// 结构变更后刷新宿主文件面：本地按父目录重读子项，空间拉整树；再重建笔记清单、
-/// 标签词表与反链。
+/// 结构变更后刷新宿主文件面：本地按父目录重读子项，空间拉整树；再重建笔记清单与标签词表。
 fn refresh_after_vault_change(app: &mut App, change: &VaultChange) -> Task<Message> {
     let mut task = if matches!(app.repo_kind, crate::RepoKind::Space(_)) {
         crate::space_actions::refresh_space_tree(app)
@@ -1787,8 +1835,7 @@ fn refresh_after_vault_change(app: &mut App, change: &VaultChange) -> Task<Messa
     };
     task = task
         .chain(app.refresh_note_files())
-        .chain(app.refresh_tag_vocab())
-        .chain(app.refresh_backlinks());
+        .chain(app.refresh_tag_vocab());
     // 改名同步了提示词标记与 Agent 的提示词引用
     if matches!(change, VaultChange::Renamed { .. }) {
         task = task.chain(app.load_vault_meta());
@@ -1798,7 +1845,8 @@ fn refresh_after_vault_change(app: &mut App, change: &VaultChange) -> Task<Messa
 
 /// 删除 / 重命名前的会话冲突：目标或其子路径正在编辑器中打开，或被当前画布引用。
 /// 这两类持有者都在内存里保留旧路径，宿主变更会与之竞争（写回幽灵文件 / 覆盖改写后的引用）。
-fn vault_change_conflict(app: &App, rel: &str) -> Option<String> {
+/// `allow_path` = 唯一允许放行的打开路径（笔记改名时的当前篇，内容已 flush）。
+fn vault_change_conflict(app: &App, rel: &str, allow_path: Option<&str>) -> Option<String> {
     let target = rel.replace('\\', "/");
     let prefix = format!("{target}/");
     let open = [
@@ -1811,7 +1859,12 @@ fn vault_change_conflict(app: &App, rel: &str) -> Option<String> {
         let path = path.replace('\\', "/");
         path == target || path.starts_with(&prefix)
     }) {
-        return Some(format!("路径正在编辑器中打开，拒绝操作：{path}"));
+        let allowed = allow_path
+            .map(|allowed| allowed.replace('\\', "/") == path.replace('\\', "/"))
+            .unwrap_or(false);
+        if !allowed {
+            return Some(format!("路径正在编辑器中打开，拒绝操作：{path}"));
+        }
     }
     let canvas = app.canvas.as_ref()?;
     for node in &canvas.data.nodes {

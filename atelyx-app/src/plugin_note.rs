@@ -1,14 +1,16 @@
 //! 插件笔记会话的壳侧实现：读盘 / 建立会话 / 编辑上报 / 保存 / 在场 / 反链。
-//! 正文真源与保存链仍在 `App`（与壳内笔记同一出口），本模块只做服务请求的适配。
+//! 正文真源与保存链仍在 `App`（笔记内容的唯一出口），本模块只做服务请求的适配。
 
 use iced::Task;
 use serde_json::json;
 
 use atelyx_core::plugin_runtime::{
-    NoteAwarenessParams, NoteEditParams, NoteOpenParams, NoteSaveParams,
+    NoteAwarenessParams, NoteEditParams, NoteOpenParams, NoteRenameParams, NoteSaveParams,
 };
 
-use atelyx_core::plugin_runtime::NoteChangedPayload;
+use atelyx_core::plugin_runtime::{
+    NoteChangedPayload, NotePresencePayload, NoteRemoteCursor,
+};
 
 use crate::settings_view::plugins::PluginsMsg;
 use crate::{vault, App, Message, RepoKind, SaveReason};
@@ -22,6 +24,23 @@ pub fn publish_state(app: &App, text: Option<String>) {
         dirty: app.dirty,
         save_error: app.save_error.clone(),
     });
+}
+
+/// 把当前笔记的远端协作者光标广播给订阅插件（未打开笔记 / 无协作者 = 空清单）。
+/// 光标偏移与 `note_text` 同一坐标系，插件据此在原位画他人光标。
+pub fn publish_presence(app: &App) {
+    let path = app.ui.last_note_file.clone();
+    let cursors = app
+        .remote_cursors
+        .iter()
+        .map(|cursor| NoteRemoteCursor {
+            name: cursor.name.clone(),
+            color: cursor.color.clone(),
+            anchor: cursor.anchor,
+            head: cursor.head,
+        })
+        .collect();
+    app.plugins.on_note_presence(NotePresencePayload { path, cursors });
 }
 
 /// 打开一篇笔记：本地读盘 / 空间走服务端内容面，成功后建立会话并回执正文。
@@ -203,6 +222,45 @@ pub(crate) fn clamp_boundary(text: &str, mut offset: usize) -> usize {
     offset
 }
 
+/// 把当前笔记改名为新的主名：同目录、保留扩展名，引用同步与历史随宿主既有改名链。
+/// 有未落盘修改时拒绝（插件先保存再重试），改名落地后插件经 `vault:file.changed` 重开本篇。
+pub fn rename(app: &mut App, request_id: u64, params: NoteRenameParams) -> Task<Message> {
+    if app.ui.last_note_file.as_deref() != Some(params.path.as_str()) {
+        app.plugins
+            .resolve_shell_call(request_id, Err("插件改名的笔记路径与当前会话不一致".into()));
+        return Task::none();
+    }
+    if !can_write(app) {
+        app.plugins
+            .resolve_shell_call(request_id, Err("该空间为只读身份，无法改名".into()));
+        return Task::none();
+    }
+    if app.dirty {
+        app.plugins
+            .resolve_shell_call(request_id, Err("笔记有未保存修改，请先保存".into()));
+        return Task::none();
+    }
+    let from = params.path.clone();
+    let Some(to) = renamed_path(&from, &params.name) else {
+        app.plugins
+            .resolve_shell_call(request_id, Err("文件名不能为空".into()));
+        return Task::none();
+    };
+    if to == from {
+        app.plugins.resolve_shell_call(request_id, Ok(json!({})));
+        return Task::none();
+    }
+    crate::settings_view::plugins::execute_vault_rename_allow_open(app, request_id, from, to)
+}
+
+/// 改名目标路径：与文件树改名同一口径（剥手打后缀、净化非法字符、保留原名扩展名）。
+fn renamed_path(from: &str, input: &str) -> Option<String> {
+    let old_name = from.rsplit('/').next().unwrap_or(from);
+    let new_name = vault::rename_file_name(input, old_name)?;
+    let dir = from.rsplit_once('/').map(|(dir, _)| format!("{dir}/")).unwrap_or_default();
+    Some(format!("{dir}{new_name}"))
+}
+
 /// 请求保存：先收当前正文，再走既有保存链；结果经 `note:changed` 到达。
 pub fn save(app: &mut App, request_id: u64, params: NoteSaveParams) -> Task<Message> {
     if app.ui.last_note_file.as_deref() != Some(params.path.as_str()) {
@@ -316,5 +374,26 @@ pub fn backlinks(app: &App, request_id: u64, path: String) -> Task<Message> {
                 },
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rename_target_strips_suffix_and_keeps_the_folder() {
+        assert_eq!(
+            renamed_path("notes/方案.md", "新方案.md").as_deref(),
+            Some("notes/新方案.md"),
+            "手打后缀不落成双后缀"
+        );
+        assert_eq!(
+            renamed_path("notes/方案.md", "a/b:c").as_deref(),
+            Some("notes/a_b_c.md"),
+            "非法字符按文件树同一口径净化"
+        );
+        assert_eq!(renamed_path("notes/方案.md", ""), None, "空名拒绝");
+        assert_eq!(renamed_path("notes/方案.md", ".md"), None, "只剩后缀 = 空主名");
     }
 }

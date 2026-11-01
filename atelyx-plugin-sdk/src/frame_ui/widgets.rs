@@ -68,7 +68,7 @@ impl TextRole {
         let sizes = &theme.sizes;
         match self {
             TextRole::Title => {
-                (FontSpec { size: sizes.h2, weight: Some(TextWeight::SemiBold), family: None }, ColorToken::Text)
+                (FontSpec { size: sizes.h1, weight: Some(TextWeight::SemiBold), family: None }, ColorToken::Text)
             }
             TextRole::Heading => {
                 (FontSpec { size: sizes.body, weight: Some(TextWeight::Medium), family: None }, ColorToken::Text)
@@ -1212,12 +1212,12 @@ impl<'c, 'a> Ui<'c, 'a> {
 
     /// 单行输入框（撑满父宽）。
     pub fn text_input(&mut self, id: impl Into<String>, value: impl Into<String>, placeholder: impl Into<String>) {
-        self.input_kind(id.into(), value.into(), placeholder.into(), None, false);
+        self.input_kind(id.into(), value.into(), placeholder.into(), None, false, false);
     }
 
     /// 密文输入框：值按掩码字符绘制，编辑语义与明文框一致。
     pub fn text_input_password(&mut self, id: impl Into<String>, value: impl Into<String>, placeholder: impl Into<String>) {
-        self.input_kind(id.into(), value.into(), placeholder.into(), None, true);
+        self.input_kind(id.into(), value.into(), placeholder.into(), None, true, false);
     }
 
     /// 单行输入框（固定宽）。
@@ -1228,10 +1228,34 @@ impl<'c, 'a> Ui<'c, 'a> {
         placeholder: impl Into<String>,
         width: f32,
     ) {
-        self.input_kind(id.into(), value.into(), placeholder.into(), Some(width), false);
+        self.input_kind(id.into(), value.into(), placeholder.into(), Some(width), false, false);
     }
 
-    fn input_kind(&mut self, id: String, value: String, placeholder: String, width: Option<f32>, masked: bool) {
+    /// 行内单行输入框（透明底，聚焦才出强调描边）：属性槽位这类就地编辑用。
+    pub fn text_input_inline(&mut self, id: impl Into<String>, value: impl Into<String>, placeholder: impl Into<String>) {
+        self.input_kind(id.into(), value.into(), placeholder.into(), None, false, true);
+    }
+
+    /// 固定宽的行内单行输入框。
+    pub fn text_input_inline_sized(
+        &mut self,
+        id: impl Into<String>,
+        value: impl Into<String>,
+        placeholder: impl Into<String>,
+        width: f32,
+    ) {
+        self.input_kind(id.into(), value.into(), placeholder.into(), Some(width), false, true);
+    }
+
+    fn input_kind(
+        &mut self,
+        id: String,
+        value: String,
+        placeholder: String,
+        width: Option<f32>,
+        masked: bool,
+        inline: bool,
+    ) {
         let theme = self.ctx().theme.clone();
         // 与宿主表单输入一致：值文字取 caption 档
         let font = FontSpec { size: theme.sizes.caption, weight: None, family: None };
@@ -1239,14 +1263,24 @@ impl<'c, 'a> Ui<'c, 'a> {
         self.push(Item {
             width: width.map(Width::Fixed).unwrap_or(Width::Fill),
             fill_height: false,
-            height: Box::new(|_, _| INPUT_H),
+            height: Box::new(move |metrics, _| {
+                if inline {
+                    text::line_height(metrics, font) + 4.0
+                } else {
+                    INPUT_H
+                }
+            }),
             draw: Box::new(move |ctx, rect, clip| {
                 let visible = rect.intersect(clip);
                 if visible.is_empty() {
                     return;
                 }
                 let focused = ctx.focused(&id);
-                draw_field(ctx, &theme, visible, focused);
+                if !inline {
+                    draw_field(ctx, &theme, visible, focused);
+                } else if focused {
+                    draw_inline_field(ctx, &theme, visible);
+                }
                 let inner = Rect::new(rect.x + PAD_X, rect.y, (rect.w - PAD_X * 2.0).max(1.0), rect.h);
                 draw_input_text(ctx, &id, &value, &placeholder, font, inner, rect, focused, &theme, visible, masked);
                 ctx.hit(&id, visible, HitCursor::Text);
@@ -1332,6 +1366,28 @@ impl<'c, 'a> Ui<'c, 'a> {
             value.into(),
             String::new(),
             AreaHeight::Auto { min, max },
+            false,
+            Some(font_size),
+            true,
+            pad,
+            Vec::new(),
+        );
+    }
+
+    /// 定高的无底色多行输入框（回车换行、不提交）：空行行这类只占一行、不画任何框的输入面。
+    pub fn text_area_plain_fixed(
+        &mut self,
+        id: impl Into<String>,
+        value: impl Into<String>,
+        height: f32,
+        font_size: f32,
+        pad: Edges,
+    ) {
+        self.text_area_kind(
+            id.into(),
+            value.into(),
+            String::new(),
+            AreaHeight::Fixed(height),
             false,
             Some(font_size),
             true,
@@ -1788,7 +1844,7 @@ impl<'c, 'a> Ui<'c, 'a> {
     ) {
         let content = content.into();
         let id = self.ctx().next_markdown_id(super::markdown::content_key(&content, &mentions));
-        self.markdown_item(id, content, mentions);
+        self.markdown_item(id, content, mentions, None);
     }
 
     /// 带调用方指定 id 的只读 Markdown：命中 / 选区 / 双击都按该 id 回发，面内排版后可
@@ -1799,8 +1855,19 @@ impl<'c, 'a> Ui<'c, 'a> {
         content: impl Into<String>,
         mentions: Vec<atelyx_markdown::MentionCandidate>,
     ) {
-        let content = content.into();
-        self.markdown_item(id.into(), content, mentions);
+        self.markdown_item(id.into(), content.into(), mentions, None);
+    }
+
+    /// 单个列表项的只读 Markdown：`index` = 该项在原列表中的序号（0 起）。
+    /// 单独渲染一项时按它画序号，避免有序列表每项都退化成 `1.`。
+    pub fn markdown_list_item_named(
+        &mut self,
+        id: impl Into<String>,
+        content: impl Into<String>,
+        index: usize,
+        mentions: Vec<atelyx_markdown::MentionCandidate>,
+    ) {
+        self.markdown_item(id.into(), content.into(), mentions, Some(index));
     }
 
     fn markdown_item(
@@ -1808,10 +1875,17 @@ impl<'c, 'a> Ui<'c, 'a> {
         id: String,
         content: String,
         mentions: Vec<atelyx_markdown::MentionCandidate>,
+        list_start: Option<usize>,
     ) {
         let theme = self.ctx().theme.clone();
         let cache = Arc::clone(&self.ctx().state.markdown_layouts);
         let key = super::markdown::content_key(&content, &mentions);
+        // 同一段项源码在不同列表位置要各自排版：起始序号一并计入缓存键
+        let key = match list_start {
+            Some(start) => key ^ (start as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15),
+            None => key,
+        };
+        let start = list_start.unwrap_or(0);
         let for_height = content.clone();
         let height_mentions = mentions.clone();
         let draw_mentions = mentions;
@@ -1819,14 +1893,14 @@ impl<'c, 'a> Ui<'c, 'a> {
             width: Width::Fill,
             fill_height: false,
             height: Box::new(move |metrics, width| {
-                super::markdown::height(&cache, metrics, &theme, key, &for_height, &height_mentions, width)
+                super::markdown::height(&cache, metrics, &theme, key, &for_height, &height_mentions, width, start)
             }),
             draw: Box::new(move |ctx, rect, clip| {
                 let visible = rect.intersect(clip);
                 if visible.is_empty() {
                     return;
                 }
-                super::markdown::paint(ctx, &id, key, &content, &draw_mentions, rect, clip);
+                super::markdown::paint(ctx, &id, key, &content, &draw_mentions, rect, clip, start);
                 // 正文可拖选：命中声明为文本形态，按下 / 拖动由输入路由换算成行列
                 ctx.hit(&id, visible, atelyx_plugin_protocol::frame::HitCursor::Text);
                 ctx.record(&id, super::model::Layout::Markdown { rect });
@@ -1914,6 +1988,21 @@ fn draw_field(ctx: &mut BuildCtx<'_>, theme: &Theme, visible: Rect, focused: boo
         stroke: Some(theme::token(if focused { ColorToken::Accent } else { ColorToken::BorderStrong })),
         stroke_width: Some(1.0),
         corner_radius: Some(theme.radii.sm),
+        shadow: None,
+    });
+}
+
+/// 行内输入框底：不填底色，只给聚焦态一圈强调描边（就地编辑不改变行外观）。
+fn draw_inline_field(ctx: &mut BuildCtx<'_>, theme: &Theme, visible: Rect) {
+    ctx.draw(DrawCommand::Rect {
+        x: visible.x,
+        y: visible.y,
+        w: visible.w,
+        h: visible.h,
+        fill: None,
+        stroke: Some(theme::token(ColorToken::Accent)),
+        stroke_width: Some(1.0),
+        corner_radius: Some(theme.radii.xs),
         shadow: None,
     });
 }

@@ -26,8 +26,8 @@ pub(crate) fn permission_for(name: &str) -> Option<Permission> {
         fs::PRIVATE_DIR | fs::READ_TEXT | fs::WRITE_TEXT | fs::READ_BINARY | fs::WRITE_BINARY
         | fs::REMOVE | fs::EXISTS | fs::LIST => Some(Fs),
         vault::READ_TEXT | vault::WRITE_TEXT | vault::READ_BINARY | vault::WRITE_BINARY
-        | vault::IMPORT_FILE | vault::IMAGE_INFO | vault::LIST | vault::EXISTS | vault::REMOVE
-        | vault::RENAME => Some(Vault),
+        | vault::IMPORT_FILE | vault::IMAGE_INFO | vault::LIST | vault::EXISTS | vault::TAGS
+        | vault::REMOVE | vault::RENAME => Some(Vault),
         table::SNAPSHOT | table::UPDATE_CELL | table::ADD_ROW | table::REMOVE_ROW
         | table::SELECT_ROW | table::SET_CELL_IMAGE => Some(Table),
         process::SPAWN | process::WRITE_STDIN | process::CLOSE_STDIN | process::KILL => Some(Process),
@@ -41,12 +41,13 @@ pub(crate) fn permission_for(name: &str) -> Option<Permission> {
         http::REQUEST | http::STREAM_OPEN | http::STREAM_CANCEL => Some(Http),
         collab::PEERS | collab::SEND | collab::META_GET | collab::META_PATCH => Some(Collab),
         // 读写当前笔记的正文 / 选区即读写用户内容，按仓库内容权限归类
-        editor::SELECTION | editor::REPLACE_SELECTION | editor::OPEN_FILES | editor::OPEN_FILE => {
-            Some(Vault)
-        }
-        note::OPEN | note::EDIT | note::SAVE | note::CLOSE | note::AWARENESS | note::BACKLINKS => {
-            Some(Vault)
-        },
+        editor::SELECTION
+        | editor::REPLACE_SELECTION
+        | editor::OPEN_FILES
+        | editor::OPEN_FILE
+        | editor::PREFS => Some(Vault),
+        note::OPEN | note::EDIT | note::SAVE | note::CLOSE | note::AWARENESS | note::BACKLINKS
+        | note::RENAME => Some(Vault),
         // 活动统计取自当前仓库内容，同样按仓库内容权限归类
         history::ACTIVITY | history::DAY | history::OPEN => Some(Vault),
         window::OPEN | window::CLOSE | window::UPDATE | window::SHOW | window::BEGIN_DRAG
@@ -113,6 +114,8 @@ mod tests {
         assert_eq!(permission_for(method::vault::WRITE_BINARY), Some(Permission::Vault));
         assert_eq!(permission_for(method::vault::REMOVE), Some(Permission::Vault));
         assert_eq!(permission_for(method::vault::RENAME), Some(Permission::Vault));
+        assert_eq!(permission_for(method::vault::TAGS), Some(Permission::Vault));
+        assert_eq!(permission_for(method::editor::PREFS), Some(Permission::Vault));
         assert_eq!(permission_for(method::clipboard::WRITE_IMAGE), Some(Permission::Clipboard));
         assert_eq!(permission_for(method::ai::MODELS), Some(Permission::Ai));
         assert_eq!(permission_for(method::ai::AGENTS), Some(Permission::Ai));

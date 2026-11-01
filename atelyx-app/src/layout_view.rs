@@ -2235,7 +2235,7 @@ pub(crate) fn inspector_view<'a>(app: &'a App, window: iced::window::Id) -> Elem
             "打开一篇笔记后在此查看与编辑其属性。",
         );
     }
-    crate::properties_view::props_panel(app, window, true)
+    crate::properties_view::props_panel(app, window)
         .unwrap_or_else(|| text("当前笔记无属性").size(pal::fs_caption()).color(pal::TEXT_MUTED).into())
 }
 

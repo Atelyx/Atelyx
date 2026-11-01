@@ -157,6 +157,11 @@ impl FrameUi {
         self.state.inputs.get(id).map(|item| (item.caret, item.anchor))
     }
 
+    /// 当前持有键盘焦点的控件 id（无焦点 = `None`）。插件自己转发语义按键前先确认焦点归属。
+    pub fn focus_id(&self) -> Option<&str> {
+        self.state.focus.as_deref()
+    }
+
     /// 设置输入框的光标与选区（`value` 只用于把光标夹在文本长度内）；文本本身由插件在
     /// `render` 时传入。须在 `render` 前调用。
     pub fn set_input(&mut self, id: &str, value: &str, caret: usize) {
@@ -166,6 +171,18 @@ impl FrameUi {
             .insert(
                 id.to_string(),
                 model::InputState { caret, anchor: caret, ..model::InputState::default() },
+            );
+    }
+
+    /// 全选输入框内容并清空其撤销栈（进入槽位编辑时键入即替换原值，上一槽的撤销历史不得带进来）；
+    /// 须在 `render` 前调用。
+    pub fn select_all_input(&mut self, id: &str, value: &str) {
+        let caret = value.len();
+        self.state
+            .inputs
+            .insert(
+                id.to_string(),
+                model::InputState { caret, anchor: 0, ..model::InputState::default() },
             );
     }
 

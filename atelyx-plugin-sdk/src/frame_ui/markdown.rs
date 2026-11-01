@@ -166,12 +166,13 @@ fn laid_out(
     content: &str,
     mentions: &[MentionCandidate],
     width: f32,
+    list_start: usize,
 ) -> Arc<Layout> {
     let full = (key, width.to_bits(), metrics.epoch());
     if let Some(hit) = cache.hit(full) {
         return hit;
     }
-    let laid = Arc::new(layout(metrics, theme, content, mentions, width));
+    let laid = Arc::new(layout(metrics, theme, content, mentions, width, list_start));
     cache.store(full, Arc::clone(&laid));
     laid
 }
@@ -185,8 +186,9 @@ pub(crate) fn height(
     content: &str,
     mentions: &[MentionCandidate],
     width: f32,
+    list_start: usize,
 ) -> f32 {
-    laid_out(cache, metrics, theme, key, content, mentions, width).height
+    laid_out(cache, metrics, theme, key, content, mentions, width, list_start).height
 }
 
 /// 绘制一块 Markdown 区域：图元在文字之下，超出裁剪区的不画。
@@ -198,8 +200,18 @@ pub(crate) fn paint(
     mentions: &[MentionCandidate],
     rect: Rect,
     clip: Rect,
+    list_start: usize,
 ) {
-    let laid = laid_out(&ctx.state.markdown_layouts, &mut ctx.metrics, ctx.theme, key, content, mentions, rect.w);
+    let laid = laid_out(
+        &ctx.state.markdown_layouts,
+        &mut ctx.metrics,
+        ctx.theme,
+        key,
+        content,
+        mentions,
+        rect.w,
+        list_start,
+    );
     ctx.markdown_seen.push((id.to_string(), Arc::clone(&laid)));
     for shape in &laid.shapes {
         let placed = Rect::new(rect.x + shape.rect.x, rect.y + shape.rect.y, shape.rect.w, shape.rect.h);
@@ -421,6 +433,8 @@ struct Builder<'a> {
     theme: &'a Theme,
     source: &'a str,
     options: ParseOptions,
+    /// 顶层列表项的起始序号（单独渲染一个列表项时不让序号退化成 1）。
+    list_start: usize,
     lines: Vec<Line>,
     shapes: Vec<Shape>,
     strokes: Vec<Stroke>,
@@ -434,6 +448,7 @@ fn layout(
     source: &str,
     mentions: &[MentionCandidate],
     width: f32,
+    list_start: usize,
 ) -> Layout {
     let options = ParseOptions { mentions: mentions.to_vec(), ..ParseOptions::default() };
     let document = parse_markdown(source, &options);
@@ -442,6 +457,7 @@ fn layout(
         theme,
         source,
         options,
+        list_start,
         lines: Vec::new(),
         shapes: Vec::new(),
         strokes: Vec::new(),
@@ -534,11 +550,12 @@ impl Builder<'_> {
                 });
             }
             MarkdownBlock::List { ordered, items, .. } => {
+                let base = if depth == 0 { self.list_start } else { 0 };
                 for (index, item) in items.iter().enumerate() {
                     if index > 0 {
                         self.gap_before(items[index - 1].to, item.from, self.prose_height(self.base_size()));
                     }
-                    self.list_item(item, *ordered, index, width, depth, previous);
+                    self.list_item(item, *ordered, index + base, width, depth, previous);
                 }
             }
             MarkdownBlock::FencedCode { lang, code, .. } => self.code_block(lang, code, indent, inner, depth),
@@ -1150,7 +1167,7 @@ mod tests {
     fn headings_grow_by_level_and_paragraphs_wrap() {
         let theme = Theme::default();
         let mut metrics = Metrics::default();
-        let laid = layout(&mut metrics, &theme, "# 标题\n\n正文", &[], 240.0);
+        let laid = layout(&mut metrics, &theme, "# 标题\n\n正文", &[], 240.0, 0);
         let sizes: Vec<f32> = laid.lines.iter().map(|line| line.runs[0].spec.size).collect();
         assert!(sizes[0] > sizes[1], "标题字号要大于正文：{sizes:?}");
         assert_eq!(laid.lines[0].runs[0].text, "标题");
@@ -1160,8 +1177,8 @@ mod tests {
     fn blank_lines_between_blocks_become_vertical_space() {
         let theme = Theme::default();
         let mut metrics = Metrics::default();
-        let tight = layout(&mut metrics, &theme, "甲\n\n乙", &[], 240.0).height;
-        let loose = layout(&mut metrics, &theme, "甲\n\n\n乙", &[], 240.0).height;
+        let tight = layout(&mut metrics, &theme, "甲\n\n乙", &[], 240.0, 0).height;
+        let loose = layout(&mut metrics, &theme, "甲\n\n\n乙", &[], 240.0, 0).height;
         assert!(loose > tight, "多一个空行就要多一段行高：{tight} vs {loose}");
     }
 
@@ -1170,7 +1187,7 @@ mod tests {
         let theme = Theme::default();
         let mut metrics = Metrics::default();
         let source = "**粗** *斜* ~~删~~ `码` #标签";
-        let laid = layout(&mut metrics, &theme, source, &[], 400.0);
+        let laid = layout(&mut metrics, &theme, source, &[], 400.0, 0);
         let runs: Vec<&Run> = laid.lines.iter().flat_map(|line| line.runs.iter()).collect();
         assert!(runs.iter().any(|run| run.style.italic && run.text == "斜"));
         assert!(runs.iter().any(|run| run.style.strike && run.text == "删"));
@@ -1183,7 +1200,7 @@ mod tests {
         let theme = Theme::default();
         let mut metrics = Metrics::default();
         let mentions = vec![MentionCandidate { key: "笔记/方案.md".into(), label: "笔记：方案.md".into() }];
-        let laid = layout(&mut metrics, &theme, "看看 #笔记：方案.md 怎么写", &mentions, 400.0);
+        let laid = layout(&mut metrics, &theme, "看看 #笔记：方案.md 怎么写", &mentions, 400.0, 0);
         let runs: Vec<&Run> = laid.lines.iter().flat_map(|line| line.runs.iter()).collect();
         assert!(
             runs.iter().any(|run| run.style.capsule && run.text.contains("方案.md")),
@@ -1197,7 +1214,7 @@ mod tests {
         let theme = Theme::default();
         let mut metrics = Metrics::default();
         let source = "```rust\nlet a = 1;\n```";
-        let laid = layout(&mut metrics, &theme, source, &[], 300.0);
+        let laid = layout(&mut metrics, &theme, source, &[], 300.0, 0);
         assert_eq!(laid.copies.len(), 1, "每个代码块一个复制钮");
         assert!(laid.copies[0].text.contains("let a = 1;"));
         assert!(laid.lines.iter().any(|line| line.runs.iter().any(|run| run.text == "rust")));
@@ -1207,11 +1224,20 @@ mod tests {
     fn task_items_paint_a_box_and_lists_stay_indented() {
         let theme = Theme::default();
         let mut metrics = Metrics::default();
-        let laid = layout(&mut metrics, &theme, "- [x] 做完\n- [ ] 没做", &[], 300.0);
+        let laid = layout(&mut metrics, &theme, "- [x] 做完\n- [ ] 没做", &[], 300.0, 0);
         assert!(laid.strokes.len() >= 1, "勾选态要有勾线");
         let bullets: Vec<&Line> = laid.lines.iter().filter(|line| line.runs.iter().any(|run| run.text == "做完")).collect();
         assert!(!bullets.is_empty());
         assert!(bullets[0].x > 0.0, "列表正文要缩进到标记列之后");
+    }
+
+    #[test]
+    fn single_ordered_item_keeps_its_original_number() {
+        let theme = Theme::default();
+        let mut metrics = Metrics::default();
+        let laid = layout(&mut metrics, &theme, "3. 丙", &[], 300.0, 2);
+        let runs: Vec<&str> = laid.lines.iter().flat_map(|line| line.runs.iter()).map(|run| run.text.as_str()).collect();
+        assert!(runs.contains(&"3."), "单独渲染的有序项要按原序号画：{runs:?}");
     }
 
     #[test]
@@ -1220,10 +1246,10 @@ mod tests {
         let theme = Theme::default();
         let mut metrics = Metrics::default();
         let key = content_key("一段正文", &[]);
-        let first = laid_out(&cache, &mut metrics, &theme, key, "一段正文", &[], 240.0);
-        let again = laid_out(&cache, &mut metrics, &theme, key, "一段正文", &[], 240.0);
+        let first = laid_out(&cache, &mut metrics, &theme, key, "一段正文", &[], 240.0, 0);
+        let again = laid_out(&cache, &mut metrics, &theme, key, "一段正文", &[], 240.0, 0);
         assert!(Arc::ptr_eq(&first, &again), "同内容同宽度应命中缓存");
-        let narrower = laid_out(&cache, &mut metrics, &theme, key, "一段正文", &[], 120.0);
+        let narrower = laid_out(&cache, &mut metrics, &theme, key, "一段正文", &[], 120.0, 0);
         assert!(!Arc::ptr_eq(&first, &narrower), "宽度变了要按新宽度重排");
     }
 
@@ -1238,7 +1264,7 @@ mod tests {
         let cache = LayoutCache::default();
         let key = content_key(&source, &[]);
 
-        let _ = laid_out(&cache, &mut metrics, &theme, key, &source, &[], 360.0);
+        let _ = laid_out(&cache, &mut metrics, &theme, key, &source, &[], 360.0, 0);
         let first = metrics.take_misses();
         let sizes: Vec<MeasureTextResult> = first
             .iter()
@@ -1247,7 +1273,7 @@ mod tests {
         metrics.apply(&first, &sizes);
 
         for width in [360.0_f32, 359.0, 358.0, 300.0, 420.0] {
-            let _ = laid_out(&cache, &mut metrics, &theme, key, &source, &[], width);
+            let _ = laid_out(&cache, &mut metrics, &theme, key, &source, &[], width, 0);
             assert!(metrics.take_misses().is_empty(), "改宽到 {width} 后不得再登记量算");
         }
     }

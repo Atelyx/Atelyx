@@ -58,13 +58,13 @@ use atelyx_core::layout::{
     self, apply_layout_op, normalize, op_passes_shape_check, AppUiState, DetachedWindow,
     LayoutOp, WindowBounds, UI_STATE_SCHEMA,
 };
-use atelyx_core::markdown::{LinkForm, MarkdownDocument};
+use atelyx_core::markdown::LinkForm;
 use atelyx_core::plugin_runtime::{
     EditorSelection, FileChangeKind, PluginEvent, PluginRuntime, PluginStatus, SurfaceKind,
 };
 use atelyx_core::vault;
 use atelyx_core::vault_refs;
-use iced::widget::{space, text_editor};
+use iced::widget::space;
 use iced::window::{self, Level, Mode, Position, Settings};
 use iced::{keyboard, mouse, Element, Event, Point, Size, Subscription, Task, Theme};
 
@@ -99,15 +99,7 @@ fn panel_settings(w: &DetachedWindow) -> Settings {
 /// 撕裂窗口最小尺寸（OS 缩放下限）。
 const PANEL_MIN_SIZE: Size = Size::new(320.0, 240.0);
 
-/// note 视图模式：只读渲染 / 预览编辑 / 源码。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NoteMode {
-    Read,
-    Edit,
-    Source,
-}
-
-/// 剥离开头的 frontmatter 块（阅读/编辑面只处理正文）；缺闭合定界符时按无 frontmatter 处理，全量正文。
+/// 剥离开头的 frontmatter 块（属性面板与正文处理只处理正文）；缺闭合定界符时按无 frontmatter 处理，全量正文。
 fn strip_frontmatter(text: &str) -> &str {
     match atelyx_core::frontmatter::block_end(text) {
         Some(end) => &text[end..],
@@ -140,21 +132,6 @@ pub(crate) fn history_author(app: &App) -> atelyx_core::history::HistoryAuthor {
         .or_else(|_| std::env::var("USER"))
         .unwrap_or_else(|_| "本地".into());
     atelyx_core::history::HistoryAuthor { id: format!("desktop:{user}"), name: user.clone(), device: user }
-}
-
-/// markdown 链接 href 编码：空格 / 括号 / 百分号百分号化，其余（含中文）原样。
-fn encode_md_href(file: &str) -> String {
-    let mut out = String::with_capacity(file.len());
-    for ch in file.chars() {
-        match ch {
-            ' ' => out.push_str("%20"),
-            '(' => out.push_str("%28"),
-            ')' => out.push_str("%29"),
-            '%' => out.push_str("%25"),
-            other => out.push(other),
-        }
-    }
-    out
 }
 
 /// 百分号解码（链接 href）。
@@ -267,6 +244,15 @@ fn bundled_presets_dir() -> Option<PathBuf> {
         .find(|dir| dir.is_dir())
 }
 
+/// 当前全局编辑偏好（`editor.prefs` 回执与偏好变更事件共用同一份）。
+pub(crate) fn editor_prefs(app: &App) -> atelyx_core::plugin_runtime::EditorPrefs {
+    atelyx_core::plugin_runtime::EditorPrefs {
+        soft_wrap: app.global.soft_wrap,
+        in_page_title: app.global.in_page_title,
+        content_width: app.global.content_width,
+    }
+}
+
 /// global.json 落盘路径（应用级全局配置：最近仓库列表）。
 fn global_config_path() -> Option<PathBuf> {
     app_data_dir().map(|d| d.join("global.json"))
@@ -343,7 +329,7 @@ fn command_key_candidate(key: &keyboard::Key, mods: keyboard::Modifiers) -> bool
     }
 }
 
-/// 注册表命令 → 表格消息（Note 域命令由编辑面部件内的绑定表消费，不产表格消息）。
+/// 注册表命令 → 表格消息（非表格 / 画布域命令不产表格消息）。
 fn table_msg_of(id: commands::CommandId) -> Option<tv::TableMsg> {
     match id {
         commands::CommandId::TableUndo => Some(tv::TableMsg::Undo),
@@ -401,28 +387,22 @@ enum Message {
     /// gen = 发起任务时的仓库世代；回调落地前与当前世代比对，过期即丢弃。
     ChildrenLoaded(String, u64, Result<Vec<vault::DirChild>, String>),
     OpenFile(String),
-    /// rel 恒为请求目标：成功与失败回执都按它与当前打开文件比对，过期回执不得动编辑面。
-    FileLoaded(u64, String, Result<String, String>),
     Save,
-    /// 携带保存发起时冻结的内容与保存动机：落地后与编辑器现值比对，区分保存完成与在途新编辑。
+    /// 携带保存发起时冻结的内容与保存动机：落地后与当前正文比对，区分保存完成与在途新编辑。
     Saved(u64, String, String, SaveReason, Result<(), String>),
     /// 自动保存防抖定时器到期（单定时器链，见 chain_autosave_timer）。
     AutosaveTick,
-    /// 切换 note 视图模式（只读 / 预览编辑 / 源码）。
-    NoteMode(NoteMode),
     /// Ctrl/Cmd+C 未被输入部件捕获时回落到命令路由。
     CopyKey { key: keyboard::Key, mods: keyboard::Modifiers },
     /// 属性面板消息（frontmatter 类型化编辑）。
     Props(PropsMsg),
-    /// 反链扫描落地（gen 守卫 + 笔记身份守卫：慢扫描回执晚于切文件时丢弃，防串台）。
-    BacklinksLoaded(u64, String, Result<Vec<vault::BacklinkRow>, String>),
     /// 标签词汇表落地（gen 守卫）。
     TagVocabLoaded(u64, Result<Vec<vault::TagRow>, String>),
-    /// 全仓库笔记清单落地（双链候选数据源；gen 守卫）。
+    /// 全仓库文件清单落地（搜索面板数据源；gen 守卫）。
     NoteFilesLoaded(u64, Result<Vec<(String, String)>, String>),
-    /// 方向键（先反链候选导航，无候选时调整分割把手）。
+    /// 方向键（表格选中态导航；无可分派的输入态时调整分割把手）。
     NavKey(bool, bool),
-    /// Enter（双链候选开启时 = 选中候选）。
+    /// Enter（表格选中态 = 下移一行）。
     EnterKey,
     /// 搜索面板查询词输入。
     SearchInput(String),
@@ -488,8 +468,6 @@ enum Message {
     CopyEntryPath { rel: String, absolute: bool },
     /// 文件树结构刷新（工具栏刷新钮；本地重读展开集，空间整树重拉）。
     FileTreeRefresh,
-    /// 切换任务勾选框（携带列表项源起点）。
-    ToggleTask(usize),
     /// 复制代码块正文到系统剪贴板。
     CopyCode(String),
     PanelTab(String, String),
@@ -1009,7 +987,7 @@ pub enum SpaceField {
 }
 
 /// 协作空间消息：账号 / 空间切换 / 空间保存回执 / 实时事件。
-/// 内容面回执尽量复用既有消息（FileLoaded / OpDone / VaultMetaLoaded 等，gen 守卫同源）。
+/// 内容面回执尽量复用既有消息（OpDone / VaultMetaLoaded 等，gen 守卫同源）。
 #[derive(Debug, Clone)]
 pub enum SpaceMsg {
     LoginField(SpaceField, String),
@@ -1364,7 +1342,7 @@ pub struct App {
     pub note_collab_file: Option<String>,
     /// 笔记在场通道（本端光标/选区上行与远端光标条目）。
     pub note_collab_channel: Option<note_collab_channel::NoteCollabChannel>,
-    /// 远端成员光标（在场通道状态换算为 note_text 字节偏移；编辑面渲染）。
+    /// 远端成员光标（在场通道状态换算为 note_text 字节偏移；供 `note:presence` 广播）。
     pub remote_cursors: Vec<RemoteCursorView>,
     /// 本端帧泵 peerId（hello-ack 分配）：自声落地帧与名册自条目据此过滤。
     pub space_own_peer_id: Option<String>,
@@ -1383,17 +1361,8 @@ pub struct App {
     os_shown: HashMap<window::Id, bool>,
     /// files 视图懒加载子项缓存（key = 目录相对路径，根为 ""；运行态不落盘）。
     pub children: HashMap<String, Vec<vault::DirChild>>,
-    /// note 正文真相（与磁盘逐字节一致；源码档与编辑档共用）。
+    /// note 正文真相（与磁盘逐字节一致；插件笔记面与画布 / 表格的文本数据源）。
     pub note_text: String,
-    /// 源码档编辑器（进出档按正文重建）。
-    pub source_editor: text_editor::Content,
-    /// 编辑档状态（光标 / 选区 / 活动块 / 撤销栈 / 组合态）。
-    pub edit: markdown_edit::EditorState,
-    /// 编辑档解析产物与块元数据（正文或档位变更时重建）。
-    pub edit_doc: Option<MarkdownDocument>,
-    pub edit_meta: Vec<markdown_view::BlockMeta>,
-    /// 编辑档解析选项（链接形态判定；进程内只建一次）。
-    pub edit_opts: atelyx_core::markdown::ParseOptions,
     /// 属性面板（frontmatter 类型化渲染与槽位编辑）。
     pub props: PropsPanel,
     pub dirty: bool,
@@ -1403,9 +1372,7 @@ pub struct App {
     autosave_deadline: Option<Instant>,
     /// 自动保存定时器在途标志（单定时器链：到期检查期限，被推迟则续排剩余时长）。
     autosave_timer: bool,
-    /// note 视图模式（缺省只读）。
-    pub note_mode: NoteMode,
-    /// 笔记正文由插件面承载（壳内笔记视图不再渲染；正文仍在本 `note_text`）。
+    /// 笔记正文由插件面承载（壳内不再渲染笔记视图；正文仍在本 `note_text`）。
     pub plugin_note_active: bool,
     /// 插件笔记面上报的本端选区（全文字节偏移；`None` = 无光标）。
     pub plugin_note_selection: Option<(usize, usize)>,
@@ -1413,11 +1380,7 @@ pub struct App {
     pub plugin_note_base: String,
     /// 笔记插件尚未就绪时挂起的打开请求（启动自动恢复 / 用户抢先点开）。
     pending_plugin_note_open: Option<String>,
-    /// 进编辑档待落光标标志（切档与载入复位）。
-    note_edit_caret_pending: bool,
-    /// 只读档的解析产物：进入只读档或文件载入时重建，避免每帧重解析。
-    pub preview_doc: Option<MarkdownDocument>,
-    /// 笔记图片句柄缓存（key = src 原文；随文件载入清空，在途与失败集合防重复发起）。
+    /// 笔记 / 画布 / 插件图片句柄缓存（key = src 原文；切仓库清空，在途与失败集合防重复发起）。
     pub note_images: markdown_view::ImageHandles,
     /// 图片像素尺寸（key 同 `note_images`）：自绘画布按 contain / cover 摆放贴片要用原图长宽。
     pub note_image_sizes: HashMap<String, (u32, u32)>,
@@ -1425,8 +1388,6 @@ pub struct App {
     pub note_image_epoch: u64,
     note_images_inflight: HashSet<String>,
     note_images_failed: HashMap<String, ImageRetry>,
-    /// ensure_image_srcs 收集的载入任务（update 收尾统一 chain，调用点不必逐个穿 Task）。
-    image_loads: Option<Task<Message>>,
     /// 防抖落盘：有未写盘的模型变更。
     persist_dirty: bool,
     /// 主窗口内容区尺寸（logical；Resized 驱动，把手命中几何用）。
@@ -1457,18 +1418,10 @@ pub struct App {
     titlebar_tab_scroll_x: f32,
     /// 各面板标签条横向滚动偏移（同上；key = 面板 id）。
     panel_tab_scroll_x: HashMap<String, f32>,
-    /// 反链（当前笔记；文件载入与改名/移动后刷新）。
-    pub backlinks: Vec<vault::BacklinkRow>,
     /// 全仓库标签词汇表（tags 候选；打开仓库与载入笔记后刷新）。
     pub tag_vocab: Vec<vault::TagRow>,
-    /// 全仓库文件清单（双链候选与搜索面板数据源；树序，全部文件类型）。
+    /// 全仓库文件清单（搜索面板数据源；树序，全部文件类型）。
     pub note_files: Vec<(String, String)>,
-    /// 双链候选开启态（None = 关闭；from = 触发符之后的正文起点）。
-    pub wiki_picker: Option<WikiPicker>,
-    /// 最近一次 Esc 关闭的双链触发位置（同位置不再自动重开，直到出现新触发符）。
-    wiki_dismissed_from: Option<usize>,
-    /// 双链候选选中后吞掉随后的编辑面 Newline（Enter 键全局订阅与部件事件双发，见 wiki_pick）。
-    wiki_swallow_newline: bool,
     /// 搜索面板查询词。
     pub search_query: String,
     /// 历史弹层/上下文的版本列表（打开弹层与每次保存后刷新；旧→新序）。
@@ -1527,8 +1480,8 @@ pub struct App {
     pub file_drag_target: Option<String>,
 }
 
-/// 编辑面渲染用的远端光标视图（字节偏移，UTF-16 已换算）。选区缺省 = 对端在场但
-/// 光标不在文档内（只读档 / 未进编辑），此时只参与协作者胶囊，不画光标。
+/// `note:presence` 广播用的远端光标视图（字节偏移，UTF-16 已换算）。选区缺省 = 对端在场但
+/// 光标不在文档内（未打开笔记 / 插件未上报选区），此时只参与协作者胶囊，不画光标。
 #[derive(Debug, Clone)]
 pub struct RemoteCursorView {
     pub name: String,
@@ -1566,14 +1519,6 @@ impl FileDrag {
     pub fn reject_at(&self, rel: &str) -> Option<DropReject> {
         self.reject.as_ref().filter(|(r, _)| r == rel).map(|(_, why)| *why)
     }
-}
-
-/// 双链候选会话：`from` = 触发符（`[[` / `【【`）之后的正文偏移，查询词随编辑推进。
-#[derive(Clone, Debug)]
-pub struct WikiPicker {
-    pub from: usize,
-    pub query: String,
-    pub active: usize,
 }
 
 impl App {
@@ -1700,29 +1645,20 @@ impl App {
                 os_shown: HashMap::new(),
                 children: HashMap::new(),
                 note_text: String::new(),
-                source_editor: text_editor::Content::new(),
-                edit: markdown_edit::EditorState::default(),
-                edit_doc: None,
-                edit_meta: Vec::new(),
-                edit_opts: markdown_view::link_options(),
                 props: PropsPanel::default(),
                 dirty: false,
                 save_error: None,
                 autosave_deadline: None,
                 autosave_timer: false,
-                note_mode: NoteMode::Read,
                 plugin_note_active: false,
                 plugin_note_selection: None,
                 plugin_note_base: String::new(),
                 pending_plugin_note_open: None,
-                note_edit_caret_pending: false,
-                preview_doc: None,
                 note_images: markdown_view::ImageHandles::new(),
                 note_image_sizes: HashMap::new(),
                 note_image_epoch: 0,
                 note_images_inflight: HashSet::new(),
                 note_images_failed: HashMap::new(),
-                image_loads: None,
                 file_sort: "mtime-desc".to_string(),
                 exclude_folders: Vec::new(),
                 attachment_folder: None,
@@ -1752,12 +1688,8 @@ impl App {
                 layout_tab_last_press: None,
                 titlebar_tab_scroll_x: 0.0,
                 panel_tab_scroll_x: HashMap::new(),
-                backlinks: Vec::new(),
                 tag_vocab: Vec::new(),
                 note_files: Vec::new(),
-                wiki_picker: None,
-                wiki_dismissed_from: None,
-                wiki_swallow_newline: false,
                 search_query: String::new(),
                 history: Vec::new(),
                 history_gen: 0,
@@ -1895,30 +1827,8 @@ impl App {
         self.cursors.get(&window).copied().unwrap_or(Point::ORIGIN)
     }
 
-    /// 编辑面正文（frontmatter 之后的部分）：编辑面全部坐标相对正文。
-    fn edit_body(&self) -> &str {
-        let n = atelyx_core::frontmatter::block_end(&self.note_text).unwrap_or(0);
-        &self.note_text[n..]
-    }
-
-    /// 用编辑面新正文替换正文（保留 frontmatter 前缀）并置脏、排自动保存。
-    fn set_edit_body(&mut self, body: String) {
-        let n = atelyx_core::frontmatter::block_end(&self.note_text).unwrap_or(0);
-        let mut next = String::with_capacity(n + body.len());
-        next.push_str(&self.note_text[..n]);
-        next.push_str(&body);
-        self.note_text = next;
-        self.dirty = true;
-        self.autosave_deadline = Some(Instant::now() + AUTOSAVE_DEBOUNCE);
-    }
-
     fn update(&mut self, message: Message) -> Task<Message> {
         let task = self.handle(message);
-        // 图片载入任务由 ensure_image_srcs 收集、此处统一链出（调用点无需穿 Task）
-        let task = match self.image_loads.take() {
-            Some(loads) => task.chain(loads),
-            None => task,
-        };
         // 表格视图面挂载差分：换视图 / 开合 / 切换表格后差额通知插件（面集变了才重投影）
         let task = if plugin_actions::sync_table_surfaces(self) {
             task.chain(plugin_actions::refresh_projection(self))
@@ -2058,75 +1968,6 @@ impl App {
                 Task::none()
             }
             Message::OpenFile(rel) => self.gate(PendingAfterFlush::OpenFile(rel)),
-            Message::FileLoaded(gen, rel, Ok(text)) => {
-                if gen != self.epoch() || self.ui.last_note_file.as_deref() != Some(rel.as_str()) {
-                    return Task::none();
-                }
-                // 插件有未落盘输入时不得用磁盘旧文覆盖（rename / 重建链接 / 外部重载的兜底）
-                if self.plugin_note_active && self.dirty {
-                    self.notify(
-                        NoticeLevel::Info,
-                        "笔记有未保存修改，已忽略外部重载".to_string(),
-                    );
-                    return Task::none();
-                }
-                // 内容载入成功即登记最近打开（本地与空间模式同链回执）
-                recent_view::record(self, &rel, recent_view::RecentKind::Note);
-                self.note_text = text.clone();
-                self.plugin_note_base = text.clone();
-                if let Some(doc) = &mut self.doc_open {
-                    doc.path = rel.clone();
-                }
-                // 空间模式：载入成功即磁盘基线（三方合流的祖先）
-                self.space_note_flushed = matches!(self.repo_kind, RepoKind::Space(_)).then(|| text.clone());
-                self.source_editor = text_editor::Content::with_text(&self.note_text);
-                self.edit.reset(0);
-                self.dirty = false;
-                self.reset_props();
-                self.backlinks.clear();
-                self.history.clear();
-                // 图片缓存随文件清空：同 src 不同仓库指向不同文件，过期句柄不得复用
-                self.note_images.clear();
-                self.note_image_sizes.clear();
-                self.note_image_epoch = self.note_image_epoch.wrapping_add(1);
-                self.note_images_inflight.clear();
-                self.note_images_failed.clear();
-                self.refresh_preview();
-                self.refresh_edit();
-                self.notify(NoticeLevel::Success, "已打开");
-                // 空间模式：笔记接入协作文档（内容已就位，基线通告 + 握手 + 身份帧）
-                if matches!(self.repo_kind, RepoKind::Space(_)) {
-                    space_actions::collab_note_loaded(self, &rel);
-                }
-                if self.plugin_note_active {
-                    crate::plugin_note::publish_state(self, Some(self.note_text.clone()));
-                }
-                self.refresh_backlinks().chain(self.reload_history())
-            }
-            Message::FileLoaded(gen, rel, Err(e)) => {
-                // 只有当前文件、当前世代的载入失败才清编辑面：过期回执（快速连点文件 /
-                // 切仓库）不得把已打开笔记的正文清空
-                if gen != self.epoch() || self.ui.last_note_file.as_deref() != Some(rel.as_str()) {
-                    return Task::none();
-                }
-                // 载入失败必须清空编辑器：last_note_file 已指向新文件，残留旧内容
-                // 会让 Ctrl+S 把旧内容写进新路径；空间合流基线与协作绑定同样不得残留
-                self.note_text.clear();
-                self.source_editor = text_editor::Content::new();
-                self.edit.reset(0);
-                self.edit_doc = None;
-                self.edit_meta.clear();
-                self.dirty = false;
-                self.preview_doc = None;
-                self.reset_props();
-                self.space_note_flushed = None;
-                self.note_collab = None;
-                self.note_collab_file = None;
-                self.note_collab_channel = None;
-                self.remote_cursors.clear();
-                self.notify(NoticeLevel::Error, e);
-                Task::none()
-            }
             Message::Save => {
                 // Ctrl+S：单元格编辑先提交，笔记 / 表格 / 画布各自手动保存（无打开内容 = 提示）
                 table_actions::commit_edit(self);
@@ -2229,46 +2070,15 @@ impl App {
                 }
                 Task::none()
             }
-            Message::NoteMode(mode) => {
-                match mode {
-                    NoteMode::Read => self.enter_read_mode(),
-                    NoteMode::Edit => {
-                        self.note_edit_caret_pending = false;
-                        self.enter_edit_mode();
-                    }
-                    NoteMode::Source => {
-                        self.note_mode = NoteMode::Source;
-                        self.preview_doc = None;
-                        self.edit_doc = None;
-                        self.edit_meta.clear();
-                        self.edit.focused = false;
-                        self.note_edit_caret_pending = false;
-                        // 属性面板随源码档卸载，槽位编辑态不得留存（否则回编辑档后键盘无归属）
-                        self.clear_props_edit();
-                        self.source_editor = text_editor::Content::with_text(&self.note_text);
-                    }
-                }
-                // 换档即换光标来源（正文编辑面 / 纯文本面 / 无光标）：选区立即随档上行
-                space_actions::collab_after_caret(self);
-                Task::none()
-            }
             Message::CopyKey { key, mods } => self.on_key_command(key, mods),
             Message::Props(m) => self.on_props(m),
-            Message::BacklinksLoaded(gen, rel, Ok(rows)) => {
-                // 身份守卫：慢扫描回执晚于切文件时丢弃，防串台显示他篇反链
-                if gen == self.epoch() && self.ui.last_note_file.as_deref() == Some(rel.as_str()) {
-                    self.backlinks = rows;
-                }
-                Task::none()
-            }
-            // 反链尽力而为：扫描失败保持上次结果，不打断编辑
-            Message::BacklinksLoaded(_, _, Err(_)) | Message::TagVocabLoaded(_, Err(_)) | Message::NoteFilesLoaded(_, Err(_)) => Task::none(),
             Message::TagVocabLoaded(gen, Ok(rows)) => {
                 if gen == self.epoch() {
                     self.tag_vocab = rows;
                 }
                 Task::none()
             }
+            Message::TagVocabLoaded(_, Err(_)) | Message::NoteFilesLoaded(_, Err(_)) => Task::none(),
             Message::NoteFilesLoaded(gen, Ok(files)) => {
                 if gen == self.epoch() {
                     self.note_files = files;
@@ -2283,15 +2093,7 @@ impl App {
                     }
                     return self.on_props(PropsMsg::SuggestMove(if positive { 1 } else { -1 }));
                 }
-                if self.wiki_picker.is_some() {
-                    let n = self.wiki_candidates().len();
-                    if n > 0 {
-                        if let Some(p) = self.wiki_picker.as_mut() {
-                            p.active = if positive { (p.active + 1) % n } else { (p.active + n - 1) % n };
-                        }
-                    }
-                    Task::none()
-                } else if horizontal
+                if horizontal
                     && self.table.as_ref().is_some_and(|t| t.view.focused && t.view.editing.is_none())
                 {
                     let dir = if positive { table_view::NavDir::Right } else { table_view::NavDir::Left };
@@ -2306,12 +2108,7 @@ impl App {
                 }
             }
             Message::EnterKey => {
-                if self.wiki_picker.is_some() {
-                    let active = self.wiki_picker.as_ref().map(|p| p.active).unwrap_or(0);
-                    let picked = self.wiki_candidates().get(active).copied().unwrap_or(0);
-                    self.wiki_pick(picked);
-                    Task::none()
-                } else if self
+                if self
                     .table
                     .as_ref()
                     .is_some_and(|t| t.view.focused && t.view.editing.is_some())
@@ -2628,16 +2425,6 @@ impl App {
                 d.reject = None;
                 d.spring = None;
                 self.file_drag_target = None;
-                Task::none()
-            }
-            Message::ToggleTask(item_from) => {
-                if let Some((next, at)) = markdown_edit::toggle_task(self.edit_body(), item_from) {
-                    self.edit.snapshot(&self.note_text);
-                    self.set_edit_body(next);
-                    self.edit.caret = at;
-                    self.edit.anchor = at;
-                    self.after_edit();
-                }
                 Task::none()
             }
             Message::CopyCode(code) => {
@@ -3424,15 +3211,11 @@ impl App {
                 if self.shortcut_recording.take().is_some() {
                     return Task::none();
                 }
-                // Esc 作用域 = 事件来源窗口：先取消文件拖拽，再关双链候选，再关该窗口弹层，
+                // Esc 作用域 = 事件来源窗口：先取消文件拖拽，再关该窗口弹层，
                 // 再退出接管（接管面内的弹层先于接管退出），再取消属性面板编辑态与行内重命名
                 if self.file_drag.take().is_some() {
                     self.file_drag_target = None;
                     self.file_press = None;
-                    return Task::none();
-                }
-                if self.wiki_picker.is_some() {
-                    self.close_wiki_picker(true);
                     return Task::none();
                 }
                 if self.popup.as_ref().is_some_and(|(w, _)| *w == window) {
@@ -3699,8 +3482,6 @@ impl App {
                     if (12..=20).contains(&size) && size != self.global.font_size {
                         self.global.font_size = size;
                         ui::palette::set_ui_base(size);
-                        // 编辑面块度量以行高换算落点，字号变更须随基字号重建
-                        self.refresh_edit();
                         if let Some(t) = self.table.as_mut() {
                             t.rebuild_layout();
                         }
@@ -3723,8 +3504,7 @@ impl App {
                 self.global.font_family = name.clone();
                 ui::set_family(name.as_deref());
                 self.dismiss_popup();
-                // 族名变了，行段度量与编辑面块度量都要按新字体重算
-                self.refresh_edit();
+                // 族名变了，表格行段度量要按新字体重算
                 if let Some(t) = self.table.as_mut() {
                     t.rebuild_layout();
                 }
@@ -3760,11 +3540,13 @@ impl App {
             Message::SoftWrapToggle => {
                 self.global.soft_wrap = !self.global.soft_wrap;
                 self.save_global_now();
+                self.plugins.on_editor_prefs_changed(editor_prefs(self));
                 Task::none()
             }
             Message::InPageTitleToggle => {
                 self.global.in_page_title = !self.global.in_page_title;
                 self.save_global_now();
+                self.plugins.on_editor_prefs_changed(editor_prefs(self));
                 Task::none()
             }
             Message::ContentWidthInput(v) => {
@@ -3777,6 +3559,7 @@ impl App {
                     if w <= 5000 && w != self.global.content_width {
                         self.global.content_width = w;
                         self.save_global_now();
+                        self.plugins.on_editor_prefs_changed(editor_prefs(self));
                     }
                 }
                 Task::none()
@@ -4098,13 +3881,12 @@ impl App {
                 }
                 let mut next = refresh
                     .chain(self.refresh_note_files())
-                    .chain(self.refresh_tag_vocab())
-                    .chain(self.refresh_backlinks());
+                    .chain(self.refresh_tag_vocab());
                 if matches!(follow, FollowUp::Renamed { .. }) {
                     next = next.chain(self.load_vault_meta());
                 }
                 if let Some(rel) = reload_note {
-                    next = next.chain(self.load_note(&rel));
+                    next = next.chain(self.open_file(&rel));
                 }
                 next
             }
@@ -4181,13 +3963,11 @@ impl App {
             }
             Message::DividerAdjust(horizontal, positive) => {
                 // 键盘调整上次拖动过的把手（±2%，双侧钳 12%）；
-                // 门控：编辑面聚焦 / 对话输入聚焦 / 源码档 / 行内重命名在途时方向键属文本操作，不调把手
-                if self.edit.focused
-                    || self
-                        .canvas
-                        .as_ref()
-                        .is_some_and(|s| s.view.card_chat.values().any(|c| c.draft.focused))
-                    || self.note_mode == NoteMode::Source
+                // 门控：对话输入聚焦 / 行内重命名在途时方向键属文本操作，不调把手
+                if self
+                    .canvas
+                    .as_ref()
+                    .is_some_and(|s| s.view.card_chat.values().any(|c| c.draft.focused))
                     || self.rename.is_some()
                     || self.popup.is_some()
                 {
@@ -4747,7 +4527,7 @@ impl App {
         }
     }
 
-    /// 插件笔记面承载一篇笔记：正文真源仍在本 `note_text`，壳内编辑面状态全部复位。
+    /// 插件笔记面承载一篇笔记：正文真源仍在本 `note_text`，编辑态由插件自持。
     /// 协作空间同时建立 CRDT 文档（基线以载入正文为准）。
     pub(crate) fn attach_plugin_note(&mut self, rel: &str, text: String) {
         self.ui.last_note_file = Some(rel.to_string());
@@ -4755,15 +4535,11 @@ impl App {
         self.plugin_note_selection = None;
         self.plugin_note_base = text.clone();
         self.note_text = text.clone();
+        // 换篇后可重试之前失败的图片（句柄按 src 缓存，仍可复用）
+        self.note_images_inflight.clear();
+        self.note_images_failed.clear();
         self.history_kind = atelyx_core::history::HistoryKind::Note;
         self.history.clear();
-        self.source_editor = text_editor::Content::with_text(&text);
-        self.edit.reset(0);
-        self.edit_doc = None;
-        self.edit_meta.clear();
-        self.preview_doc = None;
-        self.note_mode = NoteMode::Read;
-        self.note_edit_caret_pending = false;
         self.dirty = false;
         self.save_error = None;
         self.autosave_deadline = None;
@@ -4782,6 +4558,7 @@ impl App {
                 space_actions::collab_note_loaded(self, rel);
             }
         }
+        crate::plugin_note::publish_presence(self);
         self.schedule_persist();
     }
 
@@ -4809,6 +4586,8 @@ impl App {
         let correction = (merged != self.plugin_note_base).then(|| merged.clone());
         let changed = merged != before;
         self.note_text = merged;
+        // inspector 属性面板与正文同一真源：正文被插件改动后重建解析缓存
+        self.refresh_props();
         if changed {
             self.dirty = true;
             self.save_error = None;
@@ -4841,6 +4620,7 @@ impl App {
         self.note_collab_channel = None;
         self.remote_cursors.clear();
         self.space_note_flushed = None;
+        crate::plugin_note::publish_presence(self);
         self.schedule_persist();
     }
 
@@ -4958,20 +4738,13 @@ impl App {
             self.ui.last_canvas_file = None;
             // 打开中的插件文档实例随切仓库关闭（旧容器路径失效，实例面撤下；投影任务丢弃，后续刷新兜底）
             let _ = plugin_actions::close_doc(self);
-            self.note_mode = NoteMode::Read;
             self.plugin_note_active = false;
             self.plugin_note_selection = None;
             self.pending_plugin_note_open = None;
-            self.note_edit_caret_pending = false;
             self.history.clear();
         }
         self.children.clear();
         self.note_text.clear();
-        self.source_editor = text_editor::Content::new();
-        self.edit.reset(0);
-        self.edit_doc = None;
-        self.edit_meta.clear();
-        self.preview_doc = None;
         self.dirty = false;
         self.save_error = None;
         self.reset_props();
@@ -4979,6 +4752,12 @@ impl App {
         self.expand_all = false;
         self.expand_pending = 0;
         self.rename_notice = None;
+        // 图片句柄按仓库相对路径缓存：换仓库后同一路径指向别的文件，整表作废
+        self.note_images.clear();
+        self.note_image_sizes.clear();
+        self.note_images_inflight.clear();
+        self.note_images_failed.clear();
+        self.note_image_epoch = self.note_image_epoch.wrapping_add(1);
         // 表格会话随仓库切换清空（载入在途不留旧数据）
         self.table = None;
         // 画布会话随仓库切换清空（先停卡内 run，载入在途不留旧数据）
@@ -5119,11 +4898,6 @@ impl App {
                 }
                 self.ui.last_note_file = None;
                 self.note_text.clear();
-                self.source_editor = text_editor::Content::new();
-                self.edit.reset(0);
-                self.edit_doc = None;
-                self.edit_meta.clear();
-                self.preview_doc = None;
                 self.dirty = false;
                 self.save_error = None;
                 self.reset_props();
@@ -5138,33 +4912,7 @@ impl App {
         Some(layout::active_layout(&self.ui).tree)
     }
 
-    // ===== 反链 / 标签词汇表 / 双链候选 =====
-
-    /// 反链扫描：指纹增量刷新 wiki 索引后查询当前笔记（spawn_blocking，回执 gen 守卫）。
-    fn refresh_backlinks(&self) -> Task<Message> {
-        if matches!(self.repo_kind, RepoKind::Space(_)) {
-            return space_actions::refresh_space_backlinks(self);
-        }
-        let Some(rel) = self.ui.last_note_file.clone() else { return Task::none() };
-        let gen = self.epoch();
-        let state = self.vault.clone();
-        let title = rel.rsplit('/').next().unwrap_or(&rel).trim_end_matches(".md").to_string();
-        let rel_for_cb = rel.clone();
-        Task::perform(
-            async move {
-                tokio::task::spawn_blocking(move || {
-                    let (root, exclude, _) = state.session_snapshot()?;
-                    let mut guard = state.wiki.lock().map_err(|e| e.to_string())?;
-                    let index = guard.get_or_insert_with(Default::default);
-                    vault::refresh_wiki_index(&root, &exclude, index)?;
-                    Ok(vault::query_wiki_backlinks(index, &title, &rel))
-                })
-                .await
-                .map_err(|e| e.to_string())?
-            },
-            move |result| Message::BacklinksLoaded(gen, rel_for_cb, result),
-        )
-    }
+    // ===== 标签词汇表 / 全仓库文件清单 =====
 
     /// 标签词汇表扫描（spawn_blocking；候选按 count 降序）。
     fn refresh_tag_vocab(&self) -> Task<Message> {
@@ -5189,7 +4937,7 @@ impl App {
         )
     }
 
-    /// 全仓库笔记清单（双链候选数据源；树序）。空间模式由整树回执填充，此处直通。
+    /// 全仓库文件清单（搜索面板数据源；树序）。空间模式由整树回执填充，此处直通。
     fn refresh_note_files(&self) -> Task<Message> {
         if matches!(self.repo_kind, RepoKind::Space(_)) {
             return Task::none();
@@ -5210,122 +4958,6 @@ impl App {
             },
             move |result| Message::NoteFilesLoaded(gen, result),
         )
-    }
-
-    /// 双链候选的过滤序号（.md 笔记按文件名子串过滤、树序，上限 50）。
-    fn wiki_candidates(&self) -> Vec<usize> {
-        let Some(p) = &self.wiki_picker else { return Vec::new() };
-        let q = p.query.trim().to_lowercase();
-        self.note_files
-            .iter()
-            .enumerate()
-            .filter(|(_, (rel, name))| {
-                rel.ends_with(".md") && (q.is_empty() || name.to_lowercase().contains(&q))
-            })
-            .map(|(i, _)| i)
-            .take(50)
-            .collect()
-    }
-
-    /// 输入 / 删除后的双链候选状态推进：光标处于未闭合 `[[` / `【【` 片段时开启或更新。
-    fn sync_wiki_picker(&mut self) {
-        // 先算清决策（片段位置与查询词），再落到状态（避免借用交叠）
-        enum Sync {
-            Close,
-            Open(usize, String),
-        }
-        let decision = {
-                let body = self.edit_body();
-                let caret = self.edit.caret.min(body.len());
-                let ascii = body[..caret].rfind("[[").map(|i| (i, 2usize));
-                let wide = body[..caret].rfind("【【").map(|i| (i, "【【".len()));
-                let found = match (ascii, wide) {
-                    (Some(a), Some(b)) if a.0 >= b.0 => Some(a),
-                    (Some(_), Some(b)) => Some(b),
-                    (a, b) => a.or(b),
-                };
-                match found {
-                    None => Sync::Close,
-                    Some((from, tlen)) => {
-                        let q_start = from + tlen;
-                        if caret < q_start {
-                            Sync::Close
-                        } else {
-                            let query = &body[q_start..caret];
-                            if query.contains(['[', ']', '【', '】', '\n']) {
-                                Sync::Close
-                            } else {
-                                Sync::Open(from, query.to_string())
-                            }
-                        }
-                    }
-                }
-            };
-        match decision {
-            Sync::Close => self.close_wiki_picker(false),
-            Sync::Open(from, query) => match &mut self.wiki_picker {
-                Some(p) if p.from == from => {
-                    if p.query != query {
-                        p.query = query;
-                        p.active = 0;
-                    }
-                }
-                _ => {
-                    if self.wiki_dismissed_from != Some(from) {
-                        self.wiki_dismissed_from = None;
-                        self.wiki_picker = Some(WikiPicker { from, query, active: 0 });
-                    }
-                }
-            },
-        }
-    }
-
-    /// 关闭双链候选；`dismiss` = Esc 主动关闭（同触发位置不再自动重开）。
-    fn close_wiki_picker(&mut self, dismiss: bool) {
-        if let Some(p) = self.wiki_picker.take() {
-            if dismiss {
-                self.wiki_dismissed_from = Some(p.from);
-            }
-        }
-    }
-
-    /// 光标移出候选片段时收起（光标移入编辑面的导航路径调用）。
-    fn close_wiki_picker_if_outside(&mut self) {
-        if let Some(p) = &self.wiki_picker {
-            let caret = self.edit.caret.min(self.edit_body().len());
-            if caret < p.from {
-                self.close_wiki_picker(false);
-            }
-        }
-    }
-
-    /// 选中双链候选：片段替换为 `[标题](路径)` markdown 链接。
-    fn wiki_pick(&mut self, candidate_index: usize) {
-        let Some(picker) = self.wiki_picker.clone() else { return };
-        let candidates = self.wiki_candidates();
-        let Some(file_index) = candidates.get(candidate_index).copied() else { return };
-        let Some((file, name)) = self.note_files.get(file_index).cloned() else { return };
-        let body = self.edit_body().to_string();
-        let caret = self.edit.caret.min(body.len());
-        if caret < picker.from {
-            self.wiki_picker = None;
-            return;
-        }
-        let label = name.trim_end_matches(".md").replace(['[', ']'], "");
-        let insert = format!("[{}]({})", label, encode_md_href(&file));
-        let mut next = String::with_capacity(body.len() - (caret - picker.from) + insert.len());
-        next.push_str(&body[..picker.from]);
-        next.push_str(&insert);
-        next.push_str(&body[caret..]);
-        self.edit.snapshot(&self.note_text);
-        self.set_edit_body(next);
-        self.edit.caret = picker.from + insert.len();
-        self.edit.anchor = self.edit.caret;
-        self.wiki_picker = None;
-        self.wiki_dismissed_from = None;
-        // 全局 Enter 订阅与编辑面 Newline 事件对同一次按键双发：本路径先落则吞掉随后的 Newline
-        self.wiki_swallow_newline = true;
-        self.after_edit();
     }
 
     // ===== 历史侧车 =====
@@ -5536,14 +5168,9 @@ impl App {
         )
     }
 
-    /// 笔记回滚：全文快照替换正文（撤销可回退），保存链写回并记 restore 版本。
+    /// 笔记回滚：全文快照替换正文，保存链写回并记 restore 版本。
     fn note_history_restore(&mut self, version: atelyx_core::history::HistoryVersion) -> Task<Message> {
-        self.edit.snapshot(&self.note_text);
         self.note_text = version.content.clone();
-        // 源码档正文真源 = note_text 派生的编辑器内容：程序化替换须同步重建
-        if self.note_mode == NoteMode::Source {
-            self.source_editor = text_editor::Content::with_text(&self.note_text);
-        }
         self.dirty = true;
         self.save_error = None;
         self.autosave_deadline = Some(Instant::now() + AUTOSAVE_DEBOUNCE);
@@ -5553,8 +5180,6 @@ impl App {
             self.plugin_note_selection = None;
             plugin_note::publish_state(self, Some(self.note_text.clone()));
         }
-        self.refresh_preview();
-        self.refresh_edit();
         self.refresh_props();
         let Some(rel) = self.ui.last_note_file.clone() else { return Task::none() };
         if matches!(self.repo_kind, RepoKind::Space(_)) {
@@ -5979,11 +5604,6 @@ impl App {
                     }
                     self.ui.last_note_file = None;
                     self.note_text.clear();
-                    self.source_editor = text_editor::Content::new();
-                    self.edit.reset(0);
-                    self.edit_doc = None;
-                    self.edit_meta.clear();
-                    self.preview_doc = None;
                     self.dirty = false;
                     self.save_error = None;
                     self.schedule_persist();
@@ -6395,124 +6015,11 @@ impl App {
         )
     }
 
-    /// 进入只读档：清编辑态解析产物并重建只读渲染。
-    fn enter_read_mode(&mut self) {
-        self.note_mode = NoteMode::Read;
-        self.edit_doc = None;
-        self.edit_meta.clear();
-        self.edit.focused = false;
-        self.note_edit_caret_pending = false;
-        self.refresh_preview();
-    }
-
-    /// 进入预览编辑档：不揭示任何块、不持光标，首帧全篇按块渲染。
-    fn enter_edit_mode(&mut self) {
-        self.note_mode = NoteMode::Edit;
-        self.preview_doc = None;
-        self.edit.active = None;
-        self.edit.preedit = None;
-        self.edit.focused = false;
-        self.refresh_edit();
-    }
-
-    /// 只读档的解析产物：进入只读档或文件载入时重建（渲染面不逐帧解析）。
-    pub(crate) fn refresh_preview(&mut self) {
-        if self.note_mode != NoteMode::Read {
-            self.preview_doc = None;
-            return;
-        }
-        let mut body = strip_frontmatter(&self.note_text).to_string();
-        // 渲染与拖选共用这份源：`\r` 不占位、不计字符位，行尾风格先归一
-        if body.contains('\r') {
-            body = body.replace("\r\n", "\n").replace('\r', "");
-        }
-        let doc = markdown_view::parse_document(&body);
-        self.ensure_note_images(&doc);
-        self.preview_doc = Some(doc);
-    }
-
-    /// 编辑档解析产物与块元数据重建（frontmatter 剥离：编辑面只处理正文，坐标相对正文）。
-    pub(crate) fn refresh_edit(&mut self) {
-        if self.note_mode != NoteMode::Edit {
-            self.edit_doc = None;
-            self.edit_meta.clear();
-            return;
-        }
-        let body = strip_frontmatter(&self.note_text);
-        let doc = markdown_view::parse_document(body);
-        self.edit_meta = markdown_view::block_meta(&doc.blocks);
-        // 空文档（无块）也要有光标宿主：补一个空块
-        if self.edit_meta.is_empty() {
-            self.edit_meta.push(markdown_view::empty_block_meta());
-        }
-        self.ensure_note_images(&doc);
-        self.edit_doc = Some(doc);
-    }
-
-    /// 文档内块级图片的按需载入（src 取自 `markdown_view::collect_image_srcs`）。
-    fn ensure_note_images(&mut self, doc: &MarkdownDocument) {
-        let srcs = markdown_view::collect_image_srcs(&doc.source, &doc.blocks);
-        self.ensure_image_srcs(srcs);
-    }
-
     /// 该内容键的图片是否可以发起载入：未失败，或失败已过退避且仍有重试余量。
     pub(crate) fn can_load_image(&self, key: &str) -> bool {
         match self.note_images_failed.get(key) {
             None => true,
             Some(retry) => !retry.exhausted() && Instant::now() >= retry.retry_at,
-        }
-    }
-
-    /// 一组图片 src 的按需载入：缺句柄且未在途/未失败的 src 发起读盘（仓库相对路径）或
-    /// 公网策略下载（http/https）任务，任务经 update 收尾统一链出。失败不重试（失败集）。
-    pub(crate) fn ensure_image_srcs(&mut self, srcs: Vec<String>) {
-        if srcs.is_empty() {
-            return;
-        }
-        let gen = self.epoch();
-        let root = self.vault.root().ok();
-        let mut tasks = Vec::new();
-        for src in srcs {
-            if self.note_images.contains_key(&src)
-                || !self.can_load_image(&src)
-                || !self.note_images_inflight.insert(src.clone())
-            {
-                continue;
-            }
-            let task = match (&root, src.starts_with("http://") || src.starts_with("https://")) {
-                // 空间模式：仓库内路径走服务端字节读取
-                (_, true) => {
-                    let url = src.clone();
-                    Task::perform(
-                        async move { atelyx_core::remote_image::fetch_external_image(&url).await },
-                        move |r| Message::ImageLoaded(gen, src.clone(), r),
-                    )
-                }
-                (_, false) if matches!(self.repo_kind, RepoKind::Space(_)) => {
-                    space_actions::space_load_image(self, gen, src.clone())
-                }
-                (Some(root), false) => {
-                    let root = root.clone();
-                    let path = src.clone();
-                    Task::perform(
-                        async move { vault::read_file_bytes(&root, &path) },
-                        move |r| Message::ImageLoaded(gen, src.clone(), r),
-                    )
-                }
-                // 无仓库时仓库内图片无落点：保持占位
-                (None, false) => {
-                    self.note_images_inflight.remove(&src);
-                    continue;
-                }
-            };
-            tasks.push(task);
-        }
-        if !tasks.is_empty() {
-            let batch = Task::batch(tasks);
-            self.image_loads = Some(match self.image_loads.take() {
-                Some(prev) => prev.chain(batch),
-                None => batch,
-            });
         }
     }
 
@@ -6739,115 +6246,7 @@ impl App {
         )
     }
 
-    /// 光标所在块序号（严格落在块区间内；空行 / 文外返回 None）。
-    fn block_at(&self, offset: usize) -> Option<usize> {
-        self.edit_meta.iter().position(|m| offset >= m.from && offset <= m.to)
-    }
-
-    /// 光标最近块（块间空行与文外兜底用）。
-    fn nearest_block(&self, offset: usize) -> Option<usize> {
-        if self.edit_meta.is_empty() {
-            return None;
-        }
-        if let Some(i) = self.block_at(offset) {
-            return Some(i);
-        }
-        if let Some(first) = self.edit_meta.first() {
-            if offset < first.from {
-                return Some(0);
-            }
-        }
-        self.edit_meta.iter().rposition(|m| m.from <= offset).or(Some(0))
-    }
-    /// 活动块 = 光标所在块。光标落在空白区（文首 / 块间 / 文末的空白行与文末虚拟行）
-    /// 时不揭示任何块，键盘与光标由编辑面托管；其余文外位置回到最近块保住键盘宿主。
-    fn sync_active(&mut self) {
-        let len = self.edit_body().len();
-        let caret = self.edit.caret.min(len);
-        self.close_wiki_picker_if_outside();
-        if let Some(i) = self.block_at(caret) {
-            self.edit.active = Some(i);
-            return;
-        }
-        // 文末虚拟行：末块之后还有尾部字节时，caret == len 也由编辑面托管；
-        // caret == 0 落在文首 Gap 行（能走到这里说明首块前有空白行，端点上无相邻块）
-        let on_blank_line = caret == 0
-            || caret < len
-            || self.edit_meta.last().is_some_and(|last| len > last.to);
-        self.edit.active = if on_blank_line { None } else { self.nearest_block(caret) };
-    }
-
-    /// 选区锚点所在块。
-    fn anchor_block(&self) -> Option<usize> {
-        self.block_at(self.edit.anchor.min(self.edit_body().len()))
-    }
-
-    /// 一次编辑落地后的收尾。
-    fn after_edit(&mut self) {
-        self.refresh_edit();
-        self.sync_active();
-        self.autosave_deadline = Some(Instant::now() + AUTOSAVE_DEBOUNCE);
-        self.sync_wiki_picker();
-        // 空间模式：差分合入协作文档并上行 Update 帧（不置脏、不排保存）
-        space_actions::collab_after_edit(self);
-    }
-
-    /// 需要回显源码的块：光标所在块 + 选区锚点所在块（无选区时不揭示锚点块）。
-    pub fn editable_blocks(&self) -> Vec<usize> {
-        let mut out = Vec::new();
-        if let Some(i) = self.edit.active {
-            out.push(i);
-        }
-        let (a, b) = self.edit.selection();
-        if b > a {
-            if let Some(i) = self.anchor_block() {
-                if !out.contains(&i) {
-                    out.push(i);
-                }
-            }
-        }
-        out
-    }
-
-    /// 删除选区（有则删）。
-    fn delete_selection(&mut self) -> bool {
-        let (a, b) = self.edit.selection();
-        if b <= a {
-            return false;
-        }
-        let body = self.edit_body().to_string();
-        self.edit.snapshot(&self.note_text);
-        let mut next = String::with_capacity(body.len());
-        next.push_str(&body[..a]);
-        next.push_str(&body[b..]);
-        self.set_edit_body(next);
-        self.edit.caret = a;
-        self.edit.anchor = a;
-        self.after_edit();
-        true
-    }
-
-    /// 插入文本（替换选区）。行尾风格归一到 `\n`：正文只认 LF 换行，粘贴带来的 CRLF
-    /// 会让段内换行在排版里被拆成两根（多出一根源码里没有的空行）。
-    fn edit_insert(&mut self, text: String) {
-        let text = markdown_edit::normalize_newlines(text);
-        if text.is_empty() {
-            return;
-        }
-        let body = self.edit_body().to_string();
-        self.edit.snapshot(&self.note_text);
-        let (a, b) = self.edit.selection();
-        let mut next = String::with_capacity(body.len() + text.len());
-        next.push_str(&body[..a]);
-        next.push_str(&text);
-        next.push_str(&body[b..]);
-        self.set_edit_body(next);
-        self.edit.caret = a + text.len();
-        self.edit.anchor = self.edit.caret;
-        self.after_edit();
-    }
-
-    /// 插件视角的当前选区：偏移相对正文（frontmatter 之后）。阅读态与未打开笔记都回空选区。
+    /// 插件视角的当前选区：偏移相对正文（frontmatter 之后）。未打开笔记回空选区。
     pub(crate) fn editor_selection(&self) -> EditorSelection {
         let path = self.ui.last_note_file.clone();
         if self.plugin_note_active {
@@ -6860,17 +6259,10 @@ impl App {
             let to = anchor.max(head).saturating_sub(base).min(body.len());
             return EditorSelection { path, text: body[from..to].to_string(), from, to };
         }
-        if self.note_mode != NoteMode::Edit {
-            return EditorSelection::empty(path);
-        }
-        let body = self.edit_body();
-        let (from, to) = self.edit.selection();
-        let from = from.min(body.len());
-        let to = to.min(body.len()).max(from);
-        EditorSelection { path, text: body[from..to].to_string(), from, to }
+        EditorSelection::empty(path)
     }
 
-    /// 插件替换当前选区（空串 = 删除选区）。走与键入同一出口：撤销栈、置脏与自动保存期限一致。
+    /// 插件替换当前选区（空串 = 删除选区），走与插件编辑同一出口：三方合并、置脏与自动保存期限一致。
     pub(crate) fn editor_replace_selection(&mut self, text: String) -> Result<(), String> {
         if self.ui.last_note_file.is_none() {
             return Err("未打开笔记".to_string());
@@ -6897,19 +6289,10 @@ impl App {
             crate::plugin_note::publish_state(self, Some(published));
             return Ok(());
         }
-        if self.note_mode != NoteMode::Edit {
-            return Err("笔记不在编辑状态".to_string());
-        }
-        if text.is_empty() {
-            self.delete_selection();
-        } else {
-            self.edit_insert(text);
-        }
-        Ok(())
+        Err("笔记不在编辑状态".to_string())
     }
 
-    /// 命令候选键分派：录制态先吃按键；注册表按序先到先得——Note 域让位给
-    /// 编辑面部件内的绑定表（部件持焦点即已消费本键，未持焦点则放行后命者），
+    /// 命令候选键分派：录制态先吃按键；注册表按序先到先得，
     /// Table 域在表格持焦点时转发既有 TableMsg。注册表外的 Ctrl+S（保存）与
     /// Ctrl+A（表格全选）保持硬编码，下游按焦点自守卫。
     fn on_key_command(&mut self, key: keyboard::Key, mods: keyboard::Modifiers) -> Task<Message> {
@@ -6922,11 +6305,6 @@ impl App {
                 continue;
             }
             match id.scope() {
-                commands::Scope::Note => {
-                    if self.edit.focused {
-                        return Task::none();
-                    }
-                }
                 commands::Scope::Table => {
                     if self.table.as_ref().is_some_and(|t| t.view.focused) {
                         if let Some(msg) = table_msg_of(*id) {
@@ -6943,15 +6321,12 @@ impl App {
                 }
             }
         }
-        // 重做别名：redo 未被重定义时 mod+shift+z 沿用（编辑面聚焦走部件内注入，表格 / 画布直接分派）
+        // 重做别名：redo 未被重定义时 mod+shift+z 沿用（表格 / 画布直接分派）
         if (mods.control() || mods.logo())
             && mods.shift()
             && !mods.alt()
             && matches!(&key, keyboard::Key::Character(c) if c.to_lowercase() == "z")
         {
-            if self.edit.focused {
-                return Task::none();
-            }
             if self.table.as_ref().is_some_and(|t| t.view.focused)
                 && commands::redo_alias_active(&self.global.command_shortcuts, commands::Scope::Table)
             {
@@ -7067,44 +6442,6 @@ impl App {
         None
     }
 
-    /// 读 note 视图文件内容（仓库切换恢复与文件点击共用；根在发起时冻结，
-    /// 任务在途时切换仓库不会让读盘落到新仓库路径）。
-    fn load_note(&self, rel: &str) -> Task<Message> {
-        if matches!(self.repo_kind, RepoKind::Space(_)) {
-            let Some(session) = space_actions::session_of(self) else {
-                return Task::none();
-            };
-            let gen = self.epoch();
-            let rel = rel.to_string();
-            let rel_for_cb = rel.clone();
-            let (client, space_id) = (session.client, session.space_id);
-            return Task::perform(
-                async move {
-                    client
-                        .get_file_text(&space_id, &rel)
-                        .await
-                        .map_err(|e| e.to_string())
-                },
-                move |result| Message::FileLoaded(gen, rel_for_cb, result),
-            );
-        }
-        let Ok(root) = self.vault.root() else {
-            return Task::none();
-        };
-        let gen = self.epoch();
-        let rel = rel.to_string();
-        let rel_for_cb = rel.clone();
-        Task::perform(
-            async move {
-                let path = vault::safe_join(&root, &rel, false)?;
-                let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
-                String::from_utf8(bytes)
-                    .map_err(|_| "非 UTF-8 文本文件，暂不支持打开".to_string())
-            },
-            move |result| Message::FileLoaded(gen, rel_for_cb, result),
-        )
-    }
-
     fn title(&self, id: window::Id) -> String {
         if self.main_id == Some(id) {
             return "Atelyx".into();
@@ -7142,13 +6479,12 @@ impl App {
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        // 心跳仅在有待过期通知、提醒条在途、悬停提示在途（距离收起判定）、编辑面聚焦、
+        // 心跳仅在有待过期通知、提醒条在途、悬停提示在途（距离收起判定）、
         // 文件拖拽悬停折叠目录（自动展开判定）、笔记 / 表格在场有待发状态或有对端
         // （补发 / 保活 / 远端剔除搭载）、表格图片长按候选或快捷键页展示中（冲突警示两态闪烁）时挂载
         let need_tick = !self.notifications.is_empty()
             || self.rename_notice.is_some()
             || self.tooltip.is_some()
-            || self.edit.focused
             // 文件拖拽悬停折叠目录：自动展开挂起需心跳到点判定
             || self.file_drag.as_ref().is_some_and(|d| d.spring.is_some())
             // 笔记在场：有待发状态或有对端时需要周期拍；单人无对端不挂拍，避免空闲被 10Hz 重绘
@@ -7186,11 +6522,10 @@ impl App {
             } else {
                 Subscription::none()
             },
-            // 方向键：双链候选开启时导航候选，否则调整分割把手（语义在 NavKey 处理器分派）
+            // 方向键：表格选中态导航，其余落点调整分割把手（语义在 NavKey 处理器分派）
             // 表格专属键在弹层打开时也照发，由 on_msg 处理器按弹层态自守卫。
             // 已被控件捕获的左右键（文本输入 / 编辑器光标）不再全局派发：输入框里的光标
-            // 移动不得连带调布局。上下键照发——候选高亮由本路径驱动，而编辑面同时吃掉
-            // 光标移动，捕获状态分不开这两种意图，改由 NavKey 处理器按输入态门控。
+            // 移动不得连带调布局。上下键照发，由 NavKey 处理器按输入态门控。
             iced::event::listen_with(|event, status, window| match event {
                 Event::Keyboard(keyboard::Event::ModifiersChanged(m)) => {
                     Some(Message::ModsChanged(m))

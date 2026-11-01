@@ -69,7 +69,6 @@ pub struct LineRun {
     pub(crate) st: TextStyle,
     /// 相对字号倍数（脚注角标等）。
     pub(crate) scale: f32,
-    link: Option<LinkTarget>,
 }
 
 /// 一个顶层块的渲染产物：前置空行数 + 控件。
@@ -77,15 +76,6 @@ pub struct BlockChunk<'a> {
     /// 与上一块之间的源码空行数（首块为 0；块间距 = 空行数 × 行高）。
     pub gap_before: usize,
     pub element: Element<'a, Message>,
-}
-
-/// 源码态排版口径。
-#[derive(Clone, Copy, Debug)]
-pub enum SourceKind {
-    /// 散文类块：字号与行高随块类型（标题逐级放大）。
-    Prose { size: f32, line_height: f32 },
-    /// 代码类块：等宽小字。
-    Mono { size: f32 },
 }
 
 /// 无根留白的正文体，字号按 `scale` 等比缩放（调用方自带边距；画布卡浮层传视口缩放、面板传 1.0）。
@@ -109,7 +99,6 @@ fn document_body_with<'a>(
     let render = Render {
         pal: Palette::from_theme(theme),
         opts: link_options(),
-        interactive: false,
         images,
         soft_break,
         scale,
@@ -122,42 +111,6 @@ fn document_body_with<'a>(
         body = body.push(chunk.element);
     }
     body.width(Length::Fill).into()
-}
-
-/// 编辑面块元数据。
-#[derive(Clone)]
-pub struct BlockMeta {
-    pub from: usize,
-    pub to: usize,
-    /// 列表块（Enter 延续项、空项退格用）。
-    pub list: bool,
-    pub source: SourceKind,
-}
-
-/// 编辑面块元数据（按顶层块序）。
-pub fn block_meta(blocks: &[MarkdownBlock]) -> Vec<BlockMeta> {
-    blocks
-        .iter()
-        .map(|b| {
-            let (from, to) = (block_from(b), block_to(b));
-            BlockMeta {
-                from,
-                to,
-                list: matches!(b, MarkdownBlock::List { .. }),
-                source: block_source_style(b, 1.0),
-            }
-        })
-        .collect()
-}
-
-/// 空文档的空块元数据（编辑档给无块正文一个光标宿主）。
-pub fn empty_block_meta() -> BlockMeta {
-    BlockMeta {
-        from: 0,
-        to: 0,
-        list: false,
-        source: SourceKind::Prose { size: base_size(), line_height: LINE_HEIGHT },
-    }
 }
 
 /// 阅读面解析入口：与渲染面共用同一套链接形态判定。
@@ -252,29 +205,6 @@ fn heading_size(level: u8) -> f32 {
         }
 }
 
-/// 块的源码态口径：结构块与散文块统一按整块源码回显，字号随块类型（按 `scale` 缩放）。
-fn block_source_style(block: &MarkdownBlock, scale: f32) -> SourceKind {
-    match block {
-        MarkdownBlock::Heading { level, .. } => {
-            SourceKind::Prose { size: heading_size(*level) * scale, line_height: 1.3 }
-        }
-        MarkdownBlock::Paragraph { .. }
-        | MarkdownBlock::List { .. }
-        | MarkdownBlock::Blockquote { .. } => {
-            SourceKind::Prose { size: base_size() * scale, line_height: LINE_HEIGHT }
-        }
-        MarkdownBlock::FootnoteDef { .. } => {
-            SourceKind::Prose { size: base_size() * scale * 0.9, line_height: LINE_HEIGHT }
-        }
-        MarkdownBlock::FencedCode { .. }
-        | MarkdownBlock::IndentedCode { .. }
-        | MarkdownBlock::Table { .. }
-        | MarkdownBlock::HtmlBlock { .. }
-        | MarkdownBlock::MathBlock { .. }
-        | MarkdownBlock::Hr { .. } => SourceKind::Mono { size: mono_size() * scale },
-    }
-}
-
 /// 引用内边距（每层引用 10px）。
 const QUOTE_PAD: f32 = 10.0;
 /// 引用竖线宽度。
@@ -346,8 +276,6 @@ fn callout_badge<'a>(name: &str, color: Color, scale: f32) -> Element<'a, Messag
 struct Render<'a> {
     pal: Palette,
     opts: ParseOptions,
-    /// 任务框可勾（只读渲染为假）。
-    interactive: bool,
     images: &'a ImageHandles,
     /// 宽松换行（false = 段内单个换行渲染为空格）。
     soft_break: bool,
@@ -517,13 +445,7 @@ impl Render<'_> {
         width: f32,
     ) -> Element<'a, Message> {
         if item.task {
-            let from = item.from;
             let box_widget = checkbox(item.checked);
-            let box_widget = if self.interactive {
-                box_widget.on_toggle(move |_| Message::ToggleTask(from))
-            } else {
-                box_widget
-            };
             container(box_widget)
                 .width(Length::Fixed(width))
                 .padding(Padding { top: 2.0, ..Padding::default() })
@@ -542,7 +464,6 @@ impl Render<'_> {
             text: format!("[{label}] "),
             st: TextStyle { color: Some(self.pal.accent), ..self.text_style() },
             scale: 1.0,
-            link: None,
         }];
         runs.extend(self.runs(source, inline, TextStyle { color: Some(self.pal.muted), ..self.text_style() }));
         runs
@@ -691,7 +612,6 @@ impl Render<'_> {
             let cells = Render {
                 pal,
                 opts: link_options(),
-                interactive: self.interactive,
                 images,
                 soft_break: self.soft_break,
                 scale: self.scale,
@@ -825,7 +745,7 @@ impl Render<'_> {
                 } else {
                     text.replace("\r\n", "\n").replace(['\r', '\n'], " ")
                 };
-                out.push(LineRun { text, st, scale: 1.0, link: None });
+                out.push(LineRun { text, st, scale: 1.0 });
             }
             InlineSpan::Strong { children, .. } => {
                 let inner = TextStyle { font: Font { weight: iced::font::Weight::Bold, ..st.font }, ..st };
@@ -853,7 +773,7 @@ impl Render<'_> {
             }
             InlineSpan::Code { text, .. } => {
                 let inner = TextStyle { font: crate::ui::mono(), bg: Some(self.pal.panel), ..st };
-                out.push(LineRun { text: text.clone(), st: inner, scale: 1.0, link: None });
+                out.push(LineRun { text: text.clone(), st: inner, scale: 1.0 });
             }
             // 公式降级为源码文本
             InlineSpan::MathInline { from, to, .. } => {
@@ -862,17 +782,15 @@ impl Render<'_> {
                     text: source[*from..*to].to_string(),
                     st: TextStyle { font: Font { style: iced::font::Style::Italic, ..inner.font }, ..inner },
                     scale: 1.0,
-                    link: None,
                 });
             }
             InlineSpan::Comment { .. } => {}
-            InlineSpan::Link { from, to, href, label, form, .. } => {
+            InlineSpan::Link { from, to, label, form, .. } => {
                 match form {
                     LinkForm::Plain => out.push(LineRun {
                         text: source[*from..*to].to_string(),
                         st,
                         scale: 1.0,
-                        link: None,
                     }),
                     LinkForm::External | LinkForm::Path | LinkForm::Wiki => {
                         let inner = TextStyle { color: Some(self.pal.accent), underline: true, ..st };
@@ -880,31 +798,28 @@ impl Render<'_> {
                             text: label.clone(),
                             st: inner,
                             scale: 1.0,
-                            link: Some(LinkTarget { href: href.clone(), form: *form }),
                         });
                     }
                     LinkForm::Create => {
                         let inner = TextStyle { color: Some(self.pal.muted), underline: true, ..st };
-                        out.push(LineRun { text: label.clone(), st: inner, scale: 1.0, link: None });
+                        out.push(LineRun { text: label.clone(), st: inner, scale: 1.0 });
                     }
                 }
             }
-            InlineSpan::Autolink { href, label, .. } => {
+            InlineSpan::Autolink { label, .. } => {
                 let inner = TextStyle { color: Some(self.pal.accent), underline: true, ..st };
                 out.push(LineRun {
                     text: label.clone(),
                     st: inner,
                     scale: 1.0,
-                    link: Some(LinkTarget { href: href.clone(), form: LinkForm::External }),
                 });
             }
-            InlineSpan::Wiki { target, label, .. } => {
+            InlineSpan::Wiki { label, .. } => {
                 let inner = TextStyle { color: Some(self.pal.accent), underline: true, ..st };
                 out.push(LineRun {
                     text: label.clone(),
                     st: inner,
                     scale: 1.0,
-                    link: Some(LinkTarget { href: target.clone(), form: LinkForm::Wiki }),
                 });
             }
             // 图片以替代文字占位（不加载图片字节）
@@ -915,7 +830,6 @@ impl Render<'_> {
                     text: format!("[图片：{name}]"),
                     st: TextStyle { font: Font { style: iced::font::Style::Italic, ..inner.font }, ..inner },
                     scale: 1.0,
-                    link: None,
                 });
             }
             InlineSpan::Tag { tag, .. } => {
@@ -926,12 +840,12 @@ impl Render<'_> {
                     ..st
                 };
                 let text = format!("#{tag}");
-                out.push(LineRun { text, st: inner, scale: 1.0, link: None });
+                out.push(LineRun { text, st: inner, scale: 1.0 });
             }
             InlineSpan::FootnoteRef { label, .. } => {
                 let inner = TextStyle { color: Some(self.pal.accent), ..st };
                 let text = format!("[{label}]");
-                out.push(LineRun { text, st: inner, scale: 0.85, link: None });
+                out.push(LineRun { text, st: inner, scale: 0.85 });
             }
             InlineSpan::Mention { label, trigger, .. } => {
                 let inner = TextStyle {
@@ -941,7 +855,7 @@ impl Render<'_> {
                     ..st
                 };
                 let text = format!("{trigger}{label}");
-                out.push(LineRun { text, st: inner, scale: 1.0, link: None });
+                out.push(LineRun { text, st: inner, scale: 1.0 });
             }
             // raw HTML 降级为源码文本
             InlineSpan::Html { from, to, .. } => {
@@ -950,11 +864,10 @@ impl Render<'_> {
                     text: source[*from..*to].to_string(),
                     st: inner,
                     scale: 1.0,
-                    link: None,
                 });
             }
             InlineSpan::HardBreak { .. } => {
-                out.push(LineRun { text: "\n".to_string(), st, scale: 1.0, link: None });
+                out.push(LineRun { text: "\n".to_string(), st, scale: 1.0 });
             }
         }
     }
@@ -965,10 +878,7 @@ impl Render<'_> {
         if run.scale != 1.0 {
             leaf = leaf.size(self.base() * run.scale);
         }
-        match run.link {
-            Some(target) => self.linked(leaf, target.href, target.form),
-            None => leaf,
-        }
+        leaf
     }
 
     /// 片段表 → 渲染 span。
@@ -986,20 +896,6 @@ impl Render<'_> {
         align: alignment::Horizontal,
     ) -> Element<'a, Message> {
         rich(self.run_spans(runs.to_vec()), size, line_height, color, align)
-    }
-
-    /// 交互档给链接片段挂触点（纯只读档不挂，链接仅作样式）。
-    fn linked<'a>(
-        &self,
-        leaf: Span<'a, LinkTarget, Font>,
-        href: String,
-        form: LinkForm,
-    ) -> Span<'a, LinkTarget, Font> {
-        if self.interactive {
-            leaf.link(LinkTarget { href, form })
-        } else {
-            leaf
-        }
     }
 
     /// 图片块：句柄已载入 → image 部件（`|W` / `|WxH` 尺寸语法生效，缺省自然尺寸且
@@ -1090,48 +986,8 @@ fn item_content_range(source: &str, item: &MarkdownListItem) -> (usize, usize) {
     (content_from, content_to)
 }
 
-/// 列表项首段内容文本：剥标记与引用前缀（项区间跨引用块时续行带 `>`），
-/// 止于第一个嵌套子块起点（项内后续段落归 children）。渲染与图片收集共用。
-fn item_content(source: &str, item: &MarkdownListItem) -> String {
-    let (from, to) = item_content_range(source, item);
-    strip_quote_marks(&source[from..to])
-}
-
-/// 收集文档中按块渲染的图片 src（图片段落与列表项图片内容；行内图片不收集不载入）。
-/// 供应用层发起按需载入；与渲染的块级图片判定同源。
-pub fn collect_image_srcs(source: &str, blocks: &[MarkdownBlock]) -> Vec<String> {
-    let opts = link_options();
-    let mut out = Vec::new();
-    collect_walk(source, &opts, blocks, &mut out);
-    out
-}
-
-fn collect_walk(source: &str, opts: &ParseOptions, blocks: &[MarkdownBlock], out: &mut Vec<String>) {
-    for block in blocks {
-        match block {
-            MarkdownBlock::Paragraph { inline, .. } => {
-                if let Some(InlineSpan::Image { src, .. }) = image_only(inline) {
-                    out.push(src.clone());
-                }
-            }
-            MarkdownBlock::Blockquote { children, .. } => collect_walk(source, opts, children, out),
-            MarkdownBlock::List { items, .. } => {
-                for item in items {
-                    let content = item_content(source, item);
-                    let spans = parse_inline(&content, 0, content.len(), opts);
-                    if let Some(InlineSpan::Image { src, .. }) = image_only(&spans) {
-                        out.push(src.clone());
-                    }
-                    collect_walk(source, opts, &item.children, out);
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
 /// 行内富文本（默认字色与行内对齐可选，供引用/脚注的弱化文本与表格单元格对齐用）。
-/// 链接触点常驻：纯只读档的行内片段不带链接，处理器不会触发。
+/// 片段不带链接：点击处理器只为推断 `Link` 泛型，实际不会被触发。
 fn rich<'a>(
     spans: Vec<Span<'a, LinkTarget, Font>>,
     size: f32,
@@ -1442,15 +1298,5 @@ mod tests {
         assert_eq!(parse_px(Some("-3")), None);
         assert_eq!(parse_px(Some("abc")), None);
         assert_eq!(parse_px(None), None);
-    }
-
-    #[test]
-    fn collect_image_srcs_covers_block_positions() {
-        let src = "![a](p1.png)\n\n> ![b](p2.png)\n\n- ![c](p3.png)\n- 文字 ![d](p4.png)\n\n行内 ![e](p5.png) 混排";
-        let doc = parse_markdown(src, &link_options());
-        assert_eq!(
-            collect_image_srcs(&doc.source, &doc.blocks),
-            vec!["p1.png".to_string(), "p2.png".to_string(), "p3.png".to_string()]
-        );
     }
 }

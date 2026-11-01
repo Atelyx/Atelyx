@@ -37,6 +37,54 @@ pub mod name {
     /// 当前笔记会话的正文 / 落盘状态变化（协作远端合入、保存成功或失败、属性面板改写）。
     /// payload 见 [`NoteChangedPayload`]。
     pub const NOTE_CHANGED: &str = "note:changed";
+    /// 当前笔记的远端协作者光标（进入 / 移动 / 离场都会发；无协作者 = 空清单）。
+    /// payload 见 [`NotePresencePayload`]。
+    pub const NOTE_PRESENCE: &str = "note:presence";
+    /// 全局编辑偏好变更（软换行 / 页面内标题 / 正文宽度）。payload 同
+    /// `editor.prefs` 的 result（[`crate::method::EditorPrefs`]）。
+    pub const EDITOR_PREFS_CHANGED: &str = "editor:prefs.changed";
+}
+
+/// [`name::NOTE_PRESENCE`] 的 payload：当前笔记路径 + 远端协作者光标（不含本端）。
+/// `anchor` / `head` 与 `note.open` 回执的 `text` 同一坐标系（全文字节偏移）；缺省 = 该成员没有光标。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotePresencePayload {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cursors: Vec<NoteRemoteCursor>,
+}
+
+/// 一位远端协作者的光标（`color` 为 `#rrggbb` 或 `#rrggbbaa`）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NoteRemoteCursor {
+    pub name: String,
+    pub color: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<usize>,
+}
+
+/// 订阅事件名是否在封闭表内（宿主另允许 `ai::HOST_CHAT_EVENT`，见插件运行时）。
+pub fn is_known(name: &str) -> bool {
+    matches!(
+        name,
+        name::VAULT_SWITCH
+            | name::TABLE_CHANGED
+            | name::TABLE_SELECTION_CHANGED
+            | name::AI_CHAT_CHANGED
+            | name::AI_CHAT_RELOAD
+            | name::AI_CHAT_PERSIST
+            | name::VAULT_FILE_CHANGED
+            | name::SPACE_META_CHANGED
+            | name::WINDOW_FILE_DROP
+            | name::NOTE_CHANGED
+            | name::NOTE_PRESENCE
+            | name::EDITOR_PREFS_CHANGED
+    )
 }
 
 /// [`name::NOTE_CHANGED`] 的 payload：`text` 只在正文被宿主改写时给出（保存成功回填合流结果、

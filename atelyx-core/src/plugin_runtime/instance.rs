@@ -1406,6 +1406,10 @@ impl Instance {
                         path: p.path,
                     }
                 }
+                method::editor::PREFS => HostRequest::EditorPrefs {
+                    plugin_id: self.id.clone(),
+                    request_id: 0,
+                },
                 method::editor::REPLACE_SELECTION => {
                     let p: method::EditorReplaceParams = parse(params).map_err(|e| e.to_string())?;
                     p.validate()?;
@@ -1465,6 +1469,19 @@ impl Instance {
                         path: p.path,
                     }
                 }
+                method::note::RENAME => {
+                    let p: method::NoteRenameParams = parse(params).map_err(|e| e.to_string())?;
+                    p.validate()?;
+                    HostRequest::NoteRename {
+                        plugin_id: self.id.clone(),
+                        request_id: 0,
+                        params: p,
+                    }
+                }
+                method::vault::TAGS => HostRequest::VaultTags {
+                    plugin_id: self.id.clone(),
+                    request_id: 0,
+                },
                 method::history::ACTIVITY => HostRequest::HistoryActivity {
                     plugin_id: self.id.clone(),
                     request_id: 0,
@@ -1819,20 +1836,7 @@ impl Instance {
 
     fn on_subscribe(&self, params: &Value) -> Result<Value, RpcError> {
         let p: event::SubscribeParams = parse(params)?;
-        if !matches!(
-            p.name.as_str(),
-            event::name::VAULT_SWITCH
-                | event::name::TABLE_CHANGED
-                | event::name::TABLE_SELECTION_CHANGED
-                | event::name::AI_CHAT_CHANGED
-                | event::name::AI_CHAT_RELOAD
-                | event::name::AI_CHAT_PERSIST
-                | event::name::VAULT_FILE_CHANGED
-                | event::name::SPACE_META_CHANGED
-                | event::name::WINDOW_FILE_DROP
-                | event::name::NOTE_CHANGED
-                | method::ai::HOST_CHAT_EVENT
-        ) {
+        if !event::is_known(&p.name) && p.name != method::ai::HOST_CHAT_EVENT {
             return Err(RpcError::failed(format!("未知事件名：{}", p.name)));
         }
         self.subscriptions.lock().unwrap().insert(p.name.clone());
@@ -2671,6 +2675,7 @@ fn is_shell_method(method_name: &str) -> bool {
             | method::vault::IMAGE_INFO
             | method::vault::LIST
             | method::vault::EXISTS
+            | method::vault::TAGS
             | method::vault::REMOVE
             | method::vault::RENAME
             | method::table::SNAPSHOT
@@ -2690,12 +2695,14 @@ fn is_shell_method(method_name: &str) -> bool {
             | method::editor::OPEN_FILES
             | method::editor::REPLACE_SELECTION
             | method::editor::OPEN_FILE
+            | method::editor::PREFS
             | method::note::OPEN
             | method::note::EDIT
             | method::note::SAVE
             | method::note::CLOSE
             | method::note::AWARENESS
             | method::note::BACKLINKS
+            | method::note::RENAME
             | method::history::ACTIVITY
             | method::history::DAY
             | method::history::OPEN
@@ -2964,6 +2971,8 @@ mod tests {
             event::name::SPACE_META_CHANGED,
             event::name::WINDOW_FILE_DROP,
             event::name::NOTE_CHANGED,
+            event::name::NOTE_PRESENCE,
+            event::name::EDITOR_PREFS_CHANGED,
         ] {
             let ack = instance
                 .dispatch(event::SUBSCRIBE, &json!({ "name": name }))

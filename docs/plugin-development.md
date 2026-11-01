@@ -443,8 +443,8 @@ impl PluginHandler for Todo {
 | `text(content, role)` | 单行、超出按宽度省略；`role` = `Title` / `Heading` / `Label` / `FieldLabel` / `Caption` / `Value`，字号与颜色由角色定。`caption` / `field_label` 是同角色的换行版（按可用宽度折行） |
 | `text_styled(content, TextStyle)` | 按样式绘制：`TextStyle::new(role).color(token).weight(TextWeight::SemiBold).mono().wrap()`（等宽、换行、字重、语义色） |
 | `button` / `ghost_button` / `button_enabled` / `ghost_button_enabled` | 常规底 / 无底色 / 带禁用态，点击回 `Click { id }` |
-| `text_input(id, value, placeholder)` | 单行输入框；`text_input_sized` 固定宽，`text_input_password` 密文；回车回 `Submit { id }` |
-| `text_area(id, value, placeholder, height)` | 多行输入框：软换行与显式换行都排，回车**插入换行**不回 `Submit`，上下键 / 行首尾键按可视行走，光标超出内框时纵向跟随。`text_area_submit` 是回车提交、Shift+回车换行的变体（聊天输入） |
+| `text_input(id, value, placeholder)` | 单行输入框；`text_input_sized` 固定宽，`text_input_password` 密文；回车回 `Submit { id }`。`text_input_inline` / `text_input_inline_sized` 是透明底、仅聚焦出描边的行内版（属性槽这类就地编辑） |
+| `text_area(id, value, placeholder, height)` | 多行输入框：软换行与显式换行都排，回车**插入换行**不回 `Submit`，上下键 / 行首尾键按可视行走，光标超出内框时纵向跟随。`text_area_submit` 是回车提交、Shift+回车换行的变体（聊天输入）；`text_area_plain_fixed` 是无底色定高变体（空行这类只占一行、不画框的输入面） |
 | 输入框键位 | 单行 / 多行共用：Enter（单行即 `Submit`，多行按声明的语义）、Shift+Enter 换行、↑↓ 按行移动、Home / End 行首尾、Ctrl+Home / End 整篇首尾、Ctrl+← / → 按词跳、Ctrl+A / C / X / V 全选与剪贴板、Ctrl+Z / Ctrl+Y 撤销与重做、双击选词。选区用 Shift+方向键扩展 |
 | `text_area_submit_auto(id, value, placeholder, min, max, size, Edges, marks)` | 自适应高度的回车提交输入框：内容在 `min`–`max` 之间长高（按整行取，框边不切半截字），超出上限后框内滚动并带细条、滚轮先滚框内。`marks` 是标记区间（字节）：整段浅强调底高亮、点进去整段选中、边界退格 / Delete 整段删除——`#` 引用标签这类实体用它。排布依赖它高度的浮层用 `auto_area_height(...)` 取同一口径的高度 |
 | `select(id, options, selected)` | 下拉；选中回 `Select { id, index }`，展开时**就地撑开**后续内容 |
@@ -460,6 +460,8 @@ impl PluginHandler for Todo {
 | `notice(text, color)` | 提示块：整行底色 + 语义色描边与文字 |
 | `markdown(content)` | 只读 Markdown：控件层用领域库解析并排版（标题 / 列表 / 引用 / 代码块含复制钮 / 表格 / 分隔线，行内粗体 / 斜体 / 删除线 / 等宽 / 链接 / 标签胶囊），正文可拖选后 Ctrl+C 复制 |
 | `markdown_with(content, mentions)` | 同上，并把 `#笔记：方案.md` 这类引用标签画成胶囊（`MentionCandidate` 由 SDK 重导出） |
+| `markdown_named(id, content, mentions)` | 带调用方 id 的只读 Markdown：命中 / 选区 / 双击按该 id 回发，可用 `rect(id)` 取块矩形做逐块行为 |
+| `markdown_list_item_named(id, content, index, mentions)` | 单个列表项的只读 Markdown：`index` = 该项在原列表中的序号（0 起），单独渲染一项时有序列表按它画序号，不会退化成 `1.` |
 | `hint(id, text)` | 给控件挂悬停提示：指针停够 400ms 由控件层画在指针下沿 |
 | `scroll(id, gap, ...)` / `list(id, gap, ...)` | 滚动容器（吃父容器剩余高度，只画视口内的子项），滚轮回 `Scroll { id, offset, max_offset }`，右下细滚动条可拖 |
 | `virtual_scroll(id, len, gap, follow_end, viewport_hint, estimate_h, key, build)` | 虚拟滚动列表：只为视口附近构造条目，屏外用上一帧实测高与 `estimate_h` 估算总高；`key` 稳定标识条目（长消息流、日志用，条目多时比 `scroll` 快一个量级） |
@@ -509,9 +511,9 @@ ctx.begin_window_drag("main").await?;   // 宿主接管拖动手势
 | --- | --- |
 | `state` | 按插件隔离的自持 JSON，落 `<插件目录>/data/state.json`；损坏时宿主先备份原文再降级 |
 | `fs` | `private_dir()` 给私有数据目录；其余接受**任意绝对路径**，父目录自动创建 |
-| `vault` | 路径相对当前仓库根，不能越出仓库；隐藏段可访问（插件自管附件可放 `.atelyx/temp/`），本地仓库与协作空间的 `vault_list` / `vault_exists` 同口径保留隐藏项（原子写残留 `.tmp` 除外）；**正被编辑器打开的文件拒写**。文本与二进制两条通道，二进制单次上限 32 MiB；更大的文件先落到插件私有目录再用 `vault_import_file` 让宿主按路径收进仓库（字节不进 RPC，源文件须在私有目录内，复制语义，见 §8.9）。`vault_image_info` 只解文件头给出图片固有像素尺寸（png / jpeg / gif / bmp / webp），不送回文件内容。结构变更用 `vault_rename(from, to)` / `vault_remove(path)`：文件或文件夹（递归），`to` 不可已存在、文件夹不可移入自身、仓库根不可删；改名会同步 `.md` 内部链接与画布节点引用。**路径正被笔记 / 表格 / 画布 / 插件文档打开，或被当前画布引用时拒收**——这些持有者仍按旧路径工作，放行后写回会产生幽灵文件，先关闭对应面再操作 |
-| `editor` | 当前笔记的选区读写：`editor_selection()` 取文档路径、选区字节区间与选中文本（阅读态 / 未打开笔记回空选区），`editor_replace_selection(text)` 替换选区（空串 = 删除，走笔记同一套保存链）；`editor_open_file(path)` 让宿主按扩展名路由打开文件；`open_files()` 取当前打开的文件（仓库相对路径，按打开顺序），候选列表这类「打开中的优先」的界面用它置顶 |
-| `note` | 笔记正文读写（宿主持真源与保存链）：`note_open(path)` 载入并建立会话（换篇前要求旧篇无未落盘输入），`note_edit(path, text)` 提交整篇（宿主与协作远端三方合并，合并结果经 `note:changed` 回填），`note_save(path)` 请求保存，`note_close(path)` 关闭会话，`note_awareness(path, anchor, head)` 上报选区，`note_backlinks(path)` 取反链。订阅 `note:changed` 收正文 / 脏标记 / 保存错误；路径必须是当前会话那一篇 |
+| `vault` | 路径相对当前仓库根，不能越出仓库；隐藏段可访问（插件自管附件可放 `.atelyx/temp/`），本地仓库与协作空间的 `vault_list` / `vault_exists` 同口径保留隐藏项（原子写残留 `.tmp` 除外）；**正被编辑器打开的文件拒写**。文本与二进制两条通道，二进制单次上限 32 MiB；更大的文件先落到插件私有目录再用 `vault_import_file` 让宿主按路径收进仓库（字节不进 RPC，源文件须在私有目录内，复制语义，见 §8.9）。`vault_image_info` 只解文件头给出图片固有像素尺寸（png / jpeg / gif / bmp / webp），不送回文件内容；`vault_tags()` 取宿主缓存的标签词表快照（按出现次数降序、最多 1000 条，属性标签值候选这类界面用；刚写入的新标签要等宿主下次重建词表才出现）。结构变更用 `vault_rename(from, to)` / `vault_remove(path)`：文件或文件夹（递归），`to` 不可已存在、文件夹不可移入自身、仓库根不可删；改名会同步 `.md` 内部链接与画布节点引用。**路径正被笔记 / 表格 / 画布 / 插件文档打开，或被当前画布引用时拒收**——这些持有者仍按旧路径工作，放行后写回会产生幽灵文件，先关闭对应面再操作 |
+| `editor` | 当前笔记的选区读写：`editor_selection()` 取文档路径、选区字节区间与选中文本（阅读态 / 未打开笔记回空选区），`editor_replace_selection(text)` 替换选区（空串 = 删除，走笔记同一套保存链）；`editor_open_file(path)` 让宿主按扩展名路由打开文件；`open_files()` 取当前打开的文件（仓库相对路径，按打开顺序），候选列表这类「打开中的优先」的界面用它置顶；`editor_prefs()` 取宽松换行 / 页面内标题 / 正文宽度，变更经 `editor:prefs.changed` 下发 |
+| `note` | 笔记正文读写（宿主持真源与保存链）：`note_open(path)` 载入并建立会话（换篇前要求旧篇无未落盘输入），`note_edit(path, text)` 提交整篇（宿主与协作远端三方合并，合并结果经 `note:changed` 回填），`note_save(path)` 请求保存，`note_close(path)` 关闭会话，`note_awareness(path, anchor, head)` 上报选区，`note_backlinks(path)` 取反链，`note_rename(path, name)` 改主名（同目录、保留扩展名；要求无未落盘修改）。订阅 `note:changed` 收正文 / 脏标记 / 保存错误，订阅 `note:presence` 收远端协作者光标区间；路径必须是当前会话那一篇 |
 | `table` | 读写当前打开的表格。真源在宿主，写入与用户编辑同一出口（合并落盘 + 协作补丁）；**禁止**用 `fs` 旁路读写 `.atb`。快照含稳定表格 id、列宽、行内单元格样式、用户当前选区与其他协作者选区（显示名 + 身份色）；向图片字段写图片用 `table_set_cell_image`（图片先经 `vault_write_binary` 落仓库，再传仓库相对路径） |
 | `notification` | 应用内通知条 |
 | `shortcuts` | 系统级全局快捷键（如 `Shift+Alt+E`）；被占用时注册返回可读错误，停用自动注销；同一组键重复注册幂等，触发上报的是最后一次注册的写法。`query_shortcut` 可事前问某键位是否被占用（`owner` 为占用方插件 id；被系统 / 其他应用占用时为缺省） |

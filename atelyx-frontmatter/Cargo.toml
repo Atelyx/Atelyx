@@ -1,0 +1,15 @@
+[package]
+name = "atelyx-frontmatter"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "笔记 frontmatter 领域库：定界、宽类型解析与受限序列化（宿主与插件共用同一份语义）"
+license = "Apache-2.0"
+
+[dependencies]
+# YAML 解析（事件级 API 供自研 1.1 解析表使用，标量样式可区分引号形态）
+yaml-rust2 = "0.10"
+# 键名与标量形态判定
+regex = "1"
+# 属性值的 JSON 快照形态（属性面板与服务端配置互转）
+serde_json = "1"

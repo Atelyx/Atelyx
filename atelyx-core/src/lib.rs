@@ -9,7 +9,6 @@ pub mod credentials;
 pub mod canvas_collab;
 pub mod ephemeral;
 pub mod filesearch;
-pub mod frontmatter;
 pub mod global_config;
 pub mod history;
 pub mod history_diff;
@@ -35,3 +34,6 @@ pub mod write_queue;
 
 /// Markdown 解析内核（领域库 `atelyx-markdown` 的重导出）：宿主与插件共用同一份语义。
 pub use atelyx_markdown as markdown;
+
+/// frontmatter 解析与序列化（领域库 `atelyx-frontmatter` 的重导出）：宿主与插件共用同一份语义。
+pub use atelyx_frontmatter as frontmatter;

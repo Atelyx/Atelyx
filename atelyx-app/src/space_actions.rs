@@ -3,14 +3,13 @@
 //! 「取 App 状态 → 调 core → 应用结果 → 触副作用」的编排，与 table_actions 同构。
 
 use iced::Task;
-use iced::widget::text_editor;
 
 use crate::layout_view::{RenameState, RenameTarget};
 use crate::canvas_actions;
 use crate::table_view as tv;
 use crate::ui::notify::Level as NoticeLevel;
 use crate::{
-    layout_view, vault, App, DraftKind, Message, NoteMode, SaveReason, SpaceField, SpaceForm,
+    layout_view, vault, App, DraftKind, Message, SaveReason, SpaceField, SpaceForm,
     SpaceMsg,
 };
 use atelyx_core::space_client::{
@@ -812,7 +811,6 @@ pub fn enter_space(app: &mut App, session: SpaceSession, from_boot: bool) -> Tas
     };
     app.global.bump_space(&session.server_url, &session.space_id, &session.name, crate::now_secs());
     let mut task = refresh_space_tree(app);
-    task = task.chain(refresh_space_backlinks(app));
     task = task.chain(refresh_space_tags(app));
     task = task.chain(load_space_meta(app));
     task = task.chain(app.save_global());
@@ -824,11 +822,9 @@ pub fn enter_space(app: &mut App, session: SpaceSession, from_boot: bool) -> Tas
         app.ui.last_canvas_file = None;
         // 插件文档实例与笔记会话随容器切换收口：旧的相对路径在新空间指向别的文件
         let _ = crate::plugin_actions::close_doc(app);
-        app.note_mode = crate::NoteMode::Read;
         app.plugin_note_active = false;
         app.plugin_note_selection = None;
         app.pending_plugin_note_open = None;
-        app.note_edit_caret_pending = false;
         app.history.clear();
     }
     if from_boot && app.global.auto_restore {
@@ -849,11 +845,11 @@ pub fn enter_space(app: &mut App, session: SpaceSession, from_boot: bool) -> Tas
 fn clear_session_state(app: &mut App) {
     app.children.clear();
     app.note_text.clear();
-    app.source_editor = text_editor::Content::new();
-    app.edit.reset(0);
-    app.edit_doc = None;
-    app.edit_meta.clear();
-    app.preview_doc = None;
+    app.note_images.clear();
+    app.note_image_sizes.clear();
+    app.note_images_inflight.clear();
+    app.note_images_failed.clear();
+    app.note_image_epoch = app.note_image_epoch.wrapping_add(1);
     app.dirty = false;
     app.save_error = None;
     app.reset_props();
@@ -871,7 +867,6 @@ fn clear_session_state(app: &mut App) {
     app.space_note_flushed = None;
     app.space_note_save_inflight = false;
     app.space_note_save_flush_queued = false;
-    app.backlinks.clear();
     app.tag_vocab.clear();
     app.note_files.clear();
     app.history.clear();
@@ -1548,52 +1543,13 @@ fn on_note_saved(
     task
 }
 
-/// 远端文本落地（服务端合流回填 / 协作远端合入共用）：旧文本压撤销检查点（快照
-/// 只含本端输入历史，不得借撤销把远端内容整体回滚）、光标按差异区间映射、
-/// 解析产物重建、不置脏。frontmatter 前缀保持不变（差异按正文计算）。
+/// 远端文本落地（服务端合流回填 / 协作远端合入共用）：正文替换、不置脏，
+/// 插件面自行重排；远端偏移与旧选区不再对应，由插件应用新正文后重新上报。
 pub fn apply_remote_text(app: &mut App, new_text: String) {
-    let old = app.note_text.clone();
-    if app.note_mode == NoteMode::Edit {
-        app.edit.snapshot(&old);
-    }
-    let old_body_start = atelyx_core::frontmatter::block_end(&old).unwrap_or(0);
-    let new_body_start = atelyx_core::frontmatter::block_end(&new_text).unwrap_or(0);
-    let old_body = &old[old_body_start..];
-    let new_body = &new_text[new_body_start..];
-    let hunks = atelyx_core::merge3::diff_hunks(old_body, new_body);
     app.note_text = new_text.clone();
-    if app.note_mode == NoteMode::Edit {
-        // 光标映射（正文相对坐标）：hunks 全基于旧文本坐标，p 保持原坐标、按区间相对位置
-        // 累计平移量（否则 p 的「部分映射坐标」与后续 hunk 的旧坐标混用，多 hunk 时漂移）
-        let map = |pos: usize| -> usize {
-            let p = pos.min(old_body.len());
-            let mut shift: i64 = 0;
-            for h in &hunks {
-                if p <= h.at {
-                    break;
-                }
-                if p >= h.at + h.remove {
-                    shift += h.insert.len() as i64 - h.remove as i64;
-                } else {
-                    // 落入改动区间：钳到区间起点（含此前累计平移）
-                    return h.at + shift.max(0) as usize;
-                }
-            }
-            (p as i64 + shift).clamp(0, new_body.len() as i64) as usize
-        };
-        app.edit.caret = map(app.edit.caret);
-        app.edit.anchor = map(app.edit.anchor);
-    } else {
-        // Source 档编辑面回填：远端合入后 source_editor 若滞留旧全文，本端继续输入会以
-        // 旧全文覆盖 note_text（静默回退远端内容）
-        app.source_editor = text_editor::Content::with_text(&new_text);
-    }
+    app.refresh_props();
     if app.plugin_note_active {
-        // 插件面自行重排；远端偏移与旧选区不再对应，由插件应用新正文后重新上报。
         app.plugin_note_selection = None;
-    } else {
-        app.refresh_preview();
-        app.refresh_edit();
     }
     crate::plugin_note::publish_state(app, Some(new_text));
 }
@@ -2243,27 +2199,6 @@ pub fn space_write_agents(app: &mut App, agents: Vec<vault::AgentConfig>) -> Tas
             }
         },
         move |result| Message::AgentsLoaded(gen, result.map_err(err_text)),
-    )
-}
-
-/// 反链（空间模式：服务端索引端点）。
-pub fn refresh_space_backlinks(app: &App) -> Task<Message> {
-    let Some(session) = session_of(app) else { return Task::none() };
-    let Some(rel) = app.ui.last_note_file.clone() else { return Task::none() };
-    let title = rel.rsplit('/').next().unwrap_or(&rel).trim_end_matches(".md").to_string();
-    let gen = app.epoch();
-    let rel_for_cb = rel.clone();
-    let client = session.client;
-    let space_id = session.space_id;
-    Task::perform(
-        async move {
-            client.backlinks(&space_id, &title, &rel).await.map(|rows| {
-                rows.into_iter()
-                    .map(|r| vault::BacklinkRow { file: r.file, title: r.title })
-                    .collect::<Vec<_>>()
-            })
-        },
-        move |result| Message::BacklinksLoaded(gen, rel_for_cb, result.map_err(err_text)),
     )
 }
 
@@ -3079,45 +3014,15 @@ fn selection_units(text: &str, anchor: usize, head: usize) -> Option<(u32, u32)>
     Some((unit(anchor)?, unit(head)?))
 }
 
-/// 纯文本编辑面光标位置（行号 + 行内字节列）→ 全文字节偏移。列按字节计（与编辑面
-/// 内部命中口径一致）；行号越界（文本比光标短）时钳到末行。
-fn source_offset(text: &str, pos: text_editor::Position) -> usize {
-    let mut line = 0;
-    let mut start = 0;
-    for (i, ch) in text.char_indices() {
-        if line == pos.line {
-            break;
-        }
-        if ch == '\n' {
-            line += 1;
-            start = i + 1;
-        }
-    }
-    let line_len = text[start..].find('\n').unwrap_or(text.len() - start);
-    start + pos.column.min(line_len)
-}
-
-/// 本端选区（上行口径：全文 UTF-16，anchor = 锚点、head = 光标）。源码档取纯文本
-/// 编辑面光标；预览编辑档取正文编辑面（偏移相对正文，剥 frontmatter 前缀）；只读档无光标。
+/// 本端选区（上行口径：全文 UTF-16，anchor = 锚点、head = 光标）。插件笔记面报选区；
+/// 无插件笔记会话时无光标。
 fn local_selection(app: &App) -> Option<(u32, u32)> {
+    if !app.plugin_note_active {
+        return None;
+    }
     let text = app.note_text.as_str();
-    if app.plugin_note_active {
-        return app
-            .plugin_note_selection
-            .and_then(|(anchor, head)| selection_units(text, anchor, head));
-    }
-    match app.note_mode {
-        NoteMode::Read => None,
-        NoteMode::Source => {
-            let cursor = app.source_editor.cursor();
-            let anchor = source_offset(text, cursor.selection.unwrap_or(cursor.position));
-            selection_units(text, anchor, source_offset(text, cursor.position))
-        }
-        NoteMode::Edit => {
-            let base = atelyx_core::frontmatter::block_end(text).unwrap_or(0);
-            selection_units(text, base + app.edit.anchor, base + app.edit.caret)
-        }
-    }
+    app.plugin_note_selection
+        .and_then(|(anchor, head)| selection_units(text, anchor, head))
 }
 
 /// 选区 / 光标变化上行（不涉内容）：点选、拖选、方向键移动都要让对端可见，
@@ -3556,7 +3461,7 @@ pub fn collab_note_flushed(app: &mut App, flushed: &str) {
     }
 }
 
-/// 远端在场状态 → 编辑面光标视图（UTF-16 → note_text 字节偏移）。
+/// 远端在场状态 → 远端光标视图（UTF-16 → note_text 字节偏移），随后广播 `note:presence`。
 /// 事件驱动与周期 tick（过期剔除节流）共用。
 pub(crate) fn refresh_remote_cursors(app: &mut App) {
     let now = std::time::Instant::now();
@@ -3579,6 +3484,7 @@ pub(crate) fn refresh_remote_cursors(app: &mut App) {
             }
         })
         .collect();
+    crate::plugin_note::publish_presence(app);
 }
 
 /// 插件通道消息转投（可靠档与瞬时档同形）：通道前缀由发送方宿主加，
@@ -3750,7 +3656,7 @@ fn on_space_event(app: &mut App, event: atelyx_core::collab::SpaceEvent) -> Task
     }
 }
 
-/// 远端 note-sync 帧合入：协议应答上行、文档变化回填编辑面、换路跟随。
+/// 远端 note-sync 帧合入：协议应答上行、文档变化回填正文并通知插件、换路跟随。
 fn collab_remote_note(app: &mut App, peer_id: &str, file: &str, payload: &[u8]) {
     if app.note_collab_file.as_deref() != Some(file) {
         return;

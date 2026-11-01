@@ -313,12 +313,29 @@ impl Context {
         self.call_unit(method::note::AWARENESS, &params).await
     }
 
+    /// 把当前笔记改名为新的主名（同目录、保留扩展名）：有未落盘修改时宿主拒绝，先保存再调用。
+    pub async fn note_rename(&self, path: &str, name: &str) -> Result<(), RpcError> {
+        self.call_unit(
+            method::note::RENAME,
+            &NoteRenameParams { path: path.into(), name: name.into() },
+        )
+        .await
+    }
+
     /// 当前笔记的反链（引用它的其它笔记）。
     pub async fn note_backlinks(&self, path: &str) -> Result<Vec<NoteBacklink>, RpcError> {
         let result: NoteBacklinksResult = self
             .call_typed(method::note::BACKLINKS, &PathParams { path: path.into() })
             .await?;
         Ok(result.entries)
+    }
+
+    /// 全仓库标签词表（宿主缓存快照，按出现次数降序、最多 1000 条）：属性标签值候选这类
+    /// 需要「仓库里已有哪些标签」的界面用。
+    pub async fn vault_tags(&self) -> Result<Vec<String>, RpcError> {
+        let result: crate::protocol::method::VaultTagsResult =
+            self.call_typed(method::vault::TAGS, &Value::Null).await?;
+        Ok(result.tags)
     }
 
     /// 当前打开的文件（仓库相对路径，按打开顺序）：候选列表这类「打开中的优先」的界面用。
@@ -333,6 +350,11 @@ impl Context {
     pub async fn open_file(&self, path: &str) -> Result<(), RpcError> {
         self.call_unit(method::editor::OPEN_FILE, &PathParams { path: path.into() })
             .await
+    }
+
+    /// 读全局编辑偏好（软换行 / 页面内标题 / 正文宽度）；变更经 `editor:prefs.changed` 下发。
+    pub async fn editor_prefs(&self) -> Result<EditorPrefs, RpcError> {
+        self.call_typed(method::editor::PREFS, &Value::Null).await
     }
 
     /// 取宿主主题：颜色 / 字号档 / 圆角档随用户设置变化，供插件绘制对齐宿主外观。
