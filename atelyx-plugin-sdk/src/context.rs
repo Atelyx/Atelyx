@@ -271,12 +271,68 @@ impl Context {
         serde_json::from_value(value).map_err(|e| RpcError::failed(format!("量算结果解析失败：{e}")))
     }
 
+    // ---------- note（当前笔记会话；正文真源与保存链在宿主） ----------
+
+    /// 打开一篇笔记：宿主读盘并建立会话，回执正文与可写性（viewer 只读为 false）。
+    pub async fn note_open(&self, path: &str) -> Result<NoteOpenResult, RpcError> {
+        self.call_typed(method::note::OPEN, &NoteOpenParams { path: path.into() }).await
+    }
+
+    /// 提交一次编辑（完整正文 + 全文字节偏移的光标 / 选区）。内容有变化时宿主置脏并排
+    /// 自动保存，同时接入协作增量。
+    pub async fn note_edit(
+        &self,
+        path: &str,
+        text: &str,
+        anchor: Option<usize>,
+        head: Option<usize>,
+    ) -> Result<(), RpcError> {
+        let params = NoteEditParams { path: path.into(), text: text.into(), anchor, head };
+        self.call_unit(method::note::EDIT, &params).await
+    }
+
+    /// 请求一次保存（`manual` = 手动保存）；回执只表示已受理，结果经 `note:changed` 到达。
+    pub async fn note_save(&self, path: &str, manual: bool) -> Result<(), RpcError> {
+        let params = NoteSaveParams { path: path.into(), manual };
+        self.call_unit(method::note::SAVE, &params).await
+    }
+
+    /// 关闭当前笔记会话（换文件 / 关标签 / 切仓库）。
+    pub async fn note_close(&self, path: &str) -> Result<(), RpcError> {
+        self.call_unit(method::note::CLOSE, &PathParams { path: path.into() }).await
+    }
+
+    /// 上报本端选区（全文字节偏移；`None` = 只上报身份）。
+    pub async fn note_awareness(
+        &self,
+        path: &str,
+        anchor: Option<usize>,
+        head: Option<usize>,
+    ) -> Result<(), RpcError> {
+        let params = NoteAwarenessParams { path: path.into(), anchor, head };
+        self.call_unit(method::note::AWARENESS, &params).await
+    }
+
+    /// 当前笔记的反链（引用它的其它笔记）。
+    pub async fn note_backlinks(&self, path: &str) -> Result<Vec<NoteBacklink>, RpcError> {
+        let result: NoteBacklinksResult = self
+            .call_typed(method::note::BACKLINKS, &PathParams { path: path.into() })
+            .await?;
+        Ok(result.entries)
+    }
+
     /// 当前打开的文件（仓库相对路径，按打开顺序）：候选列表这类「打开中的优先」的界面用。
     pub async fn open_files(&self) -> Result<Vec<String>, RpcError> {
         let value: crate::protocol::method::EditorOpenFiles = self
             .call_typed(method::editor::OPEN_FILES, &Value::Null)
             .await?;
         Ok(value.paths)
+    }
+
+    /// 让宿主打开一个仓库内文件（按扩展名分流到对应视图；回执 = 已受理）。
+    pub async fn open_file(&self, path: &str) -> Result<(), RpcError> {
+        self.call_unit(method::editor::OPEN_FILE, &PathParams { path: path.into() })
+            .await
     }
 
     /// 取宿主主题：颜色 / 字号档 / 圆角档随用户设置变化，供插件绘制对齐宿主外观。

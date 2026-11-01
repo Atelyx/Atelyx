@@ -34,6 +34,23 @@ pub mod name {
     /// 外部文件拖入窗口（宿主只转发绝对路径，读取由订阅方经 `fs` 自理）。
     /// payload 见 [`FileDropPayload`]；未挂载界面的插件应忽略。
     pub const WINDOW_FILE_DROP: &str = "window:file.drop";
+    /// 当前笔记会话的正文 / 落盘状态变化（协作远端合入、保存成功或失败、属性面板改写）。
+    /// payload 见 [`NoteChangedPayload`]。
+    pub const NOTE_CHANGED: &str = "note:changed";
+}
+
+/// [`name::NOTE_CHANGED`] 的 payload：`text` 只在正文被宿主改写时给出（保存成功回填合流结果、
+/// 远端合入、属性面板改写）；`dirty` / `saveError` 反映当前落盘状态。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NoteChangedPayload {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub dirty: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub save_error: Option<String>,
 }
 
 /// [`name::VAULT_SWITCH`] 的 payload（`kind` 与字段名均 camelCase，与协议其余类型同一口径）。

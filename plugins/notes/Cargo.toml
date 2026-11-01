@@ -1,0 +1,18 @@
+[package]
+name = "atelyx-plugin-notes"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Atelyx 笔记插件：只读 / 预览编辑 / 源码三档，正文真源与保存链在宿主"
+license = "Apache-2.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+atelyx-markdown = { version = "0.1.0", path = "../../atelyx-markdown" }
+atelyx-plugin-protocol = { version = "0.1.0", path = "../../atelyx-plugin-protocol" }
+atelyx-plugin-sdk = { version = "0.1.0", path = "../../atelyx-plugin-sdk" }
+async-trait = "0.1"
+serde_json = "1"
+tokio = { version = "1", features = ["sync", "time"] }

@@ -1,16 +1,15 @@
 //! 工作区 UI：标题栏（布局 tab / 场景选择器 / 窗口控制）+ 面板网格 + 状态栏
-//! + 设置整页 + 弹层内容（菜单/选择器/就地确认）+ files/note 视图与占位视图。
+//! + 设置整页 + 弹层内容（菜单/选择器/就地确认）+ files 视图与占位视图。
 //!
 //! 几何计算与渲染共用同一套度量（UiMetrics）：把手/落点命中矩形由布局树 +
 //! 窗口内容区尺寸纯推导，与 iced FillPortion 的分配规则保持一致。
 
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use iced::alignment::{Horizontal, Vertical};
-use iced::widget::text::{LineHeight, Wrapping};
-use iced::widget::{button, column, container, mouse_area, row, scrollable, space, stack, text_editor, text_input, Stack};
+use iced::widget::{button, column, container, mouse_area, row, scrollable, space, stack, text_input, Stack};
 use iced::{Color, Element, Length, Padding, Point, Rectangle, Size, border, widget::container::Style};
 use serde_json::Value;
 
@@ -27,7 +26,7 @@ use crate::ui::{mono, text};
 use crate::ui::popup::{self, PopupSpec};
 use crate::ui::notify;
 use crate::ui::scroll;
-use crate::{App, DraftKind, Message, NoteMode, markdown_edit, markdown_view};
+use crate::{App, DraftKind, Message};
 
 pub struct UiMetrics;
 
@@ -101,10 +100,15 @@ fn truncate_to_width(text: &str, max_w: f32, measure: impl Fn(&str) -> f32) -> S
     "…".to_string()
 }
 
+/// 笔记视图（存量布局沿用旧内置 id `note`，与插件文档面 id 同判）。
+fn is_note_view(view: &str) -> bool {
+    view == "note" || view == atelyx_core::layout::NOTES_VIEW
+}
+
 /// 面板标签文字（笔记/表格/画布视图打开文件 = 文件名去扩展名后缀，否则视图名）。
 pub fn tab_label(app: &App, view: &str) -> String {
     let open = match view {
-        "note" => app.ui.last_note_file.as_deref(),
+        _ if is_note_view(view) => app.ui.last_note_file.as_deref(),
         "table" => app.ui.last_table_file.as_deref(),
         "canvas" => app.ui.last_canvas_file.as_deref(),
         _ => None,
@@ -136,17 +140,14 @@ pub enum RenameTarget {
 pub struct RenameState {
     pub target: RenameTarget,
     pub value: String,
-    /// 输入框所在窗口：失焦提交与 Esc 取消按该窗口判定（页面内标题可在撕裂窗口就地改名）。
+    /// 输入框所在窗口：失焦提交与 Esc 取消按该窗口判定。
     pub window: iced::window::Id,
-    /// 由页面内标题发起：输入框渲染在正文列标题处，文件树对应行不再渲染输入框。
-    pub from_title: bool,
 }
 
-/// 重名去重提醒条：文案 + 出现时刻（3s 过期）+ 渲染位置（标题发起 = 贴标题，否则在文件树）。
+/// 重名去重提醒条：文案 + 出现时刻（3s 过期）。
 pub struct RenameNotice {
     pub text: String,
     pub at: std::time::Instant,
-    pub at_title: bool,
 }
 
 /// 弹层内容形态（几何与交互数据随形态携带）。
@@ -179,7 +180,6 @@ pub(crate) enum PopupState {
     SpaceMembers,
     /// 邀请码管理（激活空间且 owner；表单草稿在 App.space_invite_form）。
     SpaceInvite,
-    NoteMenu,
     /// 属性面板类型切换菜单（属性键名）。
     PropTypeMenu { key: String },
     /// 表格：单元格右键（复制/剪切/粘贴/清空）。
@@ -252,8 +252,6 @@ pub(crate) enum PopupState {
     LicenseInfo,
     /// 历史记录弹层（居中模态；kind+file 定位侧文件）。
     HistoryBrowser { kind: atelyx_core::history::HistoryKind, file: String },
-    /// 只读正文的选区右键菜单（复制）。
-    SelectionMenu,
 }
 
 impl PopupState {
@@ -278,8 +276,6 @@ impl PopupState {
             // 成员行带 @username 与角色徽标；邀请码表单含两个数字输入
             PopupState::SpaceMembers => 320.0,
             PopupState::SpaceInvite => 320.0,
-            PopupState::NoteMenu => 144.0,
-            PopupState::SelectionMenu => 128.0,
             PopupState::PropTypeMenu { .. } => 128.0,
             PopupState::TableCellMenu => 128.0,
             PopupState::TableFieldMenu { .. } => 176.0,
@@ -351,11 +347,6 @@ pub(crate) fn btn_popup_min(window: iced::window::Id, cursor: Point, state: Popu
 /// 右键菜单类弹层：锚点 = 光标点，无翻转。
 fn ctx_popup(window: iced::window::Id, cursor: Point, state: PopupState) -> Message {
     Message::PopupOpen(window, PopupOpen { point: cursor, flip_y: None, state, min_width: 0.0 })
-}
-
-/// 只读正文右键：选区复制菜单（锚点 = 光标点）。
-pub(crate) fn selection_popup(window: iced::window::Id, cursor: Point) -> Message {
-    ctx_popup(window, cursor, PopupState::SelectionMenu)
 }
 
 /// 设置-关于：开源许可模态的打开消息（居中模态不走锚点几何）。
@@ -1362,7 +1353,7 @@ fn panel_view<'a>(
     // 右侧：状态指示 + ≡ 菜单（空面板也有 ≡：删除/分割仍可用）
     let mut right = row![].spacing(4).padding(Padding::ZERO.right(6.0));
     if let Some(t) = active {
-        if t.view == "note" {
+        if is_note_view(&t.view) {
             if let Some(pill) = note_status_pill(app) {
                 right = right.push(pill);
             }
@@ -1539,7 +1530,7 @@ fn panel_tab<'a>(
 ) -> Element<'a, Message> {
     let active = active_tab_id.as_deref() == Some(t.id.as_str());
     let label = tab_label(app, &t.view);
-    let has_file = (t.view == "note" && app.ui.last_note_file.is_some())
+    let has_file = (is_note_view(&t.view) && app.ui.last_note_file.is_some())
         || (t.view == "table" && app.ui.last_table_file.is_some())
         || (t.view == "canvas" && app.ui.last_canvas_file.is_some())
         || app
@@ -2258,15 +2249,6 @@ fn placeholder_view(app: &App, kind: &str) -> Element<'static, Message> {
     )
 }
 
-fn placeholder_panel(label: &str) -> Element<'static, Message> {
-    container(text(label.to_string()).size(pal::fs_ui()).color(pal::TEXT_MUTED))
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .center_x(Length::Fill)
-        .center_y(Length::Fill)
-        .into()
-}
-
 // ===== 撕裂窗口 =====
 
 /// 撕裂窗口：标题栏（拖拽区 + 标题 + 图钉/最小化/关闭）+ 标签条 + 内容。
@@ -2297,7 +2279,7 @@ pub fn detached_view<'a>(
         }
         let active = w.active_tab_id.as_deref() == Some(t.id.as_str());
         let label = tab_label(app, &t.view);
-        let has_file = (t.view == "note" && app.ui.last_note_file.is_some())
+        let has_file = (is_note_view(&t.view) && app.ui.last_note_file.is_some())
             || (t.view == "table" && app.ui.last_table_file.is_some())
             || (t.view == "canvas" && app.ui.last_canvas_file.is_some())
             || app
@@ -2620,8 +2602,8 @@ pub(crate) fn files_view(app: &App, _window: iced::window::Id) -> Element<'_, Me
         if !active {
             continue;
         }
-        // 重名自动加序号的提醒条（3s 自动消失）；标题发起的改名提示贴标题，不在此重复
-        if let Some(n) = app.rename_notice.as_ref().filter(|n| !n.at_title) {
+        // 重名自动加序号的提醒条（3s 自动消失）
+        if let Some(n) = app.rename_notice.as_ref() {
             tree_col = tree_col.push(
                 container(text(n.text.clone()).size(pal::fs_caption()).color(pal::WARNING))
                     .width(Length::Fill)
@@ -2679,8 +2661,8 @@ pub(crate) fn files_view(app: &App, _window: iced::window::Id) -> Element<'_, Me
         if !active {
             continue;
         }
-        // 重名自动加序号的提醒条（3s 自动消失）；标题发起的改名提示贴标题，不在此重复
-        if let Some(n) = app.rename_notice.as_ref().filter(|n| !n.at_title) {
+        // 重名自动加序号的提醒条（3s 自动消失）
+        if let Some(n) = app.rename_notice.as_ref() {
             tree_col = tree_col.push(
                 container(text(n.text.clone()).size(pal::fs_caption()).color(pal::WARNING))
                     .width(Length::Fill)
@@ -3165,10 +3147,6 @@ fn draft_input_row(app: &App, depth: usize) -> Element<'static, Message> {
 fn file_inline_input(app: &App, r: &TreeRow) -> Option<Element<'static, Message>> {
     let indent = 12.0 + r.depth as f32 * 16.0;
     let rs = app.rename.as_ref()?;
-    // 页面内标题发起的改名：输入框渲染在正文列标题处，此处不渲染（同一输入框 id 同帧唯一）
-    if rs.from_title {
-        return None;
-    }
     let (value, placeholder) = match &rs.target {
         RenameTarget::File(f) if *f == r.rel => (rs.value.clone(), ""),
         RenameTarget::Folder(d) if *d == r.rel => (rs.value.clone(), ""),
@@ -3295,652 +3273,11 @@ fn push_children(
     }
 }
 
-// ===== note 视图 =====
-
-/// 文件显示标题：相对路径末段去掉扩展名（页面内标题、标题栏与改名初值同源——
+/// 文件显示标题：相对路径末段去掉扩展名（标题栏与改名初值同源——
 /// 改名输入框只给主名，后缀由提交时按原名补回）。
 pub fn file_label(rel: &str) -> String {
     let name = rel.rsplit('/').next().unwrap_or(rel);
     atelyx_core::vault::file_stem(name).to_string()
-}
-
-/// note 视图：工具条（模式分段 + ···菜单）+ 对应档位的内容面。
-pub(crate) fn note_view(app: &App, window: iced::window::Id) -> Element<'_, Message> {
-    if app.ui.last_note_file.is_none() {
-        return controls::view_placeholder(
-            "file-text",
-            "打开笔记",
-            "在文件面板或搜索面板单击一个 .md 笔记开始编辑。",
-        );
-    }
-    let cursor = app.cursor_for(window);
-
-    let mode_control = container(
-        row![
-            mode_button(window, "eye", "只读", "只读：仅查看，双击正文进入编辑", NoteMode::Read, app.note_mode),
-            mode_button(window, "pencil", "预览编辑", "预览编辑：正文可直接修改", NoteMode::Edit, app.note_mode),
-            mode_button(window, "code", "源码", "源码：直接编辑 Markdown 源文", NoteMode::Source, app.note_mode),
-        ]
-        .spacing(2),
-    )
-    .padding(2.0)
-    .style(|_t| Style {
-        background: Some(pal::BG_SUNKEN.into()),
-        border: border::rounded(pal::RADIUS_SM).color(pal::BORDER).width(1.0),
-        ..Style::default()
-    });
-
-    // ··· 打开态着色（弹层开着 = 强调色）+ subtle 悬停（仅文字提亮）
-    let menu_open = app
-        .popup
-        .as_ref()
-        .is_some_and(|(_, open)| matches!(open.state, PopupState::NoteMenu));
-    // 协作者胶囊（空间模式；同文件在场者，色点 + 昵称，多时折叠；名册见协作房间视图）
-    let mut toolbar_row = row![space().width(Length::Fill)].spacing(4);
-    if matches!(app.repo_kind, crate::RepoKind::Space(_)) && !app.remote_cursors.is_empty() {
-        let members: Vec<(iced::Color, String)> = app
-            .remote_cursors
-            .iter()
-            .map(|c| {
-                // 畸形色串回落灰点（与协作房间名册同兜底）
-                (parse_hex_color(&c.color).unwrap_or(pal::TEXT_MUTED), c.name.clone())
-            })
-            .collect();
-        toolbar_row = toolbar_row.push(collab_pill_row(&members));
-    }
-    let toolbar = container(
-        toolbar_row
-            .push(mode_control)
-            .push(button(icon("ellipsis", 15.0, if menu_open { pal::ACCENT } else { pal::TEXT_MUTED }))
-                .padding(Padding::ZERO.horizontal(4.0).vertical(4.0))
-                .style(|_t, status| button::Style {
-                    background: None,
-                    text_color: if matches!(status, button::Status::Hovered | button::Status::Pressed) {
-                        pal::TEXT_PRIMARY
-                    } else {
-                        pal::TEXT_SECONDARY
-                    },
-                    ..Default::default()
-                })
-                .on_press(btn_popup(window, cursor, PopupState::NoteMenu)),
-        )
-        .spacing(8),
-    )
-    .width(Length::Fill)
-    .padding(Padding::ZERO.horizontal(12.0).vertical(6.0))
-    .style(|_t| Style {
-        background: Some(pal::BG_SECONDARY.into()),
-        ..Style::default()
-    });
-
-    // 只读 / 预览编辑两档共用同一 scrollable（同型同位，iced 保留滚动状态）：切档不回顶，
-    // 两档块渲染逐点一致，偏移直接对齐。源码档 text_editor 自带内部滚动，不进共享层。
-    let content: Element<'_, Message> = match app.note_mode {
-        NoteMode::Source => bounded_column(
-            iced::widget::text_editor(&app.source_editor)
-                .height(Length::Fill)
-                .font(crate::ui::regular())
-                .on_action(Message::Edited)
-                .style(|_t, _s| text_editor::Style {
-                    background: iced::Background::Color(iced::Color::TRANSPARENT),
-                    border: border::Border::default(),
-                    placeholder: pal::TEXT_MUTED,
-                    value: pal::TEXT_PRIMARY,
-                    selection: pal::SELECTION,
-                })
-                .into(),
-            app.global.content_width,
-            Length::Fill,
-        ),
-        NoteMode::Read | NoteMode::Edit => {
-            let inner: Element<'_, Message> = match app.note_mode {
-                NoteMode::Edit => edit_view(app),
-                _ => match app.preview_doc.as_ref() {
-                    Some(doc) => {
-                        markdown_view::document_view(
-                            doc,
-                            &app.theme,
-                            &app.note_images,
-                            app.global.soft_wrap,
-                            app.note_selection.as_ref(),
-                        )
-                    }
-                    None => placeholder_panel("正在渲染…"),
-                },
-            };
-            // 正文行宽：>0 时钳制正文区最大宽度并水平居中（三档同一列宽）
-            let scrolled =
-                scroll::v(bounded_column(inner, app.global.content_width, Length::Shrink))
-                    .width(Length::Fill)
-                    .height(Length::Fill);
-            // 两档同包一层 mouse_area（同型同位保滚动状态）；双击进编辑只在只读档挂处理器
-            // （编辑档不挂：编辑面按压即捕获，双击语义由块内自管）
-            if app.note_mode == NoteMode::Edit {
-                wiki_picker_overlay(app, mouse_area(scrolled).into())
-            } else {
-                // 只读档双击正文进预览编辑档（光标落点由编辑面按释放点换算）；右键 = 选区复制菜单
-                mouse_area(scrolled)
-                    .on_double_click(Message::NoteEnterEdit)
-                    .on_right_press(selection_popup(window, cursor))
-                    .into()
-            }
-        }
-    };
-    // 属性面板（只读 / 预览编辑档显示；源码档不渲染）
-    let panel = crate::properties_view::props_panel(app, window, false);
-
-    // 编辑态高亮边框：预览编辑 / 源码档给正文区一圈 1px 强调边；只读档同宽透明，切档不位移。
-    let frame = if app.note_mode == NoteMode::Read {
-        Color::TRANSPARENT
-    } else {
-        pal::ACCENT
-    };
-
-    // 页面内标题：钉在正文列顶部（只有正文滚动），与属性区 / 正文同宽居中；源码档不渲染
-    let title = (app.global.in_page_title && app.note_mode != NoteMode::Source)
-        .then(|| bounded_column(page_title(app, window), app.global.content_width, Length::Shrink));
-
-    let mut body = column![toolbar, controls::h_divider_subtle()];
-    if let Some(t) = title {
-        body = body.push(t);
-    }
-    if let Some(p) = panel {
-        body = body.push(p);
-    }
-    body = body.push(
-        container(content)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .style(move |_t| Style {
-                border: border::rounded(0.0).color(frame).width(1.0),
-                ..Style::default()
-            }),
-    );
-    body = body.push(controls::h_divider_subtle());
-    body = body.push(backlinks_section(app));
-    // 面板内按压转播：编辑档「点击其他地方退出」的面板内外判定源。
-    // 不用 mouse_area：其子部件（按钮 / 输入框 / 编辑面）会捕获按压令其跳过上报。
-    controls::PressReporter::new(
-        body.width(Length::Fill).height(Length::Fill).into(),
-        Message::NotePressInside,
-    )
-    .into()
-}
-
-/// 正文行宽钳制：宽度 > 0 时给正文列加上限宽并水平居中，0 = 不限（铺满面板）。
-/// 居中须由外层容器承担——iced 的 `center_x` 只摆自身矩形内的子项，容器自身被
-/// `max_width` 钳窄后仍贴父容器左缘，单层写法只会「变窄」而不会居中。
-fn bounded_column<'a>(
-    el: Element<'a, Message>,
-    width: u32,
-    height: Length,
-) -> Element<'a, Message> {
-    if width == 0 {
-        return el;
-    }
-    container(
-        container(el)
-            .width(Length::Fill)
-            .height(height)
-            .max_width(width as f32),
-    )
-    .width(Length::Fill)
-    .height(height)
-    .center_x(Length::Fill)
-    .into()
-}
-
-/// 页面内标题度量：左右内边距与正文 16px 内边距对齐；行高 1.4 = 20px 字 / 28px 行。
-const TITLE_PAD_X: f32 = 16.0;
-const TITLE_PAD_TOP: f32 = 12.0;
-const TITLE_PAD_BOTTOM: f32 = 4.0;
-const TITLE_LINE_RATIO: f32 = 1.4;
-/// 标题截断缓存条目上限（键 = 原文 + 可用宽 + 字号 + 字体；超限整体清空）。
-const TITLE_CLIP_CAP: usize = 32;
-
-thread_local! {
-    /// 标题截断结果缓存：标题只在切文件 / 改宽 / 改字号 / 换字体族时变，避免每帧重跑 shaping 与逐字试宽。
-    static TITLE_CLIP: std::cell::RefCell<HashMap<(String, u32, u32, iced::Font), String>> =
-        std::cell::RefCell::new(HashMap::new());
-}
-
-/// 页面内标题：正文列顶部的文件名（去扩展名）；点击就地改名，重命名在途 = 原位输入框。
-fn page_title(app: &App, window: iced::window::Id) -> Element<'_, Message> {
-    let rel = app.ui.last_note_file.clone().unwrap_or_default();
-    let title = file_label(&rel);
-    let (renaming, value) = match &app.rename {
-        Some(r) if r.from_title => (true, r.value.clone()),
-        _ => (false, String::new()),
-    };
-    // 重名去重提示渲染位置随提醒条自身：标题发起的改名贴标题下方
-    let notice = app
-        .rename_notice
-        .as_ref()
-        .filter(|n| n.at_title)
-        .map(|n| n.text.clone());
-    // 可用宽在布局期才知：省略号截断按 responsive 给出的宽计算
-    iced::widget::responsive(move |size| {
-        let mut col = column![].padding(
-            Padding::ZERO
-                .left(TITLE_PAD_X)
-                .right(TITLE_PAD_X)
-                .top(TITLE_PAD_TOP)
-                .bottom(TITLE_PAD_BOTTOM),
-        );
-        if renaming {
-            col = col.push(title_input(&value));
-        } else {
-            let avail = (size.width - TITLE_PAD_X * 2.0).max(0.0);
-            col = col.push(title_label(window, clipped_title(&title, avail)));
-        }
-        if let Some(notice) = &notice {
-            col = col.push(
-                text(notice.clone())
-                    .size(pal::fs_caption())
-                    .color(pal::WARNING),
-            );
-        }
-        col.into()
-    })
-    .width(Length::Fill)
-    .height(Length::Shrink)
-    .into()
-}
-
-/// 显示态标题：整行可点；按下在释放时上报，避开同批全局按压（失焦提交判定）把刚起的改名立即提交。
-/// 光标由按钮给出（Pointer）：MouseArea 的显式 interaction 仅在其子部件无 interaction 时生效。
-fn title_label(window: iced::window::Id, label: String) -> Element<'static, Message> {
-    let label = text(label)
-        .size(pal::fs_h1())
-        .font(crate::ui::bold())
-        .line_height(LineHeight::Relative(TITLE_LINE_RATIO))
-        .wrapping(Wrapping::None);
-    mouse_area(
-        button(label)
-            .padding(0)
-            .width(Length::Fill)
-            .style(|_t, status| button::Style {
-                background: None,
-                text_color: if matches!(status, button::Status::Hovered | button::Status::Pressed) {
-                    pal::TEXT_SECONDARY
-                } else {
-                    pal::TEXT_PRIMARY
-                },
-                ..Default::default()
-            })
-            .on_press(Message::NoteTitleRenameStart(window)),
-    )
-    .into()
-}
-
-/// 编辑态标题：与显示态同字阶 / 字重 / 行高与内边距（进入编辑文字不跳位），下沿 1px 色带表改名中。
-fn title_input(value: &str) -> Element<'static, Message> {
-    let input = text_input("", value)
-        .id(iced::widget::Id::new(controls::INLINE_RENAME_INPUT))
-        .size(pal::fs_h1())
-        .font(crate::ui::bold())
-        .line_height(LineHeight::Relative(TITLE_LINE_RATIO))
-        .padding(Padding::ZERO)
-        .width(Length::Fill)
-        .on_input(Message::LayoutRenameInput)
-        .on_submit(Message::LayoutRenameCommit)
-        .style(|_t, _s| text_input::Style {
-            background: Color::TRANSPARENT.into(),
-            border: border::Border::default(),
-            icon: pal::TEXT_MUTED,
-            placeholder: pal::INPUT_PLACEHOLDER,
-            value: pal::TEXT_PRIMARY,
-            selection: pal::SELECTION,
-        });
-    column![
-        // 输入框内按压 = 不触发失焦提交（与文件树行内输入同一标志）
-        controls::PressReporter::new(input.into(), Message::RenamePressInside),
-        container(space())
-            .width(Length::Fill)
-            .height(Length::Fixed(1.0))
-            .style(|_t| Style {
-                background: Some(pal::BORDER_STRONG.into()),
-                ..Style::default()
-            }),
-    ]
-    .into()
-}
-
-/// 单行标题按可用宽截断补省略号（结果缓存：同文同宽同字号只算一次 shaping）。
-fn clipped_title(title: &str, avail_w: f32) -> String {
-    let avail_w = avail_w.max(0.0);
-    let key = (title.to_string(), (avail_w * 100.0) as u32, pal::fs_h1().to_bits(), crate::ui::bold());
-    if let Some(hit) = TITLE_CLIP.with(|c| c.borrow().get(&key).cloned()) {
-        return hit;
-    }
-    let clipped = truncate_to_width(title, avail_w, title_text_width);
-    TITLE_CLIP.with(|c| {
-        let mut cache = c.borrow_mut();
-        if cache.len() >= TITLE_CLIP_CAP {
-            cache.clear();
-        }
-        cache.insert(key, clipped.clone());
-    });
-    clipped
-}
-
-/// 单行标题实测宽（与标题渲染同字号同字重 shaping）。
-fn title_text_width(s: &str) -> f32 {
-    crate::markdown_edit::measured_text_width(s, pal::fs_h1(), TITLE_LINE_RATIO, crate::ui::bold())
-}
-
-/// 模式分段按钮（Button sm 档：高 24 / px-8 / 11px / 强调字重；激活 = 强调淡底，悬停文字提亮）。
-fn mode_button(
-    window: iced::window::Id,
-    icon_name: &'static str,
-    label: &str,
-    hint: &str,
-    mode: NoteMode,
-    current: NoteMode,
-) -> Element<'static, Message> {
-    let active = mode == current;
-    let btn = button(
-        container(
-            row![
-                icon(icon_name, 12.0, if active { pal::ACCENT } else { pal::TEXT_SECONDARY }),
-                text(label.to_string())
-                    .size(pal::fs_micro())
-                    .font(crate::ui::bold())
-                    .color(if active { pal::ACCENT } else { pal::TEXT_SECONDARY }),
-            ]
-            .spacing(4),
-        )
-        .height(Length::Fill)
-        .align_y(Vertical::Center),
-    )
-    .padding(Padding::ZERO.horizontal(8.0))
-    .height(Length::Fixed(24.0))
-    .style(move |_t, status| button::Style {
-        background: active.then_some(pal::ACCENT_SOFT.into()),
-        text_color: if matches!(status, button::Status::Hovered | button::Status::Pressed) && !active {
-            pal::TEXT_PRIMARY
-        } else {
-            pal::TEXT_SECONDARY
-        },
-        border: border::rounded(pal::RADIUS_SM),
-        ..Default::default()
-    })
-    .on_press(Message::NoteMode(mode));
-    iced::widget::mouse_area(btn)
-        .on_enter(Message::Ui(crate::ui::UiMsg::HoverTip {
-            window,
-            label: hint.to_string(),
-            box_px: 24.0,
-        }))
-        .on_exit(Message::Ui(crate::ui::UiMsg::HoverTipEnd { window, label: hint.to_string() }))
-        .into()
-}
-
-/// 揭示态的源码面元素（行装饰由渲染面给出的包装沿用）。
-#[allow(clippy::too_many_arguments)]
-fn source_block_element<'a>(
-    app: &'a App,
-    body: &'a str,
-    from: usize,
-    to: usize,
-    source: markdown_view::SourceKind,
-    pal: markdown_edit::EditPalette,
-    bindings: crate::commands::NoteBindings,
-    body_start: usize,
-) -> Element<'a, Message> {
-    markdown_edit::SourceBlock {
-        from,
-        to,
-        text: body,
-        caret: app.edit.caret,
-        anchor: app.edit.anchor,
-        preedit: app.edit.preedit.clone(),
-        source,
-        pal,
-        opts: &app.edit_opts,
-        focused: app.edit_surface_focused() && app.edit.caret >= from && app.edit.caret <= to,
-        cursors: &app.remote_cursors,
-        body_start,
-        bindings,
-    }
-    .into()
-}
-
-/// 预览编辑档：行清单由渲染面产出（富渲染件 + 源锚 + 可见片段），已揭示的行以源码面
-/// 替换其内容、行装饰照旧；块内空行与块间空行同为可点的空行行（光标由编辑面自绘）。
-fn edit_view(app: &App) -> Element<'_, Message> {
-    use markdown_edit::SurfaceRow;
-    use markdown_view::RowKind;
-
-    let Some(doc) = app.edit_doc.as_ref() else {
-        return placeholder_panel("正在解析…");
-    };
-    let pal_edit = markdown_edit::EditPalette::from_theme(&app.theme);
-    let note_bindings = crate::commands::note_bindings(&app.global.command_shortcuts);
-    let body = doc.source.as_str();
-    let caret = app.edit.caret.min(body.len());
-    let (sel_from, sel_to) = app.edit.selection();
-    let has_selection = sel_to > sel_from;
-    // 光标停在空白行时不揭示所在行（空行行自己托管光标）
-    let caret_blank = markdown_edit::line_is_blank(body, caret);
-    // 远端光标以 note_text 全文为参照，编辑面坐标相对正文
-    let body_start = atelyx_core::frontmatter::block_end(&app.note_text).unwrap_or(0);
-    let mut rows = Vec::new();
-    // 空文档：补一个空源码行，给光标一个宿主
-    if doc.blocks.is_empty() {
-        rows.push(SurfaceRow::Row {
-            from: 0,
-            to: 0,
-            revealed: true,
-            runs: Vec::new(),
-            indent: 0.0,
-            source: markdown_view::empty_block_meta().source,
-            code: None,
-            covered: false,
-            element: source_block_element(
-                app,
-                body,
-                0,
-                0,
-                markdown_view::empty_block_meta().source,
-                pal_edit,
-                note_bindings.clone(),
-                body_start,
-            ),
-        });
-        return markdown_edit::EditSurface::new(
-            rows,
-            pal_edit,
-            body,
-            caret,
-            app.edit.anchor,
-            app.edit.preedit.clone(),
-            app.edit_surface_focused(),
-            app.note_edit_caret_pending,
-            note_bindings,
-            &app.remote_cursors,
-            body_start,
-        )
-        .into();
-    }
-
-    for row in markdown_view::edit_rows(body, &doc.blocks, &app.theme, &app.note_images) {
-        let (from, to) = (row.from, row.to);
-        match row.kind {
-            RowKind::Gap => {
-                let covered =
-                    markdown_edit::gap_covered_lines(&row.gap_lines, to, sel_from, sel_to);
-                rows.push(SurfaceRow::Gap {
-                    from,
-                    to,
-                    line_starts: row.gap_lines,
-                    covered,
-                    indent: row.indent,
-                    element: row.element,
-                });
-            }
-            RowKind::Deco => {
-                // 装饰行不承载光标：单击落点吸到该行起点（应用层按行首换算）
-                rows.push(SurfaceRow::Row {
-                    from: row.reveal.0,
-                    to: row.reveal.1,
-                    revealed: false,
-                    runs: Vec::new(),
-                    indent: row.indent,
-                    source: row.source,
-                    code: None,
-                    covered: false,
-                    element: row.element,
-                });
-            }
-            RowKind::Block | RowKind::Unit => {
-                let (reveal_from, reveal_to) = row.reveal;
-                let in_caret = caret >= reveal_from && caret <= reveal_to;
-                let in_anchor =
-                    has_selection && app.edit.anchor >= reveal_from && app.edit.anchor <= reveal_to;
-                let revealed = (in_caret && !caret_blank) || in_anchor;
-                let covered =
-                    !revealed && sel_to > sel_from && sel_from < to && sel_to > from;
-                let source = row.source;
-                let element: Element<'_, Message> = if revealed {
-                    row.revealed(source_block_element(
-                        app,
-                        body,
-                        reveal_from,
-                        reveal_to,
-                        source,
-                        pal_edit,
-                        note_bindings.clone(),
-                        body_start,
-                    ))
-                } else {
-                    row.element
-                };
-                rows.push(SurfaceRow::Row {
-                    from,
-                    to,
-                    revealed,
-                    runs: row.runs,
-                    indent: row.indent,
-                    source,
-                    code: row.code,
-                    covered,
-                    element,
-                });
-            }
-        }
-    }
-    markdown_edit::EditSurface::new(
-        rows,
-        pal_edit,
-        body,
-        caret,
-        app.edit.anchor,
-        app.edit.preedit.clone(),
-        app.edit_surface_focused(),
-        app.note_edit_caret_pending,
-        note_bindings,
-        &app.remote_cursors,
-        body_start,
-    )
-    .into()
-}
-
-/// 双链候选浮层（编辑面顶部右侧覆盖；↑↓ 导航、Enter 选中、Esc 关闭）。
-fn wiki_picker_overlay<'a>(app: &'a App, surface: Element<'a, Message>) -> Element<'a, Message> {
-    let Some(picker) = &app.wiki_picker else { return surface };
-    let candidates = app.wiki_candidates();
-    let mut col = iced::widget::Column::<Message>::new().spacing(0);
-    if candidates.is_empty() {
-        col = col.push(
-            container(text("无匹配笔记").size(pal::fs_caption()).color(pal::TEXT_MUTED))
-                .padding(Padding::ZERO.horizontal(12.0).vertical(6.0)),
-        );
-    } else {
-        let active = picker.active.min(candidates.len() - 1);
-        for (pos, fi) in candidates.iter().enumerate() {
-            let (_, name) = &app.note_files[*fi];
-            let title = name.trim_end_matches(".md").to_string();
-            let is_active = pos == active;
-            col = col.push(
-                button(
-                    row![
-                        icon("file-text", 13.0, if is_active { pal::TEXT_PRIMARY } else { pal::TEXT_MUTED }),
-                        text(title.clone())
-                            .size(pal::fs_caption())
-                            .color(if is_active { pal::TEXT_PRIMARY } else { pal::TEXT_SECONDARY }),
-                    ]
-                    .spacing(6),
-                )
-                .width(Length::Fill)
-                .padding(Padding::ZERO.horizontal(12.0).vertical(5.0))
-                .style(move |_t, _s| button::Style {
-                    background: is_active.then_some(pal::ACCENT.into()),
-                    ..button::Style::default()
-                })
-                .on_press(Message::WikiPick(*fi)),
-            );
-        }
-    }
-    let panel = container(
-        scroll::v(col)
-            .width(Length::Fill)
-            .height(Length::Fixed(264.0)),
-    )
-    .width(Length::Fixed(288.0))
-    .style(|_t| Style {
-        background: Some(pal::BG_SECONDARY.into()),
-        border: border::rounded(pal::RADIUS_MD).color(pal::BORDER).width(1.0),
-        ..Style::default()
-    });
-    stack![
-        surface,
-        container(panel)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .align_x(iced::alignment::Horizontal::Right)
-            .align_y(iced::alignment::Vertical::Top)
-            .padding(8.0),
-    ]
-    .into()
-}
-
-/// 反链区（常驻）：引用当前笔记的笔记列表，点击打开。
-fn backlinks_section(app: &App) -> Element<'_, Message> {
-    let n = app.backlinks.len();
-    let mut col = iced::widget::Column::<Message>::new()
-        .padding(Padding::ZERO.horizontal(16.0).vertical(6.0))
-        .spacing(2);
-    col = col.push(
-        row![
-            icon("unlink", 12.0, pal::TEXT_MUTED),
-            text(format!("反链 ({n})")).size(pal::fs_caption()).color(pal::TEXT_SECONDARY),
-        ]
-        .spacing(6),
-    );
-    for link in &app.backlinks {
-        let rel = link.file.clone();
-        col = col.push(
-            button(
-                row![
-                    icon("file-text", 12.0, pal::TEXT_MUTED),
-                    text(link.title.clone()).size(pal::fs_caption()).color(pal::TEXT_PRIMARY),
-                ]
-                .spacing(6),
-            )
-            .padding(Padding::ZERO.horizontal(4.0).vertical(2.0))
-            .style(|_t, status| button::Style {
-                background: matches!(status, button::Status::Hovered | button::Status::Pressed)
-                    .then_some(pal::HOVER.into()),
-                ..button::Style::default()
-            })
-            .on_press(Message::OpenFile(rel)),
-        );
-    }
-    if n == 0 {
-        col = col.push(text("暂无其他笔记引用当前笔记").size(pal::fs_micro()).color(pal::TEXT_MUTED));
-    }
-    container(col).width(Length::Fill).into()
 }
 
 /// 毫秒时间戳 → 本地短文本（YYYY-MM-DD HH:MM；纪元前显示原值）。
@@ -4257,30 +3594,6 @@ fn popup_element<'a>(
         }
         PopupState::SpaceMembers => space_members_entries(app),
         PopupState::SpaceInvite => space_invite_entries(app),
-        PopupState::NoteMenu => {
-            let note_open = app.ui.last_note_file.is_some();
-            vec![
-                (0, MenuEntry::action("添加笔记属性", Message::Props(crate::properties_view::PropsMsg::StartAdd))),
-                (
-                    0,
-                    MenuEntry::Action {
-                        label: "历史记录".into(),
-                        icon: Some("history".into()),
-                        danger: false,
-                        disabled: !note_open,
-                        on_press: app.ui.last_note_file.clone().map(|file| {
-                            Message::History(crate::history_browser::HistoryBrowserMsg::Open {
-                                window,
-                                kind: atelyx_core::history::HistoryKind::Note,
-                                file,
-                            })
-                        }),
-                        note: None,
-                        hint: (!note_open).then(|| "未打开笔记".to_string()),
-                    },
-                ),
-            ]
-        }
         PopupState::PropTypeMenu { key } => {
             // 固定顺序六类型；徽章键锁定标签（其余项禁用）
             use atelyx_core::frontmatter::{infer_type, PropType, Yaml};
@@ -4328,25 +3641,6 @@ fn popup_element<'a>(
             (0, MenuEntry::action_icon("粘贴", "clipboard-paste", Message::Table(crate::table_view::TableMsg::Menu(Box::new(crate::table_view::TableMsg::Paste))))),
             (0, MenuEntry::action_icon("格式", "type", Message::Table(crate::table_view::TableMsg::ShowStyleBar))),
         ],
-        PopupState::SelectionMenu => {
-            let has_text = app.note_mode == NoteMode::Read
-                && app.note_selection.is_some_and(|s| {
-                    let (from, to) = s.range();
-                    from < to
-                });
-            vec![(
-                0,
-                MenuEntry::Action {
-                    label: "复制".into(),
-                    icon: Some("copy".into()),
-                    danger: false,
-                    disabled: !has_text,
-                    on_press: has_text.then_some(Message::CopySelection),
-                    note: None,
-                    hint: None,
-                },
-            )]
-        }
         PopupState::TableFieldMenu { field_id } => {
             let fid = field_id.clone();
             let ftype = app.table.as_ref().and_then(|s| {
@@ -6884,7 +6178,7 @@ pub fn panel_zones(app: &App) -> Vec<PanelZone> {
                             approx_tab_width(
                                 &tab_label(app, &t.view),
                                 t.locked,
-                                (t.view == "note" && app.ui.last_note_file.is_some())
+                                (is_note_view(&t.view) && app.ui.last_note_file.is_some())
                                     || (t.view == "table" && app.ui.last_table_file.is_some())
                                     || (t.view == "canvas" && app.ui.last_canvas_file.is_some()),
                             )
@@ -6920,7 +6214,7 @@ fn walk_panels(node: &LayoutNode, area: Rectangle, out: &mut Vec<PanelZone>, app
                     approx_tab_width(
                         &tab_label(app, &t.view),
                         t.locked,
-                        (t.view == "note" && app.ui.last_note_file.is_some())
+                        (is_note_view(&t.view) && app.ui.last_note_file.is_some())
                             || (t.view == "table" && app.ui.last_table_file.is_some())
                             || (t.view == "canvas" && app.ui.last_canvas_file.is_some()),
                     )

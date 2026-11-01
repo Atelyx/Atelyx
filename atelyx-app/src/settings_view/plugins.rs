@@ -19,6 +19,7 @@ use atelyx_core::plugin_runtime::{
     DialogKind, DialogRequest, FileChangeKind, HistoryActivityResult, HistoryDayParams,
     HistoryOpenParams, HostRequest, ImageInfoResult, InstallOutcome, MeasureBatchParams,
     MeasureBatchResult, NotificationLevel, Permission, PluginEvent, PluginRuntime, PluginStatus,
+    NoteAwarenessParams, NoteEditParams, NoteOpenParams, NoteSaveParams,
     PluginSummary, SetTrayItemsParams, MAX_VAULT_BINARY_BYTES, PLATFORM_PLUGIN,
 };
 use atelyx_core::space_client::SpaceError;
@@ -270,6 +271,28 @@ pub enum PluginsMsg {
     EditorOpenFiles { request_id: u64 },
     /// 用给定文本替换当前选区（空串 = 删除选区）。
     EditorReplaceSelection { request_id: u64, text: String },
+    /// 让宿主打开一个仓库内文件（按扩展名分流视图）。
+    EditorOpenFile { request_id: u64, path: String },
+    /// 打开笔记：宿主读盘并建立会话，回执 = 正文与可写性。
+    NoteOpen { request_id: u64, params: NoteOpenParams },
+    NoteOpenDone {
+        request_id: u64,
+        gen: u64,
+        path: String,
+        result: Result<String, String>,
+        can_write: bool,
+    },
+    /// 提交一次笔记编辑（完整正文 + 光标 / 选区）。
+    NoteEdit { request_id: u64, params: NoteEditParams },
+    /// 请求一次笔记保存（回执 = 已受理，结果经 `note:changed`）。
+    NoteSave { request_id: u64, params: NoteSaveParams },
+    /// 关闭当前笔记会话。
+    NoteClose { request_id: u64, path: String },
+    /// 上报本端笔记选区。
+    NoteAwareness { request_id: u64, params: NoteAwarenessParams },
+    /// 当前笔记的反链。
+    NoteBacklinks { request_id: u64, path: String },
+    NoteBacklinksDone { request_id: u64, result: Result<serde_json::Value, String> },
     /// 按天聚合的仓库活动（`history.activity`）。
     HistoryActivity { request_id: u64 },
     HistoryActivityDone { request_id: u64, result: Result<serde_json::Value, String> },
@@ -496,6 +519,27 @@ pub fn host_requests_stream(spec: &RuntimeSpec) -> impl iced::futures::Stream<It
                 }
                 HostRequest::EditorReplaceSelection { request_id, text, .. } => {
                     Message::Plugins(PluginsMsg::EditorReplaceSelection { request_id, text })
+                }
+                HostRequest::EditorOpenFile { request_id, path, .. } => {
+                    Message::Plugins(PluginsMsg::EditorOpenFile { request_id, path })
+                }
+                HostRequest::NoteOpen { request_id, params, .. } => {
+                    Message::Plugins(PluginsMsg::NoteOpen { request_id, params })
+                }
+                HostRequest::NoteEdit { request_id, params, .. } => {
+                    Message::Plugins(PluginsMsg::NoteEdit { request_id, params })
+                }
+                HostRequest::NoteSave { request_id, params, .. } => {
+                    Message::Plugins(PluginsMsg::NoteSave { request_id, params })
+                }
+                HostRequest::NoteClose { request_id, path, .. } => {
+                    Message::Plugins(PluginsMsg::NoteClose { request_id, path })
+                }
+                HostRequest::NoteAwareness { request_id, params, .. } => {
+                    Message::Plugins(PluginsMsg::NoteAwareness { request_id, params })
+                }
+                HostRequest::NoteBacklinks { request_id, path, .. } => {
+                    Message::Plugins(PluginsMsg::NoteBacklinks { request_id, path })
                 }
                 HostRequest::CollabMetaGet { request_id, params, .. } => {
                     Message::Plugins(PluginsMsg::CollabMetaGet { request_id, params })
@@ -1303,6 +1347,39 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
         }
         PluginsMsg::EditorReplaceSelection { request_id, text } => {
             let result = app.editor_replace_selection(text).map(|_| serde_json::json!({}));
+            resolve_vault(app, request_id, result)
+        }
+        PluginsMsg::EditorOpenFile { request_id, path } => {
+            let rel = match plugin_path(Some(&path)) {
+                Ok(rel) => rel,
+                Err(e) => return resolve_vault(app, request_id, Err(e)),
+            };
+            app.plugins.resolve_shell_call(request_id, Ok(serde_json::json!({})));
+            // 打开走脏拦截：未落盘输入先 flush 再换文件（与文件树单击同一通道）
+            app.gate(crate::PendingAfterFlush::OpenFile(rel))
+        }
+        PluginsMsg::NoteOpen { request_id, params } => {
+            crate::plugin_note::open(app, request_id, params)
+        }
+        PluginsMsg::NoteOpenDone { request_id, gen, path, result, can_write } => {
+            crate::plugin_note::open_done(app, request_id, gen, path, result, can_write)
+        }
+        PluginsMsg::NoteEdit { request_id, params } => {
+            crate::plugin_note::edit(app, request_id, params)
+        }
+        PluginsMsg::NoteSave { request_id, params } => {
+            crate::plugin_note::save(app, request_id, params)
+        }
+        PluginsMsg::NoteClose { request_id, path } => {
+            crate::plugin_note::close(app, request_id, &path)
+        }
+        PluginsMsg::NoteAwareness { request_id, params } => {
+            crate::plugin_note::awareness(app, request_id, params)
+        }
+        PluginsMsg::NoteBacklinks { request_id, path } => {
+            crate::plugin_note::backlinks(app, request_id, path)
+        }
+        PluginsMsg::NoteBacklinksDone { request_id, result } => {
             resolve_vault(app, request_id, result)
         }
         PluginsMsg::HistoryActivity { request_id } => {

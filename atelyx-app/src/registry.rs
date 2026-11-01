@@ -43,7 +43,7 @@ impl Source {
 /// 注册表条目。
 #[derive(Clone, Debug, PartialEq)]
 pub struct Entry {
-    /// 视图 = 壳侧视图 kind（内置 `"note"`，插件 `"plugin:<插件 id>:<贡献 id>"`）；服务 = 服务名。
+    /// 视图 = 壳侧视图 id（内置视图如 `files`，插件 `"plugin:<插件 id>:<贡献 id>"`）；服务 = 服务名。
     pub id: String,
     pub kind: EntryKind,
     pub label: String,

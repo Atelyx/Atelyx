@@ -188,22 +188,27 @@ pub fn props_panel<'a>(
     let cursor = app.cursor_for(window);
     let body: Element<'a, Message> = match parsed {
         // YAML 解析失败：红条 + 源码模式入口（面板编辑全部禁用，防 stringify 丢弃旧数据）
-        (_data, false) => row![
-            icon("triangle-alert", 13.0, pal::DANGER),
-            text("YAML 格式错误，属性面板暂不可编辑")
-                .size(pal::fs_caption())
-                .color(pal::TEXT_SECONDARY),
-            space(),
-            controls::btn(
-                "打开源码模式",
-                &btn_tiny(),
-                controls::Variant::Secondary,
-                Some(Message::Props(PropsMsg::OpenSourceMode)),
-            ),
-        ]
-        .spacing(8)
-        .padding(Padding::ZERO.horizontal(16.0).vertical(6.0))
-        .into(),
+        (_data, false) => {
+            let mut bar = row![
+                icon("triangle-alert", 13.0, pal::DANGER),
+                text("YAML 格式错误，属性面板暂不可编辑")
+                    .size(pal::fs_caption())
+                    .color(pal::TEXT_SECONDARY),
+            ];
+            // 笔记面板自持只读 / 编辑 / 源码档，宿主不改它的档位
+            if !app.plugin_note_active {
+                bar = bar.push(space());
+                bar = bar.push(controls::btn(
+                    "打开源码模式",
+                    &btn_tiny(),
+                    controls::Variant::Secondary,
+                    Some(Message::Props(PropsMsg::OpenSourceMode)),
+                ));
+            }
+            bar.spacing(8)
+                .padding(Padding::ZERO.horizontal(16.0).vertical(6.0))
+                .into()
+        }
         (data, true) => {
             let Yaml::Map(pairs) = data else { return None };
             props_column(app, window, cursor, pairs).into()
@@ -1228,6 +1233,8 @@ impl App {
         self.save_error = None;
         self.autosave_deadline = Some(Instant::now() + crate::AUTOSAVE_DEBOUNCE);
         self.refresh_props();
+        crate::space_actions::collab_after_edit(self);
+        crate::plugin_note::publish_state(self, Some(self.note_text.clone()));
     }
 
     /// 重建属性面板解析缓存（文件载入 / 属性提交 / 撤销重做后调用）。

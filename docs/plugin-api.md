@@ -400,7 +400,10 @@ pub const BUILTIN_SERVICES: &[(&str, &str, &[&str])] = &[
     ("ai", PLATFORM_PLUGIN, &[ai::CHAT_SEND, ai::CHAT_STOP, ai::CHAT_HISTORY, ai::MODELS, ai::AGENTS, ai::CHAT_RENAME, ai::CHAT_DELETE, ai::CHAT_COMPACT, ai::CHAT_TITLE, ai::TOOL_LIST, ai::TOOL_EXECUTE, ai::CHAT_EMIT]),
     ("window", PLATFORM_PLUGIN, &[window::OPEN, window::CLOSE, window::UPDATE, window::SHOW, window::BEGIN_DRAG, window::MINIMIZE, window::TOGGLE_MAXIMIZE]),
     ("query", PLATFORM_PLUGIN, &[query::MEASURE, query::THEME]),
-    ("editor", "atelyx.notes", &[editor::SELECTION, editor::REPLACE_SELECTION]),
+    // 编辑器选区读写作用于宿主自持的笔记会话，随平台常驻
+    ("editor", PLATFORM_PLUGIN, &[editor::SELECTION, editor::REPLACE_SELECTION, editor::OPEN_FILES, editor::OPEN_FILE]),
+    // 笔记会话是宿主内容真源（保存链 / 协作增量 / 历史），归平台自身，不随插件停用下线
+    ("note", PLATFORM_PLUGIN, &[note::OPEN, note::EDIT, note::SAVE, note::CLOSE, note::AWARENESS, note::BACKLINKS]),
     ("history", "atelyx.history", &[history::ACTIVITY, history::DAY, history::OPEN]),
 ];
 ```
@@ -1817,7 +1820,7 @@ pub mod doc {
 
 ```rust
 // atelyx-plugin-protocol/src/method.rs
-/// 编辑器：当前打开笔记的选区读写（由笔记插件提供，其他插件据此做「改写选中内容」这类动作）。
+/// 编辑器：当前打开笔记的选区读写（宿主随笔记会话自持，其他插件据此做「改写选中内容」这类动作）。
 /// 只在编辑状态有意义；阅读态选区不属于编辑器能力。
 pub mod editor {
     /// 读当前文档路径与选区（无选区时 `from == to`、`text` 为空）。
@@ -1826,6 +1829,29 @@ pub mod editor {
     pub const REPLACE_SELECTION: &str = "editor.replaceSelection";
     /// 读当前打开的文件（仓库相对路径，按打开顺序）。候选列表这类要「打开中的优先」的界面用。
     pub const OPEN_FILES: &str = "editor.openFiles";
+    /// 让宿主打开一个仓库内文件（按扩展名分流到对应视图；回执 = 已受理）。
+    pub const OPEN_FILE: &str = "editor.openFile";
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 笔记文档会话：打开 / 编辑 / 保存 / 在场与反链。正文真源、保存链与协作增量都在宿主，
+/// 插件只持展示与编辑态；写入与宿主自身编辑同一出口。
+pub mod note {
+    /// 打开一篇笔记：宿主读盘、建立会话（本地与协作空间同构），回执即当前正文与可写性。
+    pub const OPEN: &str = "note.open";
+    /// 提交一次本地编辑（完整正文 + 光标 / 选区，字节偏移）。内容有变化时宿主置脏并接入
+    /// 协作增量；无变化时只更新在场选区。
+    pub const EDIT: &str = "note.edit";
+    /// 请求一次保存（手动 / 自动）。回执只表示已受理，落盘结果经 `note:changed` 到达。
+    pub const SAVE: &str = "note.save";
+    /// 关闭当前笔记会话（换文件 / 关标签 / 切仓库）。
+    pub const CLOSE: &str = "note.close";
+    /// 上报本端光标 / 选区（全文字节偏移；`None` = 无选区）。只对协作空间生效。
+    pub const AWARENESS: &str = "note.awareness";
+    /// 引用当前笔记的其它笔记（反链）。
+    pub const BACKLINKS: &str = "note.backlinks";
 }
 ```
 
@@ -2296,9 +2322,9 @@ pub struct HttpResult {
 }
 ```
 
-## 11. 能力面负载：文档与对话
+## 11. 能力面负载：文档、笔记与对话
 
-领域文档实例、AI 对话与工具桥的负载形态。
+领域文档实例、笔记会话、AI 对话与工具桥的负载形态。
 
 ```rust
 // atelyx-plugin-protocol/src/method.rs
@@ -2347,6 +2373,96 @@ pub struct EditorSelection {
 #[serde(rename_all = "camelCase")]
 pub struct EditorReplaceParams {
     pub text: String,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 单次提交的笔记正文上限（超限按可读错误拒绝）。
+pub const MAX_NOTE_TEXT_BYTES: usize = 8 * 1024 * 1024;
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`note::OPEN`] 的 params。
+#[serde(rename_all = "camelCase")]
+pub struct NoteOpenParams {
+    /// 仓库相对路径（本地仓库）/ 服务端内容路径（协作空间），与 `vault` 口径一致。
+    pub path: String,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`note::OPEN`] 的 result：当前正文与是否可写（viewer 只读）。
+#[serde(rename_all = "camelCase")]
+pub struct NoteOpenResult {
+    pub path: String,
+    pub text: String,
+    pub can_write: bool,
+    /// 宿主当前是否有未落盘修改（插件重启后据此恢复「未保存」状态）。
+    #[serde(default)]
+    pub dirty: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub save_error: Option<String>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`note::EDIT`] 的 params：完整正文 + 本端光标与选区锚点（全文字节偏移；
+/// `anchor` / `head` 缺省 = 无选区）。
+#[serde(rename_all = "camelCase")]
+pub struct NoteEditParams {
+    pub path: String,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<usize>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`note::SAVE`] 的 params：`manual` = 手动保存（成功 / 失败均有提示）；缺省 = 自动保存。
+#[serde(rename_all = "camelCase")]
+pub struct NoteSaveParams {
+    pub path: String,
+    #[serde(default)]
+    pub manual: bool,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`note::AWARENESS`] 的 params：本端选区（全文字节偏移，`None` = 只上报身份）。
+#[serde(rename_all = "camelCase")]
+pub struct NoteAwarenessParams {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<usize>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 一条反链：引用该笔记的文件路径与显示标题。
+#[serde(rename_all = "camelCase")]
+pub struct NoteBacklink {
+    pub path: String,
+    pub title: String,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`note::BACKLINKS`] 的 result。
+#[serde(rename_all = "camelCase")]
+pub struct NoteBacklinksResult {
+    pub entries: Vec<NoteBacklink>,
 }
 ```
 
@@ -3503,6 +3619,9 @@ pub mod name {
     /// 外部文件拖入窗口（宿主只转发绝对路径，读取由订阅方经 `fs` 自理）。
     /// payload 见 [`FileDropPayload`]；未挂载界面的插件应忽略。
     pub const WINDOW_FILE_DROP: &str = "window:file.drop";
+    /// 当前笔记会话的正文 / 落盘状态变化（协作远端合入、保存成功或失败、属性面板改写）。
+    /// payload 见 [`NoteChangedPayload`]。
+    pub const NOTE_CHANGED: &str = "note:changed";
 }
 ```
 
@@ -3544,6 +3663,22 @@ pub struct TableSelectionChangedPayload {
     /// 其他协作者的当前选区（不含本端）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub remote_selections: Vec<crate::method::TableRemoteSelection>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/event.rs
+/// [`name::NOTE_CHANGED`] 的 payload：`text` 只在正文被宿主改写时给出（保存成功回填合流结果、
+/// 远端合入、属性面板改写）；`dirty` / `saveError` 反映当前落盘状态。
+#[serde(rename_all = "camelCase")]
+pub struct NoteChangedPayload {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub dirty: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub save_error: Option<String>,
 }
 ```
 

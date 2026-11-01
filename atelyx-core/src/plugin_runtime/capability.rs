@@ -19,8 +19,8 @@ use serde_json::Value;
 pub(crate) fn permission_for(name: &str) -> Option<Permission> {
     use Permission::*;
     use method::{
-        ai, clipboard, collab, dialog, editor, fs, history, http, notification, process, shortcut,
-        state, table, tray, vault, window,
+        ai, clipboard, collab, dialog, editor, fs, history, http, note, notification, process,
+        shortcut, state, table, tray, vault, window,
     };
     match name {
         fs::PRIVATE_DIR | fs::READ_TEXT | fs::WRITE_TEXT | fs::READ_BINARY | fs::WRITE_BINARY
@@ -40,8 +40,13 @@ pub(crate) fn permission_for(name: &str) -> Option<Permission> {
         dialog::PICK_FILE | dialog::PICK_DIRECTORY => Some(Dialog),
         http::REQUEST | http::STREAM_OPEN | http::STREAM_CANCEL => Some(Http),
         collab::PEERS | collab::SEND | collab::META_GET | collab::META_PATCH => Some(Collab),
-        // 读写当前笔记的选区即读写用户正文，按仓库内容权限归类
-        editor::SELECTION | editor::REPLACE_SELECTION | editor::OPEN_FILES => Some(Vault),
+        // 读写当前笔记的正文 / 选区即读写用户内容，按仓库内容权限归类
+        editor::SELECTION | editor::REPLACE_SELECTION | editor::OPEN_FILES | editor::OPEN_FILE => {
+            Some(Vault)
+        }
+        note::OPEN | note::EDIT | note::SAVE | note::CLOSE | note::AWARENESS | note::BACKLINKS => {
+            Some(Vault)
+        },
         // 活动统计取自当前仓库内容，同样按仓库内容权限归类
         history::ACTIVITY | history::DAY | history::OPEN => Some(Vault),
         window::OPEN | window::CLOSE | window::UPDATE | window::SHOW | window::BEGIN_DRAG
@@ -142,6 +147,11 @@ mod tests {
         assert_eq!(permission_for(method::collab::META_PATCH), Some(Permission::Collab));
         assert_eq!(permission_for(method::editor::SELECTION), Some(Permission::Vault));
         assert_eq!(permission_for(method::editor::REPLACE_SELECTION), Some(Permission::Vault));
+        assert_eq!(permission_for(method::editor::OPEN_FILE), Some(Permission::Vault));
+        assert_eq!(permission_for(method::note::OPEN), Some(Permission::Vault));
+        assert_eq!(permission_for(method::note::EDIT), Some(Permission::Vault));
+        assert_eq!(permission_for(method::note::SAVE), Some(Permission::Vault));
+        assert_eq!(permission_for(method::note::BACKLINKS), Some(Permission::Vault));
         assert_eq!(permission_for(method::history::ACTIVITY), Some(Permission::Vault));
         assert_eq!(permission_for(method::history::DAY), Some(Permission::Vault));
         assert_eq!(permission_for(method::history::OPEN), Some(Permission::Vault));

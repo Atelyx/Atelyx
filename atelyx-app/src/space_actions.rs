@@ -822,14 +822,18 @@ pub fn enter_space(app: &mut App, session: SpaceSession, from_boot: bool) -> Tas
         app.ui.last_note_file = None;
         app.ui.last_table_file = None;
         app.ui.last_canvas_file = None;
+        // 插件文档实例与笔记会话随容器切换收口：旧的相对路径在新空间指向别的文件
+        let _ = crate::plugin_actions::close_doc(app);
         app.note_mode = crate::NoteMode::Read;
+        app.plugin_note_active = false;
+        app.plugin_note_selection = None;
+        app.pending_plugin_note_open = None;
         app.note_edit_caret_pending = false;
-        app.note_press_inside = false;
         app.history.clear();
     }
     if from_boot && app.global.auto_restore {
         if let Some(rel) = app.ui.last_note_file.clone() {
-            task = task.chain(space_load_note(app, &rel));
+            task = task.chain(app.open_file(&rel));
         }
         if let Some(rel) = app.ui.last_table_file.clone() {
             task = task.chain(space_load_table(app, &rel));
@@ -1318,20 +1322,6 @@ pub fn space_load_children_for_expand(app: &mut App, rel: &str) -> Task<Message>
     }
 }
 
-/// 打开笔记（空间模式）：GET 文本，复用 FileLoaded 回执链。
-pub fn space_load_note(app: &App, rel: &str) -> Task<Message> {
-    let Some(session) = session_of(app) else { return Task::none() };
-    let gen = app.epoch();
-    let rel = rel.to_string();
-    let rel_for_cb = rel.clone();
-    let client = session.client;
-    let space_id = session.space_id;
-    Task::perform(
-        async move { client.get_file_text(&space_id, &rel).await },
-        move |result| Message::FileLoaded(gen, rel_for_cb, result.map_err(err_text)),
-    )
-}
-
 /// 打开表格（空间模式）：GET 文本 → 解析 TableFile → 复用 TableMsg::Loaded。
 pub fn space_load_table(app: &App, rel: &str) -> Task<Message> {
     let Some(session) = session_of(app) else { return Task::none() };
@@ -1480,6 +1470,7 @@ fn on_note_saved(
         Err(e) => {
             app.settle_history_restore(false);
             app.save_error = Some(e.clone());
+            crate::plugin_note::publish_state(app, None);
             if matches!(reason, SaveReason::Flush) {
                 app.notify(NoticeLevel::Error, format!("保存失败，操作未执行：{e}"));
             } else {
@@ -1547,6 +1538,7 @@ fn on_note_saved(
                 ));
             }
             // 在途保存期间到来的 Flush（关窗/切文件拦截）：串行补发一笔收尾
+            crate::plugin_note::publish_state(app, None);
             if queued {
                 return task.chain(space_submit_save(app, SaveReason::Flush));
             }
@@ -1596,8 +1588,14 @@ pub fn apply_remote_text(app: &mut App, new_text: String) {
         // 旧全文覆盖 note_text（静默回退远端内容）
         app.source_editor = text_editor::Content::with_text(&new_text);
     }
-    app.refresh_preview();
-    app.refresh_edit();
+    if app.plugin_note_active {
+        // 插件面自行重排；远端偏移与旧选区不再对应，由插件应用新正文后重新上报。
+        app.plugin_note_selection = None;
+    } else {
+        app.refresh_preview();
+        app.refresh_edit();
+    }
+    crate::plugin_note::publish_state(app, Some(new_text));
 }
 
 // ===== 表格保存（空间模式）=====
@@ -3103,6 +3101,11 @@ fn source_offset(text: &str, pos: text_editor::Position) -> usize {
 /// 编辑面光标；预览编辑档取正文编辑面（偏移相对正文，剥 frontmatter 前缀）；只读档无光标。
 fn local_selection(app: &App) -> Option<(u32, u32)> {
     let text = app.note_text.as_str();
+    if app.plugin_note_active {
+        return app
+            .plugin_note_selection
+            .and_then(|(anchor, head)| selection_units(text, anchor, head));
+    }
     match app.note_mode {
         NoteMode::Read => None,
         NoteMode::Source => {

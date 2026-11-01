@@ -311,39 +311,6 @@ pub fn conflicts(resolved: &[(CommandId, String)], id: CommandId) -> Vec<Command
         .collect()
 }
 
-/// 编辑面部件注入的撤销/重做键位（仅 Note 域两条；部件按键匹配查此表）。
-#[derive(Clone, Debug)]
-pub struct NoteBindings {
-    pub undo: String,
-    pub redo: String,
-    /// mod+shift+z 重做别名（redo 未被重定义时沿用；部件内匹配）。
-    pub redo_alias: bool,
-}
-
-impl Default for NoteBindings {
-    fn default() -> Self {
-        Self {
-            undo: CommandId::NoteUndo.default_binding().to_string(),
-            redo: CommandId::NoteRedo.default_binding().to_string(),
-            redo_alias: true,
-        }
-    }
-}
-
-/// 解析编辑面键位：与 `resolve` 同口径（无效覆盖回退默认表）。
-pub fn note_bindings(overrides: &HashMap<String, String>) -> NoteBindings {
-    let mut b = NoteBindings::default();
-    for (id, binding) in resolve(overrides) {
-        match id {
-            CommandId::NoteUndo => b.undo = binding,
-            CommandId::NoteRedo => b.redo = binding,
-            _ => {}
-        }
-    }
-    b.redo_alias = redo_alias_active(overrides, Scope::Note);
-    b
-}
-
 /// `mod+shift+z` 重做别名是否生效：redo 未被覆盖，且 undo 未被改绑到该键串（避免一键双义）。
 pub fn redo_alias_active(overrides: &HashMap<String, String>, scope: Scope) -> bool {
     let (undo_key, redo_key) = match scope {
@@ -433,20 +400,6 @@ mod tests {
         let r = resolve(&ov);
         assert_eq!(r.iter().find(|(c, _)| *c == CommandId::NoteUndo).unwrap().1, "mod+u");
         assert_eq!(r.iter().find(|(c, _)| *c == CommandId::TableClear).unwrap().1, "delete");
-    }
-
-    #[test]
-    fn note_bindings_apply_override_and_fallback() {
-        let mut ov = HashMap::new();
-        ov.insert("note.undo".to_string(), "mod+u".to_string());
-        ov.insert("note.redo".to_string(), "u".to_string()); // 违规 → 回退默认
-        let b = note_bindings(&ov);
-        assert_eq!(b.undo, "mod+u");
-        assert_eq!(b.redo, "mod+y");
-        // 无覆盖 = 默认表
-        let b = note_bindings(&HashMap::new());
-        assert_eq!(b.undo, "mod+z");
-        assert_eq!(b.redo, "mod+y");
     }
 
     #[test]

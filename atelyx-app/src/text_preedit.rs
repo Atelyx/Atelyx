@@ -24,10 +24,6 @@ impl Composed {
         Self { insert: caret, len: preedit.map_or(0, |p| p.chars().count()) }
     }
 
-    pub(crate) fn is_active(&self) -> bool {
-        self.len > 0
-    }
-
     /// 组合串在排版文本中的字符区间。
     pub(crate) fn span(&self) -> Range<usize> {
         self.insert..self.insert + self.len

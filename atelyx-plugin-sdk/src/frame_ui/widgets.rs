@@ -1316,6 +1316,30 @@ impl<'c, 'a> Ui<'c, 'a> {
         );
     }
 
+    /// 自适应高度的无底色多行输入框（回车换行、不提交）：内容在 `min`–`max` 之间长高，
+    /// 超出后在框内滚动。整篇正文编辑这类要交给外层滚动容器的场景用它。
+    pub fn text_area_plain_auto(
+        &mut self,
+        id: impl Into<String>,
+        value: impl Into<String>,
+        min: f32,
+        max: f32,
+        font_size: f32,
+        pad: Edges,
+    ) {
+        self.text_area_kind(
+            id.into(),
+            value.into(),
+            String::new(),
+            AreaHeight::Auto { min, max },
+            false,
+            Some(font_size),
+            true,
+            pad,
+            Vec::new(),
+        );
+    }
+
     /// 自适应高度的无底色多行输入框（回车提交）：内容在 `min`–`max` 之间长高，超出后在框内滚动。
     /// 正文里被登记为标记的区间（如 `#` 引用标签）以强调浅底高亮，点进去整段选中、边界退格整段删除。
     #[allow(clippy::too_many_arguments)]
@@ -1763,10 +1787,31 @@ impl<'c, 'a> Ui<'c, 'a> {
         mentions: Vec<atelyx_markdown::MentionCandidate>,
     ) {
         let content = content.into();
+        let id = self.ctx().next_markdown_id(super::markdown::content_key(&content, &mentions));
+        self.markdown_item(id, content, mentions);
+    }
+
+    /// 带调用方指定 id 的只读 Markdown：命中 / 选区 / 双击都按该 id 回发，面内排版后可
+    /// 用 `FrameUi::rect` 取到块矩形做逐块行为（块级编辑这类按命中块分派）。
+    pub fn markdown_named(
+        &mut self,
+        id: impl Into<String>,
+        content: impl Into<String>,
+        mentions: Vec<atelyx_markdown::MentionCandidate>,
+    ) {
+        let content = content.into();
+        self.markdown_item(id.into(), content, mentions);
+    }
+
+    fn markdown_item(
+        &mut self,
+        id: String,
+        content: String,
+        mentions: Vec<atelyx_markdown::MentionCandidate>,
+    ) {
         let theme = self.ctx().theme.clone();
         let cache = Arc::clone(&self.ctx().state.markdown_layouts);
         let key = super::markdown::content_key(&content, &mentions);
-        let id = self.ctx().next_markdown_id(key);
         let for_height = content.clone();
         let height_mentions = mentions.clone();
         let draw_mentions = mentions;

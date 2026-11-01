@@ -53,7 +53,7 @@ pub use atelyx_plugin_protocol::paint::{
 };
 pub use atelyx_plugin_protocol::event::{
     ChatChangeKind, ChatChangedPayload, ChatPersistChangedPayload, ChatReloadedPayload,
-    FileChangeKind, FileChangedPayload, FileDropPayload,
+    FileChangeKind, FileChangedPayload, FileDropPayload, NoteChangedPayload,
     SpaceMetaChangedPayload, TableChangedPayload, TableSelectionChangedPayload, VaultSwitchPayload,
 };
 pub use atelyx_plugin_protocol::chat::ChatPersistError;
@@ -83,7 +83,8 @@ pub use atelyx_plugin_protocol::method::{
     RunCompactParams, RunConfigWire, RunDirectParams, RunStartParams, RunStartResult,
     RunStopParams, RunTitleParams, SearchConfigWire, ThemeResult, ToolDecl, ToolExecParams,
     ToolExecResult, ToolListParams, ToolListResult, TrayClickParams, TrayItemSpec, WindowOpenParams,
-    WindowUpdateParams, AI_CORE_PLUGIN,
+    WindowUpdateParams, NoteAwarenessParams, NoteBacklink, NoteBacklinksResult, NoteEditParams,
+    NoteOpenParams, NoteOpenResult, NoteSaveParams, AI_CORE_PLUGIN,
 };
 
 /// 插件运行状态。
@@ -328,6 +329,24 @@ pub enum HostRequest {
     EditorOpenFiles { plugin_id: String, request_id: u64 },
     /// 插件请求用给定文本替换当前选区（空串 = 删除选区；写入经笔记同一套保存链）。
     EditorReplaceSelection { plugin_id: String, request_id: u64, text: String },
+    /// 插件请求让宿主打开一个仓库内文件（按扩展名分流视图）。
+    EditorOpenFile { plugin_id: String, request_id: u64, path: String },
+    /// 插件请求打开一篇笔记（宿主读盘并建立会话，回执 = 正文与可写性）。
+    NoteOpen { plugin_id: String, request_id: u64, params: method::NoteOpenParams },
+    /// 插件提交一次笔记编辑（完整正文 + 光标 / 选区）。
+    NoteEdit { plugin_id: String, request_id: u64, params: method::NoteEditParams },
+    /// 插件请求一次笔记保存（回执只表示已受理，落盘结果经 `note:changed` 到达）。
+    NoteSave { plugin_id: String, request_id: u64, params: method::NoteSaveParams },
+    /// 插件请求关闭当前笔记会话。
+    NoteClose { plugin_id: String, request_id: u64, path: String },
+    /// 插件上报本端笔记选区。
+    NoteAwareness {
+        plugin_id: String,
+        request_id: u64,
+        params: method::NoteAwarenessParams,
+    },
+    /// 插件请求当前笔记的反链。
+    NoteBacklinks { plugin_id: String, request_id: u64, path: String },
     /// 插件请求读当前空间的团队元数据（`key` 缺省 = 全部键；仅协作空间可用）。
     CollabMetaGet { plugin_id: String, request_id: u64, params: method::CollabMetaGetParams },
     /// 插件请求按键写当前空间的团队元数据（只改给出的键；只读身份由壳拒绝）。
@@ -679,6 +698,13 @@ impl PluginRuntime {
             | HostRequest::EditorSelection { .. }
             | HostRequest::EditorOpenFiles { .. }
             | HostRequest::EditorReplaceSelection { .. }
+            | HostRequest::EditorOpenFile { .. }
+            | HostRequest::NoteOpen { .. }
+            | HostRequest::NoteEdit { .. }
+            | HostRequest::NoteSave { .. }
+            | HostRequest::NoteClose { .. }
+            | HostRequest::NoteAwareness { .. }
+            | HostRequest::NoteBacklinks { .. }
             | HostRequest::HistoryDay { .. }
             | HostRequest::HistoryOpen { .. }
             | HostRequest::HistoryActivity { .. } => {
@@ -942,6 +968,41 @@ impl PluginRuntime {
                     text,
                 }
             }
+            HostRequest::EditorOpenFile { plugin_id, path, .. } => HostRequest::EditorOpenFile {
+                plugin_id,
+                request_id,
+                path,
+            },
+            HostRequest::NoteOpen { plugin_id, params, .. } => HostRequest::NoteOpen {
+                plugin_id,
+                request_id,
+                params,
+            },
+            HostRequest::NoteEdit { plugin_id, params, .. } => HostRequest::NoteEdit {
+                plugin_id,
+                request_id,
+                params,
+            },
+            HostRequest::NoteSave { plugin_id, params, .. } => HostRequest::NoteSave {
+                plugin_id,
+                request_id,
+                params,
+            },
+            HostRequest::NoteClose { plugin_id, path, .. } => HostRequest::NoteClose {
+                plugin_id,
+                request_id,
+                path,
+            },
+            HostRequest::NoteAwareness { plugin_id, params, .. } => HostRequest::NoteAwareness {
+                plugin_id,
+                request_id,
+                params,
+            },
+            HostRequest::NoteBacklinks { plugin_id, path, .. } => HostRequest::NoteBacklinks {
+                plugin_id,
+                request_id,
+                path,
+            },
             HostRequest::HistoryDay { plugin_id, params, .. } => HostRequest::HistoryDay {
                 plugin_id,
                 request_id,
@@ -1686,6 +1747,11 @@ impl PluginRuntime {
         self.broadcast_event(event::name::TABLE_SELECTION_CHANGED, &payload);
     }
 
+    /// 广播当前笔记会话的正文 / 落盘状态变化：订阅方按 `path` 过滤，`text` 给出即替换正文。
+    pub fn on_note_changed(self: &Arc<Self>, payload: NoteChangedPayload) {
+        self.broadcast_event(event::name::NOTE_CHANGED, &payload);
+    }
+
     /// 广播仓库内文件变更给订阅了 `vault:file.changed` 的运行中插件。只覆盖宿主发起的写入
     /// （保存 / 新建 / 删除 / 改名 / 插件经 `vault` 写），外部程序直接改磁盘不发。
     pub fn on_file_changed(self: &Arc<Self>, path: &str, kind: FileChangeKind, old_path: Option<&str>) {
@@ -1976,6 +2042,13 @@ fn request_plugin_id(request: &HostRequest) -> &str {
         | HostRequest::EditorSelection { plugin_id, .. }
         | HostRequest::EditorOpenFiles { plugin_id, .. }
         | HostRequest::EditorReplaceSelection { plugin_id, .. }
+        | HostRequest::EditorOpenFile { plugin_id, .. }
+        | HostRequest::NoteOpen { plugin_id, .. }
+        | HostRequest::NoteEdit { plugin_id, .. }
+        | HostRequest::NoteSave { plugin_id, .. }
+        | HostRequest::NoteClose { plugin_id, .. }
+        | HostRequest::NoteAwareness { plugin_id, .. }
+        | HostRequest::NoteBacklinks { plugin_id, .. }
         | HostRequest::HistoryDay { plugin_id, .. }
         | HostRequest::HistoryOpen { plugin_id, .. }
         | HostRequest::HistoryActivity { plugin_id, .. } => plugin_id,

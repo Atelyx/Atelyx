@@ -30,8 +30,8 @@ pub(crate) const SERVICE_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 const BUS_NAMESPACE: &str = "service";
 
 /// 不可替换的内置服务：`query` 的量算与主题取自宿主 OS / 用户设置；`chat` 是会话真源，
-/// 只能由宿主按仓库身份读写。两者外置都会与宿主状态脱节。
-const NON_REPLACEABLE: &[&str] = &["query", "chat"];
+/// `note` 是笔记正文与保存链真源，只能由宿主按仓库身份读写。外置都会与宿主状态脱节。
+const NON_REPLACEABLE: &[&str] = &["query", "chat", "note"];
 
 /// 宿主保留方法：工具名册、结果回报、工具执行与对话事件由宿主记账，服务被外部顶替后
 /// 也不能被提供者截走。
@@ -1045,22 +1045,22 @@ mod tests {
     #[test]
     fn disabling_a_builtin_owner_takes_its_services_off_the_bus() {
         let mut dir = ServiceDir::new();
-        assert_eq!(dir.route("editor"), Route::Builtin);
+        assert_eq!(dir.route("table"), Route::Builtin);
         assert_eq!(
-            dir.set_owner_enabled("atelyx.notes", false),
-            vec!["editor".to_string()],
-            "笔记插件的全部服务一并离开"
+            dir.set_owner_enabled("atelyx.tables", false),
+            vec!["table".to_string()],
+            "表格插件的全部服务一并离开"
         );
-        assert_eq!(dir.route("editor"), Route::Missing, "归属插件停用后服务不可用");
-        assert!(dir.blocked("editor"), "在册但暂不可用与「从未登记」要能区分");
+        assert_eq!(dir.route("table"), Route::Missing, "归属插件停用后服务不可用");
+        assert!(dir.blocked("table"), "在册但暂不可用与「从未登记」要能区分");
         assert!(!dir.blocked("vault"), "平台插件的方法不受停用影响");
-        assert!(dir.list().services.iter().all(|service| service.service != "editor"));
-        assert!(!dir.changed("editor").available);
+        assert!(dir.list().services.iter().all(|service| service.service != "table"));
+        assert!(!dir.changed("table").available);
 
-        assert_eq!(dir.set_owner_enabled("atelyx.notes", true), vec!["editor".to_string()]);
-        assert_eq!(dir.route("editor"), Route::Builtin, "重新启用即恢复");
-        assert!(!dir.blocked("editor"));
-        assert!(dir.list().services.iter().any(|service| service.service == "editor"));
+        assert_eq!(dir.set_owner_enabled("atelyx.tables", true), vec!["table".to_string()]);
+        assert_eq!(dir.route("table"), Route::Builtin, "重新启用即恢复");
+        assert!(!dir.blocked("table"));
+        assert!(dir.list().services.iter().any(|service| service.service == "table"));
     }
 
     #[test]
@@ -1074,38 +1074,38 @@ mod tests {
     #[test]
     fn a_disabled_owner_yields_to_an_external_candidate() {
         let mut dir = ServiceDir::new();
-        dir.register("com.a", &params("editor", &["selection"])).unwrap();
-        dir.set_owner_enabled("atelyx.notes", false);
-        assert_eq!(dir.route("editor"), Route::Plugin("com.a".into()), "外部候选接任");
-        assert_eq!(info(&dir.list(), "editor").provider.as_deref(), Some("com.a"));
+        dir.register("com.a", &params("table", &["snapshot"])).unwrap();
+        dir.set_owner_enabled("atelyx.tables", false);
+        assert_eq!(dir.route("table"), Route::Plugin("com.a".into()), "外部候选接任");
+        assert_eq!(info(&dir.list(), "table").provider.as_deref(), Some("com.a"));
 
         dir.drop_plugin("com.a");
-        assert_eq!(dir.route("editor"), Route::Missing, "候选也没了即不可用");
-        dir.set_owner_enabled("atelyx.notes", true);
-        assert_eq!(dir.route("editor"), Route::Builtin, "内置登记留位，启用即恢复");
+        assert_eq!(dir.route("table"), Route::Missing, "候选也没了即不可用");
+        dir.set_owner_enabled("atelyx.tables", true);
+        assert_eq!(dir.route("table"), Route::Builtin, "内置登记留位，启用即恢复");
     }
 
     #[test]
     fn a_candidate_registered_after_the_owner_is_disabled_takes_over() {
         let mut dir = ServiceDir::new();
-        dir.set_owner_enabled("atelyx.notes", false);
-        assert!(dir.blocked("editor"));
+        dir.set_owner_enabled("atelyx.tables", false);
+        assert!(dir.blocked("table"));
         assert!(
-            dir.register("com.a", &params("editor", &["selection"])).unwrap(),
+            dir.register("com.a", &params("table", &["snapshot"])).unwrap(),
             "内置实现不在场时登记即接任，要广播活动提供者变化"
         );
-        assert_eq!(dir.route("editor"), Route::Plugin("com.a".into()));
-        assert!(!dir.blocked("editor"));
+        assert_eq!(dir.route("table"), Route::Plugin("com.a".into()));
+        assert!(!dir.blocked("table"));
         assert!(
-            !dir.register("com.b", &params("editor", &["selection"])).unwrap(),
+            !dir.register("com.b", &params("table", &["snapshot"])).unwrap(),
             "已有提供者时后来者只是候选"
         );
-        assert_eq!(dir.route("editor"), Route::Plugin("com.a".into()));
+        assert_eq!(dir.route("table"), Route::Plugin("com.a".into()));
 
-        dir.unregister("com.a", "editor").unwrap();
-        assert_eq!(dir.route("editor"), Route::Plugin("com.b".into()), "剩余候选接任");
-        dir.unregister("com.b", "editor").unwrap();
-        assert_eq!(dir.route("editor"), Route::Missing, "候选退出后回到暂不可用");
-        assert!(dir.blocked("editor"), "内置登记仍在册，重新启用即恢复");
+        dir.unregister("com.a", "table").unwrap();
+        assert_eq!(dir.route("table"), Route::Plugin("com.b".into()), "剩余候选接任");
+        dir.unregister("com.b", "table").unwrap();
+        assert_eq!(dir.route("table"), Route::Missing, "候选退出后回到暂不可用");
+        assert!(dir.blocked("table"), "内置登记仍在册，重新启用即恢复");
     }
 }

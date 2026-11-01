@@ -1,5 +1,5 @@
-//! `editor` 能力端到端：以真实插件进程（`editor-stub` 夹具）验证笔记插件名下的选区服务
-//! 可被外部提供者顶替、两条调用路径都落到活动提供者，以及停用归属插件后服务离开能力总线。
+//! `editor` 能力端到端：以真实插件进程（`editor-stub` 夹具）验证选区服务可被外部提供者
+//! 顶替、两条调用路径都落到活动提供者，以及提供者停用后回落内置实现。
 
 use std::time::{Duration, Instant};
 
@@ -9,7 +9,6 @@ use atelyx_plugin_sdk::protocol::manifest::MANIFEST_FILE;
 use serde_json::Value;
 
 const STUB_ID: &str = "com.atelyx.editor-stub";
-const NOTES_PLUGIN: &str = "atelyx.notes";
 
 fn entry_name() -> &'static str {
     if cfg!(windows) {
@@ -100,11 +99,11 @@ fn editor_entry(runtime: &PluginRuntime) -> Option<atelyx_core::plugin_runtime::
 }
 
 #[test]
-fn editor_service_takeover_and_owner_shutdown() {
+fn editor_service_takeover_and_fallback() {
     let tmp = TempDir::new("plugin-editor");
     let runtime = PluginRuntime::new(tmp.join("plugins"));
 
-    // 1. 出厂：editor 由笔记插件的内置实现承载，两个方法都在册
+    // 1. 出厂：editor 由平台内置实现承载，公开方法都在册
     let editor = editor_entry(&runtime).expect("目录里应有 editor 服务");
     assert_eq!(editor.provider, None, "内置实现不落 provider");
     assert!(editor.replaceable);
@@ -142,30 +141,16 @@ fn editor_service_takeover_and_owner_shutdown() {
     let direct = &state["direct"]["ok"];
     assert_eq!(direct, selection, "直接调用与 `service.call` 必须落到同一提供者：{state}");
 
-    // 4. 停用笔记插件：服务仍由外部提供者承载，但不能回落内置
-    runtime.set_builtin_owner_enabled(NOTES_PLUGIN, false);
-    assert_eq!(
-        editor_entry(&runtime).and_then(|entry| entry.provider).as_deref(),
-        Some(STUB_ID),
-        "外部提供者不受归属插件停用影响"
-    );
-    let fallback = runtime
+    // 4. 切回内置实现：外部提供者停用后编辑器服务仍可用
+    runtime
         .set_service_provider("editor", None)
-        .expect_err("内置实现所属插件已停用，不应允许回落");
-    assert!(fallback.contains("已停用"), "应可读拒绝：{fallback}");
-
-    // 5. 提供者与归属插件都不在：服务离开能力总线
-    runtime.set_enabled(STUB_ID, false).expect("停用应成功");
-    wait_status(&runtime, STUB_ID, |status| *status == PluginStatus::Stopped);
-    assert!(!runtime.service_available("editor"), "无人提供时服务不可用");
-    assert!(editor_entry(&runtime).is_none(), "无人提供时服务离开目录");
-
-    // 6. 重新启用笔记插件：内置登记留位，服务恢复
-    runtime.set_builtin_owner_enabled(NOTES_PLUGIN, true);
-    assert!(runtime.service_available("editor"));
+        .expect("内置实现常驻，应允许回落");
     assert_eq!(
         editor_entry(&runtime).and_then(|entry| entry.provider),
         None,
-        "恢复的是内置实现"
+        "回落的是内置实现"
     );
+    runtime.set_enabled(STUB_ID, false).expect("停用应成功");
+    wait_status(&runtime, STUB_ID, |status| *status == PluginStatus::Stopped);
+    assert!(runtime.service_available("editor"), "内置实现不受外部提供者停用影响");
 }

@@ -10,6 +10,7 @@ members = [
     "plugins/calendar",
     "plugins/ai-core",
     "plugins/ai-panel",
+    "plugins/notes",
     "atelyx-plugin-abi",
     "atelyx-plugin-host",
     "atelyx-plugin-sample",

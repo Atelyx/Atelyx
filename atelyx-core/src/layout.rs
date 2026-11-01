@@ -197,6 +197,8 @@ pub const MAX_RECENT_FILES: usize = 50;
 pub const CALENDAR_VIEW: &str = "plugin:com.atelyx.calendar:calendar";
 /// 预置 AI 对话插件的面板视图 id：默认布局与旧布局迁移共用。
 pub const AI_PANEL_VIEW: &str = "plugin:atelyx.ai-panel:aichat";
+/// 预置笔记插件的面板 / 文档视图 id：默认布局与旧布局迁移共用。
+pub const NOTES_VIEW: &str = "plugin:atelyx.notes:note";
 
 // ===== 布局操作命令参数（壳侧逐条映射到 LayoutOp）=====
 
@@ -420,6 +422,8 @@ fn migrate_view_id(view: &mut ViewKind) {
         *view = CALENDAR_VIEW.to_string();
     } else if view == "aichat" {
         *view = AI_PANEL_VIEW.to_string();
+    } else if view == "note" {
+        *view = NOTES_VIEW.to_string();
     }
 }
 
@@ -485,9 +489,11 @@ pub fn next_scene_name(names: &[String]) -> String {
     format!("场景 {n}")
 }
 
-/// 新建标签（锁定恒 false；视图恒非 empty）。
+/// 新建标签（锁定恒 false；视图恒非 empty）；已无渲染器的旧内置视图 id 在入口处即改写成插件面 id。
 pub fn create_tab(view: &str) -> TabItem {
-    TabItem { id: nanoid!(), view: view.to_string(), locked: false }
+    let mut view = view.to_string();
+    migrate_view_id(&mut view);
+    TabItem { id: nanoid!(), view, locked: false }
 }
 
 /// 新建单标签面板。
@@ -548,8 +554,8 @@ fn create_default_layouts() -> Vec<WorkspaceLayout> {
     };
     vec![
         build("画布", "files", "canvas", "inspector", (17.0, 83.0), (74.0, 26.0)),
-        build("笔记", "files", "note", AI_PANEL_VIEW, (19.0, 81.0), (72.0, 28.0)),
-        build("表格", "files", "table", "note", (18.0, 82.0), (77.0, 23.0)),
+        build("笔记", "files", NOTES_VIEW, AI_PANEL_VIEW, (19.0, 81.0), (72.0, 28.0)),
+        build("表格", "files", "table", NOTES_VIEW, (18.0, 82.0), (77.0, 23.0)),
     ]
 }
 
@@ -1732,7 +1738,7 @@ mod tests {
             LayoutNode::Panel { tabs, .. } => views_of_tabs(tabs),
             _ => panic!("expected panel"),
         };
-        assert_eq!(views(&scene_layouts(&ui)[0].tree), [CALENDAR_VIEW, "note"]);
+        assert_eq!(views(&scene_layouts(&ui)[0].tree), [CALENDAR_VIEW, NOTES_VIEW]);
         assert_eq!(views(&ui.scenes[0].home_layout.tree), [CALENDAR_VIEW]);
         assert_eq!(views_of_tabs(&ui.detached_windows[0].tabs), [CALENDAR_VIEW]);
         assert!(ui.detached_windows[0].tabs[0].locked, "迁移不动锁定态");
@@ -2064,7 +2070,7 @@ mod tests {
                 match &children[1] {
                     LayoutNode::Panel { tabs, active_tab_id, .. } => {
                         let views: Vec<&str> = tabs.iter().map(|t| t.view.as_str()).collect();
-                        assert_eq!(views, vec!["note", "aichat"]);
+                        assert_eq!(views, vec![NOTES_VIEW, AI_PANEL_VIEW]);
                         assert_eq!(active_tab_id.as_deref(), Some(tabs[0].id.as_str()));
                         // 全部 id 非空
                         assert!(tabs.iter().all(|t| !t.id.is_empty()));
@@ -2114,7 +2120,7 @@ mod tests {
             LayoutNode::Panel { tabs, .. } => tabs.iter().map(|t| t.view.as_str()).collect::<Vec<_>>(),
             _ => panic!("单面板规格应实例化为面板"),
         };
-        assert_eq!(tabs, vec!["note"]);
+        assert_eq!(tabs, vec![NOTES_VIEW]);
         // 空白名与非法规格不进模型
         assert!(!op_passes_shape_check(
             &ui,

@@ -1398,6 +1398,14 @@ impl Instance {
                     plugin_id: self.id.clone(),
                     request_id: 0,
                 },
+                method::editor::OPEN_FILE => {
+                    let p: method::PathParams = parse(params).map_err(|e| e.to_string())?;
+                    HostRequest::EditorOpenFile {
+                        plugin_id: self.id.clone(),
+                        request_id: 0,
+                        path: p.path,
+                    }
+                }
                 method::editor::REPLACE_SELECTION => {
                     let p: method::EditorReplaceParams = parse(params).map_err(|e| e.to_string())?;
                     p.validate()?;
@@ -1405,6 +1413,56 @@ impl Instance {
                         plugin_id: self.id.clone(),
                         request_id: 0,
                         text: p.text,
+                    }
+                }
+                method::note::OPEN => {
+                    let p: method::NoteOpenParams = parse(params).map_err(|e| e.to_string())?;
+                    p.validate()?;
+                    HostRequest::NoteOpen {
+                        plugin_id: self.id.clone(),
+                        request_id: 0,
+                        params: p,
+                    }
+                }
+                method::note::EDIT => {
+                    let p: method::NoteEditParams = parse(params).map_err(|e| e.to_string())?;
+                    p.validate()?;
+                    HostRequest::NoteEdit {
+                        plugin_id: self.id.clone(),
+                        request_id: 0,
+                        params: p,
+                    }
+                }
+                method::note::SAVE => {
+                    let p: method::NoteSaveParams = parse(params).map_err(|e| e.to_string())?;
+                    HostRequest::NoteSave {
+                        plugin_id: self.id.clone(),
+                        request_id: 0,
+                        params: p,
+                    }
+                }
+                method::note::CLOSE => {
+                    let p: method::PathParams = parse(params).map_err(|e| e.to_string())?;
+                    HostRequest::NoteClose {
+                        plugin_id: self.id.clone(),
+                        request_id: 0,
+                        path: p.path,
+                    }
+                }
+                method::note::AWARENESS => {
+                    let p: method::NoteAwarenessParams = parse(params).map_err(|e| e.to_string())?;
+                    HostRequest::NoteAwareness {
+                        plugin_id: self.id.clone(),
+                        request_id: 0,
+                        params: p,
+                    }
+                }
+                method::note::BACKLINKS => {
+                    let p: method::PathParams = parse(params).map_err(|e| e.to_string())?;
+                    HostRequest::NoteBacklinks {
+                        plugin_id: self.id.clone(),
+                        request_id: 0,
+                        path: p.path,
                     }
                 }
                 method::history::ACTIVITY => HostRequest::HistoryActivity {
@@ -1772,6 +1830,7 @@ impl Instance {
                 | event::name::VAULT_FILE_CHANGED
                 | event::name::SPACE_META_CHANGED
                 | event::name::WINDOW_FILE_DROP
+                | event::name::NOTE_CHANGED
                 | method::ai::HOST_CHAT_EVENT
         ) {
             return Err(RpcError::failed(format!("未知事件名：{}", p.name)));
@@ -2630,6 +2689,13 @@ fn is_shell_method(method_name: &str) -> bool {
             | method::editor::SELECTION
             | method::editor::OPEN_FILES
             | method::editor::REPLACE_SELECTION
+            | method::editor::OPEN_FILE
+            | method::note::OPEN
+            | method::note::EDIT
+            | method::note::SAVE
+            | method::note::CLOSE
+            | method::note::AWARENESS
+            | method::note::BACKLINKS
             | method::history::ACTIVITY
             | method::history::DAY
             | method::history::OPEN
@@ -2897,6 +2963,7 @@ mod tests {
             event::name::VAULT_FILE_CHANGED,
             event::name::SPACE_META_CHANGED,
             event::name::WINDOW_FILE_DROP,
+            event::name::NOTE_CHANGED,
         ] {
             let ack = instance
                 .dispatch(event::SUBSCRIBE, &json!({ "name": name }))
@@ -3538,17 +3605,17 @@ mod tests {
     fn a_disabled_owner_blocks_direct_service_methods() {
         let tmp = TempDir::new("instance-service-blocked");
         let runtime = PluginRuntime::new(tmp.to_path_buf());
-        runtime.set_builtin_owner_enabled("atelyx.notes", false);
-        assert_eq!(runtime.forward_to("editor", "selection"), Forward::Unavailable);
+        runtime.set_builtin_owner_enabled("atelyx.tables", false);
+        assert_eq!(runtime.forward_to("table", "snapshot"), Forward::Unavailable);
         assert!(runtime
             .service_target(service::CallParams {
-                service: "editor".into(),
-                method: "selection".into(),
+                service: "table".into(),
+                method: "snapshot".into(),
                 params: Value::Null,
             })
             .is_err_and(|error| error.message.contains(service::error::UNKNOWN_SERVICE)));
-        runtime.set_builtin_owner_enabled("atelyx.notes", true);
-        assert_eq!(runtime.forward_to("editor", "selection"), Forward::Local, "重新启用即回到内置分派");
+        runtime.set_builtin_owner_enabled("atelyx.tables", true);
+        assert_eq!(runtime.forward_to("table", "snapshot"), Forward::Local, "重新启用即回到内置分派");
     }
 
     /// 等在途服务调用落表（转发任务被调度后才登记）。

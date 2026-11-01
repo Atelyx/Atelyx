@@ -1146,24 +1146,6 @@ const GAP_AROUND_HR: f32 = 6.0;
 mod tests {
     use super::*;
 
-    fn draw(source: &str, width: f32) -> (Vec<String>, Vec<(f32, f32)>, f32) {
-        let theme = Theme::default();
-        let mut metrics = Metrics::default();
-        let laid = layout(&mut metrics, &theme, source, &[], width);
-        let lines = laid
-            .lines
-            .iter()
-            .map(|line| line.runs.iter().map(|run| run.text.as_str()).collect::<String>())
-            .collect();
-        let caps: Vec<(f32, f32)> = laid
-            .lines
-            .iter()
-            .filter(|line| line.runs.iter().any(|run| run.style.capsule))
-            .map(|line| (line.x, line.y))
-            .collect();
-        (lines, caps, laid.height)
-    }
-
     #[test]
     fn headings_grow_by_level_and_paragraphs_wrap() {
         let theme = Theme::default();
