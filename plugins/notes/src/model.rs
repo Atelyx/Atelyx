@@ -1,5 +1,5 @@
 //! 笔记插件的展示与编辑状态：三档模式、正文块、撤销栈、属性面板、反链与远端光标。
-//! 正文真源在宿主（`note.*`），这里只持本端副本。
+//! 正文真源在宿主（`doc.*`），这里只持本端副本。
 
 use atelyx_format::frontmatter::{self, Yaml};
 use atelyx_format::markdown::{parse_markdown, InlineSpan, MarkdownBlock, ParseOptions};
@@ -35,7 +35,7 @@ pub struct Backlink {
     pub title: String,
 }
 
-/// 一位远端协作者的光标（偏移与 `note_text` 同一坐标系）。
+/// 一位远端协作者的光标（偏移与 `doc_text` 同一坐标系）。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RemoteCursor {
     pub name: String,

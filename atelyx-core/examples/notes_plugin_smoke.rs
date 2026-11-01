@@ -52,14 +52,14 @@ async fn main() {
                             .collect();
                         reply(&responder, request_id, json!({ "sizes": sizes }));
                     }
-                    HostRequest::NoteOpen { request_id, params, .. } => {
+                    HostRequest::DocOpen { request_id, params, .. } => {
                         reply(
                             &responder,
                             request_id,
                             json!({ "path": params.path, "text": NOTE, "canWrite": true }),
                         );
                     }
-                    HostRequest::NoteBacklinks { request_id, .. } => {
+                    HostRequest::VaultBacklinks { request_id, .. } => {
                         reply(&responder, request_id, json!({ "entries": [] }));
                     }
                     HostRequest::VaultTags { request_id, .. } => {
@@ -72,14 +72,14 @@ async fn main() {
                             json!({ "softWrap": true, "inPageTitle": true, "contentWidth": 780 }),
                         );
                     }
-                    HostRequest::NoteRename { request_id, .. } => {
+                    HostRequest::DocRename { request_id, .. } => {
                         reply(&responder, request_id, json!({}));
                     }
-                    HostRequest::NoteEdit { request_id, .. }
-                    | HostRequest::NoteAwareness { request_id, .. } => {
+                    HostRequest::DocEdit { request_id, .. }
+                    | HostRequest::DocAwareness { request_id, .. } => {
                         reply(&responder, request_id, json!({}));
                     }
-                    HostRequest::NoteSave { request_id, .. } => {
+                    HostRequest::DocSave { request_id, .. } => {
                         reply(&responder, request_id, json!({}));
                     }
                     HostRequest::HistoryOpen { request_id, .. } => {

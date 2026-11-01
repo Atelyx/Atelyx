@@ -54,8 +54,8 @@ pub use atelyx_plugin_protocol::paint::{
 };
 pub use atelyx_plugin_protocol::event::{
     ChatChangeKind, ChatChangedPayload, ChatPersistChangedPayload, ChatReloadedPayload,
-    FileChangeKind, FileChangedPayload, FileDropPayload, NoteChangedPayload,
-    NotePresencePayload, NoteRemoteCursor, SpaceMetaChangedPayload, TableChangedPayload,
+    FileChangeKind, FileChangedPayload, FileDropPayload, DocChangedPayload,
+    DocPresencePayload, DocRemoteCursor, SpaceMetaChangedPayload, TableChangedPayload,
     TableSelectionChangedPayload, VaultSwitchPayload,
 };
 pub use atelyx_plugin_protocol::chat::ChatPersistError;
@@ -74,7 +74,7 @@ pub use atelyx_plugin_protocol::method::{
     CalendarAddParams, CalendarIdParams, CalendarItem, CalendarListResult, CalendarUpdateParams,
     CollabMetaEntry, CollabMetaGetParams, CollabMetaPatchParams, CollabMetaResult, DayActivity,
     HistoryActivityResult, HistoryDayEntry, HistoryDayParams, HistoryDayResult, HistoryOpenParams,
-    NoteRenameParams,
+    DocRenameParams,
     ChatEvent, ChatEventParams, ChatHistoryParams, ChatHistoryResult,
     ChatRenameParams, ChatSendParams, ChatSessionParams, ChatSessionSummary, ChatSessionWire,
     ChatStopParams, ClipboardImage, CollabMessageParams, CollabPeer, CollabPeersResult,
@@ -86,8 +86,8 @@ pub use atelyx_plugin_protocol::method::{
     RunCompactParams, RunConfigWire, RunDirectParams, RunStartParams, RunStartResult,
     RunStopParams, RunTitleParams, SearchConfigWire, ThemeResult, ToolDecl, ToolExecParams,
     ToolExecResult, ToolListParams, ToolListResult, TrayClickParams, TrayItemSpec, WindowOpenParams,
-    WindowUpdateParams, NoteAwarenessParams, NoteBacklink, NoteBacklinksResult, NoteEditParams,
-    NoteOpenParams, NoteOpenResult, NoteSaveParams, VaultTagsResult, AI_CORE_PLUGIN,
+    WindowUpdateParams, DocAwarenessParams, BacklinkEntry, BacklinksResult, DocEditParams,
+    DocOpenParams, DocOpenResult, DocSaveParams, VaultTagsResult, AI_CORE_PLUGIN,
 };
 
 /// 插件运行状态。
@@ -336,26 +336,26 @@ pub enum HostRequest {
     EditorOpenFile { plugin_id: String, request_id: u64, path: String },
     /// 插件请求全局编辑偏好（软换行 / 页面内标题 / 正文宽度）。
     EditorPrefs { plugin_id: String, request_id: u64 },
-    /// 插件请求打开一篇笔记（宿主读盘并建立会话，回执 = 正文与可写性）。
-    NoteOpen { plugin_id: String, request_id: u64, params: method::NoteOpenParams },
-    /// 插件提交一次笔记编辑（完整正文 + 光标 / 选区）。
-    NoteEdit { plugin_id: String, request_id: u64, params: method::NoteEditParams },
-    /// 插件请求一次笔记保存（回执只表示已受理，落盘结果经 `note:changed` 到达）。
-    NoteSave { plugin_id: String, request_id: u64, params: method::NoteSaveParams },
-    /// 插件请求关闭当前笔记会话。
-    NoteClose { plugin_id: String, request_id: u64, path: String },
-    /// 插件上报本端笔记选区。
-    NoteAwareness {
+    /// 插件请求打开一个文档会话（宿主读盘并建立会话，回执 = 正文与可写性）。
+    DocOpen { plugin_id: String, request_id: u64, params: method::DocOpenParams },
+    /// 插件提交一次文档编辑（完整正文 + 光标 / 选区）。
+    DocEdit { plugin_id: String, request_id: u64, params: method::DocEditParams },
+    /// 插件请求一次文档保存（回执只表示已受理，落盘结果经 `doc:changed` 到达）。
+    DocSave { plugin_id: String, request_id: u64, params: method::DocSaveParams },
+    /// 插件请求关闭当前文档会话。
+    DocClose { plugin_id: String, request_id: u64, path: String },
+    /// 插件上报本端文档选区。
+    DocAwareness {
         plugin_id: String,
         request_id: u64,
-        params: method::NoteAwarenessParams,
+        params: method::DocAwarenessParams,
     },
-    /// 插件请求当前笔记的反链。
-    NoteBacklinks { plugin_id: String, request_id: u64, path: String },
+    /// 插件请求某篇文档的反链。
+    VaultBacklinks { plugin_id: String, request_id: u64, path: String },
     /// 插件请求全仓库标签词表（宿主聚合后按出现次数降序返回）。
     VaultTags { plugin_id: String, request_id: u64 },
-    /// 插件请求把当前笔记改名为新的主名（宿主编排保存 / 关闭 / 改名 / 重开）。
-    NoteRename { plugin_id: String, request_id: u64, params: method::NoteRenameParams },
+    /// 插件请求把当前文档改名为新的主名（宿主编排保存 / 关闭 / 改名 / 重开）。
+    DocRename { plugin_id: String, request_id: u64, params: method::DocRenameParams },
     /// 插件请求读当前空间的团队元数据（`key` 缺省 = 全部键；仅协作空间可用）。
     CollabMetaGet { plugin_id: String, request_id: u64, params: method::CollabMetaGetParams },
     /// 插件请求按键写当前空间的团队元数据（只改给出的键；只读身份由壳拒绝）。
@@ -709,13 +709,13 @@ impl PluginRuntime {
             | HostRequest::EditorReplaceSelection { .. }
             | HostRequest::EditorOpenFile { .. }
             | HostRequest::EditorPrefs { .. }
-            | HostRequest::NoteOpen { .. }
-            | HostRequest::NoteEdit { .. }
-            | HostRequest::NoteSave { .. }
-            | HostRequest::NoteClose { .. }
-            | HostRequest::NoteAwareness { .. }
-            | HostRequest::NoteBacklinks { .. }
-            | HostRequest::NoteRename { .. }
+            | HostRequest::DocOpen { .. }
+            | HostRequest::DocEdit { .. }
+            | HostRequest::DocSave { .. }
+            | HostRequest::DocClose { .. }
+            | HostRequest::DocAwareness { .. }
+            | HostRequest::VaultBacklinks { .. }
+            | HostRequest::DocRename { .. }
             | HostRequest::VaultTags { .. }
             | HostRequest::HistoryDay { .. }
             | HostRequest::HistoryOpen { .. }
@@ -989,37 +989,37 @@ impl PluginRuntime {
                 plugin_id,
                 request_id,
             },
-            HostRequest::NoteOpen { plugin_id, params, .. } => HostRequest::NoteOpen {
+            HostRequest::DocOpen { plugin_id, params, .. } => HostRequest::DocOpen {
                 plugin_id,
                 request_id,
                 params,
             },
-            HostRequest::NoteEdit { plugin_id, params, .. } => HostRequest::NoteEdit {
+            HostRequest::DocEdit { plugin_id, params, .. } => HostRequest::DocEdit {
                 plugin_id,
                 request_id,
                 params,
             },
-            HostRequest::NoteSave { plugin_id, params, .. } => HostRequest::NoteSave {
+            HostRequest::DocSave { plugin_id, params, .. } => HostRequest::DocSave {
                 plugin_id,
                 request_id,
                 params,
             },
-            HostRequest::NoteClose { plugin_id, path, .. } => HostRequest::NoteClose {
+            HostRequest::DocClose { plugin_id, path, .. } => HostRequest::DocClose {
                 plugin_id,
                 request_id,
                 path,
             },
-            HostRequest::NoteAwareness { plugin_id, params, .. } => HostRequest::NoteAwareness {
+            HostRequest::DocAwareness { plugin_id, params, .. } => HostRequest::DocAwareness {
                 plugin_id,
                 request_id,
                 params,
             },
-            HostRequest::NoteBacklinks { plugin_id, path, .. } => HostRequest::NoteBacklinks {
+            HostRequest::VaultBacklinks { plugin_id, path, .. } => HostRequest::VaultBacklinks {
                 plugin_id,
                 request_id,
                 path,
             },
-            HostRequest::NoteRename { plugin_id, params, .. } => HostRequest::NoteRename {
+            HostRequest::DocRename { plugin_id, params, .. } => HostRequest::DocRename {
                 plugin_id,
                 request_id,
                 params,
@@ -1770,8 +1770,8 @@ impl PluginRuntime {
     }
 
     /// 广播当前笔记的远端协作者光标：订阅方按 `path` 过滤，空清单 = 已无协作者。
-    pub fn on_note_presence(self: &Arc<Self>, payload: NotePresencePayload) {
-        self.broadcast_event(event::name::NOTE_PRESENCE, &payload);
+    pub fn on_doc_presence(self: &Arc<Self>, payload: DocPresencePayload) {
+        self.broadcast_event(event::name::DOC_PRESENCE, &payload);
     }
 
     /// 广播全局编辑偏好变更（设置页改动时由壳调用）。
@@ -1780,8 +1780,8 @@ impl PluginRuntime {
     }
 
     /// 广播当前笔记会话的正文 / 落盘状态变化：订阅方按 `path` 过滤，`text` 给出即替换正文。
-    pub fn on_note_changed(self: &Arc<Self>, payload: NoteChangedPayload) {
-        self.broadcast_event(event::name::NOTE_CHANGED, &payload);
+    pub fn on_doc_changed(self: &Arc<Self>, payload: DocChangedPayload) {
+        self.broadcast_event(event::name::DOC_CHANGED, &payload);
     }
 
     /// 广播仓库内文件变更给订阅了 `vault:file.changed` 的运行中插件。只覆盖宿主发起的写入
@@ -2076,13 +2076,13 @@ fn request_plugin_id(request: &HostRequest) -> &str {
         | HostRequest::EditorReplaceSelection { plugin_id, .. }
         | HostRequest::EditorOpenFile { plugin_id, .. }
         | HostRequest::EditorPrefs { plugin_id, .. }
-        | HostRequest::NoteOpen { plugin_id, .. }
-        | HostRequest::NoteEdit { plugin_id, .. }
-        | HostRequest::NoteSave { plugin_id, .. }
-        | HostRequest::NoteClose { plugin_id, .. }
-        | HostRequest::NoteAwareness { plugin_id, .. }
-        | HostRequest::NoteBacklinks { plugin_id, .. }
-        | HostRequest::NoteRename { plugin_id, .. }
+        | HostRequest::DocOpen { plugin_id, .. }
+        | HostRequest::DocEdit { plugin_id, .. }
+        | HostRequest::DocSave { plugin_id, .. }
+        | HostRequest::DocClose { plugin_id, .. }
+        | HostRequest::DocAwareness { plugin_id, .. }
+        | HostRequest::VaultBacklinks { plugin_id, .. }
+        | HostRequest::DocRename { plugin_id, .. }
         | HostRequest::VaultTags { plugin_id, .. }
         | HostRequest::HistoryDay { plugin_id, .. }
         | HostRequest::HistoryOpen { plugin_id, .. }

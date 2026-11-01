@@ -9,12 +9,12 @@ mod ui;
 use std::sync::Mutex;
 
 use atelyx_plugin_protocol::event::{
-    self, FileChangeKind, FileChangedPayload, NoteChangedPayload, NotePresencePayload,
+    self, FileChangeKind, FileChangedPayload, DocChangedPayload, DocPresencePayload,
     PublishParams,
 };
 use atelyx_plugin_protocol::frame::{FrameInput, FrameInputParams, FrameTickParams, Key, KeyAction};
 use atelyx_plugin_protocol::method::{
-    ContributionSlot, DocCloseParams, DocOpenParams, EditorPrefs, NotificationLevel,
+    ContributionSlot, DocInstanceCloseParams, DocInstanceOpenParams, EditorPrefs, NotificationLevel,
     SurfaceAttachedParams,
 };
 use atelyx_plugin_sdk::frame_ui::{FrameUi, UiEvent};
@@ -46,7 +46,7 @@ impl NotesPlugin {
 
     async fn load(&self, ctx: &Context, path: &str) {
         let mode = self.model.lock().unwrap().mode;
-        match ctx.note_open(path).await {
+        match ctx.doc_open(path).await {
             Ok(result) => {
                 {
                     let mut model = self.model.lock().unwrap();
@@ -90,7 +90,7 @@ impl NotesPlugin {
     }
 
     async fn load_backlinks(&self, ctx: &Context, path: &str) {
-        match ctx.note_backlinks(path).await {
+        match ctx.vault_backlinks(path).await {
             Ok(entries) => {
                 let rows = entries
                     .into_iter()
@@ -102,7 +102,7 @@ impl NotesPlugin {
         }
     }
 
-    /// 一次本地编辑：先写模型再提交宿主（宿主合并协作远端内容后回发 `note:changed`）。
+    /// 一次本地编辑：先写模型再提交宿主（宿主合并协作远端内容后回发 `doc:changed`）。
     async fn commit_edit(&self, ctx: &Context, text: String, selection: Option<(usize, usize)>) {
         let path = {
             let mut model = self.model.lock().unwrap();
@@ -113,7 +113,7 @@ impl NotesPlugin {
         };
         let Some(path) = path else { return };
         let (anchor, head) = selection.unwrap_or((text.len(), text.len()));
-        if let Err(error) = ctx.note_edit(&path, &text, Some(anchor), Some(head)).await {
+        if let Err(error) = ctx.doc_edit(&path, &text, Some(anchor), Some(head)).await {
             ctx.log_error(&format!("提交笔记编辑失败（{path}）：{error}"));
             // 宿主拒绝（超限 / 只读身份 / 会话已换）时必须可见：否则界面一直停在「未保存」。
             self.model.lock().unwrap().save_error = Some(error.to_string());
@@ -123,7 +123,7 @@ impl NotesPlugin {
     async fn save(&self, ctx: &Context, manual: bool) {
         let path = self.model.lock().unwrap().path.clone();
         let Some(path) = path else { return };
-        if let Err(error) = ctx.note_save(&path, manual).await {
+        if let Err(error) = ctx.doc_save(&path, manual).await {
             ctx.log_error(&format!("请求保存失败（{path}）：{error}"));
             self.model.lock().unwrap().save_error = Some(error.to_string());
         }
@@ -133,7 +133,7 @@ impl NotesPlugin {
         let path = self.model.lock().unwrap().path.clone();
         let Some(path) = path else { return };
         let Some((anchor, head)) = selection else { return };
-        if let Err(error) = ctx.note_awareness(&path, Some(anchor), Some(head)).await {
+        if let Err(error) = ctx.doc_awareness(&path, Some(anchor), Some(head)).await {
             ctx.log_error(&format!("上报笔记选区失败（{path}）：{error}"));
         }
     }
@@ -1120,7 +1120,7 @@ impl NotesPlugin {
             self.save(ctx, false).await;
             return;
         }
-        if let Err(error) = ctx.note_rename(&path, &name).await {
+        if let Err(error) = ctx.doc_rename(&path, &name).await {
             ctx.log_error(&format!("改名失败（{path}）：{error}"));
             let _ = ctx.notify("改名失败", Some(&error.to_string()), NotificationLevel::Error).await;
         }
@@ -1341,8 +1341,8 @@ impl PluginHandler for NotesPlugin {
             ctx.log_error(&format!("注册笔记面板失败：{error}"));
         }
         for name in [
-            event::name::NOTE_CHANGED,
-            event::name::NOTE_PRESENCE,
+            event::name::DOC_CHANGED,
+            event::name::DOC_PRESENCE,
             event::name::EDITOR_PREFS_CHANGED,
             event::name::VAULT_SWITCH,
             event::name::VAULT_FILE_CHANGED,
@@ -1364,7 +1364,7 @@ impl PluginHandler for NotesPlugin {
         self.render(ctx).await;
     }
 
-    async fn on_doc_open(&self, ctx: &Context, params: DocOpenParams) {
+    async fn on_doc_open(&self, ctx: &Context, params: DocInstanceOpenParams) {
         if params.surface_id != PANEL {
             return;
         }
@@ -1372,13 +1372,13 @@ impl PluginHandler for NotesPlugin {
         self.load(ctx, &params.path).await;
     }
 
-    async fn on_doc_close(&self, ctx: &Context, params: DocCloseParams) {
+    async fn on_doc_close(&self, ctx: &Context, params: DocInstanceCloseParams) {
         if params.surface_id != PANEL {
             return;
         }
         let path = self.model.lock().unwrap().path.clone();
         if path.as_deref() == Some(params.path.as_str()) {
-            if let Err(error) = ctx.note_close(&params.path).await {
+            if let Err(error) = ctx.doc_close(&params.path).await {
                 ctx.log_error(&format!("关闭笔记失败（{}）：{error}", params.path));
             }
             self.model.lock().unwrap().clear();
@@ -1387,8 +1387,8 @@ impl PluginHandler for NotesPlugin {
 
     async fn on_host_event(&self, ctx: &Context, params: PublishParams) {
         match params.name.as_str() {
-            event::name::NOTE_CHANGED => {
-                let Ok(payload) = serde_json::from_value::<NoteChangedPayload>(params.payload) else {
+            event::name::DOC_CHANGED => {
+                let Ok(payload) = serde_json::from_value::<DocChangedPayload>(params.payload) else {
                     ctx.log_error("笔记状态载荷不可解析");
                     return;
                 };
@@ -1419,7 +1419,7 @@ impl PluginHandler for NotesPlugin {
                 };
                 if let (Some(name), false) = (pending, dirty) {
                     if let Some(path) = path {
-                        if let Err(error) = ctx.note_rename(&path, &name).await {
+                        if let Err(error) = ctx.doc_rename(&path, &name).await {
                             ctx.log_error(&format!("改名失败（{path}）：{error}"));
                             let _ = ctx
                                 .notify("改名失败", Some(&error.to_string()), NotificationLevel::Error)
@@ -1429,8 +1429,8 @@ impl PluginHandler for NotesPlugin {
                 }
                 self.render(ctx).await;
             }
-            event::name::NOTE_PRESENCE => {
-                let Ok(payload) = serde_json::from_value::<NotePresencePayload>(params.payload) else {
+            event::name::DOC_PRESENCE => {
+                let Ok(payload) = serde_json::from_value::<DocPresencePayload>(params.payload) else {
                     ctx.log_error("笔记在场载荷不可解析");
                     return;
                 };

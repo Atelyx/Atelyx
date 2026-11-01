@@ -989,12 +989,12 @@ impl App {
                     return operation::focus(self.props.focus_id.clone());
                 }
                 // 数据取自当前文本而非面板缓存：缓存可能滞后
-                let open = frontmatter::block_end(&self.note_text).is_some();
-                if !open && self.note_text.starts_with("---") {
+                let open = frontmatter::block_end(&self.doc_text).is_some();
+                if !open && self.doc_text.starts_with("---") {
                     self.notify(NoticeLevel::Info, "属性块未闭合，请先修正正文");
                     return Task::none();
                 }
-                let parsed = frontmatter::parse(&self.note_text);
+                let parsed = frontmatter::parse(&self.doc_text);
                 if open && !parsed.ok {
                     self.notify(NoticeLevel::Info, "属性块格式有误，请先修正正文");
                     return Task::none();
@@ -1197,25 +1197,25 @@ impl App {
 
     /// 用新属性数据重写 frontmatter 并走正文保存链（空映射 = 删块回到无 frontmatter 态）。
     fn apply_props(&mut self, data: Vec<(String, Yaml)>) {
-        let body = crate::strip_frontmatter(&self.note_text).to_string();
-        self.note_text = frontmatter::stringify(&Yaml::Map(data), &body);
-        self.dirty = true;
-        self.save_error = None;
+        let body = crate::strip_frontmatter(&self.doc_text).to_string();
+        self.doc_text = frontmatter::stringify(&Yaml::Map(data), &body);
+        self.doc_dirty = true;
+        self.doc_save_error = None;
         self.autosave_deadline = Some(Instant::now() + crate::AUTOSAVE_DEBOUNCE);
         self.refresh_props();
         crate::space_actions::collab_after_edit(self);
-        crate::plugin_note::publish_state(self, Some(self.note_text.clone()));
+        crate::doc_session::publish_state(self, Some(self.doc_text.clone()));
     }
 
     /// 重建属性面板解析缓存（文件载入 / 属性提交 / 撤销重做后调用）。
     /// 未闭合块（首行 `---` 但无闭合行）：按解析失败处理（红条锁编辑）——其 data 已把
     /// 正文吞入 YAML 区域，直接 stringify 会把正文复制进属性块。
     pub fn refresh_props(&mut self) {
-        let parsed = frontmatter::parse(&self.note_text);
-        let open = frontmatter::block_end(&self.note_text).is_some();
+        let parsed = frontmatter::parse(&self.doc_text);
+        let open = frontmatter::block_end(&self.doc_text).is_some();
         self.props.parsed = if open {
             Some((parsed.data, parsed.ok))
-        } else if self.note_text.starts_with("---") {
+        } else if self.doc_text.starts_with("---") {
             Some((Yaml::Map(Vec::new()), false))
         } else {
             None

@@ -92,6 +92,8 @@ pub mod vault {
     /// 把一个仓库相对路径改名 / 移动到另一路径（文件或文件夹；目标不存在，父目录自动创建）。
     /// 引用同步：`.md` 内部链接与画布文件引用随改；源文件被编辑面打开或被当前画布节点引用时拒绝。
     pub const RENAME: &str = "vault.rename";
+    /// 引用某篇文档的其它文档（反链；按 wiki 链接索引查询）。
+    pub const BACKLINKS: &str = "vault.backlinks";
 }
 
 /// 协作空间内的插件消息与团队元数据：消息按「通道」隔离，宿主把插件 id 作为通道前缀，
@@ -191,6 +193,20 @@ pub mod chat {
 }
 
 pub mod doc {
+    /// 打开一个文档会话：宿主读盘、建立会话（本地与协作空间同构），回执即当前正文与可写性。
+    pub const OPEN: &str = "doc.open";
+    /// 提交一次本地编辑（完整正文 + 光标 / 选区，字节偏移）。内容有变化时宿主置脏并接入
+    /// 协作增量；无变化时只更新在场选区。
+    pub const EDIT: &str = "doc.edit";
+    /// 请求一次保存（手动 / 自动）。回执只表示已受理，落盘结果经 `doc:changed` 到达。
+    pub const SAVE: &str = "doc.save";
+    /// 关闭当前文档会话（换文件 / 关标签 / 切仓库）。
+    pub const CLOSE: &str = "doc.close";
+    /// 上报本端光标 / 选区（全文字节偏移；`None` = 无选区）。只对协作空间生效。
+    pub const AWARENESS: &str = "doc.awareness";
+    /// 把当前文档改名为新的主名（同目录、保留扩展名；引用与历史随宿主既有改名链）。
+    /// 有未落盘修改时拒绝，插件须先 `doc.save`。
+    pub const RENAME: &str = "doc.rename";
     /// 用户打开了插件注册的领域文档类型文件（通知）。`surfaceId` 为宿主分配的实例面标识，
     /// 插件据此以 `frame.submitShared` 提交该文档实例的界面。
     pub const HOST_OPEN: &str = "host:doc.open";
@@ -256,27 +272,6 @@ pub mod editor {
     /// 读全局编辑偏好（软换行 / 页面内标题 / 正文宽度）；变更时宿主另发
     /// [`crate::event::name::EDITOR_PREFS_CHANGED`]。
     pub const PREFS: &str = "editor.prefs";
-}
-
-/// 笔记文档会话：打开 / 编辑 / 保存 / 在场与反链。正文真源、保存链与协作增量都在宿主，
-/// 插件只持展示与编辑态；写入与宿主自身编辑同一出口。
-pub mod note {
-    /// 打开一篇笔记：宿主读盘、建立会话（本地与协作空间同构），回执即当前正文与可写性。
-    pub const OPEN: &str = "note.open";
-    /// 提交一次本地编辑（完整正文 + 光标 / 选区，字节偏移）。内容有变化时宿主置脏并接入
-    /// 协作增量；无变化时只更新在场选区。
-    pub const EDIT: &str = "note.edit";
-    /// 请求一次保存（手动 / 自动）。回执只表示已受理，落盘结果经 `note:changed` 到达。
-    pub const SAVE: &str = "note.save";
-    /// 关闭当前笔记会话（换文件 / 关标签 / 切仓库）。
-    pub const CLOSE: &str = "note.close";
-    /// 上报本端光标 / 选区（全文字节偏移；`None` = 无选区）。只对协作空间生效。
-    pub const AWARENESS: &str = "note.awareness";
-    /// 引用当前笔记的其它笔记（反链）。
-    pub const BACKLINKS: &str = "note.backlinks";
-    /// 把当前笔记改名为新的主名（同目录、保留扩展名；引用与历史随宿主既有改名链）。
-    /// 有未落盘修改时拒绝，插件须先 `note.save`。
-    pub const RENAME: &str = "note.rename";
 }
 
 pub mod ai {
@@ -756,20 +751,20 @@ impl EditorReplaceParams {
     }
 }
 
-// ---------- note ----------
+// ---------- 文档会话 ----------
 
-/// 单次提交的笔记正文上限（超限按可读错误拒绝）。
-pub const MAX_NOTE_TEXT_BYTES: usize = 8 * 1024 * 1024;
+/// 单次提交的文档正文上限（超限按可读错误拒绝）。
+pub const MAX_DOC_TEXT_BYTES: usize = 8 * 1024 * 1024;
 
-/// [`note::OPEN`] 的 params。
+/// [`doc::OPEN`] 的 params。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct NoteOpenParams {
+pub struct DocOpenParams {
     /// 仓库相对路径（本地仓库）/ 服务端内容路径（协作空间），与 `vault` 口径一致。
     pub path: String,
 }
 
-impl NoteOpenParams {
+impl DocOpenParams {
     pub fn validate(&self) -> Result<(), String> {
         if self.path.trim().is_empty() {
             return Err("路径不能为空".to_string());
@@ -778,10 +773,10 @@ impl NoteOpenParams {
     }
 }
 
-/// [`note::OPEN`] 的 result：当前正文与是否可写（viewer 只读）。
+/// [`doc::OPEN`] 的 result：当前正文与是否可写（viewer 只读）。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct NoteOpenResult {
+pub struct DocOpenResult {
     pub path: String,
     pub text: String,
     pub can_write: bool,
@@ -792,11 +787,11 @@ pub struct NoteOpenResult {
     pub save_error: Option<String>,
 }
 
-/// [`note::EDIT`] 的 params：完整正文 + 本端光标与选区锚点（全文字节偏移；
+/// [`doc::EDIT`] 的 params：完整正文 + 本端光标与选区锚点（全文字节偏移；
 /// `anchor` / `head` 缺省 = 无选区）。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct NoteEditParams {
+pub struct DocEditParams {
     pub path: String,
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -805,27 +800,27 @@ pub struct NoteEditParams {
     pub head: Option<usize>,
 }
 
-impl NoteEditParams {
+impl DocEditParams {
     pub fn validate(&self) -> Result<(), String> {
         if self.path.trim().is_empty() {
             return Err("路径不能为空".to_string());
         }
-        if self.text.len() > MAX_NOTE_TEXT_BYTES {
-            return Err(format!("笔记正文不得超过 {MAX_NOTE_TEXT_BYTES} 字节"));
+        if self.text.len() > MAX_DOC_TEXT_BYTES {
+            return Err(format!("文档正文不得超过 {MAX_DOC_TEXT_BYTES} 字节"));
         }
         Ok(())
     }
 }
 
-/// [`note::RENAME`] 的 params：当前路径与新主名（不含扩展名）。
+/// [`doc::RENAME`] 的 params：当前路径与新主名（不含扩展名）。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct NoteRenameParams {
+pub struct DocRenameParams {
     pub path: String,
     pub name: String,
 }
 
-impl NoteRenameParams {
+impl DocRenameParams {
     pub fn validate(&self) -> Result<(), String> {
         if self.path.trim().is_empty() {
             return Err("路径不能为空".to_string());
@@ -841,19 +836,19 @@ impl NoteRenameParams {
     }
 }
 
-/// [`note::SAVE`] 的 params：`manual` = 手动保存（成功 / 失败均有提示）；缺省 = 自动保存。
+/// [`doc::SAVE`] 的 params：`manual` = 手动保存（成功 / 失败均有提示）；缺省 = 自动保存。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct NoteSaveParams {
+pub struct DocSaveParams {
     pub path: String,
     #[serde(default)]
     pub manual: bool,
 }
 
-/// [`note::AWARENESS`] 的 params：本端选区（全文字节偏移，`None` = 只上报身份）。
+/// [`doc::AWARENESS`] 的 params：本端选区（全文字节偏移，`None` = 只上报身份）。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct NoteAwarenessParams {
+pub struct DocAwarenessParams {
     pub path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchor: Option<usize>,
@@ -861,19 +856,19 @@ pub struct NoteAwarenessParams {
     pub head: Option<usize>,
 }
 
-/// 一条反链：引用该笔记的文件路径与显示标题。
+/// 一条反链：引用该文档的文件路径与显示标题。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct NoteBacklink {
+pub struct BacklinkEntry {
     pub path: String,
     pub title: String,
 }
 
-/// [`note::BACKLINKS`] 的 result。
+/// [`vault::BACKLINKS`] 的 result。
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct NoteBacklinksResult {
-    pub entries: Vec<NoteBacklink>,
+pub struct BacklinksResult {
+    pub entries: Vec<BacklinkEntry>,
 }
 
 /// [`vault::TAGS`] 的 result：仓库里出现过的标签（按出现次数降序）。
@@ -1393,11 +1388,12 @@ pub struct HttpResult {
     pub body_base64: String,
 }
 
-// ---------- doc ----------
+// ---------- 文档实例通知 ----------
 
+/// [`doc::HOST_OPEN`] 的 params：文档实例被打开。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DocOpenParams {
+pub struct DocInstanceOpenParams {
     /// 仓库容器内的相对路径（本地仓库）或服务端内容路径（协作空间），与 vault 口径一致。
     pub path: String,
     /// 宿主为本实例分配的面标识：插件据此以 `frame.submitShared` 提交该文档实例的界面。
@@ -1407,7 +1403,7 @@ pub struct DocOpenParams {
 /// [`doc::HOST_CLOSE`] 的 params：实例随标签关闭 / 换文件被关闭。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DocCloseParams {
+pub struct DocInstanceCloseParams {
     pub surface_id: String,
     pub path: String,
 }
@@ -2222,7 +2218,7 @@ pub const PLATFORM_PLUGIN: &str = "atelyx.platform";
 pub const BUILTIN_SERVICES: &[(&str, &str, &[&str])] = &[
     ("fs", PLATFORM_PLUGIN, &[fs::PRIVATE_DIR, fs::READ_TEXT, fs::WRITE_TEXT, fs::READ_BINARY, fs::WRITE_BINARY, fs::REMOVE, fs::EXISTS, fs::LIST]),
     ("process", PLATFORM_PLUGIN, &[process::SPAWN, process::WRITE_STDIN, process::CLOSE_STDIN, process::KILL]),
-    ("vault", PLATFORM_PLUGIN, &[vault::READ_TEXT, vault::WRITE_TEXT, vault::READ_BINARY, vault::WRITE_BINARY, vault::IMPORT_FILE, vault::IMAGE_INFO, vault::LIST, vault::EXISTS, vault::TAGS, vault::REMOVE, vault::RENAME]),
+    ("vault", PLATFORM_PLUGIN, &[vault::READ_TEXT, vault::WRITE_TEXT, vault::READ_BINARY, vault::WRITE_BINARY, vault::IMPORT_FILE, vault::IMAGE_INFO, vault::LIST, vault::EXISTS, vault::TAGS, vault::REMOVE, vault::RENAME, vault::BACKLINKS]),
     ("collab", PLATFORM_PLUGIN, &[collab::PEERS, collab::SEND, collab::META_GET, collab::META_PATCH]),
     ("table", "atelyx.tables", &[table::SNAPSHOT, table::UPDATE_CELL, table::ADD_ROW, table::REMOVE_ROW, table::SELECT_ROW, table::SET_CELL_IMAGE]),
     ("state", PLATFORM_PLUGIN, &[state::READ, state::WRITE]),
@@ -2239,10 +2235,10 @@ pub const BUILTIN_SERVICES: &[(&str, &str, &[&str])] = &[
     ("ai", PLATFORM_PLUGIN, &[ai::CHAT_SEND, ai::CHAT_STOP, ai::CHAT_HISTORY, ai::MODELS, ai::AGENTS, ai::CHAT_RENAME, ai::CHAT_DELETE, ai::CHAT_COMPACT, ai::CHAT_TITLE, ai::TOOL_LIST, ai::TOOL_EXECUTE, ai::CHAT_EMIT]),
     ("window", PLATFORM_PLUGIN, &[window::OPEN, window::CLOSE, window::UPDATE, window::SHOW, window::BEGIN_DRAG, window::MINIMIZE, window::TOGGLE_MAXIMIZE]),
     ("query", PLATFORM_PLUGIN, &[query::MEASURE, query::THEME]),
-    // 编辑器选区读写作用于宿主自持的笔记会话，随平台常驻
+    // 编辑器选区读写作用于宿主自持的当前文档会话，随平台常驻
     ("editor", PLATFORM_PLUGIN, &[editor::SELECTION, editor::REPLACE_SELECTION, editor::OPEN_FILES, editor::OPEN_FILE, editor::PREFS]),
-    // 笔记会话是宿主内容真源（保存链 / 协作增量 / 历史），归平台自身，不随插件停用下线
-    ("note", PLATFORM_PLUGIN, &[note::OPEN, note::EDIT, note::SAVE, note::CLOSE, note::AWARENESS, note::BACKLINKS, note::RENAME]),
+    // 文档会话是宿主内容真源（保存链 / 协作增量 / 历史），归平台自身，不随插件停用下线
+    ("doc", PLATFORM_PLUGIN, &[doc::OPEN, doc::EDIT, doc::SAVE, doc::CLOSE, doc::AWARENESS, doc::RENAME]),
     ("history", "atelyx.history", &[history::ACTIVITY, history::DAY, history::OPEN]),
 ];
 

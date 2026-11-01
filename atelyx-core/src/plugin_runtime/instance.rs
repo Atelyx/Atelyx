@@ -1419,60 +1419,60 @@ impl Instance {
                         text: p.text,
                     }
                 }
-                method::note::OPEN => {
-                    let p: method::NoteOpenParams = parse(params).map_err(|e| e.to_string())?;
+                method::doc::OPEN => {
+                    let p: method::DocOpenParams = parse(params).map_err(|e| e.to_string())?;
                     p.validate()?;
-                    HostRequest::NoteOpen {
+                    HostRequest::DocOpen {
                         plugin_id: self.id.clone(),
                         request_id: 0,
                         params: p,
                     }
                 }
-                method::note::EDIT => {
-                    let p: method::NoteEditParams = parse(params).map_err(|e| e.to_string())?;
+                method::doc::EDIT => {
+                    let p: method::DocEditParams = parse(params).map_err(|e| e.to_string())?;
                     p.validate()?;
-                    HostRequest::NoteEdit {
+                    HostRequest::DocEdit {
                         plugin_id: self.id.clone(),
                         request_id: 0,
                         params: p,
                     }
                 }
-                method::note::SAVE => {
-                    let p: method::NoteSaveParams = parse(params).map_err(|e| e.to_string())?;
-                    HostRequest::NoteSave {
+                method::doc::SAVE => {
+                    let p: method::DocSaveParams = parse(params).map_err(|e| e.to_string())?;
+                    HostRequest::DocSave {
                         plugin_id: self.id.clone(),
                         request_id: 0,
                         params: p,
                     }
                 }
-                method::note::CLOSE => {
+                method::doc::CLOSE => {
                     let p: method::PathParams = parse(params).map_err(|e| e.to_string())?;
-                    HostRequest::NoteClose {
+                    HostRequest::DocClose {
                         plugin_id: self.id.clone(),
                         request_id: 0,
                         path: p.path,
                     }
                 }
-                method::note::AWARENESS => {
-                    let p: method::NoteAwarenessParams = parse(params).map_err(|e| e.to_string())?;
-                    HostRequest::NoteAwareness {
+                method::doc::AWARENESS => {
+                    let p: method::DocAwarenessParams = parse(params).map_err(|e| e.to_string())?;
+                    HostRequest::DocAwareness {
                         plugin_id: self.id.clone(),
                         request_id: 0,
                         params: p,
                     }
                 }
-                method::note::BACKLINKS => {
+                method::vault::BACKLINKS => {
                     let p: method::PathParams = parse(params).map_err(|e| e.to_string())?;
-                    HostRequest::NoteBacklinks {
+                    HostRequest::VaultBacklinks {
                         plugin_id: self.id.clone(),
                         request_id: 0,
                         path: p.path,
                     }
                 }
-                method::note::RENAME => {
-                    let p: method::NoteRenameParams = parse(params).map_err(|e| e.to_string())?;
+                method::doc::RENAME => {
+                    let p: method::DocRenameParams = parse(params).map_err(|e| e.to_string())?;
                     p.validate()?;
-                    HostRequest::NoteRename {
+                    HostRequest::DocRename {
                         plugin_id: self.id.clone(),
                         request_id: 0,
                         params: p,
@@ -2464,7 +2464,7 @@ impl Instance {
 
     /// 告知插件一个文档实例已打开（`host:doc.open`）：surfaceId 为宿主分配的实例面标识。
     pub(crate) fn notify_doc_open(&self, surface_id: &str, path: &str) {
-        let params = method::DocOpenParams {
+        let params = method::DocInstanceOpenParams {
             path: path.to_string(),
             surface_id: surface_id.to_string(),
         };
@@ -2473,7 +2473,7 @@ impl Instance {
 
     /// 告知插件一个文档实例已关闭（`host:doc.close`）。
     pub(crate) fn notify_doc_close(&self, surface_id: &str, path: &str) {
-        let params = method::DocCloseParams {
+        let params = method::DocInstanceCloseParams {
             path: path.to_string(),
             surface_id: surface_id.to_string(),
         };
@@ -2701,13 +2701,13 @@ fn is_shell_method(method_name: &str) -> bool {
             | method::editor::REPLACE_SELECTION
             | method::editor::OPEN_FILE
             | method::editor::PREFS
-            | method::note::OPEN
-            | method::note::EDIT
-            | method::note::SAVE
-            | method::note::CLOSE
-            | method::note::AWARENESS
-            | method::note::BACKLINKS
-            | method::note::RENAME
+            | method::doc::OPEN
+            | method::doc::EDIT
+            | method::doc::SAVE
+            | method::doc::CLOSE
+            | method::doc::AWARENESS
+            | method::vault::BACKLINKS
+            | method::doc::RENAME
             | method::history::ACTIVITY
             | method::history::DAY
             | method::history::OPEN
@@ -2975,8 +2975,8 @@ mod tests {
             event::name::VAULT_FILE_CHANGED,
             event::name::SPACE_META_CHANGED,
             event::name::WINDOW_FILE_DROP,
-            event::name::NOTE_CHANGED,
-            event::name::NOTE_PRESENCE,
+            event::name::DOC_CHANGED,
+            event::name::DOC_PRESENCE,
             event::name::EDITOR_PREFS_CHANGED,
         ] {
             let ack = instance

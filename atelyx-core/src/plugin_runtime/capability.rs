@@ -19,7 +19,7 @@ use serde_json::Value;
 pub(crate) fn permission_for(name: &str) -> Option<Permission> {
     use Permission::*;
     use method::{
-        ai, clipboard, collab, dialog, editor, fs, history, http, note, notification, process,
+        ai, clipboard, collab, dialog, doc, editor, fs, history, http, notification, process,
         shortcut, state, table, tray, vault, window,
     };
     match name {
@@ -27,7 +27,7 @@ pub(crate) fn permission_for(name: &str) -> Option<Permission> {
         | fs::REMOVE | fs::EXISTS | fs::LIST => Some(Fs),
         vault::READ_TEXT | vault::WRITE_TEXT | vault::READ_BINARY | vault::WRITE_BINARY
         | vault::IMPORT_FILE | vault::IMAGE_INFO | vault::LIST | vault::EXISTS | vault::TAGS
-        | vault::REMOVE | vault::RENAME => Some(Vault),
+        | vault::REMOVE | vault::RENAME | vault::BACKLINKS => Some(Vault),
         table::SNAPSHOT | table::UPDATE_CELL | table::ADD_ROW | table::REMOVE_ROW
         | table::SELECT_ROW | table::SET_CELL_IMAGE => Some(Table),
         process::SPAWN | process::WRITE_STDIN | process::CLOSE_STDIN | process::KILL => Some(Process),
@@ -40,14 +40,13 @@ pub(crate) fn permission_for(name: &str) -> Option<Permission> {
         dialog::PICK_FILE | dialog::PICK_DIRECTORY => Some(Dialog),
         http::REQUEST | http::STREAM_OPEN | http::STREAM_CANCEL => Some(Http),
         collab::PEERS | collab::SEND | collab::META_GET | collab::META_PATCH => Some(Collab),
-        // 读写当前笔记的正文 / 选区即读写用户内容，按仓库内容权限归类
+        // 读写当前文档的正文 / 选区即读写用户内容，按仓库内容权限归类
         editor::SELECTION
         | editor::REPLACE_SELECTION
         | editor::OPEN_FILES
         | editor::OPEN_FILE
         | editor::PREFS => Some(Vault),
-        note::OPEN | note::EDIT | note::SAVE | note::CLOSE | note::AWARENESS | note::BACKLINKS
-        | note::RENAME => Some(Vault),
+        doc::OPEN | doc::EDIT | doc::SAVE | doc::CLOSE | doc::AWARENESS | doc::RENAME => Some(Vault),
         // 活动统计取自当前仓库内容，同样按仓库内容权限归类
         history::ACTIVITY | history::DAY | history::OPEN => Some(Vault),
         window::OPEN | window::CLOSE | window::UPDATE | window::SHOW | window::BEGIN_DRAG
@@ -151,10 +150,10 @@ mod tests {
         assert_eq!(permission_for(method::editor::SELECTION), Some(Permission::Vault));
         assert_eq!(permission_for(method::editor::REPLACE_SELECTION), Some(Permission::Vault));
         assert_eq!(permission_for(method::editor::OPEN_FILE), Some(Permission::Vault));
-        assert_eq!(permission_for(method::note::OPEN), Some(Permission::Vault));
-        assert_eq!(permission_for(method::note::EDIT), Some(Permission::Vault));
-        assert_eq!(permission_for(method::note::SAVE), Some(Permission::Vault));
-        assert_eq!(permission_for(method::note::BACKLINKS), Some(Permission::Vault));
+        assert_eq!(permission_for(method::doc::OPEN), Some(Permission::Vault));
+        assert_eq!(permission_for(method::doc::EDIT), Some(Permission::Vault));
+        assert_eq!(permission_for(method::doc::SAVE), Some(Permission::Vault));
+        assert_eq!(permission_for(method::vault::BACKLINKS), Some(Permission::Vault));
         assert_eq!(permission_for(method::history::ACTIVITY), Some(Permission::Vault));
         assert_eq!(permission_for(method::history::DAY), Some(Permission::Vault));
         assert_eq!(permission_for(method::history::OPEN), Some(Permission::Vault));

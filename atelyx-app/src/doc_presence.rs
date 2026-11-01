@@ -1,5 +1,5 @@
-//! 笔记协作在场：本机光标 / 选区经通用瞬时通道上行，远端状态解析为远端光标视图（供
-//! `note:presence` 广播给插件）。
+//! 文本文档协作在场：本机光标 / 选区经通用瞬时通道上行，远端状态解析为远端光标视图（供
+//! `doc:presence` 广播给插件）。
 //!
 //! 通道载荷只带全文 UTF-16 偏移与身份色，不含正文；对端打开别的文件时按 `file` 过滤，
 //! 换文件靠 state 变化自然生效，无需先发离场帧。
@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use crate::ui::palette as pal;
 
 /// 宿主内置通道名（插件通道为 `<插件id>:<频道>`，两套命名空间互不覆盖）。
-pub const CHANNEL: &str = "host.note-aware";
+pub const CHANNEL: &str = "host.doc-aware";
 
 /// 本端身份（名签与成员色由壳提供；通道层不感知）。
 pub struct Identity<'a> {
@@ -28,9 +28,9 @@ pub struct RemoteCaret {
     pub head: Option<u32>,
 }
 
-pub struct NoteCollabChannel {
+pub struct DocPresenceChannel {
     channel: EphemeralChannel,
-    /// 本端挂着的文件（None = 不在笔记）。
+    /// 本端挂着的文件（None = 未在场）。
     file: Option<String>,
     /// 已写入通道状态的选区（变化检测基准，含被限频压下待补发的那份）。
     sent: Option<(u32, u32)>,
@@ -40,9 +40,9 @@ pub struct NoteCollabChannel {
     remote: Vec<RemoteCaret>,
 }
 
-impl NoteCollabChannel {
+impl DocPresenceChannel {
     pub fn new() -> Self {
-        NoteCollabChannel {
+        DocPresenceChannel {
             channel: EphemeralChannel::new(),
             file: None,
             sent: None,
@@ -97,7 +97,7 @@ impl NoteCollabChannel {
             .set_local_state(now, state_json(identity, file, selection))
     }
 
-    /// 离场（关闭笔记 / 离开空间）：产出 null 条目并清本端记录。
+    /// 离场（关闭文档 / 离开空间）：产出 null 条目并清本端记录。
     pub fn leave(&mut self, now: Instant) -> Option<Value> {
         self.file = None;
         self.sent = None;
@@ -209,7 +209,7 @@ impl NoteCollabChannel {
     }
 }
 
-impl Default for NoteCollabChannel {
+impl Default for DocPresenceChannel {
     fn default() -> Self {
         Self::new()
     }
@@ -248,7 +248,7 @@ mod tests {
 
     #[test]
     fn 进入后上报文件与身份_同选区不再上行() {
-        let mut ch = NoteCollabChannel::new();
+        let mut ch = DocPresenceChannel::new();
         let now = Instant::now();
         let first = ch.enter(now, &identity(), "a.md", Some((3, 7))).expect("首次应产帧");
         assert_eq!(first["state"]["file"], "a.md");
@@ -260,7 +260,7 @@ mod tests {
 
     #[test]
     fn 身份变化也要上行_同身份同选区不再上行() {
-        let mut ch = NoteCollabChannel::new();
+        let mut ch = DocPresenceChannel::new();
         let now = Instant::now();
         ch.enter(now, &identity(), "a.md", Some((3, 7))).expect("进入");
         assert!(ch.update(now, &identity(), "a.md", Some((3, 7))).is_none());
@@ -277,7 +277,7 @@ mod tests {
 
     #[test]
     fn 改名跟随_挂靠路径改写并重发() {
-        let mut ch = NoteCollabChannel::new();
+        let mut ch = DocPresenceChannel::new();
         let now = Instant::now();
         ch.enter(now, &identity(), "notes/a.md", Some((3, 7))).expect("进入");
         ch.apply("p1", &remote_payload(9, 1, "notes/a.md", json!({ "anchor": 1, "head": 2 })), now);
@@ -299,10 +299,10 @@ mod tests {
 
     #[test]
     fn 长文本选区u32不丢失() {
-        let mut ch = NoteCollabChannel::new();
+        let mut ch = DocPresenceChannel::new();
         let now = Instant::now();
         ch.enter(now, &identity(), "a.md", Some((70_000, 70_010))).expect("进入");
-        let mut other = NoteCollabChannel::new();
+        let mut other = DocPresenceChannel::new();
         other.enter(now, &identity(), "a.md", None).expect("进入");
         let payload = json!({
             "clientId": 9, "clock": 1,
@@ -317,7 +317,7 @@ mod tests {
 
     #[test]
     fn 换文件清旧视图_离场产null() {
-        let mut ch = NoteCollabChannel::new();
+        let mut ch = DocPresenceChannel::new();
         let now = Instant::now();
         ch.enter(now, &identity(), "a.md", None).expect("进入");
         ch.apply("p1", &remote_payload(9, 1, "a.md", json!({ "anchor": 1, "head": 2 })), now);
@@ -336,7 +336,7 @@ mod tests {
 
     #[test]
     fn 远端只收同文件条目_无选区仍保留身份() {
-        let mut ch = NoteCollabChannel::new();
+        let mut ch = DocPresenceChannel::new();
         let now = Instant::now();
         ch.enter(now, &identity(), "a.md", None).expect("进入");
 
@@ -353,7 +353,7 @@ mod tests {
 
     #[test]
     fn 远端颜色缺失回落_对端断链摘除_超时剔除() {
-        let mut ch = NoteCollabChannel::new();
+        let mut ch = DocPresenceChannel::new();
         let now = Instant::now();
         ch.enter(now, &identity(), "a.md", None).expect("进入");
         let no_color = json!({

@@ -30,8 +30,8 @@ pub(crate) const SERVICE_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 const BUS_NAMESPACE: &str = "service";
 
 /// 不可替换的内置服务：`query` 的量算与主题取自宿主 OS / 用户设置；`chat` 是会话真源，
-/// `note` 是笔记正文与保存链真源，只能由宿主按仓库身份读写。外置都会与宿主状态脱节。
-const NON_REPLACEABLE: &[&str] = &["query", "chat", "note"];
+/// `doc` 是文档正文与保存链真源，只能由宿主按仓库身份读写。外置都会与宿主状态脱节。
+const NON_REPLACEABLE: &[&str] = &["query", "chat", "doc"];
 
 /// 宿主保留方法：工具名册、结果回报、工具执行与对话事件由宿主记账，服务被外部顶替后
 /// 也不能被提供者截走。
@@ -1024,7 +1024,12 @@ mod tests {
         let mut dir = ServiceDir::new();
         for service_name in NON_REPLACEABLE {
             let error = dir.register("com.a", &params(service_name, &["theme"])).unwrap_err();
-            assert!(error.contains("不可替换"), "应可读拒绝：{error}");
+            // `doc` 同时是宿主通道命名空间：命名保留先于不可替换判定拒绝，仍不可被外部顶替
+            if *service_name == "doc" {
+                assert!(error.contains("通道"), "应可读拒绝：{error}");
+            } else {
+                assert!(error.contains("不可替换"), "应可读拒绝：{error}");
+            }
             assert_eq!(dir.route(service_name), Route::Builtin);
             assert!(info(&dir.list(), service_name).candidates.is_empty());
         }

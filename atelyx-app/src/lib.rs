@@ -24,7 +24,7 @@ mod markdown_edit;
 mod markdown_view;
 mod pack;
 mod plugin_actions;
-mod plugin_note;
+mod doc_session;
 mod plugin_theme;
 mod plugin_frame;
 mod plugin_paint;
@@ -37,7 +37,7 @@ mod settings_view;
 mod space_actions;
 mod table_actions;
 mod table_collab;
-mod note_collab_channel;
+mod doc_presence;
 mod canvas_collab;
 mod table_text;
 mod table_view;
@@ -1028,8 +1028,8 @@ pub enum SpaceMsg {
         gen: u64,
         result: Result<Vec<atelyx_core::space_client::TreeNode>, atelyx_core::space_client::SpaceError>,
     },
-    /// 空间笔记保存回执（rel = 发起时文件；frozen = 发起时冻结的正文，Ok 携带服务端合流后的最终全文）。
-    NoteSaved {
+    /// 空间文档保存回执（rel = 发起时文件；frozen = 发起时冻结的正文，Ok 携带服务端合流后的最终全文）。
+    DocSaved {
         gen: u64,
         rel: String,
         frozen: String,
@@ -1297,11 +1297,11 @@ pub struct App {
     /// 会话内令牌兜底（密钥链不可用时仅本次会话有效，不落盘）。
     session_token: Option<(String, String)>,
     /// 当前打开笔记的「上次确认落盘基线」（空间模式三方合流的祖先；None = 尚未落盘）。
-    pub space_note_flushed: Option<String>,
+    pub space_doc_flushed: Option<String>,
     /// 空间笔记保存在途标志（回执即清）：空间保存无写队列可依赖，并发两笔会乱序落地覆盖服务端。
-    space_note_save_inflight: bool,
+    space_doc_save_inflight: bool,
     /// 在途保存期间收到 Flush 请求：回执后补一笔串行收尾（关窗/切文件的脏拦截依赖它）。
-    space_note_save_flush_queued: bool,
+    space_doc_save_flush_queued: bool,
     /// 各空间独立的文件树展开集（会话内记忆；键 = 服务器/空间 id）。
     expanded_by_space: HashMap<String, Vec<String>>,
     /// 设备会话列表（设置页「多人协作」；打开该页时拉取）。
@@ -1336,13 +1336,13 @@ pub struct App {
     /// 他端结构变更的树刷新节流（上次刷新时刻 + 合并窗口内是否已排兜底 tick）。
     space_tree_refresh_at: Option<std::time::Instant>,
     fs_tree_refresh_pending: bool,
-    /// 笔记协作文档绑定（空间模式且打开笔记时）。
-    pub note_collab: Option<atelyx_core::note_collab::NoteCollab>,
+    /// 文本文档协作文档绑定（空间模式且打开文档时）。
+    pub doc_collab: Option<atelyx_core::note_collab::NoteCollab>,
     /// 协作绑定当前挂的文件（None = 未挂）。
-    pub note_collab_file: Option<String>,
-    /// 笔记在场通道（本端光标/选区上行与远端光标条目）。
-    pub note_collab_channel: Option<note_collab_channel::NoteCollabChannel>,
-    /// 远端成员光标（在场通道状态换算为 note_text 字节偏移；供 `note:presence` 广播）。
+    pub doc_collab_file: Option<String>,
+    /// 文档在场通道（本端光标/选区上行与远端光标条目）。
+    pub doc_presence: Option<doc_presence::DocPresenceChannel>,
+    /// 远端成员光标（在场通道状态换算为 doc_text 字节偏移；供 `doc:presence` 广播）。
     pub remote_cursors: Vec<RemoteCursorView>,
     /// 本端帧泵 peerId（hello-ack 分配）：自声落地帧与名册自条目据此过滤。
     pub space_own_peer_id: Option<String>,
@@ -1362,24 +1362,24 @@ pub struct App {
     /// files 视图懒加载子项缓存（key = 目录相对路径，根为 ""；运行态不落盘）。
     pub children: HashMap<String, Vec<vault::DirChild>>,
     /// note 正文真相（与磁盘逐字节一致；插件笔记面与画布 / 表格的文本数据源）。
-    pub note_text: String,
+    pub doc_text: String,
     /// 属性面板（frontmatter 类型化渲染与槽位编辑）。
     pub props: PropsPanel,
-    pub dirty: bool,
+    pub doc_dirty: bool,
     /// 上次保存失败原因（None = 无；保存成功或再次编辑即清除）。
-    pub save_error: Option<String>,
+    pub doc_save_error: Option<String>,
     /// 自动保存期限（最近一次内容变更 + 500ms；保存落地或到期触发时清空）。
     autosave_deadline: Option<Instant>,
     /// 自动保存定时器在途标志（单定时器链：到期检查期限，被推迟则续排剩余时长）。
     autosave_timer: bool,
-    /// 笔记正文由插件面承载（壳内不再渲染笔记视图；正文仍在本 `note_text`）。
-    pub plugin_note_active: bool,
-    /// 插件笔记面上报的本端选区（全文字节偏移；`None` = 无光标）。
-    pub plugin_note_selection: Option<(usize, usize)>,
+    /// 文档正文由插件面承载（壳内不再渲染文档视图；正文仍在本 `doc_text`）。
+    pub doc_active: bool,
+    /// 插件文档面上报的本端选区（全文字节偏移；`None` = 无光标）。
+    pub doc_selection: Option<(usize, usize)>,
     /// 插件最后提交并被宿主接受的正文（三方合并的共同祖先；远端合入不回写它）。
-    pub plugin_note_base: String,
-    /// 笔记插件尚未就绪时挂起的打开请求（启动自动恢复 / 用户抢先点开）。
-    pending_plugin_note_open: Option<String>,
+    pub doc_base: String,
+    /// 文档插件尚未就绪时挂起的打开请求（启动自动恢复 / 用户抢先点开）。
+    pending_doc_open: Option<String>,
     /// 笔记 / 画布 / 插件图片句柄缓存（key = src 原文；切仓库清空，在途与失败集合防重复发起）。
     pub note_images: markdown_view::ImageHandles,
     /// 图片像素尺寸（key 同 `note_images`）：自绘画布按 contain / cover 摆放贴片要用原图长宽。
@@ -1480,7 +1480,7 @@ pub struct App {
     pub file_drag_target: Option<String>,
 }
 
-/// `note:presence` 广播用的远端光标视图（字节偏移，UTF-16 已换算）。选区缺省 = 对端在场但
+/// `doc:presence` 广播用的远端光标视图（字节偏移，UTF-16 已换算）。选区缺省 = 对端在场但
 /// 光标不在文档内（未打开笔记 / 插件未上报选区），此时只参与协作者胶囊，不画光标。
 #[derive(Debug, Clone)]
 pub struct RemoteCursorView {
@@ -1644,16 +1644,16 @@ impl App {
                 detached_os: HashMap::new(),
                 os_shown: HashMap::new(),
                 children: HashMap::new(),
-                note_text: String::new(),
+                doc_text: String::new(),
                 props: PropsPanel::default(),
-                dirty: false,
-                save_error: None,
+                doc_dirty: false,
+                doc_save_error: None,
                 autosave_deadline: None,
                 autosave_timer: false,
-                plugin_note_active: false,
-                plugin_note_selection: None,
-                plugin_note_base: String::new(),
-                pending_plugin_note_open: None,
+                doc_active: false,
+                doc_selection: None,
+                doc_base: String::new(),
+                pending_doc_open: None,
                 note_images: markdown_view::ImageHandles::new(),
                 note_image_sizes: HashMap::new(),
                 note_image_epoch: 0,
@@ -1716,9 +1716,9 @@ impl App {
                 space_busy: false,
                 space_pending: None,
                 session_token: None,
-                space_note_flushed: None,
-                space_note_save_inflight: false,
-                space_note_save_flush_queued: false,
+                space_doc_flushed: None,
+                space_doc_save_inflight: false,
+                space_doc_save_flush_queued: false,
                 expanded_by_space: HashMap::new(),
                 space_devices: Vec::new(),
                 space_token: None,
@@ -1741,9 +1741,9 @@ impl App {
                 space_pump_denied: false,
                 space_tree_refresh_at: None,
                 fs_tree_refresh_pending: false,
-                note_collab: None,
-                note_collab_file: None,
-                note_collab_channel: None,
+                doc_collab: None,
+                doc_collab_file: None,
+                doc_presence: None,
                 remote_cursors: Vec::new(),
                 table_collab: None,
         };
@@ -1969,7 +1969,7 @@ impl App {
             }
             Message::OpenFile(rel) => self.gate(PendingAfterFlush::OpenFile(rel)),
             Message::Save => {
-                // Ctrl+S：单元格编辑先提交，笔记 / 表格 / 画布各自手动保存（无打开内容 = 提示）
+                // Ctrl+S：单元格编辑先提交，文档 / 表格 / 画布各自手动保存（无打开内容 = 提示）
                 table_actions::commit_edit(self);
                 let mut task = Task::none();
                 if self.ui.last_note_file.is_some() {
@@ -1996,7 +1996,7 @@ impl App {
                 if self.autosave_deadline.is_some_and(|at| at <= Instant::now()) {
                     self.autosave_deadline = None;
                     let mut task = Task::none();
-                    if self.dirty && self.ui.last_note_file.is_some() {
+                    if self.doc_dirty && self.ui.last_note_file.is_some() {
                         task = task.chain(self.submit_save(SaveReason::AutoSave));
                     }
                     if self.table.as_ref().is_some_and(|t| t.dirty) {
@@ -2020,12 +2020,12 @@ impl App {
                     return Task::none();
                 }
                 self.plugins.on_file_changed(&rel, FileChangeKind::Updated, None);
-                self.save_error = None;
+                self.doc_save_error = None;
                 let proceed = match reason {
                     SaveReason::Flush => {
                         // 保存发起时冻结的内容与当前一致才算落盘；期间又有输入则再收一轮
-                        if self.note_text == saved {
-                            self.dirty = false;
+                        if self.doc_text == saved {
+                            self.doc_dirty = false;
                             self.settle_history_restore(true);
                             self.after_any_flush()
                         } else {
@@ -2033,8 +2033,8 @@ impl App {
                         }
                     }
                     SaveReason::Manual => {
-                        if self.note_text == saved {
-                            self.dirty = false;
+                        if self.doc_text == saved {
+                            self.doc_dirty = false;
                             self.settle_history_restore(true);
                             self.notify(NoticeLevel::Success, "已保存");
                         } else {
@@ -2043,8 +2043,8 @@ impl App {
                         Task::none()
                     }
                     SaveReason::AutoSave => {
-                        if self.note_text == saved {
-                            self.dirty = false;
+                        if self.doc_text == saved {
+                            self.doc_dirty = false;
                             self.settle_history_restore(true);
                         }
                         Task::none()
@@ -2052,9 +2052,9 @@ impl App {
                 };
                 // 落盘即记历史版本（edit；内容 no-op 由记录侧跳过），随后刷新版本列表
                 if self.ui.last_note_file.as_deref() == Some(rel.as_str()) {
-                    crate::plugin_note::publish_state(self, None);
+                    crate::doc_session::publish_state(self, None);
                 }
-                proceed.chain(self.record_note_history(saved))
+                proceed.chain(self.record_doc_history(saved))
             }
             Message::Saved(_, rel, _, reason, Err(e)) => {
                 self.settle_history_restore(false);
@@ -2064,9 +2064,9 @@ impl App {
                 } else {
                     self.notify(NoticeLevel::Error, format!("保存失败：{e}"));
                 }
-                self.save_error = Some(e);
+                self.doc_save_error = Some(e);
                 if self.ui.last_note_file.as_deref() == Some(rel.as_str()) {
-                    crate::plugin_note::publish_state(self, None);
+                    crate::doc_session::publish_state(self, None);
                 }
                 Task::none()
             }
@@ -2329,7 +2329,7 @@ impl App {
             Message::ColorPicker(msg) => color_picker_actions::update(self, msg),
             Message::CollabColorSet(color) => {
                 self.global.collab_color = Some(color);
-                // 换色后立即刷新笔记 / 表格在场身份，对端不必等到下一次选区事件
+                // 换色后立即刷新文档 / 表格在场身份，对端不必等到下一次选区事件
                 space_actions::collab_after_caret(self);
                 space_actions::table_collab_sync(self);
                 space_actions::canvas_collab_sync(self);
@@ -2791,7 +2791,7 @@ impl App {
                 // 表格图片长按检查（拖拽排序激活）
                 table_actions::check_long_press(self);
                 // 远端光标过期剔除节流（1s）：对端崩溃/断网无离场帧，靠通道超时惰性剔除
-                if self.note_collab_channel.is_some()
+                if self.doc_presence.is_some()
                     && self
                         .space_cursor_prune_at
                         .is_none_or(|at| at.elapsed() >= std::time::Duration::from_secs(1))
@@ -2802,11 +2802,11 @@ impl App {
                 // 在场保活重发（通道内 15s 限频，连接期间搭载）：空闲端身份帧
                 // 否则被对端 30s 超时剔除——后加入者与对端互见都依赖周期重发
                 if self.space_connected {
-                    space_actions::note_presence_keepalive(self);
+                    space_actions::doc_presence_keepalive(self);
                 }
                 // 限频压下的选区变化（拖选连续位移）由本拍补发最新一份：断线期产出即丢弃，
                 // 重连时的强制重发以最新状态兜底
-                space_actions::note_presence_flush(self);
+                space_actions::doc_presence_flush(self);
                 // 表格在场：远端超时剔除、限频补发、空闲保活
                 space_actions::table_collab_tick(self);
                 // 画布在场：同上（选中 / 对话卡锁 / 流式）
@@ -3149,7 +3149,7 @@ impl App {
             Message::Ui(msg) => self.on_ui(msg),
             Message::Update(msg) => self.on_update(msg),
             Message::Table(msg) => {
-                // 数据版本变化 = 表格编辑：与笔记同口径推迟自动保存期限
+                // 数据版本变化 = 表格编辑：与文档同口径推迟自动保存期限
                 let version_before = self.table.as_ref().map(|t| t.version);
                 let task = table_actions::on_msg(self, msg);
                 if self.table.as_ref().is_some_and(|t| t.dirty)
@@ -3347,8 +3347,9 @@ impl App {
                         }
                         // 插件窗口 / 接管面 / 打开中的文档实例随重启重新就绪
                         plugin_actions::resync_surfaces_on_running(self, id);
-                        if *id == "atelyx.notes" {
-                            if let Some(path) = self.pending_plugin_note_open.take() {
+                        if let Some(path) = self.pending_doc_open.clone() {
+                            if self.pending_doc_plugin(&path).as_deref() == Some(id.as_str()) {
+                                self.pending_doc_open = None;
                                 task = task.chain(self.gate(PendingAfterFlush::OpenFile(path)));
                             }
                         }
@@ -3365,11 +3366,12 @@ impl App {
                         for os in to_close {
                             task = task.chain(window::close(os));
                         }
-                        if *id == "atelyx.notes" {
-                            if self.pending_plugin_note_open.take().is_some() {
+                        if let Some(path) = self.pending_doc_open.clone() {
+                            if self.pending_doc_plugin(&path).as_deref() == Some(id.as_str()) {
+                                self.pending_doc_open = None;
                                 self.notify(
                                     NoticeLevel::Error,
-                                    "笔记插件未运行，无法打开笔记".to_string(),
+                                    "文档插件未运行，无法打开文档".to_string(),
                                 );
                             }
                         }
@@ -3848,7 +3850,7 @@ impl App {
                     _ => {}
                 }
                 self.apply_follow(&follow);
-                // 引用同步代写了打开中的笔记（rewritten 键 = 落盘后路径，与跟随后的
+                // 引用同步代写了打开中的文档（rewritten 键 = 落盘后路径，与跟随后的
                 // last_note_file 比对）：磁盘正文已变，重读对齐——改名/移动的 gate 已先
                 // flush，此刻无未落盘输入可丢
                 let mut reload_note: Option<String> = None;
@@ -3958,7 +3960,7 @@ impl App {
                 Task::none()
             }
             Message::SaveErrorDismiss => {
-                self.save_error = None;
+                self.doc_save_error = None;
                 Task::none()
             }
             Message::DividerAdjust(horizontal, positive) => {
@@ -4425,15 +4427,15 @@ impl App {
             .load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    /// 笔记 / 表格 / 画布任一脏。
+    /// 文档 / 表格 / 画布任一脏。
     fn any_dirty(&self) -> bool {
-        self.dirty
+        self.doc_dirty
             || self.table.as_ref().is_some_and(|t| t.dirty)
             || self.canvas.as_ref().is_some_and(|c| c.dirty)
     }
 
     /// 脏时先收尾挂起输入再放行动作；不脏直接执行。
-    /// 笔记 / 表格 / 画布任一脏即挂起 pending，全部落盘后执行（after_any_flush）。
+    /// 文档 / 表格 / 画布任一脏即挂起 pending，全部落盘后执行（after_any_flush）。
     fn gate(&mut self, pending: PendingAfterFlush) -> Task<Message> {
         // 在途单元格草稿先提交（提交即置脏，走下面的 flush；无改动 = 零成本直通）：
         // 打开/关闭/切仓库/改名/删除都会替换或丢弃表格会话，草稿不得随会话被静默丢弃
@@ -4459,7 +4461,7 @@ impl App {
     /// 提交当前所有脏面的保存（flush 语义；全部落地后由回执侧放行 flush_pending）。
     fn flush_dirty_now(&mut self) -> Task<Message> {
         let mut task = Task::none();
-        if self.dirty {
+        if self.doc_dirty {
             task = task.chain(self.submit_save(SaveReason::Flush));
         }
         if self.table.as_ref().is_some_and(|t| t.dirty) {
@@ -4527,52 +4529,52 @@ impl App {
         }
     }
 
-    /// 插件笔记面承载一篇笔记：正文真源仍在本 `note_text`，编辑态由插件自持。
+    /// 插件文档面承载一篇文档：正文真源仍在本 `doc_text`，编辑态由插件自持。
     /// 协作空间同时建立 CRDT 文档（基线以载入正文为准）。
-    pub(crate) fn attach_plugin_note(&mut self, rel: &str, text: String) {
+    pub(crate) fn attach_doc_session(&mut self, rel: &str, text: String) {
         self.ui.last_note_file = Some(rel.to_string());
-        self.plugin_note_active = true;
-        self.plugin_note_selection = None;
-        self.plugin_note_base = text.clone();
-        self.note_text = text.clone();
+        self.doc_active = true;
+        self.doc_selection = None;
+        self.doc_base = text.clone();
+        self.doc_text = text.clone();
         // 换篇后可重试之前失败的图片（句柄按 src 缓存，仍可复用）
         self.note_images_inflight.clear();
         self.note_images_failed.clear();
         self.history_kind = atelyx_core::history::HistoryKind::Note;
         self.history.clear();
-        self.dirty = false;
-        self.save_error = None;
+        self.doc_dirty = false;
+        self.doc_save_error = None;
         self.autosave_deadline = None;
         self.autosave_timer = false;
         self.reset_props();
         match self.repo_kind.clone() {
             RepoKind::Local => {
-                self.space_note_flushed = None;
-                self.note_collab = None;
-                self.note_collab_file = None;
-                self.note_collab_channel = None;
+                self.space_doc_flushed = None;
+                self.doc_collab = None;
+                self.doc_collab_file = None;
+                self.doc_presence = None;
                 self.remote_cursors.clear();
             }
             RepoKind::Space(_) => {
-                self.space_note_flushed = Some(text);
-                space_actions::collab_note_loaded(self, rel);
+                self.space_doc_flushed = Some(text);
+                space_actions::collab_doc_loaded(self, rel);
             }
         }
-        crate::plugin_note::publish_presence(self);
+        crate::doc_session::publish_presence(self);
         self.schedule_persist();
     }
 
-    /// 插件笔记面提交一次编辑：以 `plugin_note_base`（插件当前持有的全文）为祖先三方合并，
+    /// 插件文档面提交一次编辑：以 `doc_base`（插件当前持有的全文）为祖先三方合并，
     /// 返回需要回填给插件的新正文（无 = None）。只有合并结果真的变了正文才置脏并排自动保存。
-    pub(crate) fn apply_plugin_note_edit(
+    pub(crate) fn apply_doc_edit(
         &mut self,
         text: String,
         selection: Option<(usize, usize)>,
     ) -> Option<String> {
-        let before = self.note_text.clone();
-        let merged = if before != self.plugin_note_base {
+        let before = self.doc_text.clone();
+        let merged = if before != self.doc_base {
             atelyx_core::merge3::merge3(
-                &self.plugin_note_base,
+                &self.doc_base,
                 &text,
                 &before,
                 atelyx_core::merge3::ConflictSide::Ours,
@@ -4582,49 +4584,49 @@ impl App {
         };
         // 插件此刻持有的就是它提交的全文：作为下次合并的祖先。先推进到合并结果会让
         // 未及应用校正的下一笔提交以过期祖先合并，把远端合入内容改回去。
-        self.plugin_note_base = text;
-        let correction = (merged != self.plugin_note_base).then(|| merged.clone());
+        self.doc_base = text;
+        let correction = (merged != self.doc_base).then(|| merged.clone());
         let changed = merged != before;
-        self.note_text = merged;
+        self.doc_text = merged;
         // inspector 属性面板与正文同一真源：正文被插件改动后重建解析缓存
         self.refresh_props();
         if changed {
-            self.dirty = true;
-            self.save_error = None;
+            self.doc_dirty = true;
+            self.doc_save_error = None;
             self.autosave_deadline = Some(Instant::now() + AUTOSAVE_DEBOUNCE);
             space_actions::collab_after_edit(self);
         }
         // 选区偏移相对插件提交的全文；正文被合并改写时坐标系已错位，宁可丢弃。
-        self.plugin_note_selection = if correction.is_some() { None } else { selection };
+        self.doc_selection = if correction.is_some() { None } else { selection };
         space_actions::collab_after_caret(self);
         correction
     }
 
-    /// 关闭插件笔记会话（换文件 / 关标签 / 切仓库）：摘协作文档与在场通道。
-    pub(crate) fn close_plugin_note(&mut self) {
-        if !self.plugin_note_active {
+    /// 关闭文档会话（换文件 / 关标签 / 切仓库）：摘协作文档与在场通道。
+    pub(crate) fn close_doc_session(&mut self) {
+        if !self.doc_active {
             return;
         }
-        self.plugin_note_active = false;
-        self.plugin_note_selection = None;
+        self.doc_active = false;
+        self.doc_selection = None;
         self.ui.last_note_file = None;
-        self.dirty = false;
-        self.save_error = None;
+        self.doc_dirty = false;
+        self.doc_save_error = None;
         self.autosave_deadline = None;
         self.autosave_timer = false;
         if matches!(self.repo_kind, RepoKind::Space(_)) {
-            space_actions::collab_unbind_note(self);
+            space_actions::collab_unbind_doc(self);
         }
-        self.note_collab = None;
-        self.note_collab_file = None;
-        self.note_collab_channel = None;
+        self.doc_collab = None;
+        self.doc_collab_file = None;
+        self.doc_presence = None;
         self.remote_cursors.clear();
-        self.space_note_flushed = None;
-        crate::plugin_note::publish_presence(self);
+        self.space_doc_flushed = None;
+        crate::doc_session::publish_presence(self);
         self.schedule_persist();
     }
 
-    /// 提交一次笔记写盘：仓库根与内容在发起时冻结，写盘经 core 串行队列按提交序执行。
+    /// 提交一次文档写盘：仓库根与内容在发起时冻结，写盘经 core 串行队列按提交序执行。
     /// 空间模式分派服务端（回读合流 + PUT + 服务端历史）。
     pub(crate) fn submit_save(&mut self, reason: SaveReason) -> Task<Message> {
         if matches!(self.repo_kind, RepoKind::Space(_)) {
@@ -4639,7 +4641,7 @@ impl App {
             return Task::none();
         };
         let gen = self.epoch();
-        let content = self.note_text.clone();
+        let content = self.doc_text.clone();
         let saved = content.clone();
         let queue = self.vault.writes.clone();
         let rel_for_done = rel.clone();
@@ -4672,11 +4674,11 @@ impl App {
             }
         }
         if rel.ends_with(".md") {
-            // 笔记插件可能仍在后台装载（启动自动恢复先于它就绪）：挂起一次，就绪后重试。
-            self.pending_plugin_note_open = Some(rel.to_string());
+            // 文档插件可能仍在后台装载（启动自动恢复先于它就绪）：挂起一次，就绪后重试。
+            self.pending_doc_open = Some(rel.to_string());
             self.notify(
                 NoticeLevel::Info,
-                "笔记插件正在启动，稍后打开".to_string(),
+                "文档插件正在启动，稍后打开".to_string(),
             );
             return Task::none();
         }
@@ -4685,6 +4687,16 @@ impl App {
             format!("没有可打开该文件的视图：{rel}"),
         );
         Task::none()
+    }
+
+    /// 挂起中的文档打开请求归属哪个插件（按扩展名查文档类型注册）。
+    fn pending_doc_plugin(&self, path: &str) -> Option<String> {
+        let extension = path.rsplit('.').next()?;
+        self.registry
+            .doc_types()
+            .iter()
+            .find(|info| info.registration.extension.eq_ignore_ascii_case(extension))
+            .map(|info| info.plugin_id.clone())
     }
 
     /// 系统文件夹选择器（切仓库入口，脏拦截已由 gate 处理）。
@@ -4738,15 +4750,15 @@ impl App {
             self.ui.last_canvas_file = None;
             // 打开中的插件文档实例随切仓库关闭（旧容器路径失效，实例面撤下；投影任务丢弃，后续刷新兜底）
             let _ = plugin_actions::close_doc(self);
-            self.plugin_note_active = false;
-            self.plugin_note_selection = None;
-            self.pending_plugin_note_open = None;
+            self.doc_active = false;
+            self.doc_selection = None;
+            self.pending_doc_open = None;
             self.history.clear();
         }
         self.children.clear();
-        self.note_text.clear();
-        self.dirty = false;
-        self.save_error = None;
+        self.doc_text.clear();
+        self.doc_dirty = false;
+        self.doc_save_error = None;
         self.reset_props();
         self.file_count = None;
         self.expand_all = false;
@@ -4894,12 +4906,12 @@ impl App {
             _ => {
                 // 空间模式先摘协作绑定（离场帧 + presence 回收）再清编辑态
                 if matches!(self.repo_kind, RepoKind::Space(_)) {
-                    space_actions::collab_unbind_note(self);
+                    space_actions::collab_unbind_doc(self);
                 }
                 self.ui.last_note_file = None;
-                self.note_text.clear();
-                self.dirty = false;
-                self.save_error = None;
+                self.doc_text.clear();
+                self.doc_dirty = false;
+                self.doc_save_error = None;
                 self.reset_props();
                 self.history.clear();
             }
@@ -5008,7 +5020,7 @@ impl App {
 
     /// 记录一次保存为历史版本（edit；60s 窗口内同作者连续编辑合并为一版）。
     /// 历史为尽力而为侧车：写失败静默丢弃（不打扰正文保存链），与读取侧空列表降级同口径。
-    fn record_note_history(&self, content: String) -> Task<Message> {
+    fn record_doc_history(&self, content: String) -> Task<Message> {
         let Some(rel) = self.ui.last_note_file.clone() else { return Task::none() };
         let gen = self.epoch();
         let state = self.vault.clone();
@@ -5088,7 +5100,7 @@ impl App {
                     move |r: Result<(), String>| Message::HistoryRecorded(gen, r.err()),
                 )
             }
-            atelyx_core::history::HistoryKind::Note => self.note_history_restore(version),
+            atelyx_core::history::HistoryKind::Note => self.doc_history_restore(version),
             // 画布回滚走 canvas_history_restore（快照直写仓库，无会话链）
             atelyx_core::history::HistoryKind::Canvas => Task::none(),
         }
@@ -5169,21 +5181,21 @@ impl App {
     }
 
     /// 笔记回滚：全文快照替换正文，保存链写回并记 restore 版本。
-    fn note_history_restore(&mut self, version: atelyx_core::history::HistoryVersion) -> Task<Message> {
-        self.note_text = version.content.clone();
-        self.dirty = true;
-        self.save_error = None;
+    fn doc_history_restore(&mut self, version: atelyx_core::history::HistoryVersion) -> Task<Message> {
+        self.doc_text = version.content.clone();
+        self.doc_dirty = true;
+        self.doc_save_error = None;
         self.autosave_deadline = Some(Instant::now() + AUTOSAVE_DEBOUNCE);
-        if self.plugin_note_active {
+        if self.doc_active {
             // 回滚换掉整篇正文：插件面必须同步看到新文，且以它作为下一笔编辑的合并祖先。
-            self.plugin_note_base = self.note_text.clone();
-            self.plugin_note_selection = None;
-            plugin_note::publish_state(self, Some(self.note_text.clone()));
+            self.doc_base = self.doc_text.clone();
+            self.doc_selection = None;
+            doc_session::publish_state(self, Some(self.doc_text.clone()));
         }
         self.refresh_props();
         let Some(rel) = self.ui.last_note_file.clone() else { return Task::none() };
         if matches!(self.repo_kind, RepoKind::Space(_)) {
-            return space_actions::space_record_note_restore(self, rel, version.content);
+            return space_actions::space_record_doc_restore(self, rel, version.content);
         }
         let gen = self.epoch();
         let state = self.vault.clone();
@@ -5600,12 +5612,12 @@ impl App {
                 if hit {
                     // 空间模式先摘协作绑定（离场帧 + presence 回收）再清编辑态
                     if matches!(self.repo_kind, RepoKind::Space(_)) {
-                        space_actions::collab_unbind_note(self);
+                        space_actions::collab_unbind_doc(self);
                     }
                     self.ui.last_note_file = None;
-                    self.note_text.clear();
-                    self.dirty = false;
-                    self.save_error = None;
+                    self.doc_text.clear();
+                    self.doc_dirty = false;
+                    self.doc_save_error = None;
                     self.schedule_persist();
                 }
                 let hit_table = self.ui.last_table_file.as_deref().is_some_and(|f| {
@@ -6246,15 +6258,15 @@ impl App {
         )
     }
 
-    /// 插件视角的当前选区：偏移相对正文（frontmatter 之后）。未打开笔记回空选区。
+    /// 插件视角的当前选区：偏移相对正文（frontmatter 之后）。未打开文档回空选区。
     pub(crate) fn editor_selection(&self) -> EditorSelection {
         let path = self.ui.last_note_file.clone();
-        if self.plugin_note_active {
-            let base = atelyx_core::frontmatter::block_end(&self.note_text).unwrap_or(0);
-            let body = &self.note_text[base..];
-            let (anchor, head) = self.plugin_note_selection.unwrap_or((base, base));
-            let anchor = crate::plugin_note::clamp_boundary(&self.note_text, anchor);
-            let head = crate::plugin_note::clamp_boundary(&self.note_text, head);
+        if self.doc_active {
+            let base = atelyx_core::frontmatter::block_end(&self.doc_text).unwrap_or(0);
+            let body = &self.doc_text[base..];
+            let (anchor, head) = self.doc_selection.unwrap_or((base, base));
+            let anchor = crate::doc_session::clamp_boundary(&self.doc_text, anchor);
+            let head = crate::doc_session::clamp_boundary(&self.doc_text, head);
             let from = anchor.min(head).saturating_sub(base).min(body.len());
             let to = anchor.max(head).saturating_sub(base).min(body.len());
             return EditorSelection { path, text: body[from..to].to_string(), from, to };
@@ -6265,31 +6277,31 @@ impl App {
     /// 插件替换当前选区（空串 = 删除选区），走与插件编辑同一出口：三方合并、置脏与自动保存期限一致。
     pub(crate) fn editor_replace_selection(&mut self, text: String) -> Result<(), String> {
         if self.ui.last_note_file.is_none() {
-            return Err("未打开笔记".to_string());
+            return Err("未打开文档".to_string());
         }
-        if self.plugin_note_active {
-            if !crate::plugin_note::can_write(self) {
-                return Err("该空间为只读身份，无法编辑笔记".into());
+        if self.doc_active {
+            if !crate::doc_session::can_write(self) {
+                return Err("该空间为只读身份，无法编辑文档".into());
             }
             let (anchor, head) = self
-                .plugin_note_selection
-                .ok_or_else(|| "笔记没有选区".to_string())?;
-            let anchor = crate::plugin_note::clamp_boundary(&self.note_text, anchor);
-            let head = crate::plugin_note::clamp_boundary(&self.note_text, head);
+                .doc_selection
+                .ok_or_else(|| "文档没有选区".to_string())?;
+            let anchor = crate::doc_session::clamp_boundary(&self.doc_text, anchor);
+            let head = crate::doc_session::clamp_boundary(&self.doc_text, head);
             let from = anchor.min(head);
             let to = anchor.max(head);
-            let mut next = String::with_capacity(self.note_text.len() + text.len());
-            next.push_str(&self.note_text[..from]);
+            let mut next = String::with_capacity(self.doc_text.len() + text.len());
+            next.push_str(&self.doc_text[..from]);
             next.push_str(&text);
-            next.push_str(&self.note_text[to..]);
+            next.push_str(&self.doc_text[to..]);
             let caret = from + text.len();
             let published = self
-                .apply_plugin_note_edit(next, Some((caret, caret)))
-                .unwrap_or_else(|| self.note_text.clone());
-            crate::plugin_note::publish_state(self, Some(published));
+                .apply_doc_edit(next, Some((caret, caret)))
+                .unwrap_or_else(|| self.doc_text.clone());
+            crate::doc_session::publish_state(self, Some(published));
             return Ok(());
         }
-        Err("笔记不在编辑状态".to_string())
+        Err("文档不在编辑状态".to_string())
     }
 
     /// 命令候选键分派：录制态先吃按键；注册表按序先到先得，
@@ -6489,7 +6501,7 @@ impl App {
             || self.file_drag.as_ref().is_some_and(|d| d.spring.is_some())
             // 笔记在场：有待发状态或有对端时需要周期拍；单人无对端不挂拍，避免空闲被 10Hz 重绘
             || self
-                .note_collab_channel
+                .doc_presence
                 .as_ref()
                 .is_some_and(|ch| ch.has_pending() || ch.has_peers())
             // 表格在场：同笔记口径（补发 / 保活 / 远端剔除）

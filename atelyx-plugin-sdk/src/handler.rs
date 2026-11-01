@@ -6,7 +6,7 @@ use crate::context::Context;
 use crate::protocol::event::PublishParams;
 use crate::protocol::frame::{FrameInputParams, FrameTickParams};
 use crate::protocol::method::{
-    ChatEventParams, CollabMessageParams, DocCloseParams, DocOpenParams, HttpStreamChunkParams,
+    ChatEventParams, CollabMessageParams, DocInstanceCloseParams, DocInstanceOpenParams, HttpStreamChunkParams,
     HttpStreamEndParams, ProcessEventParams, ShortcutTriggeredParams, SurfaceAttachedParams,
     SurfaceDetachedParams, ToolCallParams, TrayClickParams, WindowClosedParams, WindowIdParams,
 };
@@ -34,8 +34,8 @@ pub trait PluginHandler: Send + Sync + 'static {
     async fn on_host_event(&self, _ctx: &Context, _params: PublishParams) {}
     async fn on_process_event(&self, _ctx: &Context, _params: ProcessEventParams) {}
     async fn on_shortcut(&self, _ctx: &Context, _params: ShortcutTriggeredParams) {}
-    async fn on_doc_open(&self, _ctx: &Context, _params: DocOpenParams) {}
-    async fn on_doc_close(&self, _ctx: &Context, _params: DocCloseParams) {}
+    async fn on_doc_open(&self, _ctx: &Context, _params: DocInstanceOpenParams) {}
+    async fn on_doc_close(&self, _ctx: &Context, _params: DocInstanceCloseParams) {}
     async fn on_window_closed(&self, _ctx: &Context, _params: WindowClosedParams) {}
     /// 窗口因失焦被收起（`host:window.hidden`）：需要再唤起时经 [`Context::window_show`] 重新显示。
     async fn on_window_hidden(&self, _ctx: &Context, _params: WindowIdParams) {}
@@ -115,8 +115,8 @@ pub(crate) async fn dispatch<H: PluginHandler + ?Sized>(
         event::HOST_PUBLISH => typed!(PublishParams, |p| handler.on_host_event(ctx, p)),
         m::process::HOST_EVENT => typed!(ProcessEventParams, |p| handler.on_process_event(ctx, p)),
         m::shortcut::HOST_TRIGGERED => typed!(ShortcutTriggeredParams, |p| handler.on_shortcut(ctx, p)),
-        m::doc::HOST_OPEN => typed!(DocOpenParams, |p| handler.on_doc_open(ctx, p)),
-        m::doc::HOST_CLOSE => typed!(DocCloseParams, |p| handler.on_doc_close(ctx, p)),
+        m::doc::HOST_OPEN => typed!(DocInstanceOpenParams, |p| handler.on_doc_open(ctx, p)),
+        m::doc::HOST_CLOSE => typed!(DocInstanceCloseParams, |p| handler.on_doc_close(ctx, p)),
         m::window::HOST_CLOSED => typed!(WindowClosedParams, |p| handler.on_window_closed(ctx, p)),
         m::window::HOST_HIDDEN => typed!(WindowIdParams, |p| handler.on_window_hidden(ctx, p)),
         m::frame::HOST_INPUT => typed!(FrameInputParams, |p| handler.on_frame_input(ctx, p)),

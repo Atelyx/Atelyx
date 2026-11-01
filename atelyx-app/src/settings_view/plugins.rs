@@ -19,7 +19,7 @@ use atelyx_core::plugin_runtime::{
     DialogKind, DialogRequest, FileChangeKind, HistoryActivityResult, HistoryDayParams,
     HistoryOpenParams, HostRequest, ImageInfoResult, InstallOutcome, MeasureBatchParams,
     MeasureBatchResult, NotificationLevel, Permission, PluginEvent, PluginRuntime, PluginStatus,
-    NoteAwarenessParams, NoteEditParams, NoteOpenParams, NoteRenameParams, NoteSaveParams,
+    DocAwarenessParams, DocEditParams, DocOpenParams, DocRenameParams, DocSaveParams,
     PluginSummary, SetTrayItemsParams, VaultTagsResult, MAX_VAULT_BINARY_BYTES, PLATFORM_PLUGIN,
 };
 use atelyx_core::space_client::SpaceError;
@@ -275,28 +275,28 @@ pub enum PluginsMsg {
     EditorOpenFile { request_id: u64, path: String },
     /// 全局编辑偏好（软换行 / 页面内标题 / 正文宽度）。
     EditorPrefs { request_id: u64 },
-    /// 打开笔记：宿主读盘并建立会话，回执 = 正文与可写性。
-    NoteOpen { request_id: u64, params: NoteOpenParams },
-    /// 把当前笔记改名为新的主名（同目录、保留扩展名）。
-    NoteRename { request_id: u64, params: NoteRenameParams },
-    NoteOpenDone {
+    /// 打开文档：宿主读盘并建立会话，回执 = 正文与可写性。
+    DocOpen { request_id: u64, params: DocOpenParams },
+    /// 把当前文档改名为新的主名（同目录、保留扩展名）。
+    DocRename { request_id: u64, params: DocRenameParams },
+    DocOpenDone {
         request_id: u64,
         gen: u64,
         path: String,
         result: Result<String, String>,
         can_write: bool,
     },
-    /// 提交一次笔记编辑（完整正文 + 光标 / 选区）。
-    NoteEdit { request_id: u64, params: NoteEditParams },
-    /// 请求一次笔记保存（回执 = 已受理，结果经 `note:changed`）。
-    NoteSave { request_id: u64, params: NoteSaveParams },
-    /// 关闭当前笔记会话。
-    NoteClose { request_id: u64, path: String },
-    /// 上报本端笔记选区。
-    NoteAwareness { request_id: u64, params: NoteAwarenessParams },
-    /// 当前笔记的反链。
-    NoteBacklinks { request_id: u64, path: String },
-    NoteBacklinksDone { request_id: u64, result: Result<serde_json::Value, String> },
+    /// 提交一次文档编辑（完整正文 + 光标 / 选区）。
+    DocEdit { request_id: u64, params: DocEditParams },
+    /// 请求一次文档保存（回执 = 已受理，结果经 `doc:changed`）。
+    DocSave { request_id: u64, params: DocSaveParams },
+    /// 关闭当前文档会话。
+    DocClose { request_id: u64, path: String },
+    /// 上报本端文档选区。
+    DocAwareness { request_id: u64, params: DocAwarenessParams },
+    /// 当前文档的反链。
+    VaultBacklinks { request_id: u64, path: String },
+    VaultBacklinksDone { request_id: u64, result: Result<serde_json::Value, String> },
     /// 全仓库标签词表。
     VaultTags { request_id: u64 },
     /// 按天聚合的仓库活动（`history.activity`）。
@@ -532,26 +532,26 @@ pub fn host_requests_stream(spec: &RuntimeSpec) -> impl iced::futures::Stream<It
                 HostRequest::EditorPrefs { request_id, .. } => {
                     Message::Plugins(PluginsMsg::EditorPrefs { request_id })
                 }
-                HostRequest::NoteOpen { request_id, params, .. } => {
-                    Message::Plugins(PluginsMsg::NoteOpen { request_id, params })
+                HostRequest::DocOpen { request_id, params, .. } => {
+                    Message::Plugins(PluginsMsg::DocOpen { request_id, params })
                 }
-                HostRequest::NoteRename { request_id, params, .. } => {
-                    Message::Plugins(PluginsMsg::NoteRename { request_id, params })
+                HostRequest::DocRename { request_id, params, .. } => {
+                    Message::Plugins(PluginsMsg::DocRename { request_id, params })
                 }
-                HostRequest::NoteEdit { request_id, params, .. } => {
-                    Message::Plugins(PluginsMsg::NoteEdit { request_id, params })
+                HostRequest::DocEdit { request_id, params, .. } => {
+                    Message::Plugins(PluginsMsg::DocEdit { request_id, params })
                 }
-                HostRequest::NoteSave { request_id, params, .. } => {
-                    Message::Plugins(PluginsMsg::NoteSave { request_id, params })
+                HostRequest::DocSave { request_id, params, .. } => {
+                    Message::Plugins(PluginsMsg::DocSave { request_id, params })
                 }
-                HostRequest::NoteClose { request_id, path, .. } => {
-                    Message::Plugins(PluginsMsg::NoteClose { request_id, path })
+                HostRequest::DocClose { request_id, path, .. } => {
+                    Message::Plugins(PluginsMsg::DocClose { request_id, path })
                 }
-                HostRequest::NoteAwareness { request_id, params, .. } => {
-                    Message::Plugins(PluginsMsg::NoteAwareness { request_id, params })
+                HostRequest::DocAwareness { request_id, params, .. } => {
+                    Message::Plugins(PluginsMsg::DocAwareness { request_id, params })
                 }
-                HostRequest::NoteBacklinks { request_id, path, .. } => {
-                    Message::Plugins(PluginsMsg::NoteBacklinks { request_id, path })
+                HostRequest::VaultBacklinks { request_id, path, .. } => {
+                    Message::Plugins(PluginsMsg::VaultBacklinks { request_id, path })
                 }
                 HostRequest::VaultTags { request_id, .. } => {
                     Message::Plugins(PluginsMsg::VaultTags { request_id })
@@ -1378,31 +1378,31 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
             // 打开走脏拦截：未落盘输入先 flush 再换文件（与文件树单击同一通道）
             app.gate(crate::PendingAfterFlush::OpenFile(rel))
         }
-        PluginsMsg::NoteOpen { request_id, params } => {
-            crate::plugin_note::open(app, request_id, params)
+        PluginsMsg::DocOpen { request_id, params } => {
+            crate::doc_session::open(app, request_id, params)
         }
-        PluginsMsg::NoteRename { request_id, params } => {
-            crate::plugin_note::rename(app, request_id, params)
+        PluginsMsg::DocRename { request_id, params } => {
+            crate::doc_session::rename(app, request_id, params)
         }
-        PluginsMsg::NoteOpenDone { request_id, gen, path, result, can_write } => {
-            crate::plugin_note::open_done(app, request_id, gen, path, result, can_write)
+        PluginsMsg::DocOpenDone { request_id, gen, path, result, can_write } => {
+            crate::doc_session::open_done(app, request_id, gen, path, result, can_write)
         }
-        PluginsMsg::NoteEdit { request_id, params } => {
-            crate::plugin_note::edit(app, request_id, params)
+        PluginsMsg::DocEdit { request_id, params } => {
+            crate::doc_session::edit(app, request_id, params)
         }
-        PluginsMsg::NoteSave { request_id, params } => {
-            crate::plugin_note::save(app, request_id, params)
+        PluginsMsg::DocSave { request_id, params } => {
+            crate::doc_session::save(app, request_id, params)
         }
-        PluginsMsg::NoteClose { request_id, path } => {
-            crate::plugin_note::close(app, request_id, &path)
+        PluginsMsg::DocClose { request_id, path } => {
+            crate::doc_session::close(app, request_id, &path)
         }
-        PluginsMsg::NoteAwareness { request_id, params } => {
-            crate::plugin_note::awareness(app, request_id, params)
+        PluginsMsg::DocAwareness { request_id, params } => {
+            crate::doc_session::awareness(app, request_id, params)
         }
-        PluginsMsg::NoteBacklinks { request_id, path } => {
-            crate::plugin_note::backlinks(app, request_id, path)
+        PluginsMsg::VaultBacklinks { request_id, path } => {
+            vault_backlinks(app, request_id, path)
         }
-        PluginsMsg::NoteBacklinksDone { request_id, result } => {
+        PluginsMsg::VaultBacklinksDone { request_id, result } => {
             resolve_vault(app, request_id, result)
         }
         PluginsMsg::VaultTags { request_id } => {
@@ -1656,6 +1656,74 @@ fn resolve_vault(
 ) -> Task<Message> {
     app.plugins.resolve_shell_call(request_id, result);
     Task::none()
+}
+
+/// 反链扫描：本地按 wiki 索引增量刷新，空间走服务端端点；结果按协议形态回执。
+fn vault_backlinks(app: &App, request_id: u64, path: String) -> Task<Message> {
+    let rel = match plugin_path(Some(&path)) {
+        Ok(rel) => rel,
+        Err(e) => return resolve_vault(app, request_id, Err(e)),
+    };
+    let title = rel.rsplit('/').next().unwrap_or(&rel).trim_end_matches(".md").to_string();
+    let entries = |rows: Vec<(String, String)>| {
+        rows.into_iter()
+            .map(|(path, title)| serde_json::json!({ "path": path, "title": title }))
+            .collect::<Vec<_>>()
+    };
+    match app.repo_kind.clone() {
+        crate::RepoKind::Local => {
+            let state = app.vault.clone();
+            Task::perform(
+                async move {
+                    tokio::task::spawn_blocking(move || {
+                        let (root, exclude, _) = state.session_snapshot()?;
+                        let mut guard = state.wiki.lock().map_err(|e| e.to_string())?;
+                        let index = guard.get_or_insert_with(Default::default);
+                        vault::refresh_wiki_index(&root, &exclude, index)?;
+                        Ok(vault::query_wiki_backlinks(index, &title, &rel))
+                    })
+                    .await
+                    .map_err(|e| e.to_string())?
+                },
+                move |result| {
+                    Message::Plugins(PluginsMsg::VaultBacklinksDone {
+                        request_id,
+                        result: result.map(|rows| {
+                            let rows = rows.into_iter().map(|row| (row.file, row.title)).collect();
+                            serde_json::json!({ "entries": entries(rows) })
+                        }),
+                    })
+                },
+            )
+        }
+        crate::RepoKind::Space(_) => {
+            let Some(session) = crate::space_actions::session_of(app) else {
+                return resolve_vault(
+                    app,
+                    request_id,
+                    Err("协作依赖协作空间：当前不是协作空间".into()),
+                );
+            };
+            let (client, space_id) = (session.client, session.space_id);
+            Task::perform(
+                async move {
+                    client
+                        .backlinks(&space_id, &title, &rel)
+                        .await
+                        .map_err(|e| e.to_string())
+                },
+                move |result| {
+                    Message::Plugins(PluginsMsg::VaultBacklinksDone {
+                        request_id,
+                        result: result.map(|rows| {
+                            let rows = rows.into_iter().map(|row| (row.file, row.title)).collect();
+                            serde_json::json!({ "entries": entries(rows) })
+                        }),
+                    })
+                },
+            )
+        }
+    }
 }
 
 /// 回绝挂起的历史查询（容器切换后旧查询的前提已不存在，不结算会让插件调用永远挂起）。

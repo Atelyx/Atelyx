@@ -34,32 +34,32 @@ pub mod name {
     /// 外部文件拖入窗口（宿主只转发绝对路径，读取由订阅方经 `fs` 自理）。
     /// payload 见 [`FileDropPayload`]；未挂载界面的插件应忽略。
     pub const WINDOW_FILE_DROP: &str = "window:file.drop";
-    /// 当前笔记会话的正文 / 落盘状态变化（协作远端合入、保存成功或失败、属性面板改写）。
-    /// payload 见 [`NoteChangedPayload`]。
-    pub const NOTE_CHANGED: &str = "note:changed";
-    /// 当前笔记的远端协作者光标（进入 / 移动 / 离场都会发；无协作者 = 空清单）。
-    /// payload 见 [`NotePresencePayload`]。
-    pub const NOTE_PRESENCE: &str = "note:presence";
+    /// 当前文档会话的正文 / 落盘状态变化（协作远端合入、保存成功或失败、属性面板改写）。
+    /// payload 见 [`DocChangedPayload`]。
+    pub const DOC_CHANGED: &str = "doc:changed";
+    /// 当前文档的远端协作者光标（进入 / 移动 / 离场都会发；无协作者 = 空清单）。
+    /// payload 见 [`DocPresencePayload`]。
+    pub const DOC_PRESENCE: &str = "doc:presence";
     /// 全局编辑偏好变更（软换行 / 页面内标题 / 正文宽度）。payload 同
     /// `editor.prefs` 的 result（[`crate::method::EditorPrefs`]）。
     pub const EDITOR_PREFS_CHANGED: &str = "editor:prefs.changed";
 }
 
-/// [`name::NOTE_PRESENCE`] 的 payload：当前笔记路径 + 远端协作者光标（不含本端）。
-/// `anchor` / `head` 与 `note.open` 回执的 `text` 同一坐标系（全文字节偏移）；缺省 = 该成员没有光标。
+/// [`name::DOC_PRESENCE`] 的 payload：当前文档路径 + 远端协作者光标（不含本端）。
+/// `anchor` / `head` 与 `doc.open` 回执的 `text` 同一坐标系（全文字节偏移）；缺省 = 该成员没有光标。
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct NotePresencePayload {
+pub struct DocPresencePayload {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub cursors: Vec<NoteRemoteCursor>,
+    pub cursors: Vec<DocRemoteCursor>,
 }
 
 /// 一位远端协作者的光标（`color` 为 `#rrggbb` 或 `#rrggbbaa`）。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct NoteRemoteCursor {
+pub struct DocRemoteCursor {
     pub name: String,
     pub color: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -81,17 +81,17 @@ pub fn is_known(name: &str) -> bool {
             | name::VAULT_FILE_CHANGED
             | name::SPACE_META_CHANGED
             | name::WINDOW_FILE_DROP
-            | name::NOTE_CHANGED
-            | name::NOTE_PRESENCE
+            | name::DOC_CHANGED
+            | name::DOC_PRESENCE
             | name::EDITOR_PREFS_CHANGED
     )
 }
 
-/// [`name::NOTE_CHANGED`] 的 payload：`text` 只在正文被宿主改写时给出（保存成功回填合流结果、
+/// [`name::DOC_CHANGED`] 的 payload：`text` 只在正文被宿主改写时给出（保存成功回填合流结果、
 /// 远端合入、属性面板改写）；`dirty` / `saveError` 反映当前落盘状态。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct NoteChangedPayload {
+pub struct DocChangedPayload {
     pub path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,

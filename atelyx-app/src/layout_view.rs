@@ -1354,7 +1354,7 @@ fn panel_view<'a>(
     let mut right = row![].spacing(4).padding(Padding::ZERO.right(6.0));
     if let Some(t) = active {
         if is_note_view(&t.view) {
-            if let Some(pill) = note_status_pill(app) {
+            if let Some(pill) = doc_status_pill(app) {
                 right = right.push(pill);
             }
         }
@@ -1630,13 +1630,13 @@ fn panel_tab<'a>(
 }
 
 /// 笔记保存状态徽标：错误 = ErrorPill（红调底 + 重试/关闭），未保存 = 圆点徽标。
-fn note_status_pill(app: &App) -> Option<Element<'static, Message>> {
+fn doc_status_pill(app: &App) -> Option<Element<'static, Message>> {
     app.ui.last_note_file.as_ref()?;
-    if app.save_error.is_some() {
+    if app.doc_save_error.is_some() {
         Some(
             container(
                 row![
-                    text(ellipsize(app.save_error.as_deref().unwrap_or("保存失败"), 160.0, 11.0))
+                    text(ellipsize(app.doc_save_error.as_deref().unwrap_or("保存失败"), 160.0, 11.0))
                         .size(pal::fs_micro())
                         .color(pal::DANGER),
                     button(text("重试").size(pal::fs_micro()).color(pal::DANGER))
@@ -1662,7 +1662,7 @@ fn note_status_pill(app: &App) -> Option<Element<'static, Message>> {
             })
             .into(),
         )
-    } else if app.dirty {
+    } else if app.doc_dirty {
         Some(controls::status_pill(controls::PillStatus::Pending, "未保存"))
     } else {
         None

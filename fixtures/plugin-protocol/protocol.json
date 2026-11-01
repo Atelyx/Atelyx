@@ -299,16 +299,16 @@
       }
     },
     {
-      "name": "doc.open params",
-      "type": "DocOpenParams",
+      "name": "host:doc.open params",
+      "type": "DocInstanceOpenParams",
       "value": {
         "path": "docs/board",
         "surfaceId": "doc:1"
       }
     },
     {
-      "name": "doc.close params",
-      "type": "DocCloseParams",
+      "name": "host:doc.close params",
+      "type": "DocInstanceCloseParams",
       "value": {
         "path": "docs/board",
         "surfaceId": "doc:1"

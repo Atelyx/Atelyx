@@ -820,11 +820,11 @@ pub fn enter_space(app: &mut App, session: SpaceSession, from_boot: bool) -> Tas
         app.ui.last_note_file = None;
         app.ui.last_table_file = None;
         app.ui.last_canvas_file = None;
-        // 插件文档实例与笔记会话随容器切换收口：旧的相对路径在新空间指向别的文件
+        // 插件文档实例与文档会话随容器切换收口：旧的相对路径在新空间指向别的文件
         let _ = crate::plugin_actions::close_doc(app);
-        app.plugin_note_active = false;
-        app.plugin_note_selection = None;
-        app.pending_plugin_note_open = None;
+        app.doc_active = false;
+        app.doc_selection = None;
+        app.pending_doc_open = None;
         app.history.clear();
     }
     if from_boot && app.global.auto_restore {
@@ -844,14 +844,14 @@ pub fn enter_space(app: &mut App, session: SpaceSession, from_boot: bool) -> Tas
 /// 进入/离开仓库容器共用的会话态清空（镜像 enter_vault 清单）。
 fn clear_session_state(app: &mut App) {
     app.children.clear();
-    app.note_text.clear();
+    app.doc_text.clear();
     app.note_images.clear();
     app.note_image_sizes.clear();
     app.note_images_inflight.clear();
     app.note_images_failed.clear();
     app.note_image_epoch = app.note_image_epoch.wrapping_add(1);
-    app.dirty = false;
-    app.save_error = None;
+    app.doc_dirty = false;
+    app.doc_save_error = None;
     app.reset_props();
     app.file_count = None;
     app.expand_all = false;
@@ -864,9 +864,9 @@ fn clear_session_state(app: &mut App) {
     app.table_collab = None;
     // 画布在场同理（detach_canvas 已清锁与卡运行态，通道状态一并作废）
     app.canvas_collab = None;
-    app.space_note_flushed = None;
-    app.space_note_save_inflight = false;
-    app.space_note_save_flush_queued = false;
+    app.space_doc_flushed = None;
+    app.space_doc_save_inflight = false;
+    app.space_doc_save_flush_queued = false;
     app.tag_vocab.clear();
     app.note_files.clear();
     app.history.clear();
@@ -967,8 +967,8 @@ pub fn handle(app: &mut App, msg: SpaceMsg) -> Task<Message> {
         SpaceMsg::JoinSpace => join_space(app),
         SpaceMsg::JoinSpaceDone { result } => on_space_joined(app, result),
         SpaceMsg::TreeLoaded { gen, result } => on_tree_loaded(app, gen, result),
-        SpaceMsg::NoteSaved { gen, rel, frozen, reason, result } => {
-            on_note_saved(app, gen, &rel, frozen, reason, result)
+        SpaceMsg::DocSaved { gen, rel, frozen, reason, result } => {
+            on_doc_saved(app, gen, &rel, frozen, reason, result)
         }
         SpaceMsg::TablePatchDone { gen, file, new_file, reason, result, frozen } => {
             on_table_patch_done(app, gen, file, new_file, reason, result, frozen)
@@ -1339,7 +1339,7 @@ pub fn space_load_table(app: &App, rel: &str) -> Task<Message> {
     )
 }
 
-/// 空间模式笔记保存：GET 回读合流（他人落盘不丢）→ PUT → 服务端历史。
+/// 空间模式文档保存：GET 回读合流（他人落盘不丢）→ PUT → 服务端历史。
 /// 合流后的最终全文随回执带回；落盘期间的新编辑保持脏、下一轮防抖重写。
 /// 在途互斥：空间保存是 GET→PUT 网络往返且无写队列保序，并发两笔后到先写会回退服务端，
 /// 重叠请求按来源分流——AutoSave/Manual 重挂防抖顺延，Flush 记入待续由回执后串行补发。
@@ -1356,21 +1356,21 @@ pub fn space_submit_save(app: &mut App, reason: SaveReason) -> Task<Message> {
         app.notify(NoticeLevel::Warning, "没有打开的文件");
         return Task::none();
     };
-    if app.space_note_save_inflight {
+    if app.space_doc_save_inflight {
         // 在途回执后串行补发收尾（关窗/切文件的脏拦截依赖它）
         if let SaveReason::Flush = reason {
-            app.space_note_save_flush_queued = true;
+            app.space_doc_save_flush_queued = true;
         }
         // 手动/自动顺延：在途保存的冻结内容已覆盖提交时刻的全文；此后若仍有输入，
         // 编辑链自会排防抖计时器接续，无需在此重挂（避免留下无定时器的死期限）
         return Task::none();
     }
-    app.space_note_save_inflight = true;
+    app.space_doc_save_inflight = true;
     let gen = app.epoch();
-    let content = app.note_text.clone();
+    let content = app.doc_text.clone();
     let content_for_msg = content.clone();
     let rel_for_msg = rel.clone();
-    let base = app.space_note_flushed.clone();
+    let base = app.space_doc_flushed.clone();
     let client = session.client;
     let space_id = session.space_id;
     let author = crate::history_author(app);
@@ -1427,7 +1427,7 @@ pub fn space_submit_save(app: &mut App, reason: SaveReason) -> Task<Message> {
             Ok(merged)
         },
         move |result| {
-            Message::Space(SpaceMsg::NoteSaved {
+            Message::Space(SpaceMsg::DocSaved {
                 gen,
                 rel: rel_for_msg,
                 frozen: content_for_msg,
@@ -1438,7 +1438,7 @@ pub fn space_submit_save(app: &mut App, reason: SaveReason) -> Task<Message> {
     )
 }
 
-fn on_note_saved(
+fn on_doc_saved(
     app: &mut App,
     gen: u64,
     rel: &str,
@@ -1447,8 +1447,8 @@ fn on_note_saved(
     result: Result<String, String>,
 ) -> Task<Message> {
     // 回执即清在途标志（无论回执归属）：过期回执不会再有第二笔，不清会永久阻塞后续保存
-    app.space_note_save_inflight = false;
-    let queued = std::mem::take(&mut app.space_note_save_flush_queued);
+    app.space_doc_save_inflight = false;
+    let queued = std::mem::take(&mut app.space_doc_save_flush_queued);
     // 世代 + 文件身份双守卫：保存期间切换文件后，旧文件回执不得回填新文件的编辑面与合流基线
     // （世代过期作废；文件身份不符仍要广播已落盘事件，切换文件不改变服务端已写入的事实）
     if gen != app.epoch() {
@@ -1464,8 +1464,8 @@ fn on_note_saved(
     match result {
         Err(e) => {
             app.settle_history_restore(false);
-            app.save_error = Some(e.clone());
-            crate::plugin_note::publish_state(app, None);
+            app.doc_save_error = Some(e.clone());
+            crate::doc_session::publish_state(app, None);
             if matches!(reason, SaveReason::Flush) {
                 app.notify(NoticeLevel::Error, format!("保存失败，操作未执行：{e}"));
             } else {
@@ -1473,16 +1473,16 @@ fn on_note_saved(
             }
         }
         Ok(merged) => {
-            app.save_error = None;
-            app.space_note_flushed = Some(merged.clone());
+            app.doc_save_error = None;
+            app.space_doc_flushed = Some(merged.clone());
             // 协作基线祖先推进（CRDT 三方合并的 base）
-            collab_note_flushed(app, &merged);
-            // 合流结果与本屏不同时的回填按差异来源分派：保存期间的新输入（note_text ⊃ frozen）
+            collab_doc_flushed(app, &merged);
+            // 合流结果与本屏不同时的回填按差异来源分派：保存期间的新输入（doc_text ⊃ frozen）
             // 不得被回退——以发起时冻结内容为共同祖先重基，本端在途输入为 ours（冲突时保留：
             // 输入晚于落盘合流，被旧结论覆盖即丢失键击）
-            if app.note_text != merged {
-                let rebased = if app.note_text != frozen {
-                    atelyx_core::merge3::merge3(&frozen, &app.note_text, &merged, atelyx_core::merge3::ConflictSide::Ours)
+            if app.doc_text != merged {
+                let rebased = if app.doc_text != frozen {
+                    atelyx_core::merge3::merge3(&frozen, &app.doc_text, &merged, atelyx_core::merge3::ConflictSide::Ours)
                 } else {
                     merged.clone()
                 };
@@ -1490,20 +1490,20 @@ fn on_note_saved(
             }
             // 合流结果回喂 CRDT 文档（REMOTE_ORIGIN 静默对齐不广播）：否则下次本地编辑的
             // 差分以旧文档为基准，会把对端已落盘内容当本端新增广播，对端文档出现重复文本
-            if app.note_collab_file.as_deref() == Some(rel) {
-                let aligned = app.note_text.clone();
-                if let Some(nc) = app.note_collab.as_mut() {
+            if app.doc_collab_file.as_deref() == Some(rel) {
+                let aligned = app.doc_text.clone();
+                if let Some(nc) = app.doc_collab.as_mut() {
                     nc.align_silent(&aligned);
                 }
             }
-            let stable = app.note_text == merged;
+            let stable = app.doc_text == merged;
             if stable {
                 app.settle_history_restore(true);
             }
             match reason {
                 SaveReason::Flush => {
                     if stable {
-                        app.dirty = false;
+                        app.doc_dirty = false;
                         task = task.chain(app.after_any_flush());
                     } else {
                         task = task.chain(space_submit_save(app, SaveReason::Flush));
@@ -1511,7 +1511,7 @@ fn on_note_saved(
                 }
                 SaveReason::Manual => {
                     if stable {
-                        app.dirty = false;
+                        app.doc_dirty = false;
                         app.notify(NoticeLevel::Success, "已保存");
                     } else {
                         app.notify(NoticeLevel::Info, "保存完成，期间有新修改");
@@ -1519,13 +1519,13 @@ fn on_note_saved(
                 }
                 SaveReason::AutoSave => {
                     if stable {
-                        app.dirty = false;
+                        app.doc_dirty = false;
                     }
                 }
             }
             // 回执后仍有未落盘的新输入且无在排计时器（在途期间到命的自动保存已被互斥顺延）：
             // 补排一次，防停笔后内容滞留脏态
-            if app.dirty && app.autosave_deadline.is_none() {
+            if app.doc_dirty && app.autosave_deadline.is_none() {
                 app.autosave_deadline = Some(Instant::now() + crate::AUTOSAVE_DEBOUNCE);
                 task = task.chain(Task::perform(
                     async move { tokio::time::sleep(crate::AUTOSAVE_DEBOUNCE).await },
@@ -1533,7 +1533,7 @@ fn on_note_saved(
                 ));
             }
             // 在途保存期间到来的 Flush（关窗/切文件拦截）：串行补发一笔收尾
-            crate::plugin_note::publish_state(app, None);
+            crate::doc_session::publish_state(app, None);
             if queued {
                 return task.chain(space_submit_save(app, SaveReason::Flush));
             }
@@ -1546,12 +1546,12 @@ fn on_note_saved(
 /// 远端文本落地（服务端合流回填 / 协作远端合入共用）：正文替换、不置脏，
 /// 插件面自行重排；远端偏移与旧选区不再对应，由插件应用新正文后重新上报。
 pub fn apply_remote_text(app: &mut App, new_text: String) {
-    app.note_text = new_text.clone();
+    app.doc_text = new_text.clone();
     app.refresh_props();
-    if app.plugin_note_active {
-        app.plugin_note_selection = None;
+    if app.doc_active {
+        app.doc_selection = None;
     }
-    crate::plugin_note::publish_state(app, Some(new_text));
+    crate::doc_session::publish_state(app, Some(new_text));
 }
 
 // ===== 表格保存（空间模式）=====
@@ -2303,8 +2303,8 @@ fn record_space_history(app: &App, kind: &str, rel: String, content: String, act
     )
 }
 
-/// 笔记回滚记录（空间模式）。
-pub fn space_record_note_restore(app: &App, rel: String, content: String) -> Task<Message> {
+/// 文档回滚记录（空间模式）。
+pub fn space_record_doc_restore(app: &App, rel: String, content: String) -> Task<Message> {
     record_space_history(app, "note", rel, content, "restore")
 }
 
@@ -2738,27 +2738,27 @@ pub fn space_move_entry(app: &mut App, from: &str, to_dir: &str) -> Task<Message
 
 /// 挂断当前帧泵（空间切换 / 离开时）：先发协作离场帧与 bye（防心跳窗口幽灵在线），再丢弃命令入口。
 fn teardown_pump(app: &mut App) {
-    // 笔记离场帧（对端即时移除本端光标）先于 Bye 上行
+    // 文档离场帧（对端即时移除本端光标）先于 Bye 上行
     if let Some(cmds) = &app.space_cmds {
         let now = std::time::Instant::now();
         if let Some(payload) = app
-            .note_collab_channel
+            .doc_presence
             .as_mut()
             .and_then(|channel| channel.leave(now))
         {
             let _ = cmds.send(atelyx_core::collab::SpaceCmd::Ephemeral {
-                channel: crate::note_collab_channel::CHANNEL.to_string(),
+                channel: crate::doc_presence::CHANNEL.to_string(),
                 payload,
                 target_peer_id: None,
             });
         }
     }
-    if let Some(nc) = app.note_collab.as_mut() {
+    if let Some(nc) = app.doc_collab.as_mut() {
         nc.close();
     }
-    app.note_collab = None;
-    app.note_collab_file = None;
-    app.note_collab_channel = None;
+    app.doc_collab = None;
+    app.doc_collab_file = None;
+    app.doc_presence = None;
     if let Some(cmds) = app.space_cmds.take() {
         let _ = cmds.send(atelyx_core::collab::SpaceCmd::Bye);
     }
@@ -2768,24 +2768,24 @@ fn teardown_pump(app: &mut App) {
     app.remote_cursors.clear();
 }
 
-/// 摘除当前笔记的协作绑定（关闭笔记 / 删除打开中笔记）：先广播离场帧（对端即时
+/// 摘除当前文档的协作绑定（关闭文档 / 删除打开中文档）：先广播离场帧（对端即时
 /// 移除本端光标）再清绑定，presence 随之回收（否则名册滞留「正在编辑已关闭的文件」，
 /// 且压住后续表格打开的在场上报）。
-pub fn collab_unbind_note(app: &mut App) {
+pub fn collab_unbind_doc(app: &mut App) {
     let now = std::time::Instant::now();
     if let Some(payload) = app
-        .note_collab_channel
+        .doc_presence
         .as_mut()
         .and_then(|channel| channel.leave(now))
     {
-        send_note_presence(app, payload);
+        send_doc_presence(app, payload);
     }
-    app.note_collab_channel = None;
-    if let Some(nc) = app.note_collab.as_mut() {
+    app.doc_presence = None;
+    if let Some(nc) = app.doc_collab.as_mut() {
         nc.close();
     }
-    app.note_collab = None;
-    app.note_collab_file = None;
+    app.doc_collab = None;
+    app.doc_collab_file = None;
     app.remote_cursors.clear();
     send_presence(app);
 }
@@ -2821,7 +2821,7 @@ pub(crate) fn send_plugin_message(
 }
 
 /// note-sync 通道帧批量上行（帧 = 完整通道载荷，由 note_collab 产出）。
-fn send_note_frames(app: &App, file: &str, frames: Vec<Vec<u8>>) {
+fn send_doc_frames(app: &App, file: &str, frames: Vec<Vec<u8>>) {
     if frames.is_empty() {
         return;
     }
@@ -2835,88 +2835,88 @@ fn send_note_frames(app: &App, file: &str, frames: Vec<Vec<u8>>) {
     }
 }
 
-/// 笔记在场帧上行（编辑选区随行、保活补发与离场共用出口）。
-pub(crate) fn send_note_presence(app: &App, payload: serde_json::Value) {
+/// 文档在场帧上行（编辑选区随行、保活补发与离场共用出口）。
+pub(crate) fn send_doc_presence(app: &App, payload: serde_json::Value) {
     send_cmd(
         app,
         atelyx_core::collab::SpaceCmd::Ephemeral {
-            channel: crate::note_collab_channel::CHANNEL.to_string(),
+            channel: crate::doc_presence::CHANNEL.to_string(),
             payload,
             target_peer_id: None,
         },
     );
 }
 
-/// 笔记在场同步：进入 / 换文件 / 选区变化都从这里收口（事件与 tick 共用，幂等）。
-fn sync_note_presence(app: &mut App, file: &str) {
+/// 文档在场同步：进入 / 换文件 / 选区变化都从这里收口（事件与 tick 共用，幂等）。
+fn sync_doc_presence(app: &mut App, file: &str) {
     let (name, color) = local_identity(app);
-    let identity = crate::note_collab_channel::Identity { name: &name, color: &color };
+    let identity = crate::doc_presence::Identity { name: &name, color: &color };
     let selection = local_selection(app);
     let now = Instant::now();
     let channel = app
-        .note_collab_channel
-        .get_or_insert_with(crate::note_collab_channel::NoteCollabChannel::new);
+        .doc_presence
+        .get_or_insert_with(crate::doc_presence::DocPresenceChannel::new);
     if let Some(payload) = channel.update(now, &identity, file, selection) {
-        send_note_presence(app, payload);
+        send_doc_presence(app, payload);
     }
 }
 
 /// 强制重发本端在场身份（重连 / 文档重建后对端旧条目将在 30s 过期）。
-pub(crate) fn resend_note_presence(app: &mut App) {
+pub(crate) fn resend_doc_presence(app: &mut App) {
     let now = Instant::now();
     let Some(payload) = app
-        .note_collab_channel
+        .doc_presence
         .as_mut()
         .and_then(|channel| channel.resend(now))
     else {
         return;
     };
-    send_note_presence(app, payload);
+    send_doc_presence(app, payload);
 }
 
 /// 重建后作废本端选区并重发身份：合并全文的 UTF-16 偏移与旧选区不匹配，
 /// 新选区由后续光标事件上报（对端在本端停编期间只看到身份，不看到失效光标）。
-fn reset_note_selection(app: &mut App, file: &str) {
+fn reset_doc_selection(app: &mut App, file: &str) {
     let (name, color) = local_identity(app);
-    let identity = crate::note_collab_channel::Identity { name: &name, color: &color };
+    let identity = crate::doc_presence::Identity { name: &name, color: &color };
     let now = Instant::now();
-    let Some(channel) = app.note_collab_channel.as_mut() else { return };
+    let Some(channel) = app.doc_presence.as_mut() else { return };
     if channel.file() != Some(file) {
         return;
     }
     channel.update(now, &identity, file, None);
     if let Some(payload) = channel.resend(now) {
-        send_note_presence(app, payload);
+        send_doc_presence(app, payload);
     }
 }
 
 /// 在场保活（UiTick 搭载，通道内 15s 限频）：空闲端身份帧否则被对端 30s 超时剔除。
-pub(crate) fn note_presence_keepalive(app: &mut App) {
+pub(crate) fn doc_presence_keepalive(app: &mut App) {
     let now = Instant::now();
     let Some(payload) = app
-        .note_collab_channel
+        .doc_presence
         .as_mut()
         .and_then(|channel| channel.keepalive_if_due(now))
     else {
         return;
     };
-    send_note_presence(app, payload);
+    send_doc_presence(app, payload);
 }
 
 /// 限频压下的选区变化补发（UiTick 搭载）：拖选收尾后对端仍须拿到最终选区。
-pub(crate) fn note_presence_flush(app: &mut App) {
+pub(crate) fn doc_presence_flush(app: &mut App) {
     let now = Instant::now();
     let Some(payload) = app
-        .note_collab_channel
+        .doc_presence
         .as_mut()
         .and_then(|channel| channel.flush(now))
     else {
         return;
     };
-    send_note_presence(app, payload);
+    send_doc_presence(app, payload);
 }
 
-/// 当前打开文件路径集合（笔记 + 表格 + 画布平级，≤3；presence、协作房间视图与删除命中判定共用）。
+/// 当前打开文件路径集合（文档 + 表格 + 画布平级，≤3；presence、协作房间视图与删除命中判定共用）。
 pub(crate) fn open_file_paths(app: &App) -> Vec<String> {
     let mut files = Vec::new();
     if let Some(f) = &app.ui.last_note_file {
@@ -2932,7 +2932,7 @@ pub(crate) fn open_file_paths(app: &App) -> Vec<String> {
     files
 }
 
-/// 当前打开文件集合的 presence 上行形态（笔记 / 表格 / 画布平级；多窗口共用同一份打开态）。
+/// 当前打开文件集合的 presence 上行形态（文档 / 表格 / 画布平级；多窗口共用同一份打开态）。
 fn presence_open_files(app: &App) -> Vec<serde_json::Value> {
     open_file_paths(app)
         .into_iter()
@@ -2985,7 +2985,7 @@ pub(crate) fn peer_open_files(presence: Option<&serde_json::Value>) -> Vec<Strin
         .unwrap_or_default()
 }
 
-/// 本端协作身份（昵称 + 成员色）：笔记在场与表格在场共用同一份身份。
+/// 本端协作身份（昵称 + 成员色）：文档在场与表格在场共用同一份身份。
 fn local_identity(app: &App) -> (String, String) {
     let name = app
         .global
@@ -3014,25 +3014,25 @@ fn selection_units(text: &str, anchor: usize, head: usize) -> Option<(u32, u32)>
     Some((unit(anchor)?, unit(head)?))
 }
 
-/// 本端选区（上行口径：全文 UTF-16，anchor = 锚点、head = 光标）。插件笔记面报选区；
-/// 无插件笔记会话时无光标。
+/// 本端选区（上行口径：全文 UTF-16，anchor = 锚点、head = 光标）。插件文档面报选区；
+/// 无插件文档会话时无光标。
 fn local_selection(app: &App) -> Option<(u32, u32)> {
-    if !app.plugin_note_active {
+    if !app.doc_active {
         return None;
     }
-    let text = app.note_text.as_str();
-    app.plugin_note_selection
+    let text = app.doc_text.as_str();
+    app.doc_selection
         .and_then(|(anchor, head)| selection_units(text, anchor, head))
 }
 
 /// 选区 / 光标变化上行（不涉内容）：点选、拖选、方向键移动都要让对端可见，
 /// 内容变化路径（`collab_after_edit`）另走差分与 Update 帧。限频与补发在通道层。
 pub fn collab_after_caret(app: &mut App) {
-    if !matches!(app.repo_kind, crate::RepoKind::Space(_)) || app.note_collab_file.is_none() {
+    if !matches!(app.repo_kind, crate::RepoKind::Space(_)) || app.doc_collab_file.is_none() {
         return;
     }
-    let Some(rel) = app.note_collab_file.clone() else { return };
-    sync_note_presence(app, &rel);
+    let Some(rel) = app.doc_collab_file.clone() else { return };
+    sync_doc_presence(app, &rel);
 }
 
 /// 表格在场同步：进入 / 切换 / 关闭与选区变化都从这里收口（事件与 tick 共用，幂等）。
@@ -3086,7 +3086,7 @@ pub(crate) fn table_collab_sync(app: &mut App) {
 
 /// 断链 / 被拒：清两端在场远端条目（本端状态保留，重连后由各通道强制重发）。
 fn clear_remote_presence(app: &mut App) {
-    if let Some(channel) = app.note_collab_channel.as_mut() {
+    if let Some(channel) = app.doc_presence.as_mut() {
         channel.clear_remotes();
     }
     if let Some(collab) = app.table_collab.as_mut() {
@@ -3379,34 +3379,34 @@ fn on_remote_canvas_patch(
     crate::canvas_actions::load_refs(app, ref_paths)
 }
 
-/// 笔记正文载入成功后绑定协作文档：换文件建新基线并通告，同文件重发基线通告与握手。
+/// 文档正文载入成功后绑定协作文档：换文件建新基线并通告，同文件重发基线通告与握手。
 /// 建文档必须先有正文——以未载入的空正文建基线会让对端采纳空文本。
-pub fn collab_note_loaded(app: &mut App, rel: &str) {
-    if app.note_collab_file.as_deref() == Some(rel) && app.note_collab.is_some() {
-        collab_note_resume(app);
+pub fn collab_doc_loaded(app: &mut App, rel: &str) {
+    if app.doc_collab_file.as_deref() == Some(rel) && app.doc_collab.is_some() {
+        collab_doc_resume(app);
         send_presence(app);
         return;
     }
     let author = collab_author();
-    let text = app.note_text.clone();
+    let text = app.doc_text.clone();
     let outcome = {
         let nc = app
-            .note_collab
+            .doc_collab
             .get_or_insert_with(|| atelyx_core::note_collab::NoteCollab::new(author));
         nc.open(rel, &text)
     };
-    app.note_collab_file = Some(rel.to_owned());
+    app.doc_collab_file = Some(rel.to_owned());
     let frames = vec![outcome.baseline_frame, outcome.sync_step1];
-    send_note_frames(app, rel, frames);
+    send_doc_frames(app, rel, frames);
     // 在场身份：换文件时 state.file 变化即生效，对端按 file 过滤自然不画旧文件光标
-    sync_note_presence(app, rel);
+    sync_doc_presence(app, rel);
     send_presence(app);
 }
 
 /// 连接就绪 / 重连：已有文档才重发基线与握手（没有文档 = 正文尚未载入，由载入回执建文档）。
-fn collab_note_resume(app: &mut App) {
-    let Some(rel) = app.note_collab_file.clone() else { return };
-    let Some(nc) = app.note_collab.as_mut() else { return };
+fn collab_doc_resume(app: &mut App) {
+    let Some(rel) = app.doc_collab_file.clone() else { return };
+    let Some(nc) = app.doc_collab.as_mut() else { return };
     let mut frames = Vec::new();
     if let Some(frame) = nc.baseline_frame() {
         frames.push(frame);
@@ -3414,8 +3414,8 @@ fn collab_note_resume(app: &mut App) {
     if let Some(step1) = nc.sync_step1() {
         frames.push(step1);
     }
-    send_note_frames(app, &rel, frames);
-    resend_note_presence(app);
+    send_doc_frames(app, &rel, frames);
+    resend_doc_presence(app);
 }
 
 fn collab_author() -> String {
@@ -3430,16 +3430,16 @@ fn collab_author() -> String {
 /// 本地编辑推进协作文档：差分基于文档真值（core 侧以文档当前文本求差，保存合流造成的
 /// 文档落后会被自动补齐）→ Update 帧上行；在场选区随行。
 pub fn collab_after_edit(app: &mut App) {
-    if !matches!(app.repo_kind, crate::RepoKind::Space(_)) || app.note_collab_file.is_none() {
+    if !matches!(app.repo_kind, crate::RepoKind::Space(_)) || app.doc_collab_file.is_none() {
         return;
     }
-    let rel = match app.note_collab_file.clone() {
+    let rel = match app.doc_collab_file.clone() {
         Some(f) => f,
         None => return,
     };
-    let new = app.note_text.clone();
+    let new = app.doc_text.clone();
     let mut update_frame = None;
-    if let Some(nc) = app.note_collab.as_mut() {
+    if let Some(nc) = app.doc_collab.as_mut() {
         let inner = nc.local_edit(&new);
         if let Some(inner) = inner {
             if let Some(tag) = nc.tag().cloned() {
@@ -3448,25 +3448,25 @@ pub fn collab_after_edit(app: &mut App) {
         }
     }
     if let Some(frame) = update_frame {
-        send_note_frames(app, &rel, vec![frame]);
+        send_doc_frames(app, &rel, vec![frame]);
     }
-    sync_note_presence(app, &rel);
+    sync_doc_presence(app, &rel);
 }
 
 /// 保存落地后推进协作基线祖先（空间模式三方合流的 base）。
-pub fn collab_note_flushed(app: &mut App, flushed: &str) {
-    let Some(rel) = app.note_collab_file.clone() else { return };
-    if let Some(nc) = app.note_collab.as_mut() {
+pub fn collab_doc_flushed(app: &mut App, flushed: &str) {
+    let Some(rel) = app.doc_collab_file.clone() else { return };
+    if let Some(nc) = app.doc_collab.as_mut() {
         nc.mark_disk_write(&rel, flushed);
     }
 }
 
-/// 远端在场状态 → 远端光标视图（UTF-16 → note_text 字节偏移），随后广播 `note:presence`。
+/// 远端在场状态 → 远端光标视图（UTF-16 → doc_text 字节偏移），随后广播 `doc:presence`。
 /// 事件驱动与周期 tick（过期剔除节流）共用。
 pub(crate) fn refresh_remote_cursors(app: &mut App) {
     let now = std::time::Instant::now();
-    let text = app.note_text.clone();
-    let Some(channel) = app.note_collab_channel.as_mut() else {
+    let text = app.doc_text.clone();
+    let Some(channel) = app.doc_presence.as_mut() else {
         app.remote_cursors.clear();
         return;
     };
@@ -3484,7 +3484,7 @@ pub(crate) fn refresh_remote_cursors(app: &mut App) {
             }
         })
         .collect();
-    crate::plugin_note::publish_presence(app);
+    crate::doc_session::publish_presence(app);
 }
 
 /// 插件通道消息转投（可靠档与瞬时档同形）：通道前缀由发送方宿主加，
@@ -3517,7 +3517,7 @@ fn on_space_event(app: &mut App, event: atelyx_core::collab::SpaceEvent) -> Task
             app.space_own_peer_id = Some(peer_id);
             app.space_connected = true;
             app.notify(NoticeLevel::Success, "协作已连接");
-            collab_note_resume(app);
+            collab_doc_resume(app);
             send_presence(app);
             // 重连后表格身份帧与当前选区重发（对端旧条目将在超时后过期）
             let now = std::time::Instant::now();
@@ -3546,7 +3546,7 @@ fn on_space_event(app: &mut App, event: atelyx_core::collab::SpaceEvent) -> Task
                 .filter(|p| Some(p.peer_id.as_str()) != app.space_own_peer_id.as_deref())
                 .collect();
             let mut dropped = false;
-            if let Some(channel) = app.note_collab_channel.as_mut() {
+            if let Some(channel) = app.doc_presence.as_mut() {
                 for peer in &gone {
                     dropped |= channel.drop_peer(peer);
                 }
@@ -3573,7 +3573,7 @@ fn on_space_event(app: &mut App, event: atelyx_core::collab::SpaceEvent) -> Task
             Task::none()
         }
         E::NoteSync { peer_id, file, payload } => {
-            collab_remote_note(app, &peer_id, &file, &payload);
+            collab_remote_doc(app, &peer_id, &file, &payload);
             Task::none()
         }
         E::TablePatch { peer_id, file, patch, landed } => {
@@ -3595,9 +3595,9 @@ fn on_space_event(app: &mut App, event: atelyx_core::collab::SpaceEvent) -> Task
         }
         E::FsChanged => on_fs_changed(app),
         E::Resync => {
-            if let (Some(nc), Some(file)) = (app.note_collab.as_mut(), app.note_collab_file.clone()) {
+            if let (Some(nc), Some(file)) = (app.doc_collab.as_mut(), app.doc_collab_file.clone()) {
                 if let Some(step1) = nc.sync_step1() {
-                    send_note_frames(app, &file, vec![step1]);
+                    send_doc_frames(app, &file, vec![step1]);
                 }
             }
             Task::none()
@@ -3616,9 +3616,9 @@ fn on_space_event(app: &mut App, event: atelyx_core::collab::SpaceEvent) -> Task
                 if let Some(collab) = app.canvas_collab.as_mut() {
                     collab.apply(&peer_id, &payload, now);
                 }
-            } else if channel == crate::note_collab_channel::CHANNEL {
+            } else if channel == crate::doc_presence::CHANNEL {
                 let changed = app
-                    .note_collab_channel
+                    .doc_presence
                     .as_mut()
                     .is_some_and(|c| c.apply(&peer_id, &payload, now));
                 if changed {
@@ -3657,16 +3657,16 @@ fn on_space_event(app: &mut App, event: atelyx_core::collab::SpaceEvent) -> Task
 }
 
 /// 远端 note-sync 帧合入：协议应答上行、文档变化回填正文并通知插件、换路跟随。
-fn collab_remote_note(app: &mut App, peer_id: &str, file: &str, payload: &[u8]) {
-    if app.note_collab_file.as_deref() != Some(file) {
+fn collab_remote_doc(app: &mut App, peer_id: &str, file: &str, payload: &[u8]) {
+    if app.doc_collab_file.as_deref() != Some(file) {
         return;
     }
-    let Some(nc) = app.note_collab.as_mut() else { return };
+    let Some(nc) = app.doc_collab.as_mut() else { return };
     let out = nc.apply_remote(peer_id, file, payload);
-    send_note_frames(app, file, out.reply);
+    send_doc_frames(app, file, out.reply);
     // 文档被重建：选区偏移已失效，先作废再重发身份（对端不画失效光标）
     if out.rebuilt {
-        reset_note_selection(app, file);
+        reset_doc_selection(app, file);
     }
     if out.doc_changed {
         if let Some(text) = out.text {
@@ -3821,22 +3821,22 @@ pub fn collab_follow_rename(app: &mut App, old: &str, new: &str) {
                 .map(|rest| format!("{new}/{rest}"))
         }
     };
-    if let Some(next) = app.note_collab_file.clone().and_then(|p| map(&p)) {
-        app.note_collab_file = Some(next);
+    if let Some(next) = app.doc_collab_file.clone().and_then(|p| map(&p)) {
+        app.doc_collab_file = Some(next);
     }
-    if let Some(nc) = app.note_collab.as_mut() {
+    if let Some(nc) = app.doc_collab.as_mut() {
         nc.relocate(old, new);
     }
     // 在场通道的挂靠文件随之改写：否则保活重发旧路径，本端从对端视图消失
     let (name, color) = local_identity(app);
-    let identity = crate::note_collab_channel::Identity { name: &name, color: &color };
+    let identity = crate::doc_presence::Identity { name: &name, color: &color };
     let now = std::time::Instant::now();
     if let Some(payload) = app
-        .note_collab_channel
+        .doc_presence
         .as_mut()
         .and_then(|channel| channel.relocate(now, &identity, old, new))
     {
-        send_note_presence(app, payload);
+        send_doc_presence(app, payload);
     }
 }
 

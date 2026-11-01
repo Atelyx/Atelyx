@@ -383,7 +383,7 @@ pub mod error {
 pub const BUILTIN_SERVICES: &[(&str, &str, &[&str])] = &[
     ("fs", PLATFORM_PLUGIN, &[fs::PRIVATE_DIR, fs::READ_TEXT, fs::WRITE_TEXT, fs::READ_BINARY, fs::WRITE_BINARY, fs::REMOVE, fs::EXISTS, fs::LIST]),
     ("process", PLATFORM_PLUGIN, &[process::SPAWN, process::WRITE_STDIN, process::CLOSE_STDIN, process::KILL]),
-    ("vault", PLATFORM_PLUGIN, &[vault::READ_TEXT, vault::WRITE_TEXT, vault::READ_BINARY, vault::WRITE_BINARY, vault::IMPORT_FILE, vault::IMAGE_INFO, vault::LIST, vault::EXISTS, vault::TAGS, vault::REMOVE, vault::RENAME]),
+    ("vault", PLATFORM_PLUGIN, &[vault::READ_TEXT, vault::WRITE_TEXT, vault::READ_BINARY, vault::WRITE_BINARY, vault::IMPORT_FILE, vault::IMAGE_INFO, vault::LIST, vault::EXISTS, vault::TAGS, vault::REMOVE, vault::RENAME, vault::BACKLINKS]),
     ("collab", PLATFORM_PLUGIN, &[collab::PEERS, collab::SEND, collab::META_GET, collab::META_PATCH]),
     ("table", "atelyx.tables", &[table::SNAPSHOT, table::UPDATE_CELL, table::ADD_ROW, table::REMOVE_ROW, table::SELECT_ROW, table::SET_CELL_IMAGE]),
     ("state", PLATFORM_PLUGIN, &[state::READ, state::WRITE]),
@@ -400,10 +400,10 @@ pub const BUILTIN_SERVICES: &[(&str, &str, &[&str])] = &[
     ("ai", PLATFORM_PLUGIN, &[ai::CHAT_SEND, ai::CHAT_STOP, ai::CHAT_HISTORY, ai::MODELS, ai::AGENTS, ai::CHAT_RENAME, ai::CHAT_DELETE, ai::CHAT_COMPACT, ai::CHAT_TITLE, ai::TOOL_LIST, ai::TOOL_EXECUTE, ai::CHAT_EMIT]),
     ("window", PLATFORM_PLUGIN, &[window::OPEN, window::CLOSE, window::UPDATE, window::SHOW, window::BEGIN_DRAG, window::MINIMIZE, window::TOGGLE_MAXIMIZE]),
     ("query", PLATFORM_PLUGIN, &[query::MEASURE, query::THEME]),
-    // 编辑器选区读写作用于宿主自持的笔记会话，随平台常驻
+    // 编辑器选区读写作用于宿主自持的当前文档会话，随平台常驻
     ("editor", PLATFORM_PLUGIN, &[editor::SELECTION, editor::REPLACE_SELECTION, editor::OPEN_FILES, editor::OPEN_FILE, editor::PREFS]),
-    // 笔记会话是宿主内容真源（保存链 / 协作增量 / 历史），归平台自身，不随插件停用下线
-    ("note", PLATFORM_PLUGIN, &[note::OPEN, note::EDIT, note::SAVE, note::CLOSE, note::AWARENESS, note::BACKLINKS, note::RENAME]),
+    // 文档会话是宿主内容真源（保存链 / 协作增量 / 历史），归平台自身，不随插件停用下线
+    ("doc", PLATFORM_PLUGIN, &[doc::OPEN, doc::EDIT, doc::SAVE, doc::CLOSE, doc::AWARENESS, doc::RENAME]),
     ("history", "atelyx.history", &[history::ACTIVITY, history::DAY, history::OPEN]),
 ];
 ```
@@ -1723,6 +1723,8 @@ pub mod vault {
     /// 把一个仓库相对路径改名 / 移动到另一路径（文件或文件夹；目标不存在，父目录自动创建）。
     /// 引用同步：`.md` 内部链接与画布文件引用随改；源文件被编辑面打开或被当前画布节点引用时拒绝。
     pub const RENAME: &str = "vault.rename";
+    /// 引用某篇文档的其它文档（反链；按 wiki 链接索引查询）。
+    pub const BACKLINKS: &str = "vault.backlinks";
 }
 ```
 
@@ -1813,6 +1815,20 @@ pub mod http {
 ```rust
 // atelyx-plugin-protocol/src/method.rs
 pub mod doc {
+    /// 打开一个文档会话：宿主读盘、建立会话（本地与协作空间同构），回执即当前正文与可写性。
+    pub const OPEN: &str = "doc.open";
+    /// 提交一次本地编辑（完整正文 + 光标 / 选区，字节偏移）。内容有变化时宿主置脏并接入
+    /// 协作增量；无变化时只更新在场选区。
+    pub const EDIT: &str = "doc.edit";
+    /// 请求一次保存（手动 / 自动）。回执只表示已受理，落盘结果经 `doc:changed` 到达。
+    pub const SAVE: &str = "doc.save";
+    /// 关闭当前文档会话（换文件 / 关标签 / 切仓库）。
+    pub const CLOSE: &str = "doc.close";
+    /// 上报本端光标 / 选区（全文字节偏移；`None` = 无选区）。只对协作空间生效。
+    pub const AWARENESS: &str = "doc.awareness";
+    /// 把当前文档改名为新的主名（同目录、保留扩展名；引用与历史随宿主既有改名链）。
+    /// 有未落盘修改时拒绝，插件须先 `doc.save`。
+    pub const RENAME: &str = "doc.rename";
     /// 用户打开了插件注册的领域文档类型文件（通知）。`surfaceId` 为宿主分配的实例面标识，
     /// 插件据此以 `frame.submitShared` 提交该文档实例的界面。
     pub const HOST_OPEN: &str = "host:doc.open";
@@ -1837,30 +1853,6 @@ pub mod editor {
     /// 读全局编辑偏好（软换行 / 页面内标题 / 正文宽度）；变更时宿主另发
     /// [`crate::event::name::EDITOR_PREFS_CHANGED`]。
     pub const PREFS: &str = "editor.prefs";
-}
-```
-
-```rust
-// atelyx-plugin-protocol/src/method.rs
-/// 笔记文档会话：打开 / 编辑 / 保存 / 在场与反链。正文真源、保存链与协作增量都在宿主，
-/// 插件只持展示与编辑态；写入与宿主自身编辑同一出口。
-pub mod note {
-    /// 打开一篇笔记：宿主读盘、建立会话（本地与协作空间同构），回执即当前正文与可写性。
-    pub const OPEN: &str = "note.open";
-    /// 提交一次本地编辑（完整正文 + 光标 / 选区，字节偏移）。内容有变化时宿主置脏并接入
-    /// 协作增量；无变化时只更新在场选区。
-    pub const EDIT: &str = "note.edit";
-    /// 请求一次保存（手动 / 自动）。回执只表示已受理，落盘结果经 `note:changed` 到达。
-    pub const SAVE: &str = "note.save";
-    /// 关闭当前笔记会话（换文件 / 关标签 / 切仓库）。
-    pub const CLOSE: &str = "note.close";
-    /// 上报本端光标 / 选区（全文字节偏移；`None` = 无选区）。只对协作空间生效。
-    pub const AWARENESS: &str = "note.awareness";
-    /// 引用当前笔记的其它笔记（反链）。
-    pub const BACKLINKS: &str = "note.backlinks";
-    /// 把当前笔记改名为新的主名（同目录、保留扩展名；引用与历史随宿主既有改名链）。
-    /// 有未落盘修改时拒绝，插件须先 `note.save`。
-    pub const RENAME: &str = "note.rename";
 }
 ```
 
@@ -2340,14 +2332,15 @@ pub struct HttpResult {
 }
 ```
 
-## 11. 能力面负载：文档、笔记与对话
+## 11. 能力面负载：文档与对话
 
-领域文档实例、笔记会话、AI 对话与工具桥的负载形态。
+文档实例、文档会话、AI 对话与工具桥的负载形态。
 
 ```rust
 // atelyx-plugin-protocol/src/method.rs
+/// [`doc::HOST_OPEN`] 的 params：文档实例被打开。
 #[serde(rename_all = "camelCase")]
-pub struct DocOpenParams {
+pub struct DocInstanceOpenParams {
     /// 仓库容器内的相对路径（本地仓库）或服务端内容路径（协作空间），与 vault 口径一致。
     pub path: String,
     /// 宿主为本实例分配的面标识：插件据此以 `frame.submitShared` 提交该文档实例的界面。
@@ -2359,7 +2352,7 @@ pub struct DocOpenParams {
 // atelyx-plugin-protocol/src/method.rs
 /// [`doc::HOST_CLOSE`] 的 params：实例随标签关闭 / 换文件被关闭。
 #[serde(rename_all = "camelCase")]
-pub struct DocCloseParams {
+pub struct DocInstanceCloseParams {
     pub surface_id: String,
     pub path: String,
 }
@@ -2412,15 +2405,15 @@ pub struct EditorPrefs {
 
 ```rust
 // atelyx-plugin-protocol/src/method.rs
-/// 单次提交的笔记正文上限（超限按可读错误拒绝）。
-pub const MAX_NOTE_TEXT_BYTES: usize = 8 * 1024 * 1024;
+/// 单次提交的文档正文上限（超限按可读错误拒绝）。
+pub const MAX_DOC_TEXT_BYTES: usize = 8 * 1024 * 1024;
 ```
 
 ```rust
 // atelyx-plugin-protocol/src/method.rs
-/// [`note::OPEN`] 的 params。
+/// [`doc::OPEN`] 的 params。
 #[serde(rename_all = "camelCase")]
-pub struct NoteOpenParams {
+pub struct DocOpenParams {
     /// 仓库相对路径（本地仓库）/ 服务端内容路径（协作空间），与 `vault` 口径一致。
     pub path: String,
 }
@@ -2428,9 +2421,9 @@ pub struct NoteOpenParams {
 
 ```rust
 // atelyx-plugin-protocol/src/method.rs
-/// [`note::OPEN`] 的 result：当前正文与是否可写（viewer 只读）。
+/// [`doc::OPEN`] 的 result：当前正文与是否可写（viewer 只读）。
 #[serde(rename_all = "camelCase")]
-pub struct NoteOpenResult {
+pub struct DocOpenResult {
     pub path: String,
     pub text: String,
     pub can_write: bool,
@@ -2444,10 +2437,10 @@ pub struct NoteOpenResult {
 
 ```rust
 // atelyx-plugin-protocol/src/method.rs
-/// [`note::EDIT`] 的 params：完整正文 + 本端光标与选区锚点（全文字节偏移；
+/// [`doc::EDIT`] 的 params：完整正文 + 本端光标与选区锚点（全文字节偏移；
 /// `anchor` / `head` 缺省 = 无选区）。
 #[serde(rename_all = "camelCase")]
-pub struct NoteEditParams {
+pub struct DocEditParams {
     pub path: String,
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2459,9 +2452,9 @@ pub struct NoteEditParams {
 
 ```rust
 // atelyx-plugin-protocol/src/method.rs
-/// [`note::SAVE`] 的 params：`manual` = 手动保存（成功 / 失败均有提示）；缺省 = 自动保存。
+/// [`doc::SAVE`] 的 params：`manual` = 手动保存（成功 / 失败均有提示）；缺省 = 自动保存。
 #[serde(rename_all = "camelCase")]
-pub struct NoteSaveParams {
+pub struct DocSaveParams {
     pub path: String,
     #[serde(default)]
     pub manual: bool,
@@ -2470,9 +2463,9 @@ pub struct NoteSaveParams {
 
 ```rust
 // atelyx-plugin-protocol/src/method.rs
-/// [`note::AWARENESS`] 的 params：本端选区（全文字节偏移，`None` = 只上报身份）。
+/// [`doc::AWARENESS`] 的 params：本端选区（全文字节偏移，`None` = 只上报身份）。
 #[serde(rename_all = "camelCase")]
-pub struct NoteAwarenessParams {
+pub struct DocAwarenessParams {
     pub path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchor: Option<usize>,
@@ -2483,9 +2476,9 @@ pub struct NoteAwarenessParams {
 
 ```rust
 // atelyx-plugin-protocol/src/method.rs
-/// 一条反链：引用该笔记的文件路径与显示标题。
+/// 一条反链：引用该文档的文件路径与显示标题。
 #[serde(rename_all = "camelCase")]
-pub struct NoteBacklink {
+pub struct BacklinkEntry {
     pub path: String,
     pub title: String,
 }
@@ -2493,18 +2486,18 @@ pub struct NoteBacklink {
 
 ```rust
 // atelyx-plugin-protocol/src/method.rs
-/// [`note::BACKLINKS`] 的 result。
+/// [`vault::BACKLINKS`] 的 result。
 #[serde(rename_all = "camelCase")]
-pub struct NoteBacklinksResult {
-    pub entries: Vec<NoteBacklink>,
+pub struct BacklinksResult {
+    pub entries: Vec<BacklinkEntry>,
 }
 ```
 
 ```rust
 // atelyx-plugin-protocol/src/method.rs
-/// [`note::RENAME`] 的 params：当前路径与新主名（不含扩展名）。
+/// [`doc::RENAME`] 的 params：当前路径与新主名（不含扩展名）。
 #[serde(rename_all = "camelCase")]
-pub struct NoteRenameParams {
+pub struct DocRenameParams {
     pub path: String,
     pub name: String,
 }
@@ -3663,12 +3656,12 @@ pub mod name {
     /// 外部文件拖入窗口（宿主只转发绝对路径，读取由订阅方经 `fs` 自理）。
     /// payload 见 [`FileDropPayload`]；未挂载界面的插件应忽略。
     pub const WINDOW_FILE_DROP: &str = "window:file.drop";
-    /// 当前笔记会话的正文 / 落盘状态变化（协作远端合入、保存成功或失败、属性面板改写）。
-    /// payload 见 [`NoteChangedPayload`]。
-    pub const NOTE_CHANGED: &str = "note:changed";
-    /// 当前笔记的远端协作者光标（进入 / 移动 / 离场都会发；无协作者 = 空清单）。
-    /// payload 见 [`NotePresencePayload`]。
-    pub const NOTE_PRESENCE: &str = "note:presence";
+    /// 当前文档会话的正文 / 落盘状态变化（协作远端合入、保存成功或失败、属性面板改写）。
+    /// payload 见 [`DocChangedPayload`]。
+    pub const DOC_CHANGED: &str = "doc:changed";
+    /// 当前文档的远端协作者光标（进入 / 移动 / 离场都会发；无协作者 = 空清单）。
+    /// payload 见 [`DocPresencePayload`]。
+    pub const DOC_PRESENCE: &str = "doc:presence";
     /// 全局编辑偏好变更（软换行 / 页面内标题 / 正文宽度）。payload 同
     /// `editor.prefs` 的 result（[`crate::method::EditorPrefs`]）。
     pub const EDITOR_PREFS_CHANGED: &str = "editor:prefs.changed";
@@ -3718,10 +3711,10 @@ pub struct TableSelectionChangedPayload {
 
 ```rust
 // atelyx-plugin-protocol/src/event.rs
-/// [`name::NOTE_CHANGED`] 的 payload：`text` 只在正文被宿主改写时给出（保存成功回填合流结果、
+/// [`name::DOC_CHANGED`] 的 payload：`text` 只在正文被宿主改写时给出（保存成功回填合流结果、
 /// 远端合入、属性面板改写）；`dirty` / `saveError` 反映当前落盘状态。
 #[serde(rename_all = "camelCase")]
-pub struct NoteChangedPayload {
+pub struct DocChangedPayload {
     pub path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
@@ -3734,14 +3727,14 @@ pub struct NoteChangedPayload {
 
 ```rust
 // atelyx-plugin-protocol/src/event.rs
-/// [`name::NOTE_PRESENCE`] 的 payload：当前笔记路径 + 远端协作者光标（不含本端）。
-/// `anchor` / `head` 与 `note.open` 回执的 `text` 同一坐标系（全文字节偏移）；缺省 = 该成员没有光标。
+/// [`name::DOC_PRESENCE`] 的 payload：当前文档路径 + 远端协作者光标（不含本端）。
+/// `anchor` / `head` 与 `doc.open` 回执的 `text` 同一坐标系（全文字节偏移）；缺省 = 该成员没有光标。
 #[serde(rename_all = "camelCase")]
-pub struct NotePresencePayload {
+pub struct DocPresencePayload {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub cursors: Vec<NoteRemoteCursor>,
+    pub cursors: Vec<DocRemoteCursor>,
 }
 ```
 
@@ -3749,7 +3742,7 @@ pub struct NotePresencePayload {
 // atelyx-plugin-protocol/src/event.rs
 /// 一位远端协作者的光标（`color` 为 `#rrggbb` 或 `#rrggbbaa`）。
 #[serde(rename_all = "camelCase")]
-pub struct NoteRemoteCursor {
+pub struct DocRemoteCursor {
     pub name: String,
     pub color: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
