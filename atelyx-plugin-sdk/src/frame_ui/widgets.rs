@@ -1830,7 +1830,7 @@ impl<'c, 'a> Ui<'c, 'a> {
         self.ctx().declare_hint(id, text);
     }
 
-    /// 只读 Markdown：解析（领域库）与排版都在控件层，版面按内容与宽度缓存，滚动不重排。
+    /// 只读 Markdown：解析（格式库）与排版都在控件层，版面按内容与宽度缓存，滚动不重排。
     /// 代码块头的「复制」由控件层自持（按下即写剪贴板），插件不必为它接线。
     pub fn markdown(&mut self, content: impl Into<String>) {
         self.markdown_with(content, Vec::new());
@@ -1840,7 +1840,7 @@ impl<'c, 'a> Ui<'c, 'a> {
     pub fn markdown_with(
         &mut self,
         content: impl Into<String>,
-        mentions: Vec<atelyx_markdown::MentionCandidate>,
+        mentions: Vec<atelyx_format::markdown::MentionCandidate>,
     ) {
         let content = content.into();
         let id = self.ctx().next_markdown_id(super::markdown::content_key(&content, &mentions));
@@ -1853,7 +1853,7 @@ impl<'c, 'a> Ui<'c, 'a> {
         &mut self,
         id: impl Into<String>,
         content: impl Into<String>,
-        mentions: Vec<atelyx_markdown::MentionCandidate>,
+        mentions: Vec<atelyx_format::markdown::MentionCandidate>,
     ) {
         self.markdown_item(id.into(), content.into(), mentions, None);
     }
@@ -1865,7 +1865,7 @@ impl<'c, 'a> Ui<'c, 'a> {
         id: impl Into<String>,
         content: impl Into<String>,
         index: usize,
-        mentions: Vec<atelyx_markdown::MentionCandidate>,
+        mentions: Vec<atelyx_format::markdown::MentionCandidate>,
     ) {
         self.markdown_item(id.into(), content.into(), mentions, Some(index));
     }
@@ -1874,7 +1874,7 @@ impl<'c, 'a> Ui<'c, 'a> {
         &mut self,
         id: String,
         content: String,
-        mentions: Vec<atelyx_markdown::MentionCandidate>,
+        mentions: Vec<atelyx_format::markdown::MentionCandidate>,
         list_start: Option<usize>,
     ) {
         let theme = self.ctx().theme.clone();

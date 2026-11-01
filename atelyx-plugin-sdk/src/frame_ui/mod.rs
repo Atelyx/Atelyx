@@ -29,7 +29,7 @@ pub use geom::Rect;
 pub use icons::Icon;
 pub use widgets::{AreaHeight, BoxStyle, BoxWidth, Edges, TextRole, TextStyle};
 /// 引用候选（`#笔记：方案.md` 这类标签）：交给 `Ui::markdown_with` 画成胶囊。
-pub use atelyx_markdown::MentionCandidate;
+pub use atelyx_format::markdown::MentionCandidate;
 
 /// 一次 `render` 内最多补几轮缺项（文字量算 / Markdown 块）：补齐后按最新数据重建。
 const MAX_REBUILD_PASSES: usize = 3;

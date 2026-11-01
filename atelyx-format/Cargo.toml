@@ -1,0 +1,17 @@
+[package]
+name = "atelyx-format"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Atelyx 格式语义库：Markdown 块解析与 frontmatter 定界、宽类型解析、受限序列化（宿主与插件共用一份）"
+license = "Apache-2.0"
+
+[dependencies]
+# 行内语法的模式匹配（强调 / 链接 / 标签的候选定位）；frontmatter 键名与标量形态判定
+regex = "1"
+# Markdown 块与行内规格的序列化（对拍快照、插件侧传输）
+serde = { version = "1", features = ["derive"] }
+# frontmatter 属性值的 JSON 快照形态（属性面板与服务端配置互转）
+serde_json = "1"
+# YAML 解析（事件级 API 供自研 1.1 解析表使用，标量样式可区分引号形态）
+yaml-rust2 = "0.10"

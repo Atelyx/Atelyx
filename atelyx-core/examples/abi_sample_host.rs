@@ -1,4 +1,4 @@
-//! ABI 参考宿主的冒烟：加载 sample dylib，验证服务回调、帧、输入、panic 与卸载。
+//! ABI 参考宿主的冒烟：加载 sample 动态库，验证服务回调、帧、输入、panic 与卸载。
 //! 用 `bash scripts/plugin-abi-sample.sh` 构建并运行（Windows 与 Linux 同一份代码）。
 
 use std::path::PathBuf;
@@ -6,13 +6,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+use atelyx_core::plugin_runtime::abi::{Host, HostCall, PluginLibrary};
+use atelyx_core::plugin_runtime::{DrawCommand, SurfaceFrame};
 use atelyx_plugin_abi as abi;
-use atelyx_plugin_host::{Command, Frame, Host, HostCall, PluginLibrary};
 
 struct Harness {
     seq: Mutex<usize>,
     wait: Condvar,
-    latest: Mutex<Option<Frame>>,
+    latest: Mutex<Option<SurfaceFrame>>,
     logs: Mutex<Vec<String>>,
     redraws: AtomicUsize,
 }
@@ -47,7 +48,7 @@ impl Harness {
         true
     }
 
-    fn snapshot(&self) -> Option<Frame> {
+    fn snapshot(&self) -> Option<SurfaceFrame> {
         self.latest.lock().unwrap().clone()
     }
 
@@ -57,7 +58,7 @@ impl Harness {
 }
 
 impl Host for Harness {
-    fn submit_frame(&self, _surface: &str, frame: Frame) {
+    fn submit_frame(&self, _surface: &str, frame: SurfaceFrame) {
         *self.latest.lock().unwrap() = Some(frame);
         *self.seq.lock().unwrap() += 1;
         self.wait.notify_all();
@@ -91,8 +92,6 @@ impl Host for Harness {
 }
 
 fn sample_plugin_path() -> PathBuf {
-    let exe = std::env::current_exe().expect("current_exe");
-    let dir = exe.parent().expect("exe dir");
     let name = if cfg!(target_os = "windows") {
         "atelyx_plugin_sample.dll"
     } else if cfg!(target_os = "linux") {
@@ -100,7 +99,16 @@ fn sample_plugin_path() -> PathBuf {
     } else {
         "libatelyx_plugin_sample.dylib"
     };
-    dir.join(name)
+    let exe = std::env::current_exe().expect("current_exe");
+    let dir = exe.parent().expect("exe dir");
+    // 示例产物在 `<profile>/examples/` 下，动态库落在 `<profile>/`；直接跑二进制时两者同目录。
+    let profile = dir.parent().unwrap_or(dir);
+    for candidate in [dir.join(name), profile.join(name)] {
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+    profile.join(name)
 }
 
 fn input(kind: u32) -> abi::AbiInput {
@@ -146,9 +154,9 @@ fn text_input(value: &str) -> abi::AbiInput {
     input
 }
 
-fn has_text(frame: &Frame, needle: &str) -> bool {
+fn has_text(frame: &SurfaceFrame, needle: &str) -> bool {
     frame.commands.iter().any(|command| match command {
-        Command::Text { content, .. } => content.contains(needle),
+        DrawCommand::Text { content, .. } => content.contains(needle),
         _ => false,
     })
 }
@@ -218,7 +226,7 @@ fn main() {
     assert!(harness.wait_for_frame(before), "批量帧未收到");
     let bulk_elapsed = started.elapsed();
     let frame = harness.snapshot().expect("批量帧");
-    let rects = frame.commands.iter().filter(|command| matches!(command, Command::Rect { .. })).count();
+    let rects = frame.commands.iter().filter(|command| matches!(command, DrawCommand::Rect { .. })).count();
     assert_eq!(rects, 2002, "批量帧矩形数不符");
     println!("批量帧：{} 条指令（响应 {:?}）", frame.commands.len(), bulk_elapsed);
 

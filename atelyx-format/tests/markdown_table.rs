@@ -1,6 +1,6 @@
 //! 表格断块与单元格区间：其他块级构造起始行终止表格，单元格首尾空白按行级同一口径裁剪。
 
-use atelyx_markdown::{parse_markdown, MarkdownBlock, ParseOptions};
+use atelyx_format::markdown::{parse_markdown, MarkdownBlock, ParseOptions};
 
 fn blocks(source: &str) -> Vec<MarkdownBlock> {
     parse_markdown(source, &ParseOptions::default()).blocks

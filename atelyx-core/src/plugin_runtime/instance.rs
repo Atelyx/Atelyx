@@ -28,7 +28,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use atelyx_plugin_host::HostCall;
+use super::abi::HostCall;
 
 use crate::plugin_process::{EventSink, PluginProcessHost, ProcessEvent as HostEvent};
 
@@ -434,7 +434,7 @@ impl Instance {
         let path = self.dir.join(entry);
         let library = match self.abi.library() {
             Some(library) => library,
-            None => match atelyx_plugin_host::PluginLibrary::load(&path) {
+            None => match abi::PluginLibrary::load(&path) {
                 Ok(library) => {
                     let library = Arc::new(library);
                     self.abi.set_library(library.clone());
@@ -451,7 +451,7 @@ impl Instance {
         // 会话先就绪再广播 Running：壳收到 Running 会重发已挂面的 attached，早于 begin_session 会被丢掉
         self.abi.begin_session(token);
         self.set_status(PluginStatus::Running);
-        let host: Arc<dyn atelyx_plugin_host::Host> =
+        let host: Arc<dyn abi::Host> =
             Arc::new(abi::InstanceHost::new(self, token));
         let instance = self.clone();
         let entry = entry.to_string();
@@ -1987,14 +1987,19 @@ impl Instance {
         Ok(())
     }
 
-    /// ABI 回调送来的帧：复制已在宿主库完成，这里只做协议投影与校验。
-    pub(crate) fn accept_abi_frame(self: &Arc<Self>, token: u64, surface: &str, frame: atelyx_plugin_host::Frame) {
+    /// ABI 回调送来的帧：装载层已把 ABI 内容复制成协议帧，这里只做协议校验与存档。
+    pub(crate) fn accept_abi_frame(
+        self: &Arc<Self>,
+        token: u64,
+        surface: &str,
+        frame: frame::SurfaceFrame,
+    ) {
         if token != self.run_token.load(Ordering::SeqCst)
             || !self.session_active.load(Ordering::SeqCst)
         {
             return;
         }
-        if let Err(error) = self.accept_frame(token, surface.to_string(), abi::frame_from_host(frame)) {
+        if let Err(error) = self.accept_frame(token, surface.to_string(), frame) {
             self.log_host_note(&format!("丢弃插件帧：{error}"));
         }
     }

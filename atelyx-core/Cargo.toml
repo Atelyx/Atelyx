@@ -11,8 +11,6 @@ nanoid = "0.4"
 regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# frontmatter 解析与序列化（领域库，宿主与插件共用；core 以 `frontmatter` 重导出保持路径）
-atelyx-frontmatter = { path = "../atelyx-frontmatter" }
 dunce = "1"
 # 会话容器（chat_container）：持久 op 建 id / 写链线程与广播回执（spawn + oneshot + sleep）
 # 协作帧泵（collab）：WS 连接建立用 tokio::net（超时包裹），net 特性显式声明不靠传递启用
@@ -27,13 +25,13 @@ globset = "0.4"
 # 表格 xlsx 导出（table_xlsx）
 rust_xlsxwriter = "0.89"
 base64 = "0.22"
-# Markdown 解析（领域库，宿主与插件共用；core 以 `markdown` 重导出保持路径）
-atelyx-markdown = { path = "../atelyx-markdown" }
+# 格式语义（Markdown / frontmatter，宿主与插件共用；core 以 `markdown` / `frontmatter` 重导出保持路径）
+atelyx-format = { path = "../atelyx-format" }
 # 插件协议类型（宿主运行时：信封解析、握手、能力面方法、整面帧与绘制指令）
 atelyx-plugin-protocol = { path = "../atelyx-plugin-protocol" }
-# 同进程插件 ABI 与加载：动态库实例、帧复制与宿主回调
+# 同进程插件 ABI 与宿主侧装载：C 布局类型 + 动态库加载（libloading）
 atelyx-plugin-abi = { path = "../atelyx-plugin-abi" }
-atelyx-plugin-host = { path = "../atelyx-plugin-host" }
+libloading = "0.8"
 # 整面帧共享内存映射（宿主只读映射插件写入的区域）
 memmap2 = "0.9"
 # 插件安装（plugin_runtime）：zip 解压（仅 deflate；防御见 install.rs）

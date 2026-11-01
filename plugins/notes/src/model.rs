@@ -1,8 +1,8 @@
 //! 笔记插件的展示与编辑状态：三档模式、正文块、撤销栈、属性面板、反链与远端光标。
 //! 正文真源在宿主（`note.*`），这里只持本端副本。
 
-use atelyx_frontmatter::{self as frontmatter, Yaml};
-use atelyx_markdown::{parse_markdown, InlineSpan, MarkdownBlock, ParseOptions};
+use atelyx_format::frontmatter::{self, Yaml};
+use atelyx_format::markdown::{parse_markdown, InlineSpan, MarkdownBlock, ParseOptions};
 use atelyx_plugin_protocol::method::EditorPrefs;
 
 /// 面板贡献 id：也是文档实例的 surfaceId（`plugin.json` 的 `docTypeRegistrations` 同值）。

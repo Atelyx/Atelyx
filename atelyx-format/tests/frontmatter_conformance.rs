@@ -3,7 +3,7 @@
 //! 快照里的 data 用带类型标签的 JSON 编码（`t` = 类型，map 为键值对数组保键序），
 //! 编码实现与快照生成器共用（`frontmatter::snapshot_json`），避免两边口径漂移。
 
-use atelyx_core::frontmatter::{self, Yaml};
+use atelyx_format::frontmatter::{self, Yaml};
 use serde_json::Value;
 use std::fs;
 use std::path::PathBuf;
@@ -45,7 +45,7 @@ fn conformance_matches_snapshot() {
 /// 空属性（空串 / null）可直接切换为布尔与空列表，供面板「先建空属性再改类型」的流程使用。
 #[test]
 fn empty_value_converts_to_bool_and_empty_list() {
-    use atelyx_core::frontmatter::PropType;
+    use atelyx_format::frontmatter::PropType;
     let empty = Yaml::Str(String::new());
     assert_eq!(
         frontmatter::convert_value(&empty, PropType::Boolean),

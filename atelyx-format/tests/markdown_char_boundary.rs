@@ -1,7 +1,7 @@
 //! Markdown 偏移体检：解析产出的每个源区间必须落在 UTF-8 字符边界上，
 //! 且渲染层按这些区间重解析时不得崩溃。语料由固定种子拼装，覆盖各类块级与行内构造。
 
-use atelyx_markdown::{
+use atelyx_format::markdown::{
     parse_inline, parse_markdown, MarkdownBlock, MarkdownTableCell, ParseOptions,
 };
 use serde_json::Value;

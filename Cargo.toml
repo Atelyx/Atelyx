@@ -3,8 +3,7 @@ resolver = "2"
 members = [
     "atelyx-app",
     "atelyx-core",
-    "atelyx-markdown",
-    "atelyx-frontmatter",
+    "atelyx-format",
     "atelyx-ui",
     "atelyx-plugin-protocol",
     "atelyx-plugin-sdk",
@@ -13,7 +12,6 @@ members = [
     "plugins/ai-panel",
     "plugins/notes",
     "atelyx-plugin-abi",
-    "atelyx-plugin-host",
     "atelyx-plugin-sample",
     "xtask",
 ]

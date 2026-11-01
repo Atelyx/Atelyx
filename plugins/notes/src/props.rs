@@ -1,7 +1,7 @@
 //! 属性面板：frontmatter 的类型化渲染与槽位编辑。
 //! 改动只在模型里持草稿，提交时整篇回写并交宿主合并落盘。
 
-use atelyx_frontmatter::{self as frontmatter, PropType, Yaml};
+use atelyx_format::frontmatter::{self, PropType, Yaml};
 use atelyx_plugin_protocol::paint::ColorToken;
 use atelyx_plugin_sdk::frame_ui::{BoxStyle, BoxWidth, Edges, TextRole, TextStyle, Ui};
 

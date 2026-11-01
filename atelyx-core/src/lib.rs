@@ -32,8 +32,5 @@ pub mod vault_refs;
 pub mod web;
 pub mod write_queue;
 
-/// Markdown 解析内核（领域库 `atelyx-markdown` 的重导出）：宿主与插件共用同一份语义。
-pub use atelyx_markdown as markdown;
-
-/// frontmatter 解析与序列化（领域库 `atelyx-frontmatter` 的重导出）：宿主与插件共用同一份语义。
-pub use atelyx_frontmatter as frontmatter;
+/// 格式语义库重导出：Markdown 与 frontmatter 两个模块，宿主与插件共用同一份解析与序列化语义。
+pub use atelyx_format::{frontmatter, markdown};

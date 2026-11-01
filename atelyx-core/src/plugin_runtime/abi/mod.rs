@@ -1,4 +1,4 @@
-//! 同进程插件传输：把 ABI 帧 / 输入翻成宿主既有的协议类型，并承接插件回调。
+//! 同进程插件传输：把 ABI 输入翻成宿主协议类型，并把插件的帧 / 服务回执接回实例。
 //! 帧与输入在回调返回前复制；服务与能力请求复用进程插件同一套方法名与分派。
 
 use std::collections::{HashMap, VecDeque};
@@ -6,19 +6,20 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 
 use atelyx_plugin_abi as abi;
-use atelyx_plugin_host::{
-    self as host, Command, Host, HostCall, ImageSource, PluginInstance, PluginLibrary,
-};
 use atelyx_plugin_protocol::frame::{
-    FrameInput, FrameRect, FrameSize, HitCursor, HitRegion, Key, KeyAction, Modifiers, MouseButton,
-    NamedKey, SurfaceFrame,
-};
-use atelyx_plugin_protocol::paint::{
-    ColorToken, DrawCommand, ImageFit, PaintColor, PaintPoint, PaintShadow, TextAlign, TextFamily,
-    TextWeight,
+    FrameInput, Key, KeyAction, Modifiers, MouseButton, NamedKey, SurfaceFrame,
 };
 
 use super::Instance;
+
+/// 动态库装载（宿主侧的 C 边界）。
+mod host;
+
+/// ABI 帧到协议帧的复制。
+mod frame;
+
+/// 装载层对外的类型：库、实例与宿主回调。
+pub use host::{Host, HostCall, PluginInstance, PluginLibrary};
 
 /// 插件回调转发到实例；实例销毁后回调自行收场（不再有可用的插件端）。
 pub(super) struct InstanceHost {
@@ -33,7 +34,7 @@ impl InstanceHost {
 }
 
 impl Host for InstanceHost {
-    fn submit_frame(&self, surface: &str, frame: host::Frame) {
+    fn submit_frame(&self, surface: &str, frame: SurfaceFrame) {
         if let Some(instance) = self.instance.upgrade() {
             instance.accept_abi_frame(self.token, surface, frame);
         }
@@ -633,198 +634,10 @@ fn named_key_code(key: NamedKey) -> u32 {
     }
 }
 
-/// ABI 复制来的帧 → 宿主协议帧；指令集在这里对齐，后续绘制管线不区分来源。
-pub(super) fn frame_from_host(frame: host::Frame) -> SurfaceFrame {
-    SurfaceFrame {
-        size: frame.size.map(|(w, h)| FrameSize { w, h }),
-        commands: frame.commands.into_iter().map(command_from_host).collect(),
-        hits: frame
-            .hits
-            .into_iter()
-            .map(|hit| HitRegion {
-                id: hit.id,
-                x: hit.rect.x,
-                y: hit.rect.y,
-                w: hit.rect.w,
-                h: hit.rect.h,
-                cursor: cursor_from_code(hit.cursor),
-            })
-            .collect(),
-        ime: frame.ime.map(|rect| FrameRect { x: rect.x, y: rect.y, w: rect.w, h: rect.h }),
-        keys: frame.keys,
-        fps: u16::try_from(frame.fps).ok().filter(|fps| *fps > 0),
-    }
-}
-
-fn command_from_host(command: Command) -> DrawCommand {
-    match command {
-        Command::Line { x1, y1, x2, y2, stroke, width } => {
-            DrawCommand::Line { x1, y1, x2, y2, stroke: paint_color(stroke), width }
-        }
-        Command::Rect {
-            x,
-            y,
-            w,
-            h,
-            fill,
-            stroke,
-            stroke_width,
-            corner_radius,
-            shadow,
-        } => DrawCommand::Rect {
-            x,
-            y,
-            w,
-            h,
-            fill: fill.map(paint_color),
-            stroke: stroke.map(paint_color),
-            stroke_width: Some(stroke_width),
-            corner_radius,
-            shadow: shadow.map(paint_shadow),
-        },
-        Command::Path { points, closed, fill, stroke, stroke_width } => DrawCommand::Path {
-            points: points.into_iter().map(|point| PaintPoint { x: point.x, y: point.y }).collect(),
-            closed,
-            fill: fill.map(paint_color),
-            stroke: stroke.map(paint_color),
-            stroke_width: Some(stroke_width),
-        },
-        Command::Circle { cx, cy, r, fill, stroke, stroke_width } => DrawCommand::Circle {
-            cx,
-            cy,
-            r,
-            fill: fill.map(paint_color),
-            stroke: stroke.map(paint_color),
-            stroke_width: Some(stroke_width),
-        },
-        Command::Text { x, y, content, size, color, weight, family, italic, max_width, align } => {
-            DrawCommand::Text {
-                x,
-                y,
-                content,
-                size,
-                color: paint_color(color),
-                weight: weight_from_code(weight),
-                family: family_from_code(family),
-                italic,
-                max_width,
-                align: align_from_code(align),
-            }
-        }
-        Command::Image { source, x, y, w, h, fit } => DrawCommand::Image {
-            source: image_source(source),
-            x,
-            y,
-            w,
-            h,
-            fit: fit_from_code(fit),
-        },
-    }
-}
-
-fn paint_color(color: host::Color) -> PaintColor {
-    match color {
-        host::Color::Rgba { r, g, b, a } => PaintColor::Rgba { rgba: [r, g, b, a] },
-        host::Color::Token(code) => PaintColor::Token {
-            name: token_from_code(code).unwrap_or(ColorToken::Text),
-        },
-    }
-}
-
-fn paint_shadow(shadow: host::Shadow) -> PaintShadow {
-    PaintShadow {
-        offset_x: shadow.offset_x,
-        offset_y: shadow.offset_y,
-        blur: shadow.blur,
-        color: paint_color(shadow.color),
-    }
-}
-
-fn token_from_code(code: u32) -> Option<ColorToken> {
-    Some(match code {
-        abi::TOKEN_TEXT => ColorToken::Text,
-        abi::TOKEN_TEXT_SECONDARY => ColorToken::TextSecondary,
-        abi::TOKEN_TEXT_MUTED => ColorToken::TextMuted,
-        abi::TOKEN_ACCENT => ColorToken::Accent,
-        abi::TOKEN_ACCENT_SOFT => ColorToken::AccentSoft,
-        abi::TOKEN_DANGER => ColorToken::Danger,
-        abi::TOKEN_DANGER_SOFT => ColorToken::DangerSoft,
-        abi::TOKEN_SUCCESS => ColorToken::Success,
-        abi::TOKEN_SUCCESS_SOFT => ColorToken::SuccessSoft,
-        abi::TOKEN_WARNING => ColorToken::Warning,
-        abi::TOKEN_WARNING_SOFT => ColorToken::WarningSoft,
-        abi::TOKEN_SURFACE => ColorToken::Surface,
-        abi::TOKEN_SURFACE_MUTED => ColorToken::SurfaceMuted,
-        abi::TOKEN_SURFACE_SUNKEN => ColorToken::SurfaceSunken,
-        abi::TOKEN_HOVER => ColorToken::Hover,
-        abi::TOKEN_BORDER => ColorToken::Border,
-        abi::TOKEN_BORDER_STRONG => ColorToken::BorderStrong,
-        abi::TOKEN_TRANSPARENT => ColorToken::Transparent,
-        abi::TOKEN_SURFACE_OVERLAY => ColorToken::SurfaceOverlay,
-        _ => return None,
-    })
-}
-
-fn weight_from_code(code: u32) -> Option<TextWeight> {
-    match code {
-        abi::WEIGHT_NORMAL => None,
-        abi::WEIGHT_MEDIUM => Some(TextWeight::Medium),
-        abi::WEIGHT_SEMI_BOLD => Some(TextWeight::SemiBold),
-        _ => None,
-    }
-}
-
-fn family_from_code(code: u32) -> Option<TextFamily> {
-    match code {
-        abi::FAMILY_MONO => Some(TextFamily::Mono),
-        _ => None,
-    }
-}
-
-fn align_from_code(code: u32) -> Option<TextAlign> {
-    match code {
-        abi::ALIGN_CENTER => Some(TextAlign::Center),
-        abi::ALIGN_END => Some(TextAlign::End),
-        _ => None,
-    }
-}
-
-fn fit_from_code(code: u32) -> Option<ImageFit> {
-    match code {
-        abi::FIT_CONTAIN => Some(ImageFit::Contain),
-        abi::FIT_COVER => Some(ImageFit::Cover),
-        _ => None,
-    }
-}
-
-fn image_source(source: ImageSource) -> atelyx_plugin_protocol::paint::ImageSource {
-    use atelyx_plugin_protocol::paint::ImageSource as PaintSource;
-    match source {
-        ImageSource::Private(path) => PaintSource::Private { path },
-        ImageSource::Vault(path) => PaintSource::Vault { path },
-        ImageSource::Url { url, local } => PaintSource::Url { url, local: local.then_some(true) },
-        ImageSource::File(path) => PaintSource::File { path },
-    }
-}
-
-fn cursor_from_code(code: u32) -> Option<HitCursor> {
-    match code {
-        abi::CURSOR_POINTER => Some(HitCursor::Pointer),
-        abi::CURSOR_TEXT => Some(HitCursor::Text),
-        abi::CURSOR_GRAB => Some(HitCursor::Grab),
-        abi::CURSOR_GRABBING => Some(HitCursor::Grabbing),
-        abi::CURSOR_CROSSHAIR => Some(HitCursor::Crosshair),
-        abi::CURSOR_NOT_ALLOWED => Some(HitCursor::NotAllowed),
-        abi::CURSOR_RESIZE_H => Some(HitCursor::ResizeHorizontal),
-        abi::CURSOR_RESIZE_V => Some(HitCursor::ResizeVertical),
-        _ => None,
-    }
-}
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use atelyx_plugin_protocol::frame::FrameRect;
     use std::sync::atomic::AtomicBool;
     use std::time::Duration;
 
@@ -855,122 +668,6 @@ mod tests {
         drop(held);
         worker.join().unwrap();
         assert!(passed.load(Ordering::SeqCst));
-    }
-
-    #[test]
-    fn host_frame_projects_to_protocol_frame() {
-        let frame = host::Frame {
-            size: Some((800.0, 600.0)),
-            commands: vec![
-                host::Command::Rect {
-                    x: 1.0,
-                    y: 2.0,
-                    w: 3.0,
-                    h: 4.0,
-                    fill: Some(host::Color::Token(abi::TOKEN_SURFACE)),
-                    stroke: Some(host::Color::Rgba { r: 1, g: 2, b: 3, a: 4 }),
-                    stroke_width: 2.0,
-                    corner_radius: Some(6.0),
-                    shadow: Some(host::Shadow {
-                        offset_x: 1.0,
-                        offset_y: 2.0,
-                        blur: 3.0,
-                        color: host::Color::Token(abi::TOKEN_BORDER),
-                    }),
-                },
-                host::Command::Text {
-                    x: 5.0,
-                    y: 6.0,
-                    content: "标题".into(),
-                    size: 14.0,
-                    color: host::Color::Token(abi::TOKEN_TEXT),
-                    weight: abi::WEIGHT_SEMI_BOLD,
-                    family: abi::FAMILY_MONO,
-                    italic: false,
-                    max_width: Some(80.0),
-                    align: abi::ALIGN_CENTER,
-                },
-                host::Command::Image {
-                    source: host::ImageSource::Vault("note.png".into()),
-                    x: 0.0,
-                    y: 0.0,
-                    w: 16.0,
-                    h: 16.0,
-                    fit: abi::FIT_COVER,
-                },
-            ],
-            hits: vec![host::Hit {
-                id: "next".into(),
-                rect: host::Rect {
-                    x: 0.0,
-                    y: 0.0,
-                    w: 10.0,
-                    h: 10.0,
-                    radius: 2.0,
-                    fill: None,
-                    stroke: None,
-                    stroke_width: 1.0,
-                },
-                cursor: abi::CURSOR_POINTER,
-            }],
-            ime: Some(host::Rect {
-                x: 1.0,
-                y: 2.0,
-                w: 3.0,
-                h: 18.0,
-                radius: 0.0,
-                fill: None,
-                stroke: None,
-                stroke_width: 1.0,
-            }),
-            keys: true,
-            fps: 30,
-        };
-        let projected = frame_from_host(frame);
-        assert_eq!(projected.hits.len(), 1);
-        assert_eq!(projected.hits[0].id, "next");
-        assert_eq!(projected.hits[0].cursor, Some(HitCursor::Pointer));
-        assert_eq!(projected.ime, Some(FrameRect { x: 1.0, y: 2.0, w: 3.0, h: 18.0 }));
-        assert!(projected.keys);
-        assert_eq!(projected.fps, Some(30));
-        match &projected.commands[0] {
-            DrawCommand::Rect { fill, stroke, stroke_width, corner_radius, shadow, .. } => {
-                assert_eq!(*fill, Some(PaintColor::Token { name: ColorToken::Surface }));
-                assert_eq!(*stroke, Some(PaintColor::Rgba { rgba: [1, 2, 3, 4] }));
-                assert_eq!(*stroke_width, Some(2.0));
-                assert_eq!(*corner_radius, Some(6.0));
-                assert_eq!(
-                    *shadow,
-                    Some(PaintShadow {
-                        offset_x: 1.0,
-                        offset_y: 2.0,
-                        blur: 3.0,
-                        color: PaintColor::Token { name: ColorToken::Border },
-                    })
-                );
-            }
-            other => panic!("第一条应是矩形：{other:?}"),
-        }
-        match &projected.commands[1] {
-            DrawCommand::Text { content, weight, family, align, max_width, .. } => {
-                assert_eq!(content, "标题");
-                assert_eq!(*weight, Some(TextWeight::SemiBold));
-                assert_eq!(*family, Some(TextFamily::Mono));
-                assert_eq!(*align, Some(TextAlign::Center));
-                assert_eq!(*max_width, Some(80.0));
-            }
-            other => panic!("第二条应是文字：{other:?}"),
-        }
-        match &projected.commands[2] {
-            DrawCommand::Image { source, fit, .. } => {
-                assert_eq!(
-                    *source,
-                    atelyx_plugin_protocol::paint::ImageSource::Vault { path: "note.png".into() }
-                );
-                assert_eq!(*fit, Some(ImageFit::Cover));
-            }
-            other => panic!("第三条应是图片：{other:?}"),
-        }
     }
 
     #[test]

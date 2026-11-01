@@ -1124,7 +1124,7 @@ mod tests {
     use super::*;
 
     fn inline(source: &str) -> Vec<InlineSpan> {
-        crate::parse_inline(source, 0, source.len(), &ParseOptions::default())
+        crate::markdown::parse_inline(source, 0, source.len(), &ParseOptions::default())
     }
 
     /// 硬换行（行尾 ≥2 空格）在 CRLF 文档里同样识别：`\r` 属行尾风格，不参与空格计数。
@@ -1155,7 +1155,7 @@ mod tests {
     #[test]
     fn trailing_space_scan_stops_at_range_start() {
         let source = "   \n甲";
-        let spans = crate::parse_inline(source, 0, source.len(), &ParseOptions::default());
+        let spans = crate::markdown::parse_inline(source, 0, source.len(), &ParseOptions::default());
         assert!(!spans.is_empty());
     }
 }

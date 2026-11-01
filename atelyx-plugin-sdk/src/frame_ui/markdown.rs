@@ -1,11 +1,11 @@
-//! 只读 Markdown 的排版与绘制：解析走领域库 `atelyx-markdown`（与宿主阅读面同一份语义、同一套源偏移），
+//! 只读 Markdown 的排版与绘制：解析走格式语义库 `atelyx-format`（与宿主阅读面同一份语义、同一套源偏移），
 //! 版面口径与宿主阅读面对齐（行高 1.625、标题按级放大、块间空行折算、引用竖条、代码块头、表格网格）。
 //!
 //! 排版结果按「内容 + 宽度 + 量算代次」缓存，滚动与悬停都不重排。
 
 use std::sync::{Arc, Mutex};
 
-use atelyx_markdown::{
+use atelyx_format::markdown::{
     parse_inline, parse_markdown, InlineSpan, MarkdownBlock, MarkdownListItem, MentionCandidate,
     ParseOptions,
 };
@@ -800,14 +800,14 @@ impl Builder<'_> {
     }
 
     /// 表格：等宽列 + 1px 网格 + 表头浅底（与宿主 table 部件同一形态）。
-    fn table(&mut self, header: &[atelyx_markdown::MarkdownTableCell], aligns: &[String], rows: &[Vec<atelyx_markdown::MarkdownTableCell>], indent: f32, width: f32) {
+    fn table(&mut self, header: &[atelyx_format::markdown::MarkdownTableCell], aligns: &[String], rows: &[Vec<atelyx_format::markdown::MarkdownTableCell>], indent: f32, width: f32) {
         let cols = header.len().max(rows.iter().map(Vec::len).max().unwrap_or(0)).max(1);
         let spec = FontSpec { size: self.base_size(), weight: None, family: None };
         let line = self.line_height(spec, PROSE_LINE);
         let cell_w = width / cols as f32;
         let start = self.height;
         let mut y = start;
-        let draw_row = |builder: &mut Self, y: f32, cells: &[atelyx_markdown::MarkdownTableCell], head: bool| {
+        let draw_row = |builder: &mut Self, y: f32, cells: &[atelyx_format::markdown::MarkdownTableCell], head: bool| {
             let row_h = line + CELL_PAD_Y * 2.0;
             for column in 0..cols {
                 let x = indent + column as f32 * cell_w;

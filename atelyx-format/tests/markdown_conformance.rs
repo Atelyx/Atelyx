@@ -81,25 +81,25 @@ fn parse_conformance() {
         let source = value["source"].as_str().expect("快照缺 source");
         let expected = value["expected"].clone();
 
-        let mentions: Vec<atelyx_markdown::MentionCandidate> =
+        let mentions: Vec<atelyx_format::markdown::MentionCandidate> =
             serde_json::from_value(value["mentions"].clone()).unwrap_or_default();
         let links: std::collections::HashMap<String, String> =
             serde_json::from_value(value["links"].clone()).unwrap_or_default();
 
-        let options = atelyx_markdown::ParseOptions {
+        let options = atelyx_format::markdown::ParseOptions {
             resolve_link: Some(Box::new(move |href: &str| {
                 match links.get(href).map(|s| s.as_str()) {
-                    Some("external") => atelyx_markdown::LinkForm::External,
-                    Some("wiki") => atelyx_markdown::LinkForm::Wiki,
-                    Some("path") => atelyx_markdown::LinkForm::Path,
-                    Some("create") => atelyx_markdown::LinkForm::Create,
-                    Some("plain") | None => atelyx_markdown::LinkForm::Plain,
+                    Some("external") => atelyx_format::markdown::LinkForm::External,
+                    Some("wiki") => atelyx_format::markdown::LinkForm::Wiki,
+                    Some("path") => atelyx_format::markdown::LinkForm::Path,
+                    Some("create") => atelyx_format::markdown::LinkForm::Create,
+                    Some("plain") | None => atelyx_format::markdown::LinkForm::Plain,
                     Some(other) => panic!("未知链接形态编码: {other}"),
                 }
             })),
             mentions,
         };
-        let actual = atelyx_markdown::parse_markdown(source, &options);
+        let actual = atelyx_format::markdown::parse_markdown(source, &options);
         let actual_value = serde_json::to_value(&actual).unwrap();
 
         if actual_value != expected {
@@ -121,9 +121,9 @@ fn indented_atx_heading_does_not_panic() {
         "- 甲\n\t# 😀四字节字符\n",
         "\t#### 四级标题\n",
     ] {
-        let doc = atelyx_markdown::parse_markdown(
+        let doc = atelyx_format::markdown::parse_markdown(
             source,
-            &atelyx_markdown::ParseOptions::default(),
+            &atelyx_format::markdown::ParseOptions::default(),
         );
         let json = serde_json::to_string(&doc).unwrap();
         assert!(
@@ -135,12 +135,12 @@ fn indented_atx_heading_does_not_panic() {
 
 #[test]
 fn snapshot_contract_roundtrip() {
-    // serde 契约自检：快照 → core 类型 → 回 JSON 与原快照逐值相等。
+    // serde 契约自检：快照 → 解析类型 → 回 JSON 与原快照逐值相等。
     for (name, value) in snapshot_cases() {
         let expected = value["expected"].clone();
-        let doc: atelyx_markdown::MarkdownDocument =
+        let doc: atelyx_format::markdown::MarkdownDocument =
             serde_json::from_value(expected.clone())
-                .unwrap_or_else(|e| panic!("{name}: 快照与 core 类型不兼容: {e}"));
+                .unwrap_or_else(|e| panic!("{name}: 快照与解析类型不兼容: {e}"));
         let back = serde_json::to_value(&doc).unwrap();
         assert_eq!(back, expected, "{name}: roundtrip 后 JSON 不等");
     }
@@ -148,10 +148,10 @@ fn snapshot_contract_roundtrip() {
 
 #[test]
 fn snapshot_options_contract() {
-    // 语料 options（mentions/links 映射）须能被 core 的 ParseOptions 表达。
+    // 语料 options（mentions/links 映射）须能被 ParseOptions 表达。
     for (name, value) in snapshot_cases() {
         if !value["mentions"].is_null() {
-            let mentions: Vec<atelyx_markdown::MentionCandidate> =
+            let mentions: Vec<atelyx_format::markdown::MentionCandidate> =
                 serde_json::from_value(value["mentions"].clone())
                     .unwrap_or_else(|e| panic!("{name}: mentions 形状不兼容: {e}"));
             assert!(!mentions.is_empty(), "{name}: mentions 不应为空");

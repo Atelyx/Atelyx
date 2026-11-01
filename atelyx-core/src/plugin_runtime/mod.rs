@@ -2,7 +2,8 @@
 //! 运行时为进程内单例（壳持 `Arc`，多窗口共享）；插件事件经 [`PluginRuntime::subscribe_events`]
 //! 的单一广播通道进入壳的 update。进程创建与清理一律经 [`crate::plugin_process`]。
 
-mod abi;
+/// 同进程插件传输与动态库装载（装载面公开：core 的 ABI 冒烟示例直接使用）。
+pub mod abi;
 mod ai_tools;
 
 mod capability;
