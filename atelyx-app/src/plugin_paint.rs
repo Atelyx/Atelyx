@@ -2,7 +2,6 @@
 //! 文字走段落缓存（内容不变就不重新成形），与形状按声明序交错，浮层才能压住下层文字。
 
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 use std::ops::Range;
 
 use iced::advanced::text::paragraph;
@@ -45,8 +44,9 @@ pub enum PaintStep {
 }
 
 /// 按指令序切成绘制步骤：文字、图片与带投影的矩形是顺序断点，其余形状按相邻段合批。
-pub fn plan(commands: &[DrawCommand]) -> Vec<PaintStep> {
-    let mut steps = Vec::new();
+/// 写入调用方给的缓冲（复用容量），供绘制期逐帧刷新步骤表。
+pub fn plan_into(commands: &[DrawCommand], steps: &mut Vec<PaintStep>) {
+    steps.clear();
     let mut start = 0;
     for (index, command) in commands.iter().enumerate() {
         let breakpoint = match command {
@@ -67,6 +67,13 @@ pub fn plan(commands: &[DrawCommand]) -> Vec<PaintStep> {
     if start < commands.len() {
         steps.push(PaintStep::Shapes(start..commands.len()));
     }
+}
+
+/// 一次性分配步骤表（测试用）。
+#[cfg(test)]
+pub fn plan(commands: &[DrawCommand]) -> Vec<PaintStep> {
+    let mut steps = Vec::new();
+    plan_into(commands, &mut steps);
     steps
 }
 
@@ -313,14 +320,25 @@ fn text_hash(
     italic: bool,
     max_width_bits: Option<u32>,
 ) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    content.hash(&mut hasher);
-    size_bits.hash(&mut hasher);
-    weight.map(|weight| weight as u8).hash(&mut hasher);
-    family.map(|family| family as u8).hash(&mut hasher);
-    italic.hash(&mut hasher);
-    max_width_bits.hash(&mut hasher);
-    hasher.finish()
+    // 段落缓存每帧都要按内容查一次：用逐字节 FNV，避免 SipHash 在长正文上的固定开销。
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in content.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    for value in [
+        size_bits,
+        weight.map_or(u32::MAX, |weight| weight as u32),
+        family.map_or(u32::MAX, |family| family as u32),
+        u32::from(italic),
+        max_width_bits.unwrap_or(u32::MAX),
+    ] {
+        for byte in value.to_le_bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    hash
 }
 
 fn execute_one(frame: &mut canvas::Frame, command: &DrawCommand, ctx: &PaintCtx<'_>) {

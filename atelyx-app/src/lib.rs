@@ -1366,7 +1366,8 @@ pub struct App {
     /// 插件文档面上报的本端选区（全文字节偏移；`None` = 无光标）。
     pub doc_selection: Option<(usize, usize)>,
     /// 插件最后提交并被宿主接受的正文（三方合并的共同祖先；远端合入不回写它）。
-    pub doc_base: String,
+    /// `None` = 与 [`Self::doc_text`] 相同：稳定态不另存一份全文。
+    pub doc_base: Option<String>,
     /// 文档插件尚未就绪时挂起的打开请求（启动自动恢复 / 用户抢先点开）；
     /// 连同「是否让对应视图显示」的语义一起挂起，就绪后按原样重试。
     pending_doc_open: Option<(String, bool)>,
@@ -1643,7 +1644,7 @@ impl App {
                 autosave_timer: false,
                 doc_active: false,
                 doc_selection: None,
-                doc_base: String::new(),
+                doc_base: None,
                 pending_doc_open: None,
                 note_images: markdown_view::ImageHandles::new(),
                 note_image_sizes: HashMap::new(),
@@ -3275,6 +3276,17 @@ impl App {
                     settings_view::plugins::on_event(self, *event);
                     return task;
                 }
+                if let PluginEvent::ViewSubmitted { id, surface_id } = event.as_ref() {
+                    // 帧事件只换对应面的投影；surface_id 缺省 = 帧集合整体清空（停用 / 收尾）
+                    let task = match surface_id.as_deref() {
+                        Some(surface_id) => {
+                            plugin_actions::refresh_surface_frame(self, id, surface_id)
+                        }
+                        None => plugin_actions::refresh_frames(self),
+                    };
+                    settings_view::plugins::on_event(self, *event);
+                    return task;
+                }
                 if let PluginEvent::StatusChanged { id, status } = event.as_ref() {
                     if *status == PluginStatus::Running {
                         for (plugin_id, surface_id) in self.plugin_surfaces.iter() {
@@ -3335,14 +3347,8 @@ impl App {
                 if let PluginEvent::DefaultLayoutDeclared { id, .. } = event.as_ref() {
                     task = task.chain(plugin_actions::apply_declared_default_layout(self, id));
                 }
-                let frames_only = matches!(event.as_ref(), PluginEvent::ViewSubmitted { .. });
                 settings_view::plugins::on_event(self, *event);
-                // 帧提交只重投影取帧（帧率驱动下不逐帧重建注册表）；其余事件连注册表一起重建
-                task.chain(if frames_only {
-                    plugin_actions::refresh_frames(self)
-                } else {
-                    plugin_actions::refresh_projection(self)
-                })
+                task.chain(plugin_actions::refresh_projection(self))
             }
             Message::PluginTakeoverAsk { request_id, plugin_id, scope, surface_id } => {
                 plugin_actions::on_takeover_request(self, request_id, plugin_id, scope, surface_id)
@@ -4281,7 +4287,7 @@ impl App {
         self.ui.last_note_file = Some(rel.to_string());
         self.doc_active = true;
         self.doc_selection = None;
-        self.doc_base = text.clone();
+        self.doc_base = None;
         self.doc_text = text.clone();
         // 换篇后可重试之前失败的图片（句柄按 src 缓存，仍可复用）
         self.note_images_inflight.clear();
@@ -4317,21 +4323,10 @@ impl App {
         text: String,
         selection: Option<(usize, usize)>,
     ) -> Option<String> {
-        let before = self.doc_text.clone();
-        let merged = if before != self.doc_base {
-            atelyx_core::merge3::merge3(
-                &self.doc_base,
-                &text,
-                &before,
-                atelyx_core::merge3::ConflictSide::Ours,
-            )
-        } else {
-            text.clone()
-        };
-        // 插件此刻持有的就是它提交的全文：作为下次合并的祖先。先推进到合并结果会让
-        // 未及应用校正的下一笔提交以过期祖先合并，把远端合入内容改回去。
-        self.doc_base = text;
-        let correction = (merged != self.doc_base).then(|| merged.clone());
+        // 旧正文先移出，避免每笔编辑都为比对再复制一份全文
+        let before = std::mem::take(&mut self.doc_text);
+        let (merged, base, correction) = merge_doc_edit(self.doc_base.take(), &before, text);
+        self.doc_base = base;
         let changed = merged != before;
         self.doc_text = merged;
         // inspector 属性面板与正文同一真源：正文被插件改动后重建解析缓存
@@ -4932,8 +4927,8 @@ impl App {
         self.doc_save_error = None;
         self.autosave_deadline = Some(Instant::now() + AUTOSAVE_DEBOUNCE);
         if self.doc_active {
-            // 回滚换掉整篇正文：插件面必须同步看到新文，且以它作为下一笔编辑的合并祖先。
-            self.doc_base = self.doc_text.clone();
+            // 回滚换掉整篇正文：插件面必须同步看到新文；祖先与正文相同，用 None 表示。
+            self.doc_base = None;
             self.doc_selection = None;
             doc_session::publish_state(self, Some(self.doc_text.clone()));
         }
@@ -6843,6 +6838,78 @@ fn space_pump_stream(
             .await;
         }
     })
+}
+
+/// 一次插件编辑的三方合并结果：返回（合并正文, 下一笔的祖先, 需要回填的校正）。
+/// 祖先为 None 表示它与当前正文相同，不必再存一份全文。
+fn merge_doc_edit(
+    base: Option<String>,
+    before: &str,
+    text: String,
+) -> (String, Option<String>, Option<String>) {
+    match base {
+        Some(base) if base != before => {
+            let merged = atelyx_core::merge3::merge3(
+                &base,
+                &text,
+                before,
+                atelyx_core::merge3::ConflictSide::Ours,
+            );
+            // 插件手里仍是它提交的旧文：只有发生校正时才需要把它留作下一笔的祖先。
+            // 先推进到合并结果会让未及应用校正的下一笔以过期祖先合并，把远端内容改回去。
+            let correction = (merged != text).then(|| merged.clone());
+            let next_base = if correction.is_some() { Some(text) } else { None };
+            (merged, next_base, correction)
+        }
+        // 没有远端改动：插件提交的全文即最新，祖先与正文相同
+        _ => (text, None, None),
+    }
+}
+
+#[cfg(test)]
+mod doc_edit_tests {
+    use super::merge_doc_edit;
+
+    #[test]
+    fn stable_edit_stores_no_duplicate_base() {
+        let (merged, base, correction) =
+            merge_doc_edit(None, "old", "old + new".to_string());
+        assert_eq!(merged, "old + new");
+        assert!(base.is_none(), "祖先与正文相同，不另存全文");
+        assert!(correction.is_none());
+    }
+
+    #[test]
+    fn stale_base_equal_to_before_needs_no_merge() {
+        let (merged, base, correction) =
+            merge_doc_edit(Some("same".into()), "same", "same + new".to_string());
+        assert_eq!(merged, "same + new");
+        assert!(base.is_none());
+        assert!(correction.is_none());
+    }
+
+    #[test]
+    fn remote_change_keeps_plugin_text_as_next_ancestor() {
+        let base = Some("line1\nline2\nline3\n".to_string());
+        let before = "remote1\nline2\nline3\n";
+        let text = "line1\nline2\nplugin3\n".to_string();
+        let expected_base = text.clone();
+        let (merged, next_base, correction) = merge_doc_edit(base, before, text);
+        assert_eq!(merged, "remote1\nline2\nplugin3\n");
+        assert_eq!(next_base.as_deref(), Some(expected_base.as_str()));
+        assert_eq!(correction.as_deref(), Some(merged.as_str()));
+    }
+
+    #[test]
+    fn plugin_applying_remote_change_needs_no_correction() {
+        let base = Some("line1\nline2\nline3\n".to_string());
+        let before = "remote1\nline2\nline3\n";
+        let text = "remote1\nline2\nplugin3\n".to_string();
+        let (merged, next_base, correction) = merge_doc_edit(base, before, text);
+        assert_eq!(merged, "remote1\nline2\nplugin3\n");
+        assert!(next_base.is_none(), "合并结果即插件正文时不必保留祖先");
+        assert!(correction.is_none());
+    }
 }
 
 #[cfg(test)]

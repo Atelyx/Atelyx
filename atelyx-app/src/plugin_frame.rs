@@ -1,5 +1,5 @@
 //! 插件整面帧部件：执行帧的绘制指令清单，按命中区回发原始指针 / 键盘 / 输入法输入。
-//! 坐标一律面本地逻辑像素；形状与图片按帧缓存几何，文字按段落缓存跨帧复用。
+//! 坐标一律面本地逻辑像素；形状与图片按绘制段缓存几何，文字按段落缓存跨帧复用。
 
 use std::cell::{Cell, RefCell};
 use std::sync::Arc;
@@ -82,10 +82,14 @@ fn mouse_button(button: mouse::Button) -> Option<MouseButton> {
 
 /// 部件跨帧状态（存 `tree::State`）：绘制缓存 + 拖拽 / 悬停 / 双击判定 + 输入法开关。
 struct FrameState {
-    /// 形状段缓存：按绘制步骤下标各持一块，帧内容变化时整体作废。
+    /// 形状段缓存：按绘制步骤下标各持一块，换帧时只作废内容变了的段。
     caches: RefCell<Vec<canvas::Cache>>,
     /// 已排版的文字段落：内容不变跨帧复用，改宽 / 滚动 / 悬停不重新成形。
     texts: RefCell<plugin_paint::TextCache>,
+    /// 上次绘制的步骤表（与 `painted` 同帧）：换帧时按段比对，只作废内容变了的几何缓存。
+    steps: RefCell<Vec<plugin_paint::PaintStep>>,
+    /// 下一帧的步骤表缓冲：与 `steps` 交换使用，换帧不分配新 Vec。
+    next_steps: RefCell<Vec<plugin_paint::PaintStep>>,
     /// 上次绘制的帧：按 Arc 身份判换帧。持有引用，帧对象地址不会被分配器复用。
     painted: RefCell<Option<Arc<SurfaceFrame>>>,
     /// 上次绘制用的界面字体族变更计数。
@@ -116,6 +120,8 @@ impl Default for FrameState {
         Self {
             caches: RefCell::new(Vec::new()),
             texts: RefCell::new(plugin_paint::TextCache::default()),
+            steps: RefCell::new(Vec::new()),
+            next_steps: RefCell::new(Vec::new()),
             painted: RefCell::new(None),
             font_epoch: Cell::new(0),
             image_epoch: Cell::new(0),
@@ -187,7 +193,7 @@ impl PluginFrame<'_> {
     fn hit(&self, state: &FrameState, point: Point) -> Option<String> {
         let painted = state.painted.borrow();
         let frame = painted.as_deref().unwrap_or(self.frame.as_ref());
-        frame.hit_at(point.x, point.y).map(str::to_string)
+        frame.hit_region_at(point.x, point.y).map(|hit| hit.id.clone())
     }
 
     /// 回发一条原始输入（坐标已换算到面本地）。
@@ -262,6 +268,8 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginFrame<'_> {
             state.painted.borrow_mut().take();
             state.caches.borrow().iter().for_each(canvas::Cache::clear);
             state.texts.borrow_mut().clear();
+            state.steps.borrow_mut().clear();
+            state.next_steps.borrow_mut().clear();
             state.frame_latency.set(None);
             state.slow.set(0);
         }
@@ -583,22 +591,46 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginFrame<'_> {
             .borrow()
             .as_ref()
             .is_some_and(|painted| Arc::ptr_eq(painted, frame));
-        if frame_changed
-            || state.font_epoch.get() != epoch
-            || state.image_epoch.get() != image_epoch
-        {
-            state.caches.borrow().iter().for_each(canvas::Cache::clear);
-            if state.font_epoch.get() != epoch {
+        let font_changed = state.font_epoch.get() != epoch;
+        let image_changed = state.image_epoch.get() != image_epoch;
+        if font_changed || image_changed {
+            if font_changed {
                 // 字体族变了：段落按旧字族排的版，整体作废
                 state.texts.borrow_mut().clear();
             }
+            state.caches.borrow().iter().for_each(canvas::Cache::clear);
             state.font_epoch.set(epoch);
             state.image_epoch.set(image_epoch);
+        }
+        if frame_changed || state.steps.borrow().is_empty() {
+            let previous = state.painted.borrow().clone();
+            {
+                let old_steps = state.steps.borrow();
+                let mut next = state.next_steps.borrow_mut();
+                plugin_paint::plan_into(&frame.commands, &mut next);
+                let mut caches = state.caches.borrow_mut();
+                if caches.len() < next.len() {
+                    caches.resize_with(next.len(), canvas::Cache::new);
+                }
+                // 只有内容真的变了的段才丢弃几何；悬停改一个按钮颜色不该让整面重新三角化
+                for (slot, step) in next.iter().enumerate() {
+                    let reusable = previous.as_ref().zip(old_steps.get(slot)).is_some_and(
+                        |(old_frame, old_step)| same_step(old_frame, old_step, frame, step),
+                    );
+                    if !reusable {
+                        caches[slot].clear();
+                    }
+                }
+            }
+            std::mem::swap(
+                &mut *state.steps.borrow_mut(),
+                &mut *state.next_steps.borrow_mut(),
+            );
             if frame_changed {
                 *state.painted.borrow_mut() = Some(frame.clone());
             }
         }
-        let steps = plugin_paint::plan(&frame.commands);
+        let steps = state.steps.borrow();
         let ctx = PaintCtx { app: self.app, plugin_id: &self.plugin_id };
         let mut texts = state.texts.borrow_mut();
         texts.begin_frame();
@@ -670,10 +702,29 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginFrame<'_> {
         let state = tree.state.downcast_ref::<FrameState>();
         let painted = state.painted.borrow();
         let frame = painted.as_deref().unwrap_or(self.frame.as_ref());
-        match frame.hit_at(point.x, point.y) {
-            Some(id) => interaction_of(frame.hit_cursor(id)),
+        match frame.hit_region_at(point.x, point.y) {
+            Some(hit) => interaction_of(hit.cursor.unwrap_or_default()),
             None => mouse::Interaction::None,
         }
+    }
+}
+
+/// 同一槽位的绘制段在两张帧里是否内容一致：一致即可复用几何缓存。
+fn same_step(
+    old_frame: &SurfaceFrame,
+    old_step: &plugin_paint::PaintStep,
+    new_frame: &SurfaceFrame,
+    new_step: &plugin_paint::PaintStep,
+) -> bool {
+    match (old_step, new_step) {
+        (plugin_paint::PaintStep::Shapes(old), plugin_paint::PaintStep::Shapes(new)) => {
+            old.len() == new.len()
+                && old_frame.commands.get(old.clone()) == new_frame.commands.get(new.clone())
+        }
+        (plugin_paint::PaintStep::Image(old), plugin_paint::PaintStep::Image(new)) => {
+            old_frame.commands.get(*old) == new_frame.commands.get(*new)
+        }
+        _ => false,
     }
 }
 
@@ -775,5 +826,40 @@ fn frame_modifiers(modifiers: keyboard::Modifiers) -> FrameModifiers {
         control: modifiers.control(),
         alt: modifiers.alt(),
         meta: modifiers.logo(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use atelyx_core::plugin_runtime::{ColorToken, DrawCommand, PaintColor};
+
+    fn rect(width: f32) -> DrawCommand {
+        DrawCommand::Rect {
+            x: 0.0,
+            y: 0.0,
+            w: width,
+            h: 10.0,
+            fill: Some(PaintColor::Token { name: ColorToken::Surface }),
+            stroke: None,
+            stroke_width: None,
+            corner_radius: None,
+            shadow: None,
+        }
+    }
+
+    fn frame(commands: Vec<DrawCommand>) -> SurfaceFrame {
+        SurfaceFrame { commands, ..SurfaceFrame::default() }
+    }
+
+    #[test]
+    fn same_step_reuses_only_equal_segments() {
+        let first = frame(vec![rect(10.0)]);
+        let same = frame(vec![rect(10.0)]);
+        let changed = frame(vec![rect(20.0)]);
+        let shapes = plugin_paint::PaintStep::Shapes(0..1);
+        assert!(same_step(&first, &shapes, &same, &shapes));
+        assert!(!same_step(&first, &shapes, &changed, &shapes));
+        assert!(!same_step(&first, &shapes, &same, &plugin_paint::PaintStep::Text(0)));
     }
 }

@@ -2,6 +2,7 @@
 //! 插件作者仍只实现 [`PluginHandler`]；本模块负责握手、事件分派、worker 串行与 panic 边界。
 
 use std::ffi::c_void;
+use std::marker::PhantomData;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, OnceLock};
@@ -100,10 +101,14 @@ impl HostBridge {
         unsafe { (self.api.log)(self.api.ctx, level, abi::AbiStr::new(message)) }
     }
 
-    fn submit(&self, surface: &str, frame: SurfaceFrame) -> Result<SubmitResult, RpcError> {
+    fn submit(
+        &self,
+        surface: &str,
+        frame: Arc<SurfaceFrame>,
+    ) -> Result<SubmitResult, RpcError> {
         frame
             .validate()
-            .map_err(|error| RpcError::failed(format!("帧不合法：{error}")))?;
+            .map_err(|error| RpcError::failed(format!("面 {surface} 的帧不合法：{error}")))?;
         let buffer = FrameBuffer::new(&frame);
         let raw = buffer.raw();
         unsafe { (self.api.submit_frame)(self.api.ctx, abi::AbiStr::new(surface), &raw) };
@@ -338,7 +343,7 @@ unsafe fn create_inner(host: *const abi::HostApi) -> *mut c_void {
     let host = HostBridge { api };
     let (out_tx, out_rx) = tokio::sync::mpsc::channel(64);
     let submitter: FrameSubmit =
-        Arc::new(move |surface: &str, frame: SurfaceFrame| host.submit(surface, frame));
+        Arc::new(move |surface: &str, frame: Arc<SurfaceFrame>| host.submit(surface, frame));
     let service_reply: ServiceReply =
         Arc::new(move |call_id: &str, ok: bool, payload: &str| host.reply_service(call_id, ok, payload));
     let log: LogSink = Arc::new(move |message: &str| host.log(abi::LOG_ERROR, message));
@@ -596,8 +601,7 @@ fn named_key(code: u32) -> Option<NamedKey> {
 }
 
 /// 帧与其字符串 / 点集在提交调用内保持有效；宿主复制后即可释放。
-struct FrameBuffer {
-    strings: Vec<String>,
+struct FrameBuffer<'a> {
     points: Vec<Vec<abi::AbiPoint>>,
     commands: Vec<abi::AbiCommand>,
     hits: Vec<abi::AbiHit>,
@@ -605,12 +609,14 @@ struct FrameBuffer {
     keys: bool,
     fps: u32,
     size: Option<(f32, f32)>,
+    /// ABI 指针借自提交帧：帧在 `submit` 返回前一直存活，字符串无需再复制一份。
+    _frame: PhantomData<&'a SurfaceFrame>,
 }
 
-impl FrameBuffer {
-    fn new(frame: &SurfaceFrame) -> Self {
+impl<'a> FrameBuffer<'a> {
+    fn new(frame: &'a SurfaceFrame) -> Self {
         let mut buffer = Self {
-            strings: Vec::new(),
+            _frame: PhantomData,
             points: Vec::new(),
             commands: Vec::with_capacity(frame.commands.len()),
             hits: Vec::with_capacity(frame.hits.len()),
@@ -625,7 +631,7 @@ impl FrameBuffer {
             buffer.command(command);
         }
         for hit in &frame.hits {
-            let id = buffer.store(&hit.id);
+            let id = abi::AbiStr::new(&hit.id);
             buffer.hits.push(abi::AbiHit {
                 id,
                 rect: abi::AbiRect::filled(
@@ -658,12 +664,7 @@ impl FrameBuffer {
         }
     }
 
-    fn store(&mut self, value: &str) -> abi::AbiStr {
-        self.strings.push(value.to_string());
-        abi::AbiStr::new(self.strings.last().expect("just pushed"))
-    }
-
-    fn command(&mut self, command: &DrawCommand) {
+    fn command(&mut self, command: &'a DrawCommand) {
         match command {
             DrawCommand::Line { x1, y1, x2, y2, stroke, width } => {
                 let mut value = base(abi::CMD_LINE, rect(*x1, *y1, 0.0, 0.0, 0.0));
@@ -736,7 +737,7 @@ impl FrameBuffer {
                 max_width,
                 align,
             } => {
-                let text = self.store(content);
+                let text = abi::AbiStr::new(content);
                 let mut value = base(abi::CMD_TEXT, abi::AbiRect::empty_at(*x, *y));
                 value.text = text;
                 value.text_size = *size;
@@ -750,7 +751,7 @@ impl FrameBuffer {
             }
             DrawCommand::Image { source, x, y, w, h, fit } => {
                 let (kind, path, local) = image_source(source);
-                let path = self.store(&path);
+                let path = abi::AbiStr::new(path);
                 let mut value = base(abi::CMD_IMAGE, rect(*x, *y, *w, *h, 0.0));
                 value.image_source = kind;
                 value.image_path = path;
@@ -887,12 +888,12 @@ fn cursor_code(cursor: HitCursor) -> u32 {
     }
 }
 
-fn image_source(source: &ImageSource) -> (u32, String, bool) {
+fn image_source(source: &ImageSource) -> (u32, &str, bool) {
     match source {
-        ImageSource::Private { path } => (abi::IMAGE_PRIVATE, path.clone(), false),
-        ImageSource::Vault { path } => (abi::IMAGE_VAULT, path.clone(), false),
-        ImageSource::Url { url, local } => (abi::IMAGE_URL, url.clone(), local.unwrap_or(false)),
-        ImageSource::File { path } => (abi::IMAGE_FILE, path.clone(), false),
+        ImageSource::Private { path } => (abi::IMAGE_PRIVATE, path, false),
+        ImageSource::Vault { path } => (abi::IMAGE_VAULT, path, false),
+        ImageSource::Url { url, local } => (abi::IMAGE_URL, url, local.unwrap_or(false)),
+        ImageSource::File { path } => (abi::IMAGE_FILE, path, false),
     }
 }
 
@@ -984,7 +985,7 @@ mod tests {
     }
 
     #[test]
-    fn frame_buffer_covers_every_command_and_keeps_strings_alive() {
+    fn frame_buffer_covers_every_command_and_borrows_strings() {
         let frame = surface_frame();
         let buffer = FrameBuffer::new(&frame);
         let raw = buffer.raw();
@@ -1009,6 +1010,10 @@ mod tests {
         assert_eq!(commands[3].circle_r, 12.0);
         assert_eq!(commands[4].kind, abi::CMD_TEXT);
         assert_eq!(str_of(commands[4].text), "hello");
+        let DrawCommand::Text { content, .. } = &frame.commands[4] else {
+            panic!("第 5 条应是文字");
+        };
+        assert_eq!(commands[4].text.data, content.as_ptr(), "字符串应借用提交帧，不再复制");
         assert_eq!(commands[4].text_weight, abi::WEIGHT_SEMI_BOLD);
         assert_eq!(commands[4].text_family, abi::FAMILY_MONO);
         assert_eq!(commands[4].text_align, abi::ALIGN_CENTER);

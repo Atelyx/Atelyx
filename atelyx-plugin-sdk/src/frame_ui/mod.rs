@@ -38,15 +38,6 @@ const MAX_REBUILD_PASSES: usize = 3;
 /// 声明它只是为了让画面动起来——宿主对同内容帧会去重，闪烁一拍里通常只有相位翻转那几帧真正上屏。
 pub const TICK_HZ: u16 = 10;
 
-fn check_frame(
-    surface_id: &str,
-    frame: &atelyx_plugin_protocol::frame::SurfaceFrame,
-) -> Result<(), RpcError> {
-    frame
-        .validate()
-        .map_err(|err| RpcError::failed(format!("面 {surface_id} 的帧不合法：{err}")))
-}
-
 /// 原始输入解释出的语义事件。
 #[derive(Clone, Debug, PartialEq)]
 pub enum UiEvent {
@@ -246,10 +237,10 @@ impl FrameUi {
             self.state.markdown_last = out.markdown_seen.into_iter().collect();
             self.state.overlay_scrolls = out.overlay_scrolls;
             self.state.prune();
+            let mut frame = Some(out.frame);
             // 尺寸刚变且本帧还有缺项：先按估算字宽交一帧（拖动跟手），量算补齐后再交精确帧
             if std::mem::take(&mut self.state.resize_pending) && out.misses {
-                check_frame(surface_id, &out.frame)?;
-                self.submit_if_changed(ctx, surface_id, out.frame.clone())
+                self.submit_if_changed(ctx, surface_id, frame.take().expect("本帧尚未提交"))
                     .await?;
             }
             if out.misses && passes < MAX_REBUILD_PASSES {
@@ -267,8 +258,9 @@ impl FrameUi {
                     }
                 }
             }
-            check_frame(surface_id, &out.frame)?;
-            self.submit_if_changed(ctx, surface_id, out.frame).await?;
+            if let Some(frame) = frame {
+                self.submit_if_changed(ctx, surface_id, frame).await?;
+            }
             return Ok(());
         }
     }
@@ -287,11 +279,12 @@ impl FrameUi {
             .state
             .submitted
             .as_ref()
-            .is_some_and(|(id, submitted)| id == surface_id && submitted == &frame);
+            .is_some_and(|(id, submitted)| id == surface_id && submitted.as_ref() == &frame);
         if same {
             return Ok(());
         }
-        let result = ctx.submit_frame(surface_id, frame.clone()).await?;
+        let frame = std::sync::Arc::new(frame);
+        let result = ctx.submit_frame_shared(surface_id, frame.clone()).await?;
         if result.applied {
             self.state.submitted = Some((surface_id.to_string(), frame));
         }
@@ -371,9 +364,11 @@ mod tests {
             let submitted = frames.clone();
             let logged = requests.clone();
             let ctx = Context::build_fixture(tx, Arc::new(move |_, frame| {
-                frame.validate().expect("SDK 出帧必须合法");
+                frame
+                    .validate()
+                    .map_err(|error| RpcError::failed(format!("帧不合法：{error}")))?;
                 logged.lock().unwrap().push("submit_frame".to_string());
-                submitted.lock().unwrap().push(frame);
+                submitted.lock().unwrap().push((*frame).clone());
                 Ok(SubmitResult { applied: true })
             }));
             Self {

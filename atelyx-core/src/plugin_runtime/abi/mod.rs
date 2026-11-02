@@ -40,9 +40,9 @@ impl Host for InstanceHost {
         }
     }
 
-    fn request_redraw(&self, _surface: &str) {
+    fn request_redraw(&self, surface: &str) {
         if let Some(instance) = self.instance.upgrade() {
-            instance.request_redraw_abi(self.token);
+            instance.request_redraw_abi(self.token, surface);
         }
     }
 

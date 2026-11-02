@@ -231,6 +231,60 @@ pub fn refresh_frames(app: &mut App) -> Task<Message> {
     ensure_images(app)
 }
 
+/// 只刷新一个已挂面的投影：帧事件自带 surfaceId，无需重建所有面的表。
+/// 面已不在任何承载点时按移除处理（布局 / 设置 / 表格 / 窗口 / 接管 / 文档实例）。
+pub fn refresh_surface_frame(app: &mut App, plugin_id: &str, surface_id: &str) -> Task<Message> {
+    let key = (plugin_id.to_string(), surface_id.to_string());
+    // 首次到达的面先把设置 / 表格挂载表补齐，避免帧早于挂载同步时被误判为未挂载
+    if !app.plugin_frames.contains_key(&key) {
+        sync_settings_surfaces(app);
+        sync_table_surfaces(app);
+    }
+    let mounted = surface_mounted(app, plugin_id, surface_id);
+    if !mounted {
+        app.plugin_frames.remove(&key);
+    } else {
+        match app.plugins.surface_frame(plugin_id, surface_id) {
+            Some(frame) => {
+                app.plugin_frames.insert(key, frame);
+            }
+            None => {
+                app.plugin_frames.remove(&key);
+            }
+        }
+    }
+    sync_frame_focus(app);
+    // 绘制期同步取走的帧由心跳补投影：这里不能清全局待补标记，
+    // 否则别的面永远等不到
+    ensure_images_surface(app, plugin_id, surface_id)
+}
+
+/// 面是否仍挂在某个宿主承载点上。
+fn surface_mounted(app: &App, plugin_id: &str, surface_id: &str) -> bool {
+    app.plugin_surfaces
+        .iter()
+        .any(|(plugin, surface)| plugin == plugin_id && surface == surface_id)
+        || app
+            .plugin_settings_surfaces
+            .iter()
+            .any(|(plugin, surface)| plugin == plugin_id && surface == surface_id)
+        || app
+            .plugin_table_surfaces
+            .iter()
+            .any(|(plugin, surface)| plugin == plugin_id && surface == surface_id)
+        || app
+            .plugin_windows
+            .values()
+            .any(|entry| entry.plugin_id == plugin_id && entry.window_key == surface_id)
+        || app
+            .plugin_takeovers
+            .values()
+            .any(|entry| entry.plugin_id == plugin_id && entry.surface_id == surface_id)
+        || app.doc_open.as_ref().is_some_and(|doc| {
+            doc.plugin_id == plugin_id && doc.surface_id == surface_id
+        })
+}
+
 /// 帧焦点槽只对仍在投影里的帧有效：面不再有帧即释放并回发失焦。
 fn sync_frame_focus(app: &mut App) {
     let Some(focus) = app.plugin_frame_focus.clone() else { return };
@@ -358,6 +412,25 @@ pub(crate) fn ensure_images(app: &mut App) -> Task<Message> {
             }
         });
     }
+    ensure_images_pending(app, pending)
+}
+
+/// 只扫刚换过的那一帧：帧事件占交互热路径，不能每帧扫全部面的图片指令。
+fn ensure_images_surface(app: &mut App, plugin_id: &str, surface_id: &str) -> Task<Message> {
+    let key = (plugin_id.to_string(), surface_id.to_string());
+    let Some(frame) = app.plugin_frames.get(&key) else {
+        return Task::none();
+    };
+    let mut pending: Vec<(String, ImageSource)> = Vec::new();
+    collect_draw_images(&frame.commands, &mut |source| {
+        if let Some(key) = image_key(app, plugin_id, source) {
+            pending.push((key, source.clone()));
+        }
+    });
+    ensure_images_pending(app, pending)
+}
+
+fn ensure_images_pending(app: &mut App, pending: Vec<(String, ImageSource)>) -> Task<Message> {
     let gen = app.epoch();
     let mut tasks = Vec::new();
     for (key, source) in pending {

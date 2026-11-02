@@ -823,7 +823,7 @@ pub struct EdgesPadding {
 
 ## 5. 整面帧与输入事件
 
-`frame.submitShared` 一帧即该面的完整界面（指令 + 命中区 + 输入声明），帧内容写进共享内存槽位，信封只带槽位坐标；宿主只按几何绘制并把原始输入经 `host:frame.input` 原样回发，插件按帧自行维护悬停 / 按下 / 焦点 / 滚动 / 文本编辑状态。
+插件经 ABI `submit_frame` 提交一帧即该面的完整界面（指令 + 命中区 + 输入声明），SDK 编帧借用帧内字符串，宿主在回调内同步复制成协议帧；宿主只按几何绘制并把原始输入经 `host:frame.input` 原样回发，插件按帧自行维护悬停 / 按下 / 焦点 / 滚动 / 文本编辑状态。
 
 ```rust
 // atelyx-plugin-protocol/src/method.rs
@@ -1151,7 +1151,7 @@ pub struct SurfaceDetachedParams {
 
 ```rust
 // atelyx-plugin-protocol/src/method.rs
-/// 界面提交类方法的回执（`frame.submitShared`）：`applied` = 宿主已接受并生效。
+/// 整面帧提交（`submit_frame`）的回执：`applied` = 宿主已接受并生效。
 #[serde(rename_all = "camelCase")]
 pub struct SubmitResult {
     pub applied: bool,
@@ -1580,7 +1580,7 @@ pub mod doc {
     /// 有未落盘修改时拒绝，插件须先 `doc.save`。
     pub const RENAME: &str = "doc.rename";
     /// 用户打开了插件注册的领域文档类型文件（通知）。`surfaceId` 为宿主分配的实例面标识，
-    /// 插件据此以 `frame.submitShared` 提交该文档实例的界面。
+    /// 插件据此为该面提交整面帧。
     pub const HOST_OPEN: &str = "host:doc.open";
     /// 文档实例已关闭 / 已切换走（通知）。插件此后不得再向该 surfaceId 提交帧。
     pub const HOST_CLOSE: &str = "host:doc.close";
@@ -2589,7 +2589,7 @@ pub struct HttpResult {
 pub struct DocInstanceOpenParams {
     /// 仓库容器内的相对路径（本地仓库）或服务端内容路径（协作空间），与 vault 口径一致。
     pub path: String,
-    /// 宿主为本实例分配的面标识：插件据此以 `frame.submitShared` 提交该文档实例的界面。
+    /// 宿主为本实例分配的面标识：插件据此为该面提交整面帧。
     pub surface_id: String,
 }
 ```

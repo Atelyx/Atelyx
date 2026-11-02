@@ -225,7 +225,7 @@ pub mod doc {
     /// 有未落盘修改时拒绝，插件须先 `doc.save`。
     pub const RENAME: &str = "doc.rename";
     /// 用户打开了插件注册的领域文档类型文件（通知）。`surfaceId` 为宿主分配的实例面标识，
-    /// 插件据此以 `frame.submitShared` 提交该文档实例的界面。
+    /// 插件据此为该面提交整面帧。
     pub const HOST_OPEN: &str = "host:doc.open";
     /// 文档实例已关闭 / 已切换走（通知）。插件此后不得再向该 surfaceId 提交帧。
     pub const HOST_CLOSE: &str = "host:doc.close";
@@ -447,7 +447,7 @@ pub struct SurfaceDetachedParams {
     pub surface_id: String,
 }
 
-/// 界面提交类方法的回执（`frame.submitShared`）：`applied` = 宿主已接受并生效。
+/// 整面帧提交（`submit_frame`）的回执：`applied` = 宿主已接受并生效。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SubmitResult {
@@ -2017,7 +2017,7 @@ pub struct HttpResult {
 pub struct DocInstanceOpenParams {
     /// 仓库容器内的相对路径（本地仓库）或服务端内容路径（协作空间），与 vault 口径一致。
     pub path: String,
-    /// 宿主为本实例分配的面标识：插件据此以 `frame.submitShared` 提交该文档实例的界面。
+    /// 宿主为本实例分配的面标识：插件据此为该面提交整面帧。
     pub surface_id: String,
 }
 

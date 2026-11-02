@@ -1514,7 +1514,11 @@ fn on_doc_saved(
 /// 远端文本落地（服务端合流回填 / 协作远端合入共用）：正文替换、不置脏，
 /// 插件面自行重排；远端偏移与旧选区不再对应，由插件应用新正文后重新上报。
 pub fn apply_remote_text(app: &mut App, new_text: String) {
-    app.doc_text = new_text.clone();
+    let previous = std::mem::replace(&mut app.doc_text, new_text.clone());
+    // 插件手里仍是它上次提交的全文：远端改写后必须留作下一笔合并的祖先
+    if app.doc_base.is_none() {
+        app.doc_base = Some(previous);
+    }
     app.refresh_props();
     if app.doc_active {
         app.doc_selection = None;

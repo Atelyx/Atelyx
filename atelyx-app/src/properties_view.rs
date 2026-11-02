@@ -1198,7 +1198,14 @@ impl App {
     /// 用新属性数据重写 frontmatter 并走正文保存链（空映射 = 删块回到无 frontmatter 态）。
     fn apply_props(&mut self, data: Vec<(String, Yaml)>) {
         let body = crate::strip_frontmatter(&self.doc_text).to_string();
-        self.doc_text = frontmatter::stringify(&Yaml::Map(data), &body);
+        let previous = std::mem::replace(
+            &mut self.doc_text,
+            frontmatter::stringify(&Yaml::Map(data), &body),
+        );
+        // 宿主改了正文：插件下一笔提交仍以它上次给的全文为祖先，不能把这次属性修改覆盖掉
+        if self.doc_base.is_none() {
+            self.doc_base = Some(previous);
+        }
         self.doc_dirty = true;
         self.doc_save_error = None;
         self.autosave_deadline = Some(Instant::now() + crate::AUTOSAVE_DEBOUNCE);

@@ -91,7 +91,7 @@ impl SurfaceFrame {
         if self.hits.len() > MAX_HITS {
             return Err(format!("命中区不得超过 {MAX_HITS} 个"));
         }
-        let mut ids = std::collections::HashSet::new();
+        let mut ids = std::collections::HashSet::with_capacity(self.hits.len());
         for hit in &self.hits {
             if hit.id.trim().is_empty() {
                 return Err("命中区 id 不能为空".into());
@@ -122,12 +122,17 @@ impl SurfaceFrame {
     }
 
     /// 命中区查询：坐标落在多个矩形时取最后声明的（同帧内后声明在上）。
-    pub fn hit_at(&self, x: f32, y: f32) -> Option<&str> {
+    /// 返回命中区本身，调用方拿光标形状不必再按 id 扫一遍。
+    pub fn hit_region_at(&self, x: f32, y: f32) -> Option<&HitRegion> {
         self.hits
             .iter()
             .rev()
             .find(|hit| x >= hit.x && x <= hit.x + hit.w && y >= hit.y && y <= hit.y + hit.h)
-            .map(|hit| hit.id.as_str())
+    }
+
+    /// 命中区 id（见 [`Self::hit_region_at`]）。
+    pub fn hit_at(&self, x: f32, y: f32) -> Option<&str> {
+        self.hit_region_at(x, y).map(|hit| hit.id.as_str())
     }
 
     /// 某命中区的光标形状（未命中或缺省 = 系统默认）。

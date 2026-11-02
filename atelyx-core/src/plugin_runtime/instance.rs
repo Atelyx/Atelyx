@@ -515,7 +515,10 @@ impl Instance {
         self.release_services();
         // 界面与贡献变化广播给壳：壳据此停下已停插件界面的渲染并清掉菜单条目
         if frames_dropped {
-            let _ = self.events.send(PluginEvent::ViewSubmitted { id: self.id.clone() });
+            let _ = self.events.send(PluginEvent::ViewSubmitted {
+                id: self.id.clone(),
+                surface_id: None,
+            });
         }
         if contributions_dropped {
             let _ = self.events.send(PluginEvent::ContributionsChanged { id: self.id.clone() });
@@ -1860,7 +1863,10 @@ impl Instance {
             .map_err(RpcError::failed)?;
         self.resize_acked(&surface_id);
         if !claimed {
-            let _ = self.events.send(PluginEvent::ViewSubmitted { id: self.id.clone() });
+            let _ = self.events.send(PluginEvent::ViewSubmitted {
+                id: self.id.clone(),
+                surface_id: Some(surface_id),
+            });
         }
         Ok(())
     }
@@ -1882,11 +1888,14 @@ impl Instance {
         }
     }
 
-    pub(crate) fn request_redraw_abi(&self, token: u64) {
+    pub(crate) fn request_redraw_abi(&self, token: u64, surface_id: &str) {
         if token != self.run_token.load(Ordering::SeqCst) {
             return;
         }
-        let _ = self.events.send(PluginEvent::ViewSubmitted { id: self.id.clone() });
+        let _ = self.events.send(PluginEvent::ViewSubmitted {
+            id: self.id.clone(),
+            surface_id: Some(surface_id.to_string()),
+        });
     }
 
     pub(crate) fn log_abi(&self, token: u64, level: u32, message: &str) {
@@ -2046,7 +2055,10 @@ impl Instance {
         })
         .map_err(RpcError::failed)?;
         let _ = self.events.send(PluginEvent::ContributionsChanged { id: self.id.clone() });
-        let _ = self.events.send(PluginEvent::ViewSubmitted { id: self.id.clone() });
+        let _ = self.events.send(PluginEvent::ViewSubmitted {
+            id: self.id.clone(),
+            surface_id: None,
+        });
         Ok(json!({}))
     }
 
@@ -2371,12 +2383,18 @@ impl Instance {
     /// 记录一条能力调用。声明与否都执行——记录只提供知情：设置页据此区分「声明能力」与
     /// 「实际用到但未声明」。未声明的首次出现额外广播一次（同一方法不重复打扰）。
     fn record_audit(&self, method_name: &str, params: &Value) {
-        let (name, target) = audit_subject(method_name, params);
-        let permission = capability::permission_for(&name);
-        // 只有占权限类的方法与能力总线入口进审计：界面 / 订阅这类时序方法不触碰宿主资源
-        if permission.is_none() && method_name != service::method::CALL {
-            return;
-        }
+        // 先判权限类再取审计对象：界面 / 订阅这类时序方法不触碰宿主资源，连方法名都不必复制
+        let (name, target, permission) = if method_name == service::method::CALL {
+            let (name, target) = audit_subject(method_name, params);
+            let permission = capability::permission_for(&name);
+            (name, target, permission)
+        } else {
+            let permission = capability::permission_for(method_name);
+            if permission.is_none() {
+                return;
+            }
+            (method_name.to_string(), Some(params), permission)
+        };
         let declared = permission.map_or(true, |p| self.manifest.permissions.contains(&p));
         let detail = target
             .and_then(|inner| inner.get("path"))
@@ -3390,6 +3408,9 @@ mod tests {
             ("ai", "toolResult"),
             ("ai", "registerTool"),
             ("ai", "unregisterTool"),
+            ("ai", "tool.list"),
+            ("ai", "tool.execute"),
+            ("ai", "chat.emit"),
         ] {
             assert_eq!(
                 runtime.forward_to(service_name, method_name),

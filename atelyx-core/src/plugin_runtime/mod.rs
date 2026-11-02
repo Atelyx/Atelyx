@@ -133,7 +133,8 @@ pub enum PluginEvent {
     /// （同一方法每次会话只广播第一次，避免提示刷屏）。
     PermissionDenied { id: String, method: String, detail: String },
     /// 某插件提交了新的整面帧（壳经 [`PluginRuntime::surface_frame`] 取；丢帧不影响最终渲染）。
-    ViewSubmitted { id: String },
+    /// `surface_id` 给定时壳只刷新该面的投影；缺省 = 帧集合整体变化（停用 / 收尾），需全量刷新。
+    ViewSubmitted { id: String, surface_id: Option<String> },
     /// 某插件的贡献注册表变化（注册 / 撤销 / 随会话收尾清空）。
     ContributionsChanged { id: String },
     /// 某插件注册的 AI 工具变化（注册 / 撤销 / 随会话收尾清空）。

@@ -120,9 +120,9 @@ const SECTIONS: &[Section] = &[
     },
     Section {
         title: "整面帧与输入事件",
-        intro: "`frame.submitShared` 一帧即该面的完整界面（指令 + 命中区 + 输入声明），帧内容写进共享内存\
-槽位，信封只带槽位坐标；宿主只按几何绘制并把原始输入经 `host:frame.input` 原样回发，插件按帧自行维护\
-悬停 / 按下 / 焦点 / 滚动 / 文本编辑状态。",
+        intro: "插件经 ABI `submit_frame` 提交一帧即该面的完整界面（指令 + 命中区 + 输入声明），SDK 编帧\
+借用帧内字符串，宿主在回调内同步复制成协议帧；宿主只按几何绘制并把原始输入经 `host:frame.input` 原样\
+回发，插件按帧自行维护悬停 / 按下 / 焦点 / 滚动 / 文本编辑状态。",
         items: items!(
             "method.rs": "frame",
             "frame.rs": "SurfaceFrame",

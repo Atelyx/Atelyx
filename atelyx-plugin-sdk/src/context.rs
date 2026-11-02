@@ -32,7 +32,7 @@ pub struct Context {
 
 /// 同进程宿主的帧提交：帧在这一层直接编成 ABI 指令，不落共享内存。
 pub(crate) type FrameSubmit =
-    Arc<dyn Fn(&str, crate::protocol::frame::SurfaceFrame) -> Result<SubmitResult, RpcError> + Send + Sync>;
+    Arc<dyn Fn(&str, Arc<crate::protocol::frame::SurfaceFrame>) -> Result<SubmitResult, RpcError> + Send + Sync>;
 
 /// 同进程宿主的服务回执：`call_id` 来自宿主发起的服务调用，直接走 ABI 回执。
 pub(crate) type ServiceReply =
@@ -447,6 +447,15 @@ impl Context {
         &self,
         surface_id: &str,
         frame: crate::protocol::frame::SurfaceFrame,
+    ) -> Result<SubmitResult, RpcError> {
+        self.submit_frame_shared(surface_id, Arc::new(frame)).await
+    }
+
+    /// 提交一份共享帧：控件层保留上一帧用于同内容去重时走这条，避免为提交再深拷贝整帧。
+    pub(crate) async fn submit_frame_shared(
+        &self,
+        surface_id: &str,
+        frame: Arc<crate::protocol::frame::SurfaceFrame>,
     ) -> Result<SubmitResult, RpcError> {
         let submit = self
             .inner

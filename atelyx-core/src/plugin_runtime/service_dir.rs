@@ -603,8 +603,10 @@ impl PluginRuntime {
 
     /// 普通方法的转发判定：服务段的活动提供者是外部插件时转给它；宿主保留方法恒走本地。
     pub(crate) fn forward_to(&self, service_name: &str, method_name: &str) -> Forward {
-        let wire = format!("{service_name}.{method_name}");
-        if HOST_OWNED.contains(&wire.as_str()) {
+        if HOST_OWNED.iter().any(|full| {
+            full.split_once('.')
+                .is_some_and(|(service, method)| service == service_name && method == method_name)
+        }) {
             return Forward::Local;
         }
         let dir = self.services.lock().unwrap();
