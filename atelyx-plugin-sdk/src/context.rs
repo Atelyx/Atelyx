@@ -338,6 +338,35 @@ impl Context {
         Ok(result.tags)
     }
 
+    /// 当前仓库的可检索文件清单（按宿主文件树的树序，带行图标与能否打开）：
+    /// 按名检索类界面一次取全量，自己在本地过滤 / 排序；清单重建时宿主另发
+    /// [`crate::protocol::event::name::VAULT_FILES_CHANGED`]。
+    pub async fn vault_files(&self) -> Result<FilesResult, RpcError> {
+        self.call_typed(method::vault::FILES, &Value::Null).await
+    }
+
+    /// 当前容器与在线成员快照（容器种类 / 连接态 / 本端身份 / 在线设备明细）。
+    /// 连接态与在场变化时宿主另发 [`crate::protocol::event::name::SPACE_PEERS_CHANGED`]。
+    pub async fn space_room(&self) -> Result<SpaceRoomResult, RpcError> {
+        self.call_typed(method::space::ROOM, &Value::Null).await
+    }
+
+    /// 空间成员名册快照（列表 / 加载中 / 错误）。缓存为空时宿主顺带发起一次拉取，
+    /// 结果到达后另发 [`crate::protocol::event::name::SPACE_MEMBERS_CHANGED`]。
+    pub async fn space_members(&self) -> Result<SpaceMembersResult, RpcError> {
+        self.call_typed(method::space::MEMBERS, &Value::Null).await
+    }
+
+    /// 打开宿主的「协作空间」菜单（登录与空间列表入口）。
+    pub async fn open_space_menu(&self) -> Result<(), RpcError> {
+        self.call_unit(method::space::OPEN_MENU, &Value::Null).await
+    }
+
+    /// 打开宿主的「协作设置」页。
+    pub async fn open_space_settings(&self) -> Result<(), RpcError> {
+        self.call_unit(method::space::OPEN_SETTINGS, &Value::Null).await
+    }
+
     /// 当前打开的文件（仓库相对路径，按打开顺序）：候选列表这类「打开中的优先」的界面用。
     pub async fn open_files(&self) -> Result<Vec<String>, RpcError> {
         let value: crate::protocol::method::EditorOpenFiles = self

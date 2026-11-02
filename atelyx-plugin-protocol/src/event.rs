@@ -28,9 +28,19 @@ pub mod name {
     /// 仓库内文件变更（宿主保存 / 新建 / 删除 / 改名 / 插件经 `vault` 写入）。只覆盖宿主发起的
     /// 写入，外部程序直接改磁盘不发。payload 见 [`FileChangedPayload`]。
     pub const VAULT_FILE_CHANGED: &str = "vault:file.changed";
+    /// 当前仓库的可检索文件清单重建（进 / 换仓库、宿主刷新文件清单时）。payload 为空对象；
+    /// 订阅方重取 `vault.files` 拿整份清单（条数与顺序都随重建变化）。插件经 `vault` 新建的
+    /// 文件不在其列，要等下一次清单重建才出现。
+    pub const VAULT_FILES_CHANGED: &str = "vault:files.changed";
     /// 协作空间团队元数据的某个键变更（任何成员经 `collab.metaPatch` 或宿主写入）。
     /// payload 见 [`SpaceMetaChangedPayload`]；订阅方按 `key` 过滤后重取该键。
     pub const SPACE_META_CHANGED: &str = "space:meta.changed";
+    /// 空间的连接态 / 在线设备 / 各端打开文件变化（连接建立、名册刷新、在场更新、断开）。
+    /// payload 为空对象；订阅方重取 `space.room`。
+    pub const SPACE_PEERS_CHANGED: &str = "space:peers.changed";
+    /// 空间成员名册缓存变化（拉取开始 / 成功 / 失败、离开空间清空）。payload 为空对象；
+    /// 订阅方重取 `space.members`。
+    pub const SPACE_MEMBERS_CHANGED: &str = "space:members.changed";
     /// 外部文件拖入窗口（宿主只转发绝对路径，读取由订阅方经 `fs` 自理）。
     /// payload 见 [`FileDropPayload`]；未挂载界面的插件应忽略。
     pub const WINDOW_FILE_DROP: &str = "window:file.drop";
@@ -85,7 +95,10 @@ pub fn is_known(name: &str) -> bool {
             | name::AI_CHAT_RELOAD
             | name::AI_CHAT_PERSIST
             | name::VAULT_FILE_CHANGED
+            | name::VAULT_FILES_CHANGED
             | name::SPACE_META_CHANGED
+            | name::SPACE_PEERS_CHANGED
+            | name::SPACE_MEMBERS_CHANGED
             | name::WINDOW_FILE_DROP
             | name::DOC_CHANGED
             | name::DOC_PRESENCE

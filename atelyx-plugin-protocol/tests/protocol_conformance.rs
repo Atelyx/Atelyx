@@ -318,6 +318,15 @@ fn method_type_shapes_are_frozen() {
             "VaultRenameParams" => {
                 frozen_roundtrip::<atelyx_plugin_protocol::method::VaultRenameParams>(&value)
             }
+            "FilesResult" => {
+                frozen_roundtrip::<atelyx_plugin_protocol::method::FilesResult>(&value)
+            }
+            "SpaceRoomResult" => {
+                frozen_roundtrip::<atelyx_plugin_protocol::method::SpaceRoomResult>(&value)
+            }
+            "SpaceMembersResult" => {
+                frozen_roundtrip::<atelyx_plugin_protocol::method::SpaceMembersResult>(&value)
+            }
             "ClipboardWriteImageParams" => {
                 frozen_roundtrip::<atelyx_plugin_protocol::method::ClipboardWriteImageParams>(&value)
             }

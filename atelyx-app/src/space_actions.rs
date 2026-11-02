@@ -35,17 +35,6 @@ pub(crate) fn client_platform() -> &'static str {
     std::env::consts::OS
 }
 
-/// 平台标识 → 展示名（未知标识原样透出，缺失由调用方标注「未知平台」）。
-pub(crate) fn platform_label(token: &str) -> String {
-    match token.to_ascii_lowercase().as_str() {
-        "windows" => "Windows".into(),
-        "linux" => "Linux".into(),
-        "android" => "Android".into(),
-        "macos" => "macOS".into(),
-        other => other.to_string(),
-    }
-}
-
 /// 协作在场色缺省值（用户未自定义 collab_color 时的设备标色）。
 pub(crate) const DEFAULT_COLLAB_COLOR: &str = "#30bced";
 /// 协作展示色色池（首次登录随机指派与取色器预设共用）。
@@ -455,6 +444,7 @@ pub fn open_space_menu(app: &mut App, window: iced::window::Id, cursor: iced::Po
 pub fn fetch_members(app: &mut App) -> Task<Message> {
     let Some(session) = session_of(app) else { return Task::none() };
     app.space_members_loading = true;
+    app.plugins.on_space_members_changed();
     let gen = app.epoch();
     let client = session.client;
     let space_id = session.space_id;
@@ -464,24 +454,31 @@ pub fn fetch_members(app: &mut App) -> Task<Message> {
     )
 }
 
-/// 成员名册懒装载（PersistTick 搭载）：名册视图或成员弹层在展示且无有效缓存时拉取。
+/// 成员名册懒装载（`space.members` 请求与成员弹层共用）：无有效缓存且在空间内才拉取。
 /// 加载失败不自动重试（重开弹层即重拉），防失败后周期空转。
-pub fn members_tick(app: &mut App) -> Task<Message> {
+pub fn ensure_members(app: &mut App) -> Task<Message> {
     if app.space_members_loading
         || app.space_members.is_some()
         || app.space_members_error.is_some()
     {
         return Task::none();
     }
-    let shown = layout_view::view_displayed(app, "collabroom")
-        || matches!(
-            app.popup.as_ref().map(|(_, open)| &open.state),
-            Some(layout_view::PopupState::SpaceMembers)
-        );
-    if !shown || session_of(app).is_none() {
+    if session_of(app).is_none() {
         return Task::none();
     }
     fetch_members(app)
+}
+
+/// 成员名册懒装载（PersistTick 搭载）：成员弹层在展示且无有效缓存时拉取。
+pub fn members_tick(app: &mut App) -> Task<Message> {
+    let shown = matches!(
+        app.popup.as_ref().map(|(_, open)| &open.state),
+        Some(layout_view::PopupState::SpaceMembers)
+    );
+    if !shown {
+        return Task::none();
+    }
+    ensure_members(app)
 }
 
 fn on_members_loaded(
@@ -500,6 +497,7 @@ fn on_members_loaded(
         }
         Err(e) => app.space_members_error = Some(e.to_string()),
     }
+    app.plugins.on_space_members_changed();
     Task::none()
 }
 
@@ -869,6 +867,7 @@ fn clear_session_state(app: &mut App) {
     app.space_doc_save_flush_queued = false;
     app.tag_vocab.clear();
     app.note_files.clear();
+    app.plugins.on_files_changed();
     app.history.clear();
     app.history_gen = 0;
     app.history_loading = false;
@@ -897,6 +896,7 @@ fn clear_session_state(app: &mut App) {
     app.space_members = None;
     app.space_members_loading = false;
     app.space_members_error = None;
+    app.plugins.on_space_members_changed();
     app.space_member_confirm = None;
     app.space_invites = None;
     app.space_invites_loading = false;
@@ -1270,6 +1270,7 @@ fn on_tree_loaded(app: &mut App, gen: u64, result: Result<Vec<space_client::Tree
             let mut files = Vec::new();
             crate::collect_md_files(&file_tree, &mut files);
             app.note_files = files;
+            app.plugins.on_files_changed();
             app.file_count = Some(count_tree_files(&tree));
             // 树在途期间发起的「展开全部」在此续接：全目录 children 已就绪，
             // 从根发一次展开回执完成展开集回填与 pending 归零
@@ -2768,6 +2769,7 @@ fn teardown_pump(app: &mut App) {
     app.space_own_peer_id = None;
     app.space_connected = false;
     app.remote_cursors.clear();
+    app.plugins.on_space_peers_changed();
 }
 
 /// 摘除当前文档的协作绑定（关闭文档 / 删除打开中文档）：先广播离场帧（对端即时
@@ -2954,6 +2956,8 @@ fn presence_open_files(app: &App) -> Vec<serde_json::Value> {
 /// 本端 presence 上行（打开文件清单；名册展示与跳转用）。
 /// 旧字段 file/view 保留为主打开文件（旧版客户端只认这两个字段）。
 pub fn send_presence(app: &App) {
+    // 本端打开的文件是房间快照的一部分：上行 presence 的同时通知订阅方重取
+    app.plugins.on_space_peers_changed();
     let open_files = presence_open_files(app);
     let presence = match open_files.first() {
         Some(primary) => serde_json::json!({
@@ -2988,7 +2992,7 @@ pub(crate) fn peer_open_files(presence: Option<&serde_json::Value>) -> Vec<Strin
 }
 
 /// 本端协作身份（昵称 + 成员色）：文档在场与表格在场共用同一份身份。
-fn local_identity(app: &App) -> (String, String) {
+pub(crate) fn local_identity(app: &App) -> (String, String) {
     let name = app
         .global
         .last_identity
@@ -3518,6 +3522,7 @@ fn on_space_event(app: &mut App, event: atelyx_core::collab::SpaceEvent) -> Task
         E::Ready { peer_id } => {
             app.space_own_peer_id = Some(peer_id);
             app.space_connected = true;
+            app.plugins.on_space_peers_changed();
             app.notify(NoticeLevel::Success, "协作已连接");
             collab_doc_resume(app);
             send_presence(app);
@@ -3566,11 +3571,13 @@ fn on_space_event(app: &mut App, event: atelyx_core::collab::SpaceEvent) -> Task
                     collab.drop_peer(peer);
                 }
             }
+            app.plugins.on_space_peers_changed();
             Task::none()
         }
         E::Presence { peer_id, presence } => {
             if let Some(peer) = app.space_peers.iter_mut().find(|p| p.peer_id == peer_id) {
                 peer.presence = Some(presence);
+                app.plugins.on_space_peers_changed();
             }
             Task::none()
         }
@@ -3635,6 +3642,7 @@ fn on_space_event(app: &mut App, event: atelyx_core::collab::SpaceEvent) -> Task
             // 连接失败（地址校验被拒 / 网络不可达）：泵仍按退避重连，命令经泵缓冲
             // 断线期照常上行；命令入口保留（PumpReady 只在流建立时回填一次，清了无法再生）
             app.space_connected = false;
+            app.plugins.on_space_peers_changed();
             app.notify(NoticeLevel::Warning, format!("协作连接失败：{message}"));
             Task::none()
         }
@@ -3644,12 +3652,14 @@ fn on_space_event(app: &mut App, event: atelyx_core::collab::SpaceEvent) -> Task
             app.space_pump_denied = true;
             app.space_cmds = None;
             app.space_connected = false;
+            app.plugins.on_space_peers_changed();
             clear_remote_presence(app);
             app.notify(NoticeLevel::Error, format!("协作：{message}"));
             Task::none()
         }
         E::Disconnected => {
             app.space_connected = false;
+            app.plugins.on_space_peers_changed();
             clear_remote_presence(app);
             app.notify(NoticeLevel::Warning, "协作连接断开，正在重连");
             Task::none()

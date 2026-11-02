@@ -13,6 +13,8 @@ members = [
     "plugins/notes",
     "plugins/recent",
     "plugins/history",
+    "plugins/search",
+    "plugins/collab",
     "atelyx-plugin-abi",
     "atelyx-plugin-sample",
     "xtask",

@@ -1,0 +1,19 @@
+[package]
+name = "atelyx-plugin-collab"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Atelyx 协作房间插件：空间连接态、成员名册与在线设备（事实与弹层在宿主）"
+license = "Apache-2.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+atelyx-plugin-protocol = { version = "0.1.0", path = "../../atelyx-plugin-protocol" }
+atelyx-plugin-sdk = { version = "0.1.0", path = "../../atelyx-plugin-sdk" }
+async-trait = "0.1"
+tokio = { version = "1", features = ["sync"] }
+
+[dev-dependencies]
+serde_json = "1"

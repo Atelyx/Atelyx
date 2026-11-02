@@ -1198,6 +1198,10 @@ impl Instance {
                         path: p.path,
                     }
                 }
+                method::vault::FILES => HostRequest::VaultFiles {
+                    plugin_id: self.id.clone(),
+                    request_id: 0,
+                },
                 method::vault::READ_BINARY => {
                     let p: method::PathParams = parse(params).map_err(|e| e.to_string())?;
                     HostRequest::VaultReadBinary {
@@ -1514,6 +1518,22 @@ impl Instance {
                     }
                 }
                 method::recent::LIST => HostRequest::RecentList {
+                    plugin_id: self.id.clone(),
+                    request_id: 0,
+                },
+                method::space::ROOM => HostRequest::SpaceRoom {
+                    plugin_id: self.id.clone(),
+                    request_id: 0,
+                },
+                method::space::MEMBERS => HostRequest::SpaceMembers {
+                    plugin_id: self.id.clone(),
+                    request_id: 0,
+                },
+                method::space::OPEN_MENU => HostRequest::SpaceOpenMenu {
+                    plugin_id: self.id.clone(),
+                    request_id: 0,
+                },
+                method::space::OPEN_SETTINGS => HostRequest::SpaceOpenSettings {
                     plugin_id: self.id.clone(),
                     request_id: 0,
                 },
@@ -2692,6 +2712,7 @@ fn is_shell_method(method_name: &str) -> bool {
             | method::vault::IMPORT_FILE
             | method::vault::IMAGE_INFO
             | method::vault::LIST
+            | method::vault::FILES
             | method::vault::EXISTS
             | method::vault::TAGS
             | method::vault::REMOVE
@@ -2726,6 +2747,10 @@ fn is_shell_method(method_name: &str) -> bool {
             | method::history::GROUPS
             | method::history::OPEN
             | method::recent::LIST
+            | method::space::ROOM
+            | method::space::MEMBERS
+            | method::space::OPEN_MENU
+            | method::space::OPEN_SETTINGS
     )
 }
 

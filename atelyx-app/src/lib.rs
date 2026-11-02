@@ -398,16 +398,12 @@ enum Message {
     Props(PropsMsg),
     /// 标签词汇表落地（gen 守卫）。
     TagVocabLoaded(u64, Result<Vec<vault::TagRow>, String>),
-    /// 全仓库文件清单落地（搜索面板数据源；gen 守卫）。
+    /// 全仓库文件清单落地（`vault.files` 数据源；gen 守卫）。
     NoteFilesLoaded(u64, Result<Vec<(String, String)>, String>),
     /// 方向键（表格选中态导航；无可分派的输入态时调整分割把手）。
     NavKey(bool, bool),
     /// Enter（表格选中态 = 下移一行）。
     EnterKey,
-    /// 搜索面板查询词输入。
-    SearchInput(String),
-    /// 搜索面板清空查询词（清空后回焦到输入框）。
-    SearchClear,
     /// 历史版本列表落地（gen 守卫 + kind/文件身份守卫：版本快照随文件绑定，串台会跨文件回滚）。
     HistoryLoaded(u64, atelyx_core::history::HistoryKind, String, Vec<atelyx_core::history::HistoryVersion>),
     /// 历史记录弹层（打开 / 展开预览 / 回滚二段确认）。
@@ -1420,10 +1416,8 @@ pub struct App {
     panel_tab_scroll_x: HashMap<String, f32>,
     /// 全仓库标签词汇表（tags 候选；打开仓库与载入笔记后刷新）。
     pub tag_vocab: Vec<vault::TagRow>,
-    /// 全仓库文件清单（搜索面板数据源；树序，全部文件类型）。
+    /// 全仓库文件清单（`vault.files` 的数据源；树序，全部文件类型）。
     pub note_files: Vec<(String, String)>,
-    /// 搜索面板查询词。
-    pub search_query: String,
     /// 历史弹层/上下文的版本列表（打开弹层与每次保存后刷新；旧→新序）。
     pub history: Vec<atelyx_core::history::HistoryVersion>,
     /// 列表加载世代（回滚守卫：容器/仓库切换后列表过期）。
@@ -1692,7 +1686,6 @@ impl App {
                 panel_tab_scroll_x: HashMap::new(),
                 tag_vocab: Vec::new(),
                 note_files: Vec::new(),
-                search_query: String::new(),
                 history: Vec::new(),
                 history_gen: 0,
                 history_restore_pending: false,
@@ -2087,6 +2080,7 @@ impl App {
             Message::NoteFilesLoaded(gen, Ok(files)) => {
                 if gen == self.epoch() {
                     self.note_files = files;
+                    self.plugins.on_files_changed();
                 }
                 Task::none()
             }
@@ -2130,17 +2124,6 @@ impl App {
                 } else {
                     Task::none()
                 }
-            }
-            Message::SearchInput(s) => {
-                self.search_query = s;
-                Task::none()
-            }
-            Message::SearchClear => {
-                self.search_query.clear();
-                // 点击清空钮会把输入焦点移走：清空后回焦，可直接继续输入
-                iced::widget::operation::focus(iced::widget::Id::new(
-                    layout_view::SEARCH_INPUT_ID,
-                ))
             }
             Message::HistoryLoaded(gen, kind, rel, mut versions) => {
                 // 身份守卫：版本快照随 kind+文件绑定（弹层显式指定，或当前上下文同源），
@@ -4958,7 +4941,7 @@ impl App {
         )
     }
 
-    /// 全仓库文件清单（搜索面板数据源；树序）。空间模式由整树回执填充，此处直通。
+    /// 全仓库文件清单（`vault.files` 数据源；树序）。空间模式由整树回执填充，此处直通。
     fn refresh_note_files(&self) -> Task<Message> {
         if matches!(self.repo_kind, RepoKind::Space(_)) {
             return Task::none();

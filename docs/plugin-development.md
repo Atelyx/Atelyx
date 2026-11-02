@@ -511,7 +511,7 @@ ctx.begin_window_drag("main").await?;   // 宿主接管拖动手势
 | --- | --- |
 | `state` | 按插件隔离的自持 JSON，落 `<插件目录>/data/state.json`；损坏时宿主先备份原文再降级 |
 | `fs` | `private_dir()` 给私有数据目录；其余接受**任意绝对路径**，父目录自动创建 |
-| `vault` | 路径相对当前仓库根，不能越出仓库；隐藏段可访问（插件自管附件可放 `.atelyx/temp/`），本地仓库与协作空间的 `vault_list` / `vault_exists` 同口径保留隐藏项（原子写残留 `.tmp` 除外）；**正被编辑器打开的文件拒写**。文本与二进制两条通道，二进制单次上限 32 MiB；更大的文件先落到插件私有目录再用 `vault_import_file` 让宿主按路径收进仓库（字节不进 RPC，源文件须在私有目录内，复制语义，见 §8.9）。`vault_image_info` 只解文件头给出图片固有像素尺寸（png / jpeg / gif / bmp / webp），不送回文件内容；`vault_tags()` 取宿主缓存的标签词表快照（按出现次数降序、最多 1000 条，属性标签值候选这类界面用；刚写入的新标签要等宿主下次重建词表才出现）；`vault_backlinks(path)` 取引用该文档的其它文档（wiki 链接索引，本地按增量索引、协作空间走服务端端点）。结构变更用 `vault_rename(from, to)` / `vault_remove(path)`：文件或文件夹（递归），`to` 不可已存在、文件夹不可移入自身、仓库根不可删；改名会同步 `.md` 内部链接与画布节点引用。**路径正被笔记 / 表格 / 画布 / 插件文档打开，或被当前画布引用时拒收**——这些持有者仍按旧路径工作，放行后写回会产生幽灵文件，先关闭对应面再操作 |
+| `vault` | 路径相对当前仓库根，不能越出仓库；隐藏段可访问（插件自管附件可放 `.atelyx/temp/`），本地仓库与协作空间的 `vault_list` / `vault_exists` 同口径保留隐藏项（原子写残留 `.tmp` 除外）；**正被编辑器打开的文件拒写**。文本与二进制两条通道，二进制单次上限 32 MiB；更大的文件先落到插件私有目录再用 `vault_import_file` 让宿主按路径收进仓库（字节不进 RPC，源文件须在私有目录内，复制语义，见 §8.9）。`vault_image_info` 只解文件头给出图片固有像素尺寸（png / jpeg / gif / bmp / webp），不送回文件内容；`vault_tags()` 取宿主缓存的标签词表快照（按出现次数降序、最多 1000 条，属性标签值候选这类界面用；刚写入的新标签要等宿主下次重建词表才出现）；`vault_backlinks(path)` 取引用该文档的其它文档（wiki 链接索引，本地按增量索引、协作空间走服务端端点）；`vault_files()` 一次取全仓库可检索文件（树序，带行图标键与能否在面板内打开），按名检索 / 文件清单类界面用它，过滤与排序在插件做。结构变更用 `vault_rename(from, to)` / `vault_remove(path)`：文件或文件夹（递归），`to` 不可已存在、文件夹不可移入自身、仓库根不可删；改名会同步 `.md` 内部链接与画布节点引用。**路径正被笔记 / 表格 / 画布 / 插件文档打开，或被当前画布引用时拒收**——这些持有者仍按旧路径工作，放行后写回会产生幽灵文件，先关闭对应面再操作 |
 | `editor` | 当前文档的选区读写：`editor_selection()` 取文档路径、选区字节区间与选中文本（阅读态 / 未打开文档回空选区），`editor_replace_selection(text)` 替换选区（空串 = 删除，走文档同一套保存链）；`editor_open_file(path)` 让宿主按扩展名路由打开文件（布局里没有对应视图时新增并激活），`editor_open_file_quiet(path)` 只打开文件、不动布局（列表 / 跳板类入口用）；`open_files()` 取当前打开的文件（仓库相对路径，按打开顺序），候选列表这类「打开中的优先」的界面用它置顶；`editor_prefs()` 取宽松换行 / 页面内标题 / 正文宽度，变更经 `editor:prefs.changed` 下发 |
 | `doc` | 文档正文读写（宿主持真源与保存链）：`doc_open(path)` 载入并建立会话（换篇前要求旧篇无未落盘输入；同篇重开直接回内存正文，不读盘覆盖未落盘输入），`doc_edit(path, text)` 提交整篇（宿主与协作远端三方合并，合并结果经 `doc:changed` 回填），`doc_save(path)` 请求保存，`doc_close(path)` 关闭会话，`doc_awareness(path, anchor, head)` 上报选区，`doc_rename(path, name)` 改主名（同目录、保留扩展名；要求无未落盘修改）。订阅 `doc:changed` 收正文 / 脏标记 / 保存错误，订阅 `doc:presence` 收远端协作者光标区间；路径必须是当前会话那一篇 |
 | `table` | 读写当前打开的表格。真源在宿主，写入与用户编辑同一出口（合并落盘 + 协作补丁）；**禁止**用 `fs` 旁路读写 `.atb`。快照含稳定表格 id、列宽、行内单元格样式、用户当前选区与其他协作者选区（显示名 + 身份色）；向图片字段写图片用 `table_set_cell_image`（图片先经 `vault_write_binary` 落仓库，再传仓库相对路径） |
@@ -525,6 +525,7 @@ ctx.begin_window_drag("main").await?;   // 宿主接管拖动手势
 | `ai` | 见 §8.4 |
 | `tray` | 见 §8.6 |
 | `collab` | 见 §8.7 |
+| `space` | 房间事实：`space_room()` 取容器种类 / 连接态 / 本端身份 / 在线设备（含各端打开的文件与行图标），`space_members()` 取成员名册快照（列表 / 加载中 / 错误，缓存为空时宿主顺带拉一次）；`open_space_menu()` / `open_space_settings()` 让宿主弹「协作空间」菜单与「协作设置」页。插件不连服务端；变化经 `space:peers.changed` / `space:members.changed` 到达，收到后重取对应快照 |
 
 `vault` 的读写**必须**经能力面：直接改盘会绕过写盘队列与协作通道，属于内容丢失级缺陷。
 
@@ -687,6 +688,9 @@ ctx.subscribe("ai:chat.reload").await?;  // 会话真源整体重载完成（换
 ctx.subscribe("ai:chat.persist").await?; // 会话落盘失败置位 / 恢复
 ctx.subscribe("vault:file.changed").await?; // 仓库文件被宿主写入（保存 / 新建 / 删除 / 改名）
 ctx.subscribe("window:file.drop").await?; // 外部文件拖入窗口（绝对路径）
+ctx.subscribe("vault:files.changed").await?;   // 可检索文件清单重建（重取 vault_files）
+ctx.subscribe("space:peers.changed").await?;   // 空间连接态 / 在线设备变化（重取 space_room）
+ctx.subscribe("space:members.changed").await?; // 空间名册缓存变化（重取 space_members）
 ```
 
 - `vault:switch` 只在声明了 `keepMountedOnVaultSwitch` 时才有意义：未声明的插件在收到它之前就被宿主重载了。payload：`{ kind: "local", root }` 或 `{ kind: "space", spaceId }`。
@@ -695,6 +699,7 @@ ctx.subscribe("window:file.drop").await?; // 外部文件拖入窗口（绝对�
 - `table:selection.changed` payload：`{ path?, selection?, remoteSelections? }`——当前表格路径、本端选区与协作者选区（`name` / `color`（`#rrggbb`）/ `selection`），选区形态为 `cell` / `range` / `row` / `column` / `all`。内容不变、只有选区移动也发；没有打开表格时用空载荷通知一次。载荷直接带选区，不必为一次拖选重取快照。
 - `vault:file.changed` payload：`{ path, kind, oldPath? }`，`kind` 为 `created` / `updated` / `deleted` / `renamed`（改名另带旧路径）。只覆盖**宿主发起的写入**——壳自身保存 / 新建 / 复制 / 删除 / 改名与插件经 `vault` 的写入；外部程序直接改磁盘不发，需要感知外部改动仍要按 mtime 轮询。删除目录只发目录本身一条，其下文件不逐条发（按前缀作废缓存，需要明细就重新列举）。
 - `window:file.drop` payload：`{ paths }`，绝对路径（宿主只转发路径，读取由插件经 `fs` 自理）。广播给所有订阅方，插件按自身界面是否可见决定是否接收。
+- `vault:files.changed` / `space:peers.changed` / `space:members.changed` 的 payload 都是空对象：订阅方重取 `vault_files()` / `space_room()` / `space_members()`。名册缓存只随当前空间会话有效，切容器即清空并发一次 `space:members.changed`。
 
 ### 8.6 系统托盘
 
@@ -753,7 +758,7 @@ ctx.declare_default_layout(
 ).await?;
 ```
 
-- `spec` 是分割树：`split { direction: "horizontal" | "vertical", children, sizes }` 或 `panel { views }`；`views` 写视图 id——本插件的面板贡献为 `plugin:<插件 id>:<贡献 id>`；内置视图只有 `canvas` / `table` / `files` / `search`，笔记 / 日历 / AI 对话等其余界面一律写插件面 id。首个为激活标签。
+- `spec` 是分割树：`split { direction: "horizontal" | "vertical", children, sizes }` 或 `panel { views }`；`views` 写视图 id——本插件的面板贡献为 `plugin:<插件 id>:<贡献 id>`；内置视图只有 `canvas` / `table` / `files` / `inspector`，笔记 / 搜索 / 协作房间 / 日历 / AI 对话等其余界面一律写插件面 id。首个为激活标签。
 - 只摆一次：宿主在 `ui-state.json` 记账，用户改名 / 删除后不会再补回；首次启用时当前场景已含规格里的任一视图则只记账不新建，避免与用户已摆好的界面重复。
 - 布局名与既有布局重名时宿主追加序号并激活新布局；规格超限（深度 16、面板 32、单面板视图 16、名字 64 字节）或非法即拒收。
 

@@ -123,6 +123,46 @@ impl Edges {
     }
 }
 
+/// 容器与内容区的交互形态：可按（悬停底色 + 点击命中）或只悬停（只登记提示命中）。
+#[derive(Clone, Copy)]
+enum RegionKind {
+    Click { radius: f32, selected: bool, enabled: bool },
+    Hover,
+}
+
+impl RegionKind {
+    fn paint(&self, ctx: &mut BuildCtx<'_>, id: &str, rect: Rect, visible: Rect) {
+        match *self {
+            RegionKind::Click { radius, selected, enabled } => {
+                let lit = enabled && (ctx.hovered(id) || ctx.pressed(id));
+                if selected || lit {
+                    ctx.draw(DrawCommand::Rect {
+                        x: rect.x,
+                        y: rect.y,
+                        w: rect.w,
+                        h: rect.h,
+                        fill: Some(theme::token(if selected {
+                            ColorToken::AccentSoft
+                        } else {
+                            ColorToken::Hover
+                        })),
+                        stroke: None,
+                        stroke_width: None,
+                        corner_radius: Some(radius),
+                        shadow: None,
+                    });
+                }
+                if enabled {
+                    // 先登记容器命中：子项随后登记，按「后声明在上」压住容器
+                    ctx.hit(id, visible, HitCursor::Pointer);
+                    ctx.record(id, Layout::Button);
+                }
+            }
+            RegionKind::Hover => ctx.hit(id, visible, HitCursor::Default),
+        }
+    }
+}
+
 /// 容器外观：底色 / 边框 / 圆角都取主题 token，可带投影（浮层压住下层内容）。
 #[derive(Clone, Copy, Debug)]
 pub struct BoxStyle {
@@ -981,7 +1021,42 @@ impl<'c, 'a> Ui<'c, 'a> {
         enabled: bool,
         build: impl FnOnce(&mut Ui<'_, 'a>),
     ) {
-        let id = id.into();
+        self.region_box(
+            id.into(),
+            width,
+            pad,
+            RegionKind::Click { radius, selected, enabled },
+            build,
+        );
+    }
+
+    /// 只参与悬停的容器：不画悬停底色、不响应点击，用于「只呈现、不可操作」的行。
+    /// 行上可挂 [`Ui::hint`]（悬停提示需要该行有命中区才能触发）。
+    pub fn hover_row(&mut self, id: impl Into<String>, pad: Edges, build: impl FnOnce(&mut Ui<'_, 'a>)) {
+        self.hover_box(id, BoxWidth::Fill, pad, build);
+    }
+
+    /// 定宽 / 撑满的只悬停容器（形态同 [`Ui::hover_row`]）。
+    pub fn hover_box(
+        &mut self,
+        id: impl Into<String>,
+        width: BoxWidth,
+        pad: Edges,
+        build: impl FnOnce(&mut Ui<'_, 'a>),
+    ) {
+        self.region_box(id.into(), width, pad, RegionKind::Hover, build);
+    }
+
+    /// 可按 / 只悬停两种容器的共同排布：内容宽度、内边距与裁剪一致，差异只在
+    /// 悬停底色的绘制与命中登记方式。
+    fn region_box(
+        &mut self,
+        id: String,
+        width: BoxWidth,
+        pad: Edges,
+        kind: RegionKind,
+        build: impl FnOnce(&mut Ui<'_, 'a>),
+    ) {
         let clip = self.clip;
         let mut sub = Ui::new(&mut *self.ctx, clip);
         build(&mut sub);
@@ -995,12 +1070,8 @@ impl<'c, 'a> Ui<'c, 'a> {
             width: item_width,
             fill_height: false,
             height: Box::new(move |metrics, width| {
-                column_height(
-                    &for_size,
-                    metrics,
-                    (width - pad.left - pad.right).max(1.0),
-                    0.0,
-                ) + pad.top
+                column_height(&for_size, metrics, (width - pad.left - pad.right).max(1.0), 0.0)
+                    + pad.top
                     + pad.bottom
             }),
             draw: Box::new(move |ctx, rect, clip| {
@@ -1008,29 +1079,7 @@ impl<'c, 'a> Ui<'c, 'a> {
                 if visible.is_empty() {
                     return;
                 }
-                let lit = enabled && (ctx.hovered(&id) || ctx.pressed(&id));
-                if selected || lit {
-                    ctx.draw(DrawCommand::Rect {
-                        x: rect.x,
-                        y: rect.y,
-                        w: rect.w,
-                        h: rect.h,
-                        fill: Some(theme::token(if selected {
-                            ColorToken::AccentSoft
-                        } else {
-                            ColorToken::Hover
-                        })),
-                        stroke: None,
-                        stroke_width: None,
-                        corner_radius: Some(radius),
-                        shadow: None,
-                    });
-                }
-                if enabled {
-                    // 先登记容器命中：子项随后登记，按「后声明在上」压住容器
-                    ctx.hit(&id, rect.intersect(clip), HitCursor::Pointer);
-                    ctx.record(&id, Layout::Button);
-                }
+                kind.paint(ctx, &id, rect, visible);
                 let inner = Rect::new(
                     rect.x + pad.left,
                     rect.y + pad.top,

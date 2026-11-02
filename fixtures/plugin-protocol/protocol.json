@@ -1013,6 +1013,105 @@
       }
     },
     {
+      "name": "vault.files result",
+      "type": "FilesResult",
+      "value": {
+        "files": [
+          {
+            "path": "notes/方案.md",
+            "name": "方案.md",
+            "icon": "sticky-note",
+            "openable": true
+          },
+          {
+            "path": "media/b.png",
+            "name": "b.png",
+            "icon": "image",
+            "openable": false
+          }
+        ]
+      }
+    },
+    {
+      "name": "space.room result",
+      "type": "SpaceRoomResult",
+      "value": {
+        "kind": "space",
+        "connected": true,
+        "selfPeerId": "1",
+        "selfIdentity": {
+          "name": "小明",
+          "color": "#30bced",
+          "platform": "windows",
+          "version": "0.6.5",
+          "files": [
+            {
+              "path": "notes/方案.md",
+              "icon": "sticky-note"
+            }
+          ]
+        },
+        "peers": [
+          {
+            "peerId": "2",
+            "nickname": "小红",
+            "device": "桌面端",
+            "color": "#e06c75",
+            "platform": "linux",
+            "version": "0.6.5",
+            "files": [
+              {
+                "path": "plan.atb",
+                "icon": "table"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "space.room result (local)",
+      "type": "SpaceRoomResult",
+      "value": {
+        "kind": "local",
+        "connected": false
+      }
+    },
+    {
+      "name": "space.members result",
+      "type": "SpaceMembersResult",
+      "value": {
+        "ready": true,
+        "loading": false,
+        "members": [
+          {
+            "username": "owner",
+            "displayName": "所有者",
+            "role": "owner"
+          },
+          {
+            "username": "guest",
+            "displayName": "访客",
+            "role": "viewer"
+          },
+          {
+            "username": "editor",
+            "displayName": "编辑者",
+            "role": "editor"
+          }
+        ]
+      }
+    },
+    {
+      "name": "space.members result (loading with error)",
+      "type": "SpaceMembersResult",
+      "value": {
+        "ready": false,
+        "loading": true,
+        "error": "网络不可达"
+      }
+    },
+    {
       "name": "clipboard.writeImage params",
       "type": "ClipboardWriteImageParams",
       "value": {

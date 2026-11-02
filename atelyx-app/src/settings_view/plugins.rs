@@ -21,7 +21,10 @@ use atelyx_core::plugin_runtime::{
     MeasureBatchParams,
     MeasureBatchResult, NotificationLevel, Permission, PluginEvent, PluginRuntime, PluginStatus,
     DocAwarenessParams, DocEditParams, DocOpenParams, DocRenameParams, DocSaveParams,
-    PluginSummary, SetTrayItemsParams, VaultTagsResult, MAX_VAULT_BINARY_BYTES, PLATFORM_PLUGIN,
+    FilesResult, PluginSummary, SetTrayItemsParams, SpaceContainerKind, SpaceMember,
+    SpaceMemberRole, SpaceMembersResult, SpacePeer, SpacePeerFile, SpaceRoomResult,
+    SpaceSelfIdentity, VaultFileEntry, VaultTagsResult,
+    MAX_VAULT_BINARY_BYTES, PLATFORM_PLUGIN,
 };
 use atelyx_core::space_client::SpaceError;
 
@@ -254,6 +257,8 @@ pub enum PluginsMsg {
         result: Result<serde_json::Value, String>,
     },
     VaultList { request_id: u64, path: String },
+    /// 插件请求全仓库可检索文件清单（`vault.files`）。
+    VaultFiles { request_id: u64 },
     VaultExists { request_id: u64, path: String },
     /// 删除（文件夹递归；仓库根拒绝）与重命名 / 移动（目标不可已存在；引用跟随）。
     VaultRemove { request_id: u64, path: String },
@@ -328,6 +333,14 @@ pub enum PluginsMsg {
     HistoryOpen { request_id: u64, params: HistoryOpenParams },
     /// 当前容器的最近打开清单（`recent.list`）。
     RecentList { request_id: u64 },
+    /// 当前容器与在线成员快照（`space.room`）。
+    SpaceRoom { request_id: u64 },
+    /// 空间成员名册快照（`space.members`；缓存为空时顺带发起拉取）。
+    SpaceMembers { request_id: u64 },
+    /// 打开宿主的「协作空间」菜单（`space.openMenu`）。
+    SpaceOpenMenu { request_id: u64 },
+    /// 打开宿主的「协作设置」页（`space.openSettings`）。
+    SpaceOpenSettings { request_id: u64 },
     /// 协作空间团队元数据（仅在协作空间可用；写入只改给出的键）。
     CollabMetaGet { request_id: u64, params: CollabMetaGetParams },
     CollabMetaPatch { request_id: u64, params: CollabMetaPatchParams },
@@ -512,6 +525,9 @@ pub fn host_requests_stream(spec: &RuntimeSpec) -> impl iced::futures::Stream<It
                 HostRequest::VaultList { request_id, path, .. } => {
                     Message::Plugins(PluginsMsg::VaultList { request_id, path })
                 }
+                HostRequest::VaultFiles { request_id, .. } => {
+                    Message::Plugins(PluginsMsg::VaultFiles { request_id })
+                }
                 HostRequest::VaultExists { request_id, path, .. } => {
                     Message::Plugins(PluginsMsg::VaultExists { request_id, path })
                 }
@@ -592,6 +608,18 @@ pub fn host_requests_stream(spec: &RuntimeSpec) -> impl iced::futures::Stream<It
                 }
                 HostRequest::RecentList { request_id, .. } => {
                     Message::Plugins(PluginsMsg::RecentList { request_id })
+                }
+                HostRequest::SpaceRoom { request_id, .. } => {
+                    Message::Plugins(PluginsMsg::SpaceRoom { request_id })
+                }
+                HostRequest::SpaceMembers { request_id, .. } => {
+                    Message::Plugins(PluginsMsg::SpaceMembers { request_id })
+                }
+                HostRequest::SpaceOpenMenu { request_id, .. } => {
+                    Message::Plugins(PluginsMsg::SpaceOpenMenu { request_id })
+                }
+                HostRequest::SpaceOpenSettings { request_id, .. } => {
+                    Message::Plugins(PluginsMsg::SpaceOpenSettings { request_id })
                 }
                 HostRequest::HistoryOpen { request_id, params, .. } => {
                     Message::Plugins(PluginsMsg::HistoryOpen { request_id, params })
@@ -1190,6 +1218,11 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
                 }
             }
         }
+        PluginsMsg::VaultFiles { request_id } => {
+            let result = serde_json::to_value(files_result(app))
+                .map_err(|e| format!("可检索文件清单不可序列化：{e}"));
+            resolve_vault(app, request_id, result)
+        }
         PluginsMsg::VaultList { request_id, path } => {
             let rel = match plugin_path((!path.is_empty()).then_some(path.as_str())) {
                 Ok(rel) => rel,
@@ -1513,6 +1546,26 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
             let result =
                 serde_json::to_value(list).map_err(|e| format!("最近打开清单不可序列化：{e}"));
             resolve_vault(app, request_id, result)
+        }
+        PluginsMsg::SpaceRoom { request_id } => {
+            let result = serde_json::to_value(space_room(app))
+                .map_err(|e| format!("协作房间快照不可序列化：{e}"));
+            resolve_vault(app, request_id, result)
+        }
+        PluginsMsg::SpaceMembers { request_id } => {
+            let task = crate::space_actions::ensure_members(app);
+            let result = serde_json::to_value(space_members(app))
+                .map_err(|e| format!("成员名册不可序列化：{e}"));
+            app.plugins.resolve_shell_call(request_id, result);
+            task
+        }
+        PluginsMsg::SpaceOpenMenu { request_id } => {
+            app.plugins.resolve_shell_call(request_id, Ok(serde_json::json!({})));
+            Task::done(Message::SpaceMenuOpen)
+        }
+        PluginsMsg::SpaceOpenSettings { request_id } => {
+            app.plugins.resolve_shell_call(request_id, Ok(serde_json::json!({})));
+            Task::done(Message::Space(crate::SpaceMsg::OpenCollabSettings))
         }
         PluginsMsg::HistoryOpen { request_id, params } => {
             let opened = (|| -> Result<_, String> {
@@ -2222,6 +2275,98 @@ fn image_info_json(bytes: &[u8], rel: &str) -> Result<serde_json::Value, String>
     }
     serde_json::to_value(ImageInfoResult { width, height })
         .map_err(|e| format!("图片尺寸序列化失败：{e}"))
+}
+
+/// 可检索文件清单：宿主文件树的树序 + 每行图标键（插件注册的领域文档类型按注册图标）
+/// 与能否在面板内打开（图片附件只呈现、不挂打开）。
+fn files_result(app: &App) -> FilesResult {
+    FilesResult {
+        files: app
+            .note_files
+            .iter()
+            .map(|(path, name)| VaultFileEntry {
+                path: path.clone(),
+                name: name.clone(),
+                icon: layout_view::file_icon(app, name).into_owned(),
+                openable: atelyx_core::vault::image_ext_of(name).is_none(),
+            })
+            .collect(),
+    }
+}
+
+/// 当前容器与在线成员快照：本端身份只在协作空间给（本地仓库没有设备行），
+/// 各端打开的文件带行图标（插件画不出宿主注册表里的领域文档图标）。
+fn space_room(app: &App) -> SpaceRoomResult {
+    let kind = match app.repo_kind {
+        crate::RepoKind::Local => SpaceContainerKind::Local,
+        crate::RepoKind::Space(_) => SpaceContainerKind::Space,
+    };
+    let self_identity = matches!(kind, SpaceContainerKind::Space).then(|| {
+        let (name, color) = crate::space_actions::local_identity(app);
+        SpaceSelfIdentity {
+            name,
+            color,
+            platform: crate::space_actions::client_platform().to_string(),
+            version: crate::space_actions::CLIENT_VERSION.to_string(),
+            files: peer_files(app, crate::space_actions::open_file_paths(app)),
+        }
+    });
+    SpaceRoomResult {
+        kind,
+        connected: app.space_connected,
+        self_peer_id: app.space_own_peer_id.clone(),
+        self_identity,
+        peers: app
+            .space_peers
+            .iter()
+            .map(|peer| SpacePeer {
+                peer_id: peer.peer_id.clone(),
+                nickname: peer.nickname.clone(),
+                device: peer.device_name.clone(),
+                color: peer.color.clone(),
+                platform: peer.platform.clone(),
+                version: peer.version.clone(),
+                files: peer_files(
+                    app,
+                    crate::space_actions::peer_open_files(peer.presence.as_ref()),
+                ),
+            })
+            .collect(),
+    }
+}
+
+/// 打开的文件清单 → 带图标键的行（图标按文件名走宿主注册表）。
+fn peer_files(app: &App, paths: Vec<String>) -> Vec<SpacePeerFile> {
+    paths
+        .into_iter()
+        .map(|path| {
+            let name = path.rsplit('/').next().unwrap_or(&path);
+            SpacePeerFile { icon: layout_view::file_icon(app, name).into_owned(), path }
+        })
+        .collect()
+}
+
+/// 空间成员名册快照（与宿主成员管理弹层共用同一份缓存）。
+fn space_members(app: &App) -> SpaceMembersResult {
+    SpaceMembersResult {
+        ready: app.space_members.is_some(),
+        loading: app.space_members_loading,
+        error: app.space_members_error.clone(),
+        members: app
+            .space_members
+            .iter()
+            .flatten()
+            .map(|member| SpaceMember {
+                username: member.username.clone(),
+                display_name: member.display_name.clone(),
+                role: match member.role {
+                    atelyx_core::space_client::SpaceRole::Owner => SpaceMemberRole::Owner,
+                    atelyx_core::space_client::SpaceRole::Editor => SpaceMemberRole::Editor,
+                    atelyx_core::space_client::SpaceRole::Viewer => SpaceMemberRole::Viewer,
+                },
+            })
+            .collect(),
+    }
 }
 
 /// 当前空间的在场清单：未连接时只给 `connected: false`（名册是连接期快照，断开即失效）。

@@ -1,0 +1,14 @@
+{
+  "id": "atelyx.search",
+  "name": "搜索",
+  "version": "0.1.0",
+  "apiVersion": 1,
+  "abiVersion": 1,
+  "entry": {
+    "windows": "atelyx_plugin_search.dll",
+    "linux": "libatelyx_plugin_search.so"
+  },
+  "permissions": ["vault"],
+  "singleton": true,
+  "keepMountedOnVaultSwitch": true
+}

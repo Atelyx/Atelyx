@@ -32,22 +32,10 @@ pub(crate) const BUILTIN_PLUGINS: &[BuiltinPlugin] = &[
         views: &[BuiltinView { id: "files", label: "文件", icon: "files" }],
     },
     BuiltinPlugin {
-        id: "atelyx.search",
-        label: "搜索",
-        icon: "search",
-        views: &[BuiltinView { id: "search", label: "搜索", icon: "search" }],
-    },
-    BuiltinPlugin {
         id: "atelyx.inspector",
         label: "属性",
         icon: "info",
         views: &[BuiltinView { id: "inspector", label: "属性", icon: "info" }],
-    },
-    BuiltinPlugin {
-        id: "atelyx.collab",
-        label: "协作房间",
-        icon: "users",
-        views: &[BuiltinView { id: "collabroom", label: "协作房间", icon: "users" }],
     },
     BuiltinPlugin {
         id: atelyx_core::plugin_runtime::PLATFORM_PLUGIN,
@@ -62,9 +50,7 @@ const RENDERERS: &[(&str, ViewProvider)] = &[
     ("canvas", crate::canvas_view::canvas_view),
     ("table", crate::table_view::table_view),
     ("files", crate::layout_view::files_view),
-    ("search", crate::layout_view::search_view),
     ("inspector", crate::layout_view::inspector_view),
-    ("collabroom", crate::layout_view::collab_room_view),
 ];
 
 /// 按 id 取预置插件视图内容；不属于内置表时 `None`（调用方落占位）。

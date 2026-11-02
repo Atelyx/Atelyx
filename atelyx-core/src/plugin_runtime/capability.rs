@@ -20,14 +20,14 @@ pub(crate) fn permission_for(name: &str) -> Option<Permission> {
     use Permission::*;
     use method::{
         ai, clipboard, collab, dialog, doc, editor, fs, history, http, notification, process,
-        shortcut, state, table, tray, vault, window,
+        shortcut, space, state, table, tray, vault, window,
     };
     match name {
         fs::PRIVATE_DIR | fs::READ_TEXT | fs::WRITE_TEXT | fs::READ_BINARY | fs::WRITE_BINARY
         | fs::REMOVE | fs::EXISTS | fs::LIST => Some(Fs),
         vault::READ_TEXT | vault::WRITE_TEXT | vault::READ_BINARY | vault::WRITE_BINARY
         | vault::IMPORT_FILE | vault::IMAGE_INFO | vault::LIST | vault::EXISTS | vault::TAGS
-        | vault::REMOVE | vault::RENAME | vault::BACKLINKS => Some(Vault),
+        | vault::REMOVE | vault::RENAME | vault::BACKLINKS | vault::FILES => Some(Vault),
         table::SNAPSHOT | table::UPDATE_CELL | table::ADD_ROW | table::REMOVE_ROW
         | table::SELECT_ROW | table::SET_CELL_IMAGE => Some(Table),
         process::SPAWN | process::WRITE_STDIN | process::CLOSE_STDIN | process::KILL => Some(Process),
@@ -40,6 +40,8 @@ pub(crate) fn permission_for(name: &str) -> Option<Permission> {
         dialog::PICK_FILE | dialog::PICK_DIRECTORY => Some(Dialog),
         http::REQUEST | http::STREAM_OPEN | http::STREAM_CANCEL => Some(Http),
         collab::PEERS | collab::SEND | collab::META_GET | collab::META_PATCH => Some(Collab),
+        // 空间名册与房间事实、以及房间里的两个入口都是空间范围内的界面能力
+        space::ROOM | space::MEMBERS | space::OPEN_MENU | space::OPEN_SETTINGS => Some(Collab),
         // 读写当前文档的正文 / 选区即读写用户内容，按仓库内容权限归类
         editor::SELECTION
         | editor::REPLACE_SELECTION
@@ -115,6 +117,7 @@ mod tests {
         assert_eq!(permission_for(method::vault::WRITE_BINARY), Some(Permission::Vault));
         assert_eq!(permission_for(method::vault::REMOVE), Some(Permission::Vault));
         assert_eq!(permission_for(method::vault::RENAME), Some(Permission::Vault));
+        assert_eq!(permission_for(method::vault::FILES), Some(Permission::Vault));
         assert_eq!(permission_for(method::vault::TAGS), Some(Permission::Vault));
         assert_eq!(permission_for(method::editor::PREFS), Some(Permission::Vault));
         assert_eq!(permission_for(method::clipboard::WRITE_IMAGE), Some(Permission::Clipboard));
@@ -149,6 +152,10 @@ mod tests {
         assert_eq!(permission_for(method::collab::SEND), Some(Permission::Collab));
         assert_eq!(permission_for(method::collab::META_GET), Some(Permission::Collab));
         assert_eq!(permission_for(method::collab::META_PATCH), Some(Permission::Collab));
+        assert_eq!(permission_for(method::space::ROOM), Some(Permission::Collab));
+        assert_eq!(permission_for(method::space::MEMBERS), Some(Permission::Collab));
+        assert_eq!(permission_for(method::space::OPEN_MENU), Some(Permission::Collab));
+        assert_eq!(permission_for(method::space::OPEN_SETTINGS), Some(Permission::Collab));
         assert_eq!(permission_for(method::editor::SELECTION), Some(Permission::Vault));
         assert_eq!(permission_for(method::editor::REPLACE_SELECTION), Some(Permission::Vault));
         assert_eq!(permission_for(method::editor::OPEN_FILE), Some(Permission::Vault));

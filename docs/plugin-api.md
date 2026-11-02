@@ -383,8 +383,10 @@ pub mod error {
 pub const BUILTIN_SERVICES: &[(&str, &str, &[&str])] = &[
     ("fs", PLATFORM_PLUGIN, &[fs::PRIVATE_DIR, fs::READ_TEXT, fs::WRITE_TEXT, fs::READ_BINARY, fs::WRITE_BINARY, fs::REMOVE, fs::EXISTS, fs::LIST]),
     ("process", PLATFORM_PLUGIN, &[process::SPAWN, process::WRITE_STDIN, process::CLOSE_STDIN, process::KILL]),
-    ("vault", PLATFORM_PLUGIN, &[vault::READ_TEXT, vault::WRITE_TEXT, vault::READ_BINARY, vault::WRITE_BINARY, vault::IMPORT_FILE, vault::IMAGE_INFO, vault::LIST, vault::EXISTS, vault::TAGS, vault::REMOVE, vault::RENAME, vault::BACKLINKS]),
+    ("vault", PLATFORM_PLUGIN, &[vault::READ_TEXT, vault::WRITE_TEXT, vault::READ_BINARY, vault::WRITE_BINARY, vault::IMPORT_FILE, vault::IMAGE_INFO, vault::LIST, vault::EXISTS, vault::TAGS, vault::REMOVE, vault::RENAME, vault::BACKLINKS, vault::FILES]),
     ("collab", PLATFORM_PLUGIN, &[collab::PEERS, collab::SEND, collab::META_GET, collab::META_PATCH]),
+    // 空间名册与房间事实取自宿主会话与服务端，弹层 / 菜单也在宿主，归平台自身
+    ("space", PLATFORM_PLUGIN, &[space::ROOM, space::MEMBERS, space::OPEN_MENU, space::OPEN_SETTINGS]),
     ("table", "atelyx.tables", &[table::SNAPSHOT, table::UPDATE_CELL, table::ADD_ROW, table::REMOVE_ROW, table::SELECT_ROW, table::SET_CELL_IMAGE]),
     ("state", PLATFORM_PLUGIN, &[state::READ, state::WRITE]),
     ("notification", PLATFORM_PLUGIN, &[notification::SHOW]),
@@ -1728,6 +1730,9 @@ pub mod vault {
     pub const RENAME: &str = "vault.rename";
     /// 引用某篇文档的其它文档（反链；按 wiki 链接索引查询）。
     pub const BACKLINKS: &str = "vault.backlinks";
+    /// 当前仓库可检索文件清单（按宿主文件树的树序；本地仓库与协作空间同构）。
+    /// 与 [`LIST`] 的区别：一次给全仓库文件、带行图标与可打开判定，供按名检索类界面用。
+    pub const FILES: &str = "vault.files";
 }
 ```
 
@@ -1960,6 +1965,23 @@ pub mod collab {
 }
 ```
 
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 协作空间状态与成员名册：房间这类需要「当前是不是空间、谁在线、成员有哪些」的界面用。
+/// 名册读宿主缓存（与宿主成员管理弹层共用），缓存为空时宿主顺带发起一次拉取。
+pub mod space {
+    /// 当前容器与在线成员快照（含本端身份与各端打开的文件）。给房间这类展示界面用；
+    /// 消息投递用的对端 id / 名字在 `collab.peers`。
+    pub const ROOM: &str = "space.room";
+    /// 空间成员名册快照（列表 / 加载中 / 错误）。
+    pub const MEMBERS: &str = "space.members";
+    /// 打开宿主的「协作空间」菜单（登录与空间列表入口）。
+    pub const OPEN_MENU: &str = "space.openMenu";
+    /// 打开宿主的「协作设置」页。
+    pub const OPEN_SETTINGS: &str = "space.openSettings";
+}
+```
+
 ## 10. 能力面负载：文件、进程与系统服务
 
 上表方法的 params / result 形态（`path` 在 `fs` 面是绝对路径，在 `vault` 面是仓库相对路径）。
@@ -2062,6 +2084,32 @@ pub struct VaultRenameParams {
 #[serde(rename_all = "camelCase")]
 pub struct VaultTagsResult {
     pub tags: Vec<String>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`vault::FILES`] 的 result：全仓库可检索文件，按宿主文件树的遍历序（同层按名字排序，
+/// 目录内容跟在该目录的位置）。
+#[serde(rename_all = "camelCase")]
+pub struct FilesResult {
+    pub files: Vec<VaultFileEntry>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 可检索文件的一行。`icon` 是宿主注册表的图标键（插件注册的领域文档类型按注册图标，
+/// 其余按内置扩展名映射）。`openable` = 行是否挂打开动作：图片附件不挂（由画布媒体卡承载），
+/// 其余类型交给宿主按扩展名分流，没有对应视图时宿主提示。
+#[serde(rename_all = "camelCase")]
+pub struct VaultFileEntry {
+    /// 仓库相对路径（`/` 分隔）。
+    pub path: String,
+    /// 文件名（路径末段）。
+    pub name: String,
+    pub icon: String,
+    pub openable: bool,
 }
 ```
 
@@ -3705,7 +3753,126 @@ pub struct CollabMetaPatchParams {
 }
 ```
 
-## 17. 宿主广播事件
+## 17. 能力面负载：协作房间（空间事实）
+
+房间这类「当前是不是空间、谁在线、成员有哪些」的界面用。容器、连接态、名册与各端打开的文件都由宿主给：插件不连服务端，名册缓存与宿主的成员管理共用；同名同设备的多条连接由调用方按 `device` 合并。
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 当前容器的种类（决定房间展示的是空间名册还是「未进入协作空间」）。
+#[serde(rename_all = "camelCase")]
+pub enum SpaceContainerKind {
+    #[default]
+    Local,
+    Space,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`space::ROOM`] 的 result：容器种类、连接态、本端身份与在线设备明细。
+/// `peers` 不含自己；同一身份的多条连接由订阅方按「昵称 + 设备」合并。
+#[serde(rename_all = "camelCase")]
+pub struct SpaceRoomResult {
+    pub kind: SpaceContainerKind,
+    pub connected: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub self_peer_id: Option<String>,
+    /// 本端身份（协作空间才有；本地仓库 = 缺省）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub self_identity: Option<SpaceSelfIdentity>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub peers: Vec<SpacePeer>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 本端在线设备的展示资料（名字 / 成员色 / 平台 / 版本 / 打开的文件）。
+#[serde(rename_all = "camelCase")]
+pub struct SpaceSelfIdentity {
+    pub name: String,
+    /// 成员色（`#rrggbb`）。
+    pub color: String,
+    /// 平台标识（与 `std::env::consts::OS` 同词表）。
+    pub platform: String,
+    pub version: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<SpacePeerFile>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 同空间的一个在线设备。
+#[serde(rename_all = "camelCase")]
+pub struct SpacePeer {
+    pub peer_id: String,
+    pub nickname: String,
+    /// 设备名（「昵称 + 设备」是合并键）。
+    pub device: String,
+    /// 成员色（`#rrggbb`）。
+    pub color: String,
+    /// 平台标识（旧端缺省）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
+    /// 客户端版本（旧端缺省）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<SpacePeerFile>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 一个打开中的文件：仓库相对路径 + 行图标键（宿主注册表口径）。
+#[serde(rename_all = "camelCase")]
+pub struct SpacePeerFile {
+    pub path: String,
+    pub icon: String,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`space::MEMBERS`] 的 result：名册缓存快照。`ready` 区分「缓存里有名册（可能为空）」
+/// 与「宿主还没拉到」，两者都会给 `loading` 与 `error`。
+#[serde(rename_all = "camelCase")]
+pub struct SpaceMembersResult {
+    /// 缓存里已有名册（`members` 可信）；false = 尚未拉到，展示方按「加载中 / 暂无名册」处理。
+    pub ready: bool,
+    pub loading: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<SpaceMember>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 空间内的一名成员。
+#[serde(rename_all = "camelCase")]
+pub struct SpaceMember {
+    pub username: String,
+    pub display_name: String,
+    pub role: SpaceMemberRole,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 成员角色（命名与 `SpaceRole` 的 wire 形态一致）。
+#[serde(rename_all = "camelCase")]
+pub enum SpaceMemberRole {
+    Owner,
+    Editor,
+    Viewer,
+}
+```
+
+## 18. 宿主广播事件
 
 插件经 `event.subscribe` 声明订阅的事件名与载荷；未上表的名字宿主拒绝订阅。
 
@@ -3743,9 +3910,19 @@ pub mod name {
     /// 仓库内文件变更（宿主保存 / 新建 / 删除 / 改名 / 插件经 `vault` 写入）。只覆盖宿主发起的
     /// 写入，外部程序直接改磁盘不发。payload 见 [`FileChangedPayload`]。
     pub const VAULT_FILE_CHANGED: &str = "vault:file.changed";
+    /// 当前仓库的可检索文件清单重建（进 / 换仓库、宿主刷新文件清单时）。payload 为空对象；
+    /// 订阅方重取 `vault.files` 拿整份清单（条数与顺序都随重建变化）。插件经 `vault` 新建的
+    /// 文件不在其列，要等下一次清单重建才出现。
+    pub const VAULT_FILES_CHANGED: &str = "vault:files.changed";
     /// 协作空间团队元数据的某个键变更（任何成员经 `collab.metaPatch` 或宿主写入）。
     /// payload 见 [`SpaceMetaChangedPayload`]；订阅方按 `key` 过滤后重取该键。
     pub const SPACE_META_CHANGED: &str = "space:meta.changed";
+    /// 空间的连接态 / 在线设备 / 各端打开文件变化（连接建立、名册刷新、在场更新、断开）。
+    /// payload 为空对象；订阅方重取 `space.room`。
+    pub const SPACE_PEERS_CHANGED: &str = "space:peers.changed";
+    /// 空间成员名册缓存变化（拉取开始 / 成功 / 失败、离开空间清空）。payload 为空对象；
+    /// 订阅方重取 `space.members`。
+    pub const SPACE_MEMBERS_CHANGED: &str = "space:members.changed";
     /// 外部文件拖入窗口（宿主只转发绝对路径，读取由订阅方经 `fs` 自理）。
     /// payload 见 [`FileDropPayload`]；未挂载界面的插件应忽略。
     pub const WINDOW_FILE_DROP: &str = "window:file.drop";

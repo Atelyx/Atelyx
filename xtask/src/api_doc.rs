@@ -227,6 +227,7 @@ const SECTIONS: &[Section] = &[
             "method.rs": "ai",
             "method.rs": "tray",
             "method.rs": "collab",
+            "method.rs": "space",
         ),
     },
     Section {
@@ -244,6 +245,8 @@ const SECTIONS: &[Section] = &[
             "method.rs": "ImageInfoResult",
             "method.rs": "VaultRenameParams",
             "method.rs": "VaultTagsResult",
+            "method.rs": "FilesResult",
+            "method.rs": "VaultFileEntry",
             "method.rs": "ListResult",
             "method.rs": "FsEntry",
             "method.rs": "FsEntryKind",
@@ -420,6 +423,20 @@ const SECTIONS: &[Section] = &[
             "method.rs": "CollabMetaResult",
             "method.rs": "CollabMetaEntry",
             "method.rs": "CollabMetaPatchParams",
+        ),
+    },
+    Section {
+        title: "能力面负载：协作房间（空间事实）",
+        intro: "房间这类「当前是不是空间、谁在线、成员有哪些」的界面用。容器、连接态、名册与各端打开的文件都由宿主给：插件不连服务端，名册缓存与宿主的成员管理共用；同名同设备的多条连接由调用方按 `device` 合并。",
+        items: items!(
+            "method.rs": "SpaceContainerKind",
+            "method.rs": "SpaceRoomResult",
+            "method.rs": "SpaceSelfIdentity",
+            "method.rs": "SpacePeer",
+            "method.rs": "SpacePeerFile",
+            "method.rs": "SpaceMembersResult",
+            "method.rs": "SpaceMember",
+            "method.rs": "SpaceMemberRole",
         ),
     },
     Section {

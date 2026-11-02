@@ -89,7 +89,10 @@ pub use atelyx_plugin_protocol::method::{
     RunStopParams, RunTitleParams, SearchConfigWire, ThemeResult, ToolDecl, ToolExecParams,
     ToolExecResult, ToolListParams, ToolListResult, TrayClickParams, TrayItemSpec, WindowOpenParams,
     WindowUpdateParams, DocAwarenessParams, BacklinkEntry, BacklinksResult, DocEditParams,
-    DocOpenParams, DocOpenResult, DocSaveParams, VaultTagsResult, AI_CORE_PLUGIN,
+    DocOpenParams, DocOpenResult, DocSaveParams, VaultTagsResult, FilesResult, VaultFileEntry,
+    SpaceContainerKind, SpaceMember, SpaceMemberRole, SpaceMembersResult, SpacePeer, SpacePeerFile,
+    SpaceRoomResult, SpaceSelfIdentity,
+    AI_CORE_PLUGIN,
 };
 
 /// 插件运行状态。
@@ -254,6 +257,8 @@ pub enum HostRequest {
     ClipboardWriteImage { plugin_id: String, request_id: u64, bytes: Vec<u8> },
     /// 插件请求列当前仓库内一个目录（空路径 = 仓库根）。
     VaultList { plugin_id: String, request_id: u64, path: String },
+    /// 插件请求全仓库可检索文件清单（带行图标与可打开判定；树序）。
+    VaultFiles { plugin_id: String, request_id: u64 },
     /// 插件请求删除仓库内一个路径（文件或文件夹；仓库根不可删）。
     VaultRemove { plugin_id: String, request_id: u64, path: String },
     /// 插件请求改名 / 移动仓库内一个路径（`from` / `to` 均为仓库相对路径）。
@@ -373,6 +378,14 @@ pub enum HostRequest {
     RecentList { plugin_id: String, request_id: u64 },
     /// 插件请求全仓库按文件分组的版本聚合（`refresh` = 丢弃宿主缓存后重扫）。
     HistoryGroups { plugin_id: String, request_id: u64, params: method::HistoryGroupsParams },
+    /// 插件请求当前容器与在线成员快照（`space.room`）。
+    SpaceRoom { plugin_id: String, request_id: u64 },
+    /// 插件请求空间成员名册快照（`space.members`；缓存为空时宿主顺带发起一次拉取）。
+    SpaceMembers { plugin_id: String, request_id: u64 },
+    /// 插件请求打开宿主的「协作空间」菜单（`space.openMenu`）。
+    SpaceOpenMenu { plugin_id: String, request_id: u64 },
+    /// 插件请求打开宿主的「协作设置」页（`space.openSettings`）。
+    SpaceOpenSettings { plugin_id: String, request_id: u64 },
 }
 
 /// 插件列表项（设置页渲染用）。
@@ -694,6 +707,7 @@ impl PluginRuntime {
             | HostRequest::VaultWriteBinary { .. }
             | HostRequest::VaultImportFile { .. }
             | HostRequest::VaultList { .. }
+            | HostRequest::VaultFiles { .. }
             | HostRequest::VaultExists { .. }
             | HostRequest::VaultRemove { .. }
             | HostRequest::VaultRename { .. }
@@ -728,7 +742,11 @@ impl PluginRuntime {
             | HostRequest::HistoryGroups { .. }
             | HostRequest::HistoryOpen { .. }
             | HostRequest::HistoryActivity { .. }
-            | HostRequest::RecentList { .. } => {
+            | HostRequest::RecentList { .. }
+            | HostRequest::SpaceRoom { .. }
+            | HostRequest::SpaceMembers { .. }
+            | HostRequest::SpaceOpenMenu { .. }
+            | HostRequest::SpaceOpenSettings { .. } => {
                 return Err("界面服务请求形态不符".to_string())
             }
         };
@@ -865,6 +883,10 @@ impl PluginRuntime {
                 plugin_id,
                 request_id,
                 path,
+            },
+            HostRequest::VaultFiles { plugin_id, .. } => HostRequest::VaultFiles {
+                plugin_id,
+                request_id,
             },
             HostRequest::VaultExists { plugin_id, path, .. } => HostRequest::VaultExists {
                 plugin_id,
@@ -1052,6 +1074,22 @@ impl PluginRuntime {
                 params,
             },
             HostRequest::RecentList { plugin_id, .. } => HostRequest::RecentList {
+                plugin_id,
+                request_id,
+            },
+            HostRequest::SpaceRoom { plugin_id, .. } => HostRequest::SpaceRoom {
+                plugin_id,
+                request_id,
+            },
+            HostRequest::SpaceMembers { plugin_id, .. } => HostRequest::SpaceMembers {
+                plugin_id,
+                request_id,
+            },
+            HostRequest::SpaceOpenMenu { plugin_id, .. } => HostRequest::SpaceOpenMenu {
+                plugin_id,
+                request_id,
+            },
+            HostRequest::SpaceOpenSettings { plugin_id, .. } => HostRequest::SpaceOpenSettings {
                 plugin_id,
                 request_id,
             },
@@ -1818,6 +1856,21 @@ impl PluginRuntime {
         self.broadcast_event(event::name::SPACE_META_CHANGED, &payload);
     }
 
+    /// 广播可检索文件清单已重建（进 / 换仓库、文件增删改名后）：订阅方重取 `vault.files`。
+    pub fn on_files_changed(self: &Arc<Self>) {
+        self.broadcast_event(event::name::VAULT_FILES_CHANGED, &serde_json::json!({}));
+    }
+
+    /// 广播空间连接态 / 在线设备 / 各端打开文件变化：订阅方重取 `space.room`。
+    pub fn on_space_peers_changed(self: &Arc<Self>) {
+        self.broadcast_event(event::name::SPACE_PEERS_CHANGED, &serde_json::json!({}));
+    }
+
+    /// 广播空间成员名册缓存变化（拉取开始 / 成功 / 失败、离开空间清空）：订阅方重取 `space.members`。
+    pub fn on_space_members_changed(self: &Arc<Self>) {
+        self.broadcast_event(event::name::SPACE_MEMBERS_CHANGED, &serde_json::json!({}));
+    }
+
     /// 广播最近打开清单变化（记录 / 剔除）：不带条数，订阅方重取 `recent.list`。
     pub fn on_recent_changed(self: &Arc<Self>) {
         self.broadcast_event(event::name::RECENT_CHANGED, &serde_json::json!({}));
@@ -2097,6 +2150,7 @@ fn request_plugin_id(request: &HostRequest) -> &str {
         | HostRequest::CollabSend { plugin_id, .. }
         | HostRequest::CollabMetaGet { plugin_id, .. }
         | HostRequest::CollabMetaPatch { plugin_id, .. }
+        | HostRequest::VaultFiles { plugin_id, .. }
         | HostRequest::EditorSelection { plugin_id, .. }
         | HostRequest::EditorOpenFiles { plugin_id, .. }
         | HostRequest::EditorReplaceSelection { plugin_id, .. }
@@ -2114,7 +2168,11 @@ fn request_plugin_id(request: &HostRequest) -> &str {
         | HostRequest::HistoryGroups { plugin_id, .. }
         | HostRequest::HistoryOpen { plugin_id, .. }
         | HostRequest::HistoryActivity { plugin_id, .. }
-        | HostRequest::RecentList { plugin_id, .. } => plugin_id,
+        | HostRequest::RecentList { plugin_id, .. }
+        | HostRequest::SpaceRoom { plugin_id, .. }
+        | HostRequest::SpaceMembers { plugin_id, .. }
+        | HostRequest::SpaceOpenMenu { plugin_id, .. }
+        | HostRequest::SpaceOpenSettings { plugin_id, .. } => plugin_id,
     }
 }
 
