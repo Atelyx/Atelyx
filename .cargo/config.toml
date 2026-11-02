@@ -1,4 +1,10 @@
 # MSVC 目标静态链接 VC++ 运行库：发行 exe 自包含，目标机器无需预装 VC++ Redistributable，
 # 安装器也无需捆绑运行库安装程序。
+# 插件 dll 由宿主运行时按路径装载，导入库与导出文件没有下游链接需求；link.exe 每写一份都会往 stdout
+# 打一行「正在创建库」，被 rustc 报成 linker_messages 警告。关掉二者即消除该噪音，且不静音该 lint。
 [target.x86_64-pc-windows-msvc]
-rustflags = ["-C", "target-feature=+crt-static"]
+rustflags = [
+    "-C", "target-feature=+crt-static",
+    "-C", "link-arg=/NOIMPLIB",
+    "-C", "link-arg=/NOEXP",
+]
