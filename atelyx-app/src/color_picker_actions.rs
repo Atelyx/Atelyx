@@ -22,16 +22,17 @@ const FOLDER_PRESETS: [&str; 8] =
 #[derive(Clone, Debug)]
 pub(crate) enum ColorTarget {
     Table { bg: bool },
-    Folder { rel: String },
     Collab,
+    /// 插件发起的取色：结果回填给那个请求（不写仓库任何字段）。
+    Plugin { request_id: u64, initial: Option<String> },
 }
 
 #[derive(Clone, Debug)]
 pub(crate) enum ColorPickerMsg {
-    /// 文件夹右键「图标颜色」入口。
-    OpenFolder { window: iced::window::Id, rel: String },
     /// 设置-多人协作「协作展示色」入口。
     OpenCollab { window: iced::window::Id },
+    /// 插件请求取色（结果回填给该请求）。
+    OpenPlugin { window: iced::window::Id, request_id: u64, initial: Option<String> },
     /// 拖动中的颜色（只刷新取色器自身，不落盘）。
     Preview(Hsv),
     /// 松手 / 点预设色块：提交一次。
@@ -51,12 +52,13 @@ pub(crate) fn open_table(app: &mut App, window: iced::window::Id, bg: bool) {
 
 pub(crate) fn update(app: &mut App, msg: ColorPickerMsg) -> Task<Message> {
     match msg {
-        ColorPickerMsg::OpenFolder { window, rel } => {
-            open(app, window, ColorTarget::Folder { rel });
-            Task::none()
-        }
         ColorPickerMsg::OpenCollab { window } => {
             open(app, window, ColorTarget::Collab);
+            Task::none()
+        }
+        ColorPickerMsg::OpenPlugin { window, request_id, initial } => {
+            let target = ColorTarget::Plugin { request_id, initial: initial.clone() };
+            open(app, window, target);
             Task::none()
         }
         ColorPickerMsg::Preview(hsv) => {
@@ -107,8 +109,8 @@ pub(crate) fn panel<'a>(
     let current = current_hex(app, target).and_then(|value| color_picker::parse_hex(&value));
     let resets = match target {
         ColorTarget::Table { .. } => Some("默认"),
-        ColorTarget::Folder { .. } => Some("恢复默认"),
-        ColorTarget::Collab => None,
+
+        ColorTarget::Collab | ColorTarget::Plugin { .. } => None,
     };
     let reset = resets.map(|label| (label, Message::ColorPicker(ColorPickerMsg::Reset)));
     color_picker::panel(
@@ -128,7 +130,7 @@ fn presets(target: &ColorTarget) -> &'static [&'static str] {
     match target {
         ColorTarget::Table { bg: false } => &TEXT_PRESETS,
         ColorTarget::Table { bg: true } => &BG_PRESETS,
-        ColorTarget::Folder { .. } => &FOLDER_PRESETS,
+        ColorTarget::Plugin { .. } => &FOLDER_PRESETS,
         ColorTarget::Collab => &crate::space_actions::COLLAB_COLORS,
     }
 }
@@ -137,7 +139,7 @@ fn default_color(target: &ColorTarget) -> Color {
     let hex = match target {
         ColorTarget::Table { bg: false } => TEXT_PRESETS[0],
         ColorTarget::Table { bg: true } => BG_PRESETS[0],
-        ColorTarget::Folder { .. } => FOLDER_PRESETS[5],
+        ColorTarget::Plugin { .. } => FOLDER_PRESETS[5],
         ColorTarget::Collab => crate::space_actions::DEFAULT_COLLAB_COLOR,
     };
     color_picker::parse_hex(hex).unwrap_or(Color::WHITE)
@@ -179,6 +181,13 @@ fn draft(app: &App) -> Option<String> {
     }
 }
 
+/// 把取色结果交回发起插件（`None` = 取消）：只在插件取色这条值通道上回执一次。
+pub(crate) fn reply_plugin_color(app: &App, request_id: u64, color: Option<String>) {
+    let result = serde_json::to_value(atelyx_core::plugin_runtime::PickColorResult { color })
+        .unwrap_or(serde_json::Value::Null);
+    app.plugins.resolve_shell_call(request_id, Ok(result));
+}
+
 /// 更新弹层内的取色器状态（`hsv` 保留拖动中的色相；`hex` 为输入框草稿）。
 fn set_state(app: &mut App, hsv: Option<Hsv>, hex: Option<String>) {
     let Some((_, popup)) = app.popup.as_mut() else { return };
@@ -203,18 +212,6 @@ fn commit(app: &mut App, hex: Option<String>) -> Task<Message> {
         ColorTarget::Table { bg } => {
             Task::done(Message::Table(TableMsg::SetColor { bg, color: hex }))
         }
-        ColorTarget::Folder { rel } => {
-            let unchanged = match (&hex, &current) {
-                (Some(next), Some(current)) => next.eq_ignore_ascii_case(current),
-                (None, None) => true,
-                _ => false,
-            };
-            if unchanged {
-                Task::none()
-            } else {
-                Task::done(Message::FolderColorSet(rel, hex))
-            }
-        }
         ColorTarget::Collab => {
             let Some(next) = hex else { return Task::none() };
             if current.is_some_and(|c| c.eq_ignore_ascii_case(&next)) {
@@ -223,11 +220,17 @@ fn commit(app: &mut App, hex: Option<String>) -> Task<Message> {
                 Task::done(Message::CollabColorSet(next))
             }
         }
+        // 插件取色：结果回执给发起请求（不落仓库任何字段）
+        ColorTarget::Plugin { request_id, .. } => {
+            reply_plugin_color(app, request_id, hex);
+            Task::none()
+        }
     }
 }
 
 fn current_hex(app: &App, target: &ColorTarget) -> Option<String> {
     match target {
+        ColorTarget::Plugin { initial, .. } => initial.clone(),
         ColorTarget::Table { bg } => {
             let session = app.table.as_ref()?;
             let region = table_ops::region_of(
@@ -243,7 +246,7 @@ fn current_hex(app: &App, target: &ColorTarget) -> Option<String> {
                 _ => None,
             }
         }
-        ColorTarget::Folder { rel } => app.folder_colors.get(rel).cloned(),
+
         ColorTarget::Collab => app.global.collab_color.clone(),
     }
 }

@@ -42,6 +42,19 @@ pub(crate) fn permission_for(name: &str) -> Option<Permission> {
         collab::PEERS | collab::SEND | collab::META_GET | collab::META_PATCH => Some(Collab),
         // 空间名册与房间事实、以及房间里的两个入口都是空间范围内的界面能力
         space::ROOM | space::MEMBERS | space::OPEN_MENU | space::OPEN_SETTINGS => Some(Collab),
+        // 仓库界面状态随仓库走（展开集 / 排序 / 目录颜色 / 提示词标记），与内容读写同类
+        method::vault_ui::READ | method::vault_ui::WRITE | method::vault_ui::CREATE
+        | method::vault_ui::SWITCH_CONTAINER | method::vault_ui::REMOVE_CONTAINER
+        | method::vault_ui::LIST_DIRS | method::vault_ui::REFRESH_TREE => Some(Vault),
+        // 取色器是宿主的系统单例界面，不触碰仓库内容
+        method::shell::PICK_COLOR | method::shell::PICK_VAULT => None,
+        // 显示与取路径只读当前仓库的位置事实，不改内容
+        method::shell::REVEAL | method::shell::ABSOLUTE_PATH => Some(Vault),
+        // 创建副本写仓库内容
+        method::shell::DUPLICATE => Some(Vault),
+        // 拖拽会话与宿主菜单只编排界面动作，不触碰宿主资源；落位写入经 `vault.rename`
+        method::drag::START | method::drag::HOVER | method::drag::END => None,
+        method::menu::OPEN => None,
         // 读写当前文档的正文 / 选区即读写用户内容，按仓库内容权限归类
         editor::SELECTION
         | editor::REPLACE_SELECTION
@@ -137,8 +150,6 @@ mod tests {
         // 运行时时序方法不占权限
         assert_eq!(permission_for("initialize"), None);
         assert_eq!(permission_for(method::view::REGISTER), None);
-        assert_eq!(permission_for(method::frame::SUBMIT_SHARED), None, "整面帧是界面通道，不占权限声明");
-        assert_eq!(permission_for(method::frame::REGION), None, "帧区域扩容是界面通道，不占权限声明");
         assert_eq!(permission_for(method::window::UPDATE), Some(Permission::Window));
         assert_eq!(permission_for(method::window::SHOW), Some(Permission::Window));
         assert_eq!(permission_for(method::shortcut::QUERY), Some(Permission::Shortcuts));

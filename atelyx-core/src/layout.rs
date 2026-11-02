@@ -207,6 +207,8 @@ pub const RECENT_VIEW: &str = "plugin:atelyx.recent:recent";
 pub const SEARCH_VIEW: &str = "plugin:atelyx.search:search";
 /// 预置协作房间插件的面板视图 id：主页模板与旧布局迁移共用。
 pub const COLLAB_VIEW: &str = "plugin:atelyx.collab:collabroom";
+/// 预置文件面板插件的视图 id：旧布局迁移共用。
+pub const FILES_VIEW: &str = "plugin:atelyx.files:files";
 
 // ===== 布局操作命令参数（壳侧逐条映射到 LayoutOp）=====
 
@@ -440,6 +442,8 @@ fn migrate_view_id(view: &mut ViewKind) {
         *view = SEARCH_VIEW.to_string();
     } else if view == "collabroom" {
         *view = COLLAB_VIEW.to_string();
+    } else if view == "files" {
+        *view = FILES_VIEW.to_string();
     }
 }
 

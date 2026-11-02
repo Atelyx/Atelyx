@@ -7,8 +7,7 @@ use atelyx_plugin_protocol::event::{
     TableSelectionChangedPayload, VaultSwitchPayload,
 };
 use atelyx_plugin_protocol::handshake::{self, InitializeParams, InitializeResult};
-use atelyx_plugin_protocol::frame::{FrameRegionRequest, FrameSubmitSharedParams, SurfaceFrame};
-use atelyx_plugin_protocol::frame_region::{FrameRegionInfo, SLOT_CAPACITY, SLOT_COUNT};
+use atelyx_plugin_protocol::frame::SurfaceFrame;
 use atelyx_plugin_protocol::method::{
     ChatHistoryParams, ChatRenameParams, ChatSendParams, ChatSessionParams, CollabMessageParams,
     CollabPeersResult, CollabSendParams, CollabSendResult, DocInstanceCloseParams, DocInstanceOpenParams,
@@ -107,39 +106,6 @@ fn frame_shape_is_frozen() {
         case["value"],
         "整面帧编码与快照不一致"
     );
-
-    // 共享内存通路：提交只带定位坐标，帧区域描述与握手应答同形
-    let locator = snapshot["methods"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|case| case["name"] == "frame.submitShared params")
-        .expect("快照缺帧提交坐标语料");
-    let params: FrameSubmitSharedParams =
-        serde_json::from_value(locator["value"].clone()).expect("提交坐标应可反序列化");
-    assert_eq!(params.surface_id, "board");
-    assert!(params.len > 0);
-
-    let region: FrameRegionInfo =
-        serde_json::from_value(snapshot["handshake"]["result"]["frameRegion"].clone())
-            .expect("握手应答应带帧区域描述");
-    assert_eq!(region.slot_count, SLOT_COUNT, "握手默认槽数应与常量一致");
-    assert_eq!(region.slot_capacity, SLOT_CAPACITY, "握手默认槽容量应与常量一致");
-    assert_eq!(region.byte_len() % 8, 0, "槽步长按 8 字节对齐");
-    // 提交坐标必须落在区域描述之内：槽位不越界、长度不超容量、代次与握手一致
-    assert!(params.generation == region.generation, "提交代次应与区域描述一致");
-    assert!(params.slot < region.slot_count, "槽位不得越界");
-    assert!(params.len <= region.slot_capacity, "帧长不得超过槽容量");
-
-    let expand = snapshot["methods"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|case| case["name"] == "frame.region params")
-        .expect("快照缺帧扩容请求语料");
-    let request: FrameRegionRequest =
-        serde_json::from_value(expand["value"].clone()).expect("扩容请求应可反序列化");
-    assert!(request.min_bytes > region.slot_capacity, "语料应是需要扩容的请求");
 }
 
 #[test]
@@ -333,9 +299,6 @@ fn method_type_shapes_are_frozen() {
             "AiModelsResult" => frozen_roundtrip::<atelyx_plugin_protocol::method::AiModelsResult>(&value),
             "AiAgentsResult" => frozen_roundtrip::<atelyx_plugin_protocol::method::AiAgentsResult>(&value),
             "SurfaceFrame" => frozen_roundtrip::<atelyx_plugin_protocol::frame::SurfaceFrame>(&value),
-            "FrameSubmitSharedParams" => frozen_roundtrip::<FrameSubmitSharedParams>(&value),
-            "FrameRegionRequest" => frozen_roundtrip::<FrameRegionRequest>(&value),
-            "FrameRegionInfo" => frozen_roundtrip::<FrameRegionInfo>(&value),
             "FrameInputParams" => frozen_roundtrip::<atelyx_plugin_protocol::frame::FrameInputParams>(&value),
             "FrameTickParams" => frozen_roundtrip::<atelyx_plugin_protocol::frame::FrameTickParams>(&value),
             "MeasureBatchParams" => {

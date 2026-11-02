@@ -1,0 +1,14 @@
+{
+  "id": "atelyx.files",
+  "name": "文件",
+  "version": "0.1.0",
+  "apiVersion": 1,
+  "abiVersion": 1,
+  "entry": {
+    "windows": "atelyx_plugin_files.dll",
+    "linux": "libatelyx_plugin_files.so"
+  },
+  "permissions": ["vault", "state"],
+  "singleton": true,
+  "keepMountedOnVaultSwitch": false
+}

@@ -852,8 +852,7 @@ fn clear_session_state(app: &mut App) {
     app.doc_save_error = None;
     app.reset_props();
     app.file_count = None;
-    app.expand_all = false;
-    app.expand_pending = 0;
+
     app.rename_notice = None;
     app.table = None;
     crate::canvas_chat::detach_canvas(app);
@@ -975,18 +974,6 @@ pub fn handle(app: &mut App, msg: SpaceMsg) -> Task<Message> {
         }
         SpaceMsg::CanvasPatchDone { gen, file, new_file, reason, result, frozen } => {
             on_canvas_patch_done(app, gen, file, new_file, reason, result, frozen)
-        }
-        SpaceMsg::ForceDeleteFolder { gen, rel } => {
-            app.dismiss_popup();
-            app.delete_confirm = None;
-            match session_of(app) {
-                Some(session) => space_force_delete_folder(&session, gen, &rel),
-                // 确认 pane 打开期间会话可能已失效（登出 / 进入本地仓库）
-                None => {
-                    app.notify(NoticeLevel::Warning, "空间会话已失效，删除未执行");
-                    Task::none()
-                }
-            }
         }
         SpaceMsg::HistoryRecorded { err } => {
             if let Some(e) = err {
@@ -1272,16 +1259,6 @@ fn on_tree_loaded(app: &mut App, gen: u64, result: Result<Vec<space_client::Tree
             app.note_files = files;
             app.plugins.on_files_changed();
             app.file_count = Some(count_tree_files(&tree));
-            // 树在途期间发起的「展开全部」在此续接：全目录 children 已就绪，
-            // 从根发一次展开回执完成展开集回填与 pending 归零
-            if app.expand_all && app.expand_pending > 0 {
-                let gen = app.epoch();
-                return Task::done(Message::ExpandChildrenLoaded(
-                    String::new(),
-                    gen,
-                    Ok(children_of_tree(&tree, "")),
-                ));
-            }
             Task::none()
         }
     }
@@ -1303,18 +1280,6 @@ pub fn space_load_children(app: &mut App, rel: &str) -> Task<Message> {
             let entries = children_of_tree(tree, rel);
             app.children.insert(rel.to_string(), entries);
             Task::none()
-        }
-        None => refresh_space_tree(app),
-    }
-}
-
-/// 递归展开的目录读取（空间模式 = 整树切片，复用 ExpandChildrenLoaded 回执链续接递归）。
-pub fn space_load_children_for_expand(app: &mut App, rel: &str) -> Task<Message> {
-    let gen = app.epoch();
-    match &app.space_tree {
-        Some(tree) => {
-            let entries = children_of_tree(tree, rel);
-            Task::done(Message::ExpandChildrenLoaded(rel.to_string(), gen, Ok(entries)))
         }
         None => refresh_space_tree(app),
     }
@@ -2048,56 +2013,6 @@ async fn read_json_string_list(client: &SpaceClient, space_id: &str, path: &str)
     }
 }
 
-/// 提示词标记切换（空间模式：读改写 `.atelyx/prompt-notes.json`）。
-pub fn space_toggle_prompt_note(app: &mut App, rel: &str) -> Task<Message> {
-    let Some(session) = require_write(app) else { return Task::none() };
-    let gen = app.epoch();
-    let rel = rel.to_string();
-    let client = session.client;
-    let space_id = session.space_id;
-    Task::perform(
-        async move {
-            let mut notes = read_json_string_list(&client, &space_id, ".atelyx/prompt-notes.json").await;
-            if let Some(i) = notes.iter().position(|n| n == &rel) {
-                notes.remove(i);
-            } else {
-                notes.push(rel.clone());
-            }
-            client
-                .put_file_text(&space_id, ".atelyx/prompt-notes.json", &serde_json::to_string(&notes).unwrap_or_default())
-                .await?;
-            Ok::<_, SpaceError>(notes)
-        },
-        move |result| Message::PromptNotesLoaded(gen, result.map_err(err_text)),
-    )
-}
-
-/// 文件夹颜色（空间模式：读改写 `.atelyx/folder-colors.json`）。
-pub fn space_set_folder_color(app: &mut App, rel: &str, color: Option<String>) -> Task<Message> {
-    let Some(session) = require_write(app) else { return Task::none() };
-    let gen = app.epoch();
-    let rel = rel.to_string();
-    let client = session.client;
-    let space_id = session.space_id;
-    Task::perform(
-        async move {
-            let mut colors: HashMap<String, String> =
-                match client.get_file_text(&space_id, ".atelyx/folder-colors.json").await {
-                    Ok(raw) => serde_json::from_str(&raw).unwrap_or_default(),
-                    Err(_) => HashMap::new(),
-                };
-            match color {
-                Some(c) => colors.insert(rel, c),
-                None => colors.remove(&rel),
-            };
-            client
-                .put_file_text(&space_id, ".atelyx/folder-colors.json", &serde_json::to_string(&colors).unwrap_or_default())
-                .await?;
-            Ok::<_, SpaceError>(colors)
-        },
-        move |result| Message::FolderColorsLoaded(gen, result.map_err(err_text)),
-    )
-}
 
 /// 排序方式（空间模式：读改写 `.atelyx/config.json` 的 fileExplorerSort）。
 pub fn space_set_sort(app: &mut App, sort: &str) -> Task<Message> {
@@ -2428,82 +2343,6 @@ pub fn space_create_entry(app: &mut App, dir: &str, kind: DraftKind, name: &str)
     )
 }
 
-/// 删除入口（空间模式）：文件直接删；文件夹先探需确认（needsConfirm + 条目数进确认 pane）。
-/// `confirm` = 调用方已确认（确认 pane 的动作）：文件夹跳过探测直接 force 落删。
-/// 确认与否由调用方参数表达，不得读环境态（确认 pane 的收尾会先清状态，读状态必然退化成再探测）。
-pub fn space_delete_entry(app: &mut App, rel: &str, is_dir: bool, confirm: bool) -> Task<Message> {
-    let Some(session) = require_write(app) else { return Task::none() };
-    let gen = app.epoch();
-    if is_dir && confirm {
-        let confirmed = rel.to_string();
-        return Task::done(Message::Space(SpaceMsg::ForceDeleteFolder { gen, rel: confirmed }));
-    }
-    let rel = rel.to_string();
-    let client = session.client;
-    let space_id = session.space_id;
-    if !is_dir {
-        let rel_for_cb = rel.clone();
-        Task::perform(
-            async move { client.delete_file(&space_id, &rel).await.map(|_| rel) },
-            move |result| {
-                Message::OpDone(
-                    gen,
-                    parent_of(&rel_for_cb),
-                    result.map_err(err_text),
-                    crate::FollowUp::Deleted { rel: rel_for_cb, is_dir: false },
-                )
-            },
-        )
-    } else {
-        let rel_for_cb = rel.clone();
-        // 服务端探测结果分三路：需确认 / 空目录直删 / 失败（分支各回不同消息）
-        enum FolderDelete {
-            Confirm(u64),
-            Force,
-            Failed(String),
-        }
-        Task::perform(
-            async move {
-                match client.delete_folder(&space_id, &rel, false).await {
-                    Ok(ack) if ack.needs_confirm => FolderDelete::Confirm(ack.item_count),
-                    Ok(_) => FolderDelete::Force,
-                    Err(e) => FolderDelete::Failed(e.to_string()),
-                }
-            },
-            move |step| match step {
-                FolderDelete::Confirm(count) => Message::FolderCounted(rel_for_cb, count as usize),
-                // 空目录直接删（本地口径一致：空目录免确认）——经 ForceDelete 消息统一走 force 步
-                FolderDelete::Force => Message::Space(SpaceMsg::ForceDeleteFolder { gen, rel: rel_for_cb }),
-                FolderDelete::Failed(e) => Message::OpDone(
-                    gen,
-                    parent_of(&rel_for_cb),
-                    Err(e),
-                    crate::FollowUp::None,
-                ),
-            },
-        )
-    }
-}
-
-/// 文件夹确认删除（force = true）。
-fn space_force_delete_folder(session: &SpaceSession, gen: u64, rel: &str) -> Task<Message> {
-    let client = session.client.clone();
-    let space_id = session.space_id.clone();
-    let rel = rel.to_string();
-    let rel_for_cb = rel.clone();
-    Task::perform(
-        async move { client.delete_folder(&space_id, &rel, true).await.map(|_| rel) },
-        move |result| {
-            Message::OpDone(
-                gen,
-                parent_of(&rel_for_cb),
-                result.map_err(err_text),
-                crate::FollowUp::Deleted { rel: rel_for_cb, is_dir: true },
-            )
-        },
-    )
-}
-
 /// 重命名 / 移动（空间模式）：服务端 rename（目标已存在 409 提示）+ 客户端引用改写
 /// （全库 .md 读改写，wiki 名与路径形式；尽力而为，不阻塞改名本身）。
 pub fn space_commit_rename(app: &mut App, r: RenameState) -> Task<Message> {
@@ -2638,70 +2477,85 @@ fn rewrite_note_links(text: &str, old_rel: &str, new_rel: &str) -> Option<String
     changed.then_some(out)
 }
 
-/// 创建同目录副本（空间模式）：copy 端点 + 实体 id 重建（防两文件同 id 串补丁）。
-pub fn space_duplicate_entry(app: &mut App, rel: &str, is_dir: bool) -> Task<Message> {
-    let Some(session) = require_write(app) else { return Task::none() };
+/// 插件请求创建副本（空间模式）：与本地菜单同一条链，结果只回填给插件。
+pub fn space_duplicate_reply(
+    app: &mut App,
+    request_id: u64,
+    rel: &str,
+    is_dir: bool,
+) -> Task<Message> {
+    let Some(session) = require_write(app) else {
+        app.plugins
+            .resolve_shell_call(request_id, Err("该空间为只读身份，无法创建副本".to_string()));
+        return Task::none();
+    };
     let gen = app.epoch();
     let rel = rel.to_string();
-    let rel_for_cb = rel.clone();
     let client = session.client;
     let space_id = session.space_id;
     Task::perform(
-        async move {
-            let parent = parent_of(&rel);
-            let name = rel.rsplit('/').next().unwrap_or(&rel).to_string();
-            // 同名去重：name-2、name-3 …（服务端 copy 目标已存在 409 兜底，前置避让减少报错）
-            let tree = client.tree(&space_id).await?;
-            let taken = children_of_tree(&tree, &parent)
-                .into_iter()
-                .map(|c| c.rel.rsplit('/').next().unwrap_or(&c.rel).to_string())
-                .collect::<Vec<_>>();
-            let (stem, ext) = match name.rfind('.') {
-                Some(0) | None => (name.clone(), String::new()),
-                Some(i) => (name[..i].to_string(), name[i..].to_string()),
-            };
-            let mut target = name.clone();
-            if taken.iter().any(|t| t == &target) {
-                let mut seq = 2;
-                loop {
-                    target = format!("{stem}-{seq}{ext}");
-                    if !taken.iter().any(|t| t == &target) {
-                        break;
-                    }
-                    seq += 1;
-                }
-            }
-            let new_rel = if parent.is_empty() { target.clone() } else { format!("{parent}/{target}") };
-            client.copy_file(&space_id, &rel, &new_rel).await?;
-            // 服务端 copy 不重建实体 id：非目录副本读改写换新 id，内嵌标题改为副本自己的
-            // 主名（留着原件的标题会让副本被当成原件改名，撞上原件即名冲突）
-            if !is_dir && (new_rel.ends_with(".atb") || new_rel.ends_with(".atlx")) {
-                if let Ok(text) = client.get_file_text(&space_id, &new_rel).await {
-                    if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&text) {
-                        value["id"] = serde_json::Value::String(atelyx_core::vault::new_entity_id());
-                        value["title"] =
-                            serde_json::Value::String(atelyx_core::vault::file_stem(&target).to_string());
-                        let _ = client
-                            .put_file_text(
-                                &space_id,
-                                &new_rel,
-                                &serde_json::to_string_pretty(&value).unwrap_or_default(),
-                            )
-                            .await;
-                    }
-                }
-            }
-            Ok::<_, SpaceError>(new_rel)
-        },
+        async move { duplicate_in_space(&client, &space_id, &rel, is_dir).await.map_err(err_text) },
         move |result| {
-            let parent = parent_of(&rel_for_cb);
-            let follow = match &result {
-                Ok(rel) => crate::FollowUp::Created { rel: rel.clone() },
-                Err(_) => crate::FollowUp::None,
-            };
-            Message::OpDone(gen, parent, result.map_err(err_text), follow)
+            Message::Plugins(crate::settings_view::plugins::PluginsMsg::ShellDuplicateDone {
+                request_id,
+                gen,
+                result,
+            })
         },
     )
+}
+
+/// 空间内的副本复制（copy 端点 + 实体 id 重建）：菜单项与插件入口共用。
+async fn duplicate_in_space(
+    client: &SpaceClient,
+    space_id: &str,
+    rel: &str,
+    is_dir: bool,
+) -> Result<String, SpaceError> {
+    let parent = parent_of(rel);
+    let name = rel.rsplit('/').next().unwrap_or(rel).to_string();
+    // 同名去重：name-2、name-3 …（服务端 copy 目标已存在 409 兜底，前置避让减少报错）
+    let tree = client.tree(space_id).await?;
+    let taken = children_of_tree(&tree, &parent)
+        .into_iter()
+        .map(|c| c.rel.rsplit('/').next().unwrap_or(&c.rel).to_string())
+        .collect::<Vec<_>>();
+    let (stem, ext) = match name.rfind('.') {
+        Some(0) | None => (name.clone(), String::new()),
+        Some(i) => (name[..i].to_string(), name[i..].to_string()),
+    };
+    let mut target = name.clone();
+    if taken.iter().any(|t| t == &target) {
+        let mut seq = 2;
+        loop {
+            target = format!("{stem}-{seq}{ext}");
+            if !taken.iter().any(|t| t == &target) {
+                break;
+            }
+            seq += 1;
+        }
+    }
+    let new_rel = if parent.is_empty() { target.clone() } else { format!("{parent}/{target}") };
+    client.copy_file(space_id, rel, &new_rel).await?;
+    // 服务端 copy 不重建实体 id：非目录副本读改写换新 id，内嵌标题改为副本自己的
+    // 主名（留着原件的标题会让副本被当成原件改名，撞上原件即名冲突）
+    if !is_dir && (new_rel.ends_with(".atb") || new_rel.ends_with(".atlx")) {
+        if let Ok(text) = client.get_file_text(space_id, &new_rel).await {
+            if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&text) {
+                value["id"] = serde_json::Value::String(atelyx_core::vault::new_entity_id());
+                value["title"] =
+                    serde_json::Value::String(atelyx_core::vault::file_stem(&target).to_string());
+                let _ = client
+                    .put_file_text(
+                        space_id,
+                        &new_rel,
+                        &serde_json::to_string_pretty(&value).unwrap_or_default(),
+                    )
+                    .await;
+            }
+        }
+    }
+    Ok(new_rel)
 }
 
 /// 拖拽移动（空间模式）：保持文件名移入目标目录（目标重名 409 提示，不加序号静默改位）；

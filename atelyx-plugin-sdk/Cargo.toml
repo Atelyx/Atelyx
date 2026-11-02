@@ -7,8 +7,6 @@ description = "Atelyx 插件 SDK：握手、能力面代理、绘制指令构造
 license = "Apache-2.0"
 repository = "https://github.com/Atelyx/Atelyx"
 readme = "../README.md"
-# 端到端夹具与测试依赖仓库内的宿主 crate：发布包只出 SDK 本体，不带上它们
-exclude = ["src/bin", "tests"]
 
 [dependencies]
 # Markdown 解析（格式语义库）：插件侧自己解析源码，保留源偏移，不依赖宿主服务
@@ -21,8 +19,6 @@ atelyx-plugin-abi = { version = "0.1.0", path = "../atelyx-plugin-abi" }
 serde = { version = "1", default-features = false }
 serde_json = "1"
 base64 = "0.22"
-# 整面帧共享内存映射（插件写入宿主创建的帧区域）
-memmap2 = "0.9"
 # 连接泵：stdin/stdout 读写（io-util/io-std）、读写任务与超时（rt/sync/time/macros）；
 # rt-multi-thread 让插件的 #[tokio::main] 开箱即用
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time", "macros", "io-util", "io-std"] }
@@ -30,8 +26,3 @@ thiserror = "2"
 # PluginHandler 的 async trait：通知处理逐任务分发，future 必须 Send（盒装实现）
 async-trait = "0.1"
 
-[dev-dependencies]
-# e2e：拉起 stub / crasher 子进程（process）与超时断言（macros/rt 已在主依赖，process 仅测试需要）
-tokio = { version = "1", features = ["process"] }
-# 宿主运行时端到端：仅测试用，插件侧生产依赖仍只有 protocol（core 不依赖 sdk，方向不反转）
-atelyx-core = { path = "../atelyx-core", features = ["test-support"] }

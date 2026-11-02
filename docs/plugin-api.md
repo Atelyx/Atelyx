@@ -33,19 +33,19 @@ pub struct Manifest {
     pub version: String,
     /// 协议版本，必须等于宿主的 [`crate::API_VERSION`]。
     pub api_version: u32,
-    /// 同进程动态库 ABI 版本；给出即按 cdylib 装载，缺省仍是进程插件。
+    /// 同进程动态库 ABI 版本，必须等于宿主的 `ABI_VERSION`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub abi_version: Option<u32>,
     /// 最低宿主版本（语义化版本，如 `0.4.0`）；缺省 = 不限。宿主低于它即拒绝装载。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_host_version: Option<String>,
     pub entry: Entry,
-    /// 能力声明清单：用于向用户公示与审计，不拦截调用——插件是原生进程，闸门拦住的是
-    /// 守规矩的插件。宿主据此标出「用到但未声明」的调用。
+    /// 能力声明清单：用于向用户公示与审计，不拦截调用——插件与宿主同进程、持同等权限，
+    /// 闸门拦住的是守规矩的插件。宿主据此标出「用到但未声明」的调用。
     pub permissions: Vec<Permission>,
-    /// 进程型插件的单实例约束（多窗口共享同一宿主运行时全局单例）。
+    /// 单实例约束（多窗口共享同一宿主运行时全局单例）。
     pub singleton: bool,
-    /// 切换仓库容器（本地 ↔ 空间 / 换仓库）时保持挂载；false = 宿主重载插件进程。
+    /// 切换仓库容器（本地 ↔ 空间 / 换仓库）时保持挂载；false = 宿主停掉实例后按新容器重启。
     pub keep_mounted_on_vault_switch: bool,
     pub doc_type_registrations: Vec<DocTypeRegistration>,
 }
@@ -135,8 +135,6 @@ pub struct PluginInfo {
 pub struct InitializeResult {
     pub api_version: u32,
     pub host: HostInfo,
-    /// 整面帧共享内存区域：插件按它映射，此后每次提交只走这条通路。
-    pub frame_region: FrameRegionInfo,
 }
 ```
 
@@ -383,7 +381,18 @@ pub mod error {
 pub const BUILTIN_SERVICES: &[(&str, &str, &[&str])] = &[
     ("fs", PLATFORM_PLUGIN, &[fs::PRIVATE_DIR, fs::READ_TEXT, fs::WRITE_TEXT, fs::READ_BINARY, fs::WRITE_BINARY, fs::REMOVE, fs::EXISTS, fs::LIST]),
     ("process", PLATFORM_PLUGIN, &[process::SPAWN, process::WRITE_STDIN, process::CLOSE_STDIN, process::KILL]),
-    ("vault", PLATFORM_PLUGIN, &[vault::READ_TEXT, vault::WRITE_TEXT, vault::READ_BINARY, vault::WRITE_BINARY, vault::IMPORT_FILE, vault::IMAGE_INFO, vault::LIST, vault::EXISTS, vault::TAGS, vault::REMOVE, vault::RENAME, vault::BACKLINKS, vault::FILES]),
+    ("vault", PLATFORM_PLUGIN, &[vault::READ_TEXT, vault::WRITE_TEXT, vault::READ_BINARY, vault::WRITE_BINARY, vault::IMPORT_FILE, vault::IMAGE_INFO, vault::LIST, vault::EXISTS, vault::TAGS, vault::REMOVE, vault::RENAME, vault::BACKLINKS, vault::FILES,
+        // 仓库界面状态（展开集 / 排序 / 目录颜色 / 提示词标记）与条目操作，随仓库走
+        vault_ui::READ, vault_ui::WRITE, vault_ui::CREATE, vault_ui::SWITCH_CONTAINER, vault_ui::REMOVE_CONTAINER, vault_ui::LIST_DIRS, vault_ui::REFRESH_TREE]),
+    ("drag", PLATFORM_PLUGIN, &[drag::START, drag::HOVER, drag::END]),
+    ("menu", PLATFORM_PLUGIN, &[menu::OPEN]),
+    ("shell", PLATFORM_PLUGIN, &[
+        shell::PICK_COLOR,
+        shell::PICK_VAULT,
+        shell::REVEAL,
+        shell::ABSOLUTE_PATH,
+        shell::DUPLICATE,
+    ]),
     ("collab", PLATFORM_PLUGIN, &[collab::PEERS, collab::SEND, collab::META_GET, collab::META_PATCH]),
     // 空间名册与房间事实取自宿主会话与服务端，弹层 / 菜单也在宿主，归平台自身
     ("space", PLATFORM_PLUGIN, &[space::ROOM, space::MEMBERS, space::OPEN_MENU, space::OPEN_SETTINGS]),
@@ -820,10 +829,6 @@ pub struct EdgesPadding {
 // atelyx-plugin-protocol/src/method.rs
 /// 面帧：整个面交给插件自绘，一帧即当前完整界面。
 pub mod frame {
-    /// 插件提交一份整面帧：内容写在共享内存槽里，params 只带槽位定位与校验信息。整帧替换。
-    pub const SUBMIT_SHARED: &str = "frame.submitShared";
-    /// 帧超出当前槽容量时请求宿主换一份更大的共享内存区域（应答 = 新区域描述）。
-    pub const REGION: &str = "frame.region";
     /// 宿主回发原始输入（通知）：指针 / 滚轮 / 按键 / 输入法 / 焦点 / 尺寸。
     pub const HOST_INPUT: &str = "host:frame.input";
     /// 宿主按面声明的帧率发帧拍（通知）：插件收到后提交该帧的内容。
@@ -983,32 +988,9 @@ pub const MAX_HITS: usize = 4096;
 
 ```rust
 // atelyx-plugin-protocol/src/frame.rs
-/// 命中区 id 上限（字节）。
-pub const MAX_HIT_ID_LEN: usize = 64;
-```
-
-```rust
-// atelyx-plugin-protocol/src/frame.rs
-/// `frame.submitShared` 的 params：帧内容写在共享内存的 `slot` 槽里，信封只带定位与校验信息。
-/// 宿主按 `generation` 拒绝过期映射，按 `seq` / `len` 校验槽内内容是否仍是本次写入。
-#[serde(rename_all = "camelCase")]
-pub struct FrameSubmitSharedParams {
-    pub surface_id: String,
-    pub generation: u64,
-    pub slot: u32,
-    pub seq: u64,
-    pub len: u32,
-}
-```
-
-```rust
-// atelyx-plugin-protocol/src/frame.rs
-/// `frame.region` 的 params：帧超出当前槽容量时请求宿主换一份更大的区域。
-#[serde(rename_all = "camelCase")]
-pub struct FrameRegionRequest {
-    /// 本次至少要能放下的帧字节数；实际容量按倍增取到不小于它的值。
-    pub min_bytes: u32,
-}
+/// 命中区 id 上限（字节）：插件可以把它当作不透明标识用（仓库相对路径这类天然偏长的串），
+/// 上限按 Linux 的 `PATH_MAX` 留足，中文一字 3 字节也不至于撑破。
+pub const MAX_HIT_ID_LEN: usize = 4096;
 ```
 
 ```rust
@@ -1117,247 +1099,7 @@ pub struct Modifiers {
 }
 ```
 
-## 6. 帧共享内存
-
-握手应答给出区域描述（路径 / 代次 / 槽数 / 槽容量）：插件把编码后的帧写进一个槽位，再以`frame.submitShared` 报告槽位坐标。区域文件全部小端：64 字节区域头（魔数 `ATLXFRM\0` / 版本 / 槽数 /槽容量 / 代次 / 头长 / 槽步长），每槽 16 字节槽头（序号 u64、长度 u32）+ 槽容量。写入顺序是「序号置奇 →写长度与内容 → 序号置偶」，序号取非零偶数、每次 +2；宿主首尾序号一致才认这一帧，撕裂或错位的整帧丢弃。帧超出槽容量时用 `frame.region` 请求扩容，宿主换新文件并递增代次，旧代次的提交一律拒绝。
-
-```rust
-// atelyx-plugin-protocol/src/frame_region.rs
-/// 一个共享内存区域的描述（握手应答与 `frame.region` 扩容应答同形）。
-#[serde(rename_all = "camelCase")]
-pub struct FrameRegionInfo {
-    /// 区域文件绝对路径（宿主建在系统临时目录；插件按此映射）。
-    pub path: String,
-    /// 代次：每次扩容或新会话换新文件并递增；提交时原样带回，宿主据此拒绝过期映射。
-    pub generation: u64,
-    pub slot_count: u32,
-    /// 每槽可写的最大帧字节数。
-    pub slot_capacity: u32,
-}
-```
-
-```rust
-// atelyx-plugin-protocol/src/frame_region.rs
-/// 区域头魔数（8 字节）。
-pub const REGION_MAGIC: [u8; 8] = *b"ATLXFRM\0";
-```
-
-```rust
-// atelyx-plugin-protocol/src/frame_region.rs
-/// 区域布局版本：字段含义变化即递增，双端不一致按不可用报错。
-pub const REGION_VERSION: u32 = 1;
-```
-
-```rust
-// atelyx-plugin-protocol/src/frame_region.rs
-/// 区域头长度。
-pub const REGION_HEADER_SIZE: usize = 64;
-```
-
-```rust
-// atelyx-plugin-protocol/src/frame_region.rs
-/// 槽头长度。
-pub const SLOT_HEADER_SIZE: usize = 16;
-```
-
-```rust
-// atelyx-plugin-protocol/src/frame_region.rs
-/// 槽数：写入端同时只占一槽，其余留作宿主读取与紧邻两次提交的隔离。
-pub const SLOT_COUNT: u32 = 4;
-```
-
-```rust
-// atelyx-plugin-protocol/src/frame_region.rs
-/// 槽容量（字节）：帧只装绘制指令与图片来源，不装图片像素。
-pub const SLOT_CAPACITY: u32 = 256 * 1024;
-```
-
-```rust
-// atelyx-plugin-protocol/src/frame_region.rs
-/// 槽容量上限：超出即报可读错误，不再扩容。
-pub const MAX_SLOT_CAPACITY: u32 = 16 * 1024 * 1024;
-```
-
-```rust
-// atelyx-plugin-protocol/src/frame_region.rs
-/// 填区域头：调用方须已把文件扩到 [`FrameRegionInfo::byte_len`]，且槽位从全零起步（新建文件即全零，
-/// 槽序号从 2 起递增，全零槽不会被误认）。
-///
-/// 布局（全部小端）：64 字节区域头（魔数 / 版本 / 槽数 / 槽容量 / 代次 / 头长 / 槽步长）→
-/// 每槽 16 字节槽头（序号 u64、长度 u32）+ 定长槽容量。
-///
-/// 只写区域头，槽区不动；缓冲不足或槽数 / 槽容量越界即报错。
-pub fn init_region(map: &mut [u8], info: &FrameRegionInfo) -> Result<(), String> {
-    info.check_layout()?;
-    let len = info.byte_len();
-    if map.len() < len {
-        return Err(format!("区域缓冲不足：需要 {len} 字节，实际 {}", map.len()));
-    }
-    map[..REGION_HEADER_SIZE].fill(0);
-    map[MAGIC_OFFSET..MAGIC_OFFSET + REGION_MAGIC.len()].copy_from_slice(&REGION_MAGIC);
-    write_u32(map, VERSION_OFFSET, REGION_VERSION);
-    write_u32(map, SLOT_COUNT_OFFSET, info.slot_count);
-    write_u32(map, SLOT_CAPACITY_OFFSET, info.slot_capacity);
-    write_u64(map, GENERATION_OFFSET, info.generation);
-    write_u32(map, HEADER_SIZE_OFFSET, REGION_HEADER_SIZE as u32);
-    write_u32(map, SLOT_STRIDE_OFFSET, info.slot_stride() as u32);
-    Ok(())
-}
-```
-
-```rust
-// atelyx-plugin-protocol/src/frame_region.rs
-/// 校验区域头与描述一致（映射端开箱即用的一次把关）。
-///
-/// 缓冲不足、魔数 / 版本 / 代次不符或槽数与步长和描述不同即报错。
-pub fn validate_region(map: &[u8], info: &FrameRegionInfo) -> Result<(), String> {
-    info.check_layout()?;
-    let len = info.byte_len();
-    if map.len() < len {
-        return Err(format!("区域文件不足：需要 {len} 字节，实际 {}", map.len()));
-    }
-    if map[MAGIC_OFFSET..MAGIC_OFFSET + REGION_MAGIC.len()] != REGION_MAGIC {
-        return Err("区域魔数不符".into());
-    }
-    let version = read_u32(map, VERSION_OFFSET);
-    if version != REGION_VERSION {
-        return Err(format!("区域版本不符：文件 {version}，宿主 {REGION_VERSION}"));
-    }
-    let slot_count = read_u32(map, SLOT_COUNT_OFFSET);
-    let capacity = read_u32(map, SLOT_CAPACITY_OFFSET);
-    let generation = read_u64(map, GENERATION_OFFSET);
-    let header_size = read_u32(map, HEADER_SIZE_OFFSET);
-    let stride = read_u32(map, SLOT_STRIDE_OFFSET);
-    if generation != info.generation {
-        return Err(format!("区域代次不符：文件 {generation}，描述 {}", info.generation));
-    }
-    if slot_count != info.slot_count
-        || capacity != info.slot_capacity
-        || header_size as usize != REGION_HEADER_SIZE
-        || stride as usize != info.slot_stride()
-    {
-        return Err(format!(
-            "区域头与描述不一致：槽数 {slot_count}，槽容量 {capacity}，槽头 {header_size}，步长 {stride}"
-        ));
-    }
-    Ok(())
-}
-```
-
-```rust
-// atelyx-plugin-protocol/src/frame_region.rs
-/// 把一帧编码后的内容写进槽位：序号必须是大于零的偶数。
-///
-/// 区域头与描述不符、槽位越界、内容超出槽容量或序号非法即报错，槽内内容不动。
-pub fn write_slot(
-    map: &mut [u8],
-    info: &FrameRegionInfo,
-    slot: u32,
-    seq: u64,
-    payload: &[u8],
-) -> Result<(), String> {
-    validate_region(map, info)?;
-    if seq == 0 || seq % 2 != 0 {
-        return Err(format!("槽序号须为非零偶数：{seq}"));
-    }
-    let (header, content) =
-        info.slot_offsets(slot).ok_or_else(|| format!("槽位越界：{slot}"))?;
-    if payload.len() > info.slot_capacity as usize {
-        return Err(format!(
-            "帧超出槽容量：{} > {}",
-            payload.len(),
-            info.slot_capacity
-        ));
-    }
-    // 先置奇数宣告写入中，再写长度与内容；释放栅栏确保读者看到偶数序号时内容已落地
-    write_u64(map, header + SLOT_SEQ_OFFSET, seq - 1);
-    fence(Ordering::SeqCst);
-    write_u32(map, header + SLOT_LEN_OFFSET, payload.len() as u32);
-    map[content..content + payload.len()].copy_from_slice(payload);
-    fence(Ordering::Release);
-    write_u64(map, header + SLOT_SEQ_OFFSET, seq);
-    Ok(())
-}
-```
-
-```rust
-// atelyx-plugin-protocol/src/frame_region.rs
-/// 读一槽内容：序号对得上且首尾一致才返回 `Some`。
-///
-/// 写入进行中 / 被后续写入覆盖返回 `None`（按错位丢弃）；区域头与描述不符、序号非法、槽位或
-/// 长度越界、槽内长度与提交不符即报错。
-pub fn read_slot(
-    map: &[u8],
-    info: &FrameRegionInfo,
-    slot: u32,
-    seq: u64,
-    len: u32,
-) -> Result<Option<Vec<u8>>, String> {
-    validate_region(map, info)?;
-    if seq == 0 || seq % 2 != 0 {
-        return Err(format!("槽序号须为非零偶数：{seq}"));
-    }
-    let (header, content) =
-        info.slot_offsets(slot).ok_or_else(|| format!("槽位越界：{slot}"))?;
-    if len > info.slot_capacity {
-        return Err(format!("帧长度越界：{len} > {}", info.slot_capacity));
-    }
-    let before = read_u64(map, header + SLOT_SEQ_OFFSET);
-    if before != seq || before % 2 != 0 {
-        return Ok(None);
-    }
-    fence(Ordering::Acquire);
-    let stored_len = read_u32(map, header + SLOT_LEN_OFFSET);
-    let payload = map[content..content + len as usize].to_vec();
-    fence(Ordering::Acquire);
-    let after = read_u64(map, header + SLOT_SEQ_OFFSET);
-    if after != before {
-        // 读的过程中被后续写入整槽覆盖：内容已不可信，按错位丢弃（不是插件错误）
-        return Ok(None);
-    }
-    if stored_len != len {
-        return Err(format!("槽内长度与提交不符：槽内 {stored_len}，提交 {len}"));
-    }
-    Ok(Some(payload))
-}
-```
-
-```rust
-// atelyx-plugin-protocol/src/frame_codec.rs
-/// 把一帧编成字节序列。
-pub fn encode(frame: &SurfaceFrame) -> Vec<u8> {
-    let mut out = Vec::new();
-    out.extend_from_slice(&MAGIC);
-    out.push(VERSION);
-    encode_frame(&mut out, frame);
-    out
-}
-```
-
-```rust
-// atelyx-plugin-protocol/src/frame_codec.rs
-/// 从字节序列还原一帧：魔数 / 版本 / 长度对不上或内容截断都返回可读错误。
-pub fn decode(bytes: &[u8]) -> Result<SurfaceFrame, String> {
-    if bytes.len() < MAGIC.len() + 1 {
-        return Err("帧编码过短".into());
-    }
-    if bytes[..MAGIC.len()] != MAGIC {
-        return Err("帧编码魔数不符".into());
-    }
-    let version = bytes[MAGIC.len()];
-    if version != VERSION {
-        return Err(format!("帧编码版本不符：{version}"));
-    }
-    let mut reader = Reader { buf: bytes, pos: MAGIC.len() + 1 };
-    let frame = decode_frame(&mut reader)?;
-    if reader.pos != bytes.len() {
-        return Err(format!("帧编码尾部有多余字节：{}", bytes.len() - reader.pos));
-    }
-    Ok(frame)
-}
-```
-
-## 7. 贡献点与窗口面
+## 6. 贡献点与窗口面
 
 贡献点决定插件界面出现在哪里；`surfaceId` 即贡献 id（文档实例另由宿主分配 id，插件窗口面由 `window.open` 的 `id` 指定）。
 
@@ -1556,7 +1298,7 @@ pub struct WindowDragParams {
 }
 ```
 
-## 8. 默认布局
+## 7. 默认布局
 
 插件声明自己期望的默认布局：宿主在插件首次启用时摆进当前场景，之后改名 / 删除都不再补回。`views` 填视图 kind（本插件贡献为 `plugin:<插件 id>:<贡献 id>`）。
 
@@ -1630,7 +1372,7 @@ pub const MAX_PANELS: usize = 32;
 pub const MAX_VIEWS_PER_PANEL: usize = 16;
 ```
 
-## 9. 能力面方法名
+## 8. 能力面方法名
 
 每个模块是一类能力面的方法名常量，与 `permissions` 里的能力声明一一对应；声明用于公示与审计，不是拦截：插件是原生进程，能力面上的限制只作便利层语义。
 
@@ -1982,6 +1724,445 @@ pub mod space {
 }
 ```
 
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 仓库界面状态（随仓库走的界面数据）：展开集 / 排序 / 目录颜色 / 提示词标记这类
+/// 「宿主与插件都读、重启后要保留」的键值，落仓库配置与对应侧文件，不落插件私有目录。
+pub mod vault_ui {
+    /// 读一组仓库界面状态：缺省键回落到宿主默认值。
+    pub const READ: &str = "vault.ui";
+    /// 按键写仓库界面状态：只改给出的键（`null` 删除该键），返回写后的完整快照。
+    pub const WRITE: &str = "vault.updateUi";
+    /// 新建一个条目（笔记 / 表格 / 画布 / 文件夹 / 插件文档类型）：宿主起空内容并落盘。
+    pub const CREATE: &str = "vault.create";
+    /// 切换当前容器（本地仓库或协作空间）。
+    pub const SWITCH_CONTAINER: &str = "vault.switchContainer";
+    /// 从容器列表移除一个容器（只移出最近列表，不动磁盘内容与服务端数据）。
+    pub const REMOVE_CONTAINER: &str = "vault.removeContainer";
+    /// 列出全仓库的目录（仓库相对路径；「展开全部」这类需要整棵骨架的入口用）。
+    pub const LIST_DIRS: &str = "vault.listDirs";
+    /// 让宿主重读文件树（磁盘无监听，外部改动只能靠刷新感知）。
+    pub const REFRESH_TREE: &str = "vault.refreshTree";
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 文件拖拽会话：ghost、落点判定与悬停自动展开都在宿主，插件只发起 / 更新落点 / 结束。
+pub mod drag {
+    /// 发起一次拖拽会话（同一插件同一时刻至多一个；重复发起以最新的为准）。
+    pub const START: &str = "drag.start";
+    /// 插件面在指针移动时上报本面内的落点候选（命中区 id 由插件给出）。
+    pub const HOVER: &str = "drag.hover";
+    /// 结束拖拽会话（释放即落位；取消则不落位）。
+    pub const END: &str = "drag.end";
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 宿主弹层菜单：插件声明条目（可带子面板与只读文字行），宿主按统一外观弹出并回传选中项。
+pub mod menu {
+    /// 打开一个宿主菜单，锚点为当前指针位置。关闭时经 [`HOST_CLOSED`] 回传原因。
+    pub const OPEN: &str = "menu.open";
+    /// 宿主关闭了菜单（选中某项 / 点击外点 / Esc）；`selected` 缺省 = 未选中任何项。
+    pub const HOST_CLOSED: &str = "host:menu.closed";
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 宿主自有的系统单例界面与容器入口：插件只发起，实际动作与结果回填都在壳。
+pub mod shell {
+    /// 打开宿主的取色器（HSV 拖动预览 / 松手提交），回执 = 选中色（取消时缺省）。
+    pub const PICK_COLOR: &str = "shell.pickColor";
+    /// 让宿主选一个文件夹并作为仓库打开（选择器与进入仓库链都在壳）。
+    pub const PICK_VAULT: &str = "shell.pickVault";
+    /// 在系统文件管理器中显示一个仓库内条目（空路径 = 仓库根；协作空间没有本机路径，宿主拒绝）。
+    pub const REVEAL: &str = "shell.reveal";
+    /// 取一个仓库内条目的绝对路径（空路径 = 仓库根；协作空间没有本机路径，宿主拒绝）。
+    pub const ABSOLUTE_PATH: &str = "shell.absolutePath";
+    /// 在同目录创建副本（同名自动加序号；.atlx / .atb 连同内部 id 重建），回执 = 落定的新路径。
+    pub const DUPLICATE: &str = "shell.duplicate";
+}
+```
+
+## 9. 能力面负载：文件面板
+
+仓库界面状态（展开集 / 排序 / 目录颜色 / 提示词标记）、容器切换与移除、条目新建与副本、拖拽会话、宿主菜单与系统入口的负载形态。
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 文件树的下一层条目。
+#[serde(rename_all = "camelCase")]
+pub struct UiDirEntry {
+    /// 相对本目录的名字（不含父路径）。
+    pub name: String,
+    /// 相对仓库根的路径（`/` 分隔）。
+    pub path: String,
+    pub is_dir: bool,
+    /// 修改时刻（unix 秒）：按时间排序用。
+    pub mtime: i64,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 随仓库走的界面状态：展开集 / 排序 / 目录颜色 / 提示词标记。
+#[serde(rename_all = "camelCase")]
+pub struct VaultUiState {
+    /// 文件树展开的目录（仓库相对路径；空串 = 仓库根）。
+    #[serde(default)]
+    pub expanded: Vec<String>,
+    /// 排序键（`name-asc` / `name-desc` / `mtime-desc` / `mtime-asc`）。
+    pub sort: String,
+    /// 目录图标颜色（目录相对路径 → hex 色）。
+    #[serde(default)]
+    pub folder_colors: std::collections::BTreeMap<String, String>,
+    /// 已注册为系统提示词的笔记（仓库相对路径）。
+    #[serde(default)]
+    pub prompt_notes: Vec<String>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`vault_ui::READ`] 的 params：`dir` 给定时另带该目录条目。
+#[serde(rename_all = "camelCase", default)]
+pub struct VaultUiParams {
+    /// 需要一个目录的条目（空 = 不要）。
+    pub dir: Option<String>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`vault_ui::WRITE`] 的 params：只改给出的键。
+#[serde(rename_all = "camelCase", default)]
+pub struct VaultUiPatch {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expanded: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub folder_colors: Option<std::collections::BTreeMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_notes: Option<Vec<String>>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`vault_ui::READ`] 的 result：状态快照 + 可选目录条目 + 容器清单。
+#[serde(rename_all = "camelCase")]
+pub struct VaultUiResult {
+    pub state: VaultUiState,
+    /// 请求了 `dir` 时的条目（宿主已按当前排序排好）；未请求 = 空。
+    #[serde(default)]
+    pub entries: Vec<UiDirEntry>,
+    /// 可切换的容器清单（本地仓库在前、激活项在前）。
+    #[serde(default)]
+    pub containers: Vec<ContainerEntry>,
+    /// 插件注册的文档类型（「新建」菜单条目用；扩展名不带点）。
+    #[serde(default)]
+    pub doc_types: Vec<DocTypeEntry>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 一个插件注册的文档类型（文件面板「新建」菜单条目）。
+#[serde(rename_all = "camelCase")]
+pub struct DocTypeEntry {
+    /// 扩展名（不带点）。
+    pub extension: String,
+    /// 菜单标签（如「笔记」）。
+    pub label: String,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`vault_ui::LIST_DIRS`] 的回执：全部目录的仓库相对路径（不含仓库根）。
+#[serde(rename_all = "camelCase", default)]
+pub struct DirListResult {
+    pub dirs: Vec<String>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 一个可切换的仓库容器（本地仓库或协作空间）。
+#[serde(rename_all = "camelCase")]
+pub struct ContainerEntry {
+    /// 唯一键（本地 = `local:<root>`，空间 = `space:<server>#<spaceId>`）。
+    pub id: String,
+    pub label: String,
+    /// 本地仓库根路径（空间缺省）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root: Option<String>,
+    /// 协作空间标识（本地缺省）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space_id: Option<String>,
+    /// 当前激活的容器。
+    #[serde(default)]
+    pub active: bool,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 容器切换（`vault.switchContainer`）：切到清单里给的那个容器。
+#[serde(rename_all = "camelCase")]
+pub struct SwitchContainerParams {
+    /// [`ContainerEntry::id`] 的原值。
+    pub id: String,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 容器移除（`vault.removeContainer`）：把该容器移出最近列表。
+#[serde(rename_all = "camelCase")]
+pub struct RemoveContainerParams {
+    /// [`ContainerEntry::id`] 的原值。
+    pub id: String,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 新建一个条目（`vault.create`）：宿主按 `kind` 起空内容并落盘（同名自动加序号）。
+#[serde(rename_all = "camelCase")]
+pub struct CreateEntryParams {
+    /// 目标目录（仓库相对路径；空串 = 仓库根）。
+    pub dir: String,
+    /// 条目名（不含扩展名；`kind = folder` 时即文件夹名）。
+    pub name: String,
+    /// `note` / `table` / `canvas` / `folder`，或插件注册文档类型的不带点扩展名。
+    pub kind: String,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 新建结果：落定的仓库相对路径。
+#[serde(rename_all = "camelCase")]
+pub struct CreateEntryResult {
+    pub path: String,
+    /// 新建的是文件夹。
+    #[serde(default)]
+    pub is_dir: bool,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 创建副本（`shell.duplicate`）：`path` 为源条目的仓库相对路径。
+#[serde(rename_all = "camelCase")]
+pub struct DuplicateParams {
+    pub path: String,
+    /// 源是文件夹（递归复制并重建内部 id）。
+    #[serde(default)]
+    pub is_dir: bool,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 在文件管理器中显示一个条目（`shell.reveal`）：`path` 为仓库相对路径，空串 = 仓库根。
+#[serde(rename_all = "camelCase", default)]
+pub struct RevealParams {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub path: String,
+    /// 目标是文件夹（文件夹用「打开」语义，文件用「选中」语义）。
+    #[serde(default)]
+    pub is_dir: bool,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 条目绝对路径（`shell.absolutePath` 回执）。
+#[serde(rename_all = "camelCase")]
+pub struct AbsolutePathResult {
+    pub path: String,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 取色器（`shell.pickColor`）：宿主的 HSV 取色器是系统单例 UI，插件只给初始色。
+#[serde(rename_all = "camelCase", default)]
+pub struct PickColorParams {
+    /// 初始色（`#rrggbb`）；缺省 = 宿主强调色。
+    pub initial: Option<String>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 取色结果：用户取消时 `color` 缺省。
+#[serde(rename_all = "camelCase", default)]
+pub struct PickColorResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 拖拽会话里被拖的条目。
+#[serde(rename_all = "camelCase")]
+pub struct DragItem {
+    /// 仓库相对路径。
+    pub path: String,
+    pub is_dir: bool,
+    /// ghost 上显示的文案（缺省 = 路径末段）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`drag::START`] 的 params：指针起点取宿主当前指针位置。
+#[serde(rename_all = "camelCase")]
+pub struct DragStartParams {
+    pub item: DragItem,
+    /// 承载发起面所在的窗口面标识（宿主据此把 ghost 画在正确窗口）。
+    pub surface_id: String,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`drag::HOVER`] 的 params：本面上指针所指的落点候选。
+/// 几何（哪一行）由插件判定，能不能落由宿主按同一套规则复核。
+#[serde(rename_all = "camelCase", default)]
+pub struct DragHoverParams {
+    /// 落点目录（仓库相对路径；空串 = 仓库根）；缺省 = 本面不接受落入。
+    pub target: Option<String>,
+    /// 该落点是不是目录（文件行不接受落入）。
+    pub is_dir: bool,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`drag::END`] 的 params：`cancelled` = 不落位。
+#[serde(rename_all = "camelCase", default)]
+pub struct DragEndParams {
+    pub cancelled: bool,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 宿主回推给插件的拖拽状态（[`crate::event::name::DRAG_STATE`]）：驱动落点高亮与拒绝提示。
+#[serde(rename_all = "camelCase")]
+pub struct DragStateParams {
+    /// 当前落点（仓库相对路径）；`None` = 指针不在本面的任何落点上。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// 落点不可用时的可读原因。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reject: Option<String>,
+    /// 悬停折叠目录到点会自动展开。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub springing: bool,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 菜单条目：与宿主内置菜单同一套形态。
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum MenuItem {
+    /// 动作项：`id` 随选中结果回传。
+    Action {
+        id: String,
+        label: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        icon: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        danger: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        disabled: bool,
+        /// 行尾角标（如「当前」）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+        /// 悬停提示。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hint: Option<String>,
+        /// 所属面板（0 = 根面板）。
+        #[serde(default)]
+        pane: usize,
+    },
+    /// 当前选中项（强调色文字 + 右侧对勾）。
+    Checked {
+        id: String,
+        label: String,
+        #[serde(default)]
+        pane: usize,
+    },
+    /// 钻入子面板。
+    Submenu {
+        label: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        icon: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        disabled: bool,
+        /// 所属面板（0 = 根面板）。
+        #[serde(default)]
+        pane: usize,
+        /// 点击后钻入的面板号（必须 ≥ 1：根面板不能再钻回自己）。
+        target: usize,
+    },
+    /// 只读文字行（确认说明这类）。
+    Text {
+        text: String,
+        #[serde(default)]
+        pane: usize,
+    },
+    /// 分组头（灰底小字）。
+    Group {
+        label: String,
+        #[serde(default)]
+        pane: usize,
+    },
+    /// 分隔线。
+    Divider {
+        #[serde(default)]
+        pane: usize,
+    },
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`menu::OPEN`] 的 params：`items` 顺序即渲染顺序。
+#[serde(rename_all = "camelCase")]
+pub struct MenuOpenParams {
+    pub items: Vec<MenuItem>,
+    /// 菜单宽度（逻辑像素；宿主按内容与视口钳制）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<f32>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`menu::HOST_CLOSED`] 的 params：关闭原因与选中的条目 id。
+#[serde(rename_all = "camelCase", default)]
+pub struct MenuClosedParams {
+    /// 选中的动作 / 勾选项 id；未选中（点击外部 / Esc）时缺省。
+    pub selected: Option<String>,
+}
+```
+
 ## 10. 能力面负载：文件、进程与系统服务
 
 上表方法的 params / result 形态（`path` 在 `fs` 面是绝对路径，在 `vault` 面是仓库相对路径）。
@@ -1997,8 +2178,8 @@ pub struct PrivateDirResult {
 ```rust
 // atelyx-plugin-protocol/src/method.rs
 /// `path` 的口径由能力面决定：`fs` 用绝对路径，`vault` 用相对仓库根的路径。
-/// 信任模型与进程托管一致：插件本就是任意权限的用户进程，
-/// 声明式权限是透明度机制而非沙箱边界；`fs` 服务的价值在统一出口与审计事实。
+/// 信任模型：插件与宿主同进程、持同等权限，声明式权限是透明度机制而非沙箱边界；
+/// `fs` 服务的价值在统一出口与审计事实。
 #[serde(rename_all = "camelCase")]
 pub struct PathParams {
     pub path: String,
@@ -3941,6 +4122,12 @@ pub mod name {
     /// 当前容器的历史版本集合变化（新版本记入侧文件、回滚落盘）。payload 为空对象；
     /// 订阅方重取 `history.groups` / `history.day`（宿主已丢弃聚合缓存）。
     pub const HISTORY_CHANGED: &str = "history:changed";
+    /// 拖拽会话的落点状态（发起方收到）：落点 / 拒绝原因 / 悬停自动展开。
+    /// payload 见 [`crate::method::DragStateParams`]。
+    pub const DRAG_STATE: &str = "drag:state";
+    /// 当前打开的文件集合变化（打开 / 切换 / 关闭笔记 / 表格 / 画布）。payload 为空对象；
+    /// 订阅方重取 `editor.openFiles` 拿当前集合（笔记 / 表格 / 画布各一个，至多 3 个）。
+    pub const EDITOR_OPEN_CHANGED: &str = "editor:open.changed";
 }
 ```
 

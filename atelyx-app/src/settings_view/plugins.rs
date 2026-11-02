@@ -23,7 +23,8 @@ use atelyx_core::plugin_runtime::{
     DocAwarenessParams, DocEditParams, DocOpenParams, DocRenameParams, DocSaveParams,
     FilesResult, PluginSummary, SetTrayItemsParams, SpaceContainerKind, SpaceMember,
     SpaceMemberRole, SpaceMembersResult, SpacePeer, SpacePeerFile, SpaceRoomResult,
-    SpaceSelfIdentity, VaultFileEntry, VaultTagsResult,
+    ContainerEntry, SpaceSelfIdentity, UiDirEntry, VaultFileEntry, VaultTagsResult, VaultUiParams,
+    VaultUiPatch, VaultUiResult, VaultUiState,
     MAX_VAULT_BINARY_BYTES, PLATFORM_PLUGIN,
 };
 use atelyx_core::space_client::SpaceError;
@@ -259,6 +260,12 @@ pub enum PluginsMsg {
     VaultList { request_id: u64, path: String },
     /// 插件请求全仓库可检索文件清单（`vault.files`）。
     VaultFiles { request_id: u64 },
+    /// 插件请求全仓库目录清单（`vault.listDirs`）。
+    VaultListDirs { request_id: u64 },
+    /// 插件请求宿主重读文件树（`vault.refreshTree`）。
+    VaultRefreshTree { request_id: u64 },
+    /// 目录清单落地（容器世代守卫）。
+    VaultListDirsDone { request_id: u64, gen: u64, result: Result<Vec<String>, String> },
     VaultExists { request_id: u64, path: String },
     /// 删除（文件夹递归；仓库根拒绝）与重命名 / 移动（目标不可已存在；引用跟随）。
     VaultRemove { request_id: u64, path: String },
@@ -341,6 +348,37 @@ pub enum PluginsMsg {
     SpaceOpenMenu { request_id: u64 },
     /// 打开宿主的「协作设置」页（`space.openSettings`）。
     SpaceOpenSettings { request_id: u64 },
+    /// 读 / 写随仓库走的界面状态（`vault.ui` / `vault.updateUi`）。
+    VaultUi { request_id: u64, params: atelyx_core::plugin_runtime::VaultUiParams },
+    VaultUiWrite { request_id: u64, patch: atelyx_core::plugin_runtime::VaultUiPatch },
+    /// `vault.ui` 要目录条目时的异步回执（条目按磁盘现读，不吃宿主的懒加载缓存）。
+    VaultUiDone {
+        request_id: u64,
+        result: Result<Vec<atelyx_core::plugin_runtime::UiDirEntry>, String>,
+    },
+    /// 系统入口：在文件管理器中显示一个条目 / 取一个条目的绝对路径（`shell.reveal` /
+    /// `shell.absolutePath`；协作空间没有本机路径）。
+    ShellReveal { request_id: u64, params: atelyx_core::plugin_runtime::RevealParams },
+    ShellAbsolutePath { request_id: u64, path: String },
+    /// 在同目录创建副本（`shell.duplicate`），回执 = 落定的新路径。
+    ShellDuplicate { request_id: u64, params: atelyx_core::plugin_runtime::DuplicateParams },
+    /// 副本创建完成（容器世代守卫：在途任务不跨仓库回填）。
+    ShellDuplicateDone {
+        request_id: u64,
+        gen: u64,
+        result: Result<String, String>,
+    },
+    /// 新建仓库条目（`vault.create`）与容器切换（`vault.switchContainer`）。
+    VaultCreate { request_id: u64, params: atelyx_core::plugin_runtime::CreateEntryParams },
+    VaultSwitchContainer {
+        request_id: u64,
+        params: atelyx_core::plugin_runtime::SwitchContainerParams,
+    },
+    /// 把容器移出最近列表（`vault.removeContainer`）。
+    VaultRemoveContainer {
+        request_id: u64,
+        params: atelyx_core::plugin_runtime::RemoveContainerParams,
+    },
     /// 协作空间团队元数据（仅在协作空间可用；写入只改给出的键）。
     CollabMetaGet { request_id: u64, params: CollabMetaGetParams },
     CollabMetaPatch { request_id: u64, params: CollabMetaPatchParams },
@@ -620,6 +658,52 @@ pub fn host_requests_stream(spec: &RuntimeSpec) -> impl iced::futures::Stream<It
                 }
                 HostRequest::SpaceOpenSettings { request_id, .. } => {
                     Message::Plugins(PluginsMsg::SpaceOpenSettings { request_id })
+                }
+                HostRequest::VaultUi { request_id, params, .. } => {
+                    Message::Plugins(PluginsMsg::VaultUi { request_id, params })
+                }
+                HostRequest::VaultUiWrite { request_id, patch, .. } => {
+                    Message::Plugins(PluginsMsg::VaultUiWrite { request_id, patch })
+                }
+                HostRequest::VaultCreate { request_id, params, .. } => {
+                    Message::Plugins(PluginsMsg::VaultCreate { request_id, params })
+                }
+                HostRequest::VaultSwitchContainer { request_id, params, .. } => {
+                    Message::Plugins(PluginsMsg::VaultSwitchContainer { request_id, params })
+                }
+                HostRequest::VaultRemoveContainer { request_id, params, .. } => {
+                    Message::Plugins(PluginsMsg::VaultRemoveContainer { request_id, params })
+                }
+                HostRequest::PickColor { request_id, params, .. } => {
+                    Message::PluginPickColor { request_id, params }
+                }
+                HostRequest::PickVault { request_id, .. } => Message::PluginPickVault { request_id },
+                HostRequest::Reveal { request_id, params, .. } => {
+                    Message::Plugins(PluginsMsg::ShellReveal { request_id, params })
+                }
+                HostRequest::AbsolutePath { request_id, path, .. } => {
+                    Message::Plugins(PluginsMsg::ShellAbsolutePath { request_id, path })
+                }
+                HostRequest::Duplicate { request_id, params, .. } => {
+                    Message::Plugins(PluginsMsg::ShellDuplicate { request_id, params })
+                }
+                HostRequest::VaultListDirs { request_id, .. } => {
+                    Message::Plugins(PluginsMsg::VaultListDirs { request_id })
+                }
+                HostRequest::VaultRefreshTree { request_id, .. } => {
+                    Message::Plugins(PluginsMsg::VaultRefreshTree { request_id })
+                }
+                HostRequest::DragStart { plugin_id, request_id, params } => {
+                    Message::PluginDragStart { request_id, plugin_id, params }
+                }
+                HostRequest::DragHover { request_id, params, .. } => {
+                    Message::PluginDragHover { request_id, params }
+                }
+                HostRequest::DragEnd { request_id, params, .. } => {
+                    Message::PluginDragEnd { request_id, params }
+                }
+                HostRequest::MenuOpen { request_id, plugin_id, params } => {
+                    Message::PluginMenuOpen { request_id, plugin_id, params }
                 }
                 HostRequest::HistoryOpen { request_id, params, .. } => {
                     Message::Plugins(PluginsMsg::HistoryOpen { request_id, params })
@@ -1223,6 +1307,63 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
                 .map_err(|e| format!("可检索文件清单不可序列化：{e}"));
             resolve_vault(app, request_id, result)
         }
+        PluginsMsg::VaultRefreshTree { request_id } => {
+            app.plugins.resolve_shell_call(request_id, Ok(serde_json::json!({})));
+            app.refresh_file_tree_task()
+        }
+        PluginsMsg::VaultListDirs { request_id } => {
+            let gen = app.epoch();
+            match app.repo_kind.clone() {
+                crate::RepoKind::Local => match app.vault.root() {
+                    Ok(root) => {
+                        let exclude = app.vault.exclude_folders().unwrap_or_default();
+                        Task::perform(
+                            async move {
+                                run_blocking(move || {
+                                    let tree = vault::list_vault_tree(&root, &exclude)?;
+                                    Ok::<_, String>(dir_paths(&tree))
+                                })
+                                .await
+                            },
+                            move |result| {
+                                Message::Plugins(PluginsMsg::VaultListDirsDone {
+                                    request_id,
+                                    gen,
+                                    result,
+                                })
+                            },
+                        )
+                    }
+                    Err(e) => resolve_vault(app, request_id, Err(e)),
+                },
+                crate::RepoKind::Space(space) => {
+                    let (client, space_id) = (space.client.clone(), space.space_id.clone());
+                    Task::perform(
+                        async move {
+                            let tree = client.tree(&space_id).await.map_err(|e| e.to_string())?;
+                            Ok::<_, String>(collect_space_dirs(&tree))
+                        },
+                        move |result| {
+                            Message::Plugins(PluginsMsg::VaultListDirsDone {
+                                request_id,
+                                gen,
+                                result,
+                            })
+                        },
+                    )
+                }
+            }
+        }
+        PluginsMsg::VaultListDirsDone { request_id, gen, result } => {
+            if gen != app.epoch() {
+                return resolve_vault(app, request_id, Err("仓库已切换，请重新打开".to_string()));
+            }
+            let result = result.and_then(|dirs| {
+                serde_json::to_value(atelyx_core::plugin_runtime::DirListResult { dirs })
+                    .map_err(|e| format!("目录清单不可序列化：{e}"))
+            });
+            resolve_vault(app, request_id, result)
+        }
         PluginsMsg::VaultList { request_id, path } => {
             let rel = match plugin_path((!path.is_empty()).then_some(path.as_str())) {
                 Ok(rel) => rel,
@@ -1567,6 +1708,82 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
             app.plugins.resolve_shell_call(request_id, Ok(serde_json::json!({})));
             Task::done(Message::Space(crate::SpaceMsg::OpenCollabSettings))
         }
+        PluginsMsg::VaultUi { request_id, params } => vault_ui_read(app, request_id, params),
+        PluginsMsg::VaultUiDone { request_id, result } => {
+            let result = result.and_then(|entries| vault_ui_json(app, entries));
+            resolve_vault(app, request_id, result)
+        }
+        PluginsMsg::VaultUiWrite { request_id, patch } => {
+            vault_ui_write(app, request_id, patch)
+        }
+        PluginsMsg::ShellReveal { request_id, params } => {
+            let resolved = (|| {
+                let root = local_root(app)?;
+                let path = if params.path.is_empty() {
+                    root
+                } else {
+                    vault::safe_join(&root, &params.path, false).map_err(|e| e.to_string())?
+                };
+                Ok(path)
+            })();
+            match resolved {
+                Ok(path) => {
+                    crate::reveal_in_file_manager(&path, params.is_dir);
+                    resolve_vault(app, request_id, Ok(serde_json::json!({})))
+                }
+                Err(e) => resolve_vault(app, request_id, Err(e)),
+            }
+        }
+        PluginsMsg::ShellAbsolutePath { request_id, path } => {
+            let result = (|| {
+                let root = local_root(app)?;
+                if path.is_empty() {
+                    return Ok(root.to_string_lossy().into_owned());
+                }
+                vault::safe_join(&root, &path, false)
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .map_err(|e| e.to_string())
+            })();
+            match result {
+                Ok(path) => {
+                    let result = serde_json::to_value(
+                        atelyx_core::plugin_runtime::AbsolutePathResult { path },
+                    )
+                    .map_err(|e| format!("绝对路径不可序列化：{e}"));
+                    resolve_vault(app, request_id, result)
+                }
+                Err(e) => resolve_vault(app, request_id, Err(e)),
+            }
+        }
+        PluginsMsg::ShellDuplicate { request_id, params } => {
+            let rel = match plugin_path(Some(&params.path)) {
+                Ok(rel) if !rel.is_empty() => rel,
+                Ok(_) => {
+                    return resolve_vault(app, request_id, Err("仓库根不能创建副本".to_string()))
+                }
+                Err(e) => return resolve_vault(app, request_id, Err(e)),
+            };
+            app.duplicate_entry_reply(request_id, &rel, params.is_dir)
+        }
+        PluginsMsg::ShellDuplicateDone { request_id, gen, result } => {
+            if gen != app.epoch() {
+                return resolve_vault(app, request_id, Err("仓库已切换，请重新打开".to_string()));
+            }
+            let result = result.and_then(|path| {
+                serde_json::to_value(atelyx_core::plugin_runtime::AbsolutePathResult { path })
+                    .map_err(|e| format!("副本路径不可序列化：{e}"))
+            });
+            resolve_vault(app, request_id, result)
+        }
+        PluginsMsg::VaultCreate { request_id, params } => {
+            app.plugin_create_entry(request_id, params)
+        }
+        PluginsMsg::VaultSwitchContainer { request_id, params } => {
+            app.plugin_switch_container(request_id, params)
+        }
+        PluginsMsg::VaultRemoveContainer { request_id, params } => {
+            app.plugin_remove_container(request_id, params)
+        }
         PluginsMsg::HistoryOpen { request_id, params } => {
             let opened = (|| -> Result<_, String> {
                 if !crate::repo_history::container_ready(app) {
@@ -1715,10 +1932,18 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
     }
 }
 
-/// 仓库相对路径校验：`None` = 仓库根（仅列目录允许根路径）。
+/// 当前容器的本机仓库根；协作空间没有本机路径（调用方据此拒绝）。
+fn local_root(app: &App) -> Result<std::path::PathBuf, String> {
+    if matches!(app.repo_kind, crate::RepoKind::Space(_)) {
+        return Err("协作空间没有本机路径".to_string());
+    }
+    app.vault.root().map_err(|e| e.to_string())
+}
+
+/// 仓库相对路径校验：`None` 与空串都表示仓库根（插件列根目录、在根上新建都这样传）。
 fn plugin_path(path: Option<&str>) -> Result<String, String> {
     match path {
-        None => Ok(String::new()),
+        None | Some("") => Ok(String::new()),
         Some(path) => vault::validate_plugin_path(path),
     }
 }
@@ -2277,8 +2502,219 @@ fn image_info_json(bytes: &[u8], rel: &str) -> Result<serde_json::Value, String>
         .map_err(|e| format!("图片尺寸序列化失败：{e}"))
 }
 
-/// 可检索文件清单：宿主文件树的树序 + 每行图标键（插件注册的领域文档类型按注册图标）
-/// 与能否在面板内打开（图片附件只呈现、不挂打开）。
+/// 可切换的容器清单：最近仓库按最近打开序在前，协作空间在后
+/// （服务端空间列表在前、最近空间兜底补齐，登录即见全部账号空间）。
+fn container_entries(app: &App) -> Vec<ContainerEntry> {
+    let mut out: Vec<ContainerEntry> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let active_space = match &app.repo_kind {
+        crate::RepoKind::Space(session) => {
+            Some((session.server_url.clone(), session.space_id.clone()))
+        }
+        crate::RepoKind::Local => None,
+    };
+    let active_root = app.vault_root.as_ref().map(|r| r.to_string_lossy().into_owned());
+    for vault_root in &app.global.recent_vaults {
+        let id = format!("local:{}", vault_root.root);
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        out.push(ContainerEntry {
+            id,
+            label: vault_root.name.clone(),
+            root: Some(vault_root.root.clone()),
+            server_url: None,
+            space_id: None,
+            active: active_root.as_deref() == Some(vault_root.root.as_str()),
+        });
+    }
+    if let Some(identity) = &app.global.last_identity {
+        for space in &app.space_list {
+            let id = format!("space:{}#{}", identity.server_url, space.space_id);
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            out.push(ContainerEntry {
+                id,
+                label: space.name.clone(),
+                root: None,
+                server_url: Some(identity.server_url.clone()),
+                space_id: Some(space.space_id.clone()),
+                active: active_space
+                    .as_ref()
+                    .is_some_and(|(server, space_id)| {
+                        server == &identity.server_url && space_id == &space.space_id
+                    }),
+            });
+        }
+    }
+    for space in &app.global.recent_spaces {
+        let id = format!("space:{}#{}", space.server_url, space.space_id);
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        out.push(ContainerEntry {
+            id,
+            label: space.name.clone(),
+            root: None,
+            server_url: Some(space.server_url.clone()),
+            space_id: Some(space.space_id.clone()),
+            active: active_space
+                .as_ref()
+                .is_some_and(|(server, space_id)| server == &space.server_url && space_id == &space.space_id),
+        });
+    }
+    out
+}
+
+/// 展开集 / 排序 / 目录颜色 / 提示词标记的当前快照（宿主是这几项的真源）。
+fn vault_ui_state(app: &App) -> VaultUiState {
+    VaultUiState {
+        expanded: app.ui.file_explorer_expanded.clone(),
+        sort: app.file_sort.clone(),
+        folder_colors: app
+            .folder_colors
+            .iter()
+            .map(|(path, color)| (path.clone(), color.clone()))
+            .collect(),
+        prompt_notes: app.prompt_notes.clone(),
+    }
+}
+
+/// 读界面状态（`vault.ui`）：状态快照 + 可选一个目录的条目。
+/// 目录条目按磁盘现读——宿主自己的 `children` 缓存只在进仓库 / 刷新时补齐，插件展开一个新目录时
+/// 那份缓存里没有它，取缓存会让新展开的目录显示为空。
+fn vault_ui_read(app: &mut App, request_id: u64, params: VaultUiParams) -> Task<Message> {
+    let Some(dir) = params.dir else {
+        return resolve_vault(app, request_id, vault_ui_json(app, Vec::new()));
+    };
+    let rel = match plugin_path(Some(&dir)) {
+        Ok(rel) => rel,
+        Err(e) => return resolve_vault(app, request_id, Err(e)),
+    };
+    let sort = app.file_sort.clone();
+    match app.repo_kind.clone() {
+        crate::RepoKind::Local => match app.vault.root() {
+            Ok(root) => {
+                let exclude = app.vault.exclude_folders().unwrap_or_default();
+                Task::perform(
+                    async move {
+                        run_blocking(move || {
+                            let mut children = vault::read_dir_entries(&root, &rel, &exclude)?;
+                            vault::sort_children(&mut children, &sort);
+                            Ok(ui_entries(&children))
+                        })
+                        .await
+                    },
+                    move |result| Message::Plugins(PluginsMsg::VaultUiDone { request_id, result }),
+                )
+            }
+            Err(e) => resolve_vault(app, request_id, Err(e)),
+        },
+        crate::RepoKind::Space(space) => {
+            let (client, space_id) = (space.client.clone(), space.space_id.clone());
+            Task::perform(
+                async move {
+                    // 空间没有按目录取子项的端点：整树切片后再取该目录的直接子项
+                    let tree = client.tree(&space_id).await.map_err(|e| e.to_string())?;
+                    let mut children = crate::space_actions::children_of_tree(&tree, &rel);
+                    vault::sort_children(&mut children, &sort);
+                    Ok(ui_entries(&children))
+                },
+                move |result| Message::Plugins(PluginsMsg::VaultUiDone { request_id, result }),
+            )
+        }
+    }
+}
+
+/// 文件树里的全部目录路径（不含仓库根）。
+fn dir_paths(tree: &[vault::FileTreeNode]) -> Vec<String> {
+    let mut out = Vec::new();
+    fn walk(nodes: &[vault::FileTreeNode], out: &mut Vec<String>) {
+        for node in nodes.iter().filter(|node| node.is_dir) {
+            out.push(node.path.clone());
+            walk(&node.children, out);
+        }
+    }
+    walk(tree, &mut out);
+    out
+}
+
+/// 空间整树里的全部目录路径（不含仓库根）。
+fn collect_space_dirs(tree: &[atelyx_core::space_client::TreeNode]) -> Vec<String> {
+    let mut out = Vec::new();
+    fn walk(nodes: &[atelyx_core::space_client::TreeNode], out: &mut Vec<String>) {
+        for node in nodes.iter().filter(|node| node.is_dir) {
+            out.push(node.path.clone());
+            walk(&node.children, out);
+        }
+    }
+    walk(tree, &mut out);
+    out
+}
+
+/// 目录子项转回执条目（名称取末段，与宿主文件树同一口径）。
+fn ui_entries(children: &[vault::DirChild]) -> Vec<UiDirEntry> {
+    children
+        .iter()
+        .map(|child| UiDirEntry {
+            name: child.rel.rsplit('/').next().unwrap_or(child.rel.as_str()).to_string(),
+            path: child.rel.clone(),
+            is_dir: child.is_dir,
+            mtime: child.mtime,
+        })
+        .collect()
+}
+
+/// 拼一份完整的 `vault.ui` 回执。
+fn vault_ui_json(
+    app: &App,
+    entries: Vec<atelyx_core::plugin_runtime::UiDirEntry>,
+) -> Result<serde_json::Value, String> {
+    let result = VaultUiResult {
+        state: vault_ui_state(app),
+        entries,
+        containers: container_entries(app),
+        doc_types: app
+            .registry
+            .doc_types()
+            .iter()
+            .map(|info| atelyx_core::plugin_runtime::DocTypeEntry {
+                extension: info.registration.extension.clone(),
+                label: info.registration.label.clone(),
+            })
+            .collect(),
+    };
+    serde_json::to_value(result).map_err(|e| format!("仓库界面状态不可序列化：{e}"))
+}
+
+/// 写界面状态（`vault.updateUi`）：只改给出的键，回执 = 写后的完整快照。
+/// 展开集落 `ui-state`；排序 / 目录颜色 / 提示词标记落仓库侧文件，与宿主自身写入同一个出口。
+fn vault_ui_write(app: &mut App, request_id: u64, patch: VaultUiPatch) -> Task<Message> {
+    let mut task = Task::none();
+    if let Some(expanded) = patch.expanded {
+        task = task.chain(app.ensure_children_loaded(&expanded));
+        app.ui.file_explorer_expanded = expanded;
+        app.schedule_persist();
+    }
+    if let Some(sort) = patch.sort {
+        app.file_sort = sort.clone();
+        task = task.chain(app.save_file_sort(sort));
+    }
+    if let Some(colors) = patch.folder_colors {
+        app.folder_colors = colors.into_iter().collect();
+        task = task.chain(app.save_folder_colors());
+    }
+    if let Some(notes) = patch.prompt_notes {
+        app.prompt_notes = notes;
+        task = task.chain(app.save_prompt_notes());
+    }
+    let result = serde_json::to_value(vault_ui_state(app))
+        .map_err(|e| format!("仓库界面状态不可序列化：{e}"));
+    app.plugins.resolve_shell_call(request_id, result);
+    task
+}
+
 fn files_result(app: &App) -> FilesResult {
     FilesResult {
         files: app
@@ -2590,15 +3026,8 @@ pub fn on_event(app: &mut App, event: PluginEvent) {
             if *status != PluginStatus::Running {
                 app.tray.remove_plugin(id);
             }
-            match status {
-                PluginStatus::Failed(reason) => {
-                    app.notify(NoticeLevel::Error, format!("插件 {id} 启动失败：{reason}"));
-                }
-                PluginStatus::CircuitBroken => app.notify(
-                    NoticeLevel::Error,
-                    format!("插件 {id} 连续崩溃，已熔断；可在设置中重试"),
-                ),
-                _ => {}
+            if let PluginStatus::Failed(reason) = status {
+                app.notify(NoticeLevel::Error, format!("插件 {id} 启动失败：{reason}"));
             }
         }
         // 界面 / 贡献 / AI 工具 / 服务目录 / 默认布局声明由壳的投影与布局接线统一处理（见 lib.rs 的事件分支）
@@ -3111,11 +3540,8 @@ fn install_button(label: &str, msg: PluginsMsg, disabled: bool) -> Element<'stat
 fn plugin_card(app: &App, summary: &PluginSummary) -> Element<'static, Message> {
     let id = summary.id.clone();
     let (label, color) = status_label(&summary.status);
-    // 熔断 / 启动失败：给出重试入口（与启用开关无关——熔断时启用标记仍在）
-    let retryable = matches!(
-        summary.status,
-        PluginStatus::CircuitBroken | PluginStatus::Failed(_)
-    );
+    // 启动失败：给出重试入口（启用标记仍在，只是没跑起来）
+    let retryable = matches!(summary.status, PluginStatus::Failed(_));
     let mut header = row![
         icon("puzzle", 14.0, pal::TEXT_SECONDARY),
         text(summary.name.clone()).size(pal::fs_body()).color(pal::TEXT_PRIMARY),
@@ -3723,8 +4149,6 @@ fn status_label(status: &PluginStatus) -> (&'static str, iced::Color) {
     match status {
         PluginStatus::Stopped => ("未运行", pal::TEXT_MUTED),
         PluginStatus::Running => ("运行中", pal::SUCCESS),
-        PluginStatus::Restarting => ("重启中", pal::WARNING),
-        PluginStatus::CircuitBroken => ("已熔断", pal::DANGER),
         PluginStatus::Failed(_) => ("失败", pal::DANGER),
     }
 }
@@ -3750,7 +4174,15 @@ fn permission_label(permission: Permission) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{elide_path, remove_local, rename_local};
+    use super::{elide_path, plugin_path, remove_local, rename_local};
+
+    #[test]
+    fn plugin_path_treats_empty_as_vault_root() {
+        assert_eq!(plugin_path(None).unwrap(), "");
+        assert_eq!(plugin_path(Some("")).unwrap(), "", "空串 = 仓库根，列根目录就是它");
+        assert_eq!(plugin_path(Some("dir/a.md")).unwrap(), "dir/a.md");
+        assert!(plugin_path(Some("../escape")).is_err(), "越界段仍要拒");
+    }
 
     #[test]
     fn elide_path_keeps_drive_and_file_name() {

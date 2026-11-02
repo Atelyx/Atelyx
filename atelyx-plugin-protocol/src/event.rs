@@ -59,6 +59,12 @@ pub mod name {
     /// 当前容器的历史版本集合变化（新版本记入侧文件、回滚落盘）。payload 为空对象；
     /// 订阅方重取 `history.groups` / `history.day`（宿主已丢弃聚合缓存）。
     pub const HISTORY_CHANGED: &str = "history:changed";
+    /// 拖拽会话的落点状态（发起方收到）：落点 / 拒绝原因 / 悬停自动展开。
+    /// payload 见 [`crate::method::DragStateParams`]。
+    pub const DRAG_STATE: &str = "drag:state";
+    /// 当前打开的文件集合变化（打开 / 切换 / 关闭笔记 / 表格 / 画布）。payload 为空对象；
+    /// 订阅方重取 `editor.openFiles` 拿当前集合（笔记 / 表格 / 画布各一个，至多 3 个）。
+    pub const EDITOR_OPEN_CHANGED: &str = "editor:open.changed";
 }
 
 /// [`name::DOC_PRESENCE`] 的 payload：当前文档路径 + 远端协作者光标（不含本端）。
@@ -105,6 +111,8 @@ pub fn is_known(name: &str) -> bool {
             | name::EDITOR_PREFS_CHANGED
             | name::RECENT_CHANGED
             | name::HISTORY_CHANGED
+            | name::DRAG_STATE
+            | name::EDITOR_OPEN_CHANGED
     )
 }
 

@@ -17,12 +17,11 @@ use atelyx_plugin_protocol::event;
 use atelyx_plugin_protocol::handshake::{self, HostInfo, InitializeParams, InitializeResult};
 use atelyx_plugin_protocol::manifest::Manifest;
 use atelyx_plugin_protocol::method::{
-    self, ContributionSlot, RegisterParams, SurfaceAttachedParams, SurfaceDetachedParams,
+    self, ContributionSlot, RegisterParams,
     UnregisterParams,
 };
-use atelyx_plugin_protocol::frame_region::FrameRegionInfo;
 use atelyx_plugin_protocol::service::{self, CallParams, ResultParams};
-use atelyx_plugin_protocol::{frame, frame_codec, API_VERSION};
+use atelyx_plugin_protocol::{frame, API_VERSION};
 use base64::Engine;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -33,7 +32,6 @@ use super::abi::HostCall;
 use crate::plugin_process::{EventSink, PluginProcessHost, ProcessEvent as HostEvent};
 
 use super::{abi, capability, child_process, fs, http, log, shortcut};
-use super::frame_region::FrameRegionStore;
 use super::service_dir::{Forward, ServiceTarget};
 use super::{
     AuditRecord, Contribution, DialogKind, DialogRequest, HostRequest, LayoutSpecNode, PaddingSpec,
@@ -41,13 +39,6 @@ use super::{
     MAX_VAULT_BINARY_BYTES,
 };
 
-/// 崩溃判定窗口：窗口内累计达到 [`CRASH_LIMIT`] 即熔断。
-const CRASH_WINDOW: Duration = Duration::from_secs(60);
-/// 窗口内允许的最大崩溃次数。
-const CRASH_LIMIT: usize = 5;
-/// 退避基数与封顶（第 n 次崩溃延迟 `base * 2^(n-1)`，封顶 [`BACKOFF_MAX`]）。
-const BACKOFF_BASE: Duration = Duration::from_secs(1);
-const BACKOFF_MAX: Duration = Duration::from_secs(30);
 /// 审计记录保留条数上限（详情页可见最近若干条）。
 const MAX_AUDIT: usize = 50;
 /// 握手截止：启动后超过此时长仍未收到 `initialize` 即判失败（不留「假运行中」）。
@@ -61,8 +52,6 @@ const RESIZE_GIVE_UP: Duration = Duration::from_secs(2);
 const MAX_RESIZE_IN_FLIGHT: u8 = 2;
 /// 面尺寸比较的容许误差（逻辑像素）：两端各自取整，1px 内的差不算换尺寸。
 const SIZE_TOLERANCE: f32 = 0.5;
-/// stdin 写失败记日志的最小间隔：帧拍 / 输入高频失败时不重复写满插件日志。
-const WRITE_ERROR_NOTE_INTERVAL: Duration = Duration::from_secs(5);
 
 /// 宿主自报信息（握手回应）。
 const HOST_NAME: &str = "Atelyx";
@@ -84,8 +73,6 @@ pub(crate) struct Instance {
     children: child_process::Spawned,
     /// 会话闸门：OS 资源获取（子进程 / 全局快捷键）与停用收尾互斥，见 [`Instance::with_session`]。
     resources: Mutex<()>,
-    /// 当前插件进程 pid（0 = 未在跑）。
-    pid: AtomicU64,
     /// 运行令牌：每次启动 / 停止递增，用于丢弃上次启动遗留的进程输出。
     run_token: AtomicU64,
     /// 会话是否仍活跃：启动成功后置真，停用 / 失败 / 崩溃收尾开始前置假。
@@ -112,16 +99,11 @@ pub(crate) struct Instance {
     observed_pending: AtomicBool,
     /// 声明了帧率的整面帧（面 id → 节拍）；随帧提交同步。
     surface_clocks: Mutex<HashMap<String, FrameClock>>,
-    /// 整面帧共享内存区域：握手时建，扩容换新，会话收尾释放。
-    frame_region: FrameRegionStore,
     /// 各面的尺寸变更闸门：拖动中的中间尺寸只保留最新一笔，等新帧回执或兜底到点再放下一笔。
     resize_gates: Mutex<HashMap<String, ResizeGate>>,
-    /// 上一次「stdin 写入失败」记日志的时刻（限频用）。
-    last_write_error: Mutex<Option<Instant>>,
     /// 已注册贡献点（按注册序）；id 插件内唯一，撤销按 id 摘除。
     contributions: Mutex<Vec<ContributionEntry>>,
     submits: AtomicU64,
-    crash_times: Mutex<Vec<Instant>>,
     /// 本会话声明的默认布局（重启后插件重新声明）。
     default_layout: Mutex<Option<(String, LayoutSpecNode)>>,
     /// 本插件日志（插件 stderr、协议违规与生命周期失败的唯一可查落点）。
@@ -226,7 +208,6 @@ impl Instance {
             runtime: Mutex::new(Weak::new()),
             children: child_process::Spawned::default(),
             resources: Mutex::new(()),
-            pid: AtomicU64::new(0),
             run_token: AtomicU64::new(0),
             session_active: AtomicBool::new(false),
             handshaken: AtomicBool::new(false),
@@ -241,20 +222,13 @@ impl Instance {
             frame_signal: Condvar::new(),
             observed_pending: AtomicBool::new(false),
             surface_clocks: Mutex::new(HashMap::new()),
-            frame_region: FrameRegionStore::new(&manifest_id),
             resize_gates: Mutex::new(HashMap::new()),
-            last_write_error: Mutex::new(None),
             contributions: Mutex::new(Vec::new()),
             submits: AtomicU64::new(0),
-            crash_times: Mutex::new(Vec::new()),
             default_layout: Mutex::new(None),
             log,
             abi: abi::AbiSession::default(),
         })
-    }
-
-    fn is_abi(&self) -> bool {
-        self.manifest.abi_version.is_some()
     }
 
     pub(crate) fn attach_runtime(&self, runtime: &Arc<PluginRuntime>) {
@@ -363,26 +337,9 @@ impl Instance {
         self.default_layout.lock().unwrap().clone()
     }
 
-    /// 手动重试前清零崩溃计数（否则窗口内的旧崩溃会立刻把新会话判为熔断）。
-    pub(crate) fn reset_crash_history(&self) {
-        self.crash_times.lock().unwrap().clear();
-    }
-
     /// 启动插件进程。已在跑时空操作；启动失败把状态置 `Failed` 并返回原因。
     pub(crate) fn start(self: &Arc<Self>) -> Result<(), String> {
         let _guard = self.transition.lock().unwrap();
-        self.generation.fetch_add(1, Ordering::SeqCst);
-        self.start_inner()
-    }
-
-    /// 退避重启专用：仅当世代与状态仍是崩溃时捕获的值才启动（否则已被手工启停取代）。
-    pub(crate) fn start_if_current(self: &Arc<Self>, generation: u64) -> Result<(), String> {
-        let _guard = self.transition.lock().unwrap();
-        if self.generation.load(Ordering::SeqCst) != generation
-            || self.status() != PluginStatus::Restarting
-        {
-            return Ok(());
-        }
         self.generation.fetch_add(1, Ordering::SeqCst);
         self.start_inner()
     }
@@ -404,28 +361,7 @@ impl Instance {
         // 领本次运行的令牌：此后上一次会话的输出与事件一律按令牌丢弃
         let token = self.run_token.fetch_add(1, Ordering::SeqCst) + 1;
         self.handshaken.store(false, Ordering::SeqCst);
-        if self.is_abi() {
-            return self.start_abi(token, entry);
-        }
-        let program = self.dir.join(entry).to_string_lossy().into_owned();
-        let cwd = self.dir.to_string_lossy().into_owned();
-        let instance = self.clone();
-        let sink: EventSink = Arc::new(move |event| instance.handle_process_event(token, event));
-        let pid = self
-            .process_host
-            .spawn(&program, &[], Some(&cwd), None, sink)
-            .map_err(|e| format!("启动插件进程失败：{e}"))?;
-        self.pid.store(pid as u64, Ordering::SeqCst);
-        self.session_active.store(true, Ordering::SeqCst);
-        self.set_status(PluginStatus::Running);
-        self.log.line(&format!("[启动] 进程已启动（pid {pid}，入口 {entry}）"));
-        // 握手截止：到点仍未握手即判失败（进程在跑却永不通信不能被当成正常）
-        let watchdog = self.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(HANDSHAKE_TIMEOUT);
-            watchdog.check_handshake(token);
-        });
-        Ok(())
+        self.start_abi(token, entry)
     }
 
     /// 启动动态库插件：库在本实例内跨启停保留；加载库是同步的，建实例与握手放到后台线程，
@@ -499,18 +435,14 @@ impl Instance {
         if self.status() != PluginStatus::Stopped {
             self.log.line("[生命周期] 已停止");
         }
-        if self.is_abi() {
-            // 先让在途调用以可读失败收场（此时插件还活着，回执能送达），再停 worker
-            self.release_resources();
-            self.abi.shutdown();
-            self.log.close();
-        } else {
-            self.teardown();
-        }
+        // 先让在途调用以可读失败收场（此时插件还活着，回执能送达），再停 worker
+        self.release_resources();
+        self.abi.shutdown();
+        self.log.close();
         self.set_status(PluginStatus::Stopped);
     }
 
-    /// 判定为不可装载 / 握手失败：置 `Failed` 并结束进程（避免僵死连接）。
+    /// 判定为不可装载 / 握手失败：置 `Failed` 并销毁实例。
     /// `token` 是引发失败的会话令牌；取到启停锁后令牌已被取代就不再动新会话。
     fn fail(self: &Arc<Self>, token: u64, reason: String) {
         let _guard = self.transition.lock().unwrap();
@@ -521,38 +453,21 @@ impl Instance {
         self.session_active.store(false, Ordering::SeqCst);
         self.set_status(PluginStatus::Failed(reason));
         self.run_token.fetch_add(1, Ordering::SeqCst);
-        if self.is_abi() {
-            // 先作废会话：销毁可能卡在插件的 worker 上，期间迟到的建实例结果不得再装入。
-            self.abi.invalidate(token);
-            self.release_resources();
-            // 销毁会等插件的 worker / 泵线程退出：另起线程收尾，当前调用先返回。
-            // 收尾前复查世代：期间已被重新启用（start 换代）就不再动新会话。
-            let generation = self.generation.load(Ordering::SeqCst);
-            let instance = self.clone();
-            std::thread::spawn(move || {
-                let _guard = instance.transition.lock().unwrap();
-                if instance.generation.load(Ordering::SeqCst) != generation {
-                    return;
-                }
-                instance.abi.shutdown();
-                instance.log.close();
-            });
-        } else {
-            self.teardown();
-        }
-    }
-
-    /// 结束插件进程树（pid = 0 时跳过）并收掉随插件记账的宿主资源。
-    fn teardown(&self) {
-        let pid = self.pid.swap(0, Ordering::SeqCst) as u32;
-        if pid != 0 {
-            if let Err(e) = self.process_host.kill_process_tree(pid) {
-                eprintln!("[plugin {}] 结束进程树失败：{e}", self.id);
-            }
-        }
-        // 日志写端不跨会话持有：卸载要删整个插件目录，Windows 上打开着的文件会让删除失败
-        self.log.close();
+        // 先作废会话：销毁可能卡在插件的 worker 上，期间迟到的建实例结果不得再装入。
+        self.abi.invalidate(token);
         self.release_resources();
+        // 销毁会等插件的 worker / 泵线程退出：另起线程收尾，当前调用先返回。
+        // 收尾前复查世代：期间已被重新启用（start 换代）就不再动新会话。
+        let generation = self.generation.load(Ordering::SeqCst);
+        let instance = self.clone();
+        std::thread::spawn(move || {
+            let _guard = instance.transition.lock().unwrap();
+            if instance.generation.load(Ordering::SeqCst) != generation {
+                return;
+            }
+            instance.abi.shutdown();
+            instance.log.close();
+        });
     }
 
     /// 收掉随插件记账的宿主资源：托管子进程、已注册的全局快捷键、在途的对话框请求、本会话订阅
@@ -577,7 +492,6 @@ impl Instance {
             self.frame_signal.notify_all();
             self.surface_clocks.lock().unwrap().clear();
             self.resize_gates.lock().unwrap().clear();
-            self.frame_region.release();
             contributions_dropped = !self.contributions.lock().unwrap().is_empty();
             self.contributions.lock().unwrap().clear();
             // 默认布局声明属于本次会话：插件重启后重新声明，不让旧规格跨会话生效
@@ -658,33 +572,23 @@ impl Instance {
         method_name: &str,
         params: Value,
     ) {
-        if self.is_abi() {
-            let Some(id) = self.abi.begin_service_call(call_id.to_string()) else {
-                self.fail_service_call(call_id, "插件已停止，服务调用已取消");
-                return;
-            };
-            let params = serde_json::to_string(&params).unwrap_or_else(|_| "null".into());
-            let state = self.abi.service_call(id, service_name, method_name, &params);
-            if let abi::CallState::Delivered = state {
-                return;
-            }
-            if let Some(call_id) = self.abi.finish_service_call(id) {
-                // 初始化窗口里没装入的实例不是「已停止」：分开写，排障才看得准
-                let reason = match state {
-                    abi::CallState::Starting => "插件尚未就绪，服务调用已取消",
-                    _ => "插件已停止，服务调用已取消",
-                };
-                self.fail_service_call(&call_id, reason);
-            }
+        let Some(id) = self.abi.begin_service_call(call_id.to_string()) else {
+            self.fail_service_call(call_id, "插件已停止，服务调用已取消");
+            return;
+        };
+        let params = serde_json::to_string(&params).unwrap_or_else(|_| "null".into());
+        let state = self.abi.service_call(id, service_name, method_name, &params);
+        if let abi::CallState::Delivered = state {
             return;
         }
-        let params = service::HostCallParams {
-            call_id: call_id.to_string(),
-            service: service_name.to_string(),
-            method: method_name.to_string(),
-            params,
-        };
-        self.notify(service::method::HOST_CALL, &params);
+        if let Some(call_id) = self.abi.finish_service_call(id) {
+            // 初始化窗口里没装入的实例不是「已停止」：分开写，排障才看得准
+            let reason = match state {
+                abi::CallState::Starting => "插件尚未就绪，服务调用已取消",
+                _ => "插件已停止，服务调用已取消",
+            };
+            self.fail_service_call(&call_id, reason);
+        }
     }
 
     /// 广播活动提供者的变化（`host:service.changed`）。进程不在跑时由写端静默丢弃。
@@ -737,22 +641,20 @@ impl Instance {
     }
 
     /// 启动截止检查：令牌已被取代 / 已完成启动 / 已不在运行态时都不动作。
-    /// 进程插件以握手完成为准；动态库插件以实例装入为准（`create` 里还包含 `on_ready`）。
+    /// 以实例装入为准（`create` 里还包含 `on_ready`）。
     fn check_handshake(self: &Arc<Self>, token: u64) {
         if token != self.run_token.load(Ordering::SeqCst)
             || self.status() != PluginStatus::Running
         {
             return;
         }
-        let (ready, what) = if self.is_abi() {
-            (self.abi.ready(), "启动")
-        } else {
-            (self.handshaken.load(Ordering::SeqCst), "握手")
-        };
-        if ready {
+        if self.abi.ready() {
             return;
         }
-        self.fail(token, format!("插件未在 {} 秒内完成{what}", HANDSHAKE_TIMEOUT.as_secs()));
+        self.fail(
+            token,
+            format!("插件未在 {} 秒内完成启动", HANDSHAKE_TIMEOUT.as_secs()),
+        );
     }
 
     fn set_status(&self, status: PluginStatus) {
@@ -760,124 +662,20 @@ impl Instance {
         let _ = self.events.send(PluginEvent::StatusChanged { id: self.id.clone(), status });
     }
 
-    // ---------- 进程事件 ----------
-
-    fn handle_process_event(self: &Arc<Self>, token: u64, event: HostEvent) {
-        // 上次启动遗留的输出（含延迟到达的退出上报）一律丢弃：pid / 状态已被新一次启动改写
-        if token != self.run_token.load(Ordering::SeqCst) {
-            return;
-        }
-        match event {
-            HostEvent::Stdout { data } => {
-                for line in data.lines() {
-                    let line = line.trim();
-                    if !line.is_empty() {
-                        self.handle_line_for_session(token, line);
-                    }
-                }
-            }
-            // 插件 stderr 归入诊断输出（协议正文只走 stdout）：控制台 + 插件日志两处落点
-            HostEvent::Stderr { data } => {
-                for line in data.lines() {
-                    if line.trim().is_empty() {
-                        continue;
-                    }
-                    eprintln!("[plugin {}] {line}", self.id);
-                    self.log.line(&format!("[stderr] {line}"));
-                }
-            }
-            HostEvent::Terminated { code } => self.on_exit(code),
-            HostEvent::Error { message } => {
-                eprintln!("[plugin {}] {message}", self.id);
-                self.log.line(&format!("[进程] {message}"));
-            }
-        }
-    }
-
-    /// 处理一行插件输出（当前会话）——测试与不关心会话身份的调用走这条。
+    /// 处理一次插件 → 宿主请求（ABI 回调与测试共用这一条分派路径）。
     #[cfg(test)]
     fn handle_line(self: &Arc<Self>, line: &str) {
-        self.handle_line_for_session(self.run_token.load(Ordering::SeqCst), line);
-    }
-
-    fn handle_line_for_session(self: &Arc<Self>, token: u64, line: &str) {
+        let token = self.run_token.load(Ordering::SeqCst);
         let envelope = match Envelope::parse(line) {
             Ok(envelope) => envelope,
             Err(e) => {
-                // 违规行原样落日志：stdout 被日志污染是插件最常见的一类故障
-                self.log.line(&format!("[协议] 非信封输出（已停机）：{line}"));
-                self.fail(token, format!("插件输出非协议内容（stdout 只允许 JSON-RPC 信封）：{e}"));
+                self.fail(token, format!("请求不是合法信封：{e}"));
                 return;
             }
         };
-        match envelope {
-            Envelope::Request(request) => self.handle_request(token, request),
-            Envelope::Response(_) => {
-                let text = "收到插件的响应（协议约定插件→宿主只有请求，宿主→插件只有通知）";
-                eprintln!("[plugin {}] {text}", self.id);
-                self.log.line(&format!("[协议] {text}"));
-            }
-            Envelope::Notification(notification) => {
-                let text = format!(
-                    "收到插件通知（协议约定插件→宿主只有请求）：{}",
-                    notification.method
-                );
-                eprintln!("[plugin {}] {text}", self.id);
-                self.log.line(&format!("[协议] {text}"));
-            }
+        if let Envelope::Request(request) = envelope {
+            self.handle_request(token, request);
         }
-    }
-
-    /// 进程退出：主动停止 / 已判失败 / 已熔断时不动作，其余视为崩溃走退避或熔断。
-    fn on_exit(self: &Arc<Self>, code: Option<i32>) {
-        let status = self.status();
-        if matches!(
-            status,
-            PluginStatus::Stopped | PluginStatus::Failed(_) | PluginStatus::CircuitBroken
-        ) {
-            return;
-        }
-        self.pid.store(0, Ordering::SeqCst);
-        // 本次会话就此结束：令牌换代让在途的资源获取请求作废（读线程上一次请求可能正在起子进程 /
-        // 注册热键），再把随它记账的资源收掉——托管服务不能因宿主崩溃而留成孤儿。
-        // 先置会话失效再跑收尾：收尾扫过之后到达的工具调用登记不得落表（否则等满调用超时）。
-        self.session_active.store(false, Ordering::SeqCst);
-        self.run_token.fetch_add(1, Ordering::SeqCst);
-        self.release_resources();
-        let count = record_crash(&mut self.crash_times.lock().unwrap(), Instant::now());
-        self.log.line(&format!("[进程] 意外退出（退出码 {code:?}）"));
-        if count >= CRASH_LIMIT {
-            eprintln!(
-                "[plugin {}] {} 秒内崩溃 {count} 次，已熔断（需手动重试）",
-                self.id,
-                CRASH_WINDOW.as_secs()
-            );
-            self.log.line(&format!(
-                "[熔断] {} 秒内崩溃 {count} 次，需手动重试",
-                CRASH_WINDOW.as_secs()
-            ));
-            self.set_status(PluginStatus::CircuitBroken);
-            return;
-        }
-        let delay = backoff_delay(count);
-        eprintln!(
-            "[plugin {}] 进程意外退出（退出码 {:?}），{:.1} 秒后自动重试",
-            self.id,
-            code,
-            delay.as_secs_f64()
-        );
-        self.log
-            .line(&format!("[重启] {:.1} 秒后重试（第 {count} 次崩溃）", delay.as_secs_f64()));
-        self.set_status(PluginStatus::Restarting);
-        let runtime = self.runtime.lock().unwrap().clone();
-        let id = self.id.clone();
-        let generation = self.generation.load(Ordering::SeqCst);
-        std::thread::spawn(move || {
-            std::thread::sleep(delay);
-            if let Some(runtime) = runtime.upgrade() {
-                runtime.restart_if_current(&id, generation);
-            }
-        });
     }
 
     // ---------- 插件 → 宿主请求 ----------
@@ -1059,6 +857,24 @@ impl Instance {
                     let p: method::WindowIdParams = parse(params).map_err(|e| e.to_string())?;
                     runtime.show_plugin_window(&self.id, &p.id)
                 }
+                method::drag::START => {
+                    let p: method::DragStartParams = parse(params).map_err(|e| e.to_string())?;
+                    runtime.open_drag_start(&self.id, p)
+                }
+                method::drag::HOVER => {
+                    let p: method::DragHoverParams = parse(params).map_err(|e| e.to_string())?;
+                    runtime.open_drag_hover(&self.id, p)
+                }
+                method::drag::END => {
+                    let p: method::DragEndParams = parse(params).map_err(|e| e.to_string())?;
+                    runtime.open_drag_end(&self.id, p)
+                }
+                method::menu::OPEN => {
+                    let p: method::MenuOpenParams = parse(params).map_err(|e| e.to_string())?;
+                    p.validate()?;
+                    runtime.open_menu_at_pointer(&self.id, p)
+                }
+                method::shell::PICK_VAULT => runtime.open_pick_vault(&self.id),
                 method::window::MINIMIZE => {
                     let p: method::WindowIdParams = parse(params).map_err(|e| e.to_string())?;
                     runtime.minimize_plugin_window(&self.id, &p.id)
@@ -1257,6 +1073,57 @@ impl Instance {
                         to: p.to,
                     }
                 }
+                method::vault_ui::READ => {
+                    let p: method::VaultUiParams = parse(params).map_err(|e| e.to_string())?;
+                    HostRequest::VaultUi {
+                        plugin_id: self.id.clone(),
+                        request_id: 0,
+                        params: p,
+                    }
+                }
+                method::vault_ui::WRITE => {
+                    let p: method::VaultUiPatch = parse(params).map_err(|e| e.to_string())?;
+                    p.validate()?;
+                    HostRequest::VaultUiWrite {
+                        plugin_id: self.id.clone(),
+                        request_id: 0,
+                        patch: p,
+                    }
+                }
+                method::vault_ui::CREATE => {
+                    let p: method::CreateEntryParams = parse(params).map_err(|e| e.to_string())?;
+                    HostRequest::VaultCreate {
+                        plugin_id: self.id.clone(),
+                        request_id: 0,
+                        params: p,
+                    }
+                }
+                method::vault_ui::SWITCH_CONTAINER => {
+                    let p: method::SwitchContainerParams =
+                        parse(params).map_err(|e| e.to_string())?;
+                    HostRequest::VaultSwitchContainer {
+                        plugin_id: self.id.clone(),
+                        request_id: 0,
+                        params: p,
+                    }
+                }
+                method::vault_ui::REMOVE_CONTAINER => {
+                    let p: method::RemoveContainerParams =
+                        parse(params).map_err(|e| e.to_string())?;
+                    HostRequest::VaultRemoveContainer {
+                        plugin_id: self.id.clone(),
+                        request_id: 0,
+                        params: p,
+                    }
+                }
+                method::vault_ui::LIST_DIRS => HostRequest::VaultListDirs {
+                    plugin_id: self.id.clone(),
+                    request_id: 0,
+                },
+                method::vault_ui::REFRESH_TREE => HostRequest::VaultRefreshTree {
+                    plugin_id: self.id.clone(),
+                    request_id: 0,
+                },
                 method::vault::IMAGE_INFO => {
                     let p: method::PathParams = parse(params).map_err(|e| e.to_string())?;
                     HostRequest::VaultImageInfo {
@@ -1537,6 +1404,38 @@ impl Instance {
                     plugin_id: self.id.clone(),
                     request_id: 0,
                 },
+                method::shell::PICK_COLOR => {
+                    let p: method::PickColorParams = parse(params).map_err(|e| e.to_string())?;
+                    HostRequest::PickColor {
+                        plugin_id: self.id.clone(),
+                        request_id: 0,
+                        params: p,
+                    }
+                }
+                method::shell::REVEAL => {
+                    let p: method::RevealParams = parse(params).map_err(|e| e.to_string())?;
+                    HostRequest::Reveal {
+                        plugin_id: self.id.clone(),
+                        request_id: 0,
+                        params: p,
+                    }
+                }
+                method::shell::ABSOLUTE_PATH => {
+                    let p: method::PathParams = parse(params).map_err(|e| e.to_string())?;
+                    HostRequest::AbsolutePath {
+                        plugin_id: self.id.clone(),
+                        request_id: 0,
+                        path: p.path,
+                    }
+                }
+                method::shell::DUPLICATE => {
+                    let p: method::DuplicateParams = parse(params).map_err(|e| e.to_string())?;
+                    HostRequest::Duplicate {
+                        plugin_id: self.id.clone(),
+                        request_id: 0,
+                        params: p,
+                    }
+                }
                 _ => return Err("未知宿主服务请求".to_string()),
             };
             runtime.open_shell_call(request)
@@ -1609,12 +1508,10 @@ impl Instance {
         params: &Value,
     ) -> Result<Value, RpcError> {
         match name {
-            handshake::INITIALIZE => self.on_initialize(token, params),
+            handshake::INITIALIZE => self.on_initialize(params),
             event::SUBSCRIBE => self.on_subscribe(params),
             method::view::REGISTER => self.on_register(token, params),
             method::view::UNREGISTER => self.on_unregister(token, params),
-            method::frame::SUBMIT_SHARED => self.on_frame_submit(token, params),
-            method::frame::REGION => self.on_frame_region(token, params),
             method::state::READ => {
                 let json = capability::read_state(&self.state_dir).map_err(RpcError::failed)?;
                 Ok(json!({ "json": json }))
@@ -1816,24 +1713,15 @@ impl Instance {
         }
     }
 
-    fn on_initialize(self: &Arc<Self>, token: u64, params: &Value) -> Result<Value, RpcError> {
+    fn on_initialize(self: &Arc<Self>, params: &Value) -> Result<Value, RpcError> {
         let p: InitializeParams = parse(params)?;
         if !handshake::compatible(p.api_version, API_VERSION) {
-            let reason = format!("协议版本不匹配：插件 {}，宿主 {API_VERSION}", p.api_version);
-            if self.is_abi() {
-                self.log.line(&format!("[失败] {reason}"));
-            } else {
-                self.fail(token, reason);
-            }
+            self.log
+                .line(&format!("[失败] 协议版本不匹配：插件 {}，宿主 {API_VERSION}", p.api_version));
             return Err(RpcError::failed("协议版本不匹配"));
         }
         if p.plugin.id != self.id {
-            let reason = format!("插件自报 id {} 与安装 id {} 不一致", p.plugin.id, self.id);
-            if self.is_abi() {
-                self.log.line(&format!("[失败] {reason}"));
-            } else {
-                self.fail(token, reason);
-            }
+            self.log.line(&format!("[失败] 插件自报 id {} 与安装 id {} 不一致", p.plugin.id, self.id));
             return Err(RpcError::failed("插件自报 id 与安装 id 不一致"));
         }
         self.handshaken.store(true, Ordering::SeqCst);
@@ -1841,28 +1729,12 @@ impl Instance {
             "[握手] 完成（插件 {} v{}，apiVersion {}）",
             p.plugin.name, p.plugin.version, p.api_version
         ));
-        // 同进程插件整帧走 typed 回调，不建共享内存区域；进程插件仍按原通路建区。
-        let region = if self.is_abi() {
-            FrameRegionInfo { path: String::new(), generation: 0, slot_count: 0, slot_capacity: 0 }
-        } else {
-            // 建区域与收尾同在资源闸门内：迟到的握手不得在收尾之后留下无人回收的映射与临时文件
-            match self.with_session(token, || Ok::<_, String>(self.frame_region.ensure())) {
-                Ok(Ok(info)) => info,
-                Ok(Err(reason)) => {
-                    let message = format!("帧共享内存准备失败：{reason}");
-                    self.fail(token, message);
-                    return Err(RpcError::failed("帧共享内存准备失败"));
-                }
-                Err(reason) => return Err(RpcError::failed(reason)),
-            }
-        };
         let result = InitializeResult {
             api_version: API_VERSION,
             host: HostInfo {
                 name: HOST_NAME.to_string(),
                 version: self.host_version.clone(),
             },
-            frame_region: region,
         };
         serde_json::to_value(result).map_err(|e| RpcError::failed(format!("握手应答序列化失败：{e}")))
     }
@@ -1943,33 +1815,6 @@ impl Instance {
             spec: p.spec,
         });
         Ok(json!({}))
-    }
-
-    /// 从共享内存取帧并接收：内容解码、指令 / 命中区 / 帧率一并校验后整发整换。
-    /// 存档与会话闸门同口径——收尾后到达的提交不得让已停插件的界面继续存活。
-    ///
-    /// 序号对不上（写入被后续提交覆盖 / 读取时正在写）时整帧丢弃并回 `applied: false`：
-    /// 这是并发路径的正常结果，不是插件错误，是否重发由插件按下一帧自行决定。
-    fn on_frame_submit(self: &Arc<Self>, token: u64, params: &Value) -> Result<Value, RpcError> {
-        let p: frame::FrameSubmitSharedParams = parse(params)?;
-        if p.surface_id.trim().is_empty() {
-            return Err(RpcError::failed("surfaceId 不能为空"));
-        }
-        // 拷贝在会话闸门内（映射可能被收尾或扩容换掉），解码与校验在闸门外完成
-        let bytes = self
-            .with_session(token, || self.frame_region.read(&p))
-            .map_err(RpcError::failed)?;
-        let Some(bytes) = bytes else {
-            self.log_host_note(&format!(
-                "丢弃错位帧（面 {}，槽 {}，序号 {}）",
-                p.surface_id, p.slot, p.seq
-            ));
-            return Ok(json!({ "applied": false }));
-        };
-        let frame = frame_codec::decode(&bytes)
-            .map_err(|e| RpcError::failed(format!("帧解码失败：{e}")))?;
-        self.accept_frame(token, p.surface_id, frame)?;
-        Ok(json!({ "applied": true }))
     }
 
     /// 接收一帧（共享内存与 ABI 两个来源共用）：校验后整发整换并推进帧钟。
@@ -2143,15 +1988,6 @@ impl Instance {
         }
     }
 
-    /// 帧超出当前槽容量时换一份更大的区域；容量已够则原样返回（幂等）。
-    fn on_frame_region(&self, token: u64, params: &Value) -> Result<Value, RpcError> {
-        let p: frame::FrameRegionRequest = parse(params)?;
-        let info = self
-            .with_session(token, || self.frame_region.grow(p.min_bytes))
-            .map_err(RpcError::failed)?;
-        serde_json::to_value(info).map_err(|e| RpcError::failed(format!("区域描述序列化失败：{e}")))
-    }
-
     /// 注册一个贡献点：id 插件内唯一、非空且不含 `:`（宿主的面标识以它作命名空间分隔）。
     /// 贡献注册是 UI 面声明，无权限门槛；停用 / 崩溃 / 卸载随会话收尾由宿主清除。
     fn on_register(self: &Arc<Self>, token: u64, params: &Value) -> Result<Value, RpcError> {
@@ -2323,15 +2159,7 @@ impl Instance {
     }
 
     fn send_frame_input(&self, surface_id: &str, input: &frame::FrameInput) {
-        if self.is_abi() {
-            self.abi.send_input(surface_id, input);
-            return;
-        }
-        let params = frame::FrameInputParams {
-            surface_id: surface_id.to_string(),
-            input: input.clone(),
-        };
-        self.notify(method::frame::HOST_INPUT, &params);
+        self.abi.send_input(surface_id, input);
     }
 
     /// 尺寸变更：最新一笔立刻下发（在途笔数未到上限时）。
@@ -2441,12 +2269,7 @@ impl Instance {
             due
         };
         for (surface_id, frame, delta_ms) in due {
-            if self.is_abi() {
-                self.abi.send_tick(&surface_id, frame, delta_ms);
-                continue;
-            }
-            let params = frame::FrameTickParams { surface_id, frame, delta_ms };
-            self.notify(method::frame::HOST_TICK, &params);
+            self.abi.send_tick(&surface_id, frame, delta_ms);
         }
     }
 
@@ -2458,12 +2281,7 @@ impl Instance {
 
     /// 告知插件某个面已挂载（`host:surface.attached`）。
     pub(crate) fn notify_surface_attached(&self, surface_id: &str, kind: SurfaceKind) {
-        if self.is_abi() {
-            self.abi.attach(surface_id, surface_kind_code(kind));
-            return;
-        }
-        let params = SurfaceAttachedParams { surface_id: surface_id.to_string(), kind };
-        self.notify(method::view::HOST_ATTACHED, &params);
+        self.abi.attach(surface_id, surface_kind_code(kind));
     }
 
     /// 面刚挂载时补发宿主手里的尺寸：闸门里在途的那笔属于上一轮（面已不在 / 插件已重启），
@@ -2475,12 +2293,12 @@ impl Instance {
 
     /// 告知插件某个面已移除（`host:surface.detached`）。
     pub(crate) fn notify_surface_detached(&self, surface_id: &str) {
-        if self.is_abi() {
-            self.abi.detach(surface_id);
-            return;
-        }
-        let params = SurfaceDetachedParams { surface_id: surface_id.to_string() };
-        self.notify(method::view::HOST_DETACHED, &params);
+        self.abi.detach(surface_id);
+    }
+
+    /// 告知插件它弹出的宿主菜单已关闭（`host:menu.closed`）：`selected` 缺省 = 未选中。
+    pub(crate) fn notify_menu_closed(&self, selected: Option<String>) {
+        self.notify(method::menu::HOST_CLOSED, &method::MenuClosedParams { selected });
     }
 
     /// 广播一条宿主领域事件（`host:event`）。
@@ -2614,56 +2432,24 @@ impl Instance {
     }
 
     pub(crate) fn respond(&self, id: u64, result: Option<Value>, error: Option<RpcError>) {
-        if self.is_abi() {
-            let (ok, payload) = match (result, error) {
-                (Some(result), None) => {
-                    let payload = serde_json::to_string(&result).unwrap_or_else(|_| "null".into());
-                    (true, payload)
-                }
-                (_, Some(error)) => (false, error.message),
-                (None, None) => (true, "null".into()),
-            };
-            let _ = self.abi.reply(id, ok, &payload);
-            return;
-        }
-        let (envelope, what) = match (result, error) {
-            (Some(result), None) => (Envelope::success(id, result), "回执"),
-            (_, Some(error)) => (Envelope::failure(id, error), "错误回执"),
-            (None, None) => (Envelope::success(id, Value::Null), "回执"),
-        };
-        self.write_envelope(envelope, what);
-    }
-
-    /// 向插件下发一条信封：进程写 stdin（已停时静默丢弃），动态库走 typed 通知。
-    /// 写失败按限频记入插件日志。
-    fn write_envelope(&self, envelope: Envelope, what: &str) {
-        if self.is_abi() {
-            if let Envelope::Notification(notification) = envelope {
-                let payload = serde_json::to_string(&notification.params)
-                    .unwrap_or_else(|_| "null".into());
-                self.abi.notify(&notification.method, &payload);
+        let (ok, payload) = match (result, error) {
+            (Some(result), None) => {
+                let payload = serde_json::to_string(&result).unwrap_or_else(|_| "null".into());
+                (true, payload)
             }
-            return;
-        }
-        let pid = self.pid.load(Ordering::SeqCst) as u32;
-        if pid == 0 {
-            return;
-        }
-        let mut line = envelope.to_line();
-        line.push('\n');
-        if let Err(e) = self.process_host.send_stdin(pid, &line) {
-            self.note_write_failure(what, &e);
-        }
+            (_, Some(error)) => (false, error.message),
+            (None, None) => (true, "null".into()),
+        };
+        let _ = self.abi.reply(id, ok, &payload);
     }
 
-    fn note_write_failure(&self, what: &str, reason: &str) {
-        let mut last = self.last_write_error.lock().unwrap();
-        if last.is_some_and(|at| at.elapsed() < WRITE_ERROR_NOTE_INTERVAL) {
-            return;
+    /// 向插件下发一条通知（回执走 [`Instance::respond`]）。
+    fn write_envelope(&self, envelope: Envelope, _what: &str) {
+        if let Envelope::Notification(notification) = envelope {
+            let payload = serde_json::to_string(&notification.params)
+                .unwrap_or_else(|_| "null".into());
+            self.abi.notify(&notification.method, &payload);
         }
-        *last = Some(Instant::now());
-        drop(last);
-        self.log_host_note(&format!("{what}未送达：{reason}"));
     }
 }
 
@@ -2717,6 +2503,13 @@ fn is_shell_method(method_name: &str) -> bool {
             | method::vault::TAGS
             | method::vault::REMOVE
             | method::vault::RENAME
+            | method::vault_ui::READ
+            | method::vault_ui::WRITE
+            | method::vault_ui::CREATE
+            | method::vault_ui::SWITCH_CONTAINER
+            | method::vault_ui::REMOVE_CONTAINER
+            | method::vault_ui::LIST_DIRS
+            | method::vault_ui::REFRESH_TREE
             | method::table::SNAPSHOT
             | method::table::UPDATE_CELL
             | method::table::ADD_ROW
@@ -2751,6 +2544,10 @@ fn is_shell_method(method_name: &str) -> bool {
             | method::space::MEMBERS
             | method::space::OPEN_MENU
             | method::space::OPEN_SETTINGS
+            | method::shell::PICK_COLOR
+            | method::shell::REVEAL
+            | method::shell::ABSOLUTE_PATH
+            | method::shell::DUPLICATE
     )
 }
 
@@ -2807,6 +2604,11 @@ fn is_ui_method(method_name: &str) -> bool {
             | method::window::MINIMIZE
             | method::window::TOGGLE_MAXIMIZE
             | method::window::BEGIN_DRAG
+            | method::drag::START
+            | method::drag::HOVER
+            | method::drag::END
+            | method::menu::OPEN
+            | method::shell::PICK_VAULT
     )
 }
 
@@ -2841,19 +2643,6 @@ fn dialog_request(method_name: &str, params: &Value) -> Result<DialogRequest, Rp
 fn encode_picked(path: Option<String>) -> Result<Value, RpcError> {
     serde_json::to_value(method::PickedPath { path })
         .map_err(|e| RpcError::failed(format!("应答序列化失败：{e}")))
-}
-
-/// 退避延迟：第 n 次崩溃取 `base * 2^(n-1)`，封顶 [`BACKOFF_MAX`]。
-fn backoff_delay(count: usize) -> Duration {
-    let exponent = count.saturating_sub(1).min(5) as u32;
-    BACKOFF_BASE.saturating_mul(1 << exponent).min(BACKOFF_MAX)
-}
-
-/// 记录一次崩溃并返回窗口内累计次数（先剔除窗口外的旧记录）。
-fn record_crash(times: &mut Vec<Instant>, now: Instant) -> usize {
-    times.retain(|t| now.duration_since(*t) < CRASH_WINDOW);
-    times.push(now);
-    times.len()
 }
 
 /// 解析 params。缺省 params（信封里 `params` 为 null）按空对象处理：全可选入参的方法
@@ -2934,8 +2723,6 @@ fn surface_kind_code(kind: SurfaceKind) -> u32 {
 mod tests {
     use super::*;
     use crate::vault::test_support::TempDir;
-    use atelyx_plugin_protocol::frame_codec;
-    use atelyx_plugin_protocol::frame_region;
     use atelyx_plugin_protocol::manifest::{Entry, Permission};
 
     #[allow(unused_imports)]
@@ -3057,28 +2844,6 @@ mod tests {
     }
 
     #[test]
-    fn backoff_grows_then_caps() {
-        assert_eq!(backoff_delay(1), Duration::from_secs(1));
-        assert_eq!(backoff_delay(2), Duration::from_secs(2));
-        assert_eq!(backoff_delay(3), Duration::from_secs(4));
-        assert_eq!(backoff_delay(4), Duration::from_secs(8));
-        assert_eq!(backoff_delay(60), BACKOFF_MAX);
-    }
-
-    #[test]
-    fn crash_window_prunes_old_and_counts() {
-        let mut times = Vec::new();
-        let t0 = Instant::now();
-        for _ in 0..CRASH_LIMIT {
-            assert!(record_crash(&mut times, t0) <= CRASH_LIMIT);
-        }
-        assert_eq!(times.len(), CRASH_LIMIT, "窗口内累计达到熔断阈值");
-        // 窗口外的旧记录被剔除：新一次崩溃只算 1
-        let later = t0 + CRASH_WINDOW + Duration::from_secs(1);
-        assert_eq!(record_crash(&mut times, later), 1);
-    }
-
-    #[test]
     fn vault_binary_decode_enforces_limit_without_truncating() {
         use base64::Engine;
         let ok = base64::engine::general_purpose::STANDARD.encode([0u8, 1, 2]);
@@ -3112,21 +2877,23 @@ mod tests {
     }
 
     #[test]
-    fn initialize_mismatch_marks_failed() {
+    fn initialize_mismatch_is_rejected_and_logged() {
         let (_tmp, instance) = make_instance(Vec::new());
         assert!(instance
             .dispatch(handshake::INITIALIZE, &initialize_params(API_VERSION + 1, "com.example.demo"))
             .is_err());
-        assert!(matches!(instance.status(), PluginStatus::Failed(_)));
+        assert!(!instance.handshaken.load(Ordering::SeqCst), "拒绝即不得记为已握手");
+        assert_ne!(instance.status(), PluginStatus::Running, "被拒的握手不得把实例当成在跑");
     }
 
     #[test]
-    fn initialize_id_mismatch_marks_failed() {
+    fn initialize_id_mismatch_is_rejected() {
         let (_tmp, instance) = make_instance(Vec::new());
         assert!(instance
             .dispatch(handshake::INITIALIZE, &initialize_params(API_VERSION, "com.other.id"))
             .is_err());
-        assert!(matches!(instance.status(), PluginStatus::Failed(_)));
+        assert!(!instance.handshaken.load(Ordering::SeqCst));
+        assert_ne!(instance.status(), PluginStatus::Running);
     }
 
     /// 未声明不拦执行：调用照常落地，审计记 `declared: false`（设置页据此提示「用到但未声明」）。
@@ -3439,9 +3206,10 @@ mod tests {
         assert!(bus.message.contains(service::error::UNKNOWN_SERVICE));
     }
 
-    /// 活动提供者是外部插件时普通方法与 `service.call` 都转发；提供者下线即回落内置。
-    #[tokio::test]
-    async fn external_provider_takes_over_vault_routing() {
+    /// 外部插件顶替 `vault` 后：直接调老方法名与 `service.call` 决议到同一提供者，
+    /// 提供者下线即回落内置。
+    #[test]
+    fn external_provider_takes_over_vault_routing() {
         let tmp = TempDir::new("instance-service-forward");
         let runtime = PluginRuntime::new(tmp.to_path_buf());
         let (_t, provider, _provider_events) =
@@ -3449,6 +3217,7 @@ mod tests {
         provider.attach_runtime(&runtime);
         provider.set_status(PluginStatus::Running);
         provider.session_active.store(true, Ordering::SeqCst);
+        provider.abi.begin_session(provider.run_token());
         runtime
             .instances
             .lock()
@@ -3478,61 +3247,33 @@ mod tests {
             .expect("切换应成功");
         assert_eq!(provider_of(&runtime).as_deref(), Some(provider.id.as_str()));
 
-        let (_t2, caller, _caller_events) =
-            make_named_instance_with_events("com.example.caller", Vec::new());
-        caller.attach_runtime(&runtime);
-        runtime
-            .instances
-            .lock()
-            .unwrap()
-            .insert(caller.id.clone(), caller.clone());
-
-        // 普通方法走转发：在途条目按提供者记账，别家回报不得认领
-        caller.handle_line(&request_line(
-            method::vault::READ_TEXT,
-            &json!({ "path": "notes/a.md" }),
-        ));
-        let call_id = wait_service_call(&runtime).await;
-        assert!(
-            runtime
-                .resolve_service_call(
-                    &caller.id,
-                    service::ResultParams {
-                        call_id: call_id.clone(),
-                        result: Some(json!({ "content": "外部提供者应答" })),
-                        error: None,
-                    },
-                )
-                .is_err(),
-            "他插件的回报不得认领本插件的调用"
+        // 直接调用老方法名与 `service.call` 都决议到该提供者
+        assert_eq!(
+            runtime.forward_to("vault", "readText"),
+            Forward::Plugin("com.example.provider".into()),
+            "老方法名也被路由给提供者"
         );
-        // `service.call` 同样走外部提供者
-        caller.handle_line(&request_line(
-            service::method::CALL,
-            &json!({ "service": "vault", "method": "readText", "params": { "path": "notes/b.md" } }),
-        ));
-        let second = wait_service_call_other_than(&runtime, &call_id).await;
-        for id in [call_id, second] {
-            runtime
-                .resolve_service_call(
-                    &provider.id,
-                    service::ResultParams {
-                        call_id: id,
-                        result: Some(json!({ "content": "外部提供者应答" })),
-                        error: None,
-                    },
-                )
-                .expect("提供者回报应被接受");
-        }
+        let ServiceTarget::Plugin { provider: via_call, .. } = runtime
+            .service_target(service::CallParams {
+                service: "vault".into(),
+                method: "readText".into(),
+                params: json!({ "path": "notes/a.md" }),
+            })
+            .expect("总线调用应可决议")
+        else {
+            panic!("活动提供者是外部插件");
+        };
+        assert_eq!(via_call, provider.id, "总线调用落到同一提供者");
 
         // 提供者下线：登记摘除、活动回落内置
         provider.stop();
         assert_eq!(provider_of(&runtime), None);
+        assert_eq!(runtime.forward_to("vault", "readText"), Forward::Local, "回落内置分派");
     }
 
     /// 在途调用遇提供者停用立即以 `provider_unavailable` 收场，不等 30 秒超时。
-    #[tokio::test]
-    async fn in_flight_call_fails_when_provider_stops() {
+    #[test]
+    fn in_flight_call_fails_when_provider_stops() {
         let tmp = TempDir::new("instance-service-failover");
         let runtime = PluginRuntime::new(tmp.to_path_buf());
         let (_t, provider, _events) =
@@ -3540,6 +3281,7 @@ mod tests {
         provider.attach_runtime(&runtime);
         provider.set_status(PluginStatus::Running);
         provider.session_active.store(true, Ordering::SeqCst);
+        provider.abi.begin_session(provider.run_token());
         runtime
             .instances
             .lock()
@@ -3559,19 +3301,22 @@ mod tests {
             .set_service_provider("vault", Some(&provider.id))
             .expect("切换应成功");
 
+        // 造一笔在途条目：这是投递与收场共用的登记点
         let (_t2, caller, _caller_events) =
             make_named_instance_with_events("com.example.caller", Vec::new());
         caller.attach_runtime(&runtime);
+        caller.set_status(PluginStatus::Running);
+        caller.session_active.store(true, Ordering::SeqCst);
+        caller.abi.begin_session(caller.run_token());
         runtime
             .instances
             .lock()
             .unwrap()
             .insert(caller.id.clone(), caller.clone());
-        caller.handle_line(&request_line(
-            method::vault::READ_TEXT,
-            &json!({ "path": "notes/a.md" }),
-        ));
-        let call_id = wait_service_call(&runtime).await;
+        let (call_id, _rx, _provider_instance) = runtime
+            .register_service_call(&caller, &provider.id)
+            .expect("在途条目应登记");
+        assert!(!runtime.service_calls.lock().unwrap().is_empty());
 
         provider.stop();
         assert!(
@@ -3672,35 +3417,6 @@ mod tests {
         assert_eq!(runtime.forward_to("table", "snapshot"), Forward::Local, "重新启用即回到内置分派");
     }
 
-    /// 等在途服务调用落表（转发任务被调度后才登记）。
-    async fn wait_service_call(runtime: &PluginRuntime) -> String {
-        for _ in 0..100 {
-            if let Some(id) = runtime.service_calls.lock().unwrap().keys().next() {
-                return id.clone();
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-        panic!("服务调用未在预期时间内登记");
-    }
-
-    /// 等一个不同于 `existing` 的在途服务调用（两笔调用同时在途时用）。
-    async fn wait_service_call_other_than(runtime: &PluginRuntime, existing: &str) -> String {
-        for _ in 0..100 {
-            let found = runtime
-                .service_calls
-                .lock()
-                .unwrap()
-                .keys()
-                .find(|id| id.as_str() != existing)
-                .cloned();
-            if let Some(id) = found {
-                return id;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-        panic!("第二笔服务调用未在预期时间内登记");
-    }
-
     /// 快捷键占用查询：无 OS 层时以可读失败收场（与注册同一原因），非法加速键亦拒。
     #[test]
     fn shortcut_query_reports_platform_unavailability() {
@@ -3767,57 +3483,30 @@ mod tests {
     }
 
     #[test]
-    fn stale_process_events_do_not_count_as_crash() {
-        let (_tmp, instance) = make_instance(Vec::new());
-        instance.set_status(PluginStatus::Running);
-        // 令牌不匹配（上次启动遗留）的退出上报必须被丢弃：不判崩溃、不改状态
-        let stale = instance.run_token.load(Ordering::SeqCst) + 1;
-        instance.handle_process_event(stale, HostEvent::Terminated { code: Some(1) });
-        assert_eq!(instance.status(), PluginStatus::Running);
-        // 令牌匹配时按崩溃处理：进入退避重启
-        let current = instance.run_token.load(Ordering::SeqCst);
-        instance.handle_process_event(current, HostEvent::Terminated { code: Some(1) });
-        assert_eq!(instance.status(), PluginStatus::Restarting);
-    }
-
-    #[test]
     fn handshake_deadline_marks_silent_plugin_failed() {
         let (_tmp, instance) = make_instance(Vec::new());
         instance.set_status(PluginStatus::Running);
         instance.check_handshake(instance.run_token.load(Ordering::SeqCst));
-        assert!(matches!(instance.status(), PluginStatus::Failed(_)));
+        assert!(matches!(instance.status(), PluginStatus::Failed(_)), "未装入实例即判启动失败");
 
-        // 已握手或已不在运行态时不判失败
+        // 已不在运行态时不判失败（停用 / 失败之后的迟到检查不覆盖新结论）
         let (_tmp2, instance) = make_instance(Vec::new());
-        instance.set_status(PluginStatus::Running);
-        instance.handshaken.store(true, Ordering::SeqCst);
+        instance.set_status(PluginStatus::Stopped);
         instance.check_handshake(instance.run_token.load(Ordering::SeqCst));
-        assert_eq!(instance.status(), PluginStatus::Running);
+        assert_eq!(instance.status(), PluginStatus::Stopped);
     }
 
-    /// 会话收尾清空整面帧并释放共享内存（停用 / 崩溃 / 卸载后不得留下可渲染的旧帧）。
+    /// 会话收尾清空整面帧（停用 / 卸载后不得留下可渲染的旧帧）。
     #[test]
-    fn teardown_drops_frames_and_the_region() {
+    fn teardown_drops_frames() {
         let (_tmp, instance) = make_instance(Vec::new());
-        let info = instance.frame_region.ensure().unwrap();
-        let frame = frame::SurfaceFrame { fps: Some(60), ..frame::SurfaceFrame::default() };
-        let file = std::fs::OpenOptions::new().read(true).write(true).open(&info.path).unwrap();
-        let mut map = unsafe {
-            memmap2::MmapOptions::new().len(info.byte_len()).map_mut(&file).unwrap()
-        };
-        let payload = frame_codec::encode(&frame);
-        frame_region::write_slot(&mut map, &info, 0, 2, &payload).unwrap();
-        drop(map);
+        let token = instance.run_token.load(Ordering::SeqCst);
+        instance.set_status(PluginStatus::Running);
         instance
-            .dispatch(
-                method::frame::SUBMIT_SHARED,
-                &json!({
-                    "surfaceId": "main",
-                    "generation": info.generation,
-                    "slot": 0,
-                    "seq": 2,
-                    "len": payload.len(),
-                }),
+            .accept_frame(
+                token,
+                "main".into(),
+                frame::SurfaceFrame { fps: Some(60), ..frame::SurfaceFrame::default() },
             )
             .unwrap();
         assert!(instance.surface_frame("main").is_some());
@@ -3826,38 +3515,21 @@ mod tests {
         instance.release_resources();
         assert!(instance.surface_frame("main").is_none());
         assert!(!instance.has_frame_ticks());
-        assert!(!std::path::Path::new(&info.path).exists(), "区域文件随会话释放");
     }
 
     /// 绘制期登记的等帧会取走退回的帧：登记期间的提交不发通知，超时后到达的帧照常通知。
     #[test]
     fn claimed_frame_is_not_broadcast_and_a_timeout_falls_back_to_notice() {
         let (_tmp, instance, mut events) = make_instance_with_events(Vec::new());
-        let info = instance.frame_region.ensure().unwrap();
-        let file = std::fs::OpenOptions::new().read(true).write(true).open(&info.path).unwrap();
-        let mut map = unsafe {
-            memmap2::MmapOptions::new().len(info.byte_len()).map_mut(&file).unwrap()
-        };
-        let submit = |map: &mut memmap2::MmapMut, slot: u32, seq: u64| {
-            let frame = frame::SurfaceFrame::default();
-            let payload = frame_codec::encode(&frame);
-            frame_region::write_slot(map, &info, slot, seq, &payload).unwrap();
+        let token = instance.run_token.load(Ordering::SeqCst);
+        let submit = || {
             instance
-                .dispatch(
-                    method::frame::SUBMIT_SHARED,
-                    &json!({
-                        "surfaceId": "main",
-                        "generation": info.generation,
-                        "slot": slot,
-                        "seq": seq,
-                        "len": payload.len(),
-                    }),
-                )
+                .accept_frame(token, "main".into(), frame::SurfaceFrame::default())
                 .unwrap();
         };
 
         // 没人等帧：提交照常通知壳
-        submit(&mut map, 0, 2);
+        submit();
         let first = instance.surface_frame("main").unwrap();
         assert!(matches!(
             events.try_recv().unwrap(),
@@ -3866,7 +3538,7 @@ mod tests {
 
         // 登记等帧期间的提交由等待方取走，不再通知
         instance.begin_frame_wait("main", first.clone());
-        submit(&mut map, 1, 2);
+        submit();
         assert!(events.try_recv().is_err(), "登记期间的帧不得再发通知");
         let second = instance.finish_frame_wait("main", None, Duration::from_millis(200)).unwrap();
         assert!(!Arc::ptr_eq(&first, &second));
@@ -3876,7 +3548,7 @@ mod tests {
         // 等帧超时会撤掉登记：之后退回的帧仍要通知
         instance.begin_frame_wait("main", second);
         assert!(instance.finish_frame_wait("main", None, Duration::from_millis(1)).is_none());
-        submit(&mut map, 0, 4);
+        submit();
         assert!(
             matches!(events.try_recv().unwrap(), PluginEvent::ViewSubmitted { .. }),
             "超时后到达的帧照常通知"

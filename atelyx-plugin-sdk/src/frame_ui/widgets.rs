@@ -388,6 +388,23 @@ impl<'c, 'a> Ui<'c, 'a> {
         });
     }
 
+    /// 按 lucide 名称绘制的装饰图标（自带颜色：目录图标按用户设置着色这类场景）。
+    pub fn icon_named_rgba(&mut self, name: &str, size: f32, color: crate::protocol::paint::PaintColor) {
+        let name = name.to_string();
+        self.push(Item {
+            width: Width::Fixed(size),
+            fill_height: false,
+            height: Box::new(move |_, _| size),
+            draw: Box::new(move |ctx, rect, clip| {
+                let visible = rect.intersect(clip);
+                if visible.is_empty() {
+                    return;
+                }
+                super::icons::draw_named(ctx, &name, rect, color);
+            }),
+        });
+    }
+
     /// 按 lucide 名称绘制的图标钮（指定图标边长与命中盒边长）。
     pub fn icon_button_named(
         &mut self,
@@ -1045,6 +1062,68 @@ impl<'c, 'a> Ui<'c, 'a> {
         build: impl FnOnce(&mut Ui<'_, 'a>),
     ) {
         self.region_box(id.into(), width, pad, RegionKind::Hover, build);
+    }
+
+    /// 可点行（定底色）：拖拽落点高亮、选中态背景这类需要自带底色的整行，
+    /// 命中与悬停态仍走统一路径，点击产出 `Click`。
+    pub fn click_row_tinted(
+        &mut self,
+        id: impl Into<String>,
+        width: BoxWidth,
+        pad: Edges,
+        tint: Option<ColorToken>,
+        build: impl FnOnce(&mut Ui<'_, 'a>),
+    ) {
+        let id = id.into();
+        let clip = self.clip;
+        let mut sub = Ui::new(&mut *self.ctx, clip);
+        build(&mut sub);
+        let shared = Rc::new(sub.into_items());
+        let for_size = Rc::clone(&shared);
+        let item_width = match width {
+            BoxWidth::Fill => Width::Fill,
+            BoxWidth::Fixed(width) => Width::Fixed(width),
+        };
+        self.push(Item {
+            width: item_width,
+            fill_height: false,
+            height: Box::new(move |metrics, width| {
+                column_height(&for_size, metrics, (width - pad.left - pad.right).max(1.0), 0.0)
+                    + pad.top
+                    + pad.bottom
+            }),
+            draw: Box::new(move |ctx, rect, clip| {
+                let visible = rect.intersect(clip);
+                if visible.is_empty() {
+                    return;
+                }
+                RegionKind::Click { radius: 0.0, selected: false, enabled: true }
+                    .paint(ctx, &id, rect, visible);
+                if let Some(color) = tint {
+                    ctx.draw(crate::protocol::paint::DrawCommand::Rect {
+                        x: rect.x,
+                        y: rect.y,
+                        w: rect.w,
+                        h: rect.h,
+                        fill: Some(theme::token(color)),
+                        stroke: None,
+                        stroke_width: None,
+                        corner_radius: None,
+                        shadow: None,
+                    });
+                }
+                let inner = Rect::new(
+                    rect.x + pad.left,
+                    rect.y + pad.top,
+                    (rect.w - pad.left - pad.right).max(1.0),
+                    (rect.h - pad.top - pad.bottom).max(1.0),
+                );
+                let visible = inner.intersect(clip);
+                if !visible.is_empty() {
+                    draw_column(ctx, &shared, inner, visible, 0.0);
+                }
+            }),
+        });
     }
 
     /// 可按 / 只悬停两种容器的共同排布：内容宽度、内边距与裁剪一致，差异只在

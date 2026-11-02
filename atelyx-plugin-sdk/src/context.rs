@@ -10,10 +10,6 @@ use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 
-use atelyx_plugin_protocol::frame::FrameSubmitSharedParams;
-use atelyx_plugin_protocol::frame_codec;
-use atelyx_plugin_protocol::frame_region::{self, FrameRegionInfo};
-use memmap2::{MmapMut, MmapOptions};
 
 use crate::connection::PendingMap;
 use crate::protocol::envelope::{Envelope, RpcError};
@@ -42,7 +38,7 @@ pub(crate) type FrameSubmit =
 pub(crate) type ServiceReply =
     Arc<dyn Fn(&str, bool, &str) -> Result<(), RpcError> + Send + Sync>;
 
-/// 同进程宿主的日志落点（进程插件写 stderr，由宿主归档）。
+/// 同进程宿主的日志落点（宿主写进插件运行日志）。
 pub(crate) type LogSink = Arc<dyn Fn(&str) + Send + Sync>;
 
 /// 只持有在途调用表的句柄：同进程泵用它回填宿主应答，不拖住发送端关闭。
@@ -65,9 +61,7 @@ struct Inner {
     out_tx: mpsc::Sender<Envelope>,
     pending: PendingMap,
     next_id: AtomicU64,
-    /// 握手应答给出的帧共享内存；提交一律走它，未就绪时提交直接报错。
-    frame_region: Mutex<Option<Arc<tokio::sync::Mutex<FrameRegionState>>>>,
-    /// 同进程传输的帧提交器；`Some` 时优先于共享内存。
+    /// 帧提交器：由传输层接上，未接上时提交直接报错。
     frame_submit: Option<FrameSubmit>,
     /// 同进程传输的服务回执器；`Some` 时服务结果不再走 `service.result` 请求。
     service_reply: Option<ServiceReply>,
@@ -75,74 +69,17 @@ struct Inner {
     log: Option<LogSink>,
 }
 
-/// 当前区域与它的映射：映射按需重建，失败后下一次提交重试（宿主已换区时旧映射已不可用）。
-struct FrameRegionState {
-    info: FrameRegionInfo,
-    client: Option<FrameRegionClient>,
-}
-
-impl FrameRegionState {
-    fn client(&mut self) -> Result<&mut FrameRegionClient, RpcError> {
-        if self.client.is_none() {
-            let client = FrameRegionClient::attach(self.info.clone())
-                .map_err(|e| RpcError::failed(format!("帧共享内存映射失败：{e}")))?;
-            self.client = Some(client);
-        }
-        Ok(self.client.as_mut().expect("映射刚补齐"))
-    }
-}
-
-/// 帧共享内存的插件侧句柄：独占映射，写入端同时只占一槽。
-struct FrameRegionClient {
-    info: FrameRegionInfo,
-    map: MmapMut,
-    next_seq: u64,
-    next_slot: u32,
-}
-
-impl FrameRegionClient {
-    fn attach(info: FrameRegionInfo) -> Result<Self, String> {
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&info.path)
-            .map_err(|e| format!("打开帧区域 {} 失败：{e}", info.path))?;
-        let map = unsafe { MmapOptions::new().len(info.byte_len()).map_mut(&file) }
-            .map_err(|e| format!("映射帧区域失败：{e}"))?;
-        frame_region::validate_region(&map, &info)?;
-        Ok(Self { info, map, next_seq: 2, next_slot: 0 })
-    }
-
-    /// 下一笔写入的槽位与序号（序号从 2 起、每次 +2，奇数留给写入中间态）。
-    fn next_position(&mut self) -> (u32, u64) {
-        let slot = self.next_slot % self.info.slot_count;
-        self.next_slot = self.next_slot.wrapping_add(1);
-        let seq = self.next_seq;
-        self.next_seq = self.next_seq.wrapping_add(2);
-        (slot, seq)
-    }
-}
-
 impl Context {
-    /// 接上握手应答里的帧共享内存：映射与区域头校验一次完成，此后首帧即可写。
-    pub(crate) fn attach_frame_region(&self, info: FrameRegionInfo) -> Result<(), String> {
-        let client = FrameRegionClient::attach(info.clone())?;
-        let state = FrameRegionState { info, client: Some(client) };
-        *self.inner.frame_region.lock().unwrap() = Some(Arc::new(tokio::sync::Mutex::new(state)));
-        Ok(())
-    }
-
-    fn frame_region(&self) -> Result<Arc<tokio::sync::Mutex<FrameRegionState>>, RpcError> {
-        self.inner
-            .frame_region
-            .lock()
-            .unwrap()
-            .clone()
-            .ok_or_else(|| RpcError::failed("帧共享内存未就绪：连接未完成握手"))
-    }
-
+    /// 仅测试用：构造一个没有帧 / 服务回执 / 日志落点的上下文。
+    #[cfg(test)]
     pub(crate) fn new(out_tx: mpsc::Sender<Envelope>) -> Self {
         Self::build(out_tx, None, None, None)
+    }
+
+    /// 仅测试用：接上帧提交器，其余同 [`Context::new`]。
+    #[cfg(test)]
+    pub(crate) fn build_fixture(out_tx: mpsc::Sender<Envelope>, submit: FrameSubmit) -> Self {
+        Self::build(out_tx, Some(submit), None, None)
     }
 
     /// 同进程传输：请求仍走信封通道，帧、服务回执与日志直接交给宿主。
@@ -166,17 +103,11 @@ impl Context {
                 out_tx,
                 pending: Arc::new(Mutex::new(std::collections::HashMap::new())),
                 next_id: AtomicU64::new(1),
-                frame_region: Mutex::new(None),
                 frame_submit,
                 service_reply,
                 log,
             }),
         }
-    }
-
-    /// 读任务收场在途调用时取走整表（drain）。
-    pub(crate) fn drain_pending(&self) -> std::collections::HashMap<u64, oneshot::Sender<Result<Value, RpcError>>> {
-        std::mem::take(&mut *self.inner.pending.lock().unwrap())
     }
 
     pub(crate) fn pending_handle(&self) -> PendingHandle {
@@ -192,6 +123,7 @@ impl Context {
     }
 
     /// 按请求 id 摘除一个在途调用（响应配对用）。
+    #[cfg(test)]
     pub(crate) fn remove_pending(&self, id: u64) -> Option<oneshot::Sender<Result<Value, RpcError>>> {
         self.inner.pending.lock().unwrap().remove(&id)
     }
@@ -345,6 +277,113 @@ impl Context {
         self.call_typed(method::vault::FILES, &Value::Null).await
     }
 
+    /// 读随仓库走的界面状态（展开集 / 排序 / 目录颜色 / 提示词标记）；`dir` 给定时另带该目录
+    /// 的条目（宿主已按当前排序排好）。
+    pub async fn vault_ui(
+        &self,
+        params: &VaultUiParams,
+    ) -> Result<VaultUiResult, RpcError> {
+        self.call_typed(method::vault_ui::READ, params).await
+    }
+
+    /// 按键写仓库界面状态（只改给出的字段），回执 = 写后的状态快照（不含条目与容器清单）。
+    pub async fn vault_update_ui(&self, patch: &VaultUiPatch) -> Result<VaultUiState, RpcError> {
+        self.call_typed(method::vault_ui::WRITE, patch).await
+    }
+
+    /// 发起一次文件拖拽：ghost、落点判定与悬停自动展开都在宿主，插件只给被拖条目与承载面。
+    /// 落点状态经 [`crate::protocol::event::name::DRAG_STATE`] 回推，插件据此画高亮。
+    pub async fn begin_drag(&self, params: &DragStartParams) -> Result<(), RpcError> {
+        self.call_unit(method::drag::START, params).await
+    }
+
+    /// 上报本面上指针所指的落点候选（`target` 缺省 = 本面不接受落入）。
+    pub async fn drag_hover(&self, params: &DragHoverParams) -> Result<(), RpcError> {
+        self.call_unit(method::drag::HOVER, params).await
+    }
+
+    /// 结束拖拽（`cancelled` = 不落位）。
+    pub async fn end_drag(&self, params: &DragEndParams) -> Result<(), RpcError> {
+        self.call_unit(method::drag::END, params).await
+    }
+
+    /// 在指针处弹出宿主菜单；关闭时宿主发 `host:menu.closed`（`selected` = 选中项 id）。
+    pub async fn open_menu(&self, params: &MenuOpenParams) -> Result<(), RpcError> {
+        self.call_unit(method::menu::OPEN, params).await
+    }
+
+    /// 新建一个仓库条目（笔记 / 表格 / 画布 / 文件夹 / 插件文档类型）：宿主起空内容并落盘，
+    /// 同名自动加序号。
+    pub async fn create_entry(
+        &self,
+        params: &CreateEntryParams,
+    ) -> Result<CreateEntryResult, RpcError> {
+        self.call_typed(method::vault_ui::CREATE, params).await
+    }
+
+    /// 切换当前容器（本地仓库或协作空间）：`id` 取 `vault.ui` 回执里 `containers` 的原值。
+    pub async fn switch_container(&self, params: &SwitchContainerParams) -> Result<(), RpcError> {
+        self.call_unit(method::vault_ui::SWITCH_CONTAINER, params).await
+    }
+
+    /// 把容器移出最近列表（只移出列表，不动磁盘内容与服务端数据）。激活中的容器宿主拒绝。
+    pub async fn remove_container(
+        &self,
+        params: &RemoveContainerParams,
+    ) -> Result<(), RpcError> {
+        self.call_unit(method::vault_ui::REMOVE_CONTAINER, params).await
+    }
+
+    /// 让宿主重读文件树（磁盘无监听，外部改动只能靠刷新感知）。
+    pub async fn refresh_tree(&self) -> Result<(), RpcError> {
+        self.call_unit(method::vault_ui::REFRESH_TREE, &Value::Null).await
+    }
+
+    /// 全仓库的目录清单（仓库相对路径，不含仓库根）：「展开全部」这类入口用。
+    pub async fn vault_list_dirs(&self) -> Result<Vec<String>, RpcError> {
+        let result: DirListResult =
+            self.call_typed(method::vault_ui::LIST_DIRS, &Value::Null).await?;
+        Ok(result.dirs)
+    }
+
+    /// 让宿主选一个文件夹并作为仓库打开（选择器与进入仓库链都在壳）。
+    pub async fn pick_vault(&self) -> Result<(), RpcError> {
+        self.call_unit(method::shell::PICK_VAULT, &Value::Null).await
+    }
+
+    /// 打开宿主的取色器（HSV 拖动预览 / 松手提交）；回执的 `color` 取消时缺省。
+    pub async fn pick_color(&self, params: &PickColorParams) -> Result<PickColorResult, RpcError> {
+        self.call_typed(method::shell::PICK_COLOR, params).await
+    }
+
+    /// 在系统文件管理器中显示一个仓库内条目（空路径 = 仓库根）。协作空间没有本机路径，宿主拒绝。
+    pub async fn reveal_in_file_manager(&self, path: &str, is_dir: bool) -> Result<(), RpcError> {
+        let params = RevealParams { path: path.to_string(), is_dir };
+        self.call_unit(method::shell::REVEAL, &params).await
+    }
+
+    /// 取一个仓库内条目的绝对路径（空路径 = 仓库根）。协作空间没有本机路径，宿主拒绝。
+    pub async fn vault_absolute_path(&self, path: &str) -> Result<String, RpcError> {
+        let params = PathParams { path: path.to_string() };
+        let result: AbsolutePathResult =
+            self.call_typed(method::shell::ABSOLUTE_PATH, &params).await?;
+        Ok(result.path)
+    }
+
+    /// 在同目录创建副本（同名自动加序号；`.atlx` / `.atb` 连同内部 id 重建）。
+    /// 回执 = 落定的新路径。
+    pub async fn duplicate_entry(&self, params: &DuplicateParams) -> Result<String, RpcError> {
+        let result: AbsolutePathResult =
+            self.call_typed(method::shell::DUPLICATE, params).await?;
+        Ok(result.path)
+    }
+
+    /// 写系统剪贴板（文本）。
+    pub async fn write_clipboard(&self, text: &str) -> Result<(), RpcError> {
+        self.call_unit(method::clipboard::WRITE_TEXT, &TextContent { content: text.to_string() })
+            .await
+    }
+
     /// 当前容器与在线成员快照（容器种类 / 连接态 / 本端身份 / 在线设备明细）。
     /// 连接态与在场变化时宿主另发 [`crate::protocol::event::name::SPACE_PEERS_CHANGED`]。
     pub async fn space_room(&self) -> Result<SpaceRoomResult, RpcError> {
@@ -403,49 +442,18 @@ impl Context {
     }
 
     /// 提交整面帧：整发整换该面的绘制指令、命中区与输入声明（空指令 = 清空绘制）。
-    ///
-    /// 进程插件把帧写进握手时建立的共享内存区域，须先完成握手；同进程插件直接交宿主复制。
-    /// 回执 `applied = false` 表示帧在槽内被后续写入覆盖（宿主整帧丢弃），按需重发即可。
+    /// 帧直接交宿主复制，`applied` 恒真。
     pub async fn submit_frame(
         &self,
         surface_id: &str,
         frame: crate::protocol::frame::SurfaceFrame,
     ) -> Result<SubmitResult, RpcError> {
-        if let Some(submit) = &self.inner.frame_submit {
-            return submit(surface_id, frame);
-        }
-        let region = self.frame_region()?;
-        let mut state = region.lock().await;
-        let payload = frame_codec::encode(&frame);
-        if payload.len() > state.info.slot_capacity as usize {
-            let info = self.grow_frame_region(payload.len()).await?;
-            // 宿主换区后旧代次不再可读：直接丢掉旧映射，按新描述重接（接不上则下次提交再试）
-            if info.generation != state.info.generation {
-                state.info = info;
-                state.client = None;
-            }
-        }
-        let info = state.info.clone();
-        let client = state.client()?;
-        let (slot, seq) = client.next_position();
-        frame_region::write_slot(&mut client.map, &info, slot, seq, &payload)
-            .map_err(|e| RpcError::failed(format!("写入帧共享内存失败：{e}")))?;
-        let params = FrameSubmitSharedParams {
-            surface_id: surface_id.into(),
-            generation: info.generation,
-            slot,
-            seq,
-            len: payload.len() as u32,
-        };
-        self.call_typed(method::frame::SUBMIT_SHARED, &params).await
-    }
-
-    /// 帧超出当前槽容量：请宿主换一份更大的区域并接上新映射。
-    async fn grow_frame_region(&self, min_bytes: usize) -> Result<FrameRegionInfo, RpcError> {
-        let min_bytes = u32::try_from(min_bytes)
-            .map_err(|_| RpcError::failed("帧过大：长度超出区域上限"))?;
-        let params = crate::protocol::frame::FrameRegionRequest { min_bytes };
-        self.call_typed(method::frame::REGION, &params).await
+        let submit = self
+            .inner
+            .frame_submit
+            .as_ref()
+            .ok_or_else(|| RpcError::failed("帧通道未就绪：连接未完成握手"))?;
+        submit(surface_id, frame)
     }
 
     /// 注册一个贡献点，使其出现在宿主对应入口（面板 / 表格视图 / 设置页）。

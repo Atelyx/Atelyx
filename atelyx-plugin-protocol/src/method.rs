@@ -233,10 +233,6 @@ pub mod doc {
 
 /// 面帧：整个面交给插件自绘，一帧即当前完整界面。
 pub mod frame {
-    /// 插件提交一份整面帧：内容写在共享内存槽里，params 只带槽位定位与校验信息。整帧替换。
-    pub const SUBMIT_SHARED: &str = "frame.submitShared";
-    /// 帧超出当前槽容量时请求宿主换一份更大的共享内存区域（应答 = 新区域描述）。
-    pub const REGION: &str = "frame.region";
     /// 宿主回发原始输入（通知）：指针 / 滚轮 / 按键 / 输入法 / 焦点 / 尺寸。
     pub const HOST_INPUT: &str = "host:frame.input";
     /// 宿主按面声明的帧率发帧拍（通知）：插件收到后提交该帧的内容。
@@ -300,6 +296,64 @@ pub mod editor {
     /// 读全局编辑偏好（软换行 / 页面内标题 / 正文宽度）；变更时宿主另发
     /// [`crate::event::name::EDITOR_PREFS_CHANGED`]。
     pub const PREFS: &str = "editor.prefs";
+}
+
+/// 仓库界面状态（随仓库走的界面数据）：展开集 / 排序 / 目录颜色 / 提示词标记这类
+/// 「宿主与插件都读、重启后要保留」的键值，落仓库配置与对应侧文件，不落插件私有目录。
+pub mod vault_ui {
+    /// 读一组仓库界面状态：缺省键回落到宿主默认值。
+    pub const READ: &str = "vault.ui";
+    /// 按键写仓库界面状态：只改给出的键（`null` 删除该键），返回写后的完整快照。
+    pub const WRITE: &str = "vault.updateUi";
+    /// 新建一个条目（笔记 / 表格 / 画布 / 文件夹 / 插件文档类型）：宿主起空内容并落盘。
+    pub const CREATE: &str = "vault.create";
+    /// 切换当前容器（本地仓库或协作空间）。
+    pub const SWITCH_CONTAINER: &str = "vault.switchContainer";
+    /// 从容器列表移除一个容器（只移出最近列表，不动磁盘内容与服务端数据）。
+    pub const REMOVE_CONTAINER: &str = "vault.removeContainer";
+    /// 列出全仓库的目录（仓库相对路径；「展开全部」这类需要整棵骨架的入口用）。
+    pub const LIST_DIRS: &str = "vault.listDirs";
+    /// 让宿主重读文件树（磁盘无监听，外部改动只能靠刷新感知）。
+    pub const REFRESH_TREE: &str = "vault.refreshTree";
+}
+
+/// [`vault_ui::LIST_DIRS`] 的回执：全部目录的仓库相对路径（不含仓库根）。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DirListResult {
+    pub dirs: Vec<String>,
+}
+
+/// 宿主自有的系统单例界面与容器入口：插件只发起，实际动作与结果回填都在壳。
+pub mod shell {
+    /// 打开宿主的取色器（HSV 拖动预览 / 松手提交），回执 = 选中色（取消时缺省）。
+    pub const PICK_COLOR: &str = "shell.pickColor";
+    /// 让宿主选一个文件夹并作为仓库打开（选择器与进入仓库链都在壳）。
+    pub const PICK_VAULT: &str = "shell.pickVault";
+    /// 在系统文件管理器中显示一个仓库内条目（空路径 = 仓库根；协作空间没有本机路径，宿主拒绝）。
+    pub const REVEAL: &str = "shell.reveal";
+    /// 取一个仓库内条目的绝对路径（空路径 = 仓库根；协作空间没有本机路径，宿主拒绝）。
+    pub const ABSOLUTE_PATH: &str = "shell.absolutePath";
+    /// 在同目录创建副本（同名自动加序号；.atlx / .atb 连同内部 id 重建），回执 = 落定的新路径。
+    pub const DUPLICATE: &str = "shell.duplicate";
+}
+
+/// 文件拖拽会话：ghost、落点判定与悬停自动展开都在宿主，插件只发起 / 更新落点 / 结束。
+pub mod drag {
+    /// 发起一次拖拽会话（同一插件同一时刻至多一个；重复发起以最新的为准）。
+    pub const START: &str = "drag.start";
+    /// 插件面在指针移动时上报本面内的落点候选（命中区 id 由插件给出）。
+    pub const HOVER: &str = "drag.hover";
+    /// 结束拖拽会话（释放即落位；取消则不落位）。
+    pub const END: &str = "drag.end";
+}
+
+/// 宿主弹层菜单：插件声明条目（可带子面板与只读文字行），宿主按统一外观弹出并回传选中项。
+pub mod menu {
+    /// 打开一个宿主菜单，锚点为当前指针位置。关闭时经 [`HOST_CLOSED`] 回传原因。
+    pub const OPEN: &str = "menu.open";
+    /// 宿主关闭了菜单（选中某项 / 点击外点 / Esc）；`selected` 缺省 = 未选中任何项。
+    pub const HOST_CLOSED: &str = "host:menu.closed";
 }
 
 pub mod ai {
@@ -1193,6 +1247,455 @@ pub struct DeclareDefaultLayoutParams {
     pub spec: crate::layout::LayoutSpecNode,
 }
 
+// ---------- 仓库界面状态 / 拖拽 / 菜单 ----------
+
+/// 展开集上限（条目数）：防止插件把无限增长的路径塞进仓库配置。
+pub const MAX_EXPANDED_ENTRIES: usize = 4096;
+/// 目录颜色条目上限。
+pub const MAX_FOLDER_COLORS: usize = 4096;
+/// 提示词标记条目上限。
+pub const MAX_PROMPT_NOTES: usize = 1024;
+/// 单条路径 / 键值的字节上限。
+pub const MAX_UI_STATE_TEXT: usize = 1024;
+
+/// 文件树的下一层条目。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UiDirEntry {
+    /// 相对本目录的名字（不含父路径）。
+    pub name: String,
+    /// 相对仓库根的路径（`/` 分隔）。
+    pub path: String,
+    pub is_dir: bool,
+    /// 修改时刻（unix 秒）：按时间排序用。
+    pub mtime: i64,
+}
+
+/// 随仓库走的界面状态：展开集 / 排序 / 目录颜色 / 提示词标记。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultUiState {
+    /// 文件树展开的目录（仓库相对路径；空串 = 仓库根）。
+    #[serde(default)]
+    pub expanded: Vec<String>,
+    /// 排序键（`name-asc` / `name-desc` / `mtime-desc` / `mtime-asc`）。
+    pub sort: String,
+    /// 目录图标颜色（目录相对路径 → hex 色）。
+    #[serde(default)]
+    pub folder_colors: std::collections::BTreeMap<String, String>,
+    /// 已注册为系统提示词的笔记（仓库相对路径）。
+    #[serde(default)]
+    pub prompt_notes: Vec<String>,
+}
+
+/// [`vault_ui::READ`] 的 params：`dir` 给定时另带该目录条目。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct VaultUiParams {
+    /// 需要一个目录的条目（空 = 不要）。
+    pub dir: Option<String>,
+}
+
+
+/// [`vault_ui::WRITE`] 的 params：只改给出的键。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct VaultUiPatch {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expanded: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub folder_colors: Option<std::collections::BTreeMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_notes: Option<Vec<String>>,
+}
+
+impl VaultUiPatch {
+    /// 校验条目数与单条长度：越界即拒绝，不做截断。
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(expanded) = &self.expanded {
+            ensure_list("展开集", expanded, MAX_EXPANDED_ENTRIES)?;
+        }
+        if let Some(sort) = &self.sort {
+            ensure_text("排序键", sort)?;
+        }
+        if let Some(colors) = &self.folder_colors {
+            if colors.len() > MAX_FOLDER_COLORS {
+                return Err(format!("目录颜色不得超过 {MAX_FOLDER_COLORS} 条"));
+            }
+            for (path, color) in colors {
+                ensure_text("目录路径", path)?;
+                ensure_text("颜色值", color)?;
+            }
+        }
+        if let Some(notes) = &self.prompt_notes {
+            ensure_list("提示词标记", notes, MAX_PROMPT_NOTES)?;
+        }
+        Ok(())
+    }
+}
+
+fn ensure_menu_id<'a>(
+    ids: &mut std::collections::HashSet<&'a str>,
+    id: &'a str,
+) -> Result<(), String> {
+    if id.trim().is_empty() {
+        return Err("菜单项 id 不能为空".into());
+    }
+    if !ids.insert(id) {
+        return Err(format!("菜单项 id 重复：{id}"));
+    }
+    Ok(())
+}
+
+fn ensure_list(name: &str, items: &[String], limit: usize) -> Result<(), String> {
+    if items.len() > limit {
+        return Err(format!("{name}不得超过 {limit} 条"));
+    }
+    for item in items {
+        ensure_text(name, item)?;
+    }
+    Ok(())
+}
+
+fn ensure_text(name: &str, value: &str) -> Result<(), String> {
+    if value.len() > MAX_UI_STATE_TEXT {
+        return Err(format!("{name}不得超过 {MAX_UI_STATE_TEXT} 字节"));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(format!("{name}不得含控制字符"));
+    }
+    Ok(())
+}
+
+/// 拖拽会话里被拖的条目。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DragItem {
+    /// 仓库相对路径。
+    pub path: String,
+    pub is_dir: bool,
+    /// ghost 上显示的文案（缺省 = 路径末段）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+/// [`drag::START`] 的 params：指针起点取宿主当前指针位置。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DragStartParams {
+    pub item: DragItem,
+    /// 承载发起面所在的窗口面标识（宿主据此把 ghost 画在正确窗口）。
+    pub surface_id: String,
+}
+
+/// [`drag::HOVER`] 的 params：本面上指针所指的落点候选。
+/// 几何（哪一行）由插件判定，能不能落由宿主按同一套规则复核。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DragHoverParams {
+    /// 落点目录（仓库相对路径；空串 = 仓库根）；缺省 = 本面不接受落入。
+    pub target: Option<String>,
+    /// 该落点是不是目录（文件行不接受落入）。
+    pub is_dir: bool,
+}
+
+/// [`drag::END`] 的 params：`cancelled` = 不落位。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DragEndParams {
+    pub cancelled: bool,
+}
+
+/// 宿主回推给插件的拖拽状态（[`crate::event::name::DRAG_STATE`]）：驱动落点高亮与拒绝提示。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DragStateParams {
+    /// 当前落点（仓库相对路径）；`None` = 指针不在本面的任何落点上。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// 落点不可用时的可读原因。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reject: Option<String>,
+    /// 悬停折叠目录到点会自动展开。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub springing: bool,
+}
+
+/// 菜单条目：与宿主内置菜单同一套形态。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum MenuItem {
+    /// 动作项：`id` 随选中结果回传。
+    Action {
+        id: String,
+        label: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        icon: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        danger: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        disabled: bool,
+        /// 行尾角标（如「当前」）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+        /// 悬停提示。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hint: Option<String>,
+        /// 所属面板（0 = 根面板）。
+        #[serde(default)]
+        pane: usize,
+    },
+    /// 当前选中项（强调色文字 + 右侧对勾）。
+    Checked {
+        id: String,
+        label: String,
+        #[serde(default)]
+        pane: usize,
+    },
+    /// 钻入子面板。
+    Submenu {
+        label: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        icon: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        disabled: bool,
+        /// 所属面板（0 = 根面板）。
+        #[serde(default)]
+        pane: usize,
+        /// 点击后钻入的面板号（必须 ≥ 1：根面板不能再钻回自己）。
+        target: usize,
+    },
+    /// 只读文字行（确认说明这类）。
+    Text {
+        text: String,
+        #[serde(default)]
+        pane: usize,
+    },
+    /// 分组头（灰底小字）。
+    Group {
+        label: String,
+        #[serde(default)]
+        pane: usize,
+    },
+    /// 分隔线。
+    Divider {
+        #[serde(default)]
+        pane: usize,
+    },
+}
+
+impl MenuItem {
+    /// 条目所属面板号。
+    pub fn pane(&self) -> usize {
+        match self {
+            MenuItem::Action { pane, .. }
+            | MenuItem::Checked { pane, .. }
+            | MenuItem::Text { pane, .. }
+            | MenuItem::Group { pane, .. }
+            | MenuItem::Divider { pane } => *pane,
+            MenuItem::Submenu { pane, .. } => *pane,
+        }
+    }
+}
+
+/// 菜单条目上限。
+pub const MAX_MENU_ITEMS: usize = 512;
+/// 菜单面板数上限。
+pub const MAX_MENU_PANES: usize = 8;
+
+/// [`menu::OPEN`] 的 params：`items` 顺序即渲染顺序。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MenuOpenParams {
+    pub items: Vec<MenuItem>,
+    /// 菜单宽度（逻辑像素；宿主按内容与视口钳制）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<f32>,
+}
+
+impl MenuOpenParams {
+    /// 校验条目：非空、id 非空唯一、面板号在范围内、文字长度受限。
+    pub fn validate(&self) -> Result<(), String> {
+        if self.items.is_empty() {
+            return Err("菜单至少需要一条".into());
+        }
+        if self.items.len() > MAX_MENU_ITEMS {
+            return Err(format!("菜单条目不得超过 {MAX_MENU_ITEMS} 条"));
+        }
+        let mut ids = std::collections::HashSet::new();
+        let mut max_pane = 0;
+        for item in &self.items {
+            max_pane = max_pane.max(item.pane());
+            match item {
+                MenuItem::Action { id, label, note, hint, .. } => {
+                    ensure_menu_id(&mut ids, id)?;
+                    ensure_text("菜单项文字", label)?;
+                    for value in [note.as_deref(), hint.as_deref()].into_iter().flatten() {
+                        ensure_text("菜单项文字", value)?;
+                    }
+                }
+                MenuItem::Checked { id, label, .. } => {
+                    ensure_menu_id(&mut ids, id)?;
+                    ensure_text("菜单项文字", label)?;
+                }
+                MenuItem::Submenu { label, target, .. } => {
+                    ensure_text("菜单项文字", label)?;
+                    if *target == 0 || *target >= MAX_MENU_PANES {
+                        return Err(format!("子面板入口的目标面板须在 1..{}", MAX_MENU_PANES));
+                    }
+                }
+                MenuItem::Group { label, .. } => ensure_text("菜单项文字", label)?,
+                MenuItem::Text { text, .. } => ensure_text("菜单项文字", text)?,
+                MenuItem::Divider { .. } => {}
+            }
+        }
+        if max_pane >= MAX_MENU_PANES {
+            return Err(format!("菜单面板号不得超过 {}", MAX_MENU_PANES - 1));
+        }
+        Ok(())
+    }
+}
+
+/// [`menu::HOST_CLOSED`] 的 params：关闭原因与选中的条目 id。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct MenuClosedParams {
+    /// 选中的动作 / 勾选项 id；未选中（点击外部 / Esc）时缺省。
+    pub selected: Option<String>,
+}
+
+// ---------- 文件面板：容器、条目操作与取色 ----------
+
+/// 一个可切换的仓库容器（本地仓库或协作空间）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContainerEntry {
+    /// 唯一键（本地 = `local:<root>`，空间 = `space:<server>#<spaceId>`）。
+    pub id: String,
+    pub label: String,
+    /// 本地仓库根路径（空间缺省）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root: Option<String>,
+    /// 协作空间标识（本地缺省）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space_id: Option<String>,
+    /// 当前激活的容器。
+    #[serde(default)]
+    pub active: bool,
+}
+
+/// [`vault_ui::READ`] 的 result：状态快照 + 可选目录条目 + 容器清单。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultUiResult {
+    pub state: VaultUiState,
+    /// 请求了 `dir` 时的条目（宿主已按当前排序排好）；未请求 = 空。
+    #[serde(default)]
+    pub entries: Vec<UiDirEntry>,
+    /// 可切换的容器清单（本地仓库在前、激活项在前）。
+    #[serde(default)]
+    pub containers: Vec<ContainerEntry>,
+    /// 插件注册的文档类型（「新建」菜单条目用；扩展名不带点）。
+    #[serde(default)]
+    pub doc_types: Vec<DocTypeEntry>,
+}
+
+/// 一个插件注册的文档类型（文件面板「新建」菜单条目）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocTypeEntry {
+    /// 扩展名（不带点）。
+    pub extension: String,
+    /// 菜单标签（如「笔记」）。
+    pub label: String,
+}
+
+/// 容器切换（`vault.switchContainer`）：切到清单里给的那个容器。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwitchContainerParams {
+    /// [`ContainerEntry::id`] 的原值。
+    pub id: String,
+}
+
+/// 容器移除（`vault.removeContainer`）：把该容器移出最近列表。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoveContainerParams {
+    /// [`ContainerEntry::id`] 的原值。
+    pub id: String,
+}
+
+/// 新建一个条目（`vault.create`）：宿主按 `kind` 起空内容并落盘（同名自动加序号）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateEntryParams {
+    /// 目标目录（仓库相对路径；空串 = 仓库根）。
+    pub dir: String,
+    /// 条目名（不含扩展名；`kind = folder` 时即文件夹名）。
+    pub name: String,
+    /// `note` / `table` / `canvas` / `folder`，或插件注册文档类型的不带点扩展名。
+    pub kind: String,
+}
+
+/// 新建结果：落定的仓库相对路径。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateEntryResult {
+    pub path: String,
+    /// 新建的是文件夹。
+    #[serde(default)]
+    pub is_dir: bool,
+}
+
+/// 取色器（`shell.pickColor`）：宿主的 HSV 取色器是系统单例 UI，插件只给初始色。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PickColorParams {
+    /// 初始色（`#rrggbb`）；缺省 = 宿主强调色。
+    pub initial: Option<String>,
+}
+
+/// 取色结果：用户取消时 `color` 缺省。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PickColorResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+}
+
+/// 在文件管理器中显示一个条目（`shell.reveal`）：`path` 为仓库相对路径，空串 = 仓库根。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct RevealParams {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub path: String,
+    /// 目标是文件夹（文件夹用「打开」语义，文件用「选中」语义）。
+    #[serde(default)]
+    pub is_dir: bool,
+}
+
+/// 条目绝对路径（`shell.absolutePath` 回执）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AbsolutePathResult {
+    pub path: String,
+}
+
+/// 创建副本（`shell.duplicate`）：`path` 为源条目的仓库相对路径。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DuplicateParams {
+    pub path: String,
+    /// 源是文件夹（递归复制并重建内部 id）。
+    #[serde(default)]
+    pub is_dir: bool,
+}
+
 // ---------- fs ----------
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1202,8 +1705,8 @@ pub struct PrivateDirResult {
 }
 
 /// `path` 的口径由能力面决定：`fs` 用绝对路径，`vault` 用相对仓库根的路径。
-/// 信任模型与进程托管一致：插件本就是任意权限的用户进程，
-/// 声明式权限是透明度机制而非沙箱边界；`fs` 服务的价值在统一出口与审计事实。
+/// 信任模型：插件与宿主同进程、持同等权限，声明式权限是透明度机制而非沙箱边界；
+/// `fs` 服务的价值在统一出口与审计事实。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PathParams {
@@ -2435,7 +2938,18 @@ pub const PLATFORM_PLUGIN: &str = "atelyx.platform";
 pub const BUILTIN_SERVICES: &[(&str, &str, &[&str])] = &[
     ("fs", PLATFORM_PLUGIN, &[fs::PRIVATE_DIR, fs::READ_TEXT, fs::WRITE_TEXT, fs::READ_BINARY, fs::WRITE_BINARY, fs::REMOVE, fs::EXISTS, fs::LIST]),
     ("process", PLATFORM_PLUGIN, &[process::SPAWN, process::WRITE_STDIN, process::CLOSE_STDIN, process::KILL]),
-    ("vault", PLATFORM_PLUGIN, &[vault::READ_TEXT, vault::WRITE_TEXT, vault::READ_BINARY, vault::WRITE_BINARY, vault::IMPORT_FILE, vault::IMAGE_INFO, vault::LIST, vault::EXISTS, vault::TAGS, vault::REMOVE, vault::RENAME, vault::BACKLINKS, vault::FILES]),
+    ("vault", PLATFORM_PLUGIN, &[vault::READ_TEXT, vault::WRITE_TEXT, vault::READ_BINARY, vault::WRITE_BINARY, vault::IMPORT_FILE, vault::IMAGE_INFO, vault::LIST, vault::EXISTS, vault::TAGS, vault::REMOVE, vault::RENAME, vault::BACKLINKS, vault::FILES,
+        // 仓库界面状态（展开集 / 排序 / 目录颜色 / 提示词标记）与条目操作，随仓库走
+        vault_ui::READ, vault_ui::WRITE, vault_ui::CREATE, vault_ui::SWITCH_CONTAINER, vault_ui::REMOVE_CONTAINER, vault_ui::LIST_DIRS, vault_ui::REFRESH_TREE]),
+    ("drag", PLATFORM_PLUGIN, &[drag::START, drag::HOVER, drag::END]),
+    ("menu", PLATFORM_PLUGIN, &[menu::OPEN]),
+    ("shell", PLATFORM_PLUGIN, &[
+        shell::PICK_COLOR,
+        shell::PICK_VAULT,
+        shell::REVEAL,
+        shell::ABSOLUTE_PATH,
+        shell::DUPLICATE,
+    ]),
     ("collab", PLATFORM_PLUGIN, &[collab::PEERS, collab::SEND, collab::META_GET, collab::META_PATCH]),
     // 空间名册与房间事实取自宿主会话与服务端，弹层 / 菜单也在宿主，归平台自身
     ("space", PLATFORM_PLUGIN, &[space::ROOM, space::MEMBERS, space::OPEN_MENU, space::OPEN_SETTINGS]),
@@ -2569,6 +3083,48 @@ mod tests {
         assert!(many.validate().unwrap_err().contains("不能超过"));
         // 空清单合法（收起菜单）
         assert!(SetTrayItemsParams { items: vec![] }.validate().is_ok());
+    }
+
+    #[test]
+    fn menu_items_keep_pane_and_submenu_target_apart() {
+        let ok = MenuOpenParams {
+            items: vec![
+                MenuItem::Submenu {
+                    label: "从列表移除".into(),
+                    icon: None,
+                    disabled: false,
+                    pane: 0,
+                    target: 1,
+                },
+                MenuItem::Text { text: "只从列表移除".into(), pane: 1 },
+                MenuItem::Action {
+                    id: "confirm".into(),
+                    label: "确认移除".into(),
+                    icon: None,
+                    danger: true,
+                    disabled: false,
+                    note: None,
+                    hint: None,
+                    pane: 1,
+                },
+            ],
+            width: None,
+        };
+        assert!(ok.validate().is_ok());
+        // 子面板入口指向根面板会打不开；越界同样拒绝
+        for target in [0, MAX_MENU_PANES] {
+            let bad = MenuOpenParams {
+                items: vec![MenuItem::Submenu {
+                    label: "从列表移除".into(),
+                    icon: None,
+                    disabled: false,
+                    pane: 0,
+                    target,
+                }],
+                width: None,
+            };
+            assert!(bad.validate().is_err(), "应拒绝目标面板 {target}");
+        }
     }
 
     #[test]

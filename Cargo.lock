@@ -502,6 +502,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "atelyx-plugin-files"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "atelyx-plugin-protocol",
+ "atelyx-plugin-sdk",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "atelyx-plugin-history"
 version = "0.1.0"
 dependencies = [
@@ -557,12 +568,10 @@ name = "atelyx-plugin-sdk"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "atelyx-core",
  "atelyx-format",
  "atelyx-plugin-abi",
  "atelyx-plugin-protocol",
  "base64 0.22.1",
- "memmap2",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -5080,7 +5089,6 @@ dependencies = [
  "libc",
  "mio",
  "pin-project-lite",
- "signal-hook-registry",
  "socket2",
  "tokio-macros",
  "windows-sys 0.61.2",

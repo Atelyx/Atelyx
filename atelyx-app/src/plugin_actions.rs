@@ -109,6 +109,12 @@ pub fn sync_surfaces(app: &mut App) -> bool {
             .notify_surface_attached(plugin_id, surface_id, SurfaceKind::Panel);
     }
     let removed: Vec<(String, String)> = app.plugin_surfaces.difference(&now).cloned().collect();
+    // 发起拖拽的面没了就不会再有输入来收尾：会话与落点一起清
+    if let Some(owner) = app.file_drag_surface.clone() {
+        if removed.contains(&owner) {
+            app.cancel_file_drag();
+        }
+    }
     for (plugin_id, surface_id) in &removed {
         app.plugins.notify_surface_detached(plugin_id, surface_id);
     }

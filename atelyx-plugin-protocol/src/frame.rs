@@ -7,8 +7,9 @@ use crate::paint::{validate_commands, DrawCommand, MAX_FPS};
 
 /// 命中区数量上限（单帧）。
 pub const MAX_HITS: usize = 4096;
-/// 命中区 id 上限（字节）。
-pub const MAX_HIT_ID_LEN: usize = 64;
+/// 命中区 id 上限（字节）：插件可以把它当作不透明标识用（仓库相对路径这类天然偏长的串），
+/// 上限按 Linux 的 `PATH_MAX` 留足，中文一字 3 字节也不至于撑破。
+pub const MAX_HIT_ID_LEN: usize = 4096;
 
 /// 命中区光标形状（悬停时的鼠标指针）。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -149,26 +150,6 @@ fn ensure_rect(x: f32, y: f32, w: f32, h: f32, name: &str) -> Result<(), String>
         return Err(format!("{name}的宽高不可为负"));
     }
     Ok(())
-}
-
-/// `frame.submitShared` 的 params：帧内容写在共享内存的 `slot` 槽里，信封只带定位与校验信息。
-/// 宿主按 `generation` 拒绝过期映射，按 `seq` / `len` 校验槽内内容是否仍是本次写入。
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FrameSubmitSharedParams {
-    pub surface_id: String,
-    pub generation: u64,
-    pub slot: u32,
-    pub seq: u64,
-    pub len: u32,
-}
-
-/// `frame.region` 的 params：帧超出当前槽容量时请求宿主换一份更大的区域。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FrameRegionRequest {
-    /// 本次至少要能放下的帧字节数；实际容量按倍增取到不小于它的值。
-    pub min_bytes: u32,
 }
 
 /// 键盘焦点事件与按键的归属：`Press` 含系统重复按键（长按方向键逐次到达），`Release` 在抬起时到达。
@@ -376,6 +357,17 @@ mod tests {
         assert!(frame.validate().is_err());
         frame.hits.pop();
 
+        // 命中区 id 可承载仓库相对路径（中文一字 3 字节）：上限按 PATH_MAX 留足
+        let long = format!("row:d:{}", "长目录/".repeat(60));
+        assert!(long.len() > 64 && long.len() <= MAX_HIT_ID_LEN, "{}", long.len());
+        frame.hits.push(hit(&long, 0.0, 0.0, 10.0, 10.0));
+        assert!(frame.validate().is_ok(), "长路径 id 应通过校验");
+        frame.hits.pop();
+        let too_long = "x".repeat(MAX_HIT_ID_LEN + 1);
+        frame.hits.push(hit(&too_long, 0.0, 0.0, 10.0, 10.0));
+        assert!(frame.validate().unwrap_err().contains("不得超过"));
+        frame.hits.pop();
+
         frame.fps = Some(0);
         assert!(frame.validate().unwrap_err().contains("帧率"));
         frame.fps = None;
@@ -404,31 +396,6 @@ mod tests {
         assert_eq!(frame.hit_at(15.0, 15.0), Some("button"));
         assert_eq!(frame.hit_at(90.0, 90.0), Some("panel"));
         assert_eq!(frame.hit_at(200.0, 0.0), None);
-    }
-
-    #[test]
-    fn shared_submit_params_carry_locator_only() {
-        let params = FrameSubmitSharedParams {
-            surface_id: "board".into(),
-            generation: 3,
-            slot: 1,
-            seq: 8,
-            len: 128,
-        };
-        let wire = serde_json::to_value(&params).unwrap();
-        assert_eq!(
-            wire,
-            serde_json::json!({
-                "surfaceId": "board",
-                "generation": 3,
-                "slot": 1,
-                "seq": 8,
-                "len": 128
-            })
-        );
-        assert_eq!(serde_json::from_value::<FrameSubmitSharedParams>(wire).unwrap(), params);
-        let request = FrameRegionRequest { min_bytes: 4096 };
-        assert_eq!(serde_json::to_value(request).unwrap(), serde_json::json!({ "minBytes": 4096 }));
     }
 
     #[test]

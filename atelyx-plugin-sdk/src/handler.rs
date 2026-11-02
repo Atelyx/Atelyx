@@ -6,7 +6,7 @@ use crate::context::Context;
 use crate::protocol::event::PublishParams;
 use crate::protocol::frame::{FrameInputParams, FrameTickParams};
 use crate::protocol::method::{
-    ChatEventParams, CollabMessageParams, DocInstanceCloseParams, DocInstanceOpenParams, HttpStreamChunkParams,
+    ChatEventParams, MenuClosedParams, CollabMessageParams, DocInstanceCloseParams, DocInstanceOpenParams, HttpStreamChunkParams,
     HttpStreamEndParams, ProcessEventParams, ShortcutTriggeredParams, SurfaceAttachedParams,
     SurfaceDetachedParams, ToolCallParams, TrayClickParams, WindowClosedParams, WindowIdParams,
 };
@@ -32,6 +32,8 @@ pub trait PluginHandler: Send + Sync + 'static {
     async fn on_surface_attached(&self, _ctx: &Context, _params: SurfaceAttachedParams) {}
     async fn on_surface_detached(&self, _ctx: &Context, _params: SurfaceDetachedParams) {}
     async fn on_host_event(&self, _ctx: &Context, _params: PublishParams) {}
+    /// 宿主菜单关闭：`selected` = 选中项 id（点外点 / Esc 时缺省）。
+    async fn on_menu_closed(&self, _ctx: &Context, _params: MenuClosedParams) {}
     async fn on_process_event(&self, _ctx: &Context, _params: ProcessEventParams) {}
     async fn on_shortcut(&self, _ctx: &Context, _params: ShortcutTriggeredParams) {}
     async fn on_doc_open(&self, _ctx: &Context, _params: DocInstanceOpenParams) {}
@@ -113,6 +115,7 @@ pub(crate) async fn dispatch<H: PluginHandler + ?Sized>(
         m::view::HOST_ATTACHED => typed!(SurfaceAttachedParams, |p| handler.on_surface_attached(ctx, p)),
         m::view::HOST_DETACHED => typed!(SurfaceDetachedParams, |p| handler.on_surface_detached(ctx, p)),
         event::HOST_PUBLISH => typed!(PublishParams, |p| handler.on_host_event(ctx, p)),
+        m::menu::HOST_CLOSED => typed!(MenuClosedParams, |p| handler.on_menu_closed(ctx, p)),
         m::process::HOST_EVENT => typed!(ProcessEventParams, |p| handler.on_process_event(ctx, p)),
         m::shortcut::HOST_TRIGGERED => typed!(ShortcutTriggeredParams, |p| handler.on_shortcut(ctx, p)),
         m::doc::HOST_OPEN => typed!(DocInstanceOpenParams, |p| handler.on_doc_open(ctx, p)),

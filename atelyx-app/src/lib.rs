@@ -378,12 +378,10 @@ enum Message {
     WindowOpened(window::Id),
     WindowCloseRequested(window::Id),
     WindowClosed(window::Id),
-    PickVault,
     VaultPicked(Result<PathBuf, String>),
     /// 从最近仓库列表进入指定仓库（脏拦截统一 flush 放行）。
     /// 启动自动进入 = from_boot；运行中切换在 gate 保存后关闭当前打开的文件。
     SelectVault { path: PathBuf, from_boot: bool },
-    ToggleDir(String),
     /// gen = 发起任务时的仓库世代；回调落地前与当前世代比对，过期即丢弃。
     ChildrenLoaded(String, u64, Result<Vec<vault::DirChild>, String>),
     OpenFile(String),
@@ -428,15 +426,7 @@ enum Message {
     ImageLoaded(u64, String, Result<Vec<u8>, String>),
     /// 一次失败重试到点（gen 守卫）：重扫插件界面里仍缺句柄的来源。
     ImageRetryDue(u64),
-    /// 文件面板排序方式切换（落仓库 config 的 fileExplorerSort）。
-    SetSort(String),
-    /// 创建同目录副本（文件字节复制 / 文件夹递归复制）。
-    DuplicateEntry(String, bool),
-    /// 提示词标记注册/注销切换（.atelyx/prompt-notes.json）。
-    PromptToggle(String),
-    /// 设置/清除文件夹图标颜色（None = 恢复默认）。
-    FolderColorSet(String, Option<String>),
-    /// 取色器（表格字色/底色、文件夹图标色、协作展示色）。
+    /// 取色器（表格字色/底色、文件夹图标色、协作展示色、插件取色）。
     ColorPicker(color_picker_actions::ColorPickerMsg),
     /// 协作展示色落盘（远端光标 / 名单取色）。
     CollabColorSet(String),
@@ -450,18 +440,8 @@ enum Message {
     FolderColorsLoaded(u64, Result<HashMap<String, String>, String>),
     /// 仓库级配置落盘回执（失败提示，不回滚界面选择）。
     ConfigSaved(u64, Result<(), String>),
-    /// 文件行按压（拖拽候选；由行 mouse_area 上报，超阈值转正拖拽会话）。
-    FileRowPress { window: window::Id, rel: String, is_dir: bool },
-    /// 拖拽悬停进入某行 / 落点区（可放与否由会话与目标共同判定；无会话时忽略）。
-    FileDragEnter { drop: FileDropKey, rel: String, is_dir: bool },
-    /// 拖拽悬停离开某行 / 落点区（`drop` 与进入时一致才清除）。
-    FileDragExit { drop: FileDropKey },
-    /// 在系统文件管理器中显示条目（目录 = 打开，文件 = 打开所在目录并选中）。
-    RevealEntry { rel: String, is_dir: bool },
-    /// 复制条目路径到系统剪贴板（absolute = 绝对路径，否则仓库内相对路径）。
-    CopyEntryPath { rel: String, absolute: bool },
-    /// 文件树结构刷新（工具栏刷新钮；本地重读展开集，空间整树重拉）。
-    FileTreeRefresh,
+
+
     /// 复制代码块正文到系统剪贴板。
     CopyCode(String),
     PanelTab(String, String),
@@ -587,6 +567,38 @@ enum Message {
     PluginWindowToggleMaximize { request_id: u64, plugin_id: String, window_key: String },
     /// 插件请求拖动承载某面的窗口（自绘标题栏）。
     PluginWindowBeginDrag { request_id: u64, plugin_id: String, surface_id: String },
+    /// 插件发起一次文件拖拽（ghost、落点与自动展开都在壳）。
+    PluginDragStart {
+        request_id: u64,
+        plugin_id: String,
+        params: atelyx_core::plugin_runtime::DragStartParams,
+    },
+    /// 插件面上报落点候选。
+    PluginDragHover {
+        request_id: u64,
+        params: atelyx_core::plugin_runtime::DragHoverParams,
+    },
+    /// 插件结束拖拽会话。
+    PluginDragEnd {
+        request_id: u64,
+        params: atelyx_core::plugin_runtime::DragEndParams,
+    },
+    /// 插件请求弹出一个宿主菜单（`plugin_id` 记下发起来源，关闭时按它回传选中项）。
+    PluginMenuOpen {
+        request_id: u64,
+        plugin_id: String,
+        params: atelyx_core::plugin_runtime::MenuOpenParams,
+    },
+    /// 插件请求打开文件夹选择器作为仓库（工具条「打开文件夹」入口）。
+    PluginPickVault { request_id: u64 },
+
+    /// 插件请求打开宿主取色器。
+    PluginPickColor {
+        request_id: u64,
+        params: atelyx_core::plugin_runtime::PickColorParams,
+    },
+    /// 宿主菜单关闭：回传选中项给发起插件。
+    PluginMenuClosed { selected: Option<String> },
     /// 整面帧的焦点请求 / 释放。
     PluginFrameFocus {
         window: window::Id,
@@ -606,54 +618,25 @@ enum Message {
     PopupOpen(window::Id, PopupOpen),
     /// 仓库文件总数（打开仓库后异步统计；gen 守卫）。
     FileCount(u64, Result<usize, String>),
-    /// 文件树：新建草稿输入行（落点 = 目标目录内部）。
-    DraftStart(String, DraftKind),
-    /// 文件树：就地重命名起点。
-    RenameStartFile(String),
-    RenameStartFolder(String),
-    /// 删除入口：文件直接进确认 pane；文件夹先计数（空目录免确认）。
-    DeleteAsk(String),
-    FolderDeleteAsk(String),
-    /// 文件夹条目数落地（core 仅对非空目录回 needs_confirm；带条目数进确认 pane）。
-    FolderCounted(String, usize),
-    /// 取消删除确认。
-    DeleteCancel,
-    /// 文件/文件夹删除（菜单内确认后触发）。
-    DeleteEntry(String, bool),
-    /// 仓库行：在系统文件管理器中打开指定仓库根。
-    RevealVaultAt(String),
-    /// 最近仓库行：从列表移除入口（进弹层确认 pane）。
-    RemoveVaultAsk(String),
-    /// 从列表移除确认（只移出列表，不影响磁盘文件与激活态）。
-    RemoveVaultConfirm(String),
-    /// 取消从列表移除。
-    RemoveVaultCancel,
     /// 全局配置落盘回执（失败提示，不回滚内存态）。
     GlobalSaved(Result<(), String>),
     /// 启动期全局配置读错误提示。
     StartupNotice(String),
     /// 文件操作落地（gen 守卫 + 结果通知 + 刷新子项 + 打开文件跟随）。
     OpDone(u64, String, Result<String, String>, FollowUp),
-    /// 展开全部/收起全部文件夹（懒加载树递归展开）。
-    ExpandAllToggle,
-    /// 递归展开过程中的子项落地（累计入展开集并链式下发）。
-    ExpandChildrenLoaded(String, u64, Result<Vec<vault::DirChild>, String>),
+
     /// 行内输入行被按下（重命名失焦提交的「点在输入行内」标志）。
     RenamePressInside,
     /// 分割把手键盘调整（上次拖动过的把手；horizontal + 正向）。
     DividerAdjust(bool, bool),
     /// 保存失败徽标的关闭。
     SaveErrorDismiss,
-    /// 未实现功能的占位通知。
-    NotImplemented(&'static str),
     /// 协作空间消息（账号 / 空间切换 / 空间保存回执）。
     Space(SpaceMsg),
     /// 文件面板云钮：打开协作空间菜单（未登录先弹登录层）。
     SpaceMenuOpen,
     /// 登录层切换注册 / 登录模式（弹层保持打开）。
     SpaceLoginToggle(bool),
-    /// 最近空间行：从列表移除（仅移出列表，不影响服务端数据与成员资格）。
-    RemoveSpaceAsk { server_url: String, space_id: String },
     /// 设置-通用：界面字号草稿输入（数字过滤；合法档位实时生效）。
     FontSizeInput(String),
     /// 设置-通用：字号提交（非法草稿回退显示当前生效值）。
@@ -764,6 +747,15 @@ pub enum DropReject {
     SameDir,
     /// 目标是自身 / 自身子树 / 自身祖先。
     SelfTree,
+}
+
+/// 落点被拒的可读原因（与壳内拖拽 ghost 的提示同一套文案）。
+fn reject_text(why: DropReject) -> &'static str {
+    match why {
+        DropReject::NotADir => "只能放进文件夹",
+        DropReject::SameDir => "已在此目录",
+        DropReject::SelfTree => "不能放进自身",
+    }
 }
 
 /// 拖拽落点判定：`target`（相对路径，`""` = 仓库根）能否接收当前拖拽会话。
@@ -915,6 +907,15 @@ pub enum SaveReason {
     Flush,
 }
 
+/// 容器移出最近列表的结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContainerRemoval {
+    /// 从最近清单里删掉了。
+    Removed,
+    /// 本就不在最近清单（账号空间随时可再取回），列表展示不受影响。
+    NotListed,
+}
+
 /// flush 放行后继续的动作（挂起输入已落盘才可执行，否则动作会丢失未保存内容或在途写打到旧路径）。
 #[derive(Debug, Clone)]
 enum PendingAfterFlush {
@@ -928,7 +929,6 @@ enum PendingAfterFlush {
     CloseFileTab(String),
     /// 仓库内笔记链接（已解码；能进 flush 的只有 Path/Wiki/Create 形态，外链直接打开）。
     OpenLink(String),
-    Delete { rel: String, is_dir: bool },
     /// 文件树拖拽移动（挂起输入先落盘，防代写被未落盘内容回写覆盖）。
     MoveEntry { from: String, is_dir: bool, to_dir: String },
     RenameFile(RenameState),
@@ -1050,7 +1050,6 @@ pub enum SpaceMsg {
         frozen: atelyx_core::vault::CanvasFile,
     },
     /// 文件夹确认删除（needsConfirm 二段式的 force 步）。
-    ForceDeleteFolder { gen: u64, rel: String },
     HistoryRecorded { err: Option<String> },
     /// 画布回滚回执（成功且该画布仍打开则按服务端事实重读）。
     CanvasRestored { gen: u64, rel: String, result: Result<(), String> },
@@ -1191,11 +1190,6 @@ pub struct App {
     pub rename_notice: Option<layout_view::RenameNotice>,
     /// 设置左栏折叠态。
     pub settings_collapsed: bool,
-    /// 删除确认流（目标相对路径、是否目录、文件夹条目数）。
-    pub delete_confirm: Option<(String, bool, Option<usize>)>,
-    /// 展开全部文件夹进行中（懒加载递归展开的图标/文案双态）。
-    pub expand_all: bool,
-    expand_pending: usize,
     /// 各窗口最近光标位置（右键菜单锚点 / 提示定位）。
     pub cursors: HashMap<window::Id, Point>,
     /// 打开的弹层（同窗口同时至多一个）。
@@ -1226,6 +1220,8 @@ pub struct App {
     pub plugin_table_surfaces: HashSet<(String, String)>,
     /// 最近一次广播 `table:changed` 时的表格路径（身份差分用；None = 广播过「无打开表格」）。
     pub table_event_path: Option<String>,
+    /// 最近一次广播 `editor:open.changed` 时的打开文件集合（身份差分用）。
+    pub open_files_event: Vec<String>,
     /// 最近一次广播 `table:selection.changed` 的载荷（选区差分用；None = 尚未广播）。
     pub table_selection_event: Option<atelyx_core::plugin_runtime::TableSelectionChangedPayload>,
     /// 各面的最新整面帧（键 = 插件 id + 面 id）。
@@ -1273,8 +1269,6 @@ pub struct App {
     update_notice_id: Option<u64>,
     /// 最近一次发起的切仓目标：flush 回放时只有与它一致才执行，防快速点选落到非最后目标。
     vault_switch_target: Option<PathBuf>,
-    /// 从列表移除的确认态（目标仓库根；弹层确认 pane 数据源）。
-    pub remove_vault_confirm: Option<String>,
     /// 当前仓库根（打开仓库后与 vault.root() 一致；仅用于展示与 files 视图判空）。
     pub vault_root: Option<PathBuf>,
     /// 仓库容器身份（本地 / 空间；内容面按它分派）。
@@ -1474,6 +1468,10 @@ pub struct App {
     pub file_drag: Option<FileDrag>,
     /// 拖拽悬停中的落点（目标目录相对路径，`""` = 仓库根；None = 不在可落点上）。
     pub file_drag_target: Option<String>,
+    /// 插件发起的拖拽会话归属（插件 id + 面标识）：落点状态按它回推给发起方。
+    pub file_drag_surface: Option<(String, String)>,
+    /// 插件菜单的归属插件与条目（宿主弹层渲染，选中后回传）。
+    pub plugin_menu: Option<(String, atelyx_core::plugin_runtime::MenuOpenParams)>,
 }
 
 /// `doc:presence` 广播用的远端光标视图（字节偏移，UTF-16 已换算）。选区缺省 = 对端在场但
@@ -1587,9 +1585,6 @@ impl App {
                 tooltip_half: None,
                 rename_notice: None,
                 settings_collapsed: false,
-                delete_confirm: None,
-                expand_all: false,
-                expand_pending: 0,
                 cursors: HashMap::new(),
                 popup: None,
                 popup_pane: 0,
@@ -1605,6 +1600,7 @@ impl App {
                 plugin_settings_surfaces: HashSet::new(),
                 plugin_table_surfaces: HashSet::new(),
                 table_event_path: None,
+                open_files_event: Vec::new(),
                 table_selection_event: None,
                 plugin_frames: HashMap::new(),
                 plugin_frame_focus: None,
@@ -1633,7 +1629,6 @@ impl App {
                 update_no_asset_notice: None,
                 update_notice_id: None,
                 vault_switch_target: None,
-                remove_vault_confirm: None,
                 vault_root: None,
                 file_count: None,
                 main_id: None,
@@ -1667,6 +1662,8 @@ impl App {
                 file_press: None,
                 file_drag: None,
                 file_drag_target: None,
+                file_drag_surface: None,
+                plugin_menu: None,
                 persist_dirty: false,
                 main_size: DEFAULT_WINDOW_SIZE,
                 os_positions: HashMap::new(),
@@ -1832,6 +1829,7 @@ impl App {
             task
         };
         self.notify_table_switch();
+        self.notify_open_files();
         // 选区差分广播：任何消息处理后都可能移动了选区（本地操作 / 协作远端 / 开合切换表格）
         table_actions::broadcast_selection(self);
         self.chain_autosave_timer(task)
@@ -1846,6 +1844,16 @@ impl App {
         }
         self.plugins.on_table_changed(current.as_deref());
         self.table_event_path = current;
+    }
+
+    /// 打开文件集合变化（打开 / 切换 / 关闭笔记 / 表格 / 画布）即广播 `editor:open.changed`。
+    fn notify_open_files(&mut self) {
+        let current = space_actions::open_file_paths(self);
+        if current == self.open_files_event {
+            return;
+        }
+        self.open_files_event = current;
+        self.plugins.on_open_files_changed();
     }
 
     /// 内容变更后补排自动保存定时器（单定时器链）：期限被输入推迟时按剩余时长续排，否则到期触发保存。
@@ -1924,7 +1932,6 @@ impl App {
                     takeover_task
                 }
             }
-            Message::PickVault => self.gate(PendingAfterFlush::PickVault),
             Message::VaultPicked(Ok(path)) => {
                 // 系统目录选择器选定：记为最近切仓目标，过 gate（选择器打开期间的输入先落盘）
                 self.vault_switch_target = Some(path.clone());
@@ -1938,19 +1945,6 @@ impl App {
                 // 记录目标：flush 回放时据此丢弃被更晚点选取代的切换
                 self.vault_switch_target = Some(path.clone());
                 self.gate(PendingAfterFlush::SelectVault { path, from_boot })
-            }
-            Message::ToggleDir(rel) => {
-                let expanded = &mut self.ui.file_explorer_expanded;
-                if let Some(i) = expanded.iter().position(|d| d == &rel) {
-                    expanded.remove(i);
-                } else {
-                    expanded.push(rel.clone());
-                }
-                self.schedule_persist();
-                if !self.children.contains_key(&rel) {
-                    return self.load_children(&rel);
-                }
-                Task::none()
             }
             Message::ChildrenLoaded(dir, gen, Ok(entries)) => {
                 if gen != self.epoch() {
@@ -2267,19 +2261,6 @@ impl App {
                     Task::none()
                 }
             }
-            Message::SetSort(key) => {
-                self.file_sort = key.clone();
-                if matches!(self.repo_kind, RepoKind::Space(_)) {
-                    return space_actions::space_set_sort(self, &key);
-                }
-                let Some(root) = self.vault.root().ok() else { return Task::none() };
-                let patch = serde_json::json!({ "fileExplorerSort": key });
-                let gen = self.epoch();
-                Task::perform(
-                    async move { vault::patch_vault_config(&root, &patch).map(|_| ()) },
-                    move |result| Message::ConfigSaved(gen, result),
-                )
-            }
             Message::ConfigSaved(gen, Err(e)) => {
                 if gen != self.epoch() {
                     return Task::none();
@@ -2299,14 +2280,6 @@ impl App {
                 }
                 Task::none()
             }
-            Message::DuplicateEntry(rel, is_dir) => {
-                self.dismiss_popup();
-                self.duplicate_entry(&rel, is_dir)
-            }
-            Message::PromptToggle(rel) => {
-                self.dismiss_popup();
-                self.toggle_prompt_note(&rel)
-            }
             Message::PromptNotesLoaded(gen, result) => {
                 if gen == self.epoch() {
                     match result {
@@ -2317,6 +2290,17 @@ impl App {
                 Task::none()
             }
             Message::ColorPicker(msg) => color_picker_actions::update(self, msg),
+            Message::FolderColorsLoaded(gen, result) => {
+                if gen == self.epoch() {
+                    match result {
+                        Ok(colors) => self.folder_colors = colors,
+                        Err(e) => {
+                            self.notify(NoticeLevel::Error, format!("保存文件夹颜色失败：{e}"))
+                        }
+                    }
+                }
+                Task::none()
+            }
             Message::CollabColorSet(color) => {
                 self.global.collab_color = Some(color);
                 // 换色后立即刷新文档 / 表格在场身份，对端不必等到下一次选区事件
@@ -2324,16 +2308,6 @@ impl App {
                 space_actions::table_collab_sync(self);
                 space_actions::canvas_collab_sync(self);
                 self.save_global_now();
-                Task::none()
-            }
-            Message::FolderColorSet(rel, color) => self.set_folder_color(&rel, color),
-            Message::FolderColorsLoaded(gen, result) => {
-                if gen == self.epoch() {
-                    match result {
-                        Ok(colors) => self.folder_colors = colors,
-                        Err(e) => self.notify(NoticeLevel::Error, format!("保存文件夹颜色失败：{e}")),
-                    }
-                }
                 Task::none()
             }
             Message::VaultMetaLoaded(gen, Ok((config, prompts, colors))) => {
@@ -2375,48 +2349,23 @@ impl App {
                 task
             }
             Message::Noop => Task::none(),
-            Message::FileRowPress { window, rel, is_dir } => {
-                // 拖拽会话 / 弹层 / 重命名输入期间不接纳新候选
-                if self.file_drag.is_none() && self.popup.is_none() && self.rename.is_none() {
-                    self.file_press = Some(FilePress { window, rel, is_dir });
-                }
-                Task::none()
+            Message::PluginDragStart { request_id, plugin_id, params } => {
+                self.start_plugin_drag(request_id, plugin_id, params)
             }
-            Message::FileDragEnter { drop, rel, is_dir } => {
-                let Some(d) = self.file_drag.as_ref() else { return Task::none() };
-                let verdict = file_drop_check(&d.from, d.is_dir, &rel, is_dir);
-                // 折叠目录悬停 = 自动展开候选（离开或换目标即作废；根落点区不是行，不参与）
-                let collapsed =
-                    !rel.is_empty() && !self.ui.file_explorer_expanded.iter().any(|e| e == &rel);
-                let Some(d) = self.file_drag.as_mut() else { return Task::none() };
-                d.hover = Some(drop);
-                match verdict {
-                    Ok(()) => {
-                        self.file_drag_target = Some(rel.clone());
-                        d.reject = None;
-                        d.spring = collapsed.then(|| (rel, Instant::now()));
-                    }
-                    Err(why) => {
-                        self.file_drag_target = None;
-                        d.reject = Some((rel, why));
-                        d.spring = None;
-                    }
-                }
-                Task::none()
+            Message::PluginDragHover { request_id, params } => {
+                self.plugin_drag_hover(request_id, params)
             }
-            Message::FileDragExit { drop } => {
-                // 只认当前悬停区的离开：相邻区（两侧缝 / 下方落点区）同指仓库根，
-                // 按目标清除会被后到的离开误清
-                let Some(d) = self.file_drag.as_mut() else { return Task::none() };
-                if d.hover.as_ref() != Some(&drop) {
-                    return Task::none();
-                }
-                d.hover = None;
-                d.reject = None;
-                d.spring = None;
-                self.file_drag_target = None;
-                Task::none()
+            Message::PluginDragEnd { request_id, params } => {
+                self.end_plugin_drag(request_id, params)
             }
+            Message::PluginMenuOpen { request_id, plugin_id, params } => {
+                self.open_plugin_menu(request_id, plugin_id, params)
+            }
+            Message::PluginMenuClosed { selected } => self.close_plugin_menu(selected),
+            Message::PluginPickColor { request_id, params } => {
+                self.plugin_pick_color(request_id, params)
+            }
+            Message::PluginPickVault { request_id } => self.plugin_pick_vault(request_id),
             Message::CopyCode(code) => {
                 self.notify(NoticeLevel::Success, "已复制代码");
                 iced::clipboard::write(code)
@@ -3202,8 +3151,8 @@ impl App {
                 }
                 // Esc 作用域 = 事件来源窗口：先取消文件拖拽，再关该窗口弹层，
                 // 再退出接管（接管面内的弹层先于接管退出），再取消属性面板编辑态与行内重命名
-                if self.file_drag.take().is_some() {
-                    self.file_drag_target = None;
+                if self.file_drag.is_some() {
+                    self.cancel_file_drag();
                     self.file_press = None;
                     return Task::none();
                 }
@@ -3346,7 +3295,7 @@ impl App {
                         }
                     } else if matches!(
                         status,
-                        PluginStatus::Stopped | PluginStatus::Failed(_) | PluginStatus::CircuitBroken
+                        PluginStatus::Stopped | PluginStatus::Failed(_)
                     ) {
                         let to_close: Vec<window::Id> = self
                             .plugin_windows
@@ -3356,6 +3305,10 @@ impl App {
                             .collect();
                         for os in to_close {
                             task = task.chain(window::close(os));
+                        }
+                        // 停下的插件不会再发 drag.end：会话留在宿主手里会挡住之后的拖拽
+                        if self.file_drag_surface.as_ref().is_some_and(|(owner, _)| owner == id) {
+                            self.cancel_file_drag();
                         }
                         if let Some((path, _)) = self.pending_doc_open.clone() {
                             if self.pending_doc_plugin(&path).as_deref() == Some(id.as_str()) {
@@ -3648,138 +3601,6 @@ impl App {
                 self.notify(NoticeLevel::Error, format!("统计文件失败：{e}"));
                 Task::none()
             }
-            Message::DraftStart(dir, kind) => {
-                self.dismiss_popup();
-                self.rename = Some(self.rename_state(
-                    RenameTarget::Draft { dir, kind },
-                    String::new(),
-                ));
-                rename_focus_task()
-            }
-            Message::RenameStartFile(rel) => {
-                self.dismiss_popup();
-                // 初值只给主名：后缀不进输入框（提交时按原名补回，见 rename_file_name）
-                self.rename = Some(self.rename_state(
-                    RenameTarget::File(rel.clone()),
-                    layout_view::file_label(&rel),
-                ));
-                rename_focus_task()
-            }
-            Message::RenameStartFolder(dir) => {
-                self.dismiss_popup();
-                let name = dir.rsplit('/').next().unwrap_or(&dir).to_string();
-                self.rename = Some(self.rename_state(RenameTarget::Folder(dir), name));
-                rename_focus_task()
-            }
-            Message::DeleteAsk(rel) => {
-                // 文件删除 = 直接进确认 pane（无标题行确认态）
-                self.popup_pane = 1;
-                self.delete_confirm = Some((rel, false, None));
-                Task::none()
-            }
-            Message::FolderDeleteAsk(rel) => {
-                // 文件夹删除 = 非强制删除先行：空目录直接删；非空返回条目数进确认 pane
-                if matches!(self.repo_kind, RepoKind::Space(_)) {
-                    return space_actions::space_delete_entry(self, &rel, true, false);
-                }
-                let Some(root) = self.vault.root().ok() else { return Task::none() };
-                let gen = self.epoch();
-                let rel_task = rel.clone();
-                Task::perform(
-                    async move { vault::delete_folder(&root, &rel_task, false).map(|r| (r.needs_confirm, r.item_count)) },
-                    move |result| match result {
-                        Ok((false, _)) => Message::OpDone(
-                            gen,
-                            parent_of(&rel),
-                            Ok(rel.clone()),
-                            FollowUp::Deleted { rel, is_dir: true },
-                        ),
-                        Ok((true, n)) => Message::FolderCounted(rel, n),
-                        Err(e) => Message::OpDone(gen, parent_of(&rel), Err(e), FollowUp::None),
-                    },
-                )
-            }
-            Message::FolderCounted(rel, count) => {
-                self.popup_pane = 1;
-                self.delete_confirm = Some((rel, true, Some(count)));
-                Task::none()
-            }
-            Message::DeleteCancel => {
-                self.delete_confirm = None;
-                self.popup_pane = 0;
-                Task::none()
-            }
-            Message::DeleteEntry(rel, is_dir) => {
-                // 删除命中打开中的文件：挂起输入先落盘（防未保存内容被静默清空）
-                let hits = |open: &str| {
-                    if is_dir {
-                        open == rel || open.starts_with(&format!("{rel}/"))
-                    } else {
-                        open == rel
-                    }
-                };
-                if space_actions::open_file_paths(self).iter().any(|f| hits(f)) {
-                    self.gate(PendingAfterFlush::Delete { rel, is_dir })
-                } else {
-                    self.dismiss_popup();
-                    self.delete_confirm = None;
-                    self.delete_entry(&rel, is_dir)
-                }
-            }
-            Message::RevealVaultAt(root) => {
-                reveal_in_file_manager(Path::new(&root), true);
-                Task::none()
-            }
-            Message::RevealEntry { rel, is_dir } => {
-                let Some(root) = self.vault.root().ok() else { return Task::none() };
-                let path = if rel.is_empty() {
-                    root
-                } else {
-                    match vault::safe_join(&root, &rel, false) {
-                        Ok(p) => p,
-                        Err(e) => {
-                            self.notify(NoticeLevel::Error, e);
-                            return Task::none();
-                        }
-                    }
-                };
-                reveal_in_file_manager(&path, is_dir);
-                Task::none()
-            }
-            Message::CopyEntryPath { rel, absolute } => {
-                let text = if absolute {
-                    let Some(root) = self.vault.root().ok() else { return Task::none() };
-                    match vault::safe_join(&root, &rel, false) {
-                        Ok(p) => p.to_string_lossy().into_owned(),
-                        Err(e) => {
-                            self.notify(NoticeLevel::Error, e);
-                            return Task::none();
-                        }
-                    }
-                } else {
-                    rel
-                };
-                self.notify(NoticeLevel::Success, "已复制路径");
-                iced::clipboard::write(text)
-            }
-            Message::FileTreeRefresh => self.refresh_file_tree(),
-            Message::RemoveVaultAsk(root) => {
-                // 进弹层确认 pane（与删除确认同形）：条目留在当前菜单内二段确认
-                self.remove_vault_confirm = Some(root);
-                self.popup_pane = 1;
-                Task::none()
-            }
-            Message::RemoveVaultConfirm(root) => {
-                self.dismiss_popup();
-                self.remove_vault_confirm = None;
-                self.global.remove_vault(&root);
-                self.save_global()
-            }
-            Message::RemoveVaultCancel => {
-                self.remove_vault_confirm = None;
-                self.popup_pane = 0;
-                Task::none()
-            }
             Message::GlobalSaved(Err(e)) => {
                 self.notify(NoticeLevel::Error, format!("最近仓库列表保存失败：{e}"));
                 Task::none()
@@ -3890,58 +3711,6 @@ impl App {
                 self.notify(NoticeLevel::Error, e);
                 Task::none()
             }
-            Message::ExpandAllToggle => {
-                if self.expand_all {
-                    // 收起全部：清空展开集
-                    self.expand_all = false;
-                    self.expand_pending = 0;
-                    self.ui.file_explorer_expanded.clear();
-                    self.schedule_persist();
-                    Task::none()
-                } else {
-                    // 展开全部：从根递归加载（懒加载树逐层补齐）
-                    self.expand_all = true;
-                    self.expand_pending = 1;
-                    self.load_children_for_expand("")
-                }
-            }
-            Message::ExpandChildrenLoaded(dir, gen, Ok(entries)) => {
-                if gen != self.epoch() || !self.expand_all {
-                    return Task::none();
-                }
-                self.expand_pending = self.expand_pending.saturating_sub(1);
-                if !dir.is_empty() && !self.ui.file_explorer_expanded.contains(&dir) {
-                    self.ui.file_explorer_expanded.push(dir.clone());
-                }
-                self.children.insert(dir.clone(), entries.clone());
-                let mut task = Task::none();
-                for child in entries {
-                    let (rel, is_dir) = (child.rel, child.is_dir);
-                    if !is_dir {
-                        continue;
-                    }
-                    // 已缓存目录直接进展开集；未缓存的才下发加载（缓存 ≠ 已展开）
-                    if !self.ui.file_explorer_expanded.contains(&rel) {
-                        self.ui.file_explorer_expanded.push(rel.clone());
-                    }
-                    if !self.children.contains_key(&rel) {
-                        self.expand_pending += 1;
-                        task = task.chain(self.load_children_for_expand(&rel));
-                    }
-                }
-                if self.expand_pending == 0 {
-                    self.schedule_persist();
-                }
-                task
-            }
-            Message::ExpandChildrenLoaded(_, gen, Err(e)) => {
-                if gen != self.epoch() || !self.expand_all {
-                    return Task::none();
-                }
-                self.expand_pending = self.expand_pending.saturating_sub(1);
-                self.notify(NoticeLevel::Error, format!("读取目录失败：{e}"));
-                Task::none()
-            }
             Message::RenamePressInside => {
                 self.rename_press_inside = true;
                 Task::none()
@@ -3989,11 +3758,6 @@ impl App {
                 sizes[gap + 1] = s1;
                 self.apply(LayoutOp::SetLayoutSizes { split_id, sizes })
             }
-            Message::NotImplemented(what) => {
-                self.dismiss_popup();
-                self.notify(NoticeLevel::Info, format!("「{what}」尚未实现"));
-                Task::none()
-            }
             Message::Space(msg) => match msg {
                 // 空间切换走脏拦截（登录恢复在途可能有未落盘输入）；启动自动进入直通
                 SpaceMsg::SelectSpace { server_url, space_id, name, from_boot } => {
@@ -4024,20 +3788,6 @@ impl App {
                 } else {
                     Task::none()
                 }
-            }
-            Message::RemoveSpaceAsk { server_url, space_id } => {
-                self.dismiss_popup();
-                // 只影响本机最近记录：服务端账号空间始终随列表展示，移除无效时明示
-                let in_recents = self
-                    .global
-                    .recent_spaces
-                    .iter()
-                    .any(|s| s.server_url == server_url && s.space_id == space_id);
-                self.global.remove_space(&server_url, &space_id);
-                if !in_recents {
-                    self.notify(NoticeLevel::Info, "该空间来自服务器账号，列表展示不受影响");
-                }
-                self.save_global()
             }
         }
     }
@@ -4070,6 +3820,16 @@ impl App {
 
     /// 收起当前弹层（菜单动作完成后的统一收尾）。
     pub(crate) fn dismiss_popup(&mut self) {
+        // 插件取色器被收起（Esc / 点外点 / 打开别的弹层）= 取消：结果缺省，别让插件一直等
+        if let Some((_, open)) = self.popup.take() {
+            if let layout_view::PopupState::ColorPicker {
+                target: crate::color_picker_actions::ColorTarget::Plugin { request_id, .. },
+                ..
+            } = open.state
+            {
+                crate::color_picker_actions::reply_plugin_color(self, request_id, None);
+            }
+        }
         self.popup = None;
         self.popup_pane = 0;
         // 弹层收起即取消快捷键录制（录制态不得跨弹层存续吃键）
@@ -4495,11 +4255,6 @@ impl App {
             }
             PendingAfterFlush::CloseFileTab(kind) => self.close_file_tab(&kind),
             PendingAfterFlush::OpenLink(href) => self.open_link_inner(href),
-            PendingAfterFlush::Delete { rel, is_dir } => {
-                self.dismiss_popup();
-                self.delete_confirm = None;
-                self.delete_entry(&rel, is_dir)
-            }
             PendingAfterFlush::RenameFile(r) => self.commit_file_rename(r),
             PendingAfterFlush::MoveEntry { from, is_dir, to_dir } => self.move_entry(&from, is_dir, &to_dir),
             PendingAfterFlush::PluginVaultRemove { request_id, path } => {
@@ -4753,8 +4508,6 @@ impl App {
         self.doc_save_error = None;
         self.reset_props();
         self.file_count = None;
-        self.expand_all = false;
-        self.expand_pending = 0;
         self.rename_notice = None;
         // 图片句柄按仓库相对路径缓存：换仓库后同一路径指向别的文件，整表作废
         self.note_images.clear();
@@ -5280,16 +5033,17 @@ impl App {
                 None => Task::none(),
             },
             ui::UiMsg::PopupClose { window } => {
+                // 点外点 / Esc 关掉的插件菜单也要回传「未选中」，否则发起插件等不到收尾
+                let had_plugin_menu = self.plugin_menu.is_some();
                 if self.popup.as_ref().is_some_and(|(w, _)| *w == window) {
-                    self.popup = None;
-                    self.popup_pane = 0;
-                    self.delete_confirm = None;
-                    self.remove_vault_confirm = None;
                     self.table_popup_draft.clear();
-                    // 弹层收起即取消快捷键录制（与 dismiss_popup 同口径）
-                    self.shortcut_recording = None;
+                    // 走统一收尾：插件取色器在这里以「取消」回执，插件不会悬挂
+                    self.dismiss_popup();
                 }
-                Task::none()
+                match had_plugin_menu {
+                    true => self.close_plugin_menu(None),
+                    false => Task::none(),
+                }
             }
             ui::UiMsg::NotifyDismiss(id) => {
                 // 更新通知的 × 等同「跳过」：本次运行不再自动提示该版本
@@ -5933,50 +5687,6 @@ impl App {
         }
     }
 
-    /// 删除文件/文件夹（不可恢复；菜单内已就地确认）。Ok 携带目标相对路径。
-    /// 表格文件随删图片附件目录（按 tableId 划分；读不到 id 跳过，不拦截删除本身）。
-    /// 空间模式：文件直删，文件夹直接落删（needsConfirm 的探测在菜单删除入口，不在此处）。
-    fn delete_entry(&mut self, rel: &str, is_dir: bool) -> Task<Message> {
-        if matches!(self.repo_kind, RepoKind::Space(_)) {
-            // 本入口即「用户已确认」（菜单内二段确认已过）：文件夹直接落删，不再探测
-            return space_actions::space_delete_entry(self, rel, is_dir, true);
-        }
-        let Some(root) = self.vault.root().ok() else { return Task::none() };
-        let gen = self.epoch();
-        let parent = parent_of(rel);
-        let rel_for_task = rel.to_string();
-        let rel_for_follow = rel.to_string();
-        Task::perform(
-            async move {
-                // 删除前读取：附件目录按表 id 定位（文件夹递归收集其下 .atb），文件删掉后无从读取；
-                // 收集在后台线程执行（大文件夹递归解析不阻塞 UI）
-                let rel = rel_for_task.clone();
-                let root_for_scan = root.clone();
-                let attachment_dirs = tokio::task::spawn_blocking(move || vault::table_attachment_dirs(&root_for_scan, &rel, is_dir))
-                    .await
-                    .unwrap_or_default();
-                let result = if is_dir {
-                    vault::delete_folder(&root, &rel_for_task, true).map(|_| rel_for_task)
-                } else {
-                    vault::delete_vault_file(&root, &rel_for_task).map(|_| rel_for_task)
-                };
-                // 图片附件目录随表私有：删除后尽力清理（残留不拦截删除本身）
-                if result.is_ok() {
-                    vault::purge_table_attachments(attachment_dirs);
-                }
-                result
-            },
-            move |result| {
-                Message::OpDone(
-                    gen,
-                    parent,
-                    result,
-                    FollowUp::Deleted { rel: rel_for_follow, is_dir },
-                )
-            },
-        )
-    }
-
     /// 读目录子项（core 的统一过滤语义：隐藏项 / 排除夹 / .tmp 副产物）。
     /// 空间模式 = 整树切片（树未就绪先拉树）。
     fn load_children(&mut self, rel: &str) -> Task<Message> {
@@ -5996,26 +5706,6 @@ impl App {
         Task::perform(
             async move { vault::read_dir_entries(&root, &rel, &exclude) },
             move |result| Message::ChildrenLoaded(rel_for_cb, gen, result),
-        )
-    }
-
-    /// 递归展开用的目录读取（带世代守卫：在途任务不跨仓库落地）。
-    fn load_children_for_expand(&mut self, rel: &str) -> Task<Message> {
-        if matches!(self.repo_kind, RepoKind::Space(_)) {
-            return space_actions::space_load_children_for_expand(self, rel);
-        }
-        let Ok(root) = self.vault.root() else {
-            return Task::none();
-        };
-        let Ok(exclude) = self.vault.exclude_folders() else {
-            return Task::none();
-        };
-        let rel = rel.to_string();
-        let rel_for_cb = rel.clone();
-        let gen = self.epoch();
-        Task::perform(
-            async move { vault::read_dir_entries(&root, &rel, &exclude) },
-            move |result| Message::ExpandChildrenLoaded(rel_for_cb, gen, result),
         )
     }
 
@@ -6045,48 +5735,41 @@ impl App {
         )
     }
 
-    /// 提示词标记注册/注销（读改写原子落盘，回执重读对齐）。
-    fn toggle_prompt_note(&mut self, rel: &str) -> Task<Message> {
+    /// 写文件树排序偏好（本地落仓库配置，空间走服务端配置补丁）。
+    pub(crate) fn save_file_sort(&mut self, sort: String) -> Task<Message> {
         if matches!(self.repo_kind, RepoKind::Space(_)) {
-            return space_actions::space_toggle_prompt_note(self, rel);
+            return space_actions::space_set_sort(self, &sort);
         }
         let Some(root) = self.vault.root().ok() else { return Task::none() };
-        let rel = rel.to_string();
+        let patch = serde_json::json!({ "fileExplorerSort": sort });
         let gen = self.epoch();
         Task::perform(
-            async move {
-                let mut notes = vault::read_prompt_notes_file(&root)?;
-                if let Some(i) = notes.iter().position(|n| n == &rel) {
-                    notes.remove(i);
-                } else {
-                    notes.push(rel.clone());
-                }
-                vault::write_prompt_notes_file(&root, &notes)?;
-                vault::read_prompt_notes_file(&root)
-            },
-            move |result| Message::PromptNotesLoaded(gen, result),
+            async move { vault::patch_vault_config(&root, &patch).map(|_| ()) },
+            move |result| Message::ConfigSaved(gen, result),
         )
     }
 
-    /// 设置/清除文件夹图标颜色（None = 恢复默认即删键；回执重读对齐）。
-    fn set_folder_color(&mut self, rel: &str, color: Option<String>) -> Task<Message> {
+    /// 写整份目录颜色表（本地落侧文件，空间走服务端配置补丁）。
+    fn save_folder_colors(&mut self) -> Task<Message> {
         if matches!(self.repo_kind, RepoKind::Space(_)) {
-            return space_actions::space_set_folder_color(self, rel, color);
+            let colors: serde_json::Map<String, serde_json::Value> = self
+                .folder_colors
+                .iter()
+                .map(|(path, color)| (path.clone(), serde_json::Value::String(color.clone())))
+                .collect();
+            return space_actions::space_patch_config(
+                self,
+                serde_json::json!({ "folderColors": colors }),
+            );
         }
         let Some(root) = self.vault.root().ok() else { return Task::none() };
-        let rel = rel.to_string();
+        let colors: HashMap<String, String> = self.folder_colors.clone();
         let gen = self.epoch();
         let writes = self.vault.writes.clone();
         Task::perform(
             async move {
-                // 读改写在写盘队列执行序内完成：连续换色不会互相覆盖（后提交者胜）
                 writes
                     .bulk(move || {
-                        let mut colors = vault::read_folder_colors_file(&root)?;
-                        match color {
-                            Some(c) => colors.insert(rel, c),
-                            None => colors.remove(&rel),
-                        };
                         vault::write_folder_colors_file(&root, &colors)?;
                         Ok(colors)
                     })
@@ -6096,27 +5779,57 @@ impl App {
         )
     }
 
-    /// 创建同目录副本（文件字节复制 + .atlx/.atb 重生成 id；文件夹递归复制含 id 重生成）。
-    /// 目标名同名自动加序号，实际落点经 OpDone 回传。空间模式 = copy 端点 + id 重建。
-    fn duplicate_entry(&mut self, rel: &str, is_dir: bool) -> Task<Message> {
+    /// 写整份提示词标记表（本地落侧文件，空间走服务端配置补丁）。
+    fn save_prompt_notes(&mut self) -> Task<Message> {
         if matches!(self.repo_kind, RepoKind::Space(_)) {
-            return space_actions::space_duplicate_entry(self, rel, is_dir);
+            let notes: Vec<serde_json::Value> = self
+                .prompt_notes
+                .iter()
+                .map(|path| serde_json::Value::String(path.clone()))
+                .collect();
+            return space_actions::space_patch_config(
+                self,
+                serde_json::json!({ "promptNotes": notes }),
+            );
         }
         let Some(root) = self.vault.root().ok() else { return Task::none() };
+        let notes = self.prompt_notes.clone();
         let gen = self.epoch();
-        let parent = parent_of(rel);
-        let name = rel.rsplit('/').next().unwrap_or(rel).to_string();
-        let rel = rel.to_string();
-        let is_dir_for_task = is_dir;
-        let parent_for_task = parent.clone();
         Task::perform(
             async move {
-                let parent = parent_for_task;
-                if is_dir_for_task {
+                vault::write_prompt_notes_file(&root, &notes)?;
+                vault::read_prompt_notes_file(&root)
+            },
+            move |result| Message::PromptNotesLoaded(gen, result),
+        )
+    }
+
+    /// 插件请求创建副本（`shell.duplicate`）：与本地菜单项走同一条复制链，
+    /// 结果只回填给插件（宿主自己的文件面照常靠 `vault:file.changed` 与插件重取对齐）。
+    pub(crate) fn duplicate_entry_reply(
+        &mut self,
+        request_id: u64,
+        rel: &str,
+        is_dir: bool,
+    ) -> Task<Message> {
+        if matches!(self.repo_kind, RepoKind::Space(_)) {
+            return space_actions::space_duplicate_reply(self, request_id, rel, is_dir);
+        }
+        let Some(root) = self.vault.root().ok() else {
+            self.plugins.resolve_shell_call(request_id, Err("未打开仓库".to_string()));
+            return Task::none();
+        };
+        let gen = self.epoch();
+        let rel = rel.to_string();
+        Task::perform(
+            async move {
+                let parent = parent_of(&rel);
+                let name = rel.rsplit('/').next().unwrap_or(rel.as_str()).to_string();
+                let created = if is_dir {
                     // 副本场景源名必须视为已占用（exclude 传空串），否则首个候选 = 源名自复制
                     let target = dedupe_sibling(&root, &parent, &name, None, "")?;
                     vault::copy_folder(&root, &rel, &full_rel(&parent, &target))?;
-                    Ok(full_rel(&parent, &target))
+                    full_rel(&parent, &target)
                 } else {
                     let (stem, ext) = match name.rfind('.') {
                         Some(0) | None => (name.clone(), String::new()),
@@ -6128,16 +5841,17 @@ impl App {
                     let dst = vault::safe_join(&root, &new_rel, true)?;
                     std::fs::copy(&src, &dst).map_err(|e| format!("复制文件失败：{e}"))?;
                     vault::regenerate_file_id(&dst)?;
-                    Ok(new_rel)
-                }
+                    new_rel
+                };
+                Ok(created)
             },
             move |result| {
-                let follow = match &result {
-                    Ok(rel) => FollowUp::Created { rel: rel.clone() },
-                    Err(_) => FollowUp::None,
-                };
-                Message::OpDone(gen, parent, result, follow)
-            },
+                Message::Plugins(settings_view::plugins::PluginsMsg::ShellDuplicateDone {
+                    request_id,
+                    gen,
+                    result,
+                })
+            }
         )
     }
 
@@ -6177,11 +5891,383 @@ impl App {
         }
         self.ui.file_explorer_expanded.push(dir.clone());
         self.schedule_persist();
+        // 发起拖拽的插件要跟着展开（它自己画树）：推一次「落点已不再是折叠候选」
+        self.publish_drag_state();
         if self.children.contains_key(&dir) {
             Task::none()
         } else {
             self.load_children(&dir)
         }
+    }
+
+    /// 重读文件树（工具条刷新入口；磁盘无监听，外部改动只能靠刷新感知）。
+    pub(crate) fn refresh_file_tree_task(&mut self) -> Task<Message> {
+        self.refresh_file_tree()
+    }
+
+    /// 补齐尚未缓存的目录子项：引用候选走的是这份缓存，
+    /// 新展开的目录不读一次就进不了候选。
+    pub(crate) fn ensure_children_loaded(&mut self, dirs: &[String]) -> Task<Message> {
+        let mut task = Task::none();
+        for dir in dirs {
+            if !self.children.contains_key(dir) {
+                task = task.chain(self.load_children(dir));
+            }
+        }
+        task
+    }
+
+    /// 插件请求打开文件夹选择器把某个文件夹作为仓库（工具条「打开文件夹」入口）。
+    pub(crate) fn plugin_pick_vault(&mut self, request_id: u64) -> Task<Message> {
+        self.plugins.resolve_shell_call(request_id, Ok(serde_json::json!({})));
+        self.gate(PendingAfterFlush::PickVault)
+    }
+
+    /// 插件请求新建一个仓库条目：复用「新建草稿」那条链（同名自动加序号、按类型起空内容、
+    /// 走同一写盘出口），只是名字由插件给出而不是就地输入。
+    pub(crate) fn plugin_create_entry(
+        &mut self,
+        request_id: u64,
+        params: atelyx_core::plugin_runtime::CreateEntryParams,
+    ) -> Task<Message> {
+        // 目录为空串 = 仓库根（插件在根上新建）
+        let dir = if params.dir.is_empty() {
+            String::new()
+        } else {
+            match vault::validate_plugin_path(&params.dir) {
+                Ok(dir) => dir,
+                Err(e) => {
+                    self.plugins.resolve_shell_call(request_id, Err(e));
+                    return Task::none();
+                }
+            }
+        };
+        let kind = match params.kind.as_str() {
+            "note" => DraftKind::Note,
+            "table" => DraftKind::Table,
+            "canvas" => DraftKind::Canvas,
+            "folder" => DraftKind::Folder,
+            extension => DraftKind::Doc {
+                extension: extension.to_string(),
+                label: extension.to_string(),
+            },
+        };
+        let Some(name) = draft_name(&kind, &params.name) else {
+            self.plugins
+                .resolve_shell_call(request_id, Err("条目名不能为空".to_string()));
+            return Task::none();
+        };
+        self.plugins
+            .resolve_shell_call(request_id, Ok(serde_json::json!({})));
+        let target = RenameTarget::Draft { dir, kind };
+        let mut state = self.rename_state(target, name);
+        state.value = params.name.clone();
+        self.rename = Some(state);
+        let task = self.update(Message::LayoutRenameCommit);
+        task
+    }
+
+    /// 插件请求切换容器：按清单里的 id 分派到进入仓库 / 进入空间两条既有链路。
+    pub(crate) fn plugin_switch_container(
+        &mut self,
+        request_id: u64,
+        params: atelyx_core::plugin_runtime::SwitchContainerParams,
+    ) -> Task<Message> {
+        self.plugins.resolve_shell_call(request_id, Ok(serde_json::json!({})));
+        if let Some(root) = params.id.strip_prefix("local:") {
+            return self.update(Message::SelectVault {
+                path: PathBuf::from(root),
+                from_boot: false,
+            });
+        }
+        let Some(rest) = params.id.strip_prefix("space:") else { return Task::none() };
+        let Some((server_url, space_id)) = rest.split_once('#') else { return Task::none() };
+        let name = self
+            .global
+            .recent_spaces
+            .iter()
+            .find(|space| space.server_url == server_url && space.space_id == space_id)
+            .map(|space| space.name.clone())
+            .or_else(|| {
+                self.space_list
+                    .iter()
+                    .find(|space| space.space_id == space_id)
+                    .map(|space| space.name.clone())
+            })
+            .unwrap_or_else(|| space_id.to_string());
+        self.update(Message::Space(crate::SpaceMsg::SelectSpace {
+            server_url: server_url.to_string(),
+            space_id: space_id.to_string(),
+            name,
+            from_boot: false,
+        }))
+    }
+
+    /// 插件请求把容器移出最近列表：只改 global.json 的最近清单，磁盘内容与服务端数据不动。
+    /// 激活中的容器拒绝（切走再移除）；来自账号的空间不进最近清单，只提示不影响列表。
+    pub(crate) fn plugin_remove_container(
+        &mut self,
+        request_id: u64,
+        params: atelyx_core::plugin_runtime::RemoveContainerParams,
+    ) -> Task<Message> {
+        let result = self.remove_container_by_id(&params.id);
+        let reply = match &result {
+            Ok(_) => Ok(serde_json::json!({})),
+            Err(e) => Err(e.clone()),
+        };
+        self.plugins.resolve_shell_call(request_id, reply);
+        match result {
+            Ok(ContainerRemoval::Removed) => {
+                self.save_global_now();
+                Task::none()
+            }
+            Ok(ContainerRemoval::NotListed) => {
+                self.notify(NoticeLevel::Info, "该空间来自服务器账号，列表展示不受影响");
+                Task::none()
+            }
+            Err(e) => {
+                self.notify(NoticeLevel::Error, e);
+                Task::none()
+            }
+        }
+    }
+
+    /// 按容器 id 移出最近列表；失败给可读原因（激活中 / 未知 id / 不是容器）。
+    fn remove_container_by_id(&mut self, id: &str) -> Result<ContainerRemoval, String> {
+        if let Some(root) = id.strip_prefix("local:") {
+            let active = self.vault_root.as_ref().is_some_and(|r| r.to_string_lossy() == root);
+            if active {
+                return Err("当前仓库已激活，请先切换到其他容器再移除".to_string());
+            }
+            if !self.global.recent_vaults.iter().any(|v| v.root == root) {
+                return Err("该仓库不在最近列表".to_string());
+            }
+            self.global.remove_vault(root);
+            return Ok(ContainerRemoval::Removed);
+        }
+        let Some(rest) = id.strip_prefix("space:") else {
+            return Err(format!("未知的容器标识：{id}"));
+        };
+        let Some((server_url, space_id)) = rest.split_once('#') else {
+            return Err(format!("未知的容器标识：{id}"));
+        };
+        let active = matches!(
+            &self.repo_kind,
+            RepoKind::Space(session)
+                if session.server_url == server_url && session.space_id == space_id
+        );
+        if active {
+            return Err("当前空间已激活，请先切换到其他容器再移除".to_string());
+        }
+        if !self
+            .global
+            .recent_spaces
+            .iter()
+            .any(|space| space.server_url == server_url && space.space_id == space_id)
+        {
+            return Ok(ContainerRemoval::NotListed);
+        }
+        self.global.remove_space(server_url, space_id);
+        Ok(ContainerRemoval::Removed)
+    }
+
+    /// 插件请求取色器：宿主弹自己的取色器，用户选定的颜色经回执交回插件。
+    /// 回执只在提交 / 取消时给一次（取色器走值通道），开弹层不算已应答。
+    pub(crate) fn plugin_pick_color(
+        &mut self,
+        request_id: u64,
+        params: atelyx_core::plugin_runtime::PickColorParams,
+    ) -> Task<Message> {
+        let window = self.main_id.unwrap_or_else(iced::window::Id::unique);
+        Task::done(Message::ColorPicker(crate::color_picker_actions::ColorPickerMsg::OpenPlugin {
+            window,
+            request_id,
+            initial: params.initial,
+        }))
+    }
+
+    /// 插件请求弹出宿主菜单：条目来自插件，渲染 / 定位 / 外点关闭沿用宿主弹层。
+    fn open_plugin_menu(
+        &mut self,
+        request_id: u64,
+        plugin_id: String,
+        params: atelyx_core::plugin_runtime::MenuOpenParams,
+    ) -> Task<Message> {
+        let window = self.main_id.unwrap_or_else(iced::window::Id::unique);
+        let point = self.cursor_for(window);
+        self.plugin_menu = Some((plugin_id, params));
+        self.popup = Some((
+            window,
+            layout_view::PopupOpen {
+                point,
+                flip_y: None,
+                state: layout_view::PopupState::PluginMenu,
+                min_width: 0.0,
+            },
+        ));
+        self.popup_pane = 0;
+        self.plugins.resolve_ui_call(request_id, Ok(()));
+        Task::none()
+    }
+
+    /// 宿主菜单关闭：把选中项交回发起插件（点外点 / Esc = 未选中）。
+    fn close_plugin_menu(&mut self, selected: Option<String>) -> Task<Message> {
+        let Some((plugin_id, _)) = self.plugin_menu.take() else { return Task::none() };
+        self.dismiss_popup();
+        self.plugins.notify_menu_closed(&plugin_id, selected);
+        Task::none()
+    }
+
+    /// 插件发起一次文件拖拽：ghost、落点判定与自动展开沿用壳内同一套会话。
+    /// `surface_id` 记下来，落点状态按面回推给发起插件（驱动行高亮与拒绝提示）。
+    fn start_plugin_drag(
+        &mut self,
+        request_id: u64,
+        plugin_id: String,
+        params: atelyx_core::plugin_runtime::DragStartParams,
+    ) -> Task<Message> {
+        let surface_owner = (plugin_id, params.surface_id.clone());
+        if self.file_drag.is_some() {
+            self.plugins
+                .resolve_ui_call(request_id, Err("已有拖拽会话进行中".to_string()));
+            return Task::none();
+        }
+        let rel = match vault::validate_plugin_path(&params.item.path) {
+            Ok(rel) if !rel.is_empty() => rel,
+            Ok(_) => {
+                self.plugins
+                    .resolve_ui_call(request_id, Err("仓库根不能拖动".to_string()));
+                return Task::none();
+            }
+            Err(e) => {
+                self.plugins.resolve_ui_call(request_id, Err(e));
+                return Task::none();
+            }
+        };
+        let label = params
+            .item
+            .label
+            .filter(|label| !label.trim().is_empty())
+            .unwrap_or_else(|| rel.rsplit('/').next().unwrap_or(&rel).to_string());
+        let window = self.main_id.unwrap_or_else(iced::window::Id::unique);
+        let point = self.cursor_for(window);
+        let current = self
+            .os_positions
+            .get(&window)
+            .map(|w| Point::new(w.x + point.x, w.y + point.y))
+            .unwrap_or(point);
+        self.file_drag = Some(FileDrag {
+            from: rel,
+            is_dir: params.item.is_dir,
+            label,
+            current,
+            cursor_window: window,
+            reject: None,
+            spring: None,
+            hover: None,
+        });
+        self.file_drag_target = None;
+        self.file_drag_surface = Some(surface_owner.clone());
+        self.plugins.resolve_ui_call(request_id, Ok(()));
+        Task::none()
+    }
+
+    /// 插件面上报落点候选：能不能落由宿主按同一套规则复核（与壳内行悬停同一条判定）。
+    fn plugin_drag_hover(
+        &mut self,
+        request_id: u64,
+        params: atelyx_core::plugin_runtime::DragHoverParams,
+    ) -> Task<Message> {
+        let Some(d) = self.file_drag.as_ref() else {
+            self.plugins.resolve_ui_call(request_id, Ok(()));
+            return Task::none();
+        };
+        let Some(target) = params.target.clone() else {
+            self.clear_plugin_drag_hover();
+            self.plugins.resolve_ui_call(request_id, Ok(()));
+            return Task::none();
+        };
+        let target = match vault::validate_plugin_path(&target) {
+            Ok(target) => target,
+            Err(e) => {
+                self.plugins.resolve_ui_call(request_id, Err(e));
+                return Task::none();
+            }
+        };
+        let verdict = file_drop_check(&d.from, d.is_dir, &target, params.is_dir);
+        // 折叠目录悬停 = 自动展开候选（与壳内行悬停同一条：离开或换目标即作废）
+        let collapsed = !target.is_empty()
+            && !self.ui.file_explorer_expanded.iter().any(|e| e == &target);
+        if let Some(d) = self.file_drag.as_mut() {
+            match verdict {
+                Ok(()) => {
+                    self.file_drag_target = Some(target.clone());
+                    d.reject = None;
+                    d.spring = collapsed.then(|| (target, Instant::now()));
+                }
+                Err(why) => {
+                    self.file_drag_target = None;
+                    d.reject = Some((target, why));
+                    d.spring = None;
+                }
+            }
+        }
+        self.plugins.resolve_ui_call(request_id, Ok(()));
+        self.publish_drag_state();
+        Task::none()
+    }
+
+    /// 插件结束拖拽（`cancelled` = 不落位）：与壳内释放走同一条落位链。
+    fn end_plugin_drag(
+        &mut self,
+        request_id: u64,
+        params: atelyx_core::plugin_runtime::DragEndParams,
+    ) -> Task<Message> {
+        self.plugins.resolve_ui_call(request_id, Ok(()));
+        self.file_drag_surface = None;
+        let Some(d) = self.file_drag.take() else { return Task::none() };
+        if params.cancelled {
+            self.file_drag_target = None;
+            return Task::none();
+        }
+        self.resolve_file_drop(d)
+    }
+
+    /// 清除插件面的落点状态（指针离开行）。
+    fn clear_plugin_drag_hover(&mut self) {
+        if let Some(d) = self.file_drag.as_mut() {
+            d.hover = None;
+            d.reject = None;
+            d.spring = None;
+        }
+        self.file_drag_target = None;
+        self.publish_drag_state();
+    }
+
+    /// 取消当前文件拖拽会话（Esc、发起面消失、发起插件停下）：先推「无落点」让插件清高亮，再收会话。
+    pub(crate) fn cancel_file_drag(&mut self) {
+        self.file_drag = None;
+        self.file_drag_target = None;
+        self.publish_drag_state();
+        self.file_drag_surface = None;
+    }
+
+    /// 把当前落点状态推给发起拖拽的插件（驱动行高亮、拒绝色与等待展开提示）。
+    pub(crate) fn publish_drag_state(&self) {
+        let Some((plugin_id, _)) = self.file_drag_surface.clone() else { return };
+        let (target, reject, springing) = match self.file_drag.as_ref() {
+            None => (None, None, false),
+            Some(d) => (
+                self.file_drag_target.clone(),
+                d.reject.as_ref().map(|(_, why)| reject_text(*why).to_string()),
+                d.spring.is_some(),
+            ),
+        };
+        self.plugins.notify_plugin_event(
+            &plugin_id,
+            "drag:state",
+            &atelyx_core::plugin_runtime::DragStateParams { target, reject, springing },
+        );
     }
 
     /// 拖拽释放落点 → 移动（挂起输入先落盘：引用同步会代写打开中的笔记，防回写覆盖）。

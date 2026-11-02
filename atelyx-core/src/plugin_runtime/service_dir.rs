@@ -789,7 +789,7 @@ impl PluginRuntime {
 
     /// 登记一条在途调用（只登记，不下发）：闸门保证提供者正在收尾时不再领新调用。
     /// 返回 `callId`、应答通道与提供者实例（下发由调用方在闸门外写对方 stdin）。
-    fn register_service_call(
+    pub(crate) fn register_service_call(
         &self,
         caller: &Arc<Instance>,
         provider: &str,

@@ -26,12 +26,6 @@ pub(crate) const BUILTIN_PLUGINS: &[BuiltinPlugin] = &[
         views: &[BuiltinView { id: "table", label: "表格", icon: "table" }],
     },
     BuiltinPlugin {
-        id: "atelyx.files",
-        label: "文件",
-        icon: "files",
-        views: &[BuiltinView { id: "files", label: "文件", icon: "files" }],
-    },
-    BuiltinPlugin {
         id: "atelyx.inspector",
         label: "属性",
         icon: "info",
@@ -49,7 +43,6 @@ pub(crate) const BUILTIN_PLUGINS: &[BuiltinPlugin] = &[
 const RENDERERS: &[(&str, ViewProvider)] = &[
     ("canvas", crate::canvas_view::canvas_view),
     ("table", crate::table_view::table_view),
-    ("files", crate::layout_view::files_view),
     ("inspector", crate::layout_view::inspector_view),
 ];
 

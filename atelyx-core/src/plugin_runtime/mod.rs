@@ -9,7 +9,6 @@ mod ai_tools;
 mod capability;
 mod child_process;
 mod fs;
-mod frame_region;
 mod http;
 mod http_stream;
 mod install;
@@ -92,6 +91,12 @@ pub use atelyx_plugin_protocol::method::{
     DocOpenParams, DocOpenResult, DocSaveParams, VaultTagsResult, FilesResult, VaultFileEntry,
     SpaceContainerKind, SpaceMember, SpaceMemberRole, SpaceMembersResult, SpacePeer, SpacePeerFile,
     SpaceRoomResult, SpaceSelfIdentity,
+    DragEndParams, DragHoverParams, DragItem, DragStartParams, DragStateParams,
+    ContainerEntry, CreateEntryParams, CreateEntryResult, MenuClosedParams, MenuItem,
+    AbsolutePathResult, DirListResult, DocTypeEntry, DuplicateParams, MenuOpenParams,
+    PickColorParams, PickColorResult, RemoveContainerParams, RevealParams, SwitchContainerParams,
+    UiDirEntry,
+    VaultUiParams, VaultUiPatch, VaultUiResult, VaultUiState,
     AI_CORE_PLUGIN,
 };
 
@@ -100,12 +105,8 @@ pub use atelyx_plugin_protocol::method::{
 pub enum PluginStatus {
     /// 未启用或已停用。
     Stopped,
-    /// 进程在跑。
+    /// 实例在跑。
     Running,
-    /// 崩溃后退避重启中。
-    Restarting,
-    /// 窗口内崩溃超限，已熔断（需手动重试）。
-    CircuitBroken,
     /// 启动失败 / 握手失败 / 不可装载（附可读原因）。
     Failed(String),
 }
@@ -386,6 +387,46 @@ pub enum HostRequest {
     SpaceOpenMenu { plugin_id: String, request_id: u64 },
     /// 插件请求打开宿主的「协作设置」页（`space.openSettings`）。
     SpaceOpenSettings { plugin_id: String, request_id: u64 },
+    /// 插件请求读随仓库走的界面状态与（可选）一个目录的条目（`vault.ui`）。
+    VaultUi { plugin_id: String, request_id: u64, params: method::VaultUiParams },
+    /// 插件请求按键写仓库界面状态（`vault.updateUi`），回执 = 写后的完整快照。
+    VaultUiWrite { plugin_id: String, request_id: u64, patch: method::VaultUiPatch },
+    /// 插件发起一次文件拖拽会话（`drag.start`）；ghost、落点判定与自动展开都在壳。
+    DragStart { plugin_id: String, request_id: u64, params: method::DragStartParams },
+    /// 插件面上报本面内的落点候选（`drag.hover`）。
+    DragHover { plugin_id: String, request_id: u64, params: method::DragHoverParams },
+    /// 插件结束拖拽会话（`drag.end`）。
+    DragEnd { plugin_id: String, request_id: u64, params: method::DragEndParams },
+    /// 插件请求打开一个宿主菜单（`menu.open`）；选中结果经 `host:menu.closed` 回传。
+    MenuOpen { plugin_id: String, request_id: u64, params: method::MenuOpenParams },
+    /// 插件请求新建一个仓库条目（`vault.create`）：宿主起空内容并落盘。
+    VaultCreate { plugin_id: String, request_id: u64, params: method::CreateEntryParams },
+    /// 插件请求切换当前容器（`vault.switchContainer`）。
+    VaultSwitchContainer {
+        plugin_id: String,
+        request_id: u64,
+        params: method::SwitchContainerParams,
+    },
+    /// 插件请求把一个容器移出最近列表（`vault.removeContainer`）。
+    VaultRemoveContainer {
+        plugin_id: String,
+        request_id: u64,
+        params: method::RemoveContainerParams,
+    },
+    /// 插件请求打开宿主的取色器（`shell.pickColor`）。
+    PickColor { plugin_id: String, request_id: u64, params: method::PickColorParams },
+    /// 插件请求选一个文件夹并作为仓库打开（`shell.pickVault`）。
+    PickVault { plugin_id: String, request_id: u64 },
+    /// 插件请求在系统文件管理器中显示一个条目（`shell.reveal`）。
+    Reveal { plugin_id: String, request_id: u64, params: method::RevealParams },
+    /// 插件请求一个仓库内条目的绝对路径（`shell.absolutePath`）。
+    AbsolutePath { plugin_id: String, request_id: u64, path: String },
+    /// 插件请求在同目录创建一个副本（`shell.duplicate`），回执 = 落定的新路径。
+    Duplicate { plugin_id: String, request_id: u64, params: method::DuplicateParams },
+    /// 插件请求全仓库的目录清单（`vault.listDirs`）。
+    VaultListDirs { plugin_id: String, request_id: u64 },
+    /// 插件请求宿主重读文件树（`vault.refreshTree`）。
+    VaultRefreshTree { plugin_id: String, request_id: u64 },
 }
 
 /// 插件列表项（设置页渲染用）。
@@ -510,7 +551,6 @@ impl PluginRuntime {
     /// 建立运行时并显式给出宿主产品版本（`minHostVersion` 校验与握手自报都用它）。
     pub fn with_host_version(root: PathBuf, host_version: impl Into<String>) -> Arc<Self> {
         layout::sweep_temp(&root);
-        frame_region::sweep_stale_regions();
         let (events, _) = tokio::sync::broadcast::channel(256);
         let (ai_events, ai_events_rx) = tokio::sync::mpsc::unbounded_channel();
         let (host_requests, host_requests_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -683,6 +723,29 @@ impl PluginRuntime {
                     window_id,
                 }
             }
+            HostRequest::DragStart { plugin_id, params, .. } => HostRequest::DragStart {
+                plugin_id,
+                request_id,
+                params,
+            },
+            HostRequest::DragHover { plugin_id, params, .. } => HostRequest::DragHover {
+                plugin_id,
+                request_id,
+                params,
+            },
+            HostRequest::DragEnd { plugin_id, params, .. } => HostRequest::DragEnd {
+                plugin_id,
+                request_id,
+                params,
+            },
+            HostRequest::MenuOpen { plugin_id, params, .. } => HostRequest::MenuOpen {
+                plugin_id,
+                request_id,
+                params,
+            },
+            HostRequest::PickVault { plugin_id, .. } => {
+                HostRequest::PickVault { plugin_id, request_id }
+            }
             HostRequest::Dialog { .. } => return Err("界面服务请求形态不符".to_string()),
             HostRequest::ChatSend { .. }
             | HostRequest::ChatStop { .. }
@@ -746,7 +809,18 @@ impl PluginRuntime {
             | HostRequest::SpaceRoom { .. }
             | HostRequest::SpaceMembers { .. }
             | HostRequest::SpaceOpenMenu { .. }
-            | HostRequest::SpaceOpenSettings { .. } => {
+            | HostRequest::SpaceOpenSettings { .. }
+            | HostRequest::VaultUi { .. }
+            | HostRequest::VaultUiWrite { .. }
+            | HostRequest::VaultCreate { .. }
+            | HostRequest::VaultSwitchContainer { .. }
+            | HostRequest::VaultRemoveContainer { .. }
+            | HostRequest::PickColor { .. }
+            | HostRequest::Reveal { .. }
+            | HostRequest::AbsolutePath { .. }
+            | HostRequest::Duplicate { .. }
+            | HostRequest::VaultListDirs { .. }
+            | HostRequest::VaultRefreshTree { .. } => {
                 return Err("界面服务请求形态不符".to_string())
             }
         };
@@ -1093,6 +1167,48 @@ impl PluginRuntime {
                 plugin_id,
                 request_id,
             },
+            HostRequest::VaultUi { plugin_id, params, .. } => HostRequest::VaultUi {
+                plugin_id,
+                request_id,
+                params,
+            },
+            HostRequest::VaultUiWrite { plugin_id, patch, .. } => HostRequest::VaultUiWrite {
+                plugin_id,
+                request_id,
+                patch,
+            },
+            HostRequest::VaultCreate { plugin_id, params, .. } => HostRequest::VaultCreate {
+                plugin_id,
+                request_id,
+                params,
+            },
+            HostRequest::VaultSwitchContainer { plugin_id, params, .. } => {
+                HostRequest::VaultSwitchContainer { plugin_id, request_id, params }
+            }
+            HostRequest::VaultRemoveContainer { plugin_id, params, .. } => {
+                HostRequest::VaultRemoveContainer { plugin_id, request_id, params }
+            }
+            // 取色器回执带选中的颜色，与其余壳侧服务同一条（值）通道
+            HostRequest::PickColor { plugin_id, params, .. } => HostRequest::PickColor {
+                plugin_id,
+                request_id,
+                params,
+            },
+            HostRequest::Reveal { plugin_id, params, .. } => {
+                HostRequest::Reveal { plugin_id, request_id, params }
+            }
+            HostRequest::AbsolutePath { plugin_id, path, .. } => {
+                HostRequest::AbsolutePath { plugin_id, request_id, path }
+            }
+            HostRequest::Duplicate { plugin_id, params, .. } => {
+                HostRequest::Duplicate { plugin_id, request_id, params }
+            }
+            HostRequest::VaultListDirs { plugin_id, .. } => {
+                HostRequest::VaultListDirs { plugin_id, request_id }
+            }
+            HostRequest::VaultRefreshTree { plugin_id, .. } => {
+                HostRequest::VaultRefreshTree { plugin_id, request_id }
+            }
             _ => return Err("壳侧服务请求形态不符".to_string()),
         };
         self.shell_calls
@@ -1162,6 +1278,66 @@ impl PluginRuntime {
     }
 
     // ---------- 界面服务请求入口（instance 调用） ----------
+
+    /// 插件发起文件拖拽（`drag.start`）：ghost、落点与自动展开都在壳。
+    pub(crate) fn open_drag_start(
+        self: &Arc<Self>,
+        plugin_id: &str,
+        params: method::DragStartParams,
+    ) -> Result<std::sync::mpsc::Receiver<Result<(), String>>, String> {
+        self.open_ui_call(HostRequest::DragStart {
+            plugin_id: plugin_id.to_string(),
+            request_id: 0,
+            params,
+        })
+    }
+
+    /// 插件面上报拖拽落点（`drag.hover`）。
+    pub(crate) fn open_drag_hover(
+        self: &Arc<Self>,
+        plugin_id: &str,
+        params: method::DragHoverParams,
+    ) -> Result<std::sync::mpsc::Receiver<Result<(), String>>, String> {
+        self.open_ui_call(HostRequest::DragHover {
+            plugin_id: plugin_id.to_string(),
+            request_id: 0,
+            params,
+        })
+    }
+
+    /// 插件结束拖拽（`drag.end`）。
+    pub(crate) fn open_drag_end(
+        self: &Arc<Self>,
+        plugin_id: &str,
+        params: method::DragEndParams,
+    ) -> Result<std::sync::mpsc::Receiver<Result<(), String>>, String> {
+        self.open_ui_call(HostRequest::DragEnd {
+            plugin_id: plugin_id.to_string(),
+            request_id: 0,
+            params,
+        })
+    }
+
+    /// 插件请求在指针处弹出宿主菜单（`menu.open`）。
+    pub(crate) fn open_menu_at_pointer(
+        self: &Arc<Self>,
+        plugin_id: &str,
+        params: method::MenuOpenParams,
+    ) -> Result<std::sync::mpsc::Receiver<Result<(), String>>, String> {
+        self.open_ui_call(HostRequest::MenuOpen {
+            plugin_id: plugin_id.to_string(),
+            request_id: 0,
+            params,
+        })
+    }
+
+    /// 插件请求选文件夹并作为仓库打开（`shell.pickVault`）。
+    pub(crate) fn open_pick_vault(self: &Arc<Self>, plugin_id: &str) -> Result<std::sync::mpsc::Receiver<Result<(), String>>, String> {
+        self.open_ui_call(HostRequest::PickVault {
+            plugin_id: plugin_id.to_string(),
+            request_id: 0,
+        })
+    }
 
     /// 插件请求接管当前聚焦窗口（`surface_id` 须为已注册的贡献 id：接管面与该贡献共享同一棵提交树）。
     fn open_takeover(
@@ -1645,11 +1821,10 @@ impl PluginRuntime {
         Ok(())
     }
 
-    /// 熔断后手动重试：清零崩溃计数、恢复启用标记后重启（重试即用户意图启用）。
+    /// 启动失败后手动重试：恢复启用标记后重启（重试即用户意图启用）。
     pub fn retry(self: &Arc<Self>, id: &str) -> Result<(), String> {
         let (manifest, dir) = self.resolve(id)?;
         let instance = self.instance_for(&manifest, &dir);
-        instance.reset_crash_history();
         layout::set_enabled(&self.root, id, true)?;
         self.mark_enabled(id, true);
         instance.start()
@@ -1760,14 +1935,6 @@ impl PluginRuntime {
         self.process_host.shutdown_children();
     }
 
-    /// 退避重启回调（由实例的崩溃线程调用）。
-    pub(crate) fn restart_if_current(self: &Arc<Self>, id: &str, generation: u64) {
-        let instance = self.instances.lock().unwrap().get(id).cloned();
-        if let Some(instance) = instance {
-            let _ = instance.start_if_current(generation);
-        }
-    }
-
     /// 切仓库容器（本地仓库 ↔ 协作空间 / 换仓库）后的插件侧处置：
     /// 声明 `keepMountedOnVaultSwitch` 的插件保持挂载，订阅了 `vault:switch` 的收到新容器身份；
     /// 未声明的插件由宿主重载（停进程再起）——它拿的旧仓库上下文已失效，新进程订阅时由缓存补发。
@@ -1874,6 +2041,11 @@ impl PluginRuntime {
     /// 广播最近打开清单变化（记录 / 剔除）：不带条数，订阅方重取 `recent.list`。
     pub fn on_recent_changed(self: &Arc<Self>) {
         self.broadcast_event(event::name::RECENT_CHANGED, &serde_json::json!({}));
+    }
+
+    /// 广播当前打开的文件集合变化（打开 / 切换 / 关闭）：订阅方重取 `editor.openFiles`。
+    pub fn on_open_files_changed(self: &Arc<Self>) {
+        self.broadcast_event(event::name::EDITOR_OPEN_CHANGED, &serde_json::json!({}));
     }
 
     /// 广播历史版本集合变化（新版本记入侧文件 / 回滚）：壳已丢弃聚合缓存，订阅方重取。
@@ -1997,6 +2169,30 @@ impl PluginRuntime {
         }
     }
 
+    /// 告知发起插件它弹出的宿主菜单已关闭（`selected` 缺省 = 未选中；未在跑时静默丢弃）。
+    pub fn notify_menu_closed(&self, plugin_id: &str, selected: Option<String>) {
+        let instance = self.instances.lock().unwrap().get(plugin_id).cloned();
+        if let Some(instance) = instance {
+            instance.notify_menu_closed(selected);
+        }
+    }
+
+    /// 只投给一个插件的领域事件（拖拽落点状态这类「谁发起谁收」的通知）。
+    pub fn notify_plugin_event(
+        self: &Arc<Self>,
+        plugin_id: &str,
+        name: &str,
+        payload: &impl Serialize,
+    ) {
+        let Some(instance) = self.instances.lock().unwrap().get(plugin_id).cloned() else {
+            return;
+        };
+        if instance.status() != PluginStatus::Running {
+            return;
+        }
+        instance.notify_domain_event(name, payload);
+    }
+
     /// 最近一次 `table:changed` 广播的表格路径（无打开表格 = `None`）。
     pub(crate) fn current_table_path(&self) -> Option<String> {
         self.current_table.lock().unwrap().clone()
@@ -2102,6 +2298,22 @@ fn container_identity(payload: &VaultSwitchPayload) -> String {
 fn request_plugin_id(request: &HostRequest) -> &str {
     match request {
         HostRequest::Dialog { plugin_id, .. }
+        | HostRequest::VaultUi { plugin_id, .. }
+        | HostRequest::VaultUiWrite { plugin_id, .. }
+        | HostRequest::DragStart { plugin_id, .. }
+        | HostRequest::DragHover { plugin_id, .. }
+        | HostRequest::DragEnd { plugin_id, .. }
+        | HostRequest::MenuOpen { plugin_id, .. }
+        | HostRequest::VaultCreate { plugin_id, .. }
+        | HostRequest::VaultSwitchContainer { plugin_id, .. }
+        | HostRequest::VaultRemoveContainer { plugin_id, .. }
+        | HostRequest::PickColor { plugin_id, .. }
+        | HostRequest::PickVault { plugin_id, .. }
+        | HostRequest::Reveal { plugin_id, .. }
+        | HostRequest::AbsolutePath { plugin_id, .. }
+        | HostRequest::Duplicate { plugin_id, .. }
+        | HostRequest::VaultListDirs { plugin_id, .. }
+        | HostRequest::VaultRefreshTree { plugin_id, .. }
         | HostRequest::Takeover { plugin_id, .. }
         | HostRequest::OpenWindow { plugin_id, .. }
         | HostRequest::CloseWindow { plugin_id, .. }

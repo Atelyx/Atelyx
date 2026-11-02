@@ -16,19 +16,19 @@ pub struct Manifest {
     pub version: String,
     /// 协议版本，必须等于宿主的 [`crate::API_VERSION`]。
     pub api_version: u32,
-    /// 同进程动态库 ABI 版本；给出即按 cdylib 装载，缺省仍是进程插件。
+    /// 同进程动态库 ABI 版本，必须等于宿主的 `ABI_VERSION`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub abi_version: Option<u32>,
     /// 最低宿主版本（语义化版本，如 `0.4.0`）；缺省 = 不限。宿主低于它即拒绝装载。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_host_version: Option<String>,
     pub entry: Entry,
-    /// 能力声明清单：用于向用户公示与审计，不拦截调用——插件是原生进程，闸门拦住的是
-    /// 守规矩的插件。宿主据此标出「用到但未声明」的调用。
+    /// 能力声明清单：用于向用户公示与审计，不拦截调用——插件与宿主同进程、持同等权限，
+    /// 闸门拦住的是守规矩的插件。宿主据此标出「用到但未声明」的调用。
     pub permissions: Vec<Permission>,
-    /// 进程型插件的单实例约束（多窗口共享同一宿主运行时全局单例）。
+    /// 单实例约束（多窗口共享同一宿主运行时全局单例）。
     pub singleton: bool,
-    /// 切换仓库容器（本地 ↔ 空间 / 换仓库）时保持挂载；false = 宿主重载插件进程。
+    /// 切换仓库容器（本地 ↔ 空间 / 换仓库）时保持挂载；false = 宿主停掉实例后按新容器重启。
     pub keep_mounted_on_vault_switch: bool,
     pub doc_type_registrations: Vec<DocTypeRegistration>,
 }
