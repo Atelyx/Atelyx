@@ -30,9 +30,9 @@ mod plugin_frame;
 mod plugin_paint;
 mod plugin_view;
 mod properties_view;
-mod recent_view;
+mod recent_files;
 mod registry;
-mod repohistory_view;
+mod repo_history;
 mod settings_view;
 mod space_actions;
 mod table_actions;
@@ -420,10 +420,8 @@ enum Message {
     HistoryRecorded(u64, Option<String>),
     /// 最近打开条目失效剔除（确认缺失的 (vaultKey, file) 对）。
     RecentPruned(Vec<(String, String)>),
-    /// 仓库历史聚合落地（gen 守卫）。
-    RepoHistoryLoaded(u64, Result<repohistory_view::RepoHistory, String>),
-    /// 仓库历史面板刷新（失效重取）。
-    RepoHistoryRefresh,
+    /// 仓库历史聚合落地（容器世代 + 聚合世代双重守卫）。
+    RepoHistoryLoaded(u64, u64, Result<repo_history::RepoHistory, String>),
     /// AI 对话面板消息（会话 / run 事件 / 编排）。
     Chat(chat_actions::ChatMsg),
     /// 无操作（后台任务回执无界面变化时的统一落点）。
@@ -924,7 +922,8 @@ pub enum SaveReason {
 /// flush 放行后继续的动作（挂起输入已落盘才可执行，否则动作会丢失未保存内容或在途写打到旧路径）。
 #[derive(Debug, Clone)]
 enum PendingAfterFlush {
-    OpenFile(String),
+    /// 打开仓库内文件；`reveal` = 打开后是否让对应视图显示（false = 只打开、不动布局）。
+    OpenFile { path: String, reveal: bool },
     PickVault,
     /// 从最近仓库列表进入指定仓库（from_boot 区分启动进入与运行中切换）。
     SelectVault { path: PathBuf, from_boot: bool },
@@ -1378,8 +1377,9 @@ pub struct App {
     pub doc_selection: Option<(usize, usize)>,
     /// 插件最后提交并被宿主接受的正文（三方合并的共同祖先；远端合入不回写它）。
     pub doc_base: String,
-    /// 文档插件尚未就绪时挂起的打开请求（启动自动恢复 / 用户抢先点开）。
-    pending_doc_open: Option<String>,
+    /// 文档插件尚未就绪时挂起的打开请求（启动自动恢复 / 用户抢先点开）；
+    /// 连同「是否让对应视图显示」的语义一起挂起，就绪后按原样重试。
+    pending_doc_open: Option<(String, bool)>,
     /// 笔记 / 画布 / 插件图片句柄缓存（key = src 原文；切仓库清空，在途与失败集合防重复发起）。
     pub note_images: markdown_view::ImageHandles,
     /// 图片像素尺寸（key 同 `note_images`）：自绘画布按 contain / cover 摆放贴片要用原图长宽。
@@ -1438,10 +1438,12 @@ pub struct App {
     pub history_confirm: Option<u64>,
     /// 回滚已发起、等待保存链稳定落盘的一次性标志（成功回执消费并提示，失败/切容器清除）。
     pub(crate) history_restore_pending: bool,
-    /// 仓库历史面板缓存（None = 未加载/已失效；Err = 加载失败待手动刷新）。
-    pub repo_history: Option<Result<repohistory_view::RepoHistory, String>>,
+    /// 仓库历史聚合缓存（None = 未加载/已失效；Err = 加载失败待重试）。`history.*` 查询共用这份。
+    pub repo_history: Option<Result<repo_history::RepoHistory, String>>,
     /// 仓库历史聚合在途。
     pub repo_history_loading: bool,
+    /// 聚合缓存世代：每次丢弃缓存 +1，在途扫描按它作废（不把失效前的聚合写回）。
+    pub repo_history_gen: u64,
     /// 最近打开条目存在性校验的上次发起时刻（视图展示期节流）。
     recent_checked_at: Option<Instant>,
     /// 设置-编辑器：重建内部链接会话态。
@@ -1700,6 +1702,7 @@ impl App {
                 history_confirm: None,
                 repo_history: None,
                 repo_history_loading: false,
+                repo_history_gen: 0,
                 recent_checked_at: None,
                 rebuild_links: settings_view::editor::RebuildLinksState::Idle,
                 history_kind: atelyx_core::history::HistoryKind::Note,
@@ -1967,7 +1970,9 @@ impl App {
                 self.notify(NoticeLevel::Error, format!("读取目录失败：{e}"));
                 Task::none()
             }
-            Message::OpenFile(rel) => self.gate(PendingAfterFlush::OpenFile(rel)),
+            Message::OpenFile(rel) => {
+                self.gate(PendingAfterFlush::OpenFile { path: rel, reveal: true })
+            }
             Message::Save => {
                 // Ctrl+S：单元格编辑先提交，文档 / 表格 / 画布各自手动保存（无打开内容 = 提示）
                 table_actions::commit_edit(self);
@@ -2210,8 +2215,9 @@ impl App {
                 if let Some(e) = err {
                     self.notify(NoticeLevel::Error, format!("历史版本记录失败：{e}"));
                 }
-                // 侧文件有新版本：面板聚合缓存失效，下个 tick 重取（展示中）
-                self.repo_history = None;
+                // 侧文件有新版本：聚合缓存失效并通知订阅了历史分组的插件重取
+                repo_history::invalidate(self);
+                self.plugins.on_history_changed();
                 if gen == self.epoch() {
                     self.reload_history()
                 } else {
@@ -2220,12 +2226,13 @@ impl App {
             }
             Message::RecentPruned(gone) => {
                 if !gone.is_empty() {
-                    recent_view::prune(self, &gone);
+                    recent_files::prune(self, &gone);
                 }
                 Task::none()
             }
-            Message::RepoHistoryLoaded(gen, result) => repohistory_view::on_loaded(self, gen, result),
-            Message::RepoHistoryRefresh => repohistory_view::refresh(self),
+            Message::RepoHistoryLoaded(epoch, gen, result) => {
+                repo_history::on_loaded(self, epoch, gen, result)
+            }
             Message::OpenLink(href, form) => self.open_link(&href, form),
             Message::ImageLoaded(gen, key, result) => {
                 self.note_images_inflight.remove(&key);
@@ -2749,9 +2756,8 @@ impl App {
                 self.apply(LayoutOp::DeleteScene { id })
             }
             Message::PersistTick => {
-                // 主页面板懒加载搭载：历史面板缓存失效时聚合，最近打开条目按节流校验存在性
-                let lazy = repohistory_view::tick(self)
-                    .chain(recent_view::tick(self))
+                // 主页面板懒加载搭载：最近打开条目按节流校验存在性
+                let lazy = recent_files::tick(self)
                     .chain(space_actions::members_tick(self))
                     // 绘制期同步取走的帧不走通知：投影可能落后，心跳里补一次
                     // （图片载入与键位声明读的是投影缓存）
@@ -3347,10 +3353,12 @@ impl App {
                         }
                         // 插件窗口 / 接管面 / 打开中的文档实例随重启重新就绪
                         plugin_actions::resync_surfaces_on_running(self, id);
-                        if let Some(path) = self.pending_doc_open.clone() {
+                        if let Some((path, reveal)) = self.pending_doc_open.clone() {
                             if self.pending_doc_plugin(&path).as_deref() == Some(id.as_str()) {
                                 self.pending_doc_open = None;
-                                task = task.chain(self.gate(PendingAfterFlush::OpenFile(path)));
+                                task = task.chain(
+                                    self.gate(PendingAfterFlush::OpenFile { path, reveal }),
+                                );
                             }
                         }
                     } else if matches!(
@@ -3366,7 +3374,7 @@ impl App {
                         for os in to_close {
                             task = task.chain(window::close(os));
                         }
-                        if let Some(path) = self.pending_doc_open.clone() {
+                        if let Some((path, _)) = self.pending_doc_open.clone() {
                             if self.pending_doc_plugin(&path).as_deref() == Some(id.as_str()) {
                                 self.pending_doc_open = None;
                                 self.notify(
@@ -3888,7 +3896,7 @@ impl App {
                     next = next.chain(self.load_vault_meta());
                 }
                 if let Some(rel) = reload_note {
-                    next = next.chain(self.open_file(&rel));
+                    next = next.chain(self.open_file(&rel, true));
                 }
                 next
             }
@@ -4485,7 +4493,7 @@ impl App {
     /// flush 放行后的动作执行体（gate 保证挂起输入已落盘）。
     fn proceed(&mut self, pending: PendingAfterFlush) -> Task<Message> {
         match pending {
-            PendingAfterFlush::OpenFile(rel) => self.open_file(&rel),
+            PendingAfterFlush::OpenFile { path, reveal } => self.open_file(&path, reveal),
             PendingAfterFlush::PickVault => self.start_pick_vault(),
             PendingAfterFlush::SelectVault { path, from_boot } => {
                 // 已被更晚的点选取代：丢弃挂起的这次切换（避免落到非最后点击的仓库）
@@ -4656,7 +4664,8 @@ impl App {
 
     /// 打开文件（脏拦截已由 gate 处理）：按扩展名分流（.atlx → 画布、.atb → 表格、
     /// 插件注册的领域扩展名 → 插件文档面），复位只读并清掉上一文件的解析产物。
-    pub(crate) fn open_file(&mut self, rel: &str) -> Task<Message> {
+    /// `reveal` = 是否让对应视图显示：false 只打开文件，不在布局里新增或切换视图标签。
+    pub(crate) fn open_file(&mut self, rel: &str, reveal: bool) -> Task<Message> {
         if rel.ends_with(".atlx") {
             return canvas_actions::open_canvas(self, rel);
         }
@@ -4670,12 +4679,12 @@ impl App {
                 .iter()
                 .any(|info| info.registration.extension.eq_ignore_ascii_case(extension))
             {
-                return plugin_actions::open_doc(self, rel);
+                return plugin_actions::open_doc(self, rel, reveal);
             }
         }
         if rel.ends_with(".md") {
             // 文档插件可能仍在后台装载（启动自动恢复先于它就绪）：挂起一次，就绪后重试。
-            self.pending_doc_open = Some(rel.to_string());
+            self.pending_doc_open = Some((rel.to_string(), reveal));
             self.notify(
                 NoticeLevel::Info,
                 "文档插件正在启动，稍后打开".to_string(),
@@ -4790,11 +4799,11 @@ impl App {
         self.history_expanded = None;
         self.history_preview = None;
         self.history_confirm = None;
-        // 仓库历史面板缓存随切仓失效（进面板后重取）
-        self.repo_history = None;
+        // 聚合缓存随切仓失效（在途扫描按世代作废，插件重挂后重取）
+        repo_history::invalidate(self);
         self.repo_history_loading = false;
-        // 等聚合落地的按日查询随切仓作废：逐个回绝，插件调用不会悬着
-        settings_view::plugins::fail_pending_history_day(self, "仓库已切换");
+        // 等聚合落地的查询随切仓作废：逐个回绝，插件调用不会悬着
+        settings_view::plugins::fail_pending_history(self, "仓库已切换");
         self.rebuild_links = settings_view::editor::RebuildLinksState::Idle;
         // 展开集按仓库独立：切走时记忆当前仓库的集合，切回时恢复；全新进入（无记忆）保底展开根行
         self.ui.file_explorer_expanded = match self.expanded_by_vault.get(&path) {
@@ -4823,7 +4832,7 @@ impl App {
         if from_boot && self.global.auto_restore {
             if let Some(rel) = self.ui.last_note_file.clone() {
                 // 笔记由插件文档面承载：走同一套打开路由（插件未就绪时挂起）
-                task = task.chain(self.open_file(&rel));
+                task = task.chain(self.open_file(&rel, true));
             }
             if let Some(rel) = self.ui.last_table_file.clone() {
                 task = task.chain(table_actions::load_table(self, &rel));
@@ -6428,7 +6437,7 @@ impl App {
         match self.resolve_note_path(&path) {
             Some(rel) => {
                 self.notify(NoticeLevel::Success, "打开链接");
-                self.open_file(&rel)
+                self.open_file(&rel, true)
             }
             None => {
                 self.notify(NoticeLevel::Error, format!("未找到笔记：{path}"));

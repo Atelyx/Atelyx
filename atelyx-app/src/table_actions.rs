@@ -732,7 +732,7 @@ fn on_loaded(app: &mut App, gen: u64, file: String, result: Result<TableFile, St
         Ok(table) => {
             app.table = Some(tv::TableSession::new(file.clone(), table));
             // 内容载入成功即登记最近打开（本地与空间模式同链回执）
-            crate::recent_view::record(app, &file, crate::recent_view::RecentKind::Table);
+            crate::recent_files::record(app, &file, atelyx_core::plugin_runtime::RecentKind::Table);
             // 空间模式在场跟随：名册与协作者据此看到本端正在编辑该表格
             if matches!(app.repo_kind, crate::RepoKind::Space(_)) {
                 space_actions::send_presence(app);

@@ -829,7 +829,7 @@ pub fn enter_space(app: &mut App, session: SpaceSession, from_boot: bool) -> Tas
     }
     if from_boot && app.global.auto_restore {
         if let Some(rel) = app.ui.last_note_file.clone() {
-            task = task.chain(app.open_file(&rel));
+            task = task.chain(app.open_file(&rel, true));
         }
         if let Some(rel) = app.ui.last_table_file.clone() {
             task = task.chain(space_load_table(app, &rel));
@@ -877,11 +877,11 @@ fn clear_session_state(app: &mut App) {
     app.history_confirm = None;
     // 未落盘的回滚提示随容器切换作废（旧保存链回执不再消费）
     app.history_restore_pending = false;
-    // 仓库历史面板缓存随容器切换失效（进面板后重取）
-    app.repo_history = None;
+    // 聚合缓存随容器切换失效（在途扫描按世代作废，插件重挂后重取）
+    crate::repo_history::invalidate(app);
     app.repo_history_loading = false;
-    // 等聚合落地的按日查询随容器作废：逐个回绝，插件调用不会悬着
-    crate::settings_view::plugins::fail_pending_history_day(app, "仓库已切换");
+    // 等聚合落地的查询随容器作废：逐个回绝，插件调用不会悬着
+    crate::settings_view::plugins::fail_pending_history(app, "仓库已切换");
     app.rebuild_links = crate::settings_view::editor::RebuildLinksState::Idle;
     app.remote_cursors.clear();
     // 仓库级配置基线与 AI 编辑态随容器切换清空（VaultMetaLoaded 落地后回填），
@@ -993,8 +993,9 @@ pub fn handle(app: &mut App, msg: SpaceMsg) -> Task<Message> {
                 // 历史为尽力而为侧车：失败提示但不阻塞正文链（文案由发起方按失败点拼装）
                 app.notify(NoticeLevel::Warning, e);
             }
-            // 侧文件有新版本：面板聚合缓存失效，下个 tick 重取（展示中）
-            app.repo_history = None;
+            // 侧文件有新版本：聚合缓存失效并通知订阅了历史分组的插件重取
+            crate::repo_history::invalidate(app);
+            app.plugins.on_history_changed();
             Task::none()
         }
         SpaceMsg::CanvasRestored { gen, rel, result } => {
@@ -1002,15 +1003,16 @@ pub fn handle(app: &mut App, msg: SpaceMsg) -> Task<Message> {
             if gen != app.epoch() {
                 return Task::none();
             }
+            // 回滚记下的 restore 版本不走 HistoryRecorded：聚合缓存与订阅方都在这里失效
+            crate::repo_history::invalidate(app);
+            app.plugins.on_history_changed();
             match result {
                 Err(e) => {
                     app.notify(NoticeLevel::Warning, e);
-                    app.repo_history = None;
                     Task::none()
                 }
                 Ok(()) => {
                     app.notify(NoticeLevel::Success, "已回滚");
-                    app.repo_history = None;
                     // 快照直写不经会话链：仍打开的画布须按服务端事实重读，否则界面与 `saved` 基线停在回滚前
                     if app.ui.last_canvas_file.as_deref() == Some(rel.as_str()) {
                         space_load_canvas(app, &rel)

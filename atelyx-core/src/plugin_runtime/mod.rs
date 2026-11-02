@@ -73,7 +73,9 @@ pub use atelyx_plugin_protocol::method::{
     EditorReplaceParams, EditorSelection,
     CalendarAddParams, CalendarIdParams, CalendarItem, CalendarListResult, CalendarUpdateParams,
     CollabMetaEntry, CollabMetaGetParams, CollabMetaPatchParams, CollabMetaResult, DayActivity,
-    HistoryActivityResult, HistoryDayEntry, HistoryDayParams, HistoryDayResult, HistoryOpenParams,
+    HistoryActivityResult, HistoryDayEntry, HistoryDayParams, HistoryDayResult, HistoryFileGroup,
+    HistoryGroupsParams, HistoryGroupsResult, HistoryOpenParams, RecentEntry, RecentKind,
+    RecentListResult,
     DocRenameParams,
     ChatEvent, ChatEventParams, ChatHistoryParams, ChatHistoryResult,
     ChatRenameParams, ChatSendParams, ChatSessionParams, ChatSessionSummary, ChatSessionWire,
@@ -332,8 +334,9 @@ pub enum HostRequest {
     EditorOpenFiles { plugin_id: String, request_id: u64 },
     /// 插件请求用给定文本替换当前选区（空串 = 删除选区；写入经笔记同一套保存链）。
     EditorReplaceSelection { plugin_id: String, request_id: u64, text: String },
-    /// 插件请求让宿主打开一个仓库内文件（按扩展名分流视图）。
-    EditorOpenFile { plugin_id: String, request_id: u64, path: String },
+    /// 插件请求让宿主打开一个仓库内文件（按扩展名分流视图）。`reveal` = 是否让对应视图显示
+    /// （false = 只打开文件，不动布局；已有对应视图照常显示当前文件）。
+    EditorOpenFile { plugin_id: String, request_id: u64, path: String, reveal: bool },
     /// 插件请求全局编辑偏好（软换行 / 页面内标题 / 正文宽度）。
     EditorPrefs { plugin_id: String, request_id: u64 },
     /// 插件请求打开一个文档会话（宿主读盘并建立会话，回执 = 正文与可写性）。
@@ -366,6 +369,10 @@ pub enum HostRequest {
     HistoryOpen { plugin_id: String, request_id: u64, params: method::HistoryOpenParams },
     /// 插件请求按天聚合的仓库活动（只有本地仓库有本地历史侧文件）。
     HistoryActivity { plugin_id: String, request_id: u64 },
+    /// 插件请求当前容器的最近打开清单（真源在壳的 `ui-state`）。
+    RecentList { plugin_id: String, request_id: u64 },
+    /// 插件请求全仓库按文件分组的版本聚合（`refresh` = 丢弃宿主缓存后重扫）。
+    HistoryGroups { plugin_id: String, request_id: u64, params: method::HistoryGroupsParams },
 }
 
 /// 插件列表项（设置页渲染用）。
@@ -718,8 +725,10 @@ impl PluginRuntime {
             | HostRequest::DocRename { .. }
             | HostRequest::VaultTags { .. }
             | HostRequest::HistoryDay { .. }
+            | HostRequest::HistoryGroups { .. }
             | HostRequest::HistoryOpen { .. }
-            | HostRequest::HistoryActivity { .. } => {
+            | HostRequest::HistoryActivity { .. }
+            | HostRequest::RecentList { .. } => {
                 return Err("界面服务请求形态不符".to_string())
             }
         };
@@ -980,11 +989,9 @@ impl PluginRuntime {
                     text,
                 }
             }
-            HostRequest::EditorOpenFile { plugin_id, path, .. } => HostRequest::EditorOpenFile {
-                plugin_id,
-                request_id,
-                path,
-            },
+            HostRequest::EditorOpenFile { plugin_id, path, reveal, .. } => {
+                HostRequest::EditorOpenFile { plugin_id, request_id, path, reveal }
+            }
             HostRequest::EditorPrefs { plugin_id, .. } => HostRequest::EditorPrefs {
                 plugin_id,
                 request_id,
@@ -1036,6 +1043,15 @@ impl PluginRuntime {
                 params,
             },
             HostRequest::HistoryActivity { plugin_id, .. } => HostRequest::HistoryActivity {
+                plugin_id,
+                request_id,
+            },
+            HostRequest::HistoryGroups { plugin_id, params, .. } => HostRequest::HistoryGroups {
+                plugin_id,
+                request_id,
+                params,
+            },
+            HostRequest::RecentList { plugin_id, .. } => HostRequest::RecentList {
                 plugin_id,
                 request_id,
             },
@@ -1802,6 +1818,16 @@ impl PluginRuntime {
         self.broadcast_event(event::name::SPACE_META_CHANGED, &payload);
     }
 
+    /// 广播最近打开清单变化（记录 / 剔除）：不带条数，订阅方重取 `recent.list`。
+    pub fn on_recent_changed(self: &Arc<Self>) {
+        self.broadcast_event(event::name::RECENT_CHANGED, &serde_json::json!({}));
+    }
+
+    /// 广播历史版本集合变化（新版本记入侧文件 / 回滚）：壳已丢弃聚合缓存，订阅方重取。
+    pub fn on_history_changed(self: &Arc<Self>) {
+        self.broadcast_event(event::name::HISTORY_CHANGED, &serde_json::json!({}));
+    }
+
     /// 最近一次切容器的 payload（迟到订阅 `vault:switch` 时补发）。
     pub(crate) fn current_vault_switch(&self) -> Option<VaultSwitchPayload> {
         self.last_vault_switch.lock().unwrap().clone()
@@ -2085,8 +2111,10 @@ fn request_plugin_id(request: &HostRequest) -> &str {
         | HostRequest::DocRename { plugin_id, .. }
         | HostRequest::VaultTags { plugin_id, .. }
         | HostRequest::HistoryDay { plugin_id, .. }
+        | HostRequest::HistoryGroups { plugin_id, .. }
         | HostRequest::HistoryOpen { plugin_id, .. }
-        | HostRequest::HistoryActivity { plugin_id, .. } => plugin_id,
+        | HostRequest::HistoryActivity { plugin_id, .. }
+        | HostRequest::RecentList { plugin_id, .. } => plugin_id,
     }
 }
 

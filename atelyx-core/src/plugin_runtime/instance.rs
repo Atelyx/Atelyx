@@ -1399,11 +1399,12 @@ impl Instance {
                     request_id: 0,
                 },
                 method::editor::OPEN_FILE => {
-                    let p: method::PathParams = parse(params).map_err(|e| e.to_string())?;
+                    let p: method::EditorOpenFileParams = parse(params).map_err(|e| e.to_string())?;
                     HostRequest::EditorOpenFile {
                         plugin_id: self.id.clone(),
                         request_id: 0,
                         path: p.path,
+                        reveal: p.reveal,
                     }
                 }
                 method::editor::PREFS => HostRequest::EditorPrefs {
@@ -1504,6 +1505,18 @@ impl Instance {
                         params: p,
                     }
                 }
+                method::history::GROUPS => {
+                    let p: method::HistoryGroupsParams = parse(params).map_err(|e| e.to_string())?;
+                    HostRequest::HistoryGroups {
+                        plugin_id: self.id.clone(),
+                        request_id: 0,
+                        params: p,
+                    }
+                }
+                method::recent::LIST => HostRequest::RecentList {
+                    plugin_id: self.id.clone(),
+                    request_id: 0,
+                },
                 _ => return Err("未知宿主服务请求".to_string()),
             };
             runtime.open_shell_call(request)
@@ -2710,7 +2723,9 @@ fn is_shell_method(method_name: &str) -> bool {
             | method::doc::RENAME
             | method::history::ACTIVITY
             | method::history::DAY
+            | method::history::GROUPS
             | method::history::OPEN
+            | method::recent::LIST
     )
 }
 

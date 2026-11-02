@@ -17,7 +17,8 @@ use atelyx_core::plugin_runtime::{
     ClipboardImage, CollabMetaGetParams, CollabMetaPatchParams, CollabMetaResult, CollabPeer,
     CollabPeersResult, CollabSendParams, CollabSendQos, CollabSendResult, DayActivity,
     DialogKind, DialogRequest, FileChangeKind, HistoryActivityResult, HistoryDayParams,
-    HistoryOpenParams, HostRequest, ImageInfoResult, InstallOutcome, MeasureBatchParams,
+    HistoryGroupsParams, HistoryOpenParams, HostRequest, ImageInfoResult, InstallOutcome,
+    MeasureBatchParams,
     MeasureBatchResult, NotificationLevel, Permission, PluginEvent, PluginRuntime, PluginStatus,
     DocAwarenessParams, DocEditParams, DocOpenParams, DocRenameParams, DocSaveParams,
     PluginSummary, SetTrayItemsParams, VaultTagsResult, MAX_VAULT_BINARY_BYTES, PLATFORM_PLUGIN,
@@ -141,10 +142,27 @@ pub struct PluginsState {
     pub log_error: Option<String>,
     /// 清空日志的二段确认。
     pub log_clear_ask: bool,
-    /// 等仓库历史聚合落地的按日查询（请求 id, 自纪元天数）：聚合落地或容器切换时结算。
-    pub pending_history_day: Vec<(u64, i64)>,
-    /// 等仓库历史聚合落地的活动统计（请求 id，协作空间口径）。
-    pub pending_history_activity: Vec<u64>,
+    /// 等历史聚合落地的查询：聚合落地或容器切换时统一结算。
+    pub pending_history: Vec<PendingHistory>,
+}
+
+/// 等历史聚合落地的查询（同一个聚合缓存驱动，结算与回绝都按它逐条回填）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingHistory {
+    /// 全库版本分组（`history.groups`）。
+    Groups(u64),
+    /// 某一天的版本记录（`history.day`）：请求 id + 自纪元天数。
+    Day(u64, i64),
+    /// 按天活动统计（`history.activity`，协作空间口径）。
+    Activity(u64),
+}
+
+impl PendingHistory {
+    pub fn request_id(&self) -> u64 {
+        match self {
+            PendingHistory::Groups(id) | PendingHistory::Day(id, _) | PendingHistory::Activity(id) => *id,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -271,8 +289,8 @@ pub enum PluginsMsg {
     EditorOpenFiles { request_id: u64 },
     /// 用给定文本替换当前选区（空串 = 删除选区）。
     EditorReplaceSelection { request_id: u64, text: String },
-    /// 让宿主打开一个仓库内文件（按扩展名分流视图）。
-    EditorOpenFile { request_id: u64, path: String },
+    /// 让宿主打开一个仓库内文件（按扩展名分流视图；`reveal` = 是否让对应视图显示）。
+    EditorOpenFile { request_id: u64, path: String, reveal: bool },
     /// 全局编辑偏好（软换行 / 页面内标题 / 正文宽度）。
     EditorPrefs { request_id: u64 },
     /// 打开文档：宿主读盘并建立会话，回执 = 正文与可写性。
@@ -304,8 +322,12 @@ pub enum PluginsMsg {
     HistoryActivityDone { request_id: u64, result: Result<serde_json::Value, String> },
     /// 某一天的仓库历史版本（`history.day`）：缓存在手即答，否则并入聚合后再回填。
     HistoryDay { request_id: u64, params: HistoryDayParams },
+    /// 全仓库版本分组（`history.groups`）：缓存在手即答，否则并入聚合后再回填。
+    HistoryGroups { request_id: u64, params: HistoryGroupsParams },
     /// 打开某文件的仓库历史弹层（`history.open`，在聚焦的工作区窗口打开；回执 = 已受理）。
     HistoryOpen { request_id: u64, params: HistoryOpenParams },
+    /// 当前容器的最近打开清单（`recent.list`）。
+    RecentList { request_id: u64 },
     /// 协作空间团队元数据（仅在协作空间可用；写入只改给出的键）。
     CollabMetaGet { request_id: u64, params: CollabMetaGetParams },
     CollabMetaPatch { request_id: u64, params: CollabMetaPatchParams },
@@ -526,8 +548,8 @@ pub fn host_requests_stream(spec: &RuntimeSpec) -> impl iced::futures::Stream<It
                 HostRequest::EditorReplaceSelection { request_id, text, .. } => {
                     Message::Plugins(PluginsMsg::EditorReplaceSelection { request_id, text })
                 }
-                HostRequest::EditorOpenFile { request_id, path, .. } => {
-                    Message::Plugins(PluginsMsg::EditorOpenFile { request_id, path })
+                HostRequest::EditorOpenFile { request_id, path, reveal, .. } => {
+                    Message::Plugins(PluginsMsg::EditorOpenFile { request_id, path, reveal })
                 }
                 HostRequest::EditorPrefs { request_id, .. } => {
                     Message::Plugins(PluginsMsg::EditorPrefs { request_id })
@@ -564,6 +586,12 @@ pub fn host_requests_stream(spec: &RuntimeSpec) -> impl iced::futures::Stream<It
                 }
                 HostRequest::HistoryDay { request_id, params, .. } => {
                     Message::Plugins(PluginsMsg::HistoryDay { request_id, params })
+                }
+                HostRequest::HistoryGroups { request_id, params, .. } => {
+                    Message::Plugins(PluginsMsg::HistoryGroups { request_id, params })
+                }
+                HostRequest::RecentList { request_id, .. } => {
+                    Message::Plugins(PluginsMsg::RecentList { request_id })
                 }
                 HostRequest::HistoryOpen { request_id, params, .. } => {
                     Message::Plugins(PluginsMsg::HistoryOpen { request_id, params })
@@ -1277,7 +1305,7 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
             let refresh = refresh_after_vault_change(app, &change);
             app.plugins.resolve_shell_call(request_id, result);
             match reload {
-                Some(path) => refresh.chain(app.open_file(&path)),
+                Some(path) => refresh.chain(app.open_file(&path, true)),
                 None => refresh,
             }
         }
@@ -1369,14 +1397,14 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
             let result = app.editor_replace_selection(text).map(|_| serde_json::json!({}));
             resolve_vault(app, request_id, result)
         }
-        PluginsMsg::EditorOpenFile { request_id, path } => {
+        PluginsMsg::EditorOpenFile { request_id, path, reveal } => {
             let rel = match plugin_path(Some(&path)) {
                 Ok(rel) => rel,
                 Err(e) => return resolve_vault(app, request_id, Err(e)),
             };
             app.plugins.resolve_shell_call(request_id, Ok(serde_json::json!({})));
             // 打开走脏拦截：未落盘输入先 flush 再换文件（与文件树单击同一通道）
-            app.gate(crate::PendingAfterFlush::OpenFile(rel))
+            app.gate(crate::PendingAfterFlush::OpenFile { path: rel, reveal })
         }
         PluginsMsg::DocOpen { request_id, params } => {
             crate::doc_session::open(app, request_id, params)
@@ -1437,19 +1465,19 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
             }
             if let Some(cached) = &app.repo_history {
                 let result = match cached {
-                    Ok(history) => crate::repohistory_view::activity_json(&history.timestamps),
+                    Ok(history) => crate::repo_history::activity_json(&history.timestamps),
                     Err(e) => Err(format!("历史聚合失败：{e}")),
                 };
                 return resolve_vault(app, request_id, result);
             }
-            if !crate::repohistory_view::container_ready(app) {
+            if !crate::repo_history::container_ready(app) {
                 return resolve_vault(app, request_id, Err("未打开仓库".into()));
             }
-            app.plugins_state.pending_history_activity.push(request_id);
+            app.plugins_state.pending_history.push(PendingHistory::Activity(request_id));
             if app.repo_history_loading {
                 return Task::none();
             }
-            crate::repohistory_view::load(app)
+            crate::repo_history::load(app)
         }
         PluginsMsg::HistoryActivityDone { request_id, result } => {
             resolve_vault(app, request_id, result)
@@ -1461,28 +1489,37 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
             // 聚合缓存在手即答；缺失则挂起并等下一次落地回填（未在途才发起）
             if let Some(cached) = &app.repo_history {
                 let result = match cached {
-                    Ok(history) => crate::repohistory_view::history_day_json(
-                        crate::repohistory_view::day_entries(&history.groups, day),
+                    Ok(history) => crate::repo_history::history_day_json(
+                        crate::repo_history::day_entries(&history.groups, day),
                     ),
                     Err(e) => Err(format!("历史聚合失败：{e}")),
                 };
                 return resolve_vault(app, request_id, result);
             }
-            if !crate::repohistory_view::container_ready(app) {
+            if !crate::repo_history::container_ready(app) {
                 return resolve_vault(app, request_id, Err("未打开仓库".into()));
             }
-            app.plugins_state.pending_history_day.push((request_id, day));
+            app.plugins_state.pending_history.push(PendingHistory::Day(request_id, day));
             if app.repo_history_loading {
                 return Task::none();
             }
-            crate::repohistory_view::load(app)
+            crate::repo_history::load(app)
+        }
+        PluginsMsg::HistoryGroups { request_id, params } => {
+            crate::repo_history::request_groups(app, request_id, params)
+        }
+        PluginsMsg::RecentList { request_id } => {
+            let list = crate::recent_files::list_for(app);
+            let result =
+                serde_json::to_value(list).map_err(|e| format!("最近打开清单不可序列化：{e}"));
+            resolve_vault(app, request_id, result)
         }
         PluginsMsg::HistoryOpen { request_id, params } => {
             let opened = (|| -> Result<_, String> {
-                if !crate::repohistory_view::container_ready(app) {
+                if !crate::repo_history::container_ready(app) {
                     return Err("未打开仓库".to_string());
                 }
-                let kind = crate::repohistory_view::parse_kind(&params.kind)
+                let kind = crate::repo_history::parse_kind(&params.kind)
                     .ok_or_else(|| format!("未知的历史类型：{}", params.kind))?;
                 let file = vault::validate_plugin_path(&params.file)?;
                 // 历史弹层挂在工作区窗口上：插件窗口没有工作区 chrome
@@ -1727,12 +1764,10 @@ fn vault_backlinks(app: &App, request_id: u64, path: String) -> Task<Message> {
 }
 
 /// 回绝挂起的历史查询（容器切换后旧查询的前提已不存在，不结算会让插件调用永远挂起）。
-pub(crate) fn fail_pending_history_day(app: &mut App, reason: &str) {
-    for (request_id, _) in std::mem::take(&mut app.plugins_state.pending_history_day) {
-        app.plugins.resolve_shell_call(request_id, Err(reason.to_string()));
-    }
-    for request_id in std::mem::take(&mut app.plugins_state.pending_history_activity) {
-        app.plugins.resolve_shell_call(request_id, Err(reason.to_string()));
+pub(crate) fn fail_pending_history(app: &mut App, reason: &str) {
+    for query in std::mem::take(&mut app.plugins_state.pending_history) {
+        app.plugins
+            .resolve_shell_call(query.request_id(), Err(reason.to_string()));
     }
 }
 

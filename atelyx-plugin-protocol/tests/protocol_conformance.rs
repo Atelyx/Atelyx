@@ -299,6 +299,18 @@ fn method_type_shapes_are_frozen() {
             "HistoryOpenParams" => {
                 frozen_roundtrip::<atelyx_plugin_protocol::method::HistoryOpenParams>(&value)
             }
+            "EditorOpenFileParams" => {
+                frozen_roundtrip::<atelyx_plugin_protocol::method::EditorOpenFileParams>(&value)
+            }
+            "HistoryGroupsParams" => {
+                frozen_roundtrip::<atelyx_plugin_protocol::method::HistoryGroupsParams>(&value)
+            }
+            "HistoryGroupsResult" => {
+                frozen_roundtrip::<atelyx_plugin_protocol::method::HistoryGroupsResult>(&value)
+            }
+            "RecentListResult" => {
+                frozen_roundtrip::<atelyx_plugin_protocol::method::RecentListResult>(&value)
+            }
             "MeasureTextResult" => frozen_roundtrip::<MeasureTextResult>(&value),
             "ImageSource" => {
                 frozen_roundtrip::<atelyx_plugin_protocol::paint::ImageSource>(&value)

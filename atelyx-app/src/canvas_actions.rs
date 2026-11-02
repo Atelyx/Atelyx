@@ -16,7 +16,7 @@ use crate::canvas_view::{
 };
 pub(crate) use crate::canvas_view::{LoadOut, RefRaw};
 use crate::layout_view::{PopupOpen, PopupState};
-use crate::{chat_actions, recent_view, vault, App, Message, RepoKind};
+use crate::{chat_actions, recent_files, vault, App, Message, RepoKind};
 
 /// 画布历史记版合并窗口（与表格 / 空间侧口径一致）。
 const HISTORY_COALESCE_MS: i64 = 60_000;
@@ -99,7 +99,7 @@ fn on_loaded(app: &mut App, gen: u64, file: String, result: Result<LoadOut, Stri
             crate::canvas_chat::detach_canvas(app);
             app.canvas = Some(session);
             // 内容载入成功即登记最近打开（本地与空间模式同链回执）
-            recent_view::record(app, &file, recent_view::RecentKind::Canvas);
+            recent_files::record(app, &file, atelyx_core::plugin_runtime::RecentKind::Canvas);
             // 空间模式在场跟随：名册与协作者据此看到本端正在编辑该画布
             if matches!(app.repo_kind, RepoKind::Space(_)) {
                 crate::space_actions::send_presence(app);

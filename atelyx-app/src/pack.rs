@@ -50,15 +50,6 @@ pub(crate) const BUILTIN_PLUGINS: &[BuiltinPlugin] = &[
         views: &[BuiltinView { id: "collabroom", label: "协作房间", icon: "users" }],
     },
     BuiltinPlugin {
-        id: "atelyx.history",
-        label: "仓库历史",
-        icon: "history",
-        views: &[
-            BuiltinView { id: "repohistory", label: "仓库历史", icon: "history" },
-            BuiltinView { id: "recent", label: "最近打开", icon: "clock" },
-        ],
-    },
-    BuiltinPlugin {
         id: atelyx_core::plugin_runtime::PLATFORM_PLUGIN,
         label: "平台基础",
         icon: "layers",
@@ -74,8 +65,6 @@ const RENDERERS: &[(&str, ViewProvider)] = &[
     ("search", crate::layout_view::search_view),
     ("inspector", crate::layout_view::inspector_view),
     ("collabroom", crate::layout_view::collab_room_view),
-    ("repohistory", crate::repohistory_view::repohistory_view),
-    ("recent", crate::recent_view::recent_view),
 ];
 
 /// 按 id 取预置插件视图内容；不属于内置表时 `None`（调用方落占位）。

@@ -199,6 +199,10 @@ pub const CALENDAR_VIEW: &str = "plugin:com.atelyx.calendar:calendar";
 pub const AI_PANEL_VIEW: &str = "plugin:atelyx.ai-panel:aichat";
 /// 预置笔记插件的面板 / 文档视图 id：默认布局与旧布局迁移共用。
 pub const NOTES_VIEW: &str = "plugin:atelyx.notes:note";
+/// 预置仓库历史插件的面板视图 id：主页模板与旧布局迁移共用。
+pub const REPO_HISTORY_VIEW: &str = "plugin:atelyx.history:repohistory";
+/// 预置最近打开插件的面板视图 id：主页模板与旧布局迁移共用。
+pub const RECENT_VIEW: &str = "plugin:atelyx.recent:recent";
 
 // ===== 布局操作命令参数（壳侧逐条映射到 LayoutOp）=====
 
@@ -424,6 +428,10 @@ fn migrate_view_id(view: &mut ViewKind) {
         *view = AI_PANEL_VIEW.to_string();
     } else if view == "note" {
         *view = NOTES_VIEW.to_string();
+    } else if view == "repohistory" {
+        *view = REPO_HISTORY_VIEW.to_string();
+    } else if view == "recent" {
+        *view = RECENT_VIEW.to_string();
     }
 }
 
@@ -515,13 +523,13 @@ pub fn create_home_layout() -> WorkspaceLayout {
                 LayoutNode::Split {
                     id: nanoid!(),
                     direction: "vertical".to_string(),
-                    children: vec![create_panel("collabroom"), create_panel("recent")],
+                    children: vec![create_panel("collabroom"), create_panel(RECENT_VIEW)],
                     sizes: vec![50.0, 50.0],
                 },
                 LayoutNode::Split {
                     id: nanoid!(),
                     direction: "vertical".to_string(),
-                    children: vec![create_panel(CALENDAR_VIEW), create_panel("repohistory")],
+                    children: vec![create_panel(CALENDAR_VIEW), create_panel(REPO_HISTORY_VIEW)],
                     sizes: vec![55.0, 45.0],
                 },
             ],
@@ -1742,6 +1750,32 @@ mod tests {
         assert_eq!(views(&ui.scenes[0].home_layout.tree), [CALENDAR_VIEW]);
         assert_eq!(views_of_tabs(&ui.detached_windows[0].tabs), [CALENDAR_VIEW]);
         assert!(ui.detached_windows[0].tabs[0].locked, "迁移不动锁定态");
+    }
+
+    #[test]
+    fn normalize_migrates_legacy_history_and_recent_views() {
+        // 仓库历史与最近打开改由预置插件承载：旧布局 id 原地改写为插件面 id
+        let mut ui = ui_with(panel("p1", &["repohistory", "recent"]));
+        normalize(&mut ui);
+        let views = |tree: &LayoutNode| match tree {
+            LayoutNode::Panel { tabs, .. } => views_of_tabs(tabs),
+            _ => panic!("expected panel"),
+        };
+        assert_eq!(views(&scene_layouts(&ui)[0].tree), [REPO_HISTORY_VIEW, RECENT_VIEW]);
+        // 新建的主页布局直接写插件面 id，不再依赖迁移
+        let home = create_home_layout();
+        let mut home_views = Vec::new();
+        fn collect(node: &LayoutNode, out: &mut Vec<String>) {
+            match node {
+                LayoutNode::Panel { tabs, .. } => {
+                    out.extend(tabs.iter().map(|tab| tab.view.clone()));
+                }
+                LayoutNode::Split { children, .. } => children.iter().for_each(|c| collect(c, out)),
+            }
+        }
+        collect(&home.tree, &mut home_views);
+        assert!(home_views.iter().any(|view| view == RECENT_VIEW));
+        assert!(home_views.iter().any(|view| view == REPO_HISTORY_VIEW));
     }
 
     #[test]

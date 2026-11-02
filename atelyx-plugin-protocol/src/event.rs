@@ -43,6 +43,12 @@ pub mod name {
     /// 全局编辑偏好变更（软换行 / 页面内标题 / 正文宽度）。payload 同
     /// `editor.prefs` 的 result（[`crate::method::EditorPrefs`]）。
     pub const EDITOR_PREFS_CHANGED: &str = "editor:prefs.changed";
+    /// 当前容器的最近打开清单变化（打开文件确认成功、失效条目被剔除）。payload 为空对象；
+    /// 订阅方重取 `recent.list` 拿整份清单（条数与顺序都随记录变化）。
+    pub const RECENT_CHANGED: &str = "recent:changed";
+    /// 当前容器的历史版本集合变化（新版本记入侧文件、回滚落盘）。payload 为空对象；
+    /// 订阅方重取 `history.groups` / `history.day`（宿主已丢弃聚合缓存）。
+    pub const HISTORY_CHANGED: &str = "history:changed";
 }
 
 /// [`name::DOC_PRESENCE`] 的 payload：当前文档路径 + 远端协作者光标（不含本端）。
@@ -84,6 +90,8 @@ pub fn is_known(name: &str) -> bool {
             | name::DOC_CHANGED
             | name::DOC_PRESENCE
             | name::EDITOR_PREFS_CHANGED
+            | name::RECENT_CHANGED
+            | name::HISTORY_CHANGED
     )
 }
 

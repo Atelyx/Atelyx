@@ -347,9 +347,20 @@ impl Context {
     }
 
     /// 让宿主打开一个仓库内文件（按扩展名分流到对应视图；回执 = 已受理）。
+    /// 布局里没有对应视图时由宿主新增并激活该视图标签。
     pub async fn open_file(&self, path: &str) -> Result<(), RpcError> {
-        self.call_unit(method::editor::OPEN_FILE, &PathParams { path: path.into() })
-            .await
+        self.open_file_params(path, true).await
+    }
+
+    /// 只打开文件、不动布局：布局里已有对应视图就显示该文件，没有就不新增标签
+    /// （列表 / 跳板类入口用）。
+    pub async fn open_file_quiet(&self, path: &str) -> Result<(), RpcError> {
+        self.open_file_params(path, false).await
+    }
+
+    async fn open_file_params(&self, path: &str, reveal: bool) -> Result<(), RpcError> {
+        let params = EditorOpenFileParams { path: path.into(), reveal };
+        self.call_unit(method::editor::OPEN_FILE, &params).await
     }
 
     /// 读全局编辑偏好（软换行 / 页面内标题 / 正文宽度）；变更经 `editor:prefs.changed` 下发。
@@ -948,6 +959,18 @@ impl Context {
     pub async fn history_open(&self, kind: &str, file: &str) -> Result<(), RpcError> {
         let params = HistoryOpenParams { kind: kind.into(), file: file.into() };
         self.call_unit(method::history::OPEN, &params).await
+    }
+
+    /// 全仓库按文件分组的版本聚合（组按最近版本时间新→旧）。`refresh` = 丢弃宿主聚合缓存
+    /// 后重扫（刷新 / 重试用）；版本明细与回滚走 [`Context::history_open`] 的宿主弹层。
+    pub async fn history_groups(&self, refresh: bool) -> Result<HistoryGroupsResult, RpcError> {
+        let params = HistoryGroupsParams { refresh };
+        self.call_typed(method::history::GROUPS, &params).await
+    }
+
+    /// 当前容器的最近打开清单（按打开时刻新→旧；`ready` = 容器可用）。
+    pub async fn recent_list(&self) -> Result<RecentListResult, RpcError> {
+        self.call_typed(method::recent::LIST, &Value::Null).await
     }
 
     // ---------- process ----------

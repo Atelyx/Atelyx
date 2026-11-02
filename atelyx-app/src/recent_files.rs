@@ -1,34 +1,19 @@
-//! 最近打开视图：文件确认打开成功后按仓库容器身份记录（ui-state 透传字段），
-//! 面板内按当前身份过滤展示，并定期校验条目存在性剔除失效项。
+//! 最近打开清单真源：打开成功后按仓库容器身份记录（ui-state 透传字段），按当前身份过滤成
+//! `recent.list` 的回执，并定期校验条目存在性剔除失效项。
 
 use std::collections::HashSet;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use iced::widget::{button, column, container, row, space};
-use iced::{Element, Length, Padding, Task};
-
+use iced::Task;
 use serde::{Deserialize, Serialize};
 
-use atelyx_core::layout::{AppUiState, MAX_RECENT_FILES};
+use atelyx_core::layout::{AppUiState, MAX_RECENT_FILES, RECENT_VIEW};
+use atelyx_core::plugin_runtime::{RecentEntry, RecentKind, RecentListResult};
 use atelyx_core::vault;
 
 use crate::space_actions;
-use crate::ui::controls;
-use crate::ui::icon::icon;
-use crate::ui::palette as pal;
-use crate::ui::scroll;
-use crate::ui::text;
 use crate::{App, Message, RepoKind};
-
-/// 最近打开的文件类型。
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum RecentKind {
-    Note,
-    Table,
-    Canvas,
-}
 
 /// 最近打开条目（ui-state `recentFiles` 透传字段的磁盘结构，camelCase 契约）。
 /// `vaultKey`：本地 = 仓库根路径字符串；空间 = 服务器地址/空间 id（与展开集记忆同源）。
@@ -83,8 +68,20 @@ fn vault_key_of(app: &App) -> Option<String> {
     }
 }
 
+/// `recent.list` 的回执：当前容器未就绪 = `ready: false`，否则按打开时刻新→旧给出条目。
+pub fn list_for(app: &App) -> RecentListResult {
+    let Some(key) = vault_key_of(app) else {
+        return RecentListResult::default();
+    };
+    let entries: Vec<RecentEntry> = recent_for(&decode(&app.ui), &key)
+        .into_iter()
+        .map(|e| RecentEntry { file: e.file, kind: e.kind, opened_at: e.opened_at })
+        .collect();
+    RecentListResult { ready: true, entries }
+}
+
 /// 文件确认打开成功后记录（去重置顶 + 上限截断 + 置脏落盘）；时刻 = 当前秒。
-/// 无身份键（仓库未就绪）不记录。
+/// 无身份键（仓库未就绪）不记录。清单变化即广播 `recent:changed`。
 pub fn record(app: &mut App, file: &str, kind: RecentKind) {
     let Some(vault_key) = vault_key_of(app) else { return };
     let entry = RecentFile {
@@ -94,15 +91,21 @@ pub fn record(app: &mut App, file: &str, kind: RecentKind) {
         opened_at: crate::now_secs() as i64,
     };
     encode(app, push_recent(decode(&app.ui), entry, MAX_RECENT_FILES));
+    app.plugins.on_recent_changed();
 }
 
-/// 剔除确认缺失的条目（按 file + vaultKey 匹配）并置脏落盘。
+/// 剔除确认缺失的条目（按 file + vaultKey 匹配）；有变化才置脏落盘并广播。
 pub fn prune(app: &mut App, gone: &[(String, String)]) {
+    let before = app.ui.recent_files.len();
     let kept: Vec<RecentFile> = decode(&app.ui)
         .into_iter()
         .filter(|e| !gone.iter().any(|(key, file)| key == &e.vault_key && file == &e.file))
         .collect();
+    if kept.len() == before {
+        return;
+    }
     encode(app, kept);
+    app.plugins.on_recent_changed();
 }
 
 /// PersistTick 搭载：视图展示中且距上次校验超过间隔时发起存在性校验。
@@ -110,7 +113,7 @@ pub fn tick(app: &mut App) -> Task<Message> {
     if app.recent_checked_at.is_some_and(|at| at.elapsed() < CHECK_INTERVAL) {
         return Task::none();
     }
-    if !crate::layout_view::view_displayed(app, "recent") {
+    if !crate::layout_view::view_displayed(app, RECENT_VIEW) {
         return Task::none();
     }
     let entries = decode(&app.ui);
@@ -180,97 +183,6 @@ fn start_local_check(app: &App) -> Task<Message> {
     )
 }
 
-/// 秒级时间戳 → 相对文案：刚刚 / N 分钟前 / N 小时前 / N 天前 / 日期（YYYY-MM-DD）。
-pub(crate) fn relative_ts(secs: i64, now: i64) -> String {
-    let d = now - secs;
-    if d < 60 {
-        return "刚刚".into();
-    }
-    if d < 3600 {
-        return format!("{} 分钟前", d / 60);
-    }
-    if d < 86_400 {
-        return format!("{} 小时前", d / 3600);
-    }
-    if d < 30 * 86_400 {
-        return format!("{} 天前", d / 86_400);
-    }
-    crate::layout_view::format_ts(secs * 1000)
-        .split(' ')
-        .next()
-        .unwrap_or_default()
-        .to_string()
-}
-
-/// 最近打开视图：按当前仓库身份过滤，行点击打开（复用 OpenFile，按扩展名分流笔记/表格/画布）。
-pub fn recent_view(app: &App, _window: iced::window::Id) -> Element<'_, Message> {
-    let Some(key) = vault_key_of(app) else {
-        return controls::empty_state("clock", "未打开仓库", "打开仓库后显示", None);
-    };
-    let items = recent_for(&decode(&app.ui), &key);
-    if items.is_empty() {
-        return controls::empty_state(
-            "clock",
-            "暂无最近打开",
-            "打开文件后出现在这里",
-            None,
-        );
-    }
-    let now = crate::now_secs() as i64;
-    let mut col = iced::widget::Column::<Message>::new()
-        .padding(Padding::ZERO.horizontal(12.0).vertical(10.0))
-        .spacing(6);
-    for e in items {
-        let name = e.file.rsplit('/').next().unwrap_or(&e.file).to_string();
-        let parent = e.file.rsplit_once('/').map(|(d, _)| d.to_string()).unwrap_or_default();
-        let time = relative_ts(e.opened_at, now);
-        let kind_icon = match e.kind {
-            RecentKind::Note => "file-text",
-            RecentKind::Table => "table",
-            RecentKind::Canvas => "palette",
-        };
-        col = col.push(
-            container(
-                button(
-                    row![
-                        icon(kind_icon, 14.0, pal::TEXT_MUTED),
-                        column![
-                            text(name)
-                                .size(pal::fs_body())
-                                .color(pal::TEXT_PRIMARY),
-                            row![
-                                text(parent).size(pal::fs_micro()).color(pal::TEXT_MUTED),
-                                space().width(Length::Fill),
-                                text(time).size(pal::fs_micro()).color(pal::TEXT_MUTED),
-                            ]
-                            .width(Length::Fill),
-                        ]
-                        .spacing(2)
-                        .width(Length::Fill),
-                    ]
-                    .spacing(10)
-                    .align_y(iced::alignment::Vertical::Center),
-                )
-                .width(Length::Fill)
-                .padding(0.0)
-                .style(controls::row_style(false, pal::RADIUS_MD))
-                .on_press(Message::OpenFile(e.file.clone())),
-            )
-            .width(Length::Fill)
-            .padding(Padding::ZERO.horizontal(10.0).vertical(8.0))
-            .style(|_t| iced::widget::container::Style {
-                background: Some(pal::BG_TERTIARY.into()),
-                border: iced::border::rounded(pal::RADIUS_MD),
-                ..iced::widget::container::Style::default()
-            }),
-        );
-    }
-    scroll::v(container(col).width(Length::Fill).height(Length::Fill))
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,18 +227,5 @@ mod tests {
         let list = vec![entry("a.md", "k1", 5), entry("b.md", "k2", 9), entry("c.md", "k1", 1)];
         let out = recent_for(&list, "k1");
         assert_eq!(out.iter().map(|e| e.file.as_str()).collect::<Vec<_>>(), ["a.md", "c.md"]);
-    }
-
-    #[test]
-    fn relative_ts_ladder() {
-        let now = 1_000_000_000;
-        assert_eq!(relative_ts(now, now), "刚刚");
-        assert_eq!(relative_ts(now - 120, now), "2 分钟前");
-        assert_eq!(relative_ts(now - 7_200, now), "2 小时前");
-        assert_eq!(relative_ts(now - 3 * 86_400, now), "3 天前");
-        assert_eq!(relative_ts(now + 100, now), "刚刚");
-        let old = relative_ts(now - 40 * 86_400, now);
-        assert_eq!(old.len(), "YYYY-MM-DD".len());
-        assert!(old.contains('-'));
     }
 }

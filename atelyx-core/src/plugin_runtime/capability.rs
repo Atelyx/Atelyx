@@ -48,7 +48,9 @@ pub(crate) fn permission_for(name: &str) -> Option<Permission> {
         | editor::PREFS => Some(Vault),
         doc::OPEN | doc::EDIT | doc::SAVE | doc::CLOSE | doc::AWARENESS | doc::RENAME => Some(Vault),
         // 活动统计取自当前仓库内容，同样按仓库内容权限归类
-        history::ACTIVITY | history::DAY | history::OPEN => Some(Vault),
+        history::ACTIVITY | history::DAY | history::GROUPS | history::OPEN => Some(Vault),
+        // 最近打开清单是用户在当前仓库打开过的文件路径
+        method::recent::LIST => Some(Vault),
         window::OPEN | window::CLOSE | window::UPDATE | window::SHOW | window::BEGIN_DRAG
         | window::MINIMIZE | window::TOGGLE_MAXIMIZE => Some(Window),
         ai::CHAT_SEND | ai::CHAT_STOP | ai::CHAT_HISTORY | ai::CHAT_RENAME | ai::CHAT_DELETE
@@ -156,7 +158,9 @@ mod tests {
         assert_eq!(permission_for(method::vault::BACKLINKS), Some(Permission::Vault));
         assert_eq!(permission_for(method::history::ACTIVITY), Some(Permission::Vault));
         assert_eq!(permission_for(method::history::DAY), Some(Permission::Vault));
+        assert_eq!(permission_for(method::history::GROUPS), Some(Permission::Vault));
         assert_eq!(permission_for(method::history::OPEN), Some(Permission::Vault));
+        assert_eq!(permission_for(method::recent::LIST), Some(Permission::Vault));
         // 纯文本变换与能力总线入口不占权限类（调用照常执行，审计按各自归类记录）
         for name in [
             service::method::REGISTER,

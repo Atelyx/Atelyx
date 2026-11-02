@@ -1,24 +1,20 @@
-//! 仓库历史视图：文件组卡片列表（只读元数据聚合），组头点击打开该文件的历史弹层；
-//! 本地扫侧文件元数据，空间走服务端聚合端点。
+//! 仓库历史聚合的真源：本地扫历史侧文件元数据，空间走服务端聚合端点；
+//! 按文件分组后供 `history.groups` / `history.day` / `history.activity` 回执，
+//! 历史弹层本身的版本浏览与回滚走 `history.open`。
 
-use iced::alignment::Vertical;
-use iced::widget::{button, column, container, row, space};
-use iced::{Element, Length, Padding, Task};
+use iced::Task;
 
 use atelyx_core::history::{HistoryAction, HistoryKind};
 use atelyx_core::plugin_runtime::{
-    DayActivity, HistoryActivityResult, HistoryDayEntry, HistoryDayResult,
+    DayActivity, HistoryActivityResult, HistoryDayEntry, HistoryDayResult, HistoryFileGroup,
+    HistoryGroupsParams, HistoryGroupsResult,
 };
 use atelyx_core::space_client::HistoryAggregate;
 
+use crate::settings_view::plugins::PendingHistory;
 use crate::space_actions;
-use crate::ui::controls;
-use crate::ui::icon::icon;
 use crate::ui::notify::Level as NoticeLevel;
-use crate::ui::palette as pal;
-use crate::ui::scroll;
-use crate::ui::text;
-use crate::{App, Message, RepoKind, layout_view};
+use crate::{App, Message, RepoKind};
 
 /// 组内版本行（只读元数据；本地侧文件聚合与服务端聚合的共同投影）。
 #[derive(Debug, Clone)]
@@ -164,9 +160,11 @@ pub(crate) fn container_ready(app: &App) -> bool {
 }
 
 /// 拉取仓库历史聚合（本地 spawn_blocking 扫侧文件元数据 / 空间走服务端聚合端点）。
+/// 回执带容器世代与聚合世代：两者任一变了，这一份就是过期扫描，不写回缓存。
 pub fn load(app: &mut App) -> Task<Message> {
     app.repo_history_loading = true;
-    let gen = app.epoch();
+    let epoch = app.epoch();
+    let gen = app.repo_history_gen;
     match &app.repo_kind {
         RepoKind::Space(session) => {
             let client = session.client.clone();
@@ -177,7 +175,7 @@ pub fn load(app: &mut App) -> Task<Message> {
                     let timestamps = agg.timestamps.clone();
                     Ok(RepoHistory { groups: groups_from_space(agg), timestamps })
                 },
-                move |result| Message::RepoHistoryLoaded(gen, result),
+                move |result| Message::RepoHistoryLoaded(epoch, gen, result),
             )
         }
         RepoKind::Local => {
@@ -200,67 +198,80 @@ pub fn load(app: &mut App) -> Task<Message> {
                     .map_err(|e| e.to_string())
                     .and_then(|r| r)
                 },
-                move |result| Message::RepoHistoryLoaded(gen, result),
+                move |result| Message::RepoHistoryLoaded(epoch, gen, result),
             )
         }
     }
 }
 
-/// PersistTick 搭载：面板展示中且缓存失效（None）时发起聚合（共用该缓存的插件按日查询
-/// 在缓存缺失时由查询本身发起，见 `history.day` 的宿主处理）。
-pub fn tick(app: &mut App) -> Task<Message> {
-    if app.repo_history_loading || app.repo_history.is_some() {
-        return Task::none();
-    }
-    if !container_ready(app) || !layout_view::view_displayed(app, "repohistory") {
-        return Task::none();
-    }
-    load(app)
-}
-
-/// 刷新：失效缓存重取（在途时不重复发起，回执自会落地）。
-pub fn refresh(app: &mut App) -> Task<Message> {
+/// 丢弃聚合缓存并推进代次：在途扫描落地时按代次作废，不把失效前的聚合写回。
+pub(crate) fn invalidate(app: &mut App) {
     app.repo_history = None;
-    if app.repo_history_loading || !container_ready(app) {
-        return Task::none();
-    }
-    load(app)
+    app.repo_history_gen = app.repo_history_gen.wrapping_add(1);
 }
 
-/// 聚合落地（gen 守卫）：成功缓存列表；失败缓存 Err 并提示（仅手动刷新重试，
-/// 不回退 None——周期重试失败会刷屏）。等这份缓存的按日查询在此一并回填。
-pub fn on_loaded(app: &mut App, gen: u64, result: Result<RepoHistory, String>) -> Task<Message> {
+/// 聚合落地（世代守卫）：成功缓存列表；失败缓存 Err 并提示（失败不自动重试，改由调用方重试）。
+/// 等这份缓存的查询在此一并回填。
+pub fn on_loaded(
+    app: &mut App,
+    epoch: u64,
+    gen: u64,
+    result: Result<RepoHistory, String>,
+) -> Task<Message> {
     app.repo_history_loading = false;
-    if gen != app.epoch() {
+    if epoch != app.epoch() {
+        // 容器已变：在途结果作废，挂起的查询已在切容器时回绝
         return Task::none();
     }
-    let pending = std::mem::take(&mut app.plugins_state.pending_history_day);
-    let pending_activity = std::mem::take(&mut app.plugins_state.pending_history_activity);
+    if gen != app.repo_history_gen {
+        // 扫描启动后缓存又被丢弃：这份结果作废；仍有查询等着就按当前状态重扫
+        if app.plugins_state.pending_history.is_empty() {
+            return Task::none();
+        }
+        return load(app);
+    }
+    let pending = std::mem::take(&mut app.plugins_state.pending_history);
     match result {
         Ok(history) => {
-            for (request_id, day) in pending {
-                let entries = day_entries(&history.groups, day);
-                app.plugins.resolve_shell_call(request_id, history_day_json(entries));
-            }
-            for request_id in pending_activity {
-                let activity = activity_json(&history.timestamps);
-                app.plugins.resolve_shell_call(request_id, activity);
+            for query in pending {
+                let answer = match query {
+                    PendingHistory::Groups(request_id) => (request_id, groups_json(&history)),
+                    PendingHistory::Day(request_id, day) => {
+                        (request_id, history_day_json(day_entries(&history.groups, day)))
+                    }
+                    PendingHistory::Activity(request_id) => {
+                        (request_id, activity_json(&history.timestamps))
+                    }
+                };
+                app.plugins.resolve_shell_call(answer.0, answer.1);
             }
             app.repo_history = Some(Ok(history));
         }
         Err(e) => {
-            for (request_id, _) in pending {
-                app.plugins.resolve_shell_call(request_id, Err(format!("历史聚合失败：{e}")));
-            }
-            for request_id in pending_activity {
+            for query in pending {
                 app.plugins
-                    .resolve_shell_call(request_id, Err(format!("历史聚合失败：{e}")));
+                    .resolve_shell_call(query.request_id(), Err(format!("历史聚合失败：{e}")));
             }
             app.repo_history = Some(Err(e.clone()));
             app.notify(NoticeLevel::Error, format!("历史聚合失败：{e}"));
         }
     }
     Task::none()
+}
+
+/// `history.groups` 的回执：容器就绪时的全部分组（未就绪走 `HistoryGroupsResult::default()`）。
+pub(crate) fn groups_json(history: &RepoHistory) -> Result<serde_json::Value, String> {
+    let groups = history
+        .groups
+        .iter()
+        .map(|group| HistoryFileGroup {
+            kind: kind_key(group.kind).to_string(),
+            file: group.file.clone(),
+            count: group.versions.len() as u32,
+        })
+        .collect();
+    serde_json::to_value(HistoryGroupsResult { ready: true, groups })
+        .map_err(|e| format!("历史分组不可序列化：{e}"))
 }
 
 /// 按日查询的宿主回执（`history.day`）；序列化失败带回可读原因。
@@ -281,103 +292,39 @@ pub(crate) fn activity_json(timestamps: &[i64]) -> Result<serde_json::Value, Str
         .map_err(|e| format!("活动统计不可序列化：{e}"))
 }
 
-/// 仓库历史视图：文件组卡片列表 + 组头（图标 + 文件名 + 全路径 + 版本数徽标）。
-pub fn repohistory_view(app: &App, window: iced::window::Id) -> Element<'_, Message> {
+/// `history.groups` 的请求入口：缓存缺失时挂起（聚合一落地就回填），在途不重复发起。
+/// `params.refresh` = 丢弃缓存重扫（手动刷新 / 重试用；扫描在途也按新世代重扫）；
+/// 容器未就绪回 `ready: false`。
+pub(crate) fn request_groups(
+    app: &mut App,
+    request_id: u64,
+    params: HistoryGroupsParams,
+) -> Task<Message> {
     if !container_ready(app) {
-        return controls::empty_state("history", "未打开仓库", "打开仓库后显示", None);
+        let result = serde_json::to_value(HistoryGroupsResult::default())
+            .map_err(|e| format!("历史分组不可序列化：{e}"));
+        app.plugins.resolve_shell_call(request_id, result);
+        return Task::none();
     }
-    let body: Element<'_, Message> = match &app.repo_history {
-        Some(Err(e)) => controls::empty_state(
-            "triangle-alert",
-            "历史聚合失败",
-            e.clone(),
-            Some(("重试".into(), Message::RepoHistoryRefresh)),
-        ),
-        Some(Ok(history)) if history.groups.is_empty() => controls::empty_state(
-            "history",
-            "暂无历史记录",
-            "暂无版本记录",
-            None,
-        ),
-        Some(Ok(history)) => group_list(&history.groups, window),
-        // None = 未加载或在途（发起即置 loading，此分支只持续到下个 tick）
-        None => {
-            text(if app.repo_history_loading { "加载中…" } else { "暂无历史记录" })
-                .size(pal::fs_caption())
-                .color(pal::TEXT_MUTED)
-                .into()
-        }
-    };
-    let col = iced::widget::Column::<Message>::new().push(body);
-    scroll::v(container(col.width(Length::Fill)).width(Length::Fill).height(Length::Fill))
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
-}
-
-/// 文件组卡片列表：组卡片（图标 + 文件名 + 全路径 + 版本数徽标），点击打开该文件的历史弹层。
-fn group_list<'a>(groups: &'a [RepoHistoryGroup], window: iced::window::Id) -> Element<'a, Message> {
-    let mut col = iced::widget::Column::<Message>::new()
-        .padding(Padding::ZERO.horizontal(12.0).vertical(4.0))
-        .spacing(6);
-    for g in groups {
-        col = col.push(group_card(g, window));
+    if params.refresh {
+        invalidate(app);
     }
-    container(col).width(Length::Fill).into()
-}
-
-/// 组卡片：kind 图标 + 文件名 + 全路径灰字 + 版本数徽标；点击 = 历史弹层（组内完整版本列表在弹层内浏览）。
-fn group_card(g: &RepoHistoryGroup, window: iced::window::Id) -> Element<'static, Message> {
-    let name = g.file.rsplit('/').next().unwrap_or(&g.file).to_string();
-    let count = format!("{} 版", g.versions.len());
-    container(
-        button(
-            row![
-                icon(kind_icon(g.kind), 14.0, pal::TEXT_MUTED),
-                column![
-                    row![
-                        text(name)
-                            .size(pal::fs_body())
-                            .color(pal::TEXT_PRIMARY),
-                        space().width(Length::Fill),
-                        controls::badge(count, pal::BG_SUNKEN, pal::TEXT_SECONDARY),
-                    ]
-                    .spacing(8)
-                    .align_y(Vertical::Center),
-                    text(g.file.clone()).size(pal::fs_micro()).color(pal::TEXT_MUTED),
-                ]
-                .spacing(2)
-                .width(Length::Fill),
-            ]
-            .spacing(10)
-            .align_y(Vertical::Center),
-        )
-        .width(Length::Fill)
-        .padding(0.0)
-        .style(controls::row_style(false, pal::RADIUS_MD))
-        .on_press(Message::History(crate::history_browser::HistoryBrowserMsg::Open {
-            window,
-            kind: g.kind,
-            file: g.file.clone(),
-        })),
-    )
-    .width(Length::Fill)
-    .padding(Padding::ZERO.horizontal(10.0).vertical(8.0))
-    .style(|_t| iced::widget::container::Style {
-        background: Some(pal::BG_TERTIARY.into()),
-        border: iced::border::rounded(pal::RADIUS_MD),
-        ..iced::widget::container::Style::default()
-    })
-    .into()
-}
-
-/// kind → 行首图标。
-fn kind_icon(kind: HistoryKind) -> &'static str {
-    match kind {
-        HistoryKind::Note => "file-text",
-        HistoryKind::Table => "table",
-        HistoryKind::Canvas => "pencil",
+    if let Some(cached) = &app.repo_history {
+        let result = match cached {
+            Ok(history) => groups_json(history),
+            Err(e) => Err(format!("历史聚合失败：{e}")),
+        };
+        app.plugins.resolve_shell_call(request_id, result);
+        return Task::none();
     }
+    app.plugins_state
+        .pending_history
+        .push(PendingHistory::Groups(request_id));
+    if app.repo_history_loading {
+        // 在途扫描的世代已被 refresh 抛在后面：等它落地时按代次丢弃并重扫
+        return Task::none();
+    }
+    load(app)
 }
 
 #[cfg(test)]
@@ -455,5 +402,53 @@ mod tests {
         assert_eq!(groups[0].versions[0].summary.as_deref(), Some("s1"));
         assert_eq!(groups[1].file, "b.atb");
         assert_eq!(groups[1].versions[0].action, HistoryAction::Restore);
+    }
+
+    #[test]
+    fn groups_payload_counts_versions_and_keeps_order() {
+        let history = RepoHistory {
+            groups: vec![
+                RepoHistoryGroup {
+                    kind: HistoryKind::Note,
+                    file: "a.md".into(),
+                    versions: vec![
+                        RepoVersionRow {
+                            ts: 300,
+                            action: HistoryAction::Edit,
+                            author_name: "alice".into(),
+                            summary: None,
+                        },
+                        RepoVersionRow {
+                            ts: 200,
+                            action: HistoryAction::Restore,
+                            author_name: "alice".into(),
+                            summary: None,
+                        },
+                    ],
+                },
+                RepoHistoryGroup {
+                    kind: HistoryKind::Canvas,
+                    file: "b.atlx".into(),
+                    versions: vec![RepoVersionRow {
+                        ts: 100,
+                        action: HistoryAction::Edit,
+                        author_name: "bob".into(),
+                        summary: None,
+                    }],
+                },
+            ],
+            timestamps: vec![300, 200, 100],
+        };
+        let value = groups_json(&history).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "ready": true,
+                "groups": [
+                    { "kind": "note", "file": "a.md", "count": 2 },
+                    { "kind": "canvas", "file": "b.atlx", "count": 1 }
+                ]
+            })
+        );
     }
 }

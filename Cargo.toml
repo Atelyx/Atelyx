@@ -11,6 +11,8 @@ members = [
     "plugins/ai-core",
     "plugins/ai-panel",
     "plugins/notes",
+    "plugins/recent",
+    "plugins/history",
     "atelyx-plugin-abi",
     "atelyx-plugin-sample",
     "xtask",

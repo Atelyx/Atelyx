@@ -223,6 +223,7 @@ const SECTIONS: &[Section] = &[
             "method.rs": "doc",
             "method.rs": "editor",
             "method.rs": "history",
+            "method.rs": "recent",
             "method.rs": "ai",
             "method.rs": "tray",
             "method.rs": "collab",
@@ -280,6 +281,7 @@ const SECTIONS: &[Section] = &[
             "method.rs": "DocInstanceOpenParams",
             "method.rs": "DocInstanceCloseParams",
             "method.rs": "MAX_EDITOR_TEXT_BYTES",
+            "method.rs": "EditorOpenFileParams",
             "method.rs": "EditorSelection",
             "method.rs": "EditorReplaceParams",
             "method.rs": "EditorPrefs",
@@ -380,17 +382,23 @@ const SECTIONS: &[Section] = &[
         ),
     },
     Section {
-        title: "能力面负载：仓库活动",
-        intro: "按天聚合的文件活动计数与当日版本记录；取自当前仓库（本地历史侧文件 / 空间聚合），\
-按本地日界归日。",
+        title: "能力面负载：仓库活动、版本分组与最近打开",
+        intro: "按天聚合的文件活动计数与当日版本记录按本地日界归日；版本分组按文件聚合、组按最近版本时间新→旧。\
+都取自当前仓库（本地历史侧文件 / 空间聚合）。最近打开清单由宿主按容器身份记账，记录与失效剔除都不在插件侧。",
         items: items!(
             "method.rs": "DayActivity",
             "method.rs": "HistoryActivityResult",
             "method.rs": "HistoryDayParams",
             "method.rs": "HistoryDayEntry",
             "method.rs": "HistoryDayResult",
+            "method.rs": "HistoryGroupsParams",
+            "method.rs": "HistoryFileGroup",
+            "method.rs": "HistoryGroupsResult",
             "method.rs": "HISTORY_KINDS",
             "method.rs": "HistoryOpenParams",
+            "method.rs": "RecentKind",
+            "method.rs": "RecentEntry",
+            "method.rs": "RecentListResult",
         ),
     },
     Section {

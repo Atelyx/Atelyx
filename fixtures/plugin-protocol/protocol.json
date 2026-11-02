@@ -100,6 +100,22 @@
   },
   "methods": [
     {
+      "name": "editor.openFile params (reveal default)",
+      "type": "EditorOpenFileParams",
+      "value": {
+        "path": "notes/a.md",
+        "reveal": true
+      }
+    },
+    {
+      "name": "editor.openFile params (quiet)",
+      "type": "EditorOpenFileParams",
+      "value": {
+        "path": "notes/a.md",
+        "reveal": false
+      }
+    },
+    {
       "name": "fs.readText params",
       "type": "PathParams",
       "value": {
@@ -438,6 +454,51 @@
       "value": {
         "kind": "note",
         "file": "notes/a.md"
+      }
+    },
+    {
+      "name": "history.groups params (refresh)",
+      "type": "HistoryGroupsParams",
+      "value": {
+        "refresh": true
+      }
+    },
+    {
+      "name": "history.groups result",
+      "type": "HistoryGroupsResult",
+      "value": {
+        "ready": true,
+        "groups": [
+          {
+            "kind": "note",
+            "file": "notes/a.md",
+            "count": 3
+          },
+          {
+            "kind": "table",
+            "file": "plan.atb",
+            "count": 1
+          }
+        ]
+      }
+    },
+    {
+      "name": "recent.list result",
+      "type": "RecentListResult",
+      "value": {
+        "ready": true,
+        "entries": [
+          {
+            "file": "notes/a.md",
+            "kind": "note",
+            "openedAt": 1790000000
+          },
+          {
+            "file": "board.atlx",
+            "kind": "canvas",
+            "openedAt": 1789999999
+          }
+        ]
       }
     },
     {

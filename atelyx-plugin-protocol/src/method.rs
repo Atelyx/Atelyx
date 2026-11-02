@@ -254,8 +254,18 @@ pub mod history {
     pub const ACTIVITY: &str = "history.activity";
     /// 本地某一天的版本记录（本地历史侧文件 / 空间聚合，宿主统一按本地日界归日）。
     pub const DAY: &str = "history.day";
+    /// 全仓库按文件分组的版本聚合（组按最近版本时间新→旧，只给组与版本条数）。
+    pub const GROUPS: &str = "history.groups";
     /// 在宿主界面打开某个文件的历史弹层（版本列表与回滚由宿主承载）。
     pub const OPEN: &str = "history.open";
+}
+
+/// 最近打开：宿主按仓库容器身份记录的打开清单（记录与失效剔除都在宿主，插件只读）。
+pub mod recent {
+    /// 服务名。
+    pub const SERVICE: &str = "recent";
+    /// 当前容器的最近打开条目（按打开时刻新→旧）。
+    pub const LIST: &str = "recent.list";
 }
 
 /// 编辑器：当前打开笔记的选区读写（宿主随笔记会话自持，其他插件据此做「改写选中内容」这类动作）。
@@ -267,7 +277,8 @@ pub mod editor {
     pub const REPLACE_SELECTION: &str = "editor.replaceSelection";
     /// 读当前打开的文件（仓库相对路径，按打开顺序）。候选列表这类要「打开中的优先」的界面用。
     pub const OPEN_FILES: &str = "editor.openFiles";
-    /// 让宿主打开一个仓库内文件（按扩展名分流到对应视图；回执 = 已受理）。
+    /// 让宿主打开一个仓库内文件（按扩展名分流；回执 = 已受理）。`reveal` 见
+    /// [`EditorOpenFileParams`]。
     pub const OPEN_FILE: &str = "editor.openFile";
     /// 读全局编辑偏好（软换行 / 页面内标题 / 正文宽度）；变更时宿主另发
     /// [`crate::event::name::EDITOR_PREFS_CHANGED`]。
@@ -702,6 +713,21 @@ pub struct EditorOpenFiles {
     pub paths: Vec<String>,
 }
 
+/// [`editor::OPEN_FILE`] 的 params：`path` 为仓库相对路径。
+/// `reveal` 缺省 = 打开并让对应视图显示（布局里没有就新增该视图标签）；
+/// `false` = 只打开不改布局（列表类入口用，已有对应视图照常显示当前文件）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditorOpenFileParams {
+    pub path: String,
+    #[serde(default = "reveal_default")]
+    pub reveal: bool,
+}
+
+fn reveal_default() -> bool {
+    true
+}
+
 /// [`editor::SELECTION`] 的 result：当前文档与选区。
 /// `path` 缺省 = 未打开笔记；`from` / `to` 是正文字节偏移（frontmatter 之后的部分）。
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -1084,6 +1110,59 @@ impl HistoryOpenParams {
         }
         Ok(())
     }
+}
+
+/// [`history::GROUPS`] 的 params：`refresh` = 丢弃宿主聚合缓存后重扫（手动刷新 / 重试用）。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct HistoryGroupsParams {
+    pub refresh: bool,
+}
+
+/// 一个文件的历史分组：`kind` 取 [`HISTORY_KINDS`] 的取值域，`count` = 版本条数。
+/// 版本明细不在聚合里给出——浏览与回滚走 [`history::OPEN`] 的宿主弹层。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryFileGroup {
+    pub kind: String,
+    pub file: String,
+    pub count: u32,
+}
+
+/// [`history::GROUPS`] 的 result：`ready` = 当前容器可用（false 时 `groups` 为空）。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryGroupsResult {
+    pub ready: bool,
+    pub groups: Vec<HistoryFileGroup>,
+}
+
+// ---------- recent ----------
+
+/// 最近打开条目的文件类型。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RecentKind {
+    Note,
+    Table,
+    Canvas,
+}
+
+/// 一条最近打开记录：仓库相对路径 + 类型 + 打开时刻（unix 秒）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecentEntry {
+    pub file: String,
+    pub kind: RecentKind,
+    pub opened_at: i64,
+}
+
+/// [`recent::LIST`] 的 result：`ready` = 当前容器可用（false 时 `entries` 为空）。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecentListResult {
+    pub ready: bool,
+    pub entries: Vec<RecentEntry>,
 }
 
 // ---------- layout ----------
@@ -2239,7 +2318,10 @@ pub const BUILTIN_SERVICES: &[(&str, &str, &[&str])] = &[
     ("editor", PLATFORM_PLUGIN, &[editor::SELECTION, editor::REPLACE_SELECTION, editor::OPEN_FILES, editor::OPEN_FILE, editor::PREFS]),
     // 文档会话是宿主内容真源（保存链 / 协作增量 / 历史），归平台自身，不随插件停用下线
     ("doc", PLATFORM_PLUGIN, &[doc::OPEN, doc::EDIT, doc::SAVE, doc::CLOSE, doc::AWARENESS, doc::RENAME]),
-    ("history", "atelyx.history", &[history::ACTIVITY, history::DAY, history::OPEN]),
+    // 历史读数取自宿主侧文件与服务端聚合，历史弹层也在宿主，与 doc 同理归平台自身
+    ("history", PLATFORM_PLUGIN, &[history::ACTIVITY, history::DAY, history::GROUPS, history::OPEN]),
+    // 最近打开清单是宿主按容器身份记账的界面数据，记录与剔除都由宿主维护
+    ("recent", PLATFORM_PLUGIN, &[recent::LIST]),
 ];
 
 #[cfg(test)]
@@ -2511,6 +2593,75 @@ mod tests {
             }),
             "缺省摘要不落线"
         );
+    }
+
+    #[test]
+    fn recent_list_and_history_groups_shapes() {
+        // 最近打开：类型取小写枚举名，缺省结果 = 容器未就绪
+        let list = RecentListResult {
+            ready: true,
+            entries: vec![
+                RecentEntry { file: "notes/a.md".into(), kind: RecentKind::Note, opened_at: 1_700_000_000 },
+                RecentEntry { file: "b.atb".into(), kind: RecentKind::Table, opened_at: 1_700_000_001 },
+                RecentEntry { file: "c.atlx".into(), kind: RecentKind::Canvas, opened_at: 1_700_000_002 },
+            ],
+        };
+        let wire = serde_json::to_value(&list).unwrap();
+        assert_eq!(wire["entries"][0]["kind"], "note");
+        assert_eq!(wire["entries"][1]["kind"], "table");
+        assert_eq!(wire["entries"][2]["kind"], "canvas");
+        assert_eq!(wire["entries"][0]["openedAt"], 1_700_000_000_i64);
+        assert_eq!(
+            serde_json::to_value(RecentListResult::default()).unwrap(),
+            serde_json::json!({ "ready": false, "entries": [] })
+        );
+        // 历史分组：缺省刷新标记不刷新（`{}` 可解析），刷新请求带 `refresh: true`
+        assert_eq!(
+            serde_json::to_value(HistoryGroupsParams::default()).unwrap(),
+            serde_json::json!({ "refresh": false })
+        );
+        assert_eq!(
+            serde_json::from_value::<HistoryGroupsParams>(serde_json::json!({})).unwrap(),
+            HistoryGroupsParams::default()
+        );
+        assert_eq!(
+            serde_json::to_value(HistoryGroupsParams { refresh: true }).unwrap(),
+            serde_json::json!({ "refresh": true })
+        );
+        let groups = HistoryGroupsResult {
+            ready: true,
+            groups: vec![HistoryFileGroup {
+                kind: "note".into(),
+                file: "notes/a.md".into(),
+                count: 3,
+            }],
+        };
+        assert_eq!(
+            serde_json::to_value(&groups).unwrap(),
+            serde_json::json!({
+                "ready": true,
+                "groups": [{ "kind": "note", "file": "notes/a.md", "count": 3 }]
+            })
+        );
+        // 服务名与方法名一致（能力总线按 `服务.方法` 切分）
+        assert_eq!(recent::LIST, format!("{}.list", recent::SERVICE));
+    }
+
+    #[test]
+    fn editor_open_file_reveal_defaults_to_true() {
+        // 旧调用方只给 path：按「打开并让视图显示」处理
+        let legacy: EditorOpenFileParams =
+            serde_json::from_value(serde_json::json!({ "path": "notes/a.md" })).unwrap();
+        assert!(legacy.reveal);
+        assert_eq!(
+            serde_json::to_value(&legacy).unwrap(),
+            serde_json::json!({ "path": "notes/a.md", "reveal": true })
+        );
+        // 列表类入口显式要求不动布局
+        let quiet: EditorOpenFileParams =
+            serde_json::from_value(serde_json::json!({ "path": "notes/a.md", "reveal": false }))
+                .unwrap();
+        assert!(!quiet.reveal);
     }
 
     #[test]

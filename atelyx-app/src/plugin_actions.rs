@@ -918,7 +918,8 @@ pub fn doc_type_for_extension(
 
 /// 打开一个插件领域文档（文件打开路由分派）：登记实例、确保文档视图标签存在并激活、
 /// 通知插件（`host:doc.open`）。实例面标识换新（旧实例先关闭通知）。
-pub fn open_doc(app: &mut App, rel: &str) -> Task<Message> {
+/// `reveal` = 是否确保并激活文档视图标签：false 只打开文件，布局保持不动。
+pub fn open_doc(app: &mut App, rel: &str, reveal: bool) -> Task<Message> {
     let extension = rel.rsplit('.').next().unwrap_or_default().to_string();
     let Some((plugin_id, reg, candidates)) = doc_type_for_extension(app, &extension) else {
         app.notify(
@@ -948,7 +949,12 @@ pub fn open_doc(app: &mut App, rel: &str) -> Task<Message> {
     });
     app.ui.last_doc_file = Some(rel.to_string());
     app.schedule_persist();
-    ensure_doc_tab(app, &plugin_id, &reg.surface)
+    if reveal {
+        ensure_doc_tab(app, &plugin_id, &reg.surface)
+    } else {
+        // 只打开文件：布局不动，视图没在布局里就等用户自己打开
+        refresh_projection(app)
+    }
 }
 
 /// 关闭当前打开的插件文档（文档标签关闭 / 文件删除 / 换仓库）。

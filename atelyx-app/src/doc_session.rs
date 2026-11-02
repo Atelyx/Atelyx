@@ -155,7 +155,7 @@ pub fn open_done(
     match result {
         Ok(text) => {
             app.attach_doc_session(&path, text.clone());
-            crate::recent_view::record(app, &path, crate::recent_view::RecentKind::Note);
+            crate::recent_files::record(app, &path, atelyx_core::plugin_runtime::RecentKind::Note);
             let value = json!({
                 "path": path,
                 "text": text,

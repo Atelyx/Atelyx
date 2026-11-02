@@ -132,7 +132,7 @@ fn on_done(app: &mut App, gen: u64, result: Result<RebuildReport, String>) -> Ta
                 _ => None,
             };
             match reload {
-                Some(rel) => app.open_file(&rel),
+                Some(rel) => app.open_file(&rel, true),
                 None => Task::none(),
             }
         }
