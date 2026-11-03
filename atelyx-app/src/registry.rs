@@ -119,7 +119,12 @@ impl Registry {
         let mut entries: Vec<Entry> = Vec::new();
         let mut builtin_plugins = Vec::new();
         for plugin in snapshot.builtin_plugins {
-            let enabled = !snapshot.disabled_plugins.iter().any(|id| id == plugin.id);
+            // 同 id 的已装 / 预置插件是该壳的启停真源：设置页只留插件卡片，
+            // 内置条目只提供宿主视图与渲染分派，不能再用独立的停用态把它关掉。
+            let enabled = match snapshot.plugins.iter().find(|summary| summary.id == plugin.id) {
+                Some(summary) => summary.enabled,
+                None => !snapshot.disabled_plugins.iter().any(|id| id == plugin.id),
+            };
             builtin_plugins.push(BuiltinPluginInfo {
                 id: plugin.id.to_string(),
                 label: plugin.label.to_string(),
@@ -452,13 +457,39 @@ mod tests {
     }
 
     #[test]
+    fn builtin_shell_follows_shadowing_plugin() {
+        let builtin_plugins = builtin_plugins();
+        let mut table = plugin_summary(false);
+        table.id = "atelyx.tables".into();
+        table.preset = true;
+        let plugins = [table];
+        let registry = Registry::build(Snapshot {
+            builtin_plugins: &builtin_plugins,
+            contributions: &[],
+            doc_types: &[],
+            services: &[],
+            plugins: &plugins,
+            disabled_plugins: &[],
+        });
+        assert!(!registry.get("table").expect("宿主表格面板仍在册").enabled);
+        assert!(!registry
+            .builtin_plugins()
+            .iter()
+            .find(|plugin| plugin.id == "atelyx.tables")
+            .expect("内置壳在册")
+            .enabled);
+    }
+
+    #[test]
     fn services_belong_to_their_builtin_plugin() {
         let registry = registry(true, &[]);
         let markdown = registry.service("markdown");
         // 目录里没有 markdown（本测试快照只喂了三项服务），归属仍从内置目录取
         assert!(markdown.is_none());
-        let table = registry.service("table").expect("table 在册");
-        assert_eq!(table.source, Source::Builtin("atelyx.tables".into()));
+        // 表格服务由表格插件提供，不在内置目录里（登记与启停随该插件）
+        assert!(!atelyx_core::plugin_runtime::BUILTIN_SERVICES
+            .iter()
+            .any(|(name, _, _)| *name == "table"));
         let query = registry.service("query").expect("query 在册");
         assert_eq!(query.source, Source::Builtin("atelyx.platform".into()));
         let vault = registry.service("vault").expect("vault 在册");

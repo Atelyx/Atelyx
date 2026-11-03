@@ -56,6 +56,8 @@ pub mod fs {
     pub const REMOVE: &str = "fs.remove";
     pub const EXISTS: &str = "fs.exists";
     pub const LIST: &str = "fs.list";
+    /// 系统下载目录的绝对路径（定位失败回落用户主目录）：图片 / 附件下载落盘用。
+    pub const DOWNLOADS_DIR: &str = "fs.downloadsDir";
 }
 
 pub mod process {
@@ -126,10 +128,14 @@ pub mod space {
     pub const OPEN_MENU: &str = "space.openMenu";
     /// 打开宿主的「协作设置」页。
     pub const OPEN_SETTINGS: &str = "space.openSettings";
+    /// 提交一次文本文件的补丁保存（空间内容真源）：宿主按 `kind` 把「基线 → 冻结快照」的实体差异
+    /// 交服务端仲裁，回执带服务端最终路径（补丁带标题时服务端按标题改名）。
+    pub const FILE_PATCH: &str = "space.file.patch";
 }
 
-/// 表格面：读写当前打开表格。写入与宿主自身编辑同一出口（宿主合并落盘并广播协作补丁），
-/// 插件不得旁路读写 `.atb` 真源。
+/// 表格面：读写当前打开表格。方法由表格插件提供（模型与保存链都在该插件内），其它插件
+/// （表格视图贡献）经这些方法读数据、写改动；改动与插件自身编辑同一出口（同撤销栈、同保存链、
+/// 同协作广播）。
 pub mod table {
     /// 读当前打开表格的只读快照（字段 / 行 / 仓库相对路径）；未打开表格 = `open: false`。
     pub const SNAPSHOT: &str = "table.snapshot";
@@ -142,6 +148,15 @@ pub mod table {
     pub const SELECT_ROW: &str = "table.selectRow";
     /// 向图片字段单元格写入图片引用（图片须先经 `vault.writeBinary` 落到仓库）。
     pub const SET_CELL_IMAGE: &str = "table.setCellImage";
+}
+
+/// 面板头部：插件声明自己面板顶部那一行工具条的内容，宿主按当前主题渲染（状态胶囊 / 错误文本 /
+/// 协作者胶囊 / 右侧文本 / 菜单项 / 视图下拉）。头部数据全部由插件提供，宿主只负责画与转发点击。
+pub mod panel {
+    /// 声明某个面板视图的头部状态；`header` 缺省 = 收起头部。
+    pub const HEADER: &str = "panel.header";
+    /// 回应 [`crate::event::name::PANEL_FLUSH`]：`ok: false` 时带可读原因。
+    pub const FLUSH_DONE: &str = "panel.flushDone";
 }
 
 pub mod state {
@@ -243,6 +258,8 @@ pub mod frame {
 pub mod query {
     /// 批量量算文字占位尺寸（排版按真实字宽摆放，不能按字符数估）。
     pub const MEASURE: &str = "query.measure";
+    /// 系统已安装字体族清单（排序后的族名；单元格样式里的字体选择用）。
+    pub const FONTS: &str = "query.fonts";
     /// 取宿主主题表（颜色 / 字号档 / 圆角档），插件据此与宿主观感一致。
     pub const THEME: &str = "query.theme";
 }
@@ -271,6 +288,8 @@ pub mod history {
     pub const GROUPS: &str = "history.groups";
     /// 在宿主界面打开某个文件的历史弹层（版本列表与回滚由宿主承载）。
     pub const OPEN: &str = "history.open";
+    /// 域插件落盘后记一版（本地记侧文件；与上一版内容相同则不新增）。
+    pub const RECORD: &str = "history.record";
 }
 
 /// 最近打开：宿主按仓库容器身份记录的打开清单（记录与失效剔除都在宿主，插件只读）。
@@ -646,13 +665,38 @@ pub struct WindowDragParams {
     pub surface_id: String,
 }
 
+/// [`fs::DOWNLOADS_DIR`] 的 result：系统下载目录的绝对路径。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadsDirResult {
+    pub path: String,
+}
+
+/// [`query::FONTS`] 的 result：系统已安装字体族（去重排序；宿主启动时扫描一次）。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FontFamiliesResult {
+    pub families: Vec<String>,
+}
+
 /// [`query::MEASURE`] 的 result：占位宽高（逻辑像素）与换行后的行数（单行量算恒为 1）。
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+/// `segments` 在条目声明 `segments` 时给出逐行文本与宽度，供调用方自行逐行排版与绘制。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MeasureTextResult {
     pub width: f32,
     pub height: f32,
     pub lines: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub segments: Option<Vec<MeasureSegment>>,
+}
+
+/// 量算结果的单行：`text` 是该行的源文本切片，`width` 是实测行宽。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeasureSegment {
+    pub text: String,
+    pub width: f32,
 }
 
 /// 单次批量量算的条目上限。
@@ -668,8 +712,17 @@ pub struct MeasureItem {
     pub weight: Option<crate::paint::TextWeight>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub family: Option<crate::paint::TextFamily>,
+    /// 显式字体族名（与绘制指令同口径；缺省 = 按 `family` 取）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub family_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_width: Option<f32>,
+    /// 排版口径（行高倍数 / 换行 / 整形）：与绘制指令的 `layout` 同口径，量算与绘制才对得上。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<crate::paint::TextLayout>,
+    /// 要逐行行段（结果带 `segments`）：逐行排版 / 逐行绘制的调用方用。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub segments: bool,
 }
 
 impl MeasureItem {
@@ -680,6 +733,13 @@ impl MeasureItem {
         if let Some(max_width) = self.max_width {
             if !max_width.is_finite() || max_width <= 0.0 {
                 return Err("可用宽度必须大于 0".into());
+            }
+        }
+        if let Some(layout) = &self.layout {
+            if let Some(line_height) = layout.line_height {
+                if !line_height.is_finite() || line_height <= 0.0 {
+                    return Err("行高倍数必须大于 0".into());
+                }
             }
         }
         Ok(())
@@ -747,6 +807,10 @@ pub struct ThemeColors {
     pub hover: String,
     pub border: String,
     pub border_strong: String,
+    pub background: String,
+    pub border_subtle: String,
+    pub selection: String,
+    pub scrim: String,
     pub transparent: String,
 }
 
@@ -1206,6 +1270,26 @@ pub struct HistoryFileGroup {
 pub struct HistoryGroupsResult {
     pub ready: bool,
     pub groups: Vec<HistoryFileGroup>,
+}
+
+/// [`HistoryRecordParams`] 的 kind 与 action 取值域见 [`HISTORY_KINDS`]。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryRecordParams {
+    /// [`HISTORY_KINDS`] 的取值。
+    pub kind: String,
+    /// 仓库相对路径。
+    pub file: String,
+    /// 该版本的全文内容。
+    pub content: String,
+    /// `edit` / `restore`，缺省 `edit`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+    /// 编辑合并窗口（毫秒）：同窗口内的连续编辑并成一版。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coalesce_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 // ---------- recent ----------
@@ -1958,6 +2042,9 @@ pub struct PickFileParams {
     /// true = 保存对话框；取消时 result 的 `path` 字段缺省。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub save: Option<bool>,
+    /// 允许多选（只对打开对话框有意义）：结果按选择顺序给全，`path` 仍是第一个。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub multiple: bool,
     /// 预填路径：目录部分作起始目录，文件名部分预填进名称栏。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_path: Option<String>,
@@ -1986,6 +2073,9 @@ pub struct PickedPath {
     /// 用户取消时该字段缺省（serde 对 null 与缺省等价处理）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    /// 多选时的全部路径（顺序同用户选择；单选或取消为空）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -2583,6 +2673,17 @@ pub struct TableRowIdParams {
     pub row_id: String,
 }
 
+/// [`crate::event::name::TABLE_RESTORE`] 的 payload：历史回滚交回当前表格的全文快照。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableContentParams {
+    /// 目标表格的仓库相对路径（订阅方按自己打开的文件匹配）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// `.atb` 全文（JSON 文本）。
+    pub content: String,
+}
+
 /// [`table::SET_CELL_IMAGE`] 的 params：整格替换图片引用列表（`images` 为仓库相对路径，
 /// 须先经 `vault.writeBinary` 落盘）。`display` 为显示形态（如 `grid`），缺省保持宿主默认。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -2593,6 +2694,109 @@ pub struct TableSetCellImageParams {
     pub images: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display: Option<String>,
+}
+
+// ---------- panel ----------
+
+/// 头部状态胶囊的色调。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum HeaderTone {
+    #[default]
+    Normal,
+    /// 有待落盘改动（琥珀色）。
+    Pending,
+    /// 失败（红色）。
+    Danger,
+}
+
+/// 头部左侧的状态胶囊（未保存 / 保存失败这类）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HeaderStatus {
+    pub text: String,
+    #[serde(default)]
+    pub tone: HeaderTone,
+}
+
+/// 头部右侧的协作者胶囊（`color` 为 `#rrggbb` 身份色）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HeaderPill {
+    pub text: String,
+    pub color: String,
+}
+
+/// 头部「⋯」菜单的一项：点击经 [`crate::event::name::PANEL_HEADER_ACTION`] 回发 `id`。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HeaderItem {
+    pub id: String,
+    pub label: String,
+}
+
+/// 一条面板头部状态：宿主按当前主题画成面板顶部那一行工具条。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PanelHeaderState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<HeaderStatus>,
+    /// 错误文本（红色，过长由宿主截断）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pills: Vec<HeaderPill>,
+    /// 右侧依次排列的文本（缩放百分比 / 行列统计这类）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub texts: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub items: Vec<HeaderItem>,
+    /// 显示「视图」下拉时给出贡献槽（当前只有 `tableView`）；缺省不显示下拉。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view_slot: Option<ContributionSlot>,
+    /// 本面板有未落盘改动：宿主的脏拦截据此先要求插件 flush 再放行动作。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dirty: bool,
+}
+
+/// [`panel::HEADER`] 的 params：`header` 缺省 = 收起头部。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PanelHeaderParams {
+    /// 面板视图 id（壳侧视图 id，例如表格面板的 `table`）。
+    pub target: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<PanelHeaderState>,
+}
+
+/// [`crate::event::name::PANEL_FLUSH`] 的 payload：宿主请插件立即落盘，`token` 原样随
+/// [`panel::FLUSH_DONE`] 回传。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PanelFlushParams {
+    pub target: String,
+    pub token: u64,
+}
+
+/// [`panel::FLUSH_DONE`] 的 params。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PanelFlushDoneParams {
+    pub token: u64,
+    /// 宿主发起请求时给的面板视图 id：回执原样带回，宿主据此确认是哪个面板。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// [`crate::event::name::PANEL_HEADER_ACTION`] 的 payload：用户点了头部菜单的某一项。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PanelHeaderActionParams {
+    pub target: String,
+    pub item: String,
 }
 
 // ---------- tray / collab ----------
@@ -2677,6 +2881,40 @@ pub enum SpaceContainerKind {
     #[default]
     Local,
     Space,
+}
+
+/// [`space::FILE_PATCH`] 的 params：本端「上次落盘基线」与「冻结快照」两份全文，
+/// 宿主按 `kind` 求实体差异交服务端仲裁。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpaceFilePatchParams {
+    /// 仓库相对路径。
+    pub path: String,
+    /// 文件族：`table`（当前唯一支持）——决定服务端补丁端点与历史类型。
+    pub kind: String,
+    /// 上次成功保存的全文（补丁合并的基线）。
+    pub baseline: String,
+    /// 本端当前全文（冻结快照）。
+    pub frozen: String,
+}
+
+/// [`space::FILE_PATCH`] 的 result：服务端落地后的路径（补丁带标题时服务端按标题改名）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpaceFilePatchResult {
+    pub path: String,
+}
+
+/// [`crate::event::name::SPACE_FILE_PATCH`] 的 payload：别的成员改动了本端打开的空间文件。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpaceFilePatchPayload {
+    pub path: String,
+    /// 文件族（`table`），决定 `patch` 的形态。
+    pub kind: String,
+    pub patch: Value,
+    /// 服务端是否已落盘（true = 已仲裁落地；false = 转发帧）。
+    pub landed: bool,
 }
 
 /// [`space::ROOM`] 的 result：容器种类、连接态、本端身份与在线设备明细。
@@ -2936,7 +3174,7 @@ pub const PLATFORM_PLUGIN: &str = "atelyx.platform";
 /// `host:` 方法的宿主→插件通知不在其列（那不是插件可调用的能力）。条目引用常量而非字面量，
 /// 改名 / 删除常量会直接编译失败，目录不会悄悄漂移。服务随归属插件启停。
 pub const BUILTIN_SERVICES: &[(&str, &str, &[&str])] = &[
-    ("fs", PLATFORM_PLUGIN, &[fs::PRIVATE_DIR, fs::READ_TEXT, fs::WRITE_TEXT, fs::READ_BINARY, fs::WRITE_BINARY, fs::REMOVE, fs::EXISTS, fs::LIST]),
+    ("fs", PLATFORM_PLUGIN, &[fs::PRIVATE_DIR, fs::READ_TEXT, fs::WRITE_TEXT, fs::READ_BINARY, fs::WRITE_BINARY, fs::REMOVE, fs::EXISTS, fs::LIST, fs::DOWNLOADS_DIR]),
     ("process", PLATFORM_PLUGIN, &[process::SPAWN, process::WRITE_STDIN, process::CLOSE_STDIN, process::KILL]),
     ("vault", PLATFORM_PLUGIN, &[vault::READ_TEXT, vault::WRITE_TEXT, vault::READ_BINARY, vault::WRITE_BINARY, vault::IMPORT_FILE, vault::IMAGE_INFO, vault::LIST, vault::EXISTS, vault::TAGS, vault::REMOVE, vault::RENAME, vault::BACKLINKS, vault::FILES,
         // 仓库界面状态（展开集 / 排序 / 目录颜色 / 提示词标记）与条目操作，随仓库走
@@ -2952,8 +3190,9 @@ pub const BUILTIN_SERVICES: &[(&str, &str, &[&str])] = &[
     ]),
     ("collab", PLATFORM_PLUGIN, &[collab::PEERS, collab::SEND, collab::META_GET, collab::META_PATCH]),
     // 空间名册与房间事实取自宿主会话与服务端，弹层 / 菜单也在宿主，归平台自身
-    ("space", PLATFORM_PLUGIN, &[space::ROOM, space::MEMBERS, space::OPEN_MENU, space::OPEN_SETTINGS]),
-    ("table", "atelyx.tables", &[table::SNAPSHOT, table::UPDATE_CELL, table::ADD_ROW, table::REMOVE_ROW, table::SELECT_ROW, table::SET_CELL_IMAGE]),
+    ("space", PLATFORM_PLUGIN, &[space::ROOM, space::MEMBERS, space::OPEN_MENU, space::OPEN_SETTINGS, space::FILE_PATCH]),
+    // 面板头部状态与 flush 回执是宿主界面原语，随平台常驻
+    ("panel", PLATFORM_PLUGIN, &[panel::HEADER, panel::FLUSH_DONE]),
     ("state", PLATFORM_PLUGIN, &[state::READ, state::WRITE]),
     ("notification", PLATFORM_PLUGIN, &[notification::SHOW]),
     ("tray", PLATFORM_PLUGIN, &[tray::SET_ITEMS]),
@@ -2967,13 +3206,13 @@ pub const BUILTIN_SERVICES: &[(&str, &str, &[&str])] = &[
     // 对话门面由宿主编排（核心插件只是被调用的实现），服务归平台自身
     ("ai", PLATFORM_PLUGIN, &[ai::CHAT_SEND, ai::CHAT_STOP, ai::CHAT_HISTORY, ai::MODELS, ai::AGENTS, ai::CHAT_RENAME, ai::CHAT_DELETE, ai::CHAT_COMPACT, ai::CHAT_TITLE, ai::TOOL_LIST, ai::TOOL_EXECUTE, ai::CHAT_EMIT]),
     ("window", PLATFORM_PLUGIN, &[window::OPEN, window::CLOSE, window::UPDATE, window::SHOW, window::BEGIN_DRAG, window::MINIMIZE, window::TOGGLE_MAXIMIZE]),
-    ("query", PLATFORM_PLUGIN, &[query::MEASURE, query::THEME]),
+    ("query", PLATFORM_PLUGIN, &[query::MEASURE, query::THEME, query::FONTS]),
     // 编辑器选区读写作用于宿主自持的当前文档会话，随平台常驻
     ("editor", PLATFORM_PLUGIN, &[editor::SELECTION, editor::REPLACE_SELECTION, editor::OPEN_FILES, editor::OPEN_FILE, editor::PREFS]),
     // 文档会话是宿主内容真源（保存链 / 协作增量 / 历史），归平台自身，不随插件停用下线
     ("doc", PLATFORM_PLUGIN, &[doc::OPEN, doc::EDIT, doc::SAVE, doc::CLOSE, doc::AWARENESS, doc::RENAME]),
     // 历史读数取自宿主侧文件与服务端聚合，历史弹层也在宿主，与 doc 同理归平台自身
-    ("history", PLATFORM_PLUGIN, &[history::ACTIVITY, history::DAY, history::GROUPS, history::OPEN]),
+    ("history", PLATFORM_PLUGIN, &[history::ACTIVITY, history::DAY, history::GROUPS, history::OPEN, history::RECORD]),
     // 最近打开清单是宿主按容器身份记账的界面数据，记录与剔除都由宿主维护
     ("recent", PLATFORM_PLUGIN, &[recent::LIST]),
 ];

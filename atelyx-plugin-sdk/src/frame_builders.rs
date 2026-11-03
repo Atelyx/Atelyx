@@ -22,7 +22,20 @@ fn pt(x: f32, y: f32) -> PaintPoint {
 }
 
 pub fn line(x1: f32, y1: f32, x2: f32, y2: f32, stroke: PaintColor) -> DrawCommand {
-    DrawCommand::Line { x1, y1, x2, y2, stroke, width: 1.0 }
+    DrawCommand::Line { x1, y1, x2, y2, stroke, width: 1.0, dash: None }
+}
+
+/// 虚线（`dash` = 实线长 / 空白长，像素）。
+pub fn dashed_line(
+    x1: f32,
+    y1: f32,
+    x2: f32,
+    y2: f32,
+    stroke: PaintColor,
+    width: f32,
+    dash: [f32; 2],
+) -> DrawCommand {
+    DrawCommand::Line { x1, y1, x2, y2, stroke, width, dash: Some(dash) }
 }
 
 /// 矩形：`fill` 与 `stroke` 至少给其一。
@@ -92,9 +105,11 @@ pub fn text(x: f32, y: f32, content: impl Into<String>, size: f32, color: PaintC
         color,
         weight: None,
         family: None,
+        family_name: None,
         italic: false,
         max_width: None,
         align: None,
+        layout: None,
     }
 }
 
@@ -114,9 +129,11 @@ pub fn text_weighted(
         color,
         weight: Some(weight),
         family: None,
+        family_name: None,
         italic: false,
         max_width: None,
         align: None,
+        layout: None,
     }
 }
 
@@ -138,9 +155,42 @@ pub fn text_wrapped(
         color,
         weight: None,
         family: None,
+        family_name: None,
         italic: false,
         max_width: Some(max_width),
         align,
+        layout: None,
+    }
+}
+
+/// 带排版口径的文字（行高倍数 / 换行 / 整形）：与 `query.measure` 的同名口径一致，
+/// 量出来的行高与折行点才对得上绘制结果。
+pub fn text_aligned(
+    x: f32,
+    y: f32,
+    content: impl Into<String>,
+    size: f32,
+    color: PaintColor,
+    weight: Option<TextWeight>,
+    family: Option<crate::protocol::paint::TextFamily>,
+    italic: bool,
+    max_width: Option<f32>,
+    align: Option<TextAlign>,
+    layout: Option<crate::protocol::paint::TextLayout>,
+) -> DrawCommand {
+    DrawCommand::Text {
+        x,
+        y,
+        content: content.into(),
+        size,
+        color,
+        weight,
+        family,
+        family_name: None,
+        italic,
+        max_width,
+        align,
+        layout,
     }
 }
 
@@ -185,7 +235,7 @@ pub fn ime_rect(x: f32, y: f32, w: f32, h: f32) -> FrameRect {
 
 /// 帧外壳：指令与命中区，不声明按键 / 输入法 / 帧率。
 pub fn frame(commands: Vec<DrawCommand>, hits: Vec<HitRegion>) -> SurfaceFrame {
-    SurfaceFrame { size: None, commands, hits, ime: None, keys: false, fps: None }
+    SurfaceFrame { size: None, commands, hits, ime: None, keys: false, fps: None, popup: None }
 }
 
 /// 声明本面收键盘：指针按下取焦，随后全部按键（含修饰键组合）经 `FrameInput::Key` 回发。

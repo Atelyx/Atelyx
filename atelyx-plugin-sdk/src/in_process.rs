@@ -16,13 +16,14 @@ use crate::context::{Context, FrameSubmit, LogSink, PendingHandle, ServiceReply}
 use crate::handler::{self, PluginHandler};
 use crate::protocol::envelope::{Envelope, RpcError};
 use crate::protocol::frame::{
-    FrameInput, FrameRect, HitCursor, Key, KeyAction, Modifiers, MouseButton, NamedKey,
-    SurfaceFrame,
+    FrameInput, FrameRect, HitCursor, HitRegion, Key, KeyAction, Modifiers, MouseButton, NamedKey,
+    PopupCapture, SurfaceFrame,
 };
 use crate::protocol::handshake::{self, InitializeParams, PluginInfo};
 use crate::protocol::method::{SubmitResult, SurfaceKind};
 use crate::protocol::paint::{
-    ColorToken, DrawCommand, ImageFit, ImageSource, PaintColor, TextAlign, TextFamily, TextWeight,
+    ColorToken, DrawCommand, ImageFit, ImageSource, PaintColor, TextAlign, TextFamily, TextShaping,
+    TextWeight, TextWrap,
 };
 use crate::protocol::service::HostCallParams;
 
@@ -506,6 +507,7 @@ fn input_from_abi(input: &abi::AbiInput) -> Option<FrameInput> {
         },
         abi::INPUT_POINTER_MOVE => FrameInput::PointerMove { x: input.x, y: input.y, hit },
         abi::INPUT_POINTER_LEAVE => FrameInput::PointerLeave,
+        abi::INPUT_OUTSIDE => FrameInput::Outside { x: input.x, y: input.y },
         abi::INPUT_DOUBLE_CLICK => FrameInput::DoubleClick {
             x: input.x,
             y: input.y,
@@ -517,6 +519,7 @@ fn input_from_abi(input: &abi::AbiInput) -> Option<FrameInput> {
             y: input.y,
             delta_x: input.delta_x,
             delta_y: input.delta_y,
+            modifiers: modifiers_from_bits(input.modifiers),
             hit,
         },
         abi::INPUT_KEY => {
@@ -609,41 +612,50 @@ struct FrameBuffer<'a> {
     keys: bool,
     fps: u32,
     size: Option<(f32, f32)>,
+    popup_rect: Option<abi::AbiRect>,
+    popup_capture: u32,
+    popup_commands: Vec<abi::AbiCommand>,
+    popup_hits: Vec<abi::AbiHit>,
+    popup_ime: Option<abi::AbiRect>,
     /// ABI 指针借自提交帧：帧在 `submit` 返回前一直存活，字符串无需再复制一份。
     _frame: PhantomData<&'a SurfaceFrame>,
 }
 
 impl<'a> FrameBuffer<'a> {
     fn new(frame: &'a SurfaceFrame) -> Self {
+        let popup = frame.popup.as_ref();
         let mut buffer = Self {
             _frame: PhantomData,
             points: Vec::new(),
             commands: Vec::with_capacity(frame.commands.len()),
             hits: Vec::with_capacity(frame.hits.len()),
-            ime: frame.ime.map(|rect| {
-                abi::AbiRect::filled(rect.x, rect.y, rect.w, rect.h, 0.0, abi::AbiColor::TRANSPARENT)
-            }),
+            ime: frame.ime.map(abi_rect),
             keys: frame.keys,
             fps: frame.fps.map(u32::from).unwrap_or(0),
             size: frame.size.map(|size| (size.w, size.h)),
+            popup_rect: popup.map(|value| abi_rect(value.rect)),
+            popup_capture: popup
+                .map(|value| popup_capture_code(value.capture))
+                .unwrap_or(abi::POPUP_CAPTURE_INSIDE),
+            popup_commands: Vec::new(),
+            popup_hits: Vec::new(),
+            popup_ime: popup.and_then(|value| value.ime).map(abi_rect),
         };
         for command in &frame.commands {
-            buffer.command(command);
+            buffer.command(command, false);
         }
         for hit in &frame.hits {
-            let id = abi::AbiStr::new(&hit.id);
-            buffer.hits.push(abi::AbiHit {
-                id,
-                rect: abi::AbiRect::filled(
-                    hit.x,
-                    hit.y,
-                    hit.w,
-                    hit.h,
-                    0.0,
-                    abi::AbiColor::TRANSPARENT,
-                ),
-                cursor: cursor_code(hit.cursor.unwrap_or_default()),
-            });
+            buffer.hit(hit, false);
+        }
+        if let Some(popup) = popup {
+            buffer.popup_commands.reserve(popup.commands.len());
+            buffer.popup_hits.reserve(popup.hits.len());
+            for command in &popup.commands {
+                buffer.command(command, true);
+            }
+            for hit in &popup.hits {
+                buffer.hit(hit, true);
+            }
         }
         buffer
     }
@@ -661,19 +673,60 @@ impl<'a> FrameBuffer<'a> {
             has_size: self.size.is_some() as u8,
             layout_w: self.size.map(|size| size.0).unwrap_or(0.0),
             layout_h: self.size.map(|size| size.1).unwrap_or(0.0),
+            has_popup: self.popup_rect.is_some() as u8,
+            popup_rect: self.popup_rect.unwrap_or_else(|| abi::AbiRect::empty_at(0.0, 0.0)),
+            popup_capture: self.popup_capture,
+            popup_commands: self.popup_commands.as_ptr(),
+            popup_commands_len: self.popup_commands.len(),
+            popup_hits: self.popup_hits.as_ptr(),
+            popup_hits_len: self.popup_hits.len(),
+            has_popup_ime: self.popup_ime.is_some() as u8,
+            popup_ime: self.popup_ime.unwrap_or_else(|| abi::AbiRect::empty_at(0.0, 0.0)),
         }
     }
 
-    fn command(&mut self, command: &'a DrawCommand) {
+    fn hit(&mut self, hit: &'a HitRegion, popup: bool) {
+        let value = abi::AbiHit {
+            id: abi::AbiStr::new(&hit.id),
+            rect: abi::AbiRect::filled(
+                hit.x,
+                hit.y,
+                hit.w,
+                hit.h,
+                0.0,
+                abi::AbiColor::TRANSPARENT,
+            ),
+            cursor: cursor_code(hit.cursor.unwrap_or_default()),
+        };
+        if popup {
+            self.popup_hits.push(value);
+        } else {
+            self.hits.push(value);
+        }
+    }
+
+    fn push(&mut self, value: abi::AbiCommand, popup: bool) {
+        if popup {
+            self.popup_commands.push(value);
+        } else {
+            self.commands.push(value);
+        }
+    }
+
+    fn command(&mut self, command: &'a DrawCommand, popup: bool) {
         match command {
-            DrawCommand::Line { x1, y1, x2, y2, stroke, width } => {
+            DrawCommand::Line { x1, y1, x2, y2, stroke, width, dash } => {
                 let mut value = base(abi::CMD_LINE, rect(*x1, *y1, 0.0, 0.0, 0.0));
                 value.rect.stroke = color(*stroke);
                 value.rect.has_stroke = 1;
                 value.rect.stroke_width = *width;
                 value.line_x2 = *x2;
                 value.line_y2 = *y2;
-                self.commands.push(value);
+                if let Some([on, off]) = *dash {
+                    value.line_dash_on = on;
+                    value.line_dash_off = off;
+                }
+                self.push(value, popup);
             }
             DrawCommand::Rect {
                 x,
@@ -700,7 +753,7 @@ impl<'a> FrameBuffer<'a> {
                         enabled: 1,
                     };
                 }
-                self.commands.push(value);
+                self.push(value, popup);
             }
             DrawCommand::Path { points, closed, fill, stroke, stroke_width } => {
                 self.points.push(
@@ -715,7 +768,7 @@ impl<'a> FrameBuffer<'a> {
                 value.points = points.as_ptr();
                 value.points_len = points.len();
                 value.closed = *closed as u8;
-                self.commands.push(value);
+                self.push(value, popup);
             }
             DrawCommand::Circle { cx, cy, r, fill, stroke, stroke_width } => {
                 let mut value = base(abi::CMD_CIRCLE, abi::AbiRect::empty_at(0.0, 0.0));
@@ -723,7 +776,7 @@ impl<'a> FrameBuffer<'a> {
                 value.circle_cx = *cx;
                 value.circle_cy = *cy;
                 value.circle_r = *r;
-                self.commands.push(value);
+                self.push(value, popup);
             }
             DrawCommand::Text {
                 x,
@@ -733,9 +786,11 @@ impl<'a> FrameBuffer<'a> {
                 color: text_color,
                 weight,
                 family,
+                family_name,
                 italic,
                 max_width,
                 align,
+                layout,
             } => {
                 let text = abi::AbiStr::new(content);
                 let mut value = base(abi::CMD_TEXT, abi::AbiRect::empty_at(*x, *y));
@@ -744,20 +799,30 @@ impl<'a> FrameBuffer<'a> {
                 value.text_color = color(*text_color);
                 value.text_weight = weight_code(*weight);
                 value.text_family = family_code(*family);
+                value.text_family_name = family_name
+                    .as_deref()
+                    .map(abi::AbiStr::new)
+                    .unwrap_or(abi::AbiStr::EMPTY);
                 value.text_align = align_code(*align);
                 value.text_italic = u8::from(*italic);
                 value.text_max_width = max_width.unwrap_or(0.0);
-                self.commands.push(value);
+                if let Some(layout) = layout {
+                    value.text_line_height = layout.line_height.unwrap_or(0.0);
+                    value.text_wrap = layout.wrap.map(wrap_code).unwrap_or(abi::TEXT_WRAP_WORD);
+                    value.text_shaping = shaping_code(layout.shaping);
+                }
+                self.push(value, popup);
             }
             DrawCommand::Image { source, x, y, w, h, fit } => {
-                let (kind, path, local) = image_source(source);
+                let (kind, path, local, max_edge) = image_source(source);
                 let path = abi::AbiStr::new(path);
                 let mut value = base(abi::CMD_IMAGE, rect(*x, *y, *w, *h, 0.0));
                 value.image_source = kind;
                 value.image_path = path;
                 value.image_local = local as u8;
                 value.image_fit = fit_code(*fit);
-                self.commands.push(value);
+                value.image_max_edge = max_edge;
+                self.push(value, popup);
             }
         }
     }
@@ -788,7 +853,19 @@ fn base(kind: u32, rect: abi::AbiRect) -> abi::AbiCommand {
         image_path: abi::AbiStr::EMPTY,
         image_local: 0,
         image_fit: abi::FIT_FILL,
+        text_line_height: 0.0,
+        text_wrap: abi::TEXT_WRAP_WORD,
+        text_shaping: abi::TEXT_SHAPING_AUTO,
+        line_dash_on: 0.0,
+        line_dash_off: 0.0,
+        image_max_edge: 0,
+        text_family_name: abi::AbiStr::EMPTY,
     }
+}
+
+/// 协议矩形 → ABI 矩形：填充 / 描边只承载几何时保持空值。
+fn abi_rect(rect: FrameRect) -> abi::AbiRect {
+    abi::AbiRect::filled(rect.x, rect.y, rect.w, rect.h, 0.0, abi::AbiColor::TRANSPARENT)
 }
 
 fn rect(x: f32, y: f32, w: f32, h: f32, radius: f32) -> abi::AbiRect {
@@ -838,6 +915,10 @@ fn token_code(name: ColorToken) -> u32 {
         ColorToken::Hover => abi::TOKEN_HOVER,
         ColorToken::Border => abi::TOKEN_BORDER,
         ColorToken::BorderStrong => abi::TOKEN_BORDER_STRONG,
+        ColorToken::Background => abi::TOKEN_BACKGROUND,
+        ColorToken::BorderSubtle => abi::TOKEN_BORDER_SUBTLE,
+        ColorToken::Selection => abi::TOKEN_SELECTION,
+        ColorToken::Scrim => abi::TOKEN_SCRIM,
         ColorToken::Transparent => abi::TOKEN_TRANSPARENT,
         ColorToken::SurfaceOverlay => abi::TOKEN_SURFACE_OVERLAY,
     }
@@ -847,6 +928,7 @@ fn weight_code(weight: Option<TextWeight>) -> u32 {
     match weight {
         Some(TextWeight::Medium) => abi::WEIGHT_MEDIUM,
         Some(TextWeight::SemiBold) => abi::WEIGHT_SEMI_BOLD,
+        Some(TextWeight::Bold) => abi::WEIGHT_BOLD,
         _ => abi::WEIGHT_NORMAL,
     }
 }
@@ -874,6 +956,28 @@ fn fit_code(fit: Option<ImageFit>) -> u32 {
     }
 }
 
+fn wrap_code(wrap: TextWrap) -> u32 {
+    match wrap {
+        TextWrap::Word => abi::TEXT_WRAP_WORD,
+        TextWrap::WordOrGlyph => abi::TEXT_WRAP_WORD_OR_GLYPH,
+    }
+}
+
+fn shaping_code(shaping: Option<TextShaping>) -> u32 {
+    match shaping {
+        Some(TextShaping::Basic) => abi::TEXT_SHAPING_BASIC,
+        Some(TextShaping::Advanced) => abi::TEXT_SHAPING_ADVANCED,
+        _ => abi::TEXT_SHAPING_AUTO,
+    }
+}
+
+fn popup_capture_code(capture: PopupCapture) -> u32 {
+    match capture {
+        PopupCapture::Inside => abi::POPUP_CAPTURE_INSIDE,
+        PopupCapture::All => abi::POPUP_CAPTURE_ALL,
+    }
+}
+
 fn cursor_code(cursor: HitCursor) -> u32 {
     match cursor {
         HitCursor::Default => abi::CURSOR_DEFAULT,
@@ -888,20 +992,22 @@ fn cursor_code(cursor: HitCursor) -> u32 {
     }
 }
 
-fn image_source(source: &ImageSource) -> (u32, &str, bool) {
+fn image_source(source: &ImageSource) -> (u32, &str, bool, u32) {
     match source {
-        ImageSource::Private { path } => (abi::IMAGE_PRIVATE, path, false),
-        ImageSource::Vault { path } => (abi::IMAGE_VAULT, path, false),
-        ImageSource::Url { url, local } => (abi::IMAGE_URL, url, local.unwrap_or(false)),
-        ImageSource::File { path } => (abi::IMAGE_FILE, path, false),
+        ImageSource::Private { path } => (abi::IMAGE_PRIVATE, path, false, 0),
+        ImageSource::Vault { path, max_edge } => {
+            (abi::IMAGE_VAULT, path, false, max_edge.unwrap_or(0))
+        }
+        ImageSource::Url { url, local } => (abi::IMAGE_URL, url, local.unwrap_or(false), 0),
+        ImageSource::File { path } => (abi::IMAGE_FILE, path, false, 0),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::frame::HitRegion;
-    use crate::protocol::paint::PaintPoint;
+    use crate::protocol::frame::SurfacePopup;
+    use crate::protocol::paint::{PaintPoint, TextLayout};
 
     fn surface_frame() -> SurfaceFrame {
         SurfaceFrame {
@@ -914,6 +1020,7 @@ mod tests {
                     y2: 3.0,
                     stroke: PaintColor::Token { name: ColorToken::Border },
                     width: 1.5,
+                    dash: Some([4.0, 2.0]),
                 },
                 DrawCommand::Rect {
                     x: 4.0,
@@ -949,12 +1056,21 @@ mod tests {
                     color: PaintColor::Token { name: ColorToken::Text },
                     weight: Some(TextWeight::SemiBold),
                     family: Some(TextFamily::Mono),
+                    family_name: Some("Noto Sans".into()),
                     italic: false,
                     max_width: Some(80.0),
                     align: Some(TextAlign::Center),
+                    layout: Some(TextLayout {
+                        line_height: Some(1.5),
+                        wrap: Some(TextWrap::WordOrGlyph),
+                        shaping: Some(TextShaping::Advanced),
+                    }),
                 },
                 DrawCommand::Image {
-                    source: ImageSource::Vault { path: "note.png".into() },
+                    source: ImageSource::Vault {
+                        path: "note.png".into(),
+                        max_edge: Some(160),
+                    },
                     x: 0.0,
                     y: 0.0,
                     w: 16.0,
@@ -973,6 +1089,30 @@ mod tests {
             ime: Some(FrameRect { x: 1.0, y: 2.0, w: 3.0, h: 18.0 }),
             keys: true,
             fps: Some(30),
+            popup: Some(SurfacePopup {
+                rect: FrameRect { x: 10.0, y: 20.0, w: 100.0, h: 80.0 },
+                capture: PopupCapture::All,
+                commands: vec![DrawCommand::Rect {
+                    x: 1.0,
+                    y: 2.0,
+                    w: 30.0,
+                    h: 40.0,
+                    fill: Some(PaintColor::Rgba { rgba: [5, 6, 7, 8] }),
+                    stroke: None,
+                    stroke_width: None,
+                    corner_radius: None,
+                    shadow: None,
+                }],
+                hits: vec![HitRegion {
+                    id: "popup-row".into(),
+                    x: 1.0,
+                    y: 2.0,
+                    w: 30.0,
+                    h: 40.0,
+                    cursor: Some(HitCursor::Text),
+                }],
+                ime: Some(FrameRect { x: 4.0, y: 5.0, w: 6.0, h: 18.0 }),
+            }),
         }
     }
 
@@ -996,6 +1136,8 @@ mod tests {
         let commands = unsafe { std::slice::from_raw_parts(raw.commands, raw.commands_len) };
         assert_eq!(commands[0].kind, abi::CMD_LINE);
         assert_eq!(commands[0].line_x2, 2.0);
+        assert_eq!(commands[0].line_dash_on, 4.0);
+        assert_eq!(commands[0].line_dash_off, 2.0);
         assert_eq!(commands[0].rect.stroke.kind, abi::COLOR_TOKEN);
         assert_eq!(commands[0].rect.stroke.token, abi::TOKEN_BORDER);
         assert_eq!(commands[1].kind, abi::CMD_RECT);
@@ -1016,14 +1158,42 @@ mod tests {
         assert_eq!(commands[4].text.data, content.as_ptr(), "字符串应借用提交帧，不再复制");
         assert_eq!(commands[4].text_weight, abi::WEIGHT_SEMI_BOLD);
         assert_eq!(commands[4].text_family, abi::FAMILY_MONO);
+        assert_eq!(str_of(commands[4].text_family_name), "Noto Sans");
         assert_eq!(commands[4].text_align, abi::ALIGN_CENTER);
         assert_eq!(commands[4].text_max_width, 80.0);
+        assert_eq!(commands[4].text_line_height, 1.5);
+        assert_eq!(commands[4].text_wrap, abi::TEXT_WRAP_WORD_OR_GLYPH);
+        assert_eq!(commands[4].text_shaping, abi::TEXT_SHAPING_ADVANCED);
         assert_eq!(commands[5].kind, abi::CMD_IMAGE);
         assert_eq!(commands[5].image_source, abi::IMAGE_VAULT);
+        assert_eq!(commands[5].image_max_edge, 160);
         assert_eq!(str_of(commands[5].image_path), "note.png");
         let hits = unsafe { std::slice::from_raw_parts(raw.hits, raw.hits_len) };
         assert_eq!(str_of(hits[0].id), "button");
         assert_eq!(hits[0].cursor, abi::CURSOR_POINTER);
+        assert_eq!(raw.has_popup, 1);
+        assert_eq!(raw.popup_rect.x, 10.0);
+        assert_eq!(raw.popup_rect.h, 80.0);
+        assert_eq!(raw.popup_capture, abi::POPUP_CAPTURE_ALL);
+        assert_eq!(raw.popup_commands_len, 1);
+        assert_eq!(raw.popup_hits_len, 1);
+        assert_eq!(raw.has_popup_ime, 1);
+        assert_eq!(raw.popup_ime.w, 6.0);
+        let popup_commands =
+            unsafe { std::slice::from_raw_parts(raw.popup_commands, raw.popup_commands_len) };
+        assert_eq!(popup_commands[0].kind, abi::CMD_RECT);
+        assert_eq!(popup_commands[0].rect.fill.r, 5);
+        let popup_hits = unsafe { std::slice::from_raw_parts(raw.popup_hits, raw.popup_hits_len) };
+        assert_eq!(str_of(popup_hits[0].id), "popup-row");
+        assert_eq!(popup_hits[0].cursor, abi::CURSOR_TEXT);
+        for (token, code) in [
+            (ColorToken::Background, abi::TOKEN_BACKGROUND),
+            (ColorToken::BorderSubtle, abi::TOKEN_BORDER_SUBTLE),
+            (ColorToken::Selection, abi::TOKEN_SELECTION),
+            (ColorToken::Scrim, abi::TOKEN_SCRIM),
+        ] {
+            assert_eq!(token_code(token), code);
+        }
     }
 
     fn empty_input(kind: u32) -> abi::AbiInput {
@@ -1104,6 +1274,14 @@ mod tests {
         assert_eq!(
             input_from_abi(&resize),
             Some(FrameInput::Resize { width: 640.0, height: 480.0 })
+        );
+
+        let mut outside = empty_input(abi::INPUT_OUTSIDE);
+        outside.x = 12.0;
+        outside.y = 34.0;
+        assert_eq!(
+            input_from_abi(&outside),
+            Some(FrameInput::Outside { x: 12.0, y: 34.0 })
         );
         assert!(input_from_abi(&empty_input(9999)).is_none());
     }

@@ -1,0 +1,455 @@
+//! 会话装配与本地保存链：当前表格取自宿主打开文件集合；保存走「读盘 → 基线补丁合并 →
+//! 写盘队列」，与宿主编辑同一套落盘语义（只认磁盘事实，不覆盖外部改动未触及的实体）。
+
+use atelyx_format::table::{self, TableFile};
+use atelyx_plugin_protocol::event;
+use atelyx_plugin_protocol::method::HistoryRecordParams;
+use atelyx_plugin_sdk::Context;
+
+use crate::model::Session;
+use crate::PluginState;
+
+/// 宿主当前打开的表格路径（打开文件集合里唯一的 `.atb`）。
+async fn open_table_path(ctx: &Context) -> Option<String> {
+    let files = ctx.open_files().await.ok()?;
+    files.into_iter().find(|path| path.ends_with(".atb"))
+}
+
+/// 当前会话的表格路径。
+pub fn current_file(plugin: &PluginState) -> Option<String> {
+    plugin
+        .session
+        .lock()
+        .ok()
+        .and_then(|session| session.as_ref().map(|session| session.file.clone()))
+}
+
+/// 按宿主打开的文件集合载入 / 关闭表格会话。
+pub async fn reload_from_open_files(plugin: &PluginState, ctx: &Context) {
+    let target = open_table_path(ctx).await;
+    let previous = current_file(plugin);
+    if previous == target {
+        return;
+    }
+    if let Some(old) = previous.as_deref() {
+        crate::presence::publish_leave(plugin, ctx, old).await;
+    }
+    let Some(path) = target else {
+        if let Ok(mut session) = plugin.session.lock() {
+            *session = None;
+        }
+        if let Some(old) = previous.as_deref() {
+            emit_changed(ctx, old).await;
+        }
+        notify_selection(plugin, ctx).await;
+        return;
+    };
+    // 改名（本端补丁回执 / 空间远端改标题）只换路径，不重载：脏会话里的编辑与撤销栈
+    // 仍属于同一实体，清会话会把未落盘内容丢掉
+    let dirty_id = plugin
+        .with_session(|session| session.dirty.then(|| session.data.id.clone()))
+        .flatten();
+    let text = match ctx.vault_read_text(&path).await {
+        Ok(text) => text,
+        Err(error) => {
+            if let Some(id) = dirty_id.as_deref() {
+                let migrated = plugin
+                    .with_session_mut(|session| {
+                        if session.data.id != id {
+                            return false;
+                        }
+                        session.file = path.clone();
+                        session.data.title = title_of(&path);
+                        session.saved.title = session.data.title.clone();
+                        true
+                    })
+                    .unwrap_or(false);
+                if migrated {
+                    crate::presence::publish_selection(plugin, ctx).await;
+                    notify_selection(plugin, ctx).await;
+                    emit_changed(ctx, &path).await;
+                    return;
+                }
+            }
+            ctx.log_error(&format!("读取表格失败（{path}）：{error}"));
+            let _ = ctx
+                .notify(
+                    "打开表格失败",
+                    Some(&error.to_string()),
+                    atelyx_plugin_protocol::method::NotificationLevel::Error,
+                )
+                .await;
+            if let Ok(mut session) = plugin.session.lock() {
+                *session = None;
+            }
+            return;
+        }
+    };
+    let mut data: TableFile = match serde_json::from_str(&text) {
+        Ok(data) => data,
+        Err(error) => {
+            ctx.log_error(&format!("表格解析失败（{path}）：{error}"));
+            let _ = ctx
+                .notify(
+                    "打开表格失败",
+                    Some(&error.to_string()),
+                    atelyx_plugin_protocol::method::NotificationLevel::Error,
+                )
+                .await;
+            if let Ok(mut session) = plugin.session.lock() {
+                *session = None;
+            }
+            return;
+        }
+    };
+    for row in &mut data.rows {
+        atelyx_format::table::ops::normalize_table_row(row);
+    }
+    // 内嵌标题以文件名为真源（改名后旧标题不可信）
+    data.title = title_of(&path);
+    let migrated = dirty_id.as_deref().is_some_and(|id| {
+        plugin
+            .with_session_mut(|session| {
+                if session.data.id != id || data.id != id {
+                    return false;
+                }
+                session.file = path.clone();
+                session.data.title = data.title.clone();
+                session.saved.title = data.title.clone();
+                true
+            })
+            .unwrap_or(false)
+    });
+    if migrated {
+        crate::presence::publish_selection(plugin, ctx).await;
+        notify_selection(plugin, ctx).await;
+        emit_changed(ctx, &path).await;
+        return;
+    }
+    // 确实换了另一张表：先关旧会话，载入失败时界面不能继续显示上一张表，更不能按旧路径写回
+    if let Ok(mut session) = plugin.session.lock() {
+        *session = None;
+    }
+    let mut session = Session::new(path, data);
+    if let Ok(size) = plugin.surface_size.lock() {
+        session.view.canvas_size = *size;
+    }
+    if let Ok(mut slot) = plugin.session.lock() {
+        *slot = Some(session);
+    }
+    crate::presence::publish_selection(plugin, ctx).await;
+    notify_selection(plugin, ctx).await;
+    notify_changed(plugin, ctx).await;
+}
+
+/// 宿主历史回滚交回的快照：整体替换数据并置脏（撤销可回退这一步）。
+pub fn restore_snapshot(plugin: &PluginState, path: &str, content: &str) -> bool {
+    let Ok(mut slot) = plugin.session.lock() else { return false };
+    let Some(session) = slot.as_mut() else { return false };
+    if session.file != path {
+        return false;
+    }
+    let Ok(mut data) = serde_json::from_str::<TableFile>(content) else { return false };
+    for row in &mut data.rows {
+        atelyx_format::table::ops::normalize_table_row(row);
+    }
+    data.title = session.data.title.clone();
+    session.view.undo.push((session.data.fields.clone(), session.data.rows.clone()));
+    if session.view.undo.len() > crate::model::UNDO_DEPTH {
+        session.view.undo.remove(0);
+    }
+    session.data = data;
+    session.view.redo.clear();
+    session.view.editing = None;
+    session.view.selection = None;
+    session.touch();
+    true
+}
+
+/// 空间远端补丁合入：作废撤销栈（栈内快照是合入前的本端全量数据）。
+pub fn apply_remote_patch(plugin: &PluginState, path: &str, patch: &serde_json::Value, landed: bool) -> bool {
+    let Ok(mut slot) = plugin.session.lock() else { return false };
+    let Some(session) = slot.as_mut() else { return false };
+    if session.file != path {
+        return false;
+    }
+    let Ok(patch) = serde_json::from_value::<table::TablePatch>(patch.clone()) else {
+        return false;
+    };
+    if patch.id != session.data.id {
+        return false;
+    }
+    table::apply_table_patch(&mut session.data, &patch);
+    session.version += 1;
+    session.rebuild_layout();
+    session.view.undo.clear();
+    session.view.redo.clear();
+    if landed && !session.dirty {
+        session.saved = session.data.clone();
+    }
+    true
+}
+
+/// 文件名主名（去扩展名）：内嵌标题的唯一真源。
+pub fn title_of(path: &str) -> String {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    name.rsplit_once('.').map(|(stem, _)| stem).unwrap_or(name).to_string()
+}
+
+/// 保存触发原因：自动保存不打断在途编辑；手动保存与 flush 先提交草稿。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SaveReason {
+    Auto,
+    Manual,
+    Flush,
+}
+
+/// 保存：空间模式交服务端补丁仲裁；本地模式读盘合并后写盘并记历史。
+/// 返回本次冻结快照是否已是当前数据（false = 写盘期间又有编辑，调用方保持脏）。
+pub async fn save(
+    plugin: &PluginState,
+    ctx: &Context,
+    reason: SaveReason,
+) -> Result<bool, String> {
+    if reason != SaveReason::Auto {
+        commit_draft(plugin);
+    }
+    if space_container(ctx).await? {
+        return save_space(plugin, ctx).await;
+    }
+    let (file, epoch, baseline, mut frozen) = {
+        let Ok(slot) = plugin.session.lock() else {
+            return Err("会话状态不可用".to_string());
+        };
+        let Some(session) = slot.as_ref() else {
+            return Ok(true);
+        };
+        if !session.dirty {
+            return Ok(true);
+        }
+        (session.file.clone(), session.epoch, session.saved.clone(), session.data.clone())
+    };
+    frozen.title = title_of(&file);
+    let mut target = match ctx.vault_read_text(&file).await {
+        Ok(text) => match serde_json::from_str::<TableFile>(&text) {
+            // 磁盘仍是同一实体：把本端改动按实体合并上去
+            Ok(mut disk) if disk.id == frozen.id => {
+                if let Some(patch) = table::compute_table_patch(&baseline, &frozen) {
+                    table::apply_table_patch(&mut disk, &patch);
+                }
+                disk
+            }
+            // 盘上换了个文件（被替换 / 删了重建）：以本端全量为准
+            Ok(_) => frozen.clone(),
+            Err(_) => frozen.clone(),
+        },
+        Err(_) => frozen.clone(),
+    };
+    target.title = title_of(&file);
+    target.updated_at = now_secs();
+    // 读盘到写盘之间切了仓库 / 换了文件：这次快照已不属于当前会话，不能写进新容器
+    let still_current = plugin
+        .with_session(|session| session.epoch == epoch && session.file == file)
+        .unwrap_or(false);
+    if !still_current {
+        return Ok(true);
+    }
+    let json = serde_json::to_string_pretty(&target).map_err(|e| e.to_string())?;
+    ctx.vault_write_text(&file, &json).await.map_err(|e| e.to_string())?;
+    let stable = settle(plugin, &file, epoch, frozen.clone());
+    if stable {
+        let content = serde_json::to_string(&frozen).map_err(|e| e.to_string())?;
+        let params = HistoryRecordParams {
+            kind: "table".to_string(),
+            file: file.clone(),
+            content,
+            action: Some("edit".to_string()),
+            coalesce_ms: Some(60_000),
+            note: None,
+        };
+        if let Err(error) = ctx.history_record(&params).await {
+            ctx.log_error(&format!("记录表格历史失败：{error}"));
+            let _ = ctx
+                .notify(
+                    "历史版本记录失败",
+                    Some(&error.to_string()),
+                    atelyx_plugin_protocol::method::NotificationLevel::Error,
+                )
+                .await;
+        }
+    }
+    Ok(stable)
+}
+
+/// 当前墙钟秒（表格 `updatedAt` 与宿主同一口径）。
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// 通知宿主「当前表格内容已结算」：第三方表格视图据此重取快照。
+pub async fn notify_changed(plugin: &PluginState, ctx: &Context) {
+    let Some(path) = current_file(plugin) else { return };
+    emit_changed(ctx, &path).await;
+}
+
+/// 按显式路径广播变更：关闭表格后当前文件已不在，订阅方仍要知道旧表已失效。
+async fn emit_changed(ctx: &Context, path: &str) {
+    let payload = serde_json::json!({ "path": path });
+    if let Err(error) = ctx.event_emit(event::name::TABLE_CHANGED, payload).await {
+        ctx.log_error(&format!("发布表格变更失败：{error}"));
+    }
+}
+
+/// 选区快照（宿主与第三方表格视图据此对齐选中格，含其他协作者的选区）。
+pub fn selection_payload(plugin: &crate::PluginState) -> Option<serde_json::Value> {
+    plugin.with_session(|session| {
+        let selection = session
+            .view
+            .selection
+            .as_ref()
+            .and_then(|selection| serde_json::to_value(to_wire(selection)).ok());
+        let remote_selections = plugin
+            .presence
+            .lock()
+            .map(|presence| {
+                presence.remote_selections(&session.data.fields, &session.data.rows)
+            })
+            .unwrap_or_default();
+        serde_json::json!({
+            "path": session.file,
+            "selection": selection,
+            "remoteSelections": remote_selections,
+        })
+    })
+}
+
+/// 本地选区 → 协议选区（字段 / 行 id 原样，宿主不解释）。
+fn to_wire(selection: &atelyx_format::table::ops::TableSelection) -> serde_json::Value {
+    use atelyx_format::table::ops::TableSelection;
+    match selection {
+        TableSelection::Cell { row_id, field_id } => {
+            serde_json::json!({ "kind": "cell", "rowId": row_id, "fieldId": field_id })
+        }
+        TableSelection::Range { anchor_row_id, anchor_field_id, row_id, field_id } => {
+            serde_json::json!({
+                "kind": "range",
+                "anchorRowId": anchor_row_id,
+                "anchorFieldId": anchor_field_id,
+                "rowId": row_id,
+                "fieldId": field_id
+            })
+        }
+        TableSelection::Row(row_id) => serde_json::json!({ "kind": "row", "rowId": row_id }),
+        TableSelection::Column(field_id) => {
+            serde_json::json!({ "kind": "column", "fieldId": field_id })
+        }
+        TableSelection::All => serde_json::json!({ "kind": "all" }),
+    }
+}
+
+/// 发布选区变化（内容不变、只有选区移动也发）。
+pub async fn notify_selection(plugin: &crate::PluginState, ctx: &Context) {
+    // 无打开表格也要发一次空载荷：订阅方据此知道上一张表的选区已失效
+    let payload = selection_payload(plugin).unwrap_or_else(|| serde_json::json!({}));
+    if let Err(error) = ctx
+        .event_emit(event::name::TABLE_SELECTION_CHANGED, payload)
+        .await
+    {
+        ctx.log_error(&format!("发布表格选区失败：{error}"));
+    }
+}
+
+/// 空间模式保存：基线 + 冻结快照交宿主 `space.file.patch`，回执带服务端最终路径
+/// （补丁带标题时服务端按标题改名），随后把基线推进到冻结快照。
+async fn save_space(plugin: &PluginState, ctx: &Context) -> Result<bool, String> {
+    let (file, epoch, baseline, mut frozen) = {
+        let Ok(slot) = plugin.session.lock() else {
+            return Err("会话状态不可用".to_string());
+        };
+        let Some(session) = slot.as_ref() else {
+            return Ok(true);
+        };
+        if !session.dirty {
+            return Ok(true);
+        }
+        (session.file.clone(), session.epoch, session.saved.clone(), session.data.clone())
+    };
+    let params = atelyx_plugin_protocol::method::SpaceFilePatchParams {
+        path: file.clone(),
+        kind: "table".to_string(),
+        baseline: serde_json::to_string(&baseline).map_err(|e| e.to_string())?,
+        frozen: serde_json::to_string(&frozen).map_err(|e| e.to_string())?,
+    };
+    let result = ctx
+        .space_file_patch(&params)
+        .await
+        .map_err(|e| e.to_string())?;
+    let new_path = if result.path.is_empty() { file } else { result.path };
+    frozen.title = title_of(&new_path);
+    let mut stable = false;
+    if let Ok(mut slot) = plugin.session.lock() {
+        if let Some(session) = slot.as_mut().filter(|session| session.epoch == epoch) {
+            if session.file != new_path {
+                session.file = new_path.clone();
+            }
+            // 路径可能没变而标题变了（服务端按标题改名）：标题始终跟随冻结快照
+            session.data.title = frozen.title.clone();
+            // 稳定判定只看正文（标题随路径变化不算编辑）
+            stable = session.data.fields == frozen.fields && session.data.rows == frozen.rows;
+            if stable {
+                session.saved = frozen.clone();
+                session.dirty = false;
+                session.save_error = None;
+            } else {
+                session.save_error = None;
+            }
+        }
+    }
+    Ok(stable)
+}
+
+/// 当前容器是否协作空间（`space.room` 的 `kind`）。容器类型无法确认时返回错误：
+/// 此时按本地写会把服务端内容落进用户仓库，宁可保存失败让用户重试。
+async fn space_container(ctx: &Context) -> Result<bool, String> {
+    let value = ctx
+        .call_raw(atelyx_plugin_protocol::method::space::ROOM, serde_json::Value::Null)
+        .await
+        .map_err(|e| format!("无法确认容器类型：{e}"))?;
+    Ok(value
+        .get("kind")
+        .and_then(|kind| kind.as_str())
+        .is_some_and(|kind| kind == "space"))
+}
+
+/// 保存结算：**只有会话仍是发起保存的那一份、且正文仍是这份快照时**才推进基线并清脏。
+/// 写在途期间用户继续编辑（data 已变）时保留脏，否则那次编辑会被这次结算吞掉。
+fn settle(plugin: &PluginState, file: &str, epoch: u64, frozen: table::TableFile) -> bool {
+    let Ok(mut slot) = plugin.session.lock() else { return false };
+    let Some(session) = slot.as_mut().filter(|session| session.epoch == epoch) else {
+        return false;
+    };
+    if session.file != file {
+        return false;
+    }
+    let unchanged = session.data.fields == frozen.fields && session.data.rows == frozen.rows;
+    session.save_error = None;
+    if unchanged {
+        session.data.title = frozen.title.clone();
+        session.saved = frozen;
+        session.dirty = false;
+    }
+    unchanged
+}
+
+/// 保存前提交在途单元格草稿：草稿也是未落盘内容，不能随保存被跳过。
+fn commit_draft(plugin: &PluginState) {
+    let Ok(mut slot) = plugin.session.lock() else { return };
+    if let Some(session) = slot.as_mut() {
+        if session.view.editing.is_some() {
+            crate::edit::commit(session);
+        }
+    }
+}

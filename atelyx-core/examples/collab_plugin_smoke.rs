@@ -243,11 +243,7 @@ fn serve(runtime: Arc<PluginRuntime>, state: HostState) {
                     let sizes: Vec<MeasureTextResult> = params
                         .items
                         .iter()
-                        .map(|item| MeasureTextResult {
-                            width: item.text.chars().count() as f32 * item.size * 0.55,
-                            height: item.size * 1.2,
-                            lines: 1,
-                        })
+                        .map(|item| MeasureTextResult { width: item.text.chars().count() as f32 * item.size * 0.55, height: item.size * 1.2, lines: 1, segments: None })
                         .collect();
                     reply(&runtime, request_id, json!({ "sizes": sizes }));
                 }
@@ -406,6 +402,10 @@ fn theme() -> ThemeResult {
             hover: "#f0f3f6".into(),
             border: "#d0d7de".into(),
             border_strong: "#8c959f".into(),
+            background: "#131418".into(),
+            border_subtle: "#252a31".into(),
+            selection: "#e0a94e40".into(),
+            scrim: "#00000099".into(),
             transparent: "#00000000".into(),
         },
         font_sizes: FontSizes { micro: 11.0, caption: 12.0, ui: 13.0, body: 14.0, h2: 16.0, h1: 20.0 },

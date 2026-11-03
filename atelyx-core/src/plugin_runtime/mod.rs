@@ -21,8 +21,6 @@ pub mod market;
 mod preset;
 mod service_dir;
 mod shortcut;
-/// 表格服务面的纯映射（公开给壳：表格真源 → 协议只读快照）。
-pub mod table;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -45,12 +43,13 @@ use service_dir::{ServiceCallWait, ServiceDir};
 pub use ai_tools::{PluginToolOutput, PluginToolSpec};
 pub use atelyx_plugin_protocol::frame::{
     FrameInput, FrameRect, HitCursor, HitRegion, Key, KeyAction, Modifiers, MouseButton, NamedKey,
-    SurfaceFrame,
+    PopupCapture, SurfaceFrame, SurfacePopup,
 };
 pub use atelyx_plugin_protocol::paint::{
     ColorToken, DrawCommand, ImageFit, ImageSource, PaintColor, PaintPoint, PaintShadow, TextAlign,
     TextFamily, TextWeight,
 };
+pub use atelyx_plugin_protocol::event::name as event_name;
 pub use atelyx_plugin_protocol::event::{
     ChatChangeKind, ChatChangedPayload, ChatPersistChangedPayload, ChatReloadedPayload,
     FileChangeKind, FileChangedPayload, FileDropPayload, DocChangedPayload,
@@ -60,6 +59,8 @@ pub use atelyx_plugin_protocol::event::{
 pub use atelyx_plugin_protocol::chat::ChatPersistError;
 pub use atelyx_plugin_protocol::layout::LayoutSpecNode;
 pub use atelyx_plugin_protocol::manifest::{DocTypeRegistration, Permission};
+/// 插件文字排版口径（绘制指令与量算同源）。
+pub use atelyx_plugin_protocol::paint::{TextLayout, TextShaping, TextWrap};
 /// 能力总线的对外契约类型（服务清单 / 登记参数 / 错误原因）。
 pub use atelyx_plugin_protocol::service;
 /// 宿主与 AI 核心插件之间的私有运行方法名。
@@ -80,10 +81,13 @@ pub use atelyx_plugin_protocol::method::{
     ChatRenameParams, ChatSendParams, ChatSessionParams, ChatSessionSummary, ChatSessionWire,
     ChatStopParams, ClipboardImage, CollabMessageParams, CollabPeer, CollabPeersResult,
     CollabSendParams, CollabSendQos, CollabSendResult, ContributionSlot, EdgesPadding, FileFilter,
-    FontSizes, ImageInfoResult, MeasureBatchParams, MeasureBatchResult, MeasureItem,
-    MeasureTextResult, NotificationLevel, PaddingSpec, Radii,
-    SetTrayItemsParams, ShortcutQueryResult, SurfaceKind, TableField, TableRemoteSelection,
-    TableSelection, TableRow, TableSetCellImageParams, TableSnapshot, TakeoverScope, ThemeColors,
+    DownloadsDirResult, FontFamiliesResult, FontSizes, ImageInfoResult, MeasureBatchParams, MeasureBatchResult, MeasureItem,
+    HeaderItem, HeaderPill, HeaderStatus, HeaderTone, HistoryRecordParams, MeasureSegment,
+    MeasureTextResult, NotificationLevel, PaddingSpec, PanelFlushDoneParams, PanelFlushParams,
+    PanelHeaderActionParams, PanelHeaderParams, PanelHeaderState, Radii, SpaceFilePatchParams,
+    SpaceFilePatchPayload, SpaceFilePatchResult, TableContentParams,
+    SetTrayItemsParams, ShortcutQueryResult, SurfaceKind,
+    TakeoverScope, ThemeColors,
     RunCompactParams, RunConfigWire, RunDirectParams, RunStartParams, RunStartResult,
     RunStopParams, RunTitleParams, SearchConfigWire, ThemeResult, ToolDecl, ToolExecParams,
     ToolExecResult, ToolListParams, ToolListResult, TrayClickParams, TrayItemSpec, WindowOpenParams,
@@ -186,6 +190,8 @@ pub struct DialogRequest {
     pub save: bool,
     pub default_path: Option<String>,
     pub filters: Vec<FileFilter>,
+    /// 允许多选（只对打开对话框有意义）：壳按选择顺序回填全部路径。
+    pub multiple: bool,
 }
 
 /// 仓库二进制单次读写上限：内容面数据走 JSON 单行传输，一条消息的峰值内存是载荷的数倍，
@@ -220,6 +226,8 @@ pub fn clipboard_image_payload(image: Option<ClipboardImage>) -> Value {
 #[derive(Clone, Debug)]
 pub enum HostRequest {
     Dialog { plugin_id: String, request_id: u64, dialog: DialogRequest },
+    /// 插件请求系统下载目录：壳定位后经 [`PluginRuntime::resolve_shell_call`] 回 `path`。
+    DownloadsDir { plugin_id: String, request_id: u64 },
     /// 插件请求接管当前聚焦窗口（scope = 整页 / 全接管，surface = 插件的贡献 id）；壳应用后经
     /// [`PluginRuntime::resolve_ui_call`] 回填结果（失败带可读原因）。
     Takeover { plugin_id: String, request_id: u64, scope: TakeoverScope, surface_id: String },
@@ -267,32 +275,25 @@ pub enum HostRequest {
     VaultRename { plugin_id: String, request_id: u64, from: String, to: String },
     /// 插件请求判定当前仓库内一个文件是否存在。
     VaultExists { plugin_id: String, request_id: u64, path: String },
-    /// 插件请求读当前打开表格的只读快照（真源在壳的表格会话）。
-    TableSnapshot { plugin_id: String, request_id: u64 },
-    /// 插件请求逐格写表格（经壳的表格会话与补丁 / 保存链，与本地编辑同出口）。
-    TableUpdateCell {
-        plugin_id: String,
-        request_id: u64,
-        row_id: String,
-        field_id: String,
-        value: Value,
-    },
-    /// 插件请求新增一行（结果回带宿主分配的新行 id）。
-    TableAddRow { plugin_id: String, request_id: u64 },
-    /// 插件请求删除一行。
-    TableRemoveRow { plugin_id: String, request_id: u64, row_id: String },
-    /// 插件请求写宿主表格选中态。
-    TableSelectRow { plugin_id: String, request_id: u64, row_id: String },
-    /// 插件请求向图片字段单元格写入图片引用（壳侧走与本地编辑同一出口）。
-    TableSetCellImage {
-        plugin_id: String,
-        request_id: u64,
-        params: method::TableSetCellImageParams,
-    },
     /// 插件请求批量量算文字（`query.measure`）：逐条给出宽度 / 行高 / 行数。
     MeasureBatch { plugin_id: String, request_id: u64, params: method::MeasureBatchParams },
     /// 插件请求当前主题的颜色 / 字号档 / 圆角档（`query.theme`）。
     QueryTheme { plugin_id: String, request_id: u64 },
+    /// 系统已安装字体族清单（`query.fonts`；壳侧扫描一次，插件做字体选择用）。
+    QueryFonts { plugin_id: String, request_id: u64 },
+    /// 插件声明面板头部状态：壳更新头部后经 [`PluginRuntime::resolve_ui_call`] 回已受理。
+    PanelHeader {
+        plugin_id: String,
+        request_id: u64,
+        params: method::PanelHeaderParams,
+    },
+    /// 插件回应宿主的落盘请求（`panel.flushDone`）：壳记录结果后经
+    /// [`PluginRuntime::resolve_ui_call`] 回已受理。
+    PanelFlushDone {
+        plugin_id: String,
+        request_id: u64,
+        params: method::PanelFlushDoneParams,
+    },
     /// 插件请求运行时改一个已打开窗口的属性（壳侧 OS 窗口副作用）。
     WindowUpdate { plugin_id: String, request_id: u64, params: method::WindowUpdateParams },
     /// 插件请求重新显示一个因失焦被隐藏的窗口。
@@ -380,6 +381,12 @@ pub enum HostRequest {
     RecentList { plugin_id: String, request_id: u64 },
     /// 插件请求全仓库按文件分组的版本聚合（`refresh` = 丢弃宿主缓存后重扫）。
     HistoryGroups { plugin_id: String, request_id: u64, params: method::HistoryGroupsParams },
+    /// 插件保存后记一版本地历史：壳落历史侧文件后经 [`PluginRuntime::resolve_ui_call`] 回已受理。
+    HistoryRecord {
+        plugin_id: String,
+        request_id: u64,
+        params: method::HistoryRecordParams,
+    },
     /// 插件请求当前容器与在线成员快照（`space.room`）。
     SpaceRoom { plugin_id: String, request_id: u64 },
     /// 插件请求空间成员名册快照（`space.members`；缓存为空时宿主顺带发起一次拉取）。
@@ -388,6 +395,12 @@ pub enum HostRequest {
     SpaceOpenMenu { plugin_id: String, request_id: u64 },
     /// 插件请求打开宿主的「协作设置」页（`space.openSettings`）。
     SpaceOpenSettings { plugin_id: String, request_id: u64 },
+    /// 插件提交空间文件的补丁保存：壳交服务端仲裁后经 [`PluginRuntime::resolve_shell_call`] 回最终路径。
+    SpaceFilePatch {
+        plugin_id: String,
+        request_id: u64,
+        params: method::SpaceFilePatchParams,
+    },
     /// 插件请求读随仓库走的界面状态与（可选）一个目录的条目（`vault.ui`）。
     VaultUi { plugin_id: String, request_id: u64, params: method::VaultUiParams },
     /// 插件请求按键写仓库界面状态（`vault.updateUi`），回执 = 写后的完整快照。
@@ -472,7 +485,7 @@ struct Discovered {
 }
 
 /// 对话框结果回传通道（用户选定值；取消 = `None`）。
-type DialogReplyTx = std::sync::mpsc::Sender<Result<Option<String>, String>>;
+type DialogReplyTx = std::sync::mpsc::Sender<Result<Option<Vec<String>>, String>>;
 
 /// 在途对话框等待项：发起插件 id + 结果回传通道。
 type DialogWait = (String, DialogReplyTx);
@@ -621,7 +634,7 @@ impl PluginRuntime {
         &self,
         plugin_id: &str,
         dialog: DialogRequest,
-    ) -> Result<std::sync::mpsc::Receiver<Result<Option<String>, String>>, String> {
+    ) -> Result<std::sync::mpsc::Receiver<Result<Option<Vec<String>>, String>>, String> {
         let request_id = self.next_dialog_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = std::sync::mpsc::channel();
         self.dialogs
@@ -642,10 +655,10 @@ impl PluginRuntime {
 
     /// 壳侧回填对话框结果（用户选定路径；取消 = `None`）。未登记的 id 是空操作
     /// （插件已停用 / 已崩溃时在途请求已由 [`PluginRuntime::fail_dialogs_of`] 收场）。
-    pub fn resolve_dialog(&self, request_id: u64, path: Option<String>) {
+    pub fn resolve_dialog(&self, request_id: u64, paths: Option<Vec<String>>) {
         let waiter = self.dialogs.lock().unwrap().remove(&request_id);
         if let Some((_, tx)) = waiter {
-            let _ = tx.send(Ok(path));
+            let _ = tx.send(Ok(paths));
         }
     }
 
@@ -669,7 +682,7 @@ impl PluginRuntime {
 
     /// 让全部在途对话框以可读失败收场（宿主退出收尾；逐插件路径已先收一遍，此处防漏网）。
     fn fail_all_dialogs(&self, reason: &str) {
-        let waiters: Vec<std::sync::mpsc::Sender<Result<Option<String>, String>>> = {
+        let waiters: Vec<std::sync::mpsc::Sender<Result<Option<Vec<String>>, String>>> = {
             let mut dialogs = self.dialogs.lock().unwrap();
             dialogs.drain().map(|(_, (_, tx))| tx).collect()
         };
@@ -747,6 +760,15 @@ impl PluginRuntime {
             HostRequest::PickVault { plugin_id, .. } => {
                 HostRequest::PickVault { plugin_id, request_id }
             }
+            HostRequest::HistoryRecord { plugin_id, params, .. } => {
+                HostRequest::HistoryRecord { plugin_id, request_id, params }
+            }
+            HostRequest::PanelHeader { plugin_id, params, .. } => {
+                HostRequest::PanelHeader { plugin_id, request_id, params }
+            }
+            HostRequest::PanelFlushDone { plugin_id, params, .. } => {
+                HostRequest::PanelFlushDone { plugin_id, request_id, params }
+            }
             HostRequest::Dialog { .. } => return Err("界面服务请求形态不符".to_string()),
             HostRequest::ChatSend { .. }
             | HostRequest::ChatStop { .. }
@@ -775,14 +797,9 @@ impl PluginRuntime {
             | HostRequest::VaultExists { .. }
             | HostRequest::VaultRemove { .. }
             | HostRequest::VaultRename { .. }
-            | HostRequest::TableSnapshot { .. }
-            | HostRequest::TableUpdateCell { .. }
-            | HostRequest::TableAddRow { .. }
-            | HostRequest::TableRemoveRow { .. }
-            | HostRequest::TableSelectRow { .. }
-            | HostRequest::TableSetCellImage { .. }
             | HostRequest::MeasureBatch { .. }
             | HostRequest::QueryTheme { .. }
+            | HostRequest::QueryFonts { .. }
             | HostRequest::VaultImageInfo { .. }
             | HostRequest::TraySetItems { .. }
             | HostRequest::CollabPeers { .. }
@@ -821,7 +838,9 @@ impl PluginRuntime {
             | HostRequest::AbsolutePath { .. }
             | HostRequest::Duplicate { .. }
             | HostRequest::VaultListDirs { .. }
-            | HostRequest::VaultRefreshTree { .. } => {
+            | HostRequest::VaultRefreshTree { .. }
+            | HostRequest::DownloadsDir { .. }
+            | HostRequest::SpaceFilePatch { .. } => {
                 return Err("界面服务请求形态不符".to_string())
             }
         };
@@ -979,42 +998,14 @@ impl PluginRuntime {
                 from,
                 to,
             },
-            HostRequest::TableSnapshot { plugin_id, .. } => HostRequest::TableSnapshot {
-                plugin_id,
-                request_id,
-            },
-            HostRequest::TableUpdateCell { plugin_id, row_id, field_id, value, .. } => {
-                HostRequest::TableUpdateCell {
-                    plugin_id,
-                    request_id,
-                    row_id,
-                    field_id,
-                    value,
-                }
-            }
-            HostRequest::TableAddRow { plugin_id, .. } => HostRequest::TableAddRow {
-                plugin_id,
-                request_id,
-            },
-            HostRequest::TableRemoveRow { plugin_id, row_id, .. } => HostRequest::TableRemoveRow {
-                plugin_id,
-                request_id,
-                row_id,
-            },
-            HostRequest::TableSelectRow { plugin_id, row_id, .. } => HostRequest::TableSelectRow {
-                plugin_id,
-                request_id,
-                row_id,
-            },
-            HostRequest::TableSetCellImage { plugin_id, params, .. } => HostRequest::TableSetCellImage {
-                plugin_id,
-                request_id,
-                params,
-            },
             HostRequest::MeasureBatch { plugin_id, params, .. } => HostRequest::MeasureBatch {
                 plugin_id,
                 request_id,
                 params,
+            },
+            HostRequest::QueryFonts { plugin_id, .. } => HostRequest::QueryFonts {
+                plugin_id,
+                request_id,
             },
             HostRequest::QueryTheme { plugin_id, .. } => HostRequest::QueryTheme {
                 plugin_id,
@@ -1209,6 +1200,12 @@ impl PluginRuntime {
             }
             HostRequest::VaultRefreshTree { plugin_id, .. } => {
                 HostRequest::VaultRefreshTree { plugin_id, request_id }
+            }
+            HostRequest::DownloadsDir { plugin_id, .. } => {
+                HostRequest::DownloadsDir { plugin_id, request_id }
+            }
+            HostRequest::SpaceFilePatch { plugin_id, params, .. } => {
+                HostRequest::SpaceFilePatch { plugin_id, request_id, params }
             }
             _ => return Err("壳侧服务请求形态不符".to_string()),
         };
@@ -1689,15 +1686,6 @@ impl PluginRuntime {
         instances.values().any(|instance| instance.has_frame_ticks())
     }
 
-    /// 是否有运行中的插件订阅表格选区事件（壳据此决定要不要做选区差分广播）。
-    pub fn wants_table_selection_events(&self) -> bool {
-        let instances = self.instances.lock().unwrap();
-        instances.values().any(|instance| {
-            instance.status() == PluginStatus::Running
-                && instance.subscribed_to(event::name::TABLE_SELECTION_CHANGED)
-        })
-    }
-
     /// 推一次帧节拍：给到期的画布与整面帧各发一条帧通知（壳的帧 tick 调）。
     /// 先在锁内取一份实例快照再下发，表锁不跟着每个插件的通知走。
     pub fn pump_frame_ticks(&self, now: std::time::Instant) {
@@ -1983,12 +1971,6 @@ impl PluginRuntime {
         *self.current_table.lock().unwrap() = path.map(str::to_string);
         let payload = TableChangedPayload { path: path.map(str::to_string) };
         self.broadcast_event(event::name::TABLE_CHANGED, &payload);
-    }
-
-    /// 广播当前打开表格的选区变化（本端点选 / 拖选 / 键盘移动，协作者进入 / 移动 / 离场）。
-    /// 不缓存补发：迟到订阅者用 `table.snapshot` 取当前选区。
-    pub fn on_table_selection_changed(self: &Arc<Self>, payload: TableSelectionChangedPayload) {
-        self.broadcast_event(event::name::TABLE_SELECTION_CHANGED, &payload);
     }
 
     /// 广播当前笔记的远端协作者光标：订阅方按 `path` 过滤，空清单 = 已无协作者。
@@ -2331,14 +2313,9 @@ fn request_plugin_id(request: &HostRequest) -> &str {
         | HostRequest::VaultImportFile { plugin_id, .. }
         | HostRequest::VaultList { plugin_id, .. }
         | HostRequest::VaultExists { plugin_id, .. }
-        | HostRequest::TableSnapshot { plugin_id, .. }
-        | HostRequest::TableUpdateCell { plugin_id, .. }
-        | HostRequest::TableAddRow { plugin_id, .. }
-        | HostRequest::TableRemoveRow { plugin_id, .. }
-        | HostRequest::TableSelectRow { plugin_id, .. }
-        | HostRequest::TableSetCellImage { plugin_id, .. }
         | HostRequest::MeasureBatch { plugin_id, .. }
         | HostRequest::QueryTheme { plugin_id, .. }
+        | HostRequest::QueryFonts { plugin_id, .. }
         | HostRequest::WindowUpdate { plugin_id, .. }
         | HostRequest::WindowShow { plugin_id, .. }
         | HostRequest::WindowMinimize { plugin_id, .. }
@@ -2385,7 +2362,12 @@ fn request_plugin_id(request: &HostRequest) -> &str {
         | HostRequest::SpaceRoom { plugin_id, .. }
         | HostRequest::SpaceMembers { plugin_id, .. }
         | HostRequest::SpaceOpenMenu { plugin_id, .. }
-        | HostRequest::SpaceOpenSettings { plugin_id, .. } => plugin_id,
+        | HostRequest::SpaceOpenSettings { plugin_id, .. }
+        | HostRequest::SpaceFilePatch { plugin_id, .. }
+        | HostRequest::DownloadsDir { plugin_id, .. }
+        | HostRequest::HistoryRecord { plugin_id, .. }
+        | HostRequest::PanelHeader { plugin_id, .. }
+        | HostRequest::PanelFlushDone { plugin_id, .. } => plugin_id,
     }
 }
 
@@ -2470,7 +2452,7 @@ mod tests {
     }
 
     fn dialog(kind: DialogKind) -> DialogRequest {
-        DialogRequest { kind, title: None, save: false, default_path: None, filters: Vec::new() }
+        DialogRequest { kind, title: None, save: false, default_path: None, filters: Vec::new(), multiple: false }
     }
 
     #[test]
@@ -2480,8 +2462,11 @@ mod tests {
         let runtime = PluginRuntime::new(root.to_path_buf());
         let rx = runtime.open_dialog("com.a.one", dialog(DialogKind::File)).unwrap();
         let request_id = *runtime.dialogs.lock().unwrap().keys().next().unwrap();
-        runtime.resolve_dialog(request_id, Some("/models/m.gguf".into()));
-        assert_eq!(rx.recv().unwrap().unwrap().as_deref(), Some("/models/m.gguf"));
+        runtime.resolve_dialog(request_id, Some(vec!["/models/m.gguf".to_string()]));
+        assert_eq!(
+            rx.recv().unwrap().unwrap().as_deref(),
+            Some(["/models/m.gguf".to_string()].as_slice())
+        );
         // 登记随结果落地而摘除；重复回填是空操作
         assert!(runtime.dialogs.lock().unwrap().is_empty());
         runtime.resolve_dialog(request_id, None);

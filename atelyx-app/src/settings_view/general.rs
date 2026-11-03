@@ -27,7 +27,7 @@ pub fn view(app: &App, window: iced::window::Id) -> Element<'static, Message> {
         controls::dropdown_trigger(
             &font_label,
             TRIGGER_W,
-            Some(super::open_popup(app, window, PopupState::FontPicker { for_table: false })),
+            Some(super::open_popup(app, window, PopupState::FontPicker)),
         ),
     ));
     col = col.push(setting_row(

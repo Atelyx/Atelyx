@@ -23,7 +23,12 @@ pub(crate) async fn handle(
 ) -> Vec<UiEvent> {
     let mut events = Vec::new();
     let before = caret_snapshot(state);
+    // 按在浮层外：浮层已由宿主收起，控件层不产生事件（插件按原始输入自己收尾）
+    if matches!(input, FrameInput::Outside { .. }) {
+        return Vec::new();
+    }
     match input {
+        FrameInput::Outside { .. } => {}
         FrameInput::PointerDown { x, y, button, hit, .. } => {
             if *button == MouseButton::Right {
                 // 右键不改焦点与按下态：只把落点控件报给插件（行内右键菜单 / 快捷动作）

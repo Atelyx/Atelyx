@@ -82,31 +82,46 @@ pub struct SurfaceFrame {
     /// 帧率（1–120）：声明后宿主按该节拍回发 `host:frame.tick`；缺省不推帧。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fps: Option<u16>,
+    /// 浮层（下拉 / 菜单 / 气泡 / 灯箱）：宿主画在本面之上并按窗口裁剪，可越出面矩形。
+    /// 本帧不带 = 收起。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub popup: Option<SurfacePopup>,
+}
+
+/// 浮层承接点击的范围：`inside` = 只有落在浮层矩形内的按下交给浮层（外部按下照常送本面），
+/// `all` = 浮层展开期间由宿主处理其覆盖区外的按下，并向插件回发 [`FrameInput::Outside`]。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PopupCapture {
+    #[default]
+    Inside,
+    All,
+}
+
+/// 面的浮层：绘制在本面之上（宿主按窗口裁剪，可越出面矩形）。
+/// `rect` / `commands` / `hits` / `ime` 全部用**面本地坐标**（与主帧同一坐标系）。
+/// 与主帧同寿命：本帧带浮层即展开，下一帧不带即收起。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SurfacePopup {
+    /// 相对面左上角的位置与尺寸：可为负（例如盖住面板顶部的头部行），也可大于面尺寸。
+    pub rect: FrameRect,
+    #[serde(default)]
+    pub capture: PopupCapture,
+    pub commands: Vec<DrawCommand>,
+    /// 浮层自己的命中区：浮层矩形内的按下先在这里命中（坐标同面本地）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hits: Vec<HitRegion>,
+    /// 声明后输入法候选窗按此矩形（面本地坐标）定位；缺省用主帧 `ime`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ime: Option<FrameRect>,
 }
 
 impl SurfaceFrame {
     /// 挂载前校验：指令逐条、命中区 id 非空唯一、矩形有限非负、帧率在范围内。
     pub fn validate(&self) -> Result<(), String> {
         validate_commands(&self.commands)?;
-        if self.hits.len() > MAX_HITS {
-            return Err(format!("命中区不得超过 {MAX_HITS} 个"));
-        }
-        let mut ids = std::collections::HashSet::with_capacity(self.hits.len());
-        for hit in &self.hits {
-            if hit.id.trim().is_empty() {
-                return Err("命中区 id 不能为空".into());
-            }
-            if hit.id.len() > MAX_HIT_ID_LEN {
-                return Err(format!("命中区 id 不得超过 {MAX_HIT_ID_LEN} 字节"));
-            }
-            if hit.id.chars().any(char::is_control) {
-                return Err(format!("命中区 id 不得含控制字符：{}", hit.id));
-            }
-            if !ids.insert(hit.id.as_str()) {
-                return Err(format!("命中区 id 重复：{}", hit.id));
-            }
-            ensure_rect(hit.x, hit.y, hit.w, hit.h, &format!("命中区 {}", hit.id))?;
-        }
+        validate_hits(&self.hits)?;
         if let Some(ime) = self.ime {
             ensure_rect(ime.x, ime.y, ime.w, ime.h, "输入法光标")?;
         }
@@ -116,6 +131,23 @@ impl SurfaceFrame {
         if let Some(fps) = self.fps {
             if !(1..=MAX_FPS).contains(&fps) {
                 return Err(format!("帧率须在 1–{MAX_FPS} 之间"));
+            }
+        }
+        if let Some(popup) = &self.popup {
+            validate_commands(&popup.commands).map_err(|e| format!("浮层{e}"))?;
+            validate_hits(&popup.hits).map_err(|e| format!("浮层{e}"))?;
+            if !popup.rect.x.is_finite()
+                || !popup.rect.y.is_finite()
+                || !popup.rect.w.is_finite()
+                || !popup.rect.h.is_finite()
+            {
+                return Err("浮层矩形必须是有限数".into());
+            }
+            if popup.rect.w < 0.0 || popup.rect.h < 0.0 {
+                return Err("浮层矩形的宽高不可为负".into());
+            }
+            if let Some(ime) = popup.ime {
+                ensure_rect(ime.x, ime.y, ime.w, ime.h, "浮层输入法光标")?;
             }
         }
         Ok(())
@@ -143,6 +175,30 @@ impl SurfaceFrame {
             .and_then(|hit| hit.cursor)
             .unwrap_or_default()
     }
+}
+
+/// 命中区校验：数量上限、id 非空唯一可读、矩形有限非负。
+fn validate_hits(hits: &[HitRegion]) -> Result<(), String> {
+    if hits.len() > MAX_HITS {
+        return Err(format!("命中区不得超过 {MAX_HITS} 个"));
+    }
+    let mut ids = std::collections::HashSet::with_capacity(hits.len());
+    for hit in hits {
+        if hit.id.trim().is_empty() {
+            return Err("命中区 id 不能为空".into());
+        }
+        if hit.id.len() > MAX_HIT_ID_LEN {
+            return Err(format!("命中区 id 不得超过 {MAX_HIT_ID_LEN} 字节"));
+        }
+        if hit.id.chars().any(char::is_control) {
+            return Err(format!("命中区 id 不得含控制字符：{}", hit.id));
+        }
+        if !ids.insert(hit.id.as_str()) {
+            return Err(format!("命中区 id 重复：{}", hit.id));
+        }
+        ensure_rect(hit.x, hit.y, hit.w, hit.h, &format!("命中区 {}", hit.id))?;
+    }
+    Ok(())
 }
 
 fn ensure_rect(x: f32, y: f32, w: f32, h: f32, name: &str) -> Result<(), String> {
@@ -223,6 +279,13 @@ pub struct Modifiers {
     pub meta: bool,
 }
 
+impl Modifiers {
+    /// 四个修饰键都未按下（用于省略序列化字段）。
+    pub fn is_empty(&self) -> bool {
+        !self.shift && !self.control && !self.alt && !self.meta
+    }
+}
+
 /// 鼠标按键。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -260,6 +323,12 @@ pub enum FrameInput {
     },
     /// 指针离开本面（从内到外边沿触发一次）。
     PointerLeave,
+    /// 按在浮层外：宿主已按浮层声明的承接范围处理这次按下（`all` 时不再送往本面），
+    /// 插件据此丢弃浮层状态。`x` / `y` 为窗口坐标（仅供描述位置）。
+    Outside {
+        x: f32,
+        y: f32,
+    },
     /// 同键二次按下（间隔与位移都在宿主阈值内），插件无需自己算。
     DoubleClick {
         x: f32,
@@ -274,6 +343,9 @@ pub enum FrameInput {
         y: f32,
         delta_x: f32,
         delta_y: f32,
+        /// 滚轮发生时的修饰键快照（Ctrl+滚轮缩放等）。
+        #[serde(default, skip_serializing_if = "Modifiers::is_empty")]
+        modifiers: Modifiers,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         hit: Option<String>,
     },
@@ -342,11 +414,14 @@ mod tests {
                 italic: false,
                 max_width: Some(80.0),
                 align: Some(TextAlign::Center),
+                family_name: None,
+                layout: None,
             }],
             hits: vec![hit("inc", 0.0, 0.0, 40.0, 24.0)],
             ime: None,
             keys: true,
             fps: Some(60),
+            popup: None,
         };
         assert!(frame.validate().is_ok());
 
@@ -388,6 +463,8 @@ mod tests {
             italic: false,
             max_width: None,
             align: None,
+            family_name: None,
+            layout: None,
         }];
         assert!(frame.validate().unwrap_err().contains("第 0 条指令"));
     }

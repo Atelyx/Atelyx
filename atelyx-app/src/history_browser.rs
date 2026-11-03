@@ -35,8 +35,6 @@ const NOTE_CHANGED_LINES_CAP: usize = 300;
 /// 历史记录弹层消息。
 #[derive(Debug, Clone)]
 pub enum HistoryBrowserMsg {
-    /// 打开弹层（入口：笔记/表格「···」菜单）。
-    Open { window: iced::window::Id, kind: HistoryKind, file: String },
     /// 展开/收起一行预览（互斥展开）。
     Toggle(u64),
     /// 进入回滚二段确认。
@@ -128,7 +126,6 @@ pub(crate) fn build_preview(app: &App, seq: u64) -> Option<HistoryPreview> {
 /// 弹层消息处理。
 pub fn on_msg(app: &mut App, msg: HistoryBrowserMsg) -> Task<Message> {
     match msg {
-        HistoryBrowserMsg::Open { window, kind, file } => open(app, window, kind, file),
         HistoryBrowserMsg::Toggle(seq) => {
             if app.history_expanded == Some(seq) {
                 app.history_expanded = None;
@@ -584,14 +581,8 @@ fn restore(app: &mut App, seq: u64) -> Task<Message> {
                 app.notify(NoticeLevel::Warning, "打开的表格已切换，请重新打开历史");
                 return Task::none();
             }
-            // 会话缺失（表未加载成功）时无回滚目标：不得谎报成功
-            if !app.table.as_ref().is_some_and(|s| s.file == file) {
-                app.notify(NoticeLevel::Warning, "表格未加载，无法回滚");
-                return Task::none();
-            }
             app.dismiss_popup();
-            // 成功提示挂到保存链落盘回执（「已回滚」只在写盘成功后出现）
-            app.history_restore_pending = true;
+            // 宿主把快照交回插件后即提示；插件自行替换并落入保存链
             app.history_restore(kind, version)
         }
         // 画布无会话链：快照经写盘队列直写仓库，回执通知

@@ -38,10 +38,15 @@ pub const TOKEN_BORDER: u32 = 16;
 pub const TOKEN_BORDER_STRONG: u32 = 17;
 pub const TOKEN_TRANSPARENT: u32 = 18;
 pub const TOKEN_SURFACE_OVERLAY: u32 = 19;
+pub const TOKEN_BACKGROUND: u32 = 20;
+pub const TOKEN_BORDER_SUBTLE: u32 = 21;
+pub const TOKEN_SELECTION: u32 = 22;
+pub const TOKEN_SCRIM: u32 = 23;
 
 pub const WEIGHT_NORMAL: u32 = 0;
 pub const WEIGHT_MEDIUM: u32 = 1;
 pub const WEIGHT_SEMI_BOLD: u32 = 2;
+pub const WEIGHT_BOLD: u32 = 3;
 
 pub const FAMILY_UI: u32 = 0;
 pub const FAMILY_MONO: u32 = 1;
@@ -49,6 +54,15 @@ pub const FAMILY_MONO: u32 = 1;
 pub const ALIGN_START: u32 = 0;
 pub const ALIGN_CENTER: u32 = 1;
 pub const ALIGN_END: u32 = 2;
+
+/// 换行口径：0 = 只在词间断行（缺省），1 = 超长词逐字形断行。
+pub const TEXT_WRAP_WORD: u32 = 0;
+pub const TEXT_WRAP_WORD_OR_GLYPH: u32 = 1;
+
+/// 字形整形：0 = 自动（纯 ASCII 基础、含非 ASCII 高级），1 = 基础，2 = 高级（含字体回退）。
+pub const TEXT_SHAPING_AUTO: u32 = 0;
+pub const TEXT_SHAPING_BASIC: u32 = 1;
+pub const TEXT_SHAPING_ADVANCED: u32 = 2;
 
 pub const IMAGE_PRIVATE: u32 = 1;
 pub const IMAGE_VAULT: u32 = 2;
@@ -77,6 +91,10 @@ pub const SURFACE_TAKEOVER: u32 = 4;
 pub const SURFACE_SETTINGS: u32 = 5;
 pub const SURFACE_TABLE_VIEW: u32 = 6;
 
+/// 浮层承接范围：`INSIDE` 只接浮层矩形内的按下，`ALL` 吞掉外部按下。
+pub const POPUP_CAPTURE_INSIDE: u32 = 0;
+pub const POPUP_CAPTURE_ALL: u32 = 1;
+
 pub const INPUT_POINTER_DOWN: u32 = 1;
 pub const INPUT_POINTER_UP: u32 = 2;
 pub const INPUT_POINTER_MOVE: u32 = 3;
@@ -87,6 +105,8 @@ pub const INPUT_KEY: u32 = 7;
 pub const INPUT_TEXT: u32 = 8;
 pub const INPUT_FOCUS: u32 = 9;
 pub const INPUT_RESIZE: u32 = 10;
+/// 按在浮层外；`x` / `y` 为窗口坐标（仅供描述位置）。
+pub const INPUT_OUTSIDE: u32 = INPUT_RESIZE + 1;
 
 pub const BUTTON_LEFT: u32 = 0;
 pub const BUTTON_RIGHT: u32 = 1;
@@ -280,6 +300,20 @@ pub struct AbiCommand {
     /// 仅 URL 来源有意义：按本机 / 局域网策略取图。
     pub image_local: u8,
     pub image_fit: u32,
+    /// 文字行高倍数：0 = 宿主默认行高。
+    pub text_line_height: f32,
+    /// 文字换行口径：0 = 默认（只在词间断行）/ 1 = 超长词逐字形断行。
+    pub text_wrap: u32,
+    /// 字形整形：0 = 自动 / 1 = 基础 / 2 = 高级。
+    pub text_shaping: u32,
+    /// 虚线实线段长：与 `line_dash_off` 同为 0 = 实线。
+    pub line_dash_on: f32,
+    /// 虚线空白段长：0 = 实线。
+    pub line_dash_off: f32,
+    /// 仅 Vault 图片来源有意义：缩略图长边上限（像素）；0 = 原图。
+    pub image_max_edge: u32,
+    /// 文字：显式字体族名，空串 = 未指定（按 `text_family` 取）；只在当前调用内有效。
+    pub text_family_name: AbiStr,
 }
 
 /// 一个命中区；后声明的压住先声明的（宿主按声明序命中）。
@@ -310,6 +344,21 @@ pub struct AbiFrame {
     /// 本帧按多大宽排版；宿主据此认出「上一拍宽度排的旧帧」。
     pub layout_w: f32,
     pub layout_h: f32,
+    /// 非 0 = 本帧带浮层，浮层字段与浮层指令 / 命中区有效。
+    pub has_popup: u8,
+    /// 浮层矩形：面本地坐标，可为负 / 越出面矩形。
+    pub popup_rect: AbiRect,
+    /// 浮层承接范围：`POPUP_CAPTURE_INSIDE` / `POPUP_CAPTURE_ALL`。
+    pub popup_capture: u32,
+    /// 浮层指令与命中区：口径同主帧，宿主在本调用内复制。
+    pub popup_commands: *const AbiCommand,
+    pub popup_commands_len: usize,
+    pub popup_hits: *const AbiHit,
+    pub popup_hits_len: usize,
+    /// 非 0 = 浮层声明了输入法光标矩形。
+    pub has_popup_ime: u8,
+    /// 浮层输入法光标矩形：浮层本地坐标。
+    pub popup_ime: AbiRect,
 }
 
 /// 一条原始输入；坐标面本地，滚轮增量统一为像素。

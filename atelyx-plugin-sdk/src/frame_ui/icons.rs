@@ -47,6 +47,7 @@ pub(crate) fn draw(ctx: &mut BuildCtx<'_>, icon: Icon, rect: Rect, color: PaintC
             y2: rect.y + y2 * scale,
             stroke: color,
             width,
+            dash: None,
         });
     };
     let poly = |ctx: &mut BuildCtx<'_>, points: &[(f32, f32)], closed: bool| {
@@ -302,6 +303,7 @@ pub(crate) fn draw_named(ctx: &mut BuildCtx<'_>, name: &str, rect: Rect, color: 
                     y2: rect.y + y2 * scale,
                     stroke: color,
                     width,
+                    dash: None,
                 });
             }
         }

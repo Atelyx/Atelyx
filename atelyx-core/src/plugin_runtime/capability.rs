@@ -7,6 +7,7 @@
 
 use std::path::Path;
 
+use atelyx_plugin_protocol::event;
 use atelyx_plugin_protocol::manifest::Permission;
 use atelyx_plugin_protocol::method;
 use atelyx_plugin_protocol::service;
@@ -20,16 +21,14 @@ pub(crate) fn permission_for(name: &str) -> Option<Permission> {
     use Permission::*;
     use method::{
         ai, clipboard, collab, dialog, doc, editor, fs, history, http, notification, process,
-        shortcut, space, state, table, tray, vault, window,
+        shortcut, space, state, tray, vault, window,
     };
     match name {
         fs::PRIVATE_DIR | fs::READ_TEXT | fs::WRITE_TEXT | fs::READ_BINARY | fs::WRITE_BINARY
-        | fs::REMOVE | fs::EXISTS | fs::LIST => Some(Fs),
+        | fs::REMOVE | fs::EXISTS | fs::LIST | fs::DOWNLOADS_DIR => Some(Fs),
         vault::READ_TEXT | vault::WRITE_TEXT | vault::READ_BINARY | vault::WRITE_BINARY
         | vault::IMPORT_FILE | vault::IMAGE_INFO | vault::LIST | vault::EXISTS | vault::TAGS
         | vault::REMOVE | vault::RENAME | vault::BACKLINKS | vault::FILES => Some(Vault),
-        table::SNAPSHOT | table::UPDATE_CELL | table::ADD_ROW | table::REMOVE_ROW
-        | table::SELECT_ROW | table::SET_CELL_IMAGE => Some(Table),
         process::SPAWN | process::WRITE_STDIN | process::CLOSE_STDIN | process::KILL => Some(Process),
         state::READ | state::WRITE => Some(State),
         notification::SHOW => Some(Notification),
@@ -42,6 +41,8 @@ pub(crate) fn permission_for(name: &str) -> Option<Permission> {
         collab::PEERS | collab::SEND | collab::META_GET | collab::META_PATCH => Some(Collab),
         // 空间名册与房间事实、以及房间里的两个入口都是空间范围内的界面能力
         space::ROOM | space::MEMBERS | space::OPEN_MENU | space::OPEN_SETTINGS => Some(Collab),
+        // 空间文件补丁提交的是内容补丁（与 vault / doc 写入同类），按仓库内容权限归类
+        space::FILE_PATCH => Some(Vault),
         // 仓库界面状态随仓库走（展开集 / 排序 / 目录颜色 / 提示词标记），与内容读写同类
         method::vault_ui::READ | method::vault_ui::WRITE | method::vault_ui::CREATE
         | method::vault_ui::SWITCH_CONTAINER | method::vault_ui::REMOVE_CONTAINER
@@ -63,7 +64,9 @@ pub(crate) fn permission_for(name: &str) -> Option<Permission> {
         | editor::PREFS => Some(Vault),
         doc::OPEN | doc::EDIT | doc::SAVE | doc::CLOSE | doc::AWARENESS | doc::RENAME => Some(Vault),
         // 活动统计取自当前仓库内容，同样按仓库内容权限归类
-        history::ACTIVITY | history::DAY | history::GROUPS | history::OPEN => Some(Vault),
+        history::ACTIVITY | history::DAY | history::GROUPS | history::OPEN | history::RECORD => {
+            Some(Vault)
+        }
         // 最近打开清单是用户在当前仓库打开过的文件路径
         method::recent::LIST => Some(Vault),
         window::OPEN | window::CLOSE | window::UPDATE | window::SHOW | window::BEGIN_DRAG
@@ -73,6 +76,8 @@ pub(crate) fn permission_for(name: &str) -> Option<Permission> {
         | ai::TOOL_RESULT | ai::TOOL_LIST | ai::TOOL_EXECUTE | ai::CHAT_EMIT => Some(Ai),
         method::chat::SESSION_READ | method::chat::SESSION_WRITE
         | method::chat::SESSION_SNAPSHOT => Some(Ai),
+        // 面板头部与事件发布只编排宿主界面 / 广播，不触碰宿主资源，与 `query.theme`、事件订阅同档
+        method::panel::HEADER | method::panel::FLUSH_DONE | event::EMIT => None,
         // 解析只读插件递来的文本，不触碰宿主资源；外部提供者顶替后同理
         // 能力总线入口：实际权限由目标方法自己承担
         service::method::REGISTER
@@ -136,11 +141,6 @@ mod tests {
         assert_eq!(permission_for(method::clipboard::WRITE_IMAGE), Some(Permission::Clipboard));
         assert_eq!(permission_for(method::ai::MODELS), Some(Permission::Ai));
         assert_eq!(permission_for(method::ai::AGENTS), Some(Permission::Ai));
-        assert_eq!(permission_for(method::table::SNAPSHOT), Some(Permission::Table));
-        assert_eq!(permission_for(method::table::UPDATE_CELL), Some(Permission::Table));
-        assert_eq!(permission_for(method::table::ADD_ROW), Some(Permission::Table));
-        assert_eq!(permission_for(method::table::REMOVE_ROW), Some(Permission::Table));
-        assert_eq!(permission_for(method::table::SELECT_ROW), Some(Permission::Table));
         assert_eq!(permission_for(method::http::REQUEST), Some(Permission::Http));
         assert_eq!(permission_for(method::ai::CHAT_SEND), Some(Permission::Ai));
         assert_eq!(permission_for(method::ai::CHAT_STOP), Some(Permission::Ai));
@@ -153,7 +153,6 @@ mod tests {
         assert_eq!(permission_for(method::window::UPDATE), Some(Permission::Window));
         assert_eq!(permission_for(method::window::SHOW), Some(Permission::Window));
         assert_eq!(permission_for(method::shortcut::QUERY), Some(Permission::Shortcuts));
-        assert_eq!(permission_for(method::table::SET_CELL_IMAGE), Some(Permission::Table));
         assert_eq!(permission_for(method::ai::CHAT_RENAME), Some(Permission::Ai));
         assert_eq!(permission_for(method::ai::CHAT_DELETE), Some(Permission::Ai));
         assert_eq!(permission_for(method::ai::CHAT_COMPACT), Some(Permission::Ai));
@@ -178,6 +177,13 @@ mod tests {
         assert_eq!(permission_for(method::history::DAY), Some(Permission::Vault));
         assert_eq!(permission_for(method::history::GROUPS), Some(Permission::Vault));
         assert_eq!(permission_for(method::history::OPEN), Some(Permission::Vault));
+        assert_eq!(permission_for(method::history::RECORD), Some(Permission::Vault));
+        assert_eq!(permission_for(method::fs::DOWNLOADS_DIR), Some(Permission::Fs));
+        assert_eq!(permission_for(method::space::FILE_PATCH), Some(Permission::Vault));
+        // 面板头部与事件发布不占权限类（与主题量算、事件订阅同档）
+        assert_eq!(permission_for(method::panel::HEADER), None);
+        assert_eq!(permission_for(method::panel::FLUSH_DONE), None);
+        assert_eq!(permission_for(event::EMIT), None);
         assert_eq!(permission_for(method::recent::LIST), Some(Permission::Vault));
         // 纯文本变换与能力总线入口不占权限类（调用照常执行，审计按各自归类记录）
         for name in [

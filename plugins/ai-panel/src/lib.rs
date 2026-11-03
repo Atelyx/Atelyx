@@ -176,6 +176,7 @@ impl AiPanelPlugin {
 
     async fn attach_image(&self, ctx: &Context) {
         let params = PickFileParams {
+            multiple: false,
             title: Some("选择图片".to_string()),
             save: None,
             default_path: None,

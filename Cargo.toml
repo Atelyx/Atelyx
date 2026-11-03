@@ -16,6 +16,7 @@ members = [
     "plugins/search",
     "plugins/files",
     "plugins/collab",
+    "plugins/tables",
     "atelyx-plugin-abi",
     "atelyx-plugin-sample",
     "xtask",

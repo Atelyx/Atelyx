@@ -1,10 +1,10 @@
 //! 多维表格纯逻辑：字段类型口径、列宽估算、状态栏列计算、选区归约、剪贴板 TSV、
-//! 单元格样式与行列结构操作。模型真源 = `vault::TableFile`，本模块只做模型内变换，
-//! 不做任何 I/O；展示层语义（文本换行估算等）归壳侧。
+//! 单元格样式与行列结构操作。模型真源 = [`super::TableFile`]，本模块只做模型内变换，
+//! 不做任何 I/O；展示层语义（文本换行估算等）归视图侧。
 
 use serde_json::Value;
 
-use crate::vault::{TableFile, TableField, TableRow};
+use super::{TableFile, TableField, TableRow};
 
 /// 状态栏自动计算类型显示名。
 pub fn calc_type_label(t: &str) -> &'static str {
@@ -83,7 +83,7 @@ pub fn new_table_file(title: &str) -> TableFile {
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
     TableFile {
-        schema: crate::vault::TABLE_SCHEMA.into(),
+        schema: super::TABLE_SCHEMA.into(),
         id: nanoid::nanoid!(),
         title: title.to_string(),
         fields: vec![TableField {
@@ -103,7 +103,7 @@ pub fn new_table_file(title: &str) -> TableFile {
 // ===== 单元格值工具 =====
 
 /// 值是否为图片形态（新 `{images}` 对象或旧 `string[]`）。
-pub(crate) fn is_image_value(v: &Value) -> bool {
+pub fn is_image_value(v: &Value) -> bool {
     v.is_array() || v.get("images").is_some_and(|i| i.is_array())
 }
 
@@ -917,7 +917,6 @@ pub fn restore(table: &mut TableFile, snap: TableSnapshot) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vault::TableFile;
 
     #[test]
     fn table_to_text_renders_header_rows_and_image_cells() {
@@ -1000,7 +999,7 @@ mod tests {
 
     fn table(fields: Vec<TableField>, rows: Vec<TableRow>) -> TableFile {
         TableFile {
-            schema: crate::vault::TABLE_SCHEMA.into(),
+            schema: crate::table::TABLE_SCHEMA.into(),
             id: "t".into(),
             title: "表格".into(),
             fields,

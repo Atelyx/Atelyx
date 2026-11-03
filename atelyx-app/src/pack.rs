@@ -42,7 +42,7 @@ pub(crate) const BUILTIN_PLUGINS: &[BuiltinPlugin] = &[
 /// 预置插件视图 id → 渲染函数。与 [`BUILTIN_PLUGINS`] 的视图 id 对齐（单测锁住）。
 const RENDERERS: &[(&str, ViewProvider)] = &[
     ("canvas", crate::canvas_view::canvas_view),
-    ("table", crate::table_view::table_view),
+    ("table", crate::table_panel::table_view),
     ("inspector", crate::layout_view::inspector_view),
 ];
 

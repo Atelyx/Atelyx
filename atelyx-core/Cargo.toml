@@ -22,8 +22,6 @@ uuid = { version = "1", features = ["v4"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking", "stream"] }
 # 仓库内文件检索（filesearch）：glob 模式匹配（`**/` 任意深度语义，即 ripgrep 所用引擎）
 globset = "0.4"
-# 表格 xlsx 导出（table_xlsx）
-rust_xlsxwriter = "0.89"
 base64 = "0.22"
 # 格式语义（Markdown / frontmatter，宿主与插件共用；core 以 `markdown` / `frontmatter` 重导出保持路径）
 atelyx-format = { path = "../atelyx-format" }
@@ -38,7 +36,7 @@ memmap2 = "0.9"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 # 目录安装按源目录 .gitignore 过滤（git 语义：嵌套规则 / 反选 / `**` / 目录锚定）
 ignore = "0.4"
-# xlsx 不支持的图片格式（webp 等）导出前转 PNG
+# 表格图片附件解码（image_thumb：EXIF 方向 / 缩略图 / RGBA）
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp"] }
 # 系统下载/主目录定位（图片下载落盘）
 dirs = "6"

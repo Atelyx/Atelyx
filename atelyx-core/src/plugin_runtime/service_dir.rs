@@ -947,6 +947,24 @@ mod tests {
             .unwrap_or_else(|| panic!("目录里应有服务 {service_name}"))
     }
 
+    /// 内置目录里已没有非平台归属的服务（表格服务改由插件经总线登记），
+    /// 归属插件停用语义用一条测试条目覆盖，不依赖目录里正好有可停用的内置服务。
+    fn dir_with_owned_builtin(service: &str, owner: &str) -> ServiceDir {
+        let mut dir = ServiceDir::new();
+        dir.entries.insert(
+            service.to_string(),
+            Entry {
+                owner: Some(owner.to_string()),
+                builtin: Some(vec!["echo".to_string()]),
+                builtin_enabled: true,
+                candidates: Vec::new(),
+                active: Active::Builtin,
+                replaceable: true,
+            },
+        );
+        dir
+    }
+
     #[test]
     fn builtin_catalog_splits_at_the_first_dot() {
         let dir = ServiceDir::new();
@@ -1051,23 +1069,23 @@ mod tests {
 
     #[test]
     fn disabling_a_builtin_owner_takes_its_services_off_the_bus() {
-        let mut dir = ServiceDir::new();
-        assert_eq!(dir.route("table"), Route::Builtin);
+        let mut dir = dir_with_owned_builtin("demo", "com.owner");
+        assert_eq!(dir.route("demo"), Route::Builtin);
         assert_eq!(
-            dir.set_owner_enabled("atelyx.tables", false),
-            vec!["table".to_string()],
-            "表格插件的全部服务一并离开"
+            dir.set_owner_enabled("com.owner", false),
+            vec!["demo".to_string()],
+            "归属插件的全部服务一并离开"
         );
-        assert_eq!(dir.route("table"), Route::Missing, "归属插件停用后服务不可用");
-        assert!(dir.blocked("table"), "在册但暂不可用与「从未登记」要能区分");
+        assert_eq!(dir.route("demo"), Route::Missing, "归属插件停用后服务不可用");
+        assert!(dir.blocked("demo"), "在册但暂不可用与「从未登记」要能区分");
         assert!(!dir.blocked("vault"), "平台插件的方法不受停用影响");
-        assert!(dir.list().services.iter().all(|service| service.service != "table"));
-        assert!(!dir.changed("table").available);
+        assert!(dir.list().services.iter().all(|service| service.service != "demo"));
+        assert!(!dir.changed("demo").available);
 
-        assert_eq!(dir.set_owner_enabled("atelyx.tables", true), vec!["table".to_string()]);
-        assert_eq!(dir.route("table"), Route::Builtin, "重新启用即恢复");
-        assert!(!dir.blocked("table"));
-        assert!(dir.list().services.iter().any(|service| service.service == "table"));
+        assert_eq!(dir.set_owner_enabled("com.owner", true), vec!["demo".to_string()]);
+        assert_eq!(dir.route("demo"), Route::Builtin, "重新启用即恢复");
+        assert!(!dir.blocked("demo"));
+        assert!(dir.list().services.iter().any(|service| service.service == "demo"));
     }
 
     #[test]
@@ -1080,39 +1098,39 @@ mod tests {
 
     #[test]
     fn a_disabled_owner_yields_to_an_external_candidate() {
-        let mut dir = ServiceDir::new();
-        dir.register("com.a", &params("table", &["snapshot"])).unwrap();
-        dir.set_owner_enabled("atelyx.tables", false);
-        assert_eq!(dir.route("table"), Route::Plugin("com.a".into()), "外部候选接任");
-        assert_eq!(info(&dir.list(), "table").provider.as_deref(), Some("com.a"));
+        let mut dir = dir_with_owned_builtin("demo", "com.owner");
+        dir.register("com.a", &params("demo", &["echo"])).unwrap();
+        dir.set_owner_enabled("com.owner", false);
+        assert_eq!(dir.route("demo"), Route::Plugin("com.a".into()), "外部候选接任");
+        assert_eq!(info(&dir.list(), "demo").provider.as_deref(), Some("com.a"));
 
         dir.drop_plugin("com.a");
-        assert_eq!(dir.route("table"), Route::Missing, "候选也没了即不可用");
-        dir.set_owner_enabled("atelyx.tables", true);
-        assert_eq!(dir.route("table"), Route::Builtin, "内置登记留位，启用即恢复");
+        assert_eq!(dir.route("demo"), Route::Missing, "候选也没了即不可用");
+        dir.set_owner_enabled("com.owner", true);
+        assert_eq!(dir.route("demo"), Route::Builtin, "内置登记留位，启用即恢复");
     }
 
     #[test]
     fn a_candidate_registered_after_the_owner_is_disabled_takes_over() {
-        let mut dir = ServiceDir::new();
-        dir.set_owner_enabled("atelyx.tables", false);
-        assert!(dir.blocked("table"));
+        let mut dir = dir_with_owned_builtin("demo", "com.owner");
+        dir.set_owner_enabled("com.owner", false);
+        assert!(dir.blocked("demo"));
         assert!(
-            dir.register("com.a", &params("table", &["snapshot"])).unwrap(),
+            dir.register("com.a", &params("demo", &["echo"])).unwrap(),
             "内置实现不在场时登记即接任，要广播活动提供者变化"
         );
-        assert_eq!(dir.route("table"), Route::Plugin("com.a".into()));
-        assert!(!dir.blocked("table"));
+        assert_eq!(dir.route("demo"), Route::Plugin("com.a".into()));
+        assert!(!dir.blocked("demo"));
         assert!(
-            !dir.register("com.b", &params("table", &["snapshot"])).unwrap(),
+            !dir.register("com.b", &params("demo", &["echo"])).unwrap(),
             "已有提供者时后来者只是候选"
         );
-        assert_eq!(dir.route("table"), Route::Plugin("com.a".into()));
+        assert_eq!(dir.route("demo"), Route::Plugin("com.a".into()));
 
-        dir.unregister("com.a", "table").unwrap();
-        assert_eq!(dir.route("table"), Route::Plugin("com.b".into()), "剩余候选接任");
-        dir.unregister("com.b", "table").unwrap();
-        assert_eq!(dir.route("table"), Route::Missing, "候选退出后回到暂不可用");
-        assert!(dir.blocked("table"), "内置登记仍在册，重新启用即恢复");
+        dir.unregister("com.a", "demo").unwrap();
+        assert_eq!(dir.route("demo"), Route::Plugin("com.b".into()), "剩余候选接任");
+        dir.unregister("com.b", "demo").unwrap();
+        assert_eq!(dir.route("demo"), Route::Missing, "候选退出后回到暂不可用");
+        assert!(dir.blocked("demo"), "内置登记仍在册，重新启用即恢复");
     }
 }

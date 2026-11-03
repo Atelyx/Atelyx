@@ -1099,7 +1099,6 @@ pub(crate) fn canvas_key_msg(id: crate::commands::CommandId) -> Option<CanvasMsg
         C::CanvasPaste => CanvasKey::Paste,
         C::CanvasSelectAll => CanvasKey::SelectAll,
         C::CanvasClear => CanvasKey::DeleteSelection,
-        _ => return None,
     }))
 }
 

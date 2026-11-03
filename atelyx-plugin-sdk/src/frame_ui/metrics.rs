@@ -50,7 +50,7 @@ impl Metrics {
         let max_width = max_width.map(|width| width.max(1.0));
         let key = key_of(text, spec, max_width);
         if let Some(hit) = self.cache.get(&key) {
-            return *hit;
+            return hit.clone();
         }
         if self.missed.insert(key.clone()) {
             self.misses.push(MeasureItem {
@@ -58,7 +58,10 @@ impl Metrics {
                 size: spec.size,
                 weight: spec.weight,
                 family: spec.family,
+                family_name: None,
                 max_width,
+                layout: None,
+                segments: false,
             });
         }
         estimate(text, spec.size, max_width)
@@ -96,7 +99,10 @@ impl Metrics {
                 size: spec.size,
                 weight: spec.weight,
                 family: spec.family,
+                family_name: None,
                 max_width: None,
+                layout: None,
+                segments: false,
             });
         }
     }
@@ -139,7 +145,7 @@ impl Metrics {
         let mut layout_changed = false;
         for (item, size) in items.iter().zip(sizes) {
             let spec = FontSpec { size: item.size, weight: item.weight, family: item.family };
-            self.cache.insert(key_of(&item.text, spec, item.max_width), *size);
+            self.cache.insert(key_of(&item.text, spec, item.max_width), size.clone());
             if item.max_width.is_none() {
                 layout_changed = true;
                 if let Some(ch) = single_char(&item.text) {
@@ -198,6 +204,7 @@ fn weight_code(weight: Option<TextWeight>) -> u8 {
         Some(TextWeight::Normal) => 1,
         Some(TextWeight::Medium) => 2,
         Some(TextWeight::SemiBold) => 3,
+        Some(TextWeight::Bold) => 4,
     }
 }
 
@@ -217,9 +224,9 @@ fn estimate(text: &str, size: f32, max_width: Option<f32>) -> MeasureTextResult 
     match max_width {
         Some(limit) if width > limit => {
             let lines = (width / limit).ceil().max(1.0);
-            MeasureTextResult { width: limit, height: line_height * lines, lines: lines as u32 }
+            MeasureTextResult { width: limit, height: line_height * lines, lines: lines as u32, segments: None }
         }
-        _ => MeasureTextResult { width, height: line_height, lines: 1 },
+        _ => MeasureTextResult { width, height: line_height, lines: 1, segments: None },
     }
 }
 
@@ -243,8 +250,8 @@ mod tests {
         metrics.measure("ab", spec(12.0), None);
         assert_eq!(metrics.take_misses().len(), 1, "同一键只量算一次");
 
-        let items = vec![MeasureItem { text: "ab".into(), size: 12.0, weight: None, family: None, max_width: None }];
-        metrics.apply(&items, &[MeasureTextResult { width: 13.0, height: 14.0, lines: 1 }]);
+        let items = vec![MeasureItem { text: "ab".into(), size: 12.0, weight: None, family: None, family_name: None, max_width: None , layout: None, segments: false }];
+        metrics.apply(&items, &[MeasureTextResult { width: 13.0, height: 14.0, lines: 1 , segments: None }]);
         let measured = metrics.measure("ab", spec(12.0), None);
         assert_eq!(measured.width, 13.0, "量算落地后取真实字宽");
         assert!(!metrics.has_misses());
@@ -256,8 +263,8 @@ mod tests {
         assert!((metrics.char_width('a', spec(12.0)) - 6.6).abs() < 1e-4, "未量算时按估算");
         assert_eq!(metrics.take_misses().len(), 1, "同一字型下的同一个字只量算一次");
 
-        let items = vec![MeasureItem { text: "a".into(), size: 12.0, weight: None, family: None, max_width: None }];
-        metrics.apply(&items, &[MeasureTextResult { width: 7.0, height: 14.0, lines: 1 }]);
+        let items = vec![MeasureItem { text: "a".into(), size: 12.0, weight: None, family: None, family_name: None, max_width: None , layout: None, segments: false }];
+        metrics.apply(&items, &[MeasureTextResult { width: 7.0, height: 14.0, lines: 1 , segments: None }]);
         assert_eq!(metrics.char_width('a', spec(12.0)), 7.0, "量算落地后 ASCII 走字型表");
         assert!(!metrics.has_misses(), "同一字型不再登记");
         let other_size = metrics.char_width('a', spec(20.0));

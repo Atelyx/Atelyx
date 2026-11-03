@@ -20,8 +20,8 @@ use iced::window;
 use iced::{Element, Length, Padding, Point, Rectangle, Size, Vector};
 
 use atelyx_core::plugin_runtime::{
-    FrameInput, HitCursor, Key as FrameKey, KeyAction, Modifiers as FrameModifiers, MouseButton,
-    NamedKey, SurfaceFrame,
+    FrameInput, FrameRect, HitCursor, Key as FrameKey, KeyAction, Modifiers as FrameModifiers,
+    MouseButton, NamedKey, SurfaceFrame,
 };
 
 use crate::plugin_paint::{self, PaintCtx};
@@ -86,6 +86,13 @@ struct FrameState {
     caches: RefCell<Vec<canvas::Cache>>,
     /// 已排版的文字段落：内容不变跨帧复用，改宽 / 滚动 / 悬停不重新成形。
     texts: RefCell<plugin_paint::TextCache>,
+    /// 浮层几何缓存与文字缓存（菜单 / 灯箱按需重画）。
+    popup_cache: RefCell<Vec<canvas::Cache>>,
+    popup_texts: RefCell<plugin_paint::TextCache>,
+    /// 上次绘制过的浮层：内容一变即作废几何缓存（尺寸相同也不会画旧形状）。
+    popup_painted: RefCell<Option<atelyx_core::plugin_runtime::SurfacePopup>>,
+    /// 浮层步骤表缓冲（换帧不分配新 Vec）。
+    popup_steps: RefCell<Vec<plugin_paint::PaintStep>>,
     /// 上次绘制的步骤表（与 `painted` 同帧）：换帧时按段比对，只作废内容变了的几何缓存。
     steps: RefCell<Vec<plugin_paint::PaintStep>>,
     /// 下一帧的步骤表缓冲：与 `steps` 交换使用，换帧不分配新 Vec。
@@ -111,6 +118,8 @@ struct FrameState {
     /// 最近一次指针位置（面本地）：窗口失焦时按它补发 `PointerUp`，插件不会卡在拖拽态。
     last_point: Cell<Option<Point>>,
     last_press: RefCell<Option<(MouseButton, Instant, Point)>>,
+    /// 最近一次键盘事件的修饰键快照（滚轮事件本身不带修饰键）。
+    mods: Cell<FrameModifiers>,
     /// 已请求启用输入法（失去焦点或帧不再声明 `ime` 时请求停用一次）。
     ime_on: Cell<bool>,
 }
@@ -120,6 +129,10 @@ impl Default for FrameState {
         Self {
             caches: RefCell::new(Vec::new()),
             texts: RefCell::new(plugin_paint::TextCache::default()),
+            popup_cache: RefCell::new(Vec::new()),
+            popup_texts: RefCell::new(plugin_paint::TextCache::default()),
+            popup_painted: RefCell::new(None),
+            popup_steps: RefCell::new(Vec::new()),
             steps: RefCell::new(Vec::new()),
             next_steps: RefCell::new(Vec::new()),
             painted: RefCell::new(None),
@@ -133,6 +146,7 @@ impl Default for FrameState {
             inside: Cell::new(false),
             last_point: Cell::new(None),
             last_press: RefCell::new(None),
+            mods: Cell::new(FrameModifiers::default()),
             ime_on: Cell::new(false),
         }
     }
@@ -193,7 +207,33 @@ impl PluginFrame<'_> {
     fn hit(&self, state: &FrameState, point: Point) -> Option<String> {
         let painted = state.painted.borrow();
         let frame = painted.as_deref().unwrap_or(self.frame.as_ref());
+        // 浮层画在主帧之上，命中优先取它自己的命中区（同用面本地坐标）
+        if let Some(popup) = &frame.popup {
+            if point.x >= popup.rect.x
+                && point.y >= popup.rect.y
+                && point.x <= popup.rect.x + popup.rect.w
+                && point.y <= popup.rect.y + popup.rect.h
+            {
+                if let Some(hit) = popup.hits.iter().find(|hit| {
+                    point.x >= hit.x
+                        && point.y >= hit.y
+                        && point.x <= hit.x + hit.w
+                        && point.y <= hit.y + hit.h
+                }) {
+                    return Some(hit.id.clone());
+                }
+            }
+        }
         frame.hit_region_at(point.x, point.y).map(|hit| hit.id.clone())
+    }
+
+    /// 输入法候选窗的锚点：浮层自带的 `ime` 优先（浮层内就地输入），否则用主帧的。
+    fn ime_rect(&self) -> Option<FrameRect> {
+        self.frame
+            .popup
+            .as_ref()
+            .and_then(|popup| popup.ime)
+            .or(self.frame.ime)
     }
 
     /// 回发一条原始输入（坐标已换算到面本地）。
@@ -261,6 +301,9 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginFrame<'_> {
         // 命中区会带到新面
         if state.identity.get() != self.identity() {
             state.identity.set(self.identity());
+            state.popup_cache.borrow_mut().clear();
+            state.popup_texts.borrow_mut().clear();
+            *state.popup_painted.borrow_mut() = None;
             state.pressed.set(None);
             state.inside.set(false);
             state.last_point.set(None);
@@ -399,12 +442,14 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginFrame<'_> {
                     y: point.y,
                     delta_x: dx,
                     delta_y: dy,
+                    modifiers: state.mods.get(),
                     hit: self.hit(state, point),
                 });
                 // 面消费滚轮：外层滚动容器不再同帧滚动
                 shell.capture_event();
             }
             Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, text, .. }) => {
+                state.mods.set(frame_modifiers(*modifiers));
                 if !self.focused || !self.frame.keys {
                     return;
                 }
@@ -424,6 +469,7 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginFrame<'_> {
                 shell.capture_event();
             }
             Event::Keyboard(keyboard::Event::KeyReleased { key, modifiers, .. }) => {
+                state.mods.set(frame_modifiers(*modifiers));
                 if !self.focused || !self.frame.keys {
                     return;
                 }
@@ -439,28 +485,30 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginFrame<'_> {
                 shell.capture_event();
             }
             Event::InputMethod(ime) => {
-                if !self.focused || self.frame.ime.is_none() {
+                let ime_rect = self.ime_rect();
+                if !self.focused || ime_rect.is_none() {
                     return;
                 }
                 let input = match ime {
-                    ImeEvent::Preedit(content, range) => FrameInput::Text {
+                    ImeEvent::Preedit(content, _) => FrameInput::Text {
                         text: content.clone(),
                         composing: true,
-                        caret: range.as_ref().map(|range| range.end as u32),
-                        candidates: self.frame.ime,
+                        // 组合串插在文档当前光标处；range 是组合串内部的游标区间，不是文档位置
+                        caret: None,
+                        candidates: ime_rect,
                     },
                     ImeEvent::Commit(content) => FrameInput::Text {
                         text: content.clone(),
                         composing: false,
                         caret: None,
-                        candidates: self.frame.ime,
+                        candidates: ime_rect,
                     },
                     // 组合结束且无提交：空串表示放弃组合，不插入文本
                     ImeEvent::Closed => FrameInput::Text {
                         text: String::new(),
                         composing: true,
                         caret: None,
-                        candidates: self.frame.ime,
+                        candidates: ime_rect,
                     },
                     ImeEvent::Opened => return,
                 };
@@ -468,8 +516,9 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginFrame<'_> {
                 shell.capture_event();
             }
             Event::Window(window::Event::RedrawRequested(_)) => {
-                let enabled = self.focused && self.frame.ime.is_some();
-                if let Some(ime) = self.frame.ime.filter(|_| enabled) {
+                let ime_rect = self.ime_rect();
+                let enabled = self.focused && ime_rect.is_some();
+                if let Some(ime) = ime_rect.filter(|_| enabled) {
                     let request: InputMethod<&str> = InputMethod::Enabled {
                         cursor: Rectangle::new(
                             bounds.position() + Vector::new(ime.x, ime.y),
@@ -599,6 +648,9 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginFrame<'_> {
                 state.texts.borrow_mut().clear();
             }
             state.caches.borrow().iter().for_each(canvas::Cache::clear);
+            state.popup_cache.borrow().iter().for_each(canvas::Cache::clear);
+            state.popup_texts.borrow_mut().clear();
+            *state.popup_painted.borrow_mut() = None;
             state.font_epoch.set(epoch);
             state.image_epoch.set(image_epoch);
         }
@@ -685,6 +737,7 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginFrame<'_> {
                 renderer.end_layer();
             }
         });
+        draw_popup(state, &frame.popup, bounds, viewport, renderer, &ctx);
         texts.end_frame();
     }
 
@@ -862,4 +915,93 @@ mod tests {
         assert!(!same_step(&first, &shapes, &changed, &shapes));
         assert!(!same_step(&first, &shapes, &same, &plugin_paint::PaintStep::Text(0)));
     }
+}
+
+/// 浮层绘制：按面矩形偏移、按窗口裁剪，叠在本面之上（可越出面矩形，例如盖住面板头部）。
+/// 浮层内容不参与主帧的几何缓存（内容随菜单 / 灯箱状态整块换），逐帧走临时缓存。
+fn draw_popup(
+    state: &FrameState,
+    popup: &Option<atelyx_core::plugin_runtime::SurfacePopup>,
+    bounds: Rectangle,
+    viewport: &Rectangle,
+    renderer: &mut iced::Renderer,
+    ctx: &PaintCtx<'_>,
+) {
+    let Some(popup) = popup else {
+        state.popup_cache.borrow_mut().clear();
+        *state.popup_painted.borrow_mut() = None;
+        return;
+    };
+    // 浮层命令与主帧同坐标系（面本地）：只按窗口裁剪，不做额外平移
+    let area = Rectangle::new(
+        Point::new(bounds.x + popup.rect.x, bounds.y + popup.rect.y),
+        Size::new(popup.rect.w.max(0.0), popup.rect.h.max(0.0)),
+    );
+    // 可见性看浮层矩形，裁剪仍按窗口：阴影与越出浮层矩形的描边不能被矩形自身裁掉
+    if !area.intersects(viewport) {
+        return;
+    }
+    let clip = *viewport;
+    let changed = state
+        .popup_painted
+        .borrow()
+        .as_ref()
+        .is_none_or(|painted| painted != popup);
+    if changed {
+        state.popup_cache.borrow_mut().iter().for_each(canvas::Cache::clear);
+        *state.popup_painted.borrow_mut() = Some(popup.clone());
+    }
+    let mut steps = state.popup_steps.borrow_mut();
+    plugin_paint::plan_into(&popup.commands, &mut steps);
+    let mut texts = state.popup_texts.borrow_mut();
+    texts.begin_frame();
+    renderer.with_layer(clip, |renderer| {
+        let mut caches = state.popup_cache.borrow_mut();
+        if caches.len() < steps.len() {
+            caches.resize_with(steps.len(), canvas::Cache::new);
+        }
+        let mut layer_open = false;
+        let mut max_rank = 0u8;
+        for (slot, step) in steps.iter().enumerate() {
+            let rank = plugin_paint::step_rank(step);
+            if !layer_open || rank < max_rank {
+                if layer_open {
+                    renderer.end_layer();
+                }
+                renderer.start_layer(clip);
+                layer_open = true;
+                max_rank = rank;
+            } else {
+                max_rank = max_rank.max(rank);
+            }
+            match step {
+                plugin_paint::PaintStep::Shapes(range) => {
+                    let geometry = caches[slot].draw(renderer, bounds.size(), |canvas| {
+                        plugin_paint::execute_shapes(canvas, &popup.commands, range.clone(), ctx);
+                    });
+                    renderer.with_translation(Vector::new(bounds.x, bounds.y), |renderer| {
+                        renderer.draw_geometry(geometry);
+                    });
+                }
+                plugin_paint::PaintStep::Image(index) => {
+                    let geometry = caches[slot].draw(renderer, bounds.size(), |canvas| {
+                        plugin_paint::execute_shapes(canvas, &popup.commands, *index..*index + 1, ctx);
+                    });
+                    renderer.with_translation(Vector::new(bounds.x, bounds.y), |renderer| {
+                        renderer.draw_geometry(geometry);
+                    });
+                }
+                plugin_paint::PaintStep::Text(index) => {
+                    texts.draw_one(renderer, &popup.commands[*index], bounds);
+                }
+                plugin_paint::PaintStep::Shadow(index) => {
+                    plugin_paint::draw_shadow(renderer, bounds, &popup.commands[*index]);
+                }
+            }
+        }
+        if layer_open {
+            renderer.end_layer();
+        }
+    });
+    texts.end_frame();
 }

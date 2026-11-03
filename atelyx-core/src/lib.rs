@@ -24,8 +24,8 @@ pub mod rebuild_links;
 pub mod search;
 pub mod space_client;
 pub mod space_frame;
-pub mod table_ops;
-pub mod table_xlsx;
+/// 表格纯逻辑（模型与运算在格式库，宿主经此路径沿用）。
+pub use atelyx_format::table::ops as table_ops;
 pub mod updater;
 pub mod vault;
 pub mod vault_refs;

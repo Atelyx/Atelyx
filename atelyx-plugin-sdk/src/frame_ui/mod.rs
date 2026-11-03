@@ -466,6 +466,7 @@ mod tests {
                             width: fake_width(&item.text, item.size),
                             height: item.size * 1.2,
                             lines: 1,
+    segments: None,
                         })
                         .collect();
                     serde_json::json!({ "sizes": sizes })
@@ -602,7 +603,7 @@ mod tests {
         assert!(has_hit(&frame, "overlay-card"), "浮层命中区随帧提交");
 
         let scrolls = bench
-            .event(FrameInput::Wheel { x: 80.0, y: 80.0, delta_x: 0.0, delta_y: 24.0, hit: None })
+            .event(FrameInput::Wheel { x: 80.0, y: 80.0, delta_x: 0.0, delta_y: 24.0, modifiers: Default::default(), hit: None })
             .await;
         assert!(
             matches!(scrolls.as_slice(), [UiEvent::Scroll { id, .. }] if id == "overlay-list"),
@@ -610,12 +611,12 @@ mod tests {
         );
 
         let outside = bench
-            .event(FrameInput::Wheel { x: 330.0, y: 100.0, delta_x: 0.0, delta_y: 24.0, hit: None })
+            .event(FrameInput::Wheel { x: 330.0, y: 100.0, delta_x: 0.0, delta_y: 24.0, modifiers: Default::default(), hit: None })
             .await;
         assert!(outside.is_empty(), "浮层外的滚轮不再落到下层列表：{outside:?}");
 
         let blank = bench
-            .event(FrameInput::Wheel { x: 270.0, y: 170.0, delta_x: 0.0, delta_y: 24.0, hit: None })
+            .event(FrameInput::Wheel { x: 270.0, y: 170.0, delta_x: 0.0, delta_y: 24.0, modifiers: Default::default(), hit: None })
             .await;
         assert!(blank.is_empty(), "浮层内、滚动区外的滚轮也不落到下层：{blank:?}");
     }
@@ -1084,7 +1085,7 @@ let a = 1;
         assert!(has_hit(&frame, "row0"), "起始位置第一行完整可见");
 
         bench
-            .event(FrameInput::Wheel { x: 100.0, y: 60.0, delta_x: 0.0, delta_y: 100.0, hit: None })
+            .event(FrameInput::Wheel { x: 100.0, y: 60.0, delta_x: 0.0, delta_y: 100.0, modifiers: Default::default(), hit: None })
             .await;
         let frame = bench.render(build).await.unwrap();
         assert!(!has_hit(&frame, "row0"), "滚出视口的行不再可命中");
@@ -1231,7 +1232,7 @@ let a = 1;
         };
         bench.render(build).await.unwrap();
         let events = bench
-            .event(FrameInput::Wheel { x: 100.0, y: 60.0, delta_x: 0.0, delta_y: 2.0, hit: None })
+            .event(FrameInput::Wheel { x: 100.0, y: 60.0, delta_x: 0.0, delta_y: 2.0, modifiers: Default::default(), hit: None })
             .await;
         assert!(events.is_empty(), "已在终点时继续向下滚不产生偏移变化：{events:?}");
         let frame = bench.render(build).await.unwrap();
@@ -1349,7 +1350,7 @@ let a = 1;
 
         // 左栏（x 在面板左半）
         let events = bench
-            .event(FrameInput::Wheel { x: 100.0, y: 300.0, delta_x: 0.0, delta_y: 40.0, hit: None })
+            .event(FrameInput::Wheel { x: 100.0, y: 300.0, delta_x: 0.0, delta_y: 40.0, modifiers: Default::default(), hit: None })
             .await;
         assert!(
             matches!(events.first(), Some(UiEvent::Scroll { id, .. }) if id == "left"),
@@ -1358,7 +1359,7 @@ let a = 1;
 
         // 右侧参数栏
         let events = bench
-            .event(FrameInput::Wheel { x: 300.0, y: 300.0, delta_x: 0.0, delta_y: 40.0, hit: None })
+            .event(FrameInput::Wheel { x: 300.0, y: 300.0, delta_x: 0.0, delta_y: 40.0, modifiers: Default::default(), hit: None })
             .await;
         assert!(
             matches!(events.first(), Some(UiEvent::Scroll { id, .. }) if id == "right"),
@@ -1367,7 +1368,7 @@ let a = 1;
 
         // 底部日志区（固定高度，贴底）
         let events = bench
-            .event(FrameInput::Wheel { x: 200.0, y: 580.0, delta_x: 0.0, delta_y: -40.0, hit: None })
+            .event(FrameInput::Wheel { x: 200.0, y: 580.0, delta_x: 0.0, delta_y: -40.0, modifiers: Default::default(), hit: None })
             .await;
         assert!(
             matches!(events.first(), Some(UiEvent::Scroll { id, .. }) if id == "logs"),
@@ -1433,7 +1434,7 @@ let a = 1;
         };
         bench.render(build).await.unwrap();
         let events = bench
-            .event(FrameInput::Wheel { x: 100.0, y: 60.0, delta_x: 0.0, delta_y: 80.0, hit: None })
+            .event(FrameInput::Wheel { x: 100.0, y: 60.0, delta_x: 0.0, delta_y: 80.0, modifiers: Default::default(), hit: None })
             .await;
         let UiEvent::Scroll { id, offset, max_offset } = &events[0] else {
             panic!("滚轮应上报滚动位置：{events:?}");
@@ -1457,7 +1458,7 @@ let a = 1;
         };
         bench.render(build).await.unwrap();
         let events = bench
-            .event(FrameInput::Wheel { x: 120.0, y: 100.0, delta_x: 0.0, delta_y: 40.0, hit: None })
+            .event(FrameInput::Wheel { x: 120.0, y: 100.0, delta_x: 0.0, delta_y: 40.0, modifiers: Default::default(), hit: None })
             .await;
         let Some(UiEvent::Scroll { offset, max_offset, .. }) = events.first() else {
             panic!("一格滚轮就要动：{events:?}");
@@ -1818,7 +1819,7 @@ let a = 1;
     async fn image_declares_a_tile_with_the_requested_fit() {
         let mut bench = Bench::new(200.0, 120.0).await;
         let frame = bench
-            .render(|ui| ui.image_fit(ImageSource::Vault { path: "a.png".into() }, 80.0, ImageFit::Cover))
+            .render(|ui| ui.image_fit(ImageSource::Vault { path: "a.png".into(), max_edge: None }, 80.0, ImageFit::Cover))
             .await
             .unwrap();
         assert!(frame.commands.iter().any(|command| matches!(
@@ -1936,7 +1937,7 @@ let a = 1;
         let mut bench = Bench::new(200.0, 160.0).await;
         bench.render(|ui| build(ui, true)).await.unwrap();
         let events = bench
-            .event(FrameInput::Wheel { x: 100.0, y: 30.0, delta_x: 0.0, delta_y: 40.0, hit: None })
+            .event(FrameInput::Wheel { x: 100.0, y: 30.0, delta_x: 0.0, delta_y: 40.0, modifiers: Default::default(), hit: None })
             .await;
         assert!(
             matches!(events.as_slice(), [UiEvent::Scroll { id, .. }] if id == "list"),
@@ -1946,7 +1947,7 @@ let a = 1;
         let mut bench = Bench::new(200.0, 160.0).await;
         bench.render(|ui| build(ui, false)).await.unwrap();
         let events = bench
-            .event(FrameInput::Wheel { x: 100.0, y: 30.0, delta_x: 0.0, delta_y: 40.0, hit: None })
+            .event(FrameInput::Wheel { x: 100.0, y: 30.0, delta_x: 0.0, delta_y: 40.0, modifiers: Default::default(), hit: None })
             .await;
         assert!(events.is_empty(), "阻挡浮层期间滚轮不落到下层：{events:?}");
     }

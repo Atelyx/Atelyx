@@ -1,12 +1,11 @@
 //! 协作空间模式的壳侧编排：账号与会话恢复、进入/离开空间、内容面按空间身份分派服务端。
 //! 纯逻辑与网络 I/O 在 core（space_client / collab / note_collab）；本模块只做
-//! 「取 App 状态 → 调 core → 应用结果 → 触副作用」的编排，与 table_actions 同构。
+//! 「取 App 状态 → 调 core → 应用结果 → 触副作用」的编排，与各内容面的壳侧保存链同构。
 
 use iced::Task;
 
 use crate::layout_view::{RenameState, RenameTarget};
 use crate::canvas_actions;
-use crate::table_view as tv;
 use crate::ui::notify::Level as NoticeLevel;
 use crate::{
     layout_view, vault, App, DraftKind, Message, SaveReason, SpaceField, SpaceForm,
@@ -817,6 +816,7 @@ pub fn enter_space(app: &mut App, session: SpaceSession, from_boot: bool) -> Tas
     if !from_boot {
         app.ui.last_note_file = None;
         app.ui.last_table_file = None;
+        app.plugins.on_table_changed(None);
         app.ui.last_canvas_file = None;
         // 插件文档实例与文档会话随容器切换收口：旧的相对路径在新空间指向别的文件
         let _ = crate::plugin_actions::close_doc(app);
@@ -830,7 +830,7 @@ pub fn enter_space(app: &mut App, session: SpaceSession, from_boot: bool) -> Tas
             task = task.chain(app.open_file(&rel, true));
         }
         if let Some(rel) = app.ui.last_table_file.clone() {
-            task = task.chain(space_load_table(app, &rel));
+            task = task.chain(app.open_file(&rel, true));
         }
         if let Some(rel) = app.ui.last_canvas_file.clone() {
             task = task.chain(crate::canvas_actions::load_canvas(app, &rel));
@@ -854,12 +854,9 @@ fn clear_session_state(app: &mut App) {
     app.file_count = None;
 
     app.rename_notice = None;
-    app.table = None;
     crate::canvas_chat::detach_canvas(app);
     app.canvas = None;
-    // 表格在场随容器切换作废（旧空间的通道身份不再有效；对端靠名册剔除与超时收尾）
-    app.table_collab = None;
-    // 画布在场同理（detach_canvas 已清锁与卡运行态，通道状态一并作废）
+    // 画布在场随容器切换作废（detach_canvas 已清锁与卡运行态，通道状态一并作废）
     app.canvas_collab = None;
     app.space_doc_flushed = None;
     app.space_doc_save_inflight = false;
@@ -968,9 +965,6 @@ pub fn handle(app: &mut App, msg: SpaceMsg) -> Task<Message> {
         SpaceMsg::TreeLoaded { gen, result } => on_tree_loaded(app, gen, result),
         SpaceMsg::DocSaved { gen, rel, frozen, reason, result } => {
             on_doc_saved(app, gen, &rel, frozen, reason, result)
-        }
-        SpaceMsg::TablePatchDone { gen, file, new_file, reason, result, frozen } => {
-            on_table_patch_done(app, gen, file, new_file, reason, result, frozen)
         }
         SpaceMsg::CanvasPatchDone { gen, file, new_file, reason, result, frozen } => {
             on_canvas_patch_done(app, gen, file, new_file, reason, result, frozen)
@@ -1285,28 +1279,6 @@ pub fn space_load_children(app: &mut App, rel: &str) -> Task<Message> {
     }
 }
 
-/// 打开表格（空间模式）：GET 文本 → 解析 TableFile → 复用 TableMsg::Loaded。
-pub fn space_load_table(app: &App, rel: &str) -> Task<Message> {
-    let Some(session) = session_of(app) else { return Task::none() };
-    let gen = app.epoch();
-    let rel = rel.to_string();
-    let rel_for_cb = rel.clone();
-    let client = session.client;
-    let space_id = session.space_id;
-    Task::perform(
-        async move {
-            let text = client.get_file_text(&space_id, &rel).await.map_err(err_text)?;
-            let mut table: atelyx_core::vault::TableFile =
-                serde_json::from_str(&text).map_err(|e| format!("表格解析失败：{e}"))?;
-            for row in &mut table.rows {
-                atelyx_core::table_ops::normalize_table_row(row);
-            }
-            Ok(table)
-        },
-        move |result| Message::Table(tv::TableMsg::Loaded(gen, rel_for_cb, result)),
-    )
-}
-
 /// 空间模式文档保存：GET 回读合流（他人落盘不丢）→ PUT → 服务端历史。
 /// 合流后的最终全文随回执带回；落盘期间的新编辑保持脏、下一轮防抖重写。
 /// 在途互斥：空间保存是 GET→PUT 网络往返且无写队列保序，并发两笔后到先写会回退服务端，
@@ -1526,69 +1498,105 @@ pub fn apply_remote_text(app: &mut App, new_text: String) {
     crate::doc_session::publish_state(app, Some(new_text));
 }
 
-// ===== 表格保存（空间模式）=====
+// ===== 插件提交的空间文件补丁 =====
 
-/// 空间模式表格保存：基线 diff → 服务端补丁合并仲裁（id 不符 400 → 回退全量 PUT）。
-pub fn space_submit_table_save(app: &mut App, reason: tv::SaveReason) -> Task<Message> {
-    let Some(s) = app.table.as_ref() else { return Task::none() };
-    if !s.dirty {
+/// 编辑合并窗口（毫秒，与宿主保存链同口径）。
+const PLUGIN_HISTORY_COALESCE_MS: i64 = 60_000;
+
+/// 插件提交一次空间文件补丁保存（当前只支持表格）：与宿主自持会话同一套仲裁与历史记版，
+/// 回执为服务端最终路径（补丁带标题时服务端按标题改名）。
+pub fn submit_file_patch(
+    app: &mut App,
+    request_id: u64,
+    params: atelyx_core::plugin_runtime::SpaceFilePatchParams,
+) -> Task<Message> {
+    if params.kind != "table" {
+        app.plugins.resolve_shell_call(
+            request_id,
+            Err(format!("不支持的空间文件类型：{}", params.kind)),
+        );
         return Task::none();
     }
-    let Some(session) = session_of(app) else { return Task::none() };
+    let Some(session) = session_of(app) else {
+        app.plugins
+            .resolve_shell_call(request_id, Err("当前不在协作空间".into()));
+        return Task::none();
+    };
     if !session.role.can_write() {
-        if !matches!(reason, tv::SaveReason::AutoSave) {
-            app.notify(NoticeLevel::Warning, "该空间为只读身份，无法保存");
-        }
+        app.plugins
+            .resolve_shell_call(request_id, Err("该空间为只读身份，无法保存".into()));
         return Task::none();
     }
-    let gen = app.epoch();
-    let file = s.file.clone();
-    let baseline = s.saved.clone();
-    let frozen = s.data.clone();
+    let baseline: atelyx_core::vault::TableFile = match serde_json::from_str(&params.baseline) {
+        Ok(table) => table,
+        Err(e) => {
+            app.plugins
+                .resolve_shell_call(request_id, Err(format!("保存基线不可解析：{e}")));
+            return Task::none();
+        }
+    };
+    let frozen: atelyx_core::vault::TableFile = match serde_json::from_str(&params.frozen) {
+        Ok(table) => table,
+        Err(e) => {
+            app.plugins
+                .resolve_shell_call(request_id, Err(format!("表格快照不可解析：{e}")));
+            return Task::none();
+        }
+    };
     let client = session.client;
     let space_id = session.space_id;
     let author = crate::history_author(app);
-    let frozen_for_msg = frozen.clone();
-    let file_for_msg = file.clone();
+    let gen = app.epoch();
+    let path = params.path.clone();
+    let path_for_cb = path.clone();
     Task::perform(
         async move {
             let new_file = match atelyx_core::vault::compute_table_patch(&baseline, &frozen) {
-                Some(p) => match client.table_patch(&space_id, &file, &p).await {
+                Some(patch) => match client.table_patch(&space_id, &path, &patch).await {
                     Ok(ack) => ack.file,
-                    // 补丁被拒（id 不符 / 文件损坏等）：回退前对拍服务端——文件仍为本端
-                    // 保存基线才整文恢复；已被他人改写时不覆盖（内容红线），提示刷新
+                    // 补丁被拒：对拍服务端 id——仍为本端基线才整文恢复，已改则报冲突
                     Err(SpaceError::BadRequest(_)) => {
-                        let server = client.get_file_text(&space_id, &file).await?;
+                        let server = client
+                            .get_file_text(&space_id, &path)
+                            .await
+                            .map_err(err_text)?;
                         let server_id = serde_json::from_str::<serde_json::Value>(&server)
                             .ok()
-                            .and_then(|v| v.get("id").and_then(|i| i.as_str()).map(|s| s.to_owned()));
+                            .and_then(|v| {
+                                v.get("id")
+                                    .and_then(|i| i.as_str())
+                                    .map(|s| s.to_owned())
+                            });
                         if server_id.as_deref() != Some(baseline.id.as_str()) {
-                            return Err(SpaceError::Conflict(
-                                "表格已被他人修改，请刷新后重试".to_string(),
-                            ));
+                            return Err("表格已被他人修改，请刷新后重试".to_string());
                         }
-                        let json = serde_json::to_string_pretty(&frozen).map_err(|e| SpaceError::Network(e.to_string()))?;
-                        client.put_file_text(&space_id, &file, &json).await?;
-                        file.clone()
+                        let json = serde_json::to_string_pretty(&frozen)
+                            .map_err(|e| e.to_string())?;
+                        client
+                            .put_file_text(&space_id, &path, &json)
+                            .await
+                            .map_err(err_text)?;
+                        path.clone()
                     }
-                    Err(e) => return Err(e),
+                    Err(e) => return Err(err_text(e)),
                 },
+                // 无差异（编辑后复原 / undo 回到基线）：先与服务端现状对拍，避免把分叉当成功
                 None => {
-                    // 无差异（编辑后复原 / undo 回到基线）：不盲目整文 PUT——服务端可能已有
-                    // 本端未收到的改动（漏帧），以服务端现状与本端保存基线对拍后才动作
-                    let server = client.get_file_text(&space_id, &file).await?;
+                    let server = client
+                        .get_file_text(&space_id, &path)
+                        .await
+                        .map_err(err_text)?;
                     let server_id = serde_json::from_str::<serde_json::Value>(&server)
                         .ok()
-                        .and_then(|v| v.get("id").and_then(|i| i.as_str()).map(|s| s.to_owned()));
+                        .and_then(|v| {
+                            v.get("id").and_then(|i| i.as_str()).map(|s| s.to_owned())
+                        });
                     if server_id.as_deref() != Some(baseline.id.as_str()) {
-                        return Err(SpaceError::Conflict(
-                            "表格已被他人修改，请刷新后重试".to_string(),
-                        ));
+                        return Err("表格已被他人修改，请刷新后重试".to_string());
                     }
-                    file.clone()
+                    path.clone()
                 }
             };
-            // 摘要对比保存基线（上版全文）：字段/行/单元格级实体计数
             let content_json = serde_json::to_string(&frozen).unwrap_or_default();
             let summary = atelyx_core::history::version_summary(
                 atelyx_core::history::HistoryKind::Table,
@@ -1600,7 +1608,7 @@ pub fn space_submit_table_save(app: &mut App, reason: tv::SaveReason) -> Task<Me
                     &space_id,
                     &space_client::HistoryRecordReq {
                         kind: "table".into(),
-                        file: file.clone(),
+                        file: path.clone(),
                         content: content_json,
                         action: "edit".into(),
                         author: space_client::HistoryAuthorReq {
@@ -1610,113 +1618,23 @@ pub fn space_submit_table_save(app: &mut App, reason: tv::SaveReason) -> Task<Me
                         },
                         summary: Some(summary),
                         note: None,
-                        coalesce_edit_ms: Some(HISTORY_COALESCE_MS),
+                        coalesce_edit_ms: Some(PLUGIN_HISTORY_COALESCE_MS),
                         max_versions: None,
                         byte_budget: Some(atelyx_core::history::HISTORY_BYTE_BUDGET),
                     },
                 )
                 .await;
-            Ok(new_file)
+            Ok::<String, String>(new_file)
         },
         move |result| {
-            let (new_file, inner) = match &result {
-                Ok(f) => (f.clone(), Ok(f.clone())),
-                Err(e) => (file_for_msg.clone(), Err(e.to_string())),
-            };
-            Message::Space(SpaceMsg::TablePatchDone { gen, file: file_for_msg, new_file, reason, result: inner, frozen: frozen_for_msg })
+            Message::Plugins(crate::settings_view::plugins::PluginsMsg::SpaceFilePatchDone {
+                gen,
+                request_id,
+                path: path_for_cb,
+                result,
+            })
         },
     )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn on_table_patch_done(
-    app: &mut App,
-    gen: u64,
-    file: String,
-    new_file: String,
-    reason: tv::SaveReason,
-    result: Result<String, String>,
-    frozen: atelyx_core::vault::TableFile,
-) -> Task<Message> {
-    if gen != app.epoch() {
-        return Task::none();
-    }
-    if result.is_ok() {
-        // 补丁带 title 时服务端已按标题改名：对端按 Renamed 跟随路径
-        if new_file != file {
-            app.plugins.on_file_changed(
-                &new_file,
-                FileChangeKind::Renamed,
-                Some(file.as_str()),
-            );
-        } else {
-            app.plugins.on_file_changed(&new_file, FileChangeKind::Updated, None);
-        }
-    }
-    // 身份守卫：gen + 文件路径（或标题漂移后的新路径）双校验
-    if !app.table.as_ref().is_some_and(|s| s.file == file || s.file == new_file) {
-        return Task::none();
-    }
-    let mut task = Task::none();
-    match result {
-        Err(e) => {
-            app.settle_history_restore(false);
-            let Some(s) = app.table.as_mut() else { return Task::none() };
-            s.save_error = Some(e.clone());
-            // 404 = 文件被改名（他端标题漂移未广播时）或删除：明示刷新，不做路径猜测
-            let hint = if e.contains("不存在") {
-                "表格已被他人改名或删除，请刷新空间后重新打开"
-            } else {
-                "保存失败"
-            };
-            if matches!(reason, tv::SaveReason::Flush) {
-                app.notify(NoticeLevel::Error, format!("{hint}，操作未执行：{e}"));
-            } else {
-                app.notify(NoticeLevel::Error, format!("{hint}：{e}"));
-            }
-            return refresh_space_tree(app);
-        }
-        Ok(_) => {
-            // 补丁带 title 时服务端按标题改名：本端跟随路径与内嵌标题（会话与最近表路径）
-            if new_file != file {
-                if let Some(s) = app.table.as_mut() {
-                    s.file = new_file.clone();
-                    s.data.title = crate::layout_view::file_label(&new_file);
-                }
-                if app.ui.last_table_file.as_deref() == Some(file.as_str()) {
-                    app.ui.last_table_file = Some(new_file.clone());
-                    app.schedule_persist();
-                }
-                task = task.chain(refresh_space_tree(app));
-            }
-            let stable = app
-                .table
-                .as_ref()
-                .is_some_and(|s| s.data.fields == frozen.fields && s.data.rows == frozen.rows);
-            {
-                let Some(s) = app.table.as_mut() else { return Task::none() };
-                s.save_error = None;
-                if stable {
-                    s.dirty = false;
-                    s.saved = frozen.clone();
-                }
-            }
-            if stable {
-                app.settle_history_restore(true);
-            }
-            // Flush 回执期间有新编辑（unstable）：重收一轮 Flush——脏拦截已在放行前 flush，
-            // 此轮丢失会让关闭/切换动作静默挂起（对齐笔记保存链）
-            if let tv::SaveReason::Flush = reason {
-                if stable {
-                    task = task.chain(app.after_any_flush());
-                } else {
-                    task = task.chain(space_submit_table_save(app, tv::SaveReason::Flush));
-                }
-            }
-            task = task.chain(reload_space_history(app));
-        }
-    }
-    task
 }
 
 // ===== 画布（空间模式） =====
@@ -1777,7 +1695,7 @@ pub fn space_load_canvas(app: &App, rel: &str) -> Task<Message> {
 }
 
 /// 空间模式画布保存：基线 diff → 服务端补丁仲裁（id 不符回退全量），回执走 Space 消息。
-/// 对称 space_submit_table_save；title 漂移 = 服务端改路径，本端随回执跟随。
+/// 画布保存链的对称口；title 漂移 = 服务端改路径，本端随回执跟随。
 pub fn space_submit_canvas_save(app: &mut App, reason: crate::canvas_view::SaveReason) -> Task<Message> {
     let Some(s) = app.canvas.as_ref() else { return Task::none() };
     if !s.dirty {
@@ -2143,14 +2061,30 @@ pub fn refresh_space_tags(app: &App) -> Task<Message> {
 }
 
 /// 笔记图片（空间模式：仓库相对路径走服务端字节读取；外链路径不变）。
-pub fn space_load_image(app: &App, gen: u64, src: String) -> Task<Message> {
+pub fn space_load_image(
+    app: &App,
+    gen: u64,
+    key: String,
+    src: String,
+    max_edge: Option<u32>,
+) -> Task<Message> {
     let Some(session) = session_of(app) else { return Task::none() };
     let client = session.client;
     let space_id = session.space_id;
-    let src_for_cb = src.clone();
     Task::perform(
-        async move { client.get_file_bytes(&space_id, &src).await },
-        move |result| Message::ImageLoaded(gen, src_for_cb, result.map_err(err_text)),
+        async move {
+            let bytes = client
+                .get_file_bytes(&space_id, &src)
+                .await
+                .map_err(err_text)?;
+            Ok::<crate::PluginImage, String>(match max_edge {
+                Some(max) => {
+                    crate::PluginImage::Thumb(atelyx_core::image_thumb::thumbnail(&bytes, max)?)
+                }
+                None => crate::PluginImage::Bytes(bytes),
+            })
+        },
+        move |result| Message::ImageLoaded(gen, key.clone(), result),
     )
 }
 
@@ -2861,11 +2795,6 @@ pub(crate) fn local_identity(app: &App) -> (String, String) {
     (name, color)
 }
 
-/// 对端是否打开了指定文件（与 [`peer_open_files`] 同一口径：openFiles 优先，回退旧版单 file 字段）。
-pub(crate) fn peer_has_open_file(presence: Option<&serde_json::Value>, file: &str) -> bool {
-    peer_open_files(presence).iter().any(|f| f == file)
-}
-
 /// 字节偏移对（全文，可越界）→ 选区上行的 UTF-16 偏移对。
 fn selection_units(text: &str, anchor: usize, head: usize) -> Option<(u32, u32)> {
     let unit = |byte: usize| {
@@ -2899,100 +2828,15 @@ pub fn collab_after_caret(app: &mut App) {
     sync_doc_presence(app, &rel);
 }
 
-/// 表格在场同步：进入 / 切换 / 关闭与选区变化都从这里收口（事件与 tick 共用，幂等）。
-pub(crate) fn table_collab_sync(app: &mut App) {
-    let in_space = matches!(app.repo_kind, crate::RepoKind::Space(_));
-    // 高频路径（指针移动 / 滚动）无变化直接返回：避免每次消息都重建状态与比较
-    if app.space_connected && in_space {
-        if let (Some(session), Some(collab)) = (app.table.as_ref(), app.table_collab.as_ref()) {
-            let (name, color) = local_identity(app);
-            if collab.file() == Some(session.file.as_str())
-                && collab.sent_selection() == session.view.selection.as_ref()
-                && collab.sent_identity() == Some((name.as_str(), color.as_str()))
-            {
-                return;
-            }
-        }
-    }
-    let want = if in_space {
-        app.table
-            .as_ref()
-            .map(|s| (s.file.clone(), s.view.selection.clone()))
-    } else {
-        None
-    };
-    let Some((file, selection)) = want else {
-        // 离开表格 / 非空间容器：有在场记录就发离场帧
-        if let Some(mut collab) = app.table_collab.take() {
-            if let Some(frame) = collab.leave(Instant::now()) {
-                send_table_frame(app, frame);
-            }
-        }
-        return;
-    };
-    if !app.space_connected {
-        // 连接不可用：保留在场状态（重连后同一 clientID 整份重发覆盖），只清远端条目
-        if let Some(collab) = app.table_collab.as_mut() {
-            collab.clear_remotes();
-        }
-        return;
-    }
-    let now = Instant::now();
-    let (name, color) = local_identity(app);
-    let identity = crate::table_collab::Identity { name: &name, color: &color };
-    let collab = app
-        .table_collab
-        .get_or_insert_with(crate::table_collab::TableCollab::new);
-    if let Some(frame) = collab.update(now, &identity, &file, selection.as_ref()) {
-        send_table_frame(app, frame);
-    }
-}
-
 /// 断链 / 被拒：清两端在场远端条目（本端状态保留，重连后由各通道强制重发）。
 fn clear_remote_presence(app: &mut App) {
     if let Some(channel) = app.doc_presence.as_mut() {
         channel.clear_remotes();
     }
-    if let Some(collab) = app.table_collab.as_mut() {
-        collab.clear_remotes();
-    }
     if let Some(collab) = app.canvas_collab.as_mut() {
         collab.clear_remotes();
     }
     app.remote_cursors.clear();
-}
-
-/// UiTick 搭载：远端超时剔除、限频补发、空闲保活（连接不可用时不发上行）。
-pub(crate) fn table_collab_tick(app: &mut App) {
-    table_collab_sync(app);
-    let connected = app.space_connected;
-    let now = Instant::now();
-    let mut frames = Vec::new();
-    if let Some(collab) = app.table_collab.as_mut() {
-        collab.refresh(now);
-        if let Some(frame) = collab.flush(now) {
-            frames.push(frame);
-        }
-        if connected {
-            if let Some(frame) = collab.keepalive_if_due(now) {
-                frames.push(frame);
-            }
-        }
-    }
-    for frame in frames {
-        send_table_frame(app, frame);
-    }
-}
-
-fn send_table_frame(app: &App, payload: serde_json::Value) {
-    send_cmd(
-        app,
-        atelyx_core::collab::SpaceCmd::Ephemeral {
-            channel: crate::table_collab::CHANNEL.to_string(),
-            payload,
-            target_peer_id: None,
-        },
-    );
 }
 
 // ===== 画布协作（presence + canvas-patch 合入） =====
@@ -3384,13 +3228,8 @@ fn on_space_event(app: &mut App, event: atelyx_core::collab::SpaceEvent) -> Task
             app.notify(NoticeLevel::Success, "协作已连接");
             collab_doc_resume(app);
             send_presence(app);
-            // 重连后表格身份帧与当前选区重发（对端旧条目将在超时后过期）
+            // 画布在场重连后重发（选中 / 对话卡锁 / 流式；对端旧条目将在超时后过期）
             let now = std::time::Instant::now();
-            if let Some(frame) = app.table_collab.as_mut().and_then(|c| c.resend(now)) {
-                send_table_frame(app, frame);
-            }
-            table_collab_sync(app);
-            // 画布在场同理（选中 / 对话卡锁 / 流式）
             if let Some(frame) = app.canvas_collab.as_mut().and_then(|c| c.resend(now)) {
                 send_canvas_frame(app, frame);
             }
@@ -3418,11 +3257,6 @@ fn on_space_event(app: &mut App, event: atelyx_core::collab::SpaceEvent) -> Task
             }
             if dropped {
                 refresh_remote_cursors(app);
-            }
-            if let Some(collab) = app.table_collab.as_mut() {
-                for peer in &gone {
-                    collab.drop_peer(peer);
-                }
             }
             if let Some(collab) = app.canvas_collab.as_mut() {
                 for peer in &gone {
@@ -3475,11 +3309,7 @@ fn on_space_event(app: &mut App, event: atelyx_core::collab::SpaceEvent) -> Task
         }
         E::Ephemeral { peer_id, channel, payload } => {
             let now = std::time::Instant::now();
-            if channel == crate::table_collab::CHANNEL {
-                if let Some(collab) = app.table_collab.as_mut() {
-                    collab.apply(&peer_id, &payload, now);
-                }
-            } else if channel == crate::canvas_collab::CHANNEL {
+            if channel == crate::canvas_collab::CHANNEL {
                 if let Some(collab) = app.canvas_collab.as_mut() {
                     collab.apply(&peer_id, &payload, now);
                 }
@@ -3554,9 +3384,8 @@ fn collab_remote_doc(app: &mut App, peer_id: &str, file: &str, payload: &[u8]) {
     }
 }
 
-/// 远端表格补丁（peer_id = 他人 WS 透传或落地帧回填的发起者 peerId；landed = 服务端已落盘）。
-/// 自声落地帧（peer_id 匹配本端）跳过：数据已在本端，重复合入徒增重绘且撤销栈被作废。
-/// 远端合入不入撤销栈；仅服务端已落盘且会话干净时推进 saved 基线（脏会话防吞未上行改动）。
+/// 远端表格补丁转发给表格插件（peer_id = 他人 WS 透传或落地帧回填的发起者 peerId）。
+/// 自声落地帧（peer_id 匹配本端）跳过：本端内容已在插件里，重复合入徒增重绘。
 fn on_remote_table_patch(
     app: &mut App,
     peer_id: Option<String>,
@@ -3567,41 +3396,23 @@ fn on_remote_table_patch(
     if peer_id.is_some() && peer_id == app.space_own_peer_id {
         return Task::none();
     }
-    let opened = app.table.as_ref().map(|s| s.file.clone());
-    if opened.as_deref() != Some(file.as_str()) {
+    // 只转发本端打开的文件：插件按自己打开的文件匹配，其余补丁无处可去
+    if app.ui.last_table_file.as_deref() != Some(file.as_str()) {
         return Task::none();
     }
-    let Ok(p) = serde_json::from_value::<atelyx_core::vault::TablePatch>(patch) else {
-        return Task::none();
-    };
-    // 防串表：补丁 id 与文件 id 不符即丢（服务端落地帧已仲裁，转发帧信任 file 匹配）
-    if app
-        .table
-        .as_ref()
-        .is_some_and(|s| p.id != s.data.id)
-    {
-        return Task::none();
-    }
-    let mut refresh = false;
-    {
-        let Some(s) = app.table.as_mut() else { return Task::none() };
-        if p.title.is_some() {
-            refresh = true;
-        }
-        atelyx_core::vault::apply_table_patch(&mut s.data, &p);
-        s.version += 1;
-        s.rebuild_layout();
-        // 远端改动合入后撤销栈整体作废：栈内快照是合入前的本端全量数据，按 Ctrl+Z 会把
-        // 协作者刚落盘的行/单元格一并回滚并随下次保存广播（内容丢失）
-        s.view.undo.clear();
-        s.view.redo.clear();
-        if landed && !s.dirty {
-            s.saved = s.data.clone();
-        }
-    }
-    // 远端补丁落地即广播：打开中的插件表格视图由此重读（本地结算点不覆盖这条路径）
-    app.plugins.on_table_changed(Some(file.as_str()));
-    if refresh {
+    // 标题补丁会触发服务端按标题改名：文件树跟随刷新，避免滞留旧名
+    let renamed = patch.get("title").and_then(|title| title.as_str()).is_some();
+    app.plugins.notify_plugin_event(
+        crate::plugin_actions::TABLES_PLUGIN,
+        atelyx_core::plugin_runtime::event_name::SPACE_FILE_PATCH,
+        &atelyx_core::plugin_runtime::SpaceFilePatchPayload {
+            path: file,
+            kind: "table".into(),
+            patch,
+            landed,
+        },
+    );
+    if renamed {
         return refresh_space_tree(app);
     }
     Task::none()
@@ -3615,13 +3426,10 @@ fn on_space_renamed(app: &mut App, old_path: &str, new_path: &str) -> Task<Messa
     }
     if app.ui.last_table_file.as_deref() == Some(old_path) {
         app.ui.last_table_file = Some(new_path.to_string());
+        app.plugins.on_table_changed(Some(new_path));
+        // 表格插件的会话路径随打开文件集合更新：不重发会让它继续按旧路径保存
+        app.plugins.on_open_files_changed();
         app.schedule_persist();
-        // 会话路径与内嵌标题一并跟随：路径滞留旧路径让后续补丁打到不存在的文件，
-        // 标题滞留旧名则与文件名不一致（换名广播先于改名回执到达时，回执侧无从再跟）
-        if let Some(s) = app.table.as_mut() {
-            s.file = new_path.to_string();
-            s.data.title = crate::layout_view::file_label(new_path);
-        }
     }
     if app.ui.last_canvas_file.as_deref() == Some(old_path) {
         app.ui.last_canvas_file = Some(new_path.to_string());
@@ -3798,12 +3606,5 @@ mod tests {
         let none = serde_json::json!({ "file": null, "view": null, "openFiles": [] });
         assert!(peer_open_files(Some(&none)).is_empty());
         assert!(peer_open_files(None).is_empty());
-
-        // 同文件判定：并排打开时表格不是主文件也必须命中
-        assert!(peer_has_open_file(Some(&multi), "t.atb"));
-        assert!(peer_has_open_file(Some(&multi), "a/n.md"));
-        assert!(!peer_has_open_file(Some(&multi), "other.atb"));
-        assert!(peer_has_open_file(Some(&legacy), "t.atb"));
-        assert!(!peer_has_open_file(None, "t.atb"));
     }
 }

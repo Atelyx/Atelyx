@@ -529,7 +529,7 @@ fn image_source(image: &crate::model::ImageBlock) -> ImageSource {
     if image.src.starts_with("http://") || image.src.starts_with("https://") {
         ImageSource::Url { url: image.src.clone(), local: None }
     } else {
-        ImageSource::Vault { path: image.src.clone() }
+        ImageSource::Vault { path: image.src.clone(), max_edge: None }
     }
 }
 

@@ -250,14 +250,20 @@ pub fn icon_button_el<M: UiHost>(
 /// 状态档（色 + 文字编码）。
 #[derive(Clone, Copy)]
 pub enum PillStatus {
+    /// 中性（普通状态说明）
+    Info,
     /// 进行中
     Pending,
+    /// 失败 / 危险
+    Danger,
 }
 
 impl PillStatus {
     fn color(self) -> Color {
         match self {
+            PillStatus::Info => pal::TEXT_SECONDARY,
             PillStatus::Pending => pal::WARNING,
+            PillStatus::Danger => pal::DANGER,
         }
     }
 }

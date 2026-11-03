@@ -17,7 +17,8 @@ use atelyx_core::plugin_runtime::{
     ClipboardImage, CollabMetaGetParams, CollabMetaPatchParams, CollabMetaResult, CollabPeer,
     CollabPeersResult, CollabSendParams, CollabSendQos, CollabSendResult, DayActivity,
     DialogKind, DialogRequest, FileChangeKind, HistoryActivityResult, HistoryDayParams,
-    HistoryGroupsParams, HistoryOpenParams, HostRequest, ImageInfoResult, InstallOutcome,
+    HistoryGroupsParams, HistoryOpenParams, HistoryRecordParams, HostRequest, ImageInfoResult,
+    InstallOutcome, PanelFlushDoneParams, PanelHeaderParams, SpaceFilePatchParams,
     MeasureBatchParams,
     MeasureBatchResult, NotificationLevel, Permission, PluginEvent, PluginRuntime, PluginStatus,
     DocAwarenessParams, DocEditParams, DocOpenParams, DocRenameParams, DocSaveParams,
@@ -215,7 +216,7 @@ pub enum PluginsMsg {
     LogLoaded { id: String, seq: u64, result: Result<String, String> },
     /// 壳侧服务请求：替插件弹系统对话框（选定的路径经 `resolve_dialog` 回填给等待中的调用）。
     DialogAsk { request_id: u64, dialog: DialogRequest },
-    DialogDone { request_id: u64, path: Option<String> },
+    DialogDone { request_id: u64, paths: Option<Vec<String>> },
     /// 市场索引读取：缓存先行（未过期即不联网），过期或缺失才拉网络。
     MarketRefresh,
     /// 市场索引强制刷新（刷新钮：无视缓存有效期）。
@@ -245,7 +246,7 @@ pub enum PluginsMsg {
     ClipboardImageWritten { request_id: u64, result: Result<(), String> },
     /// 仓库读写（本地仓库直接落盘；协作空间转发服务端）。`VaultCallDone` 统一回填。
     VaultRead { request_id: u64, path: String },
-    VaultWrite { request_id: u64, path: String, content: String },
+    VaultWrite { plugin_id: String, request_id: u64, path: String, content: String },
     VaultReadBinary { request_id: u64, path: String },
     VaultWriteBinary { request_id: u64, path: String, bytes: Vec<u8> },
     /// 大文件导入：`source` 为插件私有目录内的绝对路径（运行时已校验并规范化）。
@@ -283,12 +284,12 @@ pub enum PluginsMsg {
     MeasureBatch { request_id: u64, params: MeasureBatchParams },
     /// 主题查询（`query.theme`）：颜色 / 字号档 / 圆角档。
     QueryTheme { request_id: u64 },
+    /// 已安装字体族清单（`query.fonts`）。
+    QueryFonts { request_id: u64 },
     VaultCallDone { request_id: u64, result: Result<serde_json::Value, String> },
     /// AI 模型 / Agent 清单（读仓库配置与面板当前选择）。
     AiModels { request_id: u64 },
     AiAgents { request_id: u64 },
-    /// 表格只读快照（读壳的表格会话；写走表格消息流）。
-    TableSnapshot { request_id: u64 },
     /// 系统托盘条目整发整换（空清单 = 收起该插件条目）。
     TraySetItems { request_id: u64, plugin_id: String, params: SetTrayItemsParams },
     /// 协作空间在场成员（未连接 = `connected: false`）。
@@ -340,6 +341,23 @@ pub enum PluginsMsg {
     HistoryOpen { request_id: u64, params: HistoryOpenParams },
     /// 当前容器的最近打开清单（`recent.list`）。
     RecentList { request_id: u64 },
+    /// 系统下载目录的绝对路径（`fs.downloadsDir`）。
+    DownloadsDir { request_id: u64 },
+    /// 域插件落盘后记一版（`history.record`；回执 = 已受理，记版结果另行广播）。
+    HistoryRecord { request_id: u64, params: HistoryRecordParams },
+    /// 插件声明面板头部状态（`panel.header`；`header` 缺省 = 收起）。
+    PanelHeader { plugin_id: String, request_id: u64, params: PanelHeaderParams },
+    /// 插件回报落盘完成（`panel.flushDone`）：按令牌放行挂起的宿主动作。
+    PanelFlushDone { plugin_id: String, request_id: u64, params: PanelFlushDoneParams },
+    /// 空间文件补丁保存（`space.file.patch`）。
+    SpaceFilePatch { request_id: u64, params: SpaceFilePatchParams },
+    /// 空间补丁保存回执：服务端最终路径（补丁带标题时按标题改名）或可读失败原因。
+    SpaceFilePatchDone {
+        gen: u64,
+        request_id: u64,
+        path: String,
+        result: Result<String, String>,
+    },
     /// 当前容器与在线成员快照（`space.room`）。
     SpaceRoom { request_id: u64 },
     /// 空间成员名册快照（`space.members`；缓存为空时顺带发起拉取）。
@@ -548,8 +566,8 @@ pub fn host_requests_stream(spec: &RuntimeSpec) -> impl iced::futures::Stream<It
                 HostRequest::VaultReadText { request_id, path, .. } => {
                     Message::Plugins(PluginsMsg::VaultRead { request_id, path })
                 }
-                HostRequest::VaultWriteText { request_id, path, content, .. } => {
-                    Message::Plugins(PluginsMsg::VaultWrite { request_id, path, content })
+                HostRequest::VaultWriteText { plugin_id, request_id, path, content, .. } => {
+                    Message::Plugins(PluginsMsg::VaultWrite { plugin_id, request_id, path, content })
                 }
                 HostRequest::VaultReadBinary { request_id, path, .. } => {
                     Message::Plugins(PluginsMsg::VaultReadBinary { request_id, path })
@@ -583,6 +601,9 @@ pub fn host_requests_stream(spec: &RuntimeSpec) -> impl iced::futures::Stream<It
                 }
                 HostRequest::QueryTheme { request_id, .. } => {
                     Message::Plugins(PluginsMsg::QueryTheme { request_id })
+                }
+                HostRequest::QueryFonts { request_id, .. } => {
+                    Message::Plugins(PluginsMsg::QueryFonts { request_id })
                 }
                 HostRequest::TraySetItems { plugin_id, request_id, params } => {
                     Message::Plugins(PluginsMsg::TraySetItems { request_id, plugin_id, params })
@@ -659,6 +680,21 @@ pub fn host_requests_stream(spec: &RuntimeSpec) -> impl iced::futures::Stream<It
                 HostRequest::SpaceOpenSettings { request_id, .. } => {
                     Message::Plugins(PluginsMsg::SpaceOpenSettings { request_id })
                 }
+                HostRequest::SpaceFilePatch { request_id, params, .. } => {
+                    Message::Plugins(PluginsMsg::SpaceFilePatch { request_id, params })
+                }
+                HostRequest::HistoryRecord { request_id, params, .. } => {
+                    Message::Plugins(PluginsMsg::HistoryRecord { request_id, params })
+                }
+                HostRequest::PanelHeader { plugin_id, request_id, params } => {
+                    Message::Plugins(PluginsMsg::PanelHeader { plugin_id, request_id, params })
+                }
+                HostRequest::PanelFlushDone { plugin_id, request_id, params } => {
+                    Message::Plugins(PluginsMsg::PanelFlushDone { plugin_id, request_id, params })
+                }
+                HostRequest::DownloadsDir { request_id, .. } => {
+                    Message::Plugins(PluginsMsg::DownloadsDir { request_id })
+                }
                 HostRequest::VaultUi { request_id, params, .. } => {
                     Message::Plugins(PluginsMsg::VaultUi { request_id, params })
                 }
@@ -711,41 +747,17 @@ pub fn host_requests_stream(spec: &RuntimeSpec) -> impl iced::futures::Stream<It
                 HostRequest::HistoryActivity { request_id, .. } => {
                     Message::Plugins(PluginsMsg::HistoryActivity { request_id })
                 }
-                // 表格读写：读走本页回填；写出壳的表格消息流承担（与本地编辑同一出口，
-                // 自动保存期限与 table:changed 广播都由该流统一处理）
-                HostRequest::TableSnapshot { request_id, .. } => {
-                    Message::Plugins(PluginsMsg::TableSnapshot { request_id })
-                }
-                HostRequest::TableUpdateCell { request_id, row_id, field_id, value, .. } => {
-                    Message::Table(crate::table_view::TableMsg::PluginSetCell {
-                        request_id,
-                        row_id,
-                        field_id,
-                        value,
-                    })
-                }
-                HostRequest::TableAddRow { request_id, .. } => {
-                    Message::Table(crate::table_view::TableMsg::PluginAddRow { request_id })
-                }
-                HostRequest::TableRemoveRow { request_id, row_id, .. } => {
-                    Message::Table(crate::table_view::TableMsg::PluginRemoveRow { request_id, row_id })
-                }
-                HostRequest::TableSelectRow { request_id, row_id, .. } => {
-                    Message::Table(crate::table_view::TableMsg::PluginSelectRow { request_id, row_id })
-                }
-                HostRequest::TableSetCellImage { request_id, params, .. } => Message::Table(
-                    crate::table_view::TableMsg::PluginSetCellImage {
-                        request_id,
-                        row_id: params.row_id,
-                        field_id: params.field_id,
-                        images: params.images,
-                        display: params.display,
-                    },
-                ),
             };
             let _ = iced::futures::SinkExt::send(&mut output, message).await;
         }
     })
+}
+
+/// 表格头部是否报告了未落盘改动（停用插件前据此拦住，避免内容随实例一起消失）。
+fn table_header_dirty(app: &App) -> bool {
+    app.panel_headers
+        .get("table")
+        .is_some_and(|entry| entry.plugin_id == crate::plugin_actions::TABLES_PLUGIN && entry.state.dirty)
 }
 
 /// 处理插件页消息；安装走异步文件选择器，其余动作同步完成。
@@ -760,13 +772,23 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
             Task::none()
         }
         PluginsMsg::Toggle(id, on) => {
+            if !on && id == crate::plugin_actions::TABLES_PLUGIN && table_header_dirty(app) {
+                app.notify(NoticeLevel::Warning, "表格有未保存改动，先保存再停用".to_string());
+                return Task::none();
+            }
             if let Err(e) = app.plugins.set_enabled(&id, on) {
                 app.notify(NoticeLevel::Error, format!("插件操作失败：{e}"));
             }
             refresh(app);
+            // 视图 / 服务的启用态是注册表投影：插件启停后要重建，否则贡献仍留在选择器里
+            crate::plugin_actions::rebuild_registry(app);
             Task::none()
         }
         PluginsMsg::SetBuiltinPluginEnabled(id, on) => {
+            if !on && id == crate::plugin_actions::TABLES_PLUGIN && table_header_dirty(app) {
+                app.notify(NoticeLevel::Warning, "表格有未保存改动，先保存再停用".to_string());
+                return Task::none();
+            }
             let disabled = &mut app.ui.disabled_plugins;
             if on {
                 disabled.retain(|plugin| plugin != &id);
@@ -961,11 +983,11 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
             }
             Task::none()
         }
-        PluginsMsg::DialogAsk { request_id, dialog } => Task::perform(pick(dialog), move |path| {
-            Message::Plugins(PluginsMsg::DialogDone { request_id, path })
+        PluginsMsg::DialogAsk { request_id, dialog } => Task::perform(pick(dialog), move |paths| {
+            Message::Plugins(PluginsMsg::DialogDone { request_id, paths })
         }),
-        PluginsMsg::DialogDone { request_id, path } => {
-            app.plugins.resolve_dialog(request_id, path);
+        PluginsMsg::DialogDone { request_id, paths } => {
+            app.plugins.resolve_dialog(request_id, paths);
             Task::none()
         }
         PluginsMsg::MarketRefresh => market_auto_load(app),
@@ -1111,17 +1133,23 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
                 }
             }
         }
-        PluginsMsg::VaultWrite { request_id, path, content } => {
+        PluginsMsg::VaultWrite { plugin_id, request_id, path, content } => {
             let rel = match plugin_path(Some(&path)) {
                 Ok(rel) => rel,
                 Err(e) => return resolve_vault(app, request_id, Err(e)),
             };
             if let Some(open) = open_file_conflict(app, &rel) {
-                return resolve_vault(
-                    app,
-                    request_id,
-                    Err(format!("文件正在编辑器中打开，拒绝写入：{open}")),
-                );
+                // 持有该文件的插件可以写回自己的文件（表格插件保存自己打开的 .atb），
+                // 其余插件仍按「正在编辑中」拒写，避免互踩保存链
+                let owner = app.ui.last_table_file.as_deref() == Some(rel.as_str())
+                    && plugin_id == TABLES_PLUGIN_ID;
+                if !owner {
+                    return resolve_vault(
+                        app,
+                        request_id,
+                        Err(format!("文件正在编辑器中打开，拒绝写入：{open}")),
+                    );
+                }
             }
             match app.repo_kind.clone() {
                 crate::RepoKind::Local => match app.vault.root() {
@@ -1535,7 +1563,10 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
                         item.size,
                         item.weight,
                         item.family,
+                        item.family_name.as_deref(),
                         item.max_width,
+                        item.layout,
+                        item.segments,
                     )
                 })
                 .collect();
@@ -1543,6 +1574,17 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
                 Ok(value) => resolve_vault(app, request_id, Ok(value)),
                 Err(e) => resolve_vault(app, request_id, Err(format!("量算结果不可序列化：{e}"))),
             }
+        }
+        PluginsMsg::QueryFonts { request_id } => {
+            let families = crate::ui::font::filter("")
+                .into_iter()
+                .map(|entry| entry.name.clone())
+                .collect();
+            let result = serde_json::to_value(
+                atelyx_core::plugin_runtime::FontFamiliesResult { families },
+            )
+            .map_err(|e| format!("字体清单不可序列化：{e}"));
+            resolve_vault(app, request_id, result)
         }
         PluginsMsg::QueryTheme { request_id } => {
             match serde_json::to_value(crate::plugin_theme::theme_result()) {
@@ -1687,6 +1729,105 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
             let result =
                 serde_json::to_value(list).map_err(|e| format!("最近打开清单不可序列化：{e}"));
             resolve_vault(app, request_id, result)
+        }
+        PluginsMsg::DownloadsDir { request_id } => {
+            let result = match crate::vault::downloads_dir() {
+                Ok(path) => serde_json::to_value(
+                    atelyx_core::plugin_runtime::DownloadsDirResult {
+                        path: path.to_string_lossy().into_owned(),
+                    },
+                )
+                .map_err(|e| format!("下载目录不可序列化：{e}")),
+                Err(e) => Err(e),
+            };
+            resolve_vault(app, request_id, result)
+        }
+        PluginsMsg::HistoryRecord { request_id, params } => {
+            app.plugins.resolve_ui_call(request_id, Ok(()));
+            crate::repo_history::record_from_plugin(app, params)
+        }
+        PluginsMsg::PanelHeader { plugin_id, request_id, params } => {
+            // 头部只能声明到自己的视图贡献上：target 不校验会让后声明者静默顶掉别人的头部
+            let owns_target = app.plugins.contributions().iter().any(|contribution| {
+                contribution.plugin_id == plugin_id
+                    && contribution.id == params.target
+                    && contribution.slot == atelyx_core::plugin_runtime::ContributionSlot::TableView
+            });
+            let current_owner = app
+                .panel_headers
+                .get(&params.target)
+                .map(|entry| entry.plugin_id.as_str());
+            let allowed = match params.header {
+                Some(_) => owns_target,
+                None => current_owner == Some(plugin_id.as_str()),
+            };
+            if !allowed {
+                let error = format!("面板头部 target 不属于该插件：{}", params.target);
+                app.plugins.resolve_ui_call(request_id, Err(error));
+                return Task::none();
+            }
+            app.plugins.resolve_ui_call(request_id, Ok(()));
+            match params.header {
+                Some(state) => {
+                    app.panel_headers.insert(
+                        params.target,
+                        crate::PanelHeaderEntry { plugin_id, state },
+                    );
+                }
+                None => {
+                    app.panel_headers.remove(&params.target);
+                }
+            }
+            Task::none()
+        }
+        PluginsMsg::PanelFlushDone { plugin_id, request_id, params } => {
+            app.plugins.resolve_ui_call(request_id, Ok(()));
+            app.settle_panel_flush(&plugin_id, params)
+        }
+        PluginsMsg::SpaceFilePatch { request_id, params } => {
+            crate::space_actions::submit_file_patch(app, request_id, params)
+        }
+        PluginsMsg::SpaceFilePatchDone { gen, request_id, path, result } => {
+            if gen != app.epoch() {
+                app.plugins.resolve_shell_call(
+                    request_id,
+                    Err("会话已切换，保存结果作废".to_string()),
+                );
+                return Task::none();
+            }
+            match result {
+                Ok(new_file) => {
+                    let renamed = new_file != path;
+                    // 补丁带标题时服务端已按标题改名：先把宿主打开路径同步到新路径，
+                    // 再回执给插件——插件据回执改 session.file 时宿主已认新路径
+                    if renamed && app.ui.last_table_file.as_deref() == Some(path.as_str()) {
+                        app.ui.last_table_file = Some(new_file.clone());
+                        app.plugins.on_table_changed(Some(&new_file));
+                        app.plugins.on_open_files_changed();
+                        app.schedule_persist();
+                    }
+                    app.plugins.on_file_changed(
+                        &new_file,
+                        if renamed {
+                            atelyx_core::plugin_runtime::FileChangeKind::Renamed
+                        } else {
+                            atelyx_core::plugin_runtime::FileChangeKind::Updated
+                        },
+                        renamed.then_some(path.as_str()),
+                    );
+                    app.plugins.resolve_shell_call(
+                        request_id,
+                        Ok(serde_json::json!({ "path": new_file })),
+                    );
+                    app.reload_history()
+                }
+                Err(e) => {
+                    app.plugins.resolve_shell_call(request_id, Err(e.clone()));
+                    app.notify(NoticeLevel::Error, format!("保存失败：{e}"));
+                    // 远端改名 / 删除会让本地树陈旧：失败后按服务端现况重取
+                    crate::space_actions::refresh_space_tree(app)
+                }
+            }
         }
         PluginsMsg::SpaceRoom { request_id } => {
             let result = serde_json::to_value(space_room(app))
@@ -1897,35 +2038,6 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
         }
         PluginsMsg::CollabSend { request_id, plugin_id, params } => {
             let result = collab_send(app, &plugin_id, params);
-            app.plugins.resolve_shell_call(request_id, result);
-            Task::none()
-        }
-        PluginsMsg::TableSnapshot { request_id } => {
-            let snapshot: atelyx_core::plugin_runtime::TableSnapshot = match &app.table {
-                Some(session) => {
-                    let remotes: Vec<atelyx_core::plugin_runtime::table::RemoteSelection<'_>> = app
-                        .table_collab
-                        .as_ref()
-                        .map(|collab| collab.remote())
-                        .unwrap_or_default()
-                        .iter()
-                        .map(|remote| atelyx_core::plugin_runtime::table::RemoteSelection {
-                            name: &remote.name,
-                            color: &remote.color_hex,
-                            selection: &remote.selection,
-                        })
-                        .collect();
-                    atelyx_core::plugin_runtime::table::snapshot(
-                        &session.file,
-                        &session.data,
-                        session.view.selection.as_ref(),
-                        &remotes,
-                    )
-                }
-                None => atelyx_core::plugin_runtime::TableSnapshot::default(),
-            };
-            let result = serde_json::to_value(snapshot)
-                .map_err(|e| format!("表格快照序列化失败：{e}"));
             app.plugins.resolve_shell_call(request_id, result);
             Task::none()
         }
@@ -2232,7 +2344,7 @@ fn vault_change_conflict(app: &App, rel: &str, allow_path: Option<&str>) -> Opti
     let prefix = format!("{target}/");
     let open = [
         app.ui.last_note_file.as_deref(),
-        app.table.as_ref().map(|t| t.file.as_str()),
+        app.ui.last_table_file.as_deref(),
         app.canvas.as_ref().map(|c| c.file.as_str()),
         app.doc_open.as_ref().map(|d| d.path.as_str()),
     ];
@@ -2443,11 +2555,14 @@ fn write_clipboard_image(bytes: &[u8]) -> Result<(), String> {
 
 /// 写入目标是否正由编辑器持有：壳的会话里保留着该文件的内存副本，插件覆盖会与之竞争。
 /// 比较归一化相对路径（`\` 与 `/` 同义）。
+/// 表格插件 id：它持有当前打开的 `.atb`，允许写回自己的文件。
+const TABLES_PLUGIN_ID: &str = crate::plugin_actions::TABLES_PLUGIN;
+
 fn open_file_conflict(app: &App, rel: &str) -> Option<String> {
     let target = rel.replace('\\', "/");
     let open = [
         app.ui.last_note_file.as_deref(),
-        app.table.as_ref().map(|t| t.file.as_str()),
+        app.ui.last_table_file.as_deref(),
         app.canvas.as_ref().map(|c| c.file.as_str()),
         app.doc_open.as_ref().map(|d| d.path.as_str()),
     ];
@@ -2973,7 +3088,7 @@ fn start_market_fetch(app: &mut App, id: String, repo: String, check_update: boo
 }
 
 /// 替插件弹系统对话框，返回用户选定的路径（取消 = `None`）。
-async fn pick(request: DialogRequest) -> Option<String> {
+async fn pick(request: DialogRequest) -> Option<Vec<String>> {
     let mut dialog = rfd::AsyncFileDialog::new();
     if let Some(title) = &request.title {
         dialog = dialog.set_title(title);
@@ -2992,12 +3107,24 @@ async fn pick(request: DialogRequest) -> Option<String> {
         let extensions: Vec<&str> = filter.extensions.iter().map(String::as_str).collect();
         dialog = dialog.add_filter(&filter.name, &extensions);
     }
-    let picked = match (request.kind, request.save) {
-        (DialogKind::Directory, _) => dialog.pick_folder().await,
-        (DialogKind::File, true) => dialog.save_file().await,
-        (DialogKind::File, false) => dialog.pick_file().await,
-    };
-    picked.map(|handle| handle.path().to_string_lossy().into_owned())
+    match (request.kind, request.save, request.multiple) {
+        (DialogKind::File, false, true) => dialog
+            .pick_files()
+            .await
+            .map(|handles| handles.into_iter().map(|handle| handle.path().to_string_lossy().into_owned()).collect()),
+        (DialogKind::Directory, _, _) => dialog
+            .pick_folder()
+            .await
+            .map(|handle| vec![handle.path().to_string_lossy().into_owned()]),
+        (DialogKind::File, true, _) => dialog
+            .save_file()
+            .await
+            .map(|handle| vec![handle.path().to_string_lossy().into_owned()]),
+        (DialogKind::File, false, false) => dialog
+            .pick_file()
+            .await
+            .map(|handle| vec![handle.path().to_string_lossy().into_owned()]),
+    }
 }
 
 /// 运行时事件：通知 / 未声明调用 / 失败与熔断呈现；只有会改变列表状态的事件才触发刷新。
@@ -3239,6 +3366,10 @@ fn installed_group(app: &App) -> Element<'static, Message> {
 fn builtin_group(app: &App) -> Element<'static, Message> {
     let mut col = Column::new().spacing(6);
     for plugin in app.registry.builtin_plugins() {
+        // 同 id 的已装 / 预置插件已有一张带启停的卡片，内置壳不再重复列一次
+        if app.plugins_state.list.iter().any(|summary| summary.id == plugin.id) {
+            continue;
+        }
         col = col.push(stacked_card(vec![builtin_plugin_row(plugin)]));
     }
     for summary in app.plugins_state.list.iter().filter(|summary| summary.preset) {
@@ -4162,7 +4293,6 @@ fn permission_label(permission: Permission) -> &'static str {
         Permission::Notification => "通知",
         Permission::Shortcuts => "快捷键",
         Permission::Vault => "仓库",
-        Permission::Table => "表格",
         Permission::Clipboard => "剪贴板",
         Permission::Window => "窗口",
         Permission::Tray => "托盘",

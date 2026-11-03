@@ -17,7 +17,7 @@ use atelyx_core::plugin_runtime::{
 };
 
 use crate::registry::{Registry, Snapshot};
-use crate::{App, Message};
+use crate::{App, Message, PluginImage};
 
 /// 壳侧插件视图 kind 前缀（预置插件视图词汇不被插件占用；插件 id 与贡献 id 都不含 `:`）。
 const KIND_PREFIX: &str = "plugin:";
@@ -144,17 +144,44 @@ pub fn sync_settings_surfaces(app: &mut App) {
     app.plugin_settings_surfaces = now;
 }
 
+/// 表格面板默认内容 = 表格插件的网格视图（`tableView` 贡献，kind 形态固定）。
+pub const TABLES_VIEW: &str = "plugin:atelyx.tables:table";
+
+/// 表格插件 id（宿主把表格侧事件与保存回执投递给它）。
+pub const TABLES_PLUGIN: &str = "atelyx.tables";
+
 /// 表格视图面挂载差分：面板里当前选中的插件表格视图即挂在表格面板上的面
 /// （换视图 / 关表格 / 切文件即旧面 detached）。返回是否变化——变化才需重投影。
 pub fn sync_table_surfaces(app: &mut App) -> bool {
-    let now: HashSet<(String, String)> = app
-        .table
-        .as_ref()
-        .and_then(|session| session.view.active_view.as_deref())
-        .and_then(parse_view_kind)
-        .map(|(plugin_id, id)| (plugin_id.to_string(), id.to_string()))
-        .into_iter()
-        .collect();
+    // 缺省（键缺失 / None）= 表格插件的网格视图，与面板渲染的回落口径一致
+    let effective = app
+        .panel_view
+        .get("table")
+        .cloned()
+        .flatten()
+        .unwrap_or_else(|| TABLES_VIEW.to_string());
+    // 面板不在当前呈现里就没有可见面：仍按缺省视图挂载会让插件对着空气出帧
+    let mut visible = false;
+    let mut check = |node: &LayoutNode| {
+        let mut tabs = Vec::new();
+        layout::collect_tabs(node, &mut tabs);
+        visible |= tabs.iter().any(|tab| tab.view == "table");
+    };
+    check(&layout::active_layout(&app.ui).tree);
+    for window in &app.ui.detached_windows {
+        if visible {
+            break;
+        }
+        visible = window.tabs.iter().any(|tab| tab.view == "table");
+    }
+    let now: HashSet<(String, String)> = if visible {
+        parse_view_kind(&effective)
+            .map(|(plugin_id, id)| (plugin_id.to_string(), id.to_string()))
+            .into_iter()
+            .collect()
+    } else {
+        HashSet::new()
+    };
     if now == app.plugin_table_surfaces {
         return false;
     }
@@ -225,6 +252,7 @@ pub fn refresh_frames(app: &mut App) -> Task<Message> {
         frames.insert(key, frame);
     }
     app.plugin_frames = frames;
+    sync_modal_state(app);
     sync_frame_focus(app);
     // 这次投影已经覆盖到最新帧，心跳里不再重复补
     let _ = app.plugins.take_observed_pending();
@@ -253,6 +281,7 @@ pub fn refresh_surface_frame(app: &mut App, plugin_id: &str, surface_id: &str) -
             }
         }
     }
+    sync_modal_state(app);
     sync_frame_focus(app);
     // 绘制期同步取走的帧由心跳补投影：这里不能清全局待补标记，
     // 否则别的面永远等不到
@@ -374,7 +403,11 @@ pub(crate) fn image_key(app: &App, plugin_id: &str, source: &ImageSource) -> Opt
             let dir = app.plugins.plugin_data_dir(plugin_id)?;
             Some(safe_private_path(&dir, path)?.to_string_lossy().into_owned())
         }
-        ImageSource::Vault { path } => (!path.is_empty()).then(|| path.clone()),
+        // 仓库来源沿相对路径作键；缩略图上限入键：同一张图的不同上限是不同的上传物
+        ImageSource::Vault { path, max_edge } => (!path.is_empty()).then(|| match max_edge {
+            Some(max) => format!("{path}#{max}"),
+            None => path.clone(),
+        }),
         ImageSource::Url { url, local } => is_remote_url(url).then(|| match local {
             Some(true) => format!("local:{url}"),
             _ => url.clone(),
@@ -411,6 +444,13 @@ pub(crate) fn ensure_images(app: &mut App) -> Task<Message> {
                 pending.push((key, source.clone()));
             }
         });
+        if let Some(popup) = &frame.popup {
+            collect_draw_images(&popup.commands, &mut |source| {
+                if let Some(key) = image_key(app, plugin_id, source) {
+                    pending.push((key, source.clone()));
+                }
+            });
+        }
     }
     ensure_images_pending(app, pending)
 }
@@ -427,6 +467,13 @@ fn ensure_images_surface(app: &mut App, plugin_id: &str, surface_id: &str) -> Ta
             pending.push((key, source.clone()));
         }
     });
+    if let Some(popup) = &frame.popup {
+        collect_draw_images(&popup.commands, &mut |source| {
+            if let Some(key) = image_key(app, plugin_id, source) {
+                pending.push((key, source.clone()));
+            }
+        });
+    }
     ensure_images_pending(app, pending)
 }
 
@@ -452,7 +499,11 @@ fn load_image(app: &App, gen: u64, key: String, source: ImageSource) -> Task<Mes
         ImageSource::Private { .. } => {
             let path = PathBuf::from(&key);
             Task::perform(
-                async move { std::fs::read(&path).map_err(|e| format!("读插件图片失败：{e}")) },
+                async move {
+                    std::fs::read(&path)
+                        .map(PluginImage::Bytes)
+                        .map_err(|e| format!("读插件图片失败：{e}"))
+                },
                 move |result| Message::ImageLoaded(gen, key, result),
             )
         }
@@ -460,19 +511,31 @@ fn load_image(app: &App, gen: u64, key: String, source: ImageSource) -> Task<Mes
         ImageSource::File { path } => {
             let path = PathBuf::from(path);
             Task::perform(
-                async move { std::fs::read(&path).map_err(|e| format!("读插件图片失败：{e}")) },
+                async move {
+                    std::fs::read(&path)
+                        .map(PluginImage::Bytes)
+                        .map_err(|e| format!("读插件图片失败：{e}"))
+                },
                 move |result| Message::ImageLoaded(gen, key, result),
             )
         }
-        ImageSource::Vault { path } => {
+        ImageSource::Vault { path, max_edge } => {
             if matches!(app.repo_kind, crate::RepoKind::Space(_)) {
-                return crate::space_actions::space_load_image(app, gen, path);
+                return crate::space_actions::space_load_image(app, gen, key, path, max_edge);
             }
             match app.vault.root().ok() {
                 Some(root) => {
                     let rel = path.clone();
                     Task::perform(
-                        async move { atelyx_core::vault::read_file_bytes(&root, &rel) },
+                        async move {
+                            let bytes = atelyx_core::vault::read_file_bytes(&root, &rel)?;
+                            Ok::<PluginImage, String>(match max_edge {
+                                Some(max) => PluginImage::Thumb(
+                                    atelyx_core::image_thumb::thumbnail(&bytes, max)?,
+                                ),
+                                None => PluginImage::Bytes(bytes),
+                            })
+                        },
                         move |result| Message::ImageLoaded(gen, key.clone(), result),
                     )
                 }
@@ -483,11 +546,12 @@ fn load_image(app: &App, gen: u64, key: String, source: ImageSource) -> Task<Mes
             let local = local.unwrap_or(false);
             Task::perform(
                 async move {
-                    if local {
+                    let bytes = if local {
                         atelyx_core::remote_image::fetch_local_image(&url).await
                     } else {
                         atelyx_core::remote_image::fetch_external_image(&url).await
-                    }
+                    };
+                    bytes.map(crate::PluginImage::Bytes)
                 },
                 move |result| Message::ImageLoaded(gen, key, result),
             )
@@ -897,7 +961,7 @@ pub fn resync_surfaces_on_running(app: &mut App, plugin_id: &str) {
         let kind = if full { SurfaceKind::Takeover } else { SurfaceKind::Page };
         app.plugins.notify_surface_attached(&pid, &surface_id, kind);
     }
-    // 表格视图面：挂载状态由壳侧会话选择决定、不随贡献增删差分，重启后须显式重发
+    // 表格视图面：挂载状态由面板内容槽决定、不随贡献增删差分，重启后须显式重发
     let table_surfaces: Vec<(String, String)> = app.plugin_table_surfaces.iter().cloned().collect();
     for (pid, surface_id) in table_surfaces {
         if pid == plugin_id {
@@ -1050,8 +1114,12 @@ pub fn close_doc(app: &mut App) -> Task<Message> {
 /// 确保文档视图标签存在并激活（复用「添加面板」的布局通道；视图被占用时仅激活）。
 fn ensure_doc_tab(app: &mut App, plugin_id: &str, contribution_id: &str) -> Task<Message> {
     let view = doc_view_kind(plugin_id, contribution_id);
-    // 文档视图已存在（主树或撕裂窗口）= 只需激活所在标签
-    if let Some(task) = activate_existing_view(app, &view) {
+    reveal_view(app, &view)
+}
+
+/// 让某视图在布局里显示：已存在（主树或撕裂窗口）只激活，否则加到聚焦面板。
+pub(crate) fn reveal_view(app: &mut App, view: &str) -> Task<Message> {
+    if let Some(task) = activate_existing_view(app, view) {
         return task;
     }
     let panel_id = app
@@ -1062,11 +1130,11 @@ fn ensure_doc_tab(app: &mut App, plugin_id: &str, contribution_id: &str) -> Task
     let Some(panel_id) = panel_id else {
         app.notify(
             crate::ui::notify::Level::Error,
-            "没有可放置文档视图的面板".to_string(),
+            "没有可放置视图的面板".to_string(),
         );
         return Task::none();
     };
-    app.apply(layout::LayoutOp::AddView { panel_id, view })
+    app.apply(layout::LayoutOp::AddView { panel_id, view: view.to_string() })
 }
 
 /// 布局里已存在某视图标签时激活它（主树 / 撕裂窗口各查一层）；未找到 = `None`。
@@ -1141,4 +1209,16 @@ mod tests {
             assert!(safe_private_path(dir, bad).is_none(), "应拒绝越出私有目录：{bad}");
         }
     }
+}
+
+/// 重算当前展开的模态插件浮层：捕获全部外部按下的浮层（灯箱 / 模态菜单）归属到一个面，
+/// 壳侧据此把面板头部的点击转成「按在浮层外」。
+fn sync_modal_state(app: &mut App) {
+    let modal = app.plugin_frames.iter().find_map(|((plugin_id, surface_id), frame)| {
+        frame.popup.as_ref().and_then(|popup| {
+            (popup.capture == atelyx_core::plugin_runtime::PopupCapture::All)
+                .then(|| (plugin_id.clone(), surface_id.clone()))
+        })
+    });
+    app.plugin_modal = modal;
 }

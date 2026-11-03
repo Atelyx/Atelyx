@@ -343,9 +343,11 @@ pub(crate) fn paint(
         color,
         weight: spec.weight,
         family: spec.family,
+        family_name: None,
         italic: false,
         max_width,
         align,
+        layout: None,
     });
 }
 
@@ -373,9 +375,11 @@ pub(crate) fn paint_line(
         color,
         weight: spec.weight,
         family: spec.family,
+        family_name: None,
         italic: false,
         max_width: None,
         align: None,
+        layout: None,
     });
 }
 

@@ -185,9 +185,11 @@ impl<'a> BuildCtx<'a> {
             color: theme::token(ColorToken::TextSecondary),
             weight: None,
             family: None,
+            family_name: None,
             italic: false,
             max_width: None,
             align: None,
+            layout: None,
         });
     }
 
@@ -207,6 +209,7 @@ impl<'a> BuildCtx<'a> {
                 ime,
                 keys,
                 fps: None,
+                popup: None,
             },
             layouts: self.layouts,
             focusables: self.focusables,
@@ -291,9 +294,11 @@ impl<'c, 'a> Canvas<'c, 'a> {
             color,
             weight: None,
             family: None,
+            family_name: None,
             italic: false,
             max_width: None,
             align: None,
+            layout: None,
         });
     }
 

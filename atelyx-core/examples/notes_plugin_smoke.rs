@@ -44,11 +44,7 @@ async fn main() {
                         let sizes: Vec<MeasureTextResult> = params
                             .items
                             .iter()
-                            .map(|item| MeasureTextResult {
-                                width: item.text.chars().map(|ch| item.size * if (ch as u32) < 0x1100 { 0.55 } else { 1.0 }).sum(),
-                                height: item.size * 1.2,
-                                lines: 1,
-                            })
+                            .map(|item| MeasureTextResult { width: item.text.chars().map(|ch| item.size * if (ch as u32) < 0x1100 { 0.55 } else { 1.0 }).sum(), height: item.size * 1.2, lines: 1, segments: None })
                             .collect();
                         reply(&responder, request_id, json!({ "sizes": sizes }));
                     }
@@ -450,6 +446,10 @@ fn theme() -> ThemeResult {
             hover: "#f0f3f6".into(),
             border: "#d0d7de".into(),
             border_strong: "#8c959f".into(),
+            background: "#131418".into(),
+            border_subtle: "#252a31".into(),
+            selection: "#e0a94e40".into(),
+            scrim: "#00000099".into(),
             transparent: "#00000000".into(),
         },
         font_sizes: FontSizes {

@@ -8,8 +8,6 @@ use iced::keyboard::{self, key::Named};
 /// 命令作用域（决定分发时的上下文门控）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Scope {
-    /// 表格画布。
-    Table,
     /// 画布白板。
     Canvas,
 }
@@ -23,15 +21,9 @@ pub enum Rule {
     NoMod,
 }
 
-/// 可重映射命令（现役 table + canvas 两域；id 持久化为 `table.undo` 形态）。
+/// 可重映射命令（现役画布域；id 持久化为 `canvas.undo` 形态）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CommandId {
-    TableUndo,
-    TableRedo,
-    TableCopy,
-    TableCut,
-    TablePaste,
-    TableClear,
     CanvasUndo,
     CanvasRedo,
     CanvasCopy,
@@ -43,12 +35,6 @@ pub enum CommandId {
 impl CommandId {
     /// 全部命令（默认表顺序 = 命中优先序；快捷键设置页按此顺序按作用域分组展示）。
     pub const ALL: &'static [CommandId] = &[
-        CommandId::TableUndo,
-        CommandId::TableRedo,
-        CommandId::TableCopy,
-        CommandId::TableCut,
-        CommandId::TablePaste,
-        CommandId::TableClear,
         CommandId::CanvasUndo,
         CommandId::CanvasRedo,
         CommandId::CanvasCopy,
@@ -60,12 +46,6 @@ impl CommandId {
     /// 持久化 id（global.json 键）。
     pub fn key(self) -> &'static str {
         match self {
-            CommandId::TableUndo => "table.undo",
-            CommandId::TableRedo => "table.redo",
-            CommandId::TableCopy => "table.copy",
-            CommandId::TableCut => "table.cut",
-            CommandId::TablePaste => "table.paste",
-            CommandId::TableClear => "table.clear",
             CommandId::CanvasUndo => "canvas.undo",
             CommandId::CanvasRedo => "canvas.redo",
             CommandId::CanvasCopy => "canvas.copy",
@@ -80,45 +60,34 @@ impl CommandId {
     }
 
     pub fn scope(self) -> Scope {
-        match self {
-            CommandId::CanvasUndo
-            | CommandId::CanvasRedo
-            | CommandId::CanvasCopy
-            | CommandId::CanvasPaste
-            | CommandId::CanvasSelectAll
-            | CommandId::CanvasClear => Scope::Canvas,
-            _ => Scope::Table,
-        }
+        Scope::Canvas
     }
 
     pub fn rule(self) -> Rule {
         match self {
-            CommandId::TableClear | CommandId::CanvasClear => Rule::NoMod,
+            CommandId::CanvasClear => Rule::NoMod,
             _ => Rule::RequireMod,
         }
     }
 
     pub fn default_binding(self) -> &'static str {
         match self {
-            CommandId::TableUndo | CommandId::CanvasUndo => "mod+z",
-            CommandId::TableRedo | CommandId::CanvasRedo => "mod+y",
-            CommandId::TableCopy | CommandId::CanvasCopy => "mod+c",
-            CommandId::TableCut => "mod+x",
-            CommandId::TablePaste | CommandId::CanvasPaste => "mod+v",
+            CommandId::CanvasUndo => "mod+z",
+            CommandId::CanvasRedo => "mod+y",
+            CommandId::CanvasCopy => "mod+c",
+            CommandId::CanvasPaste => "mod+v",
             CommandId::CanvasSelectAll => "mod+a",
-            CommandId::TableClear | CommandId::CanvasClear => "delete",
+            CommandId::CanvasClear => "delete",
         }
     }
 
     /// 展示名（快捷键设置行；归属由分组标题承载，不含领域前缀）。
     pub fn label(self) -> &'static str {
         match self {
-            CommandId::TableUndo | CommandId::CanvasUndo => "撤销",
-            CommandId::TableRedo | CommandId::CanvasRedo => "重做",
-            CommandId::TableCopy | CommandId::CanvasCopy => "复制",
-            CommandId::TableCut => "剪切",
-            CommandId::TablePaste | CommandId::CanvasPaste => "粘贴",
-            CommandId::TableClear => "清空选区",
+            CommandId::CanvasUndo => "撤销",
+            CommandId::CanvasRedo => "重做",
+            CommandId::CanvasCopy => "复制",
+            CommandId::CanvasPaste => "粘贴",
             CommandId::CanvasSelectAll => "全选",
             CommandId::CanvasClear => "删除选中",
         }
@@ -129,7 +98,6 @@ impl Scope {
     /// 快捷键设置页的分组标题。
     pub fn label(self) -> &'static str {
         match self {
-            Scope::Table => "表格",
             Scope::Canvas => "画布",
         }
     }
@@ -302,11 +270,8 @@ pub fn conflicts(resolved: &[(CommandId, String)], id: CommandId) -> Vec<Command
 }
 
 /// `mod+shift+z` 重做别名是否生效：redo 未被覆盖，且 undo 未被改绑到该键串（避免一键双义）。
-pub fn redo_alias_active(overrides: &HashMap<String, String>, scope: Scope) -> bool {
-    let (undo_key, redo_key) = match scope {
-        Scope::Table => (CommandId::TableUndo.key(), CommandId::TableRedo.key()),
-        Scope::Canvas => (CommandId::CanvasUndo.key(), CommandId::CanvasRedo.key()),
-    };
+pub fn redo_alias_active(overrides: &HashMap<String, String>) -> bool {
+    let (undo_key, redo_key) = (CommandId::CanvasUndo.key(), CommandId::CanvasRedo.key());
     !overrides.contains_key(redo_key)
         && overrides
             .get(undo_key)
@@ -374,48 +339,41 @@ mod tests {
 
     #[test]
     fn validate_rules() {
-        assert!(validate(CommandId::TableUndo, "mod+z").is_ok());
-        assert_eq!(validate(CommandId::TableUndo, "z"), Err("此命令需包含 Ctrl/Cmd"));
-        assert!(validate(CommandId::TableClear, "delete").is_ok());
-        assert!(validate(CommandId::TableClear, "shift+delete").is_ok());
-        assert_eq!(validate(CommandId::TableClear, "mod+delete"), Err("此命令不得包含 Ctrl/Cmd/Alt"));
+        assert!(validate(CommandId::CanvasUndo, "mod+z").is_ok());
+        assert_eq!(validate(CommandId::CanvasUndo, "z"), Err("此命令需包含 Ctrl/Cmd"));
+        assert!(validate(CommandId::CanvasClear, "delete").is_ok());
+        assert!(validate(CommandId::CanvasClear, "shift+delete").is_ok());
+        assert_eq!(validate(CommandId::CanvasClear, "mod+delete"), Err("此命令不得包含 Ctrl/Cmd/Alt"));
     }
 
     #[test]
     fn resolve_override_and_invalid_fallback() {
         let mut ov = HashMap::new();
-        ov.insert("table.undo".to_string(), "mod+u".to_string());
-        ov.insert("table.clear".to_string(), "mod+delete".to_string()); // 违规 → 回退默认
+        ov.insert("canvas.undo".to_string(), "mod+u".to_string());
+        ov.insert("canvas.clear".to_string(), "mod+delete".to_string()); // 违规 → 回退默认
         let r = resolve(&ov);
-        assert_eq!(r.iter().find(|(c, _)| *c == CommandId::TableUndo).unwrap().1, "mod+u");
-        assert_eq!(r.iter().find(|(c, _)| *c == CommandId::TableClear).unwrap().1, "delete");
+        assert_eq!(r.iter().find(|(c, _)| *c == CommandId::CanvasUndo).unwrap().1, "mod+u");
+        assert_eq!(r.iter().find(|(c, _)| *c == CommandId::CanvasClear).unwrap().1, "delete");
     }
 
     #[test]
     fn conflicts_are_scope_local() {
         let mut ov = HashMap::new();
-        ov.insert("table.undo".to_string(), "mod+c".to_string());
+        ov.insert("canvas.undo".to_string(), "mod+c".to_string());
         let r = resolve(&ov);
-        assert_eq!(conflicts(&r, CommandId::TableCopy), vec![CommandId::TableUndo]);
-        // 跨作用域同键串不冲突
-        let mut ov = HashMap::new();
-        ov.insert("table.undo".to_string(), "mod+z".to_string());
-        let r = resolve(&ov);
-        assert!(conflicts(&r, CommandId::CanvasUndo).is_empty());
+        assert_eq!(conflicts(&r, CommandId::CanvasCopy), vec![CommandId::CanvasUndo]);
     }
 
     #[test]
     fn redo_alias_gating() {
         let mut ov = HashMap::new();
-        assert!(redo_alias_active(&ov, Scope::Table));
+        assert!(redo_alias_active(&ov));
         // redo 被覆盖 → 别名失效
-        ov.insert("table.redo".to_string(), "mod+r".to_string());
-        assert!(!redo_alias_active(&ov, Scope::Table));
+        ov.insert("canvas.redo".to_string(), "mod+r".to_string());
+        assert!(!redo_alias_active(&ov));
         // undo 被改绑到 mod+shift+z → 别名失效（一键双义）
         let mut ov = HashMap::new();
-        ov.insert("table.undo".to_string(), "mod+shift+z".to_string());
-        assert!(!redo_alias_active(&ov, Scope::Table));
-        // 作用域隔离
-        assert!(redo_alias_active(&ov, Scope::Canvas));
+        ov.insert("canvas.undo".to_string(), "mod+shift+z".to_string());
+        assert!(!redo_alias_active(&ov));
     }
 }

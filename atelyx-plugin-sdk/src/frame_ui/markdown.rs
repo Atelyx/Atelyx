@@ -339,9 +339,11 @@ pub(crate) fn paint(
                 color: theme::token(run.style.color),
                 weight: run.spec.weight,
                 family: run.spec.family,
+                family_name: None,
                 italic: run.style.italic,
                 max_width: None,
                 align: None,
+                layout: None,
             });
             x += width;
         }
@@ -1268,7 +1270,7 @@ mod tests {
         let first = metrics.take_misses();
         let sizes: Vec<MeasureTextResult> = first
             .iter()
-            .map(|item| MeasureTextResult { width: item.size.max(1.0), height: item.size * 1.5, lines: 1 })
+            .map(|item| MeasureTextResult { width: item.size.max(1.0), height: item.size * 1.5, lines: 1 , segments: None })
             .collect();
         metrics.apply(&first, &sizes);
 

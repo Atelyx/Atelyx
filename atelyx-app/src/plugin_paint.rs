@@ -10,11 +10,12 @@ use iced::advanced::text::{
 };
 use iced::advanced::Renderer as _;
 use iced::alignment::Vertical;
-use iced::widget::canvas::{self, Path as CanvasPath, Stroke};
+use iced::widget::canvas::{self, LineDash, Path as CanvasPath, Stroke};
 use iced::{Color, Pixels, Point, Rectangle, Size};
 
 use atelyx_core::plugin_runtime::{
-    PaintColor, PaintPoint, DrawCommand, ImageFit, ImageSource, TextAlign, TextFamily, TextWeight,
+    DrawCommand, ImageFit, ImageSource, PaintColor, PaintPoint, TextAlign, TextFamily, TextLayout,
+    TextShaping, TextWeight, TextWrap,
 };
 
 use crate::App;
@@ -136,6 +137,10 @@ struct TextEntry {
     family: Option<TextFamily>,
     italic: bool,
     max_width_bits: Option<u32>,
+    /// 排版口径（行高倍数 bits / 换行 / 整形）：同一段文字在不同口径下是不同的段落。
+    layout_key: (Option<u32>, u8, u8),
+    /// 显式字体族名（同一段文字换族是不同的段落）。
+    family_name: Option<String>,
     paragraph: paragraph::Plain<TextParagraph>,
     /// 排版后的最小宽度（对齐换算用）。
     width: f32,
@@ -177,11 +182,22 @@ impl TextCache {
             italic,
             max_width,
             align,
+            layout,
+            family_name,
         } = command
         else {
             return;
         };
-        let (paragraph, width) = self.entry(content, *size, *weight, *family, *italic, *max_width);
+        let (paragraph, width) = self.entry(
+            content,
+            *size,
+            *weight,
+            *family,
+            *italic,
+            *max_width,
+            *layout,
+            family_name.as_deref(),
+        );
         let x = aligned_x(*x, *max_width, *align, width);
         renderer.fill_paragraph(
             paragraph,
@@ -205,10 +221,22 @@ impl TextCache {
         family: Option<TextFamily>,
         italic: bool,
         max_width: Option<f32>,
+        layout: Option<TextLayout>,
+        family_name: Option<&str>,
     ) -> (&TextParagraph, f32) {
         let size_bits = size.to_bits();
         let max_width_bits = max_width.map(f32::to_bits);
-        let hash = text_hash(content, size_bits, weight, family, italic, max_width_bits);
+        let layout_key = layout_key(layout);
+        let hash = text_hash(
+            content,
+            size_bits,
+            weight,
+            family,
+            italic,
+            max_width_bits,
+            layout_key,
+            family_name,
+        );
         let frame = self.frame;
         let bucket = self.buckets.entry(hash).or_default();
         let index = bucket.iter().position(|entry| {
@@ -217,12 +245,23 @@ impl TextCache {
                 && entry.family == family
                 && entry.italic == italic
                 && entry.max_width_bits == max_width_bits
+                && entry.layout_key == layout_key
+                && entry.family_name.as_deref() == family_name
                 && entry.paragraph.content() == content
         });
         let index = match index {
             Some(index) => index,
             None => {
-                let paragraph = build_paragraph(content, size, weight, family, italic, max_width);
+                let paragraph = build_paragraph(
+                    content,
+                    size,
+                    weight,
+                    family,
+                    italic,
+                    max_width,
+                    layout,
+                    family_name,
+                );
                 let width = paragraph.min_bounds().width;
                 self.entries += 1;
                 self.bytes += content.len();
@@ -232,6 +271,8 @@ impl TextCache {
                     family,
                     italic,
                     max_width_bits,
+                    layout_key,
+                    family_name: family_name.map(str::to_string),
                     paragraph,
                     width,
                     last_used: frame,
@@ -272,7 +313,27 @@ impl TextCache {
     }
 }
 
-/// 按内容与排版参数排版一段文字。参数与 canvas 文本保持一致（行高 1.2、词级换行、
+/// 未声明行高时的相对行高倍数（与宿主界面文本同一档）。
+const DEFAULT_LINE_HEIGHT: f32 = crate::plugin_theme::DEFAULT_LINE_HEIGHT;
+
+/// 排版口径的缓存键：行高倍数取 bits，换行 / 整形取小整数。
+fn layout_key(layout: Option<TextLayout>) -> (Option<u32>, u8, u8) {
+    let Some(layout) = layout else { return (None, 0, 0) };
+    let wrap = match layout.wrap {
+        None => 0,
+        Some(TextWrap::Word) => 1,
+        Some(TextWrap::WordOrGlyph) => 2,
+    };
+    let shaping = match layout.shaping {
+        None => 0,
+        Some(TextShaping::Auto) => 1,
+        Some(TextShaping::Basic) => 2,
+        Some(TextShaping::Advanced) => 3,
+    };
+    (layout.line_height.map(f32::to_bits), wrap, shaping)
+}
+
+/// 按内容与排版参数排版一段文字。参数与 canvas 文本保持一致（默认行高 1.2、词级换行、
 /// 左上对齐），否则同一段文字在两种绘制路径下的位置与换行会不一致。
 fn build_paragraph(
     content: &str,
@@ -281,24 +342,42 @@ fn build_paragraph(
     family: Option<TextFamily>,
     italic: bool,
     max_width: Option<f32>,
+    layout: Option<TextLayout>,
+    family_name: Option<&str>,
 ) -> paragraph::Plain<TextParagraph> {
+    let line_height = layout
+        .and_then(|layout| layout.line_height)
+        .map(LineHeight::Relative)
+        .unwrap_or(LineHeight::Relative(DEFAULT_LINE_HEIGHT));
+    let wrapping = match layout.and_then(|layout| layout.wrap) {
+        Some(TextWrap::Word) => Wrapping::Word,
+        Some(TextWrap::WordOrGlyph) => Wrapping::WordOrGlyph,
+        None => Wrapping::default(),
+    };
+    let shaping = match layout.and_then(|layout| layout.shaping) {
+        Some(TextShaping::Auto) => Shaping::Auto,
+        Some(TextShaping::Basic) => Shaping::Basic,
+        Some(TextShaping::Advanced) => Shaping::Advanced,
+        None => Shaping::default(),
+    };
     let mut paragraph = paragraph::Plain::default();
     // 斜体按字型样式给：系统字体族有斜体字面时即用，没有再退正体（指令集不合成倾斜）
+    let base = crate::plugin_theme::text_font_named(weight, family, family_name);
     let font = if italic {
-        iced::Font { style: iced::font::Style::Italic, ..crate::plugin_theme::text_font(weight, family) }
+        iced::Font { style: iced::font::Style::Italic, ..base }
     } else {
-        crate::plugin_theme::text_font(weight, family)
+        base
     };
     paragraph.update(TextDef {
         content,
         bounds: Size::new(max_width.unwrap_or(f32::INFINITY), f32::INFINITY),
         size: Pixels(size),
-        line_height: LineHeight::Relative(1.2),
+        line_height,
         font,
         align_x: Alignment::Default,
         align_y: Vertical::Top,
-        shaping: Shaping::default(),
-        wrapping: Wrapping::default(),
+        shaping,
+        wrapping,
     });
     paragraph
 }
@@ -319,6 +398,8 @@ fn text_hash(
     family: Option<TextFamily>,
     italic: bool,
     max_width_bits: Option<u32>,
+    layout_key: (Option<u32>, u8, u8),
+    family_name: Option<&str>,
 ) -> u64 {
     // 段落缓存每帧都要按内容查一次：用逐字节 FNV，避免 SipHash 在长正文上的固定开销。
     let mut hash = 0xcbf2_9ce4_8422_2325u64;
@@ -332,20 +413,39 @@ fn text_hash(
         family.map_or(u32::MAX, |family| family as u32),
         u32::from(italic),
         max_width_bits.unwrap_or(u32::MAX),
+        layout_key.0.unwrap_or(u32::MAX),
+        u32::from(layout_key.1),
+        u32::from(layout_key.2),
     ] {
         for byte in value.to_le_bytes() {
             hash ^= u64::from(byte);
             hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
         }
     }
+    for byte in family_name.unwrap_or_default().as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
     hash
 }
 
 fn execute_one(frame: &mut canvas::Frame, command: &DrawCommand, ctx: &PaintCtx<'_>) {
     match command {
-        DrawCommand::Line { x1, y1, x2, y2, stroke, width } => {
+        DrawCommand::Line { x1, y1, x2, y2, stroke, width, dash } => {
             let path = CanvasPath::line(Point::new(*x1, *y1), Point::new(*x2, *y2));
-            frame.stroke(&path, stroke_of(color(*stroke), *width));
+            let segments = dash.map(|[on, off]| [on.max(0.1), off.max(0.0)]);
+            match &segments {
+                Some(segments) => frame.stroke(
+                    &path,
+                    Stroke {
+                        style: canvas::Style::Solid(color(*stroke)),
+                        width: width.max(0.1),
+                        line_dash: LineDash { segments, offset: 0 },
+                        ..Stroke::default()
+                    },
+                ),
+                None => frame.stroke(&path, stroke_of(color(*stroke), *width)),
+            }
         }
         DrawCommand::Rect { x, y, w, h, fill, stroke, stroke_width, corner_radius, .. } => {
             let top_left = Point::new(*x, *y);
@@ -479,15 +579,15 @@ mod tests {
     #[test]
     fn text_cache_reuses_the_paragraph_of_unchanged_text() {
         let mut cache = TextCache { frame: 1, ..TextCache::default() };
-        let (first, width) = cache.entry("同一段文字", 13.0, None, None, false, None);
+        let (first, width) = cache.entry("同一段文字", 13.0, None, None, false, None, None, None);
         let first: *const TextParagraph = first;
         cache.frame = 2;
-        let (second, width_again) = cache.entry("同一段文字", 13.0, None, None, false, None);
+        let (second, width_again) = cache.entry("同一段文字", 13.0, None, None, false, None, None, None);
         assert_eq!(first, second, "内容与排版参数不变即复用同一段落");
         assert_eq!(width, width_again);
         assert_eq!(cache.entries, 1);
 
-        let _ = cache.entry("另一段文字", 13.0, None, None, false, None);
+        let _ = cache.entry("另一段文字", 13.0, None, None, false, None, None, None);
         assert_eq!(cache.entries, 2, "内容变了才新增条目");
     }
 
@@ -495,10 +595,10 @@ mod tests {
     fn text_cache_trims_entries_unused_by_the_current_frame() {
         let mut cache = TextCache { frame: 1, ..TextCache::default() };
         for index in 0..4 {
-            let _ = cache.entry(&format!("line {index}"), 13.0, None, None, false, None);
+            let _ = cache.entry(&format!("line {index}"), 13.0, None, None, false, None, None, None);
         }
         cache.frame = 2;
-        let _ = cache.entry("keep", 13.0, None, None, false, None);
+        let _ = cache.entry("keep", 13.0, None, None, false, None, None, None);
         cache.trim(3, usize::MAX);
         assert_eq!(cache.entries, 1, "超出上限只留本帧用到的");
 
@@ -516,9 +616,11 @@ mod tests {
             color: PaintColor::Rgba { rgba: [0, 0, 0, 255] },
             weight: None,
             family: None,
+            family_name: None,
             italic: false,
             max_width: None,
             align: None,
+            layout: None,
         }
     }
 
@@ -576,7 +678,7 @@ mod tests {
 
     fn image_command() -> DrawCommand {
         DrawCommand::Image {
-            source: ImageSource::Vault { path: "a.png".into() },
+            source: ImageSource::Vault { path: "a.png".into(), max_edge: None },
             x: 0.0,
             y: 0.0,
             w: 4.0,

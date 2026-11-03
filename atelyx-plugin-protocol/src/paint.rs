@@ -25,13 +25,14 @@ pub enum TextFamily {
     Mono,
 }
 
-/// 字重三档。
+/// 字重四档（正文 400 / 中等 500 / 半粗 600 / 粗 700）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum TextWeight {
     Normal,
     Medium,
     SemiBold,
+    Bold,
 }
 
 /// 主题 token：取色引用宿主调色板，主题变化时自动跟随。
@@ -61,6 +62,14 @@ pub enum ColorToken {
     Hover,
     Border,
     BorderStrong,
+    /// 画布 / 内容区的底色（比次级表面深一档）。
+    Background,
+    /// 最弱的分隔线（格线、列表内分隔）。
+    BorderSubtle,
+    /// 文本选区底。
+    Selection,
+    /// 模态遮罩（灯箱 / 确认层）。
+    Scrim,
     /// 无底色 / 无边框。
     Transparent,
     /// 浮层表面（菜单 / 提示条底，比面板底亮一档）。
@@ -81,9 +90,16 @@ pub enum ImageFit {
 /// 局域网策略）；`file` = 本机绝对路径（插件自己读得到的文件，交给宿主显示）。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
+#[serde(rename_all_fields = "camelCase")]
 pub enum ImageSource {
     Private { path: String },
-    Vault { path: String },
+    Vault {
+        path: String,
+        /// 缩略图长边上限（像素）：给定时宿主按 EXIF 方向摆正并等比缩到该长边以内再上传，
+        /// 同一路径的不同上限各占一份缓存。缺省 = 原图。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_edge: Option<u32>,
+    },
     Url {
         url: String,
         /// 按本机 / 局域网策略取图：放行回环与私网、仅拒链路本地与广播。
@@ -120,6 +136,43 @@ fn default_stroke_width() -> f32 {
     1.0
 }
 
+/// 换行口径：`word` 只在词间断行（超长词溢出），`wordOrGlyph` 超长词退化为逐字形断行。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TextWrap {
+    Word,
+    WordOrGlyph,
+}
+
+/// 字形整形策略：`auto` 纯 ASCII 走基础整形、含非 ASCII 走高级整形（含字体回退）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TextShaping {
+    Auto,
+    Basic,
+    Advanced,
+}
+
+/// 文字排版口径：量算、换行与绘制共用同一份，缺省项取宿主默认。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextLayout {
+    /// 相对字号的行高倍数（缺省 = 宿主默认行高）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_height: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wrap: Option<TextWrap>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shaping: Option<TextShaping>,
+}
+
+impl TextLayout {
+    /// 全部取默认口径（等于不声明）。
+    pub fn is_default(&self) -> bool {
+        self.line_height.is_none() && self.wrap.is_none() && self.shaping.is_none()
+    }
+}
+
 /// 矩形投影：偏移、模糊半径与颜色。模糊按宿主渲染层的 quad 阴影实现，只对矩形生效。
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -147,6 +200,9 @@ pub enum DrawCommand {
         stroke: PaintColor,
         #[serde(default = "default_stroke_width")]
         width: f32,
+        /// 虚线：`[实线长, 空白长]`（像素，沿线的行程计）。缺省 = 实线。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dash: Option<[f32; 2]>,
     },
     Rect {
         x: f32,
@@ -196,11 +252,19 @@ pub enum DrawCommand {
         /// 斜体：字族没有斜体字形时按合成倾斜绘制（强调正文里的 `*斜体*` 用它）。
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         italic: bool,
+        /// 显式字体族名（用户在单元格样式里选的系统字体）：给出时优先于 `family`，
+        /// 该族不存在则回落 `family` 口径。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        family_name: Option<String>,
         /// 可用宽度：给定即按该宽度换行，并作为 `align` 的对齐区域。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         max_width: Option<f32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         align: Option<TextAlign>,
+        /// 排版口径（行高倍数 / 换行 / 整形）：与 `query.measure` 的同一项同口径，
+        /// 量出来的行高与折行点才对得上绘制结果。缺省 = 宿主默认。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        layout: Option<TextLayout>,
     },
     /// 图片贴片：绘制在给定矩形内。
     Image {
@@ -217,7 +281,14 @@ pub enum DrawCommand {
 impl DrawCommand {
     fn validate(&self) -> Result<(), String> {
         match self {
-            Self::Line { width, .. } => ensure_positive(*width, "线宽"),
+            Self::Line { width, dash, .. } => {
+                ensure_positive(*width, "线宽")?;
+                if let Some([on, off]) = dash {
+                    ensure_positive(*on, "虚线段长")?;
+                    ensure_non_negative(*off, "虚线间隔")?;
+                }
+                Ok(())
+            }
             Self::Rect { w, h, stroke_width, corner_radius, shadow, .. } => {
                 ensure_non_negative(*w, "矩形宽")?;
                 ensure_non_negative(*h, "矩形高")?;
@@ -240,13 +311,21 @@ impl DrawCommand {
                 ensure_non_negative(*r, "圆半径")?;
                 ensure_positive(stroke_width.unwrap_or(1.0), "描边宽")
             }
-            Self::Text { size, max_width, align, .. } => {
+            Self::Text { size, max_width, align, layout, .. } => {
                 ensure_positive(*size, "字号")?;
                 if let Some(max_width) = max_width {
                     ensure_positive(*max_width, "文字可用宽度")?;
                 }
                 if align.is_some() && max_width.is_none() {
                     return Err("文字对齐须与 maxWidth 同时给出".into());
+                }
+                if let Some(layout) = layout {
+                    if let Some(line_height) = layout.line_height {
+                        ensure_positive(line_height, "文字行高倍数")?;
+                    }
+                    if layout.wrap.is_some() && max_width.is_none() {
+                        return Err("换行口径须与 maxWidth 同时给出".into());
+                    }
                 }
                 Ok(())
             }
@@ -320,6 +399,8 @@ mod tests {
             italic: false,
             max_width,
             align,
+            family_name: None,
+            layout: None,
         }
     }
 
@@ -449,7 +530,7 @@ mod tests {
 
     #[test]
     fn image_fit_is_optional_and_roundtrips() {
-        let source = ImageSource::Vault { path: "a.png".into() };
+        let source = ImageSource::Vault { path: "a.png".into(), max_edge: None };
         let stretch = DrawCommand::Image {
             source: source.clone(),
             x: 0.0,

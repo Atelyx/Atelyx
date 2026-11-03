@@ -424,7 +424,6 @@ dependencies = [
  "nanoid",
  "regex",
  "reqwest",
- "rust_xlsxwriter",
  "serde",
  "serde_json",
  "sha2",
@@ -441,6 +440,7 @@ dependencies = [
 name = "atelyx-format"
 version = "0.1.0"
 dependencies = [
+ "nanoid",
  "regex",
  "serde",
  "serde_json",
@@ -585,6 +585,23 @@ dependencies = [
  "async-trait",
  "atelyx-plugin-protocol",
  "atelyx-plugin-sdk",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "atelyx-plugin-tables"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "atelyx-format",
+ "atelyx-plugin-protocol",
+ "atelyx-plugin-sdk",
+ "base64 0.22.1",
+ "image",
+ "nanoid",
+ "rust_xlsxwriter",
+ "serde",
  "serde_json",
  "tokio",
 ]

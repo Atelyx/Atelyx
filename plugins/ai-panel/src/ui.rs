@@ -574,7 +574,7 @@ fn user_block(ui: &mut Ui<'_, '_>, model: &Model, message: &Value, id: &str, cha
                     line.grow();
                     for file in images {
                         line.image_sized(
-                            ImageSource::Vault { path: file.to_string() },
+                            ImageSource::Vault { path: file.to_string(), max_edge: None },
                             THUMB,
                             THUMB,
                             Some(ImageFit::Contain),

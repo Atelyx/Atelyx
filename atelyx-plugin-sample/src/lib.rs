@@ -257,6 +257,15 @@ impl Worker {
             has_size: 0,
             layout_w: 0.0,
             layout_h: 0.0,
+            has_popup: 0,
+            popup_rect: AbiRect::empty_at(0.0, 0.0),
+            popup_capture: 0,
+            popup_commands: std::ptr::null(),
+            popup_commands_len: 0,
+            popup_hits: std::ptr::null(),
+            popup_hits_len: 0,
+            has_popup_ime: 0,
+            popup_ime: AbiRect::empty_at(0.0, 0.0),
         };
         unsafe {
             (self.host().submit_frame)(self.host().ctx, AbiStr::new(&self.surface), &frame);
@@ -288,8 +297,15 @@ fn base(kind: u32, rect: AbiRect) -> AbiCommand {
         text_max_width: 0.0,
         image_source: 0,
         image_path: AbiStr::EMPTY,
+        text_line_height: 0.0,
+        text_wrap: 0,
+        text_shaping: 0,
+        line_dash_on: 0.0,
+        line_dash_off: 0.0,
+        image_max_edge: 0,
         image_local: 0,
         image_fit: FIT_FILL,
+        text_family_name: AbiStr::EMPTY,
     }
 }
 

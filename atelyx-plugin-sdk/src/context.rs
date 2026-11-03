@@ -203,6 +203,58 @@ impl Context {
         serde_json::from_value(value).map_err(|e| RpcError::failed(format!("量算结果解析失败：{e}")))
     }
 
+    /// 系统已安装字体族清单（族名已排序；单元格字体选择这类界面用）。
+    pub async fn query_fonts(&self) -> Result<Vec<String>, RpcError> {
+        let result: crate::protocol::method::FontFamiliesResult =
+            self.call_typed(method::query::FONTS, &Value::Null).await?;
+        Ok(result.families)
+    }
+
+    /// 系统下载目录的绝对路径（图片 / 附件下载落盘用）。
+    pub async fn downloads_dir(&self) -> Result<String, RpcError> {
+        let result: crate::protocol::method::DownloadsDirResult =
+            self.call_typed(method::fs::DOWNLOADS_DIR, &Value::Null).await?;
+        Ok(result.path)
+    }
+
+    /// 域插件落盘后记一版本地历史（空间模式由 `space.file.patch` 在保存链内记）。
+    pub async fn history_record(
+        &self,
+        params: &crate::protocol::method::HistoryRecordParams,
+    ) -> Result<(), RpcError> {
+        self.call_unit(method::history::RECORD, params).await
+    }
+
+    /// 提交一次空间文本文件的补丁保存（空间模式保存链）：回执为服务端最终路径。
+    pub async fn space_file_patch(
+        &self,
+        params: &crate::protocol::method::SpaceFilePatchParams,
+    ) -> Result<crate::protocol::method::SpaceFilePatchResult, RpcError> {
+        self.call_typed(method::space::FILE_PATCH, params).await
+    }
+
+    /// 声明面板头部状态（`header` 缺省 = 收起）。
+    pub async fn panel_header(
+        &self,
+        params: &crate::protocol::method::PanelHeaderParams,
+    ) -> Result<(), RpcError> {
+        self.call_unit(method::panel::HEADER, params).await
+    }
+
+    /// 回应宿主的落盘请求（按 `token` 回执）。
+    pub async fn panel_flush_done(
+        &self,
+        params: &crate::protocol::method::PanelFlushDoneParams,
+    ) -> Result<(), RpcError> {
+        self.call_unit(method::panel::FLUSH_DONE, params).await
+    }
+
+    /// 发布一条归属本插件的域事件（未知或非本插件事件由宿主拒绝）。
+    pub async fn event_emit(&self, name: &str, payload: Value) -> Result<(), RpcError> {
+        let params = crate::protocol::event::EventEmitParams { name: name.into(), payload };
+        self.call_unit(crate::protocol::event::EMIT, &params).await
+    }
+
     // ---------- doc（当前文档会话；正文真源与保存链在宿主） ----------
 
     /// 打开一个文档会话：宿主读盘并建立会话，回执正文与可写性（viewer 只读为 false）。
@@ -1200,6 +1252,19 @@ impl Context {
     pub async fn pick_file(&self, params: PickFileParams) -> Result<Option<String>, RpcError> {
         let result: PickedPath = self.call_typed_unbounded(method::dialog::PICK_FILE, &params).await?;
         Ok(result.path)
+    }
+
+    /// 多选文件：返回全部选中路径（顺序同用户选择；取消或单选对话框为空）。
+    pub async fn pick_files(&self, params: PickFileParams) -> Result<Vec<String>, RpcError> {
+        let result: PickedPath =
+            self.call_typed_unbounded(method::dialog::PICK_FILE, &params).await?;
+        let mut paths = result.paths;
+        if paths.is_empty() {
+            if let Some(path) = result.path {
+                paths.push(path);
+            }
+        }
+        Ok(paths)
     }
 
     /// 选择目录：等待用户交互，不设等待上限（取消对话框会立即返回 `None`）。

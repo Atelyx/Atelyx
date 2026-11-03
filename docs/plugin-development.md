@@ -287,10 +287,12 @@ fn frame_of(size: (f32, f32), clicks: u32) -> SurfaceFrame {
 - **坐标是面本地逻辑像素、左上原点**。宿主不做坐标变换，指令集也没有裁剪原语：要滚动就自己减偏移，要裁剪就自己按矩形收敛坐标（整帧最终按面边界裁剪，不会画进相邻面板）。矩形要投影时给 `shadow` 字段，用 `shadow(offsetX, offsetY, blur, color)` 构造。
 - `fill` 与 `stroke` 至少给其一（都不给是空指令，会被拒收）；`strokeWidth` 只在有描边时生效，缺省 1。
 - **指令严格按声明顺序绘制**：文字与形状交错，投影随矩形画在它的填充与描边之下。要「被形状盖住的文字」，就把形状声明在文字之后；覆盖式浮层用 SDK 的 `overlay`（见 5.5）。
-- 字号 `size` 是绝对逻辑像素（与 `query.measure` 同口径），不是倍率；`weight` 取 `normal` / `medium` / `semiBold`，`family` 取 `ui`（缺省，跟随界面字体）或 `mono`。
+- 字号 `size` 是绝对逻辑像素（与 `query.measure` 同口径），不是倍率；`weight` 取 `normal` / `medium` / `semiBold` / `bold`，`family` 取 `ui`（缺省，跟随界面字体）或 `mono`；用户自选系统字体时给 `familyName`（该族未安装时回落 `family`）。
+- 文字的排版口径可显式声明：`layout: { lineHeight, wrap, shaping }`（相对行高倍数 / `word` 或 `wordOrGlyph` 换行 / `auto`、`basic`、`advanced` 整形成），与 `query.measure` 的同名字段同口径，量出来的行高与折行点才对得上绘制结果。
+- 线可声明虚线：`dash: [实线长, 空白长]`（像素）。
 - 文字给 `maxWidth` 才换行，`align`（`start` / `center` / `end`）只在给了 `maxWidth` 时成立——对齐区域是 `x` 起、宽 `maxWidth` 的矩形。不给 `maxWidth` 就单行原样绘制，超长部分不截断、直接溢出。
 - **颜色两轨**：`token(ColorToken::…)` 跟主题（`text` / `textSecondary` / `textMuted` / `accent` / `accentSoft` / `success` / `warning` / `danger` 及其 `…Soft` / `surface` / `surfaceMuted` / `surfaceSunken` / `hover` / `border` / `borderStrong` / `transparent`），`rgba(r, g, b, a)` 用于内容谱系色（连线分类、播放头）。
-- 图片来源四档：`ImageSource::Private { path }`（插件私有目录相对路径）、`Vault { path }`（仓库相对路径）、`Url { url, local }`（`local: true` 走本机 / 局域网策略）、`File { path }`（本机绝对路径）。原图长宽用 `ctx.vault_image_info(path)` 取。
+- 图片来源四档：`ImageSource::Private { path }`（插件私有目录相对路径）、`Vault { path, maxEdge }`（仓库相对路径；给 `maxEdge` 时宿主按 EXIF 方向摆正并等比缩到该长边以内再上传，同一路径不同上限各占一份缓存）、`Url { url, local }`（`local: true` 走本机 / 局域网策略）、`File { path }`（本机绝对路径）。原图长宽用 `ctx.vault_image_info(path)` 取。
 
 ### 5.2 命中区
 
@@ -313,6 +315,7 @@ fn frame_of(size: (f32, f32), clicks: u32) -> SurfaceFrame {
 | `key` | `key` `action` `modifiers` `text` | `key` 是 `{ "type": "named", "name": "arrowLeft" }` 或 `{ "type": "character", "text": "A" }`；`action` = `press` / `release`（长按会连发 press）；`modifiers` 是 `shift` / `control` / `alt` / `meta` 快照 |
 | `text` | `text` `composing` `caret` `candidates` | 输入法：`composing: true` 是组合串更新（空串 = 组合结束，不插入文本），`false` 是已提交文本；`candidates` 是候选窗锚点 |
 | `focus` | `focused` | 指针在面内按下即取焦，按到面外即失焦 |
+| `outside` | `x` `y` | 按在浮层外（本帧声明了 `capture: all` 的浮层）：宿主已收起浮层，这次按下不再送本面 |
 | `resize` | `width` `height` | 面的实际分配尺寸变化时发一次，按它重排 |
 
 三种声明决定你收什么：
@@ -331,13 +334,17 @@ fn frame_of(size: (f32, f32), clicks: u32) -> SurfaceFrame {
 use atelyx_plugin_sdk::protocol::method::MeasureItem;
 
 let items = vec![
-    MeasureItem { text: "标题".into(), size: 14.0, weight: None, family: None, max_width: None },
-    MeasureItem { text: "说明文字".into(), size: 12.0, weight: None, family: None, max_width: Some(240.0) },
+    MeasureItem { text: "标题".into(), size: 14.0, weight: None, family: None, family_name: None,
+        max_width: None, layout: None, segments: false },
+    MeasureItem { text: "说明文字".into(), size: 12.0, weight: None, family: None, family_name: None,
+        max_width: Some(240.0), layout: None, segments: true },
 ];
-let sizes = ctx.measure_batch(items).await?.sizes;   // 顺序与入参一一对应：width / height / lines
+let sizes = ctx.measure_batch(items).await?.sizes;   // 顺序与入参一一对应：width / height / lines / segments
 ```
 
 - 单批最多 **512** 条；给 `max_width` 就按该宽度换行量算并回行数，不给按单行量。一屏文字攒成一批量完，别一条一个往返。
+- `layout` 与绘制指令的 `layout` 同口径（行高倍数 / 换行 / 整形）；`segments: true` 时结果带 `segments`（逐行文本与实测宽），逐行排版的调用方（表格正文、代码块）靠它拿行段与行高。
+- `ctx.query_fonts()` 取系统已安装字体族清单（族名排序；单元格字体选择这类界面用）。
 - 结果按「文本 + 字号 + 字重 + 字体族 + 可用宽度」缓存，同一段字反复要用的（行高、列宽、省略位置）自己存住，别在帧回调里每帧量。
 - `ctx.query_theme()` 取宿主主题：`colors`（各 token 的 `#rrggbb`）、`fontSizes`（`micro` / `caption` / `ui` / `body` / `h2` / `h1`）、`radii`（`xs` / `sm` / `md`）。主题变了没有通知通道，面重新挂载时重取。
 
@@ -501,6 +508,26 @@ ctx.begin_window_drag("main").await?;   // 宿主接管拖动手势
 
 面板、表格视图与设置页这三个面，宿主默认把帧铺满内容区（贴边）；接管面与插件窗口同样贴边，且不受 `padding` 影响。需要留白时在注册这三个面的贡献时给 `padding`：数字 = 四边等距，也可按轴 `{ "horizontal": 16, "vertical": 8 }` 或按边 `{ "top": 4, "right": 0, "bottom": 4, "left": 0 }` 声明，缺省 / `0` 即贴边。
 
+### 5.8 浮层（可越出面矩形）
+
+帧里可再带一份浮层：`frame.popup = SurfacePopup { rect, capture, commands, hits, ime }`。宿主把它画在本面之上并按窗口裁剪——`rect`、`commands`、`hits`、`ime` 都用**面本地坐标**（与主帧同一坐标系），`rect` 可以为负、可以大于面尺寸（例如盖住面板顶部的头部行）。`capture` 取 `inside`（只有落在浮层矩形内的按下交给浮层）或 `all`（浮层展开期间由宿主处理其覆盖区外的按下：落在覆盖面板头部时吞掉并向插件回发 `outside`；面内其余点击仍按面本地坐标回发，由插件自行判定收起）。浮层与主帧同寿命：本帧带即展开，下一帧不带即收起。浮层内需要输入时 `hits` 优先于主帧命中、`ime` 优先于主帧候选窗锚点，两者都用**面本地坐标**；浮层自己排布输入控件时按这两个矩形的实际位置声明。
+
+### 5.9 面板头部（宿主渲染的那一行工具条）
+
+面板顶部那一行由宿主渲染，插件只声明状态：`panel.header { target, header }`，`header` 缺省 = 收起。`PanelHeaderState` 字段：
+
+| 字段 | 说明 |
+| --- | --- |
+| `status` | 左侧状态胶囊（文案 + `tone`：`normal` / `pending` / `danger`） |
+| `error` | 红色错误文本（过长由宿主截断） |
+| `pills` | 右侧胶囊列表（文案 + `#rrggbb` 身份色，协作者这类） |
+| `texts` | 右侧依次排列的文本（缩放百分比 / 行列统计） |
+| `items` | 「⋯」菜单项（`id` + 文案），点击经 `panel:header.action { target, item }` 回发 |
+| `viewSlot` | 显示「视图」下拉时给出贡献槽（`tableView`），宿主按注册表列出可切换视图 |
+| `dirty` | 本面板有未落盘改动（在途编辑草稿也算）：宿主的脏拦截会先要求插件落盘再放行动作 |
+
+落盘握手：宿主要求立即保存时发 `panel:flush { target, token }`，插件保存完用 `panel.flushDone { token, ok, error }` 按令牌回执；成功宿主清脏并放行挂起的动作，失败保留脏并提示。
+
 ## 6. 能力面
 
 `plugin.json` 的 `permissions` 是**公示与审计**口径，不是开关：调用本身不按声明拦截，未声明的调用照常执行，但会被记为「未声明」——插件详情页的「能力调用记录」里能看见，首次出现还会给用户弹一条提示。所以声明要写全：漏写不会让功能坏掉，但会让用户看到一条不该出现的记录。
@@ -510,22 +537,22 @@ ctx.begin_window_drag("main").await?;   // 宿主接管拖动手势
 | 权限 | 边界与约束 |
 | --- | --- |
 | `state` | 按插件隔离的自持 JSON，落 `<插件目录>/data/state.json`；损坏时宿主先备份原文再降级 |
-| `fs` | `private_dir()` 给私有数据目录；其余接受**任意绝对路径**，父目录自动创建 |
+| `fs` | `private_dir()` 给私有数据目录，`downloads_dir()` 给系统下载目录；其余接受**任意绝对路径**，父目录自动创建 |
 | `vault` | 路径相对当前仓库根，不能越出仓库；隐藏段可访问（插件自管附件可放 `.atelyx/temp/`），本地仓库与协作空间的 `vault_list` / `vault_exists` 同口径保留隐藏项（原子写残留 `.tmp` 除外）；**正被编辑器打开的文件拒写**。文本与二进制两条通道，二进制单次上限 32 MiB；更大的文件先落到插件私有目录再用 `vault_import_file` 让宿主按路径收进仓库（字节不进 RPC，源文件须在私有目录内，复制语义，见 §8.9）。`vault_image_info` 只解文件头给出图片固有像素尺寸（png / jpeg / gif / bmp / webp），不送回文件内容；`vault_tags()` 取宿主缓存的标签词表快照（按出现次数降序、最多 1000 条，属性标签值候选这类界面用；刚写入的新标签要等宿主下次重建词表才出现）；`vault_backlinks(path)` 取引用该文档的其它文档（wiki 链接索引，本地按增量索引、协作空间走服务端端点）；`vault_files()` 一次取全仓库可检索文件（树序，带行图标键与能否在面板内打开），按名检索 / 文件清单类界面用它，过滤与排序在插件做。结构变更用 `vault_rename(from, to)` / `vault_remove(path)`：文件或文件夹（递归），`to` 不可已存在、文件夹不可移入自身、仓库根不可删；改名会同步 `.md` 内部链接与画布节点引用。**路径正被笔记 / 表格 / 画布 / 插件文档打开，或被当前画布引用时拒收**——这些持有者仍按旧路径工作，放行后写回会产生幽灵文件，先关闭对应面再操作 |
 | `editor` | 当前文档的选区读写：`editor_selection()` 取文档路径、选区字节区间与选中文本（阅读态 / 未打开文档回空选区），`editor_replace_selection(text)` 替换选区（空串 = 删除，走文档同一套保存链）；`editor_open_file(path)` 让宿主按扩展名路由打开文件（布局里没有对应视图时新增并激活），`editor_open_file_quiet(path)` 只打开文件、不动布局（列表 / 跳板类入口用）；`open_files()` 取当前打开的文件（仓库相对路径，按打开顺序），候选列表这类「打开中的优先」的界面用它置顶；`editor_prefs()` 取宽松换行 / 页面内标题 / 正文宽度，变更经 `editor:prefs.changed` 下发 |
 | `doc` | 文档正文读写（宿主持真源与保存链）：`doc_open(path)` 载入并建立会话（换篇前要求旧篇无未落盘输入；同篇重开直接回内存正文，不读盘覆盖未落盘输入），`doc_edit(path, text)` 提交整篇（宿主与协作远端三方合并，合并结果经 `doc:changed` 回填），`doc_save(path)` 请求保存，`doc_close(path)` 关闭会话，`doc_awareness(path, anchor, head)` 上报选区，`doc_rename(path, name)` 改主名（同目录、保留扩展名；要求无未落盘修改）。订阅 `doc:changed` 收正文 / 脏标记 / 保存错误，订阅 `doc:presence` 收远端协作者光标区间；路径必须是当前会话那一篇 |
-| `table` | 读写当前打开的表格。真源在宿主，写入与用户编辑同一出口（合并落盘 + 协作补丁）；**禁止**用 `fs` 旁路读写 `.atb`。快照含稳定表格 id、列宽、行内单元格样式、用户当前选区与其他协作者选区（显示名 + 身份色）；向图片字段写图片用 `table_set_cell_image`（图片先经 `vault_write_binary` 落仓库，再传仓库相对路径） |
+| `table` | 读写当前打开的表格：由预置表格插件提供（它持有模型与保存链），其它插件（第三方表格视图）经这些方法读快照、写改动，写入与用户编辑同一出口（同撤销栈、同保存链、同广播）；**禁止**用 `fs` 旁路读写 `.atb`。快照含稳定表格 id、列宽、行内单元格样式、用户当前选区与其他协作者选区（显示名 + 身份色）；向图片字段写图片用 `table_set_cell_image`（图片先经 `vault_write_binary` 落仓库，再传仓库相对路径） |
 | `notification` | 应用内通知条 |
 | `shortcuts` | 系统级全局快捷键（如 `Shift+Alt+E`）；被占用时注册返回可读错误，停用自动注销；同一组键重复注册幂等，触发上报的是最后一次注册的写法。`query_shortcut` 可事前问某键位是否被占用（`owner` 为占用方插件 id；被系统 / 其他应用占用时为缺省） |
 | `clipboard` | 文本读写、图片读取（PNG + 尺寸，由宿主读系统剪贴板）与图片写入（`clipboard_write_image(&png)`，PNG 载荷单次 32 MiB，解码后的像素量再挡一次；失败返回可读错误） |
-| `dialog` | 系统对话框，等用户交互不设上限；取消返回 `None` |
+| `dialog` | 系统对话框，等用户交互不设上限；取消返回 `None`；打开对话框可声明多选（结果按选择顺序给全） |
 | `http` | 便利层。`http.request` 的目标地址、方法、大小、超时全由插件自负，宿主不设限，响应体以 base64 返回；大文件请插件进程自己直连。`http.stream.open` 由宿主建连、按块下发原始字节（base64），地址按供应商口径校验（公网目标拒内网，本机 / 局域网服务放行），空闲超时取 `timeout_ms`（缺省 60 秒），结束经 `on_http_stream_end` 的 `cancelled` 区分主动取消与自然结束 |
 | `process` | 托管子进程：输出与退出经 `host:process.event` 转发；停用 / 崩溃 / 卸载时连同子孙进程一起结束 |
 | `window` | 见 §8.2 |
 | `ai` | 见 §8.4 |
 | `tray` | 见 §8.6 |
 | `collab` | 见 §8.7 |
-| `space` | 房间事实：`space_room()` 取容器种类 / 连接态 / 本端身份 / 在线设备（含各端打开的文件与行图标），`space_members()` 取成员名册快照（列表 / 加载中 / 错误，缓存为空时宿主顺带拉一次）；`open_space_menu()` / `open_space_settings()` 让宿主弹「协作空间」菜单与「协作设置」页。插件不连服务端；变化经 `space:peers.changed` / `space:members.changed` 到达，收到后重取对应快照 |
+| `space` | 房间事实：`space_room()` 取容器种类 / 连接态 / 本端身份 / 在线设备（含各端打开的文件与行图标），`space_members()` 取成员名册快照（列表 / 加载中 / 错误，缓存为空时宿主顺带拉一次）；`open_space_menu()` / `open_space_settings()` 让宿主弹「协作空间」菜单与「协作设置」页；`space.file.patch` 提交一次空间文本文件的补丁保存（基线 + 冻结快照，宿主按 `kind` 交服务端仲裁并回最终路径），远端改动经 `space:file.patch` 事件送达。插件不连服务端；变化经 `space:peers.changed` / `space:members.changed` 到达，收到后重取对应快照 |
 
 `vault` 的读写**必须**经能力面：直接改盘会绕过写盘队列与协作通道，属于内容丢失级缺陷。
 
@@ -854,7 +881,7 @@ Linux 上宿主会为入口补可执行位（zip 不保留权限位也不影响�
 
 ## 12. 兼容性
 
-- `apiVersion` / `abiVersion` 都是硬闸门：宿主只接受完全相等的版本，版本不符的插件响亮拒绝，不做兼容推断。破坏性变更是否递增版本号以宿主 1.0.0 为界——之前不递增（握手 / 加载仍要求严格相等，插件随宿主更新重建即对齐），之后必须递增。
+- `apiVersion` / `abiVersion` 都是硬闸门：宿主只接受完全相等的版本，版本不符的插件响亮拒绝，不做兼容推断。1.0.0 之前两者都保持 1，ABI 结构变化直接破坏（不升号、不提供旧二进制兼容）；宿主更新后所有动态库插件必须重建。
 - 绘制指令、输入形态、贡献槽位、服务方法名都是封闭枚举 / 受限形状，扩容随协议升版；未知取值会被拒绝而不是被忽略。
 - 宿主正式发布 1.0.0 之前不承诺向后兼容：协议形状直接改，插件随宿主重建即对齐（`apiVersion` 仍要求严格相等）。
 - SDK 的 `PluginHandler` 新增通知回调都带缺省实现，不重写即忽略；`frame_ui` 的控件与容器新增不影响既有调用。

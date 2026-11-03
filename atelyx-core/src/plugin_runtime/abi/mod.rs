@@ -489,6 +489,10 @@ impl AbiInputBuf {
                 buf.set_hit(hit.as_deref());
             }
             FrameInput::PointerLeave => buf.input.kind = abi::INPUT_POINTER_LEAVE,
+            FrameInput::Outside { x, y } => {
+                buf.input.kind = abi::INPUT_OUTSIDE;
+                buf.set_point(*x, *y);
+            }
             FrameInput::DoubleClick { x, y, button, hit } => {
                 buf.input.kind = abi::INPUT_DOUBLE_CLICK;
                 buf.input.pressed = 1;
@@ -496,11 +500,12 @@ impl AbiInputBuf {
                 buf.input.button = button_code(*button);
                 buf.set_hit(hit.as_deref());
             }
-            FrameInput::Wheel { x, y, delta_x, delta_y, hit } => {
+            FrameInput::Wheel { x, y, delta_x, delta_y, modifiers, hit } => {
                 buf.input.kind = abi::INPUT_WHEEL;
                 buf.set_point(*x, *y);
                 buf.input.delta_x = *delta_x;
                 buf.input.delta_y = *delta_y;
+                buf.input.modifiers = modifier_bits(*modifiers);
                 buf.set_hit(hit.as_deref());
             }
             FrameInput::Key { key, action, modifiers, text } => {

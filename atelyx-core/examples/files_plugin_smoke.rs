@@ -533,11 +533,7 @@ fn serve(runtime: Arc<PluginRuntime>, state: HostState) {
                     let sizes: Vec<MeasureTextResult> = params
                         .items
                         .iter()
-                        .map(|item| MeasureTextResult {
-                            width: item.text.chars().count() as f32 * item.size * 0.55,
-                            height: item.size * 1.2,
-                            lines: 1,
-                        })
+                        .map(|item| MeasureTextResult { width: item.text.chars().count() as f32 * item.size * 0.55, height: item.size * 1.2, lines: 1, segments: None })
                         .collect();
                     reply(&runtime, request_id, json!({ "sizes": sizes }));
                 }

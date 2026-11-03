@@ -3,9 +3,20 @@
 
 use serde::{Deserialize, Serialize};
 
-/// 方法常量：插件订阅请求与宿主广播通知。
+/// 方法常量：插件订阅请求、插件发布域事件与宿主广播通知。
 pub const SUBSCRIBE: &str = "event.subscribe";
+/// 插件发布一条它自己拥有的域事件（例如表格插件发布 `table:changed`）：宿主校验事件名与
+/// 归属后按普通广播发给订阅方。
+pub const EMIT: &str = "event.emit";
 pub const HOST_PUBLISH: &str = "host:event";
+
+/// [`EMIT`] 的 params：事件名 + 按该事件名定型的载荷。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EventEmitParams {
+    pub name: String,
+    pub payload: serde_json::Value,
+}
 
 /// 事件名常量。订阅不存在的名字宿主回 `RpcError::FAILED`。
 pub mod name {
@@ -65,6 +76,17 @@ pub mod name {
     /// 当前打开的文件集合变化（打开 / 切换 / 关闭笔记 / 表格 / 画布）。payload 为空对象；
     /// 订阅方重取 `editor.openFiles` 拿当前集合（笔记 / 表格 / 画布各一个，至多 3 个）。
     pub const EDITOR_OPEN_CHANGED: &str = "editor:open.changed";
+    /// 历史回滚把某个版本交回当前表格：payload 见 [`crate::method::TableContentParams`]
+    /// （订阅方按自己打开的路径匹配；`content` 是 `.atb` 全文）。
+    pub const TABLE_RESTORE: &str = "table:restore";
+    /// 别的成员改动了空间里的表格：payload 见 [`crate::method::SpaceFilePatchPayload`]；
+    /// 订阅方按 `path` 与自己打开的文件匹配后合入。
+    pub const SPACE_FILE_PATCH: &str = "space:file.patch";
+    /// 宿主请面板插件立即落盘：payload 见 [`crate::method::PanelFlushParams`]，
+    /// 结果经 `panel.flushDone` 按 `token` 回执。
+    pub const PANEL_FLUSH: &str = "panel:flush";
+    /// 用户点了面板头部声明的菜单项：payload 见 [`crate::method::PanelHeaderActionParams`]。
+    pub const PANEL_HEADER_ACTION: &str = "panel:header.action";
 }
 
 /// [`name::DOC_PRESENCE`] 的 payload：当前文档路径 + 远端协作者光标（不含本端）。
@@ -113,6 +135,10 @@ pub fn is_known(name: &str) -> bool {
             | name::HISTORY_CHANGED
             | name::DRAG_STATE
             | name::EDITOR_OPEN_CHANGED
+            | name::TABLE_RESTORE
+            | name::SPACE_FILE_PATCH
+            | name::PANEL_FLUSH
+            | name::PANEL_HEADER_ACTION
     )
 }
 

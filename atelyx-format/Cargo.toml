@@ -11,7 +11,9 @@ license = "Apache-2.0"
 regex = "1"
 # Markdown 块与行内规格的序列化（对拍快照、插件侧传输）
 serde = { version = "1", features = ["derive"] }
-# frontmatter 属性值的 JSON 快照形态（属性面板与服务端配置互转）
+# frontmatter 属性值的 JSON 快照形态（属性面板与服务端配置互转）；表格单元格值同用 JSON
 serde_json = "1"
+# 表格图片附件的唯一文件名（导入即换名，删除后重导不覆盖旧文件）
+nanoid = "0.4"
 # YAML 解析（事件级 API 供自研 1.1 解析表使用，标量样式可区分引号形态）
 yaml-rust2 = "0.10"

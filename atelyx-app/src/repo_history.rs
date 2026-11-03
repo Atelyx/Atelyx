@@ -159,8 +159,54 @@ pub(crate) fn container_ready(app: &App) -> bool {
     }
 }
 
-/// 拉取仓库历史聚合（本地 spawn_blocking 扫侧文件元数据 / 空间走服务端聚合端点）。
-/// 回执带容器世代与聚合世代：两者任一变了，这一份就是过期扫描，不写回缓存。
+/// 域插件落盘后记一版（本地侧文件）。空间模式的历史由空间补丁服务在保存链内记，
+/// 这里直接跳过；失败经 `HistoryRecorded` 提示并刷新弹层。
+pub fn record_from_plugin(
+    app: &mut App,
+    params: atelyx_core::plugin_runtime::HistoryRecordParams,
+) -> Task<Message> {
+    let kind = match params.kind.as_str() {
+        "note" => HistoryKind::Note,
+        "canvas" => HistoryKind::Canvas,
+        "table" => HistoryKind::Table,
+        other => {
+            app.notify(NoticeLevel::Error, format!("未知的历史类型：{other}"));
+            return Task::none();
+        }
+    };
+    if matches!(app.repo_kind, RepoKind::Space(_)) {
+        return Task::none();
+    }
+    let action = match params.action.as_deref() {
+        Some("restore") => HistoryAction::Restore,
+        _ => HistoryAction::Edit,
+    };
+    let gen = app.epoch();
+    let state = app.vault.clone();
+    let author = crate::history_author(app);
+    let file = params.file;
+    let opts = atelyx_core::history::RecordOpts {
+        content: params.content,
+        action,
+        author,
+        coalesce_edit_ms: params.coalesce_ms,
+        max_versions: 0,
+        note: params.note,
+    };
+    Task::perform(
+        async move {
+            tokio::task::spawn_blocking(move || {
+                let (root, _, _) = state.session_snapshot()?;
+                atelyx_core::history::record_version(&root, kind, &file, &opts)
+            })
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|r| r)
+        },
+        move |result| Message::HistoryRecorded(gen, result.err()),
+    )
+}
+
 pub fn load(app: &mut App) -> Task<Message> {
     app.repo_history_loading = true;
     let epoch = app.epoch();

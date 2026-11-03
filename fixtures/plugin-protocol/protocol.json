@@ -1404,6 +1404,10 @@
           "hover": "#23272e",
           "border": "#2e333a",
           "borderStrong": "#383d44",
+          "background": "#131418",
+          "borderSubtle": "#252a31",
+          "selection": "#e0a94e40",
+          "scrim": "#00000099",
           "transparent": "#00000000"
         },
         "fontSizes": {

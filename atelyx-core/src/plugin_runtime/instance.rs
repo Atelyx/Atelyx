@@ -811,7 +811,7 @@ impl Instance {
         };
         let instance = self.clone();
         std::thread::spawn(move || match rx.recv() {
-            Ok(Ok(path)) => match encode_picked(path) {
+            Ok(Ok(paths)) => match encode_picked(paths) {
                 Ok(value) => instance.respond(id, Some(value), None),
                 Err(error) => instance.respond(id, None, Some(error)),
             },
@@ -821,7 +821,8 @@ impl Instance {
         });
     }
 
-    /// 接管与插件窗口请求：登记后在独立线程上等壳回填结果（窗口创建与接管应用由壳执行）。
+    /// 接管、窗口与面板头部 / 历史记版这类界面请求：登记后在独立线程上等壳回执
+    /// （窗口与界面状态的落地由壳执行，回执只表示已受理）。
     fn handle_ui_request(
         self: &Arc<Self>,
         token: u64,
@@ -889,6 +890,32 @@ impl Instance {
                 method::window::BEGIN_DRAG => {
                     let p: method::WindowDragParams = parse(params).map_err(|e| e.to_string())?;
                     runtime.begin_window_drag(&self.id, &p.surface_id)
+                }
+                method::history::RECORD => {
+                    let p: method::HistoryRecordParams =
+                        parse(params).map_err(|e| e.to_string())?;
+                    runtime.open_ui_call(HostRequest::HistoryRecord {
+                        plugin_id: self.id.clone(),
+                        request_id: 0,
+                        params: p,
+                    })
+                }
+                method::panel::HEADER => {
+                    let p: method::PanelHeaderParams = parse(params).map_err(|e| e.to_string())?;
+                    runtime.open_ui_call(HostRequest::PanelHeader {
+                        plugin_id: self.id.clone(),
+                        request_id: 0,
+                        params: p,
+                    })
+                }
+                method::panel::FLUSH_DONE => {
+                    let p: method::PanelFlushDoneParams =
+                        parse(params).map_err(|e| e.to_string())?;
+                    runtime.open_ui_call(HostRequest::PanelFlushDone {
+                        plugin_id: self.id.clone(),
+                        request_id: 0,
+                        params: p,
+                    })
                 }
                 _ => Err("未知界面服务请求".to_string()),
             }
@@ -992,6 +1019,10 @@ impl Instance {
                         bytes,
                     }
                 }
+                method::fs::DOWNLOADS_DIR => HostRequest::DownloadsDir {
+                    plugin_id: self.id.clone(),
+                    request_id: 0,
+                },
                 method::vault::READ_TEXT => {
                     let p: method::PathParams = parse(params).map_err(|e| e.to_string())?;
                     HostRequest::VaultReadText {
@@ -1176,49 +1207,6 @@ impl Instance {
                         params: p,
                     }
                 }
-                method::table::SNAPSHOT => HostRequest::TableSnapshot {
-                    plugin_id: self.id.clone(),
-                    request_id: 0,
-                },
-                method::table::UPDATE_CELL => {
-                    let p: method::TableUpdateCellParams = parse(params).map_err(|e| e.to_string())?;
-                    HostRequest::TableUpdateCell {
-                        plugin_id: self.id.clone(),
-                        request_id: 0,
-                        row_id: p.row_id,
-                        field_id: p.field_id,
-                        value: p.value,
-                    }
-                }
-                method::table::ADD_ROW => HostRequest::TableAddRow {
-                    plugin_id: self.id.clone(),
-                    request_id: 0,
-                },
-                method::table::REMOVE_ROW => {
-                    let p: method::TableRowIdParams = parse(params).map_err(|e| e.to_string())?;
-                    HostRequest::TableRemoveRow {
-                        plugin_id: self.id.clone(),
-                        request_id: 0,
-                        row_id: p.row_id,
-                    }
-                }
-                method::table::SELECT_ROW => {
-                    let p: method::TableRowIdParams = parse(params).map_err(|e| e.to_string())?;
-                    HostRequest::TableSelectRow {
-                        plugin_id: self.id.clone(),
-                        request_id: 0,
-                        row_id: p.row_id,
-                    }
-                }
-                method::table::SET_CELL_IMAGE => {
-                    let p: method::TableSetCellImageParams =
-                        parse(params).map_err(|e| e.to_string())?;
-                    HostRequest::TableSetCellImage {
-                        plugin_id: self.id.clone(),
-                        request_id: 0,
-                        params: p,
-                    }
-                }
                 method::ai::CHAT_RENAME => {
                     let p: method::ChatRenameParams = parse(params).map_err(|e| e.to_string())?;
                     HostRequest::ChatRename {
@@ -1260,6 +1248,10 @@ impl Instance {
                         params: p,
                     }
                 }
+                method::query::FONTS => HostRequest::QueryFonts {
+                    plugin_id: self.id.clone(),
+                    request_id: 0,
+                },
                 method::query::THEME => HostRequest::QueryTheme {
                     plugin_id: self.id.clone(),
                     request_id: 0,
@@ -1407,6 +1399,15 @@ impl Instance {
                     plugin_id: self.id.clone(),
                     request_id: 0,
                 },
+                method::space::FILE_PATCH => {
+                    let p: method::SpaceFilePatchParams =
+                        parse(params).map_err(|e| e.to_string())?;
+                    HostRequest::SpaceFilePatch {
+                        plugin_id: self.id.clone(),
+                        request_id: 0,
+                        params: p,
+                    }
+                }
                 method::shell::PICK_COLOR => {
                     let p: method::PickColorParams = parse(params).map_err(|e| e.to_string())?;
                     HostRequest::PickColor {
@@ -1513,6 +1514,7 @@ impl Instance {
         match name {
             handshake::INITIALIZE => self.on_initialize(params),
             event::SUBSCRIBE => self.on_subscribe(params),
+            event::EMIT => self.on_emit(params),
             method::view::REGISTER => self.on_register(token, params),
             method::view::UNREGISTER => self.on_unregister(token, params),
             method::state::READ => {
@@ -1704,7 +1706,7 @@ impl Instance {
                 Ok(json!({}))
             }
             // 壳侧服务方法不在这里执行（`handle_request` 已分流到异步应答）；走到这里说明分流
-            // 名单与分派名单失配，按可读失败收场而不是当成未知方法
+            // 名单与分派页失配（漏写分派臂）时以可读失败收场，而不是当成未知方法
             other if is_shell_method(other) || is_ui_method(other) => {
                 Err(RpcError::failed("宿主服务请求须走异步应答路径"))
             }
@@ -1769,6 +1771,19 @@ impl Instance {
             }
         }
         Ok(json!({ "subscribed": true }))
+    }
+
+    /// 插件发布自己域内的事件（`event.emit`）：只允许发布**归属本插件**的域事件，
+    /// 再按普通广播投给订阅方（含发布者自己）。
+    /// 宿主→插件事件（落盘请求、历史回滚、远端补丁等）不在可发布之列：放行会让人伪造宿主
+    /// 指令覆盖用户内容。
+    fn on_emit(&self, params: &Value) -> Result<Value, RpcError> {
+        let p: event::EventEmitParams = parse(params)?;
+        if !emittable_by(&self.id, &p.name) {
+            return Err(RpcError::failed(format!("不能发布该事件：{}", p.name)));
+        }
+        self.runtime_upgrade()?.broadcast_event(&p.name, &p.payload);
+        Ok(json!({}))
     }
 
     /// 校验并规范化导入源：必须是插件私有目录（`<插件目录>/data`）内的既有普通文件。
@@ -2478,7 +2493,7 @@ struct SpawnSlot {
     pending: Vec<HostEvent>,
 }
 
-/// 走壳侧异步应答的方法（对话编排 / 剪贴板 / 仓库读写 / 表格 / 托盘 / 协作 / 滚动 / 文字量算）。
+/// 走壳侧异步应答的方法（对话编排 / 剪贴板 / 仓库读写 / 托盘 / 协作 / 滚动 / 文字量算）。
 ///
 /// 帧是否按 `size` 排版：未声明尺寸的帧不参与判定（老插件按「拿到什么画什么」处理）。
 fn laid_out_at(frame: &frame::SurfaceFrame, size: (f32, f32)) -> bool {
@@ -2528,12 +2543,6 @@ fn is_shell_method(method_name: &str) -> bool {
             | method::vault_ui::REMOVE_CONTAINER
             | method::vault_ui::LIST_DIRS
             | method::vault_ui::REFRESH_TREE
-            | method::table::SNAPSHOT
-            | method::table::UPDATE_CELL
-            | method::table::ADD_ROW
-            | method::table::REMOVE_ROW
-            | method::table::SELECT_ROW
-            | method::table::SET_CELL_IMAGE
             | method::tray::SET_ITEMS
             | method::collab::PEERS
             | method::collab::SEND
@@ -2541,6 +2550,7 @@ fn is_shell_method(method_name: &str) -> bool {
             | method::collab::META_PATCH
             | method::query::MEASURE
             | method::query::THEME
+            | method::query::FONTS
             | method::editor::SELECTION
             | method::editor::OPEN_FILES
             | method::editor::REPLACE_SELECTION
@@ -2562,6 +2572,8 @@ fn is_shell_method(method_name: &str) -> bool {
             | method::space::MEMBERS
             | method::space::OPEN_MENU
             | method::space::OPEN_SETTINGS
+            | method::space::FILE_PATCH
+            | method::fs::DOWNLOADS_DIR
             | method::shell::PICK_COLOR
             | method::shell::REVEAL
             | method::shell::ABSOLUTE_PATH
@@ -2610,7 +2622,8 @@ fn tool_list(runtime: &Arc<PluginRuntime>, params: &method::ToolListParams) -> m
     method::ToolListResult { tools }
 }
 
-/// 走壳侧界面服务的方法（接管 / 插件窗口）：落地依赖 OS 窗口副作用，只由壳执行。
+/// 走壳侧界面应答的方法（接管 / 窗口 / 面板头部 / 历史记版）：界面状态与 OS 窗口副作用只由壳落地，
+/// 回执只表示已受理。
 fn is_ui_method(method_name: &str) -> bool {
     matches!(
         method_name,
@@ -2627,6 +2640,9 @@ fn is_ui_method(method_name: &str) -> bool {
             | method::drag::END
             | method::menu::OPEN
             | method::shell::PICK_VAULT
+            | method::history::RECORD
+            | method::panel::HEADER
+            | method::panel::FLUSH_DONE
     )
 }
 
@@ -2641,6 +2657,7 @@ fn dialog_request(method_name: &str, params: &Value) -> Result<DialogRequest, Rp
                 save: p.save.unwrap_or(false),
                 default_path: p.default_path,
                 filters: p.filters,
+                multiple: p.multiple,
             })
         }
         method::dialog::PICK_DIRECTORY => {
@@ -2651,15 +2668,18 @@ fn dialog_request(method_name: &str, params: &Value) -> Result<DialogRequest, Rp
                 save: false,
                 default_path: None,
                 filters: Vec::new(),
+                multiple: false,
             })
         }
         _ => Err(RpcError::failed(format!("不是对话框方法：{method_name}"))),
     }
 }
 
-/// 对话框结果 → 应答（用户取消时 `path` 缺省，与 [`method::PickedPath`] 的序列化口径一致）。
-fn encode_picked(path: Option<String>) -> Result<Value, RpcError> {
-    serde_json::to_value(method::PickedPath { path })
+/// 对话框结果 → 应答：`paths` 为全部选中项，`path` 取第一个（用户取消时两者都缺省）。
+fn encode_picked(paths: Option<Vec<String>>) -> Result<Value, RpcError> {
+    let paths = paths.unwrap_or_default();
+    let path = paths.first().cloned();
+    serde_json::to_value(method::PickedPath { path, paths })
         .map_err(|e| RpcError::failed(format!("应答序列化失败：{e}")))
 }
 
@@ -3040,7 +3060,7 @@ mod tests {
     /// 各能力面未声明也执行：审计留痕，且不再以 `PERMISSION_DENIED` 收场。
     #[test]
     fn undeclared_calls_of_each_face_are_audited_not_denied() {
-        let cases: [(Permission, &str, Value); 9] = [
+        let cases: [(Permission, &str, Value); 7] = [
             // 入参一律取「必然执行失败但不会真的落盘 / 出网 / 弹框」的形态
             (Permission::Process, method::process::SPAWN, json!({ "program": "atelyx-no-such-program" })),
             (Permission::Fs, method::fs::LIST, json!({ "path": "atelyx-no-such-dir" })),
@@ -3048,8 +3068,6 @@ mod tests {
             (Permission::Shortcuts, method::shortcut::QUERY, json!({ "accelerator": "Ctrl+F9" })),
             (Permission::Http, method::http::REQUEST, json!({ "method": "GET", "url": "ftp://example.com" })),
             (Permission::Dialog, method::dialog::PICK_DIRECTORY, Value::Null),
-            (Permission::Table, method::table::SNAPSHOT, Value::Null),
-            (Permission::Table, method::table::SET_CELL_IMAGE, json!({ "rowId": "r1", "fieldId": "f1", "images": [] })),
             (Permission::Ai, method::ai::CHAT_RENAME, json!({ "sessionId": "s1", "title": "T" })),
         ];
         for (permission, method_name, params) in cases {
@@ -3420,24 +3438,6 @@ mod tests {
         }
     }
 
-    /// 归属插件停用后，直接调它的方法（不经 `service.call`）也不能落到本地实现。
-    #[test]
-    fn a_disabled_owner_blocks_direct_service_methods() {
-        let tmp = TempDir::new("instance-service-blocked");
-        let runtime = PluginRuntime::new(tmp.to_path_buf());
-        runtime.set_builtin_owner_enabled("atelyx.tables", false);
-        assert_eq!(runtime.forward_to("table", "snapshot"), Forward::Unavailable);
-        assert!(runtime
-            .service_target(service::CallParams {
-                service: "table".into(),
-                method: "snapshot".into(),
-                params: Value::Null,
-            })
-            .is_err_and(|error| error.message.contains(service::error::UNKNOWN_SERVICE)));
-        runtime.set_builtin_owner_enabled("atelyx.tables", true);
-        assert_eq!(runtime.forward_to("table", "snapshot"), Forward::Local, "重新启用即回到内置分派");
-    }
-
     /// 快捷键占用查询：无 OS 层时以可读失败收场（与注册同一原因），非法加速键亦拒。
     #[test]
     fn shortcut_query_reports_platform_unavailability() {
@@ -3501,6 +3501,49 @@ mod tests {
             assert!(is_ui_method(name), "{name} 必须走壳侧界面分派");
             assert!(!is_shell_method(name), "{name} 不得落进壳侧异步服务分派");
         }
+    }
+
+    /// 面板头部 / 历史记版只回已受理（界面通道），下载目录与空间补丁带值回执（服务通道）；
+    /// 名单与分派必须一致，否则插件那次调用永远等不到结果。
+    #[test]
+    fn panel_history_downloads_and_patch_route_to_the_shell() {
+        for name in [
+            method::history::RECORD,
+            method::panel::HEADER,
+            method::panel::FLUSH_DONE,
+        ] {
+            assert!(is_ui_method(name), "{name} 必须走壳侧界面分派");
+            assert!(!is_shell_method(name), "{name} 不得落进壳侧异步服务分派");
+        }
+        for name in [method::fs::DOWNLOADS_DIR, method::space::FILE_PATCH] {
+            assert!(is_shell_method(name), "{name} 必须走壳侧服务分派");
+            assert!(!is_ui_method(name), "{name} 不得落进界面分派");
+        }
+    }
+
+    /// `event.emit` 只接受宿主已知的域事件名；发布成功回空对象。
+    #[test]
+    fn event_emit_broadcasts_known_names_and_rejects_unknown() {
+        let tmp = TempDir::new("instance-event-emit");
+        let runtime = PluginRuntime::new(tmp.to_path_buf());
+        let (_t, instance) = make_instance(Vec::new());
+        instance.attach_runtime(&runtime);
+        // 非归属插件：既不能发未知名字，也不能发宿主/他人域事件
+        for name in ["unknown:event", event::name::TABLE_CHANGED, event::name::DOC_CHANGED] {
+            let denied = instance
+                .dispatch(event::EMIT, &json!({ "name": name, "payload": {} }))
+                .expect_err("非归属事件应可读失败");
+            assert!(denied.message.contains("不能发布该事件"), "{}", denied.message);
+        }
+        // 归属插件：可发布自己的域事件
+        let (_t2, owner, _rx2) = make_named_instance_with_events("atelyx.tables", Vec::new());
+        owner.attach_runtime(&runtime);
+        owner
+            .dispatch(
+                event::EMIT,
+                &json!({ "name": event::name::TABLE_CHANGED, "payload": { "path": null } }),
+            )
+            .expect("归属插件应能发布自己的域事件");
     }
 
     #[test]
@@ -3836,5 +3879,15 @@ mod tests {
             );
         }
         assert_eq!(instance.default_layout().unwrap().0, "LLaMA", "拒收不得覆盖已存档布局");
+    }
+}
+
+/// 可发布事件的事件名 → 归属插件：插件只能发布自己领域的事件，宿主→插件通知不在此表。
+fn emittable_by(plugin_id: &str, name: &str) -> bool {
+    match name {
+        event::name::TABLE_CHANGED | event::name::TABLE_SELECTION_CHANGED => {
+            plugin_id == "atelyx.tables"
+        }
+        _ => false,
     }
 }
