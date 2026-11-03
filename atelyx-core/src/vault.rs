@@ -11,6 +11,11 @@ use nanoid::nanoid;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
+// 画布模型与补丁在格式库（宿主与插件共用一份语义），本模块沿用原路径重导出。
+pub use atelyx_format::canvas::{
+    apply_canvas_patch, compute_canvas_patch, CanvasFile, CanvasFileEdge, CanvasFileNode,
+    CanvasPatch, CANVAS_SCHEMA,
+};
 // 表格模型与纯运算在格式库（宿主与插件共用一份语义），本模块沿用原路径重导出。
 pub use atelyx_format::table::{
     apply_table_patch, compute_table_patch, image_ext_of, reorder_by, table_image_rel_path,
@@ -128,58 +133,6 @@ impl VaultState {
 
 // ===== .atlx 文件结构 =====
 // data 用 serde_json::Value，不耦合业务字段；rename_all = "camelCase"。
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-#[serde(rename_all = "camelCase")]
-pub struct CanvasFile {
-    #[serde(default)]
-    pub schema: String,
-    pub id: String,
-    pub title: String,
-    #[serde(default)]
-    pub nodes: Vec<CanvasFileNode>,
-    #[serde(default)]
-    pub edges: Vec<CanvasFileEdge>,
-    #[serde(default)]
-    pub created_at: i64,
-    #[serde(default)]
-    pub updated_at: i64,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct CanvasFileNode {
-    pub id: String,
-    #[serde(rename = "type")]
-    pub node_type: String,
-    pub x: f64,
-    pub y: f64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub width: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub height: Option<f64>,
-    pub data: serde_json::Value,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct CanvasFileEdge {
-    pub id: String,
-    pub source: String,
-    pub target: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_handle: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_handle: Option<String>,
-    /// false = 关联边（无消费语义）；缺省 = 数据流边。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub directed: Option<bool>,
-    /// 关联边的箭头模式（"none" | "single" | "double"，仅 directed: false 生效；缺省 = 无向）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub link_mode: Option<String>,
-    #[serde(default)]
-    pub created_at: i64,
-}
 
 /// 画布列表行（递归扫描仓库内全部 .atlx 得到，不含拓扑）。
 #[derive(Serialize)]
@@ -745,104 +698,6 @@ pub fn same_physical_file(a: &Path, b: &Path) -> bool {
     match (dunce::canonicalize(a), dunce::canonicalize(b)) {
         (Ok(x), Ok(y)) => x == y,
         _ => false,
-    }
-}
-
-/// 画布增量保存补丁（对应 `.atlx` schema）：只含变化/新增/删除的实体，
-/// 按稳定 id 合并——removed 幂等（缺 id 不报错），upsert 覆盖同 id 或追加。
-#[derive(Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct CanvasPatch {
-    /// 画布 id（防串文件守卫）。
-    pub id: String,
-    /// 标题（线形状保留：合并端按此应用标题）。文件名是唯一真源，内容保存不携带——
-    /// 改名只走重命名端点，否则陈旧标题会把文件改回旧名。
-    #[serde(default)]
-    pub title: Option<String>,
-    #[serde(default)]
-    pub upsert_nodes: Vec<CanvasFileNode>,
-    #[serde(default)]
-    pub removed_node_ids: Vec<String>,
-    #[serde(default)]
-    pub upsert_edges: Vec<CanvasFileEdge>,
-    #[serde(default)]
-    pub removed_edge_ids: Vec<String>,
-}
-
-/// 计算画布增量补丁：与落盘基线按值 diff，只含变化/新增/删除的卡与连线。
-/// 卡坐标/尺寸/data 任一变化即整卡 upsert（补丁粒度 = 整卡，与合并语义对齐）；
-/// 数组顺序无业务语义（位置在 x/y 里），不做全序重排。无任何变化返回 None（调用方跳过写盘）。
-/// title 变化随补丁携带（title 变更 = 同目录改文件名，由壳侧执行改名）。
-pub fn compute_canvas_patch(baseline: &CanvasFile, current: &CanvasFile) -> Option<CanvasPatch> {
-    let last_nodes: HashMap<&str, &CanvasFileNode> =
-        baseline.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
-    let last_edges: HashMap<&str, &CanvasFileEdge> =
-        baseline.edges.iter().map(|e| (e.id.as_str(), e)).collect();
-    let upsert_nodes: Vec<CanvasFileNode> = current
-        .nodes
-        .iter()
-        .filter(|n| last_nodes.get(n.id.as_str()).copied() != Some(*n))
-        .cloned()
-        .collect();
-    let current_node_ids: HashSet<&str> = current.nodes.iter().map(|n| n.id.as_str()).collect();
-    let removed_node_ids: Vec<String> = baseline
-        .nodes
-        .iter()
-        .filter(|n| !current_node_ids.contains(n.id.as_str()))
-        .map(|n| n.id.clone())
-        .collect();
-    let upsert_edges: Vec<CanvasFileEdge> = current
-        .edges
-        .iter()
-        .filter(|e| last_edges.get(e.id.as_str()).copied() != Some(*e))
-        .cloned()
-        .collect();
-    let current_edge_ids: HashSet<&str> = current.edges.iter().map(|e| e.id.as_str()).collect();
-    let removed_edge_ids: Vec<String> = baseline
-        .edges
-        .iter()
-        .filter(|e| !current_edge_ids.contains(e.id.as_str()))
-        .map(|e| e.id.clone())
-        .collect();
-    if upsert_nodes.is_empty()
-        && removed_node_ids.is_empty()
-        && upsert_edges.is_empty()
-        && removed_edge_ids.is_empty()
-    {
-        return None;
-    }
-    Some(CanvasPatch {
-        id: current.id.clone(),
-        // 标题随文件名，不由内容补丁携带（见字段注释）
-        title: None,
-        upsert_nodes,
-        removed_node_ids,
-        upsert_edges,
-        removed_edge_ids,
-    })
-}
-
-/// 按稳定 id 合并画布补丁到全量文件（removed 幂等；upsert 覆盖同 id 或追加）。
-/// 与磁盘真源合并（而非整文件覆写）：外部改动期间未触及的卡/连线不被在途保存冲掉。
-pub fn apply_canvas_patch(canvas: &mut CanvasFile, patch: &CanvasPatch) {
-    if let Some(title) = &patch.title {
-        canvas.title = title.clone();
-    }
-    let removed_nodes: HashSet<&String> = patch.removed_node_ids.iter().collect();
-    canvas.nodes.retain(|n| !removed_nodes.contains(&n.id));
-    for n in &patch.upsert_nodes {
-        match canvas.nodes.iter_mut().find(|x| x.id == n.id) {
-            Some(existing) => *existing = n.clone(),
-            None => canvas.nodes.push(n.clone()),
-        }
-    }
-    let removed_edges: HashSet<&String> = patch.removed_edge_ids.iter().collect();
-    canvas.edges.retain(|e| !removed_edges.contains(&e.id));
-    for e in &patch.upsert_edges {
-        match canvas.edges.iter_mut().find(|x| x.id == e.id) {
-            Some(existing) => *existing = e.clone(),
-            None => canvas.edges.push(e.clone()),
-        }
     }
 }
 
@@ -2397,10 +2252,6 @@ pub fn vault_display_name(root: &Path) -> String {
         .map(|s| s.to_string())
         .unwrap_or_default()
 }
-
-/// `.atlx` schema 版本号。
-pub const CANVAS_SCHEMA: &str = "atelyx-canvas/v1";
-
 
 // ===== 反链索引（纯内存缓存，磁盘为真相）=====
 //
