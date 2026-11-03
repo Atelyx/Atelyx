@@ -1635,18 +1635,10 @@ mod tests {
     /// 引用读取口径：文件存在但读不出文本 = 二进制占位，路径不存在 = 缺失降级。
     #[test]
     fn 引用读取区分二进制占位与缺失() {
-        let dir = std::env::temp_dir().join(format!(
-            "atelyx-canvas-ref-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = atelyx_core::scratch::TempDir::new("canvas-ref");
         // 0xff 在 UTF-8 中不是合法起始字节，read_to_string 必然失败
         std::fs::write(dir.join("bin.dat"), [0xffu8, 0xfe, 0x00, 0x01]).unwrap();
         assert!(matches!(read_ref_local(&dir, "bin.dat", RefKind::Text), RefRaw::Binary));
         assert!(matches!(read_ref_local(&dir, "missing.md", RefKind::Text), RefRaw::Missing));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

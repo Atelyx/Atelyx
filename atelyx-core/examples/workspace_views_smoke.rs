@@ -39,10 +39,9 @@ async fn main() {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("target/debug/preset-plugins"));
     // 在临时副本上跑：卸载会真删插件目录（也验证 Windows 上动态库能随实例释放）
-    let root = std::env::temp_dir().join(format!("atelyx-views-smoke-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = atelyx_core::scratch::TempDir::new("views-smoke");
     copy_tree(&source, &root).expect("复制冒烟插件目录");
-    let runtime = PluginRuntime::with_host_version(root.clone(), "0.6.5");
+    let runtime = PluginRuntime::with_host_version(root.to_path_buf(), "0.6.5");
     runtime.scan();
 
     let state = HostState::new();
@@ -145,7 +144,6 @@ async fn main() {
     println!("停用：通过");
 
     runtime.shutdown();
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// 宿主侧回执：主题 / 量算 / 最近打开清单 / 历史分组（首次失败一次）/ 打开请求记录。

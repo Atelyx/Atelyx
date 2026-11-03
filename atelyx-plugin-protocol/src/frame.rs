@@ -98,7 +98,26 @@ pub enum PopupCapture {
     All,
 }
 
-/// 面的浮层：绘制在本面之上（宿主按窗口裁剪，可越出面矩形）。
+/// 浮层的叠放层级。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PopupLayer {
+    /// 面板内：随本面图层绘制，先于相邻面板出图，可能被后绘制的面板盖住。
+    #[default]
+    Panel,
+    /// 窗口级：画在所有面板之后，可盖住任何面板的头部与相邻面板。
+    Window,
+}
+
+fn is_panel_layer(layer: &PopupLayer) -> bool {
+    *layer == PopupLayer::Panel
+}
+
+fn is_zero_order(order: &u16) -> bool {
+    *order == 0
+}
+
+/// 面的浮层：按宿主窗口裁剪，可越出面矩形。
 /// `rect` / `commands` / `hits` / `ime` 全部用**面本地坐标**（与主帧同一坐标系）。
 /// 与主帧同寿命：本帧带浮层即展开，下一帧不带即收起。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -108,6 +127,12 @@ pub struct SurfacePopup {
     pub rect: FrameRect,
     #[serde(default)]
     pub capture: PopupCapture,
+    /// 叠放层级：缺省 = 面板内。窗口级浮层不随面裁剪，宿主在所有面板之后绘制。
+    #[serde(default, skip_serializing_if = "is_panel_layer")]
+    pub layer: PopupLayer,
+    /// 窗口级浮层的叠放序：越大越靠上；同值按面 id 稳定序。面板内层不参与排序。
+    #[serde(default, skip_serializing_if = "is_zero_order")]
+    pub order: u16,
     pub commands: Vec<DrawCommand>,
     /// 浮层自己的命中区：浮层矩形内的按下先在这里命中（坐标同面本地）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -174,6 +199,26 @@ impl SurfaceFrame {
             .find(|hit| hit.id == id)
             .and_then(|hit| hit.cursor)
             .unwrap_or_default()
+    }
+}
+
+impl SurfacePopup {
+    /// 面本地坐标是否落在浮层矩形内。
+    pub fn contains(&self, x: f32, y: f32) -> bool {
+        x >= self.rect.x
+            && y >= self.rect.y
+            && x <= self.rect.x + self.rect.w
+            && y <= self.rect.y + self.rect.h
+    }
+
+    /// 浮层命中区（后声明者优先，与主帧同一口径）。
+    pub fn hit_region_at(&self, x: f32, y: f32) -> Option<&HitRegion> {
+        if !self.contains(x, y) {
+            return None;
+        }
+        self.hits.iter().rev().find(|hit| {
+            x >= hit.x && x <= hit.x + hit.w && y >= hit.y && y <= hit.y + hit.h
+        })
     }
 }
 
@@ -503,5 +548,21 @@ mod tests {
         assert_eq!(wire["candidates"]["h"], 4.0);
         let leave = FrameInput::PointerLeave;
         assert_eq!(serde_json::to_value(leave).unwrap(), serde_json::json!({ "kind": "pointerLeave" }));
+    }
+
+    #[test]
+    fn popup_without_layer_fields_stays_panel_scoped() {
+        let wire = serde_json::json!({
+            "rect": { "x": 0.0, "y": 0.0, "w": 10.0, "h": 10.0 },
+            "capture": "all",
+            "commands": []
+        });
+        let popup: SurfacePopup = serde_json::from_value(wire).unwrap();
+        assert_eq!(popup.layer, PopupLayer::Panel);
+        assert_eq!(popup.order, 0);
+
+        let out = serde_json::to_value(&popup).unwrap();
+        assert!(out.get("layer").is_none(), "默认层级不写回载荷");
+        assert!(out.get("order").is_none(), "默认叠放序不写回载荷");
     }
 }

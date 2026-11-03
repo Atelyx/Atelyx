@@ -21,16 +21,16 @@ use iced::{Element, Length, Padding, Point, Rectangle, Size, Vector};
 
 use atelyx_core::plugin_runtime::{
     FrameInput, FrameRect, HitCursor, Key as FrameKey, KeyAction, Modifiers as FrameModifiers,
-    MouseButton, NamedKey, SurfaceFrame,
+    MouseButton, NamedKey, PopupLayer, SurfaceFrame, SurfacePopup,
 };
 
 use crate::plugin_paint::{self, PaintCtx};
 use crate::{App, Message};
 
 /// 双击判定：同键二次按下的最大间隔。
-const DOUBLE_CLICK_MS: u64 = 500;
+pub(crate) const DOUBLE_CLICK_MS: u64 = 500;
 /// 双击判定：两次按下间的最大位移（逻辑像素；拖动不算双击）。
-const DOUBLE_CLICK_SLOP: f32 = 4.0;
+pub(crate) const DOUBLE_CLICK_SLOP: f32 = 4.0;
 /// 改宽那一拍等插件新帧的下限与上限：实际预算按插件的回帧延迟自适应（见 `FrameState::wait_budget`）。
 /// 下限保证首次改宽也能等到一张按新宽度排好的帧；上限保证慢插件不会把 UI 线程压在这里。
 const RESIZE_WAIT_MIN: Duration = Duration::from_millis(4);
@@ -58,7 +58,7 @@ fn surface_identity(plugin_id: &str, surface_id: &str) -> u64 {
 }
 
 /// 两点距离平方（双击位移阈值比较用，免开方）。
-fn distance_sq(a: Point, b: Point) -> f32 {
+pub(crate) fn distance_sq(a: Point, b: Point) -> f32 {
     let dx = a.x - b.x;
     let dy = a.y - b.y;
     dx * dx + dy * dy
@@ -71,7 +71,7 @@ fn drag_point(cursor: mouse::Cursor, bounds: Rectangle) -> Option<Point> {
 }
 
 /// 指针按钮 → 协议按钮（协议没有的侧键不转发）。
-fn mouse_button(button: mouse::Button) -> Option<MouseButton> {
+pub(crate) fn mouse_button(button: mouse::Button) -> Option<MouseButton> {
     match button {
         mouse::Button::Left => Some(MouseButton::Left),
         mouse::Button::Right => Some(MouseButton::Right),
@@ -86,13 +86,8 @@ struct FrameState {
     caches: RefCell<Vec<canvas::Cache>>,
     /// 已排版的文字段落：内容不变跨帧复用，改宽 / 滚动 / 悬停不重新成形。
     texts: RefCell<plugin_paint::TextCache>,
-    /// 浮层几何缓存与文字缓存（菜单 / 灯箱按需重画）。
-    popup_cache: RefCell<Vec<canvas::Cache>>,
-    popup_texts: RefCell<plugin_paint::TextCache>,
-    /// 上次绘制过的浮层：内容一变即作废几何缓存（尺寸相同也不会画旧形状）。
-    popup_painted: RefCell<Option<atelyx_core::plugin_runtime::SurfacePopup>>,
-    /// 浮层步骤表缓冲（换帧不分配新 Vec）。
-    popup_steps: RefCell<Vec<plugin_paint::PaintStep>>,
+    /// 面板内浮层的绘制缓存（菜单 / 灯箱按需重画）。
+    popup: PopupPaint,
     /// 上次绘制的步骤表（与 `painted` 同帧）：换帧时按段比对，只作废内容变了的几何缓存。
     steps: RefCell<Vec<plugin_paint::PaintStep>>,
     /// 下一帧的步骤表缓冲：与 `steps` 交换使用，换帧不分配新 Vec。
@@ -122,6 +117,120 @@ struct FrameState {
     mods: Cell<FrameModifiers>,
     /// 已请求启用输入法（失去焦点或帧不再声明 `ime` 时请求停用一次）。
     ime_on: Cell<bool>,
+    /// 上次上报的面左上角窗口坐标；窗口级浮层按它平移面本地坐标。
+    origin: Cell<Option<Point>>,
+}
+
+/// 面级浮层的绘制缓存：几何分段、文字段落与上一帧内容。
+#[derive(Default)]
+pub(crate) struct PopupPaint {
+    caches: RefCell<Vec<canvas::Cache>>,
+    texts: RefCell<plugin_paint::TextCache>,
+    /// 上次绘制过的浮层：内容一变即作废几何缓存（尺寸相同也不会画旧形状）。
+    painted: RefCell<Option<SurfacePopup>>,
+    /// 浮层步骤表缓冲（换帧不分配新 Vec）。
+    steps: RefCell<Vec<plugin_paint::PaintStep>>,
+}
+
+impl PopupPaint {
+    fn clear(&self) {
+        self.caches.borrow_mut().iter().for_each(canvas::Cache::clear);
+        self.texts.borrow_mut().clear();
+        *self.painted.borrow_mut() = None;
+        self.steps.borrow_mut().clear();
+    }
+
+    /// 绘制浮层：`origin` 是面左上角的窗口坐标，`canvas_size` 是几何缓存的口径，
+    /// `clip` 是窗口裁剪矩形（浮层可越出面矩形，含盖住面板头部）。
+    pub(crate) fn draw(
+        &self,
+        popup: &SurfacePopup,
+        origin: Point,
+        canvas_size: Size,
+        clip: Rectangle,
+        renderer: &mut iced::Renderer,
+        ctx: &PaintCtx<'_>,
+    ) {
+        let area = Rectangle::new(
+            Point::new(origin.x + popup.rect.x, origin.y + popup.rect.y),
+            Size::new(popup.rect.w.max(0.0), popup.rect.h.max(0.0)),
+        );
+        // 可见性看浮层矩形，裁剪仍按窗口：阴影与越出浮层矩形的描边不能被矩形自身裁掉
+        if !area.intersects(&clip) {
+            return;
+        }
+        let changed = self
+            .painted
+            .borrow()
+            .as_ref()
+            .is_none_or(|painted| painted != popup);
+        if changed {
+            self.caches.borrow_mut().iter().for_each(canvas::Cache::clear);
+            *self.painted.borrow_mut() = Some(popup.clone());
+        }
+        let mut steps = self.steps.borrow_mut();
+        plugin_paint::plan_into(&popup.commands, &mut steps);
+        let mut texts = self.texts.borrow_mut();
+        texts.begin_frame();
+        renderer.with_layer(clip, |renderer| {
+            let mut caches = self.caches.borrow_mut();
+            if caches.len() < steps.len() {
+                caches.resize_with(steps.len(), canvas::Cache::new);
+            }
+            let mut layer_open = false;
+            let mut max_rank = 0u8;
+            for (slot, step) in steps.iter().enumerate() {
+                let rank = plugin_paint::step_rank(step);
+                if !layer_open || rank < max_rank {
+                    if layer_open {
+                        renderer.end_layer();
+                    }
+                    renderer.start_layer(clip);
+                    layer_open = true;
+                    max_rank = rank;
+                } else {
+                    max_rank = max_rank.max(rank);
+                }
+                match step {
+                    plugin_paint::PaintStep::Shapes(range) => {
+                        let geometry = caches[slot].draw(renderer, canvas_size, |canvas| {
+                            plugin_paint::execute_shapes(canvas, &popup.commands, range.clone(), ctx);
+                        });
+                        renderer.with_translation(Vector::new(origin.x, origin.y), |renderer| {
+                            renderer.draw_geometry(geometry);
+                        });
+                    }
+                    plugin_paint::PaintStep::Image(index) => {
+                        let geometry = caches[slot].draw(renderer, canvas_size, |canvas| {
+                            plugin_paint::execute_shapes(
+                                canvas,
+                                &popup.commands,
+                                *index..*index + 1,
+                                ctx,
+                            );
+                        });
+                        renderer.with_translation(Vector::new(origin.x, origin.y), |renderer| {
+                            renderer.draw_geometry(geometry);
+                        });
+                    }
+                    plugin_paint::PaintStep::Text(index) => {
+                        texts.draw_one(renderer, &popup.commands[*index], origin, clip);
+                    }
+                    plugin_paint::PaintStep::Shadow(index) => {
+                        plugin_paint::draw_shadow(
+                            renderer,
+                            Rectangle::new(origin, canvas_size),
+                            &popup.commands[*index],
+                        );
+                    }
+                }
+            }
+            if layer_open {
+                renderer.end_layer();
+            }
+        });
+        texts.end_frame();
+    }
 }
 
 impl Default for FrameState {
@@ -129,10 +238,7 @@ impl Default for FrameState {
         Self {
             caches: RefCell::new(Vec::new()),
             texts: RefCell::new(plugin_paint::TextCache::default()),
-            popup_cache: RefCell::new(Vec::new()),
-            popup_texts: RefCell::new(plugin_paint::TextCache::default()),
-            popup_painted: RefCell::new(None),
-            popup_steps: RefCell::new(Vec::new()),
+            popup: PopupPaint::default(),
             steps: RefCell::new(Vec::new()),
             next_steps: RefCell::new(Vec::new()),
             painted: RefCell::new(None),
@@ -148,6 +254,7 @@ impl Default for FrameState {
             last_press: RefCell::new(None),
             mods: Cell::new(FrameModifiers::default()),
             ime_on: Cell::new(false),
+            origin: Cell::new(None),
         }
     }
 }
@@ -207,21 +314,11 @@ impl PluginFrame<'_> {
     fn hit(&self, state: &FrameState, point: Point) -> Option<String> {
         let painted = state.painted.borrow();
         let frame = painted.as_deref().unwrap_or(self.frame.as_ref());
-        // 浮层画在主帧之上，命中优先取它自己的命中区（同用面本地坐标）
-        if let Some(popup) = &frame.popup {
-            if point.x >= popup.rect.x
-                && point.y >= popup.rect.y
-                && point.x <= popup.rect.x + popup.rect.w
-                && point.y <= popup.rect.y + popup.rect.h
-            {
-                if let Some(hit) = popup.hits.iter().find(|hit| {
-                    point.x >= hit.x
-                        && point.y >= hit.y
-                        && point.x <= hit.x + hit.w
-                        && point.y <= hit.y + hit.h
-                }) {
-                    return Some(hit.id.clone());
-                }
+        // 面板内浮层画在主帧之上，命中优先取它自己的命中区（同用面本地坐标）
+        // 窗口级浮层由根层接收输入，不在这里重复命中
+        if let Some(popup) = frame.popup.as_ref().filter(|p| p.layer == PopupLayer::Panel) {
+            if let Some(hit) = popup.hit_region_at(point.x, point.y) {
+                return Some(hit.id.clone());
             }
         }
         frame.hit_region_at(point.x, point.y).map(|hit| hit.id.clone())
@@ -301,9 +398,8 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginFrame<'_> {
         // 命中区会带到新面
         if state.identity.get() != self.identity() {
             state.identity.set(self.identity());
-            state.popup_cache.borrow_mut().clear();
-            state.popup_texts.borrow_mut().clear();
-            *state.popup_painted.borrow_mut() = None;
+            state.origin.set(None);
+            state.popup.clear();
             state.pressed.set(None);
             state.inside.set(false);
             state.last_point.set(None);
@@ -315,6 +411,16 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginFrame<'_> {
             state.next_steps.borrow_mut().clear();
             state.frame_latency.set(None);
             state.slow.set(0);
+        }
+        // 窗口级浮层按面原点平移；位置变化才上报（布局稳定时不产生额外消息）
+        if state.origin.get() != Some(bounds.position()) {
+            state.origin.set(Some(bounds.position()));
+            shell.publish(Message::PluginSurfaceOrigin {
+                window: self.window,
+                plugin_id: self.plugin_id.clone(),
+                surface_id: self.surface_id.clone(),
+                origin: bounds.position(),
+            });
         }
         match event {
             Event::Mouse(mouse::Event::ButtonPressed(button)) => {
@@ -648,9 +754,7 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginFrame<'_> {
                 state.texts.borrow_mut().clear();
             }
             state.caches.borrow().iter().for_each(canvas::Cache::clear);
-            state.popup_cache.borrow().iter().for_each(canvas::Cache::clear);
-            state.popup_texts.borrow_mut().clear();
-            *state.popup_painted.borrow_mut() = None;
+            state.popup.clear();
             state.font_epoch.set(epoch);
             state.image_epoch.set(image_epoch);
         }
@@ -726,7 +830,7 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginFrame<'_> {
                         });
                     }
                     plugin_paint::PaintStep::Text(index) => {
-                        texts.draw_one(renderer, &frame.commands[*index], bounds);
+                        texts.draw_one(renderer, &frame.commands[*index], bounds.position(), bounds);
                     }
                     plugin_paint::PaintStep::Shadow(index) => {
                         plugin_paint::draw_shadow(renderer, bounds, &frame.commands[*index]);
@@ -737,7 +841,13 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginFrame<'_> {
                 renderer.end_layer();
             }
         });
-        draw_popup(state, &frame.popup, bounds, viewport, renderer, &ctx);
+        match frame.popup.as_ref() {
+            // 窗口级浮层由根层 overlay 绘制；本面不画
+            Some(popup) if popup.layer == PopupLayer::Panel => {
+                state.popup.draw(popup, bounds.position(), bounds.size(), *viewport, renderer, &ctx);
+            }
+            _ => state.popup.clear(),
+        }
         texts.end_frame();
     }
 
@@ -755,6 +865,11 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginFrame<'_> {
         let state = tree.state.downcast_ref::<FrameState>();
         let painted = state.painted.borrow();
         let frame = painted.as_deref().unwrap_or(self.frame.as_ref());
+        if let Some(popup) = frame.popup.as_ref().filter(|p| p.layer == PopupLayer::Panel) {
+            if let Some(hit) = popup.hit_region_at(point.x, point.y) {
+                return interaction_of(hit.cursor.unwrap_or_default());
+            }
+        }
         match frame.hit_region_at(point.x, point.y) {
             Some(hit) => interaction_of(hit.cursor.unwrap_or_default()),
             None => mouse::Interaction::None,
@@ -815,7 +930,7 @@ pub fn frame_view<'a>(
         .into()
 }
 
-fn interaction_of(cursor: HitCursor) -> mouse::Interaction {
+pub(crate) fn interaction_of(cursor: HitCursor) -> mouse::Interaction {
     match cursor {
         HitCursor::Default => mouse::Interaction::Idle,
         HitCursor::Pointer => mouse::Interaction::Pointer,
@@ -873,7 +988,7 @@ fn frame_named(named: Named) -> Option<NamedKey> {
     })
 }
 
-fn frame_modifiers(modifiers: keyboard::Modifiers) -> FrameModifiers {
+pub(crate) fn frame_modifiers(modifiers: keyboard::Modifiers) -> FrameModifiers {
     FrameModifiers {
         shift: modifiers.shift(),
         control: modifiers.control(),
@@ -917,91 +1032,4 @@ mod tests {
     }
 }
 
-/// 浮层绘制：按面矩形偏移、按窗口裁剪，叠在本面之上（可越出面矩形，例如盖住面板头部）。
-/// 浮层内容不参与主帧的几何缓存（内容随菜单 / 灯箱状态整块换），逐帧走临时缓存。
-fn draw_popup(
-    state: &FrameState,
-    popup: &Option<atelyx_core::plugin_runtime::SurfacePopup>,
-    bounds: Rectangle,
-    viewport: &Rectangle,
-    renderer: &mut iced::Renderer,
-    ctx: &PaintCtx<'_>,
-) {
-    let Some(popup) = popup else {
-        state.popup_cache.borrow_mut().clear();
-        *state.popup_painted.borrow_mut() = None;
-        return;
-    };
-    // 浮层命令与主帧同坐标系（面本地）：只按窗口裁剪，不做额外平移
-    let area = Rectangle::new(
-        Point::new(bounds.x + popup.rect.x, bounds.y + popup.rect.y),
-        Size::new(popup.rect.w.max(0.0), popup.rect.h.max(0.0)),
-    );
-    // 可见性看浮层矩形，裁剪仍按窗口：阴影与越出浮层矩形的描边不能被矩形自身裁掉
-    if !area.intersects(viewport) {
-        return;
-    }
-    let clip = *viewport;
-    let changed = state
-        .popup_painted
-        .borrow()
-        .as_ref()
-        .is_none_or(|painted| painted != popup);
-    if changed {
-        state.popup_cache.borrow_mut().iter().for_each(canvas::Cache::clear);
-        *state.popup_painted.borrow_mut() = Some(popup.clone());
-    }
-    let mut steps = state.popup_steps.borrow_mut();
-    plugin_paint::plan_into(&popup.commands, &mut steps);
-    let mut texts = state.popup_texts.borrow_mut();
-    texts.begin_frame();
-    renderer.with_layer(clip, |renderer| {
-        let mut caches = state.popup_cache.borrow_mut();
-        if caches.len() < steps.len() {
-            caches.resize_with(steps.len(), canvas::Cache::new);
-        }
-        let mut layer_open = false;
-        let mut max_rank = 0u8;
-        for (slot, step) in steps.iter().enumerate() {
-            let rank = plugin_paint::step_rank(step);
-            if !layer_open || rank < max_rank {
-                if layer_open {
-                    renderer.end_layer();
-                }
-                renderer.start_layer(clip);
-                layer_open = true;
-                max_rank = rank;
-            } else {
-                max_rank = max_rank.max(rank);
-            }
-            match step {
-                plugin_paint::PaintStep::Shapes(range) => {
-                    let geometry = caches[slot].draw(renderer, bounds.size(), |canvas| {
-                        plugin_paint::execute_shapes(canvas, &popup.commands, range.clone(), ctx);
-                    });
-                    renderer.with_translation(Vector::new(bounds.x, bounds.y), |renderer| {
-                        renderer.draw_geometry(geometry);
-                    });
-                }
-                plugin_paint::PaintStep::Image(index) => {
-                    let geometry = caches[slot].draw(renderer, bounds.size(), |canvas| {
-                        plugin_paint::execute_shapes(canvas, &popup.commands, *index..*index + 1, ctx);
-                    });
-                    renderer.with_translation(Vector::new(bounds.x, bounds.y), |renderer| {
-                        renderer.draw_geometry(geometry);
-                    });
-                }
-                plugin_paint::PaintStep::Text(index) => {
-                    texts.draw_one(renderer, &popup.commands[*index], bounds);
-                }
-                plugin_paint::PaintStep::Shadow(index) => {
-                    plugin_paint::draw_shadow(renderer, bounds, &popup.commands[*index]);
-                }
-            }
-        }
-        if layer_open {
-            renderer.end_layer();
-        }
-    });
-    texts.end_frame();
-}
+

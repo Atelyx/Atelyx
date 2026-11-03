@@ -170,7 +170,15 @@ impl TextCache {
     }
 
     /// 就地绘制一条文字指令：位置用面本地坐标，接上外壳原点的平移。
-    pub fn draw_one(&mut self, renderer: &mut iced::Renderer, command: &DrawCommand, bounds: Rectangle) {
+    /// `origin` 是坐标系原点（面本地 → 窗口坐标），`clip` 是渲染裁剪矩形：
+    /// 浮层可能越出面矩形甚至盖住面板头部，原点与裁剪必须分开给。
+    pub fn draw_one(
+        &mut self,
+        renderer: &mut iced::Renderer,
+        command: &DrawCommand,
+        origin: Point,
+        clip: Rectangle,
+    ) {
         let DrawCommand::Text {
             x,
             y,
@@ -201,9 +209,9 @@ impl TextCache {
         let x = aligned_x(*x, *max_width, *align, width);
         renderer.fill_paragraph(
             paragraph,
-            Point::new(bounds.x + x, bounds.y + *y),
+            Point::new(origin.x + x, origin.y + *y),
             color(*text_color),
-            bounds,
+            clip,
         );
     }
 

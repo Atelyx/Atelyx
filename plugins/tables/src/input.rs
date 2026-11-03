@@ -36,6 +36,8 @@ pub struct Outcome {
     pub header: bool,
     /// 手动保存请求（Ctrl+S）。
     pub manual_save: bool,
+    /// 灯箱当前图的仓库路径：入口层据此探明能否载入并收起加载占位。
+    pub lightbox_image: Option<String>,
 }
 
 /// 需要宿主剪贴板的动作。
@@ -77,6 +79,13 @@ pub enum MenuRequest {
 pub fn handle(session: &mut Session, input: &FrameInput) -> (Outcome, Option<MenuRequest>) {
     let mut outcome = Outcome::default();
     let mut menu = None;
+    // 指针位置随每次移动更新：远端名签只在悬停其选区时出现，离开面即收起
+    if let FrameInput::PointerDown { x, y, .. } | FrameInput::PointerMove { x, y, .. } = input {
+        session.view.pointer = Some(crate::model::Point::new(*x, *y));
+    } else if matches!(input, FrameInput::PointerLeave) {
+        session.view.pointer = None;
+        outcome.paint = true;
+    }
     if session.view.lightbox.is_some() {
         menu = lightbox_input(session, input, &mut outcome);
         return (outcome, menu);
@@ -87,6 +96,7 @@ pub fn handle(session: &mut Session, input: &FrameInput) -> (Outcome, Option<Men
     }
     match input {
         FrameInput::PointerDown { x, y, button, .. } => {
+            session.view.caret_on = true;
             press(session, *x, *y, *button, &mut outcome, &mut menu);
         }
         FrameInput::PointerMove { x, y, .. } => {
@@ -110,10 +120,14 @@ pub fn handle(session: &mut Session, input: &FrameInput) -> (Outcome, Option<Men
             // 修饰态随时更新：滚轮缩放判定要用最近一次按键的修饰快照
             session.view.mods = *modifiers;
             if *action == atelyx_plugin_protocol::frame::KeyAction::Press {
+                if session.view.editing.is_some() {
+                    session.view.caret_on = true;
+                }
                 key_press(session, key, modifiers, text.as_deref(), &mut outcome);
             }
         }
         FrameInput::Text { text, composing, caret, .. } => {
+            session.view.caret_on = true;
             if let Some(edit) = session.view.editing.as_mut() {
                 // 组合串只改显示；值在提交时按实际变化置脏
                 if edit.editor.apply_ime(text, *composing, *caret) {
@@ -124,6 +138,7 @@ pub fn handle(session: &mut Session, input: &FrameInput) -> (Outcome, Option<Men
         }
         FrameInput::Focus { focused: false } => {
             // 点到面外：先收尾草稿，避免切文件 / 关面板时丢已输入内容
+            session.view.editor_drag = false;
             if edit::commit(session) {
                 outcome.dirty = true;
                 outcome.header = true;
@@ -131,6 +146,7 @@ pub fn handle(session: &mut Session, input: &FrameInput) -> (Outcome, Option<Men
             outcome.paint = true;
         }
         FrameInput::Outside { .. } => {
+            session.view.editor_drag = false;
             if edit::commit(session) {
                 outcome.dirty = true;
                 outcome.header = true;
@@ -152,21 +168,24 @@ fn press(
     menu: &mut Option<MenuRequest>,
 ) {
     // 点在自己正在编辑的格子里 = 编辑器内部交互：不能提交草稿（用户可能在点插入点）
-    if let Some(editing) = session.view.editing.as_ref() {
-        if let Some(geo) = geom::geo(
+    let inside_editor = session.view.editing.as_ref().is_some_and(|editing| {
+        geom::geo(
             &session.view.layout,
             session.view.scroll_x,
             session.view.scroll_y,
             session.view.zoom,
             session.view.canvas_size,
-        ) {
-            if matches!(
+        )
+        .is_some_and(|geo| {
+            matches!(
                 geo.hit_at(x, y),
                 Some(Hit::Cell { row, field }) if row == editing.row && field == editing.field
-            ) {
-                return;
-            }
-        }
+            )
+        })
+    });
+    if inside_editor && button == MouseButton::Left {
+        place_caret(session, x, y, outcome);
+        return;
     }
     if edit::commit(session) {
         outcome.dirty = true;
@@ -336,6 +355,7 @@ fn press(
                         if grid {
                             session.view.lightbox =
                                 Some(crate::model::Lightbox::new(row_id, field_id, *index));
+                            note_lightbox_probe(session, outcome);
                         } else {
                             // 长按到点进拖拽重排：先记按压，帧拍里按时间判定
                             session.view.image_press = Some(crate::model::ImagePress {
@@ -453,9 +473,77 @@ fn press(
     outcome.paint = true;
 }
 
+/// 编辑格内落点 → 显示文本字节位（与绘制同一份行段与字宽估算）。
+fn caret_at_point(session: &Session, x: f32, y: f32) -> Option<usize> {
+    let geo = geom::geo(
+        &session.view.layout,
+        session.view.scroll_x,
+        session.view.scroll_y,
+        session.view.zoom,
+        session.view.canvas_size,
+    )?;
+    let edit = session.view.editing.as_ref()?;
+    let (Some(field), Some(table_row)) = (
+        session.data.fields.get(edit.field),
+        session.data.rows.get(edit.row),
+    ) else {
+        return None;
+    };
+    let cell = geo.cell_rect(edit.row, edit.field);
+    let zoom = session.view.zoom;
+    let style = ops::style_of(table_row, &field.id);
+    let font = crate::text::FontSpec::of(&style, field, zoom);
+    let pad_x = crate::model::CELL_PAD_X * zoom;
+    let pad_y = if field.field_type == "text" {
+        crate::model::CELL_PAD_Y * zoom
+    } else {
+        ((cell.h.max(24.0) - font.size * crate::text::LINE_FACTOR) / 2.0).max(0.0)
+    };
+    let wrap_w = (cell.w.max(40.0) - 2.0 * pad_x).max(8.0);
+    Some(crate::text::caret_at(
+        &edit.editor.text,
+        font.size,
+        wrap_w,
+        x - (cell.x + pad_x),
+        y - (cell.y + pad_y),
+    ))
+}
+
+/// 编辑格内按下：收尾输入法组合并把光标与锚点落到按压点，进入拖选。
+fn place_caret(session: &mut Session, x: f32, y: f32, outcome: &mut Outcome) {
+    let Some(edit) = session.view.editing.as_mut() else { return };
+    edit.editor.finish_preedit();
+    let Some(caret) = caret_at_point(session, x, y) else { return };
+    if let Some(edit) = session.view.editing.as_mut() {
+        edit.editor.caret = caret;
+        edit.editor.anchor = caret;
+    }
+    session.view.caret_on = true;
+    session.view.editor_drag = true;
+    outcome.paint = true;
+}
+
+/// 编辑格内拖选：锚点保持按下时落点，焦点随指针移动。
+fn drag_caret(session: &mut Session, x: f32, y: f32, outcome: &mut Outcome) {
+    let Some(caret) = caret_at_point(session, x, y) else { return };
+    if let Some(edit) = session.view.editing.as_mut() {
+        edit.editor.caret = caret;
+    }
+    session.view.caret_on = true;
+    outcome.paint = true;
+}
+
 /// 移动：悬停 / 框选 / 各类拖拽。
 fn move_cursor(session: &mut Session, x: f32, y: f32, outcome: &mut Outcome) {
     session.view.hover = None;
+    // 编辑格内按住拖动 = 扩展文本选区（锚点保持按下落点）
+    if session.view.editor_drag {
+        if session.view.editing.is_some() {
+            drag_caret(session, x, y, outcome);
+            return;
+        }
+        session.view.editor_drag = false;
+    }
     // 缩略图按压：移动超过阈值即取消长按判定
     if let Some(press) = session.view.image_press.as_mut() {
         let dx = press.start.x - x;
@@ -666,6 +754,7 @@ fn reorder_target(geo: &geom::Geo<'_>, session: &Session, y: f32) -> Option<usiz
 /// 松开：结算各类拖拽。
 fn release(session: &mut Session, x: f32, outcome: &mut Outcome) {
     session.view.hover = None;
+    session.view.editor_drag = false;
     session.view.image_press = None;
     if let Some(drag) = session.view.img_drag.take() {
         if commit_image_drag(session, drag) {
@@ -705,6 +794,7 @@ fn release(session: &mut Session, x: f32, outcome: &mut Outcome) {
     }
     if let Some((row_id, field_id, index)) = session.view.pending_image_open.take() {
         session.view.lightbox = Some(crate::model::Lightbox::new(row_id, field_id, index));
+        note_lightbox_probe(session, outcome);
         outcome.paint = true;
         return;
     }
@@ -752,8 +842,25 @@ fn release(session: &mut Session, x: f32, outcome: &mut Outcome) {
     }
 }
 
-/// 双击：文本类进编辑；图片格开灯箱由图片批次接入。
+/// 双击：编辑格内选词；文本类格进编辑。
 fn double_click(session: &mut Session, x: f32, y: f32, outcome: &mut Outcome) {
+    // 已在编辑格内双击 = 选中落点处的词，并接着可拖选（重开编辑会丢掉草稿）
+    if session.view.editing.is_some() {
+        if let Some(edit) = session.view.editing.as_mut() {
+            edit.editor.finish_preedit();
+        }
+        if let Some(caret) = caret_at_point(session, x, y) {
+            if let Some(edit) = session.view.editing.as_mut() {
+                let (start, end) = crate::editor::word_range(&edit.editor.text, caret);
+                edit.editor.anchor = start;
+                edit.editor.caret = end;
+            }
+            session.view.editor_drag = true;
+            session.view.caret_on = true;
+            outcome.paint = true;
+        }
+        return;
+    }
     let Some(geo) = geom::geo(&session.view.layout, session.view.scroll_x, session.view.scroll_y, session.view.zoom, session.view.canvas_size) else { return };
     if let Some(Hit::Cell { row, field }) = geo.hit_at(x, y) {
         if let Some(field_def) = session.data.fields.get(field) {
@@ -1166,6 +1273,35 @@ fn lightbox_input(
             outcome.paint = true;
         }
         FrameInput::PointerDown { x, y, button, .. } => {
+            let count = session
+                .view
+                .lightbox
+                .as_ref()
+                .map(|lightbox| crate::lightbox::image_count(session, lightbox))
+                .unwrap_or(0);
+            // 翻页钮在图片显示框之外：先按按钮命中处理，不能落进「点外关闭」
+            if count > 1 {
+                for dir in [-1, 1] {
+                    if !crate::lightbox::nav_button(size, dir).contains(*x, *y) {
+                        continue;
+                    }
+                    match *button {
+                        MouseButton::Left => {
+                            if let Some(lightbox) = session.view.lightbox.as_mut() {
+                                crate::lightbox::navigate(lightbox, count, dir);
+                            }
+                            note_lightbox_probe(session, outcome);
+                            outcome.paint = true;
+                        }
+                        MouseButton::Right => {
+                            outcome.paint = true;
+                            return Some(MenuRequest::Lightbox);
+                        }
+                        _ => {}
+                    }
+                    return None;
+                }
+            }
             let Some(lightbox) = session.view.lightbox.as_mut() else { return None };
             let image = crate::lightbox::display_rect(
                 crate::lightbox::inner_rect(size),
@@ -1223,10 +1359,13 @@ fn lightbox_input(
                         .as_ref()
                         .map(|lightbox| crate::lightbox::image_count(session, lightbox))
                         .unwrap_or(0);
-                    if let Some(lightbox) = session.view.lightbox.as_mut() {
-                        crate::lightbox::navigate(lightbox, count, dir);
+                    if count > 1 {
+                        if let Some(lightbox) = session.view.lightbox.as_mut() {
+                            crate::lightbox::navigate(lightbox, count, dir);
+                        }
+                        note_lightbox_probe(session, outcome);
+                        outcome.paint = true;
                     }
-                    outcome.paint = true;
                 }
                 _ => {}
             }
@@ -1238,6 +1377,15 @@ fn lightbox_input(
         _ => {}
     }
     None
+}
+
+/// 记下灯箱当前图：入口层据此探明能否载入（收起加载占位 / 显示失败文案）。
+fn note_lightbox_probe(session: &Session, outcome: &mut Outcome) {
+    outcome.lightbox_image = session
+        .view
+        .lightbox
+        .as_ref()
+        .and_then(|lightbox| crate::lightbox::current_image(session, lightbox));
 }
 
 /// 图片展示方式切换（轮播 ↔ 九宫格）。
@@ -1459,4 +1607,184 @@ pub fn tick_image_press(session: &mut Session) -> bool {
         pos: press.start,
     });
     true
+}
+
+/// 编辑光标闪烁：帧拍里翻转显隐（未编辑 = 不动）。
+pub fn tick_caret(session: &mut Session) -> bool {
+    if session.view.editing.is_none() {
+        return false;
+    }
+    session.view.caret_on = !session.view.caret_on;
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use atelyx_format::table::{TableField, TableFile, TableRow};
+    use atelyx_plugin_protocol::frame::{FrameInput, MouseButton};
+
+    use super::{handle, tick_caret};
+    use crate::model::{Lightbox, Session, Size};
+
+    fn table(field_type: &str, value: serde_json::Value) -> TableFile {
+        let mut values = serde_json::Map::new();
+        values.insert("f".into(), value);
+        TableFile {
+            schema: "atelyx-table/v1".into(),
+            id: "t".into(),
+            title: "T".into(),
+            fields: vec![TableField {
+                id: "f".into(),
+                name: "A".into(),
+                field_type: field_type.into(),
+                options: None,
+                width: None,
+                calc_type: None,
+            }],
+            rows: vec![TableRow {
+                id: "r".into(),
+                values,
+                height: None,
+                styles: None,
+            }],
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    fn session(field_type: &str, value: serde_json::Value) -> Session {
+        let mut session = Session::new("t.atb".into(), table(field_type, value));
+        session.view.canvas_size = Size { width: 400.0, height: 300.0 };
+        session
+    }
+
+    #[test]
+    fn click_inside_editing_cell_places_caret() {
+        let mut session = session("text", serde_json::json!("abcdef"));
+        crate::edit::begin(&mut session, 0, 0, None);
+        let cell = crate::geom::geo(
+            &session.view.layout,
+            session.view.scroll_x,
+            session.view.scroll_y,
+            session.view.zoom,
+            session.view.canvas_size,
+        )
+        .expect("已建布局")
+        .cell_rect(0, 0);
+        let x = cell.x + crate::model::CELL_PAD_X + 3.0 * 14.0 * 0.55;
+        let y = cell.y + crate::model::CELL_PAD_Y;
+        let (outcome, _) = handle(
+            &mut session,
+            &FrameInput::PointerDown { x, y, button: MouseButton::Left, hit: None },
+        );
+        let edit = session.view.editing.as_ref().expect("仍应处于编辑态");
+        assert_eq!(edit.editor.caret, 3);
+        assert_eq!(edit.editor.anchor, 3);
+        assert!(session.view.caret_on);
+        assert!(outcome.paint);
+    }
+
+    #[test]
+    fn caret_blinks_only_while_editing() {
+        let mut session = session("text", serde_json::json!("abc"));
+        assert!(!tick_caret(&mut session));
+        crate::edit::begin(&mut session, 0, 0, None);
+        let before = session.view.caret_on;
+        assert!(tick_caret(&mut session));
+        assert_ne!(session.view.caret_on, before);
+    }
+
+    #[test]
+    fn dragging_inside_editor_extends_text_selection() {
+        let mut session = session("text", serde_json::json!("abcdef"));
+        crate::edit::begin(&mut session, 0, 0, None);
+        let cell = cell_rect(&session);
+        let char_w = crate::theme::font_ui() * 0.55;
+        let y = cell.y + crate::model::CELL_PAD_Y;
+        let press_x = cell.x + crate::model::CELL_PAD_X + 2.0 * char_w;
+        handle(
+            &mut session,
+            &FrameInput::PointerDown { x: press_x, y, button: MouseButton::Left, hit: None },
+        );
+        assert!(session.view.editor_drag, "按下编辑格应进入拖选");
+        assert_eq!(
+            session.view.editing.as_ref().map(|edit| edit.editor.selection()),
+            Some((2, 2)),
+            "单击不产生选区"
+        );
+        let drag_x = cell.x + crate::model::CELL_PAD_X + 5.0 * char_w;
+        handle(
+            &mut session,
+            &FrameInput::PointerMove { x: drag_x, y, hit: None },
+        );
+        assert_eq!(
+            session.view.editing.as_ref().map(|edit| edit.editor.selection()),
+            Some((2, 5)),
+            "拖动应扩展选区"
+        );
+        handle(
+            &mut session,
+            &FrameInput::PointerUp { x: drag_x, y, button: MouseButton::Left, hit: None },
+        );
+        assert!(!session.view.editor_drag, "松开后结束拖选");
+        assert_eq!(
+            session.view.editing.as_ref().map(|edit| edit.editor.selection()),
+            Some((2, 5)),
+            "松开保留选区"
+        );
+    }
+
+    #[test]
+    fn double_click_inside_editor_selects_word() {
+        let mut session = session("text", serde_json::json!("hello world"));
+        crate::edit::begin(&mut session, 0, 0, None);
+        let cell = cell_rect(&session);
+        let char_w = crate::theme::font_ui() * 0.55;
+        let x = cell.x + crate::model::CELL_PAD_X + 8.0 * char_w;
+        let y = cell.y + crate::model::CELL_PAD_Y;
+        handle(
+            &mut session,
+            &FrameInput::DoubleClick { x, y, button: MouseButton::Left, hit: None },
+        );
+        assert_eq!(
+            session.view.editing.as_ref().map(|edit| edit.editor.selection()),
+            Some((6, 11)),
+            "双击应选中落点所在的词"
+        );
+        assert!(session.view.editor_drag, "双击后应可接着拖选");
+    }
+
+    /// 编辑格矩形（与绘制同口径）。
+    fn cell_rect(session: &Session) -> crate::model::Rect {
+        crate::geom::geo(
+            &session.view.layout,
+            session.view.scroll_x,
+            session.view.scroll_y,
+            session.view.zoom,
+            session.view.canvas_size,
+        )
+        .expect("已建布局")
+        .cell_rect(0, 0)
+    }
+
+    #[test]
+    fn lightbox_nav_buttons_switch_image_without_closing() {
+        let mut session = session("image", serde_json::json!(["a.png", "b.png"]));
+        session.view.lightbox = Some(Lightbox::new("r".into(), "f".into(), 0));
+        let size = session.view.canvas_size;
+        let right = crate::lightbox::nav_button(size, 1);
+        let (outcome, menu) = handle(
+            &mut session,
+            &FrameInput::PointerDown {
+                x: right.x + right.w / 2.0,
+                y: right.y + right.h / 2.0,
+                button: MouseButton::Left,
+                hit: None,
+            },
+        );
+        assert!(session.view.lightbox.is_some(), "点翻页钮不能退出预览");
+        assert_eq!(session.view.lightbox.as_ref().map(|lightbox| lightbox.index), Some(1));
+        assert_eq!(outcome.lightbox_image.as_deref(), Some("b.png"));
+        assert_eq!(menu, None);
+    }
 }

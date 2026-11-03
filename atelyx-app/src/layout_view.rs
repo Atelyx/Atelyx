@@ -578,6 +578,10 @@ fn with_overlays<'a>(
         root = root.push(edge_resize_bands(window));
     }
 
+    // 窗口级插件浮层：在所有面板之上、宿主菜单与模态之下
+    if let Some(el) = crate::plugin_overlay::overlay(app, window) {
+        root = root.push(el);
+    }
 
     // 弹层（同窗口至多一个；捕获层点击 = 外点关闭；居中模态另行渲染，见下方）
     if let Some((w, open)) = &app.popup {
@@ -2179,7 +2183,7 @@ fn popup_element<'a>(
             }
             entries
         }
-        PopupState::PluginMenu => plugin_menu_entries(app),
+        PopupState::PluginMenu => plugin_menu_entries(app, pane),
         PopupState::SpaceMenu => space_menu_entries(app, window),
         PopupState::SpaceLogin { register } => space_login_entries(app, *register),
         PopupState::SpaceCreate => vec![
@@ -2790,6 +2794,9 @@ fn canvas_rename_input(draft: &str) -> Element<'static, Message> {
         .into()
 }
 
+/// 菜单搜索行高度（px）：字体弹层与插件声明搜索的菜单共用。
+const MENU_SEARCH_H: f32 = 30.0;
+
 /// 弹层内联输入（单行；提交由菜单项动作携带草稿）。
 fn popup_text_input(
     placeholder: &str,
@@ -2966,7 +2973,6 @@ fn font_picker_entries(
     app: &App,
     window: iced::window::Id,
 ) -> Vec<(usize, MenuEntry<'static, Message>)> {
-    const SEARCH_H: f32 = 30.0;
     /// 清单可视区行数上下限（再多也只给滚动区，不让弹层顶满屏幕）。
     const MIN_ROWS: usize = 2;
     const MAX_ROWS: usize = 16;
@@ -2981,7 +2987,7 @@ fn font_picker_entries(
             0,
             MenuEntry::Custom(
                 popup_text_input("搜索字体…", &app.font_picker_query, Message::FontPickerQuery),
-                SEARCH_H,
+                MENU_SEARCH_H,
             ),
         ),
         (0, MenuEntry::Divider),
@@ -3006,7 +3012,7 @@ fn font_picker_entries(
     }
     // 可视区高度 = 窗口高 − 弹层固定部分（上下内边距 + 搜索行 + 分隔线 + 复位行）− 阴影环 − 上下留白
     let chrome = pal::POPUP_PAD_Y * 2.0
-        + SEARCH_H
+        + MENU_SEARCH_H
         + pal::MENU_DIVIDER_H
         + pal::MENU_ITEM_H
         + popup::SHADOW_PAD_TOP
@@ -3411,12 +3417,21 @@ fn panel_tab_with_view(app: &App, panel_id: &str, kind: &str) -> Option<String> 
 }
 
 /// 插件声明的菜单条目：形态与内置菜单同一套渲染（动作 / 勾选 / 分隔线 / 子面板 / 只读文字 / 分组头）。
+fn plugin_menu_entries(app: &App, pane: usize) -> Vec<(usize, MenuEntry<'static, Message>)> {
+    let Some((_, params)) = app.plugin_menu.as_ref() else { return Vec::new() };
+    plugin_entries(params, &app.plugin_menu_query, pane)
+}
+
+/// 声明了 `search` 时在当前面板顶部加搜索行，并按输入过滤（匹配规则见 `ui::menu::filter_entries`）。
 /// 选中经 `HostRequest` 对应的回传通道交回发起插件。
-fn plugin_menu_entries(app: &App) -> Vec<(usize, MenuEntry<'static, Message>)> {
+fn plugin_entries(
+    params: &atelyx_core::plugin_runtime::MenuOpenParams,
+    query: &str,
+    pane: usize,
+) -> Vec<(usize, MenuEntry<'static, Message>)> {
     use atelyx_core::plugin_runtime::MenuItem;
 
-    let Some((_, params)) = app.plugin_menu.as_ref() else { return Vec::new() };
-    params
+    let mut entries: Vec<(usize, MenuEntry<'static, Message>)> = params
         .items
         .iter()
         .map(|item| {
@@ -3456,7 +3471,28 @@ fn plugin_menu_entries(app: &App) -> Vec<(usize, MenuEntry<'static, Message>)> {
             };
             (item.pane(), entry)
         })
-        .collect()
+        .collect();
+    let Some(search) = params.search.as_ref() else { return entries };
+    entries = crate::ui::menu::filter_entries(entries, query);
+    // 空态按当前面板判定：过滤后该面板没有存活条目就提示
+    let has_result = entries.iter().any(|(entry_pane, _)| *entry_pane == pane);
+    if !has_result && !query.trim().is_empty() {
+        if let Some(empty) = search.empty.as_deref() {
+            entries.push((pane, MenuEntry::Custom(popup_hint(empty), 18.0)));
+        }
+    }
+    entries.insert(0, (pane, MenuEntry::Divider));
+    entries.insert(
+        0,
+        (
+            pane,
+            MenuEntry::Custom(
+                popup_text_input(&search.placeholder, query, Message::PluginMenuQuery),
+                MENU_SEARCH_H,
+            ),
+        ),
+    );
+    entries
 }
 
 /// 菜单角标是 `&'static str`（内置条目都用字面量）；插件给的是运行时字符串，泄漏一处换取同一形态。
@@ -4306,8 +4342,11 @@ pub fn drop_zone_at(zone: &PanelZone, global: iced::Point) -> DropZone {
 
 #[cfg(test)]
 mod tests {
-    use super::{divider_size, file_label, truncate_to_width, UiMetrics};
+    use super::{divider_size, file_label, plugin_entries, truncate_to_width, UiMetrics, MENU_SEARCH_H};
+    use atelyx_core::plugin_runtime::{MenuItem, MenuOpenParams, MenuSearch};
     use iced::Length;
+
+    use crate::ui::menu::MenuEntry;
 
     #[test]
     fn divider_thickness_follows_split_axis() {
@@ -4355,5 +4394,79 @@ mod tests {
     #[test]
     fn clips_at_char_boundary() {
         assert_eq!(truncate_to_width("中文测试", 3.0, per_char), "中文…");
+    }
+
+    /// 字体菜单的条目形状：默认项 + 系统字体族，全部是勾选行。
+    fn font_menu(search: Option<MenuSearch>) -> MenuOpenParams {
+        let mut items = vec![MenuItem::Checked {
+            id: "style:font:".into(),
+            label: "默认".into(),
+            pane: 0,
+        }];
+        for label in ["Sans Serif", "Sarasa Mono SC", "Segoe UI"] {
+            items.push(MenuItem::Checked {
+                id: format!("style:font:{label}"),
+                label: label.into(),
+                pane: 0,
+            });
+        }
+        MenuOpenParams { items, width: None, search }
+    }
+
+    fn font_search() -> MenuSearch {
+        MenuSearch { placeholder: "搜索字体".into(), empty: Some("没有匹配的字体".into()) }
+    }
+
+    fn labels<'a>(entries: &'a [(usize, MenuEntry<'static, crate::Message>)]) -> Vec<&'a str> {
+        entries
+            .iter()
+            .filter_map(|(_, entry)| match entry {
+                MenuEntry::Action { label, .. }
+                | MenuEntry::Checked { label, .. }
+                | MenuEntry::Submenu { label, .. } => Some(label.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn font_menu_search_keeps_only_trimmed_case_folded_matches() {
+        let params = font_menu(Some(font_search()));
+        for query in ["sarasa", "SARASA", "  sarasa  "] {
+            let entries = plugin_entries(&params, query, 0);
+            assert_eq!(labels(&entries), ["Sarasa Mono SC"], "查询「{query}」应只留下命中的字体");
+            // 顶部是先插入的搜索行，随后一条分隔线，然后才是命中项
+            let MenuEntry::Custom(_, height) = &entries[0].1 else {
+                panic!("搜索行应是最顶部的自定义行")
+            };
+            assert!((*height - MENU_SEARCH_H).abs() < f32::EPSILON);
+            assert!(matches!(&entries[1].1, MenuEntry::Divider));
+            assert_eq!(entries.len(), 3);
+        }
+    }
+
+    #[test]
+    fn font_menu_search_shows_empty_hint_when_nothing_matches() {
+        let params = font_menu(Some(font_search()));
+        let entries = plugin_entries(&params, "不存在的字体", 0);
+        assert!(labels(&entries).is_empty(), "无匹配时不应留下条目");
+        assert_eq!(entries.len(), 3);
+        let MenuEntry::Custom(_, height) = &entries[2].1 else {
+            panic!("无匹配时应在搜索行与分隔线之后补空态行")
+        };
+        assert!((*height - 18.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn menu_without_search_keeps_items_regardless_of_query() {
+        let params = font_menu(None);
+        let entries = plugin_entries(&params, "sarasa", 0);
+        assert_eq!(
+            labels(&entries),
+            ["默认", "Sans Serif", "Sarasa Mono SC", "Segoe UI"],
+            "未声明 search 的旧调用方不插入搜索行、不按输入过滤"
+        );
+        assert!(matches!(&entries[0].1, MenuEntry::Checked { .. }));
+        assert_eq!(entries.len(), 4);
     }
 }

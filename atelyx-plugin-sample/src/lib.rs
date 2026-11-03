@@ -260,6 +260,8 @@ impl Worker {
             has_popup: 0,
             popup_rect: AbiRect::empty_at(0.0, 0.0),
             popup_capture: 0,
+            popup_layer: 0,
+            popup_order: 0,
             popup_commands: std::ptr::null(),
             popup_commands_len: 0,
             popup_hits: std::ptr::null(),

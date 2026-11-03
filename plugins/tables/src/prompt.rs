@@ -2,7 +2,7 @@
 //! 请求来自菜单，浮层由插件自绘（浮层帧），回车提交、Esc 取消、点外取消。
 
 use atelyx_format::table::ops;
-use atelyx_plugin_protocol::frame::{FrameRect, PopupCapture, SurfacePopup};
+use atelyx_plugin_protocol::frame::{FrameRect, PopupCapture, PopupLayer, SurfacePopup};
 use atelyx_plugin_protocol::paint::{ColorToken, DrawCommand, PaintColor};
 
 use crate::editor::Editor;
@@ -256,6 +256,8 @@ pub fn popup_frame(session: &Session, size: crate::model::Size) -> Option<Surfac
     Some(SurfacePopup {
         rect: FrameRect { x: area.x, y: area.y, w: area.w, h: area.h },
         capture: PopupCapture::All,
+        layer: PopupLayer::Panel,
+        order: 0,
         commands,
         hits: Vec::new(),
         ime: None,

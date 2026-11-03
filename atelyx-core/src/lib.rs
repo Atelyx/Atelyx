@@ -21,6 +21,9 @@ pub mod plugin_process;
 pub mod plugin_runtime;
 pub mod remote_image;
 pub mod rebuild_links;
+/// 测试与冒烟产物的统一临时根与 RAII 清理（宿主测试与示例共用）。
+#[doc(hidden)]
+pub mod scratch;
 pub mod search;
 pub mod space_client;
 pub mod space_frame;

@@ -22,10 +22,9 @@ async fn main() {
         .nth(1)
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("target/debug/preset-plugins"));
-    let root = std::env::temp_dir().join(format!("atelyx-ai-smoke-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = atelyx_core::scratch::TempDir::new("ai-smoke");
     copy_tree(&source, &root).expect("复制冒烟插件目录");
-    let runtime = PluginRuntime::with_host_version(root.clone(), "0.6.5");
+    let runtime = PluginRuntime::with_host_version(root.to_path_buf(), "0.6.5");
     runtime.scan();
 
     // 宿主请求应答放在独立线程：改宽基准会忙等，不能占住应答任务所在的运行时
@@ -475,8 +474,8 @@ async fn main() {
     runtime.notify_surface_detached(PANEL, SURFACE);
     runtime.set_enabled(PANEL, false).expect("停用面板");
     runtime.set_enabled(CORE, false).expect("停用核心");
+    runtime.shutdown();
     println!("停用：通过");
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 fn reply(runtime: &Arc<PluginRuntime>, request_id: u64, value: Value) {

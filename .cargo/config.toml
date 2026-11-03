@@ -1,3 +1,8 @@
+# 测试 / 冒烟临时目录落在工作区的 target/tmp（相对本文件父目录解析），避免系统临时盘堆积。
+# 其他机器与 CI 可用同名环境变量覆盖。
+[env]
+ATELYX_TMP_ROOT = { value = "target/tmp", relative = true }
+
 # MSVC 目标静态链接 VC++ 运行库：发行 exe 自包含，目标机器无需预装 VC++ Redistributable，
 # 安装器也无需捆绑运行库安装程序。
 # 插件 dll 由宿主运行时按路径装载，导入库与导出文件没有下游链接需求；link.exe 每写一份都会往 stdout

@@ -179,6 +179,8 @@ pub struct ViewState {
     pub selection: Option<TableSelection>,
     /// 单元格编辑器浮层（None = 未在编辑）。
     pub editing: Option<crate::edit::CellEdit>,
+    /// 编辑格内按住左键拖动：移动时把焦点移到落点、锚点保持起按处。
+    pub editor_drag: bool,
     /// 格式气泡可见（单击已选中格弹出；换选 / 进编辑 / 撤销重做即隐藏）。
     pub bar_shown: bool,
     pub hscroll_drag: Option<HScrollDrag>,
@@ -211,6 +213,10 @@ pub struct ViewState {
     pub image_press: Option<ImagePress>,
     /// 浮层输入（字段改名 / 插列 / 添加字段 / 选项编辑）。
     pub prompt: Option<crate::prompt::Prompt>,
+    /// 编辑光标当前是否可见（帧拍翻转实现闪烁）。
+    pub caret_on: bool,
+    /// 指针在面内的最近位置（离开即清空；远端名签据此判定悬停）。
+    pub pointer: Option<Point>,
 }
 
 /// 面尺寸。
@@ -354,6 +360,10 @@ pub struct Lightbox {
     /// 平移（放大后可拖动）。
     pub pan: Point,
     pub drag: Option<(Point, Point)>,
+    /// 图片是否仍在载入（开图 / 翻页置位，宿主回报后可加载尺寸或失败时清除）。
+    pub loading: bool,
+    /// 载入失败文案（`loading` 清除后与图片同框显示）。
+    pub error: Option<String>,
 }
 
 impl Lightbox {
@@ -365,6 +375,8 @@ impl Lightbox {
             zoom: 1.0,
             pan: Point::default(),
             drag: None,
+            loading: true,
+            error: None,
         }
     }
 

@@ -3628,10 +3628,8 @@ mod chat_append_tests {
     fn concurrent_appends_keep_each_line_parseable() {
         // 并发追加不变量：多端各自 O_APPEND 追加后，每行仍是完整 JSON（无行内交错）、
         // 消息不丢失。单机并发进程测试（本环境无 SMB/NAS，无法做跨设备双端压测）。
-        let dir = std::env::temp_dir().join(format!("atelyx-chat-append-{}", std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let root = &dir;
+        let dir = crate::scratch::TempDir::new("chat-append");
+        let root = &*dir;
         let rel = ".atelyx/对话历史/s.md.jsonl";
         let path = root.join(".atelyx/对话历史").join("s.md.jsonl");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -3643,7 +3641,6 @@ mod chat_append_tests {
         std::thread::scope(|scope| {
             for t in 0..total_threads {
                 let rel = rel.to_string();
-                let root = root.clone();
                 scope.spawn(move || {
                     let records: Vec<ChatMessageRecord> =
                         (0..per_thread).map(|i| record(&format!("t{t}-{i}"), "并发")).collect();
@@ -3668,15 +3665,9 @@ mod chat_append_tests {
 mod sideload_remap_tests {
     use super::*;
 
-    /// 临时目录（纳秒级命名防碰撞；残留于系统临时目录）。
-    fn tmp_root(tag: &str) -> PathBuf {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("atelyx-remap-{tag}-{nanos}"));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    /// 每个用例独立的临时仓库（`Drop` 清理，失败留日志）。
+    fn tmp_root(tag: &str) -> crate::scratch::TempDir {
+        crate::scratch::TempDir::new(&format!("remap-{tag}"))
     }
 
     /// 写一个历史侧文件（kind_sub = "" / "canvas/" / "table/"）。
@@ -3941,59 +3932,10 @@ mod tag_index_tests {
     }
 }
 
+/// 测试临时目录与残留检查（实现见 `crate::scratch`，此处保留仓库域入口）。
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
-    use std::path::{Path, PathBuf};
-
-    /// 测试用临时目录（纳秒级命名防碰撞）；`Drop` 递归清理，测试失败也不留残留。
-    pub struct TempDir(PathBuf);
-
-    impl TempDir {
-        pub fn new(tag: &str) -> Self {
-            let nanos = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos();
-            let dir = std::env::temp_dir().join(format!("atelyx-{tag}-{nanos}"));
-            std::fs::create_dir_all(&dir).unwrap();
-            TempDir(dir)
-        }
-
-        pub fn join(&self, rel: &str) -> PathBuf {
-            self.0.join(rel)
-        }
-    }
-
-    impl std::ops::Deref for TempDir {
-        type Target = Path;
-        fn deref(&self) -> &Path {
-            &self.0
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
-    /// 目录树下残留的 `.tmp` 文件（相对路径，排序）。
-    pub fn tmp_leftovers(dir: &Path) -> Vec<String> {
-        let mut out = Vec::new();
-        let mut stack = vec![dir.to_path_buf()];
-        while let Some(cur) = stack.pop() {
-            for entry in std::fs::read_dir(&cur).unwrap().filter_map(|e| e.ok()) {
-                let path = entry.path();
-                if path.is_dir() {
-                    stack.push(path);
-                } else if path.to_string_lossy().ends_with(".tmp") {
-                    out.push(path.to_string_lossy().into_owned());
-                }
-            }
-        }
-        out.sort();
-        out
-    }
+    pub use crate::scratch::{tmp_leftovers, TempDir};
 }
 
 #[cfg(test)]

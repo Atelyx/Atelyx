@@ -1589,6 +1589,17 @@ pub const MAX_MENU_ITEMS: usize = 512;
 /// 菜单面板数上限。
 pub const MAX_MENU_PANES: usize = 8;
 
+/// 菜单顶部搜索行；声明后宿主渲染输入框并按标签过滤条目。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MenuSearch {
+    /// 输入框提示文字。
+    pub placeholder: String,
+    /// 无匹配结果时的提示；缺省不显示空态行。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub empty: Option<String>,
+}
+
 /// [`menu::OPEN`] 的 params：`items` 顺序即渲染顺序。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1597,6 +1608,9 @@ pub struct MenuOpenParams {
     /// 菜单宽度（逻辑像素；宿主按内容与视口钳制）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub width: Option<f32>,
+    /// 声明后宿主在菜单顶部渲染搜索行：只匹配条目标签（去首尾空白、忽略大小写的子串）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search: Option<MenuSearch>,
 }
 
 impl MenuOpenParams {
@@ -1637,6 +1651,12 @@ impl MenuOpenParams {
         }
         if max_pane >= MAX_MENU_PANES {
             return Err(format!("菜单面板号不得超过 {}", MAX_MENU_PANES - 1));
+        }
+        if let Some(search) = &self.search {
+            ensure_text("菜单搜索提示", &search.placeholder)?;
+            if let Some(empty) = search.empty.as_deref() {
+                ensure_text("菜单搜索空态", empty)?;
+            }
         }
         Ok(())
     }
@@ -3348,6 +3368,7 @@ mod tests {
                 },
             ],
             width: None,
+            search: None,
         };
         assert!(ok.validate().is_ok());
         // 子面板入口指向根面板会打不开；越界同样拒绝
@@ -3361,9 +3382,43 @@ mod tests {
                     target,
                 }],
                 width: None,
+                search: None,
             };
             assert!(bad.validate().is_err(), "应拒绝目标面板 {target}");
         }
+    }
+
+    #[test]
+    fn menu_search_is_optional_and_validated() {
+        let plain = MenuOpenParams {
+            items: vec![MenuItem::Checked { id: "font".into(), label: "等宽".into(), pane: 0 }],
+            width: None,
+            search: None,
+        };
+        assert!(plain.validate().is_ok());
+        let wire = serde_json::to_value(&plain).unwrap();
+        assert!(wire.get("search").is_none(), "不声明搜索时载荷不变");
+
+        let searched = MenuOpenParams {
+            items: vec![MenuItem::Action {
+                id: "font".into(),
+                label: "等宽".into(),
+                icon: None,
+                danger: false,
+                disabled: false,
+                note: None,
+                hint: None,
+                pane: 0,
+            }],
+            width: None,
+            search: Some(MenuSearch { placeholder: "搜索字体".into(), empty: Some("没有匹配项".into()) }),
+        };
+        assert!(searched.validate().is_ok());
+        let bad = MenuOpenParams {
+            search: Some(MenuSearch { placeholder: "x".repeat(MAX_UI_STATE_TEXT + 1), empty: None }),
+            ..searched
+        };
+        assert!(bad.validate().unwrap_err().contains("菜单搜索提示"));
     }
 
     #[test]

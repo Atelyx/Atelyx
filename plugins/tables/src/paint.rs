@@ -28,6 +28,18 @@ const HEADER_MENU_W: f32 = 18.0;
 /// 列头右缘拖宽把手宽（px，未缩放）：与命中判定的右缘 8px 同口径。
 const COL_HANDLE_W: f32 = 8.0;
 
+/// 名签内边距 / 圆角 / 堆叠间距 / 最大宽（px，未缩放）。
+const TAG_PAD_X: f32 = 5.0;
+const TAG_PAD_Y: f32 = 2.0;
+const TAG_RADIUS: f32 = 3.0;
+const TAG_GAP: f32 = 2.0;
+const TAG_MAX_W: f32 = 160.0;
+/// 名签行高与正文同一行距口径（绘制侧按 `LINE_FACTOR` 排版）。
+const TAG_LINE: f32 = LINE_FACTOR;
+/// 名签相对指针的偏移（右侧下方起排，贴边时翻到左侧）。
+const TAG_OFFSET_X: f32 = 12.0;
+const TAG_OFFSET_Y: f32 = 14.0;
+
 /// 正文排版口径：固定行高倍数 + 按宽折行 + 复杂整形（与量算请求同一项）。
 fn text_layout(wrap_w: f32) -> TextLayout {
     TextLayout {
@@ -41,7 +53,7 @@ fn text_layout(wrap_w: f32) -> TextLayout {
 pub fn paint(
     session: Option<&Session>,
     size: Size,
-    remote: &[(crate::model::Rect, [u8; 4])],
+    remote: &[crate::presence::RemoteCursor],
 ) -> (Vec<DrawCommand>, Vec<HitRegion>) {
     let mut out = Vec::new();
     let mut hits = Vec::new();
@@ -152,8 +164,15 @@ pub fn paint(
     }
 
     // 远端协作者选区描边（各自身份色）
-    for (rect, color) in remote {
-        out.push(stroke_rect(rect.x, rect.y, rect.w, rect.h, PaintColor::Rgba { rgba: *color }, 1.5));
+    for cursor in remote {
+        out.push(stroke_rect(
+            cursor.rect.x,
+            cursor.rect.y,
+            cursor.rect.w,
+            cursor.rect.h,
+            PaintColor::Rgba { rgba: cursor.color },
+            1.5,
+        ));
     }
     // 本机选中框
     if let Some(rect) = selection_rect(&geo, session) {
@@ -167,16 +186,7 @@ pub fn paint(
     }
     // 新行条
     draw_new_row(&mut out, &geo, session);
-    // 单元格编辑器浮层（草稿文本 + 光标 + 选区底）
-    draw_editor(&mut out, &mut hits, &geo, session);
-
-    // Chrome：行号列 / 表头 / 状态栏 / 滚动条
-    draw_chrome(&mut out, &mut hits, &geo, session);
-
-    // 格式气泡（压在网格与 chrome 之上，灯箱浮层之下）
-    crate::format::paint(&mut out, session, size);
-
-    // 光标区：只表达指针形状（交互命中由插件按坐标自算）
+    // 光标区先声明：编辑器命中区后声明才能盖住网格（同帧内后声明者在上）
     hits.push(HitRegion {
         id: "grid".to_string(),
         x: geo.grid_left(),
@@ -185,6 +195,15 @@ pub fn paint(
         h: geo.viewport_h(),
         cursor: Some(HitCursor::Default),
     });
+    // 单元格编辑器浮层（草稿文本 + 光标 + 选区底）
+    draw_editor(&mut out, &mut hits, &geo, session);
+
+    // Chrome：行号列 / 表头 / 状态栏 / 滚动条
+    draw_chrome(&mut out, &mut hits, &geo, session);
+    // 远端协作者名签（悬停其选区时出现）
+    draw_remote_tags(&mut out, &geo, session, size, remote);
+
+    // 光标区：表头右缘的拖宽把手
     for field in 0..session.data.fields.len() {
         let x = geo.grid_left() + geo.col_x(field) - view.scroll_x;
         let width = geo.col_w(field);
@@ -687,25 +706,175 @@ fn reorder_target_rect(geo: &Geo<'_>, session: &Session, target: usize) -> Optio
     Some(Rect::new(geo.grid_left(), y - 1.0, geo.viewport_w(), 2.0))
 }
 
-/// 空态（未打开表格）。
+/// 悬停远端选区：在指针旁画昵称名签（跟随指针、多签顺序避让、钳进可见区）。
+fn draw_remote_tags(
+    out: &mut Vec<DrawCommand>,
+    geo: &Geo<'_>,
+    session: &Session,
+    size: Size,
+    remote: &[crate::presence::RemoteCursor],
+) {
+    let Some(pointer) = session.view.pointer else { return };
+    let font_size = crate::theme::font_micro();
+    let tag_h = font_size * TAG_LINE + 2.0 * TAG_PAD_Y;
+    let left = geo.grid_left();
+    let top = geo.grid_top();
+    let right = size.width - geo.scrollbar_w() - 4.0;
+    let bottom = (top + geo.viewport_h()).min(size.height);
+    let max_w = TAG_MAX_W.min(right - left);
+    if max_w < 24.0 {
+        return;
+    }
+    let mut placed: Vec<(f32, f32, f32, f32)> = Vec::new();
+    for cursor in remote {
+        if cursor.name.is_empty() || !cursor.rect.contains(pointer.x, pointer.y) {
+            continue;
+        }
+        let label = text::ellipsize(&cursor.name, font_size, max_w - 2.0 * TAG_PAD_X);
+        let w = (text::measure(&label, font_size) + 2.0 * TAG_PAD_X).min(max_w);
+        let mut x = pointer.x + TAG_OFFSET_X;
+        if x + w > right {
+            x = pointer.x - TAG_OFFSET_X - w;
+        }
+        x = x.max(left + 2.0).min((right - w).max(left + 2.0));
+        let mut y = pointer.y + TAG_OFFSET_Y;
+        for (ox, oy, ow, oh) in &placed {
+            if x < ox + ow && x + w > *ox && y < oy + *oh && y + tag_h > *oy {
+                y = oy + *oh + TAG_GAP;
+                if y + tag_h > bottom - 2.0 {
+                    y = oy - tag_h - TAG_GAP;
+                }
+            }
+        }
+        y = y.max(top + 2.0).min((bottom - tag_h - 2.0).max(top + 2.0));
+        out.push(DrawCommand::Rect {
+            x,
+            y,
+            w,
+            h: tag_h,
+            fill: Some(PaintColor::Rgba { rgba: cursor.color }),
+            stroke: None,
+            stroke_width: None,
+            corner_radius: Some(TAG_RADIUS),
+            shadow: None,
+        });
+        let [r, g, b, _] = cursor.color;
+        let light = 0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32;
+        let color = if light > 160.0 {
+            PaintColor::Rgba { rgba: [17, 17, 17, 255] }
+        } else {
+            PaintColor::Rgba { rgba: [255, 255, 255, 255] }
+        };
+        out.push(text_command(
+            &label,
+            x,
+            y + TAG_PAD_Y,
+            FontSpec {
+                size: font_size,
+                weight: None,
+                family: None,
+                family_name: None,
+                italic: false,
+                color,
+            },
+            Some(TextAlign::Center),
+            w,
+        ));
+        placed.push((x, y, w, tag_h));
+    }
+}
+
+/// 空态（未打开表格）：圆角图标底座 + 表格图标 + 标题 + 说明，整页居中。
 fn draw_empty(out: &mut Vec<DrawCommand>, size: Size) {
+    const BASE: f32 = 40.0;
+    const RADIUS: f32 = 10.0;
+    const GAP: f32 = 8.0;
+    const EMPTY_LINE: f32 = 1.2;
+    let title_size = crate::theme::font_body();
+    let desc_size = crate::theme::font_ui();
+    let title_h = title_size * EMPTY_LINE;
+    let desc_h = desc_size * EMPTY_LINE;
+    let total = BASE + GAP + title_h + GAP + desc_h;
     let cx = size.width / 2.0;
-    let cy = size.height / 2.0;
+    let top = ((size.height - total) / 2.0).max(0.0);
+    out.push(DrawCommand::Rect {
+        x: cx - BASE / 2.0,
+        y: top,
+        w: BASE,
+        h: BASE,
+        fill: Some(token(ColorToken::Surface)),
+        stroke: None,
+        stroke_width: None,
+        corner_radius: Some(RADIUS),
+        shadow: None,
+    });
+    // 表格图标：24 单位形状按 18px 缩放，居中放进底座
+    let icon = 18.0;
+    let k = icon / 24.0;
+    let ox = cx - icon / 2.0;
+    let oy = top + (BASE - icon) / 2.0;
+    let stroke = token(ColorToken::TextMuted);
+    out.push(DrawCommand::Rect {
+        x: ox + 3.0 * k,
+        y: oy + 3.0 * k,
+        w: 18.0 * k,
+        h: 18.0 * k,
+        fill: None,
+        stroke: Some(stroke),
+        stroke_width: Some(2.0 * k),
+        corner_radius: Some(2.0 * k),
+        shadow: None,
+    });
+    out.push(DrawCommand::Line {
+        x1: ox + 12.0 * k,
+        y1: oy + 3.0 * k,
+        x2: ox + 12.0 * k,
+        y2: oy + 21.0 * k,
+        stroke,
+        width: 2.0 * k,
+        dash: None,
+    });
+    for y in [9.0, 15.0] {
+        out.push(DrawCommand::Line {
+            x1: ox + 3.0 * k,
+            y1: oy + y * k,
+            x2: ox + 21.0 * k,
+            y2: oy + y * k,
+            stroke,
+            width: 2.0 * k,
+            dash: None,
+        });
+    }
+    let title_y = top + BASE + GAP;
     out.push(text_command(
         "未打开表格",
-        cx - 60.0,
-        cy - 10.0,
-        FontSpec { size: crate::theme::font_body(), weight: None, family: None, family_name: None, italic: false, color: token(ColorToken::TextSecondary)  },
-        Some(TextAlign::Start),
-        200.0,
+        0.0,
+        title_y,
+        FontSpec {
+            size: title_size,
+            weight: Some(atelyx_plugin_protocol::paint::TextWeight::Bold),
+            family: None,
+            family_name: None,
+            italic: false,
+            color: token(ColorToken::Text),
+        },
+        Some(TextAlign::Center),
+        size.width,
     ));
     out.push(text_command(
         "从文件面板打开一个 .atb 文件",
-        cx - 90.0,
-        cy + 14.0,
-        FontSpec { size: crate::theme::font_caption(), weight: None, family: None, family_name: None, italic: false, color: token(ColorToken::TextMuted)  },
-        Some(TextAlign::Start),
-        240.0,
+        0.0,
+        title_y + title_h + GAP,
+        FontSpec {
+            size: desc_size,
+            weight: None,
+            family: None,
+            family_name: None,
+            italic: false,
+            color: token(ColorToken::TextMuted),
+        },
+        Some(TextAlign::Center),
+        size.width,
     ));
 }
 
@@ -938,8 +1107,8 @@ fn draw_editor(
             wrap_w,
         ));
     }
-    // 光标（组合串也画在插入点前，随光标走）
-    if origin_y + (caret_line as f32 + 1.0) * line_h <= clip_bottom {
+    // 光标（组合串也画在插入点前，随光标走；帧拍按 `caret_on` 翻转显隐）
+    if session.view.caret_on && origin_y + (caret_line as f32 + 1.0) * line_h <= clip_bottom {
         out.push(fill_rect(
             origin_x + caret_x.min(wrap_w),
             origin_y + caret_line as f32 * line_h,
@@ -1027,4 +1196,152 @@ pub fn ime_rect(session: &Session, size: Size) -> Option<atelyx_plugin_protocol:
         w: 1.5,
         h: line_h,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use atelyx_format::table::{TableField, TableFile, TableRow};
+    use atelyx_plugin_protocol::frame::{HitCursor, HitRegion};
+    use atelyx_plugin_protocol::paint::{ColorToken, DrawCommand, PaintColor};
+
+    use super::paint;
+    use crate::model::{Point, Session, Size};
+
+    fn session(width: f32) -> Session {
+        let mut values = serde_json::Map::new();
+        values.insert("f".into(), serde_json::json!("abc"));
+        let mut session = Session::new(
+            "t.atb".into(),
+            TableFile {
+                schema: "atelyx-table/v1".into(),
+                id: "t".into(),
+                title: "T".into(),
+                fields: vec![TableField {
+                    id: "f".into(),
+                    name: "A".into(),
+                    field_type: "text".into(),
+                    options: None,
+                    width: None,
+                    calc_type: None,
+                }],
+                rows: vec![TableRow { id: "r".into(), values, height: None, styles: None }],
+                created_at: 0,
+                updated_at: 0,
+            },
+        );
+        session.view.canvas_size = Size { width, height: 200.0 };
+        session
+    }
+
+    #[test]
+    fn hovered_remote_selection_shows_name_tag() {
+        let mut session = session(400.0);
+        let geo = crate::geom::geo(
+            &session.view.layout,
+            session.view.scroll_x,
+            session.view.scroll_y,
+            session.view.zoom,
+            session.view.canvas_size,
+        )
+        .expect("已建布局");
+        let cell = geo.cell_rect(0, 0);
+        session.view.pointer = Some(Point::new(cell.x + cell.w / 2.0, cell.y + cell.h / 2.0));
+        let remote = vec![crate::presence::RemoteCursor {
+            rect: cell,
+            color: [59, 130, 246, 255],
+            name: "Ann".into(),
+        }];
+        let (commands, _) = paint(Some(&session), session.view.canvas_size, &remote);
+        assert!(commands.iter().any(|command| matches!(
+            command,
+            DrawCommand::Text { content, .. } if content == "Ann"
+        )));
+        // 名签底色 = 身份色
+        assert!(commands.iter().any(|command| matches!(
+            command,
+            DrawCommand::Rect { fill: Some(PaintColor::Rgba { rgba }), .. } if *rgba == [59, 130, 246, 255]
+        )));
+    }
+
+    #[test]
+    fn name_tag_clamps_inside_narrow_panel() {
+        let mut session = session(120.0);
+        let geo = crate::geom::geo(
+            &session.view.layout,
+            session.view.scroll_x,
+            session.view.scroll_y,
+            session.view.zoom,
+            session.view.canvas_size,
+        )
+        .expect("已建布局");
+        let cell = geo.cell_rect(0, 0);
+        session.view.pointer = Some(Point::new(cell.x + cell.w - 2.0, cell.y + cell.h / 2.0));
+        let remote = vec![crate::presence::RemoteCursor {
+            rect: cell,
+            color: [59, 130, 246, 255],
+            name: "A-very-long-collaborator-name".into(),
+        }];
+        let (commands, _) = paint(Some(&session), session.view.canvas_size, &remote);
+        let tag = commands.iter().find_map(|command| match command {
+            DrawCommand::Rect { fill: Some(PaintColor::Rgba { rgba }), x, w, corner_radius: Some(_), .. }
+                if *rgba == [59, 130, 246, 255] => Some((*x, *w)),
+            _ => None,
+        });
+        let (x, w) = tag.expect("应有名签");
+        assert!(x >= geo.grid_left());
+        assert!(x + w <= session.view.canvas_size.width);
+    }
+
+    #[test]
+    fn editing_cell_reports_text_cursor_over_grid_hit() {
+        let mut session = session(400.0);
+        crate::edit::begin(&mut session, 0, 0, None);
+        let geo = crate::geom::geo(
+            &session.view.layout,
+            session.view.scroll_x,
+            session.view.scroll_y,
+            session.view.zoom,
+            session.view.canvas_size,
+        )
+        .expect("已建布局");
+        let cell = geo.cell_rect(0, 0);
+        let cx = cell.x + cell.w / 2.0;
+        let cy = cell.y + cell.h / 2.0;
+        let (_, hits) = paint(Some(&session), session.view.canvas_size, &[]);
+        let top: &HitRegion = hits
+            .iter()
+            .rev()
+            .find(|hit| cx >= hit.x && cx <= hit.x + hit.w && cy >= hit.y && cy <= hit.y + hit.h)
+            .expect("编辑格应有命中区");
+        assert_eq!(top.cursor, Some(HitCursor::Text), "编辑格命中区应压在网格之上");
+    }
+
+    #[test]
+    fn editor_selection_highlight_draws_across_wrapped_lines() {
+        // 窄面 + 长草稿：选区底要在每个折行段各铺一段（整行裁切不应吞掉可见行）
+        let mut session = session(120.0);
+        crate::edit::begin(&mut session, 0, 0, None);
+        if let Some(edit) = session.view.editing.as_mut() {
+            edit.editor.text = "abcdefghijklmnopqrst".to_string();
+            edit.editor.touched = true;
+            edit.editor.anchor = 2;
+            edit.editor.caret = 19;
+        }
+        session.rebuild_layout();
+        let (commands, _) = paint(Some(&session), session.view.canvas_size, &[]);
+        let highlights = commands
+            .iter()
+            .filter(|command| {
+                matches!(
+                    command,
+                    DrawCommand::Rect {
+                        fill: Some(PaintColor::Token { name: ColorToken::Selection }),
+                        w,
+                        ..
+                    } if *w > 0.0
+                )
+            })
+            .count();
+        assert!(highlights >= 2, "折行的选区分段都应铺底色，实际 {highlights} 段");
+    }
 }

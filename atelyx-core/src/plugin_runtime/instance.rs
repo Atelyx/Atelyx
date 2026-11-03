@@ -442,6 +442,11 @@ impl Instance {
         self.set_status(PluginStatus::Stopped);
     }
 
+    /// 释放本次会话缓存的动态库句柄（宿主退出时调用，见 [`PluginRuntime::shutdown`]）。
+    pub(crate) fn release_library(&self) {
+        self.abi.release_library();
+    }
+
     /// 判定为不可装载 / 握手失败：置 `Failed` 并销毁实例。
     /// `token` 是引发失败的会话令牌；取到启停锁后令牌已被取代就不再动新会话。
     fn fail(self: &Arc<Self>, token: u64, reason: String) {
@@ -2757,6 +2762,13 @@ fn surface_kind_code(kind: SurfaceKind) -> u32 {
     }
 }
 
+/// 实例销毁兜底关闭日志写端：未走停用路径时，Windows 上打开着的日志文件会让插件目录删除失败。
+impl Drop for Instance {
+    fn drop(&mut self) {
+        self.log.close();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3055,6 +3067,8 @@ mod tests {
         };
         assert_eq!(params.session_id.as_deref(), Some("s1"));
         runtime.resolve_shell_call(request_id, Err("会话 s1 不存在".to_string()));
+        // 先释放运行时（实例日志写端随之关闭），临时目录才能删除
+        drop(runtime);
     }
 
     /// 各能力面未声明也执行：审计留痕，且不再以 `PERMISSION_DENIED` 收场。
@@ -3370,6 +3384,8 @@ mod tests {
             )
             .expect_err("收场后的回报应被丢弃");
         assert!(late.contains("已收场"), "应可读说明迟到：{late}");
+        // 先释放运行时（实例日志写端随之关闭），临时目录才能删除
+        drop(runtime);
     }
 
     /// 分组方法名（`ai.chat.send`）经能力总线调用与直接调用落到同一实现。
@@ -3485,6 +3501,8 @@ mod tests {
         // 关闭表格 = 缓存清空，迟到订阅者不再补发旧路径
         runtime.on_table_changed(None);
         assert_eq!(runtime.current_table_path(), None);
+        // 先释放运行时（实例日志写端随之关闭），临时目录才能删除
+        drop(runtime);
     }
 
     #[test]
@@ -3749,6 +3767,8 @@ mod tests {
         instance.stop();
         assert!(runtime.plugin_tools().is_empty(), "停用后工具必须摘除");
         assert_eq!(pending.await.unwrap().unwrap_err(), "插件已停止，工具调用已取消");
+        // 先释放运行时（实例日志写端随之关闭），临时目录才能删除
+        drop(runtime);
     }
 
     /// 工具调用登记在资源闸门内复查会话活跃：会话已失效时立即可读失败，不落表等满调用超时。
@@ -3784,6 +3804,8 @@ mod tests {
             .expect_err("会话失效后不得再登记工具调用");
         assert!(error.contains("插件未运行"), "{error}");
         assert!(runtime.tool_calls.lock().unwrap().is_empty(), "被拒的调用不得落表");
+        // 先释放运行时（实例日志写端随之关闭），临时目录才能删除
+        drop(runtime);
     }
 
     /// 导入源只能是插件私有目录内的既有文件：目录外、目录本身、空路径都拒收。

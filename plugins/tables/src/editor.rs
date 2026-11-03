@@ -132,6 +132,19 @@ impl Editor {
         true
     }
 
+    /// 结束输入法组合：把组合串并入正文并把光标落在其后（点击等收尾用）。
+    pub fn finish_preedit(&mut self) {
+        if self.preedit.is_empty() {
+            return;
+        }
+        let at = self.preedit_at.min(self.text.len());
+        self.text.insert_str(at, &self.preedit);
+        self.caret = at + self.preedit.len();
+        self.anchor = self.caret;
+        self.preedit.clear();
+        self.touched = true;
+    }
+
     /// 处理一次按键（编辑态语义：回车提交、Esc 取消、Shift+Enter 由 `multiline` 决定换行）。
     pub fn apply_key(&mut self, key: &Key, modifiers: &Modifiers, multiline: bool) -> KeyOutcome {
         let mut outcome = KeyOutcome::default();
@@ -286,6 +299,52 @@ impl Editor {
 
 }
 
+/// 双击落点处的词区间（字节位）：字母数字 / 下划线连成词，空白与其余符号按同类连写。
+pub fn word_range(text: &str, index: usize) -> (usize, usize) {
+    let index = floor_boundary(text, index);
+    // 落点在两字符之间：优先取左侧非空白字符（点在词尾时仍选该词），否则取右侧字符
+    let seed = if index > 0 {
+        let prev = prev_boundary(text, index);
+        let left = text[prev..].chars().next();
+        match left {
+            Some(c) if !c.is_whitespace() => prev,
+            _ if index < text.len() => index,
+            _ => prev,
+        }
+    } else {
+        index
+    };
+    let Some(ch) = text[seed..].chars().next() else { return (index, index) };
+    let class = char_class(ch);
+    let mut start = seed;
+    while start > 0 {
+        let prev = prev_boundary(text, start);
+        if char_class(text[prev..].chars().next().unwrap_or('\0')) != class {
+            break;
+        }
+        start = prev;
+    }
+    let mut end = seed;
+    while end < text.len() {
+        if char_class(text[end..].chars().next().unwrap_or('\0')) != class {
+            break;
+        }
+        end = next_boundary(text, end);
+    }
+    (start, end)
+}
+
+/// 双击选词的字符归类：空白 / 词字符（字母数字与下划线）/ 其余符号。
+fn char_class(ch: char) -> u8 {
+    if ch.is_whitespace() {
+        1
+    } else if ch.is_alphanumeric() || ch == '_' {
+        2
+    } else {
+        3
+    }
+}
+
 /// 字节位向下取整到字符边界：多行文本按字节列对齐时不能落进多字节字符中间。
 fn floor_boundary(text: &str, index: usize) -> usize {
     let mut index = index.min(text.len());
@@ -315,5 +374,34 @@ pub fn ordered(a: usize, b: usize) -> (usize, usize) {
         (a, b)
     } else {
         (b, a)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::word_range;
+
+    #[test]
+    fn word_range_selects_word_at_caret_and_word_end() {
+        let text = "hello world";
+        assert_eq!(word_range(text, 0), (0, 5));
+        assert_eq!(word_range(text, 3), (0, 5));
+        // 点在词尾边界（右侧是空格）仍选该词
+        assert_eq!(word_range(text, 5), (0, 5));
+        assert_eq!(word_range(text, 6), (6, 11));
+        assert_eq!(word_range(text, 8), (6, 11));
+        assert_eq!(word_range(text, 11), (6, 11));
+    }
+
+    #[test]
+    fn word_range_keeps_cjk_run_as_one_word() {
+        assert_eq!(word_range("中文abc", 1), (0, 9));
+    }
+
+    #[test]
+    fn word_range_splits_punctuation_from_words() {
+        assert_eq!(word_range("a.b", 0), (0, 1));
+        assert_eq!(word_range("a.b", 2), (1, 2));
+        assert_eq!(word_range("a.b", 3), (2, 3));
     }
 }

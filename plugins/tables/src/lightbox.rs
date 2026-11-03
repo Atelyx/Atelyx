@@ -1,6 +1,6 @@
 //! 灯箱（图片全屏预览）：浮层帧绘制与输入（滚轮缩放、拖动平移、双击复位、左右翻页、点外关闭）。
 
-use atelyx_plugin_protocol::frame::{FrameRect, PopupCapture, SurfacePopup};
+use atelyx_plugin_protocol::frame::{FrameRect, PopupCapture, PopupLayer, SurfacePopup};
 use atelyx_plugin_protocol::paint::{ColorToken, DrawCommand, ImageFit, PaintColor};
 
 use crate::images;
@@ -33,6 +33,25 @@ pub fn image_count(session: &Session, lightbox: &Lightbox) -> usize {
         .unwrap_or(0)
 }
 
+/// 翻页钮半径与圆心距边（面本地坐标；绘制与命中同口径）。
+pub const NAV_RADIUS: f32 = 16.0;
+const NAV_INSET: f32 = 24.0;
+
+/// 翻页钮矩形：`dir` = -1 左侧 / 1 右侧，垂直居中。
+pub fn nav_button(size: Size, dir: i32) -> Rect {
+    let cx = if dir < 0 {
+        NAV_INSET
+    } else {
+        (size.width - NAV_INSET).max(NAV_INSET)
+    };
+    Rect::new(
+        cx - NAV_RADIUS,
+        size.height / 2.0 - NAV_RADIUS,
+        NAV_RADIUS * 2.0,
+        NAV_RADIUS * 2.0,
+    )
+}
+
 /// 灯箱浮层帧：遮罩 + 图片（含平移）+ 翻页按钮 + 计数。
 pub fn popup_frame(session: &Session, size: Size) -> Option<SurfacePopup> {
     let lightbox = session.view.lightbox.as_ref()?;
@@ -63,58 +82,60 @@ pub fn popup_frame(session: &Session, size: Size) -> Option<SurfacePopup> {
     );
     let display = display_rect(inner, lightbox.zoom, lightbox.pan);
     let count = image_count(session, lightbox);
-    match current_image(session, lightbox) {
-        Some(rel) => {
-            commands.push(DrawCommand::Image {
-                source: atelyx_plugin_protocol::paint::ImageSource::Vault { path: rel, max_edge: None },
-                x: display.x,
-                y: display.y,
-                w: display.w,
-                h: display.h,
-                fit: Some(ImageFit::Contain),
-            });
-        }
-        None => {
-            commands.push(DrawCommand::Text {
-                x: rect.x,
-                y: rect.y + rect.h / 2.0 - crate::theme::font_caption() * TEXT_LINE / 2.0,
-                content: "图片已清空".to_string(),
-                size: crate::theme::font_caption(),
-                color: PaintColor::Token { name: ColorToken::TextMuted },
-                weight: None,
-                family: None,
-                family_name: None,
-                italic: false,
-                max_width: Some(rect.w),
-                align: Some(atelyx_plugin_protocol::paint::TextAlign::Center),
-                layout: None,
-            });
+    let mut hits = Vec::new();
+    if lightbox.loading {
+        commands.push(centered_note(size, "图片加载中…", ColorToken::TextMuted));
+    } else if let Some(error) = &lightbox.error {
+        commands.push(centered_note(size, error, ColorToken::Danger));
+    } else {
+        match current_image(session, lightbox) {
+            Some(rel) => {
+                commands.push(DrawCommand::Image {
+                    source: atelyx_plugin_protocol::paint::ImageSource::Vault { path: rel, max_edge: None },
+                    x: display.x,
+                    y: display.y,
+                    w: display.w,
+                    h: display.h,
+                    fit: Some(ImageFit::Contain),
+                });
+            }
+            None => commands.push(centered_note(size, "图片已清空", ColorToken::TextMuted)),
         }
     }
     // 翻页按钮（多图）：左右两侧垂直居中
     if count > 1 {
-        let mid_y = size.height / 2.0;
-        for x in [24.0, rect.w - 24.0] {
-            let left = x < rect.w / 2.0;
+        for (dir, id) in [(-1, "lb:prev"), (1, "lb:next")] {
+            let button = nav_button(size, dir);
+            let cx = button.x + NAV_RADIUS;
+            let cy = button.y + NAV_RADIUS;
             commands.push(DrawCommand::Circle {
-                cx: x,
-                cy: mid_y,
-                r: 16.0,
+                cx,
+                cy,
+                r: NAV_RADIUS,
                 fill: Some(PaintColor::Token { name: ColorToken::Scrim }),
                 stroke: None,
                 stroke_width: None,
             });
-            let (tip, back) = if left { (x + 3.0, x - 3.0) } else { (x - 3.0, x + 3.0) };
+            let tip = if dir < 0 { cx + 3.0 } else { cx - 3.0 };
+            let back = if dir < 0 { cx - 3.0 } else { cx + 3.0 };
             commands.push(DrawCommand::Path {
                 points: vec![
-                    atelyx_plugin_protocol::paint::PaintPoint { x: tip, y: mid_y - 5.0 },
-                    atelyx_plugin_protocol::paint::PaintPoint { x: back, y: mid_y },
-                    atelyx_plugin_protocol::paint::PaintPoint { x: tip, y: mid_y + 5.0 },
+                    atelyx_plugin_protocol::paint::PaintPoint { x: tip, y: cy - 5.0 },
+                    atelyx_plugin_protocol::paint::PaintPoint { x: back, y: cy },
+                    atelyx_plugin_protocol::paint::PaintPoint { x: tip, y: cy + 5.0 },
                 ],
                 closed: false,
                 fill: None,
                 stroke: Some(PaintColor::Token { name: ColorToken::Text }),
                 stroke_width: Some(1.5),
+            });
+            hits.push(atelyx_plugin_protocol::frame::HitRegion {
+                id: id.to_string(),
+                x: button.x,
+                y: button.y,
+                w: button.w,
+                h: button.h,
+                cursor: Some(atelyx_plugin_protocol::frame::HitCursor::Pointer),
             });
         }
     }
@@ -139,10 +160,31 @@ pub fn popup_frame(session: &Session, size: Size) -> Option<SurfacePopup> {
     Some(SurfacePopup {
         rect,
         capture: PopupCapture::All,
+        layer: PopupLayer::Panel,
+        order: 0,
         commands,
-        hits: Vec::new(),
+        hits,
         ime: None,
     })
+}
+
+/// 图片显示区内水平居中、垂直居中的提示文字（与图片同区，不压到头部行）。
+fn centered_note(size: Size, content: &str, color: ColorToken) -> DrawCommand {
+    let font = crate::theme::font_caption();
+    DrawCommand::Text {
+        x: 0.0,
+        y: size.height / 2.0 - HEADER_INSET - font * TEXT_LINE / 2.0,
+        content: content.to_string(),
+        size: font,
+        color: PaintColor::Token { name: color },
+        weight: None,
+        family: None,
+        family_name: None,
+        italic: false,
+        max_width: Some(size.width.max(1.0)),
+        align: Some(atelyx_plugin_protocol::paint::TextAlign::Center),
+        layout: None,
+    }
 }
 
 /// 灯箱显示区：内框按倍率放大并居中，叠加夹紧后的平移；图片由宿主在框内按比例 `Contain`。
@@ -189,6 +231,8 @@ pub fn navigate(lightbox: &mut Lightbox, count: usize, dir: i32) {
     }
     lightbox.index = (lightbox.index as i32 + dir).rem_euclid(count as i32) as usize;
     lightbox.reset_zoom();
+    lightbox.loading = true;
+    lightbox.error = None;
 }
 
 /// 滚轮缩放（以光标为锚）：协议里 `delta_y` 为正 = 向下滚 = 缩小。
@@ -208,4 +252,95 @@ pub fn zoom_at(lightbox: &mut Lightbox, size: Size, cursor: Point, delta_y: f32)
     let target_y = cursor.y - anchor_y * after.h;
     lightbox.pan = Point::new(target_x - after.x + lightbox.pan.x, target_y - after.y + lightbox.pan.y);
     clamp_pan(lightbox, size);
+}
+
+#[cfg(test)]
+mod tests {
+    use atelyx_format::table::{TableField, TableFile, TableRow};
+    use atelyx_plugin_protocol::paint::DrawCommand;
+
+    use super::{nav_button, navigate, popup_frame};
+    use crate::model::{Lightbox, Session, Size};
+
+    fn session() -> Session {
+        let mut values = serde_json::Map::new();
+        values.insert("f".into(), serde_json::json!(["a.png", "b.png"]));
+        let mut session = Session::new(
+            "t.atb".into(),
+            TableFile {
+                schema: "atelyx-table/v1".into(),
+                id: "t".into(),
+                title: "T".into(),
+                fields: vec![TableField {
+                    id: "f".into(),
+                    name: "A".into(),
+                    field_type: "image".into(),
+                    options: None,
+                    width: None,
+                    calc_type: None,
+                }],
+                rows: vec![TableRow { id: "r".into(), values, height: None, styles: None }],
+                created_at: 0,
+                updated_at: 0,
+            },
+        );
+        session.view.canvas_size = Size { width: 400.0, height: 300.0 };
+        session.view.lightbox = Some(Lightbox::new("r".into(), "f".into(), 0));
+        session
+    }
+
+    #[test]
+    fn navigate_wraps_and_resets_loading() {
+        let mut lightbox = Lightbox::new("row".into(), "field".into(), 0);
+        lightbox.loading = false;
+        lightbox.zoom = 2.0;
+        lightbox.error = Some("旧错误".into());
+        navigate(&mut lightbox, 3, -1);
+        assert_eq!(lightbox.index, 2);
+        assert_eq!(lightbox.zoom, 1.0);
+        assert!(lightbox.loading);
+        assert_eq!(lightbox.error, None);
+        navigate(&mut lightbox, 3, 1);
+        assert_eq!(lightbox.index, 0);
+    }
+
+    #[test]
+    fn nav_buttons_stay_inside_narrow_panel() {
+        let size = Size { width: 120.0, height: 200.0 };
+        let left = nav_button(size, -1);
+        let right = nav_button(size, 1);
+        assert_eq!(left.x, 8.0);
+        assert_eq!(right.x + right.w, size.width - 8.0);
+        assert!(nav_button(Size { width: 40.0, height: 200.0 }, 1).x >= 0.0);
+    }
+
+    #[test]
+    fn loading_and_error_show_note_instead_of_image() {
+        let mut session = session();
+        let popup = popup_frame(&session, session.view.canvas_size).expect("应有浮层");
+        assert!(!popup.commands.iter().any(|command| matches!(command, DrawCommand::Image { .. })));
+        assert!(popup.commands.iter().any(|command| matches!(
+            command,
+            DrawCommand::Text { content, .. } if content == "图片加载中…"
+        )));
+        if let Some(lightbox) = session.view.lightbox.as_mut() {
+            lightbox.loading = false;
+            lightbox.error = Some("无法加载图片".into());
+        }
+        let popup = popup_frame(&session, session.view.canvas_size).expect("应有浮层");
+        assert!(popup.commands.iter().any(|command| matches!(
+            command,
+            DrawCommand::Text { content, .. } if content == "无法加载图片"
+        )));
+    }
+
+    #[test]
+    fn loaded_image_emits_image_command() {
+        let mut session = session();
+        if let Some(lightbox) = session.view.lightbox.as_mut() {
+            lightbox.loading = false;
+        }
+        let popup = popup_frame(&session, session.view.canvas_size).expect("应有浮层");
+        assert!(popup.commands.iter().any(|command| matches!(command, DrawCommand::Image { .. })));
+    }
 }

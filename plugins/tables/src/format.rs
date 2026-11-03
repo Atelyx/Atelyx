@@ -1,7 +1,10 @@
 //! 格式气泡：选中格上的样式工具条（字体 / 字号 / B I U S / 字色 / 底色 / 清除）。
-//! 位置随选区钳在面内（上方放不下翻到下方），条目命中由交互层按几何判定。
+//! 以窗口级浮层提交（不随面裁剪，可盖住面板头部）；条目命中由交互层按几何判定。
 
 use atelyx_format::table::ops::{self, KeyOp, OptState, StylePatch, StyleSummary};
+use atelyx_plugin_protocol::frame::{
+    FrameRect, HitCursor, HitRegion, PopupCapture, PopupLayer, SurfacePopup,
+};
 use atelyx_plugin_protocol::paint::{ColorToken, DrawCommand, PaintColor};
 
 use crate::model::{Rect, Session, Size};
@@ -161,7 +164,8 @@ fn swatch_fill(state: &OptState<String>) -> Option<[u8; 4]> {
     }
 }
 
-/// 气泡矩形：锚在选区左上，上方放不下翻到选区下方，再钳进面内。
+/// 气泡矩形（面本地坐标）：锚在选区左上、向上展开。面尺寸只用于横向避让，
+/// 不收缩宽高、不限 y——越出面矩形的部分由窗口级浮层按窗口裁剪。
 pub fn bar_rect(session: &Session, size: Size) -> Option<Rect> {
     let region = ops::region_of(
         session.view.selection.as_ref(),
@@ -185,22 +189,11 @@ pub fn bar_rect(session: &Session, size: Size) -> Option<Rect> {
         size,
     )?;
     let first = geo.cell_rect(region.row_start, region.col_start);
-    let last = geo.cell_rect(region.row_end, region.col_end);
     let left = first.x.max(geo.grid_left());
-    let top = first.y;
-    let max_x = (size.width - width - 6.0).max(6.0);
-    let mut x = left.min(max_x).max(6.0);
-    let mut y = top - height - BAR_GAP_SELECTION;
-    if y < geo.grid_top() {
-        let below = last.bottom() + BAR_GAP_SELECTION;
-        y = below;
-    }
-    let max_y = (size.height - height - 6.0).max(geo.grid_top());
-    y = y.clamp(geo.grid_top(), max_y);
-    if width > size.width - 12.0 {
-        x = 6.0;
-    }
-    Some(Rect::new(x, y, width.min(size.width - 12.0), height))
+    // 右侧放不下就整体左移；面比气泡还窄时贴面左缘铺开，宽度保持完整
+    let x = left.min((size.width - width - 6.0).max(6.0));
+    let y = first.y - height - BAR_GAP_SELECTION;
+    Some(Rect::new(x, y, width, height))
 }
 
 /// 气泡是否可见（编辑中 / 拖拽中 / 灯箱打开时不显示）。
@@ -236,8 +229,44 @@ pub fn hit(session: &Session, size: Size, point: crate::model::Point) -> Option<
     Some(FormatHit::Blank)
 }
 
+/// 气泡窗口级浮层；不可见时返回 `None`（本帧不带浮层即收起）。
+pub fn popup_frame(session: &Session, size: Size) -> Option<SurfacePopup> {
+    if !visible(session) {
+        return None;
+    }
+    let rect = bar_rect(session, size)?;
+    let summary = selection_style(session)?;
+    let mut commands = Vec::new();
+    paint_into(&mut commands, session, size);
+    let mut hits = Vec::new();
+    let mut x = rect.x + BAR_PAD_X;
+    for (index, item) in ITEMS.iter().enumerate() {
+        let width = item_width(*item, &summary);
+        if FormatHit::of(*item).is_some() {
+            hits.push(HitRegion {
+                id: format!("format:{index}"),
+                x,
+                y: rect.y,
+                w: width,
+                h: rect.h,
+                cursor: Some(HitCursor::Pointer),
+            });
+        }
+        x += width + BAR_GAP;
+    }
+    Some(SurfacePopup {
+        rect: FrameRect { x: rect.x, y: rect.y, w: rect.w, h: rect.h },
+        capture: PopupCapture::Inside,
+        layer: PopupLayer::Window,
+        order: 1,
+        commands,
+        hits,
+        ime: None,
+    })
+}
+
 /// 绘制气泡：底 + 边框 + 条目（B/I/U/S 按当前样式高亮，颜色条目画色块）。
-pub fn paint(out: &mut Vec<DrawCommand>, session: &Session, size: Size) {
+fn paint_into(out: &mut Vec<DrawCommand>, session: &Session, size: Size) {
     if !visible(session) {
         return;
     }
@@ -467,5 +496,66 @@ pub fn current_color(session: &Session, background: bool) -> Option<String> {
     match state {
         OptState::Value(value) => value,
         OptState::Mixed => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use atelyx_format::table::ops::TableSelection;
+    use atelyx_format::table::{TableField, TableFile, TableRow};
+    use atelyx_plugin_protocol::paint::DrawCommand;
+
+    use super::popup_frame;
+    use crate::model::{Session, Size};
+
+    fn session(width: f32) -> Session {
+        let mut values = serde_json::Map::new();
+        values.insert("f".into(), serde_json::json!("abc"));
+        let mut session = Session::new(
+            "t.atb".into(),
+            TableFile {
+                schema: "atelyx-table/v1".into(),
+                id: "t".into(),
+                title: "T".into(),
+                fields: vec![TableField {
+                    id: "f".into(),
+                    name: "A".into(),
+                    field_type: "text".into(),
+                    options: None,
+                    width: None,
+                    calc_type: None,
+                }],
+                rows: vec![TableRow { id: "r".into(), values, height: None, styles: None }],
+                created_at: 0,
+                updated_at: 0,
+            },
+        );
+        session.view.canvas_size = Size { width, height: 200.0 };
+        session.view.selection =
+            Some(TableSelection::Cell { row_id: "r".into(), field_id: "f".into() });
+        session.view.bar_shown = true;
+        session
+    }
+
+    #[test]
+    fn bubble_is_window_layer_and_not_clipped_by_narrow_panel() {
+        let session = session(160.0);
+        let popup = popup_frame(&session, session.view.canvas_size).expect("选中格应弹气泡");
+        assert_eq!(popup.layer, atelyx_plugin_protocol::frame::PopupLayer::Window);
+        assert_eq!(popup.capture, atelyx_plugin_protocol::frame::PopupCapture::Inside);
+        assert!(
+            popup.rect.w > session.view.canvas_size.width,
+            "面比气泡窄时不应压窄气泡：{}",
+            popup.rect.w
+        );
+        assert!(popup.rect.y < 0.0, "首行选区的气泡应越出面顶盖住面板头部：{}", popup.rect.y);
+        assert!(
+            popup.commands.iter().any(|command| matches!(
+                command,
+                DrawCommand::Text { content, .. } if content == "B"
+            )),
+            "气泡应含样式条目"
+        );
+        assert!(!popup.hits.is_empty(), "条目光标区应随浮层提交");
     }
 }

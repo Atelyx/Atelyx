@@ -23,7 +23,9 @@ use std::sync::{Arc, Mutex};
 
 use atelyx_plugin_protocol::event::{self, PublishParams};
 use atelyx_plugin_protocol::frame::{FrameInput, FrameInputParams, SurfaceFrame};
-use atelyx_plugin_protocol::method::{ContributionSlot, SurfaceAttachedParams, SurfaceDetachedParams};
+use atelyx_plugin_protocol::method::{
+    ContributionSlot, MenuOpenParams, MenuSearch, SurfaceAttachedParams, SurfaceDetachedParams,
+};
 use atelyx_plugin_sdk::{Context, PluginHandler, PluginInfo};
 
 use crate::model::{Session, Size};
@@ -36,6 +38,8 @@ const VIEW: &str = "table";
 const PANEL_TARGET: &str = "table";
 /// 长按判定期间的帧拍频率（缩略图按住等长按到点）。
 const TICK_HZ: u16 = 30;
+/// 编辑光标闪烁帧拍（500ms 一次翻转）。
+const CARET_BLINK_HZ: u16 = 2;
 
 /// 自动保存防抖（毫秒，与宿主保存链同口径）。
 const AUTOSAVE_DEBOUNCE_MS: u64 = 500;
@@ -146,11 +150,48 @@ impl PluginState {
                 Ok(guard) => guard,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            build_frame(guard.as_ref(), &remote)
+            build_frame(guard.as_ref(), &remote, size)
         };
         if let Err(error) = ctx.submit_frame(VIEW, frame).await {
             ctx.log_error(&format!("提交表格视图失败：{error}"));
         }
+    }
+
+    /// 探明灯箱当前图能否载入：尺寸可读即收起加载占位，失败给出同框文案。
+    /// 只对仍在看的那张图生效——翻页在途的旧回执不能收起新图的占位。
+    pub(crate) async fn probe_lightbox(&self, ctx: &Context, path: &str) {
+        let params = atelyx_plugin_protocol::method::PathParams { path: path.to_string() };
+        let Ok(value) = serde_json::to_value(&params) else { return };
+        let failed = match ctx
+            .call_raw(atelyx_plugin_protocol::method::vault::IMAGE_INFO, value)
+            .await
+        {
+            Ok(_) => None,
+            Err(error) => {
+                ctx.log_error(&format!("读取图片信息失败（{path}）：{error}"));
+                Some("无法加载图片".to_string())
+            }
+        };
+        let current = self
+            .with_session(|session| {
+                session
+                    .view
+                    .lightbox
+                    .as_ref()
+                    .and_then(|lightbox| crate::lightbox::current_image(session, lightbox))
+                    .filter(|current| current.as_str() == path)
+            })
+            .flatten();
+        if current.is_none() {
+            return;
+        }
+        self.with_session_mut(|session| {
+            if let Some(lightbox) = session.view.lightbox.as_mut() {
+                lightbox.loading = false;
+                lightbox.error = failed;
+            }
+        });
+        self.render(ctx).await;
     }
 
     /// 批量补齐断行量算：每批 512 条，宿主按同口径折行并回传逐行行段。
@@ -265,12 +306,20 @@ impl PluginState {
         }
     }
 
+    /// 字体清单可能有几十项：只给样式字体菜单加搜索行，其余菜单不声明。
+    fn font_menu_search(request: &input::MenuRequest) -> Option<MenuSearch> {
+        matches!(request, input::MenuRequest::StyleFont).then(|| MenuSearch {
+            placeholder: "搜索字体".into(),
+            empty: Some("没有匹配的字体".into()),
+        })
+    }
+
     /// 打开右键菜单（宿主渲染、选中回传）。
     async fn open_menu(&self, ctx: &Context, request: input::MenuRequest) {
         let Some(items) = self.with_session(|session| menu::build(session, &request)) else {
             return;
         };
-        let params = atelyx_plugin_protocol::method::MenuOpenParams { items, width: None };
+        let params = MenuOpenParams { items, width: None, search: Self::font_menu_search(&request) };
         if let Err(error) = ctx.open_menu(&params).await {
             ctx.log_error(&format!("打开表格菜单失败：{error}"));
         }
@@ -827,23 +876,33 @@ impl PluginState {
 /// 组帧：按当前会话与面尺寸画出整面（无会话 = 空态）。
 fn build_frame(
     session: Option<&Session>,
-    remote: &[(model::Rect, [u8; 4])],
+    remote: &[presence::RemoteCursor],
+    fallback: Size,
 ) -> SurfaceFrame {
-    let size = session
-        .map(|session| session.view.canvas_size)
-        .unwrap_or(Size { width: 0.0, height: 0.0 });
+    let size = match session {
+        Some(session)
+            if session.view.canvas_size.width > 0.0 && session.view.canvas_size.height > 0.0 =>
+        {
+            session.view.canvas_size
+        }
+        _ => fallback,
+    };
     let (commands, hits) = paint::paint(session, size, remote);
     let ime = session.and_then(|session| paint::ime_rect(session, size));
-    // 长按缩略图按帧拍推进；有会话时另以 1fps 驱动在场保活与过期剔除
+    // 长按缩略图 30fps 判长按；编辑态按光标闪烁 2fps；其余 1fps 驱动在场保活与过期剔除
     let fps = session.map(|session| {
         if session.view.image_press.is_some() {
             crate::TICK_HZ
+        } else if session.view.editing.is_some() {
+            CARET_BLINK_HZ
         } else {
             1
         }
     });
     let popup = session.and_then(|session| {
-        prompt::popup_frame(session, size).or_else(|| lightbox::popup_frame(session, size))
+        prompt::popup_frame(session, size)
+            .or_else(|| lightbox::popup_frame(session, size))
+            .or_else(|| format::popup_frame(session, size))
     });
     SurfaceFrame {
         size: Some(atelyx_plugin_protocol::frame::FrameSize { w: size.width, h: size.height }),
@@ -1049,7 +1108,11 @@ impl PluginHandler for TablesPlugin {
             .state
             .with_session_mut(crate::input::tick_image_press)
             .unwrap_or(false);
-        if started || presence_changed {
+        let blinked = self
+            .state
+            .with_session_mut(crate::input::tick_caret)
+            .unwrap_or(false);
+        if started || blinked || presence_changed {
             self.state.render(ctx).await;
             if presence_changed {
                 self.state.publish_header(ctx).await;
@@ -1075,6 +1138,7 @@ impl PluginHandler for TablesPlugin {
             .state
             .with_session_mut(|session| input::handle(session, &params.input))
             .unwrap_or_default();
+        let lightbox_image = outcome.lightbox_image.clone();
         if let Some(action) = outcome.clipboard {
             self.state.run_clipboard(ctx, action).await;
         }
@@ -1102,6 +1166,12 @@ impl PluginHandler for TablesPlugin {
         }
         if outcome.paint || outcome.dirty {
             self.state.render(ctx).await;
+        }
+        if let Some(path) = lightbox_image {
+            // 探针走后台任务：宿主在空间模式下要整文件下载，不能堵住输入队列
+            let state = self.state.clone();
+            let ctx = ctx.clone();
+            tokio::spawn(async move { state.probe_lightbox(&ctx, &path).await });
         }
     }
 }
@@ -1185,4 +1255,55 @@ async fn space_container(ctx: &Context) -> bool {
         .get("kind")
         .and_then(|kind| kind.as_str())
         .is_some_and(|kind| kind == "space")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_frame;
+    use crate::model::Size;
+    use atelyx_plugin_protocol::paint::DrawCommand;
+
+    #[test]
+    fn empty_frame_uses_surface_size_and_standard_placeholder() {
+        let frame = build_frame(None, &[], Size { width: 320.0, height: 200.0 });
+        let size = frame.size.expect("整面帧必须带尺寸");
+        assert_eq!(size.w, 320.0);
+        assert_eq!(size.h, 200.0);
+        let texts: Vec<&str> = frame
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                DrawCommand::Text { content, .. } => Some(content.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(texts.contains(&"未打开表格"));
+        assert!(texts.contains(&"从文件面板打开一个 .atb 文件"));
+        assert!(frame.commands.iter().any(|command| matches!(
+            command,
+            DrawCommand::Rect { w, h, corner_radius: Some(_), .. }
+                if (*w - 40.0).abs() < f32::EPSILON && (*h - 40.0).abs() < f32::EPSILON
+        )));
+    }
+
+    #[test]
+    fn font_menu_is_the_only_menu_declaring_search() {
+        use super::PluginState;
+        use crate::input::MenuRequest;
+
+        let search = PluginState::font_menu_search(&MenuRequest::StyleFont)
+            .expect("字体菜单应声明搜索行");
+        assert_eq!(search.placeholder, "搜索字体");
+        assert_eq!(search.empty.as_deref(), Some("没有匹配的字体"));
+        for request in [
+            MenuRequest::StyleSize,
+            MenuRequest::All,
+            MenuRequest::Cell { row: "r1".into(), field: "f1".into() },
+        ] {
+            assert!(
+                PluginState::font_menu_search(&request).is_none(),
+                "只有字体菜单声明搜索行：{request:?}"
+            );
+        }
+    }
 }

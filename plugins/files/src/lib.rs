@@ -358,7 +358,7 @@ impl FilesPlugin {
 
     /// 弹出一个宿主菜单。
     async fn open_menu(&self, ctx: &Context, items: Vec<MenuItem>, width: f32) {
-        let params = MenuOpenParams { items, width: Some(width) };
+        let params = MenuOpenParams { items, width: Some(width), search: None };
         if let Err(error) = ctx.open_menu(&params).await {
             ctx.log_error(&format!("弹出菜单失败：{error}"));
         }

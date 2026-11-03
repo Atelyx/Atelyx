@@ -11,7 +11,7 @@ use atelyx_core::plugin_runtime::{
     FrameInput, HostRequest, MeasureTextResult, MouseButton, PanelHeaderParams, PluginRuntime,
     PluginStatus, SurfaceKind,
 };
-use atelyx_plugin_protocol::frame::SurfaceFrame;
+use atelyx_plugin_protocol::frame::{PopupLayer, SurfaceFrame, SurfacePopup};
 use atelyx_plugin_protocol::method::{
     FontSizes, Radii, ThemeColors, ThemeResult,
 };
@@ -29,21 +29,18 @@ async fn main() {
         .nth(1)
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("target/debug/preset-plugins"));
-    let root = std::env::temp_dir().join(format!("atelyx-tables-smoke-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = atelyx_core::scratch::TempDir::new("tables-smoke");
     copy_tree(&source, &root).expect("复制冒烟插件目录");
-    let runtime = PluginRuntime::with_host_version(root.clone(), "0.6.5");
+    let runtime = PluginRuntime::with_host_version(root.to_path_buf(), "0.6.5");
     runtime.scan();
 
     // 临时仓库：一张两行一列的表格
-    let vault = std::env::temp_dir().join(format!("atelyx-tables-vault-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&vault);
-    std::fs::create_dir_all(&vault).expect("建临时仓库");
+    let vault = atelyx_core::scratch::TempDir::new("tables-vault");
     let table_path = vault.join("demo.atb");
     std::fs::write(&table_path, seed_table()).expect("写初始表格");
 
     let state = Arc::new(HostState::default());
-    serve(runtime.clone(), state.clone(), vault.clone());
+    serve(runtime.clone(), state.clone(), vault.to_path_buf());
 
     enable(&runtime, TABLES_ID).await;
     wait_running(&runtime, TABLES_ID).await;
@@ -84,14 +81,22 @@ async fn main() {
     assert!(frame.hits.iter().any(|hit| hit.id.starts_with("h:")), "表头应有光标区");
     println!("载入：{} 条指令 / {} 个命中区", frame.commands.len(), frame.hits.len());
 
-    // 点第一格 → 再点一次已在选中的格弹格式气泡（气泡帧里有 B / I / U / S 字样）
+    // 点第一格 → 再点一次已在选中的格弹格式气泡（窗口级浮层，气泡帧里有 B / I / U / S 字样）
     let cell = cell_point(0, 0);
     click_at(&runtime, cell.0, cell.1);
     // 隔开双击判定窗口：第二下必须是独立单击，否则会走「双击进编辑」
     tokio::time::sleep(Duration::from_millis(650)).await;
     click_at(&runtime, cell.0, cell.1);
-    let bubble = wait_frame(&runtime, |frame| has_text(frame, "B") && has_text(frame, "S")).await;
-    assert!(bubble.is_some(), "重按已选中格应弹格式气泡");
+    let bubble = wait_frame(&runtime, |frame| {
+        frame.popup.as_ref().is_some_and(|popup| {
+            popup.layer == PopupLayer::Window
+                && popup_has_text(popup, "B")
+                && popup_has_text(popup, "S")
+        })
+    })
+    .await;
+    let bubble = bubble.expect("重按已选中格应在窗口级浮层弹格式气泡");
+    assert!(!has_text(&bubble, "S"), "格式气泡不应再画进主帧命令");
 
     // 双击进编辑 → 输入替换文本 → 回车提交（先全选再替换：Ctrl+A 后打字）
     double_click_at(&runtime, cell.0, cell.1);
@@ -167,8 +172,6 @@ async fn main() {
     assert!(matches!(status, Some(PluginStatus::Stopped) | None), "停用后应退出运行态");
     println!("停用：通过");
     runtime.shutdown();
-    let _ = std::fs::remove_dir_all(&vault);
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// 初始表格内容（schema / 字段 / 两行）。
@@ -422,6 +425,12 @@ fn reply(runtime: &PluginRuntime, request_id: u64, result: Value) {
 
 fn has_text(frame: &SurfaceFrame, wanted: &str) -> bool {
     frame.commands.iter().any(|command| {
+        matches!(command, DrawCommand::Text { content, .. } if content == wanted)
+    })
+}
+
+fn popup_has_text(popup: &SurfacePopup, wanted: &str) -> bool {
+    popup.commands.iter().any(|command| {
         matches!(command, DrawCommand::Text { content, .. } if content == wanted)
     })
 }

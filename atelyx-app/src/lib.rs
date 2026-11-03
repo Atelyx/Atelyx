@@ -28,6 +28,7 @@ mod doc_session;
 mod panel_header;
 mod plugin_theme;
 mod plugin_frame;
+mod plugin_overlay;
 mod plugin_paint;
 mod plugin_view;
 mod properties_view;
@@ -627,6 +628,15 @@ enum Message {
     },
     /// 宿主菜单关闭：回传选中项给发起插件。
     PluginMenuClosed { selected: Option<String> },
+    /// 插件菜单搜索输入。
+    PluginMenuQuery(String),
+    /// 整面帧上报自己的窗口坐标原点（布局变化时发）：窗口级浮层按它平移面本地坐标。
+    PluginSurfaceOrigin {
+        window: window::Id,
+        plugin_id: String,
+        surface_id: String,
+        origin: Point,
+    },
     /// 整面帧的焦点请求 / 释放。
     PluginFrameFocus {
         window: window::Id,
@@ -1493,6 +1503,10 @@ pub struct App {
     pub file_drag_surface: Option<(String, String)>,
     /// 插件菜单的归属插件与条目（宿主弹层渲染，选中后回传）。
     pub plugin_menu: Option<(String, atelyx_core::plugin_runtime::MenuOpenParams)>,
+    /// 插件菜单搜索输入（菜单声明 `search` 时使用；每次打开清空）。
+    pub plugin_menu_query: String,
+    /// 窗口级浮层的面原点（窗口 / 插件 / 面 → 面左上角窗口坐标），由整面帧布局变化时上报。
+    pub plugin_surface_origins: HashMap<(window::Id, String, String), Point>,
 }
 
 /// `doc:presence` 广播用的远端光标视图（字节偏移，UTF-16 已换算）。选区缺省 = 对端在场但
@@ -1683,6 +1697,8 @@ impl App {
                 file_drag_target: None,
                 file_drag_surface: None,
                 plugin_menu: None,
+                plugin_menu_query: String::new(),
+                plugin_surface_origins: HashMap::new(),
                 persist_dirty: false,
                 main_size: DEFAULT_WINDOW_SIZE,
                 os_positions: HashMap::new(),
@@ -1934,6 +1950,7 @@ impl App {
                     // 光标记录随窗口消失；该窗在途悬停提示立即清除
                     // （cursors 缺失会让收起判定恒 false，提示与心跳订阅悬挂）
                     self.cursors.remove(&id);
+                    self.plugin_surface_origins.retain(|(w, _, _), _| *w != id);
                     if self.tooltip.as_ref().is_some_and(|(w, _, _, _, _, _)| *w == id) {
                         self.tooltip = None;
                     }
@@ -2429,6 +2446,17 @@ impl App {
                 self.open_plugin_menu(request_id, plugin_id, params)
             }
             Message::PluginMenuClosed { selected } => self.close_plugin_menu(selected),
+            Message::PluginMenuQuery(query) => {
+                self.plugin_menu_query = query;
+                Task::none()
+            }
+            Message::PluginSurfaceOrigin { window, plugin_id, surface_id, origin } => {
+                // 一个面同时只在一个窗口里：换窗口时清掉旧窗的原点，避免后续在旧窗重画浮层
+                self.plugin_surface_origins
+                    .retain(|(_, p, s), _| !(p == &plugin_id && s == &surface_id));
+                self.plugin_surface_origins.insert((window, plugin_id, surface_id), origin);
+                Task::none()
+            }
             Message::PluginPickColor { request_id, params } => {
                 self.plugin_pick_color(request_id, params)
             }
@@ -6270,6 +6298,7 @@ impl App {
             },
         ));
         self.popup_pane = 0;
+        self.plugin_menu_query.clear();
         self.plugins.resolve_ui_call(request_id, Ok(()));
         Task::none()
     }
@@ -6277,6 +6306,7 @@ impl App {
     /// 宿主菜单关闭：把选中项交回发起插件（点外点 / Esc = 未选中）。
     fn close_plugin_menu(&mut self, selected: Option<String>) -> Task<Message> {
         let Some((plugin_id, _)) = self.plugin_menu.take() else { return Task::none() };
+        self.plugin_menu_query.clear();
         self.dismiss_popup();
         self.plugins.notify_menu_closed(&plugin_id, selected);
         Task::none()

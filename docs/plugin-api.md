@@ -976,7 +976,7 @@ pub struct SurfaceFrame {
 
 ```rust
 // atelyx-plugin-protocol/src/frame.rs
-/// 面的浮层：绘制在本面之上（宿主按窗口裁剪，可越出面矩形）。
+/// 面的浮层：按宿主窗口裁剪，可越出面矩形。
 /// `rect` / `commands` / `hits` / `ime` 全部用**面本地坐标**（与主帧同一坐标系）。
 /// 与主帧同寿命：本帧带浮层即展开，下一帧不带即收起。
 #[serde(rename_all = "camelCase")]
@@ -985,6 +985,12 @@ pub struct SurfacePopup {
     pub rect: FrameRect,
     #[serde(default)]
     pub capture: PopupCapture,
+    /// 叠放层级：缺省 = 面板内。窗口级浮层不随面裁剪，宿主在所有面板之后绘制。
+    #[serde(default, skip_serializing_if = "is_panel_layer")]
+    pub layer: PopupLayer,
+    /// 窗口级浮层的叠放序：越大越靠上；同值按面 id 稳定序。面板内层不参与排序。
+    #[serde(default, skip_serializing_if = "is_zero_order")]
+    pub order: u16,
     pub commands: Vec<DrawCommand>,
     /// 浮层自己的命中区：浮层矩形内的按下先在这里命中（坐标同面本地）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -992,6 +998,19 @@ pub struct SurfacePopup {
     /// 声明后输入法候选窗按此矩形（面本地坐标）定位；缺省用主帧 `ime`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ime: Option<FrameRect>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/frame.rs
+/// 浮层的叠放层级。
+#[serde(rename_all = "camelCase")]
+pub enum PopupLayer {
+    /// 面板内：随本面图层绘制，先于相邻面板出图，可能被后绘制的面板盖住。
+    #[default]
+    Panel,
+    /// 窗口级：画在所有面板之后，可盖住任何面板的头部与相邻面板。
+    Window,
 }
 ```
 
@@ -2325,6 +2344,22 @@ pub struct MenuOpenParams {
     /// 菜单宽度（逻辑像素；宿主按内容与视口钳制）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub width: Option<f32>,
+    /// 声明后宿主在菜单顶部渲染搜索行：只匹配条目标签（去首尾空白、忽略大小写的子串）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search: Option<MenuSearch>,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 菜单顶部搜索行；声明后宿主渲染输入框并按标签过滤条目。
+#[serde(rename_all = "camelCase")]
+pub struct MenuSearch {
+    /// 输入框提示文字。
+    pub placeholder: String,
+    /// 无匹配结果时的提示；缺省不显示空态行。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub empty: Option<String>,
 }
 ```
 

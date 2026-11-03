@@ -24,10 +24,9 @@ async fn main() {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("target/debug/preset-plugins"));
     // 在临时副本上跑：卸载会真删插件目录（也验证 Windows 上动态库能随实例释放）
-    let root = std::env::temp_dir().join(format!("atelyx-abi-smoke-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = atelyx_core::scratch::TempDir::new("abi-smoke");
     copy_tree(&source, &root).expect("复制冒烟插件目录");
-    let runtime = PluginRuntime::with_host_version(root.clone(), "0.6.5");
+    let runtime = PluginRuntime::with_host_version(root.to_path_buf(), "0.6.5");
     runtime.scan();
 
     let responder = runtime.clone();
@@ -131,7 +130,6 @@ async fn main() {
 
     runtime.uninstall(ID).expect("卸载动态库插件应成功");
     assert!(!root.join(ID).exists(), "卸载后插件目录应已删除");
-    let _ = std::fs::remove_dir_all(&root);
     println!("卸载：通过");
 }
 

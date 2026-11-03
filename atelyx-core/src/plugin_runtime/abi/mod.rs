@@ -135,6 +135,12 @@ impl AbiSession {
         *self.library.lock().unwrap() = Some(library);
     }
 
+    /// 释放缓存的动态库句柄：只随宿主退出调用，之后不再有启停复用。
+    /// Windows 上句柄释放后插件文件才能被删除或替换。
+    pub(super) fn release_library(&self) {
+        self.library.lock().unwrap().take();
+    }
+
     /// 开新会话：先收掉上一次会话的残留（实例、在途回执、服务序号、待发事件），再放开新会话。
     pub(super) fn begin_session(&self, token: u64) {
         let (old, calls) = {

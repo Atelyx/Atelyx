@@ -73,5 +73,6 @@ winapi = { version = "0.3", features = ["winnt", "processthreadsapi", "handleapi
 keyring = { version = "3.6", features = ["windows-native"] }
 
 [features]
-# 测试基建（TempDir 等）供依赖方的测试构建复用；常规构建不编译
+# 仓库测试入口（`vault::test_support`）与进程托管测试替身供依赖方的测试构建复用；
+# 常规构建不编译（临时目录本身在 `scratch` 模块，常开）
 test-support = []

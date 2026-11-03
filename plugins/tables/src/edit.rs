@@ -36,6 +36,8 @@ pub fn begin(session: &mut Session, row: usize, field: usize, seed: Option<Strin
     editor.touched = seeded;
     session.view.edit_session = Some((session.data.fields.clone(), session.data.rows.clone()));
     session.view.bar_shown = false;
+    session.view.caret_on = true;
+    session.view.editor_drag = false;
     session.view.editing = Some(CellEdit { row, field, editor });
 }
 
@@ -51,6 +53,7 @@ fn push_snapshot(session: &mut Session, snapshot: Snapshot) {
 /// 提交当前编辑：值有变化才入撤销栈并置脏；返回是否有变化。
 pub fn commit(session: &mut Session) -> bool {
     let Some(edit) = session.view.editing.take() else { return false };
+    session.view.editor_drag = false;
     let snapshot = session.view.edit_session.take();
     if !edit.editor.touched {
         return false;
@@ -81,6 +84,7 @@ pub fn commit(session: &mut Session) -> bool {
 
 /// 取消编辑（丢弃草稿）。
 pub fn cancel(session: &mut Session) -> bool {
+    session.view.editor_drag = false;
     if session.view.editing.take().is_some() {
         session.view.edit_session = None;
     }

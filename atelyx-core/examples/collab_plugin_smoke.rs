@@ -33,10 +33,9 @@ async fn main() {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("target/debug/preset-plugins"));
     // 在临时副本上跑：停用会真删插件目录
-    let root = std::env::temp_dir().join(format!("atelyx-collab-smoke-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = atelyx_core::scratch::TempDir::new("collab-smoke");
     copy_tree(&source, &root).expect("复制冒烟插件目录");
-    let runtime = PluginRuntime::with_host_version(root.clone(), "0.6.5");
+    let runtime = PluginRuntime::with_host_version(root.to_path_buf(), "0.6.5");
     runtime.scan();
 
     let state = HostState::new();
@@ -148,7 +147,6 @@ async fn main() {
     println!("停用：通过");
 
     runtime.shutdown();
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// 宿主侧回执：主题 / 量算 / 房间与名册快照 / 两个入口与打开请求的记录。

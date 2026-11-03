@@ -407,6 +407,8 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
+    use crate::scratch::TempDir;
+
     const FILE_NAME: &str = "Atelyx_1.0.0_x64-setup.exe";
 
     // ---------- compare_versions ----------
@@ -502,23 +504,6 @@ mod tests {
 
     fn sha256_hex(bytes: &[u8]) -> String {
         hex::encode(Sha256::digest(bytes))
-    }
-
-    /// 测试自清临时目录。
-    struct TempDir(PathBuf);
-
-    impl TempDir {
-        fn new() -> Self {
-            let dir = std::env::temp_dir().join(format!("atelyx-updater-test-{}", nanoid::nanoid!(12)));
-            std::fs::create_dir_all(&dir).unwrap();
-            TempDir(dir)
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
     }
 
     /// 进度回调（received, total）。
@@ -692,17 +677,17 @@ mod tests {
     async fn full_download_verifies_and_renames() {
         let body = test_body(256);
         let server = spawn_server(body.clone(), None);
-        let dir = TempDir::new();
+        let dir = TempDir::new("updater");
         let (on_progress, events) = progress_sink();
         let cancel = Arc::new(AtomicBool::new(false));
 
-        let path = run_download(&server, &dir.0, Some(&format!("sha256:{}", sha256_hex(&body))), cancel, on_progress)
+        let path = run_download(&server, &dir, Some(&format!("sha256:{}", sha256_hex(&body))), cancel, on_progress)
             .await
             .unwrap();
 
-        assert_eq!(path, dir.0.join(FILE_NAME));
+        assert_eq!(path, dir.join(FILE_NAME));
         assert_eq!(std::fs::read(&path).unwrap(), body);
-        assert!(!dir.0.join(format!("{FILE_NAME}.part")).exists());
+        assert!(!dir.join(format!("{FILE_NAME}.part")).exists());
         assert_eq!(*events.lock().unwrap().last().unwrap(), (256, 256));
     }
 
@@ -712,15 +697,15 @@ mod tests {
         let body = test_body(256);
         let half = body.len() / 2;
         let server = spawn_server(body.clone(), None);
-        let dir = TempDir::new();
-        std::fs::write(dir.0.join(format!("{FILE_NAME}.part")), &body[..half]).unwrap();
+        let dir = TempDir::new("updater");
+        std::fs::write(dir.join(format!("{FILE_NAME}.part")), &body[..half]).unwrap();
 
-        let path = run_download(&server, &dir.0, None, Arc::new(AtomicBool::new(false)), progress_sink().0)
+        let path = run_download(&server, &dir, None, Arc::new(AtomicBool::new(false)), progress_sink().0)
             .await
             .unwrap();
 
         assert_eq!(std::fs::read(&path).unwrap(), body);
-        assert!(!dir.0.join(format!("{FILE_NAME}.part")).exists());
+        assert!(!dir.join(format!("{FILE_NAME}.part")).exists());
         // 确为续传：服务端收到 Range: bytes={half}- 而非全量请求
         assert!(server.log.lock().unwrap().contains(&Some(half as u64)));
     }
@@ -730,17 +715,17 @@ mod tests {
     async fn complete_part_finalizes_without_download() {
         let body = test_body(64);
         let server = spawn_server(body.clone(), None);
-        let dir = TempDir::new();
-        std::fs::write(dir.0.join(format!("{FILE_NAME}.part")), &body).unwrap();
+        let dir = TempDir::new("updater");
+        std::fs::write(dir.join(format!("{FILE_NAME}.part")), &body).unwrap();
 
-        let path = run_download(&server, &dir.0, None, Arc::new(AtomicBool::new(false)), progress_sink().0)
+        let path = run_download(&server, &dir, None, Arc::new(AtomicBool::new(false)), progress_sink().0)
             .await
             .unwrap();
 
         assert_eq!(std::fs::read(&path).unwrap(), body);
         // 唯一一次请求即 416（Range 起点 = 总长）
         assert_eq!(*server.log.lock().unwrap(), vec![Some(64)]);
-        assert!(!dir.0.join(format!("{FILE_NAME}.part")).exists());
+        assert!(!dir.join(format!("{FILE_NAME}.part")).exists());
     }
 
     /// `.part` 比远端长（换包/损坏）：416 后丢弃重发，200 从头重写为完整文件。
@@ -748,12 +733,12 @@ mod tests {
     async fn oversized_part_restarts_from_scratch() {
         let body = test_body(64);
         let server = spawn_server(body.clone(), None);
-        let dir = TempDir::new();
+        let dir = TempDir::new("updater");
         let mut stale = body.clone();
         stale.extend_from_slice(b"stale-extra-bytes");
-        std::fs::write(dir.0.join(format!("{FILE_NAME}.part")), &stale).unwrap();
+        std::fs::write(dir.join(format!("{FILE_NAME}.part")), &stale).unwrap();
 
-        let path = run_download(&server, &dir.0, None, Arc::new(AtomicBool::new(false)), progress_sink().0)
+        let path = run_download(&server, &dir, None, Arc::new(AtomicBool::new(false)), progress_sink().0)
             .await
             .unwrap();
 
@@ -769,15 +754,15 @@ mod tests {
     #[tokio::test]
     async fn sha_mismatch_removes_part() {
         let server = spawn_server(test_body(64), None);
-        let dir = TempDir::new();
+        let dir = TempDir::new("updater");
 
-        let error = run_download(&server, &dir.0, Some(&sha256_hex(&test_body(65))), Arc::new(AtomicBool::new(false)), progress_sink().0)
+        let error = run_download(&server, &dir, Some(&sha256_hex(&test_body(65))), Arc::new(AtomicBool::new(false)), progress_sink().0)
             .await
             .unwrap_err();
 
         assert!(error.contains("摘要不匹配"), "{error}");
-        assert!(!dir.0.join(format!("{FILE_NAME}.part")).exists());
-        assert!(!dir.0.join(FILE_NAME).exists());
+        assert!(!dir.join(format!("{FILE_NAME}.part")).exists());
+        assert!(!dir.join(FILE_NAME).exists());
     }
 
     /// 中途取消：报「已取消」，`.part` 保留为已写完整前缀。
@@ -787,10 +772,10 @@ mod tests {
         let split = 32;
         // 服务端发完前 32 字节停顿 500ms，留出取消窗口
         let server = spawn_server(body.clone(), Some((split, Duration::from_millis(500))));
-        let dir = TempDir::new();
+        let dir = TempDir::new("updater");
         let cancel = Arc::new(AtomicBool::new(false));
-        let part = dir.0.join(format!("{FILE_NAME}.part"));
-        let dest = dir.0.clone();
+        let part = dir.join(format!("{FILE_NAME}.part"));
+        let dest = dir.to_path_buf();
         let server_url = server.url.clone();
         let task_cancel = Arc::clone(&cancel);
         let task = tokio::spawn(async move {
@@ -816,6 +801,6 @@ mod tests {
         let error = task.await.unwrap().unwrap_err();
         assert_eq!(error, "已取消");
         assert_eq!(std::fs::read(&part).unwrap(), &body[..split]);
-        assert!(!dir.0.join(FILE_NAME).exists());
+        assert!(!dir.join(FILE_NAME).exists());
     }
 }

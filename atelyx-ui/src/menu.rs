@@ -134,6 +134,83 @@ pub fn pane_view<'a, M: UiHost>(
     (col.into(), height)
 }
 
+/// 按查询过滤菜单条目：只匹配条目标签（去首尾空白、忽略大小写的子串）。
+/// 每个面板独立过滤；Group / Divider 只在有存活条目时才保留，Text / Custom 过滤时整条丢弃。
+/// 查询为空时原样返回。
+pub fn filter_entries<'a, M>(
+    entries: Vec<(usize, MenuEntry<'a, M>)>,
+    query: &str,
+) -> Vec<(usize, MenuEntry<'a, M>)> {
+    let needle = query.trim().to_lowercase();
+    if needle.is_empty() {
+        return entries;
+    }
+    let mut panes: std::collections::BTreeMap<usize, Vec<MenuEntry<'a, M>>> = Default::default();
+    for (pane, entry) in entries {
+        panes.entry(pane).or_default().push(entry);
+    }
+    panes
+        .into_iter()
+        .flat_map(|(pane, items)| {
+            filter_pane(items, &needle)
+                .into_iter()
+                .map(move |entry| (pane, entry))
+        })
+        .collect()
+}
+
+fn filter_pane<'a, M>(items: Vec<MenuEntry<'a, M>>, needle: &str) -> Vec<MenuEntry<'a, M>> {
+    let mut out = Vec::new();
+    // 尚未等到存活条目的结构行：最后一个 Group 或一个 Divider。
+    let mut pending: Vec<MenuEntry<'a, M>> = Vec::new();
+    for item in items {
+        let matched = match &item {
+            MenuEntry::Action { label, .. }
+            | MenuEntry::Checked { label, .. }
+            | MenuEntry::Submenu { label, .. } => label_matches(label, needle),
+            _ => false,
+        };
+        match item {
+            MenuEntry::Group(_) | MenuEntry::Divider => pending.push(item),
+            MenuEntry::Scroll { entries, height } => {
+                let inner = filter_pane(entries, needle);
+                if !inner.is_empty() {
+                    flush_structure(&mut out, &mut pending);
+                    out.push(MenuEntry::Scroll { entries: inner, height });
+                }
+            }
+            MenuEntry::Custom(..) => {}
+            _ if matched => {
+                flush_structure(&mut out, &mut pending);
+                out.push(item);
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// 把等待中的结构行接到存活条目之前：分组头优先（只留最后一个），其次一条分隔线。
+fn flush_structure<'a, M>(out: &mut Vec<MenuEntry<'a, M>>, pending: &mut Vec<MenuEntry<'a, M>>) {
+    if let Some(index) = pending
+        .iter()
+        .rposition(|entry| matches!(entry, MenuEntry::Group(_)))
+    {
+        let group = pending.remove(index);
+        pending.clear();
+        out.push(group);
+    } else if !out.is_empty() && pending.iter().any(|entry| matches!(entry, MenuEntry::Divider)) {
+        pending.clear();
+        out.push(MenuEntry::Divider);
+    } else {
+        pending.clear();
+    }
+}
+
+fn label_matches(label: &str, needle: &str) -> bool {
+    label.trim().to_lowercase().contains(needle)
+}
+
 /// 渲染单条目，并返回它占用的竖向高度（供弹层估高与钳制）。
 fn entry_element<'a, M: UiHost>(entry: MenuEntry<'a, M>, window: iced::window::Id) -> (Element<'a, M>, f32) {
     match entry {
@@ -323,4 +400,112 @@ fn divider<M: 'static>() -> Element<'static, M> {
     .padding(Padding::ZERO.vertical(4.0))
     .width(Length::Fill)
     .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn action(label: &str, pane: usize) -> (usize, MenuEntry<'static, ()>) {
+        (
+            pane,
+            MenuEntry::Action {
+                label: label.into(),
+                icon: None,
+                danger: false,
+                disabled: false,
+                on_press: None,
+                note: None,
+                hint: None,
+            },
+        )
+    }
+
+    fn labels(entries: &[(usize, MenuEntry<'_, ()>)]) -> Vec<(usize, String)> {
+        entries
+            .iter()
+            .map(|(pane, entry)| {
+                let label = match entry {
+                    MenuEntry::Action { label, .. }
+                    | MenuEntry::Checked { label, .. }
+                    | MenuEntry::Submenu { label, .. }
+                    | MenuEntry::Group(label) => label.clone(),
+                    MenuEntry::Divider => "——".into(),
+                    MenuEntry::Custom(..) => "<自定义>".into(),
+                    MenuEntry::Scroll { .. } => "<滚动>".into(),
+                };
+                (*pane, label)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn filter_matches_trimmed_labels_case_insensitively() {
+        let entries = vec![action("  Inter ", 0), action("等宽", 0)];
+        let filtered = filter_entries(entries, " inter ");
+        assert_eq!(labels(&filtered), vec![(0, "  Inter ".to_string())]);
+    }
+
+    #[test]
+    fn filter_keeps_structure_only_around_survivors() {
+        let entries = vec![
+            (0, MenuEntry::Group("字体".into())),
+            action("等宽", 0),
+            (0, MenuEntry::Divider),
+            (0, MenuEntry::Group("其他".into())),
+            action("Inter", 0),
+            (0, MenuEntry::Divider),
+        ];
+        let filtered = filter_entries(entries, "inter");
+        assert_eq!(
+            labels(&filtered),
+            vec![(0, "其他".to_string()), (0, "Inter".to_string())]
+        );
+    }
+
+    #[test]
+    fn filter_is_per_pane_and_drops_empty_groups() {
+        let entries = vec![
+            (0, MenuEntry::Group("无匹配".into())),
+            action("Serif", 0),
+            action("等宽", 1),
+            (1, MenuEntry::Checked { label: "Inter".into(), on_press: () }),
+        ];
+        let filtered = filter_entries(entries, "inter");
+        assert_eq!(
+            labels(&filtered),
+            vec![(1, "Inter".to_string())]
+        );
+    }
+
+    #[test]
+    fn filter_drops_text_rows_and_matches_submenu_by_own_label() {
+        let entries = vec![
+            (0, MenuEntry::Custom(iced::widget::text("说明").into(), 18.0)),
+            (0, MenuEntry::Submenu { label: "字体".into(), icon: None, disabled: false, pane: 1 }),
+            action("Inter", 0),
+        ];
+        assert_eq!(
+            labels(&filter_entries(entries, "字体")),
+            vec![(0, "字体".to_string())]
+        );
+    }
+
+    #[test]
+    fn filter_recurses_into_scroll_children() {
+        let entries = vec![(
+            0,
+            MenuEntry::Scroll {
+                entries: vec![action("Inter", 0).1, action("等宽", 0).1],
+                height: 64.0,
+            },
+        )];
+        let filtered = filter_entries(entries, "inter");
+        assert_eq!(labels(&filtered), vec![(0, "<滚动>".to_string())]);
+        let MenuEntry::Scroll { entries, height } = &filtered[0].1 else {
+            panic!("期望滚动区，实际 {}", labels(&filtered)[0].1);
+        };
+        assert_eq!(entries.len(), 1, "滚动区应只留命中条目");
+        assert_eq!(*height, 64.0);
+    }
 }

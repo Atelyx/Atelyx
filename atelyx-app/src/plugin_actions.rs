@@ -252,6 +252,7 @@ pub fn refresh_frames(app: &mut App) -> Task<Message> {
         frames.insert(key, frame);
     }
     app.plugin_frames = frames;
+    prune_surface_origins(app);
     sync_modal_state(app);
     sync_frame_focus(app);
     // 这次投影已经覆盖到最新帧，心跳里不再重复补
@@ -281,6 +282,7 @@ pub fn refresh_surface_frame(app: &mut App, plugin_id: &str, surface_id: &str) -
             }
         }
     }
+    prune_surface_origins(app);
     sync_modal_state(app);
     sync_frame_focus(app);
     // 绘制期同步取走的帧由心跳补投影：这里不能清全局待补标记，
@@ -324,6 +326,14 @@ fn sync_frame_focus(app: &mut App) {
         app.plugin_frame_focus = None;
         notify_frame_focus(app, &focus.plugin_id, &focus.surface_id, false);
     }
+}
+
+/// 面已卸载即丢弃它的原点上报表：窗口级浮层按原点平移，过期原点会画到错误位置。
+fn prune_surface_origins(app: &mut App) {
+    app.plugin_surface_origins.retain(|(_, plugin_id, surface_id), _| {
+        app.plugin_frames
+            .contains_key(&(plugin_id.clone(), surface_id.clone()))
+    });
 }
 
 /// 整面帧的焦点变化回发插件（`host:frame.input`）。

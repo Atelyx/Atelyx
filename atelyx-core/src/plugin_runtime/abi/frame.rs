@@ -3,7 +3,8 @@
 
 use atelyx_plugin_abi as abi;
 use atelyx_plugin_protocol::frame::{
-    FrameRect, FrameSize, HitCursor, HitRegion, PopupCapture, SurfaceFrame, SurfacePopup,
+    FrameRect, FrameSize, HitCursor, HitRegion, PopupCapture, PopupLayer, SurfaceFrame,
+    SurfacePopup,
 };
 use atelyx_plugin_protocol::paint::{
     ColorToken, DrawCommand, ImageFit, ImageSource, PaintColor, PaintPoint, PaintShadow, TextAlign,
@@ -21,6 +22,8 @@ pub(super) unsafe fn frame_from_abi(frame: &abi::AbiFrame) -> Result<SurfaceFram
         Some(SurfacePopup {
             rect: frame_rect(frame.popup_rect),
             capture: popup_capture_from_code(frame.popup_capture),
+            layer: popup_layer_from_code(frame.popup_layer),
+            order: u16::try_from(frame.popup_order).unwrap_or(u16::MAX),
             commands: unsafe { commands_from_abi(frame.popup_commands, frame.popup_commands_len) }?,
             hits: unsafe { hits_from_abi(frame.popup_hits, frame.popup_hits_len) },
             ime: (frame.has_popup_ime != 0).then(|| frame_rect(frame.popup_ime)),
@@ -189,6 +192,14 @@ fn popup_capture_from_code(code: u32) -> PopupCapture {
         PopupCapture::All
     } else {
         PopupCapture::Inside
+    }
+}
+
+fn popup_layer_from_code(code: u32) -> PopupLayer {
+    if code == abi::POPUP_LAYER_WINDOW {
+        PopupLayer::Window
+    } else {
+        PopupLayer::Panel
     }
 }
 
@@ -372,6 +383,8 @@ mod tests {
             has_popup: 0,
             popup_rect: abi::AbiRect::empty_at(0.0, 0.0),
             popup_capture: abi::POPUP_CAPTURE_INSIDE,
+            popup_layer: abi::POPUP_LAYER_PANEL,
+            popup_order: 0,
             popup_commands: std::ptr::null(),
             popup_commands_len: 0,
             popup_hits: std::ptr::null(),

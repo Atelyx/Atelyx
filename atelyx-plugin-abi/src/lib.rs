@@ -94,6 +94,8 @@ pub const SURFACE_TABLE_VIEW: u32 = 6;
 /// 浮层承接范围：`INSIDE` 只接浮层矩形内的按下，`ALL` 吞掉外部按下。
 pub const POPUP_CAPTURE_INSIDE: u32 = 0;
 pub const POPUP_CAPTURE_ALL: u32 = 1;
+pub const POPUP_LAYER_PANEL: u32 = 0;
+pub const POPUP_LAYER_WINDOW: u32 = 1;
 
 pub const INPUT_POINTER_DOWN: u32 = 1;
 pub const INPUT_POINTER_UP: u32 = 2;
@@ -359,6 +361,10 @@ pub struct AbiFrame {
     pub has_popup_ime: u8,
     /// 浮层输入法光标矩形：浮层本地坐标。
     pub popup_ime: AbiRect,
+    /// 浮层层级：`POPUP_LAYER_PANEL` / `POPUP_LAYER_WINDOW`。
+    pub popup_layer: u32,
+    /// 窗口级浮层的叠放序：越大越靠上（同值按面 id 稳定序）。
+    pub popup_order: u32,
 }
 
 /// 一条原始输入；坐标面本地，滚轮增量统一为像素。

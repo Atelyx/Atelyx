@@ -17,7 +17,7 @@ use crate::handler::{self, PluginHandler};
 use crate::protocol::envelope::{Envelope, RpcError};
 use crate::protocol::frame::{
     FrameInput, FrameRect, HitCursor, HitRegion, Key, KeyAction, Modifiers, MouseButton, NamedKey,
-    PopupCapture, SurfaceFrame,
+    PopupCapture, PopupLayer, SurfaceFrame,
 };
 use crate::protocol::handshake::{self, InitializeParams, PluginInfo};
 use crate::protocol::method::{SubmitResult, SurfaceKind};
@@ -614,6 +614,8 @@ struct FrameBuffer<'a> {
     size: Option<(f32, f32)>,
     popup_rect: Option<abi::AbiRect>,
     popup_capture: u32,
+    popup_layer: u32,
+    popup_order: u32,
     popup_commands: Vec<abi::AbiCommand>,
     popup_hits: Vec<abi::AbiHit>,
     popup_ime: Option<abi::AbiRect>,
@@ -637,6 +639,10 @@ impl<'a> FrameBuffer<'a> {
             popup_capture: popup
                 .map(|value| popup_capture_code(value.capture))
                 .unwrap_or(abi::POPUP_CAPTURE_INSIDE),
+            popup_layer: popup
+                .map(|value| popup_layer_code(value.layer))
+                .unwrap_or(abi::POPUP_LAYER_PANEL),
+            popup_order: popup.map(|value| u32::from(value.order)).unwrap_or(0),
             popup_commands: Vec::new(),
             popup_hits: Vec::new(),
             popup_ime: popup.and_then(|value| value.ime).map(abi_rect),
@@ -682,6 +688,8 @@ impl<'a> FrameBuffer<'a> {
             popup_hits_len: self.popup_hits.len(),
             has_popup_ime: self.popup_ime.is_some() as u8,
             popup_ime: self.popup_ime.unwrap_or_else(|| abi::AbiRect::empty_at(0.0, 0.0)),
+            popup_layer: self.popup_layer,
+            popup_order: self.popup_order,
         }
     }
 
@@ -978,6 +986,13 @@ fn popup_capture_code(capture: PopupCapture) -> u32 {
     }
 }
 
+fn popup_layer_code(layer: PopupLayer) -> u32 {
+    match layer {
+        PopupLayer::Panel => abi::POPUP_LAYER_PANEL,
+        PopupLayer::Window => abi::POPUP_LAYER_WINDOW,
+    }
+}
+
 fn cursor_code(cursor: HitCursor) -> u32 {
     match cursor {
         HitCursor::Default => abi::CURSOR_DEFAULT,
@@ -1092,6 +1107,8 @@ mod tests {
             popup: Some(SurfacePopup {
                 rect: FrameRect { x: 10.0, y: 20.0, w: 100.0, h: 80.0 },
                 capture: PopupCapture::All,
+                layer: PopupLayer::Window,
+                order: 7,
                 commands: vec![DrawCommand::Rect {
                     x: 1.0,
                     y: 2.0,
@@ -1175,6 +1192,8 @@ mod tests {
         assert_eq!(raw.popup_rect.x, 10.0);
         assert_eq!(raw.popup_rect.h, 80.0);
         assert_eq!(raw.popup_capture, abi::POPUP_CAPTURE_ALL);
+        assert_eq!(raw.popup_layer, abi::POPUP_LAYER_WINDOW);
+        assert_eq!(raw.popup_order, 7);
         assert_eq!(raw.popup_commands_len, 1);
         assert_eq!(raw.popup_hits_len, 1);
         assert_eq!(raw.has_popup_ime, 1);

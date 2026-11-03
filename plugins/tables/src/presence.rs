@@ -26,6 +26,14 @@ pub struct RemotePeer {
     pub at: Instant,
 }
 
+/// 对端选区（描边矩形 + 身份色 + 昵称；昵称空 = 不画名签）。
+#[derive(Clone, Debug)]
+pub struct RemoteCursor {
+    pub rect: Rect,
+    pub color: [u8; 4],
+    pub name: String,
+}
+
 /// 协作在场缓存。
 #[derive(Default)]
 pub struct Presence {
@@ -99,8 +107,8 @@ impl Presence {
         before != self.peers.len()
     }
 
-    /// 对端选区矩形与身份色（按当前布局换算）。
-    pub fn rects(&self, session: &Session) -> Vec<(Rect, [u8; 4])> {
+    /// 对端选区矩形、身份色与昵称（按当前布局换算）。
+    pub fn rects(&self, session: &Session) -> Vec<RemoteCursor> {
         let Some(geo) = crate::geom::geo(
             &session.view.layout,
             session.view.scroll_x,
@@ -119,15 +127,16 @@ impl Presence {
             };
             let first = geo.cell_rect(region.row_start, region.col_start);
             let last = geo.cell_rect(region.row_end, region.col_end);
-            out.push((
-                Rect::new(
+            out.push(RemoteCursor {
+                rect: Rect::new(
                     first.x,
                     first.y,
                     (last.right() - first.x).max(0.0),
                     (last.bottom() - first.y).max(0.0),
                 ),
-                peer.color,
-            ));
+                color: peer.color,
+                name: peer.name.clone(),
+            });
         }
         out
     }

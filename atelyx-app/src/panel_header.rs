@@ -129,6 +129,15 @@ fn status_tone(tone: HeaderTone) -> PillStatus {
     }
 }
 
+/// 头部条目约定 id → 内置图标（协议条目不带图标，按 id 映射；未约定保留无图标）。
+fn item_icon(id: &str) -> Option<&'static str> {
+    match id {
+        "history" => Some("history"),
+        "export" => Some("download"),
+        _ => None,
+    }
+}
+
 /// 头部「⋯」菜单条目：宿主渲染，点击按条目 id 回发插件。
 pub(crate) fn item_entries(app: &App, target: &str) -> Vec<(usize, MenuEntry<'static, Message>)> {
     let Some(state) = app.panel_headers.get(target).map(|entry| &entry.state) else {
@@ -142,7 +151,7 @@ pub(crate) fn item_entries(app: &App, target: &str) -> Vec<(usize, MenuEntry<'st
                 0,
                 MenuEntry::Action {
                     label: item.label.clone(),
-                    icon: None,
+                    icon: item_icon(&item.id).map(str::to_string),
                     danger: false,
                     disabled: false,
                     note: None,
@@ -155,4 +164,16 @@ pub(crate) fn item_entries(app: &App, target: &str) -> Vec<(usize, MenuEntry<'st
             )
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::item_icon;
+
+    #[test]
+    fn header_items_map_to_builtin_icons() {
+        assert_eq!(item_icon("history"), Some("history"));
+        assert_eq!(item_icon("export"), Some("download"));
+        assert_eq!(item_icon("unknown"), None);
+    }
 }

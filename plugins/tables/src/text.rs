@@ -270,6 +270,56 @@ fn estimate_char(ch: char, size: f32) -> f32 {
     size * if ch.is_ascii() { 0.55 } else { 1.0 }
 }
 
+/// 点击落点 → 显示串字节位（估算口径与编辑器绘制一致：同一份行段与单字字宽）。
+/// `x` / `y` 相对文本起点；越界时钳到首行行首 / 末行行尾。
+pub fn caret_at(text: &str, size: f32, wrap_w: f32, x: f32, y: f32) -> usize {
+    let lines = estimate_lines_of(text, size, wrap_w);
+    let line_h = size * LINE_FACTOR;
+    let index = ((y / line_h).floor().max(0.0) as usize).min(lines.len().saturating_sub(1));
+    let mut start = 0usize;
+    for line in &lines[..index] {
+        let end = start + line.text.len();
+        start = if text.as_bytes().get(end) == Some(&b'\n') { end + 1 } else { end };
+    }
+    let mut offset = 0usize;
+    let mut width = 0.0f32;
+    for (byte, ch) in lines[index].text.char_indices() {
+        let advance = estimate_char(ch, size);
+        if width + advance / 2.0 >= x {
+            break;
+        }
+        width += advance;
+        offset = byte + ch.len_utf8();
+    }
+    (start + offset).min(text.len())
+}
+
+/// 估算字宽（同一份单字口径；供名签等短文本排版）。
+pub fn measure(text: &str, size: f32) -> f32 {
+    text.chars().map(|ch| estimate_char(ch, size)).sum()
+}
+
+/// 按最大宽度截断并补省略号（估算口径；宽度不足时只输出省略号）。
+pub fn ellipsize(text: &str, size: f32, max_w: f32) -> String {
+    if measure(text, size) <= max_w {
+        return text.to_string();
+    }
+    let ellipsis = "…";
+    let budget = (max_w - measure(ellipsis, size)).max(0.0);
+    let mut out = String::new();
+    let mut width = 0.0f32;
+    for ch in text.chars() {
+        let advance = estimate_char(ch, size);
+        if width + advance > budget {
+            break;
+        }
+        width += advance;
+        out.push(ch);
+    }
+    out.push_str(ellipsis);
+    out
+}
+
 /// 单元格文本可否直接起稿（文本 / 数字 / 时长；单选与图片走各自的交互）。
 pub fn can_type_into(field: &TableField) -> bool {
     matches!(field.field_type.as_str(), "text" | "number" | "duration")
@@ -277,7 +327,7 @@ pub fn can_type_into(field: &TableField) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_hex;
+    use super::{caret_at, ellipsize, parse_hex};
 
     #[test]
     fn parse_hex_accepts_shorthand_and_rejects_non_ascii() {
@@ -286,6 +336,32 @@ mod tests {
         // 字节长恰为 6 但含多字节字符：按字符边界切会 panic，这里必须安全返回 None
         assert_eq!(parse_hex("#aééb"), None);
         assert_eq!(parse_hex("#gggggg"), None);
+    }
+
+    #[test]
+    fn caret_at_maps_click_to_line_and_char_boundary() {
+        let size = 14.0;
+        let text = "ab\ncd";
+        // 第一行：首字前 / 两字交界 / 行尾
+        assert_eq!(caret_at(text, size, 200.0, 0.0, 0.0), 0);
+        assert_eq!(caret_at(text, size, 200.0, 8.0, 0.0), 1);
+        assert_eq!(caret_at(text, size, 200.0, 40.0, 0.0), 2);
+        // 换行后的第二行从字节 3 起
+        assert_eq!(caret_at(text, size, 200.0, 0.0, size * super::LINE_FACTOR), 3);
+        assert_eq!(caret_at(text, size, 200.0, 40.0, size * super::LINE_FACTOR), 5);
+    }
+
+    #[test]
+    fn caret_at_counts_cjk_as_full_width() {
+        let size = 14.0;
+        assert_eq!(caret_at("中a", size, 200.0, size / 2.0 - 0.1, 0.0), 0);
+        assert_eq!(caret_at("中a", size, 200.0, size / 2.0 + 0.1, 0.0), 3);
+    }
+
+    #[test]
+    fn ellipsize_keeps_width_budget() {
+        assert_eq!(ellipsize("abcdef", 10.0, 30.0), "abc…");
+        assert_eq!(ellipsize("ok", 10.0, 30.0), "ok");
     }
 }
 

@@ -43,7 +43,7 @@ use service_dir::{ServiceCallWait, ServiceDir};
 pub use ai_tools::{PluginToolOutput, PluginToolSpec};
 pub use atelyx_plugin_protocol::frame::{
     FrameInput, FrameRect, HitCursor, HitRegion, Key, KeyAction, Modifiers, MouseButton, NamedKey,
-    PopupCapture, SurfaceFrame, SurfacePopup,
+    PopupCapture, PopupLayer, SurfaceFrame, SurfacePopup,
 };
 pub use atelyx_plugin_protocol::paint::{
     ColorToken, DrawCommand, ImageFit, ImageSource, PaintColor, PaintPoint, PaintShadow, TextAlign,
@@ -96,7 +96,7 @@ pub use atelyx_plugin_protocol::method::{
     SpaceContainerKind, SpaceMember, SpaceMemberRole, SpaceMembersResult, SpacePeer, SpacePeerFile,
     SpaceRoomResult, SpaceSelfIdentity,
     DragEndParams, DragHoverParams, DragItem, DragStartParams, DragStateParams,
-    ContainerEntry, CreateEntryParams, CreateEntryResult, MenuClosedParams, MenuItem,
+    ContainerEntry, CreateEntryParams, CreateEntryResult, MenuClosedParams, MenuItem, MenuSearch,
     AbsolutePathResult, DirListResult, DocTypeEntry, DuplicateParams, MenuOpenParams,
     PickColorParams, PickColorResult, RemoveContainerParams, RevealParams, SwitchContainerParams,
     UiDirEntry,
@@ -1910,11 +1910,13 @@ impl PluginRuntime {
     }
 
     /// 应用退出：停全部插件并结束全部托管进程（含插件再起的子进程）。
+    /// 停用后释放缓存的动态库句柄，插件文件即可被删除或替换。
     pub fn shutdown(&self) {
         let instances: Vec<Arc<Instance>> =
             self.instances.lock().unwrap().values().cloned().collect();
         for instance in instances {
             instance.stop();
+            instance.release_library();
         }
         self.fail_all_dialogs("宿主已退出");
         self.fail_all_ui_calls("宿主已退出");
