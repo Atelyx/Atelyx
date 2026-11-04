@@ -524,15 +524,18 @@ pub fn release_plugin_focus(app: &mut App, window: window::Id) {
     notify_frame_focus(app, &focus.plugin_id, &focus.surface_id, false);
 }
 
-/// 整面帧是否收全部按键（含命令组合）：持有焦点的面按最新帧的 `keys` 声明判定。
-pub fn frame_takes_keyboard(app: &App) -> bool {
-    let Some(focus) = app.plugin_frame_focus.as_ref() else {
-        return false;
-    };
+/// 持有焦点的面的最新帧。
+fn focused_frame(app: &App) -> Option<std::sync::Arc<atelyx_core::plugin_runtime::SurfaceFrame>> {
+    let focus = app.plugin_frame_focus.as_ref()?;
     app.plugins
         .surface_frame(&focus.plugin_id, &focus.surface_id)
         .or_else(|| app.plugin_frames.get(&(focus.plugin_id.clone(), focus.surface_id.clone())).cloned())
-        .is_some_and(|frame| frame.keys)
+}
+
+/// 整面帧是否收全部按键（含命令组合）：持有焦点的面按最新帧的 `keys` 声明判定，
+/// 声明后导航键与命令组合都归面处理，宿主不再派发。
+pub fn frame_takes_keyboard(app: &App) -> bool {
+    focused_frame(app).is_some_and(|frame| frame.keys)
 }
 
 // ===== 界面图片 =====
@@ -1289,6 +1292,10 @@ pub fn close_doc(app: &mut App) -> Task<Message> {
     };
     app.ui.last_doc_file = None;
     app.plugins.notify_doc_close(&doc.plugin_id, &doc.surface_id, &doc.path);
+    // 关档即摘会话：正文、合并基线、选区与历史都只属于这份文档，插件面已不再持有它时
+    // 继续保留会让面外写入沿用旧正文。删文件路径已由 gate 先 flush。
+    app.clear_doc_state();
+    app.notify_open_files();
     app.schedule_persist();
     refresh_projection(app)
 }

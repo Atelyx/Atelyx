@@ -4743,6 +4743,15 @@ impl App {
     }
 
     /// 关闭文档会话（换文件 / 关标签 / 切仓库）：摘协作文档与在场通道。
+    /// 摘掉文档会话状态：正文、合并基线、选区与历史都只属于当前文档。
+    pub(crate) fn clear_doc_state(&mut self) {
+        self.close_doc_session();
+        self.doc_text.clear();
+        self.doc_base = None;
+        self.doc_selection = None;
+        self.history.clear();
+    }
+
     pub(crate) fn close_doc_session(&mut self) {
         if !self.doc_active {
             return;

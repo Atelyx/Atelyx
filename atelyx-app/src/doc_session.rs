@@ -384,7 +384,7 @@ pub fn save(app: &mut App, request_id: u64, params: DocSaveParams) -> Task<Messa
 /// 关闭当前会话：只认与当前路径一致的关闭（换文件时旧实例的关闭不得摘掉新会话）。
 pub fn close(app: &mut App, request_id: u64, path: &str) -> Task<Message> {
     if app.ui.last_note_file.as_deref() == Some(path) {
-        app.close_doc_session();
+        app.clear_doc_state();
     }
     app.plugins.resolve_shell_call(request_id, Ok(json!({})));
     Task::none()

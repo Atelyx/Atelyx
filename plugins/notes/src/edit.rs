@@ -103,6 +103,24 @@ fn is_list_line(line: &str) -> bool {
     parse_list_marker(line).is_some()
 }
 
+/// 任务项勾选态翻转：把标记列里的 `[ ]` 与 `[x]` 互换，返回新文本与勾选框内偏移。
+/// `from` 为该项源码内任一偏移；非任务项返回 None。
+pub fn task_toggle_edit(text: &str, from: usize) -> Option<(String, usize)> {
+    let line_start = line_start_at(text, from);
+    let line = &text[line_start..line_end_at(text, from)];
+    let marker = parse_list_marker(line)?;
+    if !marker.task {
+        return None;
+    }
+    let open = line[marker.indent..marker.end].find('[')? + line_start + marker.indent;
+    let checked = matches!(text.as_bytes().get(open + 1), Some(b'x') | Some(b'X'));
+    let mut out = String::with_capacity(text.len());
+    out.push_str(&text[..open + 1]);
+    out.push(if checked { ' ' } else { 'x' });
+    out.push_str(&text[open + 2..]);
+    Some((out, open + 1))
+}
+
 /// 选区覆盖的行首偏移：折叠光标即当前行；有选区时取最后一个被选中字符所在行。
 fn covered_line_starts(text: &str, from: usize, to: usize) -> Vec<usize> {
     let last = line_start_at(text, if to > from { to - 1 } else { from });
@@ -159,13 +177,15 @@ pub fn list_backspace_edit(text: &str, from: usize) -> Option<(String, usize)> {
         return None;
     }
     let marker_end = line_start + marker.end;
-    if from <= line_start || from > marker_end {
+    // 行首缩进不属于标记：退格只删标记，保留该项的嵌套层级
+    let keep = line_start + marker.indent;
+    if from <= keep || from > marker_end {
         return None;
     }
     let mut out = String::with_capacity(text.len());
-    out.push_str(&text[..line_start]);
+    out.push_str(&text[..keep]);
     out.push_str(&text[marker_end..]);
-    Some((out, line_start))
+    Some((out, keep))
 }
 
 /// Tab 缩进：光标在列表行或存在选区时整行缩进，其余情况在光标处插入一级缩进。
@@ -256,6 +276,16 @@ mod tests {
         assert_eq!(text, "\n");
         assert_eq!(caret, 0);
         assert!(list_backspace_edit("- 甲\n", 3).is_none(), "有内容不改写");
+    }
+
+    #[test]
+    fn task_toggle_flips_the_box_on_the_item_line() {
+        let (text, at) = task_toggle_edit("甲\n- [ ] 待办\n乙", 5).expect("任务项");
+        assert_eq!(text, "甲\n- [x] 待办\n乙");
+        assert_eq!(at, 7, "光标落在勾选框内");
+        let (text, _) = task_toggle_edit(&text, 7).expect("再翻回");
+        assert_eq!(text, "甲\n- [ ] 待办\n乙");
+        assert!(task_toggle_edit("- 普通项\n", 2).is_none(), "非任务项不翻转");
     }
 
     #[test]

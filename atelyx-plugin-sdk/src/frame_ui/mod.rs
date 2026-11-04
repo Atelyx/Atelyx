@@ -921,6 +921,29 @@ mod tests {
         );
     }
 
+    /// 代码块复制钮与任务框的命中区要压在整块正文命中区之上：子区点击不被正文拖选吞掉。
+    #[tokio::test]
+    async fn markdown_sub_hits_sit_above_the_block_hit() {
+        let mut bench = Bench::new(360.0, 240.0).await;
+        let build = |ui: &mut build::Ui<'_, '_>| {
+            ui.markdown_named("md", "```\nlet a = 1;\n```\n\n- [ ] 待办", Vec::new());
+        };
+        bench.render(build).await.unwrap();
+        let frame = bench.frames().last().expect("应提交一帧").clone();
+        for suffix in ["::copy:0", "::task:0"] {
+            let hit = frame
+                .hits
+                .iter()
+                .find(|hit| hit.id.ends_with(suffix))
+                .unwrap_or_else(|| panic!("缺少子区命中 {suffix}"));
+            assert_eq!(
+                frame.hit_at(hit.x + hit.w / 2.0, hit.y + hit.h / 2.0),
+                Some(hit.id.as_str()),
+                "{suffix} 应是最上层命中"
+            );
+        }
+    }
+
     /// 表格 / 代码块混排里拖选整块：命中与取字都不得 panic（同行多列、多个片段行）。
     #[tokio::test]
     async fn selecting_across_a_table_and_a_code_block_is_safe() {

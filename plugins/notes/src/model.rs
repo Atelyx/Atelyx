@@ -1,6 +1,8 @@
 //! 笔记插件的展示与编辑状态：三档模式、正文块、撤销栈、属性面板、反链与远端光标。
 //! 正文真源在宿主（`doc.*`），这里只持本端副本。
 
+use std::collections::HashMap;
+
 use atelyx_format::frontmatter::{self, Yaml};
 use atelyx_format::markdown::{parse_markdown, InlineSpan, MarkdownBlock, ParseOptions};
 use atelyx_plugin_protocol::method::EditorPrefs;
@@ -19,7 +21,7 @@ pub const TITLE_INPUT: &str = "note:title-input";
 /// 空笔记（正文无块）时的编辑面 id。
 pub const EMPTY_EDIT: &str = "note:empty";
 /// 撤销栈深度（全文快照）。
-const UNDO_DEPTH: usize = 50;
+const UNDO_DEPTH: usize = 200;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -48,6 +50,8 @@ pub struct RemoteCursor {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ImageBlock {
     pub src: String,
+    /// 替代文字：载入失败时只读面回落成 `[图片：alt]`。
+    pub alt: String,
     /// 声明的像素高度（缺省由阅读面回落成替代文字占位）。
     pub height: Option<f32>,
 }
@@ -60,6 +64,13 @@ pub struct BlockInfo {
     pub image: Option<ImageBlock>,
     /// 列表块的项区间（非列表为空）：每项是独立揭示单元。
     pub items: Vec<ItemInfo>,
+}
+
+/// 撤销快照：正文与当时的选区（全文绝对偏移）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UndoEntry {
+    pub text: String,
+    pub selection: Option<(usize, usize)>,
 }
 
 /// 列表项的源区间（相对正文）：标记起点到项内容尾，不含行首缩进与项后空行。
@@ -87,8 +98,10 @@ pub struct NoteModel {
     pub backlinks: Vec<Backlink>,
     pub remote: Vec<RemoteCursor>,
     pub props: PropsState,
-    pub undo: Vec<String>,
-    pub redo: Vec<String>,
+    pub undo: Vec<UndoEntry>,
+    pub redo: Vec<UndoEntry>,
+    /// 最近一次提交的选区（全文绝对偏移）：随撤销快照存取，撤销后光标回到编辑处。
+    pub selection: Option<(usize, usize)>,
     /// 预览编辑的活动块（顶层块下标）；与 `active_item` 互斥。
     pub active_block: Option<usize>,
     /// 预览编辑的活动列表项（块下标，项下标）；与 `active_block` 互斥。
@@ -101,6 +114,8 @@ pub struct NoteModel {
     pub pending_rename: Option<String>,
     /// 最近一次按下位置（面本地像素）：类型菜单这类就地弹层按它定位。
     pub pointer: (f32, f32),
+    /// 正文图片的可用性（路径 → 能否解码）：失败的在只读面回落替代文字。
+    pub image_probe: HashMap<String, bool>,
     pub blocks: Vec<BlockInfo>,
     /// 正文起点（frontmatter 之后）；块区间相对正文。
     pub body_start: usize,
@@ -140,11 +155,15 @@ impl NoteModel {
         self.remote.clear();
         self.undo.clear();
         self.redo.clear();
+        self.selection = None;
         self.active_block = None;
         self.active_item = None;
         self.renaming = None;
         self.pending_rename = None;
         self.menu_open = false;
+        self.image_probe.clear();
+        // 上一份文档的槽位下标对新正文无意义：草稿与候选态一并丢弃
+        atelyx_plugin_props::discard_edit(self);
         self.refresh_blocks();
         self.refresh_props();
     }
@@ -161,9 +180,11 @@ impl NoteModel {
         self.remote.clear();
         self.undo.clear();
         self.redo.clear();
+        self.selection = None;
         self.active_block = None;
         self.active_item = None;
         self.blocks.clear();
+        self.image_probe.clear();
         self.body_start = 0;
         self.props = PropsState::default();
         self.renaming = None;
@@ -181,16 +202,20 @@ impl NoteModel {
         self.text = text;
         self.undo.clear();
         self.redo.clear();
+        self.selection = None;
         self.refresh_blocks();
         self.refresh_props();
     }
 
-    /// 本端编辑：入撤销栈并重算块区间。
+    /// 本端编辑：入撤销栈并重算块区间（快照带当时的选区）。
     pub fn edit_text(&mut self, text: String) {
         if self.text == text {
             return;
         }
-        self.undo.push(std::mem::replace(&mut self.text, text));
+        self.undo.push(UndoEntry {
+            text: std::mem::replace(&mut self.text, text),
+            selection: self.selection,
+        });
         if self.undo.len() > UNDO_DEPTH {
             self.undo.remove(0);
         }
@@ -201,24 +226,34 @@ impl NoteModel {
         self.refresh_props();
     }
 
-    pub fn undo(&mut self) -> Option<String> {
+    /// 撤销：返回恢复后的正文与当时的选区。
+    pub fn undo(&mut self) -> Option<(String, Option<(usize, usize)>)> {
         let previous = self.undo.pop()?;
-        self.redo.push(std::mem::replace(&mut self.text, previous));
+        self.redo.push(UndoEntry {
+            text: std::mem::replace(&mut self.text, previous.text),
+            selection: self.selection,
+        });
+        self.selection = previous.selection;
         self.dirty = true;
         self.save_error = None;
         self.refresh_blocks();
         self.refresh_props();
-        Some(self.text.clone())
+        Some((self.text.clone(), self.selection))
     }
 
-    pub fn redo(&mut self) -> Option<String> {
+    /// 重做：返回恢复后的正文与当时的选区。
+    pub fn redo(&mut self) -> Option<(String, Option<(usize, usize)>)> {
         let next = self.redo.pop()?;
-        self.undo.push(std::mem::replace(&mut self.text, next));
+        self.undo.push(UndoEntry {
+            text: std::mem::replace(&mut self.text, next.text),
+            selection: self.selection,
+        });
+        self.selection = next.selection;
         self.dirty = true;
         self.save_error = None;
         self.refresh_blocks();
         self.refresh_props();
-        Some(self.text.clone())
+        Some((self.text.clone(), self.selection))
     }
 
     /// 块的可编辑区间（绝对偏移）：块自身区间 + 其后到下一块行首之间的空行。
@@ -255,10 +290,15 @@ impl NoteModel {
         Some(&self.text[from..to])
     }
 
-    /// 列表项的源区间（绝对偏移）：项标记起点到项内容尾，不含行首缩进与项后空行。
+    /// 列表项的源区间（绝对偏移）：行首（含缩进）到项内容尾，不含项后空行。
+    /// 含缩进才能让 Tab / 续项按整行判定嵌套，缩进也就随项一起显示与回写。
     pub fn item_source(&self, block: usize, item: usize) -> Option<(usize, usize)> {
         let info = self.blocks.get(block)?.items.get(item)?;
-        Some((self.body_start + info.from, self.body_start + info.to))
+        let body = self.body();
+        let line_from = body[..info.from.min(body.len())]
+            .rfind('\n')
+            .map_or(0, |line| line + 1);
+        Some((self.body_start + line_from, self.body_start + info.to))
     }
 
     /// 列表项内某偏移所属的（块序，项序）。
@@ -452,9 +492,10 @@ fn block_info(block: &MarkdownBlock) -> BlockInfo {
     let (from, to) = block_range(block);
     let image = match block {
         MarkdownBlock::Paragraph { inline, .. } => image_only(inline).map(|span| {
-            let InlineSpan::Image { src, height, .. } = span else { unreachable!() };
+            let InlineSpan::Image { src, alt, height, .. } = span else { unreachable!() };
             ImageBlock {
                 src: src.clone(),
+                alt: alt.clone(),
                 height: height.as_deref().and_then(parse_len),
             }
         }),
@@ -497,6 +538,14 @@ fn block_range(block: &MarkdownBlock) -> (usize, usize) {
         | MarkdownBlock::HtmlBlock { from, to, .. }
         | MarkdownBlock::FootnoteDef { from, to, .. } => (*from, *to),
     }
+}
+
+/// markdown 的图片 src 与仓库相对路径是否指同一个文件：src 可能带 `./`、`../` 或目录前缀。
+pub fn image_src_matches(src: &str, path: &str) -> bool {
+    if src == path {
+        return true;
+    }
+    src.ends_with(&format!("/{path}")) || path.ends_with(&format!("/{src}"))
 }
 
 #[cfg(test)]
@@ -554,6 +603,26 @@ mod tests {
         assert_eq!(model.item_gap_lines(0, 1), 1);
         assert_eq!(model.item_at(model.body_start + 1), Some((0, 0)));
         assert_eq!(model.item_at(model.body_start + 7), Some((0, 1)));
+    }
+
+    /// 缩进项的源区间从行首算起：Tab / 续项按整行判定，编辑框也照这个区间绘制。
+    #[test]
+    fn nested_item_source_includes_the_leading_indent() {
+        let mut model = NoteModel::default();
+        model.load("a.md".into(), "  - 甲\n  - 乙\n".into(), true);
+        let (from, to) = model.item_source(0, 0).expect("项在");
+        assert_eq!(&model.text[from..to], "  - 甲", "缩进随项一起显示与回写");
+    }
+
+    /// 图片探测缓存按 src 记，变更事件给的是仓库相对路径：两种写法都要能对上。
+    #[test]
+    fn image_src_matches_repository_paths() {
+        assert!(image_src_matches("图.png", "图.png"));
+        assert!(image_src_matches("./图.png", "图.png"));
+        assert!(image_src_matches("../附件/图.png", "附件/图.png"));
+        assert!(image_src_matches("附件/图.png", "附件/图.png"));
+        assert!(!image_src_matches("图.png", "附件/图2.png"));
+        assert!(!image_src_matches("附件/图.png", "附件/图2.png"));
     }
 
     #[test]

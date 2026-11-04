@@ -99,6 +99,8 @@ pub(crate) struct Layout {
     strokes: Vec<Stroke>,
     /// 代码块头「复制」按钮的落位与内容：命中按 `id::copy:<序>` 登记，按下即写剪贴板。
     copies: Vec<CopyHit>,
+    /// 任务框的落位：命中按 `id::task:<序>` 交给插件翻转勾选态。
+    tasks: Vec<Rect>,
     height: f32,
 }
 
@@ -167,12 +169,13 @@ fn laid_out(
     mentions: &[MentionCandidate],
     width: f32,
     list_start: usize,
+    soft_wrap: bool,
 ) -> Arc<Layout> {
     let full = (key, width.to_bits(), metrics.epoch());
     if let Some(hit) = cache.hit(full) {
         return hit;
     }
-    let laid = Arc::new(layout(metrics, theme, content, mentions, width, list_start));
+    let laid = Arc::new(layout(metrics, theme, content, mentions, width, list_start, soft_wrap));
     cache.store(full, Arc::clone(&laid));
     laid
 }
@@ -187,8 +190,9 @@ pub(crate) fn height(
     mentions: &[MentionCandidate],
     width: f32,
     list_start: usize,
+    soft_wrap: bool,
 ) -> f32 {
-    laid_out(cache, metrics, theme, key, content, mentions, width, list_start).height
+    laid_out(cache, metrics, theme, key, content, mentions, width, list_start, soft_wrap).height
 }
 
 /// 绘制一块 Markdown 区域：图元在文字之下，超出裁剪区的不画。
@@ -201,6 +205,7 @@ pub(crate) fn paint(
     rect: Rect,
     clip: Rect,
     list_start: usize,
+    soft_wrap: bool,
 ) {
     let laid = laid_out(
         &ctx.state.markdown_layouts,
@@ -211,6 +216,7 @@ pub(crate) fn paint(
         mentions,
         rect.w,
         list_start,
+        soft_wrap,
     );
     ctx.markdown_seen.push((id.to_string(), Arc::clone(&laid)));
     for shape in &laid.shapes {
@@ -358,6 +364,16 @@ pub(crate) fn paint(
         ctx.hit(&hit, visible, atelyx_plugin_protocol::frame::HitCursor::Pointer);
         ctx.record(&hit, super::model::Layout::Copy { text: copy.text.clone() });
     }
+    for (index, task) in laid.tasks.iter().enumerate() {
+        let placed = Rect::new(rect.x + task.x, rect.y + task.y, task.w, task.h);
+        let visible = placed.intersect(clip);
+        if visible.is_empty() {
+            continue;
+        }
+        let hit = task_hit_id(id, index);
+        ctx.hit(&hit, visible, atelyx_plugin_protocol::frame::HitCursor::Pointer);
+        ctx.record(&hit, super::model::Layout::Custom);
+    }
 }
 
 /// 落点 → （行序，行内字节位）：先按纵向定行，再按横向归到最近的一列（表格同行多列）。
@@ -429,18 +445,26 @@ fn copy_hit_id(id: &str, index: usize) -> String {
     format!("{id}::copy:{index}")
 }
 
+/// 任务框的命中 id：`<块 id>::task:<序>`。
+fn task_hit_id(id: &str, index: usize) -> String {
+    format!("{id}::task:{index}")
+}
+
 /// 排版器：随块递归累积行与图元，坐标都相对块原点。
 struct Builder<'a> {
     metrics: &'a mut Metrics,
     theme: &'a Theme,
     source: &'a str,
     options: ParseOptions,
+    /// 段内软换行是否保留：关闭时段内单个换行按空格排版，硬换行仍是换行。
+    soft_wrap: bool,
     /// 顶层列表项的起始序号（单独渲染一个列表项时不让序号退化成 1）。
     list_start: usize,
     lines: Vec<Line>,
     shapes: Vec<Shape>,
     strokes: Vec<Stroke>,
     copies: Vec<CopyHit>,
+    tasks: Vec<Rect>,
     height: f32,
 }
 
@@ -451,6 +475,7 @@ fn layout(
     mentions: &[MentionCandidate],
     width: f32,
     list_start: usize,
+    soft_wrap: bool,
 ) -> Layout {
     let options = ParseOptions { mentions: mentions.to_vec(), ..ParseOptions::default() };
     let document = parse_markdown(source, &options);
@@ -459,11 +484,13 @@ fn layout(
         theme,
         source,
         options,
+        soft_wrap,
         list_start,
         lines: Vec::new(),
         shapes: Vec::new(),
         strokes: Vec::new(),
         copies: Vec::new(),
+        tasks: Vec::new(),
         height: 0.0,
     };
     let mut previous = 0usize;
@@ -473,6 +500,7 @@ fn layout(
         shapes: builder.shapes,
         strokes: builder.strokes,
         copies: builder.copies,
+        tasks: builder.tasks,
         height: builder.height,
     }
 }
@@ -666,6 +694,8 @@ impl Builder<'_> {
 
     /// 任务框：勾选态填强调色并画勾线，未勾选只描边。
     fn task_box(&mut self, x: f32, y: f32, line: f32, checked: bool) {
+        // 整列都可点：勾选框只有 12px，命中区按标记列与行高放宽
+        self.tasks.push(Rect::new(x, y, LIST_MARKER_W + LIST_GAP, line));
         let top = y + (line - TASK_BOX) / 2.0;
         let fill = checked.then(|| theme::token(ColorToken::Accent));
         self.shapes.push(Shape {
@@ -852,7 +882,14 @@ impl Builder<'_> {
     fn push_spans(&self, inline: &[InlineSpan], base: FontSpec, style: RunStyle, out: &mut Vec<Run>) {
         for span in inline {
             match span {
-                InlineSpan::Text { text, .. } => push_run(out, text, base, style),
+                InlineSpan::Text { text, .. } => {
+                    // 软换行是正文 Text 里的换行；硬换行是独立 span，折叠只作用于前者
+                    if self.soft_wrap || !text.contains('\n') {
+                        push_run(out, text, base, style);
+                    } else {
+                        push_run(out, &text.replace('\n', " "), base, style);
+                    }
+                }
                 InlineSpan::Strong { children, .. } | InlineSpan::Highlight { children, .. } => {
                     let spec = FontSpec { weight: Some(TextWeight::SemiBold), ..base };
                     self.push_spans(children, spec, style, out);
@@ -1169,7 +1206,7 @@ mod tests {
     fn headings_grow_by_level_and_paragraphs_wrap() {
         let theme = Theme::default();
         let mut metrics = Metrics::default();
-        let laid = layout(&mut metrics, &theme, "# 标题\n\n正文", &[], 240.0, 0);
+        let laid = layout(&mut metrics, &theme, "# 标题\n\n正文", &[], 240.0, 0, true);
         let sizes: Vec<f32> = laid.lines.iter().map(|line| line.runs[0].spec.size).collect();
         assert!(sizes[0] > sizes[1], "标题字号要大于正文：{sizes:?}");
         assert_eq!(laid.lines[0].runs[0].text, "标题");
@@ -1179,8 +1216,8 @@ mod tests {
     fn blank_lines_between_blocks_become_vertical_space() {
         let theme = Theme::default();
         let mut metrics = Metrics::default();
-        let tight = layout(&mut metrics, &theme, "甲\n\n乙", &[], 240.0, 0).height;
-        let loose = layout(&mut metrics, &theme, "甲\n\n\n乙", &[], 240.0, 0).height;
+        let tight = layout(&mut metrics, &theme, "甲\n\n乙", &[], 240.0, 0, true).height;
+        let loose = layout(&mut metrics, &theme, "甲\n\n\n乙", &[], 240.0, 0, true).height;
         assert!(loose > tight, "多一个空行就要多一段行高：{tight} vs {loose}");
     }
 
@@ -1189,7 +1226,7 @@ mod tests {
         let theme = Theme::default();
         let mut metrics = Metrics::default();
         let source = "**粗** *斜* ~~删~~ `码` #标签";
-        let laid = layout(&mut metrics, &theme, source, &[], 400.0, 0);
+        let laid = layout(&mut metrics, &theme, source, &[], 400.0, 0, true);
         let runs: Vec<&Run> = laid.lines.iter().flat_map(|line| line.runs.iter()).collect();
         assert!(runs.iter().any(|run| run.style.italic && run.text == "斜"));
         assert!(runs.iter().any(|run| run.style.strike && run.text == "删"));
@@ -1202,7 +1239,7 @@ mod tests {
         let theme = Theme::default();
         let mut metrics = Metrics::default();
         let mentions = vec![MentionCandidate { key: "笔记/方案.md".into(), label: "笔记：方案.md".into() }];
-        let laid = layout(&mut metrics, &theme, "看看 #笔记：方案.md 怎么写", &mentions, 400.0, 0);
+        let laid = layout(&mut metrics, &theme, "看看 #笔记：方案.md 怎么写", &mentions, 400.0, 0, true);
         let runs: Vec<&Run> = laid.lines.iter().flat_map(|line| line.runs.iter()).collect();
         assert!(
             runs.iter().any(|run| run.style.capsule && run.text.contains("方案.md")),
@@ -1216,7 +1253,7 @@ mod tests {
         let theme = Theme::default();
         let mut metrics = Metrics::default();
         let source = "```rust\nlet a = 1;\n```";
-        let laid = layout(&mut metrics, &theme, source, &[], 300.0, 0);
+        let laid = layout(&mut metrics, &theme, source, &[], 300.0, 0, true);
         assert_eq!(laid.copies.len(), 1, "每个代码块一个复制钮");
         assert!(laid.copies[0].text.contains("let a = 1;"));
         assert!(laid.lines.iter().any(|line| line.runs.iter().any(|run| run.text == "rust")));
@@ -1226,7 +1263,7 @@ mod tests {
     fn task_items_paint_a_box_and_lists_stay_indented() {
         let theme = Theme::default();
         let mut metrics = Metrics::default();
-        let laid = layout(&mut metrics, &theme, "- [x] 做完\n- [ ] 没做", &[], 300.0, 0);
+        let laid = layout(&mut metrics, &theme, "- [x] 做完\n- [ ] 没做", &[], 300.0, 0, true);
         assert!(laid.strokes.len() >= 1, "勾选态要有勾线");
         let bullets: Vec<&Line> = laid.lines.iter().filter(|line| line.runs.iter().any(|run| run.text == "做完")).collect();
         assert!(!bullets.is_empty());
@@ -1237,9 +1274,25 @@ mod tests {
     fn single_ordered_item_keeps_its_original_number() {
         let theme = Theme::default();
         let mut metrics = Metrics::default();
-        let laid = layout(&mut metrics, &theme, "3. 丙", &[], 300.0, 2);
+        let laid = layout(&mut metrics, &theme, "3. 丙", &[], 300.0, 2, true);
         let runs: Vec<&str> = laid.lines.iter().flat_map(|line| line.runs.iter()).map(|run| run.text.as_str()).collect();
         assert!(runs.contains(&"3."), "单独渲染的有序项要按原序号画：{runs:?}");
+    }
+
+    #[test]
+    fn soft_wrap_off_folds_paragraph_breaks_but_keeps_hard_breaks() {
+        let theme = Theme::default();
+        let mut metrics = Metrics::default();
+        let folded = layout(&mut metrics, &theme, "第一行\n第二行", &[], 400.0, 0, false);
+        assert_eq!(folded.lines.len(), 1, "软换行折叠后只剩一行");
+        assert_eq!(folded.lines[0].runs[0].text, "第一行 第二行");
+
+        let kept = layout(&mut metrics, &theme, "第一行\n第二行", &[], 400.0, 0, true);
+        assert_eq!(kept.lines.len(), 2, "宽松换行保留段内换行");
+
+        let hard = layout(&mut metrics, &theme, "硬换行  \n下一行", &[], 400.0, 0, false);
+        assert_eq!(hard.lines.len(), 2, "硬换行不受折叠影响");
+        assert_eq!(hard.lines[0].runs[0].text, "硬换行");
     }
 
     #[test]
@@ -1248,10 +1301,10 @@ mod tests {
         let theme = Theme::default();
         let mut metrics = Metrics::default();
         let key = content_key("一段正文", &[]);
-        let first = laid_out(&cache, &mut metrics, &theme, key, "一段正文", &[], 240.0, 0);
-        let again = laid_out(&cache, &mut metrics, &theme, key, "一段正文", &[], 240.0, 0);
+        let first = laid_out(&cache, &mut metrics, &theme, key, "一段正文", &[], 240.0, 0, true);
+        let again = laid_out(&cache, &mut metrics, &theme, key, "一段正文", &[], 240.0, 0, true);
         assert!(Arc::ptr_eq(&first, &again), "同内容同宽度应命中缓存");
-        let narrower = laid_out(&cache, &mut metrics, &theme, key, "一段正文", &[], 120.0, 0);
+        let narrower = laid_out(&cache, &mut metrics, &theme, key, "一段正文", &[], 120.0, 0, true);
         assert!(!Arc::ptr_eq(&first, &narrower), "宽度变了要按新宽度重排");
     }
 
@@ -1266,7 +1319,7 @@ mod tests {
         let cache = LayoutCache::default();
         let key = content_key(&source, &[]);
 
-        let _ = laid_out(&cache, &mut metrics, &theme, key, &source, &[], 360.0, 0);
+        let _ = laid_out(&cache, &mut metrics, &theme, key, &source, &[], 360.0, 0, true);
         let first = metrics.take_misses();
         let sizes: Vec<MeasureTextResult> = first
             .iter()
@@ -1275,7 +1328,7 @@ mod tests {
         metrics.apply(&first, &sizes);
 
         for width in [360.0_f32, 359.0, 358.0, 300.0, 420.0] {
-            let _ = laid_out(&cache, &mut metrics, &theme, key, &source, &[], width, 0);
+            let _ = laid_out(&cache, &mut metrics, &theme, key, &source, &[], width, 0, true);
             assert!(metrics.take_misses().is_empty(), "改宽到 {width} 后不得再登记量算");
         }
     }

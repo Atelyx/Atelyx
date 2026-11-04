@@ -248,6 +248,8 @@ fn content(ui: &mut Ui<'_, '_>, model: &NoteModel) {
 }
 
 fn read_view(ui: &mut Ui<'_, '_>, model: &NoteModel) {
+    // 宽松换行关闭只作用于只读面：编辑面文本即真相，换行照旧
+    ui.markdown_soft_wrap(model.prefs.soft_wrap);
     ui.scroll(BODY_SCROLL, 0.0, |ui| {
         bounded(ui, model, |ui| {
             ui.pad(16.0, 10.0, |ui| {
@@ -337,7 +339,13 @@ fn rows(ui: &mut Ui<'_, '_>, model: &NoteModel, edit: Option<EditMeasure>) {
         }
         match &block.image {
             Some(image) if image.height.is_some() => {
-                ui.image_fit(image_source(image), image.height.unwrap_or(240.0), ImageFit::Contain);
+                if model.image_probe.get(&image.src) == Some(&false) {
+                    // 载入失败：按替代文字占位，不给正文留空洞
+                    let name = if image.alt.is_empty() { &image.src } else { &image.alt };
+                    ui.markdown_named(block_id(index), &format!("[图片：{name}]"), Vec::new());
+                } else {
+                    ui.image_fit(image_source(image), image.height.unwrap_or(240.0), ImageFit::Contain);
+                }
             }
             _ => {
                 ui.markdown_named(block_id(index), &body[block.from..block.to], Vec::new());
@@ -391,9 +399,14 @@ fn list_rows(
         let id = item_id(index, item);
         let source = &body[info.from..info.to];
         if model.active_item == Some((index, item)) {
+            // 编辑框的文本必须与编辑值同源（含行首缩进），否则光标与点击落点整体偏移缩进宽度
+            let Some(editing) = model.item_source(index, item).map(|(from, to)| &model.text[from..to])
+            else {
+                continue;
+            };
             ui.text_area_plain_auto(
                 id,
-                source,
+                editing,
                 measure.line,
                 600.0,
                 measure.size,

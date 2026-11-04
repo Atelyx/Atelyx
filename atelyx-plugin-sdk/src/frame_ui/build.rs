@@ -50,6 +50,8 @@ pub(crate) struct BuildCtx<'a> {
     hints: HashMap<String, String>,
     /// 本帧画过的只读正文版面：状态留一份，选择命中与复制按它算。
     pub markdown_seen: Vec<(String, Arc<super::markdown::Layout>)>,
+    /// 后续只读 Markdown 的段内换行策略：true = 保留，false = 软换行折叠为空格。
+    pub soft_wrap: bool,
 }
 
 pub(crate) struct BuildOut {
@@ -96,6 +98,7 @@ impl<'a> BuildCtx<'a> {
             markdown_seq: 0,
             hints: HashMap::new(),
             markdown_seen: Vec::new(),
+            soft_wrap: true,
         }
     }
 
@@ -371,6 +374,13 @@ impl<'c, 'a> Ui<'c, 'a> {
     /// 本面的完整矩形（浮层定位用；坐标为面本地逻辑像素）。
     pub fn bounds(&self) -> Rect {
         self.clip
+    }
+
+    /// 本帧内后续绘制的只读 Markdown 的段内换行策略：false = 段内软换行按空格排版（硬换行保留）。
+    /// 是整帧状态而非容器作用域——调用点之后的 Markdown 都跟随；只读阅读面据此跟随「宽松换行」设置，
+    /// 编辑面文本即真相，不调用。
+    pub fn markdown_soft_wrap(&mut self, soft_wrap: bool) {
+        self.ctx.soft_wrap = soft_wrap;
     }
 
     /// 纵向容器：子项按声明序自上而下，`gap` 为间距。

@@ -614,15 +614,24 @@ pub fn reset_suggest(host: &mut dyn PropsHost) {
     props.suggest_armed = false;
 }
 
+/// 清掉在途槽编辑的全部残留：草稿、错误、类型菜单与候选态。
+fn clear_edit(host: &mut dyn PropsHost) {
+    let props = host.props_mut();
+    props.editing = None;
+    props.draft.clear();
+    props.error = None;
+    props.type_menu = None;
+    reset_suggest(host);
+}
+
+/// 丢弃在途槽编辑的草稿与候选态（不提交、不重读正文）：换文档时清掉上一份的残留。
+pub fn discard_edit(host: &mut dyn PropsHost) {
+    clear_edit(host);
+}
+
 /// 放弃在途槽编辑（不提交草稿）：删除类动作按渲染下标执行，先取消可避免提交改行后下标漂移。
 pub fn cancel_edit(host: &mut dyn PropsHost) {
-    {
-        let props = host.props_mut();
-        props.editing = None;
-        props.draft.clear();
-        props.error = None;
-    }
-    reset_suggest(host);
+    clear_edit(host);
     host.refresh();
 }
 

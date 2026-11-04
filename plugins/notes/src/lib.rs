@@ -61,6 +61,7 @@ impl NotesPlugin {
                 }
                 self.load_backlinks(ctx, &result.path).await;
                 self.refresh_tags(ctx).await;
+                self.refresh_images(ctx).await;
             }
             Err(error) => {
                 ctx.log_error(&format!("打开笔记失败（{path}）：{error}"));
@@ -89,6 +90,30 @@ impl NotesPlugin {
         }
     }
 
+    /// 探测正文引用的仓库图片能否解码：失败的在只读面回落替代文字。
+    /// 结果按路径缓存，文件变更事件到达时由调用方失效重探。
+    async fn refresh_images(&self, ctx: &Context) {
+        let pending: Vec<String> = {
+            let model = self.model.lock().unwrap();
+            let mut out: Vec<String> = Vec::new();
+            for block in &model.blocks {
+                let Some(image) = &block.image else { continue };
+                if image.src.starts_with("http://") || image.src.starts_with("https://") {
+                    continue;
+                }
+                if model.image_probe.contains_key(&image.src) || out.contains(&image.src) {
+                    continue;
+                }
+                out.push(image.src.clone());
+            }
+            out
+        };
+        for src in pending {
+            let ok = ctx.vault_image_info(&src).await.is_ok();
+            self.model.lock().unwrap().image_probe.insert(src, ok);
+        }
+    }
+
     async fn load_backlinks(&self, ctx: &Context, path: &str) {
         match ctx.vault_backlinks(path).await {
             Ok(entries) => {
@@ -109,6 +134,7 @@ impl NotesPlugin {
             if model.text != text {
                 model.edit_text(text.clone());
             }
+            model.selection = selection;
             model.path.clone()
         };
         let Some(path) = path else { return };
@@ -139,34 +165,43 @@ impl NotesPlugin {
     }
 
     async fn undo(&self, ctx: &Context, redo: bool) {
-        let (text, input) = {
+        let (text, selection, input) = {
             let mut model = self.model.lock().unwrap();
-            let Some(text) = (if redo { model.redo() } else { model.undo() }) else {
+            let Some((text, selection)) = (if redo { model.redo() } else { model.undo() }) else {
                 return;
             };
             let input = active_input(&model).and_then(|id| {
                 let value = value_of(&model, &id)?;
-                let caret = if let Some((block, item)) = item_index(&id) {
-                    model.item_source(block, item).map_or(value.len(), |(from, to)| to - from)
-                } else {
-                    block_index(&id)
-                        .and_then(|index| model.blocks.get(index))
-                        .map_or(value.len(), |block| block.to.saturating_sub(block.from))
-                };
+                let base = input_base(&model, &id);
+                let caret = selection
+                    .map_or(value.len(), |(anchor, _)| anchor)
+                    .saturating_sub(base)
+                    .min(value.len());
                 Some((id, value, caret))
             });
-            (text, input)
+            (text, selection, input)
         };
         if let Some((id, value, caret)) = input {
             let mut frame_ui = self.ui.lock().await;
             frame_ui.set_input(&id, &value, caret);
         }
-        self.commit_edit(ctx, text, None).await;
+        // 快照里的选区随撤销恢复：继续撤销的光标落点与上报给协作的选区都按它
+        self.commit_edit(ctx, text, selection).await;
         self.render(ctx).await;
     }
 
     async fn handle_input(&self, ctx: &Context, params: FrameInputParams) {
         let input = params.input;
+        // 点出面板即退出编辑：面板内工具条 / 属性 / 反链的编辑不受影响。
+        // 失焦事件仍要交给控件层，否则属性槽 / 标题草稿不会提交、输入法组合串留在帧里。
+        if matches!(input, FrameInput::Focus { focused: false }) {
+            let mut model = self.model.lock().unwrap();
+            if model.mode == Mode::Edit && model.can_write {
+                model.mode = Mode::Read;
+                model.active_block = None;
+                model.active_item = None;
+            }
+        }
         self.remember_pointer(&input);
         if let FrameInput::DoubleClick { hit, .. } = &input {
             self.on_pointer_double(ctx, hit.as_deref()).await;
@@ -501,6 +536,9 @@ impl NotesPlugin {
         if focus == props::KEY_INPUT {
             return self.handle_props_key(ctx, key, modifiers.shift).await;
         }
+        if focus == SOURCE {
+            return self.handle_source_key(ctx, key, modifiers.shift).await;
+        }
         if let Some((gap, line)) = gap_input(&focus) {
             return self.handle_gap_key(ctx, &focus, gap, line, key).await;
         }
@@ -680,6 +718,50 @@ impl NotesPlugin {
         }
     }
 
+    /// 源码档 Tab / Shift+Tab：整行缩进与反缩进。Tab 先于控件层消费，
+    /// 否则会被控件层的焦点巡航吃掉（跳到工具条输入框）。
+    async fn handle_source_key(&self, ctx: &Context, key: &Key, shift: bool) -> bool {
+        use atelyx_plugin_protocol::frame::NamedKey;
+        if !matches!(key, Key::Named { name: NamedKey::Tab }) {
+            return false;
+        }
+        let (caret, anchor) = {
+            let frame_ui = self.ui.lock().await;
+            match frame_ui.caret(SOURCE) {
+                Some(caret) => caret,
+                None => return false,
+            }
+        };
+        let (from, to) = if anchor <= caret { (anchor, caret) } else { (caret, anchor) };
+        let (text, at) = {
+            let model = self.model.lock().unwrap();
+            if model.mode != Mode::Edit || !model.can_write {
+                return false;
+            }
+            let edit = if shift {
+                match edit::outdent_edit(&model.text, from, to) {
+                    Some(edit) => edit,
+                    // 无可删缩进也吞掉按键：交给控件层会把焦点挪走
+                    None => return true,
+                }
+            } else {
+                edit::indent_edit(&model.text, from, to)
+            };
+            (edit.text, edit.caret)
+        };
+        {
+            let mut model = self.model.lock().unwrap();
+            model.edit_text(text.clone());
+        }
+        self.commit_edit(ctx, text.clone(), Some((at, at))).await;
+        {
+            let mut frame_ui = self.ui.lock().await;
+            frame_ui.set_input(SOURCE, &text, at);
+        }
+        self.render(ctx).await;
+        true
+    }
+
     /// 列表项输入面的语义按键：续项 / 空项退格 / 缩进，↑↓ 在项与相邻单元之间巡航。
     async fn handle_item_key(
         &self,
@@ -827,6 +909,13 @@ impl NotesPlugin {
         if self.props_click(ctx, id).await {
             return;
         }
+        // 任务框命中：`<项 id>::task:<序>`，整项只画一个框
+        if let Some((item_id, _)) = id.split_once("::task:") {
+            if let Some((block, item)) = item_index(item_id) {
+                self.toggle_task(ctx, block, item).await;
+                return;
+            }
+        }
         match id {
             "note:retry" => {
                 self.model.lock().unwrap().save_error = None;
@@ -896,6 +985,9 @@ impl NotesPlugin {
                 if let Some(path) = path {
                     if let Err(error) = ctx.open_file(&path).await {
                         ctx.log_error(&format!("打开反链文件失败（{path}）：{error}"));
+                        let _ = ctx
+                            .notify("打开文件失败", Some(&error.to_string()), NotificationLevel::Error)
+                            .await;
                     }
                 }
             }
@@ -926,6 +1018,20 @@ impl NotesPlugin {
             }
             self.focus_block(ctx, index, None).await;
         }
+    }
+
+    /// 任务项点击：翻转勾选态并把光标落在勾选框内（协作在场不跳到文末）。
+    async fn toggle_task(&self, ctx: &Context, block: usize, item: usize) {
+        let (next, at) = {
+            let model = self.model.lock().unwrap();
+            if !model.can_write {
+                return;
+            }
+            let Some((from, _)) = model.item_source(block, item) else { return };
+            let Some(toggled) = edit::task_toggle_edit(&model.text, from) else { return };
+            toggled
+        };
+        self.commit_edit(ctx, next, Some((at, at))).await;
     }
 
     /// 属性面板的点击：命中即处理并返回 true。
@@ -1259,6 +1365,23 @@ enum Focus {
     Gap(usize, usize, usize),
 }
 
+/// 输入框文本在全文中的起点（选区偏移按它换算成框内光标）。
+fn input_base(model: &NoteModel, id: &str) -> usize {
+    if id == crate::model::EMPTY_EDIT {
+        return model.body_start;
+    }
+    if let Some((block, item)) = item_index(id) {
+        return model.item_source(block, item).map_or(0, |(from, _)| from);
+    }
+    if let Some(index) = block_index(id) {
+        return model
+            .blocks
+            .get(index)
+            .map_or(0, |block| model.body_start + block.from);
+    }
+    0
+}
+
 fn value_of(model: &NoteModel, id: &str) -> Option<String> {
     if id == SOURCE {
         return Some(model.text.clone());
@@ -1382,6 +1505,8 @@ impl PluginHandler for NotesPlugin {
                 ctx.log_error(&format!("关闭笔记失败（{}）：{error}", params.path));
             }
             self.model.lock().unwrap().clear();
+            // 关档后宿主仍持有上一帧：必须交一帧空态，否则面板停在旧文档
+            self.render(ctx).await;
         }
     }
 
@@ -1427,6 +1552,7 @@ impl PluginHandler for NotesPlugin {
                         }
                     }
                 }
+                self.refresh_images(ctx).await;
                 self.render(ctx).await;
             }
             event::name::DOC_PRESENCE => {
@@ -1490,7 +1616,14 @@ impl PluginHandler for NotesPlugin {
                         self.render(ctx).await;
                     }
                     (_, Some(path)) => {
+                        // 探测结论按 markdown 原始 src 缓存，变更路径是仓库相对路径：同一条目按尾部匹配清掉
+                        self.model
+                            .lock()
+                            .unwrap()
+                            .image_probe
+                            .retain(|src, _| !crate::model::image_src_matches(src, &payload.path));
                         self.load_backlinks(ctx, &path).await;
+                        self.refresh_images(ctx).await;
                         self.render(ctx).await;
                     }
                     _ => {}

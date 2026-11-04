@@ -1,4 +1,4 @@
-﻿//! SDK 控件：文字、按钮、输入框、下拉、勾选与滚动容器。
+//! SDK 控件：文字、按钮、输入框、下拉、勾选与滚动容器。
 //! 每个控件在自己的绘制闭包里写指令、命中区与布局记录；外观取主题 token，尺寸与宿主表单控件同档。
 
 use std::collections::HashSet;
@@ -2058,12 +2058,15 @@ impl<'c, 'a> Ui<'c, 'a> {
     ) {
         let theme = self.ctx().theme.clone();
         let cache = Arc::clone(&self.ctx().state.markdown_layouts);
+        let soft_wrap = self.ctx().soft_wrap;
         let key = super::markdown::content_key(&content, &mentions);
         // 同一段项源码在不同列表位置要各自排版：起始序号一并计入缓存键
         let key = match list_start {
             Some(start) => key ^ (start as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15),
             None => key,
         };
+        // 折叠软换行改变版面：与保留换行的版面分开缓存
+        let key = if soft_wrap { key } else { key ^ 0x5F35_6E4B_2A17_9C31 };
         let start = list_start.unwrap_or(0);
         let for_height = content.clone();
         let height_mentions = mentions.clone();
@@ -2072,17 +2075,28 @@ impl<'c, 'a> Ui<'c, 'a> {
             width: Width::Fill,
             fill_height: false,
             height: Box::new(move |metrics, width| {
-                super::markdown::height(&cache, metrics, &theme, key, &for_height, &height_mentions, width, start)
+                super::markdown::height(
+                    &cache,
+                    metrics,
+                    &theme,
+                    key,
+                    &for_height,
+                    &height_mentions,
+                    width,
+                    start,
+                    soft_wrap,
+                )
             }),
             draw: Box::new(move |ctx, rect, clip| {
                 let visible = rect.intersect(clip);
                 if visible.is_empty() {
                     return;
                 }
-                super::markdown::paint(ctx, &id, key, &content, &draw_mentions, rect, clip, start);
-                // 正文可拖选：命中声明为文本形态，按下 / 拖动由输入路由换算成行列
+                // 正文可拖选：命中声明为文本形态，按下 / 拖动由输入路由换算成行列。
+                // 复制钮与任务框在 paint 里后声明，同帧内后声明者优先，子区点击不会被整块吞掉。
                 ctx.hit(&id, visible, atelyx_plugin_protocol::frame::HitCursor::Text);
                 ctx.record(&id, super::model::Layout::Markdown { rect });
+                super::markdown::paint(ctx, &id, key, &content, &draw_mentions, rect, clip, start, soft_wrap);
             }),
         });
     }
