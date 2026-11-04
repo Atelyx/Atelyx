@@ -1532,7 +1532,9 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
             let refresh = refresh_after_vault_change(app, &change);
             app.plugins.resolve_shell_call(request_id, result);
             match reload {
-                Some(path) => refresh.chain(app.open_file(&path, true)),
+                Some(path) => refresh.chain(
+                    app.open_file(&path, crate::plugin_actions::OpenMode::Reveal),
+                ),
                 None => refresh,
             }
         }
@@ -1645,7 +1647,12 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
             };
             app.plugins.resolve_shell_call(request_id, Ok(serde_json::json!({})));
             // 打开走脏拦截：未落盘输入先 flush 再换文件（与文件树单击同一通道）
-            app.gate(crate::PendingAfterFlush::OpenFile { path: rel, reveal })
+            let mode = if reveal {
+                crate::plugin_actions::OpenMode::Reveal
+            } else {
+                crate::plugin_actions::OpenMode::Background
+            };
+            app.gate(crate::PendingAfterFlush::OpenFile { path: rel, mode })
         }
         PluginsMsg::DocOpen { request_id, params } => {
             crate::doc_session::open(app, request_id, params)

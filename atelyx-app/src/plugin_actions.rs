@@ -10,7 +10,7 @@ use std::path::{Component, Path, PathBuf};
 
 use iced::{Task, window};
 
-use atelyx_core::layout::{self, LayoutNode, LayoutOp};
+use atelyx_core::layout::{self, AppUiState, LayoutNode, LayoutOp};
 use atelyx_core::plugin_runtime::{
     Contribution, ContributionSlot, DrawCommand, FrameInput, ImageSource, SurfaceKind,
     TakeoverScope, WindowOpenParams, WindowUpdateParams,
@@ -1069,6 +1069,34 @@ fn scene_has_view(app: &App, view: &str) -> bool {
 
 // ===== 领域文档类型 =====
 
+/// 打开文件的意图：决定是否让对应视图显示，以及是否产生会话副作用。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OpenMode {
+    /// 用户主动打开：视图不存在就新建标签并激活，记最近打开并落盘。
+    Reveal,
+    /// 用户打开但不动布局：只挂到已有视图，仍记最近打开并落盘。
+    Background,
+    /// 启动恢复：只把文件挂到已有视图；不新建 / 不激活标签、不记最近打开、不落盘。
+    Restore,
+}
+
+impl OpenMode {
+    /// 是否让对应视图显示（恢复与后台打开都不动布局）。
+    pub(crate) fn reveals(self) -> bool {
+        matches!(self, Self::Reveal)
+    }
+
+    /// 是否记入最近打开清单（恢复不重排清单）。
+    pub(crate) fn records_recent(self) -> bool {
+        !matches!(self, Self::Restore)
+    }
+
+    /// 是否落盘「上次打开」字段（恢复沿用磁盘现值，不新增写盘）。
+    pub(crate) fn persists(self) -> bool {
+        !matches!(self, Self::Restore)
+    }
+}
+
 /// 一个打开中的插件文档实例（单实例：同一时间至多一个打开的插件文档，切换文件即换实例）。
 #[derive(Clone, Debug)]
 pub struct DocOpenInstance {
@@ -1079,6 +1107,8 @@ pub struct DocOpenInstance {
     pub path: String,
     /// 实例面标识（= contribution_id；插件据此提交文档面）。
     pub surface_id: String,
+    /// 本次打开的意图：读盘完成时据此判定是否记最近打开。
+    pub(crate) mode: OpenMode,
 }
 
 /// 文档视图 kind：插件领域文档视图沿用插件视图 kind 命名空间。
@@ -1104,10 +1134,9 @@ pub fn doc_type_for_extension(
     Some((first.plugin_id, first.registration, count))
 }
 
-/// 打开一个插件领域文档（文件打开路由分派）：登记实例、确保文档视图标签存在并激活、
+/// 打开一个插件领域文档（文件打开路由分派）：登记实例、按 `mode` 决定是否让视图显示、
 /// 通知插件（`host:doc.open`）。实例面标识换新（旧实例先关闭通知）。
-/// `reveal` = 是否确保并激活文档视图标签：false 只打开文件，布局保持不动。
-pub fn open_doc(app: &mut App, rel: &str, reveal: bool) -> Task<Message> {
+pub fn open_doc(app: &mut App, rel: &str, mode: OpenMode) -> Task<Message> {
     let extension = rel.rsplit('.').next().unwrap_or_default().to_string();
     let Some((plugin_id, reg, candidates)) = doc_type_for_extension(app, &extension) else {
         app.notify(
@@ -1134,10 +1163,13 @@ pub fn open_doc(app: &mut App, rel: &str, reveal: bool) -> Task<Message> {
         contribution_id: surface_id.clone(),
         path: rel.to_string(),
         surface_id,
+        mode,
     });
     app.ui.last_doc_file = Some(rel.to_string());
-    app.schedule_persist();
-    if reveal {
+    if mode.persists() {
+        app.schedule_persist();
+    }
+    if mode.reveals() {
         ensure_doc_tab(app, &plugin_id, &reg.surface)
     } else {
         // 只打开文件：布局不动，视图没在布局里就等用户自己打开
@@ -1164,26 +1196,32 @@ fn ensure_doc_tab(app: &mut App, plugin_id: &str, contribution_id: &str) -> Task
 
 /// 让某视图在布局里显示：已存在（主树或撕裂窗口）只激活，否则加到聚焦面板。
 pub(crate) fn reveal_view(app: &mut App, view: &str) -> Task<Message> {
-    if let Some(task) = activate_existing_view(app, view) {
-        return task;
+    match reveal_op(&app.ui, view) {
+        Some(op) => app.apply(op),
+        None => {
+            app.notify(
+                crate::ui::notify::Level::Error,
+                "没有可放置视图的面板".to_string(),
+            );
+            Task::none()
+        }
     }
-    let panel_id = app
-        .ui
-        .focused_panel_id
-        .clone()
-        .or_else(|| first_panel_id(&layout::active_layout(&app.ui).tree));
-    let Some(panel_id) = panel_id else {
-        app.notify(
-            crate::ui::notify::Level::Error,
-            "没有可放置视图的面板".to_string(),
-        );
-        return Task::none();
-    };
-    app.apply(layout::LayoutOp::AddView { panel_id, view: view.to_string() })
 }
 
-/// 布局里已存在某视图标签时激活它（主树 / 撕裂窗口各查一层）；未找到 = `None`。
-fn activate_existing_view(app: &mut App, view: &str) -> Option<Task<Message>> {
+/// 视图显示的目标布局操作（纯函数）：已有标签 → 激活；不存在 → 加到聚焦面板。
+pub(crate) fn reveal_op(ui: &AppUiState, view: &str) -> Option<LayoutOp> {
+    if let Some(op) = activate_existing_view_op(ui, view) {
+        return Some(op);
+    }
+    let panel_id = ui
+        .focused_panel_id
+        .clone()
+        .or_else(|| first_panel_id(&layout::active_layout(ui).tree))?;
+    Some(LayoutOp::AddView { panel_id, view: view.to_string() })
+}
+
+/// 布局里已存在某视图标签时的激活操作（主树 / 撕裂窗口各查一层）；未找到 = `None`。
+fn activate_existing_view_op(ui: &AppUiState, view: &str) -> Option<LayoutOp> {
     fn find_in(node: &LayoutNode, view: &str) -> Option<(String, String)> {
         match node {
             LayoutNode::Panel { id, tabs, .. } => tabs
@@ -1195,15 +1233,15 @@ fn activate_existing_view(app: &mut App, view: &str) -> Option<Task<Message>> {
             }
         }
     }
-    if let Some((panel_id, tab_id)) = find_in(&layout::active_layout(&app.ui).tree, view) {
-        return Some(app.apply(layout::LayoutOp::SetActive { panel_id, tab_id }));
+    if let Some((panel_id, tab_id)) = find_in(&layout::active_layout(ui).tree, view) {
+        return Some(LayoutOp::SetActive { panel_id, tab_id });
     }
-    for window in &app.ui.detached_windows {
+    for window in &ui.detached_windows {
         if let Some(tab) = window.tabs.iter().find(|t| t.view == view) {
-            return Some(app.apply(layout::LayoutOp::DetachedSetActive {
+            return Some(LayoutOp::DetachedSetActive {
                 window_id: window.id.clone(),
                 tab_id: tab.id.clone(),
-            }));
+            });
         }
     }
     None

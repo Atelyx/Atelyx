@@ -61,6 +61,7 @@ use ui::notify::{Level as NoticeLevel, Notification, Progress as NoticeProgress}
 use layout_view::{
     enumerate_dividers, panel_tab_ids_in, PopupOpen, PopupState, RenameState, RenameTarget, UiMetrics,
 };
+use plugin_actions::OpenMode;
 
 /// 撕裂窗口建窗参数：bounds 恢复位置 + 条目 OS 选项（不进任务栏）；无系统边框。
 fn panel_settings(w: &DetachedWindow) -> Settings {
@@ -939,8 +940,8 @@ enum ContainerRemoval {
 /// flush 放行后继续的动作（挂起输入已落盘才可执行，否则动作会丢失未保存内容或在途写打到旧路径）。
 #[derive(Debug, Clone)]
 enum PendingAfterFlush {
-    /// 打开仓库内文件；`reveal` = 打开后是否让对应视图显示（false = 只打开、不动布局）。
-    OpenFile { path: String, reveal: bool },
+    /// 打开仓库内文件；`mode` = 打开意图（恢复只挂已有视图，不新建标签）。
+    OpenFile { path: String, mode: OpenMode },
     PickVault,
     /// 从最近仓库列表进入指定仓库（from_boot 区分启动进入与运行中切换）。
     SelectVault { path: PathBuf, from_boot: bool },
@@ -960,6 +961,28 @@ enum PendingAfterFlush {
     SelectSpace { server_url: String, space_id: String, name: String },
     /// 安装就绪的更新包（挂起输入先落盘，安装器替换文件不丢未保存内容）。
     InstallUpdate,
+}
+
+/// 启动自动恢复要打开的文件：笔记 / 表格 / 画布各按上次路径发起一次，全部用
+/// [`OpenMode::Restore`]（只把文件挂到已有视图，不新建标签、不改布局）。
+/// 运行中切换容器（`from_boot == false`）不恢复；「自动恢复」关闭时不产生请求。
+pub(crate) fn restore_open_requests(
+    ui: &AppUiState,
+    from_boot: bool,
+    auto_restore: bool,
+) -> Vec<(String, OpenMode)> {
+    if !from_boot || !auto_restore {
+        return Vec::new();
+    }
+    [
+        ui.last_note_file.clone(),
+        ui.last_table_file.clone(),
+        ui.last_canvas_file.clone(),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|rel| (rel, OpenMode::Restore))
+    .collect()
 }
 
 /// 仓库容器身份：本地文件夹仓库 or 协作空间（同一时刻互斥激活）。
@@ -1384,8 +1407,8 @@ pub struct App {
     /// `None` = 与 [`Self::doc_text`] 相同：稳定态不另存一份全文。
     pub doc_base: Option<String>,
     /// 文档插件尚未就绪时挂起的打开请求（启动自动恢复 / 用户抢先点开）；
-    /// 连同「是否让对应视图显示」的语义一起挂起，就绪后按原样重试。
-    pending_doc_open: Option<(String, bool)>,
+    /// 连同「打开意图」一起挂起，就绪后按原样重试。
+    pending_doc_open: Option<(String, OpenMode)>,
     /// 笔记 / 画布 / 插件图片句柄缓存（key = src 原文；切仓库清空，在途与失败集合防重复发起）。
     pub note_images: ImageHandles,
     /// 图片像素尺寸（key 同 `note_images`）：自绘贴片按 contain / cover 摆放要用原图长宽。
@@ -3222,11 +3245,11 @@ impl App {
                         }
                         // 插件窗口 / 接管面 / 打开中的文档实例随重启重新就绪
                         plugin_actions::resync_surfaces_on_running(self, id);
-                        if let Some((path, reveal)) = self.pending_doc_open.clone() {
+                        if let Some((path, mode)) = self.pending_doc_open.clone() {
                             if self.pending_doc_plugin(&path).as_deref() == Some(id.as_str()) {
                                 self.pending_doc_open = None;
                                 task = task.chain(
-                                    self.gate(PendingAfterFlush::OpenFile { path, reveal }),
+                                    self.gate(PendingAfterFlush::OpenFile { path, mode }),
                                 );
                             }
                         }
@@ -3619,7 +3642,7 @@ impl App {
                     next = next.chain(self.load_vault_meta());
                 }
                 if let Some(rel) = reload_note {
-                    next = next.chain(self.open_file(&rel, true));
+                    next = next.chain(self.open_file(&rel, OpenMode::Reveal));
                 }
                 next
             }
@@ -4417,7 +4440,7 @@ impl App {
     /// flush 放行后的动作执行体（gate 保证挂起输入已落盘）。
     fn proceed(&mut self, pending: PendingAfterFlush) -> Task<Message> {
         match pending {
-            PendingAfterFlush::OpenFile { path, reveal } => self.open_file(&path, reveal),
+            PendingAfterFlush::OpenFile { path, mode } => self.open_file(&path, mode),
             PendingAfterFlush::PickVault => self.start_pick_vault(),
             PendingAfterFlush::SelectVault { path, from_boot } => {
                 // 已被更晚的点选取代：丢弃挂起的这次切换（避免落到非最后点击的仓库）
@@ -4459,6 +4482,7 @@ impl App {
     /// 插件文档面承载一篇文档：正文真源仍在本 `doc_text`，编辑态由插件自持。
     /// 协作空间同时建立 CRDT 文档（基线以载入正文为准）。
     pub(crate) fn attach_doc_session(&mut self, rel: &str, text: String) {
+        let path_changed = self.ui.last_note_file.as_deref() != Some(rel);
         self.ui.last_note_file = Some(rel.to_string());
         self.doc_active = true;
         self.doc_selection = None;
@@ -4487,7 +4511,10 @@ impl App {
             }
         }
         crate::doc_session::publish_presence(self);
-        self.schedule_persist();
+        // 启动恢复挂回的仍是磁盘上的同一路径：不新增写盘。
+        if path_changed {
+            self.schedule_persist();
+        }
     }
 
     /// 插件文档面提交一次编辑：以 `doc_base`（插件当前持有的全文）为祖先三方合并，
@@ -4568,21 +4595,25 @@ impl App {
     }
 
     /// 打开 .atb：登记打开的文件、面板内容切到表格插件网格视图、广播打开文件集合。
-    /// 表格数据、编辑与保存链都在插件；宿主只负责视图显示（`reveal`）、最近打开与历史列表。
-    fn open_table(&mut self, rel: &str, reveal: bool) -> Task<Message> {
+    /// 表格数据、编辑与保存链都在插件；宿主只负责视图显示（`mode`）、最近打开与历史列表。
+    fn open_table(&mut self, rel: &str, mode: OpenMode) -> Task<Message> {
         self.ui.last_table_file = Some(rel.to_string());
         self.history_kind = atelyx_core::history::HistoryKind::Table;
         // 打开 / 切换表格即广播：第三方表格视图按当前路径重取
         self.plugins.on_table_changed(Some(rel));
-        self.schedule_persist();
-        crate::recent_files::record(self, rel, atelyx_core::plugin_runtime::RecentKind::Table);
+        if mode.persists() {
+            self.schedule_persist();
+        }
+        if mode.records_recent() {
+            crate::recent_files::record(self, rel, atelyx_core::plugin_runtime::RecentKind::Table);
+        }
         // 插件按打开文件集合事件重读内容：切表 / 首次打开都靠这条
         self.notify_open_files();
         // 空间名册的「正在编辑」取打开文件集合：打开表格同样要上行
         if matches!(self.repo_kind, RepoKind::Space(_)) {
             crate::space_actions::send_presence(self);
         }
-        let task = if reveal {
+        let task = if mode.reveals() {
             plugin_actions::reveal_view(self, "table")
         } else {
             Task::none()
@@ -4591,18 +4622,22 @@ impl App {
     }
 
     /// 打开 .atlx：登记打开的文件、面板内容切到画布插件视图、广播打开文件集合。
-    /// 画布数据、交互与保存链都在插件；宿主只负责视图显示（`reveal`）、最近打开与历史列表。
-    fn open_canvas(&mut self, rel: &str, reveal: bool) -> Task<Message> {
+    /// 画布数据、交互与保存链都在插件；宿主只负责视图显示（`mode`）、最近打开与历史列表。
+    fn open_canvas(&mut self, rel: &str, mode: OpenMode) -> Task<Message> {
         self.ui.last_canvas_file = Some(rel.to_string());
         self.history_kind = atelyx_core::history::HistoryKind::Canvas;
-        self.schedule_persist();
-        crate::recent_files::record(self, rel, atelyx_core::plugin_runtime::RecentKind::Canvas);
+        if mode.persists() {
+            self.schedule_persist();
+        }
+        if mode.records_recent() {
+            crate::recent_files::record(self, rel, atelyx_core::plugin_runtime::RecentKind::Canvas);
+        }
         // 插件按打开文件集合事件重读内容：切画布 / 首次打开都靠这条
         self.notify_open_files();
         if matches!(self.repo_kind, RepoKind::Space(_)) {
             crate::space_actions::send_presence(self);
         }
-        let task = if reveal {
+        let task = if mode.reveals() {
             plugin_actions::reveal_view(self, atelyx_core::layout::CANVAS_VIEW)
         } else {
             Task::none()
@@ -4612,13 +4647,14 @@ impl App {
 
     /// 打开文件（脏拦截已由 gate 处理）：按扩展名分流（.atlx → 画布、.atb → 表格、
     /// 插件注册的领域扩展名 → 插件文档面），复位只读并清掉上一文件的解析产物。
-    /// `reveal` = 是否让对应视图显示：false 只打开文件，不在布局里新增或切换视图标签。
-    pub(crate) fn open_file(&mut self, rel: &str, reveal: bool) -> Task<Message> {
+    /// `mode` = 打开意图：Reveal 确保视图标签存在并激活；Background 只挂已有视图；
+    /// Restore 只把文件挂到已有视图，不新建 / 不激活标签、不落盘。
+    pub(crate) fn open_file(&mut self, rel: &str, mode: OpenMode) -> Task<Message> {
         if rel.ends_with(".atlx") {
-            return self.open_canvas(rel, reveal);
+            return self.open_canvas(rel, mode);
         }
         if rel.ends_with(".atb") {
-            return self.open_table(rel, reveal);
+            return self.open_table(rel, mode);
         }
         if let Some(extension) = rel.rsplit('.').next() {
             if self
@@ -4627,16 +4663,19 @@ impl App {
                 .iter()
                 .any(|info| info.registration.extension.eq_ignore_ascii_case(extension))
             {
-                return plugin_actions::open_doc(self, rel, reveal);
+                return plugin_actions::open_doc(self, rel, mode);
             }
         }
         if rel.ends_with(".md") {
-            // 文档插件可能仍在后台装载（启动自动恢复先于它就绪）：挂起一次，就绪后重试。
-            self.pending_doc_open = Some((rel.to_string(), reveal));
-            self.notify(
-                NoticeLevel::Info,
-                "文档插件正在启动，稍后打开".to_string(),
-            );
+            // 文档插件可能仍在后台装载（启动自动恢复先于它就绪）：挂起一次，就绪后按原意图重试。
+            self.pending_doc_open = Some((rel.to_string(), mode));
+            // 启动恢复是静默恢复：不为「插件启动中」再提示一次。
+            if mode.records_recent() {
+                self.notify(
+                    NoticeLevel::Info,
+                    "文档插件正在启动，稍后打开".to_string(),
+                );
+            }
             return Task::none();
         }
         self.notify(
@@ -4769,18 +4808,10 @@ impl App {
         task = task.chain(self.refresh_tag_vocab()).chain(self.refresh_note_files());
         task = task.chain(self.load_vault_meta());
         task = task.chain(self.save_global());
-        // 启动自动进入且「自动恢复」开启：恢复上次打开的文件；运行中切换不恢复（文件已随切仓关闭）
-        if from_boot && self.global.auto_restore {
-            if let Some(rel) = self.ui.last_note_file.clone() {
-                // 笔记由插件文档面承载：走同一套打开路由（插件未就绪时挂起）
-                task = task.chain(self.open_file(&rel, true));
-            }
-            if let Some(rel) = self.ui.last_table_file.clone() {
-                task = task.chain(self.open_file(&rel, true));
-            }
-            if let Some(rel) = self.ui.last_canvas_file.clone() {
-                task = task.chain(self.open_file(&rel, true));
-            }
+        // 启动自动进入且「自动恢复」开启：把上次打开的文件挂回已有视图；运行中切换不恢复（文件已随切仓关闭）
+        for (rel, mode) in restore_open_requests(&self.ui, from_boot, self.global.auto_restore) {
+            // 笔记由插件文档面承载：走同一套打开路由（插件未就绪时按恢复意图挂起）
+            task = task.chain(self.open_file(&rel, mode));
         }
         task
     }
@@ -6657,7 +6688,7 @@ impl App {
         match self.resolve_note_path(&path) {
             Some(rel) => {
                 self.notify(NoticeLevel::Success, "打开链接");
-                self.open_file(&rel, true)
+                self.open_file(&rel, OpenMode::Reveal)
             }
             None => {
                 self.notify(NoticeLevel::Error, format!("未找到笔记：{path}"));
@@ -7078,5 +7109,134 @@ mod file_drop_tests {
             file_drop_check("docs", true, "", true),
             Err(DropReject::SameDir)
         );
+    }
+}
+
+#[cfg(test)]
+mod restore_open_tests {
+    use super::restore_open_requests;
+    use crate::plugin_actions::{reveal_op, OpenMode};
+    use atelyx_core::layout::{self, AppUiState, LayoutOp, NOTES_VIEW};
+
+    fn default_ui() -> AppUiState {
+        let mut ui = AppUiState::default();
+        layout::normalize(&mut ui);
+        ui
+    }
+
+    fn first_panel_id(ui: &AppUiState) -> String {
+        let active = layout::active_layout(ui);
+        let mut panels = Vec::new();
+        layout::collect_panels(&active.tree, &mut panels);
+        panels[0].node_id().to_string()
+    }
+
+    fn tab_count(ui: &AppUiState) -> usize {
+        let active = layout::active_layout(ui);
+        let mut tabs = Vec::new();
+        layout::collect_tabs(&active.tree, &mut tabs);
+        tabs.len()
+    }
+
+    fn layouts_with(ui: &AppUiState, view: &str) -> usize {
+        let mut count = ui
+            .scenes
+            .iter()
+            .flat_map(|scene| scene.layouts.iter())
+            .filter(|layout| {
+                let mut tabs = Vec::new();
+                layout::collect_tabs(&layout.tree, &mut tabs);
+                tabs.iter().any(|tab| tab.view == view)
+            })
+            .count();
+        let active_is_home = match ui.active_layout_id.as_deref() {
+            None | Some(layout::HOME_LAYOUT_ID) => true,
+            _ => false,
+        };
+        if active_is_home {
+            let active = layout::active_layout(ui);
+            let mut tabs = Vec::new();
+            layout::collect_tabs(&active.tree, &mut tabs);
+            if tabs.iter().any(|tab| tab.view == view) {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    fn add_view(ui: &mut AppUiState, view: &str) {
+        let panel_id = first_panel_id(ui);
+        layout::apply_layout_op(
+            ui,
+            &LayoutOp::AddView { panel_id, view: view.to_string() },
+        );
+    }
+
+    #[test]
+    fn restore_requests_open_files_without_touching_layout() {
+        let mut ui = default_ui();
+        ui.last_note_file = Some("a.md".into());
+        ui.last_table_file = Some("b.atb".into());
+        ui.last_canvas_file = Some("c.atlx".into());
+        let before = tab_count(&ui);
+        let requests = restore_open_requests(&ui, true, true);
+        assert_eq!(
+            requests,
+            vec![
+                ("a.md".to_string(), OpenMode::Restore),
+                ("b.atb".to_string(), OpenMode::Restore),
+                ("c.atlx".to_string(), OpenMode::Restore),
+            ]
+        );
+        // 只有打开请求：主页没有笔记标签，也不因恢复新增
+        assert_eq!(tab_count(&ui), before);
+        assert!(!OpenMode::Restore.reveals(), "恢复不新建 / 不激活标签");
+        assert!(!OpenMode::Restore.persists(), "恢复不落盘");
+        assert!(!OpenMode::Restore.records_recent(), "恢复不重排最近打开");
+        // 运行中切换容器、关闭「自动恢复」都不产生请求
+        assert!(restore_open_requests(&ui, false, true).is_empty());
+        assert!(restore_open_requests(&ui, true, false).is_empty());
+    }
+
+    #[test]
+    fn restore_keeps_existing_tab_without_layout_change() {
+        let mut ui = default_ui();
+        add_view(&mut ui, NOTES_VIEW);
+        let before = tab_count(&ui);
+        let _ = restore_open_requests(&ui, true, true);
+        assert_eq!(tab_count(&ui), before);
+        // 用户主动打开才会激活已有标签；恢复路径不调用这条
+        assert!(matches!(
+            reveal_op(&ui, NOTES_VIEW),
+            Some(LayoutOp::SetActive { .. })
+        ));
+    }
+
+    #[test]
+    fn user_open_adds_tab_only_when_view_missing() {
+        let ui = default_ui();
+        assert!(matches!(
+            reveal_op(&ui, NOTES_VIEW),
+            Some(LayoutOp::AddView { .. })
+        ));
+        assert!(OpenMode::Reveal.reveals());
+        assert!(!OpenMode::Background.reveals(), "后台打开不动布局");
+        assert!(OpenMode::Background.persists() && OpenMode::Background.records_recent());
+    }
+
+    #[test]
+    fn view_in_multiple_layouts_is_activated_without_duplicate_tab() {
+        let mut ui = default_ui();
+        // 默认「笔记」「表格」两套布局都带笔记视图（主页不带）
+        assert_eq!(layouts_with(&ui, NOTES_VIEW), 2);
+        add_view(&mut ui, NOTES_VIEW);
+        assert_eq!(layouts_with(&ui, NOTES_VIEW), 3);
+        assert!(
+            matches!(reveal_op(&ui, NOTES_VIEW), Some(LayoutOp::SetActive { .. })),
+            "多布局同视图只激活一个标签，不重复新建"
+        );
+        // 同一视图存在于多个布局，恢复仍只产生一次打开请求
+        ui.last_note_file = Some("a.md".into());
+        assert_eq!(restore_open_requests(&ui, true, true).len(), 1);
     }
 }

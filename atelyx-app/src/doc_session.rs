@@ -155,8 +155,19 @@ pub fn open_done(
     }
     match result {
         Ok(text) => {
+            // 启动恢复只把文件挂回已有视图：最近打开清单与磁盘一致，不重排、不写盘。
+            let restored = app.doc_open.as_ref().is_some_and(|open| {
+                open.mode == crate::plugin_actions::OpenMode::Restore
+                    && open.path == path
+            });
             app.attach_doc_session(&path, text.clone());
-            crate::recent_files::record(app, &path, atelyx_core::plugin_runtime::RecentKind::Note);
+            if !restored {
+                crate::recent_files::record(
+                    app,
+                    &path,
+                    atelyx_core::plugin_runtime::RecentKind::Note,
+                );
+            }
             let value = json!({
                 "path": path,
                 "text": text,

@@ -824,16 +824,8 @@ pub fn enter_space(app: &mut App, session: SpaceSession, from_boot: bool) -> Tas
         app.pending_doc_open = None;
         app.history.clear();
     }
-    if from_boot && app.global.auto_restore {
-        if let Some(rel) = app.ui.last_note_file.clone() {
-            task = task.chain(app.open_file(&rel, true));
-        }
-        if let Some(rel) = app.ui.last_table_file.clone() {
-            task = task.chain(app.open_file(&rel, true));
-        }
-        if let Some(rel) = app.ui.last_canvas_file.clone() {
-            task = task.chain(app.open_file(&rel, true));
-        }
+    for (rel, mode) in crate::restore_open_requests(&app.ui, from_boot, app.global.auto_restore) {
+        task = task.chain(app.open_file(&rel, mode));
     }
     task
 }
