@@ -42,10 +42,59 @@ const PEER_PILL_SIZE: f32 = 10.0;
 const CARD_HEAD_H: f32 = 30.0;
 /// 低缩放卡片只画卡头与居中图标的图标边长（屏幕像素）。
 const COMPACT_ICON_SIZE: f32 = 22.0;
+/// 省略量算的宽度余量：量算按常规字重口径，粗体实绘偏宽。
+const ELLIPSIZE_WIDTH_GUARD: f32 = 1.06;
 
 /// 低缩放紧凑形态：屏幕宽装不下标题，或卡头高度已装不下固定字号（卡头高度随缩放缩小）。
 fn compact_card(zoom: f32, world_w: f32) -> bool {
     world_w * zoom <= COMPACT_CARD_PX || CARD_HEAD_H * zoom < CARD_TITLE_SIZE
+}
+
+/// 单行省略：超出 `max_w` 时按字符二分截断并补省略号。世界层是整块自绘画布，
+/// 指令集没有逐项裁剪，越界文字必须在这里收住。
+fn ellipsize(canvas: &mut Canvas, text: &str, size: f32, max_w: f32) -> String {
+    if text.is_empty() || max_w <= 0.0 {
+        return String::new();
+    }
+    // 粗体实绘偏宽：量算放大一档，避免省略后仍贴到卡框边缘
+    let measure_size = size * ELLIPSIZE_WIDTH_GUARD;
+    let (full_w, _) = canvas.measure(text, measure_size);
+    if full_w <= max_w {
+        return text.to_string();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let (mut lo, mut hi) = (0usize, chars.len());
+    while lo < hi {
+        let mid = (lo + hi + 1) / 2;
+        let mut candidate: String = chars[..mid].iter().collect();
+        candidate.push('…');
+        let (width, _) = canvas.measure(&candidate, measure_size);
+        if width <= max_w {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    if lo == 0 {
+        return String::new();
+    }
+    let mut out: String = chars[..lo].iter().collect();
+    out.push('…');
+    out
+}
+
+/// 对话卡头右侧控件占宽（屏幕像素，含与标题的间隙）：生成中胶囊或压缩钮。
+fn header_reserve(canvas: &mut Canvas, s: &Snapshot, node: &CanvasFileNode) -> f32 {
+    if node.node_type != "conversation" {
+        return 0.0;
+    }
+    let streaming = s.cards.get(&node.id).is_some_and(|chat| chat.streaming);
+    if streaming {
+        let (tw, _) = canvas.measure("生成中", PILL_SIZE);
+        tw + 18.0 + 10.0 * s.zoom
+    } else {
+        32.0 * s.zoom
+    }
 }
 
 fn token(name: ColorToken) -> PaintColor {
@@ -372,6 +421,7 @@ fn draw_group(canvas: &mut Canvas, s: &Snapshot, node: &CanvasFileNode) {
         }
         if sw >= 40.0 && sh >= GROUP_LABEL_SIZE {
             let (text, text_color) = group_label(s, node);
+            let text = ellipsize(canvas, &text, GROUP_LABEL_SIZE, sw - 16.0 * s.zoom);
             let (tw, _) = canvas.measure(&text, GROUP_LABEL_SIZE);
             canvas.draw(Text {
                 x: sx + ((sw - tw) / 2.0).max(0.0),
@@ -383,7 +433,7 @@ fn draw_group(canvas: &mut Canvas, s: &Snapshot, node: &CanvasFileNode) {
                 family: None,
                 italic: false,
                 family_name: None,
-                max_width: Some((sw - 16.0 * s.zoom).max(1.0)),
+                max_width: None,
                 align: None,
                 layout: None,
             });
@@ -403,6 +453,7 @@ fn draw_group(canvas: &mut Canvas, s: &Snapshot, node: &CanvasFileNode) {
     });
     let (text, color) = group_label(s, node);
     if 30.0 * s.zoom >= GROUP_LABEL_SIZE {
+        let text = ellipsize(canvas, &text, GROUP_LABEL_SIZE, sw - 20.0 * s.zoom);
         canvas.draw(Text {
             x: sx + 10.0 * s.zoom,
             y: sy + (30.0 * s.zoom - GROUP_LABEL_SIZE) / 2.0,
@@ -413,7 +464,7 @@ fn draw_group(canvas: &mut Canvas, s: &Snapshot, node: &CanvasFileNode) {
             family: None,
             italic: false,
             family_name: None,
-            max_width: Some((sw - 20.0 * s.zoom).max(1.0)),
+            max_width: None,
             align: None,
             layout: None,
         });
@@ -690,6 +741,9 @@ fn draw_card(canvas: &mut Canvas, s: &Snapshot, node: &CanvasFileNode) {
         ) {
             canvas.draw(command);
         }
+        // 标题省略到卡头右侧控件之前：世界层不裁剪，越界会盖到按钮或溢出卡框
+        let title_limit = (sw - 36.0 * s.zoom - header_reserve(canvas, s, node)).max(0.0);
+        let title = ellipsize(canvas, &title, CARD_TITLE_SIZE, title_limit);
         canvas.draw(Text {
             x: sx + 26.0 * s.zoom,
             y: sy + (head - CARD_TITLE_SIZE) / 2.0,
@@ -700,7 +754,7 @@ fn draw_card(canvas: &mut Canvas, s: &Snapshot, node: &CanvasFileNode) {
             family: None,
             italic: false,
             family_name: None,
-            max_width: Some((sw - 36.0 * s.zoom).max(1.0)),
+            max_width: None,
             align: None,
             layout: None,
         });
@@ -778,17 +832,18 @@ fn draw_card(canvas: &mut Canvas, s: &Snapshot, node: &CanvasFileNode) {
     }
     if node.node_type == "link" && !compact {
         if let Some(url) = node.data.get("url").and_then(serde_json::Value::as_str) {
+            let url = ellipsize(canvas, url, CARD_TITLE_SIZE, sw - 20.0 * s.zoom);
             canvas.draw(Text {
                 x: sx + 10.0 * s.zoom,
                 y: sy + head + 10.0 * s.zoom,
-                content: url.to_string(),
+                content: url,
                 size: CARD_TITLE_SIZE,
                 color: token(ColorToken::Accent),
                 weight: None,
                 family: None,
                 italic: false,
                 family_name: None,
-                max_width: Some((sw - 20.0 * s.zoom).max(1.0)),
+                max_width: None,
                 align: None,
                 layout: None,
             });
@@ -797,17 +852,23 @@ fn draw_card(canvas: &mut Canvas, s: &Snapshot, node: &CanvasFileNode) {
     if node.node_type == "table" && !compact {
         if let Some(path) = node.data.get("file").and_then(serde_json::Value::as_str) {
             if let Some(crate::model::RefContent::Table { summary, .. }) = s.refs.get(path) {
+                let text = ellipsize(
+                    canvas,
+                    &format!("双击打开表格 · {summary}"),
+                    CARD_TITLE_SIZE,
+                    sw - 20.0 * s.zoom,
+                );
                 canvas.draw(Text {
                     x: sx + 10.0 * s.zoom,
                     y: sy + head + 10.0 * s.zoom,
-                    content: format!("双击打开表格 · {summary}"),
+                    content: text,
                     size: CARD_TITLE_SIZE,
                     color: token(ColorToken::TextSecondary),
                     weight: None,
                     family: None,
                     italic: false,
                     family_name: None,
-                    max_width: Some((sw - 20.0 * s.zoom).max(1.0)),
+                    max_width: None,
                     align: None,
                     layout: None,
                 });
@@ -888,37 +949,46 @@ fn draw_remote(canvas: &mut Canvas, s: &Snapshot) {
                 });
             }
             if !compact && !tagged && !peer.name.is_empty() {
-                tagged = true;
                 let size = PEER_NAME_SIZE;
-                let (tw, th) = canvas.measure(&peer.name, size);
-                let (bx, by) = (x + 4.0 * s.zoom, (y - th - 4.0).max(TOOLBAR_H));
-                canvas.draw(Rect {
-                    x: bx,
-                    y: by,
-                    w: (tw + 12.0).max(0.0),
-                    h: (th + 4.0).max(0.0),
-                    fill: Some(color),
-                    stroke: None,
-                    stroke_width: None,
-                    corner_radius: Some((th + 4.0) / 2.0),
-                    shadow: None,
-                });
-                canvas.draw(Text {
-                    x: bx + 6.0,
-                    y: by + 2.0,
-                    content: peer.name.clone(),
+                // 名签不越出卡宽：名字可用宽度扣掉胶囊内边距与卡两侧留白
+                let name = ellipsize(
+                    canvas,
+                    &peer.name,
                     size,
-                    color: PaintColor::Rgba {
-                        rgba: [255, 255, 255, 235],
-                    },
-                    weight: None,
-                    family: None,
-                    italic: false,
-                    family_name: None,
-                    max_width: None,
-                    align: None,
-                    layout: None,
-                });
+                    (w as f32 * s.zoom - 8.0 * s.zoom - 12.0).max(0.0),
+                );
+                if !name.is_empty() {
+                    tagged = true;
+                    let (tw, th) = canvas.measure(&name, size);
+                    let (bx, by) = (x + 4.0 * s.zoom, (y - th - 4.0).max(TOOLBAR_H));
+                    canvas.draw(Rect {
+                        x: bx,
+                        y: by,
+                        w: (tw + 12.0).max(0.0),
+                        h: (th + 4.0).max(0.0),
+                        fill: Some(color),
+                        stroke: None,
+                        stroke_width: None,
+                        corner_radius: Some((th + 4.0) / 2.0),
+                        shadow: None,
+                    });
+                    canvas.draw(Text {
+                        x: bx + 6.0,
+                        y: by + 2.0,
+                        content: name,
+                        size,
+                        color: PaintColor::Rgba {
+                            rgba: [255, 255, 255, 235],
+                        },
+                        weight: None,
+                        family: None,
+                        italic: false,
+                        family_name: None,
+                        max_width: None,
+                        align: None,
+                        layout: None,
+                    });
+                }
             }
         }
     }

@@ -1,5 +1,6 @@
 //! 画布插件无界面冒烟：经真实 `PluginRuntime` 加载、挂面、取帧，覆盖载入渲染、右键新建卡、
-//! 卡片拖动与防抖落盘、撤销、面板头部脏标记与停用收尾。
+//! 卡片拖动与防抖落盘、撤销、视口（滚轮方向 / 字号固定 / 占位阈值 / 改尺寸保持视口）、
+//! 面板头部脏标记与停用收尾。
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -8,8 +9,8 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use atelyx_core::plugin_runtime::{
-    FilesResult, FrameInput, HostRequest, MeasureTextResult, MouseButton, PanelHeaderParams,
-    PluginRuntime, PluginStatus, SurfaceKind, VaultFileEntry,
+    FilesResult, FrameInput, HostRequest, MeasureTextResult, Modifiers, MouseButton,
+    PanelHeaderParams, PluginRuntime, PluginStatus, SurfaceKind, VaultFileEntry,
 };
 use atelyx_plugin_protocol::frame::SurfaceFrame;
 use atelyx_plugin_protocol::method::{FontSizes, Radii, ThemeColors, ThemeResult};
@@ -22,6 +23,14 @@ const PANEL_H: f32 = 600.0;
 /// 视图初始 pan = (40,40)、缩放 1；适配后单卡居中，卡片左上角落在 (170,80)。
 const CARD_LEFT: f32 = 100.0;
 const CARD_TOP: f32 = 100.0;
+const CARD_W: f32 = 360.0;
+const CARD_H: f32 = 240.0;
+/// 卡头字号固定为屏幕像素（不随缩放变化）。
+const CARD_TITLE_SIZE: f32 = 12.0;
+/// 标题实际可用宽度 = 卡宽 - 左右内边距与图标位（见画布世界层排版）。
+const TITLE_LIMIT: f32 = CARD_W - 36.0;
+/// 屏幕宽不超过该值时卡片退化为「卡头 + 居中图标」占位形态。
+const COMPACT_CARD_PX: f32 = 120.0;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
@@ -74,10 +83,23 @@ async fn main() {
     resize(&runtime);
 
     // 首帧：网格底 + 卡片标题画进主帧（浮层随视口铺开后才有命中区）
-    let frame = wait_frame(&runtime, |frame| has_text(frame, "现有卡") && !frame.hits.is_empty())
+    let frame = wait_frame(&runtime, |frame| has_text_prefix(frame, "现有卡") && !frame.hits.is_empty())
         .await
         .unwrap_or_else(|| panic!("载入后应出画布帧；当前无帧"));
     assert!(frame.hits.iter().any(|hit| !hit.id.is_empty()), "应有可命中区域");
+    // 长标题按卡宽省略：世界层指令没有逐项裁剪，越界会盖住控件或溢出卡框
+    let title = title_text(&frame).expect("应画出卡片标题");
+    assert!(title.ends_with('…'), "长标题应省略：{title}");
+    assert!(
+        text_width(&title, CARD_TITLE_SIZE) <= TITLE_LIMIT + 0.5,
+        "标题不应越出卡框：{} > {TITLE_LIMIT}",
+        text_width(&title, CARD_TITLE_SIZE)
+    );
+    assert_eq!(
+        title_size(&frame),
+        Some(CARD_TITLE_SIZE),
+        "卡头字号固定为屏幕像素"
+    );
     println!("载入：{} 条指令 / {} 个命中区", frame.commands.len(), frame.hits.len());
 
     // 右键空白 → 宿主弹菜单 → 选「新建文本卡」：画布内容变脏
@@ -125,6 +147,90 @@ async fn main() {
     );
     println!("撤销：通过");
 
+    // 滚轮方向：协议增量正 = 向下；向上滚（负增量）应放大，字号与缩放无关
+    let before_zoom = zoom_percent(&frame).expect("工具条应显示缩放百分比");
+    wheel(&runtime, -40.0, false);
+    let zoomed = wait_frame(&runtime, |frame| {
+        zoom_percent(frame).is_some_and(|pct| pct > before_zoom)
+    })
+    .await
+    .expect("向上滚应放大");
+    assert_eq!(
+        title_size(&zoomed),
+        Some(CARD_TITLE_SIZE),
+        "放大后卡头字号不应变化"
+    );
+    println!("滚轮方向与字号固定：通过（{before_zoom}% → {}%）", zoom_percent(&zoomed).unwrap_or(0));
+
+    // 改面板尺寸不再重置视口：既有缩放应原样保留
+    let kept = zoom_percent(&zoomed).unwrap_or(0);
+    runtime.notify_frame_input(
+        CANVAS_ID,
+        SURFACE,
+        &FrameInput::Resize {
+            width: 1000.0,
+            height: 600.0,
+        },
+    );
+    let resized = wait_frame_at_width(&runtime, 1000.0, |frame| {
+        zoom_percent(frame).is_some_and(|pct| pct == kept)
+    })
+    .await
+    .expect("改尺寸后应保持既有缩放");
+    assert_eq!(title_size(&resized), Some(CARD_TITLE_SIZE), "改尺寸后字号不变");
+    runtime.notify_frame_input(
+        CANVAS_ID,
+        SURFACE,
+        &FrameInput::Resize {
+            width: PANEL_W,
+            height: PANEL_H,
+        },
+    );
+    let restored = wait_frame(&runtime, |frame| zoom_percent(frame) == Some(kept))
+        .await
+        .expect("尺寸还原后缩放仍应保留");
+    println!("改尺寸保持视口：通过（{kept}%）");
+
+    // Ctrl+滚轮：正增量（向下）应把画面向上推（pan.1 减小，卡头屏幕上移）
+    let title_y = text_y(&restored).expect("应有卡头标题");
+    wheel(&runtime, 40.0, true);
+    let panned = wait_frame(&runtime, |frame| {
+        text_y(frame).is_some_and(|y| y < title_y - 20.0)
+    })
+    .await
+    .expect("Ctrl+滚轮向下应向上平移画面");
+    assert_eq!(zoom_percent(&panned), Some(kept), "Ctrl+滚轮不应改变缩放");
+    println!("滚轮平移方向：通过");
+
+    // 阈值 120px：卡宽落在 96–120px 区间时就该占位（旧 96px 阈值下这一档仍会画标题）
+    wheel(&runtime, 520.0, false);
+    let near = wait_frame(&runtime, |frame| {
+        let width = CARD_W * zoom_percent(frame).unwrap_or(0) as f32 / 100.0;
+        (96.0..=COMPACT_CARD_PX).contains(&width)
+            && title_size(frame).is_none()
+            && has_icon_path(frame)
+    })
+    .await
+    .expect("卡宽进入 96–120px 区间时应切成占位形态");
+    println!("占位阈值 {COMPACT_CARD_PX}px：通过（{}%）", zoom_percent(&near).unwrap_or(0));
+
+    // 低缩放占位：屏幕宽不超过阈值只画卡头与居中图标，正文与标题不再参与排版
+    wheel(&runtime, 1000.0, false);
+    let compact = wait_frame(&runtime, |frame| {
+        let pct = zoom_percent(frame).unwrap_or(0);
+        pct <= 15
+            && title_size(frame).is_none()
+            && card_rect(frame, CARD_W * pct as f32 / 100.0, CARD_H * pct as f32 / 100.0)
+            && has_icon_path(frame)
+    })
+    .await
+    .expect("缩小到下限后应切成占位形态");
+    assert!(
+        CARD_W * zoom_percent(&compact).unwrap_or(0) as f32 / 100.0 <= COMPACT_CARD_PX,
+        "占位形态只在卡宽 ≤ {COMPACT_CARD_PX}px 时出现"
+    );
+    println!("低缩放占位：通过（{}%）", zoom_percent(&compact).unwrap_or(0));
+
     disable(&runtime, CANVAS_ID).await;
     let status = runtime
         .list()
@@ -141,6 +247,8 @@ fn written_at(state: &HostState, index: usize) -> String {
 }
 
 fn seed_canvas() -> String {
+    // 标题刻意超过卡宽：覆盖世界层单行省略（世界层指令没有逐项裁剪）
+    let title = "现有卡 · 一个用于验证标题在卡头内省略而不是溢出卡框的很长很长的标题名称";
     json!({
         "schema": "atelyx-canvas/v1",
         "id": "cv-smoke",
@@ -150,9 +258,9 @@ fn seed_canvas() -> String {
             "type": "text",
             "x": CARD_LEFT,
             "y": CARD_TOP,
-            "width": 360,
-            "height": 240,
-            "data": { "title": "现有卡", "bodyMd": "正文" }
+            "width": CARD_W,
+            "height": CARD_H,
+            "data": { "title": title, "bodyMd": "正文" }
         }],
         "edges": [],
         "createdAt": 0,
@@ -373,6 +481,84 @@ fn has_text(frame: &SurfaceFrame, wanted: &str) -> bool {
         .any(|command| matches!(command, DrawCommand::Text { content, .. } if content == wanted))
 }
 
+fn has_text_prefix(frame: &SurfaceFrame, prefix: &str) -> bool {
+    frame.commands.iter().any(
+        |command| matches!(command, DrawCommand::Text { content, .. } if content.starts_with(prefix))
+    )
+}
+
+/// 卡头标题（世界层，内容是省略后的文本）。
+fn title_command(frame: &SurfaceFrame) -> Option<(&str, f32, f32)> {
+    frame.commands.iter().find_map(|command| match command {
+        DrawCommand::Text { content, x: _, y, size, .. } if content.starts_with("现有卡") => {
+            Some((content.as_str(), *size, *y))
+        }
+        _ => None,
+    })
+}
+
+fn title_text(frame: &SurfaceFrame) -> Option<String> {
+    title_command(frame).map(|(content, _, _)| content.to_string())
+}
+
+fn title_size(frame: &SurfaceFrame) -> Option<f32> {
+    title_command(frame).map(|(_, size, _)| size)
+}
+
+fn text_y(frame: &SurfaceFrame) -> Option<f32> {
+    title_command(frame).map(|(_, _, y)| y)
+}
+
+/// 工具条上的缩放百分比。
+fn zoom_percent(frame: &SurfaceFrame) -> Option<i32> {
+    frame.commands.iter().find_map(|command| match command {
+        DrawCommand::Text { content, .. } if content.ends_with('%') => {
+            content.trim_end_matches('%').parse().ok()
+        }
+        _ => None,
+    })
+}
+
+/// 卡片主体矩形（宽高按当前缩放后的尺寸）。
+fn card_rect(frame: &SurfaceFrame, w: f32, h: f32) -> bool {
+    frame.commands.iter().any(|command| {
+        matches!(command, DrawCommand::Rect { w: rw, h: rh, .. }
+            if (rw - w).abs() < 1.0 && (rh - h).abs() < 1.0)
+    })
+}
+
+fn has_icon_path(frame: &SurfaceFrame) -> bool {
+    frame
+        .commands
+        .iter()
+        .any(|command| matches!(command, DrawCommand::Path { .. }))
+}
+
+/// 与宿主量算同一口径的宽度估算（ASCII 0.55 字宽，其余 1 字宽）。
+fn text_width(text: &str, size: f32) -> f32 {
+    text.chars()
+        .map(|ch| size * if ch.is_ascii() { 0.55 } else { 1.0 })
+        .sum()
+}
+
+fn wheel(runtime: &PluginRuntime, delta_y: f32, control: bool) {
+    let mut modifiers = Modifiers::default();
+    modifiers.control = control;
+    // 空白世界区（避开卡片正文浮层与小地图）：浮层上的滚轮归控件层滚动
+    runtime.notify_frame_input(
+        CANVAS_ID,
+        SURFACE,
+        &FrameInput::Wheel {
+            x: 600.0,
+            y: 500.0,
+            delta_x: 0.0,
+            delta_y,
+            modifiers,
+            hit: None,
+        },
+    );
+}
+
 /// 空态：标题 / 说明按面宽居中，内容块（64 图标 + 两侧 16 间距 + 两行文字）垂直中心落在面中心。
 fn assert_empty_state_centered(frame: &SurfaceFrame, title: &str, desc: &str) {
     let size = frame.size.expect("整面帧必须带尺寸");
@@ -440,10 +626,18 @@ async fn wait_frame(
     runtime: &PluginRuntime,
     accept: impl Fn(&SurfaceFrame) -> bool,
 ) -> Option<SurfaceFrame> {
+    wait_frame_at_width(runtime, PANEL_W, accept).await
+}
+
+async fn wait_frame_at_width(
+    runtime: &PluginRuntime,
+    width: f32,
+    accept: impl Fn(&SurfaceFrame) -> bool,
+) -> Option<SurfaceFrame> {
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
         if let Some(frame) = runtime.surface_frame(CANVAS_ID, SURFACE) {
-            let sized = frame.size.is_some_and(|size| (size.w - PANEL_W).abs() < 0.5);
+            let sized = frame.size.is_some_and(|size| (size.w - width).abs() < 0.5);
             if sized && accept(&frame) {
                 return Some((*frame).clone());
             }

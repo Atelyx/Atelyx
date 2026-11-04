@@ -60,7 +60,7 @@ pub fn handle(
             button: MouseButton::Left,
             ..
         } => {
-            out.redraw = double_click(session, *x, *y, &mut out);
+            out.redraw = double_click(session, *x, *y, size, &mut out);
         }
         FrameInput::PointerLeave => {
             // 指针离开面：悬停态不能留到下次进入
@@ -89,7 +89,7 @@ fn press(
     mods: &Modifiers,
     out: &mut Outcome,
 ) -> bool {
-    // 工具条只认左键；右键先于小地图判定，拖拽中不弹菜单
+    // 工具条是独立浮层，只认左键
     if button == MouseButton::Left && y < TOOLBAR_H {
         return toolbar_press(session, x, size);
     }
@@ -103,11 +103,14 @@ fn press(
         return false;
     }
     if button == MouseButton::Right {
-        if session.view.drag.is_some() {
+        // 工具条与小地图都不落到世界层；拖拽中也不弹菜单
+        if session.view.drag.is_some()
+            || y < TOOLBAR_H
+            || minimap_area(size).contains(x, y)
+        {
             return false;
         }
-        // 右键落在工具条上时按视口上缘取世界坐标：新建的卡不会落到可视区外
-        let world = session.view.world(x, local(y).max(0.0));
+        let world = session.view.world(x, local(y));
         session.view.menu_at = Some(world);
         out.menu = context_menu(session, world);
         return true;
@@ -235,17 +238,24 @@ fn toolbar_press(session: &mut Session, x: f32, size: (f32, f32)) -> bool {
     false
 }
 
+fn minimap_area(size: (f32, f32)) -> Rect {
+    Rect::new(
+        size.0 - MINIMAP_W - MINIMAP_MARGIN,
+        size.1 - MINIMAP_H - MINIMAP_MARGIN,
+        MINIMAP_W,
+        MINIMAP_H,
+    )
+}
+
 fn minimap_world(session: &Session, x: f32, y: f32, size: (f32, f32)) -> Option<(f64, f64)> {
-    let mx = size.0 - MINIMAP_W - MINIMAP_MARGIN;
-    let my = size.1 - MINIMAP_H - MINIMAP_MARGIN;
-    let area = Rect::new(mx, my, MINIMAP_W, MINIMAP_H);
+    let area = minimap_area(size);
     if !area.contains(x, y) {
         return None;
     }
     let (scale, ox, oy) = crate::model::minimap_transform(&session.data.nodes)?;
     Some((
-        ox + ((x - mx) / scale) as f64,
-        oy + ((y - my) / scale) as f64,
+        ox + ((x - area.x) / scale) as f64,
+        oy + ((y - area.y) / scale) as f64,
     ))
 }
 
@@ -276,6 +286,10 @@ fn moved(session: &mut Session, x: f32, y: f32, size: (f32, f32)) -> bool {
         return false;
     }
     session.view.toolbar_hover = None;
+    // 小地图是独立浮层：悬停不命中它下面的世界层卡片
+    if session.view.drag.is_none() && minimap_area(size).contains(x, y) {
+        return session.view.hover.take().is_some();
+    }
     let world = session.view.world(x, local(y));
     let Some(drag) = session.view.drag.clone() else {
         let hover = hit_card(&session.data, world)
@@ -492,7 +506,11 @@ pub fn zoom_at(session: &mut Session, x: f32, y: f32, factor: f32) {
     session.view.fit_pending = false;
 }
 
-fn double_click(session: &mut Session, x: f32, y: f32, out: &mut Outcome) -> bool {
+fn double_click(session: &mut Session, x: f32, y: f32, size: (f32, f32), out: &mut Outcome) -> bool {
+    // 工具条与小地图不落到世界层
+    if y < TOOLBAR_H || minimap_area(size).contains(x, y) {
+        return false;
+    }
     let world = session.view.world(x, local(y));
     let Some(index) = hit_card(&session.data, world) else {
         return false;

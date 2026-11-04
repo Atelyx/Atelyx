@@ -33,7 +33,7 @@ pub const GRID_STEP: f64 = 100.0;
 /// 框选起手最小位移（屏幕像素）。
 pub const MARQUEE_MIN: f32 = 4.0;
 /// 卡片屏幕宽不超过它时只画卡头与居中图标（世界层文字不再缩小到不可读）。
-pub const COMPACT_CARD_PX: f32 = 96.0;
+pub const COMPACT_CARD_PX: f32 = 120.0;
 /// 创建分组时成员包围盒外扩（世界坐标）。
 pub const GROUP_PAD: f64 = 24.0;
 /// 粘贴落位逐行避让步长（世界坐标）。
