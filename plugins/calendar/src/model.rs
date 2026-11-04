@@ -185,9 +185,11 @@ impl Model {
     }
 
     /// 用真源清单替换（展示层按日期 / 创建序归组，这里保持读回顺序）。
+    /// 读成功即清掉上一次读失败的错误，否则修复后错误仍留在面板上。
     pub fn replace(&mut self, items: Vec<CalendarItem>) {
         self.items = items;
         self.ready = true;
+        self.error = None;
         if let Some(pending) = &self.delete_confirm {
             if !self.items.iter().any(|item| &item.id == pending) {
                 self.delete_confirm = None;
@@ -449,6 +451,15 @@ mod tests {
         assert_eq!(snapshot.by_day.len(), 2, "非法日期不进网格");
         assert_eq!(snapshot.by_day.get(&date::days_from_civil(2026, 10, 1)).map(Vec::len), Some(2));
         assert!(snapshot.cells.contains(&Some(1)));
+    }
+
+    #[test]
+    fn replace_clears_a_previous_load_error() {
+        let mut model = Model::new();
+        model.set_backend(Backend::Local);
+        model.fail("日程数据损坏".into());
+        model.replace(vec![item("a", "2026-10-01", 1)]);
+        assert_eq!(model.snapshot().error, None);
     }
 
     #[test]

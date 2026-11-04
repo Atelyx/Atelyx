@@ -16,8 +16,6 @@ const ROW_H: f32 = 24.0;
 const HISTORY_ROW_H: f32 = 22.0;
 /// 当日历史行数上限（超出显示「还有 N 条」）。
 const HISTORY_CAP: usize = 20;
-/// 行内标题输入与添加行输入宽度。
-const INPUT_W: f32 = 180.0;
 /// 添加行色板块的命中边长。
 const SWATCH: f32 = 16.0;
 
@@ -153,7 +151,7 @@ fn schedule_row(ui: &mut Ui<'_, '_>, snapshot: &Snapshot, item: &CalendarItem) {
             }
         });
         if editing {
-            row.text_input_sized(format!("edit:{id}"), editing_draft, "", INPUT_W);
+            row.text_input(format!("edit:{id}"), editing_draft, "");
         } else {
             let title = item.title.clone();
             let target = format!("edit:{id}");
@@ -194,8 +192,12 @@ fn add_row(ui: &mut Ui<'_, '_>, snapshot: &Snapshot) {
     let writable = snapshot.writable;
     let enabled = writable && !snapshot.draft.trim().is_empty();
     let draft = snapshot.draft.clone();
-    ui.row(6.0, |row| {
-        row.text_input_sized("draft", draft, "添加日程…", INPUT_W);
+    // 色点另起一行：窄面板里它和输入框挤在同一行时会把「添加」推出可点范围
+    ui.row(6.0, move |row| {
+        row.text_input("draft", draft, "添加日程…");
+        row.button_enabled("add", "添加", enabled);
+    });
+    ui.row(6.0, move |row| {
         for (index, hex) in colors.iter().enumerate() {
             let color = item_color(Some(hex), &accent);
             let chosen = index == selected % colors.len();
@@ -227,7 +229,5 @@ fn add_row(ui: &mut Ui<'_, '_>, snapshot: &Snapshot) {
                 }
             });
         }
-        row.grow();
-        row.button_enabled("add", "添加", enabled);
     });
 }
