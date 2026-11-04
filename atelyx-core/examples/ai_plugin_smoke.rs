@@ -8,7 +8,8 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use atelyx_core::plugin_runtime::{
-    FrameInput, HostRequest, MeasureTextResult, PluginRuntime, PluginStatus, SurfaceKind,
+    FileChangeKind, FrameInput, HostRequest, MeasureTextResult, PluginRuntime, PluginStatus,
+    SurfaceKind,
 };
 use atelyx_plugin_protocol::event::VaultSwitchPayload;
 use atelyx_plugin_protocol::frame::SurfaceFrame;
@@ -482,12 +483,19 @@ async fn main() {
             println!("点外关闭菜单：{}", if closed { "通过" } else { "未关闭" });
         }
     }
-    // 时序一：已挂面且已订阅时广播，直接重取
+    // 时序一：已挂面且已订阅时广播，直接重取会话侧；文件树不随会话真源重载重扫
     let base = wait_quiet(&counts, Duration::from_millis(300)).await;
     runtime.on_chat_store_reloaded();
     println!(
-        "已挂面收广播即重取：{}",
-        if wait_growth(&counts, base).await { "通过" } else { "未重取" }
+        "已挂面收广播即重取（不重扫文件树）：{}",
+        if wait_chat_reload(&counts, base).await { "通过" } else { "未重取" }
+    );
+    // 文件结构变化仍要让候选刷新：文件树的重扫走 VAULT_FILE_CHANGED
+    let base = wait_quiet(&counts, Duration::from_millis(300)).await;
+    runtime.on_file_changed("资料/新方案.md", FileChangeKind::Created, None);
+    println!(
+        "文件变化重扫候选：{}",
+        if wait_files_growth(&counts, base).await { "通过" } else { "未重扫" }
     );
 
     // 时序二：广播发生在重载之前（面板停用期间）—— 广播被跳过，重新启用并挂面后全量补齐
@@ -565,6 +573,31 @@ async fn wait_growth(counts: &Counts, base: (usize, usize, usize)) -> bool {
     while Instant::now() < deadline {
         let now = counts.snapshot();
         if now.0 > base.0 && now.1 > base.1 && now.2 > base.2 {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    false
+}
+
+/// 会话真源重载只重取模型与会话：文件树计数必须保持在基线。
+async fn wait_chat_reload(counts: &Counts, base: (usize, usize, usize)) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        let now = counts.snapshot();
+        if now.0 > base.0 && now.1 > base.1 && now.2 == base.2 {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    false
+}
+
+/// 文件树重扫：只等 `vault.list` 计数超过基线。
+async fn wait_files_growth(counts: &Counts, base: (usize, usize, usize)) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if counts.snapshot().2 > base.2 {
             return true;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;

@@ -20,11 +20,13 @@ use iced::window;
 use iced::{Element, Length, Padding, Point, Rectangle, Size, Vector};
 
 use atelyx_core::plugin_runtime::{
-    FrameInput, FrameRect, HitCursor, Key as FrameKey, KeyAction, Modifiers as FrameModifiers,
-    MouseButton, NamedKey, PopupLayer, SurfaceFrame, SurfacePopup,
+    ColorToken, DrawCommand, FrameInput, FrameRect, HitCursor, Key as FrameKey, KeyAction,
+    Modifiers as FrameModifiers, MouseButton, NamedKey, PaintColor, PopupLayer, SurfaceFrame,
+    SurfacePopup, TextAlign, TextWeight,
 };
 
 use crate::plugin_paint::{self, PaintCtx};
+use crate::ui::palette as pal;
 use crate::{App, Message};
 
 /// 双击判定：同键二次按下的最大间隔。
@@ -41,6 +43,9 @@ const RESIZE_WAIT_FIRST: Duration = Duration::from_millis(12);
 const RESIZE_STEP: f32 = 0.5;
 /// 帧声明的排版尺寸与当前面尺寸的容许差：两端各自取整，1px 内的差不算换尺寸。
 const SIZE_TOLERANCE: f32 = 0.5;
+/// 等首张正确帧时的静态占位：图标边长、块内行距（与空态占位视图同一视觉口径）。
+const PLACEHOLDER_ICON: f32 = 64.0;
+const PLACEHOLDER_GAP: f32 = 16.0;
 
 /// 标识哈希（FNV-1a；面 / 面 id 的身份判定用，不参与协议）。
 fn hash_id(value: &str) -> u64 {
@@ -730,13 +735,23 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginFrame<'_> {
         let frame = resized.as_ref().unwrap_or(&current);
         // 只画按当前面尺寸排好的帧：改宽时手里那帧常是上一拍宽度排的（右对齐项与滚动条停在
         // 旧边缘），首帧还可能按插件自己的占位尺寸排。已经等过一拍还没等到、且屏幕上本来就有
-        // 内容时退回旧帧（否则整面空着）；从没画过正确帧（刚挂载）就空着等，别先闪一张错的。
+        // 内容时退回旧帧（否则整面空着）；从没画过正确帧（刚挂载）画静态占位，不留白。
         if !laid_out_at(frame, bounds.width, bounds.height) {
             let has_content = state.painted.borrow().is_some();
             if !(timed_out && has_content) {
                 // 没等过新帧就尺寸不符 = 插件还停在旧尺寸（尺寸那笔丢了或它先交了旧画面）：
-                // 再报一次尺寸让它重排，这一拍先不画，新帧到了宿主会重绘
+                // 再报一次尺寸让它重排；从没画过正确帧的面画静态占位，不留白
                 self.send(FrameInput::Resize { width: bounds.width, height: bounds.height });
+                if !has_content {
+                    draw_waiting_placeholder(
+                        self.app,
+                        &self.plugin_id,
+                        &self.surface_id,
+                        state,
+                        renderer,
+                        bounds,
+                    );
+                }
                 return;
             }
         }
@@ -901,6 +916,133 @@ fn laid_out_at(frame: &Arc<SurfaceFrame>, width: f32, height: f32) -> bool {
     frame.size.is_none_or(|size| {
         (size.w - width).abs() <= SIZE_TOLERANCE && (size.h - height).abs() <= SIZE_TOLERANCE
     })
+}
+
+/// 首张正确尺寸的帧到达前的静态占位：图标 + 贡献标题 + 说明，纵向居中。
+/// 每帧重画（只在等待窗内出现，且占位色随主题 token 即时解析，不留烘焙的旧色）。
+fn draw_waiting_placeholder(
+    app: &App,
+    plugin_id: &str,
+    surface_id: &str,
+    state: &FrameState,
+    renderer: &mut iced::Renderer,
+    bounds: Rectangle,
+) {
+    if bounds.width <= 0.0 || bounds.height <= 0.0 {
+        return;
+    }
+    let contribution = crate::plugin_actions::contribution(app, plugin_id, surface_id);
+    let icon_key = crate::plugin_actions::plugin_icon_key(
+        contribution.and_then(|contribution| contribution.icon.as_deref()),
+        "puzzle",
+    );
+    let title = contribution.map(|contribution| contribution.label.clone()).unwrap_or_default();
+    let title_size = pal::fs_h1();
+    let desc_size = pal::fs_body();
+    let title_line = title_size * 1.4;
+    let desc_line = desc_size * 1.4;
+    let total = PLACEHOLDER_ICON + PLACEHOLDER_GAP + title_line + PLACEHOLDER_GAP + desc_line;
+    let origin = bounds.position();
+    let top = origin.y + ((bounds.height - total) / 2.0).max(0.0);
+    let center_x = origin.x + bounds.width / 2.0;
+    let title_y = top + PLACEHOLDER_ICON + PLACEHOLDER_GAP;
+    let desc_y = title_y + title_line + PLACEHOLDER_GAP;
+
+    // 图标几何按 24 单位视框展平（与 lucide 描边口径一致）
+    let geometry = {
+        let mut frame =
+            canvas::Frame::new(renderer, Size::new(PLACEHOLDER_ICON, PLACEHOLDER_ICON));
+        if let Some(subpaths) = crate::ui::icon::polylines(&icon_key) {
+            let scale = PLACEHOLDER_ICON / 24.0;
+            let stroke = canvas::Stroke {
+                style: canvas::Style::Solid(
+                    crate::plugin_theme::token_color(ColorToken::TextMuted).scale_alpha(0.6),
+                ),
+                width: 1.5,
+                line_cap: canvas::LineCap::Round,
+                line_join: canvas::LineJoin::Round,
+                line_dash: canvas::LineDash { segments: &[], offset: 0 },
+            };
+            frame.with_save(|frame| {
+                frame.scale(scale);
+                for points in subpaths {
+                    if points.len() < 2 {
+                        continue;
+                    }
+                    let path = canvas::Path::new(|builder| {
+                        builder.move_to(Point::new(points[0][0], points[0][1]));
+                        for point in &points[1..] {
+                            builder.line_to(Point::new(point[0], point[1]));
+                        }
+                    });
+                    frame.stroke(&path, stroke);
+                }
+            });
+        }
+        frame.into_geometry()
+    };
+    renderer.with_layer(bounds, |renderer| {
+        renderer.with_translation(
+            Vector::new(center_x - PLACEHOLDER_ICON / 2.0, top),
+            |renderer| renderer.draw_geometry(geometry),
+        );
+        let mut texts = state.texts.borrow_mut();
+        texts.begin_frame();
+        if !title.is_empty() {
+            texts.draw_one(
+                renderer,
+                &placeholder_text(
+                    title,
+                    title_y - origin.y,
+                    title_size,
+                    ColorToken::Text,
+                    TextWeight::Bold,
+                    bounds.width,
+                ),
+                origin,
+                bounds,
+            );
+        }
+        texts.draw_one(
+            renderer,
+            &placeholder_text(
+                "正在准备界面…".to_string(),
+                desc_y - origin.y,
+                desc_size,
+                ColorToken::TextMuted,
+                TextWeight::Normal,
+                bounds.width,
+            ),
+            origin,
+            bounds,
+        );
+        texts.end_frame();
+    });
+}
+
+/// 占位文字指令：横向按面宽居中。
+fn placeholder_text(
+    content: String,
+    y: f32,
+    size: f32,
+    color: ColorToken,
+    weight: TextWeight,
+    max_width: f32,
+) -> DrawCommand {
+    DrawCommand::Text {
+        x: 0.0,
+        y,
+        content,
+        size,
+        color: PaintColor::Token { name: color },
+        weight: Some(weight),
+        family: None,
+        family_name: None,
+        italic: false,
+        max_width: Some(max_width),
+        align: Some(TextAlign::Center),
+        layout: None,
+    }
 }
 
 /// 整面帧渲染入口：铺满可用区域，外层按贡献声明的内边距包裹。

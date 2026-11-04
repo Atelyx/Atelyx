@@ -196,7 +196,8 @@ fn sidebar_body(ui: &mut Ui<'_, '_>, model: &Model) {
                     for session in model.visible_sessions() {
                         session_row(body, model, session);
                     }
-                    if model.sessions.is_empty() {
+                    // 数据未到时不画空态，避免骨架帧把「暂无历史会话」挂在屏幕上
+                    if model.ready && model.sessions.is_empty() {
                         let label = if model.search.trim().is_empty() {
                             "暂无历史会话"
                         } else {
@@ -414,7 +415,10 @@ fn message_flow(ui: &mut Ui<'_, '_>, model: &Model, chat_width: f32) {
     let marker = compaction_index(model);
     let len = model.messages.len() + usize::from(marker.is_some());
     if len == 0 {
-        empty_flow(ui);
+        // 会话数据未到只留白：空态文案要等清单装载完成才成立
+        if model.ready {
+            empty_flow(ui);
+        }
         return;
     }
     let viewport = (ui.bounds().h - 37.0 - composer_height(ui, model, chat_width)).max(160.0);

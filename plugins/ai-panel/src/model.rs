@@ -235,7 +235,8 @@ impl Model {
         Arc::make_mut(&mut self.messages).clear();
     }
 
-    /// 容器切换：旧会话投影、草稿与选择器全部作废（面板覆盖随新容器重新装载）。
+    /// 会话真源切换：旧会话投影、草稿与选择器全部作废（面板覆盖随新真源重新装载）。
+    /// 引用候选不随会话真源变化，由文件树事件维护，不在此清空。
     pub fn reset(&mut self) {
         self.ready = false;
         self.error = None;
@@ -259,8 +260,6 @@ impl Model {
         self.draft.clear();
         self.refs.clear();
         self.images.clear();
-        self.files.clear();
-        self.files_ready = false;
         self.agent_override = None;
         self.model_pick = None;
         self.effort = None;

@@ -1265,6 +1265,8 @@ impl PluginHandler for AiPanelPlugin {
         *self.attached.lock().unwrap() = true;
         // 重挂只重取主题，保留宿主已上报的尺寸（否则首帧按占位尺寸画、等 resize 再跳）
         self.ui.lock().await.refresh_theme();
+        // 首帧不等数据：先出骨架，取到的数据再画进去
+        self.render(ctx).await;
         // 挂面即全量重取：未挂面期间的数据事件已被门控，这里补齐错过的变更
         self.load_choices(ctx).await;
         self.load_files(ctx).await;
@@ -1285,7 +1287,13 @@ impl PluginHandler for AiPanelPlugin {
         }
         match params.name.as_str() {
             event::name::VAULT_SWITCH => {
-                self.model.lock().unwrap().reset();
+                // 容器已换：会话投影与引用候选一并作废，随后的取数重新建立
+                {
+                    let mut model = self.model.lock().unwrap();
+                    model.reset();
+                    model.files.clear();
+                    model.files_ready = false;
+                }
                 self.load_files(ctx).await;
                 self.load_all(ctx).await;
                 self.render(ctx).await;
@@ -1345,9 +1353,9 @@ impl PluginHandler for AiPanelPlugin {
             }
             event::name::AI_CHAT_RELOAD => {
                 // 会话真源已换：整体重取，旧展示与输入态一并作废
+                // 引用候选不随会话真源变化：文件树由 VAULT_SWITCH / VAULT_FILE_CHANGED 维护
                 self.model.lock().unwrap().reset();
                 self.load_choices(ctx).await;
-                self.load_files(ctx).await;
                 self.load_all(ctx).await;
                 self.render(ctx).await;
             }
@@ -1528,7 +1536,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn surface_attach_reloads_data() {
+    async fn surface_attach_renders_skeleton_before_fetching() {
         let (ctx, mut out_rx) = test_context();
         let plugin = Arc::new(AiPanelPlugin::new());
         let task = tokio::spawn({
@@ -1545,11 +1553,103 @@ mod tests {
         });
         assert_eq!(
             first_request_method(&mut out_rx).await.as_deref(),
-            Some(method::ai::MODELS),
-            "挂面应先向宿主取模型清单"
+            Some(method::query::THEME),
+            "挂面应先出骨架帧（主题往返），再取数据"
         );
         task.abort();
         assert!(plugin.is_attached());
+    }
+
+    /// 会话真源重载只作废会话侧状态；引用候选由文件树事件维护，不随重载清空。
+    #[tokio::test]
+    async fn chat_reload_keeps_reference_candidates() {
+        let (ctx, mut out_rx) = test_context();
+        let plugin = Arc::new(AiPanelPlugin::new());
+        *plugin.attached.lock().unwrap() = true;
+        {
+            let mut model = plugin.model.lock().unwrap();
+            model.files = vec![crate::model::FileEntry {
+                path: "方案.md".into(),
+                is_dir: false,
+            }];
+            model.files_ready = true;
+        }
+        let task = tokio::spawn({
+            let plugin = plugin.clone();
+            let ctx = ctx.clone();
+            async move {
+                plugin
+                    .on_host_event(
+                        &ctx,
+                        PublishParams { name: event::name::AI_CHAT_RELOAD.into(), payload: Value::Null },
+                    )
+                    .await
+            }
+        });
+        assert_eq!(
+            first_request_method(&mut out_rx).await.as_deref(),
+            Some(method::ai::MODELS),
+            "重载后先与会话真源对齐，而不是重扫文件树"
+        );
+        {
+            let model = plugin.model.lock().unwrap();
+            assert_eq!(model.files.len(), 1, "引用候选不应随会话真源重载清空");
+            assert!(model.files_ready);
+        }
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn vault_switch_rescans_reference_candidates() {
+        let (ctx, mut out_rx) = test_context();
+        let plugin = Arc::new(AiPanelPlugin::new());
+        *plugin.attached.lock().unwrap() = true;
+        let task = tokio::spawn({
+            let plugin = plugin.clone();
+            let ctx = ctx.clone();
+            async move {
+                plugin
+                    .on_host_event(
+                        &ctx,
+                        PublishParams { name: event::name::VAULT_SWITCH.into(), payload: Value::Null },
+                    )
+                    .await
+            }
+        });
+        assert_eq!(
+            first_request_method(&mut out_rx).await.as_deref(),
+            Some(method::vault::LIST),
+            "换容器应重扫文件树补齐候选"
+        );
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn file_change_rescans_reference_candidates() {
+        let (ctx, mut out_rx) = test_context();
+        let plugin = Arc::new(AiPanelPlugin::new());
+        *plugin.attached.lock().unwrap() = true;
+        let task = tokio::spawn({
+            let plugin = plugin.clone();
+            let ctx = ctx.clone();
+            async move {
+                plugin
+                    .on_host_event(
+                        &ctx,
+                        PublishParams {
+                            name: event::name::VAULT_FILE_CHANGED.into(),
+                            payload: json!({ "path": "方案.md", "kind": "created" }),
+                        },
+                    )
+                    .await
+            }
+        });
+        assert_eq!(
+            first_request_method(&mut out_rx).await.as_deref(),
+            Some(method::vault::LIST),
+            "文件结构变化应重扫文件树"
+        );
+        task.abort();
     }
 
     #[tokio::test]
@@ -1608,8 +1708,8 @@ mod tests {
         });
         assert_eq!(
             first_request_method(&mut out_rx).await.as_deref(),
-            Some(method::ai::MODELS),
-            "错过的广播应由挂面全量重取补齐"
+            Some(method::query::THEME),
+            "错过的广播应由挂面全量重取补齐（先出骨架帧）"
         );
         task.abort();
     }
