@@ -48,7 +48,7 @@ pub fn font_micro() -> f32 {
     sizes().micro
 }
 
-/// 正文档（编辑器浮层用）。
-pub fn font_body() -> f32 {
-    sizes().body
+/// 面板主标题档（空态标题）。
+pub fn font_h1() -> f32 {
+    sizes().h1
 }

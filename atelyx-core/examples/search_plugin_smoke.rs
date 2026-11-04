@@ -14,7 +14,7 @@ use atelyx_core::plugin_runtime::{
 };
 use atelyx_plugin_protocol::frame::SurfaceFrame;
 use atelyx_plugin_protocol::method::{FontSizes, Radii, ThemeColors, ThemeResult};
-use atelyx_plugin_protocol::paint::DrawCommand;
+use atelyx_plugin_protocol::paint::{DrawCommand, TextAlign};
 
 const SEARCH_ID: &str = "atelyx.search";
 const SEARCH_SURFACE: &str = "search";
@@ -87,6 +87,7 @@ async fn main() {
         .await
         .expect("清空后应仍保留输入焦点");
     assert!(has_text(&refocused, "无匹配文件"));
+    assert_empty_state_centered(&refocused, "无匹配文件", "换个关键词，或输入所在文件夹的名字。");
     click_hit(&runtime, &refocused, "search-clear");
     let cleared = wait_frame(&runtime, |frame| has_text(frame, "共 3 个文件"))
         .await
@@ -250,6 +251,44 @@ fn has_text(frame: &SurfaceFrame, wanted: &str) -> bool {
     frame.commands.iter().any(|command| {
         matches!(command, DrawCommand::Text { content, .. } if content == wanted)
     })
+}
+
+/// 空态：标题 / 说明按面宽居中，内容块（64 图标 + 两侧 16 间距 + 两行文字）在顶部区下方的剩余区居中。
+fn assert_empty_state_centered(frame: &SurfaceFrame, title: &str, desc: &str) {
+    let size = frame.size.expect("整面帧必须带尺寸");
+    // 空态排在顶部区 + 1px 分隔线之下：分隔线的底边就是内容区上沿
+    let content_top = frame
+        .commands
+        .iter()
+        .find_map(|command| match command {
+            DrawCommand::Rect { x, y, w, h, .. } if *x == 0.0 && *w >= size.w - 0.5 && *h <= 1.5 => {
+                Some(*y + *h)
+            }
+            _ => None,
+        })
+        .unwrap_or(0.0);
+    let text = |wanted: &str| {
+        frame.commands.iter().find_map(|command| match command {
+            DrawCommand::Text { content, x, y, size, max_width, align, .. } if content == wanted => {
+                Some((*x, *y, *size, *max_width, *align))
+            }
+            _ => None,
+        }).unwrap_or_else(|| panic!("空态缺少文字：{wanted}"))
+    };
+    let title = text(title);
+    let desc = text(desc);
+    for (label, (x, _, _, max_width, align)) in [("标题", title), ("说明", desc)] {
+        assert_eq!(max_width, Some(size.w), "空态{label}应按面宽对齐");
+        assert_eq!(align, Some(TextAlign::Center), "空态{label}应居中");
+        assert!(x.abs() < 0.5, "空态{label}对齐盒的左缘应在面左缘");
+    }
+    let block = 64.0 + 16.0 + title.2 * 1.2 + 16.0 + desc.2 * 1.2;
+    let avail = size.h - content_top;
+    let top = content_top + (avail - block) / 2.0;
+    assert!((title.1 - (top + 64.0 + 16.0)).abs() < 0.5, "空态标题应垂直居中");
+    let desc_y = top + 64.0 + 16.0 + title.2 * 1.2 + 16.0;
+    assert!((desc.1 - desc_y).abs() < 0.5, "空态说明应垂直居中");
+    assert!(((top + desc_y + desc.2 * 1.2) / 2.0 - (size.h + content_top) / 2.0).abs() < 0.5, "空态内容块应垂直居中");
 }
 
 /// 冒烟用的目录复制（保留目录层级）。

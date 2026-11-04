@@ -14,6 +14,7 @@ use atelyx_core::plugin_runtime::{
 };
 use atelyx_plugin_protocol::frame::SurfaceFrame;
 use atelyx_plugin_protocol::method::{FontSizes, Radii, ThemeColors, ThemeResult};
+use atelyx_plugin_protocol::paint::{DrawCommand, TextAlign};
 
 const RECENT_ID: &str = "atelyx.recent";
 const RECENT_SURFACE: &str = "recent";
@@ -134,6 +135,21 @@ async fn main() {
     );
     println!("历史重取：通过");
 
+    // 面板级空态：最近打开清空 / 历史分组置空后，空态内容块在面内居中
+    state.recent_entries.lock().unwrap().clear();
+    runtime.on_recent_changed();
+    let recent_empty = wait_frame(&runtime, RECENT_ID, RECENT_SURFACE, |frame| has_text(frame, "暂无最近打开"))
+        .await
+        .expect("清空后最近打开应出空态");
+    assert_empty_state_centered(&recent_empty, "暂无最近打开", "打开文件后出现在这里。");
+    state.history_empty.store(true, Ordering::SeqCst);
+    runtime.on_history_changed();
+    let history_empty = wait_frame(&runtime, HISTORY_ID, HISTORY_SURFACE, |frame| has_text(frame, "暂无历史记录"))
+        .await
+        .expect("分组置空后历史应出空态");
+    assert_empty_state_centered(&history_empty, "暂无历史记录", "暂无版本记录。");
+    println!("空态居中：通过");
+
     for id in [RECENT_ID, HISTORY_ID] {
         runtime.set_enabled(id, false).expect("停用");
     }
@@ -156,6 +172,8 @@ struct HostState {
     history_refreshes: Arc<Mutex<Vec<bool>>>,
     history_calls: Arc<AtomicUsize>,
     history_fail_once: Arc<AtomicBool>,
+    /// 置位后历史回执给空集合，用来覆盖面板级空态。
+    history_empty: Arc<AtomicBool>,
 }
 
 impl HostState {
@@ -167,6 +185,7 @@ impl HostState {
             history_refreshes: Arc::new(Mutex::new(Vec::new())),
             history_calls: Arc::new(AtomicUsize::new(0)),
             history_fail_once: Arc::new(AtomicBool::new(false)),
+            history_empty: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -199,6 +218,8 @@ fn serve(runtime: Arc<PluginRuntime>, state: HostState) {
                             request_id,
                             Err("冒烟：首次聚合失败".to_string()),
                         );
+                    } else if state.history_empty.load(Ordering::SeqCst) {
+                        reply(&runtime, request_id, json!({ "ready": true, "groups": [] }));
                     } else {
                         reply(
                             &runtime,
@@ -234,6 +255,39 @@ fn serve(runtime: Arc<PluginRuntime>, state: HostState) {
 
 fn recent(file: &str, kind: RecentKind, opened_at: i64) -> RecentEntry {
     RecentEntry { file: file.into(), kind, opened_at }
+}
+
+fn has_text(frame: &SurfaceFrame, wanted: &str) -> bool {
+    frame
+        .commands
+        .iter()
+        .any(|command| matches!(command, DrawCommand::Text { content, .. } if content == wanted))
+}
+
+/// 空态：标题 / 说明按面宽居中，内容块（64 图标 + 两侧 16 间距 + 两行文字）垂直中心落在面中心。
+fn assert_empty_state_centered(frame: &SurfaceFrame, title: &str, desc: &str) {
+    let size = frame.size.expect("整面帧必须带尺寸");
+    let text = |wanted: &str| {
+        frame.commands.iter().find_map(|command| match command {
+            DrawCommand::Text { content, x, y, size, max_width, align, .. } if content == wanted => {
+                Some((*x, *y, *size, *max_width, *align))
+            }
+            _ => None,
+        }).unwrap_or_else(|| panic!("空态缺少文字：{wanted}"))
+    };
+    let title = text(title);
+    let desc = text(desc);
+    for (label, (x, _, _, max_width, align)) in [("标题", title), ("说明", desc)] {
+        assert_eq!(max_width, Some(size.w), "空态{label}应按面宽对齐");
+        assert_eq!(align, Some(TextAlign::Center), "空态{label}应居中");
+        assert!(x.abs() < 0.5, "空态{label}对齐盒的左缘应在面左缘");
+    }
+    let block = 64.0 + 16.0 + title.2 * 1.2 + 16.0 + desc.2 * 1.2;
+    let top = (size.h - block) / 2.0;
+    assert!((title.1 - (top + 64.0 + 16.0)).abs() < 0.5, "空态标题应垂直居中");
+    let desc_y = top + 64.0 + 16.0 + title.2 * 1.2 + 16.0;
+    assert!((desc.1 - desc_y).abs() < 0.5, "空态说明应垂直居中");
+    assert!(((top + desc_y + desc.2 * 1.2) / 2.0 - size.h / 2.0).abs() < 0.5, "空态内容块应垂直居中");
 }
 
 async fn enable(runtime: &Arc<PluginRuntime>, id: &str) {

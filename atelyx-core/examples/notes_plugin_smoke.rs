@@ -11,6 +11,7 @@ use atelyx_core::plugin_runtime::{
 };
 use atelyx_plugin_protocol::frame::{Key, KeyAction, Modifiers, NamedKey, SurfaceFrame};
 use atelyx_plugin_protocol::method::{FontSizes, Radii, ThemeColors, ThemeResult};
+use atelyx_plugin_protocol::paint::{DrawCommand, TextAlign};
 
 const PLUGIN: &str = "atelyx.notes";
 const SURFACE: &str = "note";
@@ -102,10 +103,11 @@ async fn main() {
     );
     let frame = wait_frame(&runtime, Duration::from_secs(5)).await.expect("挂面后应有帧");
     println!("面板首帧：{} 条指令，{} 个命中区", frame.commands.len(), frame.hits.len());
-    let empty_hint = frame.commands.iter().any(|command| {
-        matches!(command, atelyx_plugin_protocol::paint::DrawCommand::Text { content, .. } if content.contains("或搜索面板"))
-    });
-    assert!(empty_hint, "未打开笔记的空态要给出完整引导文案");
+    assert_empty_state_centered(
+        &frame,
+        "打开笔记",
+        "在文件面板或搜索面板单击一个 .md 笔记开始编辑。",
+    );
 
     runtime.notify_doc_open(PLUGIN, SURFACE, "a.md");
     let frame = wait_frame(&runtime, Duration::from_secs(5)).await.expect("打开笔记后应有帧");
@@ -372,6 +374,32 @@ async fn wait_hit(
         }
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
+}
+
+/// 空态：标题 / 说明按面宽居中，内容块（64 图标 + 两侧 16 间距 + 两行文字）垂直中心落在面中心。
+fn assert_empty_state_centered(frame: &SurfaceFrame, title: &str, desc: &str) {
+    let size = frame.size.expect("整面帧必须带尺寸");
+    let text = |wanted: &str| {
+        frame.commands.iter().find_map(|command| match command {
+            DrawCommand::Text { content, x, y, size, max_width, align, .. } if content == wanted => {
+                Some((*x, *y, *size, *max_width, *align))
+            }
+            _ => None,
+        }).unwrap_or_else(|| panic!("空态缺少文字：{wanted}"))
+    };
+    let title = text(title);
+    let desc = text(desc);
+    for (label, (x, _, _, max_width, align)) in [("标题", title), ("说明", desc)] {
+        assert_eq!(max_width, Some(size.w), "空态{label}应按面宽对齐");
+        assert_eq!(align, Some(TextAlign::Center), "空态{label}应居中");
+        assert!(x.abs() < 0.5, "空态{label}对齐盒的左缘应在面左缘");
+    }
+    let block = 64.0 + 16.0 + title.2 * 1.2 + 16.0 + desc.2 * 1.2;
+    let top = (size.h - block) / 2.0;
+    assert!((title.1 - (top + 64.0 + 16.0)).abs() < 0.5, "空态标题应垂直居中");
+    let desc_y = top + 64.0 + 16.0 + title.2 * 1.2 + 16.0;
+    assert!((desc.1 - desc_y).abs() < 0.5, "空态说明应垂直居中");
+    assert!(((top + desc_y + desc.2 * 1.2) / 2.0 - size.h / 2.0).abs() < 0.5, "空态内容块应垂直居中");
 }
 
 async fn wait_frame(runtime: &Arc<PluginRuntime>, timeout: Duration) -> Option<Arc<SurfaceFrame>> {

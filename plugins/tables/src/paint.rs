@@ -9,6 +9,7 @@ use atelyx_plugin_protocol::paint::{
     ColorToken, DrawCommand, PaintColor, PaintPoint, TextAlign, TextFamily, TextLayout, TextShaping,
     TextWrap,
 };
+use atelyx_plugin_sdk::frame_builders::{empty_state, EmptyStateText};
 
 use crate::geom::Geo;
 use crate::images;
@@ -784,97 +785,18 @@ fn draw_remote_tags(
     }
 }
 
-/// 空态（未打开表格）：圆角图标底座 + 表格图标 + 标题 + 说明，整页居中。
+/// 空态（未打开表格）：与其它面板共用同一份居中排版。
 fn draw_empty(out: &mut Vec<DrawCommand>, size: Size) {
-    const BASE: f32 = 40.0;
-    const RADIUS: f32 = 10.0;
-    const GAP: f32 = 8.0;
     const EMPTY_LINE: f32 = 1.2;
-    let title_size = crate::theme::font_body();
-    let desc_size = crate::theme::font_ui();
-    let title_h = title_size * EMPTY_LINE;
-    let desc_h = desc_size * EMPTY_LINE;
-    let total = BASE + GAP + title_h + GAP + desc_h;
-    let cx = size.width / 2.0;
-    let top = ((size.height - total) / 2.0).max(0.0);
-    out.push(DrawCommand::Rect {
-        x: cx - BASE / 2.0,
-        y: top,
-        w: BASE,
-        h: BASE,
-        fill: Some(token(ColorToken::Surface)),
-        stroke: None,
-        stroke_width: None,
-        corner_radius: Some(RADIUS),
-        shadow: None,
-    });
-    // 表格图标：24 单位形状按 18px 缩放，居中放进底座
-    let icon = 18.0;
-    let k = icon / 24.0;
-    let ox = cx - icon / 2.0;
-    let oy = top + (BASE - icon) / 2.0;
-    let stroke = token(ColorToken::TextMuted);
-    out.push(DrawCommand::Rect {
-        x: ox + 3.0 * k,
-        y: oy + 3.0 * k,
-        w: 18.0 * k,
-        h: 18.0 * k,
-        fill: None,
-        stroke: Some(stroke),
-        stroke_width: Some(2.0 * k),
-        corner_radius: Some(2.0 * k),
-        shadow: None,
-    });
-    out.push(DrawCommand::Line {
-        x1: ox + 12.0 * k,
-        y1: oy + 3.0 * k,
-        x2: ox + 12.0 * k,
-        y2: oy + 21.0 * k,
-        stroke,
-        width: 2.0 * k,
-        dash: None,
-    });
-    for y in [9.0, 15.0] {
-        out.push(DrawCommand::Line {
-            x1: ox + 3.0 * k,
-            y1: oy + y * k,
-            x2: ox + 21.0 * k,
-            y2: oy + y * k,
-            stroke,
-            width: 2.0 * k,
-            dash: None,
-        });
-    }
-    let title_y = top + BASE + GAP;
-    out.push(text_command(
-        "未打开表格",
-        0.0,
-        title_y,
-        FontSpec {
-            size: title_size,
-            weight: Some(atelyx_plugin_protocol::paint::TextWeight::Bold),
-            family: None,
-            family_name: None,
-            italic: false,
-            color: token(ColorToken::Text),
-        },
-        Some(TextAlign::Center),
-        size.width,
-    ));
-    out.push(text_command(
-        "从文件面板打开一个 .atb 文件",
-        0.0,
-        title_y + title_h + GAP,
-        FontSpec {
-            size: desc_size,
-            weight: None,
-            family: None,
-            family_name: None,
-            italic: false,
-            color: token(ColorToken::TextMuted),
-        },
-        Some(TextAlign::Center),
-        size.width,
+    let title = crate::theme::font_h1();
+    let desc = crate::theme::font_caption();
+    out.extend(empty_state(
+        (0.0, 0.0, size.width, size.height),
+        "table",
+        "打开表格",
+        "在文件面板或搜索面板单击一个 .atb 表格开始编辑。",
+        EmptyStateText { size: title, line: title * EMPTY_LINE },
+        EmptyStateText { size: desc, line: desc * EMPTY_LINE },
     ));
 }
 

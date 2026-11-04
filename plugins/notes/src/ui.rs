@@ -55,22 +55,11 @@ pub fn frame(ui: &mut Ui<'_, '_>, model: &NoteModel) {
 
 /// 未打开笔记：整页居中的引导（图标 + 标题 + 说明）。
 fn empty(ui: &mut Ui<'_, '_>, model: &NoteModel) {
-    ui.fill_column(0.0, |ui| {
-        ui.fill_spacer();
-        ui.center_column(16.0, |ui| {
-            ui.icon_named("file-text", 64.0, ColorToken::TextMuted);
-            ui.text_styled_fit(
-                "打开笔记",
-                TextStyle::new(TextRole::Title).weight(TextWeight::SemiBold),
-            );
-            let hint = match &model.open_error {
-                Some(error) => short(error, "打开失败"),
-                None => "在文件面板或搜索面板单击一个 .md 笔记开始编辑。".to_string(),
-            };
-            ui.text_styled_fit(hint, TextStyle::new(TextRole::Caption));
-        });
-        ui.fill_spacer();
-    });
+    let hint = match &model.open_error {
+        Some(error) => short(error, "打开失败"),
+        None => "在文件面板或搜索面板单击一个 .md 笔记开始编辑。".to_string(),
+    };
+    ui.empty_state("file-text", "打开笔记", &hint);
 }
 
 fn toolbar(ui: &mut Ui<'_, '_>, model: &NoteModel) {

@@ -2,7 +2,7 @@
 
 use atelyx_plugin_protocol::method::{CanvasRefStatus, CanvasSnapshotResult};
 use atelyx_plugin_props as props;
-use atelyx_plugin_protocol::paint::{ColorToken, TextWeight};
+use atelyx_plugin_protocol::paint::ColorToken;
 use atelyx_plugin_sdk::frame_ui::{TextRole, TextStyle, Ui};
 
 use crate::model::InspectorModel;
@@ -16,20 +16,16 @@ pub fn frame(ui: &mut Ui<'_, '_>, model: &mut InspectorModel) {
         match model.canvas.clone() {
             Some(snapshot) => canvas_panel(ui, &snapshot),
             // 快照未到（画布刚切到前台）先给空态，避免整面空白
-            None => placeholder(ui, "画布属性", "打开一篇画布后在此查看其属性。"),
+            None => ui.empty_state("info", "画布属性", "打开一篇画布后在此查看其属性。"),
         }
         return;
     }
     if !model.open {
-        placeholder(ui, "笔记属性", "打开一篇笔记后在此查看与编辑其属性。");
+        ui.empty_state("info", "笔记属性", "打开一篇笔记后在此查看与编辑其属性。");
         return;
     }
     match model.props.data.clone() {
-        None => {
-            ui.column(0.0, |ui| {
-                ui.caption("当前笔记无属性");
-            });
-        }
+        None => ui.empty_state("info", "笔记属性", "当前笔记无属性。"),
         Some((_, false)) => error_row(ui),
         Some(_) => props::panel(ui, model),
     }
@@ -40,20 +36,6 @@ pub fn overlays(ui: &mut Ui<'_, '_>, model: &InspectorModel, pointer: (f32, f32)
     let Some(index) = model.props.type_menu else { return };
     let left = pointer.0.min(ui.bounds().w - 140.0).max(4.0);
     props::type_menu(ui, model, index, left, pointer.1 + 6.0);
-}
-
-fn placeholder(ui: &mut Ui<'_, '_>, title: &str, desc: &str) {
-    ui.fill_column(0.0, |ui| {
-        ui.fill_spacer();
-        ui.center_column(16.0, |ui| {
-            ui.icon_named("info", 64.0, ColorToken::TextMuted);
-            let title_style = TextStyle::new(TextRole::Title).weight(TextWeight::Bold);
-            ui.text_styled(title.to_string(), title_style);
-            let desc_style = TextStyle::new(TextRole::Body).color(ColorToken::TextMuted);
-            ui.text_styled(desc.to_string(), desc_style);
-        });
-        ui.fill_spacer();
-    });
 }
 
 fn error_row(ui: &mut Ui<'_, '_>) {

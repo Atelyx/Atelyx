@@ -1263,27 +1263,42 @@ mod tests {
     use crate::model::Size;
     use atelyx_plugin_protocol::paint::DrawCommand;
 
+    // 面 320×200：标题与说明按面宽居中，整块（图标 + 标题 + 说明）上下沿中心 = 100。
     #[test]
     fn empty_frame_uses_surface_size_and_standard_placeholder() {
+        use atelyx_plugin_protocol::paint::TextAlign;
+
         let frame = build_frame(None, &[], Size { width: 320.0, height: 200.0 });
         let size = frame.size.expect("整面帧必须带尺寸");
         assert_eq!(size.w, 320.0);
         assert_eq!(size.h, 200.0);
-        let texts: Vec<&str> = frame
-            .commands
-            .iter()
-            .filter_map(|command| match command {
-                DrawCommand::Text { content, .. } => Some(content.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert!(texts.contains(&"未打开表格"));
-        assert!(texts.contains(&"从文件面板打开一个 .atb 文件"));
-        assert!(frame.commands.iter().any(|command| matches!(
-            command,
-            DrawCommand::Rect { w, h, corner_radius: Some(_), .. }
-                if (*w - 40.0).abs() < f32::EPSILON && (*h - 40.0).abs() < f32::EPSILON
-        )));
+
+        let text = |wanted: &str| {
+            frame
+                .commands
+                .iter()
+                .find_map(|command| match command {
+                    DrawCommand::Text { content, x, y, size, max_width, align, .. } if content == wanted => {
+                        Some((*x, *y, *size, *max_width, *align))
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("空态缺少文字：{wanted}"))
+        };
+        let title = text("打开表格");
+        let desc = text("在文件面板或搜索面板单击一个 .atb 表格开始编辑。");
+        for (label, (x, _, _, max_width, align)) in [("标题", title), ("说明", desc)] {
+            assert_eq!(max_width, Some(320.0), "空态{label}应按面宽对齐");
+            assert_eq!(align, Some(TextAlign::Center), "空态{label}应居中");
+            assert!((x + 320.0 / 2.0 - 160.0).abs() < 0.5, "空态{label}应水平居中");
+        }
+        let group_h = 64.0 + 16.0 + title.2 * 1.2 + 16.0 + desc.2 * 1.2;
+        let group_top = (200.0 - group_h) / 2.0;
+        assert!((title.1 - (group_top + 64.0 + 16.0)).abs() < 0.5, "空态标题应垂直居中");
+        let desc_y = group_top + 64.0 + 16.0 + title.2 * 1.2 + 16.0;
+        assert!((desc.1 - desc_y).abs() < 0.5, "空态说明应垂直居中");
+        let block_center = (group_top + desc_y + desc.2 * 1.2) / 2.0;
+        assert!((block_center - 100.0).abs() < 0.5, "空态内容块应垂直居中");
     }
 
     #[test]

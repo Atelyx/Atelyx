@@ -16,7 +16,7 @@ use atelyx_core::plugin_runtime::{
 use atelyx_plugin_protocol::event;
 use atelyx_plugin_protocol::frame::SurfaceFrame;
 use atelyx_plugin_protocol::method::{FontSizes, Radii, ThemeColors, ThemeResult};
-use atelyx_plugin_protocol::paint::{ColorToken, DrawCommand, PaintColor};
+use atelyx_plugin_protocol::paint::{ColorToken, DrawCommand, PaintColor, TextAlign};
 
 const FILES_ID: &str = "atelyx.files";
 const FILES_SURFACE: &str = "files";
@@ -423,6 +423,15 @@ async fn main() {
     click_hit(&runtime, &frame, "open-vault");
     wait_pick_vaults(&state, 1).await;
     println!("打开仓库入口：通过");
+
+    // 空仓库：面板级空态在工具条下方居中
+    state.entries.lock().unwrap().insert(String::new(), Vec::new());
+    runtime.on_files_changed();
+    let empty = wait_frame(&runtime, |frame| has_text(frame, "暂无文件"))
+        .await
+        .expect("空仓库应出面板级空态");
+    assert_empty_state_centered(&empty, "暂无文件", "右键新建笔记或文件夹。");
+    println!("空仓库空态：通过");
 
     runtime.set_enabled(FILES_ID, false).expect("停用");
     let status = runtime
@@ -913,6 +922,51 @@ fn has_text(frame: &SurfaceFrame, needle: &str) -> bool {
         DrawCommand::Text { content, .. } => content.contains(needle),
         _ => false,
     })
+}
+
+/// 空态：标题 / 说明按面宽居中，内容块（64 图标 + 两侧 16 间距 + 两行文字）在工具条下方的剩余区居中。
+fn assert_empty_state_centered(frame: &SurfaceFrame, title: &str, desc: &str) {
+    let size = frame.size.expect("整面帧必须带尺寸");
+    // 空态排在工具条 + 1px 分隔线 + 容器行之下：容器行底边（无容器时取树顶部留白）
+    let rule_bottom = frame
+        .commands
+        .iter()
+        .find_map(|command| match command {
+            DrawCommand::Rect { x, y, w, h, .. } if *x == 0.0 && *w >= size.w - 0.5 && *h <= 1.5 => {
+                Some(*y + *h)
+            }
+            _ => None,
+        })
+        .unwrap_or(0.0);
+    let tree_top = frame
+        .hits
+        .iter()
+        .filter(|hit| hit.id.starts_with("switch:"))
+        .map(|hit| hit.y + hit.h)
+        .fold(rule_bottom + 6.0, f32::max);
+    let content_top = tree_top + 12.0;
+    let text = |wanted: &str| {
+        frame.commands.iter().find_map(|command| match command {
+            DrawCommand::Text { content, x, y, size, max_width, align, .. } if content == wanted => {
+                Some((*x, *y, *size, *max_width, *align))
+            }
+            _ => None,
+        }).unwrap_or_else(|| panic!("空态缺少文字：{wanted}"))
+    };
+    let title = text(title);
+    let desc = text(desc);
+    for (label, (x, _, _, max_width, align)) in [("标题", title), ("说明", desc)] {
+        assert_eq!(max_width, Some(size.w), "空态{label}应按面宽对齐");
+        assert_eq!(align, Some(TextAlign::Center), "空态{label}应居中");
+        assert!(x.abs() < 0.5, "空态{label}对齐盒的左缘应在面左缘");
+    }
+    let block = 64.0 + 16.0 + title.2 * 1.2 + 16.0 + desc.2 * 1.2;
+    let avail = size.h - content_top;
+    let top = content_top + (avail - block) / 2.0;
+    assert!((title.1 - (top + 64.0 + 16.0)).abs() < 0.5, "空态标题应垂直居中");
+    let desc_y = top + 64.0 + 16.0 + title.2 * 1.2 + 16.0;
+    assert!((desc.1 - desc_y).abs() < 0.5, "空态说明应垂直居中");
+    assert!(((top + desc_y + desc.2 * 1.2) / 2.0 - (size.h + content_top) / 2.0).abs() < 0.5, "空态内容块应垂直居中");
 }
 
 fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {

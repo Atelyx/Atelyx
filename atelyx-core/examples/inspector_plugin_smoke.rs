@@ -11,15 +11,19 @@ use atelyx_core::plugin_runtime::{
     FrameInput, HostRequest, MeasureTextResult, MouseButton, PluginRuntime, PluginStatus,
     SurfaceKind, VaultFileEntry, FilesResult,
 };
+use atelyx_plugin_protocol::event::DocChangedPayload;
 use atelyx_plugin_protocol::frame::SurfaceFrame;
 use atelyx_plugin_protocol::method::{FontSizes, Radii, ThemeColors, ThemeResult};
-use atelyx_plugin_protocol::paint::{DrawCommand, TextLayout};
+use atelyx_plugin_protocol::paint::{DrawCommand, TextAlign, TextLayout};
 
 const INSPECTOR_ID: &str = "atelyx.inspector";
 const CANVAS_ID: &str = "atelyx.canvas";
 const SURFACE: &str = "inspector";
 const PANEL_W: f32 = 320.0;
 const PANEL_H: f32 = 400.0;
+/// 空态图标边长与内容块行距（与插件占位组合一致）。
+const EMPTY_ICON: f32 = 64.0;
+const EMPTY_GAP: f32 = 16.0;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
@@ -51,6 +55,19 @@ async fn main() {
             break;
         }
     }
+
+    // 无属性：空态整块在可用区域内水平垂直居中
+    let empty = wait_frame_text(&runtime, "当前笔记无属性。").await.unwrap_or_else(|| panic!("无属性时应出空态"));
+    assert_empty_state_centered(&empty);
+
+    // 切到有属性：宿主广播 doc:changed 后插件重读属性区
+    *state.present.lock().unwrap() = true;
+    runtime.on_doc_changed(DocChangedPayload {
+        path: "notes/demo.md".into(),
+        text: None,
+        dirty: false,
+        save_error: None,
+    });
 
     // 笔记属性：键名与值都画进帧
     let frame = wait_frame(&runtime, |frame| has_text(frame, "标题")).await.unwrap_or_else(|| {
@@ -145,6 +162,8 @@ struct HostState {
     written: Mutex<Vec<String>>,
     vault: Mutex<PathBuf>,
     unhandled: Mutex<Vec<String>>,
+    /// 当前笔记是否有 frontmatter 块（false = 属性面板空态）。
+    present: Mutex<bool>,
 }
 
 fn serve(runtime: Arc<PluginRuntime>, state: Arc<HostState>, vault: PathBuf) {
@@ -166,15 +185,20 @@ fn serve(runtime: Arc<PluginRuntime>, state: Arc<HostState>, vault: PathBuf) {
                     reply(&runtime, request_id, json!({ "tags": ["a", "b"] }));
                 }
                 HostRequest::DocPropsRead { request_id, .. } => {
-                    let block = state.written.lock().unwrap().last().cloned().unwrap_or_else(initial_block);
+                    let present = *state.present.lock().unwrap();
+                    let block = if present {
+                        state.written.lock().unwrap().last().cloned().unwrap_or_else(initial_block)
+                    } else {
+                        String::new()
+                    };
                     reply(
                         &runtime,
                         request_id,
                         json!({
                             "path": "notes/demo.md",
                             "frontmatter": block,
-                            "present": true,
-                            "parsed": true,
+                            "present": present,
+                            "parsed": present,
                             "editable": true
                         }),
                     );
@@ -245,7 +269,7 @@ fn measure(item: &atelyx_plugin_protocol::method::MeasureItem) -> MeasureTextRes
         let mut current = String::new();
         let mut width = 0.0f32;
         for ch in segment.chars() {
-            let advance = item.size * if ch.is_ascii() { 0.55 } else { 1.0 };
+            let advance = char_advance(ch, item.size);
             if !current.is_empty() && width + advance > wrap_w {
                 segments.push(atelyx_plugin_protocol::method::MeasureSegment { text: std::mem::take(&mut current), width });
                 width = 0.0;
@@ -327,6 +351,56 @@ fn reply(runtime: &PluginRuntime, request_id: u64, result: Value) {
 
 fn has_text(frame: &SurfaceFrame, wanted: &str) -> bool {
     frame.commands.iter().any(|command| matches!(command, DrawCommand::Text { content, .. } if content == wanted))
+}
+
+/// 空态标题与说明的对齐盒中心落在面宽中心，内容块（图标 + 标题 + 说明）的垂直中心落在面高中心。
+fn assert_empty_state_centered(frame: &SurfaceFrame) {
+    let title = text_geometry(frame, "笔记属性").expect("空态应有标题");
+    let desc = text_geometry(frame, "当前笔记无属性。").expect("空态应有说明");
+    for (label, text) in [("标题", &title), ("说明", &desc)] {
+        let width = text.max_width.expect("空态文字应按面宽对齐");
+        assert_eq!(text.align, Some(TextAlign::Center), "空态{label}应居中");
+        assert!(
+            (text.x + width / 2.0 - PANEL_W / 2.0).abs() < 0.5,
+            "空态{label}应水平居中：x={} 宽={width}",
+            text.x
+        );
+    }
+    let group_h = EMPTY_ICON + EMPTY_GAP + title.size * 1.2 + EMPTY_GAP + desc.size * 1.2;
+    let group_top = (PANEL_H - group_h) / 2.0;
+    let title_y = group_top + EMPTY_ICON + EMPTY_GAP;
+    let desc_y = title_y + title.size * 1.2 + EMPTY_GAP;
+    assert!(
+        (title.y - title_y).abs() < 0.5,
+        "空态标题应垂直居中：y={} 期望={title_y}",
+        title.y
+    );
+    assert!(
+        (desc.y - desc_y).abs() < 0.5,
+        "空态说明应垂直居中：y={} 期望={desc_y}",
+        desc.y
+    );
+}
+
+struct TextGeom {
+    x: f32,
+    y: f32,
+    size: f32,
+    max_width: Option<f32>,
+    align: Option<TextAlign>,
+}
+
+fn text_geometry(frame: &SurfaceFrame, wanted: &str) -> Option<TextGeom> {
+    frame.commands.iter().find_map(|command| match command {
+        DrawCommand::Text { x, y, size, content, max_width, align, .. } if content == wanted => {
+            Some(TextGeom { x: *x, y: *y, size: *size, max_width: *max_width, align: *align })
+        }
+        _ => None,
+    })
+}
+
+fn char_advance(ch: char, size: f32) -> f32 {
+    size * if ch.is_ascii() { 0.55 } else { 1.0 }
 }
 
 async fn wait_frame(runtime: &PluginRuntime, accept: impl Fn(&SurfaceFrame) -> bool) -> Option<SurfaceFrame> {

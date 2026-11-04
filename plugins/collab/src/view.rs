@@ -57,7 +57,7 @@ pub fn frame(ui: &mut Ui<'_, '_>, model: &Model) {
         return;
     }
     if !model.in_space() {
-        empty_state(ui, model);
+        empty_state(ui);
         return;
     }
     ui.scroll("room", 0.0, move |page| {
@@ -373,38 +373,14 @@ fn badge(ui: &mut Ui<'_, '_>, label: &str, color: PaintColor, radius: f32) {
 }
 
 /// 空态：未进入协作空间，附「协作空间」入口（点开宿主菜单）。
-fn empty_state(ui: &mut Ui<'_, '_>, model: &Model) {
-    let radius = model.palette.radii.md;
-    ui.fill_column(0.0, move |outer| {
-        outer.fill_spacer();
-        outer.center_column(8.0, move |center| {
-            center.boxed(
-                BoxWidth::Fixed(40.0),
-                BoxStyle::new(Some(ColorToken::Surface), None, radius),
-                Edges::all(0.0),
-                0.0,
-                move |tile| {
-                    tile.spacer(11.0);
-                    tile.row(0.0, move |line| {
-                        line.grow();
-                        line.icon_named("users", 18.0, ColorToken::TextMuted);
-                        line.grow();
-                    });
-                    tile.spacer(11.0);
-                },
-            );
-            center.text_styled_fit(
-                "未进入协作空间",
-                TextStyle::new(TextRole::Body).weight(TextWeight::SemiBold),
-            );
-            center.text_styled(
-                "登录并进入空间后显示在线成员",
-                TextStyle::new(TextRole::Label).color(ColorToken::TextMuted),
-            );
-            center.button(OPEN_MENU, "协作空间");
-        });
-        outer.fill_spacer();
-    });
+fn empty_state(ui: &mut Ui<'_, '_>) {
+    ui.empty_state_action(
+        "users",
+        "进入协作空间",
+        "登录并进入空间后显示在线成员。",
+        OPEN_MENU,
+        "协作空间",
+    );
 }
 
 /// 房间快照读取失败且手上没有快照：可读原因 + 重试。

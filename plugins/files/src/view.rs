@@ -37,13 +37,15 @@ pub fn frame(ui: &mut Ui<'_, '_>, view: &View, radii: &Radii) {
             return;
         }
         if !view.in_repo {
-            empty_state(
-                ui,
+            ui.empty_state(
                 "folder-open",
-                "还没有仓库",
-                "打开一个文件夹作为仓库，或经工具条云钮登录协作空间。",
-                radii,
+                "打开仓库",
+                "用工具条打开一个文件夹作为仓库，或登录协作空间。",
             );
+            return;
+        }
+        if view.rows.is_empty() && view.inline.is_none() {
+            empty_repo(ui, view, radii.sm);
             return;
         }
         list(ui, view, radii);
@@ -122,7 +124,6 @@ fn toolbar(ui: &mut Ui<'_, '_>, any_expanded: bool, in_repo: bool) {
 /// 文件树：滚动区撑满剩余高度（容器列表在前，激活容器的文件树就地展开在其后）。
 fn list(ui: &mut Ui<'_, '_>, view: &View, radii: &Radii) {
     let radius = radii.sm;
-    let empty_radii = radii.clone();
     let rows = view.rows.clone();
     let inline = view.inline.clone();
     let containers = view.containers.clone();
@@ -143,7 +144,7 @@ fn list(ui: &mut Ui<'_, '_>, view: &View, radii: &Radii) {
                 });
                 // 激活行就地展开文件树（其余行收起）
                 if row.active && row.open {
-                    tree_block(col, &rows, &inline, radius, &empty_radii, seam_base);
+                    tree_block(col, &rows, &inline, radius, seam_base);
                 }
             }
             if let Some(why) = &hint {
@@ -158,6 +159,23 @@ fn list(ui: &mut Ui<'_, '_>, view: &View, radii: &Radii) {
     });
 }
 
+/// 空仓库：容器行照常铺，空态占满剩余高度（滚动页里没有可撑高的余量，块居中不了）。
+fn empty_repo(ui: &mut Ui<'_, '_>, view: &View, radius: f32) {
+    let containers = view.containers.clone();
+    ui.column(0.0, move |col| {
+        col.spacer(TREE_PAD_TOP);
+        for (index, row) in containers.iter().enumerate() {
+            col.row(0.0, |line| {
+                seam(line, format!("{}{index}:l", crate::DROP_ROOT));
+                container_row(line, row, radius);
+                seam(line, format!("{}{index}:r", crate::DROP_ROOT));
+            });
+        }
+        col.spacer(TREE_PAD_BOTTOM);
+    });
+    ui.empty_state("folder", "暂无文件", "右键新建笔记或文件夹。");
+}
+
 /// 激活容器的文件树（就地展开在该容器行之后）。
 /// 重命名中的行由输入行替换；草稿行插在目标行之后（目录为空串时在首行）。
 fn tree_block(
@@ -165,7 +183,6 @@ fn tree_block(
     rows: &[Row],
     inline: &Option<(InlineEdit, usize)>,
     radius: f32,
-    empty_radii: &Radii,
     seam_base: usize,
 ) {
     let (renaming, draft_at) = match inline {
@@ -204,9 +221,6 @@ fn tree_block(
                 );
             }
         }
-    }
-    if rows.is_empty() && inline.is_none() {
-        empty_state(ui, "folder", "空仓库", "用右键菜单新建笔记或文件夹", empty_radii);
     }
 }
 
@@ -442,40 +456,6 @@ fn failure_state(ui: &mut Ui<'_, '_>, error: &str, radii: &Radii) {
                 TextStyle::new(TextRole::Label).color(ColorToken::TextMuted),
             );
             center.button("retry", "重试");
-        });
-        outer.fill_spacer();
-    });
-}
-
-/// 空态：大图标 + 标题 + 说明。
-fn empty_state(ui: &mut Ui<'_, '_>, icon: &str, title: &str, hint: &str, radii: &Radii) {
-    let radius = radii.md;
-    let icon = icon.to_string();
-    let title = title.to_string();
-    let hint = hint.to_string();
-    ui.fill_column(0.0, move |outer| {
-        outer.fill_spacer();
-        outer.center_column(8.0, move |center| {
-            center.boxed(
-                BoxWidth::Fixed(40.0),
-                BoxStyle::new(Some(ColorToken::Surface), None, radius),
-                Edges::all(0.0),
-                0.0,
-                move |tile| {
-                    tile.spacer(11.0);
-                    tile.row(0.0, move |line| {
-                        line.grow();
-                        line.icon_named(&icon, 18.0, ColorToken::TextMuted);
-                        line.grow();
-                    });
-                    tile.spacer(11.0);
-                },
-            );
-            center.text_styled_fit(
-                title,
-                TextStyle::new(TextRole::Body).weight(TextWeight::SemiBold),
-            );
-            center.text_styled(hint, TextStyle::new(TextRole::Label).color(ColorToken::TextMuted));
         });
         outer.fill_spacer();
     });

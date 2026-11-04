@@ -23,7 +23,7 @@ pub fn frame(ui: &mut Ui<'_, '_>, model: &Model) {
     // 失败态先于就绪门控：首份回执就失败时 `ready` 仍是 None，不能被吞掉
     if let Some(error) = &model.error {
         if model.groups.is_empty() {
-            empty_state(ui, "triangle-alert", "历史聚合失败", error, true, model.radii.md);
+            failure_state(ui, error, model.radii.md);
             return;
         }
     }
@@ -35,11 +35,11 @@ pub fn frame(ui: &mut Ui<'_, '_>, model: &Model) {
         return;
     };
     if !ready {
-        empty_state(ui, "history", "未打开仓库", "打开仓库后显示", false, model.radii.md);
+        ui.empty_state("history", "打开仓库", "打开仓库后显示。");
         return;
     }
     if model.groups.is_empty() {
-        empty_state(ui, "history", "暂无历史记录", "暂无版本记录", false, model.radii.md);
+        ui.empty_state("history", "暂无历史记录", "暂无版本记录。");
         return;
     }
     let groups = model.groups.clone();
@@ -109,11 +109,9 @@ fn kind_icon(kind: &str) -> &'static str {
     }
 }
 
-/// 空态：方形图标底 + 标题 + 说明；`retry` = 取数失败时给重试按钮。
-fn empty_state(ui: &mut Ui<'_, '_>, icon_name: &str, title: &str, desc: &str, retry: bool, radius: f32) {
-    let icon = icon_name.to_string();
-    let title = title.to_string();
-    let desc = desc.to_string();
+/// 失败态：方形图标底 + 标题 + 错误文本 + 重试。
+fn failure_state(ui: &mut Ui<'_, '_>, error: &str, radius: f32) {
+    let error = error.to_string();
     ui.fill_column(0.0, move |outer| {
         outer.fill_spacer();
         outer.center_column(8.0, move |center| {
@@ -122,27 +120,25 @@ fn empty_state(ui: &mut Ui<'_, '_>, icon_name: &str, title: &str, desc: &str, re
                 BoxStyle::new(Some(ColorToken::Surface), None, radius),
                 Edges::all(0.0),
                 0.0,
-                move |tile| {
+                |tile| {
                     tile.spacer(11.0);
                     tile.row(0.0, move |line| {
                         line.grow();
-                        line.icon_named(&icon, 18.0, ColorToken::TextMuted);
+                        line.icon_named("triangle-alert", 18.0, ColorToken::TextMuted);
                         line.grow();
                     });
                     tile.spacer(11.0);
                 },
             );
             center.text_styled_fit(
-                title.clone(),
+                "历史聚合失败",
                 TextStyle::new(TextRole::Body).weight(TextWeight::SemiBold),
             );
             center.text_styled(
-                desc.clone(),
+                error.clone(),
                 TextStyle::new(TextRole::Label).color(ColorToken::TextMuted),
             );
-            if retry {
-                center.button("retry", "重试");
-            }
+            center.button("retry", "重试");
         });
         outer.fill_spacer();
     });

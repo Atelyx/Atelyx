@@ -41,20 +41,12 @@ pub fn frame(ui: &mut Ui<'_, '_>, view: &View, query: &str, radii: &Radii) {
             return;
         }
         match view.empty {
-            Empty::NoFiles => empty_state(
-                ui,
-                "files",
-                "还没有可搜索的文件",
-                "在文件面板打开仓库后，在这里按名称检索",
-                radii,
-            ),
-            Empty::NoMatch => empty_state(
-                ui,
-                "search",
-                "无匹配文件",
-                "换个关键词，或输入所在文件夹的名字",
-                radii,
-            ),
+            Empty::NoFiles => {
+                ui.empty_state("folder-open", "打开仓库", "在文件面板打开仓库后，在这里按名称检索。");
+            }
+            Empty::NoMatch => {
+                ui.empty_state("search", "无匹配文件", "换个关键词，或输入所在文件夹的名字。");
+            }
             Empty::None => list(ui, view, radii),
         }
     });
@@ -257,41 +249,4 @@ fn row_path(row: &crate::model::Row) -> String {
     } else {
         format!("{}/{}", row.parent, row.name)
     }
-}
-
-/// 空态：方形图标底 + 标题 + 说明，整块居中。
-fn empty_state(ui: &mut Ui<'_, '_>, icon_name: &str, title: &str, desc: &str, radii: &Radii) {
-    let icon = icon_name.to_string();
-    let title = title.to_string();
-    let desc = desc.to_string();
-    let radius_md = radii.md;
-    ui.fill_column(0.0, move |outer| {
-        outer.fill_spacer();
-        outer.center_column(8.0, move |center| {
-            center.boxed(
-                BoxWidth::Fixed(40.0),
-                BoxStyle::new(Some(ColorToken::Surface), None, radius_md),
-                Edges::all(0.0),
-                0.0,
-                move |tile| {
-                    tile.spacer(11.0);
-                    tile.row(0.0, move |line| {
-                        line.grow();
-                        line.icon_named(&icon, 18.0, ColorToken::TextMuted);
-                        line.grow();
-                    });
-                    tile.spacer(11.0);
-                },
-            );
-            center.text_styled_fit(
-                title.clone(),
-                TextStyle::new(TextRole::Body).weight(TextWeight::SemiBold),
-            );
-            center.text_styled(
-                desc.clone(),
-                TextStyle::new(TextRole::Label).color(ColorToken::TextMuted),
-            );
-        });
-        outer.fill_spacer();
-    });
 }
