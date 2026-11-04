@@ -1255,9 +1255,7 @@ impl PluginHandler for AiPanelPlugin {
                 ctx.log_error(&format!("订阅 {name} 失败：{error}"));
             }
         }
-        self.load_choices(ctx).await;
-        self.load_files(ctx).await;
-        self.load_all(ctx).await;
+        // 启动期只登记与订阅；数据在挂面时装载，与其它视图插件同一口径
     }
 
     async fn on_surface_attached(&self, ctx: &Context, params: SurfaceAttachedParams) {
@@ -1267,10 +1265,9 @@ impl PluginHandler for AiPanelPlugin {
         *self.attached.lock().unwrap() = true;
         // 重挂只重取主题，保留宿主已上报的尺寸（否则首帧按占位尺寸画、等 resize 再跳）
         self.ui.lock().await.refresh_theme();
+        // 挂面即全量重取：未挂面期间的数据事件已被门控，这里补齐错过的变更
         self.load_choices(ctx).await;
-        if !self.model.lock().unwrap().files_ready {
-            self.load_files(ctx).await;
-        }
+        self.load_files(ctx).await;
         self.load_all(ctx).await;
         self.render(ctx).await;
     }
@@ -1282,6 +1279,10 @@ impl PluginHandler for AiPanelPlugin {
     }
 
     async fn on_host_event(&self, ctx: &Context, params: PublishParams) {
+        // 未挂面不接数据事件：不做重扫 / 重取，挂面时由 attach 全量重取补齐
+        if !self.is_attached() {
+            return;
+        }
         match params.name.as_str() {
             event::name::VAULT_SWITCH => {
                 self.model.lock().unwrap().reset();
@@ -1302,10 +1303,6 @@ impl PluginHandler for AiPanelPlugin {
                 }
             }
             event::name::WINDOW_FILE_DROP => {
-                // 面板未挂载时不接收：避免把图片塞进看不见的输入区
-                if !self.is_attached() {
-                    return;
-                }
                 let Ok(payload) = serde_json::from_value::<FileDropPayload>(params.payload.clone())
                 else {
                     ctx.log_error("文件拖入载荷不可解析");
@@ -1385,6 +1382,7 @@ impl PluginHandler for AiPanelPlugin {
         }
     }
 
+    // 流式事件不按挂面门控：宿主快照不携带在途回复状态，漏接会让界面停在「回复中」
     async fn on_chat_event(&self, ctx: &Context, params: ChatEventParams) {
         let known = {
             let model = self.model.lock().unwrap();
@@ -1472,6 +1470,183 @@ mod tests {
         assert_eq!(manifest["id"], PLUGIN_ID);
         assert_eq!(manifest["version"], env!("CARGO_PKG_VERSION"));
         assert_eq!(manifest["abiVersion"], atelyx_plugin_sdk::abi::ABI_VERSION);
+    }
+
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use atelyx_plugin_protocol::envelope::Envelope;
+    use atelyx_plugin_protocol::method::{self, SurfaceKind};
+
+    fn test_context() -> (Context, tokio::sync::mpsc::Receiver<Envelope>) {
+        let (out_tx, out_rx) = tokio::sync::mpsc::channel(32);
+        (Context::test_unbound(out_tx), out_rx)
+    }
+
+    /// 取第一条插件→宿主的请求方法名，超时或通道关闭返回 `None`。
+    async fn first_request_method(
+        out_rx: &mut tokio::sync::mpsc::Receiver<Envelope>,
+    ) -> Option<String> {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while let Some(envelope) = out_rx.recv().await {
+                if let Envelope::Request(request) = envelope {
+                    return Some(request.method);
+                }
+            }
+            None
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
+    #[tokio::test]
+    async fn data_events_are_dropped_before_the_surface_attaches() {
+        let (ctx, mut out_rx) = test_context();
+        let plugin = AiPanelPlugin::new();
+        for name in [
+            event::name::VAULT_FILE_CHANGED,
+            event::name::AI_CHAT_CHANGED,
+            event::name::AI_CHAT_PERSIST,
+            event::name::AI_CHAT_RELOAD,
+        ] {
+            plugin
+                .on_host_event(
+                    &ctx,
+                    PublishParams { name: name.into(), payload: Value::Null },
+                )
+                .await;
+        }
+        assert!(
+            matches!(
+                out_rx.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ),
+            "未挂面时数据事件不应向宿主发请求"
+        );
+        assert!(!plugin.model.lock().unwrap().ready);
+    }
+
+    #[tokio::test]
+    async fn surface_attach_reloads_data() {
+        let (ctx, mut out_rx) = test_context();
+        let plugin = Arc::new(AiPanelPlugin::new());
+        let task = tokio::spawn({
+            let plugin = plugin.clone();
+            let ctx = ctx.clone();
+            async move {
+                plugin
+                    .on_surface_attached(
+                        &ctx,
+                        SurfaceAttachedParams { surface_id: PANEL.into(), kind: SurfaceKind::Panel },
+                    )
+                    .await
+            }
+        });
+        assert_eq!(
+            first_request_method(&mut out_rx).await.as_deref(),
+            Some(method::ai::MODELS),
+            "挂面应先向宿主取模型清单"
+        );
+        task.abort();
+        assert!(plugin.is_attached());
+    }
+
+    #[tokio::test]
+    async fn reload_after_attach_is_applied_immediately() {
+        let (ctx, mut out_rx) = test_context();
+        let plugin = Arc::new(AiPanelPlugin::new());
+        *plugin.attached.lock().unwrap() = true;
+        let task = tokio::spawn({
+            let plugin = plugin.clone();
+            let ctx = ctx.clone();
+            async move {
+                plugin
+                    .on_host_event(
+                        &ctx,
+                        PublishParams { name: event::name::AI_CHAT_RELOAD.into(), payload: Value::Null },
+                    )
+                    .await
+            }
+        });
+        assert_eq!(
+            first_request_method(&mut out_rx).await.as_deref(),
+            Some(method::ai::MODELS),
+            "已挂面时应直接按广播重取"
+        );
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn reload_missed_before_subscribe_is_recovered_by_attach() {
+        let (ctx, mut out_rx) = test_context();
+        let plugin = Arc::new(AiPanelPlugin::new());
+        plugin
+            .on_host_event(
+                &ctx,
+                PublishParams { name: event::name::AI_CHAT_RELOAD.into(), payload: Value::Null },
+            )
+            .await;
+        assert!(
+            matches!(
+                out_rx.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ),
+            "未订阅的新实例收不到广播，也不应向宿主发请求"
+        );
+        let task = tokio::spawn({
+            let plugin = plugin.clone();
+            let ctx = ctx.clone();
+            async move {
+                plugin
+                    .on_surface_attached(
+                        &ctx,
+                        SurfaceAttachedParams { surface_id: PANEL.into(), kind: SurfaceKind::Panel },
+                    )
+                    .await
+            }
+        });
+        assert_eq!(
+            first_request_method(&mut out_rx).await.as_deref(),
+            Some(method::ai::MODELS),
+            "错过的广播应由挂面全量重取补齐"
+        );
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn streaming_events_apply_before_the_surface_attaches() {
+        let (ctx, mut out_rx) = test_context();
+        let plugin = AiPanelPlugin::new();
+        {
+            let mut model = plugin.model.lock().unwrap();
+            model.active = Some("s1".into());
+            model.streaming.insert("s1".into());
+        }
+        plugin
+            .on_chat_event(
+                &ctx,
+                ChatEventParams {
+                    session_id: "s1".into(),
+                    message_id: "m1".into(),
+                    event: ChatEvent::Message {
+                        rev: 1,
+                        message: json!({ "id": "m1", "role": "assistant", "content": "x" }),
+                    },
+                },
+            )
+            .await;
+        let model = plugin.model.lock().unwrap();
+        assert_eq!(model.messages.len(), 1, "未挂面时仍应接收流式消息");
+        assert!(model.streaming.contains("s1"));
+        drop(model);
+        assert!(
+            matches!(
+                out_rx.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ),
+            "流式事件不应额外触发宿主请求"
+        );
     }
 
     #[test]

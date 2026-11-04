@@ -1,6 +1,7 @@
 //! AI 预置插件的无界面冒烟：装载 ai-core / ai-panel，挂面取帧，再停用 / 卸载。
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -9,6 +10,7 @@ use serde_json::{json, Value};
 use atelyx_core::plugin_runtime::{
     FrameInput, HostRequest, MeasureTextResult, PluginRuntime, PluginStatus, SurfaceKind,
 };
+use atelyx_plugin_protocol::event::VaultSwitchPayload;
 use atelyx_plugin_protocol::frame::SurfaceFrame;
 use atelyx_plugin_protocol::method::{FontSizes, Radii, ThemeColors, ThemeResult};
 
@@ -26,9 +28,15 @@ async fn main() {
     copy_tree(&source, &root).expect("复制冒烟插件目录");
     let runtime = PluginRuntime::with_host_version(root.to_path_buf(), "0.6.5");
     runtime.scan();
+    // 先落下容器身份，后面切到另一个根才会真的触发插件重载
+    runtime.on_vault_switch(VaultSwitchPayload::Local {
+        root: root.to_string_lossy().into_owned(),
+    });
 
     // 宿主请求应答放在独立线程：改宽基准会忙等，不能占住应答任务所在的运行时
+    let counts = Counts::default();
     let responder = runtime.clone();
+    let responder_counts = counts.clone();
     std::thread::spawn(move || {
         let responder_runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -60,6 +68,7 @@ async fn main() {
                         reply(&responder, request_id, json!({ "sizes": sizes }));
                     }
                     HostRequest::AiModels { request_id, .. } => {
+                        responder_counts.models.fetch_add(1, Ordering::Relaxed);
                         reply(&responder, request_id, json!({ "providers": [] }));
                     }
                     HostRequest::AiAgents { request_id, .. } => {
@@ -77,6 +86,7 @@ async fn main() {
                         );
                     }
                     HostRequest::ChatHistory { request_id, params, .. } => {
+                        responder_counts.history.fetch_add(1, Ordering::Relaxed);
                         if params.session_id.is_some() {
                             reply(
                                 &responder,
@@ -128,6 +138,7 @@ async fn main() {
                         );
                     }
                     HostRequest::VaultList { request_id, path, .. } => {
+                        responder_counts.files.fetch_add(1, Ordering::Relaxed);
                         let entries = if path.is_empty() {
                             json!([
                                 { "name": "方案.md", "kind": "file" },
@@ -471,6 +482,54 @@ async fn main() {
             println!("点外关闭菜单：{}", if closed { "通过" } else { "未关闭" });
         }
     }
+    // 时序一：已挂面且已订阅时广播，直接重取
+    let base = wait_quiet(&counts, Duration::from_millis(300)).await;
+    runtime.on_chat_store_reloaded();
+    println!(
+        "已挂面收广播即重取：{}",
+        if wait_growth(&counts, base).await { "通过" } else { "未重取" }
+    );
+
+    // 时序二：广播发生在重载之前（面板停用期间）—— 广播被跳过，重新启用并挂面后全量补齐
+    runtime.notify_surface_detached(PANEL, SURFACE);
+    runtime.set_enabled(PANEL, false).expect("停用面板");
+    wait_status(&runtime, PANEL, PluginStatus::Stopped).await;
+    let base = wait_quiet(&counts, Duration::from_millis(300)).await;
+    runtime.on_chat_store_reloaded();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    println!(
+        "停用期间广播不重取：{}",
+        if counts.snapshot() == base { "通过" } else { "有请求" }
+    );
+    runtime.set_enabled(PANEL, true).expect("启用面板");
+    wait_status(&runtime, PANEL, PluginStatus::Running).await;
+    runtime.notify_surface_attached(PANEL, SURFACE, SurfaceKind::Panel);
+    runtime.notify_frame_input(PANEL, SURFACE, &FrameInput::Resize { width: 900.0, height: 700.0 });
+    println!(
+        "重新启用挂面补齐：{}",
+        if wait_growth(&counts, base).await { "通过" } else { "未补齐" }
+    );
+
+    // 时序三：重载发生在广播之前—— 新实例尚未挂面，广播被门控，挂面后全量补齐
+    runtime.on_vault_switch(VaultSwitchPayload::Local {
+        root: format!("{}-next", root.to_string_lossy()),
+    });
+    wait_status(&runtime, PANEL, PluginStatus::Running).await;
+    wait_status(&runtime, CORE, PluginStatus::Running).await;
+    let base = wait_quiet(&counts, Duration::from_millis(300)).await;
+    runtime.on_chat_store_reloaded();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    println!(
+        "重载后未挂面广播不重取：{}",
+        if counts.snapshot() == base { "通过" } else { "有请求" }
+    );
+    runtime.notify_surface_attached(PANEL, SURFACE, SurfaceKind::Panel);
+    runtime.notify_frame_input(PANEL, SURFACE, &FrameInput::Resize { width: 900.0, height: 700.0 });
+    println!(
+        "重载后挂面补齐：{}",
+        if wait_growth(&counts, base).await { "通过" } else { "未补齐" }
+    );
+
     runtime.notify_surface_detached(PANEL, SURFACE);
     runtime.set_enabled(PANEL, false).expect("停用面板");
     runtime.set_enabled(CORE, false).expect("停用核心");
@@ -480,6 +539,57 @@ async fn main() {
 
 fn reply(runtime: &Arc<PluginRuntime>, request_id: u64, value: Value) {
     runtime.resolve_shell_call(request_id, Ok(value));
+}
+
+/// 观测三类「全量重取」请求：模型清单 / 会话清单 / 仓库文件树。
+#[derive(Clone, Default)]
+struct Counts {
+    models: Arc<AtomicUsize>,
+    history: Arc<AtomicUsize>,
+    files: Arc<AtomicUsize>,
+}
+
+impl Counts {
+    fn snapshot(&self) -> (usize, usize, usize) {
+        (
+            self.models.load(Ordering::Relaxed),
+            self.history.load(Ordering::Relaxed),
+            self.files.load(Ordering::Relaxed),
+        )
+    }
+}
+
+/// 三类请求都超过基线：一次 attach 全量重取会让三项都发出。
+async fn wait_growth(counts: &Counts, base: (usize, usize, usize)) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        let now = counts.snapshot();
+        if now.0 > base.0 && now.1 > base.1 && now.2 > base.2 {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    false
+}
+
+/// 等计数在安静期内不再变化：避免把启动或上一次交互的在途请求算进基线。
+async fn wait_quiet(counts: &Counts, quiet: Duration) -> (usize, usize, usize) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut last = counts.snapshot();
+    let mut stable_since = Instant::now();
+    loop {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let now = counts.snapshot();
+        if now != last {
+            last = now;
+            stable_since = Instant::now();
+        } else if stable_since.elapsed() >= quiet {
+            return last;
+        }
+        if Instant::now() >= deadline {
+            return last;
+        }
+    }
 }
 
 /// 连续改宽到新帧回到宿主的耗时（拖动布局时每一拍都要走这条路径）。

@@ -82,6 +82,14 @@ impl Context {
         Self::build(out_tx, Some(submit), None, None)
     }
 
+    /// 仅测试用（`test-support` 特性）：不接帧提交与服务回执；发出的请求无人应答，
+    /// 调用方只能观察信封通道，或在被门控的路径上断言通道保持为空。
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn test_unbound(out_tx: mpsc::Sender<Envelope>) -> Self {
+        Self::build(out_tx, None, None, None)
+    }
+
     /// 同进程传输：请求仍走信封通道，帧、服务回执与日志直接交给宿主。
     pub(crate) fn new_in_process(
         out_tx: mpsc::Sender<Envelope>,
