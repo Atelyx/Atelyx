@@ -1,7 +1,7 @@
 //! 面板状态：会话清单、当前会话消息、输入草稿 / 引用 / 附件与选择器。
 //! 真源全在宿主（`chat.session.*` / `ai.chat.*`），这里只持展示所需的副本与交互态。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -120,6 +120,8 @@ pub struct Picker {
     pub candidates: Vec<Candidate>,
     /// 键盘巡航项。
     pub selected: usize,
+    /// 候选来自不完整的文件索引：只列出已扫到的部分。
+    pub partial: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -146,7 +148,9 @@ pub struct Model {
     /// 共享只读快照：渲染时克隆 Model 不复制整段对话。
     pub messages: Arc<Vec<Value>>,
     pub compaction: Option<Value>,
-    pub streaming: HashSet<String>,
+    /// 会话 → 本端请求代号（0 = 只有宿主事件置位，无本端请求）。
+    pub streaming: HashMap<String, u64>,
+    stream_token: u64,
     pub compacting: Option<String>,
     pub renaming: HashSet<String>,
     pub sidebar_open: bool,
@@ -201,7 +205,8 @@ impl Model {
             active_agent_id: None,
             messages: Arc::new(Vec::new()),
             compaction: None,
-            streaming: HashSet::new(),
+            streaming: HashMap::new(),
+            stream_token: 0,
             compacting: None,
             renaming: HashSet::new(),
             sidebar_open: false,
@@ -423,7 +428,31 @@ impl Model {
     }
 
     pub fn active_streaming(&self) -> bool {
-        self.active.as_deref().is_some_and(|id| self.streaming.contains(id))
+        self.active.as_deref().is_some_and(|id| self.streaming.contains_key(id))
+    }
+
+    /// 标记会话在途并返回本次请求的代号：收场时据此只撤自己的标记。
+    pub fn begin_stream(&mut self, session_id: &str) -> u64 {
+        self.stream_token += 1;
+        self.streaming.insert(session_id.to_string(), self.stream_token);
+        self.stream_token
+    }
+
+    /// 只撤本次请求自己的在途标记：更晚的请求已接管同一会话时保持它的标记。
+    pub fn end_stream(&mut self, session_id: &str, token: u64) {
+        if self.streaming.get(session_id) == Some(&token) {
+            self.streaming.remove(session_id);
+        }
+    }
+
+    /// 宿主事件显示会话在途（无本端请求代号）；已有标记时保留原代号。
+    pub fn mark_streaming(&mut self, session_id: &str) {
+        self.streaming.entry(session_id.to_string()).or_insert(0);
+    }
+
+    /// 宿主报告在途结束：不论标记归属都清掉。
+    pub fn clear_streaming(&mut self, session_id: &str) {
+        self.streaming.remove(session_id);
     }
 
     pub fn active_compacting(&self) -> bool {
@@ -502,9 +531,7 @@ impl Model {
         // 这一拍之前候选是不是已经开着：只有「刚展开」才值得向宿主取一次打开文件清单
         let was_open = self.picker.is_some();
         self.picker = None;
-        if !self.files_ready {
-            return;
-        }
+        let partial = !self.files_ready;
         let Some(hash) = self.draft[..caret].rfind('#') else { return };
         let preceded_ok = self.draft[..hash]
             .chars()
@@ -556,7 +583,7 @@ impl Model {
         if candidates.is_empty() {
             return;
         }
-        self.picker = Some(Picker { hash, caret, candidates, selected: 0 });
+        self.picker = Some(Picker { hash, caret, candidates, selected: 0, partial });
         if !was_open {
             self.open_files_stale = true;
         }
@@ -754,6 +781,17 @@ mod tests {
     }
 
     #[test]
+    fn end_stream_keeps_a_newer_request_marker() {
+        let mut model = Model::new();
+        let first = model.begin_stream("s1");
+        let second = model.begin_stream("s1");
+        model.end_stream("s1", first);
+        assert_eq!(model.streaming.get("s1"), Some(&second), "旧请求收场不得撤新请求的标记");
+        model.end_stream("s1", second);
+        assert!(!model.streaming.contains_key("s1"));
+    }
+
+    #[test]
     fn hash_query_opens_picker_and_pick_replaces_the_tag() {
         let mut model = picker_model();
         model.draft = "看看 #方案".into();
@@ -765,6 +803,17 @@ mod tests {
         assert_eq!(caret, next.len());
         assert_eq!(model.refs.len(), 1);
         assert!(model.refs[0].label.ends_with("方案.md"));
+    }
+
+    #[test]
+    fn picker_lists_scanned_files_when_the_index_is_incomplete() {
+        let mut model = picker_model();
+        model.files_ready = false;
+        model.draft = "#方案".into();
+        model.refresh_picker(model.draft.len());
+        let picker = model.picker.as_ref().expect("索引不完整也应列出已扫到的文件");
+        assert_eq!(picker.candidates.len(), 1);
+        assert!(picker.partial);
     }
 
     #[test]

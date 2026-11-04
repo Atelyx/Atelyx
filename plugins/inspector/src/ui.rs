@@ -20,8 +20,14 @@ pub fn frame(ui: &mut Ui<'_, '_>, model: &mut InspectorModel) {
         }
         return;
     }
+    // 读失败时旧数据照常显示，错误行留在顶上并可重试
+    if let Some(error) = model.load_error.clone() {
+        load_error_row(ui, &error);
+    }
     if !model.open {
-        ui.empty_state("info", "笔记属性", "打开一篇笔记后在此查看与编辑其属性。");
+        if model.load_error.is_none() {
+            ui.empty_state("info", "笔记属性", "打开一篇笔记后在此查看与编辑其属性。");
+        }
         return;
     }
     match model.props.data.clone() {
@@ -36,6 +42,21 @@ pub fn overlays(ui: &mut Ui<'_, '_>, model: &InspectorModel, pointer: (f32, f32)
     let Some(index) = model.props.type_menu else { return };
     let left = pointer.0.min(ui.bounds().w - 140.0).max(4.0);
     props::type_menu(ui, model, index, left, pointer.1 + 6.0);
+}
+
+/// 读取失败：原因 + 重试，下方继续显示上次读到的属性。
+fn load_error_row(ui: &mut Ui<'_, '_>, error: &str) {
+    ui.pad(16.0, 6.0, |ui| {
+        ui.row(ROW_GAP, |row| {
+            row.icon_named("triangle-alert", 13.0, ColorToken::Danger);
+            row.text_styled(
+                error.to_string(),
+                TextStyle::new(TextRole::Caption).color(ColorToken::Danger),
+            );
+            row.grow();
+            row.button("props:retry", "重试");
+        });
+    });
 }
 
 fn error_row(ui: &mut Ui<'_, '_>) {

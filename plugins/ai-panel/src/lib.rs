@@ -296,21 +296,22 @@ impl AiPanelPlugin {
         let paths = match self.stage_images(ctx, &session_id, &mut images).await {
             Ok(paths) => paths,
             Err(error) => {
-                self.fail_send(ctx, &session_id, created, false, error, images, request.restore)
+                self.fail_send(ctx, &session_id, None, created, false, error, images, request.restore)
                     .await;
                 return;
             }
         };
-        {
+        let token = {
             let mut model = self.model.lock().unwrap();
             if created {
                 model.images.clear();
             } else {
                 model.images = images.clone();
             }
-            model.streaming.insert(session_id.clone());
+            let token = model.begin_stream(&session_id);
             model.error = None;
-        }
+            token
+        };
         let params = ChatSendParams {
             text: request.display.clone(),
             session_id: Some(session_id.clone()),
@@ -335,7 +336,12 @@ impl AiPanelPlugin {
             Ok(result) => {
                 {
                     let mut model = self.model.lock().unwrap();
-                    model.streaming.insert(result.session_id.clone());
+                    // 宿主可能在本调用返回前就发完 Finished 并清掉标记：只在请求仍在途时
+                    // 把标记挪到实际会话 id，否则会把它重新置成「回复中」且再没人来清
+                    if model.streaming.get(&session_id) == Some(&token) {
+                        model.streaming.remove(&session_id);
+                        model.streaming.insert(result.session_id.clone(), token);
+                    }
                     if !keep_input {
                         model.clear_input();
                     }
@@ -347,6 +353,7 @@ impl AiPanelPlugin {
                 self.fail_send(
                     ctx,
                     &session_id,
+                    Some(token),
                     created,
                     error.is_timeout(),
                     error.to_string(),
@@ -366,6 +373,7 @@ impl AiPanelPlugin {
         &self,
         ctx: &Context,
         session_id: &str,
+        token: Option<u64>,
         created: bool,
         unknown: bool,
         error: String,
@@ -379,7 +387,9 @@ impl AiPanelPlugin {
         }
         {
             let mut model = self.model.lock().unwrap();
-            model.streaming.remove(session_id);
+            if let Some(token) = token {
+                model.end_stream(session_id, token);
+            }
             if created {
                 // 托盘图片重新挂回：staged 路径随会话删除失效时，下次发送会按来源重读
                 model.images = images;
@@ -421,7 +431,7 @@ impl AiPanelPlugin {
             let Some(session_id) = model.active.clone() else {
                 return;
             };
-            if model.streaming.contains(&session_id) {
+            if model.streaming.contains_key(&session_id) {
                 return;
             }
             model.regenerate_keep(&session_id).map(|(keep, user)| {
@@ -499,7 +509,7 @@ impl AiPanelPlugin {
             let Some(session_id) = model.active.clone() else {
                 return;
             };
-            if model.streaming.contains(&session_id) {
+            if model.streaming.contains_key(&session_id) {
                 return;
             }
             let Some(keep) = model.rollback_keep(message_id) else {
@@ -531,7 +541,7 @@ impl AiPanelPlugin {
         };
         {
             let mut model = self.model.lock().unwrap();
-            if model.streaming.contains(&session_id) {
+            if model.streaming.contains_key(&session_id) {
                 return;
             }
             model.compacting = Some(session_id.clone());
@@ -557,7 +567,7 @@ impl AiPanelPlugin {
         };
         {
             let mut model = self.model.lock().unwrap();
-            if model.streaming.contains(&session_id) {
+            if model.streaming.contains_key(&session_id) {
                 return;
             }
             model.renaming.insert(session_id.clone());
@@ -743,16 +753,7 @@ impl AiPanelPlugin {
     /// Ctrl+V 且输入框有焦点：剪贴板里是图片就转成待发送附件，返回真表示这次按键已被消费；
     /// 没有图片时交回输入框做文字粘贴。
     async fn handle_image_paste(&self, ctx: &Context, input: &FrameInput) -> bool {
-        let FrameInput::Key {
-            key: Key::Character { text },
-            action: KeyAction::Press,
-            modifiers,
-            ..
-        } = input
-        else {
-            return false;
-        };
-        if !modifiers.control || modifiers.meta || text != "v" {
+        if !is_image_paste(input) {
             return false;
         }
         if self.ui.lock().await.focus_id() != Some(DRAFT) {
@@ -915,6 +916,10 @@ impl AiPanelPlugin {
         match action {
             Action::Attach => self.attach_image(ctx).await,
             Action::Send => {
+                // 在途时回车不发起第二次请求：草稿与焦点都不动，等流式收场
+                if self.model.lock().unwrap().active_streaming() {
+                    return;
+                }
                 let request = {
                     let model = self.model.lock().unwrap();
                     SendRequest {
@@ -952,6 +957,19 @@ impl AiPanelPlugin {
             Action::SetEffort(effort) => self.set_effort(ctx, effort).await,
         }
     }
+}
+
+/// Ctrl+V（含大写与 Caps Lock）且不带其它修饰键：图片粘贴的按键条件。
+fn is_image_paste(input: &FrameInput) -> bool {
+    matches!(
+        input,
+        FrameInput::Key {
+            key: Key::Character { text },
+            action: KeyAction::Press,
+            modifiers,
+            ..
+        } if modifiers.control && !modifiers.meta && text.eq_ignore_ascii_case("v")
+    )
 }
 
 struct SendRequest {
@@ -1396,7 +1414,7 @@ impl PluginHandler for AiPanelPlugin {
             let model = self.model.lock().unwrap();
             model.active.as_deref() == Some(params.session_id.as_str())
                 || model.session(&params.session_id).is_some()
-                || model.streaming.contains(&params.session_id)
+                || model.streaming.contains_key(&params.session_id)
         };
         if !known && !matches!(&params.event, ChatEvent::Titled { .. }) {
             return;
@@ -1404,13 +1422,13 @@ impl PluginHandler for AiPanelPlugin {
         match params.event {
             ChatEvent::Message { message, .. } => {
                 let mut model = self.model.lock().unwrap();
-                model.streaming.insert(params.session_id.clone());
+                model.mark_streaming(&params.session_id);
                 model.upsert_message(&params.session_id, &params.message_id, message);
             }
             ChatEvent::Finished { .. } => {
                 let active = {
                     let mut model = self.model.lock().unwrap();
-                    model.streaming.remove(&params.session_id);
+                    model.clear_streaming(&params.session_id);
                     model.active.as_deref() == Some(params.session_id.as_str())
                 };
                 if active {
@@ -1421,7 +1439,7 @@ impl PluginHandler for AiPanelPlugin {
             ChatEvent::Failed { error } => {
                 let active = {
                     let mut model = self.model.lock().unwrap();
-                    model.streaming.remove(&params.session_id);
+                    model.clear_streaming(&params.session_id);
                     let active = model.active.as_deref() == Some(params.session_id.as_str());
                     if active {
                         model.error = Some(format!("回复失败：{error}"));
@@ -1471,6 +1489,7 @@ pub extern "C" fn atelyx_plugin_api() -> *const atelyx_plugin_sdk::abi::PluginAp
 #[cfg(test)]
 mod tests {
     use super::*;
+    use atelyx_plugin_protocol::frame::Modifiers;
 
     #[test]
     fn manifest_matches_the_crate_identity() {
@@ -1714,6 +1733,20 @@ mod tests {
         task.abort();
     }
 
+    #[test]
+    fn image_paste_accepts_uppercase_v() {
+        let press = |text: &str, control: bool| FrameInput::Key {
+            key: Key::Character { text: text.into() },
+            action: KeyAction::Press,
+            modifiers: Modifiers { control, ..Modifiers::default() },
+            text: None,
+        };
+        assert!(is_image_paste(&press("v", true)));
+        assert!(is_image_paste(&press("V", true)), "大写 V 也应触发图片粘贴");
+        assert!(!is_image_paste(&press("v", false)));
+        assert!(!is_image_paste(&press("x", true)));
+    }
+
     #[tokio::test]
     async fn streaming_events_apply_before_the_surface_attaches() {
         let (ctx, mut out_rx) = test_context();
@@ -1721,7 +1754,7 @@ mod tests {
         {
             let mut model = plugin.model.lock().unwrap();
             model.active = Some("s1".into());
-            model.streaming.insert("s1".into());
+            model.mark_streaming("s1");
         }
         plugin
             .on_chat_event(
@@ -1738,7 +1771,7 @@ mod tests {
             .await;
         let model = plugin.model.lock().unwrap();
         assert_eq!(model.messages.len(), 1, "未挂面时仍应接收流式消息");
-        assert!(model.streaming.contains("s1"));
+        assert!(model.streaming.contains_key("s1"));
         drop(model);
         assert!(
             matches!(

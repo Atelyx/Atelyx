@@ -18,7 +18,7 @@ use atelyx_plugin_sdk::frame_ui::{FrameUi, UiEvent};
 use atelyx_plugin_sdk::{Context, PluginHandler, PluginInfo};
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::model::{DocProps, InspectorModel, PANEL};
+use crate::model::{InspectorModel, PANEL};
 
 /// 插件 id（与 `plugin.json` 一致）。
 const PLUGIN_ID: &str = "atelyx.inspector";
@@ -52,29 +52,17 @@ impl InspectorPlugin {
     async fn refresh(&self, ctx: &Context) {
         let doc = ctx.call_raw(method::doc::PROPS_READ, serde_json::json!({})).await;
         let tags = ctx.vault_tags().await.unwrap_or_default();
+        let parsed = match doc {
+            Ok(value) => serde_json::from_value::<DocPropsResult>(value)
+                .map_err(|error| format!("属性回执不可解析：{error}")),
+            Err(error) => Err(format!("属性读取失败：{error}")),
+        };
+        if let Err(error) = &parsed {
+            ctx.log_error(error);
+        }
         let mut model = self.model.lock().unwrap();
         model.tags = tags;
-        match doc {
-            Ok(value) => match serde_json::from_value::<DocPropsResult>(value) {
-                Ok(result) => {
-                    if result.path.is_empty() {
-                        model.clear_doc();
-                    } else {
-                        model.set_doc(DocProps {
-                            block: result.frontmatter,
-                            present: result.present,
-                            parsed: result.parsed,
-                            editable: result.editable,
-                        });
-                    }
-                }
-                Err(error) => ctx.log_error(&format!("属性回执不可解析：{error}")),
-            },
-            Err(error) => {
-                ctx.log_error(&format!("读取属性失败：{error}"));
-                model.clear_doc();
-            }
-        }
+        model.apply_props(parsed);
     }
 
     /// 挂面时取一次画布快照：只在此处调用画布服务，事件回调里不回调画布，避免与画布的事件派发互等。
@@ -178,6 +166,10 @@ impl InspectorPlugin {
     }
 
     async fn on_click(&self, ctx: &Context, id: &str) {
+        if id == "props:retry" {
+            self.refresh(ctx).await;
+            return;
+        }
         if let Some(rest) = id.strip_prefix("props:suggest:") {
             let Ok(index) = rest.parse::<usize>() else { return };
             let next = {

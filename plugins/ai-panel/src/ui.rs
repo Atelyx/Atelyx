@@ -39,6 +39,8 @@ const TOOL_ROW_BOTTOM: f32 = 10.0 + 8.0 + TOOL_ROW_H;
 const PICKER_ROW_H: f32 = 25.0;
 const PICKER_SUB_H: f32 = 15.0;
 const PICKER_MAX_H: f32 = 224.0;
+/// 候选框内「索引不完整」提示行的高度（单行 Micro + 图标）。
+const PICKER_NOTICE_H: f32 = 18.0;
 const PICKER_ROW_PAD_X: f32 = 10.0;
 const PICKER_ROW_PAD_Y: f32 = 5.0;
 const PICKER_LINE_GAP: f32 = 1.0;
@@ -49,6 +51,13 @@ const PICKER_INDENT: f32 = PICKER_ICON + PICKER_ICON_GAP;
 const PICKER_RADIUS: f32 = 6.0;
 /// 输入盒内的工具排高度（发送钮 28px 定行高）。
 const TOOL_ROW_H: f32 = 28.0;
+/// 工具排的间隙、加号与发送钮的固定宽：两个触发钮只分剩下的宽。
+const TOOL_GAP: f32 = 6.0;
+const TOOL_PLUS_W: f32 = 24.0;
+const TOOL_SEND_W: f32 = 28.0;
+/// 触发钮收成图标时的宽与收起的门槛（低于它就装不下图标 + 文字）。
+const TOOL_TRIGGER_ICON_W: f32 = 28.0;
+const TOOL_TRIGGER_MIN_W: f32 = 72.0;
 /// 输入盒内文字区的内边距（左 2 / 上 8 与拆分前的输入面一致）。
 const AREA_PAD: Edges = Edges { left: 2.0, right: 2.0, top: 8.0, bottom: 0.0 };
 /// 输入区的左右留白与输入盒内边距：算文字区可用宽时先扣掉它们。
@@ -66,13 +75,11 @@ fn picker_row_height(candidate: &Candidate) -> f32 {
     }
 }
 
+/// 候选框实高：候选行 + 可选的提示行，超出上限即滚动。
 fn picker_height(picker: &Picker) -> f32 {
-    picker
-        .candidates
-        .iter()
-        .map(picker_row_height)
-        .sum::<f32>()
-        .min(PICKER_MAX_H)
+    let rows = picker.candidates.iter().map(picker_row_height).sum::<f32>();
+    let notice = if picker.partial { PICKER_NOTICE_H } else { 0.0 };
+    (rows + notice).min(PICKER_MAX_H)
 }
 
 /// 文字区实际高度（含内边距）：随草稿行数在 `INPUT_MIN_H`–`INPUT_MAX_H` 之间增长。
@@ -372,7 +379,8 @@ fn top_bar(ui: &mut Ui<'_, '_>, model: &Model) {
                     ColorToken::TextSecondary,
                     true,
                 );
-                if model.active.is_some() && model.messages.len() >= 2 {
+                // 流式中不提供压缩入口：压缩要重写会话历史，与在途回复的写入互相踩
+                if model.active.is_some() && model.messages.len() >= 2 && !model.active_streaming() {
                     if model.active_compacting() {
                         line.click_box(
                             "compact-progress",
@@ -939,27 +947,35 @@ fn composer(ui: &mut Ui<'_, '_>, model: &Model, chat_width: f32) {
 }
 
 fn tool_row(ui: &mut Ui<'_, '_>, model: &Model, chat_width: f32) {
-    ui.row(6.0, |line| {
+    let (slot, compact) = trigger_slot(chat_width);
+    let triggers = show_triggers(chat_width);
+    ui.row(TOOL_GAP, |line| {
         let plus_open = model.menu == Some(Menu::Plus);
         line.hint("plus-menu", "添加上下文与附件");
         line.icon_button_named(
             "plus-menu",
             "plus",
             13.0,
-            24.0,
+            TOOL_PLUS_W,
             if plus_open { ColorToken::Accent } else { ColorToken::TextSecondary },
             true,
         );
-        line.hint("agent-menu", "选择 Agent");
-        trigger(line, "agent-menu", "bot", model.agent_label(), chat_width);
-        line.hint("model-menu", "模型与推理等级");
-        trigger(
-            line,
-            "model-menu",
-            "sparkles",
-            format!("{} · {}", model.model_label(), model.effort_label()),
-            chat_width,
-        );
+        if triggers {
+            line.hint("agent-menu", &format!("Agent：{}", model.agent_label()));
+            trigger(line, "agent-menu", "bot", model.agent_label(), slot, compact);
+            line.hint(
+                "model-menu",
+                &format!("模型：{} · {}", model.model_label(), model.effort_label()),
+            );
+            trigger(
+                line,
+                "model-menu",
+                "sparkles",
+                format!("{} · {}", model.model_label(), model.effort_label()),
+                slot,
+                compact,
+            );
+        }
         line.grow();
         if model.active_streaming() {
             line.hint("stop", "停止生成");
@@ -967,7 +983,7 @@ fn tool_row(ui: &mut Ui<'_, '_>, model: &Model, chat_width: f32) {
                 "stop",
                 "square",
                 14.0,
-                28.0,
+                TOOL_SEND_W,
                 ColorToken::Surface,
                 ColorToken::Text,
                 true,
@@ -978,7 +994,7 @@ fn tool_row(ui: &mut Ui<'_, '_>, model: &Model, chat_width: f32) {
                 "send",
                 "arrow-up",
                 14.0,
-                28.0,
+                TOOL_SEND_W,
                 ColorToken::Accent,
                 atelyx_plugin_protocol::paint::PaintColor::Rgba { rgba: [0x14, 0x14, 0x14, 255] },
                 true,
@@ -987,9 +1003,35 @@ fn tool_row(ui: &mut Ui<'_, '_>, model: &Model, chat_width: f32) {
     });
 }
 
-fn trigger(ui: &mut Ui<'_, '_>, id: &str, icon: &str, label: String, chat_width: f32) {
-    let width = (12.0 + 4.0 + ui.text_width(&label, TextRole::Micro) + 4.0 + 10.0 + 12.0)
-        .min(((chat_width - 100.0) / 2.0).max(80.0));
+/// 工具排可用宽 = 输入区宽 − 输入区左右留白 − 输入盒内边距（与文字区、候选盒同口径）。
+const TOOL_ROW_INSET: f32 = COMPOSER_PAD_X * 2.0 + BOX_PAD * 2.0;
+
+/// 工具排可用宽：输入区宽扣掉输入区左右留白与输入盒内边距。
+fn tool_row_width(chat_width: f32) -> f32 {
+    (chat_width - TOOL_ROW_INSET).max(0.0)
+}
+
+/// 两个触发图标都装不下时只留加号与发送钮：结束回复的入口不能被挤掉。
+fn show_triggers(chat_width: f32) -> bool {
+    tool_row_width(chat_width)
+        >= TOOL_PLUS_W + TOOL_TRIGGER_ICON_W * 2.0 + TOOL_SEND_W + TOOL_GAP * 4.0
+}
+
+/// 两个触发钮各得的宽与是否收成图标：先扣掉加号、发送钮与四个间隙。
+fn trigger_slot(chat_width: f32) -> (f32, bool) {
+    // 一行五子项（加号 / 两个触发钮 / 弹簧 / 发送钮）= 四个间隙
+    let budget =
+        (chat_width - TOOL_ROW_INSET - TOOL_PLUS_W - TOOL_SEND_W - TOOL_GAP * 4.0).max(0.0);
+    let slot = (budget / 2.0).floor();
+    (slot, slot < TOOL_TRIGGER_MIN_W)
+}
+
+fn trigger(ui: &mut Ui<'_, '_>, id: &str, icon: &str, label: String, slot: f32, compact: bool) {
+    if compact {
+        ui.icon_button_named(id, icon, 13.0, TOOL_TRIGGER_ICON_W, ColorToken::TextSecondary, true);
+        return;
+    }
+    let width = (12.0 + 4.0 + ui.text_width(&label, TextRole::Micro) + 4.0 + 10.0 + 12.0).min(slot);
     ui.click_box(
         id,
         BoxWidth::Fixed(width),
@@ -1185,6 +1227,15 @@ fn picker_box(ui: &mut Ui<'_, '_>, picker: &Picker, chat_width: f32) {
                             });
                         },
                     );
+                }
+                if picker.partial {
+                    list.row(PICKER_ICON_GAP, |note| {
+                        note.icon_named("triangle-alert", PICKER_ICON, ColorToken::Warning);
+                        note.text_styled(
+                            "文件索引不完整，仅列出已扫到的部分".to_string(),
+                            TextStyle::new(TextRole::Micro).color(ColorToken::TextMuted),
+                        );
+                    });
                 }
             });
         },
@@ -1441,14 +1492,38 @@ fn rel_time(timestamp: i64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::picker_scroll_offset;
+    use super::{
+        picker_height, picker_scroll_offset, show_triggers, tool_row_width, trigger_slot,
+        TOOL_GAP, TOOL_PLUS_W, TOOL_SEND_W, TOOL_TRIGGER_ICON_W, PICKER_NOTICE_H,
+    };
     use crate::model::{Candidate, Picker};
+
+    /// 工具排（含发送钮）必须落在输入盒内的可用宽里：超出去的子项既不画也点不到。
+    #[test]
+    fn tool_row_keeps_the_send_button_inside_the_row() {
+        for width in [140.0f32, 180.0, 230.0, 320.0, 520.0] {
+            let (slot, compact) = trigger_slot(width);
+            let row = tool_row_width(width);
+            let used = if show_triggers(width) {
+                let triggers = if compact { TOOL_TRIGGER_ICON_W * 2.0 } else { slot * 2.0 };
+                TOOL_PLUS_W + triggers + TOOL_SEND_W + TOOL_GAP * 4.0
+            } else {
+                TOOL_PLUS_W + TOOL_SEND_W + TOOL_GAP * 2.0
+            };
+            assert!(used <= row + 0.01, "{width} 宽下工具排超出行宽：{used} > {row}");
+        }
+        assert!(show_triggers(230.0), "230px 面板仍给两个触发钮留位");
+        assert!(!show_triggers(140.0), "更窄时只留加号与发送钮");
+        assert!(trigger_slot(230.0).1, "230px 面板下触发钮收成图标");
+        assert!(!trigger_slot(520.0).1, "宽面板保留文字");
+    }
 
     fn picker(rows: &[bool]) -> Picker {
         Picker {
             hash: 0,
             caret: 0,
             selected: 0,
+            partial: false,
             candidates: rows
                 .iter()
                 .enumerate()
@@ -1460,6 +1535,15 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    /// 「索引不完整」提示行也占候选框高度：输入区浮钮按它上移，少算会压住提示。
+    #[test]
+    fn picker_height_includes_the_partial_notice() {
+        let mut picker = picker(&[false; 2]);
+        let complete = picker_height(&picker);
+        picker.partial = true;
+        assert_eq!(picker_height(&picker), complete + PICKER_NOTICE_H);
     }
 
     #[test]

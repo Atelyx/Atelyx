@@ -77,7 +77,10 @@ impl CollabPlugin {
     async fn reload_members(&self, ctx: &Context) {
         match ctx.space_members().await {
             Ok(members) => self.model.lock().unwrap().apply_members(members),
-            Err(error) => ctx.log_error(&format!("取空间成员名册失败：{error}")),
+            Err(error) => {
+                ctx.log_error(&format!("取空间成员名册失败：{error}"));
+                self.model.lock().unwrap().fail_members(error.to_string());
+            }
         }
     }
 

@@ -2,7 +2,7 @@
 
 use atelyx_format::frontmatter::{self, Yaml};
 use atelyx_plugin_props::{PropsHost, PropsState};
-use atelyx_plugin_protocol::method::CanvasSnapshotResult;
+use atelyx_plugin_protocol::method::{CanvasSnapshotResult, DocPropsResult};
 
 /// 面板视图贡献 id（也是整面帧的 surfaceId）。
 pub const PANEL: &str = "inspector";
@@ -30,6 +30,8 @@ pub struct InspectorModel {
     pub canvas_visible: bool,
     /// 待提交的属性块（渲染期提交，落盘在渲染之后统一发起）。
     pub pending_write: Option<String>,
+    /// 最近一次属性读取失败的原因：面板上可见并可重试，旧数据保持不动。
+    pub load_error: Option<String>,
     /// 最近一次指针位置（类型菜单浮层锚点）。
     pub pointer: (f32, f32),
 }
@@ -47,6 +49,26 @@ impl InspectorModel {
         self.props = PropsState::default();
         self.open = false;
         self.canvas = None;
+    }
+
+    /// 属性读回执落地：成功替换属性区并清掉错误；失败保留上次数据，错误留在面板上可重试。
+    pub fn apply_props(&mut self, result: Result<DocPropsResult, String>) {
+        match result {
+            Ok(result) => {
+                self.load_error = None;
+                if result.path.is_empty() {
+                    self.clear_doc();
+                } else {
+                    self.set_doc(DocProps {
+                        block: result.frontmatter,
+                        present: result.present,
+                        parsed: result.parsed,
+                        editable: result.editable,
+                    });
+                }
+            }
+            Err(error) => self.load_error = Some(error),
+        }
     }
 
     /// 画布快照只在画布处于前台时成立（`path` 为空 = 画布不在前台）。
@@ -155,6 +177,31 @@ mod tests {
         model.set_doc(doc("---\ntitle: x\n---\n", true, true));
         model.write_pairs(Vec::new());
         assert_eq!(model.pending_write.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn failed_read_keeps_the_last_doc_and_shows_the_error() {
+        let mut model = InspectorModel::default();
+        model.apply_props(Ok(DocPropsResult {
+            path: "笔记/a.md".into(),
+            frontmatter: "---
+title: x
+---
+".into(),
+            present: true,
+            parsed: true,
+            editable: true,
+        }));
+        model.apply_props(Err("属性读取失败：超时".into()));
+        assert_eq!(model.doc.block, "---
+title: x
+---
+", "失败不得清掉上次数据");
+        assert!(model.open);
+        assert_eq!(model.load_error.as_deref(), Some("属性读取失败：超时"));
+        model.apply_props(Ok(DocPropsResult::default()));
+        assert!(model.load_error.is_none(), "读成功应清掉错误");
+        assert!(!model.open, "没有文档时回空态");
     }
 
     #[test]

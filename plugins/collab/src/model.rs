@@ -85,6 +85,13 @@ impl Model {
         self.gen = self.gen.wrapping_add(1);
     }
 
+    /// 名册请求失败：保留上次名册，错误交给视图显示（读失败不再只写日志）。
+    pub fn fail_members(&mut self, error: String) {
+        self.members.error = Some(error);
+        self.members.loading = false;
+        self.gen = self.gen.wrapping_add(1);
+    }
+
     /// 当前容器是协作空间（本地仓库只出空态）。
     pub fn in_space(&self) -> bool {
         self.room
@@ -92,12 +99,12 @@ impl Model {
             .is_some_and(|room| room.kind == SpaceContainerKind::Space)
     }
 
-    /// 在线台数：本端 + 全部对端连接（合并前计数，与连接数一致）。
+    /// 在线台数：按合并后的设备行计数（同一身份的多条连接算一台）。
     pub fn online_count(&self) -> usize {
-        self.room
-            .as_ref()
-            .map(|room| room.peers.len() + 1)
-            .unwrap_or(1)
+        match self.room.as_ref() {
+            Some(_) => self.devices().len().max(1),
+            None => 1,
+        }
     }
 
     pub fn connected(&self) -> bool {
@@ -249,6 +256,36 @@ mod tests {
         assert!(!model.in_space());
         assert!(model.devices().is_empty());
         assert_eq!(model.online_count(), 1);
+    }
+
+    #[test]
+    fn online_count_uses_merged_device_rows() {
+        let mut model = Model::new();
+        model.apply_room(room(vec![
+            peer("2", "张三", "笔记本", Vec::new()),
+            peer("3", "张三", "笔记本", Vec::new()),
+        ]));
+        assert_eq!(model.devices().len(), 2, "同一身份的两条连接合成一行");
+        assert_eq!(model.online_count(), 2);
+    }
+
+    #[test]
+    fn failed_roster_keeps_members_and_shows_the_error() {
+        let mut model = Model::new();
+        model.apply_members(SpaceMembersResult {
+            ready: true,
+            loading: false,
+            error: None,
+            members: vec![SpaceMember {
+                username: "owner".into(),
+                display_name: "所有者".into(),
+                role: SpaceMemberRole::Owner,
+            }],
+        });
+        model.fail_members("超时".into());
+        assert_eq!(model.members().len(), 1, "失败不得清掉上次名册");
+        assert_eq!(model.members.error.as_deref(), Some("超时"));
+        assert!(!model.members.loading);
     }
 
     #[test]
