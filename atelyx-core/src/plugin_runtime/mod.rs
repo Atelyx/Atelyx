@@ -1733,6 +1733,15 @@ impl PluginRuntime {
         }
     }
 
+    /// 该面最近一次绘制上报的尺寸（逻辑像素）；从未绘制 = `None`。
+    pub fn surface_size(&self, plugin_id: &str, surface_id: &str) -> Option<(f32, f32)> {
+        self.surface_sizes
+            .lock()
+            .unwrap()
+            .get(&(plugin_id.to_string(), surface_id.to_string()))
+            .copied()
+    }
+
     /// 是否有画布或整面帧在等帧（壳据此决定要不要挂帧节拍：没有动画时不产生周期唤醒）。
     pub fn has_frame_ticks(&self) -> bool {
         // 只读判定，锁内直接遍历（避免每次调用都克隆实例表）

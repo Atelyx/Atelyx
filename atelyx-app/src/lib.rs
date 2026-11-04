@@ -28,6 +28,7 @@ mod registry;
 mod repo_history;
 mod settings_view;
 mod space_actions;
+mod startup;
 mod doc_presence;
 mod table_panel;
 mod tray;
@@ -62,6 +63,7 @@ use layout_view::{
     enumerate_dividers, panel_tab_ids_in, PopupOpen, PopupState, RenameState, RenameTarget, UiMetrics,
 };
 use plugin_actions::OpenMode;
+use startup::{BootPlan, Gate, Startup, Step};
 
 /// 撕裂窗口建窗参数：bounds 恢复位置 + 条目 OS 选项（不进任务栏）；无系统边框。
 fn panel_settings(w: &DetachedWindow) -> Settings {
@@ -195,6 +197,9 @@ const DOUBLE_CLICK_MS: u128 = 350;
 
 /// 防抖落盘周期：期间多次模型变更合并为一次写盘（拖宽/拖拽等连续操作不逐帧写）。
 const PERSIST_TICK: std::time::Duration = std::time::Duration::from_millis(800);
+
+/// 加载屏扫光 / 转圈的节拍（约 30fps；就绪前挂载、就绪后停止）。
+const STARTUP_FRAME: std::time::Duration = std::time::Duration::from_millis(33);
 
 /// 帧拍的调度粒度（125 Hz，覆盖协议允许的最高帧率）：具体节拍由各画布与整面帧声明的 fps 决定，
 /// 此值只决定检查密度——比它更慢会让 120 fps 的声明退化成按检查密度发帧。
@@ -421,6 +426,10 @@ enum Message {
     RepoHistoryLoaded(u64, u64, Result<repo_history::RepoHistory, String>),
     /// AI 对话面板消息（会话 / run 事件 / 编排）。
     Chat(chat_actions::ChatMsg),
+    /// 加载屏首帧已渲染（只生效一次）：此后执行插件装载与启动进入。
+    StartupBegin,
+    /// 加载屏扫光 / 转圈相位推进，并检查闸门超时。
+    StartupFrameTick,
     /// 无操作（后台任务回执无界面变化时的统一落点）。
     Noop,
     /// 打开链接（外链 / 仓库路径 / wiki）。
@@ -1411,6 +1420,10 @@ pub struct App {
     /// 文档插件尚未就绪时挂起的打开请求（启动自动恢复 / 用户抢先点开）；
     /// 连同「打开意图」一起挂起，就绪后按原样重试。
     pending_doc_open: Option<(String, OpenMode)>,
+    /// 启动加载屏状态：步骤推进、就绪闸门与超时（就绪后同一窗口切工作区）。
+    startup: Startup,
+    /// boot 同步阶段只收集、首帧后执行的启动计划。
+    boot_plan: BootPlan,
     /// 笔记 / 画布 / 插件图片句柄缓存（key = src 原文；切仓库清空，在途与失败集合防重复发起）。
     pub note_images: ImageHandles,
     /// 图片像素尺寸（key 同 `note_images`）：自绘贴片按 contain / cover 摆放要用原图长宽。
@@ -1591,35 +1604,28 @@ impl App {
             Some(LastActive::Space { .. }) => None,
             None => global.recent_vaults.first().map(|v| PathBuf::from(&v.root)),
         };
-        let mut boot = open
+        // 首帧只建窗：读盘与插件装载交给首帧后的启动消息，加载屏得以先上屏。
+        let boot = open
             .map(Message::WindowOpened)
             .chain(window::position(main_os).map(move |p| Message::PositionKnown(main_os, p)));
-        if let Some(text) = global_notice {
-            boot = boot.chain(Task::done(Message::StartupNotice(text)));
-        }
-        if let Some(root) = auto_vault.clone() {
-            boot = boot.chain(Task::done(Message::SelectVault { path: root, from_boot: true }));
-        }
-        if let Some(LastActive::Space { server_url, space_id }) = &global.last_active {
-            let name = global
-                .recent_spaces
-                .iter()
-                .find(|s| s.server_url == *server_url && s.space_id == *space_id)
-                .map(|s| s.name.clone())
-                .unwrap_or_else(|| space_id.clone());
-            boot = boot.chain(Task::done(Message::Space(SpaceMsg::SelectSpace {
-                server_url: server_url.clone(),
-                space_id: space_id.clone(),
-                name,
-                from_boot: true,
-            })));
-        }
-        // 启动静默检查更新（开关与开发构建口径由更新处理器统一判定）
-        if global.auto_update {
-            boot = boot.chain(Task::done(Message::Update(update::UpdateMsg::Check {
-                manual: false,
-            })));
-        }
+        let space_plan = match &global.last_active {
+            Some(LastActive::Space { server_url, space_id }) => {
+                let name = global
+                    .recent_spaces
+                    .iter()
+                    .find(|s| s.server_url == *server_url && s.space_id == *space_id)
+                    .map(|s| s.name.clone())
+                    .unwrap_or_else(|| space_id.clone());
+                Some((server_url.clone(), space_id.clone(), name))
+            }
+            _ => None,
+        };
+        let boot_plan = BootPlan {
+            notice: global_notice,
+            auto_vault: auto_vault.clone(),
+            space: space_plan,
+            auto_update: global.auto_update,
+        };
         let mut app = Self {
                 ui: load_ui_state(),
                 registry: crate::registry::Registry::default(),
@@ -1689,6 +1695,11 @@ impl App {
                 doc_selection: None,
                 doc_base: None,
                 pending_doc_open: None,
+                startup: Startup::new(
+                    Instant::now(),
+                    &[Gate::Plugins, Gate::Vault, Gate::RestoreDocs],
+                ),
+                boot_plan,
                 note_images: ImageHandles::new(),
                 note_image_sizes: HashMap::new(),
                 note_image_epoch: 0,
@@ -1800,32 +1811,189 @@ impl App {
                     .insert(root.clone(), app.ui.file_explorer_expanded.clone());
             }
         }
+        (app, boot)
+    }
+
+    /// 加载屏首帧已上屏：执行插件同步 / 扫描 / 启动与注册表投影，随后按启动计划进入容器。
+    fn begin_startup(&mut self) -> Task<Message> {
+        if !self.startup.begin() {
+            return Task::none();
+        }
         // 随包预置插件：发行包内的预置目录补进用户插件根（首装启用；版本更新或内容变化即替换，
-        // 用户卸过的不装回）。这里只补内容，启动交给随后的 scan + start_enabled
+        // 用户卸过的不装回）
         if let Some(data) = app_data_dir() {
             if let Some(bundled) = bundled_presets_dir() {
-                match app.plugins.sync_presets(&bundled, &data.join("preset-plugins.json")) {
+                match self.plugins.sync_presets(&bundled, &data.join("preset-plugins.json")) {
                     Ok(report) => {
                         for (id, reason) in report.failed {
-                            app.notify(NoticeLevel::Warning, format!("预置插件 {id} 同步失败：{reason}"));
+                            self.notify(
+                                NoticeLevel::Warning,
+                                format!("预置插件 {id} 同步失败：{reason}"),
+                            );
                         }
                     }
-                    Err(e) => app.notify(NoticeLevel::Warning, format!("预置插件同步失败：{e}")),
+                    Err(e) => {
+                        self.notify(NoticeLevel::Warning, format!("预置插件同步失败：{e}"))
+                    }
                 }
             }
         }
-        // 插件运行时：扫描已安装清单并启动已启用插件；布局里现存的插件面就绪即通知
-        app.plugins.scan();
-        app.plugins.start_enabled();
+        // 插件运行时：扫描已安装清单并启动已启用插件
+        self.plugins.scan();
+        self.plugins.start_enabled();
         // 内置插件的停用态要落到能力总线：停用插件的内置服务不进目录（外部候选可接手）
-        for plugin in app.ui.disabled_plugins.clone() {
-            app.plugins.set_builtin_owner_enabled(&plugin, false);
+        for plugin in self.ui.disabled_plugins.clone() {
+            self.plugins.set_builtin_owner_enabled(&plugin, false);
         }
-        plugin_actions::sync_surfaces(&mut app);
-        plugin_actions::sync_canvas_display(&mut app);
-        plugin_actions::rebuild_registry(&mut app);
-        boot = boot.chain(plugin_actions::refresh_projection(&mut app));
-        (app, boot)
+        plugin_actions::sync_surfaces(self);
+        plugin_actions::sync_canvas_display(self);
+        plugin_actions::rebuild_registry(self);
+        let mut task = plugin_actions::refresh_projection(self);
+        // 订阅建立之前广播的 Running 已丢：按当前状态对账，补齐挂面与挂起文档的触发点
+        task = task.chain(self.reconcile_running_plugins());
+        let mut finished = self.startup_arrive(Gate::Plugins);
+        // 首帧后按启动计划进入上次的容器（无容器则仓库与文档闸门直接放行）
+        let plan = self.boot_plan.take();
+        if let Some(text) = plan.notice {
+            task = task.chain(Task::done(Message::StartupNotice(text)));
+        }
+        if let Some(root) = plan.auto_vault {
+            self.startup.enter(Step::OpenRepo);
+            task = task.chain(Task::done(Message::SelectVault { path: root, from_boot: true }));
+        } else if let Some((server_url, space_id, name)) = plan.space {
+            self.startup.enter(Step::OpenSpace);
+            task = task.chain(Task::done(Message::Space(SpaceMsg::SelectSpace {
+                server_url,
+                space_id,
+                name,
+                from_boot: true,
+            })));
+        } else {
+            finished |= self.startup_arrive(Gate::Vault);
+            finished |= self.startup_arrive(Gate::RestoreDocs);
+        }
+        // 启动静默检查更新（开关与开发构建口径由更新处理器统一判定）
+        if plan.auto_update {
+            task = task.chain(Task::done(Message::Update(update::UpdateMsg::Check {
+                manual: false,
+            })));
+        }
+        task.chain(self.startup_settled(finished))
+    }
+
+    /// 启动闸门凑齐后进入覆盖层：渲染一次工作区并登记要等的可见插件面；面齐即撤屏。
+    fn startup_settled(&mut self, finished: bool) -> Task<Message> {
+        if finished || self.startup.finished() {
+            return self.reconcile();
+        }
+        if !self.startup.presenting() || self.startup.faces_registered() {
+            return Task::none();
+        }
+        let frames = plugin_actions::refresh_frames(self);
+        let faces = plugin_actions::startup_wait_faces(self);
+        if !faces.is_empty() {
+            eprintln!(
+                "启动覆盖层：等待 {} 个插件面出帧：{}",
+                faces.len(),
+                startup::faces_text(&faces)
+            );
+        }
+        if self.startup.begin_faces(faces, Instant::now()) {
+            return Task::batch([frames, self.reconcile()]);
+        }
+        frames
+    }
+
+    /// 覆盖层期间逐拍判定等待面：全部就绪才撤屏；没有时间上限，卡住的面留在日志里。
+    fn startup_poll_faces(&mut self, now: Instant) -> Task<Message> {
+        let frames = plugin_actions::refresh_frames(self);
+        let running = plugin_actions::running_plugins(self);
+        let pending = self.startup.pending_faces().to_vec();
+        let mut ready = Vec::new();
+        for (plugin_id, surface_id) in pending {
+            let running = running.contains(&plugin_id);
+            if plugin_actions::face_ready(self, &plugin_id, &surface_id, running) {
+                ready.push((plugin_id, surface_id));
+            }
+        }
+        if !ready.is_empty() {
+            for (plugin_id, surface_id) in &ready {
+                self.startup.mark_face_ready(plugin_id, surface_id, now);
+            }
+            let pending = self.startup.pending_faces();
+            let remaining = if pending.is_empty() {
+                "无".to_string()
+            } else {
+                startup::faces_text(pending)
+            };
+            eprintln!("启动覆盖层：插件面就绪 {} 个，仍未就绪：{}", ready.len(), remaining);
+        }
+        if self.startup.finished() {
+            return Task::batch([frames, self.reconcile()]);
+        }
+        frames
+    }
+
+    /// 随后续闸门到达推进步骤；返回是否已撤屏进入工作区。
+    fn startup_arrive(&mut self, gate: Gate) -> bool {
+        self.startup.arrive(gate, Instant::now())
+    }
+
+    /// 插件进入运行态：通知已挂面、重同步窗口与文档实例，并接续挂起的文档打开。
+    fn on_plugin_running(&mut self, id: &str) -> Task<Message> {
+        for (plugin_id, surface_id) in self.plugin_surfaces.iter() {
+            if plugin_id == id {
+                self.plugins
+                    .notify_surface_attached(plugin_id, surface_id, SurfaceKind::Panel);
+            }
+        }
+        // 插件窗口 / 接管面 / 打开中的文档实例随重启重新就绪
+        plugin_actions::resync_surfaces_on_running(self, id);
+        let mut task = Task::none();
+        if let Some((path, mode)) = self.pending_doc_open.clone() {
+            if self.pending_doc_plugin(&path).as_deref() == Some(id) {
+                self.pending_doc_open = None;
+                task = self.gate(PendingAfterFlush::OpenFile { path, mode });
+            }
+        }
+        task
+    }
+
+    /// 订阅建立前广播的 Running 已丢：按当前状态对账一次（状态查询不经事件通道）。
+    fn reconcile_running_plugins(&mut self) -> Task<Message> {
+        let running: Vec<String> = self
+            .plugins
+            .list()
+            .iter()
+            .filter(|plugin| plugin.status == PluginStatus::Running)
+            .map(|plugin| plugin.id.clone())
+            .collect();
+        let mut task = Task::none();
+        for id in running {
+            task = task.chain(self.on_plugin_running(&id));
+        }
+        task
+    }
+
+    /// 无可恢复的容器（无令牌的空间 / 无自动进入）：仓库与文档闸门直接放行。
+    pub(crate) fn startup_skip_container(&mut self) -> Task<Message> {
+        let finished = self.startup_arrive(Gate::Vault) | self.startup_arrive(Gate::RestoreDocs);
+        self.startup_settled(finished)
+    }
+
+    /// 注册表里有该文档类型的插件且已运行：接续挂起的文档打开（只挂已有视图）。
+    fn retry_pending_doc_open(&mut self) -> Task<Message> {
+        let Some((path, mode)) = self.pending_doc_open.clone() else {
+            return Task::none();
+        };
+        let Some(plugin_id) = self.pending_doc_plugin(&path) else {
+            return Task::none();
+        };
+        if !self.plugin_is_running(&plugin_id) {
+            return Task::none();
+        }
+        self.pending_doc_open = None;
+        self.gate(PendingAfterFlush::OpenFile { path, mode })
     }
 
     /// 追加一条通知（右下角；容量上限防堆积，溢出优先淘汰最旧的非常驻条）。
@@ -1912,6 +2080,10 @@ impl App {
     }
 
     fn handle(&mut self, message: Message) -> Task<Message> {
+        // 覆盖层不透明：窗口级指针消息在部件捕获之外单独到达，这里一并吞掉
+        if self.startup.covering() && startup::covering_blocks(&message) {
+            return Task::none();
+        }
         // 整面帧声明 keys 时连命令组合也归它：宿主的键盘派生消息与快捷键动作同样让位
         if plugin_actions::frame_takes_keyboard(self) && is_frame_keyboard_message(&message) {
             return Task::none();
@@ -1920,10 +2092,33 @@ impl App {
             Message::WindowOpened(id) => {
                 if self.main_id.is_none() {
                     self.main_id = Some(id);
-                    // 主窗口就绪即调和：启动恢复 restore_on_launch 的撕裂窗口
-                    return self.reconcile();
                 }
                 Task::none()
+            }
+            Message::StartupBegin => self.begin_startup(),
+            Message::StartupFrameTick => {
+                if self.startup.finished() {
+                    return Task::none();
+                }
+                self.startup.animate();
+                let now = Instant::now();
+                // 覆盖层期间只轮询等待面；闸门已清空，没有再放行的闸门
+                if self.startup.presenting() {
+                    if !self.startup.faces_registered() {
+                        return self.startup_settled(false);
+                    }
+                    return self.startup_poll_faces(now);
+                }
+                let (expired, finished) = self.startup.expire(now);
+                if !expired.is_empty() {
+                    let names: Vec<&str> = expired.iter().map(|g| g.label()).collect();
+                    eprintln!(
+                        "启动超时放行：{}（已等待 {}ms）",
+                        names.join("、"),
+                        self.startup.elapsed(now).as_millis()
+                    );
+                }
+                self.startup_settled(finished)
             }
             Message::WindowCloseRequested(id) => {
                 if self.main_id == Some(id) {
@@ -2414,9 +2609,19 @@ impl App {
                         Task::none()
                     }
                 });
-                task
+                self.startup.enter(Step::FileTree);
+                self.startup.enter(Step::AiSessions);
+                let finished = self.startup_arrive(Gate::Vault);
+                task.chain(self.startup_settled(finished))
             }
-            Message::VaultMetaLoaded(_, Err(_)) => Task::none(),
+            Message::VaultMetaLoaded(gen, Err(_)) => {
+                if gen != self.epoch() {
+                    return Task::none();
+                }
+                // 配置读回失败不阻塞启动：仓库闸门放行，错误已由加载侧记录
+                let finished = self.startup_arrive(Gate::Vault);
+                self.startup_settled(finished)
+            }
             Message::Chat(msg) => {
                 chat_actions::update(self, msg)
             }
@@ -3240,22 +3445,7 @@ impl App {
                 }
                 if let PluginEvent::StatusChanged { id, status } = event.as_ref() {
                     if *status == PluginStatus::Running {
-                        for (plugin_id, surface_id) in self.plugin_surfaces.iter() {
-                            if plugin_id == id {
-                                self.plugins
-                                    .notify_surface_attached(plugin_id, surface_id, SurfaceKind::Panel);
-                            }
-                        }
-                        // 插件窗口 / 接管面 / 打开中的文档实例随重启重新就绪
-                        plugin_actions::resync_surfaces_on_running(self, id);
-                        if let Some((path, mode)) = self.pending_doc_open.clone() {
-                            if self.pending_doc_plugin(&path).as_deref() == Some(id.as_str()) {
-                                self.pending_doc_open = None;
-                                task = task.chain(
-                                    self.gate(PendingAfterFlush::OpenFile { path, mode }),
-                                );
-                            }
-                        }
+                        task = task.chain(self.on_plugin_running(id));
                     } else if matches!(
                         status,
                         PluginStatus::Stopped | PluginStatus::Failed(_)
@@ -3273,13 +3463,17 @@ impl App {
                         if self.file_drag_surface.as_ref().is_some_and(|(owner, _)| owner == id) {
                             self.cancel_file_drag();
                         }
-                        if let Some((path, _)) = self.pending_doc_open.clone() {
+                        if let Some((path, mode)) = self.pending_doc_open.clone() {
                             if self.pending_doc_plugin(&path).as_deref() == Some(id.as_str()) {
                                 self.pending_doc_open = None;
                                 self.notify(
                                     NoticeLevel::Error,
                                     "文档插件未运行，无法打开文档".to_string(),
                                 );
+                                // 恢复请求没有落点，同样收尾，不拖到文档闸门超时
+                                if matches!(mode, OpenMode::Restore) {
+                                    task = task.chain(self.startup_restore_doc_done());
+                                }
                             }
                         }
                         // 核心异常退出 / 被停用都没有插件侧收尾：替在途 run 补发失败终态
@@ -3299,7 +3493,9 @@ impl App {
                     task = task.chain(plugin_actions::apply_declared_default_layout(self, id));
                 }
                 settings_view::plugins::on_event(self, *event);
-                task.chain(plugin_actions::refresh_projection(self))
+                let task = task.chain(plugin_actions::refresh_projection(self));
+                // 注册表摊平后文档类型才可路由：挂起的文档打开在此重试
+                task.chain(self.retry_pending_doc_open())
             }
             Message::PluginTakeoverAsk { request_id, plugin_id, scope, surface_id } => {
                 plugin_actions::on_takeover_request(self, request_id, plugin_id, scope, surface_id)
@@ -4654,10 +4850,12 @@ impl App {
     /// Restore 只把文件挂到已有视图，不新建 / 不激活标签、不落盘。
     pub(crate) fn open_file(&mut self, rel: &str, mode: OpenMode) -> Task<Message> {
         if rel.ends_with(".atlx") {
-            return self.open_canvas(rel, mode);
+            let task = self.open_canvas(rel, mode);
+            return self.doc_restored(task, mode);
         }
         if rel.ends_with(".atb") {
-            return self.open_table(rel, mode);
+            let task = self.open_table(rel, mode);
+            return self.doc_restored(task, mode);
         }
         if let Some(extension) = rel.rsplit('.').next() {
             if self
@@ -4666,6 +4864,7 @@ impl App {
                 .iter()
                 .any(|info| info.registration.extension.eq_ignore_ascii_case(extension))
             {
+                // 文档面打开是异步读盘：回执（DocOpened）到达时才收尾
                 return plugin_actions::open_doc(self, rel, mode);
             }
         }
@@ -4685,7 +4884,23 @@ impl App {
             NoticeLevel::Warning,
             format!("没有可打开该文件的视图：{rel}"),
         );
-        Task::none()
+        // 没有视图可挂：这份恢复请求到此收尾，不阻塞启动
+        self.doc_restored(Task::none(), mode)
+    }
+
+    /// 恢复请求在宿主侧收尾（打开登记与失败都算完成；插件正文仍可异步补齐）。
+    fn doc_restored(&mut self, task: Task<Message>, mode: OpenMode) -> Task<Message> {
+        if !matches!(mode, OpenMode::Restore) {
+            return task;
+        }
+        let finished = self.startup.docs_done(Instant::now());
+        task.chain(self.startup_settled(finished))
+    }
+
+    /// 恢复文档在宿主侧收尾：最后一份到达即放行文档闸门（超时兜底见 `Startup`）。
+    pub(crate) fn startup_restore_doc_done(&mut self) -> Task<Message> {
+        let finished = self.startup.docs_done(Instant::now());
+        self.startup_settled(finished)
     }
 
     /// 挂起中的文档打开请求归属哪个插件（按扩展名查文档类型注册）。
@@ -4730,10 +4945,13 @@ impl App {
         if let Err(e) = self.vault.set(path.clone(), exclude) {
             self.vault_switch_target = None;
             self.notify(NoticeLevel::Error, e);
-            return Task::none();
+            // 打不开仓库不再拦住启动：仓库与文档闸门直接放行，用户停在工作区空态
+            let finished = self.startup_arrive(Gate::Vault) | self.startup_arrive(Gate::RestoreDocs);
+            return self.startup_settled(finished);
         }
         let root = self.vault.root().ok();
         self.vault_root = root.clone();
+        self.startup.enter(Step::VaultConfig);
         // 登记最近仓库：root 用归一化后的仓库根，与列表项、切仓比对同源
         if let Some(root) = &root {
             let name = vault::vault_display_name(root);
@@ -4812,11 +5030,20 @@ impl App {
         task = task.chain(self.load_vault_meta());
         task = task.chain(self.save_global());
         // 启动自动进入且「自动恢复」开启：把上次打开的文件挂回已有视图；运行中切换不恢复（文件已随切仓关闭）
-        for (rel, mode) in restore_open_requests(&self.ui, from_boot, self.global.auto_restore) {
-            // 笔记由插件文档面承载：走同一套打开路由（插件未就绪时按恢复意图挂起）
-            task = task.chain(self.open_file(&rel, mode));
+        let restore = restore_open_requests(&self.ui, from_boot, self.global.auto_restore);
+        let mut finished = false;
+        if restore.is_empty() {
+            // 没有待恢复的文档：文档闸门直接放行
+            finished |= self.startup_arrive(Gate::RestoreDocs);
+        } else {
+            self.startup.enter(Step::RestoreDocs);
+            self.startup.expect_docs(restore.len(), Instant::now());
+            for (rel, mode) in restore {
+                // 笔记由插件文档面承载：走同一套打开路由（插件未就绪时按恢复意图挂起）
+                task = task.chain(self.open_file(&rel, mode));
+            }
         }
-        task
+        task.chain(self.startup_settled(finished))
     }
 
     /// 落盘 global.json（小文件整写；失败提示，不回滚内存态）。
@@ -6743,7 +6970,7 @@ impl App {
 
     fn view(&self, id: window::Id) -> Element<'_, Message> {
         if self.main_id == Some(id) {
-            layout_view::main_view(self, id)
+            startup::main_window_view(self, id)
         } else if let Some(model_id) = self.detached_os.get(&id) {
             layout_view::detached_view(self, id, model_id)
         } else if self.plugin_windows.contains_key(&id) {
@@ -6770,6 +6997,18 @@ impl App {
             || !self.chat.renaming.is_empty()
             || (self.settings_open && self.settings_tab == "shortcuts");
         Subscription::batch([
+            // 加载屏：首帧信号只挂到首帧消息到达（此后不再订阅，避免满速重绘）
+            if !self.startup.began() {
+                window::frames().map(|_| Message::StartupBegin)
+            } else {
+                Subscription::none()
+            },
+            // 加载屏扫光 / 转圈节拍；就绪后停止
+            if !self.startup.finished() {
+                iced::time::every(STARTUP_FRAME).map(|_| Message::StartupFrameTick)
+            } else {
+                Subscription::none()
+            },
             iced::time::every(PERSIST_TICK).map(|_| Message::PersistTick),
             // 运行期轮询：开着自动检查且非开发构建时按固定间隔静默检查
             if self.global.auto_update && !cfg!(debug_assertions) {

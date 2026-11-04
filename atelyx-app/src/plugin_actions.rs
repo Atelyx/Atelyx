@@ -7,13 +7,14 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 use iced::{Task, window};
 
 use atelyx_core::layout::{self, AppUiState, LayoutNode, LayoutOp};
 use atelyx_core::plugin_runtime::{
-    Contribution, ContributionSlot, DrawCommand, FrameInput, ImageSource, SurfaceKind,
-    TakeoverScope, WindowOpenParams, WindowUpdateParams,
+    Contribution, ContributionSlot, DrawCommand, FrameInput, ImageSource, PluginStatus,
+    SurfaceFrame, SurfaceKind, TakeoverScope, WindowOpenParams, WindowUpdateParams,
 };
 
 use crate::registry::{Registry, Snapshot};
@@ -229,6 +230,106 @@ pub fn sync_table_surfaces(app: &mut App) -> bool {
     }
     app.plugin_table_surfaces = now;
     true
+}
+
+/// 判定帧已按面尺寸排好时两端各自允许的差（与整面帧部件的同口径）。
+pub(crate) const FACE_SIZE_TOLERANCE: f32 = 0.5;
+
+/// 主窗当前激活标签上的插件面（`(插件 id, 贡献 id)`，已排序去重）。
+/// 设置整页占住内容区时没有面板面；表格面板的内容槽按当前选择的视图解析。
+pub fn visible_surfaces(app: &App) -> Vec<(String, String)> {
+    if app.settings_open {
+        return Vec::new();
+    }
+    let table_view = app
+        .panel_view
+        .get("table")
+        .cloned()
+        .flatten()
+        .unwrap_or_else(|| TABLES_VIEW.to_string());
+    let mut faces = Vec::new();
+    collect_visible_surfaces(&layout::active_layout(&app.ui).tree, &table_view, &mut faces);
+    faces.sort();
+    faces.dedup();
+    faces
+}
+
+fn collect_visible_surfaces(
+    node: &LayoutNode,
+    table_view: &str,
+    faces: &mut Vec<(String, String)>,
+) {
+    match node {
+        LayoutNode::Panel { tabs, active_tab_id, .. } => {
+            let Some(tab) = active_tab_id
+                .as_deref()
+                .and_then(|id| tabs.iter().find(|tab| tab.id == id))
+            else {
+                return;
+            };
+            let view = if tab.view == "table" { table_view } else { tab.view.as_str() };
+            if let Some((plugin_id, id)) = parse_view_kind(view) {
+                faces.push((plugin_id.to_string(), id.to_string()));
+            }
+        }
+        LayoutNode::Split { children, .. } => {
+            for child in children {
+                collect_visible_surfaces(child, table_view, faces);
+            }
+        }
+    }
+}
+
+/// 运行中的插件 id（装载失败 / 被停用 / 未启动的插件不在其中）。
+pub(crate) fn running_plugins(app: &App) -> HashSet<String> {
+    app.plugins
+        .list()
+        .into_iter()
+        .filter(|plugin| plugin.status == PluginStatus::Running)
+        .map(|plugin| plugin.id)
+        .collect()
+}
+
+/// 覆盖层期间真正要等出帧的面：可见、已挂面且插件在跑。
+/// 未挂载的可见面没有插件在画它（宿主占位），失败或停用的插件也不等它。
+pub(crate) fn waiting_faces(
+    visible: &[(String, String)],
+    mounted: &HashSet<(String, String)>,
+    running: &HashSet<String>,
+) -> Vec<(String, String)> {
+    visible
+        .iter()
+        .filter(|face| mounted.contains(face) && running.contains(&face.0))
+        .cloned()
+        .collect()
+}
+
+/// 进入覆盖层时登记的等待面（面板面 ∪ 表格视图面）。
+pub(crate) fn startup_wait_faces(app: &App) -> Vec<(String, String)> {
+    let mut mounted = app.plugin_surfaces.clone();
+    mounted.extend(app.plugin_table_surfaces.iter().cloned());
+    waiting_faces(&visible_surfaces(app), &mounted, &running_plugins(app))
+}
+
+/// 某面是否已就绪：插件不在跑即就绪（显示占位）；否则要求已上报过尺寸且帧按该尺寸排好。
+pub(crate) fn face_ready(app: &App, plugin_id: &str, surface_id: &str, running: bool) -> bool {
+    if !running {
+        return true;
+    }
+    let size = app.plugins.surface_size(plugin_id, surface_id);
+    let frame = app
+        .plugin_frames
+        .get(&(plugin_id.to_string(), surface_id.to_string()));
+    frame_matches(frame, size)
+}
+
+fn frame_matches(frame: Option<&Arc<SurfaceFrame>>, size: Option<(f32, f32)>) -> bool {
+    let Some((width, height)) = size else { return false };
+    let Some(frame) = frame else { return false };
+    frame.size.is_none_or(|laid| {
+        (laid.w - width).abs() <= FACE_SIZE_TOLERANCE
+            && (laid.h - height).abs() <= FACE_SIZE_TOLERANCE
+    })
 }
 
 /// 唯一注册表的唯一重建入口：内置插件表 + 插件贡献 + 文档类型 + 在册服务 + 内置停用表。
@@ -1345,6 +1446,60 @@ mod tests {
         for bad in ["/etc/passwd", "../escape.png", "a/../../b.png"] {
             assert!(safe_private_path(dir, bad).is_none(), "应拒绝越出私有目录：{bad}");
         }
+    }
+
+    fn tab(id: &str, view: &str) -> atelyx_core::layout::TabItem {
+        atelyx_core::layout::TabItem { id: id.into(), view: view.into(), locked: false }
+    }
+
+    #[test]
+    fn visible_surfaces_skip_background_tabs() {
+        let tree = LayoutNode::Panel {
+            id: "p1".into(),
+            tabs: vec![
+                tab("t1", "plugin:com.a.canvas:canvas"),
+                tab("t2", "plugin:com.a.notes:note"),
+            ],
+            active_tab_id: Some("t1".into()),
+        };
+        let mut faces = Vec::new();
+        collect_visible_surfaces(&tree, TABLES_VIEW, &mut faces);
+        assert_eq!(faces, vec![("com.a.canvas".to_string(), "canvas".to_string())]);
+    }
+
+    #[test]
+    fn table_slot_resolves_to_the_selected_view() {
+        let tree = LayoutNode::Panel {
+            id: "p1".into(),
+            tabs: vec![tab("t1", "table")],
+            active_tab_id: Some("t1".into()),
+        };
+        let mut faces = Vec::new();
+        collect_visible_surfaces(&tree, "plugin:com.a.tables:grid", &mut faces);
+        assert_eq!(faces, vec![("com.a.tables".to_string(), "grid".to_string())]);
+    }
+
+    #[test]
+    fn failed_or_unmounted_faces_are_not_awaited() {
+        let visible = vec![
+            ("com.a.canvas".to_string(), "canvas".to_string()),
+            ("com.a.notes".to_string(), "note".to_string()),
+            ("com.a.preview".to_string(), "preview".to_string()),
+        ];
+        let mounted: HashSet<_> = visible.iter().cloned().collect();
+        // 笔记插件装载失败（不在运行集），预览面未挂载：两者都不计入等待
+        let running: HashSet<String> = ["com.a.canvas".to_string()].into_iter().collect();
+        assert_eq!(
+            waiting_faces(&visible, &mounted, &running),
+            vec![("com.a.canvas".to_string(), "canvas".to_string())]
+        );
+    }
+
+    #[test]
+    fn face_without_frame_or_size_is_not_ready() {
+        let frame = Arc::new(SurfaceFrame::default());
+        assert!(!frame_matches(Some(&frame), None), "插件尚未上报尺寸");
+        assert!(!frame_matches(None, Some((100.0, 80.0))), "还没有帧");
     }
 }
 

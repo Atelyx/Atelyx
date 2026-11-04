@@ -715,6 +715,7 @@ fn on_invite_revoked(
 
 /// 恢复会话并进入目标空间：密钥链 / 会话内令牌 → list_spaces 校验 → 进入或弹登录。
 fn restore_and_enter(app: &mut App, server_url: String, space_id: String, name: String, from_boot: bool) -> Task<Message> {
+    app.startup.enter(crate::startup::Step::SpaceSession);
     let username = app.global.last_identity.as_ref().map(|i| i.username.clone());
     let token = username
         .as_deref()
@@ -730,7 +731,8 @@ fn restore_and_enter(app: &mut App, server_url: String, space_id: String, name: 
         app.space_pending = Some((server_url.clone(), space_id, name));
         app.space_form = SpaceForm { server: server_url, ..Default::default() };
         if from_boot {
-            return Task::none();
+            // 无会话就无法恢复空间：静默跳过并把启动闸门放行，不停在加载屏
+            return app.startup_skip_container();
         }
         return match app.main_id {
             Some(window) => open_login_popup(app, window),
@@ -762,7 +764,11 @@ fn on_restore_done(
 ) -> Task<Message> {
     app.space_busy = false;
     match result {
-        Err(e) => on_error(app, e, "进入空间失败"),
+        Err(e) => {
+            let task = on_error(app, e, "进入空间失败");
+            // 进入失败不阻塞启动：闸门放行，用户停在工作区空态
+            task.chain(app.startup_skip_container())
+        }
         Ok((client, spaces)) => {
             app.space_list = spaces;
             let role = app
@@ -781,6 +787,7 @@ fn on_restore_done(
 /// 启动自动进入（from_boot）按「自动恢复」设置载入上次打开的文件；
 /// 运行中切换在 gate 保存后关闭当前打开的文件，进入新空间为未打开态。
 pub fn enter_space(app: &mut App, session: SpaceSession, from_boot: bool) -> Task<Message> {
+    app.startup.enter(crate::startup::Step::SpaceConnect);
     // 换空间 = 换泵：旧连接先 bye 再重建（订阅按 topic 换血）
     teardown_pump(app);
     // 展开集按空间独立记忆
@@ -806,6 +813,7 @@ pub fn enter_space(app: &mut App, session: SpaceSession, from_boot: bool) -> Tas
         None => vec![String::new()],
     };
     app.global.bump_space(&session.server_url, &session.space_id, &session.name, crate::now_secs());
+    app.startup.enter(crate::startup::Step::VaultConfig);
     let mut task = refresh_space_tree(app);
     task = task.chain(refresh_space_tags(app));
     task = task.chain(load_space_meta(app));
@@ -824,10 +832,19 @@ pub fn enter_space(app: &mut App, session: SpaceSession, from_boot: bool) -> Tas
         app.pending_doc_open = None;
         app.history.clear();
     }
-    for (rel, mode) in crate::restore_open_requests(&app.ui, from_boot, app.global.auto_restore) {
-        task = task.chain(app.open_file(&rel, mode));
+    let restore = crate::restore_open_requests(&app.ui, from_boot, app.global.auto_restore);
+    let mut finished = false;
+    if restore.is_empty() {
+        // 没有待恢复的文档：文档闸门直接放行
+        finished |= app.startup_arrive(crate::startup::Gate::RestoreDocs);
+    } else {
+        app.startup.enter(crate::startup::Step::RestoreDocs);
+        app.startup.expect_docs(restore.len(), Instant::now());
+        for (rel, mode) in restore {
+            task = task.chain(app.open_file(&rel, mode));
+        }
     }
-    task
+    task.chain(app.startup_settled(finished))
 }
 
 /// 进入/离开仓库容器共用的会话态清空（镜像 enter_vault 清单）。

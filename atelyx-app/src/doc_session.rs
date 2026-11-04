@@ -248,13 +248,12 @@ pub fn open_done(app: &mut App, done: OpenReadResult) -> Task<Message> {
         );
         return Task::none();
     }
+    // 启动恢复只把文件挂回已有视图：最近打开清单与磁盘一致，不重排、不写盘。
+    let restored = app.doc_open.as_ref().is_some_and(|open| {
+        open.mode == crate::plugin_actions::OpenMode::Restore && open.path == path
+    });
     match result {
         Ok(text) => {
-            // 启动恢复只把文件挂回已有视图：最近打开清单与磁盘一致，不重排、不写盘。
-            let restored = app.doc_open.as_ref().is_some_and(|open| {
-                open.mode == crate::plugin_actions::OpenMode::Restore
-                    && open.path == path
-            });
             app.attach_doc_session(&path, text.clone());
             if !restored {
                 crate::recent_files::record(
@@ -275,7 +274,12 @@ pub fn open_done(app: &mut App, done: OpenReadResult) -> Task<Message> {
             app.plugins.resolve_shell_call(request_id, Err(e));
         }
     }
-    Task::none()
+    // 恢复读盘成功或失败都算这份请求收尾（正文仍由插件面异步呈现）
+    if restored {
+        app.startup_restore_doc_done()
+    } else {
+        Task::none()
+    }
 }
 
 pub(crate) fn can_write(app: &App) -> bool {
