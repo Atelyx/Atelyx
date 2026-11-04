@@ -1301,6 +1301,27 @@ mod tests {
         assert!((block_center - 100.0).abs() < 0.5, "空态内容块应垂直居中");
     }
 
+    // 布局过渡首帧可能上报 0 尺寸：空态只留背景，整帧仍须可提交。
+    #[test]
+    fn empty_frame_tolerates_zero_surface_size() {
+        let frame = build_frame(None, &[], Size { width: 0.0, height: 0.0 });
+        assert!(
+            !frame
+                .commands
+                .iter()
+                .any(|command| matches!(command, DrawCommand::Text { .. })),
+            "零尺寸空态不应产文字指令"
+        );
+        frame.validate().expect("零尺寸空态帧必须通过校验");
+    }
+
+    // 极窄面按真实宽度排版：文字可用宽度为正即可提交。
+    #[test]
+    fn empty_frame_stays_valid_at_tiny_width() {
+        let frame = build_frame(None, &[], Size { width: 1.0, height: 200.0 });
+        frame.validate().expect("1 像素宽的空态帧必须通过校验");
+    }
+
     #[test]
     fn font_menu_is_the_only_menu_declaring_search() {
         use super::PluginState;

@@ -70,6 +70,10 @@ pub fn paint(
         corner_radius: None,
         shadow: None,
     });
+    // 面尺寸非正（布局过渡的首帧）没有可排内容：只留背景，不产文字指令。
+    if size.width <= 0.0 || size.height <= 0.0 {
+        return (out, hits);
+    }
     let Some(session) = session else {
         draw_empty(&mut out, size);
         return (out, hits);
@@ -78,9 +82,6 @@ pub fn paint(
         draw_empty(&mut out, size);
         return (out, hits);
     };
-    if size.width <= 0.0 || size.height <= 0.0 {
-        return (out, hits);
-    }
     let view = &session.view;
 
     // 整行 / 整列选中淡底（单格与区域只画框，不铺底）

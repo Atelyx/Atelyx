@@ -287,6 +287,7 @@ fn icon_rect(x: f32, y: f32, w: f32) -> crate::frame_ui::Rect {
 
 /// 空态整块（图标 + 标题 + 说明）：在 `area` 内水平 / 垂直居中，坐标面本地。
 /// 图标按 lucide 名称取；标题与说明以面宽为对齐区域居中。
+/// `area` 的宽或高非正时不产出任何指令（零宽文字会被协议校验拒绝）。
 pub fn empty_state(
     area: (f32, f32, f32, f32),
     icon: &str,
@@ -296,6 +297,10 @@ pub fn empty_state(
     desc_text: EmptyStateText,
 ) -> Vec<DrawCommand> {
     let (x, y, w, h) = area;
+    // 面尺寸非正（布局过渡的首帧）没有可排的空态：返回空指令，避免宽度 ≤ 0 的文字被协议拒绝。
+    if w <= 0.0 || h <= 0.0 {
+        return Vec::new();
+    }
     let block = empty_state_height(title_text.line, desc_text.line);
     let top = y + (h - block) / 2.0;
     let title_y = top + EMPTY_ICON + EMPTY_GAP;
@@ -396,6 +401,23 @@ mod tests {
         let block_top = title_y - EMPTY_ICON - EMPTY_GAP;
         let block_bottom = desc_y + desc.line;
         assert!(((block_top + block_bottom) / 2.0 - 150.0).abs() < 0.5);
+    }
+
+    // 面宽或面高非正时没有可排区域：不产指令，避免宽度 ≤ 0 的文字进帧。
+    #[test]
+    fn empty_state_skips_non_positive_area() {
+        let title = EmptyStateText { size: 20.0, line: 24.0 };
+        let desc = EmptyStateText { size: 12.0, line: 14.4 };
+        for area in [
+            (0.0, 0.0, 0.0, 0.0),
+            (0.0, 0.0, 0.0, 300.0),
+            (0.0, 0.0, 400.0, 0.0),
+        ] {
+            assert!(
+                empty_state(area, "file-text", "打开笔记", "说明", title, desc).is_empty(),
+                "非正面区域不应产空态指令：{area:?}"
+            );
+        }
     }
 }
 
