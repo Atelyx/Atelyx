@@ -1,5 +1,6 @@
-//! JSON-RPC 2.0 信封：一行一个 JSON（NDJSON），请求 / 通知 / 响应三态。
-//! 字段名按 JSON-RPC 规范原文（jsonrpc/id/method/params/result/error），不做 camelCase 改写。
+//! 能力调用的请求 / 通知 / 响应三态结构；字段名按 JSON-RPC 2.0 规范原文
+//! （jsonrpc/id/method/params/result/error），不做 camelCase 改写。同进程 ABI 只复制 JSON 字符串，
+//! 不落文本流。
 //! 解析唯一入口是 [`Envelope::parse`]；三个结构体只实现序列化（字段含 `&'static str`，
 //! 生成 Deserialize 会要求输入也是 'static，对 owned 行文本不可用）。
 

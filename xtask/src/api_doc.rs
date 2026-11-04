@@ -53,7 +53,7 @@ const SECTIONS: &[Section] = &[
     },
     Section {
         title: "握手与信封",
-        intro: "插件启动后的第一个请求是 `initialize`；此后双向都是一行一个 JSON-RPC 2.0 信封（NDJSON）。",
+        intro: "插件启动后的第一个请求是 `initialize` 握手；此后能力调用与宿主事件都按本节的请求 / 通知 / 响应结构传递——跨同进程动态库只复制 JSON 字符串（函数调用），不成文本流。",
         items: items!(
             "handshake.rs": "INITIALIZE",
             "handshake.rs": "InitializeParams",
