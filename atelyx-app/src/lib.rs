@@ -12,7 +12,7 @@ mod app_icon;
 mod color_picker_actions;
 mod commands;
 mod history_browser;
-mod image_clipboard;
+mod clipboard;
 mod layout_view;
 mod pack;
 mod plugin_actions;

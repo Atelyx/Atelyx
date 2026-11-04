@@ -1035,7 +1035,7 @@ pub fn handle(app: &mut App, msg: SpaceMsg) -> Task<Message> {
         SpaceMsg::InviteRevoked { gen, code, result } => on_invite_revoked(app, gen, code, result),
         SpaceMsg::InviteCopy(code) => {
             app.space_invite_copied = true;
-            iced::clipboard::write(code)
+            crate::clipboard::write_text_task(code).map(|()| Message::Noop)
         }
         SpaceMsg::OpenCollabSettings => {
             // 已在设置页只切分区，否则切分区后再开整页

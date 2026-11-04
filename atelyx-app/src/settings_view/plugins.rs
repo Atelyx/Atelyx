@@ -234,12 +234,12 @@ pub enum PluginsMsg {
     /// 市场更新（Release 版本比对后走既有压缩安装链）。
     MarketUpdate { id: String, repo: String },
     MarketDone(Result<MarketResult, String>),
-    /// 剪贴板读写（系统剪贴板只能经壳的 iced 任务访问）。
+    /// 剪贴板读写（文本与图片都走壳的剪贴板线程，见 `crate::clipboard`）。
     ClipboardWrite { request_id: u64, text: String },
-    ClipboardWritten { request_id: u64 },
+    ClipboardWritten { request_id: u64, result: Result<(), String> },
     ClipboardRead { request_id: u64 },
-    ClipboardReadDone { request_id: u64, text: Option<String> },
-    /// 剪贴板图片（arboard 在阻塞线程池读，编成 PNG 后 base64 回填）。
+    ClipboardReadDone { request_id: u64, result: Result<Option<String>, String> },
+    /// 剪贴板图片（像素读取走壳的剪贴板线程，PNG 编码在阻塞线程池执行后 base64 回填）。
     ClipboardReadImage { request_id: u64 },
     ClipboardImageDone { request_id: u64, result: Result<Option<ClipboardImage>, String> },
     /// 写剪贴板图片（运行时已解码并校验单次上限；壳再解成 RGBA 交给剪贴板线程）。
@@ -981,7 +981,7 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
         }
         PluginsMsg::CopyLogPath(path) => {
             app.notify(NoticeLevel::Success, "已复制日志路径");
-            iced::clipboard::write(path).map(|_: ()| Message::Noop)
+            crate::clipboard::write_text_task(path).map(|()| Message::Noop)
         }
         PluginsMsg::LogLoaded { id, seq, result } => {
             // 详情已换插件、换分页，或读取已被清空 / 后来的读取取代：这次回执不作数
@@ -1087,20 +1087,23 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
             }
             Task::none()
         }
-        PluginsMsg::ClipboardWrite { request_id, text } => iced::clipboard::write(text)
-            .map(move |_: ()| Message::Plugins(PluginsMsg::ClipboardWritten { request_id })),
-        PluginsMsg::ClipboardWritten { request_id } => {
+        PluginsMsg::ClipboardWrite { request_id, text } => Task::perform(
+            async move { run_blocking(move || crate::clipboard::write_text(text)).await },
+            move |result| Message::Plugins(PluginsMsg::ClipboardWritten { request_id, result }),
+        ),
+        PluginsMsg::ClipboardWritten { request_id, result } => {
             app.plugins
-                .resolve_shell_call(request_id, Ok(serde_json::json!({})));
+                .resolve_shell_call(request_id, result.map(|_| serde_json::json!({})));
             Task::none()
         }
-        PluginsMsg::ClipboardRead { request_id } => iced::clipboard::read().map(move |text| {
-            Message::Plugins(PluginsMsg::ClipboardReadDone { request_id, text })
-        }),
-        PluginsMsg::ClipboardReadDone { request_id, text } => {
-            let text = text.unwrap_or_default();
-            app.plugins
-                .resolve_shell_call(request_id, Ok(serde_json::json!({ "text": text })));
+        PluginsMsg::ClipboardRead { request_id } => Task::perform(
+            async move { run_blocking(crate::clipboard::read_text).await },
+            move |result| Message::Plugins(PluginsMsg::ClipboardReadDone { request_id, result }),
+        ),
+        PluginsMsg::ClipboardReadDone { request_id, result } => {
+            let result =
+                result.map(|text| serde_json::json!({ "text": text.unwrap_or_default() }));
+            app.plugins.resolve_shell_call(request_id, result);
             Task::none()
         }
         PluginsMsg::ClipboardReadImage { request_id } => Task::perform(
@@ -2588,7 +2591,7 @@ fn write_clipboard_image(bytes: &[u8]) -> Result<(), String> {
     }
     let image = image::load_from_memory_with_format(bytes, image::ImageFormat::Png)
         .map_err(|e| format!("解码图片失败：{e}"))?;
-    crate::image_clipboard::write_image(width, height, image.to_rgba8().into_raw())
+    crate::clipboard::write_image(width, height, image.to_rgba8().into_raw())
 }
 
 /// 写入目标是否正由编辑器持有：壳的会话里保留着该文件的内存副本，插件覆盖会与之竞争。
@@ -3015,7 +3018,7 @@ fn collab_send(
 fn read_clipboard_image() -> Result<Option<ClipboardImage>, String> {
     use image::ImageEncoder;
 
-    let Some((width, height, rgba)) = crate::image_clipboard::read_image()? else {
+    let Some((width, height, rgba)) = crate::clipboard::read_image()? else {
         return Ok(None);
     };
     let (width, height) = (width as u32, height as u32);

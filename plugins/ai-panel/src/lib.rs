@@ -740,6 +740,52 @@ impl AiPanelPlugin {
         true
     }
 
+    /// Ctrl+V 且输入框有焦点：剪贴板里是图片就转成待发送附件，返回真表示这次按键已被消费；
+    /// 没有图片时交回输入框做文字粘贴。
+    async fn handle_image_paste(&self, ctx: &Context, input: &FrameInput) -> bool {
+        let FrameInput::Key {
+            key: Key::Character { text },
+            action: KeyAction::Press,
+            modifiers,
+            ..
+        } = input
+        else {
+            return false;
+        };
+        if !modifiers.control || modifiers.meta || text != "v" {
+            return false;
+        }
+        if self.ui.lock().await.focus_id() != Some(DRAFT) {
+            return false;
+        }
+        let png = match ctx.clipboard_read_image_png().await {
+            Ok(Some(png)) => png,
+            // 剪贴板里没有图片是常态；读失败也不拦文字粘贴
+            Ok(None) => return false,
+            Err(error) => {
+                ctx.log_error(&format!("读取剪贴板图片失败：{error}"));
+                return false;
+            }
+        };
+        let dir = match ctx.private_dir().await {
+            Ok(dir) => dir,
+            Err(error) => {
+                self.set_error(format!("剪贴板图片暂存失败：{error}"));
+                return true;
+            }
+        };
+        let path = format!("{dir}/clipboard-{}.png", Uuid::new_v4());
+        if let Err(error) = ctx.write_binary(&path, &png).await {
+            self.set_error(format!("剪贴板图片暂存失败：{error}"));
+            return true;
+        }
+        self.model
+            .lock()
+            .unwrap()
+            .push_image("剪贴板图片".to_string(), path);
+        true
+    }
+
     async fn handle_input(&self, ctx: &Context, params: FrameInputParams) {
         if params.surface_id != PANEL {
             return;
@@ -774,6 +820,10 @@ impl AiPanelPlugin {
             }
         }
         if self.handle_picker_key(&params.input).await {
+            self.render(ctx).await;
+            return;
+        }
+        if self.handle_image_paste(ctx, &params.input).await {
             self.render(ctx).await;
             return;
         }
