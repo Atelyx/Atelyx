@@ -9,11 +9,13 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::net_guard::{client_for, ensure_public_http_url, ClientTimeout, HostPolicy};
+use crate::net_guard::{client_for, ensure_http_url, ClientTimeout, HostPolicy};
 use crate::updater;
 
 /// 官方插件索引（CDN 直链，沿用官方索引仓库的发布形态）。
 pub const INDEX_URL: &str = "https://cdn.jsdelivr.net/gh/Atelyx/Atelyx-plugin-index@main/index.json";
+/// Release 查询的 GitHub API 根（其后拼 `repos/<owner>/<repo>/releases/latest`）。
+const RELEASE_API_BASE: &str = "https://api.github.com";
 /// 官方账号名单：repo owner 命中即 official 徽标。
 pub const OFFICIAL_PLUGIN_ORGS: &[&str] = &["Atelyx"];
 /// 索引本地缓存有效期（毫秒）。
@@ -146,7 +148,16 @@ pub fn read_cache(cache_path: &std::path::Path) -> Option<MarketSnapshot> {
 /// 拉取市场索引并落缓存。网络失败直接报错（由调用方提示），不回退缓存——
 /// 缓存只作秒开来源，是否回退到缓存展示由壳决定。
 pub async fn fetch_snapshot(cache_path: &std::path::Path) -> Result<MarketSnapshot, String> {
-    let (generated_at, mut items) = fetch_json(INDEX_URL)
+    fetch_snapshot_from(INDEX_URL, cache_path, HostPolicy::PublicOnly).await
+}
+
+/// 从给定索引地址拉取（策略随地址用途选择：官方 CDN 走公网，本地验收源走本机/局域网）。
+async fn fetch_snapshot_from(
+    index_url: &str,
+    cache_path: &std::path::Path,
+    policy: HostPolicy,
+) -> Result<MarketSnapshot, String> {
+    let (generated_at, mut items) = fetch_json(index_url, policy)
         .await
         .and_then(|value| parse_index(&value))
         .map_err(|e| format!("拉取插件索引失败：{e}"))?;
@@ -171,9 +182,9 @@ fn write_cache(cache_path: &std::path::Path, snapshot: &MarketSnapshot) -> Resul
     crate::vault::atomic_write(cache_path, &text)
 }
 
-async fn fetch_json(url: &str) -> Result<Value, String> {
-    let checked = ensure_public_http_url(url)?;
-    let client = client_for(HostPolicy::PublicOnly, ClientTimeout::Total(FETCH_TIMEOUT_SECS))?;
+async fn fetch_json(url: &str, policy: HostPolicy) -> Result<Value, String> {
+    let checked = ensure_http_url(url, policy)?;
+    let client = client_for(policy, ClientTimeout::Total(FETCH_TIMEOUT_SECS))?;
     client
         .get(checked)
         .header("User-Agent", concat!("Atelyx/", env!("CARGO_PKG_VERSION")))
@@ -204,13 +215,23 @@ struct GitHubAsset {
 /// 查插件仓库的最新 Release：版本取 tag（剥 `v`/`V`），资产按命名约定匹配本平台 zip。
 /// 无 Release、无本平台资产分别以可读结果区分（`asset_url` = `None`）。
 pub async fn latest_plugin_release(repo: &str, plugin_id: &str) -> Result<PluginRelease, String> {
+    latest_plugin_release_from(RELEASE_API_BASE, repo, plugin_id, HostPolicy::PublicOnly).await
+}
+
+/// 从给定 API 根查询（策略随源地址选择，用法同 [`fetch_snapshot_from`]）。
+async fn latest_plugin_release_from(
+    api_base: &str,
+    repo: &str,
+    plugin_id: &str,
+    policy: HostPolicy,
+) -> Result<PluginRelease, String> {
     let repo = repo.trim().trim_matches('/');
     if repo.split('/').count() != 2 || repo.is_empty() {
         return Err(format!("仓库地址非法：{repo}"));
     }
-    let url = format!("https://api.github.com/repos/{repo}/releases/latest");
-    let checked = ensure_public_http_url(&url)?;
-    let client = client_for(HostPolicy::PublicOnly, ClientTimeout::Total(FETCH_TIMEOUT_SECS))?;
+    let url = format!("{}/repos/{repo}/releases/latest", api_base.trim_end_matches('/'));
+    let checked = ensure_http_url(&url, policy)?;
+    let client = client_for(policy, ClientTimeout::Total(FETCH_TIMEOUT_SECS))?;
     let release: GitHubRelease = client
         .get(checked)
         .header("User-Agent", concat!("Atelyx/", env!("CARGO_PKG_VERSION")))
@@ -297,7 +318,13 @@ pub fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::sync::Mutex;
+
     use serde_json::json;
+    use sha2::Digest;
+
+    use crate::plugin_runtime::PluginRuntime;
 
     #[test]
     fn parse_index_reads_items_and_tolerates_missing() {
@@ -381,5 +408,245 @@ mod tests {
     async fn latest_plugin_release_rejects_bad_repo() {
         assert!(latest_plugin_release("", "com.a").await.is_err());
         assert!(latest_plugin_release("not-a-repo", "com.a").await.is_err());
+    }
+
+    // ---------- 本地真实源端到端：取索引 → 下载 → sha256 → 包内 id → 安装 → 发现新版本 → 更新 ----------
+
+    /// 市场源替身：一个按路径返回固定内容的本机 HTTP 服务，内容可替换以模拟发新版。
+    /// 只解析请求行与终止符；请求走 `HostPolicy::LocalService`（真实安装链的地址校验照常执行）。
+    struct SourceServer {
+        base: String,
+        routes: Arc<Mutex<std::collections::HashMap<String, Vec<u8>>>>,
+        stop: Arc<std::sync::atomic::AtomicBool>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl Drop for SourceServer {
+        fn drop(&mut self) {
+            self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            if let Some(thread) = self.thread.take() {
+                thread.join().ok();
+            }
+        }
+    }
+
+    impl SourceServer {
+        fn start() -> Self {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let routes = Arc::new(Mutex::new(std::collections::HashMap::new()));
+            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let thread = {
+                let routes = Arc::clone(&routes);
+                let stop = Arc::clone(&stop);
+                std::thread::spawn(move || {
+                    listener.set_nonblocking(true).unwrap();
+                    while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        match listener.accept() {
+                            Ok((stream, _)) => serve_once(stream, &routes),
+                            Err(ref error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                                std::thread::sleep(std::time::Duration::from_millis(2));
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                })
+            };
+            Self {
+                base: format!("http://{addr}"),
+                routes,
+                stop,
+                thread: Some(thread),
+            }
+        }
+
+        fn route(&self, path: &str, body: Vec<u8>) {
+            self.routes.lock().unwrap().insert(path.to_string(), body);
+        }
+
+        fn url(&self, path: &str) -> String {
+            format!("{}{path}", self.base)
+        }
+    }
+
+    fn serve_once(
+        mut stream: std::net::TcpStream,
+        routes: &Mutex<std::collections::HashMap<String, Vec<u8>>>,
+    ) {
+        stream.set_nonblocking(false).ok();
+        stream.set_read_timeout(Some(std::time::Duration::from_millis(500))).ok();
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 1024];
+        loop {
+            match stream.read(&mut chunk) {
+                Ok(0) | Err(_) => return,
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            }
+            if buf.ends_with(b"\r\n\r\n") {
+                break;
+            }
+        }
+        let head = String::from_utf8_lossy(&buf);
+        let path = head
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .unwrap_or_default()
+            .to_string();
+        let body = routes.lock().unwrap().get(&path).cloned();
+        let response = match body {
+            Some(body) => format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .into_bytes()
+            .into_iter()
+            .chain(body)
+            .collect::<Vec<_>>(),
+            None => b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                .to_vec(),
+        };
+        stream.write_all(&response).ok();
+        stream.flush().ok();
+    }
+
+    const ACCEPT_ID: &str = "com.example.demo";
+    const ACCEPT_REPO: &str = "local/demo";
+
+    fn manifest_json(id: &str, version: &str) -> String {
+        format!(
+            r#"{{"id":"{id}","name":"Demo","version":"{version}","apiVersion":1,"entry":{{"windows":"app.exe","linux":"app"}}}}"#
+        )
+    }
+
+    fn build_zip(path: &std::path::Path, id: &str, version: &str) {
+        let file = std::fs::File::create(path).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        let entry = if cfg!(windows) { "app.exe" } else { "app" };
+        writer
+            .start_file(atelyx_plugin_protocol::manifest::MANIFEST_FILE, options)
+            .unwrap();
+        writer.write_all(manifest_json(id, version).as_bytes()).unwrap();
+        writer.start_file(entry, options).unwrap();
+        writer.write_all(b"stub").unwrap();
+        writer.finish().unwrap();
+    }
+
+    /// 发布一个版本的索引 / Release / 资产（资产字节留在 `tmp` 下，RAII 清理随临时根走）。
+    fn publish(server: &SourceServer, tmp: &std::path::Path, version: &str) {
+        let zip_path = tmp.join(format!("source-{version}.zip"));
+        build_zip(&zip_path, ACCEPT_ID, version);
+        let bytes = std::fs::read(&zip_path).unwrap();
+        let asset = asset_name(ACCEPT_ID, version);
+        let asset_path = format!("/download/{asset}");
+        server.route(&asset_path, bytes.clone());
+        let release = serde_json::json!({
+            "tag_name": format!("v{version}"),
+            "assets": [{
+                "name": asset,
+                "browser_download_url": server.url(&asset_path),
+                "digest": format!("sha256:{}", hex::encode(sha2::Sha256::digest(&bytes))),
+            }]
+        });
+        server.route(
+            &format!("/repos/{ACCEPT_REPO}/releases/latest"),
+            serde_json::to_vec(&release).unwrap(),
+        );
+        let index = serde_json::json!({
+            "generatedAt": "2026-11-04T00:00:00.000Z",
+            "items": [{ "id": ACCEPT_ID, "name": "Demo", "repo": ACCEPT_REPO }]
+        });
+        server.route("/index.json", serde_json::to_vec(&index).unwrap());
+    }
+
+    async fn download_asset(release: &PluginRelease, dir: &std::path::Path) -> Result<PathBuf, String> {
+        let url = release
+            .asset_url
+            .as_deref()
+            .ok_or_else(|| "发布未挂本平台资产".to_string())?;
+        updater::download_via(
+            reqwest::Client::new(),
+            reqwest::Url::parse(url).map_err(|e| e.to_string())?,
+            dir,
+            release.sha256.as_deref(),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            Arc::new(|_, _| {}),
+        )
+        .await
+    }
+
+    /// 完整链路：本地真实 HTTP 源 + 真 zip；索引落缓存、sha256 生效、包内 id 拒收、安装落位、
+    /// 发布新版后检测为可更新并覆盖安装。
+    #[tokio::test]
+    async fn local_source_runs_the_whole_market_chain() {
+        use std::cmp::Ordering;
+
+        let tmp = crate::scratch::TempDir::new("market-chain");
+        let server = SourceServer::start();
+        publish(&server, &tmp, "1.0.0");
+
+        // 取索引（与生产同一份 fetch + parse + 落缓存）
+        let cache = tmp.join("market-cache.json");
+        let snapshot = fetch_snapshot_from(&server.url("/index.json"), &cache, HostPolicy::LocalService)
+            .await
+            .unwrap();
+        assert_eq!(snapshot.items.len(), 1);
+        assert_eq!(snapshot.items[0].id, ACCEPT_ID);
+        assert_eq!(read_cache(&cache).unwrap(), snapshot, "索引快照应已落缓存");
+
+        let release =
+            latest_plugin_release_from(&server.base, ACCEPT_REPO, ACCEPT_ID, HostPolicy::LocalService)
+                .await
+                .unwrap();
+        assert_eq!(release.version, "1.0.0");
+        assert!(release.sha256.is_some(), "资产摘要应随 Release 取到");
+
+        let runtime = PluginRuntime::new(tmp.join("plugins"));
+        let downloads = tmp.join("downloads");
+        let zip = download_asset(&release, &downloads).await.unwrap();
+
+        // 包内清单 id 必须与市场条目一致，否则拒收且不动已装内容
+        let foreign = tmp.join("foreign.zip");
+        build_zip(&foreign, "com.example.other", "9.9.9");
+        let error = runtime.install_zip(&foreign, Some(ACCEPT_ID)).unwrap_err();
+        assert!(error.contains("不一致"), "{error}");
+
+        runtime.install_zip(&zip, Some(ACCEPT_ID)).unwrap();
+        let installed = runtime
+            .list()
+            .into_iter()
+            .find(|plugin| plugin.id == ACCEPT_ID)
+            .unwrap();
+        assert_eq!(installed.version, "1.0.0");
+
+        // 发新版：取数 → 版本比对判为可更新 → 下载 → 覆盖安装
+        publish(&server, &tmp, "1.1.0");
+        let next =
+            latest_plugin_release_from(&server.base, ACCEPT_REPO, ACCEPT_ID, HostPolicy::LocalService)
+                .await
+                .unwrap();
+        assert_eq!(next.version, "1.1.0");
+        assert_eq!(
+            updater::compare_versions("1.0.0", &next.version),
+            Ordering::Less,
+            "应判定为可更新"
+        );
+
+        // 摘要校验确实生效：同一资产被替换而摘要不变，下载必须失败
+        let tampered_path = format!("/download/{}", asset_name(ACCEPT_ID, "1.1.0"));
+        server.route(&tampered_path, b"tampered".to_vec());
+        let error = download_asset(&next, &downloads).await.unwrap_err();
+        assert!(error.contains("摘要不匹配"), "{error}");
+        publish(&server, &tmp, "1.1.0");
+
+        let zip = download_asset(&next, &downloads).await.unwrap();
+        runtime.install_zip(&zip, Some(ACCEPT_ID)).unwrap();
+        let updated = runtime
+            .list()
+            .into_iter()
+            .find(|plugin| plugin.id == ACCEPT_ID)
+            .unwrap();
+        assert_eq!(updated.version, "1.1.0");
     }
 }

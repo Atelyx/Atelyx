@@ -156,8 +156,8 @@ pub async fn download(
 }
 
 /// 下载主体：定写法（续传/重写/已完整）→ 落盘 → 长度与摘要校验 → 原子改名。
-/// 客户端与已校验 URL 由入口定好；测试以本机地址直入，不重复挂公网守卫。
-async fn download_via(
+/// 客户端与已校验 URL 由入口定好；测试与本地源验收以本机地址直入，不重复挂公网守卫。
+pub(crate) async fn download_via(
     client: reqwest::Client,
     url: reqwest::Url,
     dest_dir: &Path,
