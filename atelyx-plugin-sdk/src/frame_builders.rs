@@ -4,7 +4,7 @@
 use crate::protocol::frame::{FrameRect, HitCursor, HitRegion, SurfaceFrame};
 use crate::protocol::paint::{
     ColorToken, DrawCommand, ImageFit, ImageSource, PaintColor, PaintPoint, PaintShadow, TextAlign,
-    TextWeight,
+    TextLayout, TextShaping, TextWeight,
 };
 
 /// 主题 token 颜色。
@@ -255,3 +255,147 @@ pub fn fps(mut frame: SurfaceFrame, fps: u16) -> SurfaceFrame {
     frame.fps = Some(fps);
     frame
 }
+
+/// 空态图标边长。
+pub const EMPTY_ICON: f32 = 64.0;
+/// 空态图标 / 标题 / 说明之间的间距。
+pub const EMPTY_GAP: f32 = 16.0;
+
+/// 空态文字档：字号与行高由调用方按主题取（宿主量算值），SDK 不自估。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EmptyStateText {
+    pub size: f32,
+    pub line: f32,
+}
+
+impl EmptyStateText {
+    /// 宿主绘制用的行高倍数（与 `line` 一致，避免排版与绘制各行其是）。
+    fn line_factor(&self) -> f32 {
+        if self.size > 0.0 { (self.line / self.size).max(0.0) } else { 1.2 }
+    }
+}
+
+/// 空态内容块高度（图标 + 标题 + 说明）：调用方要在块下挂按钮等附加内容时按它让位。
+pub fn empty_state_height(title_line: f32, desc_line: f32) -> f32 {
+    EMPTY_ICON + EMPTY_GAP * 2.0 + title_line + desc_line
+}
+
+/// 空态图标在给定宽度内的水平位置（块内左缘）。
+fn icon_rect(x: f32, y: f32, w: f32) -> crate::frame_ui::Rect {
+    crate::frame_ui::Rect::new(x + (w - EMPTY_ICON) / 2.0, y, EMPTY_ICON, EMPTY_ICON)
+}
+
+/// 空态整块（图标 + 标题 + 说明）：在 `area` 内水平 / 垂直居中，坐标面本地。
+/// 图标按 lucide 名称取；标题与说明以面宽为对齐区域居中。
+pub fn empty_state(
+    area: (f32, f32, f32, f32),
+    icon: &str,
+    title: &str,
+    desc: &str,
+    title_text: EmptyStateText,
+    desc_text: EmptyStateText,
+) -> Vec<DrawCommand> {
+    let (x, y, w, h) = area;
+    let block = empty_state_height(title_text.line, desc_text.line);
+    let top = y + (h - block) / 2.0;
+    let title_y = top + EMPTY_ICON + EMPTY_GAP;
+    let desc_y = title_y + title_text.line + EMPTY_GAP;
+    let mut out =
+        crate::frame_ui::icon_commands(icon, icon_rect(x, top, w), token(ColorToken::TextMuted));
+    let title = text_aligned(
+        x,
+        title_y,
+        title,
+        title_text.size,
+        token(ColorToken::Text),
+        Some(TextWeight::SemiBold),
+        None,
+        false,
+        Some(w),
+        Some(TextAlign::Center),
+        Some(TextLayout {
+            line_height: Some(title_text.line_factor()),
+            wrap: None,
+            shaping: Some(TextShaping::Advanced),
+        }),
+    );
+    let desc = text_aligned(
+        x,
+        desc_y,
+        desc,
+        desc_text.size,
+        token(ColorToken::TextMuted),
+        None,
+        None,
+        false,
+        Some(w),
+        Some(TextAlign::Center),
+        Some(TextLayout {
+            line_height: Some(desc_text.line_factor()),
+            wrap: None,
+            shaping: Some(TextShaping::Advanced),
+        }),
+    );
+    out.push(title);
+    out.push(desc);
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text<'a>(commands: &'a [DrawCommand], content: &str) -> &'a DrawCommand {
+        commands
+            .iter()
+            .find(|command| matches!(command, DrawCommand::Text { content: text, .. } if text == content))
+            .expect("空态缺少文字指令")
+    }
+
+    // 面 400×300、标题 20/24、说明 12/14.4：图标左缘 = (400-64)/2，整块上下沿中心 = 150。
+    #[test]
+    fn empty_state_block_is_centered_in_area() {
+        let title = EmptyStateText { size: 20.0, line: 24.0 };
+        let desc = EmptyStateText { size: 12.0, line: 14.4 };
+        let block = empty_state_height(title.line, desc.line);
+        let top = (300.0 - block) / 2.0;
+        let commands = empty_state(
+            (0.0, 0.0, 400.0, 300.0),
+            "file-text",
+            "打开笔记",
+            "在文件面板或搜索面板单击一个 .md 笔记开始编辑。",
+            title,
+            desc,
+        );
+
+        let icon = icon_rect(0.0, top, 400.0);
+        assert_eq!(icon.x, 168.0);
+        assert_eq!(icon.y, top);
+        assert_eq!(icon.w, 64.0);
+        assert_eq!(icon.h, 64.0);
+
+        for content in ["打开笔记", "在文件面板或搜索面板单击一个 .md 笔记开始编辑。"] {
+            let DrawCommand::Text { x, max_width, align, .. } = text(&commands, content) else {
+                unreachable!()
+            };
+            assert_eq!(*x, 0.0);
+            assert_eq!(*max_width, Some(400.0));
+            assert_eq!(*align, Some(TextAlign::Center));
+        }
+
+        let title_y = match text(&commands, "打开笔记") {
+            DrawCommand::Text { y, .. } => *y,
+            _ => unreachable!(),
+        };
+        let desc_y = match text(&commands, "在文件面板或搜索面板单击一个 .md 笔记开始编辑。") {
+            DrawCommand::Text { y, .. } => *y,
+            _ => unreachable!(),
+        };
+        assert!((title_y - (top + EMPTY_ICON + EMPTY_GAP)).abs() < 0.5);
+        assert!((desc_y - (title_y + title.line + EMPTY_GAP)).abs() < 0.5);
+        let block_top = title_y - EMPTY_ICON - EMPTY_GAP;
+        let block_bottom = desc_y + desc.line;
+        assert!(((block_top + block_bottom) / 2.0 - 150.0).abs() < 0.5);
+    }
+}
+

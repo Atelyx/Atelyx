@@ -750,6 +750,57 @@ impl<'c, 'a> Ui<'c, 'a> {
         });
     }
 
+    /// 面板级空态（图标 + 标题 + 说明）：在可用区域内居中。
+    /// 排版只在 `frame_builders::empty_state` 里实现一次，这里只按主题取字号与行高。
+    pub fn empty_state(&mut self, icon: &str, title: &str, desc: &str) {
+        self.empty_state_block(icon, title, desc, None);
+    }
+
+    /// 带入口按钮的空态：按钮排在说明下，图标到按钮整块居中。
+    pub fn empty_state_action(&mut self, icon: &str, title: &str, desc: &str, id: &str, label: &str) {
+        self.empty_state_block(icon, title, desc, Some((id, label)));
+    }
+
+    fn empty_state_block(
+        &mut self,
+        icon: &str,
+        title: &str,
+        desc: &str,
+        action: Option<(&str, &str)>,
+    ) {
+        let title_text = crate::frame_builders::EmptyStateText {
+            size: self.role_size(TextRole::Title),
+            line: self.text_height(TextRole::Title),
+        };
+        let desc_text = crate::frame_builders::EmptyStateText {
+            size: self.role_size(TextRole::Caption),
+            line: self.text_height(TextRole::Caption),
+        };
+        let block = crate::frame_builders::empty_state_height(title_text.line, desc_text.line);
+        let icon = icon.to_string();
+        let title = title.to_string();
+        let desc = desc.to_string();
+        self.fill_spacer();
+        self.canvas(block, move |canvas| {
+            let area = canvas.area();
+            for command in crate::frame_builders::empty_state(
+                (area.x, area.y, area.w, block),
+                &icon,
+                &title,
+                &desc,
+                title_text,
+                desc_text,
+            ) {
+                canvas.draw(command);
+            }
+        });
+        if let Some((id, label)) = action {
+            self.spacer(crate::frame_builders::EMPTY_GAP);
+            self.center_column(0.0, move |ui| ui.button(id, label));
+        }
+        self.fill_spacer();
+    }
+
     /// 固定宽度的行内空白。
     pub fn spacer_width(&mut self, width: f32) {
         self.push(Item {
