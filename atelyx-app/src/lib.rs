@@ -1277,6 +1277,8 @@ pub struct App {
     pub plugin_windows: HashMap<window::Id, plugin_actions::PluginWindowActive>,
     /// 打开中的插件文档实例（单实例；切换文件即换实例）。
     pub doc_open: Option<plugin_actions::DocOpenInstance>,
+    /// 在途文档读盘的归属守卫（身份 + 序号）：失效的读盘结果不得回填到已切换的会话。
+    doc_open_guard: doc_session::DocOpenGuard,
     /// 最近聚焦的窗口（插件接管请求的作用域）。
     pub focused_window: Option<window::Id>,
     /// 市场索引缓存落盘路径（应用数据目录不可用时为 None：不缓存，市场仅内存展示）。
@@ -1650,6 +1652,7 @@ impl App {
                 plugin_takeovers: HashMap::new(),
                 plugin_windows: HashMap::new(),
                 doc_open: None,
+                doc_open_guard: doc_session::DocOpenGuard::default(),
                 focused_window: None,
                 market_cache_path,
                 ai_sub_tab: "providers".into(),

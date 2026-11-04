@@ -308,20 +308,14 @@ pub enum PluginsMsg {
     /// 全局编辑偏好（软换行 / 页面内标题 / 正文宽度）。
     EditorPrefs { request_id: u64 },
     /// 打开文档：宿主读盘并建立会话，回执 = 正文与可写性。
-    DocOpen { request_id: u64, params: DocOpenParams },
+    DocOpen { request_id: u64, plugin_id: String, params: DocOpenParams },
     /// 把当前文档改名为新的主名（同目录、保留扩展名）。
     DocRename { request_id: u64, params: DocRenameParams },
     /// 读当前文档的 frontmatter 块（属性面板）。
     DocPropsRead { request_id: u64 },
     /// 用新 frontmatter 块替换当前文档的属性区。
     DocPropsWrite { request_id: u64, params: DocPropsWriteParams },
-    DocOpenDone {
-        request_id: u64,
-        gen: u64,
-        path: String,
-        result: Result<String, String>,
-        can_write: bool,
-    },
+    DocOpenDone(crate::doc_session::OpenReadResult),
     /// 提交一次文档编辑（完整正文 + 光标 / 选区）。
     DocEdit { request_id: u64, params: DocEditParams },
     /// 请求一次文档保存（回执 = 已受理，结果经 `doc:changed`）。
@@ -643,8 +637,8 @@ pub fn host_requests_stream(spec: &RuntimeSpec) -> impl iced::futures::Stream<It
                 HostRequest::EditorPrefs { request_id, .. } => {
                     Message::Plugins(PluginsMsg::EditorPrefs { request_id })
                 }
-                HostRequest::DocOpen { request_id, params, .. } => {
-                    Message::Plugins(PluginsMsg::DocOpen { request_id, params })
+                HostRequest::DocOpen { plugin_id, request_id, params } => {
+                    Message::Plugins(PluginsMsg::DocOpen { request_id, plugin_id, params })
                 }
                 HostRequest::DocRename { request_id, params, .. } => {
                     Message::Plugins(PluginsMsg::DocRename { request_id, params })
@@ -1654,15 +1648,13 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
             };
             app.gate(crate::PendingAfterFlush::OpenFile { path: rel, mode })
         }
-        PluginsMsg::DocOpen { request_id, params } => {
-            crate::doc_session::open(app, request_id, params)
+        PluginsMsg::DocOpen { request_id, plugin_id, params } => {
+            crate::doc_session::open(app, request_id, &plugin_id, params)
         }
         PluginsMsg::DocRename { request_id, params } => {
             crate::doc_session::rename(app, request_id, params)
         }
-        PluginsMsg::DocOpenDone { request_id, gen, path, result, can_write } => {
-            crate::doc_session::open_done(app, request_id, gen, path, result, can_write)
-        }
+        PluginsMsg::DocOpenDone(done) => crate::doc_session::open_done(app, done),
         PluginsMsg::DocEdit { request_id, params } => {
             crate::doc_session::edit(app, request_id, params)
         }

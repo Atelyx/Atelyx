@@ -1151,6 +1151,8 @@ pub fn open_doc(app: &mut App, rel: &str, mode: OpenMode) -> Task<Message> {
             format!(".{extension} 由多个插件注册，已用 {plugin_id} 打开"),
         );
     }
+    // 新打开动作取代旧的打开实例：在途读盘结果随之失效（不得回填到新会话）
+    app.doc_open_guard.invalidate();
     // 换文件即换实例：旧实例先通知关闭（同插件同贡献时插件可按路径自辨，无需重建面）
     if let Some(old) = app.doc_open.take() {
         app.plugins.notify_doc_close(&old.plugin_id, &old.surface_id, &old.path);
@@ -1179,6 +1181,8 @@ pub fn open_doc(app: &mut App, rel: &str, mode: OpenMode) -> Task<Message> {
 
 /// 关闭当前打开的插件文档（文档标签关闭 / 文件删除 / 换仓库）。
 pub fn close_doc(app: &mut App) -> Task<Message> {
+    // 实例关闭后，在途读盘结果不得再把文档挂回会话
+    app.doc_open_guard.invalidate();
     let Some(doc) = app.doc_open.take() else {
         return Task::none();
     };
