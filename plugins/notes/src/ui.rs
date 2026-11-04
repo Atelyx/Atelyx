@@ -248,7 +248,6 @@ fn content(ui: &mut Ui<'_, '_>, model: &NoteModel) {
 }
 
 fn read_view(ui: &mut Ui<'_, '_>, model: &NoteModel) {
-    // 宽松换行关闭只作用于只读面：编辑面文本即真相，换行照旧
     ui.markdown_soft_wrap(model.prefs.soft_wrap);
     ui.scroll(BODY_SCROLL, 0.0, |ui| {
         bounded(ui, model, |ui| {
@@ -265,11 +264,10 @@ fn read_view(ui: &mut Ui<'_, '_>, model: &NoteModel) {
 
 fn edit_view(ui: &mut Ui<'_, '_>, model: &NoteModel) {
     let body_size = ui.role_size(TextRole::Body);
-    let measure = EditMeasure {
-        size: body_size,
-        line: body_size * PROSE_LINE,
-        text: ui.text_height(TextRole::Body),
-    };
+    let measure = EditMeasure { size: body_size, line: body_size * PROSE_LINE };
+    // 未揭示的块与只读面同口径：换行设置一致，行高按 1.625 倍字号排进输入面
+    ui.markdown_soft_wrap(model.prefs.soft_wrap);
+    ui.input_line_height(Some(measure.line));
     ui.scroll(BODY_SCROLL, 0.0, |ui| {
         bounded(ui, model, |ui| {
             ui.pad(16.0, 10.0, |ui| {
@@ -290,12 +288,11 @@ fn edit_view(ui: &mut Ui<'_, '_>, model: &NoteModel) {
     });
 }
 
-/// 预览编辑的行高口径：正文源码行高 1.625 倍字号；输入框内部按实际字高排版，差额用上下内衬补齐。
+/// 预览编辑的行高口径：正文源码行高 1.625 倍字号。
 #[derive(Clone, Copy)]
 struct EditMeasure {
     size: f32,
     line: f32,
-    text: f32,
 }
 
 /// 块序列：只读 / 预览编辑共用（预览编辑档的活动块换成源码输入面，空行各自成为输入行）。
@@ -326,16 +323,14 @@ fn rows(ui: &mut Ui<'_, '_>, model: &NoteModel, edit: Option<EditMeasure>) {
                     measure.line,
                     600.0,
                     measure.size,
-                    Edges::symmetric(0.0, 2.0),
+                    Edges::symmetric(0.0, 0.0),
                 );
                 continue;
             }
         }
-        if let Some(measure) = edit {
-            if !block.items.is_empty() {
-                list_rows(ui, model, index, block, measure);
-                continue;
-            }
+        if !block.items.is_empty() {
+            list_rows(ui, model, index, block, line, edit);
+            continue;
         }
         match &block.image {
             Some(image) if image.height.is_some() => {
@@ -372,49 +367,51 @@ fn rows(ui: &mut Ui<'_, '_>, model: &NoteModel, edit: Option<EditMeasure>) {
 fn gap_line(ui: &mut Ui<'_, '_>, model: &NoteModel, gap: usize, line_index: usize, measure: EditMeasure) {
     let Some((from, to)) = model.gap_line_range(gap, line_index) else { return };
     let value = model.text[from..to].to_string();
-    let pad = ((measure.line - measure.text) / 2.0).max(0.0);
     ui.text_area_plain_fixed(
         gap_input_id(gap, line_index),
         value,
         measure.line,
         measure.size,
-        Edges::symmetric(0.0, pad),
+        Edges::symmetric(0.0, 0.0),
     );
 }
 
-/// 列表块逐项渲染：每项一个揭示单元，有序项按原序号绘制，项间空行折算为间距。
+/// 列表块逐项渲染：每项一个揭示单元（只读档同此），有序项按原序号绘制，项间空行折算为间距。
 fn list_rows(
     ui: &mut Ui<'_, '_>,
     model: &NoteModel,
     index: usize,
     block: &BlockInfo,
-    measure: EditMeasure,
+    line: f32,
+    edit: Option<EditMeasure>,
 ) {
     let body = model.body();
     for (item, info) in block.items.iter().enumerate() {
         let gaps = model.item_gap_lines(index, item);
         if gaps > 0 {
-            ui.spacer(gaps as f32 * measure.line);
+            ui.spacer(gaps as f32 * line);
         }
         let id = item_id(index, item);
         let source = &body[info.from..info.to];
-        if model.active_item == Some((index, item)) {
-            // 编辑框的文本必须与编辑值同源（含行首缩进），否则光标与点击落点整体偏移缩进宽度
-            let Some(editing) = model.item_source(index, item).map(|(from, to)| &model.text[from..to])
-            else {
+        if let Some(measure) = edit {
+            if model.active_item == Some((index, item)) {
+                // 编辑框的文本必须与编辑值同源（含行首缩进），否则光标与点击落点整体偏移缩进宽度
+                let Some(editing) = model.item_source(index, item).map(|(from, to)| &model.text[from..to])
+                else {
+                    continue;
+                };
+                ui.text_area_plain_auto(
+                    id,
+                    editing,
+                    measure.line,
+                    600.0,
+                    measure.size,
+                    Edges::symmetric(0.0, 0.0),
+                );
                 continue;
-            };
-            ui.text_area_plain_auto(
-                id,
-                editing,
-                measure.line,
-                600.0,
-                measure.size,
-                Edges::symmetric(0.0, 2.0),
-            );
-        } else {
-            ui.markdown_list_item_named(id, source, item, Vec::new());
+            }
         }
+        ui.markdown_list_item_named(id, source, item, Vec::new());
     }
 }
 

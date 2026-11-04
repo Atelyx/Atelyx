@@ -45,6 +45,9 @@ const CODE_BTN_PAD_X: f32 = 6.0;
 const CODE_BTN_PAD_Y: f32 = 2.0;
 /// 表格单元格内边距、分隔线与外边线宽。
 const CELL_PAD_X: f32 = 8.0;
+/// 块内横向滚动条的粗细与贴底间距。
+const HSCROLL_H: f32 = 4.0;
+const HSCROLL_PAD: f32 = 3.0;
 const CELL_PAD_Y: f32 = 4.0;
 const TABLE_LINE: f32 = 1.0;
 /// 任务框边长、圆角与勾线粗细。
@@ -70,12 +73,13 @@ struct Run {
     style: RunStyle,
 }
 
-/// 一行文字：`y` 相对块原点，`x` 已含缩进。
+/// 一行文字：`y` 相对块原点，`x` 已含缩进。`scroll` 为真时随块内横向滚动整体平移。
 struct Line {
     x: f32,
     y: f32,
     height: f32,
     runs: Vec<Run>,
+    scroll: bool,
 }
 
 /// 矩形图元（底色 / 边框 / 圆角）。绘制顺序在文字之下。
@@ -84,6 +88,7 @@ struct Shape {
     fill: Option<PaintColor>,
     stroke: Option<(PaintColor, f32)>,
     radius: Option<f32>,
+    scroll: bool,
 }
 
 /// 描边图元（任务框的勾线）：绘制顺序在矩形之上、文字之下。
@@ -102,6 +107,26 @@ pub(crate) struct Layout {
     /// 任务框的落位：命中按 `id::task:<序>` 交给插件翻转勾选态。
     tasks: Vec<Rect>,
     height: f32,
+    /// 内容的自然宽（含缩进）；大于外框宽时块内横向滚动。
+    content_w: f32,
+    /// 横向滚动内容的可视区（块内坐标）：表格是整块，代码块只有正文区。
+    scroll_clip: Rect,
+}
+
+impl Layout {
+    pub(crate) fn line_count(&self) -> usize {
+        self.lines.len()
+    }
+
+    /// 内容自然宽（含缩进）：横滚偏移的上限按它算。
+    pub(crate) fn content_width(&self) -> f32 {
+        self.content_w
+    }
+}
+
+/// 某行的可见文字长度（行内字节位）。
+pub(crate) fn line_len(layout: &Layout, line: usize) -> usize {
+    layout.lines.get(line).map(|line| line.runs.iter().map(|run| run.text.len()).sum()).unwrap_or(0)
 }
 
 struct CopyHit {
@@ -219,9 +244,24 @@ pub(crate) fn paint(
         soft_wrap,
     );
     ctx.markdown_seen.push((id.to_string(), Arc::clone(&laid)));
+    let clip = clip.intersect(rect);
+    if clip.is_empty() {
+        return;
+    }
+    let max_offset = (laid.content_w - rect.w).max(0.0);
+    let offset = if max_offset > 0.0 {
+        ctx.state.scroll_x.get(id).copied().unwrap_or(0.0).clamp(0.0, max_offset)
+    } else {
+        0.0
+    };
+    let scroll_clip =
+        Rect::new(rect.x + laid.scroll_clip.x, rect.y + laid.scroll_clip.y, laid.scroll_clip.w, laid.scroll_clip.h).intersect(clip);
+    let selection = ctx.state.selection_range(&laid, id).filter(|(from, to)| from < to);
+    ctx.record(id, super::model::Layout::Markdown { rect, content_w: laid.content_w });
     for shape in &laid.shapes {
-        let placed = Rect::new(rect.x + shape.rect.x, rect.y + shape.rect.y, shape.rect.w, shape.rect.h);
-        let visible = placed.intersect(clip);
+        let shift = if shape.scroll { offset } else { 0.0 };
+        let placed = Rect::new(rect.x + shape.rect.x - shift, rect.y + shape.rect.y, shape.rect.w, shape.rect.h);
+        let visible = placed.intersect(if shape.scroll { scroll_clip } else { clip });
         if visible.is_empty() {
             continue;
         }
@@ -248,13 +288,6 @@ pub(crate) fn paint(
             stroke_width: Some(stroke.width),
         });
     }
-    // 选区高亮先画：只画本块自己的选择
-    let selection = ctx
-        .state
-        .selection
-        .as_ref()
-        .filter(|selection| selection.id == id)
-        .map(|selection| selection.range());
     if let Some((from, to)) = selection {
         for (index, line) in laid.lines.iter().enumerate() {
             if index < from.0 || index > to.0 {
@@ -266,19 +299,19 @@ pub(crate) fn paint(
             let end = if index == to.0 { to.1.min(text.len()) } else { text.len() };
             let start = text.floor_char_boundary(start);
             let end = text.floor_char_boundary(end);
+            if end <= start {
+                continue;
+            }
             let low = text::offset_in_line(&mut ctx.metrics, &text, spec, start);
-            let high = if end > start {
-                text::offset_in_line(&mut ctx.metrics, &text, spec, end)
-            } else {
-                low
-            };
+            let high = text::offset_in_line(&mut ctx.metrics, &text, spec, end);
+            let shift = if line.scroll { offset } else { 0.0 };
             let band = Rect::new(
-                rect.x + line.x + low,
+                rect.x + line.x + low - shift,
                 rect.y + line.y,
-                (high - low).max(1.0),
+                high - low,
                 line.height,
             );
-            let visible = band.intersect(clip);
+            let visible = band.intersect(if line.scroll { scroll_clip } else { clip });
             if visible.is_empty() {
                 continue;
             }
@@ -296,16 +329,18 @@ pub(crate) fn paint(
         }
     }
     for line in &laid.lines {
+        let bounds = if line.scroll { scroll_clip } else { clip };
         let y = rect.y + line.y;
-        if y + line.height < clip.y || y > clip.bottom() {
+        if y + line.height < bounds.y || y > bounds.bottom() {
             continue;
         }
-        let mut x = rect.x + line.x;
+        let shift = if line.scroll { offset } else { 0.0 };
+        let mut x = rect.x + line.x - shift;
         for run in &line.runs {
             let width = text::advance(&mut ctx.metrics, &run.text, run.spec);
             if run.style.capsule {
                 let band = Rect::new(x - 1.0, y + line.height * 0.08, width + 2.0, line.height * 0.84);
-                let visible = band.intersect(clip);
+                let visible = band.intersect(bounds);
                 if !visible.is_empty() {
                     ctx.draw(DrawCommand::Rect {
                         x: visible.x,
@@ -322,7 +357,7 @@ pub(crate) fn paint(
             }
             if run.style.strike {
                 let band = Rect::new(x, y + line.height * 0.5, width, 1.0);
-                let visible = band.intersect(clip);
+                let visible = band.intersect(bounds);
                 if !visible.is_empty() {
                     ctx.draw(DrawCommand::Rect {
                         x: visible.x,
@@ -337,20 +372,22 @@ pub(crate) fn paint(
                     });
                 }
             }
-            ctx.draw(DrawCommand::Text {
-                x,
-                y,
-                content: run.text.clone(),
-                size: run.spec.size,
-                color: theme::token(run.style.color),
-                weight: run.spec.weight,
-                family: run.spec.family,
-                family_name: None,
-                italic: run.style.italic,
-                max_width: None,
-                align: None,
-                layout: None,
-            });
+            if let Some((text, draw_x)) = clip_run(&mut ctx.metrics, &run.text, run.spec, x, width, bounds) {
+                ctx.draw(DrawCommand::Text {
+                    x: draw_x,
+                    y,
+                    content: text,
+                    size: run.spec.size,
+                    color: theme::token(run.style.color),
+                    weight: run.spec.weight,
+                    family: run.spec.family,
+                    family_name: None,
+                    italic: run.style.italic,
+                    max_width: None,
+                    align: None,
+                    layout: None,
+                });
+            }
             x += width;
         }
     }
@@ -373,6 +410,97 @@ pub(crate) fn paint(
         let hit = task_hit_id(id, index);
         ctx.hit(&hit, visible, atelyx_plugin_protocol::frame::HitCursor::Pointer);
         ctx.record(&hit, super::model::Layout::Custom);
+    }
+    if max_offset > 0.0 {
+        let track = Rect::new(rect.x + 2.0, rect.bottom() - HSCROLL_PAD - HSCROLL_H, (rect.w - 4.0).max(1.0), HSCROLL_H);
+        let visible = track.intersect(clip);
+        if !visible.is_empty() {
+            ctx.draw(DrawCommand::Rect {
+                x: visible.x,
+                y: visible.y,
+                w: visible.w,
+                h: visible.h,
+                fill: Some(theme::token(ColorToken::Border)),
+                stroke: None,
+                stroke_width: None,
+                corner_radius: Some(HSCROLL_H * 0.5),
+                shadow: None,
+            });
+            let thumb_w = (rect.w / laid.content_w * track.w).clamp(18.0f32.min(track.w), track.w);
+            let thumb_x = track.x + (offset / max_offset) * (track.w - thumb_w);
+            let thumb = Rect::new(thumb_x, track.y, thumb_w, HSCROLL_H).intersect(clip);
+            if !thumb.is_empty() {
+                ctx.draw(DrawCommand::Rect {
+                    x: thumb.x,
+                    y: thumb.y,
+                    w: thumb.w,
+                    h: thumb.h,
+                    fill: Some(theme::token(ColorToken::TextMuted)),
+                    stroke: None,
+                    stroke_width: None,
+                    corner_radius: Some(HSCROLL_H * 0.5),
+                    shadow: None,
+                });
+            }
+            let hit = hbar_hit_id(id);
+            ctx.hit(&hit, visible, atelyx_plugin_protocol::frame::HitCursor::Pointer);
+            ctx.record(
+                &hit,
+                super::model::Layout::ScrollBarX { owner: id.to_string(), track, thumb: thumb_w, max_offset },
+            );
+        }
+    }
+}
+
+/// 把一段文字裁到横向可视区：返回（可见子串, 实际绘制 x）。整段不可见返回 None。
+/// `width` 由调用方量好：只有越界时才需要逐字找切点，常见的不越界路径不重复量算。
+fn clip_run(
+    metrics: &mut Metrics,
+    text: &str,
+    spec: FontSpec,
+    x: f32,
+    width: f32,
+    bounds: Rect,
+) -> Option<(String, f32)> {
+    if x >= bounds.right() || x + width <= bounds.x {
+        return None;
+    }
+    if x >= bounds.x && x + width <= bounds.right() {
+        return Some((text.to_string(), x));
+    }
+    let mut start = 0usize;
+    let mut start_x = x;
+    for (index, ch) in text.char_indices() {
+        let len = ch.len_utf8();
+        let advance = text::advance(metrics, &text[index..index + len], spec);
+        if start_x + advance <= bounds.x {
+            start_x += advance;
+            start = index + len;
+        } else {
+            break;
+        }
+    }
+    if start_x < bounds.x && start < text.len() {
+        let len = text[start..].chars().next().map(char::len_utf8).unwrap_or(0);
+        start_x += text::advance(metrics, &text[start..start + len], spec);
+        start += len;
+    }
+    let mut end = text.len();
+    let mut cursor = start_x;
+    for (offset, ch) in text[start..].char_indices() {
+        let index = start + offset;
+        let len = ch.len_utf8();
+        let advance = text::advance(metrics, &text[index..index + len], spec);
+        if cursor + advance > bounds.right() {
+            end = index;
+            break;
+        }
+        cursor += advance;
+    }
+    if start >= end {
+        None
+    } else {
+        Some((text[start..end].to_string(), start_x))
     }
 }
 
@@ -400,7 +528,23 @@ pub(crate) fn hit(layout: &Layout, metrics: &mut Metrics, x: f32, y: f32) -> Opt
             best = Some((index, gap));
         }
     }
-    let index = best.map(|(index, _)| index).unwrap_or(layout.lines.len() - 1);
+    // 纵向落在行间空隙或块外时取纵向最近的行（块上方落第一行，块下方落末行）
+    let index = best.map(|(index, _)| index).unwrap_or_else(|| {
+        let mut nearest = 0usize;
+        let mut distance = f32::INFINITY;
+        for (index, line) in layout.lines.iter().enumerate() {
+            let gap = if y < line.y {
+                line.y - y
+            } else {
+                (y - (line.y + line.height)).max(0.0)
+            };
+            if gap < distance {
+                distance = gap;
+                nearest = index;
+            }
+        }
+        nearest
+    });
     let line = &layout.lines[index];
     let text = line_text(line);
     let spec = line.runs.first().map(|run| run.spec).unwrap_or(FontSpec { size: 13.0, weight: None, family: None });
@@ -450,6 +594,11 @@ fn task_hit_id(id: &str, index: usize) -> String {
     format!("{id}::task:{index}")
 }
 
+/// 横向滚动条的命中 id：`<块 id>::hbar`。
+fn hbar_hit_id(id: &str) -> String {
+    format!("{id}::hbar")
+}
+
 /// 排版器：随块递归累积行与图元，坐标都相对块原点。
 struct Builder<'a> {
     metrics: &'a mut Metrics,
@@ -466,6 +615,10 @@ struct Builder<'a> {
     copies: Vec<CopyHit>,
     tasks: Vec<Rect>,
     height: f32,
+    /// 可横向滚动内容的自然右缘（块内坐标）。
+    content_right: f32,
+    /// 横向滚动内容的可视区（块内坐标，多段取并集）。
+    scroll_clip: Rect,
 }
 
 fn layout(
@@ -492,9 +645,12 @@ fn layout(
         copies: Vec::new(),
         tasks: Vec::new(),
         height: 0.0,
+        content_right: 0.0,
+        scroll_clip: Rect::default(),
     };
     let mut previous = 0usize;
     builder.blocks(&document.blocks, width.max(1.0), 0, &mut previous);
+    let content_w = width.max(builder.content_right);
     Layout {
         lines: builder.lines,
         shapes: builder.shapes,
@@ -502,6 +658,12 @@ fn layout(
         copies: builder.copies,
         tasks: builder.tasks,
         height: builder.height,
+        content_w,
+        scroll_clip: if builder.scroll_clip.is_empty() {
+            Rect::new(0.0, 0.0, width, builder.height)
+        } else {
+            builder.scroll_clip
+        },
     }
 }
 
@@ -577,6 +739,7 @@ impl Builder<'_> {
                     fill: Some(theme::token(ColorToken::Border)),
                     stroke: None,
                     radius: None,
+                    scroll: false,
                 });
             }
             MarkdownBlock::List { ordered, items, .. } => {
@@ -597,6 +760,7 @@ impl Builder<'_> {
                     fill: Some(theme::token(ColorToken::Border)),
                     stroke: None,
                     radius: None,
+                    scroll: false,
                 });
                 self.height += 1.0 + GAP_AROUND_HR;
             }
@@ -672,6 +836,7 @@ impl Builder<'_> {
                     spec,
                     style: RunStyle { color: ColorToken::TextSecondary, italic: false, strike: false, capsule: false },
                 }],
+                scroll: false,
             });
         }
         self.flow(runs, indent + marker_w, (width - indent - marker_w).max(1.0), line);
@@ -703,6 +868,7 @@ impl Builder<'_> {
             fill,
             stroke: (!checked).then(|| (theme::token(ColorToken::Border), 1.0)),
             radius: Some(TASK_RADIUS),
+            scroll: false,
         });
         if checked {
             let color = theme::token(ColorToken::Surface);
@@ -734,6 +900,7 @@ impl Builder<'_> {
             fill: Some(theme::token(ColorToken::Surface)),
             stroke: Some((theme::token(ColorToken::Border), CODE_BORDER)),
             radius: Some(CODE_RADIUS),
+            scroll: false,
         });
         // 头与正文之间的分隔线
         self.shapes.push(Shape {
@@ -741,23 +908,28 @@ impl Builder<'_> {
             fill: Some(theme::token(ColorToken::Border)),
             stroke: None,
             radius: None,
+            scroll: false,
         });
         let line = (mono.size * CODE_LINE).max(mono.size);
         let mut y = start + head + CODE_BODY_PAD;
+        let mut right = indent + width;
         for source in code.trim_end_matches('\n').lines().take(CODE_MAX_LINES) {
-            let shown = text::elide(self.metrics, source, mono, (width - CODE_BODY_PAD * 2.0).max(1.0));
+            right = right.max(indent + CODE_BODY_PAD + self.metrics.width(source, mono) + CODE_BODY_PAD);
             self.lines.push(Line {
                 x: indent + CODE_BODY_PAD,
                 y,
                 height: line,
                 runs: vec![Run {
-                    text: shown,
+                    text: source.to_string(),
                     spec: mono,
                     style: RunStyle { color: ColorToken::Text, italic: false, strike: false, capsule: false },
                 }],
+                scroll: true,
             });
             y += line;
         }
+        self.content_right = self.content_right.max(right);
+        self.expand_scroll(Rect::new(indent, start + head, width, body_h));
         self.height = start + total;
         let _ = depth;
     }
@@ -778,6 +950,7 @@ impl Builder<'_> {
                 spec,
                 style: RunStyle { color: ColorToken::TextMuted, italic: false, strike: false, capsule: false },
             }],
+            scroll: false,
         });
         let button = FontSpec { size: CODE_HEAD_SIZE, weight: None, family: None };
         let text_w = self.metrics.width("复制", button);
@@ -793,6 +966,7 @@ impl Builder<'_> {
                 spec: button,
                 style: RunStyle { color: ColorToken::TextSecondary, italic: false, strike: false, capsule: false },
             }],
+            scroll: false,
         });
         self.copies.push(CopyHit {
             rect: Rect::new(btn_x, start + CODE_HEAD_PAD_Y - CODE_BTN_PAD_Y, btn_w, btn_h),
@@ -807,17 +981,19 @@ impl Builder<'_> {
         let line = (mono.size * CODE_LINE).max(mono.size);
         let start = self.height;
         let mut y = start + CODE_BODY_PAD;
+        let mut right = indent + width;
         for source in content.lines() {
-            let shown = text::elide(self.metrics, source, mono, (width - CODE_BODY_PAD * 2.0).max(1.0));
+            right = right.max(indent + CODE_BODY_PAD + self.metrics.width(source, mono) + CODE_BODY_PAD);
             self.lines.push(Line {
                 x: indent + CODE_BODY_PAD,
                 y,
                 height: line,
                 runs: vec![Run {
-                    text: shown,
+                    text: source.to_string(),
                     spec: mono,
                     style: RunStyle { color: ColorToken::TextMuted, italic: false, strike: false, capsule: false },
                 }],
+                scroll: true,
             });
             y += line;
         }
@@ -827,7 +1003,10 @@ impl Builder<'_> {
             fill: Some(theme::token(ColorToken::Surface)),
             stroke: Some((theme::token(ColorToken::Border), CODE_BORDER)),
             radius: Some(4.0),
+            scroll: false,
         });
+        self.content_right = self.content_right.max(right);
+        self.expand_scroll(Rect::new(indent, start, width, body_h));
         self.height = start + body_h;
     }
 
@@ -836,40 +1015,88 @@ impl Builder<'_> {
         let cols = header.len().max(rows.iter().map(Vec::len).max().unwrap_or(0)).max(1);
         let spec = FontSpec { size: self.base_size(), weight: None, family: None };
         let line = self.line_height(spec, PROSE_LINE);
-        let cell_w = width / cols as f32;
+        // 先把每格的排版片段算出来，才能按最宽格定列宽（不换行、不裁字，超宽由块内横向滚动承接）
+        let mut parsed: Vec<(bool, Vec<Vec<Run>>)> = Vec::with_capacity(rows.len() + 1);
+        parsed.push((true, self.table_row_runs(header, cols, spec, true)));
+        for row in rows {
+            parsed.push((false, self.table_row_runs(row, cols, spec, false)));
+        }
+        let mut widest = 0.0_f32;
+        for (_, cells) in &parsed {
+            for runs in cells {
+                widest = widest.max(self.runs_width(runs));
+            }
+        }
+        let cell_w = (width / cols as f32).max(widest + CELL_PAD_X * 2.0);
         let start = self.height;
         let mut y = start;
-        let draw_row = |builder: &mut Self, y: f32, cells: &[atelyx_format::markdown::MarkdownTableCell], head: bool| {
+        for (head, cells) in parsed {
             let row_h = line + CELL_PAD_Y * 2.0;
-            for column in 0..cols {
+            for (column, runs) in cells.into_iter().enumerate() {
                 let x = indent + column as f32 * cell_w;
-                builder.shapes.push(Shape {
+                self.shapes.push(Shape {
                     rect: Rect::new(x, y, cell_w, row_h),
                     fill: head.then(|| theme::token(ColorToken::Surface)),
                     stroke: Some((theme::token(ColorToken::Border), TABLE_LINE)),
                     radius: None,
+                    scroll: true,
                 });
-                let Some(cell) = cells.get(column) else { continue };
-                if cell.to <= cell.from {
+                if runs.is_empty() {
                     continue;
                 }
-                let inline = parse_inline(builder.source, cell.from, cell.to, &builder.options);
-                let mut runs = builder.runs(&inline, spec, ColorToken::Text);
+                let runs = align_runs(
+                    runs,
+                    aligns.get(column).map(String::as_str),
+                    cell_w - CELL_PAD_X * 2.0,
+                    self.metrics,
+                    spec,
+                );
+                self.lines.push(Line {
+                    x: x + CELL_PAD_X,
+                    y: y + CELL_PAD_Y,
+                    height: line,
+                    runs,
+                    scroll: true,
+                });
+            }
+            y += row_h;
+        }
+        self.content_right = self.content_right.max(indent + cell_w * cols as f32);
+        self.expand_scroll(Rect::new(indent, start, width, y - start));
+        self.height = y;
+    }
+
+    fn table_row_runs(&self, cells: &[atelyx_format::markdown::MarkdownTableCell], cols: usize, spec: FontSpec, head: bool) -> Vec<Vec<Run>> {
+        (0..cols)
+            .map(|column| {
+                let Some(cell) = cells.get(column).filter(|cell| cell.to > cell.from) else { return Vec::new() };
+                let inline = parse_inline(self.source, cell.from, cell.to, &self.options);
+                let mut runs = self.runs(&inline, spec, ColorToken::Text);
                 if head {
                     for run in &mut runs {
                         run.spec.weight = Some(TextWeight::SemiBold);
                     }
                 }
-                let runs = align_runs(runs, aligns.get(column).map(String::as_str), cell_w - CELL_PAD_X * 2.0, builder.metrics, spec);
-                builder.lines.push(Line { x: x + CELL_PAD_X, y: y + CELL_PAD_Y, height: line, runs });
-            }
-            y + row_h
+                runs
+            })
+            .collect()
+    }
+
+    fn runs_width(&mut self, runs: &[Run]) -> f32 {
+        runs.iter().map(|run| self.metrics.width(&run.text, run.spec)).sum()
+    }
+
+    /// 把一段横向内容并进块内滚动可视区（多段取并集）。
+    fn expand_scroll(&mut self, rect: Rect) {
+        self.scroll_clip = if self.scroll_clip.is_empty() {
+            rect
+        } else {
+            let left = self.scroll_clip.x.min(rect.x);
+            let top = self.scroll_clip.y.min(rect.y);
+            let right = self.scroll_clip.right().max(rect.right());
+            let bottom = self.scroll_clip.bottom().max(rect.bottom());
+            Rect::new(left, top, right - left, bottom - top)
         };
-        y = draw_row(self, y, header, true);
-        for row in rows {
-            y = draw_row(self, y, row, false);
-        }
-        self.height = y;
     }
 
     /// 行内片段 → 带样式的绘制片段（强调 / 斜体 / 删除线 / 等宽 / 链接 / 标签胶囊 / 图片替代文字）。
@@ -1003,7 +1230,7 @@ impl Builder<'_> {
             return;
         }
         let runs = std::mem::take(current);
-        self.lines.push(Line { x, y: self.height, height: line_height, runs });
+        self.lines.push(Line { x, y: self.height, height: line_height, runs, scroll: false });
         self.height += line_height;
     }
 
@@ -1030,6 +1257,7 @@ impl Builder<'_> {
             fill: None,
             stroke: None,
             radius: None,
+            scroll: false,
         });
         self.height = start + height;
         let _ = (parse_len(spec_w.as_deref()), depth);
@@ -1249,7 +1477,7 @@ mod tests {
     }
 
     #[test]
-    fn code_blocks_carry_a_copy_region_and_clip_long_lines() {
+    fn code_blocks_carry_a_copy_region_and_keep_their_source() {
         let theme = Theme::default();
         let mut metrics = Metrics::default();
         let source = "```rust\nlet a = 1;\n```";

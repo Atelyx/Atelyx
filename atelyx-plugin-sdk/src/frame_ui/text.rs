@@ -306,9 +306,15 @@ pub(crate) fn advance(metrics: &mut Metrics, text: &str, spec: FontSpec) -> f32 
 
 /// 软换行后的整块高度：只数行数，不建行表。
 pub(crate) fn wrapped_height(metrics: &mut Metrics, text: &str, spec: FontSpec, width: f32) -> f32 {
+    let line = line_height(metrics, spec);
+    wrapped_height_with_line(metrics, text, spec, width, line)
+}
+
+/// 软换行后的整块高度，行高由调用方给定（输入框可与正文行距对齐）。
+pub(crate) fn wrapped_height_with_line(metrics: &mut Metrics, text: &str, spec: FontSpec, width: f32, line: f32) -> f32 {
     let mut lines = 0usize;
     wrap_each(metrics, text, spec, width, |_, _| lines += 1);
-    lines as f32 * line_height(metrics, spec)
+    lines as f32 * line
 }
 
 /// 单行文字绘制：`max_width` 给定时文字按该宽度换行（只用于输入框这类定宽单行控件）。

@@ -143,7 +143,7 @@ async fn main() {
             let frame = revealed.expect("揭示标题");
             let height = frame.hits.iter().find(|hit| hit.id == "note:block:0").map_or(0.0, |hit| hit.h);
             println!("标题揭示高度（块后一根空行）：{height:.1}");
-            assert!((32.0..48.0).contains(&height), "标题 + 一根空行应为两行（高度 {height}）");
+            assert!((32.0..49.0).contains(&height), "标题 + 一根空行应为两行（高度 {height}）");
             // 清掉活动块，块间空行输入面才会重新出现
             if let Some(hit) = frame.hits.iter().find(|hit| hit.id == "note:block:1").cloned() {
                 click_hit(&runtime, &hit);

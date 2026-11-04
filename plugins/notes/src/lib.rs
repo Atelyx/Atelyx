@@ -348,25 +348,39 @@ impl NotesPlugin {
         }
     }
 
-    /// 只读档双击正文：进入预览编辑并揭示该块（列表块只切模式，再按项揭示）。
+    /// 只读档双击正文：进入预览编辑并揭示落点（块或列表项；列表按项揭示）。
     async fn on_pointer_double(&self, ctx: &Context, hit: Option<&str>) {
-        let Some(index) = hit.and_then(block_index) else { return };
-        let list = {
+        let Some(hit) = hit else { return };
+        // 任务框的命中 id 是 `<项 id>::task:<序>`：揭示落在整项上
+        let hit = hit.split_once("::task:").map_or(hit, |(id, _)| id);
+        if let Some((index, item)) = item_index(hit) {
+            {
+                let mut model = self.model.lock().unwrap();
+                if model.mode != Mode::Read || !model.can_write {
+                    return;
+                }
+                model.mode = Mode::Edit;
+                model.active_block = None;
+                model.active_item = Some((index, item));
+            }
+            self.focus_item(ctx, index, item, None).await;
+            return;
+        }
+        let Some(index) = block_index(hit) else { return };
+        {
             let mut model = self.model.lock().unwrap();
             if model.mode != Mode::Read || !model.can_write {
                 return;
             }
+            // 列表块按下标揭示没有整块输入面，双击落点只能来自逐项命中
+            if !model.blocks.get(index).is_some_and(|block| block.items.is_empty()) {
+                return;
+            }
             model.mode = Mode::Edit;
-            let list = model.blocks.get(index).is_some_and(|block| !block.items.is_empty());
-            model.active_block = if list { None } else { Some(index) };
+            model.active_block = Some(index);
             model.active_item = None;
-            list
-        };
-        if list {
-            self.render(ctx).await;
-        } else {
-            self.focus_block(ctx, index, None).await;
         }
+        self.focus_block(ctx, index, None).await;
     }
 
     /// 聚焦一个块输入面：`caret` 缺省落块内容尾（源码区间还含块后空行，不能取 `value.len()`）。
@@ -995,6 +1009,8 @@ impl NotesPlugin {
     }
 
     async fn on_double_click(&self, ctx: &Context, id: &str) {
+        // 任务框命中 id 附带 `::task:<序>`，揭示按所属块算
+        let id = id.split_once("::task:").map_or(id, |(id, _)| id);
         let Some(index) = block_index(id) else { return };
         let mode = self.model.lock().unwrap().mode;
         if mode == Mode::Read {
@@ -1024,7 +1040,8 @@ impl NotesPlugin {
     async fn toggle_task(&self, ctx: &Context, block: usize, item: usize) {
         let (next, at) = {
             let model = self.model.lock().unwrap();
-            if !model.can_write {
+            // 只读档不写盘：勾选态只在预览编辑 / 源码编辑档可翻转
+            if model.mode == Mode::Read || !model.can_write {
                 return;
             }
             let Some((from, _)) = model.item_source(block, item) else { return };

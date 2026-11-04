@@ -5,8 +5,7 @@ use atelyx_plugin_protocol::frame::{Key, Modifiers, MouseButton, NamedKey};
 use atelyx_plugin_protocol::method::MAX_MEASURE_ITEMS;
 
 use super::geom::Rect;
-use super::metrics::Metrics;
-use super::model::{Drag, FontSpec, InputState, Layout, Press, TextSelection, UiState};
+use super::model::{BlockPos, Drag, FontSpec, InputState, Layout, Press, TextSelection, UiState};
 use super::text;
 use crate::frame_ui::UiEvent;
 use crate::Context;
@@ -78,8 +77,8 @@ pub(crate) async fn handle(
             state.hovered = None;
             state.clear_hint();
         }
-        FrameInput::Wheel { x, y, delta_y, .. } => {
-            if let Some(event) = wheel(state, *x, *y, *delta_y) {
+        FrameInput::Wheel { x, y, delta_x, delta_y, .. } => {
+            if let Some(event) = wheel(state, *x, *y, *delta_x, *delta_y) {
                 events.push(event);
             }
         }
@@ -220,13 +219,13 @@ async fn pointer_down(
             item.preedit.clear();
             state.press = Some(Press { id: id.to_string(), from_input: true });
         }
-        Layout::TextArea { inner, font, value: shown, marks, .. } => {
+        Layout::TextArea { inner, font, value: shown, marks, line, .. } => {
             // 可视首行取决于落点前的光标所在行：先按旧光标换算，再改光标与焦点
             let current = value_of(id).unwrap_or(shown);
             let was_focused = state.focus.as_deref() == Some(id);
             let old = state.inputs.get(id).map(|item| item.caret).unwrap_or(0);
             let caret =
-                area_caret_at(state, ctx, id, inner, font, &current, x, y, old, was_focused).await;
+                area_caret_at(state, ctx, id, inner, font, line, &current, x, y, old, was_focused).await;
             // 点在标记（`#` 引用标签这类整段实体）内部 = 整段选中，之后一个退格删掉整条
             let (caret, anchor) = match mark_at(&marks, caret) {
                 Some((start, end)) => (end, start),
@@ -253,10 +252,11 @@ async fn pointer_down(
         Layout::Button | Layout::Option { .. } | Layout::Copy { .. } => {
             state.press = Some(Press { id: id.to_string(), from_input: false });
         }
-        Layout::Markdown { rect } => {
-            // 只读正文里按下即起选：拖过多少选多少，同一次按下内延伸
+        Layout::Markdown { rect, .. } => {
+            // 只读正文里按下即起选：拖过多少选多少，同一次按下内可跨块延伸
             let at = markdown_point(state, id, rect, x, y).unwrap_or((0, 0));
-            state.selection = Some(TextSelection { id: id.to_string(), anchor: at, focus: at });
+            let pos = BlockPos { id: id.to_string(), line: at.0, byte: at.1 };
+            state.selection = Some(TextSelection { anchor: pos.clone(), focus: pos });
             state.press = Some(Press { id: id.to_string(), from_input: true });
         }
         Layout::Custom => {
@@ -276,19 +276,58 @@ async fn pointer_down(
         Layout::ScrollBar { scroll, track, thumb, max_offset } => {
             // 滚动条按下即可跳转，并进入拖动：移动继续按落点改偏移
             state.press = None;
-            state.drag_bar = Some(scroll.clone());
+            state.drag_bar = Some(id.to_string());
             let offset = bar_offset(track, thumb, max_offset, y);
             state.scroll.insert(scroll.clone(), offset);
             events.push(UiEvent::Scroll { id: scroll, offset, max_offset });
         }
+        Layout::ScrollBarX { owner, track, thumb, max_offset } => {
+            state.press = None;
+            state.drag_bar = Some(id.to_string());
+            let offset = bar_offset_x(track, thumb, max_offset, x);
+            if (state.scroll_x.get(&owner).copied().unwrap_or(0.0) - offset).abs() >= 0.01 {
+                state.scroll_x.insert(owner.clone(), offset);
+                events.push(UiEvent::Scroll { id: owner, offset, max_offset });
+            }
+        }
     }
 }
 
-/// 只读正文里的落点 → （行序，行内字节位）：坐标先换算到块本地再按版面命中。
+/// 只读正文里的落点 → （行序，行内字节位）：坐标先换算到块本地（含横向滚动偏移）再按版面命中。
 fn markdown_point(state: &mut UiState, id: &str, rect: Rect, x: f32, y: f32) -> Option<(usize, usize)> {
     let layout = state.markdown_last.get(id)?.clone();
-    let mut metrics = Metrics::default();
-    super::markdown::hit(&layout, &mut metrics, x - rect.x, y - rect.y)
+    // 与绘制同一上限：窄于内容自然宽时偏移才生效，避免把越界偏移算进落点
+    let max_offset = (layout.content_width() - rect.w).max(0.0);
+    let offset = state.scroll_x.get(id).copied().unwrap_or(0.0).clamp(0.0, max_offset);
+    super::markdown::hit(&layout, &mut state.metrics, x - rect.x + offset, y - rect.y)
+}
+
+/// 指针落在哪个 Markdown 块：优先当前命中 id，落在块间空白时取纵向最近的块。
+fn markdown_under(state: &UiState, hit: Option<&str>, x: f32, y: f32) -> Option<(String, Rect)> {
+    if let Some(id) = hit {
+        if let Some(Layout::Markdown { rect, .. }) = state.layouts.get(id) {
+            return Some((id.to_string(), *rect));
+        }
+    }
+    let mut best: Option<(String, Rect, f32)> = None;
+    for (id, layout) in &state.layouts {
+        let Layout::Markdown { rect, .. } = layout else { continue };
+        let gap = if y < rect.y {
+            rect.y - y
+        } else if y > rect.bottom() {
+            y - rect.bottom()
+        } else if x < rect.x {
+            rect.x - x
+        } else if x > rect.right() {
+            x - rect.right()
+        } else {
+            0.0
+        };
+        if best.as_ref().is_none_or(|(_, _, nearest)| gap < *nearest) {
+            best = Some((id.clone(), *rect, gap));
+        }
+    }
+    best.map(|(id, rect, _)| (id, rect))
 }
 
 fn pointer_up(state: &mut UiState, x: f32, y: f32, hit: Option<&str>, events: &mut Vec<UiEvent>) {
@@ -343,17 +382,26 @@ async fn pointer_move(
     value_of: &impl Fn(&str) -> Option<String>,
     events: &mut Vec<UiEvent>,
 ) {
-    if let Some(scroll) = state.drag_bar.clone() {
-        let bar = super::widgets::scrollbar_id(&scroll);
-        if let Some(Layout::ScrollBar { track, thumb, max_offset, .. }) = state.layouts.get(&bar).cloned() {
-            let offset = bar_offset(track, thumb, max_offset, y);
-            if (state.scroll.get(&scroll).copied().unwrap_or(0.0) - offset).abs() >= 0.01 {
-                state.scroll.insert(scroll.clone(), offset);
-                events.push(UiEvent::Scroll { id: scroll, offset, max_offset });
+    if let Some(bar_id) = state.drag_bar.clone() {
+        match state.layouts.get(&bar_id).cloned() {
+            Some(Layout::ScrollBar { scroll, track, thumb, max_offset }) => {
+                let offset = bar_offset(track, thumb, max_offset, y);
+                if (state.scroll.get(&scroll).copied().unwrap_or(0.0) - offset).abs() >= 0.01 {
+                    state.scroll.insert(scroll.clone(), offset);
+                    events.push(UiEvent::Scroll { id: scroll, offset, max_offset });
+                }
+                return;
             }
-            return;
+            Some(Layout::ScrollBarX { owner, track, thumb, max_offset }) => {
+                let offset = bar_offset_x(track, thumb, max_offset, x);
+                if (state.scroll_x.get(&owner).copied().unwrap_or(0.0) - offset).abs() >= 0.01 {
+                    state.scroll_x.insert(owner.clone(), offset);
+                    events.push(UiEvent::Scroll { id: owner, offset, max_offset });
+                }
+                return;
+            }
+            _ => state.drag_bar = None,
         }
-        state.drag_bar = None;
     }
     // 自绘子区的拖拽不看落点命中：手指常常拖出子区，位移才是语义
     if let Some(mut drag) = state.drag.take() {
@@ -369,13 +417,14 @@ async fn pointer_move(
         state.drag = Some(drag);
         return;
     }
-    // 只读正文里按住拖动：落点换算成行列，延伸当前选择
+    // 只读正文里按住拖动：落点换算成行列，跨块时按块序延伸当前选择
     if let Some(press) = state.press.clone().filter(|press| press.from_input) {
-        if let Some(Layout::Markdown { rect }) = state.layouts.get(&press.id).cloned() {
-            if hit == Some(press.id.as_str()) {
-                if let Some(at) = markdown_point(state, &press.id, rect, x, y) {
-                    if let Some(selection) = state.selection.as_mut().filter(|sel| sel.id == press.id) {
-                        selection.focus = at;
+        if matches!(state.layouts.get(&press.id), Some(Layout::Markdown { .. })) {
+            if let Some((target_id, rect)) = markdown_under(state, hit, x, y) {
+                if let Some(at) = markdown_point(state, &target_id, rect, x, y) {
+                    let pos = BlockPos { id: target_id, line: at.0, byte: at.1 };
+                    if let Some(selection) = state.selection.as_mut() {
+                        selection.focus = pos;
                     }
                 }
             }
@@ -396,10 +445,10 @@ async fn pointer_move(
             let current = value_of(&press.id).unwrap_or(shown);
             caret_at(state, ctx, inner, font, &current, x).await
         }
-        Layout::TextArea { inner, font, value: shown, .. } => {
+        Layout::TextArea { inner, font, value: shown, line, .. } => {
             let current = value_of(&press.id).unwrap_or(shown);
             let old = state.inputs.get(&press.id).map(|item| item.caret).unwrap_or(0);
-            area_caret_at(state, ctx, &press.id, inner, font, &current, x, y, old, true).await
+            area_caret_at(state, ctx, &press.id, inner, font, line, &current, x, y, old, true).await
         }
         _ => return,
     };
@@ -415,8 +464,15 @@ fn bar_offset(track: Rect, thumb: f32, max_offset: f32, y: f32) -> f32 {
     ratio * max_offset
 }
 
+/// 横向滚动条落点 → 偏移。
+fn bar_offset_x(track: Rect, thumb: f32, max_offset: f32, x: f32) -> f32 {
+    let travel = (track.w - thumb).max(1.0);
+    let ratio = ((x - track.x - thumb / 2.0) / travel).clamp(0.0, 1.0);
+    ratio * max_offset
+}
+
 /// 滚轮改滚动偏移：增量是像素（宿主已把「行」换算成像素），按光标所在的最内层滚动容器走。
-fn wheel(state: &mut UiState, x: f32, y: f32, delta_y: f32) -> Option<UiEvent> {
+fn wheel(state: &mut UiState, x: f32, y: f32, delta_x: f32, delta_y: f32) -> Option<UiEvent> {
     // 浮层打开时滚轮只作用于浮层内：落点不在浮层上即丢弃，也不把滚动漏给下层列表
     if !state.overlays.is_empty() && !state.overlays.iter().any(|rect| rect.contains(x, y)) {
         return None;
@@ -426,14 +482,14 @@ fn wheel(state: &mut UiState, x: f32, y: f32, delta_y: f32) -> Option<UiEvent> {
         .layouts
         .iter()
         .filter_map(|(id, layout)| match layout {
-            Layout::TextArea { inner, font, value, .. } if inner.contains(x, y) => {
-                Some((id.clone(), *inner, *font, value.clone()))
+            Layout::TextArea { inner, font, value, line, .. } if inner.contains(x, y) => {
+                Some((id.clone(), *inner, *font, value.clone(), *line))
             }
             _ => None,
         })
         .min_by(|a, b| (a.1.w * a.1.h).total_cmp(&(b.1.w * b.1.h)));
-    if let Some((id, inner, font, value)) = area {
-        let content = text::wrapped_height(&mut state.metrics, &value, font, inner.w);
+    if let Some((id, inner, font, value, line)) = area {
+        let content = text::wrapped_height_with_line(&mut state.metrics, &value, font, inner.w, line);
         let max_offset = (content - inner.h).max(0.0);
         if max_offset > 0.5 {
             let item = state.inputs.entry(id).or_default();
@@ -441,7 +497,29 @@ fn wheel(state: &mut UiState, x: f32, y: f32, delta_y: f32) -> Option<UiEvent> {
             return None;
         }
     }
-    // 嵌套滚动区取面积最小者（最内层）：否则滚动会作用到外层容器上
+    // 光标落在块内超宽的 Markdown（表格 / 代码块）上：横向增量先滚块内，不滚整篇
+    if delta_x.abs() > 0.01 {
+        let target = state
+            .layouts
+            .iter()
+            .filter_map(|(id, layout)| match layout {
+                Layout::Markdown { rect, content_w } if rect.contains(x, y) && *content_w > rect.w + 0.5 => {
+                    Some((id.clone(), *rect, *content_w))
+                }
+                _ => None,
+            })
+            .min_by(|a, b| (a.1.w * a.1.h).total_cmp(&(b.1.w * b.1.h)));
+        if let Some((id, rect, content_w)) = target {
+            let max_offset = (content_w - rect.w).max(0.0);
+            let current = state.scroll_x.get(&id).copied().unwrap_or(0.0);
+            let next = (current + delta_x).clamp(0.0, max_offset);
+            if (next - current).abs() >= 0.01 {
+                state.scroll_x.insert(id.clone(), next);
+                return Some(UiEvent::Scroll { id, offset: next, max_offset });
+            }
+        }
+    }
+
     let (id, content, viewport) = state
         .layouts
         .iter()
@@ -1079,6 +1157,7 @@ async fn area_caret_at(
     id: &str,
     inner: Rect,
     font: FontSpec,
+    line_height: f32,
     value: &str,
     x: f32,
     y: f32,
@@ -1087,7 +1166,6 @@ async fn area_caret_at(
 ) -> usize {
     refill(state, ctx, value, font, inner.w).await;
     let lines = text::lines(&mut state.metrics, value, font, inner.w);
-    let line_height = state.metrics.measure("", font, None).height.max(1.0);
     let stored = state.inputs.get(id).map(|item| item.scroll).unwrap_or(0.0);
     let scroll = text::area_scroll(
         stored,

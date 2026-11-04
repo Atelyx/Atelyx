@@ -48,6 +48,8 @@ pub(crate) enum Layout {
         value: String,
         enter_submits: bool,
         marks: Vec<(usize, usize)>,
+        /// 内部排版行高（光标落点与绘制同一口径）。
+        line: f32,
     },
     Select { options: usize },
     Checkbox,
@@ -57,12 +59,15 @@ pub(crate) enum Layout {
     Option { select: String, index: usize },
     /// 滚动条：按下 / 拖动按纵向落点换算偏移（内部命中 id，插件看不到）。
     ScrollBar { scroll: String, track: Rect, thumb: f32, max_offset: f32 },
+    /// 横向滚动条：`owner` = 横向滚动的 Markdown 块 id（偏移记在 `scroll_x`）。
+    ScrollBarX { owner: String, track: Rect, thumb: f32, max_offset: f32 },
     /// 自绘子区：语义与按钮一致（按下再抬起算一次点击）。
     Custom,
     /// 控件层自持的复制钮（代码块头）：按下即写剪贴板，插件不必知道这次点击。
     Copy { text: String },
     /// 只读 Markdown 块：区内可拖选文字（`rect` 是块的外框，落点按版面换算到行列）。
-    Markdown { rect: Rect },
+    /// `content_w` = 内容的自然宽：大于外框宽时块内可横向滚动。
+    Markdown { rect: Rect, content_w: f32 },
 }
 
 /// 单个输入框的编辑态（文本本身由插件持有，这里只记光标与选区）。
@@ -107,23 +112,19 @@ pub(crate) struct Drag {
     pub started: bool,
 }
 
-/// 一段文本选择：块 id + 起点 / 终点（行序，行内字节位）。
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct TextSelection {
+/// 只读正文里的一个落点：块 id + 行序 + 行内字节位。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct BlockPos {
     pub id: String,
-    pub anchor: (usize, usize),
-    pub focus: (usize, usize),
+    pub line: usize,
+    pub byte: usize,
 }
 
-impl TextSelection {
-    /// 选择区间的规范序（起点在前）。
-    pub(crate) fn range(&self) -> ((usize, usize), (usize, usize)) {
-        if self.anchor <= self.focus {
-            (self.anchor, self.focus)
-        } else {
-            (self.focus, self.anchor)
-        }
-    }
+/// 一段文本选择：两个落点可跨块。块的先后由本帧绘制序（`markdown_order`）决定。
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct TextSelection {
+    pub anchor: BlockPos,
+    pub focus: BlockPos,
 }
 
 /// 悬停提示的待发状态：指针停住的那个控件与起始时刻。
@@ -144,10 +145,12 @@ pub(crate) struct UiState {
     pub hints: HashMap<String, String>,
     /// 指针停住的那个控件与起始时刻（停够 [`HINT_DELAY`] 即出提示）。
     pub hint: Option<HintHover>,
-    /// 当前文本选择（只在一个 Markdown 块内）。
+    /// 当前文本选择（两个落点可跨块）。
     pub selection: Option<TextSelection>,
     /// 各 Markdown 块最近一次绘制的版面：选择命中与复制按它算。
     pub markdown_last: HashMap<String, Arc<markdown::Layout>>,
+    /// 最近一帧 Markdown 块的绘制序：跨块选择的先后按它比较。
+    pub markdown_order: Vec<String>,
     /// 最近一次指针位置（面本地）：提示贴指针下沿画。
     pub pointer: Option<(f32, f32)>,
     pub metrics: Metrics,
@@ -169,6 +172,8 @@ pub(crate) struct UiState {
     pub scroll_max: HashMap<String, f32>,
     /// 各滚动容器上一帧是否声明贴底跟随（由关转开的那一帧跳到终点）。
     pub follow_prev: HashMap<String, bool>,
+    /// 各 Markdown 块的横向滚动偏移（自然宽超出外框宽时才有意义）。
+    pub scroll_x: HashMap<String, f32>,
     /// Markdown 版面缓存（键含内容、宽度与量算代次）：滚动时长内容不必每帧重排。
     pub markdown_layouts: Arc<markdown::LayoutCache>,
     /// 上次已提交的帧与所在面：同内容帧不再提交（宿主每收一帧都要重投影并整窗重绘）。
@@ -198,6 +203,7 @@ impl Default for UiState {
             pointer: None,
             selection: None,
             markdown_last: HashMap::new(),
+            markdown_order: Vec::new(),
             metrics: Metrics::default(),
             layouts: HashMap::new(),
             focusables: Vec::new(),
@@ -212,6 +218,7 @@ impl Default for UiState {
             scroll: HashMap::new(),
             scroll_max: HashMap::new(),
             follow_prev: HashMap::new(),
+            scroll_x: HashMap::new(),
             markdown_layouts: Arc::default(),
             submitted: None,
             resize_pending: false,
@@ -257,12 +264,49 @@ impl UiState {
         self.hint.as_ref().is_some_and(|hint| hint.since.elapsed() < HINT_DELAY)
     }
 
-    /// 复制选择区内的文字（按版面逐行取，不含 Markdown 标记）。
+    /// 复制选择区内的文字（按块序逐块取，不含 Markdown 标记；块间用一个换行拼接）。
     pub(crate) fn selection_text(&self) -> Option<String> {
         let selection = self.selection.as_ref()?;
-        let layout = self.markdown_last.get(&selection.id)?;
-        let text = markdown::selected_text(layout, selection.range());
+        let (from_rank, to_rank, from, to) = self.selection_ends(selection)?;
+        let mut parts: Vec<String> = Vec::new();
+        for (rank, id) in self.markdown_order.iter().enumerate() {
+            if rank < from_rank || rank > to_rank {
+                continue;
+            }
+            let Some(layout) = self.markdown_last.get(id) else { continue };
+            let Some(range) = local_selection_range(layout, rank, from_rank, to_rank, from, to) else { continue };
+            let text = markdown::selected_text(layout, range);
+            if !text.is_empty() {
+                parts.push(text);
+            }
+        }
+        let text = parts.join("\n");
         (!text.trim().is_empty()).then_some(text)
+    }
+
+    /// 本块在该次选择中的局部区间（行序，行内字节位）：本块不在选择范围返回 None。
+    pub(crate) fn selection_range(&self, layout: &markdown::Layout, id: &str) -> Option<((usize, usize), (usize, usize))> {
+        let selection = self.selection.as_ref()?;
+        let (from_rank, to_rank, from, to) = self.selection_ends(selection)?;
+        let rank = self.markdown_rank(id)?;
+        local_selection_range(layout, rank, from_rank, to_rank, from, to)
+    }
+
+    fn markdown_rank(&self, id: &str) -> Option<usize> {
+        self.markdown_order.iter().position(|block| block == id)
+    }
+
+    /// 选择两端的规范序：起点在前；返回（起点块序，终点块序，起点，终点）。
+    fn selection_ends<'s>(&self, selection: &'s TextSelection) -> Option<(usize, usize, &'s BlockPos, &'s BlockPos)> {
+        let anchor_rank = self.markdown_rank(&selection.anchor.id)?;
+        let focus_rank = self.markdown_rank(&selection.focus.id)?;
+        let anchor_first = anchor_rank < focus_rank
+            || (anchor_rank == focus_rank && (selection.anchor.line, selection.anchor.byte) <= (selection.focus.line, selection.focus.byte));
+        if anchor_first {
+            Some((anchor_rank, focus_rank, &selection.anchor, &selection.focus))
+        } else {
+            Some((focus_rank, anchor_rank, &selection.focus, &selection.anchor))
+        }
     }
 
     /// 光标此刻是否显形。
@@ -285,6 +329,7 @@ impl UiState {
         self.scroll.retain(|id, _| self.layouts.contains_key(id));
         self.scroll_max.retain(|id, _| self.layouts.contains_key(id));
         self.follow_prev.retain(|id, _| self.layouts.contains_key(id));
+        self.scroll_x.retain(|id, _| self.markdown_last.contains_key(id));
         self.draggables.retain(|id| self.layouts.contains_key(id));
         self.overlay_scrolls.retain(|id| self.layouts.contains_key(id));
         if self.drag_bar.as_ref().is_some_and(|id| !self.layouts.contains_key(id)) {
@@ -296,6 +341,39 @@ impl UiState {
         if self.focus.as_ref().is_some_and(|id| !self.layouts.contains_key(id)) {
             self.focus = None;
         }
+        // 端点块不再出帧（被虚拟滚动裁掉或已删除）时选区一并作废，避免滚回来复活旧选区
+        if self.selection.as_ref().is_some_and(|selection| {
+            !self.markdown_last.contains_key(&selection.anchor.id)
+                || !self.markdown_last.contains_key(&selection.focus.id)
+        }) {
+            self.selection = None;
+        }
+    }
+}
+
+/// 选择在某一块里的局部区间：起点块取起点到块尾，终点块取块首到终点，中间块整块。
+fn local_selection_range(
+    layout: &markdown::Layout,
+    rank: usize,
+    from_rank: usize,
+    to_rank: usize,
+    from: &BlockPos,
+    to: &BlockPos,
+) -> Option<((usize, usize), (usize, usize))> {
+    if rank < from_rank || rank > to_rank {
+        return None;
+    }
+    let last_line = layout.line_count().saturating_sub(1);
+    let last_byte = markdown::line_len(layout, last_line);
+    if from_rank == to_rank {
+        return Some(((from.line, from.byte), (to.line, to.byte)));
+    }
+    if rank == from_rank {
+        Some(((from.line, from.byte), (last_line, last_byte)))
+    } else if rank == to_rank {
+        Some(((0, 0), (to.line, to.byte)))
+    } else {
+        Some(((0, 0), (last_line, last_byte)))
     }
 }
 

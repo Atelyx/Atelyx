@@ -1297,7 +1297,8 @@ impl<'c, 'a> Ui<'c, 'a> {
         let caret = state.map_or(value.len(), |item| item.caret.min(value.len()));
         let preedit = state.map_or("", |item| item.preedit.as_str());
         let composed = text::compose(value, text::Composed::new(caret, preedit), preedit);
-        auto_area_height(&mut self.ctx().metrics, &composed, font, width, min, max, pad)
+        let line = self.ctx().input_line_height;
+        auto_area_height(&mut self.ctx().metrics, &composed, font, width, min, max, pad, line)
     }
 
     /// 面板：圆角表面容器（承接子项，不承接点击）。
@@ -1617,6 +1618,7 @@ impl<'c, 'a> Ui<'c, 'a> {
     ) {
         let theme = self.ctx().theme.clone();
         let font = FontSpec { size: font_size.unwrap_or(theme.sizes.caption), weight: None, family: None };
+        let line_override = self.ctx().input_line_height;
         let for_layout = value.clone();
         // 组合串也计入高度：拼音还没上屏时输入盒要跟着长高
         let for_height = {
@@ -1632,7 +1634,7 @@ impl<'c, 'a> Ui<'c, 'a> {
             height: Box::new(move |metrics, width| match height {
                 AreaHeight::Fixed(height) => height,
                 AreaHeight::Auto { min, max } => {
-                    auto_area_height(metrics, &for_height, font, width, min, max, pad)
+                    auto_area_height(metrics, &for_height, font, width, min, max, pad, line_override)
                 }
             }),
             draw: Box::new(move |ctx, rect, clip| {
@@ -1650,6 +1652,7 @@ impl<'c, 'a> Ui<'c, 'a> {
                     (rect.w - pad.left - pad.right).max(1.0),
                     (rect.h - pad.top - pad.bottom).max(1.0),
                 );
+                let line = line_override.unwrap_or_else(|| text::line_height(&mut ctx.metrics, font));
                 draw_area_text(
                     ctx,
                     &id,
@@ -1661,6 +1664,7 @@ impl<'c, 'a> Ui<'c, 'a> {
                     &theme,
                     visible,
                     &marks,
+                    line,
                 );
                 ctx.hit(&id, visible, HitCursor::Text);
                 ctx.record(
@@ -1671,6 +1675,7 @@ impl<'c, 'a> Ui<'c, 'a> {
                         value: for_layout.clone(),
                         enter_submits,
                         marks: for_marks.clone(),
+                        line,
                     },
                 );
                 ctx.focusables.push(id.clone());
@@ -2095,7 +2100,6 @@ impl<'c, 'a> Ui<'c, 'a> {
                 // 正文可拖选：命中声明为文本形态，按下 / 拖动由输入路由换算成行列。
                 // 复制钮与任务框在 paint 里后声明，同帧内后声明者优先，子区点击不会被整块吞掉。
                 ctx.hit(&id, visible, atelyx_plugin_protocol::frame::HitCursor::Text);
-                ctx.record(&id, super::model::Layout::Markdown { rect });
                 super::markdown::paint(ctx, &id, key, &content, &draw_mentions, rect, clip, start, soft_wrap);
             }),
         });
@@ -2419,10 +2423,10 @@ fn draw_area_text(
     theme: &Theme,
     clip: Rect,
     marks: &[(usize, usize)],
+    line_height: f32,
 ) {
     let default_state = InputState::default();
     let state = ctx.state.inputs.get(id).unwrap_or(&default_state);
-    let line_height = ctx.metrics.measure("", font, None).height.max(1.0);
     let line_x = inner.x;
     // 空草稿恒显示占位符（取到焦点时也不消失），与原生输入框一致
     if value.is_empty() && state.preedit.is_empty() {
@@ -2614,10 +2618,11 @@ pub(crate) fn auto_area_height(
     min: f32,
     max: f32,
     pad: Edges,
+    line: Option<f32>,
 ) -> f32 {
-    let line_height = text::line_height(metrics, font);
+    let line_height = line.unwrap_or_else(|| text::line_height(metrics, font));
     let inner_w = (width - pad.left - pad.right).max(1.0);
-    let content = text::wrapped_height(metrics, value, font, inner_w);
+    let content = text::wrapped_height_with_line(metrics, value, font, inner_w, line_height);
     let cap = (max / line_height).floor().max(1.0) * line_height;
     content.min(cap).max(min.min(cap)) + pad.top + pad.bottom
 }
@@ -2812,7 +2817,7 @@ fn draw_scrollbar(ctx: &mut BuildCtx<'_>, id: &str, track: Rect, visible: Rect, 
         return;
     }
     let bar_id = scrollbar_id(id);
-    let color = if ctx.state.drag_bar.as_deref() == Some(id) {
+    let color = if ctx.state.drag_bar.as_deref() == Some(bar_id.as_str()) {
         ColorToken::Accent
     } else if ctx.hovered(&bar_id) {
         ColorToken::TextSecondary

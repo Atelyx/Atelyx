@@ -52,6 +52,8 @@ pub(crate) struct BuildCtx<'a> {
     pub markdown_seen: Vec<(String, Arc<super::markdown::Layout>)>,
     /// 后续只读 Markdown 的段内换行策略：true = 保留，false = 软换行折叠为空格。
     pub soft_wrap: bool,
+    /// 后续多行输入框的内部行高：None = 按字高；设值时与只读正文的行距对齐。
+    pub input_line_height: Option<f32>,
 }
 
 pub(crate) struct BuildOut {
@@ -99,6 +101,7 @@ impl<'a> BuildCtx<'a> {
             hints: HashMap::new(),
             markdown_seen: Vec::new(),
             soft_wrap: true,
+            input_line_height: None,
         }
     }
 
@@ -381,6 +384,11 @@ impl<'c, 'a> Ui<'c, 'a> {
     /// 编辑面文本即真相，不调用。
     pub fn markdown_soft_wrap(&mut self, soft_wrap: bool) {
         self.ctx.soft_wrap = soft_wrap;
+    }
+
+    /// 本帧后续多行输入框的内部行高：与只读正文行距设成同一值时，揭示块与渲染行逐行对齐。
+    pub fn input_line_height(&mut self, height: Option<f32>) {
+        self.ctx.input_line_height = height;
     }
 
     /// 纵向容器：子项按声明序自上而下，`gap` 为间距。

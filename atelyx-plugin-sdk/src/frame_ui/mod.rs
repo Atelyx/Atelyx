@@ -234,6 +234,7 @@ impl FrameUi {
             self.state.follow_prev = out.follow_prev;
             self.state.overlays = out.overlays;
             self.state.hints = out.hints;
+            self.state.markdown_order = out.markdown_seen.iter().map(|(id, _)| id.clone()).collect();
             self.state.markdown_last = out.markdown_seen.into_iter().collect();
             self.state.overlay_scrolls = out.overlay_scrolls;
             self.state.prune();
@@ -336,6 +337,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::*;
+    use super::model::Layout;
 
     /// 假宿主：应答主题 / 量算 / 提交与剪贴板，并记下请求顺序与已提交的帧。
     struct Bench {
@@ -982,6 +984,192 @@ let a = 1;
             .await;
         let copied = bench.clipboard.lock().unwrap().clone();
         assert!(!copied.is_empty(), "跨表格与代码块拖选后应能复制到文字");
+    }
+
+    /// 只读正文单击只留下空选择：不画光标细条，Ctrl+C 也拿不到内容。
+    #[tokio::test]
+    async fn clicking_read_only_markdown_draws_no_caret() {
+        let mut bench = Bench::new(320.0, 200.0).await;
+        let build = |ui: &mut build::Ui<'_, '_>| ui.markdown("第一行文字");
+        bench.render(build).await.unwrap();
+        let id = Some(format!("@md:1:{:x}", super::markdown::content_key("第一行文字", &[])));
+        bench
+            .event(FrameInput::PointerDown { x: 20.0, y: 8.0, button: MouseButton::Left, hit: id.clone() })
+            .await;
+        bench
+            .event(FrameInput::PointerUp { x: 20.0, y: 8.0, button: MouseButton::Left, hit: id })
+            .await;
+        let frame = bench.render(build).await.unwrap();
+        assert!(caret_bar(&frame).is_none(), "单击不得画出光标细条");
+        let ctrl = Modifiers { control: true, ..Modifiers::default() };
+        bench
+            .event(FrameInput::Key {
+                key: Key::Character { text: "c".into() },
+                action: KeyAction::Press,
+                modifiers: ctrl,
+                text: None,
+            })
+            .await;
+        assert!(bench.clipboard.lock().unwrap().is_empty(), "空选区不产生复制内容");
+    }
+
+    /// 两块正文之间拖选：选择按绘制序跨块延伸，Ctrl+C 取到两块的文字。
+    #[tokio::test]
+    async fn dragging_between_two_markdown_blocks_copies_across_them() {
+        let mut bench = Bench::new(320.0, 200.0).await;
+        let build = |ui: &mut build::Ui<'_, '_>| {
+            ui.markdown_named("md-a", "甲行", Vec::new());
+            ui.markdown_named("md-b", "乙行", Vec::new());
+        };
+        let frame = bench.render(build).await.unwrap();
+        let a = frame.hits.iter().find(|hit| hit.id == "md-a").cloned().expect("第一块命中区");
+        let b = frame.hits.iter().find(|hit| hit.id == "md-b").cloned().expect("第二块命中区");
+        bench
+            .event(FrameInput::PointerDown {
+                x: a.x + 2.0,
+                y: a.y + a.h * 0.5,
+                button: MouseButton::Left,
+                hit: Some("md-a".into()),
+            })
+            .await;
+        bench
+            .event(FrameInput::PointerMove { x: b.x + b.w - 2.0, y: b.y + b.h * 0.5, hit: Some("md-b".into()) })
+            .await;
+        bench
+            .event(FrameInput::PointerUp {
+                x: b.x + b.w - 2.0,
+                y: b.y + b.h * 0.5,
+                button: MouseButton::Left,
+                hit: Some("md-b".into()),
+            })
+            .await;
+        let ctrl = Modifiers { control: true, ..Modifiers::default() };
+        bench
+            .event(FrameInput::Key {
+                key: Key::Character { text: "c".into() },
+                action: KeyAction::Press,
+                modifiers: ctrl,
+                text: None,
+            })
+            .await;
+        assert_eq!(bench.clipboard.lock().unwrap().as_str(), "甲行\n乙行");
+    }
+
+    /// 端点块不再出帧（被虚拟滚动裁掉或删除）时选区作废，滚回来不会复原旧选区。
+    #[tokio::test]
+    async fn selection_drops_when_an_end_block_leaves_the_frame() {
+        let mut bench = Bench::new(320.0, 200.0).await;
+        let both = |ui: &mut build::Ui<'_, '_>| {
+            ui.markdown_named("md-a", "甲行", Vec::new());
+            ui.markdown_named("md-b", "乙行", Vec::new());
+        };
+        let frame = bench.render(both).await.unwrap();
+        let a = frame.hits.iter().find(|hit| hit.id == "md-a").cloned().expect("第一块命中区");
+        let b = frame.hits.iter().find(|hit| hit.id == "md-b").cloned().expect("第二块命中区");
+        bench
+            .event(FrameInput::PointerDown {
+                x: a.x + 2.0,
+                y: a.y + a.h * 0.5,
+                button: MouseButton::Left,
+                hit: Some("md-a".into()),
+            })
+            .await;
+        bench
+            .event(FrameInput::PointerMove { x: b.x + b.w - 2.0, y: b.y + b.h * 0.5, hit: Some("md-b".into()) })
+            .await;
+        bench
+            .event(FrameInput::PointerUp {
+                x: b.x + b.w - 2.0,
+                y: b.y + b.h * 0.5,
+                button: MouseButton::Left,
+                hit: Some("md-b".into()),
+            })
+            .await;
+        assert!(bench.ui.lock().await.state.selection.is_some(), "拖选后应有选区");
+        bench.render(|ui| ui.markdown_named("md-a", "甲行", Vec::new())).await.unwrap();
+        assert!(bench.ui.lock().await.state.selection.is_none(), "端点块离帧后选区应作废");
+    }
+
+    /// 超宽表格：按最宽格定列宽并把内容并进块内横向滚动，绘制裁在块矩形里。
+    #[tokio::test]
+    async fn wide_table_scrolls_inside_its_block() {
+        let long = "一二三四五六七八九十一二三四五六七八九十";
+        let source = format!("| {long} | 乙 |\n| --- | --- |\n| 丙 | 丁 |");
+        let mut bench = Bench::new(320.0, 200.0).await;
+        let build = move |ui: &mut build::Ui<'_, '_>| ui.markdown_named("wide", source.clone(), Vec::new());
+        let frame = bench.render(build.clone()).await.unwrap();
+        let rect = frame.hits.iter().find(|hit| hit.id == "wide").cloned().expect("表格块命中区");
+        let content_w = {
+            let ui = bench.ui.lock().await;
+            match ui.state.layouts.get("wide") {
+                Some(Layout::Markdown { content_w, .. }) => *content_w,
+                _ => panic!("应记录为 Markdown 版面"),
+            }
+        };
+        assert!(content_w > rect.w + 0.5, "超宽表格的自然宽应大于外框：{content_w}/{}", rect.w);
+        assert!(has_hit(&frame, "wide::hbar"), "超宽内容应给横向滚动条");
+
+        let events = bench
+            .event(FrameInput::Wheel {
+                x: rect.x + rect.w * 0.5,
+                y: rect.y + rect.h * 0.5,
+                delta_x: 40.0,
+                delta_y: 0.0,
+                modifiers: Default::default(),
+                hit: None,
+            })
+            .await;
+        let UiEvent::Scroll { id, offset, max_offset } = &events[0] else {
+            panic!("横向滚动应回滚动位置：{events:?}");
+        };
+        assert_eq!(id, "wide");
+        assert!((*offset - 40.0).abs() < 0.01 && *max_offset > 40.0, "{offset}/{max_offset}");
+
+        let frame = bench.render(build).await.unwrap();
+        assert!(!texts(&frame).iter().any(|text| text == long), "滚出左缘的内容应被裁掉");
+        for command in &frame.commands {
+            match command {
+                DrawCommand::Rect { x, y, w, .. } if (rect.y..=rect.y + rect.h).contains(y) => {
+                    assert!(*x >= rect.x - 0.5 && *x + *w <= rect.x + rect.w + 0.5, "矩形越界：{x}+{w}");
+                }
+                DrawCommand::Text { x, y, .. } if (rect.y..=rect.y + rect.h).contains(y) => {
+                    assert!(*x >= rect.x - 0.5 && *x <= rect.x + rect.w + 0.5, "文字越界：{x}");
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// 超宽代码块：正文在块内横向滚动，头部（含复制钮）保持原位。
+    #[tokio::test]
+    async fn wide_code_block_scrolls_without_moving_the_header() {
+        let code = format!("```rust\n{}\n```", "let a = 1; ".repeat(30));
+        let mut bench = Bench::new(320.0, 200.0).await;
+        let build = move |ui: &mut build::Ui<'_, '_>| ui.markdown_named("code", code.clone(), Vec::new());
+        let frame = bench.render(build).await.unwrap();
+        assert!(has_hit(&frame, "code::hbar"), "超宽代码正文应给横向滚动条");
+        assert!(has_hit(&frame, "code::copy:0"), "代码头复制钮不随正文滚动");
+    }
+
+    /// 输入框行高参数：文本区的行距与外层渲染行一致（揭示块按它逐行对齐）。
+    #[tokio::test]
+    async fn input_line_height_sets_the_text_area_rows() {
+        let mut bench = Bench::new(320.0, 200.0).await;
+        let build = |ui: &mut build::Ui<'_, '_>| {
+            ui.input_line_height(Some(24.0));
+            ui.text_area_plain_auto("draft", "甲\n乙", 10.0, 200.0, 14.0, Edges::symmetric(0.0, 0.0));
+        };
+        let frame = bench.render(build).await.unwrap();
+        let hit = frame.hits.iter().find(|hit| hit.id == "draft").expect("输入面命中区");
+        assert!((hit.h - 48.0).abs() < 0.5, "两行按 24px 行高：{}", hit.h);
+        let line = {
+            let ui = bench.ui.lock().await;
+            match ui.state.layouts.get("draft") {
+                Some(Layout::TextArea { line, .. }) => *line,
+                _ => panic!("应记录为多行输入面"),
+            }
+        };
+        assert!((line - 24.0).abs() < 0.5, "版面记录的行高应取自参数：{line}");
     }
 
     /// 悬停提示：停够时间才画，等待期间要帧拍；指针移开即消失。
