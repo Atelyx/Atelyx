@@ -1779,19 +1779,17 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
         }
         PluginsMsg::PanelHeader { plugin_id, request_id, params } => {
             // 头部只能声明到自己的视图贡献上：target 不校验会让后声明者静默顶掉别人的头部
-            let owns_target = app.plugins.contributions().iter().any(|contribution| {
-                contribution.plugin_id == plugin_id
-                    && contribution.id == params.target
-                    && contribution.slot == atelyx_core::plugin_runtime::ContributionSlot::TableView
-            });
             let current_owner = app
                 .panel_headers
                 .get(&params.target)
                 .map(|entry| entry.plugin_id.as_str());
-            let allowed = match params.header {
-                Some(_) => owns_target,
-                None => current_owner == Some(plugin_id.as_str()),
-            };
+            let allowed = crate::plugin_actions::panel_header_allowed(
+                &app.plugins.contributions(),
+                &plugin_id,
+                &params.target,
+                params.header.is_some(),
+                current_owner,
+            );
             if !allowed {
                 let error = format!("面板头部 target 不属于该插件：{}", params.target);
                 app.plugins.resolve_ui_call(request_id, Err(error));

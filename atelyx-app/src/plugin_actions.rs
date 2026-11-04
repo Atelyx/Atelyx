@@ -54,6 +54,28 @@ pub fn contributions_of(app: &App, slot: ContributionSlot) -> impl Iterator<Item
     app.plugin_contributions.iter().filter(move |c| c.slot == slot)
 }
 
+/// 插件能否声明 / 收起 `target` 面的头部：声明必须落在本插件的面板或表格视图贡献上，
+/// 收起只允许当前持有者（未占用时的收起等于无操作，不算越权）。
+pub fn panel_header_allowed(
+    contributions: &[Contribution],
+    plugin_id: &str,
+    target: &str,
+    has_header: bool,
+    current_owner: Option<&str>,
+) -> bool {
+    if !has_header {
+        return current_owner.map_or(true, |owner| owner == plugin_id);
+    }
+    contributions.iter().any(|contribution| {
+        contribution.plugin_id == plugin_id
+            && contribution.id == target
+            && matches!(
+                contribution.slot,
+                ContributionSlot::Panel | ContributionSlot::TableView
+            )
+    })
+}
+
 /// 插件声明图标的解析键：内置名原样返回；未声明 / 未知名回落 `fallback`。
 pub fn plugin_icon_key(name: Option<&str>, fallback: &'static str) -> Cow<'static, str> {
     let Some(name) = name.filter(|name| !name.is_empty()) else {
@@ -1218,6 +1240,56 @@ mod tests {
         ] {
             assert!(parse_view_kind(bad).is_none(), "应拒绝：{bad}");
         }
+    }
+
+    fn contribution(plugin_id: &str, slot: ContributionSlot, id: &str) -> Contribution {
+        Contribution {
+            plugin_id: plugin_id.to_string(),
+            slot,
+            id: id.to_string(),
+            label: String::new(),
+            icon: None,
+            padding: None,
+        }
+    }
+
+    #[test]
+    fn panel_header_target_must_be_own_panel_or_table_view() {
+        let contributions = [
+            contribution("com.a.canvas", ContributionSlot::Panel, "canvas"),
+            contribution("com.a.tables", ContributionSlot::TableView, "table"),
+            contribution("com.a.settings", ContributionSlot::Settings, "settings"),
+        ];
+        assert!(panel_header_allowed(&contributions, "com.a.canvas", "canvas", true, None));
+        assert!(panel_header_allowed(&contributions, "com.a.tables", "table", true, None));
+        assert!(
+            !panel_header_allowed(&contributions, "com.a.canvas", "table", true, None),
+            "不能声明别的插件的面"
+        );
+        assert!(
+            !panel_header_allowed(&contributions, "com.a.settings", "settings", true, None),
+            "设置面不走面板头部"
+        );
+    }
+
+    #[test]
+    fn panel_header_collapse_only_touches_own_header() {
+        let contributions = [contribution("com.a.canvas", ContributionSlot::Panel, "canvas")];
+        assert!(
+            panel_header_allowed(&contributions, "com.a.canvas", "canvas", false, None),
+            "未占用时的收起是无操作"
+        );
+        assert!(panel_header_allowed(
+            &contributions,
+            "com.a.canvas",
+            "canvas",
+            false,
+            Some("com.a.canvas")
+        ));
+        assert!(
+            !panel_header_allowed(&contributions, "com.a.canvas", "canvas", false, Some("com.a.other")),
+            "不能收起别的插件已声明的头部"
+        );
     }
 
     #[test]
