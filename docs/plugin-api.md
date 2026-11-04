@@ -2096,6 +2096,9 @@ pub struct DocTypeEntry {
     pub extension: String,
     /// 菜单标签（如「笔记」）。
     pub label: String,
+    /// 宿主图标形状名（文件树条目与新建菜单用；空 = 按扩展名兜底）。
+    #[serde(default)]
+    pub icon: String,
 }
 ```
 
@@ -4787,7 +4790,7 @@ pub mod name {
     /// 订阅方重取 `space.members`。
     pub const SPACE_MEMBERS_CHANGED: &str = "space:members.changed";
     /// 外部文件拖入窗口（宿主只转发绝对路径，读取由订阅方经 `fs` 自理）。
-    /// payload 见 [`FileDropPayload`]；未挂载界面的插件应忽略。
+    /// payload 见 [`FileDropPayload`]；只投给指针所在面的插件，该面未挂载即不投递。
     pub const WINDOW_FILE_DROP: &str = "window:file.drop";
     /// 当前文档会话的正文 / 落盘状态变化（协作远端合入、保存成功或失败、属性面板改写）。
     /// payload 见 [`DocChangedPayload`]。
@@ -4992,10 +4995,12 @@ pub struct SpaceMetaChangedPayload {
 
 ```rust
 // atelyx-plugin-protocol/src/event.rs
-/// [`name::WINDOW_FILE_DROP`] 的 payload：本次拖入的绝对路径（一次事件可含多张图）。
+/// [`name::WINDOW_FILE_DROP`] 的 payload：本次拖入的绝对路径（一次事件可含多张图）与落点面。
 #[serde(rename_all = "camelCase", default)]
 pub struct FileDropPayload {
     pub paths: Vec<String>,
+    /// 指针落点面板的活动视图贡献 id：同一插件有多个面时按它区分。
+    pub surface_id: String,
 }
 ```
 

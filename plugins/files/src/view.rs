@@ -5,7 +5,7 @@ use atelyx_plugin_protocol::method::Radii;
 use atelyx_plugin_protocol::paint::{ColorToken, PaintColor, TextWeight};
 use atelyx_plugin_sdk::frame_ui::{BoxStyle, BoxWidth, Edges, TextRole, TextStyle, Ui};
 
-use crate::model::{ContainerRow, InlineEdit, Row, View};
+use crate::model::{extension_of, stem_of, ContainerRow, InlineEdit, Row, View};
 
 /// 行左右内衬。
 const ROW_PAD_X: f32 = 8.0;
@@ -13,6 +13,10 @@ const ROW_PAD_X: f32 = 8.0;
 const INDENT: f32 = 16.0;
 /// 行内元素间距。
 const ROW_GAP: f32 = 6.0;
+/// 行内容上下内衬（参考线要贯穿整行，行高由它定）。
+const ROW_PAD_Y: f32 = 8.0;
+/// 层级参考线宽。
+const GUIDE_W: f32 = 1.0;
 /// 图标边长。
 const ICON: f32 = 14.0;
 /// 工具条内衬。
@@ -32,6 +36,9 @@ pub fn frame(ui: &mut Ui<'_, '_>, view: &View, radii: &Radii) {
     ui.fill_column(0.0, |ui| {
         toolbar(ui, view.any_expanded, view.in_repo);
         ui.rule();
+        if let Some(notice) = view.notice.as_deref() {
+            ui.notice(notice.to_string(), ColorToken::Danger);
+        }
         if let Some(error) = view.error.as_ref().filter(|_| view.rows.is_empty()) {
             failure_state(ui, error, radii);
             return;
@@ -132,29 +139,33 @@ fn list(ui: &mut Ui<'_, '_>, view: &View, radii: &Radii) {
     let root_active = view.vault_drop_target;
     let root_rejected = view.vault_drop_rejected;
     let seam_base = containers.len();
-    ui.scroll("tree", 0.0, move |page| {
-        page.column(0.0, move |col| {
-            col.spacer(TREE_PAD_TOP);
-            for (index, row) in containers.iter().enumerate() {
-                // 容器行也带两侧缝：缝隙与行体都指向仓库根（拖到行上 = 移入根）
-                col.row(0.0, |line| {
-                    seam(line, format!("{}{index}:l", crate::DROP_ROOT));
-                    container_row(line, row, radius);
-                    seam(line, format!("{}{index}:r", crate::DROP_ROOT));
-                });
-                // 激活行就地展开文件树（其余行收起）
-                if row.active && row.open {
-                    tree_block(col, &rows, &inline, radius, seam_base);
+    ui.stack(move |layer| {
+        // 树视口整块也是根落点：内容不满一屏时，行下方的空白照样接收拖拽（行自身的命中区压在上面）
+        layer.hit_area(crate::DROP_BOTTOM);
+        layer.scroll("tree", 0.0, move |page| {
+            page.column(0.0, move |col| {
+                col.spacer(TREE_PAD_TOP);
+                for (index, row) in containers.iter().enumerate() {
+                    // 容器行也带两侧缝：缝隙与行体都指向仓库根（拖到行上 = 移入根）
+                    col.row(0.0, |line| {
+                        seam(line, format!("{}{index}:l", crate::DROP_ROOT));
+                        container_row(line, row, radius);
+                        seam(line, format!("{}{index}:r", crate::DROP_ROOT));
+                    });
+                    // 激活行就地展开文件树（其余行收起）
+                    if row.active && row.open {
+                        tree_block(col, &rows, &inline, radius, seam_base);
+                    }
                 }
-            }
-            if let Some(why) = &hint {
-                col.notice(why.clone(), ColorToken::Danger);
-            }
-            // 列表下方空白：拖拽期才出现的根落点（行侧缝之外的第二个通道）
-            if dragging {
-                root_drop_zone(col, radius, root_active, root_rejected);
-            }
-            col.spacer(TREE_PAD_BOTTOM);
+                if let Some(why) = &hint {
+                    col.notice(why.clone(), ColorToken::Danger);
+                }
+                // 内容末尾的根落点：拖拽期给出可见落位区（命中由树视口那块承担）
+                if dragging {
+                    root_drop_zone(col, radius, root_active, root_rejected);
+                }
+                col.spacer(TREE_PAD_BOTTOM);
+            });
         });
     });
 }
@@ -162,18 +173,22 @@ fn list(ui: &mut Ui<'_, '_>, view: &View, radii: &Radii) {
 /// 空仓库：容器行照常铺，空态占满剩余高度（滚动页里没有可撑高的余量，块居中不了）。
 fn empty_repo(ui: &mut Ui<'_, '_>, view: &View, radius: f32) {
     let containers = view.containers.clone();
-    ui.column(0.0, move |col| {
-        col.spacer(TREE_PAD_TOP);
-        for (index, row) in containers.iter().enumerate() {
-            col.row(0.0, |line| {
-                seam(line, format!("{}{index}:l", crate::DROP_ROOT));
-                container_row(line, row, radius);
-                seam(line, format!("{}{index}:r", crate::DROP_ROOT));
-            });
-        }
-        col.spacer(TREE_PAD_BOTTOM);
+    ui.stack(move |layer| {
+        // 空仓库整块也是根落点：没有可落的行时文件仍能拖进仓库根
+        layer.hit_area(crate::DROP_BOTTOM);
+        layer.fill_column(0.0, move |col| {
+            col.spacer(TREE_PAD_TOP);
+            for (index, row) in containers.iter().enumerate() {
+                col.row(0.0, |line| {
+                    seam(line, format!("{}{index}:l", crate::DROP_ROOT));
+                    container_row(line, row, radius);
+                    seam(line, format!("{}{index}:r", crate::DROP_ROOT));
+                });
+            }
+            col.spacer(TREE_PAD_BOTTOM);
+            col.empty_state("folder", "暂无文件", "右键新建笔记或文件夹。");
+        });
     });
-    ui.empty_state("folder", "暂无文件", "右键新建笔记或文件夹。");
 }
 
 /// 激活容器的文件树（就地展开在该容器行之后）。
@@ -242,39 +257,39 @@ fn root_drop_zone(ui: &mut Ui<'_, '_>, radius: f32, active: bool, rejected: bool
     };
     let label = if active { "松手移到根目录" } else { "移到根目录" };
     let pad = ((DROP_ZONE_H - 16.0) / 2.0).max(0.0);
-    ui.hover_box(crate::DROP_BOTTOM, BoxWidth::Fill, Edges::all(0.0), move |zone| {
-        zone.boxed(
-            BoxWidth::Fill,
-            BoxStyle::new(fill, Some(border), radius),
-            Edges::all(0.0),
-            0.0,
-            move |inside| {
-                inside.spacer(pad);
-                inside.row(0.0, move |line| {
-                    line.grow();
-                    line.text_styled(label, TextStyle::new(TextRole::Caption).color(color));
-                    line.grow();
-                });
-                inside.spacer(pad);
-            },
-        );
-    });
+    ui.boxed(
+        BoxWidth::Fill,
+        BoxStyle::new(fill, Some(border), radius),
+        Edges::all(0.0),
+        0.0,
+        move |inside| {
+            inside.spacer(pad);
+            inside.row(0.0, move |line| {
+                line.grow();
+                line.text_styled(label, TextStyle::new(TextRole::Caption).color(color));
+                line.grow();
+            });
+            inside.spacer(pad);
+        },
+    );
 }
 
-/// 一行：展开指示线 + 缩进 + 展开箭头（目录）+ 图标 + 名称 + 扩展名（文件）。
+/// 一行：层级参考线 + 缩进 + 展开箭头（目录）+ 图标 + 主名 + 后缀徽标（文件）。
+/// 主名吃剩余宽度并按尾部省略，悬停整行给出完整文件名；后缀徽标按固有宽留在行尾，恒显且右缘对齐。
 fn tree_row(ui: &mut Ui<'_, '_>, row: &Row, radius: f32) {
-    let indent = ROW_PAD_X + row.depth as f32 * INDENT;
     let id = crate::row_id(&row.path, row.is_dir);
     let name = row.name.clone();
     let is_dir = row.is_dir;
     let expanded = row.expanded;
     let color = row.color.clone();
+    let doc_icon = row.icon.clone();
     let ext = if is_dir { String::new() } else { ext_label(&name) };
-    let guides = row.guides.len();
+    let label = row_label(&name, is_dir);
+    let depth = row.depth;
+    let guides = guide_xs(depth);
     let drop_target = row.drop_target;
     let drop_rejected = row.drop_rejected;
     let active = row.active;
-    // 落点底色与展开指示线：底色铺整行，指示线在左侧做等宽占位（行内容从它之后开始）
     let tint = if drop_rejected {
         Some(ColorToken::DangerSoft)
     } else if drop_target || active {
@@ -285,45 +300,74 @@ fn tree_row(ui: &mut Ui<'_, '_>, row: &Row, radius: f32) {
     let name_color = if active { ColorToken::Accent } else { ColorToken::TextSecondary };
     let icon_color = if active { ColorToken::Accent } else { ColorToken::TextMuted };
     let ext_color = if active { ColorToken::Accent } else { ColorToken::TextMuted };
+    ui.hint(&id, &name);
     ui.click_row_tinted(
         id,
         BoxWidth::Fill,
-        Edges { left: indent, right: ROW_PAD_X, top: 8.0, bottom: 8.0 },
+        Edges { left: 0.0, right: ROW_PAD_X, top: 0.0, bottom: 0.0 },
         tint,
         move |line| {
-            // 展开指示线：按深度给出左侧竖向标尺（每层一档，细线区分层级）
-            if guides > 0 {
-                line.bar(guides as f32, ColorToken::Border);
-            }
-            line.row(ROW_GAP, move |content| {
-                if is_dir {
-                    content.icon_named(
-                        if expanded { "chevron-down" } else { "chevron-right" },
-                        ICON,
-                        ColorToken::TextMuted,
-                    );
-                }
-                let icon = if is_dir { "folder" } else { file_icon(&name) };
-                match color.as_deref().and_then(parse_hex) {
-                    Some((r, g, b, a)) => {
-                        content.icon_named_rgba(icon, ICON, PaintColor::Rgba { rgba: [r, g, b, a] })
+            line.row(0.0, move |whole| {
+                // 层级参考线：每层一条，落在该层上级展开箭头的中心线上，贯穿整行高度
+                let mut x = 0.0;
+                for guide in guides.iter() {
+                    if *guide > x {
+                        whole.spacer_width(guide - x);
                     }
-                    None => content.icon_named(icon, ICON, icon_color),
+                    whole.bar(GUIDE_W, ColorToken::Border);
+                    x = guide + GUIDE_W;
                 }
-                // 名字按内容定宽：别和 grow 的空白抢宽度，否则宽面板里也会早早省略
-                content.text_styled_fit(
-                    name.clone(),
-                    TextStyle::new(TextRole::Caption).color(name_color),
-                );
-                if !is_dir {
-                    content.grow();
-                    content.text_styled_fit(ext, TextStyle::new(TextRole::Micro).color(ext_color));
+                let content_x = ROW_PAD_X + depth as f32 * INDENT;
+                if content_x > x {
+                    whole.spacer_width(content_x - x);
                 }
+                whole.column(0.0, move |body| {
+                    body.spacer(ROW_PAD_Y);
+                    body.row(ROW_GAP, move |content| {
+                        if is_dir {
+                            content.icon_named(
+                                if expanded { "chevron-down" } else { "chevron-right" },
+                                ICON,
+                                ColorToken::TextMuted,
+                            );
+                        }
+                        let icon = match doc_icon.as_deref() {
+                            Some(icon) => icon,
+                            None if is_dir => "folder",
+                            None => file_icon(&name),
+                        };
+                        match color.as_deref().and_then(parse_hex) {
+                            Some((r, g, b, a)) => content
+                                .icon_named_rgba(icon, ICON, PaintColor::Rgba { rgba: [r, g, b, a] }),
+                            None => content.icon_named(icon, ICON, icon_color),
+                        }
+                        content.text_styled(
+                            label,
+                            TextStyle::new(TextRole::Caption).color(name_color),
+                        );
+                        if !ext.is_empty() {
+                            content.text_styled_fit(
+                                ext,
+                                TextStyle::new(TextRole::Micro).mono().color(ext_color),
+                            );
+                        }
+                    });
+                    body.spacer(ROW_PAD_Y);
+                });
             });
         },
     );
     let _ = radius;
 }
+
+/// 层级参考线的 x 坐标：每层一条，落在该层上级展开箭头的中心线上。
+fn guide_xs(depth: usize) -> Vec<f32> {
+    (1..=depth)
+        .map(|level| ROW_PAD_X + ICON / 2.0 + (level - 1) as f32 * INDENT)
+        .collect()
+}
+
+
 
 /// 容器行：激活行淡底 + 就地展开箭头；非激活行点击切过去。
 fn container_row(ui: &mut Ui<'_, '_>, row: &ContainerRow, radius: f32) {
@@ -393,17 +437,19 @@ fn inline_row(ui: &mut Ui<'_, '_>, edit: InlineEdit, depth: usize, radius: f32) 
     );
 }
 
+/// 行上显示的名字：目录显示全名（`v1.2` 的点不是扩展名），文件只显示主名。
+fn row_label(name: &str, is_dir: bool) -> String {
+    if is_dir { name.to_string() } else { stem_of(name).to_string() }
+}
+
 /// 文件名的扩展名标签（`a.md` → `MD`；无扩展名 = 空）。
 fn ext_label(name: &str) -> String {
-    match name.rsplit_once('.') {
-        Some((stem, ext)) if !stem.is_empty() && !ext.is_empty() => ext.to_uppercase(),
-        _ => String::new(),
-    }
+    extension_of(name).map(str::to_uppercase).unwrap_or_default()
 }
 
 /// 文件名 → lucide 图标名（按扩展名分档）。
 fn file_icon(name: &str) -> &'static str {
-    let ext = name.rsplit_once('.').map(|(_, ext)| ext).unwrap_or_default();
+    let ext = extension_of(name).unwrap_or_default();
     match ext.to_ascii_lowercase().as_str() {
         "md" => "file-text",
         "atb" => "table",
@@ -459,4 +505,36 @@ fn failure_state(ui: &mut Ui<'_, '_>, error: &str, radii: &Radii) {
         });
         outer.fill_spacer();
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 参考线落在上级箭头中心线上，每层一档。
+    #[test]
+    fn guides_follow_the_arrow_centers() {
+        assert!(guide_xs(0).is_empty());
+        assert_eq!(guide_xs(1), vec![ROW_PAD_X + ICON / 2.0]);
+        assert_eq!(guide_xs(2), vec![15.0, 31.0]);
+    }
+
+    /// 主名去掉后缀；隐藏文件与无后缀名原样保留。
+    #[test]
+    fn stem_drops_the_extension() {
+        assert_eq!(stem_of("plan.atb"), "plan");
+        assert_eq!(stem_of("方案.md"), "方案");
+        assert_eq!(stem_of(".gitignore"), ".gitignore");
+        assert_eq!(stem_of("README"), "README");
+        assert_eq!(stem_of("a.b.c"), "a.b");
+    }
+
+    /// 目录名不按扩展名截断：带点的目录名整名显示，文件才只留主名。
+    #[test]
+    fn directory_rows_keep_their_full_name() {
+        assert_eq!(row_label("v1.2", true), "v1.2");
+        assert_eq!(row_label("api.example.com", true), "api.example.com");
+        assert_eq!(row_label("plan.atb", false), "plan");
+        assert_eq!(row_label(".gitignore", false), ".gitignore");
+    }
 }

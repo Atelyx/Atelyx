@@ -64,7 +64,7 @@ async fn main() {
     resize(&runtime, FILES_ID, FILES_SURFACE);
 
     // 首帧：容器行 + 根目录条目（文件夹在前，按 mtime 新→旧）
-    let frame = wait_frame(&runtime, |frame| has_text(frame, "plan.atb"))
+    let frame = wait_frame(&runtime, |frame| has_text(frame, "plan"))
         .await
         .expect("首帧应列出根目录条目");
     assert!(has_text(&frame, "本地仓库"), "容器行应显示当前仓库名");
@@ -83,7 +83,7 @@ async fn main() {
 
     // 展开目录：点目录行 → 取下一层并出带子项的帧
     click_hit(&runtime, &frame, "row:d:docs");
-    let expanded = wait_frame(&runtime, |frame| has_text(frame, "方案.md"))
+    let expanded = wait_frame(&runtime, |frame| has_text(frame, "方案"))
         .await
         .expect("展开后应出现子项");
     assert!(
@@ -93,7 +93,7 @@ async fn main() {
     );
     assert!(has_text(&expanded, "docs"));
     assert!(
-        has_text(&expanded, LONG_NAME),
+        has_text(&expanded, LONG_STEM),
         "宽度够时名字不应被省略：{:?}",
         expanded
             .commands
@@ -110,10 +110,14 @@ async fn main() {
     // 折叠同一目录：子项消失，且不再请求该目录
     let before = state.requested_dirs().len();
     click_hit(&runtime, &expanded, "row:d:docs");
-    let collapsed = wait_frame(&runtime, |frame| !has_text(frame, "方案.md"))
+    let collapsed = wait_frame(&runtime, |frame| !has_text(frame, "方案"))
         .await
         .expect("折叠后子项应消失");
     assert_eq!(state.requested_dirs().len(), before, "折叠不应再取目录");
+    assert!(
+        wait_patch(&state, |patch| patch.expanded.as_deref() == Some(&[String::new()][..])).await,
+        "折叠应把展开集写回宿主（展开集的真源在宿主）"
+    );
     println!("折叠目录：通过");
     let _ = collapsed;
 
@@ -124,22 +128,22 @@ async fn main() {
     .await
     .expect("工具条应挂全部展开钮");
     click_hit(&runtime, &frame, "toggle-all");
-    let all = wait_frame(&runtime, |frame| has_text(frame, "方案.md"))
+    let all = wait_frame(&runtime, |frame| has_text(frame, "方案"))
         .await
         .expect("全部展开应出现子项");
-    assert!(has_text(&all, "plan.atb"), "根条目应仍在");
+    assert!(has_text(&all, "plan"), "根条目应仍在");
     click_hit(&runtime, &all, "toggle-all");
-    let none = wait_frame(&runtime, |frame| !has_text(frame, "方案.md"))
+    let none = wait_frame(&runtime, |frame| !has_text(frame, "方案"))
         .await
         .expect("收起全部应收起子目录");
     assert!(
-        has_text(&none, "plan.atb") && none.hits.iter().any(|hit| hit.id == "row:d:docs"),
+        has_text(&none, "plan") && none.hits.iter().any(|hit| hit.id == "row:d:docs"),
         "容器行与根条目不参与收起全部"
     );
     println!("全部展开 / 收起：通过");
 
     // 排序菜单：点工具条排序钮 → 宿主弹菜单 → 选中键写回
-    let frame = wait_frame(&runtime, |frame| !has_text(frame, "方案.md"))
+    let frame = wait_frame(&runtime, |frame| !has_text(frame, "方案"))
         .await
         .expect("折叠后应能再取一帧");
     click_hit(&runtime, &frame, "sort");
@@ -173,7 +177,7 @@ async fn main() {
     wait_frame(&runtime, |frame| {
         frame.commands.iter().any(|command| match command {
             DrawCommand::Text { content, color, .. } => {
-                content.contains("plan.atb")
+                content == "plan"
                     && matches!(color, PaintColor::Token { name: ColorToken::Accent })
             }
             _ => false,
@@ -193,7 +197,7 @@ async fn main() {
         active: false,
     });
     runtime.on_files_changed();
-    let frame = wait_frame(&runtime, |frame| has_text(frame, "plan.atb"))
+    let frame = wait_frame(&runtime, |frame| has_text(frame, "plan"))
         .await
         .expect("事件后应重取");
     click_right(&runtime, &frame, &format!("switch:{LOCAL_CONTAINER_ID}"));
@@ -323,11 +327,33 @@ async fn main() {
             .any(|hover| hover.as_deref() == Some("plan.atb")),
         "起拖后应上报所在行落点"
     );
-    // 行侧缝 = 根落点：指针移到缝上要上报空路径（拖回仓库根）
+    // 列表下方空白 = 根落点：内容不满一屏时整块树视口挂 drop-root:bottom
+    let bottom = frame
+        .hits
+        .iter()
+        .find(|hit| hit.id == "drop-root:bottom")
+        .expect("树视口空白区应挂根落点")
+        .clone();
+    runtime.notify_frame_input(
+        FILES_ID,
+        FILES_SURFACE,
+        &FrameInput::PointerMove {
+            x: bottom.x + bottom.w / 2.0,
+            y: bottom.y + bottom.h - 4.0,
+            hit: Some(bottom.id.clone()),
+        },
+    );
+    wait_for(
+        || state.drag_hovers.lock().unwrap().last().cloned() == Some(Some(String::new())),
+        "空白区应上报仓库根落点",
+    )
+    .await;
+    // 行侧缝 = 根落点：指针移到缝上要上报空路径（拖回仓库根）。
+    // 整块树视口也挂根落点（drop-root:bottom），按带序号的侧缝 id 取
     let seam = frame
         .hits
         .iter()
-        .find(|hit| hit.id.starts_with("drop-root:"))
+        .find(|hit| hit.id.starts_with("drop-root:") && hit.id != "drop-root:bottom")
         .expect("行侧缝应挂命中区")
         .clone();
     runtime.notify_frame_input(
@@ -350,7 +376,7 @@ async fn main() {
         event::name::DRAG_STATE,
         &DragStateParams { target: Some("docs".into()), springing: false, ..Default::default() },
     );
-    wait_frame(&runtime, |frame| has_text(frame, "方案.md"))
+    wait_frame(&runtime, |frame| has_text(frame, "方案"))
         .await
         .expect("宿主展开的目录应在本面展开");
     // 指针离开所有行时宿主推「无落点」：那不是会话结束，松手仍要发 drag.end
@@ -455,6 +481,8 @@ const PICKED_COLOR: &str = "#e0a94e";
 const LOCAL_CONTAINER_ID: &str = "local:/tmp/vault";
 /// 足够长、但在面板宽度内放得下的中文文件名：验证行内名字按内容定宽而不是被均分挤省略。
 const LONG_NAME: &str = "这是一个特别长的中文文件名用来验证不会被过早省略.md";
+/// 上面那条的主名（行内只画主名，后缀另作徽标）。
+const LONG_STEM: &str = "这是一个特别长的中文文件名用来验证不会被过早省略";
 
 /// 宿主侧回执：主题 / 量算 / 界面状态 / 菜单 / 打开与写回记录。
 #[derive(Clone)]
@@ -487,6 +515,8 @@ struct HostState {
     picks: Arc<Mutex<Vec<Option<String>>>>,
     /// 宿主注册的插件文档类型（「新建」菜单条目来源）。
     doc_types: Arc<Mutex<Vec<DocTypeEntry>>>,
+    /// 宿主持有的展开集（仓库界面状态的真源）。
+    expanded: Arc<Mutex<Vec<String>>>,
     /// 当前打开的文件（宿主 `editor.openFiles` 的回执来源）。
     active: Arc<Mutex<Vec<String>>>,
 }
@@ -519,7 +549,9 @@ impl HostState {
             doc_types: Arc::new(Mutex::new(vec![DocTypeEntry {
                 extension: "board".into(),
                 label: "画板".into(),
+                icon: "layout-dashboard".into(),
             }])),
+            expanded: Arc::new(Mutex::new(vec![String::new()])),
             active: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -556,7 +588,7 @@ fn serve(runtime: Arc<PluginRuntime>, state: HostState) {
                         .unwrap_or_default();
                     let result = VaultUiResult {
                         state: VaultUiState {
-                            expanded: Vec::new(),
+                            expanded: state.expanded.lock().unwrap().clone(),
                             sort: "mtime-desc".into(),
                             ..VaultUiState::default()
                         },
@@ -568,10 +600,13 @@ fn serve(runtime: Arc<PluginRuntime>, state: HostState) {
                 }
                 HostRequest::VaultUiWrite { request_id, patch, .. } => {
                     state.patches.lock().unwrap().push(patch.clone());
+                    if let Some(expanded) = patch.expanded.clone() {
+                        *state.expanded.lock().unwrap() = expanded;
+                    }
                     let result = VaultUiResult {
                         state: VaultUiState {
                             sort: patch.sort.clone().unwrap_or_else(|| "mtime-desc".into()),
-                            expanded: patch.expanded.clone().unwrap_or_default(),
+                            expanded: state.expanded.lock().unwrap().clone(),
                             ..VaultUiState::default()
                         },
                         entries: Vec::new(),

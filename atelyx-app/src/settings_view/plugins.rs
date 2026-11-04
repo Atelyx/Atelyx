@@ -2837,6 +2837,7 @@ fn vault_ui_json(
             .map(|info| atelyx_core::plugin_runtime::DocTypeEntry {
                 extension: info.registration.extension.clone(),
                 label: info.registration.label.clone(),
+                icon: info.registration.icon.clone(),
             })
             .collect(),
     };

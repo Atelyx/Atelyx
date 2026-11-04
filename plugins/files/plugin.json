@@ -8,7 +8,7 @@
     "windows": "atelyx_plugin_files.dll",
     "linux": "libatelyx_plugin_files.so"
   },
-  "permissions": ["vault", "state"],
+  "permissions": ["vault", "clipboard", "collab"],
   "singleton": true,
   "keepMountedOnVaultSwitch": false
 }

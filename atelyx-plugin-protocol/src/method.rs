@@ -1760,6 +1760,9 @@ pub struct DocTypeEntry {
     pub extension: String,
     /// 菜单标签（如「笔记」）。
     pub label: String,
+    /// 宿主图标形状名（文件树条目与新建菜单用；空 = 按扩展名兜底）。
+    #[serde(default)]
+    pub icon: String,
 }
 
 /// 容器切换（`vault.switchContainer`）：切到清单里给的那个容器。

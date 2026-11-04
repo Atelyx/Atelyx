@@ -24,8 +24,8 @@ pub struct Row {
     pub drop_target: bool,
     /// 落点被拒（警示底色）。
     pub drop_rejected: bool,
-    /// 展开指示线的 x 坐标（每层一条）。
-    pub guides: Vec<f32>,
+    /// 条目图标名（插件注册的文档类型给；`None` = 按扩展名兜底）。
+    pub icon: Option<String>,
 }
 
 /// 就地输入会话（重命名 / 新建草稿行）。
@@ -113,10 +113,21 @@ pub struct ContainerRow {
     pub drop_rejected: bool,
 }
 
+/// 插件注册的文档类型（扩展名不带点）：菜单条目与文件树条目的图标都取自这里。
+#[derive(Clone, Debug, PartialEq)]
+pub struct DocType {
+    pub extension: String,
+    pub label: String,
+    /// 宿主图标形状名（空 = 按扩展名兜底）。
+    pub icon: String,
+}
+
 /// 一帧要画的内容（与 [`Model`] 解耦，渲染期间不持锁）。
 #[derive(Clone, Debug, PartialEq)]
 pub struct View {
     pub error: Option<String>,
+    /// 上一次操作失败的可读原因（下一次操作开始时清掉）。
+    pub notice: Option<String>,
     pub rows: Vec<Row>,
     /// 容器列表（全部最近仓库 + 全部空间，激活项在前）。
     pub containers: Vec<ContainerRow>,
@@ -154,8 +165,12 @@ pub struct Model {
     inline: Option<InlineEdit>,
     /// 圆角档取自宿主主题。
     pub radii: Radii,
-    /// 插件注册的文档类型（扩展名 + 菜单标签）。
-    doc_types: Vec<(String, String)>,
+    /// 插件注册的文档类型（扩展名 + 菜单标签 + 条目图标）。
+    doc_types: Vec<DocType>,
+    /// 文档类型扩展名（小写）→ 图标名：摊平行时按扩展名取图标。
+    doc_icons: HashMap<String, String>,
+    /// 上一次操作失败的可读原因。
+    notice: Option<String>,
 }
 
 impl Model {
@@ -173,6 +188,8 @@ impl Model {
             inline: None,
             radii: Radii::default(),
             doc_types: Vec::new(),
+            doc_icons: HashMap::new(),
+            notice: None,
         }
     }
 
@@ -186,6 +203,8 @@ impl Model {
         self.state = state;
         self.ready = true;
         self.error = None;
+        // 成功重取即撤掉上一次失败留下的顶部提示
+        self.notice = None;
     }
 
     pub fn set_containers(&mut self, containers: Vec<ContainerEntry>) {
@@ -201,13 +220,27 @@ impl Model {
         self.containers.iter().any(|entry| entry.active && entry.root.is_some())
     }
 
-    /// 插件注册的文档类型（扩展名 + 菜单标签），供「新建」菜单条目使用。
-    pub fn set_doc_types(&mut self, doc_types: Vec<(String, String)>) {
+    /// 插件注册的文档类型（扩展名 + 菜单标签 + 条目图标），供「新建」菜单与行图标使用。
+    pub fn set_doc_types(&mut self, doc_types: Vec<DocType>) {
+        self.doc_icons = doc_types
+            .iter()
+            .filter(|kind| !kind.icon.is_empty())
+            .map(|kind| (kind.extension.to_ascii_lowercase(), kind.icon.clone()))
+            .collect();
         self.doc_types = doc_types;
     }
 
-    pub fn doc_types(&self) -> Vec<(String, String)> {
-        self.doc_types.clone()
+    pub fn doc_types(&self) -> &[DocType] {
+        &self.doc_types
+    }
+
+    /// 记一条用户可见的失败原因（面板顶部提示，下一次操作开始时清掉）。
+    pub fn warn(&mut self, notice: String) {
+        self.notice = Some(notice);
+    }
+
+    pub fn clear_notice(&mut self) {
+        self.notice = None;
     }
 
     pub fn prompt_notes(&self) -> &[String] {
@@ -344,6 +377,7 @@ impl Model {
             .collect();
         View {
             error: self.error.clone(),
+            notice: self.notice.clone(),
             rows,
             containers,
             // 容器行（仓库根 = 空路径）不算「有展开的目录」：全部展开/收起只作用于仓库内的条目
@@ -380,7 +414,12 @@ impl Model {
                 color: self.state.folder_colors.get(&entry.path).cloned(),
                 drop_target: is_target && !rejected && entry.is_dir,
                 drop_rejected: is_target && rejected,
-                guides: (1..=depth).map(|level| 15.0 + level as f32 * 16.0).collect(),
+                icon: if entry.is_dir {
+                    None
+                } else {
+                    extension_of(&entry.name)
+                        .and_then(|ext| self.doc_icons.get(&ext.to_ascii_lowercase()).cloned())
+                },
             });
             if entry.is_dir && expanded {
                 self.push_rows(children, &entry.path, depth + 1, rows);
@@ -392,5 +431,56 @@ impl Model {
 impl Default for Model {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// 文件名的扩展名（不带点；无扩展名与 `.` 开头的隐藏文件都没有）。
+pub(crate) fn extension_of(name: &str) -> Option<&str> {
+    match name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() && !ext.is_empty() => Some(ext),
+        _ => None,
+    }
+}
+
+/// 文件名的主名（无扩展名与隐藏文件原样返回）。
+pub(crate) fn stem_of(name: &str) -> &str {
+    match extension_of(name) {
+        Some(ext) => &name[..name.len() - ext.len() - 1],
+        None => name,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn kind(extension: &str, icon: &str) -> DocType {
+        DocType { extension: extension.into(), label: extension.into(), icon: icon.into() }
+    }
+
+    /// 第三方文档类型的条目图标按注册表声明取，大小写与扩展名无关。
+    #[test]
+    fn row_icon_follows_the_registered_doc_type() {
+        let mut model = Model::new();
+        model.set_doc_types(vec![kind("board", "layout-dashboard")]);
+        let mut children = HashMap::new();
+        children.insert(
+            String::new(),
+            vec![
+                UiDirEntry { name: "白板.BOARD".into(), path: "白板.BOARD".into(), is_dir: false, mtime: 0 },
+                UiDirEntry { name: "笔记.md".into(), path: "笔记.md".into(), is_dir: false, mtime: 0 },
+            ],
+        );
+        let view = model.view(&children);
+        assert_eq!(view.rows[0].icon.as_deref(), Some("layout-dashboard"));
+        assert_eq!(view.rows[1].icon, None, "未注册的扩展名交给扩展名兜底");
+    }
+
+    /// 隐藏文件没有扩展名，不该被当成后缀徽标或文档类型。
+    #[test]
+    fn hidden_files_have_no_extension() {
+        assert_eq!(extension_of(".gitignore"), None);
+        assert_eq!(extension_of("a.md"), Some("md"));
+        assert_eq!(extension_of("无扩展名"), None);
     }
 }

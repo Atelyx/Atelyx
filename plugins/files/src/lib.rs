@@ -1,5 +1,5 @@
 //! 文件面板插件：仓库文件树 + 展开集 / 排序 / 目录颜色 / 提示词标记。
-//! 目录条目与界面状态由宿主给（`vault.ui`），写回也经宿主；展开集另存插件自持数据。
+//! 目录条目与界面状态（含展开集）都以宿主为真源，经 `vault.ui` 读、`vault.updateUi` 写。
 
 mod model;
 mod view;
@@ -17,17 +17,14 @@ use atelyx_plugin_protocol::method::{
 };
 use atelyx_plugin_sdk::frame_ui::{FrameUi, UiEvent};
 use atelyx_plugin_sdk::{Context, PluginHandler, PluginInfo};
-use serde_json::json;
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::model::{DraftKind, InlineEdit, Model};
+use crate::model::{stem_of, DocType, DraftKind, InlineEdit, Model};
 
 /// 插件 id（与 `plugin.json` 一致）。
 const PLUGIN_ID: &str = "atelyx.files";
 /// 面板贡献 id（同时是面标识的贡献段）。
 const PANEL: &str = "files";
-/// 插件自持数据里的展开集键。
-const STATE_EXPANDED: &str = "expanded";
 /// 工具条与仓库行按钮的命中区 id。
 const OPEN_VAULT: &str = "open-vault";
 const SPACE_MENU: &str = "space-menu";
@@ -87,16 +84,29 @@ impl FilesPlugin {
     }
 
     /// 取界面状态与根目录条目，并补齐已展开目录的下一层。
+    /// 宿主事件逐条处理（同一插件只有一条命令通道），因此不需要在途合并。
     async fn reload(&self, ctx: &Context) {
         let result = match ctx.vault_ui(&VaultUiParams { dir: Some(String::new()) }).await {
             Ok(result) => result,
             Err(error) => {
-                ctx.log_error(&format!("取仓库界面状态失败：{error}"));
+                // 空树的失败由失败态正文承载，不再叠一条顶部提示
+                let empty_tree = self
+                    .children
+                    .lock()
+                    .unwrap()
+                    .get("")
+                    .map_or(true, |rows| rows.is_empty());
+                if empty_tree {
+                    ctx.log_error(&format!("刷新文件树失败：{error}"));
+                } else {
+                    self.warn(ctx, "刷新文件树", &error);
+                }
                 self.model.lock().unwrap().fail(error.to_string());
                 return;
             }
         };
-        let expanded = self.load_expanded(ctx).await;
+        // 展开集以宿主为真源：随仓库界面状态一起给，进容器即恢复该容器自己的展开态
+        let expanded = result.state.expanded.clone();
         let mut children = HashMap::new();
         children.insert(String::new(), result.entries);
         // 根条目上面已取过（展开集里也含根），不重复请求
@@ -105,7 +115,7 @@ impl FilesPlugin {
                 Ok(next) => {
                     children.insert(dir.clone(), next.entries);
                 }
-                Err(error) => ctx.log_error(&format!("取目录 {dir} 失败：{error}")),
+                Err(error) => self.warn(ctx, &format!("打开目录 {dir}"), &error),
             }
         }
         let active_files = ctx.open_files().await.unwrap_or_default();
@@ -116,13 +126,12 @@ impl FilesPlugin {
         }
         cache.retain(|dir, _| dir.is_empty() || expanded.iter().any(|item| item == dir));
         drop(cache);
-        let mut state = result.state;
-        state.expanded = expanded;
+        let state = result.state;
         let containers = result.containers;
         let doc_types = result
             .doc_types
             .into_iter()
-            .map(|entry| (entry.extension, entry.label))
+            .map(|entry| DocType { extension: entry.extension, label: entry.label, icon: entry.icon })
             .collect();
         let mut model = self.model.lock().unwrap();
         model.apply(state);
@@ -131,27 +140,18 @@ impl FilesPlugin {
         model.set_doc_types(doc_types);
     }
 
-    /// 读插件自持的展开集：从未写过（首次使用）时保底展开仓库根，否则插件面一进来是空的。
-    async fn load_expanded(&self, ctx: &Context) -> Vec<String> {
-        let Ok(raw) = ctx.state_read().await else { return vec![String::new()] };
-        match raw.get(STATE_EXPANDED).and_then(|value| value.as_array()) {
-            Some(items) => items
-                .iter()
-                .filter_map(|item| item.as_str().map(str::to_string))
-                .collect(),
-            None => vec![String::new()],
+    /// 写展开集：仓库界面状态是唯一真源，宿主回执不参与重建展开态。
+    async fn save_expanded(&self, ctx: &Context, expanded: Vec<String>) {
+        let patch = VaultUiPatch { expanded: Some(expanded), ..VaultUiPatch::default() };
+        if let Err(error) = ctx.vault_update_ui(&patch).await {
+            self.warn(ctx, "保存展开状态", &error);
         }
     }
 
-    /// 写展开集：插件自持数据是权威，仓库配置只作镜像（宿主回执不参与重建展开态）。
-    async fn save_expanded(&self, ctx: &Context, expanded: Vec<String>) {
-        if let Err(error) = ctx.state_write(json!({ STATE_EXPANDED: json!(expanded) })).await {
-            ctx.log_error(&format!("写展开集失败：{error}"));
-        }
-        let patch = VaultUiPatch { expanded: Some(expanded.clone()), ..VaultUiPatch::default() };
-        if let Err(error) = ctx.vault_update_ui(&patch).await {
-            ctx.log_error(&format!("同步展开集失败：{error}"));
-        }
+    /// 失败落点：日志留可定位原因，面板顶部给一句话（下一次操作清掉）。
+    fn warn(&self, ctx: &Context, what: &str, error: &impl std::fmt::Display) {
+        ctx.log_error(&format!("{what}失败：{error}"));
+        self.model.lock().unwrap().warn(format!("{what}失败：{error}"));
     }
 
     async fn render(&self, ctx: &Context) {
@@ -189,7 +189,7 @@ impl FilesPlugin {
                     Ok(result) => {
                         self.children.lock().unwrap().insert(rel, result.entries);
                     }
-                    Err(error) => ctx.log_error(&format!("取目录 {rel} 失败：{error}")),
+                    Err(error) => self.warn(ctx, &format!("打开目录 {rel}"), &error),
                 }
             }
         } else {
@@ -225,7 +225,7 @@ impl FilesPlugin {
         let dirs = match ctx.vault_list_dirs().await {
             Ok(dirs) => dirs,
             Err(error) => {
-                ctx.log_error(&format!("取目录清单失败：{error}"));
+                self.warn(ctx, "取目录清单", &error);
                 return;
             }
         };
@@ -255,11 +255,12 @@ impl FilesPlugin {
                     kind.icon(),
                 ));
             }
-            for (extension, label) in self.model.lock().unwrap().doc_types() {
+            let doc_types = self.model.lock().unwrap().doc_types().to_vec();
+            for kind in doc_types {
                 items.push(menu_action(
-                    &format!("draft:{extension}:{path}"),
-                    &format!("新建{label}"),
-                    "file-text",
+                    &format!("draft:{}:{path}", kind.extension),
+                    &format!("新建{}", kind.label),
+                    if kind.icon.is_empty() { "file-text" } else { &kind.icon },
                 ));
             }
             items.push(menu_action(
@@ -360,7 +361,7 @@ impl FilesPlugin {
     async fn open_menu(&self, ctx: &Context, items: Vec<MenuItem>, width: f32) {
         let params = MenuOpenParams { items, width: Some(width), search: None };
         if let Err(error) = ctx.open_menu(&params).await {
-            ctx.log_error(&format!("弹出菜单失败：{error}"));
+            self.warn(ctx, "弹出菜单", &error);
         }
     }
 
@@ -597,7 +598,7 @@ impl PluginHandler for FilesPlugin {
                 if self.model.lock().unwrap().dragging() {
                     self.model.lock().unwrap().set_dragging(false);
                     if let Err(error) = ctx.end_drag(&DragEndParams { cancelled: true }).await {
-                        ctx.log_error(&format!("结束拖拽失败：{error}"));
+                        self.warn(ctx, "结束拖拽", &error);
                     }
                 }
                 if let Some((path, is_dir)) = hit.as_deref().and_then(parse_row_id) {
@@ -623,7 +624,7 @@ impl PluginHandler for FilesPlugin {
                     };
                     match ctx.begin_drag(&params).await {
                         Ok(()) => self.model.lock().unwrap().set_dragging(true),
-                        Err(error) => ctx.log_error(&format!("发起拖拽失败：{error}")),
+                        Err(error) => self.warn(ctx, "发起拖拽", &error),
                     }
                 }
             }
@@ -637,7 +638,7 @@ impl PluginHandler for FilesPlugin {
                     is_dir: target.is_some_and(|(_, is_dir)| is_dir),
                 };
                 if let Err(error) = ctx.drag_hover(&params).await {
-                    ctx.log_error(&format!("上报拖拽落点失败：{error}"));
+                    self.warn(ctx, "上报拖拽落点", &error);
                 }
             }
             // 松手即收尾：宿主按落点落位（没有落点则什么也不做），会话不得留在宿主手里
@@ -645,7 +646,7 @@ impl PluginHandler for FilesPlugin {
                 self.pending_drag.lock().unwrap().take();
                 self.model.lock().unwrap().set_dragging(false);
                 if let Err(error) = ctx.end_drag(&DragEndParams { cancelled: false }).await {
-                    ctx.log_error(&format!("结束拖拽失败：{error}"));
+                    self.warn(ctx, "结束拖拽", &error);
                 }
             }
         } else if matches!(input, FrameInput::PointerUp { .. } | FrameInput::PointerLeave) {
@@ -719,28 +720,29 @@ impl FilesPlugin {
         }
         let params = SwitchContainerParams { id: id.to_string() };
         if let Err(error) = ctx.switch_container(&params).await {
-            ctx.log_error(&format!("切换容器失败：{error}"));
+            self.warn(ctx, "切换容器", &error);
         }
     }
 
     /// 处理一次点击（工具条 / 行）。
     async fn on_action(&self, ctx: &Context, id: String) {
+        self.model.lock().unwrap().clear_notice();
         match id.as_str() {
             OPEN_VAULT => {
                 if let Err(error) = ctx.pick_vault().await {
-                    ctx.log_error(&format!("打开文件夹选择器失败：{error}"));
+                    self.warn(ctx, "打开文件夹选择器", &error);
                 }
             }
             SPACE_MENU => {
                 if let Err(error) = ctx.open_space_menu().await {
-                    ctx.log_error(&format!("打开协作空间菜单失败：{error}"));
+                    self.warn(ctx, "打开协作空间菜单", &error);
                 }
             }
             SORT => self.open_sort_menu(ctx).await,
             REFRESH => {
                 // 先让宿主重读它自己的文件树缓存（别处也读它），再重取本面的条目
                 if let Err(error) = ctx.refresh_tree().await {
-                    ctx.log_error(&format!("刷新宿主文件树失败：{error}"));
+                    self.warn(ctx, "刷新宿主文件树", &error);
                 }
                 self.reload(ctx).await;
                 self.render(ctx).await;
@@ -757,7 +759,7 @@ impl FilesPlugin {
                         self.toggle_dir(ctx, path).await;
                     } else if let Err(error) = ctx.open_file_quiet(&path).await {
                         // 打开但不改布局：有对应视图就显示在里面，没有也不新建标签
-                        ctx.log_error(&format!("打开文件 {path} 失败：{error}"));
+                        self.warn(ctx, &format!("打开文件 {path}"), &error);
                     }
                     return;
                 }
@@ -768,10 +770,11 @@ impl FilesPlugin {
 
     /// 菜单选中：新建 / 颜色 / 提示词 / 重命名 / 删除 / 排序 / 切容器。
     async fn on_menu_action(&self, ctx: &Context, selected: String) {
+        self.model.lock().unwrap().clear_notice();
         if let Some(kind) = selected.strip_prefix("sort:") {
             let patch = VaultUiPatch { sort: Some(kind.to_string()), ..VaultUiPatch::default() };
             if let Err(error) = ctx.vault_update_ui(&patch).await {
-                ctx.log_error(&format!("写排序失败：{error}"));
+                self.warn(ctx, "写排序", &error);
             }
             self.reload(ctx).await;
             return;
@@ -780,7 +783,7 @@ impl FilesPlugin {
             let params =
                 atelyx_plugin_protocol::method::SwitchContainerParams { id: id.to_string() };
             if let Err(error) = ctx.switch_container(&params).await {
-                ctx.log_error(&format!("切换容器失败：{error}"));
+                self.warn(ctx, "切换容器", &error);
             }
             return;
         }
@@ -788,7 +791,7 @@ impl FilesPlugin {
             let params = RemoveContainerParams { id: id.to_string() };
             match ctx.remove_container(&params).await {
                 Ok(()) => self.reload(ctx).await,
-                Err(error) => ctx.log_error(&format!("移除容器 {id} 失败：{error}")),
+                Err(error) => self.warn(ctx, &format!("移除容器 {id}"), &error),
             }
             return;
         }
@@ -818,7 +821,7 @@ impl FilesPlugin {
                         self.set_folder_color(ctx, path, Some(color)).await;
                     }
                 }
-                Err(error) => ctx.log_error(&format!("取色失败：{error}")),
+                Err(error) => self.warn(ctx, "取色", &error),
             }
             return;
         }
@@ -832,7 +835,7 @@ impl FilesPlugin {
             self.start_inline(InlineEdit::Rename {
                 path: path.to_string(),
                 is_dir,
-                value: if is_dir { name } else { file_stem(&name) },
+                value: if is_dir { name } else { stem_of(&name).to_string() },
             })
             .await;
             return;
@@ -845,7 +848,7 @@ impl FilesPlugin {
         if let Some(id) = selected.strip_prefix("delete-confirm:") {
             let (path, _) = id.rsplit_once('|').unwrap_or((id, "f"));
             if let Err(error) = ctx.vault_remove(path).await {
-                ctx.log_error(&format!("删除 {path} 失败：{error}"));
+                self.warn(ctx, &format!("删除 {path}"), &error);
             }
             self.reload(ctx).await;
             return;
@@ -874,7 +877,7 @@ impl FilesPlugin {
             let params = DuplicateParams { path: path.to_string(), is_dir: is_dir == "d" };
             match ctx.duplicate_entry(&params).await {
                 Ok(_) => self.reload(ctx).await,
-                Err(error) => ctx.log_error(&format!("创建副本失败：{error}")),
+                Err(error) => self.warn(ctx, "创建副本", &error),
             }
         }
     }
@@ -882,7 +885,7 @@ impl FilesPlugin {
     /// 在系统文件管理器中显示（本地仓库才有本机路径）。
     async fn reveal(&self, ctx: &Context, path: &str, is_dir: bool) {
         if let Err(error) = ctx.reveal_in_file_manager(path, is_dir).await {
-            ctx.log_error(&format!("打开文件管理器失败：{error}"));
+            self.warn(ctx, "打开文件管理器", &error);
         }
     }
 
@@ -892,14 +895,14 @@ impl FilesPlugin {
             true => match ctx.vault_absolute_path(path).await {
                 Ok(text) => text,
                 Err(error) => {
-                    ctx.log_error(&format!("取绝对路径失败：{error}"));
+                    self.warn(ctx, "取绝对路径", &error);
                     return;
                 }
             },
             false => path.to_string(),
         };
         if let Err(error) = ctx.write_clipboard(&text).await {
-            ctx.log_error(&format!("复制路径失败：{error}"));
+            self.warn(ctx, "复制路径", &error);
         }
     }
 
@@ -918,7 +921,7 @@ impl FilesPlugin {
                 Ok(result) => {
                     self.children.lock().unwrap().insert(dir, result.entries);
                 }
-                Err(error) => ctx.log_error(&format!("取目录 {dir} 失败：{error}")),
+                Err(error) => self.warn(ctx, &format!("打开目录 {dir}"), &error),
             }
         }
         self.save_expanded(ctx, expanded).await;
@@ -965,7 +968,7 @@ impl FilesPlugin {
                 }
                 let params = CreateEntryParams { dir, name, kind: kind.wire().to_string() };
                 if let Err(error) = ctx.create_entry(&params).await {
-                    ctx.log_error(&format!("新建条目失败：{error}"));
+                    self.warn(ctx, "新建条目", &error);
                 }
                 self.reload(ctx).await;
             }
@@ -974,23 +977,12 @@ impl FilesPlugin {
                 if name.is_empty() {
                     return;
                 }
-                let parent = path.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
-                let original = path.rsplit('/').next().unwrap_or(&path);
-                let extension = if is_dir {
-                    String::new()
-                } else {
-                    original.rsplit_once('.').map(|(_, ext)| format!(".{ext}")).unwrap_or_default()
-                };
-                let to = if parent.is_empty() {
-                    format!("{name}{extension}")
-                } else {
-                    format!("{parent}/{name}{extension}")
-                };
+                let to = rename_target(&path, is_dir, &name);
                 if to == path {
                     return;
                 }
                 if let Err(error) = ctx.vault_rename(&path, &to).await {
-                    ctx.log_error(&format!("重命名失败：{error}"));
+                    self.warn(ctx, "重命名", &error);
                 }
                 self.reload(ctx).await;
             }
@@ -1010,7 +1002,7 @@ impl FilesPlugin {
         }
         let patch = VaultUiPatch { folder_colors: Some(colors), ..VaultUiPatch::default() };
         if let Err(error) = ctx.vault_update_ui(&patch).await {
-            ctx.log_error(&format!("写目录颜色失败：{error}"));
+            self.warn(ctx, "写目录颜色", &error);
         }
         self.reload(ctx).await;
     }
@@ -1025,15 +1017,34 @@ impl FilesPlugin {
         }
         let patch = VaultUiPatch { prompt_notes: Some(notes), ..VaultUiPatch::default() };
         if let Err(error) = ctx.vault_update_ui(&patch).await {
-            ctx.log_error(&format!("写提示词标记失败：{error}"));
+            self.warn(ctx, "写提示词标记", &error);
         }
         self.reload(ctx).await;
     }
 }
 
-/// 文件名去掉扩展名（重命名输入框的初值）。
-fn file_stem(name: &str) -> String {
-    name.rsplit_once('.').map(|(stem, _)| stem.to_string()).unwrap_or_else(|| name.to_string())
+/// 重命名目标路径：输入里手打的原后缀先剥掉再拼回，`b.md` 重命名 `a.md` 得 `b.md` 而不是 `b.md.md`。
+fn rename_target(path: &str, is_dir: bool, typed: &str) -> String {
+    let parent = path.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
+    let original = path.rsplit('/').next().unwrap_or(path);
+    // 输入框初值就是主名：主名本身带同后缀的文件（a.md.md）直接回车不是改名
+    if !is_dir && typed == crate::model::stem_of(original) {
+        return path.to_string();
+    }
+    let name = match if is_dir { None } else { crate::model::extension_of(original) } {
+        Some(ext) => match typed.rsplit_once('.') {
+            Some((stem, typed_ext)) if !stem.is_empty() && typed_ext.eq_ignore_ascii_case(ext) => {
+                format!("{stem}.{ext}")
+            }
+            _ => format!("{typed}.{ext}"),
+        },
+        None => typed.to_string(),
+    };
+    if parent.is_empty() {
+        name
+    } else {
+        format!("{parent}/{name}")
+    }
 }
 
 #[no_mangle]
@@ -1078,9 +1089,22 @@ mod tests {
         assert_eq!(parse_row_id("row:f:a:b"), Some(("a:b".into(), false)));
     }
 
+    /// 手打后缀不该和原后缀叠成 `b.md.md`；换别的后缀则原样保留用户输入。
     #[test]
-    fn file_stem_drops_the_extension_only_when_present() {
-        assert_eq!(file_stem("方案.md"), "方案");
-        assert_eq!(file_stem("无扩展名"), "无扩展名");
+    fn rename_target_strips_a_retyped_extension() {
+        assert_eq!(rename_target("a.md", false, "b.md"), "b.md");
+        assert_eq!(rename_target("a.md", false, "b.MD"), "b.md");
+        assert_eq!(rename_target("a.md", false, "b"), "b.md");
+        assert_eq!(rename_target("a.md", false, "b.txt"), "b.txt.md");
+        assert_eq!(rename_target("docs/a.md", false, "b"), "docs/b.md");
+        assert_eq!(rename_target("docs", true, "notes"), "notes");
+        assert_eq!(rename_target(".gitignore", false, ".env"), ".env");
+    }
+
+    /// 输入框初值就是主名：主名本身带同后缀的文件直接回车不是改名。
+    #[test]
+    fn rename_target_keeps_a_double_suffixed_name_unchanged() {
+        assert_eq!(rename_target("a.md.md", false, "a.md"), "a.md.md");
+        assert_eq!(rename_target("docs/表.md.md", false, "表.md"), "docs/表.md.md");
     }
 }
