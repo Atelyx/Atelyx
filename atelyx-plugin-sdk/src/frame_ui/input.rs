@@ -1,5 +1,8 @@
 ﻿//! 原始输入 → 语义事件：指针按命中 id 与上次布局解释成点击 / 聚焦，键盘与输入法落到聚焦控件上编辑。
 
+use std::collections::HashMap;
+use std::time::Instant;
+
 use atelyx_plugin_protocol::frame::FrameInput;
 use atelyx_plugin_protocol::frame::{Key, Modifiers, MouseButton, NamedKey};
 use atelyx_plugin_protocol::method::MAX_MEASURE_ITEMS;
@@ -13,19 +16,94 @@ use crate::Context;
 /// 自绘子区起拖的最小位移（逻辑像素）：小于它仍按点击 / 双击解释。
 const DRAG_THRESHOLD: f32 = 4.0;
 
-/// 一条输入对应的语义事件；改完状态后由插件调用 `render` 提交新一帧。
+/// 一条输入的处理结果：语义事件，以及这次输入是否改变了画面。
+pub struct InputOutcome {
+    /// 解释出的语义事件（按发生顺序）。
+    pub events: Vec<UiEvent>,
+    /// 本次输入是否改变了影响绘制或命中的状态。为 `false` 时插件可以跳过 `render`：
+    /// 重排出来的帧与上一帧相同。纯悬停移动（悬停区、焦点、光标、选区、滚动都不变）即此列。
+    pub repaint: bool,
+}
+
+impl InputOutcome {
+    fn unchanged() -> Self {
+        Self { events: Vec::new(), repaint: false }
+    }
+}
+
+/// 影响绘制 / 命中的交互态快照：输入前后相等且没有事件 = 这次输入不必重绘。
+/// 只收输入会改的字段；`layouts` / `hints` 这类由 `render` 写回的字段不算。
+/// 整表克隆在指针高频事件上仍是微秒级，换来的是「漏一个字段就画面不刷新」的风险为零。
+#[derive(PartialEq)]
+struct PaintState {
+    size: (f32, f32),
+    hovered: Option<String>,
+    /// 提示可见时指针位置决定提示贴哪画，才需要纳入比较。
+    pointer: Option<(f32, f32)>,
+    hint: Option<(String, Instant)>,
+    press: Option<(String, bool)>,
+    drag_bar: Option<String>,
+    drag: Option<(String, f32, f32, bool)>,
+    focus: Option<String>,
+    /// 各输入框的（光标，选区锚点，预输入串，内部滚动偏移）。
+    inputs: HashMap<String, (usize, usize, String, f32)>,
+    selects: HashMap<String, (bool, Option<usize>)>,
+    scroll: HashMap<String, f32>,
+    scroll_x: HashMap<String, f32>,
+    selection: Option<TextSelection>,
+}
+
+impl PaintState {
+    fn of(state: &UiState) -> Self {
+        Self {
+            size: state.size,
+            hovered: state.hovered.clone(),
+            pointer: if state.hint_label().is_some() { state.pointer } else { None },
+            hint: state.hint.as_ref().map(|hint| (hint.id.clone(), hint.since)),
+            press: state
+                .press
+                .as_ref()
+                .map(|press| (press.id.clone(), press.from_input)),
+            drag_bar: state.drag_bar.clone(),
+            drag: state
+                .drag
+                .as_ref()
+                .map(|drag| (drag.id.clone(), drag.dx, drag.dy, drag.started)),
+            focus: state.focus.clone(),
+            inputs: state
+                .inputs
+                .iter()
+                .map(|(id, item)| {
+                    (id.clone(), (item.caret, item.anchor, item.preedit.clone(), item.scroll))
+                })
+                .collect(),
+            selects: state
+                .selects
+                .iter()
+                .map(|(id, select)| (id.clone(), (select.open, select.hover)))
+                .collect(),
+            scroll: state.scroll.clone(),
+            scroll_x: state.scroll_x.clone(),
+            selection: state.selection.clone(),
+        }
+    }
+}
+
+/// 一条输入对应的语义事件；改完状态后由插件按 [`InputOutcome::repaint`] 决定是否提交新一帧。
 pub(crate) async fn handle(
     state: &mut UiState,
     ctx: &Context,
     input: &FrameInput,
     value_of: impl Fn(&str) -> Option<String>,
-) -> Vec<UiEvent> {
+) -> InputOutcome {
     let mut events = Vec::new();
-    let before = caret_snapshot(state);
     // 按在浮层外：浮层已由宿主收起，控件层不产生事件（插件按原始输入自己收尾）
     if matches!(input, FrameInput::Outside { .. }) {
-        return Vec::new();
+        return InputOutcome::unchanged();
     }
+    let paint_before = PaintState::of(state);
+    let caret_was_lit = state.caret_lit();
+    let caret_before = caret_snapshot(state);
     match input {
         FrameInput::Outside { .. } => {}
         FrameInput::PointerDown { x, y, button, hit, .. } => {
@@ -133,13 +211,13 @@ pub(crate) async fn handle(
     let text_changed = events.iter().any(|event| matches!(event, UiEvent::Text { .. }));
     let after = caret_snapshot(state);
     // 编辑与光标移动都把闪烁计时清零：按键的瞬间光标一定是亮的
-    if text_changed || before.as_ref() != after.as_ref() {
+    if text_changed || caret_before.as_ref() != after.as_ref() {
         state.reset_blink();
     }
     if !text_changed {
         if let Some((id, caret, anchor)) = after {
             // 焦点换了另有 Focus 事件，不必再报一次光标
-            let changed = before
+            let changed = caret_before
                 .map(|(before_id, before_caret, before_anchor)| {
                     before_id == id && (before_caret != caret || before_anchor != anchor)
                 })
@@ -149,7 +227,11 @@ pub(crate) async fn handle(
             }
         }
     }
-    events
+    // 有事件 = 插件要据此改自己的状态，必然重绘；否则只认交互态与光标相位的实际变化
+    let repaint = !events.is_empty()
+        || PaintState::of(state) != paint_before
+        || state.caret_lit() != caret_was_lit;
+    InputOutcome { events, repaint }
 }
 
 /// 当前聚焦输入框的 (id, 光标, 选区锚点)。

@@ -230,15 +230,46 @@ fn worker_loop(
             return;
         }
     }
-    while let Ok(cmd) = rx.recv() {
+    let mut deferred: Option<Cmd> = None;
+    loop {
+        let cmd = match deferred.take() {
+            Some(cmd) => cmd,
+            None => match rx.recv() {
+                Ok(cmd) => cmd,
+                Err(_) => break,
+            },
+        };
         if matches!(&cmd, Cmd::Stop) {
             let _ = catch_unwind(AssertUnwindSafe(|| runtime.block_on(handler.on_shutdown(&ctx))));
             break;
         }
+        // worker 忙时队里会积压一串指针移动：中间位置早已过期，只留最后一条再解释，
+        // 非移动命令一律排在它之后处理（顺序不变），所以先记下来下一轮跑。
+        let (cmd, next) = fold_pointer_moves(cmd, &rx);
+        deferred = next;
         let handled =
             catch_unwind(AssertUnwindSafe(|| runtime.block_on(handle_cmd(handler.as_ref(), &ctx, cmd))));
         if handled.is_err() {
             host.log(abi::LOG_ERROR, "插件入口 panic，已跳过本次输入");
+        }
+    }
+}
+
+/// 队首是指针移动时，把紧随其后的同面指针移动折叠成最后一条：只解释最终落点。
+/// 返回（这一轮要处理的命令，下一轮要先处理的命令）；被折叠掉的中间位置不再产生任何事件。
+fn fold_pointer_moves(mut cmd: Cmd, rx: &std_mpsc::Receiver<Cmd>) -> (Cmd, Option<Cmd>) {
+    loop {
+        let Cmd::Input(surface, FrameInput::PointerMove { .. }) = &cmd else {
+            return (cmd, None);
+        };
+        match rx.try_recv() {
+            Ok(next) => match &next {
+                Cmd::Input(next_surface, FrameInput::PointerMove { .. }) if next_surface == surface => {
+                    cmd = next;
+                }
+                _ => return (cmd, Some(next)),
+            },
+            Err(_) => return (cmd, None),
         }
     }
 }
@@ -1303,5 +1334,33 @@ mod tests {
             Some(FrameInput::Outside { x: 12.0, y: 34.0 })
         );
         assert!(input_from_abi(&empty_input(9999)).is_none());
+    }
+
+    /// 队里挤了一串同面指针移动时只解释最后一条；非移动命令排在它之后，不能被越过。
+    #[test]
+    fn queued_pointer_moves_collapse_to_the_last_one() {
+        let (tx, rx) = std_mpsc::channel();
+        let mv = |x: f32| FrameInput::PointerMove { x, y: 0.0, hit: Some("card".into()) };
+        for x in [1.0, 2.0, 3.0] {
+            tx.send(Cmd::Input("canvas".into(), mv(x))).unwrap();
+        }
+        tx.send(Cmd::Tick("canvas".into(), 1, 16)).unwrap();
+        let (cmd, next) = fold_pointer_moves(Cmd::Input("canvas".into(), mv(0.0)), &rx);
+        assert!(
+            matches!(&cmd, Cmd::Input(_, FrameInput::PointerMove { x, .. }) if *x == 3.0),
+            "中间位置已过期，只留最后一条"
+        );
+        assert!(matches!(next, Some(Cmd::Tick(..))), "帧拍排在移动之后，顺序不变");
+    }
+
+    /// 不同面的移动不折叠：各面按到达顺序各自解释。
+    #[test]
+    fn pointer_moves_of_different_surfaces_keep_their_order() {
+        let (tx, rx) = std_mpsc::channel();
+        let mv = |x: f32| FrameInput::PointerMove { x, y: 0.0, hit: None };
+        tx.send(Cmd::Input("a".into(), mv(2.0))).unwrap();
+        let (cmd, next) = fold_pointer_moves(Cmd::Input("b".into(), mv(1.0)), &rx);
+        assert!(matches!(&cmd, Cmd::Input(surface, _) if surface == "b"));
+        assert!(matches!(next, Some(Cmd::Input(surface, _)) if surface == "a"));
     }
 }

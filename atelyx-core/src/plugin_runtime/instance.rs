@@ -2309,9 +2309,14 @@ impl Instance {
         }
     }
 
-    /// 是否有面在收帧（壳据此决定要不要挂帧节拍：没有动画时不产生周期唤醒）。
-    pub(crate) fn has_frame_ticks(&self) -> bool {
-        !self.surface_clocks.lock().unwrap().is_empty()
+    /// 本实例各面声明的最高帧率（没有声明帧率的面 = `None`；壳据此决定要不要挂帧节拍）。
+    pub(crate) fn max_frame_fps(&self) -> Option<u16> {
+        self.surface_clocks
+            .lock()
+            .unwrap()
+            .values()
+            .map(|clock| clock.fps)
+            .max()
     }
 
     /// 推一次帧节拍：到期的整面帧发 `host:frame.tick`。
@@ -3623,11 +3628,11 @@ mod tests {
             )
             .unwrap();
         assert!(instance.surface_frame("main").is_some());
-        assert!(instance.has_frame_ticks());
+        assert!(instance.max_frame_fps().is_some());
 
         instance.release_resources();
         assert!(instance.surface_frame("main").is_none());
-        assert!(!instance.has_frame_ticks());
+        assert!(instance.max_frame_fps().is_none());
     }
 
     /// 绘制期登记的等帧会取走退回的帧：登记期间的提交不发通知，超时后到达的帧照常通知。

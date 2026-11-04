@@ -1742,11 +1742,15 @@ impl PluginRuntime {
             .copied()
     }
 
-    /// 是否有画布或整面帧在等帧（壳据此决定要不要挂帧节拍：没有动画时不产生周期唤醒）。
-    pub fn has_frame_ticks(&self) -> bool {
-        // 只读判定，锁内直接遍历（避免每次调用都克隆实例表）
+    /// 各面声明的最高帧率（没有声明帧率的面 = `None`）：壳据此把帧拍按真实需要挂定时器，
+    /// 而不是固定高频空转——每收到一条消息 iced 都要整窗重建一遍视图。
+    /// 锁内直接遍历，避免每次订阅求值都克隆实例表。
+    pub fn max_frame_fps(&self) -> Option<u16> {
         let instances = self.instances.lock().unwrap();
-        instances.values().any(|instance| instance.has_frame_ticks())
+        instances
+            .values()
+            .filter_map(|instance| instance.max_frame_fps())
+            .max()
     }
 
     /// 推一次帧节拍：给到期的画布与整面帧各发一条帧通知（壳的帧 tick 调）。

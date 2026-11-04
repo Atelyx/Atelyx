@@ -201,9 +201,11 @@ const PERSIST_TICK: std::time::Duration = std::time::Duration::from_millis(800);
 /// 加载屏扫光 / 转圈的节拍（约 30fps；就绪前挂载、就绪后停止）。
 const STARTUP_FRAME: std::time::Duration = std::time::Duration::from_millis(33);
 
-/// 帧拍的调度粒度（125 Hz，覆盖协议允许的最高帧率）：具体节拍由各画布与整面帧声明的 fps 决定，
-/// 此值只决定检查密度——比它更慢会让 120 fps 的声明退化成按检查密度发帧。
-const FRAME_TICK: std::time::Duration = std::time::Duration::from_millis(8);
+/// 帧拍订阅的唤醒下限：最高帧率的插件按 125 Hz 上限唤醒，静态面按 10 Hz 唤醒。
+/// 每一条定时消息都会让 iced 整窗重建一遍视图，所以订阅粒度必须跟着声明帧率走，
+/// 不能固定按 125 Hz 空转。
+const FRAME_TICK_MIN: std::time::Duration = std::time::Duration::from_millis(8);
+const FRAME_TICK_MAX: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// 自动保存防抖：最近一次内容变更后停止输入该时长才写回（尾沿 debounce，单定时器链续排）。
 pub(crate) const AUTOSAVE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(500);
@@ -556,6 +558,8 @@ enum Message {
     Plugins(settings_view::plugins::PluginsMsg),
     /// 插件运行时事件（单一通道进 update）。
     PluginEvent(Box<PluginEvent>),
+    /// 合并后的帧提交通知：一批 = 一个合并窗口内所有面的最新帧（`None` = 该插件整表清空）。
+    PluginFramesSubmitted(Vec<(String, Option<String>)>),
     /// 托盘选择（插件条目回发 `host:tray.click`，宿主条目由壳处理）。
     Tray(tray::TrayEvent),
     /// 插件请求接管聚焦窗口（壳应用后经运行时回填插件）。
@@ -637,8 +641,6 @@ enum Message {
     },
     /// 帧节拍：给声明了帧率的整面帧发一条帧通知（只在有动画面时订阅）。
     PluginFrameTick,
-    /// 一拍帧通知已写完（复位在飞标记）。
-    PluginFramePumped,
     /// 退出接管（常驻退出入口 / Esc）。
     PluginExitTakeover(window::Id),
     /// 窗口获得焦点（接管请求作用域 = 最近聚焦窗口）。
@@ -1277,8 +1279,6 @@ pub struct App {
         HashMap<(String, String), std::sync::Arc<atelyx_core::plugin_runtime::SurfaceFrame>>,
     /// 整面帧的键盘焦点（全局单槽：OS 只给聚焦窗口发键盘，窗口失焦即清除）。
     pub plugin_frame_focus: Option<plugin_actions::FrameFocus>,
-    /// 帧拍是否还在飞（同一时刻只推一拍，慢插件不积压帧任务）。
-    pub plugin_frame_pumping: bool,
     /// 各窗口的接管态（键 = OS 窗口 id；布局真源不动，退出即恢复）。
     pub plugin_takeovers: HashMap<window::Id, plugin_actions::TakeoverActive>,
     /// 插件窗口记账（键 = OS 窗口 id；随窗口关闭 / 插件停用收尾）。
@@ -1653,7 +1653,6 @@ impl App {
                 open_files_event: Vec::new(),
                 plugin_frames: HashMap::new(),
                 plugin_frame_focus: None,
-                plugin_frame_pumping: false,
                 plugin_takeovers: HashMap::new(),
                 plugin_windows: HashMap::new(),
                 doc_open: None,
@@ -3459,17 +3458,6 @@ impl App {
                     settings_view::plugins::on_event(self, *event);
                     return task;
                 }
-                if let PluginEvent::ViewSubmitted { id, surface_id } = event.as_ref() {
-                    // 帧事件只换对应面的投影；surface_id 缺省 = 帧集合整体清空（停用 / 收尾）
-                    let task = match surface_id.as_deref() {
-                        Some(surface_id) => {
-                            plugin_actions::refresh_surface_frame(self, id, surface_id)
-                        }
-                        None => plugin_actions::refresh_frames(self),
-                    };
-                    settings_view::plugins::on_event(self, *event);
-                    return task;
-                }
                 if let PluginEvent::StatusChanged { id, status } = event.as_ref() {
                     if *status == PluginStatus::Running {
                         task = task.chain(self.on_plugin_running(id));
@@ -3524,6 +3512,21 @@ impl App {
                 // 注册表摊平后文档类型才可路由：挂起的文档打开在此重试
                 task.chain(self.retry_pending_doc_open())
             }
+            Message::PluginFramesSubmitted(submissions) => {
+                // 一整批只换投影、只重建一次视图；整表清空覆盖所有单面投影
+                if submissions.iter().any(|(_, surface)| surface.is_none()) {
+                    return plugin_actions::refresh_frames(self);
+                }
+                let mut task = Task::none();
+                for (plugin_id, surface_id) in submissions {
+                    if let Some(surface_id) = surface_id {
+                        task = task.chain(plugin_actions::refresh_surface_frame(
+                            self, &plugin_id, &surface_id,
+                        ));
+                    }
+                }
+                task
+            }
             Message::PluginTakeoverAsk { request_id, plugin_id, scope, surface_id } => {
                 plugin_actions::on_takeover_request(self, request_id, plugin_id, scope, surface_id)
             }
@@ -3553,20 +3556,9 @@ impl App {
                 Task::none()
             }
             Message::PluginFrameTick => {
-                // 帧拍只推通知、不等插件回执；写出插件 stdin 交给线程池——管道写满时阻塞的是任务线程，
-                // 不能是 UI 线程。上一拍还在写就不再起新任务：否则慢插件会让帧排成一队、顺序也不保证
-                if self.plugin_frame_pumping {
-                    return Task::none();
-                }
-                self.plugin_frame_pumping = true;
-                let plugins = self.plugins.clone();
-                Task::perform(
-                    async move { plugins.pump_frame_ticks(std::time::Instant::now()) },
-                    |_| Message::PluginFramePumped,
-                )
-            }
-            Message::PluginFramePumped => {
-                self.plugin_frame_pumping = false;
+                // 拍通知对同进程插件只是一次入队（不写管道、不等回执），就地推进即可；
+                // 绕一圈异步任务会多出一条完成消息，而每条消息都要整窗重建一遍视图。
+                self.plugins.pump_frame_ticks(std::time::Instant::now());
                 Task::none()
             }
             Message::PluginExitTakeover(id) => plugin_actions::exit_takeover(self, id),
@@ -7059,9 +7051,11 @@ impl App {
             } else {
                 Subscription::none()
             },
-            // 帧拍：只有存在声明了帧率的画布或整面帧时才挂（静态面不产生周期唤醒）
-            if self.plugins.has_frame_ticks() {
-                iced::time::every(FRAME_TICK).map(|_| Message::PluginFrameTick)
+            // 帧拍：按各面声明的最高帧率唤醒（静态面不产生周期唤醒；10 Hz 光标闪烁按 100 ms 唤醒）
+            if let Some(fps) = self.plugins.max_frame_fps() {
+                let cadence = std::time::Duration::from_millis(1000 / u64::from(fps.max(1)))
+                    .clamp(FRAME_TICK_MIN, FRAME_TICK_MAX);
+                iced::time::every(cadence).map(|_| Message::PluginFrameTick)
             } else {
                 Subscription::none()
             },

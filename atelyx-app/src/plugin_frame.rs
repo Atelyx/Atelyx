@@ -124,6 +124,17 @@ struct FrameState {
     ime_on: Cell<bool>,
     /// 上次上报的面左上角窗口坐标；窗口级浮层按它平移面本地坐标。
     origin: Cell<Option<Point>>,
+    /// 同一绘帧周期内攒下的连续输入（见 [`PendingInput`]）。
+    pending: RefCell<PendingInput>,
+}
+
+/// 连续输入合并缓冲：在一个绘帧周期里只保留指针移动的最新坐标与滚轮的累计增量。
+/// 插件每处理一条输入都要整面重排并回交一张帧，逐事件转发会让高上报率设备
+/// 把插件的串行处理队列排到秒级；合并后每个绘制周期最多两条，其余事件仍按序单独下发。
+#[derive(Default)]
+struct PendingInput {
+    movement: Option<FrameInput>,
+    wheel: Option<FrameInput>,
 }
 
 /// 面级浮层的绘制缓存：几何分段、文字段落与上一帧内容。
@@ -260,6 +271,7 @@ impl Default for FrameState {
             mods: Cell::new(FrameModifiers::default()),
             ime_on: Cell::new(false),
             origin: Cell::new(None),
+            pending: RefCell::new(PendingInput::default()),
         }
     }
 }
@@ -354,13 +366,62 @@ impl PluginFrame<'_> {
         }
     }
 
-    /// 指针移动是否要上报（按下中恒上报；悬停中仅在面内上报）。
-    fn pointer_move(&self, state: &FrameState, point: Point) {
-        self.send(FrameInput::PointerMove {
+    /// 指针移动只保留最新一条，等本绘制周期统一发。
+    fn queue_move(&self, state: &FrameState, point: Point) {
+        let hit = self.hit(state, point);
+        state.pending.borrow_mut().movement = Some(FrameInput::PointerMove {
             x: point.x,
             y: point.y,
-            hit: self.hit(state, point),
+            hit,
         });
+    }
+
+    /// 滚轮按累计增量合并：同一绘制周期内的多格滚动等价于一次更大的滚动。
+    fn queue_wheel(&self, state: &FrameState, point: Point, delta_x: f32, delta_y: f32) {
+        let hit = self.hit(state, point);
+        let modifiers = state.mods.get();
+        let mut pending = state.pending.borrow_mut();
+        match pending.wheel.as_mut() {
+            Some(FrameInput::Wheel {
+                x,
+                y,
+                delta_x: sum_x,
+                delta_y: sum_y,
+                modifiers: pending_mods,
+                hit: pending_hit,
+            }) => {
+                *sum_x += delta_x;
+                *sum_y += delta_y;
+                *x = point.x;
+                *y = point.y;
+                *pending_mods = modifiers;
+                *pending_hit = hit;
+            }
+            _ => {
+                pending.wheel = Some(FrameInput::Wheel {
+                    x: point.x,
+                    y: point.y,
+                    delta_x,
+                    delta_y,
+                    modifiers,
+                    hit,
+                });
+            }
+        }
+    }
+
+    /// 把缓冲里的连续输入按序下发给插件（移动在前、滚轮在后）。
+    fn flush(&self, state: &FrameState) {
+        let (movement, wheel) = {
+            let mut pending = state.pending.borrow_mut();
+            (pending.movement.take(), pending.wheel.take())
+        };
+        if let Some(input) = movement {
+            self.send(input);
+        }
+        if let Some(input) = wheel {
+            self.send(input);
+        }
     }
 }
 
@@ -416,6 +477,7 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginFrame<'_> {
             state.next_steps.borrow_mut().clear();
             state.frame_latency.set(None);
             state.slow.set(0);
+            *state.pending.borrow_mut() = PendingInput::default();
         }
         // 窗口级浮层按面原点平移；位置变化才上报（布局稳定时不产生额外消息）
         if state.origin.get() != Some(bounds.position()) {
@@ -426,6 +488,15 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginFrame<'_> {
                 surface_id: self.surface_id.clone(),
                 origin: bounds.position(),
             });
+        }
+        // 连续输入先留在缓冲里等本绘制周期一起发；其余事件（按下 / 抬起 / 键盘 / 输入法）
+        // 必须先把缓冲冲刷掉，保证它们看到最新的指针位置与累计滚动量
+        let coalesced = matches!(
+            event,
+            Event::Mouse(mouse::Event::CursorMoved { .. } | mouse::Event::WheelScrolled { .. })
+        );
+        if !coalesced {
+            self.flush(state);
         }
         match event {
             Event::Mouse(mouse::Event::ButtonPressed(button)) => {
@@ -518,8 +589,9 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginFrame<'_> {
                         return;
                     };
                     state.last_point.set(Some(point));
-                    self.pointer_move(state, point);
+                    self.queue_move(state, point);
                     shell.capture_event();
+                    shell.request_redraw();
                     return;
                 }
                 // 悬停只在面内发 Move；从内到外边沿发 Leave
@@ -527,12 +599,15 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginFrame<'_> {
                 let left = state.inside.get() && inside.is_none();
                 state.inside.set(inside.is_some());
                 if left {
+                    // 出界必须排在最后一次移动之后，否则插件看到的离开位置是旧的
+                    self.flush(state);
                     state.last_point.set(None);
                     self.send(FrameInput::PointerLeave);
                     shell.capture_event();
                 } else if let Some(point) = inside {
                     state.last_point.set(Some(point));
-                    self.pointer_move(state, point);
+                    self.queue_move(state, point);
+                    shell.request_redraw();
                 }
             }
             Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
@@ -548,16 +623,10 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginFrame<'_> {
                     }
                     mouse::ScrollDelta::Pixels { x, y } => (-x, -y),
                 };
-                self.send(FrameInput::Wheel {
-                    x: point.x,
-                    y: point.y,
-                    delta_x: dx,
-                    delta_y: dy,
-                    modifiers: state.mods.get(),
-                    hit: self.hit(state, point),
-                });
+                self.queue_wheel(state, point, dx, dy);
                 // 面消费滚轮：外层滚动容器不再同帧滚动
                 shell.capture_event();
+                shell.request_redraw();
             }
             Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, text, .. }) => {
                 state.mods.set(frame_modifiers(*modifiers));
@@ -678,10 +747,12 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginFrame<'_> {
         viewport: &Rectangle,
     ) {
         let bounds = layout.bounds();
+        let state = tree.state.downcast_ref::<FrameState>();
+        // 本绘制周期攒下的连续输入在这里下发：每次绘制最多一条移动与一条滚轮
+        self.flush(state);
         if !bounds.intersects(viewport) {
             return;
         }
-        let state = tree.state.downcast_ref::<FrameState>();
         let epoch = crate::ui::epoch();
         let image_epoch = self.app.note_image_epoch;
         // 取运行时最新帧：改宽期间投影可能还没追上（那一帧已在绘制期取走、不再发通知），

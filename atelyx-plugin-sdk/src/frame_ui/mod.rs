@@ -27,6 +27,7 @@ pub use build::Ui;
 pub use build::Canvas;
 pub use geom::Rect;
 pub use icons::{commands as icon_commands, Icon};
+pub use input::InputOutcome;
 pub use widgets::{AreaHeight, BoxStyle, BoxWidth, Edges, TextRole, TextStyle};
 /// 引用候选（`#笔记：方案.md` 这类标签）：交给 `Ui::markdown_with` 画成胶囊。
 pub use atelyx_format::markdown::MentionCandidate;
@@ -186,6 +187,17 @@ impl FrameUi {
         input: &FrameInput,
         value_of: impl Fn(&str) -> Option<String>,
     ) -> Vec<UiEvent> {
+        self.event_outcome(ctx, input, value_of).await.events
+    }
+
+    /// 与 [`FrameUi::event`] 相同，另报这次输入是否改变了画面：`repaint` 为假（纯悬停移动）时
+    /// 插件可以跳过 `render`——交互态、光标相位与事件都没变，重排出来的帧与上一帧一致。
+    pub async fn event_outcome(
+        &mut self,
+        ctx: &Context,
+        input: &FrameInput,
+        value_of: impl Fn(&str) -> Option<String>,
+    ) -> InputOutcome {
         input::handle(&mut self.state, ctx, input, value_of).await
     }
 
@@ -395,13 +407,18 @@ mod tests {
         }
 
         async fn event(&mut self, input: FrameInput) -> Vec<UiEvent> {
+            self.outcome(input).await.events
+        }
+
+        /// 带「是否要重绘」的输入结果（悬停合并与不让插件空转都据此判断）。
+        async fn outcome(&mut self, input: FrameInput) -> InputOutcome {
             let ui = self.ui.clone();
             let ctx = self.ctx.clone();
             let values = self.values.clone();
             let task = tokio::spawn(async move {
                 let mut guard = ui.lock().await;
                 guard
-                    .event(&ctx, &input, move |id| values.lock().unwrap().get(id).cloned())
+                    .event_outcome(&ctx, &input, move |id| values.lock().unwrap().get(id).cloned())
                     .await
             });
             self.drive(task).await
@@ -1200,6 +1217,115 @@ let a = 1;
         bench.event(FrameInput::PointerMove { x: 10.0, y: 10.0, hit: None }).await;
         let frame = bench.render(build).await.unwrap();
         assert!(!texts(&frame).iter().any(|text| text == "运行一次"), "指针离开即收起");
+    }
+
+    /// 悬停路径：同一悬停区内反复移动不改画面，进入控件或换提示目标才要重绘。
+    #[tokio::test]
+    async fn hover_move_inside_the_same_control_skips_the_repaint() {
+        let mut bench = Bench::new(240.0, 120.0).await;
+        let build = |ui: &mut build::Ui<'_, '_>| {
+            ui.hint("go", "运行一次");
+            ui.button("go", "运行");
+            ui.button("other", "其它");
+        };
+        bench.render(build).await.unwrap();
+        let enter = bench
+            .outcome(FrameInput::PointerMove { x: 10.0, y: 10.0, hit: Some("go".into()) })
+            .await;
+        assert!(enter.repaint, "进入控件要换悬停样式并重新开始提示计时");
+        let same = bench
+            .outcome(FrameInput::PointerMove { x: 14.0, y: 12.0, hit: Some("go".into()) })
+            .await;
+        assert!(same.events.is_empty(), "悬停不产生事件：{:?}", same.events);
+        assert!(!same.repaint, "悬停区与提示目标都没变，重排出来的帧与上一帧相同");
+    }
+
+    /// 点击路径：按下改按下态、抬起出点击事件，两步都要重绘。
+    #[tokio::test]
+    async fn click_repaints_on_press_and_release() {
+        let mut bench = Bench::new(200.0, 120.0).await;
+        bench.render(|ui| ui.button("go", "启动")).await.unwrap();
+        let down = bench
+            .outcome(FrameInput::PointerDown { x: 1.0, y: 1.0, button: MouseButton::Left, hit: Some("go".into()) })
+            .await;
+        assert!(down.repaint, "按下态要立刻显示");
+        assert!(down.events.is_empty(), "按钮按下不产生事件");
+        let up = bench
+            .outcome(FrameInput::PointerUp { x: 1.0, y: 1.0, button: MouseButton::Left, hit: Some("go".into()) })
+            .await;
+        assert!(up.repaint);
+        assert_eq!(up.events, vec![UiEvent::Click { id: "go".into() }]);
+    }
+
+    /// 拖选路径：只延伸选区、不出事件，也必须重绘——选择高亮由控件层画。
+    #[tokio::test]
+    async fn dragging_a_read_only_selection_repaints_without_events() {
+        let mut bench = Bench::new(320.0, 120.0).await;
+        let build = |ui: &mut build::Ui<'_, '_>| ui.markdown("第一行文字");
+        bench.render(build).await.unwrap();
+        let id = Some(format!("@md:1:{:x}", super::markdown::content_key("第一行文字", &[])));
+        let down = bench
+            .outcome(FrameInput::PointerDown { x: 20.0, y: 8.0, button: MouseButton::Left, hit: id.clone() })
+            .await;
+        assert!(down.repaint, "按下即起选");
+        let moved = bench
+            .outcome(FrameInput::PointerMove { x: 200.0, y: 8.0, hit: id })
+            .await;
+        assert!(moved.events.is_empty(), "拖选不产生事件：{:?}", moved.events);
+        assert!(moved.repaint, "选区延伸要重画高亮");
+    }
+
+    /// 输入法路径：组合串只改预输入（没有事件）也必须重绘，否则候选串不上屏。
+    #[tokio::test]
+    async fn ime_composition_repaints_without_events() {
+        let mut bench = Bench::new(240.0, 120.0).await;
+        bench.render(|ui| ui.text_input("host", "", "")).await.unwrap();
+        bench
+            .event(FrameInput::PointerDown { x: 20.0, y: 10.0, button: MouseButton::Left, hit: Some("host".into()) })
+            .await;
+        let composing = bench
+            .outcome(FrameInput::Text { text: "zhong".into(), composing: true, caret: Some(5), candidates: None })
+            .await;
+        assert!(composing.events.is_empty(), "组合串不进入值");
+        assert!(composing.repaint, "组合串要画在输入框里");
+    }
+
+    /// 滚动路径：偏移变了要重绘；滚到底再滚、偏移被钳住时不必重绘。
+    #[tokio::test]
+    async fn wheel_scroll_repaints_only_when_the_offset_moves() {
+        let mut bench = Bench::new(320.0, 200.0).await;
+        let build = |ui: &mut build::Ui<'_, '_>| {
+            ui.scroll_sized("list", 120.0, 0.0, false, |ui| {
+                for index in 0..20 {
+                    ui.text(format!("行{index}"), TextRole::Label);
+                }
+            });
+        };
+        bench.render(build).await.unwrap();
+        let scrolled = bench
+            .outcome(FrameInput::Wheel {
+                x: 80.0,
+                y: 40.0,
+                delta_x: 0.0,
+                delta_y: 1000.0,
+                modifiers: Default::default(),
+                hit: None,
+            })
+            .await;
+        assert!(scrolled.repaint);
+        assert!(matches!(scrolled.events.as_slice(), [UiEvent::Scroll { .. }]));
+        let clamped = bench
+            .outcome(FrameInput::Wheel {
+                x: 80.0,
+                y: 40.0,
+                delta_x: 0.0,
+                delta_y: 24.0,
+                modifiers: Default::default(),
+                hit: None,
+            })
+            .await;
+        assert!(clamped.events.is_empty(), "已在终点，本次滚轮没有事件");
+        assert!(!clamped.repaint, "偏移没动，画面不变");
     }
 
     /// 聚焦即按拍推进（光标闪烁），闪烁的暗相只收竖条、不撤输入法锚点。

@@ -411,11 +411,70 @@ impl std::hash::Hash for RuntimeSpec {
     }
 }
 
+/// 帧提交通知的合并窗口：连续出帧（动画 / 缩放 / 滚动）在窗口内只投一次影。
+/// 每条消息都会让 iced 重建一遍全部窗口的视图，逐帧投影等于逐帧整窗重建。
+const FRAME_PROJECT_WINDOW: std::time::Duration = std::time::Duration::from_millis(8);
+
+/// 帧提交通知缓冲：窗口首帧立即出队（点击 / 首屏不多等一拍），窗口内按面去重；
+/// 窗口尾沿取走攒下的面后**继续滚动**，突发期间每窗口只投一次，最后一帧不丢。
+#[derive(Default)]
+struct FrameSubmissions {
+    pending: Vec<(String, String)>,
+}
+
+impl FrameSubmissions {
+    /// 收一条帧提交。`window_open` = 合并窗口是否在滚动中（由调用方按时钟维护）。
+    /// `Some` = 现在就要发出的批次（新窗口首帧或整表清空），`None` = 留在窗口里等尾沿。
+    fn push(
+        &mut self,
+        window_open: bool,
+        id: &str,
+        surface_id: Option<&str>,
+    ) -> Option<Vec<(String, Option<String>)>> {
+        let Some(surface_id) = surface_id else {
+            // 整表清空（停用 / 会话收尾）必须立刻生效：窗口里攒的单面投影一并作废
+            self.pending.clear();
+            return Some(vec![(id.to_string(), None)]);
+        };
+        let key = (id.to_string(), surface_id.to_string());
+        if !self.pending.contains(&key) {
+            self.pending.push(key);
+        }
+        if window_open {
+            None
+        } else {
+            self.take()
+        }
+    }
+
+    /// 窗口尾沿或被非帧事件打断时取走批次；`None` = 这一窗没有新帧。
+    fn take(&mut self) -> Option<Vec<(String, Option<String>)>> {
+        if self.pending.is_empty() {
+            return None;
+        }
+        Some(
+            std::mem::take(&mut self.pending)
+                .into_iter()
+                .map(|(id, surface)| (id, Some(surface)))
+                .collect(),
+        )
+    }
+}
+
+async fn send_frames(
+    output: &mut (impl iced::futures::Sink<Message> + Unpin),
+    batch: Vec<(String, Option<String>)>,
+) {
+    let _ = iced::futures::SinkExt::send(output, Message::PluginFramesSubmitted(batch)).await;
+}
+
 /// 插件事件订阅流：把运行时的单一广播通道接进 Elm update。
 pub fn runtime_stream(spec: &RuntimeSpec) -> impl iced::futures::Stream<Item = Message> + use<> {
     let runtime = spec.0.clone();
     iced::stream::channel(64, async move |mut output| {
         let mut events = runtime.subscribe_events();
+        let mut frames = FrameSubmissions::default();
+        let mut deadline: Option<tokio::time::Instant> = None;
         // 广播不保留历史：先订阅再补发已存档的默认布局声明，避免插件启动快于订阅而丢声明
         for event in runtime.declared_default_layouts() {
             let _ = iced::futures::SinkExt::send(
@@ -439,10 +498,35 @@ pub fn runtime_stream(spec: &RuntimeSpec) -> impl iced::futures::Stream<Item = M
                     },
                     None => break,
                 },
+                // 合并窗口尾沿：取走窗口里攒下的面，突发未止窗口就继续滚动
+                _ = tokio::time::sleep_until(deadline.unwrap_or_else(tokio::time::Instant::now)),
+                    if deadline.is_some() =>
+                {
+                    match frames.take() {
+                        Some(batch) => {
+                            deadline = Some(tokio::time::Instant::now() + FRAME_PROJECT_WINDOW);
+                            send_frames(&mut output, batch).await;
+                        }
+                        None => deadline = None,
+                    }
+                    continue;
+                },
             };
             // 对话事件走上面的无界通道：广播里的副本跳过，避免重复应用
             if matches!(event, PluginEvent::AiChatEvent { .. }) {
                 continue;
+            }
+            if let PluginEvent::ViewSubmitted { id, surface_id } = &event {
+                if let Some(batch) = frames.push(deadline.is_some(), id, surface_id.as_deref()) {
+                    deadline = Some(tokio::time::Instant::now() + FRAME_PROJECT_WINDOW);
+                    send_frames(&mut output, batch).await;
+                }
+                continue;
+            }
+            // 非帧事件保持原有先后：先把挂起的投影发出去，再发本条
+            deadline = None;
+            if let Some(batch) = frames.take() {
+                send_frames(&mut output, batch).await;
             }
             let _ = iced::futures::SinkExt::send(
                 &mut output,
@@ -4345,7 +4429,70 @@ fn permission_label(permission: Permission) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{elide_path, plugin_path, remove_local, rename_local};
+    use super::{
+        elide_path, plugin_path, remove_local, rename_local, FrameSubmissions,
+        FRAME_PROJECT_WINDOW,
+    };
+
+    #[test]
+    fn frame_submissions_lead_edge_is_immediate_and_tail_keeps_last() {
+        let mut frames = FrameSubmissions::default();
+        let first = frames.push(false, "p", Some("s1")).expect("窗口首帧应立刻发出");
+        assert_eq!(first, vec![("p".into(), Some("s1".into()))]);
+        assert!(frames.push(true, "p", Some("s1")).is_none(), "窗口内同面去重");
+        assert!(frames.push(true, "p", Some("s2")).is_none(), "窗口内攒下另一个面");
+        let tail = frames.take().expect("窗口尾沿必须有补投影");
+        assert_eq!(
+            tail,
+            vec![("p".into(), Some("s1".into())), ("p".into(), Some("s2".into()))],
+            "尾沿一批投出窗口内所有面的最新帧"
+        );
+        assert!(frames.take().is_none(), "取走之后同一窗不再有第二批");
+    }
+
+    #[test]
+    fn frame_submissions_caps_projection_rate_during_burst() {
+        // 120 帧以 1.2ms 间隔到达（一个忙插件的出帧速率）：窗口滚动下应约每 8ms 投一次，
+        // 而不是逐帧投；同时最后一帧仍由下一次尾沿补上。
+        use std::time::{Duration, Instant};
+        let mut frames = FrameSubmissions::default();
+        let mut now = Instant::now();
+        let mut deadline: Option<Instant> = None;
+        let mut projections = 0;
+        for _ in 0..120 {
+            now += Duration::from_micros(1200);
+            if frames.push(deadline.is_some(), "p", Some("s")).is_some() {
+                deadline = Some(now + FRAME_PROJECT_WINDOW);
+                projections += 1;
+            }
+            if deadline.is_some_and(|at| now >= at) {
+                if frames.take().is_some() {
+                    projections += 1;
+                    deadline = Some(now + FRAME_PROJECT_WINDOW);
+                } else {
+                    deadline = None;
+                }
+            }
+        }
+        assert!(projections <= 20, "144ms 的突发应合并到约 19 次投影，实际 {projections}");
+    }
+
+    #[test]
+    fn frame_submissions_whole_clear_dominates_pending() {
+        let mut frames = FrameSubmissions::default();
+        assert!(frames.push(false, "p", Some("s1")).is_some());
+        // 窗口开着时插件停用：清空立刻发，窗口里攒的单面投影作废
+        let cleared = frames.push(true, "p", None).expect("整表清空应立刻发出");
+        assert_eq!(cleared, vec![("p".into(), None)]);
+        assert!(frames.take().is_none(), "清空已覆盖前面攒下的面");
+        // 清空之后的新帧仍要在尾沿补投，否则画面停在清空态
+        assert!(frames.push(true, "p", Some("s3")).is_none());
+        assert_eq!(
+            frames.take(),
+            Some(vec![("p".into(), Some("s3".into()))]),
+            "清空后出帧不能丢"
+        );
+    }
 
     #[test]
     fn plugin_path_treats_empty_as_vault_root() {

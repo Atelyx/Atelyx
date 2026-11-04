@@ -828,10 +828,10 @@ impl AiPanelPlugin {
             self.render(ctx).await;
             return;
         }
-        let events = {
+        let outcome = {
             let mut frame_ui = self.ui.lock().await;
             frame_ui
-                .event(ctx, &params.input, |id| {
+                .event_outcome(ctx, &params.input, |id| {
                     let model = self.model.lock().unwrap();
                     match id {
                         DRAFT => Some(model.draft.clone()),
@@ -841,12 +841,14 @@ impl AiPanelPlugin {
                 })
                 .await
         };
+        // 纯悬停移动不改任何画面状态：跳过整面重排与提交，指针划过不再让线程空转
+        let mut repaint = outcome.repaint;
         let caret = self.ui.lock().await.caret(DRAFT).map(|(caret, _)| caret);
         let mut actions = Vec::new();
         let mut edit: Option<(String, usize)> = None;
         {
             let mut model = self.model.lock().unwrap();
-            for event in events {
+            for event in outcome.events {
                 match event {
                     UiEvent::Click { id } => {
                         on_click(&mut model, &id, caret, &mut actions, &mut edit);
@@ -894,6 +896,7 @@ impl AiPanelPlugin {
         if let Some((value, caret)) = edit {
             let mut frame_ui = self.ui.lock().await;
             frame_ui.set_input(DRAFT, &value, caret);
+            repaint = true;
         }
         // 候选刚展开：取一次当前打开的文件，让它们按打开顺序置顶（取不到就按原顺序）
         let stale = { self.model.lock().unwrap().open_files_stale };
@@ -905,11 +908,15 @@ impl AiPanelPlugin {
             if let Some(caret) = model.picker.as_ref().map(|picker| picker.caret) {
                 model.refresh_picker(caret);
             }
+            repaint = true;
         }
+        repaint |= !actions.is_empty();
         for action in actions {
             self.perform(ctx, action).await;
         }
-        self.render(ctx).await;
+        if repaint {
+            self.render(ctx).await;
+        }
     }
 
     async fn perform(&self, ctx: &Context, action: Action) {
