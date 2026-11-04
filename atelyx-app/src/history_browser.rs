@@ -585,7 +585,7 @@ fn restore(app: &mut App, seq: u64) -> Task<Message> {
             // 宿主把快照交回插件后即提示；插件自行替换并落入保存链
             app.history_restore(kind, version)
         }
-        // 画布无会话链：快照经写盘队列直写仓库，回执通知
+        // 画布无会话链：快照交插件并入保存链，回执通知
         HistoryKind::Canvas => {
             app.dismiss_popup();
             app.canvas_history_restore(file, version)

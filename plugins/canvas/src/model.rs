@@ -32,6 +32,8 @@ pub const MINIMAP_MARGIN: f32 = 12.0;
 pub const GRID_STEP: f64 = 100.0;
 /// 框选起手最小位移（屏幕像素）。
 pub const MARQUEE_MIN: f32 = 4.0;
+/// 卡片屏幕宽不超过它时只画卡头与居中图标（世界层文字不再缩小到不可读）。
+pub const COMPACT_CARD_PX: f32 = 96.0;
 /// 创建分组时成员包围盒外扩（世界坐标）。
 pub const GROUP_PAD: f64 = 24.0;
 /// 粘贴落位逐行避让步长（世界坐标）。
@@ -146,6 +148,7 @@ impl Session {
         self.view.zoom = zoom;
         self.view.pan = pan;
         self.view.fit_pending = false;
+        self.view.fitted = true;
     }
 
     pub fn acquire_lock(&mut self, node_id: &str, now_ms: i64) {
@@ -249,6 +252,8 @@ pub fn hidden_of(nodes: &[CanvasFileNode], id: &str) -> bool {
 #[derive(Debug, Clone)]
 pub struct RemotePeer {
     pub peer_id: String,
+    /// 对端所在画布（仓库相对路径）：同一空间里对端可能开的是另一张画布。
+    pub path: String,
     pub name: String,
     pub color: (u8, u8, u8),
     pub selected: Vec<String>,
@@ -264,6 +269,7 @@ impl Default for RemotePeer {
     fn default() -> Self {
         Self {
             peer_id: String::new(),
+            path: String::new(),
             name: String::new(),
             color: (0x61, 0xaf, 0xef),
             selected: Vec::new(),
@@ -337,6 +343,8 @@ pub struct ViewState {
     pub zoom: f32,
     pub pan: (f32, f32),
     pub fit_pending: bool,
+    /// 本会话已按真实尺寸定过视口：之后的尺寸变化保留用户缩放与平移。
+    pub fitted: bool,
     pub selection: Vec<String>,
     pub hover: Option<String>,
     pub drag: Option<DragState>,
@@ -371,6 +379,7 @@ impl Default for ViewState {
             zoom: 1.0,
             pan: (40.0, 40.0),
             fit_pending: false,
+            fitted: false,
             selection: Vec::new(),
             hover: None,
             drag: None,
@@ -408,40 +417,57 @@ impl ViewState {
         self.view().world(x, y)
     }
 
-    /// 编辑锁是否被对端持有：锁主按 since 最小、同 since 比 peer id 判定，主不是本端即只读。
-    pub fn locked_by_peer(&self, node_id: &str) -> Option<&RemotePeer> {
-        let mine = self.locks.get(node_id).copied();
-        let claims = |self_id: &str| {
-            let mut claims = vec![atelyx_format::canvas::collab::LockClaim {
-                peer_id: self_id.to_string(),
-                since: mine.unwrap_or(i64::MAX),
-            }];
-            claims.extend(self.remote.iter().filter_map(|peer| {
-                peer.locks.get(node_id).map(|since| {
-                    atelyx_format::canvas::collab::LockClaim {
-                        peer_id: peer.peer_id.clone(),
-                        since: *since,
-                    }
+    /// 编辑锁是否被对端持有：只看同一条画布上的对端，主不是本端即只读。
+    pub fn locked_by_peer(&self, path: &str, node_id: &str) -> Option<&RemotePeer> {
+        lock_owner(
+            self.locks.get(node_id).copied(),
+            &self.remote,
+            path,
+            self.self_id.as_deref(),
+            node_id,
+        )
+    }
+}
+
+/// 编辑锁的远端持有者：锁主按 since 最小、同 since 比 peer id 判定（与合入侧同一套规则）。
+/// 本端未拿到自身 peer id 时退化为「对端 since 更早即锁主」，供只读呈现使用。
+pub fn lock_owner<'a>(
+    mine: Option<i64>,
+    remote: &'a [RemotePeer],
+    path: &str,
+    self_id: Option<&str>,
+    node_id: &str,
+) -> Option<&'a RemotePeer> {
+    let peers: Vec<&RemotePeer> = remote.iter().filter(|peer| peer.path == path).collect();
+    let claims = |self_id: &str| {
+        let mut claims = vec![atelyx_format::canvas::collab::LockClaim {
+            peer_id: self_id.to_string(),
+            since: mine.unwrap_or(i64::MAX),
+        }];
+        claims.extend(peers.iter().filter_map(|peer| {
+            peer.locks
+                .get(node_id)
+                .map(|since| atelyx_format::canvas::collab::LockClaim {
+                    peer_id: peer.peer_id.clone(),
+                    since: *since,
                 })
-            }));
-            claims
-        };
-        let owner = self.self_id.as_deref().and_then(|self_id| {
-            atelyx_format::canvas::collab::compute_lock_owner(&claims(self_id))
-        });
-        let peer_locks = |peer: &&RemotePeer| peer.locks.contains_key(node_id);
-        match owner {
-            Some(owner) if Some(owner.as_str()) == self.self_id.as_deref() => None,
-            Some(owner) => self
-                .remote
-                .iter()
-                .find(|peer| peer.peer_id == owner && peer_locks(&peer)),
-            None => self.remote.iter().find(|peer| {
-                peer.locks
-                    .get(node_id)
-                    .is_some_and(|since| mine.is_none_or(|mine| *since < mine))
-            }),
-        }
+        }));
+        claims
+    };
+    let owner = self_id.and_then(|self_id| {
+        atelyx_format::canvas::collab::compute_lock_owner(&claims(self_id))
+    });
+    match owner {
+        Some(owner) if Some(owner.as_str()) == self_id => None,
+        Some(owner) => peers
+            .iter()
+            .copied()
+            .find(|peer| peer.peer_id == owner && peer.locks.contains_key(node_id)),
+        None => peers.into_iter().find(|peer| {
+            peer.locks
+                .get(node_id)
+                .is_some_and(|since| mine.is_none_or(|mine| *since < mine))
+        }),
     }
 }
 

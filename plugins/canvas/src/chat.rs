@@ -285,7 +285,7 @@ pub fn card_effort(session: &Session, node: &str) -> Option<String> {
 
 /// 该卡是否被对端持有编辑锁。
 pub fn locked_by_peer(session: &Session, node: &str) -> bool {
-    session.view.locked_by_peer(node).is_some()
+    session.view.locked_by_peer(&session.file, node).is_some()
 }
 
 /// 卡当前是否在流式生成。
@@ -340,8 +340,10 @@ pub async fn send(plugin: &PluginState, ctx: &atelyx_plugin_sdk::Context, node_i
 
     let sid = media_session_id(node_id);
     let mut attachments: Vec<Value> = Vec::new();
+    let mut written: Vec<String> = Vec::new();
     for image in &plan.images {
         let Some(ext) = image_ext_of(&image.file_name) else {
+            cleanup_written(ctx, &written).await;
             restore(plugin, &plan);
             let _ = ctx
                 .notify("只能发送图片附件", None, method::NotificationLevel::Warning)
@@ -350,6 +352,7 @@ pub async fn send(plugin: &PluginState, ctx: &atelyx_plugin_sdk::Context, node_i
         };
         let rel = format!(".atelyx/temp/chats/{sid}/img-{}.{ext}", nanoid::nanoid!());
         if let Err(error) = ctx.vault_write_binary(&rel, &image.bytes).await {
+            cleanup_written(ctx, &written).await;
             restore(plugin, &plan);
             let _ = ctx
                 .notify(
@@ -360,6 +363,7 @@ pub async fn send(plugin: &PluginState, ctx: &atelyx_plugin_sdk::Context, node_i
                 .await;
             return false;
         }
+        written.push(rel.clone());
         attachments.push(json!({ "kind": "image", "mime": image.mime, "file": rel }));
     }
 
@@ -425,8 +429,10 @@ pub async fn send(plugin: &PluginState, ctx: &atelyx_plugin_sdk::Context, node_i
         })
         .collect();
 
+    let mut added_edges: Vec<String> = Vec::new();
     for id in plan.refs.iter().filter_map(|entry| entry.node_id.clone()) {
-        plugin.with_session_mut(|session| ensure_edge(session, &id, node_id));
+        let edge = plugin.with_session_mut(|session| ensure_edge(session, &id, node_id)).flatten();
+        added_edges.extend(edge);
     }
 
     let user_message = json!({
@@ -465,11 +471,29 @@ pub async fn send(plugin: &PluginState, ctx: &atelyx_plugin_sdk::Context, node_i
         })
         .flatten();
     let Some(history) = history else {
+        cleanup_written(ctx, &written).await;
         restore(plugin, &plan);
         return false;
     };
 
-    run(plugin, ctx, node_id, history, user_message, config).await;
+    if let Err(error) = run(plugin, ctx, node_id, history, user_message.clone(), config).await {
+        // 发送没成立：撤掉刚插入的用户消息，草稿与引用还给输入区，清掉本次落盘的图片
+        let message_id = user_message
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        plugin.with_session_mut(|session| {
+            remove_message(session, node_id, &message_id);
+            // 本次引用新建的连线也一并撤掉：发送没成立，卡之间不该多出一条引用边
+            session.data.edges.retain(|edge| !added_edges.contains(&edge.id));
+            session.touch();
+        });
+        restore(plugin, &plan);
+        cleanup_written(ctx, &written).await;
+        fail(plugin, node_id, error);
+        return false;
+    }
     let paths: Vec<String> = attachments
         .iter()
         .filter(|a| a.get("kind").and_then(Value::as_str) == Some("image"))
@@ -501,7 +525,7 @@ async fn run(
     history: Vec<Value>,
     user_message: Value,
     config: (Option<String>, Option<(String, String)>, Option<String>),
-) {
+) -> Result<(), String> {
     let (agent_id, pick, effort) = config;
     let compaction = plugin
         .with_session(|session| {
@@ -527,12 +551,19 @@ async fn run(
         effort,
         space_prompt: None,
     };
-    let Ok(value) = serde_json::to_value(params) else {
-        fail(plugin, node_id, "运行参数序列化失败".to_string());
-        return;
-    };
-    if let Err(error) = ctx.call_raw(method::ai::CHAT_SEND_DIRECT, value).await {
-        fail(plugin, node_id, error.to_string());
+    let value = serde_json::to_value(params).map_err(|error| error.to_string())?;
+    ctx.call_raw(method::ai::CHAT_SEND_DIRECT, value)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+/// 清掉本次发送已落盘的临时图片；失败只记日志，不覆盖发送结果。
+async fn cleanup_written(ctx: &atelyx_plugin_sdk::Context, paths: &[String]) {
+    for path in paths {
+        if let Err(error) = ctx.vault_remove(path).await {
+            ctx.log_error(&format!("清理未发送的图片失败（{path}）：{error}"));
+        }
     }
 }
 
@@ -633,17 +664,18 @@ fn card_injection(
     refs::card_injection(hits, &contents)
 }
 
-/// 确保一条对话卡连线（同向且非无向边去重）。
-pub fn ensure_edge(session: &mut Session, source: &str, target: &str) {
+/// 确保一条对话卡连线（同向且非无向边去重）：返回本次新建的边 id，已存在 = None。
+pub fn ensure_edge(session: &mut Session, source: &str, target: &str) -> Option<String> {
     let exists =
         session.data.edges.iter().any(|edge| {
             edge.source == source && edge.target == target && edge.directed != Some(false)
         });
     if exists {
-        return;
+        return None;
     }
+    let id = uuid();
     session.data.edges.push(CanvasFileEdge {
-        id: uuid(),
+        id: id.clone(),
         source: source.to_string(),
         target: target.to_string(),
         source_handle: None,
@@ -653,6 +685,7 @@ pub fn ensure_edge(session: &mut Session, source: &str, target: &str) {
         created_at: now_secs(),
     });
     session.touch();
+    Some(id)
 }
 
 // ===== run 事件 =====
@@ -764,7 +797,10 @@ pub async fn regenerate(
     let Some((history, user_message, config)) = prepared else {
         return false;
     };
-    run(plugin, ctx, node, history, user_message, config).await;
+    if let Err(error) = run(plugin, ctx, node, history, user_message, config).await {
+        fail(plugin, node, error);
+        return false;
+    }
     true
 }
 

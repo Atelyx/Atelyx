@@ -195,7 +195,8 @@ pub fn apply(plugin: &PluginState, params: CollabMessageParams) {
         })
         .unwrap_or_default();
     plugin.with_session_mut(|session| {
-        if !present || session.file != path {
+        // 对端可能开着另一张画布：状态按 peer 保留，绘制期再按当前路径过滤
+        if !present {
             session
                 .view
                 .remote
@@ -204,6 +205,7 @@ pub fn apply(plugin: &PluginState, params: CollabMessageParams) {
         }
         let peer = RemotePeer {
             peer_id: params.peer_id.clone(),
+            path: path.to_string(),
             name,
             color,
             selected,

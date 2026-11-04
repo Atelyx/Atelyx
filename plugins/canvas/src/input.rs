@@ -62,14 +62,13 @@ pub fn handle(
         } => {
             out.redraw = double_click(session, *x, *y, &mut out);
         }
+        FrameInput::PointerLeave => {
+            // 指针离开面：悬停态不能留到下次进入
+            out.redraw = session.view.hover.take().is_some();
+            out.redraw |= session.view.toolbar_hover.take().is_some();
+        }
         FrameInput::Key { modifiers, .. } => {
             *mods = *modifiers;
-        }
-        FrameInput::Resize { width, height } => {
-            // 只记视口并排一次适应：每次尺寸变化都强制缩放会吞掉用户的缩放与平移
-            session.view.viewport = (*width, *height);
-            session.view.fit_pending = true;
-            out.redraw = true;
         }
         _ => {}
     }
@@ -90,7 +89,8 @@ fn press(
     mods: &Modifiers,
     out: &mut Outcome,
 ) -> bool {
-    if y < TOOLBAR_H {
+    // 工具条只认左键；右键先于小地图判定，拖拽中不弹菜单
+    if button == MouseButton::Left && y < TOOLBAR_H {
         return toolbar_press(session, x, size);
     }
     if button == MouseButton::Middle {
@@ -100,6 +100,19 @@ fn press(
             orig: Default::default(),
             mutated: false,
         });
+        return false;
+    }
+    if button == MouseButton::Right {
+        if session.view.drag.is_some() {
+            return false;
+        }
+        // 右键落在工具条上时按视口上缘取世界坐标：新建的卡不会落到可视区外
+        let world = session.view.world(x, local(y).max(0.0));
+        session.view.menu_at = Some(world);
+        out.menu = context_menu(session, world);
+        return true;
+    }
+    if button != MouseButton::Left {
         return false;
     }
     if let Some((wx, wy)) = minimap_world(session, x, y, size) {
@@ -117,14 +130,6 @@ fn press(
         return true;
     }
     let world = session.view.world(x, local(y));
-    if button == MouseButton::Right {
-        session.view.menu_at = Some(world);
-        out.menu = context_menu(session, world);
-        return false;
-    }
-    if button != MouseButton::Left {
-        return false;
-    }
     if let Some(id) = resize_handle(session, world) {
         session.push_undo();
         session.view.selection = vec![id.clone()];
@@ -358,6 +363,8 @@ fn moved(session: &mut Session, x: f32, y: f32, size: (f32, f32)) -> bool {
                     node.y = oy + dy + snap.dy;
                 }
             }
+            // 几何一变就置脏：拖拽中途来远端补丁 / 自动保存也能认出本端有改动
+            session.touch();
             if let Some(active) = session.view.drag.as_mut() {
                 active.mutated = true;
             }
@@ -379,6 +386,7 @@ fn moved(session: &mut Session, x: f32, y: f32, size: (f32, f32)) -> bool {
                 node.width = Some(w);
                 node.height = Some(h);
             }
+            session.touch();
             if let Some(active) = session.view.drag.as_mut() {
                 active.mutated = true;
             }
@@ -451,18 +459,24 @@ fn wheel(
     modifiers: &Modifiers,
     size: (f32, f32),
 ) -> bool {
-    if session.view.fit_pending {
+    // 小地图上的滚轮不缩放世界
+    if minimap_world(session, x, y, size).is_some() {
+        return false;
+    }
+    // 还没有真实视口时不算适应：否则会按 1×1 把视口钉在缩放下限
+    if session.view.fit_pending && size.0 > 1.0 && size.1 > 1.0 {
         session.apply_fit(size.0, size.1);
     }
+    // 协议增量正 = 向下 / 向右（宿主已按 Web 惯例换算）
     if modifiers.control || modifiers.meta {
-        session.view.pan.1 += if delta_y != 0.0 { delta_y } else { delta_x };
+        session.view.pan.1 -= if delta_y != 0.0 { delta_y } else { delta_x };
         return true;
     }
     if modifiers.alt {
-        session.view.pan.0 += if delta_x != 0.0 { delta_x } else { delta_y };
+        session.view.pan.0 -= if delta_x != 0.0 { delta_x } else { delta_y };
         return true;
     }
-    let factor = (delta_y * 0.0025).exp();
+    let factor = (-delta_y * 0.0025).exp();
     zoom_at(session, x, local(y), factor);
     true
 }

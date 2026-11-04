@@ -176,7 +176,7 @@ pub fn delete_selection(session: &mut Session) -> Vec<String> {
         .view
         .selection
         .iter()
-        .filter(|id| session.view.locked_by_peer(id).is_some())
+        .filter(|id| session.view.locked_by_peer(&session.file, id).is_some())
         .cloned()
         .collect();
     let ids: Vec<String> = session

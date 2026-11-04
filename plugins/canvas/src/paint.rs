@@ -14,8 +14,8 @@ use atelyx_plugin_protocol::paint::{
 use atelyx_plugin_sdk::frame_ui::{Canvas, Rect as UiRect, TextRole, TextStyle, Ui, icon_commands};
 
 use crate::model::{
-    CardChat, GRID_STEP, MINIMAP_H, MINIMAP_MARGIN, MINIMAP_W, RemotePeer, Session, TOOLBAR_H,
-    card_head,
+    COMPACT_CARD_PX, CardChat, GRID_STEP, MINIMAP_H, MINIMAP_MARGIN, MINIMAP_W, RemotePeer, Session,
+    TOOLBAR_H, card_head,
 };
 
 /// 组色板（六色）。
@@ -30,6 +30,23 @@ pub const GROUP_COLORS: [[u8; 3]; 6] = [
 
 /// 收起分组的边框虚线（屏幕像素）。
 const GROUP_DASH: [f32; 2] = [6.0, 4.0];
+/// 世界层文字字号固定为屏幕像素：缩放只改卡片几何，字号不跟着缩小到不可读。
+const CARD_TITLE_SIZE: f32 = 12.0;
+const CARD_ICON_SIZE: f32 = 12.0;
+const GROUP_LABEL_SIZE: f32 = 13.0;
+const PILL_SIZE: f32 = 11.0;
+const PILL_H: f32 = 18.0;
+const PEER_NAME_SIZE: f32 = 11.0;
+const PEER_PILL_SIZE: f32 = 10.0;
+/// 卡头世界高度：随缩放变化，字与图标固定为屏幕像素。
+const CARD_HEAD_H: f32 = 30.0;
+/// 低缩放卡片只画卡头与居中图标的图标边长（屏幕像素）。
+const COMPACT_ICON_SIZE: f32 = 22.0;
+
+/// 低缩放紧凑形态：屏幕宽装不下标题，或卡头高度已装不下固定字号（卡头高度随缩放缩小）。
+fn compact_card(zoom: f32, world_w: f32) -> bool {
+    world_w * zoom <= COMPACT_CARD_PX || CARD_HEAD_H * zoom < CARD_TITLE_SIZE
+}
 
 fn token(name: ColorToken) -> PaintColor {
     PaintColor::Token { name }
@@ -70,7 +87,12 @@ pub struct Snapshot {
     pub viewport: (f32, f32),
     pub refs: std::collections::HashMap<String, crate::model::RefContent>,
     pub cards: std::collections::HashMap<String, CardChat>,
+    /// 只含当前画布上的对端（同一空间里对端可能开着别的画布）。
     pub remote: Vec<RemotePeer>,
+    pub path: String,
+    /// 本端持有的编辑锁（nodeId → 占锁时刻毫秒）与本端 peer id：只读判定与交互侧同一套规则。
+    pub locks: std::collections::HashMap<String, i64>,
+    pub self_id: Option<String>,
     pub rename: Option<(String, String)>,
     pub dirty: bool,
     pub save_error: Option<String>,
@@ -99,7 +121,16 @@ impl Snapshot {
             viewport: session.view.viewport,
             refs: session.view.refs.clone(),
             cards: session.view.card_chat.clone(),
-            remote: session.view.remote.clone(),
+            remote: session
+                .view
+                .remote
+                .iter()
+                .filter(|peer| peer.path == session.file)
+                .cloned()
+                .collect(),
+            path: session.file.clone(),
+            locks: session.view.locks.clone(),
+            self_id: session.view.self_id.clone(),
             rename: session.view.group_rename.clone(),
             dirty: session.dirty,
             save_error: session.save_error.clone(),
@@ -121,6 +152,17 @@ impl Snapshot {
 
     fn node(&self, id: &str) -> Option<&CanvasFileNode> {
         self.data.nodes.iter().find(|n| n.id == id)
+    }
+
+    /// 编辑锁的远端持有者：本端持有更早的锁时不显示他人「编辑中」。
+    fn locked_by_peer(&self, node_id: &str) -> Option<&RemotePeer> {
+        crate::model::lock_owner(
+            self.locks.get(node_id).copied(),
+            &self.remote,
+            &self.path,
+            self.self_id.as_deref(),
+            node_id,
+        )
     }
 }
 
@@ -328,23 +370,24 @@ fn draw_group(canvas: &mut Canvas, s: &Snapshot, node: &CanvasFileNode) {
                 dash: Some(GROUP_DASH),
             });
         }
-        let (text, text_color) = group_label(s, node);
-        let size = 13.0 * s.zoom;
-        let (tw, _) = canvas.measure(&text, size);
-        canvas.draw(Text {
-            x: sx + ((sw - tw) / 2.0).max(0.0),
-            y: sy + ((sh - size) / 2.0).max(0.0),
-            content: text,
-            size,
-            color: text_color,
-            weight: Some(TextWeight::Bold),
-            family: None,
-            italic: false,
-            family_name: None,
-            max_width: Some((sw - 16.0 * s.zoom).max(1.0)),
-            align: None,
-            layout: None,
-        });
+        if sw >= 40.0 && sh >= GROUP_LABEL_SIZE {
+            let (text, text_color) = group_label(s, node);
+            let (tw, _) = canvas.measure(&text, GROUP_LABEL_SIZE);
+            canvas.draw(Text {
+                x: sx + ((sw - tw) / 2.0).max(0.0),
+                y: sy + ((sh - GROUP_LABEL_SIZE) / 2.0).max(0.0),
+                content: text,
+                size: GROUP_LABEL_SIZE,
+                color: text_color,
+                weight: Some(TextWeight::Bold),
+                family: None,
+                italic: false,
+                family_name: None,
+                max_width: Some((sw - 16.0 * s.zoom).max(1.0)),
+                align: None,
+                layout: None,
+            });
+        }
         return;
     }
     canvas.draw(Rect {
@@ -359,20 +402,22 @@ fn draw_group(canvas: &mut Canvas, s: &Snapshot, node: &CanvasFileNode) {
         shadow: None,
     });
     let (text, color) = group_label(s, node);
-    canvas.draw(Text {
-        x: sx + 10.0 * s.zoom,
-        y: sy + 7.0 * s.zoom,
-        content: text,
-        size: 13.0 * s.zoom,
-        color,
-        weight: Some(TextWeight::Bold),
-        family: None,
-        italic: false,
-        family_name: None,
-        max_width: Some((sw - 20.0 * s.zoom).max(1.0)),
-        align: None,
-        layout: None,
-    });
+    if 30.0 * s.zoom >= GROUP_LABEL_SIZE {
+        canvas.draw(Text {
+            x: sx + 10.0 * s.zoom,
+            y: sy + (30.0 * s.zoom - GROUP_LABEL_SIZE) / 2.0,
+            content: text,
+            size: GROUP_LABEL_SIZE,
+            color,
+            weight: Some(TextWeight::Bold),
+            family: None,
+            italic: false,
+            family_name: None,
+            max_width: Some((sw - 20.0 * s.zoom).max(1.0)),
+            align: None,
+            layout: None,
+        });
+    }
 }
 
 /// 分组标题：改名草稿优先，其次节点标签，缺省「分组」。
@@ -592,7 +637,7 @@ fn draw_card(canvas: &mut Canvas, s: &Snapshot, node: &CanvasFileNode) {
         corner_radius: Some(10.0 * s.zoom),
         shadow: None,
     });
-    let head = 30.0 * s.zoom;
+    let head = CARD_HEAD_H * s.zoom;
     canvas.draw(Rect {
         x: sx,
         y: sy,
@@ -616,32 +661,50 @@ fn draw_card(canvas: &mut Canvas, s: &Snapshot, node: &CanvasFileNode) {
         shadow: None,
     });
     let (icon, title) = card_head(node);
-    for command in icon_commands(
-        icon,
-        UiRect::new(
-            sx + 9.0 * s.zoom,
-            sy + (head - 12.0 * s.zoom) / 2.0,
-            12.0 * s.zoom,
-            12.0 * s.zoom,
-        ),
-        token(ColorToken::TextMuted),
-    ) {
-        canvas.draw(command);
+    let compact = compact_card(s.zoom, w as f32);
+    if compact {
+        // 低缩放只留卡头与居中图标：正文预览在这个尺寸读不出来，字号也不再跟着缩小
+        let (cx, cy) = (sx + sw / 2.0, sy + sh / 2.0);
+        for command in icon_commands(
+            icon,
+            UiRect::new(
+                cx - COMPACT_ICON_SIZE / 2.0,
+                cy - COMPACT_ICON_SIZE / 2.0,
+                COMPACT_ICON_SIZE,
+                COMPACT_ICON_SIZE,
+            ),
+            token(ColorToken::TextMuted),
+        ) {
+            canvas.draw(command);
+        }
+    } else {
+        for command in icon_commands(
+            icon,
+            UiRect::new(
+                sx + 9.0 * s.zoom,
+                sy + (head - CARD_ICON_SIZE) / 2.0,
+                CARD_ICON_SIZE,
+                CARD_ICON_SIZE,
+            ),
+            token(ColorToken::TextMuted),
+        ) {
+            canvas.draw(command);
+        }
+        canvas.draw(Text {
+            x: sx + 26.0 * s.zoom,
+            y: sy + (head - CARD_TITLE_SIZE) / 2.0,
+            content: title,
+            size: CARD_TITLE_SIZE,
+            color: token(ColorToken::Text),
+            weight: Some(TextWeight::Bold),
+            family: None,
+            italic: false,
+            family_name: None,
+            max_width: Some((sw - 36.0 * s.zoom).max(1.0)),
+            align: None,
+            layout: None,
+        });
     }
-    canvas.draw(Text {
-        x: sx + 26.0 * s.zoom,
-        y: sy + (head - 15.0 * s.zoom) / 2.0,
-        content: title,
-        size: 12.0 * s.zoom,
-        color: token(ColorToken::Text),
-        weight: Some(TextWeight::Bold),
-        family: None,
-        italic: false,
-        family_name: None,
-        max_width: Some((sw - 36.0 * s.zoom).max(1.0)),
-        align: None,
-        layout: None,
-    });
     let linked = s.hover.as_deref() == Some(node.id.as_str()) || selected;
     if linked && !matches!(node.node_type.as_str(), "group" | "conversation") {
         canvas.draw(Circle {
@@ -666,36 +729,40 @@ fn draw_card(canvas: &mut Canvas, s: &Snapshot, node: &CanvasFileNode) {
             shadow: None,
         });
     }
-    if node.node_type == "conversation" && s.cards.get(&node.id).is_some_and(|chat| chat.streaming)
+    if !compact
+        && head >= PILL_H
+        && node.node_type == "conversation"
+        && s.cards.get(&node.id).is_some_and(|chat| chat.streaming)
     {
         let label = "生成中";
-        let (tw, _) = canvas.measure(label, 11.0);
+        let (tw, _) = canvas.measure(label, PILL_SIZE);
         let pill_w = tw + 18.0;
         let pill_x = sx + sw - pill_w - 6.0 * s.zoom;
+        let pill_y = sy + (head - PILL_H) / 2.0;
         canvas.draw(Rect {
             x: pill_x,
-            y: sy + 6.0 * s.zoom,
+            y: pill_y,
             w: (pill_w).max(0.0),
-            h: (18.0 * s.zoom).max(0.0),
+            h: PILL_H,
             fill: Some(token(ColorToken::SurfaceMuted)),
             stroke: None,
             stroke_width: None,
-            corner_radius: Some(9.0 * s.zoom),
+            corner_radius: Some(PILL_H / 2.0),
             shadow: None,
         });
         canvas.draw(Circle {
-            cx: pill_x + 8.0 * s.zoom,
-            cy: sy + 15.0 * s.zoom,
-            r: 2.5 * s.zoom,
+            cx: pill_x + 8.0,
+            cy: pill_y + PILL_H / 2.0,
+            r: 2.5,
             fill: Some(token(ColorToken::Accent)),
             stroke: None,
             stroke_width: None,
         });
         canvas.draw(Text {
-            x: pill_x + 14.0 * s.zoom,
-            y: sy + 9.0 * s.zoom,
+            x: pill_x + 14.0,
+            y: pill_y + 3.5,
             content: label.to_string(),
-            size: 11.0 * s.zoom,
+            size: PILL_SIZE,
             color: token(ColorToken::TextSecondary),
             weight: None,
             family: None,
@@ -706,16 +773,16 @@ fn draw_card(canvas: &mut Canvas, s: &Snapshot, node: &CanvasFileNode) {
             layout: None,
         });
     }
-    if node.node_type == "media" {
+    if node.node_type == "media" && !compact {
         draw_media(canvas, s, node);
     }
-    if node.node_type == "link" {
+    if node.node_type == "link" && !compact {
         if let Some(url) = node.data.get("url").and_then(serde_json::Value::as_str) {
             canvas.draw(Text {
                 x: sx + 10.0 * s.zoom,
                 y: sy + head + 10.0 * s.zoom,
                 content: url.to_string(),
-                size: 12.0 * s.zoom,
+                size: CARD_TITLE_SIZE,
                 color: token(ColorToken::Accent),
                 weight: None,
                 family: None,
@@ -727,14 +794,14 @@ fn draw_card(canvas: &mut Canvas, s: &Snapshot, node: &CanvasFileNode) {
             });
         }
     }
-    if node.node_type == "table" {
+    if node.node_type == "table" && !compact {
         if let Some(path) = node.data.get("file").and_then(serde_json::Value::as_str) {
             if let Some(crate::model::RefContent::Table { summary, .. }) = s.refs.get(path) {
                 canvas.draw(Text {
                     x: sx + 10.0 * s.zoom,
                     y: sy + head + 10.0 * s.zoom,
                     content: format!("双击打开表格 · {summary}"),
-                    size: 12.0 * s.zoom,
+                    size: CARD_TITLE_SIZE,
                     color: token(ColorToken::TextSecondary),
                     weight: None,
                     family: None,
@@ -787,26 +854,27 @@ fn draw_remote(canvas: &mut Canvas, s: &Snapshot) {
                 corner_radius: Some(12.0 * s.zoom),
                 shadow: None,
             });
-            if peer.streaming.iter().any(|item| item == id) {
+            let compact = compact_card(s.zoom, w as f32);
+            if !compact && peer.streaming.iter().any(|item| item == id) {
                 let label = "生成中";
-                let (tw, _) = canvas.measure(label, 10.0);
+                let (tw, _) = canvas.measure(label, PEER_PILL_SIZE);
                 let (px, py) = (x + 6.0 * s.zoom, y + 6.0 * s.zoom);
                 canvas.draw(Rect {
                     x: px,
                     y: py,
                     w: (tw + 12.0).max(0.0),
-                    h: (16.0 * s.zoom).max(0.0),
+                    h: 16.0,
                     fill: Some(with_alpha(color, 0.9)),
                     stroke: None,
                     stroke_width: None,
-                    corner_radius: Some(8.0 * s.zoom),
+                    corner_radius: Some(8.0),
                     shadow: None,
                 });
                 canvas.draw(Text {
                     x: px + 6.0,
                     y: py + 2.0,
                     content: label.to_string(),
-                    size: 10.0 * s.zoom,
+                    size: PEER_PILL_SIZE,
                     color: PaintColor::Rgba {
                         rgba: [255, 255, 255, 235],
                     },
@@ -819,11 +887,11 @@ fn draw_remote(canvas: &mut Canvas, s: &Snapshot) {
                     layout: None,
                 });
             }
-            if !tagged && !peer.name.is_empty() {
+            if !compact && !tagged && !peer.name.is_empty() {
                 tagged = true;
-                let size = (11.0 * s.zoom).max(8.0);
+                let size = PEER_NAME_SIZE;
                 let (tw, th) = canvas.measure(&peer.name, size);
-                let (bx, by) = (x + 4.0 * s.zoom, (y - th - 4.0 * s.zoom).max(TOOLBAR_H));
+                let (bx, by) = (x + 4.0 * s.zoom, (y - th - 4.0).max(TOOLBAR_H));
                 canvas.draw(Rect {
                     x: bx,
                     y: by,
@@ -1035,6 +1103,43 @@ fn draw_toolbar(canvas: &mut Canvas, s: &Snapshot, w: f32, _h: f32) {
             canvas.draw(command);
         }
     }
+    if let Some((name, (bx, by, bw, _))) = buttons
+        .iter()
+        .find(|(name, _)| s.toolbar_hover.as_deref() == Some(*name))
+    {
+        let label = match *name {
+            "zoom-in" => "放大",
+            "zoom-out" => "缩小",
+            _ => "适应视图",
+        };
+        let (tw, _) = canvas.measure(label, 11.0);
+        let tx = (bx + bw / 2.0 - tw / 2.0).clamp(4.0, (w - tw - 4.0).max(4.0));
+        canvas.draw(Rect {
+            x: tx - 6.0,
+            y: by + 28.0,
+            w: (tw + 12.0).max(0.0),
+            h: 20.0,
+            fill: Some(token(ColorToken::SurfaceMuted)),
+            stroke: Some(token(ColorToken::Border)),
+            stroke_width: Some(1.0),
+            corner_radius: Some(4.0),
+            shadow: None,
+        });
+        canvas.draw(Text {
+            x: tx,
+            y: by + 31.5,
+            content: label.to_string(),
+            size: 11.0,
+            color: token(ColorToken::TextSecondary),
+            weight: None,
+            family: None,
+            italic: false,
+            family_name: None,
+            max_width: None,
+            align: None,
+            layout: None,
+        });
+    }
     let stats = format!(
         "{} 卡 · {} 连线{}",
         s.data
@@ -1087,6 +1192,10 @@ fn card_overlays(ui: &mut Ui, s: &Snapshot, choices: &Choices<'_>) {
                     });
                 }
             }
+            continue;
+        }
+        // 低缩放卡片没有正文与输入区：浮层控件一并省掉，命中与双击仍走世界层判定
+        if compact_card(s.zoom, w as f32) {
             continue;
         }
         if node.node_type == "conversation" {
@@ -1206,12 +1315,7 @@ fn conversation_overlay(
         .unwrap_or_default();
     let chat = s.cards.get(&node.id).cloned().unwrap_or_default();
     let id = node.id.clone();
-    let locked = s
-        .remote
-        .iter()
-        .filter(|peer| peer.locks.contains_key(&node.id))
-        .min_by_key(|peer| peer.locks.get(&node.id).copied().unwrap_or(i64::MAX))
-        .map(|peer| peer.name.clone());
+    let locked = s.locked_by_peer(&node.id).map(|peer| peer.name.clone());
     let selected_agent = node
         .data
         .get("agentId")

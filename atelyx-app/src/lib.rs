@@ -4543,7 +4543,8 @@ impl App {
                         self.notify(NoticeLevel::Warning, "画布已切换，回滚取消".to_string());
                         return self.after_any_flush();
                     }
-                    self.notify(NoticeLevel::Success, "已回滚".to_string());
+                    // 画布快照按补丁并入保存链，不是整份覆盖
+                    self.notify(NoticeLevel::Success, "已合并".to_string());
                     history = if restore.space {
                         space_actions::space_record_canvas_restore(self, restore.rel, restore.content)
                     } else {

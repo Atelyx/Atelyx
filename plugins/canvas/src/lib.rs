@@ -246,8 +246,9 @@ impl PluginState {
             .map(|size| *size)
             .unwrap_or((1.0, 1.0));
         // 适应视口在绘制前消化：尺寸变化只排队，不打断用户的缩放 / 平移
+        // 面还没拿到真实尺寸（1×1 占位）时不算定过视口，留给首个 Resize
         self.with_session_mut(|session| {
-            if session.view.fit_pending {
+            if session.view.fit_pending && size.0 > 1.0 && size.1 > 1.0 {
                 session.apply_fit(size.0, size.1);
             }
         });
@@ -327,7 +328,14 @@ impl PluginState {
                         Ok(_) => crate::session::notify_changed(&state, &ctx).await,
                         Err(error) => {
                             ctx.log_error(&format!("保存画布失败：{error}"));
-                            state.with_session_mut(|session| session.save_error = Some(error));
+                            state.with_session_mut(|session| session.save_error = Some(error.clone()));
+                            let _ = ctx
+                                .notify(
+                                    "保存画布失败",
+                                    Some(&error),
+                                    method::NotificationLevel::Error,
+                                )
+                                .await;
                         }
                     }
                     state.panel_header(&ctx).await;
@@ -663,6 +671,8 @@ impl PluginState {
                 let done = if undo { session.undo() } else { session.redo() };
                 if done {
                     session.touch();
+                    // 快照可能带回已删的对话卡 / 去掉新增的卡：运行态跟着数据对齐
+                    crate::chat::sync_card_chats(session);
                 }
                 done
             })
@@ -703,7 +713,13 @@ impl PluginState {
             return;
         };
         let changed = self
-            .with_session_mut(|session| crate::actions::paste(session, &text))
+            .with_session_mut(|session| {
+                let changed = crate::actions::paste(session, &text);
+                if changed {
+                    crate::chat::sync_card_chats(session);
+                }
+                changed
+            })
             .unwrap_or(false);
         if changed {
             crate::service::emit_changed(self, ctx).await;
@@ -737,8 +753,10 @@ impl PluginState {
             }
             self.with_session_mut(|session| {
                 session.view.viewport = (width, height);
-                // 尺寸变化只排队适应：渲染前统一消化，避免每次改尺寸都重置视图
-                session.view.fit_pending = true;
+                // 只在还没有真实视口时适应：改尺寸不该重置用户的缩放与平移
+                if !session.view.fitted {
+                    session.view.fit_pending = true;
+                }
             });
             // 排版尺寸由帧状态机持有：不转给它，后续每帧继续按占位尺寸排。
             let mut ui = self.ui.lock().await;
@@ -1467,6 +1485,11 @@ impl PluginHandler for CanvasPlugin {
         crate::service::emit_changed(&self.state, ctx).await;
         self.state.schedule_save(ctx);
         self.state.render(ctx).await;
+        // 流式开始 / 结束要即时上屏给对端，不能等下一次保活；面已卸载时不再上行，
+        // 否则离场后迟到的结束事件会把本端重新广播成在场
+        if self.state.is_attached() {
+            crate::presence::send(&self.state, ctx).await;
+        }
     }
 
     async fn on_service_call(&self, ctx: &Context, params: HostCallParams) {
