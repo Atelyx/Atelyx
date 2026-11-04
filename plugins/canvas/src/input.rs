@@ -473,8 +473,8 @@ fn wheel(
     modifiers: &Modifiers,
     size: (f32, f32),
 ) -> bool {
-    // 小地图上的滚轮不缩放世界
-    if minimap_world(session, x, y, size).is_some() {
+    // 小地图是独立浮层：落在矩形内一律消费，空画布时也不能透传成缩放
+    if minimap_area(size).contains(x, y) {
         return false;
     }
     // 还没有真实视口时不算适应：否则会按 1×1 把视口钉在缩放下限
@@ -551,6 +551,8 @@ pub fn card_bodies(session: &Session) -> Vec<(String, Rect)> {
         .iter()
         .filter(|n| matches!(n.node_type.as_str(), "text" | "conversation"))
         .filter(|n| !geometry::hidden_by_collapsed(&session.data.nodes, &n.id))
+        // 占位卡没有正文浮层：不过滤会让浮层命中吞掉整张卡上的按下与滚轮
+        .filter(|n| !crate::paint::compact_card(session.view.zoom, display_size(n).0 as f32))
         .map(|n| {
             let (w, h) = display_size(n);
             let (sx, sy) = session.view.screen(n.x, n.y);
@@ -671,4 +673,94 @@ fn context_menu(session: &mut Session, world: (f64, f64)) -> Option<MenuOpenPara
         width: Some(width),
         search: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use atelyx_format::canvas::{CANVAS_SCHEMA, CanvasFile, CanvasFileNode};
+
+    fn session_with(nodes: Vec<CanvasFileNode>) -> Session {
+        Session::new(
+            "a.atlx".into(),
+            CanvasFile {
+                schema: CANVAS_SCHEMA.into(),
+                id: "c".into(),
+                title: "a".into(),
+                nodes,
+                edges: Vec::new(),
+                created_at: 0,
+                updated_at: 0,
+            },
+            1,
+        )
+    }
+
+    fn text_card(id: &str, w: f64, h: f64) -> CanvasFileNode {
+        CanvasFileNode {
+            id: id.into(),
+            node_type: "text".into(),
+            x: 100.0,
+            y: 100.0,
+            width: Some(w),
+            height: Some(h),
+            data: serde_json::json!({}),
+        }
+    }
+
+    fn wheel_at(session: &mut Session, x: f32, y: f32, size: (f32, f32)) {
+        let mut mods = Modifiers::default();
+        handle(
+            session,
+            &FrameInput::Wheel {
+                x,
+                y,
+                delta_x: 0.0,
+                delta_y: -40.0,
+                modifiers: Modifiers::default(),
+                hit: None,
+            },
+            size,
+            &mut mods,
+        );
+    }
+
+    fn minimap_center(size: (f32, f32)) -> (f32, f32) {
+        (
+            size.0 - MINIMAP_W - MINIMAP_MARGIN + MINIMAP_W / 2.0,
+            size.1 - MINIMAP_H - MINIMAP_MARGIN + MINIMAP_H / 2.0,
+        )
+    }
+
+    /// 小地图矩形内滚轮一律消费：空画布取不到映射也不能透传成画布缩放。
+    #[test]
+    fn wheel_over_minimap_never_zooms_empty_canvas() {
+        let size = (900.0, 600.0);
+        let mut session = session_with(Vec::new());
+        let before = session.view.zoom;
+        let (x, y) = minimap_center(size);
+        wheel_at(&mut session, x, y, size);
+        assert_eq!(session.view.zoom, before, "小地图上的滚轮不应缩放");
+    }
+
+    /// 小地图外的滚轮仍然缩放。
+    #[test]
+    fn wheel_outside_minimap_zooms() {
+        let size = (900.0, 600.0);
+        let mut session = session_with(Vec::new());
+        let before = session.view.zoom;
+        wheel_at(&mut session, 600.0, 300.0, size);
+        assert!(session.view.zoom > before, "空白区滚轮应缩放");
+    }
+
+    /// 占位卡没有正文浮层：正文矩形集合必须剔除它，否则命中会吞掉卡上的按下与滚轮。
+    #[test]
+    fn card_bodies_skip_compact_cards() {
+        let card = text_card("n1", 360.0, 240.0);
+        let mut session = session_with(vec![card]);
+        session.view.zoom = 0.3;
+        assert!(card_bodies(&session).is_empty(), "占位卡不应有正文浮层");
+        session.view.zoom = 0.5;
+        assert_eq!(card_bodies(&session).len(), 1, "非占位卡保留正文浮层");
+    }
 }

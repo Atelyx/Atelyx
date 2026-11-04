@@ -202,6 +202,37 @@ async fn main() {
     assert_eq!(zoom_percent(&panned), Some(kept), "Ctrl+滚轮不应改变缩放");
     println!("滚轮平移方向：通过");
 
+    // 小地图矩形内的滚轮被消费：不应改变缩放
+    let minimap_zoom = zoom_percent(&panned).unwrap_or(0);
+    let minimap_mods = Modifiers::default();
+    runtime.notify_frame_input(
+        CANVAS_ID,
+        SURFACE,
+        &FrameInput::Wheel {
+            x: 800.0,
+            y: 550.0,
+            delta_x: 0.0,
+            delta_y: 1000.0,
+            modifiers: minimap_mods,
+            hit: None,
+        },
+    );
+    // 再走一次 Ctrl+滚轮（只平移不缩放）：用平移产生的新帧证明小地图上的那次已被丢弃
+    let minimap_title_y = text_y(&panned).expect("应有卡头标题");
+    wheel(&runtime, 40.0, true);
+    let after_minimap = wait_frame(&runtime, |frame| {
+        zoom_percent(frame).is_some_and(|pct| pct == minimap_zoom)
+            && text_y(frame).is_some_and(|y| y < minimap_title_y - 20.0)
+    })
+    .await
+    .expect("小地图上的滚轮应被消费（缩放未变且随后平移生效）");
+    assert_eq!(
+        zoom_percent(&after_minimap),
+        Some(minimap_zoom),
+        "小地图上的滚轮应被消费"
+    );
+    println!("小地图滚轮消费：通过");
+
     // 阈值 120px：卡宽落在 96–120px 区间时就该占位（旧 96px 阈值下这一档仍会画标题）
     wheel(&runtime, 520.0, false);
     let near = wait_frame(&runtime, |frame| {

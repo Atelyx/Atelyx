@@ -158,6 +158,13 @@ pub async fn leave(plugin: &PluginState, ctx: &Context, path: &str) {
 
 /// 收到一条对端状态：离场帧摘除该对端，其余按路径匹配后整条替换。
 pub fn apply(plugin: &PluginState, params: CollabMessageParams) {
+    // 本端上行的回声不是对端：把它记成 peer 会让自己显示成「被占用」
+    let self_echo = plugin
+        .with_session(|session| session.view.self_id.as_deref() == Some(params.peer_id.as_str()))
+        .unwrap_or(false);
+    if self_echo {
+        return;
+    }
     let Some(payload) = params.payload.as_object() else {
         return;
     };
@@ -280,6 +287,67 @@ fn parse_hex(raw: &str) -> Option<(u8, u8, u8)> {
     let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
     let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
     Some((r, g, b))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Session;
+    use atelyx_format::canvas::{CANVAS_SCHEMA, CanvasFile};
+
+    fn plugin_on(file: &str) -> std::sync::Arc<PluginState> {
+        let plugin = PluginState::new();
+        let session = Session::new(
+            file.into(),
+            CanvasFile {
+                schema: CANVAS_SCHEMA.into(),
+                id: "c".into(),
+                title: "a".into(),
+                nodes: Vec::new(),
+                edges: Vec::new(),
+                created_at: 0,
+                updated_at: 0,
+            },
+            1,
+        );
+        *plugin.session.lock().unwrap() = Some(session);
+        plugin
+    }
+
+    fn message(peer: &str, path: &str) -> CollabMessageParams {
+        CollabMessageParams {
+            channel: CHANNEL.into(),
+            payload: serde_json::json!({ "path": path, "present": true }),
+            peer_id: peer.into(),
+            peer_name: None,
+        }
+    }
+
+    /// 本端上行的回声不能记成对端，否则自己的锁会被渲染成「被他人占用」。
+    #[test]
+    fn apply_skips_self_echo() {
+        let plugin = plugin_on("a.atlx");
+        plugin.with_session_mut(|session| session.view.self_id = Some("me".into()));
+        apply(&plugin, message("me", "a.atlx"));
+        assert!(plugin.with_session(|session| session.view.remote.is_empty()).unwrap());
+
+        apply(&plugin, message("p1", "a.atlx"));
+        assert_eq!(
+            plugin.with_session(|session| session.view.remote.len()).unwrap(),
+            1
+        );
+    }
+
+    /// 对端开着别的画布也要保留状态，绘制期再按当前路径过滤。
+    #[test]
+    fn apply_keeps_peer_from_other_canvas() {
+        let plugin = plugin_on("a.atlx");
+        apply(&plugin, message("p1", "b.atlx"));
+        let path = plugin
+            .with_session(|session| session.view.remote[0].path.clone())
+            .unwrap();
+        assert_eq!(path, "b.atlx");
+    }
 }
 
 /// 对端未带身份色时按 peer id 取一个稳定色。

@@ -46,7 +46,7 @@ const COMPACT_ICON_SIZE: f32 = 22.0;
 const ELLIPSIZE_WIDTH_GUARD: f32 = 1.06;
 
 /// 低缩放紧凑形态：屏幕宽装不下标题，或卡头高度已装不下固定字号（卡头高度随缩放缩小）。
-fn compact_card(zoom: f32, world_w: f32) -> bool {
+pub(crate) fn compact_card(zoom: f32, world_w: f32) -> bool {
     world_w * zoom <= COMPACT_CARD_PX || CARD_HEAD_H * zoom < CARD_TITLE_SIZE
 }
 
@@ -1210,20 +1210,7 @@ fn draw_toolbar(canvas: &mut Canvas, s: &Snapshot, w: f32, _h: f32) {
             layout: None,
         });
     }
-    let stats = format!(
-        "{} 卡 · {} 连线{}",
-        s.data
-            .nodes
-            .iter()
-            .filter(|n| n.node_type != "group")
-            .count(),
-        s.data.edges.len(),
-        if s.selection.is_empty() {
-            String::new()
-        } else {
-            format!(" · 已选 {}", s.selection.len())
-        }
-    );
+    let stats = stats_text(s);
     let (sw, _) = canvas.measure(&stats, 12.0);
     canvas.draw(Text {
         x: (left_edge - tw - sw - 20.0).max(10.0),
@@ -1239,6 +1226,20 @@ fn draw_toolbar(canvas: &mut Canvas, s: &Snapshot, w: f32, _h: f32) {
         align: None,
         layout: None,
     });
+}
+
+/// 工具条统计：分组也计入卡数。
+fn stats_text(s: &Snapshot) -> String {
+    format!(
+        "{} 卡 · {} 连线{}",
+        s.data.nodes.len(),
+        s.data.edges.len(),
+        if s.selection.is_empty() {
+            String::new()
+        } else {
+            format!(" · 已选 {}", s.selection.len())
+        }
+    )
 }
 
 fn card_overlays(ui: &mut Ui, s: &Snapshot, choices: &Choices<'_>) {
@@ -1643,4 +1644,43 @@ fn conversation_overlay(
             });
         });
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use atelyx_format::canvas::{CANVAS_SCHEMA, CanvasFile, CanvasFileNode};
+
+    const GROUP_NODE: &str = r#"{"id":"g1","type":"group","x":0.0,"y":0.0,"data":{}}"#;
+
+    /// 工具条统计口径：分组与普通卡一起计数。
+    #[test]
+    fn stats_count_groups() {
+        let nodes = vec![
+            CanvasFileNode {
+                id: "n1".into(),
+                node_type: "text".into(),
+                x: 0.0,
+                y: 0.0,
+                width: None,
+                height: None,
+                data: serde_json::json!({}),
+            },
+            serde_json::from_str(GROUP_NODE).unwrap(),
+        ];
+        let session = Session::new(
+            "a.atlx".into(),
+            CanvasFile {
+                schema: CANVAS_SCHEMA.into(),
+                id: "c".into(),
+                title: "a".into(),
+                nodes,
+                edges: Vec::new(),
+                created_at: 0,
+                updated_at: 0,
+            },
+            1,
+        );
+        assert_eq!(stats_text(&Snapshot::of(&session)), "2 卡 · 0 连线");
+    }
 }

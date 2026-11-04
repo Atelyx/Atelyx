@@ -1,7 +1,9 @@
 //! 画布会话装配与保存链：当前画布取自宿主打开文件集合；保存走「读盘 → 基线补丁合并 →
 //! 写盘队列」，空间模式交宿主按 `canvas` 文件族仲裁。
 
-use atelyx_format::canvas::{CANVAS_SCHEMA, CanvasFile, apply_canvas_patch, compute_canvas_patch};
+use atelyx_format::canvas::{
+    CANVAS_SCHEMA, CanvasFile, CanvasPatch, apply_canvas_patch, compute_canvas_patch,
+};
 use atelyx_plugin_protocol::method::{
     CanvasContentParams, HistoryRecordParams, NotificationLevel, SpaceFilePatchParams,
 };
@@ -233,6 +235,47 @@ pub fn restore_snapshot(plugin: &PluginState, payload: &serde_json::Value) -> bo
         .unwrap_or(false)
 }
 
+/// 合入一条远端补丁并同步会话视图；脏标记只由本地编辑置位，透传帧不改它。
+fn merge_remote(
+    session: &mut Session,
+    patch: &CanvasPatch,
+    landed: bool,
+) -> Option<atelyx_format::canvas::collab::RemoteApplyOutcome> {
+    if patch.id != session.data.id {
+        return None;
+    }
+    let outcome = atelyx_format::canvas::collab::apply_remote_patch(
+        &mut session.data,
+        &mut session.saved,
+        patch,
+        landed,
+    );
+    session.version += 1;
+    session.view.undo.clear();
+    session.view.redo.clear();
+    let live: Vec<String> = session
+        .data
+        .nodes
+        .iter()
+        .map(|node| node.id.clone())
+        .collect();
+    session.view.selection.retain(|id| live.contains(id));
+    session.view.locks.retain(|id, _| live.contains(id));
+    if session.view.hover.as_ref().is_some_and(|id| !live.contains(id)) {
+        session.view.hover = None;
+    }
+    if session
+        .view
+        .group_rename
+        .as_ref()
+        .is_some_and(|(id, _)| !live.contains(id))
+    {
+        session.view.group_rename = None;
+    }
+    crate::chat::sync_card_chats(session);
+    Some(outcome)
+}
+
 /// 空间远端补丁合入（双基线推进）。
 pub async fn apply_remote(
     plugin: &PluginState,
@@ -252,43 +295,7 @@ pub async fn apply_remote(
         return false;
     };
     let applied = plugin
-        .with_session_mut(|session| {
-            if patch.id != session.data.id {
-                return None;
-            }
-            let outcome = atelyx_format::canvas::collab::apply_remote_patch(
-                &mut session.data,
-                &mut session.saved,
-                &patch,
-                params.landed,
-            );
-            session.version += 1;
-            session.dirty = session.data.nodes != session.saved.nodes
-                || session.data.edges != session.saved.edges;
-            session.view.undo.clear();
-            session.view.redo.clear();
-            let live: Vec<String> = session
-                .data
-                .nodes
-                .iter()
-                .map(|node| node.id.clone())
-                .collect();
-            session.view.selection.retain(|id| live.contains(id));
-            session.view.locks.retain(|id, _| live.contains(id));
-            if session.view.hover.as_ref().is_some_and(|id| !live.contains(id)) {
-                session.view.hover = None;
-            }
-            if session
-                .view
-                .group_rename
-                .as_ref()
-                .is_some_and(|(id, _)| !live.contains(id))
-            {
-                session.view.group_rename = None;
-            }
-            crate::chat::sync_card_chats(session);
-            Some(outcome)
-        })
+        .with_session_mut(|session| merge_remote(session, &patch, params.landed))
         .flatten();
     if let Some(outcome) = applied {
         let paths: Vec<String> = plugin
@@ -552,6 +559,33 @@ mod tests {
             assert_eq!(session.data.nodes.len(), 2);
             assert_eq!(session.saved.nodes.len(), 1);
             assert!(session.dirty);
+        });
+    }
+
+    /// 远端透传帧只改内存数据，不置脏：否则会把对端内容当成本地改动回写。
+    #[test]
+    fn remote_patch_keeps_dirty_flag_local() {
+        let plugin = PluginState::new();
+        *plugin.session.lock().unwrap() = Some(Session::new("a.atlx".into(), canvas(&["a"]), 1));
+
+        plugin.with_session_mut(|session| {
+            let mut extra = session.data.nodes[0].clone();
+            extra.id = "b".into();
+            let patch = CanvasPatch {
+                id: "c".into(),
+                title: None,
+                upsert_nodes: vec![extra],
+                removed_node_ids: Vec::new(),
+                upsert_edges: Vec::new(),
+                removed_edge_ids: Vec::new(),
+            };
+            assert!(merge_remote(session, &patch, false).is_some());
+            assert_eq!(session.data.nodes.len(), 2, "透传帧应合入内存");
+            assert!(!session.dirty, "透传帧不置脏");
+
+            session.dirty = true;
+            assert!(merge_remote(session, &patch, true).is_some());
+            assert!(session.dirty, "本地脏标记不被远端覆盖");
         });
     }
 }

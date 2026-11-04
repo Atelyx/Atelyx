@@ -1294,6 +1294,8 @@ impl PluginState {
             self.render(ctx).await;
         }
         if self.is_attached() {
+            // 每拍都试上行（最小间隔在 Presence 内限频）：锁释放等非输入变化不等保活
+            crate::presence::send(self, ctx).await;
             crate::presence::keepalive(self, ctx).await;
         }
     }

@@ -698,4 +698,26 @@ mod tests {
         assert!(((x + w) - (400.0 - 12.0 - 2.0 * 28.0)).abs() < f32::EPSILON);
         assert!(buttons[0].1.0 > buttons[1].1.0 && buttons[1].1.0 > buttons[2].1.0);
     }
+
+    /// 锁主判定与合入侧同一口径：本端 since 更早时不算被对端占用。
+    #[test]
+    fn lock_owner_ignores_own_earlier_lock() {
+        let peer = |since: i64| RemotePeer {
+            peer_id: "p1".into(),
+            path: "a.atlx".into(),
+            locks: [("n1".to_string(), since)].into_iter().collect(),
+            ..RemotePeer::default()
+        };
+        let mut view = ViewState::default();
+        view.self_id = Some("me".into());
+
+        view.locks.insert("n1".into(), 1);
+        view.remote.push(peer(2));
+        assert!(view.locked_by_peer("a.atlx", "n1").is_none(), "本端锁更早时不算被占用");
+
+        view.remote.clear();
+        view.remote.push(peer(1));
+        view.locks.insert("n1".into(), 2);
+        assert!(view.locked_by_peer("a.atlx", "n1").is_some(), "对端锁更早时应只读");
+    }
 }
