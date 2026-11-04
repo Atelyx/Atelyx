@@ -62,7 +62,14 @@ pub(crate) fn permission_for(name: &str) -> Option<Permission> {
         | editor::OPEN_FILES
         | editor::OPEN_FILE
         | editor::PREFS => Some(Vault),
-        doc::OPEN | doc::EDIT | doc::SAVE | doc::CLOSE | doc::AWARENESS | doc::RENAME => Some(Vault),
+        doc::OPEN
+        | doc::EDIT
+        | doc::SAVE
+        | doc::CLOSE
+        | doc::AWARENESS
+        | doc::RENAME
+        | doc::PROPS_READ
+        | doc::PROPS_WRITE => Some(Vault),
         // 活动统计取自当前仓库内容，同样按仓库内容权限归类
         history::ACTIVITY | history::DAY | history::GROUPS | history::OPEN | history::RECORD => {
             Some(Vault)
@@ -71,7 +78,8 @@ pub(crate) fn permission_for(name: &str) -> Option<Permission> {
         method::recent::LIST => Some(Vault),
         window::OPEN | window::CLOSE | window::UPDATE | window::SHOW | window::BEGIN_DRAG
         | window::MINIMIZE | window::TOGGLE_MAXIMIZE => Some(Window),
-        ai::CHAT_SEND | ai::CHAT_STOP | ai::CHAT_HISTORY | ai::CHAT_RENAME | ai::CHAT_DELETE
+        ai::CHAT_SEND | ai::CHAT_SEND_DIRECT | ai::CHAT_COMPACT_DIRECT | ai::SETTINGS
+        | ai::CHAT_STOP | ai::CHAT_HISTORY | ai::CHAT_RENAME | ai::CHAT_DELETE
         | ai::CHAT_COMPACT | ai::CHAT_TITLE | ai::MODELS | ai::AGENTS | ai::REGISTER_TOOL | ai::UNREGISTER_TOOL
         | ai::TOOL_RESULT | ai::TOOL_LIST | ai::TOOL_EXECUTE | ai::CHAT_EMIT => Some(Ai),
         method::chat::SESSION_READ | method::chat::SESSION_WRITE

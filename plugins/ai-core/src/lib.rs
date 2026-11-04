@@ -9,8 +9,9 @@ mod title;
 use std::sync::Arc;
 
 use atelyx_plugin_protocol::method::{
-    self, ChatEvent, ChatEventParams, HttpStreamChunkParams, HttpStreamEndParams, RunCompactParams,
-    RunDirectParams, RunStartParams, RunStopParams, RunTitleParams,
+    self, ChatEvent, ChatEventParams, HttpStreamChunkParams, HttpStreamEndParams,
+    RunCompactDirectParams, RunCompactParams, RunDirectParams, RunStartParams, RunStopParams,
+    RunTitleParams,
 };
 use atelyx_plugin_protocol::service::HostCallParams;
 use atelyx_plugin_sdk::{Context, PluginHandler, PluginInfo};
@@ -90,6 +91,18 @@ impl AiCorePlugin {
                                 .map_err(|error| format!("run.compact 参数不可解析：{error}"))?;
                             run::compact(&ctx, &thread_hub, &params.session_id, &params.config).await
                         }
+                        method::run::COMPACT_DIRECT => {
+                            let params: RunCompactDirectParams = serde_json::from_value(raw)
+                                .map_err(|error| format!("run.compactDirect 参数不可解析：{error}"))?;
+                            run::compact_direct(
+                                &ctx,
+                                &thread_hub,
+                                &params.messages,
+                                params.compaction.as_ref(),
+                                &params.config,
+                            )
+                            .await
+                        }
                         method::run::TITLE => {
                             let params: RunTitleParams = serde_json::from_value(raw)
                                 .map_err(|error| format!("run.title 参数不可解析：{error}"))?;
@@ -161,7 +174,10 @@ impl PluginHandler for AiCorePlugin {
 
     async fn on_service_call(&self, ctx: &Context, params: HostCallParams) {
         if params.service == method::run::SERVICE
-            && matches!(params.method.as_str(), method::run::COMPACT | method::run::TITLE)
+            && matches!(
+                params.method.as_str(),
+                method::run::COMPACT | method::run::COMPACT_DIRECT | method::run::TITLE
+            )
         {
             self.spawn_aux(ctx.clone(), params).await;
             return;

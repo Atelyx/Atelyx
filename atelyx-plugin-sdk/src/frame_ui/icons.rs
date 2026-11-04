@@ -255,6 +255,18 @@ fn cached(name: &str) -> Option<Arc<Vec<CachedShape>>> {
 /// 按 lucide 名称绘制（24×24 视框、2 单位描边）：插件用字符串取图标，
 /// 不必靠扩展枚举；表外的名称不画。
 pub(crate) fn draw_named(ctx: &mut BuildCtx<'_>, name: &str, rect: Rect, color: PaintColor) {
+    emit(name, rect, color, |command| ctx.draw(command));
+}
+
+/// 按 lucide 名称生成图标指令（按宽等比缩放到 `rect`）：自绘整面的插件把它并进自己的指令流。
+/// 表外名称返回空。
+pub fn commands(name: &str, rect: Rect, color: PaintColor) -> Vec<DrawCommand> {
+    let mut out = Vec::new();
+    emit(name, rect, color, |command| out.push(command));
+    out
+}
+
+fn emit(name: &str, rect: Rect, color: PaintColor, mut sink: impl FnMut(DrawCommand)) {
     let Some(shapes) = cached(name) else {
         return;
     };
@@ -263,49 +275,41 @@ pub(crate) fn draw_named(ctx: &mut BuildCtx<'_>, name: &str, rect: Rect, color: 
     let point = |x: f32, y: f32| PaintPoint { x: rect.x + x * scale, y: rect.y + y * scale };
     for shape in shapes.iter() {
         match shape {
-            CachedShape::Polyline(polyline) => {
-                ctx.draw(DrawCommand::Path {
-                    points: polyline.iter().map(|[x, y]| point(*x, *y)).collect(),
-                    closed: false,
-                    fill: None,
-                    stroke: Some(color),
-                    stroke_width: Some(width),
-                });
-            }
-            CachedShape::Circle(cx, cy, r) => {
-                ctx.draw(DrawCommand::Circle {
-                    cx: rect.x + cx * scale,
-                    cy: rect.y + cy * scale,
-                    r: r * scale,
-                    fill: None,
-                    stroke: Some(color),
-                    stroke_width: Some(width),
-                });
-            }
-            CachedShape::Rect(x, y, w, h, radius) => {
-                ctx.draw(DrawCommand::Rect {
-                    x: rect.x + x * scale,
-                    y: rect.y + y * scale,
-                    w: w * scale,
-                    h: h * scale,
-                    fill: None,
-                    stroke: Some(color),
-                    stroke_width: Some(width),
-                    corner_radius: Some(radius * scale),
-                    shadow: None,
-                });
-            }
-            CachedShape::Line([x1, y1, x2, y2]) => {
-                ctx.draw(DrawCommand::Line {
-                    x1: rect.x + x1 * scale,
-                    y1: rect.y + y1 * scale,
-                    x2: rect.x + x2 * scale,
-                    y2: rect.y + y2 * scale,
-                    stroke: color,
-                    width,
-                    dash: None,
-                });
-            }
+            CachedShape::Polyline(polyline) => sink(DrawCommand::Path {
+                points: polyline.iter().map(|[x, y]| point(*x, *y)).collect(),
+                closed: false,
+                fill: None,
+                stroke: Some(color),
+                stroke_width: Some(width),
+            }),
+            CachedShape::Circle(cx, cy, r) => sink(DrawCommand::Circle {
+                cx: rect.x + cx * scale,
+                cy: rect.y + cy * scale,
+                r: r * scale,
+                fill: None,
+                stroke: Some(color),
+                stroke_width: Some(width),
+            }),
+            CachedShape::Rect(x, y, w, h, radius) => sink(DrawCommand::Rect {
+                x: rect.x + x * scale,
+                y: rect.y + y * scale,
+                w: w * scale,
+                h: h * scale,
+                fill: None,
+                stroke: Some(color),
+                stroke_width: Some(width),
+                corner_radius: Some(radius * scale),
+                shadow: None,
+            }),
+            CachedShape::Line([x1, y1, x2, y2]) => sink(DrawCommand::Line {
+                x1: rect.x + x1 * scale,
+                y1: rect.y + y1 * scale,
+                x2: rect.x + x2 * scale,
+                y2: rect.y + y2 * scale,
+                stroke: color,
+                width,
+                dash: None,
+            }),
         }
     }
 }

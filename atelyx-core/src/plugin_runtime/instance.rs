@@ -956,6 +956,20 @@ impl Instance {
         let opened = self.with_session(token, || {
             // parse 的 RpcError 统一转可读串（本闭包的错误类型是 String）
             let request = match method_name {
+                method::ai::CHAT_SEND_DIRECT => HostRequest::ChatSendDirect {
+                    plugin_id: self.id.clone(),
+                    request_id: 0,
+                    params: parse(params).map_err(|e| e.to_string())?,
+                },
+                method::ai::CHAT_COMPACT_DIRECT => HostRequest::ChatCompactDirect {
+                    plugin_id: self.id.clone(),
+                    request_id: 0,
+                    params: parse(params).map_err(|e| e.to_string())?,
+                },
+                method::ai::SETTINGS => HostRequest::AiSettings {
+                    plugin_id: self.id.clone(),
+                    request_id: 0,
+                },
                 method::ai::CHAT_SEND => HostRequest::ChatSend {
                     plugin_id: self.id.clone(),
                     request_id: 0,
@@ -1339,6 +1353,18 @@ impl Instance {
                         plugin_id: self.id.clone(),
                         request_id: 0,
                         path: p.path,
+                    }
+                }
+                method::doc::PROPS_READ => HostRequest::DocPropsRead {
+                    plugin_id: self.id.clone(),
+                    request_id: 0,
+                },
+                method::doc::PROPS_WRITE => {
+                    let p: method::DocPropsWriteParams = parse(params).map_err(|e| e.to_string())?;
+                    HostRequest::DocPropsWrite {
+                        plugin_id: self.id.clone(),
+                        request_id: 0,
+                        params: p,
                     }
                 }
                 method::doc::RENAME => {
@@ -1938,9 +1964,9 @@ impl Instance {
 
     /// 插件 → 宿主的通用调用：落点与进程插件完全相同（权限 / 服务目录 / 壳回填）。
     pub(crate) fn handle_abi_call(self: &Arc<Self>, token: u64, call: HostCall) {
-        if token != self.run_token.load(Ordering::SeqCst)
-            || !self.session_active.load(Ordering::SeqCst)
-        {
+        let run_token = self.run_token.load(Ordering::SeqCst);
+        let active = self.session_active.load(Ordering::SeqCst);
+        if token != run_token || !active {
             call.reply(false, "插件会话已结束");
             return;
         }
@@ -2513,6 +2539,9 @@ fn is_shell_method(method_name: &str) -> bool {
     matches!(
         method_name,
         method::ai::CHAT_SEND
+            | method::ai::CHAT_SEND_DIRECT
+            | method::ai::CHAT_COMPACT_DIRECT
+            | method::ai::SETTINGS
             | method::ai::CHAT_STOP
             | method::ai::CHAT_HISTORY
             | method::ai::CHAT_RENAME
@@ -2568,6 +2597,8 @@ fn is_shell_method(method_name: &str) -> bool {
             | method::doc::AWARENESS
             | method::vault::BACKLINKS
             | method::doc::RENAME
+            | method::doc::PROPS_READ
+            | method::doc::PROPS_WRITE
             | method::history::ACTIVITY
             | method::history::DAY
             | method::history::GROUPS
@@ -3910,6 +3941,7 @@ fn emittable_by(plugin_id: &str, name: &str) -> bool {
         event::name::TABLE_CHANGED | event::name::TABLE_SELECTION_CHANGED => {
             plugin_id == "atelyx.tables"
         }
+        event::name::CANVAS_CHANGED => plugin_id == "atelyx.canvas",
         _ => false,
     }
 }

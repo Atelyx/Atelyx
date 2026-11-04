@@ -10,15 +10,14 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
 use atelyx_core::ai::{
-    agent::{self, RunConfig, RunEvent},
+    agent::RunConfig,
     refs as ai_refs,
     session::{CommitBatch, DeleteEntry, MetaPatch, SessionStore, WriteChainConfig},
-    stream::LlmMessage,
     tools::{RepoAccess, SearchConfig, ToolCtx},
 };
 use atelyx_core::plugin_runtime::{
-    ChatChangeKind, ChatEvent, ChatEventParams, ChatHistoryResult, ChatPersistError,
-    ChatSendParams, ChatSessionSummary, ChatSessionWire,
+    ChatChangeKind, ChatDirectCompactResult, ChatEvent, ChatEventParams, ChatHistoryResult,
+    ChatPersistError, ChatSendParams, ChatSessionSummary, ChatSessionWire,
 };
 
 use crate::Message;
@@ -41,7 +40,6 @@ type EventSlot<T> = (
     std::sync::Mutex<Option<mpsc::UnboundedReceiver<T>>>,
 );
 
-static RUN_EVENTS: OnceLock<EventSlot<RunEvent>> = OnceLock::new();
 static CONTROL: OnceLock<EventSlot<ChatMsg>> = OnceLock::new();
 
 fn store() -> &'static Arc<SessionStore> {
@@ -62,13 +60,6 @@ pub(crate) fn chat_overrides() -> (Option<Value>, Option<String>, Option<String>
     store().overrides()
 }
 
-pub(crate) fn run_event_channel() -> &'static EventSlot<RunEvent> {
-    RUN_EVENTS.get_or_init(|| {
-        let (tx, rx) = mpsc::unbounded_channel();
-        (tx, std::sync::Mutex::new(Some(rx)))
-    })
-}
-
 fn control_channel() -> &'static EventSlot<ChatMsg> {
     CONTROL.get_or_init(|| {
         let (tx, rx) = mpsc::unbounded_channel();
@@ -76,30 +67,9 @@ fn control_channel() -> &'static EventSlot<ChatMsg> {
     })
 }
 
-/// 订阅流取走 run 事件接收端（每进程一次；订阅重建不重复取）。
-pub fn take_run_event_receiver() -> Option<mpsc::UnboundedReceiver<RunEvent>> {
-    run_event_channel().1.lock().unwrap_or_else(|e| e.into_inner()).take()
-}
-
 /// 订阅流取走控制事件接收端（persistError 等）。
 pub fn take_control_receiver() -> Option<mpsc::UnboundedReceiver<ChatMsg>> {
     control_channel().1.lock().unwrap_or_else(|e| e.into_inner()).take()
-}
-
-/// run 事件订阅流（core run 循环 → Elm）。
-pub fn run_events_subscription() -> iced::Subscription<Message> {
-    iced::Subscription::run_with(String::from("chat-run-events"), |_: &String| {
-        iced::stream::channel(64, async move |mut output| {
-            if let Some(mut rx) = take_run_event_receiver() {
-                while let Some(event) = rx.recv().await {
-                    let sent = iced::futures::SinkExt::send(&mut output, Message::Chat(ChatMsg::Run(event))).await;
-                    if sent.is_err() {
-                        break;
-                    }
-                }
-            }
-        })
-    })
 }
 
 /// 控制事件订阅流（写链 persistError 观察者 → Elm）。
@@ -143,15 +113,11 @@ pub enum ChatMsg {
     PersistStatus(Option<(String, i64)>),
     /// 外部文件拖入窗口（优先落到悬停的对话卡）。
     FileDropped(std::path::PathBuf),
-    /// run 循环事件（画布直写 run 的受理失败）。
-    Run(RunEvent),
     /// 会话真源装载完成（空间模式在自建线程上装载，回执经控制通道回 Elm）。
     /// 空间装载回执：`Ok(false)` = 已被更新的装载取代，结果不再应用。
     StoreLoaded(u64, Result<bool, String>),
     /// 退出前落盘回执。
     FlushDone(Result<(), String>),
-    /// 画布卡压缩收尾（携带会话 id 与摘要结果）。
-    AidDone(String, Option<String>),
     /// 插件请求发起 / 续聊一轮对话（ai.chat.send 的宿主编排）。
     PluginSend {
         request_id: u64,
@@ -163,6 +129,26 @@ pub enum ChatMsg {
         plan: Box<PluginSendPlan>,
         result: Result<PluginSendPrepared, String>,
     },
+    /// 插件请求起一轮直写型 run（消息真源在插件）。
+    PluginSendDirect {
+        request_id: u64,
+        params: atelyx_core::plugin_runtime::method::ChatDirectParams,
+    },
+    /// 直写发送的空间前置回执（Agent 提示词取回）。
+    PluginSendDirectReady {
+        gen: u64,
+        plan: Box<DirectSendPlan>,
+        result: Result<Option<String>, String>,
+    },
+    /// 插件请求压缩一段自己持有的消息（ai.chat.compactDirect）。
+    PluginCompactDirect {
+        request_id: u64,
+        params: atelyx_core::plugin_runtime::method::ChatDirectCompactParams,
+    },
+    /// 直写压缩回执。
+    PluginCompactDirectDone { request_id: u64, result: Result<Value, String> },
+    /// 插件读 AI 运行相关设置（ai.settings）。
+    PluginAiSettings { request_id: u64 },
     /// 插件请求中断一个会话的活跃 run（ai.chat.stop）。
     PluginStop { request_id: u64, session_id: String },
     /// 插件请求读会话清单或单会话消息（ai.chat.history）。
@@ -473,15 +459,10 @@ fn update_inner(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
             iced::Task::none()
         }
         ChatMsg::FileDropped(path) => {
-            if let Some(node) = crate::canvas_chat::hovered_conversation(app) {
-                crate::canvas_chat::add_attachments(app, &node, vec![path]);
-            } else {
-                // 面板由插件自理：宿主只转发绝对路径，插件按自身界面状态决定是否接收
-                app.plugins.on_files_dropped(vec![path.to_string_lossy().into_owned()]);
-            }
+            // 面板与画布卡都由插件自理：宿主只转发绝对路径，插件按自身界面状态决定是否接收
+            app.plugins.on_files_dropped(vec![path.to_string_lossy().into_owned()]);
             iced::Task::none()
         }
-        ChatMsg::Run(event) => on_run_event(app, event),
         ChatMsg::StoreLoaded(gen, result) => {
             if gen != app.epoch() {
                 // 装载在途期间换了容器：旧真源快照整体丢弃
@@ -509,14 +490,6 @@ fn update_inner(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
             }
             iced::Task::none()
         }
-        ChatMsg::AidDone(session_id, result) => {
-            if let Some(node) =
-                crate::canvas_chat::node_of_session(&session_id).map(str::to_string)
-            {
-                crate::canvas_chat::compact_done(app, &node, result);
-            }
-            iced::Task::none()
-        }
         ChatMsg::PluginSend { request_id, params } => plugin_chat_send(app, request_id, params),
         ChatMsg::PluginSendReady { gen, plan, result } => {
             if gen != app.epoch() {
@@ -533,6 +506,38 @@ fn update_inner(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
                     iced::Task::none()
                 }
             }
+        }
+        ChatMsg::PluginSendDirect { request_id, params } => {
+            plugin_send_direct(app, request_id, params)
+        }
+        ChatMsg::PluginSendDirectReady { gen, plan, result } => {
+            if gen != app.epoch() {
+                app.plugins
+                    .resolve_shell_call(plan.request_id, Err("仓库已切换，发送已取消".into()));
+                return iced::Task::none();
+            }
+            match result {
+                Ok(space_prompt) => direct_send_now(app, *plan, space_prompt),
+                Err(e) => {
+                    app.plugins.resolve_shell_call(plan.request_id, Err(e));
+                    iced::Task::none()
+                }
+            }
+        }
+        ChatMsg::PluginCompactDirect { request_id, params } => {
+            plugin_compact_direct(app, request_id, params)
+        }
+        ChatMsg::PluginCompactDirectDone { request_id, result } => {
+            app.plugins.resolve_shell_call(request_id, result);
+            iced::Task::none()
+        }
+        ChatMsg::PluginAiSettings { request_id } => {
+            let settings = atelyx_core::plugin_runtime::method::AiSettingsResult {
+                auto_materialize: app.repo_config.canvas_auto_materialize.unwrap_or(true),
+            };
+            let result = serde_json::to_value(settings).map_err(|e| e.to_string());
+            app.plugins.resolve_shell_call(request_id, result);
+            iced::Task::none()
         }
         ChatMsg::PluginStop { request_id, session_id } => {
             stop_run(app, &session_id);
@@ -754,230 +759,26 @@ pub(crate) fn stop_run(app: &App, session_id: &str) {
     );
 }
 
-pub(crate) fn source_hash(s: &str) -> u64 {
-    use std::hash::Hash;
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    s.hash(&mut h);
-    std::hash::Hasher::finish(&h)
-}
-
-/// 文档缓存键（并入引用签名：同文不同引用的 mention 解析结果不同，防串档）。
-pub(crate) fn doc_key(source: &str, mention_sig: &[String]) -> u64 {
-    source_hash(&format!("{source}\u{1}{}", mention_sig.join("\u{1}")))
-}
-
-pub(crate) fn now_ms() -> i64 {
+fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
 }
 
-pub(crate) fn uuid_v4() -> String {
+fn uuid_v4() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-/// 消息的引用标签签名（缓存键与解析候选同源：前缀：标签，与正文逐字一致）。
-pub(crate) fn mention_sig(message: &Value) -> Vec<String> {
-    message_mentions(message).into_iter().map(|mn| mn.label).collect()
-}
-
-/// 消息 refs → mention 候选（标签文本 = 前缀：标签，与正文中的引用标签逐字一致）。
-pub(crate) fn message_mentions(message: &Value) -> Vec<atelyx_core::markdown::MentionCandidate> {
-    message_refs(message)
-        .iter()
-        .map(|r| atelyx_core::markdown::MentionCandidate {
-            key: r.path.clone(),
-            label: format!("{}：{}", r.kind.prefix(), r.label),
-        })
-        .collect()
-}
-
-/// 消息 refs 字段 → 内存引用条目（畸形条目跳过）。
-pub(crate) fn message_refs(message: &Value) -> Vec<ai_refs::RefEntry> {
-    message
-        .get("refs")
-        .and_then(Value::as_array)
-        .map(|refs| {
-            refs.iter()
-                .filter_map(|r| {
-                    let node_id = r.get("nodeId").and_then(Value::as_str).map(str::to_string);
-                    // 画布卡引用只有 nodeId；文件引用只有 path
-                    let path = r
-                        .get("path")
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                        .or_else(|| node_id.clone())?;
-                    let label = r.get("label").and_then(Value::as_str)?;
-                    let kind = ai_refs::RefKind::parse_key(
-                        r.get("refKind").and_then(Value::as_str).unwrap_or(""),
-                    )?;
-                    Some(ai_refs::RefEntry {
-                        path,
-                        label: label.to_string(),
-                        kind,
-                        node_id,
-                    })
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// 附件落盘后端（本地写盘队列 / 空间端点）。
-pub(crate) enum ImageBackend {
-    Local {
-        root: std::path::PathBuf,
-        queue: atelyx_core::write_queue::WriteQueue,
-    },
-    Space {
-        client: Arc<atelyx_core::space_client::SpaceClient>,
-        space_id: String,
-    },
-}
-
-pub(crate) fn image_backend(app: &App) -> Result<ImageBackend, String> {
-    match &app.repo_kind {
-        RepoKind::Space(_) => {
-            let session =
-                crate::space_actions::session_of(app).ok_or_else(|| "协作空间未连接".to_string())?;
-            if !session.role.can_write() {
-                return Err("该空间为只读身份，无法发送图片".to_string());
-            }
-            Ok(ImageBackend::Space { client: session.client, space_id: session.space_id })
-        }
-        RepoKind::Local => {
-            let root = app.vault_root.clone().ok_or_else(|| "仓库未打开".to_string())?;
-            Ok(ImageBackend::Local { root, queue: app.vault.writes.clone() })
-        }
-    }
-}
-
-/// 托盘图片逐张落临时区（`img-<nanoid>.<ext>` 每次新文件名，重发不覆盖），
-/// 返回消息 attachments 元数据（路径引用；字节不进消息）。
-/// 任一张失败 = 已处理图片与余量整体原样带回（托盘恢复原样，不产生半发消息）。
-pub(crate) async fn materialize_images(
-    backend: ImageBackend,
-    session_id: String,
-    images: Vec<PendingImage>,
-) -> Result<Vec<Value>, (Vec<PendingImage>, String)> {
-    let mut attachments = Vec::new();
-    let mut pending: std::collections::VecDeque<PendingImage> = images.into_iter().collect();
-    while let Some(img) = pending.pop_front() {
-        let rel = match atelyx_core::vault::chat_image_rel_path(&session_id, &img.file_name) {
-            Ok(rel) => rel,
-            Err(e) => return Err((pending.into_iter().collect(), e)),
-        };
-        let write = match &backend {
-            ImageBackend::Local { root, queue } => {
-                let path = match atelyx_core::vault::safe_join(root, &rel, true) {
-                    Ok(path) => path,
-                    Err(e) => return Err((pending.into_iter().collect(), e)),
-                };
-                queue.write_bytes(path, img.bytes.clone()).await
-            }
-            ImageBackend::Space { client, space_id } => client
-                .put_file_bytes(space_id, &rel, &img.bytes)
-                .await
-                .map(|_| ())
-                .map_err(|e| e.to_string()),
-        };
-        if let Err(e) = write {
-            let mut restore: Vec<PendingImage> = pending.into_iter().collect();
-            restore.insert(0, img);
-            return Err((restore, format!("图片落盘失败（{rel}）：{e}")));
-        }
-        attachments.push(json!({ "kind": "image", "mime": img.mime, "file": rel }));
-    }
-    Ok(attachments)
-}
-
-// ===== 输入面与 # 引用 =====
-
-/// # 引用候选：仓库文件 / 目录或画布内已有卡。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MentionTarget {
-    Vault { rel: String, is_dir: bool },
-    Card { node_id: String },
-}
-
-/// # 引用候选浮层状态。
-pub struct MentionPicker {
-    /// 触发 `#` 的字节位置。
-    pub at: usize,
-    /// 触发位到光标之间的查询串。
-    pub query: String,
-    /// 键盘选中行。
-    pub selected: usize,
-    /// 过滤后的候选（画布卡排在前，其后为仓库文件与目录）。
-    pub candidates: Vec<MentionTarget>,
-}
-
-/// 候选条数上限（超出只显示前 N 条，继续键入收窄）。
-const MENTION_CANDIDATE_CAP: usize = 50;
-
-/// 引用候选：打开中的文件（笔记 / 表格 / 画布）置顶，其余按文件树缓存序（md / atb / atlx
-/// 文件与目录；隐藏与排除目录不在缓存内自然缺席）。查询按子串过滤（不区分大小写），
-/// 置顶项同样受过滤，已置顶的路径不再在文件树里重复出现。
-pub(crate) fn mention_candidates(app: &App, query: &str) -> Vec<MentionTarget> {
-    let needle = query.to_lowercase();
-    let mut out = Vec::new();
-    seed_open_candidates(&crate::space_actions::open_file_paths(app), &needle, &mut out);
-    collect_candidates(app, "", &needle, &mut out);
-    out
-}
-
-/// 打开中的文件前置：命中查询者按打开顺序入列，已在列里的路径不再重复。
-fn seed_open_candidates(open: &[String], needle: &str, out: &mut Vec<MentionTarget>) {
-    for rel in open {
-        if (needle.is_empty() || rel.to_lowercase().contains(needle)) && !listed(out, rel) {
-            out.push(MentionTarget::Vault { rel: rel.clone(), is_dir: false });
-        }
-    }
-}
-
-fn collect_candidates(app: &App, dir: &str, needle: &str, out: &mut Vec<MentionTarget>) {
-    if out.len() >= MENTION_CANDIDATE_CAP {
-        return;
-    }
-    let mut children = app.children.get(dir).cloned().unwrap_or_default();
-    atelyx_core::vault::sort_children(&mut children, &app.file_sort);
-    for child in children {
-        let hit = needle.is_empty() || child.rel.to_lowercase().contains(needle);
-        if hit && !listed(out, &child.rel) {
-            out.push(MentionTarget::Vault { rel: child.rel.clone(), is_dir: child.is_dir });
-            if out.len() >= MENTION_CANDIDATE_CAP {
-                return;
-            }
-        }
-        if child.is_dir {
-            collect_candidates(app, &child.rel, needle, out);
-        }
-    }
-}
-
-/// 路径是否已在候选里（置顶项与文件树项去重）。
-fn listed(out: &[MentionTarget], rel: &str) -> bool {
-    out.iter().any(|t| matches!(t, MentionTarget::Vault { rel: r, .. } if r == rel))
-}
-
-/// 扩展名 → MIME（托盘四类图片）。
-pub(crate) fn image_mime(ext: &str) -> String {
-    match ext {
+fn image_mime(ext: &str) -> String {
+    match ext.to_ascii_lowercase().as_str() {
         "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",
         "webp" => "image/webp",
-        _ => "image/gif",
+        "gif" => "image/gif",
+        _ => "application/octet-stream",
     }
     .to_string()
-}
-
-/// 待发送图片附件（托盘运行时项；发送时字节落仓库临时区，消息只持久化路径引用）。
-#[derive(Debug, Clone)]
-pub struct PendingImage {
-    pub file_name: String,
-    pub bytes: Vec<u8>,
-    pub mime: String,
 }
 
 /// 发送前置检查（会话真源已装载）。
@@ -991,93 +792,11 @@ fn check_ready(app: &App) -> Result<(), String> {
     Ok(())
 }
 
-/// 压缩任务：按既有检查点重建转写并请求摘要，回执 `ChatMsg::AidDone`。
-/// 压缩中标志由调用方自持（面板 = `ChatState.compacting`，卡 = 卡运行态）。
-pub(crate) fn compact_task(
-    session_key: String,
-    config: RunConfig,
-    messages: &[Value],
-    compaction: Option<Value>,
-) -> iced::Task<Message> {
-    let mut transcript = String::new();
-    for m in agent::history_to_llm_messages(messages, compaction.as_ref()) {
-        match m {
-            LlmMessage::User { parts, .. } => {
-                transcript.push_str(&format!("用户：{}\n\n", parts.join("\n")));
-            }
-            LlmMessage::Assistant { content, tool_calls } => {
-                let body = match content {
-                    Some(c) if !c.is_empty() => c,
-                    _ if !tool_calls.is_empty() => format!(
-                        "（调用工具 {}）",
-                        tool_calls.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join("、")
-                    ),
-                    _ => String::new(),
-                };
-                transcript.push_str(&format!("助手：{body}\n\n"));
-            }
-            LlmMessage::Tool { content, .. } => {
-                transcript.push_str(&format!("工具结果：{}\n\n", content));
-            }
-            LlmMessage::System { .. } => {}
-        }
-    }
-    iced::Task::future(async move {
-        let Some(client) = agent::aid_client(&config.base_url) else {
-            return Message::Chat(ChatMsg::AidDone(session_key, None));
-        };
-        let summary = agent::compact_summary(
-            &client,
-            &config.base_url,
-            &config.api_key,
-            &config.model,
-            &transcript,
-        )
-        .await;
-        Message::Chat(ChatMsg::AidDone(session_key, summary))
-    })
-}
-
-
 // ===== run 事件应用 =====
-
-fn on_run_event(app: &mut App, event: RunEvent) -> iced::Task<Message> {
-    // 该通道只承载画布直写 run 的受理失败；存储型会话的展示与落盘由核心插件事件驱动
-    if crate::canvas_chat::node_of_session(event_session(&event)).is_none() {
-        return iced::Task::none();
-    }
-    crate::canvas_chat::on_run_event(app, event)
-}
 
 /// 应用 AI 核心发布的一条对话事件：画布卡会话按直写快照落卡，存储型会话只维护在途集合。
 pub fn on_ai_chat_event(app: &mut App, params: ChatEventParams) -> iced::Task<Message> {
     let session_id = params.session_id.clone();
-    if crate::canvas_chat::node_of_session(&session_id).is_some() {
-        let event = match params.event {
-            ChatEvent::Message { rev, message } => RunEvent::Snapshot {
-                session_id: session_id.clone(),
-                message_id: params.message_id.clone(),
-                message,
-                rev,
-            },
-            ChatEvent::Finished { reason } => RunEvent::Finished {
-                session_id: session_id.clone(),
-                message_id: params.message_id.clone(),
-                reason,
-            },
-            ChatEvent::Failed { error } => RunEvent::Failed {
-                session_id: session_id.clone(),
-                message_id: params.message_id.clone(),
-                error,
-            },
-            ChatEvent::Removed => RunEvent::MessageRemoved {
-                session_id: session_id.clone(),
-                message_id: params.message_id.clone(),
-            },
-            ChatEvent::Titled { .. } => return iced::Task::none(),
-        };
-        return crate::canvas_chat::on_run_event(app, event);
-    }
     // 存储型会话的展示由对话面板插件自理；壳只维护在途集合（压缩 / 停止的互斥判断用）
     match params.event {
         ChatEvent::Message { .. } => {
@@ -1094,20 +813,6 @@ pub fn on_ai_chat_event(app: &mut App, params: ChatEventParams) -> iced::Task<Me
         ChatEvent::Titled { .. } => {}
     }
     iced::Task::none()
-}
-
-fn event_session(event: &RunEvent) -> &str {
-    match event {
-        RunEvent::Started { session_id, .. }
-        | RunEvent::TextDelta { session_id, .. }
-        | RunEvent::ReasoningDelta { session_id, .. }
-        | RunEvent::ToolStart { session_id, .. }
-        | RunEvent::ToolEnd { session_id, .. }
-        | RunEvent::Finished { session_id, .. }
-        | RunEvent::Failed { session_id, .. }
-        | RunEvent::Snapshot { session_id, .. }
-        | RunEvent::MessageRemoved { session_id, .. } => session_id,
-    }
 }
 
 // ===== 插件 AI 契约编排（ai.chat.* 宿主侧） =====
@@ -1131,6 +836,297 @@ pub struct PluginSendPrepared {
 
 /// 插件发起 / 续聊一轮对话：校验（Agent / 模型 / 图片）→ 空间前置 → 会话就位
 /// → user 消息落真源 → 起 run（回执经宿主请求通道异步送达插件，运行事件由核心插件广播）。
+/// 直写发送计划：请求 id 与已校验的参数在空间提示词取回前后传递。
+#[derive(Clone, Debug)]
+pub(crate) struct DirectSendPlan {
+    request_id: u64,
+    params: atelyx_core::plugin_runtime::ChatDirectParams,
+    pick: Option<(String, String)>,
+}
+
+/// 直写发送的模型解析：只认显式给出的（供应商, 模型）对；未给 = 沿用面板当前选择。
+fn direct_model_pick(
+    app: &App,
+    model: Option<&str>,
+    provider_id: Option<&str>,
+) -> Result<Option<(String, String)>, String> {
+    let model = model.filter(|m| !m.is_empty());
+    let provider_id = provider_id.filter(|p| !p.is_empty());
+    match (model, provider_id) {
+        (None, None) => Ok(None),
+        (None, Some(_)) => Err("指定 providerId 时必须同时指定 model".to_string()),
+        (Some(model), None) => {
+            let providers = app.repo_config.providers.as_deref().unwrap_or_default();
+            let mut hits = providers.iter().filter(|p| p.models.iter().any(|m| m.id == model));
+            let Some(provider) = hits.next() else {
+                return Err(format!("模型 {model} 未在供应商配置中"));
+            };
+            if hits.next().is_some() {
+                return Err(format!("模型 {model} 在多个供应商中配置，请指定 providerId"));
+            }
+            Ok(Some((provider.id.clone(), model.to_string())))
+        }
+        (Some(model), Some(provider_id)) => {
+            let providers = app.repo_config.providers.as_deref().unwrap_or_default();
+            let Some(provider) = providers.iter().find(|p| p.id == provider_id) else {
+                return Err(format!("供应商不存在：{provider_id}"));
+            };
+            if !provider.models.iter().any(|m| m.id == model) {
+                return Err(format!("供应商 {provider_id} 未配置模型 {model}"));
+            }
+            Ok(Some((provider_id.to_string(), model.to_string())))
+        }
+    }
+}
+
+/// 推理等级：缺省不改；无法识别 = 拒绝。
+fn apply_effort(config: &mut RunConfig, effort: Option<&str>) -> Result<(), String> {
+    let Some(effort) = effort.filter(|e| !e.is_empty()) else {
+        return Ok(());
+    };
+    config.reasoning_effort = match effort {
+        "off" => None,
+        "low" => Some(atelyx_core::ai::stream::ReasoningEffort::Low),
+        "medium" => Some(atelyx_core::ai::stream::ReasoningEffort::Medium),
+        "high" => Some(atelyx_core::ai::stream::ReasoningEffort::High),
+        other => return Err(format!("推理等级无效：{other}")),
+    };
+    Ok(())
+}
+
+fn agent_prompt_file(app: &App, agent_id: Option<&str>) -> Option<String> {
+    agent_id
+        .filter(|id| !id.is_empty())
+        .and_then(|id| app.agents.iter().find(|a| a.id == id))
+        .and_then(|a| a.system_prompt_file.clone())
+}
+
+/// 直写发送（ai.chat.sendDirect）：校验 → 空间提示词前置 → 起直写 run。
+fn plugin_send_direct(
+    app: &mut App,
+    request_id: u64,
+    params: atelyx_core::plugin_runtime::ChatDirectParams,
+) -> iced::Task<Message> {
+    let deny = |app: &App, reason: String| {
+        app.plugins.resolve_shell_call(request_id, Err(reason));
+    };
+    if params.session_id.trim().is_empty() {
+        deny(app, "会话标识为空".to_string());
+        return iced::Task::none();
+    }
+    if let Some(agent_id) = params.agent_id.as_deref().filter(|id| !id.is_empty()) {
+        if !app.agents.iter().any(|a| a.id == agent_id) {
+            let reason = if app.agents.is_empty() {
+                "Agent 名册尚未读取完成，请稍后重试".to_string()
+            } else {
+                format!("Agent 不存在：{agent_id}")
+            };
+            deny(app, reason);
+            return iced::Task::none();
+        }
+    }
+    let pick = match direct_model_pick(
+        app,
+        params.model.as_deref(),
+        params.provider_id.as_deref(),
+    ) {
+        Ok(pick) => pick,
+        Err(e) => {
+            deny(app, e);
+            return iced::Task::none();
+        }
+    };
+    let plan = DirectSendPlan { request_id, params, pick };
+    let prompt_file = agent_prompt_file(app, plan.params.agent_id.as_deref());
+    if plan.params.space_prompt.is_some() || prompt_file.is_none() {
+        let prompt = plan.params.space_prompt.clone();
+        return direct_send_now(app, plan, prompt);
+    }
+    if !matches!(app.repo_kind, RepoKind::Space(_)) {
+        return direct_send_now(app, plan, None);
+    }
+    let Some(session) = crate::space_actions::session_of(app) else {
+        deny(app, "协作空间未连接".to_string());
+        return iced::Task::none();
+    };
+    let client = session.client.clone();
+    let space_id = session.space_id.clone();
+    let gen = app.epoch();
+    let message_plan = plan.clone();
+    iced::Task::perform(
+        async move {
+            let Some(file) = prompt_file else {
+                return Ok(None);
+            };
+            client
+                .get_file_text(&space_id, &file)
+                .await
+                .map(Some)
+                .map_err(|e| format!("Agent 提示词读取失败（{file}）：{e}"))
+        },
+        move |result| {
+            Message::Chat(ChatMsg::PluginSendDirectReady {
+                gen,
+                plan: Box::new(message_plan.clone()),
+                result,
+            })
+        },
+    )
+}
+
+/// 直写发送第二段：配置就绪后交给 AI 核心插件起 run。
+fn direct_send_now(
+    app: &mut App,
+    plan: DirectSendPlan,
+    space_prompt: Option<String>,
+) -> iced::Task<Message> {
+    let request_id = plan.request_id;
+    let deny = |app: &App, reason: String| {
+        app.plugins.resolve_shell_call(request_id, Err(reason));
+    };
+    let mut config = match resolve_run_config(
+        app,
+        plan.params.agent_id.as_deref(),
+        space_prompt,
+        true,
+        plan.pick.as_ref().map(|(provider, model)| (provider.as_str(), model.as_str())),
+    ) {
+        Ok(config) => config,
+        Err(e) => {
+            deny(app, e);
+            return iced::Task::none();
+        }
+    };
+    if let Err(e) = apply_effort(&mut config, plan.params.effort.as_deref()) {
+        deny(app, e);
+        return iced::Task::none();
+    }
+    let params = atelyx_core::plugin_runtime::RunDirectParams {
+        session_id: plan.params.session_id.clone(),
+        history: plan.params.history.clone(),
+        user_message: plan.params.user_message.clone(),
+        compaction: plan.params.compaction.clone(),
+        config: wire_config(&config),
+    };
+    let params = match serde_json::to_value(params) {
+        Ok(params) => params,
+        Err(e) => {
+            deny(app, format!("运行参数序列化失败：{e}"));
+            return iced::Task::none();
+        }
+    };
+    let runtime = app.plugins.clone();
+    match runtime.call_plugin_timeout(
+        atelyx_core::plugin_runtime::AI_CORE_PLUGIN,
+        atelyx_core::plugin_runtime::ai_run::SERVICE,
+        atelyx_core::plugin_runtime::ai_run::START_DIRECT,
+        params,
+        AUX_CALL_WAIT,
+    ) {
+        Ok(rx) => {
+            std::thread::spawn(move || {
+                let result = rx
+                    .recv()
+                    .unwrap_or_else(|_| Err("AI 核心未返回受理结果".to_string()));
+                runtime.resolve_shell_call(request_id, result.map(|_| json!({})));
+            });
+            iced::Task::none()
+        }
+        Err(e) => {
+            deny(app, e);
+            iced::Task::none()
+        }
+    }
+}
+
+/// 直写压缩（ai.chat.compactDirect）：压缩插件给出的消息，只回摘要。
+fn plugin_compact_direct(
+    app: &mut App,
+    request_id: u64,
+    params: atelyx_core::plugin_runtime::ChatDirectCompactParams,
+) -> iced::Task<Message> {
+    let deny = |app: &App, reason: String| {
+        app.plugins.resolve_shell_call(request_id, Err(reason));
+    };
+    if let Some(agent_id) = params.agent_id.as_deref().filter(|id| !id.is_empty()) {
+        if !app.agents.iter().any(|a| a.id == agent_id) {
+            let reason = if app.agents.is_empty() {
+                "Agent 名册尚未读取完成，请稍后重试".to_string()
+            } else {
+                format!("Agent 不存在：{agent_id}")
+            };
+            deny(app, reason);
+            return iced::Task::none();
+        }
+    }
+    let pick = match direct_model_pick(
+        app,
+        params.model.as_deref(),
+        params.provider_id.as_deref(),
+    ) {
+        Ok(pick) => pick,
+        Err(e) => {
+            deny(app, e);
+            return iced::Task::none();
+        }
+    };
+    let config = match resolve_run_config(
+        app,
+        params.agent_id.as_deref(),
+        None,
+        false,
+        pick.as_ref().map(|(provider, model)| (provider.as_str(), model.as_str())),
+    ) {
+        Ok(config) => config,
+        Err(e) => {
+            deny(app, e);
+            return iced::Task::none();
+        }
+    };
+    let params = atelyx_core::plugin_runtime::RunCompactDirectParams {
+        messages: params.messages,
+        compaction: params.compaction,
+        config: wire_config(&config),
+    };
+    let params = match serde_json::to_value(params) {
+        Ok(params) => params,
+        Err(e) => {
+            deny(app, format!("压缩参数序列化失败：{e}"));
+            return iced::Task::none();
+        }
+    };
+    let runtime = app.plugins.clone();
+    match runtime.call_plugin_timeout(
+        atelyx_core::plugin_runtime::AI_CORE_PLUGIN,
+        atelyx_core::plugin_runtime::ai_run::SERVICE,
+        atelyx_core::plugin_runtime::ai_run::COMPACT_DIRECT,
+        params,
+        AUX_CALL_WAIT,
+    ) {
+        Ok(rx) => {
+            std::thread::spawn(move || {
+                let result = rx
+                    .recv()
+                    .unwrap_or_else(|_| Err("AI 核心未返回压缩结果".to_string()))
+                    .and_then(|value| {
+                        serde_json::from_value::<ChatDirectCompactResult>(value.clone())
+                            .map(|_| value)
+                            .map_err(|e| format!("压缩结果格式不符：{e}"))
+                    });
+                let _ = control_channel().0.send(ChatMsg::PluginCompactDirectDone {
+                    request_id,
+                    result,
+                });
+            });
+            iced::Task::none()
+        }
+        Err(e) => {
+            deny(app, e);
+            iced::Task::none()
+        }
+    }
+}
+
 fn plugin_chat_send(
     app: &mut App,
     request_id: u64,
@@ -1782,13 +1778,7 @@ fn plugin_compact_check(app: &App, session_id: &str) -> Result<(), String> {
 
 /// 当前仍在途的会话（面板插件会话 + 画布卡会话），AI 核心异常收场时补发终态用。
 pub fn in_flight_sessions(app: &App) -> Vec<String> {
-    let mut sessions: Vec<String> = app.chat.streaming.iter().cloned().collect();
-    for session in crate::canvas_chat::streaming_sessions(app) {
-        if !sessions.contains(&session) {
-            sessions.push(session);
-        }
-    }
-    sessions
+    app.chat.streaming.iter().cloned().collect()
 }
 
 #[cfg(test)]
@@ -1855,30 +1845,4 @@ mod tests {
         assert!(plugin_image_entries(&[".atelyx/temp/chats/a.png".to_string()]).is_ok());
     }
 
-    /// 打开中的文件排在候选最前，其余按文件树序追加；同一路径只出现一次，查询同样过滤置顶项。
-    #[test]
-    fn open_files_lead_mention_candidates() {
-        let open = vec!["笔记/甲.md".to_string(), "数据.atb".to_string()];
-        let mut out = Vec::new();
-        seed_open_candidates(&open, "", &mut out);
-        assert_eq!(
-            out,
-            vec![
-                MentionTarget::Vault { rel: "笔记/甲.md".into(), is_dir: false },
-                MentionTarget::Vault { rel: "数据.atb".into(), is_dir: false },
-            ]
-        );
-
-        // 已在列里的路径不重复（文件树递归会再次扫到同一文件）
-        seed_open_candidates(&open, "", &mut out);
-        assert_eq!(out.len(), 2, "已完成列出的路径不再入列");
-
-        // 查询只放过命中的置顶项
-        let mut filtered = Vec::new();
-        seed_open_candidates(&open, "数据", &mut filtered);
-        assert_eq!(
-            filtered,
-            vec![MentionTarget::Vault { rel: "数据.atb".into(), is_dir: false }]
-        );
-    }
 }

@@ -8,7 +8,7 @@ use atelyx_plugin_sdk::frame_ui::{BoxStyle, BoxWidth, Edges, Rect, TextRole, Tex
 use crate::model::{
     BlockInfo, Mode, NoteModel, BODY_SCROLL, EMPTY_EDIT, SOURCE, SOURCE_SCROLL, TITLE,
 };
-use crate::props;
+use atelyx_plugin_props as props;
 
 /// 正文源码行高倍数（与阅读面同一口径）。
 const PROSE_LINE: f32 = 1.625;

@@ -7,9 +7,8 @@
 use std::borrow::Cow;
 
 use iced::alignment::{Horizontal, Vertical};
-use iced::widget::{button, column, container, mouse_area, row, scrollable, space, stack, text_input, Stack};
+use iced::widget::{button, column, container, mouse_area, row, scrollable, space, stack, Stack};
 use iced::{Element, Length, Padding, Point, Rectangle, Size, border, widget::container::Style};
-use serde_json::Value;
 
 use atelyx_core::layout::{self, AppUiState, LayoutNode, TabItem};
 use atelyx_core::plugin_runtime::ContributionSlot;
@@ -97,6 +96,11 @@ fn truncate_to_width(text: &str, max_w: f32, measure: impl Fn(&str) -> f32) -> S
     "…".to_string()
 }
 
+/// 画布视图（插件注册的面板视图 id）。
+pub(crate) fn is_canvas_view(view: &str) -> bool {
+    view == atelyx_core::layout::CANVAS_VIEW
+}
+
 /// 笔记视图（存量布局沿用旧内置 id `note`，与插件文档面 id 同判）。
 fn is_note_view(view: &str) -> bool {
     view == "note" || view == atelyx_core::layout::NOTES_VIEW
@@ -107,7 +111,7 @@ pub fn tab_label(app: &App, view: &str) -> String {
     let open = match view {
         _ if is_note_view(view) => app.ui.last_note_file.as_deref(),
         "table" => app.ui.last_table_file.as_deref(),
-        "canvas" => app.ui.last_canvas_file.as_deref(),
+        v if is_canvas_view(v) => app.ui.last_canvas_file.as_deref(),
         _ => None,
     };
     match open {
@@ -173,18 +177,6 @@ pub(crate) enum PopupState {
     SpaceInvite,
     /// 插件声明的菜单（条目来自插件，宿主渲染与命中，选中后回传）。
     PluginMenu,
-    /// 属性面板类型切换菜单（属性键名）。
-    PropTypeMenu { key: String },
-    /// 画布：卡右键。
-    CanvasCardMenu { node_id: String },
-    /// 画布：分组右键（改色 / 改名 / 收起展开）。
-    CanvasGroupMenu { node_id: String },
-    /// 画布：多选右键（批量删除 / 复制 / 编组）。
-    CanvasMultiMenu,
-    /// 画布：空白右键（粘贴 / 新建分组）。
-    CanvasBlankMenu { x: f64, y: f64 },
-    /// 画布：分组改名（内联输入）。
-    CanvasGroupRename { node_id: String },
     /// 字体选择弹层（界面字体）。
     FontPicker,
     /// 取色器弹层（文件夹图标色、协作展示色、插件取色）。
@@ -199,12 +191,6 @@ pub(crate) enum PopupState {
     PanelItemsMenu { target: String },
     /// 设置-AI：话题命名模型下拉。
     AiModelMenu,
-    /// AI 对话卡：模型 / 推理等级两级菜单（写入卡节点配置）。
-    ChatModelMenu { node: String },
-    /// AI 对话卡：输入区「+」菜单（添加上下文 / 上传附件）。
-    ChatPlusMenu { node: String },
-    /// AI 对话卡：Agent 下拉（缺省「对话」）。
-    ChatAgentMenu { node: String },
     /// 设置-AI：话题自动命名模式。
     AiNamingMenu,
     /// 设置-AI：Agent 系统提示词选择。
@@ -239,21 +225,12 @@ impl PopupState {
             // 成员行带 @username 与角色徽标；邀请码表单含两个数字输入
             PopupState::SpaceMembers => 320.0,
             PopupState::SpaceInvite => 320.0,
-            PopupState::PropTypeMenu { .. } => 128.0,
-            PopupState::CanvasCardMenu { .. } => 144.0,
-            PopupState::CanvasGroupMenu { .. } => 160.0,
-            PopupState::CanvasMultiMenu => 144.0,
-            PopupState::CanvasBlankMenu { .. } => 144.0,
-            PopupState::CanvasGroupRename { .. } => 200.0,
             PopupState::FontPicker => 240.0,
             PopupState::ColorPicker { .. } => crate::ui::color_picker::PANEL_W,
             PopupState::PanelViewMenu { .. } => 120.0,
             PopupState::PanelItemsMenu { .. } => 144.0,
             // AI 设置：模型 id / 笔记名可能较长，给足一行的宽度
             PopupState::AiModelMenu => 224.0,
-            PopupState::ChatModelMenu { .. } => 224.0,
-            PopupState::ChatAgentMenu { .. } => 200.0,
-            PopupState::ChatPlusMenu { .. } => 176.0,
             PopupState::AiNamingMenu => 144.0,
             PopupState::AiAgentPromptMenu => 208.0,
             PopupState::AiProviderDeleteMenu | PopupState::AiAgentDeleteMenu => 208.0,
@@ -1482,7 +1459,7 @@ fn panel_tab<'a>(
     let label = tab_label(app, &t.view);
     let has_file = (is_note_view(&t.view) && app.ui.last_note_file.is_some())
         || (t.view == "table" && app.ui.last_table_file.is_some())
-        || (t.view == "canvas" && app.ui.last_canvas_file.is_some())
+        || (is_canvas_view(&t.view) && app.ui.last_canvas_file.is_some())
         || app
             .doc_open
             .as_ref()
@@ -1673,24 +1650,6 @@ fn disabled_view(app: &App, kind: &str) -> Element<'static, Message> {
     )
 }
 
-/// 属性面板视图：画布正作为激活标签展示（任一窗口前台）= 画布属性区，否则笔记属性
-/// （与编辑器属性区同一组件，改动经同一保存链落盘）。
-pub(crate) fn inspector_view<'a>(app: &'a App, window: iced::window::Id) -> Element<'a, Message> {
-    // 画布属性只在画布处于前台时呈现：其他标签在前台时不得被画布属性顶掉
-    if app.canvas.is_some() && view_displayed(app, "canvas") {
-        return crate::canvas_view::props_panel(app);
-    }
-    if app.ui.last_note_file.is_none() {
-        return controls::view_placeholder(
-            "info",
-            "笔记属性",
-            "打开一篇笔记后在此查看与编辑其属性。",
-        );
-    }
-    crate::properties_view::props_panel(app, window)
-        .unwrap_or_else(|| text("当前笔记无属性").size(pal::fs_caption()).color(pal::TEXT_MUTED).into())
-}
-
 /// 占位视图：大图标 + 名称 + 未实现说明（PanelPlaceholder 同款形态）。
 fn placeholder_view(app: &App, kind: &str) -> Element<'static, Message> {
     let icon_key = view_icon(app, kind);
@@ -1733,7 +1692,7 @@ pub fn detached_view<'a>(
         let label = tab_label(app, &t.view);
         let has_file = (is_note_view(&t.view) && app.ui.last_note_file.is_some())
             || (t.view == "table" && app.ui.last_table_file.is_some())
-            || (t.view == "canvas" && app.ui.last_canvas_file.is_some())
+            || (is_canvas_view(&t.view) && app.ui.last_canvas_file.is_some())
             || app
                 .doc_open
                 .as_ref()
@@ -2230,273 +2189,6 @@ fn popup_element<'a>(
         ],
         PopupState::SpaceMembers => space_members_entries(app),
         PopupState::SpaceInvite => space_invite_entries(app),
-        PopupState::PropTypeMenu { key } => {
-            // 固定顺序六类型；徽章键锁定标签（其余项禁用）
-            use atelyx_core::frontmatter::{infer_type, PropType, Yaml};
-            let row = match app.props.parsed.as_ref() {
-                Some((Yaml::Map(pairs), true)) => pairs.iter().find(|(k, _)| k == key),
-                _ => None,
-            };
-            let badge = row.is_some_and(|(k, _)| crate::properties_view::is_badge_key(k));
-            let current = row.map(|(_, v)| infer_type(badge, v));
-            const TYPES: [(PropType, &str, &str); 6] = [
-                (PropType::Text, "type", "文本"),
-                (PropType::Tag, "tag", "标签"),
-                (PropType::Date, "calendar-days", "日期"),
-                (PropType::Number, "hash", "数字"),
-                (PropType::Boolean, "toggle-left", "布尔"),
-                (PropType::List, "list", "列表"),
-            ];
-            TYPES
-                .iter()
-                .map(|(pt, icon_name, label)| {
-                    // 标签类型只属于 tags：其余键没有 `#` 渲染语义，禁用避免误以为是标签
-                    let locked = if badge { *pt != PropType::Tag } else { *pt == PropType::Tag };
-                    let is_current = current == Some(*pt);
-                    (
-                        0,
-                        MenuEntry::Action {
-                            label: (*label).to_string(),
-                            icon: Some(icon_name.to_string()),
-                            danger: false,
-                            disabled: locked,
-                            on_press: (!locked)
-                                .then(|| Message::Props(crate::properties_view::PropsMsg::ConvertType(key.clone(), *pt))),
-                            note: is_current.then_some("当前"),
-                            hint: locked.then(|| {
-                                if badge { "tags 恒为标签" } else { "仅 tags 属性可用" }.to_string()
-                            }),
-                        },
-                    )
-                })
-                .collect()
-        }
-        PopupState::CanvasCardMenu { node_id } => {
-            let node = app
-                .canvas
-                .as_ref()
-                .and_then(|s| s.data.nodes.iter().find(|n| &n.id == node_id));
-            let mut entries = vec![(
-                0,
-                MenuEntry::action_icon("复制", "copy", canvas_menu(crate::canvas_view::CanvasMenuAction::CopySelection)),
-            )];
-            match node.map(|n| n.node_type.as_str()) {
-                Some("table") | Some("text") => {
-                    if let Some(rel) = node.and_then(|n| n.data.get("file")).and_then(Value::as_str) {
-                        let label = if node.is_some_and(|n| n.node_type == "table") {
-                            "打开表格"
-                        } else {
-                            "打开笔记"
-                        };
-                        entries.push((0, MenuEntry::action_icon(label, "external-link", Message::OpenFile(rel.to_string()))));
-                    }
-                }
-                _ => {}
-            }
-            entries.push((
-                2,
-                MenuEntry::danger("删除", "trash-2", canvas_menu(crate::canvas_view::CanvasMenuAction::DeleteSelection)),
-            ));
-            entries
-        }
-        PopupState::CanvasGroupMenu { node_id } => {
-            let group = app
-                .canvas
-                .as_ref()
-                .and_then(|s| s.data.nodes.iter().find(|n| &n.id == node_id));
-            let collapsed = group
-                .and_then(|n| n.data.get("collapsed"))
-                .and_then(Value::as_bool)
-                == Some(true);
-            let current = group
-                .and_then(|n| n.data.get("color"))
-                .and_then(Value::as_str)
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(0);
-            let mut entries = vec![
-                (
-                    0,
-                    MenuEntry::Submenu {
-                        label: "颜色".into(),
-                        icon: Some("palette".into()),
-                        disabled: false,
-                        pane: 1,
-                    },
-                ),
-                (
-                    0,
-                    MenuEntry::action_icon(
-                        "重命名",
-                        "pencil",
-                        canvas_menu(crate::canvas_view::CanvasMenuAction::GroupRenameStart { node: node_id.clone() }),
-                    ),
-                ),
-                (
-                    0,
-                    MenuEntry::action_icon(
-                        if collapsed { "展开" } else { "收起" },
-                        if collapsed { "chevrons-up-down" } else { "chevrons-down-up" },
-                        canvas_menu(crate::canvas_view::CanvasMenuAction::ToggleCollapse { node: node_id.clone() }),
-                    ),
-                ),
-                (
-                    2,
-                    // 删组只删容器：成员卡保留（成员判定是空间关系）
-                    MenuEntry::danger("删除分组", "trash-2", canvas_menu(crate::canvas_view::CanvasMenuAction::DeleteSelection)),
-                ),
-            ];
-            // 颜色子面板（pane 1）：色板行 + 当前色角标
-            for (i, color) in crate::ui::palette::CANVAS_GROUP_COLORS.iter().enumerate() {
-                let idx = i + 1;
-                let swatch = container(space().width(12.0).height(12.0)).style(move |_| {
-                    iced::widget::container::Style {
-                        background: Some((*color).into()),
-                        border: iced::border::rounded(3.0).color(crate::ui::palette::BORDER),
-                        ..Default::default()
-                    }
-                });
-                entries.push((
-                    1,
-                    MenuEntry::Custom(
-                        iced::widget::button(
-                            row![
-                                swatch,
-                                text(if idx == current {
-                                    format!("色 {idx}（当前）")
-                                } else {
-                                    format!("色 {idx}")
-                                })
-                                .size(pal::fs_caption()),
-                            ]
-                                .spacing(8)
-                                .align_y(iced::alignment::Vertical::Center),
-                        )
-                        .padding(Padding::ZERO.horizontal(12.0).vertical(5.0))
-                        .width(Length::Fill)
-                        .style(|t, s| controls::row_style(false, pal::RADIUS_SM)(t, s))
-                        .on_press(canvas_menu(crate::canvas_view::CanvasMenuAction::GroupColor {
-                            node: node_id.clone(),
-                            index: idx,
-                        }))
-                        .into(),
-                        28.0,
-                    ),
-                ));
-            }
-            entries
-        }
-        PopupState::CanvasMultiMenu => vec![
-            (
-                0,
-                MenuEntry::action_icon("复制", "copy", canvas_menu(crate::canvas_view::CanvasMenuAction::CopySelection)),
-            ),
-            (
-                0,
-                MenuEntry::action_icon(
-                    "创建分组",
-                    "layers",
-                    canvas_menu(crate::canvas_view::CanvasMenuAction::CreateGroupFromSelection),
-                ),
-            ),
-            (
-                2,
-                MenuEntry::danger("删除", "trash-2", canvas_menu(crate::canvas_view::CanvasMenuAction::DeleteSelection)),
-            ),
-        ],
-        PopupState::CanvasBlankMenu { x, y } => {
-            let mut entries = vec![
-                (
-                    0,
-                    MenuEntry::action_icon(
-                        "新建对话卡",
-                        "message-square",
-                        canvas_menu(crate::canvas_view::CanvasMenuAction::CreateConversationAt {
-                            x: *x,
-                            y: *y,
-                        }),
-                    ),
-                ),
-                (
-                    0,
-                    MenuEntry::action_icon(
-                        "新建文本卡",
-                        "align-left",
-                        canvas_menu(crate::canvas_view::CanvasMenuAction::CreateTextAt {
-                            x: *x,
-                            y: *y,
-                        }),
-                    ),
-                ),
-                (
-                    0,
-                    MenuEntry::action_icon(
-                        "新建分组",
-                        "layers",
-                        canvas_menu(crate::canvas_view::CanvasMenuAction::CreateGroupAt { x: *x, y: *y }),
-                    ),
-                ),
-            ];
-            // 右键空白不清选中：有选中时提供复制（与卡菜单 / Ctrl+C 同剪贴板口径，可跨画布粘贴）
-            if app.canvas.as_ref().is_some_and(|s| !s.view.selection.is_empty()) {
-                entries.push((
-                    0,
-                    MenuEntry::action_icon(
-                        "复制",
-                        "copy",
-                        canvas_menu(crate::canvas_view::CanvasMenuAction::CopySelection),
-                    ),
-                ));
-            }
-            entries.push((
-                0,
-                MenuEntry::action_icon(
-                    "粘贴",
-                    "clipboard-paste",
-                    canvas_menu(crate::canvas_view::CanvasMenuAction::Paste),
-                ),
-            ));
-            entries
-        }
-        PopupState::CanvasGroupRename { node_id } => {
-            let current = app
-                .canvas
-                .as_ref()
-                .and_then(|s| s.data.nodes.iter().find(|n| &n.id == node_id))
-                .and_then(|n| n.data.get("label"))
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            let draft = app
-                .canvas
-                .as_ref()
-                .and_then(|s| s.view.group_rename.as_ref())
-                .filter(|(id, _)| id == node_id)
-                .map(|(_, d)| d.clone())
-                .unwrap_or_else(|| current.clone());
-            vec![
-                (0, MenuEntry::Custom(canvas_rename_input(&draft), 30.0)),
-                (
-                    0,
-                    MenuEntry::action(
-                        "重命名",
-                        canvas_menu(crate::canvas_view::CanvasMenuAction::GroupRenameCommit {
-                            node: node_id.clone(),
-                            name: draft,
-                        }),
-                    ),
-                ),
-                (
-                    0,
-                    MenuEntry::Custom(
-                        popup_hint(&format!(
-                            "当前：{}",
-                            if current.is_empty() { "（未命名）" } else { current.as_str() }
-                        )),
-                        18.0,
-                    ),
-                ),
-            ]
-        }
         PopupState::FontPicker => font_picker_entries(app, window),
         PopupState::ColorPicker { target, hsv, hex } => {
             let (panel, height) = crate::color_picker_actions::panel(app, target, *hsv, hex);
@@ -2570,118 +2262,6 @@ fn popup_element<'a>(
                 entries.push((0, MenuEntry::Custom(popup_hint("先在「供应商」添加模型"), 18.0)));
             }
             entries
-        }
-        PopupState::ChatAgentMenu { node } => {
-            // 未选过 = 内置「对话」生效；名册由装载时种子补齐，恒含「对话」
-            let current = card_agent_id(app, node)
-                .unwrap_or_else(|| atelyx_core::vault::BUILTIN_AGENT_CHAT_ID.to_string());
-            let pick = |id: String| {
-                Message::Canvas(crate::canvas_view::CanvasMsg::Chat(
-                    crate::canvas_chat::CanvasChatMsg::AgentPick {
-                        node: node.clone(),
-                        agent: Some(id),
-                    },
-                ))
-            };
-            let mut entries: Vec<(usize, MenuEntry<Message>)> = Vec::new();
-            for agent in &app.agents {
-                let press = pick(agent.id.clone());
-                entries.push((
-                    0,
-                    if current == agent.id {
-                        MenuEntry::Checked { label: agent.name.clone(), on_press: press }
-                    } else {
-                        MenuEntry::action(agent.name.clone(), press)
-                    },
-                ));
-            }
-            entries
-        }
-        PopupState::ChatPlusMenu { node } => {
-            let add_ctx = Message::Canvas(crate::canvas_view::CanvasMsg::Chat(
-                crate::canvas_chat::CanvasChatMsg::TriggerMention(node.clone()),
-            ));
-            let upload = Message::Canvas(crate::canvas_view::CanvasMsg::Chat(
-                crate::canvas_chat::CanvasChatMsg::PickFiles(node.clone()),
-            ));
-            vec![
-                (0, MenuEntry::action("添加上下文", add_ctx)),
-                (0, MenuEntry::action("上传附件", upload)),
-            ]
-        }
-        PopupState::ChatModelMenu { node } => {
-            // 两级菜单（pane 0 根 / 1 模型 / 2 推理等级）：模型与等级为正交覆盖。
-            // 条目元组首元素是 pane 归属标签，pane_view 按当前 pane 过滤——必须与所在面板同值
-            match pane {
-                2 => {
-                    let (current, pick): (
-                        Option<String>,
-                        Box<dyn Fn(Option<String>) -> Message>,
-                    ) = {
-                        let node = node.clone();
-                        (
-                            card_effort(app, &node),
-                            Box::new(move |v: Option<String>| {
-                                Message::Canvas(crate::canvas_view::CanvasMsg::Chat(
-                                    crate::canvas_chat::CanvasChatMsg::EffortPick {
-                                        node: node.clone(),
-                                        effort: v,
-                                    },
-                                ))
-                            }),
-                        )
-                    };
-                    [
-                        (None, "默认"),
-                        (Some("off".to_string()), "关闭"),
-                        (Some("low".to_string()), "低"),
-                        (Some("medium".to_string()), "中"),
-                        (Some("high".to_string()), "高"),
-                    ]
-                    .into_iter()
-                    .map(|(value, label)| {
-                        let pick = pick(value.clone());
-                        let is_current = current == value;
-                        (
-                            2,
-                            if is_current {
-                                MenuEntry::Checked { label: label.into(), on_press: pick }
-                            } else {
-                                MenuEntry::action(label, pick)
-                            },
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                }
-                1 => canvas_card_model_entries(app, node)
-                    .into_iter()
-                    .map(|(_, e)| (1, e))
-                    .collect(),
-                _ => {
-                    let model_label = canvas_card_model_label(app, node);
-                    let effort_label = canvas_card_effort_label(app, node);
-                    vec![
-                        (
-                            0,
-                            MenuEntry::Submenu {
-                                label: format!("模型：{model_label}"),
-                                icon: None,
-                                disabled: false,
-                                pane: 1,
-                            },
-                        ),
-                        (
-                            0,
-                            MenuEntry::Submenu {
-                                label: format!("推理等级：{effort_label}"),
-                                icon: None,
-                                disabled: false,
-                                pane: 2,
-                            },
-                        ),
-                    ]
-                }
-            }
         }
         PopupState::AiNamingMenu => {
             let mode = ai::naming_mode(app);
@@ -2778,22 +2358,6 @@ fn popup_element<'a>(
     crate::ui::menu::pane_view(entries, pane, window)
 }
 
-/// 画布右键菜单动作消息。
-fn canvas_menu(action: crate::canvas_view::CanvasMenuAction) -> Message {
-    Message::Canvas(crate::canvas_view::CanvasMsg::Menu(action))
-}
-
-/// 画布分组改名输入（提交由菜单项动作携带草稿；每次渲染重建携带最新草稿）。
-fn canvas_rename_input(draft: &str) -> Element<'static, Message> {
-    text_input("分组名称", draft)
-        .size(pal::fs_caption())
-        .font(crate::ui::regular())
-        .padding(Padding::ZERO.horizontal(12.0).vertical(6.0))
-        .on_input(|v| Message::Canvas(crate::canvas_view::CanvasMsg::GroupRenameDraft(v)))
-        .style(|_theme, status| controls::form_input_style(status))
-        .into()
-}
-
 /// 菜单搜索行高度（px）：字体弹层与插件声明搜索的菜单共用。
 const MENU_SEARCH_H: f32 = 30.0;
 
@@ -2810,162 +2374,6 @@ fn popup_text_input(
         .on_input(on_input)
         .style(|_theme, status| controls::form_input_style(status))
         .into()
-}
-
-/// 画布卡当前生效模型显示名：卡指定优先，回落仓库默认模型；未配置 = 提示文案。
-pub(crate) fn canvas_card_model_label(app: &App, node_id: &str) -> String {
-    match card_model_pick(app, node_id) {
-        Some((pid, model)) => model_pick_label(app, &pid, &model),
-        None => "选择模型".to_string(),
-    }
-}
-
-/// 卡模型选择：节点 `providerId` + `model` 成对有效优先，回落仓库默认模型。
-fn card_model_pick(app: &App, node_id: &str) -> Option<(String, String)> {
-    let specified = app
-        .canvas
-        .as_ref()
-        .and_then(|s| s.data.nodes.iter().find(|n| n.id == node_id))
-        .and_then(|n| match (
-            n.data.get("providerId").and_then(serde_json::Value::as_str),
-            n.data.get("model").and_then(serde_json::Value::as_str),
-        ) {
-            (Some(p), Some(m)) if !p.is_empty() && !m.is_empty() => {
-                Some((p.to_string(), m.to_string()))
-            }
-            _ => None,
-        });
-    specified.or_else(|| match (&app.repo_config.model, &app.repo_config.model_provider_id) {
-        (Some(m), Some(p)) => Some((p.clone(), m.clone())),
-        _ => None,
-    })
-}
-
-/// 模型显示名（昵称；同名模型跨供应商时带供应商名消歧，供应商已删回落 id）。
-fn model_pick_label(app: &App, pid: &str, model: &str) -> String {
-    // 昵称取自所指向的供应商（同名模型跨供应商昵称可能不同）
-    let display = app
-        .repo_config
-        .providers
-        .iter()
-        .flatten()
-        .find(|p| p.id == pid)
-        .and_then(|p| p.models.iter().find(|m| m.id == model).map(model_display))
-        .unwrap_or_else(|| model.to_string());
-    // 同名模型跨供应商时带供应商名消歧
-    let ambiguous = app
-        .repo_config
-        .providers
-        .iter()
-        .flatten()
-        .any(|p| p.id != pid && p.models.iter().any(|m| m.id == model));
-    if ambiguous {
-        let provider_name = app
-            .repo_config
-            .providers
-            .iter()
-            .flatten()
-            .find(|p| p.id == pid)
-            .map(|p| p.name.clone())
-            .unwrap_or_else(|| pid.to_string());
-        format!("{provider_name} · {display}")
-    } else {
-        display
-    }
-}
-
-/// 画布卡推理等级显示名（节点 `data.reasoningEffort`；未设 = 默认）。
-pub(crate) fn canvas_card_effort_label(app: &App, node_id: &str) -> &'static str {
-    effort_label(card_effort(app, node_id).as_deref())
-}
-
-/// 推理等级线格式 → 显示名。
-fn effort_label(effort: Option<&str>) -> &'static str {
-    match effort {
-        Some("off") => "关闭",
-        Some("low") => "低",
-        Some("medium") => "中",
-        Some("high") => "高",
-        _ => "默认",
-    }
-}
-
-/// 卡节点 Agent id（`data.agentId`）。
-fn card_agent_id(app: &App, node_id: &str) -> Option<String> {
-    app.canvas
-        .as_ref()
-        .and_then(|s| s.data.nodes.iter().find(|n| n.id == node_id))
-        .and_then(|n| n.data.get("agentId").and_then(serde_json::Value::as_str))
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-}
-
-/// 卡节点推理等级（线格式；未设 = None）。
-fn card_effort(app: &App, node_id: &str) -> Option<String> {
-    app.canvas
-        .as_ref()
-        .and_then(|s| s.data.nodes.iter().find(|n| n.id == node_id))
-        .and_then(|n| {
-            n.data
-                .get("reasoningEffort")
-                .and_then(serde_json::Value::as_str)
-        })
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-}
-
-/// 卡模型子面板条目：跟随默认（卡有指定时）+ 按供应商分组的模型清单。
-fn canvas_card_model_entries(app: &App, node_id: &str) -> Vec<(usize, MenuEntry<'static, Message>)> {
-    use crate::canvas_chat::CanvasChatMsg;
-    use crate::canvas_view::CanvasMsg;
-    let pick = |p: String, m: String| {
-        Message::Canvas(CanvasMsg::Chat(CanvasChatMsg::ModelPick {
-            node: node_id.to_string(),
-            pick: Some((p, m)),
-        }))
-    };
-    let current = card_model_pick(app, node_id);
-    // 卡已指定模型时提供「跟随默认」（移除节点级指定）
-    let card_has_model = app
-        .canvas
-        .as_ref()
-        .and_then(|s| s.data.nodes.iter().find(|n| n.id == node_id))
-        .is_some_and(|n| {
-            n.data.get("model").and_then(serde_json::Value::as_str).is_some_and(|m| !m.is_empty())
-        });
-    let mut entries: Vec<(usize, MenuEntry<'static, Message>)> = Vec::new();
-    if card_has_model {
-        entries.push((
-            0,
-            MenuEntry::action(
-                "跟随默认",
-                Message::Canvas(CanvasMsg::Chat(CanvasChatMsg::ModelPick {
-                    node: node_id.to_string(),
-                    pick: None,
-                })),
-            ),
-        ));
-    }
-    for p in app.repo_config.providers.iter().flatten() {
-        if p.models.is_empty() {
-            continue;
-        }
-        entries.push((0, MenuEntry::Group(p.name.clone())));
-        for m in &p.models {
-            let is_current =
-                current.as_ref().is_some_and(|(provider, model)| provider == &p.id && model == &m.id);
-            let press = pick(p.id.clone(), m.id.clone());
-            entries.push((0, if is_current {
-                MenuEntry::Checked { label: model_display(m), on_press: press }
-            } else {
-                MenuEntry::action(model_display(m), press)
-            }));
-        }
-    }
-    if entries.len() == usize::from(card_has_model) {
-        entries.push((0, MenuEntry::Custom(popup_hint("先在「供应商」添加模型"), 18.0)));
-    }
-    entries
 }
 
 /// 字体选择弹层条目：过滤输入 + 复位项 + 命中族清单（清单定高，超出走内滚动）。
@@ -4183,7 +3591,7 @@ fn window_shows_view(app: &App, window: iced::window::Id, view: &str) -> bool {
 
 /// 窗口当前活动视图是否为画布（画布键盘命令的作用域判定用）。
 pub fn window_shows_canvas(app: &App, window: iced::window::Id) -> bool {
-    window_shows_view(app, window, "canvas")
+    window_shows_view(app, window, atelyx_core::layout::CANVAS_VIEW)
 }
 
 /// 枚举全部窗口的可停靠面板矩形（拖拽会话期间位置尺寸视为稳定）。
@@ -4232,7 +3640,7 @@ pub fn panel_zones(app: &App) -> Vec<PanelZone> {
                                 t.locked,
                                 (is_note_view(&t.view) && app.ui.last_note_file.is_some())
                                     || (t.view == "table" && app.ui.last_table_file.is_some())
-                                    || (t.view == "canvas" && app.ui.last_canvas_file.is_some()),
+                                    || (is_canvas_view(&t.view) && app.ui.last_canvas_file.is_some()),
                             )
                         })
                         .collect()
@@ -4268,7 +3676,7 @@ fn walk_panels(node: &LayoutNode, area: Rectangle, out: &mut Vec<PanelZone>, app
                         t.locked,
                         (is_note_view(&t.view) && app.ui.last_note_file.is_some())
                             || (t.view == "table" && app.ui.last_table_file.is_some())
-                            || (t.view == "canvas" && app.ui.last_canvas_file.is_some()),
+                            || (is_canvas_view(&t.view) && app.ui.last_canvas_file.is_some()),
                     )
                 })
                 .collect(),

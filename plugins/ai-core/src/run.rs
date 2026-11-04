@@ -1342,29 +1342,7 @@ pub async fn compact(
     if record.messages.len() < 2 {
         return Err("对话内容太少，无需压缩".to_string());
     }
-    let mut transcript = String::new();
-    for message in history_to_llm_messages(&record.messages, record.compaction.as_ref()) {
-        match message {
-            LlmMessage::User { parts, .. } => {
-                transcript.push_str(&format!("用户：{}\n\n", parts.join("\n")));
-            }
-            LlmMessage::Assistant { content, tool_calls } => {
-                let body = match content {
-                    Some(content) if !content.is_empty() => content,
-                    _ if !tool_calls.is_empty() => format!(
-                        "（调用工具 {}）",
-                        tool_calls.iter().map(|call| call.name.as_str()).collect::<Vec<_>>().join("、")
-                    ),
-                    _ => String::new(),
-                };
-                transcript.push_str(&format!("助手：{body}\n\n"));
-            }
-            LlmMessage::Tool { content, .. } => {
-                transcript.push_str(&format!("工具结果：{content}\n\n"));
-            }
-            LlmMessage::System { .. } => {}
-        }
-    }
+    let transcript = transcript_of(&record.messages, record.compaction.as_ref());
     let summary = aux_text(
         ctx,
         hub,
@@ -1399,6 +1377,59 @@ pub async fn compact(
         .await
         .map_err(|error| format!("压缩摘要写入失败：{error}"))?;
     Ok(json!({}))
+}
+
+/// 压缩一段调用方给出的消息：只回摘要，不读写会话记录。
+pub async fn compact_direct(
+    ctx: &Context,
+    hub: &Arc<RunHub>,
+    messages: &[Value],
+    compaction: Option<&Value>,
+    config: &RunConfigWire,
+) -> Result<Value, String> {
+    validate_config(config)?;
+    if messages.len() < 2 {
+        return Err("对话内容太少，无需压缩".to_string());
+    }
+    let transcript = transcript_of(messages, compaction);
+    let summary = aux_text(
+        ctx,
+        hub,
+        config,
+        "你负责压缩对话历史。输出结构化检查点：会话主题 / 已完成 / 关键决策 / 产出文件 / 待办 / 当前状态。只输出检查点本身。",
+        &format!("压缩以下对话历史：\n\n{transcript}"),
+        2048,
+    )
+    .await?;
+    Ok(json!({ "summary": summary }))
+}
+
+/// 把消息转成压缩用的纯文本记录：工具调用与结果也进入记录，避免摘要丢掉执行事实。
+fn transcript_of(messages: &[Value], compaction: Option<&Value>) -> String {
+    let mut transcript = String::new();
+    for message in history_to_llm_messages(messages, compaction) {
+        match message {
+            LlmMessage::User { parts, .. } => {
+                transcript.push_str(&format!("用户：{}\n\n", parts.join("\n")));
+            }
+            LlmMessage::Assistant { content, tool_calls } => {
+                let body = match content {
+                    Some(content) if !content.is_empty() => content,
+                    _ if !tool_calls.is_empty() => format!(
+                        "（调用工具 {}）",
+                        tool_calls.iter().map(|call| call.name.as_str()).collect::<Vec<_>>().join("、")
+                    ),
+                    _ => String::new(),
+                };
+                transcript.push_str(&format!("助手：{body}\n\n"));
+            }
+            LlmMessage::Tool { content, .. } => {
+                transcript.push_str(&format!("工具结果：{content}\n\n"));
+            }
+            LlmMessage::System { .. } => {}
+        }
+    }
+    transcript
 }
 
 pub async fn retitle(

@@ -1,0 +1,14 @@
+{
+  "id": "atelyx.canvas",
+  "name": "画布",
+  "version": "0.1.0",
+  "apiVersion": 1,
+  "abiVersion": 1,
+  "entry": {
+    "windows": "atelyx_plugin_canvas.dll",
+    "linux": "libatelyx_plugin_canvas.so"
+  },
+  "permissions": ["vault", "collab", "fs", "dialog", "clipboard", "notification", "ai"],
+  "singleton": true,
+  "keepMountedOnVaultSwitch": false
+}

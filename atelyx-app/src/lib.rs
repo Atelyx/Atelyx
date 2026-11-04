@@ -7,21 +7,13 @@
 //! 进程入口在 `main.rs`，只调 [`run`]。
 
 mod autostart;
-mod canvas_actions;
-mod canvas_chat;
-mod canvas_view;
 mod chat_actions;
-mod chat_composer;
-mod chat_input;
-mod chat_stream;
 mod app_icon;
 mod color_picker_actions;
 mod commands;
 mod history_browser;
 mod image_clipboard;
 mod layout_view;
-mod markdown_edit;
-mod markdown_view;
 mod pack;
 mod plugin_actions;
 mod doc_session;
@@ -31,16 +23,13 @@ mod plugin_frame;
 mod plugin_overlay;
 mod plugin_paint;
 mod plugin_view;
-mod properties_view;
 mod recent_files;
 mod registry;
 mod repo_history;
 mod settings_view;
 mod space_actions;
 mod doc_presence;
-mod canvas_collab;
 mod table_panel;
-mod text_preedit;
 mod tray;
 pub use atelyx_ui as ui;
 mod update;
@@ -67,7 +56,6 @@ use iced::widget::space;
 use iced::window::{self, Level, Mode, Position, Settings};
 use iced::{keyboard, mouse, Element, Event, Point, Size, Subscription, Task, Theme};
 
-use properties_view::{PropsMsg, PropsPanel};
 use ui::notify::{Level as NoticeLevel, Notification, Progress as NoticeProgress};
 
 use layout_view::{
@@ -288,14 +276,6 @@ pub(crate) fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// 当前 unix 毫秒（对话卡编辑锁的 since 取值）。
-pub(crate) fn now_millis() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
-}
-
 /// 命令候选键形态：Ctrl/Cmd + 单字符（撤销/重做/剪贴板类），或命名键（任意修饰，
 /// 覆盖 NoMod 清空类与其余注册表键位）。全局订阅不持 App 状态，是否命中与消费
 /// 由处理器按录制态与作用域焦点自守卫。
@@ -305,7 +285,6 @@ pub(crate) fn now_millis() -> i64 {
 fn is_host_keyboard_message(message: &Message) -> bool {
     match message {
         Message::NavKey(..) | Message::Escape(_) => true,
-        Message::Props(properties_view::PropsMsg::CommitMove(_)) => true,
         _ => false,
     }
 }
@@ -383,6 +362,14 @@ pub(crate) struct PendingTableRestore {
     pub gen: u64,
 }
 
+/// 画布回滚待结算：与表格同构——先交回快照给插件，落盘收敛后再记 restore 版本。
+pub(crate) struct PendingCanvasRestore {
+    pub rel: String,
+    pub content: String,
+    pub space: bool,
+    pub gen: u64,
+}
+
 /// 面板落盘请求的等待上限：插件无响应时撤回请求并提示，不让脏拦截永久挂起。
 const PANEL_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -405,7 +392,6 @@ enum Message {
     SelectVault { path: PathBuf, from_boot: bool },
     /// gen = 发起任务时的仓库世代；回调落地前与当前世代比对，过期即丢弃。
     ChildrenLoaded(String, u64, Result<Vec<vault::DirChild>, String>),
-    OpenFile(String),
     Save,
     /// 携带保存发起时冻结的内容与保存动机：落地后与当前正文比对，区分保存完成与在途新编辑。
     Saved(u64, String, String, SaveReason, Result<(), String>),
@@ -413,8 +399,6 @@ enum Message {
     AutosaveTick,
     /// Ctrl/Cmd+C 未被输入部件捕获时回落到命令路由。
     CopyKey { key: keyboard::Key, mods: keyboard::Modifiers },
-    /// 属性面板消息（frontmatter 类型化编辑）。
-    Props(PropsMsg),
     /// 标签词汇表落地（gen 守卫）。
     TagVocabLoaded(u64, Result<Vec<vault::TagRow>, String>),
     /// 全仓库文件清单落地（`vault.files` 数据源；gen 守卫）。
@@ -426,7 +410,6 @@ enum Message {
     /// 历史记录弹层（打开 / 展开预览 / 回滚二段确认）。
     History(history_browser::HistoryBrowserMsg),
     /// 画布回滚写盘回执（gen 守卫；失败提示不阻塞）。
-    CanvasHistoryRestored(u64, String, Result<(), String>),
     /// 重建内部链接（设置-编辑器：二段确认 / 队列执行 / 回执）。
     RebuildLinks(settings_view::editor::RebuildLinksMsg),
     /// 历史记录/回滚落盘完成 → 重读版本列表。
@@ -445,6 +428,7 @@ enum Message {
     PanelFlushTimeout(u64),
     /// 历史回滚交回插件后延迟一拍请求落盘：等插件把新的脏头部送到宿主。
     TableRestoreFlush,
+    CanvasRestoreFlush,
     /// 模态插件浮层期间点了被它盖住的面板头部：转成「按在浮层外」交给插件收起。
     PluginPopupDismiss { window: window::Id },
     /// 打开面板头部的「视图」下拉（宿主按贡献槽列出可切换的视图）。
@@ -476,7 +460,6 @@ enum Message {
 
 
     /// 复制代码块正文到系统剪贴板。
-    CopyCode(String),
     PanelTab(String, String),
     /// 空面板右键添加视图。
     PanelAddView { panel_id: String, view: String },
@@ -535,7 +518,6 @@ enum Message {
     Release,
     /// ui 层消息（悬停提示 / 弹层关闭与面板导航 / 通知关闭）。
     Ui(ui::UiMsg<Message>),
-    Canvas(canvas_view::CanvasMsg),
     /// 键盘修饰态（Ctrl+滚轮缩放 / Shift+滚轮横滚判定源）。
     ModsChanged(keyboard::Modifiers),
     /// 标题栏空白区按下：拖拽窗口 / 双击最大化。
@@ -1069,19 +1051,8 @@ pub enum SpaceMsg {
         reason: SaveReason,
         result: Result<String, String>,
     },
-    /// 空间画布补丁回执（new_file = 补丁落地后的实际路径；带 title 的补丁会改名）。
-    CanvasPatchDone {
-        gen: u64,
-        file: String,
-        new_file: String,
-        reason: canvas_view::SaveReason,
-        result: Result<String, String>,
-        frozen: atelyx_core::vault::CanvasFile,
-    },
     /// 文件夹确认删除（needsConfirm 二段式的 force 步）。
     HistoryRecorded { err: Option<String> },
-    /// 画布回滚回执（成功且该画布仍打开则按服务端事实重读）。
-    CanvasRestored { gen: u64, rel: String, result: Result<(), String> },
     /// 设备会话列表落地（设置页「多人协作」）。
     DevicesLoaded {
         result: Result<Vec<atelyx_core::space_client::DeviceEntry>, atelyx_core::space_client::SpaceError>,
@@ -1183,6 +1154,21 @@ impl ImageRetry {
     }
 }
 
+/// 滚轮行增量折算成像素的系数（插件帧输入与自绘视图同口径）。
+pub(crate) const WHEEL_LINE_PX: f32 = 40.0;
+
+/// 插件面图片缓存键 → 已解码图柄。
+pub type ImageHandles = HashMap<String, iced::widget::image::Handle>;
+
+/// 图片字节的固有像素尺寸（解码失败 = 0×0，调用方按「尺寸未知」处理）。
+pub(crate) fn image_dimensions(bytes: &[u8]) -> (u32, u32) {
+    image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()
+        .and_then(|r| r.into_dimensions().ok())
+        .unwrap_or((0, 0))
+}
+
 pub struct App {
     /// 布局状态真源（core 模型；磁盘格式由 schema 版本标识）。
     pub ui: AppUiState,
@@ -1190,10 +1176,8 @@ pub struct App {
     /// 启动装配期与投影刷新时整体重建，运行期只读。
     pub registry: crate::registry::Registry,
     vault: Arc<vault::VaultState>,
-    /// 画布会话（None = 未打开）。
-    pub canvas: Option<canvas_view::CanvasSession>,
-    /// 画布实时在场（选中 / 对话卡锁 / 流式上行 + 远端条目；None = 不在任何画布上）。
-    pub canvas_collab: Option<canvas_collab::CanvasCollab>,
+    /// 本轮 flush 是否还需画布插件确认：插件脏标记异步到达，打开画布时一律先落盘再放行动作。
+    pub(crate) canvas_flush_pending: bool,
     /// flush 放行后待续的动作（笔记 / 表格 / 画布任一脏时挂起，全部落盘后执行）。
     pub(crate) flush_pending: Option<PendingAfterFlush>,
     /// 插件声明的面板头部状态（按面板视图 id）：宿主按它渲染那一行工具条。
@@ -1204,6 +1188,9 @@ pub struct App {
     pub(crate) pending_panel_flush: Option<PendingPanelFlush>,
     /// 历史回滚待结算：内容已交回插件，等它的落盘回执后才记 restore 版本并报成功。
     pub(crate) pending_table_restore: Option<PendingTableRestore>,
+    pub(crate) pending_canvas_restore: Option<PendingCanvasRestore>,
+    /// 画布视图是否展示在前台（后台标签页不算）；变化时才广播给插件。
+    pub(crate) canvas_displayed: bool,
     /// 当前展开的模态插件浮层（插件 id + 面 id）：其覆盖区的点击不再落到宿主控件。
     pub(crate) plugin_modal: Option<(String, String)>,
     panel_flush_seq: u64,
@@ -1382,8 +1369,6 @@ pub struct App {
     pub children: HashMap<String, Vec<vault::DirChild>>,
     /// note 正文真相（与磁盘逐字节一致；插件笔记面与画布 / 表格的文本数据源）。
     pub doc_text: String,
-    /// 属性面板（frontmatter 类型化渲染与槽位编辑）。
-    pub props: PropsPanel,
     pub doc_dirty: bool,
     /// 上次保存失败原因（None = 无；保存成功或再次编辑即清除）。
     pub doc_save_error: Option<String>,
@@ -1402,10 +1387,11 @@ pub struct App {
     /// 连同「是否让对应视图显示」的语义一起挂起，就绪后按原样重试。
     pending_doc_open: Option<(String, bool)>,
     /// 笔记 / 画布 / 插件图片句柄缓存（key = src 原文；切仓库清空，在途与失败集合防重复发起）。
-    pub note_images: markdown_view::ImageHandles,
-    /// 图片像素尺寸（key 同 `note_images`）：自绘画布按 contain / cover 摆放贴片要用原图长宽。
+    pub note_images: ImageHandles,
+    /// 图片像素尺寸（key 同 `note_images`）：自绘贴片按 contain / cover 摆放要用原图长宽。
     pub note_image_sizes: HashMap<String, (u32, u32)>,
-    /// 图片句柄代数：句柄入表或整表清空即自增，自绘画布据此作废已缓存的几何。
+
+    /// 图片句柄代数：句柄入表或整表清空即自增，自绘贴片据此作废已缓存的几何。
     pub note_image_epoch: u64,
     note_images_inflight: HashSet<String>,
     note_images_failed: HashMap<String, ImageRetry>,
@@ -1669,7 +1655,6 @@ impl App {
                 os_shown: HashMap::new(),
                 children: HashMap::new(),
                 doc_text: String::new(),
-                props: PropsPanel::default(),
                 doc_dirty: false,
                 doc_save_error: None,
                 autosave_deadline: None,
@@ -1678,9 +1663,11 @@ impl App {
                 doc_selection: None,
                 doc_base: None,
                 pending_doc_open: None,
-                note_images: markdown_view::ImageHandles::new(),
+                note_images: ImageHandles::new(),
                 note_image_sizes: HashMap::new(),
                 note_image_epoch: 0,
+
+
                 note_images_inflight: HashSet::new(),
                 note_images_failed: HashMap::new(),
                 file_sort: "mtime-desc".to_string(),
@@ -1731,13 +1718,14 @@ impl App {
                 recent_checked_at: None,
                 rebuild_links: settings_view::editor::RebuildLinksState::Idle,
                 history_kind: atelyx_core::history::HistoryKind::Note,
-                canvas: None,
-                canvas_collab: None,
+                canvas_flush_pending: false,
                 flush_pending: None,
                 panel_headers: std::collections::HashMap::new(),
                 panel_view: std::collections::HashMap::new(),
                 pending_panel_flush: None,
                 pending_table_restore: None,
+            pending_canvas_restore: None,
+                canvas_displayed: false,
                 plugin_modal: None,
                 panel_flush_seq: 0,
                 mods: keyboard::Modifiers::default(),
@@ -1808,6 +1796,7 @@ impl App {
             app.plugins.set_builtin_owner_enabled(&plugin, false);
         }
         plugin_actions::sync_surfaces(&mut app);
+        plugin_actions::sync_canvas_display(&mut app);
         plugin_actions::rebuild_registry(&mut app);
         boot = boot.chain(plugin_actions::refresh_projection(&mut app));
         (app, boot)
@@ -1982,27 +1971,18 @@ impl App {
                 self.notify(NoticeLevel::Error, format!("读取目录失败：{e}"));
                 Task::none()
             }
-            Message::OpenFile(rel) => {
-                self.gate(PendingAfterFlush::OpenFile { path: rel, reveal: true })
-            }
             Message::Save => {
                 // Ctrl+S：文档 / 画布各自手动保存（无打开内容 = 提示）
                 let mut task = Task::none();
                 if self.ui.last_note_file.is_some() {
                     task = task.chain(self.submit_save(SaveReason::Manual));
                 }
-                if self.canvas.is_some() {
-                    task = task.chain(canvas_actions::submit_canvas_save(
-                        self,
-                        canvas_view::SaveReason::Manual,
-                    ));
-                }
-                // 表格内容在插件：手动保存走面板 flush（插件侧会先提交在途草稿）
-                let table_open = self.ui.last_table_file.is_some();
-                if table_open {
+                // 表格与画布内容都在插件：手动保存走面板 flush（插件侧会先提交在途草稿）
+                let panel_open = self.ui.last_table_file.is_some() || self.ui.last_canvas_file.is_some();
+                if panel_open {
                     task = task.chain(self.request_panel_flush(PanelFlushPurpose::Gate));
                 }
-                if self.ui.last_note_file.is_none() && self.canvas.is_none() && !table_open {
+                if self.ui.last_note_file.is_none() && !panel_open {
                     self.notify(NoticeLevel::Warning, "没有打开的文件");
                 }
                 task
@@ -2015,12 +1995,6 @@ impl App {
                     let mut task = Task::none();
                     if self.doc_dirty && self.ui.last_note_file.is_some() {
                         task = task.chain(self.submit_save(SaveReason::AutoSave));
-                    }
-                    if self.canvas.as_ref().is_some_and(|c| c.dirty) {
-                        task = task.chain(canvas_actions::submit_canvas_save(
-                            self,
-                            canvas_view::SaveReason::AutoSave,
-                        ));
                     }
                     return task;
                 }
@@ -2082,7 +2056,6 @@ impl App {
                 Task::none()
             }
             Message::CopyKey { key, mods } => self.on_key_command(key, mods),
-            Message::Props(m) => self.on_props(m),
             Message::TagVocabLoaded(gen, Ok(rows)) => {
                 if gen == self.epoch() {
                     self.tag_vocab = rows;
@@ -2098,13 +2071,6 @@ impl App {
                 Task::none()
             }
             Message::NavKey(horizontal, positive) => {
-                // 属性输入：↑↓ 走候选高亮（左右仍是输入框光标），不落到分割把手
-                if self.props.editing.is_some() {
-                    if horizontal {
-                        return Task::none();
-                    }
-                    return self.on_props(PropsMsg::SuggestMove(if positive { 1 } else { -1 }));
-                }
                 self.handle(Message::DividerAdjust(horizontal, positive))
             }
             Message::HistoryLoaded(gen, kind, rel, mut versions) => {
@@ -2154,27 +2120,6 @@ impl App {
                 Task::none()
             }
             Message::History(m) => history_browser::on_msg(self, m),
-            Message::CanvasHistoryRestored(gen, rel, result) => {
-                if gen != self.epoch() {
-                    return Task::none();
-                }
-                match result {
-                    Err(e) => {
-                        self.notify(NoticeLevel::Error, format!("画布回滚失败：{e}"));
-                        Task::none()
-                    }
-                    Ok(()) => {
-                        self.notify(NoticeLevel::Success, "已回滚");
-                        // 打开中的画布随磁盘事实重读会话（回滚直写不经会话链）
-                        let mut task = Task::none();
-                        if self.ui.last_canvas_file.as_deref() == Some(rel.as_str()) {
-                            task = task.chain(canvas_actions::load_canvas(self, &rel));
-                        }
-                        // 记 restore 版本（尽力而为；回执经 HistoryRecorded 刷新弹层列表）
-                        task.chain(self.record_canvas_restore_history(rel))
-                    }
-                }
-            }
             Message::RebuildLinks(m) => settings_view::editor::on_msg(self, m),
             Message::HistoryRecorded(gen, err) => {
                 if let Some(e) = err {
@@ -2200,6 +2145,27 @@ impl App {
             }
             Message::OpenLink(href, form) => self.open_link(&href, form),
             Message::PanelFlushTimeout(token) => self.settle_panel_flush_timeout(token),
+            Message::CanvasRestoreFlush => {
+                if self.pending_canvas_restore.is_none() {
+                    return Task::none();
+                }
+                // 已有别的 flush 在途：等它结算后再强制请画布落盘，不能把回滚判失败
+                if self.pending_panel_flush.is_some() {
+                    return Task::perform(
+                        async move {
+                            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                        },
+                        |()| Message::CanvasRestoreFlush,
+                    );
+                }
+                let task = self.request_canvas_flush(PanelFlushPurpose::RestoreNotice);
+                if self.pending_panel_flush.is_none() {
+                    // 画布插件没把回滚后的脏状态送到：不记版本、不报成功
+                    self.pending_canvas_restore = None;
+                    self.notify(NoticeLevel::Error, "回滚未落盘".to_string());
+                }
+                task
+            }
             Message::TableRestoreFlush => {
                 if self.pending_table_restore.is_none() {
                     return Task::none();
@@ -2294,7 +2260,7 @@ impl App {
                         // 画布与图片贴片的 contain / cover 需要固有像素尺寸，装载点顺手记下
                         let (handle, size) = match image {
                             PluginImage::Bytes(bytes) => {
-                                let size = crate::canvas_actions::image_dimensions(&bytes);
+                                let size = image_dimensions(&bytes);
                                 (iced::widget::image::Handle::from_bytes(bytes), size)
                             }
                             PluginImage::Thumb(thumb) => (
@@ -2390,7 +2356,6 @@ impl App {
                 self.global.collab_color = Some(color);
                 // 换色后立即刷新文档 / 画布在场身份，对端不必等到下一次选区事件
                 space_actions::collab_after_caret(self);
-                space_actions::canvas_collab_sync(self);
                 self.save_global_now();
                 Task::none()
             }
@@ -2427,10 +2392,7 @@ impl App {
             }
             Message::VaultMetaLoaded(_, Err(_)) => Task::none(),
             Message::Chat(msg) => {
-                let task = chat_actions::update(self, msg);
-                // 画布卡会话的 run 快照经 Chat 通道进入，落卡后同样要排自动保存
-                self.schedule_canvas_save();
-                task
+                chat_actions::update(self, msg)
             }
             Message::Noop => Task::none(),
             Message::PluginDragStart { request_id, plugin_id, params } => {
@@ -2461,10 +2423,6 @@ impl App {
                 self.plugin_pick_color(request_id, params)
             }
             Message::PluginPickVault { request_id } => self.plugin_pick_vault(request_id),
-            Message::CopyCode(code) => {
-                self.notify(NoticeLevel::Success, "已复制代码");
-                iced::clipboard::write(code)
-            }
             Message::PanelTab(panel_id, tab_id) => {
                 // 拖拽会话结束的按钮释放不触发激活
                 if self.drag.is_some() {
@@ -2838,8 +2796,6 @@ impl App {
                 // 限频压下的选区变化（拖选连续位移）由本拍补发最新一份：断线期产出即丢弃，
                 // 重连时的强制重发以最新状态兜底
                 space_actions::doc_presence_flush(self);
-                // 画布在场：远端超时剔除、限频补发、空闲保活
-                space_actions::canvas_collab_tick(self);
                 // 重名提醒条 3s 过期
                 if self
                     .rename_notice
@@ -2907,35 +2863,6 @@ impl App {
                 self.focused_window = Some(id);
                 let cursor = self.cursor_for(id);
                 // 对话输入面外点失焦：同批输入部件按压（Focus 事件）先行置位
-                // 画布卡输入面同理：按压在卡输入面内（Focus 事件同批置位）保持焦点，否则失焦
-                if let Some(s) = self.canvas.as_mut() {
-                    let focused: Option<String> = s
-                        .view
-                        .card_chat
-                        .iter()
-                        .find(|(_, c)| c.draft.focused)
-                        .map(|(id, _)| id.clone());
-                    if let Some(id) = focused {
-                        let inside = s
-                            .view
-                            .card_chat
-                            .get_mut(&id)
-                            .map(|c| std::mem::take(&mut c.press_inside))
-                            .unwrap_or(false);
-                        if !inside {
-                            if let Some(c) = s.view.card_chat.get_mut(&id) {
-                                c.draft.focused = false;
-                            }
-                        }
-                    }
-                }
-                // 属性输入失焦即提交：同批属性面板按压（PressReporter）先行置位；
-                // 面板内按压由控件自身动作先提交（切槽 / 删除等），此处只处理外点。
-                // 须先于弹层早退消费：弹层开着时按压仍应结算属性输入
-                let props_press_inside = std::mem::take(&mut self.props.press_inside);
-                if self.props.editing.is_some() && !props_press_inside {
-                    self.finish_props_edit();
-                }
                 // 弹层打开期间按压交由捕获层处理（外点关闭），不触发拖拽手势
                 if self.popup.as_ref().is_some_and(|(w, _)| *w == id) {
                     return Task::none();
@@ -3140,14 +3067,6 @@ impl App {
             }
             Message::Ui(msg) => self.on_ui(msg),
             Message::Update(msg) => self.on_update(msg),
-            Message::Canvas(msg) => {
-                // 数据版本变化 = 画布编辑：与文档同口径推迟自动保存期限（拖拽中不排，松手收口）
-                let task = canvas_actions::on_msg(self, msg);
-                self.schedule_canvas_save();
-                // 在场状态可能随本条消息变化（选中 / 对话卡锁 / 流式 / 开关卡）：幂等收口
-                space_actions::canvas_collab_sync(self);
-                task
-            }
             Message::ModsChanged(m) => {
                 self.mods = m;
                 Task::none()
@@ -3195,19 +3114,17 @@ impl App {
                 } else if self.plugin_takeovers.contains_key(&window) {
                     // 接管窗口：弹层已关（上一分支），Esc = 退出接管（退出入口常驻，Esc 是后备通道）
                     return plugin_actions::exit_takeover(self, window);
-                } else if self.main_id == Some(window) && self.props.editing.is_some() {
-                    return self.on_props(PropsMsg::CancelSlot);
                 } else if self.rename.as_ref().is_some_and(|r| r.window == window) {
                     // 行内重命名 Esc = 取消
                     self.rename = None;
                 } else if layout_view::window_shows_canvas(self, window) {
-                    // 画布 Esc = 清选中（拖拽会话随松手自然收口）
-                    if let Some(s) = &mut self.canvas {
-                        s.view.selection.clear();
-                        s.view.guides.clear();
-                        s.redraw();
-                    }
-                    space_actions::canvas_collab_sync(self);
+                    self.plugins.notify_plugin_event(
+                        crate::plugin_actions::CANVAS_PLUGIN,
+                        atelyx_core::plugin_runtime::event_name::CANVAS_COMMAND,
+                        &atelyx_core::plugin_runtime::CanvasCommandParams {
+                            command: "escape".to_string(),
+                        },
+                    );
                 }
                 Task::none()
             }
@@ -3281,7 +3198,6 @@ impl App {
                 if let PluginEvent::AiChatEvent { params, .. } = event.as_ref() {
                     // 流式对话事件只更新对应会话 / 卡片，不进注册表重建
                     let task = chat_actions::on_ai_chat_event(self, params.clone());
-                    self.schedule_canvas_save();
                     settings_view::plugins::on_event(self, *event);
                     return task;
                 }
@@ -3462,9 +3378,6 @@ impl App {
                 self.global.font_family = name.clone();
                 ui::set_family(name.as_deref());
                 self.dismiss_popup();
-                if let Some(c) = self.canvas.as_mut() {
-                    c.redraw();
-                }
                 self.save_global_now();
                 Task::none()
             }
@@ -3732,11 +3645,7 @@ impl App {
             Message::DividerAdjust(horizontal, positive) => {
                 // 键盘调整上次拖动过的把手（±2%，双侧钳 12%）；
                 // 门控：对话输入聚焦 / 行内重命名在途时方向键属文本操作，不调把手
-                if self
-                    .canvas
-                    .as_ref()
-                    .is_some_and(|s| s.view.card_chat.values().any(|c| c.draft.focused))
-                    || self.rename.is_some()
+                if self.rename.is_some()
                     || self.popup.is_some()
                 {
                     return Task::none();
@@ -3816,6 +3725,7 @@ impl App {
         // 布局变化可能增减插件面：差额通知插件（attached / detached）；面集合确实变了才重投影
         // （改分割比例这类高频布局操作不触发重投影）
         let surfaces_changed = plugin_actions::sync_surfaces(self);
+        plugin_actions::sync_canvas_display(self);
         let reconcile = self.reconcile();
         let task = match surfaces_changed {
             true => reconcile.chain(plugin_actions::refresh_projection(self)),
@@ -4161,20 +4071,26 @@ impl App {
         task
     }
 
-    pub(crate) fn schedule_persist(&mut self) {
-        self.persist_dirty = true;
+    /// 画布快捷键上下文：画布已打开且在焦点窗口展示、无弹层 / 行内改名 / 拖拽在途。
+    fn canvas_key_ready(&self) -> bool {
+        if self.ui.last_canvas_file.is_none() || self.popup.is_some() || self.rename.is_some() {
+            return false;
+        }
+        self.focused_window
+            .is_some_and(|window| layout_view::window_shows_canvas(self, window))
     }
 
-    /// 画布脏数据排自动保存：流式期间已有期限时不再后推，让 500ms 后落一次中间态。
-    pub(crate) fn schedule_canvas_save(&mut self) {
-        let Some(canvas) = self.canvas.as_ref() else { return };
-        if !canvas.dirty || canvas.view.drag.is_some() {
-            return;
-        }
-        let streaming = canvas.view.card_chat.values().any(|chat| chat.streaming);
-        if !streaming || self.autosave_deadline.is_none() {
-            self.autosave_deadline = Some(Instant::now() + AUTOSAVE_DEBOUNCE);
-        }
+    /// 把画布作用域命令转给画布插件执行（快捷键可自定义，绑定仍归宿主）。
+    fn send_canvas_command(&self, command: &str) {
+        self.plugins.notify_plugin_event(
+            plugin_actions::CANVAS_PLUGIN,
+            atelyx_core::plugin_runtime::event_name::CANVAS_COMMAND,
+            &atelyx_core::plugin_runtime::CanvasCommandParams { command: command.to_string() },
+        );
+    }
+
+    pub(crate) fn schedule_persist(&mut self) {
+        self.persist_dirty = true;
     }
 
     /// 会话世代：core 在每次切换仓库时自增；在途任务的回调据此判定是否过期。
@@ -4187,7 +4103,7 @@ impl App {
     /// 文档 / 画布 / 仍在运行的面板插件任一脏（停用插件的残留头部不再拦动作）。
     fn any_dirty(&self) -> bool {
         self.doc_dirty
-            || self.canvas.as_ref().is_some_and(|c| c.dirty)
+            || self.canvas_flush_pending
             || self.panel_headers.values().any(|entry| {
                 entry.state.dirty && self.plugin_is_running(&entry.plugin_id)
             })
@@ -4225,7 +4141,13 @@ impl App {
             self.plugins
                 .resolve_shell_call(*request_id, Err("被更晚的宿主操作取代，请重试".into()));
         }
-        if self.any_dirty() {
+        // 画布脏标记由插件异步上报，不能只靠它判定：打开着画布就先请插件确认一次
+        if self.ui.last_canvas_file.is_some()
+            && self.plugin_is_running(plugin_actions::CANVAS_PLUGIN)
+        {
+            self.canvas_flush_pending = true;
+        }
+        if self.any_dirty() || self.canvas_flush_pending {
             self.flush_pending = Some(pending);
             return self.flush_dirty_now();
         }
@@ -4236,11 +4158,11 @@ impl App {
     fn flush_dirty_now(&mut self) -> Task<Message> {
         let mut task = Task::none();
         task = task.chain(self.request_panel_flush(PanelFlushPurpose::Gate));
+        if self.pending_panel_flush.is_none() && self.canvas_flush_pending {
+            task = task.chain(self.request_canvas_flush(PanelFlushPurpose::Gate));
+        }
         if self.doc_dirty {
             task = task.chain(self.submit_save(SaveReason::Flush));
-        }
-        if self.canvas.as_ref().is_some_and(|c| c.dirty) {
-            task = task.chain(canvas_actions::submit_canvas_save(self, canvas_view::SaveReason::Flush));
         }
         task
     }
@@ -4264,6 +4186,18 @@ impl App {
         self.send_panel_flush(
             "table".to_string(),
             plugin_actions::TABLES_PLUGIN.to_string(),
+            purpose,
+        )
+    }
+
+    /// 回滚后强制请画布插件落盘：不依赖脏头部（回滚可能已被自动保存提前落盘）。
+    fn request_canvas_flush(&mut self, purpose: PanelFlushPurpose) -> Task<Message> {
+        if self.pending_panel_flush.is_some() {
+            return Task::none();
+        }
+        self.send_panel_flush(
+            "canvas".to_string(),
+            plugin_actions::CANVAS_PLUGIN.to_string(),
             purpose,
         )
     }
@@ -4317,6 +4251,9 @@ impl App {
         let purpose = pending.purpose;
         let target = pending.target.clone();
         self.pending_panel_flush = None;
+        if target == "canvas" {
+            self.canvas_flush_pending = false;
+        }
         if !params.ok {
             let reason = params.error.unwrap_or_else(|| "未知原因".to_string());
             self.notify(NoticeLevel::Error, format!("保存失败，操作未执行：{reason}"));
@@ -4329,6 +4266,7 @@ impl App {
         }
         let mut history = Task::none();
         if purpose == PanelFlushPurpose::RestoreNotice {
+            if target == "table" {
             if let Some(restore) = self.pending_table_restore.take() {
                 if restore.gen != self.epoch() {
                     self.notify(NoticeLevel::Warning, "已切换仓库，回滚取消".to_string());
@@ -4372,9 +4310,56 @@ impl App {
                     )
                 };
             }
+            } else if target == "canvas" {
+                if let Some(restore) = self.pending_canvas_restore.take() {
+                    if restore.gen != self.epoch() {
+                        self.notify(NoticeLevel::Warning, "已切换仓库，回滚取消".to_string());
+                        return self.after_any_flush();
+                    }
+                    // 回滚期间又切了文件：快照已不属于当前打开的画布，不能记成功
+                    if self.ui.last_canvas_file.as_deref() != Some(restore.rel.as_str()) {
+                        self.notify(NoticeLevel::Warning, "画布已切换，回滚取消".to_string());
+                        return self.after_any_flush();
+                    }
+                    self.notify(NoticeLevel::Success, "已回滚".to_string());
+                    history = if restore.space {
+                        space_actions::space_record_canvas_restore(self, restore.rel, restore.content)
+                    } else {
+                        let gen = self.epoch();
+                        let state = self.vault.clone();
+                        let author = history_author(self);
+                        Task::perform(
+                            async move {
+                                tokio::task::spawn_blocking(move || {
+                                    let (root, _, _) = state.session_snapshot()?;
+                                    atelyx_core::history::record_version(
+                                        &root,
+                                        atelyx_core::history::HistoryKind::Canvas,
+                                        &restore.rel,
+                                        &atelyx_core::history::RecordOpts {
+                                            content: restore.content,
+                                            action: atelyx_core::history::HistoryAction::Restore,
+                                            author,
+                                            coalesce_edit_ms: None,
+                                            max_versions: 0,
+                                            note: None,
+                                        },
+                                    )
+                                })
+                                .await
+                                .map_err(|e| e.to_string())
+                                .and_then(|r| r)
+                            },
+                            move |r: Result<(), String>| Message::HistoryRecorded(gen, r.err()),
+                        )
+                    };
+                }
+            }
         }
         let next = if let Some((target, _)) = self.next_dirty_panel() {
-            let purpose = if self.pending_table_restore.is_some() && target == "table" {
+            let purpose = if (self.pending_table_restore.is_some() && target == "table")
+                || (self.pending_canvas_restore.is_some() && target == "canvas")
+            {
                 PanelFlushPurpose::RestoreNotice
             } else {
                 PanelFlushPurpose::Gate
@@ -4383,6 +4368,15 @@ impl App {
         } else if self.pending_table_restore.is_some() {
             // 回滚可能已被自动保存提前落盘：脏面清空后仍要请表格插件确认一次
             let task = self.request_table_flush(PanelFlushPurpose::RestoreNotice);
+            if self.pending_panel_flush.is_some() {
+                task
+            } else {
+                self.after_any_flush()
+            }
+        } else if self.canvas_flush_pending {
+            self.request_canvas_flush(PanelFlushPurpose::Gate)
+        } else if self.pending_canvas_restore.is_some() {
+            let task = self.request_canvas_flush(PanelFlushPurpose::RestoreNotice);
             if self.pending_panel_flush.is_some() {
                 task
             } else {
@@ -4400,6 +4394,7 @@ impl App {
             return Task::none();
         }
         self.pending_panel_flush = None;
+        self.canvas_flush_pending = false;
         // 挂起动作一并放弃：保留它会让下一次放行在插件仍无响应时反复触发同一超时
         self.flush_pending = None;
         let restore = self.pending_table_restore.take().is_some();
@@ -4478,7 +4473,6 @@ impl App {
         self.doc_save_error = None;
         self.autosave_deadline = None;
         self.autosave_timer = false;
-        self.reset_props();
         match self.repo_kind.clone() {
             RepoKind::Local => {
                 self.space_doc_flushed = None;
@@ -4509,8 +4503,6 @@ impl App {
         self.doc_base = base;
         let changed = merged != before;
         self.doc_text = merged;
-        // inspector 属性面板与正文同一真源：正文被插件改动后重建解析缓存
-        self.refresh_props();
         if changed {
             self.doc_dirty = true;
             self.doc_save_error = None;
@@ -4598,12 +4590,32 @@ impl App {
         task.chain(self.reload_history())
     }
 
+    /// 打开 .atlx：登记打开的文件、面板内容切到画布插件视图、广播打开文件集合。
+    /// 画布数据、交互与保存链都在插件；宿主只负责视图显示（`reveal`）、最近打开与历史列表。
+    fn open_canvas(&mut self, rel: &str, reveal: bool) -> Task<Message> {
+        self.ui.last_canvas_file = Some(rel.to_string());
+        self.history_kind = atelyx_core::history::HistoryKind::Canvas;
+        self.schedule_persist();
+        crate::recent_files::record(self, rel, atelyx_core::plugin_runtime::RecentKind::Canvas);
+        // 插件按打开文件集合事件重读内容：切画布 / 首次打开都靠这条
+        self.notify_open_files();
+        if matches!(self.repo_kind, RepoKind::Space(_)) {
+            crate::space_actions::send_presence(self);
+        }
+        let task = if reveal {
+            plugin_actions::reveal_view(self, atelyx_core::layout::CANVAS_VIEW)
+        } else {
+            Task::none()
+        };
+        task.chain(self.reload_history())
+    }
+
     /// 打开文件（脏拦截已由 gate 处理）：按扩展名分流（.atlx → 画布、.atb → 表格、
     /// 插件注册的领域扩展名 → 插件文档面），复位只读并清掉上一文件的解析产物。
     /// `reveal` = 是否让对应视图显示：false 只打开文件，不在布局里新增或切换视图标签。
     pub(crate) fn open_file(&mut self, rel: &str, reveal: bool) -> Task<Message> {
         if rel.ends_with(".atlx") {
-            return canvas_actions::open_canvas(self, rel);
+            return self.open_canvas(rel, reveal);
         }
         if rel.ends_with(".atb") {
             return self.open_table(rel, reveal);
@@ -4705,7 +4717,6 @@ impl App {
         self.doc_text.clear();
         self.doc_dirty = false;
         self.doc_save_error = None;
-        self.reset_props();
         self.file_count = None;
         self.rename_notice = None;
         // 图片句柄按仓库相对路径缓存：换仓库后同一路径指向别的文件，整表作废
@@ -4714,9 +4725,6 @@ impl App {
         self.note_images_inflight.clear();
         self.note_images_failed.clear();
         self.note_image_epoch = self.note_image_epoch.wrapping_add(1);
-        // 画布会话随仓库切换清空（先停卡内 run，载入在途不留旧数据）
-        canvas_chat::detach_canvas(self);
-        self.canvas = None;
         // 仓库级配置会话态随切仓清空（VaultMetaLoaded 落地后回填）
         self.exclude_folders.clear();
         self.attachment_folder = None;
@@ -4771,7 +4779,7 @@ impl App {
                 task = task.chain(self.open_file(&rel, true));
             }
             if let Some(rel) = self.ui.last_canvas_file.clone() {
-                task = task.chain(canvas_actions::load_canvas(self, &rel));
+                task = task.chain(self.open_file(&rel, true));
             }
         }
         task
@@ -4813,6 +4821,17 @@ impl App {
     /// 关闭打开的文件（×：摘下对应视图的文件、标签保留回未打开态；脏拦截已由 gate 处理）。
     fn close_file_tab(&mut self, kind: &str) -> Task<Message> {
         self.dismiss_popup();
+        // 画布是整面插件视图：先于插件文档分支处理，否则会被「非文档插件视图」早退吞掉
+        if layout_view::is_canvas_view(kind) {
+            self.ui.last_canvas_file = None;
+            self.schedule_persist();
+            self.notify_open_files();
+            self.history.clear();
+            if matches!(self.repo_kind, RepoKind::Space(_)) {
+                space_actions::send_presence(self);
+            }
+            return Task::none();
+        }
         // 插件文档视图：关闭当前文档实例（标签保留回未打开态）
         if crate::plugin_actions::parse_view_kind(kind).is_some() {
             let is_doc_view = self
@@ -4839,15 +4858,6 @@ impl App {
                     space_actions::send_presence(self);
                 }
             }
-            "canvas" => {
-                self.ui.last_canvas_file = None;
-                canvas_chat::detach_canvas(self);
-                self.canvas = None;
-                self.history.clear();
-                if matches!(self.repo_kind, RepoKind::Space(_)) {
-                    space_actions::send_presence(self);
-                }
-            }
             _ => {
                 // 空间模式先摘协作绑定（离场帧 + presence 回收）再清编辑态
                 if matches!(self.repo_kind, RepoKind::Space(_)) {
@@ -4857,8 +4867,7 @@ impl App {
                 self.doc_text.clear();
                 self.doc_dirty = false;
                 self.doc_save_error = None;
-                self.reset_props();
-                self.history.clear();
+                        self.history.clear();
             }
         }
         self.schedule_persist();
@@ -4995,6 +5004,50 @@ impl App {
         )
     }
 
+    fn doc_history_restore(&mut self, version: atelyx_core::history::HistoryVersion) -> Task<Message> {
+        self.doc_text = version.content.clone();
+        self.doc_dirty = true;
+        self.doc_save_error = None;
+        self.autosave_deadline = Some(Instant::now() + AUTOSAVE_DEBOUNCE);
+        if self.doc_active {
+            // 回滚换掉整篇正文：插件面必须同步看到新文；祖先与正文相同，用 None 表示。
+            self.doc_base = None;
+            self.doc_selection = None;
+            doc_session::publish_state(self, Some(self.doc_text.clone()));
+        }
+        let Some(rel) = self.ui.last_note_file.clone() else { return Task::none() };
+        if matches!(self.repo_kind, RepoKind::Space(_)) {
+            return space_actions::space_record_doc_restore(self, rel, version.content);
+        }
+        let gen = self.epoch();
+        let state = self.vault.clone();
+        let author = history_author(self);
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    let (root, _, _) = state.session_snapshot()?;
+                    atelyx_core::history::record_version(
+                        &root,
+                        atelyx_core::history::HistoryKind::Note,
+                        &rel,
+                        &atelyx_core::history::RecordOpts {
+                            content: version.content,
+                            action: atelyx_core::history::HistoryAction::Restore,
+                            author,
+                            coalesce_edit_ms: None,
+                            max_versions: 0,
+                            note: None,
+                        },
+                    )
+                })
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|r| r)
+            },
+            move |r: Result<(), String>| Message::HistoryRecorded(gen, r.err()),
+        )
+    }
+
     /// 回滚到指定版本：全文快照写回走各保存链（画布走 canvas_history_restore 快照直写）。
     pub(crate) fn history_restore(
         &mut self,
@@ -5045,12 +5098,17 @@ impl App {
                 )
             }
             atelyx_core::history::HistoryKind::Note => self.doc_history_restore(version),
-            // 画布回滚走 canvas_history_restore（快照直写仓库，无会话链）
-            atelyx_core::history::HistoryKind::Canvas => Task::none(),
+            atelyx_core::history::HistoryKind::Canvas => {
+                let Some(rel) = self.ui.last_canvas_file.clone() else {
+                    self.notify(NoticeLevel::Warning, "画布未打开，无法回滚");
+                    return Task::none();
+                };
+                self.canvas_history_restore(rel, version)
+            }
         }
     }
 
-    /// 画布回滚：快照校验后写回仓库真源（本地经写盘队列批量作业，空间模式先写服务端再记历史）。
+    /// 画布回滚：快照校验后交回插件，等它落盘收敛再记 restore 版本（与表格同一条链）。
     pub(crate) fn canvas_history_restore(
         &mut self,
         rel: String,
@@ -5063,114 +5121,42 @@ impl App {
             self.notify(NoticeLevel::Error, e);
             return Task::none();
         }
-        if matches!(self.repo_kind, RepoKind::Space(_)) {
-            return space_actions::space_restore_canvas(self, rel, version.content);
+        if self.ui.last_canvas_file.as_deref() != Some(rel.as_str()) {
+            self.notify(NoticeLevel::Warning, "画布未打开，无法回滚");
+            return Task::none();
         }
-        let gen = self.epoch();
-        // 根在入队前快照：作业排队期间切仓不改变执行目标（闭包内不重读会话）
-        let root = self.vault.root();
-        let queue = self.vault.writes.clone();
-        let content = version.content.clone();
+        // 内容与保存链都在插件：插件不在跑就无从交回快照，不能谎报成功
+        if !self
+            .plugins
+            .list()
+            .iter()
+            .any(|p| p.id == plugin_actions::CANVAS_PLUGIN && p.status == PluginStatus::Running)
+        {
+            self.notify(NoticeLevel::Warning, "画布插件未运行，无法回滚");
+            return Task::none();
+        }
+        self.plugins.notify_plugin_event(
+            plugin_actions::CANVAS_PLUGIN,
+            atelyx_core::plugin_runtime::event_name::CANVAS_RESTORE,
+            &atelyx_core::plugin_runtime::CanvasContentParams {
+                path: Some(rel.clone()),
+                content: version.content.clone(),
+            },
+        );
+        self.pending_canvas_restore = Some(PendingCanvasRestore {
+            rel,
+            content: version.content,
+            space: matches!(self.repo_kind, RepoKind::Space(_)),
+            gen: self.epoch(),
+        });
         Task::perform(
             async move {
-                let rel_for_cb = rel.clone();
-                let r = queue.bulk(move || {
-                    atelyx_core::history::restore_snapshot(
-                        &root?,
-                        atelyx_core::history::HistoryKind::Canvas,
-                        &rel,
-                        &content,
-                    )
-                })
-                .await;
-                Message::CanvasHistoryRestored(gen, rel_for_cb, r)
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
             },
-            |m| m,
+            |()| Message::CanvasRestoreFlush,
         )
     }
 
-    /// 画布回滚落盘后的 restore 版本记录（尽力而为）。
-    fn record_canvas_restore_history(&self, rel: String) -> Task<Message> {
-        // 快照即回滚写入的原文：从磁盘事实取内容（队列写已完成，读到的是回滚后状态）
-        let gen = self.epoch();
-        let state = self.vault.clone();
-        let author = history_author(self);
-        Task::perform(
-            async move {
-                let r = tokio::task::spawn_blocking(move || {
-                    let (root, _, _) = state.session_snapshot()?;
-                    let path = atelyx_core::vault::safe_join(&root, &rel, false)?;
-                    let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-                    atelyx_core::history::record_version(
-                        &root,
-                        atelyx_core::history::HistoryKind::Canvas,
-                        &rel,
-                        &atelyx_core::history::RecordOpts {
-                            content,
-                            action: atelyx_core::history::HistoryAction::Restore,
-                            author,
-                            coalesce_edit_ms: None,
-                            max_versions: 0,
-                            note: None,
-                        },
-                    )
-                })
-                .await
-                .map_err(|e| e.to_string())
-                .and_then(|r| r);
-                Message::HistoryRecorded(gen, r.err())
-            },
-            |m| m,
-        )
-    }
-
-    /// 笔记回滚：全文快照替换正文，保存链写回并记 restore 版本。
-    fn doc_history_restore(&mut self, version: atelyx_core::history::HistoryVersion) -> Task<Message> {
-        self.doc_text = version.content.clone();
-        self.doc_dirty = true;
-        self.doc_save_error = None;
-        self.autosave_deadline = Some(Instant::now() + AUTOSAVE_DEBOUNCE);
-        if self.doc_active {
-            // 回滚换掉整篇正文：插件面必须同步看到新文；祖先与正文相同，用 None 表示。
-            self.doc_base = None;
-            self.doc_selection = None;
-            doc_session::publish_state(self, Some(self.doc_text.clone()));
-        }
-        self.refresh_props();
-        let Some(rel) = self.ui.last_note_file.clone() else { return Task::none() };
-        if matches!(self.repo_kind, RepoKind::Space(_)) {
-            return space_actions::space_record_doc_restore(self, rel, version.content);
-        }
-        let gen = self.epoch();
-        let state = self.vault.clone();
-        let author = history_author(self);
-        Task::perform(
-            async move {
-                tokio::task::spawn_blocking(move || {
-                    let (root, _, _) = state.session_snapshot()?;
-                    atelyx_core::history::record_version(
-                        &root,
-                        atelyx_core::history::HistoryKind::Note,
-                        &rel,
-                        &atelyx_core::history::RecordOpts {
-                            content: version.content,
-                            action: atelyx_core::history::HistoryAction::Restore,
-                            author,
-                            coalesce_edit_ms: None,
-                            max_versions: 0,
-                            note: None,
-                        },
-                    )
-                })
-                .await
-                .map_err(|e| e.to_string())
-                .and_then(|r| r)
-            },
-            move |r: Result<(), String>| Message::HistoryRecorded(gen, r.err()),
-        )
-    }
-
-    /// 消费回滚落盘回执（一次性）：成功出「已回滚」，失败仅清标志（失败详情由保存链提示）。
     pub(crate) fn settle_history_restore(&mut self, ok: bool) {
         if !self.history_restore_pending {
             return;
@@ -5526,15 +5512,10 @@ impl App {
                         None
                     };
                     if let Some(n) = next {
-                        if let Some(s) = &mut self.canvas {
-                            if s.file == *f || s.file.starts_with(&format!("{from}/")) {
-                                s.file = n.clone();
-                                // 会话内嵌标题跟随文件名（标题不由内容保存落盘，不置脏）
-                                s.data.title = layout_view::file_label(&n);
-                            }
-                        }
                         self.ui.last_canvas_file = Some(n);
                         self.schedule_persist();
+                        // 插件按打开文件集合更新会话路径，不重发会继续按旧路径保存
+                        self.plugins.on_open_files_changed();
                     }
                 }
                 space_actions::collab_follow_rename(self, from, to);
@@ -5582,8 +5563,7 @@ impl App {
                 });
                 if hit_canvas {
                     self.ui.last_canvas_file = None;
-                    canvas_chat::detach_canvas(self);
-                    self.canvas = None;
+                                            self.notify_open_files();
                     if matches!(self.repo_kind, RepoKind::Space(_)) {
                         space_actions::send_presence(self);
                     }
@@ -6587,10 +6567,17 @@ impl App {
             if !commands::matches(binding, mods, &key) {
                 continue;
             }
-            if matches!(id.scope(), commands::Scope::Canvas) && canvas_actions::key_ready(self) {
-                if let Some(msg) = canvas_actions::canvas_key_msg(*id) {
-                    return self.handle(Message::Canvas(msg));
-                }
+            if matches!(id.scope(), commands::Scope::Canvas) && self.canvas_key_ready() {
+                let command = match id {
+                    commands::CommandId::CanvasUndo => "undo",
+                    commands::CommandId::CanvasRedo => "redo",
+                    commands::CommandId::CanvasCopy => "copy",
+                    commands::CommandId::CanvasPaste => "paste",
+                    commands::CommandId::CanvasSelectAll => "select-all",
+                    commands::CommandId::CanvasClear => "delete",
+                };
+                self.send_canvas_command(command);
+                return Task::none();
             }
         }
         // 重做别名：redo 未被重定义时 mod+shift+z 沿用（画布直接分派）
@@ -6598,12 +6585,11 @@ impl App {
             && mods.shift()
             && !mods.alt()
             && matches!(&key, keyboard::Key::Character(c) if c.to_lowercase() == "z")
-            && canvas_actions::key_ready(self)
+            && self.canvas_key_ready()
             && commands::redo_alias_active(&self.global.command_shortcuts)
         {
-            return self.handle(Message::Canvas(crate::canvas_view::CanvasMsg::Key(
-                crate::canvas_view::CanvasKey::Redo,
-            )));
+            self.send_canvas_command("redo");
+            return Task::none();
         }
         // 退格 = 删除选中的既有别名（删除键位保持默认 delete 时沿用）
         let clear_binding = |id: commands::CommandId| {
@@ -6615,11 +6601,10 @@ impl App {
         if mods.is_empty()
             && matches!(key, keyboard::Key::Named(keyboard::key::Named::Backspace))
             && clear_binding(commands::CommandId::CanvasClear).as_deref() == Some("delete")
-            && canvas_actions::key_ready(self)
+            && self.canvas_key_ready()
         {
-            return self.handle(Message::Canvas(crate::canvas_view::CanvasMsg::Key(
-                crate::canvas_view::CanvasKey::DeleteSelection,
-            )));
+            self.send_canvas_command("delete");
+            return Task::none();
         }
         if (mods.control() || mods.logo()) && !mods.alt() {
             if let keyboard::Key::Character(c) = &key {
@@ -6802,11 +6787,6 @@ impl App {
                     ..
                 }) if modifiers.is_empty() => Some(Message::NavKey(false, true)),
                 Event::Keyboard(keyboard::Event::KeyPressed {
-                    key: keyboard::Key::Named(keyboard::key::Named::Tab),
-                    modifiers,
-                    ..
-                }) => Some(Message::Props(PropsMsg::CommitMove(if modifiers.shift() { -1 } else { 1 }))),
-                Event::Keyboard(keyboard::Event::KeyPressed {
                     key: keyboard::Key::Named(keyboard::key::Named::Escape),
                     ..
                 }) => Some(Message::Escape(window)),
@@ -6863,7 +6843,6 @@ impl App {
             self.plugin_events_subscription(),
             self.plugin_host_requests_subscription(),
             Subscription::run_with(self.tray.spec(), tray::events_stream).map(Message::Tray),
-            chat_actions::run_events_subscription(),
             chat_actions::control_subscription(),
         ])
     }

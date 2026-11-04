@@ -3,7 +3,6 @@
 
 mod edit;
 mod model;
-mod props;
 mod ui;
 
 use std::sync::Mutex;
@@ -21,6 +20,7 @@ use atelyx_plugin_sdk::frame_ui::{FrameUi, UiEvent};
 use atelyx_plugin_sdk::{Context, PluginHandler, PluginInfo};
 use tokio::sync::Mutex as AsyncMutex;
 
+use atelyx_plugin_props as props;
 use crate::model::{Backlink, Mode, NoteModel, PANEL, SOURCE};
 
 /// 插件 id（与 `plugin.json` 一致）。
@@ -594,8 +594,8 @@ impl NotesPlugin {
                 let delta = if matches!(key, Key::Named { name: NamedKey::ArrowUp }) { -1 } else { 1 };
                 let (moved, offset) = {
                     let mut model = self.model.lock().unwrap();
-                    let moved = props::move_suggestion(&mut model, delta);
-                    (moved, props::suggest_scroll_offset(&model))
+                    let moved = props::move_suggestion(&mut *model, delta);
+                    (moved, props::suggest_scroll_offset(&*model))
                 };
                 if moved {
                     self.ui.lock().await.scroll_to(props::SUGGEST_SCROLL, offset);
@@ -870,7 +870,7 @@ impl NotesPlugin {
                 if mode == Mode::Source {
                     model.props.editing = None;
                     model.props.draft.clear();
-                    props::reset_suggest(&mut model);
+                    props::reset_suggest(&mut *model);
                 }
             }
             crate::model::TITLE => {
@@ -931,7 +931,7 @@ impl NotesPlugin {
     /// 属性面板的点击：命中即处理并返回 true。
     async fn props_click(&self, ctx: &Context, id: &str) -> bool {
         if id.starts_with("props:typepick:") {
-            let text = props::on_type_pick(&mut self.model.lock().unwrap(), id);
+            let text = props::on_type_pick(&mut *self.model.lock().unwrap(), id);
             if let Some(text) = text {
                 self.commit_edit(ctx, text, None).await;
             }
@@ -941,7 +941,7 @@ impl NotesPlugin {
             let Ok(index) = rest.parse::<usize>() else { return true };
             let (text, next) = {
                 let mut model = self.model.lock().unwrap();
-                props::pick_suggestion(&mut model, index)
+                props::pick_suggestion(&mut *model, index)
             };
             if let Some(text) = text {
                 self.commit_edit(ctx, text, None).await;
@@ -973,7 +973,7 @@ impl NotesPlugin {
         if editing {
             if quick || empty_key {
                 // 删除 / 翻转按渲染下标执行；空键名提交会删行，也先丢草稿，避免下标漂移
-                props::cancel_edit(&mut self.model.lock().unwrap());
+                props::cancel_edit(&mut *self.model.lock().unwrap());
             } else {
                 self.commit_props(ctx, 0).await;
             }
@@ -985,7 +985,7 @@ impl NotesPlugin {
         if quick {
             return self.props_quick_action(ctx, id).await;
         }
-        let focus = props::on_click(&mut self.model.lock().unwrap(), id);
+        let focus = props::on_click(&mut *self.model.lock().unwrap(), id);
         if focus {
             self.focus_props_input().await;
         }
@@ -995,7 +995,7 @@ impl NotesPlugin {
     async fn props_quick_action(&self, ctx: &Context, id: &str) -> bool {
         let text = {
             let mut model = self.model.lock().unwrap();
-            props::quick_action(&mut model, id)
+            props::quick_action(&mut *model, id)
         };
         if let Some(text) = text {
             self.commit_edit(ctx, text, None).await;
@@ -1007,7 +1007,7 @@ impl NotesPlugin {
     async fn submit_props(&self, ctx: &Context) {
         let (text, next) = {
             let mut model = self.model.lock().unwrap();
-            props::submit(&mut model, 1)
+            props::submit(&mut *model, 1)
         };
         if let Some(text) = text {
             self.commit_edit(ctx, text, None).await;
@@ -1020,7 +1020,7 @@ impl NotesPlugin {
     async fn commit_props(&self, ctx: &Context, dir: i32) {
         let (text, next) = {
             let mut model = self.model.lock().unwrap();
-            props::commit(&mut model, dir)
+            props::commit(&mut *model, dir)
         };
         if let Some(text) = text {
             self.commit_edit(ctx, text, None).await;
@@ -1034,8 +1034,8 @@ impl NotesPlugin {
     async fn add_property(&self, ctx: &Context) {
         let (added, text) = {
             let mut model = self.model.lock().unwrap();
-            if props::add_property(&mut model) {
-                (true, props::text_with_placeholder(&model))
+            if props::add_property(&mut *model) {
+                (true, props::text_with_placeholder(&mut *model))
             } else {
                 (false, None)
             }
@@ -1082,7 +1082,7 @@ impl NotesPlugin {
             model.props.editing = None;
             model.props.draft.clear();
             model.props.error = None;
-            props::reset_suggest(&mut model);
+            props::reset_suggest(&mut *model);
             // 丢弃未提交的草稿；已写进正文的占位属性保留
             model.refresh_props();
         } else if id == crate::model::TITLE_INPUT {
@@ -1403,7 +1403,7 @@ impl PluginHandler for NotesPlugin {
                         // 远端整篇换文会让槽位下标失效：丢弃在途槽编辑，避免提交到别的属性上
                         model.props.editing = None;
                         model.props.draft.clear();
-                        props::reset_suggest(&mut model);
+                        props::reset_suggest(&mut *model);
                     }
                     model.dirty = payload.dirty;
                     model.save_error = payload.save_error;

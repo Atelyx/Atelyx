@@ -1,11 +1,52 @@
 //! 属性面板：frontmatter 的类型化渲染与槽位编辑。
-//! 改动只在模型里持草稿，提交时整篇回写并交宿主合并落盘。
+//! 面板只持草稿，提交经 [`PropsHost::write_pairs`] 交宿主写回正文。
 
 use atelyx_format::frontmatter::{self, PropType, Yaml};
 use atelyx_plugin_protocol::paint::ColorToken;
 use atelyx_plugin_sdk::frame_ui::{BoxStyle, BoxWidth, Edges, TextRole, TextStyle, Ui};
 
-use crate::model::{NoteModel, Slot};
+/// 正在编辑的属性槽位。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Slot {
+    Key(usize),
+    Value(usize),
+    Item(usize, usize),
+    /// 数组行尚未写入的新项（提交非空才追加）。
+    NewItem(usize),
+}
+
+/// 面板状态：正文里 frontmatter 的副本 + 在途编辑态。
+#[derive(Clone, Debug, Default)]
+pub struct PropsState {
+    /// `None` = 没有 frontmatter 块；`Some((键值对, yaml 是否可解析))`。
+    pub data: Option<(Vec<(String, Yaml)>, bool)>,
+    pub collapsed: bool,
+    pub editing: Option<Slot>,
+    pub draft: String,
+    /// 打开类型菜单的属性行下标。
+    pub type_menu: Option<usize>,
+    /// 提交校验失败的可读原因（重复键 / 空键名）。
+    pub error: Option<String>,
+    /// 候选清单的过滤词：进入槽位时为空（展示候选池顶部），键入后才随草稿过滤。
+    pub suggest_query: String,
+    /// 候选清单高亮下标；`armed` = 按过 ↑↓（仅此时 Enter 选中候选）。
+    pub suggest_index: usize,
+    pub suggest_armed: bool,
+}
+
+/// 面板与宿主的交界：面板只管草稿，读正文、写正文与候选池由宿主提供。
+pub trait PropsHost {
+    fn props(&self) -> &PropsState;
+    fn props_mut(&mut self) -> &mut PropsState;
+    /// 正文当前可写（只读身份下所有编辑动作不生效）。
+    fn editable(&self) -> bool;
+    /// 标签候选池（全仓库标签）。
+    fn tags(&self) -> &[String];
+    /// 把整份键值写回正文；返回新的全文（宿主自持正文时给 `Some`，异步写回给 `None`）。
+    fn write_pairs(&mut self, pairs: Vec<(String, Yaml)>) -> Option<String>;
+    /// 按正文现状重读 frontmatter（写回失败 / 无变化时保持面板与正文一致）。
+    fn refresh(&mut self);
+}
 
 /// 属性槽位的单行输入框 id（同时至多一个槽在编辑）。
 pub const KEY_INPUT: &str = "props:input";
@@ -27,12 +68,12 @@ const SUGGEST_ROW_H: f32 = 24.0;
 const PLACEHOLDER_KEY: &str = "property";
 
 /// 面板渲染：没有 frontmatter 块时整块不出现；YAML 解析失败只显示红条并锁编辑。
-pub fn panel(ui: &mut Ui<'_, '_>, model: &NoteModel) {
-    let Some((pairs, ok)) = &model.props.data else { return };
+pub fn panel(ui: &mut Ui<'_, '_>, host: &dyn PropsHost) {
+    let Some((pairs, ok)) = &host.props().data else { return };
     ui.pad(16.0, 6.0, |ui| {
         ui.column(2.0, |ui| {
             if !pairs.is_empty() {
-                let chevron = if model.props.collapsed { "chevron-right" } else { "chevron-down" };
+                let chevron = if host.props().collapsed { "chevron-right" } else { "chevron-down" };
                 ui.click_row(
                     "props:toggle",
                     Edges::all(2.0),
@@ -48,7 +89,7 @@ pub fn panel(ui: &mut Ui<'_, '_>, model: &NoteModel) {
                     },
                 );
             }
-            if model.props.collapsed {
+            if host.props().collapsed {
                 return;
             }
             if !ok {
@@ -62,25 +103,25 @@ pub fn panel(ui: &mut Ui<'_, '_>, model: &NoteModel) {
                 return;
             }
             for (index, (key, value)) in pairs.iter().enumerate() {
-                row(ui, model, index, key, value);
-                suggestions(ui, model, index);
+                row(ui, host, index, key, value);
+                suggestions(ui, host, index);
             }
-            if let Some(error) = &model.props.error {
+            if let Some(error) = &host.props().error {
                 let style = TextStyle::new(TextRole::Micro).color(ColorToken::Danger);
                 ui.text_styled_fit(error.clone(), style);
             }
-            add_area(ui, model);
+            add_area(ui, host);
         });
     });
 }
 
-fn row(ui: &mut Ui<'_, '_>, model: &NoteModel, index: usize, key: &str, value: &Yaml) {
+fn row(ui: &mut Ui<'_, '_>, host: &dyn PropsHost, index: usize, key: &str, value: &Yaml) {
     let kind = frontmatter::infer_type(is_badge_key(key), value);
     let key_id = format!("props:key:{index}");
     let delete_id = format!("props:delete:{index}");
     // 整段键名区（含删除钮占位）作为悬停区：指针从键名移到删除钮途中不会闪断
     let row_id = format!("props:keyrow:{index}");
-    let hover_key = model.can_write
+    let hover_key = host.editable()
         && (ui.hovered(&row_id) || ui.hovered(KEY_INPUT) || ui.hovered(&delete_id));
     ui.row(6.0, |ui| {
         ui.icon_button_named(
@@ -100,8 +141,8 @@ fn row(ui: &mut Ui<'_, '_>, model: &NoteModel, index: usize, key: &str, value: &
             true,
             |ui| {
                 ui.row_fit(2.0, |ui| {
-                    if model.props.editing == Some(Slot::Key(index)) {
-                        ui.text_input_inline_sized(KEY_INPUT, model.props.draft.clone(), "键名", 80.0);
+                    if host.props().editing == Some(Slot::Key(index)) {
+                        ui.text_input_inline_sized(KEY_INPUT, host.props().draft.clone(), "键名", 80.0);
                     } else {
                         ui.click_box(
                             key_id,
@@ -125,11 +166,11 @@ fn row(ui: &mut Ui<'_, '_>, model: &NoteModel, index: usize, key: &str, value: &
                 });
             },
         );
-        value_cell(ui, model, index, value, kind);
+        value_cell(ui, host, index, value, kind);
     });
 }
 
-fn value_cell(ui: &mut Ui<'_, '_>, model: &NoteModel, index: usize, value: &Yaml, kind: PropType) {
+fn value_cell(ui: &mut Ui<'_, '_>, host: &dyn PropsHost, index: usize, value: &Yaml, kind: PropType) {
     match value {
         Yaml::Bool(flag) => {
             let label = if *flag { "true" } else { "false" };
@@ -140,7 +181,7 @@ fn value_cell(ui: &mut Ui<'_, '_>, model: &NoteModel, index: usize, value: &Yaml
                 Edges::symmetric(6.0, 2.0),
                 3.0,
                 false,
-                model.can_write,
+                host.editable(),
                 |ui| {
                     let style = TextStyle::new(TextRole::Micro).color(ColorToken::TextSecondary);
                     ui.text_styled_fit(label.to_string(), style);
@@ -150,30 +191,30 @@ fn value_cell(ui: &mut Ui<'_, '_>, model: &NoteModel, index: usize, value: &Yaml
         Yaml::Seq(items) if kind == PropType::Tag => {
             ui.row_fit(4.0, |ui| {
                 for (item, value) in items.iter().enumerate() {
-                    if model.props.editing == Some(Slot::Item(index, item)) {
-                        ui.text_input_inline_sized(KEY_INPUT, model.props.draft.clone(), "标签", 90.0);
+                    if host.props().editing == Some(Slot::Item(index, item)) {
+                        ui.text_input_inline_sized(KEY_INPUT, host.props().draft.clone(), "标签", 90.0);
                         continue;
                     }
-                    tag_pill(ui, model, index, item, value);
+                    tag_pill(ui, host, index, item, value);
                 }
-                if model.props.editing == Some(Slot::NewItem(index)) {
-                    ui.text_input_inline_sized(KEY_INPUT, model.props.draft.clone(), "标签", 90.0);
+                if host.props().editing == Some(Slot::NewItem(index)) {
+                    ui.text_input_inline_sized(KEY_INPUT, host.props().draft.clone(), "标签", 90.0);
                 } else {
-                    tiny_add(ui, model, format!("props:additem:{index}"), true);
+                    tiny_add(ui, host, format!("props:additem:{index}"), true);
                 }
             });
         }
         Yaml::Seq(items) => {
             ui.column(2.0, |ui| {
                 for (item, value) in items.iter().enumerate() {
-                    if model.props.editing == Some(Slot::Item(index, item)) {
-                        ui.text_input_inline_sized(KEY_INPUT, model.props.draft.clone(), "项", 200.0);
+                    if host.props().editing == Some(Slot::Item(index, item)) {
+                        ui.text_input_inline_sized(KEY_INPUT, host.props().draft.clone(), "项", 200.0);
                         continue;
                     }
                     let item_id = format!("props:item:{index}:{item}");
                     let delete_id = format!("props:delete-item:{index}:{item}");
                     let row_id = format!("props:itemrow:{index}:{item}");
-                    let lit = model.can_write && (ui.hovered(&row_id) || ui.hovered(&delete_id));
+                    let lit = host.editable() && (ui.hovered(&row_id) || ui.hovered(&delete_id));
                     let editable = scalar_text(value).is_some();
                     ui.click_box(
                         row_id,
@@ -220,16 +261,16 @@ fn value_cell(ui: &mut Ui<'_, '_>, model: &NoteModel, index: usize, value: &Yaml
                         },
                     );
                 }
-                if model.props.editing == Some(Slot::NewItem(index)) {
-                    ui.text_input_inline_sized(KEY_INPUT, model.props.draft.clone(), "项", 200.0);
+                if host.props().editing == Some(Slot::NewItem(index)) {
+                    ui.text_input_inline_sized(KEY_INPUT, host.props().draft.clone(), "项", 200.0);
                 } else {
-                    tiny_add(ui, model, format!("props:additem:{index}"), false);
+                    tiny_add(ui, host, format!("props:additem:{index}"), false);
                 }
             });
         }
         Yaml::Str(text) => {
-            if model.props.editing == Some(Slot::Value(index)) {
-                ui.text_input_inline(KEY_INPUT, model.props.draft.clone(), "属性值");
+            if host.props().editing == Some(Slot::Value(index)) {
+                ui.text_input_inline(KEY_INPUT, host.props().draft.clone(), "属性值");
             } else {
                 let empty = text.is_empty();
                 let shown = if empty { "（空）".to_string() } else { text.clone() };
@@ -273,13 +314,13 @@ fn value_cell(ui: &mut Ui<'_, '_>, model: &NoteModel, index: usize, value: &Yaml
 }
 
 /// 标签胶囊（强调浅底 + 圆角）：文字与删除钮都嵌在同一底色块里，删除钮悬停才显、宽度预留。
-fn tag_pill(ui: &mut Ui<'_, '_>, model: &NoteModel, index: usize, item: usize, value: &Yaml) {
+fn tag_pill(ui: &mut Ui<'_, '_>, host: &dyn PropsHost, index: usize, item: usize, value: &Yaml) {
     let label = format!("#{}", yaml_text(value));
     let item_id = format!("props:item:{index}:{item}");
     let delete_id = format!("props:delete-item:{index}:{item}");
     let row_id = format!("props:pill:{index}:{item}");
-    let lit = model.can_write && (ui.hovered(&row_id) || ui.hovered(&delete_id));
-    let delete_w = if model.can_write { 12.0 } else { 0.0 };
+    let lit = host.editable() && (ui.hovered(&row_id) || ui.hovered(&delete_id));
+    let delete_w = if host.editable() { 12.0 } else { 0.0 };
     let width = ui.text_width(&label, TextRole::Micro) + delete_w + 14.0;
     ui.boxed(
         BoxWidth::Fixed(width),
@@ -318,7 +359,7 @@ fn tag_pill(ui: &mut Ui<'_, '_>, model: &NoteModel, index: usize, item: usize, v
                                 ColorToken::Danger,
                                 true,
                             );
-                        } else if model.can_write {
+                        } else if host.editable() {
                             ui.spacer_width(12.0);
                         }
                     });
@@ -329,8 +370,8 @@ fn tag_pill(ui: &mut Ui<'_, '_>, model: &NoteModel, index: usize, item: usize, v
 }
 
 /// 数组行的「添加」入口：标签行给加号，普通列表给极简文字。
-fn tiny_add(ui: &mut Ui<'_, '_>, model: &NoteModel, id: String, icon: bool) {
-    let enabled = model.can_write && model.props.editing.is_none();
+fn tiny_add(ui: &mut Ui<'_, '_>, host: &dyn PropsHost, id: String, icon: bool) {
+    let enabled = host.editable() && host.props().editing.is_none();
     let label = "添加".to_string();
     let width = if icon {
         18.0
@@ -356,8 +397,8 @@ fn tiny_add(ui: &mut Ui<'_, '_>, model: &NoteModel, id: String, icon: bool) {
 }
 
 /// 底部「添加属性」入口：常驻；有槽正在编辑时不可再点。
-fn add_area(ui: &mut Ui<'_, '_>, model: &NoteModel) {
-    let enabled = model.can_write && model.props.editing.is_none();
+fn add_area(ui: &mut Ui<'_, '_>, host: &dyn PropsHost) {
+    let enabled = host.editable() && host.props().editing.is_none();
     let width = ui.text_width("添加属性", TextRole::Micro) + 11.0 + 4.0 + 8.0;
     ui.click_box(
         "props:add",
@@ -376,8 +417,8 @@ fn add_area(ui: &mut Ui<'_, '_>, model: &NoteModel) {
     );
 }
 
-fn suggestions(ui: &mut Ui<'_, '_>, model: &NoteModel, index: usize) {
-    let Some(view) = view_for_row(model, index) else { return };
+fn suggestions(ui: &mut Ui<'_, '_>, host: &dyn PropsHost, index: usize) {
+    let Some(view) = view_for_row(host, index) else { return };
     if !view.pool {
         return;
     }
@@ -409,9 +450,9 @@ fn suggestions(ui: &mut Ui<'_, '_>, model: &NoteModel, index: usize) {
                     );
                     return;
                 }
-                let active = model.props.suggest_index.min(items.len().saturating_sub(1));
+                let active = host.props().suggest_index.min(items.len().saturating_sub(1));
                 for (item, label) in items.iter().enumerate() {
-                    let selected = model.props.suggest_armed && item == active;
+                    let selected = host.props().suggest_armed && item == active;
                     let pad = (SUGGEST_ROW_H - ui.text_height(TextRole::Caption)) / 2.0;
                     let id = format!("props:suggest:{item}");
                     ui.click_box(
@@ -463,10 +504,10 @@ struct SuggestView {
     pool: bool,
 }
 
-fn view_for_row(model: &NoteModel, index: usize) -> Option<SuggestView> {
-    let (pairs, _) = model.props.data.as_ref()?;
-    let query = model.props.suggest_query.as_str();
-    match model.props.editing.as_ref()? {
+fn view_for_row(host: &dyn PropsHost, index: usize) -> Option<SuggestView> {
+    let (pairs, _) = host.props().data.as_ref()?;
+    let query = host.props().suggest_query.as_str();
+    match host.props().editing.as_ref()? {
         Slot::Key(row) if *row == index => {
             let existing: Vec<String> = pairs.iter().map(|(key, _)| key.clone()).collect();
             Some(filter_keys(&existing, query))
@@ -485,7 +526,7 @@ fn view_for_row(model: &NoteModel, index: usize) -> Option<SuggestView> {
                 })
                 .collect();
             existing.extend(split_comma_list(query));
-            Some(filter_tags(&model.tag_vocab, &existing, query))
+            Some(filter_tags(&host.tags(), &existing, query))
         }
         _ => None,
     }
@@ -524,60 +565,65 @@ fn filter_tags(vocab: &[String], used: &[String], query: &str) -> SuggestView {
 }
 
 /// 当前编辑槽的候选（键盘巡航 / 点击选中与渲染同一口径）。
-pub fn suggestion_items(model: &NoteModel) -> Vec<String> {
-    let index = match model.props.editing.as_ref() {
+pub fn suggestion_items(host: &dyn PropsHost) -> Vec<String> {
+    let index = match host.props().editing.as_ref() {
         Some(Slot::Key(row)) => *row,
         Some(Slot::Item(row, _) | Slot::NewItem(row)) => *row,
         _ => return Vec::new(),
     };
-    view_for_row(model, index).map(|view| view.items).unwrap_or_default()
+    view_for_row(host, index).map(|view| view.items).unwrap_or_default()
 }
 
 /// ↑↓ 巡航：首次点亮首 / 尾项；返回是否发生了移动。
-pub fn move_suggestion(model: &mut NoteModel, delta: i32) -> bool {
-    let count = suggestion_items(model).len();
+pub fn move_suggestion(host: &mut dyn PropsHost, delta: i32) -> bool {
+    let count = suggestion_items(host).len();
     if count == 0 {
         return false;
     }
     let last = count - 1;
-    model.props.suggest_index = if model.props.suggest_armed {
-        (model.props.suggest_index.min(last) as i32 + delta).clamp(0, last as i32) as usize
+    let props = host.props_mut();
+    props.suggest_index = if props.suggest_armed {
+        (props.suggest_index.min(last) as i32 + delta).clamp(0, last as i32) as usize
     } else if delta > 0 {
         0
     } else {
         last
     };
-    model.props.suggest_armed = true;
+    props.suggest_armed = true;
     true
 }
 
 /// 候选清单纵向滚动偏移（高亮行越过可视区后跟随）。
-pub fn suggest_scroll_offset(model: &NoteModel) -> f32 {
-    let count = suggestion_items(model).len();
+pub fn suggest_scroll_offset(host: &dyn PropsHost) -> f32 {
+    let count = suggestion_items(host).len();
     if count <= SUGGEST_MAX_ROWS {
         return 0.0;
     }
-    let first = model
-        .props
+    let first = host
+        .props()
         .suggest_index
         .saturating_sub(SUGGEST_MAX_ROWS - 1)
         .min(count - SUGGEST_MAX_ROWS);
     first as f32 * SUGGEST_ROW_H
 }
 
-pub fn reset_suggest(model: &mut NoteModel) {
-    model.props.suggest_query.clear();
-    model.props.suggest_index = 0;
-    model.props.suggest_armed = false;
+pub fn reset_suggest(host: &mut dyn PropsHost) {
+    let props = host.props_mut();
+    props.suggest_query.clear();
+    props.suggest_index = 0;
+    props.suggest_armed = false;
 }
 
 /// 放弃在途槽编辑（不提交草稿）：删除类动作按渲染下标执行，先取消可避免提交改行后下标漂移。
-pub fn cancel_edit(model: &mut NoteModel) {
-    model.props.editing = None;
-    model.props.draft.clear();
-    model.props.error = None;
-    reset_suggest(model);
-    model.refresh_props();
+pub fn cancel_edit(host: &mut dyn PropsHost) {
+    {
+        let props = host.props_mut();
+        props.editing = None;
+        props.draft.clear();
+        props.error = None;
+    }
+    reset_suggest(host);
+    host.refresh();
 }
 
 fn is_badge_key(key: &str) -> bool {
@@ -619,7 +665,7 @@ fn parse_type(key: &str) -> Option<PropType> {
 }
 
 /// 类型菜单：六种类型（徽章键锁标签，其余键标签不可选）。
-pub fn type_menu(ui: &mut Ui<'_, '_>, model: &NoteModel, index: usize, left: f32, bottom: f32) {
+pub fn type_menu(ui: &mut Ui<'_, '_>, host: &dyn PropsHost, index: usize, left: f32, bottom: f32) {
     const TYPES: [(PropType, &str, &str); 6] = [
         (PropType::Text, "type", "文本"),
         (PropType::Tag, "tag", "标签"),
@@ -628,7 +674,7 @@ pub fn type_menu(ui: &mut Ui<'_, '_>, model: &NoteModel, index: usize, left: f32
         (PropType::Boolean, "toggle-left", "布尔"),
         (PropType::List, "list", "列表"),
     ];
-    let Some((pairs, _)) = &model.props.data else { return };
+    let Some((pairs, _)) = &host.props().data else { return };
     let Some((key, value)) = pairs.get(index) else { return };
     let badge = is_badge_key(key);
     let current = frontmatter::infer_type(badge, value);
@@ -676,30 +722,32 @@ pub fn type_menu(ui: &mut Ui<'_, '_>, model: &NoteModel, index: usize, left: f32
 }
 
 /// 点击处理：返回 true 表示需要把键盘焦点交给属性输入框。
-pub fn on_click(model: &mut NoteModel, id: &str) -> bool {
+pub fn on_click(host: &mut dyn PropsHost, id: &str) -> bool {
     if id == "props:toggle" {
-        model.props.collapsed = !model.props.collapsed;
+        let collapsed = host.props().collapsed;
+        host.props_mut().collapsed = !collapsed;
         return false;
     }
-    if !model.can_write {
+    if !host.editable() {
         return false;
     }
     if id == "props:add" {
         return false;
     }
+    let data = host.props().data.clone();
     if let Some(rest) = id.strip_prefix("props:key:") {
         let Ok(index) = rest.parse::<usize>() else { return false };
-        let Some((pairs, _)) = &model.props.data else { return false };
+        let Some((pairs, _)) = &data else { return false };
         let Some((key, _)) = pairs.get(index) else { return false };
-        begin_slot(model, Slot::Key(index), key.clone());
+        begin_slot(host, Slot::Key(index), key.clone());
         return true;
     }
     if let Some(rest) = id.strip_prefix("props:value:") {
         let Ok(index) = rest.parse::<usize>() else { return false };
-        let Some((pairs, _)) = &model.props.data else { return false };
+        let Some((pairs, _)) = &data else { return false };
         let Some((_, value)) = pairs.get(index) else { return false };
         let text = yaml_text(value);
-        begin_slot(model, Slot::Value(index), text);
+        begin_slot(host, Slot::Value(index), text);
         return true;
     }
     if let Some(rest) = id.strip_prefix("props:item:") {
@@ -707,44 +755,47 @@ pub fn on_click(model: &mut NoteModel, id: &str) -> bool {
         let (Ok(row), Ok(item)) = (row.parse::<usize>(), item.parse::<usize>()) else {
             return false;
         };
-        let Some((pairs, _)) = &model.props.data else { return false };
+        let Some((pairs, _)) = &data else { return false };
         let Some((_, Yaml::Seq(items))) = pairs.get(row) else { return false };
         let Some(value) = items.get(item) else { return false };
         if scalar_text(value).is_none() {
             return false;
         }
-        begin_slot(model, Slot::Item(row, item), yaml_text(value));
+        begin_slot(host, Slot::Item(row, item), yaml_text(value));
         return true;
     }
     if let Some(rest) = id.strip_prefix("props:additem:") {
         let Ok(index) = rest.parse::<usize>() else { return false };
-        let Some((pairs, _)) = &model.props.data else { return false };
+        let Some((pairs, _)) = &data else { return false };
         let Some((_, Yaml::Seq(_))) = pairs.get(index) else { return false };
-        begin_slot(model, Slot::NewItem(index), String::new());
+        begin_slot(host, Slot::NewItem(index), String::new());
         return true;
     }
     if let Some(rest) = id.strip_prefix("props:type:") {
         let Ok(index) = rest.parse::<usize>() else { return false };
-        model.props.type_menu = Some(index);
+        host.props_mut().type_menu = Some(index);
         return false;
     }
     false
 }
 
-fn begin_slot(model: &mut NoteModel, slot: Slot, draft: String) {
-    model.props.editing = Some(slot);
-    model.props.draft = draft;
-    model.props.error = None;
-    reset_suggest(model);
+fn begin_slot(host: &mut dyn PropsHost, slot: Slot, draft: String) {
+    {
+        let props = host.props_mut();
+        props.editing = Some(slot);
+        props.draft = draft;
+        props.error = None;
+    }
+    reset_suggest(host);
 }
 
 /// 追加一条空属性并进入键名编辑；返回是否应把焦点交给输入框。
 /// 调用方随即把占位键写进正文，因此 Esc 取消编辑后这条空属性仍留在文件里。
-pub fn add_property(model: &mut NoteModel) -> bool {
-    if !model.can_write || model.props.editing.is_some() {
+pub fn add_property(host: &mut dyn PropsHost) -> bool {
+    if !host.editable() || host.props().editing.is_some() {
         return false;
     }
-    let (mut pairs, ok) = match model.props.data.clone() {
+    let (mut pairs, ok) = match host.props().data.clone() {
         Some((pairs, ok)) => (pairs, ok),
         None => (Vec::new(), true),
     };
@@ -753,106 +804,112 @@ pub fn add_property(model: &mut NoteModel) -> bool {
     }
     let key = unique_key(&pairs);
     pairs.push((key.clone(), Yaml::Str(String::new())));
-    model.props.data = Some((pairs.clone(), true));
-    model.props.collapsed = false;
-    begin_slot(model, Slot::Key(pairs.len() - 1), key);
+    let props = host.props_mut();
+    props.data = Some((pairs.clone(), true));
+    props.collapsed = false;
+    begin_slot(host, Slot::Key(pairs.len() - 1), key);
     true
 }
 
 /// 占位键先写进正文（返回新全文）。
-pub fn text_with_placeholder(model: &NoteModel) -> Option<String> {
-    let (pairs, _) = model.props.data.as_ref()?;
-    Some(model.text_with_props(pairs.clone()))
+pub fn text_with_placeholder(host: &mut dyn PropsHost) -> Option<String> {
+    let pairs = host.props().data.as_ref()?.0.clone();
+    host.write_pairs(pairs)
 }
 
 /// Enter：候选已用 ↑↓ 高亮则选中候选，否则按方向提交并步进。
-pub fn submit(model: &mut NoteModel, dir: i32) -> (Option<String>, bool) {
-    if model.props.suggest_armed {
-        let items = suggestion_items(model);
-        let index = model.props.suggest_index.min(items.len().saturating_sub(1));
+pub fn submit(host: &mut dyn PropsHost, dir: i32) -> (Option<String>, bool) {
+    if host.props().suggest_armed {
+        let items = suggestion_items(host);
+        let index = host.props().suggest_index.min(items.len().saturating_sub(1));
         if let Some(text) = items.into_iter().nth(index) {
-            return pick(model, text, dir);
+            return pick(host, text, dir);
         }
     }
-    commit(model, dir)
+    commit(host, dir)
 }
 
 /// 点击候选：替换草稿后提交（鼠标选中不步进）。
-pub fn pick_suggestion(model: &mut NoteModel, index: usize) -> (Option<String>, bool) {
-    let items = suggestion_items(model);
+pub fn pick_suggestion(host: &mut dyn PropsHost, index: usize) -> (Option<String>, bool) {
+    let items = suggestion_items(host);
     match items.into_iter().nth(index) {
-        Some(text) => pick(model, text, 0),
+        Some(text) => pick(host, text, 0),
         None => (None, false),
     }
 }
 
-fn pick(model: &mut NoteModel, mut text: String, dir: i32) -> (Option<String>, bool) {
-    model.props.suggest_armed = false;
-    if matches!(model.props.editing, Some(Slot::Item(..) | Slot::NewItem(_)) | Some(Slot::Key(_))) {
+fn pick(host: &mut dyn PropsHost, mut text: String, dir: i32) -> (Option<String>, bool) {
+    host.props_mut().suggest_armed = false;
+    if matches!(host.props().editing, Some(Slot::Item(..) | Slot::NewItem(_)) | Some(Slot::Key(_))) {
         // 标签项草稿可能带逗号分隔的多段：只替换最后一段，前面的段保留
-        let row = match model.props.editing {
+        let row = match host.props().editing {
             Some(Slot::Item(row, _) | Slot::NewItem(row)) => Some(row),
             _ => None,
         };
         let tag_row = row.is_some_and(|row| {
-            model
-                .props
+            host
+                .props()
                 .data
                 .as_ref()
                 .and_then(|(pairs, _)| pairs.get(row))
                 .is_some_and(|(key, _)| is_badge_key(key))
         });
         if tag_row {
-            if let Some(at) = model.props.draft.rfind(|ch| ch == ',' || ch == '，') {
-                text = format!("{}{}", &model.props.draft[..=at], text);
+            if let Some(at) = host.props().draft.rfind(|ch| ch == ',' || ch == '，') {
+                text = format!("{}{}", &host.props().draft[..=at], text);
             }
         }
-        model.props.draft = text;
+        host.props_mut().draft = text;
     }
-    commit(model, dir)
+    commit(host, dir)
 }
 
 /// 提交当前槽位并按方向步进：返回（新全文，是否已切到下一槽）。
-pub fn commit(model: &mut NoteModel, dir: i32) -> (Option<String>, bool) {
-    let Some(slot) = model.props.editing.clone() else { return (None, false) };
-    let Some((pairs, _)) = model.props.data.clone() else {
-        reset_suggest(model);
-        model.props.editing = None;
-        model.props.draft.clear();
+pub fn commit(host: &mut dyn PropsHost, dir: i32) -> (Option<String>, bool) {
+    let Some(slot) = host.props().editing.clone() else { return (None, false) };
+    let Some((pairs, _)) = host.props().data.clone() else {
+        reset_suggest(host);
+        let props = host.props_mut();
+        props.editing = None;
+        props.draft.clear();
         return (None, false);
     };
     let mut pairs = pairs;
     if !slot_valid(&pairs, &slot) {
-        reset_suggest(model);
-        model.props.editing = None;
-        model.props.draft.clear();
-        model.props.error = None;
+        reset_suggest(host);
+        let props = host.props_mut();
+        props.editing = None;
+        props.draft.clear();
+        props.error = None;
         return (None, false);
     }
-    let draft = model.props.draft.trim().to_string();
+    let draft = host.props().draft.trim().to_string();
     if let Slot::Key(index) = slot {
         if !draft.is_empty()
             && pairs[index].0 != draft
             && pairs.iter().enumerate().any(|(i, (key, _))| i != index && key == &draft)
         {
-            model.props.error = Some(format!("属性「{draft}」已存在，未写入"));
-            reset_suggest(model);
-            model.props.editing = None;
-            model.props.draft.clear();
+            host.props_mut().error = Some(format!("属性「{draft}」已存在，未写入"));
+            reset_suggest(host);
+            let props = host.props_mut();
+            props.editing = None;
+            props.draft.clear();
             return (None, false);
         }
     }
     let outcome = commit_slot_data(&mut pairs, &slot, &draft);
-    model.props.draft.clear();
-    model.props.error = None;
-    reset_suggest(model);
-    model.props.editing = None;
+    {
+        let props = host.props_mut();
+        props.draft.clear();
+        props.error = None;
+        props.editing = None;
+    }
+    reset_suggest(host);
     let text = if outcome.changed {
-        let text = model.text_with_props(pairs.clone());
-        model.props.data = Some((pairs.clone(), true));
-        Some(text)
+        host.props_mut().data = Some((pairs.clone(), true));
+        host.write_pairs(pairs.clone())
     } else {
-        model.refresh_props();
+        host.refresh();
         None
     };
     if outcome.deleted || dir == 0 {
@@ -866,8 +923,10 @@ pub fn commit(model: &mut NoteModel, dir: i32) -> (Option<String>, bool) {
         None => None,
     };
     if let Some(next) = target {
-        model.props.editing = Some(next.clone());
-        model.props.draft = slot_text(&pairs, &next);
+        let draft = slot_text(&pairs, &next);
+        let props = host.props_mut();
+        props.editing = Some(next);
+        props.draft = draft;
         (text, true)
     } else {
         (text, false)
@@ -875,30 +934,34 @@ pub fn commit(model: &mut NoteModel, dir: i32) -> (Option<String>, bool) {
 }
 
 /// 类型菜单选项的点击（命中即改值并提交）。
-pub fn on_type_pick(model: &mut NoteModel, id: &str) -> Option<String> {
+pub fn on_type_pick(host: &mut dyn PropsHost, id: &str) -> Option<String> {
     let rest = id.strip_prefix("props:typepick:")?;
     let (row, kind) = rest.split_once(':')?;
     let row = row.parse::<usize>().ok()?;
     let kind = parse_type(kind)?;
-    let (pairs, _) = model.props.data.as_mut()?;
+    let (mut pairs, _) = host.props().data.clone()?;
     let value = &mut pairs.get_mut(row)?.1;
     let Some(converted) = frontmatter::convert_value(value, kind) else {
-        model.props.error = Some("无法转换为该类型".to_string());
+        host.props_mut().error = Some("无法转换为该类型".to_string());
         return None;
     };
     *value = converted;
-    model.props.type_menu = None;
-    model.props.error = None;
+    host.props_mut().data = Some((pairs.clone(), true));
+    {
+        let props = host.props_mut();
+        props.type_menu = None;
+        props.error = None;
+    }
     let pairs = pairs.clone();
-    Some(model.text_with_props(pairs))
+    host.write_pairs(pairs)
 }
 
 /// 直接改值类点击（删行 / 删项 / 翻转布尔）：返回新全文（无变化返回 None）。
-pub fn quick_action(model: &mut NoteModel, id: &str) -> Option<String> {
-    if !model.can_write {
+pub fn quick_action(host: &mut dyn PropsHost, id: &str) -> Option<String> {
+    if !host.editable() {
         return None;
     }
-    let (pairs, ok) = model.props.data.clone()?;
+    let (pairs, ok) = host.props().data.clone()?;
     if !ok {
         return None;
     }
@@ -926,11 +989,14 @@ pub fn quick_action(model: &mut NoteModel, id: &str) -> Option<String> {
     } else {
         return None;
     }
-    model.props.editing = None;
-    model.props.draft.clear();
-    model.props.error = None;
-    reset_suggest(model);
-    Some(model.text_with_props(pairs))
+    {
+        let props = host.props_mut();
+        props.editing = None;
+        props.draft.clear();
+        props.error = None;
+    }
+    reset_suggest(host);
+    host.write_pairs(pairs)
 }
 
 /// 值区文本：序列按「，」连接，其余标量取原文本。
@@ -1158,68 +1224,142 @@ fn split_comma_list(text: &str) -> Vec<String> {
 mod tests {
     use super::*;
 
-    fn model(text: &str) -> NoteModel {
-        let mut model = NoteModel::default();
-        model.load("a.md".into(), text.into(), true);
-        model
+    struct TestHost {
+        props: PropsState,
+        text: String,
+        tags: Vec<String>,
+    }
+
+    impl TestHost {
+        fn new(text: &str) -> Self {
+            let mut host = Self { props: PropsState::default(), text: text.into(), tags: Vec::new() };
+            host.refresh();
+            host
+        }
+    }
+
+    impl PropsHost for TestHost {
+        fn props(&self) -> &PropsState {
+            &self.props
+        }
+
+        fn props_mut(&mut self) -> &mut PropsState {
+            &mut self.props
+        }
+
+        fn editable(&self) -> bool {
+            true
+        }
+
+        fn tags(&self) -> &[String] {
+            &self.tags
+        }
+
+        fn write_pairs(&mut self, pairs: Vec<(String, Yaml)>) -> Option<String> {
+            let parsed = frontmatter::parse(&self.text);
+            let text = frontmatter::stringify(&Yaml::Map(pairs.clone()), &parsed.body);
+            self.text = text.clone();
+            self.props.data = Some((pairs, true));
+            Some(text)
+        }
+
+        fn refresh(&mut self) {
+            let parsed = frontmatter::parse(&self.text);
+            let open = frontmatter::block_end(&self.text).is_some();
+            self.props.data = if open {
+                let pairs = parsed.data.as_map().map(<[(String, Yaml)]>::to_vec).unwrap_or_default();
+                Some((pairs, parsed.ok))
+            } else if self.text.starts_with("---") {
+                Some((Vec::new(), false))
+            } else {
+                None
+            };
+        }
+    }
+
+    fn host(text: &str) -> TestHost {
+        TestHost::new(text)
     }
 
     #[test]
     fn clearing_a_string_value_keeps_an_empty_property() {
-        let mut note = model("---\na: x\n---\n正文");
-        begin_slot(&mut note, Slot::Value(0), "x".into());
-        note.props.draft.clear();
-        let (text, next) = commit(&mut note, 0);
+        let mut host = host("---
+a: x
+---
+正文");
+        begin_slot(&mut host, Slot::Value(0), "x".into());
+        host.props.draft.clear();
+        let (text, next) = commit(&mut host, 0);
         assert!(!next);
-        assert_eq!(text.as_deref(), Some("---\na: ''\n---\n正文"), "空字符串保留属性");
-        assert_eq!(note.props.data.as_ref().unwrap().0[0].1, Yaml::Str(String::new()));
+        assert_eq!(text.as_deref(), Some("---
+a: ''
+---
+正文"), "空字符串保留属性");
+        assert_eq!(host.props.data.as_ref().unwrap().0[0].1, Yaml::Str(String::new()));
     }
 
     #[test]
     fn clearing_an_item_removes_it_and_does_not_step() {
-        let mut note = model("---\ntags: [a, b]\n---\n正文");
-        begin_slot(&mut note, Slot::Item(0, 0), "a".into());
-        note.props.draft.clear();
-        let (_, next) = commit(&mut note, 1);
+        let mut host = host("---
+tags: [a, b]
+---
+正文");
+        begin_slot(&mut host, Slot::Item(0, 0), "a".into());
+        host.props.draft.clear();
+        let (_, next) = commit(&mut host, 1);
         assert!(!next, "删空的槽不再前进");
-        assert_eq!(note.props.data.as_ref().unwrap().0[0].1, Yaml::Seq(vec![Yaml::Str("b".into())]));
+        assert_eq!(host.props.data.as_ref().unwrap().0[0].1, Yaml::Seq(vec![Yaml::Str("b".into())]));
     }
 
     #[test]
     fn tab_steps_from_key_to_value() {
-        let mut note = model("---\na: x\n---\n正文");
-        begin_slot(&mut note, Slot::Key(0), "a".into());
-        let (_, next) = commit(&mut note, 1);
+        let mut host = host("---
+a: x
+---
+正文");
+        begin_slot(&mut host, Slot::Key(0), "a".into());
+        let (_, next) = commit(&mut host, 1);
         assert!(next);
-        assert_eq!(note.props.editing, Some(Slot::Value(0)));
-        assert_eq!(note.props.draft, "x");
+        assert_eq!(host.props.editing, Some(Slot::Value(0)));
+        assert_eq!(host.props.draft, "x");
     }
 
     #[test]
     fn duplicate_key_is_rejected_with_a_notice() {
-        let mut note = model("---\na: x\nb: y\n---\n正文");
-        begin_slot(&mut note, Slot::Key(0), "b".into());
-        let (text, next) = commit(&mut note, 1);
+        let mut host = host("---
+a: x
+b: y
+---
+正文");
+        begin_slot(&mut host, Slot::Key(0), "b".into());
+        let (text, next) = commit(&mut host, 1);
         assert!(text.is_none() && !next);
-        assert!(note.props.error.as_deref().unwrap().contains("已存在"));
-        assert_eq!(note.props.editing, None);
+        assert!(host.props.error.as_deref().unwrap().contains("已存在"));
+        assert_eq!(host.props.editing, None);
     }
 
     #[test]
     fn adding_a_property_uses_the_placeholder_key_and_writes_immediately() {
-        let mut note = model("---\na: x\n---\n正文");
-        assert!(add_property(&mut note));
-        let text = text_with_placeholder(&note).expect("有占位键");
+        let mut host = host("---
+a: x
+---
+正文");
+        assert!(add_property(&mut host));
+        let text = text_with_placeholder(&mut host).expect("有占位键");
         assert!(text.contains("property:"));
-        assert_eq!(note.props.editing, Some(Slot::Key(1)));
+        assert_eq!(host.props.editing, Some(Slot::Key(1)));
     }
 
     #[test]
     fn key_suggestions_exclude_existing_keys_and_filter_by_draft() {
-        let mut note = model("---\ntags: []\nstatus: x\n---\n正文");
-        begin_slot(&mut note, Slot::Key(1), "cr".into());
-        note.props.suggest_query = "cr".into();
-        let items = suggestion_items(&note);
+        let mut host = host("---
+tags: []
+status: x
+---
+正文");
+        begin_slot(&mut host, Slot::Key(1), "cr".into());
+        host.props.suggest_query = "cr".into();
+        let items = suggestion_items(&host);
         assert!(!items.contains(&"status".to_string()), "已有键不重复提供");
         assert!(items.iter().any(|item| item == "created"), "按草稿过滤：{items:?}");
         assert!(items.iter().all(|item| item.to_lowercase().contains("cr")));
@@ -1227,22 +1367,28 @@ mod tests {
 
     #[test]
     fn tag_suggestions_filter_the_last_comma_segment() {
-        let mut note = model("---\ntags: [开发]\n---\n正文");
-        note.tag_vocab = vec!["开发".into(), "开发工具".into(), "设计".into()];
-        begin_slot(&mut note, Slot::NewItem(0), "开".into());
-        note.props.suggest_query = "开".into();
-        let items = suggestion_items(&note);
+        let mut host = host("---
+tags: [开发]
+---
+正文");
+        host.tags = vec!["开发".into(), "开发工具".into(), "设计".into()];
+        begin_slot(&mut host, Slot::NewItem(0), "开".into());
+        host.props.suggest_query = "开".into();
+        let items = suggestion_items(&host);
         assert_eq!(items, vec!["开发工具".to_string()], "排除已用标签并按最后一段过滤");
     }
 
     #[test]
     fn picking_a_tag_candidate_keeps_the_earlier_segments() {
-        let mut note = model("---\ntags: []\n---\n正文");
-        note.tag_vocab = vec!["开发".into(), "设计".into()];
-        begin_slot(&mut note, Slot::NewItem(0), "开发,设".into());
-        note.props.suggest_query = "开发,设".into();
-        let (_, _) = pick_suggestion(&mut note, 0);
-        let Yaml::Seq(items) = &note.props.data.as_ref().unwrap().0[0].1 else {
+        let mut host = host("---
+tags: []
+---
+正文");
+        host.tags = vec!["开发".into(), "设计".into()];
+        begin_slot(&mut host, Slot::NewItem(0), "开发,设".into());
+        host.props.suggest_query = "开发,设".into();
+        let (_, _) = pick_suggestion(&mut host, 0);
+        let Yaml::Seq(items) = &host.props.data.as_ref().unwrap().0[0].1 else {
             panic!("tags 应为数组");
         };
         assert_eq!(items, &vec![Yaml::Str("开发".into()), Yaml::Str("设计".into())]);

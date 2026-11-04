@@ -197,6 +197,10 @@ pub const MAX_RECENT_FILES: usize = 50;
 pub const CALENDAR_VIEW: &str = "plugin:com.atelyx.calendar:calendar";
 /// 预置 AI 对话插件的面板视图 id：默认布局与旧布局迁移共用。
 pub const AI_PANEL_VIEW: &str = "plugin:atelyx.ai-panel:aichat";
+/// 预置画布插件的面板视图 id：默认布局与旧布局迁移共用。
+pub const CANVAS_VIEW: &str = "plugin:atelyx.canvas:canvas";
+/// 预置属性面板插件的视图 id：默认布局与旧布局迁移共用。
+pub const INSPECTOR_VIEW: &str = "plugin:atelyx.inspector:inspector";
 /// 预置笔记插件的面板 / 文档视图 id：默认布局与旧布局迁移共用。
 pub const NOTES_VIEW: &str = "plugin:atelyx.notes:note";
 /// 预置仓库历史插件的面板视图 id：主页模板与旧布局迁移共用。
@@ -444,6 +448,10 @@ fn migrate_view_id(view: &mut ViewKind) {
         *view = COLLAB_VIEW.to_string();
     } else if view == "files" {
         *view = FILES_VIEW.to_string();
+    } else if view == "canvas" {
+        *view = CANVAS_VIEW.to_string();
+    } else if view == "inspector" {
+        *view = INSPECTOR_VIEW.to_string();
     }
 }
 
@@ -573,7 +581,7 @@ fn create_default_layouts() -> Vec<WorkspaceLayout> {
         }
     };
     vec![
-        build("画布", "files", "canvas", "inspector", (17.0, 83.0), (74.0, 26.0)),
+        build("画布", "files", CANVAS_VIEW, INSPECTOR_VIEW, (17.0, 83.0), (74.0, 26.0)),
         build("笔记", "files", NOTES_VIEW, AI_PANEL_VIEW, (19.0, 81.0), (72.0, 28.0)),
         build("表格", "files", "table", NOTES_VIEW, (18.0, 82.0), (77.0, 23.0)),
     ]

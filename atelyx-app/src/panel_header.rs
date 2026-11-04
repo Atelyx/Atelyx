@@ -43,12 +43,15 @@ pub(crate) fn header_row<'a>(
         .plugin_modal
         .as_ref()
         .is_some_and(|(plugin_id, _)| *plugin_id == entry.plugin_id);
+    // 只有脏标记、没有可见内容的头部不占高度（画布只用它参与 flush 门控）。
+    let mut visible = false;
     let mut bar = row![]
         .spacing(10)
         .padding(Padding::ZERO.horizontal(10.0))
         .height(Length::Fixed(HEADER_H))
         .align_y(alignment::Vertical::Center);
     if state.view_slot == Some(ContributionSlot::TableView) {
+        visible = true;
         let active = app.panel_view.get(target).cloned().flatten();
         let label = view_label(app, active.as_deref().unwrap_or(target));
         bar = bar.push(
@@ -66,10 +69,12 @@ pub(crate) fn header_row<'a>(
         ));
     }
     if let Some(status) = &state.status {
+        visible = true;
         bar = bar.push(controls::status_pill(status_tone(status.tone), status.text.clone()));
     }
     bar = bar.push(space().width(Length::Fill));
     if let Some(error) = &state.error {
+        visible = true;
         bar = bar.push(
             text(ellipsize(error, ERROR_MAX_W, pal::fs_micro()))
                 .size(pal::fs_micro())
@@ -77,6 +82,7 @@ pub(crate) fn header_row<'a>(
         );
     }
     if !state.pills.is_empty() {
+        visible = true;
         let members: Vec<(iced::Color, String)> = state
             .pills
             .iter()
@@ -90,6 +96,7 @@ pub(crate) fn header_row<'a>(
         bar = bar.push(collab_pill_row(&members));
     }
     for label in &state.texts {
+        visible = true;
         bar = bar.push(
             text(label.clone())
                 .size(pal::fs_caption())
@@ -97,6 +104,7 @@ pub(crate) fn header_row<'a>(
         );
     }
     if !state.items.is_empty() {
+        visible = true;
         bar = bar.push(controls::icon_button(
             "ellipsis",
             14.0,
@@ -108,6 +116,9 @@ pub(crate) fn header_row<'a>(
             }),
             Some((window, "更多".to_string())),
         ));
+    }
+    if !visible && !modal {
+        return None;
     }
     let row: Element<'_, Message> = bar.into();
     if modal {

@@ -539,7 +539,7 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginFrame<'_> {
                     // iced 沿 winit（正 = 向上 / 向左）；协议按 Web 惯例（正 = 向下 / 向右），取反换算。
                     // 行增量按宿主同一口径折算成像素：协议只认像素，插件不必区分设备
                     mouse::ScrollDelta::Lines { x, y } => {
-                        (-x * crate::canvas_view::WHEEL_LINE_PX, -y * crate::canvas_view::WHEEL_LINE_PX)
+                        (-x * crate::WHEEL_LINE_PX, -y * crate::WHEEL_LINE_PX)
                     }
                     mouse::ScrollDelta::Pixels { x, y } => (-x, -y),
                 };

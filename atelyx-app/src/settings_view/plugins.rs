@@ -21,7 +21,8 @@ use atelyx_core::plugin_runtime::{
     InstallOutcome, PanelFlushDoneParams, PanelHeaderParams, SpaceFilePatchParams,
     MeasureBatchParams,
     MeasureBatchResult, NotificationLevel, Permission, PluginEvent, PluginRuntime, PluginStatus,
-    DocAwarenessParams, DocEditParams, DocOpenParams, DocRenameParams, DocSaveParams,
+    DocAwarenessParams, DocEditParams, DocOpenParams, DocPropsWriteParams, DocRenameParams,
+    DocSaveParams,
     FilesResult, PluginSummary, SetTrayItemsParams, SpaceContainerKind, SpaceMember,
     SpaceMemberRole, SpaceMembersResult, SpacePeer, SpacePeerFile, SpaceRoomResult,
     ContainerEntry, SpaceSelfIdentity, UiDirEntry, VaultFileEntry, VaultTagsResult, VaultUiParams,
@@ -310,6 +311,10 @@ pub enum PluginsMsg {
     DocOpen { request_id: u64, params: DocOpenParams },
     /// 把当前文档改名为新的主名（同目录、保留扩展名）。
     DocRename { request_id: u64, params: DocRenameParams },
+    /// 读当前文档的 frontmatter 块（属性面板）。
+    DocPropsRead { request_id: u64 },
+    /// 用新 frontmatter 块替换当前文档的属性区。
+    DocPropsWrite { request_id: u64, params: DocPropsWriteParams },
     DocOpenDone {
         request_id: u64,
         gen: u64,
@@ -490,6 +495,15 @@ pub fn host_requests_stream(spec: &RuntimeSpec) -> impl iced::futures::Stream<It
                 HostRequest::ChatSend { plugin_id: _, request_id, params } => Message::Chat(
                     crate::chat_actions::ChatMsg::PluginSend { request_id, params },
                 ),
+                HostRequest::ChatSendDirect { request_id, params, .. } => Message::Chat(
+                    crate::chat_actions::ChatMsg::PluginSendDirect { request_id, params },
+                ),
+                HostRequest::ChatCompactDirect { request_id, params, .. } => Message::Chat(
+                    crate::chat_actions::ChatMsg::PluginCompactDirect { request_id, params },
+                ),
+                HostRequest::AiSettings { request_id, .. } => Message::Chat(
+                    crate::chat_actions::ChatMsg::PluginAiSettings { request_id },
+                ),
                 HostRequest::ChatStop { request_id, params, .. } => Message::Chat(
                     crate::chat_actions::ChatMsg::PluginStop {
                         request_id,
@@ -634,6 +648,12 @@ pub fn host_requests_stream(spec: &RuntimeSpec) -> impl iced::futures::Stream<It
                 }
                 HostRequest::DocRename { request_id, params, .. } => {
                     Message::Plugins(PluginsMsg::DocRename { request_id, params })
+                }
+                HostRequest::DocPropsRead { request_id, .. } => {
+                    Message::Plugins(PluginsMsg::DocPropsRead { request_id })
+                }
+                HostRequest::DocPropsWrite { request_id, params, .. } => {
+                    Message::Plugins(PluginsMsg::DocPropsWrite { request_id, params })
                 }
                 HostRequest::DocEdit { request_id, params, .. } => {
                     Message::Plugins(PluginsMsg::DocEdit { request_id, params })
@@ -1141,8 +1161,10 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
             if let Some(open) = open_file_conflict(app, &rel) {
                 // 持有该文件的插件可以写回自己的文件（表格插件保存自己打开的 .atb），
                 // 其余插件仍按「正在编辑中」拒写，避免互踩保存链
-                let owner = app.ui.last_table_file.as_deref() == Some(rel.as_str())
-                    && plugin_id == TABLES_PLUGIN_ID;
+                let owner = (app.ui.last_table_file.as_deref() == Some(rel.as_str())
+                    && plugin_id == TABLES_PLUGIN_ID)
+                    || (app.ui.last_canvas_file.as_deref() == Some(rel.as_str())
+                        && plugin_id == CANVAS_PLUGIN_ID);
                 if !owner {
                     return resolve_vault(
                         app,
@@ -1634,6 +1656,12 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
         PluginsMsg::DocEdit { request_id, params } => {
             crate::doc_session::edit(app, request_id, params)
         }
+        PluginsMsg::DocPropsRead { request_id } => {
+            crate::doc_session::props_read(app, request_id)
+        }
+        PluginsMsg::DocPropsWrite { request_id, params } => {
+            crate::doc_session::props_write(app, request_id, params)
+        }
         PluginsMsg::DocSave { request_id, params } => {
             crate::doc_session::save(app, request_id, params)
         }
@@ -2076,7 +2104,7 @@ fn dir_entries_json(children: &[vault::DirChild]) -> serde_json::Value {
 }
 
 /// 回填一次仓库调用并结束消息处理。
-fn resolve_vault(
+pub(crate) fn resolve_vault(
     app: &App,
     request_id: u64,
     result: Result<serde_json::Value, String>,
@@ -2345,7 +2373,7 @@ fn vault_change_conflict(app: &App, rel: &str, allow_path: Option<&str>) -> Opti
     let open = [
         app.ui.last_note_file.as_deref(),
         app.ui.last_table_file.as_deref(),
-        app.canvas.as_ref().map(|c| c.file.as_str()),
+        app.ui.last_canvas_file.as_deref(),
         app.doc_open.as_ref().map(|d| d.path.as_str()),
     ];
     if let Some(path) = open.into_iter().flatten().find(|path| {
@@ -2359,16 +2387,26 @@ fn vault_change_conflict(app: &App, rel: &str, allow_path: Option<&str>) -> Opti
             return Some(format!("路径正在编辑器中打开，拒绝操作：{path}"));
         }
     }
-    let canvas = app.canvas.as_ref()?;
-    for node in &canvas.data.nodes {
+    // 画布内容由插件持有，按磁盘上的画布判断引用：未落盘的新引用不在此列
+    let canvas_file = app.ui.last_canvas_file.as_deref()?;
+    let (root, _, _) = app.vault.session_snapshot().ok()?;
+    let (_, canvas) = atelyx_core::vault::read_canvas_file_cached(&app.vault, &root, canvas_file)
+        .ok()?;
+    for node in &canvas.nodes {
         let field = match node.node_type.as_str() {
             "text" | "media" | "table" => "file",
             "conversation" => "systemPromptFile",
             _ => continue,
         };
-        let Some(path) = node.data.get(field).and_then(serde_json::Value::as_str) else { continue };
+        let Some(path) = node.data.get(field).and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let path = path.replace('\\', "/");
         if path == target || path.starts_with(&prefix) {
-            return Some(format!("路径正被画布「{}」引用，拒绝操作：{path}", canvas.data.title));
+            return Some(format!(
+                "路径正被画布「{}」引用，拒绝操作：{path}",
+                canvas.title
+            ));
         }
     }
     None
@@ -2557,13 +2595,15 @@ fn write_clipboard_image(bytes: &[u8]) -> Result<(), String> {
 /// 比较归一化相对路径（`\` 与 `/` 同义）。
 /// 表格插件 id：它持有当前打开的 `.atb`，允许写回自己的文件。
 const TABLES_PLUGIN_ID: &str = crate::plugin_actions::TABLES_PLUGIN;
+/// 画布插件 id：它持有当前打开的 `.atlx`，允许写回自己的文件。
+const CANVAS_PLUGIN_ID: &str = crate::plugin_actions::CANVAS_PLUGIN;
 
 fn open_file_conflict(app: &App, rel: &str) -> Option<String> {
     let target = rel.replace('\\', "/");
     let open = [
         app.ui.last_note_file.as_deref(),
         app.ui.last_table_file.as_deref(),
-        app.canvas.as_ref().map(|c| c.file.as_str()),
+        app.ui.last_canvas_file.as_deref(),
         app.doc_open.as_ref().map(|d| d.path.as_str()),
     ];
     open.into_iter()
@@ -2609,7 +2649,7 @@ fn read_image_info(root: &std::path::Path, rel: &str) -> Result<serde_json::Valu
 
 /// 图片头 → 协议尺寸；认不出格式可读失败（插件据此提示而不是拿 0 继续画）。
 fn image_info_json(bytes: &[u8], rel: &str) -> Result<serde_json::Value, String> {
-    let (width, height) = crate::canvas_actions::image_dimensions(bytes);
+    let (width, height) = crate::image_dimensions(bytes);
     if width == 0 || height == 0 {
         return Err(format!("不是可识别的图片（png / jpeg / gif / bmp / webp）：{rel}"));
     }

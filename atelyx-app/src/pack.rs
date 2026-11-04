@@ -14,22 +14,10 @@ type ViewProvider = for<'a> fn(&'a App, window::Id) -> Element<'a, Message>;
 /// 预置插件：顺序即选择器里视图的出现序（组内按声明序）。
 pub(crate) const BUILTIN_PLUGINS: &[BuiltinPlugin] = &[
     BuiltinPlugin {
-        id: "atelyx.canvas",
-        label: "画布",
-        icon: "palette",
-        views: &[BuiltinView { id: "canvas", label: "画布", icon: "palette" }],
-    },
-    BuiltinPlugin {
         id: "atelyx.tables",
         label: "表格",
         icon: "table",
         views: &[BuiltinView { id: "table", label: "表格", icon: "table" }],
-    },
-    BuiltinPlugin {
-        id: "atelyx.inspector",
-        label: "属性",
-        icon: "info",
-        views: &[BuiltinView { id: "inspector", label: "属性", icon: "info" }],
     },
     BuiltinPlugin {
         id: atelyx_core::plugin_runtime::PLATFORM_PLUGIN,
@@ -41,9 +29,7 @@ pub(crate) const BUILTIN_PLUGINS: &[BuiltinPlugin] = &[
 
 /// 预置插件视图 id → 渲染函数。与 [`BUILTIN_PLUGINS`] 的视图 id 对齐（单测锁住）。
 const RENDERERS: &[(&str, ViewProvider)] = &[
-    ("canvas", crate::canvas_view::canvas_view),
     ("table", crate::table_panel::table_view),
-    ("inspector", crate::layout_view::inspector_view),
 ];
 
 /// 按 id 取预置插件视图内容；不属于内置表时 `None`（调用方落占位）。

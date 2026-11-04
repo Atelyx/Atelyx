@@ -5,7 +5,6 @@
 use iced::Task;
 
 use crate::layout_view::{RenameState, RenameTarget};
-use crate::canvas_actions;
 use crate::ui::notify::Level as NoticeLevel;
 use crate::{
     layout_view, vault, App, DraftKind, Message, SaveReason, SpaceField, SpaceForm,
@@ -833,7 +832,7 @@ pub fn enter_space(app: &mut App, session: SpaceSession, from_boot: bool) -> Tas
             task = task.chain(app.open_file(&rel, true));
         }
         if let Some(rel) = app.ui.last_canvas_file.clone() {
-            task = task.chain(crate::canvas_actions::load_canvas(app, &rel));
+            task = task.chain(app.open_file(&rel, true));
         }
     }
     task
@@ -850,14 +849,9 @@ fn clear_session_state(app: &mut App) {
     app.note_image_epoch = app.note_image_epoch.wrapping_add(1);
     app.doc_dirty = false;
     app.doc_save_error = None;
-    app.reset_props();
     app.file_count = None;
 
     app.rename_notice = None;
-    crate::canvas_chat::detach_canvas(app);
-    app.canvas = None;
-    // 画布在场随容器切换作废（detach_canvas 已清锁与卡运行态，通道状态一并作废）
-    app.canvas_collab = None;
     app.space_doc_flushed = None;
     app.space_doc_save_inflight = false;
     app.space_doc_save_flush_queued = false;
@@ -966,9 +960,6 @@ pub fn handle(app: &mut App, msg: SpaceMsg) -> Task<Message> {
         SpaceMsg::DocSaved { gen, rel, frozen, reason, result } => {
             on_doc_saved(app, gen, &rel, frozen, reason, result)
         }
-        SpaceMsg::CanvasPatchDone { gen, file, new_file, reason, result, frozen } => {
-            on_canvas_patch_done(app, gen, file, new_file, reason, result, frozen)
-        }
         SpaceMsg::HistoryRecorded { err } => {
             if let Some(e) = err {
                 // 历史为尽力而为侧车：失败提示但不阻塞正文链（文案由发起方按失败点拼装）
@@ -978,30 +969,6 @@ pub fn handle(app: &mut App, msg: SpaceMsg) -> Task<Message> {
             crate::repo_history::invalidate(app);
             app.plugins.on_history_changed();
             Task::none()
-        }
-        SpaceMsg::CanvasRestored { gen, rel, result } => {
-            // 世代守卫：切空间 / 切仓库后回执过期，不得越会话提示或触发重读
-            if gen != app.epoch() {
-                return Task::none();
-            }
-            // 回滚记下的 restore 版本不走 HistoryRecorded：聚合缓存与订阅方都在这里失效
-            crate::repo_history::invalidate(app);
-            app.plugins.on_history_changed();
-            match result {
-                Err(e) => {
-                    app.notify(NoticeLevel::Warning, e);
-                    Task::none()
-                }
-                Ok(()) => {
-                    app.notify(NoticeLevel::Success, "已回滚");
-                    // 快照直写不经会话链：仍打开的画布须按服务端事实重读，否则界面与 `saved` 基线停在回滚前
-                    if app.ui.last_canvas_file.as_deref() == Some(rel.as_str()) {
-                        space_load_canvas(app, &rel)
-                    } else {
-                        Task::none()
-                    }
-                }
-            }
         }
         SpaceMsg::DevicesLoaded { result } => match result {
             Err(e) => on_error(app, e, "设备列表获取失败"),
@@ -1491,7 +1458,6 @@ pub fn apply_remote_text(app: &mut App, new_text: String) {
     if app.doc_base.is_none() {
         app.doc_base = Some(previous);
     }
-    app.refresh_props();
     if app.doc_active {
         app.doc_selection = None;
     }
@@ -1510,13 +1476,6 @@ pub fn submit_file_patch(
     request_id: u64,
     params: atelyx_core::plugin_runtime::SpaceFilePatchParams,
 ) -> Task<Message> {
-    if params.kind != "table" {
-        app.plugins.resolve_shell_call(
-            request_id,
-            Err(format!("不支持的空间文件类型：{}", params.kind)),
-        );
-        return Task::none();
-    }
     let Some(session) = session_of(app) else {
         app.plugins
             .resolve_shell_call(request_id, Err("当前不在协作空间".into()));
@@ -1527,87 +1486,44 @@ pub fn submit_file_patch(
             .resolve_shell_call(request_id, Err("该空间为只读身份，无法保存".into()));
         return Task::none();
     }
-    let baseline: atelyx_core::vault::TableFile = match serde_json::from_str(&params.baseline) {
-        Ok(table) => table,
-        Err(e) => {
-            app.plugins
-                .resolve_shell_call(request_id, Err(format!("保存基线不可解析：{e}")));
-            return Task::none();
-        }
-    };
-    let frozen: atelyx_core::vault::TableFile = match serde_json::from_str(&params.frozen) {
-        Ok(table) => table,
-        Err(e) => {
-            app.plugins
-                .resolve_shell_call(request_id, Err(format!("表格快照不可解析：{e}")));
-            return Task::none();
-        }
-    };
     let client = session.client;
     let space_id = session.space_id;
     let author = crate::history_author(app);
     let gen = app.epoch();
     let path = params.path.clone();
     let path_for_cb = path.clone();
+    let kind = params.kind.clone();
+    let baseline = params.baseline.clone();
+    let frozen = params.frozen.clone();
     Task::perform(
         async move {
-            let new_file = match atelyx_core::vault::compute_table_patch(&baseline, &frozen) {
-                Some(patch) => match client.table_patch(&space_id, &path, &patch).await {
-                    Ok(ack) => ack.file,
-                    // 补丁被拒：对拍服务端 id——仍为本端基线才整文恢复，已改则报冲突
-                    Err(SpaceError::BadRequest(_)) => {
-                        let server = client
-                            .get_file_text(&space_id, &path)
-                            .await
-                            .map_err(err_text)?;
-                        let server_id = serde_json::from_str::<serde_json::Value>(&server)
-                            .ok()
-                            .and_then(|v| {
-                                v.get("id")
-                                    .and_then(|i| i.as_str())
-                                    .map(|s| s.to_owned())
-                            });
-                        if server_id.as_deref() != Some(baseline.id.as_str()) {
-                            return Err("表格已被他人修改，请刷新后重试".to_string());
-                        }
-                        let json = serde_json::to_string_pretty(&frozen)
-                            .map_err(|e| e.to_string())?;
-                        client
-                            .put_file_text(&space_id, &path, &json)
-                            .await
-                            .map_err(err_text)?;
-                        path.clone()
-                    }
-                    Err(e) => return Err(err_text(e)),
-                },
-                // 无差异（编辑后复原 / undo 回到基线）：先与服务端现状对拍，避免把分叉当成功
-                None => {
-                    let server = client
-                        .get_file_text(&space_id, &path)
-                        .await
-                        .map_err(err_text)?;
-                    let server_id = serde_json::from_str::<serde_json::Value>(&server)
-                        .ok()
-                        .and_then(|v| {
-                            v.get("id").and_then(|i| i.as_str()).map(|s| s.to_owned())
-                        });
-                    if server_id.as_deref() != Some(baseline.id.as_str()) {
-                        return Err("表格已被他人修改，请刷新后重试".to_string());
-                    }
-                    path.clone()
+            let (new_path, content_json, history_kind, history_name) = match kind.as_str() {
+                "table" => {
+                    let path = submit_table_flow(&client, &space_id, path.clone(), &baseline, &frozen).await?;
+                    (
+                        path,
+                        frozen.clone(),
+                        atelyx_core::history::HistoryKind::Table,
+                        "table",
+                    )
                 }
+                "canvas" => {
+                    let path = submit_canvas_flow(&client, &space_id, path.clone(), &baseline, &frozen).await?;
+                    (
+                        path,
+                        frozen.clone(),
+                        atelyx_core::history::HistoryKind::Canvas,
+                        "canvas",
+                    )
+                }
+                other => return Err(format!("不支持的空间文件类型：{other}")),
             };
-            let content_json = serde_json::to_string(&frozen).unwrap_or_default();
-            let summary = atelyx_core::history::version_summary(
-                atelyx_core::history::HistoryKind::Table,
-                &serde_json::to_string(&baseline).unwrap_or_default(),
-                &content_json,
-            );
+            let summary = atelyx_core::history::version_summary(history_kind, &baseline, &content_json);
             let _ = client
                 .history_record(
                     &space_id,
                     &space_client::HistoryRecordReq {
-                        kind: "table".into(),
+                        kind: history_name.into(),
                         file: path.clone(),
                         content: content_json,
                         action: "edit".into(),
@@ -1624,7 +1540,7 @@ pub fn submit_file_patch(
                     },
                 )
                 .await;
-            Ok::<String, String>(new_file)
+            Ok::<String, String>(new_path)
         },
         move |result| {
             Message::Plugins(crate::settings_view::plugins::PluginsMsg::SpaceFilePatchDone {
@@ -1637,266 +1553,94 @@ pub fn submit_file_patch(
     )
 }
 
-// ===== 画布（空间模式） =====
-
-/// 空间模式载入 .atlx：画布文本 + 引用内容一并拉取（文本 / 媒体 / 图片取字节端点，表格走文本端点）。
-pub fn space_load_canvas(app: &App, rel: &str) -> Task<Message> {
-    let Some(session) = session_of(app) else { return Task::none() };
-    let gen = app.epoch();
-    let rel_owned = rel.to_string();
-    let rel_for_cb = rel_owned.clone();
-    let client = session.client;
-    let space_id = session.space_id;
-    Task::perform(
-        async move {
-            let rel = rel_owned;
-            let text = client.get_file_text(&space_id, &rel).await.map_err(err_text)?;
-            let canvas: atelyx_core::vault::CanvasFile =
-                serde_json::from_str(&text).map_err(|e| format!("画布解析失败：{e}"))?;
-            let docs = canvas_actions::prepare_docs(&canvas);
-            let mut refs: HashMap<String, canvas_actions::RefRaw> = HashMap::new();
-            for (path, kind) in canvas_actions::collect_ref_paths(&canvas) {
-                // 与本地同口径：取原始字节，UTF-8 可解码 = 文本，否则 = 二进制占位，读不到 = 缺失。
-                // 不经文本端点——它按 lossy 解码返回，非文本内容与缺失在响应里无从区分
-                let raw = match kind {
-                    canvas_actions::RefKind::Text | canvas_actions::RefKind::Media => {
-                        match client.get_file_bytes(&space_id, &path).await {
-                            Ok(bytes) => match String::from_utf8(bytes) {
-                                Ok(t) => canvas_actions::RefRaw::Text(t),
-                                Err(_) => canvas_actions::RefRaw::Binary,
-                            },
-                            Err(_) => canvas_actions::RefRaw::Missing,
-                        }
-                    }
-                    canvas_actions::RefKind::Image => match client.get_file_bytes(&space_id, &path).await {
-                        Ok(bytes) => {
-                            let (width, height) = canvas_actions::image_dimensions(&bytes);
-                            canvas_actions::RefRaw::Image { bytes, width, height }
-                        }
-                        Err(_) => canvas_actions::RefRaw::Missing,
-                    },
-                    canvas_actions::RefKind::Table => match client.get_file_text(&space_id, &path).await {
-                        Ok(t) => serde_json::from_str::<atelyx_core::vault::TableFile>(&t)
-                            .map(|tb| canvas_actions::RefRaw::Table {
-                                summary: format!("{} 字段 · {} 行", tb.fields.len(), tb.rows.len()),
-                                body: atelyx_core::table_ops::table_to_text(&tb),
-                            })
-                            .unwrap_or(canvas_actions::RefRaw::Missing),
-                        Err(_) => canvas_actions::RefRaw::Missing,
-                    },
-                };
-                refs.insert(path, raw);
+/// 表格补丁：按稳定 id 合并；被拒时对拍服务端 id 决定整文恢复还是冲突。
+async fn submit_table_flow(
+    client: &space_client::SpaceClient,
+    space_id: &str,
+    path: String,
+    baseline: &str,
+    frozen: &str,
+) -> Result<String, String> {
+    let baseline: atelyx_core::vault::TableFile =
+        serde_json::from_str(baseline).map_err(|e| format!("保存基线不可解析：{e}"))?;
+    let frozen: atelyx_core::vault::TableFile =
+        serde_json::from_str(frozen).map_err(|e| format!("表格快照不可解析：{e}"))?;
+    match atelyx_core::vault::compute_table_patch(&baseline, &frozen) {
+        Some(patch) => match client.table_patch(space_id, &path, &patch).await {
+            Ok(ack) => Ok(ack.file),
+            Err(SpaceError::BadRequest(_)) => {
+                let server_id = server_file_id(client, space_id, &path).await?;
+                if server_id.as_deref() != Some(baseline.id.as_str()) {
+                    return Err("表格已被他人修改，请刷新后重试".to_string());
+                }
+                let json = serde_json::to_string_pretty(&frozen).map_err(|e| e.to_string())?;
+                client
+                    .put_file_text(space_id, &path, &json)
+                    .await
+                    .map_err(err_text)?;
+                Ok(path)
             }
-            let text_docs = canvas_actions::prepare_text_docs(&canvas, &refs);
-            Ok(canvas_actions::LoadOut { canvas, docs, text_docs, refs })
+            Err(e) => Err(err_text(e)),
         },
-        move |result| Message::Canvas(crate::canvas_view::CanvasMsg::Loaded(gen, rel_for_cb, result)),
-    )
+        None => {
+            let server_id = server_file_id(client, space_id, &path).await?;
+            if server_id.as_deref() != Some(baseline.id.as_str()) {
+                return Err("表格已被他人修改，请刷新后重试".to_string());
+            }
+            Ok(path)
+        }
+    }
 }
 
-/// 空间模式画布保存：基线 diff → 服务端补丁仲裁（id 不符回退全量），回执走 Space 消息。
-/// 画布保存链的对称口；title 漂移 = 服务端改路径，本端随回执跟随。
-pub fn space_submit_canvas_save(app: &mut App, reason: crate::canvas_view::SaveReason) -> Task<Message> {
-    let Some(s) = app.canvas.as_ref() else { return Task::none() };
-    if !s.dirty {
-        return Task::none();
-    }
-    let Some(session) = session_of(app) else { return Task::none() };
-    if !session.role.can_write() {
-        if !matches!(reason, crate::canvas_view::SaveReason::AutoSave) {
-            app.notify(NoticeLevel::Warning, "该空间为只读身份，无法保存");
-        }
-        return Task::none();
-    }
-    let gen = app.epoch();
-    let file = s.file.clone();
-    let baseline = s.saved.clone();
-    let frozen = s.data.clone();
-    let client = session.client;
-    let space_id = session.space_id;
-    let author = crate::history_author(app);
-    let frozen_for_msg = frozen.clone();
-    let file_for_msg = file.clone();
-    Task::perform(
-        async move {
-            let new_file = match atelyx_core::vault::compute_canvas_patch(&baseline, &frozen) {
-                Some(p) => match client.canvas_patch(&space_id, &file, &p).await {
-                    Ok(ack) => ack.file,
-                    // 补丁被拒（id 不符 / 文件损坏等）：回退前对拍服务端——文件仍为本端
-                    // 保存基线才整文恢复；已被他人改写时不覆盖（内容红线），提示刷新
-                    Err(SpaceError::BadRequest(_)) => {
-                        let server = client.get_file_text(&space_id, &file).await?;
-                        let server_id = serde_json::from_str::<serde_json::Value>(&server)
-                            .ok()
-                            .and_then(|v| v.get("id").and_then(|i| i.as_str()).map(|s| s.to_owned()));
-                        if server_id.as_deref() != Some(baseline.id.as_str()) {
-                            return Err(SpaceError::Conflict(
-                                "画布已被他人修改，请刷新后重试".to_string(),
-                            ));
-                        }
-                        let json = serde_json::to_string_pretty(&frozen)
-                            .map_err(|e| SpaceError::Network(e.to_string()))?;
-                        client.put_file_text(&space_id, &file, &json).await?;
-                        file.clone()
-                    }
-                    Err(e) => return Err(e),
-                },
-                None => {
-                    // 无差异（编辑后复原 / 拖回原位）：不盲目整文 PUT——服务端可能已有
-                    // 本端未收到的改动（漏帧），以服务端现状与本端保存基线对拍后才动作
-                    let server = client.get_file_text(&space_id, &file).await?;
-                    let server_id = serde_json::from_str::<serde_json::Value>(&server)
-                        .ok()
-                        .and_then(|v| v.get("id").and_then(|i| i.as_str()).map(|s| s.to_owned()));
-                    if server_id.as_deref() != Some(baseline.id.as_str()) {
-                        return Err(SpaceError::Conflict(
-                            "画布已被他人修改，请刷新后重试".to_string(),
-                        ));
-                    }
-                    file.clone()
+/// 画布补丁：与表格同一套仲裁；被拒时对拍服务端 id 决定整文恢复还是冲突。
+async fn submit_canvas_flow(
+    client: &space_client::SpaceClient,
+    space_id: &str,
+    path: String,
+    baseline: &str,
+    frozen: &str,
+) -> Result<String, String> {
+    let baseline: atelyx_core::vault::CanvasFile =
+        serde_json::from_str(baseline).map_err(|e| format!("保存基线不可解析：{e}"))?;
+    let frozen: atelyx_core::vault::CanvasFile =
+        serde_json::from_str(frozen).map_err(|e| format!("画布快照不可解析：{e}"))?;
+    match atelyx_core::vault::compute_canvas_patch(&baseline, &frozen) {
+        Some(patch) => match client.canvas_patch(space_id, &path, &patch).await {
+            Ok(ack) => Ok(ack.file),
+            Err(SpaceError::BadRequest(_)) => {
+                let server_id = server_file_id(client, space_id, &path).await?;
+                if server_id.as_deref() != Some(baseline.id.as_str()) {
+                    return Err("画布已被他人修改，请刷新后重试".to_string());
                 }
-            };
-            // 摘要对比保存基线（上版全文）：卡 / 连线 / 消息计数
-            let content_json = serde_json::to_string(&frozen).unwrap_or_default();
-            let summary = atelyx_core::history::version_summary(
-                atelyx_core::history::HistoryKind::Canvas,
-                &serde_json::to_string(&baseline).unwrap_or_default(),
-                &content_json,
-            );
-            let _ = client
-                .history_record(
-                    &space_id,
-                    &space_client::HistoryRecordReq {
-                        kind: "canvas".into(),
-                        file: file.clone(),
-                        content: content_json,
-                        action: "edit".into(),
-                        author: space_client::HistoryAuthorReq {
-                            id: author.id.clone(),
-                            name: author.name.clone(),
-                            device: author.device.clone(),
-                        },
-                        summary: Some(summary),
-                        note: None,
-                        coalesce_edit_ms: Some(HISTORY_COALESCE_MS),
-                        max_versions: None,
-                        byte_budget: Some(atelyx_core::history::HISTORY_BYTE_BUDGET),
-                    },
-                )
-                .await;
-            Ok(new_file)
+                let json = serde_json::to_string_pretty(&frozen).map_err(|e| e.to_string())?;
+                client
+                    .put_file_text(space_id, &path, &json)
+                    .await
+                    .map_err(err_text)?;
+                Ok(path)
+            }
+            Err(e) => Err(err_text(e)),
         },
-        move |result| {
-            let (new_file, inner) = match &result {
-                Ok(f) => (f.clone(), Ok(f.clone())),
-                Err(e) => (file_for_msg.clone(), Err(e.to_string())),
-            };
-            Message::Space(SpaceMsg::CanvasPatchDone {
-                gen,
-                file: file_for_msg,
-                new_file,
-                reason,
-                result: inner,
-                frozen: frozen_for_msg,
-            })
-        },
-    )
+        None => {
+            let server_id = server_file_id(client, space_id, &path).await?;
+            if server_id.as_deref() != Some(baseline.id.as_str()) {
+                return Err("画布已被他人修改，请刷新后重试".to_string());
+            }
+            Ok(path)
+        }
+    }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn on_canvas_patch_done(
-    app: &mut App,
-    gen: u64,
-    file: String,
-    new_file: String,
-    reason: crate::canvas_view::SaveReason,
-    result: Result<String, String>,
-    frozen: atelyx_core::vault::CanvasFile,
-) -> Task<Message> {
-    if gen != app.epoch() {
-        return Task::none();
-    }
-    if result.is_ok() {
-        // 补丁带 title 时服务端已按标题改名：对端按 Renamed 跟随路径
-        if new_file != file {
-            app.plugins.on_file_changed(
-                &new_file,
-                FileChangeKind::Renamed,
-                Some(file.as_str()),
-            );
-        } else {
-            app.plugins.on_file_changed(&new_file, FileChangeKind::Updated, None);
-        }
-    }
-    // 身份守卫：gen + 文件路径（或标题漂移后的新路径）双校验
-    if !app.canvas.as_ref().is_some_and(|s| s.file == file || s.file == new_file) {
-        return Task::none();
-    }
-    let mut task = Task::none();
-    match result {
-        Err(e) => {
-            app.settle_history_restore(false);
-            let Some(s) = app.canvas.as_mut() else { return Task::none() };
-            s.save_error = Some(e.clone());
-            // 404 = 文件被改名（他端标题漂移未广播时）或删除：明示刷新，不做路径猜测
-            let hint = if e.contains("不存在") {
-                "画布已被他人改名或删除，请刷新空间后重新打开"
-            } else {
-                "保存失败"
-            };
-            if matches!(reason, crate::canvas_view::SaveReason::Flush) {
-                app.notify(NoticeLevel::Error, format!("{hint}，操作未执行：{e}"));
-            } else {
-                app.notify(NoticeLevel::Error, format!("{hint}：{e}"));
-            }
-            return refresh_space_tree(app);
-        }
-        Ok(_) => {
-            // 补丁带 title 时服务端按标题改名：本端跟随路径与内嵌标题（会话与最近画布路径）
-            if new_file != file {
-                if let Some(s) = app.canvas.as_mut() {
-                    s.file = new_file.clone();
-                    s.data.title = crate::layout_view::file_label(&new_file);
-                }
-                if app.ui.last_canvas_file.as_deref() == Some(file.as_str()) {
-                    app.ui.last_canvas_file = Some(new_file.clone());
-                    app.schedule_persist();
-                }
-                task = task.chain(refresh_space_tree(app));
-            }
-            // 只认磁盘事实：冻结快照与当前数据一致才算落盘（时间戳不参与）
-            let stable = app
-                .canvas
-                .as_ref()
-                .is_some_and(|s| {
-                    s.data.title == frozen.title
-                        && s.data.nodes == frozen.nodes
-                        && s.data.edges == frozen.edges
-                });
-            {
-                let Some(s) = app.canvas.as_mut() else { return Task::none() };
-                s.save_error = None;
-                if stable {
-                    s.dirty = false;
-                    s.saved = frozen.clone();
-                }
-            }
-            if stable {
-                app.settle_history_restore(true);
-            }
-            // Flush 回执期间有新编辑（unstable）：重收一轮 Flush——脏拦截已在放行前 flush，
-            // 此轮丢失会让关闭/切换动作静默挂起（对齐笔记 / 表格保存链）
-            if let crate::canvas_view::SaveReason::Flush = reason {
-                if stable {
-                    task = task.chain(app.after_any_flush());
-                } else {
-                    task = task.chain(space_submit_canvas_save(app, crate::canvas_view::SaveReason::Flush));
-                }
-            }
-            task = task.chain(reload_space_history(app));
-        }
-    }
-    task
+/// 服务端当前文件的稳定 id（读不到 / 无 id 时为空）。
+async fn server_file_id(
+    client: &space_client::SpaceClient,
+    space_id: &str,
+    path: &str,
+) -> Result<Option<String>, String> {
+    let server = client.get_file_text(space_id, path).await.map_err(err_text)?;
+    Ok(serde_json::from_str::<serde_json::Value>(&server)
+        .ok()
+        .and_then(|v| v.get("id").and_then(|i| i.as_str()).map(|s| s.to_owned())))
 }
 
 // ===== 元数据 / 索引 / 图片 / 历史 =====
@@ -2164,49 +1908,14 @@ pub fn space_record_doc_restore(app: &App, rel: String, content: String) -> Task
     record_space_history(app, "note", rel, content, "restore")
 }
 
+/// 画布回滚记录（空间模式）。
+pub fn space_record_canvas_restore(app: &App, rel: String, content: String) -> Task<Message> {
+    record_space_history(app, "canvas", rel, content, "restore")
+}
+
 /// 表格回滚记录（空间模式）。
 pub fn space_record_table_restore(app: &App, rel: String, content: String) -> Task<Message> {
     record_space_history(app, "table", rel, content, "restore")
-}
-
-/// 画布回滚（空间模式）：快照写回服务端真源后记 restore 历史；打开中的画布随服务端事实重读
-/// （快照直写不经会话链，不重读则界面与 `saved` 基线都停在回滚前）。
-pub fn space_restore_canvas(app: &mut App, rel: String, content: String) -> Task<Message> {
-    let Some(session) = require_write(app) else { return Task::none() };
-    let gen = app.epoch();
-    let client = session.client;
-    let space_id = session.space_id;
-    let author = crate::history_author(app);
-    let rel_cb = rel.clone();
-    Task::perform(
-        async move {
-            client
-                .put_file_text(&space_id, &rel, &content)
-                .await
-                .map_err(|e| format!("回滚写入失败：{e}"))?;
-            let req = space_client::HistoryRecordReq {
-                kind: "canvas".into(),
-                file: rel,
-                content,
-                action: "restore".into(),
-                author: space_client::HistoryAuthorReq {
-                    id: author.id.clone(),
-                    name: author.name.clone(),
-                    device: author.device.clone(),
-                },
-                summary: None,
-                note: None,
-                coalesce_edit_ms: None,
-                max_versions: None,
-                byte_budget: Some(atelyx_core::history::HISTORY_BYTE_BUDGET),
-            };
-            client
-                .history_record(&space_id, &req)
-                .await
-                .map_err(|e| format!("历史版本记录失败：{e}"))
-        },
-        move |result| Message::Space(SpaceMsg::CanvasRestored { gen, rel: rel_cb, result }),
-    )
 }
 
 // ===== 文件操作 =====
@@ -2833,258 +2542,7 @@ fn clear_remote_presence(app: &mut App) {
     if let Some(channel) = app.doc_presence.as_mut() {
         channel.clear_remotes();
     }
-    if let Some(collab) = app.canvas_collab.as_mut() {
-        collab.clear_remotes();
-    }
     app.remote_cursors.clear();
-}
-
-// ===== 画布协作（presence + canvas-patch 合入） =====
-
-/// 画布在场同步：进入 / 切换 / 关闭与选中、对话卡锁、流式变化都从这里收口
-/// （事件与 tick 共用，幂等）。锁的失效收敛也在此：失焦且无草稿且不在流式的锁释放。
-pub(crate) fn canvas_collab_sync(app: &mut App) {
-    let in_space = matches!(app.repo_kind, crate::RepoKind::Space(_));
-    sweep_canvas_locks(app);
-    // 高频路径（指针移动）无变化直接返回：不构造上行状态
-    if app.space_connected && in_space {
-        if let (Some(session), Some(collab)) = (app.canvas.as_ref(), app.canvas_collab.as_ref()) {
-            let (name, color) = local_identity(app);
-            let streaming: Vec<&str> = session
-                .view
-                .card_chat
-                .iter()
-                .filter(|(_, c)| c.streaming)
-                .map(|(id, _)| id.as_str())
-                .collect();
-            if collab.matches_presence(
-                (&name, &color),
-                &session.file,
-                &session.view.selection,
-                &session.view.locks,
-                &streaming,
-            ) {
-                return;
-            }
-        }
-    }
-    let want = if in_space {
-        app.canvas.as_ref().map(|s| (s.file.clone(), canvas_presence_of(s)))
-    } else {
-        None
-    };
-    let Some((file, (selection, locked, streaming))) = want else {
-        // 离开画布 / 非空间容器：有在场记录就发离场帧
-        if let Some(mut collab) = app.canvas_collab.take() {
-            if let Some(frame) = collab.leave(Instant::now()) {
-                send_canvas_frame(app, frame);
-            }
-        }
-        return;
-    };
-    if !app.space_connected {
-        // 连接不可用：保留在场状态（重连后同一 clientID 整份重发覆盖），只清远端条目
-        if let Some(collab) = app.canvas_collab.as_mut() {
-            collab.clear_remotes();
-        }
-        return;
-    }
-    let now = Instant::now();
-    let (name, color) = local_identity(app);
-    let identity = crate::canvas_collab::Identity { name: &name, color: &color };
-    let collab = app
-        .canvas_collab
-        .get_or_insert_with(crate::canvas_collab::CanvasCollab::new);
-    if let Some(frame) = collab.update(now, &identity, &file, selection, locked, streaming) {
-        send_canvas_frame(app, frame);
-    }
-}
-
-/// 对话卡锁失效收敛（幂等）：失焦且无草稿且不在流式的锁释放；卡已删除的锁一并摘除。
-/// 草稿未清空就失焦时锁保留（草稿是未完成内容，对端不该插手），清空后自然释放。
-fn sweep_canvas_locks(app: &mut App) {
-    let Some(session) = app.canvas.as_mut() else { return };
-    let view = &mut session.view;
-    view.locks.retain(|id, _| {
-        view.card_chat
-            .get(id)
-            .is_some_and(|c| c.streaming || c.draft.focused || !c.draft.text.is_empty())
-    });
-}
-
-/// 本端在场状态（选区原序、锁按 id 序保证上行帧稳定、流式卡 id 序）。
-fn canvas_presence_of(
-    s: &crate::canvas_view::CanvasSession,
-) -> (Vec<String>, Vec<(String, i64)>, Vec<String>) {
-    let mut locked: Vec<(String, i64)> =
-        s.view.locks.iter().map(|(k, v)| (k.clone(), *v)).collect();
-    locked.sort();
-    let mut streaming: Vec<String> = s
-        .view
-        .card_chat
-        .iter()
-        .filter(|(_, c)| c.streaming)
-        .map(|(id, _)| id.clone())
-        .collect();
-    streaming.sort();
-    (s.view.selection.clone(), locked, streaming)
-}
-
-/// UiTick 搭载：远端超时剔除、限频补发、空闲保活（连接不可用时不发上行）。
-pub(crate) fn canvas_collab_tick(app: &mut App) {
-    canvas_collab_sync(app);
-    let connected = app.space_connected;
-    let now = Instant::now();
-    let mut frames = Vec::new();
-    if let Some(collab) = app.canvas_collab.as_mut() {
-        collab.refresh(now);
-        if let Some(frame) = collab.flush(now) {
-            frames.push(frame);
-        }
-        if connected {
-            if let Some(frame) = collab.keepalive_if_due(now) {
-                frames.push(frame);
-            }
-        }
-    }
-    for frame in frames {
-        send_canvas_frame(app, frame);
-    }
-}
-
-fn send_canvas_frame(app: &App, payload: serde_json::Value) {
-    send_cmd(
-        app,
-        atelyx_core::collab::SpaceCmd::Ephemeral {
-            channel: crate::canvas_collab::CHANNEL.to_string(),
-            payload,
-            target_peer_id: None,
-        },
-    );
-}
-
-/// 对话卡编辑锁的持有方（本端视角）。
-pub(crate) enum LockHolder {
-    /// 无任何锁声明。
-    Free,
-    /// 本端持有（锁主判定含本端声明）。
-    Mine,
-    /// 对端持有（携带对方名签与成员色，供只读呈现）。
-    Peer { name: String, color_hex: String },
-}
-
-/// 对话卡锁主判定：收齐本端声明与对端 presence 声明，since 最小者持有
-/// （core 纯函数保证各端判定一致）。本端 peerId 未分配时本端声明不参与。
-pub(crate) fn conversation_lock_holder(app: &App, node_id: &str) -> LockHolder {
-    let mut claims: Vec<atelyx_core::canvas_collab::LockClaim> = Vec::new();
-    if let (Some(pid), Some(since)) = (
-        app.space_own_peer_id.as_deref(),
-        app.canvas.as_ref().and_then(|s| s.view.locks.get(node_id)),
-    ) {
-        claims.push(atelyx_core::canvas_collab::LockClaim {
-            peer_id: pid.to_string(),
-            since: *since,
-        });
-    }
-    let remotes = app.canvas_collab.as_ref().map(|c| c.remote()).unwrap_or(&[]);
-    for p in remotes {
-        if let Some(since) = p.locks(node_id) {
-            claims.push(atelyx_core::canvas_collab::LockClaim {
-                peer_id: p.peer_id.clone(),
-                since,
-            });
-        }
-    }
-    let Some(owner) = atelyx_core::canvas_collab::compute_lock_owner(&claims) else {
-        return LockHolder::Free;
-    };
-    if Some(owner.as_str()) == app.space_own_peer_id.as_deref() {
-        return LockHolder::Mine;
-    }
-    match remotes.iter().find(|p| p.peer_id == owner) {
-        Some(p) => LockHolder::Peer { name: p.name.clone(), color_hex: p.color_hex.clone() },
-        // 锁主声明来自已消失的连接（条目尚未超时）：按无锁处理防幽灵锁
-        None => LockHolder::Free,
-    }
-}
-
-/// 本端是否可占对话卡编辑锁（空间模式可写身份；本地单机与只读身份无锁语义）。
-pub(crate) fn canvas_lockable(app: &App) -> bool {
-    matches!(app.repo_kind, crate::RepoKind::Space(_))
-        && session_of(app).is_some_and(|s| s.role.can_write())
-}
-
-/// 远端画布补丁（帧语义同表格：自声落地帧跳过；landed = 服务端已落盘）。
-/// 双基线合入：data 与保存基线一并推进（对话卡消息按卡做未落盘保护），远端内容不再被
-/// 本端保存重发（防回环），本端未落盘编辑的补丁保持只含本端增量（防膨胀）；合入不置脏。
-fn on_remote_canvas_patch(
-    app: &mut App,
-    peer_id: Option<String>,
-    file: String,
-    patch: serde_json::Value,
-    landed: bool,
-) -> Task<Message> {
-    if peer_id.is_some() && peer_id == app.space_own_peer_id {
-        return Task::none();
-    }
-    let opened = app.canvas.as_ref().map(|s| s.file.clone());
-    if opened.as_deref() != Some(file.as_str()) {
-        return Task::none();
-    }
-    let Ok(p) = serde_json::from_value::<atelyx_core::vault::CanvasPatch>(patch) else {
-        return Task::none();
-    };
-    // 防串画布：补丁 id 与文件 id 不符即丢（服务端落地帧已仲裁，透传帧信任 file 匹配）
-    if app.canvas.as_ref().is_some_and(|s| p.id != s.data.id) {
-        return Task::none();
-    }
-    let (mut ref_paths, conversation_ids, text_changed) = {
-        let Some(s) = app.canvas.as_mut() else { return Task::none() };
-        let outcome = atelyx_core::canvas_collab::apply_remote_patch(&mut s.data, &mut s.saved, &p, landed);
-        s.version += 1;
-        s.view.content_cache.clear();
-        // 远端改动合入后撤销栈整体作废：栈内快照会把协作者刚落盘的内容一并回滚并随下次保存广播
-        s.view.undo.clear();
-        s.view.redo.clear();
-        // 选中 / 悬停 / 改名目标收敛到仍存在的卡
-        s.view.selection.retain(|id| s.data.nodes.iter().any(|n| &n.id == id));
-        if s.view.hover.as_ref().is_some_and(|id| !s.data.nodes.iter().any(|n| &n.id == id)) {
-            s.view.hover = None;
-        }
-        if s
-            .view
-            .group_rename
-            .as_ref()
-            .is_some_and(|(id, _)| !s.data.nodes.iter().any(|n| &n.id == id))
-        {
-            s.view.group_rename = None;
-        }
-        // 持锁卡被远端删除：防御性释放（锁模型下不应发生）
-        for id in &outcome.removed_node_ids {
-            s.view.locks.remove(id);
-        }
-        (
-            outcome.ref_paths,
-            outcome.upserted_conversations,
-            p.upsert_nodes.iter().any(|n| n.node_type == "text"),
-        )
-    };
-    ref_paths.sort();
-    ref_paths.dedup();
-    crate::canvas_chat::sync_card_chats(app);
-    if !conversation_ids.is_empty() {
-        // 消息流解析缓存随新消息重建
-        if let Some(s) = app.canvas.as_mut() {
-            crate::canvas_chat::refresh_card_docs(s, "");
-        }
-    }
-    if text_changed {
-        if let Some(s) = app.canvas.as_mut() {
-            crate::canvas_actions::rebuild_text_docs(s);
-        }
-    }
-    // 引用内容补读：新卡 / 远端换引用 / 笔记正文可能已变（回执重建文本卡正文缓存）
-    crate::canvas_actions::load_refs(app, ref_paths)
 }
 
 /// 文档正文载入成功后绑定协作文档：换文件建新基线并通告，同文件重发基线通告与握手。
@@ -3228,12 +2686,6 @@ fn on_space_event(app: &mut App, event: atelyx_core::collab::SpaceEvent) -> Task
             app.notify(NoticeLevel::Success, "协作已连接");
             collab_doc_resume(app);
             send_presence(app);
-            // 画布在场重连后重发（选中 / 对话卡锁 / 流式；对端旧条目将在超时后过期）
-            let now = std::time::Instant::now();
-            if let Some(frame) = app.canvas_collab.as_mut().and_then(|c| c.resend(now)) {
-                send_canvas_frame(app, frame);
-            }
-            canvas_collab_sync(app);
             Task::none()
         }
         E::Peers(list) => {
@@ -3257,11 +2709,6 @@ fn on_space_event(app: &mut App, event: atelyx_core::collab::SpaceEvent) -> Task
             }
             if dropped {
                 refresh_remote_cursors(app);
-            }
-            if let Some(collab) = app.canvas_collab.as_mut() {
-                for peer in &gone {
-                    collab.drop_peer(peer);
-                }
             }
             app.plugins.on_space_peers_changed();
             Task::none()
@@ -3309,11 +2756,7 @@ fn on_space_event(app: &mut App, event: atelyx_core::collab::SpaceEvent) -> Task
         }
         E::Ephemeral { peer_id, channel, payload } => {
             let now = std::time::Instant::now();
-            if channel == crate::canvas_collab::CHANNEL {
-                if let Some(collab) = app.canvas_collab.as_mut() {
-                    collab.apply(&peer_id, &payload, now);
-                }
-            } else if channel == crate::doc_presence::CHANNEL {
+            if channel == crate::doc_presence::CHANNEL {
                 let changed = app
                     .doc_presence
                     .as_mut()
@@ -3418,6 +2861,37 @@ fn on_remote_table_patch(
     Task::none()
 }
 
+/// 远端画布补丁：只转发本端打开的画布，插件按自己的路径匹配合入。
+fn on_remote_canvas_patch(
+    app: &mut App,
+    peer_id: Option<String>,
+    file: String,
+    patch: serde_json::Value,
+    landed: bool,
+) -> Task<Message> {
+    if peer_id.is_some() && peer_id == app.space_own_peer_id {
+        return Task::none();
+    }
+    if app.ui.last_canvas_file.as_deref() != Some(file.as_str()) {
+        return Task::none();
+    }
+    let renamed = patch.get("title").and_then(|title| title.as_str()).is_some();
+    app.plugins.notify_plugin_event(
+        crate::plugin_actions::CANVAS_PLUGIN,
+        atelyx_core::plugin_runtime::event_name::SPACE_FILE_PATCH,
+        &atelyx_core::plugin_runtime::SpaceFilePatchPayload {
+            path: file,
+            kind: "canvas".into(),
+            patch,
+            landed,
+        },
+    );
+    if renamed {
+        return refresh_space_tree(app);
+    }
+    Task::none()
+}
+
 /// 服务端改名广播：打开中文件路径与协作绑定跟随（内容不动，不重载）。
 fn on_space_renamed(app: &mut App, old_path: &str, new_path: &str) -> Task<Message> {
     if app.ui.last_note_file.as_deref() == Some(old_path) {
@@ -3434,11 +2908,8 @@ fn on_space_renamed(app: &mut App, old_path: &str, new_path: &str) -> Task<Messa
     if app.ui.last_canvas_file.as_deref() == Some(old_path) {
         app.ui.last_canvas_file = Some(new_path.to_string());
         app.schedule_persist();
-        // 同上：会话路径与内嵌标题一并跟随
-        if let Some(s) = app.canvas.as_mut() {
-            s.file = new_path.to_string();
-            s.data.title = crate::layout_view::file_label(new_path);
-        }
+        // 插件按打开文件集合更新会话路径，不重发会继续按旧路径保存
+        app.plugins.on_open_files_changed();
     }
     collab_follow_rename(app, old_path, new_path);
     let prefix = format!("{old_path}/");

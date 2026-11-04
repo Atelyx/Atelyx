@@ -29,6 +29,16 @@ pub mod name {
     /// 当前打开表格的选区变更（本端点选 / 拖选 / 键盘移动，协作者进入 / 移动 / 离场）。
     /// 内容不变、只有选区移动时也发。payload 见 [`TableSelectionChangedPayload`]。
     pub const TABLE_SELECTION_CHANGED: &str = "table:selection.changed";
+    /// 历史回滚把某个版本交回当前画布：payload 见 [`crate::method::CanvasContentParams`]
+    /// （订阅方按自己打开的路径匹配；`content` 是 `.atlx` 全文）。
+    pub const CANVAS_RESTORE: &str = "canvas:restore";
+    /// 画布内容已结算（本插件落盘 / 关闭）：payload 见 [`CanvasChangedPayload`]。
+    pub const CANVAS_CHANGED: &str = "canvas:changed";
+    /// 宿主拦截的画布快捷键命令（撤销 / 复制 / 粘贴等，按用户自定义键位触发）：
+    /// payload 见 [`crate::method::CanvasCommandParams`]。
+    pub const CANVAS_COMMAND: &str = "canvas:command";
+    /// 画布是否正展示在前台（后台标签页不算）：payload 见 [`CanvasVisiblePayload`]。
+    pub const CANVAS_VISIBLE: &str = "canvas:visible";
     /// 会话语义变更（流式增量不广播）。payload 见 [`ChatChangedPayload`]。
     pub const AI_CHAT_CHANGED: &str = "ai:chat.changed";
     /// 会话真源整体重载完成（换仓 / 空间装载），订阅方应整体重取。
@@ -119,6 +129,10 @@ pub fn is_known(name: &str) -> bool {
         name::VAULT_SWITCH
             | name::TABLE_CHANGED
             | name::TABLE_SELECTION_CHANGED
+            | name::CANVAS_RESTORE
+            | name::CANVAS_CHANGED
+            | name::CANVAS_COMMAND
+            | name::CANVAS_VISIBLE
             | name::AI_CHAT_CHANGED
             | name::AI_CHAT_RELOAD
             | name::AI_CHAT_PERSIST
@@ -277,6 +291,28 @@ pub struct SubscribeParams {
 #[serde(rename_all = "camelCase")]
 pub struct SubscribeResult {
     pub subscribed: bool,
+}
+
+/// [`name::CANVAS_CHANGED`] 的 payload：当前打开画布的路径 / 落盘状态 / 选中卡属性 / 统计。
+/// 关闭画布时 `path` 缺省、`selection` 缺省、统计全零。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CanvasChangedPayload {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub dirty: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<crate::method::CanvasSelectionInfo>,
+    #[serde(default)]
+    pub stats: crate::method::CanvasStats,
+}
+
+/// [`name::CANVAS_VISIBLE`] 的 payload：画布是否展示在前台。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CanvasVisiblePayload {
+    pub visible: bool,
 }
 
 #[cfg(test)]

@@ -69,33 +69,7 @@ pub struct ItemInfo {
     pub to: usize,
 }
 
-/// 属性面板里正在编辑的槽位。
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Slot {
-    Key(usize),
-    Value(usize),
-    Item(usize, usize),
-    /// 数组行尚未写入的新项（提交非空才追加）。
-    NewItem(usize),
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct PropsState {
-    /// `None` = 没有 frontmatter 块；`Some((键值对, yaml 是否可解析))`。
-    pub data: Option<(Vec<(String, Yaml)>, bool)>,
-    pub collapsed: bool,
-    pub editing: Option<Slot>,
-    pub draft: String,
-    /// 打开类型菜单的属性行下标。
-    pub type_menu: Option<usize>,
-    /// 提交校验失败的可读原因（重复键 / 空键名）。
-    pub error: Option<String>,
-    /// 候选清单的过滤词：进入槽位时为空（展示候选池顶部），键入后才随草稿过滤。
-    pub suggest_query: String,
-    /// 候选清单高亮下标；`armed` = 按过 ↑↓（仅此时 Enter 选中候选）。
-    pub suggest_index: usize,
-    pub suggest_armed: bool,
-}
+pub use atelyx_plugin_props::{PropsHost, PropsState, Slot};
 
 #[derive(Clone, Debug, Default)]
 pub struct NoteModel {
@@ -464,6 +438,10 @@ impl NoteModel {
     }
 
     /// 用属性数据重写 frontmatter，返回新全文（空映射 = 删块回到无 frontmatter 态）。
+    /// 属性面板写回：整篇正文替换由调用方提交给宿主。
+    fn props_write_text(&self, pairs: Vec<(String, Yaml)>) -> String {
+        self.text_with_props(pairs)
+    }
     pub fn text_with_props(&self, pairs: Vec<(String, Yaml)>) -> String {
         let parsed = frontmatter::parse(&self.text);
         frontmatter::stringify(&Yaml::Map(pairs), &parsed.body)
@@ -655,5 +633,31 @@ mod tests {
         let image = model.blocks[0].image.as_ref().expect("图片块");
         assert_eq!(image.src, "p.png");
         assert_eq!(image.height, Some(80.0));
+    }
+}
+
+impl PropsHost for NoteModel {
+    fn props(&self) -> &PropsState {
+        &self.props
+    }
+
+    fn props_mut(&mut self) -> &mut PropsState {
+        &mut self.props
+    }
+
+    fn editable(&self) -> bool {
+        self.can_write
+    }
+
+    fn tags(&self) -> &[String] {
+        &self.tag_vocab
+    }
+
+    fn write_pairs(&mut self, pairs: Vec<(String, Yaml)>) -> Option<String> {
+        Some(self.props_write_text(pairs))
+    }
+
+    fn refresh(&mut self) {
+        self.refresh_props();
     }
 }

@@ -26,7 +26,7 @@ use crate::Context;
 pub use build::Ui;
 pub use build::Canvas;
 pub use geom::Rect;
-pub use icons::Icon;
+pub use icons::{commands as icon_commands, Icon};
 pub use widgets::{AreaHeight, BoxStyle, BoxWidth, Edges, TextRole, TextStyle};
 /// 引用候选（`#笔记：方案.md` 这类标签）：交给 `Ui::markdown_with` 画成胶囊。
 pub use atelyx_format::markdown::MentionCandidate;

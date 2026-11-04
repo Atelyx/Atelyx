@@ -150,6 +150,13 @@ pub mod table {
     pub const SET_CELL_IMAGE: &str = "table.setCellImage";
 }
 
+/// 画布面：读取当前打开画布的结构化快照（选中卡属性 / 画布统计）。方法由画布插件提供，
+/// 属性面板等第三方视图经它与画布数据同源。
+pub mod canvas {
+    /// 读当前打开画布的只读快照；未打开画布 = `path: None` 与全零统计。
+    pub const SNAPSHOT: &str = "canvas.snapshot";
+}
+
 /// 面板头部：插件声明自己面板顶部那一行工具条的内容，宿主按当前主题渲染（状态胶囊 / 错误文本 /
 /// 协作者胶囊 / 右侧文本 / 菜单项 / 视图下拉）。头部数据全部由插件提供，宿主只负责画与转发点击。
 pub mod panel {
@@ -239,6 +246,10 @@ pub mod doc {
     /// 把当前文档改名为新的主名（同目录、保留扩展名；引用与历史随宿主既有改名链）。
     /// 有未落盘修改时拒绝，插件须先 `doc.save`。
     pub const RENAME: &str = "doc.rename";
+    /// 读当前文档的 frontmatter 块原文与可写性（属性面板）。
+    pub const PROPS_READ: &str = "doc.props.read";
+    /// 用新 frontmatter 块替换当前文档的属性区：正文原样保留，走文档同一条保存链。
+    pub const PROPS_WRITE: &str = "doc.props.write";
     /// 用户打开了插件注册的领域文档类型文件（通知）。`surfaceId` 为宿主分配的实例面标识，
     /// 插件据此为该面提交整面帧。
     pub const HOST_OPEN: &str = "host:doc.open";
@@ -416,6 +427,13 @@ pub mod ai {
     /// 插件向宿主发布一条对话事件；宿主点对点发给订阅了 [`HOST_CHAT_EVENT`] 的插件，
     /// 并经无界通道交给壳侧。
     pub const CHAT_EMIT: &str = "ai.chat.emit";
+    /// 起一轮直写型 run：消息真源归调用方（画布卡），宿主解析模型配置后交给 AI 核心插件。
+    /// 事件经 [`HOST_CHAT_EVENT`] 以 `sessionId` 归属，调用方据此把消息写回自己的容器。
+    pub const CHAT_SEND_DIRECT: &str = "ai.chat.sendDirect";
+    /// 压缩调用方给出的一段消息（真源不在会话语料里）：只回摘要，调用方自行落存储。
+    pub const CHAT_COMPACT_DIRECT: &str = "ai.chat.compactDirect";
+    /// 读与 AI 运行相关的仓库设置（落卡开关等）；插件据此决定本地派生行为。
+    pub const SETTINGS: &str = "ai.settings";
 }
 
 /// 宿主与 AI 核心插件之间的私有服务（`ai.core`）：只由宿主调用，不登记进能力目录。
@@ -429,6 +447,8 @@ pub mod run {
     pub const STOP: &str = "run.stop";
     /// 压缩一个会话（把较早消息总结为压缩注解）。
     pub const COMPACT: &str = "run.compact";
+    /// 压缩一段调用方给出的消息（真源不在会话语料里，如画布卡）：只回摘要，不写任何记录。
+    pub const COMPACT_DIRECT: &str = "run.compactDirect";
     /// 重新生成会话标题（AI 命名）。
     pub const TITLE: &str = "run.title";
     /// 中断全部活跃 run（换仓 / 切空间）。
@@ -979,6 +999,30 @@ impl DocEditParams {
 pub struct DocRenameParams {
     pub path: String,
     pub name: String,
+}
+
+/// [`doc::PROPS_READ`] 的结果：当前文档的属性区与可写性。
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocPropsResult {
+    /// 当前文档路径；没有打开文档时为空串。
+    pub path: String,
+    /// frontmatter 块原文（含首尾 `---` 定界）；文档没有属性块时为空串。
+    pub frontmatter: String,
+    /// 文档是否有属性区（含未闭合的 `---` 起始行）。
+    #[serde(default)]
+    pub present: bool,
+    /// 属性区 YAML 是否可解析（未闭合或语法错误为 `false`，面板锁编辑）。
+    pub parsed: bool,
+    /// 当前文档是否可写（只读身份 / 未打开文档为 `false`）。
+    pub editable: bool,
+}
+
+/// [`doc::PROPS_WRITE`] 的入参：新的 frontmatter 块原文（含 `---` 定界；空串 = 删除属性区）。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocPropsWriteParams {
+    pub frontmatter: String,
 }
 
 impl DocRenameParams {
@@ -2910,7 +2954,7 @@ pub enum SpaceContainerKind {
 pub struct SpaceFilePatchParams {
     /// 仓库相对路径。
     pub path: String,
-    /// 文件族：`table`（当前唯一支持）——决定服务端补丁端点与历史类型。
+    /// 文件族：`table` / `canvas`——决定服务端补丁端点与历史类型。
     pub kind: String,
     /// 上次成功保存的全文（补丁合并的基线）。
     pub baseline: String,
@@ -3224,13 +3268,26 @@ pub const BUILTIN_SERVICES: &[(&str, &str, &[&str])] = &[
     ("chat", PLATFORM_PLUGIN, &[chat::SESSION_READ, chat::SESSION_WRITE, chat::SESSION_SNAPSHOT]),
     // 工具名册与结果回报是宿主记账，不是可由外部提供者接管的能力，故不在目录里；
     // 对话门面由宿主编排（核心插件只是被调用的实现），服务归平台自身
-    ("ai", PLATFORM_PLUGIN, &[ai::CHAT_SEND, ai::CHAT_STOP, ai::CHAT_HISTORY, ai::MODELS, ai::AGENTS, ai::CHAT_RENAME, ai::CHAT_DELETE, ai::CHAT_COMPACT, ai::CHAT_TITLE, ai::TOOL_LIST, ai::TOOL_EXECUTE, ai::CHAT_EMIT]),
+    ("ai", PLATFORM_PLUGIN, &[ai::CHAT_SEND, ai::CHAT_SEND_DIRECT, ai::CHAT_STOP, ai::CHAT_HISTORY, ai::MODELS, ai::AGENTS, ai::CHAT_RENAME, ai::CHAT_DELETE, ai::CHAT_COMPACT, ai::CHAT_COMPACT_DIRECT, ai::CHAT_TITLE, ai::TOOL_LIST, ai::TOOL_EXECUTE, ai::CHAT_EMIT, ai::SETTINGS]),
     ("window", PLATFORM_PLUGIN, &[window::OPEN, window::CLOSE, window::UPDATE, window::SHOW, window::BEGIN_DRAG, window::MINIMIZE, window::TOGGLE_MAXIMIZE]),
     ("query", PLATFORM_PLUGIN, &[query::MEASURE, query::THEME, query::FONTS]),
     // 编辑器选区读写作用于宿主自持的当前文档会话，随平台常驻
     ("editor", PLATFORM_PLUGIN, &[editor::SELECTION, editor::REPLACE_SELECTION, editor::OPEN_FILES, editor::OPEN_FILE, editor::PREFS]),
     // 文档会话是宿主内容真源（保存链 / 协作增量 / 历史），归平台自身，不随插件停用下线
-    ("doc", PLATFORM_PLUGIN, &[doc::OPEN, doc::EDIT, doc::SAVE, doc::CLOSE, doc::AWARENESS, doc::RENAME]),
+    (
+        "doc",
+        PLATFORM_PLUGIN,
+        &[
+            doc::OPEN,
+            doc::EDIT,
+            doc::SAVE,
+            doc::CLOSE,
+            doc::AWARENESS,
+            doc::RENAME,
+            doc::PROPS_READ,
+            doc::PROPS_WRITE,
+        ],
+    ),
     // 历史读数取自宿主侧文件与服务端聚合，历史弹层也在宿主，与 doc 同理归平台自身
     ("history", PLATFORM_PLUGIN, &[history::ACTIVITY, history::DAY, history::GROUPS, history::OPEN, history::RECORD]),
     // 最近打开清单是宿主按容器身份记账的界面数据，记录与剔除都由宿主维护
@@ -3668,3 +3725,181 @@ mod tests {
         assert!(old.event_colors.is_empty(), "旧宿主不带色板时按空清单");
     }
 }
+
+/// 历史回滚把某个版本交回当前画布（`canvas:restore` 的 payload）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CanvasContentParams {
+    /// 目标画布的仓库相对路径（订阅方按自己打开的文件匹配）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// `.atlx` 全文（JSON 文本）。
+    pub content: String,
+}
+
+/// 画布选中卡的引用加载状态。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CanvasRefStatus {
+    /// 已加载（文本 / 图片 / 表格可见）。
+    Loaded,
+    /// 读到字节但无法按文本呈现。
+    Binary,
+    /// 引用的文件不存在或读取失败。
+    Missing,
+    /// 引用内容仍在读取。
+    Loading,
+}
+
+/// 选中卡的一条连线。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CanvasEdgeInfo {
+    /// `association` / `reference-consumed` / `reference-unconsumed` / `lineage` / `flow`。
+    pub role: String,
+    /// `out` = 选中卡是源；`in` = 选中卡是目标。
+    pub direction: String,
+    /// 对端卡标题。
+    pub peer_title: String,
+}
+
+/// 画布选中卡的属性快照（属性面板数据源）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CanvasSelectionInfo {
+    pub title: String,
+    /// 节点类型原文（`conversation` / `text` / `table` / `media` / `link` / 分组等）。
+    pub node_type: String,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    /// 卡引用的仓库相对路径。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    /// 引用内容状态；无引用文件 = 缺省。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ref_status: Option<CanvasRefStatus>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub edges: Vec<CanvasEdgeInfo>,
+}
+
+/// 画布统计（无选中时属性面板展示）。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CanvasStats {
+    pub cards: usize,
+    pub groups: usize,
+    pub edges: usize,
+}
+
+/// [`canvas::SNAPSHOT`] 的 result。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CanvasSnapshotResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub dirty: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<CanvasSelectionInfo>,
+    #[serde(default)]
+    pub stats: CanvasStats,
+}
+
+/// [`crate::event::name::CANVAS_COMMAND`] 的 payload：宿主按画布作用域拦截的快捷键命令。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CanvasCommandParams {
+    /// `undo` / `redo` / `copy` / `paste` / `select-all` / `delete` / `escape`。
+    pub command: String,
+}
+
+
+/// [`ai::CHAT_SEND_DIRECT`] 的 params：宿主解析模型配置后把同一份负载交给 AI 核心插件，
+/// 消息真源不进入会话语料。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatDirectParams {
+    /// 事件归属的会话键（画布卡等合成 id）。
+    pub session_id: String,
+    /// 本轮之前的消息（不含即将追加的用户消息）。
+    pub history: Vec<Value>,
+    /// 已构造好的用户消息（含引用路径块、附件与 displayContent）。
+    pub user_message: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction: Option<Value>,
+    /// Agent id（当前仓库名册）；缺省 = 内置「对话」工具集。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    /// 显式模型（可只给模型 id，在仓库供应商配置里唯一命中即采用；
+    /// 指定 `providerId` 时必须同时给出模型 id）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_id: Option<String>,
+    /// 推理等级（`off` / `low` / `medium` / `high`）；缺省 = 面板当前覆盖值。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    /// 空间模式下已取回的 Agent 提示词正文（本地模式缺省，宿主自取）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space_prompt: Option<String>,
+}
+
+/// [`ai::CHAT_COMPACT_DIRECT`] 的 params：压缩调用方给出的消息，不读写会话语料。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatDirectCompactParams {
+    /// 事件归属的会话键（与直写 run 同口径）；缺省时仅按消息压缩。
+    #[serde(default)]
+    pub session_id: String,
+    pub messages: Vec<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_id: Option<String>,
+}
+
+/// [`ai::CHAT_COMPACT_DIRECT`] 的 result。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatDirectCompactResult {
+    pub summary: String,
+}
+
+
+/// [`run::COMPACT_DIRECT`] 的 params：消息由调用方给出，结果只回摘要。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunCompactDirectParams {
+    pub messages: Vec<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction: Option<Value>,
+    pub config: RunConfigWire,
+}
+
+/// [`run::COMPACT_DIRECT`] 的 result。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunCompactDirectResult {
+    pub summary: String,
+}
+
+
+/// [`ai::SETTINGS`] 的 result：与 AI 运行相关的仓库设置。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiSettingsResult {
+    /// 画布对话落卡开关；缺省 = 开启。
+    #[serde(default = "default_auto_materialize")]
+    pub auto_materialize: bool,
+}
+
+fn default_auto_materialize() -> bool {
+    true
+}
+

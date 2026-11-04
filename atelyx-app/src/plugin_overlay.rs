@@ -419,8 +419,8 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginOverlay<'_> {
                 let local = target.local(point);
                 let (dx, dy) = match delta {
                     mouse::ScrollDelta::Lines { x, y } => (
-                        -x * crate::canvas_view::WHEEL_LINE_PX,
-                        -y * crate::canvas_view::WHEEL_LINE_PX,
+                        -x * crate::WHEEL_LINE_PX,
+                        -y * crate::WHEEL_LINE_PX,
                     ),
                     mouse::ScrollDelta::Pixels { x, y } => (-x, -y),
                 };

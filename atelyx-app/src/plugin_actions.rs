@@ -97,6 +97,16 @@ pub fn surfaces_in_layout(app: &App) -> HashSet<(String, String)> {
     found
 }
 
+/// 画布视图的前台状态变化：属性面板据此在画布属性与文档属性之间切换。
+pub fn sync_canvas_display(app: &mut App) {
+    let displayed = crate::layout_view::view_displayed(app, layout::CANVAS_VIEW);
+    if displayed == app.canvas_displayed {
+        return;
+    }
+    app.canvas_displayed = displayed;
+    app.plugins.on_canvas_visible(displayed);
+}
+
 /// 布局变化后重算已挂面并差额通知插件：新出现的面发 attached，消失的面发 detached。
 /// 返回已挂面集合是否变化——未变化（改分割比例等）时调用方无需重投影。
 pub fn sync_surfaces(app: &mut App) -> bool {
@@ -148,6 +158,7 @@ pub fn sync_settings_surfaces(app: &mut App) {
 pub const TABLES_VIEW: &str = "plugin:atelyx.tables:table";
 
 /// 表格插件 id（宿主把表格侧事件与保存回执投递给它）。
+pub const CANVAS_PLUGIN: &str = "atelyx.canvas";
 pub const TABLES_PLUGIN: &str = "atelyx.tables";
 
 /// 表格视图面挂载差分：面板里当前选中的插件表格视图即挂在表格面板上的面
@@ -987,6 +998,8 @@ pub fn resync_surfaces_on_running(app: &mut App, plugin_id: &str) {
     for (plugin_id, surface_id) in windows {
         app.plugins.notify_surface_attached(&plugin_id, &surface_id, SurfaceKind::Window);
     }
+    // 画布前台状态：属性面板按它决定显示画布属性还是文档属性
+    app.plugins.on_canvas_visible(app.canvas_displayed);
     // 打开中的领域文档实例：重启后实例面已清空，按当前文档重新告知
     if let Some(doc) = &app.doc_open {
         if doc.plugin_id == plugin_id {

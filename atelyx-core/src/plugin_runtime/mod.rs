@@ -29,7 +29,6 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use atelyx_plugin_protocol::event;
 use atelyx_plugin_protocol::manifest::Manifest;
-use atelyx_plugin_protocol::method;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -53,8 +52,8 @@ pub use atelyx_plugin_protocol::event::name as event_name;
 pub use atelyx_plugin_protocol::event::{
     ChatChangeKind, ChatChangedPayload, ChatPersistChangedPayload, ChatReloadedPayload,
     FileChangeKind, FileChangedPayload, FileDropPayload, DocChangedPayload,
-    DocPresencePayload, DocRemoteCursor, SpaceMetaChangedPayload, TableChangedPayload,
-    TableSelectionChangedPayload, VaultSwitchPayload,
+    CanvasChangedPayload, DocPresencePayload, DocRemoteCursor, SpaceMetaChangedPayload, TableChangedPayload,
+    CanvasVisiblePayload, TableSelectionChangedPayload, VaultSwitchPayload,
 };
 pub use atelyx_plugin_protocol::chat::ChatPersistError;
 pub use atelyx_plugin_protocol::layout::LayoutSpecNode;
@@ -64,6 +63,7 @@ pub use atelyx_plugin_protocol::paint::{TextLayout, TextShaping, TextWrap};
 /// 能力总线的对外契约类型（服务清单 / 登记参数 / 错误原因）。
 pub use atelyx_plugin_protocol::service;
 /// 宿主与 AI 核心插件之间的私有运行方法名。
+pub use atelyx_plugin_protocol::method;
 pub use atelyx_plugin_protocol::method::run as ai_run;
 /// 随包预置插件同步的结果。
 pub use preset::PresetSyncReport;
@@ -76,7 +76,7 @@ pub use atelyx_plugin_protocol::method::{
     HistoryActivityResult, HistoryDayEntry, HistoryDayParams, HistoryDayResult, HistoryFileGroup,
     HistoryGroupsParams, HistoryGroupsResult, HistoryOpenParams, RecentEntry, RecentKind,
     RecentListResult,
-    DocRenameParams,
+    DocPropsResult, DocPropsWriteParams, DocRenameParams,
     ChatEvent, ChatEventParams, ChatHistoryParams, ChatHistoryResult,
     ChatRenameParams, ChatSendParams, ChatSessionParams, ChatSessionSummary, ChatSessionWire,
     ChatStopParams, ClipboardImage, CollabMessageParams, CollabPeer, CollabPeersResult,
@@ -88,6 +88,9 @@ pub use atelyx_plugin_protocol::method::{
     SpaceFilePatchPayload, SpaceFilePatchResult, TableContentParams,
     SetTrayItemsParams, ShortcutQueryResult, SurfaceKind,
     TakeoverScope, ThemeColors,
+    AiSettingsResult, CanvasCommandParams, CanvasContentParams, CanvasEdgeInfo, CanvasRefStatus,
+    CanvasSelectionInfo, CanvasSnapshotResult, CanvasStats, ChatDirectCompactParams,
+    ChatDirectCompactResult, ChatDirectParams, RunCompactDirectParams, RunCompactDirectResult,
     RunCompactParams, RunConfigWire, RunDirectParams, RunStartParams, RunStartResult,
     RunStopParams, RunTitleParams, SearchConfigWire, ThemeResult, ToolDecl, ToolExecParams,
     ToolExecResult, ToolListParams, ToolListResult, TrayClickParams, TrayItemSpec, WindowOpenParams,
@@ -238,6 +241,21 @@ pub enum HostRequest {
     /// 插件请求发起 / 续聊一轮 AI 对话（须声明 `ai` 权限；壳编排后经
     /// [`PluginRuntime::resolve_shell_call`] 回填，事件随后经 `host:ai.chat.event` 流达插件）。
     ChatSend { plugin_id: String, request_id: u64, params: method::ChatSendParams },
+    /// 插件请求起一轮直写型 run（消息真源归插件，宿主解析模型配置后交给 AI 核心）：
+    /// 事件随后经 `host:ai.chat.event` 以 `sessionId` 归属。
+    ChatSendDirect {
+        plugin_id: String,
+        request_id: u64,
+        params: method::ChatDirectParams,
+    },
+    /// 插件请求压缩一段自己持有的消息（真源不在会话语料里）：只回摘要。
+    ChatCompactDirect {
+        plugin_id: String,
+        request_id: u64,
+        params: method::ChatDirectCompactParams,
+    },
+    /// 插件读与 AI 运行相关的仓库设置（落卡开关等）。
+    AiSettings { plugin_id: String, request_id: u64 },
     /// 插件请求中断一个会话的活跃 run。
     ChatStop { plugin_id: String, request_id: u64, params: method::ChatStopParams },
     /// 插件请求读会话清单或单会话消息历史。
@@ -367,6 +385,14 @@ pub enum HostRequest {
     VaultTags { plugin_id: String, request_id: u64 },
     /// 插件请求把当前文档改名为新的主名（宿主编排保存 / 关闭 / 改名 / 重开）。
     DocRename { plugin_id: String, request_id: u64, params: method::DocRenameParams },
+    /// 插件请求读当前文档的 frontmatter 块（属性面板）。
+    DocPropsRead { plugin_id: String, request_id: u64 },
+    /// 插件请求用新 frontmatter 块替换当前文档的属性区。
+    DocPropsWrite {
+        plugin_id: String,
+        request_id: u64,
+        params: method::DocPropsWriteParams,
+    },
     /// 插件请求读当前空间的团队元数据（`key` 缺省 = 全部键；仅协作空间可用）。
     CollabMetaGet { plugin_id: String, request_id: u64, params: method::CollabMetaGetParams },
     /// 插件请求按键写当前空间的团队元数据（只改给出的键；只读身份由壳拒绝）。
@@ -771,6 +797,9 @@ impl PluginRuntime {
             }
             HostRequest::Dialog { .. } => return Err("界面服务请求形态不符".to_string()),
             HostRequest::ChatSend { .. }
+            | HostRequest::ChatSendDirect { .. }
+            | HostRequest::ChatCompactDirect { .. }
+            | HostRequest::AiSettings { .. }
             | HostRequest::ChatStop { .. }
             | HostRequest::ChatHistory { .. }
             | HostRequest::ChatRename { .. }
@@ -818,6 +847,8 @@ impl PluginRuntime {
             | HostRequest::DocAwareness { .. }
             | HostRequest::VaultBacklinks { .. }
             | HostRequest::DocRename { .. }
+            | HostRequest::DocPropsRead { .. }
+            | HostRequest::DocPropsWrite { .. }
             | HostRequest::VaultTags { .. }
             | HostRequest::HistoryDay { .. }
             | HostRequest::HistoryGroups { .. }
@@ -1119,6 +1150,24 @@ impl PluginRuntime {
                 request_id,
                 params,
             },
+            HostRequest::DocPropsRead { plugin_id, .. } => HostRequest::DocPropsRead {
+                plugin_id,
+                request_id,
+            },
+            HostRequest::DocPropsWrite { plugin_id, params, .. } => HostRequest::DocPropsWrite {
+                plugin_id,
+                request_id,
+                params,
+            },
+            HostRequest::ChatSendDirect { plugin_id, params, .. } => HostRequest::ChatSendDirect {
+                plugin_id,
+                request_id,
+                params,
+            },
+            HostRequest::ChatCompactDirect { plugin_id, params, .. } => {
+                HostRequest::ChatCompactDirect { plugin_id, request_id, params }
+            }
+            HostRequest::AiSettings { plugin_id, .. } => HostRequest::AiSettings { plugin_id, request_id },
             HostRequest::VaultTags { plugin_id, .. } => HostRequest::VaultTags { plugin_id, request_id },
             HostRequest::HistoryDay { plugin_id, params, .. } => HostRequest::HistoryDay {
                 plugin_id,
@@ -1207,7 +1256,12 @@ impl PluginRuntime {
             HostRequest::SpaceFilePatch { plugin_id, params, .. } => {
                 HostRequest::SpaceFilePatch { plugin_id, request_id, params }
             }
-            _ => return Err("壳侧服务请求形态不符".to_string()),
+            other => {
+                return Err(format!(
+                    "壳侧服务请求形态不符：插件 {}",
+                    request_plugin_id(&other)
+                ));
+            }
         };
         self.shell_calls
             .lock()
@@ -1975,6 +2029,11 @@ impl PluginRuntime {
         self.broadcast_event(event::name::TABLE_CHANGED, &payload);
     }
 
+    /// 广播画布的前台展示状态（后台标签页不算）；属性面板据此切换内容。
+    pub fn on_canvas_visible(self: &Arc<Self>, visible: bool) {
+        self.broadcast_event(event::name::CANVAS_VISIBLE, &CanvasVisiblePayload { visible });
+    }
+
     /// 广播当前笔记的远端协作者光标：订阅方按 `path` 过滤，空清单 = 已无协作者。
     pub fn on_doc_presence(self: &Arc<Self>, payload: DocPresencePayload) {
         self.broadcast_event(event::name::DOC_PRESENCE, &payload);
@@ -2303,6 +2362,9 @@ fn request_plugin_id(request: &HostRequest) -> &str {
         | HostRequest::OpenWindow { plugin_id, .. }
         | HostRequest::CloseWindow { plugin_id, .. }
         | HostRequest::ChatSend { plugin_id, .. }
+        | HostRequest::ChatSendDirect { plugin_id, .. }
+        | HostRequest::ChatCompactDirect { plugin_id, .. }
+        | HostRequest::AiSettings { plugin_id, .. }
         | HostRequest::ChatStop { plugin_id, .. }
         | HostRequest::ChatHistory { plugin_id, .. }
         | HostRequest::ClipboardWrite { plugin_id, .. }
@@ -2350,6 +2412,8 @@ fn request_plugin_id(request: &HostRequest) -> &str {
         | HostRequest::EditorPrefs { plugin_id, .. }
         | HostRequest::DocOpen { plugin_id, .. }
         | HostRequest::DocEdit { plugin_id, .. }
+        | HostRequest::DocPropsRead { plugin_id, .. }
+        | HostRequest::DocPropsWrite { plugin_id, .. }
         | HostRequest::DocSave { plugin_id, .. }
         | HostRequest::DocClose { plugin_id, .. }
         | HostRequest::DocAwareness { plugin_id, .. }

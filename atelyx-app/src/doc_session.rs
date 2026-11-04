@@ -5,7 +5,8 @@ use iced::Task;
 use serde_json::json;
 
 use atelyx_core::plugin_runtime::{
-    DocAwarenessParams, DocEditParams, DocOpenParams, DocRenameParams, DocSaveParams,
+    DocAwarenessParams, DocEditParams, DocOpenParams, DocPropsResult, DocPropsWriteParams,
+    DocRenameParams, DocSaveParams,
 };
 
 use atelyx_core::plugin_runtime::{
@@ -316,4 +317,89 @@ mod tests {
         assert_eq!(renamed_path("notes/方案.md", ""), None, "空名拒绝");
         assert_eq!(renamed_path("notes/方案.md", ".md"), None, "只剩后缀 = 空主名");
     }
+}
+
+/// 读当前文档的属性区：无文档 / 无属性块时给出空块，正文明细不在回执里。
+pub fn props_read(app: &App, request_id: u64) -> Task<Message> {
+    let path = app.ui.last_note_file.clone().unwrap_or_default();
+    let editable = !path.is_empty() && can_write(app);
+    if path.is_empty() {
+        return crate::settings_view::plugins::resolve_vault(
+            app,
+            request_id,
+            Ok(serde_json::to_value(DocPropsResult {
+                path: String::new(),
+                frontmatter: String::new(),
+                present: false,
+                parsed: false,
+                editable: false,
+            })
+            .unwrap_or_default()),
+        );
+    }
+    let parsed = atelyx_core::frontmatter::parse(&app.doc_text);
+    let closed = atelyx_core::frontmatter::block_end(&app.doc_text).is_some();
+    let result = DocPropsResult {
+        path,
+        frontmatter: if closed { parsed.fm_prefix } else { String::new() },
+        present: app.doc_text.starts_with("---"),
+        parsed: parsed.ok && closed,
+        editable,
+    };
+    let value = serde_json::to_value(result).unwrap_or_else(|_| json!({}));
+    crate::settings_view::plugins::resolve_vault(app, request_id, Ok(value))
+}
+
+/// 用新的 frontmatter 块替换当前文档的属性区；正文与在途编辑保持不动。
+pub fn props_write(
+    app: &mut App,
+    request_id: u64,
+    params: DocPropsWriteParams,
+) -> Task<Message> {
+    if app.ui.last_note_file.is_none() {
+        return crate::settings_view::plugins::resolve_vault(
+            app,
+            request_id,
+            Err("没有打开的文档".to_string()),
+        );
+    }
+    if !can_write(app) {
+        return crate::settings_view::plugins::resolve_vault(
+            app,
+            request_id,
+            Err("当前文档不可写".to_string()),
+        );
+    }
+    let block = params.frontmatter;
+    let data = if block.trim().is_empty() {
+        Vec::new()
+    } else {
+        let parsed = atelyx_core::frontmatter::parse(&block);
+        if !parsed.ok || atelyx_core::frontmatter::block_end(&block).is_none() {
+            return crate::settings_view::plugins::resolve_vault(
+                app,
+                request_id,
+                Err("属性块无法解析".to_string()),
+            );
+        }
+        parsed.data.as_map().map(<[(String, atelyx_core::frontmatter::Yaml)]>::to_vec).unwrap_or_default()
+    };
+    apply_props(app, data);
+    crate::settings_view::plugins::resolve_vault(app, request_id, Ok(json!({})))
+}
+
+/// 用新的属性数据重写属性区；正文与在途编辑保持不动。
+pub fn apply_props(app: &mut App, data: Vec<(String, atelyx_core::frontmatter::Yaml)>) {
+    use atelyx_core::frontmatter::{stringify, Yaml};
+    let body = crate::strip_frontmatter(&app.doc_text).to_string();
+    let previous = std::mem::replace(&mut app.doc_text, stringify(&Yaml::Map(data), &body));
+    // 宿主改了正文：插件下一笔提交仍以它上次给的全文为祖先，不能把这次属性修改覆盖掉
+    if app.doc_base.is_none() {
+        app.doc_base = Some(previous);
+    }
+    app.doc_dirty = true;
+    app.doc_save_error = None;
+    app.autosave_deadline = Some(std::time::Instant::now() + crate::AUTOSAVE_DEBOUNCE);
+    crate::space_actions::collab_after_edit(app);
+    publish_state(app, Some(app.doc_text.clone()));
 }
