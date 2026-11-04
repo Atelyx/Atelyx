@@ -252,7 +252,14 @@ impl PluginState {
             }
         });
         let session = self.with_session(|session| session.clone());
-        let Some(session) = session else { return };
+        let mut ui = self.ui.lock().await;
+        let Some(session) = session else {
+            // 未打开画布也要提交空态帧：否则宿主会继续显示上一张帧
+            if let Err(error) = ui.render(ctx, VIEW, crate::paint::empty).await {
+                ctx.log_error(&format!("提交画布视图失败：{error}"));
+            }
+            return;
+        };
         let (agents, default_pick) = (
             self.agents
                 .lock()
@@ -260,7 +267,6 @@ impl PluginState {
                 .unwrap_or_default(),
             self.default_pick.lock().ok().and_then(|pick| pick.clone()),
         );
-        let mut ui = self.ui.lock().await;
         if let Err(error) = ui
             .render(ctx, VIEW, |ui| {
                 crate::paint::frame(

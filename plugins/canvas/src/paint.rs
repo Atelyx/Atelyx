@@ -131,6 +131,11 @@ pub struct Choices<'a> {
     pub default_pick: Option<&'a atelyx_plugin_protocol::method::AiModelPick>,
 }
 
+/// 未打开画布：整页空态（与其它面板同一份居中排版）。
+pub fn empty(ui: &mut Ui) {
+    ui.empty_state("pencil", "打开画布", "在文件面板或搜索面板单击一个 .atlx 画布开始编辑。");
+}
+
 pub fn frame(ui: &mut Ui, session: &Session, size: (f32, f32), choices: Choices<'_>) {
     let snapshot = Arc::new(Snapshot::of(session));
     let (w, h) = size;

@@ -13,7 +13,7 @@ use atelyx_core::plugin_runtime::{
 };
 use atelyx_plugin_protocol::frame::SurfaceFrame;
 use atelyx_plugin_protocol::method::{FontSizes, Radii, ThemeColors, ThemeResult};
-use atelyx_plugin_protocol::paint::{DrawCommand, TextLayout};
+use atelyx_plugin_protocol::paint::{DrawCommand, TextAlign, TextLayout};
 
 const CANVAS_ID: &str = "atelyx.canvas";
 const SURFACE: &str = "canvas";
@@ -60,8 +60,21 @@ async fn main() {
         }
     }
 
-    // 首帧：网格底 + 卡片标题画进主帧
-    let frame = wait_frame(&runtime, |frame| has_text(frame, "现有卡"))
+    // 未打开画布：插件必须提交空态帧，而不是让宿主留着上一张帧
+    let empty = wait_frame(&runtime, |frame| has_text(frame, "打开画布"))
+        .await
+        .expect("未打开画布时应提交空态帧");
+    assert_empty_state_centered(&empty, "打开画布", "在文件面板或搜索面板单击一个 .atlx 画布开始编辑。");
+    println!("空态：{} 条指令", empty.commands.len());
+
+    // 宿主打开画布后才建会话
+    *state.open_files.lock().unwrap() = vec!["demo.atlx".into()];
+    runtime.on_open_files_changed();
+    // 新会话从默认视口起算：再报一次尺寸，卡片浮层与命中才按面尺寸铺开
+    resize(&runtime);
+
+    // 首帧：网格底 + 卡片标题画进主帧（浮层随视口铺开后才有命中区）
+    let frame = wait_frame(&runtime, |frame| has_text(frame, "现有卡") && !frame.hits.is_empty())
         .await
         .unwrap_or_else(|| panic!("载入后应出画布帧；当前无帧"));
     assert!(frame.hits.iter().any(|hit| !hit.id.is_empty()), "应有可命中区域");
@@ -156,6 +169,8 @@ struct HostState {
     menus: Mutex<usize>,
     unhandled: Mutex<Vec<String>>,
     vault: Mutex<PathBuf>,
+    /// 宿主当前打开的文件：先空后给 `demo.atlx`，用来覆盖「未打开画布」空态。
+    open_files: Mutex<Vec<String>>,
 }
 
 fn serve(runtime: Arc<PluginRuntime>, state: Arc<HostState>, vault: PathBuf) {
@@ -198,7 +213,8 @@ fn serve(runtime: Arc<PluginRuntime>, state: Arc<HostState>, vault: PathBuf) {
                     runtime.resolve_ui_call(request_id, Ok(()));
                 }
                 HostRequest::EditorOpenFiles { request_id, .. } => {
-                    reply(&runtime, request_id, json!({ "paths": ["demo.atlx"] }));
+                    let paths = state.open_files.lock().unwrap().clone();
+                    reply(&runtime, request_id, json!({ "paths": paths }));
                 }
                 HostRequest::AiAgents { request_id, .. } => {
                     reply(
@@ -355,6 +371,32 @@ fn has_text(frame: &SurfaceFrame, wanted: &str) -> bool {
         .commands
         .iter()
         .any(|command| matches!(command, DrawCommand::Text { content, .. } if content == wanted))
+}
+
+/// 空态：标题 / 说明按面宽居中，内容块（64 图标 + 两侧 16 间距 + 两行文字）垂直中心落在面中心。
+fn assert_empty_state_centered(frame: &SurfaceFrame, title: &str, desc: &str) {
+    let size = frame.size.expect("整面帧必须带尺寸");
+    let text = |wanted: &str| {
+        frame.commands.iter().find_map(|command| match command {
+            DrawCommand::Text { content, x, y, size, max_width, align, .. } if content == wanted => {
+                Some((*x, *y, *size, *max_width, *align))
+            }
+            _ => None,
+        }).unwrap_or_else(|| panic!("空态缺少文字：{wanted}"))
+    };
+    let title = text(title);
+    let desc = text(desc);
+    for (label, (x, _, _, max_width, align)) in [("标题", title), ("说明", desc)] {
+        assert_eq!(max_width, Some(size.w), "空态{label}应按面宽对齐");
+        assert_eq!(align, Some(TextAlign::Center), "空态{label}应居中");
+        assert!(x.abs() < 0.5, "空态{label}对齐盒的左缘应在面左缘");
+    }
+    let block = 64.0 + 16.0 + title.2 * 1.2 + 16.0 + desc.2 * 1.2;
+    let top = (size.h - block) / 2.0;
+    assert!((title.1 - (top + 64.0 + 16.0)).abs() < 0.5, "空态标题应垂直居中");
+    let desc_y = top + 64.0 + 16.0 + title.2 * 1.2 + 16.0;
+    assert!((desc.1 - desc_y).abs() < 0.5, "空态说明应垂直居中");
+    assert!(((top + desc_y + desc.2 * 1.2) / 2.0 - size.h / 2.0).abs() < 0.5, "空态内容块应垂直居中");
 }
 
 async fn wait_menu(state: &HostState) {
