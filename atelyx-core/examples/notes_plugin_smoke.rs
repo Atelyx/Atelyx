@@ -68,7 +68,8 @@ async fn main() {
                             json!({ "softWrap": true, "inPageTitle": true, "contentWidth": 780 }),
                         );
                     }
-                    HostRequest::DocRename { request_id, .. } => {
+                    HostRequest::DocRename { request_id, .. }
+                    | HostRequest::DocClose { request_id, .. } => {
                         reply(&responder, request_id, json!({}));
                     }
                     HostRequest::DocEdit { request_id, .. }
@@ -308,6 +309,52 @@ async fn main() {
             .expect("源码档应有输入面");
         println!("源码档：{} 条指令", frame.commands.len());
     }
+    // 失焦退编辑：面板外点一下即回只读档，编辑面（空行输入）随之撤掉
+    if let Some(hit) = runtime
+        .surface_frame(PLUGIN, SURFACE)
+        .and_then(|frame| frame.hits.iter().find(|hit| hit.id == "note:mode:edit").cloned())
+    {
+        click_hit(&runtime, &hit);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut editing = false;
+        while Instant::now() < deadline {
+            editing = runtime.surface_frame(PLUGIN, SURFACE).is_some_and(|frame| {
+                frame.hits.iter().any(|hit| hit.id.starts_with("note:gap:"))
+            });
+            if editing {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(editing, "预览编辑档应有空行输入面");
+        runtime.notify_frame_input(PLUGIN, SURFACE, &FrameInput::Focus { focused: false });
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut read = false;
+        while Instant::now() < deadline {
+            read = runtime.surface_frame(PLUGIN, SURFACE).is_some_and(|frame| {
+                !frame.hits.iter().any(|hit| hit.id.starts_with("note:gap:"))
+                    && frame.hits.iter().any(|hit| hit.id == "note:block:0")
+            });
+            if read {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(read, "失焦后应回只读档：编辑面撤掉、正文块仍可命中");
+        println!("失焦退编辑：通过");
+    }
+    // 关档：插件必须交空态帧，否则面板停在上一份文档
+    runtime.notify_doc_close(PLUGIN, SURFACE, "a.md");
+    let frame = wait_empty_state(&runtime, Duration::from_secs(2))
+        .await
+        .expect("关档后应出现空态帧");
+    assert_empty_state_centered(
+        &frame,
+        "打开笔记",
+        "在文件面板或搜索面板单击一个 .md 笔记开始编辑。",
+    );
+    println!("关档空态帧：通过");
+
     runtime.notify_surface_detached(PLUGIN, SURFACE);
     runtime.set_enabled(PLUGIN, false).expect("停用笔记插件");
     runtime.shutdown();
@@ -400,6 +447,27 @@ fn assert_empty_state_centered(frame: &SurfaceFrame, title: &str, desc: &str) {
     let desc_y = top + 64.0 + 16.0 + title.2 * 1.2 + 16.0;
     assert!((desc.1 - desc_y).abs() < 0.5, "空态说明应垂直居中");
     assert!(((top + desc_y + desc.2 * 1.2) / 2.0 - size.h / 2.0).abs() < 0.5, "空态内容块应垂直居中");
+}
+
+/// 等到面板画出空态标题（关档后宿主才有可交的画面）。
+async fn wait_empty_state(
+    runtime: &Arc<PluginRuntime>,
+    timeout: Duration,
+) -> Option<Arc<SurfaceFrame>> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(frame) = runtime.surface_frame(PLUGIN, SURFACE) {
+            if frame.commands.iter().any(|command| {
+                matches!(command, DrawCommand::Text { content, .. } if content == "打开笔记")
+            }) {
+                return Some(frame);
+            }
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
 }
 
 async fn wait_frame(runtime: &Arc<PluginRuntime>, timeout: Duration) -> Option<Arc<SurfaceFrame>> {

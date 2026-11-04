@@ -56,13 +56,13 @@ async fn main() {
     wait_count(&state.menus, 1, "宿主未收到「协作空间」菜单请求").await;
     println!("本地空态与菜单入口：通过");
 
-    // 进入空间：名册 + 在线设备（两条同身份连接合并成一行，台数按连接数算）
+    // 进入空间：名册 + 在线设备（两条同身份连接合并成一行，台数按合并后的设备行算）
     *state.room.lock().unwrap() = space_room();
     *state.members.lock().unwrap() = members();
     runtime.on_space_peers_changed();
     runtime.on_space_members_changed();
     let frame = wait_frame(&runtime, |frame| {
-        has_text(frame, "已连接") && has_text(frame, "3 台在线") && has_text(frame, "所有者")
+        has_text(frame, "已连接") && has_text(frame, "2 台在线") && has_text(frame, "所有者")
     })
     .await
     .expect("空间快照到达后应出房间帧");
