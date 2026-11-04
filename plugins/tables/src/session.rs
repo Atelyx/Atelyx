@@ -41,7 +41,7 @@ pub async fn reload_from_open_files(plugin: &PluginState, ctx: &Context) {
         if let Some(old) = previous.as_deref() {
             emit_changed(ctx, old).await;
         }
-        notify_selection(plugin, ctx).await;
+        broadcast_selection(plugin, ctx).await;
         return;
     };
     // 改名（本端补丁回执 / 空间远端改标题）只换路径，不重载：脏会话里的编辑与撤销栈
@@ -65,8 +65,7 @@ pub async fn reload_from_open_files(plugin: &PluginState, ctx: &Context) {
                     })
                     .unwrap_or(false);
                 if migrated {
-                    crate::presence::publish_selection(plugin, ctx).await;
-                    notify_selection(plugin, ctx).await;
+                    broadcast_selection(plugin, ctx).await;
                     emit_changed(ctx, &path).await;
                     return;
                 }
@@ -121,8 +120,7 @@ pub async fn reload_from_open_files(plugin: &PluginState, ctx: &Context) {
             .unwrap_or(false)
     });
     if migrated {
-        crate::presence::publish_selection(plugin, ctx).await;
-        notify_selection(plugin, ctx).await;
+        broadcast_selection(plugin, ctx).await;
         emit_changed(ctx, &path).await;
         return;
     }
@@ -137,9 +135,14 @@ pub async fn reload_from_open_files(plugin: &PluginState, ctx: &Context) {
     if let Ok(mut slot) = plugin.session.lock() {
         *slot = Some(session);
     }
+    broadcast_selection(plugin, ctx).await;
+    notify_changed(plugin, ctx).await;
+}
+
+/// 选区变更的唯一出口：宿主事件与协作在场一起发（上行节流在 presence 内）。
+pub async fn broadcast_selection(plugin: &PluginState, ctx: &Context) {
     crate::presence::publish_selection(plugin, ctx).await;
     notify_selection(plugin, ctx).await;
-    notify_changed(plugin, ctx).await;
 }
 
 /// 宿主历史回滚交回的快照：整体替换数据并置脏（撤销可回退这一步）。
@@ -163,6 +166,8 @@ pub fn restore_snapshot(plugin: &PluginState, path: &str, content: &str) -> bool
     session.view.editing = None;
     session.view.selection = None;
     session.touch();
+    // 回滚后的行 / 列集合变了：滚动位收回新几何的合法区间
+    crate::geom::clamp_scroll(session);
     true
 }
 
@@ -179,15 +184,43 @@ pub fn apply_remote_patch(plugin: &PluginState, path: &str, patch: &serde_json::
     if patch.id != session.data.id {
         return false;
     }
+    // 回声补丁（同 id 同内容）不触发布局重建与重绘：按 id 差量比对，空补丁直接丢弃
+    if !patch_changes(&session.data, &patch) {
+        return false;
+    }
     table::apply_table_patch(&mut session.data, &patch);
     session.version += 1;
     session.rebuild_layout();
+    // 行 / 列集合变了：滚动位收回新几何的合法区间
+    crate::geom::clamp_scroll(session);
     session.view.undo.clear();
     session.view.redo.clear();
     if landed && !session.dirty {
         session.saved = session.data.clone();
     }
     true
+}
+
+/// 补丁是否真会改动数据（按 id 比对内容；顺序变更按 id 序列判定）。
+/// 字段必须覆盖 apply 会写到的每一处，否则该字段的远端更新会被当成回声丢掉。
+fn patch_changes(data: &TableFile, patch: &table::TablePatch) -> bool {
+    if patch.title.as_ref().is_some_and(|title| *title != data.title) {
+        return true;
+    }
+    let field = |id: &str| data.fields.iter().find(|field| field.id == id);
+    let row = |id: &str| data.rows.iter().find(|row| row.id == id);
+    patch.upsert_fields.iter().any(|next| field(&next.id) != Some(next))
+        || patch.upsert_rows.iter().any(|next| row(&next.id) != Some(next))
+        || patch.removed_field_ids.iter().any(|id| field(id).is_some())
+        || patch.removed_row_ids.iter().any(|id| row(id).is_some())
+        || patch.field_order.as_ref().is_some_and(|order| {
+            order.len() != data.fields.len()
+                || order.iter().zip(&data.fields).any(|(id, field)| *id != field.id)
+        })
+        || patch.row_order.as_ref().is_some_and(|order| {
+            order.len() != data.rows.len()
+                || order.iter().zip(&data.rows).any(|(id, row)| *id != row.id)
+        })
 }
 
 /// 文件名主名（去扩展名）：内嵌标题的唯一真源。

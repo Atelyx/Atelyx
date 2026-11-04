@@ -279,7 +279,7 @@ impl PluginState {
                 })
                 .unwrap_or_default(),
             texts: vec![
-                format!("{}%", (session.view.zoom * 100.0).round() as i32),
+                format!("{}%", crate::model::zoom_percent(session.view.zoom)),
                 format!("{} 行 · {} 列", session.data.rows.len(), session.data.fields.len()),
             ],
             items: vec![
@@ -339,6 +339,7 @@ impl PluginState {
                     .unwrap_or(false);
                 if changed {
                     self.schedule_save(ctx);
+                    self.publish_header(ctx).await;
                 }
                 self.render(ctx).await;
                 return;
@@ -355,6 +356,7 @@ impl PluginState {
                 .unwrap_or(false);
             if changed {
                 self.schedule_save(ctx);
+                self.publish_header(ctx).await;
                 self.render(ctx).await;
             }
             return;
@@ -714,6 +716,7 @@ impl PluginState {
                 }
                 if action == input::ClipboardAction::Cut {
                     self.schedule_save(ctx);
+                    self.publish_header(ctx).await;
                     self.render(ctx).await;
                 }
             }
@@ -730,6 +733,7 @@ impl PluginState {
                     .unwrap_or(false);
                 if changed {
                     self.schedule_save(ctx);
+                    self.publish_header(ctx).await;
                     self.render(ctx).await;
                 }
             }
@@ -968,7 +972,7 @@ impl PluginHandler for TablesPlugin {
         if let Ok(mut attached) = self.state.attached.lock() {
             *attached = true;
         }
-        crate::presence::publish_selection(&self.state, ctx).await;
+        crate::session::broadcast_selection(&self.state, ctx).await;
         self.state.render(ctx).await;
         self.state.publish_header(ctx).await;
     }
@@ -996,6 +1000,8 @@ impl PluginHandler for TablesPlugin {
             event::name::TABLE_RESTORE => {
                 if self.state.apply_restore(&params.payload) {
                     self.state.schedule_save(ctx);
+                    // 回滚清掉了选区：对端与宿主都要看到这次变化
+                    crate::session::broadcast_selection(&self.state, ctx).await;
                     self.state.render(ctx).await;
                     self.state.publish_header(ctx).await;
                 }
@@ -1005,6 +1011,7 @@ impl PluginHandler for TablesPlugin {
                     // 远端合入也是一次内容结算：订阅 table:changed 的第三方视图据此重取
                     crate::session::notify_changed(&self.state, ctx).await;
                     self.state.render(ctx).await;
+                    self.state.publish_header(ctx).await;
                 }
             }
             event::name::PANEL_FLUSH => {
@@ -1129,8 +1136,11 @@ impl PluginHandler for TablesPlugin {
             if let Ok(mut current) = self.state.surface_size.lock() {
                 *current = size;
             }
-            self.state
-                .with_session_mut(|session| session.view.canvas_size = size);
+            self.state.with_session_mut(|session| {
+                session.view.canvas_size = size;
+                // 视口变大后可用滚动范围变小（滚到底再缩窗口会留下空白）
+                crate::geom::clamp_scroll(session);
+            });
             self.state.render(ctx).await;
             return;
         }
@@ -1145,17 +1155,19 @@ impl PluginHandler for TablesPlugin {
         if outcome.manual_save {
             self.state.save_now(ctx).await;
         }
+        let mut header = outcome.selection || outcome.header || outcome.dirty;
         if let Some((row_id, field_id)) = outcome.image_import {
             self.state.import_images(ctx, &row_id, &field_id).await;
+            header = true;
         }
         if let Some(background) = outcome.pick_color {
             self.state.pick_style_color(ctx, background).await;
+            header = true;
         }
         if outcome.selection {
-            crate::session::notify_selection(&self.state, ctx).await;
-            presence::publish_selection(&self.state, ctx).await;
+            crate::session::broadcast_selection(&self.state, ctx).await;
         }
-        if outcome.selection || outcome.header || outcome.dirty {
+        if header {
             self.state.publish_header(ctx).await;
         }
         if let Some(request) = menu_request {

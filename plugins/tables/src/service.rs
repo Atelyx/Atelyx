@@ -216,8 +216,7 @@ async fn select_row(
             Ok(())
         })
         .ok_or("未打开表格，无法选中行")??;
-    crate::session::notify_selection(plugin, ctx).await;
-    crate::presence::publish_selection(plugin, ctx).await;
+    crate::session::broadcast_selection(plugin, ctx).await;
     plugin.render(ctx).await;
     plugin.publish_header(ctx).await;
     Ok(serde_json::json!({}))
@@ -273,8 +272,7 @@ async fn finish(
 ) -> Result<serde_json::Value, String> {
     if changed {
         crate::session::notify_changed(plugin, ctx).await;
-        crate::session::notify_selection(plugin, ctx).await;
-        crate::presence::publish_selection(plugin, ctx).await;
+        crate::session::broadcast_selection(plugin, ctx).await;
         // 与用户编辑同一出口：写后同样排防抖保存
         plugin.schedule_save(ctx);
         plugin.render(ctx).await;

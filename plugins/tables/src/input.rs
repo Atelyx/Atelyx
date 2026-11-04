@@ -889,11 +889,16 @@ fn wheel(session: &mut Session, delta_x: f32, delta_y: f32, outcome: &mut Outcom
 
 /// Ctrl+滚轮缩放（`delta_y` 正 = 向下 = 缩小）。
 pub fn zoom_by_wheel(session: &mut Session, delta_y: f32, outcome: &mut Outcome) {
+    let before = crate::model::zoom_percent(session.view.zoom);
     let zoom = (session.view.zoom * (-delta_y * 0.0015f32).exp()).clamp(MIN_ZOOM, MAX_ZOOM);
     session.view.zoom = (zoom * 100.0).round() / 100.0;
     session.rebuild_layout();
     geom::clamp_scroll(session);
     outcome.paint = true;
+    // 头部显示整百分比：只有跨过 1% 才重发，滚轮高频不至于每拍都出头部
+    if crate::model::zoom_percent(session.view.zoom) != before {
+        outcome.header = true;
+    }
 }
 
 /// 键盘：编辑态优先，其次是表格级快捷键。
@@ -1623,7 +1628,7 @@ mod tests {
     use atelyx_format::table::{TableField, TableFile, TableRow};
     use atelyx_plugin_protocol::frame::{FrameInput, MouseButton};
 
-    use super::{handle, tick_caret};
+    use super::{handle, tick_caret, zoom_by_wheel, Outcome};
     use crate::model::{Lightbox, Session, Size};
 
     fn table(field_type: &str, value: serde_json::Value) -> TableFile {
@@ -1786,5 +1791,17 @@ mod tests {
         assert_eq!(session.view.lightbox.as_ref().map(|lightbox| lightbox.index), Some(1));
         assert_eq!(outcome.lightbox_image.as_deref(), Some("b.png"));
         assert_eq!(menu, None);
+    }
+
+    #[test]
+    fn zoom_wheel_republishes_header_only_when_percent_changes() {
+        let mut session = session("text", serde_json::json!("abc"));
+        let mut outcome = Outcome::default();
+        zoom_by_wheel(&mut session, 100.0, &mut outcome);
+        assert!(outcome.paint);
+        assert!(outcome.header, "跨过 1% 要重发头部（否则一直显示 100%）");
+        let mut outcome = Outcome::default();
+        zoom_by_wheel(&mut session, 1.0, &mut outcome);
+        assert!(!outcome.header, "未跨过 1% 不重发头部");
     }
 }

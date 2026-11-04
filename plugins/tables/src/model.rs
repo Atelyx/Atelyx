@@ -31,6 +31,11 @@ pub const MIN_ROW_H: f32 = 32.0;
 /// 缩放上下限。
 pub const MIN_ZOOM: f32 = 0.5;
 pub const MAX_ZOOM: f32 = 2.0;
+
+/// 缩放显示值（整百分比）：头部文本与重发判定共用，避免两处取整口径漂移。
+pub fn zoom_percent(zoom: f32) -> i32 {
+    (zoom * 100.0).round() as i32
+}
 /// 撤销栈深度（快照式）。
 pub const UNDO_DEPTH: usize = 50;
 /// 双击判定窗口（毫秒）。

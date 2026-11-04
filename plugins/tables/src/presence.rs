@@ -16,6 +16,8 @@ const CHANNEL: &str = "table-presence";
 const PEER_TTL_MS: u128 = 30_000;
 /// 本端状态保活间隔：空闲端不重发就会被对端按 TTL 剔除。
 const KEEPALIVE_MS: u128 = 15_000;
+/// 本端选区上行最小间隔：连续拖选合并成一次，只发最后一版。
+const SEND_INTERVAL_MS: u128 = 120;
 
 /// 一位对端的选区。
 #[derive(Clone)]
@@ -41,6 +43,8 @@ pub struct Presence {
     /// 最近一次上行的本端状态与时刻（保活重发用）。
     sent: Option<serde_json::Value>,
     sent_at: Option<Instant>,
+    /// 被最小上行间隔挡下的新状态：到点后由下一拍补发，避免停在旧状态。
+    pending: Option<serde_json::Value>,
 }
 
 impl Presence {
@@ -60,10 +64,38 @@ impl Presence {
         self.sent.clone()
     }
 
+    /// 载荷与上次相同则交给保活；不同则受最小上行间隔限制。
+    pub fn should_send(&mut self, payload: &serde_json::Value) -> bool {
+        match (&self.sent, self.sent_at) {
+            (Some(sent), _) if sent == payload => {
+                self.pending = None;
+                false
+            }
+            (Some(_), Some(at)) if at.elapsed().as_millis() < SEND_INTERVAL_MS => {
+                self.pending = Some(payload.clone());
+                false
+            }
+            _ => {
+                self.pending = None;
+                true
+            }
+        }
+    }
+
+    /// 取被最小间隔挡下的新状态（未到间隔或无待发 = None）。
+    pub fn take_pending(&mut self) -> Option<serde_json::Value> {
+        let at = self.sent_at?;
+        if at.elapsed().as_millis() < SEND_INTERVAL_MS {
+            return None;
+        }
+        self.pending.take()
+    }
+
     /// 离场：清本端与对端记录（本端状态由调用方补发空载荷）。
     pub fn leave(&mut self) {
         self.sent = None;
         self.sent_at = None;
+        self.pending = None;
         self.peers.clear();
     }
 
@@ -200,6 +232,7 @@ fn fallback_color(peer_id: &str) -> [u8; 4] {
 }
 
 /// 发本端选区（空间模式下才有意义；未连接时宿主回 `queued=false`，只记本地状态）。
+/// 载荷未变直接跳过，变化受最小上行间隔限制（间隔内的连续变更只发最后一版）。
 pub async fn publish_selection(plugin: &PluginState, ctx: &Context) {
     let Some(payload) = plugin.with_session(|session| {
         let selection = session.view.selection.as_ref().and_then(selection_json);
@@ -210,38 +243,55 @@ pub async fn publish_selection(plugin: &PluginState, ctx: &Context) {
     }) else {
         return;
     };
-    if let Ok(result) = ctx.collab_send_ephemeral(CHANNEL, payload.clone(), None).await {
-        if result.queued {
+    let due = plugin
+        .presence
+        .lock()
+        .map(|mut presence| presence.should_send(&payload))
+        .unwrap_or(false);
+    if !due {
+        return;
+    }
+    send(plugin, ctx, payload).await;
+}
+
+/// 上行一条本端状态：受理后记为已发，失败留日志（保活会在下一拍重发上一次状态）。
+async fn send(plugin: &PluginState, ctx: &Context, payload: serde_json::Value) {
+    match ctx.collab_send_ephemeral(CHANNEL, payload.clone(), None).await {
+        Ok(_) => {
             if let Ok(mut presence) = plugin.presence.lock() {
                 presence.note_sent(payload);
             }
         }
+        Err(error) => ctx.log_error(&format!("发送表格在场失败：{error}")),
     }
 }
 
 /// 离开当前表格：先发一条无选区的同路径载荷，对端据此立刻收起本端（不必等 TTL）。
 pub async fn publish_leave(plugin: &PluginState, ctx: &Context, path: &str) {
     let payload = serde_json::json!({ "path": path, "selection": serde_json::Value::Null });
-    let _ = ctx.collab_send_ephemeral(CHANNEL, payload, None).await;
+    if let Err(error) = ctx.collab_send_ephemeral(CHANNEL, payload, None).await {
+        ctx.log_error(&format!("发送表格离场失败：{error}"));
+    }
     if let Ok(mut presence) = plugin.presence.lock() {
         presence.leave();
     }
 }
 
-/// 帧拍推进：剔除过期对端；到点保活重发（返回是否需要重绘）。
+/// 帧拍推进：剔除过期对端；到点保活重发被间隔挡下的选区（返回是否需要重绘）。
 pub async fn tick(plugin: &PluginState, ctx: &Context) -> bool {
     let pruned = plugin
         .presence
         .lock()
         .map(|mut presence| presence.prune())
         .unwrap_or(false);
-    let keepalive = plugin
+    // 节流窗口内排队的选区在下一拍补发，不依赖下一次输入；与保活同拍只发一条
+    let due = plugin
         .presence
         .lock()
         .ok()
-        .and_then(|mut presence| presence.keepalive());
-    if let Some(payload) = keepalive {
-        let _ = ctx.collab_send_ephemeral(CHANNEL, payload, None).await;
+        .and_then(|mut presence| presence.keepalive().or_else(|| presence.take_pending()));
+    if let Some(payload) = due {
+        send(plugin, ctx, payload).await;
     }
     pruned
 }
