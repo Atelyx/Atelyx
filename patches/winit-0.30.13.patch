@@ -253,3 +253,85 @@ diff -ruN a/src/platform_impl/windows/event_loop.rs b/src/platform_impl/windows/
 +
 +    conservative_rect
 +}
+diff -ruN a/src/platform_impl/windows/drop_handler.rs b/src/platform_impl/windows/drop_handler.rs
+--- a/src/platform_impl/windows/drop_handler.rs
++++ b/src/platform_impl/windows/drop_handler.rs
+@@ -5,7 +5,8 @@
+ use std::sync::atomic::{AtomicUsize, Ordering};
+ 
+ use windows_sys::core::{IUnknown, GUID, HRESULT};
+-use windows_sys::Win32::Foundation::{DV_E_FORMATETC, HWND, POINTL, S_OK};
++use windows_sys::Win32::Foundation::{DV_E_FORMATETC, HWND, POINT, POINTL, S_OK};
++use windows_sys::Win32::Graphics::Gdi::ScreenToClient;
+ use windows_sys::Win32::System::Com::{IDataObject, DVASPECT_CONTENT, FORMATETC, TYMED_HGLOBAL};
+ use windows_sys::Win32::System::Ole::{CF_HDROP, DROPEFFECT_COPY, DROPEFFECT_NONE};
+ use windows_sys::Win32::UI::Shell::{DragFinish, DragQueryFileW, HDROP};
+@@ -15,9 +16,10 @@
+ use crate::platform_impl::platform::definitions::{
+     IDataObjectVtbl, IDropTarget, IDropTargetVtbl, IUnknownVtbl,
+ };
+-use crate::platform_impl::platform::WindowId;
++use crate::platform_impl::platform::{WindowId, DEVICE_ID};
+ 
+-use crate::event::Event;
++use crate::dpi::PhysicalPosition;
++use crate::event::{Event, WindowEvent};
+ use crate::window::WindowId as RootWindowId;
+ 
+ #[repr(C)]
+@@ -106,11 +108,12 @@
+     pub unsafe extern "system" fn DragOver(
+         this: *mut IDropTarget,
+         _grfKeyState: u32,
+-        _pt: *const POINTL,
++        pt: *const POINTL,
+         pdwEffect: *mut u32,
+     ) -> HRESULT {
+         let drop_handler = unsafe { Self::from_interface(this) };
+         unsafe {
++            Self::send_cursor_moved(drop_handler, pt);
+             *pdwEffect = drop_handler.cursor_effect;
+         }
+ 
+@@ -134,11 +137,14 @@
+         this: *mut IDropTarget,
+         pDataObj: *const IDataObject,
+         _grfKeyState: u32,
+-        _pt: *const POINTL,
++        pt: *const POINTL,
+         _pdwEffect: *mut u32,
+     ) -> HRESULT {
+         use crate::event::WindowEvent::DroppedFile;
+         let drop_handler = unsafe { Self::from_interface(this) };
++        unsafe {
++            Self::send_cursor_moved(drop_handler, pt);
++        }
+         let hdrop = unsafe {
+             Self::iterate_filenames(pDataObj, |filename| {
+                 drop_handler.send_event(Event::WindowEvent {
+@@ -154,6 +160,25 @@
+         S_OK
+     }
+ 
++    /// 拖放期间没有 WM_MOUSEMOVE：把 OLE 给的落点（屏幕坐标）补发成 CursorMoved，
++    /// 否则宿主按最近一次鼠标位置判定落点，拿到的是拖拽开始前的旧光标。
++    unsafe fn send_cursor_moved(drop_handler: &mut FileDropHandlerData, pt: *const POINTL) {
++        if pt.is_null() {
++            return;
++        }
++        let mut location = POINT { x: unsafe { (*pt).x }, y: unsafe { (*pt).y } };
++        if unsafe { ScreenToClient(drop_handler.window, &mut location) } == false.into() {
++            return;
++        }
++        drop_handler.send_event(Event::WindowEvent {
++            window_id: RootWindowId(WindowId(drop_handler.window)),
++            event: WindowEvent::CursorMoved {
++                device_id: DEVICE_ID,
++                position: PhysicalPosition::new(location.x as f64, location.y as f64),
++            },
++        });
++    }
++
+     unsafe fn from_interface<'a, InterfaceT>(this: *mut InterfaceT) -> &'a mut FileDropHandlerData {
+         unsafe { &mut *(this as *mut _) }
+     }

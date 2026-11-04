@@ -2161,13 +2161,27 @@ impl PluginRuntime {
         );
     }
 
-    /// 外部文件拖入窗口：把绝对路径广播给订阅方（是否接收由插件按自身界面状态决定）。
-    pub fn on_files_dropped(self: &Arc<Self>, paths: Vec<String>) {
+    /// 外部文件拖入某个插件面：只投给该面的插件（订阅方按载荷的 surface id 区分自己的面）。
+    pub fn on_files_dropped(
+        self: &Arc<Self>,
+        plugin_id: &str,
+        surface_id: &str,
+        paths: Vec<String>,
+    ) {
         if paths.is_empty() {
             return;
         }
-        let payload = FileDropPayload { paths };
-        self.broadcast_event(event::name::WINDOW_FILE_DROP, &payload);
+        let subscribed = self
+            .instances
+            .lock()
+            .unwrap()
+            .get(plugin_id)
+            .is_some_and(|instance| instance.subscribed_to(event::name::WINDOW_FILE_DROP));
+        if !subscribed {
+            return;
+        }
+        let payload = FileDropPayload { paths, surface_id: surface_id.to_string() };
+        self.notify_plugin_event(plugin_id, event::name::WINDOW_FILE_DROP, &payload);
     }
 
     /// 发布一条对话事件：广播给订阅了 `host:ai.chat.event` 的插件，并交给壳（画布卡等宿主

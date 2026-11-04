@@ -63,7 +63,7 @@ pub mod name {
     /// 订阅方重取 `space.members`。
     pub const SPACE_MEMBERS_CHANGED: &str = "space:members.changed";
     /// 外部文件拖入窗口（宿主只转发绝对路径，读取由订阅方经 `fs` 自理）。
-    /// payload 见 [`FileDropPayload`]；未挂载界面的插件应忽略。
+    /// payload 见 [`FileDropPayload`]；只投给指针所在面的插件，该面未挂载即不投递。
     pub const WINDOW_FILE_DROP: &str = "window:file.drop";
     /// 当前文档会话的正文 / 落盘状态变化（协作远端合入、保存成功或失败、属性面板改写）。
     /// payload 见 [`DocChangedPayload`]。
@@ -254,11 +254,13 @@ pub struct SpaceMetaChangedPayload {
     pub key: String,
 }
 
-/// [`name::WINDOW_FILE_DROP`] 的 payload：本次拖入的绝对路径（一次事件可含多张图）。
+/// [`name::WINDOW_FILE_DROP`] 的 payload：本次拖入的绝对路径（一次事件可含多张图）与落点面。
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct FileDropPayload {
     pub paths: Vec<String>,
+    /// 指针落点面板的活动视图贡献 id：同一插件有多个面时按它区分。
+    pub surface_id: String,
 }
 
 /// 文件变更种类：新建 / 内容写入 / 删除 / 改名或移动。
@@ -362,6 +364,18 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&renamed).unwrap(),
             serde_json::json!({ "path": "notes/b.md", "kind": "renamed", "oldPath": "notes/a.md" })
+        );
+    }
+
+    #[test]
+    fn file_drop_payload_names_the_target_surface() {
+        let payload = FileDropPayload {
+            paths: vec!["C:/tmp/a.png".into()],
+            surface_id: "canvas".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&payload).unwrap(),
+            serde_json::json!({ "paths": ["C:/tmp/a.png"], "surfaceId": "canvas" })
         );
     }
 

@@ -3662,6 +3662,53 @@ pub fn panel_zones(app: &App) -> Vec<PanelZone> {
     out
 }
 
+/// 指定窗口内全局坐标所在面板的活动视图 kind（落在面板外 = `None`）。
+/// 主窗与撕裂窗的矩形可能重叠，因此必须按窗口筛掉别的窗口的面板。
+pub fn view_at(app: &App, window: iced::window::Id, point: Point) -> Option<String> {
+    let zone = panel_zones(app)
+        .into_iter()
+        .find(|zone| zone.rect.contains(point) && zone_window(app, zone) == Some(window))?;
+    match (&zone.panel_id, &zone.detached_id) {
+        (Some(panel_id), _) => active_view_in(&layout::active_layout(&app.ui).tree, panel_id),
+        (_, Some(detached_id)) => app
+            .ui
+            .detached_windows
+            .iter()
+            .find(|w| &w.id == detached_id)
+            .and_then(|w| {
+                let active = w.active_tab_id.as_deref()?;
+                w.tabs.iter().find(|t| t.id == active)
+            })
+            .map(|t| t.view.clone()),
+        _ => None,
+    }
+}
+
+/// 落点矩形所属窗口：主窗面板归主窗，撕裂窗面板归该撕裂窗口。
+fn zone_window(app: &App, zone: &PanelZone) -> Option<iced::window::Id> {
+    match (&zone.panel_id, &zone.detached_id) {
+        (Some(_), _) => app.main_id,
+        (_, Some(detached_id)) => {
+            app.detached_os.iter().find(|(_, id)| *id == detached_id).map(|(os, _)| *os)
+        }
+        _ => None,
+    }
+}
+
+/// 主树某面板的活动标签视图 kind（无活动标签 = `None`）。
+fn active_view_in(node: &LayoutNode, panel_id: &str) -> Option<String> {
+    match node {
+        LayoutNode::Panel { id, tabs, active_tab_id } if id == panel_id => {
+            let active = active_tab_id.as_deref()?;
+            tabs.iter().find(|t| t.id == active).map(|t| t.view.clone())
+        }
+        LayoutNode::Split { children, .. } => {
+            children.iter().find_map(|child| active_view_in(child, panel_id))
+        }
+        _ => None,
+    }
+}
+
 fn walk_panels(node: &LayoutNode, area: Rectangle, out: &mut Vec<PanelZone>, app: &App) {
     match node {
         LayoutNode::Panel { id, tabs, .. } => out.push(PanelZone {
@@ -3750,7 +3797,11 @@ pub fn drop_zone_at(zone: &PanelZone, global: iced::Point) -> DropZone {
 
 #[cfg(test)]
 mod tests {
-    use super::{divider_size, file_label, plugin_entries, truncate_to_width, UiMetrics, MENU_SEARCH_H};
+    use super::{
+        active_view_in, divider_size, file_label, plugin_entries, truncate_to_width, UiMetrics,
+        MENU_SEARCH_H,
+    };
+    use atelyx_core::layout::{LayoutNode, TabItem};
     use atelyx_core::plugin_runtime::{MenuItem, MenuOpenParams, MenuSearch};
     use iced::Length;
 
@@ -3761,6 +3812,28 @@ mod tests {
         let bar = Length::Fixed(UiMetrics::DIVIDER_W);
         assert_eq!(divider_size(true), (bar, Length::Fill));
         assert_eq!(divider_size(false), (Length::Fill, bar));
+    }
+
+    /// 落点面取面板的活动标签：无活动标签的面板不接收拖入。
+    #[test]
+    fn active_view_follows_the_panel_active_tab() {
+        let panel = |id: &str, active: Option<&str>| LayoutNode::Panel {
+            id: id.into(),
+            tabs: vec![
+                TabItem { id: "t1".into(), view: "plugin:canvas:canvas".into(), locked: false },
+                TabItem { id: "t2".into(), view: "note".into(), locked: false },
+            ],
+            active_tab_id: active.map(str::to_string),
+        };
+        let tree = LayoutNode::Split {
+            id: "s1".into(),
+            direction: "row".into(),
+            children: vec![panel("p1", Some("t2")), panel("p2", None)],
+            sizes: vec![1.0, 1.0],
+        };
+        assert_eq!(active_view_in(&tree, "p1").as_deref(), Some("note"));
+        assert_eq!(active_view_in(&tree, "p2"), None);
+        assert_eq!(active_view_in(&tree, "missing"), None);
     }
 
     /// 固定度量：每字符 1 单位（截断只按字符数收缩，与字体 shaping 解耦）。

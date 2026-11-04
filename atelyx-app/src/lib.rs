@@ -286,8 +286,8 @@ pub(crate) fn now_secs() -> u64 {
 /// 覆盖 NoMod 清空类与其余注册表键位）。全局订阅不持 App 状态，是否命中与消费
 /// 由处理器按录制态与作用域焦点自守卫。
 /// 宿主的键盘派生消息（整面帧持有键盘时一律不处理）。
-/// 只列**无命令修饰**的键盘来源项——带 Ctrl / Alt / Super 的组合键归宿主（`KeyCommand` / `CopyKey`
-/// 因此不在此列），鼠标、窗口与定时消息也不受插件焦点影响。
+/// 只列**无命令修饰**的键盘来源项——带 Ctrl / Alt / Super 的组合键由 `is_frame_command_message` 单列，
+/// 鼠标、窗口与定时消息不受插件焦点影响。
 fn is_host_keyboard_message(message: &Message) -> bool {
     match message {
         Message::NavKey(..) | Message::Escape(_) => true,
@@ -295,12 +295,9 @@ fn is_host_keyboard_message(message: &Message) -> bool {
     }
 }
 
-/// 整面帧收键盘时的宿主键盘派生消息：帧声明 `keys` 即收全部按键（含命令组合），宿主不做键盘动作。
-fn is_frame_keyboard_message(message: &Message) -> bool {
-    match message {
-        Message::KeyCommand { .. } | Message::CopyKey { .. } => true,
-        other => is_host_keyboard_message(other),
-    }
+/// 命令组合消息：面声明 keys 时归面处理，否则由宿主按命令派发。
+fn is_frame_command_message(message: &Message) -> bool {
+    matches!(message, Message::KeyCommand { .. } | Message::CopyKey { .. })
 }
 
 fn command_key_candidate(key: &keyboard::Key, mods: keyboard::Modifiers) -> bool {
@@ -526,6 +523,8 @@ enum Message {
     Press(window::Id),
     CursorMoved(window::Id, Point),
     Release,
+    /// 外部文件拖入窗口：按指针所在面的活动视图路由给插件。
+    FileDropped(window::Id, std::path::PathBuf),
     /// ui 层消息（悬停提示 / 弹层关闭与面板导航 / 通知关闭）。
     Ui(ui::UiMsg<Message>),
     /// 键盘修饰态（Ctrl+滚轮缩放 / Shift+滚轮横滚判定源）。
@@ -2041,6 +2040,27 @@ impl App {
         self.cursors.get(&window).copied().unwrap_or(Point::ORIGIN)
     }
 
+    /// 外部文件拖入：只投给指针所在面板的活动视图（无差别广播会让多个面板一起消费同一次拖入）。
+    /// 落点取窗口内最近一次光标位置——拖放期间没有鼠标移动事件，平台层在拖放回调里补发。
+    fn file_dropped(&mut self, window: window::Id, path: std::path::PathBuf) {
+        let Some(pos) = self.os_positions.get(&window).copied() else {
+            eprintln!("文件拖入：窗口位置未知，未投递 {path:?}");
+            return;
+        };
+        let cursor = self.cursor_for(window);
+        let global = Point::new(pos.x + cursor.x, pos.y + cursor.y);
+        let Some(view) = layout_view::view_at(self, window, global) else {
+            eprintln!("文件拖入：落点不在任何面板，未投递 {path:?}");
+            return;
+        };
+        let Some((plugin_id, surface_id)) = plugin_actions::parse_view_kind(&view) else {
+            eprintln!("文件拖入：面板 {view} 不接受文件，未投递 {path:?}");
+            return;
+        };
+        self.plugins
+            .on_files_dropped(plugin_id, surface_id, vec![path.to_string_lossy().into_owned()]);
+    }
+
     fn update(&mut self, message: Message) -> Task<Message> {
         let task = self.handle(message);
         // 表格视图面挂载差分：换视图 / 开合 / 切换表格后差额通知插件（面集变了才重投影）
@@ -2084,8 +2104,11 @@ impl App {
         if self.startup.covering() && startup::covering_blocks(&message) {
             return Task::none();
         }
-        // 整面帧声明 keys 时连命令组合也归它：宿主的键盘派生消息与快捷键动作同样让位
-        if plugin_actions::frame_takes_keyboard(self) && is_frame_keyboard_message(&message) {
+        // 整面帧声明 keys 即接管键盘：导航键与命令组合都由面自己处理，宿主不重复派发。
+        // 未声明 keys 的视图（画布）仍由宿主按命令分派
+        if plugin_actions::frame_takes_keyboard(self)
+            && (is_host_keyboard_message(&message) || is_frame_command_message(&message))
+        {
             return Task::none();
         }
         match message {
@@ -3152,6 +3175,10 @@ impl App {
                     }
                 }
                 self.press = Some((id, cursor));
+                Task::none()
+            }
+            Message::FileDropped(id, path) => {
+                self.file_dropped(id, path);
                 Task::none()
             }
             Message::CursorMoved(id, pos) => {
@@ -7117,8 +7144,7 @@ impl App {
                     Some(Message::Release)
                 }
                 Event::Window(window::Event::FileDropped(path)) => {
-                    // 外部文件拖入：路由到画布对话卡（面板由插件自理）
-                    Some(Message::Chat(chat_actions::ChatMsg::FileDropped(path)))
+                    Some(Message::FileDropped(window, path))
                 }
                 _ => None,
             }),

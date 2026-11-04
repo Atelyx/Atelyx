@@ -111,8 +111,6 @@ pub struct ChatState {
 pub enum ChatMsg {
     /// 落盘失败状态（写链观察者；None = 恢复）。
     PersistStatus(Option<(String, i64)>),
-    /// 外部文件拖入窗口（优先落到悬停的对话卡）。
-    FileDropped(std::path::PathBuf),
     /// 会话真源装载完成（空间模式在自建线程上装载，回执经控制通道回 Elm）。
     /// 空间装载回执：`Ok(false)` = 已被更新的装载取代，结果不再应用。
     StoreLoaded(u64, Result<bool, String>),
@@ -456,11 +454,6 @@ fn update_inner(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
                 );
             }
             app.plugins.on_chat_persist(error);
-            iced::Task::none()
-        }
-        ChatMsg::FileDropped(path) => {
-            // 面板与画布卡都由插件自理：宿主只转发绝对路径，插件按自身界面状态决定是否接收
-            app.plugins.on_files_dropped(vec![path.to_string_lossy().into_owned()]);
             iced::Task::none()
         }
         ChatMsg::StoreLoaded(gen, result) => {

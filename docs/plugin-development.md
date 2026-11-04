@@ -714,7 +714,7 @@ ctx.subscribe("ai:chat.changed").await?; // AI 会话内容变更（含对话面
 ctx.subscribe("ai:chat.reload").await?;  // 会话真源整体重载完成（换仓 / 空间装载）
 ctx.subscribe("ai:chat.persist").await?; // 会话落盘失败置位 / 恢复
 ctx.subscribe("vault:file.changed").await?; // 仓库文件被宿主写入（保存 / 新建 / 删除 / 改名）
-ctx.subscribe("window:file.drop").await?; // 外部文件拖入窗口（绝对路径）
+ctx.subscribe("window:file.drop").await?; // 外部文件拖入本插件的面（绝对路径）
 ctx.subscribe("vault:files.changed").await?;   // 可检索文件清单重建（重取 vault_files）
 ctx.subscribe("space:peers.changed").await?;   // 空间连接态 / 在线设备变化（重取 space_room）
 ctx.subscribe("space:members.changed").await?; // 空间名册缓存变化（重取 space_members）
@@ -725,7 +725,7 @@ ctx.subscribe("space:members.changed").await?; // 空间名册缓存变化（重
 - `table:changed` payload 是当前表格的仓库相对路径；订阅时会先补发一次当前状态（迟到订阅不丢当前表格）。
 - `table:selection.changed` payload：`{ path?, selection?, remoteSelections? }`——当前表格路径、本端选区与协作者选区（`name` / `color`（`#rrggbb`）/ `selection`），选区形态为 `cell` / `range` / `row` / `column` / `all`。内容不变、只有选区移动也发；没有打开表格时用空载荷通知一次。载荷直接带选区，不必为一次拖选重取快照。
 - `vault:file.changed` payload：`{ path, kind, oldPath? }`，`kind` 为 `created` / `updated` / `deleted` / `renamed`（改名另带旧路径）。只覆盖**宿主发起的写入**——壳自身保存 / 新建 / 复制 / 删除 / 改名与插件经 `vault` 的写入；外部程序直接改磁盘不发，需要感知外部改动仍要按 mtime 轮询。删除目录只发目录本身一条，其下文件不逐条发（按前缀作废缓存，需要明细就重新列举）。
-- `window:file.drop` payload：`{ paths }`，绝对路径（宿主只转发路径，读取由插件经 `fs` 自理）。广播给所有订阅方，插件按自身界面是否可见决定是否接收。
+- `window:file.drop` payload：`{ paths, surfaceId }`，绝对路径（宿主只转发路径，读取由插件经 `fs` 自理）与指针落点面的贡献 id。只投给落点面所属插件，落在其他面板（含非插件面板）不投递。
 - `vault:files.changed` / `space:peers.changed` / `space:members.changed` 的 payload 都是空对象：订阅方重取 `vault_files()` / `space_room()` / `space_members()`。名册缓存只随当前空间会话有效，切容器即清空并发一次 `space:members.changed`。
 
 ### 8.6 系统托盘

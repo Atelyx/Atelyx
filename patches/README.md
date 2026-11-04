@@ -21,6 +21,9 @@ bash patches/apply.sh
   Win11 上自算重定位导致跨 DPI 显示器拖动时窗口跳变 / 振荡 / 尺寸异常。
   与上游 rust-windowing/winit#4341 同改（已进上游，未随任何 0.30.x 发布）。
 - `dark_mode.rs`：`WIN10_BUILD_VERSION` 改 `pub(crate)`（供 `event_loop.rs` 使用）。
+- `drop_handler.rs`：`DragOver` / `Drop` 把 OLE 给的落点（屏幕坐标，先 `ScreenToClient`）
+  补发成 `CursorMoved`。拖放期间没有 `WM_MOUSEMOVE`，不补这一条应用层读到的光标停在
+  拖拽开始前，按指针落点分发的功能会投错面板。
 
 iced 依赖栈拉到含上游 #4341 的 winit 发布版后，删除本补丁、物化目录与根 `Cargo.toml`
 的 `[patch.crates-io]` 条目。
