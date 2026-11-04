@@ -1369,7 +1369,7 @@ fn provider_card(p: &vault::VaultProvider, selected: bool) -> Element<'static, M
     .into()
 }
 
-/// 表单字段（标签在上、控件在下；旧壳 Field 布局）。
+/// 表单字段（标签在上、控件在下）。
 fn field(label: impl Into<String>, control: Element<'static, Message>) -> Element<'static, Message> {
     column![
         text(label.into()).size(pal::fs_micro()).color(pal::TEXT_MUTED),
