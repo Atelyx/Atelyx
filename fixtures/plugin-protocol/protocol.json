@@ -923,7 +923,8 @@
           "line": 3
         },
         "peerId": "2",
-        "peerName": "林"
+        "peerName": "林",
+        "peerColor": "#f97316"
       }
     },
     {
@@ -1250,6 +1251,13 @@
             "stroke": null
           },
           {
+            "kind": "pushClip",
+            "x": 0.0,
+            "y": 0.0,
+            "w": 232.0,
+            "h": 72.0
+          },
+          {
             "kind": "text",
             "x": 8.0,
             "y": 8.0,
@@ -1274,6 +1282,9 @@
             "w": 24.0,
             "h": 24.0,
             "fit": "contain"
+          },
+          {
+            "kind": "popClip"
           }
         ],
         "hits": [

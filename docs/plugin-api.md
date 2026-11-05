@@ -5,15 +5,15 @@ Atelyx 插件协议的全部公开类型与方法名。概念、取舍与常见�
 > 本文件由 `cargo run -p xtask -- docs` 从 `atelyx-plugin-protocol/` 源码生成，请勿手改。
 > 协议改动后重跑一次即可；忘记重跑时 `cargo test --workspace` 会失败。
 
-## 1. 协议版本与清单
+## 1. 契约版本与清单
 
-`plugin.json` 的结构、能力声明与宿主保留的清单文件名。`apiVersion` 必须与宿主相等，不等即拒绝装载。
+`plugin.json` 的结构、能力声明与宿主保留的清单文件名。`apiVersion` 是唯一契约版本，必须与宿主相等，不等即拒绝装载。
 
 ```rust
 // atelyx-plugin-protocol/src/lib.rs
-/// API 版本。破坏性变更（方法/指令/事件语义不兼容）递增后，握手时双方不一致即失败。
-/// 协议冻结为稳定契约前不递增本号（同版本发布，避免每次扩容都要求重建在装插件）。
-pub const API_VERSION: u32 = 1;
+/// 契约版本：取 [`atelyx_plugin_abi::CONTRACT_VERSION`] 这同一个值，宿主与插件的 manifest、
+/// 握手、函数表都按它严格相等校验。协议冻结为稳定契约前不递增本号。
+pub const API_VERSION: u32 = atelyx_plugin_abi::CONTRACT_VERSION;
 ```
 
 ```rust
@@ -31,11 +31,8 @@ pub struct Manifest {
     pub id: String,
     pub name: String,
     pub version: String,
-    /// 协议版本，必须等于宿主的 [`crate::API_VERSION`]。
+    /// 契约版本（必填），必须等于宿主的 [`crate::API_VERSION`]；缺失按 0 处理并被结构校验拒绝。
     pub api_version: u32,
-    /// 同进程动态库 ABI 版本，必须等于宿主的 `ABI_VERSION`。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub abi_version: Option<u32>,
     /// 最低宿主版本（语义化版本，如 `0.4.0`）；缺省 = 不限。宿主低于它即拒绝装载。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_host_version: Option<String>,
@@ -409,7 +406,7 @@ pub const BUILTIN_SERVICES: &[(&str, &str, &[&str])] = &[
     ("chat", PLATFORM_PLUGIN, &[chat::SESSION_READ, chat::SESSION_WRITE, chat::SESSION_SNAPSHOT]),
     // 工具名册与结果回报是宿主记账，不是可由外部提供者接管的能力，故不在目录里；
     // 对话门面由宿主编排（核心插件只是被调用的实现），服务归平台自身
-    ("ai", PLATFORM_PLUGIN, &[ai::CHAT_SEND, ai::CHAT_SEND_DIRECT, ai::CHAT_STOP, ai::CHAT_HISTORY, ai::MODELS, ai::AGENTS, ai::CHAT_RENAME, ai::CHAT_DELETE, ai::CHAT_COMPACT, ai::CHAT_COMPACT_DIRECT, ai::CHAT_TITLE, ai::TOOL_LIST, ai::TOOL_EXECUTE, ai::CHAT_EMIT, ai::SETTINGS]),
+    ("ai", PLATFORM_PLUGIN, &[ai::CHAT_SEND, ai::CHAT_SEND_DIRECT, ai::CHAT_STOP, ai::CHAT_HISTORY, ai::MODELS, ai::AGENTS, ai::CHAT_RENAME, ai::CHAT_DELETE, ai::CHAT_COMPACT, ai::CHAT_COMPACT_DIRECT, ai::CHAT_TITLE, ai::TOOL_LIST, ai::TOOL_EXECUTE, ai::CHAT_EMIT, ai::SETTINGS, ai::CHAT_OPEN_PANEL]),
     ("window", PLATFORM_PLUGIN, &[window::OPEN, window::CLOSE, window::UPDATE, window::SHOW, window::BEGIN_DRAG, window::MINIMIZE, window::TOGGLE_MAXIMIZE]),
     ("query", PLATFORM_PLUGIN, &[query::MEASURE, query::THEME, query::FONTS]),
     // 编辑器选区读写作用于宿主自持的当前文档会话，随平台常驻
@@ -444,6 +441,7 @@ pub const BUILTIN_SERVICES: &[(&str, &str, &[&str])] = &[
 // atelyx-plugin-protocol/src/paint.rs
 /// 绘图指令。矩形 / 路径 / 圆：`fill` 与 `stroke` 至少声明其一，`stroke_width` 只在 `stroke`
 /// 存在时生效（缺省 1.0）；线只有 `stroke`（字段名 `width`）；文字与图片没有描边概念。
+/// 裁剪：`PushClip` 之后的指令按该矩形与已压栈矩形的交集绘制，`PopClip` 弹出最近一层。
 #[serde(tag = "kind", rename_all = "camelCase")]
 #[serde(rename_all_fields = "camelCase")]
 pub enum DrawCommand {
@@ -531,6 +529,10 @@ pub enum DrawCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         fit: Option<ImageFit>,
     },
+    /// 压入裁剪矩形：之后的指令只画在该矩形内，嵌套时取交集。
+    PushClip { x: f32, y: f32, w: f32, h: f32 },
+    /// 弹出最近一次 `PushClip`；与 `PushClip` 必须成对出现。
+    PopClip,
 }
 ```
 
@@ -1891,6 +1893,8 @@ pub mod ai {
     pub const CHAT_COMPACT_DIRECT: &str = "ai.chat.compactDirect";
     /// 读与 AI 运行相关的仓库设置（落卡开关等）；插件据此决定本地派生行为。
     pub const SETTINGS: &str = "ai.settings";
+    /// 激活已打开的 AI 对话面板；未打开时不新建、不提示。
+    pub const CHAT_OPEN_PANEL: &str = "ai.chat.openPanel";
 }
 ```
 
@@ -2043,6 +2047,9 @@ pub struct VaultUiState {
     /// 已注册为系统提示词的笔记（仓库相对路径）。
     #[serde(default)]
     pub prompt_notes: Vec<String>,
+    /// 重命名撞名自动顺延后的提醒文案（`None` = 无提醒）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rename_notice: Option<String>,
 }
 ```
 
@@ -2069,6 +2076,9 @@ pub struct VaultUiPatch {
     pub folder_colors: Option<std::collections::BTreeMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_notes: Option<Vec<String>>,
+    /// `Some(true)` = 用户关闭重名提醒条（宿主清掉该条）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dismiss_rename_notice: Option<bool>,
 }
 ```
 
@@ -3025,6 +3035,8 @@ pub struct DocRenameParams {
 pub struct DocPropsResult {
     /// 当前文档路径；没有打开文档时为空串。
     pub path: String,
+    /// 读取时正文的内容指纹；写回须原样回传，正文已变即被宿主拒绝。
+    pub fingerprint: String,
     /// frontmatter 块原文（含首尾 `---` 定界）；文档没有属性块时为空串。
     pub frontmatter: String,
     /// 文档是否有属性区（含未闭合的 `---` 起始行）。
@@ -3040,9 +3052,12 @@ pub struct DocPropsResult {
 ```rust
 // atelyx-plugin-protocol/src/method.rs
 /// [`doc::PROPS_WRITE`] 的入参：新的 frontmatter 块原文（含 `---` 定界；空串 = 删除属性区）。
+/// `path` + `fingerprint` 来自读属性回执；与当前文档不符时宿主拒绝写回。
 #[serde(rename_all = "camelCase")]
 pub struct DocPropsWriteParams {
     pub frontmatter: String,
+    pub path: String,
+    pub fingerprint: String,
 }
 ```
 
@@ -4399,6 +4414,9 @@ pub struct CollabMessageParams {
     pub peer_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peer_name: Option<String>,
+    /// 空间名册里该成员的身份色（`#RRGGBB`）；由宿主填，插件不再自行哈希。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_color: Option<String>,
 }
 ```
 
