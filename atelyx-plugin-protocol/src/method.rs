@@ -1421,6 +1421,9 @@ pub struct VaultUiState {
     /// 已注册为系统提示词的笔记（仓库相对路径）。
     #[serde(default)]
     pub prompt_notes: Vec<String>,
+    /// 重命名撞名自动顺延后的提醒文案（`None` = 无提醒）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rename_notice: Option<String>,
 }
 
 /// [`vault_ui::READ`] 的 params：`dir` 给定时另带该目录条目。
@@ -1444,6 +1447,9 @@ pub struct VaultUiPatch {
     pub folder_colors: Option<std::collections::BTreeMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_notes: Option<Vec<String>>,
+    /// `Some(true)` = 用户关闭重名提醒条（宿主清掉该条）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dismiss_rename_notice: Option<bool>,
 }
 
 impl VaultUiPatch {

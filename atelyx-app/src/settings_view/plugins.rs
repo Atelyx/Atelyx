@@ -1645,6 +1645,24 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
                 app.plugins.resolve_shell_call(request_id, result);
                 return Task::none();
             }
+            // 占用名顺延 / 净化后名称未变的最终路径来自执行体；未变时没有结构变更可跟随
+            let final_path = result
+                .as_ref()
+                .ok()
+                .and_then(|value| value.get("path"))
+                .and_then(|path| path.as_str())
+                .map(str::to_string);
+            let change = match change {
+                VaultChange::Renamed { from, to } => VaultChange::Renamed {
+                    to: final_path.unwrap_or(to),
+                    from,
+                },
+                other => other,
+            };
+            if matches!(&change, VaultChange::Renamed { from, to } if from == to) {
+                app.plugins.resolve_shell_call(request_id, result);
+                return Task::none();
+            }
             match &change {
                 VaultChange::Removed { rel } => {
                     app.plugins.on_file_changed(rel, FileChangeKind::Deleted, None);
@@ -2583,7 +2601,7 @@ fn remove_local(root: &std::path::Path, rel: &str) -> Result<serde_json::Value, 
     Ok(serde_json::json!({}))
 }
 
-/// 本地重命名 / 移动：目标不可已存在（case-only 改名豁免），引用由 core 事务同步。
+/// 本地重命名 / 移动：名称按 core 规则净化、占用名自动编号（case-only 改名豁免），引用由 core 事务同步。
 fn rename_local(
     root: &std::path::Path,
     exclude: &[String],
@@ -2598,19 +2616,68 @@ fn rename_local(
     if is_dir && to.starts_with(&format!("{from}/")) {
         return Err("不能把文件夹移动到自身内部".to_string());
     }
+    let parent = to.rsplit_once('/').map_or("", |(parent, _)| parent);
+    let mut to = normalized_target(from, to, is_dir)?;
+    if to == from {
+        return Ok((serde_json::json!({ "path": from }), Vec::new()));
+    }
     // case-only 改名不查重：Windows 的存在性判断大小写不敏感，会把源自身当占用
     if !to.eq_ignore_ascii_case(from) {
-        let occupied = vault::safe_join(root, to, false).is_ok_and(|path| path.exists());
-        if occupied {
-            return Err(format!("目标已存在：{to}"));
+        let occupied =
+            |rel: &str| vault::safe_join(root, rel, false).is_ok_and(|path| path.exists());
+        if occupied(&to) {
+            // 重名静默落位：同名顺延 `-2`、`-3`…
+            let name = to.rsplit_once('/').map_or(to.as_str(), |(_, name)| name);
+            let (stem, suffix) = sequence_name(name, is_dir);
+            let mut seq = 2;
+            loop {
+                let candidate = format!("{stem}-{seq}{suffix}");
+                to = if parent.is_empty() {
+                    candidate
+                } else {
+                    format!("{parent}/{candidate}")
+                };
+                if !occupied(&to) {
+                    break;
+                }
+                seq += 1;
+            }
         }
     }
     let sync = if is_dir {
-        atelyx_core::vault_refs::rename_folder_synced(root, exclude, from, to)?
+        atelyx_core::vault_refs::rename_folder_synced(root, exclude, from, &to)?
     } else {
-        atelyx_core::vault_refs::rename_note_synced(root, exclude, from, to)?
+        atelyx_core::vault_refs::rename_note_synced(root, exclude, from, &to)?
     };
-    Ok((serde_json::json!({}), sync.rewritten))
+    // 占用名顺延后的最终路径随回执带回：壳按它更新打开文件 / 缓存
+    Ok((serde_json::json!({ "path": to }), sync.rewritten))
+}
+
+/// 重命名 / 移动目标：名称按 core 规则净化（目录整名、文件后缀恒取原名），父目录沿用 `to`。
+fn normalized_target(from: &str, to: &str, is_dir: bool) -> Result<String, String> {
+    let (parent, typed) = to.rsplit_once('/').map_or(("", to), |(parent, name)| (parent, name));
+    let old_name = from.rsplit_once('/').map_or(from, |(_, name)| name);
+    let name = if is_dir {
+        vault::sanitize_filename(typed)
+    } else {
+        vault::rename_file_name(typed, old_name)
+            .ok_or_else(|| format!("名称不可用：{typed}"))?
+    };
+    if name.is_empty() {
+        return Err(format!("名称不可用：{typed}"));
+    }
+    Ok(if parent.is_empty() { name } else { format!("{parent}/{name}") })
+}
+
+/// 占用名顺延用的主名与后缀（目录整名顺延，不带后缀）。
+fn sequence_name(name: &str, is_dir: bool) -> (String, String) {
+    if is_dir {
+        return (name.to_string(), String::new());
+    }
+    match vault::file_extension(name) {
+        Some(ext) => (vault::file_stem(name).to_string(), format!(".{ext}")),
+        None => (name.to_string(), String::new()),
+    }
 }
 
 /// 空间删除：按整树（含隐藏项）判定条目种类；文件夹递归删除。
@@ -2637,7 +2704,7 @@ async fn remove_space(
     Ok(serde_json::json!({}))
 }
 
-/// 空间重命名 / 移动：目标不可已存在；改名后按最新整树改写全库 .md 链接。
+/// 空间重命名 / 移动：名称按 core 规则净化；改名后按最新整树改写全库 .md 链接。
 async fn rename_space(
     client: &atelyx_core::space_client::SpaceClient,
     space_id: &str,
@@ -2654,14 +2721,18 @@ async fn rename_space(
     if is_dir && to.starts_with(&format!("{from}/")) {
         return Err("不能把文件夹移动到自身内部".to_string());
     }
-    if find_tree_entry(&tree, to).is_some() {
+    let to = normalized_target(from, to, is_dir)?;
+    if to == from {
+        return Ok((serde_json::json!({ "path": from }), Vec::new()));
+    }
+    if find_tree_entry(&tree, &to).is_some() {
         return Err(format!("目标已存在：{to}"));
     }
-    client.rename_file(space_id, from, to).await.map_err(|e| e.to_string())?;
+    client.rename_file(space_id, from, &to).await.map_err(|e| e.to_string())?;
     let tree = client.tree(space_id).await.map_err(|e| e.to_string())?;
     let rewritten =
-        crate::space_actions::rewrite_links_after_rename(client, space_id, &tree, from, to).await;
-    Ok((serde_json::json!({}), rewritten))
+        crate::space_actions::rewrite_links_after_rename(client, space_id, &tree, from, &to).await;
+    Ok((serde_json::json!({ "path": to }), rewritten))
 }
 
 fn find_tree_entry<'a>(
@@ -2887,6 +2958,7 @@ fn vault_ui_state(app: &App) -> VaultUiState {
             .map(|(path, color)| (path.clone(), color.clone()))
             .collect(),
         prompt_notes: app.prompt_notes.clone(),
+        rename_notice: app.rename_notice.clone(),
     }
 }
 
@@ -3018,6 +3090,9 @@ fn vault_ui_write(app: &mut App, request_id: u64, patch: VaultUiPatch) -> Task<M
     if let Some(notes) = patch.prompt_notes {
         app.prompt_notes = notes;
         task = task.chain(app.save_prompt_notes());
+    }
+    if patch.dismiss_rename_notice == Some(true) {
+        app.rename_notice = None;
     }
     let result = serde_json::to_value(vault_ui_state(app))
         .map_err(|e| format!("仓库界面状态不可序列化：{e}"));
@@ -4621,14 +4696,26 @@ mod tests {
     }
 
     #[test]
-    fn rename_local_rejects_occupied_target_and_keeps_source() {
+    fn rename_local_numbers_an_occupied_target() {
         let tmp = TempDir::new("plugin-rename-occupied");
         let root = &*tmp;
         write(root, "a.md", "源");
         write(root, "dir/a.md", "既有");
-        assert!(rename_local(root, &[], "a.md", "dir/a.md").is_err());
-        assert_eq!(std::fs::read_to_string(root.join("a.md")).unwrap(), "源");
+        let (result, _) = rename_local(root, &[], "a.md", "dir/a.md").unwrap();
+        assert_eq!(result["path"], "dir/a-2.md", "占用名应顺延而不是覆盖");
+        assert!(!root.join("a.md").exists());
+        assert_eq!(std::fs::read_to_string(root.join("dir/a-2.md")).unwrap(), "源");
         assert_eq!(std::fs::read_to_string(root.join("dir/a.md")).unwrap(), "既有");
+    }
+
+    #[test]
+    fn rename_local_sanitizes_illegal_characters() {
+        let tmp = TempDir::new("plugin-rename-sanitize");
+        let root = &*tmp;
+        write(root, "a.md", "源");
+        let (result, _) = rename_local(root, &[], "a.md", "b:c.md").unwrap();
+        assert_eq!(result["path"], "b_c.md");
+        assert!(root.join("b_c.md").exists());
     }
 
     #[test]

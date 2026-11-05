@@ -32,39 +32,69 @@ const GUTTER: f32 = 8.0;
 /// 列表下方空白落点的高度。
 const DROP_ZONE_H: f32 = 120.0;
 
+/// 非文件树状态下，容器行下方展示的内容。
+#[derive(Clone, Copy)]
+enum Pane<'a> {
+    Loading,
+    Failure(&'a str),
+    NoRepo,
+    EmptyRepo,
+}
+
 pub fn frame(ui: &mut Ui<'_, '_>, view: &View, radii: &Radii) {
     ui.fill_column(0.0, |ui| {
-        toolbar(ui, view.any_expanded, view.in_repo);
+        toolbar(ui, view.all_expanded, view.in_repo);
         ui.rule();
+        if let Some(notice) = view.rename_notice.as_deref() {
+            rename_notice(ui, notice, radii.sm);
+        }
         if let Some(notice) = view.notice.as_deref() {
             ui.notice(notice.to_string(), ColorToken::Danger);
         }
-        if let Some(error) = view.error.as_ref().filter(|_| view.rows.is_empty()) {
-            failure_state(ui, error, radii);
+        let pane = if view.loading {
+            Pane::Loading
+        } else if let Some(error) = view.error.as_ref().filter(|_| view.rows.is_empty()) {
+            Pane::Failure(error)
+        } else if !view.in_repo {
+            Pane::NoRepo
+        } else if view.rows.is_empty() && view.inline.is_none() {
+            Pane::EmptyRepo
+        } else {
+            list(ui, view, radii);
             return;
-        }
-        if view.loading {
-            ui.loading_state();
-            return;
-        }
-        if !view.in_repo {
-            ui.empty_state(
-                "folder-open",
-                "打开仓库",
-                "用工具条打开一个文件夹作为仓库，或登录协作空间。",
-            );
-            return;
-        }
-        if view.rows.is_empty() && view.inline.is_none() {
-            empty_repo(ui, view, radii.sm);
-            return;
-        }
-        list(ui, view, radii);
+        };
+        state_page(ui, view, radii, pane);
     });
 }
 
+/// 重名顺延提醒条：警示色边、文案占满、右侧关闭钮。
+fn rename_notice(ui: &mut Ui<'_, '_>, text: &str, radius: f32) {
+    ui.boxed(
+        BoxWidth::Fill,
+        BoxStyle::new(Some(ColorToken::Surface), Some(ColorToken::Warning), radius),
+        Edges { left: ROW_PAD_X, right: 4.0, top: 4.0, bottom: 4.0 },
+        0.0,
+        |bar| {
+            bar.row(0.0, |line| {
+                line.text_styled(
+                    text.to_string(),
+                    TextStyle::new(TextRole::Caption).color(ColorToken::Warning),
+                );
+                line.icon_button_named(
+                    crate::DISMISS_RENAME_NOTICE,
+                    "x",
+                    12.0,
+                    18.0,
+                    ColorToken::TextMuted,
+                    true,
+                );
+            });
+        },
+    );
+}
+
 /// 工具条：打开仓库 / 协作空间 / 排序 / 刷新 / 展开或收起全部。
-fn toolbar(ui: &mut Ui<'_, '_>, any_expanded: bool, in_repo: bool) {
+fn toolbar(ui: &mut Ui<'_, '_>, all_expanded: bool, in_repo: bool) {
     ui.boxed(
         BoxWidth::Fill,
         BoxStyle::new(Some(ColorToken::Surface), None, 0.0),
@@ -117,11 +147,11 @@ fn toolbar(ui: &mut Ui<'_, '_>, any_expanded: bool, in_repo: bool) {
                 );
                 line.hint(
                     crate::TOGGLE_ALL,
-                    if any_expanded { "收起全部文件夹" } else { "展开全部文件夹" },
+                    if all_expanded { "收起全部文件夹" } else { "展开全部文件夹" },
                 );
                 line.icon_button_named(
                     crate::TOGGLE_ALL,
-                    "chevrons-up-down",
+                    if all_expanded { "chevrons-down-up" } else { "chevrons-up-down" },
                     14.0,
                     22.0,
                     ColorToken::TextMuted,
@@ -174,11 +204,14 @@ fn list(ui: &mut Ui<'_, '_>, view: &View, radii: &Radii) {
     });
 }
 
-/// 空仓库：容器行照常铺，空态占满剩余高度（滚动页里没有可撑高的余量，块居中不了）。
-fn empty_repo(ui: &mut Ui<'_, '_>, view: &View, radius: f32) {
+/// 非文件树状态页：容器行照常铺在最前，加载 / 失败 / 空态排在容器行下方。
+/// 撑满列而非滚动页：容器行下方没有可撑高的余量，状态块居中不了。
+fn state_page(ui: &mut Ui<'_, '_>, view: &View, radii: &Radii, pane: Pane<'_>) {
     let containers = view.containers.clone();
+    let radius = radii.sm;
+    let tile_radius = radii.md;
     ui.stack(move |layer| {
-        // 空仓库整块也是根落点：没有可落的行时文件仍能拖进仓库根
+        // 容器行下方整块也是根落点：任何状态都能把文件拖进仓库根
         layer.hit_area(crate::DROP_BOTTOM);
         layer.fill_column(0.0, move |col| {
             col.spacer(TREE_PAD_TOP);
@@ -190,7 +223,20 @@ fn empty_repo(ui: &mut Ui<'_, '_>, view: &View, radius: f32) {
                 });
             }
             col.spacer(TREE_PAD_BOTTOM);
-            col.empty_state("folder", "暂无文件", "右键新建笔记或文件夹。");
+            match pane {
+                Pane::Loading => col.loading_state(),
+                Pane::Failure(error) => failure_block(col, error, tile_radius),
+                Pane::NoRepo => col.empty_state_action(
+                    "folder-open",
+                    "打开仓库",
+                    "用工具条打开一个文件夹作为仓库，或登录协作空间。",
+                    crate::OPEN_VAULT,
+                    "打开文件夹",
+                ),
+                Pane::EmptyRepo => {
+                    col.empty_state("folder", "暂无文件", "右键新建笔记或文件夹。");
+                }
+            }
         });
     });
 }
@@ -475,40 +521,37 @@ fn parse_hex(hex: &str) -> Option<(u8, u8, u8, u8)> {
     }
 }
 
-/// 取数失败且清单为空：可读原因 + 重试。
-fn failure_state(ui: &mut Ui<'_, '_>, error: &str, radii: &Radii) {
+/// 取数失败且清单为空：可读原因 + 重试（在撑满列里上下居中）。
+fn failure_block(ui: &mut Ui<'_, '_>, error: &str, radius: f32) {
     let error = error.to_string();
-    let radius = radii.md;
-    ui.fill_column(0.0, move |outer| {
-        outer.fill_spacer();
-        outer.center_column(8.0, move |center| {
-            center.boxed(
-                BoxWidth::Fixed(40.0),
-                BoxStyle::new(Some(ColorToken::Surface), None, radius),
-                Edges::all(0.0),
-                0.0,
-                |tile| {
-                    tile.spacer(11.0);
-                    tile.row(0.0, move |line| {
-                        line.grow();
-                        line.icon_named("triangle-alert", 18.0, ColorToken::TextMuted);
-                        line.grow();
-                    });
-                    tile.spacer(11.0);
-                },
-            );
-            center.text_styled_fit(
-                "文件树读取失败",
-                TextStyle::new(TextRole::Body).weight(TextWeight::SemiBold),
-            );
-            center.text_styled(
-                error.clone(),
-                TextStyle::new(TextRole::Label).color(ColorToken::TextMuted),
-            );
-            center.button("retry", "重试");
-        });
-        outer.fill_spacer();
+    ui.fill_spacer();
+    ui.center_column(8.0, move |center| {
+        center.boxed(
+            BoxWidth::Fixed(40.0),
+            BoxStyle::new(Some(ColorToken::Surface), None, radius),
+            Edges::all(0.0),
+            0.0,
+            |tile| {
+                tile.spacer(11.0);
+                tile.row(0.0, move |line| {
+                    line.grow();
+                    line.icon_named("triangle-alert", 18.0, ColorToken::TextMuted);
+                    line.grow();
+                });
+                tile.spacer(11.0);
+            },
+        );
+        center.text_styled_fit(
+            "文件树读取失败",
+            TextStyle::new(TextRole::Body).weight(TextWeight::SemiBold),
+        );
+        center.text_styled(
+            error.clone(),
+            TextStyle::new(TextRole::Label).color(ColorToken::TextMuted),
+        );
+        center.button(crate::RETRY, "重试");
     });
+    ui.fill_spacer();
 }
 
 #[cfg(test)]

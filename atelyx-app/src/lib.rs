@@ -1247,8 +1247,8 @@ pub struct App {
     pub tooltip: Option<(window::Id, String, Instant, bool, Option<Instant>, Point)>,
     /// 触发钮半边长（提示锚定其下缘；菜单项 = 半行高）。
     pub tooltip_half: Option<f32>,
-    /// 重名自动加序号的提醒条（文案 + 出现时刻；3s 自动消失）。
-    pub rename_notice: Option<layout_view::RenameNotice>,
+    /// 重名自动加序号的提醒文案（随 `vault.ui` 下发给文件面板，用户关闭或下次改名成功后清除）。
+    pub rename_notice: Option<String>,
     /// 设置左栏折叠态。
     pub settings_collapsed: bool,
     /// 各窗口最近光标位置（右键菜单锚点 / 提示定位）。
@@ -3070,14 +3070,6 @@ impl App {
                 // 限频压下的选区变化（拖选连续位移）由本拍补发最新一份：断线期产出即丢弃，
                 // 重连时的强制重发以最新状态兜底
                 space_actions::doc_presence_flush(self);
-                // 重名提醒条 3s 过期
-                if self
-                    .rename_notice
-                    .as_ref()
-                    .is_some_and(|n| n.at.elapsed().as_millis() >= 3000)
-                {
-                    self.rename_notice = None;
-                }
                 // 悬停提示收起判定：光标离开触发钮邻域 = 进入收起延迟
                 // （与显现同源的距离判定；批量事件中 exit 会被捕获状态吞掉，事件驱动不可靠）
                 let tip = self
@@ -3802,11 +3794,13 @@ impl App {
                     if *to != final_rel {
                         let old_name = to.rsplit('/').next().unwrap_or(to);
                         let new_name = final_rel.rsplit('/').next().unwrap_or(&final_rel);
-                        self.rename_notice = Some(layout_view::RenameNotice {
-                            text: format!("「{old_name}」已存在，已重命名为「{new_name}」"),
-                            at: Instant::now(),
-                        });
+                        self.rename_notice = Some(format!(
+                            "「{old_name}」已存在，已重命名为「{new_name}」"
+                        ));
                         *to = final_rel;
+                    } else {
+                        // 成功改名（未撞名）：清掉上一条重名提醒
+                        self.rename_notice = None;
                     }
                 }
                 if let FollowUp::Renamed { to, announce, .. } = &follow {
@@ -7083,11 +7077,10 @@ impl App {
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        // 心跳仅在有待过期通知、提醒条在途、悬停提示在途（距离收起判定）、
+        // 心跳仅在有待过期通知、悬停提示在途（距离收起判定）、
         // 文件拖拽悬停折叠目录（自动展开判定）、笔记在场有待发状态或有对端
         // （补发 / 保活 / 远端剔除搭载）、快捷键页展示中（冲突警示两态闪烁）时挂载
         let need_tick = !self.notifications.is_empty()
-            || self.rename_notice.is_some()
             || self.tooltip.is_some()
             // 文件拖拽悬停折叠目录：自动展开挂起需心跳到点判定
             || self.file_drag.as_ref().is_some_and(|d| d.spring.is_some())

@@ -9,7 +9,7 @@ use std::sync::Mutex;
 
 use futures_util::future::join_all;
 
-use atelyx_plugin_protocol::event::{self, PublishParams};
+use atelyx_plugin_protocol::event::{self, PublishParams, VaultSwitchPayload};
 use atelyx_plugin_protocol::frame::{FrameInput, FrameInputParams, FrameTickParams, MouseButton};
 use atelyx_plugin_protocol::method::{
     ContributionSlot, CreateEntryParams, DragEndParams, DragStartParams, DuplicateParams,
@@ -43,6 +43,10 @@ const DROP_ROOT: &str = "drop-root:";
 const DROP_BOTTOM: &str = "drop-root:bottom";
 /// 就地输入框的控件 id。
 const INLINE: &str = "inline-input";
+/// 取数失败态的重试按钮 id。
+const RETRY: &str = "retry";
+/// 重名提醒条的关闭按钮 id。
+const DISMISS_RENAME_NOTICE: &str = "dismiss-rename-notice";
 /// 起拖阈值（逻辑像素）：与壳内行拖拽同一条判据。
 const DRAG_THRESHOLD: f32 = 5.0;
 /// 排序菜单里的四档。
@@ -216,16 +220,11 @@ impl FilesPlugin {
     async fn toggle_all(&self, ctx: &Context) {
         // 容器行（仓库根）的展开态不参与「全部」：全部展开/收起只作用于仓库内的条目
         let root_open = self.model.lock().unwrap().expanded().iter().any(String::is_empty);
+        let all_expanded = self.model.lock().unwrap().all_expanded();
         let mut expanded: Vec<String> = root_open.then(|| String::new()).into_iter().collect();
-        if self
-            .model
-            .lock()
-            .unwrap()
-            .expanded()
-            .iter()
-            .any(|dir| !dir.is_empty())
-        {
+        if all_expanded {
             self.model.lock().unwrap().set_expanded(expanded.clone());
+            self.model.lock().unwrap().set_all_expanded(false);
             self.children.lock().unwrap().retain(|dir, _| dir.is_empty());
             self.save_expanded(ctx, expanded).await;
             self.render(ctx).await;
@@ -243,6 +242,7 @@ impl FilesPlugin {
             for dir in &dirs {
                 model.expand(dir.clone());
             }
+            model.set_all_expanded(true);
         }
         expanded.extend(dirs);
         self.save_expanded(ctx, expanded).await;
@@ -285,15 +285,21 @@ impl FilesPlugin {
             }
         } else {
             if path.ends_with(".md") {
-                let marked = self.model.lock().unwrap().prompt_notes().iter().any(|n| n == path);
+                let (marked, can_write) = {
+                    let model = self.model.lock().unwrap();
+                    (
+                        model.prompt_notes().iter().any(|n| n == path),
+                        model.can_write(),
+                    )
+                };
                 items.push(MenuItem::Action {
                     id: format!("prompt:{path}"),
                     label: if marked { "注销提示词" } else { "注册为提示词" }.into(),
                     icon: Some(if marked { "bookmark-minus" } else { "bookmark-plus" }.into()),
                     danger: false,
-                    disabled: false,
+                    disabled: !can_write,
                     note: None,
-                    hint: None,
+                    hint: (!can_write).then(|| "只读空间不能修改提示词".to_string()),
                     pane,
                 });
                 items.push(MenuItem::Divider { pane });
@@ -544,8 +550,16 @@ impl PluginHandler for FilesPlugin {
                 self.render(ctx).await;
             }
             event::name::VAULT_SWITCH => {
+                // 角色随切换事件下发：viewer 只读空间的提示词标记入口在界面上禁用。
+                // 解析失败按可写处理；禁用只是界面收敛，写操作仍由宿主拒绝
+                let can_write =
+                    match serde_json::from_value::<VaultSwitchPayload>(params.payload) {
+                        Ok(VaultSwitchPayload::Space { can_write, .. }) => can_write,
+                        _ => true,
+                    };
                 // 切容器：旧容器的树不能当新容器的空态，缓存与展开集先清掉
                 self.children.lock().unwrap().clear();
+                self.model.lock().unwrap().set_can_write(can_write);
                 self.model.lock().unwrap().begin_load();
                 self.render(ctx).await;
                 self.reload(ctx).await;
@@ -767,6 +781,24 @@ impl FilesPlugin {
                 self.render(ctx).await;
             }
             TOGGLE_ALL => self.toggle_all(ctx).await,
+            DISMISS_RENAME_NOTICE => {
+                let patch = VaultUiPatch {
+                    dismiss_rename_notice: Some(true),
+                    ..VaultUiPatch::default()
+                };
+                match ctx.vault_update_ui(&patch).await {
+                    Ok(state) => {
+                        self.model.lock().unwrap().apply(state);
+                        self.render(ctx).await;
+                    }
+                    Err(error) => self.warn(ctx, "关闭重名提醒", &error),
+                }
+            }
+            RETRY => {
+                self.model.lock().unwrap().clear_error();
+                self.reload(ctx).await;
+                self.render(ctx).await;
+            }
             _ => {
                 // 容器行：激活容器收起 / 展开根，其余容器切过去
                 if let Some(id) = id.strip_prefix(CONTAINER) {
@@ -994,6 +1026,12 @@ impl FilesPlugin {
             InlineEdit::Rename { path, is_dir, value } => {
                 let name = value.trim().to_string();
                 if name.is_empty() {
+                    return;
+                }
+                // 名称只允许单段：含分隔符会被当成移到另一目录，而不是改名
+                if name.contains('/') || name.contains('\\') {
+                    self.warn(ctx, "重命名", &"名称不能包含路径分隔符");
+                    self.reload(ctx).await;
                     return;
                 }
                 let to = rename_target(&path, is_dir, &name);

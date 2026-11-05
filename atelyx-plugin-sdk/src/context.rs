@@ -992,8 +992,9 @@ impl Context {
         self.call_unit(method::vault::REMOVE, &PathParams { path: path.into() }).await
     }
 
-    /// 改名 / 移动仓库内文件或文件夹：`to` 不可已存在，父目录自动创建。
-    /// `.md` 内部链接与画布文件引用随改名同步改写；源文件被编辑面打开或被当前画布节点引用时由宿主拒绝。
+    /// 改名 / 移动仓库内文件或文件夹：父目录自动创建。个人仓库里 `to` 已存在时自动顺延 `-2`、`-3`，
+    /// 协作空间容器占用名直接报错。`.md` 内部链接与画布文件引用随改名同步改写；
+    /// 源文件被编辑面打开或被当前画布节点引用时由宿主拒绝。
     pub async fn vault_rename(&self, from: &str, to: &str) -> Result<(), RpcError> {
         let params = VaultRenameParams { from: from.into(), to: to.into() };
         self.call_unit(method::vault::RENAME, &params).await

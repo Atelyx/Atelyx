@@ -145,12 +145,6 @@ pub struct RenameState {
     pub window: iced::window::Id,
 }
 
-/// 重名去重提醒条：文案 + 出现时刻（3s 过期）。
-pub struct RenameNotice {
-    pub text: String,
-    pub at: std::time::Instant,
-}
-
 /// 弹层内容形态（几何与交互数据随形态携带）。
 #[derive(Clone, Debug)]
 pub(crate) enum PopupState {

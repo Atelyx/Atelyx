@@ -131,8 +131,8 @@ pub struct View {
     pub rows: Vec<Row>,
     /// 容器列表（全部最近仓库 + 全部空间，激活项在前）。
     pub containers: Vec<ContainerRow>,
-    /// 「展开全部」按钮当前状态（有任一展开即显示「收起全部」）。
-    pub any_expanded: bool,
+    /// 工具条「展开全部 / 收起全部」当前档位。
+    pub all_expanded: bool,
     /// 当前容器是否可用（未进入仓库时给空态）。
     pub in_repo: bool,
     /// 首份状态（或切容器后的首份）尚未取到：只画加载态，不判定空态。
@@ -147,6 +147,8 @@ pub struct View {
     pub drop_hint: Option<String>,
     /// 排序键（菜单勾选态）。
     pub sort: String,
+    /// 重命名撞名自动顺延后的提醒文案（宿主下发；关闭后清除）。
+    pub rename_notice: Option<String>,
 }
 
 /// 面板状态。
@@ -173,6 +175,10 @@ pub struct Model {
     doc_icons: HashMap<String, String>,
     /// 上一次操作失败的可读原因。
     notice: Option<String>,
+    /// 工具条档位：只随工具条切换与切容器变化，单个目录的展开不参与。
+    all_expanded: bool,
+    /// 当前容器可写（协作空间的 viewer 只读；宿主仍会拒绝写操作）。
+    can_write: bool,
 }
 
 impl Model {
@@ -192,6 +198,8 @@ impl Model {
             doc_types: Vec::new(),
             doc_icons: HashMap::new(),
             notice: None,
+            all_expanded: false,
+            can_write: true,
         }
     }
 
@@ -259,11 +267,17 @@ impl Model {
         self.error = Some(error);
     }
 
+    /// 重试入口：清掉失败原因；首份状态未到时按加载态重画。
+    pub fn clear_error(&mut self) {
+        self.error = None;
+    }
+
     /// 切容器：丢掉旧容器的展开集 / 即时态，回到未就绪（取到首份前只画加载态）。
     pub fn begin_load(&mut self) {
         self.ready = false;
         self.error = None;
         self.notice = None;
+        self.all_expanded = false;
         self.expanded.clear();
         self.inline = None;
         self.active_files.clear();
@@ -286,6 +300,23 @@ impl Model {
     /// 整份替换展开集（「全部展开 / 收起」用）。
     pub fn set_expanded(&mut self, expanded: Vec<String>) {
         self.expanded = expanded;
+    }
+
+    pub fn all_expanded(&self) -> bool {
+        self.all_expanded
+    }
+
+    pub fn set_all_expanded(&mut self, value: bool) {
+        self.all_expanded = value;
+    }
+
+    /// 当前容器是否可写（协作空间的 viewer 只读）。
+    pub fn can_write(&self) -> bool {
+        self.can_write
+    }
+
+    pub fn set_can_write(&mut self, value: bool) {
+        self.can_write = value;
     }
 
     /// 切换一个目录的展开态，返回切换后是否展开。
@@ -394,8 +425,7 @@ impl Model {
             notice: self.notice.clone(),
             rows,
             containers,
-            // 容器行（仓库根 = 空路径）不算「有展开的目录」：全部展开/收起只作用于仓库内的条目
-            any_expanded: self.expanded.iter().any(|dir| !dir.is_empty()),
+            all_expanded: self.all_expanded,
             in_repo: self.ready,
             loading: !self.ready && self.error.is_none(),
             vault_drop_target: root_target,
@@ -404,6 +434,7 @@ impl Model {
             dragging: self.dragging,
             drop_hint: self.drag_reject.clone(),
             sort: self.state.sort.clone(),
+            rename_notice: self.state.rename_notice.clone(),
         }
     }
 

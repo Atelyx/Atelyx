@@ -29,8 +29,10 @@ const NARROW_W: f32 = 160.0;
 const ROW_PAD_X: f32 = 8.0;
 /// 行侧缝（与插件 `GUTTER` 同值）：行体本身从面板右缘退让这么宽。
 const GUTTER: f32 = 8.0;
-/// 徽标右缘 = 面板右缘 - 侧缝 - 行内衬。
-const ROW_RIGHT: f32 = NARROW_W - GUTTER - ROW_PAD_X;
+/// 滚动容器的恒定槽宽（与 SDK 同值）：内容宽无条件让出，徽标随之内移。
+const SCROLLBAR_SLOT_W: f32 = 8.0;
+/// 徽标右缘 = 面板右缘 - 槽位 - 侧缝 - 行内衬。
+const ROW_RIGHT: f32 = NARROW_W - SCROLLBAR_SLOT_W - GUTTER - ROW_PAD_X;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
@@ -585,6 +587,32 @@ async fn main() {
     assert_empty_state_centered(&empty, "暂无文件", "右键新建笔记或文件夹。");
     println!("空仓库空态：通过");
 
+    // 重名提醒：随 `vault.ui` 下发，列表上方出现提醒条与关闭钮；关闭后宿主清掉、帧不再显示
+    *state.rename_notice.lock().unwrap() = Some(RENAME_NOTICE.to_string());
+    runtime.notify_plugin_event(FILES_ID, event::name::VAULT_FILES_CHANGED, &json!({}));
+    let notified = wait_frame(&runtime, |frame| has_text(frame, "已重命名为"))
+        .await
+        .expect("重名提醒应显示在文件列表上方");
+    assert!(
+        notified.hits.iter().any(|hit| hit.id == "dismiss-rename-notice"),
+        "提醒条应挂关闭钮：{:?}",
+        notified.hits.iter().map(|hit| hit.id.clone()).collect::<Vec<_>>()
+    );
+    click_hit(&runtime, &notified, "dismiss-rename-notice");
+    wait_frame(&runtime, |frame| !has_text(frame, "已重命名为"))
+        .await
+        .expect("关闭后提醒条应消失");
+    assert!(
+        state
+            .patches
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|patch| patch.dismiss_rename_notice == Some(true)),
+        "关闭应把清除提醒写给宿主"
+    );
+    println!("重名提醒条与关闭：通过");
+
     runtime.set_enabled(FILES_ID, false).expect("停用");
     let status = runtime
         .list()
@@ -609,6 +637,8 @@ const LOCAL_CONTAINER_ID: &str = "local:/tmp/vault";
 const LONG_NAME: &str = "这是一个特别长的中文文件名用来验证不会被过早省略.md";
 /// 上面那条的主名（行内只画主名，后缀另作徽标）。
 const LONG_STEM: &str = "这是一个特别长的中文文件名用来验证不会被过早省略";
+/// 宿主下发的重名提醒文案（`vault.ui.renameNotice`）。
+const RENAME_NOTICE: &str = "「plan.atb」已存在，已重命名为「plan-2.atb」";
 
 /// 宿主侧回执：主题 / 量算 / 界面状态 / 菜单 / 打开与写回记录。
 #[derive(Clone)]
@@ -651,6 +681,8 @@ struct HostState {
     expanded: Arc<Mutex<Vec<String>>>,
     /// 当前打开的文件（宿主 `editor.openFiles` 的回执来源）。
     active: Arc<Mutex<Vec<String>>>,
+    /// 宿主侧的重名提醒文案（`vault.ui` 下发给文件面板）。
+    rename_notice: Arc<Mutex<Option<String>>>,
 }
 
 impl HostState {
@@ -691,6 +723,7 @@ impl HostState {
             }])),
             expanded: Arc::new(Mutex::new(vec![String::new()])),
             active: Arc::new(Mutex::new(Vec::new())),
+            rename_notice: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -743,6 +776,7 @@ fn serve(runtime: Arc<PluginRuntime>, state: HostState) {
                         state: VaultUiState {
                             expanded: state.expanded.lock().unwrap().clone(),
                             sort: "mtime-desc".into(),
+                            rename_notice: state.rename_notice.lock().unwrap().clone(),
                             ..VaultUiState::default()
                         },
                         entries,
@@ -753,6 +787,9 @@ fn serve(runtime: Arc<PluginRuntime>, state: HostState) {
                 }
                 HostRequest::VaultUiWrite { request_id, patch, .. } => {
                     state.patches.lock().unwrap().push(patch.clone());
+                    if patch.dismiss_rename_notice == Some(true) {
+                        *state.rename_notice.lock().unwrap() = None;
+                    }
                     if let Some(expanded) = patch.expanded.clone() {
                         let container = state.active_container();
                         state
@@ -766,6 +803,7 @@ fn serve(runtime: Arc<PluginRuntime>, state: HostState) {
                         state: VaultUiState {
                             sort: patch.sort.clone().unwrap_or_else(|| "mtime-desc".into()),
                             expanded: state.expanded.lock().unwrap().clone(),
+                            rename_notice: state.rename_notice.lock().unwrap().clone(),
                             ..VaultUiState::default()
                         },
                         entries: Vec::new(),
