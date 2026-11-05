@@ -550,7 +550,61 @@ pub(crate) fn scope_line(kind: HistoryKind, content: &str) -> String {
     }
 }
 
-/// 回滚执行（守卫：列表加载世代 + 打开文件身份；确认后关弹层再走各保存链）。
+/// 当前各编辑面打开的文件（路由回滚用）。
+#[derive(Debug, Clone, Copy, Default)]
+struct OpenFiles<'a> {
+    note: Option<&'a str>,
+    table: Option<&'a str>,
+    canvas: Option<&'a str>,
+}
+
+/// 回滚路由：目标已在对应编辑面打开时只应用版本，否则先按扩展名打开再应用。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RestoreRoute {
+    Current,
+    Open(HistoryKind),
+}
+
+/// 编辑面类型由扩展名决定（顺序与 `open_file` 的 `.atlx` / `.atb` / 文档类型分流一致）。
+fn kind_for_path(file: &str) -> Option<HistoryKind> {
+    if file.ends_with(".atlx") {
+        Some(HistoryKind::Canvas)
+    } else if file.ends_with(".atb") {
+        Some(HistoryKind::Table)
+    } else if file.ends_with(".md") {
+        Some(HistoryKind::Note)
+    } else {
+        None
+    }
+}
+
+/// 回滚裁决：只读身份、扩展名不支持、历史类型与扩展名不符一律拒绝（原因直接展示给用户）。
+fn plan_restore(
+    popup_kind: HistoryKind,
+    file: &str,
+    open: OpenFiles<'_>,
+    writable: bool,
+) -> Result<RestoreRoute, &'static str> {
+    if !writable {
+        return Err("该空间为只读身份，无法回滚");
+    }
+    let kind = kind_for_path(file).ok_or("该文件类型不支持历史回滚")?;
+    if kind != popup_kind {
+        return Err("历史版本类型与该文件扩展名不一致");
+    }
+    let current = match kind {
+        HistoryKind::Note => open.note,
+        HistoryKind::Table => open.table,
+        HistoryKind::Canvas => open.canvas,
+    };
+    if current == Some(file) {
+        Ok(RestoreRoute::Current)
+    } else {
+        Ok(RestoreRoute::Open(kind))
+    }
+}
+
+/// 回滚执行（守卫：列表加载世代 + 只读身份 + 文件类型；未打开的文件先按扩展名打开编辑面）。
 fn restore(app: &mut App, seq: u64) -> Task<Message> {
     let Some((_, open)) = &app.popup else { return Task::none() };
     let PopupState::HistoryBrowser { kind, file } = &open.state else {
@@ -565,30 +619,143 @@ fn restore(app: &mut App, seq: u64) -> Task<Message> {
         app.notify(NoticeLevel::Warning, "历史列表已过期，请重新打开");
         return Task::none();
     }
-    match kind {
-        HistoryKind::Note => {
-            if app.ui.last_note_file.as_deref() != Some(file.as_str()) {
-                app.notify(NoticeLevel::Warning, "打开的笔记已切换，请重新打开历史");
-                return Task::none();
+    let route = match plan_restore(
+        kind,
+        &file,
+        OpenFiles {
+            note: app.ui.last_note_file.as_deref(),
+            table: app.ui.last_table_file.as_deref(),
+            canvas: app.ui.last_canvas_file.as_deref(),
+        },
+        crate::doc_session::can_write(app),
+    ) {
+        Ok(route) => route,
+        Err(reason) => {
+            app.notify(NoticeLevel::Warning, reason);
+            return Task::none();
+        }
+    };
+    match route {
+        RestoreRoute::Current => {
+            app.dismiss_popup();
+            match kind {
+                // 成功提示挂到保存链落盘回执（「已回滚」只在写盘成功后出现）
+                HistoryKind::Note => {
+                    app.history_restore_pending = true;
+                    app.history_restore(kind, version)
+                }
+                // 宿主把快照交回插件后即提示；插件自行替换并落入保存链
+                HistoryKind::Table => app.history_restore(kind, version),
+                // 画布无会话链：快照交插件并入保存链，回执通知
+                HistoryKind::Canvas => app.canvas_history_restore(file, version),
             }
-            app.dismiss_popup();
-            // 成功提示挂到保存链落盘回执（「已回滚」只在写盘成功后出现）
-            app.history_restore_pending = true;
-            app.history_restore(kind, version)
         }
-        HistoryKind::Table => {
-            if app.ui.last_table_file.as_deref() != Some(file.as_str()) {
-                app.notify(NoticeLevel::Warning, "打开的表格已切换，请重新打开历史");
-                return Task::none();
+        RestoreRoute::Open(route_kind) => {
+            // 内容与保存链在插件：插件不在跑就无从交回快照，先拒绝以免白白切换编辑面
+            if matches!(route_kind, HistoryKind::Table | HistoryKind::Canvas) {
+                let (plugin_id, label) = if route_kind == HistoryKind::Table {
+                    (crate::plugin_actions::TABLES_PLUGIN, "表格")
+                } else {
+                    (crate::plugin_actions::CANVAS_PLUGIN, "画布")
+                };
+                if !app.plugin_is_running(plugin_id) {
+                    app.notify(NoticeLevel::Warning, format!("{label}插件未运行，无法回滚"));
+                    return Task::none();
+                }
+                if let Err(err) =
+                    atelyx_core::history::validate_snapshot(route_kind, &version.content)
+                {
+                    app.notify(NoticeLevel::Error, err);
+                    return Task::none();
+                }
             }
+            // 挂起输入先落盘，再打开目标文件（打开事件先于回滚事件进入插件队列）
             app.dismiss_popup();
-            // 宿主把快照交回插件后即提示；插件自行替换并落入保存链
-            app.history_restore(kind, version)
+            app.gate(crate::PendingAfterFlush::HistoryRestore {
+                kind: route_kind,
+                file,
+                version,
+            })
         }
-        // 画布无会话链：快照交插件并入保存链，回执通知
-        HistoryKind::Canvas => {
-            app.dismiss_popup();
-            app.canvas_history_restore(file, version)
-        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unopened() -> OpenFiles<'static> {
+        OpenFiles::default()
+    }
+
+    #[test]
+    fn unopened_files_route_by_extension() {
+        assert_eq!(
+            plan_restore(HistoryKind::Note, "笔记.md", unopened(), true),
+            Ok(RestoreRoute::Open(HistoryKind::Note))
+        );
+        assert_eq!(
+            plan_restore(HistoryKind::Table, "表格.atb", unopened(), true),
+            Ok(RestoreRoute::Open(HistoryKind::Table))
+        );
+        assert_eq!(
+            plan_restore(HistoryKind::Canvas, "画布.atlx", unopened(), true),
+            Ok(RestoreRoute::Open(HistoryKind::Canvas))
+        );
+    }
+
+    #[test]
+    fn opened_files_keep_current_restore_path() {
+        assert_eq!(
+            plan_restore(
+                HistoryKind::Note,
+                "笔记.md",
+                OpenFiles { note: Some("笔记.md"), ..unopened() },
+                true
+            ),
+            Ok(RestoreRoute::Current)
+        );
+        assert_eq!(
+            plan_restore(
+                HistoryKind::Table,
+                "表格.atb",
+                OpenFiles { table: Some("表格.atb"), ..unopened() },
+                true
+            ),
+            Ok(RestoreRoute::Current)
+        );
+        assert_eq!(
+            plan_restore(
+                HistoryKind::Canvas,
+                "画布.atlx",
+                OpenFiles { canvas: Some("画布.atlx"), ..unopened() },
+                true
+            ),
+            Ok(RestoreRoute::Current)
+        );
+    }
+
+    #[test]
+    fn read_only_identity_is_rejected() {
+        assert_eq!(
+            plan_restore(HistoryKind::Note, "笔记.md", unopened(), false),
+            Err("该空间为只读身份，无法回滚")
+        );
+        assert_eq!(
+            plan_restore(HistoryKind::Canvas, "画布.atlx", unopened(), false),
+            Err("该空间为只读身份，无法回滚")
+        );
+    }
+
+    #[test]
+    fn mismatched_kind_or_unknown_extension_is_rejected() {
+        assert_eq!(
+            plan_restore(HistoryKind::Table, "笔记.md", unopened(), true),
+            Err("历史版本类型与该文件扩展名不一致")
+        );
+        assert_eq!(
+            plan_restore(HistoryKind::Note, "图片.png", unopened(), true),
+            Err("该文件类型不支持历史回滚")
+        );
     }
 }

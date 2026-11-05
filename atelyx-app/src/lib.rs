@@ -978,6 +978,12 @@ enum PendingAfterFlush {
     SelectSpace { server_url: String, space_id: String, name: String },
     /// 安装就绪的更新包（挂起输入先落盘，安装器替换文件不丢未保存内容）。
     InstallUpdate,
+    /// 历史回滚目标文件未打开：挂起输入先落盘，再按扩展名打开编辑面并应用版本。
+    HistoryRestore {
+        kind: atelyx_core::history::HistoryKind,
+        file: String,
+        version: atelyx_core::history::HistoryVersion,
+    },
 }
 
 /// 启动自动恢复要打开的文件：笔记 / 表格 / 画布各按上次路径发起一次，全部用
@@ -4729,6 +4735,9 @@ impl App {
                 )
             }
             PendingAfterFlush::InstallUpdate => self.install_ready_update(),
+            PendingAfterFlush::HistoryRestore { kind, file, version } => {
+                self.restore_unopened_file(kind, &file, version)
+            }
         }
     }
 
@@ -5429,6 +5438,32 @@ impl App {
                 };
                 self.canvas_history_restore(rel, version)
             }
+        }
+    }
+
+    /// 未打开文件的历史回滚：按扩展名打开对应编辑面，再沿该类型既有保存链写回版本。
+    /// 表格/画布先发打开事件再发回滚事件：插件单线程按序处理，回滚命中的是已载入会话。
+    pub(crate) fn restore_unopened_file(
+        &mut self,
+        kind: atelyx_core::history::HistoryKind,
+        file: &str,
+        version: atelyx_core::history::HistoryVersion,
+    ) -> Task<Message> {
+        match kind {
+            atelyx_core::history::HistoryKind::Note => {
+                // 正文真源在宿主：先建会话（正文 = 版本内容），插件打开后直接读到内存真源，
+                // 再由防抖保存链落盘，标签与脏标记跟落盘结果一致。
+                self.attach_doc_session(file, version.content.clone());
+                self.history_restore_pending = true;
+                let open = self.open_file(file, OpenMode::Reveal);
+                open.chain(self.doc_history_restore(version))
+            }
+            atelyx_core::history::HistoryKind::Table => self
+                .open_file(file, OpenMode::Reveal)
+                .chain(self.history_restore(kind, version)),
+            atelyx_core::history::HistoryKind::Canvas => self
+                .open_file(file, OpenMode::Reveal)
+                .chain(self.canvas_history_restore(file.to_string(), version)),
         }
     }
 
