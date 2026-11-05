@@ -18,12 +18,12 @@ type SpecCode = u64;
 const ASCII_LEN: usize = 128;
 const UNMEASURED: f32 = f32::NAN;
 
-/// 缓存条数上限：超出即整体清空（键含文本，长期运行的插件会按历史值累积）。
+/// 缓存条数上限：超出按最近使用淘汰，不清空（清空会让整页下一帧全量重排）。
 const MAX_MEASURED: usize = 4096;
 
 #[derive(Default)]
 pub(crate) struct Metrics {
-    cache: HashMap<Key, MeasureTextResult>,
+    cache: HashMap<Key, (MeasureTextResult, u64)>,
     misses: Vec<MeasureItem>,
     missed: HashSet<Key>,
     /// 非 ASCII 字宽：键与排版宽度无关，拖动改宽不会重新量算。
@@ -35,13 +35,31 @@ pub(crate) struct Metrics {
     ascii_hot: Option<(SpecCode, usize)>,
     char_misses: Vec<MeasureItem>,
     char_missed: HashSet<CharKey>,
-    /// 量算落地代次：真实字宽一变，按旧字宽排出的 Markdown 版面即作废。
-    epoch: u64,
+    /// 正在排版的版面是否用过估算字宽（量算落地后只有这种版面要重排）。
+    recording: bool,
+    estimate_used: bool,
+    /// 量算落地代次：只用来作废用过估算值的版面，用真实字宽排出的版面不受影响。
+    layout_epoch: u64,
+    /// 缓存最近使用刻度：超上限时淘汰最久未用的键。
+    tick: u64,
 }
 
 impl Metrics {
-    pub(crate) fn epoch(&self) -> u64 {
-        self.epoch
+    /// 版面量算代次：已落地的真实字宽只作废此前用估算值排出的版面。
+    pub(crate) fn layout_epoch(&self) -> u64 {
+        self.layout_epoch
+    }
+
+    /// 开始记录一段版面是否用了估算字宽。
+    pub(crate) fn begin_layout(&mut self) {
+        self.recording = true;
+        self.estimate_used = false;
+    }
+
+    /// 结束记录：返回这段版面是否用过估算字宽。
+    pub(crate) fn end_layout(&mut self) -> bool {
+        self.recording = false;
+        self.estimate_used
     }
 
     /// 取量算结果：未命中时按估算值排版并登记待量算。
@@ -49,7 +67,9 @@ impl Metrics {
     pub(crate) fn measure(&mut self, text: &str, spec: FontSpec, max_width: Option<f32>) -> MeasureTextResult {
         let max_width = max_width.map(|width| width.max(1.0));
         let key = key_of(text, spec, max_width);
-        if let Some(hit) = self.cache.get(&key) {
+        if let Some((hit, stamp)) = self.cache.get_mut(&key) {
+            self.tick += 1;
+            *stamp = self.tick;
             return hit.clone();
         }
         if self.missed.insert(key.clone()) {
@@ -63,6 +83,9 @@ impl Metrics {
                 layout: None,
                 segments: false,
             });
+        }
+        if self.recording {
+            self.estimate_used = true;
         }
         estimate(text, spec.size, max_width)
     }
@@ -105,6 +128,9 @@ impl Metrics {
                 segments: false,
             });
         }
+        if self.recording {
+            self.estimate_used = true;
+        }
     }
 
     /// 取该字型的 ASCII 字宽表（不在最热位置时就地换入）。
@@ -127,12 +153,18 @@ impl Metrics {
         !self.misses.is_empty() || !self.char_misses.is_empty()
     }
 
-    /// 取走本轮的待量算条目（并按存活条数上限收紧缓存）。
+    /// 取走本轮的待量算条目（并按存活条数上限淘汰最久未用的键）。
     pub(crate) fn take_misses(&mut self) -> Vec<MeasureItem> {
         self.missed.clear();
         self.char_missed.clear();
         if self.cache.len() > MAX_MEASURED {
-            self.cache.clear();
+            let excess = self.cache.len() - MAX_MEASURED;
+            let mut ages: Vec<(u64, Key)> =
+                self.cache.iter().map(|(key, (_, stamp))| (*stamp, key.clone())).collect();
+            ages.sort_unstable_by_key(|(stamp, _)| *stamp);
+            for (_, key) in ages.into_iter().take(excess) {
+                self.cache.remove(&key);
+            }
         }
         let mut out = std::mem::take(&mut self.misses);
         out.append(&mut self.char_misses);
@@ -140,12 +172,15 @@ impl Metrics {
     }
 
     /// 落地一批量算结果：`items` 与 `sizes` 一一对应（宿主可能少回，按较短者取）。
-    /// 只有不带可用宽度的量算会改变 Markdown 版面（字宽 / 行高 / 整行宽），带宽度的是控件自身高度，不动版面代次。
+    /// 只有不带可用宽度的量算会改变 Markdown 版面（字宽 / 行高 / 整行宽），带宽度的是控件自身高度。
     pub(crate) fn apply(&mut self, items: &[MeasureItem], sizes: &[MeasureTextResult]) {
         let mut layout_changed = false;
         for (item, size) in items.iter().zip(sizes) {
             let spec = FontSpec { size: item.size, weight: item.weight, family: item.family };
-            self.cache.insert(key_of(&item.text, spec, item.max_width), size.clone());
+            let key = key_of(&item.text, spec, item.max_width);
+            self.tick += 1;
+            let stamp = self.tick;
+            self.cache.insert(key, (size.clone(), stamp));
             if item.max_width.is_none() {
                 layout_changed = true;
                 if let Some(ch) = single_char(&item.text) {
@@ -159,7 +194,7 @@ impl Metrics {
             }
         }
         if layout_changed {
-            self.epoch += 1;
+            self.layout_epoch += 1;
         }
     }
 }

@@ -1,8 +1,9 @@
 //! 只读 Markdown 的排版与绘制：解析走格式语义库 `atelyx-format`（与宿主阅读面同一份语义、同一套源偏移），
 //! 版面口径与宿主阅读面对齐（行高 1.625、标题按级放大、块间空行折算、引用竖条、代码块头、表格网格）。
 //!
-//! 排版结果按「内容 + 宽度 + 量算代次」缓存，滚动与悬停都不重排。
+//! 排版结果按「内容 + 宽度」缓存；量算落地只作废用估算字宽排出的版面，滚动与悬停都不重排。
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use atelyx_format::markdown::{
@@ -149,37 +150,71 @@ pub(crate) fn line_len(layout: &Layout, line: usize) -> usize {
     layout.lines.get(line).map(|line| line.runs.iter().map(|run| run.text.len()).sum()).unwrap_or(0)
 }
 
-/// 排版缓存键：内容指纹 + 宽度位型 + 量算代次。
-type CacheKey = (u64, u32, u64);
+/// 排版缓存键：内容指纹 + 宽度位型。
+type CacheKey = (u64, u32);
 
 /// 跨帧排版缓存：同一段 Markdown 在滚动时按宽度反复重排是纯浪费。
 pub(crate) struct LayoutCache {
-    entries: Mutex<Vec<(CacheKey, Arc<Layout>)>>,
+    inner: Mutex<LayoutCacheInner>,
 }
 
-/// 缓存条数上限：一段内容在几个宽度（滚动条占位前后 / 面板改宽）下各留一份即可。
-const MAX_LAYOUTS: usize = 8;
+#[derive(Default)]
+struct LayoutCacheInner {
+    entries: HashMap<CacheKey, CachedLayout>,
+    clock: u64,
+}
+
+struct CachedLayout {
+    layout: Arc<Layout>,
+    /// 排版时用了估算字宽：对应量算落地后必须重排。
+    estimate: bool,
+    /// 排版时的量算代次（只对 `estimate` 版面生效）。
+    epoch: u64,
+    /// 最近使用刻度（按它淘汰）。
+    stamp: u64,
+}
+
+/// 缓存条数上限：长文档按块缓存（滚动时逐块取高度），按最近使用淘汰。
+const MAX_LAYOUTS: usize = 16384;
 
 impl Default for LayoutCache {
     fn default() -> Self {
-        Self { entries: Mutex::new(Vec::new()) }
+        Self { inner: Mutex::new(LayoutCacheInner::default()) }
     }
 }
 
 impl LayoutCache {
-    fn hit(&self, key: CacheKey) -> Option<Arc<Layout>> {
-        let mut entries = self.entries.lock().unwrap();
-        let index = entries.iter().position(|(entry, _)| *entry == key)?;
-        let found = entries.remove(index);
-        let layout = Arc::clone(&found.1);
-        entries.insert(0, found);
-        Some(layout)
+    fn hit(&self, key: CacheKey, epoch: u64) -> Option<Arc<Layout>> {
+        let mut inner = self.inner.lock().unwrap();
+        inner.clock = inner.clock.wrapping_add(1);
+        let stamp = inner.clock;
+        let stale = inner
+            .entries
+            .get(&key)
+            .is_some_and(|cached| cached.estimate && cached.epoch < epoch);
+        if stale {
+            inner.entries.remove(&key);
+            return None;
+        }
+        let cached = inner.entries.get_mut(&key)?;
+        cached.stamp = stamp;
+        Some(Arc::clone(&cached.layout))
     }
 
-    fn store(&self, key: CacheKey, layout: Arc<Layout>) {
-        let mut entries = self.entries.lock().unwrap();
-        entries.insert(0, (key, layout));
-        entries.truncate(MAX_LAYOUTS);
+    fn store(&self, key: CacheKey, layout: Arc<Layout>, estimate: bool, epoch: u64) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.clock = inner.clock.wrapping_add(1);
+        let stamp = inner.clock;
+        if inner.entries.len() >= MAX_LAYOUTS {
+            // 一次腾出四分之一，避免满容量时每存一条都全表找最旧。
+            let mut ages: Vec<(u64, CacheKey)> =
+                inner.entries.iter().map(|(key, cached)| (cached.stamp, *key)).collect();
+            ages.sort_unstable_by_key(|(stamp, _)| *stamp);
+            for (_, key) in ages.into_iter().take(MAX_LAYOUTS / 4) {
+                inner.entries.remove(&key);
+            }
+        }
+        inner.entries.insert(key, CachedLayout { layout, estimate, epoch, stamp });
     }
 }
 
@@ -213,14 +248,12 @@ fn laid_out(
     soft_wrap: bool,
     expanded: &[usize],
 ) -> Arc<Layout> {
-    let full = (
-        key ^ expanded_key(expanded) ^ content_key(owner, &[]),
-        width.to_bits(),
-        metrics.epoch(),
-    );
-    if let Some(hit) = cache.hit(full) {
+    let full = (key ^ expanded_key(expanded) ^ content_key(owner, &[]), width.to_bits());
+    let epoch = metrics.layout_epoch();
+    if let Some(hit) = cache.hit(full, epoch) {
         return hit;
     }
+    metrics.begin_layout();
     let laid = Arc::new(layout_expanded(
         metrics,
         theme,
@@ -232,7 +265,8 @@ fn laid_out(
         soft_wrap,
         expanded,
     ));
-    cache.store(full, Arc::clone(&laid));
+    let estimate = metrics.end_layout();
+    cache.store(full, Arc::clone(&laid), estimate, epoch);
     laid
 }
 
