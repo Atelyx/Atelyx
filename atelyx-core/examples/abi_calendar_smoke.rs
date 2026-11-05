@@ -59,6 +59,9 @@ async fn main() {
                 HostRequest::HistoryActivity { request_id, .. } => {
                     reply(&responder, request_id, json!({ "days": [] }));
                 }
+                HostRequest::HistoryDay { request_id, .. } => {
+                    reply(&responder, request_id, json!({ "entries": [] }));
+                }
                 HostRequest::VaultExists { request_id, path, .. } => {
                     let exists = files.lock().unwrap().contains_key(&path);
                     reply(&responder, request_id, json!({ "exists": exists }));
@@ -189,6 +192,97 @@ async fn main() {
         .await
         .expect("点击后应有新帧");
     println!("点击后：{} 条指令，{} 个命中区", frame.commands.len(), frame.hits.len());
+
+    // 选中一天，天详情的添加行才出现
+    let day_hit = frame.hits.iter().find(|hit| hit.id.starts_with("day:")).cloned();
+    let before = frame.clone();
+    let frame = match day_hit {
+        Some(hit) => {
+            let id = hit.id.clone();
+            let x = hit.x + hit.w / 2.0;
+            let y = hit.y + hit.h / 2.0;
+            runtime.notify_frame_input(
+                ID,
+                SURFACE,
+                &FrameInput::PointerDown { x, y, button: MouseButton::Left, hit: Some(id.clone()) },
+            );
+            runtime.notify_frame_input(
+                ID,
+                SURFACE,
+                &FrameInput::PointerUp { x, y, button: MouseButton::Left, hit: Some(id) },
+            );
+            wait_frame_after(&runtime, &before, Duration::from_secs(3))
+                .await
+                .expect("选日应有新帧")
+        }
+        None => frame,
+    };
+
+    // 窄面 70：添加行与色点都在面宽内，色点按可用宽换行（3 枚 → 2 列 2 行）
+    let before = frame.clone();
+    runtime.notify_frame_input(
+        ID,
+        SURFACE,
+        &FrameInput::Resize { width: 70.0, height: 1400.0 },
+    );
+    let frame = wait_frame_after(&runtime, &before, Duration::from_secs(3))
+        .await
+        .expect("窄面应有新帧");
+    // 草稿非空「添加」才可点；先聚焦输入框敲一个字，再验按钮不被裁
+    let draft_hit = frame.hits.iter().find(|hit| hit.id == "draft").cloned();
+    let before = frame;
+    if let Some(hit) = draft_hit {
+        let x = hit.x + hit.w / 2.0;
+        let y = hit.y + hit.h / 2.0;
+        runtime.notify_frame_input(
+            ID,
+            SURFACE,
+            &FrameInput::PointerDown { x, y, button: MouseButton::Left, hit: Some(hit.id.clone()) },
+        );
+        runtime.notify_frame_input(
+            ID,
+            SURFACE,
+            &FrameInput::PointerUp { x, y, button: MouseButton::Left, hit: Some(hit.id) },
+        );
+        runtime.notify_frame_input(
+            ID,
+            SURFACE,
+            &FrameInput::Key {
+                key: atelyx_plugin_protocol::frame::Key::Character { text: "x".into() },
+                action: atelyx_plugin_protocol::frame::KeyAction::Press,
+                modifiers: atelyx_plugin_protocol::frame::Modifiers::default(),
+                text: Some("x".into()),
+            },
+        );
+    }
+    let frame = wait_frame_after(&runtime, &before, Duration::from_secs(3))
+        .await
+        .expect("写入草稿应有新帧");
+    for id in ["draft", "add"] {
+        let hit = frame
+            .hits
+            .iter()
+            .find(|hit| hit.id == id)
+            .unwrap_or_else(|| panic!("窄面缺少 {id} 命中区"));
+        assert!(hit.x + hit.w <= 70.5, "{id} 超出窄面宽：{}", hit.x + hit.w);
+    }
+    let mut colors: Vec<_> = frame.hits.iter().filter(|hit| hit.id.starts_with("color:")).collect();
+    colors.sort_by(|a, b| a.id.cmp(&b.id));
+    assert_eq!(colors.len(), 3, "窄面色点应全部保留");
+    assert!(
+        colors.iter().all(|hit| hit.x + hit.w <= 70.5),
+        "色点不得超出窄面宽"
+    );
+    assert!(
+        colors.iter().any(|hit| (hit.y - colors[0].y).abs() > 1.0),
+        "窄面放不下一整排色点时应换行"
+    );
+    println!("窄面：添加行与色点在面宽内：通过");
+    runtime.notify_frame_input(
+        ID,
+        SURFACE,
+        &FrameInput::Resize { width: 900.0, height: 700.0 },
+    );
 
     toggle(&runtime, false).await.expect("停用");
     toggle(&runtime, true).await.expect("重新启用");

@@ -1789,6 +1789,29 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn send_is_ignored_while_the_active_session_is_streaming() {
+        let (ctx, mut out_rx) = test_context();
+        let plugin = AiPanelPlugin::new();
+        {
+            let mut model = plugin.model.lock().unwrap();
+            model.active = Some("s1".into());
+            model.mark_streaming("s1");
+            model.draft = "继续".into();
+        }
+        plugin.perform(&ctx, Action::Send).await;
+        assert!(
+            matches!(
+                out_rx.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ),
+            "在途时回车不得再向宿主发起第二次发送"
+        );
+        let model = plugin.model.lock().unwrap();
+        assert_eq!(model.draft, "继续", "被忽略的发送不得清掉草稿");
+        assert!(model.active_streaming(), "在途标记应保留，停止入口不能消失");
+    }
+
     #[test]
     fn regenerated_images_keep_their_vault_paths() {
         let message = json!({

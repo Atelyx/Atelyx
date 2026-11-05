@@ -70,7 +70,18 @@ async fn main() {
                     }
                     HostRequest::AiModels { request_id, .. } => {
                         responder_counts.models.fetch_add(1, Ordering::Relaxed);
-                        reply(&responder, request_id, json!({ "providers": [] }));
+                        reply(
+                            &responder,
+                            request_id,
+                            json!({
+                                "providers": [{
+                                    "id": "p1",
+                                    "name": "测试供应商",
+                                    "models": [{ "id": "m1", "nickname": "测试模型" }]
+                                }],
+                                "current": { "providerId": "p1", "model": "m1" }
+                            }),
+                        );
                     }
                     HostRequest::AiAgents { request_id, .. } => {
                         reply(
@@ -137,6 +148,22 @@ async fn main() {
                             request_id,
                             json!({ "sessionVaultKey": "smoke", "sessions": [] }),
                         );
+                    }
+                    // 只回会话 id、不推 Finished：让生成停留在途，供重复 Enter 的忽略判定观察
+                    HostRequest::ChatSend { request_id, params, .. } => {
+                        responder_counts.sends.fetch_add(1, Ordering::Relaxed);
+                        let session = params.session_id.unwrap_or_else(|| "s1".into());
+                        reply(
+                            &responder,
+                            request_id,
+                            json!({ "sessionId": session, "messageId": "m1" }),
+                        );
+                    }
+                    HostRequest::ChatStop { request_id, .. } => {
+                        reply(&responder, request_id, json!({}));
+                    }
+                    HostRequest::ChatSessionWrite { request_id, .. } => {
+                        reply(&responder, request_id, json!({}));
                     }
                     HostRequest::VaultList { request_id, path, .. } => {
                         responder_counts.files.fetch_add(1, Ordering::Relaxed);
@@ -310,6 +337,31 @@ async fn main() {
             println!("帧快照：target/ai_frame.json");
         }
     }
+    // 窄面 380：加号 / 发送钮必须留在面宽内（触发钮可收起，不能被裁掉）
+    wait_resize(&runtime, 380.0, 700.0).expect("窄面尺寸");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    // 空草稿时发送钮不可点（没有命中区），先敲一个字再验位置
+    if let Some(draft) = runtime
+        .surface_frame(PANEL, SURFACE)
+        .and_then(|frame| frame.hits.iter().find(|hit| hit.id == "draft").cloned())
+    {
+        click_hit(&runtime, &draft);
+        type_text(&runtime, "k");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let narrow_ok = runtime.surface_frame(PANEL, SURFACE).is_some_and(|frame| {
+        ["plus-menu", "send"].iter().all(|id| {
+            frame
+                .hits
+                .iter()
+                .find(|hit| hit.id == *id)
+                .is_some_and(|hit| hit.x + hit.w <= 380.5)
+        })
+    });
+    assert!(narrow_ok, "窄面 380 下加号与发送钮都应留在面宽内");
+    println!("窄面 380 发送钮在面宽内：通过");
+    press_backspace(&runtime);
+    wait_resize(&runtime, 900.0, 700.0).expect("恢复宽面");
     // # 候选：聚焦输入框敲一个 #，候选贴输入盒内展开；键盘下移一行后应出现滚动位移
     if let Some(hit) = runtime
         .surface_frame(PANEL, SURFACE)
@@ -483,6 +535,59 @@ async fn main() {
             println!("点外关闭菜单：{}", if closed { "通过" } else { "未关闭" });
         }
     }
+    // 在途防重：首次发送后标记在途，第二次 Enter 必须被忽略且停止入口保持
+    // 容器切换会清空模型选择，发送前重新选上
+    if let Some(menu) = runtime
+        .surface_frame(PANEL, SURFACE)
+        .and_then(|frame| frame.hits.iter().find(|hit| hit.id == "model-menu").cloned())
+    {
+        click_hit(&runtime, &menu);
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        // 模型菜单是二级菜单：先展开「模型」，再点具体模型行
+        if let Some(open) = runtime
+            .surface_frame(PANEL, SURFACE)
+            .and_then(|frame| frame.hits.iter().find(|hit| hit.id == "open-model").cloned())
+        {
+            click_hit(&runtime, &open);
+            tokio::time::sleep(Duration::from_millis(120)).await;
+        }
+        if let Some(row) = runtime
+            .surface_frame(PANEL, SURFACE)
+            .and_then(|frame| frame.hits.iter().find(|hit| hit.id == "model:0").cloned())
+        {
+            click_hit(&runtime, &row);
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
+    }
+    if let Some(draft) = runtime
+        .surface_frame(PANEL, SURFACE)
+        .and_then(|frame| frame.hits.iter().find(|hit| hit.id == "draft").cloned())
+    {
+        click_hit(&runtime, &draft);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        type_text(&runtime, "ping");
+        press_enter(&runtime);
+        let sent = wait_sends(&counts, 1).await;
+        assert!(sent, "首次发送应到达宿主的 ChatSend");
+        println!("首次发送：通过");
+        type_text(&runtime, "again");
+        press_enter(&runtime);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let repeated = counts.sends();
+        let stop = runtime
+            .surface_frame(PANEL, SURFACE)
+            .is_some_and(|frame| frame.hits.iter().any(|hit| hit.id == "stop"));
+        assert_eq!(repeated, 1, "在途重复回车不得再发一次 ChatSend");
+        assert!(stop, "在途时停止入口应保留");
+        println!("在途重复回车：被忽略；停止入口：保留");
+        if let Some(hit) = runtime
+            .surface_frame(PANEL, SURFACE)
+            .and_then(|frame| frame.hits.iter().find(|hit| hit.id == "stop").cloned())
+        {
+            click_hit(&runtime, &hit);
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
     // 时序一：已挂面且已订阅时广播，直接重取会话侧；文件树不随会话真源重载重扫
     let base = wait_quiet(&counts, Duration::from_millis(300)).await;
     runtime.on_chat_store_reloaded();
@@ -549,12 +654,59 @@ fn reply(runtime: &Arc<PluginRuntime>, request_id: u64, value: Value) {
     runtime.resolve_shell_call(request_id, Ok(value));
 }
 
+/// 逐字敲入 ASCII：输入框只认字符键事件。
+fn type_text(runtime: &Arc<PluginRuntime>, text: &str) {
+    for ch in text.chars() {
+        runtime.notify_frame_input(
+            PANEL,
+            SURFACE,
+            &FrameInput::Key {
+                key: atelyx_plugin_protocol::frame::Key::Character { text: ch.to_string() },
+                action: atelyx_plugin_protocol::frame::KeyAction::Press,
+                modifiers: atelyx_plugin_protocol::frame::Modifiers::default(),
+                text: Some(ch.to_string()),
+            },
+        );
+    }
+}
+
+fn press_enter(runtime: &Arc<PluginRuntime>) {
+    runtime.notify_frame_input(
+        PANEL,
+        SURFACE,
+        &FrameInput::Key {
+            key: atelyx_plugin_protocol::frame::Key::Named {
+                name: atelyx_plugin_protocol::frame::NamedKey::Enter,
+            },
+            action: atelyx_plugin_protocol::frame::KeyAction::Press,
+            modifiers: atelyx_plugin_protocol::frame::Modifiers::default(),
+            text: None,
+        },
+    );
+}
+
+fn press_backspace(runtime: &Arc<PluginRuntime>) {
+    runtime.notify_frame_input(
+        PANEL,
+        SURFACE,
+        &FrameInput::Key {
+            key: atelyx_plugin_protocol::frame::Key::Named {
+                name: atelyx_plugin_protocol::frame::NamedKey::Backspace,
+            },
+            action: atelyx_plugin_protocol::frame::KeyAction::Press,
+            modifiers: atelyx_plugin_protocol::frame::Modifiers::default(),
+            text: None,
+        },
+    );
+}
+
 /// 观测三类「全量重取」请求：模型清单 / 会话清单 / 仓库文件树。
 #[derive(Clone, Default)]
 struct Counts {
     models: Arc<AtomicUsize>,
     history: Arc<AtomicUsize>,
     files: Arc<AtomicUsize>,
+    sends: Arc<AtomicUsize>,
 }
 
 impl Counts {
@@ -565,6 +717,22 @@ impl Counts {
             self.files.load(Ordering::Relaxed),
         )
     }
+
+    fn sends(&self) -> usize {
+        self.sends.load(Ordering::Relaxed)
+    }
+}
+
+/// 等发送请求计数达到 `want`（宿主回执后插件才完成这次发送）。
+async fn wait_sends(counts: &Counts, want: usize) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if counts.sends() >= want {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    false
 }
 
 /// 三类请求都超过基线：一次 attach 全量重取会让三项都发出。

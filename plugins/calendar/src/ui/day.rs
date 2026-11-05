@@ -18,6 +18,10 @@ const HISTORY_ROW_H: f32 = 22.0;
 const HISTORY_CAP: usize = 20;
 /// 添加行色板块的命中边长。
 const SWATCH: f32 = 16.0;
+/// 色点格的间距（格宽 = 色块 + 4 的内缩）。
+const SWATCH_GAP: f32 = 6.0;
+/// 面板右缘的滚动条预留宽：色点换行按扣掉它之后的可用宽算。
+const SCROLLBAR_RESERVE: f32 = 12.0;
 
 pub fn detail(ui: &mut Ui<'_, '_>, snapshot: &Snapshot) {
     if snapshot.selected.is_none() {
@@ -197,37 +201,66 @@ fn add_row(ui: &mut Ui<'_, '_>, snapshot: &Snapshot) {
         row.text_input("draft", draft, "添加日程…");
         row.button_enabled("add", "添加", enabled);
     });
-    ui.row(6.0, move |row| {
-        for (index, hex) in colors.iter().enumerate() {
-            let color = item_color(Some(hex), &accent);
-            let chosen = index == selected % colors.len();
-            row.canvas_sized(SWATCH + 4.0, ROW_H, move |canvas| {
-                let area = canvas.area();
-                if chosen {
-                    canvas.draw(DrawCommand::Rect {
-                        x: area.x,
-                        y: area.y,
-                        w: area.w,
-                        h: area.h,
-                        fill: None,
-                        stroke: Some(token(ColorToken::Text)),
-                        stroke_width: Some(1.0),
-                        corner_radius: Some(SWATCH / 2.0),
-                        shadow: None,
+    // 色点按可用宽换行：窄面板里整排挤在一行会把尾部色点推出可点范围
+    let columns = swatch_columns((ui.bounds().w - SCROLLBAR_RESERVE).max(0.0));
+    let total = colors.len();
+    for (chunk, base) in colors.chunks(columns).zip((0..).step_by(columns)) {
+        let chunk = chunk.to_vec();
+        let accent = accent.clone();
+        ui.row(SWATCH_GAP, move |row| {
+            for (offset, hex) in chunk.iter().enumerate() {
+                let index = base + offset;
+                let color = item_color(Some(hex), &accent);
+                let chosen = index == selected % total;
+                row.canvas_sized(SWATCH + 4.0, ROW_H, move |canvas| {
+                    let area = canvas.area();
+                    if chosen {
+                        canvas.draw(DrawCommand::Rect {
+                            x: area.x,
+                            y: area.y,
+                            w: area.w,
+                            h: area.h,
+                            fill: None,
+                            stroke: Some(token(ColorToken::Text)),
+                            stroke_width: Some(1.0),
+                            corner_radius: Some(SWATCH / 2.0),
+                            shadow: None,
+                        });
+                    }
+                    canvas.draw(DrawCommand::Circle {
+                        cx: area.x + area.w / 2.0,
+                        cy: area.y + area.h / 2.0,
+                        r: DOT / 2.0,
+                        fill: Some(color),
+                        stroke: None,
+                        stroke_width: None,
                     });
-                }
-                canvas.draw(DrawCommand::Circle {
-                    cx: area.x + area.w / 2.0,
-                    cy: area.y + area.h / 2.0,
-                    r: DOT / 2.0,
-                    fill: Some(color),
-                    stroke: None,
-                    stroke_width: None,
+                    if writable {
+                        canvas.hit(&format!("color:{index}"), area, HitCursor::Pointer);
+                    }
                 });
-                if writable {
-                    canvas.hit(&format!("color:{index}"), area, HitCursor::Pointer);
-                }
-            });
-        }
-    });
+            }
+        });
+    }
+}
+
+/// 一行最多放几枚色点：格宽 = 色块 + 4 内缩，格间留 `SWATCH_GAP`。
+fn swatch_columns(available: f32) -> usize {
+    let cell = SWATCH + 4.0;
+    let fit = ((available + SWATCH_GAP) / (cell + SWATCH_GAP)).floor();
+    (fit as usize).max(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::swatch_columns;
+
+    /// 宽面板一行放得下 7 枚色点，窄面板按可用宽换行（至少留一枚，不越界）。
+    #[test]
+    fn swatches_wrap_to_the_available_width() {
+        assert!(swatch_columns(320.0) >= 7, "宽面板一行应放得下全部色点");
+        assert_eq!(swatch_columns(120.0), 4);
+        assert_eq!(swatch_columns(20.0), 1);
+        assert_eq!(swatch_columns(0.0), 1, "极窄也至少放一枚，不能出现空行");
+    }
 }

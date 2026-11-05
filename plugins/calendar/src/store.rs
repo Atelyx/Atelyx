@@ -2,7 +2,6 @@
 //! 读失败绝不降级为空清单；损坏的本地原文按内容指纹另存备份，本体保留不动。
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use atelyx_plugin_protocol::method::{CalendarItem, CollabMetaEntry};
 use atelyx_plugin_sdk::Context;
@@ -13,10 +12,10 @@ pub const CALENDAR_FILE: &str = ".atelyx/calendar.json";
 pub const META_KEY: &str = "calendar";
 /// 日程文件 schema（读侧不校验，仅写盘落字段）。
 const SCHEMA: &str = "atelyx-calendar/v1";
-/// 备份名里的内容指纹长度（SHA-256 十六进制前 16 位）。
+/// 备份名里的内容指纹长度（FNV-1a 64 位的十六进制表示）。
 const FINGERPRINT_HEX: usize = 16;
 /// 空文件不是「没有日程」：可能是同步未完成，既不删也不写。
-const EMPTY_NOTICE: &str = "日程数据为空（可能同步未完成），已跳过且未改动原文件";
+const EMPTY_NOTICE: &str = "日程文件为空（可能同步未完成），已跳过且未改动原文件";
 
 /// 当前容器的存储去向。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -115,14 +114,16 @@ fn backup_path(raw: &str) -> String {
     format!("{CALENDAR_FILE}.corrupt-{}", fingerprint(raw))
 }
 
-/// 原文的 SHA-256 前 16 位十六进制。
+/// 原文的 FNV-1a 64 位指纹：纯字节遍历，同内容恒定得到同一个备份名。
 fn fingerprint(raw: &str) -> String {
-    let digest = Sha256::digest(raw.as_bytes());
-    let mut hex = String::with_capacity(FINGERPRINT_HEX);
-    for byte in digest.iter().take(FINGERPRINT_HEX / 2) {
-        hex.push_str(&format!("{byte:02x}"));
+    const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = OFFSET_BASIS;
+    for byte in raw.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(PRIME);
     }
-    hex
+    format!("{hash:0width$x}", width = FINGERPRINT_HEX)
 }
 
 /// 本地原文：先剥掉开头单个 BOM（部分编辑器/同步工具会写进去）。
@@ -199,6 +200,14 @@ mod tests {
         assert_eq!(hex.len(), FINGERPRINT_HEX);
         assert!(hex.chars().all(|ch| ch.is_ascii_hexdigit()));
         assert_eq!(first, format!(".atelyx/calendar.json.corrupt-{hex}"), "备份与本体同目录");
+    }
+
+    /// 指纹必须是 FNV-1a 64 位（取公开参考向量）；偏离该算法会让备份名与契约不符。
+    #[test]
+    fn fingerprint_matches_fnv1a_64_reference() {
+        assert_eq!(fingerprint(""), "cbf29ce484222325");
+        assert_eq!(fingerprint("a"), "af63dc4c8601ec8c");
+        assert_eq!(fingerprint("foobar"), "85944171f73967e8");
     }
 
     /// 写盘产物能被自己读回（字段不丢）。
