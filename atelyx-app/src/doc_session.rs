@@ -16,16 +16,8 @@ use atelyx_core::plugin_runtime::{
 use crate::settings_view::plugins::PluginsMsg;
 use crate::{vault, App, Message, RepoKind, SaveReason};
 
-/// 一次读盘回填的归属凭据：身份（插件 id + 请求 id）与序号（本会话内的打开次序），
-/// 连同发起时的世代与路径。守卫只认与当前登记完全一致的凭据。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OpenTicket {
-    plugin_id: String,
-    request_id: u64,
-    seq: u64,
-    gen: u64,
-    path: String,
-}
+pub use atelyx_core::doc_session::DocOpenGuard;
+use atelyx_core::doc_session::{discard_line, OpenTicket};
 
 /// 读盘完成回填：发起时登记的凭据 + 读盘结果（凭据由 `open` 原样带回）。
 #[derive(Debug, Clone)]
@@ -33,78 +25,6 @@ pub struct OpenReadResult {
     ticket: OpenTicket,
     result: Result<String, String>,
     can_write: bool,
-}
-
-/// 读盘结果被守卫丢弃的原因（决定回执文案与日志说明）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DiscardReason {
-    /// 打开动作已被新的打开 / 关闭取代（凭据不再指向当前登记）。
-    Superseded,
-    /// 读盘跨过了仓库切换。
-    VaultSwitched,
-}
-
-impl DiscardReason {
-    fn text(self) -> &'static str {
-        match self {
-            Self::Superseded => "文档打开已被新的请求取代",
-            Self::VaultSwitched => "仓库已切换，请重新打开",
-        }
-    }
-}
-
-/// 在途读盘的归属守卫：只有最后一次登记、且身份 / 序号 / 世代都对得上的结果可以建立会话。
-/// 打开新文件、关闭实例、插件重发 `doc.open` 都推进序号，旧结果据此丢弃。
-#[derive(Debug, Default)]
-pub struct DocOpenGuard {
-    seq: u64,
-    current: Option<OpenTicket>,
-}
-
-impl DocOpenGuard {
-    /// 登记一次新的读盘并返回它的凭据；更早登记的读盘结果全部作废。
-    pub(crate) fn start(
-        &mut self,
-        plugin_id: &str,
-        request_id: u64,
-        gen: u64,
-        path: &str,
-    ) -> OpenTicket {
-        self.seq = self.seq.saturating_add(1);
-        let ticket = OpenTicket {
-            plugin_id: plugin_id.to_string(),
-            request_id,
-            seq: self.seq,
-            gen,
-            path: path.to_string(),
-        };
-        self.current = Some(ticket.clone());
-        ticket
-    }
-
-    /// 实例被换下 / 关闭：在途读盘结果不得再回填。
-    pub(crate) fn invalidate(&mut self) {
-        self.seq = self.seq.saturating_add(1);
-        self.current = None;
-    }
-
-    /// 校验回填归属：接受即消耗本次打开（一次打开只建立一次会话）。
-    fn accept(&mut self, ticket: &OpenTicket, epoch: u64) -> Result<(), DiscardReason> {
-        if ticket.gen != epoch {
-            return Err(DiscardReason::VaultSwitched);
-        }
-        let matched = self.current.as_ref().is_some_and(|current| current == ticket);
-        if !matched {
-            return Err(DiscardReason::Superseded);
-        }
-        self.current = None;
-        Ok(())
-    }
-}
-
-/// 被丢弃读盘的日志文案：含被丢弃的路径与原因，便于在插件日志里定位。
-fn discard_line(path: &str, reason: DiscardReason) -> String {
-    format!("文档读盘结果被丢弃：{path}（{}）", reason.text())
 }
 
 /// 把当前文档的正文 / 落盘状态广播给订阅插件（`text` 只在宿主改写正文时给出）。
@@ -230,16 +150,16 @@ pub fn open(
 pub fn open_done(app: &mut App, done: OpenReadResult) -> Task<Message> {
     let OpenReadResult { ticket, result, can_write } = done;
     if let Err(reason) = app.doc_open_guard.accept(&ticket, app.epoch()) {
-        let line = discard_line(&ticket.path, reason);
-        if !app.plugins.log_to_plugin(&ticket.plugin_id, &line) {
+        let line = discard_line(ticket.path(), reason);
+        if !app.plugins.log_to_plugin(ticket.plugin_id(), &line) {
             eprintln!("{line}");
         }
         app.plugins
-            .resolve_shell_call(ticket.request_id, Err(reason.text().into()));
+            .resolve_shell_call(ticket.request_id(), Err(reason.text().into()));
         return Task::none();
     }
-    let request_id = ticket.request_id;
-    let path = ticket.path;
+    let request_id = ticket.request_id();
+    let path = ticket.path().to_string();
     // 读盘在途期间插件可能已对旧篇提交按键（脏态出现即拒绝），否则旧篇输入被本篇正文覆盖。
     if result.is_ok() && app.doc_dirty {
         app.plugins.resolve_shell_call(
@@ -411,71 +331,6 @@ pub fn awareness(app: &mut App, request_id: u64, params: DocAwarenessParams) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// 交错：A 读盘在途 → 用户切到 B（实例换下 + B 登记）→ A 结果晚到。
-    /// A 的凭据不再指向当前登记，必须丢弃；B 的凭据仍可回填（A 不得覆盖 B 的会话）。
-    #[test]
-    fn stale_read_of_previous_file_is_discarded() {
-        let mut guard = DocOpenGuard::default();
-        let a = guard.start("notes", 11, 1, "a.md");
-        guard.invalidate();
-        let b = guard.start("notes", 12, 1, "b.md");
-
-        assert_eq!(
-            guard.accept(&a, 1),
-            Err(DiscardReason::Superseded),
-            "切到 B 之后 A 的读盘不得再建立会话"
-        );
-        assert!(guard.accept(&b, 1).is_ok(), "B 的读盘仍归属当前打开");
-        let line = discard_line("a.md", DiscardReason::Superseded);
-        assert!(line.contains("a.md") && line.contains("取代"), "日志含被丢弃的路径与原因：{line}");
-    }
-
-    /// 正常链路：登记后原样回填即建立会话，且同一凭据只能回填一次。
-    #[test]
-    fn matching_read_is_accepted_once() {
-        let mut guard = DocOpenGuard::default();
-        let ticket = guard.start("notes", 7, 3, "a.md");
-        assert!(guard.accept(&ticket, 3).is_ok());
-        assert_eq!(
-            guard.accept(&ticket, 3),
-            Err(DiscardReason::Superseded),
-            "同一凭据的重复回填不得二次挂载"
-        );
-    }
-
-    /// 交错：读盘在途期间切换仓库（世代前进），旧世代的结果必须丢弃。
-    #[test]
-    fn vault_switch_discards_inflight_read() {
-        let mut guard = DocOpenGuard::default();
-        let ticket = guard.start("notes", 9, 4, "a.md");
-        assert_eq!(guard.accept(&ticket, 5), Err(DiscardReason::VaultSwitched));
-        let line = discard_line("a.md", DiscardReason::VaultSwitched);
-        assert!(line.contains("a.md") && line.contains("仓库已切换"), "日志含路径与原因：{line}");
-    }
-
-    /// 交错：启动恢复打开 A（在途）→ 用户主动打开同一篇 A（实例换下）。
-    /// 恢复那笔读盘必须丢弃，只有用户这次打开可以建立会话。
-    #[test]
-    fn restore_read_is_discarded_when_user_reopens_same_file() {
-        let mut guard = DocOpenGuard::default();
-        let restore = guard.start("notes", 21, 1, "a.md");
-        guard.invalidate();
-        let reveal = guard.start("notes", 22, 1, "a.md");
-
-        assert_eq!(guard.accept(&restore, 1), Err(DiscardReason::Superseded));
-        assert!(guard.accept(&reveal, 1).is_ok());
-    }
-
-    /// 凭据身份不同（插件 / 请求 id）时即使路径与序号巧合也不得回填。
-    #[test]
-    fn identity_mismatch_is_discarded() {
-        let mut guard = DocOpenGuard::default();
-        let ticket = guard.start("notes", 31, 2, "a.md");
-        let mut other = ticket.clone();
-        other.request_id = 32;
-        assert_eq!(guard.accept(&other, 2), Err(DiscardReason::Superseded));
-    }
 
     #[test]
     fn rename_target_strips_suffix_and_keeps_the_folder() {

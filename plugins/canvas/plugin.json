@@ -9,5 +9,17 @@
   },
   "permissions": ["vault", "collab", "fs", "dialog", "clipboard", "notification", "ai"],
   "singleton": true,
-  "keepMountedOnVaultSwitch": false
+  "keepMountedOnVaultSwitch": false,
+  "docTypeRegistrations": [
+    {
+      "id": "canvas",
+      "extensions": ["atlx"],
+      "ownerPlugin": "atelyx.canvas",
+      "views": ["canvas"],
+      "editable": true,
+      "multiDoc": false,
+      "label": "画布",
+      "icon": "palette"
+    }
+  ]
 }

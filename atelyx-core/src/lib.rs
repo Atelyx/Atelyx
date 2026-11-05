@@ -7,6 +7,8 @@ pub mod ai;
 pub mod collab;
 pub mod credentials;
 pub mod canvas_collab;
+pub mod doc_session;
+pub mod doc_type;
 pub mod ephemeral;
 pub mod filesearch;
 pub mod global_config;

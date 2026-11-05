@@ -2274,7 +2274,8 @@ mod tests {
         assert_eq!(manifest["id"], PLUGIN_ID);
         assert_eq!(manifest["version"], env!("CARGO_PKG_VERSION"));
         assert_eq!(manifest["apiVersion"], atelyx_plugin_sdk::abi::CONTRACT_VERSION);
-        assert_eq!(manifest["docTypeRegistrations"][0]["extension"], "md");
-        assert_eq!(manifest["docTypeRegistrations"][0]["surface"], PANEL);
+        assert_eq!(manifest["docTypeRegistrations"][0]["extensions"][0], "md");
+        assert_eq!(manifest["docTypeRegistrations"][0]["ownerPlugin"], PLUGIN_ID);
+        assert_eq!(manifest["docTypeRegistrations"][0]["views"][0], PANEL);
     }
 }

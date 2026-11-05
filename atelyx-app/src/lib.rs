@@ -1432,9 +1432,6 @@ pub struct App {
     /// 插件最后提交并被宿主接受的正文（三方合并的共同祖先；远端合入不回写它）。
     /// `None` = 与 [`Self::doc_text`] 相同：稳定态不另存一份全文。
     pub doc_base: Option<String>,
-    /// 文档插件尚未就绪时挂起的打开请求（启动自动恢复 / 用户抢先点开）；
-    /// 连同「打开意图」一起挂起，就绪后按原样重试。
-    pending_doc_open: Option<(String, OpenMode)>,
     /// 启动加载屏状态：步骤推进、就绪闸门与超时（就绪后同一窗口切工作区）。
     startup: Startup,
     /// boot 同步阶段只收集、首帧后执行的启动计划。
@@ -1710,7 +1707,6 @@ impl App {
                 doc_active: false,
                 doc_selection: None,
                 doc_base: None,
-                pending_doc_open: None,
                 startup: Startup::new(
                     Instant::now(),
                     &[Gate::Plugins, Gate::Vault, Gate::RestoreDocs],
@@ -1955,7 +1951,7 @@ impl App {
         self.startup.arrive(gate, Instant::now())
     }
 
-    /// 插件进入运行态：通知已挂面、重同步窗口与文档实例，并接续挂起的文档打开。
+    /// 插件进入运行态：通知已挂面、重同步窗口与文档实例。
     fn on_plugin_running(&mut self, id: &str) -> Task<Message> {
         for (plugin_id, surface_id) in self.plugin_surfaces.iter() {
             if plugin_id == id {
@@ -1965,14 +1961,7 @@ impl App {
         }
         // 插件窗口 / 接管面 / 打开中的文档实例随重启重新就绪
         plugin_actions::resync_surfaces_on_running(self, id);
-        let mut task = Task::none();
-        if let Some((path, mode)) = self.pending_doc_open.clone() {
-            if self.pending_doc_plugin(&path).as_deref() == Some(id) {
-                self.pending_doc_open = None;
-                task = self.gate(PendingAfterFlush::OpenFile { path, mode });
-            }
-        }
-        task
+        Task::none()
     }
 
     /// 订阅建立前广播的 Running 已丢：按当前状态对账一次（状态查询不经事件通道）。
@@ -1995,21 +1984,6 @@ impl App {
     pub(crate) fn startup_skip_container(&mut self) -> Task<Message> {
         let finished = self.startup_arrive(Gate::Vault) | self.startup_arrive(Gate::RestoreDocs);
         self.startup_settled(finished)
-    }
-
-    /// 注册表里有该文档类型的插件且已运行：接续挂起的文档打开（只挂已有视图）。
-    fn retry_pending_doc_open(&mut self) -> Task<Message> {
-        let Some((path, mode)) = self.pending_doc_open.clone() else {
-            return Task::none();
-        };
-        let Some(plugin_id) = self.pending_doc_plugin(&path) else {
-            return Task::none();
-        };
-        if !self.plugin_is_running(&plugin_id) {
-            return Task::none();
-        }
-        self.pending_doc_open = None;
-        self.gate(PendingAfterFlush::OpenFile { path, mode })
     }
 
     /// 追加一条通知（右下角；容量上限防堆积，溢出优先淘汰最旧的非常驻条）。
@@ -3497,19 +3471,6 @@ impl App {
                         if self.file_drag_surface.as_ref().is_some_and(|(owner, _)| owner == id) {
                             self.cancel_file_drag();
                         }
-                        if let Some((path, mode)) = self.pending_doc_open.clone() {
-                            if self.pending_doc_plugin(&path).as_deref() == Some(id.as_str()) {
-                                self.pending_doc_open = None;
-                                self.notify(
-                                    NoticeLevel::Error,
-                                    "文档插件未运行，无法打开文档".to_string(),
-                                );
-                                // 恢复请求没有落点，同样收尾，不拖到文档闸门超时
-                                if matches!(mode, OpenMode::Restore) {
-                                    task = task.chain(self.startup_restore_doc_done());
-                                }
-                            }
-                        }
                         // 核心异常退出 / 被停用都没有插件侧收尾：替在途 run 补发失败终态
                         // （正常停用同样收掉在途 run，避免面板永久停在「回复中」）
                         if *id == atelyx_core::plugin_runtime::AI_CORE_PLUGIN {
@@ -3527,9 +3488,7 @@ impl App {
                     task = task.chain(plugin_actions::apply_declared_default_layout(self, id));
                 }
                 settings_view::plugins::on_event(self, *event);
-                let task = task.chain(plugin_actions::refresh_projection(self));
-                // 注册表摊平后文档类型才可路由：挂起的文档打开在此重试
-                task.chain(self.retry_pending_doc_open())
+                task.chain(plugin_actions::refresh_projection(self))
             }
             Message::PluginFramesSubmitted(submissions) => {
                 // 帧本身不产生消息：这里只承载面上的首帧与清帧，整表清空覆盖所有单面投影
@@ -4867,7 +4826,8 @@ impl App {
 
     /// 打开 .atb：登记打开的文件、面板内容切到表格插件网格视图、广播打开文件集合。
     /// 表格数据、编辑与保存链都在插件；宿主只负责视图显示（`mode`）、最近打开与历史列表。
-    fn open_table(&mut self, rel: &str, mode: OpenMode) -> Task<Message> {
+    /// `view` 来自文档类型声明的承载视图，宿主不在此硬编码视图 id。
+    fn open_table(&mut self, rel: &str, mode: OpenMode, view: &str) -> Task<Message> {
         self.ui.last_table_file = Some(rel.to_string());
         self.history_kind = atelyx_core::history::HistoryKind::Table;
         // 打开 / 切换表格即广播：第三方表格视图按当前路径重取
@@ -4885,7 +4845,7 @@ impl App {
             crate::space_actions::send_presence(self);
         }
         let task = if mode.reveals() {
-            plugin_actions::reveal_view(self, "table")
+            plugin_actions::reveal_view(self, view)
         } else {
             Task::none()
         };
@@ -4894,7 +4854,8 @@ impl App {
 
     /// 打开 .atlx：登记打开的文件、面板内容切到画布插件视图、广播打开文件集合。
     /// 画布数据、交互与保存链都在插件；宿主只负责视图显示（`mode`）、最近打开与历史列表。
-    fn open_canvas(&mut self, rel: &str, mode: OpenMode) -> Task<Message> {
+    /// `view` 来自文档类型声明的承载视图，宿主不在此硬编码视图 id。
+    fn open_canvas(&mut self, rel: &str, mode: OpenMode, view: &str) -> Task<Message> {
         self.ui.last_canvas_file = Some(rel.to_string());
         self.history_kind = atelyx_core::history::HistoryKind::Canvas;
         if mode.persists() {
@@ -4909,55 +4870,45 @@ impl App {
             crate::space_actions::send_presence(self);
         }
         let task = if mode.reveals() {
-            plugin_actions::reveal_view(self, atelyx_core::layout::CANVAS_VIEW)
+            plugin_actions::reveal_view(self, view)
         } else {
             Task::none()
         };
         task.chain(self.reload_history())
     }
 
-    /// 打开文件（脏拦截已由 gate 处理）：按扩展名分流（.atlx → 画布、.atb → 表格、
-    /// 插件注册的领域扩展名 → 插件文档面），复位只读并清掉上一文件的解析产物。
+    /// 打开文件的统一路由入口（脏拦截已由 gate 处理）：按扩展名查插件声明的文档类型，
+    /// 由 [`crate::pack::preset_doc_kind`] 分派到宿主现有通路或插件文档面；
+    /// 未知扩展名给出明确错误，不静默。
     /// `mode` = 打开意图：Reveal 确保视图标签存在并激活；Background 只挂已有视图；
     /// Restore 只把文件挂到已有视图，不新建 / 不激活标签、不落盘。
     pub(crate) fn open_file(&mut self, rel: &str, mode: OpenMode) -> Task<Message> {
-        if rel.ends_with(".atlx") {
-            let task = self.open_canvas(rel, mode);
-            return self.doc_restored(task, mode);
-        }
-        if rel.ends_with(".atb") {
-            let task = self.open_table(rel, mode);
-            return self.doc_restored(task, mode);
-        }
-        if let Some(extension) = rel.rsplit('.').next() {
-            if self
-                .registry
-                .doc_types()
-                .iter()
-                .any(|info| info.registration.extension.eq_ignore_ascii_case(extension))
-            {
-                // 文档面打开是异步读盘：回执（DocOpened）到达时才收尾
-                return plugin_actions::open_doc(self, rel, mode);
+        let Some(route) = self.registry.route_for_path(rel).cloned() else {
+            self.notify(
+                NoticeLevel::Warning,
+                format!("未知文件类型，没有插件注册可打开它的视图：{rel}"),
+            );
+            return self.doc_restored(Task::none(), mode);
+        };
+        let Some(view) = route.views.first().map(|view| self.registry.doc_view_id(view)) else {
+            self.notify(
+                NoticeLevel::Error,
+                format!("文档类型 {} 没有可承载视图：{rel}", route.id),
+            );
+            return self.doc_restored(Task::none(), mode);
+        };
+        match crate::pack::preset_doc_kind(&route) {
+            Some(crate::pack::PresetDocKind::Table) => {
+                let task = self.open_table(rel, mode, &view);
+                self.doc_restored(task, mode)
             }
-        }
-        if rel.ends_with(".md") {
-            // 文档插件可能仍在后台装载（启动自动恢复先于它就绪）：挂起一次，就绪后按原意图重试。
-            self.pending_doc_open = Some((rel.to_string(), mode));
-            // 启动恢复是静默恢复：不为「插件启动中」再提示一次。
-            if mode.records_recent() {
-                self.notify(
-                    NoticeLevel::Info,
-                    "文档插件正在启动，稍后打开".to_string(),
-                );
+            Some(crate::pack::PresetDocKind::Canvas) => {
+                let task = self.open_canvas(rel, mode, &view);
+                self.doc_restored(task, mode)
             }
-            return Task::none();
+            // 文档面打开是异步读盘：回执（DocOpenDone）到达时才收尾恢复闸门
+            None => plugin_actions::open_doc(self, rel, mode, &route),
         }
-        self.notify(
-            NoticeLevel::Warning,
-            format!("没有可打开该文件的视图：{rel}"),
-        );
-        // 没有视图可挂：这份恢复请求到此收尾，不阻塞启动
-        self.doc_restored(Task::none(), mode)
     }
 
     /// 恢复请求在宿主侧收尾（打开登记与失败都算完成；插件正文仍可异步补齐）。
@@ -4973,16 +4924,6 @@ impl App {
     pub(crate) fn startup_restore_doc_done(&mut self) -> Task<Message> {
         let finished = self.startup.docs_done(Instant::now());
         self.startup_settled(finished)
-    }
-
-    /// 挂起中的文档打开请求归属哪个插件（按扩展名查文档类型注册）。
-    fn pending_doc_plugin(&self, path: &str) -> Option<String> {
-        let extension = path.rsplit('.').next()?;
-        self.registry
-            .doc_types()
-            .iter()
-            .find(|info| info.registration.extension.eq_ignore_ascii_case(extension))
-            .map(|info| info.plugin_id.clone())
     }
 
     /// 系统文件夹选择器（切仓库入口，脏拦截已由 gate 处理）。
@@ -5042,7 +4983,6 @@ impl App {
             let _ = plugin_actions::close_doc(self);
             self.doc_active = false;
             self.doc_selection = None;
-            self.pending_doc_open = None;
             self.history.clear();
         }
         self.children.clear();

@@ -642,15 +642,26 @@ ctx.window_show("palette").await?;
 
 ### 8.3 领域文档类型
 
-在 `plugin.json` 里注册扩展名，宿主负责文件树图标、新建菜单与打开路由：
+在 `plugin.json` 里注册文档类型，宿主负责文件树图标、新建菜单与打开路由：
 
 ```json
 "docTypeRegistrations": [
-  { "extension": "board", "label": "白板", "icon": "layout-dashboard", "surface": "doc" }
+  {
+    "id": "board",
+    "extensions": ["board"],
+    "ownerPlugin": "com.example.board",
+    "views": ["doc"],
+    "editable": true,
+    "multiDoc": false,
+    "label": "白板",
+    "icon": "layout-dashboard"
+  }
 ]
 ```
 
-`surface` 必须同时用 `view.register` 注册为 `panel` 贡献。用户打开这类文件时宿主发 `host:doc.open { surfaceId, path }`，插件按 `surfaceId` 提交这一面的帧；关闭或换文件时先发 `host:doc.close`。同一时间至多一个打开的插件文档（切换文件即换实例）；文件被删除或切仓库也会关闭。同一扩展名被多个插件注册时按插件 id 取第一个并提示。
+`id` 在插件内稳定且唯一，`extensions` 是不带点的小写扩展名清单。`ownerPlugin` 是持内容真源、定解析 / 合并 / 保存语义的插件；`views` 是能承载该文档类型的视图贡献 id（当前须由同一插件用 `view.register` 注册为 `panel`），宿主按 `views` 决定可绑定视图。同一扩展名被多个插件争用时预置插件优先，其余按（插件 id、文档类型 id）字典序取首个并记入冲突。
+
+用户打开这类文件时宿主发 `host:doc.open { surfaceId, path }` 给 `ownerPlugin`（`surfaceId` = 首个承载视图 id），插件按 `surfaceId` 提交这一面的帧；关闭或换文件时先发 `host:doc.close`。同一时间至多一个打开的插件文档（切换文件即换实例）；文件被删除或切仓库也会关闭。
 
 ### 8.4 AI 总线
 

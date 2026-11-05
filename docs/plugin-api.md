@@ -83,17 +83,24 @@ pub enum Permission {
 
 ```rust
 // atelyx-plugin-protocol/src/manifest.rs
-/// 领域文档类型注册：扩展名、展示标签、图标名与承载文档内容的贡献 id。
-#[serde(rename_all = "camelCase")]
+/// 领域文档类型注册：声明扩展名、内容真源的归属插件与可承载它的视图贡献。
+#[serde(rename_all = "camelCase", default)]
 pub struct DocTypeRegistration {
-    /// 不带点的扩展名（如 `board`）。
-    pub extension: String,
+    /// 插件内稳定的文档类型 id（如 `table`）；宿主状态与路由以它为准。
+    pub id: String,
+    /// 不带点的扩展名（如 `board`）；一个类型可声明多个，比较不区分大小写。
+    pub extensions: Vec<String>,
+    /// 持内容真源、定解析 / 合并 / 保存语义的插件 id；通常与声明插件相同。
+    pub owner_plugin: String,
+    /// 能承载该文档类型的视图贡献 id 列表（贡献由声明插件注册）。
+    pub views: Vec<String>,
+    /// 文档内容可编辑；false = 只读。
+    pub editable: bool,
+    /// 允许同类多文档并行打开（false = 每类型至多一个热文档）。
+    pub multi_doc: bool,
     pub label: String,
     /// 宿主内置形状名（未知名回落拼图）。
     pub icon: String,
-    /// 承载该文档实例的贡献 id（插件须同时以 `view.register` 注册同名贡献，
-    /// `slot` 为面板）；打开该扩展名文件时宿主分配 surfaceId 并通知插件提交整面帧。
-    pub surface: String,
 }
 ```
 

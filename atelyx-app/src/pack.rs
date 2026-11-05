@@ -32,6 +32,24 @@ const RENDERERS: &[(&str, ViewProvider)] = &[
     ("table", crate::table_panel::table_view),
 ];
 
+/// 临时桥：插件声明的文档类型 → 宿主现有的具体打开通路。
+/// 仅承担「按文档类型 id 分派到现有 table / canvas 通路」这一件事；DocSessions 接线后整段删除，
+/// 届时由会话表统一打开，宿主不再认识任何具体文档类型。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PresetDocKind {
+    Table,
+    Canvas,
+}
+
+/// 判定一条文档类型路由是否走宿主内置通路（owner 与 id 同时匹配，避免外部插件同名劫持）。
+pub(crate) fn preset_doc_kind(route: &atelyx_core::doc_type::DocTypeRoute) -> Option<PresetDocKind> {
+    match (route.owner_plugin.as_str(), route.id.as_str()) {
+        ("atelyx.tables", "table") => Some(PresetDocKind::Table),
+        ("atelyx.canvas", "canvas") => Some(PresetDocKind::Canvas),
+        _ => None,
+    }
+}
+
 /// 按 id 取预置插件视图内容；不属于内置表时 `None`（调用方落占位）。
 pub(crate) fn render<'a>(
     id: &str,

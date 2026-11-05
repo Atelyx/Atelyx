@@ -4,6 +4,7 @@
 
 use std::borrow::Cow;
 
+use atelyx_core::doc_type::{DocTypeIndex, DocTypeRoute, DocViewRef};
 use atelyx_core::plugin_runtime::service::ServiceInfo;
 use atelyx_core::plugin_runtime::{
     Contribution, ContributionSlot, DocTypeInfo, PluginSummary, BUILTIN_SERVICES,
@@ -111,6 +112,8 @@ pub struct Registry {
     builtin_plugins: Vec<BuiltinPluginInfo>,
     /// 领域文档类型按扩展名路由，不进选择器；保存完整注册以便打开 / 新建 / 图标共用一处。
     doc_types: Vec<DocTypeInfo>,
+    /// 扩展名 → 文档类型（owner + 可承载视图）的查询表；重名扩展名已在建表时定归属。
+    doc_type_index: DocTypeIndex,
 }
 
 impl Registry {
@@ -188,7 +191,12 @@ impl Registry {
                 builtin,
             });
         }
-        Self { entries, builtin_plugins, doc_types: snapshot.doc_types.to_vec() }
+        Self {
+            entries,
+            builtin_plugins,
+            doc_type_index: DocTypeIndex::build(snapshot.doc_types),
+            doc_types: snapshot.doc_types.to_vec(),
+        }
     }
 
     /// 按视图 id 查条目（不看启用态：停用视图的标签仍要显示名称与图标）。
@@ -206,9 +214,49 @@ impl Registry {
             .find(|entry| entry.kind == EntryKind::Service && entry.id == name)
     }
 
-    /// 领域文档类型注册（扩展名路由 / 新建菜单 / 文件树图标共用这一份）。
+    /// 领域文档类型注册（新建菜单 / 设置页清单用；路由请走 [`Registry::route_for_path`]）。
     pub fn doc_types(&self) -> &[DocTypeInfo] {
         &self.doc_types
+    }
+
+    /// 按路径扩展名查文档类型路由；未知扩展名 = `None`（调用方给出明确错误）。
+    pub fn route_for_path(&self, path: &str) -> Option<&DocTypeRoute> {
+        self.doc_type_index.route_for_path(path)
+    }
+
+    /// 按扩展名查文档类型路由（不带点、不区分大小写）。
+    pub fn route_for_extension(&self, extension: &str) -> Option<&DocTypeRoute> {
+        self.doc_type_index.route_for_extension(extension)
+    }
+
+    /// 该扩展名上落败的声明数量（> 0 = 多个插件争用，打开时可提示实际归属）。
+    pub fn doc_type_conflicts(&self, extension: &str) -> usize {
+        self.doc_type_index.conflicts_for(extension)
+    }
+
+    /// 全部路由（按扩展名排序）。
+    pub fn doc_type_routes(&self) -> impl Iterator<Item = &DocTypeRoute> {
+        self.doc_type_index.routes()
+    }
+
+    /// 文档类型声明里某个承载视图对应的壳侧视图 id：
+    /// 宿主内置视图（如表格）用裸 id，插件贡献视图走 `plugin:<插件 id>:<贡献 id>`。
+    pub fn doc_view_id(&self, view: &DocViewRef) -> String {
+        let builtin_owner = self.get(&view.view_id).is_some_and(|entry| {
+            entry.source.is_builtin() && entry.source.plugin_id() == view.plugin_id
+        });
+        if builtin_owner {
+            view.view_id.clone()
+        } else {
+            crate::plugin_actions::view_kind(&view.plugin_id, &view.view_id)
+        }
+    }
+
+    /// 某壳侧视图 id 承载的文档类型（不存在 = 该视图不承载文档）。
+    pub fn doc_type_for_view(&self, view: &str) -> Option<&DocTypeRoute> {
+        self.doc_type_index
+            .routes()
+            .find(|route| route.views.iter().any(|candidate| self.doc_view_id(candidate) == view))
     }
 
     /// 内置插件（设置页按它分组：每组带自己的视图与服务条目）。

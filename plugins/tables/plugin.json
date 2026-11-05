@@ -9,5 +9,17 @@
   },
   "permissions": ["vault", "collab", "fs", "dialog", "clipboard", "notification"],
   "singleton": true,
-  "keepMountedOnVaultSwitch": false
+  "keepMountedOnVaultSwitch": false,
+  "docTypeRegistrations": [
+    {
+      "id": "table",
+      "extensions": ["atb"],
+      "ownerPlugin": "atelyx.tables",
+      "views": ["table"],
+      "editable": true,
+      "multiDoc": false,
+      "label": "表格",
+      "icon": "table"
+    }
+  ]
 }

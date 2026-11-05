@@ -11,6 +11,15 @@
   "singleton": true,
   "keepMountedOnVaultSwitch": false,
   "docTypeRegistrations": [
-    { "extension": "md", "label": "笔记", "icon": "file-text", "surface": "note" }
+    {
+      "id": "note",
+      "extensions": ["md"],
+      "ownerPlugin": "atelyx.notes",
+      "views": ["note"],
+      "editable": true,
+      "multiDoc": false,
+      "label": "笔记",
+      "icon": "file-text"
+    }
   ]
 }

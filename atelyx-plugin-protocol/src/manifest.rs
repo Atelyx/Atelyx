@@ -73,18 +73,25 @@ pub enum Permission {
     Dialog,
 }
 
-/// 领域文档类型注册：扩展名、展示标签、图标名与承载文档内容的贡献 id。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+/// 领域文档类型注册：声明扩展名、内容真源的归属插件与可承载它的视图贡献。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 pub struct DocTypeRegistration {
-    /// 不带点的扩展名（如 `board`）。
-    pub extension: String,
+    /// 插件内稳定的文档类型 id（如 `table`）；宿主状态与路由以它为准。
+    pub id: String,
+    /// 不带点的扩展名（如 `board`）；一个类型可声明多个，比较不区分大小写。
+    pub extensions: Vec<String>,
+    /// 持内容真源、定解析 / 合并 / 保存语义的插件 id；通常与声明插件相同。
+    pub owner_plugin: String,
+    /// 能承载该文档类型的视图贡献 id 列表（贡献由声明插件注册）。
+    pub views: Vec<String>,
+    /// 文档内容可编辑；false = 只读。
+    pub editable: bool,
+    /// 允许同类多文档并行打开（false = 每类型至多一个热文档）。
+    pub multi_doc: bool,
     pub label: String,
     /// 宿主内置形状名（未知名回落拼图）。
     pub icon: String,
-    /// 承载该文档实例的贡献 id（插件须同时以 `view.register` 注册同名贡献，
-    /// `slot` 为面板）；打开该扩展名文件时宿主分配 surfaceId 并通知插件提交整面帧。
-    pub surface: String,
 }
 
 /// 纯结构校验：id 形态与目录安全、名称/版本非空、契约版本已填。平台入口存在性与
@@ -106,12 +113,44 @@ impl Manifest {
                 return Err(format!("minHostVersion 非法（须为点分数字版本，如 0.4 或 0.4.0）：{min}"));
             }
         }
+        let mut seen_ids: Vec<&str> = Vec::new();
+        let mut seen_extensions: Vec<&str> = Vec::new();
         for reg in &self.doc_type_registrations {
-            if reg.extension.trim().is_empty() || reg.extension.contains('.') {
-                return Err(format!("文档类型扩展名非法：{}", reg.extension));
+            if reg.id.trim().is_empty() {
+                return Err("文档类型 id 不能为空".into());
             }
-            if reg.surface.trim().is_empty() {
-                return Err(format!("文档类型 {} 缺承载贡献 id（surface）", reg.extension));
+            if seen_ids.contains(&reg.id.trim()) {
+                return Err(format!("文档类型 id 重复：{}", reg.id));
+            }
+            seen_ids.push(reg.id.trim());
+            if reg.extensions.is_empty() {
+                return Err(format!("文档类型 {} 未声明扩展名", reg.id));
+            }
+            for extension in &reg.extensions {
+                let extension = extension.trim();
+                if extension.is_empty() || extension.contains('.') {
+                    return Err(format!("文档类型 {} 扩展名非法：{extension}", reg.id));
+                }
+                if seen_extensions.iter().any(|seen| seen.eq_ignore_ascii_case(extension)) {
+                    return Err(format!("扩展名在本 manifest 内重复声明：{extension}"));
+                }
+                seen_extensions.push(extension);
+            }
+            if reg.owner_plugin.trim().is_empty() {
+                return Err(format!("文档类型 {} 缺归属插件（ownerPlugin）", reg.id));
+            }
+            validate_id(reg.owner_plugin.trim())
+                .map_err(|_| format!("文档类型 {} 的 ownerPlugin 非法：{}", reg.id, reg.owner_plugin))?;
+            if reg.views.is_empty() {
+                return Err(format!("文档类型 {} 未声明承载视图（views）", reg.id));
+            }
+            for view in &reg.views {
+                if view.trim().is_empty() {
+                    return Err(format!("文档类型 {} 的视图贡献 id 不能为空", reg.id));
+                }
+            }
+            if reg.label.trim().is_empty() {
+                return Err(format!("文档类型 {} 缺标签（label）", reg.id));
             }
         }
         Ok(())
@@ -234,6 +273,49 @@ mod tests {
         .unwrap();
         assert_eq!(m.api_version, 0, "缺 apiVersion 按 0 解析");
         assert!(m.validate_shape().is_err(), "缺 apiVersion 必须判为非法 manifest");
+    }
+
+    fn doc_type(id: &str, extension: &str) -> DocTypeRegistration {
+        DocTypeRegistration {
+            id: id.into(),
+            extensions: vec![extension.into()],
+            owner_plugin: "com.atelyx.echo".into(),
+            views: vec![format!("{id}-view")],
+            editable: true,
+            multi_doc: false,
+            label: id.into(),
+            icon: String::new(),
+        }
+    }
+
+    #[test]
+    fn shape_accepts_doc_type_registrations() {
+        let mut m = valid();
+        m.doc_type_registrations = vec![doc_type("note", "md"), doc_type("board", "board")];
+        m.validate_shape().expect("合法文档类型注册应通过");
+    }
+
+    #[test]
+    fn shape_rejects_bad_doc_type_registrations() {
+        let mut m = valid();
+        m.doc_type_registrations = vec![DocTypeRegistration::default()];
+        assert!(m.validate_shape().is_err(), "缺字段的注册必须拒绝");
+
+        let mut duplicated_id = doc_type("note", "md");
+        duplicated_id.id = "note".into();
+        let mut m = valid();
+        m.doc_type_registrations = vec![duplicated_id.clone(), duplicated_id];
+        assert!(m.validate_shape().is_err(), "同一 manifest 内 id 重复必须拒绝");
+
+        let mut m = valid();
+        m.doc_type_registrations = vec![doc_type("note", "md"), doc_type("other", "MD")];
+        assert!(m.validate_shape().is_err(), "同一 manifest 内扩展名重复（不分大小写）必须拒绝");
+
+        let mut bad_owner = doc_type("note", "md");
+        bad_owner.owner_plugin = "not-a-plugin-id".into();
+        let mut m = valid();
+        m.doc_type_registrations = vec![bad_owner];
+        assert!(m.validate_shape().is_err(), "ownerPlugin 必须是合法插件 id");
     }
 
     #[test]

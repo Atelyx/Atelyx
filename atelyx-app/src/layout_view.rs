@@ -106,15 +106,37 @@ fn is_note_view(view: &str) -> bool {
     view == "note" || view == atelyx_core::layout::NOTES_VIEW
 }
 
-/// 面板标签文字（笔记/表格/画布视图打开文件 = 文件名去扩展名后缀，否则视图名）。
+/// 视图当前承载的打开文件：插件文档实例优先，其余按注册表里该视图所属文档类型的扩展名
+/// 匹配「上次打开」路径。注册表里没有该视图的文档类型 = 该视图不承载文档。
+pub(crate) fn doc_file_for_view<'a>(app: &'a App, view: &str) -> Option<&'a str> {
+    let route = app.registry.doc_type_for_view(view)?;
+    if let Some(open) = &app.doc_open {
+        if crate::plugin_actions::doc_view_kind(&open.plugin_id, &open.contribution_id) == view {
+            return Some(&open.path);
+        }
+    }
+    [
+        app.ui.last_note_file.as_deref(),
+        app.ui.last_table_file.as_deref(),
+        app.ui.last_canvas_file.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|path| {
+        atelyx_core::doc_type::extension_of(path).is_some_and(|extension| {
+            route.extensions.iter().any(|registered| registered.eq_ignore_ascii_case(extension))
+        })
+    })
+}
+
+/// 标签是否带「关闭文件」×：该视图当前有打开文件。
+pub(crate) fn tab_has_file(app: &App, view: &str) -> bool {
+    doc_file_for_view(app, view).is_some()
+}
+
+/// 面板标签文字（承载文档的视图按打开的文件名去扩展名，否则视图名）。
 pub fn tab_label(app: &App, view: &str) -> String {
-    let open = match view {
-        _ if is_note_view(view) => app.ui.last_note_file.as_deref(),
-        "table" => app.ui.last_table_file.as_deref(),
-        v if is_canvas_view(v) => app.ui.last_canvas_file.as_deref(),
-        _ => None,
-    };
-    match open {
+    match doc_file_for_view(app, view) {
         Some(file) => file_label(file),
         None => view_label(app, view),
     }
@@ -1451,13 +1473,7 @@ fn panel_tab<'a>(
 ) -> Element<'a, Message> {
     let active = active_tab_id.as_deref() == Some(t.id.as_str());
     let label = tab_label(app, &t.view);
-    let has_file = (is_note_view(&t.view) && app.ui.last_note_file.is_some())
-        || (t.view == "table" && app.ui.last_table_file.is_some())
-        || (is_canvas_view(&t.view) && app.ui.last_canvas_file.is_some())
-        || app
-            .doc_open
-            .as_ref()
-            .is_some_and(|d| crate::plugin_actions::doc_view_kind(&d.plugin_id, &d.contribution_id) == t.view);
+    let has_file = tab_has_file(app, &t.view);
     let window = app.main_id.unwrap_or(iced::window::Id::unique());
     let cursor = app.cursor_for(window);
 
@@ -1688,13 +1704,7 @@ pub fn detached_view<'a>(
         }
         let active = w.active_tab_id.as_deref() == Some(t.id.as_str());
         let label = tab_label(app, &t.view);
-        let has_file = (is_note_view(&t.view) && app.ui.last_note_file.is_some())
-            || (t.view == "table" && app.ui.last_table_file.is_some())
-            || (is_canvas_view(&t.view) && app.ui.last_canvas_file.is_some())
-            || app
-                .doc_open
-                .as_ref()
-                .is_some_and(|d| crate::plugin_actions::doc_view_kind(&d.plugin_id, &d.contribution_id) == t.view);
+        let has_file = tab_has_file(app, &t.view);
         let text_color = if active { pal::TEXT_PRIMARY } else { pal::TEXT_SECONDARY };
         let mut label_row = row![].spacing(4);
         label_row = label_row.push(icon_stroke(&view_icon(app, &t.view), 13.0, text_color, 1.5));
@@ -1947,18 +1957,8 @@ fn file_icon_base(name: &str) -> &'static str {
 
 /// 文件行的图标键：插件注册的领域文档类型按注册图标，其余走内置映射。
 pub(crate) fn file_icon(app: &App, name: &str) -> Cow<'static, str> {
-    if let Some(ext) = name.rsplit('.').next() {
-        if let Some(info) = app
-            .registry
-            .doc_types()
-            .iter()
-            .find(|i| i.registration.extension.eq_ignore_ascii_case(ext))
-        {
-            return crate::plugin_actions::plugin_icon_key(
-                Some(&info.registration.icon),
-                "paperclip",
-            );
-        }
+    if let Some(route) = app.registry.route_for_path(name) {
+        return crate::plugin_actions::plugin_icon_key(Some(&route.icon), "paperclip");
     }
     Cow::Borrowed(file_icon_base(name))
 }
@@ -3641,9 +3641,7 @@ pub fn panel_zones(app: &App) -> Vec<PanelZone> {
                             approx_tab_width(
                                 &tab_label(app, &t.view),
                                 t.locked,
-                                (is_note_view(&t.view) && app.ui.last_note_file.is_some())
-                                    || (t.view == "table" && app.ui.last_table_file.is_some())
-                                    || (is_canvas_view(&t.view) && app.ui.last_canvas_file.is_some()),
+                                tab_has_file(app, &t.view),
                             )
                         })
                         .collect()
@@ -3724,9 +3722,7 @@ fn walk_panels(node: &LayoutNode, area: Rectangle, out: &mut Vec<PanelZone>, app
                     approx_tab_width(
                         &tab_label(app, &t.view),
                         t.locked,
-                        (is_note_view(&t.view) && app.ui.last_note_file.is_some())
-                            || (t.view == "table" && app.ui.last_table_file.is_some())
-                            || (is_canvas_view(&t.view) && app.ui.last_canvas_file.is_some()),
+                        tab_has_file(app, &t.view),
                     )
                 })
                 .collect(),

@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use iced::{Task, window};
 
+use atelyx_core::doc_type::DocTypeRoute;
 use atelyx_core::layout::{self, AppUiState, LayoutNode, LayoutOp};
 use atelyx_core::plugin_runtime::{
     Contribution, ContributionSlot, DrawCommand, FrameInput, ImageSource, PluginStatus,
@@ -1259,7 +1260,7 @@ impl OpenMode {
 #[derive(Clone, Debug)]
 pub struct DocOpenInstance {
     pub plugin_id: String,
-    /// 承载文档内容的贡献 id（manifest docTypeRegistrations.surface）；
+    /// 承载文档内容的贡献 id（manifest docTypeRegistrations.views 的首项）；
     /// 实例面标识 = 贡献 id 本身（单实例）。
     pub contribution_id: String,
     pub path: String,
@@ -1274,39 +1275,23 @@ pub fn doc_view_kind(plugin_id: &str, contribution_id: &str) -> String {
     view_kind(plugin_id, contribution_id)
 }
 
-/// 按扩展名找文档类型注册（多个插件注册同一扩展名时按插件 id 排序取第一个，
-/// 返回的候选数供调用方提示）。
-pub fn doc_type_for_extension(
-    app: &App,
-    extension: &str,
-) -> Option<(String, atelyx_core::plugin_runtime::DocTypeRegistration, usize)> {
-    let matches: Vec<atelyx_core::plugin_runtime::DocTypeInfo> = app
-        .registry
-        .doc_types()
-        .iter()
-        .filter(|info| info.registration.extension.eq_ignore_ascii_case(extension))
-        .cloned()
-        .collect();
-    let count = matches.len();
-    let first = matches.into_iter().next()?;
-    Some((first.plugin_id, first.registration, count))
-}
-
 /// 打开一个插件领域文档（文件打开路由分派）：登记实例、按 `mode` 决定是否让视图显示、
-/// 通知插件（`host:doc.open`）。实例面标识换新（旧实例先关闭通知）。
-pub fn open_doc(app: &mut App, rel: &str, mode: OpenMode) -> Task<Message> {
-    let extension = rel.rsplit('.').next().unwrap_or_default().to_string();
-    let Some((plugin_id, reg, candidates)) = doc_type_for_extension(app, &extension) else {
+/// 通知 owner 插件（`host:doc.open`）。实例面标识换新（旧实例先关闭通知）。
+pub fn open_doc(app: &mut App, rel: &str, mode: OpenMode, route: &DocTypeRoute) -> Task<Message> {
+    let Some(view) = route.views.first() else {
         app.notify(
             crate::ui::notify::Level::Error,
-            format!("没有插件注册 .{extension} 文档类型"),
+            format!("文档类型 {} 没有可承载视图", route.id),
         );
         return Task::none();
     };
-    if candidates > 1 {
+    let conflicts = atelyx_core::doc_type::extension_of(rel)
+        .map(|extension| app.registry.doc_type_conflicts(extension))
+        .unwrap_or(0);
+    if conflicts > 0 {
         app.notify(
             crate::ui::notify::Level::Info,
-            format!(".{extension} 由多个插件注册，已用 {plugin_id} 打开"),
+            format!("多个插件注册了该扩展名，已用 {} 打开", route.owner_plugin),
         );
     }
     // 新打开动作取代旧的打开实例：在途读盘结果随之失效（不得回填到新会话）
@@ -1315,11 +1300,12 @@ pub fn open_doc(app: &mut App, rel: &str, mode: OpenMode) -> Task<Message> {
     if let Some(old) = app.doc_open.take() {
         app.plugins.notify_doc_close(&old.plugin_id, &old.surface_id, &old.path);
     }
-    // 实例面标识 = 贡献 id：渲染与清理共用同一键空间（单实例语义）
-    let surface_id = reg.surface.clone();
-    app.plugins.notify_doc_open(&plugin_id, &surface_id, rel);
+    // 实例面标识 = 承载视图的贡献 id：渲染与清理共用同一键空间（单实例语义）
+    let surface_id = view.view_id.clone();
+    let view_id = app.registry.doc_view_id(view);
+    app.plugins.notify_doc_open(&route.owner_plugin, &surface_id, rel);
     app.doc_open = Some(DocOpenInstance {
-        plugin_id: plugin_id.clone(),
+        plugin_id: route.owner_plugin.clone(),
         contribution_id: surface_id.clone(),
         path: rel.to_string(),
         surface_id,
@@ -1330,7 +1316,7 @@ pub fn open_doc(app: &mut App, rel: &str, mode: OpenMode) -> Task<Message> {
         app.schedule_persist();
     }
     if mode.reveals() {
-        ensure_doc_tab(app, &plugin_id, &reg.surface)
+        reveal_view(app, &view_id)
     } else {
         // 只打开文件：布局不动，视图没在布局里就等用户自己打开
         refresh_projection(app)
@@ -1352,12 +1338,6 @@ pub fn close_doc(app: &mut App) -> Task<Message> {
     app.notify_open_files();
     app.schedule_persist();
     refresh_projection(app)
-}
-
-/// 确保文档视图标签存在并激活（复用「添加面板」的布局通道；视图被占用时仅激活）。
-fn ensure_doc_tab(app: &mut App, plugin_id: &str, contribution_id: &str) -> Task<Message> {
-    let view = doc_view_kind(plugin_id, contribution_id);
-    reveal_view(app, &view)
 }
 
 /// 让某视图在布局里显示：已存在（主树或撕裂窗口）只激活，否则加到聚焦面板。

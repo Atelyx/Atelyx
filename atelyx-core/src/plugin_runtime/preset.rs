@@ -56,14 +56,15 @@ pub(crate) fn sync(
         let id = bundled_manifest.id.clone();
         let installed_dir = layout::plugin_dir(root, id.as_str());
         if installed_dir.is_dir() {
-            let installed_manifest = match manifest::read_manifest(&installed_dir) {
-                Ok(manifest) => manifest,
-                Err(e) => {
-                    report.failed.push((id, e));
-                    continue;
+            // 已装副本的清单按当前契约不可读（换代前的字段形态或内容损坏）时无从比较内容，
+            // 但随包清单已校验可读：直接以随包内容修复，否则这条副本永远过不了替换判定。
+            let needs_replace = match manifest::read_manifest(&installed_dir) {
+                Ok(installed_manifest) => {
+                    replaces(&dir, &bundled_manifest, &installed_dir, &installed_manifest)
                 }
+                Err(_) => true,
             };
-            if replaces(&dir, &bundled_manifest, &installed_dir, &installed_manifest) {
+            if needs_replace {
                 match install::install_bundled(root, &dir) {
                     Ok(_) => report.updated.push(id.clone()),
                     Err(e) => {
@@ -296,6 +297,36 @@ mod tests {
         std::fs::write(&marker, "not json").unwrap();
         assert!(sync(&root, &bundled, &marker).is_err());
         assert!(!layout::plugin_dir(&root, "com.a.one").exists(), "标记不可信时不装");
+    }
+
+    /// 已装副本的清单按当前契约已不可读（旧版本文档类型字段形态）：随包清单一变，这份副本就再也
+    /// 过不了替换判定，每次启动都停在「未运行」。可读的随包内容必须能把它修复。
+    #[test]
+    fn an_installed_copy_with_unreadable_manifest_is_repaired_from_bundle() {
+        let (_tmp, root, bundled, marker) = fixture("preset-unreadable-installed");
+        let source = bundled.join("com.a.one");
+        seed_plugin(&source, "com.a.one", "1.0.0");
+        sync(&root, &bundled, &marker).unwrap();
+
+        let installed_dir = layout::plugin_dir(&root, "com.a.one");
+        std::fs::write(
+            installed_dir.join(MANIFEST_FILE),
+            r#"{"id":"com.a.one","name":"Demo","version":"1.0.0","apiVersion":1,
+                "entry":{"windows":"app.exe","linux":"app"},"permissions":[],
+                "docTypeRegistrations":[{"extension":"md","label":"笔记","icon":"file-text","surface":"note"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(installed_dir.join(entry_name()), b"old").unwrap();
+        assert!(manifest::read_manifest(&installed_dir).is_err(), "旧形态清单不可读");
+
+        let report = sync(&root, &bundled, &marker).unwrap();
+        assert_eq!(report.updated, ["com.a.one"], "不可读的副本要被随包内容替换：{report:?}");
+        assert!(report.failed.is_empty(), "{report:?}");
+        manifest::read_manifest(&layout::plugin_dir(&root, "com.a.one")).expect("替换后清单可读");
+        assert_eq!(
+            std::fs::read(layout::plugin_dir(&root, "com.a.one").join(entry_name())).unwrap(),
+            b"stub"
+        );
     }
 
     #[test]

@@ -3063,10 +3063,14 @@ fn vault_ui_json(
             .registry
             .doc_types()
             .iter()
-            .map(|info| atelyx_core::plugin_runtime::DocTypeEntry {
-                extension: info.registration.extension.clone(),
-                label: info.registration.label.clone(),
-                icon: info.registration.icon.clone(),
+            .flat_map(|info| {
+                info.registration.extensions.iter().map(|extension| {
+                    atelyx_core::plugin_runtime::DocTypeEntry {
+                        extension: extension.clone(),
+                        label: info.registration.label.clone(),
+                        icon: info.registration.icon.clone(),
+                    }
+                })
             })
             .collect(),
     };

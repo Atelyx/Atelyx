@@ -170,10 +170,13 @@ pub struct Contribution {
     pub padding: Option<PaddingSpec>,
 }
 
-/// 一个领域文档类型注册及其所属插件（文件树图标 / 新建菜单 / 打开路由用）。
+/// 一个领域文档类型注册及其声明插件（文件树图标 / 新建菜单 / 打开路由用）。
 #[derive(Clone, Debug, PartialEq)]
 pub struct DocTypeInfo {
+    /// 声明这条注册的插件（其 `views` 属于该插件）。
     pub plugin_id: String,
+    /// 随包预置（扩展名归属冲突时预置优先）。
+    pub preset: bool,
     pub registration: DocTypeRegistration,
 }
 
@@ -1529,28 +1532,26 @@ impl PluginRuntime {
 
     // ---------- 领域文档类型 ----------
 
-    /// 全部已安装插件注册的领域文档类型（按插件 id + 扩展名排序；文件树 / 新建菜单 / 打开路由用）。
+    /// 全部已安装插件注册的领域文档类型（按插件 id + 文档类型 id 排序；文件树 / 新建菜单 / 打开路由用）。
     pub fn doc_types(&self) -> Vec<DocTypeInfo> {
         let discovered = self.discovered.lock().unwrap();
         let mut all: Vec<DocTypeInfo> = discovered
             .iter()
             .filter_map(|(id, entry)| {
                 let manifest = entry.manifest.as_ref().ok()?;
+                let preset = layout::is_preset(&self.root, id);
                 Some(
                     manifest
                         .doc_type_registrations
                         .iter()
-                        .map(|reg| DocTypeInfo {
-                            plugin_id: id.clone(),
-                            registration: reg.clone(),
-                        })
+                        .map(|reg| DocTypeInfo { plugin_id: id.clone(), preset, registration: reg.clone() })
                         .collect::<Vec<_>>(),
                 )
             })
             .flatten()
             .collect();
         all.sort_by(|a, b| {
-            (&a.plugin_id, &a.registration.extension).cmp(&(&b.plugin_id, &b.registration.extension))
+            (&a.plugin_id, &a.registration.id).cmp(&(&b.plugin_id, &b.registration.id))
         });
         all
     }
@@ -2675,7 +2676,9 @@ mod tests {
             dir.join(MANIFEST_FILE),
             r#"{"id":"com.example.board","name":"Board","version":"1.0.0","apiVersion":1,
                 "entry":{"windows":"app.exe","linux":"app"},"permissions":[],
-                "docTypeRegistrations":[{"extension":"board","label":"画板","icon":"layout-dashboard","surface":"board-view"}]}"#,
+                "docTypeRegistrations":[{"id":"board","extensions":["board"],
+                 "ownerPlugin":"com.example.board","views":["board-view"],
+                 "editable":true,"multiDoc":false,"label":"画板","icon":"layout-dashboard"}]}"#,
         )
         .unwrap();
         std::fs::write(dir.join(entry), b"stub").unwrap();
@@ -2685,9 +2688,12 @@ mod tests {
         let doc_types = runtime.doc_types();
         assert_eq!(doc_types.len(), 1, "未注册文档类型的插件不产生条目");
         assert_eq!(doc_types[0].plugin_id, "com.example.board");
-        assert_eq!(doc_types[0].registration.extension, "board");
-        assert_eq!(doc_types[0].registration.surface, "board-view");
+        assert_eq!(doc_types[0].registration.id, "board");
+        assert_eq!(doc_types[0].registration.extensions, vec!["board"]);
+        assert_eq!(doc_types[0].registration.owner_plugin, "com.example.board");
+        assert_eq!(doc_types[0].registration.views, vec!["board-view"]);
         assert_eq!(doc_types[0].registration.label, "画板");
+        assert!(!doc_types[0].preset, "目录安装的插件不是预置");
     }
 
     fn tool_params(

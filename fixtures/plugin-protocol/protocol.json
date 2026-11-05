@@ -85,10 +85,14 @@
     "keepMountedOnVaultSwitch": false,
     "docTypeRegistrations": [
       {
-        "extension": "board",
+        "id": "board",
+        "extensions": ["board"],
+        "ownerPlugin": "com.example.studio",
+        "views": ["board-view"],
+        "editable": true,
+        "multiDoc": false,
         "label": "画板",
-        "icon": "layout-dashboard",
-        "surface": "board-view"
+        "icon": "layout-dashboard"
       }
     ]
   },

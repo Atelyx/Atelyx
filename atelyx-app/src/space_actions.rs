@@ -829,7 +829,6 @@ pub fn enter_space(app: &mut App, session: SpaceSession, from_boot: bool) -> Tas
         let _ = crate::plugin_actions::close_doc(app);
         app.doc_active = false;
         app.doc_selection = None;
-        app.pending_doc_open = None;
         app.history.clear();
     }
     let restore = crate::restore_open_requests(&app.ui, from_boot, app.global.auto_restore);
