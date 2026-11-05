@@ -557,14 +557,14 @@ pub extern "C" fn atelyx_plugin_api() -> *const atelyx_plugin_sdk::abi::PluginAp
 mod tests {
     use super::*;
 
-    /// 随包安装读取的是 `plugin.json`，与动态库导出的身份、ABI 版本必须一致。
+    /// 随包安装读取的是 `plugin.json`，与动态库导出的身份、契约版本必须一致。
     #[test]
     fn manifest_matches_the_crate_identity() {
         let manifest: serde_json::Value =
             serde_json::from_str(include_str!("../plugin.json")).unwrap();
         assert_eq!(manifest["id"], PLUGIN_ID);
         assert_eq!(manifest["version"], env!("CARGO_PKG_VERSION"));
-        assert_eq!(manifest["abiVersion"], atelyx_plugin_sdk::abi::ABI_VERSION);
+        assert_eq!(manifest["apiVersion"], atelyx_plugin_sdk::abi::CONTRACT_VERSION);
         let (platform, entry) = if cfg!(windows) {
             ("windows", "atelyx_plugin_calendar.dll")
         } else {

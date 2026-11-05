@@ -1,4 +1,4 @@
-//! 同进程插件动态库的装载层：libloading 加载、ABI 版本严格相等校验、实例生命周期。
+//! 同进程插件动态库的装载层：libloading 加载、契约版本严格相等校验、实例生命周期。
 //! 跨动态库只走 `atelyx-plugin-abi` 的 C 布局值；帧在回调返回前复制成协议帧。
 
 use std::ffi::{c_void, OsStr};
@@ -78,7 +78,7 @@ pub struct PluginLibrary {
 }
 
 impl PluginLibrary {
-    /// 加载动态库并校验导出的 ABI 版本必须与宿主严格相等。
+    /// 加载动态库并校验导出的契约版本必须与宿主严格相等。
     pub fn load(path: impl AsRef<OsStr>) -> Result<Self, String> {
         let lib = unsafe { libloading::Library::new(path) }
             .map_err(|error| format!("加载动态库失败：{error}"))?;
@@ -91,7 +91,7 @@ impl PluginLibrary {
             }
             unsafe { *pointer }
         };
-        check_abi(api.abi_version)?;
+        check_contract(api.abi_version)?;
         Ok(Self { _lib: lib, api })
     }
 
@@ -100,7 +100,7 @@ impl PluginLibrary {
         let mut host = Box::new(HostCtx {
             host,
             api: abi::HostApi {
-                abi_version: abi::ABI_VERSION,
+                abi_version: abi::CONTRACT_VERSION,
                 ctx: std::ptr::null_mut(),
                 submit_frame: host_submit_frame,
                 request_redraw: host_request_redraw,
@@ -116,7 +116,7 @@ impl PluginLibrary {
         let api = unsafe { &(*ctx.cast::<HostCtx>()).api };
         let handle = unsafe { (self.api.create)(api) };
         if handle.is_null() {
-            return Err("插件 create 返回空句柄（ABI 版本不符或初始化失败）".into());
+            return Err("插件 create 返回空句柄（契约版本不符或初始化失败）".into());
         }
         Ok(PluginInstance { library: self.clone(), handle, _host: host, destroyed: false })
     }
@@ -196,12 +196,12 @@ impl Drop for PluginInstance {
     }
 }
 
-/// ABI 版本必须严格相等；宽容匹配会让旧插件带未知语义跑起来。
-fn check_abi(version: u32) -> Result<(), String> {
-    if version == abi::ABI_VERSION {
+/// 契约版本必须严格相等；宽容匹配会让旧插件带未知语义跑起来。
+fn check_contract(version: u32) -> Result<(), String> {
+    if version == abi::CONTRACT_VERSION {
         Ok(())
     } else {
-        Err(format!("ABI 版本不符：插件 {version}，宿主 {}", abi::ABI_VERSION))
+        Err(format!("契约版本不匹配：插件 {version}，宿主 {}", abi::CONTRACT_VERSION))
     }
 }
 
@@ -303,8 +303,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn abi_version_must_match_exactly() {
-        assert!(check_abi(abi::ABI_VERSION).is_ok());
-        assert!(check_abi(abi::ABI_VERSION + 1).is_err());
+    fn contract_version_must_match_exactly() {
+        assert!(check_contract(abi::CONTRACT_VERSION).is_ok());
+        assert!(check_contract(abi::CONTRACT_VERSION + 1).is_err());
     }
 }

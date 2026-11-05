@@ -13,7 +13,7 @@ use crate::protocol::envelope::RpcError;
 pub enum ConnectError {
     #[error("握手失败：{0}")]
     Handshake(String),
-    #[error("协议版本不一致：插件 {plugin}，宿主 {host}")]
+    #[error("契约版本不一致：插件 {plugin}，宿主 {host}")]
     VersionMismatch { plugin: u32, host: u32 },
     #[error("连接异常结束：{0}")]
     Abnormal(String),

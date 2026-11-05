@@ -383,7 +383,7 @@ unsafe extern "C" fn create(host: *const HostApi) -> *mut c_void {
             return std::ptr::null_mut();
         }
         let host = unsafe { *host };
-        if host.abi_version != ABI_VERSION {
+        if host.abi_version != CONTRACT_VERSION {
             return std::ptr::null_mut();
         }
         let (tx, rx) = mpsc::channel();
@@ -513,7 +513,7 @@ unsafe extern "C" fn on_service_call(
 }
 
 static PLUGIN_API: PluginApi = PluginApi {
-    abi_version: ABI_VERSION,
+    abi_version: CONTRACT_VERSION,
     create,
     destroy,
     on_attach,

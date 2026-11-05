@@ -771,7 +771,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(bad_version.join(entry_name()), b"stub").unwrap();
-        assert!(install_from_dir(&root, &bad_version).is_err(), "协议版本不一致应被拒");
+        assert!(install_from_dir(&root, &bad_version).is_err(), "契约版本不一致应被拒");
 
         let no_entry = tmp.join("no-entry");
         std::fs::create_dir_all(&no_entry).unwrap();

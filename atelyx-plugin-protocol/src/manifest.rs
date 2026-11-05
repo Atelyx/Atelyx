@@ -1,5 +1,5 @@
 //! 插件 manifest（`plugin.json`）：插件自述的身份、入口、能力声明与贡献，宿主装载前据此校验。
-//! 本模块只含纯结构与序列化；平台入口存在性、协议版本一致性等需要文件系统的校验归宿主运行时。
+//! 本模块只含纯结构与序列化；平台入口存在性、契约版本一致性等需要文件系统的校验归宿主运行时。
 
 use serde::{Deserialize, Serialize};
 
@@ -14,11 +14,8 @@ pub struct Manifest {
     pub id: String,
     pub name: String,
     pub version: String,
-    /// 协议版本，必须等于宿主的 [`crate::API_VERSION`]。
+    /// 契约版本（必填），必须等于宿主的 [`crate::API_VERSION`]；缺失按 0 处理并被结构校验拒绝。
     pub api_version: u32,
-    /// 同进程动态库 ABI 版本，必须等于宿主的 `ABI_VERSION`。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub abi_version: Option<u32>,
     /// 最低宿主版本（语义化版本，如 `0.4.0`）；缺省 = 不限。宿主低于它即拒绝装载。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_host_version: Option<String>,
@@ -90,7 +87,7 @@ pub struct DocTypeRegistration {
     pub surface: String,
 }
 
-/// 纯结构校验：id 形态与目录安全、名称/版本非空、协议版本已填。平台入口存在性与
+/// 纯结构校验：id 形态与目录安全、名称/版本非空、契约版本已填。平台入口存在性与
 /// 版本一致性依赖文件系统与宿主上下文，由宿主运行时校验。
 impl Manifest {
     pub fn validate_shape(&self) -> Result<(), String> {
@@ -226,5 +223,35 @@ mod tests {
         let out = serde_json::to_string(&m).unwrap();
         assert!(!out.contains("\"linux\""));
         assert!(out.contains("\"apiVersion\":1"));
+    }
+
+    #[test]
+    fn missing_api_version_is_invalid() {
+        let m: Manifest = serde_json::from_str(
+            r#"{"id":"com.atelyx.echo","name":"Echo","version":"0.1.0",
+                "entry":{"windows":"echo.exe"}}"#,
+        )
+        .unwrap();
+        assert_eq!(m.api_version, 0, "缺 apiVersion 按 0 解析");
+        assert!(m.validate_shape().is_err(), "缺 apiVersion 必须判为非法 manifest");
+    }
+
+    #[test]
+    fn abi_version_field_is_ignored() {
+        // 只留旧字段不构成契约版本声明：必需字段仍缺
+        let m: Manifest = serde_json::from_str(
+            r#"{"id":"com.atelyx.echo","name":"Echo","version":"0.1.0","abiVersion":1,
+                "entry":{"windows":"echo.exe"}}"#,
+        )
+        .unwrap();
+        assert!(m.validate_shape().is_err(), "abiVersion 不得替代 apiVersion");
+        // 同时声明时旧字段按未知字段忽略，不回写
+        let m: Manifest = serde_json::from_str(
+            r#"{"id":"com.atelyx.echo","name":"Echo","version":"0.1.0","apiVersion":1,"abiVersion":1,
+                "entry":{"windows":"echo.exe"}}"#,
+        )
+        .unwrap();
+        m.validate_shape().expect("结构合法");
+        assert!(!serde_json::to_string(&m).unwrap().contains("\"abiVersion\""));
     }
 }

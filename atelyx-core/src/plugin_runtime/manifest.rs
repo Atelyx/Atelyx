@@ -1,5 +1,5 @@
 //! 已安装 / 待安装插件的 manifest 读取与校验：结构校验之外还需文件系统事实
-//! （协议版本一致、当前平台入口存在且不越出插件目录）。
+//! （契约版本一致、当前平台入口存在且不越出插件目录）。
 
 use std::path::{Component, Path};
 
@@ -35,17 +35,9 @@ pub(crate) fn read_manifest(dir: &Path) -> Result<Manifest, String> {
     manifest.validate_shape()?;
     if manifest.api_version != API_VERSION {
         return Err(format!(
-            "协议版本不匹配：插件 apiVersion {}，宿主 {API_VERSION}",
+            "契约版本不匹配：插件 apiVersion {}，宿主 {API_VERSION}",
             manifest.api_version
         ));
-    }
-    if let Some(abi) = manifest.abi_version {
-        if abi != atelyx_plugin_abi::ABI_VERSION {
-            return Err(format!(
-                "ABI 版本不匹配：插件 abiVersion {abi}，宿主 {}",
-                atelyx_plugin_abi::ABI_VERSION
-            ));
-        }
     }
     let entry = manifest
         .entry
@@ -78,6 +70,7 @@ fn validate_entry(rel: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vault::test_support::TempDir;
     use atelyx_plugin_protocol::manifest::Entry;
 
     fn manifest_with_min(min: Option<&str>) -> Manifest {
@@ -104,5 +97,45 @@ mod tests {
             check_host_version(&manifest_with_min(Some("not-a-version")), host).is_err(),
             "非法版本串应拒"
         );
+    }
+
+    fn seed(dir: &Path, manifest: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join(MANIFEST_FILE), manifest).unwrap();
+        let entry = if cfg!(windows) { "app.exe" } else { "app" };
+        std::fs::write(dir.join(entry), b"stub").unwrap();
+    }
+
+    #[test]
+    fn read_manifest_accepts_contract_version() {
+        let dir = TempDir::new("plugin-manifest-ok").join("demo");
+        seed(
+            &dir,
+            r#"{"id":"com.example.demo","name":"Demo","version":"1.0.0","apiVersion":1,
+                "entry":{"windows":"app.exe","linux":"app"}}"#,
+        );
+        let manifest = read_manifest(&dir).expect("契约版本相等且入口存在应通过");
+        assert_eq!(manifest.api_version, API_VERSION);
+    }
+
+    #[test]
+    fn read_manifest_rejects_mismatched_or_missing_version() {
+        let mismatch = TempDir::new("plugin-manifest-mismatch").join("demo");
+        seed(
+            &mismatch,
+            r#"{"id":"com.example.demo","name":"Demo","version":"1.0.0","apiVersion":2,
+                "entry":{"windows":"app.exe","linux":"app"}}"#,
+        );
+        let err = read_manifest(&mismatch).expect_err("契约版本不符应拒载");
+        assert!(err.contains("契约版本不匹配"), "{err}");
+
+        let missing = TempDir::new("plugin-manifest-missing").join("demo");
+        seed(
+            &missing,
+            r#"{"id":"com.example.demo","name":"Demo","version":"1.0.0",
+                "entry":{"windows":"app.exe","linux":"app"}}"#,
+        );
+        let err = read_manifest(&missing).expect_err("缺 apiVersion 应判为非法 manifest");
+        assert!(err.contains("apiVersion"), "{err}");
     }
 }

@@ -4,7 +4,9 @@
 
 use core::ffi::c_void;
 
-pub const ABI_VERSION: u32 = 1;
+/// 插件契约版本：函数表、协议与 manifest 都按这一个值校验，不符即拒绝装载。
+/// 1.0.0 前契约破坏性变更直接改，不升号、不提供旧产物兼容；增删指令时必须同时重建插件产物。
+pub const CONTRACT_VERSION: u32 = 1;
 /// 插件导出符号（含结尾 NUL，供 `libloading` 按字节查找）。
 pub const PLUGIN_API_SYMBOL: &[u8] = b"atelyx_plugin_api\0";
 

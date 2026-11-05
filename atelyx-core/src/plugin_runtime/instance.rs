@@ -1693,8 +1693,8 @@ impl Instance {
         let p: InitializeParams = parse(params)?;
         if !handshake::compatible(p.api_version, API_VERSION) {
             self.log
-                .line(&format!("[失败] 协议版本不匹配：插件 {}，宿主 {API_VERSION}", p.api_version));
-            return Err(RpcError::failed("协议版本不匹配"));
+                .line(&format!("[失败] 契约版本不匹配：插件 {}，宿主 {API_VERSION}", p.api_version));
+            return Err(RpcError::failed("契约版本不匹配"));
         }
         if p.plugin.id != self.id {
             self.log.line(&format!("[失败] 插件自报 id {} 与安装 id {} 不一致", p.plugin.id, self.id));

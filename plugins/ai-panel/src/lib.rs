@@ -1503,7 +1503,7 @@ mod tests {
         let manifest: Value = serde_json::from_str(include_str!("../plugin.json")).unwrap();
         assert_eq!(manifest["id"], PLUGIN_ID);
         assert_eq!(manifest["version"], env!("CARGO_PKG_VERSION"));
-        assert_eq!(manifest["abiVersion"], atelyx_plugin_sdk::abi::ABI_VERSION);
+        assert_eq!(manifest["apiVersion"], atelyx_plugin_sdk::abi::CONTRACT_VERSION);
     }
 
     use std::sync::Arc;

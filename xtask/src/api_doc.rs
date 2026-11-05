@@ -39,9 +39,9 @@ macro_rules! items {
 
 const SECTIONS: &[Section] = &[
     Section {
-        title: "协议版本与清单",
-        intro: "`plugin.json` 的结构、能力声明与宿主保留的清单文件名。`apiVersion` 必须与宿主相等，\
-不等即拒绝装载。",
+        title: "契约版本与清单",
+        intro: "`plugin.json` 的结构、能力声明与宿主保留的清单文件名。`apiVersion` 是唯一契约版本，\
+必须与宿主相等，不等即拒绝装载。",
         items: items!(
             "lib.rs": "API_VERSION",
             "manifest.rs": "MANIFEST_FILE",

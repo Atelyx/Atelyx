@@ -4010,7 +4010,7 @@ fn detail_modal(app: &App, window: iced::window::Id, summary: &PluginSummary) ->
 fn detail_overview(app: &App, summary: &PluginSummary) -> Element<'static, Message> {
     let mut rows: Vec<Element<'static, Message>> = vec![
         meta_row("版本", summary.version.clone()),
-        meta_row("协议", format!("apiVersion {}", summary.api_version)),
+        meta_row("契约版本", summary.api_version.to_string()),
         meta_row("界面提交", format!("{} 次", summary.submits)),
         meta_row("未声明调用", format!("{} 条", summary.undeclared)),
     ];

@@ -40,7 +40,7 @@ pub fn plugin_api(info: fn() -> PluginInfo, factory: Factory) -> *const abi::Plu
     let _ = INFO.set(info);
     let _ = FACTORY.set(factory);
     API.get_or_init(|| abi::PluginApi {
-        abi_version: abi::ABI_VERSION,
+        abi_version: abi::CONTRACT_VERSION,
         create,
         destroy,
         on_attach,
@@ -363,7 +363,7 @@ unsafe fn create_inner(host: *const abi::HostApi) -> *mut c_void {
         return std::ptr::null_mut();
     }
     let api = unsafe { *host };
-    if api.abi_version != abi::ABI_VERSION {
+    if api.abi_version != abi::CONTRACT_VERSION {
         return std::ptr::null_mut();
     }
     let Some(info) = INFO.get().map(|info| info()) else {
