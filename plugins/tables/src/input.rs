@@ -1663,6 +1663,22 @@ mod tests {
         session
     }
 
+    fn tall_session(rows: usize) -> Session {
+        let rows: Vec<TableRow> = (0..rows)
+            .map(|index| TableRow {
+                id: format!("r{index}"),
+                values: [("f".to_string(), serde_json::json!("x"))].into_iter().collect(),
+                height: None,
+                styles: None,
+            })
+            .collect();
+        let mut data = table("text", serde_json::json!("x"));
+        data.rows = rows;
+        let mut session = Session::new("t.atb".into(), data);
+        session.view.canvas_size = Size { width: 200.0, height: 120.0 };
+        session
+    }
+
     #[test]
     fn click_inside_editing_cell_places_caret() {
         let mut session = session("text", serde_json::json!("abcdef"));
@@ -1803,5 +1819,36 @@ mod tests {
         let mut outcome = Outcome::default();
         zoom_by_wheel(&mut session, 1.0, &mut outcome);
         assert!(!outcome.header, "未跨过 1% 不重发头部");
+    }
+
+    #[test]
+    fn zoom_stops_republishing_header_at_limit() {
+        let mut session = session("text", serde_json::json!("abc"));
+        let mut outcome = Outcome::default();
+        zoom_by_wheel(&mut session, -1_000.0, &mut outcome);
+        assert_eq!(session.view.zoom, crate::model::MAX_ZOOM);
+        assert!(outcome.header, "首次到达上限时显示值仍会变");
+        let mut outcome = Outcome::default();
+        zoom_by_wheel(&mut session, -1_000.0, &mut outcome);
+        assert!(!outcome.header, "已在上限：显示值不再变化就不重发");
+    }
+
+    #[test]
+    fn shrink_viewport_clamps_scroll_into_new_range() {
+        let mut session = tall_session(40);
+        session.view.scroll_x = 5_000.0;
+        session.view.scroll_y = 5_000.0;
+        crate::geom::clamp_scroll(&mut session);
+        let geo = crate::geom::geo(
+            &session.view.layout,
+            session.view.scroll_x,
+            session.view.scroll_y,
+            session.view.zoom,
+            session.view.canvas_size,
+        )
+        .expect("已建布局");
+        assert_eq!(session.view.scroll_x, geo.max_scroll_x());
+        assert_eq!(session.view.scroll_y, geo.max_scroll_y());
+        assert!(session.view.scroll_y > 0.0, "内容高于可视区时仍有滚动余量");
     }
 }

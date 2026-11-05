@@ -383,8 +383,9 @@ fn to_wire(selection: &atelyx_format::table::ops::TableSelection) -> serde_json:
     }
 }
 
-/// 发布选区变化（内容不变、只有选区移动也发）。
-pub async fn notify_selection(plugin: &crate::PluginState, ctx: &Context) {
+/// 只把选区变化发给宿主（内容不变、只有选区移动也发）；外部一律经 [`broadcast_selection`]，
+/// 避免漏掉协作上行。
+async fn notify_selection(plugin: &crate::PluginState, ctx: &Context) {
     // 无打开表格也要发一次空载荷：订阅方据此知道上一张表的选区已失效
     let payload = selection_payload(plugin).unwrap_or_else(|| serde_json::json!({}));
     if let Err(error) = ctx
@@ -484,5 +485,68 @@ fn commit_draft(plugin: &PluginState) {
         if session.view.editing.is_some() {
             crate::edit::commit(session);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use atelyx_format::table::ops;
+
+    use super::*;
+    use crate::model::Size;
+
+    fn table(rows: usize) -> TableFile {
+        let rows: Vec<serde_json::Value> = (0..rows)
+            .map(|index| serde_json::json!({ "id": format!("r{index}"), "values": { "f": "x" } }))
+            .collect();
+        serde_json::from_value(serde_json::json!({
+            "schema": "atelyx-table/v1",
+            "id": "t",
+            "title": "T",
+            "fields": [{ "id": "f", "name": "A", "type": "text" }],
+            "rows": rows,
+        }))
+        .expect("表格夹具")
+    }
+
+    /// 历史回滚换了行 / 列集合：滚动位要收回新几何，选区随旧行失效一并清掉。
+    #[test]
+    fn restore_clamps_scroll_and_clears_selection() {
+        let plugin = PluginState::new();
+        let mut session = Session::new("t.atb".into(), table(40));
+        session.view.canvas_size = Size { width: 200.0, height: 120.0 };
+        session.view.scroll_x = 5_000.0;
+        session.view.scroll_y = 5_000.0;
+        session.view.selection = Some(ops::TableSelection::Cell {
+            row_id: "r39".into(),
+            field_id: "f".into(),
+        });
+        *plugin.session.lock().expect("会话锁") = Some(session);
+
+        let content = serde_json::to_string(&table(2)).expect("快照序列化");
+        assert!(restore_snapshot(&plugin, "t.atb", &content), "同路径快照应被接受");
+
+        let (selection, scroll_x, scroll_y, max_x, max_y) = plugin
+            .with_session(|session| {
+                let geo = crate::geom::geo(
+                    &session.view.layout,
+                    session.view.scroll_x,
+                    session.view.scroll_y,
+                    session.view.zoom,
+                    session.view.canvas_size,
+                )
+                .expect("回滚后应重建布局");
+                (
+                    session.view.selection.is_none(),
+                    session.view.scroll_x,
+                    session.view.scroll_y,
+                    geo.max_scroll_x(),
+                    geo.max_scroll_y(),
+                )
+            })
+            .expect("会话仍在");
+        assert!(selection, "回滚清掉对旧行的选区");
+        assert_eq!(scroll_x, max_x);
+        assert_eq!(scroll_y, max_y);
     }
 }

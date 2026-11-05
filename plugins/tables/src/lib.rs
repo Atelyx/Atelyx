@@ -64,7 +64,7 @@ struct SaveDebounce {
 }
 
 impl PluginState {
-    fn new() -> Arc<Self> {
+    pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
             session: Mutex::new(None),
             attached: Mutex::new(false),
@@ -1089,7 +1089,8 @@ impl PluginHandler for TablesPlugin {
                 true
             })
             .unwrap_or(false);
-        crate::session::notify_selection(&self.state, ctx).await;
+        // 对端进入 / 移动 / 离场也是一次选区变化：走唯一出口（本地状态不变，不会重复上行）
+        crate::session::broadcast_selection(&self.state, ctx).await;
         if changed {
             self.state.render(ctx).await;
             self.state.publish_header(ctx).await;

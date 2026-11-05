@@ -11,6 +11,7 @@ use atelyx_core::plugin_runtime::{
     FrameInput, HostRequest, MeasureTextResult, MouseButton, PanelHeaderParams, PluginRuntime,
     PluginStatus, SurfaceKind,
 };
+use atelyx_plugin_protocol::event;
 use atelyx_plugin_protocol::frame::{PopupLayer, SurfaceFrame, SurfacePopup};
 use atelyx_plugin_protocol::method::{
     FontSizes, Radii, ThemeColors, ThemeResult,
@@ -162,6 +163,99 @@ async fn main() {
     wait_written(&state, 3).await;
     println!("撤销：通过");
 
+    // 连续选区变化：250ms 窗口内只上行最后一版（两次点选间隔 150ms）
+    // 先收掉格式气泡、清空选区，保证两次点选都落在格子上而不是浮层
+    send_key(&runtime, "Escape", false);
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    let baseline = state.collabs.lock().unwrap().len();
+    click_at(&runtime, cell_point(0, 0).0, cell_point(0, 0).1);
+    wait_collabs(&state, baseline + 1).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    click_at(&runtime, cell_point(1, 0).0, cell_point(1, 0).1);
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    assert_eq!(
+        state.collabs.lock().unwrap().len(),
+        baseline + 1,
+        "窗口内的第二次移动只记待发，不应立即上行"
+    );
+    // 帧拍间隔 1s：等到下一拍再泵，补发待上行的那一版
+    tokio::time::sleep(Duration::from_millis(900)).await;
+    runtime.pump_frame_ticks(Instant::now());
+    let latest = wait_collab(&state, baseline, |payload| {
+        payload.get("selection").and_then(|selection| selection.get("rowId")) == Some(&json!("r2"))
+    })
+    .await;
+    assert!(latest.is_some(), "停顿后应补发最后一版选区");
+    println!("选区限频：通过");
+
+    // Ctrl+滚轮缩放：头部百分比跟随最终倍数
+    wheel(&runtime, -40.0, true);
+    let zoomed = wait_header(&state, |params| {
+        params
+            .header
+            .as_ref()
+            .and_then(|header| header.texts.first())
+            .is_some_and(|text| text == "106%")
+    })
+    .await;
+    assert!(zoomed.is_some(), "缩放后头部应显示 106%");
+    let headers_zoomed = state.headers.lock().unwrap().len();
+    wheel(&runtime, -1.0, true);
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    assert_eq!(
+        state.headers.lock().unwrap().len(),
+        headers_zoomed,
+        "未跨过 1% 不重发头部"
+    );
+    println!("缩放头部：通过");
+
+    // 远端补丁合入：重绘新行并重发头部统计
+    let patch = json!({
+        "id": "tb-smoke",
+        "upsertRows": [{ "id": "r3", "values": { "f1": "丁" } }],
+    });
+    let headers_before_patch = state.headers.lock().unwrap().len();
+    runtime.notify_plugin_event(
+        TABLES_ID,
+        event::name::SPACE_FILE_PATCH,
+        &json!({ "path": "demo.atb", "kind": "table", "patch": patch, "landed": true }),
+    );
+    let patched = wait_frame(&runtime, |frame| has_text(frame, "丁")).await;
+    assert!(patched.is_some(), "远端补丁后应重绘出新行");
+    let patched_header = wait_header_after(&state, headers_before_patch, |params| {
+        params.header.as_ref().is_some_and(|header| {
+            header.texts.last().is_some_and(|text| text.starts_with("3 行"))
+        })
+    })
+    .await;
+    assert!(patched_header.is_some(), "远端补丁后头部应按新行数重发");
+    println!("远端补丁头部：通过");
+
+    // 历史回滚：整体换回两行，滚动与选区归位并重发头部 / 空选区广播
+    let collabs_before_restore = state.collabs.lock().unwrap().len();
+    let headers_before_restore = state.headers.lock().unwrap().len();
+    runtime.notify_plugin_event(
+        TABLES_ID,
+        event::name::TABLE_RESTORE,
+        &json!({ "path": "demo.atb", "content": seed_table() }),
+    );
+    let restored = wait_frame(&runtime, |frame| has_text(frame, "甲") && !has_text(frame, "丁")).await;
+    assert!(restored.is_some(), "回滚后应重绘为快照内容");
+    let restored_header = wait_header_after(&state, headers_before_restore, |params| {
+        params.header.as_ref().is_some_and(|header| {
+            header.texts.last().is_some_and(|text| text.starts_with("2 行"))
+        })
+    })
+    .await;
+    assert!(restored_header.is_some(), "回滚后头部应按快照行数重发");
+    let broadcast = wait_collab(&state, collabs_before_restore, |payload| {
+        payload.get("path").and_then(Value::as_str) == Some("demo.atb")
+            && payload.get("selection").is_some_and(Value::is_null)
+    })
+    .await;
+    assert!(broadcast.is_some(), "回滚清掉选区后应向对端广播空选区");
+    println!("历史回滚：通过");
+
     // 停用：插件退出运行态
     disable(&runtime, TABLES_ID).await;
     let status = runtime
@@ -196,6 +290,8 @@ fn seed_table() -> String {
 struct HostState {
     written: Mutex<Vec<String>>,
     headers: Mutex<Vec<PanelHeaderParams>>,
+    /// 选区上行载荷（协作通道），用于验证限频与回滚广播。
+    collabs: Mutex<Vec<Value>>,
     /// 冒烟宿主未接线的请求（等待失败时列出，便于定位缺口）。
     unhandled: Mutex<Vec<String>>,
     vault: Mutex<PathBuf>,
@@ -255,7 +351,8 @@ fn serve(runtime: Arc<PluginRuntime>, state: Arc<HostState>, vault: PathBuf) {
                 HostRequest::MenuOpen { request_id, .. } => {
                     reply(&runtime, request_id, json!({}));
                 }
-                HostRequest::CollabSend { request_id, .. } => {
+                HostRequest::CollabSend { request_id, params, .. } => {
+                    state.collabs.lock().unwrap().push(params.payload);
                     reply(&runtime, request_id, json!({ "queued": false }));
                 }
                 other => {
@@ -394,6 +491,7 @@ fn send_key(runtime: &PluginRuntime, named: &str, control: bool) {
     use atelyx_plugin_protocol::frame::{Key, KeyAction, Modifiers, NamedKey};
     let key = match named {
         "Enter" => Key::Named { name: NamedKey::Enter },
+        "Escape" => Key::Named { name: NamedKey::Escape },
         other => Key::Character { text: other.to_string() },
     };
     runtime.notify_frame_input(
@@ -404,6 +502,22 @@ fn send_key(runtime: &PluginRuntime, named: &str, control: bool) {
             action: KeyAction::Press,
             modifiers: Modifiers { shift: false, control, alt: false, meta: false },
             text: None,
+        },
+    );
+}
+
+fn wheel(runtime: &PluginRuntime, delta_y: f32, control: bool) {
+    use atelyx_plugin_protocol::frame::Modifiers;
+    runtime.notify_frame_input(
+        TABLES_ID,
+        SURFACE,
+        &FrameInput::Wheel {
+            x: 100.0,
+            y: 100.0,
+            delta_x: 0.0,
+            delta_y,
+            modifiers: Modifiers { shift: false, control, alt: false, meta: false },
+            hit: None,
         },
     );
 }
@@ -448,13 +562,68 @@ async fn wait_written(state: &HostState, count: usize) {
     }
 }
 
+async fn wait_collabs(state: &HostState, count: usize) {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while state.collabs.lock().unwrap().len() < count {
+        assert!(
+            Instant::now() < deadline,
+            "选区未上行到 {} 条；当前 {} 条",
+            count,
+            state.collabs.lock().unwrap().len()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// 从 `start` 起找一条命中条件的选区上行（早先的广播不算）。
+async fn wait_collab(
+    state: &HostState,
+    start: usize,
+    accept: impl Fn(&Value) -> bool,
+) -> Option<Value> {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        if let Some(payload) = state
+            .collabs
+            .lock()
+            .unwrap()
+            .iter()
+            .skip(start)
+            .find(|payload| accept(payload))
+        {
+            return Some(payload.clone());
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 async fn wait_header(
     state: &HostState,
     accept: impl Fn(&PanelHeaderParams) -> bool,
 ) -> Option<PanelHeaderParams> {
+    wait_header_after(state, 0, accept).await
+}
+
+/// 从 `start` 起找一条命中条件的头部声明（早先的声明不算）。
+async fn wait_header_after(
+    state: &HostState,
+    start: usize,
+    accept: impl Fn(&PanelHeaderParams) -> bool,
+) -> Option<PanelHeaderParams> {
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
-        if let Some(params) = state.headers.lock().unwrap().iter().rev().find(|params| accept(params)) {
+        if let Some(params) = state
+            .headers
+            .lock()
+            .unwrap()
+            .iter()
+            .skip(start)
+            .rev()
+            .find(|params| accept(params))
+        {
             return Some(params.clone());
         }
         if Instant::now() >= deadline {

@@ -17,7 +17,7 @@ const PEER_TTL_MS: u128 = 30_000;
 /// 本端状态保活间隔：空闲端不重发就会被对端按 TTL 剔除。
 const KEEPALIVE_MS: u128 = 15_000;
 /// 本端选区上行最小间隔：连续拖选合并成一次，只发最后一版。
-const SEND_INTERVAL_MS: u128 = 120;
+const SEND_INTERVAL_MS: u128 = 250;
 
 /// 一位对端的选区。
 #[derive(Clone)]
@@ -336,4 +336,51 @@ fn parse_selection(value: &serde_json::Value) -> Option<ops::TableSelection> {
         "all" => ops::TableSelection::All,
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use serde_json::json;
+
+    use super::Presence;
+
+    fn payload(row: &str) -> serde_json::Value {
+        json!({ "path": "t.atb", "selection": { "kind": "cell", "rowId": row, "fieldId": "f" } })
+    }
+
+    impl Presence {
+        /// 回拨最近上行时刻：用例以固定时刻验间隔边界，免得真实等待在负载下越过窗口。
+        fn backdate_send(&mut self, ago: Duration) {
+            if let Some(at) = self.sent_at {
+                self.sent_at = Some(at.checked_sub(ago).unwrap_or(at));
+            }
+        }
+    }
+
+    #[test]
+    fn local_updates_are_throttled_and_keep_latest() {
+        let mut presence = Presence::default();
+        let first = payload("r1");
+        let latest = payload("r2");
+        assert!(presence.should_send(&first), "首条上行不受间隔限制");
+        presence.note_sent(first);
+        assert!(!presence.should_send(&latest), "窗口内只记待发");
+        presence.backdate_send(Duration::from_millis(200));
+        assert!(presence.take_pending().is_none(), "未满最小间隔不补发");
+        presence.backdate_send(Duration::from_millis(100));
+        assert_eq!(presence.take_pending(), Some(latest), "窗口过后补发最后一版");
+    }
+
+    /// 同一状态不产生新上行，已排队的待发一并作废。
+    #[test]
+    fn identical_payload_is_not_resent() {
+        let mut presence = Presence::default();
+        let state = payload("r1");
+        assert!(presence.should_send(&state));
+        presence.note_sent(state.clone());
+        assert!(!presence.should_send(&state));
+        assert!(presence.pending.is_none());
+    }
 }
