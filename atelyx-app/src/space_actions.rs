@@ -2668,11 +2668,12 @@ fn deliver_plugin_message(app: &App, peer_id: &str, channel: &str, payload: serd
     let Some((plugin_id, channel)) = channel.split_once(PLUGIN_CHANNEL_SEP) else {
         return;
     };
-    let peer_name = app
-        .space_peers
-        .iter()
-        .find(|peer| peer.peer_id == peer_id)
-        .map(|peer| peer.nickname.clone());
+    // 身份色取空间名册，同一成员在画布 / 表格等所有插件里一致（不让插件按连接 id 哈希）
+    let peer = app.space_peers.iter().find(|peer| peer.peer_id == peer_id);
+    let peer_name = peer.map(|peer| peer.nickname.clone());
+    let peer_color = peer
+        .map(|peer| peer.color.clone())
+        .filter(|color| !color.is_empty());
     app.plugins.notify_collab_message(
         plugin_id,
         &atelyx_core::plugin_runtime::CollabMessageParams {
@@ -2680,6 +2681,7 @@ fn deliver_plugin_message(app: &App, peer_id: &str, channel: &str, payload: serd
             payload,
             peer_id: peer_id.to_string(),
             peer_name,
+            peer_color,
         },
     );
 }

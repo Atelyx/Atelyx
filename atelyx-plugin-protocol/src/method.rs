@@ -3148,6 +3148,9 @@ pub struct CollabMessageParams {
     pub peer_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peer_name: Option<String>,
+    /// 空间名册里该成员的身份色（`#RRGGBB`）；由宿主填，插件不再自行哈希。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_color: Option<String>,
 }
 
 /// 团队元数据键的字节上限。

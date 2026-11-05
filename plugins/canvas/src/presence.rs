@@ -185,10 +185,17 @@ pub fn apply(plugin: &PluginState, params: CollabMessageParams) {
             }
         }
     }
-    let color = payload
-        .get("color")
-        .and_then(serde_json::Value::as_str)
+    // 身份色以宿主名册为准（跨插件一致）；旧对端未带名册色时再回落到帧内色 / 稳定色
+    let color = params
+        .peer_color
+        .as_deref()
         .and_then(parse_hex)
+        .or_else(|| {
+            payload
+                .get("color")
+                .and_then(serde_json::Value::as_str)
+                .and_then(parse_hex)
+        })
         .unwrap_or_else(|| fallback_color(&params.peer_id));
     let name = params
         .peer_name
@@ -320,6 +327,7 @@ mod tests {
             payload: serde_json::json!({ "path": path, "present": true }),
             peer_id: peer.into(),
             peer_name: None,
+            peer_color: None,
         }
     }
 
@@ -347,6 +355,36 @@ mod tests {
             .with_session(|session| session.view.remote[0].path.clone())
             .unwrap();
         assert_eq!(path, "b.atlx");
+    }
+
+    /// 名册色优先于帧内自报色，同一成员在各插件里由宿主统一取色。
+    #[test]
+    fn apply_prefers_roster_color() {
+        let plugin = plugin_on("a.atlx");
+        let mut params = message("p1", "a.atlx");
+        params.peer_color = Some("#123456".into());
+        params.payload["color"] = serde_json::json!("#abcdef");
+        apply(&plugin, params);
+        let color = plugin
+            .with_session(|session| session.view.remote[0].color)
+            .unwrap();
+        assert_eq!(color, parse_hex("#123456").unwrap());
+    }
+
+    /// 断链 / 离线后名册为空，远端条目随事件立即摘除，不等 TTL。
+    #[test]
+    fn retain_roster_clears_disconnected_peers() {
+        let plugin = plugin_on("a.atlx");
+        apply(&plugin, message("p1", "a.atlx"));
+        assert!(retain_roster(&plugin, &[]));
+        assert!(plugin.with_session(|session| session.view.remote.is_empty()).unwrap());
+
+        apply(&plugin, message("p1", "a.atlx"));
+        assert!(!retain_roster(&plugin, &["p1".to_string()]));
+        assert_eq!(
+            plugin.with_session(|session| session.view.remote.len()).unwrap(),
+            1
+        );
     }
 }
 

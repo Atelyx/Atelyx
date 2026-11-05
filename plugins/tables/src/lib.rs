@@ -1204,7 +1204,13 @@ impl PluginHandler for TablesPlugin {
             .presence
             .lock()
             .map(|mut presence| {
-                presence.apply(&params.peer_id, params.peer_name.as_deref(), &params.payload, &file);
+                presence.apply(
+                    &params.peer_id,
+                    params.peer_name.as_deref(),
+                    params.peer_color.as_deref(),
+                    &params.payload,
+                    &file,
+                );
                 true
             })
             .unwrap_or(false);

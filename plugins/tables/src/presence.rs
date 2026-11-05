@@ -104,6 +104,7 @@ impl Presence {
         &mut self,
         peer_id: &str,
         name: Option<&str>,
+        peer_color: Option<&str>,
         payload: &serde_json::Value,
         file: &str,
     ) {
@@ -115,10 +116,15 @@ impl Presence {
             self.peers.remove(peer_id);
             return;
         };
-        let color = payload
-            .get("color")
-            .and_then(|color| color.as_str())
+        // 身份色以宿主名册为准（跨插件一致）；旧对端未带名册色时再回落到帧内色 / 稳定色
+        let color = peer_color
             .and_then(crate::text::parse_hex)
+            .or_else(|| {
+                payload
+                    .get("color")
+                    .and_then(|color| color.as_str())
+                    .and_then(crate::text::parse_hex)
+            })
             .unwrap_or_else(|| fallback_color(peer_id));
         let name = name
             .map(str::to_string)
@@ -382,5 +388,14 @@ mod tests {
         presence.note_sent(state.clone());
         assert!(!presence.should_send(&state));
         assert!(presence.pending.is_none());
+    }
+
+    /// 名册色优先于帧内自报色，同一成员在画布 / 表格里取同一身份色。
+    #[test]
+    fn roster_color_wins_over_payload_color() {
+        let mut presence = Presence::default();
+        presence.apply("p1", Some("林"), Some("#123456"), &payload("r1"), "t.atb");
+        let peer = presence.peers.get("p1").unwrap();
+        assert_eq!(peer.color, [0x12, 0x34, 0x56, 0xff]);
     }
 }
