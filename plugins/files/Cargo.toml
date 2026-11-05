@@ -14,4 +14,5 @@ atelyx-plugin-protocol = { version = "0.1.0", path = "../../atelyx-plugin-protoc
 atelyx-plugin-sdk = { version = "0.1.0", path = "../../atelyx-plugin-sdk" }
 serde_json = "1"
 async-trait = "0.1"
+futures-util = "0.3"
 tokio = { version = "1", features = ["sync"] }

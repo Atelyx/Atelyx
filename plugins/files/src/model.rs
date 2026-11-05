@@ -197,14 +197,12 @@ impl Model {
         self.radii = radii;
     }
 
-    /// 整份状态替换（宿主给的就是当前仓库的完整状态）。
+    /// 整份状态替换（宿主给的就是当前仓库的完整状态）；不动顶部提示，由重取入口自行清理。
     pub fn apply(&mut self, state: VaultUiState) {
         self.expanded = state.expanded.clone();
         self.state = state;
         self.ready = true;
         self.error = None;
-        // 成功重取即撤掉上一次失败留下的顶部提示
-        self.notice = None;
     }
 
     pub fn set_containers(&mut self, containers: Vec<ContainerEntry>) {
@@ -386,7 +384,7 @@ impl Model {
             vault_drop_target: root_target,
             vault_drop_rejected: root_target && rejected,
             inline,
-            dragging: self.drag_target.is_some() || self.drag_reject.is_some(),
+            dragging: self.dragging,
             drop_hint: self.drag_reject.clone(),
             sort: self.state.sort.clone(),
         }

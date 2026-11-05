@@ -7,6 +7,8 @@ mod view;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+use futures_util::future::join_all;
+
 use atelyx_plugin_protocol::event::{self, PublishParams};
 use atelyx_plugin_protocol::frame::{FrameInput, FrameInputParams, FrameTickParams, MouseButton};
 use atelyx_plugin_protocol::method::{
@@ -109,11 +111,18 @@ impl FilesPlugin {
         let expanded = result.state.expanded.clone();
         let mut children = HashMap::new();
         children.insert(String::new(), result.entries);
-        // 根条目上面已取过（展开集里也含根），不重复请求
-        for dir in expanded.iter().filter(|dir| !dir.is_empty()) {
-            match ctx.vault_ui(&VaultUiParams { dir: Some(dir.clone()) }).await {
+        // 根条目上面已取过（展开集里也含根），不重复请求；其余目录并发取，避免深层展开时逐层叠加往返
+        let reads = join_all(expanded.iter().filter(|dir| !dir.is_empty()).map(|dir| {
+            let dir = dir.clone();
+            async move {
+                let next = ctx.vault_ui(&VaultUiParams { dir: Some(dir.clone()) }).await;
+                (dir, next)
+            }
+        }));
+        for (dir, next) in reads.await {
+            match next {
                 Ok(next) => {
-                    children.insert(dir.clone(), next.entries);
+                    children.insert(dir, next.entries);
                 }
                 Err(error) => self.warn(ctx, &format!("打开目录 {dir}"), &error),
             }

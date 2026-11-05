@@ -525,6 +525,7 @@ dependencies = [
  "async-trait",
  "atelyx-plugin-protocol",
  "atelyx-plugin-sdk",
+ "futures-util",
  "serde_json",
  "tokio",
 ]

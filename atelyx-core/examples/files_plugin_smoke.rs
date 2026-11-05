@@ -23,6 +23,14 @@ const FILES_SURFACE: &str = "files";
 /// 冒烟下发的面板尺寸（与 SDK 首帧占位尺寸不同，才能证明按尺寸重排生效）。
 const PANEL_W: f32 = 900.0;
 const PANEL_H: f32 = 600.0;
+/// 窄面宽度：主名必须被省略，后缀徽标仍贴行尾。
+const NARROW_W: f32 = 160.0;
+/// 行右内衬（与插件 `ROW_PAD_X` 同值，判徽标右缘用）。
+const ROW_PAD_X: f32 = 8.0;
+/// 行侧缝（与插件 `GUTTER` 同值）：行体本身从面板右缘退让这么宽。
+const GUTTER: f32 = 8.0;
+/// 徽标右缘 = 面板右缘 - 侧缝 - 行内衬。
+const ROW_RIGHT: f32 = NARROW_W - GUTTER - ROW_PAD_X;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
@@ -45,6 +53,7 @@ async fn main() {
         String::new(),
         vec![
             entry("docs", "docs", true, 300),
+            entry("media", "media", true, 250),
             entry("notes", "notes", true, 200),
             entry("plan.atb", "plan.atb", false, 100),
         ],
@@ -55,6 +64,11 @@ async fn main() {
             entry("docs/方案.md", "方案.md", false, 100),
             entry(&format!("docs/{LONG_NAME}"), LONG_NAME, false, 90),
         ],
+    );
+    // 第二个可展开目录：证明多目录并发取回的结果各自归位，不被互相覆盖
+    state.entries.lock().unwrap().insert(
+        "media".to_string(),
+        vec![entry("media/图.png", "图.png", false, 80)],
     );
     serve(runtime.clone(), state.clone());
 
@@ -107,6 +121,45 @@ async fn main() {
     assert_eq!(state.requested_dirs(), vec![String::new(), "docs".to_string()]);
     println!("展开目录：通过");
 
+    // 窄面：主名按可用宽尾部省略并加「…」，后缀徽标恒显，右缘与层级无关地对齐
+    resize_to(&runtime, NARROW_W, PANEL_H);
+    let narrow = wait_frame(&runtime, |frame| has_text(frame, "…"))
+        .await
+        .expect("窄面应出现省略号");
+    assert!(!has_text(&narrow, LONG_STEM), "窄面不得完整画出主名");
+    let texts = narrow
+        .commands
+        .iter()
+        .filter_map(|command| match command {
+            DrawCommand::Text { content, x, size, .. } => Some((content.as_str(), *x, *size)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let ellipsized = texts
+        .iter()
+        .find(|(content, ..)| content.ends_with('…'))
+        .expect("应有被省略的主名");
+    let name_right = ellipsized.1 + ellipsized.0.chars().count() as f32 * ellipsized.2 * 0.55;
+    assert!(name_right <= ROW_RIGHT + 0.01, "主名不得越出面板：{name_right}");
+    let badges = texts
+        .iter()
+        .filter(|(content, ..)| matches!(*content, "ATB" | "MD"))
+        .collect::<Vec<_>>();
+    assert!(badges.len() >= 2, "根层与子层都应保留后缀徽标：{badges:?}");
+    for (content, x, size) in badges {
+        let right = x + content.chars().count() as f32 * size * 0.55;
+        assert!(
+            (right - ROW_RIGHT).abs() < 0.6,
+            "{content} 徽标应贴行右缘：{right} vs {ROW_RIGHT}"
+        );
+    }
+    resize_to(&runtime, PANEL_W, PANEL_H);
+    let wide = wait_frame(&runtime, |frame| has_text(frame, LONG_STEM))
+        .await
+        .expect("恢复宽面后应完整显示主名");
+    assert!(!has_text(&wide, "…"), "宽面不应省略");
+    println!("窄面省略与徽标对齐：通过");
+
     // 折叠同一目录：子项消失，且不再请求该目录
     let before = state.requested_dirs().len();
     click_hit(&runtime, &expanded, "row:d:docs");
@@ -128,12 +181,37 @@ async fn main() {
     .await
     .expect("工具条应挂全部展开钮");
     click_hit(&runtime, &frame, "toggle-all");
-    let all = wait_frame(&runtime, |frame| has_text(frame, "方案"))
+    // 两个目录同批并发读：两份子项都要落到各自的父级下（并发不得互相覆盖或丢结果）
+    let all = wait_frame(&runtime, |frame| has_text(frame, "方案") && has_text(frame, "图"))
         .await
-        .expect("全部展开应出现子项");
+        .expect("全部展开应出现两个目录的子项");
     assert!(has_text(&all, "plan"), "根条目应仍在");
+    assert!(
+        !has_text(&all, "打开目录"),
+        "全部成功时不应留下失败提示：{:?}",
+        all.commands
+    );
+    // 单目录读失败：提示可见、其余目录照常出树（失败不得只落日志）
+    state.fail_dirs.lock().unwrap().insert("media".to_string());
+    runtime.on_files_changed();
+    let failed = wait_frame(&runtime, |frame| has_text(frame, "打开目录 media失败"))
+        .await
+        .expect("目录读失败应在面板顶部提示");
+    assert!(has_text(&failed, "方案"), "一个目录失败不得拖垮整棵树");
+    state.fail_dirs.lock().unwrap().remove("media");
+    runtime.on_files_changed();
+    wait_frame(&runtime, |frame| has_text(frame, "图"))
+        .await
+        .expect("失败恢复后应重新取到该目录");
+    println!("目录并发与失败提示：通过");
+    // 收起全部（上一次操作清掉失败提示）
+    let all = wait_frame(&runtime, |frame| {
+        frame.hits.iter().any(|hit| hit.id == "toggle-all")
+    })
+    .await
+    .expect("应能再取一帧");
     click_hit(&runtime, &all, "toggle-all");
-    let none = wait_frame(&runtime, |frame| !has_text(frame, "方案"))
+    let none = wait_frame(&runtime, |frame| !has_text(frame, "方案") && !has_text(frame, "图"))
         .await
         .expect("收起全部应收起子目录");
     assert!(
@@ -245,7 +323,7 @@ async fn main() {
     assert_eq!(created.name, "会议记录");
     println!("新建条目：通过");
 
-    // 切换容器：点非激活容器行 → 宿主收到切换请求
+    // 切换容器：点非激活容器行 → 宿主收到切换请求，并恢复目标容器自己的展开集
     let frame = wait_frame(&runtime, |frame| {
         frame.hits.iter().any(|hit| hit.id == "switch:space:srv#room")
     })
@@ -254,7 +332,21 @@ async fn main() {
     click_hit(&runtime, &frame, "switch:space:srv#room");
     wait_switches(&state, 1).await;
     assert_eq!(state.switches.lock().unwrap()[0], "space:srv#room");
-    println!("切换容器：通过");
+    let space_frame = wait_frame(&runtime, |frame| has_text(frame, "方案"))
+        .await
+        .expect("空间自己的展开集应恢复 docs 展开");
+    assert!(
+        space_frame.hits.iter().any(|hit| hit.id == format!("switch:{LOCAL_CONTAINER_ID}")),
+        "切到空间后仍应列出本机容器"
+    );
+    click_hit(&runtime, &space_frame, &format!("switch:{LOCAL_CONTAINER_ID}"));
+    wait_switches(&state, 2).await;
+    assert_eq!(state.switches.lock().unwrap()[1], LOCAL_CONTAINER_ID);
+    let local_frame = wait_frame(&runtime, |frame| !has_text(frame, "方案"))
+        .await
+        .expect("切回本机应恢复本机的收起态");
+    assert!(has_text(&local_frame, "plan"), "本机条目应仍在");
+    println!("切换容器与展开集隔离：通过");
 
     // 移除容器：激活行只给禁用项，非激活行进二段确认 → 宿主收到移除请求
     let frame = wait_frame(&runtime, |frame| {
@@ -318,6 +410,10 @@ async fn main() {
     );
     wait_drags(&state, 1).await;
     assert_eq!(state.drags.lock().unwrap()[0], "plan.atb");
+    // 起拖即显示列表下方根落点（落点区跟着拖拽会话，不依赖指针是否已落上去）
+    wait_frame(&runtime, |frame| has_text(frame, "移到根目录"))
+        .await
+        .expect("起拖后应出现列表下方根落点");
     assert!(
         state
             .drag_hovers
@@ -348,6 +444,9 @@ async fn main() {
         "空白区应上报仓库根落点",
     )
     .await;
+    wait_frame(&runtime, |frame| has_text(frame, "松手移到根目录"))
+        .await
+        .expect("悬停空白区应显示松手落位");
     // 行侧缝 = 根落点：指针移到缝上要上报空路径（拖回仓库根）。
     // 整块树视口也挂根落点（drop-root:bottom），按带序号的侧缝 id 取
     let seam = frame
@@ -408,6 +507,33 @@ async fn main() {
     wait_drag_ends(&state, 2).await;
     assert!(state.drag_ends.lock().unwrap()[1], "丢失的会话应按未落位收掉");
     println!("拖拽会话：通过");
+
+    // 重命名：输入行只给主名；手打同名后缀先剥掉，避免拼成 plan2.atb.atb
+    let frame = wait_frame(&runtime, |frame| {
+        frame.hits.iter().any(|hit| hit.id == "row:f:plan.atb")
+    })
+    .await
+    .expect("文件行应挂命中区");
+    click_right(&runtime, &frame, "row:f:plan.atb");
+    wait_menu(&state, |items| items.iter().any(|item| item["id"] == "rename:plan.atb"))
+        .await
+        .expect("文件菜单应给出重命名入口");
+    select_menu(&state, &runtime, "rename:plan.atb");
+    let editing = wait_frame(&runtime, |frame| {
+        frame.hits.iter().any(|hit| hit.id == "inline-input")
+    })
+    .await
+    .expect("重命名应出现就地输入行");
+    assert!(!has_text(&editing, "plan.atb"), "输入行只画主名，不画后缀");
+    type_text(&runtime, "2.atb");
+    press_enter(&runtime);
+    let renames = wait_renames(&state, 1).await;
+    assert_eq!(
+        renames[0],
+        ("plan.atb".to_string(), "plan2.atb".to_string()),
+        "手打的同名后缀应剥掉再拼回"
+    );
+    println!("重命名后缀：通过");
 
     // 删除确认：右键文件 → 删除 → 二段确认才真的删（危险动作不直落）
     let frame = wait_frame(&runtime, |frame| {
@@ -509,6 +635,12 @@ struct HostState {
     removes: Arc<Mutex<Vec<String>>>,
     /// 插件请求删除的仓库相对路径。
     deletes: Arc<Mutex<Vec<String>>>,
+    /// 插件请求重命名的（原路径，目标路径）。
+    renames: Arc<Mutex<Vec<(String, String)>>>,
+    /// 按容器分开保存的展开集（切容器时各取各的）。
+    expanded_by_container: Arc<Mutex<std::collections::HashMap<String, Vec<String>>>>,
+    /// 读取时故意回绝的目录（验证失败提示与部分失败）。
+    fail_dirs: Arc<Mutex<std::collections::HashSet<String>>>,
     /// 插件请求过的容器切换计数。
     pick_vaults: Arc<Mutex<usize>>,
     /// 插件请求过的取色次数。
@@ -544,6 +676,12 @@ impl HostState {
             switches: Arc::new(Mutex::new(Vec::new())),
             removes: Arc::new(Mutex::new(Vec::new())),
             deletes: Arc::new(Mutex::new(Vec::new())),
+            renames: Arc::new(Mutex::new(Vec::new())),
+            expanded_by_container: Arc::new(Mutex::new(std::collections::HashMap::from([
+                ("local:/tmp/vault".to_string(), vec![String::new()]),
+                ("space:srv#room".to_string(), vec![String::new(), "docs".to_string()]),
+            ]))),
+            fail_dirs: Arc::new(Mutex::new(std::collections::HashSet::new())),
             pick_vaults: Arc::new(Mutex::new(0)),
             picks: Arc::new(Mutex::new(Vec::new())),
             doc_types: Arc::new(Mutex::new(vec![DocTypeEntry {
@@ -558,6 +696,17 @@ impl HostState {
 
     fn requested_dirs(&self) -> Vec<String> {
         self.dirs.lock().unwrap().clone()
+    }
+
+    /// 当前激活的容器 id（展开集按它归属）。
+    fn active_container(&self) -> String {
+        self.containers
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|container| container.active)
+            .map(|container| container.id.clone())
+            .unwrap_or_default()
     }
 }
 
@@ -579,6 +728,10 @@ fn serve(runtime: Arc<PluginRuntime>, state: HostState) {
                 HostRequest::VaultUi { request_id, params, .. } => {
                     let dir = params.dir.clone().unwrap_or_default();
                     state.dirs.lock().unwrap().push(dir.clone());
+                    if state.fail_dirs.lock().unwrap().contains(&dir) {
+                        runtime.resolve_shell_call(request_id, Err(format!("读取 {dir} 失败")));
+                        continue;
+                    }
                     let entries = state
                         .entries
                         .lock()
@@ -601,6 +754,12 @@ fn serve(runtime: Arc<PluginRuntime>, state: HostState) {
                 HostRequest::VaultUiWrite { request_id, patch, .. } => {
                     state.patches.lock().unwrap().push(patch.clone());
                     if let Some(expanded) = patch.expanded.clone() {
+                        let container = state.active_container();
+                        state
+                            .expanded_by_container
+                            .lock()
+                            .unwrap()
+                            .insert(container, expanded.clone());
                         *state.expanded.lock().unwrap() = expanded;
                     }
                     let result = VaultUiResult {
@@ -672,7 +831,23 @@ fn serve(runtime: Arc<PluginRuntime>, state: HostState) {
                 }
                 HostRequest::VaultSwitchContainer { request_id, params, .. } => {
                     state.switches.lock().unwrap().push(params.id.clone());
+                    let from = state.active_container();
+                    let current = state.expanded.lock().unwrap().clone();
+                    state.expanded_by_container.lock().unwrap().insert(from, current);
+                    let next = state
+                        .expanded_by_container
+                        .lock()
+                        .unwrap()
+                        .get(&params.id)
+                        .cloned()
+                        .unwrap_or_else(|| vec![String::new()]);
+                    *state.expanded.lock().unwrap() = next;
+                    for container in state.containers.lock().unwrap().iter_mut() {
+                        container.active = container.id == params.id;
+                    }
                     resolve(&runtime, request_id, json!({}));
+                    // 真宿主切换后广播载体：订阅方据此重取该容器的界面状态（含展开集）
+                    runtime.notify_plugin_event(FILES_ID, event::name::VAULT_SWITCH, &json!({}));
                 }
                 HostRequest::VaultRemoveContainer { request_id, params, .. } => {
                     state.removes.lock().unwrap().push(params.id.clone());
@@ -680,6 +855,10 @@ fn serve(runtime: Arc<PluginRuntime>, state: HostState) {
                 }
                 HostRequest::VaultRemove { request_id, path, .. } => {
                     state.deletes.lock().unwrap().push(path);
+                    resolve(&runtime, request_id, json!({}));
+                }
+                HostRequest::VaultRename { request_id, from, to, .. } => {
+                    state.renames.lock().unwrap().push((from, to));
                     resolve(&runtime, request_id, json!({}));
                 }
                 HostRequest::EditorOpenFile { request_id, path, reveal, .. } => {
@@ -872,6 +1051,15 @@ fn resize(runtime: &PluginRuntime, plugin_id: &str, surface_id: &str) {
     );
 }
 
+/// 指定尺寸重排（窄面验证省略与徽标对齐）。
+fn resize_to(runtime: &PluginRuntime, width: f32, height: f32) {
+    runtime.notify_frame_input(
+        FILES_ID,
+        FILES_SURFACE,
+        &FrameInput::Resize { width, height },
+    );
+}
+
 fn click_hit(runtime: &PluginRuntime, frame: &SurfaceFrame, id: &str) {
     let hit = frame
         .hits
@@ -947,6 +1135,18 @@ async fn wait_opens(state: &HostState, count: usize) {
             return;
         }
         assert!(Instant::now() < deadline, "等打开请求超时");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+async fn wait_renames(state: &HostState, count: usize) -> Vec<(String, String)> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let renames = state.renames.lock().unwrap().clone();
+        if renames.len() >= count {
+            return renames;
+        }
+        assert!(Instant::now() < deadline, "等重命名请求超时");
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
