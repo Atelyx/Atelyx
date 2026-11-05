@@ -198,20 +198,13 @@ impl PopupPaint {
                     max_rank = max_rank.max(rank);
                 }
                 match step {
-                    plugin_paint::PaintStep::Shapes(range) => {
-                        let geometry = caches[slot].draw(renderer, canvas_size, |canvas| {
-                            plugin_paint::execute_shapes(canvas, &popup.commands, range.clone(), ctx);
-                        });
-                        renderer.with_translation(Vector::new(origin.x, origin.y), |renderer| {
-                            renderer.draw_geometry(geometry);
-                        });
-                    }
-                    plugin_paint::PaintStep::Image(index) => {
+                    plugin_paint::PaintStep::Shapes { range, clip: step_clip } => {
                         let geometry = caches[slot].draw(renderer, canvas_size, |canvas| {
                             plugin_paint::execute_shapes(
                                 canvas,
                                 &popup.commands,
-                                *index..*index + 1,
+                                range.clone(),
+                                *step_clip,
                                 ctx,
                             );
                         });
@@ -219,15 +212,53 @@ impl PopupPaint {
                             renderer.draw_geometry(geometry);
                         });
                     }
-                    plugin_paint::PaintStep::Text(index) => {
-                        texts.draw_one(renderer, &popup.commands[*index], origin, clip);
+                    plugin_paint::PaintStep::Image { index, clip: step_clip } => {
+                        let geometry = caches[slot].draw(renderer, canvas_size, |canvas| {
+                            plugin_paint::execute_shapes(
+                                canvas,
+                                &popup.commands,
+                                *index..*index + 1,
+                                *step_clip,
+                                ctx,
+                            );
+                        });
+                        renderer.with_translation(Vector::new(origin.x, origin.y), |renderer| {
+                            renderer.draw_geometry(geometry);
+                        });
                     }
-                    plugin_paint::PaintStep::Shadow(index) => {
-                        plugin_paint::draw_shadow(
+                    plugin_paint::PaintStep::Text { index, clip: step_clip } => {
+                        texts.draw_one(
                             renderer,
-                            Rectangle::new(origin, canvas_size),
                             &popup.commands[*index],
+                            origin,
+                            clip,
+                            *step_clip,
                         );
+                    }
+                    plugin_paint::PaintStep::Shadow { index, clip: step_clip } => {
+                        let command = &popup.commands[*index];
+                        let bounds = Rectangle::new(origin, canvas_size);
+                        match *step_clip {
+                            Some(step_clip) if step_clip.width > 0.0 && step_clip.height > 0.0 => {
+                                // 阴影按面本地坐标画，图层裁剪要换到窗口坐标并与浮层裁剪求交
+                                let region = Rectangle::new(
+                                    Point::new(bounds.x + step_clip.x, bounds.y + step_clip.y),
+                                    Size::new(step_clip.width, step_clip.height),
+                                );
+                                // 独立图层合成在当前层之后；先闭层，后续步骤换新层，阴影才压在形状之下
+                                if layer_open {
+                                    renderer.end_layer();
+                                    layer_open = false;
+                                }
+                                if let Some(region) = region.intersection(&clip) {
+                                    renderer.with_layer(region, |renderer| {
+                                        plugin_paint::draw_shadow(renderer, bounds, command);
+                                    });
+                                }
+                            }
+                            Some(_) => {}
+                            None => plugin_paint::draw_shadow(renderer, bounds, command),
+                        }
                     }
                 }
             }
@@ -903,27 +934,66 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginFrame<'_> {
                     max_rank = max_rank.max(rank);
                 }
                 match step {
-                    plugin_paint::PaintStep::Shapes(range) => {
+                    plugin_paint::PaintStep::Shapes { range, clip: step_clip } => {
                         let geometry = caches[slot].draw(renderer, bounds.size(), |canvas| {
-                            plugin_paint::execute_shapes(canvas, &frame.commands, range.clone(), &ctx);
+                            plugin_paint::execute_shapes(
+                                canvas,
+                                &frame.commands,
+                                range.clone(),
+                                *step_clip,
+                                &ctx,
+                            );
                         });
                         renderer.with_translation(Vector::new(bounds.x, bounds.y), |renderer| {
                             renderer.draw_geometry(geometry);
                         });
                     }
-                    plugin_paint::PaintStep::Image(index) => {
+                    plugin_paint::PaintStep::Image { index, clip: step_clip } => {
                         let geometry = caches[slot].draw(renderer, bounds.size(), |canvas| {
-                            plugin_paint::execute_shapes(canvas, &frame.commands, *index..*index + 1, &ctx);
+                            plugin_paint::execute_shapes(
+                                canvas,
+                                &frame.commands,
+                                *index..*index + 1,
+                                *step_clip,
+                                &ctx,
+                            );
                         });
                         renderer.with_translation(Vector::new(bounds.x, bounds.y), |renderer| {
                             renderer.draw_geometry(geometry);
                         });
                     }
-                    plugin_paint::PaintStep::Text(index) => {
-                        texts.draw_one(renderer, &frame.commands[*index], bounds.position(), bounds);
+                    plugin_paint::PaintStep::Text { index, clip: step_clip } => {
+                        texts.draw_one(
+                            renderer,
+                            &frame.commands[*index],
+                            bounds.position(),
+                            bounds,
+                            *step_clip,
+                        );
                     }
-                    plugin_paint::PaintStep::Shadow(index) => {
-                        plugin_paint::draw_shadow(renderer, bounds, &frame.commands[*index]);
+                    plugin_paint::PaintStep::Shadow { index, clip: step_clip } => {
+                        let command = &frame.commands[*index];
+                        match *step_clip {
+                            Some(step_clip) if step_clip.width > 0.0 && step_clip.height > 0.0 => {
+                                // 阴影按面本地坐标画，图层裁剪要换到窗口坐标并与面矩形求交
+                                let region = Rectangle::new(
+                                    Point::new(bounds.x + step_clip.x, bounds.y + step_clip.y),
+                                    Size::new(step_clip.width, step_clip.height),
+                                );
+                                // 独立图层合成在当前层之后；先闭层，后续步骤换新层，阴影才压在形状之下
+                                if layer_open {
+                                    renderer.end_layer();
+                                    layer_open = false;
+                                }
+                                if let Some(region) = region.intersection(&bounds) {
+                                    renderer.with_layer(region, |renderer| {
+                                        plugin_paint::draw_shadow(renderer, bounds, command);
+                                    });
+                                }
+                            }
+                            Some(_) => {}
+                            None => plugin_paint::draw_shadow(renderer, bounds, command),
+                        }
                     }
                 }
             }
@@ -977,13 +1047,18 @@ fn same_step(
     new_step: &plugin_paint::PaintStep,
 ) -> bool {
     match (old_step, new_step) {
-        (plugin_paint::PaintStep::Shapes(old), plugin_paint::PaintStep::Shapes(new)) => {
-            old.len() == new.len()
+        (
+            plugin_paint::PaintStep::Shapes { range: old, clip: old_clip },
+            plugin_paint::PaintStep::Shapes { range: new, clip: new_clip },
+        ) => {
+            old_clip == new_clip
+                && old.len() == new.len()
                 && old_frame.commands.get(old.clone()) == new_frame.commands.get(new.clone())
         }
-        (plugin_paint::PaintStep::Image(old), plugin_paint::PaintStep::Image(new)) => {
-            old_frame.commands.get(*old) == new_frame.commands.get(*new)
-        }
+        (
+            plugin_paint::PaintStep::Image { index: old, clip: old_clip },
+            plugin_paint::PaintStep::Image { index: new, clip: new_clip },
+        ) => old_clip == new_clip && old_frame.commands.get(*old) == new_frame.commands.get(*new),
         _ => false,
     }
 }
@@ -1078,6 +1153,7 @@ fn draw_waiting_placeholder(
                 ),
                 origin,
                 bounds,
+                None,
             );
         }
         texts.draw_one(
@@ -1092,6 +1168,7 @@ fn draw_waiting_placeholder(
             ),
             origin,
             bounds,
+            None,
         );
         texts.end_frame();
     });
@@ -1242,10 +1319,15 @@ mod tests {
         let first = frame(vec![rect(10.0)]);
         let same = frame(vec![rect(10.0)]);
         let changed = frame(vec![rect(20.0)]);
-        let shapes = plugin_paint::PaintStep::Shapes(0..1);
+        let shapes = plugin_paint::PaintStep::Shapes { range: 0..1, clip: None };
         assert!(same_step(&first, &shapes, &same, &shapes));
         assert!(!same_step(&first, &shapes, &changed, &shapes));
-        assert!(!same_step(&first, &shapes, &same, &plugin_paint::PaintStep::Text(0)));
+        assert!(!same_step(
+            &first,
+            &shapes,
+            &same,
+            &plugin_paint::PaintStep::Text { index: 0, clip: None }
+        ));
     }
 
     /// 拖动改宽每拍都上报；半像素以内的抖动不惊动插件，换面即重报。

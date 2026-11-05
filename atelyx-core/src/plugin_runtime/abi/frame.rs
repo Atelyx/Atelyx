@@ -155,6 +155,13 @@ unsafe fn command_from_abi(value: &abi::AbiCommand) -> Result<DrawCommand, Strin
             h: value.rect.h,
             fit: fit_from_code(value.image_fit),
         },
+        abi::CMD_PUSH_CLIP => DrawCommand::PushClip {
+            x: value.rect.x,
+            y: value.rect.y,
+            w: value.rect.w,
+            h: value.rect.h,
+        },
+        abi::CMD_POP_CLIP => DrawCommand::PopClip,
         other => return Err(format!("未知绘制指令：{other}")),
     })
 }

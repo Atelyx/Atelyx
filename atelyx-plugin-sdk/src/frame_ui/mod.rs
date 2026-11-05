@@ -2544,6 +2544,268 @@ let a = 1;
         assert!((tall_y - 120.0).abs() < 2.0, "超过限高按限高收住：{tall_y}");
     }
 
+    /// 槽宽恒定：内容不溢出与溢出两态下，内容宽同为容器宽减槽宽。
+    #[tokio::test]
+    async fn scroll_keeps_content_width_when_overflow_state_flips() {
+        let slot = super::widgets::SCROLLBAR_SLOT_W;
+        let mut short = Bench::new(300.0, 220.0).await;
+        let frame = short
+            .render(|ui| {
+                ui.scroll_max("short", 120.0, 0.0, |s| {
+                    s.click_row("row0", Edges::all(0.0), 0.0, false, true, |r| r.text("行0", TextRole::Label));
+                });
+            })
+            .await
+            .unwrap();
+        let short_row = frame.hits.iter().find(|hit| hit.id == "row0").expect("单行");
+        assert!((short_row.w - (300.0 - slot)).abs() < 0.5, "不溢出也留槽：{}", short_row.w);
+
+        let mut tall = Bench::new(300.0, 220.0).await;
+        let frame = tall
+            .render(|ui| {
+                ui.scroll_max("tall", 120.0, 0.0, |s| {
+                    for index in 0..20 {
+                        s.click_row(
+                            format!("row{index}"),
+                            Edges::all(0.0),
+                            0.0,
+                            false,
+                            true,
+                            |r| r.text(format!("行{index}"), TextRole::Label),
+                        );
+                    }
+                })
+            })
+            .await
+            .unwrap();
+        let tall_row = frame.hits.iter().find(|hit| hit.id == "row0").expect("首行");
+        assert!((tall_row.w - short_row.w).abs() < 0.5, "溢出与否内容宽一致：{}/{}", tall_row.w, short_row.w);
+    }
+
+    /// 槽贴容器右缘：内容自身限宽居中时滚动条不跟着内容漂移。
+    #[tokio::test]
+    async fn scroll_slot_hugs_the_container_right_edge() {
+        let slot = super::widgets::SCROLLBAR_SLOT_W;
+        let mut bench = Bench::new(300.0, 240.0).await;
+        let frame = bench
+            .render(|ui| {
+                ui.scroll("body", 0.0, |s| {
+                    s.bounded(140.0, |b| {
+                        for index in 0..20 {
+                            b.button(format!("row{index}"), format!("行{index}"));
+                        }
+                    });
+                });
+            })
+            .await
+            .unwrap();
+        let bar = frame.hits.iter().find(|hit| hit.id == "body::bar").expect("滚动条");
+        assert!((bar.w - slot).abs() < 0.5, "槽宽恒定：{}", bar.w);
+        assert!((bar.x + bar.w - 300.0).abs() < 0.5, "贴容器右缘：{}", bar.x + bar.w);
+    }
+
+    /// 内容按视口裁剪：滚出视口的行不再出绘制指令，不盖工具栏也不越出容器。
+    #[tokio::test]
+    async fn scroll_never_draws_content_outside_its_viewport() {
+        fn build(ui: &mut build::Ui<'_, '_>) {
+            ui.fill_column(0.0, |c| {
+                c.button("toolbar", "工具");
+                c.scroll_max("body", 100.0, 0.0, |s| {
+                    for index in 0..40 {
+                        s.button(format!("row{index}"), format!("行{index}"));
+                    }
+                });
+            });
+        }
+        let mut bench = Bench::new(300.0, 300.0).await;
+        let frame = bench.render(build).await.unwrap();
+        let toolbar = frame.hits.iter().find(|hit| hit.id == "toolbar").expect("工具栏");
+        let top = toolbar.y + toolbar.h;
+        bench
+            .event(FrameInput::Wheel {
+                x: 150.0,
+                y: top + 50.0,
+                delta_x: 0.0,
+                delta_y: 180.0,
+                modifiers: Default::default(),
+                hit: None,
+            })
+            .await;
+        let frame = bench.render(build).await.unwrap();
+        for command in &frame.commands {
+            if let DrawCommand::Text { content, y, .. } = command {
+                if content.starts_with('行') {
+                    assert!(*y >= top - 0.5 && *y <= top + 100.5, "行文字落在视口内：{content} y={y}");
+                }
+            }
+        }
+    }
+
+    /// 滚动容器裁剪对贴片与图标同样生效：滚到中部时绘制范围不越出视口，命中区不被裁剪。
+    #[tokio::test]
+    async fn scroll_clips_images_and_icons_to_the_viewport() {
+        fn build(ui: &mut build::Ui<'_, '_>) {
+            ui.column(0.0, |c| {
+                c.scroll_max("body", 100.0, 0.0, |s| {
+                    s.image_fit(
+                        ImageSource::Vault { path: "a.png".into(), max_edge: None },
+                        160.0,
+                        ImageFit::Contain,
+                    );
+                    s.click_row("mid-row", Edges::all(0.0), 0.0, false, true, |r| {
+                        r.text("中部行", TextRole::Label)
+                    });
+                    for _ in 0..8 {
+                        s.icon(super::icons::Icon::Clock);
+                    }
+                });
+            });
+        }
+        let slot = super::widgets::SCROLLBAR_SLOT_W;
+        let mut bench = Bench::new(300.0, 300.0).await;
+        bench.render(build).await.unwrap();
+        bench
+            .event(FrameInput::Wheel {
+                x: 150.0,
+                y: 50.0,
+                delta_x: 0.0,
+                delta_y: 100.0,
+                modifiers: Default::default(),
+                hit: None,
+            })
+            .await;
+        let frame = bench.render(build).await.unwrap();
+        let bar = frame.hits.iter().find(|hit| hit.id == "body::bar").expect("滚动条");
+        let content = Rect::new(0.0, bar.y, 300.0 - slot, bar.h);
+
+        // 贴片高 160、视口 100：滚动后仍有一部分可见，该指令必须落在裁剪内
+        let mut image_bounds = None;
+        let mut icon_shapes = 0usize;
+        let mut stack: Vec<Rect> = Vec::new();
+        for command in &frame.commands {
+            match command {
+                DrawCommand::PushClip { x, y, w, h } => stack.push(Rect::new(*x, *y, *w, *h)),
+                DrawCommand::PopClip => {
+                    stack.pop();
+                }
+                DrawCommand::Image { x, y, w, h, .. } => {
+                    let clip = stack.last().copied().expect("贴片应在视口裁剪内");
+                    let shown = Rect::new(*x, *y, *w, *h).intersect(clip);
+                    assert!(!shown.is_empty(), "可见贴片应落在视口内");
+                    assert!(shown.y >= content.y - 0.5 && shown.bottom() <= content.bottom() + 0.5);
+                    image_bounds = Some(Rect::new(*x, *y, *w, *h));
+                }
+                DrawCommand::Rect { .. }
+                | DrawCommand::Circle { .. }
+                | DrawCommand::Line { .. }
+                | DrawCommand::Path { .. }
+                    if !stack.is_empty() =>
+                {
+                    let clip = *stack.last().expect("裁剪栈非空");
+                    assert!(
+                        clip.x >= content.x - 0.5 && clip.right() <= content.right() + 0.5,
+                        "裁剪区横向不得越过视口：{clip:?} / {content:?}"
+                    );
+                    assert!(
+                        clip.y >= content.y - 0.5 && clip.bottom() <= content.bottom() + 0.5,
+                        "裁剪区纵向不得越过视口：{clip:?} / {content:?}"
+                    );
+                    let bounds = match command {
+                        DrawCommand::Rect { x, y, w, h, .. } => Rect::new(*x, *y, *w, *h),
+                        DrawCommand::Circle { cx, cy, r, .. } => {
+                            Rect::new(cx - r, cy - r, 2.0 * r, 2.0 * r)
+                        }
+                        DrawCommand::Line { x1, y1, x2, y2, .. } => Rect::new(
+                            x1.min(*x2),
+                            y1.min(*y2),
+                            (x2 - x1).abs(),
+                            (y2 - y1).abs(),
+                        ),
+                        DrawCommand::Path { points, .. } => {
+                            let (min_x, max_x) = points
+                                .iter()
+                                .fold((f32::MAX, f32::MIN), |(lo, hi), point| {
+                                    (lo.min(point.x), hi.max(point.x))
+                                });
+                            let (min_y, max_y) = points
+                                .iter()
+                                .fold((f32::MAX, f32::MIN), |(lo, hi), point| {
+                                    (lo.min(point.y), hi.max(point.y))
+                                });
+                            Rect::new(min_x, min_y, max_x - min_x, max_y - min_y)
+                        }
+                        _ => unreachable!(),
+                    };
+                    // 零尺寸形状（退化图元）本就没有可见面积，不纳入裁剪断言
+                    if bounds.w <= 0.0 || bounds.h <= 0.0 {
+                        continue;
+                    }
+                    let shown = bounds.intersect(clip);
+                    assert!(!shown.is_empty(), "绘制形状应落在裁剪区内：{bounds:?} / {clip:?}");
+                    icon_shapes += 1;
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            image_bounds.is_some_and(|bounds| bounds.h > content.h),
+            "贴片应高于视口以验证裁剪确实生效"
+        );
+        assert!(icon_shapes > 0, "图标形状也应落在裁剪栈内");
+
+        // 命中区仍按布局矩形登记，不被绘制裁剪切掉
+        let row = frame.hits.iter().find(|hit| hit.id == "mid-row").expect("中部行命中区");
+        assert!((row.w - (300.0 - slot)).abs() < 0.5, "命中区宽不受裁剪影响：{}", row.w);
+    }
+
+
+    /// 多行输入框内部滚动与滚动容器同口径：占同一槽宽、贴右内缘、可拖且不压文字。
+    #[tokio::test]
+    async fn text_area_scrollbar_takes_the_same_slot_and_drags() {
+        let slot = super::widgets::SCROLLBAR_SLOT_W;
+        let mut bench = Bench::new(200.0, 160.0).await;
+        let body: String = (0..24).map(|index| format!("行{index}\n")).collect();
+        let initial = body.clone();
+        let frame = bench
+            .render(move |ui| ui.text_area("draft", initial.clone(), "", 120.0))
+            .await
+            .unwrap();
+        let bar = frame.hits.iter().find(|hit| hit.id == "draft::bar").expect("内容超一屏出现滚动条");
+        assert!((bar.w - slot).abs() < 0.5, "同槽宽：{}", bar.w);
+        assert!(
+            (bar.x + bar.w - 200.0).abs() < 0.5,
+            "槽贴输入框右缘：{}",
+            bar.x + bar.w
+        );
+
+        // 先点进正文取焦点（光标停在首行），再从滚动条拖到底：拖动不受光标跟随回拉
+        bench
+            .event(FrameInput::PointerDown { x: 60.0, y: bar.y + 8.0, button: MouseButton::Left, hit: Some("draft".into()) })
+            .await;
+        bench
+            .event(FrameInput::PointerDown {
+                x: bar.x + bar.w / 2.0,
+                y: bar.y + 2.0,
+                button: MouseButton::Left,
+                hit: Some("draft::bar".into()),
+            })
+            .await;
+        bench
+            .event(FrameInput::PointerMove { x: bar.x + bar.w / 2.0, y: bar.y + bar.h - 2.0, hit: None })
+            .await;
+        bench
+            .event(FrameInput::PointerUp { x: bar.x + bar.w / 2.0, y: bar.y + bar.h - 2.0, button: MouseButton::Left, hit: None })
+            .await;
+        let frame = bench
+            .render(move |ui| ui.text_area("draft", body.clone(), "", 120.0))
+            .await
+            .unwrap();
+        assert!(
+            !frame.commands.iter().any(|command| matches!(command, DrawCommand::Text { content, .. } if content == "行0")),
+            "拖到底后视口停在末尾，首行不再绘制"
+        );
+    }
+
     #[tokio::test]
     async fn fill_spacer_centers_the_column_content() {
         let mut bench = Bench::new(200.0, 200.0).await;

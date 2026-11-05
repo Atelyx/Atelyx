@@ -599,7 +599,14 @@ impl<'c, 'a> Ui<'c, 'a> {
                 if visible.is_empty() {
                     return;
                 }
-                super::icons::draw(ctx, icon, rect, theme::token(ColorToken::TextMuted));
+                // 图形按完整方框缩放：可见区更窄时交给裁剪栈，不缩图
+                if visible == rect {
+                    super::icons::draw(ctx, icon, rect, theme::token(ColorToken::TextMuted));
+                } else {
+                    ctx.with_clip(visible, |ctx| {
+                        super::icons::draw(ctx, icon, rect, theme::token(ColorToken::TextMuted));
+                    });
+                }
             }),
         });
     }
@@ -625,11 +632,31 @@ impl<'c, 'a> Ui<'c, 'a> {
                     return;
                 }
                 // 拉伸按可见区绘制（与裁剪等价）；等比方式换框会改变缩放比例，只能整片画
-                let (x, y, w, h) = match fit {
-                    None => (visible.x, visible.y, visible.w, visible.h),
-                    Some(_) => (rect.x, rect.y, rect.w, rect.h),
-                };
-                ctx.draw(DrawCommand::Image { source: source.clone(), x, y, w, h, fit });
+                match fit {
+                    None => ctx.draw(DrawCommand::Image {
+                        source: source.clone(),
+                        x: visible.x,
+                        y: visible.y,
+                        w: visible.w,
+                        h: visible.h,
+                        fit: None,
+                    }),
+                    Some(_) => {
+                        let command = DrawCommand::Image {
+                            source: source.clone(),
+                            x: rect.x,
+                            y: rect.y,
+                            w: rect.w,
+                            h: rect.h,
+                            fit,
+                        };
+                        if visible == rect {
+                            ctx.draw(command);
+                        } else {
+                            ctx.with_clip(visible, |ctx| ctx.draw(command));
+                        }
+                    }
+                }
             }),
         });
     }
@@ -660,7 +687,13 @@ impl<'c, 'a> Ui<'c, 'a> {
                 }
                 let glyph = Rect::new(rect.x + (rect.w - ICON_SIZE) / 2.0, rect.y + (rect.h - ICON_SIZE) / 2.0, ICON_SIZE, ICON_SIZE);
                 let color = if enabled { ColorToken::TextSecondary } else { ColorToken::TextMuted };
-                super::icons::draw(ctx, icon, glyph, theme::token(color));
+                if visible == rect {
+                    super::icons::draw(ctx, icon, glyph, theme::token(color));
+                } else {
+                    ctx.with_clip(visible, |ctx| {
+                        super::icons::draw(ctx, icon, glyph, theme::token(color));
+                    });
+                }
                 if enabled {
                     ctx.hit(&id, visible, HitCursor::Pointer);
                     ctx.record(&id, Layout::Button);
@@ -1300,7 +1333,12 @@ impl<'c, 'a> Ui<'c, 'a> {
                     None => (visible.x, visible.y, visible.w, visible.h),
                     Some(_) => (rect.x, rect.y, rect.w, rect.h),
                 };
-                ctx.draw(DrawCommand::Image { source: source.clone(), x, y, w, h, fit });
+                let command = DrawCommand::Image { source: source.clone(), x, y, w, h, fit };
+                if fit.is_some() && visible != rect {
+                    ctx.with_clip(visible, |ctx| ctx.draw(command));
+                } else {
+                    ctx.draw(command);
+                }
             }),
         });
     }
@@ -1323,14 +1361,20 @@ impl<'c, 'a> Ui<'c, 'a> {
                 if visible.is_empty() {
                     return;
                 }
-                ctx.draw(DrawCommand::Image {
+                // 等比图整片绘制才能保持缩放：可见区更窄时把整片交给裁剪栈
+                let command = DrawCommand::Image {
                     source: source.clone(),
                     x: rect.x,
                     y: rect.y,
                     w: rect.w,
                     h: rect.h,
                     fit: Some(fit),
-                });
+                };
+                if visible == rect {
+                    ctx.draw(command);
+                } else {
+                    ctx.with_clip(visible, |ctx| ctx.draw(command));
+                }
             }),
         });
     }
@@ -1740,10 +1784,13 @@ impl<'c, 'a> Ui<'c, 'a> {
                 let inner = Rect::new(
                     rect.x + pad.left,
                     rect.y + pad.top,
-                    (rect.w - pad.left - pad.right).max(1.0),
+                    (rect.w - pad.left - pad.right - SCROLLBAR_SLOT_W).max(1.0),
                     (rect.h - pad.top - pad.bottom).max(1.0),
                 );
+                // 槽贴输入框右内缘：文字宽已让出槽，滚动条不压正文
+                let slot = Rect::new(rect.right() - SCROLLBAR_SLOT_W, inner.y, SCROLLBAR_SLOT_W, inner.h);
                 let line = line_override.unwrap_or_else(|| text::line_height(&mut ctx.metrics, font));
+                ctx.hit(&id, visible, HitCursor::Text);
                 draw_area_text(
                     ctx,
                     &id,
@@ -1751,13 +1798,13 @@ impl<'c, 'a> Ui<'c, 'a> {
                     &placeholder,
                     font,
                     inner,
+                    slot,
                     focused,
                     &theme,
                     visible,
                     &marks,
                     line,
                 );
-                ctx.hit(&id, visible, HitCursor::Text);
                 ctx.record(
                     &id,
                     Layout::TextArea {
@@ -2094,7 +2141,7 @@ impl<'c, 'a> Ui<'c, 'a> {
             fill_height: height.is_none(),
             height: Box::new(move |metrics, width| match height {
                 Some(height) => height,
-                None => column_height(&for_size, metrics, width, gap),
+                None => column_height(&for_size, metrics, (width - SCROLLBAR_SLOT_W).max(1.0), gap),
             }),
             draw: Box::new(move |ctx, rect, clip| draw_scroll(ctx, &shared, &id, rect, clip, gap, follow_end)),
         });
@@ -2285,7 +2332,7 @@ fn text_item(content: String, spec: FontSpec, color: ColorToken, wrap: bool) -> 
     }
 }
 
-/// 表单控件底：主题表面底 + 常规边框，聚焦换强调边框；按可见区收敛（指令集没有裁剪）。
+/// 表单控件底：主题表面底 + 常规边框，聚焦换强调边框；几何按可见区收敛，超出部分由裁剪栈裁掉。
 fn draw_field(ctx: &mut BuildCtx<'_>, theme: &Theme, visible: Rect, focused: bool) {
     ctx.draw(DrawCommand::Rect {
         x: visible.x,
@@ -2530,50 +2577,70 @@ fn draw_area_text(
     placeholder: &str,
     font: FontSpec,
     inner: Rect,
+    slot: Rect,
     focused: bool,
     theme: &Theme,
     clip: Rect,
     marks: &[(usize, usize)],
     line_height: f32,
 ) {
-    let default_state = InputState::default();
-    let state = ctx.state.inputs.get(id).unwrap_or(&default_state);
     let line_x = inner.x;
+    let (caret_pos, anchor_pos, input_scroll, preedit) = ctx.state.inputs.get(id).map_or(
+        (value.len(), 0usize, 0.0, String::new()),
+        |item| {
+            (
+                item.caret.min(value.len()),
+                item.anchor.min(value.len()),
+                item.scroll,
+                item.preedit.clone(),
+            )
+        },
+    );
+    // 文字只画在正文区内：内边距与下方槽位不外溢
+    let paint_clip = inner.intersect(clip);
     // 空草稿恒显示占位符（取到焦点时也不消失），与原生输入框一致
-    if value.is_empty() && state.preedit.is_empty() {
-        text::paint(
-            ctx,
-            placeholder,
-            font,
-            theme::token(ColorToken::TextMuted),
-            line_x,
-            inner.y,
-            Some(inner.w),
-            Some(TextAlign::Start),
-            clip,
-        );
-        if focused {
-            let lit = ctx.caret_lit();
-            draw_caret_bar(ctx, line_x, inner.y, line_height, clip, lit);
-            anchor_ime(ctx, line_x, inner.y, line_height, clip);
-        }
+    if value.is_empty() && preedit.is_empty() {
+        ctx.with_clip(paint_clip, |ctx| {
+            text::paint(
+                ctx,
+                placeholder,
+                font,
+                theme::token(ColorToken::TextMuted),
+                line_x,
+                inner.y,
+                Some(inner.w),
+                Some(TextAlign::Start),
+                paint_clip,
+            );
+            if focused {
+                let lit = ctx.caret_lit();
+                draw_caret_bar(ctx, line_x, inner.y, line_height, paint_clip, lit);
+                anchor_ime(ctx, line_x, inner.y, line_height, paint_clip);
+            }
+        });
         return;
     }
     // 组合串作为光标处的临时文字进入排版：后面的字顺次右移、该换行就换行
-    let at = text::Composed::new(text::snap(value, state.caret), &state.preedit);
-    let composed = text::compose(value, at, &state.preedit);
-    let caret = at.caret(text::snap(value, state.caret));
-    let anchor = at.index(text::snap(value, state.anchor));
+    let at = text::Composed::new(text::snap(value, caret_pos), &preedit);
+    let composed = text::compose(value, at, &preedit);
+    let caret = at.caret(text::snap(value, caret_pos));
+    let anchor = at.index(text::snap(value, anchor_pos));
     let lines = text::lines(&mut ctx.metrics, &composed, font, inner.w);
     let caret_index = text::line_of(&lines, caret);
+    // 人工滚动位（滚轮 / 拖条）优先，此时不跟光标；点回正文或再次编辑后恢复光标跟随
+    let manual = ctx.state.scroll.get(id).copied();
     let scroll = text::area_scroll(
-        state.scroll,
+        manual.unwrap_or(input_scroll),
         caret_index,
         line_height,
         inner.h,
         lines.len(),
-        focused,
+        focused && manual.is_none(),
     );
+    if paint_clip.is_empty() {
+        return;
+    }
+    ctx.push_clip(paint_clip);
     let shift = inner.y - scroll;
     let (from, to) = (caret.min(anchor), caret.max(anchor));
     for (index, line) in lines.iter().enumerate() {
@@ -2669,12 +2736,12 @@ fn draw_area_text(
             font,
             caret - caret_line.start,
         );
-    let caret_y = shift + caret_index as f32 * line_height;
     if focused {
+        let caret_y = shift + caret_index as f32 * line_height;
         let lit = ctx.caret_lit();
         draw_caret_bar(ctx, caret_x, caret_y, line_height, clip, lit);
         // 候选窗贴组合串起点（串尾由本端自绘）：串变长时候选窗不跟着右移
-        let lead = at.index(text::snap(value, state.caret));
+        let lead = at.index(text::snap(value, caret_pos));
         let (ime_x, ime_y) = if lead < caret {
             let lead_index = text::line_of(&lines, lead);
             let line = lines[lead_index];
@@ -2691,24 +2758,11 @@ fn draw_area_text(
         };
         anchor_ime(ctx, ime_x, ime_y, line_height, clip);
     }
-    // 内容超出可视高度：贴右缘的细条指示当前位置（浅色，不抢正文）
+    ctx.pop_clip();
+    // 内容超出可视高度：按滚动容器同口径的槽位画可拖滑块（不覆盖正文）
     let content = lines.len() as f32 * line_height;
     if content > inner.h + 0.5 {
-        let track = (inner.h - 8.0).max(1.0);
-        let thumb = (track * inner.h / content).max(24.0).min(track);
-        let max = (content - inner.h).max(1.0);
-        let top = inner.y + 4.0 + (scroll / max) * (track - thumb);
-        ctx.draw(DrawCommand::Rect {
-            x: inner.right() - 4.0,
-            y: top,
-            w: 3.0,
-            h: thumb,
-            fill: Some(theme::token(ColorToken::Border)),
-            stroke: None,
-            stroke_width: None,
-            corner_radius: Some(1.5),
-            shadow: None,
-        });
+        draw_scrollbar(ctx, id, slot, clip, content, scroll, (content - inner.h).max(0.0), false);
     }
 }
 
@@ -2732,7 +2786,7 @@ pub(crate) fn auto_area_height(
     line: Option<f32>,
 ) -> f32 {
     let line_height = line.unwrap_or_else(|| text::line_height(metrics, font));
-    let inner_w = (width - pad.left - pad.right).max(1.0);
+    let inner_w = (width - pad.left - pad.right - SCROLLBAR_SLOT_W).max(1.0);
     let content = text::wrapped_height_with_line(metrics, value, font, inner_w, line_height);
     let cap = (max / line_height).floor().max(1.0) * line_height;
     content.min(cap).max(min.min(cap)) + pad.top + pad.bottom
@@ -2764,8 +2818,11 @@ fn anchor_ime(ctx: &mut BuildCtx<'_>, x: f32, y: f32, line_height: f32, clip: Re
     ctx.ime = Some(Rect::new(x, y, 1.0, line_height));
 }
 
-/// 滚动条宽度（与宿主内嵌滚动条同宽）与内容让位。
-const SCROLLBAR_W: f32 = 8.0;
+/// 纵向滚动条槽宽：恒定从内容宽里让出，与是否溢出、滚动位置无关。
+pub(crate) const SCROLLBAR_SLOT_W: f32 = 8.0;
+/// 滑块可见宽度：居中落在槽内，悬停 / 拖动时加宽但不越出槽。
+const SCROLLBAR_THUMB_W: f32 = 4.0;
+const SCROLLBAR_HOVER_W: f32 = 6.0;
 
 /// 虚拟列表视口外预构造的余量：滚动与改宽时新条目已在手上，不会先出空白。
 const VIRTUAL_OVERSCAN: f32 = 360.0;
@@ -2848,14 +2905,9 @@ fn draw_scroll(
     if visible.is_empty() {
         return;
     }
-    // 先按整宽判定是否溢出；溢出时内容宽度让出滚动条（滚动条占布局空间，不浮在内容上）
-    let wide = scroll_metrics(ctx, items, rect.w, gap);
-    let overflow = wide.content > rect.h;
-    let laid = if overflow {
-        scroll_metrics(ctx, items, (rect.w - SCROLLBAR_W).max(1.0), gap)
-    } else {
-        wide
-    };
+    // 槽宽恒定：无论内容是否溢出，内容宽都按容器宽减槽宽一次算定，改宽时文字不跳
+    let laid = scroll_metrics(ctx, items, (rect.w - SCROLLBAR_SLOT_W).max(1.0), gap);
+    let overflow = laid.content > rect.h + 0.5;
     let max_offset = (laid.content - rect.h).max(0.0);
     let previous = ctx.scrolls.get(id).copied().unwrap_or(0.0);
     let previous_max = ctx.scroll_max.get(id).copied().unwrap_or(0.0);
@@ -2870,18 +2922,23 @@ fn draw_scroll(
     ctx.scrolls.insert(id.to_string(), offset);
     ctx.scroll_max.insert(id.to_string(), max_offset);
     ctx.record(id, Layout::Scroll { viewport: visible, content: laid.content });
-    let mut y = rect.y - offset;
-    for (index, item) in items.iter().enumerate() {
-        let slot = Rect::new(rect.x, y, laid.widths[index], laid.heights[index]);
-        let slot_visible = slot.intersect(visible);
-        if !slot_visible.is_empty() {
-            (item.draw)(ctx, slot, slot_visible);
+    // 内容按视口裁剪（并以槽左缘为右界）：滚出视口的条目不得画进工具栏 / 标题区或槽内
+    let content_clip =
+        Rect::new(rect.x, rect.y, (rect.w - SCROLLBAR_SLOT_W).max(1.0), rect.h).intersect(visible);
+    ctx.with_clip(content_clip, |ctx| {
+        let mut y = rect.y - offset;
+        for (index, item) in items.iter().enumerate() {
+            let slot = Rect::new(rect.x, y, laid.widths[index], laid.heights[index]);
+            let slot_visible = slot.intersect(visible);
+            if !slot_visible.is_empty() {
+                (item.draw)(ctx, slot, slot_visible);
+            }
+            y += laid.heights[index] + gap;
         }
-        y += laid.heights[index] + gap;
-    }
+    });
     if overflow {
-        let track = Rect::new(rect.right() - SCROLLBAR_W, rect.y, SCROLLBAR_W, rect.h);
-        draw_scrollbar(ctx, id, track, visible, laid.content, offset, max_offset);
+        let track = Rect::new(rect.right() - SCROLLBAR_SLOT_W, rect.y, SCROLLBAR_SLOT_W, rect.h);
+        draw_scrollbar(ctx, id, track, visible, laid.content, offset, max_offset, true);
     }
 }
 
@@ -2902,33 +2959,46 @@ fn scroll_metrics(ctx: &mut BuildCtx<'_>, items: &[Item], width: f32, gap: f32) 
     ScrollMetrics { widths, heights, content }
 }
 
-/// 滚动条外观与宿主一致：下沉底轨道 + 三态滑块（常规 / 悬停 / 拖动强调色）。
-fn draw_scrollbar(ctx: &mut BuildCtx<'_>, id: &str, track: Rect, visible: Rect, content: f32, offset: f32, max_offset: f32) {
+/// 滚动条外观与宿主一致：槽内居中滑块（常规 / 悬停加宽 / 拖动强调色）；`paint_track` = 画槽底。
+fn draw_scrollbar(
+    ctx: &mut BuildCtx<'_>,
+    id: &str,
+    track: Rect,
+    visible: Rect,
+    content: f32,
+    offset: f32,
+    max_offset: f32,
+    paint_track: bool,
+) {
     let track_visible = track.intersect(visible);
     if track_visible.is_empty() {
         return;
     }
-    ctx.draw(DrawCommand::Rect {
-        x: track_visible.x,
-        y: track_visible.y,
-        w: track_visible.w,
-        h: track_visible.h,
-        fill: Some(theme::token(ColorToken::SurfaceSunken)),
-        stroke: None,
-        stroke_width: None,
-        corner_radius: None,
-        shadow: None,
-    });
+    if paint_track {
+        ctx.draw(DrawCommand::Rect {
+            x: track_visible.x,
+            y: track_visible.y,
+            w: track_visible.w,
+            h: track_visible.h,
+            fill: Some(theme::token(ColorToken::SurfaceSunken)),
+            stroke: None,
+            stroke_width: None,
+            corner_radius: None,
+            shadow: None,
+        });
+    }
+    let bar_id = scrollbar_id(id);
+    let dragging = ctx.state.drag_bar.as_deref() == Some(bar_id.as_str());
+    let thumb_w = if dragging || ctx.hovered(&bar_id) { SCROLLBAR_HOVER_W } else { SCROLLBAR_THUMB_W };
     let thumb_height = (track.h * track.h / content).max(12.0).min(track.h);
     let travel = track.h - thumb_height;
     let ratio = if max_offset > 0.0 { offset / max_offset } else { 0.0 };
-    let thumb = Rect::new(track.x, track.y + travel * ratio, track.w, thumb_height);
+    let thumb = Rect::new(track.x + (track.w - thumb_w) / 2.0, track.y + travel * ratio, thumb_w, thumb_height);
     let thumb_visible = thumb.intersect(visible);
     if thumb_visible.is_empty() {
         return;
     }
-    let bar_id = scrollbar_id(id);
-    let color = if ctx.state.drag_bar.as_deref() == Some(bar_id.as_str()) {
+    let color = if dragging {
         ColorToken::Accent
     } else if ctx.hovered(&bar_id) {
         ColorToken::TextSecondary

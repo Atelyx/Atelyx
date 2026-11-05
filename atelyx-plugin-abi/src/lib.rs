@@ -16,6 +16,10 @@ pub const CMD_PATH: u32 = 3;
 pub const CMD_CIRCLE: u32 = 4;
 pub const CMD_TEXT: u32 = 5;
 pub const CMD_IMAGE: u32 = 6;
+/// 压栈裁剪矩形：用 `rect` 的 x / y / w / h。
+pub const CMD_PUSH_CLIP: u32 = 7;
+/// 弹出最近一次裁剪矩形。
+pub const CMD_POP_CLIP: u32 = 8;
 
 /// 颜色来源：`COLOR_RGBA` 读 r/g/b/a，`COLOR_TOKEN` 读 token（跟随宿主主题）。
 pub const COLOR_RGBA: u32 = 0;

@@ -58,6 +58,8 @@ pub(crate) struct BuildCtx<'a> {
     pub soft_wrap: bool,
     /// 后续多行输入框的内部行高：None = 按字高；设值时与只读正文的行距对齐。
     pub input_line_height: Option<f32>,
+    /// 已压入指令流的裁剪矩形栈：绘制容器据此省略与栈顶相同的重复压栈。
+    clip_stack: Vec<Rect>,
 }
 
 pub(crate) struct BuildOut {
@@ -106,11 +108,57 @@ impl<'a> BuildCtx<'a> {
             markdown_seen: Vec::new(),
             soft_wrap: true,
             input_line_height: None,
+            clip_stack: Vec::new(),
         }
     }
 
     pub(crate) fn draw(&mut self, command: DrawCommand) {
         self.commands.push(command);
+    }
+
+    /// 已压入的裁剪区域（嵌套取交集）；空栈 = 不裁剪。
+    fn effective_clip(&self) -> Option<Rect> {
+        self.clip_stack.iter().copied().reduce(|outer, inner| outer.intersect(inner))
+    }
+
+    /// 在裁剪区内绘制：区域不缩小当前裁剪时不重复压栈，完全落在当前裁剪外时不绘制。
+    pub(crate) fn with_clip(&mut self, clip: Rect, paint: impl FnOnce(&mut Self)) {
+        if clip.is_empty() {
+            return;
+        }
+        if let Some(current) = self.effective_clip() {
+            let narrowed = current.intersect(clip);
+            if narrowed.is_empty() {
+                return;
+            }
+            if narrowed == current {
+                paint(self);
+                return;
+            }
+        }
+        self.push_clip(clip);
+        paint(self);
+        self.pop_clip();
+    }
+
+    /// 容器矩形本身已是裁剪区时直接绘制：根容器不额外压栈，不改变无裁剪场景的指令流。
+    fn clip_if_narrowed(&mut self, rect: Rect, clip: Rect, paint: impl FnOnce(&mut Self)) {
+        if clip == rect {
+            paint(self);
+        } else {
+            self.with_clip(clip, paint);
+        }
+    }
+
+    /// 压入裁剪矩形（调用方已确认非空且需要收紧）。
+    pub(crate) fn push_clip(&mut self, clip: Rect) {
+        self.commands.push(DrawCommand::PushClip { x: clip.x, y: clip.y, w: clip.w, h: clip.h });
+        self.clip_stack.push(clip);
+    }
+
+    pub(crate) fn pop_clip(&mut self) {
+        self.commands.push(DrawCommand::PopClip);
+        self.clip_stack.pop();
     }
 
     pub(crate) fn hit(&mut self, id: &str, rect: Rect, cursor: HitCursor) {
@@ -297,7 +345,7 @@ impl<'a> BuildCtx<'a> {
 }
 
 /// 自绘画布：区域与裁剪由容器给定，闭包里画指令并登记子区命中。
-/// 指令集没有裁剪，超出 `visible()` 的内容由闭包自己收住；子区命中按声明逆序取最上面的一个。
+/// 超出 `visible()` 的内容由容器压入的裁剪栈裁掉；子区命中按声明逆序取最上面的一个。
 pub struct Canvas<'c, 'a> {
     ctx: &'c mut BuildCtx<'a>,
     rect: Rect,
@@ -406,7 +454,12 @@ impl<'c, 'a> Canvas<'c, 'a> {
 
     /// 内置图标：`rect` 是图标的完整方框（形状按方框宽 / 24 缩放），传裁剪后的可见矩形会缩小图形。
     pub fn icon(&mut self, icon: super::icons::Icon, rect: Rect, color: PaintColor) {
-        super::icons::draw(self.ctx, icon, rect, color);
+        let visible = self.visible();
+        if visible == rect {
+            super::icons::draw(self.ctx, icon, rect, color);
+        } else {
+            self.ctx.with_clip(visible, |ctx| super::icons::draw(ctx, icon, rect, color));
+        }
     }
 }
 
@@ -653,7 +706,8 @@ pub(crate) fn layout_overlays(ctx: &mut BuildCtx<'_>) {
         }
         // 浮层整块承接点击：子项随后登记，命中优先于这块兜底
         ctx.hit(&format!("@overlay:{index}"), rect, HitCursor::Default);
-        draw_column(ctx, &items, rect, rect, 0.0);
+        // 浮层内容按自身矩形裁剪：超出部分不画到下层
+        ctx.with_clip(rect, |ctx| draw_column(ctx, &items, rect, rect, 0.0));
     }
     ctx.in_overlay = false;
 }
@@ -724,19 +778,21 @@ fn stack_item(items: Vec<Item>) -> Item {
 }
 
 fn draw_stack(ctx: &mut BuildCtx<'_>, items: &[Item], rect: Rect, clip: Rect) {
-    for item in items {
-        let width = child_width(item, &mut ctx.metrics, rect.w);
-        let height = if item.fill_height {
-            rect.h
-        } else {
-            child_height(item, &mut ctx.metrics, width).min(rect.h)
-        };
-        let child = Rect::new(rect.x, rect.y, width, height);
-        let visible = child.intersect(clip);
-        if !visible.is_empty() {
-            (item.draw)(ctx, child, visible);
+    ctx.clip_if_narrowed(rect, clip, |ctx| {
+        for item in items {
+            let width = child_width(item, &mut ctx.metrics, rect.w);
+            let height = if item.fill_height {
+                rect.h
+            } else {
+                child_height(item, &mut ctx.metrics, width).min(rect.h)
+            };
+            let child = Rect::new(rect.x, rect.y, width, height);
+            let visible = child.intersect(clip);
+            if !visible.is_empty() {
+                (item.draw)(ctx, child, visible);
+            }
         }
-    }
+    });
 }
 
 fn column_item(items: Vec<Item>, gap: f32) -> Item {
@@ -777,16 +833,18 @@ pub(crate) fn draw_column(ctx: &mut BuildCtx<'_>, items: &[Item], rect: Rect, cl
         .sum::<f32>()
         + gaps;
     let share = if fill_count > 0 { ((rect.h - occupied).max(0.0)) / fill_count as f32 } else { 0.0 };
-    let mut y = rect.y;
-    for (index, item) in items.iter().enumerate() {
-        let height = if item.fill_height && share > 0.0 { share } else { heights[index] };
-        let child = Rect::new(rect.x, y, widths[index], height);
-        let visible = child.intersect(clip);
-        if !visible.is_empty() {
-            (item.draw)(ctx, child, visible);
+    ctx.clip_if_narrowed(rect, clip, |ctx| {
+        let mut y = rect.y;
+        for (index, item) in items.iter().enumerate() {
+            let height = if item.fill_height && share > 0.0 { share } else { heights[index] };
+            let child = Rect::new(rect.x, y, widths[index], height);
+            let visible = child.intersect(clip);
+            if !visible.is_empty() {
+                (item.draw)(ctx, child, visible);
+            }
+            y += height + gap;
         }
-        y += height + gap;
-    }
+    });
 }
 
 fn row_item(items: Vec<Item>, gap: f32, fill_height: bool) -> Item {
@@ -842,15 +900,17 @@ fn row_slots(items: &[Item], metrics: &mut Metrics, width: f32, gap: f32) -> Row
 
 fn draw_row(ctx: &mut BuildCtx<'_>, items: &[Item], rect: Rect, clip: Rect, gap: f32) {
     let slots = row_slots(items, &mut ctx.metrics, rect.w, gap);
-    let mut x = rect.x;
-    for (index, item) in items.iter().enumerate() {
-        // 吃满高度的子项（滚动区）拿走整行高度，否则按内容高并在行内垂直居中
-        let height = if item.fill_height { rect.h } else { slots.heights[index].min(rect.h) };
-        let child = Rect::new(x, rect.y + (rect.h - height) / 2.0, slots.widths[index], height);
-        let visible = child.intersect(clip);
-        if !visible.is_empty() {
-            (item.draw)(ctx, child, visible);
+    ctx.clip_if_narrowed(rect, clip, |ctx| {
+        let mut x = rect.x;
+        for (index, item) in items.iter().enumerate() {
+            // 吃满高度的子项（滚动区）拿走整行高度，否则按内容高并在行内垂直居中
+            let height = if item.fill_height { rect.h } else { slots.heights[index].min(rect.h) };
+            let child = Rect::new(x, rect.y + (rect.h - height) / 2.0, slots.widths[index], height);
+            let visible = child.intersect(clip);
+            if !visible.is_empty() {
+                (item.draw)(ctx, child, visible);
+            }
+            x += slots.widths[index] + gap;
         }
-        x += slots.widths[index] + gap;
-    }
+    });
 }

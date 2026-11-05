@@ -36,38 +36,88 @@ pub struct PaintCtx<'a> {
 }
 
 /// 绘制顺序里的一步：形状段按序合批进一块几何，图片 / 文字 / 矩形投影各自成步。
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// `clip` 是该步所属裁剪栈的交集（面本地坐标，None = 不裁剪）。
+#[derive(Clone, Debug, PartialEq)]
 pub enum PaintStep {
-    Shapes(Range<usize>),
-    Image(usize),
-    Text(usize),
-    Shadow(usize),
+    Shapes { range: Range<usize>, clip: Option<Rectangle> },
+    Image { index: usize, clip: Option<Rectangle> },
+    Text { index: usize, clip: Option<Rectangle> },
+    Shadow { index: usize, clip: Option<Rectangle> },
 }
 
-/// 按指令序切成绘制步骤：文字、图片与带投影的矩形是顺序断点，其余形状按相邻段合批。
-/// 写入调用方给的缓冲（复用容量），供绘制期逐帧刷新步骤表。
+/// 按指令序切成绘制步骤：文字、图片、带投影的矩形与裁剪开关都是顺序断点，
+/// 其余形状按相邻段合批。写入调用方给的缓冲（复用容量），供绘制期逐帧刷新步骤表。
 pub fn plan_into(commands: &[DrawCommand], steps: &mut Vec<PaintStep>) {
     steps.clear();
     let mut start = 0;
+    let mut stack: Vec<Rectangle> = Vec::new();
+    let mut clip = None;
     for (index, command) in commands.iter().enumerate() {
-        let breakpoint = match command {
-            DrawCommand::Text { .. } => Some((PaintStep::Text(index), index + 1)),
-            DrawCommand::Image { .. } => Some((PaintStep::Image(index), index + 1)),
-            DrawCommand::Rect { shadow: Some(_), .. } => Some((PaintStep::Shadow(index), index)),
-            _ => None,
-        };
-        if let Some((step, next)) = breakpoint {
-            if start < index {
-                steps.push(PaintStep::Shapes(start..index));
+        match command {
+            DrawCommand::PushClip { x, y, w, h } => {
+                if start < index {
+                    steps.push(PaintStep::Shapes { range: start..index, clip });
+                }
+                stack.push(Rectangle::new(
+                    Point::new(*x, *y),
+                    Size::new(w.max(0.0), h.max(0.0)),
+                ));
+                clip = clip_of(&stack);
+                start = index + 1;
             }
-            steps.push(step);
-            // 投影矩形本身仍归入后续形状段：投影先画，填充与描边随后覆盖其上
-            start = next;
+            DrawCommand::PopClip => {
+                if start < index {
+                    steps.push(PaintStep::Shapes { range: start..index, clip });
+                }
+                stack.pop();
+                clip = clip_of(&stack);
+                start = index + 1;
+            }
+            DrawCommand::Text { .. } => {
+                if start < index {
+                    steps.push(PaintStep::Shapes { range: start..index, clip });
+                }
+                steps.push(PaintStep::Text { index, clip });
+                start = index + 1;
+            }
+            DrawCommand::Image { .. } => {
+                if start < index {
+                    steps.push(PaintStep::Shapes { range: start..index, clip });
+                }
+                steps.push(PaintStep::Image { index, clip });
+                start = index + 1;
+            }
+            DrawCommand::Rect { shadow: Some(_), .. } => {
+                if start < index {
+                    steps.push(PaintStep::Shapes { range: start..index, clip });
+                }
+                steps.push(PaintStep::Shadow { index, clip });
+                // 投影矩形本身仍归入后续形状段：投影先画，填充与描边随后覆盖其上
+                start = index;
+            }
+            _ => {}
         }
     }
     if start < commands.len() {
-        steps.push(PaintStep::Shapes(start..commands.len()));
+        steps.push(PaintStep::Shapes { range: start..commands.len(), clip });
     }
+}
+
+/// 裁剪栈的当前交集：任一层与上层不相交时宽度或高度为 0，绘制期直接跳过。
+fn clip_of(stack: &[Rectangle]) -> Option<Rectangle> {
+    let first = *stack.first()?;
+    Some(stack[1..].iter().fold(first, |acc, region| intersect(acc, *region)))
+}
+
+fn intersect(a: Rectangle, b: Rectangle) -> Rectangle {
+    let left = a.x.max(b.x);
+    let top = a.y.max(b.y);
+    let right = (a.x + a.width).min(b.x + b.width);
+    let bottom = (a.y + a.height).min(b.y + b.height);
+    Rectangle::new(
+        Point::new(left, top),
+        Size::new((right - left).max(0.0), (bottom - top).max(0.0)),
+    )
 }
 
 /// 一次性分配步骤表（测试用）。
@@ -82,10 +132,10 @@ pub fn plan(commands: &[DrawCommand]) -> Vec<PaintStep> {
 /// 声明顺序与批次序相反时必须另起图层，否则后声明的形状会先被画出来。
 pub fn step_rank(step: &PaintStep) -> u8 {
     match step {
-        PaintStep::Shadow(_) => 0,
-        PaintStep::Shapes(_) => 1,
-        PaintStep::Image(_) => 2,
-        PaintStep::Text(_) => 3,
+        PaintStep::Shadow { .. } => 0,
+        PaintStep::Shapes { .. } => 1,
+        PaintStep::Image { .. } => 2,
+        PaintStep::Text { .. } => 3,
     }
 }
 
@@ -94,12 +144,25 @@ pub fn execute_shapes<'a>(
     frame: &mut canvas::Frame,
     commands: &'a [DrawCommand],
     range: Range<usize>,
+    clip: Option<Rectangle>,
     ctx: &PaintCtx<'_>,
 ) {
-    for command in &commands[range] {
-        if !matches!(command, DrawCommand::Text { .. }) {
-            execute_one(frame, command, ctx);
+    let paint = |frame: &mut canvas::Frame| {
+        for command in &commands[range.clone()] {
+            if !matches!(
+                command,
+                DrawCommand::Text { .. } | DrawCommand::PushClip { .. } | DrawCommand::PopClip
+            ) {
+                execute_one(frame, command, ctx, clip);
+            }
         }
+    };
+    match clip {
+        Some(region) if region.width > 0.0 && region.height > 0.0 => {
+            frame.with_clip(region, paint);
+        }
+        Some(_) => {}
+        None => paint(frame),
     }
 }
 
@@ -172,12 +235,14 @@ impl TextCache {
     /// 就地绘制一条文字指令：位置用面本地坐标，接上外壳原点的平移。
     /// `origin` 是坐标系原点（面本地 → 窗口坐标），`clip` 是渲染裁剪矩形：
     /// 浮层可能越出面矩形甚至盖住面板头部，原点与裁剪必须分开给。
+    /// `command_clip` 是该指令所属裁剪栈的交集（面本地坐标），与 `clip` 求交后绘制。
     pub fn draw_one(
         &mut self,
         renderer: &mut iced::Renderer,
         command: &DrawCommand,
         origin: Point,
         clip: Rectangle,
+        command_clip: Option<Rectangle>,
     ) {
         let DrawCommand::Text {
             x,
@@ -194,6 +259,19 @@ impl TextCache {
             family_name,
         } = command
         else {
+            return;
+        };
+        let Some(clip) = (match command_clip {
+            None => Some(clip),
+            Some(region) => {
+                let region = Rectangle::new(
+                    Point::new(origin.x + region.x, origin.y + region.y),
+                    Size::new(region.width, region.height),
+                );
+                let merged = intersect(clip, region);
+                (merged.width > 0.0 && merged.height > 0.0).then_some(merged)
+            }
+        }) else {
             return;
         };
         let (paragraph, width) = self.entry(
@@ -437,7 +515,12 @@ fn text_hash(
     hash
 }
 
-fn execute_one(frame: &mut canvas::Frame, command: &DrawCommand, ctx: &PaintCtx<'_>) {
+fn execute_one(
+    frame: &mut canvas::Frame,
+    command: &DrawCommand,
+    ctx: &PaintCtx<'_>,
+    clip: Option<Rectangle>,
+) {
     match command {
         DrawCommand::Line { x1, y1, x2, y2, stroke, width, dash } => {
             let path = CanvasPath::line(Point::new(*x1, *y1), Point::new(*x2, *y2));
@@ -526,13 +609,19 @@ fn execute_one(frame: &mut canvas::Frame, command: &DrawCommand, ctx: &PaintCtx<
                 Point::new(x + (w - draw_w) / 2.0, y + (h - draw_h) / 2.0),
                 Size::new(draw_w, draw_h),
             );
-            // cover 的溢出部分裁到目标框；contain 的绘制框本就不超出
+            // cover 的溢出部分裁到目标框；contain 的绘制框本就不超出。
+            // 内层裁剪会覆盖外层 draft 的裁剪区，故先与步骤裁剪求交再压栈。
             if fit == ImageFit::Cover {
-                frame.with_clip(target, |frame| frame.draw_image(rect, &handle));
+                let target = clip.map_or(target, |region| intersect(target, region));
+                if target.width > 0.0 && target.height > 0.0 {
+                    frame.with_clip(target, |frame| frame.draw_image(rect, &handle));
+                }
             } else {
                 frame.draw_image(rect, &handle);
             }
         }
+        // 裁剪开关只参与分段规划，由步骤 clip 生效
+        DrawCommand::PushClip { .. } | DrawCommand::PopClip => {}
     }
 }
 
@@ -662,21 +751,21 @@ mod tests {
         assert_eq!(
             plan(&commands),
             vec![
-                PaintStep::Shapes(0..1),
-                PaintStep::Text(1),
-                PaintStep::Shadow(2),
-                PaintStep::Shapes(2..3),
-                PaintStep::Image(3),
-                PaintStep::Shapes(4..6),
+                PaintStep::Shapes { range: 0..1, clip: None },
+                PaintStep::Text { index: 1, clip: None },
+                PaintStep::Shadow { index: 2, clip: None },
+                PaintStep::Shapes { range: 2..3, clip: None },
+                PaintStep::Image { index: 3, clip: None },
+                PaintStep::Shapes { range: 4..6, clip: None },
             ],
             "文字 / 图片就地断段；投影先于矩形填充；其余形状合批"
         );
         assert_eq!(
             [
-                step_rank(&PaintStep::Shadow(0)),
-                step_rank(&PaintStep::Shapes(0..1)),
-                step_rank(&PaintStep::Image(0)),
-                step_rank(&PaintStep::Text(0)),
+                step_rank(&PaintStep::Shadow { index: 0, clip: None }),
+                step_rank(&PaintStep::Shapes { range: 0..1, clip: None }),
+                step_rank(&PaintStep::Image { index: 0, clip: None }),
+                step_rank(&PaintStep::Text { index: 0, clip: None }),
             ],
             [0, 1, 2, 3],
             "批次序：投影 → 形状 → 图片 → 文字"
@@ -693,5 +782,46 @@ mod tests {
             h: 4.0,
             fit: Some(ImageFit::Contain),
         }
+    }
+
+    fn dot() -> DrawCommand {
+        DrawCommand::Circle {
+            cx: 0.0,
+            cy: 0.0,
+            r: 1.0,
+            fill: Some(PaintColor::Rgba { rgba: [0, 0, 0, 255] }),
+            stroke: None,
+            stroke_width: None,
+        }
+    }
+
+    fn region(x: f32, y: f32, w: f32, h: f32) -> Rectangle {
+        Rectangle::new(Point::new(x, y), Size::new(w, h))
+    }
+
+    #[test]
+    fn nested_clips_intersect_and_split_shape_batches() {
+        let commands = vec![
+            dot(),
+            DrawCommand::PushClip { x: 10.0, y: 10.0, w: 100.0, h: 100.0 },
+            dot(),
+            DrawCommand::PushClip { x: 20.0, y: 20.0, w: 50.0, h: 200.0 },
+            dot(),
+            DrawCommand::PopClip,
+            dot(),
+            DrawCommand::PopClip,
+            dot(),
+        ];
+        assert_eq!(
+            plan(&commands),
+            vec![
+                PaintStep::Shapes { range: 0..1, clip: None },
+                PaintStep::Shapes { range: 2..3, clip: Some(region(10.0, 10.0, 100.0, 100.0)) },
+                PaintStep::Shapes { range: 4..5, clip: Some(region(20.0, 20.0, 50.0, 90.0)) },
+                PaintStep::Shapes { range: 6..7, clip: Some(region(10.0, 10.0, 100.0, 100.0)) },
+                PaintStep::Shapes { range: 8..9, clip: None },
+            ],
+            "裁剪开关断段且嵌套取交集；出栈后恢复外层裁剪"
+        );
     }
 }

@@ -863,6 +863,15 @@ impl<'a> FrameBuffer<'a> {
                 value.image_max_edge = max_edge;
                 self.push(value, popup);
             }
+            DrawCommand::PushClip { x, y, w, h } => {
+                let mut value = base(abi::CMD_PUSH_CLIP, abi::AbiRect::empty_at(*x, *y));
+                value.rect.w = *w;
+                value.rect.h = *h;
+                self.push(value, popup);
+            }
+            DrawCommand::PopClip => {
+                self.push(base(abi::CMD_POP_CLIP, abi::AbiRect::empty_at(0.0, 0.0)), popup);
+            }
         }
     }
 }

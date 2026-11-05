@@ -188,6 +188,7 @@ pub struct PaintShadow {
 
 /// 绘图指令。矩形 / 路径 / 圆：`fill` 与 `stroke` 至少声明其一，`stroke_width` 只在 `stroke`
 /// 存在时生效（缺省 1.0）；线只有 `stroke`（字段名 `width`）；文字与图片没有描边概念。
+/// 裁剪：`PushClip` 之后的指令按该矩形与已压栈矩形的交集绘制，`PopClip` 弹出最近一层。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 #[serde(rename_all_fields = "camelCase")]
@@ -276,6 +277,10 @@ pub enum DrawCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         fit: Option<ImageFit>,
     },
+    /// 压入裁剪矩形：之后的指令只画在该矩形内，嵌套时取交集。
+    PushClip { x: f32, y: f32, w: f32, h: f32 },
+    /// 弹出最近一次 `PushClip`；与 `PushClip` 必须成对出现。
+    PopClip,
 }
 
 impl DrawCommand {
@@ -333,6 +338,13 @@ impl DrawCommand {
                 ensure_non_negative(*w, "贴片宽")?;
                 ensure_non_negative(*h, "贴片高")
             }
+            Self::PushClip { x, y, w, h } => {
+                ensure_finite(*x, "裁剪左缘")?;
+                ensure_finite(*y, "裁剪上缘")?;
+                ensure_non_negative(*w, "裁剪宽")?;
+                ensure_non_negative(*h, "裁剪高")
+            }
+            Self::PopClip => Ok(()),
         }
     }
 
@@ -342,6 +354,7 @@ impl DrawCommand {
             Self::Rect { fill, stroke, .. }
             | Self::Path { fill, stroke, .. }
             | Self::Circle { fill, stroke, .. } => fill.is_some() || stroke.is_some(),
+            Self::PushClip { .. } | Self::PopClip => false,
             _ => true,
         }
     }
@@ -349,11 +362,23 @@ impl DrawCommand {
 
 /// 清单整体校验：逐条报可读错误（错误信息带指令下标，插件可定位到条）。
 pub fn validate_commands(commands: &[DrawCommand]) -> Result<(), String> {
+    let mut clip_depth = 0usize;
     for (index, command) in commands.iter().enumerate() {
         command.validate().map_err(|e| format!("第 {index} 条指令：{e}"))?;
-        if !command.has_paint() {
-            return Err(format!("第 {index} 条指令：fill 与 stroke 至少声明其一"));
+        match command {
+            DrawCommand::PushClip { .. } => clip_depth += 1,
+            DrawCommand::PopClip if clip_depth == 0 => {
+                return Err(format!("第 {index} 条指令：PopClip 没有对应的 PushClip"));
+            }
+            DrawCommand::PopClip => clip_depth -= 1,
+            _ if !command.has_paint() => {
+                return Err(format!("第 {index} 条指令：fill 与 stroke 至少声明其一"));
+            }
+            _ => {}
         }
+    }
+    if clip_depth != 0 {
+        return Err(format!("裁剪栈未闭合：还有 {clip_depth} 层 PushClip 未弹出"));
     }
     Ok(())
 }
@@ -449,6 +474,19 @@ mod tests {
         };
         let err = validate_commands(&[valid, short]).unwrap_err();
         assert!(err.starts_with("第 1 条指令"), "错误须带指令下标：{err}");
+    }
+
+    #[test]
+    fn clip_stack_must_balance() {
+        let push = DrawCommand::PushClip { x: 0.0, y: 0.0, w: 10.0, h: 10.0 };
+        assert!(validate_commands(&[push.clone(), DrawCommand::PopClip]).is_ok());
+        assert!(validate_commands(&[push.clone(), push.clone(), DrawCommand::PopClip, DrawCommand::PopClip]).is_ok());
+
+        let err = validate_commands(&[DrawCommand::PopClip]).unwrap_err();
+        assert!(err.contains("没有对应的 PushClip"), "多余的出栈须报错：{err}");
+
+        let err = validate_commands(&[push]).unwrap_err();
+        assert!(err.contains("未弹出"), "未闭合的裁剪栈须报错：{err}");
     }
 
     #[test]

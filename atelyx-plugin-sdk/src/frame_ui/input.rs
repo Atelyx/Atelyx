@@ -330,6 +330,12 @@ async fn pointer_down(
             state.press = Some(Press { id: id.to_string(), from_input: true });
         }
         Layout::TextArea { inner, font, value: shown, marks, line, .. } => {
+            // 点回正文恢复光标跟随：人工滚动位并回输入态
+            if let Some(offset) = state.scroll.remove(id) {
+                if let Some(item) = state.inputs.get_mut(id) {
+                    item.scroll = offset;
+                }
+            }
             // 可视首行取决于落点前的光标所在行：先按旧光标换算，再改光标与焦点
             let current = value_of(id).unwrap_or(shown);
             let was_focused = state.focus.as_deref() == Some(id);
@@ -392,8 +398,7 @@ async fn pointer_down(
             state.press = None;
             state.drag_bar = Some(id.to_string());
             let offset = bar_offset(track, thumb, max_offset, y);
-            state.scroll.insert(scroll.clone(), offset);
-            events.push(UiEvent::Scroll { id: scroll, offset, max_offset });
+            set_bar_offset(state, &scroll, offset, max_offset, events);
         }
         Layout::ScrollBarX { owner, track, thumb, max_offset } => {
             state.press = None;
@@ -506,8 +511,7 @@ async fn pointer_move(
             Some(Layout::ScrollBar { scroll, track, thumb, max_offset }) => {
                 let offset = bar_offset(track, thumb, max_offset, y);
                 if (state.scroll.get(&scroll).copied().unwrap_or(0.0) - offset).abs() >= 0.01 {
-                    state.scroll.insert(scroll.clone(), offset);
-                    events.push(UiEvent::Scroll { id: scroll, offset, max_offset });
+                    set_bar_offset(state, &scroll, offset, max_offset, events);
                 }
                 return;
             }
@@ -583,6 +587,25 @@ fn bar_offset(track: Rect, thumb: f32, max_offset: f32, y: f32) -> f32 {
     ratio * max_offset
 }
 
+/// 滚动条落点写回目标：普通容器记在 `scroll`，多行输入框同记在 `scroll` 覆盖位（暂停光标跟随）
+/// 并同步到输入态（落点换算与光标矩形读输入态）；输入框的滚动不给插件发 Scroll 事件。
+fn set_bar_offset(
+    state: &mut UiState,
+    target: &str,
+    offset: f32,
+    max_offset: f32,
+    events: &mut Vec<UiEvent>,
+) {
+    state.scroll.insert(target.to_string(), offset);
+    if let Some(Layout::TextArea { .. }) = state.layouts.get(target) {
+        if let Some(item) = state.inputs.get_mut(target) {
+            item.scroll = offset;
+        }
+        return;
+    }
+    events.push(UiEvent::Scroll { id: target.to_string(), offset, max_offset });
+}
+
 /// 横向滚动条落点 → 偏移。
 fn bar_offset_x(track: Rect, thumb: f32, max_offset: f32, x: f32) -> f32 {
     let travel = (track.w - thumb).max(1.0);
@@ -611,8 +634,11 @@ fn wheel(state: &mut UiState, x: f32, y: f32, delta_x: f32, delta_y: f32) -> Opt
         let content = text::wrapped_height_with_line(&mut state.metrics, &value, font, inner.w, line);
         let max_offset = (content - inner.h).max(0.0);
         if max_offset > 0.5 {
-            let item = state.inputs.entry(id).or_default();
+            let item = state.inputs.entry(id.clone()).or_default();
             item.scroll = (item.scroll + delta_y).clamp(0.0, max_offset);
+            let offset = item.scroll;
+            // 滚轮也是人工滚动：写覆盖位，否则聚焦时会被光标跟随拉回
+            state.scroll.insert(id, offset);
             return None;
         }
     }
@@ -815,6 +841,8 @@ async fn edit_key(
     let Some(current) = current_value(state, id, value_of) else {
         return;
     };
+    // 编辑或移动光标后回到光标跟随：人工滚动位失效
+    state.scroll.remove(id);
     if modifiers.control && !modifiers.alt {
         if let Key::Character { text: character } = key {
             match character.to_ascii_lowercase().as_str() {
