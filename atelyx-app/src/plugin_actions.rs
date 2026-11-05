@@ -389,8 +389,6 @@ pub fn refresh_frames(app: &mut App) -> Task<Message> {
     prune_surface_origins(app);
     sync_modal_state(app);
     sync_frame_focus(app);
-    // 这次投影已经覆盖到最新帧，心跳里不再重复补
-    let _ = app.plugins.take_observed_pending();
     ensure_images(app)
 }
 

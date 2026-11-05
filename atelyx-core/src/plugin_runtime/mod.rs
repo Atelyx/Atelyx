@@ -1635,69 +1635,6 @@ impl PluginRuntime {
             .and_then(|i| i.surface_frame(surface_id))
     }
 
-    /// 登记一次改宽等帧：须在向插件发 `Resize` 之前登记。登记期间退回的帧由
-    /// [`PluginRuntime::finish_surface_wait`] 取走画上，运行时不再为它发 `ViewSubmitted`
-    /// （一条通知会让 iced 整窗重建一遍，拖动期间那等于每拍白重建一次）。
-    pub fn begin_surface_wait(
-        &self,
-        plugin_id: &str,
-        surface_id: &str,
-        seen: std::sync::Arc<atelyx_plugin_protocol::frame::SurfaceFrame>,
-    ) {
-        let instance = self.instances.lock().unwrap().get(plugin_id).cloned();
-        if let Some(instance) = instance {
-            if matches!(instance.status(), PluginStatus::Running) {
-                instance.begin_frame_wait(surface_id, seen);
-            }
-        }
-    }
-
-    /// 等登记过的面出现一张「按 `size` 排版」的新帧（改宽那一拍同步取新帧用）。
-    /// 改宽期间插件手里可能还有上一拍宽度的帧，按尺寸过滤才不会把那种帧当成新帧画上去
-    /// （画上去的表现就是右对齐项与滚动条停在旧边缘）。未声明尺寸的帧不参与过滤。
-    /// 插件不在运行态、未登记、超时都返回 `None`，调用方按手上的帧画。
-    pub fn finish_surface_wait(
-        &self,
-        plugin_id: &str,
-        surface_id: &str,
-        size: (f32, f32),
-        timeout: std::time::Duration,
-    ) -> Option<std::sync::Arc<atelyx_plugin_protocol::frame::SurfaceFrame>> {
-        let instance = self.instances.lock().unwrap().get(plugin_id).cloned()?;
-        if !matches!(instance.status(), PluginStatus::Running) {
-            return None;
-        }
-        instance.finish_frame_wait(surface_id, Some(size), timeout)
-    }
-
-    /// 等某面出现一张不同于 `seen` 的新帧（登记与等待一步完成，供不需要抢先登记的调用方与测试）。
-    pub fn wait_surface_frame(
-        &self,
-        plugin_id: &str,
-        surface_id: &str,
-        seen: &std::sync::Arc<atelyx_plugin_protocol::frame::SurfaceFrame>,
-        timeout: std::time::Duration,
-    ) -> Option<std::sync::Arc<atelyx_plugin_protocol::frame::SurfaceFrame>> {
-        let instance = self.instances.lock().unwrap().get(plugin_id).cloned()?;
-        if !matches!(instance.status(), PluginStatus::Running) {
-            return None;
-        }
-        instance.begin_frame_wait(surface_id, seen.clone());
-        instance.finish_frame_wait(surface_id, None, timeout)
-    }
-
-    /// 是否有帧被绘制期同步取走、投影尚未补齐。壳在心跳里据此补一次投影
-    /// （图片载入与键位声明读的是投影缓存，同步取走的帧不走通知）。
-    pub fn take_observed_pending(&self) -> bool {
-        let instances: Vec<Arc<Instance>> =
-            self.instances.lock().unwrap().values().cloned().collect();
-        let mut pending = false;
-        for instance in instances {
-            pending |= instance.take_observed_pending();
-        }
-        pending
-    }
-
     /// 向某插件的运行日志追加一条宿主侧诊断（如帧里引用了未注册的图片源）。
     /// 返回是否真正写入：实例不在（未启用 / 已卸载 / 装载失败）时无处落盘，调用方据此
     /// 决定是否保留重试，而不是把「写不进去」当成「已报告」。

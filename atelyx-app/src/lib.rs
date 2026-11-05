@@ -2996,14 +2996,7 @@ impl App {
             Message::PersistTick => {
                 // 主页面板懒加载搭载：最近打开条目按节流校验存在性
                 let lazy = recent_files::tick(self)
-                    .chain(space_actions::members_tick(self))
-                    // 绘制期同步取走的帧不走通知：投影可能落后，心跳里补一次
-                    // （图片载入与键位声明读的是投影缓存）
-                    .chain(if self.plugins.take_observed_pending() {
-                        plugin_actions::refresh_frames(self)
-                    } else {
-                        Task::none()
-                    });
+                    .chain(space_actions::members_tick(self));
                 if !self.persist_dirty {
                     return lazy;
                 }

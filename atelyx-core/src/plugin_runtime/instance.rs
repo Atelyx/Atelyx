@@ -9,7 +9,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, Weak};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use atelyx_plugin_protocol::envelope::{Envelope, Request, RpcError};
@@ -50,8 +50,6 @@ const RESIZE_GIVE_UP: Duration = Duration::from_secs(2);
 /// 同时在途的尺寸上限。插件回帧比宿主重绘快得多时（每拍 1–3 ms 对 6–16 ms）每拍都能立刻发；
 /// 插件真慢时这里形成背压，只保留最新一笔，不会把尺寸排成无界队列。
 const MAX_RESIZE_IN_FLIGHT: u8 = 2;
-/// 面尺寸比较的容许误差（逻辑像素）：两端各自取整，1px 内的差不算换尺寸。
-const SIZE_TOLERANCE: f32 = 0.5;
 
 /// 宿主自报信息（握手回应）。
 const HOST_NAME: &str = "Atelyx";
@@ -92,11 +90,7 @@ pub(crate) struct Instance {
     undeclared_methods: Mutex<HashSet<String>>,
     undeclared_calls: AtomicU64,
     /// 各面整面帧（surface id → 帧）；会话收尾一并清除。
-    frames: Mutex<FrameStore>,
-    /// 新帧落地信号：与 `frames` 同一把锁配对，供绘制期同步等新帧（见 [`Instance::finish_frame_wait`]）。
-    frame_signal: Condvar,
-    /// 有帧被绘制期同步取走后置位，壳在心跳里据此补一次投影。
-    observed_pending: AtomicBool,
+    frames: Mutex<HashMap<String, Arc<frame::SurfaceFrame>>>,
     /// 声明了帧率的整面帧（面 id → 节拍）；随帧提交同步。
     surface_clocks: Mutex<HashMap<String, FrameClock>>,
     /// 各面的尺寸变更闸门：拖动中的中间尺寸只保留最新一笔，等新帧回执或兜底到点再放下一笔。
@@ -110,15 +104,6 @@ pub(crate) struct Instance {
     log: Arc<log::LogSink>,
     /// 动态库传输；进程插件始终为空。
     abi: abi::AbiSession,
-}
-
-/// 各面已落地的整面帧与正在等帧的面。
-#[derive(Default)]
-struct FrameStore {
-    frames: HashMap<String, Arc<frame::SurfaceFrame>>,
-    /// 已登记等帧的面 → 等帧前画在屏幕上的那一帧：登记期间退回的帧由等帧方取走画上，
-    /// 不再另发一条通知（否则每拍都会多一次整窗重建）。
-    waiting: HashMap<String, Arc<frame::SurfaceFrame>>,
 }
 
 /// 一个画布节点的帧节拍：声明了 `fps` 才有，宿主按它决定什么时候发 `host:canvas.frame`。
@@ -218,9 +203,7 @@ impl Instance {
             audits: Mutex::new(Vec::new()),
             undeclared_methods: Mutex::new(HashSet::new()),
             undeclared_calls: AtomicU64::new(0),
-            frames: Mutex::new(FrameStore::default()),
-            frame_signal: Condvar::new(),
-            observed_pending: AtomicBool::new(false),
+            frames: Mutex::new(HashMap::new()),
             surface_clocks: Mutex::new(HashMap::new()),
             resize_gates: Mutex::new(HashMap::new()),
             contributions: Mutex::new(Vec::new()),
@@ -254,55 +237,7 @@ impl Instance {
 
     /// 某面的整面帧（会话收尾即清空）。
     pub(crate) fn surface_frame(&self, surface_id: &str) -> Option<Arc<frame::SurfaceFrame>> {
-        self.frames.lock().unwrap().frames.get(surface_id).cloned()
-    }
-
-    /// 登记一次改宽等帧。须在向插件发 `Resize` 之前登记：登记期间退回的帧由
-    /// [`Instance::finish_frame_wait`] 取走并画上，提交路径不再发通知。
-    pub(crate) fn begin_frame_wait(&self, surface_id: &str, seen: Arc<frame::SurfaceFrame>) {
-        self.frames.lock().unwrap().waiting.insert(surface_id.to_string(), seen);
-    }
-
-    /// 等某面出现一张不同于登记时画面、且（给了 `size` 时）按该尺寸排版的新帧。
-    /// 超时、未登记、该面已无可渲染帧时返回 `None`：调用方按手上的帧画。
-    pub(crate) fn finish_frame_wait(
-        &self,
-        surface_id: &str,
-        size: Option<(f32, f32)>,
-        timeout: Duration,
-    ) -> Option<Arc<frame::SurfaceFrame>> {
-        let deadline = Instant::now() + timeout;
-        let mut store = self.frames.lock().unwrap();
-        let seen = store.waiting.get(surface_id).cloned()?;
-        loop {
-            match store.frames.get(surface_id) {
-                Some(frame)
-                    if !Arc::ptr_eq(frame, &seen)
-                        && size.is_none_or(|size| laid_out_at(frame, size)) => {
-                    let frame = frame.clone();
-                    store.waiting.remove(surface_id);
-                    drop(store);
-                    self.observed_pending.store(true, Ordering::Relaxed);
-                    return Some(frame);
-                }
-                Some(_) => {}
-                None => {
-                    store.waiting.remove(surface_id);
-                    return None;
-                }
-            }
-            let now = Instant::now();
-            if now >= deadline {
-                store.waiting.remove(surface_id);
-                return None;
-            }
-            store = self.frame_signal.wait_timeout(store, deadline - now).ok()?.0;
-        }
-    }
-
-    /// 取走「有帧被同步取走」的待补投影标记。
-    pub(crate) fn take_observed_pending(&self) -> bool {
-        self.observed_pending.swap(false, Ordering::Relaxed)
+        self.frames.lock().unwrap().get(surface_id).cloned()
     }
 
     /// 本插件已注册贡献点（补上插件 id）。
@@ -488,13 +423,10 @@ impl Instance {
             self.undeclared_methods.lock().unwrap().clear();
             self.undeclared_calls.store(0, Ordering::Relaxed);
             {
-                let mut store = self.frames.lock().unwrap();
-                frames_dropped = !store.frames.is_empty();
-                store.frames.clear();
-                store.waiting.clear();
+                let mut frames = self.frames.lock().unwrap();
+                frames_dropped = !frames.is_empty();
+                frames.clear();
             }
-            self.observed_pending.store(false, Ordering::Relaxed);
-            self.frame_signal.notify_all();
             self.surface_clocks.lock().unwrap().clear();
             self.resize_gates.lock().unwrap().clear();
             contributions_dropped = !self.contributions.lock().unwrap().is_empty();
@@ -1880,40 +1812,32 @@ impl Instance {
             .validate()
             .map_err(|e| RpcError::failed(format!("帧内容不合法：{e}")))?;
         let submitted = Arc::new(frame);
-        let claimed = self
-            .with_session(token, || {
-                let mut clocks = self.surface_clocks.lock().unwrap();
-                // 帧率未变的面沿用原钟：帧序号与节拍相位不因内容更新而重置
-                match submitted.fps {
-                    Some(fps) => {
-                        let clock = match clocks.get(&surface_id) {
-                            Some(clock) if clock.fps == fps => *clock,
-                            _ => FrameClock::new(fps, Instant::now()),
-                        };
-                        clocks.insert(surface_id.clone(), clock);
-                    }
-                    None => {
-                        clocks.remove(&surface_id);
-                    }
+        self.with_session(token, || {
+            let mut clocks = self.surface_clocks.lock().unwrap();
+            // 帧率未变的面沿用原钟：帧序号与节拍相位不因内容更新而重置
+            match submitted.fps {
+                Some(fps) => {
+                    let clock = match clocks.get(&surface_id) {
+                        Some(clock) if clock.fps == fps => *clock,
+                        _ => FrameClock::new(fps, Instant::now()),
+                    };
+                    clocks.insert(surface_id.clone(), clock);
                 }
-                drop(clocks);
-                let mut store = self.frames.lock().unwrap();
-                store.frames.insert(surface_id.clone(), submitted);
-                // 有绘制期等帧登记：这一帧由它取走画上，不再发通知（发一条就是一次整窗重建）
-                let claimed = store.waiting.contains_key(&surface_id);
-                drop(store);
-                self.frame_signal.notify_all();
-                self.submits.fetch_add(1, Ordering::Relaxed);
-                Ok(claimed)
-            })
-            .map_err(RpcError::failed)?;
+                None => {
+                    clocks.remove(&surface_id);
+                }
+            }
+            drop(clocks);
+            self.frames.lock().unwrap().insert(surface_id.clone(), submitted);
+            self.submits.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        })
+        .map_err(RpcError::failed)?;
         self.resize_acked(&surface_id);
-        if !claimed {
-            let _ = self.events.send(PluginEvent::ViewSubmitted {
-                id: self.id.clone(),
-                surface_id: Some(surface_id),
-            });
-        }
+        let _ = self.events.send(PluginEvent::ViewSubmitted {
+            id: self.id.clone(),
+            surface_id: Some(surface_id),
+        });
         Ok(())
     }
 
@@ -2091,12 +2015,9 @@ impl Instance {
                 return Err(format!("未注册的贡献 id：{}", p.id));
             }
             {
-                let mut store = self.frames.lock().unwrap();
-                store.frames.remove(&p.id);
-                store.waiting.remove(&p.id);
+                self.frames.lock().unwrap().remove(&p.id);
             }
             self.surface_clocks.lock().unwrap().remove(&p.id);
-            self.frame_signal.notify_all();
             Ok(())
         })
         .map_err(RpcError::failed)?;
@@ -2527,15 +2448,6 @@ impl Instance {
 struct SpawnSlot {
     pid: Option<u32>,
     pending: Vec<HostEvent>,
-}
-
-/// 走壳侧异步应答的方法（对话编排 / 剪贴板 / 仓库读写 / 托盘 / 协作 / 滚动 / 文字量算）。
-///
-/// 帧是否按 `size` 排版：未声明尺寸的帧不参与判定（老插件按「拿到什么画什么」处理）。
-fn laid_out_at(frame: &frame::SurfaceFrame, size: (f32, f32)) -> bool {
-    frame.size.is_none_or(|laid| {
-        (laid.w - size.0).abs() <= SIZE_TOLERANCE && (laid.h - size.1).abs() <= SIZE_TOLERANCE
-    })
 }
 
 /// 分流判定与「不得同步分派」的防御共用这一份清单：两处各写一遍时，新增方法只改一处会
@@ -3635,42 +3547,65 @@ mod tests {
         assert!(instance.max_frame_fps().is_none());
     }
 
-    /// 绘制期登记的等帧会取走退回的帧：登记期间的提交不发通知，超时后到达的帧照常通知。
+    /// 拖动改宽期间回帧照常通知壳（帧提交事件由壳按窗口合并投影，这里不做抑制）。
     #[test]
-    fn claimed_frame_is_not_broadcast_and_a_timeout_falls_back_to_notice() {
+    fn frames_during_a_resize_are_broadcast_and_ack_the_gate() {
         let (_tmp, instance, mut events) = make_instance_with_events(Vec::new());
         let token = instance.run_token.load(Ordering::SeqCst);
-        let submit = || {
-            instance
-                .accept_frame(token, "main".into(), frame::SurfaceFrame::default())
-                .unwrap();
-        };
-
-        // 没人等帧：提交照常通知壳
-        submit();
-        let first = instance.surface_frame("main").unwrap();
+        instance.on_resize("main", 400.0, 300.0);
+        instance.on_resize("main", 420.0, 300.0);
+        instance
+            .accept_frame(token, "main".into(), frame::SurfaceFrame::default())
+            .unwrap();
         assert!(matches!(
             events.try_recv().unwrap(),
             PluginEvent::ViewSubmitted { .. }
         ));
+        let gates = instance.resize_gates.lock().unwrap();
+        let gate = gates.get("main").unwrap();
+        assert_eq!(gate.sent, Some((420.0, 300.0)), "回帧后补发最新一笔");
+        assert_eq!(gate.unacked, 1, "回帧只核销一笔在途");
+    }
 
-        // 登记等帧期间的提交由等待方取走，不再通知
-        instance.begin_frame_wait("main", first.clone());
-        submit();
-        assert!(events.try_recv().is_err(), "登记期间的帧不得再发通知");
-        let second = instance.finish_frame_wait("main", None, Duration::from_millis(200)).unwrap();
-        assert!(!Arc::ptr_eq(&first, &second));
-        assert!(instance.take_observed_pending(), "取走即标记待补投影");
-        assert!(!instance.take_observed_pending());
+    /// 尺寸兜底放弃闸门之后才回的帧照样落地并通知；下一次改宽重新开闸。
+    #[test]
+    fn a_late_frame_after_the_gate_gave_up_is_accepted_and_broadcast() {
+        let (_tmp, instance, mut events) = make_instance_with_events(Vec::new());
+        let token = instance.run_token.load(Ordering::SeqCst);
+        instance.on_resize("main", 400.0, 300.0);
+        {
+            let mut gates = instance.resize_gates.lock().unwrap();
+            gates.get_mut("main").unwrap().stale_since =
+                Some(Instant::now() - RESIZE_GIVE_UP - Duration::from_millis(1));
+        }
+        assert!(!instance.resize_fallback("main"), "超过放弃时限即撤闸");
+        assert!(instance.resize_gates.lock().unwrap().get("main").is_none());
+        instance
+            .accept_frame(token, "main".into(), frame::SurfaceFrame::default())
+            .unwrap();
+        assert!(instance.surface_frame("main").is_some(), "迟交的帧不丢");
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            PluginEvent::ViewSubmitted { .. }
+        ));
+    }
 
-        // 等帧超时会撤掉登记：之后退回的帧仍要通知
-        instance.begin_frame_wait("main", second);
-        assert!(instance.finish_frame_wait("main", None, Duration::from_millis(1)).is_none());
-        submit();
-        assert!(
-            matches!(events.try_recv().unwrap(), PluginEvent::ViewSubmitted { .. }),
-            "超时后到达的帧照常通知"
-        );
+    /// 面重新挂载会清掉上一轮在途尺寸；上一面迟到的帧仍按面 id 落地并通知。
+    #[test]
+    fn a_late_frame_is_accepted_after_the_surface_is_remounted() {
+        let (_tmp, instance, mut events) = make_instance_with_events(Vec::new());
+        let token = instance.run_token.load(Ordering::SeqCst);
+        instance.on_resize("main", 400.0, 300.0);
+        instance.replay_surface_size("main", 500.0, 400.0);
+        assert!(instance.resize_gates.lock().unwrap().get("main").is_none());
+        instance
+            .accept_frame(token, "main".into(), frame::SurfaceFrame::default())
+            .unwrap();
+        assert!(instance.surface_frame("main").is_some());
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            PluginEvent::ViewSubmitted { .. }
+        ));
     }
 
     /// 尺寸突发：在途额度内逐笔立即下发，超出额度只留最新一笔，回帧即补发。
