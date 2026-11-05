@@ -24,3 +24,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 # 历史内嵌图片的 dataURL 解码
 base64 = "0.22"
 nanoid = "0.4"
+
+[dev-dependencies]
+# 剪贴板参数契约测试：取 Context 测试句柄观察插件发出的请求
+atelyx-plugin-sdk = { version = "0.1.0", path = "../../atelyx-plugin-sdk", features = ["test-support"] }

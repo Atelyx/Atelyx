@@ -1116,7 +1116,7 @@ impl PluginState {
                     })
                     .flatten();
                 if let Some(text) = text {
-                    let _ = ctx.write_clipboard(&text).await;
+                    let _ = ctx.clipboard_write(&text).await;
                 }
                 (false, false)
             }

@@ -952,7 +952,7 @@ impl FilesPlugin {
             },
             false => path.to_string(),
         };
-        if let Err(error) = ctx.write_clipboard(&text).await {
+        if let Err(error) = ctx.clipboard_write(&text).await {
             self.warn(ctx, "复制路径", &error);
         }
     }

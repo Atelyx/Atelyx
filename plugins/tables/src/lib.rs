@@ -714,7 +714,7 @@ impl PluginState {
                     if text.is_empty() {
                         return;
                     }
-                    if let Err(error) = ctx.write_clipboard(&text).await {
+                    if let Err(error) = ctx.clipboard_write(&text).await {
                         ctx.log_error(&format!("写剪贴板失败：{error}"));
                         let _ = ctx
                             .notify(&format!("{label}失败：{error}"), None, NotificationLevel::Error)
@@ -771,7 +771,7 @@ impl PluginState {
                 else {
                     return;
                 };
-                if let Err(error) = ctx.write_clipboard(&text).await {
+                if let Err(error) = ctx.clipboard_write(&text).await {
                     ctx.log_error(&format!("写剪贴板失败：{error}"));
                     let _ = ctx
                         .notify(&format!("{label}失败：{error}"), None, NotificationLevel::Error)
@@ -1352,6 +1352,35 @@ pub extern "C" fn atelyx_plugin_api() -> *const atelyx_plugin_sdk::abi::PluginAp
         },
         || Box::new(TablesPlugin::new()),
     )
+}
+
+#[cfg(test)]
+mod clipboard_contract_tests {
+    use atelyx_plugin_protocol::envelope::Envelope;
+    use atelyx_plugin_protocol::method::{clipboard, TextPayload};
+    use atelyx_plugin_sdk::Context;
+
+    /// 复制 / 剪切写剪贴板必须发协议 TextPayload：宿主按 `text` 字段解析，发 `content` 会被拒。
+    #[test]
+    fn clipboard_write_params_parse_as_text_payload() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("测试运行时");
+        runtime.block_on(async {
+            let (out_tx, mut out_rx) = tokio::sync::mpsc::channel(4);
+            let ctx = Context::test_unbound(out_tx);
+            let call = tokio::spawn(async move { ctx.clipboard_write("a\tb").await });
+            let envelope = out_rx.recv().await.expect("应发出调用请求");
+            call.abort();
+
+            let Envelope::Request(request) = envelope else { panic!("应为请求信封") };
+            assert_eq!(request.method, clipboard::WRITE_TEXT);
+            let payload: TextPayload =
+                serde_json::from_value(request.params).expect("协议解析失败：缺少 text 字段");
+            assert_eq!(payload.text, "a\tb");
+        });
+    }
 }
 
 /// 单张导入图片的大小上限（字节，与宿主表格图片同一档）。

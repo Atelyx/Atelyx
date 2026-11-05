@@ -444,12 +444,6 @@ impl Context {
         self.call_unit(method::shell::OPEN_URL, &params).await
     }
 
-    /// 写系统剪贴板（文本）。
-    pub async fn write_clipboard(&self, text: &str) -> Result<(), RpcError> {
-        self.call_unit(method::clipboard::WRITE_TEXT, &TextContent { content: text.to_string() })
-            .await
-    }
-
     /// 当前容器与在线成员快照（容器种类 / 连接态 / 本端身份 / 在线设备明细）。
     /// 连接态与在场变化时宿主另发 [`crate::protocol::event::name::SPACE_PEERS_CHANGED`]。
     pub async fn space_room(&self) -> Result<SpaceRoomResult, RpcError> {
@@ -1309,5 +1303,32 @@ impl Context {
         let value = serde_json::to_value(params)
             .map_err(|e| RpcError::failed(format!("调用 {method} 失败：params 序列化错误（{e}）")))?;
         self.call_unbounded(method, value).await.map(|_| ())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 剪贴板文本的唯一出口必须发协议 `TextPayload`：宿主按 `text` 字段解析。
+    #[test]
+    fn clipboard_write_params_parse_as_text_payload() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("测试运行时");
+        runtime.block_on(async {
+            let (out_tx, mut out_rx) = mpsc::channel(4);
+            let ctx = Context::new(out_tx);
+            let call = tokio::spawn(async move { ctx.clipboard_write("a\tb").await });
+            let envelope = out_rx.recv().await.expect("应发出调用请求");
+            call.abort();
+
+            let Envelope::Request(request) = envelope else { panic!("应为请求信封") };
+            assert_eq!(request.method, method::clipboard::WRITE_TEXT);
+            let payload: TextPayload =
+                serde_json::from_value(request.params).expect("协议解析失败：缺少 text 字段");
+            assert_eq!(payload.text, "a\tb");
+        });
     }
 }
