@@ -12,11 +12,11 @@ use atelyx_core::plugin_runtime::{
 use atelyx_plugin_protocol::event::{DocPresencePayload, DocRemoteCursor};
 use atelyx_plugin_protocol::frame::{Key, KeyAction, Modifiers, NamedKey, SurfaceFrame};
 use atelyx_plugin_protocol::method::{FontSizes, Radii, ThemeColors, ThemeResult};
-use atelyx_plugin_protocol::paint::{DrawCommand, PaintColor, TextAlign};
+use atelyx_plugin_protocol::paint::{ColorToken, DrawCommand, ImageSource, PaintColor, TextAlign};
 
 const PLUGIN: &str = "atelyx.notes";
 const SURFACE: &str = "note";
-const NOTE: &str = "---\ntags: [开发]\n---\n# 标题\n\n第一段正文。\n\n- 列表项一\n- 列表项二\n\n1. 步骤一\n2. 步骤二\n\n- 父项\n  - 子项一\n  - 子项二\n\n> 引用段一\n>\n> 引用段二\n";
+const NOTE: &str = "---\ntags: [开发]\n---\n# 标题\n\n第一段正文。\n\n- 列表项一\n- 列表项二\n\n1. 步骤一\n2. 步骤二\n\n- 父项\n  - 子项一\n  - 子项二\n\n> 引用段一\n>\n> 引用段二\n\n![窄图|320](img/a.png)\n\n![宽图|1000](img/d.png)\n\n![定尺|400x300](img/b.png)\n\n![自然](img/c.png)\n";
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
@@ -61,6 +61,19 @@ async fn main() {
                     }
                     HostRequest::VaultTags { request_id, .. } => {
                         reply(&responder, request_id, json!({ "tags": ["开发", "设计"] }));
+                    }
+                    HostRequest::VaultFiles { request_id, .. } => {
+                        reply(
+                            &responder,
+                            request_id,
+                            json!({ "files": [
+                                { "path": "a.md", "name": "a.md", "icon": "file-text", "openable": true },
+                                { "path": "笔记/方案.md", "name": "方案.md", "icon": "file-text", "openable": true },
+                            ] }),
+                        );
+                    }
+                    HostRequest::VaultImageInfo { request_id, .. } => {
+                        reply(&responder, request_id, json!({ "width": 640, "height": 480 }));
                     }
                     HostRequest::EditorPrefs { request_id, .. } => {
                         reply(
@@ -114,6 +127,28 @@ async fn main() {
     runtime.notify_doc_open(PLUGIN, SURFACE, "a.md");
     let frame = wait_frame(&runtime, Duration::from_secs(5)).await.expect("打开笔记后应有帧");
     println!("只读帧：{} 条指令，{} 个命中区", frame.commands.len(), frame.hits.len());
+
+    // 图片绘制的实际尺寸：`|宽`（超可用宽时等比收缩）、`|宽x高`、未声明（原图自然尺寸）。
+    // 图片在正文末尾，先拉高面让所有块进入可视区再断言，随后恢复原高度。
+    runtime.notify_frame_input(PLUGIN, SURFACE, &FrameInput::Resize { width: 900.0, height: 2400.0 });
+    let images = wait_images(&runtime, Duration::from_secs(2)).await.expect("图片块应按声明或原图尺寸绘制");
+    for (path, want) in [("img/a.png", (320.0, 240.0)), ("img/b.png", (400.0, 300.0)), ("img/c.png", (640.0, 480.0))] {
+        let (w, h) = image_size(&images, path).unwrap_or_else(|| panic!("缺少图片指令：{path}"));
+        println!("图片 {path}：{w:.1}×{h:.1}");
+        assert!(
+            (w - want.0).abs() < 1.0 && (h - want.1).abs() < 1.0,
+            "{path} 应绘制 {}×{}，实际 {w}×{h}",
+            want.0,
+            want.1
+        );
+    }
+    let (w, h) = image_size(&images, "img/d.png").expect("超宽图片指令");
+    println!("图片 img/d.png：{w:.1}×{h:.1}");
+    assert!(w < 1000.0 && w <= 780.5, "超宽图片应按可用宽收缩（实际 {w}）");
+    assert!((w / h - 640.0 / 480.0).abs() < 0.02, "收缩后应保持原图比例（{w}×{h}）");
+    runtime.notify_frame_input(PLUGIN, SURFACE, &FrameInput::Resize { width: 900.0, height: 700.0 });
+    let frame = wait_frame(&runtime, Duration::from_secs(5)).await.expect("恢复面尺寸后应有帧");
+    println!("恢复只读帧：{} 条指令", frame.commands.len());
 
     // 只读面的远端协作光标：竖线与名签叠在正文块上
     let cursor_at = NOTE.find("第一段").expect("正文起点");
@@ -297,6 +332,43 @@ async fn main() {
                     .any(|command| matches!(command, atelyx_plugin_protocol::paint::DrawCommand::Text { content, .. } if content == "空行"))
             });
             println!("空行就地输入：{}", if inserted { "通过" } else { "未确认" });
+        }
+        // `[[` 候选浮层贴光标：浮层由事件期算出的光标矩形定位，应与同一帧的光标竖线对齐
+        if let Some(hit) = runtime
+            .surface_frame(PLUGIN, SURFACE)
+            .and_then(|frame| frame.hits.iter().find(|hit| hit.id == "note:block:1").cloned())
+        {
+            click_hit(&runtime, &hit);
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            runtime.notify_frame_input(
+                PLUGIN,
+                SURFACE,
+                &FrameInput::Text { text: "[[".into(), composing: false, caret: None, candidates: None },
+            );
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let mut found = None;
+            while Instant::now() < deadline {
+                if let Some(frame) = runtime.surface_frame(PLUGIN, SURFACE) {
+                    let overlay = frame
+                        .hits
+                        .iter()
+                        .find(|hit| hit.id == "@overlay:0")
+                        .map(|hit| (hit.x, hit.y, hit.w, hit.h));
+                    if let (Some(overlay), Some(caret)) = (overlay, caret_rect(&frame)) {
+                        found = Some((overlay, caret));
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            let (overlay, caret) = found.expect("输入 [[ 后应出现候选浮层与光标");
+            println!(
+                "[[ 候选浮层：({:.1},{:.1}) {:.0}×{:.0}，光标 ({:.1},{:.1})",
+                overlay.0, overlay.1, overlay.2, overlay.3, caret.0, caret.1
+            );
+            assert!((overlay.0 - (caret.0 + 6.0)).abs() < 1.0, "浮层左缘应贴在光标右侧 6px");
+            assert!((overlay.1 - (caret.1 + caret.3 + 4.0)).abs() < 1.0, "浮层上缘应贴在光标下沿 4px");
+            assert!((overlay.2 - 260.0).abs() < 0.5, "候选浮层宽度固定");
         }
     }
     if let Some(hit) = runtime
@@ -603,6 +675,49 @@ async fn wait_remote_cursor(
 fn has_text(frame: &SurfaceFrame, text: &str) -> bool {
     frame.commands.iter().any(|command| {
         matches!(command, DrawCommand::Text { content, .. } if content.trim() == text.trim())
+    })
+}
+
+/// 某张仓库图片在帧里的绘制尺寸（`w/h` 即实际版面尺寸）。
+fn image_size(frame: &SurfaceFrame, path: &str) -> Option<(f32, f32)> {
+    frame.commands.iter().find_map(|command| match command {
+        DrawCommand::Image { source: ImageSource::Vault { path: src, .. }, w, h, .. } if src == path => {
+            Some((*w, *h))
+        }
+        _ => None,
+    })
+}
+
+async fn wait_images(runtime: &Arc<PluginRuntime>, timeout: Duration) -> Option<Arc<SurfaceFrame>> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(frame) = runtime.surface_frame(PLUGIN, SURFACE) {
+            if ["img/a.png", "img/b.png", "img/c.png", "img/d.png"]
+                .iter()
+                .all(|path| image_size(&frame, path).is_some())
+            {
+                return Some(frame);
+            }
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+/// 帧里的光标竖线（1px、强调色填充），与输入面同坐标系。
+fn caret_rect(frame: &SurfaceFrame) -> Option<(f32, f32, f32, f32)> {
+    frame.commands.iter().find_map(|command| match command {
+        DrawCommand::Rect {
+            x,
+            y,
+            w,
+            h,
+            fill: Some(PaintColor::Token { name: ColorToken::Accent }),
+            ..
+        } if (*w - 1.0).abs() < 0.6 && *h > 12.0 => Some((*x, *y, *w, *h)),
+        _ => None,
     })
 }
 

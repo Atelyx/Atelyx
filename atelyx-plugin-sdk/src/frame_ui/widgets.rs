@@ -1244,6 +1244,36 @@ impl<'c, 'a> Ui<'c, 'a> {
         });
     }
 
+    /// 固定宽高、指定填充方式的图片贴片。宽高按等比描述给定：父容器比请求宽度窄时，
+    /// 高度随实际可用宽等比收缩，避免窄面板里图被纵向拉扁。
+    pub fn image_fit_sized(&mut self, source: ImageSource, width: f32, height: f32, fit: ImageFit) {
+        self.push(Item {
+            width: Width::Fixed(width.max(1.0)),
+            fill_height: false,
+            height: Box::new(move |_, actual| {
+                if width > 0.0 {
+                    height * (actual.min(width) / width).max(0.0)
+                } else {
+                    height
+                }
+            }),
+            draw: Box::new(move |ctx, rect, clip| {
+                let visible = rect.intersect(clip);
+                if visible.is_empty() {
+                    return;
+                }
+                ctx.draw(DrawCommand::Image {
+                    source: source.clone(),
+                    x: rect.x,
+                    y: rect.y,
+                    w: rect.w,
+                    h: rect.h,
+                    fit: Some(fit),
+                });
+            }),
+        });
+    }
+
     /// 透明命中区（撑满父容器剩余空间）；用于浮层背板「点外面关闭」。
     pub fn hit_area(&mut self, id: impl Into<String>) {
         let id = id.into();
@@ -2064,7 +2094,8 @@ impl<'c, 'a> Ui<'c, 'a> {
         let theme = self.ctx().theme.clone();
         let cache = Arc::clone(&self.ctx().state.markdown_layouts);
         let soft_wrap = self.ctx().soft_wrap;
-        let key = super::markdown::content_key(&content, &mentions);
+        let owner_key = super::markdown::content_key(&content, &mentions);
+        let key = owner_key;
         // 同一段项源码在不同列表位置要各自排版：起始序号一并计入缓存键
         let key = match list_start {
             Some(start) => key ^ (start as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15),
@@ -2073,8 +2104,13 @@ impl<'c, 'a> Ui<'c, 'a> {
         // 折叠软换行改变版面：与保留换行的版面分开缓存
         let key = if soft_wrap { key } else { key ^ 0x5F35_6E4B_2A17_9C31 };
         let start = list_start.unwrap_or(0);
+        // 展开态归属「块位 + 内容」：同一块位换了文档内容即回到折叠态
+        let owner = format!("{}:{owner_key:x}", id);
+        let expanded = Arc::new(self.ctx().state.expanded_codes(&owner));
         let for_height = content.clone();
         let height_mentions = mentions.clone();
+        let height_owner = owner.clone();
+        let height_expanded = Arc::clone(&expanded);
         let draw_mentions = mentions;
         self.push(Item {
             width: Width::Fill,
@@ -2085,11 +2121,13 @@ impl<'c, 'a> Ui<'c, 'a> {
                     metrics,
                     &theme,
                     key,
+                    &height_owner,
                     &for_height,
                     &height_mentions,
                     width,
                     start,
                     soft_wrap,
+                    &height_expanded,
                 )
             }),
             draw: Box::new(move |ctx, rect, clip| {
@@ -2100,7 +2138,19 @@ impl<'c, 'a> Ui<'c, 'a> {
                 // 正文可拖选：命中声明为文本形态，按下 / 拖动由输入路由换算成行列。
                 // 复制钮与任务框在 paint 里后声明，同帧内后声明者优先，子区点击不会被整块吞掉。
                 ctx.hit(&id, visible, atelyx_plugin_protocol::frame::HitCursor::Text);
-                super::markdown::paint(ctx, &id, key, &content, &draw_mentions, rect, clip, start, soft_wrap);
+                super::markdown::paint(
+                    ctx,
+                    &id,
+                    &owner,
+                    key,
+                    &content,
+                    &draw_mentions,
+                    rect,
+                    clip,
+                    start,
+                    soft_wrap,
+                    &expanded,
+                );
             }),
         });
     }

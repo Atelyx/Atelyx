@@ -438,6 +438,12 @@ impl Context {
         Ok(result.path)
     }
 
+    /// 用系统默认浏览器打开外链（只接受 http(s) / mailto；其余由宿主拒绝）。
+    pub async fn open_url(&self, url: &str) -> Result<(), RpcError> {
+        let params = OpenUrlParams { url: url.to_string() };
+        self.call_unit(method::shell::OPEN_URL, &params).await
+    }
+
     /// 写系统剪贴板（文本）。
     pub async fn write_clipboard(&self, text: &str) -> Result<(), RpcError> {
         self.call_unit(method::clipboard::WRITE_TEXT, &TextContent { content: text.to_string() })

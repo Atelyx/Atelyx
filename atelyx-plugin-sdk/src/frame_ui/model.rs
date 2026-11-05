@@ -65,6 +65,10 @@ pub(crate) enum Layout {
     Custom,
     /// 控件层自持的复制钮（代码块头）：按下即写剪贴板，插件不必知道这次点击。
     Copy { text: String },
+    /// 控件层自持的「展开 / 收起」行：点击就地翻转折叠态，不交给插件。
+    Expand { key: String },
+    /// Markdown 内的链接片段：`target` 是内链目标或外链 URL，点击交给插件处理。
+    Link { target: String },
     /// 只读 Markdown 块：区内可拖选文字（`rect` 是块的外框，落点按版面换算到行列）。
     /// `content_w` = 内容的自然宽：大于外框宽时块内可横向滚动。
     Markdown { rect: Rect, content_w: f32 },
@@ -185,6 +189,8 @@ pub(crate) struct UiState {
     pub overlays: Vec<Rect>,
     /// 浮层内的滚动容器 id：浮层打开时不把滚轮落到下层列表。
     pub overlay_scrolls: std::collections::HashSet<String>,
+    /// 已展开的长代码块（键 = `<Markdown 块 id>:<内容指纹>::code:<序>`）：控件层自持，点击就地翻转。
+    pub expanded: std::collections::HashSet<String>,
     /// 虚拟列表各条目的最近一次实测高（列表 id + 条目 key）：只用于估算屏外条目，
     /// 改宽后优先按新宽度重排屏内条目。
     pub virtual_heights: Arc<Mutex<HashMap<(String, u64), f32>>>,
@@ -224,6 +230,7 @@ impl Default for UiState {
             resize_pending: false,
             overlays: Vec::new(),
             overlay_scrolls: std::collections::HashSet::new(),
+            expanded: std::collections::HashSet::new(),
             virtual_heights: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -248,6 +255,18 @@ impl UiState {
     pub(crate) fn clear_hint(&mut self) {
         self.hint = None;
         self.pointer = None;
+    }
+
+    /// 某 Markdown 块里已展开的代码块序号（排版时判定显示全部行还是折叠）。
+    pub(crate) fn expanded_codes(&self, owner: &str) -> Vec<usize> {
+        let prefix = format!("{owner}::code:");
+        let mut codes: Vec<usize> = self
+            .expanded
+            .iter()
+            .filter_map(|key| key.strip_prefix(&prefix)?.parse().ok())
+            .collect();
+        codes.sort_unstable();
+        codes
     }
 
     /// 此刻该画的提示文字：停够 [`HINT_DELAY`] 才算数。
@@ -330,6 +349,11 @@ impl UiState {
         self.scroll_max.retain(|id, _| self.layouts.contains_key(id));
         self.follow_prev.retain(|id, _| self.layouts.contains_key(id));
         self.scroll_x.retain(|id, _| self.markdown_last.contains_key(id));
+        self.expanded.retain(|key| {
+            key.rsplit_once("::code:")
+                .and_then(|(owner, _)| owner.rsplit_once(':'))
+                .is_some_and(|(id, _)| self.markdown_last.contains_key(id))
+        });
         self.draggables.retain(|id| self.layouts.contains_key(id));
         self.overlay_scrolls.retain(|id| self.layouts.contains_key(id));
         if self.drag_bar.as_ref().is_some_and(|id| !self.layouts.contains_key(id)) {

@@ -391,6 +391,7 @@ pub const BUILTIN_SERVICES: &[(&str, &str, &[&str])] = &[
         shell::REVEAL,
         shell::ABSOLUTE_PATH,
         shell::DUPLICATE,
+        shell::OPEN_URL,
     ]),
     ("collab", PLATFORM_PLUGIN, &[collab::PEERS, collab::SEND, collab::META_GET, collab::META_PATCH]),
     // 空间名册与房间事实取自宿主会话与服务端，弹层 / 菜单也在宿主，归平台自身
@@ -2002,6 +2003,8 @@ pub mod shell {
     pub const ABSOLUTE_PATH: &str = "shell.absolutePath";
     /// 在同目录创建副本（同名自动加序号；.atlx / .atb 连同内部 id 重建），回执 = 落定的新路径。
     pub const DUPLICATE: &str = "shell.duplicate";
+    /// 用系统默认浏览器打开一个外链 URL（只接受 http(s) / mailto，其余由宿主拒绝）。
+    pub const OPEN_URL: &str = "shell.openUrl";
 }
 ```
 
@@ -2201,6 +2204,16 @@ pub struct RevealParams {
     /// 目标是文件夹（文件夹用「打开」语义，文件用「选中」语义）。
     #[serde(default)]
     pub is_dir: bool,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 在外链打开 URL（`shell.openUrl`）：`url` 必须是 http(s) / mailto。
+#[serde(rename_all = "camelCase", default)]
+pub struct OpenUrlParams {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub url: String,
 }
 ```
 

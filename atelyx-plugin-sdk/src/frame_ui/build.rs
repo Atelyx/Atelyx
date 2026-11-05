@@ -10,7 +10,8 @@ use atelyx_plugin_protocol::frame::{FrameRect, HitCursor, HitRegion, SurfaceFram
 
 use super::geom::Rect;
 use super::metrics::Metrics;
-use super::model::{FontSpec, Layout, UiState};
+use super::model::{FontSpec, InputState, Layout, UiState};
+use super::text;
 use super::theme;
 
 /// 提示标签的内边距（左右 / 上下）。
@@ -560,6 +561,43 @@ pub(crate) fn layout_overlays(ctx: &mut BuildCtx<'_>) {
         draw_column(ctx, &items, rect, rect, 0.0);
     }
     ctx.in_overlay = false;
+}
+
+/// 输入框的光标矩形：单行按窗口左移换算，多行按软换行与框内滚动偏移换算。
+/// 几何取上一帧的输入框落点（输入框位置不随本帧文字变化），文字与光标用传入的当前值。
+pub(crate) fn caret_rect(
+    layouts: &HashMap<String, Layout>,
+    inputs: &HashMap<String, InputState>,
+    metrics: &mut Metrics,
+    id: &str,
+    value: &str,
+    caret: usize,
+) -> Option<Rect> {
+    let layout = layouts.get(id)?;
+    let caret = text::snap(value, caret);
+    match layout {
+        Layout::Input { inner, font, .. } => {
+            let line = text::line_height(metrics, *font);
+            let window = text::window(metrics, value, *font, inner.w, caret, caret);
+            Some(Rect::new(inner.x + window.caret, inner.y + (inner.h - line) * 0.5, 1.0, line))
+        }
+        Layout::TextArea { inner, font, line, .. } => {
+            let lines = text::lines(metrics, value, *font, inner.w);
+            let index = text::line_of(&lines, caret);
+            let scroll = text::area_scroll(
+                inputs.get(id).map_or(0.0, |input| input.scroll),
+                index,
+                *line,
+                inner.h,
+                lines.len(),
+                true,
+            );
+            let start = lines[index].start;
+            let x = inner.x + text::offset_in_line(metrics, &value[start..caret], *font, caret - start);
+            Some(Rect::new(x, inner.y - scroll + index as f32 * *line, 1.0, *line))
+        }
+        _ => None,
+    }
 }
 
 pub(crate) fn child_width(item: &Item, metrics: &mut Metrics, available: f32) -> f32 {

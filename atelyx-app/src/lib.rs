@@ -153,22 +153,23 @@ fn hex_val(b: u8) -> Option<u8> {
 
 /// 外链交系统浏览器打开：只放行常见协议，命令行走原样拼接并整串加引号，
 /// 拒绝引号/百分号/换行——避免 URL 内容被命令行解释成命令分隔或变量展开。
-fn open_external(url: &str) {
+fn open_external(url: &str) -> bool {
     let scheme_ok = url.starts_with("http://") || url.starts_with("https://") || url.starts_with("mailto:");
     let clean = !url.contains('"') && !url.contains('%') && !url.contains('\n') && !url.contains('\r');
     if !scheme_ok || !clean {
-        return;
+        return false;
     }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        let _ = std::process::Command::new("cmd")
+        std::process::Command::new("cmd")
             .raw_arg(format!("/C start \"\" \"{url}\""))
-            .spawn();
+            .spawn()
+            .is_ok()
     }
     #[cfg(not(windows))]
     {
-        let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+        std::process::Command::new("xdg-open").arg(url).spawn().is_ok()
     }
 }
 
@@ -6924,7 +6925,7 @@ impl App {
         let decoded = percent_decode(href);
         match form {
             LinkForm::External => {
-                open_external(&decoded);
+                let _ = open_external(&decoded);
                 Task::none()
             }
             LinkForm::Path | LinkForm::Wiki | LinkForm::Create => {

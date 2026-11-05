@@ -5,7 +5,8 @@ use std::collections::HashMap;
 
 use atelyx_format::frontmatter::{self, Yaml};
 use atelyx_format::markdown::{parse_markdown, InlineSpan, MarkdownBlock, MarkdownListItem, ParseOptions};
-use atelyx_plugin_protocol::method::EditorPrefs;
+use atelyx_plugin_protocol::method::{EditorPrefs, VaultFileEntry};
+use atelyx_plugin_sdk::frame_ui::Rect;
 
 /// 面板贡献 id：也是文档实例的 surfaceId（`plugin.json` 的 `docTypeRegistrations` 同值）。
 pub const PANEL: &str = "note";
@@ -56,6 +57,18 @@ pub struct ImageBlock {
     pub width: Option<f32>,
     /// 声明的像素高度（缺省取原图高）。
     pub height: Option<f32>,
+}
+
+/// `[[` 候选浮层：`input` = 所在输入面，`start` = `[[` 在输入值里的字节位，`caret` = 光标在输入值里的字节位。
+#[derive(Clone, Debug, PartialEq)]
+pub struct WikiSuggest {
+    pub input: String,
+    pub start: usize,
+    pub query: String,
+    pub caret: usize,
+    pub candidates: Vec<String>,
+    /// 光标矩形（面本地坐标）：浮层按它定位；输入框尚未落位时为 `None`（本帧不画）。
+    pub caret_rect: Option<Rect>,
 }
 
 /// 图片的显示尺寸（像素）：声明值优先，缺边按原图比例补齐。
@@ -154,6 +167,10 @@ pub struct NoteModel {
     pub pointer: (f32, f32),
     /// 正文图片的探测结果（路径 → 原图像素尺寸；`None` = 不能解码）：失败的在只读面回落替代文字。
     pub image_probe: HashMap<String, Option<(u32, u32)>>,
+    /// 仓库文件清单（`[[` 候选与内链解析用；宿主清单重建时重取）。
+    pub wiki_files: Vec<VaultFileEntry>,
+    /// `[[` 候选浮层（`None` = 未在输入链接）。
+    pub wiki: Option<WikiSuggest>,
     pub blocks: Vec<BlockInfo>,
     /// 正文起点（frontmatter 之后）；块区间相对正文。
     pub body_start: usize,
@@ -200,6 +217,7 @@ impl NoteModel {
         self.pending_rename = None;
         self.menu_open = false;
         self.image_probe.clear();
+        self.wiki = None;
         // 上一份文档的槽位下标对新正文无意义：草稿与候选态一并丢弃
         atelyx_plugin_props::discard_edit(self);
         self.refresh_blocks();
@@ -223,6 +241,7 @@ impl NoteModel {
         self.active_item = None;
         self.blocks.clear();
         self.image_probe.clear();
+        self.wiki = None;
         self.body_start = 0;
         self.props = PropsState::default();
         self.renaming = None;
@@ -701,7 +720,6 @@ pub fn image_display_size(image: &ImageBlock, natural: Option<(u32, u32)>) -> Op
 }
 
 /// 版面计算：先取显示尺寸，再等比收到可用宽内（`available` ≤ 0 表示不约束）。
-#[allow(dead_code)]
 pub fn image_layout(image: &ImageBlock, natural: Option<(u32, u32)>, available: f32) -> Option<ImageSize> {
     let size = image_display_size(image, natural)?;
     if available > 0.0 && size.width > available {
@@ -709,6 +727,106 @@ pub fn image_layout(image: &ImageBlock, natural: Option<(u32, u32)>, available: 
         return Some(ImageSize { width: available, height: size.height * scale });
     }
     Some(size)
+}
+
+/// 光标前未闭合的 `[[` 查询：返回 `[[` 起点与查询串；含换行 / `]` / `|` 视为已闭合或不是链接。
+pub fn wiki_query(value: &str, caret: usize) -> Option<(usize, &str)> {
+    let head = value.get(..caret.min(value.len()))?;
+    let start = head.rfind("[[")?;
+    let query = &head[start + 2..];
+    if query.contains('\n') || query.contains(']') || query.contains('|') || query.contains("[[") {
+        return None;
+    }
+    Some((start, query))
+}
+
+/// `[[` 候选：仓库内笔记按路径 / 文件名包含查询串（不区分大小写），同目录优先，最多 `limit` 条。
+pub fn wiki_candidates(
+    files: &[VaultFileEntry],
+    query: &str,
+    current: Option<&str>,
+    limit: usize,
+) -> Vec<String> {
+    let needle = query.trim().to_lowercase();
+    let dir = current.and_then(parent_of);
+    let mut hits: Vec<&VaultFileEntry> = files
+        .iter()
+        .filter(|file| file.openable && is_note(&file.name))
+        .filter(|file| {
+            needle.is_empty()
+                || file.path.to_lowercase().contains(&needle)
+                || file.name.to_lowercase().contains(&needle)
+        })
+        .collect();
+    hits.sort_by(|a, b| {
+        let a_same = dir.is_some_and(|dir| parent_of(&a.path) == Some(dir));
+        let b_same = dir.is_some_and(|dir| parent_of(&b.path) == Some(dir));
+        b_same.cmp(&a_same).then_with(|| a.path.cmp(&b.path))
+    });
+    hits.into_iter().take(limit).map(|file| file.path.clone()).collect()
+}
+
+/// 候选路径 → 插入文本：`[[路径|文件名]]`，显示用文件名、目标用完整路径。
+pub fn wiki_link(path: &str) -> String {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let stem = name
+        .strip_suffix(".md")
+        .or_else(|| name.strip_suffix(".MD"))
+        .unwrap_or(name);
+    format!("[[{path}|{stem}]]")
+}
+
+/// 外链（http / https / mailto）交给系统浏览器，其余按仓库内链处理。
+pub fn is_external(target: &str) -> bool {
+    let target = target.trim();
+    target.starts_with("http://") || target.starts_with("https://") || target.starts_with("mailto:")
+}
+
+/// 内链目标 → 仓库相对路径：先按完整路径（含相对当前笔记目录），再按文件名匹配。
+pub fn resolve_link(files: &[VaultFileEntry], current: Option<&str>, target: &str) -> Option<String> {
+    let target = target.trim().split('#').next().unwrap_or("").trim();
+    if target.is_empty() {
+        return None;
+    }
+    let direct = normalize_path(target);
+    if let Some(found) = files.iter().find(|file| file.openable && file.path == direct) {
+        return Some(found.path.clone());
+    }
+    if let Some(dir) = current.and_then(parent_of) {
+        let joined = normalize_path(&format!("{dir}/{target}"));
+        if let Some(found) = files.iter().find(|file| file.openable && file.path == joined) {
+            return Some(found.path.clone());
+        }
+    }
+    let name = target.rsplit('/').next().unwrap_or(target).to_lowercase();
+    let with_md = if name.ends_with(".md") { name } else { format!("{name}.md") };
+    files
+        .iter()
+        .find(|file| file.openable && file.name.to_lowercase() == with_md)
+        .map(|file| file.path.clone())
+}
+
+fn parent_of(path: &str) -> Option<&str> {
+    path.rsplit_once('/').map(|(dir, _)| dir)
+}
+
+fn is_note(name: &str) -> bool {
+    name.to_lowercase().ends_with(".md")
+}
+
+/// 去掉空段与 `.`、按 `..` 回退：内链里的相对写法先归一成仓库相对路径。
+fn normalize_path(path: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            other => parts.push(other),
+        }
+    }
+    parts.join("/")
 }
 
 fn spot_of(
@@ -993,6 +1111,71 @@ mod tests {
         assert_eq!((size.width, size.height), (320.0, 240.0));
         let size = image_layout(&image, Some((640, 480)), 800.0).expect("原样");
         assert_eq!((size.width, size.height), (640.0, 480.0));
+    }
+
+    /// 三种写法都要给出可绘制的尺寸：`|W` 补等比高、`|HxW` 用声明值、未声明用原图，超宽都等比收缩。
+    #[test]
+    fn image_layout_honours_width_only_fixed_and_natural_forms() {
+        let natural = Some((640, 480));
+        let width_only =
+            ImageBlock { src: "p.png".into(), alt: "图".into(), width: Some(120.0), height: None };
+        let size = image_layout(&width_only, natural, 320.0).expect("按宽补高");
+        assert_eq!((size.width, size.height), (120.0, 90.0), "宽高单边声明不收缩，高按原图比例补");
+        let fixed = ImageBlock { src: "p.png".into(), alt: "图".into(), width: Some(400.0), height: Some(300.0) };
+        let size = image_layout(&fixed, natural, 320.0).expect("两边都声明");
+        assert_eq!((size.width, size.height), (320.0, 240.0), "超宽等比收缩，不拉伸单边");
+        let natural_image = ImageBlock { src: "p.png".into(), alt: "图".into(), width: None, height: None };
+        let size = image_layout(&natural_image, natural, 320.0).expect("自然尺寸");
+        assert_eq!((size.width, size.height), (320.0, 240.0));
+        let size = image_layout(&natural_image, natural, 800.0).expect("原样");
+        assert_eq!((size.width, size.height), (640.0, 480.0));
+    }
+
+    #[test]
+    fn wiki_query_tracks_unclosed_double_brackets() {
+        assert_eq!(wiki_query("[[方案", 8), Some((0, "方案")));
+        assert_eq!(wiki_query("甲 [[方", 9), Some((4, "方")));
+        assert_eq!(wiki_query("[[方案]]", 10), None, "已闭合不再出候选");
+        assert_eq!(wiki_query("[[方案\n", 9), None, "跨行不算链接");
+        assert_eq!(wiki_query("[[方案|", 9), None, "别名已开始");
+        assert_eq!(wiki_query("普通文字", 12), None);
+    }
+
+    #[test]
+    fn wiki_candidates_prefer_same_directory_and_filter_by_query() {
+        let files = vec![
+            note("方案.md"),
+            note("子目录/方案.md"),
+            note("子目录/甲.md"),
+            note("图片.png"),
+        ];
+        let hits = wiki_candidates(&files, "方案", Some("子目录/甲.md"), 4);
+        assert_eq!(hits, ["子目录/方案.md", "方案.md"], "同目录优先，图片不进候选");
+        let hits = wiki_candidates(&files, "", Some("子目录/甲.md"), 2);
+        assert_eq!(hits.len(), 2);
+        assert!(hits.contains(&"子目录/方案.md".to_string()));
+    }
+
+    #[test]
+    fn wiki_links_resolve_by_path_directory_and_name() {
+        let files = vec![note("方案.md"), note("子目录/甲.md"), note("子目录/乙.md")];
+        assert_eq!(
+            resolve_link(&files, Some("子目录/甲.md"), "乙.md"),
+            Some("子目录/乙.md".into()),
+            "相对当前笔记目录"
+        );
+        assert_eq!(resolve_link(&files, Some("甲.md"), "子目录/乙"), Some("子目录/乙.md".into()));
+        assert_eq!(resolve_link(&files, Some("子目录/甲.md"), "方案"), Some("方案.md".into()));
+        assert_eq!(resolve_link(&files, Some("子目录/甲.md"), "../方案.md"), Some("方案.md".into()));
+        assert_eq!(resolve_link(&files, Some("子目录/甲.md"), "不存在"), None);
+        assert_eq!(wiki_link("子目录/乙.md"), "[[子目录/乙.md|乙]]");
+        assert!(is_external("https://example.com"), "外链走系统浏览器");
+        assert!(!is_external("乙.md"));
+    }
+
+    fn note(path: &str) -> VaultFileEntry {
+        let name = path.rsplit('/').next().unwrap_or(path).to_string();
+        VaultFileEntry { path: path.into(), name, icon: "file-text".into(), openable: true }
     }
 
     /// 图片探测缓存按 src 记，变更事件给的是仓库相对路径：两种写法都要能对上。

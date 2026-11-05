@@ -1403,6 +1403,14 @@ impl Instance {
                         params: p,
                     }
                 }
+                method::shell::OPEN_URL => {
+                    let p: method::OpenUrlParams = parse(params).map_err(|e| e.to_string())?;
+                    HostRequest::OpenUrl {
+                        plugin_id: self.id.clone(),
+                        request_id: 0,
+                        params: p,
+                    }
+                }
                 _ => return Err("未知宿主服务请求".to_string()),
             };
             runtime.open_shell_call(request)
@@ -2531,6 +2539,7 @@ fn is_shell_method(method_name: &str) -> bool {
             | method::shell::REVEAL
             | method::shell::ABSOLUTE_PATH
             | method::shell::DUPLICATE
+            | method::shell::OPEN_URL
     )
 }
 

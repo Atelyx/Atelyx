@@ -21,7 +21,7 @@ use atelyx_plugin_sdk::{Context, PluginHandler, PluginInfo};
 use tokio::sync::Mutex as AsyncMutex;
 
 use atelyx_plugin_props as props;
-use crate::model::{Backlink, Mode, NoteModel, PANEL, SOURCE};
+use crate::model::{Backlink, Mode, NoteModel, PANEL, SOURCE, WikiSuggest};
 
 /// 插件 id（与 `plugin.json` 一致）。
 const PLUGIN_ID: &str = "atelyx.notes";
@@ -61,6 +61,9 @@ impl NotesPlugin {
                 }
                 self.load_backlinks(ctx, &result.path).await;
                 self.refresh_tags(ctx).await;
+                if self.model.lock().unwrap().wiki_files.is_empty() {
+                    self.refresh_wiki_files(ctx).await;
+                }
                 self.refresh_images(ctx).await;
             }
             Err(error) => {
@@ -88,6 +91,107 @@ impl NotesPlugin {
             Ok(tags) => self.model.lock().unwrap().tag_vocab = tags,
             Err(error) => ctx.log_error(&format!("读取标签词表失败：{error}")),
         }
+    }
+
+    /// 仓库文件清单（`[[` 候选与内链解析）；宿主清单重建时由变更事件重取。
+    async fn refresh_wiki_files(&self, ctx: &Context) {
+        match ctx.vault_files().await {
+            Ok(result) => self.model.lock().unwrap().wiki_files = result.files,
+            Err(error) => ctx.log_error(&format!("读取仓库文件清单失败：{error}")),
+        }
+    }
+
+    /// 按输入值与光标刷新 `[[` 候选：离开链接范围、跨行或已有候选外内容即收起。
+    /// 光标矩形在事件期算一次并存入模型，浮层绘制不必每帧重排正文。
+    async fn refresh_wiki(&self, id: &str, value: &str, caret: usize) {
+        let suggestion = {
+            let model = self.model.lock().unwrap();
+            if model.mode == Mode::Read || !model.can_write {
+                None
+            } else {
+                crate::model::wiki_query(value, caret).and_then(|(start, query)| {
+                    let candidates =
+                        crate::model::wiki_candidates(&model.wiki_files, query, model.path.as_deref(), 6);
+                    (!candidates.is_empty()).then(|| WikiSuggest {
+                        input: id.to_string(),
+                        start,
+                        query: query.to_string(),
+                        caret,
+                        candidates,
+                        caret_rect: None,
+                    })
+                })
+            }
+        };
+        let Some(mut suggestion) = suggestion else {
+            self.model.lock().unwrap().wiki = None;
+            return;
+        };
+        suggestion.caret_rect = self.ui.lock().await.caret_rect_for(id, value, caret);
+        self.model.lock().unwrap().wiki = Some(suggestion);
+    }
+
+    /// 链接点击：外链交系统浏览器，内链按仓库路径 / 当前目录 / 文件名解析后打开。
+    async fn follow_link(&self, ctx: &Context, target: &str) {
+        if crate::model::is_external(target) {
+            if let Err(error) = ctx.open_url(target).await {
+                ctx.log_error(&format!("打开外链失败（{target}）：{error}"));
+                let _ = ctx
+                    .notify("打开链接失败", Some(&error.to_string()), NotificationLevel::Error)
+                    .await;
+            }
+            return;
+        }
+        let path = {
+            let model = self.model.lock().unwrap();
+            crate::model::resolve_link(&model.wiki_files, model.path.as_deref(), target)
+        };
+        match path {
+            Some(path) => {
+                if let Err(error) = ctx.open_file(&path).await {
+                    ctx.log_error(&format!("打开内链失败（{path}）：{error}"));
+                    let _ = ctx
+                        .notify("打开链接失败", Some(&error.to_string()), NotificationLevel::Error)
+                        .await;
+                }
+            }
+            None => {
+                let _ = ctx
+                    .notify("找不到链接目标", Some(target), NotificationLevel::Warning)
+                    .await;
+            }
+        }
+    }
+
+    /// 候选点击：把在输入的 `[[查询` 整体换成 `[[路径|文件名]]`，光标落在链接之后。
+    async fn insert_wiki(&self, ctx: &Context, index: usize) {
+        let Some((input, start, span, replacement)) = ({
+            let model = self.model.lock().unwrap();
+            let Some(wiki) = &model.wiki else { return };
+            let Some(path) = wiki.candidates.get(index) else { return };
+            Some((wiki.input.clone(), wiki.start, 2 + wiki.query.len(), crate::model::wiki_link(path)))
+        }) else {
+            return;
+        };
+        let (text, at) = {
+            let mut model = self.model.lock().unwrap();
+            if model.mode == Mode::Read || !model.can_write {
+                return;
+            }
+            let base = input_base(&model, &input);
+            let from = base + start;
+            let to = from + span;
+            if to > model.text.len() {
+                return;
+            }
+            let mut text = model.text.clone();
+            text.replace_range(from..to, &replacement);
+            model.edit_text(text.clone());
+            model.wiki = None;
+            (text, from + replacement.len())
+        };
+        self.commit_edit(ctx, text, Some((at, at))).await;
+        self.focus_at(ctx, at).await;
     }
 
     /// 探测正文引用的仓库图片能否解码，并记下原图像素尺寸：失败的在只读面回落替代文字，
@@ -266,6 +370,17 @@ impl NotesPlugin {
                 UiEvent::Caret { id, caret, anchor } => {
                     let selection = selection_of(&self.model.lock().unwrap(), &id, caret, anchor);
                     self.notify_caret(ctx, selection).await;
+                    if caret == anchor {
+                        let value = {
+                            let model = self.model.lock().unwrap();
+                            value_of(&model, &id)
+                        };
+                        if let Some(value) = value {
+                            self.refresh_wiki(&id, &value, caret).await;
+                        }
+                    } else {
+                        self.model.lock().unwrap().wiki = None;
+                    }
                 }
                 _ => {}
             }
@@ -291,6 +406,17 @@ impl NotesPlugin {
         if hit == "note:menu-backdrop" {
             self.model.lock().unwrap().menu_open = false;
             return;
+        }
+        {
+            // 点候选行时保留候选（抬起后还要按行插入）；点输入框自身保留；点别处收起
+            let mut model = self.model.lock().unwrap();
+            let keep = model
+                .wiki
+                .as_ref()
+                .is_some_and(|wiki| hit == wiki.input || hit.starts_with("note:wiki:"));
+            if !keep {
+                model.wiki = None;
+            }
         }
         // 点面内其它位置先提交属性 / 标题草稿（控件层的按钮与正文不产生失焦事件）
         if self.model.lock().unwrap().props.editing.is_some() && !hit.starts_with("props:") {
@@ -931,8 +1057,13 @@ impl NotesPlugin {
         self.move_to(ctx, target).await;
     }
 
-
     async fn on_click(&self, ctx: &Context, id: &str) {
+        // 先取链接目标再释放 ui 锁：持锁跨 await 会挡住同一面的渲染
+        let link = self.ui.lock().await.link_target(id);
+        if let Some(target) = link {
+            self.follow_link(ctx, &target).await;
+            return;
+        }
         if self.props_click(ctx, id).await {
             return;
         }
@@ -983,6 +1114,7 @@ impl NotesPlugin {
                 model.active_item = None;
                 model.props.type_menu = None;
                 model.menu_open = false;
+                model.wiki = None;
                 if mode == Mode::Source {
                     model.props.editing = None;
                     model.props.draft.clear();
@@ -998,6 +1130,10 @@ impl NotesPlugin {
                     model.renaming = Some(model.title());
                 }
                 self.focus_title_input().await;
+            }
+            _ if id.starts_with("note:wiki:") => {
+                let Ok(index) = id["note:wiki:".len()..].parse::<usize>() else { return };
+                self.insert_wiki(ctx, index).await;
             }
             _ => {
                 let Some(index) = id.strip_prefix("note:backlink:") else { return };
@@ -1232,6 +1368,12 @@ impl NotesPlugin {
     }
 
     async fn on_cancel(&self, id: &str) {
+        {
+            let mut model = self.model.lock().unwrap();
+            if model.wiki.as_ref().is_some_and(|wiki| wiki.input == id) {
+                model.wiki = None;
+            }
+        }
         if id == props::KEY_INPUT {
             let mut model = self.model.lock().unwrap();
             model.props.editing = None;
@@ -1246,6 +1388,12 @@ impl NotesPlugin {
     }
 
     async fn on_blur(&self, ctx: &Context, id: &str) {
+        {
+            let mut model = self.model.lock().unwrap();
+            if model.wiki.as_ref().is_some_and(|wiki| wiki.input == id) {
+                model.wiki = None;
+            }
+        }
         if id == props::KEY_INPUT {
             self.commit_props(ctx, 0).await;
         } else if id == crate::model::TITLE_INPUT {
@@ -1315,6 +1463,7 @@ impl NotesPlugin {
                 model.edit_text(text.clone());
                 (text, at)
             };
+            self.refresh_wiki(id, &value, caret.map_or(value.len(), |(caret, _)| caret)).await;
             self.commit_edit(ctx, text, Some((at, at))).await;
             self.focus_at(ctx, at).await;
             return;
@@ -1351,6 +1500,13 @@ impl NotesPlugin {
                 .flatten();
             (next, selection, handoff)
         };
+        // 候选跟活动输入面走：空笔记敲出首块后，输入面已换成块 0
+        let caret = caret.map_or((value_len, value_len), |pair| pair).0;
+        if let Some((id, value, caret)) = &handoff {
+            self.refresh_wiki(id, value, *caret).await;
+        } else {
+            self.refresh_wiki(id, &value, caret).await;
+        }
         if let Some((id, value, caret)) = handoff {
             let mut frame_ui = self.ui.lock().await;
             frame_ui.focus_input(&id, &value);
@@ -1527,12 +1683,14 @@ impl PluginHandler for NotesPlugin {
             event::name::EDITOR_PREFS_CHANGED,
             event::name::VAULT_SWITCH,
             event::name::VAULT_FILE_CHANGED,
+            event::name::VAULT_FILES_CHANGED,
         ] {
             if let Err(error) = ctx.subscribe(name).await {
                 ctx.log_error(&format!("订阅 {name} 失败：{error}"));
             }
         }
         self.refresh_prefs(ctx).await;
+        self.refresh_wiki_files(ctx).await;
         self.render(ctx).await;
     }
 
@@ -1653,6 +1811,19 @@ impl PluginHandler for NotesPlugin {
             }
             event::name::VAULT_SWITCH => {
                 self.model.lock().unwrap().clear();
+                self.refresh_wiki_files(ctx).await;
+                self.render(ctx).await;
+            }
+            event::name::VAULT_FILES_CHANGED => {
+                self.refresh_wiki_files(ctx).await;
+                // 候选浮层开着时按新清单重算；填不上就不出，继续输入会再触发
+                let open = {
+                    let model = self.model.lock().unwrap();
+                    let Some(wiki) = &model.wiki else { return };
+                    let Some(value) = value_of(&model, &wiki.input) else { return };
+                    (wiki.input.clone(), value, wiki.caret)
+                };
+                self.refresh_wiki(&open.0, &open.1, open.2).await;
                 self.render(ctx).await;
             }
             event::name::VAULT_FILE_CHANGED => {

@@ -154,6 +154,21 @@ impl FrameUi {
         self.state.focus.as_deref()
     }
 
+    /// 某命中 id 对应的链接目标（Markdown 内联链接 / 双链）：`None` 表示该 id 不是本帧的链接。
+    /// 点击先按 `UiEvent::Click { id }` 到达插件，插件用它把 id 翻回目标。
+    pub fn link_target(&self, id: &str) -> Option<String> {
+        match self.state.layouts.get(id) {
+            Some(model::Layout::Link { target }) => Some(target.clone()),
+            _ => None,
+        }
+    }
+
+    /// 输入框光标在面本地坐标里的矩形（已含框内滚动）：候选浮层贴光标定位用。
+    /// `value` / `caret` 传当前值（上一帧的布局记录里只有旧值），几何取上一帧的输入框落点。
+    pub fn caret_rect_for(&mut self, id: &str, value: &str, caret: usize) -> Option<Rect> {
+        build::caret_rect(&self.state.layouts, &self.state.inputs, &mut self.state.metrics, id, value, caret)
+    }
+
     /// 设置输入框的光标与选区（`value` 只用于把光标夹在文本长度内）；文本本身由插件在
     /// `render` 时传入。须在 `render` 前调用。
     pub fn set_input(&mut self, id: &str, value: &str, caret: usize) {
@@ -719,6 +734,63 @@ mod tests {
         );
         let events = bench.event(typed("X")).await;
         assert_eq!(events, vec![UiEvent::Text { id: "body".into(), value: "line1\nXline2\n".into() }]);
+    }
+
+    #[tokio::test]
+    async fn text_area_page_and_doc_keys_move_the_caret() {
+        let mut bench = Bench::new(160.0, 90.0).await;
+        let value: String = (0..20).map(|index| format!("r{index}\n")).collect();
+        let shown = value.clone();
+        bench.render(move |ui| ui.text_area("body", &shown, "", 60.0)).await.unwrap();
+        bench
+            .event(FrameInput::PointerDown { x: 150.0, y: 20.0, button: MouseButton::Left, hit: Some("body".into()) })
+            .await;
+        // 光标先回到文档开头
+        bench
+            .event(FrameInput::Key {
+                key: Key::Named { name: NamedKey::Home },
+                action: KeyAction::Press,
+                modifiers: Modifiers { control: true, ..Modifiers::default() },
+                text: None,
+            })
+            .await;
+
+        let events = bench
+            .event(FrameInput::Key {
+                key: Key::Named { name: NamedKey::PageDown },
+                action: KeyAction::Press,
+                modifiers: Modifiers::default(),
+                text: None,
+            })
+            .await;
+        let caret = match &events[..] {
+            [UiEvent::Caret { caret, anchor, .. }] => {
+                assert_eq!(caret, anchor);
+                *caret
+            }
+            other => panic!("PageDown 只挪光标：{other:?}"),
+        };
+        let moved = value[..caret].lines().count();
+        assert!((2..20).contains(&moved), "按可见高度跨行而不是一行：{moved}");
+
+        let events = bench
+            .event(FrameInput::Key {
+                key: Key::Named { name: NamedKey::End },
+                action: KeyAction::Press,
+                modifiers: Modifiers { control: true, ..Modifiers::default() },
+                text: None,
+            })
+            .await;
+        assert!(matches!(&events[..], [UiEvent::Caret { caret, .. }] if *caret == value.len()), "Ctrl+End 到文档末尾");
+        let events = bench
+            .event(FrameInput::Key {
+                key: Key::Named { name: NamedKey::Home },
+                action: KeyAction::Press,
+                modifiers: Modifiers { control: true, ..Modifiers::default() },
+                text: None,
+            })
+            .await;
+        assert!(matches!(&events[..], [UiEvent::Caret { caret, .. }] if *caret == 0), "Ctrl+Home 到文档开头");
     }
 
     #[tokio::test]
@@ -2163,6 +2235,137 @@ let a = 1;
             command,
             DrawCommand::Image { fit: Some(ImageFit::Cover), w, h, .. } if *w == 200.0 && *h == 80.0
         )));
+    }
+
+    #[tokio::test]
+    async fn image_fit_sized_shrinks_height_with_the_available_width() {
+        let mut bench = Bench::new(200.0, 160.0).await;
+        let frame = bench
+            .render(|ui| {
+                ui.image_fit_sized(
+                    ImageSource::Vault { path: "a.png".into(), max_edge: None },
+                    400.0,
+                    200.0,
+                    ImageFit::Contain,
+                )
+            })
+            .await
+            .unwrap();
+        assert!(frame.commands.iter().any(|command| matches!(
+            command,
+            DrawCommand::Image { fit: Some(ImageFit::Contain), w, h, .. } if *w == 200.0 && *h == 100.0
+        )), "请求 400x200 在 200 宽里按等比收到 200x100");
+    }
+
+    #[tokio::test]
+    async fn image_fit_sized_draws_the_declared_size_within_the_available_width() {
+        let mut bench = Bench::new(320.0, 240.0).await;
+        let frame = bench
+            .render(|ui| {
+                ui.image_fit_sized(
+                    ImageSource::Vault { path: "a.png".into(), max_edge: None },
+                    120.0,
+                    90.0,
+                    ImageFit::Contain,
+                )
+            })
+            .await
+            .unwrap();
+        assert!(frame.commands.iter().any(|command| matches!(
+            command,
+            DrawCommand::Image { fit: Some(ImageFit::Contain), w, h, .. } if *w == 120.0 && *h == 90.0
+        )), "未超可用宽时按声明尺寸绘制");
+    }
+
+    #[tokio::test]
+    async fn caret_rect_tracks_the_soft_wrapped_line() {
+        let mut bench = Bench::new(200.0, 90.0).await;
+        let value = "one\ntwo\nthree";
+        bench.render(move |ui| ui.text_area("t", value, "", 48.0)).await.unwrap();
+        let mut frame_ui = bench.ui.lock().await;
+        let first = frame_ui.caret_rect_for("t", value, 0).expect("首行光标");
+        let second = frame_ui.caret_rect_for("t", value, 4).expect("次行光标");
+        assert_eq!(first.x, second.x, "两行都从行首起");
+        assert!(second.y > first.y, "次行光标在首行之下：{first:?} / {second:?}");
+    }
+
+    #[tokio::test]
+    async fn long_code_block_expands_on_click_and_keeps_full_copy() {
+        let mut bench = Bench::new(320.0, 1100.0).await;
+        let body: String = (1..=40).map(|index| format!("line {index}\n")).collect();
+        let markdown = format!("```rust\n{body}```");
+        let shown = markdown.clone();
+        let frame = bench
+            .render(move |ui| ui.markdown_named("md", shown.clone(), Vec::new()))
+            .await
+            .unwrap();
+        let expand = frame
+            .hits
+            .iter()
+            .find(|hit| hit.id.contains("::code:"))
+            .map(|hit| hit.id.clone())
+            .expect("超长代码块给出展开命中");
+        assert!(texts(&frame).iter().any(|text| text.contains("展开全部（共 40 行）")));
+
+        for input in click(&expand) {
+            let events = bench.event(input).await;
+            assert!(events.is_empty(), "展开由控件层自持，不打扰插件");
+        }
+        let shown = markdown.clone();
+        let frame = bench
+            .render(move |ui| ui.markdown_named("md", shown.clone(), Vec::new()))
+            .await
+            .unwrap();
+        assert!(texts(&frame).iter().any(|text| text.contains("收起（共 40 行）")), "点开后显示全部行并可收起");
+        assert!(texts(&frame).iter().any(|text| text == "line 40"), "第 40 行可见");
+    }
+
+    #[tokio::test]
+    async fn expanding_a_code_block_does_not_leak_to_other_content_at_the_same_slot() {
+        let mut bench = Bench::new(320.0, 1100.0).await;
+        let body: String = (1..=40).map(|index| format!("line {index}\n")).collect();
+        let first = format!("```rust\n{body}```");
+        let shown = first.clone();
+        let frame = bench.render(move |ui| ui.markdown_named("md", shown.clone(), Vec::new())).await.unwrap();
+        let expand = frame
+            .hits
+            .iter()
+            .find(|hit| hit.id.contains("::code:"))
+            .map(|hit| hit.id.clone())
+            .expect("超长代码块给出展开命中");
+        for input in click(&expand) {
+            bench.event(input).await;
+        }
+
+        // 同一块位换成另一段内容：展开态按内容归属，不应沿用
+        let second = format!("```rust\n{body}tail\n```");
+        let shown = second.clone();
+        let frame = bench.render(move |ui| ui.markdown_named("md", shown.clone(), Vec::new())).await.unwrap();
+        assert!(
+            texts(&frame).iter().any(|text| text.contains("展开全部（共 41 行）")),
+            "同块位换内容应回到折叠态"
+        );
+    }
+
+    #[tokio::test]
+    async fn markdown_link_reports_target_and_click() {
+        let mut bench = Bench::new(320.0, 160.0).await;
+        let frame = bench
+            .render(|ui| ui.markdown_named("md", "[外部](https://example.com)".to_string(), Vec::new()))
+            .await
+            .unwrap();
+        let link = frame
+            .hits
+            .iter()
+            .find(|hit| hit.id.starts_with("md::link:"))
+            .map(|hit| hit.id.clone())
+            .expect("链接片段要登记命中区");
+        assert_eq!(bench.ui.lock().await.link_target(&link).as_deref(), Some("https://example.com"));
+        let mut events = Vec::new();
+        for input in click(&link) {
+            events.extend(bench.event(input).await);
+        }
+        assert!(matches!(&events[..], [UiEvent::Click { id }] if id == &link), "{events:?}");
     }
 
     #[tokio::test]

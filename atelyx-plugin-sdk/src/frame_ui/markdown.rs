@@ -71,6 +71,8 @@ struct Run {
     text: String,
     spec: FontSpec,
     style: RunStyle,
+    /// 该片段属于链接时的目标（内链目标或外链 URL）；命中区按片段登记，点击交给插件。
+    link: Option<String>,
 }
 
 /// 一行文字：`y` 相对块原点，`x` 已含缩进。`scroll` 为真时随块内横向滚动整体平移。
@@ -104,6 +106,8 @@ pub(crate) struct Layout {
     strokes: Vec<Stroke>,
     /// 代码块头「复制」按钮的落位与内容：命中按 `id::copy:<序>` 登记，按下即写剪贴板。
     copies: Vec<CopyHit>,
+    /// 长代码块的「展开 / 收起」行：命中由控件层自持翻转，不交给插件。
+    expands: Vec<ExpandHit>,
     /// 任务框的落位：命中按 `id::task:<序>` 交给插件翻转勾选态。
     tasks: Vec<Rect>,
     height: f32,
@@ -122,16 +126,27 @@ impl Layout {
     pub(crate) fn content_width(&self) -> f32 {
         self.content_w
     }
-}
 
-/// 某行的可见文字长度（行内字节位）。
-pub(crate) fn line_len(layout: &Layout, line: usize) -> usize {
-    layout.lines.get(line).map(|line| line.runs.iter().map(|run| run.text.len()).sum()).unwrap_or(0)
+    /// 本块内链接片段的目标（按行内顺序）。
+    #[cfg(test)]
+    pub(crate) fn link_targets(&self) -> Vec<String> {
+        self.lines.iter().flat_map(|line| line.runs.iter().filter_map(|run| run.link.clone())).collect()
+    }
 }
 
 struct CopyHit {
     rect: Rect,
     text: String,
+}
+
+struct ExpandHit {
+    rect: Rect,
+    key: String,
+}
+
+/// 某行的可见文字长度（行内字节位）。
+pub(crate) fn line_len(layout: &Layout, line: usize) -> usize {
+    layout.lines.get(line).map(|line| line.runs.iter().map(|run| run.text.len()).sum()).unwrap_or(0)
 }
 
 /// 排版缓存键：内容指纹 + 宽度位型 + 量算代次。
@@ -190,40 +205,71 @@ fn laid_out(
     metrics: &mut Metrics,
     theme: &Theme,
     key: u64,
+    owner: &str,
     content: &str,
     mentions: &[MentionCandidate],
     width: f32,
     list_start: usize,
     soft_wrap: bool,
+    expanded: &[usize],
 ) -> Arc<Layout> {
-    let full = (key, width.to_bits(), metrics.epoch());
+    let full = (
+        key ^ expanded_key(expanded) ^ content_key(owner, &[]),
+        width.to_bits(),
+        metrics.epoch(),
+    );
     if let Some(hit) = cache.hit(full) {
         return hit;
     }
-    let laid = Arc::new(layout(metrics, theme, content, mentions, width, list_start, soft_wrap));
+    let laid = Arc::new(layout_expanded(
+        metrics,
+        theme,
+        owner,
+        content,
+        mentions,
+        width,
+        list_start,
+        soft_wrap,
+        expanded,
+    ));
     cache.store(full, Arc::clone(&laid));
     laid
 }
 
+/// 展开态参与缓存键：同一段内容展开前后版面不同。
+fn expanded_key(expanded: &[usize]) -> u64 {
+    let mut hash = 0u64;
+    for index in expanded {
+        hash ^= (*index as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        hash = hash.rotate_left(13);
+    }
+    hash
+}
+
 /// 一段 Markdown 排版后的高度（父容器定高用）。
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn height(
     cache: &LayoutCache,
     metrics: &mut Metrics,
     theme: &Theme,
     key: u64,
+    owner: &str,
     content: &str,
     mentions: &[MentionCandidate],
     width: f32,
     list_start: usize,
     soft_wrap: bool,
+    expanded: &[usize],
 ) -> f32 {
-    laid_out(cache, metrics, theme, key, content, mentions, width, list_start, soft_wrap).height
+    laid_out(cache, metrics, theme, key, owner, content, mentions, width, list_start, soft_wrap, expanded).height
 }
 
 /// 绘制一块 Markdown 区域：图元在文字之下，超出裁剪区的不画。
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn paint(
     ctx: &mut BuildCtx<'_>,
     id: &str,
+    owner: &str,
     key: u64,
     content: &str,
     mentions: &[MentionCandidate],
@@ -231,17 +277,20 @@ pub(crate) fn paint(
     clip: Rect,
     list_start: usize,
     soft_wrap: bool,
+    expanded: &[usize],
 ) {
     let laid = laid_out(
         &ctx.state.markdown_layouts,
         &mut ctx.metrics,
         ctx.theme,
         key,
+        owner,
         content,
         mentions,
         rect.w,
         list_start,
         soft_wrap,
+        expanded,
     );
     ctx.markdown_seen.push((id.to_string(), Arc::clone(&laid)));
     let clip = clip.intersect(rect);
@@ -328,6 +377,7 @@ pub(crate) fn paint(
             });
         }
     }
+    let mut link_seq = 0usize;
     for line in &laid.lines {
         let bounds = if line.scroll { scroll_clip } else { clip };
         let y = rect.y + line.y;
@@ -388,6 +438,16 @@ pub(crate) fn paint(
                     layout: None,
                 });
             }
+            if let Some(target) = &run.link {
+                let placed = Rect::new(x, y, width, line.height);
+                let visible = placed.intersect(bounds);
+                if !visible.is_empty() {
+                    let hit = link_hit_id(id, link_seq);
+                    link_seq += 1;
+                    ctx.hit(&hit, visible, atelyx_plugin_protocol::frame::HitCursor::Pointer);
+                    ctx.record(&hit, super::model::Layout::Link { target: target.clone() });
+                }
+            }
             x += width;
         }
     }
@@ -400,6 +460,15 @@ pub(crate) fn paint(
         let hit = copy_hit_id(id, index);
         ctx.hit(&hit, visible, atelyx_plugin_protocol::frame::HitCursor::Pointer);
         ctx.record(&hit, super::model::Layout::Copy { text: copy.text.clone() });
+    }
+    for expand in &laid.expands {
+        let placed = Rect::new(rect.x + expand.rect.x, rect.y + expand.rect.y, expand.rect.w, expand.rect.h);
+        let visible = placed.intersect(clip);
+        if visible.is_empty() {
+            continue;
+        }
+        ctx.hit(&expand.key, visible, atelyx_plugin_protocol::frame::HitCursor::Pointer);
+        ctx.record(&expand.key, super::model::Layout::Expand { key: expand.key.clone() });
     }
     for (index, task) in laid.tasks.iter().enumerate() {
         let placed = Rect::new(rect.x + task.x, rect.y + task.y, task.w, task.h);
@@ -594,6 +663,11 @@ fn task_hit_id(id: &str, index: usize) -> String {
     format!("{id}::task:{index}")
 }
 
+/// 链接片段的命中 id：`<块 id>::link:<序>`（序按本帧可见链接片段的绘制顺序）。
+fn link_hit_id(id: &str, index: usize) -> String {
+    format!("{id}::link:{index}")
+}
+
 /// 横向滚动条的命中 id：`<块 id>::hbar`。
 fn hbar_hit_id(id: &str) -> String {
     format!("{id}::hbar")
@@ -609,10 +683,17 @@ struct Builder<'a> {
     soft_wrap: bool,
     /// 顶层列表项的起始序号（单独渲染一个列表项时不让序号退化成 1）。
     list_start: usize,
+    /// 归属的 Markdown 块 id：展开态按它生成命中键。
+    owner: &'a str,
+    /// 已展开的代码块序号（块内顺序，0 起）。
+    expanded: &'a [usize],
+    /// 当前代码块序号（排版推进时自增）。
+    code_seq: usize,
     lines: Vec<Line>,
     shapes: Vec<Shape>,
     strokes: Vec<Stroke>,
     copies: Vec<CopyHit>,
+    expands: Vec<ExpandHit>,
     tasks: Vec<Rect>,
     height: f32,
     /// 可横向滚动内容的自然右缘（块内坐标）。
@@ -621,14 +702,17 @@ struct Builder<'a> {
     scroll_clip: Rect,
 }
 
-fn layout(
+#[allow(clippy::too_many_arguments)]
+fn layout_expanded(
     metrics: &mut Metrics,
     theme: &Theme,
+    owner: &str,
     source: &str,
     mentions: &[MentionCandidate],
     width: f32,
     list_start: usize,
     soft_wrap: bool,
+    expanded: &[usize],
 ) -> Layout {
     let options = ParseOptions { mentions: mentions.to_vec(), ..ParseOptions::default() };
     let document = parse_markdown(source, &options);
@@ -639,10 +723,14 @@ fn layout(
         options,
         soft_wrap,
         list_start,
+        owner,
+        expanded,
+        code_seq: 0,
         lines: Vec::new(),
         shapes: Vec::new(),
         strokes: Vec::new(),
         copies: Vec::new(),
+        expands: Vec::new(),
         tasks: Vec::new(),
         height: 0.0,
         content_right: 0.0,
@@ -656,6 +744,7 @@ fn layout(
         shapes: builder.shapes,
         strokes: builder.strokes,
         copies: builder.copies,
+        expands: builder.expands,
         tasks: builder.tasks,
         height: builder.height,
         content_w,
@@ -665,6 +754,20 @@ fn layout(
             builder.scroll_clip
         },
     }
+}
+
+/// 无展开态的排版（单测与不需要折叠的调用方用）。
+#[cfg(test)]
+fn layout(
+    metrics: &mut Metrics,
+    theme: &Theme,
+    source: &str,
+    mentions: &[MentionCandidate],
+    width: f32,
+    list_start: usize,
+    soft_wrap: bool,
+) -> Layout {
+    layout_expanded(metrics, theme, "", source, mentions, width, list_start, soft_wrap, &[])
 }
 
 impl Builder<'_> {
@@ -728,6 +831,7 @@ impl Builder<'_> {
                         text: name.to_string(),
                         spec,
                         style: RunStyle { color: ColorToken::Accent, italic: false, strike: false, capsule: true },
+                        link: None,
                     }];
                     let line = self.line_height(spec, PROSE_LINE);
                     self.flow(runs, indent + pad, inner - pad, line);
@@ -778,6 +882,7 @@ impl Builder<'_> {
                     text: format!("[{label}] "),
                     spec,
                     style: RunStyle { color: ColorToken::Accent, italic: false, strike: false, capsule: false },
+                    link: None,
                 }];
                 runs.extend(self.runs(inline, spec, ColorToken::TextSecondary));
                 let line = self.line_height(spec, PROSE_LINE);
@@ -835,6 +940,7 @@ impl Builder<'_> {
                     text: marker,
                     spec,
                     style: RunStyle { color: ColorToken::TextSecondary, italic: false, strike: false, capsule: false },
+                    link: None,
                 }],
                 scroll: false,
             });
@@ -891,9 +997,22 @@ impl Builder<'_> {
             family: Some(TextFamily::Mono),
         };
         let head = self.code_head(lang, code, indent, width);
-        let lines = code.trim_end_matches('\n').lines().count().max(1).min(CODE_MAX_LINES);
-        let body_h = lines as f32 * (mono.size * CODE_LINE).max(mono.size) + CODE_BODY_PAD * 2.0;
-        let total = head + body_h;
+        let code_lines: Vec<&str> = code.trim_end_matches('\n').lines().collect();
+        let total = code_lines.len().max(1);
+        let index = self.code_seq;
+        self.code_seq += 1;
+        let folded = total > CODE_MAX_LINES;
+        let expanded = folded && self.expanded.contains(&index);
+        let shown = if expanded { total } else { total.min(CODE_MAX_LINES) };
+        let line = (mono.size * CODE_LINE).max(mono.size);
+        let footer_line = self.line_height(
+            FontSpec { size: CODE_HEAD_SIZE, weight: None, family: None },
+            CODE_LINE,
+        );
+        let body_h = shown as f32 * line
+            + if folded { footer_line } else { 0.0 }
+            + CODE_BODY_PAD * 2.0;
+        let total_h = head + body_h;
         let start = self.height;
         self.shapes.push(Shape {
             rect: Rect::new(indent, start, width, head + body_h),
@@ -910,27 +1029,51 @@ impl Builder<'_> {
             radius: None,
             scroll: false,
         });
-        let line = (mono.size * CODE_LINE).max(mono.size);
         let mut y = start + head + CODE_BODY_PAD;
         let mut right = indent + width;
-        for source in code.trim_end_matches('\n').lines().take(CODE_MAX_LINES) {
+        for source in code_lines.iter().take(shown) {
             right = right.max(indent + CODE_BODY_PAD + self.metrics.width(source, mono) + CODE_BODY_PAD);
             self.lines.push(Line {
                 x: indent + CODE_BODY_PAD,
                 y,
                 height: line,
                 runs: vec![Run {
-                    text: source.to_string(),
+                    text: (*source).to_string(),
                     spec: mono,
                     style: RunStyle { color: ColorToken::Text, italic: false, strike: false, capsule: false },
+                    link: None,
                 }],
                 scroll: true,
             });
             y += line;
         }
+        if folded {
+            let label = if expanded {
+                format!("收起（共 {total} 行）")
+            } else {
+                format!("展开全部（共 {total} 行）")
+            };
+            let spec = FontSpec { size: CODE_HEAD_SIZE, weight: None, family: None };
+            self.lines.push(Line {
+                x: indent + CODE_BODY_PAD,
+                y,
+                height: footer_line,
+                runs: vec![Run {
+                    text: label,
+                    spec,
+                    style: RunStyle { color: ColorToken::Accent, italic: false, strike: false, capsule: false },
+                    link: None,
+                }],
+                scroll: false,
+            });
+            self.expands.push(ExpandHit {
+                rect: Rect::new(indent, y, width, footer_line),
+                key: format!("{}::code:{index}", self.owner),
+            });
+        }
         self.content_right = self.content_right.max(right);
         self.expand_scroll(Rect::new(indent, start + head, width, body_h));
-        self.height = start + total;
+        self.height = start + total_h;
         let _ = depth;
     }
 
@@ -949,6 +1092,7 @@ impl Builder<'_> {
                 text: label,
                 spec,
                 style: RunStyle { color: ColorToken::TextMuted, italic: false, strike: false, capsule: false },
+                link: None,
             }],
             scroll: false,
         });
@@ -965,6 +1109,7 @@ impl Builder<'_> {
                 text: "复制".to_string(),
                 spec: button,
                 style: RunStyle { color: ColorToken::TextSecondary, italic: false, strike: false, capsule: false },
+                link: None,
             }],
             scroll: false,
         });
@@ -992,6 +1137,7 @@ impl Builder<'_> {
                     text: source.to_string(),
                     spec: mono,
                     style: RunStyle { color: ColorToken::TextMuted, italic: false, strike: false, capsule: false },
+                    link: None,
                 }],
                 scroll: true,
             });
@@ -1131,9 +1277,13 @@ impl Builder<'_> {
                     let spec = FontSpec { family: Some(TextFamily::Mono), ..base };
                     push_run(out, text, spec, style);
                 }
-                InlineSpan::Link { label, .. } | InlineSpan::Autolink { label, .. } | InlineSpan::Wiki { label, .. } => {
+                InlineSpan::Link { label, href, .. } | InlineSpan::Autolink { label, href, .. } => {
                     let link = RunStyle { color: ColorToken::Accent, ..style };
-                    push_run(out, label, base, link);
+                    push_link(out, label, base, link, href);
+                }
+                InlineSpan::Wiki { label, target, .. } => {
+                    let link = RunStyle { color: ColorToken::Accent, ..style };
+                    push_link(out, label, base, link, target);
                 }
                 InlineSpan::Image { src, alt, .. } => {
                     let name = if alt.is_empty() { src.as_str() } else { alt.as_str() };
@@ -1204,7 +1354,7 @@ impl Builder<'_> {
             let (take, width) = fit_prefix(self.metrics, rest, run.spec, remaining.max(0.0));
             if take == rest.len() {
                 if !rest.is_empty() {
-                    current.push(Run { text: rest.to_string(), spec: run.spec, style: run.style });
+                    current.push(Run { text: rest.to_string(), spec: run.spec, style: run.style, link: run.link.clone() });
                     *remaining = (*remaining - width).max(0.0);
                 }
                 return;
@@ -1218,7 +1368,7 @@ impl Builder<'_> {
                 *remaining = available;
                 continue;
             }
-            current.push(Run { text: rest[..take].to_string(), spec: run.spec, style: run.style });
+            current.push(Run { text: rest[..take].to_string(), spec: run.spec, style: run.style, link: run.link.clone() });
             self.flush(current, x, line_height);
             *remaining = available;
             rest = &rest[take..];
@@ -1248,7 +1398,7 @@ impl Builder<'_> {
             let name = if alt.is_empty() { src.as_str() } else { alt.as_str() };
             let style = RunStyle { color: ColorToken::TextMuted, italic: true, strike: false, capsule: false };
             let line = self.line_height(spec, PROSE_LINE);
-            self.flow(vec![Run { text: format!("[图片：{name}]"), spec, style }], indent, width, line);
+            self.flow(vec![Run { text: format!("[图片：{name}]"), spec, style, link: None }], indent, width, line);
             return;
         }
         let start = self.height;
@@ -1286,6 +1436,7 @@ fn align_runs(
         text: " ".repeat(((pad / (spec.size * 0.5)).max(0.0)) as usize),
         spec,
         style: RunStyle { color: ColorToken::Text, italic: false, strike: false, capsule: false },
+        link: None,
     }];
     out.extend(runs);
     out
@@ -1295,7 +1446,16 @@ fn push_run(out: &mut Vec<Run>, text: &str, spec: FontSpec, style: RunStyle) {
     if text.is_empty() {
         return;
     }
-    out.push(Run { text: text.to_string(), spec, style });
+    out.push(Run { text: text.to_string(), spec, style, link: None });
+}
+
+/// 带链接目标的片段：空标签不产生片段，目标也不得落到前一段上（否则点前一处文字会打开这个链接）。
+fn push_link(out: &mut Vec<Run>, text: &str, spec: FontSpec, style: RunStyle, target: &str) {
+    let before = out.len();
+    push_run(out, text, spec, style);
+    if out.len() > before {
+        out[before].link = Some(target.to_string());
+    }
 }
 
 /// 在 `available` 宽度内能放下的最长前缀（字节）与该前缀字宽。
@@ -1488,6 +1648,69 @@ mod tests {
     }
 
     #[test]
+    fn long_code_block_folds_with_a_footer_and_copies_every_line() {
+        let theme = Theme::default();
+        let mut metrics = Metrics::default();
+        let body: String = (1..=40).map(|index| format!("line {index}\n")).collect();
+        let source = format!("```rust\n{body}```");
+        let folded =
+            layout_expanded(&mut metrics, &theme, "md", &source, &[], 300.0, 0, true, &[]);
+        assert_eq!(folded.expands.len(), 1, "超长代码块要给出展开命中");
+        assert!(
+            folded.lines.iter().any(|line| line.runs.iter().any(|run| run.text.contains("展开全部（共 40 行）"))),
+            "折叠态要显示总行数提示"
+        );
+        let shown = folded
+            .lines
+            .iter()
+            .flat_map(|line| line.runs.iter())
+            .filter(|run| run.spec.family == Some(TextFamily::Mono) && run.text.starts_with("line "))
+            .count();
+        assert_eq!(shown, CODE_MAX_LINES, "折叠态只显示上限行数，但不会丢数据");
+        assert!(folded.copies[0].text.contains("line 40"), "复制永远取全文");
+
+        let expanded =
+            layout_expanded(&mut metrics, &theme, "md", &source, &[], 300.0, 0, true, &[0]);
+        assert!(
+            expanded.lines.iter().any(|line| line.runs.iter().any(|run| run.text.contains("收起（共 40 行）"))),
+            "展开后要能收起"
+        );
+        let shown = expanded
+            .lines
+            .iter()
+            .flat_map(|line| line.runs.iter())
+            .filter(|run| run.spec.family == Some(TextFamily::Mono) && run.text.starts_with("line "))
+            .count();
+        assert_eq!(shown, 40, "展开后显示全部行");
+        assert_eq!(expanded.expands.len(), 1);
+    }
+
+    #[test]
+    fn inline_links_expose_their_targets() {
+        let theme = Theme::default();
+        let mut metrics = Metrics::default();
+        let source = "[外部](https://example.com) 与 [[方案]] 还有 <https://auto.test>";
+        let laid = layout(&mut metrics, &theme, source, &[], 400.0, 0, true);
+        let targets = laid.link_targets();
+        assert!(targets.iter().any(|target| target == "https://example.com"), "{targets:?}");
+        assert!(targets.iter().any(|target| target == "方案"), "双链目标是文件名：{targets:?}");
+        assert!(targets.iter().any(|target| target == "https://auto.test"), "{targets:?}");
+    }
+
+    #[test]
+    fn empty_link_labels_do_not_attach_to_a_neighbouring_run() {
+        let base = FontSpec { size: 13.0, weight: None, family: None };
+        let style = RunStyle { color: ColorToken::Text, italic: false, strike: false, capsule: false };
+        let mut runs = Vec::new();
+        push_run(&mut runs, "前文", base, style);
+        push_link(&mut runs, "", base, style, "https://example.com");
+        assert_eq!(runs.len(), 1, "空标签不产生片段");
+        assert_eq!(runs[0].link, None, "空标签的链接目标不得挂到前一段");
+        push_link(&mut runs, "链接", base, style, "https://example.com");
+        assert_eq!(runs[1].link.as_deref(), Some("https://example.com"));
+    }
+
+    #[test]
     fn task_items_paint_a_box_and_lists_stay_indented() {
         let theme = Theme::default();
         let mut metrics = Metrics::default();
@@ -1529,10 +1752,10 @@ mod tests {
         let theme = Theme::default();
         let mut metrics = Metrics::default();
         let key = content_key("一段正文", &[]);
-        let first = laid_out(&cache, &mut metrics, &theme, key, "一段正文", &[], 240.0, 0, true);
-        let again = laid_out(&cache, &mut metrics, &theme, key, "一段正文", &[], 240.0, 0, true);
+        let first = laid_out(&cache, &mut metrics, &theme, key, "", "一段正文", &[], 240.0, 0, true, &[]);
+        let again = laid_out(&cache, &mut metrics, &theme, key, "", "一段正文", &[], 240.0, 0, true, &[]);
         assert!(Arc::ptr_eq(&first, &again), "同内容同宽度应命中缓存");
-        let narrower = laid_out(&cache, &mut metrics, &theme, key, "一段正文", &[], 120.0, 0, true);
+        let narrower = laid_out(&cache, &mut metrics, &theme, key, "", "一段正文", &[], 120.0, 0, true, &[]);
         assert!(!Arc::ptr_eq(&first, &narrower), "宽度变了要按新宽度重排");
     }
 
@@ -1547,7 +1770,7 @@ mod tests {
         let cache = LayoutCache::default();
         let key = content_key(&source, &[]);
 
-        let _ = laid_out(&cache, &mut metrics, &theme, key, &source, &[], 360.0, 0, true);
+        let _ = laid_out(&cache, &mut metrics, &theme, key, "", &source, &[], 360.0, 0, true, &[]);
         let first = metrics.take_misses();
         let sizes: Vec<MeasureTextResult> = first
             .iter()
@@ -1556,7 +1779,7 @@ mod tests {
         metrics.apply(&first, &sizes);
 
         for width in [360.0_f32, 359.0, 358.0, 300.0, 420.0] {
-            let _ = laid_out(&cache, &mut metrics, &theme, key, &source, &[], width, 0, true);
+            let _ = laid_out(&cache, &mut metrics, &theme, key, "", &source, &[], width, 0, true, &[]);
             assert!(metrics.take_misses().is_empty(), "改宽到 {width} 后不得再登记量算");
         }
     }

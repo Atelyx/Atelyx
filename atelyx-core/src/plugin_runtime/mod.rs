@@ -102,6 +102,7 @@ pub use atelyx_plugin_protocol::method::{
     ContainerEntry, CreateEntryParams, CreateEntryResult, MenuClosedParams, MenuItem, MenuSearch,
     AbsolutePathResult, DirListResult, DocTypeEntry, DuplicateParams, MenuOpenParams,
     PickColorParams, PickColorResult, RemoveContainerParams, RevealParams, SwitchContainerParams,
+    OpenUrlParams,
     UiDirEntry,
     VaultUiParams, VaultUiPatch, VaultUiResult, VaultUiState,
     AI_CORE_PLUGIN,
@@ -463,6 +464,8 @@ pub enum HostRequest {
     AbsolutePath { plugin_id: String, request_id: u64, path: String },
     /// 插件请求在同目录创建一个副本（`shell.duplicate`），回执 = 落定的新路径。
     Duplicate { plugin_id: String, request_id: u64, params: method::DuplicateParams },
+    /// 插件请求用系统默认浏览器打开一个外链（`shell.openUrl`）。
+    OpenUrl { plugin_id: String, request_id: u64, params: method::OpenUrlParams },
     /// 插件请求全仓库的目录清单（`vault.listDirs`）。
     VaultListDirs { plugin_id: String, request_id: u64 },
     /// 插件请求宿主重读文件树（`vault.refreshTree`）。
@@ -868,6 +871,7 @@ impl PluginRuntime {
             | HostRequest::Reveal { .. }
             | HostRequest::AbsolutePath { .. }
             | HostRequest::Duplicate { .. }
+            | HostRequest::OpenUrl { .. }
             | HostRequest::VaultListDirs { .. }
             | HostRequest::VaultRefreshTree { .. }
             | HostRequest::DownloadsDir { .. }
@@ -1243,6 +1247,9 @@ impl PluginRuntime {
             }
             HostRequest::Duplicate { plugin_id, params, .. } => {
                 HostRequest::Duplicate { plugin_id, request_id, params }
+            }
+            HostRequest::OpenUrl { plugin_id, params, .. } => {
+                HostRequest::OpenUrl { plugin_id, request_id, params }
             }
             HostRequest::VaultListDirs { plugin_id, .. } => {
                 HostRequest::VaultListDirs { plugin_id, request_id }
@@ -2320,6 +2327,7 @@ fn request_plugin_id(request: &HostRequest) -> &str {
         | HostRequest::Reveal { plugin_id, .. }
         | HostRequest::AbsolutePath { plugin_id, .. }
         | HostRequest::Duplicate { plugin_id, .. }
+        | HostRequest::OpenUrl { plugin_id, .. }
         | HostRequest::VaultListDirs { plugin_id, .. }
         | HostRequest::VaultRefreshTree { plugin_id, .. }
         | HostRequest::Takeover { plugin_id, .. }

@@ -6,7 +6,8 @@ use atelyx_plugin_protocol::paint::{
 use atelyx_plugin_sdk::frame_ui::{BoxStyle, BoxWidth, Edges, Rect, TextRole, TextStyle, Ui};
 
 use crate::model::{
-    BlockInfo, CursorSpot, Mode, NoteModel, UnitKind, BODY_SCROLL, EMPTY_EDIT, SOURCE, SOURCE_SCROLL, TITLE,
+    image_layout, BlockInfo, CursorSpot, Mode, NoteModel, UnitKind, BODY_SCROLL, EMPTY_EDIT, SOURCE,
+    SOURCE_SCROLL, TITLE,
 };
 use atelyx_plugin_props as props;
 
@@ -341,16 +342,29 @@ fn rows(ui: &mut Ui<'_, '_>, model: &NoteModel, edit: Option<EditMeasure>) {
             continue;
         }
         match &block.image {
-            Some(image) if image.height.is_some() => {
-                if model.image_probe.get(&image.src) == Some(&None) {
+            Some(image) => {
+                let failed = model.image_probe.get(&image.src) == Some(&None);
+                if failed {
                     // 载入失败：按替代文字占位，不给正文留空洞
                     let name = if image.alt.is_empty() { &image.src } else { &image.alt };
                     ui.markdown_named(block_id(index), &format!("[图片：{name}]"), Vec::new());
                 } else {
-                    ui.image_fit(image_source(image), image.height.unwrap_or(240.0), ImageFit::Contain);
+                    let natural = model.image_probe.get(&image.src).copied().flatten();
+                    match image_layout(image, natural, model.prefs.content_width as f32) {
+                        Some(size) => {
+                            ui.image_fit_sized(image_source(image), size.width, size.height, ImageFit::Contain);
+                        }
+                        // 原图尺寸还没探测回来且没有声明尺寸：先按正文渲染，探测完成后重排成图片
+                        None => {
+                            let source = &body[block.from..block.to];
+                            with_cursors(ui, model, index, None, 0.0, line, true, |ui| {
+                                ui.markdown_named(block_id(index), source, Vec::new());
+                            });
+                        }
+                    }
                 }
             }
-            _ => {
+            None => {
                 let source = &body[block.from..block.to];
                 with_cursors(ui, model, index, None, 0.0, line, true, |ui| {
                     ui.markdown_named(block_id(index), source, Vec::new());
@@ -666,6 +680,60 @@ fn overlays(ui: &mut Ui<'_, '_>, model: &NoteModel) {
         let left = x.min(ui.bounds().w - 140.0).max(4.0);
         props::type_menu(ui, model, index, left, y + 6.0);
     }
+    wiki_menu(ui, model);
+}
+
+/// `[[` 候选：贴着当前光标弹出，优先放在光标下沿，越界时翻到上沿 / 左移。
+fn wiki_menu(ui: &mut Ui<'_, '_>, model: &NoteModel) {
+    let Some(wiki) = &model.wiki else { return };
+    let Some(caret) = wiki.caret_rect else { return };
+    let bounds = ui.bounds();
+    const ROW_H: f32 = 26.0;
+    let width = 260.0;
+    let height = 8.0 + wiki.candidates.len() as f32 * ROW_H;
+    let left = if caret.x + 6.0 + width <= bounds.w - 4.0 {
+        caret.x + 6.0
+    } else {
+        (caret.x - width - 6.0).max(4.0)
+    };
+    let below = caret.y + caret.h + 4.0;
+    let top = if below + height <= bounds.h - 4.0 { below } else { (caret.y - height - 4.0).max(4.0) };
+    ui.overlay(Rect::new(left, top, width, height), |ui| {
+        ui.boxed(
+            BoxWidth::Fixed(width),
+            BoxStyle::new(Some(ColorToken::SurfaceOverlay), Some(ColorToken::Border), 6.0),
+            Edges::all(4.0),
+            0.0,
+            |ui| {
+                for (index, path) in wiki.candidates.iter().enumerate() {
+                    let name = path.rsplit('/').next().unwrap_or(path);
+                    let name = name
+                        .strip_suffix(".md")
+                        .or_else(|| name.strip_suffix(".MD"))
+                        .unwrap_or(name);
+                    let dir = path.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
+                    ui.click_row(
+                        &format!("note:wiki:{index}"),
+                        Edges::symmetric(6.0, 3.0),
+                        3.0,
+                        false,
+                        true,
+                        |ui| {
+                            ui.row_fit(6.0, |ui| {
+                                ui.icon_named("file-text", 13.0, ColorToken::TextMuted);
+                                let style = TextStyle::new(TextRole::Caption).color(ColorToken::TextSecondary);
+                                ui.text_styled_fit(name, style);
+                                if !dir.is_empty() {
+                                    let dim = TextStyle::new(TextRole::Micro).color(ColorToken::TextMuted);
+                                    ui.text_styled_fit(dir, dim);
+                                }
+                            });
+                        },
+                    );
+                }
+            },
+        );
+    });
 }
 
 fn image_source(image: &crate::model::ImageBlock) -> ImageSource {

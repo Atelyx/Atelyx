@@ -379,6 +379,8 @@ pub enum PluginsMsg {
     ShellAbsolutePath { request_id: u64, path: String },
     /// 在同目录创建副本（`shell.duplicate`），回执 = 落定的新路径。
     ShellDuplicate { request_id: u64, params: atelyx_core::plugin_runtime::DuplicateParams },
+    /// 外链交系统浏览器打开（`shell.openUrl`）。
+    ShellOpenUrl { request_id: u64, params: atelyx_core::plugin_runtime::OpenUrlParams },
     /// 副本创建完成（容器世代守卫：在途任务不跨仓库回填）。
     ShellDuplicateDone {
         request_id: u64,
@@ -820,6 +822,9 @@ pub fn host_requests_stream(spec: &RuntimeSpec) -> impl iced::futures::Stream<It
                 }
                 HostRequest::Duplicate { request_id, params, .. } => {
                     Message::Plugins(PluginsMsg::ShellDuplicate { request_id, params })
+                }
+                HostRequest::OpenUrl { request_id, params, .. } => {
+                    Message::Plugins(PluginsMsg::ShellOpenUrl { request_id, params })
                 }
                 HostRequest::VaultListDirs { request_id, .. } => {
                     Message::Plugins(PluginsMsg::VaultListDirs { request_id })
@@ -2006,6 +2011,17 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
                     resolve_vault(app, request_id, result)
                 }
                 Err(e) => resolve_vault(app, request_id, Err(e)),
+            }
+        }
+        PluginsMsg::ShellOpenUrl { request_id, params } => {
+            let url = crate::percent_decode(params.url.trim());
+            let allowed = url.starts_with("http://") || url.starts_with("https://") || url.starts_with("mailto:");
+            if !allowed {
+                resolve_vault(app, request_id, Err("只支持 http(s) / mailto 链接".to_string()))
+            } else if !crate::open_external(&url) {
+                resolve_vault(app, request_id, Err("链接含不安全的命令行字符或唤起失败".to_string()))
+            } else {
+                resolve_vault(app, request_id, Ok(serde_json::json!({})))
             }
         }
         PluginsMsg::ShellDuplicate { request_id, params } => {

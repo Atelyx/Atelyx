@@ -48,7 +48,7 @@ pub(crate) fn permission_for(name: &str) -> Option<Permission> {
         | method::vault_ui::SWITCH_CONTAINER | method::vault_ui::REMOVE_CONTAINER
         | method::vault_ui::LIST_DIRS | method::vault_ui::REFRESH_TREE => Some(Vault),
         // 取色器是宿主的系统单例界面，不触碰仓库内容
-        method::shell::PICK_COLOR | method::shell::PICK_VAULT => None,
+        method::shell::PICK_COLOR | method::shell::PICK_VAULT | method::shell::OPEN_URL => None,
         // 显示与取路径只读当前仓库的位置事实，不改内容
         method::shell::REVEAL | method::shell::ABSOLUTE_PATH => Some(Vault),
         // 创建副本写仓库内容

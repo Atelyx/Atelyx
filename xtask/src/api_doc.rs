@@ -237,6 +237,7 @@ const SECTIONS: &[Section] = &[
             "method.rs": "CreateEntryResult",
             "method.rs": "DuplicateParams",
             "method.rs": "RevealParams",
+            "method.rs": "OpenUrlParams",
             "method.rs": "AbsolutePathResult",
             "method.rs": "PickColorParams",
             "method.rs": "PickColorResult",

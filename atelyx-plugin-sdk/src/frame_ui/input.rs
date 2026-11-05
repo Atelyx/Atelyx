@@ -197,11 +197,20 @@ pub(crate) async fn handle(
     // 插件回读光标即可；但光标离开 `#` 触发段这类场景文本不变，浮层要靠这条收起
     // 控件层自持的复制钮（代码块头的「复制」）：就地写剪贴板，不把这次点击交给插件
     let mut kept = Vec::with_capacity(events.len());
+    let mut expanded_changed = false;
     for event in events {
         if let UiEvent::Click { id } = &event {
             if let Some(Layout::Copy { text }) = state.layouts.get(id) {
                 let text = text.clone();
                 clip_write(ctx, &text).await;
+                continue;
+            }
+            if let Some(Layout::Expand { key }) = state.layouts.get(id) {
+                let key = key.clone();
+                if !state.expanded.remove(&key) {
+                    state.expanded.insert(key);
+                }
+                expanded_changed = true;
                 continue;
             }
         }
@@ -230,6 +239,7 @@ pub(crate) async fn handle(
     // 有事件 = 插件要据此改自己的状态，必然重绘；否则只认交互态与光标相位的实际变化
     let repaint = !events.is_empty()
         || PaintState::of(state) != paint_before
+        || expanded_changed
         || state.caret_lit() != caret_was_lit;
     InputOutcome { events, repaint }
 }
@@ -331,7 +341,11 @@ async fn pointer_down(
             set_focus(state, Some(id.to_string()), value_of, events);
             state.press = Some(Press { id: id.to_string(), from_input: false });
         }
-        Layout::Button | Layout::Option { .. } | Layout::Copy { .. } => {
+        Layout::Button
+        | Layout::Option { .. }
+        | Layout::Copy { .. }
+        | Layout::Expand { .. }
+        | Layout::Link { .. } => {
             state.press = Some(Press { id: id.to_string(), from_input: false });
         }
         Layout::Markdown { rect, .. } => {
@@ -438,7 +452,12 @@ fn pointer_up(state: &mut UiState, x: f32, y: f32, hit: Option<&str>, events: &m
         Nothing,
     }
     let outcome = match state.layouts.get(&press.id) {
-        Some(Layout::Button) | Some(Layout::Checkbox) | Some(Layout::Custom) | Some(Layout::Copy { .. }) => Outcome::Click,
+        Some(Layout::Button)
+        | Some(Layout::Checkbox)
+        | Some(Layout::Custom)
+        | Some(Layout::Copy { .. })
+        | Some(Layout::Expand { .. })
+        | Some(Layout::Link { .. }) => Outcome::Click,
         Some(Layout::Option { select, index, .. }) => Outcome::Select { select: select.clone(), index: *index },
         _ => Outcome::Nothing,
     };
@@ -819,7 +838,13 @@ async fn edit_key(
                 _ => {}
             }
         }
-        return;
+        // Ctrl+Home / Ctrl+End / PageUp / PageDown 是光标跳转，继续往下交给多行框处理
+        if !matches!(
+            key,
+            Key::Named { name: NamedKey::Home | NamedKey::End | NamedKey::PageUp | NamedKey::PageDown }
+        ) {
+            return;
+        }
     }
     if let Some(area) = area {
         let (inner, font) = (area.inner, area.font);
@@ -831,7 +856,28 @@ async fn edit_key(
         }
         if let Key::Named { name: NamedKey::Home | NamedKey::End } = key {
             let end = matches!(key, Key::Named { name: NamedKey::End });
-            move_line_edge(state, ctx, id, &current, inner, font, end, modifiers.shift).await;
+            if modifiers.control {
+                // Ctrl+Home / Ctrl+End：文档首尾（与可视行首尾区分）
+                refill(state, ctx, &current, font, inner.w).await;
+                let item = state.inputs.entry(id.to_string()).or_default();
+                item.caret = if end { current.len() } else { 0 };
+                if !modifiers.shift {
+                    item.anchor = item.caret;
+                }
+            } else {
+                move_line_edge(state, ctx, id, &current, inner, font, end, modifiers.shift).await;
+            }
+            return;
+        }
+        if let Key::Named { name: NamedKey::PageUp | NamedKey::PageDown } = key {
+            // 按可见高度步进：视口能放下几行就跨几行
+            let up = matches!(key, Key::Named { name: NamedKey::PageUp });
+            refill(state, ctx, &current, font, inner.w).await;
+            let line = text::line_height(&mut state.metrics, font);
+            let step = ((inner.h / line).floor() as usize).max(1);
+            for _ in 0..step {
+                move_vertical(state, ctx, id, &current, inner, font, up, modifiers.shift).await;
+            }
             return;
         }
         // 标记边界上的退格 / 删除 = 整段删掉（与整段选中的交互对齐，逐字拆标签没有意义）
