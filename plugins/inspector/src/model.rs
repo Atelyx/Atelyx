@@ -16,6 +16,10 @@ pub struct DocProps {
     pub present: bool,
     pub parsed: bool,
     pub editable: bool,
+    /// 文档路径：写回时回传宿主，指向别的文档即拒绝。
+    pub path: String,
+    /// 读取时正文的内容指纹：写回时回传，正文已变即拒绝。
+    pub fingerprint: String,
 }
 
 /// 面板状态：属性草稿 + 最近的文档 / 画布数据。
@@ -67,6 +71,8 @@ impl InspectorModel {
                         present: result.present,
                         parsed: result.parsed,
                         editable: result.editable,
+                        path: result.path,
+                        fingerprint: result.fingerprint,
                     });
                 }
             }
@@ -87,7 +93,8 @@ impl InspectorModel {
     }
 }
 
-/// 无属性区 = 面板整块不显示；有块但解析失败 = 错误行；其余按键值对渲染。
+/// 无属性区 = 面板整块不显示；有块但解析失败或根本不是映射 = 错误行；
+/// 只有映射才按键值对渲染，避免新增一条时整块覆盖原内容。
 fn data_of(doc: &DocProps) -> Option<(Vec<(String, Yaml)>, bool)> {
     if !doc.present {
         return None;
@@ -96,8 +103,10 @@ fn data_of(doc: &DocProps) -> Option<(Vec<(String, Yaml)>, bool)> {
         return Some((Vec::new(), false));
     }
     let parsed = frontmatter::parse(&doc.block);
-    let pairs = parsed.data.as_map().map(<[(String, Yaml)]>::to_vec).unwrap_or_default();
-    Some((pairs, parsed.ok))
+    let Some(map) = parsed.data.as_map() else {
+        return Some((Vec::new(), false));
+    };
+    Some((map.to_vec(), parsed.ok))
 }
 
 impl PropsHost for InspectorModel {
@@ -142,6 +151,8 @@ mod tests {
             present,
             parsed,
             editable: true,
+            path: "笔记/a.md".into(),
+            fingerprint: "fp".into(),
         }
     }
 
@@ -157,6 +168,17 @@ mod tests {
         let mut model = InspectorModel::default();
         model.set_doc(doc("---\n: :\n", true, false));
         assert_eq!(model.props.data, Some((Vec::new(), false)));
+    }
+
+    #[test]
+    fn non_mapping_block_locks_editing() {
+        let mut model = InspectorModel::default();
+        model.set_doc(doc("---\njust text\n---\n", true, true));
+        assert_eq!(
+            model.props.data,
+            Some((Vec::new(), false)),
+            "非映射块不渲染添加属性，避免新增一条覆盖整块"
+        );
     }
 
     #[test]
@@ -201,6 +223,7 @@ title: x
             present: true,
             parsed: true,
             editable: true,
+            fingerprint: "fp".into(),
         }));
         model.apply_props(Err("属性读取失败：超时".into()));
         assert_eq!(model.doc.block, "---

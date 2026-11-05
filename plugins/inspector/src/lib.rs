@@ -35,16 +35,32 @@ impl InspectorPlugin {
 
     async fn render(&self, ctx: &Context) {
         let mut frame_ui = self.ui.lock().await;
-        let result = frame_ui
-            .render(ctx, PANEL, |frame| {
+        let mut retried = false;
+        loop {
+            let (editing, anchor) = {
                 let mut model = self.model.lock().unwrap();
-                ui::frame(frame, &mut model);
-                let pointer = model.pointer;
-                ui::overlays(frame, &model, pointer);
-            })
-            .await;
-        if let Err(error) = result {
+                let anchor = props::input_anchor(&mut frame_ui, &*model);
+                model.props.anchor = anchor;
+                (model.props.editing.is_some(), anchor)
+            };
+            let result = frame_ui
+                .render(ctx, PANEL, |frame| {
+                    let mut model = self.model.lock().unwrap();
+                    ui::frame(frame, &mut model);
+                    let pointer = model.pointer;
+                    ui::overlays(frame, &model, pointer);
+                })
+                .await;
+            let Err(error) = result else {
+                // 进入槽位的那一帧输入框才落位：再取一次锚点补一帧，候选浮层当帧可见
+                if anchor.is_some() || !editing || retried {
+                    return;
+                }
+                retried = true;
+                continue;
+            };
             ctx.log_error(&format!("提交属性面失败：{error}"));
+            return;
         }
     }
 
@@ -81,12 +97,20 @@ impl InspectorPlugin {
 
     /// 渲染期攒下的属性块提交给宿主；宿主拼回正文后重读一次，保证草稿与磁盘口径一致。
     async fn flush_pending(&self, ctx: &Context) -> bool {
-        let block = {
+        let (block, path, fingerprint) = {
             let mut model = self.model.lock().unwrap();
-            model.pending_write.take()
+            (
+                model.pending_write.take(),
+                model.doc.path.clone(),
+                model.doc.fingerprint.clone(),
+            )
         };
         let Some(block) = block else { return false };
-        let params = serde_json::json!({ "frontmatter": block });
+        let params = serde_json::json!({
+            "frontmatter": block,
+            "path": path,
+            "fingerprint": fingerprint,
+        });
         match ctx.call_raw(method::doc::PROPS_WRITE, params).await {
             Ok(_) => {
                 self.refresh(ctx).await;
@@ -96,6 +120,8 @@ impl InspectorPlugin {
                 let text = format!("属性保存失败：{error}");
                 self.model.lock().unwrap().props.error = Some(text.clone());
                 ctx.log_error(&text);
+                // 宿主拒绝了过期写回：立刻重读，草稿与指纹对齐到当前正文
+                self.refresh(ctx).await;
                 true
             }
         }
@@ -104,6 +130,13 @@ impl InspectorPlugin {
     async fn handle_input(&self, ctx: &Context, params: FrameInputParams) {
         let input = params.input;
         self.remember_pointer(&input);
+        if matches!(&input, FrameInput::Focus { focused: false }) {
+            // 面板失焦：在途槽按失焦同提交收尾（提交会清掉 editing），再收起类型菜单
+            if self.model.lock().unwrap().props.editing.is_some() {
+                self.commit_props(ctx, 0).await;
+            }
+            self.model.lock().unwrap().props.type_menu = None;
+        }
         if self.handle_props_key(ctx, &input).await {
             self.render(ctx).await;
             return;
@@ -123,11 +156,14 @@ impl InspectorPlugin {
                 UiEvent::Click { id } => self.on_click(ctx, &id).await,
                 UiEvent::Text { id, value } => {
                     if id == props::KEY_INPUT {
-                        let mut model = self.model.lock().unwrap();
-                        model.props.suggest_query = value.clone();
-                        model.props.draft = value;
-                        model.props.suggest_index = 0;
-                        model.props.suggest_armed = false;
+                        {
+                            let mut model = self.model.lock().unwrap();
+                            model.props.suggest_query = value.clone();
+                            model.props.draft = value;
+                            model.props.suggest_index = 0;
+                            model.props.suggest_armed = false;
+                        }
+                        self.ui.lock().await.scroll_to(props::SUGGEST_SCROLL, 0.0);
                     }
                 }
                 UiEvent::Submit { id } => {
@@ -208,11 +244,15 @@ impl InspectorPlugin {
             (model.props.editing.is_some(), empty_key)
         };
         if editing {
-            if quick || empty_key {
-                // 删除 / 翻转按渲染下标执行；空键名提交会删行，先丢草稿避免下标漂移
+            if quick {
+                // 删除 / 翻转按渲染下标执行；先丢草稿避免提交改行后下标漂移
                 props::cancel_edit(&mut *self.model.lock().unwrap());
             } else {
                 self.commit_props(ctx, 0).await;
+                if empty_key {
+                    // 空键名提交会删行，后续渲染下标已整体前移：本次点击不再落到新行上
+                    return;
+                }
             }
         }
         if id == "props:add" {
@@ -327,6 +367,7 @@ impl InspectorPlugin {
         let mut frame_ui = self.ui.lock().await;
         frame_ui.focus_input(props::KEY_INPUT, &draft);
         frame_ui.select_all_input(props::KEY_INPUT, &draft);
+        frame_ui.scroll_to(props::SUGGEST_SCROLL, 0.0);
     }
 }
 

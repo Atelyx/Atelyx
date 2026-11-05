@@ -504,6 +504,7 @@ pub fn props_read(app: &App, request_id: u64) -> Task<Message> {
             request_id,
             Ok(serde_json::to_value(DocPropsResult {
                 path: String::new(),
+                fingerprint: String::new(),
                 frontmatter: String::new(),
                 present: false,
                 parsed: false,
@@ -515,6 +516,7 @@ pub fn props_read(app: &App, request_id: u64) -> Task<Message> {
     let parsed = atelyx_core::frontmatter::parse(&app.doc_text);
     let closed = atelyx_core::frontmatter::block_end(&app.doc_text).is_some();
     let result = DocPropsResult {
+        fingerprint: doc_fingerprint(&app.doc_text),
         path,
         frontmatter: if closed { parsed.fm_prefix } else { String::new() },
         present: app.doc_text.starts_with("---"),
@@ -525,24 +527,47 @@ pub fn props_read(app: &App, request_id: u64) -> Task<Message> {
     crate::settings_view::plugins::resolve_vault(app, request_id, Ok(value))
 }
 
+/// 正文内容指纹：回执与写回同一进程内取自同一份 `doc_text`，用于拒绝过期的属性块。
+fn doc_fingerprint(text: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
 /// 用新的 frontmatter 块替换当前文档的属性区；正文与在途编辑保持不动。
+/// `path` + `fingerprint` 必须与读属性时的文档一致，否则拒绝（防止把旧块写到别的 / 已变的文档）。
 pub fn props_write(
     app: &mut App,
     request_id: u64,
     params: DocPropsWriteParams,
 ) -> Task<Message> {
-    if app.ui.last_note_file.is_none() {
+    let Some(path) = app.ui.last_note_file.clone() else {
         return crate::settings_view::plugins::resolve_vault(
             app,
             request_id,
             Err("没有打开的文档".to_string()),
         );
-    }
+    };
     if !can_write(app) {
         return crate::settings_view::plugins::resolve_vault(
             app,
             request_id,
             Err("当前文档不可写".to_string()),
+        );
+    }
+    if params.path != path {
+        return crate::settings_view::plugins::resolve_vault(
+            app,
+            request_id,
+            Err("文档已切换，属性未写入".to_string()),
+        );
+    }
+    if params.fingerprint != doc_fingerprint(&app.doc_text) {
+        return crate::settings_view::plugins::resolve_vault(
+            app,
+            request_id,
+            Err("文档内容已变化，属性未写入".to_string()),
         );
     }
     let block = params.frontmatter;

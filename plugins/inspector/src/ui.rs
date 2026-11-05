@@ -45,8 +45,7 @@ pub fn frame(ui: &mut Ui<'_, '_>, model: &mut InspectorModel) {
 /// 属性浮层：类型菜单（点击行内类型徽标展开）。
 pub fn overlays(ui: &mut Ui<'_, '_>, model: &InspectorModel, pointer: (f32, f32)) {
     let Some(index) = model.props.type_menu else { return };
-    let left = pointer.0.min(ui.bounds().w - 140.0).max(4.0);
-    props::type_menu(ui, model, index, left, pointer.1 + 6.0);
+    props::type_menu(ui, model, index, pointer.0, pointer.1 + 6.0);
 }
 
 /// 读取失败：原因 + 重试，下方继续显示上次读到的属性。

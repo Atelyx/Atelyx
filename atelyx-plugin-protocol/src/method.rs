@@ -1009,6 +1009,8 @@ pub struct DocRenameParams {
 pub struct DocPropsResult {
     /// 当前文档路径；没有打开文档时为空串。
     pub path: String,
+    /// 读取时正文的内容指纹；写回须原样回传，正文已变即被宿主拒绝。
+    pub fingerprint: String,
     /// frontmatter 块原文（含首尾 `---` 定界）；文档没有属性块时为空串。
     pub frontmatter: String,
     /// 文档是否有属性区（含未闭合的 `---` 起始行）。
@@ -1021,10 +1023,13 @@ pub struct DocPropsResult {
 }
 
 /// [`doc::PROPS_WRITE`] 的入参：新的 frontmatter 块原文（含 `---` 定界；空串 = 删除属性区）。
+/// `path` + `fingerprint` 来自读属性回执；与当前文档不符时宿主拒绝写回。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DocPropsWriteParams {
     pub frontmatter: String,
+    pub path: String,
+    pub fingerprint: String,
 }
 
 impl DocRenameParams {
@@ -3314,6 +3319,40 @@ pub const BUILTIN_SERVICES: &[(&str, &str, &[&str])] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn doc_props_identity_fields_are_required() {
+        let result = serde_json::json!({
+            "path": "a.md",
+            "fingerprint": "fp",
+            "frontmatter": "---\nx: y\n---\n",
+            "present": true,
+            "parsed": true,
+            "editable": true,
+        });
+        let parsed: DocPropsResult = serde_json::from_value(result.clone()).unwrap();
+        assert_eq!(parsed.fingerprint, "fp");
+        let mut missing = result;
+        missing.as_object_mut().unwrap().remove("fingerprint");
+        assert!(
+            serde_json::from_value::<DocPropsResult>(missing).is_err(),
+            "读回执缺指纹必须反序列化失败"
+        );
+        let write = serde_json::json!({
+            "frontmatter": "---\n---\n",
+            "path": "a.md",
+            "fingerprint": "fp",
+        });
+        assert!(serde_json::from_value::<DocPropsWriteParams>(write.clone()).is_ok());
+        for field in ["path", "fingerprint"] {
+            let mut missing = write.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<DocPropsWriteParams>(missing).is_err(),
+                "写回缺 {field} 必须反序列化失败"
+            );
+        }
+    }
 
     #[test]
     fn slot_and_surface_kind_serde_uses_camel_case() {

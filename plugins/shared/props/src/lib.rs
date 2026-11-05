@@ -3,7 +3,7 @@
 
 use atelyx_format::frontmatter::{self, PropType, Yaml};
 use atelyx_plugin_protocol::paint::ColorToken;
-use atelyx_plugin_sdk::frame_ui::{BoxStyle, BoxWidth, Edges, TextRole, TextStyle, Ui};
+use atelyx_plugin_sdk::frame_ui::{BoxStyle, BoxWidth, Edges, FrameUi, Rect, TextRole, TextStyle, Ui};
 
 /// 正在编辑的属性槽位。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -32,6 +32,8 @@ pub struct PropsState {
     /// 候选清单高亮下标；`armed` = 按过 ↑↓（仅此时 Enter 选中候选）。
     pub suggest_index: usize,
     pub suggest_armed: bool,
+    /// 候选浮层的锚点（编辑输入框的光标矩形）：宿主每帧渲染前用 [`input_anchor`] 刷新。
+    pub anchor: Option<Rect>,
 }
 
 /// 面板与宿主的交界：面板只管草稿，读正文、写正文与候选池由宿主提供。
@@ -52,6 +54,8 @@ pub trait PropsHost {
 pub const KEY_INPUT: &str = "props:input";
 /// 候选清单的滚动容器 id（↑↓ 巡航时由插件把高亮行滚进可视区）。
 pub const SUGGEST_SCROLL: &str = "props:suggest-scroll";
+/// 类型菜单的滚动容器 id（可视区压矮时菜单内滚动）。
+const TYPE_MENU_SCROLL: &str = "props:type-scroll";
 
 /// 徽章键：值渲染为 `#` 胶囊流。
 const BADGE_KEYS: &[&str] = &["tags"];
@@ -64,8 +68,50 @@ const COMMON_KEYS: &[&str] = &[
 const SUGGEST_MAX_ROWS: usize = 8;
 /// 候选行高（与宿主候选卡同档）。
 const SUGGEST_ROW_H: f32 = 24.0;
+/// 候选浮层宽度（面板窄于此值时按面宽收缩）。
+const SUGGEST_CARD_W: f32 = 240.0;
+/// 候选浮层内边距（上下各一份）。
+const SUGGEST_CARD_PAD: f32 = 4.0;
+/// 浮层与面边、与锚点的间距。
+const POPUP_EDGE: f32 = 4.0;
 /// 新属性的占位键名。
 const PLACEHOLDER_KEY: &str = "property";
+
+/// 浮层矩形：优先贴锚点下方；下方放不下翻到上方；两侧都放不下取空间大的一侧并压到可用高度。
+/// 返回值始终落在 `bounds` 内（四周留 `POPUP_EDGE`），垂直方向不覆盖锚点。
+pub fn popup_rect(anchor: Rect, width: f32, height: f32, bounds: Rect) -> Rect {
+    let width = width.min((bounds.w - POPUP_EDGE * 2.0).max(0.0));
+    let left = anchor.x.max(bounds.x + POPUP_EDGE);
+    let below_top = anchor.bottom() + POPUP_EDGE;
+    let below_room = (bounds.bottom() - POPUP_EDGE - below_top).max(0.0);
+    let above_room = (anchor.y - POPUP_EDGE - (bounds.y + POPUP_EDGE)).max(0.0);
+    let (top, room) = if height <= below_room {
+        (below_top, below_room)
+    } else if height <= above_room {
+        (anchor.y - POPUP_EDGE - height, above_room)
+    } else if below_room >= above_room {
+        (below_top, below_room)
+    } else {
+        (anchor.y - POPUP_EDGE - above_room, above_room)
+    };
+    let top = top.clamp(bounds.y + POPUP_EDGE, (bounds.bottom() - POPUP_EDGE).max(bounds.y));
+    let height = height
+        .min(room)
+        .min((bounds.bottom() - POPUP_EDGE - top).max(0.0));
+    Rect::new(left.min((bounds.right() - POPUP_EDGE - width).max(bounds.x)), top, width, height)
+}
+
+/// 属性输入框的光标矩形：候选浮层锚点；输入框尚未落位（首帧）时返回 `None`。
+pub fn input_anchor(frame_ui: &mut FrameUi, host: &dyn PropsHost) -> Option<Rect> {
+    if host.props().editing.is_none() {
+        return None;
+    }
+    let caret = frame_ui
+        .caret(KEY_INPUT)
+        .map(|(caret, _)| caret)
+        .unwrap_or_else(|| host.props().draft.len());
+    frame_ui.caret_rect_for(KEY_INPUT, &host.props().draft, caret)
+}
 
 /// 面板渲染：没有 frontmatter 块时整块不出现；YAML 解析失败只显示红条并锁编辑。
 pub fn panel(ui: &mut Ui<'_, '_>, host: &dyn PropsHost) {
@@ -121,8 +167,7 @@ fn row(ui: &mut Ui<'_, '_>, host: &dyn PropsHost, index: usize, key: &str, value
     let delete_id = format!("props:delete:{index}");
     // 整段键名区（含删除钮占位）作为悬停区：指针从键名移到删除钮途中不会闪断
     let row_id = format!("props:keyrow:{index}");
-    let hover_key = host.editable()
-        && (ui.hovered(&row_id) || ui.hovered(KEY_INPUT) || ui.hovered(&delete_id));
+    let hover_key = host.editable() && (ui.hovered(&row_id) || ui.hovered(&delete_id));
     ui.row(6.0, |ui| {
         ui.icon_button_named(
             format!("props:type:{index}"),
@@ -170,6 +215,11 @@ fn row(ui: &mut Ui<'_, '_>, host: &dyn PropsHost, index: usize, key: &str, value
     });
 }
 
+/// 逐项输入框按草稿文本展开（下限 44），避免长标签在固定窄框里只能横向滚动。
+fn draft_input_width(ui: &mut Ui<'_, '_>, draft: &str) -> f32 {
+    (ui.text_width(draft, TextRole::Caption) + 20.0).max(44.0)
+}
+
 fn value_cell(ui: &mut Ui<'_, '_>, host: &dyn PropsHost, index: usize, value: &Yaml, kind: PropType) {
     match value {
         Yaml::Bool(flag) => {
@@ -192,13 +242,15 @@ fn value_cell(ui: &mut Ui<'_, '_>, host: &dyn PropsHost, index: usize, value: &Y
             ui.row_fit(4.0, |ui| {
                 for (item, value) in items.iter().enumerate() {
                     if host.props().editing == Some(Slot::Item(index, item)) {
-                        ui.text_input_inline_sized(KEY_INPUT, host.props().draft.clone(), "标签", 90.0);
+                        let input_w = draft_input_width(ui, &host.props().draft);
+                        ui.text_input_inline_sized(KEY_INPUT, host.props().draft.clone(), "标签", input_w);
                         continue;
                     }
                     tag_pill(ui, host, index, item, value);
                 }
                 if host.props().editing == Some(Slot::NewItem(index)) {
-                    ui.text_input_inline_sized(KEY_INPUT, host.props().draft.clone(), "标签", 90.0);
+                    let input_w = draft_input_width(ui, &host.props().draft);
+                    ui.text_input_inline_sized(KEY_INPUT, host.props().draft.clone(), "标签", input_w);
                 } else {
                     tiny_add(ui, host, format!("props:additem:{index}"), true);
                 }
@@ -208,7 +260,8 @@ fn value_cell(ui: &mut Ui<'_, '_>, host: &dyn PropsHost, index: usize, value: &Y
             ui.column(2.0, |ui| {
                 for (item, value) in items.iter().enumerate() {
                     if host.props().editing == Some(Slot::Item(index, item)) {
-                        ui.text_input_inline_sized(KEY_INPUT, host.props().draft.clone(), "项", 200.0);
+                        let input_w = draft_input_width(ui, &host.props().draft);
+                        ui.text_input_inline_sized(KEY_INPUT, host.props().draft.clone(), "项", input_w);
                         continue;
                     }
                     let item_id = format!("props:item:{index}:{item}");
@@ -422,80 +475,92 @@ fn suggestions(ui: &mut Ui<'_, '_>, host: &dyn PropsHost, index: usize) {
     if !view.pool {
         return;
     }
-    let visible = view.items.len().min(SUGGEST_MAX_ROWS);
-    let height = if visible == 0 { SUGGEST_ROW_H } else { visible as f32 * SUGGEST_ROW_H };
+    let Some(anchor) = host.props().anchor else { return };
+    let bounds = ui.bounds();
+    if bounds.w <= POPUP_EDGE * 2.0 || bounds.h <= POPUP_EDGE * 2.0 {
+        return;
+    }
     let items = view.items;
     let tags = view.tags;
-    ui.boxed(
-        BoxWidth::Fill,
-        BoxStyle::new(Some(ColorToken::SurfaceMuted), Some(ColorToken::Border), 4.0),
-        Edges::symmetric(0.0, 2.0),
-        0.0,
-        |ui| {
-            let rows = |ui: &mut Ui<'_, '_>| {
-                if items.is_empty() {
-                    let text = if tags { "没有匹配的标签" } else { "没有匹配的键名" };
-                    let pad = (SUGGEST_ROW_H - ui.text_height(TextRole::Caption)) / 2.0;
-                    ui.click_box(
-                        "props:suggest:none",
-                        BoxWidth::Fill,
-                        Edges::symmetric(6.0, pad.max(0.0)),
-                        3.0,
-                        false,
-                        false,
-                        |ui| {
-                            let style = TextStyle::new(TextRole::Caption).color(ColorToken::TextMuted);
-                            ui.text_styled_fit(text.to_string(), style);
-                        },
-                    );
-                    return;
-                }
-                let active = host.props().suggest_index.min(items.len().saturating_sub(1));
-                for (item, label) in items.iter().enumerate() {
-                    let selected = host.props().suggest_armed && item == active;
-                    let pad = (SUGGEST_ROW_H - ui.text_height(TextRole::Caption)) / 2.0;
-                    let id = format!("props:suggest:{item}");
-                    ui.click_box(
-                        id,
-                        BoxWidth::Fill,
-                        Edges::symmetric(6.0, pad.max(0.0)),
-                        3.0,
-                        selected,
-                        true,
-                        |ui| {
-                            if tags {
-                                ui.row_fit(5.0, |ui| {
-                                    ui.icon_named(
-                                        "tag",
-                                        12.0,
-                                        if selected { ColorToken::Accent } else { ColorToken::TextMuted },
-                                    );
+    let content_h = items.len().max(1) as f32 * SUGGEST_ROW_H;
+    let card_h = content_h.min(SUGGEST_MAX_ROWS as f32 * SUGGEST_ROW_H) + SUGGEST_CARD_PAD * 2.0;
+    let rect = popup_rect(anchor, SUGGEST_CARD_W, card_h, bounds);
+    let inner_h = rect.h - SUGGEST_CARD_PAD * 2.0;
+    if rect.w <= 0.0 || inner_h < SUGGEST_ROW_H {
+        return;
+    }
+    let active = host.props().suggest_index.min(items.len().saturating_sub(1));
+    ui.overlay(rect, |ui| {
+        ui.boxed(
+            BoxWidth::Fixed(rect.w),
+            BoxStyle::new(Some(ColorToken::SurfaceOverlay), Some(ColorToken::Border), 4.0),
+            Edges::all(SUGGEST_CARD_PAD),
+            0.0,
+            |ui| {
+                let rows = |ui: &mut Ui<'_, '_>| {
+                    if items.is_empty() {
+                        let text = if tags { "没有匹配的标签" } else { "没有匹配的键名" };
+                        let pad = (SUGGEST_ROW_H - ui.text_height(TextRole::Caption)) / 2.0;
+                        ui.click_box(
+                            "props:suggest:none",
+                            BoxWidth::Fill,
+                            Edges::symmetric(6.0, pad.max(0.0)),
+                            3.0,
+                            false,
+                            false,
+                            |ui| {
+                                let style = TextStyle::new(TextRole::Caption).color(ColorToken::TextMuted);
+                                ui.text_styled_fit(text.to_string(), style);
+                            },
+                        );
+                        return;
+                    }
+                    for (item, label) in items.iter().enumerate() {
+                        let selected = host.props().suggest_armed && item == active;
+                        let pad = (SUGGEST_ROW_H - ui.text_height(TextRole::Caption)) / 2.0;
+                        let id = format!("props:suggest:{item}");
+                        ui.click_box(
+                            id,
+                            BoxWidth::Fill,
+                            Edges::symmetric(6.0, pad.max(0.0)),
+                            3.0,
+                            selected,
+                            true,
+                            |ui| {
+                                if tags {
+                                    ui.row_fit(5.0, |ui| {
+                                        ui.icon_named(
+                                            "tag",
+                                            12.0,
+                                            if selected { ColorToken::Accent } else { ColorToken::TextMuted },
+                                        );
+                                        let style = TextStyle::new(TextRole::Caption).color(if selected {
+                                            ColorToken::Accent
+                                        } else {
+                                            ColorToken::Text
+                                        });
+                                        ui.text_styled_fit(format!("#{label}"), style);
+                                    });
+                                } else {
                                     let style = TextStyle::new(TextRole::Caption).color(if selected {
                                         ColorToken::Accent
                                     } else {
                                         ColorToken::Text
                                     });
-                                    ui.text_styled_fit(format!("#{label}"), style);
-                                });
-                            } else {
-                                let style = TextStyle::new(TextRole::Caption).color(if selected {
-                                    ColorToken::Accent
-                                } else {
-                                    ColorToken::Text
-                                });
-                                ui.text_styled(label.clone(), style);
-                            }
-                        },
-                    );
+                                    ui.text_styled(label.clone(), style);
+                                }
+                            },
+                        );
+                    }
+                };
+                if content_h > inner_h {
+                    ui.scroll_max(SUGGEST_SCROLL, inner_h, 0.0, rows);
+                } else {
+                    ui.column(0.0, rows);
                 }
-            };
-            if items.len() > SUGGEST_MAX_ROWS {
-                ui.scroll_max(SUGGEST_SCROLL, height, 0.0, rows);
-            } else {
-                ui.column(0.0, rows);
-            }
-        },
-    );
+            },
+        );
+    });
 }
 
 struct SuggestView {
@@ -512,24 +577,29 @@ fn view_for_row(host: &dyn PropsHost, index: usize) -> Option<SuggestView> {
             let existing: Vec<String> = pairs.iter().map(|(key, _)| key.clone()).collect();
             Some(filter_keys(&existing, query))
         }
-        Slot::Item(row, _) | Slot::NewItem(row) if *row == index => {
+        Slot::Item(row, _) | Slot::NewItem(row) | Slot::Value(row) if *row == index => {
             let key = pairs.get(*row)?.0.as_str();
             if !is_badge_key(key) {
                 return None;
             }
-            let mut existing: Vec<String> = pairs
-                .iter()
-                .filter(|(key, _)| is_badge_key(key))
-                .flat_map(|(_, value)| match value {
-                    Yaml::Seq(items) => items.iter().map(yaml_text).collect::<Vec<_>>(),
-                    other => vec![yaml_text(other)],
-                })
-                .collect();
-            existing.extend(split_comma_list(query));
-            Some(filter_tags(&host.tags(), &existing, query))
+            Some(tag_view(&host.tags(), pairs, query))
         }
         _ => None,
     }
+}
+
+/// 标签候选：排除已用标签与草稿里已输入的段，键入子串过滤（空查询列全部）。
+fn tag_view(vocab: &[String], pairs: &[(String, Yaml)], query: &str) -> SuggestView {
+    let mut existing: Vec<String> = pairs
+        .iter()
+        .filter(|(key, _)| is_badge_key(key))
+        .flat_map(|(_, value)| match value {
+            Yaml::Seq(items) => items.iter().map(yaml_text).collect::<Vec<_>>(),
+            other => vec![yaml_text(other)],
+        })
+        .collect();
+    existing.extend(split_comma_list(query));
+    filter_tags(vocab, &existing, query)
 }
 
 fn filter_keys(existing: &[String], query: &str) -> SuggestView {
@@ -567,7 +637,7 @@ fn filter_tags(vocab: &[String], used: &[String], query: &str) -> SuggestView {
 /// 当前编辑槽的候选（键盘巡航 / 点击选中与渲染同一口径）。
 pub fn suggestion_items(host: &dyn PropsHost) -> Vec<String> {
     let index = match host.props().editing.as_ref() {
-        Some(Slot::Key(row)) => *row,
+        Some(Slot::Key(row) | Slot::Value(row)) => *row,
         Some(Slot::Item(row, _) | Slot::NewItem(row)) => *row,
         _ => return Vec::new(),
     };
@@ -674,6 +744,7 @@ fn parse_type(key: &str) -> Option<PropType> {
 }
 
 /// 类型菜单：六种类型（徽章键锁标签，其余键标签不可选）。
+/// `left` / `bottom` = 触发点的指针坐标；定位复用 [`popup_rect`]，高度受压时菜单内滚动。
 pub fn type_menu(ui: &mut Ui<'_, '_>, host: &dyn PropsHost, index: usize, left: f32, bottom: f32) {
     const TYPES: [(PropType, &str, &str); 6] = [
         (PropType::Text, "type", "文本"),
@@ -683,20 +754,30 @@ pub fn type_menu(ui: &mut Ui<'_, '_>, host: &dyn PropsHost, index: usize, left: 
         (PropType::Boolean, "toggle-left", "布尔"),
         (PropType::List, "list", "列表"),
     ];
+    // 菜单外框宽 / 行高 / 内衬：高度与候选卡同口径按可视区压缩。
+    const MENU_W: f32 = 132.0;
+    const MENU_ROW_H: f32 = 26.0;
+    const MENU_PAD: f32 = 6.0;
+    const MENU_TRIGGER_GAP: f32 = 6.0;
     let Some((pairs, _)) = &host.props().data else { return };
     let Some((key, value)) = pairs.get(index) else { return };
     let badge = is_badge_key(key);
     let current = frontmatter::infer_type(badge, value);
-    let width = 132.0;
-    ui.overlay(
-        atelyx_plugin_sdk::frame_ui::Rect::new(left, bottom, width, 6.0 + 26.0 * TYPES.len() as f32),
-        |menu| {
-            menu.boxed(
-                BoxWidth::Fixed(width),
-                BoxStyle::new(Some(ColorToken::SurfaceOverlay), Some(ColorToken::Border), 6.0),
-                Edges::all(6.0),
-                0.0,
-                |menu| {
+    let anchor = Rect::new(left, (bottom - MENU_TRIGGER_GAP).max(0.0), 0.0, 0.0);
+    let content_h = MENU_ROW_H * TYPES.len() as f32;
+    let rect = popup_rect(anchor, MENU_W, content_h + MENU_PAD * 2.0, ui.bounds());
+    let inner_h = rect.h - MENU_PAD * 2.0;
+    if rect.w <= 0.0 || inner_h <= 0.0 {
+        return;
+    }
+    ui.overlay(rect, |menu| {
+        menu.boxed(
+            BoxWidth::Fixed(rect.w),
+            BoxStyle::new(Some(ColorToken::SurfaceOverlay), Some(ColorToken::Border), 6.0),
+            Edges::all(MENU_PAD),
+            0.0,
+            |menu| {
+                let rows = |menu: &mut Ui<'_, '_>| {
                     for (kind, icon, label) in TYPES {
                         let locked = if badge { kind != PropType::Tag } else { kind == PropType::Tag };
                         let selected = current == kind;
@@ -724,10 +805,15 @@ pub fn type_menu(ui: &mut Ui<'_, '_>, host: &dyn PropsHost, index: usize, left: 
                             },
                         );
                     }
-                },
-            );
-        },
-    );
+                };
+                if content_h > inner_h {
+                    menu.scroll_max(TYPE_MENU_SCROLL, inner_h, 0.0, rows);
+                } else {
+                    menu.column(0.0, rows);
+                }
+            },
+        );
+    });
 }
 
 /// 点击处理：返回 true 表示需要把键盘焦点交给属性输入框。
@@ -809,6 +895,7 @@ pub fn add_property(host: &mut dyn PropsHost) -> bool {
         None => (Vec::new(), true),
     };
     if !ok {
+        host.props_mut().error = Some("属性区无法解析，未添加属性".to_string());
         return false;
     }
     let key = unique_key(&pairs);
@@ -849,10 +936,13 @@ pub fn pick_suggestion(host: &mut dyn PropsHost, index: usize) -> (Option<String
 
 fn pick(host: &mut dyn PropsHost, mut text: String, dir: i32) -> (Option<String>, bool) {
     host.props_mut().suggest_armed = false;
-    if matches!(host.props().editing, Some(Slot::Item(..) | Slot::NewItem(_)) | Some(Slot::Key(_))) {
+    if matches!(
+        host.props().editing,
+        Some(Slot::Item(..) | Slot::NewItem(_) | Slot::Value(_) | Slot::Key(_))
+    ) {
         // 标签项草稿可能带逗号分隔的多段：只替换最后一段，前面的段保留
         let row = match host.props().editing {
-            Some(Slot::Item(row, _) | Slot::NewItem(row)) => Some(row),
+            Some(Slot::Item(row, _) | Slot::NewItem(row) | Slot::Value(row)) => Some(row),
             _ => None,
         };
         let tag_row = row.is_some_and(|row| {
@@ -892,7 +982,10 @@ pub fn commit(host: &mut dyn PropsHost, dir: i32) -> (Option<String>, bool) {
         props.error = None;
         return (None, false);
     }
-    let draft = host.props().draft.trim().to_string();
+    // 变更判定用原始草稿（未 trim）：进入编辑后原样回车不产生磁盘 diff；
+    // 真正要写回时才按槽位语义 trim / 解析。
+    let raw = host.props().draft.clone();
+    let draft = raw.trim().to_string();
     if let Slot::Key(index) = slot {
         if !draft.is_empty()
             && pairs[index].0 != draft
@@ -906,7 +999,7 @@ pub fn commit(host: &mut dyn PropsHost, dir: i32) -> (Option<String>, bool) {
             return (None, false);
         }
     }
-    let outcome = commit_slot_data(&mut pairs, &slot, &draft);
+    let outcome = commit_slot_data(&mut pairs, &slot, &raw);
     {
         let props = host.props_mut();
         props.draft.clear();
@@ -951,7 +1044,9 @@ pub fn on_type_pick(host: &mut dyn PropsHost, id: &str) -> Option<String> {
     let (mut pairs, _) = host.props().data.clone()?;
     let value = &mut pairs.get_mut(row)?.1;
     let Some(converted) = frontmatter::convert_value(value, kind) else {
-        host.props_mut().error = Some("无法转换为该类型".to_string());
+        let props = host.props_mut();
+        props.type_menu = None;
+        props.error = Some("无法转换为该类型".to_string());
         return None;
     };
     *value = converted;
@@ -1013,13 +1108,7 @@ pub fn yaml_text(value: &Yaml) -> String {
     match value {
         Yaml::Null => String::new(),
         Yaml::Bool(flag) => if *flag { "true" } else { "false" }.to_string(),
-        Yaml::Num(number) => {
-            if number.fract() == 0.0 {
-                format!("{}", *number as i64)
-            } else {
-                number.to_string()
-            }
-        }
+        Yaml::Num(number) => number.to_string(),
         Yaml::Date(date) => date.clone(),
         Yaml::Str(text) => text.clone(),
         Yaml::Seq(items) => items.iter().map(yaml_text).collect::<Vec<_>>().join("，"),
@@ -1090,6 +1179,7 @@ fn anchor_slot(slot: &Slot, item_span: Option<(usize, usize)>) -> Option<Slot> {
 fn commit_slot_data(pairs: &mut Vec<(String, Yaml)>, slot: &Slot, draft: &str) -> CommitOutcome {
     match slot {
         Slot::Key(index) => {
+            let draft = draft.trim();
             if draft == pairs[*index].0.trim() {
                 return CommitOutcome::unchanged();
             }
@@ -1101,17 +1191,22 @@ fn commit_slot_data(pairs: &mut Vec<(String, Yaml)>, slot: &Slot, draft: &str) -
             if draft == "tags" {
                 if let Yaml::Str(text) = &pairs[*index].1 {
                     let items: Vec<Yaml> = split_comma_list(text).into_iter().map(Yaml::Str).collect();
-                    pairs[*index].1 = if items.is_empty() { Yaml::Str(String::new()) } else { Yaml::Seq(items) };
+                    pairs[*index].1 = Yaml::Seq(items);
                 }
             }
             CommitOutcome::changed(None)
         }
         Slot::Value(index) => {
             let original = yaml_text(&pairs[*index].1);
-            if original == draft {
+            if draft == original {
                 return CommitOutcome::unchanged();
             }
-            let value = parse_like(&pairs[*index].1, draft);
+            let draft = draft.trim();
+            let value = if is_badge_key(&pairs[*index].0) {
+                Yaml::Seq(split_comma_list(draft).into_iter().map(Yaml::Str).collect())
+            } else {
+                parse_like(&pairs[*index].1, draft)
+            };
             if yaml_text(&value) == original {
                 return CommitOutcome::unchanged();
             }
@@ -1120,6 +1215,7 @@ fn commit_slot_data(pairs: &mut Vec<(String, Yaml)>, slot: &Slot, draft: &str) -
         }
         Slot::Item(row, item) => {
             let Yaml::Seq(items) = &mut pairs[*row].1 else { return CommitOutcome::unchanged() };
+            let draft = draft.trim();
             let original = yaml_text(&items[*item]);
             if draft.is_empty() {
                 if original.trim().is_empty() {
@@ -1142,6 +1238,7 @@ fn commit_slot_data(pairs: &mut Vec<(String, Yaml)>, slot: &Slot, draft: &str) -
         }
         Slot::NewItem(row) => {
             let Yaml::Seq(items) = &mut pairs[*row].1 else { return CommitOutcome::unchanged() };
+            let draft = draft.trim();
             let parts = split_comma_list(draft);
             if parts.is_empty() {
                 return CommitOutcome::unchanged();
@@ -1388,6 +1485,111 @@ tags: [开发]
     }
 
     #[test]
+    fn popup_rect_prefers_below_and_stays_inside_bounds() {
+        let bounds = Rect::new(0.0, 0.0, 320.0, 240.0);
+        let anchor = Rect::new(20.0, 100.0, 80.0, 18.0);
+        let rect = popup_rect(anchor, 240.0, 100.0, bounds);
+        assert_eq!(rect.y, 122.0, "下方放得下就贴光标下沿");
+        assert_eq!(rect.w, 240.0);
+        assert!(rect.bottom() <= bounds.bottom() - 4.0 + 0.01);
+    }
+
+    #[test]
+    fn popup_rect_flips_above_near_the_bottom_edge() {
+        let bounds = Rect::new(0.0, 0.0, 320.0, 240.0);
+        let anchor = Rect::new(20.0, 200.0, 90.0, 18.0);
+        let rect = popup_rect(anchor, 240.0, 100.0, bounds);
+        assert_eq!(rect.bottom(), 196.0, "下方不够时翻到光标上方");
+        assert!(rect.y >= 4.0, "翻转后仍留在面内");
+    }
+
+    #[test]
+    fn popup_rect_caps_to_the_larger_side_when_neither_side_fits() {
+        let bounds = Rect::new(0.0, 0.0, 320.0, 200.0);
+        let anchor = Rect::new(20.0, 60.0, 80.0, 18.0);
+        let rect = popup_rect(anchor, 240.0, 160.0, bounds);
+        assert_eq!(rect.y, 82.0, "两侧都放不下时取空间大的下方");
+        assert_eq!(rect.h, 114.0, "高度压到可用空间");
+        assert!(rect.bottom() <= bounds.bottom() - 4.0 + 0.01);
+    }
+
+    #[test]
+    fn popup_rect_clamps_width_and_left_edge() {
+        let bounds = Rect::new(0.0, 0.0, 200.0, 300.0);
+        let anchor = Rect::new(180.0, 10.0, 18.0, 18.0);
+        let rect = popup_rect(anchor, 400.0, 60.0, bounds);
+        assert_eq!(rect.w, 192.0, "宽度不超过面宽（留 4px 边）");
+        assert_eq!(rect.x, 4.0, "右缘对齐面右缘");
+    }
+
+    #[test]
+    fn arrows_arm_the_candidate_and_enter_picks_it() {
+        let mut host = host("---
+tags: [开发]
+---
+正文");
+        host.tags = vec!["开发".into(), "开发工具".into(), "设计".into()];
+        begin_slot(&mut host, Slot::NewItem(0), String::new());
+        assert!(move_suggestion(&mut host, 1), "有候选时 ↓ 应点亮首行");
+        assert!(host.props.suggest_armed);
+        let (_, next) = submit(&mut host, 1);
+        let Yaml::Seq(items) = &host.props.data.as_ref().unwrap().0[0].1 else {
+            panic!("tags 应为数组");
+        };
+        assert!(items.contains(&Yaml::Str("开发工具".into())), "Enter 采用高亮候选：{items:?}");
+        assert!(!next, "新建项提交后没有后继槽");
+    }
+
+    #[test]
+    fn escape_cancels_the_draft_without_writing() {
+        let mut host = host("---
+a: x
+---
+正文");
+        begin_slot(&mut host, Slot::Value(0), "x".into());
+        host.props.draft = "y".into();
+        cancel_edit(&mut host);
+        assert_eq!(host.props.editing, None);
+        assert!(host.props.draft.is_empty());
+        assert_eq!(host.text, "---
+a: x
+---
+正文");
+    }
+
+    #[test]
+    fn clicking_a_candidate_closes_without_stepping() {
+        let mut host = host("---
+tags: []
+---
+正文");
+        host.tags = vec!["开发".into(), "设计".into()];
+        begin_slot(&mut host, Slot::NewItem(0), String::new());
+        let (_, next) = pick_suggestion(&mut host, 1);
+        assert!(!next);
+        assert_eq!(host.props.editing, None, "点击候选后收起面板");
+        let Yaml::Seq(items) = &host.props.data.as_ref().unwrap().0[0].1 else {
+            panic!("tags 应为数组");
+        };
+        assert_eq!(items, &vec![Yaml::Str("设计".into())]);
+    }
+
+    #[test]
+    fn manually_typed_duplicate_tag_is_kept() {
+        let mut host = host("---
+tags: [开发]
+---
+正文");
+        begin_slot(&mut host, Slot::NewItem(0), "开发".into());
+        let (text, _) = commit(&mut host, 0);
+        assert!(text.is_some(), "手输重复标签照常写入（与逐项编辑同一口径）");
+        let Yaml::Seq(items) = &host.props.data.as_ref().unwrap().0[0].1 else {
+            panic!("tags 应为数组");
+        };
+        assert_eq!(items, &vec![Yaml::Str("开发".into()), Yaml::Str("开发".into())]);
+    }
+
+    #[test]
     fn picking_a_tag_candidate_keeps_the_earlier_segments() {
         let mut host = host("---
 tags: []
@@ -1401,5 +1603,67 @@ tags: []
             panic!("tags 应为数组");
         };
         assert_eq!(items, &vec![Yaml::Str("开发".into()), Yaml::Str("设计".into())]);
+    }
+
+    #[test]
+    fn clearing_the_key_removes_the_row() {
+        let mut host = host("---
+a: x
+b: y
+---
+正文");
+        begin_slot(&mut host, Slot::Key(0), String::new());
+        let (text, next) = commit(&mut host, 0);
+        assert!(text.is_some() && !next, "空键名提交即删行");
+        assert_eq!(host.props.data.as_ref().unwrap().0.len(), 1);
+        assert_eq!(host.props.data.as_ref().unwrap().0[0].0, "b");
+    }
+
+    #[test]
+    fn renaming_to_tags_turns_an_empty_string_into_an_empty_list() {
+        let mut host = host("---
+note: ''
+---
+正文");
+        begin_slot(&mut host, Slot::Key(0), "tags".into());
+        let (text, _) = commit(&mut host, 0);
+        assert_eq!(host.props.data.as_ref().unwrap().0[0].1, Yaml::Seq(Vec::new()));
+        assert!(text.unwrap().contains("tags: []"), "空标签写空数组");
+    }
+
+    #[test]
+    fn untouched_value_with_padding_does_not_rewrite() {
+        let mut host = host("---
+a: ' x'
+---
+正文");
+        let text = yaml_text(&host.props.data.as_ref().unwrap().0[0].1);
+        begin_slot(&mut host, Slot::Value(0), text);
+        let (text, next) = commit(&mut host, 0);
+        assert!(text.is_none() && !next, "原样回车不产生磁盘 diff");
+        assert_eq!(host.props.data.as_ref().unwrap().0[0].1, Yaml::Str(" x".into()));
+    }
+
+    #[test]
+    fn large_numbers_display_without_integer_truncation() {
+        assert_eq!(yaml_text(&Yaml::Num(1e21)), "1000000000000000000000");
+        assert_eq!(yaml_text(&Yaml::Num(1.0)), "1");
+    }
+
+    #[test]
+    fn entering_a_tags_value_immediately_offers_candidates() {
+        let mut host = host("---
+tags: ''
+---
+正文");
+        host.tags = vec!["开发".into(), "设计".into()];
+        begin_slot(&mut host, Slot::Value(0), String::new());
+        assert_eq!(
+            suggestion_items(&host),
+            vec!["开发".to_string(), "设计".to_string()],
+            "空草稿聚焦即列全部标签候选"
+        );
+        host.props.suggest_query = "开".into();
+        assert_eq!(suggestion_items(&host), vec!["开发".to_string()], "键入即时收敛");
     }
 }
