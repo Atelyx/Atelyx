@@ -1,5 +1,5 @@
 //! 画布插件无界面冒烟：经真实 `PluginRuntime` 加载、挂面、取帧，覆盖载入渲染、右键新建卡、
-//! 卡片拖动与防抖落盘、撤销、视口（滚轮方向 / 字号固定 / 占位阈值 / 改尺寸保持视口）、
+//! 卡片拖动与防抖落盘、撤销、视口（滚轮方向 / 世界坐标排版与整体倍乘 / 改尺寸保持视口）、
 //! 面板头部脏标记与停用收尾。
 
 use std::path::{Path, PathBuf};
@@ -27,30 +27,26 @@ const CARD_LEFT: f32 = 100.0;
 const CARD_TOP: f32 = 100.0;
 const CARD_W: f32 = 360.0;
 const CARD_H: f32 = 240.0;
-/// 卡头字号固定为屏幕像素（不随缩放变化）。
+/// 卡头字号基础值（世界单位）：绘制字号 = 基础 × zoom。
 const CARD_TITLE_SIZE: f32 = 12.0;
-/// 主题正文字号：卡内正文与消息都用它，缩放不应改变。
+/// 主题正文字号基础值（世界单位）：绘制字号 = 基础 × zoom。
 const BODY_SIZE: f32 = 14.0;
-/// 滚动条槽宽（卡内容右缘让出的部分，SDK 与画布共同口径）。
+/// 滚动条槽宽（世界单位，SDK 与画布共同口径）：屏幕宽 = 槽宽 × zoom。
 const SCROLLBAR_SLOT_W: f32 = 8.0;
-/// 卡内容矩形右侧内缩：滚动条槽右缘距卡右缘的距离。
+/// 卡内容矩形右侧内缩（世界单位）：滚动条槽右缘距卡右缘的距离按 zoom 换算。
 const CARD_CONTENT_INSET: f32 = 1.0;
-/// 卡内容左右内边距。
+/// 卡内容左右内边距（世界单位）。
 const CARD_CONTENT_PAD: f32 = 8.0;
 /// 卡片圆角半径（世界单位，随缩放变化）：内容下沿据此避开圆角。
 const CARD_CORNER_RADIUS: f32 = 10.0;
-/// 卡头世界高度与卡头到内容矩形的屏幕间距。
+/// 卡头世界高度与卡头到内容矩形的世界间距。
 const CARD_HEAD_H: f32 = 30.0;
 const CARD_BODY_GAP: f32 = 4.0;
-/// 卡内最大行高（主题 h1 × 1.3）：跨视口边的 Markdown 行会整行画出，内容矩形上下各让出一档。
-const CARD_CONTENT_MAX_LINE: f32 = 26.0;
 /// 对话卡片尺寸（世界单位）。
 const CHAT_W: f32 = 520.0;
 const CHAT_H: f32 = 560.0;
 /// 标题实际可用宽度 = 卡宽 - 左右内边距与图标位（见画布世界层排版）。
 const TITLE_LIMIT: f32 = CARD_W - 36.0;
-/// 屏幕宽不超过该值时卡片退化为「卡头 + 居中图标」占位形态。
-const COMPACT_CARD_PX: f32 = 120.0;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
@@ -119,7 +115,7 @@ async fn main() {
     assert_eq!(
         title_size(&frame),
         Some(CARD_TITLE_SIZE),
-        "卡头字号固定为屏幕像素"
+        "载入时视图缩放为 1，卡头字号应等于世界基础值"
     );
     println!("载入：{} 条指令 / {} 个命中区", frame.commands.len(), frame.hits.len());
 
@@ -252,7 +248,7 @@ async fn main() {
     );
     println!("拖拽中 Delete 忽略：通过");
 
-    // 滚轮方向：协议增量正 = 向下；向上滚（负增量）应放大，字号与缩放无关
+    // 滚轮方向：协议增量正 = 向下；向上滚（负增量）应放大。字号按世界基础值 × zoom 绘制。
     let before_zoom = zoom_percent(&frame).expect("工具条应显示缩放百分比");
     wheel(&runtime, -40.0, false);
     let zoomed = wait_frame(&runtime, |frame| {
@@ -260,12 +256,14 @@ async fn main() {
     })
     .await
     .expect("向上滚应放大");
-    assert_eq!(
-        title_size(&zoomed),
-        Some(CARD_TITLE_SIZE),
-        "放大后卡头字号不应变化"
+    let zoom_factor = card_zoom(&zoomed);
+    assert!(
+        title_size(&zoomed)
+            .is_some_and(|size| (size / zoom_factor - CARD_TITLE_SIZE).abs() < 0.05),
+        "放大后卡头字号应为基础字号 × zoom：当前 {:?} / {zoom_factor}",
+        title_size(&zoomed)
     );
-    println!("滚轮方向与字号固定：通过（{before_zoom}% → {}%）", zoom_percent(&zoomed).unwrap_or(0));
+    println!("滚轮方向与字号倍乘：通过（{before_zoom}% → {}%）", zoom_percent(&zoomed).unwrap_or(0));
 
     // 改面板尺寸不再重置视口：既有缩放应原样保留
     let kept = zoom_percent(&zoomed).unwrap_or(0);
@@ -282,7 +280,11 @@ async fn main() {
     })
     .await
     .expect("改尺寸后应保持既有缩放");
-    assert_eq!(title_size(&resized), Some(CARD_TITLE_SIZE), "改尺寸后字号不变");
+    let resized_zoom = card_zoom(&resized);
+    assert!(
+        title_size(&resized).is_some_and(|size| (size / resized_zoom - CARD_TITLE_SIZE).abs() < 0.05),
+        "改尺寸后字号仍应为基础字号 × zoom"
+    );
     runtime.notify_frame_input(
         CANVAS_ID,
         SURFACE,
@@ -296,33 +298,78 @@ async fn main() {
         .expect("尺寸还原后缩放仍应保留");
     println!("改尺寸保持视口：通过（{kept}%）");
 
-    // 卡内字号固定：锚定卡头放大到 300%（正文浮层会吞滚轮，锚点必须落在浮层外），
-    // 正文与卡头字号不变、正文不出卡、滚动条仍贴卡右缘
-    let base_size = body_command(&restored).expect("文本卡应画出正文").3;
+    // 世界坐标排版 + 输出整体倍乘：0.4 / 0.6 / 1.0 / 1.5 / 2.0 下正文逐行内容一致、
+    // 字号与内容偏移都是基础值的同一倍率（换行位置不随缩放跳动）。
     let (anchor_x, anchor_y) = title_point(&restored).expect("应有卡头标题");
     let (anchor_x, anchor_y) = (anchor_x + 2.0, anchor_y + 2.0);
-    wheel_at(&runtime, anchor_x, anchor_y, -400.0);
-    let zoom300 = wait_frame(&runtime, |frame| {
-        zoom_percent(frame).is_some_and(|pct| pct >= 290) && body_command(frame).is_some()
-    })
-    .await
-    .expect("放大到 300% 后正文应仍可见");
-    assert_eq!(
-        body_command(&zoom300).map(|body| body.3),
-        Some(base_size),
-        "正文字号不应随缩放变化"
+    let mut current = restored;
+    let mut baseline: Option<Vec<String>> = None;
+    let mut ratios: Vec<(f32, f32, f32)> = Vec::new();
+    for target in [40, 60, 100, 150, 200] {
+        current = zoom_to(&runtime, &current, target, anchor_x, anchor_y).await;
+        let lines = card_text_lines(&current, CARD_W, CARD_H);
+        assert!(!lines.is_empty(), "{target}% 时卡内应画出正文");
+        match &baseline {
+            Some(expected) => {
+                assert_eq!(&lines, expected, "{target}% 下正文换行位置与逐行内容应完全一致")
+            }
+            None => baseline = Some(lines),
+        }
+        let (cx, cy, cw, _) = card_bounds(&current, CARD_W, CARD_H).expect("应找到卡片背景");
+        let zoom = cw / CARD_W;
+        let body = body_command(&current).expect("文本卡应画出正文");
+        assert!(
+            (body.3 / zoom - BODY_SIZE).abs() < 0.05,
+            "{target}% 下正文字号应为 {BODY_SIZE} × {zoom}：{}",
+            body.3
+        );
+        ratios.push(((body.1 - cx) / zoom, (body.2 - cy) / zoom, body.3 / zoom));
+        assert_card_text_within_card(&current, CARD_W, CARD_H);
+        assert_scrollbar_hugs_card(&current, CARD_W, CARD_H, true);
+    }
+    let reference = ratios[0];
+    for (x, y, size) in &ratios {
+        assert!((x - reference.0).abs() < 0.05, "正文横向偏移比例不一致：{x} vs {}", reference.0);
+        assert!((y - reference.1).abs() < 0.05, "正文纵向偏移比例不一致：{y} vs {}", reference.1);
+        assert!((size - reference.2).abs() < 0.05, "正文字号比例不一致：{size} vs {}", reference.2);
+    }
+    println!("世界坐标排版与等比倍乘：通过（基准 14 / 偏移 {:?}）", reference);
+
+    // 底部多余空白：各档缩放下滚到底时最后一行下缘贴齐卡内容区下缘（仅让出圆角），且末行完整可见。
+    for target in [50, 100, 200] {
+        current = zoom_to(&runtime, &current, target, anchor_x, anchor_y).await;
+        let (cx, cy, cw, ch) = card_bounds(&current, CARD_W, CARD_H).expect("应找到卡片背景");
+        wheel_at(&runtime, cx + cw / 2.0, cy + ch / 2.0, 10000.0);
+        let at_bottom = wait_frame(&runtime, |frame| has_text_containing(frame, "正文段落 59"))
+            .await
+            .expect("滚到底应看到最后一段正文");
+        let zoom = cw / CARD_W;
+        let body_top = cy + (CARD_HEAD_H + CARD_BODY_GAP) * zoom;
+        let body_bottom = cy + ch - CARD_CORNER_RADIUS * zoom;
+        let (last_bottom, last_line) =
+            last_content_line_bottom(&at_bottom, CARD_W, CARD_H).expect("滚到底应画出末行");
+        assert!(
+            (last_bottom - body_bottom).abs() <= 1.5,
+            "{target}% 末行下缘应与卡内容区下缘一致：{last_bottom} vs {body_bottom}"
+        );
+        assert!(
+            last_bottom - last_line >= body_top - 0.5,
+            "{target}% 末行应完整落在卡内容区内，不能被视口切掉一行"
+        );
+        println!("底部无多余空白：通过（{target}% / 末行下缘 {last_bottom} / 内容下缘 {body_bottom}）");
+    }
+
+    // 低缩放（30%）：内容不越出卡内容区、文字不被横向裁半，卡头仍按比例绘制而不是占位。
+    current = zoom_to(&runtime, &current, 30, anchor_x, anchor_y).await;
+    assert_card_text_within_card(&current, CARD_W, CARD_H);
+    let low_zoom = card_zoom(&current);
+    assert!(
+        title_size(&current).is_some_and(|size| (size / low_zoom - CARD_TITLE_SIZE).abs() < 0.05),
+        "低缩放仍应绘制卡头标题（不切占位形态）"
     );
-    assert_eq!(title_size(&zoom300), Some(CARD_TITLE_SIZE), "放大到 300% 后卡头字号不变");
-    assert_card_text_within_card(&zoom300, CARD_W, CARD_H);
-    assert_scrollbar_hugs_card(&zoom300, CARD_W, CARD_H, true);
-    // 缩放步进按指数算（`exp(-delta * 0.0025)`），固定 ±400 在 300% 上限处不往回等量，
-    // 这里按当前缩放与目标缩放反解增量。
-    let back = ((zoom_percent(&zoom300).unwrap_or(300) as f32) / kept as f32).ln() / 0.0025;
-    wheel_at(&runtime, anchor_x, anchor_y, back);
-    let restored = wait_frame(&runtime, |frame| zoom_percent(frame).is_some_and(|pct| pct == kept))
-        .await
-        .expect("缩回原缩放");
-    println!("卡内字号固定与正文裁剪：通过（300% / {kept}%）");
+    println!("低缩放不越界：通过（{}%）", zoom_percent(&current).unwrap_or(0));
+
+    let restored = zoom_to(&runtime, &current, kept, anchor_x, anchor_y).await;
 
     // Ctrl+滚轮：正增量（向下）应把画面向上推（pan.1 减小，卡头屏幕上移）
     let title_y = text_y(&restored).expect("应有卡头标题");
@@ -365,35 +412,6 @@ async fn main() {
         "小地图上的滚轮应被消费"
     );
     println!("小地图滚轮消费：通过");
-
-    // 阈值 120px：卡宽落在 96–120px 区间时就该占位（旧 96px 阈值下这一档仍会画标题）
-    wheel(&runtime, 520.0, false);
-    let near = wait_frame(&runtime, |frame| {
-        let width = CARD_W * zoom_percent(frame).unwrap_or(0) as f32 / 100.0;
-        (96.0..=COMPACT_CARD_PX).contains(&width)
-            && title_size(frame).is_none()
-            && has_icon_path(frame)
-    })
-    .await
-    .expect("卡宽进入 96–120px 区间时应切成占位形态");
-    println!("占位阈值 {COMPACT_CARD_PX}px：通过（{}%）", zoom_percent(&near).unwrap_or(0));
-
-    // 低缩放占位：屏幕宽不超过阈值只画卡头与居中图标，正文与标题不再参与排版
-    wheel(&runtime, 1000.0, false);
-    let compact = wait_frame(&runtime, |frame| {
-        let pct = zoom_percent(frame).unwrap_or(0);
-        pct <= 15
-            && title_size(frame).is_none()
-            && card_rect(frame, CARD_W * pct as f32 / 100.0, CARD_H * pct as f32 / 100.0)
-            && has_icon_path(frame)
-    })
-    .await
-    .expect("缩小到下限后应切成占位形态");
-    assert!(
-        CARD_W * zoom_percent(&compact).unwrap_or(0) as f32 / 100.0 <= COMPACT_CARD_PX,
-        "占位形态只在卡宽 ≤ {COMPACT_CARD_PX}px 时出现"
-    );
-    println!("低缩放占位：通过（{}%）", zoom_percent(&compact).unwrap_or(0));
 
     // 切到对话画布：恢复 messages 的 steps / 附件 / 引用胶囊 / 压缩标记与「模型 · 推理等级」标签
     *state.open_files.lock().unwrap() = vec!["chat.atlx".into()];
@@ -453,7 +471,7 @@ async fn main() {
     // 卡内全部文字（消息 / 输入区 / 引用）落在内容矩形内；缩略图宽度收敛到内容宽
     assert_card_text_within_card(&chat, CHAT_W, CHAT_H);
     assert_card_text_within_card(&scrolled, CHAT_W, CHAT_H);
-    assert_scrollbar_hugs_card(&chat, CHAT_W, CHAT_H, true);
+    assert_scrollbar_hugs_card(&chat, CHAT_W, CHAT_H, false);
     assert_scrollbar_hugs_card(&scrolled, CHAT_W, CHAT_H, false);
     assert_thumb_within_content(&chat, CHAT_W, CHAT_H);
     println!("对话卡信息恢复：通过（{} 条指令）", chat.commands.len());
@@ -939,14 +957,6 @@ fn zoom_percent(frame: &SurfaceFrame) -> Option<i32> {
     })
 }
 
-/// 卡片主体矩形（宽高按当前缩放后的尺寸）。
-fn card_rect(frame: &SurfaceFrame, w: f32, h: f32) -> bool {
-    frame.commands.iter().any(|command| {
-        matches!(command, DrawCommand::Rect { w: rw, h: rh, .. }
-            if (rw - w).abs() < 1.0 && (rh - h).abs() < 1.0)
-    })
-}
-
 /// 卡片背景矩形：圆角矩形且宽高与卡片世界尺寸同比例（缩放由宽高反推）。
 fn card_bounds(frame: &SurfaceFrame, world_w: f32, world_h: f32) -> Option<(f32, f32, f32, f32)> {
     frame.commands.iter().find_map(|command| match command {
@@ -959,6 +969,70 @@ fn card_bounds(frame: &SurfaceFrame, world_w: f32, world_h: f32) -> Option<(f32,
     })
 }
 
+/// 当前视图的缩放倍率（由卡宽反推，避免工具条百分比取整误差）。
+fn card_zoom(frame: &SurfaceFrame) -> f32 {
+    card_bounds(frame, CARD_W, CARD_H).map(|(_, _, w, _)| w / CARD_W).unwrap_or(1.0)
+}
+
+/// 卡内容区内的正文行（按绘制顺序，排除卡头与世界层 chrome）：换行一致性与末行断言都读它。
+fn card_text_lines(frame: &SurfaceFrame, world_w: f32, world_h: f32) -> Vec<String> {
+    let (cx, cy, cw, ch) = card_bounds(frame, world_w, world_h).expect("应找到卡片背景");
+    let zoom = cw / world_w;
+    let body_top = cy + (CARD_HEAD_H + CARD_BODY_GAP) * zoom;
+    let body_bottom = cy + ch - CARD_CORNER_RADIUS * zoom;
+    let content_left = cx + (CARD_CONTENT_INSET + CARD_CONTENT_PAD) * zoom;
+    let content_right =
+        cx + cw - (CARD_CONTENT_INSET + SCROLLBAR_SLOT_W + CARD_CONTENT_PAD) * zoom;
+    frame
+        .commands
+        .iter()
+        .filter_map(|command| match command {
+            DrawCommand::Text { content, x, y, size, .. }
+                if *y >= body_top - 0.5
+                    && *y <= body_bottom
+                    && *x >= content_left - 1.0
+                    && *x + text_width(content, *size) <= content_right + 1.5 =>
+            {
+                Some(content.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// 卡内容区里最靠下的一行：返回（行下缘，行高）。滚动到底时用它核对内容下缘是否贴齐。
+fn last_content_line_bottom(
+    frame: &SurfaceFrame,
+    world_w: f32,
+    world_h: f32,
+) -> Option<(f32, f32)> {
+    let (cx, cy, cw, _) = card_bounds(frame, world_w, world_h).expect("应找到卡片背景");
+    let zoom = cw / world_w;
+    let body_top = cy + (CARD_HEAD_H + CARD_BODY_GAP) * zoom;
+    let content_left = cx + (CARD_CONTENT_INSET + CARD_CONTENT_PAD) * zoom;
+    let content_right =
+        cx + cw - (CARD_CONTENT_INSET + SCROLLBAR_SLOT_W + CARD_CONTENT_PAD) * zoom;
+    let mut bottommost: Option<(f32, f32)> = None;
+    for command in &frame.commands {
+        let DrawCommand::Text { content, x, y, size, .. } = command else {
+            continue;
+        };
+        if *x < content_left - 1.0 || *x + text_width(content, *size) > content_right + 1.5 {
+            continue;
+        }
+        // 行盒高度与字号同一比例（宿主量算结果按字号线性缩放），不能按字号分档估
+        let line = *size * 1.625;
+        if *y + line < body_top {
+            continue;
+        }
+        let bottom = *y + line;
+        if bottommost.is_none_or(|(last, _)| bottom > last) {
+            bottommost = Some((bottom, line));
+        }
+    }
+    bottommost
+}
+
 /// 文本卡正文首行（字号断言与缩放锚点都按它定位）。
 fn body_command(frame: &SurfaceFrame) -> Option<(&str, f32, f32, f32)> {
     frame.commands.iter().find_map(|command| match command {
@@ -969,7 +1043,7 @@ fn body_command(frame: &SurfaceFrame) -> Option<(&str, f32, f32, f32)> {
     })
 }
 
-/// 卡内每条滚动条槽（恒定槽宽）的右缘距卡右缘恒定，且槽落在卡内。
+/// 卡内每条滚动条槽右缘距卡右缘恒定（距离按 zoom 等比），且槽落在卡内。
 /// `require` 为 false 时不要求滚动条可见：滚动停止后控件层会隐藏槽。
 fn assert_scrollbar_hugs_card(
     frame: &SurfaceFrame,
@@ -978,12 +1052,14 @@ fn assert_scrollbar_hugs_card(
     require: bool,
 ) {
     let (cx, cy, cw, ch) = card_bounds(frame, world_w, world_h).expect("应找到卡片背景");
+    let zoom = cw / world_w;
+    let slot_w = SCROLLBAR_SLOT_W * zoom;
     let mut bars = 0;
     for command in &frame.commands {
         let DrawCommand::Rect { x, y, w, h, corner_radius: None, .. } = command else {
             continue;
         };
-        if (*w - SCROLLBAR_SLOT_W).abs() > 0.5 || *h < 24.0 {
+        if (*w - slot_w).abs() > 0.5 || *h < 24.0 * zoom {
             continue;
         }
         // 与卡片无交集：属于别的卡或小地图，跳过。
@@ -1006,7 +1082,7 @@ fn assert_scrollbar_hugs_card(
             cy + ch
         );
         let distance = cx + cw - (x + w);
-        if (distance - CARD_CONTENT_INSET).abs() < 1.5 {
+        if (distance - CARD_CONTENT_INSET * zoom).abs() < 1.5 {
             bars += 1;
         }
     }
@@ -1015,43 +1091,55 @@ fn assert_scrollbar_hugs_card(
     }
 }
 
-/// 卡内全部文字必须落在卡片矩形内（圆角以内）；正文行还要落在内容矩形（不压滚动条槽）。
+/// 卡内全部文字对外可见的部分必须落在卡片矩形内（圆角以内），未裁剪的文字右缘不压滚动条槽。
+/// 跨视口边的 Markdown 行会整行画出、由滚动裁剪截断，所以纵向按下缘用「可见矩形」判定。
 fn assert_card_text_within_card(frame: &SurfaceFrame, world_w: f32, world_h: f32) {
     let (cx, cy, cw, ch) = card_bounds(frame, world_w, world_h).expect("应找到卡片背景");
     let zoom = cw / world_w;
-    let body_left = cx + CARD_CONTENT_INSET;
-    let body_right = cx + cw - CARD_CONTENT_INSET;
-    let content_left = body_left + CARD_CONTENT_PAD;
-    let content_right = body_right - SCROLLBAR_SLOT_W - CARD_CONTENT_PAD;
-    let body_top = cy + (CARD_HEAD_H * zoom + CARD_BODY_GAP).max(CARD_CONTENT_MAX_LINE);
+    let content_left = cx + (CARD_CONTENT_INSET + CARD_CONTENT_PAD) * zoom;
+    let content_right =
+        cx + cw - (CARD_CONTENT_INSET + SCROLLBAR_SLOT_W + CARD_CONTENT_PAD) * zoom;
+    let body_top = cy + (CARD_HEAD_H + CARD_BODY_GAP) * zoom;
     let card_bottom = cy + ch - CARD_CORNER_RADIUS * zoom;
+    let mut clips: Vec<(f32, f32, f32, f32)> = Vec::new();
     let mut lines = 0;
     for command in &frame.commands {
-        let DrawCommand::Text { content, x, y, size, .. } = command else {
-            continue;
-        };
-        // 卡头文字按卡宽省略（另行断言）；跨视口上下边的 Markdown 行可能整行画出，
-        // 这里只约束内容区文字仍在卡片圆角矩形以内。
-        if *y < body_top - 0.5 || *y > card_bottom || *x < cx - 0.5 || *x > cx + cw {
-            continue;
+        match command {
+            DrawCommand::PushClip { x, y, w, h } => clips.push((*x, *y, *w, *h)),
+            DrawCommand::PopClip => {
+                clips.pop();
+            }
+            DrawCommand::Text { content, x, y, size, .. } => {
+                // 卡头文字按卡宽省略（另行断言），不参与内容区约束。
+                if *y < body_top - 0.5 || *y > card_bottom || *x < cx - 0.5 || *x > cx + cw {
+                    continue;
+                }
+                lines += 1;
+                assert!(
+                    *x >= content_left - 1.0,
+                    "卡内文字左缘越出内容矩形：{content} @ {x} < {content_left}"
+                );
+                let right = *x + text_width(content, *size);
+                assert!(
+                    right <= content_right + 1.5,
+                    "卡内文字右缘越出内容矩形：{content} → {right} > {content_right}"
+                );
+                let mut visible = (*x, *y, text_width(content, *size),
+                    if *size >= 16.0 { *size * 1.3 } else { *size * 1.625 });
+                for clip in &clips {
+                    visible = intersect(visible, *clip);
+                }
+                if visible.2 <= 0.0 || visible.3 <= 0.0 {
+                    continue;
+                }
+                assert!(
+                    visible.1 + visible.3 <= card_bottom + 1.0,
+                    "卡内可见文字下缘越出卡片圆角：{content} → {} > {card_bottom}",
+                    visible.1 + visible.3
+                );
+            }
+            _ => {}
         }
-        lines += 1;
-        assert!(
-            *x >= content_left - 1.0,
-            "卡内文字左缘越出内容矩形：{content} @ {x} < {content_left}"
-        );
-        let right = *x + text_width(content, *size);
-        assert!(
-            right <= content_right + 1.5,
-            "卡内文字右缘越出内容矩形：{content} → {right} > {content_right}"
-        );
-        // 行高按 Markdown 口径：标题 1.3 倍，正文 / 说明 1.625 倍。
-        let line_height = if *size >= 16.0 { *size * 1.3 } else { *size * 1.625 };
-        assert!(
-            *y + line_height <= card_bottom + 1.0,
-            "卡内文字下缘越出卡片圆角：{content} → {} > {card_bottom}",
-            *y + line_height
-        );
     }
     assert!(lines > 0, "卡内容区应画出文字");
 }
@@ -1060,10 +1148,11 @@ fn assert_card_text_within_card(frame: &SurfaceFrame, world_w: f32, world_h: f32
 fn assert_thumb_within_content(frame: &SurfaceFrame, world_w: f32, world_h: f32) {
     let (cx, cy, cw, ch) = card_bounds(frame, world_w, world_h).expect("应找到卡片背景");
     let zoom = cw / world_w;
-    let body_top = cy + (CARD_HEAD_H * zoom + CARD_BODY_GAP).max(CARD_CONTENT_MAX_LINE);
+    let body_top = cy + (CARD_HEAD_H + CARD_BODY_GAP) * zoom;
     let body_bottom = cy + ch - CARD_CORNER_RADIUS * zoom;
-    let content_left = cx + CARD_CONTENT_INSET + CARD_CONTENT_PAD;
-    let content_right = cx + cw - CARD_CONTENT_INSET - SCROLLBAR_SLOT_W - CARD_CONTENT_PAD;
+    let content_left = cx + (CARD_CONTENT_INSET + CARD_CONTENT_PAD) * zoom;
+    let content_right =
+        cx + cw - (CARD_CONTENT_INSET + SCROLLBAR_SLOT_W + CARD_CONTENT_PAD) * zoom;
     let content_width = content_right - content_left;
     let mut clips: Vec<(f32, f32, f32, f32)> = Vec::new();
     let mut thumbs = 0;
@@ -1136,13 +1225,6 @@ fn intersect(a: (f32, f32, f32, f32), b: (f32, f32, f32, f32)) -> (f32, f32, f32
     let x1 = (a.0 + a.2).min(b.0 + b.2);
     let y1 = (a.1 + a.3).min(b.1 + b.3);
     (x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0))
-}
-
-fn has_icon_path(frame: &SurfaceFrame) -> bool {
-    frame
-        .commands
-        .iter()
-        .any(|command| matches!(command, DrawCommand::Path { .. }))
 }
 
 /// 与宿主量算同一口径的宽度估算（ASCII 0.55 字宽，其余 1 字宽）。
@@ -1277,6 +1359,30 @@ async fn wait_frame_at_width(
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+}
+
+/// 把视图缩放到目标百分比：锚点落在卡头（正文浮层之外，滚轮才交给视图），
+/// 按缩放步进的指数口径（`exp(-delta * 0.0025)`）反解增量。
+async fn zoom_to(
+    runtime: &PluginRuntime,
+    frame: &SurfaceFrame,
+    target: i32,
+    anchor_x: f32,
+    anchor_y: f32,
+) -> SurfaceFrame {
+    // 从卡宽反推实际倍率，避免工具条百分比取整带来的累积偏差。
+    let current = card_zoom(frame);
+    let target_zoom = target as f32 / 100.0;
+    let delta = -(target_zoom / current).ln() / 0.0025;
+    wheel_at(runtime, anchor_x, anchor_y, delta);
+    wait_frame(runtime, |frame| {
+        zoom_percent(frame).is_some_and(|pct| (pct - target).abs() <= 1)
+    })
+    .await
+    .unwrap_or_else(|| {
+        let now = runtime.surface_frame(CANVAS_ID, SURFACE);
+        panic!("未缩放到 {target}%（当前 {:?}）", now.as_deref().and_then(zoom_percent))
+    })
 }
 
 fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {

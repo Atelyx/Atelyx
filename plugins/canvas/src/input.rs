@@ -554,7 +554,7 @@ fn double_click(session: &mut Session, x: f32, y: f32, size: (f32, f32), out: &m
     true
 }
 
-/// 卡正文浮层矩形（世界层命中时用来判断「按下落在正文上」）。
+/// 卡正文浮层矩形（屏幕坐标，世界层命中时用来判断「按下落在正文上」）。
 pub fn card_bodies(session: &Session) -> Vec<(String, Rect)> {
     session
         .data
@@ -562,20 +562,19 @@ pub fn card_bodies(session: &Session) -> Vec<(String, Rect)> {
         .iter()
         .filter(|n| matches!(n.node_type.as_str(), "text" | "conversation"))
         .filter(|n| !geometry::hidden_by_collapsed(&session.data.nodes, &n.id))
-        // 占位卡没有正文浮层：不过滤会让浮层命中吞掉整张卡上的按下与滚轮
-        .filter(|n| !crate::paint::compact_card(session.view.zoom, display_size(n).0 as f32))
         .map(|n| {
             let (w, h) = display_size(n);
+            let zoom = session.view.zoom;
             let (sx, sy) = session.view.screen(n.x, n.y);
-            let (x, y, bw, bh) = crate::paint::card_body_rect(
-                session.view.zoom,
+            // card_body_rect 给基础坐标：换算回屏幕矩形，与指针坐标同域
+            let (bx, by, bw, bh) = crate::paint::card_body_rect(
+                zoom,
                 sx,
                 TOOLBAR_H + sy,
                 w as f32,
                 h as f32,
-                crate::paint::card_tail_gap(&n.node_type),
             );
-            (n.id.clone(), Rect::new(x, y, bw, bh))
+            (n.id.clone(), Rect::new(bx * zoom, by * zoom, bw * zoom, bh * zoom))
         })
         .collect()
 }
@@ -766,14 +765,16 @@ mod tests {
         assert!(session.view.zoom > before, "空白区滚轮应缩放");
     }
 
-    /// 占位卡没有正文浮层：正文矩形集合必须剔除它，否则命中会吞掉卡上的按下与滚轮。
+    /// 正文浮层矩形按缩放换算成屏幕坐标：低缩放仍要命中正文区（滚轮 / 按下不掉给世界层）。
     #[test]
-    fn card_bodies_skip_compact_cards() {
+    fn card_bodies_follow_card_scale() {
         let card = text_card("n1", 360.0, 240.0);
         let mut session = session_with(vec![card]);
         session.view.zoom = 0.3;
-        assert!(card_bodies(&session).is_empty(), "占位卡不应有正文浮层");
-        session.view.zoom = 0.5;
-        assert_eq!(card_bodies(&session).len(), 1, "非占位卡保留正文浮层");
+        let bodies = card_bodies(&session);
+        assert_eq!(bodies.len(), 1, "文本卡始终有正文浮层");
+        let rect = bodies[0].1;
+        assert!((rect.w - 358.0 * 0.3).abs() < 0.5, "内容宽按缩放换算：{}", rect.w);
+        assert!((rect.h - 196.0 * 0.3).abs() < 0.5, "内容高按缩放换算：{}", rect.h);
     }
 }

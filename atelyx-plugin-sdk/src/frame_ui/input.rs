@@ -113,16 +113,21 @@ pub(crate) async fn handle(
                 // 右键不改焦点与按下态：选区复制菜单自己处理，其余落点报给插件
                 right_click(state, *x, *y, hit.as_deref(), &mut events);
             } else {
-                pointer_down(state, ctx, *x, *y, *button, hit.as_deref(), &value_of, &mut events).await;
+                let (bx, by) = state.base_point(*x, *y);
+                pointer_down(state, ctx, bx, by, *button, hit.as_deref(), &value_of, &mut events).await;
             }
         }
-        FrameInput::PointerUp { x, y, hit, .. } => pointer_up(state, *x, *y, hit.as_deref(), &mut events),
+        FrameInput::PointerUp { x, y, hit, .. } => {
+            let (bx, by) = state.base_point(*x, *y);
+            pointer_up(state, bx, by, hit.as_deref(), &mut events);
+        }
         FrameInput::DoubleClick { x, y, button, hit, .. } => {
             if *button == MouseButton::Right {
                 // 右键双击按一次右键处理：不改焦点与按下态
                 right_click(state, *x, *y, hit.as_deref(), &mut events);
             } else {
-                pointer_down(state, ctx, *x, *y, *button, hit.as_deref(), &value_of, &mut events).await;
+                let (bx, by) = state.base_point(*x, *y);
+                pointer_down(state, ctx, bx, by, *button, hit.as_deref(), &value_of, &mut events).await;
                 if let Some(id) = hit
                     .as_deref()
                     .filter(|id| matches!(state.layouts.get(*id), Some(Layout::Input { .. } | Layout::TextArea { .. })))
@@ -147,7 +152,8 @@ pub(crate) async fn handle(
             // 只有声明了提示的控件才进入等待；换控件即重新计时
             let hinted = hit.as_deref().filter(|id| state.hints.contains_key(*id));
             state.track_hint(hinted);
-            pointer_move(state, ctx, *x, *y, hit.as_deref(), &value_of, &mut events).await;
+            let (bx, by) = state.base_point(*x, *y);
+            pointer_move(state, ctx, bx, by, hit.as_deref(), &value_of, &mut events).await;
         }
         FrameInput::PointerLeave => {
             state.hovered = None;
@@ -614,11 +620,16 @@ fn bar_offset_x(track: Rect, thumb: f32, max_offset: f32, x: f32) -> f32 {
 }
 
 /// 滚轮改滚动偏移：增量是像素（宿主已把「行」换算成像素），按光标所在的最内层滚动容器走。
+/// 落点与增量都按所在缩放浮层的倍率换算回基础坐标：滚动偏移以基础单位存储，跨缩放连续。
+/// 增量是屏幕像素，除倍率才是基础单位；乘倍率会让滚速随缩放平方变化。
 fn wheel(state: &mut UiState, x: f32, y: f32, delta_x: f32, delta_y: f32) -> Option<UiEvent> {
     // 浮层打开时滚轮只作用于浮层内：落点不在浮层上即丢弃，也不把滚动漏给下层列表
     if !state.overlays.is_empty() && !state.overlays.iter().any(|rect| rect.contains(x, y)) {
         return None;
     }
+    let scale = state.scale_at(x, y);
+    let (x, y) = state.base_point(x, y);
+    let (delta_x, delta_y) = (delta_x / scale, delta_y / scale);
     // 光标落在内容超出一屏的多行输入框上：滚轮先滚输入框内部（与原生输入面一致）
     let area = state
         .layouts

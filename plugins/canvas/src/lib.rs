@@ -874,6 +874,8 @@ impl PluginState {
                     offset,
                     max_offset,
                 } => {
+                    // 滚动偏移由控件层自持：它已改，必须重描绘出新偏移下的内容
+                    redraw = true;
                     // 远离底部即退出跟随：「回到底部」按钮据此出现，新消息不再强拉视图
                     if let Some(node) = id.strip_prefix("canvas-chat-") {
                         redraw |= self

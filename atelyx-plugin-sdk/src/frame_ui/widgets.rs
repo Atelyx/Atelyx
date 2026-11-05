@@ -2815,7 +2815,7 @@ fn anchor_ime(ctx: &mut BuildCtx<'_>, x: f32, y: f32, line_height: f32, clip: Re
     if y < clip.y || y + line_height > clip.bottom() + 0.5 {
         return;
     }
-    ctx.ime = Some(Rect::new(x, y, 1.0, line_height));
+    ctx.set_ime(Rect::new(x, y, 1.0, line_height));
 }
 
 /// 纵向滚动条槽宽：恒定从内容宽里让出，与是否溢出、滚动位置无关。

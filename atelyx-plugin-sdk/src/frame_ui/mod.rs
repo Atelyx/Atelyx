@@ -261,6 +261,7 @@ impl FrameUi {
             self.state.scroll_max = out.scroll_max;
             self.state.follow_prev = out.follow_prev;
             self.state.overlays = out.overlays;
+            self.state.scaled_regions = out.scaled_regions;
             self.state.hints = out.hints;
             self.state.markdown_order = out.markdown_seen.iter().map(|(id, _)| id.clone()).collect();
             self.state.markdown_last = out.markdown_seen.into_iter().collect();
@@ -654,6 +655,99 @@ mod tests {
             .event(FrameInput::Wheel { x: 270.0, y: 170.0, delta_x: 0.0, delta_y: 24.0, modifiers: Default::default(), hit: None })
             .await;
         assert!(blank.is_empty(), "浮层内、滚动区外的滚轮也不落到下层：{blank:?}");
+    }
+
+    /// 缩放浮层：绘制整体按倍率倍乘，字号 / 行距 / 命中区都是基础值的同一倍率。
+    #[tokio::test]
+    async fn scaled_overlay_multiplies_draw_and_hits() {
+        // 基础矩形按倍率反推，使屏幕原点固定：屏幕坐标 = 基础 × 倍率
+        let origin = (50.0, 30.0);
+        let render = |scale: f32| async move {
+            let rect = Rect::new(origin.0 / scale, origin.1 / scale, 120.0, 100.0);
+            let mut bench = Bench::new(320.0, 220.0).await;
+            bench
+                .render(move |ui| {
+                    ui.overlay_scaled(rect, scale, |ui| {
+                        ui.column(8.0, |c| {
+                            c.text("甲", TextRole::Body);
+                            c.text("乙", TextRole::Body);
+                        });
+                        ui.button("scaled-go", "确定");
+                    });
+                })
+                .await
+                .unwrap()
+        };
+        let base = render(1.0).await;
+        let doubled = render(2.0).await;
+        let find = |frame: &SurfaceFrame, content: &str| {
+            frame
+                .commands
+                .iter()
+                .find_map(|command| match command {
+                    DrawCommand::Text { content: value, size, x, y, .. } if value == content => {
+                        Some((*size, *x, *y))
+                    }
+                    _ => None,
+                })
+                .expect("应画出正文")
+        };
+        let body = theme_result().font_sizes.body;
+        assert!((find(&base, "甲").0 - body).abs() < 0.01, "基础倍率不改字号");
+        assert!((find(&doubled, "甲").0 - body * 2.0).abs() < 0.01, "字号按倍率放大");
+        let step = |frame: &SurfaceFrame| find(frame, "乙").2 - origin.1;
+        assert!(
+            (step(&doubled) - step(&base) * 2.0).abs() < 0.5,
+            "行距按同倍率放大：{} → {}",
+            step(&base),
+            step(&doubled)
+        );
+        assert!((find(&doubled, "甲").1 - find(&base, "甲").1).abs() < 0.01, "屏幕原点不随倍率平移");
+        let hit = |frame: &SurfaceFrame| {
+            frame.hits.iter().find(|hit| hit.id == "scaled-go").map(|hit| (hit.x, hit.w)).expect("应有按钮命中")
+        };
+        assert!((hit(&doubled).1 - hit(&base).1 * 2.0).abs() < 0.5, "命中区按倍率换算");
+        assert!((hit(&doubled).0 - hit(&base).0).abs() < 0.01, "命中区屏幕原点不随倍率平移");
+        assert!(
+            doubled.commands.iter().any(|command| matches!(
+                command,
+                DrawCommand::PushClip { w, h, .. } if (*w - 240.0).abs() < 0.5 && (*h - 200.0).abs() < 0.5
+            )),
+            "浮层裁剪矩形同样按倍率换算"
+        );
+    }
+
+    /// 缩放浮层内的滚动偏移以基础单位存储：滚轮增量按倍率换算，跨缩放连续。
+    /// 增量是屏幕像素，换算回基础单位要除倍率——同一格滚轮在任意缩放下屏幕位移相同。
+    #[tokio::test]
+    async fn scaled_overlay_owns_the_wheel_in_base_units() {
+        let mut bench = Bench::new(400.0, 260.0).await;
+        bench
+            .render(|ui| {
+                ui.overlay_scaled(Rect::new(25.0, 15.0, 120.0, 100.0), 2.0, |ui| {
+                    ui.scroll_sized("scaled-list", 80.0, 0.0, false, |ui| {
+                        for index in 0..30 {
+                            ui.text(format!("项{index}"), TextRole::Label);
+                        }
+                    });
+                });
+            })
+            .await
+            .unwrap();
+        let events = bench
+            .event(FrameInput::Wheel {
+                x: 60.0,
+                y: 60.0,
+                delta_x: 0.0,
+                delta_y: 24.0,
+                modifiers: Default::default(),
+                hit: None,
+            })
+            .await;
+        assert!(
+            matches!(events.as_slice(), [UiEvent::Scroll { id, offset, .. }] if id == "scaled-list" && (*offset - 12.0).abs() < 0.01),
+            "屏幕像素增量除倍率得到基础单位：{events:?}"
+        );
     }
 
     #[tokio::test]

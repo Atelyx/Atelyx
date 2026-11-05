@@ -36,6 +36,23 @@ pub(crate) struct FontSpec {
     pub family: Option<TextFamily>,
 }
 
+/// 缩放浮层：内容按基础坐标排版与记录布局，绘制 / 命中按 `scale` 倍乘，输入按倍率反算。
+/// 屏幕坐标 = 基础坐标 × 倍率（原点为面板左上角），所以多个浮层的基础矩形仍在同一坐标系，
+/// 命中不会因为浮层的基础矩形重叠而落到别的浮层。
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ScaledRegion {
+    /// 屏幕外框（浮层绘制区域）。
+    pub screen: Rect,
+    pub scale: f32,
+}
+
+impl ScaledRegion {
+    /// 屏幕坐标 → 基础坐标。
+    pub(crate) fn to_base(&self, x: f32, y: f32) -> (f32, f32) {
+        (x / self.scale, y / self.scale)
+    }
+}
+
 /// 一个控件在上一帧的落位与解释所需的信息。
 #[derive(Clone, Debug)]
 pub(crate) enum Layout {
@@ -192,6 +209,8 @@ pub(crate) struct UiState {
     pub resize_pending: bool,
     /// 上一帧声明的浮层区域：有浮层时滚轮只作用于浮层内的滚动区。
     pub overlays: Vec<Rect>,
+    /// 上一帧的缩放浮层：指针按所在浮层的倍率反算为内容坐标。
+    pub scaled_regions: Vec<ScaledRegion>,
     /// 浮层内的滚动容器 id：浮层打开时不把滚轮落到下层列表。
     pub overlay_scrolls: std::collections::HashSet<String>,
     /// 已展开的长代码块（键 = `<Markdown 块 id>:<内容指纹>::code:<序>`）：控件层自持，点击就地翻转。
@@ -235,6 +254,7 @@ impl Default for UiState {
             submitted: None,
             resize_pending: false,
             overlays: Vec::new(),
+            scaled_regions: Vec::new(),
             overlay_scrolls: std::collections::HashSet::new(),
             expanded: std::collections::HashSet::new(),
             virtual_heights: Arc::new(Mutex::new(HashMap::new())),
@@ -255,6 +275,26 @@ impl UiState {
             return;
         }
         self.hint = next.map(|id| HintHover { id, since: Instant::now() });
+    }
+
+    /// 指针的屏幕坐标 → 内容坐标：落在缩放浮层内时按该层倍率反算（后画的浮层优先）。
+    pub(crate) fn base_point(&self, x: f32, y: f32) -> (f32, f32) {
+        self.scaled_regions
+            .iter()
+            .rev()
+            .find(|region| region.screen.contains(x, y))
+            .map(|region| region.to_base(x, y))
+            .unwrap_or((x, y))
+    }
+
+    /// 指针位置的输出倍率（不在缩放浮层内为 1.0）：滚轮增量按它换算成内容坐标。
+    pub(crate) fn scale_at(&self, x: f32, y: f32) -> f32 {
+        self.scaled_regions
+            .iter()
+            .rev()
+            .find(|region| region.screen.contains(x, y))
+            .map(|region| region.scale)
+            .unwrap_or(1.0)
     }
 
     /// 收起提示（指针离开面 / 面失焦）。
@@ -442,5 +482,19 @@ mod tests {
         assert!(!state.caret_lit());
         state.reset_blink();
         assert!(state.caret_lit());
+    }
+
+    /// 缩放浮层把屏幕坐标反算成基础坐标：倍率取所在浮层（后画的优先），浮层外不变。
+    #[test]
+    fn scaled_region_maps_screen_points_back_to_base() {
+        let mut state = UiState::default();
+        state.scaled_regions.push(ScaledRegion {
+            screen: Rect::new(40.0, 30.0, 200.0, 160.0),
+            scale: 2.0,
+        });
+        assert_eq!(state.base_point(60.0, 50.0), (30.0, 25.0));
+        assert_eq!(state.scale_at(60.0, 50.0), 2.0);
+        assert_eq!(state.base_point(10.0, 10.0), (10.0, 10.0), "浮层外坐标不变");
+        assert_eq!(state.scale_at(10.0, 10.0), 1.0);
     }
 }

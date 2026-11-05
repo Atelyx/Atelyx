@@ -17,8 +17,8 @@ use atelyx_plugin_sdk::frame_ui::{
 };
 
 use crate::model::{
-    COMPACT_CARD_PX, CardChat, GRID_STEP, MINIMAP_H, MINIMAP_MARGIN, MINIMAP_W, RemotePeer, Session,
-    TOOLBAR_H, card_head,
+    CardChat, GRID_STEP, MINIMAP_H, MINIMAP_MARGIN, MINIMAP_W, RemotePeer, Session, TOOLBAR_H,
+    card_head,
 };
 
 /// 组色板（六色）。
@@ -33,7 +33,7 @@ pub const GROUP_COLORS: [[u8; 3]; 6] = [
 
 /// 收起分组的边框虚线（屏幕像素）。
 const GROUP_DASH: [f32; 2] = [6.0, 4.0];
-/// 世界层文字字号固定为屏幕像素：缩放只改卡片几何，字号不跟着缩小到不可读。
+/// 卡头文字与图标的基础尺寸（世界单位）：绘制时随 `zoom` 等比缩放。
 const CARD_TITLE_SIZE: f32 = 12.0;
 const CARD_ICON_SIZE: f32 = 12.0;
 const GROUP_LABEL_SIZE: f32 = 13.0;
@@ -41,53 +41,38 @@ const PILL_SIZE: f32 = 11.0;
 const PILL_H: f32 = 18.0;
 const PEER_NAME_SIZE: f32 = 11.0;
 const PEER_PILL_SIZE: f32 = 10.0;
-/// 卡头世界高度：随缩放变化，字与图标固定为屏幕像素。
+/// 卡头世界高度（世界单位）。
 const CARD_HEAD_H: f32 = 30.0;
 /// 卡片圆角半径（世界单位，随缩放变化）。
 const CARD_CORNER_RADIUS: f32 = 10.0;
 /// 内容矩形与卡片外框的内缩：滚动条槽据此贴住卡片右缘。
 const CARD_CONTENT_INSET: f32 = 1.0;
-/// 卡头与内容矩形的屏幕间距。
+/// 卡头与内容矩形的世界间距。
 const CARD_BODY_GAP: f32 = 4.0;
-/// 卡内最大行高（主题 h1 × 1.3）：Markdown 行跨视口边时整行不切分，所以内容矩形顶部与正文下沿都让出一档。
-pub(crate) const CARD_CONTENT_MAX_LINE: f32 = 26.0;
-/// 卡片内容左右内边距（屏幕像素，不随缩放变化）。
+/// 卡片内容左右内边距（世界单位，随缩放等比变化）。
 const CARD_CONTENT_PAD: f32 = 8.0;
-/// 卡内滚动条槽宽（与控件层滚动容器的恒定槽宽一致）：内容宽按此扣减。
+/// 卡内滚动条槽宽（世界单位）：内容宽按此扣减。
 const CARD_SCROLL_SLOT: f32 = 8.0;
-/// 低缩放卡片只画卡头与居中图标的图标边长（屏幕像素）。
-const COMPACT_ICON_SIZE: f32 = 22.0;
 /// 省略量算的宽度余量：量算按常规字重口径，粗体实绘偏宽。
 const ELLIPSIZE_WIDTH_GUARD: f32 = 1.06;
 
-/// 低缩放紧凑形态：屏幕宽装不下标题，或卡头高度已装不下固定字号（卡头高度随缩放缩小）。
-pub(crate) fn compact_card(zoom: f32, world_w: f32) -> bool {
-    world_w * zoom <= COMPACT_CARD_PX || CARD_HEAD_H * zoom < CARD_TITLE_SIZE
-}
-
-/// 卡内容矩形（屏幕坐标，`sy` 含工具条偏移）：左右下贴卡内缘，滚动条槽据此贴住卡片右缘；
-/// 顶部至少让出一档行高，底部避开圆角外的透明区。`tail_gap` 是下沿额外让量。
+/// 卡内容矩形（基础坐标）：`(左上角 x, 左上角 y, 宽, 高)`，全部是 zoom=1 的度量。
+/// 传屏幕左上角与视图缩放，返回整块基础矩形；内容在这个基础矩形里排版，
+/// 绘制时由 `Ui::overlay_scaled` 整体乘缩放。左右下贴卡内缘，底部只让出圆角。
 pub(crate) fn card_body_rect(
     zoom: f32,
     sx: f32,
     sy: f32,
     world_w: f32,
     world_h: f32,
-    tail_gap: f32,
 ) -> (f32, f32, f32, f32) {
-    let head = CARD_HEAD_H * zoom;
-    let top = (head + CARD_BODY_GAP).max(CARD_CONTENT_MAX_LINE);
+    let top = CARD_HEAD_H + CARD_BODY_GAP;
     (
-        sx + CARD_CONTENT_INSET,
-        sy + top,
-        (world_w * zoom - CARD_CONTENT_INSET * 2.0).max(1.0),
-        (world_h * zoom - top - CARD_CORNER_RADIUS * zoom - tail_gap).max(1.0),
+        sx / zoom + CARD_CONTENT_INSET,
+        sy / zoom + top,
+        (world_w - CARD_CONTENT_INSET * 2.0).max(1.0),
+        (world_h - top - CARD_CORNER_RADIUS).max(1.0),
     )
-}
-
-/// 内容矩形下沿额外让量：铺满整卡的正文滚动区让出一档行高，底部另有输入区的对话卡不再让。
-pub(crate) fn card_tail_gap(node_type: &str) -> f32 {
-    if node_type == "text" { CARD_CONTENT_MAX_LINE } else { 0.0 }
 }
 
 /// 单行省略：超出 `max_w` 时按字符二分截断并补省略号。世界层是整块自绘画布，
@@ -130,8 +115,8 @@ fn header_reserve(canvas: &mut Canvas, s: &Snapshot, node: &CanvasFileNode) -> f
     }
     let streaming = s.cards.get(&node.id).is_some_and(|chat| chat.streaming);
     if streaming {
-        let (tw, _) = canvas.measure("生成中", PILL_SIZE);
-        tw + 18.0 + 10.0 * s.zoom
+        let (tw, _) = canvas.measure("生成中", PILL_SIZE * s.zoom);
+        tw + (18.0 + 10.0) * s.zoom
     } else {
         32.0 * s.zoom
     }
@@ -745,7 +730,7 @@ fn draw_card(canvas: &mut Canvas, s: &Snapshot, node: &CanvasFileNode) {
         } else {
             token(ColorToken::Border)
         }),
-        stroke_width: Some(if selected { 2.0 } else { 1.0 }),
+        stroke_width: Some(if selected { 2.0 * s.zoom } else { 1.0 * s.zoom }),
         corner_radius: Some(CARD_CORNER_RADIUS * s.zoom),
         shadow: None,
     });
@@ -773,53 +758,37 @@ fn draw_card(canvas: &mut Canvas, s: &Snapshot, node: &CanvasFileNode) {
         shadow: None,
     });
     let (icon, title) = card_head(node);
-    let compact = compact_card(s.zoom, w as f32);
-    if compact {
-        // 低缩放只留卡头与居中图标：正文预览在这个尺寸读不出来，字号也不再跟着缩小
-        let (cx, cy) = (sx + sw / 2.0, sy + sh / 2.0);
-        for command in icon_commands(
-            icon,
-            UiRect::new(
-                cx - COMPACT_ICON_SIZE / 2.0,
-                cy - COMPACT_ICON_SIZE / 2.0,
-                COMPACT_ICON_SIZE,
-                COMPACT_ICON_SIZE,
-            ),
-            token(ColorToken::TextMuted),
-        ) {
-            canvas.draw(command);
-        }
-    } else {
-        for command in icon_commands(
-            icon,
-            UiRect::new(
-                sx + 9.0 * s.zoom,
-                sy + (head - CARD_ICON_SIZE) / 2.0,
-                CARD_ICON_SIZE,
-                CARD_ICON_SIZE,
-            ),
-            token(ColorToken::TextMuted),
-        ) {
-            canvas.draw(command);
-        }
-        // 标题省略到卡头右侧控件之前：世界层不裁剪，越界会盖到按钮或溢出卡框
-        let title_limit = (sw - 36.0 * s.zoom - header_reserve(canvas, s, node)).max(0.0);
-        let title = ellipsize(canvas, &title, CARD_TITLE_SIZE, title_limit);
-        canvas.draw(Text {
-            x: sx + 26.0 * s.zoom,
-            y: sy + (head - CARD_TITLE_SIZE) / 2.0,
-            content: title,
-            size: CARD_TITLE_SIZE,
-            color: token(ColorToken::Text),
-            weight: Some(TextWeight::Bold),
-            family: None,
-            italic: false,
-            family_name: None,
-            max_width: None,
-            align: None,
-            layout: None,
-        });
+    let icon_size = CARD_ICON_SIZE * s.zoom;
+    for command in icon_commands(
+        icon,
+        UiRect::new(
+            sx + 9.0 * s.zoom,
+            sy + (head - icon_size) / 2.0,
+            icon_size,
+            icon_size,
+        ),
+        token(ColorToken::TextMuted),
+    ) {
+        canvas.draw(command);
     }
+    // 标题省略到卡头右侧控件之前：世界层不裁剪，越界会盖到按钮或溢出卡框
+    let title_size = CARD_TITLE_SIZE * s.zoom;
+    let title_limit = (sw - 36.0 * s.zoom - header_reserve(canvas, s, node)).max(0.0);
+    let title = ellipsize(canvas, &title, title_size, title_limit);
+    canvas.draw(Text {
+        x: sx + 26.0 * s.zoom,
+        y: sy + (head - title_size) / 2.0,
+        content: title,
+        size: title_size,
+        color: token(ColorToken::Text),
+        weight: Some(TextWeight::Bold),
+        family: None,
+        italic: false,
+        family_name: None,
+        max_width: None,
+        align: None,
+        layout: None,
+    });
     let linked = s.hover.as_deref() == Some(node.id.as_str()) || selected;
     if linked && !matches!(node.node_type.as_str(), "group" | "conversation") {
         canvas.draw(Circle {
@@ -840,44 +809,45 @@ fn draw_card(canvas: &mut Canvas, s: &Snapshot, node: &CanvasFileNode) {
             fill: Some(token(ColorToken::Accent)),
             stroke: None,
             stroke_width: None,
-            corner_radius: Some(1.0),
+            corner_radius: Some(1.0 * s.zoom),
             shadow: None,
         });
     }
-    if !compact
-        && head >= PILL_H
+    if head >= PILL_H * s.zoom
         && node.node_type == "conversation"
         && s.cards.get(&node.id).is_some_and(|chat| chat.streaming)
     {
         let label = "生成中";
-        let (tw, _) = canvas.measure(label, PILL_SIZE);
-        let pill_w = tw + 18.0;
+        let pill_size = PILL_SIZE * s.zoom;
+        let pill_h = PILL_H * s.zoom;
+        let (tw, _) = canvas.measure(label, pill_size);
+        let pill_w = tw + 18.0 * s.zoom;
         let pill_x = sx + sw - pill_w - 6.0 * s.zoom;
-        let pill_y = sy + (head - PILL_H) / 2.0;
+        let pill_y = sy + (head - pill_h) / 2.0;
         canvas.draw(Rect {
             x: pill_x,
             y: pill_y,
             w: (pill_w).max(0.0),
-            h: PILL_H,
+            h: pill_h,
             fill: Some(token(ColorToken::SurfaceMuted)),
             stroke: None,
             stroke_width: None,
-            corner_radius: Some(PILL_H / 2.0),
+            corner_radius: Some(pill_h / 2.0),
             shadow: None,
         });
         canvas.draw(Circle {
-            cx: pill_x + 8.0,
-            cy: pill_y + PILL_H / 2.0,
-            r: 2.5,
+            cx: pill_x + 8.0 * s.zoom,
+            cy: pill_y + pill_h / 2.0,
+            r: 2.5 * s.zoom,
             fill: Some(token(ColorToken::Accent)),
             stroke: None,
             stroke_width: None,
         });
         canvas.draw(Text {
-            x: pill_x + 14.0,
-            y: pill_y + 3.5,
+            x: pill_x + 14.0 * s.zoom,
+            y: pill_y + 3.5 * s.zoom,
             content: label.to_string(),
-            size: PILL_SIZE,
+            size: pill_size,
             color: token(ColorToken::TextSecondary),
             weight: None,
             family: None,
@@ -888,17 +858,18 @@ fn draw_card(canvas: &mut Canvas, s: &Snapshot, node: &CanvasFileNode) {
             layout: None,
         });
     }
-    if node.node_type == "media" && !compact {
+    if node.node_type == "media" {
         draw_media(canvas, s, node);
     }
-    if node.node_type == "link" && !compact {
+    if node.node_type == "link" {
         if let Some(url) = node.data.get("url").and_then(serde_json::Value::as_str) {
-            let url = ellipsize(canvas, url, CARD_TITLE_SIZE, sw - 20.0 * s.zoom);
+            let meta_size = CARD_TITLE_SIZE * s.zoom;
+            let url = ellipsize(canvas, url, meta_size, sw - 20.0 * s.zoom);
             canvas.draw(Text {
                 x: sx + 10.0 * s.zoom,
                 y: sy + head + 10.0 * s.zoom,
                 content: url,
-                size: CARD_TITLE_SIZE,
+                size: meta_size,
                 color: token(ColorToken::Accent),
                 weight: None,
                 family: None,
@@ -910,7 +881,7 @@ fn draw_card(canvas: &mut Canvas, s: &Snapshot, node: &CanvasFileNode) {
             });
         }
     }
-    if node.node_type == "table" && !compact {
+    if node.node_type == "table" {
         if let Some(path) = node.data.get("file").and_then(serde_json::Value::as_str) {
             // 没有可用的表格内容也要给提示，不留空白卡
             let (hint, color) = match s.refs.get(path) {
@@ -924,12 +895,13 @@ fn draw_card(canvas: &mut Canvas, s: &Snapshot, node: &CanvasFileNode) {
                 Some(_) => ("引用表格缺失".to_string(), ColorToken::Danger),
                 None => ("加载中…".to_string(), ColorToken::TextMuted),
             };
-            let text = ellipsize(canvas, &hint, CARD_TITLE_SIZE, sw - 20.0 * s.zoom);
+            let meta_size = CARD_TITLE_SIZE * s.zoom;
+            let text = ellipsize(canvas, &hint, meta_size, sw - 20.0 * s.zoom);
             canvas.draw(Text {
                 x: sx + 10.0 * s.zoom,
                 y: sy + head + 10.0 * s.zoom,
                 content: text,
-                size: CARD_TITLE_SIZE,
+                size: meta_size,
                 color: token(color),
                 weight: None,
                 family: None,
@@ -960,7 +932,7 @@ fn draw_media(canvas: &mut Canvas, s: &Snapshot, node: &CanvasFileNode) {
             x: sx + 10.0 * s.zoom,
             y: sy + 40.0 * s.zoom + 10.0 * s.zoom,
             content: hint.to_string(),
-            size: CARD_TITLE_SIZE,
+            size: CARD_TITLE_SIZE * s.zoom,
             color: token(color),
             weight: None,
             family: None,
@@ -994,37 +966,37 @@ fn draw_remote(canvas: &mut Canvas, s: &Snapshot) {
             let (w, h) = display_size(node);
             let (x, y) = s.screen(node.x, node.y);
             canvas.draw(Rect {
-                x: x - 3.0,
-                y: y - 3.0,
-                w: (w as f32 * s.zoom + 6.0).max(0.0),
-                h: (h as f32 * s.zoom + 6.0).max(0.0),
+                x: x - 3.0 * s.zoom,
+                y: y - 3.0 * s.zoom,
+                w: (w as f32 * s.zoom + 6.0 * s.zoom).max(0.0),
+                h: (h as f32 * s.zoom + 6.0 * s.zoom).max(0.0),
                 fill: None,
                 stroke: Some(color),
-                stroke_width: Some(2.0),
+                stroke_width: Some(2.0 * s.zoom),
                 corner_radius: Some(12.0 * s.zoom),
                 shadow: None,
             });
-            let compact = compact_card(s.zoom, w as f32);
-            if !compact && peer.streaming.iter().any(|item| item == id) {
+            if peer.streaming.iter().any(|item| item == id) {
                 let label = "生成中";
-                let (tw, _) = canvas.measure(label, PEER_PILL_SIZE);
+                let pill_size = PEER_PILL_SIZE * s.zoom;
+                let (tw, _) = canvas.measure(label, pill_size);
                 let (px, py) = (x + 6.0 * s.zoom, y + 6.0 * s.zoom);
                 canvas.draw(Rect {
                     x: px,
                     y: py,
-                    w: (tw + 12.0).max(0.0),
-                    h: 16.0,
+                    w: (tw + 12.0 * s.zoom).max(0.0),
+                    h: 16.0 * s.zoom,
                     fill: Some(with_alpha(color, 0.9)),
                     stroke: None,
                     stroke_width: None,
-                    corner_radius: Some(8.0),
+                    corner_radius: Some(8.0 * s.zoom),
                     shadow: None,
                 });
                 canvas.draw(Text {
-                    x: px + 6.0,
-                    y: py + 2.0,
+                    x: px + 6.0 * s.zoom,
+                    y: py + 2.0 * s.zoom,
                     content: label.to_string(),
-                    size: PEER_PILL_SIZE,
+                    size: pill_size,
                     color: PaintColor::Rgba {
                         rgba: [255, 255, 255, 235],
                     },
@@ -1037,33 +1009,33 @@ fn draw_remote(canvas: &mut Canvas, s: &Snapshot) {
                     layout: None,
                 });
             }
-            if !compact && !tagged && !peer.name.is_empty() {
-                let size = PEER_NAME_SIZE;
+            if !tagged && !peer.name.is_empty() {
+                let size = PEER_NAME_SIZE * s.zoom;
                 // 名签不越出卡宽：名字可用宽度扣掉胶囊内边距与卡两侧留白
                 let name = ellipsize(
                     canvas,
                     &peer.name,
                     size,
-                    (w as f32 * s.zoom - 8.0 * s.zoom - 12.0).max(0.0),
+                    (w as f32 * s.zoom - 20.0 * s.zoom).max(0.0),
                 );
                 if !name.is_empty() {
                     tagged = true;
                     let (tw, th) = canvas.measure(&name, size);
-                    let (bx, by) = (x + 4.0 * s.zoom, (y - th - 4.0).max(TOOLBAR_H));
+                    let (bx, by) = (x + 4.0 * s.zoom, (y - th - 4.0 * s.zoom).max(TOOLBAR_H));
                     canvas.draw(Rect {
                         x: bx,
                         y: by,
-                        w: (tw + 12.0).max(0.0),
-                        h: (th + 4.0).max(0.0),
+                        w: (tw + 12.0 * s.zoom).max(0.0),
+                        h: (th + 4.0 * s.zoom).max(0.0),
                         fill: Some(color),
                         stroke: None,
                         stroke_width: None,
-                        corner_radius: Some((th + 4.0) / 2.0),
+                        corner_radius: Some((th + 4.0 * s.zoom) / 2.0),
                         shadow: None,
                     });
                     canvas.draw(Text {
-                        x: bx + 6.0,
-                        y: by + 2.0,
+                        x: bx + 6.0 * s.zoom,
+                        y: by + 2.0 * s.zoom,
                         content: name,
                         size,
                         color: PaintColor::Rgba {
@@ -1391,10 +1363,7 @@ fn card_overlays(ui: &mut Ui, s: &Snapshot, choices: &Choices<'_>) {
             }
             continue;
         }
-        // 低缩放卡片没有正文与输入区：浮层控件一并省掉，命中与双击仍走世界层判定
-        if compact_card(s.zoom, w as f32) {
-            continue;
-        }
+        // 卡片内容浮层：正文 / 输入区都在世界层之上按同倍率缩放绘制
         if node.node_type == "conversation" {
             let compacting = s.cards.get(&node.id).is_some_and(|chat| chat.compacting);
             let streaming = s.cards.get(&node.id).is_some_and(|chat| chat.streaming);
@@ -1406,13 +1375,16 @@ fn card_overlays(ui: &mut Ui, s: &Snapshot, choices: &Choices<'_>) {
                 24.0 * s.zoom,
             );
             let id = node.id.clone();
+            let zoom = s.zoom;
             ui.overlay(rect, move |ui| {
+                let icon = 13.0 * zoom;
+                let box_size = 24.0 * zoom;
                 if compacting {
                     ui.icon_button_named(
                         &format!("canvas-compact-{id}"),
                         "loader-circle",
-                        13.0,
-                        24.0,
+                        icon,
+                        box_size,
                         ColorToken::TextMuted,
                         false,
                     );
@@ -1420,8 +1392,8 @@ fn card_overlays(ui: &mut Ui, s: &Snapshot, choices: &Choices<'_>) {
                     ui.icon_button_named(
                         &format!("canvas-compact-{id}"),
                         "layers",
-                        13.0,
-                        24.0,
+                        icon,
+                        box_size,
                         ColorToken::TextMuted,
                         !streaming && !locked,
                     );
@@ -1432,14 +1404,7 @@ fn card_overlays(ui: &mut Ui, s: &Snapshot, choices: &Choices<'_>) {
                 }
             });
         }
-        let (bx, by, bw, bh) = card_body_rect(
-            s.zoom,
-            sx,
-            sy,
-            w as f32,
-            h as f32,
-            card_tail_gap(&node.node_type),
-        );
+        let (bx, by, bw, bh) = card_body_rect(s.zoom, sx, sy, w as f32, h as f32);
         let body = UiRect::new(bx, by, bw, bh);
         match node.node_type.as_str() {
             "text" => {
@@ -1465,7 +1430,7 @@ fn card_overlays(ui: &mut Ui, s: &Snapshot, choices: &Choices<'_>) {
                     Some(None) => Some(("加载中…", ColorToken::TextMuted)),
                     _ => None,
                 };
-                ui.overlay(body, move |ui| {
+                ui.overlay_scaled(body, s.zoom, move |ui| {
                     ui.scroll(format!("canvas-text-{}", node.id), 0.0, |ui| {
                         ui.pad(CARD_CONTENT_PAD, 0.0, |ui| {
                             if let Some((hint, color)) = hint {
@@ -1549,7 +1514,7 @@ fn conversation_overlay(
                 .and_then(serde_json::Value::as_str)
         )
     );
-    ui.overlay(rect, move |ui| {
+    ui.overlay_scaled(rect, s.zoom, move |ui| {
         ui.fill_column(6.0, |ui| {
             // 错误条固定在消息区顶部，不随消息滚动
             if let Some(error) = chat.error.clone() {

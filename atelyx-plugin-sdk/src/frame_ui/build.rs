@@ -10,7 +10,7 @@ use atelyx_plugin_protocol::frame::{FrameRect, HitCursor, HitRegion, SurfaceFram
 
 use super::geom::Rect;
 use super::metrics::Metrics;
-use super::model::{FontSpec, InputState, Layout, UiState, COPY_MENU_ID};
+use super::model::{FontSpec, InputState, Layout, ScaledRegion, UiState, COPY_MENU_ID};
 use super::text;
 use super::theme;
 
@@ -38,10 +38,14 @@ pub(crate) struct BuildCtx<'a> {
     /// 光标声明为拖动形态的子区：按下它们才建拖拽候选。
     pub draggables: HashSet<String>,
     /// 浮层：主内容布局完成后按声明序绘制，指令与命中区都压在主内容之上；
-    /// 布尔 = 是否拦截滚轮（弹层拦截，角标 / 浮钮这类被动浮层不拦）。
-    pub overlays: Vec<(Rect, Vec<Item>, bool)>,
+    /// 布尔 = 是否拦截滚轮（弹层拦截，角标 / 浮钮这类被动浮层不拦），末项 = 输出倍率。
+    pub overlays: Vec<(Rect, Vec<Item>, bool, f32)>,
     /// 已布局的浮层区域（随帧交给状态，供滚轮隔离判定）。
     pub overlay_rects: Vec<Rect>,
+    /// 本帧的缩放浮层（屏幕外框 + 倍率），随帧交给状态供输入反算。
+    pub scaled_regions: Vec<ScaledRegion>,
+    /// 当前绘制块的输出倍率：块内基础坐标整体乘倍率后才落指令。
+    output_scale: f32,
     /// 正在绘制浮层：滚动容器据此记入 `overlay_scrolls`（滚轮隔离）。
     in_overlay: bool,
     /// 浮层内的滚动容器 id。
@@ -80,6 +84,7 @@ pub(crate) struct BuildOut {
     /// 光标声明为拖动形态的子区：按下它们才建拖拽候选。
     pub draggables: HashSet<String>,
     pub overlays: Vec<Rect>,
+    pub scaled_regions: Vec<ScaledRegion>,
     pub overlay_scrolls: HashSet<String>,
 }
 
@@ -100,6 +105,8 @@ impl<'a> BuildCtx<'a> {
             draggables: HashSet::new(),
             overlays: Vec::new(),
             overlay_rects: Vec::new(),
+            scaled_regions: Vec::new(),
+            output_scale: 1.0,
             in_overlay: false,
             overlay_scrolls: HashSet::new(),
             wants_ticks: false,
@@ -113,7 +120,124 @@ impl<'a> BuildCtx<'a> {
     }
 
     pub(crate) fn draw(&mut self, command: DrawCommand) {
+        let command = self.scale_command(command);
         self.commands.push(command);
+    }
+
+    /// 基础坐标点 → 屏幕坐标：块内绘制整体乘输出倍率（原点为面板左上角）。
+    fn scale_point(&self, x: f32, y: f32) -> (f32, f32) {
+        if self.output_scale == 1.0 {
+            return (x, y);
+        }
+        (x * self.output_scale, y * self.output_scale)
+    }
+
+    fn scale_rect(&self, rect: Rect) -> Rect {
+        if self.output_scale == 1.0 {
+            return rect;
+        }
+        let (x, y) = self.scale_point(rect.x, rect.y);
+        Rect::new(x, y, rect.w * self.output_scale, rect.h * self.output_scale)
+    }
+
+    /// 绘制指令整体倍乘：坐标按原点缩放，长度（尺寸 / 线宽 / 圆角 / 投影）直接乘倍率。
+    fn scale_command(&self, command: DrawCommand) -> DrawCommand {
+        if self.output_scale == 1.0 {
+            return command;
+        }
+        let k = self.output_scale;
+        let point = |x: f32, y: f32| self.scale_point(x, y);
+        match command {
+            DrawCommand::Line { x1, y1, x2, y2, stroke, width, dash } => {
+                let (x1, y1) = point(x1, y1);
+                let (x2, y2) = point(x2, y2);
+                DrawCommand::Line {
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    stroke,
+                    width: width * k,
+                    dash: dash.map(|[on, off]| [on * k, off * k]),
+                }
+            }
+            DrawCommand::Rect { x, y, w, h, fill, stroke, stroke_width, corner_radius, shadow } => {
+                let (x, y) = point(x, y);
+                DrawCommand::Rect {
+                    x,
+                    y,
+                    w: w * k,
+                    h: h * k,
+                    fill,
+                    stroke,
+                    stroke_width: stroke_width.map(|value| value * k),
+                    corner_radius: corner_radius.map(|value| value * k),
+                    shadow: shadow.map(|shadow| atelyx_plugin_protocol::paint::PaintShadow {
+                        offset_x: shadow.offset_x * k,
+                        offset_y: shadow.offset_y * k,
+                        blur: shadow.blur * k,
+                        color: shadow.color,
+                    }),
+                }
+            }
+            DrawCommand::Path { points, closed, fill, stroke, stroke_width } => DrawCommand::Path {
+                points: points
+                    .into_iter()
+                    .map(|p| {
+                        let (x, y) = self.scale_point(p.x, p.y);
+                        atelyx_plugin_protocol::paint::PaintPoint { x, y }
+                    })
+                    .collect(),
+                closed,
+                fill,
+                stroke,
+                stroke_width: stroke_width.map(|value| value * k),
+            },
+            DrawCommand::Circle { cx, cy, r, fill, stroke, stroke_width } => {
+                let (cx, cy) = point(cx, cy);
+                DrawCommand::Circle {
+                    cx,
+                    cy,
+                    r: r * k,
+                    fill,
+                    stroke,
+                    stroke_width: stroke_width.map(|value| value * k),
+                }
+            }
+            DrawCommand::Text {
+                x, y, content, size, color, weight, family, family_name, italic, max_width, align, layout,
+            } => {
+                let (x, y) = point(x, y);
+                DrawCommand::Text {
+                    x,
+                    y,
+                    content,
+                    size: size * k,
+                    color,
+                    weight,
+                    family,
+                    family_name,
+                    italic,
+                    max_width: max_width.map(|value| value * k),
+                    align,
+                    layout,
+                }
+            }
+            DrawCommand::Image { source, x, y, w, h, fit } => {
+                let (x, y) = point(x, y);
+                DrawCommand::Image { source, x, y, w: w * k, h: h * k, fit }
+            }
+            DrawCommand::PushClip { x, y, w, h } => {
+                let (x, y) = point(x, y);
+                DrawCommand::PushClip { x, y, w: w * k, h: h * k }
+            }
+            DrawCommand::PopClip => DrawCommand::PopClip,
+        }
+    }
+
+    /// 记录输入法光标矩形：浮层内按同一倍率换算成屏幕坐标。
+    pub(crate) fn set_ime(&mut self, rect: Rect) {
+        self.ime = Some(self.scale_rect(rect));
     }
 
     /// 已压入的裁剪区域（嵌套取交集）；空栈 = 不裁剪。
@@ -150,9 +274,10 @@ impl<'a> BuildCtx<'a> {
         }
     }
 
-    /// 压入裁剪矩形（调用方已确认非空且需要收紧）。
+    /// 压入裁剪矩形（调用方已确认非空且需要收紧）：栈里存基础坐标，指令按当前倍率换算。
     pub(crate) fn push_clip(&mut self, clip: Rect) {
-        self.commands.push(DrawCommand::PushClip { x: clip.x, y: clip.y, w: clip.w, h: clip.h });
+        let command = self.scale_command(DrawCommand::PushClip { x: clip.x, y: clip.y, w: clip.w, h: clip.h });
+        self.commands.push(command);
         self.clip_stack.push(clip);
     }
 
@@ -162,6 +287,7 @@ impl<'a> BuildCtx<'a> {
     }
 
     pub(crate) fn hit(&mut self, id: &str, rect: Rect, cursor: HitCursor) {
+        let rect = self.scale_rect(rect);
         self.hits.push(HitRegion { id: id.to_string(), x: rect.x, y: rect.y, w: rect.w, h: rect.h, cursor: Some(cursor) });
         if matches!(
             cursor,
@@ -339,6 +465,7 @@ impl<'a> BuildCtx<'a> {
             wants_ticks: self.wants_ticks,
             draggables: self.draggables,
             overlays: self.overlay_rects,
+            scaled_regions: self.scaled_regions,
             overlay_scrolls: self.overlay_scrolls,
         }
     }
@@ -668,19 +795,26 @@ impl<'c, 'a> Ui<'c, 'a> {
     /// 浮层：内容按纵向容器排在 `rect` 内，主内容布局完成后整体追加绘制与命中区。
     /// 整块登记点击兜底（子项命中优先），空白处不穿透到下层；有浮层时滚轮只作用于浮层内的滚动区。
     pub fn overlay(&mut self, rect: Rect, build: impl FnOnce(&mut Ui<'_, 'a>)) {
-        self.overlay_kind(rect, true, build);
+        self.overlay_kind(rect, true, 1.0, build);
     }
 
     /// 被动浮层：绘制与命中同 [`Ui::overlay`]，但不拦截滚轮（浮钮 / 角标这类不应挡住下层滚动）。
     pub fn overlay_passive(&mut self, rect: Rect, build: impl FnOnce(&mut Ui<'_, 'a>)) {
-        self.overlay_kind(rect, false, build);
+        self.overlay_kind(rect, false, 1.0, build);
     }
 
-    fn overlay_kind(&mut self, rect: Rect, blocks_wheel: bool, build: impl FnOnce(&mut Ui<'_, 'a>)) {
+    /// 缩放浮层：`rect` 按基础坐标给（屏幕位置 = 基础位置 × `scale`，宽高同），
+    /// 内容在这个基础矩形里排版，绘制指令、命中区与裁剪统一乘 `scale`，指针输入按倍率反算。
+    /// 布局记录（滚动偏移 / 光标）保持基础坐标，因此缩放切换不改变排版与滚动位置。
+    pub fn overlay_scaled(&mut self, rect: Rect, scale: f32, build: impl FnOnce(&mut Ui<'_, 'a>)) {
+        self.overlay_kind(rect, true, scale.max(0.01), build);
+    }
+
+    fn overlay_kind(&mut self, rect: Rect, blocks_wheel: bool, scale: f32, build: impl FnOnce(&mut Ui<'_, 'a>)) {
         let mut sub = Ui::new(&mut *self.ctx, rect);
         build(&mut sub);
         let items = sub.into_items();
-        self.ctx.overlays.push((rect, items, blocks_wheel));
+        self.ctx.overlays.push((rect, items, blocks_wheel, scale));
     }
 }
 
@@ -700,14 +834,21 @@ pub(crate) fn layout_root(ctx: &mut BuildCtx<'_>, mut items: Vec<Item>, rect: Re
 pub(crate) fn layout_overlays(ctx: &mut BuildCtx<'_>) {
     let overlays = std::mem::take(&mut ctx.overlays);
     ctx.in_overlay = true;
-    for (index, (rect, items, blocks_wheel)) in overlays.into_iter().enumerate() {
+    for (index, (rect, items, blocks_wheel, scale)) in overlays.into_iter().enumerate() {
+        // 屏幕外框：基础矩形整体乘倍率（原点为面板左上角）；命中 / 滚轮判定都按屏幕坐标比较
+        let screen = Rect::new(rect.x * scale, rect.y * scale, rect.w * scale, rect.h * scale);
         if blocks_wheel {
-            ctx.overlay_rects.push(rect);
+            ctx.overlay_rects.push(screen);
         }
+        if scale != 1.0 {
+            ctx.scaled_regions.push(ScaledRegion { screen, scale });
+        }
+        ctx.output_scale = scale;
         // 浮层整块承接点击：子项随后登记，命中优先于这块兜底
         ctx.hit(&format!("@overlay:{index}"), rect, HitCursor::Default);
         // 浮层内容按自身矩形裁剪：超出部分不画到下层
         ctx.with_clip(rect, |ctx| draw_column(ctx, &items, rect, rect, 0.0));
+        ctx.output_scale = 1.0;
     }
     ctx.in_overlay = false;
 }
