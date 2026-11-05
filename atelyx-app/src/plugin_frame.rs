@@ -1199,6 +1199,19 @@ fn placeholder_text(
     }
 }
 
+/// 该窗口的该面是否持有输入焦点：同一面在多窗口渲染时只有焦点窗口接收键盘 / IME，
+/// 其余投影只渲染（指针按事件所在窗口派发）。
+fn frame_takes_input(
+    focus: Option<&crate::plugin_actions::FrameFocus>,
+    window: window::Id,
+    plugin_id: &str,
+    surface_id: &str,
+) -> bool {
+    focus.is_some_and(|focus| {
+        focus.window == window && focus.plugin_id == plugin_id && focus.surface_id == surface_id
+    })
+}
+
 /// 整面帧渲染入口：铺满可用区域，外层按贡献声明的内边距包裹。
 pub fn frame_view<'a>(
     app: &'a App,
@@ -1207,9 +1220,7 @@ pub fn frame_view<'a>(
     surface_id: &str,
     padding: Padding,
 ) -> Element<'a, Message> {
-    let focused = app.plugin_frame_focus.as_ref().is_some_and(|focus| {
-        focus.plugin_id == plugin_id && focus.surface_id == surface_id
-    });
+    let focused = frame_takes_input(app.plugin_frame_focus.as_ref(), window, plugin_id, surface_id);
     let widget = PluginFrame {
         app,
         window,
@@ -1352,6 +1363,21 @@ mod tests {
         assert!(request.retry(), "尺寸对上后再不符可再补");
         request.observe(7, 480.0, 300.0);
         assert!(request.retry(), "尺寸变化后重新允许补发");
+    }
+
+    /// 同一文档两面投影：只有焦点窗口那一份接收键盘 / IME，另一份只渲染。
+    #[test]
+    fn only_the_focus_window_takes_input_for_a_shared_surface() {
+        let a = window::Id::unique();
+        let b = window::Id::unique();
+        let focus = crate::plugin_actions::FrameFocus {
+            window: a,
+            plugin_id: "atelyx.notes".into(),
+            surface_id: "note".into(),
+        };
+        assert!(frame_takes_input(Some(&focus), a, "atelyx.notes", "note"));
+        assert!(!frame_takes_input(Some(&focus), b, "atelyx.notes", "note"));
+        assert!(!frame_takes_input(None, a, "atelyx.notes", "note"));
     }
 }
 

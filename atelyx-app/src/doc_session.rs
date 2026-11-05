@@ -17,7 +17,41 @@ use crate::settings_view::plugins::PluginsMsg;
 use crate::{vault, App, Message, RepoKind, SaveReason};
 
 pub use atelyx_core::doc_session::DocOpenGuard;
-use atelyx_core::doc_session::{discard_line, OpenTicket};
+use atelyx_core::doc_session::{discard_line, DocId, DocSessions, DocSpec, OpenTicket};
+use atelyx_core::doc_type::DocTypeRoute;
+use atelyx_core::layout::AppUiState;
+
+/// 打开集合（持久化意图）与会话表（运行时事实）的同步登记：宿主打开动作只经此处增。
+/// 同一路径重复打开复用原会话并把该文档置热（同类型旧会话随之转冷）。
+pub(crate) fn register_open(
+    ui: &mut AppUiState,
+    sessions: &mut DocSessions,
+    rel: &str,
+    route: &DocTypeRoute,
+    editable: bool,
+) -> DocId {
+    let title = rel.rsplit('/').next().unwrap_or(rel).to_string();
+    let spec = DocSpec {
+        path: rel.to_string(),
+        doc_type: route.id.clone(),
+        plugin_id: route.owner_plugin.clone(),
+        surface: route.views.first().map(|view| view.view_id.clone()).unwrap_or_default(),
+        title,
+        editable,
+    };
+    ui.remember_open_doc(rel, route.id.as_str());
+    let id = sessions.open_or_reuse(spec);
+    sessions.set_hot(&id);
+    id
+}
+
+/// 打开集合与会话表同步移除（调用方必须先 flush 再关闭文档）。
+pub(crate) fn unregister_open(ui: &mut AppUiState, sessions: &mut DocSessions, rel: &str) {
+    ui.forget_open_doc(rel);
+    if let Some(id) = sessions.by_path(rel).map(|session| session.id.clone()) {
+        sessions.close(&id);
+    }
+}
 
 /// 读盘完成回填：发起时登记的凭据 + 读盘结果（凭据由 `open` 原样带回）。
 #[derive(Debug, Clone)]
@@ -29,7 +63,7 @@ pub struct OpenReadResult {
 
 /// 把当前文档的正文 / 落盘状态广播给订阅插件（`text` 只在宿主改写正文时给出）。
 pub fn publish_state(app: &App, text: Option<String>) {
-    let Some(path) = app.ui.last_note_file.clone() else { return };
+    let Some(path) = app.note_file() else { return };
     app.plugins.on_doc_changed(DocChangedPayload {
         path,
         text,
@@ -41,7 +75,7 @@ pub fn publish_state(app: &App, text: Option<String>) {
 /// 把当前文档的远端协作者光标广播给订阅插件（未打开文档 / 无协作者 = 空清单）。
 /// 光标偏移与 `doc_text` 同一坐标系，插件据此在原位画他人光标。
 pub fn publish_presence(app: &App) {
-    let path = app.ui.last_note_file.clone();
+    let path = app.note_file();
     let cursors = app
         .remote_cursors
         .iter()
@@ -71,7 +105,7 @@ pub fn open(
         }
     };
     // 同一篇已由插件承载：直接回内存真源（插件重启 / 重发 doc.open 不得用旧盘文覆盖未落盘输入）。
-    if app.doc_active && app.ui.last_note_file.as_deref() == Some(rel.as_str()) {
+    if app.doc_active && app.note_file().as_deref() == Some(rel.as_str()) {
         let result = json!({
             "path": rel,
             "text": app.doc_text.clone(),
@@ -83,7 +117,7 @@ pub fn open(
         return Task::none();
     }
     // 换篇前必须没有未落盘输入：正常打开走 gate，这里是插件直接调用的兜底。
-    if app.ui.last_note_file.is_some() && app.doc_dirty {
+    if app.note_file().is_some() && app.doc_dirty {
         app.plugins
             .resolve_shell_call(request_id, Err("当前文档有未保存修改，请先保存".into()));
         return Task::none();
@@ -212,7 +246,7 @@ pub(crate) fn can_write(app: &App) -> bool {
 
 /// 提交一次编辑：路径必须与当前会话一致；内容有变化才置脏与排自动保存。
 pub fn edit(app: &mut App, request_id: u64, params: DocEditParams) -> Task<Message> {
-    if app.ui.last_note_file.as_deref() != Some(params.path.as_str()) {
+    if app.note_file().as_deref() != Some(params.path.as_str()) {
         app.plugins
             .resolve_shell_call(request_id, Err("插件提交的文档路径与当前会话不一致".into()));
         return Task::none();
@@ -248,7 +282,7 @@ pub(crate) fn clamp_boundary(text: &str, mut offset: usize) -> usize {
 /// 把当前文档改名为新的主名：同目录、保留扩展名，引用同步与历史随宿主既有改名链。
 /// 有未落盘修改时拒绝（插件先保存再重试），改名落地后插件经 `vault:file.changed` 重开本篇。
 pub fn rename(app: &mut App, request_id: u64, params: DocRenameParams) -> Task<Message> {
-    if app.ui.last_note_file.as_deref() != Some(params.path.as_str()) {
+    if app.note_file().as_deref() != Some(params.path.as_str()) {
         app.plugins
             .resolve_shell_call(request_id, Err("插件改名的文档路径与当前会话不一致".into()));
         return Task::none();
@@ -286,7 +320,7 @@ fn renamed_path(from: &str, input: &str) -> Option<String> {
 
 /// 请求保存：先收当前正文，再走既有保存链；结果经 `doc:changed` 到达。
 pub fn save(app: &mut App, request_id: u64, params: DocSaveParams) -> Task<Message> {
-    if app.ui.last_note_file.as_deref() != Some(params.path.as_str()) {
+    if app.note_file().as_deref() != Some(params.path.as_str()) {
         app.plugins
             .resolve_shell_call(request_id, Err("插件保存的文档路径与当前会话不一致".into()));
         return Task::none();
@@ -301,18 +335,26 @@ pub fn save(app: &mut App, request_id: u64, params: DocSaveParams) -> Task<Messa
     app.submit_save(reason)
 }
 
-/// 关闭当前会话：只认与当前路径一致的关闭（换文件时旧实例的关闭不得摘掉新会话）。
+/// 关闭插件文档：先回执已受理，再经 gate 落盘后结束会话；保存失败即中止，文档留着。
 pub fn close(app: &mut App, request_id: u64, path: &str) -> Task<Message> {
-    if app.ui.last_note_file.as_deref() == Some(path) {
-        app.clear_doc_state();
-    }
+    let rel = match vault::validate_plugin_path(path) {
+        Ok(rel) => rel,
+        Err(e) => {
+            app.plugins.resolve_shell_call(request_id, Err(e));
+            return Task::none();
+        }
+    };
+    // 先回执已受理：关闭要等 gate 落盘，不能让插件那次调用悬着
     app.plugins.resolve_shell_call(request_id, Ok(json!({})));
-    Task::none()
+    match app.doc_sessions.by_path(&rel).map(|session| session.id.clone()) {
+        Some(id) => app.close_document(id),
+        None => Task::none(),
+    }
 }
 
 /// 在场上报：选区写入会话状态并上行（仅协作空间实际发出）。
 pub fn awareness(app: &mut App, request_id: u64, params: DocAwarenessParams) -> Task<Message> {
-    if app.ui.last_note_file.as_deref() != Some(params.path.as_str()) {
+    if app.note_file().as_deref() != Some(params.path.as_str()) {
         app.plugins
             .resolve_shell_call(request_id, Err("插件上报的文档路径与当前会话不一致".into()));
         return Task::none();
@@ -347,11 +389,45 @@ mod tests {
         assert_eq!(renamed_path("notes/方案.md", ""), None, "空名拒绝");
         assert_eq!(renamed_path("notes/方案.md", ".md"), None, "只剩后缀 = 空主名");
     }
+
+    /// 打开集合 = 持久化意图、会话表 = 运行时事实：只在 register / unregister 里成对增删。
+    #[test]
+    fn open_set_and_sessions_move_together() {
+        use atelyx_core::doc_type::{DocTypeId, DocViewRef};
+
+        let route = DocTypeRoute {
+            id: DocTypeId::new("note"),
+            owner_plugin: "atelyx.notes".into(),
+            declaring_plugin: "atelyx.notes".into(),
+            views: vec![DocViewRef { plugin_id: "atelyx.notes".into(), view_id: "note".into() }],
+            extensions: vec!["md".into()],
+            editable: true,
+            multi_doc: false,
+            label: "笔记".into(),
+            icon: "file-text".into(),
+            preset: true,
+        };
+        let mut ui = AppUiState::default();
+        let mut sessions = DocSessions::default();
+        let a = register_open(&mut ui, &mut sessions, "a.md", &route, true);
+        let b = register_open(&mut ui, &mut sessions, "b.md", &route, true);
+        assert_eq!(ui.open_docs.len(), 2);
+        assert!(sessions.session(&a).is_some() && sessions.session(&b).is_some());
+        assert_eq!(
+            sessions.hot_of("atelyx.notes", &DocTypeId::new("note")).unwrap().id,
+            b,
+            "后打开的置热，旧会话转冷"
+        );
+        unregister_open(&mut ui, &mut sessions, "a.md");
+        assert_eq!(ui.open_docs.len(), 1);
+        assert!(sessions.session(&a).is_none());
+        assert!(sessions.session(&b).is_some());
+    }
 }
 
 /// 读当前文档的属性区：无文档 / 无属性块时给出空块，正文明细不在回执里。
 pub fn props_read(app: &App, request_id: u64) -> Task<Message> {
-    let path = app.ui.last_note_file.clone().unwrap_or_default();
+    let path = app.note_file().unwrap_or_default();
     let editable = !path.is_empty() && can_write(app);
     if path.is_empty() {
         return crate::settings_view::plugins::resolve_vault(
@@ -397,7 +473,7 @@ pub fn props_write(
     request_id: u64,
     params: DocPropsWriteParams,
 ) -> Task<Message> {
-    let Some(path) = app.ui.last_note_file.clone() else {
+    let Some(path) = app.note_file() else {
         return crate::settings_view::plugins::resolve_vault(
             app,
             request_id,
@@ -455,6 +531,7 @@ pub fn apply_props(app: &mut App, data: Vec<(String, atelyx_core::frontmatter::Y
     app.doc_dirty = true;
     app.doc_save_error = None;
     app.autosave_deadline = Some(std::time::Instant::now() + crate::AUTOSAVE_DEBOUNCE);
+    app.publish_doc_session_state();
     crate::space_actions::collab_after_edit(app);
     publish_state(app, Some(app.doc_text.clone()));
 }

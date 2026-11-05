@@ -471,6 +471,7 @@ fn notify_frame_focus(app: &App, plugin_id: &str, surface_id: &str, focused: boo
 }
 
 /// 整面帧的键盘焦点（全局单槽：OS 只给聚焦窗口发键盘，窗口失焦即清除）。
+/// 同一面在多窗口渲染时只有一处持焦点，键盘 / IME 只从该窗口派发。
 #[derive(Clone, Debug, PartialEq)]
 pub struct FrameFocus {
     pub window: window::Id,
@@ -489,9 +490,10 @@ pub fn on_frame_focus(
 ) {
     let current = app.plugin_frame_focus.clone();
     if !focused {
-        let holds = current
-            .as_ref()
-            .is_some_and(|focus| focus.plugin_id == plugin_id && focus.surface_id == surface_id);
+        // 只清本窗口持有的焦点：同一面在另一窗口还有一份投影时不得误清
+        let holds = current.as_ref().is_some_and(|focus| {
+            focus.window == window && focus.plugin_id == plugin_id && focus.surface_id == surface_id
+        });
         if holds {
             app.plugin_frame_focus = None;
             notify_frame_focus(app, &plugin_id, &surface_id, false);
@@ -1250,7 +1252,7 @@ impl OpenMode {
         !matches!(self, Self::Restore)
     }
 
-    /// 是否落盘「上次打开」字段（恢复沿用磁盘现值，不新增写盘）。
+    /// 是否落盘打开集合（恢复沿用磁盘现值，不新增写盘）。
     pub(crate) fn persists(self) -> bool {
         !matches!(self, Self::Restore)
     }
@@ -1275,16 +1277,9 @@ pub fn doc_view_kind(plugin_id: &str, contribution_id: &str) -> String {
     view_kind(plugin_id, contribution_id)
 }
 
-/// 打开一个插件领域文档（文件打开路由分派）：登记实例、按 `mode` 决定是否让视图显示、
-/// 通知 owner 插件（`host:doc.open`）。实例面标识换新（旧实例先关闭通知）。
-pub fn open_doc(app: &mut App, rel: &str, mode: OpenMode, route: &DocTypeRoute) -> Task<Message> {
-    let Some(view) = route.views.first() else {
-        app.notify(
-            crate::ui::notify::Level::Error,
-            format!("文档类型 {} 没有可承载视图", route.id),
-        );
-        return Task::none();
-    };
+/// 插件文档面开始一次打开：登记实例（实例面标识换新，旧实例先通知关闭）并通知 owner 插件
+/// （`host:doc.open`，正文由插件发起读盘）。视图显示与投影重绑由宿主统一打开链负责。
+pub fn begin_doc_open(app: &mut App, rel: &str, mode: OpenMode, route: &DocTypeRoute) {
     let conflicts = atelyx_core::doc_type::extension_of(rel)
         .map(|extension| app.registry.doc_type_conflicts(extension))
         .unwrap_or(0);
@@ -1301,8 +1296,7 @@ pub fn open_doc(app: &mut App, rel: &str, mode: OpenMode, route: &DocTypeRoute) 
         app.plugins.notify_doc_close(&old.plugin_id, &old.surface_id, &old.path);
     }
     // 实例面标识 = 承载视图的贡献 id：渲染与清理共用同一键空间（单实例语义）
-    let surface_id = view.view_id.clone();
-    let view_id = app.registry.doc_view_id(view);
+    let surface_id = route.views.first().map(|view| view.view_id.clone()).unwrap_or_default();
     app.plugins.notify_doc_open(&route.owner_plugin, &surface_id, rel);
     app.doc_open = Some(DocOpenInstance {
         plugin_id: route.owner_plugin.clone(),
@@ -1311,16 +1305,6 @@ pub fn open_doc(app: &mut App, rel: &str, mode: OpenMode, route: &DocTypeRoute) 
         surface_id,
         mode,
     });
-    app.ui.last_doc_file = Some(rel.to_string());
-    if mode.persists() {
-        app.schedule_persist();
-    }
-    if mode.reveals() {
-        reveal_view(app, &view_id)
-    } else {
-        // 只打开文件：布局不动，视图没在布局里就等用户自己打开
-        refresh_projection(app)
-    }
 }
 
 /// 关闭当前打开的插件文档（文档标签关闭 / 文件删除 / 换仓库）。
@@ -1330,7 +1314,12 @@ pub fn close_doc(app: &mut App) -> Task<Message> {
     let Some(doc) = app.doc_open.take() else {
         return Task::none();
     };
-    app.ui.last_doc_file = None;
+    app.forget_open_doc(&doc.path);
+    // 文档已关闭：该视图各处标签解除绑定（会话表里不再有这份文档）
+    let _ = app.apply(LayoutOp::BindViewDoc {
+        view: view_kind(&doc.plugin_id, &doc.contribution_id),
+        doc: None,
+    });
     app.plugins.notify_doc_close(&doc.plugin_id, &doc.surface_id, &doc.path);
     // 关档即摘会话：正文、合并基线、选区与历史都只属于这份文档，插件面已不再持有它时
     // 继续保留会让面外写入沿用旧正文。删文件路径已由 gate 先 flush。
@@ -1338,20 +1327,6 @@ pub fn close_doc(app: &mut App) -> Task<Message> {
     app.notify_open_files();
     app.schedule_persist();
     refresh_projection(app)
-}
-
-/// 让某视图在布局里显示：已存在（主树或撕裂窗口）只激活，否则加到聚焦面板。
-pub(crate) fn reveal_view(app: &mut App, view: &str) -> Task<Message> {
-    match reveal_op(&app.ui, view) {
-        Some(op) => app.apply(op),
-        None => {
-            app.notify(
-                crate::ui::notify::Level::Error,
-                "没有可放置视图的面板".to_string(),
-            );
-            Task::none()
-        }
-    }
 }
 
 /// 只激活已存在的视图标签（主树或撕裂窗口）；不存在返回 `None`，不新建标签。
@@ -1363,18 +1338,6 @@ pub(crate) fn activate_view(app: &mut App, view: &str) -> Option<Task<Message>> 
 /// 仅激活已存在视图的布局操作；`None` = 视图不在布局里。
 pub(crate) fn activate_op(ui: &AppUiState, view: &str) -> Option<LayoutOp> {
     activate_existing_view_op(ui, view)
-}
-
-/// 视图显示的目标布局操作（纯函数）：已有标签 → 激活；不存在 → 加到聚焦面板。
-pub(crate) fn reveal_op(ui: &AppUiState, view: &str) -> Option<LayoutOp> {
-    if let Some(op) = activate_existing_view_op(ui, view) {
-        return Some(op);
-    }
-    let panel_id = ui
-        .focused_panel_id
-        .clone()
-        .or_else(|| first_panel_id(&layout::active_layout(ui).tree))?;
-    Some(LayoutOp::AddView { panel_id, view: view.to_string() })
 }
 
 /// 布局里已存在某视图标签时的激活操作（主树 / 撕裂窗口各查一层）；未找到 = `None`。
@@ -1402,13 +1365,6 @@ fn activate_existing_view_op(ui: &AppUiState, view: &str) -> Option<LayoutOp> {
         }
     }
     None
-}
-
-fn first_panel_id(node: &LayoutNode) -> Option<String> {
-    match node {
-        LayoutNode::Panel { id, .. } => Some(id.clone()),
-        LayoutNode::Split { children, .. } => children.iter().find_map(first_panel_id),
-    }
 }
 
 #[cfg(test)]
@@ -1536,7 +1492,7 @@ mod tests {
     }
 
     fn tab(id: &str, view: &str) -> atelyx_core::layout::TabItem {
-        atelyx_core::layout::TabItem { id: id.into(), view: view.into(), locked: false }
+        atelyx_core::layout::TabItem { id: id.into(), view: view.into(), doc: None, locked: false }
     }
 
     #[test]

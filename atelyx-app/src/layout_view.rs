@@ -115,18 +115,16 @@ pub(crate) fn doc_file_for_view<'a>(app: &'a App, view: &str) -> Option<&'a str>
             return Some(&open.path);
         }
     }
-    [
-        app.ui.last_note_file.as_deref(),
-        app.ui.last_table_file.as_deref(),
-        app.ui.last_canvas_file.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    .find(|path| {
-        atelyx_core::doc_type::extension_of(path).is_some_and(|extension| {
-            route.extensions.iter().any(|registered| registered.eq_ignore_ascii_case(extension))
+    app.ui
+        .open_docs
+        .iter()
+        .rev()
+        .find(|doc| {
+            atelyx_core::doc_type::extension_of(&doc.path).is_some_and(|extension| {
+                route.extensions.iter().any(|registered| registered.eq_ignore_ascii_case(extension))
+            })
         })
-    })
+        .map(|doc| doc.path.as_str())
 }
 
 /// 标签是否带「关闭文件」×：该视图当前有打开文件。
@@ -1502,7 +1500,7 @@ fn panel_tab<'a>(
                     border: border::rounded(pal::RADIUS_XS),
                     ..Default::default()
                 })
-                .on_press(Message::PanelTabFileClose(t.view.clone())),
+                .on_press(Message::PanelTabFileClose(t.view.clone(), t.doc.clone())),
         );
     }
 
@@ -1568,7 +1566,7 @@ fn panel_tab<'a>(
 
 /// 笔记保存状态徽标：错误 = ErrorPill（红调底 + 重试/关闭），未保存 = 圆点徽标。
 fn doc_status_pill(app: &App) -> Option<Element<'static, Message>> {
-    app.ui.last_note_file.as_ref()?;
+    app.note_file()?;
     if app.doc_save_error.is_some() {
         Some(
             container(
@@ -1730,7 +1728,7 @@ pub fn detached_view<'a>(
                         border: border::rounded(pal::RADIUS_XS),
                         ..Default::default()
                     })
-                    .on_press(Message::DetachedTabFileClose(t.view.clone())),
+                    .on_press(Message::DetachedTabFileClose(t.view.clone(), t.doc.clone())),
             );
         }
         let top_radius = iced::border::Radius {
@@ -3827,8 +3825,8 @@ mod tests {
         let panel = |id: &str, active: Option<&str>| LayoutNode::Panel {
             id: id.into(),
             tabs: vec![
-                TabItem { id: "t1".into(), view: "plugin:canvas:canvas".into(), locked: false },
-                TabItem { id: "t2".into(), view: "note".into(), locked: false },
+                TabItem { id: "t1".into(), view: "plugin:canvas:canvas".into(), doc: None, locked: false },
+                TabItem { id: "t2".into(), view: "note".into(), doc: None, locked: false },
             ],
             active_tab_id: active.map(str::to_string),
         };

@@ -44,6 +44,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use atelyx_core::credentials;
+use atelyx_core::doc_session::{DocId, DocSessions, DocStateUpdate};
 use atelyx_core::global_config::{self, LastActive};
 use atelyx_core::layout::{
     self, apply_layout_op, normalize, op_passes_shape_check, AppUiState, DetachedWindow,
@@ -483,10 +484,9 @@ enum Message {
     SetTabView { panel_id: String, tab_id: String, view: String },
     /// 右键切换撕裂窗口标签视图。
     DetachedSetTabView { window_id: String, tab_id: String, view: String },
-    /// 关闭文件（×：摘下文件、标签保留回未打开态）。
-    /// × = 关文件留标签（kind = "note" / "table" / "canvas"，只关对应面）。
-    PanelTabFileClose(String),
-    DetachedTabFileClose(String),
+    /// × = 关文档（doc = 标签绑定的文档身份；无绑定回落为关对应面的文件）。
+    PanelTabFileClose(String, Option<DocId>),
+    DetachedTabFileClose(String, Option<DocId>),
     /// 标签按下：拖拽候选由标签按钮自证命中（渲染自适应后几何不再可靠）。
     PanelTabPress { panel_id: String, tab_id: String },
     DetachedTabPress { window_id: String, tab_id: String },
@@ -965,6 +965,8 @@ enum PendingAfterFlush {
     CloseMain(window::Id),
     /// 关文件留标签（kind = "note" / "table" / "canvas"，只关对应面）。
     CloseFileTab(String),
+    /// 关闭文档：先 flush 全部脏面，成功后摘投影并结束会话。
+    CloseDocument(DocId),
     /// 仓库内笔记链接（已解码；能进 flush 的只有 Path/Wiki/Create 形态，外链直接打开）。
     OpenLink(String),
     /// 文件树拖拽移动（挂起输入先落盘，防代写被未落盘内容回写覆盖）。
@@ -986,8 +988,15 @@ enum PendingAfterFlush {
     },
 }
 
-/// 启动自动恢复要打开的文件：笔记 / 表格 / 画布各按上次路径发起一次，全部用
-/// [`OpenMode::Restore`]（只把文件挂到已有视图，不新建标签、不改布局）。
+/// 保存失败时丢弃关闭挂起：关闭类动作直接中止，打开类动作保留待重试。
+fn abort_close_on_save_failure(pending: &mut Option<PendingAfterFlush>) {
+    if matches!(pending, Some(PendingAfterFlush::CloseDocument(_))) {
+        *pending = None;
+    }
+}
+
+/// 启动自动恢复要打开的文件：遍历打开集合逐个发起一次，全部用 [`OpenMode::Restore`]
+/// （只把文件挂到已有视图，不新建标签、不改布局）。
 /// 运行中切换容器（`from_boot == false`）不恢复；「自动恢复」关闭时不产生请求。
 pub(crate) fn restore_open_requests(
     ui: &AppUiState,
@@ -997,15 +1006,10 @@ pub(crate) fn restore_open_requests(
     if !from_boot || !auto_restore {
         return Vec::new();
     }
-    [
-        ui.last_note_file.clone(),
-        ui.last_table_file.clone(),
-        ui.last_canvas_file.clone(),
-    ]
-    .into_iter()
-    .flatten()
-    .map(|rel| (rel, OpenMode::Restore))
-    .collect()
+    ui.open_docs
+        .iter()
+        .map(|doc| (doc.path.clone(), OpenMode::Restore))
+        .collect()
 }
 
 /// 仓库容器身份：本地文件夹仓库 or 协作空间（同一时刻互斥激活）。
@@ -1301,6 +1305,10 @@ pub struct App {
     pub plugin_windows: HashMap<window::Id, plugin_actions::PluginWindowActive>,
     /// 打开中的插件文档实例（单实例；切换文件即换实例）。
     pub doc_open: Option<plugin_actions::DocOpenInstance>,
+    /// 全部打开文档的运行时会话表（唯一真源：打开着哪些文档、归哪个插件与文档类型、热 / 冷、脏与错误）。
+    /// 与 `ui.open_docs` 的关系：打开集合 = 持久化意图（重启恢复用），会话表 = 运行时事实；
+    /// 两者只在打开 / 关闭动作（[`Self::remember_open_doc`] / [`Self::forget_open_doc`]）里同步增删，不得各自独立改动。
+    pub doc_sessions: DocSessions,
     /// 在途文档读盘的归属守卫（身份 + 序号）：失效的读盘结果不得回填到已切换的会话。
     doc_open_guard: doc_session::DocOpenGuard,
     /// 最近聚焦的窗口（插件接管请求的作用域）。
@@ -1542,6 +1550,7 @@ pub struct App {
     /// 插件菜单搜索输入（菜单声明 `search` 时使用；每次打开清空）。
     pub plugin_menu_query: String,
     /// 窗口级浮层的面原点（窗口 / 插件 / 面 → 面左上角窗口坐标），由整面帧布局变化时上报。
+    /// 同一面在多个窗口渲染时各留一份（同一文档多投影，浮层锚点按所在窗口取）。
     pub plugin_surface_origins: HashMap<(window::Id, String, String), Point>,
 }
 
@@ -1587,6 +1596,55 @@ impl FileDrag {
 }
 
 impl App {
+    /// 该扩展名所属文档类型在打开集合中的路径（同类型多条取最近打开）。
+    fn open_path_of_extension(&self, extension: &str) -> Option<String> {
+        let route = self.registry.route_for_extension(extension)?;
+        self.ui.open_doc_path(route.id.as_str()).map(str::to_string)
+    }
+
+    /// 打开集合中的笔记路径（正文真源仍在宿主；正文迁移后随本访问器一并移除）。
+    pub(crate) fn note_file(&self) -> Option<String> {
+        self.open_path_of_extension("md")
+    }
+
+    /// 打开集合中的表格路径。
+    pub(crate) fn table_file(&self) -> Option<String> {
+        self.open_path_of_extension("atb")
+    }
+
+    /// 打开集合中的画布路径。
+    pub(crate) fn canvas_file(&self) -> Option<String> {
+        self.open_path_of_extension("atlx")
+    }
+
+    /// 登记打开：打开集合（持久化意图）与会话表（运行时事实）同时增加，目标文档置热。
+    /// 同一路径重复打开复用原会话；同类型旧会话自动转冷（flush 由调用方在打开前完成）。
+    pub(crate) fn remember_open_doc(&mut self, rel: &str) {
+        let Some(route) = self.registry.route_for_path(rel).cloned() else { return };
+        let editable = route.editable && doc_session::can_write(self);
+        doc_session::register_open(&mut self.ui, &mut self.doc_sessions, rel, &route, editable);
+    }
+
+    /// 关闭文档：打开集合与会话表同时移除（关闭前必须已 flush）。
+    pub(crate) fn forget_open_doc(&mut self, rel: &str) {
+        doc_session::unregister_open(&mut self.ui, &mut self.doc_sessions, rel);
+    }
+
+    /// 把笔记正文的脏与保存错误同步进会话表（会话是运行时事实，正文真源仍在宿主，直到正文迁入插件）。
+    pub(crate) fn publish_doc_session_state(&mut self) {
+        let Some(path) = self.note_file() else { return };
+        let Some((id, open_seq)) =
+            self.doc_sessions.by_path(&path).map(|session| (session.id.clone(), session.open_seq))
+        else {
+            return;
+        };
+        self.doc_sessions.update_state(
+            &id,
+            open_seq,
+            DocStateUpdate { dirty: self.doc_dirty, save_error: self.doc_save_error.clone(), title: None, disk_rev: None },
+        );
+    }
+
     fn boot() -> (Self, Task<Message>) {
         let (main_os, open) = window::open(Settings {
             size: DEFAULT_WINDOW_SIZE,
@@ -1672,6 +1730,7 @@ impl App {
                 plugin_windows: HashMap::new(),
                 doc_open: None,
                 doc_open_guard: doc_session::DocOpenGuard::default(),
+                doc_sessions: DocSessions::default(),
                 focused_window: None,
                 market_cache_path,
                 ai_sub_tab: "providers".into(),
@@ -1860,6 +1919,10 @@ impl App {
         plugin_actions::sync_surfaces(self);
         plugin_actions::sync_canvas_display(self);
         plugin_actions::rebuild_registry(self);
+        // 旧版 ui-state 的四个单槽位一次性迁入打开集合（文档类型按注册表判定）
+        for path in self.ui.take_legacy_open_paths() {
+            self.remember_open_doc(&path);
+        }
         let mut task = plugin_actions::refresh_projection(self);
         // 订阅建立之前广播的 Running 已丢：按当前状态对账，补齐挂面与挂起文档的触发点
         task = task.chain(self.reconcile_running_plugins());
@@ -2225,15 +2288,15 @@ impl App {
             Message::Save => {
                 // Ctrl+S：文档 / 画布各自手动保存（无打开内容 = 提示）
                 let mut task = Task::none();
-                if self.ui.last_note_file.is_some() {
+                if self.note_file().is_some() {
                     task = task.chain(self.submit_save(SaveReason::Manual));
                 }
                 // 表格与画布内容都在插件：手动保存走面板 flush（插件侧会先提交在途草稿）
-                let panel_open = self.ui.last_table_file.is_some() || self.ui.last_canvas_file.is_some();
+                let panel_open = self.table_file().is_some() || self.canvas_file().is_some();
                 if panel_open {
                     task = task.chain(self.request_panel_flush(PanelFlushPurpose::Gate));
                 }
-                if self.ui.last_note_file.is_none() && !panel_open {
+                if self.note_file().is_none() && !panel_open {
                     self.notify(NoticeLevel::Warning, "没有打开的文件");
                 }
                 task
@@ -2244,7 +2307,7 @@ impl App {
                 if self.autosave_deadline.is_some_and(|at| at <= Instant::now()) {
                     self.autosave_deadline = None;
                     let mut task = Task::none();
-                    if self.doc_dirty && self.ui.last_note_file.is_some() {
+                    if self.doc_dirty && self.note_file().is_some() {
                         task = task.chain(self.submit_save(SaveReason::AutoSave));
                     }
                     return task;
@@ -2287,21 +2350,26 @@ impl App {
                     }
                 };
                 // 落盘即记历史版本（edit；内容 no-op 由记录侧跳过），随后刷新版本列表
-                if self.ui.last_note_file.as_deref() == Some(rel.as_str()) {
+                if self.note_file().as_deref() == Some(rel.as_str()) {
+                    self.publish_doc_session_state();
                     crate::doc_session::publish_state(self, None);
                 }
                 proceed.chain(self.record_doc_history(saved))
             }
             Message::Saved(_, rel, _, reason, Err(e)) => {
                 self.settle_history_restore(false);
-                // flush 被保存失败打断：动作不放行（放行会丢弃未落盘内容），挂起输入保留待重试
+                // flush 被保存失败打断：动作不放行（放行会丢弃未落盘内容）；关闭类动作直接中止，
+                // 打开类动作保留待重试。
                 if matches!(reason, SaveReason::Flush) {
                     self.notify(NoticeLevel::Error, format!("保存失败，操作未执行：{e}"));
                 } else {
                     self.notify(NoticeLevel::Error, format!("保存失败：{e}"));
                 }
+                // 保留关闭挂起会在后续某次保存成功后补执行关闭，与「失败后文档留着」相反
+                abort_close_on_save_failure(&mut self.flush_pending);
                 self.doc_save_error = Some(e);
-                if self.ui.last_note_file.as_deref() == Some(rel.as_str()) {
+                if self.note_file().as_deref() == Some(rel.as_str()) {
+                    self.publish_doc_session_state();
                     crate::doc_session::publish_state(self, None);
                 }
                 Task::none()
@@ -2337,15 +2405,15 @@ impl App {
                 let ctx_matches = match kind {
                     atelyx_core::history::HistoryKind::Note => {
                         self.history_kind == atelyx_core::history::HistoryKind::Note
-                            && self.ui.last_note_file.as_deref() == Some(rel.as_str())
+                            && self.note_file().as_deref() == Some(rel.as_str())
                     }
                     atelyx_core::history::HistoryKind::Table => {
                         self.history_kind == atelyx_core::history::HistoryKind::Table
-                            && self.ui.last_table_file.as_deref() == Some(rel.as_str())
+                            && self.table_file().as_deref() == Some(rel.as_str())
                     }
                     atelyx_core::history::HistoryKind::Canvas => {
                         self.history_kind == atelyx_core::history::HistoryKind::Canvas
-                            && self.ui.last_canvas_file.as_deref() == Some(rel.as_str())
+                            && self.canvas_file().as_deref() == Some(rel.as_str())
                     }
                 };
                 if gen == self.epoch() && (popup_matches || ctx_matches) {
@@ -2674,9 +2742,8 @@ impl App {
                 Task::none()
             }
             Message::PluginSurfaceOrigin { window, plugin_id, surface_id, origin } => {
-                // 一个面同时只在一个窗口里：换窗口时清掉旧窗的原点，避免后续在旧窗重画浮层
-                self.plugin_surface_origins
-                    .retain(|(_, p, s), _| !(p == &plugin_id && s == &surface_id));
+                // 同一面可在多窗口各自渲染（同一文档多投影）：原点按窗口分别保留，
+                // 浮层锚点取所在窗口的那一份，换窗不清旧窗（另一处仍要按自己的原点绘制）。
                 self.plugin_surface_origins.insert((window, plugin_id, surface_id), origin);
                 Task::none()
             }
@@ -2700,10 +2767,11 @@ impl App {
             Message::DetachedSetTabView { window_id, tab_id, view } => {
                 self.apply(LayoutOp::DetachedSetTabView { window_id, tab_id, view })
             }
-            // × = 关文件留标签：摘下对应视图的文件回到未打开态（tab 不动）
-            Message::PanelTabFileClose(kind) | Message::DetachedTabFileClose(kind) => {
-                self.gate(PendingAfterFlush::CloseFileTab(kind))
-            }
+            // × = 关文档：摘掉全部投影并结束会话；无绑定的标签只关对应面
+            Message::PanelTabFileClose(kind, doc) | Message::DetachedTabFileClose(kind, doc) => match doc {
+                Some(id) => self.close_document(id),
+                None => self.gate(PendingAfterFlush::CloseFileTab(kind)),
+            },
             Message::PanelTabPress { panel_id, tab_id } => {
                 self.tab_press = Some(TabPress {
                     window: self.main_id.unwrap_or(iced::window::Id::unique()),
@@ -3803,11 +3871,11 @@ impl App {
                 }
                 self.apply_follow(&follow);
                 // 引用同步代写了打开中的文档（rewritten 键 = 落盘后路径，与跟随后的
-                // last_note_file 比对）：磁盘正文已变，重读对齐——改名/移动的 gate 已先
+                // 打开集合比对）：磁盘正文已变，重读对齐——改名/移动的 gate 已先
                 // flush，此刻无未落盘输入可丢
                 let mut reload_note: Option<String> = None;
                 if let FollowUp::Renamed { rewritten, .. } = &follow {
-                    if let Some(f) = self.ui.last_note_file.clone() {
+                    if let Some(f) = self.note_file() {
                         if rewritten.contains(&f) {
                             reload_note = Some(f);
                         }
@@ -4294,7 +4362,7 @@ impl App {
 
     /// 画布快捷键上下文：画布已打开且在焦点窗口展示、无弹层 / 行内改名 / 拖拽在途。
     fn canvas_key_ready(&self) -> bool {
-        if self.ui.last_canvas_file.is_none() || self.popup.is_some() || self.rename.is_some() {
+        if self.canvas_file().is_none() || self.popup.is_some() || self.rename.is_some() {
             return false;
         }
         self.focused_window
@@ -4312,7 +4380,7 @@ impl App {
 
     /// 表格快捷键上下文：表格已打开且在焦点窗口展示、无弹层 / 行内改名，焦点在表格网格面且非编辑。
     fn table_key_ready(&self) -> bool {
-        if self.ui.last_table_file.is_none() || self.popup.is_some() || self.rename.is_some() {
+        if self.table_file().is_none() || self.popup.is_some() || self.rename.is_some() {
             return false;
         }
         self.focused_window
@@ -4382,7 +4450,7 @@ impl App {
                 .resolve_shell_call(*request_id, Err("被更晚的宿主操作取代，请重试".into()));
         }
         // 画布脏标记由插件异步上报，不能只靠它判定：打开着画布就先请插件确认一次
-        if self.ui.last_canvas_file.is_some()
+        if self.canvas_file().is_some()
             && self.plugin_is_running(plugin_actions::CANVAS_PLUGIN)
         {
             self.canvas_flush_pending = true;
@@ -4513,7 +4581,7 @@ impl App {
                     return self.after_any_flush();
                 }
                 // 回滚期间又切了文件：快照已不属于当前打开的表，不能记成功
-                if self.ui.last_table_file.as_deref() != Some(restore.rel.as_str()) {
+                if self.table_file().as_deref() != Some(restore.rel.as_str()) {
                     self.notify(NoticeLevel::Warning, "表格已切换，回滚取消".to_string());
                     return self.after_any_flush();
                 }
@@ -4557,7 +4625,7 @@ impl App {
                         return self.after_any_flush();
                     }
                     // 回滚期间又切了文件：快照已不属于当前打开的画布，不能记成功
-                    if self.ui.last_canvas_file.as_deref() != Some(restore.rel.as_str()) {
+                    if self.canvas_file().as_deref() != Some(restore.rel.as_str()) {
                         self.notify(NoticeLevel::Warning, "画布已切换，回滚取消".to_string());
                         return self.after_any_flush();
                     }
@@ -4676,6 +4744,7 @@ impl App {
                 chat_actions::flush_sessions().chain(window::close(id))
             }
             PendingAfterFlush::CloseFileTab(kind) => self.close_file_tab(&kind),
+            PendingAfterFlush::CloseDocument(id) => self.close_document_now(id),
             PendingAfterFlush::OpenLink(href) => self.open_link_inner(href),
             PendingAfterFlush::RenameFile(r) => self.commit_file_rename(r),
             PendingAfterFlush::MoveEntry { from, is_dir, to_dir } => self.move_entry(&from, is_dir, &to_dir),
@@ -4703,8 +4772,8 @@ impl App {
     /// 插件文档面承载一篇文档：正文真源仍在本 `doc_text`，编辑态由插件自持。
     /// 协作空间同时建立 CRDT 文档（基线以载入正文为准）。
     pub(crate) fn attach_doc_session(&mut self, rel: &str, text: String) {
-        let path_changed = self.ui.last_note_file.as_deref() != Some(rel);
-        self.ui.last_note_file = Some(rel.to_string());
+        let path_changed = self.note_file().as_deref() != Some(rel);
+        self.remember_open_doc(rel);
         self.doc_active = true;
         self.doc_selection = None;
         self.doc_base = None;
@@ -4716,6 +4785,7 @@ impl App {
         self.history.clear();
         self.doc_dirty = false;
         self.doc_save_error = None;
+        self.publish_doc_session_state();
         self.autosave_deadline = None;
         self.autosave_timer = false;
         match self.repo_kind.clone() {
@@ -4755,6 +4825,7 @@ impl App {
             self.doc_dirty = true;
             self.doc_save_error = None;
             self.autosave_deadline = Some(Instant::now() + AUTOSAVE_DEBOUNCE);
+            self.publish_doc_session_state();
             space_actions::collab_after_edit(self);
         }
         // 选区偏移相对插件提交的全文；正文被合并改写时坐标系已错位，宁可丢弃。
@@ -4779,7 +4850,9 @@ impl App {
         }
         self.doc_active = false;
         self.doc_selection = None;
-        self.ui.last_note_file = None;
+        if let Some(path) = self.note_file() {
+            self.forget_open_doc(&path);
+        }
         self.doc_dirty = false;
         self.doc_save_error = None;
         self.autosave_deadline = None;
@@ -4802,7 +4875,7 @@ impl App {
         if matches!(self.repo_kind, RepoKind::Space(_)) {
             return space_actions::space_submit_save(self, reason);
         }
-        let Some(rel) = self.ui.last_note_file.clone() else {
+        let Some(rel) = self.note_file() else {
             self.notify(NoticeLevel::Warning, "没有打开的文件");
             return Task::none();
         };
@@ -4824,64 +4897,68 @@ impl App {
         )
     }
 
-    /// 打开 .atb：登记打开的文件、面板内容切到表格插件网格视图、广播打开文件集合。
-    /// 表格数据、编辑与保存链都在插件；宿主只负责视图显示（`mode`）、最近打开与历史列表。
-    /// `view` 来自文档类型声明的承载视图，宿主不在此硬编码视图 id。
-    fn open_table(&mut self, rel: &str, mode: OpenMode, view: &str) -> Task<Message> {
-        self.ui.last_table_file = Some(rel.to_string());
-        self.history_kind = atelyx_core::history::HistoryKind::Table;
-        // 打开 / 切换表格即广播：第三方表格视图按当前路径重取
-        self.plugins.on_table_changed(Some(rel));
+    /// 打开文件的统一执行体（脏拦截已由 gate 处理）：登记打开集合与会话（置热）→ 按 owner
+    /// 触发内容态副作用 → 重绑投影 → 只激活已有标签 → 统一收尾。
+    /// 返回 `(任务, 是否等待插件面异步读盘)`：插件文档面在读盘回执到达后才收尾，不放行恢复闸门。
+    fn open_session(
+        &mut self,
+        rel: &str,
+        mode: OpenMode,
+        route: &atelyx_core::doc_type::DocTypeRoute,
+        view: &str,
+    ) -> (Task<Message>, bool) {
+        // owner 决定内容态载体（内置表格内容槽 / 整面画布 / 插件文档实例）；不按文档类型 id 分派
+        let builtin_recent = match route.owner_plugin.as_str() {
+            plugin_actions::TABLES_PLUGIN => {
+                self.history_kind = atelyx_core::history::HistoryKind::Table;
+                // 打开 / 切换表格即广播：第三方表格视图按当前路径重取
+                self.plugins.on_table_changed(Some(rel));
+                Some(atelyx_core::plugin_runtime::RecentKind::Table)
+            }
+            plugin_actions::CANVAS_PLUGIN => {
+                self.history_kind = atelyx_core::history::HistoryKind::Canvas;
+                Some(atelyx_core::plugin_runtime::RecentKind::Canvas)
+            }
+            _ => {
+                plugin_actions::begin_doc_open(self, rel, mode, route);
+                None
+            }
+        };
+        // 打开集合（持久化意图）与会话表（运行时事实）同时登记，目标文档置热
+        self.remember_open_doc(rel);
         if mode.persists() {
             self.schedule_persist();
         }
+        // 插件文档面的最近打开在读盘成功后记录：打开失败不进清单
         if mode.records_recent() {
-            crate::recent_files::record(self, rel, atelyx_core::plugin_runtime::RecentKind::Table);
+            if let Some(kind) = builtin_recent {
+                crate::recent_files::record(self, rel, kind);
+            }
         }
-        // 插件按打开文件集合事件重读内容：切表 / 首次打开都靠这条
+        // 只激活已存在的标签：目标视图不在任何布局里时留在后台（不新建、不提示）
+        let task = if mode.reveals() {
+            plugin_actions::activate_view(self, view).unwrap_or_else(Task::none)
+        } else if builtin_recent.is_some() {
+            Task::none()
+        } else {
+            plugin_actions::refresh_projection(self)
+        };
+        // 目标视图（含各布局 / 撕裂窗口的同一视图标签）重绑到这份文档；旧会话已转冷
+        let _ = self.apply(LayoutOp::BindViewDoc { view: view.to_string(), doc: Some(DocId::new(rel)) });
+        // 投影与打开集合都已就位后再广播：插件按打开文件集合事件重读内容
         self.notify_open_files();
-        // 空间名册的「正在编辑」取打开文件集合：打开表格同样要上行
+        // 空间名册的「正在编辑」取打开文件集合：打开即上行
         if matches!(self.repo_kind, RepoKind::Space(_)) {
             crate::space_actions::send_presence(self);
         }
-        let task = if mode.reveals() {
-            plugin_actions::reveal_view(self, view)
-        } else {
-            Task::none()
-        };
-        task.chain(self.reload_history())
+        // 内置载体在宿主侧读历史列表；插件文档面的历史随正文载入切换
+        let task = if builtin_recent.is_some() { task.chain(self.reload_history()) } else { task };
+        (task, builtin_recent.is_none())
     }
 
-    /// 打开 .atlx：登记打开的文件、面板内容切到画布插件视图、广播打开文件集合。
-    /// 画布数据、交互与保存链都在插件；宿主只负责视图显示（`mode`）、最近打开与历史列表。
-    /// `view` 来自文档类型声明的承载视图，宿主不在此硬编码视图 id。
-    fn open_canvas(&mut self, rel: &str, mode: OpenMode, view: &str) -> Task<Message> {
-        self.ui.last_canvas_file = Some(rel.to_string());
-        self.history_kind = atelyx_core::history::HistoryKind::Canvas;
-        if mode.persists() {
-            self.schedule_persist();
-        }
-        if mode.records_recent() {
-            crate::recent_files::record(self, rel, atelyx_core::plugin_runtime::RecentKind::Canvas);
-        }
-        // 插件按打开文件集合事件重读内容：切画布 / 首次打开都靠这条
-        self.notify_open_files();
-        if matches!(self.repo_kind, RepoKind::Space(_)) {
-            crate::space_actions::send_presence(self);
-        }
-        let task = if mode.reveals() {
-            plugin_actions::reveal_view(self, view)
-        } else {
-            Task::none()
-        };
-        task.chain(self.reload_history())
-    }
-
-    /// 打开文件的统一路由入口（脏拦截已由 gate 处理）：按扩展名查插件声明的文档类型，
-    /// 由 [`crate::pack::preset_doc_kind`] 分派到宿主现有通路或插件文档面；
-    /// 未知扩展名给出明确错误，不静默。
-    /// `mode` = 打开意图：Reveal 确保视图标签存在并激活；Background 只挂已有视图；
-    /// Restore 只把文件挂到已有视图，不新建 / 不激活标签、不落盘。
+    /// 打开文件的统一入口（脏拦截已由 gate 处理）：按扩展名查插件声明的文档类型，
+    /// 由会话表登记后交给 owner 触发内容态副作用；未知扩展名给出明确错误，不静默。
+    /// `mode` = 打开意图：Reveal 激活已有视图标签；Background / Restore 只挂已有视图，布局不动。
     pub(crate) fn open_file(&mut self, rel: &str, mode: OpenMode) -> Task<Message> {
         let Some(route) = self.registry.route_for_path(rel).cloned() else {
             self.notify(
@@ -4897,17 +4974,12 @@ impl App {
             );
             return self.doc_restored(Task::none(), mode);
         };
-        match crate::pack::preset_doc_kind(&route) {
-            Some(crate::pack::PresetDocKind::Table) => {
-                let task = self.open_table(rel, mode, &view);
-                self.doc_restored(task, mode)
-            }
-            Some(crate::pack::PresetDocKind::Canvas) => {
-                let task = self.open_canvas(rel, mode, &view);
-                self.doc_restored(task, mode)
-            }
-            // 文档面打开是异步读盘：回执（DocOpenDone）到达时才收尾恢复闸门
-            None => plugin_actions::open_doc(self, rel, mode, &route),
+        let (task, deferred) = self.open_session(rel, mode, &route, &view);
+        // 文档面打开是异步读盘：回执（DocOpenDone）到达时才收尾恢复闸门
+        if deferred {
+            task
+        } else {
+            self.doc_restored(task, mode)
         }
     }
 
@@ -4973,12 +5045,11 @@ impl App {
         self.vault_switch_target = None;
         self.notify(NoticeLevel::Success, "仓库已打开");
         // 运行中切换：当前打开的笔记 / 表格 / 画布一并关闭（保存已由 gate 完成），
-        // 「上次打开」记录随之清除，进入新仓库为未打开态
+        // 打开集合与会话表随之清空，进入新仓库为未打开态
         if !from_boot {
-            self.ui.last_note_file = None;
-            self.ui.last_table_file = None;
+            self.ui.open_docs.clear();
+            self.doc_sessions.clear();
             self.plugins.on_table_changed(None);
-            self.ui.last_canvas_file = None;
             // 打开中的插件文档实例随切仓库关闭（旧容器路径失效，实例面撤下；投影任务丢弃，后续刷新兜底）
             let _ = plugin_actions::close_doc(self);
             self.doc_active = false;
@@ -5096,7 +5167,9 @@ impl App {
         self.dismiss_popup();
         // 画布是整面插件视图：先于插件文档分支处理，否则会被「非文档插件视图」早退吞掉
         if layout_view::is_canvas_view(kind) {
-            self.ui.last_canvas_file = None;
+            if let Some(path) = self.canvas_file() {
+                self.forget_open_doc(&path);
+            }
             self.schedule_persist();
             self.notify_open_files();
             self.history.clear();
@@ -5119,7 +5192,9 @@ impl App {
         }
         match kind {
             "table" => {
-                self.ui.last_table_file = None;
+                if let Some(path) = self.table_file() {
+                    self.forget_open_doc(&path);
+                }
                 self.panel_view.insert("table".to_string(), None);
                 self.plugins.on_table_changed(None);
                 self.schedule_persist();
@@ -5136,15 +5211,75 @@ impl App {
                 if matches!(self.repo_kind, RepoKind::Space(_)) {
                     space_actions::collab_unbind_doc(self);
                 }
-                self.ui.last_note_file = None;
+                if let Some(path) = self.note_file() {
+                    self.forget_open_doc(&path);
+                }
                 self.doc_text.clear();
                 self.doc_dirty = false;
                 self.doc_save_error = None;
-                        self.history.clear();
+                self.history.clear();
             }
         }
         self.schedule_persist();
         Task::none()
+    }
+
+    /// 关闭一份文档：脏则先 flush（保存失败即中止），成功后摘全部投影并结束会话。
+    pub(crate) fn close_document(&mut self, id: DocId) -> Task<Message> {
+        self.gate(PendingAfterFlush::CloseDocument(id))
+    }
+
+    /// gate 放行后的关闭执行体：摘标签 → 结束会话 → 持久化。
+    fn close_document_now(&mut self, id: DocId) -> Task<Message> {
+        let Some(session) = self.doc_sessions.session(&id).cloned() else { return Task::none() };
+        let path = session.path.clone();
+        self.dismiss_popup();
+        // 全部布局与撕裂窗口中引用该文档的标签先摘掉（空面板保留，与关标签一致）
+        let _ = self.apply(LayoutOp::RemoveDocTabs { doc: id });
+        let route = self.registry.route_for_path(&path).cloned();
+        // 按内容态载体（owner）收尾，与会话表口径一致；不按文档类型 id 分派
+        let task = match session.plugin_id.as_str() {
+            plugin_actions::TABLES_PLUGIN => {
+                if self.table_file().as_deref() == Some(path.as_str()) {
+                    self.panel_view.insert("table".to_string(), None);
+                    self.plugins.on_table_changed(None);
+                    self.history.clear();
+                }
+                self.forget_open_doc(&path);
+                Task::none()
+            }
+            plugin_actions::CANVAS_PLUGIN => {
+                if self.canvas_file().as_deref() == Some(path.as_str()) {
+                    self.history.clear();
+                }
+                self.forget_open_doc(&path);
+                Task::none()
+            }
+            _ => {
+                if self.doc_open.as_ref().is_some_and(|doc| doc.path == path) {
+                    plugin_actions::close_doc(self)
+                } else {
+                    self.forget_open_doc(&path);
+                    Task::none()
+                }
+            }
+        };
+        // 同类型还有热会话就指向它，否则解绑（残留的无主标签回到空态）
+        if let Some(route) = route {
+            if let Some(view) = route.views.first().map(|view| self.registry.doc_view_id(view)) {
+                let hot = self
+                    .doc_sessions
+                    .hot_of(&session.plugin_id, &session.doc_type)
+                    .map(|hot| hot.id.clone());
+                let _ = self.apply(LayoutOp::BindViewDoc { view, doc: hot });
+            }
+        }
+        self.schedule_persist();
+        self.notify_open_files();
+        if matches!(self.repo_kind, RepoKind::Space(_)) {
+            space_actions::send_presence(self);
+        }
+        task
     }
 
     fn active_tree(&self) -> Option<layout::LayoutNode> {
@@ -5205,13 +5340,13 @@ impl App {
     fn reload_history(&self) -> Task<Message> {
         let (kind, rel) = match self.history_kind {
             atelyx_core::history::HistoryKind::Note => {
-                (atelyx_core::history::HistoryKind::Note, self.ui.last_note_file.clone())
+                (atelyx_core::history::HistoryKind::Note, self.note_file())
             }
             atelyx_core::history::HistoryKind::Table => {
-                (atelyx_core::history::HistoryKind::Table, self.ui.last_table_file.clone())
+                (atelyx_core::history::HistoryKind::Table, self.table_file())
             }
             atelyx_core::history::HistoryKind::Canvas => {
-                (atelyx_core::history::HistoryKind::Canvas, self.ui.last_canvas_file.clone())
+                (atelyx_core::history::HistoryKind::Canvas, self.canvas_file())
             }
         };
         match rel {
@@ -5248,7 +5383,7 @@ impl App {
     /// 记录一次保存为历史版本（edit；60s 窗口内同作者连续编辑合并为一版）。
     /// 历史为尽力而为侧车：写失败静默丢弃（不打扰正文保存链），与读取侧空列表降级同口径。
     fn record_doc_history(&self, content: String) -> Task<Message> {
-        let Some(rel) = self.ui.last_note_file.clone() else { return Task::none() };
+        let Some(rel) = self.note_file() else { return Task::none() };
         let gen = self.epoch();
         let state = self.vault.clone();
         let author = history_author(self);
@@ -5288,7 +5423,7 @@ impl App {
             self.doc_selection = None;
             doc_session::publish_state(self, Some(self.doc_text.clone()));
         }
-        let Some(rel) = self.ui.last_note_file.clone() else { return Task::none() };
+        let Some(rel) = self.note_file() else { return Task::none() };
         if matches!(self.repo_kind, RepoKind::Space(_)) {
             return space_actions::space_record_doc_restore(self, rel, version.content);
         }
@@ -5334,7 +5469,7 @@ impl App {
                     self.notify(NoticeLevel::Error, "历史版本无法解析");
                     return Task::none();
                 }
-                let Some(rel) = self.ui.last_table_file.clone() else {
+                let Some(rel) = self.table_file() else {
                     self.notify(NoticeLevel::Warning, "表格未打开，无法回滚");
                     return Task::none();
                 };
@@ -5372,7 +5507,7 @@ impl App {
             }
             atelyx_core::history::HistoryKind::Note => self.doc_history_restore(version),
             atelyx_core::history::HistoryKind::Canvas => {
-                let Some(rel) = self.ui.last_canvas_file.clone() else {
+                let Some(rel) = self.canvas_file() else {
                     self.notify(NoticeLevel::Warning, "画布未打开，无法回滚");
                     return Task::none();
                 };
@@ -5420,7 +5555,7 @@ impl App {
             self.notify(NoticeLevel::Error, e);
             return Task::none();
         }
-        if self.ui.last_canvas_file.as_deref() != Some(rel.as_str()) {
+        if self.canvas_file().as_deref() != Some(rel.as_str()) {
             self.notify(NoticeLevel::Warning, "画布未打开，无法回滚");
             return Task::none();
         }
@@ -5770,112 +5905,74 @@ impl App {
                         *d = format!("{to}/{rest}");
                     }
                 }
-                if let Some(f) = &self.ui.last_note_file {
-                    let next = if f == from {
-                        Some(to.clone())
-                    } else if f.starts_with(&format!("{from}/")) {
-                        Some(f.replacen(from, to, 1))
-                    } else {
-                        None
-                    };
-                    if let Some(n) = next {
-                        if let Some(doc) = &mut self.doc_open {
-                            if doc.path == *from || doc.path.starts_with(&format!("{from}/")) {
-                                doc.path = n.clone();
-                            }
+                let old_table = self.table_file();
+                let old_canvas = self.canvas_file();
+                let renamed = self.ui.rename_open_docs(from, to);
+                if !renamed.is_empty() {
+                    for (old, next) in &renamed {
+                        self.doc_sessions.rename_path(old, next);
+                    }
+                    if let Some(doc) = &mut self.doc_open {
+                        if let Some((_, next)) = renamed.iter().find(|(old, _)| old == &doc.path) {
+                            doc.path = next.clone();
                         }
-                        self.ui.last_note_file = Some(n);
-                        self.schedule_persist();
                     }
-                }
-                if let Some(f) = &self.ui.last_table_file {
-                    let next = if f == from {
-                        Some(to.clone())
-                    } else if f.starts_with(&format!("{from}/")) {
-                        Some(f.replacen(from, to, 1))
-                    } else {
-                        None
-                    };
-                    if let Some(n) = next {
-                        self.ui.last_table_file = Some(n.clone());
-                        self.plugins.on_table_changed(Some(&n));
-                        self.schedule_persist();
+                    if let Some(next) = self.table_file() {
+                        if Some(&next) != old_table.as_ref() {
+                            self.plugins.on_table_changed(Some(&next));
+                        }
                     }
-                }
-                if let Some(f) = &self.ui.last_canvas_file {
-                    let next = if f == from {
-                        Some(to.clone())
-                    } else if f.starts_with(&format!("{from}/")) {
-                        Some(f.replacen(from, to, 1))
-                    } else {
-                        None
-                    };
-                    if let Some(n) = next {
-                        self.ui.last_canvas_file = Some(n);
-                        self.schedule_persist();
+                    if self.canvas_file() != old_canvas {
                         // 插件按打开文件集合更新会话路径，不重发会继续按旧路径保存
                         self.plugins.on_open_files_changed();
                     }
+                    self.schedule_persist();
                 }
                 space_actions::collab_follow_rename(self, from, to);
             }
             FollowUp::Deleted { rel, is_dir } => {
-                let hit = self.ui.last_note_file.as_deref().is_some_and(|f| {
+                let hit = |path: &str| {
                     if *is_dir {
-                        f == rel || f.starts_with(&format!("{rel}/"))
+                        path == rel || path.starts_with(&format!("{rel}/"))
                     } else {
-                        f == rel
+                        path == rel
                     }
-                });
-                if hit {
+                };
+                let note_hit = self.note_file().as_deref().is_some_and(hit);
+                let table_hit = self.table_file().as_deref().is_some_and(hit);
+                let canvas_hit = self.canvas_file().as_deref().is_some_and(hit);
+                let removed = self.ui.remove_open_docs(rel, *is_dir);
+                for path in &removed {
+                    if let Some(id) = self.doc_sessions.by_path(path).map(|session| session.id.clone()) {
+                        self.doc_sessions.close(&id);
+                    }
+                }
+                if note_hit {
                     // 空间模式先摘协作绑定（离场帧 + presence 回收）再清编辑态
                     if matches!(self.repo_kind, RepoKind::Space(_)) {
                         space_actions::collab_unbind_doc(self);
                     }
-                    self.ui.last_note_file = None;
                     self.doc_text.clear();
                     self.doc_dirty = false;
                     self.doc_save_error = None;
                     self.schedule_persist();
                 }
-                let hit_table = self.ui.last_table_file.as_deref().is_some_and(|f| {
-                    if *is_dir {
-                        f == rel || f.starts_with(&format!("{rel}/"))
-                    } else {
-                        f == rel
-                    }
-                });
-                if hit_table {
-                    self.ui.last_table_file = None;
+                if table_hit {
                     self.plugins.on_table_changed(None);
                     self.schedule_persist();
                     if matches!(self.repo_kind, RepoKind::Space(_)) {
                         space_actions::send_presence(self);
                     }
                 }
-                let hit_canvas = self.ui.last_canvas_file.as_deref().is_some_and(|f| {
-                    if *is_dir {
-                        f == rel || f.starts_with(&format!("{rel}/"))
-                    } else {
-                        f == rel
-                    }
-                });
-                if hit_canvas {
-                    self.ui.last_canvas_file = None;
-                                            self.notify_open_files();
+                if canvas_hit {
+                    self.notify_open_files();
                     if matches!(self.repo_kind, RepoKind::Space(_)) {
                         space_actions::send_presence(self);
                     }
                     self.schedule_persist();
                 }
                 // 打开中的插件文档被删 / 所在目录被删：实例随磁盘事实关闭
-                let hit_doc = self.doc_open.as_ref().is_some_and(|d| {
-                    if *is_dir {
-                        d.path == *rel || d.path.starts_with(&format!("{rel}/"))
-                    } else {
-                        d.path == *rel
-                    }
-                });
+                let hit_doc = self.doc_open.as_ref().is_some_and(|d| hit(&d.path));
                 if hit_doc {
                     let _ = plugin_actions::close_doc(self);
                 }
@@ -6811,7 +6908,7 @@ impl App {
 
     /// 插件视角的当前选区：偏移相对正文（frontmatter 之后）。未打开文档回空选区。
     pub(crate) fn editor_selection(&self) -> EditorSelection {
-        let path = self.ui.last_note_file.clone();
+        let path = self.note_file();
         if self.doc_active {
             let base = atelyx_core::frontmatter::block_end(&self.doc_text).unwrap_or(0);
             let body = &self.doc_text[base..];
@@ -6827,7 +6924,7 @@ impl App {
 
     /// 插件替换当前选区（空串 = 删除选区），走与插件编辑同一出口：三方合并、置脏与自动保存期限一致。
     pub(crate) fn editor_replace_selection(&mut self, text: String) -> Result<(), String> {
-        if self.ui.last_note_file.is_none() {
+        if self.note_file().is_none() {
             return Err("未打开文档".to_string());
         }
         if self.doc_active {
@@ -7436,7 +7533,7 @@ mod file_drop_tests {
 #[cfg(test)]
 mod restore_open_tests {
     use super::restore_open_requests;
-    use crate::plugin_actions::{reveal_op, OpenMode};
+    use crate::plugin_actions::{activate_op, OpenMode};
     use atelyx_core::layout::{self, AppUiState, LayoutOp, NOTES_VIEW};
 
     fn default_ui() -> AppUiState {
@@ -7496,9 +7593,9 @@ mod restore_open_tests {
     #[test]
     fn restore_requests_open_files_without_touching_layout() {
         let mut ui = default_ui();
-        ui.last_note_file = Some("a.md".into());
-        ui.last_table_file = Some("b.atb".into());
-        ui.last_canvas_file = Some("c.atlx".into());
+        ui.remember_open_doc("a.md", "note");
+        ui.remember_open_doc("b.atb", "table");
+        ui.remember_open_doc("c.atlx", "canvas");
         let before = tab_count(&ui);
         let requests = restore_open_requests(&ui, true, true);
         assert_eq!(
@@ -7526,20 +7623,18 @@ mod restore_open_tests {
         let before = tab_count(&ui);
         let _ = restore_open_requests(&ui, true, true);
         assert_eq!(tab_count(&ui), before);
-        // 用户主动打开才会激活已有标签；恢复路径不调用这条
+        // 用户主动打开只会激活已有标签；恢复路径不调用这条
         assert!(matches!(
-            reveal_op(&ui, NOTES_VIEW),
+            activate_op(&ui, NOTES_VIEW),
             Some(LayoutOp::SetActive { .. })
         ));
     }
 
     #[test]
-    fn user_open_adds_tab_only_when_view_missing() {
+    fn user_open_never_adds_tab() {
         let ui = default_ui();
-        assert!(matches!(
-            reveal_op(&ui, NOTES_VIEW),
-            Some(LayoutOp::AddView { .. })
-        ));
+        // 视图不在布局里：只后台打开，不新建标签、不提示
+        assert!(activate_op(&ui, NOTES_VIEW).is_none());
         assert!(OpenMode::Reveal.reveals());
         assert!(!OpenMode::Background.reveals(), "后台打开不动布局");
         assert!(OpenMode::Background.persists() && OpenMode::Background.records_recent());
@@ -7573,11 +7668,31 @@ mod restore_open_tests {
         add_view(&mut ui, NOTES_VIEW);
         assert_eq!(layouts_with(&ui, NOTES_VIEW), 3);
         assert!(
-            matches!(reveal_op(&ui, NOTES_VIEW), Some(LayoutOp::SetActive { .. })),
+            matches!(activate_op(&ui, NOTES_VIEW), Some(LayoutOp::SetActive { .. })),
             "多布局同视图只激活一个标签，不重复新建"
         );
         // 同一视图存在于多个布局，恢复仍只产生一次打开请求
-        ui.last_note_file = Some("a.md".into());
+        ui.remember_open_doc("a.md", "note");
         assert_eq!(restore_open_requests(&ui, true, true).len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod close_tests {
+    use super::{abort_close_on_save_failure, PendingAfterFlush};
+    use atelyx_core::doc_session::DocId;
+
+    #[test]
+    fn save_failure_aborts_close_but_keeps_other_pending() {
+        let mut pending = Some(PendingAfterFlush::CloseDocument(DocId::new("a.md")));
+        abort_close_on_save_failure(&mut pending);
+        assert!(pending.is_none(), "关闭失败即中止，不保留待重试");
+        let mut pending = Some(PendingAfterFlush::MoveEntry {
+            from: "a.md".into(),
+            is_dir: false,
+            to_dir: "docs".into(),
+        });
+        abort_close_on_save_failure(&mut pending);
+        assert!(pending.is_some(), "打开 / 移动类动作仍保留待重试");
     }
 }

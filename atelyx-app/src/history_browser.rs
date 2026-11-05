@@ -623,9 +623,9 @@ fn restore(app: &mut App, seq: u64) -> Task<Message> {
         kind,
         &file,
         OpenFiles {
-            note: app.ui.last_note_file.as_deref(),
-            table: app.ui.last_table_file.as_deref(),
-            canvas: app.ui.last_canvas_file.as_deref(),
+            note: app.note_file().as_deref(),
+            table: app.table_file().as_deref(),
+            canvas: app.canvas_file().as_deref(),
         },
         crate::doc_session::can_write(app),
     ) {

@@ -819,12 +819,11 @@ pub fn enter_space(app: &mut App, session: SpaceSession, from_boot: bool) -> Tas
     task = task.chain(load_space_meta(app));
     task = task.chain(app.save_global());
     // 运行中切换：当前打开的笔记、表格与画布一并关闭（保存已由 gate 完成），
-    // 「上次打开」记录随之清除，进入新空间为未打开态
+    // 打开集合与会话表随之清空，进入新空间为未打开态
     if !from_boot {
-        app.ui.last_note_file = None;
-        app.ui.last_table_file = None;
+        app.ui.open_docs.clear();
+        app.doc_sessions.clear();
         app.plugins.on_table_changed(None);
-        app.ui.last_canvas_file = None;
         // 插件文档实例与文档会话随容器切换收口：旧的相对路径在新空间指向别的文件
         let _ = crate::plugin_actions::close_doc(app);
         app.doc_active = false;
@@ -1267,7 +1266,7 @@ pub fn space_submit_save(app: &mut App, reason: SaveReason) -> Task<Message> {
         }
         return Task::none();
     }
-    let Some(rel) = app.ui.last_note_file.clone() else {
+    let Some(rel) = app.note_file() else {
         app.notify(NoticeLevel::Warning, "没有打开的文件");
         return Task::none();
     };
@@ -1372,7 +1371,7 @@ fn on_doc_saved(
     if result.is_ok() {
         app.plugins.on_file_changed(rel, FileChangeKind::Updated, None);
     }
-    if app.ui.last_note_file.as_deref() != Some(rel) {
+    if app.note_file().as_deref() != Some(rel) {
         return Task::none();
     }
     let mut task = Task::none();
@@ -1844,13 +1843,13 @@ pub fn space_load_image(
 pub fn reload_space_history(app: &App) -> Task<Message> {
     let (kind, rel) = match app.history_kind {
         atelyx_core::history::HistoryKind::Note => {
-            (atelyx_core::history::HistoryKind::Note, app.ui.last_note_file.clone())
+            (atelyx_core::history::HistoryKind::Note, app.note_file())
         }
         atelyx_core::history::HistoryKind::Table => {
-            (atelyx_core::history::HistoryKind::Table, app.ui.last_table_file.clone())
+            (atelyx_core::history::HistoryKind::Table, app.table_file())
         }
         atelyx_core::history::HistoryKind::Canvas => {
-            (atelyx_core::history::HistoryKind::Canvas, app.ui.last_canvas_file.clone())
+            (atelyx_core::history::HistoryKind::Canvas, app.canvas_file())
         }
     };
     match rel {
@@ -2429,20 +2428,9 @@ pub(crate) fn doc_presence_flush(app: &mut App) {
     send_doc_presence(app, payload);
 }
 
-/// 当前打开文件路径集合（文档 + 表格 + 画布平级，≤3；presence、协作房间视图与删除命中判定共用）。
+/// 当前打开文件路径集合（打开集合全部条目；presence、协作房间视图与删除命中判定共用）。
 pub(crate) fn open_file_paths(app: &App) -> Vec<String> {
-    let mut files = Vec::new();
-    if let Some(f) = &app.ui.last_note_file {
-        files.push(f.clone());
-    }
-    if let Some(f) = &app.ui.last_table_file {
-        files.push(f.clone());
-    }
-    if let Some(f) = &app.ui.last_canvas_file {
-        files.push(f.clone());
-    }
-    files.truncate(3);
-    files
+    app.ui.open_docs.iter().map(|doc| doc.path.clone()).collect()
 }
 
 /// 当前打开文件集合的 presence 上行形态（文档 / 表格 / 画布平级；多窗口共用同一份打开态）。
@@ -2830,8 +2818,11 @@ fn collab_remote_doc(app: &mut App, peer_id: &str, file: &str, payload: &[u8]) {
     if let Some((old, new)) = out.relocated {
         // 旧对端换路：绑定跟随新路径（文档挂靠已由 apply_remote 内部迁移）
         collab_follow_rename(app, &old, &new);
-        if app.ui.last_note_file.as_deref() == Some(old.as_str()) {
-            app.ui.last_note_file = Some(new);
+        if app.note_file().as_deref() == Some(old.as_str()) {
+            let renamed = app.ui.rename_open_docs(&old, &new);
+            for (from, to) in &renamed {
+                app.doc_sessions.rename_path(from, to);
+            }
             app.schedule_persist();
         }
     }
@@ -2850,7 +2841,7 @@ fn on_remote_table_patch(
         return Task::none();
     }
     // 只转发本端打开的文件：插件按自己打开的文件匹配，其余补丁无处可去
-    if app.ui.last_table_file.as_deref() != Some(file.as_str()) {
+    if app.table_file().as_deref() != Some(file.as_str()) {
         return Task::none();
     }
     // 标题补丁会触发服务端按标题改名：文件树跟随刷新，避免滞留旧名
@@ -2882,7 +2873,7 @@ fn on_remote_canvas_patch(
     if peer_id.is_some() && peer_id == app.space_own_peer_id {
         return Task::none();
     }
-    if app.ui.last_canvas_file.as_deref() != Some(file.as_str()) {
+    if app.canvas_file().as_deref() != Some(file.as_str()) {
         return Task::none();
     }
     let renamed = patch.get("title").and_then(|title| title.as_str()).is_some();
@@ -2904,22 +2895,30 @@ fn on_remote_canvas_patch(
 
 /// 服务端改名广播：打开中文件路径与协作绑定跟随（内容不动，不重载）。
 fn on_space_renamed(app: &mut App, old_path: &str, new_path: &str) -> Task<Message> {
-    if app.ui.last_note_file.as_deref() == Some(old_path) {
-        app.ui.last_note_file = Some(new_path.to_string());
+    let table_before = app.table_file();
+    let canvas_before = app.canvas_file();
+    let renamed = app.ui.rename_open_docs(old_path, new_path);
+    if !renamed.is_empty() {
+        for (from, to) in &renamed {
+            app.doc_sessions.rename_path(from, to);
+        }
+        if let Some(doc) = &mut app.doc_open {
+            if let Some((_, next)) = renamed.iter().find(|(old, _)| old == &doc.path) {
+                doc.path = next.clone();
+            }
+        }
+        if let Some(next) = app.table_file() {
+            if Some(&next) != table_before.as_ref() {
+                app.plugins.on_table_changed(Some(&next));
+                // 表格插件的会话路径随打开文件集合更新：不重发会让它继续按旧路径保存
+                app.plugins.on_open_files_changed();
+            }
+        }
+        if app.canvas_file() != canvas_before {
+            // 插件按打开文件集合更新会话路径，不重发会继续按旧路径保存
+            app.plugins.on_open_files_changed();
+        }
         app.schedule_persist();
-    }
-    if app.ui.last_table_file.as_deref() == Some(old_path) {
-        app.ui.last_table_file = Some(new_path.to_string());
-        app.plugins.on_table_changed(Some(new_path));
-        // 表格插件的会话路径随打开文件集合更新：不重发会让它继续按旧路径保存
-        app.plugins.on_open_files_changed();
-        app.schedule_persist();
-    }
-    if app.ui.last_canvas_file.as_deref() == Some(old_path) {
-        app.ui.last_canvas_file = Some(new_path.to_string());
-        app.schedule_persist();
-        // 插件按打开文件集合更新会话路径，不重发会继续按旧路径保存
-        app.plugins.on_open_files_changed();
     }
     collab_follow_rename(app, old_path, new_path);
     let prefix = format!("{old_path}/");

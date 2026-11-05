@@ -5,10 +5,13 @@
 
 use std::collections::BTreeMap;
 
+use serde::{Deserialize, Serialize};
+
 use crate::doc_type::DocTypeId;
 
-/// 文档身份 = 仓库相对路径。
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// 文档身份 = 仓库相对路径（磁盘上按字符串写出）。
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct DocId(String);
 
 impl DocId {
@@ -266,6 +269,36 @@ impl DocSessions {
         Some(session)
     }
 
+    /// 路径改名：条目与热态一起换到新路径，脏 / 错误状态原样保留。
+    /// 目标路径已有条目时以被改名的会话为准（改名覆盖的旧条目丢弃）。
+    pub fn rename_path(&mut self, from: &str, to: &str) -> bool {
+        let old = DocId::new(from);
+        let new = DocId::new(to);
+        if let Some(replaced) = self.docs.remove(&new) {
+            let key = (replaced.plugin_id, replaced.doc_type);
+            if self.hot.get(&key) == Some(&new) {
+                self.hot.remove(&key);
+            }
+        }
+        let Some(mut session) = self.docs.remove(&old) else { return false };
+        for id in self.hot.values_mut() {
+            if id == &old {
+                *id = new.clone();
+            }
+        }
+        session.id = new.clone();
+        session.path = to.to_string();
+        self.docs.insert(new, session);
+        true
+    }
+
+    /// 清空全部会话（切仓库 / 切空间：旧路径全部失效）。序号继续推进，不复用旧号。
+    pub fn clear(&mut self) {
+        self.docs.clear();
+        self.hot.clear();
+        self.seq = self.seq.saturating_add(1);
+    }
+
     pub fn session(&self, id: &DocId) -> Option<&DocSession> {
         self.docs.get(id)
     }
@@ -368,6 +401,47 @@ mod tests {
         assert!(sessions.session(&id).is_none());
         assert!(sessions.hot_of("atelyx.notes", &DocTypeId::new("note")).is_none());
         assert!(sessions.close(&id).is_none());
+    }
+
+    #[test]
+    fn rename_moves_entry_and_keeps_dirty_state() {
+        let mut sessions = DocSessions::default();
+        let id = sessions.open_or_reuse(spec("a.md", "note"));
+        let seq = sessions.session(&id).unwrap().open_seq;
+        assert!(sessions.update_state(&id, seq, state(true, Some("保存失败"))));
+        sessions.set_hot(&id);
+        assert!(sessions.rename_path("a.md", "dir/b.md"));
+        assert!(sessions.by_path("a.md").is_none());
+        let moved = sessions.by_path("dir/b.md").expect("改名后按新路径可达");
+        assert_eq!(moved.id, DocId::new("dir/b.md"));
+        assert!(moved.dirty);
+        assert_eq!(moved.save_error.as_deref(), Some("保存失败"));
+        assert_eq!(sessions.hot_of("atelyx.notes", &DocTypeId::new("note")).unwrap().path, "dir/b.md");
+        assert!(!sessions.rename_path("gone.md", "x.md"));
+    }
+
+    #[test]
+    fn cold_session_keeps_unsaved_state() {
+        let mut sessions = DocSessions::default();
+        let a = sessions.open_or_reuse(spec("a.md", "note"));
+        let seq = sessions.session(&a).unwrap().open_seq;
+        sessions.set_hot(&a);
+        assert!(sessions.update_state(&a, seq, state(true, None)));
+        let b = sessions.open_or_reuse(spec("b.md", "note"));
+        sessions.set_hot(&b);
+        // 换热文档后旧会话转冷但脏状态必须留在表里（flush 由调用方在换之前完成）
+        assert_eq!(sessions.hot_of("atelyx.notes", &DocTypeId::new("note")).unwrap().id, b);
+        assert!(sessions.session(&a).unwrap().dirty);
+    }
+
+    #[test]
+    fn clear_drops_all_sessions_and_hot_state() {
+        let mut sessions = DocSessions::default();
+        let a = sessions.open_or_reuse(spec("a.md", "note"));
+        sessions.set_hot(&a);
+        sessions.clear();
+        assert!(sessions.is_empty());
+        assert!(sessions.hot_of("atelyx.notes", &DocTypeId::new("note")).is_none());
     }
 
     #[test]

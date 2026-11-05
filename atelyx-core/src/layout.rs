@@ -10,6 +10,8 @@ use atelyx_plugin_protocol::layout::Axis;
 use nanoid::nanoid;
 use serde::{Deserialize, Serialize};
 
+use crate::doc_session::DocId;
+
 // ===== 类型（ui-state.json / 布局磁盘契约）=====
 
 /// 视图类型（插件视图为任意字符串，故用 String）。
@@ -35,6 +37,9 @@ pub struct WindowBounds {
 pub struct TabItem {
     pub id: String,
     pub view: ViewKind,
+    /// 绑定文档身份：文档视图标签才有；同一文档可在多布局 / 多窗口同时投影（同一会话）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doc: Option<DocId>,
     /// 锁定（固定）：禁拖/禁撕裂/禁关闭，需先解锁。
     pub locked: bool,
 }
@@ -141,6 +146,28 @@ fn default_true() -> bool {
     true
 }
 
+/// 打开集合条目：仓库相对路径 + 所属文档类型 id（由插件声明）。
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenDoc {
+    pub path: String,
+    pub doc_type: String,
+}
+
+/// 旧版「每类型一个上次打开」槽位：只在读取旧文件时解析，迁入 `open_docs` 后清空且永不写出。
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+struct LegacyLastFiles {
+    #[serde(default, skip_serializing)]
+    last_canvas_file: Option<String>,
+    #[serde(default, skip_serializing)]
+    last_note_file: Option<String>,
+    #[serde(default, skip_serializing)]
+    last_table_file: Option<String>,
+    #[serde(default, skip_serializing)]
+    last_doc_file: Option<String>,
+}
+
 /// 应用级 UI 使用状态（`app_data_dir/ui-state.json` 磁盘格式；本模块为唯一写者）。
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase")]
@@ -149,16 +176,12 @@ pub struct AppUiState {
     /// 文件面板展开的文件夹相对路径列表（缺省 = 全部折叠；跨仓库按路径共享）。
     #[serde(default)]
     pub file_explorer_expanded: Vec<String>,
-    /// 上次打开的画布/笔记/表格文件（相对仓库根路径）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_canvas_file: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_note_file: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_table_file: Option<String>,
-    /// 上次打开的插件领域文档（相对仓库根路径；打开路由按扩展名分派给注册该文档类型的插件）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_doc_file: Option<String>,
+    /// 打开集合（路径 + 文档类型 id；同一路径只留一条，最近打开在尾部）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub open_docs: Vec<OpenDoc>,
+    /// 旧版单槽位（只读取迁移，不写出；迁入 `open_docs` 后清空）。
+    #[serde(flatten)]
+    legacy_last_files: LegacyLastFiles,
     /// 场景列表（布局之上的容器；缺省 = 空，normalize 种子化默认场景）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub scenes: Vec<Scene>,
@@ -183,6 +206,72 @@ pub struct AppUiState {
     /// 已停用的内置插件 id（其视图不再进选择器、服务离开能力总线；已打开的标签保留并显示停用占位）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub disabled_plugins: Vec<String>,
+}
+
+impl AppUiState {
+    /// 取出旧版槽位记录的路径（迁移用；取出后清空）。
+    pub fn take_legacy_open_paths(&mut self) -> Vec<String> {
+        [
+            self.legacy_last_files.last_note_file.take(),
+            self.legacy_last_files.last_table_file.take(),
+            self.legacy_last_files.last_canvas_file.take(),
+            self.legacy_last_files.last_doc_file.take(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+
+    /// 记录 / 更新打开集合：同一路径去重后置于尾部（尾部 = 最近打开）。
+    pub fn remember_open_doc(&mut self, path: &str, doc_type: &str) {
+        self.open_docs.retain(|doc| doc.path != path);
+        self.open_docs
+            .push(OpenDoc { path: path.to_string(), doc_type: doc_type.to_string() });
+    }
+
+    /// 打开集合中该文档类型最近打开的一条路径。
+    pub fn open_doc_path(&self, doc_type: &str) -> Option<&str> {
+        self.open_docs
+            .iter()
+            .rev()
+            .find(|doc| doc.doc_type == doc_type)
+            .map(|doc| doc.path.as_str())
+    }
+
+    /// 从打开集合移除一条路径。
+    pub fn forget_open_doc(&mut self, path: &str) {
+        self.open_docs.retain(|doc| doc.path != path);
+    }
+
+    /// 路径改名（文件精确匹配、目录按前缀）；返回被改写的旧→新路径。
+    pub fn rename_open_docs(&mut self, from: &str, to: &str) -> Vec<(String, String)> {
+        let prefix = format!("{from}/");
+        let mut renamed = Vec::new();
+        for doc in &mut self.open_docs {
+            if doc.path == from {
+                renamed.push((doc.path.clone(), to.to_string()));
+                doc.path = to.to_string();
+            } else if let Some(rest) = doc.path.strip_prefix(&prefix) {
+                renamed.push((doc.path.clone(), format!("{to}/{rest}")));
+                doc.path = format!("{to}/{rest}");
+            }
+        }
+        renamed
+    }
+
+    /// 移除路径条目（`is_dir` = 连同该目录前缀下的条目）；返回被移除的路径。
+    pub fn remove_open_docs(&mut self, path: &str, is_dir: bool) -> Vec<String> {
+        let prefix = format!("{path}/");
+        let mut removed = Vec::new();
+        self.open_docs.retain(|doc| {
+            let hit = if is_dir { doc.path == path || doc.path.starts_with(&prefix) } else { doc.path == path };
+            if hit {
+                removed.push(doc.path.clone());
+            }
+            !hit
+        });
+        removed
+    }
 }
 
 /// ui-state.json 的 schema 版本（格式变更直接升版，旧文件按默认态处理）。
@@ -230,6 +319,12 @@ pub enum LayoutOp {
     SetLocked { panel_id: String, tab_id: String, locked: bool },
     /// 切换面板中某标签的视图（锁定拒关；目标视图被其他位置占用 = 忽略）。
     SetTabView { panel_id: String, tab_id: String, view: ViewKind },
+    /// 把该视图的全部标签绑定到同一文档（找不到该视图 = 忽略）：阶段一每（插件, 类型）
+    /// 只有一份热文档，各布局 / 撕裂窗口的同一视图标签必须指向同一文档。
+    BindViewDoc { view: ViewKind, doc: Option<DocId> },
+    /// 关闭文档：摘掉全部场景布局与撕裂窗口中绑定到该文档的标签（空面板保留，与关标签一致，
+    /// 空撕裂窗口条目一并移除）。
+    RemoveDocTabs { doc: DocId },
     /// 面板标签组内排序。
     MoveTabWithin { panel_id: String, tab_id: String, to_index: usize },
     /// 窗口内跨面板移动标签（面板 A → 面板 B 标签组，默认尾部）。
@@ -347,14 +442,6 @@ pub struct LayoutOpResult {
 pub struct UiStatePatch {
     #[serde(default)]
     pub file_explorer_expanded: Option<Vec<String>>,
-    #[serde(default, deserialize_with = "de_patch_clearable")]
-    pub last_canvas_file: Option<Option<String>>,
-    #[serde(default, deserialize_with = "de_patch_clearable")]
-    pub last_note_file: Option<Option<String>>,
-    #[serde(default, deserialize_with = "de_patch_clearable")]
-    pub last_table_file: Option<Option<String>>,
-    #[serde(default, deserialize_with = "de_patch_clearable")]
-    pub last_doc_file: Option<Option<String>>,
     #[serde(default, deserialize_with = "de_patch_clearable")]
     pub focused_panel_id: Option<Option<String>>,
     #[serde(default)]
@@ -521,7 +608,7 @@ pub fn next_scene_name(names: &[String]) -> String {
 pub fn create_tab(view: &str) -> TabItem {
     let mut view = view.to_string();
     migrate_view_id(&mut view);
-    TabItem { id: nanoid!(), view, locked: false }
+    TabItem { id: nanoid!(), view, doc: None, locked: false }
 }
 
 /// 新建单标签面板。
@@ -863,13 +950,20 @@ pub fn group_activate_tab(g: &TabGroup, tab_id: &str) -> Option<TabGroup> {
     }
 }
 
-/// 切换某标签的视图（view 恒非 empty）。
+/// 切换某标签的视图（view 恒非 empty）：换视图即解除文档绑定，同视图切换保留绑定。
 pub fn group_set_tab_view(g: &TabGroup, tab_id: &str, view: &str) -> TabGroup {
     TabGroup {
         tabs: g
             .tabs
             .iter()
-            .map(|t| if t.id == tab_id { TabItem { id: t.id.clone(), view: view.to_string(), locked: t.locked } } else { t.clone() })
+            .map(|t| {
+                if t.id == tab_id {
+                    let doc = (t.view == view).then(|| t.doc.clone()).flatten();
+                    TabItem { id: t.id.clone(), view: view.to_string(), doc, locked: t.locked }
+                } else {
+                    t.clone()
+                }
+            })
             .collect(),
         active_tab_id: g.active_tab_id.clone(),
     }
@@ -881,7 +975,7 @@ pub fn group_set_tab_locked(g: &TabGroup, tab_id: &str, locked: bool) -> TabGrou
         tabs: g
             .tabs
             .iter()
-            .map(|t| if t.id == tab_id { TabItem { id: t.id.clone(), view: t.view.clone(), locked } } else { t.clone() })
+            .map(|t| if t.id == tab_id { TabItem { id: t.id.clone(), view: t.view.clone(), doc: t.doc.clone(), locked } } else { t.clone() })
             .collect(),
         active_tab_id: g.active_tab_id.clone(),
     }
@@ -1117,7 +1211,7 @@ pub fn tear_off_from_detached(
 pub fn regenerate_ids(node: &LayoutNode) -> LayoutNode {
     match node {
         LayoutNode::Panel { tabs, .. } => {
-            let tabs: Vec<TabItem> = tabs.iter().map(|t| TabItem { id: nanoid!(), view: t.view.clone(), locked: t.locked }).collect();
+            let tabs: Vec<TabItem> = tabs.iter().map(|t| TabItem { id: nanoid!(), view: t.view.clone(), doc: t.doc.clone(), locked: t.locked }).collect();
             let active = tabs.first().map(|t| t.id.clone());
             LayoutNode::Panel { id: nanoid!(), tabs, active_tab_id: active }
         }
@@ -1241,6 +1335,78 @@ fn view_occupied(ui: &AppUiState, view: &str, except_tab_id: Option<&str>) -> bo
     ui.detached_windows.iter().flat_map(|w| &w.tabs).any(|t| t.view == view && except_tab_id != Some(t.id.as_str()))
 }
 
+/// 把全部场景布局与撕裂窗口中该视图的标签绑定到同一文档；没有该视图 = 无改动。
+fn bind_view_doc(ui: &mut AppUiState, view: &str, doc: Option<&DocId>) {
+    for scene in &mut ui.scenes {
+        bind_doc_in_node(&mut scene.home_layout.tree, view, doc);
+        for layout in &mut scene.layouts {
+            bind_doc_in_node(&mut layout.tree, view, doc);
+        }
+    }
+    for window in &mut ui.detached_windows {
+        for tab in &mut window.tabs {
+            if tab.view == view {
+                tab.doc = doc.cloned();
+            }
+        }
+    }
+}
+
+fn bind_doc_in_node(node: &mut LayoutNode, view: &str, doc: Option<&DocId>) {
+    match node {
+        LayoutNode::Panel { tabs, .. } => {
+            for tab in tabs {
+                if tab.view == view {
+                    tab.doc = doc.cloned();
+                }
+            }
+        }
+        LayoutNode::Split { children, .. } => {
+            for child in children {
+                bind_doc_in_node(child, view, doc);
+            }
+        }
+    }
+}
+
+/// 摘掉全部场景布局与撕裂窗口中绑定到该文档的标签。
+fn remove_doc_tabs(ui: &mut AppUiState, doc: &DocId) {
+    for scene in &mut ui.scenes {
+        remove_doc_in_node(&mut scene.home_layout.tree, doc);
+        for layout in &mut scene.layouts {
+            remove_doc_in_node(&mut layout.tree, doc);
+        }
+    }
+    for window in &mut ui.detached_windows {
+        remove_doc_tab_group(&mut window.tabs, &mut window.active_tab_id, doc);
+    }
+    ui.detached_windows.retain(|window| !window.tabs.is_empty());
+}
+
+fn remove_doc_in_node(node: &mut LayoutNode, doc: &DocId) {
+    match node {
+        LayoutNode::Panel { tabs, active_tab_id, .. } => {
+            remove_doc_tab_group(tabs, active_tab_id, doc);
+        }
+        LayoutNode::Split { children, .. } => {
+            for child in children {
+                remove_doc_in_node(child, doc);
+            }
+        }
+    }
+}
+
+/// 摘标签后激活标签失效时回落到首个标签（空组 = 无激活）。
+fn remove_doc_tab_group(tabs: &mut Vec<TabItem>, active_tab_id: &mut Option<String>, doc: &DocId) {
+    if !tabs.iter().any(|tab| tab.doc.as_ref() == Some(doc)) {
+        return;
+    }
+    tabs.retain(|tab| tab.doc.as_ref() != Some(doc));
+    if active_tab_id.as_deref().is_some_and(|id| !tabs.iter().any(|tab| tab.id == id)) {
+        *active_tab_id = tabs.first().map(|tab| tab.id.clone());
+    }
+}
+
 /// 应用一个布局操作并返回结果。模型变更后由调用方负责广播 + 调度落盘。
 pub fn apply_layout_op(ui: &mut AppUiState, op: &LayoutOp) -> LayoutOpResult {
     let mut result = LayoutOpResult::default();
@@ -1292,6 +1458,8 @@ pub fn apply_layout_op(ui: &mut AppUiState, op: &LayoutOp) -> LayoutOpResult {
                 }
             }
         }
+        LayoutOp::BindViewDoc { view, doc } => bind_view_doc(ui, view, doc.as_ref()),
+        LayoutOp::RemoveDocTabs { doc } => remove_doc_tabs(ui, doc),
         LayoutOp::MoveTabWithin { panel_id, tab_id, to_index } => {
             let tree = active_layout(ui).tree;
             let tree = map_panel(&tree, panel_id, &|p| apply_tab_group_panel(p, group_move_tab(&group_of(p), tab_id, *to_index)));
@@ -1706,7 +1874,7 @@ mod tests {
     fn panel(id: &str, views: &[&str]) -> LayoutNode {
         let tabs: Vec<TabItem> = views
             .iter()
-            .map(|v| TabItem { id: format!("t-{v}"), view: v.to_string(), locked: false })
+            .map(|v| TabItem { id: format!("t-{v}"), view: v.to_string(), doc: None, locked: false })
             .collect();
         let active = tabs.first().map(|t| t.id.clone());
         LayoutNode::Panel { id: id.to_string(), tabs, active_tab_id: active }
@@ -1751,7 +1919,7 @@ mod tests {
         ui.scenes[0].home_layout.tree = panel("h1", &["calendar"]);
         ui.detached_windows.push(DetachedWindow {
             id: "w1".into(),
-            tabs: vec![TabItem { id: "t1".into(), view: "calendar".into(), locked: true }],
+            tabs: vec![TabItem { id: "t1".into(), view: "calendar".into(), doc: None, locked: true }],
             active_tab_id: Some("t1".into()),
             bounds: WindowBounds { x: 0.0, y: 0.0, width: 100.0, height: 100.0, scale: 1.0 },
             hidden: false,
@@ -1930,24 +2098,66 @@ mod tests {
     }
 
     #[test]
+    fn open_docs_record_dedupe_and_type_lookup() {
+        let mut ui = AppUiState::default();
+        ui.remember_open_doc("a.md", "note");
+        ui.remember_open_doc("t.atb", "table");
+        ui.remember_open_doc("a.md", "note");
+        assert_eq!(ui.open_docs.len(), 2, "同一路径去重");
+        assert_eq!(ui.open_docs[1].path, "a.md", "再次打开置于尾部");
+        assert_eq!(ui.open_doc_path("note"), Some("a.md"));
+        assert_eq!(ui.open_doc_path("table"), Some("t.atb"));
+        assert_eq!(ui.open_doc_path("canvas"), None);
+        ui.forget_open_doc("a.md");
+        assert_eq!(ui.open_doc_path("note"), None);
+    }
+
+    #[test]
+    fn open_docs_rename_and_remove_prefix() {
+        let mut ui = AppUiState::default();
+        ui.remember_open_doc("画布/a.atlx", "canvas");
+        ui.remember_open_doc("画布/子/b.atlx", "canvas");
+        ui.remember_open_doc("笔记.md", "note");
+        let renamed = ui.rename_open_docs("画布", "设计");
+        assert_eq!(renamed.len(), 2, "目录前缀整体改名");
+        assert_eq!(ui.open_doc_path("canvas"), Some("设计/子/b.atlx"));
+        let removed = ui.remove_open_docs("设计", true);
+        assert_eq!(removed.len(), 2);
+        assert_eq!(ui.open_docs.len(), 1);
+        assert_eq!(ui.open_doc_path("note"), Some("笔记.md"));
+    }
+
+    #[test]
+    fn legacy_last_files_migrate_once_and_never_written() {
+        // 旧文件只有四个单槽位：读入后由调用方按注册表换成文档类型 id，迁入打开集合。
+        let mut ui: AppUiState = serde_json::from_str(
+            r#"{"schema":"atelyx-ui-state/v2","lastNoteFile":"n.md","lastTableFile":"t.atb",
+                "lastCanvasFile":"c.atlx","lastDocFile":"d.md"}"#,
+        )
+        .unwrap();
+        assert!(ui.open_docs.is_empty(), "旧字段不直接进打开集合");
+        assert_eq!(ui.take_legacy_open_paths(), ["n.md", "t.atb", "c.atlx", "d.md"]);
+        assert!(ui.take_legacy_open_paths().is_empty(), "迁移只取一次");
+        ui.remember_open_doc("n.md", "note");
+        let json = serde_json::to_string(&ui).unwrap();
+        assert!(!json.contains("lastNoteFile"), "旧字段不再写出：{json}");
+        assert!(json.contains(r#""openDocs":[{"path":"n.md","docType":"note"}]"#), "{json}");
+    }
+
+    #[test]
     fn ui_state_patch_null_clears_and_missing_ignores() {
         // JSON null 必须解为「显式清除」（外层 Some + 内层 None），不能与字段缺失混淆：
-        // 否则关闭文件发的清除补丁被 ui_state_patch 静默丢弃，重启仍会恢复已关闭的文件。
-        let p: UiStatePatch = serde_json::from_str(r#"{"lastCanvasFile": null}"#).unwrap();
-        assert_eq!(p.last_canvas_file, Some(None), "null 应解为显式清除");
-        let p: UiStatePatch = serde_json::from_str(r#"{"lastNoteFile": null}"#).unwrap();
-        assert_eq!(p.last_note_file, Some(None));
-        let p: UiStatePatch = serde_json::from_str(r#"{"lastTableFile": null, "focusedPanelId": null}"#).unwrap();
-        assert_eq!(p.last_table_file, Some(None));
-        assert_eq!(p.focused_panel_id, Some(None));
+        // 否则清除补丁被 ui_state_patch 静默丢弃，重启仍会恢复旧值。
+        let p: UiStatePatch = serde_json::from_str(r#"{"focusedPanelId": null}"#).unwrap();
+        assert_eq!(p.focused_panel_id, Some(None), "null 应解为显式清除");
         // 字符串 = 设置
-        let p: UiStatePatch = serde_json::from_str(r#"{"lastCanvasFile": "画布/a.atlx"}"#).unwrap();
-        assert_eq!(p.last_canvas_file, Some(Some("画布/a.atlx".into())));
+        let p: UiStatePatch = serde_json::from_str(r#"{"focusedPanelId": "p1"}"#).unwrap();
+        assert_eq!(p.focused_panel_id, Some(Some("p1".into())));
         // 字段缺失 = 不修改
         let p: UiStatePatch = serde_json::from_str(r#"{}"#).unwrap();
-        assert_eq!(p.last_canvas_file, None, "字段缺失应解为不修改");
+        assert_eq!(p.focused_panel_id, None, "字段缺失应解为不修改");
         // 非法类型（数字等）整批补丁反序列化报错：null 特判不误伤其他类型
-        assert!(serde_json::from_str::<UiStatePatch>(r#"{"lastCanvasFile": 42}"#).is_err());
+        assert!(serde_json::from_str::<UiStatePatch>(r#"{"focusedPanelId": 42}"#).is_err());
     }
 
 
@@ -2220,5 +2430,159 @@ mod tests {
         let _ = apply_layout_op(&mut ui, &LayoutOp::RenameLayout { id: HOME_LAYOUT_ID.into(), name: "首页".into() });
         assert_eq!(ui.scenes[0].home_layout.name, "主页");
         assert_eq!(ui.scenes[0].layouts.last().unwrap().name, before);
+    }
+
+    #[test]
+    fn bind_view_doc_marks_every_projection() {
+        let mut ui = ui_with(panel("p1", &["note"]));
+        ui.scenes[0].layouts.push(WorkspaceLayout { id: "l2".into(), name: "L2".into(), tree: panel("p2", &["note"]) });
+        let LayoutNode::Panel { tabs, .. } = panel("p3", &["note"]) else { unreachable!() };
+        ui.detached_windows.push(detached_window("w1", tabs));
+        assert_eq!(tabs_with_doc(&ui, "note").len(), 3);
+        let _ = apply_layout_op(&mut ui, &LayoutOp::BindViewDoc { view: "note".into(), doc: Some(DocId::new("a.md")) });
+        assert_eq!(tabs_with_doc(&ui, "note"), vec![Some("a.md"), Some("a.md"), Some("a.md")]);
+        // 解绑只清该视图
+        let _ = apply_layout_op(&mut ui, &LayoutOp::BindViewDoc { view: "note".into(), doc: None });
+        assert_eq!(tabs_with_doc(&ui, "note"), vec![None, None, None]);
+    }
+
+    #[test]
+    fn tear_off_and_dock_keep_doc_binding() {
+        let mut ui = ui_with(panel("p1", &["note"]));
+        set_tab_doc(&mut ui.scenes[0].layouts[0].tree, "t-note", DocId::new("a.md"));
+        let _ = apply_layout_op(
+            &mut ui,
+            &LayoutOp::TearOff {
+                panel_id: "p1".into(),
+                tab_id: "t-note".into(),
+                bounds: WindowBounds { x: 0.0, y: 0.0, width: 300.0, height: 200.0, scale: 1.0 },
+            },
+        );
+        let window = ui.detached_windows.last().unwrap();
+        assert_eq!(window.tabs[0].doc, Some(DocId::new("a.md")));
+        let tab_id = window.tabs[0].id.clone();
+        let _ = apply_layout_op(
+            &mut ui,
+            &LayoutOp::DockIntoPanel { panel_id: "p1".into(), tab_id: tab_id.clone(), index: None },
+        );
+        assert_eq!(dock_doc(&ui, "p1", &tab_id), Some(DocId::new("a.md")));
+    }
+
+    #[test]
+    fn closing_tab_leaves_doc_session_open() {
+        use crate::doc_session::{DocSessions, DocSpec};
+        use crate::doc_type::DocTypeId;
+
+        let mut ui = ui_with(panel("p1", &["note"]));
+        set_tab_doc(&mut ui.scenes[0].layouts[0].tree, "t-note", DocId::new("a.md"));
+        let mut sessions = DocSessions::default();
+        let id = sessions.open_or_reuse(DocSpec {
+            path: "a.md".into(),
+            doc_type: DocTypeId::new("note"),
+            plugin_id: "atelyx.notes".into(),
+            surface: "note".into(),
+            title: "a.md".into(),
+            editable: true,
+        });
+        sessions.set_hot(&id);
+        // 摘标签只是布局动作：不 flush、不通知插件、不删会话
+        let _ = apply_layout_op(&mut ui, &LayoutOp::CloseTab { panel_id: "p1".into(), tab_id: "t-note".into() });
+        assert!(tabs_with_doc(&ui, "note").is_empty());
+        assert!(sessions.session(&id).is_some());
+    }
+
+    #[test]
+    fn remove_doc_tabs_clears_every_projection() {
+        let mut ui = ui_with(panel("p1", &["note"]));
+        ui.scenes[0]
+            .layouts
+            .push(WorkspaceLayout { id: "l2".into(), name: "L2".into(), tree: panel("p2", &["note"]) });
+        let LayoutNode::Panel { tabs, .. } = panel("p3", &["note"]) else { unreachable!() };
+        let mut window = detached_window("w1", tabs);
+        window.tabs[0].doc = Some(DocId::new("a.md"));
+        ui.detached_windows.push(window);
+        set_tab_doc(&mut ui.scenes[0].layouts[0].tree, "t-note", DocId::new("a.md"));
+        set_tab_doc(&mut ui.scenes[0].layouts[1].tree, "t-note", DocId::new("a.md"));
+        let _ = apply_layout_op(&mut ui, &LayoutOp::RemoveDocTabs { doc: DocId::new("a.md") });
+        assert!(tabs_with_doc(&ui, "note").is_empty());
+        // 撕空窗口条目一并移除
+        assert!(ui.detached_windows.is_empty());
+    }
+
+    #[test]
+    fn remove_doc_tabs_keeps_other_docs_and_tabs() {
+        let mut ui = ui_with(panel("p1", &["note", "table"]));
+        set_tab_doc(&mut ui.scenes[0].layouts[0].tree, "t-note", DocId::new("a.md"));
+        set_tab_doc(&mut ui.scenes[0].layouts[0].tree, "t-table", DocId::new("b.atb"));
+        let _ = apply_layout_op(&mut ui, &LayoutOp::RemoveDocTabs { doc: DocId::new("a.md") });
+        assert!(tabs_with_doc(&ui, "note").is_empty());
+        assert_eq!(tabs_with_doc(&ui, "table"), vec![Some("b.atb")]);
+    }
+}
+
+#[cfg(test)]
+fn tabs_with_doc<'a>(ui: &'a AppUiState, view: &str) -> Vec<Option<&'a str>> {
+    let mut out = Vec::new();
+    let mut push = |tabs: &'a [TabItem]| {
+        out.extend(tabs.iter().filter(|t| t.view == view).map(|t| t.doc.as_ref().map(|d| d.as_str())));
+    };
+    push(match &ui.scenes[0].layouts[0].tree {
+        LayoutNode::Panel { tabs, .. } => tabs,
+        _ => &[],
+    });
+    for layout in &ui.scenes[0].layouts[1..] {
+        if let LayoutNode::Panel { tabs, .. } = &layout.tree {
+            push(tabs);
+        }
+    }
+    for window in &ui.detached_windows {
+        push(&window.tabs);
+    }
+    out
+}
+
+#[cfg(test)]
+fn set_tab_doc(node: &mut LayoutNode, tab_id: &str, doc: DocId) {
+    match node {
+        LayoutNode::Panel { tabs, .. } => {
+            for tab in tabs {
+                if tab.id == tab_id {
+                    tab.doc = Some(doc.clone());
+                }
+            }
+        }
+        LayoutNode::Split { children, .. } => {
+            for child in children {
+                set_tab_doc(child, tab_id, doc.clone());
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+fn dock_doc(ui: &AppUiState, panel_id: &str, tab_id: &str) -> Option<DocId> {
+    let mut tabs = Vec::new();
+    let mut stack = vec![&ui.scenes[0].layouts[0].tree];
+    while let Some(node) = stack.pop() {
+        match node {
+            LayoutNode::Panel { id, tabs: t, .. } if id == panel_id => tabs.extend(t.iter().cloned()),
+            LayoutNode::Panel { .. } => {}
+            LayoutNode::Split { children, .. } => stack.extend(children.iter()),
+        }
+    }
+    tabs.into_iter().find(|t| t.id == tab_id).and_then(|t| t.doc)
+}
+
+#[cfg(test)]
+fn detached_window(id: &str, tabs: Vec<TabItem>) -> DetachedWindow {
+    DetachedWindow {
+        id: id.into(),
+        active_tab_id: tabs.first().map(|t| t.id.clone()),
+        tabs,
+        bounds: WindowBounds { x: 0.0, y: 0.0, width: 300.0, height: 200.0, scale: 1.0 },
+        hidden: false,
+        restore_on_launch: true,
+        options: Default::default(),
+        pinned: false,
     }
 }

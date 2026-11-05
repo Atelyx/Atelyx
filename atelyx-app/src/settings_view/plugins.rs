@@ -1304,9 +1304,9 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
             if let Some(open) = open_file_conflict(app, &rel) {
                 // 持有该文件的插件可以写回自己的文件（表格插件保存自己打开的 .atb），
                 // 其余插件仍按「正在编辑中」拒写，避免互踩保存链
-                let owner = (app.ui.last_table_file.as_deref() == Some(rel.as_str())
+                let owner = (app.table_file().as_deref() == Some(rel.as_str())
                     && plugin_id == TABLES_PLUGIN_ID)
-                    || (app.ui.last_canvas_file.as_deref() == Some(rel.as_str())
+                    || (app.canvas_file().as_deref() == Some(rel.as_str())
                         && plugin_id == CANVAS_PLUGIN_ID);
                 if !owner {
                     return resolve_vault(
@@ -1685,7 +1685,7 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
             }
             // 引用同步代写了打开中的笔记：磁盘正文已变，重读对齐——结构变更经 gate
             // 已先 flush，此刻无未落盘输入可丢
-            let open = app.ui.last_note_file.clone();
+            let open = app.note_file();
             let reload = open.filter(|path| rewritten.iter().any(|rel| rel == path));
             let refresh = refresh_after_vault_change(app, &change);
             app.plugins.resolve_shell_call(request_id, result);
@@ -1992,8 +1992,8 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
                     let renamed = new_file != path;
                     // 补丁带标题时服务端已按标题改名：先把宿主打开路径同步到新路径，
                     // 再回执给插件——插件据回执改 session.file 时宿主已认新路径
-                    if renamed && app.ui.last_table_file.as_deref() == Some(path.as_str()) {
-                        app.ui.last_table_file = Some(new_file.clone());
+                    if renamed && app.table_file().as_deref() == Some(path.as_str()) {
+                        app.ui.rename_open_docs(&path, &new_file);
                         app.plugins.on_table_changed(Some(&new_file));
                         app.plugins.on_open_files_changed();
                         app.schedule_persist();
@@ -2545,13 +2545,13 @@ fn refresh_after_vault_change(app: &mut App, change: &VaultChange) -> Task<Messa
 fn vault_change_conflict(app: &App, rel: &str, allow_path: Option<&str>) -> Option<String> {
     let target = rel.replace('\\', "/");
     let prefix = format!("{target}/");
-    let open = [
-        app.ui.last_note_file.as_deref(),
-        app.ui.last_table_file.as_deref(),
-        app.ui.last_canvas_file.as_deref(),
-        app.doc_open.as_ref().map(|d| d.path.as_str()),
-    ];
-    if let Some(path) = open.into_iter().flatten().find(|path| {
+    let open = app
+        .ui
+        .open_docs
+        .iter()
+        .map(|doc| doc.path.as_str())
+        .chain(app.doc_open.as_ref().map(|doc| doc.path.as_str()));
+    if let Some(path) = open.into_iter().find(|path| {
         let path = path.replace('\\', "/");
         path == target || path.starts_with(&prefix)
     }) {
@@ -2563,9 +2563,9 @@ fn vault_change_conflict(app: &App, rel: &str, allow_path: Option<&str>) -> Opti
         }
     }
     // 画布内容由插件持有，按磁盘上的画布判断引用：未落盘的新引用不在此列
-    let canvas_file = app.ui.last_canvas_file.as_deref()?;
+    let canvas_file = app.canvas_file()?;
     let (root, _, _) = app.vault.session_snapshot().ok()?;
-    let (_, canvas) = atelyx_core::vault::read_canvas_file_cached(&app.vault, &root, canvas_file)
+    let (_, canvas) = atelyx_core::vault::read_canvas_file_cached(&app.vault, &root, &canvas_file)
         .ok()?;
     for node in &canvas.nodes {
         let field = match node.node_type.as_str() {
@@ -2828,14 +2828,13 @@ const CANVAS_PLUGIN_ID: &str = crate::plugin_actions::CANVAS_PLUGIN;
 
 fn open_file_conflict(app: &App, rel: &str) -> Option<String> {
     let target = rel.replace('\\', "/");
-    let open = [
-        app.ui.last_note_file.as_deref(),
-        app.ui.last_table_file.as_deref(),
-        app.ui.last_canvas_file.as_deref(),
-        app.doc_open.as_ref().map(|d| d.path.as_str()),
-    ];
+    let open = app
+        .ui
+        .open_docs
+        .iter()
+        .map(|doc| doc.path.as_str())
+        .chain(app.doc_open.as_ref().map(|doc| doc.path.as_str()));
     open.into_iter()
-        .flatten()
         .find(|path| path.replace('\\', "/") == target)
         .map(str::to_string)
 }
