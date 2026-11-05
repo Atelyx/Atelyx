@@ -90,8 +90,8 @@ impl NotesPlugin {
         }
     }
 
-    /// 探测正文引用的仓库图片能否解码：失败的在只读面回落替代文字。
-    /// 结果按路径缓存，文件变更事件到达时由调用方失效重探。
+    /// 探测正文引用的仓库图片能否解码，并记下原图像素尺寸：失败的在只读面回落替代文字，
+    /// 尺寸供未声明宽高时的版面换算。结果按路径缓存，文件变更事件到达时由调用方失效重探。
     async fn refresh_images(&self, ctx: &Context) {
         let pending: Vec<String> = {
             let model = self.model.lock().unwrap();
@@ -109,8 +109,8 @@ impl NotesPlugin {
             out
         };
         for src in pending {
-            let ok = ctx.vault_image_info(&src).await.is_ok();
-            self.model.lock().unwrap().image_probe.insert(src, ok);
+            let size = ctx.vault_image_info(&src).await.ok().map(|info| (info.width, info.height));
+            self.model.lock().unwrap().image_probe.insert(src, size);
         }
     }
 
@@ -324,7 +324,7 @@ impl NotesPlugin {
         if let Some(index) = block_index(hit) {
             let active = {
                 let mut model = self.model.lock().unwrap();
-                // 列表块只按项揭示：块 id 不整块回显源码
+                // 有揭示单元的块（列表 / 引用）只按单元揭示：块 id 不整块回显源码
                 if !model.blocks.get(index).is_some_and(|block| block.items.is_empty()) {
                     return;
                 }
@@ -348,7 +348,7 @@ impl NotesPlugin {
         }
     }
 
-    /// 只读档双击正文：进入预览编辑并揭示落点（块或列表项；列表按项揭示）。
+    /// 只读档双击正文：进入预览编辑并揭示落点（块或揭示单元）。
     async fn on_pointer_double(&self, ctx: &Context, hit: Option<&str>) {
         let Some(hit) = hit else { return };
         // 任务框的命中 id 是 `<项 id>::task:<序>`：揭示落在整项上
@@ -372,7 +372,7 @@ impl NotesPlugin {
             if model.mode != Mode::Read || !model.can_write {
                 return;
             }
-            // 列表块按下标揭示没有整块输入面，双击落点只能来自逐项命中
+            // 有揭示单元的块没有整块输入面，双击落点只能来自单元命中
             if !model.blocks.get(index).is_some_and(|block| block.items.is_empty()) {
                 return;
             }
@@ -384,7 +384,7 @@ impl NotesPlugin {
     }
 
     /// 聚焦一个块输入面：`caret` 缺省落块内容尾（源码区间还含块后空行，不能取 `value.len()`）。
-    /// 列表块没有整块编辑面：转到首项（`usize::MAX` = 末项）。
+    /// 有揭示单元的块没有整块编辑面：转到首单元（`usize::MAX` = 末项）。
     async fn focus_block(&self, ctx: &Context, index: usize, caret: Option<usize>) {
         let item = {
             let model = self.model.lock().unwrap();
@@ -474,7 +474,7 @@ impl NotesPlugin {
                 (ui::item_id(block, item), value, caret)
             } else if let Some(index) = model.block_at(offset) {
                 if !model.blocks[index].items.is_empty() {
-                    // 列表块内但落在项间空行：落到最近一项（前项末尾 / 首项开头）
+                    // 有揭示单元的块内但落在单元间空行：落到最近的单元（前项末尾 / 首项开头）
                     let item = model.blocks[index]
                         .items
                         .iter()
@@ -578,16 +578,14 @@ impl NotesPlugin {
                 None => return false,
             }
         };
-        if caret != anchor {
-            return false;
-        }
+        let (from, to) = if anchor <= caret { (anchor, caret) } else { (caret, anchor) };
         let Some(source) = self.model.lock().unwrap().active_source().map(str::to_string) else {
             return false;
         };
-        // 块输入面首行 / 末行的 ↑↓ 跨出输入面：先进相邻空行，再进相邻块
+        // 块输入面首行 / 末行的 ↑↓ 跨出输入面：先进相邻空行，再进相邻块（有选区时不跨）
         if let Key::Named { name: NamedKey::ArrowUp | NamedKey::ArrowDown } = key {
             let up = matches!(key, Key::Named { name: NamedKey::ArrowUp });
-            let cross = if up { caret == 0 } else { caret == source.len() };
+            let cross = from == to && if up { caret == 0 } else { caret == source.len() };
             if cross {
                 let target = {
                     let model = self.model.lock().unwrap();
@@ -611,29 +609,38 @@ impl NotesPlugin {
             }
         }
         let change = match key {
-            Key::Named { name: NamedKey::Enter } => edit::list_enter_edit(&source, caret),
-            Key::Named { name: NamedKey::Backspace } => edit::list_backspace_edit(&source, caret),
+            Key::Named { name: NamedKey::Enter } if from == to => {
+                edit::list_enter_edit(&source, caret).map(|(text, at)| (text, at, at))
+            }
+            Key::Named { name: NamedKey::Backspace } if from == to => {
+                edit::list_backspace_edit(&source, caret).map(|(text, at)| (text, at, at))
+            }
             Key::Named { name: NamedKey::Tab } if modifiers.shift => {
-                edit::outdent_edit(&source, caret, caret).map(|edit| (edit.text, edit.caret))
+                match edit::outdent_edit(&source, from, to) {
+                    Some(edit) => Some(selection_of_edit(edit, anchor <= caret)),
+                    // 无可删缩进也吞掉按键：交给控件层会把焦点挪走
+                    None => return true,
+                }
             }
             Key::Named { name: NamedKey::Tab } => {
-                let edit = edit::indent_edit(&source, caret, caret);
-                Some((edit.text, edit.caret))
+                Some(selection_of_edit(edit::indent_edit(&source, from, to), anchor <= caret))
             }
             _ => None,
         };
-        let Some((source, caret)) = change else { return false };
-        let text = {
+        let Some((source, sel_anchor, sel_caret)) = change else { return false };
+        let (text, base) = {
             let mut model = self.model.lock().unwrap();
+            let Some((base, _)) = model.block_source(index) else { return false };
             let Some(text) = model.replace_block(index, &source) else { return false };
             model.edit_text(text.clone());
-            text
+            (text, base)
         };
         {
             let mut frame_ui = self.ui.lock().await;
-            frame_ui.set_input(&id, &source, caret);
+            // 置光标会折叠选区：视觉落点取光标端，选区两端仍按实际更新上报给协作
+            frame_ui.set_input(&id, &source, sel_caret);
         }
-        self.commit_edit(ctx, text, None).await;
+        self.commit_edit(ctx, text, Some((base + sel_anchor, base + sel_caret))).await;
         self.render(ctx).await;
         true
     }
@@ -747,9 +754,9 @@ impl NotesPlugin {
             }
         };
         let (from, to) = if anchor <= caret { (anchor, caret) } else { (caret, anchor) };
-        let (text, at) = {
+        let (text, sel_anchor, sel_caret) = {
             let model = self.model.lock().unwrap();
-            if model.mode != Mode::Edit || !model.can_write {
+            if model.mode != Mode::Source || !model.can_write {
                 return false;
             }
             let edit = if shift {
@@ -761,16 +768,17 @@ impl NotesPlugin {
             } else {
                 edit::indent_edit(&model.text, from, to)
             };
-            (edit.text, edit.caret)
+            selection_of_edit(edit, anchor <= caret)
         };
         {
             let mut model = self.model.lock().unwrap();
             model.edit_text(text.clone());
         }
-        self.commit_edit(ctx, text.clone(), Some((at, at))).await;
+        self.commit_edit(ctx, text.clone(), Some((sel_anchor, sel_caret))).await;
         {
             let mut frame_ui = self.ui.lock().await;
-            frame_ui.set_input(SOURCE, &text, at);
+            // 置光标会折叠选区：视觉落点取光标端，选区两端仍按实际更新上报给协作
+            frame_ui.set_input(SOURCE, &text, sel_caret);
         }
         self.render(ctx).await;
         true
@@ -801,19 +809,17 @@ impl NotesPlugin {
                 None => return false,
             }
         };
-        if caret != anchor {
-            return false;
-        }
-        let Some((from, to)) = self.model.lock().unwrap().item_source(block, item) else {
+        let (from, to) = if anchor <= caret { (anchor, caret) } else { (caret, anchor) };
+        let Some((unit_from, unit_to)) = self.model.lock().unwrap().item_source(block, item) else {
             return false;
         };
-        let Some(source) = self.model.lock().unwrap().text.get(from..to).map(str::to_string) else {
+        let Some(source) = self.model.lock().unwrap().text.get(unit_from..unit_to).map(str::to_string) else {
             return false;
         };
-        // 项首 / 项尾的 ↑↓ 跨出：先在列表内换项，再进相邻块
+        // 项首 / 项尾的 ↑↓ 跨出：先在列表内换项，再进相邻块（有选区时不跨）
         if let Key::Named { name: NamedKey::ArrowUp | NamedKey::ArrowDown } = key {
             let up = matches!(key, Key::Named { name: NamedKey::ArrowUp });
-            let cross = if up { caret == 0 } else { caret == source.len() };
+            let cross = from == to && if up { caret == 0 } else { caret == source.len() };
             if cross {
                 let target = {
                     let model = self.model.lock().unwrap();
@@ -840,27 +846,34 @@ impl NotesPlugin {
             }
         }
         let change = match key {
-            Key::Named { name: NamedKey::Enter } => edit::list_enter_edit(&source, caret),
-            Key::Named { name: NamedKey::Backspace } => edit::list_backspace_edit(&source, caret),
+            Key::Named { name: NamedKey::Enter } if from == to => {
+                edit::list_enter_edit(&source, caret).map(|(text, at)| (text, at, at))
+            }
+            Key::Named { name: NamedKey::Backspace } if from == to => {
+                edit::list_backspace_edit(&source, caret).map(|(text, at)| (text, at, at))
+            }
             Key::Named { name: NamedKey::Tab } if shift => {
-                edit::outdent_edit(&source, caret, caret).map(|edit| (edit.text, edit.caret))
+                match edit::outdent_edit(&source, from, to) {
+                    Some(edit) => Some(selection_of_edit(edit, anchor <= caret)),
+                    // 无可删缩进也吞掉按键：交给控件层会把焦点挪走
+                    None => return true,
+                }
             }
             Key::Named { name: NamedKey::Tab } => {
-                let edit = edit::indent_edit(&source, caret, caret);
-                Some((edit.text, edit.caret))
+                Some(selection_of_edit(edit::indent_edit(&source, from, to), anchor <= caret))
             }
             _ => None,
         };
-        let Some((source, caret)) = change else { return false };
+        let Some((source, sel_anchor, sel_caret)) = change else { return false };
         let text = {
             let mut model = self.model.lock().unwrap();
             let Some(text) = model.replace_item(block, item, &source) else { return false };
             model.edit_text(text.clone());
             text
         };
-        let at = from + caret;
-        self.commit_edit(ctx, text, Some((at, at))).await;
-        self.focus_at(ctx, at).await;
+        // 置光标会折叠选区：落点取光标端，选区两端仍按实际更新上报给协作与撤销快照
+        self.commit_edit(ctx, text, Some((unit_from + sel_anchor, unit_from + sel_caret))).await;
+        self.focus_at(ctx, unit_from + sel_caret).await;
         self.render(ctx).await;
         true
     }
@@ -1009,31 +1022,50 @@ impl NotesPlugin {
     }
 
     async fn on_double_click(&self, ctx: &Context, id: &str) {
-        // 任务框命中 id 附带 `::task:<序>`，揭示按所属块算
+        // 任务框命中 id 附带 `::task:<序>`，揭示按所属单元算
         let id = id.split_once("::task:").map_or(id, |(id, _)| id);
-        let Some(index) = block_index(id) else { return };
         let mode = self.model.lock().unwrap().mode;
         if mode == Mode::Read {
             self.on_pointer_double(ctx, Some(id)).await;
-        } else if mode == Mode::Edit {
+            return;
+        }
+        if mode != Mode::Edit {
+            return;
+        }
+        if let Some((block, item)) = item_index(id) {
             {
                 let model = self.model.lock().unwrap();
-                // 列表块只按项揭示，块 id 双击不整块回显源码
-                if !model.blocks.get(index).is_some_and(|block| block.items.is_empty()) {
-                    return;
-                }
-                if model.active_block == Some(index) {
-                    // 已在编辑本块：双击只做选词（控件层已处理），不重置光标
+                // 已在编辑本单元：双击只做选词（控件层已处理），不重置光标
+                if model.active_item == Some((block, item)) {
                     return;
                 }
             }
             {
                 let mut model = self.model.lock().unwrap();
-                model.active_block = Some(index);
-                model.active_item = None;
+                model.active_block = None;
+                model.active_item = Some((block, item));
             }
-            self.focus_block(ctx, index, None).await;
+            self.focus_item(ctx, block, item, None).await;
+            return;
         }
+        let Some(index) = block_index(id) else { return };
+        {
+            let model = self.model.lock().unwrap();
+            // 有揭示单元的块（列表 / 引用）只按单元揭示，块 id 双击不整块回显源码
+            if !model.blocks.get(index).is_some_and(|block| block.items.is_empty()) {
+                return;
+            }
+            if model.active_block == Some(index) {
+                // 已在编辑本块：双击只做选词（控件层已处理），不重置光标
+                return;
+            }
+        }
+        {
+            let mut model = self.model.lock().unwrap();
+            model.active_block = Some(index);
+            model.active_item = None;
+        }
+        self.focus_block(ctx, index, None).await;
     }
 
     /// 任务项点击：翻转勾选态并把光标落在勾选框内（协作在场不跳到文末）。
@@ -1376,7 +1408,7 @@ fn item_index(id: &str) -> Option<(usize, usize)> {
 enum Focus {
     /// 块序号 + 光标（`usize::MAX` = 块尾）。
     Block(usize, usize),
-    /// 列表块序 + 项序 + 光标（`usize::MAX` = 项尾）。
+    /// 揭示单元：块序 + 单元序 + 光标（`usize::MAX` = 单元尾）。
     Item(usize, usize, usize),
     /// 空行区序 + 行序 + 光标。
     Gap(usize, usize, usize),
@@ -1417,6 +1449,15 @@ fn value_of(model: &NoteModel, id: &str) -> Option<String> {
     let index = block_index(id)?;
     let (from, to) = model.block_source(index)?;
     Some(model.text[from..to].to_string())
+}
+
+/// 缩进 / 反缩进后的文本与选区两端，按原来的选择方向还原锚点与光标端。
+fn selection_of_edit(edit: edit::LineEdit, forward: bool) -> (String, usize, usize) {
+    if forward {
+        (edit.text, edit.anchor, edit.caret)
+    } else {
+        (edit.text, edit.caret, edit.anchor)
+    }
 }
 
 /// 输入面内相对光标 → 全文绝对选区。
@@ -1715,6 +1756,16 @@ mod tests {
             text: None,
         };
         assert_eq!(undo_key(&release), None, "抬起不触发");
+    }
+
+    #[test]
+    fn tab_indent_selection_keeps_the_drag_direction() {
+        let (text, anchor, caret) = selection_of_edit(edit::indent_edit("- a\n- b\n", 0, 8), true);
+        assert_eq!(text, "  - a\n  - b\n");
+        assert_eq!((anchor, caret), (2, 12));
+        // 反向拖选：缩进后仍保持 anchor 在右、caret 在左
+        let (_, anchor, caret) = selection_of_edit(edit::indent_edit("- a\n- b\n", 0, 8), false);
+        assert_eq!((anchor, caret), (12, 2));
     }
 
     #[test]

@@ -4,9 +4,12 @@
 /// 一级缩进单位（列表靠行首缩进判定嵌套）。
 pub const INDENT_UNIT: &str = "  ";
 
-/// 文本变换结果：新文本 + 变换后的光标（源偏移）。
+/// 文本变换结果：新文本 + 变换后的选区两端（源偏移）。
 pub struct LineEdit {
     pub text: String,
+    /// 选区起点（无序的锚点端）。
+    pub anchor: usize,
+    /// 选区终点（光标端）。
     pub caret: usize,
 }
 
@@ -103,6 +106,11 @@ fn is_list_line(line: &str) -> bool {
     parse_list_marker(line).is_some()
 }
 
+/// 行首列表标记的结束偏移（含行首缩进与标记后的空白 / 任务框）；非列表行返回 None。
+pub fn list_marker_end(line: &str) -> Option<usize> {
+    parse_list_marker(line).map(|marker| marker.end)
+}
+
 /// 任务项勾选态翻转：把标记列里的 `[ ]` 与 `[x]` 互换，返回新文本与勾选框内偏移。
 /// `from` 为该项源码内任一偏移；非任务项返回 None。
 pub fn task_toggle_edit(text: &str, from: usize) -> Option<(String, usize)> {
@@ -188,14 +196,14 @@ pub fn list_backspace_edit(text: &str, from: usize) -> Option<(String, usize)> {
     Some((out, keep))
 }
 
-/// Tab 缩进：光标在列表行或存在选区时整行缩进，其余情况在光标处插入一级缩进。
+/// Tab 缩进：光标在列表行或有选区时按覆盖行整行缩进，其余情况在光标处插入一级缩进。
 pub fn indent_edit(text: &str, from: usize, to: usize) -> LineEdit {
     if from == to && !is_list_line(line_text_at(text, from)) {
         let mut out = String::with_capacity(text.len() + INDENT_UNIT.len());
         out.push_str(&text[..from]);
         out.push_str(INDENT_UNIT);
         out.push_str(&text[from..]);
-        return LineEdit { text: out, caret: from + INDENT_UNIT.len() };
+        return LineEdit { text: out, anchor: from + INDENT_UNIT.len(), caret: from + INDENT_UNIT.len() };
     }
     let starts = covered_line_starts(text, from, to);
     let shift = |offset: usize| {
@@ -209,7 +217,7 @@ pub fn indent_edit(text: &str, from: usize, to: usize) -> LineEdit {
         prev = start;
     }
     out.push_str(&text[prev..]);
-    LineEdit { text: out, caret: shift(from) }
+    LineEdit { text: out, anchor: shift(from), caret: shift(to) }
 }
 
 /// Shift+Tab 反缩进：选区覆盖的每一行去掉一级前导缩进；没有可删的行返回 None。
@@ -253,7 +261,7 @@ pub fn outdent_edit(text: &str, from: usize, to: usize) -> Option<LineEdit> {
         prev = start + count;
     }
     out.push_str(&text[prev..]);
-    Some(LineEdit { text: out, caret: map(from) })
+    Some(LineEdit { text: out, anchor: map(from), caret: map(to) })
 }
 
 #[cfg(test)]
@@ -292,9 +300,20 @@ mod tests {
     fn indent_and_outdent_keep_the_caret() {
         let edit = indent_edit("甲\n乙\n", 0, 8);
         assert_eq!(edit.text, "  甲\n  乙\n");
-        assert_eq!(edit.caret, 2);
+        assert_eq!((edit.anchor, edit.caret), (2, 12), "选区两端随插入的缩进一起后移");
         let back = outdent_edit(&edit.text, 2, 12).expect("可反缩进");
         assert_eq!(back.text, "甲\n乙\n");
-        assert_eq!(back.caret, 0);
+        assert_eq!((back.anchor, back.caret), (0, 8));
+    }
+
+    /// Tab 按选区覆盖的每一行整行缩进：列表项的续行也吃到一级缩进。
+    #[test]
+    fn tab_indents_every_line_covered_by_a_selection() {
+        let edit = indent_edit("- 甲\n  续行\n", 0, 15);
+        assert_eq!(edit.text, "  - 甲\n    续行\n");
+        assert_eq!((edit.anchor, edit.caret), (2, 19));
+        let back = outdent_edit(&edit.text, 2, 19).expect("可反缩进");
+        assert_eq!(back.text, "- 甲\n  续行\n");
+        assert_eq!((back.anchor, back.caret), (0, 15));
     }
 }

@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 
 use atelyx_format::frontmatter::{self, Yaml};
-use atelyx_format::markdown::{parse_markdown, InlineSpan, MarkdownBlock, ParseOptions};
+use atelyx_format::markdown::{parse_markdown, InlineSpan, MarkdownBlock, MarkdownListItem, ParseOptions};
 use atelyx_plugin_protocol::method::EditorPrefs;
 
 /// 面板贡献 id：也是文档实例的 surfaceId（`plugin.json` 的 `docTypeRegistrations` 同值）。
@@ -52,8 +52,18 @@ pub struct ImageBlock {
     pub src: String,
     /// 替代文字：载入失败时只读面回落成 `[图片：alt]`。
     pub alt: String,
-    /// 声明的像素高度（缺省由阅读面回落成替代文字占位）。
+    /// 声明的像素宽度（缺省取原图宽）。
+    pub width: Option<f32>,
+    /// 声明的像素高度（缺省取原图高）。
     pub height: Option<f32>,
+}
+
+/// 图片的显示尺寸（像素）：声明值优先，缺边按原图比例补齐。
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[allow(dead_code)]
+pub struct ImageSize {
+    pub width: f32,
+    pub height: f32,
 }
 
 /// 顶层块的源区间（相对正文）与图片信息。
@@ -62,7 +72,7 @@ pub struct BlockInfo {
     pub from: usize,
     pub to: usize,
     pub image: Option<ImageBlock>,
-    /// 列表块的项区间（非列表为空）：每项是独立揭示单元。
+    /// 块内的揭示单元（列表项逐层展开、引用内各子块）：每项独立替换，空表示整块揭示。
     pub items: Vec<ItemInfo>,
 }
 
@@ -73,12 +83,40 @@ pub struct UndoEntry {
     pub selection: Option<(usize, usize)>,
 }
 
-/// 列表项的源区间（相对正文）：标记起点到项内容尾，不含行首缩进与项后空行。
+/// 揭示单元的渲染形态。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnitKind {
+    /// 列表项：`depth` 为嵌套层级（0 = 顶层），`ordinal` 为同一兄弟列表内的序号（有序项绘制用）。
+    Item { depth: usize, ordinal: usize },
+    /// 容器（引用 / 列表项续段）里的子块：`depth` 为所属列表的嵌套层级（0 = 顶层）。
+    Block { depth: usize },
+}
+
+/// 揭示单元的源区间（相对正文）：行首（含缩进 / 容器前缀）到自身内容行尾，
+/// 不含行尾换行，也不含其嵌套子单元。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ItemInfo {
     pub from: usize,
     pub to: usize,
+    pub kind: UnitKind,
 }
+
+/// 远端光标在某揭示单元内的位置：行序 + 装饰位移 + 行前文本（绘制时量宽）。
+#[derive(Clone, Debug, PartialEq)]
+pub struct CursorSpot {
+    pub block: usize,
+    pub unit: Option<usize>,
+    pub line: usize,
+    /// 该行文字在单元左缘之后的位移（列表标记列 / 引用竖条留白），不含嵌套缩进。
+    pub base_x: f32,
+    /// 去掉列表标记与引用前缀后的行前文本。
+    pub line_prefix: String,
+}
+
+/// 列表项文字相对单元左缘的位移（与 Markdown 渲染的标记列同口径）。
+pub const LIST_TEXT_X: f32 = 20.0;
+/// 引用块文字相对单元左缘的位移（与 Markdown 渲染的引用留白同口径）。
+pub const QUOTE_TEXT_X: f32 = 12.0;
 
 pub use atelyx_plugin_props::{PropsHost, PropsState, Slot};
 
@@ -114,8 +152,8 @@ pub struct NoteModel {
     pub pending_rename: Option<String>,
     /// 最近一次按下位置（面本地像素）：类型菜单这类就地弹层按它定位。
     pub pointer: (f32, f32),
-    /// 正文图片的可用性（路径 → 能否解码）：失败的在只读面回落替代文字。
-    pub image_probe: HashMap<String, bool>,
+    /// 正文图片的探测结果（路径 → 原图像素尺寸；`None` = 不能解码）：失败的在只读面回落替代文字。
+    pub image_probe: HashMap<String, Option<(u32, u32)>>,
     pub blocks: Vec<BlockInfo>,
     /// 正文起点（frontmatter 之后）；块区间相对正文。
     pub body_start: usize,
@@ -290,15 +328,11 @@ impl NoteModel {
         Some(&self.text[from..to])
     }
 
-    /// 列表项的源区间（绝对偏移）：行首（含缩进）到项内容尾，不含项后空行。
+    /// 揭示单元的源区间（绝对偏移）：行首（含缩进 / 容器前缀）到单元自身内容行尾。
     /// 含缩进才能让 Tab / 续项按整行判定嵌套，缩进也就随项一起显示与回写。
     pub fn item_source(&self, block: usize, item: usize) -> Option<(usize, usize)> {
         let info = self.blocks.get(block)?.items.get(item)?;
-        let body = self.body();
-        let line_from = body[..info.from.min(body.len())]
-            .rfind('\n')
-            .map_or(0, |line| line + 1);
-        Some((self.body_start + line_from, self.body_start + info.to))
+        Some((self.body_start + info.from, self.body_start + info.to))
     }
 
     /// 列表项内某偏移所属的（块序，项序）。
@@ -329,7 +363,7 @@ impl NoteModel {
         Some(out)
     }
 
-    /// 列表项之间的空行数（渲染时折算间距；与 Markdown 版面口径一致）。
+    /// 揭示单元之间的空行数（渲染时折算间距；与 Markdown 版面口径一致）。
     pub fn item_gap_lines(&self, block: usize, item: usize) -> usize {
         if item == 0 {
             return 0;
@@ -339,6 +373,52 @@ impl NoteModel {
             return 0;
         };
         self.body()[prev.to..next.from].matches('\n').count().saturating_sub(1)
+    }
+
+    /// 远端光标（全文绝对偏移）落在哪个揭示单元的第几行：装饰位移与行前文本供绘制时量宽。
+    /// 落在块间空行、单元之间的空行或非法字节位时返回 `None`（不画）。
+    pub fn cursor_spot(&self, offset: usize) -> Option<CursorSpot> {
+        self.spot_at(offset, true)
+    }
+
+    /// 活动编辑框（展示源码原文）的远端光标：行前文本保留缩进与容器前缀，不做渲染位移。
+    pub fn source_cursor_spot(&self, offset: usize) -> Option<CursorSpot> {
+        self.spot_at(offset, false)
+    }
+
+    fn spot_at(&self, offset: usize, rendered: bool) -> Option<CursorSpot> {
+        let rel = offset.checked_sub(self.body_start)?;
+        let body = self.body();
+        // 协作偏移可能来自旧正文：越界或落在字符中间都不猜，直接不画
+        if rel > body.len() || !body.is_char_boundary(rel) {
+            return None;
+        }
+        for (index, block) in self.blocks.iter().enumerate() {
+            if block.items.is_empty() {
+                if rel >= block.from && rel <= block.to {
+                    return Some(spot_of(
+                        body,
+                        index,
+                        None,
+                        block.from,
+                        rel,
+                        UnitKind::Block { depth: 0 },
+                        rendered,
+                    ));
+                }
+                continue;
+            }
+            let Some(unit) = block
+                .items
+                .iter()
+                .position(|info| rel >= info.from && rel <= info.to)
+            else {
+                continue;
+            };
+            let info = block.items[unit];
+            return Some(spot_of(body, index, Some(unit), info.from, rel, info.kind, rendered));
+        }
+        None
     }
 
     /// 正文（frontmatter 之后）。
@@ -447,8 +527,8 @@ impl NoteModel {
         self.body_start = frontmatter::block_end(&self.text).unwrap_or(0);
         let body = &self.text[self.body_start..];
         let doc = parse_markdown(body, &ParseOptions::default());
-        self.blocks = doc.blocks.iter().map(block_info).collect();
-        // 活动块只指向可整块揭示的块：列表块按项揭示，不保留块级活动态
+        self.blocks = doc.blocks.iter().map(|block| block_info(block, body)).collect();
+        // 活动块只指向可整块揭示的块：有揭示单元的块按单元揭示，不保留块级活动态
         if self
             .active_block
             .is_some_and(|index| self.blocks.get(index).is_none_or(|info| !info.items.is_empty()))
@@ -488,27 +568,80 @@ impl NoteModel {
     }
 }
 
-fn block_info(block: &MarkdownBlock) -> BlockInfo {
+fn block_info(block: &MarkdownBlock, body: &str) -> BlockInfo {
     let (from, to) = block_range(block);
     let image = match block {
-        MarkdownBlock::Paragraph { inline, .. } => image_only(inline).map(|span| {
-            let InlineSpan::Image { src, alt, height, .. } = span else { unreachable!() };
-            ImageBlock {
-                src: src.clone(),
-                alt: alt.clone(),
-                height: height.as_deref().and_then(parse_len),
-            }
-        }),
+        MarkdownBlock::Paragraph { inline, .. } => image_only(inline).map(image_block),
         _ => None,
     };
-    let items = match block {
-        MarkdownBlock::List { items, .. } => items
-            .iter()
-            .map(|item| ItemInfo { from: item.from, to: item.to })
-            .collect(),
-        _ => Vec::new(),
-    };
+    let mut items = Vec::new();
+    match block {
+        MarkdownBlock::List { items: list, .. } => push_list_units(list, body, 0, &mut items),
+        MarkdownBlock::Blockquote { children, .. } => {
+            items.extend(children.iter().map(|child| block_unit(child, body, 0)));
+        }
+        _ => {}
+    }
     BlockInfo { from, to, image, items }
+}
+
+/// 列表项逐层展开为揭示单元；项自身源止于第一个子块所在行，嵌套项再各自成单元。
+fn push_list_units(items: &[MarkdownListItem], body: &str, depth: usize, out: &mut Vec<ItemInfo>) {
+    for (ordinal, item) in items.iter().enumerate() {
+        let from = line_start(body, item.from);
+        let to = item
+            .children
+            .first()
+            .map_or(item.to, |child| own_end(body, block_range(child).0))
+            .max(from);
+        out.push(ItemInfo { from, to, kind: UnitKind::Item { depth, ordinal } });
+        push_item_children(&item.children, body, depth + 1, out);
+    }
+}
+
+fn push_item_children(children: &[MarkdownBlock], body: &str, depth: usize, out: &mut Vec<ItemInfo>) {
+    for child in children {
+        match child {
+            MarkdownBlock::List { items, .. } => push_list_units(items, body, depth, out),
+            MarkdownBlock::Blockquote { children, .. } => {
+                out.extend(children.iter().map(|block| block_unit(block, body, depth)));
+            }
+            _ => out.push(block_unit(child, body, depth)),
+        }
+    }
+}
+
+/// 容器内子块：行首到块所在行尾，源码保留引用 / 缩进前缀。
+fn block_unit(block: &MarkdownBlock, body: &str, depth: usize) -> ItemInfo {
+    let (from, to) = block_range(block);
+    ItemInfo { from: line_start(body, from), to: line_end(body, to), kind: UnitKind::Block { depth } }
+}
+
+fn line_start(body: &str, at: usize) -> usize {
+    body[..at.min(body.len())].rfind('\n').map_or(0, |line| line + 1)
+}
+
+fn line_end(body: &str, at: usize) -> usize {
+    let at = at.min(body.len());
+    body[at..].find('\n').map_or(body.len(), |offset| at + offset)
+}
+
+/// `at` 之前最后一个非空行的行尾：从 `at` 往前逐行跳过空行与仅有空白的行。
+fn own_end(body: &str, at: usize) -> usize {
+    let mut end = at.min(body.len());
+    loop {
+        while end > 0 && matches!(body.as_bytes().get(end - 1), Some(b'\n') | Some(b'\r')) {
+            end -= 1;
+        }
+        let start = body[..end].rfind('\n').map_or(0, |line| line + 1);
+        if !body[start..end].trim().is_empty() {
+            return end;
+        }
+        if start == 0 {
+            return 0;
+        }
+        end = start;
+    }
 }
 
 fn image_only(inline: &[InlineSpan]) -> Option<&InlineSpan> {
@@ -518,10 +651,129 @@ fn image_only(inline: &[InlineSpan]) -> Option<&InlineSpan> {
     }
 }
 
-/// 尺寸声明（`![x](p.png =120x80)` 那类）→ 像素；只认高度，宽随可用宽等比。
+fn image_block(span: &InlineSpan) -> ImageBlock {
+    let InlineSpan::Image { src, alt, width, height, .. } = span else { unreachable!() };
+    let mut alt = alt.clone();
+    let declared_width = width.as_deref().and_then(parse_len);
+    let mut declared_height = height.as_deref().and_then(parse_len);
+    if declared_width.is_none() && declared_height.is_none() {
+        // 格式库只识别 `|W` / `|WxH`，高度单声明（`|x80`）仍留在替代文字里，这里补解析
+        if let Some((rest, spec)) = alt.rsplit_once('|') {
+            if let Some(height) = height_spec(spec) {
+                alt = rest.to_string();
+                declared_height = Some(height);
+            }
+        }
+    }
+    ImageBlock { src: src.clone(), alt, width: declared_width, height: declared_height }
+}
+
+fn height_spec(spec: &str) -> Option<f32> {
+    let digits = spec.trim().strip_prefix(['x', 'X'])?;
+    if !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse::<f32>().ok().filter(|value| *value > 0.0)
+}
+
+/// 尺寸声明（`![x|120x80](p.png)` 这类）→ 像素；宽高各自独立，缺省取原图尺寸。
 fn parse_len(value: &str) -> Option<f32> {
     let raw = value.trim().trim_end_matches(['%', 'x', 'X']);
     raw.parse::<f32>().ok().filter(|value| *value > 0.0)
+}
+
+/// 图片显示尺寸：声明的宽高优先，单边声明按原图比例补另一边，未声明用原图自然尺寸。
+#[allow(dead_code)]
+pub fn image_display_size(image: &ImageBlock, natural: Option<(u32, u32)>) -> Option<ImageSize> {
+    let natural = natural
+        .map(|(width, height)| (width as f32, height as f32))
+        .filter(|(width, height)| *width > 0.0 && *height > 0.0);
+    match (image.width, image.height) {
+        (Some(width), Some(height)) => Some(ImageSize { width, height }),
+        (Some(width), None) => {
+            natural.map(|(natural_w, natural_h)| ImageSize { width, height: width * natural_h / natural_w })
+        }
+        (None, Some(height)) => {
+            natural.map(|(natural_w, natural_h)| ImageSize { width: height * natural_w / natural_h, height })
+        }
+        (None, None) => natural.map(|(width, height)| ImageSize { width, height }),
+    }
+}
+
+/// 版面计算：先取显示尺寸，再等比收到可用宽内（`available` ≤ 0 表示不约束）。
+#[allow(dead_code)]
+pub fn image_layout(image: &ImageBlock, natural: Option<(u32, u32)>, available: f32) -> Option<ImageSize> {
+    let size = image_display_size(image, natural)?;
+    if available > 0.0 && size.width > available {
+        let scale = available / size.width;
+        return Some(ImageSize { width: available, height: size.height * scale });
+    }
+    Some(size)
+}
+
+fn spot_of(
+    body: &str,
+    block: usize,
+    unit: Option<usize>,
+    from: usize,
+    rel: usize,
+    kind: UnitKind,
+    rendered: bool,
+) -> CursorSpot {
+    let text = &body[from.min(body.len())..rel.min(body.len())];
+    let line = text.matches('\n').count();
+    let line_start = text.rfind('\n').map_or(0, |index| index + 1);
+    let raw = &text[line_start..];
+    let (base_x, line_prefix) = if rendered {
+        match kind {
+            UnitKind::Item { .. } => (LIST_TEXT_X, item_prefix(body, from + line_start, raw)),
+            UnitKind::Block { .. } => block_line_prefix(body, from + line_start, raw),
+        }
+    } else {
+        (0.0, raw.to_string())
+    };
+    CursorSpot { block, unit, line, base_x, line_prefix }
+}
+
+/// 列表项的行前文本：首行的标记（`- ` / `1. ` / 任务框）不参与量宽，落在标记内时贴住内容起点；
+/// 续行的行首缩进同样不上屏。
+fn item_prefix(body: &str, line_abs_start: usize, raw: &str) -> String {
+    let line = line_start_line(body, line_abs_start);
+    let marker_end = crate::edit::list_marker_end(line).unwrap_or(0);
+    if raw.len() <= marker_end {
+        return String::new();
+    }
+    line[marker_end..raw.len()].trim_start_matches([' ', '\t']).to_string()
+}
+
+/// 引用容器的行前文本：剥掉逐层 `>` 标记，文字位移按引用竖条的留白算；
+/// 引用内再起列表时，列表标记同样不参与量宽，落在标记内贴住内容起点。
+fn block_line_prefix(body: &str, line_abs_start: usize, raw: &str) -> (f32, String) {
+    let (levels, line_text) = quote_parts(line_start_line(body, line_abs_start));
+    let marker_end = crate::edit::list_marker_end(line_text).unwrap_or(0);
+    let base = levels as f32 * QUOTE_TEXT_X + if marker_end > 0 { LIST_TEXT_X } else { 0.0 };
+    let (_, raw_text) = quote_parts(raw);
+    if raw_text.len() <= marker_end {
+        return (base, String::new());
+    }
+    (base, raw_text[marker_end..].trim_start_matches([' ', '\t']).to_string())
+}
+
+/// 剥掉行首空白与逐层 `>` 标记。
+fn quote_parts(raw: &str) -> (usize, &str) {
+    let mut text = raw.trim_start_matches([' ', '\t']);
+    let mut levels = 0;
+    while let Some(rest) = text.strip_prefix('>') {
+        levels += 1;
+        text = rest.trim_start_matches([' ', '\t']);
+    }
+    (levels, text)
+}
+
+fn line_start_line(body: &str, at: usize) -> &str {
+    let at = at.min(body.len());
+    let end = body[at..].find('\n').map_or(body.len(), |offset| at + offset);
+    &body[at..end]
 }
 
 fn block_range(block: &MarkdownBlock) -> (usize, usize) {
@@ -612,6 +864,135 @@ mod tests {
         model.load("a.md".into(), "  - 甲\n  - 乙\n".into(), true);
         let (from, to) = model.item_source(0, 0).expect("项在");
         assert_eq!(&model.text[from..to], "  - 甲", "缩进随项一起显示与回写");
+    }
+
+    /// 嵌套列表逐层展开：父子项都是独立揭示单元，父项源区间止于子项行首。
+    #[test]
+    fn nested_list_items_are_independent_units() {
+        let mut model = NoteModel::default();
+        model.load("a.md".into(), "- 甲\n  - 乙\n    - 丙\n- 丁\n".into(), true);
+        let block = &model.blocks[0];
+        assert_eq!(block.items.len(), 4, "父子项各自成单元");
+        assert!(matches!(block.items[0].kind, UnitKind::Item { depth: 0, ordinal: 0 }));
+        assert!(matches!(block.items[1].kind, UnitKind::Item { depth: 1, ordinal: 0 }));
+        assert!(matches!(block.items[2].kind, UnitKind::Item { depth: 2, ordinal: 0 }));
+        assert!(matches!(block.items[3].kind, UnitKind::Item { depth: 0, ordinal: 1 }));
+        let sources: Vec<String> = (0..4)
+            .map(|item| {
+                let (from, to) = model.item_source(0, item).expect("项在");
+                model.text[from..to].to_string()
+            })
+            .collect();
+        assert_eq!(sources, ["- 甲", "  - 乙", "    - 丙", "- 丁"]);
+        assert_eq!(model.item_at(model.body_start + 10), Some((0, 1)));
+        assert_eq!(model.item_at(model.body_start + 16), Some((0, 2)));
+        assert_eq!(model.item_gap_lines(0, 1), 0, "父子之间没有空行");
+        let text = model.replace_item(0, 1, "  - 改").expect("项在");
+        assert_eq!(text, "- 甲\n  - 改\n    - 丙\n- 丁\n");
+    }
+
+    /// 引用内的子块各自成揭示单元：段与列表分别替换，源码保留引用前缀。
+    #[test]
+    fn blockquote_children_are_independent_units() {
+        let mut model = NoteModel::default();
+        model.load("a.md".into(), "> 甲\n>\n> - 一\n> - 二\n".into(), true);
+        let block = &model.blocks[0];
+        assert_eq!(block.items.len(), 2, "引用内的段落与列表各一项");
+        let (from, to) = model.item_source(0, 0).expect("子块在");
+        assert_eq!(&model.text[from..to], "> 甲");
+        let (from, to) = model.item_source(0, 1).expect("子块在");
+        assert_eq!(&model.text[from..to], "> - 一\n> - 二");
+        let at = model.body_start + model.body().find('一').expect("找到列表项");
+        assert_eq!(model.item_at(at), Some((0, 1)));
+        let text = model.replace_item(0, 1, "> - 改").expect("子块在");
+        assert_eq!(text, "> 甲\n>\n> - 改\n");
+    }
+
+    /// 远端光标按所在揭示单元的行首换算：返回块 / 项、行序、装饰位移与行前文本。
+    #[test]
+    fn remote_cursor_maps_to_unit_line_and_prefix() {
+        let mut model = NoteModel::default();
+        model.load("a.md".into(), "甲\n\n- 甲\n  - 乙\n".into(), true);
+        let line = model.body().find("乙").expect("找到嵌套项");
+        let spot = model.cursor_spot(model.body_start + line).expect("落在嵌套项");
+        assert_eq!((spot.block, spot.unit, spot.line), (1, Some(1), 0));
+        assert_eq!(spot.line_prefix, "", "列表标记与缩进都不参与绘制");
+        assert_eq!(spot.base_x, LIST_TEXT_X, "文字从标记列之后起算");
+        // 活动编辑框画的是源码：前缀含缩进与标记，不做渲染位移
+        let raw = model.source_cursor_spot(model.body_start + line).expect("源码落点");
+        assert_eq!((raw.base_x, raw.line_prefix.as_str()), (0.0, "  - "));
+
+        model.load("a.md".into(), "甲\n乙".into(), true);
+        let line = model.body().find('乙').expect("找到第二行");
+        let spot = model.cursor_spot(model.body_start + line).expect("落在段落");
+        assert_eq!((spot.block, spot.unit, spot.line), (0, None, 1));
+        assert_eq!((spot.base_x, spot.line_prefix.as_str()), (0.0, ""));
+
+        model.load("a.md".into(), "> 甲\n> 乙\n".into(), true);
+        let line = model.body().find('乙').expect("引用第二行");
+        let spot = model.cursor_spot(model.body_start + line).expect("落在引用子块");
+        assert_eq!(spot.line_prefix, "", "引用标记不上屏");
+        assert_eq!(spot.base_x, QUOTE_TEXT_X);
+
+        // 引用内列表：引用留白之后再让出列表标记列
+        model.load("a.md".into(), "> - 甲\n".into(), true);
+        let line = model.body().find('甲').expect("引用内列表项");
+        let spot = model.cursor_spot(model.body_start + line).expect("落在引用内列表");
+        assert_eq!(spot.line_prefix, "", "列表标记不上屏");
+        assert_eq!(spot.base_x, QUOTE_TEXT_X + LIST_TEXT_X);
+    }
+
+    /// 图片尺寸声明按 `|W` / `|WxH` 记入模型：宽高分开保存，缺省为 None。
+    #[test]
+    fn image_only_paragraphs_carry_declared_width_and_height() {
+        let mut model = NoteModel::default();
+        model.load("a.md".into(), "![图|120](p.png)\n".into(), true);
+        let image = model.blocks[0].image.as_ref().expect("图片块");
+        assert_eq!(image.width, Some(120.0));
+        assert_eq!(image.height, None);
+        model.load("a.md".into(), "![图|120x80](p.png)\n".into(), true);
+        let image = model.blocks[0].image.as_ref().expect("图片块");
+        assert_eq!((image.width, image.height), (Some(120.0), Some(80.0)));
+    }
+
+    /// 高度单声明（`|x80`）：格式库不识别，插件补解析并从替代文字里剥掉。
+    #[test]
+    fn image_only_paragraphs_accept_height_only_size() {
+        let mut model = NoteModel::default();
+        model.load("a.md".into(), "![图|x80](p.png)\n".into(), true);
+        let image = model.blocks[0].image.as_ref().expect("图片块");
+        assert_eq!((image.width, image.height), (None, Some(80.0)));
+        assert_eq!(image.alt, "图");
+    }
+
+    /// 显示尺寸：声明的宽高优先，单边声明按原图比例补另一边，都缺省用原图尺寸。
+    #[test]
+    fn image_display_size_uses_declared_or_natural_size() {
+        let image = ImageBlock { src: "p.png".into(), alt: "图".into(), width: None, height: None };
+        let natural = Some((640, 480));
+        let size = image_display_size(&image, natural).expect("原图尺寸");
+        assert_eq!(size, ImageSize { width: 640.0, height: 480.0 });
+        let size = image_display_size(&ImageBlock { width: Some(320.0), ..image.clone() }, natural).expect("按宽补高");
+        assert_eq!((size.width, size.height), (320.0, 240.0));
+        let size = image_display_size(&ImageBlock { height: Some(120.0), ..image.clone() }, natural).expect("按高补宽");
+        assert_eq!((size.width, size.height), (160.0, 120.0));
+        assert!(image_display_size(&image, None).is_none(), "无声明也无原图尺寸时算不出");
+        let sized = ImageBlock { width: Some(200.0), height: Some(100.0), ..image };
+        assert_eq!(
+            image_display_size(&sized, None).map(|size| (size.width, size.height)),
+            Some((200.0, 100.0)),
+            "两边都声明时不需要原图尺寸"
+        );
+    }
+
+    /// 布局计算把超过可用宽的原图等比收到面板内。
+    #[test]
+    fn image_layout_clamps_natural_size_to_available_width() {
+        let image = ImageBlock { src: "p.png".into(), alt: "图".into(), width: None, height: None };
+        let size = image_layout(&image, Some((640, 480)), 320.0).expect("可布局");
+        assert_eq!((size.width, size.height), (320.0, 240.0));
+        let size = image_layout(&image, Some((640, 480)), 800.0).expect("原样");
+        assert_eq!((size.width, size.height), (640.0, 480.0));
     }
 
     /// 图片探测缓存按 src 记，变更事件给的是仓库相对路径：两种写法都要能对上。

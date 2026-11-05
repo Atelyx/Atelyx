@@ -6,12 +6,18 @@ use atelyx_plugin_protocol::paint::{
 use atelyx_plugin_sdk::frame_ui::{BoxStyle, BoxWidth, Edges, Rect, TextRole, TextStyle, Ui};
 
 use crate::model::{
-    BlockInfo, Mode, NoteModel, BODY_SCROLL, EMPTY_EDIT, SOURCE, SOURCE_SCROLL, TITLE,
+    BlockInfo, CursorSpot, Mode, NoteModel, UnitKind, BODY_SCROLL, EMPTY_EDIT, SOURCE, SOURCE_SCROLL, TITLE,
 };
 use atelyx_plugin_props as props;
 
 /// 正文源码行高倍数（与阅读面同一口径）。
 const PROSE_LINE: f32 = 1.625;
+/// 列表嵌套一级的水平缩进（与 Markdown 版面的标号列同宽）。
+const LIST_STEP: f32 = crate::model::LIST_TEXT_X;
+/// 远端光标名签的字号 / 水平内边距 / 高度。
+const TAG_SIZE: f32 = 10.0;
+const TAG_PAD_X: f32 = 4.0;
+const TAG_H: f32 = 14.0;
 
 /// 预览编辑的块 id；双击 / 单击回发同一个 id。
 pub fn block_id(index: usize) -> String {
@@ -23,7 +29,7 @@ pub fn gap_input_id(gap: usize, line: usize) -> String {
     format!("note:gap:{gap}:{line}")
 }
 
-/// 列表项输入面 / 命中区 id：`block` = 列表块序，`item` = 项序。
+/// 揭示单元输入面 / 命中区 id：`block` = 块序，`item` = 单元序。
 pub fn item_id(block: usize, item: usize) -> String {
     format!("note:item:{block}:{item}")
 }
@@ -317,24 +323,26 @@ fn rows(ui: &mut Ui<'_, '_>, model: &NoteModel, edit: Option<EditMeasure>) {
         if let (Some(measure), Some(index_active)) = (edit, model.active_block) {
             if index_active == index && block.items.is_empty() {
                 let source = model.active_source().unwrap_or("");
-                ui.text_area_plain_auto(
-                    block_id(index),
-                    source,
-                    measure.line,
-                    600.0,
-                    measure.size,
-                    Edges::symmetric(0.0, 0.0),
-                );
+                with_cursors(ui, model, index, None, 0.0, measure.line, false, |ui| {
+                    ui.text_area_plain_auto(
+                        block_id(index),
+                        source,
+                        measure.line,
+                        600.0,
+                        measure.size,
+                        Edges::symmetric(0.0, 0.0),
+                    );
+                });
                 continue;
             }
         }
         if !block.items.is_empty() {
-            list_rows(ui, model, index, block, line, edit);
+            unit_rows(ui, model, index, block, line, edit);
             continue;
         }
         match &block.image {
             Some(image) if image.height.is_some() => {
-                if model.image_probe.get(&image.src) == Some(&false) {
+                if model.image_probe.get(&image.src) == Some(&None) {
                     // 载入失败：按替代文字占位，不给正文留空洞
                     let name = if image.alt.is_empty() { &image.src } else { &image.alt };
                     ui.markdown_named(block_id(index), &format!("[图片：{name}]"), Vec::new());
@@ -343,7 +351,10 @@ fn rows(ui: &mut Ui<'_, '_>, model: &NoteModel, edit: Option<EditMeasure>) {
                 }
             }
             _ => {
-                ui.markdown_named(block_id(index), &body[block.from..block.to], Vec::new());
+                let source = &body[block.from..block.to];
+                with_cursors(ui, model, index, None, 0.0, line, true, |ui| {
+                    ui.markdown_named(block_id(index), source, Vec::new());
+                });
             }
         }
     }
@@ -376,8 +387,8 @@ fn gap_line(ui: &mut Ui<'_, '_>, model: &NoteModel, gap: usize, line_index: usiz
     );
 }
 
-/// 列表块逐项渲染：每项一个揭示单元（只读档同此），有序项按原序号绘制，项间空行折算为间距。
-fn list_rows(
+/// 揭示单元逐项渲染：列表项按嵌套层级缩进，引用子块按块渲染；每项一个独立揭示单元。
+fn unit_rows(
     ui: &mut Ui<'_, '_>,
     model: &NoteModel,
     index: usize,
@@ -386,33 +397,166 @@ fn list_rows(
     edit: Option<EditMeasure>,
 ) {
     let body = model.body();
-    for (item, info) in block.items.iter().enumerate() {
-        let gaps = model.item_gap_lines(index, item);
+    for (unit, info) in block.items.iter().enumerate() {
+        let gaps = model.item_gap_lines(index, unit);
         if gaps > 0 {
             ui.spacer(gaps as f32 * line);
         }
-        let id = item_id(index, item);
-        let source = &body[info.from..info.to];
+        let id = item_id(index, unit);
         if let Some(measure) = edit {
-            if model.active_item == Some((index, item)) {
-                // 编辑框的文本必须与编辑值同源（含行首缩进），否则光标与点击落点整体偏移缩进宽度
-                let Some(editing) = model.item_source(index, item).map(|(from, to)| &model.text[from..to])
+            if model.active_item == Some((index, unit)) {
+                // 编辑框的文本必须与编辑值同源（含行首缩进 / 容器前缀），否则光标与点击落点整体偏移
+                let Some(editing) = model.item_source(index, unit).map(|(from, to)| &model.text[from..to])
                 else {
                     continue;
                 };
-                ui.text_area_plain_auto(
-                    id,
-                    editing,
-                    measure.line,
-                    600.0,
-                    measure.size,
-                    Edges::symmetric(0.0, 0.0),
-                );
+                with_cursors(ui, model, index, Some(unit), 0.0, measure.line, false, |ui| {
+                    ui.text_area_plain_auto(
+                        id,
+                        editing,
+                        measure.line,
+                        600.0,
+                        measure.size,
+                        Edges::symmetric(0.0, 0.0),
+                    );
+                });
                 continue;
             }
         }
-        ui.markdown_list_item_named(id, source, item, Vec::new());
+        let source = &body[info.from..info.to];
+        match info.kind {
+            UnitKind::Item { depth, ordinal } => {
+                // 首行缩进由层级缩进代替，避免 4 空格以上被 Markdown 当成代码块
+                let shown = source.trim_start_matches([' ', '\t']);
+                let indent = depth as f32 * LIST_STEP;
+                with_cursors(ui, model, index, Some(unit), indent, line, true, |ui| {
+                    if depth == 0 {
+                        ui.markdown_list_item_named(&id, shown, ordinal, Vec::new());
+                    } else {
+                        ui.row(0.0, |row| {
+                            row.spacer_width(indent);
+                            row.markdown_list_item_named(&id, shown, ordinal, Vec::new());
+                        });
+                    }
+                });
+            }
+            UnitKind::Block { depth } => {
+                let indent = depth as f32 * LIST_STEP;
+                let shown = unindent(source, depth);
+                with_cursors(ui, model, index, Some(unit), indent, line, true, |ui| {
+                    if depth == 0 {
+                        ui.markdown_named(&id, &shown, Vec::new());
+                    } else {
+                        ui.row(0.0, |row| {
+                            row.spacer_width(indent);
+                            row.markdown_named(&id, &shown, Vec::new());
+                        });
+                    }
+                });
+            }
+        }
     }
+}
+
+/// 容器子块去掉所属列表的基准缩进（每层两级空格），余下的额外缩进仍按 Markdown 语义（如代码块）。
+fn unindent(source: &str, depth: usize) -> String {
+    if depth == 0 {
+        return source.to_string();
+    }
+    let limit = depth * crate::edit::INDENT_UNIT.len();
+    source
+        .split('\n')
+        .map(|line| {
+            let mut cut = 0;
+            while cut < limit && matches!(line.as_bytes().get(cut), Some(b' ') | Some(b'\t')) {
+                cut += 1;
+            }
+            &line[cut..]
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// 单元内的远端光标：同一矩形里叠在内容之上画竖线与名签。
+/// `rendered` = 内容按 Markdown 渲染（列表标记 / 引用前缀不进量宽）；活动编辑框传 false（画的是源码）。
+fn with_cursors(
+    ui: &mut Ui<'_, '_>,
+    model: &NoteModel,
+    block: usize,
+    unit: Option<usize>,
+    indent: f32,
+    line: f32,
+    rendered: bool,
+    content: impl FnOnce(&mut Ui<'_, '_>),
+) {
+    if model.remote.is_empty() {
+        content(ui);
+        return;
+    }
+    let spots: Vec<(String, [u8; 4], CursorSpot)> = model
+        .remote
+        .iter()
+        .filter_map(|cursor| {
+            let offset = cursor.head.or(cursor.anchor)?;
+            // 先按块区间筛掉别的行，避免逐行重扫全文块表；块区间相对正文，偏移先减 frontmatter
+            let rel = offset.checked_sub(model.body_start)?;
+            let in_block =
+                model.blocks.get(block).is_some_and(|info| rel >= info.from && rel <= info.to);
+            if !in_block {
+                return None;
+            }
+            let spot = if rendered {
+                model.cursor_spot(offset)?
+            } else {
+                model.source_cursor_spot(offset)?
+            };
+            (spot.block == block && spot.unit == unit).then(|| (cursor.name.clone(), parse_color(&cursor.color), spot))
+        })
+        .collect();
+    if spots.is_empty() {
+        content(ui);
+        return;
+    }
+    let size = ui.role_size(TextRole::Body);
+    let need = spots.iter().map(|(_, _, spot)| spot.line).max().unwrap_or(0) as f32 * line + line;
+    ui.column(0.0, |outer| {
+        outer.stack(|layer| {
+            content(layer);
+            layer.canvas(need, move |canvas| {
+                let area = canvas.area();
+                for (name, color, spot) in &spots {
+                    let x = area.x + indent + spot.base_x + canvas.measure(&spot.line_prefix, size).0;
+                    let y = area.y + spot.line as f32 * line;
+                    canvas.draw(DrawCommand::Rect {
+                        x,
+                        y,
+                        w: 2.0,
+                        h: line,
+                        fill: Some(PaintColor::Rgba { rgba: *color }),
+                        stroke: None,
+                        stroke_width: None,
+                        corner_radius: None,
+                        shadow: None,
+                    });
+                    let tag_w = canvas.measure(name, TAG_SIZE).0 + TAG_PAD_X * 2.0;
+                    let tag_x = (x + 3.0).min(area.x + area.w - tag_w).max(area.x);
+                    let tag_y = (y - TAG_H - 1.0).max(area.y);
+                    canvas.draw(DrawCommand::Rect {
+                        x: tag_x,
+                        y: tag_y,
+                        w: tag_w,
+                        h: TAG_H,
+                        fill: Some(PaintColor::Rgba { rgba: *color }),
+                        stroke: None,
+                        stroke_width: None,
+                        corner_radius: Some(3.0),
+                        shadow: None,
+                    });
+                    canvas.text(name, tag_x + TAG_PAD_X, tag_y + 1.0, TAG_SIZE, PaintColor::Rgba { rgba: [255, 255, 255, 255] });
+                }
+            });
+        });
+    });
 }
 
 fn source_view(ui: &mut Ui<'_, '_>, model: &NoteModel) {

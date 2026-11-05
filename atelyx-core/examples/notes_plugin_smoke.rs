@@ -9,13 +9,14 @@ use serde_json::{json, Value};
 use atelyx_core::plugin_runtime::{
     FrameInput, HostRequest, MeasureTextResult, PluginRuntime, PluginStatus, SurfaceKind,
 };
+use atelyx_plugin_protocol::event::{DocPresencePayload, DocRemoteCursor};
 use atelyx_plugin_protocol::frame::{Key, KeyAction, Modifiers, NamedKey, SurfaceFrame};
 use atelyx_plugin_protocol::method::{FontSizes, Radii, ThemeColors, ThemeResult};
-use atelyx_plugin_protocol::paint::{DrawCommand, TextAlign};
+use atelyx_plugin_protocol::paint::{DrawCommand, PaintColor, TextAlign};
 
 const PLUGIN: &str = "atelyx.notes";
 const SURFACE: &str = "note";
-const NOTE: &str = "---\ntags: [开发]\n---\n# 标题\n\n第一段正文。\n\n- 列表项一\n- 列表项二\n\n1. 步骤一\n2. 步骤二\n";
+const NOTE: &str = "---\ntags: [开发]\n---\n# 标题\n\n第一段正文。\n\n- 列表项一\n- 列表项二\n\n1. 步骤一\n2. 步骤二\n\n- 父项\n  - 子项一\n  - 子项二\n\n> 引用段一\n>\n> 引用段二\n";
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
@@ -114,6 +115,21 @@ async fn main() {
     let frame = wait_frame(&runtime, Duration::from_secs(5)).await.expect("打开笔记后应有帧");
     println!("只读帧：{} 条指令，{} 个命中区", frame.commands.len(), frame.hits.len());
 
+    // 只读面的远端协作光标：竖线与名签叠在正文块上
+    let cursor_at = NOTE.find("第一段").expect("正文起点");
+    runtime.on_doc_presence(DocPresencePayload {
+        path: Some("a.md".into()),
+        cursors: vec![DocRemoteCursor {
+            name: "伙伴".into(),
+            color: "#4a90d9".into(),
+            anchor: Some(cursor_at),
+            head: Some(cursor_at),
+        }],
+    });
+    let cursor_frame = wait_remote_cursor(&runtime, "伙伴", Duration::from_secs(2)).await;
+    println!("只读面协作光标：{}", if cursor_frame.is_some() { "通过" } else { "未确认" });
+    assert!(cursor_frame.is_some(), "只读面应画出远端光标竖线与名签");
+
     if let Some(hit) = frame.hits.iter().find(|hit| hit.id == "note:mode:edit").cloned() {
         click_hit(&runtime, &hit);
         let frame = wait_hit(&runtime, "note:gap:1:0", Duration::from_secs(2))
@@ -124,6 +140,10 @@ async fn main() {
         let first_y = frame.hits.iter().find(|hit| hit.id == "note:block:0").map_or(-1.0, |hit| hit.y);
         println!("预览编辑块：{blocks}，空行输入面：{gaps}，首块 y：{first_y:.1}");
         assert!(first_y < 200.0, "工具条 / 属性面板不得吃满剩余高度（首块 y = {first_y}）");
+        // 编辑面同样叠远端光标：此刻没有活动块，正文块仍是渲染面
+        let edit_cursor = wait_remote_cursor(&runtime, "伙伴", Duration::from_secs(2)).await;
+        println!("编辑面协作光标：{}", if edit_cursor.is_some() { "通过" } else { "未确认" });
+        assert!(edit_cursor.is_some(), "编辑面应画出远端光标竖线与名签");
         // 揭示块：块后一根空行应显示为第二行（修复前会多算一行）
         if let Some(hit) = frame.hits.iter().find(|hit| hit.id == "note:block:0").cloned() {
             click_hit(&runtime, &hit);
@@ -150,34 +170,12 @@ async fn main() {
                 tokio::time::sleep(Duration::from_millis(80)).await;
             }
         }
-        let frame = runtime.surface_frame(PLUGIN, SURFACE).expect("预览编辑帧");
-        if let Some(hit) = frame.hits.iter().find(|hit| hit.id.starts_with("note:gap:")).cloned() {
-            click_hit(&runtime, &hit);
-            runtime.notify_frame_input(
-                PLUGIN,
-                SURFACE,
-                &FrameInput::Text {
-                    text: "空行".into(),
-                    composing: false,
-                    caret: None,
-                    candidates: None,
-                },
-            );
-            tokio::time::sleep(Duration::from_millis(150)).await;
-            let inserted = runtime.surface_frame(PLUGIN, SURFACE).is_some_and(|frame| {
-                frame
-                    .commands
-                    .iter()
-                    .any(|command| matches!(command, atelyx_plugin_protocol::paint::DrawCommand::Text { content, .. } if content == "空行"))
-            });
-            println!("空行就地输入：{}", if inserted { "通过" } else { "未确认" });
-        }
         // 列表项逐项揭示：点第二项只把该项换成源码，另一项保持渲染
         let frame = runtime.surface_frame(PLUGIN, SURFACE).expect("预览编辑帧");
         let items: Vec<String> = frame
             .hits
             .iter()
-            .filter(|hit| hit.id.starts_with("note:item:"))
+            .filter(|hit| hit.id.starts_with("note:item:2:") || hit.id.starts_with("note:item:3:"))
             .map(|hit| hit.id.clone())
             .collect();
         let list_blocks = frame
@@ -211,6 +209,94 @@ async fn main() {
             println!("有序项揭示：首项渲染 {first_still_rendered}，高度 {height:.1}");
             assert!(first_still_rendered, "另一项要保持渲染");
             assert!(height < 32.0, "揭示项不得多出一行（高度 {height}）");
+        }
+        // 嵌套列表：点子项只揭示该子项，父项与兄弟子项保持渲染
+        let frame = runtime.surface_frame(PLUGIN, SURFACE).expect("预览编辑帧");
+        if let Some(hit) = frame.hits.iter().find(|hit| hit.id == "note:item:4:1").cloned() {
+            click_hit(&runtime, &hit);
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let mut revealed = None;
+            while Instant::now() < deadline {
+                if let Some(frame) = runtime.surface_frame(PLUGIN, SURFACE) {
+                    if has_text(&frame, "- 子项一") {
+                        revealed = Some(frame);
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            let frame = revealed.expect("揭示嵌套子项");
+            let parent = has_text(&frame, "父项");
+            let sibling = has_text(&frame, "子项二");
+            let height = frame.hits.iter().find(|hit| hit.id == "note:item:4:1").map_or(0.0, |hit| hit.h);
+            println!("嵌套项揭示：父项 {parent}，兄弟 {sibling}，高度 {height:.1}");
+            assert!(parent && sibling, "父项与兄弟子项要保持渲染");
+            assert!(height < 32.0, "嵌套项揭示不得带上父项的行（高度 {height}）");
+            // 活动编辑框画的是源码：同一项内的远端光标也要落在输入面上
+            let active_at = NOTE.find("子项一").expect("活动项偏移");
+            runtime.on_doc_presence(DocPresencePayload {
+                path: Some("a.md".into()),
+                cursors: vec![DocRemoteCursor {
+                    name: "伙伴".into(),
+                    color: "#4a90d9".into(),
+                    anchor: Some(active_at),
+                    head: Some(active_at),
+                }],
+            });
+            let cursor = wait_remote_cursor(&runtime, "伙伴", Duration::from_secs(2)).await;
+            println!("活动编辑框协作光标：{}", if cursor.is_some() { "通过" } else { "未确认" });
+            assert!(cursor.is_some(), "活动编辑框内也应画远端光标竖线与名签");
+        }
+        // 引用内子块各自成揭示单元：点第二段只换第二段
+        let frame = runtime.surface_frame(PLUGIN, SURFACE).expect("预览编辑帧");
+        if let Some(hit) = frame.hits.iter().find(|hit| hit.id == "note:item:5:1").cloned() {
+            click_hit(&runtime, &hit);
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let mut revealed = None;
+            while Instant::now() < deadline {
+                if let Some(frame) = runtime.surface_frame(PLUGIN, SURFACE) {
+                    if has_text(&frame, "> 引用段二") {
+                        revealed = Some(frame);
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            let frame = revealed.expect("揭示引用第二段");
+            let first = has_text(&frame, "引用段一");
+            println!("引用子块揭示：第一段保持渲染 {first}");
+            assert!(first, "引用内其他子块要保持渲染");
+        }
+        // 空行就地输入：先点回整块面撤掉活动单元，块间空行输入面才出现
+        if let Some(hit) = runtime.surface_frame(PLUGIN, SURFACE)
+            .and_then(|frame| frame.hits.iter().find(|hit| hit.id == "note:block:1").cloned())
+        {
+            click_hit(&runtime, &hit);
+            tokio::time::sleep(Duration::from_millis(80)).await;
+        }
+        if let Some(hit) = runtime
+            .surface_frame(PLUGIN, SURFACE)
+            .and_then(|frame| frame.hits.iter().find(|hit| hit.id.starts_with("note:gap:")).cloned())
+        {
+            click_hit(&runtime, &hit);
+            runtime.notify_frame_input(
+                PLUGIN,
+                SURFACE,
+                &FrameInput::Text {
+                    text: "空行".into(),
+                    composing: false,
+                    caret: None,
+                    candidates: None,
+                },
+            );
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            let inserted = runtime.surface_frame(PLUGIN, SURFACE).is_some_and(|frame| {
+                frame
+                    .commands
+                    .iter()
+                    .any(|command| matches!(command, atelyx_plugin_protocol::paint::DrawCommand::Text { content, .. } if content == "空行"))
+            });
+            println!("空行就地输入：{}", if inserted { "通过" } else { "未确认" });
         }
     }
     if let Some(hit) = runtime
@@ -485,6 +571,39 @@ async fn wait_frame(runtime: &Arc<PluginRuntime>, timeout: Duration) -> Option<A
         }
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
+}
+
+/// 等到帧里出现远端光标：2px 自绘竖线 + 名字签。
+async fn wait_remote_cursor(
+    runtime: &Arc<PluginRuntime>,
+    name: &str,
+    timeout: Duration,
+) -> Option<Arc<SurfaceFrame>> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(frame) = runtime.surface_frame(PLUGIN, SURFACE) {
+            let line = frame.commands.iter().any(|command| {
+                matches!(command, DrawCommand::Rect { w, fill: Some(PaintColor::Rgba { .. }), .. } if (*w - 2.0).abs() < 0.01)
+            });
+            let tag = frame.commands.iter().any(|command| {
+                matches!(command, DrawCommand::Text { content, .. } if content == name)
+            });
+            if line && tag {
+                return Some(frame);
+            }
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+/// 帧里是否画出了某段文字（去掉行首缩进后比较：揭示面画的是源码）。
+fn has_text(frame: &SurfaceFrame, text: &str) -> bool {
+    frame.commands.iter().any(|command| {
+        matches!(command, DrawCommand::Text { content, .. } if content.trim() == text.trim())
+    })
 }
 
 async fn wait_status(runtime: &Arc<PluginRuntime>, id: &str) {
