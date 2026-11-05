@@ -179,7 +179,7 @@ fn press(
         .is_some_and(|geo| {
             matches!(
                 geo.hit_at(x, y),
-                Some(Hit::Cell { row, field }) if row == editing.row && field == editing.field
+                Some(Hit::Cell { row, field }) if editing.position(session) == Some((row, field))
             )
         })
     });
@@ -350,23 +350,16 @@ fn press(
                 for (index, thumb) in layout.thumbs.iter().chain(layout.tiles.iter()) {
                     if thumb.contains(x, y) {
                         session.view.carousel.insert(key.clone(), *index);
-                        let grid = crate::images::display_mode(value.as_ref()) == "grid";
-                        // 九宫格点图 = 直接开灯箱；轮播点缩略图 = 切主图
-                        if grid {
-                            session.view.lightbox =
-                                Some(crate::model::Lightbox::new(row_id, field_id, *index));
-                            note_lightbox_probe(session, outcome);
-                        } else {
-                            // 长按到点进拖拽重排：先记按压，帧拍里按时间判定
-                            session.view.image_press = Some(crate::model::ImagePress {
-                                row_id: row_id.clone(),
-                                field_id: field_id.clone(),
-                                index: *index,
-                                at: std::time::Instant::now(),
-                                start: crate::model::Point::new(x, y),
-                                moved: false,
-                            });
-                        }
+                        // 九宫格点图在干净松手时才开灯箱；轮播点缩略图切主图。
+                        // 两种情况都记按压：长按到点进拖拽重排，移动超过阈值即取消。
+                        session.view.image_press = Some(crate::model::ImagePress {
+                            row_id: row_id.clone(),
+                            field_id: field_id.clone(),
+                            index: *index,
+                            at: std::time::Instant::now(),
+                            start: crate::model::Point::new(x, y),
+                            moved: false,
+                        });
                         outcome.paint = true;
                         return;
                     }
@@ -411,14 +404,16 @@ fn press(
                 outcome.paint = true;
                 return;
             }
-            // 再点选区内部（含多格 / 整行 / 整列）弹格式气泡
+            // 再点选区内部（含多格 / 整行 / 整列）：保持原选区并弹格式气泡
             let already = ops::region_of(
                 session.view.selection.as_ref(),
                 &session.data.fields,
                 &session.data.rows,
             )
             .is_some_and(|region| region.contains(row, field));
-            session.view.selection = Some(TableSelection::Cell { row_id, field_id });
+            if !already {
+                session.view.selection = Some(TableSelection::Cell { row_id, field_id });
+            }
             session.view.bar_shown = already;
             session.view.press = Some(PressState {
                 origin: (row, field),
@@ -483,13 +478,14 @@ fn caret_at_point(session: &Session, x: f32, y: f32) -> Option<usize> {
         session.view.canvas_size,
     )?;
     let edit = session.view.editing.as_ref()?;
+    let (row, field_index) = edit.position(session)?;
     let (Some(field), Some(table_row)) = (
-        session.data.fields.get(edit.field),
-        session.data.rows.get(edit.row),
+        session.data.fields.get(field_index),
+        session.data.rows.get(row),
     ) else {
         return None;
     };
-    let cell = geo.cell_rect(edit.row, edit.field);
+    let cell = geo.cell_rect(row, field_index);
     let zoom = session.view.zoom;
     let style = ops::style_of(table_row, &field.id);
     let font = crate::text::FontSpec::of(&style, field, zoom);
@@ -685,7 +681,7 @@ fn move_cursor(session: &mut Session, x: f32, y: f32, outcome: &mut Outcome) {
         if press.kind == PressKind::Cell {
             let (row, field) = press.origin;
             let distance = ((press.pos.x - x).powi(2) + (press.pos.y - y).powi(2)).sqrt();
-            if distance > crate::model::CELL_PAD_X * 2.0 {
+            if distance > crate::model::RANGE_DRAG_SLOP * session.view.zoom {
                 if let Some(Hit::Cell { row: target_row, field: target_field }) = hit {
                     let (anchor_row, anchor_field) = (row, field);
                     if let (Some(anchor), Some(target)) = (
@@ -755,13 +751,27 @@ fn reorder_target(geo: &geom::Geo<'_>, session: &Session, y: f32) -> Option<usiz
 fn release(session: &mut Session, x: f32, outcome: &mut Outcome) {
     session.view.hover = None;
     session.view.editor_drag = false;
-    session.view.image_press = None;
+    let image_press = session.view.image_press.take();
     if let Some(drag) = session.view.img_drag.take() {
         if commit_image_drag(session, drag) {
             outcome.dirty = true;
         }
         outcome.paint = true;
         return;
+    }
+    // 九宫格缩略图：同格内按下并抬起（未超移动阈值、未进拖拽）才开灯箱
+    if let Some(press) = image_press {
+        let grid = session.data.rows.iter()
+            .find(|row| row.id == press.row_id)
+            .and_then(|row| row.values.get(&press.field_id))
+            .is_some_and(|value| crate::images::display_mode(Some(value)) == "grid");
+        if grid && !press.moved {
+            session.view.lightbox =
+                Some(crate::model::Lightbox::new(press.row_id, press.field_id, press.index));
+            note_lightbox_probe(session, outcome);
+            outcome.paint = true;
+            return;
+        }
     }
     if let Some(swipe) = session.view.swipe.take() {
         if swipe.moved {
@@ -945,7 +955,10 @@ fn key_press(
         outcome.header = true;
         if result.cancel {
             edit::cancel(session);
+            session.view.selection = None;
+            session.view.bar_shown = false;
             session.rebuild_layout();
+            outcome.selection = true;
         } else if result.commit {
             let has_next = selection_cell(session)
                 .is_some_and(|(row, _)| row + 1 < session.data.rows.len());
@@ -973,18 +986,9 @@ fn key_press(
             NamedKey::Home => move_selection(session, NavDir::Home),
             NamedKey::End => move_selection(session, NavDir::End),
             NamedKey::Enter => {
-                // 只有可直接输入的字段才起稿：图片 / 单选走各自交互，避免把字符串写进图片值
-                if let Some((row, field)) = selection_cell(session) {
-                    let typeable = session
-                        .data
-                        .fields
-                        .get(field)
-                        .is_some_and(crate::text::can_type_into);
-                    if typeable {
-                        edit::begin(session, row, field, None);
-                        outcome.header = true;
-                    }
-                }
+                // 选中态回车 = 下移一行；起稿编辑用双击 / 选中后直接敲字符
+                move_selection(session, NavDir::Down);
+                outcome.selection = true;
             }
             NamedKey::Escape => {
                 session.view.bar_shown = false;
@@ -1001,6 +1005,15 @@ fn key_press(
             let Some((row, field)) = selection_cell(session) else { return };
             let Some(field_def) = session.data.fields.get(field) else { return };
             if !crate::text::can_type_into(field_def) {
+                return;
+            }
+            // 数字 / 时长只接受数字与符号首字符，字母等输入不进草稿
+            if matches!(field_def.field_type.as_str(), "number" | "duration")
+                && !typed
+                    .chars()
+                    .next()
+                    .is_some_and(|ch| ch.is_ascii_digit() || matches!(ch, '-' | '.' | '+'))
+            {
                 return;
             }
             let seed = text.map(str::to_string).unwrap_or_else(|| typed.clone());
@@ -1185,9 +1198,16 @@ pub fn copy_tsv(session: &Session) -> Option<String> {
     Some(ops::build_region_tsv(&session.data.fields, &session.data.rows, &region))
 }
 
-/// 粘贴 TSV：以选区左上角为锚点落格（表格不够宽时按需扩列）。
+/// 粘贴 TSV：以选区（多格 / 整行 / 整列 / 全表）左上角为锚点落格（表格不够宽时按需扩列）。
 pub fn paste_tsv(session: &mut Session, text: &str) -> bool {
-    let Some((row, field)) = selection_cell(session) else { return false };
+    let Some(region) = ops::region_of(
+        session.view.selection.as_ref(),
+        &session.data.fields,
+        &session.data.rows,
+    ) else {
+        return false;
+    };
+    let (row, field) = (region.row_start, region.col_start);
     let grid = ops::parse_tsv(text);
     if grid.is_empty() {
         return false;
@@ -1801,5 +1821,155 @@ mod tests {
         assert_eq!(session.view.scroll_x, geo.max_scroll_x());
         assert_eq!(session.view.scroll_y, geo.max_scroll_y());
         assert!(session.view.scroll_y > 0.0, "内容高于可视区时仍有滚动余量");
+    }
+
+    /// 整行选区粘贴：锚点是选区左上角，不能被「只有单格选区才可粘贴」挡掉。
+    #[test]
+    fn paste_tsv_uses_selection_top_left_for_whole_rows() {
+        let mut session = wide_session();
+        session.view.selection = Some(atelyx_format::table::ops::TableSelection::Row("r0".into()));
+        assert!(super::paste_tsv(&mut session, "a\tb"));
+        assert_eq!(session.data.rows[0].values.get("f1"), Some(&serde_json::json!("a")));
+        assert_eq!(session.data.rows[0].values.get("f2"), Some(&serde_json::json!("b")));
+        assert_eq!(session.data.rows[1].values.get("f1"), Some(&serde_json::json!("x")));
+    }
+
+    /// 多格选区内单击：保持原选区（仅弹格式气泡），不收缩成单格。
+    #[test]
+    fn click_inside_range_keeps_multi_cell_selection() {
+        let mut session = wide_session();
+        session.view.selection = Some(atelyx_format::table::ops::TableSelection::Range {
+            anchor_row_id: "r0".into(),
+            anchor_field_id: "f1".into(),
+            row_id: "r1".into(),
+            field_id: "f2".into(),
+        });
+        let cell = crate::geom::geo(
+            &session.view.layout,
+            session.view.scroll_x,
+            session.view.scroll_y,
+            session.view.zoom,
+            session.view.canvas_size,
+        )
+        .expect("已建布局")
+        .cell_rect(1, 1);
+        let (_, _) = handle(
+            &mut session,
+            &FrameInput::PointerDown {
+                x: cell.x + cell.w / 2.0,
+                y: cell.y + cell.h / 2.0,
+                button: MouseButton::Left,
+                hit: None,
+            },
+        );
+        assert!(
+            matches!(
+                session.view.selection,
+                Some(atelyx_format::table::ops::TableSelection::Range { .. })
+            ),
+            "点选区内侧不应把整块选区收成单格"
+        );
+        handle(
+            &mut session,
+            &FrameInput::PointerUp {
+                x: cell.x + cell.w / 2.0,
+                y: cell.y + cell.h / 2.0,
+                button: MouseButton::Left,
+                hit: None,
+            },
+        );
+        assert!(matches!(
+            session.view.selection,
+            Some(atelyx_format::table::ops::TableSelection::Range { .. })
+        ));
+    }
+
+    /// 九宫格图片：按下只记按压，同格内干净松手才开灯箱；按住移动则不开。
+    #[test]
+    fn grid_thumb_opens_lightbox_only_on_clean_release() {
+        let value = serde_json::json!({ "images": ["a.png", "b.png"], "display": "grid" });
+        let mut session = session("image", value.clone());
+        let cell = cell_rect(&session);
+        let layout = crate::images::layout_of(cell, Some(&value), session.view.zoom, 0);
+        let tile = layout.tiles[0].1;
+        let (x, y) = (tile.x + tile.w / 2.0, tile.y + tile.h / 2.0);
+        let (_, _) = handle(
+            &mut session,
+            &FrameInput::PointerDown { x, y, button: MouseButton::Left, hit: None },
+        );
+        assert!(session.view.lightbox.is_none(), "按下不应直接开灯箱");
+        handle(
+            &mut session,
+            &FrameInput::PointerUp { x, y, button: MouseButton::Left, hit: None },
+        );
+        assert_eq!(
+            session.view.lightbox.as_ref().map(|lightbox| lightbox.index),
+            Some(0),
+            "同格内按下并抬起才开灯箱"
+        );
+    }
+
+    /// 选中态回车 = 下移一行（不是起稿编辑）。
+    #[test]
+    fn enter_moves_selection_down_without_editing() {
+        let mut session = tall_session(3);
+        session.view.selection = Some(atelyx_format::table::ops::TableSelection::Cell {
+            row_id: "r0".into(),
+            field_id: "f".into(),
+        });
+        let (_, _) = handle(
+            &mut session,
+            &FrameInput::Key {
+                key: atelyx_plugin_protocol::frame::Key::Named {
+                    name: atelyx_plugin_protocol::frame::NamedKey::Enter,
+                },
+                action: atelyx_plugin_protocol::frame::KeyAction::Press,
+                modifiers: Default::default(),
+                text: None,
+            },
+        );
+        assert!(session.view.editing.is_none());
+        assert_eq!(
+            super::selection_cell(&session).map(|(row, _)| row),
+            Some(1)
+        );
+    }
+
+    fn wide_session() -> Session {
+        let fields = vec![
+            TableField {
+                id: "f1".into(),
+                name: "A".into(),
+                field_type: "text".into(),
+                options: None,
+                width: None,
+                calc_type: None,
+            },
+            TableField {
+                id: "f2".into(),
+                name: "B".into(),
+                field_type: "text".into(),
+                options: None,
+                width: None,
+                calc_type: None,
+            },
+        ];
+        let rows = ["r0", "r1"]
+            .into_iter()
+            .map(|id| TableRow {
+                id: id.into(),
+                values: [("f1".to_string(), serde_json::json!("x"))]
+                    .into_iter()
+                    .collect(),
+                height: None,
+                styles: None,
+            })
+            .collect();
+        let mut data = table("text", serde_json::json!("x"));
+        data.fields = fields;
+        data.rows = rows;
+        let mut session = Session::new("t.atb".into(), data);
+        session.view.canvas_size = Size { width: 400.0, height: 300.0 };
+        session
     }
 }

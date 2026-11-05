@@ -1,7 +1,7 @@
 //! 表格右键菜单 / 字段菜单 / 行菜单 / 统计菜单 / 单选菜单：内容由插件声明，宿主渲染并回传选中项。
 //! 菜单项 id 自带语义（动作 + 目标 id），选中后在 [`apply`] 里落成模型变更。
 
-use atelyx_format::table::ops::{self, OptState};
+use atelyx_format::table::ops::{self, OptState, TableSelection};
 use atelyx_plugin_protocol::method::MenuItem;
 
 use crate::input::MenuRequest;
@@ -329,9 +329,28 @@ pub fn apply(session: &mut Session, id: &str) -> bool {
                     changed
                 }
                 "del" => {
+                    let Some(index) = session.data.rows.iter().position(|row| row.id == row_id)
+                    else {
+                        return false;
+                    };
                     crate::input::push_undo(session);
                     let removed = ops::remove_rows(&mut session.data, &[row_id]);
                     if removed > 0 {
+                        // 选中相邻行便于继续键盘导航：优先原位置的下一行，删的是末行则取上一行
+                        let next = if index < session.data.rows.len() {
+                            Some(index)
+                        } else {
+                            index.checked_sub(1)
+                        };
+                        session.view.selection = next
+                            .and_then(|index| session.data.rows.get(index))
+                            .map(|row| TableSelection::Row(row.id.clone()));
+                        if let Some(index) = next {
+                            if !session.data.fields.is_empty() {
+                                crate::input::scroll_into_view(session, index, 0);
+                            }
+                        }
+                        crate::geom::clamp_scroll(session);
                         session.touch();
                         true
                     } else {
@@ -499,5 +518,45 @@ pub fn apply_style(session: &mut Session, rest: &str) -> bool {
             crate::format::apply(session, crate::format::patch_size(size))
         }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use atelyx_format::table::TableFile;
+
+    use super::TableSelection;
+    use crate::model::Session;
+
+    fn table() -> TableFile {
+        serde_json::from_value(serde_json::json!({
+            "schema": "atelyx-table/v1",
+            "id": "t",
+            "title": "T",
+            "fields": [{ "id": "f", "name": "A", "type": "text" }],
+            "rows": [
+                { "id": "r0", "values": { "f": "x" } },
+                { "id": "r1", "values": { "f": "x" } },
+                { "id": "r2", "values": { "f": "x" } }
+            ],
+        }))
+        .expect("表格夹具")
+    }
+
+    /// 删行后选中相邻行（优先下一行，末行则上一行），键盘导航不失效。
+    #[test]
+    fn deleting_row_selects_adjacent_row() {
+        let mut session = Session::new("t.atb".into(), table());
+        session.view.selection = Some(TableSelection::Row("r1".into()));
+        assert!(super::apply(&mut session, "row:del:r1"));
+        assert!(matches!(
+            session.view.selection,
+            Some(TableSelection::Row(ref id)) if id == "r2"
+        ));
+        assert!(super::apply(&mut session, "row:del:r2"));
+        assert!(matches!(
+            session.view.selection,
+            Some(TableSelection::Row(ref id)) if id == "r0"
+        ));
     }
 }

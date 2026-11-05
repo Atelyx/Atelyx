@@ -256,7 +256,7 @@ fn draw_cell(
         .view
         .editing
         .as_ref()
-        .is_some_and(|edit| edit.row == row && edit.field == field_index)
+        .is_some_and(|edit| edit.position(session) == Some((row, field_index)))
     {
         return;
     }
@@ -979,14 +979,15 @@ fn draw_editor(
     session: &Session,
 ) {
     let Some(edit) = session.view.editing.as_ref() else { return };
+    let Some((row, field_index)) = edit.position(session) else { return };
     let (Some(field), Some(table_row)) = (
-        session.data.fields.get(edit.field),
-        session.data.rows.get(edit.row),
+        session.data.fields.get(field_index),
+        session.data.rows.get(row),
     ) else {
         return;
     };
     let zoom = session.view.zoom;
-    let cell = geo.cell_rect(edit.row, edit.field);
+    let cell = geo.cell_rect(row, field_index);
     let width = cell.w.max(40.0);
     let height = cell.h.max(24.0);
     let style = ops::style_of(table_row, &field.id);
@@ -1129,12 +1130,13 @@ pub fn ime_rect(session: &Session, size: Size) -> Option<atelyx_plugin_protocol:
         session.view.zoom,
         size,
     )?;
-    let (field, row) = (
-        session.data.fields.get(edit.field)?,
-        session.data.rows.get(edit.row)?,
+    let (row, field_index) = edit.position(session)?;
+    let (field, table_row) = (
+        session.data.fields.get(field_index)?,
+        session.data.rows.get(row)?,
     );
-    let cell = geo.cell_rect(edit.row, edit.field);
-    let style = ops::style_of(row, &field.id);
+    let cell = geo.cell_rect(row, field_index);
+    let style = ops::style_of(table_row, &field.id);
     let font = FontSpec::of(&style, field, session.view.zoom);
     let pad_x = crate::model::CELL_PAD_X * session.view.zoom;
     let pad_y = if field.field_type == "text" {

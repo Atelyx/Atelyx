@@ -40,6 +40,8 @@ pub fn zoom_percent(zoom: f32) -> i32 {
 pub const UNDO_DEPTH: usize = 50;
 /// 双击判定窗口（毫秒）。
 pub const DOUBLE_CLICK_MS: u128 = 350;
+/// 单元格按压到拖选的位移阈值（逻辑像素，乘以缩放）。
+pub const RANGE_DRAG_SLOP: f32 = 5.0;
 
 /// 数据快照（撤销 / 重做单元）。
 pub type Snapshot = (Vec<TableField>, Vec<TableRow>);
@@ -122,8 +124,9 @@ impl Session {
         // 列宽拖拽在途：该列换行宽每帧都变，本轮不实测（定高与绘制同走字符估算）
         let dragging = self.view.col_drag.as_ref().map(|drag| drag.field_id.clone());
         // 在途草稿也算内容：它可能比已提交值多出软换行，行高要跟着撑开
-        let draft = self.view.editing.as_ref().map(|edit| {
-            (edit.row, edit.field, edit.editor.display_text())
+        let draft = self.view.editing.as_ref().and_then(|edit| {
+            edit.position(self)
+                .map(|(row, field)| (row, field, edit.editor.display_text()))
         });
         let mut row_h = Vec::with_capacity(self.data.rows.len());
         let mut row_y = Vec::with_capacity(self.data.rows.len() + 1);

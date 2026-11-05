@@ -6,11 +6,21 @@ use atelyx_format::table::ops;
 use crate::editor::Editor;
 use crate::model::{Session, Snapshot};
 
-/// 单元格编辑会话。
+/// 单元格编辑会话：绑定行 / 字段的稳定 id，远端插删行后仍指向同一实体。
 pub struct CellEdit {
-    pub row: usize,
-    pub field: usize,
+    pub row_id: String,
+    pub field_id: String,
     pub editor: Editor,
+}
+
+impl CellEdit {
+    /// 草稿所在格在当前数据里的下标；行或字段已被删除 = None（提交据此拒绝写回）。
+    pub fn position(&self, session: &Session) -> Option<(usize, usize)> {
+        Some((
+            session.data.rows.iter().position(|row| row.id == self.row_id)?,
+            session.data.fields.iter().position(|field| field.id == self.field_id)?,
+        ))
+    }
 }
 
 /// 起稿：记录快照、把当前值放进编辑器、光标置于末尾。
@@ -38,7 +48,11 @@ pub fn begin(session: &mut Session, row: usize, field: usize, seed: Option<Strin
     session.view.bar_shown = false;
     session.view.caret_on = true;
     session.view.editor_drag = false;
-    session.view.editing = Some(CellEdit { row, field, editor });
+    session.view.editing = Some(CellEdit {
+        row_id: table_row.id.clone(),
+        field_id,
+        editor,
+    });
 }
 
 /// 起稿快照入撤销栈（提交有变化时调用）；新变更作废重做栈。
@@ -58,7 +72,9 @@ pub fn commit(session: &mut Session) -> bool {
     if !edit.editor.touched {
         return false;
     }
-    let Some(field) = session.data.fields.get(edit.field) else { return false };
+    let Some(field) = session.data.fields.iter().find(|field| field.id == edit.field_id) else {
+        return false;
+    };
     let field_id = field.id.clone();
     let field_type = field.field_type.clone();
     let value = match cell_value(&field_type, &edit.editor.text) {
@@ -70,7 +86,9 @@ pub fn commit(session: &mut Session) -> bool {
             return false;
         }
     };
-    let Some(row) = session.data.rows.get_mut(edit.row) else { return false };
+    let Some(row) = session.data.rows.iter_mut().find(|row| row.id == edit.row_id) else {
+        return false;
+    };
     let changed = ops::set_cell_value(row, &field_id, value);
     if !changed {
         return false;
@@ -130,6 +148,7 @@ pub fn multiline(session: &Session, edit: &CellEdit) -> bool {
     session
         .data
         .fields
-        .get(edit.field)
+        .iter()
+        .find(|field| field.id == edit.field_id)
         .is_some_and(|field| field.field_type == "text")
 }

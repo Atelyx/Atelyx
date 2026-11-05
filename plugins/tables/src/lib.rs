@@ -363,6 +363,8 @@ impl PluginState {
         }
         let changed = self.with_session_mut(|session| menu::apply(session, id)).unwrap_or(false);
         if changed {
+            // 菜单可能删行 / 删列并重设选区：广播一次让宿主与协作者跟随
+            crate::session::broadcast_selection(self, ctx).await;
             self.schedule_save(ctx);
             self.publish_header(ctx).await;
         }
@@ -919,7 +921,23 @@ impl PluginState {
                         Ok(_) => crate::session::notify_changed(&state, &ctx).await,
                         Err(error) => {
                             ctx.log_error(&format!("保存表格失败：{error}"));
-                            state.with_session_mut(|session| session.save_error = Some(error));
+                            // 同一失败反复重试不重复弹通知；头部错误仍每次同步
+                            let first = state
+                                .with_session_mut(|session| {
+                                    let first = session.save_error.as_deref() != Some(error.as_str());
+                                    session.save_error = Some(error.clone());
+                                    first
+                                })
+                                .unwrap_or(false);
+                            if first {
+                                let _ = ctx
+                                    .notify(
+                                        &format!("保存表格失败：{error}"),
+                                        None,
+                                        atelyx_plugin_protocol::method::NotificationLevel::Error,
+                                    )
+                                    .await;
+                            }
                         }
                     }
                     state.publish_header(&ctx).await;
@@ -951,16 +969,16 @@ impl PluginState {
     }
 
     /// 空间远端补丁合入。
-    fn apply_remote(&self, payload: &serde_json::Value) -> bool {
+    fn apply_remote(&self, payload: &serde_json::Value) -> crate::session::RemotePatchOutcome {
         let Ok(params) =
             serde_json::from_value::<atelyx_plugin_protocol::method::SpaceFilePatchPayload>(
                 payload.clone(),
             )
         else {
-            return false;
+            return crate::session::RemotePatchOutcome::default();
         };
         if params.kind != "table" {
-            return false;
+            return crate::session::RemotePatchOutcome::default();
         }
         crate::session::apply_remote_patch(self, &params.path, &params.patch, params.landed)
     }
@@ -1117,11 +1135,21 @@ impl PluginHandler for TablesPlugin {
                 }
             }
             event::name::SPACE_FILE_PATCH => {
-                if self.state.apply_remote(&params.payload) {
+                let outcome = self.state.apply_remote(&params.payload);
+                if outcome.applied {
                     // 远端合入也是一次内容结算：订阅 table:changed 的第三方视图据此重取
                     crate::session::notify_changed(&self.state, ctx).await;
                     self.state.render(ctx).await;
                     self.state.publish_header(ctx).await;
+                }
+                if outcome.draft_lost {
+                    let _ = ctx
+                        .notify(
+                            "正在编辑的单元格已被他人删除，草稿未保存",
+                            None,
+                            atelyx_plugin_protocol::method::NotificationLevel::Warning,
+                        )
+                        .await;
                 }
             }
             event::name::PANEL_FLUSH => {

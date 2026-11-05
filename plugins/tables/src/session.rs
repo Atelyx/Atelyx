@@ -171,26 +171,55 @@ pub fn restore_snapshot(plugin: &PluginState, path: &str, content: &str) -> bool
     true
 }
 
+/// 远端补丁合入结果：是否改动数据；在途草稿绑定的行 / 字段被远端删除而丢弃。
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RemotePatchOutcome {
+    pub applied: bool,
+    pub draft_lost: bool,
+}
+
 /// 空间远端补丁合入：作废撤销栈（栈内快照是合入前的本端全量数据）。
-pub fn apply_remote_patch(plugin: &PluginState, path: &str, patch: &serde_json::Value, landed: bool) -> bool {
-    let Ok(mut slot) = plugin.session.lock() else { return false };
-    let Some(session) = slot.as_mut() else { return false };
+/// 草稿按稳定 id 跟随实体；实体被远端删除时丢弃草稿并由调用方提示，不能静默写进别的格。
+pub fn apply_remote_patch(
+    plugin: &PluginState,
+    path: &str,
+    patch: &serde_json::Value,
+    landed: bool,
+) -> RemotePatchOutcome {
+    let Ok(mut slot) = plugin.session.lock() else { return RemotePatchOutcome::default() };
+    let Some(session) = slot.as_mut() else { return RemotePatchOutcome::default() };
     if session.file != path {
-        return false;
+        return RemotePatchOutcome::default();
     }
     let Ok(patch) = serde_json::from_value::<table::TablePatch>(patch.clone()) else {
-        return false;
+        return RemotePatchOutcome::default();
     };
     if patch.id != session.data.id {
-        return false;
+        return RemotePatchOutcome::default();
     }
     // 回声补丁（同 id 同内容）不触发布局重建与重绘：按 id 差量比对，空补丁直接丢弃
     if !patch_changes(&session.data, &patch) {
-        return false;
+        return RemotePatchOutcome::default();
     }
+    let editing = session
+        .view
+        .editing
+        .as_ref()
+        .map(|edit| (edit.row_id.clone(), edit.field_id.clone()));
     table::apply_table_patch(&mut session.data, &patch);
     session.version += 1;
+    let draft_lost = editing.is_some_and(|(row_id, field_id)| {
+        let gone = !session.data.rows.iter().any(|row| row.id == row_id)
+            || !session.data.fields.iter().any(|field| field.id == field_id);
+        if gone {
+            session.view.editing = None;
+            session.view.edit_session = None;
+            session.view.editor_drag = false;
+        }
+        gone
+    });
     session.rebuild_layout();
+    crate::input::clear_invalid_selection(session);
     // 行 / 列集合变了：滚动位收回新几何的合法区间
     crate::geom::clamp_scroll(session);
     session.view.undo.clear();
@@ -198,7 +227,7 @@ pub fn apply_remote_patch(plugin: &PluginState, path: &str, patch: &serde_json::
     if landed && !session.dirty {
         session.saved = session.data.clone();
     }
-    true
+    RemotePatchOutcome { applied: true, draft_lost }
 }
 
 /// 补丁是否真会改动数据（按 id 比对内容；顺序变更按 id 序列判定）。
@@ -548,5 +577,70 @@ mod tests {
         assert!(selection, "回滚清掉对旧行的选区");
         assert_eq!(scroll_x, max_x);
         assert_eq!(scroll_y, max_y);
+    }
+
+    /// 编辑在途 + 远端在顶部插行：草稿绑定行 id，提交落到原行而不是旧行索引。
+    #[test]
+    fn draft_commit_follows_row_id_after_remote_insert() {
+        let plugin = PluginState::new();
+        let mut session = Session::new("t.atb".into(), table(2));
+        crate::edit::begin(&mut session, 1, 0, Some("改".into()));
+        *plugin.session.lock().expect("会话锁") = Some(session);
+
+        let patch = serde_json::json!({
+            "id": "t",
+            "upsertRows": [{ "id": "r9", "values": { "f": "远端" } }],
+            "rowOrder": ["r9", "r0", "r1"],
+        });
+        let outcome = apply_remote_patch(&plugin, "t.atb", &patch, false);
+        assert!(outcome.applied);
+        assert!(!outcome.draft_lost, "被编辑行仍在，草稿应保留");
+
+        plugin
+            .with_session_mut(|session| crate::edit::commit(session))
+            .expect("会话仍在");
+        let values = plugin
+            .with_session(|session| {
+                session.data.rows.iter()
+                    .find(|row| row.id == "r1")
+                    .and_then(|row| row.values.get("f").cloned())
+            })
+            .expect("会话仍在");
+        assert_eq!(values, Some(serde_json::json!("改")), "草稿写回原行");
+        assert!(
+            plugin
+                .with_session(|session| session.data.rows[1].values.get("f") == Some(&serde_json::json!("x")))
+                .expect("会话仍在"),
+            "插行后的旧索引行未被写错"
+        );
+    }
+
+    /// 编辑在途 + 远端删掉被编辑行：草稿丢弃并标记，不能静默写进相邻格。
+    #[test]
+    fn draft_dropped_when_remote_removes_edited_row() {
+        let plugin = PluginState::new();
+        let mut session = Session::new("t.atb".into(), table(2));
+        crate::edit::begin(&mut session, 1, 0, Some("改".into()));
+        *plugin.session.lock().expect("会话锁") = Some(session);
+
+        let patch = serde_json::json!({
+            "id": "t",
+            "removedRowIds": ["r1"],
+            "rowOrder": ["r0"],
+        });
+        let outcome = apply_remote_patch(&plugin, "t.atb", &patch, false);
+        assert!(outcome.applied);
+        assert!(outcome.draft_lost, "被编辑行已删除，草稿应丢弃");
+
+        let (editing, wrote) = plugin
+            .with_session(|session| {
+                (
+                    session.view.editing.is_none(),
+                    session.data.rows.iter().any(|row| row.values.get("f") == Some(&serde_json::json!("改"))),
+                )
+            })
+            .expect("会话仍在");
+        assert!(editing, "编辑态随目标消失而结束");
+        assert!(!wrote, "草稿未写进任何现存行");
     }
 }
