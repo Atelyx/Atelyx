@@ -250,15 +250,27 @@ impl NoteModel {
         self.mode = Mode::Read;
     }
 
-    /// 宿主改写正文（协作远端合入 / 属性面板 / 保存合流）：撤销栈作废，
-    /// 旧快照回放会把远端内容整体改回去。
+    /// 宿主改写正文（协作远端合入 / 属性面板 / 保存合流）。
+    /// 正文变化时撤销栈作废（旧快照回放会把远端内容整体改回去）；
+    /// 仅 frontmatter 变化（属性写回）时正文不动，记一次可撤销编辑，撤销栈仍与正文对齐。
     pub fn replace_text(&mut self, text: String) {
         if self.text == text {
             return;
         }
-        self.text = text;
-        self.undo.clear();
-        self.redo.clear();
+        if body_of(&self.text) == body_of(&text) {
+            self.undo.push(UndoEntry {
+                text: std::mem::replace(&mut self.text, text),
+                selection: self.selection,
+            });
+            if self.undo.len() > UNDO_DEPTH {
+                self.undo.remove(0);
+            }
+            self.redo.clear();
+        } else {
+            self.text = text;
+            self.undo.clear();
+            self.redo.clear();
+        }
         self.selection = None;
         self.refresh_blocks();
         self.refresh_props();
@@ -392,6 +404,40 @@ impl NoteModel {
             return 0;
         };
         self.body()[prev.to..next.from].matches('\n').count().saturating_sub(1)
+    }
+
+    /// 同一列表块内两项之间空行区某行的内容区间（绝对偏移）：`item` 为后一项，首项无前项。
+    pub fn item_gap_line_range(&self, block: usize, item: usize, line: usize) -> Option<(usize, usize)> {
+        if item == 0 {
+            return None;
+        }
+        let info = self.blocks.get(block)?;
+        let (prev, next) = (info.items.get(item - 1)?, info.items.get(item)?);
+        let body = self.body();
+        let start = body[prev.to..next.from]
+            .char_indices()
+            .filter(|(_, ch)| *ch == '\n')
+            .map(|(offset, _)| prev.to + offset + 1)
+            .filter(|at| *at < next.from)
+            .nth(line)?;
+        let end = body[start..].find('\n').map_or(body.len(), |offset| start + offset);
+        Some((self.body_start + start, self.body_start + end))
+    }
+
+    /// 光标落在哪个列表项间空行区的哪一行（绝对偏移）：行首 ≤ 光标 ≤ 行尾。
+    pub fn item_gap_line_at(&self, offset: usize) -> Option<(usize, usize, usize)> {
+        for (block, info) in self.blocks.iter().enumerate() {
+            for item in 1..info.items.len() {
+                for line in 0..self.item_gap_lines(block, item) {
+                    if let Some((from, to)) = self.item_gap_line_range(block, item, line) {
+                        if offset >= from && offset <= to {
+                            return Some((block, item, line));
+                        }
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// 远端光标（全文绝对偏移）落在哪个揭示单元的第几行：装饰位移与行前文本供绘制时量宽。
@@ -567,8 +613,10 @@ impl NoteModel {
         let parsed = frontmatter::parse(&self.text);
         let open = frontmatter::block_end(&self.text).is_some();
         self.props.data = if open {
-            let pairs = parsed.data.as_map().map(<[(String, Yaml)]>::to_vec).unwrap_or_default();
-            Some((pairs, parsed.ok))
+            let map = parsed.data.as_map().map(<[(String, Yaml)]>::to_vec);
+            let editable = parsed.ok && map.is_some();
+            // 根不是映射的 YAML 无法按属性编辑：面板只显示不可编辑态，避免新建一条覆盖整块
+            Some((map.unwrap_or_default(), editable))
         } else if self.text.starts_with("---") {
             Some((Vec::new(), false))
         } else {
@@ -892,6 +940,11 @@ fn line_start_line(body: &str, at: usize) -> &str {
     let at = at.min(body.len());
     let end = body[at..].find('\n').map_or(body.len(), |offset| at + offset);
     &body[at..end]
+}
+
+/// 去掉开头闭合的 frontmatter 块后的正文；无块即全文。
+fn body_of(text: &str) -> &str {
+    frontmatter::block_end(text).map_or(text, |end| &text[end..])
 }
 
 fn block_range(block: &MarkdownBlock) -> (usize, usize) {
@@ -1230,6 +1283,20 @@ mod tests {
     }
 
     #[test]
+    fn item_gap_line_range_locates_lines_between_items() {
+        let mut model = NoteModel::default();
+        model.load("a.md".into(), "- 甲\n\n  \n- 乙\n".into(), true);
+        assert_eq!(model.item_gap_lines(0, 1), 2, "两项之间两根空行");
+        let (from, to) = model.item_gap_line_range(0, 1, 0).expect("项间首行");
+        assert_eq!(&model.text[from..to], "", "首行为空");
+        let (from, to) = model.item_gap_line_range(0, 1, 1).expect("项间次行");
+        assert_eq!(&model.text[from..to], "  ", "空格属于该空行内容");
+        assert!(model.item_gap_line_range(0, 0, 0).is_none(), "首项没有前项间空行");
+        assert_eq!(model.item_gap_line_at(from), Some((0, 1, 1)), "光标落点归到项间空行");
+        assert_eq!(model.item_gap_line_at(to), Some((0, 1, 1)), "行尾仍算该空行");
+    }
+
+    #[test]
     fn load_and_clear_drop_a_pending_rename() {
         let mut model = NoteModel::default();
         model.pending_rename = Some("改名".into());
@@ -1248,6 +1315,27 @@ mod tests {
         assert_eq!(model.undo.len(), 1);
         model.replace_text("三".into());
         assert!(model.undo.is_empty() && model.redo.is_empty());
+    }
+
+    #[test]
+    fn frontmatter_only_replace_keeps_undo_history() {
+        let mut model = NoteModel::default();
+        model.load("a.md".into(), "---\n标签: 甲\n---\n正文\n".into(), true);
+        model.edit_text("---\n标签: 甲\n---\n正文二\n".into());
+        assert_eq!(model.undo.len(), 1);
+        model.replace_text("---\n标签: 乙\n---\n正文二\n".into());
+        assert_eq!(model.undo.len(), 2, "属性写回只追加一次可撤销编辑");
+        model.undo();
+        assert!(model.text.contains("标签: 甲") && model.text.contains("正文二"), "撤销只回退属性，正文不动");
+    }
+
+    #[test]
+    fn non_map_frontmatter_is_not_editable() {
+        let mut model = NoteModel::default();
+        model.load("a.md".into(), "---\n- 甲\n- 乙\n---\n正文\n".into(), true);
+        let (pairs, editable) = model.props.data.as_ref().expect("有 frontmatter 即带属性数据");
+        assert!(pairs.is_empty(), "序列根没有属性行");
+        assert!(!editable, "根不是映射时不开放属性编辑");
     }
 
     #[test]

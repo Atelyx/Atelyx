@@ -3,6 +3,7 @@
 use atelyx_plugin_protocol::paint::{
     ColorToken, DrawCommand, ImageFit, ImageSource, PaintColor, TextWeight,
 };
+use atelyx_plugin_protocol::frame::HitCursor;
 use atelyx_plugin_sdk::frame_ui::{BoxStyle, BoxWidth, Edges, Rect, TextRole, TextStyle, Ui};
 
 use crate::model::{
@@ -10,6 +11,10 @@ use crate::model::{
     SOURCE_SCROLL, TITLE,
 };
 use atelyx_plugin_props as props;
+use std::sync::{Arc, Mutex};
+
+/// 只读面的行几何缓存：行 id → 面内顶边（双击无命中时据此挑最近行进入编辑）。
+pub type RowCache = Arc<Mutex<Vec<(String, f32)>>>;
 
 /// 正文源码行高倍数（与阅读面同一口径）。
 const PROSE_LINE: f32 = 1.625;
@@ -19,6 +24,8 @@ const LIST_STEP: f32 = crate::model::LIST_TEXT_X;
 const TAG_SIZE: f32 = 10.0;
 const TAG_PAD_X: f32 = 4.0;
 const TAG_H: f32 = 14.0;
+/// `[[` 候选浮层的滚动容器 id（候选超出可用高度时滚轮滚动）。
+const WIKI_SCROLL: &str = "note:wiki-scroll";
 
 /// 预览编辑的块 id；双击 / 单击回发同一个 id。
 pub fn block_id(index: usize) -> String {
@@ -30,6 +37,11 @@ pub fn gap_input_id(gap: usize, line: usize) -> String {
     format!("note:gap:{gap}:{line}")
 }
 
+/// 列表项间空行输入面 id：`block` / `item` 定位后一项，`line` = 空行区内行序。
+pub fn item_gap_id(block: usize, item: usize, line: usize) -> String {
+    format!("note:igap:{block}:{item}:{line}")
+}
+
 /// 揭示单元输入面 / 命中区 id：`block` = 块序，`item` = 单元序。
 pub fn item_id(block: usize, item: usize) -> String {
     format!("note:item:{block}:{item}")
@@ -39,7 +51,9 @@ pub fn backlink_id(index: usize) -> String {
     format!("note:backlink:{index}")
 }
 
-pub fn frame(ui: &mut Ui<'_, '_>, model: &NoteModel) {
+pub fn frame(ui: &mut Ui<'_, '_>, model: &NoteModel, rows: &RowCache) {
+    // 每帧先清空：构建可能多趟，只保留本帧最后一趟的行几何
+    rows.lock().unwrap().clear();
     if !model.is_open() {
         empty(ui, model);
         return;
@@ -61,7 +75,7 @@ pub fn frame(ui: &mut Ui<'_, '_>, model: &NoteModel) {
         if model.mode != Mode::Source {
             props::panel(ui, model);
         }
-        content(ui, model);
+        content(ui, model, rows);
         ui.rule();
         backlinks(ui, model);
     });
@@ -185,9 +199,9 @@ fn mode_control(ui: &mut Ui<'_, '_>, model: &NoteModel) {
                         "当前身份为只读，无法编辑"
                     } else {
                         match mode {
-                            Mode::Read => "只读：仅查看，双击正文进入编辑",
-                            Mode::Edit => "预览编辑",
-                            Mode::Source => "源码",
+                            Mode::Read => "仅查看，双击正文进入编辑",
+                            Mode::Edit => "正文可直接修改",
+                            Mode::Source => "直接编辑 Markdown 源文",
                         }
                     };
                     ui.hint(id, tip);
@@ -266,7 +280,7 @@ fn page_title(ui: &mut Ui<'_, '_>, model: &NoteModel) {
     });
 }
 
-fn content(ui: &mut Ui<'_, '_>, model: &NoteModel) {
+fn content(ui: &mut Ui<'_, '_>, model: &NoteModel, rows_cache: &RowCache) {
     let border = if model.mode == Mode::Read {
         ColorToken::Transparent
     } else {
@@ -278,14 +292,14 @@ fn content(ui: &mut Ui<'_, '_>, model: &NoteModel) {
         Edges::all(1.0),
         0.0,
         |ui| match model.mode {
-            Mode::Read => read_view(ui, model),
+            Mode::Read => read_view(ui, model, rows_cache),
             Mode::Edit => edit_view(ui, model),
             Mode::Source => source_view(ui, model),
         },
     );
 }
 
-fn read_view(ui: &mut Ui<'_, '_>, model: &NoteModel) {
+fn read_view(ui: &mut Ui<'_, '_>, model: &NoteModel, rows_cache: &RowCache) {
     ui.markdown_soft_wrap(model.prefs.soft_wrap);
     ui.scroll(BODY_SCROLL, 0.0, |ui| {
         bounded(ui, model, |ui| {
@@ -294,7 +308,7 @@ fn read_view(ui: &mut Ui<'_, '_>, model: &NoteModel) {
                     ui.text("这篇笔记还没有正文。", TextRole::Caption);
                     return;
                 }
-                rows(ui, model, None);
+                rows(ui, model, None, Some(rows_cache));
             });
         });
     });
@@ -320,7 +334,7 @@ fn edit_view(ui: &mut Ui<'_, '_>, model: &NoteModel) {
                     );
                     return;
                 }
-                rows(ui, model, Some(measure));
+                rows(ui, model, Some(measure), None);
             });
         });
     });
@@ -334,7 +348,12 @@ struct EditMeasure {
 }
 
 /// 块序列：只读 / 预览编辑共用（预览编辑档的活动块换成源码输入面，空行各自成为输入行）。
-fn rows(ui: &mut Ui<'_, '_>, model: &NoteModel, edit: Option<EditMeasure>) {
+fn rows(
+    ui: &mut Ui<'_, '_>,
+    model: &NoteModel,
+    edit: Option<EditMeasure>,
+    rows_cache: Option<&RowCache>,
+) {
     let body = model.body();
     let line = ui.role_size(TextRole::Body) * PROSE_LINE;
     for (index, block) in model.blocks.iter().enumerate() {
@@ -349,7 +368,14 @@ fn rows(ui: &mut Ui<'_, '_>, model: &NoteModel, edit: Option<EditMeasure>) {
                         }
                     }
                 }
-                None => ui.spacer(gaps as f32 * line),
+                None => match rows_cache {
+                    Some(cache) => {
+                        for line_index in 0..gaps {
+                            gap_hit_line(ui, cache, gap_input_id(index, line_index), line);
+                        }
+                    }
+                    None => ui.spacer(gaps as f32 * line),
+                },
             }
         }
         if let (Some(measure), Some(index_active)) = (edit, model.active_block) {
@@ -369,10 +395,11 @@ fn rows(ui: &mut Ui<'_, '_>, model: &NoteModel, edit: Option<EditMeasure>) {
             }
         }
         if !block.items.is_empty() {
-            unit_rows(ui, model, index, block, line, edit);
+            unit_rows(ui, model, index, block, line, edit, rows_cache);
             continue;
         }
-        match &block.image {
+        let read = edit.is_none();
+        let draw = |ui: &mut Ui<'_, '_>| match &block.image {
             Some(image) => {
                 let failed = model.image_probe.get(&image.src) == Some(&None);
                 if failed {
@@ -383,7 +410,30 @@ fn rows(ui: &mut Ui<'_, '_>, model: &NoteModel, edit: Option<EditMeasure>) {
                     let natural = model.image_probe.get(&image.src).copied().flatten();
                     match image_layout(image, natural, model.prefs.content_width as f32) {
                         Some(size) => {
-                            ui.image_fit_sized(image_source(image), size.width, size.height, ImageFit::Contain);
+                            if read {
+                                // 图片本身没有命中区：补一层同 id 命中，双击走块进入编辑
+                                let image_ui = |ui: &mut Ui<'_, '_>| {
+                                    ui.image_fit_sized(
+                                        image_source(image),
+                                        size.width,
+                                        size.height,
+                                        ImageFit::Contain,
+                                    );
+                                };
+                                ui.hover_box(
+                                    block_id(index),
+                                    BoxWidth::Fixed(size.width),
+                                    Edges::all(0.0),
+                                    image_ui,
+                                );
+                            } else {
+                                ui.image_fit_sized(
+                                    image_source(image),
+                                    size.width,
+                                    size.height,
+                                    ImageFit::Contain,
+                                );
+                            }
                         }
                         // 原图尺寸还没探测回来且没有声明尺寸：先按正文渲染，探测完成后重排成图片
                         None => {
@@ -401,6 +451,10 @@ fn rows(ui: &mut Ui<'_, '_>, model: &NoteModel, edit: Option<EditMeasure>) {
                     ui.markdown_named(block_id(index), source, Vec::new());
                 });
             }
+        };
+        match rows_cache {
+            Some(cache) if read => record_row(ui, cache, block_id(index), draw),
+            _ => draw(ui),
         }
     }
     let tail = model.gap_lines(model.blocks.len()).len();
@@ -414,9 +468,44 @@ fn rows(ui: &mut Ui<'_, '_>, model: &NoteModel, edit: Option<EditMeasure>) {
                     }
                 }
             }
-            None => ui.spacer(tail as f32 * line),
+            None => match rows_cache {
+                Some(cache) => {
+                    for line_index in 0..tail {
+                        gap_hit_line(ui, cache, gap_input_id(model.blocks.len(), line_index), line);
+                    }
+                }
+                None => ui.spacer(tail as f32 * line),
+            },
         }
     }
+}
+
+/// 记录一行的面内顶边；`rows` 为 None（预览编辑档）时不加包裹，布局不变。
+fn record_row(
+    ui: &mut Ui<'_, '_>,
+    rows: &RowCache,
+    id: String,
+    build: impl FnOnce(&mut Ui<'_, '_>),
+) {
+    let cache = Arc::clone(rows);
+    // 外层 column 抵消 stack 的撑满高度，行高仍由内容决定；1 像素画布只读行顶
+    ui.column(0.0, |outer| {
+        outer.stack(|layer| {
+            layer.canvas(1.0, move |canvas| {
+                cache.lock().unwrap().push((id.clone(), canvas.area().y));
+            });
+            build(layer);
+        });
+    });
+}
+
+/// 只读面的空行命中区：高度与预览编辑的同名输入行一致，双击后由编辑面落光标。
+fn gap_hit_line(ui: &mut Ui<'_, '_>, rows: &RowCache, id: String, height: f32) {
+    let cache = Arc::clone(rows);
+    ui.canvas(height, move |canvas| {
+        canvas.hit(&id, canvas.area(), HitCursor::Pointer);
+        cache.lock().unwrap().push((id.clone(), canvas.area().y));
+    });
 }
 
 /// 一根空行 = 一个无底色输入面：点它光标落在这根空行，键入内容就地插进正文，不揭示任何块。
@@ -432,6 +521,26 @@ fn gap_line(ui: &mut Ui<'_, '_>, model: &NoteModel, gap: usize, line_index: usiz
     );
 }
 
+/// 列表项间空行 = 一根可编辑的输入行：光标落在该行，键入内容就地插进正文。
+fn item_gap_line(
+    ui: &mut Ui<'_, '_>,
+    model: &NoteModel,
+    block: usize,
+    item: usize,
+    line_index: usize,
+    measure: EditMeasure,
+) {
+    let Some((from, to)) = model.item_gap_line_range(block, item, line_index) else { return };
+    let value = model.text[from..to].to_string();
+    ui.text_area_plain_fixed(
+        item_gap_id(block, item, line_index),
+        value,
+        measure.line,
+        measure.size,
+        Edges::symmetric(0.0, 0.0),
+    );
+}
+
 /// 揭示单元逐项渲染：列表项按嵌套层级缩进，引用子块按块渲染；每项一个独立揭示单元。
 fn unit_rows(
     ui: &mut Ui<'_, '_>,
@@ -440,12 +549,27 @@ fn unit_rows(
     block: &BlockInfo,
     line: f32,
     edit: Option<EditMeasure>,
+    rows_cache: Option<&RowCache>,
 ) {
     let body = model.body();
     for (unit, info) in block.items.iter().enumerate() {
         let gaps = model.item_gap_lines(index, unit);
         if gaps > 0 {
-            ui.spacer(gaps as f32 * line);
+            match edit {
+                Some(measure) => {
+                    for line_index in 0..gaps {
+                        item_gap_line(ui, model, index, unit, line_index, measure);
+                    }
+                }
+                None => match rows_cache {
+                    Some(cache) => {
+                        for line_index in 0..gaps {
+                            gap_hit_line(ui, cache, item_gap_id(index, unit, line_index), line);
+                        }
+                    }
+                    None => ui.spacer(gaps as f32 * line),
+                },
+            }
         }
         let id = item_id(index, unit);
         if let Some(measure) = edit {
@@ -469,7 +593,7 @@ fn unit_rows(
             }
         }
         let source = &body[info.from..info.to];
-        match info.kind {
+        let draw = |ui: &mut Ui<'_, '_>| match info.kind {
             UnitKind::Item { depth, ordinal } => {
                 // 首行缩进由层级缩进代替，避免 4 空格以上被 Markdown 当成代码块
                 let shown = source.trim_start_matches([' ', '\t']);
@@ -499,6 +623,10 @@ fn unit_rows(
                     }
                 });
             }
+        };
+        match rows_cache {
+            Some(cache) if edit.is_none() => record_row(ui, cache, id.clone(), draw),
+            _ => draw(ui),
         }
     }
 }
@@ -714,53 +842,64 @@ fn overlays(ui: &mut Ui<'_, '_>, model: &NoteModel) {
     wiki_menu(ui, model);
 }
 
-/// `[[` 候选：贴着当前光标弹出，优先放在光标下沿，越界时翻到上沿 / 左移。
+/// `[[` 候选：贴着当前光标弹出，优先放在光标下沿，越界时翻到上沿 / 夹进面内。
 fn wiki_menu(ui: &mut Ui<'_, '_>, model: &NoteModel) {
     let Some(wiki) = &model.wiki else { return };
     let Some(caret) = wiki.caret_rect else { return };
-    let bounds = ui.bounds();
     const ROW_H: f32 = 26.0;
-    let width = 260.0;
-    let height = 8.0 + wiki.candidates.len() as f32 * ROW_H;
-    let left = if caret.x + 6.0 + width <= bounds.w - 4.0 {
-        caret.x + 6.0
-    } else {
-        (caret.x - width - 6.0).max(4.0)
-    };
-    let below = caret.y + caret.h + 4.0;
-    let top = if below + height <= bounds.h - 4.0 { below } else { (caret.y - height - 4.0).max(4.0) };
-    ui.overlay(Rect::new(left, top, width, height), |ui| {
+    const PAD: f32 = 4.0;
+    let bounds = ui.bounds();
+    let content_h = wiki.candidates.len() as f32 * ROW_H;
+    let anchor = Rect::new(caret.x + 6.0, caret.y, 0.0, caret.h);
+    let rect = props::popup_rect(
+        anchor,
+        260.0,
+        (content_h + PAD * 2.0).max(ROW_H + PAD * 2.0),
+        bounds,
+    );
+    if rect.w <= 0.0 || rect.h <= PAD * 2.0 {
+        return;
+    }
+    let inner_h = rect.h - PAD * 2.0;
+    ui.overlay(rect, |ui| {
         ui.boxed(
-            BoxWidth::Fixed(width),
+            BoxWidth::Fixed(rect.w),
             BoxStyle::new(Some(ColorToken::SurfaceOverlay), Some(ColorToken::Border), 6.0),
-            Edges::all(4.0),
+            Edges::all(PAD),
             0.0,
             |ui| {
-                for (index, path) in wiki.candidates.iter().enumerate() {
-                    let name = path.rsplit('/').next().unwrap_or(path);
-                    let name = name
-                        .strip_suffix(".md")
-                        .or_else(|| name.strip_suffix(".MD"))
-                        .unwrap_or(name);
-                    let dir = path.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
-                    ui.click_row(
-                        &format!("note:wiki:{index}"),
-                        Edges::symmetric(6.0, 3.0),
-                        3.0,
-                        false,
-                        true,
-                        |ui| {
-                            ui.row_fit(6.0, |ui| {
-                                ui.icon_named("file-text", 13.0, ColorToken::TextMuted);
-                                let style = TextStyle::new(TextRole::Caption).color(ColorToken::TextSecondary);
-                                ui.text_styled_fit(name, style);
-                                if !dir.is_empty() {
-                                    let dim = TextStyle::new(TextRole::Micro).color(ColorToken::TextMuted);
-                                    ui.text_styled_fit(dir, dim);
-                                }
-                            });
-                        },
-                    );
+                let rows = |ui: &mut Ui<'_, '_>| {
+                    for (index, path) in wiki.candidates.iter().enumerate() {
+                        let name = path.rsplit('/').next().unwrap_or(path);
+                        let name = name
+                            .strip_suffix(".md")
+                            .or_else(|| name.strip_suffix(".MD"))
+                            .unwrap_or(name);
+                        let dir = path.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
+                        ui.click_row(
+                            &format!("note:wiki:{index}"),
+                            Edges::symmetric(6.0, 3.0),
+                            3.0,
+                            false,
+                            true,
+                            |ui| {
+                                ui.row_fit(6.0, |ui| {
+                                    ui.icon_named("file-text", 13.0, ColorToken::TextMuted);
+                                    let style = TextStyle::new(TextRole::Caption).color(ColorToken::TextSecondary);
+                                    ui.text_styled_fit(name, style);
+                                    if !dir.is_empty() {
+                                        let dim = TextStyle::new(TextRole::Micro).color(ColorToken::TextMuted);
+                                        ui.text_styled_fit(dir, dim);
+                                    }
+                                });
+                            },
+                        );
+                    }
+                };
+                if content_h > inner_h {
+                    ui.scroll_max(WIKI_SCROLL, inner_h, 0.0, rows);
+                } else {
+                    ui.column(0.0, rows);
                 }
             },
         );

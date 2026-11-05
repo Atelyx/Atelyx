@@ -5,7 +5,7 @@ mod edit;
 mod model;
 mod ui;
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use atelyx_plugin_protocol::event::{
     self, FileChangeKind, FileChangedPayload, DocChangedPayload, DocPresencePayload,
@@ -29,18 +29,38 @@ const PLUGIN_ID: &str = "atelyx.notes";
 struct NotesPlugin {
     model: Mutex<NoteModel>,
     ui: AsyncMutex<FrameUi>,
+    /// 只读面本帧各行顶边（面内坐标）：双击空白时据此挑最近的行。
+    rows: ui::RowCache,
+    /// 双击空白进入编辑时控件层会按「点空」清掉焦点：事件处理完按活动输入面复位。
+    refocus: Mutex<bool>,
 }
 
 impl NotesPlugin {
     fn new() -> Self {
-        Self { model: Mutex::new(NoteModel::default()), ui: AsyncMutex::new(FrameUi::new()) }
+        Self {
+            model: Mutex::new(NoteModel::default()),
+            ui: AsyncMutex::new(FrameUi::new()),
+            rows: Arc::new(Mutex::new(Vec::new())),
+            refocus: Mutex::new(false),
+        }
     }
 
     async fn render(&self, ctx: &Context) {
-        let snapshot = self.model.lock().unwrap().clone_for_view();
+        let mut snapshot = self.model.lock().unwrap().clone_for_view();
         let mut frame_ui = self.ui.lock().await;
-        if let Err(error) = frame_ui.render(ctx, PANEL, |frame| ui::frame(frame, &snapshot)).await {
+        snapshot.props.anchor = props::input_anchor(&mut frame_ui, &snapshot);
+        if let Err(error) = frame_ui.render(ctx, PANEL, |frame| ui::frame(frame, &snapshot, &self.rows)).await {
             ctx.log_error(&format!("提交笔记面失败：{error}"));
+            return;
+        }
+        // 刚进入槽位时输入框要到本帧才落位：再取一次光标矩形并补一帧，候选浮层当帧可见
+        if snapshot.props.editing.is_some() && snapshot.props.anchor.is_none() {
+            snapshot.props.anchor = props::input_anchor(&mut frame_ui, &snapshot);
+            if snapshot.props.anchor.is_some() {
+                if let Err(error) = frame_ui.render(ctx, PANEL, |frame| ui::frame(frame, &snapshot, &self.rows)).await {
+                    ctx.log_error(&format!("提交笔记面失败：{error}"));
+                }
+            }
         }
     }
 
@@ -344,7 +364,13 @@ impl NotesPlugin {
         let (events, carets) = {
             let values = self.model.lock().unwrap().clone_for_view();
             let mut frame_ui = self.ui.lock().await;
+            let refocus = std::mem::take(&mut *self.refocus.lock().unwrap());
             let events = frame_ui.event(ctx, &input, |id| value_of(&values, id)).await;
+            if refocus {
+                // 双击处理已换过档位与活动输入面：按最新模型复位，旧快照找不到新输入面
+                let model = self.model.lock().unwrap();
+                refocus_active(&mut frame_ui, &model);
+            }
             // 文本事件不带光标：在同一个输入状态机里取走（事件之后、释放锁之前）。
             let carets: Vec<(String, Option<(usize, usize)>)> = events
                 .iter()
@@ -474,17 +500,42 @@ impl NotesPlugin {
         }
     }
 
-    /// 只读档双击正文：进入预览编辑并揭示落点（块或揭示单元）。
+    /// 只读档双击正文：进入预览编辑并揭示落点（块、揭示单元或空行）。
+    /// 命中为空白时按指针纵向位置挑最近的行；光标统一由编辑面按落点换算。
     async fn on_pointer_double(&self, ctx: &Context, hit: Option<&str>) {
-        let Some(hit) = hit else { return };
+        {
+            let model = self.model.lock().unwrap();
+            if model.mode != Mode::Read || !model.can_write || model.blocks.is_empty() {
+                return;
+            }
+        }
+        let placeholder = hit.is_none();
         // 任务框的命中 id 是 `<项 id>::task:<序>`：揭示落在整项上
-        let hit = hit.split_once("::task:").map_or(hit, |(id, _)| id);
-        if let Some((index, item)) = item_index(hit) {
+        let hit = hit.map(|hit| hit.split_once("::task:").map_or(hit, |(id, _)| id));
+        let target = match hit {
+            Some(hit)
+                if item_index(hit).is_some()
+                    || item_gap_index(hit).is_some()
+                    || gap_input(hit).is_some()
+                    || block_index(hit).is_some() =>
+            {
+                hit.to_string()
+            }
+            // 空白 / 容器命中：按指针位置挑最近的行（空行自己带命中，不参与兜底）
+            _ => {
+                let y = self.model.lock().unwrap().pointer.1;
+                let rows = self.rows.lock().unwrap();
+                let Some(id) = nearest_row(&rows, y) else { return };
+                id
+            }
+        };
+        // 「点空」的按下会被控件层解释成失去焦点：事件处理完由 refocus 把焦点还给编辑面
+        if placeholder {
+            *self.refocus.lock().unwrap() = true;
+        }
+        if let Some((index, item)) = item_index(&target) {
             {
                 let mut model = self.model.lock().unwrap();
-                if model.mode != Mode::Read || !model.can_write {
-                    return;
-                }
                 model.mode = Mode::Edit;
                 model.active_block = None;
                 model.active_item = Some((index, item));
@@ -492,14 +543,43 @@ impl NotesPlugin {
             self.focus_item(ctx, index, item, None).await;
             return;
         }
-        let Some(index) = block_index(hit) else { return };
+        if let Some((block, item, line)) = item_gap_index(&target) {
+            let value = {
+                let model = self.model.lock().unwrap();
+                let Some((from, to)) = model.item_gap_line_range(block, item, line) else { return };
+                model.text[from..to].to_string()
+            };
+            {
+                let mut model = self.model.lock().unwrap();
+                model.mode = Mode::Edit;
+                model.active_block = None;
+                model.active_item = None;
+            }
+            let id = ui::item_gap_id(block, item, line);
+            {
+                let mut frame_ui = self.ui.lock().await;
+                frame_ui.focus_input(&id, &value);
+                frame_ui.set_input(&id, &value, 0);
+            }
+            self.render(ctx).await;
+            return;
+        }
+        if let Some((gap, line)) = gap_input(&target) {
+            {
+                let mut model = self.model.lock().unwrap();
+                model.mode = Mode::Edit;
+                model.active_block = None;
+                model.active_item = None;
+            }
+            // 空行自己托管光标：不揭示相邻块，交给编辑面把光标落到该行
+            self.focus_gap(ctx, gap, line, 0).await;
+            self.render(ctx).await;
+            return;
+        }
+        let Some(index) = block_index(&target) else { return };
         {
             let mut model = self.model.lock().unwrap();
-            if model.mode != Mode::Read || !model.can_write {
-                return;
-            }
-            // 有揭示单元的块没有整块输入面，双击落点只能来自单元命中
-            if !model.blocks.get(index).is_some_and(|block| block.items.is_empty()) {
+            if model.blocks.get(index).is_none() {
                 return;
             }
             model.mode = Mode::Edit;
@@ -509,8 +589,8 @@ impl NotesPlugin {
         self.focus_block(ctx, index, None).await;
     }
 
-    /// 聚焦一个块输入面：`caret` 缺省落块内容尾（源码区间还含块后空行，不能取 `value.len()`）。
-    /// 有揭示单元的块没有整块编辑面：转到首单元（`usize::MAX` = 末项）。
+    /// 聚焦一个块输入面：`caret` 缺省按指针在块内的落点换算，`usize::MAX` = 块内容尾
+    /// （源码区间还含块后空行，不能取 `value.len()`）；有揭示单元的块转到首单元。
     async fn focus_block(&self, ctx: &Context, index: usize, caret: Option<usize>) {
         let item = {
             let model = self.model.lock().unwrap();
@@ -540,28 +620,35 @@ impl NotesPlugin {
             (value, end)
         };
         let id = ui::block_id(index);
+        let pointer_caret = caret.is_none();
         let caret = match caret {
-            Some(usize::MAX) | None => content_end,
+            Some(usize::MAX) => content_end,
             Some(caret) => caret.min(content_end),
+            None => content_end,
         };
         let mut frame_ui = self.ui.lock().await;
         frame_ui.focus_input(&id, &value);
         frame_ui.set_input(&id, &value, caret);
         drop(frame_ui);
         self.render(ctx).await;
+        if pointer_caret {
+            self.set_caret_from_pointer(&id, &value).await;
+        }
     }
 
-    /// 聚焦一个列表项输入面：`caret` 缺省落项尾。
+    /// 聚焦一个列表项输入面：`caret` 缺省按指针在项内的落点换算，`usize::MAX` = 项尾。
     async fn focus_item(&self, ctx: &Context, block: usize, item: usize, caret: Option<usize>) {
-        let (value, caret) = {
+        let (value, caret, pointer_caret) = {
             let model = self.model.lock().unwrap();
             let Some((from, to)) = model.item_source(block, item) else { return };
             let value = model.text[from..to].to_string();
+            let pointer_caret = caret.is_none();
             let caret = match caret {
-                Some(usize::MAX) | None => value.len(),
+                Some(usize::MAX) => value.len(),
                 Some(caret) => caret.min(value.len()),
+                None => value.len(),
             };
-            (value, caret)
+            (value, caret, pointer_caret)
         };
         let id = ui::item_id(block, item);
         {
@@ -570,6 +657,20 @@ impl NotesPlugin {
             frame_ui.set_input(&id, &value, caret);
         }
         self.render(ctx).await;
+        if pointer_caret {
+            self.set_caret_from_pointer(&id, &value).await;
+        }
+    }
+
+    /// 输入面当帧已渲染：按指针落点换算字符位（与编辑面点击换算同口径）。
+    async fn set_caret_from_pointer(&self, id: &str, value: &str) {
+        let (px, py) = {
+            let model = self.model.lock().unwrap();
+            model.pointer
+        };
+        let mut frame_ui = self.ui.lock().await;
+        let Some(caret) = caret_at_pointer(&mut frame_ui, id, value, px, py) else { return };
+        frame_ui.set_input(id, value, caret);
     }
 
     /// 聚焦一根空行：光标落在空行内容里，不揭示任何块。
@@ -587,6 +688,21 @@ impl NotesPlugin {
         frame_ui.set_input(&id, &value, caret);
     }
 
+    /// 聚焦列表项之间的一根空行：光标落在空行内容里，不揭示任何块与项。
+    async fn focus_item_gap(&self, block: usize, item: usize, line: usize, caret: usize) {
+        let (value, caret) = {
+            let model = self.model.lock().unwrap();
+            let Some((from, to)) = model.item_gap_line_range(block, item, line) else { return };
+            let value = model.text[from..to].to_string();
+            let caret = caret.min(value.len());
+            (value, caret)
+        };
+        let id = ui::item_gap_id(block, item, line);
+        let mut frame_ui = self.ui.lock().await;
+        frame_ui.focus_input(&id, &value);
+        frame_ui.set_input(&id, &value, caret);
+    }
+
     /// 正文编辑后把光标落回新的结构：优先列表项，其次块，再次空行，最后落到末块末尾。
     async fn focus_at(&self, _ctx: &Context, offset: usize) -> bool {
         let target = {
@@ -598,6 +714,16 @@ impl NotesPlugin {
                 model.active_item = Some((block, item));
                 let caret = offset.saturating_sub(from).min(value.len());
                 (ui::item_id(block, item), value, caret)
+            } else if let Some((block, item, line)) = model.item_gap_line_at(offset) {
+                // 项间空行自己托管光标：不并到相邻项，否则每敲一个字符焦点都被挪走
+                let Some((from, to)) = model.item_gap_line_range(block, item, line) else {
+                    return false;
+                };
+                let value = model.text[from..to].to_string();
+                model.active_block = None;
+                model.active_item = None;
+                let caret = offset.saturating_sub(from).min(value.len());
+                (ui::item_gap_id(block, item, line), value, caret)
             } else if let Some(index) = model.block_at(offset) {
                 if !model.blocks[index].items.is_empty() {
                     // 有揭示单元的块内但落在单元间空行：落到最近的单元（前项末尾 / 首项开头）
@@ -681,6 +807,9 @@ impl NotesPlugin {
         }
         if let Some((gap, line)) = gap_input(&focus) {
             return self.handle_gap_key(ctx, &focus, gap, line, key).await;
+        }
+        if let Some((block, item, line)) = item_gap_index(&focus) {
+            return self.handle_item_gap_key(ctx, &focus, block, item, line, key).await;
         }
         if let Some((block, item)) = item_index(&focus) {
             return self.handle_item_key(ctx, &focus, block, item, key, modifiers.shift).await;
@@ -865,6 +994,109 @@ impl NotesPlugin {
         }
     }
 
+    /// 列表项间空行输入面的按键：退格并入上一行、Delete 并入下一行，
+    /// ↑↓ 在空行与相邻项之间巡航；Tab 不参与控件巡航。
+    async fn handle_item_gap_key(
+        &self,
+        ctx: &Context,
+        id: &str,
+        block: usize,
+        item: usize,
+        line: usize,
+        key: &Key,
+    ) -> bool {
+        use atelyx_plugin_protocol::frame::NamedKey;
+        let editable = {
+            let model = self.model.lock().unwrap();
+            model.mode == Mode::Edit && model.can_write
+        };
+        if !editable {
+            return false;
+        }
+        match key {
+            Key::Named { name: NamedKey::Tab } => true,
+            Key::Named { name: NamedKey::Backspace } => {
+                let (caret, anchor) = {
+                    let frame_ui = self.ui.lock().await;
+                    frame_ui.caret(id).unwrap_or((0, 0))
+                };
+                if caret != 0 || anchor != 0 {
+                    return false;
+                }
+                let Some(offset) = self
+                    .model
+                    .lock()
+                    .unwrap()
+                    .item_gap_line_range(block, item, line)
+                    .map(|(from, _)| from)
+                else {
+                    return false;
+                };
+                let Some((text, at)) = self.model.lock().unwrap().join_gap_line(offset) else {
+                    return false;
+                };
+                self.model.lock().unwrap().edit_text(text.clone());
+                self.commit_edit(ctx, text, Some((at, at))).await;
+                self.focus_at(ctx, at).await;
+                true
+            }
+            Key::Named { name: NamedKey::Delete } => {
+                let (caret, anchor) = {
+                    let frame_ui = self.ui.lock().await;
+                    frame_ui.caret(id).unwrap_or((0, 0))
+                };
+                let (value_len, end) = {
+                    let model = self.model.lock().unwrap();
+                    match model.item_gap_line_range(block, item, line) {
+                        Some((from, to)) => (to - from, to),
+                        None => return false,
+                    }
+                };
+                if caret != value_len || anchor != caret {
+                    return false;
+                }
+                let Some((text, at)) = self.model.lock().unwrap().remove_newline(end) else {
+                    return false;
+                };
+                self.model.lock().unwrap().edit_text(text.clone());
+                self.commit_edit(ctx, text, Some((at, at))).await;
+                self.focus_at(ctx, at).await;
+                true
+            }
+            Key::Named { name: NamedKey::ArrowUp } | Key::Named { name: NamedKey::ArrowDown } => {
+                let up = matches!(key, Key::Named { name: NamedKey::ArrowUp });
+                let target = {
+                    let model = self.model.lock().unwrap();
+                    if up {
+                        if line > 0 {
+                            Some(Focus::ItemGap(block, item, line - 1, 0))
+                        } else if item > 0 {
+                            Some(Focus::Item(block, item - 1, usize::MAX))
+                        } else if block > 0 {
+                            Some(Focus::Block(block - 1, usize::MAX))
+                        } else {
+                            None
+                        }
+                    } else if line + 1 < model.item_gap_lines(block, item) {
+                        Some(Focus::ItemGap(block, item, line + 1, 0))
+                    } else if model.blocks.get(block).is_some_and(|info| item + 1 < info.items.len()) {
+                        Some(Focus::Item(block, item + 1, 0))
+                    } else if block + 1 < model.blocks.len() {
+                        Some(Focus::Block(block + 1, 0))
+                    } else {
+                        None
+                    }
+                };
+                if let Some(target) = target {
+                    self.move_to(ctx, target).await;
+                    return true;
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
     /// 源码档 Tab / Shift+Tab：整行缩进与反缩进。Tab 先于控件层消费，
     /// 否则会被控件层的焦点巡航吃掉（跳到工具条输入框）。
     async fn handle_source_key(&self, ctx: &Context, key: &Key, shift: bool) -> bool {
@@ -1030,6 +1262,15 @@ impl NotesPlugin {
                     model.active_item = None;
                 }
                 self.focus_gap(ctx, gap, line, caret).await;
+                self.render(ctx).await;
+            }
+            Focus::ItemGap(block, item, line, caret) => {
+                {
+                    let mut model = self.model.lock().unwrap();
+                    model.active_block = None;
+                    model.active_item = None;
+                }
+                self.focus_item_gap(block, item, line, caret).await;
                 self.render(ctx).await;
             }
         }
@@ -1205,11 +1446,11 @@ impl NotesPlugin {
     }
 
     /// 任务项点击：翻转勾选态并把光标落在勾选框内（协作在场不跳到文末）。
+    /// 显示档位不作权限：能否写由 `can_write` 决定，被宿主拒绝时回填保存错误。
     async fn toggle_task(&self, ctx: &Context, block: usize, item: usize) {
         let (next, at) = {
             let model = self.model.lock().unwrap();
-            // 只读档不写盘：勾选态只在预览编辑 / 源码编辑档可翻转
-            if model.mode == Mode::Read || !model.can_write {
+            if !model.can_write {
                 return;
             }
             let Some((from, _)) = model.item_source(block, item) else { return };
@@ -1350,6 +1591,7 @@ impl NotesPlugin {
         let mut frame_ui = self.ui.lock().await;
         frame_ui.focus_input(props::KEY_INPUT, &draft);
         frame_ui.select_all_input(props::KEY_INPUT, &draft);
+        frame_ui.scroll_to(props::SUGGEST_SCROLL, 0.0);
     }
 
     async fn focus_title_input(&self) {
@@ -1431,11 +1673,14 @@ impl NotesPlugin {
 
     async fn on_text(&self, ctx: &Context, id: &str, value: String, caret: Option<(usize, usize)>) {
         if id == props::KEY_INPUT {
-            let mut model = self.model.lock().unwrap();
-            model.props.suggest_query = value.clone();
-            model.props.draft = value;
-            model.props.suggest_index = 0;
-            model.props.suggest_armed = false;
+            {
+                let mut model = self.model.lock().unwrap();
+                model.props.suggest_query = value.clone();
+                model.props.draft = value;
+                model.props.suggest_index = 0;
+                model.props.suggest_armed = false;
+            }
+            self.ui.lock().await.scroll_to(props::SUGGEST_SCROLL, 0.0);
             return;
         }
         if id == crate::model::TITLE_INPUT {
@@ -1448,6 +1693,8 @@ impl NotesPlugin {
             let model = self.model.lock().unwrap();
             if let Some((gap, line)) = gap_input(id) {
                 model.gap_line_range(gap, line)
+            } else if let Some((block, item, line)) = item_gap_index(id) {
+                model.item_gap_line_range(block, item, line)
             } else {
                 item_index(id).and_then(|(block, item)| model.item_source(block, item))
             }
@@ -1560,6 +1807,60 @@ fn item_index(id: &str) -> Option<(usize, usize)> {
     Some((block.parse().ok()?, item.parse().ok()?))
 }
 
+/// 列表项间空行输入面 id →（块序，后一项序，行序）。
+fn item_gap_index(id: &str) -> Option<(usize, usize, usize)> {
+    let rest = id.strip_prefix("note:igap:")?;
+    let (block, rest) = rest.split_once(':')?;
+    let (item, line) = rest.split_once(':')?;
+    Some((block.parse().ok()?, item.parse().ok()?, line.parse().ok()?))
+}
+
+/// 空白双击挑最近的行：跳过空行（它们自己带命中区），取行顶不高于点击 y 的最后一行，
+/// 都低不过时取最上面一行；没有可编辑行时为 None。
+fn nearest_row(rows: &[(String, f32)], y: f32) -> Option<String> {
+    let mut best: Option<(&str, f32)> = None;
+    let mut first: Option<(&str, f32)> = None;
+    for (id, top) in rows {
+        if id.starts_with("note:gap:") || id.starts_with("note:igap:") {
+            continue;
+        }
+        if first.map_or(true, |(_, first_top)| *top < first_top) {
+            first = Some((id, *top));
+        }
+        if *top <= y && best.map_or(true, |(_, best_top)| *top > best_top) {
+            best = Some((id, *top));
+        }
+    }
+    best.or(first).map(|(id, _)| id.to_string())
+}
+
+/// 输入面当帧已渲染：按光标矩形在 (行, 横坐标) 序上二分，求指针处最近字符位。
+fn caret_at_pointer(frame_ui: &mut FrameUi, id: &str, value: &str, px: f32, py: f32) -> Option<usize> {
+    let offsets: Vec<usize> = value.char_indices().map(|(at, _)| at).chain(std::iter::once(value.len())).collect();
+    let (mut lo, mut hi) = (0usize, offsets.len() - 1);
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        let rect = frame_ui.caret_rect_for(id, value, offsets[mid])?;
+        // 光标行在点击下方，或同一行但在点击右侧 = 该光标位在落点之后
+        let after = rect.y > py || (py >= rect.y && py < rect.y + rect.h && rect.x > px);
+        if after {
+            hi = mid;
+        } else {
+            lo = mid + 1;
+        }
+    }
+    Some(offsets[lo])
+}
+
+/// 双击空白进入编辑后控件层按「点空」清焦点：事件处理完把焦点还给活动输入面。
+fn refocus_active(frame_ui: &mut FrameUi, model: &NoteModel) {
+    let Some(id) = active_input(model) else { return };
+    let Some(value) = value_of(model, &id) else { return };
+    let caret = frame_ui.caret(&id).map_or(value.len(), |(caret, _)| caret);
+    frame_ui.focus_input(&id, &value);
+    frame_ui.set_input(&id, &value, caret);
+}
+
 /// 纵向巡航的目标（↑↓ 跨输入面时用）。
 enum Focus {
     /// 块序号 + 光标（`usize::MAX` = 块尾）。
@@ -1568,12 +1869,17 @@ enum Focus {
     Item(usize, usize, usize),
     /// 空行区序 + 行序 + 光标。
     Gap(usize, usize, usize),
+    /// 列表项间空行：块序 + 后一项序 + 行序 + 光标。
+    ItemGap(usize, usize, usize, usize),
 }
 
 /// 输入框文本在全文中的起点（选区偏移按它换算成框内光标）。
 fn input_base(model: &NoteModel, id: &str) -> usize {
     if id == crate::model::EMPTY_EDIT {
         return model.body_start;
+    }
+    if let Some((block, item, line)) = item_gap_index(id) {
+        return model.item_gap_line_range(block, item, line).map_or(0, |(from, _)| from);
     }
     if let Some((block, item)) = item_index(id) {
         return model.item_source(block, item).map_or(0, |(from, _)| from);
@@ -1596,6 +1902,10 @@ fn value_of(model: &NoteModel, id: &str) -> Option<String> {
     }
     if let Some((gap, line)) = gap_input(id) {
         let (from, to) = model.gap_line_range(gap, line)?;
+        return Some(model.text[from..to].to_string());
+    }
+    if let Some((block, item, line)) = item_gap_index(id) {
+        let (from, to) = model.item_gap_line_range(block, item, line)?;
         return Some(model.text[from..to].to_string());
     }
     if let Some((block, item)) = item_index(id) {
@@ -1630,6 +1940,8 @@ fn selection_of(
         model.body_start.min(model.text.len())
     } else if let Some((gap, line)) = gap_input(id) {
         model.gap_line_range(gap, line)?.0
+    } else if let Some((block, item, line)) = item_gap_index(id) {
+        model.item_gap_line_range(block, item, line)?.0
     } else if let Some((block, item)) = item_index(id) {
         model.item_source(block, item)?.0
     } else {

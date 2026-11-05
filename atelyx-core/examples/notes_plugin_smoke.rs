@@ -11,7 +11,7 @@ use atelyx_core::plugin_runtime::{
     SurfaceKind,
 };
 use atelyx_plugin_protocol::event::{DocPresencePayload, DocRemoteCursor};
-use atelyx_plugin_protocol::frame::{Key, KeyAction, Modifiers, NamedKey, SurfaceFrame};
+use atelyx_plugin_protocol::frame::{HitCursor, Key, KeyAction, Modifiers, NamedKey, SurfaceFrame};
 use atelyx_plugin_protocol::method::{FontSizes, Radii, ThemeColors, ThemeResult};
 use atelyx_plugin_protocol::paint::{ColorToken, DrawCommand, ImageSource, PaintColor, TextAlign};
 
@@ -246,11 +246,11 @@ async fn main() {
 
     if let Some(hit) = frame.hits.iter().find(|hit| hit.id == "note:mode:edit").cloned() {
         click_hit(&runtime, &hit);
-        let frame = wait_hit(&runtime, "note:gap:1:0", Duration::from_secs(2))
+        let frame = wait_gap_input(&runtime, Duration::from_secs(2))
             .await
             .expect("切换预览编辑档后应有空行输入面");
         let blocks = frame.hits.iter().filter(|hit| hit.id.starts_with("note:block:")).count();
-        let gaps = frame.hits.iter().filter(|hit| hit.id.starts_with("note:gap:")).count();
+        let gaps = frame.hits.iter().filter(|hit| is_gap_input(hit)).count();
         let first_y = frame.hits.iter().find(|hit| hit.id == "note:block:0").map_or(-1.0, |hit| hit.y);
         println!("预览编辑块：{blocks}，空行输入面：{gaps}，首块 y：{first_y:.1}");
         assert!(first_y < 200.0, "工具条 / 属性面板不得吃满剩余高度（首块 y = {first_y}）");
@@ -390,7 +390,7 @@ async fn main() {
         }
         if let Some(hit) = runtime
             .surface_frame(PLUGIN, SURFACE)
-            .and_then(|frame| frame.hits.iter().find(|hit| hit.id.starts_with("note:gap:")).cloned())
+            .and_then(|frame| frame.hits.iter().find(|hit| is_gap_input(hit)).cloned())
         {
             click_hit(&runtime, &hit);
             runtime.notify_frame_input(
@@ -495,13 +495,34 @@ async fn main() {
                 }
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
-            let ok = tagged.is_some_and(|frame| {
+            let ok = tagged.as_ref().is_some_and(|frame| {
                 frame.hits.iter().any(|hit| hit.id == "props:suggest:0")
                     && frame.commands.iter().any(|command| {
                         matches!(command, atelyx_plugin_protocol::paint::DrawCommand::Text { content, .. } if content == "#设计")
                     })
             });
             println!("标签候选（vault.tags）：{}", if ok { "通过" } else { "未确认" });
+            // 候选浮层必须留在面内，且不能盖住正在编辑的标签行
+            if let Some(frame) = tagged {
+                if let (Some(input), Some(overlay)) = (
+                    frame.hits.iter().find(|hit| hit.id == "props:input"),
+                    frame.hits.iter().find(|hit| hit.id == "@overlay:0"),
+                ) {
+                    println!(
+                        "标签候选浮层：({:.1},{:.1}) {:.0}×{:.0}，输入行 ({:.1},{:.1}) {:.0}×{:.0}",
+                        overlay.x, overlay.y, overlay.w, overlay.h, input.x, input.y, input.w, input.h
+                    );
+                    assert!(overlay.x >= 0.0 && overlay.y >= 0.0, "浮层不得越出面左上角");
+                    assert!(
+                        overlay.x + overlay.w <= 900.0 + 0.5 && overlay.y + overlay.h <= 700.0 + 0.5,
+                        "浮层不得越出面右下角"
+                    );
+                    assert!(
+                        overlay.y >= input.y + input.h + 3.0 || overlay.y + overlay.h <= input.y - 3.0,
+                        "浮层不得盖住正在编辑的标签行"
+                    );
+                }
+            }
         }
     }
     if let Some(hit) = runtime
@@ -546,7 +567,7 @@ async fn main() {
             .expect("源码档应有输入面");
         println!("源码档：{} 条指令", frame.commands.len());
     }
-    // 失焦退编辑：面板外点一下即回只读档，编辑面（空行输入）随之撤掉
+    // 失焦退编辑：面板外点一下即回只读档，只剩指针光标的空行命中、不再有空行输入面
     if let Some(hit) = runtime
         .surface_frame(PLUGIN, SURFACE)
         .and_then(|frame| frame.hits.iter().find(|hit| hit.id == "note:mode:edit").cloned())
@@ -555,29 +576,28 @@ async fn main() {
         let deadline = Instant::now() + Duration::from_secs(2);
         let mut editing = false;
         while Instant::now() < deadline {
-            editing = runtime.surface_frame(PLUGIN, SURFACE).is_some_and(|frame| {
-                frame.hits.iter().any(|hit| hit.id.starts_with("note:gap:"))
-            });
+            editing = runtime
+                .surface_frame(PLUGIN, SURFACE)
+                .is_some_and(|frame| has_gap_input(&frame));
             if editing {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        assert!(editing, "预览编辑档应有空行输入面");
+        assert!(editing, "预览编辑档应有空行输入面（文本光标）");
         runtime.notify_frame_input(PLUGIN, SURFACE, &FrameInput::Focus { focused: false });
         let deadline = Instant::now() + Duration::from_secs(2);
         let mut read = false;
         while Instant::now() < deadline {
             read = runtime.surface_frame(PLUGIN, SURFACE).is_some_and(|frame| {
-                !frame.hits.iter().any(|hit| hit.id.starts_with("note:gap:"))
-                    && frame.hits.iter().any(|hit| hit.id == "note:block:0")
+                !has_gap_input(&frame) && frame.hits.iter().any(|hit| hit.id == "note:block:0")
             });
             if read {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        assert!(read, "失焦后应回只读档：编辑面撤掉、正文块仍可命中");
+        assert!(read, "失焦后应回只读档：空行输入面（文本光标）撤掉、正文块仍可命中");
         println!("失焦退编辑：通过");
     }
     // 关档：插件必须交空态帧，否则面板停在上一份文档
@@ -650,6 +670,30 @@ fn double_click(runtime: &Arc<PluginRuntime>, hit: &atelyx_plugin_protocol::fram
             hit: Some(hit.id.clone()),
         },
     );
+}
+
+/// 空行输入面：与只读档的空行命中同 id，只有编辑档把它登记成文本光标（TextArea）。
+fn is_gap_input(hit: &atelyx_plugin_protocol::frame::HitRegion) -> bool {
+    hit.id.starts_with("note:gap:") && hit.cursor == Some(HitCursor::Text)
+}
+
+fn has_gap_input(frame: &SurfaceFrame) -> bool {
+    frame.hits.iter().any(is_gap_input)
+}
+
+async fn wait_gap_input(runtime: &Arc<PluginRuntime>, timeout: Duration) -> Option<Arc<SurfaceFrame>> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(frame) = runtime.surface_frame(PLUGIN, SURFACE) {
+            if has_gap_input(&frame) {
+                return Some(frame);
+            }
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
 }
 
 async fn wait_hit(
