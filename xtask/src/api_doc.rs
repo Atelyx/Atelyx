@@ -394,6 +394,7 @@ const SECTIONS: &[Section] = &[
             "method.rs": "TableAddRowResult",
             "method.rs": "TableRowIdParams",
             "method.rs": "TableSetCellImageParams",
+            "method.rs": "TableCommandParams",
         ),
     },
     Section {

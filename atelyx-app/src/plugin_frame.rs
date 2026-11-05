@@ -307,7 +307,6 @@ pub struct PluginFrame<'a> {
     pub window: window::Id,
     pub plugin_id: String,
     pub surface_id: String,
-    pub frame: &'a Arc<SurfaceFrame>,
     /// 本面当前是否持有键盘焦点（渲染期由壳侧焦点槽投影）。
     pub focused: bool,
 }
@@ -317,11 +316,42 @@ impl PluginFrame<'_> {
         surface_identity(&self.plugin_id, &self.surface_id)
     }
 
+    /// 面最新帧：帧提交通路直接写共享存储，绘制期取它，不再依赖视图重建。
+    fn latest(&self) -> Option<Arc<SurfaceFrame>> {
+        self.app.plugin_frames.get(&self.plugin_id, &self.surface_id)
+    }
+
+    /// 重绘前发现新帧时，判它是否需要宿主补做侧效应；只在需要的那一拍发一条消息。
+    fn check_frame_side_effects(&self, state: &FrameState, shell: &mut Shell<'_, Message>) {
+        let latest = self.latest();
+        let painted = state.painted.borrow().clone();
+        let changed = match (latest.as_ref(), painted.as_ref()) {
+            (Some(latest), Some(painted)) => !Arc::ptr_eq(latest, painted),
+            (None, None) => false,
+            _ => true,
+        };
+        if !changed {
+            return;
+        }
+        if crate::plugin_actions::frame_needs_host_sync(
+            self.app,
+            &self.plugin_id,
+            &self.surface_id,
+            latest.as_deref(),
+            painted.as_deref(),
+        ) {
+            shell.publish(Message::PluginFrameObserved {
+                plugin_id: self.plugin_id.clone(),
+                surface_id: self.surface_id.clone(),
+            });
+        }
+    }
+
     /// 命中的基准是实际画在屏幕上的那一帧：改宽期间投影缓存可能还没追上，
     /// 但用户点的是眼前看到的画面。
     fn hit(&self, state: &FrameState, point: Point) -> Option<String> {
-        let painted = state.painted.borrow();
-        let frame = painted.as_deref().unwrap_or(self.frame.as_ref());
+        let painted = state.painted.borrow().clone();
+        let frame = painted.or_else(|| self.latest())?;
         // 面板内浮层画在主帧之上，命中优先取它自己的命中区（同用面本地坐标）
         // 窗口级浮层由根层接收输入，不在这里重复命中
         if let Some(popup) = frame.popup.as_ref().filter(|p| p.layer == PopupLayer::Panel) {
@@ -334,11 +364,9 @@ impl PluginFrame<'_> {
 
     /// 输入法候选窗的锚点：浮层自带的 `ime` 优先（浮层内就地输入），否则用主帧的。
     fn ime_rect(&self) -> Option<FrameRect> {
-        self.frame
-            .popup
-            .as_ref()
-            .and_then(|popup| popup.ime)
-            .or(self.frame.ime)
+        self.latest()
+            .as_deref()
+            .and_then(|frame| frame.popup.as_ref().and_then(|popup| popup.ime).or(frame.ime))
     }
 
     /// 回发一条原始输入（坐标已换算到面本地）。
@@ -468,6 +496,11 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginFrame<'_> {
             state.next_steps.borrow_mut().clear();
             *state.resize.borrow_mut() = ResizeRequest::default();
             *state.pending.borrow_mut() = PendingInput::default();
+        }
+        // 帧到达只请求红绘、不发消息；侧效应（模态归属 / 图片预载 / 投影元数据）
+        // 在这里发现新帧时补一次消息，且只在确实需要时补，避免帧率一高就整窗重建。
+        if matches!(event, Event::Window(window::Event::RedrawRequested(_))) {
+            self.check_frame_side_effects(state, shell);
         }
         // 窗口级浮层按面原点平移；位置变化才上报（布局稳定时不产生额外消息）
         if state.origin.get() != Some(bounds.position()) {
@@ -620,7 +653,7 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginFrame<'_> {
             }
             Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, text, .. }) => {
                 state.mods.set(frame_modifiers(*modifiers));
-                if !self.focused || !self.frame.keys {
+                if !self.focused || !self.latest().is_some_and(|frame| frame.keys) {
                     return;
                 }
                 let Some(key) = frame_key(key) else {
@@ -640,7 +673,7 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginFrame<'_> {
             }
             Event::Keyboard(keyboard::Event::KeyReleased { key, modifiers, .. }) => {
                 state.mods.set(frame_modifiers(*modifiers));
-                if !self.focused || !self.frame.keys {
+                if !self.focused || !self.latest().is_some_and(|frame| frame.keys) {
                     return;
                 }
                 let Some(key) = frame_key(key) else {
@@ -745,13 +778,29 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginFrame<'_> {
         }
         let epoch = crate::ui::epoch();
         let image_epoch = self.app.note_image_epoch;
-        // 取运行时最新帧：改宽期间投影可能还没追上（帧提交事件按窗口合并），
-        // 这里必须画最新的一张，否则下一拍会退回投影里的旧帧。
-        let current = self
-            .app
-            .plugins
-            .surface_frame(&self.plugin_id, &self.surface_id)
-            .unwrap_or_else(|| self.frame.clone());
+        // 取共享存储里的最新帧：帧提交直接写入，不依赖视图重建，
+        // 所以改宽游标停在同一拍也能画到当前最新的一张。
+        let Some(current) = self.latest() else {
+            // 帧已被清空（面摘除 / 插件停用）：作废绘制基准，回到等待占位
+            *state.painted.borrow_mut() = None;
+            state.steps.borrow_mut().clear();
+            let asked = state
+                .resize
+                .borrow_mut()
+                .observe(self.identity(), bounds.width, bounds.height);
+            if asked {
+                self.send(FrameInput::Resize { width: bounds.width, height: bounds.height });
+            }
+            draw_waiting_placeholder(
+                self.app,
+                &self.plugin_id,
+                &self.surface_id,
+                state,
+                renderer,
+                bounds,
+            );
+            return;
+        };
         // 面身份或尺寸变化即上报插件：绘制拿到的是真实分配尺寸，这是插件重排的唯一来源。
         // 改宽这一拍不等插件回帧：插件排新帧要等量算回执，而回执只能由 App 的 update 应答，
         // 在这里同步等待等于把回执饿死在同一线程上。旧帧按新尺寸裁剪画上一拍，新帧到了再整面替换。
@@ -904,8 +953,10 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginFrame<'_> {
             return mouse::Interaction::None;
         };
         let state = tree.state.downcast_ref::<FrameState>();
-        let painted = state.painted.borrow();
-        let frame = painted.as_deref().unwrap_or(self.frame.as_ref());
+        let painted = state.painted.borrow().clone();
+        let Some(frame) = painted.or_else(|| self.latest()) else {
+            return mouse::Interaction::None;
+        };
         if let Some(popup) = frame.popup.as_ref().filter(|p| p.layer == PopupLayer::Panel) {
             if let Some(hit) = popup.hit_region_at(point.x, point.y) {
                 return interaction_of(hit.cursor.unwrap_or_default());
@@ -1077,7 +1128,6 @@ pub fn frame_view<'a>(
     window: window::Id,
     plugin_id: &str,
     surface_id: &str,
-    frame: &'a Arc<SurfaceFrame>,
     padding: Padding,
 ) -> Element<'a, Message> {
     let focused = app.plugin_frame_focus.as_ref().is_some_and(|focus| {
@@ -1088,7 +1138,6 @@ pub fn frame_view<'a>(
         window,
         plugin_id: plugin_id.to_string(),
         surface_id: surface_id.to_string(),
-        frame,
         focused,
     };
     container(Element::new(widget))

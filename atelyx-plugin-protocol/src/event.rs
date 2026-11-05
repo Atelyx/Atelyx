@@ -37,6 +37,9 @@ pub mod name {
     /// 宿主拦截的画布快捷键命令（撤销 / 复制 / 粘贴等，按用户自定义键位触发）：
     /// payload 见 [`crate::method::CanvasCommandParams`]。
     pub const CANVAS_COMMAND: &str = "canvas:command";
+    /// 宿主拦截的表格快捷键命令（撤销 / 复制 / 保存等，非编辑态按用户自定义键位触发）：
+    /// payload 见 [`crate::method::TableCommandParams`]。
+    pub const TABLE_COMMAND: &str = "table:command";
     /// 画布是否正展示在前台（后台标签页不算）：payload 见 [`CanvasVisiblePayload`]。
     pub const CANVAS_VISIBLE: &str = "canvas:visible";
     /// 会话语义变更（流式增量不广播）。payload 见 [`ChatChangedPayload`]。
@@ -132,6 +135,7 @@ pub fn is_known(name: &str) -> bool {
             | name::CANVAS_RESTORE
             | name::CANVAS_CHANGED
             | name::CANVAS_COMMAND
+            | name::TABLE_COMMAND
             | name::CANVAS_VISIBLE
             | name::AI_CHAT_CHANGED
             | name::AI_CHAT_RELOAD

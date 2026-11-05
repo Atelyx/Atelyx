@@ -41,6 +41,13 @@ const TAG_LINE: f32 = LINE_FACTOR;
 const TAG_OFFSET_X: f32 = 12.0;
 const TAG_OFFSET_Y: f32 = 14.0;
 
+/// 列头提示的内边距 / 圆角 / 相对指针偏移（px）：与通用提示同一形态。
+const HINT_PAD_X: f32 = 8.0;
+const HINT_PAD_Y: f32 = 4.0;
+const HINT_RADIUS: f32 = 4.0;
+const HINT_OFFSET_X: f32 = 10.0;
+const HINT_OFFSET_Y: f32 = 18.0;
+
 /// 正文排版口径：固定行高倍数 + 按宽折行 + 复杂整形（与量算请求同一项）。
 fn text_layout(wrap_w: f32) -> TextLayout {
     TextLayout {
@@ -204,6 +211,8 @@ pub fn paint(
     draw_chrome(&mut out, &mut hits, &geo, session);
     // 远端协作者名签（悬停其选区时出现）
     draw_remote_tags(&mut out, &geo, session, size, remote);
+    // 列头提示（列名被省略时给出完整字段名）
+    draw_header_hint(&mut out, &geo, session, size);
 
     // 光标区：表头右缘的拖宽把手
     for field in 0..session.data.fields.len() {
@@ -784,6 +793,49 @@ fn draw_remote_tags(
         ));
         placed.push((x, y, w, tag_h));
     }
+}
+
+/// 悬停被省略的列头：指针旁画完整字段名，整块钳进面内。
+fn draw_header_hint(out: &mut Vec<DrawCommand>, geo: &Geo<'_>, session: &Session, size: Size) {
+    let Some(pointer) = session.view.pointer else { return };
+    let Some(crate::model::Hit::Header { field }) = session.view.hover else { return };
+    let Some(field_def) = session.data.fields.get(field) else { return };
+    let caption = crate::theme::font_caption() * geo.z;
+    let text_w = (geo.col_w(field) - 2.0 * CELL_PAD_X * geo.z - HEADER_MENU_W * geo.z).max(4.0);
+    if ellipsize(&field_def.name, caption, text_w) == field_def.name {
+        return;
+    }
+    let font_size = crate::theme::font_micro();
+    let w = text::measure(&field_def.name, font_size) + 2.0 * HINT_PAD_X;
+    let h = font_size * LINE_FACTOR + 2.0 * HINT_PAD_Y;
+    let x = (pointer.x + HINT_OFFSET_X).clamp(4.0, (size.width - w - 4.0).max(4.0));
+    let y = (pointer.y + HINT_OFFSET_Y).clamp(4.0, (size.height - h - 4.0).max(4.0));
+    out.push(DrawCommand::Rect {
+        x,
+        y,
+        w,
+        h,
+        fill: Some(token(ColorToken::Surface)),
+        stroke: Some(token(ColorToken::Border)),
+        stroke_width: Some(1.0),
+        corner_radius: Some(HINT_RADIUS),
+        shadow: None,
+    });
+    out.push(text_command(
+        &field_def.name,
+        x + HINT_PAD_X,
+        y + HINT_PAD_Y,
+        FontSpec {
+            size: font_size,
+            weight: None,
+            family: None,
+            family_name: None,
+            italic: false,
+            color: token(ColorToken::TextSecondary),
+        },
+        Some(TextAlign::Start),
+        0.0,
+    ));
 }
 
 /// 空态（未打开表格）：与其它面板共用同一份居中排版。

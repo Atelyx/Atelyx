@@ -391,19 +391,34 @@ impl PluginState {
 
     /// 复制灯箱当前图到系统剪贴板（统一转 PNG：宿主剪贴板只认 PNG）。
     async fn copy_lightbox_image(&self, ctx: &Context) {
-        let Some((_rel, bytes)) = self.lightbox_bytes(ctx).await else { return };
+        use atelyx_plugin_protocol::method::NotificationLevel;
+
+        let Some((_rel, bytes)) = self.lightbox_bytes(ctx).await else {
+            let _ = ctx
+                .notify("复制失败：无法读取图片", None, NotificationLevel::Error)
+                .await;
+            return;
+        };
         let png = match png_of(&bytes) {
             Ok(png) => png,
             Err(error) => {
                 ctx.log_error(&format!("图片转 PNG 失败：{error}"));
+                let _ = ctx
+                    .notify(&format!("复制失败：{error}"), None, NotificationLevel::Error)
+                    .await;
                 return;
             }
         };
         match ctx.clipboard_write_image(&png).await {
             Ok(()) => {
-                let _ = ctx.notify("已复制图片", None, atelyx_plugin_protocol::method::NotificationLevel::Success).await;
+                let _ = ctx.notify("已复制图片", None, NotificationLevel::Success).await;
             }
-            Err(error) => ctx.log_error(&format!("写剪贴板失败：{error}")),
+            Err(error) => {
+                ctx.log_error(&format!("写剪贴板失败：{error}"));
+                let _ = ctx
+                    .notify(&format!("复制失败：{error}"), None, NotificationLevel::Error)
+                    .await;
+            }
         }
     }
 
@@ -589,7 +604,7 @@ impl PluginState {
     }
 
     /// 导入图片：多选对话框 → 逐张落仓库（`.atelyx/temp/tables/<表 id>/`）→ 一次撤销合并进单元格。
-    /// 单张超过 50 MiB 或扩展名不在白名单的跳过并记日志，不阻断其余图片。
+    /// 单张失败跳过并计入失败清单，不阻断其余图片；结果按成功 / 部分失败 / 全部失败汇总提示。
     async fn import_images(self: &Arc<Self>, ctx: &Context, row_id: &str, field_id: &str) {
         let params = atelyx_plugin_protocol::method::PickFileParams {
             title: Some("选择图片".to_string()),
@@ -605,6 +620,13 @@ impl PluginState {
             Ok(paths) => paths,
             Err(error) => {
                 ctx.log_error(&format!("选择图片失败：{error}"));
+                let _ = ctx
+                    .notify(
+                        &format!("选择图片失败：{error}"),
+                        None,
+                        atelyx_plugin_protocol::method::NotificationLevel::Error,
+                    )
+                    .await;
                 return;
             }
         };
@@ -615,6 +637,7 @@ impl PluginState {
             return;
         };
         let mut written: Vec<String> = Vec::new();
+        let mut failures: Vec<String> = Vec::new();
         for path in paths {
             let file_name = std::path::Path::new(&path)
                 .file_name()
@@ -622,32 +645,48 @@ impl PluginState {
                 .unwrap_or_default();
             let Ok(rel) = atelyx_format::table::table_image_rel_path(&table_id, &file_name) else {
                 ctx.log_error(&format!("跳过不支持的图片：{file_name}"));
+                failures.push(format!("{file_name}：不支持的格式"));
                 continue;
             };
             let metadata = std::fs::metadata(&path);
             if metadata.as_ref().map(|meta| meta.len()).unwrap_or(0) > MAX_IMAGE_BYTES {
                 ctx.log_error(&format!("图片超过 {} MiB，已跳过：{file_name}", MAX_IMAGE_BYTES >> 20));
+                failures.push(format!("{file_name}：超过 {} MiB", MAX_IMAGE_BYTES >> 20));
                 continue;
             }
             let bytes = match std::fs::read(&path) {
                 Ok(bytes) => bytes,
                 Err(error) => {
                     ctx.log_error(&format!("读取图片失败（{path}）：{error}"));
+                    failures.push(format!("{file_name}：读取失败"));
                     continue;
                 }
             };
             if let Err(error) = ctx.vault_write_binary(&rel, &bytes).await {
                 ctx.log_error(&format!("写入图片失败（{rel}）：{error}"));
+                failures.push(format!("{file_name}：写入失败"));
                 continue;
             }
             written.push(rel);
         }
-        if written.is_empty() {
+        let changed = if written.is_empty() {
+            false
+        } else {
+            self.with_session_mut(|session| append_images(session, row_id, field_id, &written))
+                .unwrap_or(false)
+        };
+        if !written.is_empty() && !changed {
+            let _ = ctx
+                .notify(
+                    "未能写入任何图片：目标单元格已不存在",
+                    None,
+                    atelyx_plugin_protocol::method::NotificationLevel::Error,
+                )
+                .await;
             return;
         }
-        let changed = self
-            .with_session_mut(|session| append_images(session, row_id, field_id, &written))
-            .unwrap_or(false);
+        let (level, text) = import_report(written.len(), &failures);
+        let _ = ctx.notify(&text, None, level).await;
         if changed {
             self.schedule_save(ctx);
         }
@@ -655,32 +694,49 @@ impl PluginState {
     }
 
     /// 剪贴板动作：复制 / 剪切写系统剪贴板，粘贴读回后落格。
+    /// 剪切先确认写入成功再清空选区，剪贴板写入失败时不动内容。
     async fn run_clipboard(self: &Arc<Self>, ctx: &Context, action: input::ClipboardAction) {
+        use atelyx_plugin_protocol::method::NotificationLevel;
+
         // 单元格编辑中：复制 / 剪切 / 粘贴作用于编辑框文本
         if self.with_session(|session| session.view.editing.is_some()).unwrap_or(false) {
             match action {
                 input::ClipboardAction::Copy | input::ClipboardAction::Cut => {
-                    let cut = action == input::ClipboardAction::Cut;
+                    let label = if action == input::ClipboardAction::Cut { "剪切" } else { "复制" };
                     let text = self
-                        .with_session_mut(|session| {
-                            let edit = session.view.editing.as_mut()?;
-                            let text = edit.editor.selected_text();
-                            if cut {
-                                edit.editor.delete_selection_now();
-                            }
-                            Some(text)
+                        .with_session(|session| {
+                            session.view.editing.as_ref().map(|edit| edit.editor.selected_text())
                         })
                         .flatten()
                         .unwrap_or_default();
-                    if !text.is_empty() {
-                        let _ = ctx.write_clipboard(&text).await;
+                    if text.is_empty() {
+                        return;
                     }
-                    if cut {
-                        self.render(ctx).await;
+                    if let Err(error) = ctx.write_clipboard(&text).await {
+                        ctx.log_error(&format!("写剪贴板失败：{error}"));
+                        let _ = ctx
+                            .notify(&format!("{label}失败：{error}"), None, NotificationLevel::Error)
+                            .await;
+                        return;
+                    }
+                    if action == input::ClipboardAction::Cut {
+                        let changed = self
+                            .with_session_mut(|session| {
+                                session
+                                    .view
+                                    .editing
+                                    .as_mut()
+                                    .map(|edit| edit.editor.delete_selection_now())
+                                    .unwrap_or(false)
+                            })
+                            .unwrap_or(false);
+                        if changed {
+                            self.render(ctx).await;
+                        }
                     }
                 }
-                input::ClipboardAction::Paste => {
-                    if let Ok(text) = ctx.clipboard_read().await {
+                input::ClipboardAction::Paste => match ctx.clipboard_read().await {
+                    Ok(text) => {
                         let changed = self
                             .with_session_mut(|session| {
                                 session
@@ -695,29 +751,40 @@ impl PluginState {
                             self.render(ctx).await;
                         }
                     }
-                }
+                    Err(error) => {
+                        ctx.log_error(&format!("读剪贴板失败：{error}"));
+                        let _ = ctx
+                            .notify(&format!("粘贴失败：{error}"), None, NotificationLevel::Error)
+                            .await;
+                    }
+                },
             }
             return;
         }
         match action {
             input::ClipboardAction::Copy | input::ClipboardAction::Cut => {
-                let text = self
-                    .with_session_mut(|session| {
-                        if action == input::ClipboardAction::Cut {
-                            input::cut_tsv(session)
-                        } else {
-                            input::copy_tsv(session)
-                        }
-                    })
-                    .flatten();
-                let Some(text) = text else { return };
+                let label = if action == input::ClipboardAction::Cut { "剪切" } else { "复制" };
+                let Some(text) =
+                    self.with_session(|session| input::copy_tsv(session)).flatten()
+                else {
+                    return;
+                };
                 if let Err(error) = ctx.write_clipboard(&text).await {
                     ctx.log_error(&format!("写剪贴板失败：{error}"));
+                    let _ = ctx
+                        .notify(&format!("{label}失败：{error}"), None, NotificationLevel::Error)
+                        .await;
+                    return;
                 }
                 if action == input::ClipboardAction::Cut {
-                    self.schedule_save(ctx);
-                    self.publish_header(ctx).await;
-                    self.render(ctx).await;
+                    let changed = self
+                        .with_session_mut(input::clear_selection_public)
+                        .unwrap_or(false);
+                    if changed {
+                        self.schedule_save(ctx);
+                        self.publish_header(ctx).await;
+                        self.render(ctx).await;
+                    }
                 }
             }
             input::ClipboardAction::Paste => {
@@ -725,6 +792,9 @@ impl PluginState {
                     Ok(text) => text,
                     Err(error) => {
                         ctx.log_error(&format!("读剪贴板失败：{error}"));
+                        let _ = ctx
+                            .notify(&format!("粘贴失败：{error}"), None, NotificationLevel::Error)
+                            .await;
                         return;
                     }
                 };
@@ -737,6 +807,45 @@ impl PluginState {
                     self.render(ctx).await;
                 }
             }
+        }
+    }
+
+    /// 宿主按表格作用域拦截的快捷键命令（非编辑态按键绑定归宿主，编辑态仍由输入通路处理）。
+    async fn apply_table_command(self: &Arc<Self>, ctx: &Context, command: &str) {
+        match command {
+            "copy" | "cut" | "paste" => {
+                let action = match command {
+                    "copy" => input::ClipboardAction::Copy,
+                    "cut" => input::ClipboardAction::Cut,
+                    _ => input::ClipboardAction::Paste,
+                };
+                self.run_clipboard(ctx, action).await;
+            }
+            "save" => self.save_now(ctx).await,
+            "undo" | "redo" | "delete" => {
+                let changed = self
+                    .with_session_mut(|session| match command {
+                        "undo" => input::undo(session),
+                        "redo" => input::redo(session),
+                        _ => input::clear_selection_public(session),
+                    })
+                    .unwrap_or(false);
+                if !changed {
+                    return;
+                }
+                self.schedule_save(ctx);
+                crate::session::broadcast_selection(self, ctx).await;
+                self.publish_header(ctx).await;
+                self.render(ctx).await;
+            }
+            "select-all" => {
+                let _ = self.with_session_mut(|session| {
+                    session.view.selection = Some(atelyx_format::table::ops::TableSelection::All);
+                });
+                crate::session::broadcast_selection(self, ctx).await;
+                self.render(ctx).await;
+            }
+            other => ctx.log_error(&format!("未知的表格命令：{other}")),
         }
     }
 
@@ -951,6 +1060,7 @@ impl PluginHandler for TablesPlugin {
             event::name::SPACE_FILE_PATCH,
             event::name::PANEL_FLUSH,
             event::name::PANEL_HEADER_ACTION,
+            event::name::TABLE_COMMAND,
         ] {
             if let Err(error) = ctx.subscribe(name).await {
                 ctx.log_error(&format!("订阅 {name} 失败：{error}"));
@@ -1056,6 +1166,15 @@ impl PluginHandler for TablesPlugin {
                     return;
                 };
                 self.state.handle_header_action(ctx, &action.item).await;
+            }
+            event::name::TABLE_COMMAND => {
+                let Ok(params) = serde_json::from_value::<
+                    atelyx_plugin_protocol::method::TableCommandParams,
+                >(params.payload.clone())
+                else {
+                    return;
+                };
+                self.state.apply_table_command(ctx, &params.command).await;
             }
             _ => {}
         }
@@ -1204,6 +1323,25 @@ pub extern "C" fn atelyx_plugin_api() -> *const atelyx_plugin_sdk::abi::PluginAp
 /// 单张导入图片的大小上限（字节，与宿主表格图片同一档）。
 const MAX_IMAGE_BYTES: u64 = 50 << 20;
 
+/// 导入结果汇总：成功 / 部分失败 / 全部失败三档，失败清单每项「文件名：原因」。
+fn import_report(
+    inserted: usize,
+    failures: &[String],
+) -> (atelyx_plugin_protocol::method::NotificationLevel, String) {
+    use atelyx_plugin_protocol::method::NotificationLevel;
+
+    if failures.is_empty() {
+        return (NotificationLevel::Success, format!("已插入 {inserted} 张"));
+    }
+    if inserted == 0 {
+        return (NotificationLevel::Error, format!("未能写入任何图片：{}", failures[0]));
+    }
+    (
+        NotificationLevel::Warning,
+        format!("已插入 {inserted} 张，{} 张失败（{}）", failures.len(), failures[0]),
+    )
+}
+
 /// 把新导入的图片引用追加到图片格（一次撤销、一次置脏）。
 fn append_images(session: &mut Session, row_id: &str, field_id: &str, rels: &[String]) -> bool {
     let Some(row) = session.data.rows.iter().find(|row| row.id == row_id) else {
@@ -1333,6 +1471,33 @@ mod tests {
     fn empty_frame_stays_valid_at_tiny_width() {
         let frame = build_frame(None, &[], Size { width: 1.0, height: 200.0 });
         frame.validate().expect("1 像素宽的空态帧必须通过校验");
+    }
+
+    // 导入结果三档文案：成功 / 部分失败 / 全部失败，部分与全部失败带首个原因。
+    #[test]
+    fn import_report_covers_success_partial_and_total_failure() {
+        use atelyx_plugin_protocol::method::NotificationLevel;
+        use super::import_report;
+
+        assert_eq!(
+            import_report(3, &[]),
+            (NotificationLevel::Success, "已插入 3 张".to_string())
+        );
+
+        let failures = vec!["a.png：超过 50 MiB".to_string()];
+        assert_eq!(
+            import_report(2, &failures),
+            (
+                NotificationLevel::Warning,
+                "已插入 2 张，1 张失败（a.png：超过 50 MiB）".to_string()
+            )
+        );
+
+        let failures = vec!["a.png：读取失败".to_string(), "b.png：写入失败".to_string()];
+        assert_eq!(
+            import_report(0, &failures),
+            (NotificationLevel::Error, "未能写入任何图片：a.png：读取失败".to_string())
+        );
     }
 
     #[test]

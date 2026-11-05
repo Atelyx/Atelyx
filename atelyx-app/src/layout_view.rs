@@ -1596,13 +1596,9 @@ fn doc_status_pill(app: &App) -> Option<Element<'static, Message>> {
     }
 }
 
-/// 按视图 kind 分派内容（所属内置插件停用时先给占位；预置插件视图按 id 查渲染表；插件面板按整面帧渲染）。
+/// 按视图 kind 分派内容（注册表条目停用时先给就地启用占位；预置插件视图按 id 查渲染表；插件面板按整面帧渲染）。
 fn view_content<'a>(app: &'a App, window: iced::window::Id, kind: &str) -> Element<'a, Message> {
-    let disabled_builtin = app
-        .registry
-        .get(kind)
-        .is_some_and(|entry| entry.source.is_builtin() && !entry.enabled);
-    if disabled_builtin {
+    if view_disabled(app.registry.get(kind).map(|entry| entry.enabled)) {
         return disabled_view(app, kind);
     }
     let content = if crate::plugin_actions::parse_view_kind(kind).is_some() {
@@ -1625,6 +1621,11 @@ fn view_content<'a>(app: &'a App, window: iced::window::Id, kind: &str) -> Eleme
     }
 }
 
+/// 视图条目是否停用：未登记（尚未加载 / 未就绪）不算停用，避免把加载中误判为已停用。
+pub(crate) fn view_disabled(enabled: Option<bool>) -> bool {
+    enabled == Some(false)
+}
+
 /// 停用视图的占位：标签保留（不关标签、不动布局），内容区就地给重新启用入口。
 fn disabled_view(app: &App, kind: &str) -> Element<'static, Message> {
     let plugin_id = app
@@ -1633,19 +1634,22 @@ fn disabled_view(app: &App, kind: &str) -> Element<'static, Message> {
         .map(|entry| entry.source.plugin_id().to_string())
         .unwrap_or_default();
     let action = (!plugin_id.is_empty()).then(|| {
+        let msg = if app.plugins_state.list.iter().any(|plugin| plugin.id == plugin_id) {
+            crate::settings_view::plugins::PluginsMsg::Toggle(plugin_id.clone(), true)
+        } else {
+            crate::settings_view::plugins::PluginsMsg::SetBuiltinPluginEnabled(plugin_id.clone(), true)
+        };
         Element::from(controls::btn(
             "重新启用",
             &controls::btn_sm(),
             Variant::Primary,
-            Some(Message::Plugins(
-                crate::settings_view::plugins::PluginsMsg::SetBuiltinPluginEnabled(plugin_id, true),
-            )),
+            Some(Message::Plugins(msg)),
         ))
     });
     controls::view_placeholder_action(
         &view_icon(app, kind),
         view_label(app, kind),
-        "所属内置插件已停用".to_string(),
+        "所属插件已在设置中停用".to_string(),
         action,
     )
 }
@@ -3594,6 +3598,11 @@ pub fn window_shows_canvas(app: &App, window: iced::window::Id) -> bool {
     window_shows_view(app, window, atelyx_core::layout::CANVAS_VIEW)
 }
 
+/// 窗口当前活动视图是否为表格（表格键盘命令的作用域判定用）。
+pub fn window_shows_table(app: &App, window: iced::window::Id) -> bool {
+    window_shows_view(app, window, "table")
+}
+
 /// 枚举全部窗口的可停靠面板矩形（拖拽会话期间位置尺寸视为稳定）。
 pub fn panel_zones(app: &App) -> Vec<PanelZone> {
     let mut out = Vec::new();
@@ -3798,14 +3807,22 @@ pub fn drop_zone_at(zone: &PanelZone, global: iced::Point) -> DropZone {
 #[cfg(test)]
 mod tests {
     use super::{
-        active_view_in, divider_size, file_label, plugin_entries, truncate_to_width, UiMetrics,
-        MENU_SEARCH_H,
+        active_view_in, divider_size, file_label, plugin_entries, truncate_to_width,
+        view_disabled, UiMetrics, MENU_SEARCH_H,
     };
     use atelyx_core::layout::{LayoutNode, TabItem};
     use atelyx_core::plugin_runtime::{MenuItem, MenuOpenParams, MenuSearch};
     use iced::Length;
 
     use crate::ui::menu::MenuEntry;
+
+    /// 未登记条目是插件加载中就绪前的过渡，不等同于已停用，不能给「重新启用」入口。
+    #[test]
+    fn only_disabled_entries_take_the_disabled_view() {
+        assert!(view_disabled(Some(false)));
+        assert!(!view_disabled(Some(true)));
+        assert!(!view_disabled(None));
+    }
 
     #[test]
     fn divider_thickness_follows_split_axis() {

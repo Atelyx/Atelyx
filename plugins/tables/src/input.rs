@@ -964,10 +964,6 @@ fn key_press(
         return;
     }
     let control = modifiers.control || modifiers.meta;
-    if control && matches!(key, Key::Character { text } if text.eq_ignore_ascii_case("s")) {
-        outcome.manual_save = true;
-        return;
-    }
     match key {
         Key::Named { name } => match name {
             NamedKey::ArrowUp => move_selection(session, NavDir::Up),
@@ -995,47 +991,9 @@ fn key_press(
                 session.view.selection = None;
                 outcome.selection = true;
             }
-            NamedKey::Delete | NamedKey::Backspace => {
-                if clear_selection(session) {
-                    outcome.dirty = true;
-                }
-            }
             _ => {}
         },
         Key::Character { text: typed } => {
-            if control && typed.eq_ignore_ascii_case("z") {
-                let changed = if modifiers.shift { redo(session) } else { undo(session) };
-                if changed {
-                    outcome.dirty = true;
-                    outcome.paint = true;
-                }
-                return;
-            }
-            if control && typed.eq_ignore_ascii_case("y") {
-                if redo(session) {
-                    outcome.dirty = true;
-                    outcome.paint = true;
-                }
-                return;
-            }
-            if control && typed.eq_ignore_ascii_case("c") {
-                outcome.clipboard = Some(ClipboardAction::Copy);
-                return;
-            }
-            if control && typed.eq_ignore_ascii_case("x") {
-                outcome.clipboard = Some(ClipboardAction::Cut);
-                return;
-            }
-            if control && typed.eq_ignore_ascii_case("v") {
-                outcome.clipboard = Some(ClipboardAction::Paste);
-                return;
-            }
-            if control && typed.eq_ignore_ascii_case("a") {
-                session.view.selection = Some(TableSelection::All);
-                outcome.selection = true;
-                outcome.paint = true;
-                return;
-            }
             if control {
                 return;
             }
@@ -1225,13 +1183,6 @@ pub fn copy_tsv(session: &Session) -> Option<String> {
         &session.data.rows,
     )?;
     Some(ops::build_region_tsv(&session.data.fields, &session.data.rows, &region))
-}
-
-/// 剪切：导出后清空选区（图片格保留）。
-pub fn cut_tsv(session: &mut Session) -> Option<String> {
-    let text = copy_tsv(session)?;
-    clear_selection_public(session);
-    Some(text)
 }
 
 /// 粘贴 TSV：以选区左上角为锚点落格（表格不够宽时按需扩列）。

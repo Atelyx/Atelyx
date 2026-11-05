@@ -3829,6 +3829,13 @@ pub struct CanvasCommandParams {
     pub command: String,
 }
 
+/// [`crate::event::name::TABLE_COMMAND`] 的 payload：宿主按表格作用域拦截的快捷键命令。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableCommandParams {
+    /// `undo` / `redo` / `copy` / `cut` / `paste` / `select-all` / `delete` / `save`。
+    pub command: String,
+}
 
 /// [`ai::CHAT_SEND_DIRECT`] 的 params：宿主解析模型配置后把同一份负载交给 AI 核心插件，
 /// 消息真源不进入会话语料。

@@ -135,17 +135,22 @@ struct OverlayState {
 
 /// 当前窗口里的窗口级浮层（无则返回 `None`，不额外加部件）。
 pub fn overlay<'a>(app: &'a App, window: window::Id) -> Option<Element<'a, Message>> {
-    let mut targets: Vec<Target> = app
-        .plugin_frames
-        .iter()
-        .filter_map(|((plugin_id, surface_id), frame)| {
-            let origin = app
-                .plugin_surface_origins
-                .get(&(window, plugin_id.clone(), surface_id.clone()))
-                .copied();
-            window_target(plugin_id, surface_id, frame, origin)
-        })
-        .collect();
+    let mut targets: Vec<Target> = {
+        let frames = app.plugin_frames.read();
+        frames
+            .iter()
+            .flat_map(|(plugin_id, surfaces)| {
+                surfaces.iter().map(move |(surface_id, frame)| (plugin_id, surface_id, frame))
+            })
+            .filter_map(|(plugin_id, surface_id, frame)| {
+                let origin = app
+                    .plugin_surface_origins
+                    .get(&(window, plugin_id.clone(), surface_id.clone()))
+                    .copied();
+                window_target(plugin_id, surface_id, frame, origin)
+            })
+            .collect()
+    };
     if targets.is_empty() {
         return None;
     }

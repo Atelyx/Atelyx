@@ -148,8 +148,12 @@ async fn main() {
     wait_written(&state, 2).await;
     println!("新行与统计：通过");
 
-    // 撤销：Ctrl+Z 回到新增前的行数（头部统计回落 2 行）
-    send_key(&runtime, "z", true);
+    // 撤销：非编辑态快捷键由宿主命令域下发，插件收到 table:command 后回到新增前的行数
+    runtime.notify_plugin_event(
+        TABLES_ID,
+        event::name::TABLE_COMMAND,
+        &atelyx_plugin_protocol::method::TableCommandParams { command: "undo".to_string() },
+    );
     let undone = wait_header(&state, |params| {
         params.header.as_ref().is_some_and(|header| {
             header

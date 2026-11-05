@@ -14,7 +14,8 @@ use iced::{Task, window};
 use atelyx_core::layout::{self, AppUiState, LayoutNode, LayoutOp};
 use atelyx_core::plugin_runtime::{
     Contribution, ContributionSlot, DrawCommand, FrameInput, ImageSource, PluginStatus,
-    SurfaceFrame, SurfaceKind, TakeoverScope, WindowOpenParams, WindowUpdateParams,
+    PopupCapture, PopupLayer, SurfaceFrame, SurfaceKind, TakeoverScope, WindowOpenParams,
+    WindowUpdateParams,
 };
 
 use crate::registry::{Registry, Snapshot};
@@ -317,10 +318,8 @@ pub(crate) fn face_ready(app: &App, plugin_id: &str, surface_id: &str, running: 
         return true;
     }
     let size = app.plugins.surface_size(plugin_id, surface_id);
-    let frame = app
-        .plugin_frames
-        .get(&(plugin_id.to_string(), surface_id.to_string()));
-    frame_matches(frame, size)
+    let frame = app.plugin_frames.get(plugin_id, surface_id);
+    frame_matches(frame.as_ref(), size)
 }
 
 fn frame_matches(frame: Option<&Arc<SurfaceFrame>>, size: Option<(f32, f32)>) -> bool {
@@ -385,7 +384,7 @@ pub fn refresh_frames(app: &mut App) -> Task<Message> {
         };
         frames.insert(key, frame);
     }
-    app.plugin_frames = frames;
+    app.plugin_frames.replace(frames);
     prune_surface_origins(app);
     sync_modal_state(app);
     sync_frame_focus(app);
@@ -395,22 +394,21 @@ pub fn refresh_frames(app: &mut App) -> Task<Message> {
 /// 只刷新一个已挂面的投影：帧事件自带 surfaceId，无需重建所有面的表。
 /// 面已不在任何承载点时按移除处理（布局 / 设置 / 表格 / 窗口 / 接管 / 文档实例）。
 pub fn refresh_surface_frame(app: &mut App, plugin_id: &str, surface_id: &str) -> Task<Message> {
-    let key = (plugin_id.to_string(), surface_id.to_string());
-    // 首次到达的面先把设置 / 表格挂载表补齐，避免帧早于挂载同步时被误判为未挂载
-    if !app.plugin_frames.contains_key(&key) {
+    // 帧可能早于挂载同步到达：判为未挂载时先补齐设置 / 表格挂载表再判一次
+    if !surface_mounted(app, plugin_id, surface_id) {
         sync_settings_surfaces(app);
         sync_table_surfaces(app);
     }
     let mounted = surface_mounted(app, plugin_id, surface_id);
     if !mounted {
-        app.plugin_frames.remove(&key);
+        app.plugin_frames.remove(plugin_id, surface_id);
     } else {
         match app.plugins.surface_frame(plugin_id, surface_id) {
             Some(frame) => {
-                app.plugin_frames.insert(key, frame);
+                app.plugin_frames.insert(plugin_id, surface_id, frame);
             }
             None => {
-                app.plugin_frames.remove(&key);
+                app.plugin_frames.remove(plugin_id, surface_id);
             }
         }
     }
@@ -451,9 +449,7 @@ fn surface_mounted(app: &App, plugin_id: &str, surface_id: &str) -> bool {
 /// 帧焦点槽只对仍在投影里的帧有效：面不再有帧即释放并回发失焦。
 fn sync_frame_focus(app: &mut App) {
     let Some(focus) = app.plugin_frame_focus.clone() else { return };
-    let mounted = app
-        .plugin_frames
-        .contains_key(&(focus.plugin_id.clone(), focus.surface_id.clone()));
+    let mounted = app.plugin_frames.get(&focus.plugin_id, &focus.surface_id).is_some();
     if !mounted {
         app.plugin_frame_focus = None;
         notify_frame_focus(app, &focus.plugin_id, &focus.surface_id, false);
@@ -463,8 +459,7 @@ fn sync_frame_focus(app: &mut App) {
 /// 面已卸载即丢弃它的原点上报表：窗口级浮层按原点平移，过期原点会画到错误位置。
 fn prune_surface_origins(app: &mut App) {
     app.plugin_surface_origins.retain(|(_, plugin_id, surface_id), _| {
-        app.plugin_frames
-            .contains_key(&(plugin_id.clone(), surface_id.clone()))
+        app.plugin_frames.get(plugin_id, surface_id).is_some()
     });
 }
 
@@ -527,13 +522,32 @@ fn focused_frame(app: &App) -> Option<std::sync::Arc<atelyx_core::plugin_runtime
     let focus = app.plugin_frame_focus.as_ref()?;
     app.plugins
         .surface_frame(&focus.plugin_id, &focus.surface_id)
-        .or_else(|| app.plugin_frames.get(&(focus.plugin_id.clone(), focus.surface_id.clone())).cloned())
+        .or_else(|| app.plugin_frames.get(&focus.plugin_id, &focus.surface_id))
 }
 
 /// 整面帧是否收全部按键（含命令组合）：持有焦点的面按最新帧的 `keys` 声明判定，
 /// 声明后导航键与命令组合都归面处理，宿主不再派发。
 pub fn frame_takes_keyboard(app: &App) -> bool {
     focused_frame(app).is_some_and(|frame| frame.keys)
+}
+
+/// 表格网格视图是否持有键盘焦点（表格域命令的作用域判定）。
+pub fn table_frame_focused(app: &App) -> bool {
+    app.plugin_frame_focus
+        .as_ref()
+        .is_some_and(|focus| focus.plugin_id == TABLES_PLUGIN && focus.surface_id == "table")
+}
+
+/// 表格面在非文本录入时把命令组合交宿主按快捷键设置派发（导航与首字符起稿仍归面）。
+/// 判据：焦点在表格网格、帧无输入法光标、无弹层、帧率处于非编辑档（编辑为光标闪烁档）。
+pub fn table_commands_to_host(app: &App) -> bool {
+    table_frame_focused(app)
+        && focused_frame(app).is_some_and(|frame| frame_command_keys_to_host(&frame))
+}
+
+/// 命令组合是否归宿主：面声明收键，但当前不在文本录入——无输入法光标、无弹层、帧率非编辑档。
+fn frame_command_keys_to_host(frame: &atelyx_core::plugin_runtime::SurfaceFrame) -> bool {
+    frame.keys && frame.ime.is_none() && frame.popup.is_none() && frame.fps.is_none_or(|fps| fps <= 1)
 }
 
 // ===== 界面图片 =====
@@ -583,30 +597,34 @@ fn safe_private_path(dir: &Path, rel: &str) -> Option<PathBuf> {
 /// 句柄与笔记图片共用同一缓存（同来源即同字节，键不重叠）。
 pub(crate) fn ensure_images(app: &mut App) -> Task<Message> {
     let mut pending: Vec<(String, ImageSource)> = Vec::new();
-    for ((plugin_id, _), frame) in &app.plugin_frames {
-        collect_draw_images(&frame.commands, &mut |source| {
-            if let Some(key) = image_key(app, plugin_id, source) {
-                pending.push((key, source.clone()));
+    {
+        let frames = app.plugin_frames.read();
+        for (plugin_id, surfaces) in frames.iter() {
+            for frame in surfaces.values() {
+                collect_frame_images(app, plugin_id, frame, &mut pending);
             }
-        });
-        if let Some(popup) = &frame.popup {
-            collect_draw_images(&popup.commands, &mut |source| {
-                if let Some(key) = image_key(app, plugin_id, source) {
-                    pending.push((key, source.clone()));
-                }
-            });
         }
     }
     ensure_images_pending(app, pending)
 }
 
 /// 只扫刚换过的那一帧：帧事件占交互热路径，不能每帧扫全部面的图片指令。
-fn ensure_images_surface(app: &mut App, plugin_id: &str, surface_id: &str) -> Task<Message> {
-    let key = (plugin_id.to_string(), surface_id.to_string());
-    let Some(frame) = app.plugin_frames.get(&key) else {
+pub(crate) fn ensure_images_surface(app: &mut App, plugin_id: &str, surface_id: &str) -> Task<Message> {
+    let Some(frame) = app.plugin_frames.get(plugin_id, surface_id) else {
         return Task::none();
     };
     let mut pending: Vec<(String, ImageSource)> = Vec::new();
+    collect_frame_images(app, plugin_id, &frame, &mut pending);
+    ensure_images_pending(app, pending)
+}
+
+/// 收集一帧（正文 + 浮层）里按需载入的图片来源。
+fn collect_frame_images(
+    app: &App,
+    plugin_id: &str,
+    frame: &SurfaceFrame,
+    pending: &mut Vec<(String, ImageSource)>,
+) {
     collect_draw_images(&frame.commands, &mut |source| {
         if let Some(key) = image_key(app, plugin_id, source) {
             pending.push((key, source.clone()));
@@ -619,7 +637,45 @@ fn ensure_images_surface(app: &mut App, plugin_id: &str, surface_id: &str) -> Ta
             }
         });
     }
-    ensure_images_pending(app, pending)
+}
+
+/// 绘制期新帧是否需要宿主补做侧效应：模态归属变了、或帧里有尚未载入的图片。
+/// 只在少数帧上为真——否则每次重绘都要补一条消息，帧率一高就又回到整窗重建。
+pub(crate) fn frame_needs_host_sync(
+    app: &App,
+    plugin_id: &str,
+    surface_id: &str,
+    frame: Option<&SurfaceFrame>,
+    painted: Option<&SurfaceFrame>,
+) -> bool {
+    let Some(frame) = frame else { return true };
+    // 窗口级浮层在视图里组装（浮层根层按面帧收集目标）：出现 / 消失 / 几何变化都要重建视图
+    if painted.is_some_and(window_popup) || window_popup(frame) {
+        return true;
+    }
+    let capture = frame
+        .popup
+        .as_ref()
+        .is_some_and(|popup| popup.capture == PopupCapture::All);
+    let owns_modal = matches!(
+        app.plugin_modal.as_ref(),
+        Some((plugin, surface)) if plugin == plugin_id && surface == surface_id
+    );
+    if capture != owns_modal {
+        return true;
+    }
+    let mut images: Vec<(String, ImageSource)> = Vec::new();
+    collect_frame_images(app, plugin_id, frame, &mut images);
+    images.iter().any(|(key, _)| {
+        !app.note_images.contains_key(key)
+            && !app.note_images_inflight.contains(key)
+            && app.can_load_image(key)
+    })
+}
+
+/// 帧带窗口级浮层（不在面板裁剪内，由窗口浮层根层绘制）。
+fn window_popup(frame: &SurfaceFrame) -> bool {
+    frame.popup.as_ref().is_some_and(|popup| popup.layer == PopupLayer::Window)
 }
 
 fn ensure_images_pending(app: &mut App, pending: Vec<(String, ImageSource)>) -> Task<Message> {
@@ -1375,6 +1431,41 @@ mod tests {
         assert_eq!(parse_view_kind(&kind), Some(("com.a.panel", "models")));
     }
 
+    /// 表格命令组合的归属：非编辑档归宿主派发，输入法录入 / 弹层 / 编辑档仍归面。
+    #[test]
+    fn table_command_keys_follow_text_entry_state() {
+        use atelyx_core::plugin_runtime::{
+            FrameRect, PopupCapture, PopupLayer, SurfaceFrame, SurfacePopup,
+        };
+
+        let rect = FrameRect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 };
+        let mut frame = SurfaceFrame { keys: true, fps: Some(1), ..SurfaceFrame::default() };
+        assert!(frame_command_keys_to_host(&frame), "非编辑档命令组合应归宿主");
+
+        frame.ime = Some(rect);
+        assert!(!frame_command_keys_to_host(&frame), "输入法录入中按键归面");
+
+        frame.ime = None;
+        frame.popup = Some(SurfacePopup {
+            rect,
+            capture: PopupCapture::default(),
+            layer: PopupLayer::default(),
+            order: 0,
+            commands: Vec::new(),
+            hits: Vec::new(),
+            ime: None,
+        });
+        assert!(!frame_command_keys_to_host(&frame), "弹层展开期间按键归面");
+
+        frame.popup = None;
+        frame.fps = Some(2);
+        assert!(!frame_command_keys_to_host(&frame), "编辑档（光标闪烁）按键归面");
+
+        frame.fps = None;
+        frame.keys = false;
+        assert!(!frame_command_keys_to_host(&frame), "未声明收键时宿主不按命令派发");
+    }
+
     #[test]
     fn parse_view_kind_rejects_non_plugin_and_malformed_kinds() {
         for bad in [
@@ -1511,11 +1602,16 @@ mod tests {
 /// 重算当前展开的模态插件浮层：捕获全部外部按下的浮层（灯箱 / 模态菜单）归属到一个面，
 /// 壳侧据此把面板头部的点击转成「按在浮层外」。
 fn sync_modal_state(app: &mut App) {
-    let modal = app.plugin_frames.iter().find_map(|((plugin_id, surface_id), frame)| {
-        frame.popup.as_ref().and_then(|popup| {
-            (popup.capture == atelyx_core::plugin_runtime::PopupCapture::All)
-                .then(|| (plugin_id.clone(), surface_id.clone()))
+    let modal = {
+        let frames = app.plugin_frames.read();
+        frames.iter().find_map(|(plugin_id, surfaces)| {
+            surfaces.iter().find_map(|(surface_id, frame)| {
+                frame.popup.as_ref().and_then(|popup| {
+                    (popup.capture == PopupCapture::All)
+                        .then(|| (plugin_id.clone(), surface_id.clone()))
+                })
+            })
         })
-    });
+    };
     app.plugin_modal = modal;
 }

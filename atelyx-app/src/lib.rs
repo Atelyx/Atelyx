@@ -17,6 +17,7 @@ mod layout_view;
 mod pack;
 mod plugin_actions;
 mod doc_session;
+mod frame_store;
 mod panel_header;
 mod plugin_theme;
 mod plugin_frame;
@@ -32,6 +33,7 @@ mod startup;
 mod doc_presence;
 mod table_panel;
 mod tray;
+mod ui_metrics;
 pub use atelyx_ui as ui;
 mod update;
 
@@ -392,6 +394,10 @@ enum Message {
     WindowOpened(window::Id),
     WindowCloseRequested(window::Id),
     WindowClosed(window::Id),
+    /// 窗口原生句柄取回（注册为帧红绘目标）。
+    WindowRawId(window::Id, u64),
+    /// 绘制期发现新帧需要宿主补做侧效应（图片预载 / 模态浮层 / 焦点 / 投影）。
+    PluginFrameObserved { plugin_id: String, surface_id: String },
     VaultPicked(Result<PathBuf, String>),
     /// 从最近仓库列表进入指定仓库（脏拦截统一 flush 放行）。
     /// 启动自动进入 = from_boot；运行中切换在 gate 保存后关闭当前打开的文件。
@@ -559,7 +565,7 @@ enum Message {
     Plugins(settings_view::plugins::PluginsMsg),
     /// 插件运行时事件（单一通道进 update）。
     PluginEvent(Box<PluginEvent>),
-    /// 合并后的帧提交通知：一批 = 一个合并窗口内所有面的最新帧（`None` = 该插件整表清空）。
+    /// 需要换部件的帧通知：面上的首帧，或无红绘唤醒入口平台的合并批次（`None` = 该插件整表清空）。
     PluginFramesSubmitted(Vec<(String, Option<String>)>),
     /// 托盘选择（插件条目回发 `host:tray.click`，宿主条目由壳处理）。
     Tray(tray::TrayEvent),
@@ -1275,9 +1281,12 @@ pub struct App {
     pub plugin_table_surfaces: HashSet<(String, String)>,
     /// 最近一次广播 `editor:open.changed` 时的打开文件集合（身份差分用）。
     pub open_files_event: Vec<String>,
-    /// 各面的最新整面帧（键 = 插件 id + 面 id）。
-    pub plugin_frames:
-        HashMap<(String, String), std::sync::Arc<atelyx_core::plugin_runtime::SurfaceFrame>>,
+    /// 各面的最新整面帧（订阅流写入，绘制期读取）。
+    pub plugin_frames: frame_store::FrameStore,
+    /// 帧到达后的窗口红绘请求（不经消息，不重建视图）。
+    pub frame_redraw: frame_store::FrameRedraw,
+    /// 各窗口的原生句柄（窗口打开时取回，关闭时摘除红绘目标）。
+    pub frame_redraw_ids: HashMap<window::Id, u64>,
     /// 整面帧的键盘焦点（全局单槽：OS 只给聚焦窗口发键盘，窗口失焦即清除）。
     pub plugin_frame_focus: Option<plugin_actions::FrameFocus>,
     /// 各窗口的接管态（键 = OS 窗口 id；布局真源不动，退出即恢复）。
@@ -1652,7 +1661,9 @@ impl App {
                 plugin_settings_surfaces: HashSet::new(),
                 plugin_table_surfaces: HashSet::new(),
                 open_files_event: Vec::new(),
-                plugin_frames: HashMap::new(),
+                plugin_frames: frame_store::FrameStore::default(),
+                frame_redraw: frame_store::FrameRedraw::default(),
+                frame_redraw_ids: HashMap::new(),
                 plugin_frame_focus: None,
                 plugin_takeovers: HashMap::new(),
                 plugin_windows: HashMap::new(),
@@ -2062,6 +2073,7 @@ impl App {
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
+        ui_metrics::count_update();
         let task = self.handle(message);
         // 表格视图面挂载差分：换视图 / 开合 / 切换表格后差额通知插件（面集变了才重投影）
         let task = if plugin_actions::sync_table_surfaces(self) {
@@ -2104,10 +2116,14 @@ impl App {
         if self.startup.covering() && startup::covering_blocks(&message) {
             return Task::none();
         }
-        // 整面帧声明 keys 即接管键盘：导航键与命令组合都由面自己处理，宿主不重复派发。
-        // 未声明 keys 的视图（画布）仍由宿主按命令分派
+        // 整面帧声明 keys 即接管键盘：导航键与字符输入都由面自己处理，宿主不重复派发。
+        // 表格网格非文本录入时命令组合例外：按宿主快捷键设置分派，编辑态（有输入法光标）仍归面。
+        if plugin_actions::frame_takes_keyboard(self) && is_host_keyboard_message(&message) {
+            return Task::none();
+        }
         if plugin_actions::frame_takes_keyboard(self)
-            && (is_host_keyboard_message(&message) || is_frame_command_message(&message))
+            && is_frame_command_message(&message)
+            && !plugin_actions::table_commands_to_host(self)
         {
             return Task::none();
         }
@@ -2116,7 +2132,15 @@ impl App {
                 if self.main_id.is_none() {
                     self.main_id = Some(id);
                 }
+                window::raw_id::<Message>(id).map(move |raw| Message::WindowRawId(id, raw))
+            }
+            Message::WindowRawId(id, raw) => {
+                self.frame_redraw_ids.insert(id, raw);
+                self.frame_redraw.register(raw);
                 Task::none()
+            }
+            Message::PluginFrameObserved { plugin_id, surface_id } => {
+                plugin_actions::refresh_surface_frame(self, &plugin_id, &surface_id)
             }
             Message::StartupBegin => self.begin_startup(),
             Message::StartupFrameTick => {
@@ -2165,6 +2189,9 @@ impl App {
                 }
             }
             Message::WindowClosed(id) => {
+                if let Some(raw) = self.frame_redraw_ids.remove(&id) {
+                    self.frame_redraw.forget(raw);
+                }
                 plugin_actions::release_plugin_focus(self, id);
                 if self.main_id == Some(id) {
                     // 主窗关闭即退出：显式收尾插件运行时（停全部插件并结束托管进程树）
@@ -3507,7 +3534,7 @@ impl App {
                 task.chain(self.retry_pending_doc_open())
             }
             Message::PluginFramesSubmitted(submissions) => {
-                // 一整批只换投影、只重建一次视图；整表清空覆盖所有单面投影
+                // 帧本身不产生消息：这里只承载面上的首帧与清帧，整表清空覆盖所有单面投影
                 if submissions.iter().any(|(_, surface)| surface.is_none()) {
                     return plugin_actions::refresh_frames(self);
                 }
@@ -4321,6 +4348,25 @@ impl App {
             plugin_actions::CANVAS_PLUGIN,
             atelyx_core::plugin_runtime::event_name::CANVAS_COMMAND,
             &atelyx_core::plugin_runtime::CanvasCommandParams { command: command.to_string() },
+        );
+    }
+
+    /// 表格快捷键上下文：表格已打开且在焦点窗口展示、无弹层 / 行内改名，焦点在表格网格面且非编辑。
+    fn table_key_ready(&self) -> bool {
+        if self.ui.last_table_file.is_none() || self.popup.is_some() || self.rename.is_some() {
+            return false;
+        }
+        self.focused_window
+            .is_some_and(|window| layout_view::window_shows_table(self, window))
+            && plugin_actions::table_commands_to_host(self)
+    }
+
+    /// 把表格作用域命令转给表格插件执行（非编辑态按键绑定归宿主）。
+    fn send_table_command(&self, command: &str) {
+        self.plugins.notify_plugin_event(
+            plugin_actions::TABLES_PLUGIN,
+            atelyx_core::plugin_runtime::event_name::TABLE_COMMAND,
+            &atelyx_core::plugin_runtime::TableCommandParams { command: command.to_string() },
         );
     }
 
@@ -6840,7 +6886,7 @@ impl App {
         Err("文档不在编辑状态".to_string())
     }
 
-    /// 命令候选键分派：录制态先吃按键；注册表按序先到先得，画布域按画布焦点自守卫。
+    /// 命令候选键分派：录制态先吃按键；注册表按序先到先得，表格 / 画布域按各自焦点自守卫。
     /// 注册表外的 Ctrl+S（保存）保持硬编码。
     fn on_key_command(&mut self, key: keyboard::Key, mods: keyboard::Modifiers) -> Task<Message> {
         if self.shortcut_recording.is_some() {
@@ -6851,6 +6897,21 @@ impl App {
             if !commands::matches(binding, mods, &key) {
                 continue;
             }
+            if matches!(id.scope(), commands::Scope::Table) && self.table_key_ready() {
+                let command = match id {
+                    commands::CommandId::TableUndo => "undo",
+                    commands::CommandId::TableRedo => "redo",
+                    commands::CommandId::TableCopy => "copy",
+                    commands::CommandId::TableCut => "cut",
+                    commands::CommandId::TablePaste => "paste",
+                    commands::CommandId::TableSelectAll => "select-all",
+                    commands::CommandId::TableClear => "delete",
+                    commands::CommandId::TableSave => "save",
+                    _ => continue,
+                };
+                self.send_table_command(command);
+                return Task::none();
+            }
             if matches!(id.scope(), commands::Scope::Canvas) && self.canvas_key_ready() {
                 let command = match id {
                     commands::CommandId::CanvasUndo => "undo",
@@ -6859,18 +6920,27 @@ impl App {
                     commands::CommandId::CanvasPaste => "paste",
                     commands::CommandId::CanvasSelectAll => "select-all",
                     commands::CommandId::CanvasClear => "delete",
+                    _ => continue,
                 };
                 self.send_canvas_command(command);
                 return Task::none();
             }
         }
-        // 重做别名：redo 未被重定义时 mod+shift+z 沿用（画布直接分派）
-        if (mods.control() || mods.logo())
+        // 重做别名：redo 未被重定义时 mod+shift+z 沿用（表格 / 画布各按本域绑定判定）
+        let redo_alias = (mods.control() || mods.logo())
             && mods.shift()
             && !mods.alt()
-            && matches!(&key, keyboard::Key::Character(c) if c.to_lowercase() == "z")
+            && matches!(&key, keyboard::Key::Character(c) if c.to_lowercase() == "z");
+        if redo_alias
+            && self.table_key_ready()
+            && commands::redo_alias_active(&self.global.command_shortcuts, commands::Scope::Table)
+        {
+            self.send_table_command("redo");
+            return Task::none();
+        }
+        if redo_alias
             && self.canvas_key_ready()
-            && commands::redo_alias_active(&self.global.command_shortcuts)
+            && commands::redo_alias_active(&self.global.command_shortcuts, commands::Scope::Canvas)
         {
             self.send_canvas_command("redo");
             return Task::none();
@@ -6882,6 +6952,14 @@ impl App {
                 .find(|(c, _)| *c == id)
                 .map(|(_, b)| b.clone())
         };
+        if mods.is_empty()
+            && matches!(key, keyboard::Key::Named(keyboard::key::Named::Backspace))
+            && clear_binding(commands::CommandId::TableClear).as_deref() == Some("delete")
+            && self.table_key_ready()
+        {
+            self.send_table_command("delete");
+            return Task::none();
+        }
         if mods.is_empty()
             && matches!(key, keyboard::Key::Named(keyboard::key::Named::Backspace))
             && clear_binding(commands::CommandId::CanvasClear).as_deref() == Some("delete")
@@ -6992,6 +7070,7 @@ impl App {
     }
 
     fn view(&self, id: window::Id) -> Element<'_, Message> {
+        ui_metrics::count_view();
         if self.main_id == Some(id) {
             startup::main_window_view(self, id)
         } else if let Some(model_id) = self.detached_os.get(&id) {
@@ -7147,7 +7226,11 @@ impl App {
     /// 插件运行时事件订阅：单一广播通道接进 update（同一运行时不重建流）。
     fn plugin_events_subscription(&self) -> Subscription<Message> {
         Subscription::run_with(
-            settings_view::plugins::RuntimeSpec(self.plugins.clone()),
+            settings_view::plugins::RuntimeSpec {
+                runtime: self.plugins.clone(),
+                frames: self.plugin_frames.clone(),
+                redraw: self.frame_redraw.clone(),
+            },
             settings_view::plugins::runtime_stream,
         )
     }
@@ -7155,7 +7238,11 @@ impl App {
     /// 壳侧服务请求订阅：对话框请求走无界通道（不丢帧），与事件广播分属两条流。
     fn plugin_host_requests_subscription(&self) -> Subscription<Message> {
         Subscription::run_with(
-            settings_view::plugins::RuntimeSpec(self.plugins.clone()),
+            settings_view::plugins::RuntimeSpec {
+                runtime: self.plugins.clone(),
+                frames: self.plugin_frames.clone(),
+                redraw: self.frame_redraw.clone(),
+            },
             settings_view::plugins::host_requests_stream,
         )
     }

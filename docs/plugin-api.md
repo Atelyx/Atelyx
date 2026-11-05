@@ -3890,6 +3890,16 @@ pub struct TableSetCellImageParams {
 }
 ```
 
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`crate::event::name::TABLE_COMMAND`] 的 payload：宿主按表格作用域拦截的快捷键命令。
+#[serde(rename_all = "camelCase")]
+pub struct TableCommandParams {
+    /// `undo` / `redo` / `copy` / `cut` / `paste` / `select-all` / `delete` / `save`。
+    pub command: String,
+}
+```
+
 ## 14. 能力面负载：画布
 
 画布面读写当前打开的画布：内容真源是磁盘上的 `.atlx` 文件，插件写盘经宿主 `vault.writeText`。`canvas.snapshot` 由预置画布插件提供，返回选中卡属性与统计，属性面板据此渲染。
@@ -4777,6 +4787,9 @@ pub mod name {
     /// 宿主拦截的画布快捷键命令（撤销 / 复制 / 粘贴等，按用户自定义键位触发）：
     /// payload 见 [`crate::method::CanvasCommandParams`]。
     pub const CANVAS_COMMAND: &str = "canvas:command";
+    /// 宿主拦截的表格快捷键命令（撤销 / 复制 / 保存等，非编辑态按用户自定义键位触发）：
+    /// payload 见 [`crate::method::TableCommandParams`]。
+    pub const TABLE_COMMAND: &str = "table:command";
     /// 画布是否正展示在前台（后台标签页不算）：payload 见 [`CanvasVisiblePayload`]。
     pub const CANVAS_VISIBLE: &str = "canvas:visible";
     /// 会话语义变更（流式增量不广播）。payload 见 [`ChatChangedPayload`]。

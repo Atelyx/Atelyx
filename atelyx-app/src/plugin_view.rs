@@ -26,14 +26,12 @@ pub fn window_view<'a>(
     window: iced::window::Id,
     entry: &crate::plugin_actions::PluginWindowActive,
 ) -> Element<'a, Message> {
-    let key = (entry.plugin_id.clone(), entry.window_key.clone());
-    match app.plugin_frames.get(&key) {
-        Some(frame) => crate::plugin_frame::frame_view(
+    match app.plugin_frames.get(&entry.plugin_id, &entry.window_key) {
+        Some(_) => crate::plugin_frame::frame_view(
             app,
             window,
             &entry.plugin_id,
             &entry.window_key,
-            frame,
             Padding::ZERO,
         ),
         None => placeholder("puzzle", "插件窗口", "等待插件提交界面（插件未运行或尚未就绪）"),
@@ -47,10 +45,9 @@ pub fn takeover_content<'a>(
     plugin_id: &str,
     surface_id: &str,
 ) -> Element<'a, Message> {
-    let key = (plugin_id.to_string(), surface_id.to_string());
-    match app.plugin_frames.get(&key) {
-        Some(frame) => {
-            crate::plugin_frame::frame_view(app, window, plugin_id, surface_id, frame, Padding::ZERO)
+    match app.plugin_frames.get(plugin_id, surface_id) {
+        Some(_) => {
+            crate::plugin_frame::frame_view(app, window, plugin_id, surface_id, Padding::ZERO)
         }
         None => placeholder("puzzle", "接管面", "等待插件提交界面"),
     }
@@ -70,19 +67,18 @@ pub(crate) fn surface_view<'a>(
         return placeholder(
             "puzzle",
             &format!("{kind_label} {plugin_id}"),
-            "插件不可用：未安装、未启用或已卸载",
+            "插件未就绪：仍在加载",
         );
     };
-    let key = (plugin_id.to_string(), surface_id.to_string());
     let outer_pad = contribution.padding.map(padding_of).unwrap_or(Padding::ZERO);
-    match app.plugin_frames.get(&key) {
-        Some(frame) => {
-            crate::plugin_frame::frame_view(app, window, plugin_id, surface_id, frame, outer_pad)
+    match app.plugin_frames.get(plugin_id, surface_id) {
+        Some(_) => {
+            crate::plugin_frame::frame_view(app, window, plugin_id, surface_id, outer_pad)
         }
         None => {
             let icon_key =
                 crate::plugin_actions::plugin_icon_key(contribution.icon.as_deref(), "puzzle");
-            placeholder(&icon_key, &contribution.label, "等待插件提交界面（插件未运行或尚未就绪）")
+            placeholder(&icon_key, &contribution.label, "插件未就绪：等待插件提交界面")
         }
     }
 }

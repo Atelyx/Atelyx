@@ -85,7 +85,7 @@ pub use atelyx_plugin_protocol::method::{
     HeaderItem, HeaderPill, HeaderStatus, HeaderTone, HistoryRecordParams, MeasureSegment,
     MeasureTextResult, NotificationLevel, PaddingSpec, PanelFlushDoneParams, PanelFlushParams,
     PanelHeaderActionParams, PanelHeaderParams, PanelHeaderState, Radii, SpaceFilePatchParams,
-    SpaceFilePatchPayload, SpaceFilePatchResult, TableContentParams,
+    SpaceFilePatchPayload, SpaceFilePatchResult, TableContentParams, TableCommandParams,
     SetTrayItemsParams, ShortcutQueryResult, SurfaceKind,
     TakeoverScope, ThemeColors,
     AiSettingsResult, CanvasCommandParams, CanvasContentParams, CanvasEdgeInfo, CanvasRefStatus,
