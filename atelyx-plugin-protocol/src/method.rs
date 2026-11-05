@@ -436,6 +436,8 @@ pub mod ai {
     pub const CHAT_COMPACT_DIRECT: &str = "ai.chat.compactDirect";
     /// 读与 AI 运行相关的仓库设置（落卡开关等）；插件据此决定本地派生行为。
     pub const SETTINGS: &str = "ai.settings";
+    /// 激活已打开的 AI 对话面板；未打开时不新建、不提示。
+    pub const CHAT_OPEN_PANEL: &str = "ai.chat.openPanel";
 }
 
 /// 宿主与 AI 核心插件之间的私有服务（`ai.core`）：只由宿主调用，不登记进能力目录。
@@ -3296,7 +3298,7 @@ pub const BUILTIN_SERVICES: &[(&str, &str, &[&str])] = &[
     ("chat", PLATFORM_PLUGIN, &[chat::SESSION_READ, chat::SESSION_WRITE, chat::SESSION_SNAPSHOT]),
     // 工具名册与结果回报是宿主记账，不是可由外部提供者接管的能力，故不在目录里；
     // 对话门面由宿主编排（核心插件只是被调用的实现），服务归平台自身
-    ("ai", PLATFORM_PLUGIN, &[ai::CHAT_SEND, ai::CHAT_SEND_DIRECT, ai::CHAT_STOP, ai::CHAT_HISTORY, ai::MODELS, ai::AGENTS, ai::CHAT_RENAME, ai::CHAT_DELETE, ai::CHAT_COMPACT, ai::CHAT_COMPACT_DIRECT, ai::CHAT_TITLE, ai::TOOL_LIST, ai::TOOL_EXECUTE, ai::CHAT_EMIT, ai::SETTINGS]),
+    ("ai", PLATFORM_PLUGIN, &[ai::CHAT_SEND, ai::CHAT_SEND_DIRECT, ai::CHAT_STOP, ai::CHAT_HISTORY, ai::MODELS, ai::AGENTS, ai::CHAT_RENAME, ai::CHAT_DELETE, ai::CHAT_COMPACT, ai::CHAT_COMPACT_DIRECT, ai::CHAT_TITLE, ai::TOOL_LIST, ai::TOOL_EXECUTE, ai::CHAT_EMIT, ai::SETTINGS, ai::CHAT_OPEN_PANEL]),
     ("window", PLATFORM_PLUGIN, &[window::OPEN, window::CLOSE, window::UPDATE, window::SHOW, window::BEGIN_DRAG, window::MINIMIZE, window::TOGGLE_MAXIMIZE]),
     ("query", PLATFORM_PLUGIN, &[query::MEASURE, query::THEME, query::FONTS]),
     // 编辑器选区读写作用于宿主自持的当前文档会话，随平台常驻

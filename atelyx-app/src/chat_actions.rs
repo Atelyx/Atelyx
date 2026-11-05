@@ -147,6 +147,8 @@ pub enum ChatMsg {
     PluginCompactDirectDone { request_id: u64, result: Result<Value, String> },
     /// 插件读 AI 运行相关设置（ai.settings）。
     PluginAiSettings { request_id: u64 },
+    /// 插件请求激活已打开的 AI 对话面板（ai.chat.openPanel）；未打开时不新建。
+    PluginOpenPanel { request_id: u64 },
     /// 插件请求中断一个会话的活跃 run（ai.chat.stop）。
     PluginStop { request_id: u64, session_id: String },
     /// 插件请求读会话清单或单会话消息（ai.chat.history）。
@@ -531,6 +533,15 @@ fn update_inner(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
             let result = serde_json::to_value(settings).map_err(|e| e.to_string());
             app.plugins.resolve_shell_call(request_id, result);
             iced::Task::none()
+        }
+        ChatMsg::PluginOpenPanel { request_id } => {
+            let task = crate::plugin_actions::activate_view(
+                app,
+                atelyx_core::layout::AI_PANEL_VIEW,
+            )
+            .unwrap_or_else(iced::Task::none);
+            app.plugins.resolve_shell_call(request_id, Ok(json!({})));
+            task
         }
         ChatMsg::PluginStop { request_id, session_id } => {
             stop_run(app, &session_id);

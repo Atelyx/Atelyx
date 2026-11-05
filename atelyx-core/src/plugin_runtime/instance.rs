@@ -902,6 +902,10 @@ impl Instance {
                     plugin_id: self.id.clone(),
                     request_id: 0,
                 },
+                method::ai::CHAT_OPEN_PANEL => HostRequest::ChatOpenPanel {
+                    plugin_id: self.id.clone(),
+                    request_id: 0,
+                },
                 method::ai::CHAT_SEND => HostRequest::ChatSend {
                     plugin_id: self.id.clone(),
                     request_id: 0,
@@ -2467,6 +2471,7 @@ fn is_shell_method(method_name: &str) -> bool {
             | method::ai::CHAT_SEND_DIRECT
             | method::ai::CHAT_COMPACT_DIRECT
             | method::ai::SETTINGS
+            | method::ai::CHAT_OPEN_PANEL
             | method::ai::CHAT_STOP
             | method::ai::CHAT_HISTORY
             | method::ai::CHAT_RENAME

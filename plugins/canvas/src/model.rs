@@ -601,6 +601,18 @@ pub fn zoom_buttons(w: f32) -> [(&'static str, (f32, f32, f32, f32)); 3] {
     rects
 }
 
+/// 选中的单个对话卡节点 id：工具条「在 AI 面板打开」的显示与命中条件。
+pub fn open_panel_target<'a>(nodes: &'a [CanvasFileNode], selection: &[String]) -> Option<&'a str> {
+    if selection.len() != 1 {
+        return None;
+    }
+    let id = selection[0].as_str();
+    nodes
+        .iter()
+        .find(|node| node.id == id && node.node_type == "conversation")
+        .map(|node| node.id.as_str())
+}
+
 /// 小地图映射：内容包围盒等比缩进小地图框并居中。
 /// 返回 `(scale, offset_x, offset_y)`，屏幕坐标 = `(world - offset) * scale` 再加小地图框左上角。
 pub fn minimap_transform(nodes: &[CanvasFileNode]) -> Option<(f32, f64, f64)> {

@@ -81,7 +81,8 @@ pub(crate) fn permission_for(name: &str) -> Option<Permission> {
         ai::CHAT_SEND | ai::CHAT_SEND_DIRECT | ai::CHAT_COMPACT_DIRECT | ai::SETTINGS
         | ai::CHAT_STOP | ai::CHAT_HISTORY | ai::CHAT_RENAME | ai::CHAT_DELETE
         | ai::CHAT_COMPACT | ai::CHAT_TITLE | ai::MODELS | ai::AGENTS | ai::REGISTER_TOOL | ai::UNREGISTER_TOOL
-        | ai::TOOL_RESULT | ai::TOOL_LIST | ai::TOOL_EXECUTE | ai::CHAT_EMIT => Some(Ai),
+        | ai::TOOL_RESULT | ai::TOOL_LIST | ai::TOOL_EXECUTE | ai::CHAT_EMIT
+        | ai::CHAT_OPEN_PANEL => Some(Ai),
         method::chat::SESSION_READ | method::chat::SESSION_WRITE
         | method::chat::SESSION_SNAPSHOT => Some(Ai),
         // 面板头部与事件发布只编排宿主界面 / 广播，不触碰宿主资源，与 `query.theme`、事件订阅同档

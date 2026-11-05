@@ -257,6 +257,8 @@ pub enum HostRequest {
     },
     /// 插件读与 AI 运行相关的仓库设置（落卡开关等）。
     AiSettings { plugin_id: String, request_id: u64 },
+    /// 插件请求激活已打开的 AI 对话面板；未打开时不新建。
+    ChatOpenPanel { plugin_id: String, request_id: u64 },
     /// 插件请求中断一个会话的活跃 run。
     ChatStop { plugin_id: String, request_id: u64, params: method::ChatStopParams },
     /// 插件请求读会话清单或单会话消息历史。
@@ -803,6 +805,7 @@ impl PluginRuntime {
             | HostRequest::ChatSendDirect { .. }
             | HostRequest::ChatCompactDirect { .. }
             | HostRequest::AiSettings { .. }
+            | HostRequest::ChatOpenPanel { .. }
             | HostRequest::ChatStop { .. }
             | HostRequest::ChatHistory { .. }
             | HostRequest::ChatRename { .. }
@@ -1172,6 +1175,9 @@ impl PluginRuntime {
                 HostRequest::ChatCompactDirect { plugin_id, request_id, params }
             }
             HostRequest::AiSettings { plugin_id, .. } => HostRequest::AiSettings { plugin_id, request_id },
+            HostRequest::ChatOpenPanel { plugin_id, .. } => {
+                HostRequest::ChatOpenPanel { plugin_id, request_id }
+            }
             HostRequest::VaultTags { plugin_id, .. } => HostRequest::VaultTags { plugin_id, request_id },
             HostRequest::HistoryDay { plugin_id, params, .. } => HostRequest::HistoryDay {
                 plugin_id,
@@ -2337,6 +2343,7 @@ fn request_plugin_id(request: &HostRequest) -> &str {
         | HostRequest::ChatSendDirect { plugin_id, .. }
         | HostRequest::ChatCompactDirect { plugin_id, .. }
         | HostRequest::AiSettings { plugin_id, .. }
+        | HostRequest::ChatOpenPanel { plugin_id, .. }
         | HostRequest::ChatStop { plugin_id, .. }
         | HostRequest::ChatHistory { plugin_id, .. }
         | HostRequest::ClipboardWrite { plugin_id, .. }

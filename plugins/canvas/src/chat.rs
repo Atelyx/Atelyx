@@ -32,6 +32,13 @@ pub fn node_of_session(session: &str) -> Option<&str> {
     session.strip_prefix(SESSION_PREFIX)
 }
 
+/// 激活已打开的 AI 对话面板；未打开时不新建标签、不提示。
+pub async fn open_in_panel(ctx: &atelyx_plugin_sdk::Context) {
+    if let Err(error) = ctx.call_raw(method::ai::CHAT_OPEN_PANEL, json!({})).await {
+        ctx.log_error(&format!("打开 AI 面板失败：{error}"));
+    }
+}
+
 /// 附件临时区的会话 id：非字母数字 / `-` 的字符一律替换为 `-`，截断 128（目录名不接受路径语义）。
 pub fn media_session_id(node: &str) -> String {
     let body: String = node

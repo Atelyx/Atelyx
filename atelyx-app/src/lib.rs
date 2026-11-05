@@ -7571,6 +7571,26 @@ mod restore_open_tests {
     }
 
     #[test]
+    fn activate_only_never_adds_tab() {
+        let mut ui = default_ui();
+        assert!(
+            crate::plugin_actions::activate_op(&ui, NOTES_VIEW).is_none(),
+            "视图不存在时不得返回建标签操作"
+        );
+        assert!(
+            crate::plugin_actions::activate_op(&ui, atelyx_core::layout::AI_PANEL_VIEW).is_none(),
+            "AI 面板默认不在布局里"
+        );
+        add_view(&mut ui, NOTES_VIEW);
+        let before = tab_count(&ui);
+        assert!(matches!(
+            crate::plugin_actions::activate_op(&ui, NOTES_VIEW),
+            Some(LayoutOp::SetActive { .. })
+        ));
+        assert_eq!(tab_count(&ui), before, "仅激活不得新增标签");
+    }
+
+    #[test]
     fn view_in_multiple_layouts_is_activated_without_duplicate_tab() {
         let mut ui = default_ui();
         // 默认「笔记」「表格」两套布局都带笔记视图（主页不带）

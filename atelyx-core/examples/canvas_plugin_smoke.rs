@@ -13,8 +13,10 @@ use atelyx_core::plugin_runtime::{
     PanelHeaderParams, PluginRuntime, PluginStatus, SurfaceKind, VaultFileEntry,
 };
 use atelyx_plugin_protocol::frame::SurfaceFrame;
-use atelyx_plugin_protocol::method::{FontSizes, Radii, ThemeColors, ThemeResult};
-use atelyx_plugin_protocol::paint::{DrawCommand, TextAlign, TextLayout};
+use atelyx_plugin_protocol::method::{
+    CollabMessageParams, FontSizes, MenuItem, MenuOpenParams, Radii, ThemeColors, ThemeResult,
+};
+use atelyx_plugin_protocol::paint::{DrawCommand, PaintColor, TextAlign, TextLayout};
 
 const CANVAS_ID: &str = "atelyx.canvas";
 const SURFACE: &str = "canvas";
@@ -27,6 +29,24 @@ const CARD_W: f32 = 360.0;
 const CARD_H: f32 = 240.0;
 /// 卡头字号固定为屏幕像素（不随缩放变化）。
 const CARD_TITLE_SIZE: f32 = 12.0;
+/// 主题正文字号：卡内正文与消息都用它，缩放不应改变。
+const BODY_SIZE: f32 = 14.0;
+/// 滚动条槽宽（卡内容右缘让出的部分，SDK 与画布共同口径）。
+const SCROLLBAR_SLOT_W: f32 = 8.0;
+/// 卡内容矩形右侧内缩：滚动条槽右缘距卡右缘的距离。
+const CARD_CONTENT_INSET: f32 = 1.0;
+/// 卡内容左右内边距。
+const CARD_CONTENT_PAD: f32 = 8.0;
+/// 卡片圆角半径（世界单位，随缩放变化）：内容下沿据此避开圆角。
+const CARD_CORNER_RADIUS: f32 = 10.0;
+/// 卡头世界高度与卡头到内容矩形的屏幕间距。
+const CARD_HEAD_H: f32 = 30.0;
+const CARD_BODY_GAP: f32 = 4.0;
+/// 卡内最大行高（主题 h1 × 1.3）：跨视口边的 Markdown 行会整行画出，内容矩形上下各让出一档。
+const CARD_CONTENT_MAX_LINE: f32 = 26.0;
+/// 对话卡片尺寸（世界单位）。
+const CHAT_W: f32 = 520.0;
+const CHAT_H: f32 = 560.0;
 /// 标题实际可用宽度 = 卡宽 - 左右内边距与图标位（见画布世界层排版）。
 const TITLE_LIMIT: f32 = CARD_W - 36.0;
 /// 屏幕宽不超过该值时卡片退化为「卡头 + 居中图标」占位形态。
@@ -103,9 +123,56 @@ async fn main() {
     );
     println!("载入：{} 条指令 / {} 个命中区", frame.commands.len(), frame.hits.len());
 
+    // 协作在场：远端名签用宿主名册色（不看载荷自报色）；断链事件后立即摘除
+    runtime.notify_collab_message(
+        CANVAS_ID,
+        &CollabMessageParams {
+            channel: "canvas-presence".to_string(),
+            payload: json!({
+                "path": "demo.atlx",
+                "present": true,
+                "selected": ["n1"],
+                "color": "#abcdef"
+            }),
+            peer_id: "p1".to_string(),
+            peer_name: Some("林".to_string()),
+            peer_color: Some("#123456".to_string()),
+        },
+    );
+    let remote = wait_frame(&runtime, |frame| has_text_containing(frame, "林"))
+        .await
+        .expect("远端在场后应画出名签");
+    assert!(
+        remote.commands.iter().any(|command| matches!(
+            command,
+            DrawCommand::Rect { stroke: Some(PaintColor::Rgba { rgba }), .. }
+                if rgba == &[0x12, 0x34, 0x56, 255]
+        )),
+        "远端选区描边应取名册身份色"
+    );
+    runtime.notify_plugin_event(
+        CANVAS_ID,
+        atelyx_plugin_protocol::event::name::SPACE_PEERS_CHANGED,
+        &json!({}),
+    );
+    wait_frame(&runtime, |frame| !has_text_containing(frame, "林"))
+        .await
+        .expect("断链后远端名签应立即消失");
+    println!("协作在场身份色与断链清理：通过");
+
+    // 长正文在卡内滚动：正文行全落在内容矩形内，滚动条槽右缘贴卡右缘
+    assert_eq!(
+        body_command(&frame).map(|body| body.3),
+        Some(BODY_SIZE),
+        "正文字号固定为屏幕像素"
+    );
+    assert_card_text_within_card(&frame, CARD_W, CARD_H);
+    assert_scrollbar_hugs_card(&frame, CARD_W, CARD_H, true);
+    println!("卡内正文裁剪与滚动条贴边：通过");
+
     // 右键空白 → 宿主弹菜单 → 选「新建文本卡」：画布内容变脏
     right_click_at(&runtime, 700.0, 200.0);
-    wait_menu(&state).await;
+    wait_menu(&state, 1).await;
     runtime.notify_menu_closed(CANVAS_ID, Some("canvas-menu-new-text".to_string()));
     wait_written(&state, 1).await;
     let two_cards: Value = serde_json::from_str(&written_at(&state, 0)).expect("写盘内容是画布 JSON");
@@ -229,6 +296,34 @@ async fn main() {
         .expect("尺寸还原后缩放仍应保留");
     println!("改尺寸保持视口：通过（{kept}%）");
 
+    // 卡内字号固定：锚定卡头放大到 300%（正文浮层会吞滚轮，锚点必须落在浮层外），
+    // 正文与卡头字号不变、正文不出卡、滚动条仍贴卡右缘
+    let base_size = body_command(&restored).expect("文本卡应画出正文").3;
+    let (anchor_x, anchor_y) = title_point(&restored).expect("应有卡头标题");
+    let (anchor_x, anchor_y) = (anchor_x + 2.0, anchor_y + 2.0);
+    wheel_at(&runtime, anchor_x, anchor_y, -400.0);
+    let zoom300 = wait_frame(&runtime, |frame| {
+        zoom_percent(frame).is_some_and(|pct| pct >= 290) && body_command(frame).is_some()
+    })
+    .await
+    .expect("放大到 300% 后正文应仍可见");
+    assert_eq!(
+        body_command(&zoom300).map(|body| body.3),
+        Some(base_size),
+        "正文字号不应随缩放变化"
+    );
+    assert_eq!(title_size(&zoom300), Some(CARD_TITLE_SIZE), "放大到 300% 后卡头字号不变");
+    assert_card_text_within_card(&zoom300, CARD_W, CARD_H);
+    assert_scrollbar_hugs_card(&zoom300, CARD_W, CARD_H, true);
+    // 缩放步进按指数算（`exp(-delta * 0.0025)`），固定 ±400 在 300% 上限处不往回等量，
+    // 这里按当前缩放与目标缩放反解增量。
+    let back = ((zoom_percent(&zoom300).unwrap_or(300) as f32) / kept as f32).ln() / 0.0025;
+    wheel_at(&runtime, anchor_x, anchor_y, back);
+    let restored = wait_frame(&runtime, |frame| zoom_percent(frame).is_some_and(|pct| pct == kept))
+        .await
+        .expect("缩回原缩放");
+    println!("卡内字号固定与正文裁剪：通过（300% / {kept}%）");
+
     // Ctrl+滚轮：正增量（向下）应把画面向上推（pan.1 减小，卡头屏幕上移）
     let title_y = text_y(&restored).expect("应有卡头标题");
     wheel(&runtime, 40.0, true);
@@ -329,10 +424,6 @@ async fn main() {
         "引用胶囊应渲染引用标签（当前指令里没有含「说明」的文字）"
     );
     assert!(
-        has_image_command(&chat, 160.0, 160.0),
-        "图片附件应出现 160×160 缩略图"
-    );
-    assert!(
         chat.commands.iter().any(|command| matches!(
             command,
             DrawCommand::Text { content, .. } if content.contains("先看看目录")
@@ -359,6 +450,12 @@ async fn main() {
         has_text(&scrolled, "最终结论"),
         "滚动到底应看到后续正文"
     );
+    // 卡内全部文字（消息 / 输入区 / 引用）落在内容矩形内；缩略图宽度收敛到内容宽
+    assert_card_text_within_card(&chat, CHAT_W, CHAT_H);
+    assert_card_text_within_card(&scrolled, CHAT_W, CHAT_H);
+    assert_scrollbar_hugs_card(&chat, CHAT_W, CHAT_H, true);
+    assert_scrollbar_hugs_card(&scrolled, CHAT_W, CHAT_H, false);
+    assert_thumb_within_content(&chat, CHAT_W, CHAT_H);
     println!("对话卡信息恢复：通过（{} 条指令）", chat.commands.len());
 
     // 表格 / 媒体卡：引用缺失也要出提示，不留空白卡
@@ -371,6 +468,55 @@ async fn main() {
         "媒体附件缺失时应提示「附件缺失」"
     );
     println!("媒体 / 表格卡提示：通过");
+
+    // 对话卡两处「在 AI 面板打开」入口：选中卡后工具条出现按钮，右键菜单同项，
+    // 两条入口都发 ai.chat.openPanel 给宿主；标签策略（仅激活、不新建）由壳侧单测覆盖，
+    // 冒烟只验证请求确实发出（面板会话真源与画布卡分离，不定位会话）
+    let (title_x, title_y) = chat_title_point(&chat).expect("对话卡应有卡头标题");
+    let (click_x, click_y) = (title_x + 2.0, title_y + 2.0);
+    assert!(
+        !chat.hits.iter().any(|hit| hit.id == "canvas-open-panel"),
+        "未选中对话卡时不应出现该入口"
+    );
+    pointer(&runtime, FrameInput::PointerDown { x: click_x, y: click_y, button: MouseButton::Left, hit: None });
+    pointer(&runtime, FrameInput::PointerUp { x: click_x, y: click_y, button: MouseButton::Left, hit: None });
+    wait_frame(&runtime, |frame| {
+        frame.hits.iter().any(|hit| hit.id == "canvas-open-panel")
+    })
+    .await
+    .expect("选中对话卡后工具条应出现「在 AI 面板打开」");
+    right_click_at(&runtime, click_x, click_y);
+    let menu = wait_menu(&state, 2).await;
+    assert!(
+        menu.items.iter().any(|item| matches!(
+            item,
+            MenuItem::Action { id, label, .. } if id == "canvas-menu-open-panel" && label == "在 AI 面板打开"
+        )),
+        "对话卡右键菜单应含「在 AI 面板打开」：{:?}",
+        menu.items
+    );
+    runtime.notify_menu_closed(CANVAS_ID, Some("canvas-menu-open-panel".to_string()));
+    wait_open_panel(&state, 1).await;
+    pointer(
+        &runtime,
+        FrameInput::PointerDown {
+            x: 24.0,
+            y: 18.0,
+            button: MouseButton::Left,
+            hit: Some("canvas-open-panel".to_string()),
+        },
+    );
+    pointer(
+        &runtime,
+        FrameInput::PointerUp {
+            x: 24.0,
+            y: 18.0,
+            button: MouseButton::Left,
+            hit: Some("canvas-open-panel".to_string()),
+        },
+    );
+    wait_open_panel(&state, 2).await;
+    println!("对话卡在 AI 面板打开入口：通过");
 
     disable(&runtime, CANVAS_ID).await;
     let status = runtime
@@ -401,13 +547,24 @@ fn seed_canvas() -> String {
             "y": CARD_TOP,
             "width": CARD_W,
             "height": CARD_H,
-            "data": { "title": title, "bodyMd": "正文" }
+            "data": { "title": title, "bodyMd": seed_body() }
         }],
         "edges": [],
         "createdAt": 0,
         "updatedAt": 0
     })
     .to_string()
+}
+
+/// 长正文：首行供字号断言定位，其后多段让正文超出卡内视口（滚动条与视口裁剪才有意义）。
+fn seed_body() -> String {
+    let mut body = String::from("正文");
+    for index in 0..60 {
+        body.push_str(&format!(
+            "\n\n正文段落 {index}：用于验证长正文在卡内换行、滚动与裁剪。"
+        ));
+    }
+    body
 }
 
 /// 对话画布：覆盖消息步骤 / 空正文工具轮次 / 附件缩略图 / 引用胶囊 / 压缩标记，
@@ -441,7 +598,13 @@ fn seed_chat_canvas() -> String {
                             "content": "看看附件",
                             "displayContent": "看看附件 [笔记：说明]",
                             "refs": [{ "path": "note.md", "label": "说明", "refKind": "note" }],
-                            "attachments": [{ "kind": "image", "file": "missing.png" }]
+                            "attachments": [
+                                { "kind": "image", "file": "missing1.png" },
+                                { "kind": "image", "file": "missing2.png" },
+                                { "kind": "image", "file": "missing3.png" },
+                                { "kind": "image", "file": "missing4.png" },
+                                { "kind": "image", "file": "missing5.png" }
+                            ]
                         },
                         {
                             "id": "m2",
@@ -497,7 +660,8 @@ fn seed_chat_canvas() -> String {
 struct HostState {
     written: Mutex<Vec<String>>,
     headers: Mutex<Vec<PanelHeaderParams>>,
-    menus: Mutex<usize>,
+    menus: Mutex<Vec<MenuOpenParams>>,
+    open_panels: Mutex<usize>,
     unhandled: Mutex<Vec<String>>,
     vault: Mutex<PathBuf>,
     /// 宿主当前打开的文件：先空后给 `demo.atlx`，用来覆盖「未打开画布」空态。
@@ -579,10 +743,14 @@ fn serve(runtime: Arc<PluginRuntime>, state: Arc<HostState>, vault: PathBuf) {
                         .unwrap(),
                     );
                 }
-                HostRequest::MenuOpen { request_id, .. } => {
-                    *state.menus.lock().unwrap() += 1;
+                HostRequest::MenuOpen { request_id, params, .. } => {
+                    state.menus.lock().unwrap().push(params);
                     // 菜单走界面服务通道：用错回执通道会让 open_menu 永远等不到结果
                     runtime.resolve_ui_call(request_id, Ok(()));
+                }
+                HostRequest::ChatOpenPanel { request_id, .. } => {
+                    *state.open_panels.lock().unwrap() += 1;
+                    reply(&runtime, request_id, json!({}));
                 }
                 HostRequest::SpaceRoom { request_id, .. } => {
                     reply(&runtime, request_id, json!({ "kind": "local", "connected": false }));
@@ -721,14 +889,6 @@ fn has_text_containing(frame: &SurfaceFrame, wanted: &str) -> bool {
     )
 }
 
-/// 存在指定尺寸的图片指令（附件缩略图按固定边长绘制）。
-fn has_image_command(frame: &SurfaceFrame, width: f32, height: f32) -> bool {
-    frame.commands.iter().any(|command| {
-        matches!(command, DrawCommand::Image { w, h, .. }
-            if (*w - width).abs() < 0.5 && (*h - height).abs() < 0.5)
-    })
-}
-
 /// 卡头标题（世界层，内容是省略后的文本）。
 fn title_command(frame: &SurfaceFrame) -> Option<(&str, f32, f32)> {
     frame.commands.iter().find_map(|command| match command {
@@ -751,6 +911,24 @@ fn text_y(frame: &SurfaceFrame) -> Option<f32> {
     title_command(frame).map(|(_, _, y)| y)
 }
 
+/// 卡头标题位置：缩放锚点必须落在正文浮层之外，滚轮才交给视图缩放。
+fn title_point(frame: &SurfaceFrame) -> Option<(f32, f32)> {
+    frame.commands.iter().find_map(|command| match command {
+        DrawCommand::Text { content, x, y, .. } if content.starts_with("现有卡") => {
+            Some((*x, *y))
+        }
+        _ => None,
+    })
+}
+
+/// 对话卡卡头标题位置（选中卡与右键都落在卡头，正文浮层不参与）。
+fn chat_title_point(frame: &SurfaceFrame) -> Option<(f32, f32)> {
+    frame.commands.iter().find_map(|command| match command {
+        DrawCommand::Text { content, x, y, .. } if content == "对话" => Some((*x, *y)),
+        _ => None,
+    })
+}
+
 /// 工具条上的缩放百分比。
 fn zoom_percent(frame: &SurfaceFrame) -> Option<i32> {
     frame.commands.iter().find_map(|command| match command {
@@ -767,6 +945,197 @@ fn card_rect(frame: &SurfaceFrame, w: f32, h: f32) -> bool {
         matches!(command, DrawCommand::Rect { w: rw, h: rh, .. }
             if (rw - w).abs() < 1.0 && (rh - h).abs() < 1.0)
     })
+}
+
+/// 卡片背景矩形：圆角矩形且宽高与卡片世界尺寸同比例（缩放由宽高反推）。
+fn card_bounds(frame: &SurfaceFrame, world_w: f32, world_h: f32) -> Option<(f32, f32, f32, f32)> {
+    frame.commands.iter().find_map(|command| match command {
+        DrawCommand::Rect { x, y, w, h, corner_radius: Some(_), .. } => {
+            let zoom = *w / world_w;
+            (zoom >= 0.1 && zoom <= 3.0 && (*h - world_h * zoom).abs() < 1.0)
+                .then_some((*x, *y, *w, *h))
+        }
+        _ => None,
+    })
+}
+
+/// 文本卡正文首行（字号断言与缩放锚点都按它定位）。
+fn body_command(frame: &SurfaceFrame) -> Option<(&str, f32, f32, f32)> {
+    frame.commands.iter().find_map(|command| match command {
+        DrawCommand::Text { content, x, y, size, .. } if content == "正文" => {
+            Some((content.as_str(), *x, *y, *size))
+        }
+        _ => None,
+    })
+}
+
+/// 卡内每条滚动条槽（恒定槽宽）的右缘距卡右缘恒定，且槽落在卡内。
+/// `require` 为 false 时不要求滚动条可见：滚动停止后控件层会隐藏槽。
+fn assert_scrollbar_hugs_card(
+    frame: &SurfaceFrame,
+    world_w: f32,
+    world_h: f32,
+    require: bool,
+) {
+    let (cx, cy, cw, ch) = card_bounds(frame, world_w, world_h).expect("应找到卡片背景");
+    let mut bars = 0;
+    for command in &frame.commands {
+        let DrawCommand::Rect { x, y, w, h, corner_radius: None, .. } = command else {
+            continue;
+        };
+        if (*w - SCROLLBAR_SLOT_W).abs() > 0.5 || *h < 24.0 {
+            continue;
+        }
+        // 与卡片无交集：属于别的卡或小地图，跳过。
+        if *x + *w <= cx || *x >= cx + cw || *y + *h <= cy || *y >= cy + ch {
+            continue;
+        }
+        // 与卡片相交的槽不得伸出卡片矩形；输入框内部的滚动槽在内容区，不贴卡缘。
+        assert!(
+            *x >= cx - 0.5 && *x + *w <= cx + cw + 0.5,
+            "滚动条横向越出卡片：{}..{} 不在 {cx}..{}",
+            x,
+            *x + *w,
+            cx + cw
+        );
+        assert!(
+            *y >= cy - 0.5 && *y + *h <= cy + ch + 0.5,
+            "滚动条纵向越出卡片：{}..{} 不在 {cy}..{}",
+            y,
+            *y + *h,
+            cy + ch
+        );
+        let distance = cx + cw - (x + w);
+        if (distance - CARD_CONTENT_INSET).abs() < 1.5 {
+            bars += 1;
+        }
+    }
+    if require {
+        assert!(bars > 0, "长内容应画出卡内滚动条");
+    }
+}
+
+/// 卡内全部文字必须落在卡片矩形内（圆角以内）；正文行还要落在内容矩形（不压滚动条槽）。
+fn assert_card_text_within_card(frame: &SurfaceFrame, world_w: f32, world_h: f32) {
+    let (cx, cy, cw, ch) = card_bounds(frame, world_w, world_h).expect("应找到卡片背景");
+    let zoom = cw / world_w;
+    let body_left = cx + CARD_CONTENT_INSET;
+    let body_right = cx + cw - CARD_CONTENT_INSET;
+    let content_left = body_left + CARD_CONTENT_PAD;
+    let content_right = body_right - SCROLLBAR_SLOT_W - CARD_CONTENT_PAD;
+    let body_top = cy + (CARD_HEAD_H * zoom + CARD_BODY_GAP).max(CARD_CONTENT_MAX_LINE);
+    let card_bottom = cy + ch - CARD_CORNER_RADIUS * zoom;
+    let mut lines = 0;
+    for command in &frame.commands {
+        let DrawCommand::Text { content, x, y, size, .. } = command else {
+            continue;
+        };
+        // 卡头文字按卡宽省略（另行断言）；跨视口上下边的 Markdown 行可能整行画出，
+        // 这里只约束内容区文字仍在卡片圆角矩形以内。
+        if *y < body_top - 0.5 || *y > card_bottom || *x < cx - 0.5 || *x > cx + cw {
+            continue;
+        }
+        lines += 1;
+        assert!(
+            *x >= content_left - 1.0,
+            "卡内文字左缘越出内容矩形：{content} @ {x} < {content_left}"
+        );
+        let right = *x + text_width(content, *size);
+        assert!(
+            right <= content_right + 1.5,
+            "卡内文字右缘越出内容矩形：{content} → {right} > {content_right}"
+        );
+        // 行高按 Markdown 口径：标题 1.3 倍，正文 / 说明 1.625 倍。
+        let line_height = if *size >= 16.0 { *size * 1.3 } else { *size * 1.625 };
+        assert!(
+            *y + line_height <= card_bottom + 1.0,
+            "卡内文字下缘越出卡片圆角：{content} → {} > {card_bottom}",
+            *y + line_height
+        );
+    }
+    assert!(lines > 0, "卡内容区应画出文字");
+}
+
+/// 附件缩略图对外可见的绘制区（命令矩形 ∩ 外层裁剪）必须落在卡内容矩形内。
+fn assert_thumb_within_content(frame: &SurfaceFrame, world_w: f32, world_h: f32) {
+    let (cx, cy, cw, ch) = card_bounds(frame, world_w, world_h).expect("应找到卡片背景");
+    let zoom = cw / world_w;
+    let body_top = cy + (CARD_HEAD_H * zoom + CARD_BODY_GAP).max(CARD_CONTENT_MAX_LINE);
+    let body_bottom = cy + ch - CARD_CORNER_RADIUS * zoom;
+    let content_left = cx + CARD_CONTENT_INSET + CARD_CONTENT_PAD;
+    let content_right = cx + cw - CARD_CONTENT_INSET - SCROLLBAR_SLOT_W - CARD_CONTENT_PAD;
+    let content_width = content_right - content_left;
+    let mut clips: Vec<(f32, f32, f32, f32)> = Vec::new();
+    let mut thumbs = 0;
+    let mut rows: Vec<(f32, f32, f32)> = Vec::new();
+    for command in &frame.commands {
+        match command {
+            DrawCommand::PushClip { x, y, w, h } => clips.push((*x, *y, *w, *h)),
+            DrawCommand::PopClip => {
+                clips.pop();
+            }
+            DrawCommand::Image { x, y, w, h, .. } => {
+                let mut rect = (*x, *y, *w, *h);
+                for clip in &clips {
+                    rect = intersect(rect, *clip);
+                }
+                if rect.2 <= 0.0 || rect.3 <= 0.0 || rect.0 < cx - 0.5 || rect.0 > cx + cw {
+                    continue;
+                }
+                thumbs += 1;
+                assert!(
+                    rect.0 >= content_left - 1.0,
+                    "缩略图左缘越出内容矩形：{} < {content_left}",
+                    rect.0
+                );
+                assert!(
+                    rect.1 >= body_top - 1.0,
+                    "缩略图上缘越出内容矩形：{} < {body_top}",
+                    rect.1
+                );
+                assert!(
+                    rect.2 <= content_width + 1.0,
+                    "缩略图宽度应收敛到内容宽：{} > {content_width}",
+                    rect.2
+                );
+                assert!(
+                    rect.0 + rect.2 <= content_right + 1.5,
+                    "缩略图右缘越出内容矩形：{} > {content_right}",
+                    rect.0 + rect.2
+                );
+                assert!(
+                    rect.1 + rect.3 <= body_bottom + 1.0,
+                    "缩略图下缘越出内容矩形：{} > {body_bottom}",
+                    rect.1 + rect.3
+                );
+                match rows.iter_mut().find(|row| (row.0 - rect.1).abs() < 2.0) {
+                    Some(row) => {
+                        row.1 = row.1.min(rect.0);
+                        row.2 = row.2.max(rect.0 + rect.2);
+                    }
+                    None => rows.push((rect.1, rect.0, rect.0 + rect.2)),
+                }
+            }
+            _ => {}
+        }
+    }
+    assert!(thumbs >= 5, "对话卡应画出全部附件缩略图：{thumbs} < 5");
+    // 同一行的缩略图总宽必须收敛到内容宽：多图 / 窄卡都不铺到卡外。
+    for (y, left, right) in rows {
+        let span = right - left;
+        assert!(
+            span <= content_width + 1.0,
+            "缩略图行总宽应收敛到内容宽 @ {y}：{span} > {content_width}"
+        );
+    }
+}
+
+fn intersect(a: (f32, f32, f32, f32), b: (f32, f32, f32, f32)) -> (f32, f32, f32, f32) {
+    let x0 = a.0.max(b.0);
+    let y0 = a.1.max(b.1);
+    let x1 = (a.0 + a.2).min(b.0 + b.2);
+    let y1 = (a.1 + a.3).min(b.1 + b.3);
+    (x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0))
 }
 
 fn has_icon_path(frame: &SurfaceFrame) -> bool {
@@ -835,10 +1204,21 @@ fn assert_empty_state_centered(frame: &SurfaceFrame, title: &str, desc: &str) {
     assert!(((top + desc_y + desc.2 * 1.2) / 2.0 - size.h / 2.0).abs() < 0.5, "空态内容块应垂直居中");
 }
 
-async fn wait_menu(state: &HostState) {
+async fn wait_menu(state: &HostState, count: usize) -> MenuOpenParams {
     let deadline = Instant::now() + Duration::from_secs(3);
-    while *state.menus.lock().unwrap() == 0 {
-        assert!(Instant::now() < deadline, "右键空白应请求宿主弹菜单");
+    loop {
+        if let Some(params) = state.menus.lock().unwrap().get(count.saturating_sub(1)) {
+            return params.clone();
+        }
+        assert!(Instant::now() < deadline, "右键应请求宿主弹菜单");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+async fn wait_open_panel(state: &HostState, count: usize) {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while *state.open_panels.lock().unwrap() < count {
+        assert!(Instant::now() < deadline, "应请求宿主打开 AI 面板（期望 {count} 次）");
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }

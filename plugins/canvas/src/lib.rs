@@ -1004,6 +1004,12 @@ impl PluginState {
                 .unwrap_or(false);
             return (cleared, false);
         }
+        if id == "canvas-open-panel" {
+            if self.selected_open_panel_node().is_some() {
+                crate::chat::open_in_panel(ctx).await;
+            }
+            return (false, false);
+        }
         if let Some(rest) = id.strip_prefix("canvas-stop-") {
             crate::chat::stop(ctx, rest).await;
             return (false, false);
@@ -1394,6 +1400,15 @@ impl PluginState {
 }
 
 impl PluginState {
+    /// 选中的单个对话卡节点 id。
+    fn selected_open_panel_node(&self) -> Option<String> {
+        self.with_session(|session| {
+            crate::model::open_panel_target(&session.data.nodes, &session.view.selection)
+                .map(str::to_string)
+        })
+        .flatten()
+    }
+
     /// 右键菜单选中项；返回是否有数据变化（需要保存）。
     async fn menu_action(self: &Arc<Self>, ctx: &Context, id: &str) -> bool {
         if let Some(rest) = id.strip_prefix("model:") {
@@ -1466,6 +1481,12 @@ impl PluginState {
             return false;
         };
         match action {
+            "open-panel" => {
+                if self.selected_open_panel_node().is_some() {
+                    crate::chat::open_in_panel(ctx).await;
+                }
+                false
+            }
             "copy" => {
                 self.copy(ctx).await;
                 false

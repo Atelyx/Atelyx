@@ -1374,6 +1374,17 @@ pub(crate) fn reveal_view(app: &mut App, view: &str) -> Task<Message> {
     }
 }
 
+/// 只激活已存在的视图标签（主树或撕裂窗口）；不存在返回 `None`，不新建标签。
+pub(crate) fn activate_view(app: &mut App, view: &str) -> Option<Task<Message>> {
+    let op = activate_op(&app.ui, view);
+    op.map(|op| app.apply(op))
+}
+
+/// 仅激活已存在视图的布局操作；`None` = 视图不在布局里。
+pub(crate) fn activate_op(ui: &AppUiState, view: &str) -> Option<LayoutOp> {
+    activate_existing_view_op(ui, view)
+}
+
 /// 视图显示的目标布局操作（纯函数）：已有标签 → 激活；不存在 → 加到聚焦面板。
 pub(crate) fn reveal_op(ui: &AppUiState, view: &str) -> Option<LayoutOp> {
     if let Some(op) = activate_existing_view_op(ui, view) {

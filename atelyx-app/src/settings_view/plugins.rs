@@ -638,6 +638,9 @@ pub fn host_requests_stream(spec: &RuntimeSpec) -> impl iced::futures::Stream<It
                 HostRequest::AiSettings { request_id, .. } => Message::Chat(
                     crate::chat_actions::ChatMsg::PluginAiSettings { request_id },
                 ),
+                HostRequest::ChatOpenPanel { request_id, .. } => Message::Chat(
+                    crate::chat_actions::ChatMsg::PluginOpenPanel { request_id },
+                ),
                 HostRequest::ChatStop { request_id, params, .. } => Message::Chat(
                     crate::chat_actions::ChatMsg::PluginStop {
                         request_id,

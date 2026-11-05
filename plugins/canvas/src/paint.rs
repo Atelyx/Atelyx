@@ -43,6 +43,18 @@ const PEER_NAME_SIZE: f32 = 11.0;
 const PEER_PILL_SIZE: f32 = 10.0;
 /// 卡头世界高度：随缩放变化，字与图标固定为屏幕像素。
 const CARD_HEAD_H: f32 = 30.0;
+/// 卡片圆角半径（世界单位，随缩放变化）。
+const CARD_CORNER_RADIUS: f32 = 10.0;
+/// 内容矩形与卡片外框的内缩：滚动条槽据此贴住卡片右缘。
+const CARD_CONTENT_INSET: f32 = 1.0;
+/// 卡头与内容矩形的屏幕间距。
+const CARD_BODY_GAP: f32 = 4.0;
+/// 卡内最大行高（主题 h1 × 1.3）：Markdown 行跨视口边时整行不切分，所以内容矩形顶部与正文下沿都让出一档。
+pub(crate) const CARD_CONTENT_MAX_LINE: f32 = 26.0;
+/// 卡片内容左右内边距（屏幕像素，不随缩放变化）。
+const CARD_CONTENT_PAD: f32 = 8.0;
+/// 卡内滚动条槽宽（与控件层滚动容器的恒定槽宽一致）：内容宽按此扣减。
+const CARD_SCROLL_SLOT: f32 = 8.0;
 /// 低缩放卡片只画卡头与居中图标的图标边长（屏幕像素）。
 const COMPACT_ICON_SIZE: f32 = 22.0;
 /// 省略量算的宽度余量：量算按常规字重口径，粗体实绘偏宽。
@@ -51,6 +63,31 @@ const ELLIPSIZE_WIDTH_GUARD: f32 = 1.06;
 /// 低缩放紧凑形态：屏幕宽装不下标题，或卡头高度已装不下固定字号（卡头高度随缩放缩小）。
 pub(crate) fn compact_card(zoom: f32, world_w: f32) -> bool {
     world_w * zoom <= COMPACT_CARD_PX || CARD_HEAD_H * zoom < CARD_TITLE_SIZE
+}
+
+/// 卡内容矩形（屏幕坐标，`sy` 含工具条偏移）：左右下贴卡内缘，滚动条槽据此贴住卡片右缘；
+/// 顶部至少让出一档行高，底部避开圆角外的透明区。`tail_gap` 是下沿额外让量。
+pub(crate) fn card_body_rect(
+    zoom: f32,
+    sx: f32,
+    sy: f32,
+    world_w: f32,
+    world_h: f32,
+    tail_gap: f32,
+) -> (f32, f32, f32, f32) {
+    let head = CARD_HEAD_H * zoom;
+    let top = (head + CARD_BODY_GAP).max(CARD_CONTENT_MAX_LINE);
+    (
+        sx + CARD_CONTENT_INSET,
+        sy + top,
+        (world_w * zoom - CARD_CONTENT_INSET * 2.0).max(1.0),
+        (world_h * zoom - top - CARD_CORNER_RADIUS * zoom - tail_gap).max(1.0),
+    )
+}
+
+/// 内容矩形下沿额外让量：铺满整卡的正文滚动区让出一档行高，底部另有输入区的对话卡不再让。
+pub(crate) fn card_tail_gap(node_type: &str) -> f32 {
+    if node_type == "text" { CARD_CONTENT_MAX_LINE } else { 0.0 }
 }
 
 /// 单行省略：超出 `max_w` 时按字符二分截断并补省略号。世界层是整块自绘画布，
@@ -239,6 +276,27 @@ pub fn frame(ui: &mut Ui, session: &Session, size: (f32, f32), choices: Choices<
         draw_world(canvas, &paint, w, h, body_h);
     });
     card_overlays(ui, &snapshot, &choices);
+    toolbar_overlay(ui, &snapshot);
+}
+
+/// 选中对话卡时在工具条左端给出「在 AI 面板打开」入口。
+fn toolbar_overlay(ui: &mut Ui, s: &Snapshot) {
+    if crate::model::open_panel_target(&s.data.nodes, &s.selection).is_none() {
+        return;
+    }
+    let size = 24.0;
+    let rect = UiRect::new(12.0, (TOOLBAR_H - size) / 2.0, size, size);
+    ui.overlay(rect, |ui| {
+        ui.icon_button_named(
+            "canvas-open-panel",
+            "message-square",
+            15.0,
+            size,
+            ColorToken::TextSecondary,
+            true,
+        );
+        ui.hint("canvas-open-panel", "在 AI 面板打开");
+    });
 }
 
 fn draw_world(canvas: &mut Canvas, s: &Snapshot, w: f32, h: f32, body_h: f32) {
@@ -688,7 +746,7 @@ fn draw_card(canvas: &mut Canvas, s: &Snapshot, node: &CanvasFileNode) {
             token(ColorToken::Border)
         }),
         stroke_width: Some(if selected { 2.0 } else { 1.0 }),
-        corner_radius: Some(10.0 * s.zoom),
+        corner_radius: Some(CARD_CORNER_RADIUS * s.zoom),
         shadow: None,
     });
     let head = CARD_HEAD_H * s.zoom;
@@ -700,7 +758,7 @@ fn draw_card(canvas: &mut Canvas, s: &Snapshot, node: &CanvasFileNode) {
         fill: Some(token(ColorToken::SurfaceSunken)),
         stroke: None,
         stroke_width: None,
-        corner_radius: Some(10.0 * s.zoom),
+        corner_radius: Some(CARD_CORNER_RADIUS * s.zoom),
         shadow: None,
     });
     canvas.draw(Rect {
@@ -1108,6 +1166,10 @@ fn draw_toolbar(canvas: &mut Canvas, s: &Snapshot, w: f32, _h: f32) {
         dash: None,
     });
     let mut left = 12.0;
+    if crate::model::open_panel_target(&s.data.nodes, &s.selection).is_some() {
+        // 工具条左端控件层图标钮占位（见 `toolbar_overlay`）
+        left += 28.0;
+    }
     if s.dirty {
         let (tw, _) = canvas.measure("未保存", 11.0);
         canvas.draw(Rect {
@@ -1370,13 +1432,15 @@ fn card_overlays(ui: &mut Ui, s: &Snapshot, choices: &Choices<'_>) {
                 }
             });
         }
-        let pad = 10.0 * s.zoom;
-        let body = UiRect::new(
-            sx + pad,
-            sy + 40.0 * s.zoom,
-            (sw - 2.0 * pad).max(1.0),
-            (sh - 50.0 * s.zoom).max(1.0),
+        let (bx, by, bw, bh) = card_body_rect(
+            s.zoom,
+            sx,
+            sy,
+            w as f32,
+            h as f32,
+            card_tail_gap(&node.node_type),
         );
+        let body = UiRect::new(bx, by, bw, bh);
         match node.node_type.as_str() {
             "text" => {
                 let text = text_body(s, node);
@@ -1403,17 +1467,20 @@ fn card_overlays(ui: &mut Ui, s: &Snapshot, choices: &Choices<'_>) {
                 };
                 ui.overlay(body, move |ui| {
                     ui.scroll(format!("canvas-text-{}", node.id), 0.0, |ui| {
-                        if let Some((hint, color)) = hint {
-                            ui.text_styled(hint, TextStyle::new(TextRole::Caption).color(color));
-                        } else {
-                            match text.as_deref() {
-                                Some(text) if !text.is_empty() => ui.markdown(text),
-                                _ => ui.text_styled(
-                                    "（空）",
-                                    TextStyle::new(TextRole::Caption).color(ColorToken::TextMuted),
-                                ),
+                        ui.pad(CARD_CONTENT_PAD, 0.0, |ui| {
+                            if let Some((hint, color)) = hint {
+                                ui.text_styled(hint, TextStyle::new(TextRole::Caption).color(color));
+                            } else {
+                                match text.as_deref() {
+                                    Some(text) if !text.is_empty() => ui.markdown(text),
+                                    _ => ui.text_styled(
+                                        "（空）",
+                                        TextStyle::new(TextRole::Caption)
+                                            .color(ColorToken::TextMuted),
+                                    ),
+                                }
                             }
-                        }
+                        });
                     });
                 });
             }
@@ -1487,184 +1554,204 @@ fn conversation_overlay(
             // 错误条固定在消息区顶部，不随消息滚动
             if let Some(error) = chat.error.clone() {
                 let clear = format!("canvas-error-clear-{id}");
-                ui.row(4.0, |ui| {
-                    ui.icon_named("circle-alert", 12.0, ColorToken::Danger);
-                    ui.text_styled(
-                        error,
-                        TextStyle::new(TextRole::Micro)
-                            .color(ColorToken::Danger)
-                            .wrap(),
-                    );
-                    ui.grow();
-                    ui.icon_button_named(&clear, "x", 12.0, 20.0, ColorToken::TextMuted, true);
-                    ui.hint(&clear, "清除");
+                ui.pad(CARD_CONTENT_PAD, 0.0, |ui| {
+                    ui.row(4.0, |ui| {
+                        ui.icon_named("circle-alert", 12.0, ColorToken::Danger);
+                        ui.text_styled(
+                            error,
+                            TextStyle::new(TextRole::Micro)
+                                .color(ColorToken::Danger)
+                                .wrap(),
+                        );
+                        ui.grow();
+                        ui.icon_button_named(&clear, "x", 12.0, 20.0, ColorToken::TextMuted, true);
+                        ui.hint(&clear, "清除");
+                    });
                 });
             }
             ui.scroll_follow(format!("canvas-chat-{id}"), 8.0, chat.follow_bottom, |ui| {
-                if messages.is_empty() {
-                    ui.text_styled(
-                        "输入消息开始对话",
-                        TextStyle::new(TextRole::Caption).color(ColorToken::TextMuted),
-                    );
-                }
-                let last_assistant = messages.iter().rposition(|message| {
-                    message.get("role").and_then(serde_json::Value::as_str) != Some("user")
-                });
-                let marker = compaction_index(&messages, compaction.as_ref());
-                for (index, message) in messages.iter().enumerate() {
-                    if Some(index) == marker {
-                        if let Some(compaction) = compaction.as_ref() {
-                            compaction_marker(ui, compaction);
+                ui.pad(CARD_CONTENT_PAD, 0.0, |ui| {
+                    ui.column(8.0, |ui| {
+                        if messages.is_empty() {
+                            ui.text_styled(
+                                "输入消息开始对话",
+                                TextStyle::new(TextRole::Caption).color(ColorToken::TextMuted),
+                            );
                         }
-                    }
-                    render_message(
-                        ui,
-                        message,
-                        &expanded,
-                        streaming && last_assistant == Some(index),
-                        &id,
-                        last_assistant == Some(index),
-                        rollback_confirm.as_deref() == Some(message_id_of(message)),
-                        rect.w,
-                    );
-                }
-                // 折叠覆盖到末尾（刚压缩完的常态）：标记落在消息列表最后
-                if marker == Some(messages.len()) {
-                    if let Some(compaction) = compaction.as_ref() {
-                        compaction_marker(ui, compaction);
-                    }
-                }
+                        let last_assistant = messages.iter().rposition(|message| {
+                            message.get("role").and_then(serde_json::Value::as_str)
+                                != Some("user")
+                        });
+                        let marker = compaction_index(&messages, compaction.as_ref());
+                        for (index, message) in messages.iter().enumerate() {
+                            if Some(index) == marker {
+                                if let Some(compaction) = compaction.as_ref() {
+                                    compaction_marker(ui, compaction);
+                                }
+                            }
+                            render_message(
+                                ui,
+                                message,
+                                &expanded,
+                                streaming && last_assistant == Some(index),
+                                &id,
+                                last_assistant == Some(index),
+                                rollback_confirm.as_deref() == Some(message_id_of(message)),
+                                rect.w,
+                            );
+                        }
+                        // 折叠覆盖到末尾（刚压缩完的常态）：标记落在消息列表最后
+                        if marker == Some(messages.len()) {
+                            if let Some(compaction) = compaction.as_ref() {
+                                compaction_marker(ui, compaction);
+                            }
+                        }
+                    });
+                });
             });
             if let Some(name) = &locked {
-                ui.text_styled(
-                    format!("{name} 编辑中"),
-                    TextStyle::new(TextRole::Micro).color(ColorToken::TextMuted),
-                );
+                ui.pad(CARD_CONTENT_PAD, 0.0, |ui| {
+                    ui.text_styled(
+                        format!("{name} 编辑中"),
+                        TextStyle::new(TextRole::Micro).color(ColorToken::TextMuted),
+                    );
+                });
                 return;
             }
             if !chat.follow_bottom && !messages.is_empty() {
-                ui.row(0.0, |ui| {
+                ui.pad(CARD_CONTENT_PAD, 0.0, |ui| {
+                    ui.row(0.0, |ui| {
+                        ui.click_row(
+                            &format!("canvas-bottom-{id}"),
+                            atelyx_plugin_sdk::frame_ui::Edges::all(4.0),
+                            4.0,
+                            false,
+                            true,
+                            |ui| {
+                                ui.text_styled(
+                                    "回到底部",
+                                    TextStyle::new(TextRole::Micro).color(ColorToken::Accent),
+                                );
+                            },
+                        );
+                    });
+                });
+            }
+            if let Some(picker) = &chat.mention_picker {
+                // 内边距放在滚动区内：滚动条槽贴卡右缘，内容再内缩一档。
+                ui.scroll_max(format!("canvas-picker-{id}"), 160.0, 0.0, |ui| {
+                    ui.pad(CARD_CONTENT_PAD, 0.0, |ui| {
+                        for (index, candidate) in picker.candidates.iter().enumerate() {
+                            let label = crate::chat::candidate_label(candidate);
+                            let row_id = format!("canvas-pick-{id}-{index}");
+                            ui.click_row(
+                                &row_id,
+                                atelyx_plugin_sdk::frame_ui::Edges::all(4.0),
+                                4.0,
+                                picker.selected == index,
+                                true,
+                                |ui| {
+                                    ui.text_styled(label, TextStyle::new(TextRole::Caption));
+                                },
+                            );
+                        }
+                    });
+                });
+            }
+            if !chat.pending_images.is_empty() {
+                ui.pad(CARD_CONTENT_PAD, 0.0, |ui| {
+                    ui.row(6.0, |ui| {
+                        for (index, image) in chat.pending_images.iter().enumerate() {
+                            let row_id = format!("canvas-remove-image-{id}-{index}");
+                            let label = format!("{} ×", image.file_name);
+                            ui.click_row(
+                                &row_id,
+                                atelyx_plugin_sdk::frame_ui::Edges::all(4.0),
+                                4.0,
+                                false,
+                                true,
+                                |ui| {
+                                    ui.chip(label, ColorToken::SurfaceMuted);
+                                },
+                            );
+                        }
+                    });
+                });
+            }
+            ui.pad(CARD_CONTENT_PAD, 0.0, |ui| {
+                ui.row(6.0, |ui| {
+                    ui.icon_button_named(
+                        &format!("canvas-attach-{id}"),
+                        "plus",
+                        12.0,
+                        22.0,
+                        ColorToken::TextMuted,
+                        true,
+                    );
                     ui.click_row(
-                        &format!("canvas-bottom-{id}"),
+                        &format!("canvas-agent-{id}"),
                         atelyx_plugin_sdk::frame_ui::Edges::all(4.0),
                         4.0,
                         false,
                         true,
                         |ui| {
                             ui.text_styled(
-                                "回到底部",
-                                TextStyle::new(TextRole::Micro).color(ColorToken::Accent),
+                                selected_agent,
+                                TextStyle::new(TextRole::Micro).color(ColorToken::TextMuted),
+                            );
+                        },
+                    );
+                    ui.click_row(
+                        &format!("canvas-provider-{id}"),
+                        atelyx_plugin_sdk::frame_ui::Edges::all(4.0),
+                        4.0,
+                        false,
+                        true,
+                        |ui| {
+                            ui.text_styled(
+                                selected_model,
+                                TextStyle::new(TextRole::Micro).color(ColorToken::TextMuted),
                             );
                         },
                     );
                 });
-            }
-            if let Some(picker) = &chat.mention_picker {
-                ui.scroll_max(format!("canvas-picker-{id}"), 160.0, 0.0, |ui| {
-                    for (index, candidate) in picker.candidates.iter().enumerate() {
-                        let label = crate::chat::candidate_label(candidate);
-                        let row_id = format!("canvas-pick-{id}-{index}");
-                        ui.click_row(
-                            &row_id,
-                            atelyx_plugin_sdk::frame_ui::Edges::all(4.0),
-                            4.0,
-                            picker.selected == index,
-                            true,
-                            |ui| {
-                                ui.text_styled(label, TextStyle::new(TextRole::Caption));
-                            },
-                        );
-                    }
-                });
-            }
-            if !chat.pending_images.is_empty() {
-                ui.row(6.0, |ui| {
-                    for (index, image) in chat.pending_images.iter().enumerate() {
-                        let row_id = format!("canvas-remove-image-{id}-{index}");
-                        let label = format!("{} ×", image.file_name);
-                        ui.click_row(
-                            &row_id,
-                            atelyx_plugin_sdk::frame_ui::Edges::all(4.0),
-                            4.0,
-                            false,
-                            true,
-                            |ui| {
-                                ui.chip(label, ColorToken::SurfaceMuted);
-                            },
-                        );
-                    }
-                });
-            }
-            ui.row(6.0, |ui| {
-                ui.icon_button_named(
-                    &format!("canvas-attach-{id}"),
-                    "plus",
-                    12.0,
-                    22.0,
-                    ColorToken::TextMuted,
-                    true,
-                );
-                ui.click_row(
-                    &format!("canvas-agent-{id}"),
-                    atelyx_plugin_sdk::frame_ui::Edges::all(4.0),
-                    4.0,
-                    false,
-                    true,
-                    |ui| {
-                        ui.text_styled(
-                            selected_agent,
-                            TextStyle::new(TextRole::Micro).color(ColorToken::TextMuted),
-                        );
-                    },
-                );
-                ui.click_row(
-                    &format!("canvas-provider-{id}"),
-                    atelyx_plugin_sdk::frame_ui::Edges::all(4.0),
-                    4.0,
-                    false,
-                    true,
-                    |ui| {
-                        ui.text_styled(
-                            selected_model,
-                            TextStyle::new(TextRole::Micro).color(ColorToken::TextMuted),
-                        );
-                    },
-                );
             });
-            ui.row(6.0, |ui| {
-                ui.text_area_submit_auto(
-                    &format!("canvas-input-{id}"),
-                    chat.draft.clone(),
-                    "输入消息…",
-                    28.0,
-                    120.0,
-                    13.0,
-                    atelyx_plugin_sdk::frame_ui::Edges::all(6.0),
-                    crate::chat::marks(&chat),
-                );
-                if chat.streaming {
-                    ui.icon_button_filled(
-                        &format!("canvas-stop-{id}"),
-                        "square",
-                        12.0,
-                        26.0,
-                        ColorToken::Accent,
-                        ColorToken::Text,
-                        true,
+            ui.pad(CARD_CONTENT_PAD, 0.0, |ui| {
+                ui.row(6.0, |ui| {
+                    ui.text_area_submit_auto(
+                        &format!("canvas-input-{id}"),
+                        chat.draft.clone(),
+                        "输入消息…",
+                        28.0,
+                        120.0,
+                        13.0,
+                        atelyx_plugin_sdk::frame_ui::Edges::all(6.0),
+                        crate::chat::marks(&chat),
                     );
-                } else {
-                    let enabled =
-                        !chat.draft.trim().is_empty() || !chat.pending_images.is_empty();
-                    ui.icon_button_filled(
-                        &format!("canvas-send-{id}"),
-                        "arrow-up",
-                        12.0,
-                        26.0,
-                        ColorToken::Accent,
-                        ColorToken::Text,
-                        enabled,
-                    );
-                }
+                    if chat.streaming {
+                        ui.icon_button_filled(
+                            &format!("canvas-stop-{id}"),
+                            "square",
+                            12.0,
+                            26.0,
+                            ColorToken::Accent,
+                            ColorToken::Text,
+                            true,
+                        );
+                    } else {
+                        let enabled =
+                            !chat.draft.trim().is_empty() || !chat.pending_images.is_empty();
+                        ui.icon_button_filled(
+                            &format!("canvas-send-{id}"),
+                            "arrow-up",
+                            12.0,
+                            26.0,
+                            ColorToken::Accent,
+                            ColorToken::Text,
+                            enabled,
+                        );
+                    }
+                });
             });
         });
     });
@@ -1799,7 +1886,9 @@ fn render_user(
 ) {
     let display = display_of(message);
     let plain = is_plain_line(display);
-    let max_width = 560.0_f32.min((width - 24.0).max(80.0));
+    // `width` 是卡内容矩形宽：减去滚动条槽与左右内边距即正文可排宽度，气泡不越内容区。
+    let content_width = width - CARD_SCROLL_SLOT - CARD_CONTENT_PAD * 2.0;
+    let max_width = 560.0_f32.min(content_width.max(80.0));
     ui.column(4.0, |column| {
         if !display.is_empty() {
             let bubble_width = if plain {
@@ -1843,6 +1932,9 @@ fn render_user(
             })
             .collect();
         if !images.is_empty() {
+            // 缩略图边长按消息内容宽收敛，避免多图/窄卡把图铺到卡外。
+            let count = images.len() as f32;
+            let thumb = CHAT_THUMB.min(((max_width - 6.0 * (count - 1.0)) / count).max(1.0));
             column.row(6.0, |line| {
                 line.grow();
                 for file in images {
@@ -1851,8 +1943,8 @@ fn render_user(
                             path: file.to_string(),
                             max_edge: None,
                         },
-                        CHAT_THUMB,
-                        CHAT_THUMB,
+                        thumb,
+                        thumb,
                         Some(ImageFit::Contain),
                     );
                 }

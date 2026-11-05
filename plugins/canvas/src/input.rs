@@ -567,16 +567,15 @@ pub fn card_bodies(session: &Session) -> Vec<(String, Rect)> {
         .map(|n| {
             let (w, h) = display_size(n);
             let (sx, sy) = session.view.screen(n.x, n.y);
-            let zoom = session.view.zoom;
-            (
-                n.id.clone(),
-                Rect::new(
-                    sx + 10.0 * zoom,
-                    TOOLBAR_H + sy + 40.0 * zoom,
-                    (w as f32 - 20.0) * zoom,
-                    (h as f32 - 50.0) * zoom,
-                ),
-            )
+            let (x, y, bw, bh) = crate::paint::card_body_rect(
+                session.view.zoom,
+                sx,
+                TOOLBAR_H + sy,
+                w as f32,
+                h as f32,
+                crate::paint::card_tail_gap(&n.node_type),
+            );
+            (n.id.clone(), Rect::new(x, y, bw, bh))
         })
         .collect()
 }
@@ -657,6 +656,9 @@ fn context_menu(session: &mut Session, world: (f64, f64)) -> Option<MenuOpenPara
             (items, 200.0)
         } else {
             let mut items = vec![action("copy", "复制", "copy", false)];
+            if node.node_type == "conversation" {
+                items.push(action("open-panel", "在 AI 面板打开", "message-square", false));
+            }
             let file = node.data.get("file").and_then(serde_json::Value::as_str);
             if file.is_some() && node.node_type == "table" {
                 items.push(action("open", "打开表格", "external-link", false));
