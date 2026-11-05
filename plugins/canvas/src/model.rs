@@ -297,6 +297,8 @@ pub struct CardChat {
     /// 待二次确认的回滚消息 id。
     pub rollback_confirm: Option<String>,
     pub compacting: bool,
+    /// 已展开的步骤块（键 = `{消息 id}:{步骤序号}`）。
+    pub expanded: std::collections::HashSet<String>,
 }
 
 /// 待发送的图片（字节在内存，落盘后只留路径）。

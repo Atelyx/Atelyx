@@ -11,7 +11,10 @@ use atelyx_format::canvas::{CanvasFile, CanvasFileNode};
 use atelyx_plugin_protocol::paint::{
     ColorToken, DrawCommand::*, ImageFit, ImageSource, PaintColor, PaintPoint, TextWeight,
 };
-use atelyx_plugin_sdk::frame_ui::{Canvas, Rect as UiRect, TextRole, TextStyle, Ui, icon_commands};
+use atelyx_plugin_sdk::frame_ui::{
+    BoxStyle, BoxWidth, Canvas, Edges, MentionCandidate, Rect as UiRect, TextRole, TextStyle, Ui,
+    icon_commands,
+};
 
 use crate::model::{
     COMPACT_CARD_PX, CardChat, GRID_STEP, MINIMAP_H, MINIMAP_MARGIN, MINIMAP_W, RemotePeer, Session,
@@ -851,28 +854,33 @@ fn draw_card(canvas: &mut Canvas, s: &Snapshot, node: &CanvasFileNode) {
     }
     if node.node_type == "table" && !compact {
         if let Some(path) = node.data.get("file").and_then(serde_json::Value::as_str) {
-            if let Some(crate::model::RefContent::Table { summary, .. }) = s.refs.get(path) {
-                let text = ellipsize(
-                    canvas,
-                    &format!("双击打开表格 · {summary}"),
-                    CARD_TITLE_SIZE,
-                    sw - 20.0 * s.zoom,
-                );
-                canvas.draw(Text {
-                    x: sx + 10.0 * s.zoom,
-                    y: sy + head + 10.0 * s.zoom,
-                    content: text,
-                    size: CARD_TITLE_SIZE,
-                    color: token(ColorToken::TextSecondary),
-                    weight: None,
-                    family: None,
-                    italic: false,
-                    family_name: None,
-                    max_width: None,
-                    align: None,
-                    layout: None,
-                });
-            }
+            // 没有可用的表格内容也要给提示，不留空白卡
+            let (hint, color) = match s.refs.get(path) {
+                Some(crate::model::RefContent::Table { summary, .. }) => (
+                    format!("双击打开表格 · {summary}"),
+                    ColorToken::TextSecondary,
+                ),
+                Some(crate::model::RefContent::Missing) => {
+                    ("引用表格缺失".to_string(), ColorToken::Danger)
+                }
+                Some(_) => ("引用表格缺失".to_string(), ColorToken::Danger),
+                None => ("加载中…".to_string(), ColorToken::TextMuted),
+            };
+            let text = ellipsize(canvas, &hint, CARD_TITLE_SIZE, sw - 20.0 * s.zoom);
+            canvas.draw(Text {
+                x: sx + 10.0 * s.zoom,
+                y: sy + head + 10.0 * s.zoom,
+                content: text,
+                size: CARD_TITLE_SIZE,
+                color: token(color),
+                weight: None,
+                family: None,
+                italic: false,
+                family_name: None,
+                max_width: None,
+                align: None,
+                layout: None,
+            });
         }
     }
 }
@@ -883,6 +891,29 @@ fn draw_media(canvas: &mut Canvas, s: &Snapshot, node: &CanvasFileNode) {
     };
     let (w, h) = display_size(node);
     let (sx, sy) = s.screen(node.x, node.y);
+    // 图片还没解析 / 附件找不到时出提示，避免只剩一张空白卡
+    let hint = match s.refs.get(path) {
+        Some(crate::model::RefContent::Image) => None,
+        Some(_) => Some(("附件缺失", ColorToken::Danger)),
+        None => Some(("图片加载中…", ColorToken::TextMuted)),
+    };
+    if let Some((hint, color)) = hint {
+        canvas.draw(Text {
+            x: sx + 10.0 * s.zoom,
+            y: sy + 40.0 * s.zoom + 10.0 * s.zoom,
+            content: hint.to_string(),
+            size: CARD_TITLE_SIZE,
+            color: token(color),
+            weight: None,
+            family: None,
+            italic: false,
+            family_name: None,
+            max_width: Some((w as f32 - 20.0) * s.zoom),
+            align: None,
+            layout: None,
+        });
+        return;
+    }
     canvas.draw(Image {
         source: ImageSource::Vault {
             path: path.to_string(),
@@ -1109,20 +1140,53 @@ fn draw_toolbar(canvas: &mut Canvas, s: &Snapshot, w: f32, _h: f32) {
         left += tw + 22.0;
     }
     if let Some(error) = &s.save_error {
+        // 工具条只留 220px 单行省略；悬停该区域时在工具条下方给出全文
+        let short = ellipsize(canvas, error, 11.0, 220.0);
         canvas.draw(Text {
             x: left,
             y: 11.5,
-            content: error.clone(),
+            content: short,
             size: 11.0,
             color: token(ColorToken::Danger),
             weight: None,
             family: None,
             italic: false,
             family_name: None,
-            max_width: Some((w * 0.5 - left).max(1.0)),
+            max_width: Some(220.0),
             align: None,
             layout: None,
         });
+        if s.toolbar_hover.as_deref() == Some("save-error") {
+            let max_w = (w - 24.0).max(120.0);
+            let full = error.clone();
+            let (text_w, _) = canvas.measure(&full, 11.0);
+            let box_w = (text_w + 16.0).min(max_w);
+            canvas.draw(Rect {
+                x: 12.0,
+                y: TOOLBAR_H + 4.0,
+                w: box_w,
+                h: 22.0,
+                fill: Some(token(ColorToken::SurfaceMuted)),
+                stroke: Some(token(ColorToken::Border)),
+                stroke_width: Some(1.0),
+                corner_radius: Some(5.0),
+                shadow: None,
+            });
+            canvas.draw(Text {
+                x: 20.0,
+                y: TOOLBAR_H + 10.0,
+                content: full,
+                size: 11.0,
+                color: token(ColorToken::Danger),
+                weight: None,
+                family: None,
+                italic: false,
+                family_name: None,
+                max_width: Some(box_w - 16.0),
+                align: None,
+                layout: None,
+            });
+        }
     }
     let buttons = crate::model::zoom_buttons(w);
     let left_edge = buttons
@@ -1272,6 +1336,7 @@ fn card_overlays(ui: &mut Ui, s: &Snapshot, choices: &Choices<'_>) {
         if node.node_type == "conversation" {
             let compacting = s.cards.get(&node.id).is_some_and(|chat| chat.compacting);
             let streaming = s.cards.get(&node.id).is_some_and(|chat| chat.streaming);
+            let locked = s.locked_by_peer(&node.id).is_some();
             let rect = UiRect::new(
                 sx + sw - 28.0 * s.zoom,
                 sy + 3.0 * s.zoom,
@@ -1296,9 +1361,12 @@ fn card_overlays(ui: &mut Ui, s: &Snapshot, choices: &Choices<'_>) {
                         13.0,
                         24.0,
                         ColorToken::TextMuted,
-                        !streaming,
+                        !streaming && !locked,
                     );
-                    ui.hint(&format!("canvas-compact-{id}"), "压缩对话");
+                    ui.hint(
+                        &format!("canvas-compact-{id}"),
+                        if locked { "对方编辑中" } else { "压缩对话" },
+                    );
                 }
             });
         }
@@ -1387,6 +1455,10 @@ fn conversation_overlay(
     let chat = s.cards.get(&node.id).cloned().unwrap_or_default();
     let id = node.id.clone();
     let locked = s.locked_by_peer(&node.id).map(|peer| peer.name.clone());
+    let compaction = node.data.get("compaction").cloned();
+    let expanded = chat.expanded.clone();
+    let streaming = chat.streaming;
+    let rollback_confirm = chat.rollback_confirm.clone();
     let selected_agent = node
         .data
         .get("agentId")
@@ -1401,8 +1473,33 @@ fn conversation_overlay(
         .map(str::to_string)
         .or_else(|| choices.default_pick.map(|pick| pick.model.clone()))
         .unwrap_or_else(|| "模型".to_string());
+    // 模型标签带推理等级：与供应商菜单里的「推理等级」二级项一致
+    let selected_model = format!(
+        "{selected_model} · {}",
+        effort_label(
+            node.data
+                .get("reasoningEffort")
+                .and_then(serde_json::Value::as_str)
+        )
+    );
     ui.overlay(rect, move |ui| {
         ui.fill_column(6.0, |ui| {
+            // 错误条固定在消息区顶部，不随消息滚动
+            if let Some(error) = chat.error.clone() {
+                let clear = format!("canvas-error-clear-{id}");
+                ui.row(4.0, |ui| {
+                    ui.icon_named("circle-alert", 12.0, ColorToken::Danger);
+                    ui.text_styled(
+                        error,
+                        TextStyle::new(TextRole::Micro)
+                            .color(ColorToken::Danger)
+                            .wrap(),
+                    );
+                    ui.grow();
+                    ui.icon_button_named(&clear, "x", 12.0, 20.0, ColorToken::TextMuted, true);
+                    ui.hint(&clear, "清除");
+                });
+            }
             ui.scroll_follow(format!("canvas-chat-{id}"), 8.0, chat.follow_bottom, |ui| {
                 if messages.is_empty() {
                     ui.text_styled(
@@ -1413,102 +1510,29 @@ fn conversation_overlay(
                 let last_assistant = messages.iter().rposition(|message| {
                     message.get("role").and_then(serde_json::Value::as_str) != Some("user")
                 });
+                let marker = compaction_index(&messages, compaction.as_ref());
                 for (index, message) in messages.iter().enumerate() {
-                    let role = message
-                        .get("role")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("user");
-                    let content = message
-                        .get("displayContent")
-                        .and_then(serde_json::Value::as_str)
-                        .filter(|text| !text.is_empty())
-                        .or_else(|| message.get("content").and_then(serde_json::Value::as_str))
-                        .unwrap_or("");
-                    if content.is_empty() {
-                        continue;
-                    }
-                    let mut label = TextStyle::new(TextRole::Micro).color(ColorToken::TextMuted);
-                    if role != "user" {
-                        label = label.color(ColorToken::Accent);
-                    }
-                    ui.text_styled(if role == "user" { "你" } else { "AI" }, label);
-                    ui.markdown(content);
-                    let message_id = message
-                        .get("id")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or_default()
-                        .to_string();
-                    let node_id = id.clone();
-                    let streamed = chat.streaming;
-                    let action_id = |action| {
-                        crate::chat::message_action_id(action, &node_id, Some(&message_id))
-                    };
-                    ui.row(2.0, |ui| {
-                        let copy = action_id(crate::chat::MessageAction::Copy);
-                        ui.icon_button_named(
-                            &copy,
-                            "copy",
-                            12.0,
-                            22.0,
-                            ColorToken::TextMuted,
-                            true,
-                        );
-                        ui.hint(&copy, "复制");
-                        if role != "user" && !streamed && !content.starts_with("[错误]") {
-                            let rollback = action_id(crate::chat::MessageAction::Rollback);
-                            ui.icon_button_named(
-                                &rollback,
-                                "corner-up-left",
-                                12.0,
-                                22.0,
-                                ColorToken::TextMuted,
-                                true,
-                            );
-                            ui.hint(&rollback, "回到此处（该消息之后转为新话题）");
-                            let branch = action_id(crate::chat::MessageAction::Branch);
-                            ui.icon_button_named(
-                                &branch,
-                                "columns-2",
-                                12.0,
-                                22.0,
-                                ColorToken::TextMuted,
-                                true,
-                            );
-                            ui.hint(&branch, "分支为新对话卡");
+                    if Some(index) == marker {
+                        if let Some(compaction) = compaction.as_ref() {
+                            compaction_marker(ui, compaction);
                         }
-                        if role != "user" && Some(index) == last_assistant && !streamed {
-                            let regen = action_id(crate::chat::MessageAction::Regen);
-                            ui.icon_button_named(
-                                &regen,
-                                "refresh-cw",
-                                12.0,
-                                22.0,
-                                ColorToken::TextMuted,
-                                true,
-                            );
-                            ui.hint(&regen, "重新生成回复");
-                        }
-                    });
-                    if chat.rollback_confirm.as_deref() == Some(message_id.as_str()) {
-                        let confirm = action_id(crate::chat::MessageAction::RollbackConfirm);
-                        let cancel = crate::chat::message_action_id(
-                            crate::chat::MessageAction::CancelRollback,
-                            &node_id,
-                            None,
-                        );
-                        ui.row(6.0, |ui| {
-                            ui.button(&confirm, "确认回滚？");
-                            ui.button(&cancel, "取消");
-                        });
                     }
-                }
-                if let Some(error) = &chat.error {
-                    ui.text_styled(
-                        format!("[错误] {error}"),
-                        TextStyle::new(TextRole::Caption)
-                            .color(ColorToken::Danger)
-                            .wrap(),
+                    render_message(
+                        ui,
+                        message,
+                        &expanded,
+                        streaming && last_assistant == Some(index),
+                        &id,
+                        last_assistant == Some(index),
+                        rollback_confirm.as_deref() == Some(message_id_of(message)),
+                        rect.w,
                     );
+                }
+                // 折叠覆盖到末尾（刚压缩完的常态）：标记落在消息列表最后
+                if marker == Some(messages.len()) {
+                    if let Some(compaction) = compaction.as_ref() {
+                        compaction_marker(ui, compaction);
+                    }
                 }
             });
             if let Some(name) = &locked {
@@ -1646,6 +1670,608 @@ fn conversation_overlay(
     });
 }
 
+/// 对话消息缩略图边长与折叠块摘要字符上限（与面板消息流同一口径）。
+const CHAT_THUMB: f32 = 160.0;
+const CHAT_SUMMARY_CHARS: usize = 56;
+
+fn message_id_of(message: &serde_json::Value) -> &str {
+    message
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+}
+
+fn role_of(message: &serde_json::Value) -> &str {
+    message
+        .get("role")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+}
+
+/// 用户消息正文：`displayContent` 优先（可为空），缺失回落 `content`（旧消息）。
+fn display_of(message: &serde_json::Value) -> &str {
+    message
+        .get("displayContent")
+        .and_then(serde_json::Value::as_str)
+        .filter(|text| !text.is_empty())
+        .or_else(|| message.get("content").and_then(serde_json::Value::as_str))
+        .unwrap_or_default()
+}
+
+fn content_of(message: &serde_json::Value) -> &str {
+    message
+        .get("content")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+}
+
+/// 压缩标记的插入位（消息数组下标；= 长度表示落在列表末尾）；无注解 / 锚点失配 = None。
+fn compaction_index(
+    messages: &[serde_json::Value],
+    compaction: Option<&serde_json::Value>,
+) -> Option<usize> {
+    let compaction = compaction.filter(|value| !value.is_null())?;
+    let anchor = compaction
+        .get("upToMessageId")
+        .and_then(serde_json::Value::as_str)?;
+    Some(
+        messages
+            .iter()
+            .position(|message| message_id_of(message) == anchor)
+            .map(|index| index + 1)
+            .unwrap_or(messages.len()),
+    )
+}
+
+fn compaction_marker(ui: &mut Ui, compaction: &serde_json::Value) {
+    let summary = compaction
+        .get("summary")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let count = compaction
+        .get("messageCount")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    ui.boxed(
+        BoxWidth::Fill,
+        BoxStyle::new(None, Some(ColorToken::Border), 10.0).hairline(),
+        Edges::all(8.0),
+        4.0,
+        |card| {
+            card.text_styled(
+                format!("上下文已压缩 · 以上 {count} 条已折叠为摘要"),
+                TextStyle::new(TextRole::Micro),
+            );
+            if !summary.is_empty() {
+                card.text_styled(
+                    summary.to_string(),
+                    TextStyle::new(TextRole::Micro)
+                        .color(ColorToken::TextSecondary)
+                        .wrap(),
+                );
+            }
+        },
+    );
+}
+
+fn render_message(
+    ui: &mut Ui,
+    message: &serde_json::Value,
+    expanded: &std::collections::HashSet<String>,
+    streaming: bool,
+    node: &str,
+    last_assistant: bool,
+    rollback_pending: bool,
+    width: f32,
+) {
+    let message_id = message_id_of(message).to_string();
+    if role_of(message) == "user" {
+        render_user(
+            ui,
+            message,
+            &message_id,
+            node,
+            rollback_pending,
+            width,
+        );
+    } else {
+        render_assistant(
+            ui,
+            message,
+            expanded,
+            streaming,
+            &message_id,
+            node,
+            last_assistant,
+            rollback_pending,
+        );
+    }
+}
+
+/// 用户气泡：按内容收缩、纯文本不套 markdown，引用走胶囊，图片附件出缩略图行。
+fn render_user(
+    ui: &mut Ui,
+    message: &serde_json::Value,
+    message_id: &str,
+    node: &str,
+    rollback_pending: bool,
+    width: f32,
+) {
+    let display = display_of(message);
+    let plain = is_plain_line(display);
+    let max_width = 560.0_f32.min((width - 24.0).max(80.0));
+    ui.column(4.0, |column| {
+        if !display.is_empty() {
+            let bubble_width = if plain {
+                (column.text_width(display, TextRole::Body) + 20.0).min(max_width)
+            } else {
+                max_width
+            };
+            column.row(0.0, |line| {
+                line.grow();
+                line.boxed(
+                    BoxWidth::Fixed(bubble_width.max(1.0)),
+                    BoxStyle::new(Some(ColorToken::Surface), Some(ColorToken::Border), 10.0)
+                        .hairline(),
+                    Edges::all(10.0),
+                    0.0,
+                    |bubble| {
+                        if plain {
+                            bubble.text_styled(
+                                display.to_string(),
+                                TextStyle::new(TextRole::Body).wrap(),
+                            );
+                        } else {
+                            bubble.markdown_with(display.to_string(), mentions_of(message));
+                        }
+                    },
+                );
+            });
+        }
+        let images: Vec<&str> = message
+            .get("attachments")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|attachment| {
+                attachment.get("kind").and_then(serde_json::Value::as_str) == Some("image")
+            })
+            .filter_map(|attachment| {
+                attachment
+                    .get("file")
+                    .and_then(serde_json::Value::as_str)
+            })
+            .collect();
+        if !images.is_empty() {
+            column.row(6.0, |line| {
+                line.grow();
+                for file in images {
+                    line.image_sized(
+                        ImageSource::Vault {
+                            path: file.to_string(),
+                            max_edge: None,
+                        },
+                        CHAT_THUMB,
+                        CHAT_THUMB,
+                        Some(ImageFit::Contain),
+                    );
+                }
+            });
+        }
+        message_actions(
+            column,
+            node,
+            message_id,
+            "user",
+            display,
+            false,
+            false,
+            rollback_pending,
+        );
+    });
+}
+
+/// assistant 块（无气泡全宽）：步骤块（思考 / 工具可折叠）+ 最终正文 + 操作行。
+fn render_assistant(
+    ui: &mut Ui,
+    message: &serde_json::Value,
+    expanded: &std::collections::HashSet<String>,
+    streaming: bool,
+    message_id: &str,
+    node: &str,
+    last_assistant: bool,
+    rollback_pending: bool,
+) {
+    let content = content_of(message);
+    let steps = message.get("steps").and_then(serde_json::Value::as_array);
+    let mut has_tools = false;
+    ui.column(6.0, |column| {
+        if let Some(steps) = steps {
+            let last = steps.len().saturating_sub(1);
+            for (idx, step) in steps.iter().enumerate() {
+                let key = format!("{message_id}:{idx}");
+                match step.get("kind").and_then(serde_json::Value::as_str) {
+                    Some("reasoning") => reasoning_block(
+                        column,
+                        expanded,
+                        step,
+                        streaming && idx == last,
+                        node,
+                        &key,
+                    ),
+                    Some("text") => {
+                        if let Some(text) = step.get("text").and_then(serde_json::Value::as_str) {
+                            if !text.is_empty() {
+                                column.markdown(text.to_string());
+                            }
+                        }
+                    }
+                    Some("tool") => {
+                        has_tools = true;
+                        tool_block(column, expanded, step, node, &key);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if has_tools && !content.is_empty() {
+            column.rule();
+        }
+        if !content.is_empty() {
+            column.markdown(content.to_string());
+        } else if streaming && steps.map(|steps| steps.is_empty()).unwrap_or(true) {
+            column.text_styled(
+                "生成中…",
+                TextStyle::new(TextRole::Caption).color(ColorToken::TextMuted),
+            );
+        }
+        message_actions(
+            column,
+            node,
+            message_id,
+            "assistant",
+            content,
+            last_assistant,
+            streaming,
+            rollback_pending,
+        );
+    });
+}
+
+/// 思考块：折叠态一行摘要（流式取最新一行、完成后取首行），展开态全文。
+fn reasoning_block(
+    ui: &mut Ui,
+    expanded: &std::collections::HashSet<String>,
+    step: &serde_json::Value,
+    streaming: bool,
+    node: &str,
+    key: &str,
+) {
+    let full = step
+        .get("text")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let summary = if streaming {
+        full.lines()
+            .rfind(|line| !line.trim().is_empty())
+            .unwrap_or("")
+            .trim()
+    } else {
+        full.lines()
+            .find(|line| !line.trim().is_empty())
+            .unwrap_or("")
+            .trim()
+    };
+    let open = expanded.contains(key);
+    details_block(
+        ui,
+        node,
+        key,
+        open,
+        vec![("brain", ColorToken::TextMuted)],
+        "思考过程".to_string(),
+        summary.to_string(),
+        false,
+        full.to_string(),
+        "思考内容为空",
+    );
+}
+
+/// 工具块：折叠态 = 状态色图示 + 工具名 + 等宽参数/结果摘要；展开态 = 参数与结果分节。
+fn tool_block(
+    ui: &mut Ui,
+    expanded: &std::collections::HashSet<String>,
+    step: &serde_json::Value,
+    node: &str,
+    key: &str,
+) {
+    let run = step.get("run").cloned().unwrap_or(serde_json::Value::Null);
+    let name = run
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("tool");
+    let status = run
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("running");
+    let args_summary = run
+        .get("argsSummary")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let result_summary = run
+        .get("resultSummary")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let open = expanded.contains(key);
+    // 参数与结果是任意长的工具输出：只有展开时才格式化
+    let detail = if open {
+        let args_json = run.get("args").map(pretty_json).unwrap_or_default();
+        let result = run
+            .get("result")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        format!(
+            "参数\n{}\n\n结果\n{}",
+            if args_json.is_empty() {
+                "—".to_string()
+            } else {
+                args_json
+            },
+            if status == "running" {
+                "进行中…".to_string()
+            } else if result.is_empty() {
+                result_summary.to_string()
+            } else {
+                result.to_string()
+            }
+        )
+    } else {
+        String::new()
+    };
+    let summary = match (args_summary.is_empty(), result_summary.is_empty()) {
+        (true, true) => String::new(),
+        (true, false) => result_summary.to_string(),
+        (false, true) => args_summary.to_string(),
+        (false, false) => format!("{args_summary} · {result_summary}"),
+    };
+    let status_icon = match status {
+        "error" => ("circle-x", ColorToken::Danger),
+        "done" => ("check", ColorToken::Success),
+        _ => ("loader-circle", ColorToken::TextMuted),
+    };
+    details_block(
+        ui,
+        node,
+        key,
+        open,
+        vec![(tool_icon(name), ColorToken::TextMuted), status_icon],
+        tool_label(name),
+        summary,
+        true,
+        detail,
+        "",
+    );
+}
+
+/// 可折叠步骤块（思考 / 工具共用）：折叠态一行，展开态正文（超高滚动）。
+#[allow(clippy::too_many_arguments)]
+fn details_block(
+    ui: &mut Ui,
+    node: &str,
+    key: &str,
+    open: bool,
+    leading: Vec<(&str, ColorToken)>,
+    title: String,
+    summary: String,
+    mono_summary: bool,
+    body: String,
+    empty_hint: &str,
+) {
+    ui.boxed(
+        BoxWidth::Fill,
+        BoxStyle::new(Some(ColorToken::SurfaceSunken), Some(ColorToken::Border), 6.0).hairline(),
+        Edges::all(0.0),
+        0.0,
+        |card| {
+            card.click_row(
+                format!("step|{node}|{key}"),
+                Edges::symmetric(0.0, 5.0),
+                4.0,
+                false,
+                true,
+                |head| {
+                    head.row(6.0, |line| {
+                        line.icon_named(
+                            if open { "chevron-down" } else { "chevron-right" },
+                            12.0,
+                            ColorToken::TextMuted,
+                        );
+                        for (name, color) in &leading {
+                            line.icon_named(name, 12.0, *color);
+                        }
+                        line.text_styled_fit(
+                            title.clone(),
+                            TextStyle::new(TextRole::Micro).color(ColorToken::TextSecondary),
+                        );
+                        if !summary.is_empty() {
+                            let mut style = TextStyle::new(TextRole::Micro);
+                            if mono_summary {
+                                style = style.mono();
+                            }
+                            line.text_styled(one_line(&summary, CHAT_SUMMARY_CHARS), style);
+                        }
+                    });
+                },
+            );
+            if open {
+                if !body.is_empty() {
+                    card.rule();
+                    card.pad(0.0, 6.0, |body_ui| {
+                        body_ui.scroll_sized(
+                            format!("step-body:{key}"),
+                            160.0,
+                            0.0,
+                            false,
+                            |scroll| {
+                                scroll.text_styled(
+                                    body.clone(),
+                                    TextStyle::new(TextRole::Micro)
+                                        .color(ColorToken::TextSecondary)
+                                        .wrap(),
+                                );
+                            },
+                        );
+                    });
+                } else if !empty_hint.is_empty() {
+                    card.pad(0.0, 6.0, |hint| {
+                        hint.text_styled(empty_hint, TextStyle::new(TextRole::Micro));
+                    });
+                }
+            }
+        },
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn message_actions(
+    ui: &mut Ui,
+    node: &str,
+    message_id: &str,
+    role: &str,
+    content: &str,
+    last_assistant: bool,
+    streaming: bool,
+    rollback_pending: bool,
+) {
+    let action_id = |action| crate::chat::message_action_id(action, node, Some(message_id));
+    ui.row(2.0, |line| {
+        let copy = action_id(crate::chat::MessageAction::Copy);
+        line.icon_button_named(&copy, "copy", 12.0, 22.0, ColorToken::TextMuted, true);
+        line.hint(&copy, "复制");
+        if role != "user" && !streaming && !content.starts_with("[错误]") {
+            let rollback = action_id(crate::chat::MessageAction::Rollback);
+            line.icon_button_named(
+                &rollback,
+                "corner-up-left",
+                12.0,
+                22.0,
+                ColorToken::TextMuted,
+                true,
+            );
+            line.hint(&rollback, "回到此处（该消息之后转为新话题）");
+            let branch = action_id(crate::chat::MessageAction::Branch);
+            line.icon_button_named(&branch, "columns-2", 12.0, 22.0, ColorToken::TextMuted, true);
+            line.hint(&branch, "分支为新对话卡");
+        }
+        if role != "user" && last_assistant && !streaming {
+            let regen = action_id(crate::chat::MessageAction::Regen);
+            line.icon_button_named(&regen, "refresh-cw", 12.0, 22.0, ColorToken::TextMuted, true);
+            line.hint(&regen, "重新生成回复");
+        }
+    });
+    if rollback_pending {
+        let confirm = action_id(crate::chat::MessageAction::RollbackConfirm);
+        let cancel =
+            crate::chat::message_action_id(crate::chat::MessageAction::CancelRollback, node, None);
+        ui.row(6.0, |line| {
+            line.button(&confirm, "确认回滚？");
+            line.button(&cancel, "取消");
+        });
+    }
+}
+
+/// 消息里的引用 → 解析器的引用候选：标签文本与草稿里插入的那段字面量逐字一致，胶囊才画得准。
+fn mentions_of(message: &serde_json::Value) -> Vec<MentionCandidate> {
+    message
+        .get("refs")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|reference| {
+            let path = reference.get("path").and_then(serde_json::Value::as_str)?;
+            let label = reference.get("label").and_then(serde_json::Value::as_str)?;
+            let prefix = match reference.get("refKind").and_then(serde_json::Value::as_str) {
+                Some("table") => "表格",
+                Some("canvas") => "画布",
+                Some("dir") => "文件夹",
+                _ => "笔记",
+            };
+            Some(MentionCandidate {
+                key: path.to_string(),
+                label: format!("{prefix}：{label}"),
+            })
+        })
+        .collect()
+}
+
+fn is_plain_line(source: &str) -> bool {
+    !source.contains('\n')
+        && source.chars().count() <= 200
+        && !source.contains(['*', '_', '`', '[', ']', '#', '>', '|', '\\', '~'])
+}
+
+fn one_line(source: &str, cap: usize) -> String {
+    let mut out: String = source
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .take(cap + 1)
+        .collect();
+    if out.chars().count() > cap {
+        out = out.chars().take(cap).collect();
+        out.push('\u{2026}');
+    }
+    out
+}
+
+fn pretty_json(value: &serde_json::Value) -> String {
+    serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+}
+
+fn tool_icon(name: &str) -> &'static str {
+    match name {
+        "web_search" => "globe",
+        "web_fetch" => "link",
+        "read_file" | "read_history" => "file-text",
+        "glob" | "grep" => "search",
+        "edit_file" => "pen-line",
+        "write_file" | "append_file" => "file-plus",
+        _ => "wrench",
+    }
+}
+
+fn tool_label(id: &str) -> String {
+    match id {
+        "web_search" => "联网搜索",
+        "web_fetch" => "抓取网页",
+        "read_file" => "读取文件",
+        "glob" => "查找文件",
+        "grep" => "搜索内容",
+        "list_dir" => "列出目录",
+        "read_history" => "读取历史",
+        "edit_file" => "编辑文件",
+        "append_file" => "追加内容",
+        "write_file" => "写入文件",
+        "rename_file" => "重命名文件",
+        "move_file" => "移动文件",
+        "delete_file" => "删除文件",
+        "delete_dir" => "删除目录",
+        "todo_write" => "任务清单",
+        other => other,
+    }
+    .to_string()
+}
+
+/// 推理等级的展示文案（`off` / `low` / `medium` / `high`；缺省 = 默认）。
+fn effort_label(effort: Option<&str>) -> &'static str {
+    match effort {
+        Some("off") => "关闭",
+        Some("low") => "低",
+        Some("medium") => "中",
+        Some("high") => "高",
+        _ => "默认",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1682,5 +2308,70 @@ mod tests {
             1,
         );
         assert_eq!(stats_text(&Snapshot::of(&session)), "2 卡 · 0 连线");
+    }
+
+    /// 压缩标记插在锚点消息之后；锚点失配时落在末尾，空注解不画标记。
+    #[test]
+    fn compaction_index_anchor() {
+        let messages = vec![
+            serde_json::json!({ "id": "m1", "role": "user", "content": "a" }),
+            serde_json::json!({ "id": "m2", "role": "assistant", "content": "b" }),
+        ];
+        let compaction = serde_json::json!({ "upToMessageId": "m1", "messageCount": 1 });
+        assert_eq!(compaction_index(&messages, Some(&compaction)), Some(1));
+        let unknown = serde_json::json!({ "upToMessageId": "gone", "messageCount": 1 });
+        assert_eq!(compaction_index(&messages, Some(&unknown)), Some(2));
+        assert_eq!(compaction_index(&messages, None), None);
+        assert_eq!(
+            compaction_index(&messages, Some(&serde_json::Value::Null)),
+            None
+        );
+    }
+
+    /// 引用胶囊的标签与草稿插入字面量一致（前缀按 refKind 区分）。
+    #[test]
+    fn mention_labels_follow_ref_kind() {
+        let message = serde_json::json!({
+            "refs": [
+                { "path": "note.md", "label": "说明", "refKind": "note" },
+                { "path": "t.csv", "label": "清单", "refKind": "table" },
+                { "path": "dir", "label": "资料", "refKind": "dir" },
+                { "label": "缺路径" }
+            ]
+        });
+        let labels: Vec<String> = mentions_of(&message)
+            .into_iter()
+            .map(|candidate| candidate.label)
+            .collect();
+        assert_eq!(labels, vec!["笔记：说明", "表格：清单", "文件夹：资料"]);
+    }
+
+    /// 折叠摘要单行：超长补省略号、控制字符剔除。
+    #[test]
+    fn one_line_truncates_and_strips_controls() {
+        assert_eq!(one_line("短句", 56), "短句");
+        assert_eq!(one_line("a\nb", 56), "ab");
+        let long: String = std::iter::repeat('字').take(60).collect();
+        let short = one_line(&long, 56);
+        assert_eq!(short.chars().count(), 57);
+        assert!(short.ends_with('\u{2026}'));
+    }
+
+    /// 消息正文优先级：displayContent 非空优先，否则回落 content。
+    #[test]
+    fn display_falls_back_to_content() {
+        let message = serde_json::json!({ "content": "原始", "displayContent": "" });
+        assert_eq!(display_of(&message), "原始");
+        let message = serde_json::json!({ "content": "原始", "displayContent": "显示" });
+        assert_eq!(display_of(&message), "显示");
+    }
+
+    /// 推理等级标签：已知值映射中文，缺省 / 未知回落「默认」。
+    #[test]
+    fn effort_labels() {
+        assert_eq!(effort_label(None), "默认");
+        assert_eq!(effort_label(Some("off")), "关闭");
+        assert_eq!(effort_label(Some("medium")), "中");
+        assert_eq!(effort_label(Some("unknown")), "默认");
     }
 }

@@ -45,6 +45,7 @@ async fn main() {
 
     let vault = atelyx_core::scratch::TempDir::new("canvas-vault");
     std::fs::write(vault.join("demo.atlx"), seed_canvas()).expect("写初始画布");
+    std::fs::write(vault.join("chat.atlx"), seed_chat_canvas()).expect("写对话画布");
 
     let state = Arc::new(HostState::default());
     serve(runtime.clone(), state.clone(), vault.to_path_buf());
@@ -146,6 +147,43 @@ async fn main() {
         "撤销后应回到拖动前的 x"
     );
     println!("撤销：通过");
+
+    // 拖拽途中 Delete：快捷键被忽略，既不删卡也不打断拖拽；且拖动过程本身不触发保存
+    let before_delete = state.written.lock().unwrap().len();
+    let drag_start = (320.0, 210.0);
+    pointer(&runtime, FrameInput::PointerDown { x: drag_start.0, y: drag_start.1, button: MouseButton::Left, hit: None });
+    pointer(&runtime, FrameInput::PointerMove { x: drag_start.0 + 100.0, y: drag_start.1 + 60.0, hit: None });
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    assert_eq!(
+        state.written.lock().unwrap().len(),
+        before_delete,
+        "拖动在途不应触发保存"
+    );
+    runtime.notify_plugin_event(
+        CANVAS_ID,
+        atelyx_core::plugin_runtime::event_name::CANVAS_COMMAND,
+        &atelyx_core::plugin_runtime::CanvasCommandParams { command: "delete".to_string() },
+    );
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    assert_eq!(
+        state.written.lock().unwrap().len(),
+        before_delete,
+        "拖拽中的 Delete 应被忽略且不落盘"
+    );
+    pointer(&runtime, FrameInput::PointerUp { x: drag_start.0 + 100.0, y: drag_start.1 + 60.0, button: MouseButton::Left, hit: None });
+    wait_written(&state, before_delete + 1).await;
+    let after_drag_delete: Value =
+        serde_json::from_str(&written_at(&state, before_delete)).expect("拖拽后写盘");
+    assert_eq!(
+        after_drag_delete["nodes"].as_array().map(Vec::len),
+        Some(2),
+        "拖拽中的 Delete 不应删卡"
+    );
+    assert!(
+        after_drag_delete["nodes"][0]["x"].as_f64().unwrap_or(0.0) > CARD_LEFT as f64 + 50.0,
+        "拖拽应继续生效"
+    );
+    println!("拖拽中 Delete 忽略：通过");
 
     // 滚轮方向：协议增量正 = 向下；向上滚（负增量）应放大，字号与缩放无关
     let before_zoom = zoom_percent(&frame).expect("工具条应显示缩放百分比");
@@ -262,6 +300,78 @@ async fn main() {
     );
     println!("低缩放占位：通过（{}%）", zoom_percent(&compact).unwrap_or(0));
 
+    // 切到对话画布：恢复 messages 的 steps / 附件 / 引用胶囊 / 压缩标记与「模型 · 推理等级」标签
+    *state.open_files.lock().unwrap() = vec!["chat.atlx".into()];
+    runtime.on_open_files_changed();
+    resize(&runtime);
+    let chat = match wait_frame(&runtime, |frame| {
+        has_text(frame, "思考过程")
+            && has_text_prefix(frame, "上下文已压缩")
+            && has_text(frame, "gpt-x · 中")
+    })
+    .await
+    {
+        Some(frame) => frame,
+        None => {
+            if let Some(frame) = runtime.surface_frame(CANVAS_ID, SURFACE) {
+                eprintln!("当前帧缩放：{:?}", zoom_percent(&frame));
+                for command in &frame.commands {
+                    if let DrawCommand::Text { content, .. } = command {
+                        eprintln!("TEXT：{content}");
+                    }
+                }
+            }
+            panic!("对话卡应恢复步骤摘要、压缩标记与模型·推理等级");
+        }
+    };
+    assert!(
+        has_text_containing(&chat, "说明"),
+        "引用胶囊应渲染引用标签（当前指令里没有含「说明」的文字）"
+    );
+    assert!(
+        has_image_command(&chat, 160.0, 160.0),
+        "图片附件应出现 160×160 缩略图"
+    );
+    assert!(
+        chat.commands.iter().any(|command| matches!(
+            command,
+            DrawCommand::Text { content, .. } if content.contains("先看看目录")
+        )),
+        "思考块折叠摘要应可见"
+    );
+    // 消息区在卡内滚动：继续往下滚，露出纯工具轮次（正文为空也要有工具块）
+    let scrolled = {
+        let mut found = None;
+        for _ in 0..6 {
+            wheel_at(&runtime, 300.0, 320.0, 120.0);
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            if let Some(frame) = runtime.surface_frame(CANVAS_ID, SURFACE) {
+                if has_text(&frame, "读取文件") {
+                    found = Some((*frame).clone());
+                    break;
+                }
+            }
+        }
+        found
+    }
+    .expect("纯工具轮次应在消息区滚动后可见");
+    assert!(
+        has_text(&scrolled, "最终结论"),
+        "滚动到底应看到后续正文"
+    );
+    println!("对话卡信息恢复：通过（{} 条指令）", chat.commands.len());
+
+    // 表格 / 媒体卡：引用缺失也要出提示，不留空白卡
+    assert!(
+        has_text(&chat, "引用表格缺失"),
+        "表格引用非表时应提示「引用表格缺失」"
+    );
+    assert!(
+        has_text(&chat, "附件缺失"),
+        "媒体附件缺失时应提示「附件缺失」"
+    );
+    println!("媒体 / 表格卡提示：通过");
+
     disable(&runtime, CANVAS_ID).await;
     let status = runtime
         .list()
@@ -293,6 +403,88 @@ fn seed_canvas() -> String {
             "height": CARD_H,
             "data": { "title": title, "bodyMd": "正文" }
         }],
+        "edges": [],
+        "createdAt": 0,
+        "updatedAt": 0
+    })
+    .to_string()
+}
+
+/// 对话画布：覆盖消息步骤 / 空正文工具轮次 / 附件缩略图 / 引用胶囊 / 压缩标记，
+/// 以及引用缺失的表格与媒体卡提示。
+fn seed_chat_canvas() -> String {
+    json!({
+        "schema": "atelyx-canvas/v1",
+        "id": "cv-chat",
+        "title": "chat",
+        "nodes": [
+            {
+                "id": "c1",
+                "type": "conversation",
+                "x": 10,
+                "y": 10,
+                "width": 520,
+                "height": 560,
+                "data": {
+                    "title": "对话",
+                    "model": "gpt-x",
+                    "reasoningEffort": "medium",
+                    "compaction": {
+                        "upToMessageId": "m1",
+                        "messageCount": 1,
+                        "summary": "压缩摘要"
+                    },
+                    "messages": [
+                        {
+                            "id": "m1",
+                            "role": "user",
+                            "content": "看看附件",
+                            "displayContent": "看看附件 [笔记：说明]",
+                            "refs": [{ "path": "note.md", "label": "说明", "refKind": "note" }],
+                            "attachments": [{ "kind": "image", "file": "missing.png" }]
+                        },
+                        {
+                            "id": "m2",
+                            "role": "assistant",
+                            "content": "",
+                            "steps": [
+                                { "kind": "reasoning", "text": "先看看目录" },
+                                {
+                                    "kind": "tool",
+                                    "run": {
+                                        "name": "read_file",
+                                        "status": "done",
+                                        "argsSummary": "a.md",
+                                        "resultSummary": "已完成",
+                                        "args": { "path": "a.md" },
+                                        "result": "ok"
+                                    }
+                                }
+                            ]
+                        },
+                        { "id": "m3", "role": "assistant", "content": "最终结论" }
+                    ]
+                }
+            },
+            {
+                "id": "t1",
+                "type": "table",
+                "x": 560,
+                "y": 10,
+                "width": 220,
+                "height": 140,
+                "data": { "title": "表格", "file": "missing.csv" }
+            },
+            {
+                "id": "i1",
+                "type": "media",
+                "x": 560,
+                "y": 180,
+                "width": 220,
+                "height": 160,
+                "data": { "title": "图片", "file": "missing.png" }
+            }
+        ],
         "edges": [],
         "createdAt": 0,
         "updatedAt": 0
@@ -334,6 +526,10 @@ fn serve(runtime: Arc<PluginRuntime>, state: Arc<HostState>, vault: PathBuf) {
                         Ok(content) => reply(&runtime, request_id, json!({ "content": content })),
                         Err(error) => runtime.resolve_shell_call(request_id, Err(error.to_string())),
                     }
+                }
+                HostRequest::VaultReadBinary { request_id, .. } => {
+                    // 冒烟里附件刻意缺失：立刻回错误，引用解析才能继续（不然载入会一直等）
+                    runtime.resolve_shell_call(request_id, Err("附件不存在".to_string()));
                 }
                 HostRequest::VaultWriteText { request_id, path, content, .. } => {
                     let target = state.vault.lock().unwrap().join(path);
@@ -518,6 +714,21 @@ fn has_text_prefix(frame: &SurfaceFrame, prefix: &str) -> bool {
     )
 }
 
+/// 任意文字片段包含目标字面量（引用胶囊 / 折叠摘要这类会被分段绘制）。
+fn has_text_containing(frame: &SurfaceFrame, wanted: &str) -> bool {
+    frame.commands.iter().any(
+        |command| matches!(command, DrawCommand::Text { content, .. } if content.contains(wanted))
+    )
+}
+
+/// 存在指定尺寸的图片指令（附件缩略图按固定边长绘制）。
+fn has_image_command(frame: &SurfaceFrame, width: f32, height: f32) -> bool {
+    frame.commands.iter().any(|command| {
+        matches!(command, DrawCommand::Image { w, h, .. }
+            if (*w - width).abs() < 0.5 && (*h - height).abs() < 0.5)
+    })
+}
+
 /// 卡头标题（世界层，内容是省略后的文本）。
 fn title_command(frame: &SurfaceFrame) -> Option<(&str, f32, f32)> {
     frame.commands.iter().find_map(|command| match command {
@@ -573,15 +784,23 @@ fn text_width(text: &str, size: f32) -> f32 {
 }
 
 fn wheel(runtime: &PluginRuntime, delta_y: f32, control: bool) {
+    wheel_with(runtime, 600.0, 500.0, delta_y, control);
+}
+
+/// 指定位置的滚轮（用于滚动卡片浮层内的消息区）。
+fn wheel_at(runtime: &PluginRuntime, x: f32, y: f32, delta_y: f32) {
+    wheel_with(runtime, x, y, delta_y, false);
+}
+
+fn wheel_with(runtime: &PluginRuntime, x: f32, y: f32, delta_y: f32, control: bool) {
     let mut modifiers = Modifiers::default();
     modifiers.control = control;
-    // 空白世界区（避开卡片正文浮层与小地图）：浮层上的滚轮归控件层滚动
     runtime.notify_frame_input(
         CANVAS_ID,
         SURFACE,
         &FrameInput::Wheel {
-            x: 600.0,
-            y: 500.0,
+            x,
+            y,
             delta_x: 0.0,
             delta_y,
             modifiers,

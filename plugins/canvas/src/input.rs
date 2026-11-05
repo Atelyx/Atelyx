@@ -281,7 +281,7 @@ fn link_handle(session: &Session, world: (f64, f64)) -> Option<String> {
 fn moved(session: &mut Session, x: f32, y: f32, size: (f32, f32)) -> bool {
     // 已有拖拽时不再按工具栏拦截：指针经过顶部仍继续拖动
     if session.view.drag.is_none() && y < TOOLBAR_H {
-        let hover = toolbar_hover(size, x);
+        let hover = toolbar_hover(session, size, x);
         session.view.toolbar_hover = hover;
         return false;
     }
@@ -413,12 +413,23 @@ fn moved(session: &mut Session, x: f32, y: f32, size: (f32, f32)) -> bool {
     }
 }
 
-fn toolbar_hover(size: (f32, f32), x: f32) -> Option<String> {
+fn toolbar_hover(session: &Session, size: (f32, f32), x: f32) -> Option<String> {
     let y = TOOLBAR_H / 2.0;
-    crate::model::zoom_buttons(size.0)
+    if let Some(name) = crate::model::zoom_buttons(size.0)
         .into_iter()
         .find(|(_, (bx, by, bw, bh))| Rect::new(*bx, *by, *bw, *bh).contains(x, y))
         .map(|(name, _)| name.to_string())
+    {
+        return Some(name);
+    }
+    // 保存错误是一段限宽单行文字：悬停它给出全文
+    if session.save_error.is_some() {
+        let left = if session.dirty { 12.0 + 33.0 + 22.0 } else { 12.0 };
+        if (left..=left + 220.0).contains(&x) {
+            return Some("save-error".to_string());
+        }
+    }
+    None
 }
 
 fn release(session: &mut Session, out: &mut Outcome) -> bool {
@@ -637,9 +648,9 @@ fn context_menu(session: &mut Session, world: (f64, f64)) -> Option<MenuOpenPara
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false);
             items.push(if collapsed {
-                action("group-expand", "展开", "chevrons-down-up", false)
+                action("group-expand", "展开", "chevrons-up-down", false)
             } else {
-                action("group-collapse", "收起", "chevrons-up-down", false)
+                action("group-collapse", "收起", "chevrons-down-up", false)
             });
             items.push(MenuItem::Divider { pane: 0 });
             items.push(action("delete", "删除分组", "trash-2", true));

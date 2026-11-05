@@ -621,6 +621,14 @@ impl PluginState {
         if self.ui.lock().await.focus_id().is_some() {
             return;
         }
+        // 拖拽 / 改尺寸途中 Delete 不生效：既避免误删在拖的卡，也避免打断拖拽
+        if command == "delete"
+            && self
+                .with_session(|session| session.view.drag.is_some())
+                .unwrap_or(false)
+        {
+            return;
+        }
         match command {
             "undo" => self.undo_redo(ctx, true).await,
             "redo" => self.undo_redo(ctx, false).await,
@@ -935,7 +943,21 @@ impl PluginState {
         };
         let released = self.sweep_locks(focused.as_deref());
         let moving = matches!(input, FrameInput::PointerMove { .. });
-        if (redraw || dirty) && !moving {
+        // 拖动 / 改尺寸在途：几何已变，属性面板要跟手；只发变更事件，不排保存
+        let geometry_move = moving
+            && self
+                .with_session(|session| {
+                    session.view.drag.as_ref().is_some_and(|drag| {
+                        drag.mutated
+                            && matches!(
+                                drag.kind,
+                                crate::model::DragKind::Card
+                                    | crate::model::DragKind::Resize(_)
+                            )
+                    })
+                })
+                .unwrap_or(false);
+        if ((redraw || dirty) && !moving) || geometry_move {
             crate::service::emit_changed(self, ctx).await;
         }
         if (redraw || dirty || released) && !moving && self.is_attached() {
@@ -953,6 +975,34 @@ impl PluginState {
     async fn ui_click(self: &Arc<Self>, ctx: &Context, id: &str) -> (bool, bool) {
         if let Some((action, node, message)) = crate::chat::parse_message_action(id) {
             return self.message_action(ctx, action, node, message).await;
+        }
+        if let Some(rest) = id.strip_prefix("step|") {
+            let Some((node, key)) = rest.split_once('|') else {
+                return (false, false);
+            };
+            let changed = self
+                .with_session_mut(|session| {
+                    session.view.card_chat.get_mut(node).is_some_and(|chat| {
+                        if !chat.expanded.remove(key) {
+                            chat.expanded.insert(key.to_string());
+                        }
+                        true
+                    })
+                })
+                .unwrap_or(false);
+            return (changed, false);
+        }
+        if let Some(node) = id.strip_prefix("canvas-error-clear-") {
+            let cleared = self
+                .with_session_mut(|session| {
+                    session
+                        .view
+                        .card_chat
+                        .get_mut(node)
+                        .is_some_and(|chat| chat.error.take().is_some())
+                })
+                .unwrap_or(false);
+            return (cleared, false);
         }
         if let Some(rest) = id.strip_prefix("canvas-stop-") {
             crate::chat::stop(ctx, rest).await;
@@ -1125,9 +1175,17 @@ impl PluginState {
                     .node(node)
                     .and_then(|n| n.data.get("model"))
                     .and_then(serde_json::Value::as_str);
-                (provider.map(str::to_string), model.map(str::to_string))
+                let effort = session
+                    .node(node)
+                    .and_then(|n| n.data.get("reasoningEffort"))
+                    .and_then(serde_json::Value::as_str);
+                (
+                    provider.map(str::to_string),
+                    model.map(str::to_string),
+                    effort.map(str::to_string),
+                )
             })
-            .unwrap_or((None, None));
+            .unwrap_or((None, None, None));
         let mut items = Vec::new();
         for provider in &providers {
             for model in &provider.models {
@@ -1157,6 +1215,40 @@ impl PluginState {
         }
         if items.is_empty() {
             return false;
+        }
+        // 二级菜单：推理等级（值写回节点数据，随消息一起发给模型）
+        let current_effort = current.2.as_deref().unwrap_or("");
+        items.push(method::MenuItem::Divider { pane: 0 });
+        items.push(method::MenuItem::Submenu {
+            label: "推理等级".to_string(),
+            icon: Some("sliders-horizontal".to_string()),
+            disabled: false,
+            pane: 0,
+            target: 1,
+        });
+        for (value, label) in [
+            ("", "默认"),
+            ("off", "关闭"),
+            ("low", "低"),
+            ("medium", "中"),
+            ("high", "高"),
+        ] {
+            let id = format!("effort:{node}:{value}");
+            let label = label.to_string();
+            items.push(if current_effort == value {
+                method::MenuItem::Checked { id, label, pane: 1 }
+            } else {
+                method::MenuItem::Action {
+                    id,
+                    label,
+                    icon: None,
+                    danger: false,
+                    disabled: false,
+                    note: None,
+                    hint: None,
+                    pane: 1,
+                }
+            });
         }
         let params = method::MenuOpenParams {
             items,
@@ -1341,6 +1433,29 @@ impl PluginState {
                             .map(|data| data.remove("agentId"));
                     } else {
                         target.data["agentId"] = serde_json::Value::String(agent.to_string());
+                    }
+                    session.touch();
+                    true
+                })
+                .unwrap_or(false);
+        }
+        if let Some(rest) = id.strip_prefix("effort:") {
+            let mut parts = rest.splitn(2, ':');
+            let (Some(node), Some(value)) = (parts.next(), parts.next()) else {
+                return false;
+            };
+            return self
+                .with_session_mut(|session| {
+                    let Some(target) = session.node_mut(node) else {
+                        return false;
+                    };
+                    if value.is_empty() {
+                        if let Some(data) = target.data.as_object_mut() {
+                            data.remove("reasoningEffort");
+                        }
+                    } else {
+                        target.data["reasoningEffort"] =
+                            serde_json::Value::String(value.to_string());
                     }
                     session.touch();
                     true
