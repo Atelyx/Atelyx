@@ -83,6 +83,11 @@ struct Line {
     height: f32,
     runs: Vec<Run>,
     scroll: bool,
+    /// 选区复制时该行之后的分隔符（表格行内为制表符，其余为换行）；
+    /// `None` = 该行只是界面文案（代码块头、展开提示），不参与选区文字。
+    selection_sep: Option<char>,
+    /// 整块取全文的代码行：该块源文本在 `Layout::code_sources` 的下标（折叠不影响取全文）。
+    atomic_code: Option<usize>,
 }
 
 /// 矩形图元（底色 / 边框 / 圆角）。绘制顺序在文字之下。
@@ -116,6 +121,8 @@ pub(crate) struct Layout {
     content_w: f32,
     /// 横向滚动内容的可视区（块内坐标）：表格是整块，代码块只有正文区。
     scroll_clip: Rect,
+    /// 各代码块的完整源文本（行间 `\n`、不含尾部换行）：任一代码行入选即整块取它。
+    code_sources: Vec<String>,
 }
 
 impl Layout {
@@ -373,7 +380,7 @@ pub(crate) fn paint(
     }
     if let Some((from, to)) = selection {
         for (index, line) in laid.lines.iter().enumerate() {
-            if index < from.0 || index > to.0 {
+            if index < from.0 || index > to.0 || line.selection_sep.is_none() {
                 continue;
             }
             let text = line_text(line);
@@ -660,29 +667,42 @@ fn line_text(line: &Line) -> String {
     line.runs.iter().map(|run| run.text.as_str()).collect()
 }
 
-/// 选择区间的文字：跨行时按换行拼接，行内按字节切。
+/// 选择区间的文字：按行序拼接，行内按字节切；界面文案行跳过，
+/// 代码行整块取源文本，表格每行单元格以制表符分隔、行间换行。
 pub(crate) fn selected_text(layout: &Layout, range: ((usize, usize), (usize, usize))) -> String {
     let ((from_line, from_byte), (to_line, to_byte)) = range;
-    let mut out = String::new();
+    if from_line == to_line && from_byte == to_byte {
+        return String::new();
+    }
+    let mut parts: Vec<(String, char)> = Vec::new();
+    let mut last_code = None;
     for (index, line) in layout.lines.iter().enumerate() {
         if index < from_line || index > to_line {
+            continue;
+        }
+        let Some(sep) = line.selection_sep else { continue };
+        if let Some(group) = line.atomic_code {
+            // 同一代码块的可见行只取一次全文
+            if last_code != Some(group) {
+                last_code = Some(group);
+                parts.push((layout.code_sources[group].clone(), sep));
+            }
             continue;
         }
         let text = line_text(line);
         let start = if index == from_line { from_byte.min(text.len()) } else { 0 };
         let end = if index == to_line { to_byte.min(text.len()) } else { text.len() };
-        if end <= start {
-            if index != to_line {
-                out.push('\n');
-            }
-            continue;
-        }
         let start = text.floor_char_boundary(start);
         let end = text.floor_char_boundary(end);
-        if !out.is_empty() {
-            out.push('\n');
+        let piece = if end <= start { String::new() } else { text[start..end].to_string() };
+        parts.push((piece, sep));
+    }
+    let mut out = String::new();
+    for (index, (piece, sep)) in parts.iter().enumerate() {
+        out.push_str(piece);
+        if index + 1 < parts.len() {
+            out.push(*sep);
         }
-        out.push_str(&text[start..end]);
     }
     out
 }
@@ -734,6 +754,8 @@ struct Builder<'a> {
     content_right: f32,
     /// 横向滚动内容的可视区（块内坐标，多段取并集）。
     scroll_clip: Rect,
+    /// 各代码块的完整源文本（代码行选区按它整块取字）。
+    code_sources: Vec<String>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -769,6 +791,7 @@ fn layout_expanded(
         height: 0.0,
         content_right: 0.0,
         scroll_clip: Rect::default(),
+        code_sources: Vec::new(),
     };
     let mut previous = 0usize;
     builder.blocks(&document.blocks, width.max(1.0), 0, &mut previous);
@@ -787,6 +810,7 @@ fn layout_expanded(
         } else {
             builder.scroll_clip
         },
+        code_sources: builder.code_sources,
     }
 }
 
@@ -977,6 +1001,8 @@ impl Builder<'_> {
                     link: None,
                 }],
                 scroll: false,
+                selection_sep: Some('\n'),
+                atomic_code: None,
             });
         }
         self.flow(runs, indent + marker_w, (width - indent - marker_w).max(1.0), line);
@@ -1032,6 +1058,8 @@ impl Builder<'_> {
         };
         let head = self.code_head(lang, code, indent, width);
         let code_lines: Vec<&str> = code.trim_end_matches('\n').lines().collect();
+        let group = self.code_sources.len();
+        self.code_sources.push(code_lines.join("\n"));
         let total = code_lines.len().max(1);
         let index = self.code_seq;
         self.code_seq += 1;
@@ -1078,6 +1106,8 @@ impl Builder<'_> {
                     link: None,
                 }],
                 scroll: true,
+                selection_sep: Some('\n'),
+                atomic_code: Some(group),
             });
             y += line;
         }
@@ -1099,6 +1129,8 @@ impl Builder<'_> {
                     link: None,
                 }],
                 scroll: false,
+                selection_sep: None,
+                atomic_code: None,
             });
             self.expands.push(ExpandHit {
                 rect: Rect::new(indent, y, width, footer_line),
@@ -1129,6 +1161,8 @@ impl Builder<'_> {
                 link: None,
             }],
             scroll: false,
+            selection_sep: None,
+            atomic_code: None,
         });
         let button = FontSpec { size: CODE_HEAD_SIZE, weight: None, family: None };
         let text_w = self.metrics.width("复制", button);
@@ -1146,6 +1180,8 @@ impl Builder<'_> {
                 link: None,
             }],
             scroll: false,
+            selection_sep: None,
+            atomic_code: None,
         });
         self.copies.push(CopyHit {
             rect: Rect::new(btn_x, start + CODE_HEAD_PAD_Y - CODE_BTN_PAD_Y, btn_w, btn_h),
@@ -1174,6 +1210,8 @@ impl Builder<'_> {
                     link: None,
                 }],
                 scroll: true,
+                selection_sep: Some('\n'),
+                atomic_code: None,
             });
             y += line;
         }
@@ -1221,22 +1259,26 @@ impl Builder<'_> {
                     radius: None,
                     scroll: true,
                 });
-                if runs.is_empty() {
-                    continue;
-                }
-                let runs = align_runs(
-                    runs,
-                    aligns.get(column).map(String::as_str),
-                    cell_w - CELL_PAD_X * 2.0,
-                    self.metrics,
-                    spec,
-                );
+                let runs = if runs.is_empty() {
+                    Vec::new()
+                } else {
+                    align_runs(
+                        runs,
+                        aligns.get(column).map(String::as_str),
+                        cell_w - CELL_PAD_X * 2.0,
+                        self.metrics,
+                        spec,
+                    )
+                };
                 self.lines.push(Line {
                     x: x + CELL_PAD_X,
                     y: y + CELL_PAD_Y,
                     height: line,
                     runs,
                     scroll: true,
+                    // 行内单元格以制表符分隔，行尾换行：整表复制后仍是行列结构
+                    selection_sep: Some(if column + 1 == cols { '\n' } else { '\t' }),
+                    atomic_code: None,
                 });
             }
             y += row_h;
@@ -1414,7 +1456,15 @@ impl Builder<'_> {
             return;
         }
         let runs = std::mem::take(current);
-        self.lines.push(Line { x, y: self.height, height: line_height, runs, scroll: false });
+        self.lines.push(Line {
+            x,
+            y: self.height,
+            height: line_height,
+            runs,
+            scroll: false,
+            selection_sep: Some('\n'),
+            atomic_code: None,
+        });
         self.height += line_height;
     }
 
@@ -1623,6 +1673,7 @@ const GAP_AROUND_HR: f32 = 6.0;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::model::{BlockPos, TextSelection, UiState};
 
     #[test]
     fn headings_grow_by_level_and_paragraphs_wrap() {
@@ -1816,5 +1867,51 @@ mod tests {
             let _ = laid_out(&cache, &mut metrics, &theme, key, "", &source, &[], width, 0, true, &[]);
             assert!(metrics.take_misses().is_empty(), "改宽到 {width} 后不得再登记量算");
         }
+    }
+
+    /// 按真实复制出口（`UiState::selection_text`）取一块排版里给定行区间的文字。
+    fn selected_text_of(laid: Arc<Layout>, from: (usize, usize), to: (usize, usize)) -> Option<String> {
+        let mut state = UiState::default();
+        state.markdown_order = vec!["md".to_string()];
+        state.markdown_last.insert("md".to_string(), laid);
+        state.selection = Some(TextSelection {
+            anchor: BlockPos { id: "md".into(), line: from.0, byte: from.1 },
+            focus: BlockPos { id: "md".into(), line: to.0, byte: to.1 },
+        });
+        state.selection_text()
+    }
+
+    #[test]
+    fn folded_code_block_selection_copies_full_source_without_chrome() {
+        let theme = Theme::default();
+        let mut metrics = Metrics::default();
+        let body: String = (1..=40).map(|index| format!("line {index}\n")).collect();
+        let source = format!("前言\n\n```rust\n{body}```\n\n后记");
+        let laid = Arc::new(layout_expanded(&mut metrics, &theme, "md", &source, &[], 300.0, 0, true, &[]));
+        let last = laid.line_count() - 1;
+        let end = line_len(&laid, last);
+        let code: String = (1..=40).map(|index| format!("line {index}")).collect::<Vec<_>>().join("\n");
+        let expected = format!("前言\n{code}\n后记");
+        let text = selected_text_of(Arc::clone(&laid), (0, 0), (last, end)).expect("整块选区应取到文字");
+        assert_eq!(text, expected, "折叠态也要取整块全文");
+        for chrome in ["rust", "复制", "展开全部"] {
+            assert!(!text.contains(chrome), "控件文案不得进选区：{chrome}");
+        }
+
+        // 正文首行入选但光标未拖动：单击不整块复制
+        let body_line = laid.lines.iter().position(|line| line.atomic_code.is_some()).expect("应有代码行");
+        assert_eq!(selected_text_of(laid, (body_line, 3), (body_line, 3)), None);
+    }
+
+    #[test]
+    fn table_selection_keeps_cells_and_rows() {
+        let theme = Theme::default();
+        let mut metrics = Metrics::default();
+        let source = "| 甲 | 乙 |\n| --- | --- |\n| 1 | 2 |";
+        let laid = Arc::new(layout(&mut metrics, &theme, source, &[], 300.0, 0, true));
+        let last = laid.line_count() - 1;
+        let end = line_len(&laid, last);
+        let text = selected_text_of(laid, (0, 0), (last, end)).expect("整表选区应取到文字");
+        assert_eq!(text, "甲\t乙\n1\t2", "整表应制表符分格、换行分行");
     }
 }
