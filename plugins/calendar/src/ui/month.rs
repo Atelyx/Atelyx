@@ -8,7 +8,7 @@ use atelyx_plugin_protocol::method::CalendarItem;
 use atelyx_plugin_protocol::paint::{ColorToken, DrawCommand, PaintColor};
 use atelyx_plugin_sdk::frame_ui::{Canvas, Rect, Ui};
 
-use super::{elide, item_color, token};
+use super::{item_color, token};
 use crate::date;
 use crate::model::{Palette, Snapshot};
 
@@ -138,8 +138,15 @@ fn draw(
                 stroke: None,
                 stroke_width: None,
             });
-            let title = elide(canvas, &item.title, micro, (tile.w - 17.0).max(1.0));
-            canvas.text(title, tile.x + 13.0, y + (block_h - line_h) / 2.0, micro, token(ColorToken::Text));
+            canvas.elide_with_hint(
+                &id,
+                &item.title,
+                tile.x + 13.0,
+                y + (block_h - line_h) / 2.0,
+                (tile.w - 17.0).max(1.0),
+                micro,
+                token(ColorToken::Text),
+            );
             y += block_h + 2.0;
         }
         if extra > 0 {

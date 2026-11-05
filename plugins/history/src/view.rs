@@ -29,9 +29,7 @@ pub fn frame(ui: &mut Ui<'_, '_>, model: &Model) {
     }
     let Some(ready) = model.ready else {
         // 首次聚合要扫全库侧文件或走服务端：这段时间给出加载态而不是空白
-        ui.pad(LIST_PAD_X, LIST_PAD_Y, |inner| {
-            inner.text("加载中…", TextRole::Caption);
-        });
+        ui.loading_state();
         return;
     };
     if !ready {
@@ -69,6 +67,7 @@ fn card(ui: &mut Ui<'_, '_>, index: usize, gen: u64, group: &HistoryFileGroup, r
     let count = format!("{} 版", group.count);
     let icon = kind_icon(&group.kind);
     let id = format!("open:{gen}:{index}");
+    let hint_id = id.clone();
     ui.boxed(
         BoxWidth::Fill,
         BoxStyle::new(Some(ColorToken::Surface), None, radius),
@@ -86,11 +85,22 @@ fn card(ui: &mut Ui<'_, '_>, index: usize, gen: u64, group: &HistoryFileGroup, r
                     row.row(ICON_GAP, move |line| {
                         line.icon_named(icon, ICON_PX, ColorToken::TextMuted);
                         line.column(2.0, move |text| {
+                            let name_hint = hint_id.clone();
                             text.row(0.0, move |head| {
-                                head.text(name.clone(), TextRole::Body);
+                                head.elide_with_hint(
+                                    &name_hint,
+                                    name.clone(),
+                                    name.clone(),
+                                    TextStyle::new(TextRole::Body),
+                                );
                                 head.chip(count.clone(), ColorToken::TextSecondary);
                             });
-                            text.text(path.clone(), TextRole::Micro);
+                            text.elide_with_hint(
+                                &hint_id,
+                                path.clone(),
+                                path.clone(),
+                                TextStyle::new(TextRole::Micro),
+                            );
                         });
                     });
                 },

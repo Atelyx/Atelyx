@@ -12,10 +12,15 @@ const LABEL_W: f32 = 64.0;
 /// 属性行间距。
 const ROW_GAP: f32 = 8.0;
 pub fn frame(ui: &mut Ui<'_, '_>, model: &mut InspectorModel) {
+    // 首份属性回执未到（首次挂面 / 切仓库）：只画加载态，不提前给空态
+    if !model.loaded {
+        ui.loading_state();
+        return;
+    }
     if model.canvas_visible {
         match model.canvas.clone() {
             Some(snapshot) => canvas_panel(ui, &snapshot),
-            // 快照未到（画布刚切到前台）先给空态，避免整面空白
+            // 无快照 = 当前没有打开的画布：给说明文字，首份属性回执的等待已由上方 `loaded` 门覆盖
             None => ui.empty_state("info", "画布属性", "打开一篇画布后在此查看其属性。"),
         }
         return;

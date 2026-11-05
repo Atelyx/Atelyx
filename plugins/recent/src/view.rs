@@ -27,7 +27,11 @@ pub fn frame(ui: &mut Ui<'_, '_>, model: &Model) {
             return;
         }
     }
-    let Some(ready) = model.ready else { return };
+    // 首份清单（或切容器后的首份）未到：先画加载态，绝不先露空态
+    let Some(ready) = model.ready else {
+        ui.loading_state();
+        return;
+    };
     if !ready {
         ui.empty_state("clock", "打开仓库", "打开仓库后显示。");
         return;
@@ -64,6 +68,8 @@ fn card(ui: &mut Ui<'_, '_>, index: usize, gen: u64, entry: &RecentEntry, now: i
     let time = crate::time::relative(entry.opened_at, now);
     let icon = kind_icon(entry.kind);
     let id = format!("open:{gen}:{index}");
+    let hint_id = id.clone();
+    let full = entry.file.clone();
     ui.boxed(
         BoxWidth::Fill,
         BoxStyle::new(Some(ColorToken::Surface), None, radius),
@@ -81,9 +87,19 @@ fn card(ui: &mut Ui<'_, '_>, index: usize, gen: u64, entry: &RecentEntry, now: i
                     row.row(ICON_GAP, move |line| {
                         line.icon_named(icon, ICON_PX, ColorToken::TextMuted);
                         line.column(2.0, move |text| {
-                            text.text(name.clone(), TextRole::Body);
+                            text.elide_with_hint(
+                                &hint_id,
+                                name.clone(),
+                                name.clone(),
+                                TextStyle::new(TextRole::Body),
+                            );
                             text.row(0.0, move |meta| {
-                                meta.text(parent.clone(), TextRole::Micro);
+                                meta.elide_with_hint(
+                                    &hint_id,
+                                    parent.clone(),
+                                    full.clone(),
+                                    TextStyle::new(TextRole::Micro),
+                                );
                                 meta.text_styled_fit(time.clone(), TextStyle::new(TextRole::Micro));
                             });
                         });

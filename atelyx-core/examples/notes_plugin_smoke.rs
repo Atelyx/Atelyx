@@ -7,7 +7,8 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use atelyx_core::plugin_runtime::{
-    FrameInput, HostRequest, MeasureTextResult, PluginRuntime, PluginStatus, SurfaceKind,
+    FrameInput, HostRequest, MeasureTextResult, MouseButton, PluginRuntime, PluginStatus,
+    SurfaceKind,
 };
 use atelyx_plugin_protocol::event::{DocPresencePayload, DocRemoteCursor};
 use atelyx_plugin_protocol::frame::{Key, KeyAction, Modifiers, NamedKey, SurfaceFrame};
@@ -29,7 +30,9 @@ async fn main() {
     let runtime = PluginRuntime::with_host_version(root.to_path_buf(), "0.6.5");
     runtime.scan();
 
+    let clipboard = Arc::new(std::sync::Mutex::new(None::<String>));
     let responder = runtime.clone();
+    let responder_clipboard = clipboard.clone();
     std::thread::spawn(move || {
         let responder_runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -96,6 +99,10 @@ async fn main() {
                     HostRequest::HistoryOpen { request_id, .. } => {
                         reply(&responder, request_id, json!({}));
                     }
+                    HostRequest::ClipboardWrite { request_id, text, .. } => {
+                        *responder_clipboard.lock().unwrap() = Some(text);
+                        reply(&responder, request_id, json!({}));
+                    }
                     other => eprintln!("未处理的宿主请求：{other:?}"),
                 }
             }
@@ -127,6 +134,78 @@ async fn main() {
     runtime.notify_doc_open(PLUGIN, SURFACE, "a.md");
     let frame = wait_frame(&runtime, Duration::from_secs(5)).await.expect("打开笔记后应有帧");
     println!("只读帧：{} 条指令，{} 个命中区", frame.commands.len(), frame.hits.len());
+
+    // 只读正文选区右键：无选区不弹菜单；拖选跨块后弹「复制」并写入宿主剪贴板
+    let blocks = frame
+        .hits
+        .iter()
+        .filter(|hit| hit.id == "note:block:1" || hit.id == "note:block:2")
+        .cloned()
+        .collect::<Vec<_>>();
+    let (one, two) = (blocks.first().cloned(), blocks.last().cloned());
+    let (one, two) = (one.expect("首段块命中"), two.expect("列表块命中"));
+    right_click(&runtime, &two);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let no_menu = runtime.surface_frame(PLUGIN, SURFACE).is_some_and(|frame| {
+        !frame.hits.iter().any(|hit| hit.id == "@sdk:copy-menu")
+    });
+    assert!(no_menu, "无选区时右键不得弹复制菜单");
+    println!("无选区右键不弹菜单：通过");
+
+    let start = (one.x + 4.0, one.y + one.h / 2.0);
+    let end = (two.x + two.w - 4.0, two.y + two.h / 2.0);
+    for input in [
+        FrameInput::PointerDown {
+            x: start.0,
+            y: start.1,
+            button: MouseButton::Left,
+            hit: Some(one.id.clone()),
+        },
+        FrameInput::PointerMove { x: end.0, y: end.1, hit: None },
+        FrameInput::PointerUp {
+            x: end.0,
+            y: end.1,
+            button: MouseButton::Left,
+            hit: Some(two.id.clone()),
+        },
+    ] {
+        runtime.notify_frame_input(PLUGIN, SURFACE, &input);
+    }
+    right_click(&runtime, &two);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut menu = None;
+    while Instant::now() < deadline {
+        if let Some(frame) = runtime.surface_frame(PLUGIN, SURFACE) {
+            if frame.hits.iter().any(|hit| hit.id == "@sdk:copy-menu") && has_text(&frame, "复制") {
+                menu = Some(frame);
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let menu = menu.expect("有选区时右键应弹复制菜单");
+    let copy = menu
+        .hits
+        .iter()
+        .find(|hit| hit.id == "@sdk:copy-menu")
+        .cloned()
+        .expect("复制菜单命中区");
+    click_hit(&runtime, &copy);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut copied = None;
+    while Instant::now() < deadline {
+        if let Some(text) = clipboard.lock().unwrap().clone() {
+            copied = Some(text);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let copied = copied.expect("点「复制」应写入宿主剪贴板");
+    assert!(
+        copied.contains("第一段正文"),
+        "跨块选区应复制首段全文，实际 {copied:?}"
+    );
+    println!("选区右键复制：{copied:?}");
 
     // 图片绘制的实际尺寸：`|宽`（超可用宽时等比收缩）、`|宽x高`、未声明（原图自然尺寸）。
     // 图片在正文末尾，先拉高面让所有块进入可视区再断言，随后恢复原高度。
@@ -545,6 +624,17 @@ fn click_hit(runtime: &Arc<PluginRuntime>, hit: &atelyx_plugin_protocol::frame::
     ] {
         runtime.notify_frame_input(PLUGIN, SURFACE, &input);
     }
+}
+
+/// 在命中区内按右键（只发按下：SDK 在这一步判定选区与菜单）。
+fn right_click(runtime: &Arc<PluginRuntime>, hit: &atelyx_plugin_protocol::frame::HitRegion) {
+    let x = hit.x + hit.w / 2.0;
+    let y = hit.y + hit.h / 2.0;
+    runtime.notify_frame_input(
+        PLUGIN,
+        SURFACE,
+        &FrameInput::PointerDown { x, y, button: MouseButton::Right, hit: Some(hit.id.clone()) },
+    );
 }
 
 fn double_click(runtime: &Arc<PluginRuntime>, hit: &atelyx_plugin_protocol::frame::HitRegion) {

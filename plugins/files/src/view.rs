@@ -43,6 +43,10 @@ pub fn frame(ui: &mut Ui<'_, '_>, view: &View, radii: &Radii) {
             failure_state(ui, error, radii);
             return;
         }
+        if view.loading {
+            ui.loading_state();
+            return;
+        }
         if !view.in_repo {
             ui.empty_state(
                 "folder-open",

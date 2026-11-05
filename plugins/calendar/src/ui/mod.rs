@@ -23,6 +23,10 @@ pub fn frame(ui: &mut Ui<'_, '_>, snapshot: &Snapshot) {
         });
         return;
     }
+    if snapshot.loading {
+        ui.loading_state();
+        return;
+    }
     ui.scroll("page", 12.0, |page| {
         nav(page, snapshot);
         if let Some(error) = &snapshot.error {

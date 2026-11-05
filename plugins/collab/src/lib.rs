@@ -145,6 +145,8 @@ impl PluginHandler for CollabPlugin {
         // 重挂只重取控件层主题，保留宿主已上报的尺寸（尺寸变了宿主会再发 resize）
         self.ui.lock().await.refresh_theme();
         self.apply_theme(ctx).await;
+        // 先交一帧：首份快照未到时是加载态，重挂时是已有房间内容
+        self.render(ctx).await;
         self.reload(ctx).await;
         self.render(ctx).await;
     }

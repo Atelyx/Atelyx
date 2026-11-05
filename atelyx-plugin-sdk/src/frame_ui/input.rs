@@ -8,7 +8,7 @@ use atelyx_plugin_protocol::frame::{Key, Modifiers, MouseButton, NamedKey};
 use atelyx_plugin_protocol::method::MAX_MEASURE_ITEMS;
 
 use super::geom::Rect;
-use super::model::{BlockPos, Drag, FontSpec, InputState, Layout, Press, TextSelection, UiState};
+use super::model::{BlockPos, Drag, FontSpec, InputState, Layout, Press, TextSelection, UiState, COPY_MENU_ID};
 use super::text;
 use crate::frame_ui::UiEvent;
 use crate::Context;
@@ -51,6 +51,7 @@ struct PaintState {
     scroll: HashMap<String, f32>,
     scroll_x: HashMap<String, f32>,
     selection: Option<TextSelection>,
+    copy_menu: Option<(f32, f32)>,
 }
 
 impl PaintState {
@@ -85,6 +86,7 @@ impl PaintState {
             scroll: state.scroll.clone(),
             scroll_x: state.scroll_x.clone(),
             selection: state.selection.clone(),
+            copy_menu: state.copy_menu,
         }
     }
 }
@@ -108,10 +110,8 @@ pub(crate) async fn handle(
         FrameInput::Outside { .. } => {}
         FrameInput::PointerDown { x, y, button, hit, .. } => {
             if *button == MouseButton::Right {
-                // 右键不改焦点与按下态：只把落点控件报给插件（行内右键菜单 / 快捷动作）
-                if let Some(id) = hit.as_deref() {
-                    events.push(UiEvent::RightClick { id: id.to_string() });
-                }
+                // 右键不改焦点与按下态：选区复制菜单自己处理，其余落点报给插件
+                right_click(state, *x, *y, hit.as_deref(), &mut events);
             } else {
                 pointer_down(state, ctx, *x, *y, *button, hit.as_deref(), &value_of, &mut events).await;
             }
@@ -120,9 +120,7 @@ pub(crate) async fn handle(
         FrameInput::DoubleClick { x, y, button, hit, .. } => {
             if *button == MouseButton::Right {
                 // 右键双击按一次右键处理：不改焦点与按下态
-                if let Some(id) = hit.as_deref() {
-                    events.push(UiEvent::RightClick { id: id.to_string() });
-                }
+                right_click(state, *x, *y, hit.as_deref(), &mut events);
             } else {
                 pointer_down(state, ctx, *x, *y, *button, hit.as_deref(), &value_of, &mut events).await;
                 if let Some(id) = hit
@@ -203,6 +201,7 @@ pub(crate) async fn handle(
             if let Some(Layout::Copy { text }) = state.layouts.get(id) {
                 let text = text.clone();
                 clip_write(ctx, &text).await;
+                state.copy_menu = None;
                 continue;
             }
             if let Some(Layout::Expand { key }) = state.layouts.get(id) {
@@ -244,6 +243,20 @@ pub(crate) async fn handle(
     InputOutcome { events, repaint }
 }
 
+/// 右键路由：markdown 命中区上有非空选区时开出「复制」菜单并吞掉这次右键；
+/// 其余落点先收起菜单，再把落点控件报给插件。
+fn right_click(state: &mut UiState, x: f32, y: f32, hit: Option<&str>, events: &mut Vec<UiEvent>) {
+    let on_markdown = hit.is_some_and(|id| matches!(state.layouts.get(id), Some(Layout::Markdown { .. })));
+    if on_markdown && state.selection_text().is_some() {
+        state.copy_menu = Some((x, y));
+        return;
+    }
+    state.copy_menu = None;
+    if let Some(id) = hit.filter(|id| *id != COPY_MENU_ID) {
+        events.push(UiEvent::RightClick { id: id.to_string() });
+    }
+}
+
 /// 当前聚焦输入框的 (id, 光标, 选区锚点)。
 fn caret_snapshot(state: &UiState) -> Option<(String, usize, usize)> {
     let id = state.focus.clone()?;
@@ -265,12 +278,17 @@ async fn pointer_down(
     if button != MouseButton::Left {
         return;
     }
+    // 点在任何别处都收起选区复制菜单；点菜单项时保留到这次点击处理完
+    if state.copy_menu.is_some() && hit != Some(COPY_MENU_ID) {
+        state.copy_menu = None;
+    }
     // 新的一次按下换掉上一轮拖拽候选：拖拽只在同一次按下内成立
     state.drag = None;
-    // 点在别处即放弃上一处选择（本块内的按下会在下面重新起选）
-    let keeps_selection = hit
-        .and_then(|id| state.layouts.get(id))
-        .is_some_and(|layout| matches!(layout, Layout::Markdown { .. }));
+    // 点在别处即放弃上一处选择（本块内的按下会在下面重新起选）；
+    // 菜单项复用这段选区文本，按下它时不能把选区清掉，否则重绘后菜单命中区与回执都消失
+    let keeps_selection = hit.is_some_and(|id| {
+        id == COPY_MENU_ID || matches!(state.layouts.get(id), Some(Layout::Markdown { .. }))
+    });
     if !keeps_selection {
         state.selection = None;
     }
@@ -656,6 +674,9 @@ async fn key_press(
     if let Key::Named { name: NamedKey::Tab } = key {
         move_focus(state, modifiers.shift, value_of, events);
         return;
+    }
+    if matches!(key, Key::Named { name: NamedKey::Escape }) {
+        state.copy_menu = None;
     }
     // 拖拽中的 Esc 先取消拖拽（未起拖的候选只清掉，不影响后续按键语义）
     if matches!(key, Key::Named { name: NamedKey::Escape }) {

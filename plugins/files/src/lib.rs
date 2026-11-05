@@ -522,6 +522,8 @@ impl PluginHandler for FilesPlugin {
         *self.attached.lock().unwrap() = true;
         self.ui.lock().await.refresh_theme();
         self.apply_theme(ctx).await;
+        // 先交一帧：首份状态未到时画加载态，重挂时画上次的树
+        self.render(ctx).await;
         self.reload(ctx).await;
         self.render(ctx).await;
     }
@@ -537,7 +539,15 @@ impl PluginHandler for FilesPlugin {
             return;
         }
         match params.name.as_str() {
-            event::name::VAULT_FILES_CHANGED | event::name::VAULT_SWITCH => {
+            event::name::VAULT_FILES_CHANGED => {
+                self.reload(ctx).await;
+                self.render(ctx).await;
+            }
+            event::name::VAULT_SWITCH => {
+                // 切容器：旧容器的树不能当新容器的空态，缓存与展开集先清掉
+                self.children.lock().unwrap().clear();
+                self.model.lock().unwrap().begin_load();
+                self.render(ctx).await;
                 self.reload(ctx).await;
                 self.render(ctx).await;
             }

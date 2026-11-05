@@ -135,6 +135,8 @@ pub struct View {
     pub any_expanded: bool,
     /// 当前容器是否可用（未进入仓库时给空态）。
     pub in_repo: bool,
+    /// 首份状态（或切容器后的首份）尚未取到：只画加载态，不判定空态。
+    pub loading: bool,
     pub vault_drop_target: bool,
     pub vault_drop_rejected: bool,
     /// 就地输入会话与它的插入位置（`Draft` 时为该行之后；重命名时被替换行的下标）。
@@ -255,6 +257,20 @@ impl Model {
 
     pub fn fail(&mut self, error: String) {
         self.error = Some(error);
+    }
+
+    /// 切容器：丢掉旧容器的展开集 / 即时态，回到未就绪（取到首份前只画加载态）。
+    pub fn begin_load(&mut self) {
+        self.ready = false;
+        self.error = None;
+        self.notice = None;
+        self.expanded.clear();
+        self.inline = None;
+        self.active_files.clear();
+        self.clear_drag();
+        self.dragging = false;
+        let sort = self.state.sort.clone();
+        self.state = VaultUiState { sort, ..VaultUiState::default() };
     }
 
     pub fn expanded(&self) -> &[String] {
@@ -381,6 +397,7 @@ impl Model {
             // 容器行（仓库根 = 空路径）不算「有展开的目录」：全部展开/收起只作用于仓库内的条目
             any_expanded: self.expanded.iter().any(|dir| !dir.is_empty()),
             in_repo: self.ready,
+            loading: !self.ready && self.error.is_none(),
             vault_drop_target: root_target,
             vault_drop_rejected: root_target && rejected,
             inline,
@@ -454,6 +471,23 @@ mod tests {
 
     fn kind(extension: &str, icon: &str) -> DocType {
         DocType { extension: extension.into(), label: extension.into(), icon: icon.into() }
+    }
+
+    /// 首份状态未到（初始 / 切容器）只画加载态；取到状态后空树才交给空态。
+    #[test]
+    fn loading_gate_closes_until_the_first_state() {
+        let children = HashMap::new();
+        let mut model = Model::new();
+        assert!(model.view(&children).loading, "初始未取数");
+
+        model.apply(VaultUiState::default());
+        assert!(!model.view(&children).loading, "首份状态到了");
+
+        model.begin_load();
+        let view = model.view(&children);
+        assert!(view.loading, "切容器回到未就绪");
+        assert!(!view.in_repo, "未就绪不当成空仓库");
+        assert!(view.rows.is_empty());
     }
 
     /// 第三方文档类型的条目图标按注册表声明取，大小写与扩展名无关。

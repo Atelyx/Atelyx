@@ -36,8 +36,10 @@ async fn main() {
 
     // 宿主请求应答放在独立线程：改宽基准会忙等，不能占住应答任务所在的运行时
     let counts = Counts::default();
+    let clipboard = Arc::new(std::sync::Mutex::new(None::<String>));
     let responder = runtime.clone();
     let responder_counts = counts.clone();
+    let responder_clipboard = clipboard.clone();
     std::thread::spawn(move || {
         let responder_runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -183,6 +185,10 @@ async fn main() {
                     }
                     HostRequest::VaultExists { request_id, .. } => {
                         reply(&responder, request_id, json!({ "exists": false }));
+                    }
+                    HostRequest::ClipboardWrite { request_id, text, .. } => {
+                        *responder_clipboard.lock().unwrap() = Some(text);
+                        reply(&responder, request_id, json!({}));
                     }
                     other => eprintln!("未处理的宿主请求：{other:?}"),
                 }
@@ -588,6 +594,71 @@ async fn main() {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
+    // 只读消息选区右键：无选区不弹菜单；拖选后弹「复制」并写入宿主剪贴板
+    if let Some(md) = runtime.surface_frame(PANEL, SURFACE).and_then(|frame| {
+        frame.hits.iter().find(|hit| hit.id.starts_with("@md:")).cloned()
+    }) {
+        right_click(&runtime, &md);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let no_menu = runtime.surface_frame(PANEL, SURFACE).is_some_and(|frame| {
+            !frame.hits.iter().any(|hit| hit.id == "@sdk:copy-menu")
+        });
+        assert!(no_menu, "无选区时右键不得弹复制菜单");
+        println!("消息选区右键（无选区）：不弹菜单");
+
+        let start = (md.x + 4.0, md.y + 4.0);
+        let end = (md.x + md.w - 4.0, md.y + (md.h * 0.7).max(4.0));
+        for input in [
+            FrameInput::PointerDown {
+                x: start.0,
+                y: start.1,
+                button: atelyx_core::plugin_runtime::MouseButton::Left,
+                hit: Some(md.id.clone()),
+            },
+            FrameInput::PointerMove { x: end.0, y: end.1, hit: None },
+            FrameInput::PointerUp {
+                x: end.0,
+                y: end.1,
+                button: atelyx_core::plugin_runtime::MouseButton::Left,
+                hit: Some(md.id.clone()),
+            },
+        ] {
+            runtime.notify_frame_input(PANEL, SURFACE, &input);
+        }
+        right_click(&runtime, &md);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut menu = None;
+        while Instant::now() < deadline {
+            if let Some(frame) = runtime.surface_frame(PANEL, SURFACE) {
+                if frame.hits.iter().any(|hit| hit.id == "@sdk:copy-menu") {
+                    menu = Some(frame);
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let menu = menu.expect("有选区时右键应弹复制菜单");
+        let copy = menu
+            .hits
+            .iter()
+            .find(|hit| hit.id == "@sdk:copy-menu")
+            .cloned()
+            .expect("复制菜单命中区");
+        click_hit(&runtime, &copy);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut copied = None;
+        while Instant::now() < deadline {
+            if let Some(text) = clipboard.lock().unwrap().clone() {
+                copied = Some(text);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let copied = copied.expect("点「复制」应写入宿主剪贴板");
+        assert!(!copied.trim().is_empty(), "选区复制内容不应为空");
+        println!("消息选区右键复制：{} 字", copied.chars().count());
+    }
+
     // 时序一：已挂面且已订阅时广播，直接重取会话侧；文件树不随会话真源重载重扫
     let base = wait_quiet(&counts, Duration::from_millis(300)).await;
     runtime.on_chat_store_reloaded();
@@ -846,6 +917,22 @@ fn click_hit(runtime: &Arc<PluginRuntime>, hit: &atelyx_plugin_protocol::frame::
     ] {
         runtime.notify_frame_input(PANEL, SURFACE, &input);
     }
+}
+
+/// 在命中区内按右键（只发按下：SDK 在这一步判定选区与菜单）。
+fn right_click(runtime: &Arc<PluginRuntime>, hit: &atelyx_plugin_protocol::frame::HitRegion) {
+    let x = hit.x + hit.w / 2.0;
+    let y = hit.y + hit.h / 2.0;
+    runtime.notify_frame_input(
+        PANEL,
+        SURFACE,
+        &FrameInput::PointerDown {
+            x,
+            y,
+            button: atelyx_core::plugin_runtime::MouseButton::Right,
+            hit: Some(hit.id.clone()),
+        },
+    );
 }
 
 fn wait_resize(runtime: &Arc<PluginRuntime>, width: f32, height: f32) -> Option<()> {

@@ -43,6 +43,8 @@ pub enum Empty {
 pub struct View {
     /// 清单世代：行命中区 id 带着它，过期帧上的点击据此作废。
     pub gen: u64,
+    /// 首份清单（或切仓库后的首份）尚未取到：只画加载态，不判定空态。
+    pub loading: bool,
     /// 取数失败的原因（保留上次成功的清单；空清单 + 失败给可读空态）。
     pub error: Option<String>,
     pub rows: Vec<Row>,
@@ -60,6 +62,8 @@ pub struct Model {
     gen: u64,
     /// 圆角档取自宿主主题。
     pub radii: Radii,
+    /// 首份清单是否已到：未到时视图画加载态，不判空态。
+    loaded: bool,
     /// 取数失败的原因（清单保持上次成功的值）。
     error: Option<String>,
 }
@@ -71,6 +75,7 @@ impl Model {
             query: String::new(),
             gen: 0,
             radii: Radii::default(),
+            loaded: false,
             error: None,
         }
     }
@@ -92,6 +97,7 @@ impl Model {
             })
             .collect();
         self.gen = self.gen.wrapping_add(1);
+        self.loaded = true;
         self.error = None;
     }
 
@@ -99,6 +105,15 @@ impl Model {
     pub fn fail(&mut self, error: String) {
         self.error = Some(error);
         self.gen = self.gen.wrapping_add(1);
+        self.loaded = true;
+    }
+
+    /// 切仓库：丢掉旧仓库的清单，回到未就绪（取到首份前只画加载态）。
+    pub fn begin_load(&mut self) {
+        self.entries.clear();
+        self.gen = self.gen.wrapping_add(1);
+        self.loaded = false;
+        self.error = None;
     }
 
     pub fn clear_error(&mut self) {
@@ -158,6 +173,7 @@ impl Model {
         };
         View {
             gen: self.gen,
+            loading: !self.loaded,
             error: self.error.clone(),
             count: count_label(total, rows.len(), &self.query),
             rows,
@@ -336,6 +352,26 @@ mod tests {
         let view = model.view();
         assert_eq!(view.rows[0].parent, "docs");
         assert_eq!(view.rows[1].parent, "");
+    }
+
+    /// 首份结果未到（初始 / 切仓库）只画加载态；成功或失败回执到了才允许判空态。
+    #[test]
+    fn loading_gate_closes_until_first_result() {
+        let mut model = Model::new();
+        assert!(model.view().loading, "初始未取数");
+        assert_eq!(model.view().empty, Empty::NoFiles, "空态结论先不给视图用");
+
+        model.apply(FilesResult::default());
+        assert!(!model.view().loading, "首份清单到了");
+
+        model.begin_load();
+        let view = model.view();
+        assert!(view.loading, "切仓库回到未就绪");
+        assert!(view.rows.is_empty(), "旧仓库清单不能留在新仓库里");
+        assert_eq!(view.error, None);
+
+        model.fail("宿主未响应".into());
+        assert!(!model.view().loading, "失败回执也结束等待（给失败态）");
     }
 
     /// 空清单分两种：没有可搜索文件 / 取数失败（失败态由视图给可读原因与重试）。

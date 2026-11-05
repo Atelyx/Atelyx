@@ -367,6 +367,8 @@ impl PluginHandler for InspectorPlugin {
             return;
         }
         self.ui.lock().await.refresh_theme();
+        // 先交一帧：首份回执未到时画加载态，重挂时画上次的属性
+        self.render(ctx).await;
         self.refresh(ctx).await;
         if self.model.lock().unwrap().canvas_visible {
             self.refresh_canvas(ctx).await;
@@ -392,6 +394,11 @@ impl PluginHandler for InspectorPlugin {
                 self.render(ctx).await;
                 return;
             }
+        }
+        if params.name == event::name::VAULT_SWITCH {
+            // 切仓库：旧容器的属性与画布快照不能当新容器的结果
+            self.model.lock().unwrap().begin_loading();
+            self.render(ctx).await;
         }
         self.refresh(ctx).await;
         self.render(ctx).await;

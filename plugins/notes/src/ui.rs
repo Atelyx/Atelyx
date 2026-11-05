@@ -46,6 +46,14 @@ pub fn frame(ui: &mut Ui<'_, '_>, model: &NoteModel) {
     }
     ui.fill_column(0.0, |ui| {
         toolbar(ui, model);
+        if !model.can_write {
+            ui.pad(16.0, 5.0, |ui| {
+                ui.text_styled(
+                    "当前身份为只读，无法编辑",
+                    TextStyle::new(TextRole::Micro).color(ColorToken::TextMuted),
+                );
+            });
+        }
         ui.rule();
         if model.prefs.in_page_title && model.mode != Mode::Source {
             page_title(ui, model);
@@ -172,29 +180,52 @@ fn mode_control(ui: &mut Ui<'_, '_>, model: &NoteModel) {
                         Mode::Edit => "note:mode:edit",
                         Mode::Source => "note:mode:source",
                     };
-                    ui.click_box(
-                        id,
-                        BoxWidth::Fixed(*width),
-                        Edges::symmetric(8.0, 5.0),
-                        3.0,
-                        active,
-                        enabled,
-                        |ui| {
-                            ui.center_column(0.0, |ui| {
-                                ui.row_fit(4.0, |ui| {
-                                    ui.icon_named(icon, 12.0, tint);
-                                    let style = TextStyle::new(TextRole::Micro)
-                                        .color(tint)
-                                        .weight(TextWeight::SemiBold);
-                                    ui.text_styled_fit((*label).to_string(), style);
-                                });
-                            });
-                        },
-                    );
+                    // 只读身份下不可切的档位也要能悬停：命中区由 hover_box 登记，理由才看得到
+                    let tip = if !enabled {
+                        "当前身份为只读，无法编辑"
+                    } else {
+                        match mode {
+                            Mode::Read => "只读：仅查看，双击正文进入编辑",
+                            Mode::Edit => "预览编辑",
+                            Mode::Source => "源码",
+                        }
+                    };
+                    ui.hint(id, tip);
+                    if enabled {
+                        ui.click_box(
+                            id,
+                            BoxWidth::Fixed(*width),
+                            Edges::symmetric(8.0, 5.0),
+                            3.0,
+                            active,
+                            true,
+                            |ui| mode_label(ui, label, icon, tint),
+                        );
+                    } else {
+                        ui.hover_box(
+                            id,
+                            BoxWidth::Fixed(*width),
+                            Edges::symmetric(8.0, 5.0),
+                            |ui| mode_label(ui, label, icon, tint),
+                        );
+                    }
                 }
             });
         },
     );
+}
+
+/// 单个档位的内容：图标 + 文字（档位底与命中区由外层容器画）。
+fn mode_label(ui: &mut Ui<'_, '_>, label: &str, icon: &str, tint: ColorToken) {
+    ui.center_column(0.0, |ui| {
+        ui.row_fit(4.0, |ui| {
+            ui.icon_named(icon, 12.0, tint);
+            let style = TextStyle::new(TextRole::Micro)
+                .color(tint)
+                .weight(TextWeight::SemiBold);
+            ui.text_styled_fit(label.to_string(), style);
+        });
+    });
 }
 
 fn page_title(ui: &mut Ui<'_, '_>, model: &NoteModel) {

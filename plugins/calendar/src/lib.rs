@@ -163,6 +163,8 @@ impl CalendarPlugin {
         if !self.is_attached() {
             return;
         }
+        // 切容器：先交加载帧，旧容器的日程不能当新容器的空清单
+        self.render(ctx).await;
         self.reload_items(ctx).await;
         self.load_activity(ctx).await;
         self.render(ctx).await;
@@ -403,6 +405,8 @@ impl PluginHandler for CalendarPlugin {
         // 重挂只重取控件层主题，保留宿主已上报的尺寸（尺寸变了宿主会再发 resize）
         self.ui.lock().await.refresh_theme();
         self.apply_theme(ctx).await;
+        // 先交一帧：首份日程未到时画加载态，重挂时画上次的清单
+        self.render(ctx).await;
         self.reload_items(ctx).await;
         self.load_activity(ctx).await;
         let selected = self.model.lock().unwrap().selected();

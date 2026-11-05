@@ -32,6 +32,8 @@ pub struct InspectorModel {
     pub pending_write: Option<String>,
     /// 最近一次属性读取失败的原因：面板上可见并可重试，旧数据保持不动。
     pub load_error: Option<String>,
+    /// 首份属性回执（或切仓库后的首份）是否已到：未到时只画加载态。
+    pub loaded: bool,
     /// 最近一次指针位置（类型菜单浮层锚点）。
     pub pointer: (f32, f32),
 }
@@ -53,6 +55,7 @@ impl InspectorModel {
 
     /// 属性读回执落地：成功替换属性区并清掉错误；失败保留上次数据，错误留在面板上可重试。
     pub fn apply_props(&mut self, result: Result<DocPropsResult, String>) {
+        self.loaded = true;
         match result {
             Ok(result) => {
                 self.load_error = None;
@@ -69,6 +72,13 @@ impl InspectorModel {
             }
             Err(error) => self.load_error = Some(error),
         }
+    }
+
+    /// 切仓库：丢掉旧容器的属性与画布快照，回到未就绪（首份回执前只画加载态）。
+    pub fn begin_loading(&mut self) {
+        self.clear_doc();
+        self.load_error = None;
+        self.loaded = false;
     }
 
     /// 画布快照只在画布处于前台时成立（`path` 为空 = 画布不在前台）。
@@ -202,6 +212,19 @@ title: x
         model.apply_props(Ok(DocPropsResult::default()));
         assert!(model.load_error.is_none(), "读成功应清掉错误");
         assert!(!model.open, "没有文档时回空态");
+    }
+
+    #[test]
+    fn loading_gate_covers_the_first_read_and_vault_switch() {
+        let mut model = InspectorModel::default();
+        assert!(!model.loaded, "首份回执未到");
+        model.apply_props(Ok(DocPropsResult::default()));
+        assert!(model.loaded, "首份回执到了才允许空态");
+        model.begin_loading();
+        assert!(!model.loaded, "切仓库回到未就绪");
+        assert!(!model.open, "旧容器的属性不能留在新容器里");
+        model.apply_props(Err("属性读取失败：超时".into()));
+        assert!(model.loaded, "失败回执也结束等待（给失败行）");
     }
 
     #[test]

@@ -19,6 +19,9 @@ pub(crate) const BLINK_MS: u128 = 500;
 /// 悬停提示的停留时间：指针在同一控件上停够这么久才出提示（与宿主同一节拍）。
 pub(crate) const HINT_DELAY: Duration = Duration::from_millis(400);
 
+/// 只读选区右键菜单里「复制」这一项的命中 id：控件层自持，插件看不到。
+pub(crate) const COPY_MENU_ID: &str = "@sdk:copy-menu";
+
 /// 静默 `elapsed` 之后光标是否显形。任何编辑 / 光标移动 / 重新聚焦都会把计时清零，
 /// 所以按键的瞬间光标一定是亮的。
 pub(crate) fn caret_lit(elapsed: Duration) -> bool {
@@ -151,6 +154,8 @@ pub(crate) struct UiState {
     pub hint: Option<HintHover>,
     /// 当前文本选择（两个落点可跨块）。
     pub selection: Option<TextSelection>,
+    /// 只读选区右键菜单的落点（面本地坐标）：`Some` 时下一帧画出「复制」项。
+    pub copy_menu: Option<(f32, f32)>,
     /// 各 Markdown 块最近一次绘制的版面：选择命中与复制按它算。
     pub markdown_last: HashMap<String, Arc<markdown::Layout>>,
     /// 最近一帧 Markdown 块的绘制序：跨块选择的先后按它比较。
@@ -208,6 +213,7 @@ impl Default for UiState {
             hint: None,
             pointer: None,
             selection: None,
+            copy_menu: None,
             markdown_last: HashMap::new(),
             markdown_order: Vec::new(),
             metrics: Metrics::default(),

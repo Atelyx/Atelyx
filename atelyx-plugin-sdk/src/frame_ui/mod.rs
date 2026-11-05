@@ -242,7 +242,8 @@ impl FrameUi {
                 };
                 build::layout_root(&mut ctxb, items, area);
                 build::layout_overlays(&mut ctxb);
-                // 提示压在最后：悬停够久才画，浮在所有内容之上
+                // 只读选区的右键菜单压在插件内容与浮层之上；提示再压它一层
+                ctxb.paint_copy_menu();
                 ctxb.paint_hint();
                 ctxb.finish()
             };
@@ -1142,6 +1143,136 @@ let a = 1;
             })
             .await;
         assert_eq!(bench.clipboard.lock().unwrap().as_str(), "甲行\n乙行");
+    }
+
+    /// 只读选区上右键弹「复制」，点它把选区写进剪贴板（跨块取全文）。
+    #[tokio::test]
+    async fn right_click_selection_opens_copy_menu_and_copies_across_blocks() {
+        let mut bench = Bench::new(320.0, 200.0).await;
+        let build = |ui: &mut build::Ui<'_, '_>| {
+            ui.markdown_named("md-a", "甲行", Vec::new());
+            ui.markdown_named("md-b", "乙行", Vec::new());
+        };
+        let frame = bench.render(build).await.unwrap();
+        let a = frame.hits.iter().find(|hit| hit.id == "md-a").cloned().expect("第一块命中区");
+        let b = frame.hits.iter().find(|hit| hit.id == "md-b").cloned().expect("第二块命中区");
+        bench
+            .event(FrameInput::PointerDown {
+                x: a.x + 2.0,
+                y: a.y + a.h * 0.5,
+                button: MouseButton::Left,
+                hit: Some("md-a".into()),
+            })
+            .await;
+        bench
+            .event(FrameInput::PointerMove { x: b.x + b.w - 2.0, y: b.y + b.h * 0.5, hit: Some("md-b".into()) })
+            .await;
+        bench
+            .event(FrameInput::PointerUp {
+                x: b.x + b.w - 2.0,
+                y: b.y + b.h * 0.5,
+                button: MouseButton::Left,
+                hit: Some("md-b".into()),
+            })
+            .await;
+        let events = bench
+            .event(FrameInput::PointerDown {
+                x: b.x + 2.0,
+                y: b.y + b.h * 0.5,
+                button: MouseButton::Right,
+                hit: Some("md-b".into()),
+            })
+            .await;
+        assert!(events.is_empty(), "右键菜单自己消化，不再报 RightClick");
+        let frame = bench.render(build).await.unwrap();
+        assert!(has_hit(&frame, super::model::COPY_MENU_ID), "有选区时右键应弹出复制项");
+        assert!(texts(&frame).iter().any(|text| text == "复制"));
+        let menu = frame
+            .hits
+            .iter()
+            .find(|hit| hit.id == super::model::COPY_MENU_ID)
+            .cloned()
+            .expect("复制项命中区");
+        // 宿主在按下与抬起之间会重绘一帧：菜单项与这次按下都要活到抬起
+        bench
+            .event(FrameInput::PointerDown {
+                x: menu.x + menu.w * 0.5,
+                y: menu.y + menu.h * 0.5,
+                button: MouseButton::Left,
+                hit: Some(super::model::COPY_MENU_ID.into()),
+            })
+            .await;
+        let frame = bench.render(build).await.unwrap();
+        assert!(has_hit(&frame, super::model::COPY_MENU_ID), "按下复制项后菜单不能消失");
+        bench
+            .event(FrameInput::PointerUp {
+                x: menu.x + menu.w * 0.5,
+                y: menu.y + menu.h * 0.5,
+                button: MouseButton::Left,
+                hit: Some(super::model::COPY_MENU_ID.into()),
+            })
+            .await;
+        assert_eq!(bench.clipboard.lock().unwrap().as_str(), "甲行\n乙行");
+        let frame = bench.render(build).await.unwrap();
+        assert!(!has_hit(&frame, super::model::COPY_MENU_ID), "复制后菜单收起");
+    }
+
+    /// 没有选区时右键照旧报给插件，不弹菜单。
+    #[tokio::test]
+    async fn right_click_without_selection_reports_hit() {
+        let mut bench = Bench::new(320.0, 200.0).await;
+        let build = |ui: &mut build::Ui<'_, '_>| ui.markdown_named("md", "正文", Vec::new());
+        let frame = bench.render(build).await.unwrap();
+        let md = frame.hits.iter().find(|hit| hit.id == "md").cloned().expect("正文命中区");
+        let events = bench
+            .event(FrameInput::PointerDown {
+                x: md.x + 2.0,
+                y: md.y + md.h * 0.5,
+                button: MouseButton::Right,
+                hit: Some("md".into()),
+            })
+            .await;
+        assert_eq!(events, vec![UiEvent::RightClick { id: "md".into() }]);
+        let frame = bench.render(build).await.unwrap();
+        assert!(!has_hit(&frame, super::model::COPY_MENU_ID));
+        assert!(!texts(&frame).iter().any(|text| text == "复制"));
+    }
+
+    /// 空白文字即使被省略也不挂悬停提示；宽度够时不挂。
+    #[tokio::test]
+    async fn elide_with_hint_skips_blank_and_untruncated_text() {
+        let mut bench = Bench::new(60.0, 100.0).await;
+        bench
+            .render(|ui| {
+                ui.elide_with_hint("row", "短", "短", TextStyle::new(TextRole::Label));
+                ui.elide_with_hint("blank", "   ", "空白提示", TextStyle::new(TextRole::Label));
+            })
+            .await
+            .unwrap();
+        assert!(!bench.ui.lock().await.state.hints.contains_key("row"));
+        assert!(!bench.ui.lock().await.state.hints.contains_key("blank"));
+
+        let mut bench = Bench::new(60.0, 100.0).await;
+        let long = "这是一段明显超过面板宽度的文字".to_string();
+        let expected = long.clone();
+        bench
+            .render(move |ui| {
+                ui.elide_with_hint("row", long.clone(), long.clone(), TextStyle::new(TextRole::Label));
+            })
+            .await
+            .unwrap();
+        let hints = bench.ui.lock().await.state.hints.clone();
+        assert_eq!(hints.get("row").map(String::as_str), Some(expected.as_str()));
+    }
+
+    /// 加载态与空态同一套居中排版，但内容只有转圈与一行字。
+    #[tokio::test]
+    async fn loading_state_draws_spinner_and_caption() {
+        let mut bench = Bench::new(200.0, 160.0).await;
+        let frame = bench.render(|ui| ui.loading_state()).await.unwrap();
+        let texts = texts(&frame);
+        assert!(texts.iter().any(|text| text == "加载中…"));
+        assert_eq!(texts.len(), 1, "加载态只有一行文字，不堆标题与说明");
     }
 
     /// 端点块不再出帧（被虚拟滚动裁掉或删除）时选区作废，滚回来不会复原旧选区。

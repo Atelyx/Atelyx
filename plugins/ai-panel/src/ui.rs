@@ -229,6 +229,7 @@ fn session_row(ui: &mut Ui<'_, '_>, model: &Model, session: &crate::model::Sessi
     let menu_open = model.session_menu.as_deref() == Some(session.id.as_str());
     let confirm = model.delete_confirm.as_deref() == Some(session.id.as_str());
     let row_id = format!("session:{}", session.id);
+    let hint_id = row_id.clone();
     let hovered = ui.hovered(&row_id);
     ui.click_row(
         row_id,
@@ -240,8 +241,11 @@ fn session_row(ui: &mut Ui<'_, '_>, model: &Model, session: &crate::model::Sessi
             row.row(6.0, |line| {
                 line.bar(2.0, if active { ColorToken::Accent } else { ColorToken::Transparent });
                 line.column(1.0, |text| {
-                    text.text_styled(
-                        session.title().to_string(),
+                    let title = session.title().to_string();
+                    text.elide_with_hint(
+                        &hint_id,
+                        title.clone(),
+                        title,
                         TextStyle::new(TextRole::Caption)
                             .color(if active { ColorToken::Accent } else { ColorToken::Text }),
                     );

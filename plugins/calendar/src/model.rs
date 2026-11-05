@@ -67,6 +67,8 @@ pub struct Snapshot {
     pub writable: bool,
     pub blocked: Option<&'static str>,
     pub ready: bool,
+    /// 容器已打开但首份日程尚未读到：只画加载态，不当作空日程。
+    pub loading: bool,
     pub year: i64,
     pub month: u32,
     pub cells: Vec<Option<u32>>,
@@ -390,6 +392,7 @@ impl Model {
             writable: self.writable(),
             blocked: self.blocked_reason(),
             ready: self.ready,
+            loading: self.backend.is_some() && !self.ready,
             year,
             month,
             cells: date::month_cells(year, month),
@@ -524,6 +527,20 @@ mod tests {
         assert!(snapshot.draft.is_empty());
         assert_eq!(snapshot.delete_confirm, None);
         assert!(!snapshot.ready);
+    }
+
+    #[test]
+    fn loading_covers_the_gap_between_opening_a_container_and_the_first_read() {
+        let mut model = Model::new();
+        assert!(!model.snapshot().loading, "未打开仓库不画加载态");
+        model.set_backend(Backend::Local);
+        assert!(model.snapshot().loading, "已打开但首份日程未到");
+        model.replace(Vec::new());
+        assert!(!model.snapshot().loading, "首份清单到了才允许空日程");
+        model.set_backend(Backend::Local);
+        assert!(model.snapshot().loading, "切容器回到未就绪");
+        model.fail("日程数据损坏".into());
+        assert!(!model.snapshot().loading, "失败回执结束等待");
     }
 
     #[test]

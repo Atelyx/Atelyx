@@ -123,6 +123,8 @@ impl PluginHandler for SearchPlugin {
         // 重挂只重取控件层主题，保留宿主已上报的尺寸（尺寸变了宿主会再发 resize）
         self.ui.lock().await.refresh_theme();
         self.apply_theme(ctx).await;
+        // 先交一帧：首份清单未到时画加载态，重挂时画上次的清单
+        self.render(ctx).await;
         self.reload(ctx).await;
         self.render(ctx).await;
     }
@@ -137,6 +139,11 @@ impl PluginHandler for SearchPlugin {
         let watched = [event::name::VAULT_FILES_CHANGED, event::name::VAULT_SWITCH];
         if !watched.contains(&params.name.as_str()) || !self.is_attached() {
             return;
+        }
+        // 切仓库：旧仓库的清单不能当新仓库的空态，先回到加载态
+        if params.name == event::name::VAULT_SWITCH {
+            self.model.lock().unwrap().begin_load();
+            self.render(ctx).await;
         }
         self.reload(ctx).await;
         self.render(ctx).await;

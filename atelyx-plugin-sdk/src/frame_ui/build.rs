@@ -10,13 +10,16 @@ use atelyx_plugin_protocol::frame::{FrameRect, HitCursor, HitRegion, SurfaceFram
 
 use super::geom::Rect;
 use super::metrics::Metrics;
-use super::model::{FontSpec, InputState, Layout, UiState};
+use super::model::{FontSpec, InputState, Layout, UiState, COPY_MENU_ID};
 use super::text;
 use super::theme;
 
 /// 提示标签的内边距（左右 / 上下）。
 const HINT_PAD_X: f32 = 8.0;
 const HINT_PAD_Y: f32 = 4.0;
+/// 只读选区右键菜单的单行内边距。
+const COPY_MENU_PAD_X: f32 = 10.0;
+const COPY_MENU_PAD_Y: f32 = 5.0;
 use super::theme::Theme;
 
 /// 一帧的绘制上下文：指令 / 命中区 / 布局记录与量算都在这里，绘制结束后整批交回。
@@ -158,6 +161,13 @@ impl<'a> BuildCtx<'a> {
         }
     }
 
+    /// 同一命中区已有提示时不再覆盖：一格内多段省略文字只提示最先画的那段。
+    fn declare_hint_once(&mut self, id: &str, text: &str) {
+        if !text.is_empty() && !self.hints.contains_key(id) {
+            self.hints.insert(id.to_string(), text.to_string());
+        }
+    }
+
     /// 提示标签：悬停够久后压在最后画（整块留在面内，贴边时向里收）。
     pub(crate) fn paint_hint(&mut self) {
         let Some(label) = self.state.hint_label() else {
@@ -198,6 +208,59 @@ impl<'a> BuildCtx<'a> {
             align: None,
             layout: None,
         });
+    }
+
+    /// 只读选区的右键菜单：整块压在插件内容之上，只登记「复制」一项；
+    /// 点击由输入路由写剪贴板并吞掉，插件看不到这项命中。
+    pub(crate) fn paint_copy_menu(&mut self) {
+        let Some((pointer_x, pointer_y)) = self.state.copy_menu else {
+            return;
+        };
+        let Some(text) = self.state.selection_text() else {
+            return;
+        };
+        let spec = FontSpec { size: self.theme.sizes.micro, weight: None, family: None };
+        let line = self.metrics.measure("", spec, None).height.max(spec.size * 1.2);
+        let width = self.metrics.width("复制", spec) + COPY_MENU_PAD_X * 2.0;
+        let height = line + COPY_MENU_PAD_Y * 2.0;
+        let size = self.state.size;
+        let x = (pointer_x + 4.0).clamp(4.0, (size.0 - width - 4.0).max(4.0));
+        let y = (pointer_y + 4.0).clamp(4.0, (size.1 - height - 4.0).max(4.0));
+        let hovered = self.state.hovered.as_deref() == Some(COPY_MENU_ID);
+        self.draw(DrawCommand::Rect {
+            x,
+            y,
+            w: width,
+            h: height,
+            fill: Some(theme::token(if hovered { ColorToken::Hover } else { ColorToken::Surface })),
+            stroke: Some(theme::token(ColorToken::Border)),
+            stroke_width: Some(1.0),
+            corner_radius: Some(self.theme.radii.sm),
+            shadow: None,
+        });
+        self.draw(DrawCommand::Text {
+            x: x + COPY_MENU_PAD_X,
+            y: y + COPY_MENU_PAD_Y,
+            content: "复制".to_string(),
+            size: spec.size,
+            color: theme::token(ColorToken::Text),
+            weight: None,
+            family: None,
+            family_name: None,
+            italic: false,
+            max_width: None,
+            align: None,
+            layout: None,
+        });
+        self.hits.push(HitRegion {
+            id: COPY_MENU_ID.to_string(),
+            x,
+            y,
+            w: width,
+            h: height,
+            cursor: Some(HitCursor::Pointer),
+        });
+        self.layouts.insert(COPY_MENU_ID.to_string(), Layout::Copy { text });
     }
 
     /// 汇总成帧：键盘声明按「本帧有无可聚焦控件」定，输入法光标取聚焦输入框的光标矩形。
@@ -307,6 +370,38 @@ impl<'c, 'a> Canvas<'c, 'a> {
             align: None,
             layout: None,
         });
+    }
+
+    /// 单行文字，按 `width` 省略；被省略时把全文记为该命中区的悬停提示（空白或未省略不记）。
+    /// `hint_id` 须是本帧已登记的点击命中区 id；同一命中区只保留最先省略的那段。
+    pub fn elide_with_hint(
+        &mut self,
+        hint_id: &str,
+        content: &str,
+        x: f32,
+        y: f32,
+        width: f32,
+        size: f32,
+        color: PaintColor,
+    ) -> bool {
+        let spec = FontSpec { size, weight: None, family: None };
+        let shown = text::elide(&mut self.ctx.metrics, content, spec, width);
+        let elided = shown != content;
+        if elided {
+            self.ctx.declare_hint_once(hint_id, content);
+        }
+        let line_height = text::line_height(&mut self.ctx.metrics, spec);
+        text::paint_line(
+            self.ctx,
+            &shown,
+            spec,
+            color,
+            x,
+            y,
+            line_height,
+            self.visible(),
+        );
+        elided
     }
 
     /// 内置图标：`rect` 是图标的完整方框（形状按方框宽 / 24 缩放），传裁剪后的可见矩形会缩小图形。

@@ -49,10 +49,12 @@ const SETTINGS: &str = "space-settings";
 const OPEN_MENU: &str = "space-open-menu";
 
 pub fn frame(ui: &mut Ui<'_, '_>, model: &Model) {
-    // 首份回执未到：不画空态（避免开面板瞬间闪出「未进入协作空间」）
+    // 首份回执未到：先画加载态，绝不先露空态
     if model.room.is_none() {
         if let Some(error) = model.room_error.as_ref() {
             failure_state(ui, error, &model.palette);
+        } else {
+            ui.loading_state();
         }
         return;
     }
@@ -283,6 +285,7 @@ fn device_row(
                 } else {
                     for (index, file) in files.iter().enumerate() {
                         let id = device_file_id(gen, device_index, index);
+                        let hint_id = id.clone();
                         let (path, icon) = (file.path.clone(), file.icon.clone());
                         lines.click_box(
                             id,
@@ -294,8 +297,11 @@ fn device_row(
                             move |row| {
                                 row.row(FILE_GAP, move |line| {
                                     line.icon_named(&icon, FILE_ICON, ColorToken::TextSecondary);
-                                    line.text_styled(
-                                        file_name(&path),
+                                    let name = file_name(&path);
+                                    line.elide_with_hint(
+                                        &hint_id,
+                                        name,
+                                        path.clone(),
                                         TextStyle::new(TextRole::Micro)
                                             .color(ColorToken::TextSecondary),
                                     );

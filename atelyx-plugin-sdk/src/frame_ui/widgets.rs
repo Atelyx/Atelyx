@@ -30,6 +30,9 @@ const CARD_PAD: f32 = 9.0;
 const CARD_GAP: f32 = 5.0;
 /// 提示块的内边距。
 const NOTICE_PAD: f32 = 8.0;
+/// 加载态的转圈直径与图文间距（比空态的图标矮一档）。
+const LOADING_SPINNER: f32 = 18.0;
+const LOADING_GAP: f32 = 10.0;
 
 /// 多行输入框的垂直内边距。
 const AREA_PAD_Y: f32 = 6.0;
@@ -249,6 +252,50 @@ impl<'c, 'a> Ui<'c, 'a> {
         let content = content.into();
         let (spec, color) = style.resolve(self.ctx().theme);
         self.push(text_item(content, spec, color, style.wrap));
+    }
+
+    /// 单行文字（占满父宽，超宽省略）；被省略时把 `hint` 记为该命中区的悬停全文。
+    /// `hint_id` 须是本帧已登记的点击命中区 id，空白或未省略都不挂提示。
+    pub fn elide_with_hint(
+        &mut self,
+        hint_id: &str,
+        content: impl Into<String>,
+        hint: impl Into<String>,
+        style: TextStyle,
+    ) {
+        let content = content.into();
+        let hint = hint.into();
+        let (spec, color) = style.resolve(self.ctx().theme);
+        let id = hint_id.to_string();
+        let hint_blank = hint.trim().is_empty();
+        let for_height = content.clone();
+        let for_draw = content;
+        self.push(Item {
+            width: Width::Fill,
+            fill_height: false,
+            height: Box::new(move |metrics, _| metrics.measure(&for_height, spec, None).height),
+            draw: Box::new(move |ctx, rect, clip| {
+                let visible = rect.intersect(clip);
+                if visible.is_empty() {
+                    return;
+                }
+                let shown = text::elide(&mut ctx.metrics, &for_draw, spec, rect.w);
+                if !hint_blank && shown != for_draw {
+                    ctx.declare_hint(&id, &hint);
+                }
+                let line_height = text::line_height(&mut ctx.metrics, spec);
+                text::paint_line(
+                    ctx,
+                    &shown,
+                    spec,
+                    theme::token(color),
+                    rect.x,
+                    rect.y,
+                    line_height,
+                    visible,
+                );
+            }),
+        });
     }
 
     /// 按内容定宽的单行文字（行内标题 / 摘要这类需要紧跟在前一项后面的文字）。
@@ -798,6 +845,20 @@ impl<'c, 'a> Ui<'c, 'a> {
             self.spacer(crate::frame_builders::EMPTY_GAP);
             self.center_column(0.0, move |ui| ui.button(id, label));
         }
+        self.fill_spacer();
+    }
+
+    /// 取数中的居中占位：小转圈 + 「加载中…」，与空态同一套居中排版但更轻。
+    /// 数据未就绪时先画它，首份结果到了才允许空态。
+    pub fn loading_state(&mut self) {
+        self.fill_spacer();
+        self.center_column(LOADING_GAP, |ui| {
+            ui.spinner(LOADING_SPINNER, ColorToken::TextMuted);
+            ui.text_styled_fit(
+                "加载中…",
+                TextStyle::new(TextRole::Caption).color(ColorToken::TextMuted),
+            );
+        });
         self.fill_spacer();
     }
 

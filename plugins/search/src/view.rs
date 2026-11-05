@@ -40,6 +40,10 @@ pub fn frame(ui: &mut Ui<'_, '_>, view: &View, query: &str, radii: &Radii) {
             failure_state(ui, error, radii);
             return;
         }
+        if view.loading {
+            ui.loading_state();
+            return;
+        }
         match view.empty {
             Empty::NoFiles => {
                 ui.empty_state("folder-open", "打开仓库", "在文件面板打开仓库后，在这里按名称检索。");
