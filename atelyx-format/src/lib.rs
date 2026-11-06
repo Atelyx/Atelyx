@@ -3,4 +3,5 @@
 pub mod canvas;
 pub mod frontmatter;
 pub mod markdown;
+pub mod note;
 pub mod table;

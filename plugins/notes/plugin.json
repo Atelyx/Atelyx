@@ -7,7 +7,7 @@
     "windows": "atelyx_plugin_notes.dll",
     "linux": "libatelyx_plugin_notes.so"
   },
-  "permissions": ["vault", "clipboard"],
+  "permissions": ["vault", "clipboard", "collab"],
   "singleton": true,
   "keepMountedOnVaultSwitch": false,
   "docTypeRegistrations": [

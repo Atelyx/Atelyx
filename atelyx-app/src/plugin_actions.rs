@@ -186,6 +186,11 @@ pub const TABLES_VIEW: &str = "plugin:atelyx.tables:table";
 pub const CANVAS_PLUGIN: &str = "atelyx.canvas";
 pub const TABLES_PLUGIN: &str = "atelyx.tables";
 
+/// 预置文档类型 id（插件 manifest 里的声明 id；宿主历史侧车与落盘闸门按类型定位热文档）。
+pub const NOTE_TYPE: &str = "note";
+pub const TABLE_TYPE: &str = "table";
+pub const CANVAS_TYPE: &str = "canvas";
+
 /// 表格视图面挂载差分：面板里当前选中的插件表格视图即挂在表格面板上的面
 /// （换视图 / 关表格 / 切文件即旧面 detached）。返回是否变化——变化才需重投影。
 pub fn sync_table_surfaces(app: &mut App) -> bool {
@@ -1186,7 +1191,13 @@ pub fn resync_surfaces_on_running(app: &mut App, plugin_id: &str) {
     // 打开中的领域文档实例：重启后实例面已清空，按当前文档重新告知
     if let Some(doc) = &app.doc_open {
         if doc.plugin_id == plugin_id {
-            app.plugins.notify_doc_open(plugin_id, &doc.surface_id, &doc.path);
+            app.plugins.notify_doc_open(
+                plugin_id,
+                &doc.surface_id,
+                &doc.path,
+                doc.doc_id.as_str(),
+                doc.open_seq,
+            );
         }
     }
 }
@@ -1268,6 +1279,11 @@ pub struct DocOpenInstance {
     pub path: String,
     /// 实例面标识（= contribution_id；插件据此提交文档面）。
     pub surface_id: String,
+    /// 文档会话身份；插件按 `(docId, openSeq)` 寻址并丢弃迟到回执。
+    pub doc_id: atelyx_core::doc_session::DocId,
+    pub open_seq: u64,
+    /// 本次打开是否新建会话；读盘失败时只撤销新建的那一份。
+    pub created: bool,
     /// 本次打开的意图：读盘完成时据此判定是否记最近打开。
     pub(crate) mode: OpenMode,
 }
@@ -1279,7 +1295,15 @@ pub fn doc_view_kind(plugin_id: &str, contribution_id: &str) -> String {
 
 /// 插件文档面开始一次打开：登记实例（实例面标识换新，旧实例先通知关闭）并通知 owner 插件
 /// （`host:doc.open`，正文由插件发起读盘）。视图显示与投影重绑由宿主统一打开链负责。
-pub fn begin_doc_open(app: &mut App, rel: &str, mode: OpenMode, route: &DocTypeRoute) {
+pub fn begin_doc_open(
+    app: &mut App,
+    rel: &str,
+    mode: OpenMode,
+    route: &DocTypeRoute,
+    identity: Option<(atelyx_core::doc_session::DocId, u64, bool)>,
+) {
+    // 会话身份由统一打开链在通知插件前确定；缺失即调用顺序有误，不再自行登记。
+    let Some((doc_id, open_seq, created)) = identity else { return };
     let conflicts = atelyx_core::doc_type::extension_of(rel)
         .map(|extension| app.registry.doc_type_conflicts(extension))
         .unwrap_or(0);
@@ -1293,16 +1317,26 @@ pub fn begin_doc_open(app: &mut App, rel: &str, mode: OpenMode, route: &DocTypeR
     app.doc_open_guard.invalidate();
     // 换文件即换实例：旧实例先通知关闭（同插件同贡献时插件可按路径自辨，无需重建面）
     if let Some(old) = app.doc_open.take() {
-        app.plugins.notify_doc_close(&old.plugin_id, &old.surface_id, &old.path);
+        app.plugins.notify_doc_close(
+            &old.plugin_id,
+            &old.surface_id,
+            &old.path,
+            old.doc_id.as_str(),
+            old.open_seq,
+        );
     }
     // 实例面标识 = 承载视图的贡献 id：渲染与清理共用同一键空间（单实例语义）
     let surface_id = route.views.first().map(|view| view.view_id.clone()).unwrap_or_default();
-    app.plugins.notify_doc_open(&route.owner_plugin, &surface_id, rel);
+    app.plugins
+        .notify_doc_open(&route.owner_plugin, &surface_id, rel, doc_id.as_str(), open_seq);
     app.doc_open = Some(DocOpenInstance {
         plugin_id: route.owner_plugin.clone(),
         contribution_id: surface_id.clone(),
         path: rel.to_string(),
         surface_id,
+        doc_id,
+        open_seq,
+        created,
         mode,
     });
 }
@@ -1320,10 +1354,15 @@ pub fn close_doc(app: &mut App) -> Task<Message> {
         view: view_kind(&doc.plugin_id, &doc.contribution_id),
         doc: None,
     });
-    app.plugins.notify_doc_close(&doc.plugin_id, &doc.surface_id, &doc.path);
-    // 关档即摘会话：正文、合并基线、选区与历史都只属于这份文档，插件面已不再持有它时
-    // 继续保留会让面外写入沿用旧正文。删文件路径已由 gate 先 flush。
-    app.clear_doc_state();
+    app.plugins.notify_doc_close(
+        &doc.plugin_id,
+        &doc.surface_id,
+        &doc.path,
+        doc.doc_id.as_str(),
+        doc.open_seq,
+    );
+    // 关档即摘会话收尾：历史投影与自动保存期限只属于这份文档（删文件路径已由 gate 先 flush）。
+    app.close_doc_session();
     app.notify_open_files();
     app.schedule_persist();
     refresh_projection(app)

@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+use atelyx_core::doc_session::content_rev;
 use atelyx_core::plugin_runtime::{
     FrameInput, HostRequest, MeasureTextResult, MouseButton, PluginRuntime, PluginStatus,
     SurfaceKind, VaultFileEntry, FilesResult,
@@ -64,7 +65,8 @@ async fn main() {
     *state.present.lock().unwrap() = true;
     runtime.on_doc_changed(DocChangedPayload {
         path: "notes/demo.md".into(),
-        text: None,
+        doc_id: None,
+        open_seq: None,
         dirty: false,
         save_error: None,
     });
@@ -196,6 +198,7 @@ fn serve(runtime: Arc<PluginRuntime>, state: Arc<HostState>, vault: PathBuf) {
                         request_id,
                         json!({
                             "path": "notes/demo.md",
+                            "fingerprint": content_rev(block.as_bytes()),
                             "frontmatter": block,
                             "present": present,
                             "parsed": present,
@@ -204,7 +207,11 @@ fn serve(runtime: Arc<PluginRuntime>, state: Arc<HostState>, vault: PathBuf) {
                     );
                 }
                 HostRequest::DocPropsWrite { request_id, params, .. } => {
-                    state.written.lock().unwrap().push(params.frontmatter);
+                    state
+                        .written
+                        .lock()
+                        .unwrap()
+                        .push(params.value.to_string());
                     reply(&runtime, request_id, json!({}));
                 }
                 HostRequest::EditorOpenFiles { request_id, .. } => {

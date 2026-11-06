@@ -1,5 +1,5 @@
 //! 属性面板插件：当前文档的 frontmatter 属性编辑与画布属性只读展示。
-//! 正文真源、保存链与属性块拼接都在宿主，插件只持草稿并在提交时回传整块。
+//! 属性块由内容所有者插件拼接，本插件只持草稿并经 `doc.props.*` 交回整块。
 
 mod model;
 mod ui;
@@ -11,7 +11,7 @@ use atelyx_plugin_protocol::event::{
 };
 use atelyx_plugin_protocol::frame::{FrameInput, FrameInputParams, Key};
 use atelyx_plugin_protocol::method::{
-    self, CanvasSnapshotResult, ContributionSlot, DocPropsResult, SurfaceAttachedParams,
+    self, CanvasSnapshotResult, ContentPropsResult, ContributionSlot, SurfaceAttachedParams,
 };
 use atelyx_plugin_props as props;
 use atelyx_plugin_sdk::frame_ui::{FrameUi, UiEvent};
@@ -69,7 +69,7 @@ impl InspectorPlugin {
         let doc = ctx.call_raw(method::doc::PROPS_READ, serde_json::json!({})).await;
         let tags = ctx.vault_tags().await.unwrap_or_default();
         let parsed = match doc {
-            Ok(value) => serde_json::from_value::<DocPropsResult>(value)
+            Ok(value) => serde_json::from_value::<ContentPropsResult>(value)
                 .map_err(|error| format!("属性回执不可解析：{error}")),
             Err(error) => Err(format!("属性读取失败：{error}")),
         };
@@ -106,10 +106,10 @@ impl InspectorPlugin {
             )
         };
         let Some(block) = block else { return false };
+        // 宿主只按 docId 寻址并把 value 原样转发给内容所有者，载荷形态由所有者定
         let params = serde_json::json!({
-            "frontmatter": block,
-            "path": path,
-            "fingerprint": fingerprint,
+            "docId": path,
+            "value": { "frontmatter": block, "fingerprint": fingerprint },
         });
         match ctx.call_raw(method::doc::PROPS_WRITE, params).await {
             Ok(_) => {

@@ -1,13 +1,11 @@
-//! 笔记协作帧编解码（`note-sync` 通道载荷）与 lib0 基元。
-//! 字节布局与 lib0 / y-protocols 完全一致，由 golden vector 测试冻结。
-//! 解码对网络载荷不可信：字段不完整 / 未知类型 / 尾随字节一律返回 `None` 不抛错。
+//! 正文协作帧的编解码（可靠通道载荷）与 lib0 基元。
+//! 字节布局与 lib0 / y-protocols 一致，由 golden vector 测试冻结；解码对网络载荷不可信：
+//! 字段不完整 / 未知类型 / 尾随字节一律返回 `None` 不抛错。
 
 use std::cmp::Ordering;
 
 pub const NOTE_FRAME_SYNC: u64 = 0x03;
 pub const NOTE_FRAME_BASELINE: u64 = 0x42;
-pub const NOTE_FRAME_RESYNC: u64 = 0x43;
-pub const NOTE_FRAME_RELOCATE: u64 = 0x44;
 
 /// y-protocols 同步消息头（`SYNC` 帧内嵌载荷首字节）。
 pub const SYNC_MSG_STEP1: u64 = 0;
@@ -42,8 +40,6 @@ impl DocTag {
 pub enum NoteFrame {
     Sync { tag: DocTag, msg: Vec<u8> },
     Baseline { tag: DocTag, baseline_text: String, current_text: String },
-    Resync { reason: u64 },
-    Relocate { old_path: String, new_path: String },
 }
 
 // ---------- lib0 基元 ----------
@@ -147,21 +143,6 @@ pub fn encode_note_baseline(tag: &DocTag, baseline_text: &str, current_text: &st
     buf
 }
 
-pub fn encode_note_resync(reason: u64) -> Vec<u8> {
-    let mut buf = Vec::new();
-    write_var_uint(&mut buf, NOTE_FRAME_RESYNC);
-    write_var_uint(&mut buf, reason);
-    buf
-}
-
-pub fn encode_note_relocate(old_path: &str, new_path: &str) -> Vec<u8> {
-    let mut buf = Vec::new();
-    write_var_uint(&mut buf, NOTE_FRAME_RELOCATE);
-    write_var_string(&mut buf, old_path);
-    write_var_string(&mut buf, new_path);
-    buf
-}
-
 pub fn decode_note_payload(payload: &[u8]) -> Option<NoteFrame> {
     let mut r = Reader::new(payload);
     if !r.has_content() {
@@ -177,11 +158,6 @@ pub fn decode_note_payload(payload: &[u8]) -> Option<NoteFrame> {
             tag: read_tag(&mut r)?,
             baseline_text: read_var_string(&mut r)?.to_owned(),
             current_text: read_var_string(&mut r)?.to_owned(),
-        },
-        NOTE_FRAME_RESYNC => NoteFrame::Resync { reason: read_var_uint(&mut r)? },
-        NOTE_FRAME_RELOCATE => NoteFrame::Relocate {
-            old_path: read_var_string(&mut r)?.to_owned(),
-            new_path: read_var_string(&mut r)?.to_owned(),
         },
         _ => return None,
     };
@@ -303,11 +279,6 @@ mod tests {
             )),
             "42000010302d7a746e7466702d313777647271780000"
         );
-        assert_eq!(hex(encode_note_resync(1)), "4301");
-        assert_eq!(
-            hex(encode_note_relocate("笔记/旧 名.md", "子/新名.md")),
-            "4411e7ac94e8aeb02fe697a720e5908d2e6d640de5ad902fe696b0e5908d2e6d64"
-        );
     }
 
     #[test]
@@ -326,20 +297,12 @@ mod tests {
                 current_text: "追加".to_owned()
             })
         );
-        assert_eq!(decode_note_payload(&encode_note_resync(1)), Some(NoteFrame::Resync { reason: 1 }));
-        assert_eq!(
-            decode_note_payload(&encode_note_relocate("笔记/旧 名.md", "子/新名.md")),
-            Some(NoteFrame::Relocate {
-                old_path: "笔记/旧 名.md".to_owned(),
-                new_path: "子/新名.md".to_owned()
-            })
-        );
         // 空载荷 / 未知类型 / 尾随字节 / 截断
         assert_eq!(decode_note_payload(&[]), None);
         let mut unknown = Vec::new();
         write_var_uint(&mut unknown, 0x7f);
         assert_eq!(decode_note_payload(&unknown), None);
-        let mut trailing = encode_note_resync(0);
+        let mut trailing = encode_note_sync(&tag, &[]);
         trailing.push(9);
         assert_eq!(decode_note_payload(&trailing), None);
         let full = encode_note_baseline(&tag, "完整正文", "完整正文");

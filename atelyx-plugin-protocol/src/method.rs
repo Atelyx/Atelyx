@@ -234,21 +234,19 @@ pub mod chat {
 pub mod doc {
     /// 打开一个文档会话：宿主读盘、建立会话（本地与协作空间同构），回执即当前正文与可写性。
     pub const OPEN: &str = "doc.open";
-    /// 提交一次本地编辑（完整正文 + 光标 / 选区，字节偏移）。内容有变化时宿主置脏并接入
-    /// 协作增量；无变化时只更新在场选区。
-    pub const EDIT: &str = "doc.edit";
-    /// 请求一次保存（手动 / 自动）。回执只表示已受理，落盘结果经 `doc:changed` 到达。
+    /// 内容所有者上报会话状态（未落盘修改与保存失败原因）：宿主只记账，不推断。
+    pub const STATE: &str = "doc.state";
+    /// 请求一次保存（手动 / 自动）。回执即落盘结果（成功 / 冲突 / 失败三态），宿主据此
+    /// 立即更新会话的脏标记与错误，随后内容所有者可用 `doc.state` 修正（如合流后仍脏）。
     pub const SAVE: &str = "doc.save";
     /// 关闭当前文档会话（换文件 / 关标签 / 切仓库）。
     pub const CLOSE: &str = "doc.close";
-    /// 上报本端光标 / 选区（全文字节偏移；`None` = 无选区）。只对协作空间生效。
-    pub const AWARENESS: &str = "doc.awareness";
     /// 把当前文档改名为新的主名（同目录、保留扩展名；引用与历史随宿主既有改名链）。
     /// 有未落盘修改时拒绝，插件须先 `doc.save`。
     pub const RENAME: &str = "doc.rename";
-    /// 读当前文档的 frontmatter 块原文与可写性（属性面板）。
+    /// 读一份文档的属性：宿主按会话找到内容所有者后原样转发，载荷形态由所有者定。
     pub const PROPS_READ: &str = "doc.props.read";
-    /// 用新 frontmatter 块替换当前文档的属性区：正文原样保留，走文档同一条保存链。
+    /// 写一份文档的属性：`value` 原样转发给内容所有者，正文写入走它自己的保存链。
     pub const PROPS_WRITE: &str = "doc.props.write";
     /// 用户打开了插件注册的领域文档类型文件（通知）。`surfaceId` 为宿主分配的实例面标识，
     /// 插件据此为该面提交整面帧。
@@ -311,13 +309,8 @@ pub mod recent {
     pub const LIST: &str = "recent.list";
 }
 
-/// 编辑器：当前打开笔记的选区读写（宿主随笔记会话自持，其他插件据此做「改写选中内容」这类动作）。
-/// 只在编辑状态有意义；阅读态选区不属于编辑器能力。
+/// 编辑器：打开集合与全局编辑偏好。正文与选区归内容所有者插件，宿主不认识。
 pub mod editor {
-    /// 读当前文档路径与选区（无选区时 `from == to`、`text` 为空）。
-    pub const SELECTION: &str = "editor.selection";
-    /// 用给定文本替换当前选区（空串 = 删除选区）；写入经笔记同一套保存链。
-    pub const REPLACE_SELECTION: &str = "editor.replaceSelection";
     /// 读当前打开的文件（仓库相对路径，按打开顺序）。候选列表这类要「打开中的优先」的界面用。
     pub const OPEN_FILES: &str = "editor.openFiles";
     /// 让宿主打开一个仓库内文件（按扩展名分流；回执 = 已受理）。`reveal` 见
@@ -861,9 +854,6 @@ pub struct Radii {
 
 // ---------- editor ----------
 
-/// 单次替换文本的字节上限（超限按可读错误拒绝）。
-pub const MAX_EDITOR_TEXT_BYTES: usize = 512 * 1024;
-
 /// [`editor::OPEN_FILES`] 的 result：当前打开的文件（仓库相对路径，按打开顺序）。
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -887,25 +877,6 @@ fn reveal_default() -> bool {
     true
 }
 
-/// [`editor::SELECTION`] 的 result：当前文档与选区。
-/// `path` 缺省 = 未打开笔记；`from` / `to` 是正文字节偏移（frontmatter 之后的部分）。
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct EditorSelection {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-    pub text: String,
-    pub from: usize,
-    pub to: usize,
-}
-
-impl EditorSelection {
-    /// 阅读态或未打开笔记时的空选区（`path` 仍带回当前文档）。
-    pub fn empty(path: Option<String>) -> Self {
-        Self { path, text: String::new(), from: 0, to: 0 }
-    }
-}
-
 /// [`editor::PREFS`] 的 result：全局编辑偏好。`content_width` = 正文列最大宽度
 /// （0 = 不限，铺满可用宽度）。
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -920,81 +891,56 @@ pub struct EditorPrefs {
     pub content_width: u32,
 }
 
-/// [`editor::REPLACE_SELECTION`] 的 params：替换文本（空串 = 删除当前选区）。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct EditorReplaceParams {
-    pub text: String,
-}
-
-impl EditorReplaceParams {
-    pub fn validate(&self) -> Result<(), String> {
-        if self.text.len() > MAX_EDITOR_TEXT_BYTES {
-            return Err(format!("替换文本不得超过 {MAX_EDITOR_TEXT_BYTES} 字节"));
-        }
-        Ok(())
-    }
-}
-
 // ---------- 文档会话 ----------
 
 /// 单次提交的文档正文上限（超限按可读错误拒绝）。
 pub const MAX_DOC_TEXT_BYTES: usize = 8 * 1024 * 1024;
 
-/// [`doc::OPEN`] 的 params。
+/// [`doc::OPEN`] 的 params：按会话身份读取内容所有者手里的正文。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DocOpenParams {
-    /// 仓库相对路径（本地仓库）/ 服务端内容路径（协作空间），与 `vault` 口径一致。
-    pub path: String,
+    /// 文档会话 id（仓库相对路径 / 服务端内容路径，与 `vault` 口径一致）。
+    pub doc_id: String,
+    /// 本次打开动作的序号；同一文档重开即递增，迟到回执按它丢弃。
+    pub open_seq: u64,
 }
 
 impl DocOpenParams {
     pub fn validate(&self) -> Result<(), String> {
-        if self.path.trim().is_empty() {
-            return Err("路径不能为空".to_string());
+        if self.doc_id.trim().is_empty() {
+            return Err("文档 id 不能为空".to_string());
         }
         Ok(())
     }
 }
 
-/// [`doc::OPEN`] 的 result：当前正文与是否可写（viewer 只读）。
+/// [`doc::OPEN`] 的 result：原始正文、磁盘基线与可写性。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DocOpenResult {
+    pub doc_id: String,
+    pub open_seq: u64,
     pub path: String,
+    /// 原始磁盘正文（宿主不解析、不合并）。
     pub text: String,
     pub can_write: bool,
-    /// 宿主当前是否有未落盘修改（插件重启后据此恢复「未保存」状态）。
+    /// `text` 所对应磁盘内容的完整 SHA-256（十六进制）；插件提交保存时原样回传。
+    pub disk_rev: String,
+}
+
+/// [`doc::STATE`] 的 params：内容所有者判定的会话状态。宿主只按上报值记账，不自行推断。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocStateParams {
+    pub doc_id: String,
+    pub open_seq: u64,
+    /// 是否有未落盘修改。
     #[serde(default)]
     pub dirty: bool,
+    /// 最近一次保存失败原因（`None` = 无；再次成功保存即清除）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub save_error: Option<String>,
-}
-
-/// [`doc::EDIT`] 的 params：完整正文 + 本端光标与选区锚点（全文字节偏移；
-/// `anchor` / `head` 缺省 = 无选区）。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DocEditParams {
-    pub path: String,
-    pub text: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub anchor: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub head: Option<usize>,
-}
-
-impl DocEditParams {
-    pub fn validate(&self) -> Result<(), String> {
-        if self.path.trim().is_empty() {
-            return Err("路径不能为空".to_string());
-        }
-        if self.text.len() > MAX_DOC_TEXT_BYTES {
-            return Err(format!("文档正文不得超过 {MAX_DOC_TEXT_BYTES} 字节"));
-        }
-        Ok(())
-    }
 }
 
 /// [`doc::RENAME`] 的 params：当前路径与新主名（不含扩展名）。
@@ -1005,33 +951,22 @@ pub struct DocRenameParams {
     pub name: String,
 }
 
-/// [`doc::PROPS_READ`] 的结果：当前文档的属性区与可写性。
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+/// 按文档寻址：`doc_id` 为空 = 宿主当前活动文档。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DocPropsResult {
-    /// 当前文档路径；没有打开文档时为空串。
-    pub path: String,
-    /// 读取时正文的内容指纹；写回须原样回传，正文已变即被宿主拒绝。
-    pub fingerprint: String,
-    /// frontmatter 块原文（含首尾 `---` 定界）；文档没有属性块时为空串。
-    pub frontmatter: String,
-    /// 文档是否有属性区（含未闭合的 `---` 起始行）。
+pub struct DocTargetParams {
     #[serde(default)]
-    pub present: bool,
-    /// 属性区 YAML 是否可解析（未闭合或语法错误为 `false`，面板锁编辑）。
-    pub parsed: bool,
-    /// 当前文档是否可写（只读身份 / 未打开文档为 `false`）。
-    pub editable: bool,
+    pub doc_id: String,
 }
 
-/// [`doc::PROPS_WRITE`] 的入参：新的 frontmatter 块原文（含 `---` 定界；空串 = 删除属性区）。
-/// `path` + `fingerprint` 来自读属性回执；与当前文档不符时宿主拒绝写回。
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// [`doc::PROPS_WRITE`] 的入参：`value` 是属性面板给内容所有者的完整请求载荷，宿主原样转发。
+/// `doc_id` 只用于寻址（须与当前热文档一致），不参与载荷解释。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DocPropsWriteParams {
-    pub frontmatter: String,
-    pub path: String,
-    pub fingerprint: String,
+    #[serde(default)]
+    pub doc_id: String,
+    pub value: Value,
 }
 
 impl DocRenameParams {
@@ -1050,24 +985,104 @@ impl DocRenameParams {
     }
 }
 
-/// [`doc::SAVE`] 的 params：`manual` = 手动保存（成功 / 失败均有提示）；缺省 = 自动保存。
+/// [`doc::SAVE`] 的 params：内容所有者提交完整正文，宿主按 `expected_rev` 校验后原子写。
+/// `manual` = 手动保存（成功 / 失败均有提示）；缺省 = 自动保存。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DocSaveParams {
-    pub path: String,
+    pub doc_id: String,
+    pub open_seq: u64,
+    /// 插件读到 / 上次写成磁盘内容的完整 SHA-256；与写前即时读盘结果不符即冲突。
+    pub expected_rev: String,
+    pub text: String,
     #[serde(default)]
     pub manual: bool,
 }
 
-/// [`doc::AWARENESS`] 的 params：本端选区（全文字节偏移，`None` = 只上报身份）。
+impl DocSaveParams {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.doc_id.trim().is_empty() {
+            return Err("文档 id 不能为空".to_string());
+        }
+        if !is_sha256_hex(&self.expected_rev) {
+            return Err("expected_rev 须为 64 位十六进制 SHA-256".to_string());
+        }
+        if self.text.len() > MAX_DOC_TEXT_BYTES {
+            return Err(format!("文档正文不得超过 {MAX_DOC_TEXT_BYTES} 字节"));
+        }
+        Ok(())
+    }
+}
+
+/// 完整 SHA-256 十六进制（64 位小写十六进制）。
+pub fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// [`doc::SAVE`] 的回执：成功给新基线；磁盘已被外部改写时把磁盘原文原样交回插件合并。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum DocSaveResult {
+    Ok { new_rev: String },
+    Conflict { disk_rev: String, disk_content: String },
+    Err { message: String },
+}
+
+/// [`doc::CLOSE`] 的 params：关闭会话（按下标识别，迟到回执据此丢弃）。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DocAwarenessParams {
+pub struct DocCloseParams {
+    pub doc_id: String,
+    pub open_seq: u64,
+}
+
+/// 内容所有者对宿主提供的内容服务：宿主按文档会话寻址后原样转发，租约与正文都在插件。
+pub mod content {
+    pub const SERVICE: &str = "content";
+    /// 读一份文档的属性区。
+    pub const PROPS_READ: &str = "props.read";
+    /// 写一份文档的属性区（正文由所有者自己的保存链落盘）。
+    pub const PROPS_WRITE: &str = "props.write";
+}
+
+/// [`content::PROPS_READ`] 的 params：要读属性的文档会话。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContentPropsReadParams {
+    pub doc_id: String,
+    pub open_seq: u64,
+}
+
+/// [`content::PROPS_READ`] 的 result：属性区原文与可写性。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContentPropsResult {
+    /// 读取时的文档路径；会话已失效时为空串。
     pub path: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub anchor: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub head: Option<usize>,
+    /// 读取时正文的指纹；写回须原样回传，正文已变即被拒绝。
+    pub fingerprint: String,
+    /// frontmatter 块原文（含首尾 `---` 定界）；没有属性块时为空串。
+    pub frontmatter: String,
+    /// 是否有属性区（含未闭合的 `---` 起始行）。
+    #[serde(default)]
+    pub present: bool,
+    /// 属性区 YAML 是否可解析（未闭合或语法错误为 `false`）。
+    pub parsed: bool,
+    /// 当前文档是否可写（只读身份 / 会话已失效为 `false`）。
+    pub editable: bool,
+}
+
+/// [`content::PROPS_WRITE`] 的 params：`value` 是属性面板的完整写回载荷，语义归内容所有者
+/// （宿主只补会话身份并转发）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContentPropsWriteParams {
+    pub doc_id: String,
+    pub open_seq: u64,
+    pub value: Value,
 }
 
 /// 一条反链：引用该文档的文件路径与显示标题。
@@ -2199,6 +2214,10 @@ pub struct DocInstanceOpenParams {
     pub path: String,
     /// 宿主为本实例分配的面标识：插件据此为该面提交整面帧。
     pub surface_id: String,
+    /// 文档会话 id（与 `path` 同值；插件按它寻址缓冲）。
+    pub doc_id: String,
+    /// 本次打开动作的序号；迟到回执按 `(docId, openSeq)` 丢弃。
+    pub open_seq: u64,
 }
 
 /// [`doc::HOST_CLOSE`] 的 params：实例随标签关闭 / 换文件被关闭。
@@ -2207,6 +2226,8 @@ pub struct DocInstanceOpenParams {
 pub struct DocInstanceCloseParams {
     pub surface_id: String,
     pub path: String,
+    pub doc_id: String,
+    pub open_seq: u64,
 }
 
 // ---------- ai ----------
@@ -2866,6 +2887,11 @@ pub struct PanelHeaderParams {
 pub struct PanelFlushParams {
     pub target: String,
     pub token: u64,
+    /// 文档会话身份（仅文档面携带；贯穿提交正文协议后再回执）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doc_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_seq: Option<u64>,
 }
 
 /// [`panel::FLUSH_DONE`] 的 params。
@@ -2876,6 +2902,11 @@ pub struct PanelFlushDoneParams {
     /// 宿主发起请求时给的面板视图 id：回执原样带回，宿主据此确认是哪个面板。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
+    /// 文档会话身份原样带回；宿主只认与请求相同的会话。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doc_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_seq: Option<u64>,
     pub ok: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -3301,21 +3332,18 @@ pub const BUILTIN_SERVICES: &[(&str, &str, &[&str])] = &[
     ("ai", PLATFORM_PLUGIN, &[ai::CHAT_SEND, ai::CHAT_SEND_DIRECT, ai::CHAT_STOP, ai::CHAT_HISTORY, ai::MODELS, ai::AGENTS, ai::CHAT_RENAME, ai::CHAT_DELETE, ai::CHAT_COMPACT, ai::CHAT_COMPACT_DIRECT, ai::CHAT_TITLE, ai::TOOL_LIST, ai::TOOL_EXECUTE, ai::CHAT_EMIT, ai::SETTINGS, ai::CHAT_OPEN_PANEL]),
     ("window", PLATFORM_PLUGIN, &[window::OPEN, window::CLOSE, window::UPDATE, window::SHOW, window::BEGIN_DRAG, window::MINIMIZE, window::TOGGLE_MAXIMIZE]),
     ("query", PLATFORM_PLUGIN, &[query::MEASURE, query::THEME, query::FONTS]),
-    // 编辑器选区读写作用于宿主自持的当前文档会话，随平台常驻
-    ("editor", PLATFORM_PLUGIN, &[editor::SELECTION, editor::REPLACE_SELECTION, editor::OPEN_FILES, editor::OPEN_FILE, editor::PREFS]),
-    // 文档会话是宿主内容真源（保存链 / 协作增量 / 历史），归平台自身，不随插件停用下线
+    // 编辑器打开集合与偏好是宿主界面事实，随平台常驻
+    ("editor", PLATFORM_PLUGIN, &[editor::OPEN_FILES, editor::OPEN_FILE, editor::PREFS]),
+    // 文档会话表（身份 / 脏 / 磁盘基线 / 落盘）归平台自身，不随插件停用下线
     (
         "doc",
         PLATFORM_PLUGIN,
         &[
             doc::OPEN,
-            doc::EDIT,
+            doc::STATE,
             doc::SAVE,
             doc::CLOSE,
-            doc::AWARENESS,
             doc::RENAME,
-            doc::PROPS_READ,
-            doc::PROPS_WRITE,
         ],
     ),
     // 历史读数取自宿主侧文件与服务端聚合，历史弹层也在宿主，与 doc 同理归平台自身
@@ -3329,37 +3357,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn doc_props_identity_fields_are_required() {
-        let result = serde_json::json!({
-            "path": "a.md",
-            "fingerprint": "fp",
-            "frontmatter": "---\nx: y\n---\n",
-            "present": true,
-            "parsed": true,
-            "editable": true,
-        });
-        let parsed: DocPropsResult = serde_json::from_value(result.clone()).unwrap();
-        assert_eq!(parsed.fingerprint, "fp");
-        let mut missing = result;
-        missing.as_object_mut().unwrap().remove("fingerprint");
+    fn doc_target_and_props_carry_the_addressed_session() {
+        let target: DocTargetParams = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(target.doc_id.is_empty(), "省略 docId = 宿主当前活动文档");
+        let write: DocPropsWriteParams = serde_json::from_value(serde_json::json!({
+            "value": { "frontmatter": "---\n---\n" },
+        }))
+        .unwrap();
+        assert_eq!(write.doc_id, "");
         assert!(
-            serde_json::from_value::<DocPropsResult>(missing).is_err(),
-            "读回执缺指纹必须反序列化失败"
+            serde_json::from_value::<DocPropsWriteParams>(serde_json::json!({})).is_err(),
+            "缺 value 的写回必须反序列化失败"
         );
-        let write = serde_json::json!({
-            "frontmatter": "---\n---\n",
-            "path": "a.md",
-            "fingerprint": "fp",
-        });
-        assert!(serde_json::from_value::<DocPropsWriteParams>(write.clone()).is_ok());
-        for field in ["path", "fingerprint"] {
-            let mut missing = write.clone();
-            missing.as_object_mut().unwrap().remove(field);
-            assert!(
-                serde_json::from_value::<DocPropsWriteParams>(missing).is_err(),
-                "写回缺 {field} 必须反序列化失败"
-            );
-        }
+        assert_eq!(DocTargetParams::default(), target);
+        let read = ContentPropsReadParams { doc_id: "a.md".into(), open_seq: 3 };
+        assert_eq!(read.open_seq, 3);
     }
 
     #[test]

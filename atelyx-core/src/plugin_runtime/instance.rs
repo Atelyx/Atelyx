@@ -1211,10 +1211,6 @@ impl Instance {
                     plugin_id: self.id.clone(),
                     request_id: 0,
                 },
-                method::editor::SELECTION => HostRequest::EditorSelection {
-                    plugin_id: self.id.clone(),
-                    request_id: 0,
-                },
                 method::editor::OPEN_FILES => HostRequest::EditorOpenFiles {
                     plugin_id: self.id.clone(),
                     request_id: 0,
@@ -1232,15 +1228,6 @@ impl Instance {
                     plugin_id: self.id.clone(),
                     request_id: 0,
                 },
-                method::editor::REPLACE_SELECTION => {
-                    let p: method::EditorReplaceParams = parse(params).map_err(|e| e.to_string())?;
-                    p.validate()?;
-                    HostRequest::EditorReplaceSelection {
-                        plugin_id: self.id.clone(),
-                        request_id: 0,
-                        text: p.text,
-                    }
-                }
                 method::doc::OPEN => {
                     let p: method::DocOpenParams = parse(params).map_err(|e| e.to_string())?;
                     p.validate()?;
@@ -1250,10 +1237,9 @@ impl Instance {
                         params: p,
                     }
                 }
-                method::doc::EDIT => {
-                    let p: method::DocEditParams = parse(params).map_err(|e| e.to_string())?;
-                    p.validate()?;
-                    HostRequest::DocEdit {
+                method::doc::STATE => {
+                    let p: method::DocStateParams = parse(params).map_err(|e| e.to_string())?;
+                    HostRequest::DocState {
                         plugin_id: self.id.clone(),
                         request_id: 0,
                         params: p,
@@ -1268,16 +1254,8 @@ impl Instance {
                     }
                 }
                 method::doc::CLOSE => {
-                    let p: method::PathParams = parse(params).map_err(|e| e.to_string())?;
+                    let p: method::DocCloseParams = parse(params).map_err(|e| e.to_string())?;
                     HostRequest::DocClose {
-                        plugin_id: self.id.clone(),
-                        request_id: 0,
-                        path: p.path,
-                    }
-                }
-                method::doc::AWARENESS => {
-                    let p: method::DocAwarenessParams = parse(params).map_err(|e| e.to_string())?;
-                    HostRequest::DocAwareness {
                         plugin_id: self.id.clone(),
                         request_id: 0,
                         params: p,
@@ -1291,10 +1269,14 @@ impl Instance {
                         path: p.path,
                     }
                 }
-                method::doc::PROPS_READ => HostRequest::DocPropsRead {
-                    plugin_id: self.id.clone(),
-                    request_id: 0,
-                },
+                method::doc::PROPS_READ => {
+                    let p: method::DocTargetParams = parse(params).map_err(|e| e.to_string())?;
+                    HostRequest::DocPropsRead {
+                        plugin_id: self.id.clone(),
+                        request_id: 0,
+                        params: p,
+                    }
+                }
                 method::doc::PROPS_WRITE => {
                     let p: method::DocPropsWriteParams = parse(params).map_err(|e| e.to_string())?;
                     HostRequest::DocPropsWrite {
@@ -2310,19 +2292,23 @@ impl Instance {
     }
 
     /// 告知插件一个文档实例已打开（`host:doc.open`）：surfaceId 为宿主分配的实例面标识。
-    pub(crate) fn notify_doc_open(&self, surface_id: &str, path: &str) {
+    pub(crate) fn notify_doc_open(&self, surface_id: &str, path: &str, doc_id: &str, open_seq: u64) {
         let params = method::DocInstanceOpenParams {
             path: path.to_string(),
             surface_id: surface_id.to_string(),
+            doc_id: doc_id.to_string(),
+            open_seq,
         };
         self.notify(method::doc::HOST_OPEN, &params);
     }
 
     /// 告知插件一个文档实例已关闭（`host:doc.close`）。
-    pub(crate) fn notify_doc_close(&self, surface_id: &str, path: &str) {
+    pub(crate) fn notify_doc_close(&self, surface_id: &str, path: &str, doc_id: &str, open_seq: u64) {
         let params = method::DocInstanceCloseParams {
             path: path.to_string(),
             surface_id: surface_id.to_string(),
+            doc_id: doc_id.to_string(),
+            open_seq,
         };
         self.notify(method::doc::HOST_CLOSE, &params);
     }
@@ -2515,16 +2501,13 @@ fn is_shell_method(method_name: &str) -> bool {
             | method::query::MEASURE
             | method::query::THEME
             | method::query::FONTS
-            | method::editor::SELECTION
             | method::editor::OPEN_FILES
-            | method::editor::REPLACE_SELECTION
             | method::editor::OPEN_FILE
             | method::editor::PREFS
             | method::doc::OPEN
-            | method::doc::EDIT
+            | method::doc::STATE
             | method::doc::SAVE
             | method::doc::CLOSE
-            | method::doc::AWARENESS
             | method::vault::BACKLINKS
             | method::doc::RENAME
             | method::doc::PROPS_READ
@@ -2815,7 +2798,6 @@ mod tests {
             event::name::SPACE_META_CHANGED,
             event::name::WINDOW_FILE_DROP,
             event::name::DOC_CHANGED,
-            event::name::DOC_PRESENCE,
             event::name::EDITOR_PREFS_CHANGED,
         ] {
             let ack = instance

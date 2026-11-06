@@ -128,7 +128,13 @@ fn on_done(app: &mut App, gen: u64, result: Result<RebuildReport, String>) -> Ta
             // 打开中笔记被改写 → 重读正文对齐磁盘；有未保存编辑时不回读
             // （内存输入更新于重建基线，回读会丢用户输入）
             let reload = match app.note_file() {
-                Some(rel) if report.rewrites.contains(&rel) && !app.doc_dirty => Some(rel),
+                Some(rel) if report.rewrites.contains(&rel) => {
+                    let clean = app
+                        .doc_sessions
+                        .by_path(&rel)
+                        .is_none_or(|session| !session.dirty);
+                    clean.then_some(rel)
+                }
                 _ => None,
             };
             match reload {

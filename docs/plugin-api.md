@@ -416,21 +416,18 @@ pub const BUILTIN_SERVICES: &[(&str, &str, &[&str])] = &[
     ("ai", PLATFORM_PLUGIN, &[ai::CHAT_SEND, ai::CHAT_SEND_DIRECT, ai::CHAT_STOP, ai::CHAT_HISTORY, ai::MODELS, ai::AGENTS, ai::CHAT_RENAME, ai::CHAT_DELETE, ai::CHAT_COMPACT, ai::CHAT_COMPACT_DIRECT, ai::CHAT_TITLE, ai::TOOL_LIST, ai::TOOL_EXECUTE, ai::CHAT_EMIT, ai::SETTINGS, ai::CHAT_OPEN_PANEL]),
     ("window", PLATFORM_PLUGIN, &[window::OPEN, window::CLOSE, window::UPDATE, window::SHOW, window::BEGIN_DRAG, window::MINIMIZE, window::TOGGLE_MAXIMIZE]),
     ("query", PLATFORM_PLUGIN, &[query::MEASURE, query::THEME, query::FONTS]),
-    // 编辑器选区读写作用于宿主自持的当前文档会话，随平台常驻
-    ("editor", PLATFORM_PLUGIN, &[editor::SELECTION, editor::REPLACE_SELECTION, editor::OPEN_FILES, editor::OPEN_FILE, editor::PREFS]),
-    // 文档会话是宿主内容真源（保存链 / 协作增量 / 历史），归平台自身，不随插件停用下线
+    // 编辑器打开集合与偏好是宿主界面事实，随平台常驻
+    ("editor", PLATFORM_PLUGIN, &[editor::OPEN_FILES, editor::OPEN_FILE, editor::PREFS]),
+    // 文档会话表（身份 / 脏 / 磁盘基线 / 落盘）归平台自身，不随插件停用下线
     (
         "doc",
         PLATFORM_PLUGIN,
         &[
             doc::OPEN,
-            doc::EDIT,
+            doc::STATE,
             doc::SAVE,
             doc::CLOSE,
-            doc::AWARENESS,
             doc::RENAME,
-            doc::PROPS_READ,
-            doc::PROPS_WRITE,
         ],
     ),
     // 历史读数取自宿主侧文件与服务端聚合，历史弹层也在宿主，与 doc 同理归平台自身
@@ -1779,21 +1776,19 @@ pub mod http {
 pub mod doc {
     /// 打开一个文档会话：宿主读盘、建立会话（本地与协作空间同构），回执即当前正文与可写性。
     pub const OPEN: &str = "doc.open";
-    /// 提交一次本地编辑（完整正文 + 光标 / 选区，字节偏移）。内容有变化时宿主置脏并接入
-    /// 协作增量；无变化时只更新在场选区。
-    pub const EDIT: &str = "doc.edit";
-    /// 请求一次保存（手动 / 自动）。回执只表示已受理，落盘结果经 `doc:changed` 到达。
+    /// 内容所有者上报会话状态（未落盘修改与保存失败原因）：宿主只记账，不推断。
+    pub const STATE: &str = "doc.state";
+    /// 请求一次保存（手动 / 自动）。回执即落盘结果（成功 / 冲突 / 失败三态），宿主据此
+    /// 立即更新会话的脏标记与错误，随后内容所有者可用 `doc.state` 修正（如合流后仍脏）。
     pub const SAVE: &str = "doc.save";
     /// 关闭当前文档会话（换文件 / 关标签 / 切仓库）。
     pub const CLOSE: &str = "doc.close";
-    /// 上报本端光标 / 选区（全文字节偏移；`None` = 无选区）。只对协作空间生效。
-    pub const AWARENESS: &str = "doc.awareness";
     /// 把当前文档改名为新的主名（同目录、保留扩展名；引用与历史随宿主既有改名链）。
     /// 有未落盘修改时拒绝，插件须先 `doc.save`。
     pub const RENAME: &str = "doc.rename";
-    /// 读当前文档的 frontmatter 块原文与可写性（属性面板）。
+    /// 读一份文档的属性：宿主按会话找到内容所有者后原样转发，载荷形态由所有者定。
     pub const PROPS_READ: &str = "doc.props.read";
-    /// 用新 frontmatter 块替换当前文档的属性区：正文原样保留，走文档同一条保存链。
+    /// 写一份文档的属性：`value` 原样转发给内容所有者，正文写入走它自己的保存链。
     pub const PROPS_WRITE: &str = "doc.props.write";
     /// 用户打开了插件注册的领域文档类型文件（通知）。`surfaceId` 为宿主分配的实例面标识，
     /// 插件据此为该面提交整面帧。
@@ -1805,13 +1800,20 @@ pub mod doc {
 
 ```rust
 // atelyx-plugin-protocol/src/method.rs
-/// 编辑器：当前打开笔记的选区读写（宿主随笔记会话自持，其他插件据此做「改写选中内容」这类动作）。
-/// 只在编辑状态有意义；阅读态选区不属于编辑器能力。
+/// 内容所有者对宿主提供的内容服务：宿主按文档会话寻址后原样转发，租约与正文都在插件。
+pub mod content {
+    pub const SERVICE: &str = "content";
+    /// 读一份文档的属性区。
+    pub const PROPS_READ: &str = "props.read";
+    /// 写一份文档的属性区（正文由所有者自己的保存链落盘）。
+    pub const PROPS_WRITE: &str = "props.write";
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// 编辑器：打开集合与全局编辑偏好。正文与选区归内容所有者插件，宿主不认识。
 pub mod editor {
-    /// 读当前文档路径与选区（无选区时 `from == to`、`text` 为空）。
-    pub const SELECTION: &str = "editor.selection";
-    /// 用给定文本替换当前选区（空串 = 删除选区）；写入经笔记同一套保存链。
-    pub const REPLACE_SELECTION: &str = "editor.replaceSelection";
     /// 读当前打开的文件（仓库相对路径，按打开顺序）。候选列表这类要「打开中的优先」的界面用。
     pub const OPEN_FILES: &str = "editor.openFiles";
     /// 让宿主打开一个仓库内文件（按扩展名分流；回执 = 已受理）。`reveal` 见
@@ -2864,6 +2866,10 @@ pub struct DocInstanceOpenParams {
     pub path: String,
     /// 宿主为本实例分配的面标识：插件据此为该面提交整面帧。
     pub surface_id: String,
+    /// 文档会话 id（与 `path` 同值；插件按它寻址缓冲）。
+    pub doc_id: String,
+    /// 本次打开动作的序号；迟到回执按 `(docId, openSeq)` 丢弃。
+    pub open_seq: u64,
 }
 ```
 
@@ -2874,13 +2880,9 @@ pub struct DocInstanceOpenParams {
 pub struct DocInstanceCloseParams {
     pub surface_id: String,
     pub path: String,
+    pub doc_id: String,
+    pub open_seq: u64,
 }
-```
-
-```rust
-// atelyx-plugin-protocol/src/method.rs
-/// 单次替换文本的字节上限（超限按可读错误拒绝）。
-pub const MAX_EDITOR_TEXT_BYTES: usize = 512 * 1024;
 ```
 
 ```rust
@@ -2893,29 +2895,6 @@ pub struct EditorOpenFileParams {
     pub path: String,
     #[serde(default = "reveal_default")]
     pub reveal: bool,
-}
-```
-
-```rust
-// atelyx-plugin-protocol/src/method.rs
-/// [`editor::SELECTION`] 的 result：当前文档与选区。
-/// `path` 缺省 = 未打开笔记；`from` / `to` 是正文字节偏移（frontmatter 之后的部分）。
-#[serde(rename_all = "camelCase")]
-pub struct EditorSelection {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-    pub text: String,
-    pub from: usize,
-    pub to: usize,
-}
-```
-
-```rust
-// atelyx-plugin-protocol/src/method.rs
-/// [`editor::REPLACE_SELECTION`] 的 params：替换文本（空串 = 删除当前选区）。
-#[serde(rename_all = "camelCase")]
-pub struct EditorReplaceParams {
-    pub text: String,
 }
 ```
 
@@ -2943,25 +2922,43 @@ pub const MAX_DOC_TEXT_BYTES: usize = 8 * 1024 * 1024;
 
 ```rust
 // atelyx-plugin-protocol/src/method.rs
-/// [`doc::OPEN`] 的 params。
+/// [`doc::OPEN`] 的 params：按会话身份读取内容所有者手里的正文。
 #[serde(rename_all = "camelCase")]
 pub struct DocOpenParams {
-    /// 仓库相对路径（本地仓库）/ 服务端内容路径（协作空间），与 `vault` 口径一致。
-    pub path: String,
+    /// 文档会话 id（仓库相对路径 / 服务端内容路径，与 `vault` 口径一致）。
+    pub doc_id: String,
+    /// 本次打开动作的序号；同一文档重开即递增，迟到回执按它丢弃。
+    pub open_seq: u64,
 }
 ```
 
 ```rust
 // atelyx-plugin-protocol/src/method.rs
-/// [`doc::OPEN`] 的 result：当前正文与是否可写（viewer 只读）。
+/// [`doc::OPEN`] 的 result：原始正文、磁盘基线与可写性。
 #[serde(rename_all = "camelCase")]
 pub struct DocOpenResult {
+    pub doc_id: String,
+    pub open_seq: u64,
     pub path: String,
+    /// 原始磁盘正文（宿主不解析、不合并）。
     pub text: String,
     pub can_write: bool,
-    /// 宿主当前是否有未落盘修改（插件重启后据此恢复「未保存」状态）。
+    /// `text` 所对应磁盘内容的完整 SHA-256（十六进制）；插件提交保存时原样回传。
+    pub disk_rev: String,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`doc::STATE`] 的 params：内容所有者判定的会话状态。宿主只按上报值记账，不自行推断。
+#[serde(rename_all = "camelCase")]
+pub struct DocStateParams {
+    pub doc_id: String,
+    pub open_seq: u64,
+    /// 是否有未落盘修改。
     #[serde(default)]
     pub dirty: bool,
+    /// 最近一次保存失败原因（`None` = 无；再次成功保存即清除）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub save_error: Option<String>,
 }
@@ -2969,25 +2966,15 @@ pub struct DocOpenResult {
 
 ```rust
 // atelyx-plugin-protocol/src/method.rs
-/// [`doc::EDIT`] 的 params：完整正文 + 本端光标与选区锚点（全文字节偏移；
-/// `anchor` / `head` 缺省 = 无选区）。
-#[serde(rename_all = "camelCase")]
-pub struct DocEditParams {
-    pub path: String,
-    pub text: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub anchor: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub head: Option<usize>,
-}
-```
-
-```rust
-// atelyx-plugin-protocol/src/method.rs
-/// [`doc::SAVE`] 的 params：`manual` = 手动保存（成功 / 失败均有提示）；缺省 = 自动保存。
+/// [`doc::SAVE`] 的 params：内容所有者提交完整正文，宿主按 `expected_rev` 校验后原子写。
+/// `manual` = 手动保存（成功 / 失败均有提示）；缺省 = 自动保存。
 #[serde(rename_all = "camelCase")]
 pub struct DocSaveParams {
-    pub path: String,
+    pub doc_id: String,
+    pub open_seq: u64,
+    /// 插件读到 / 上次写成磁盘内容的完整 SHA-256；与写前即时读盘结果不符即冲突。
+    pub expected_rev: String,
+    pub text: String,
     #[serde(default)]
     pub manual: bool,
 }
@@ -2995,14 +2982,22 @@ pub struct DocSaveParams {
 
 ```rust
 // atelyx-plugin-protocol/src/method.rs
-/// [`doc::AWARENESS`] 的 params：本端选区（全文字节偏移，`None` = 只上报身份）。
+/// [`doc::SAVE`] 的回执：成功给新基线；磁盘已被外部改写时把磁盘原文原样交回插件合并。
+#[serde(tag = "status", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum DocSaveResult {
+    Ok { new_rev: String },
+    Conflict { disk_rev: String, disk_content: String },
+    Err { message: String },
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`doc::CLOSE`] 的 params：关闭会话（按下标识别，迟到回执据此丢弃）。
 #[serde(rename_all = "camelCase")]
-pub struct DocAwarenessParams {
-    pub path: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub anchor: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub head: Option<usize>,
+pub struct DocCloseParams {
+    pub doc_id: String,
+    pub open_seq: u64,
 }
 ```
 
@@ -3037,34 +3032,66 @@ pub struct DocRenameParams {
 
 ```rust
 // atelyx-plugin-protocol/src/method.rs
-/// [`doc::PROPS_READ`] 的结果：当前文档的属性区与可写性。
+/// 按文档寻址：`doc_id` 为空 = 宿主当前活动文档。
 #[serde(rename_all = "camelCase")]
-pub struct DocPropsResult {
-    /// 当前文档路径；没有打开文档时为空串。
+pub struct DocTargetParams {
+    #[serde(default)]
+    pub doc_id: String,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`doc::PROPS_WRITE`] 的入参：`value` 是属性面板给内容所有者的完整请求载荷，宿主原样转发。
+/// `doc_id` 只用于寻址（须与当前热文档一致），不参与载荷解释。
+#[serde(rename_all = "camelCase")]
+pub struct DocPropsWriteParams {
+    #[serde(default)]
+    pub doc_id: String,
+    pub value: Value,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`content::PROPS_READ`] 的 params：要读属性的文档会话。
+#[serde(rename_all = "camelCase")]
+pub struct ContentPropsReadParams {
+    pub doc_id: String,
+    pub open_seq: u64,
+}
+```
+
+```rust
+// atelyx-plugin-protocol/src/method.rs
+/// [`content::PROPS_READ`] 的 result：属性区原文与可写性。
+#[serde(rename_all = "camelCase")]
+pub struct ContentPropsResult {
+    /// 读取时的文档路径；会话已失效时为空串。
     pub path: String,
-    /// 读取时正文的内容指纹；写回须原样回传，正文已变即被宿主拒绝。
+    /// 读取时正文的指纹；写回须原样回传，正文已变即被拒绝。
     pub fingerprint: String,
-    /// frontmatter 块原文（含首尾 `---` 定界）；文档没有属性块时为空串。
+    /// frontmatter 块原文（含首尾 `---` 定界）；没有属性块时为空串。
     pub frontmatter: String,
-    /// 文档是否有属性区（含未闭合的 `---` 起始行）。
+    /// 是否有属性区（含未闭合的 `---` 起始行）。
     #[serde(default)]
     pub present: bool,
-    /// 属性区 YAML 是否可解析（未闭合或语法错误为 `false`，面板锁编辑）。
+    /// 属性区 YAML 是否可解析（未闭合或语法错误为 `false`）。
     pub parsed: bool,
-    /// 当前文档是否可写（只读身份 / 未打开文档为 `false`）。
+    /// 当前文档是否可写（只读身份 / 会话已失效为 `false`）。
     pub editable: bool,
 }
 ```
 
 ```rust
 // atelyx-plugin-protocol/src/method.rs
-/// [`doc::PROPS_WRITE`] 的入参：新的 frontmatter 块原文（含 `---` 定界；空串 = 删除属性区）。
-/// `path` + `fingerprint` 来自读属性回执；与当前文档不符时宿主拒绝写回。
+/// [`content::PROPS_WRITE`] 的 params：`value` 是属性面板的完整写回载荷，语义归内容所有者
+/// （宿主只补会话身份并转发）。
 #[serde(rename_all = "camelCase")]
-pub struct DocPropsWriteParams {
-    pub frontmatter: String,
-    pub path: String,
-    pub fingerprint: String,
+pub struct ContentPropsWriteParams {
+    pub doc_id: String,
+    pub open_seq: u64,
+    pub value: Value,
 }
 ```
 
@@ -4731,6 +4758,11 @@ pub struct HeaderItem {
 pub struct PanelFlushParams {
     pub target: String,
     pub token: u64,
+    /// 文档会话身份（仅文档面携带；贯穿提交正文协议后再回执）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doc_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_seq: Option<u64>,
 }
 ```
 
@@ -4743,6 +4775,11 @@ pub struct PanelFlushDoneParams {
     /// 宿主发起请求时给的面板视图 id：回执原样带回，宿主据此确认是哪个面板。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
+    /// 文档会话身份原样带回；宿主只认与请求相同的会话。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doc_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_seq: Option<u64>,
     pub ok: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -4840,15 +4877,18 @@ pub mod name {
     /// 空间成员名册缓存变化（拉取开始 / 成功 / 失败、离开空间清空）。payload 为空对象；
     /// 订阅方重取 `space.members`。
     pub const SPACE_MEMBERS_CHANGED: &str = "space:members.changed";
+    /// 与服务端的实时频道重新接上（重连成功、补投完成）：payload 为空对象。
+    /// 订阅方按自己的通道重发当前状态——断连期间的帧已丢失，宿主不代存内容。
+    pub const SPACE_RESYNC: &str = "space:resync";
     /// 外部文件拖入窗口（宿主只转发绝对路径，读取由订阅方经 `fs` 自理）。
     /// payload 见 [`FileDropPayload`]；只投给指针所在面的插件，该面未挂载即不投递。
     pub const WINDOW_FILE_DROP: &str = "window:file.drop";
-    /// 当前文档会话的正文 / 落盘状态变化（协作远端合入、保存成功或失败、属性面板改写）。
-    /// payload 见 [`DocChangedPayload`]。
+    /// 当前文档会话状态变化（打开 / 落盘状态 / 改名 / 回滚）；正文归内容所有者插件，
+    /// 宿主只广播会话事实。payload 见 [`DocChangedPayload`]。
     pub const DOC_CHANGED: &str = "doc:changed";
-    /// 当前文档的远端协作者光标（进入 / 移动 / 离场都会发；无协作者 = 空清单）。
-    /// payload 见 [`DocPresencePayload`]。
-    pub const DOC_PRESENCE: &str = "doc:presence";
+    /// 历史回滚把某个版本交回当前文本文档：payload 见 [`DocRestorePayload`]
+    /// （订阅方按自己的会话身份匹配；`content` 是整篇正文）。
+    pub const DOC_RESTORE: &str = "doc:restore";
     /// 全局编辑偏好变更（软换行 / 页面内标题 / 正文宽度）。payload 同
     /// `editor.prefs` 的 result（[`crate::method::EditorPrefs`]）。
     pub const EDITOR_PREFS_CHANGED: &str = "editor:prefs.changed";
@@ -4947,13 +4987,16 @@ pub struct CanvasVisiblePayload {
 
 ```rust
 // atelyx-plugin-protocol/src/event.rs
-/// [`name::DOC_CHANGED`] 的 payload：`text` 只在正文被宿主改写时给出（保存成功回填合流结果、
-/// 远端合入、属性面板改写）；`dirty` / `saveError` 反映当前落盘状态。
+/// [`name::DOC_CHANGED`] 的 payload：会话路径与落盘状态。
+/// 正文归内容所有者插件，宿主不转发副本；插件按 `(docId, openSeq)` 丢弃迟到通知。
 #[serde(rename_all = "camelCase")]
 pub struct DocChangedPayload {
     pub path: String,
+    /// 文档会话身份；插件只认当前热文档的 `(docId, openSeq)`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub text: Option<String>,
+    pub doc_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_seq: Option<u64>,
     #[serde(default)]
     pub dirty: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4963,28 +5006,14 @@ pub struct DocChangedPayload {
 
 ```rust
 // atelyx-plugin-protocol/src/event.rs
-/// [`name::DOC_PRESENCE`] 的 payload：当前文档路径 + 远端协作者光标（不含本端）。
-/// `anchor` / `head` 与 `doc.open` 回执的 `text` 同一坐标系（全文字节偏移）；缺省 = 该成员没有光标。
+/// [`name::DOC_RESTORE`] 的 payload：宿主把历史版本正文交回内容所有者插件。
 #[serde(rename_all = "camelCase")]
-pub struct DocPresencePayload {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub cursors: Vec<DocRemoteCursor>,
-}
-```
-
-```rust
-// atelyx-plugin-protocol/src/event.rs
-/// 一位远端协作者的光标（`color` 为 `#rrggbb` 或 `#rrggbbaa`）。
-#[serde(rename_all = "camelCase")]
-pub struct DocRemoteCursor {
-    pub name: String,
-    pub color: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub anchor: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub head: Option<usize>,
+pub struct DocRestorePayload {
+    /// 文档会话身份；插件只认当前热文档的 [`(docId, openSeq)`]。
+    pub doc_id: String,
+    pub open_seq: u64,
+    /// 整篇正文（回滚目标版本的原文）。
+    pub content: String,
 }
 ```
 

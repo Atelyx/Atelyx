@@ -10,6 +10,7 @@ use iced::alignment::{Horizontal, Vertical};
 use iced::widget::{button, column, container, mouse_area, row, scrollable, space, stack, Stack};
 use iced::{Element, Length, Padding, Point, Rectangle, Size, border, widget::container::Style};
 
+use atelyx_core::doc_session::DocId;
 use atelyx_core::layout::{self, AppUiState, LayoutNode, TabItem};
 use atelyx_core::plugin_runtime::ContributionSlot;
 
@@ -94,16 +95,6 @@ fn truncate_to_width(text: &str, max_w: f32, measure: impl Fn(&str) -> f32) -> S
         }
     }
     "…".to_string()
-}
-
-/// 画布视图（插件注册的面板视图 id）。
-pub(crate) fn is_canvas_view(view: &str) -> bool {
-    view == atelyx_core::layout::CANVAS_VIEW
-}
-
-/// 笔记视图（存量布局沿用旧内置 id `note`，与插件文档面 id 同判）。
-fn is_note_view(view: &str) -> bool {
-    view == "note" || view == atelyx_core::layout::NOTES_VIEW
 }
 
 /// 视图当前承载的打开文件：插件文档实例优先，其余按注册表里该视图所属文档类型的扩展名
@@ -1294,8 +1285,8 @@ fn panel_view<'a>(
     // 右侧：状态指示 + ≡ 菜单（空面板也有 ≡：删除/分割仍可用）
     let mut right = row![].spacing(4).padding(Padding::ZERO.right(6.0));
     if let Some(t) = active {
-        if is_note_view(&t.view) {
-            if let Some(pill) = doc_status_pill(app) {
+        if let Some(doc) = &t.doc {
+            if let Some(pill) = doc_status_pill(app, doc) {
                 right = right.push(pill);
             }
         }
@@ -1500,7 +1491,7 @@ fn panel_tab<'a>(
                     border: border::rounded(pal::RADIUS_XS),
                     ..Default::default()
                 })
-                .on_press(Message::PanelTabFileClose(t.view.clone(), t.doc.clone())),
+                .on_press(Message::PanelTabFileClose(t.view.clone())),
         );
     }
 
@@ -1564,14 +1555,15 @@ fn panel_tab<'a>(
     .into()
 }
 
-/// 笔记保存状态徽标：错误 = ErrorPill（红调底 + 重试/关闭），未保存 = 圆点徽标。
-fn doc_status_pill(app: &App) -> Option<Element<'static, Message>> {
-    app.note_file()?;
-    if app.doc_save_error.is_some() {
+/// 文档保存状态徽标：错误 = ErrorPill（红调底 + 重试/关闭），未保存 = 圆点徽标。
+fn doc_status_pill(app: &App, doc: &DocId) -> Option<Element<'static, Message>> {
+    let session = app.doc_sessions.session(doc)?;
+    if let Some(error) = session.save_error.clone() {
+        let dismiss = doc.clone();
         Some(
             container(
                 row![
-                    text(ellipsize(app.doc_save_error.as_deref().unwrap_or("保存失败"), 160.0, 11.0))
+                    text(ellipsize(&error, 160.0, 11.0))
                         .size(pal::fs_micro())
                         .color(pal::DANGER),
                     button(text("重试").size(pal::fs_micro()).color(pal::DANGER))
@@ -1585,7 +1577,7 @@ fn doc_status_pill(app: &App) -> Option<Element<'static, Message>> {
                     button(icon("x", 11.0, pal::DANGER))
                         .padding(1.0)
                         .style(|_t, _s| button::Style::default())
-                        .on_press(Message::SaveErrorDismiss),
+                        .on_press(Message::SaveErrorDismiss(dismiss)),
                 ]
                 .spacing(4),
             )
@@ -1597,7 +1589,7 @@ fn doc_status_pill(app: &App) -> Option<Element<'static, Message>> {
             })
             .into(),
         )
-    } else if app.doc_dirty {
+    } else if session.dirty {
         Some(controls::status_pill(controls::PillStatus::Pending, "未保存"))
     } else {
         None
@@ -1728,7 +1720,7 @@ pub fn detached_view<'a>(
                         border: border::rounded(pal::RADIUS_XS),
                         ..Default::default()
                     })
-                    .on_press(Message::DetachedTabFileClose(t.view.clone(), t.doc.clone())),
+                    .on_press(Message::DetachedTabFileClose(t.view.clone())),
             );
         }
         let top_radius = iced::border::Radius {

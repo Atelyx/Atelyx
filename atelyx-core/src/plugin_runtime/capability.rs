@@ -57,16 +57,13 @@ pub(crate) fn permission_for(name: &str) -> Option<Permission> {
         method::drag::START | method::drag::HOVER | method::drag::END => None,
         method::menu::OPEN => None,
         // 读写当前文档的正文 / 选区即读写用户内容，按仓库内容权限归类
-        editor::SELECTION
-        | editor::REPLACE_SELECTION
-        | editor::OPEN_FILES
+        editor::OPEN_FILES
         | editor::OPEN_FILE
         | editor::PREFS => Some(Vault),
         doc::OPEN
-        | doc::EDIT
+        | doc::STATE
         | doc::SAVE
         | doc::CLOSE
-        | doc::AWARENESS
         | doc::RENAME
         | doc::PROPS_READ
         | doc::PROPS_WRITE => Some(Vault),
@@ -175,11 +172,9 @@ mod tests {
         assert_eq!(permission_for(method::space::MEMBERS), Some(Permission::Collab));
         assert_eq!(permission_for(method::space::OPEN_MENU), Some(Permission::Collab));
         assert_eq!(permission_for(method::space::OPEN_SETTINGS), Some(Permission::Collab));
-        assert_eq!(permission_for(method::editor::SELECTION), Some(Permission::Vault));
-        assert_eq!(permission_for(method::editor::REPLACE_SELECTION), Some(Permission::Vault));
         assert_eq!(permission_for(method::editor::OPEN_FILE), Some(Permission::Vault));
         assert_eq!(permission_for(method::doc::OPEN), Some(Permission::Vault));
-        assert_eq!(permission_for(method::doc::EDIT), Some(Permission::Vault));
+        assert_eq!(permission_for(method::doc::STATE), Some(Permission::Vault));
         assert_eq!(permission_for(method::doc::SAVE), Some(Permission::Vault));
         assert_eq!(permission_for(method::vault::BACKLINKS), Some(Permission::Vault));
         assert_eq!(permission_for(method::history::ACTIVITY), Some(Permission::Vault));

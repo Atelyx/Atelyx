@@ -1,7 +1,5 @@
-//! 笔记协作 yrs 文档绑定与基线对账：单活动文档的 CRDT 增量收发、基线标签提案与三方合并。
-//!
-//! 文档以 `OffsetKind::Utf16` 创建：TextRef 的 insert/remove 索引与 clock 消耗均按 UTF-16 code unit
-//! 计（与 Yjs 数据模型一致）；yrs 默认的 `OffsetKind::Bytes` 索引单位为 UTF-8 字节，不用于本模块。
+//! 笔记协作的 yrs 文档绑定与基线对账：单活动文档的增量收发、基线标签提案与三方合并。
+//! 文档按 `OffsetKind::Utf16` 建（索引与 clock 按 UTF-16 code unit 计），不用 yrs 默认的字节偏移。
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -13,8 +11,8 @@ use yrs::{
     ClientID, Doc, GetString, OffsetKind, Options, ReadTxn, StateVector, Text, Transact, Update,
 };
 
-use crate::merge3::{diff_hunks, merge3, ConflictSide};
-use crate::space_frame::{
+use atelyx_format::note::merge3::{diff_hunks, merge3, ConflictSide};
+use crate::collab::frame::{
     baseline_id_of, byte_to_utf16_offset, decode_note_payload, encode_note_baseline,
     encode_note_sync, read_var_bytes, read_var_uint, write_var_bytes, write_var_uint, DocTag,
     NoteFrame, Reader, SYNC_MSG_STEP1, SYNC_MSG_STEP2, SYNC_MSG_UPDATE,
@@ -44,8 +42,6 @@ pub struct RemoteOutcome {
     pub doc_changed: bool,
     /// `doc_changed` 时的合并后新全文（供壳刷新视图，省一次 `current_text()`）。
     pub text: Option<String>,
-    /// Relocate 帧的（旧路径 → 新路径）：文档不动，壳负责改挂路径。
-    pub relocated: Option<(String, String)>,
     /// 文档已被重建（新实例、新基线）：壳须重发本端在场身份，选区随旧文本作废。
     pub rebuilt: bool,
 }
@@ -142,28 +138,25 @@ impl NoteCollab {
 
     /// 本地编辑：以文档当前文本为基准求差并合入 ytext（差分基于文档真值，调用方无需
     /// 维护镜像——保存合流等导致文档落后于编辑器文本时，差分会把落盘内容一并补进文档）。
-    /// 返回 = 需上行的内嵌 Update 消息（无变化 / 未打开 = None）。
-    pub fn local_edit(&mut self, new: &str) -> Option<Vec<u8>> {
-        let before = self.current_text()?;
+    /// 返回 = 需上行的内嵌 Update 消息（无变化 / 未打开 = 空）。
+    pub fn local_edit(&mut self, new: &str) -> Vec<Vec<u8>> {
+        let Some(before) = self.current_text() else { return Vec::new() };
         let hunks = diff_hunks(&before, new);
         if hunks.is_empty() {
-            return None;
+            return Vec::new();
         }
         {
-            let active = self.doc.as_mut()?;
+            let Some(active) = self.doc.as_mut() else { return Vec::new() };
             let mut txn = active.doc.transact_mut_with(LOCAL_ORIGIN);
             apply_hunks(&active.ytext, &mut txn, &before, &hunks);
         }
-        // 单事务恒产出单个 update 事件；空 update（hunk 全被钳掉）不上行。
-        // 多条即不变式被破坏（静默丢弃会丢内容），debug 构建当场暴露
+        // 单事务通常产出一条 update；空 update（hunk 全被钳掉）不上行。
+        // 多条也照发：丢任何一条对端都不会自愈（差分以文档真值为基准，跳过的那段再不出现）
         let msgs = {
             let mut sink = self.outbox.lock().expect("outbox 锁不可重入");
             sink.drain(..).collect::<Vec<_>>()
         };
-        let mut msgs = msgs.into_iter().filter(|m| m.len() > 2);
-        let first = msgs.next();
-        debug_assert!(msgs.next().is_none(), "单事务应恒产出单个 update 消息");
-        first
+        msgs.into_iter().filter(|msg| msg.len() > 2).collect()
     }
 
     /// 文档静默对齐到指定文本：差分以 [`REMOTE_ORIGIN`] 事务合入，update 订阅按 origin
@@ -181,7 +174,7 @@ impl NoteCollab {
         true
     }
 
-    /// 周期反熵/重连/收 Resync 后的握手：SyncStep1 索取对端状态（未打开 = None）。
+    /// 周期反熵与重连后的握手：SyncStep1 索取对端状态（未打开 = None）。
     pub fn sync_step1(&mut self) -> Option<Vec<u8>> {
         let active = self.doc.as_ref()?;
         let mut msg = Vec::new();
@@ -197,23 +190,6 @@ impl NoteCollab {
             return RemoteOutcome::default();
         };
         match frame {
-            NoteFrame::Resync { .. } => {
-                // 对端消费过慢被裁剪：重发本端握手（对端同样回发，双向补齐缺失增量）
-                let mut out = RemoteOutcome::default();
-                if self.matches_active(file) {
-                    if let Some(step1) = self.sync_step1() {
-                        out.reply.push(step1);
-                    }
-                }
-                out
-            }
-            NoteFrame::Relocate { old_path, new_path } => {
-                self.relocate(&old_path, &new_path);
-                RemoteOutcome {
-                    relocated: Some((old_path, new_path)),
-                    ..RemoteOutcome::default()
-                }
-            }
             NoteFrame::Sync { tag, msg } => {
                 self.remember_room_seq(file, tag.seq);
                 self.receive_sync_frame(peer_id, file, tag, msg)
@@ -235,10 +211,6 @@ impl NoteCollab {
     }
 
     // ---------- 入站帧内部分支 ----------
-
-    fn matches_active(&self, file: &str) -> bool {
-        self.doc.as_ref().is_some_and(|d| d.file == file)
-    }
 
     fn receive_sync_frame(
         &mut self,
@@ -460,7 +432,7 @@ impl NoteCollab {
         self.incompatible.retain(|key| !key.ends_with(&suffix));
     }
 
-    /// 文件换路跟随（远端 Relocate 帧 / 改名广播）：活动文档挂靠路径与该路径的
+    /// 文件换路跟随（改名广播）：活动文档挂靠路径与该路径的
     /// 序号、限频记忆一并改写（文档内容不动；含目录换路的前缀跟随，路径不符仅迁移记忆）。
     pub fn relocate(&mut self, old: &str, new: &str) {
         let map = |p: &str| -> Option<String> {
@@ -527,7 +499,7 @@ fn apply_hunks(
     ytext: &yrs::TextRef,
     txn: &mut yrs::TransactionMut,
     before: &str,
-    hunks: &[crate::merge3::TextHunk],
+    hunks: &[atelyx_format::note::merge3::TextHunk],
 ) {
     let mut shift: i64 = 0;
     for hunk in hunks {
@@ -610,7 +582,6 @@ fn yrs_index_for_byte(text: &str, byte: usize) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::space_frame::{encode_note_relocate, encode_note_resync};
 
     const GOLDEN_FULL_UPDATE: &str =
         "0101b2f21900040104746578741de4b880e6aeb5e59fbae7babfe6ada3e696870ae7acace4ba8ce8a18c0a00";
@@ -694,7 +665,7 @@ mod tests {
         let opened = nc.open("f.md", "v1\n");
         assert_eq!(nc.baseline_frame(), Some(opened.baseline_frame));
         // 本地编辑后重发的基线帧带文档当前全文，基线正文保持不变
-        assert!(nc.local_edit("v1改\n").is_some());
+        assert!(!nc.local_edit("v1改\n").is_empty());
         let Some(NoteFrame::Baseline { tag, baseline_text, current_text }) =
             nc.baseline_frame().and_then(|f| decode_note_payload(&f))
         else {
@@ -720,11 +691,11 @@ mod tests {
         }
         // 在 😀 之后插入（hunk 锚点字节跨过多字节字符）
         let edited = "中文\na😀插入尾\n";
-        assert!(nc.local_edit(edited).is_some());
+        assert!(!nc.local_edit(edited).is_empty());
         assert_eq!(nc.current_text().as_deref(), Some(edited));
         // 删除 😀 与插入段（remove 区间含 2 单位的代理对）
         let removed = "中文\na尾\n";
-        assert!(nc.local_edit(removed).is_some());
+        assert!(!nc.local_edit(removed).is_empty());
         assert_eq!(nc.current_text().as_deref(), Some(removed));
         // 字节落在 😀 内部时向下取整到其 UTF-16 起点
         assert_eq!(yrs_index_for_byte("a😀尾", 3), 1);
@@ -739,7 +710,7 @@ mod tests {
         let before = "aa\nP\nbb\nQ\ncc\n";
         let after = "aa\nQ\nbb\nP\ncc\n";
         nc.open("f.md", before);
-        assert!(nc.local_edit(after).is_some());
+        assert!(!nc.local_edit(after).is_empty());
         assert_eq!(nc.current_text().as_deref(), Some(after));
     }
 
@@ -813,7 +784,7 @@ mod tests {
         a.incompatible.insert(peer_key("p", "f.md"));
         let mut p = NoteCollab::new("p".to_owned());
         p.open("g.md", "x1\n");
-        let p_msg = p.local_edit("x1改\n").unwrap();
+        let p_msg = p.local_edit("x1改\n").pop().unwrap();
         let out = a.apply_remote("p", "f.md", &sync_frame(&forged, &p_msg));
         assert!(!out.doc_changed);
         assert_eq!(a.current_text().as_deref(), Some(text));
@@ -850,7 +821,7 @@ mod tests {
         // 拉黑已解除：同 id 的 sync 帧恢复应用
         let mut q = NoteCollab::new("q".to_owned());
         q.open("h.md", "新基线\n");
-        let q_msg = q.local_edit("新基线改\n").unwrap();
+        let q_msg = q.local_edit("新基线改\n").pop().unwrap();
         let out = a.apply_remote("q", "f.md", &sync_frame(&good, &q_msg));
         assert!(out.doc_changed);
         assert_eq!(a.current_text().as_deref(), Some("新基线改\n"));
@@ -865,9 +836,9 @@ mod tests {
         b.open("f.md", base);
         // 同正文 → 同基线 id → sync 帧互认
         let a_text = "第一行A\n第二行\n第三行\n";
-        let a_msg = a.local_edit(a_text).unwrap();
+        let a_msg = a.local_edit(a_text).pop().unwrap();
         let b_text = "第一行\n第二行\n第三行B\n";
-        let b_msg = b.local_edit(b_text).unwrap();
+        let b_msg = b.local_edit(b_text).pop().unwrap();
         b.apply_remote("pa", "f.md", &sync_frame(a.tag().unwrap(), &a_msg));
         a.apply_remote("pb", "f.md", &sync_frame(b.tag().unwrap(), &b_msg));
         assert_eq!(a.current_text(), b.current_text());
@@ -875,7 +846,7 @@ mod tests {
         // 第二轮基于收敛后文本继续编辑
         let cur = a.current_text().unwrap();
         let next = cur.replace("第二行", "第二行A2");
-        let msg = a.local_edit(&next).unwrap();
+        let msg = a.local_edit(&next).pop().unwrap();
         let out = b.apply_remote("pa", "f.md", &sync_frame(a.tag().unwrap(), &msg));
         assert!(out.doc_changed);
         assert_eq!(out.text.as_deref(), Some(next.as_str()));
@@ -914,20 +885,9 @@ mod tests {
     }
 
     #[test]
-    fn resync与relocate与序号记忆() {
+    fn 帧序号跨重开记忆_各文件独立() {
         let mut a = NoteCollab::new("a".to_owned());
         a.open("f.md", "v1\n");
-        // Resync → 重发握手
-        let out = a.apply_remote("p", "f.md", &encode_note_resync(1));
-        assert_eq!(out.reply.len(), 1);
-        assert!(matches!(
-            decode_note_payload(&out.reply[0]),
-            Some(NoteFrame::Sync { msg, .. }) if msg[0] == SYNC_MSG_STEP1 as u8
-        ));
-        // Relocate → 交壳改挂路径，文档不动
-        let out = a.apply_remote("p", "f.md", &encode_note_relocate("f.md", "g.md"));
-        assert_eq!(out.relocated, Some(("f.md".to_owned(), "g.md".to_owned())));
-        assert_eq!(a.current_text().as_deref(), Some("v1\n"));
         // 帧序号跨 close/open 记忆：对端宣称更高 seq 后，本端重新提案取更高序
         let higher = DocTag { seq: 40, author: "p".to_owned(), id: baseline_id_of("v1\n") };
         a.apply_remote("p", "f.md", &sync_frame(&higher, &[]));

@@ -20,7 +20,6 @@ static NEXT_CLIENT: AtomicU64 = AtomicU64::new(1);
 
 /// 远端条目（壳层视图）。
 pub struct RemoteState {
-    pub client_id: u64,
     /// 上报该条目的连接 id（锁声明等按连接归属判定用）。
     pub peer_id: String,
     pub state: Value,
@@ -97,11 +96,6 @@ impl EphemeralChannel {
         self.emit(now, self.local_state.clone()?)
     }
 
-    /// 是否有被限频压下、尚未上行的本端状态（壳据此保证补发拍不缺席）。
-    pub fn has_pending(&self) -> bool {
-        self.local_state.is_some() && self.local_state != self.local_sent
-    }
-
     /// 到期保活：重发当前状态（未在场 / 未到间隔 = None）。
     pub fn keepalive_if_due(&mut self, now: Instant) -> Option<Value> {
         if !self
@@ -174,7 +168,7 @@ impl EphemeralChannel {
             .remotes
             .iter()
             .map(|(id, entry)| {
-                (*id, RemoteState { client_id: *id, peer_id: entry.peer_id.clone(), state: entry.state.clone() })
+                (*id, RemoteState { peer_id: entry.peer_id.clone(), state: entry.state.clone() })
             })
             .collect();
         list.sort_by_key(|(id, _)| *id);
@@ -192,11 +186,6 @@ impl EphemeralChannel {
     /// clock 水位一并保留：重连后迟到的旧帧不得把已离场的端插回来。
     pub fn clear_remotes(&mut self) {
         self.remotes.clear();
-    }
-
-    /// 是否有远端条目（壳据此决定要不要为保活/剔除挂周期拍）。
-    pub fn has_remotes(&self) -> bool {
-        !self.remotes.is_empty()
     }
 
     fn emit(&mut self, now: Instant, state: Value) -> Option<Value> {
@@ -255,13 +244,11 @@ mod tests {
         let now = Instant::now();
         ch.set_local_state(now, json!({ "v": 1 })).expect("首帧");
         assert!(ch.set_local_state(now, json!({ "v": 2 })).is_none());
-        assert!(ch.has_pending());
         assert!(ch.flush(now + Duration::from_millis(10)).is_none(), "未到间隔不补发");
         let flushed = ch
             .flush(now + MIN_INTERVAL)
             .expect("到间隔补发最新一份");
         assert_eq!(flushed["state"], json!({ "v": 2 }));
-        assert!(!ch.has_pending());
         assert!(ch.flush(now + Duration::from_secs(1)).is_none(), "无待发变化");
     }
 
@@ -313,7 +300,7 @@ mod tests {
         assert!(ch.drop_peer("p1"));
         assert!(!ch.drop_peer("p1"));
         assert_eq!(ch.remotes(now).len(), 1);
-        assert_eq!(ch.remotes(now)[0].client_id, 10);
+        assert_eq!(ch.remotes(now)[0].peer_id, "p2");
 
         // 恰好到期的一刻仍算在线（闭区间），超过才剔除
         assert_eq!(ch.remotes(now + TIMEOUT).len(), 1);
@@ -337,7 +324,7 @@ mod tests {
         // 正常离场后，更旧的 state 帧不得把条目插回来（clock 水位保留）
         assert!(ch.apply_remote("p1", &json!({ "clientId": 9, "clock": 6, "state": null }), now));
         assert!(!ch.apply_remote("p1", &payload(5, json!({ "v": 1 })), now));
-        assert!(!ch.has_remotes());
+        assert!(ch.remotes(now).is_empty());
     }
 
     #[test]

@@ -1,7 +1,6 @@
 //! 通用文档会话表：谁打开了哪份文件、归属哪个文档类型与插件、脏 / 错误 / 标题与热态。
-//! 与布局无关、零 I/O：正文真源、保存链与 flush 都在调用方；宿主不推断 `dirty`。
-//! 不变量：会话存在 ⇔ `docs` 有条目；每（插件, 文档类型）至多一个热文档；
-//! 每次打开推进 `open_seq`，带旧序号的回执不得覆盖新状态。
+//! 正文缓冲、合并与落盘都在内容所有者插件，本表只记状态；不变量：会话存在 ⇔ `docs` 有条目，
+//! 每（插件, 文档类型）至多一个热文档，每次打开推进 `open_seq`，旧序号的回执不得覆盖新状态。
 
 use std::collections::BTreeMap;
 
@@ -30,6 +29,13 @@ impl std::fmt::Display for DocId {
     }
 }
 
+/// 正文基线的完整 SHA-256（64 位小写十六进制）：基线只认实际字节，
+/// 用时间戳 / 修改标记推断会把「内容没变」误判成冲突或反过来漏掉冲突。
+pub fn content_rev(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(bytes))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DocSession {
     pub id: DocId,
@@ -43,8 +49,6 @@ pub struct DocSession {
     pub editable: bool,
     pub dirty: bool,
     pub save_error: Option<String>,
-    /// 最近一次确认落盘的版本号；由调用方在保存完成时上报。
-    pub disk_rev: u64,
     /// 建立 / 复用本次会话时的打开序号；旧序号的回执会被拒绝。
     pub open_seq: u64,
 }
@@ -61,13 +65,12 @@ pub struct DocSpec {
 }
 
 /// 插件上报的会话状态：`dirty` 与 `save_error` 每次按上报值覆盖（`None` = 无错误）；
-/// `title` / `disk_rev` 为 `None` 表示不变。
+/// `title` 为 `None` 表示不变。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DocStateUpdate {
     pub dirty: bool,
     pub save_error: Option<String>,
     pub title: Option<String>,
-    pub disk_rev: Option<u64>,
 }
 
 /// 一次读盘回填的归属凭据：身份（插件 id + 请求 id）、序号（打开次序）、世代与路径。
@@ -171,8 +174,8 @@ pub struct DocSessions {
 }
 
 impl DocSessions {
-    /// 建立或复用会话：同一路径复用原条目（保留脏 / 错误状态），并推进打开序号。
-    /// 调用方负责在换文档前 flush；本方法不读盘、不写盘。
+    /// 建立或复用会话：同一路径复用原条目并推进打开序号，脏与错误原样保留。
+    /// 调用方负责在换文档前 flush：保留未落盘状态，重开时的脏拦截才拦得住。本方法不读盘、不写盘。
     pub fn open_or_reuse(&mut self, spec: DocSpec) -> DocId {
         self.seq = self.seq.saturating_add(1);
         let open_seq = self.seq;
@@ -199,7 +202,6 @@ impl DocSessions {
                         editable: spec.editable,
                         dirty: false,
                         save_error: None,
-                        disk_rev: 0,
                         open_seq,
                     },
                 );
@@ -242,6 +244,20 @@ impl DocSessions {
         self.docs.get(id)
     }
 
+    /// 某文档类型的当前热文档；同一类型至多一个热会话，故不必先知道归属插件。
+    pub fn hot_of_type(&self, doc_type: &DocTypeId) -> Option<&DocSession> {
+        let (_, id) = self.hot.iter().find(|((_, kind), _)| kind == doc_type)?;
+        self.docs.get(id)
+    }
+
+    /// 该文档类型的全部会话：换文件前按它清掉同类型的旧会话，不区分冷热。
+    pub fn of_type(&self, doc_type: &DocTypeId) -> impl Iterator<Item = &DocSession> + '_ {
+        let doc_type = doc_type.clone();
+        self.docs
+            .values()
+            .filter(move |session| session.doc_type == doc_type)
+    }
+
     /// 应用插件上报状态；`open_seq` 与条目的当前序号不符时拒绝（乱序回执不得覆盖新状态）。
     pub fn update_state(&mut self, id: &DocId, open_seq: u64, state: DocStateUpdate) -> bool {
         let Some(session) = self.docs.get_mut(id) else { return false };
@@ -252,9 +268,6 @@ impl DocSessions {
         session.save_error = state.save_error;
         if let Some(title) = state.title {
             session.title = title;
-        }
-        if let Some(disk_rev) = state.disk_rev {
-            session.disk_rev = disk_rev;
         }
         true
     }
@@ -307,14 +320,9 @@ impl DocSessions {
         self.docs.get(&DocId::new(path))
     }
 
-    pub fn by_type<'a>(&'a self, plugin_id: &'a str, doc_type: &'a DocTypeId) -> impl Iterator<Item = &'a DocSession> + 'a {
-        self.docs
-            .values()
-            .filter(move |session| session.plugin_id == plugin_id && &session.doc_type == doc_type)
-    }
-
-    pub fn all_open(&self) -> impl Iterator<Item = &DocSession> {
-        self.docs.values()
+    /// 有未落盘修改的会话（按路径序；调用方据 `plugin_id` 找到内容所有者请它落盘）。
+    pub fn dirty(&self) -> impl Iterator<Item = &DocSession> {
+        self.docs.values().filter(|session| session.dirty)
     }
 
     pub fn len(&self) -> usize {
@@ -342,7 +350,7 @@ mod tests {
     }
 
     fn state(dirty: bool, error: Option<&str>) -> DocStateUpdate {
-        DocStateUpdate { dirty, save_error: error.map(Into::into), title: None, disk_rev: None }
+        DocStateUpdate { dirty, save_error: error.map(Into::into), title: None }
     }
 
     #[test]
@@ -357,7 +365,22 @@ mod tests {
         assert_eq!(sessions.len(), 1);
         assert!(sessions.session(&id).unwrap().open_seq > seq, "复用推进打开序号");
         assert_eq!(sessions.by_path("a.md").unwrap().id, id);
-        assert_eq!(sessions.by_type("atelyx.notes", &DocTypeId::new("note")).count(), 1);
+    }
+
+    #[test]
+    fn reuse_keeps_unsaved_state() {
+        let mut sessions = DocSessions::default();
+        let id = sessions.open_or_reuse(spec("a.md", "note"));
+        assert!(sessions.update_state(
+            &id,
+            sessions.session(&id).unwrap().open_seq,
+            state(true, Some("磁盘被外部修改")),
+        ));
+        // 重开同路径不得抹掉未落盘状态：脏拦截读的就是这份
+        sessions.open_or_reuse(spec("a.md", "note"));
+        let session = sessions.session(&id).unwrap();
+        assert!(session.dirty);
+        assert_eq!(session.save_error.as_deref(), Some("磁盘被外部修改"));
     }
 
     #[test]
@@ -390,6 +413,25 @@ mod tests {
         let board = sessions.open_or_reuse(board);
         sessions.set_hot(&board);
         assert!(sessions.hot_of("atelyx.notes", &DocTypeId::new("board")).is_some(), "不同类型可各自有热文档");
+    }
+
+    #[test]
+    fn of_type_lists_every_session_of_the_type() {
+        let mut sessions = DocSessions::default();
+        let a = sessions.open_or_reuse(spec("a.md", "note"));
+        let b = sessions.open_or_reuse(spec("b.md", "note"));
+        sessions.open_or_reuse(spec("c.atb", "table"));
+        assert!(sessions.set_hot(&a));
+        // 冷会话与热会话同等计入：换文件时要清掉同类型的全部旧会话
+        let mut paths: Vec<&str> = sessions
+            .of_type(&DocTypeId::new("note"))
+            .map(|session| session.path.as_str())
+            .collect();
+        paths.sort_unstable();
+        assert_eq!(paths, vec!["a.md", "b.md"]);
+        assert_eq!(sessions.of_type(&DocTypeId::new("note")).count(), 2);
+        assert!(sessions.of_type(&DocTypeId::new("board")).next().is_none());
+        assert!(!sessions.session(&b).unwrap().dirty);
     }
 
     #[test]

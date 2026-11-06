@@ -1,53 +1,78 @@
-//! 笔记插件：只读 / 预览编辑 / 源码三档。正文真源、保存链与协作增量都在宿主，
-//! 插件只持本端副本与编辑态。
+//! 笔记插件：只读 / 预览编辑 / 源码三档。正文真源在本端缓冲，落盘经宿主按磁盘基线
+//! 校验的保存协议，协作经宿主的房间通道收发。
 
+mod collab;
 mod edit;
 mod model;
+mod session;
 mod ui;
 
 use std::sync::{Arc, Mutex};
 
+use atelyx_format::frontmatter::{self, Yaml};
+
 use atelyx_plugin_protocol::event::{
-    self, FileChangeKind, FileChangedPayload, DocChangedPayload, DocPresencePayload,
-    PublishParams,
+    self, DocChangedPayload, DocRestorePayload, FileChangeKind, FileChangedPayload, PublishParams,
 };
 use atelyx_plugin_protocol::frame::{FrameInput, FrameInputParams, FrameTickParams, Key, KeyAction};
 use atelyx_plugin_protocol::method::{
-    ContributionSlot, DocInstanceCloseParams, DocInstanceOpenParams, EditorPrefs, NotificationLevel,
+    content as content_method, CollabMessageParams, ContentPropsReadParams, ContentPropsResult,
+    ContentPropsWriteParams, ContributionSlot, DocInstanceCloseParams, DocInstanceOpenParams,
+    EditorPrefs, HistoryRecordParams, NotificationLevel, PanelFlushDoneParams, PanelFlushParams,
     SurfaceAttachedParams,
 };
+use atelyx_plugin_protocol::service::HostCallParams;
 use atelyx_plugin_sdk::frame_ui::{FrameUi, UiEvent};
 use atelyx_plugin_sdk::{Context, PluginHandler, PluginInfo};
 use tokio::sync::Mutex as AsyncMutex;
 
 use atelyx_plugin_props as props;
+
 use crate::model::{Backlink, Mode, NoteModel, PANEL, SOURCE, WikiSuggest};
 
 /// 插件 id（与 `plugin.json` 一致）。
 const PLUGIN_ID: &str = "atelyx.notes";
 
+/// 单个文档一次保存操作内允许的合流重试次数：磁盘被持续外部改写时以可见失败收场。
+const SAVE_ATTEMPTS: usize = 3;
+
+/// 历史版本合并窗口：窗口内的连续保存并成一版，与表格侧同一口径。
+const HISTORY_COALESCE_MS: i64 = 60_000;
+
+/// 挂着协作文档时的帧拍频率：在场保活与对端剔除按拍推进，静止时不需要更高。
+const COLLAB_TICK_HZ: u16 = 4;
+
 struct NotesPlugin {
     model: Mutex<NoteModel>,
+    /// 热文档唯一，切走的文档留冷缓冲：flush / 关闭按会话身份找到并提交。
+    buffers: Mutex<crate::session::DocBuffers>,
     ui: AsyncMutex<FrameUi>,
     /// 只读面本帧各行顶边（面内坐标）：双击空白时据此挑最近的行。
     rows: ui::RowCache,
     /// 双击空白进入编辑时控件层会按「点空」清掉焦点：事件处理完按活动输入面复位。
     refocus: Mutex<bool>,
+    /// 当前文档的协作状态（正文增量与在场光标）；本地仓库下不产生任何上行。
+    collab: Mutex<collab::Collab>,
 }
 
 impl NotesPlugin {
     fn new() -> Self {
         Self {
             model: Mutex::new(NoteModel::default()),
+            buffers: Mutex::new(crate::session::DocBuffers::default()),
             ui: AsyncMutex::new(FrameUi::new()),
             rows: Arc::new(Mutex::new(Vec::new())),
             refocus: Mutex::new(false),
+            collab: Mutex::new(collab::Collab::new()),
         }
     }
 
     async fn render(&self, ctx: &Context) {
         let mut snapshot = self.model.lock().unwrap().clone_for_view();
+        let collab_active = self.collab.lock().unwrap().is_active();
         let mut frame_ui = self.ui.lock().await;
+        // 在场保活与超时剔除按拍推进：没有协作文档时不要求帧拍
+        frame_ui.set_fps(collab_active.then_some(COLLAB_TICK_HZ));
         snapshot.props.anchor = props::input_anchor(&mut frame_ui, &snapshot);
         if let Err(error) = frame_ui.render(ctx, PANEL, |frame| ui::frame(frame, &snapshot, &self.rows)).await {
             ctx.log_error(&format!("提交笔记面失败：{error}"));
@@ -64,21 +89,46 @@ impl NotesPlugin {
         }
     }
 
-    async fn load(&self, ctx: &Context, path: &str) {
+    /// 按会话身份读盘：宿主回执带 `open_seq`，迟到回执直接丢弃。
+    async fn load(&self, ctx: &Context, doc_id: &str, open_seq: u64) {
         let mode = self.model.lock().unwrap().mode;
-        match ctx.doc_open(path).await {
+        match ctx.doc_open(doc_id, open_seq).await {
             Ok(result) => {
+                // 读盘期间文档已切走：这份正文属于旧会话，不得落到新文档上
+                if !self
+                    .buffers
+                    .lock()
+                    .unwrap()
+                    .is_current(&result.doc_id, result.open_seq)
+                {
+                    return;
+                }
                 {
                     let mut model = self.model.lock().unwrap();
                     let same = model.path.as_deref() == Some(result.path.as_str());
-                    model.load(result.path.clone(), result.text, result.can_write);
+                    model.load(result.path.clone(), result.text.clone(), result.can_write);
                     if same {
                         // 同一篇改名后重开：档位不因换路径而回落
                         model.mode = mode;
                     }
-                    model.dirty = result.dirty;
-                    model.save_error = result.save_error;
+                    model.doc.open(
+                        crate::session::DocKey {
+                            doc_id: result.doc_id.clone(),
+                            open_seq: result.open_seq,
+                        },
+                        &result.text,
+                        result.disk_rev,
+                    );
                 }
+                self.buffers.lock().unwrap().prune(&result.path);
+                // 正文到位后建立协作基线：换文件重建，同文件重开也下发一份新基线
+                let (path, text, selection) = {
+                    let model = self.model.lock().unwrap();
+                    (model.path.clone().unwrap_or_default(), model.text.clone(), model.selection)
+                };
+                let out = self.collab.lock().unwrap().open(&path, &text, selection);
+                self.send_collab(ctx, out).await;
+                self.sync_cursors();
                 self.load_backlinks(ctx, &result.path).await;
                 self.refresh_tags(ctx).await;
                 if self.model.lock().unwrap().wiki_files.is_empty() {
@@ -87,7 +137,7 @@ impl NotesPlugin {
                 self.refresh_images(ctx).await;
             }
             Err(error) => {
-                ctx.log_error(&format!("打开笔记失败（{path}）：{error}"));
+                ctx.log_error(&format!("打开笔记失败（{doc_id}）：{error}"));
                 // 打开失败不得沿用上一篇正文（下一次编辑会被提交到新路径）。
                 let mut model = self.model.lock().unwrap();
                 model.clear();
@@ -206,7 +256,6 @@ impl NotesPlugin {
             }
             let mut text = model.text.clone();
             text.replace_range(from..to, &replacement);
-            model.edit_text(text.clone());
             model.wiki = None;
             (text, from + replacement.len())
         };
@@ -251,40 +300,354 @@ impl NotesPlugin {
         }
     }
 
-    /// 一次本地编辑：先写模型再提交宿主（宿主合并协作远端内容后回发 `doc:changed`）。
+    /// 一次本地编辑：先写模型，再按会话身份把脏状态报给宿主（宿主只记账，不合并正文）。
     async fn commit_edit(&self, ctx: &Context, text: String, selection: Option<(usize, usize)>) {
-        let path = {
+        let (changed, key) = {
             let mut model = self.model.lock().unwrap();
-            if model.text != text {
+            let changed = model.text != text;
+            if changed {
                 model.edit_text(text.clone());
             }
             model.selection = selection;
-            model.path.clone()
+            (changed, model.doc.key().cloned())
         };
-        let Some(path) = path else { return };
-        let (anchor, head) = selection.unwrap_or((text.len(), text.len()));
-        if let Err(error) = ctx.doc_edit(&path, &text, Some(anchor), Some(head)).await {
-            ctx.log_error(&format!("提交笔记编辑失败（{path}）：{error}"));
+        if changed {
+            let out = self.collab.lock().unwrap().edit(&text, selection);
+            self.send_collab(ctx, out).await;
+            self.sync_cursors();
+        }
+        if let Some(key) = key {
+            self.report_state(ctx, &key).await;
+        }
+    }
+
+    /// 把当前脏状态与保存错误报给宿主：宿主据此排自动保存并在标签栏显示胶囊。
+    async fn report_state(&self, ctx: &Context, key: &crate::session::DocKey) {
+        let (dirty, error) = {
+            let model = self.model.lock().unwrap();
+            (model.dirty, model.save_error.clone())
+        };
+        if let Err(e) = ctx.doc_state(&key.doc_id, key.open_seq, dirty, error.as_deref()).await {
+            ctx.log_error(&format!("上报笔记会话状态失败（{}）：{e}", key.doc_id));
             // 宿主拒绝（超限 / 只读身份 / 会话已换）时必须可见：否则界面一直停在「未保存」。
-            self.model.lock().unwrap().save_error = Some(error.to_string());
+            self.model.lock().unwrap().save_error = Some(e.to_string());
         }
     }
 
-    async fn save(&self, ctx: &Context, manual: bool) {
-        let path = self.model.lock().unwrap().path.clone();
-        let Some(path) = path else { return };
-        if let Err(error) = ctx.doc_save(&path, manual).await {
-            ctx.log_error(&format!("请求保存失败（{path}）：{error}"));
-            self.model.lock().unwrap().save_error = Some(error.to_string());
+    /// 记一版历史：宿主不持正文，记版所需的全文只有本插件有。
+    /// 给出合并窗口时窗口内的连续编辑并成一版；回滚按独立动作记版，不并入编辑窗口。
+    async fn record_history(
+        &self,
+        ctx: &Context,
+        path: &str,
+        text: &str,
+        action: &str,
+        coalesce_ms: Option<i64>,
+    ) {
+        let params = HistoryRecordParams {
+            kind: "note".to_string(),
+            file: path.to_string(),
+            content: text.to_string(),
+            action: Some(action.to_string()),
+            coalesce_ms,
+            note: None,
+        };
+        if let Err(error) = ctx.history_record(&params).await {
+            // 历史是侧车：失败只留可读原因，不把已完成的正文保存判成失败
+            ctx.log_error(&format!("记录笔记历史失败（{path}）：{error}"));
         }
     }
 
-    async fn notify_caret(&self, ctx: &Context, selection: Option<(usize, usize)>) {
-        let path = self.model.lock().unwrap().path.clone();
-        let Some(path) = path else { return };
-        let Some((anchor, head)) = selection else { return };
-        if let Err(error) = ctx.doc_awareness(&path, Some(anchor), Some(head)).await {
-            ctx.log_error(&format!("上报笔记选区失败（{path}）：{error}"));
+    /// 保存热文档：正文全文提交，宿主按 `expected_rev` 校验后原子写；冲突拿磁盘原文合流重试。
+    async fn save_hot(&self, ctx: &Context, manual: bool) -> Result<(), String> {
+        self.save_hot_as(ctx, manual, "edit", Some(HISTORY_COALESCE_MS)).await
+    }
+
+    /// 同上，落盘成功后按给定动作记版：回滚换掉的整篇正文不与编辑窗口合并。
+    async fn save_hot_as(
+        &self,
+        ctx: &Context,
+        manual: bool,
+        action: &str,
+        coalesce_ms: Option<i64>,
+    ) -> Result<(), String> {
+        for _ in 0..SAVE_ATTEMPTS {
+            let (key, request) = {
+                let mut model = self.model.lock().unwrap();
+                if !model.can_write || !model.dirty {
+                    return Ok(());
+                }
+                let Some(key) = model.doc.key().cloned() else { return Ok(()) };
+                let text = model.text.clone();
+                let Some(request) = model.doc.begin_save(&text) else {
+                    return Ok(());
+                };
+                (key, request)
+            };
+            let result = match ctx
+                .doc_save(
+                    &key.doc_id,
+                    key.open_seq,
+                    &request.expected_rev,
+                    &request.text,
+                    manual,
+                )
+                .await
+            {
+                Ok(result) => result,
+                Err(error) => {
+                    // 宿主调用失败没有回执：撤回在途请求，正文保持脏并可见原因
+                    let message = error.to_string();
+                    {
+                        let mut model = self.model.lock().unwrap();
+                        model.doc.abort_save(&request);
+                        model.dirty = true;
+                        model.save_error = Some(message.clone());
+                    }
+                    self.report_state(ctx, &key).await;
+                    return Err(message);
+                }
+            };
+            // 会话在写盘期间被切走：在途请求只留在该文档的冷缓冲快照里，
+            // 不撤回它就再也提交不了；保存没写成，脏状态必须报回去
+            let stale = {
+                let mut buffers = self.buffers.lock().unwrap();
+                if buffers.is_current(&key.doc_id, key.open_seq) {
+                    None
+                } else {
+                    let snapshot = buffers.cold(&key).cloned();
+                    if let Some(mut doc) = snapshot.clone() {
+                        doc.state.abort_save(&request);
+                        doc.dirty = true;
+                        buffers.store_cold(key.clone(), doc);
+                    }
+                    Some(snapshot.is_some())
+                }
+            };
+            if let Some(report) = stale {
+                if report {
+                    self.report_cold_state(ctx, &key, true, None).await;
+                }
+                return Err("文档会话已切换，本次保存作废".to_string());
+            }
+            let mut recorded = None;
+            let outcome = {
+                let mut model = self.model.lock().unwrap();
+                let current = model.text.clone();
+                let outcome = model.doc.finish(&request, &current, result);
+                match &outcome {
+                    crate::session::SaveOutcome::Clean => {
+                        model.dirty = false;
+                        model.save_error = None;
+                        // 落盘成功：磁盘内容成为三方合并的新共同祖先
+                        if let Some(path) = model.path.clone() {
+                            self.collab.lock().unwrap().flushed(&path, &request.text);
+                            recorded = Some((path, request.text.clone()));
+                        }
+                    }
+                    crate::session::SaveOutcome::Dirty => {
+                        model.dirty = true;
+                        model.save_error = None;
+                    }
+                    crate::session::SaveOutcome::Merged { text } => {
+                        model.replace_text(text.clone());
+                        model.dirty = true;
+                        model.save_error = None;
+                        // 合流结果含对端已落盘内容：静默对齐，不得当成本端新增广播出去
+                        self.collab.lock().unwrap().aligned(text);
+                    }
+                    crate::session::SaveOutcome::Failed(message) => {
+                        model.dirty = true;
+                        model.save_error = Some(message.clone());
+                    }
+                    crate::session::SaveOutcome::Stale => {}
+                }
+                outcome
+            };
+            match outcome {
+                crate::session::SaveOutcome::Clean | crate::session::SaveOutcome::Stale => {
+                    self.report_state(ctx, &key).await;
+                    if let Some((path, text)) = recorded {
+                        self.record_history(ctx, &path, &text, action, coalesce_ms).await;
+                    }
+                    return Ok(());
+                }
+                crate::session::SaveOutcome::Dirty
+                | crate::session::SaveOutcome::Merged { .. } => continue,
+                crate::session::SaveOutcome::Failed(message) => {
+                    self.report_state(ctx, &key).await;
+                    return Err(message);
+                }
+            }
+        }
+        let message = "磁盘持续被外部修改，保存未完成".to_string();
+        let key = {
+            let mut model = self.model.lock().unwrap();
+            model.save_error = Some(message.clone());
+            model.doc.key().cloned()
+        };
+        if let Some(key) = key {
+            self.report_state(ctx, &key).await;
+        }
+        Err(message)
+    }
+
+    /// 保存冷文档：切走但未关闭的文档按会话身份取冷缓冲提交。
+    async fn save_cold(&self, ctx: &Context, key: crate::session::DocKey, manual: bool) -> Result<(), String> {
+        for _ in 0..SAVE_ATTEMPTS {
+            let Some(mut cold) = self.buffers.lock().unwrap().cold(&key).cloned() else {
+                return Ok(());
+            };
+            if !cold.dirty || !cold.state.is_current(&key.doc_id, key.open_seq) {
+                return Ok(());
+            }
+            let Some(request) = cold.state.begin_save(&cold.text) else {
+                return Err("该文档已有在途保存，稍后重试".to_string());
+            };
+            let result = match ctx
+                .doc_save(
+                    &key.doc_id,
+                    key.open_seq,
+                    &request.expected_rev,
+                    &request.text,
+                    manual,
+                )
+                .await
+            {
+                Ok(result) => result,
+                Err(error) => {
+                    let message = error.to_string();
+                    cold.state.abort_save(&request);
+                    cold.dirty = true;
+                    self.buffers.lock().unwrap().store_cold(key.clone(), cold);
+                    self.report_cold_state(ctx, &key, true, Some(&message)).await;
+                    return Err(message);
+                }
+            };
+            let outcome = cold.state.finish(&request, &cold.text, result);
+            match outcome {
+                crate::session::SaveOutcome::Clean => {
+                    cold.dirty = false;
+                    self.buffers.lock().unwrap().store_cold(key.clone(), cold);
+                    self.report_cold_state(ctx, &key, false, None).await;
+                    // 冷文档只按普通编辑记版：整篇回滚的版本由发起回滚的那次保存另记
+                    self.record_history(ctx, &key.doc_id, &request.text, "edit", Some(HISTORY_COALESCE_MS))
+                        .await;
+                    return Ok(());
+                }
+                crate::session::SaveOutcome::Dirty => {
+                    cold.dirty = true;
+                    self.buffers.lock().unwrap().store_cold(key.clone(), cold);
+                }
+                crate::session::SaveOutcome::Merged { text } => {
+                    cold.text = text;
+                    cold.dirty = true;
+                    self.buffers.lock().unwrap().store_cold(key.clone(), cold);
+                }
+                crate::session::SaveOutcome::Failed(message) => {
+                    cold.dirty = true;
+                    self.buffers.lock().unwrap().store_cold(key.clone(), cold);
+                    self.report_cold_state(ctx, &key, true, Some(&message)).await;
+                    return Err(message);
+                }
+                crate::session::SaveOutcome::Stale => return Ok(()),
+            }
+        }
+        self.report_cold_state(ctx, &key, true, Some("磁盘持续被外部修改，保存未完成")).await;
+        Err("磁盘持续被外部修改，保存未完成".to_string())
+    }
+
+    /// 冷文档的脏状态与保存错误上行（热文档走模型，冷文档只有缓冲里的状态）。
+    async fn report_cold_state(
+        &self,
+        ctx: &Context,
+        key: &crate::session::DocKey,
+        dirty: bool,
+        error: Option<&str>,
+    ) {
+        if let Err(e) = ctx.doc_state(&key.doc_id, key.open_seq, dirty, error).await {
+            ctx.log_error(&format!("上报冷文档状态失败（{}）：{e}", key.doc_id));
+        }
+    }
+
+    /// 宿主落盘请求：按会话身份提交热 / 冷文档正文。
+    /// 身份已不在本端（插件重开过或宿主先结束了会话）即报错：谎报送 Ok 会让宿主判成落盘成功。
+    async fn flush_document(&self, ctx: &Context, flush: &PanelFlushParams) -> Result<(), String> {
+        let (Some(doc_id), Some(open_seq)) = (flush.doc_id.as_deref(), flush.open_seq) else {
+            // 笔记的落盘一律按会话身份寻址：无身份请求无处可写，谎报成功会让宿主清掉脏标记
+            return Err("落盘请求缺少文档会话身份".to_string());
+        };
+        let key = crate::session::DocKey { doc_id: doc_id.to_string(), open_seq };
+        if self.buffers.lock().unwrap().is_current(&key.doc_id, key.open_seq) {
+            return self.save_hot(ctx, false).await;
+        }
+        if self.buffers.lock().unwrap().cold(&key).is_some() {
+            return self.save_cold(ctx, key, false).await;
+        }
+        Err("插件已不持有该文档会话的正文，无法落盘".to_string())
+    }
+
+    /// 属性读服务：只认当前热文档的会话身份。
+    fn props_read_call(&self, params: &HostCallParams) -> Result<ContentPropsResult, String> {
+        let request: ContentPropsReadParams = serde_json::from_value(params.params.clone())
+            .map_err(|error| format!("属性读取参数不可解析：{error}"))?;
+        self.props_session(&request.doc_id, request.open_seq)?;
+        let model = self.model.lock().unwrap();
+        let parsed = frontmatter::parse(&model.text);
+        let closed = frontmatter::block_end(&model.text).is_some();
+        Ok(ContentPropsResult {
+            path: model.path.clone().unwrap_or_default(),
+            fingerprint: text_fingerprint(&model.text),
+            frontmatter: if closed { parsed.fm_prefix } else { String::new() },
+            present: model.text.starts_with("---"),
+            parsed: parsed.ok && closed,
+            editable: model.can_write,
+        })
+    }
+
+    /// 属性写服务：`value` 是属性面板交回的草稿（`frontmatter` + `fingerprint`），
+    /// 按它重写全文并提交编辑协议，落盘仍走保存协议。
+    async fn props_write_call(&self, ctx: &Context, params: &HostCallParams) -> Result<(), String> {
+        let request: ContentPropsWriteParams = serde_json::from_value(params.params.clone())
+            .map_err(|error| format!("属性写回参数不可解析：{error}"))?;
+        self.props_session(&request.doc_id, request.open_seq)?;
+        let draft = PropsDraft::parse(&request.value)?;
+        let next = {
+            let model = self.model.lock().unwrap();
+            if !model.can_write {
+                return Err("文档只读，属性未写入".to_string());
+            }
+            if draft.fingerprint != text_fingerprint(&model.text) {
+                return Err("文档内容已变化，属性未写入".to_string());
+            }
+            let data = if draft.frontmatter.trim().is_empty() {
+                Vec::new()
+            } else {
+                let parsed = frontmatter::parse(&draft.frontmatter);
+                if !parsed.ok || frontmatter::block_end(&draft.frontmatter).is_none() {
+                    return Err("属性块无法解析".to_string());
+                }
+                parsed
+                    .data
+                    .as_map()
+                    .map(<[(String, Yaml)]>::to_vec)
+                    .unwrap_or_default()
+            };
+            let next = model.text_with_props(data);
+            (next != model.text).then_some(next)
+        };
+        if let Some(next) = next {
+            self.commit_edit(ctx, next, None).await;
+        }
+        Ok(())
+    }
+
+    /// 属性转发的会话校验：会话已关闭或序号过期时拒绝，不把属性写到别的文档上。
+    fn props_session(&self, doc_id: &str, open_seq: u64) -> Result<(), String> {
+        if self.model.lock().unwrap().doc.is_current(doc_id, open_seq) {
+            Ok(())
+        } else {
+            Err("文档会话已失效，请重新打开".to_string())
         }
     }
 
@@ -353,7 +716,7 @@ impl NotesPlugin {
         if save_key(&input) {
             // 未改动不写盘：空跑一次保存会多出一条历史版本。
             if self.model.lock().unwrap().dirty {
-                self.save(ctx, true).await;
+                let _ = self.save_hot(ctx, true).await;
                 self.render(ctx).await;
             }
             return;
@@ -395,7 +758,11 @@ impl NotesPlugin {
                 UiEvent::Focus { id, focused: false } => self.on_blur(ctx, &id).await,
                 UiEvent::Caret { id, caret, anchor } => {
                     let selection = selection_of(&self.model.lock().unwrap(), &id, caret, anchor);
-                    self.notify_caret(ctx, selection).await;
+                    self.model.lock().unwrap().selection = selection;
+                    let text = self.model.lock().unwrap().text.clone();
+                    let out = self.collab.lock().unwrap().caret(&text, selection);
+                    self.send_collab(ctx, out).await;
+                    self.sync_cursors();
                     if caret == anchor {
                         let value = {
                             let model = self.model.lock().unwrap();
@@ -884,10 +1251,9 @@ impl NotesPlugin {
         };
         let Some((source, sel_anchor, sel_caret)) = change else { return false };
         let (text, base) = {
-            let mut model = self.model.lock().unwrap();
+            let model = self.model.lock().unwrap();
             let Some((base, _)) = model.block_source(index) else { return false };
             let Some(text) = model.replace_block(index, &source) else { return false };
-            model.edit_text(text.clone());
             (text, base)
         };
         {
@@ -954,7 +1320,6 @@ impl NotesPlugin {
                 let Some((text, at)) = self.model.lock().unwrap().join_gap_line(offset) else {
                     return false;
                 };
-                self.model.lock().unwrap().edit_text(text.clone());
                 self.commit_edit(ctx, text, Some((at, at))).await;
                 self.focus_at(ctx, at).await;
                 true
@@ -977,7 +1342,6 @@ impl NotesPlugin {
                 let Some((text, at)) = self.model.lock().unwrap().remove_newline(end) else {
                     return false;
                 };
-                self.model.lock().unwrap().edit_text(text.clone());
                 self.commit_edit(ctx, text, Some((at, at))).await;
                 self.focus_at(ctx, at).await;
                 true
@@ -1035,7 +1399,6 @@ impl NotesPlugin {
                 let Some((text, at)) = self.model.lock().unwrap().join_gap_line(offset) else {
                     return false;
                 };
-                self.model.lock().unwrap().edit_text(text.clone());
                 self.commit_edit(ctx, text, Some((at, at))).await;
                 self.focus_at(ctx, at).await;
                 true
@@ -1058,7 +1421,6 @@ impl NotesPlugin {
                 let Some((text, at)) = self.model.lock().unwrap().remove_newline(end) else {
                     return false;
                 };
-                self.model.lock().unwrap().edit_text(text.clone());
                 self.commit_edit(ctx, text, Some((at, at))).await;
                 self.focus_at(ctx, at).await;
                 true
@@ -1128,10 +1490,6 @@ impl NotesPlugin {
             };
             selection_of_edit(edit, anchor <= caret)
         };
-        {
-            let mut model = self.model.lock().unwrap();
-            model.edit_text(text.clone());
-        }
         self.commit_edit(ctx, text.clone(), Some((sel_anchor, sel_caret))).await;
         {
             let mut frame_ui = self.ui.lock().await;
@@ -1224,9 +1582,8 @@ impl NotesPlugin {
         };
         let Some((source, sel_anchor, sel_caret)) = change else { return false };
         let text = {
-            let mut model = self.model.lock().unwrap();
+            let model = self.model.lock().unwrap();
             let Some(text) = model.replace_item(block, item, &source) else { return false };
-            model.edit_text(text.clone());
             text
         };
         // 置光标会折叠选区：落点取光标端，选区两端仍按实际更新上报给协作与撤销快照
@@ -1318,7 +1675,7 @@ impl NotesPlugin {
         match id {
             "note:retry" => {
                 self.model.lock().unwrap().save_error = None;
-                self.save(ctx, true).await;
+                let _ = self.save_hot(ctx, true).await;
             }
             "note:error-dismiss" => self.model.lock().unwrap().save_error = None,
             "note:menu" => {
@@ -1662,7 +2019,7 @@ impl NotesPlugin {
         }
         if dirty {
             self.model.lock().unwrap().pending_rename = Some(name);
-            self.save(ctx, false).await;
+            let _ = self.save_hot(ctx, false).await;
             return;
         }
         if let Err(error) = ctx.doc_rename(&path, &name).await {
@@ -1701,13 +2058,12 @@ impl NotesPlugin {
         };
         if let Some((from, to)) = range {
             let (text, at) = {
-                let mut model = self.model.lock().unwrap();
+                let model = self.model.lock().unwrap();
                 if model.mode != Mode::Edit || !model.can_write {
                     return;
                 }
                 let caret = caret.map_or(value.len(), |(caret, _)| caret);
                 let (text, at) = model.replace_range(from, to, &value, caret);
-                model.edit_text(text.clone());
                 (text, at)
             };
             self.refresh_wiki(id, &value, caret.map_or(value.len(), |(caret, _)| caret)).await;
@@ -1717,7 +2073,7 @@ impl NotesPlugin {
         }
         let value_len = value.len();
         let (text, selection, handoff) = {
-            let mut model = self.model.lock().unwrap();
+            let model = self.model.lock().unwrap();
             if model.mode == Mode::Read || !model.can_write {
                 return;
             }
@@ -1734,7 +2090,6 @@ impl NotesPlugin {
                 let Some(next) = model.replace_block(index, &value) else { return };
                 next
             };
-            model.edit_text(next.clone());
             let (caret, anchor) = caret.unwrap_or((value_len, value_len));
             let selection = selection_of(&model, id, caret, anchor);
             // 空笔记敲出第一个块后，编辑面 id 从 `EMPTY_EDIT` 换成块 0：把焦点一并交给它，
@@ -1952,6 +2307,50 @@ fn selection_of(
     Some((clamp(anchor), clamp(caret)))
 }
 
+/// 宿主通知是否属于插件当前热文档：带会话身份时按身份判定，缺身份时退回路径匹配。
+fn doc_identity_matches(
+    model: &NoteModel,
+    doc_id: Option<&str>,
+    open_seq: Option<u64>,
+    path: Option<&str>,
+) -> bool {
+    match (doc_id, open_seq) {
+        (Some(doc_id), Some(open_seq)) => model.doc.is_current(doc_id, open_seq),
+        _ => match path {
+            Some(path) => model.path.as_deref() == Some(path),
+            None => false,
+        },
+    }
+}
+
+/// 属性面板交回的草稿：本插件 props.read 回执里的 frontmatter 与 fingerprint 原样带回。
+/// value 的具体形状由内容所有者定义，宿主只转发。
+struct PropsDraft {
+    frontmatter: String,
+    fingerprint: String,
+}
+
+impl PropsDraft {
+    fn parse(value: &serde_json::Value) -> Result<Self, String> {
+        let field = |name: &str| {
+            value
+                .get(name)
+                .and_then(|item| item.as_str())
+                .unwrap_or_default()
+                .to_string()
+        };
+        Ok(Self { frontmatter: field("frontmatter"), fingerprint: field("fingerprint") })
+    }
+}
+
+/// 属性读写回执的内容指纹：同一进程内对当前正文取摘要，只用于拒绝把属性块写到已变的文档上。
+fn text_fingerprint(text: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
 /// Ctrl/Cmd+S = 手动保存（面持有键盘焦点时宿主快捷键让位，由插件显式转发）。
 fn save_key(input: &FrameInput) -> bool {
     let FrameInput::Key { key, action, modifiers, .. } = input else { return false };
@@ -1989,13 +2388,25 @@ impl PluginHandler for NotesPlugin {
         {
             ctx.log_error(&format!("注册笔记面板失败：{error}"));
         }
+        if let Err(error) = ctx
+            .register_service(
+                content_method::SERVICE,
+                &[content_method::PROPS_READ, content_method::PROPS_WRITE],
+            )
+            .await
+        {
+            ctx.log_error(&format!("注册笔记属性服务失败：{error}"));
+        }
         for name in [
             event::name::DOC_CHANGED,
-            event::name::DOC_PRESENCE,
+            event::name::DOC_RESTORE,
             event::name::EDITOR_PREFS_CHANGED,
             event::name::VAULT_SWITCH,
             event::name::VAULT_FILE_CHANGED,
             event::name::VAULT_FILES_CHANGED,
+            event::name::PANEL_FLUSH,
+            event::name::SPACE_PEERS_CHANGED,
+            event::name::SPACE_RESYNC,
         ] {
             if let Err(error) = ctx.subscribe(name).await {
                 ctx.log_error(&format!("订阅 {name} 失败：{error}"));
@@ -2020,21 +2431,79 @@ impl PluginHandler for NotesPlugin {
             return;
         }
         self.ui.lock().await.refresh_theme();
-        self.load(ctx, &params.path).await;
+        let key = crate::session::DocKey {
+            doc_id: params.doc_id.clone(),
+            open_seq: params.open_seq,
+        };
+        // 旧热文档冻结进冷缓冲：切走后 flush / 关闭仍能按身份提交它
+        let previous = {
+            let model = self.model.lock().unwrap();
+            let buffers = self.buffers.lock().unwrap();
+            buffers.hot().filter(|_| model.path.is_some()).map(|old| {
+                (
+                    old.clone(),
+                    crate::session::ColdDoc {
+                        text: model.text.clone(),
+                        dirty: model.dirty,
+                        state: model.doc.clone(),
+                    },
+                )
+            })
+        };
+        self.buffers.lock().unwrap().activate(key, previous);
+        let same = self
+            .model
+            .lock()
+            .unwrap()
+            .path
+            .as_deref()
+            == Some(params.path.as_str());
+        if !same {
+            self.model.lock().unwrap().clear();
+        }
+        self.refresh_room(ctx).await;
+        self.load(ctx, &params.doc_id, params.open_seq).await;
     }
 
     async fn on_doc_close(&self, ctx: &Context, params: DocInstanceCloseParams) {
         if params.surface_id != PANEL {
             return;
         }
-        let path = self.model.lock().unwrap().path.clone();
-        if path.as_deref() == Some(params.path.as_str()) {
-            if let Err(error) = ctx.doc_close(&params.path).await {
-                ctx.log_error(&format!("关闭笔记失败（{}）：{error}", params.path));
+        let key = crate::session::DocKey {
+            doc_id: params.doc_id.clone(),
+            open_seq: params.open_seq,
+        };
+        let hot = self
+            .buffers
+            .lock()
+            .unwrap()
+            .is_current(&params.doc_id, params.open_seq);
+        if hot {
+            let out = self.collab.lock().unwrap().close();
+            self.send_collab(ctx, out).await;
+            // 落盘失败即中止关闭：缓冲与正文都留着，宿主那边会话不结束，用户可以重试
+            if let Err(error) = self.save_hot(ctx, false).await {
+                ctx.log_error(&format!("关闭前落盘失败（{}）：{error}", params.doc_id));
+                self.render(ctx).await;
+                return;
             }
+            if let Err(error) = ctx.doc_close(&params.doc_id, params.open_seq).await {
+                ctx.log_error(&format!("关闭笔记失败（{}）：{error}", params.doc_id));
+            }
+            self.buffers.lock().unwrap().forget(&key);
             self.model.lock().unwrap().clear();
             // 关档后宿主仍持有上一帧：必须交一帧空态，否则面板停在旧文档
             self.render(ctx).await;
+        } else if self.buffers.lock().unwrap().cold(&key).is_some() {
+            // 冷文档被关：先提交冷缓冲正文，失败即中止（同热文档口径）
+            if let Err(error) = self.save_cold(ctx, key.clone(), false).await {
+                ctx.log_error(&format!("关闭前落盘失败（{}）：{error}", params.doc_id));
+                return;
+            }
+            if let Err(error) = ctx.doc_close(&params.doc_id, params.open_seq).await {
+                ctx.log_error(&format!("关闭笔记失败（{}）：{error}", params.doc_id));
+            }
+            self.buffers.lock().unwrap().forget(&key);
         }
     }
 
@@ -2045,26 +2514,19 @@ impl PluginHandler for NotesPlugin {
                     ctx.log_error("笔记状态载荷不可解析");
                     return;
                 };
-                let changed = {
-                    let mut model = self.model.lock().unwrap();
-                    if model.path.as_deref() != Some(payload.path.as_str()) {
+                {
+                    let model = self.model.lock().unwrap();
+                    // 会话身份不符即迟到通知：不得把旧文档的状态盖到新文档
+                    if !doc_identity_matches(
+                        &model,
+                        payload.doc_id.as_deref(),
+                        payload.open_seq,
+                        Some(&payload.path),
+                    ) {
                         return;
                     }
-                    let changed = payload.text.is_some();
-                    if let Some(text) = payload.text {
-                        model.replace_text(text);
-                        // 远端整篇换文会让槽位下标失效：丢弃在途槽编辑，避免提交到别的属性上
-                        model.props.editing = None;
-                        model.props.draft.clear();
-                        props::reset_suggest(&mut *model);
-                    }
-                    model.dirty = payload.dirty;
-                    model.save_error = payload.save_error;
-                    changed
-                };
-                if changed {
-                    self.reset_inputs().await;
                 }
+                // 判脏方是本插件：只把宿主回执当作「可以重试改名」的信号，不反向采纳落盘状态
                 let (pending, dirty, path) = {
                     let mut model = self.model.lock().unwrap();
                     let pending = if model.dirty { None } else { model.pending_rename.take() };
@@ -2083,35 +2545,41 @@ impl PluginHandler for NotesPlugin {
                 self.refresh_images(ctx).await;
                 self.render(ctx).await;
             }
-            event::name::DOC_PRESENCE => {
-                let Ok(payload) = serde_json::from_value::<DocPresencePayload>(params.payload) else {
-                    ctx.log_error("笔记在场载荷不可解析");
+            event::name::DOC_RESTORE => {
+                let Ok(payload) = serde_json::from_value::<DocRestorePayload>(params.payload) else {
+                    ctx.log_error("回滚载荷不可解析");
                     return;
                 };
-                let next: Vec<crate::model::RemoteCursor> = payload
-                    .cursors
-                    .into_iter()
-                    .map(|cursor| crate::model::RemoteCursor {
-                        name: cursor.name,
-                        color: cursor.color,
-                        anchor: cursor.anchor,
-                        head: cursor.head,
-                    })
-                    .collect();
-                let changed = {
+                let accepted = {
                     let mut model = self.model.lock().unwrap();
-                    if payload.path.as_deref() != model.path.as_deref() {
+                    if !doc_identity_matches(&model, Some(&payload.doc_id), Some(payload.open_seq), None) {
                         return;
                     }
-                    if model.remote == next {
-                        return;
+                    if model.text != payload.content {
+                        model.replace_text(payload.content.clone());
+                        // 整篇换文会让槽位下标失效：丢弃在途槽编辑，避免提交到别的属性上
+                        model.props.editing = None;
+                        model.props.draft.clear();
+                        props::reset_suggest(&mut *model);
+                        let restored = model.text.clone();
+                        model.doc.adopt_text(&restored);
+                        model.dirty = true;
+                        true
+                    } else {
+                        false
                     }
-                    model.remote = next;
-                    true
                 };
-                if changed {
-                    self.render(ctx).await;
+                if !accepted {
+                    return;
                 }
+                // 协作文档同步到回滚后的正文：否则下一次差分会把回滚掉的内容当本端新增再发出去
+                let text = self.model.lock().unwrap().text.clone();
+                self.collab.lock().unwrap().aligned(&text);
+                self.reset_inputs().await;
+                if let Err(error) = self.save_hot_as(ctx, false, "restore", None).await {
+                    ctx.log_error(&format!("回滚后落盘失败：{error}"));
+                }
+                self.render(ctx).await;
             }
             event::name::EDITOR_PREFS_CHANGED => {
                 let Ok(prefs) = serde_json::from_value::<EditorPrefs>(params.payload) else {
@@ -2122,8 +2590,39 @@ impl PluginHandler for NotesPlugin {
                 self.render(ctx).await;
             }
             event::name::VAULT_SWITCH => {
+                self.buffers.lock().unwrap().clear();
                 self.model.lock().unwrap().clear();
+                self.refresh_room(ctx).await;
                 self.refresh_wiki_files(ctx).await;
+                self.render(ctx).await;
+            }
+            event::name::SPACE_PEERS_CHANGED => {
+                self.refresh_room(ctx).await;
+                self.sync_cursors();
+                self.render(ctx).await;
+            }
+            event::name::SPACE_RESYNC => {
+                // 断连期间的帧已丢失：重发基线与握手，强制重发在场身份
+                let out = self.collab.lock().unwrap().resync();
+                self.send_collab(ctx, out).await;
+            }
+            event::name::PANEL_FLUSH => {
+                let Ok(flush) = serde_json::from_value::<PanelFlushParams>(params.payload) else {
+                    ctx.log_error("落盘请求载荷不可解析");
+                    return;
+                };
+                let result = self.flush_document(ctx, &flush).await;
+                let done = PanelFlushDoneParams {
+                    target: Some(flush.target),
+                    token: flush.token,
+                    doc_id: flush.doc_id,
+                    open_seq: flush.open_seq,
+                    ok: result.is_ok(),
+                    error: result.err(),
+                };
+                if let Err(error) = ctx.panel_flush_done(&done).await {
+                    ctx.log_error(&format!("回报落盘结果失败：{error}"));
+                }
                 self.render(ctx).await;
             }
             event::name::VAULT_FILES_CHANGED => {
@@ -2143,44 +2642,213 @@ impl PluginHandler for NotesPlugin {
                     ctx.log_error("仓库文件变更载荷不可解析");
                     return;
                 };
-                let path = self.model.lock().unwrap().path.clone();
-                match (payload.kind, path) {
-                    (FileChangeKind::Renamed, Some(path)) => {
-                        if payload.old_path.as_deref() == Some(path.as_str()) {
-                            // 改名后宿主会话与文档实例已换路：先记下新路径，重开时按「同一篇」保留档位。
-                            self.model.lock().unwrap().path = Some(payload.path.clone());
-                            self.load(ctx, &payload.path).await;
+                if matches!(payload.kind, FileChangeKind::Deleted) {
+                    let path = self.model.lock().unwrap().path.clone();
+                    if path.as_deref() == Some(payload.path.as_str()) {
+                        let key = self.model.lock().unwrap().doc.key().cloned();
+                        if let Some(key) = key {
+                            self.buffers.lock().unwrap().forget(&key);
                         }
-                    }
-                    (FileChangeKind::Deleted, Some(path)) if payload.path == path => {
                         self.model.lock().unwrap().clear();
                         self.render(ctx).await;
+                        return;
                     }
-                    (_, Some(path)) => {
-                        // 探测结论按 markdown 原始 src 缓存，变更路径是仓库相对路径：同一条目按尾部匹配清掉
-                        self.model
-                            .lock()
-                            .unwrap()
-                            .image_probe
-                            .retain(|src, _| !crate::model::image_src_matches(src, &payload.path));
-                        self.load_backlinks(ctx, &path).await;
-                        self.refresh_images(ctx).await;
-                        self.render(ctx).await;
-                    }
-                    _ => {}
                 }
+                if matches!(payload.kind, FileChangeKind::Renamed) {
+                    if let Some(old) = payload.old_path.as_deref() {
+                        self.follow_rename(ctx, old, &payload.path).await;
+                    }
+                }
+                // 探测结论按 markdown 原始 src 缓存，变更路径是仓库相对路径：同一条目按尾部匹配清掉
+                self.model
+                    .lock()
+                    .unwrap()
+                    .image_probe
+                    .retain(|src, _| !crate::model::image_src_matches(src, &payload.path));
+                let path = self.model.lock().unwrap().path.clone();
+                if let Some(path) = path {
+                    self.load_backlinks(ctx, &path).await;
+                }
+                self.refresh_images(ctx).await;
+                self.render(ctx).await;
             }
             _ => {}
         }
     }
 
+    async fn on_service_call(&self, ctx: &Context, params: HostCallParams) {
+        let result = if params.service != content_method::SERVICE {
+            Err(format!("未提供该服务：{}", params.service))
+        } else {
+            match params.method.as_str() {
+                content_method::PROPS_READ => self
+                    .props_read_call(&params)
+                    .and_then(|result| {
+                        serde_json::to_value(result)
+                            .map_err(|error| format!("属性回执不可序列化：{error}"))
+                    }),
+                content_method::PROPS_WRITE => self
+                    .props_write_call(ctx, &params)
+                    .await
+                    .map(|_| serde_json::json!({})),
+                _ => Err(format!("未提供该服务方法：{}", params.method)),
+            }
+        };
+        let response = match result {
+            Ok(value) => ctx.service_result(&params.call_id, value).await,
+            Err(error) => ctx.service_error(&params.call_id, &error).await,
+        };
+        if let Err(error) = response {
+            ctx.log_error(&format!("回报属性服务结果失败：{error}"));
+        }
+        self.render(ctx).await;
+    }
+
     async fn on_frame_tick(&self, ctx: &Context, _params: FrameTickParams) {
         self.ui.lock().await.tick();
+        let (out, cursors_changed) = self.collab.lock().unwrap().tick();
+        self.send_collab(ctx, out).await;
+        if cursors_changed {
+            self.sync_cursors();
+        }
         self.render(ctx).await;
     }
 
     async fn on_frame_input(&self, ctx: &Context, params: FrameInputParams) {
         self.handle_input(ctx, params).await;
+    }
+
+    async fn on_collab_message(&self, ctx: &Context, params: CollabMessageParams) {
+        if params.channel == collab::presence::CHANNEL {
+            let changed = self
+                .collab
+                .lock()
+                .unwrap()
+                .apply_presence(&params.peer_id, &params.payload);
+            if changed {
+                self.sync_cursors();
+                self.render(ctx).await;
+            }
+            return;
+        }
+        if params.channel != collab::SYNC_CHANNEL {
+            return;
+        }
+        let Some((file, frames)) = collab::decode_frames(&params.payload) else {
+            ctx.log_error("协作帧载荷不可解析");
+            return;
+        };
+        let mut out = Vec::new();
+        let mut text = None;
+        for frame in frames {
+            let (outcome, presence) = self
+                .collab
+                .lock()
+                .unwrap()
+                .apply(&params.peer_id, &file, &frame);
+            if !outcome.reply.is_empty() {
+                out.push(collab::frames(&file, outcome.reply));
+            }
+            out.extend(presence);
+            if outcome.doc_changed {
+                text = outcome.text;
+            }
+        }
+        self.send_collab(ctx, out).await;
+        let current = self.model.lock().unwrap().path.clone();
+        if current.as_deref() != Some(file.as_str()) {
+            // 对端在别的文件上编辑：帧只进协作文档，不改本端正文
+            return;
+        }
+        if let Some(text) = text {
+            {
+                let mut model = self.model.lock().unwrap();
+                model.replace_text(text);
+                // 整篇换文会让槽位下标失效：丢弃在途槽编辑，避免提交到别的属性上
+                model.props.editing = None;
+                model.props.draft.clear();
+                props::reset_suggest(&mut *model);
+                model.dirty = true;
+            }
+            self.sync_cursors();
+            self.reset_inputs().await;
+            if let Err(error) = self.save_hot(ctx, false).await {
+                ctx.log_error(&format!("协作正文落盘失败：{error}"));
+            }
+            self.render(ctx).await;
+        }
+    }
+}
+
+impl NotesPlugin {
+    /// 协作上行统一出口：正文帧走可靠档，在场走瞬时档。发送失败只记日志，
+    /// 本端正文与落盘不因协作通道受阻。
+    async fn send_collab(&self, ctx: &Context, out: Vec<collab::Outgoing>) {
+        for item in out {
+            let sent = match item {
+                collab::Outgoing::Frames(payload) => {
+                    ctx.collab_send(collab::SYNC_CHANNEL, payload, None).await
+                }
+                collab::Outgoing::Presence(payload) => {
+                    ctx.collab_send_ephemeral(collab::presence::CHANNEL, payload, None).await
+                }
+            };
+            if let Err(error) = sent {
+                ctx.log_error(&format!("发送协作帧失败：{error}"));
+            }
+        }
+    }
+
+    /// 远端光标写进模型：绘制只读模型，不每帧碰协作锁。
+    fn sync_cursors(&self) {
+        let mut model = self.model.lock().unwrap();
+        let cursors = match model.path {
+            Some(_) => self.collab.lock().unwrap().cursors(&model.text),
+            None => Vec::new(),
+        };
+        model.remote = cursors;
+    }
+
+    /// 房间类型与本端身份重认：切仓库、进入 / 离开空间、名册变化后重取；
+    /// 名册里消失的连接立即摘掉光标条目，不等超时。
+    async fn refresh_room(&self, ctx: &Context) {
+        let room = match ctx.space_room().await {
+            Ok(room) => room,
+            Err(error) => {
+                ctx.log_error(&format!("读取协作房间失败：{error}"));
+                return;
+            }
+        };
+        let known = match ctx.collab_peers().await {
+            Ok(peers) => peers.peers.into_iter().map(|peer| peer.peer_id).collect::<Vec<_>>(),
+            Err(error) => {
+                ctx.log_error(&format!("读取协作名册失败：{error}"));
+                Vec::new()
+            }
+        };
+        let mut collab = self.collab.lock().unwrap();
+        collab.set_room(room.kind, room.self_identity);
+        let dropped = collab.retain_roster(&known);
+        drop(collab);
+        if dropped {
+            self.sync_cursors();
+        }
+    }
+
+    /// 宿主改名广播：当前文档跟到新路径（会话身份、冷缓冲与协作挂靠一并跟随，正文不动）。
+    async fn follow_rename(&self, ctx: &Context, old: &str, new: &str) {
+        let (from, to) = {
+            let mut model = self.model.lock().unwrap();
+            let Some(from) = model.path.clone() else { return };
+            let Some(to) = crate::session::follow_rename(&from, old, new) else { return };
+            model.path = Some(to.clone());
+            model.doc.rename_doc_id(&to);
+            (from, to)
+        };
+        self.buffers.lock().unwrap().rename_path(&from, &to);
+        let out = self.collab.lock().unwrap().follow_rename(&from, &to);
+        self.send_collab(ctx, out).await;
+        self.sync_cursors();
     }
 }
 

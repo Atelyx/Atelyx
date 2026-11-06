@@ -2,7 +2,7 @@
 
 use atelyx_format::frontmatter::{self, Yaml};
 use atelyx_plugin_props::{PropsHost, PropsState};
-use atelyx_plugin_protocol::method::{CanvasSnapshotResult, DocPropsResult};
+use atelyx_plugin_protocol::method::{CanvasSnapshotResult, ContentPropsResult};
 
 /// 面板视图贡献 id（也是整面帧的 surfaceId）。
 pub const PANEL: &str = "inspector";
@@ -58,7 +58,7 @@ impl InspectorModel {
     }
 
     /// 属性读回执落地：成功替换属性区并清掉错误；失败保留上次数据，错误留在面板上可重试。
-    pub fn apply_props(&mut self, result: Result<DocPropsResult, String>) {
+    pub fn apply_props(&mut self, result: Result<ContentPropsResult, String>) {
         self.loaded = true;
         match result {
             Ok(result) => {
@@ -214,7 +214,7 @@ mod tests {
     #[test]
     fn failed_read_keeps_the_last_doc_and_shows_the_error() {
         let mut model = InspectorModel::default();
-        model.apply_props(Ok(DocPropsResult {
+        model.apply_props(Ok(ContentPropsResult {
             path: "笔记/a.md".into(),
             frontmatter: "---
 title: x
@@ -232,7 +232,7 @@ title: x
 ", "失败不得清掉上次数据");
         assert!(model.open);
         assert_eq!(model.load_error.as_deref(), Some("属性读取失败：超时"));
-        model.apply_props(Ok(DocPropsResult::default()));
+        model.apply_props(Ok(ContentPropsResult::default()));
         assert!(model.load_error.is_none(), "读成功应清掉错误");
         assert!(!model.open, "没有文档时回空态");
     }
@@ -241,7 +241,7 @@ title: x
     fn loading_gate_covers_the_first_read_and_vault_switch() {
         let mut model = InspectorModel::default();
         assert!(!model.loaded, "首份回执未到");
-        model.apply_props(Ok(DocPropsResult::default()));
+        model.apply_props(Ok(ContentPropsResult::default()));
         assert!(model.loaded, "首份回执到了才允许空态");
         model.begin_loading();
         assert!(!model.loaded, "切仓库回到未就绪");

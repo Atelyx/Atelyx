@@ -552,6 +552,8 @@ impl PluginState {
                 let done = PanelFlushDoneParams {
                     target: Some(params.target.clone()),
                     token: params.token,
+                    doc_id: params.doc_id.clone(),
+                    open_seq: params.open_seq,
                     ok: result.is_ok(),
                     error: result.err(),
                 };

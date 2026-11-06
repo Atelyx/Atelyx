@@ -317,7 +317,9 @@
       "type": "DocInstanceOpenParams",
       "value": {
         "path": "docs/board",
-        "surfaceId": "doc:1"
+        "surfaceId": "doc:1",
+        "docId": "docs/board",
+        "openSeq": 3
       }
     },
     {
@@ -325,7 +327,152 @@
       "type": "DocInstanceCloseParams",
       "value": {
         "path": "docs/board",
-        "surfaceId": "doc:1"
+        "surfaceId": "doc:1",
+        "docId": "docs/board",
+        "openSeq": 3
+      }
+    },
+    {
+      "name": "host:doc.state params",
+      "type": "DocStateParams",
+      "value": {
+        "docId": "docs/board",
+        "openSeq": 3,
+        "dirty": true,
+        "saveError": "写盘失败"
+      }
+    },
+    {
+      "name": "host:doc.open result",
+      "type": "DocOpenResult",
+      "value": {
+        "docId": "docs/board",
+        "openSeq": 3,
+        "path": "docs/board.md",
+        "text": "# 板\n",
+        "canWrite": true,
+        "diskRev": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    {
+      "name": "host:doc.save params",
+      "type": "DocSaveParams",
+      "value": {
+        "docId": "docs/board",
+        "openSeq": 3,
+        "expectedRev": "0000000000000000000000000000000000000000000000000000000000000000",
+        "text": "# 板\n",
+        "manual": false
+      }
+    },
+    {
+      "name": "host:doc.save result ok",
+      "type": "DocSaveResult",
+      "value": {
+        "status": "ok",
+        "newRev": "1111111111111111111111111111111111111111111111111111111111111111"
+      }
+    },
+    {
+      "name": "host:doc.save result conflict",
+      "type": "DocSaveResult",
+      "value": {
+        "status": "conflict",
+        "diskRev": "2222222222222222222222222222222222222222222222222222222222222222",
+        "diskContent": "# 板二\n"
+      }
+    },
+    {
+      "name": "host:doc.save result err",
+      "type": "DocSaveResult",
+      "value": {
+        "status": "err",
+        "message": "磁盘只读"
+      }
+    },
+    {
+      "name": "host:doc.close params",
+      "type": "DocCloseParams",
+      "value": {
+        "docId": "docs/board",
+        "openSeq": 3
+      }
+    },
+    {
+      "name": "host:doc.rename params",
+      "type": "DocRenameParams",
+      "value": {
+        "path": "docs/board.md",
+        "name": "看板"
+      }
+    },
+    {
+      "name": "host:doc.target params",
+      "type": "DocTargetParams",
+      "value": {
+        "docId": "docs/board"
+      }
+    },
+    {
+      "name": "host:doc.props.write params",
+      "type": "DocPropsWriteParams",
+      "value": {
+        "docId": "docs/board",
+        "value": {
+          "frontmatter": "---\n标签: 甲\n---\n"
+        }
+      }
+    },
+    {
+      "name": "content props.read params",
+      "type": "ContentPropsReadParams",
+      "value": {
+        "docId": "docs/board",
+        "openSeq": 3
+      }
+    },
+    {
+      "name": "content props.read result",
+      "type": "ContentPropsResult",
+      "value": {
+        "path": "docs/board.md",
+        "fingerprint": "0123456789abcdef",
+        "frontmatter": "---\n标签: 甲\n---\n",
+        "present": true,
+        "parsed": true,
+        "editable": true
+      }
+    },
+    {
+      "name": "content props.write params",
+      "type": "ContentPropsWriteParams",
+      "value": {
+        "docId": "docs/board",
+        "openSeq": 3,
+        "value": {
+          "frontmatter": "---\n标签: 乙\n---\n",
+          "fingerprint": "0123456789abcdef"
+        }
+      }
+    },
+    {
+      "name": "doc:changed payload",
+      "type": "DocChangedPayload",
+      "value": {
+        "path": "docs/board.md",
+        "docId": "docs/board",
+        "openSeq": 3,
+        "dirty": true,
+        "saveError": "磁盘只读"
+      }
+    },
+    {
+      "name": "doc:restore payload",
+      "type": "DocRestorePayload",
+      "value": {
+        "docId": "docs/board",
+        "openSeq": 3,
+        "content": "# 板\n"
       }
     },
     {

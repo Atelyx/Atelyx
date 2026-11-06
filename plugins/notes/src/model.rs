@@ -1,5 +1,5 @@
 //! 笔记插件的展示与编辑状态：三档模式、正文块、撤销栈、属性面板、反链与远端光标。
-//! 正文真源在宿主（`doc.*`），这里只持本端副本。
+//! 正文缓冲在插件，宿主只按 `doc.state` / `doc.save` 记会话状态并落盘。
 
 use std::collections::HashMap;
 
@@ -10,6 +10,8 @@ use atelyx_plugin_sdk::frame_ui::Rect;
 
 /// 面板贡献 id：也是文档实例的 surfaceId（`plugin.json` 的 `docTypeRegistrations` 同值）。
 pub const PANEL: &str = "note";
+/// 笔记文件扩展名（与 `plugin.json` 的 `docTypeRegistrations` 一致）。
+pub const EXTENSION: &str = "md";
 /// 源码编辑面 id。
 pub const SOURCE: &str = "note:source";
 /// 源码模式外层滚动容器 id。
@@ -38,7 +40,7 @@ pub struct Backlink {
     pub title: String,
 }
 
-/// 一位远端协作者的光标（偏移与 `doc_text` 同一坐标系）。
+/// 一位远端协作者的光标（偏移与模型正文同一坐标系）。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RemoteCursor {
     pub name: String,
@@ -140,6 +142,8 @@ pub struct NoteModel {
     pub can_write: bool,
     pub mode: Mode,
     pub dirty: bool,
+    /// 保存状态真源：会话身份 / 磁盘基线 / 在途请求；`save_error` 是它的视图副本。
+    pub doc: crate::session::DocState,
     pub save_error: Option<String>,
     /// 打开失败原因：面板无可显示正文时给出可见原因，不静默。
     pub open_error: Option<String>,
@@ -191,10 +195,7 @@ impl NoteModel {
     pub fn title(&self) -> String {
         let Some(path) = &self.path else { return "笔记".to_string() };
         let name = path.rsplit('/').next().unwrap_or(path);
-        name.strip_suffix(".md")
-            .or_else(|| name.strip_suffix(".MD"))
-            .unwrap_or(name)
-            .to_string()
+        strip_extension(name).to_string()
     }
 
     /// 载入正文（打开文件 / 宿主回填）：撤销历史与活动块全部作废。
@@ -228,6 +229,7 @@ impl NoteModel {
     pub fn clear(&mut self) {
         self.path = None;
         self.text.clear();
+        self.doc.close();
         self.dirty = false;
         self.save_error = None;
         self.open_error = None;
@@ -817,10 +819,7 @@ pub fn wiki_candidates(
 /// 候选路径 → 插入文本：`[[路径|文件名]]`，显示用文件名、目标用完整路径。
 pub fn wiki_link(path: &str) -> String {
     let name = path.rsplit('/').next().unwrap_or(path);
-    let stem = name
-        .strip_suffix(".md")
-        .or_else(|| name.strip_suffix(".MD"))
-        .unwrap_or(name);
+    let stem = strip_extension(name);
     format!("[[{path}|{stem}]]")
 }
 
@@ -847,7 +846,7 @@ pub fn resolve_link(files: &[VaultFileEntry], current: Option<&str>, target: &st
         }
     }
     let name = target.rsplit('/').next().unwrap_or(target).to_lowercase();
-    let with_md = if name.ends_with(".md") { name } else { format!("{name}.md") };
+    let with_md = if is_note(&name) { name } else { format!("{name}.{EXTENSION}") };
     files
         .iter()
         .find(|file| file.openable && file.name.to_lowercase() == with_md)
@@ -859,7 +858,20 @@ fn parent_of(path: &str) -> Option<&str> {
 }
 
 fn is_note(name: &str) -> bool {
-    name.to_lowercase().ends_with(".md")
+    strip_extension(name).len() != name.len()
+}
+
+/// 去掉笔记扩展名（大小写不敏感）；不带该扩展名时原样返回。
+fn strip_extension(name: &str) -> &str {
+    let suffix = EXTENSION.len() + 1;
+    let Some(cut) = name.len().checked_sub(suffix) else { return name };
+    if name.is_char_boundary(cut) {
+        let tail = &name[cut..];
+        if tail.starts_with('.') && tail[1..].eq_ignore_ascii_case(EXTENSION) {
+            return &name[..cut];
+        }
+    }
+    name
 }
 
 /// 去掉空段与 `.`、按 `..` 回退：内链里的相对写法先归一成仓库相对路径。

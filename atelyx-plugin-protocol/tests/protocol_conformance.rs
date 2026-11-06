@@ -3,14 +3,17 @@
 
 use atelyx_plugin_protocol::envelope::Envelope;
 use atelyx_plugin_protocol::event::{
-    ChatChangedPayload, FileChangedPayload, SpaceMetaChangedPayload, TableChangedPayload,
-    TableSelectionChangedPayload, VaultSwitchPayload,
+    ChatChangedPayload, DocChangedPayload, DocRestorePayload, FileChangedPayload,
+    SpaceMetaChangedPayload, TableChangedPayload, TableSelectionChangedPayload, VaultSwitchPayload,
 };
 use atelyx_plugin_protocol::handshake::{self, InitializeParams, InitializeResult};
 use atelyx_plugin_protocol::frame::SurfaceFrame;
 use atelyx_plugin_protocol::method::{
     ChatHistoryParams, ChatRenameParams, ChatSendParams, ChatSessionParams, CollabMessageParams,
-    CollabPeersResult, CollabSendParams, CollabSendResult, DocInstanceCloseParams, DocInstanceOpenParams,
+    CollabPeersResult, CollabSendParams, CollabSendResult, ContentPropsReadParams,
+    ContentPropsResult, ContentPropsWriteParams, DocCloseParams, DocInstanceCloseParams,
+    DocInstanceOpenParams, DocOpenResult, DocPropsWriteParams, DocRenameParams, DocSaveParams,
+    DocSaveResult, DocStateParams, DocTargetParams,
     HttpRequestParams, HttpResult, ImageInfoResult, ImportFileParams, ListResult,
     MeasureTextResult, PathParams, PickFileParams, PickedPath, ProcessEventParams, RegisterParams,
     RegisterShortcutParams, RegisterToolParams, SetTrayItemsParams, ShortcutQueryParams,
@@ -207,6 +210,19 @@ fn method_type_shapes_are_frozen() {
             "UnregisterParams" => frozen_roundtrip::<UnregisterParams>(&value),
             "DocInstanceOpenParams" => frozen_roundtrip::<DocInstanceOpenParams>(&value),
             "DocInstanceCloseParams" => frozen_roundtrip::<DocInstanceCloseParams>(&value),
+            "DocOpenResult" => frozen_roundtrip::<DocOpenResult>(&value),
+            "DocStateParams" => frozen_roundtrip::<DocStateParams>(&value),
+            "DocSaveParams" => frozen_roundtrip::<DocSaveParams>(&value),
+            "DocSaveResult" => frozen_roundtrip::<DocSaveResult>(&value),
+            "DocCloseParams" => frozen_roundtrip::<DocCloseParams>(&value),
+            "DocRenameParams" => frozen_roundtrip::<DocRenameParams>(&value),
+            "DocTargetParams" => frozen_roundtrip::<DocTargetParams>(&value),
+            "DocPropsWriteParams" => frozen_roundtrip::<DocPropsWriteParams>(&value),
+            "ContentPropsReadParams" => frozen_roundtrip::<ContentPropsReadParams>(&value),
+            "ContentPropsResult" => frozen_roundtrip::<ContentPropsResult>(&value),
+            "ContentPropsWriteParams" => frozen_roundtrip::<ContentPropsWriteParams>(&value),
+            "DocChangedPayload" => frozen_roundtrip::<DocChangedPayload>(&value),
+            "DocRestorePayload" => frozen_roundtrip::<DocRestorePayload>(&value),
             "TakeoverParams" => frozen_roundtrip::<TakeoverParams>(&value),
             "WindowOpenParams" => frozen_roundtrip::<WindowOpenParams>(&value),
             "WindowCloseParams" => frozen_roundtrip::<WindowCloseParams>(&value),

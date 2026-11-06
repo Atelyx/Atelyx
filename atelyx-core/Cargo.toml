@@ -40,8 +40,6 @@ ignore = "0.4"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp"] }
 # 系统下载/主目录定位（图片下载落盘）
 dirs = "6"
-# 笔记协作（note_collab）：Yjs CRDT 内核，与 yjs 数据互通
-yrs = "0.28"
 # 协作帧泵（collab）：WebSocket 长连接（rustls TLS，webpki 根证书）
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["rustls-tls-webpki-roots", "connect"] }
 # 协作空间客户端（space_client）：错误类型与来源信息

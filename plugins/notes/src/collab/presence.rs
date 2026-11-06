@@ -1,20 +1,18 @@
-//! 文本文档协作在场：本机光标 / 选区经通用瞬时通道上行，远端状态解析为远端光标视图（供
-//! `doc:presence` 广播给插件）。
-//!
-//! 通道载荷只带全文 UTF-16 偏移与身份色，不含正文；对端打开别的文件时按 `file` 过滤，
-//! 换文件靠 state 变化自然生效，无需先发离场帧。
+//! 文本文档协作在场：光标 / 选区经瞬时通道上行，远端状态解析为可绘制的远端光标。
+//! 载荷只带 UTF-16 偏移与身份色（不含正文），按文件过滤；换文件靠 state 变化生效，不发离场帧。
 
 use std::time::Instant;
 
-use atelyx_core::ephemeral::EphemeralChannel;
+use crate::collab::ephemeral::EphemeralChannel;
 use serde_json::{json, Value};
 
-use crate::ui::palette as pal;
+/// 在场帧通道名（瞬时档：不入缓存、不占序号，断线期间丢失由保活补上）。
+pub const CHANNEL: &str = "doc-presence";
 
-/// 宿主内置通道名（插件通道为 `<插件id>:<频道>`，两套命名空间互不覆盖）。
-pub const CHANNEL: &str = "host.doc-aware";
+/// 对端没带身份色时的回落。
+const FALLBACK_COLOR: &str = "#9aa0a6";
 
-/// 本端身份（名签与成员色由壳提供；通道层不感知）。
+/// 本端身份（名签与成员色由空间名册给出；通道层不感知）。
 pub struct Identity<'a> {
     pub name: &'a str,
     pub color: &'a str,
@@ -118,15 +116,6 @@ impl DocPresenceChannel {
         self.channel.resend(now)
     }
 
-    pub fn has_pending(&self) -> bool {
-        self.channel.has_pending()
-    }
-
-    /// 通道里是否有任何远端条目（含无选区的）：有对端才需要周期拍做剔除与保活。
-    pub fn has_peers(&self) -> bool {
-        self.channel.has_remotes()
-    }
-
     /// 合入他人帧并刷新视图；返回远端集合是否变化。
     pub fn apply(&mut self, peer_id: &str, payload: &Value, now: Instant) -> bool {
         if !self.channel.apply_remote(peer_id, payload, now) {
@@ -179,7 +168,7 @@ impl DocPresenceChannel {
                     .and_then(|u| u.get("color"))
                     .and_then(Value::as_str)
                     .filter(|c| !c.is_empty())
-                    .unwrap_or(pal::FALLBACK_COLLAB_COLOR)
+                    .unwrap_or(FALLBACK_COLOR)
                     .to_owned();
                 let unit = |key: &str| {
                     state
@@ -193,13 +182,24 @@ impl DocPresenceChannel {
             .collect();
     }
 
-    /// 对端连接消失：摘除其条目并刷新。
-    pub fn drop_peer(&mut self, peer_id: &str) -> bool {
-        if !self.channel.drop_peer(peer_id) {
-            return false;
+    /// 名册对账：不在名册里的对端条目立即摘除（对端退出不必等超时）。
+    pub fn retain_roster(&mut self, known: &[String]) -> bool {
+        let now = Instant::now();
+        let stale: Vec<String> = self
+            .channel
+            .remotes(now)
+            .into_iter()
+            .map(|entry| entry.peer_id)
+            .filter(|peer_id| !known.iter().any(|known| known == peer_id))
+            .collect();
+        let mut changed = false;
+        for peer_id in stale {
+            changed |= self.channel.drop_peer(&peer_id);
         }
-        self.refresh(Instant::now());
-        true
+        if changed {
+            self.refresh(now);
+        }
+        changed
     }
 
     /// 断开 / 离开空间：清远端（本端状态保留，重连后由 [`resend`](Self::resend) 重发）。
@@ -342,7 +342,6 @@ mod tests {
 
         ch.apply("p1", &remote_payload(9, 1, "b.md", json!({ "anchor": 1, "head": 2 })), now);
         assert!(ch.remote().is_empty(), "别的文件不画");
-        assert!(ch.has_peers(), "条目仍在通道里参与保活与剔除");
 
         ch.apply("p1", &remote_payload(9, 2, "a.md", Value::Null), now + Duration::from_millis(60));
         let remote = ch.remote();
@@ -362,11 +361,12 @@ mod tests {
                        "selection": { "anchor": 1, "head": 2 } },
         });
         ch.apply("p1", &no_color, now);
-        assert_eq!(ch.remote()[0].color, pal::FALLBACK_COLLAB_COLOR);
+        assert_eq!(ch.remote()[0].color, FALLBACK_COLOR);
 
-        assert!(ch.drop_peer("p1"));
+        // 名册里没有 p1：对端条目立即摘除（不必等超时）
+        assert!(ch.retain_roster(&[]));
         assert!(ch.remote().is_empty());
-        assert!(!ch.drop_peer("p1"));
+        assert!(!ch.retain_roster(&[]), "已摘除的连接不再产生变化");
 
         ch.apply("p1", &remote_payload(9, 1, "a.md", Value::Null), now);
         assert_eq!(ch.remote().len(), 1);

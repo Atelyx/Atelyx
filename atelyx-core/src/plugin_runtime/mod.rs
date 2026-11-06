@@ -51,8 +51,8 @@ pub use atelyx_plugin_protocol::paint::{
 pub use atelyx_plugin_protocol::event::name as event_name;
 pub use atelyx_plugin_protocol::event::{
     ChatChangeKind, ChatChangedPayload, ChatPersistChangedPayload, ChatReloadedPayload,
-    FileChangeKind, FileChangedPayload, FileDropPayload, DocChangedPayload,
-    CanvasChangedPayload, DocPresencePayload, DocRemoteCursor, SpaceMetaChangedPayload, TableChangedPayload,
+    FileChangeKind, FileChangedPayload, FileDropPayload, DocChangedPayload, DocRestorePayload,
+    CanvasChangedPayload, SpaceMetaChangedPayload, TableChangedPayload,
     CanvasVisiblePayload, TableSelectionChangedPayload, VaultSwitchPayload,
 };
 pub use atelyx_plugin_protocol::chat::ChatPersistError;
@@ -70,13 +70,13 @@ pub use preset::PresetSyncReport;
 pub use atelyx_plugin_protocol::method::{
     AiAgent, AiAgentsResult, AiModel, AiModelPick, AiModelProvider, AiModelsResult,
     AxesPadding, BUILTIN_SERVICES, PLATFORM_PLUGIN, EditorOpenFiles, EditorPrefs,
-    EditorReplaceParams, EditorSelection,
+    ContentPropsReadParams, ContentPropsResult, ContentPropsWriteParams, DocTargetParams,
     CalendarAddParams, CalendarIdParams, CalendarItem, CalendarListResult, CalendarUpdateParams,
     CollabMetaEntry, CollabMetaGetParams, CollabMetaPatchParams, CollabMetaResult, DayActivity,
     HistoryActivityResult, HistoryDayEntry, HistoryDayParams, HistoryDayResult, HistoryFileGroup,
     HistoryGroupsParams, HistoryGroupsResult, HistoryOpenParams, RecentEntry, RecentKind,
     RecentListResult,
-    DocPropsResult, DocPropsWriteParams, DocRenameParams,
+    DocCloseParams, DocPropsWriteParams, DocRenameParams, DocSaveResult,
     ChatEvent, ChatEventParams, ChatHistoryParams, ChatHistoryResult,
     ChatRenameParams, ChatSendParams, ChatSessionParams, ChatSessionSummary, ChatSessionWire,
     ChatStopParams, ClipboardImage, CollabMessageParams, CollabPeer, CollabPeersResult,
@@ -94,7 +94,7 @@ pub use atelyx_plugin_protocol::method::{
     RunCompactParams, RunConfigWire, RunDirectParams, RunStartParams, RunStartResult,
     RunStopParams, RunTitleParams, SearchConfigWire, ThemeResult, ToolDecl, ToolExecParams,
     ToolExecResult, ToolListParams, ToolListResult, TrayClickParams, TrayItemSpec, WindowOpenParams,
-    WindowUpdateParams, DocAwarenessParams, BacklinkEntry, BacklinksResult, DocEditParams,
+    WindowUpdateParams, BacklinkEntry, BacklinksResult, DocStateParams,
     DocOpenParams, DocOpenResult, DocSaveParams, VaultTagsResult, FilesResult, VaultFileEntry,
     SpaceContainerKind, SpaceMember, SpaceMemberRole, SpaceMembersResult, SpacePeer, SpacePeerFile,
     SpaceRoomResult, SpaceSelfIdentity,
@@ -360,12 +360,8 @@ pub enum HostRequest {
     CollabPeers { plugin_id: String, request_id: u64 },
     /// 插件请求向同空间的对等插件发一条消息。
     CollabSend { plugin_id: String, request_id: u64, params: method::CollabSendParams },
-    /// 插件请求当前打开笔记的选区（真源在壳的编辑面会话）。
-    EditorSelection { plugin_id: String, request_id: u64 },
     /// 插件请求当前打开的文件清单（仓库相对路径，按打开顺序）。
     EditorOpenFiles { plugin_id: String, request_id: u64 },
-    /// 插件请求用给定文本替换当前选区（空串 = 删除选区；写入经笔记同一套保存链）。
-    EditorReplaceSelection { plugin_id: String, request_id: u64, text: String },
     /// 插件请求让宿主打开一个仓库内文件（按扩展名分流视图）。`reveal` = 是否让对应视图显示
     /// （false = 只打开文件，不动布局；已有对应视图照常显示当前文件）。
     EditorOpenFile { plugin_id: String, request_id: u64, path: String, reveal: bool },
@@ -373,27 +369,21 @@ pub enum HostRequest {
     EditorPrefs { plugin_id: String, request_id: u64 },
     /// 插件请求打开一个文档会话（宿主读盘并建立会话，回执 = 正文与可写性）。
     DocOpen { plugin_id: String, request_id: u64, params: method::DocOpenParams },
-    /// 插件提交一次文档编辑（完整正文 + 光标 / 选区）。
-    DocEdit { plugin_id: String, request_id: u64, params: method::DocEditParams },
-    /// 插件请求一次文档保存（回执只表示已受理，落盘结果经 `doc:changed` 到达）。
+    /// 内容所有者上报文档会话状态（未落盘修改 / 保存失败原因），宿主只记账。
+    DocState { plugin_id: String, request_id: u64, params: method::DocStateParams },
+    /// 插件提交完整正文保存；回执 `Ok / Conflict / Err` 在写盘 / 基线校验完成后返回。
     DocSave { plugin_id: String, request_id: u64, params: method::DocSaveParams },
-    /// 插件请求关闭当前文档会话。
-    DocClose { plugin_id: String, request_id: u64, path: String },
-    /// 插件上报本端文档选区。
-    DocAwareness {
-        plugin_id: String,
-        request_id: u64,
-        params: method::DocAwarenessParams,
-    },
+    /// 插件请求关闭文档会话（按 `(docId, openSeq)` 寻址）。
+    DocClose { plugin_id: String, request_id: u64, params: method::DocCloseParams },
     /// 插件请求某篇文档的反链。
     VaultBacklinks { plugin_id: String, request_id: u64, path: String },
     /// 插件请求全仓库标签词表（宿主聚合后按出现次数降序返回）。
     VaultTags { plugin_id: String, request_id: u64 },
     /// 插件请求把当前文档改名为新的主名（宿主编排保存 / 关闭 / 改名 / 重开）。
     DocRename { plugin_id: String, request_id: u64, params: method::DocRenameParams },
-    /// 插件请求读当前文档的 frontmatter 块（属性面板）。
-    DocPropsRead { plugin_id: String, request_id: u64 },
-    /// 插件请求用新 frontmatter 块替换当前文档的属性区。
+    /// 插件请求把属性读取转给文档的内容所有者（载荷语义归所有者，宿主只寻址）。
+    DocPropsRead { plugin_id: String, request_id: u64, params: method::DocTargetParams },
+    /// 插件请求内容所有者写回属性（`value` 原样转发）。
     DocPropsWrite {
         plugin_id: String,
         request_id: u64,
@@ -844,16 +834,13 @@ impl PluginRuntime {
             | HostRequest::CollabSend { .. }
             | HostRequest::CollabMetaGet { .. }
             | HostRequest::CollabMetaPatch { .. }
-            | HostRequest::EditorSelection { .. }
             | HostRequest::EditorOpenFiles { .. }
-            | HostRequest::EditorReplaceSelection { .. }
             | HostRequest::EditorOpenFile { .. }
             | HostRequest::EditorPrefs { .. }
             | HostRequest::DocOpen { .. }
-            | HostRequest::DocEdit { .. }
+            | HostRequest::DocState { .. }
             | HostRequest::DocSave { .. }
             | HostRequest::DocClose { .. }
-            | HostRequest::DocAwareness { .. }
             | HostRequest::VaultBacklinks { .. }
             | HostRequest::DocRename { .. }
             | HostRequest::DocPropsRead { .. }
@@ -1103,21 +1090,10 @@ impl PluginRuntime {
                     params,
                 }
             }
-            HostRequest::EditorSelection { plugin_id, .. } => HostRequest::EditorSelection {
-                plugin_id,
-                request_id,
-            },
             HostRequest::EditorOpenFiles { plugin_id, .. } => HostRequest::EditorOpenFiles {
                 plugin_id,
                 request_id,
             },
-            HostRequest::EditorReplaceSelection { plugin_id, text, .. } => {
-                HostRequest::EditorReplaceSelection {
-                    plugin_id,
-                    request_id,
-                    text,
-                }
-            }
             HostRequest::EditorOpenFile { plugin_id, path, reveal, .. } => {
                 HostRequest::EditorOpenFile { plugin_id, request_id, path, reveal }
             }
@@ -1130,7 +1106,7 @@ impl PluginRuntime {
                 request_id,
                 params,
             },
-            HostRequest::DocEdit { plugin_id, params, .. } => HostRequest::DocEdit {
+            HostRequest::DocState { plugin_id, params, .. } => HostRequest::DocState {
                 plugin_id,
                 request_id,
                 params,
@@ -1140,12 +1116,7 @@ impl PluginRuntime {
                 request_id,
                 params,
             },
-            HostRequest::DocClose { plugin_id, path, .. } => HostRequest::DocClose {
-                plugin_id,
-                request_id,
-                path,
-            },
-            HostRequest::DocAwareness { plugin_id, params, .. } => HostRequest::DocAwareness {
+            HostRequest::DocClose { plugin_id, params, .. } => HostRequest::DocClose {
                 plugin_id,
                 request_id,
                 params,
@@ -1160,9 +1131,10 @@ impl PluginRuntime {
                 request_id,
                 params,
             },
-            HostRequest::DocPropsRead { plugin_id, .. } => HostRequest::DocPropsRead {
+            HostRequest::DocPropsRead { plugin_id, params, .. } => HostRequest::DocPropsRead {
                 plugin_id,
                 request_id,
+                params,
             },
             HostRequest::DocPropsWrite { plugin_id, params, .. } => HostRequest::DocPropsWrite {
                 plugin_id,
@@ -1557,18 +1529,18 @@ impl PluginRuntime {
     }
 
     /// 告知插件一个文档实例已打开（未在跑时静默丢弃；插件重启后由壳按打开中的实例重发）。
-    pub fn notify_doc_open(&self, plugin_id: &str, surface_id: &str, path: &str) {
+    pub fn notify_doc_open(&self, plugin_id: &str, surface_id: &str, path: &str, doc_id: &str, open_seq: u64) {
         let instance = self.instances.lock().unwrap().get(plugin_id).cloned();
         if let Some(instance) = instance {
-            instance.notify_doc_open(surface_id, path);
+            instance.notify_doc_open(surface_id, path, doc_id, open_seq);
         }
     }
 
     /// 告知插件一个文档实例已关闭。
-    pub fn notify_doc_close(&self, plugin_id: &str, surface_id: &str, path: &str) {
+    pub fn notify_doc_close(&self, plugin_id: &str, surface_id: &str, path: &str, doc_id: &str, open_seq: u64) {
         let instance = self.instances.lock().unwrap().get(plugin_id).cloned();
         if let Some(instance) = instance {
-            instance.notify_doc_close(surface_id, path);
+            instance.notify_doc_close(surface_id, path, doc_id, open_seq);
         }
     }
 
@@ -1998,11 +1970,6 @@ impl PluginRuntime {
         self.broadcast_event(event::name::CANVAS_VISIBLE, &CanvasVisiblePayload { visible });
     }
 
-    /// 广播当前笔记的远端协作者光标：订阅方按 `path` 过滤，空清单 = 已无协作者。
-    pub fn on_doc_presence(self: &Arc<Self>, payload: DocPresencePayload) {
-        self.broadcast_event(event::name::DOC_PRESENCE, &payload);
-    }
-
     /// 广播全局编辑偏好变更（设置页改动时由壳调用）。
     pub fn on_editor_prefs_changed(self: &Arc<Self>, prefs: EditorPrefs) {
         self.broadcast_event(event::name::EDITOR_PREFS_CHANGED, &prefs);
@@ -2039,6 +2006,11 @@ impl PluginRuntime {
     /// 广播空间连接态 / 在线设备 / 各端打开文件变化：订阅方重取 `space.room`。
     pub fn on_space_peers_changed(self: &Arc<Self>) {
         self.broadcast_event(event::name::SPACE_PEERS_CHANGED, &serde_json::json!({}));
+    }
+
+    /// 广播实时频道重新接通：订阅方按自己的通道重发状态（断连期间的帧不会补发）。
+    pub fn on_space_resync(self: &Arc<Self>) {
+        self.broadcast_event(event::name::SPACE_RESYNC, &serde_json::json!({}));
     }
 
     /// 广播空间成员名册缓存变化（拉取开始 / 成功 / 失败、离开空间清空）：订阅方重取 `space.members`。
@@ -2385,18 +2357,15 @@ fn request_plugin_id(request: &HostRequest) -> &str {
         | HostRequest::CollabMetaGet { plugin_id, .. }
         | HostRequest::CollabMetaPatch { plugin_id, .. }
         | HostRequest::VaultFiles { plugin_id, .. }
-        | HostRequest::EditorSelection { plugin_id, .. }
         | HostRequest::EditorOpenFiles { plugin_id, .. }
-        | HostRequest::EditorReplaceSelection { plugin_id, .. }
         | HostRequest::EditorOpenFile { plugin_id, .. }
         | HostRequest::EditorPrefs { plugin_id, .. }
         | HostRequest::DocOpen { plugin_id, .. }
-        | HostRequest::DocEdit { plugin_id, .. }
+        | HostRequest::DocState { plugin_id, .. }
         | HostRequest::DocPropsRead { plugin_id, .. }
         | HostRequest::DocPropsWrite { plugin_id, .. }
         | HostRequest::DocSave { plugin_id, .. }
         | HostRequest::DocClose { plugin_id, .. }
-        | HostRequest::DocAwareness { plugin_id, .. }
         | HostRequest::VaultBacklinks { plugin_id, .. }
         | HostRequest::DocRename { plugin_id, .. }
         | HostRequest::VaultTags { plugin_id, .. }

@@ -21,8 +21,8 @@ use atelyx_core::plugin_runtime::{
     InstallOutcome, PanelFlushDoneParams, PanelHeaderParams, SpaceFilePatchParams,
     MeasureBatchParams,
     MeasureBatchResult, NotificationLevel, Permission, PluginEvent, PluginRuntime, PluginStatus,
-    DocAwarenessParams, DocEditParams, DocOpenParams, DocPropsWriteParams, DocRenameParams,
-    DocSaveParams,
+    DocCloseParams, DocOpenParams, DocPropsWriteParams,
+    DocRenameParams, DocSaveParams, DocSaveResult, DocStateParams, DocTargetParams,
     FilesResult, PluginSummary, SetTrayItemsParams, SpaceContainerKind, SpaceMember,
     SpaceMemberRole, SpaceMembersResult, SpacePeer, SpacePeerFile, SpaceRoomResult,
     ContainerEntry, SpaceSelfIdentity, UiDirEntry, VaultFileEntry, VaultTagsResult, VaultUiParams,
@@ -171,6 +171,18 @@ impl PendingHistory {
     }
 }
 
+/// 写盘完成后回填给插件的提交结果。
+#[derive(Debug, Clone)]
+pub struct DocCommitDone {
+    pub request_id: u64,
+    pub doc_id: String,
+    pub open_seq: u64,
+    pub gen: u64,
+    pub result: DocSaveResult,
+    /// 历史侧车记版失败原因：正文已落盘，只提示不改变回执。
+    pub history_error: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub enum PluginsMsg {
     /// 打开插件页 / 动作后刷新列表。
@@ -297,12 +309,8 @@ pub enum PluginsMsg {
     CollabPeers { request_id: u64 },
     /// 向同空间对等插件发消息（通道加插件前缀，未连接时回 `queued: false`）。
     CollabSend { request_id: u64, plugin_id: String, params: CollabSendParams },
-    /// 当前笔记选区（编辑态才有内容；未打开笔记或阅读态回空选区）。
-    EditorSelection { request_id: u64 },
     /// 当前打开的文件清单（仓库相对路径，按打开顺序）。
     EditorOpenFiles { request_id: u64 },
-    /// 用给定文本替换当前选区（空串 = 删除选区）。
-    EditorReplaceSelection { request_id: u64, text: String },
     /// 让宿主打开一个仓库内文件（按扩展名分流视图；`reveal` = 是否让对应视图显示）。
     EditorOpenFile { request_id: u64, path: String, reveal: bool },
     /// 全局编辑偏好（软换行 / 页面内标题 / 正文宽度）。
@@ -311,19 +319,19 @@ pub enum PluginsMsg {
     DocOpen { request_id: u64, plugin_id: String, params: DocOpenParams },
     /// 把当前文档改名为新的主名（同目录、保留扩展名）。
     DocRename { request_id: u64, params: DocRenameParams },
-    /// 读当前文档的 frontmatter 块（属性面板）。
-    DocPropsRead { request_id: u64 },
-    /// 用新 frontmatter 块替换当前文档的属性区。
+    /// 读当前文档的 frontmatter 块（属性面板）：宿主转发给内容所有者，不自行解析。
+    DocPropsRead { request_id: u64, params: DocTargetParams },
+    /// 用新 frontmatter 块替换当前文档的属性区：宿主转发给内容所有者。
     DocPropsWrite { request_id: u64, params: DocPropsWriteParams },
+    DocPropsForwarded { request_id: u64, result: Result<serde_json::Value, String> },
     DocOpenDone(crate::doc_session::OpenReadResult),
-    /// 提交一次文档编辑（完整正文 + 光标 / 选区）。
-    DocEdit { request_id: u64, params: DocEditParams },
-    /// 请求一次文档保存（回执 = 已受理，结果经 `doc:changed`）。
+    /// 内容所有者上报会话状态（脏 / 保存错误）；正文由插件自己持有。
+    DocState { request_id: u64, params: DocStateParams },
+    /// 提交完整正文保存：回执 `Ok / Conflict / Err` 在写盘完成后返回。
     DocSave { request_id: u64, params: DocSaveParams },
-    /// 关闭当前文档会话。
-    DocClose { request_id: u64, path: String },
-    /// 上报本端文档选区。
-    DocAwareness { request_id: u64, params: DocAwarenessParams },
+    DocCommitDone(DocCommitDone),
+    /// 关闭文档会话（按 `(docId, openSeq)` 寻址）。
+    DocClose { request_id: u64, params: DocCloseParams },
     /// 当前文档的反链。
     VaultBacklinks { request_id: u64, path: String },
     VaultBacklinksDone { request_id: u64, result: Result<serde_json::Value, String> },
@@ -765,14 +773,8 @@ pub fn host_requests_stream(spec: &RuntimeSpec) -> impl iced::futures::Stream<It
                 HostRequest::CollabSend { plugin_id, request_id, params } => {
                     Message::Plugins(PluginsMsg::CollabSend { request_id, plugin_id, params })
                 }
-                HostRequest::EditorSelection { request_id, .. } => {
-                    Message::Plugins(PluginsMsg::EditorSelection { request_id })
-                }
                 HostRequest::EditorOpenFiles { request_id, .. } => {
                     Message::Plugins(PluginsMsg::EditorOpenFiles { request_id })
-                }
-                HostRequest::EditorReplaceSelection { request_id, text, .. } => {
-                    Message::Plugins(PluginsMsg::EditorReplaceSelection { request_id, text })
                 }
                 HostRequest::EditorOpenFile { request_id, path, reveal, .. } => {
                     Message::Plugins(PluginsMsg::EditorOpenFile { request_id, path, reveal })
@@ -786,23 +788,20 @@ pub fn host_requests_stream(spec: &RuntimeSpec) -> impl iced::futures::Stream<It
                 HostRequest::DocRename { request_id, params, .. } => {
                     Message::Plugins(PluginsMsg::DocRename { request_id, params })
                 }
-                HostRequest::DocPropsRead { request_id, .. } => {
-                    Message::Plugins(PluginsMsg::DocPropsRead { request_id })
+                HostRequest::DocPropsRead { request_id, params, .. } => {
+                    Message::Plugins(PluginsMsg::DocPropsRead { request_id, params })
                 }
                 HostRequest::DocPropsWrite { request_id, params, .. } => {
                     Message::Plugins(PluginsMsg::DocPropsWrite { request_id, params })
                 }
-                HostRequest::DocEdit { request_id, params, .. } => {
-                    Message::Plugins(PluginsMsg::DocEdit { request_id, params })
+                HostRequest::DocState { request_id, params, .. } => {
+                    Message::Plugins(PluginsMsg::DocState { request_id, params })
                 }
                 HostRequest::DocSave { request_id, params, .. } => {
                     Message::Plugins(PluginsMsg::DocSave { request_id, params })
                 }
-                HostRequest::DocClose { request_id, path, .. } => {
-                    Message::Plugins(PluginsMsg::DocClose { request_id, path })
-                }
-                HostRequest::DocAwareness { request_id, params, .. } => {
-                    Message::Plugins(PluginsMsg::DocAwareness { request_id, params })
+                HostRequest::DocClose { request_id, params, .. } => {
+                    Message::Plugins(PluginsMsg::DocClose { request_id, params })
                 }
                 HostRequest::VaultBacklinks { request_id, path, .. } => {
                     Message::Plugins(PluginsMsg::VaultBacklinks { request_id, path })
@@ -1671,9 +1670,7 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
                     app.plugins.on_file_changed(rel, FileChangeKind::Deleted, None);
                 }
                 VaultChange::Renamed { from, to } => {
-                    app.plugins
-                        .on_file_changed(to, FileChangeKind::Renamed, Some(from.as_str()));
-                    // 展开集 / 打开中文件路径与文件树子目录缓存跟随（与文件树改名同一口径）
+                    // 先跟随打开集合与会话表，再广播：插件按新会话身份处理改名，不落到旧路径
                     app.apply_follow(&crate::FollowUp::Renamed {
                         from: from.clone(),
                         to: to.clone(),
@@ -1681,6 +1678,8 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
                         announce: false,
                     });
                     app.follow_children_cache(from, to);
+                    app.plugins
+                        .on_file_changed(to, FileChangeKind::Renamed, Some(from.as_str()));
                 }
             }
             // 引用同步代写了打开中的笔记：磁盘正文已变，重读对齐——结构变更经 gate
@@ -1789,15 +1788,6 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
                 .map_err(|e| format!("编辑偏好不可序列化：{e}"));
             resolve_vault(app, request_id, result)
         }
-        PluginsMsg::EditorSelection { request_id } => {
-            let result = serde_json::to_value(app.editor_selection())
-                .map_err(|e| format!("选区结果不可序列化：{e}"));
-            resolve_vault(app, request_id, result)
-        }
-        PluginsMsg::EditorReplaceSelection { request_id, text } => {
-            let result = app.editor_replace_selection(text).map(|_| serde_json::json!({}));
-            resolve_vault(app, request_id, result)
-        }
         PluginsMsg::EditorOpenFile { request_id, path, reveal } => {
             let rel = match plugin_path(Some(&path)) {
                 Ok(rel) => rel,
@@ -1819,11 +1809,11 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
             crate::doc_session::rename(app, request_id, params)
         }
         PluginsMsg::DocOpenDone(done) => crate::doc_session::open_done(app, done),
-        PluginsMsg::DocEdit { request_id, params } => {
-            crate::doc_session::edit(app, request_id, params)
+        PluginsMsg::DocState { request_id, params } => {
+            crate::doc_session::state(app, request_id, params)
         }
-        PluginsMsg::DocPropsRead { request_id } => {
-            crate::doc_session::props_read(app, request_id)
+        PluginsMsg::DocPropsRead { request_id, params } => {
+            crate::doc_session::props_read(app, request_id, params)
         }
         PluginsMsg::DocPropsWrite { request_id, params } => {
             crate::doc_session::props_write(app, request_id, params)
@@ -1831,11 +1821,13 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
         PluginsMsg::DocSave { request_id, params } => {
             crate::doc_session::save(app, request_id, params)
         }
-        PluginsMsg::DocClose { request_id, path } => {
-            crate::doc_session::close(app, request_id, &path)
+        PluginsMsg::DocClose { request_id, params } => {
+            crate::doc_session::close(app, request_id, params)
         }
-        PluginsMsg::DocAwareness { request_id, params } => {
-            crate::doc_session::awareness(app, request_id, params)
+        PluginsMsg::DocCommitDone(done) => crate::doc_session::commit_done(app, done),
+        PluginsMsg::DocPropsForwarded { request_id, result } => {
+            app.plugins.resolve_shell_call(request_id, result);
+            Task::none()
         }
         PluginsMsg::VaultBacklinks { request_id, path } => {
             vault_backlinks(app, request_id, path)

@@ -6,17 +6,18 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+use atelyx_core::doc_session::content_rev;
 use atelyx_core::plugin_runtime::{
     FrameInput, HostRequest, MeasureTextResult, MouseButton, PluginRuntime, PluginStatus,
     SurfaceKind,
 };
-use atelyx_plugin_protocol::event::{DocPresencePayload, DocRemoteCursor};
 use atelyx_plugin_protocol::frame::{HitCursor, Key, KeyAction, Modifiers, NamedKey, SurfaceFrame};
 use atelyx_plugin_protocol::method::{FontSizes, Radii, ThemeColors, ThemeResult};
 use atelyx_plugin_protocol::paint::{ColorToken, DrawCommand, ImageSource, PaintColor, TextAlign};
 
 const PLUGIN: &str = "atelyx.notes";
 const SURFACE: &str = "note";
+const DOC: &str = "a.md";
 const NOTE: &str = "---\ntags: [开发]\n---\n# 标题\n\n第一段正文。\n\n- 列表项一\n- 列表项二\n\n1. 步骤一\n2. 步骤二\n\n- 父项\n  - 子项一\n  - 子项二\n\n> 引用段一\n>\n> 引用段二\n\n![窄图|320](img/a.png)\n\n![宽图|1000](img/d.png)\n\n![定尺|400x300](img/b.png)\n\n![自然](img/c.png)\n";
 
 #[tokio::main(flavor = "current_thread")]
@@ -56,7 +57,14 @@ async fn main() {
                         reply(
                             &responder,
                             request_id,
-                            json!({ "path": params.path, "text": NOTE, "canWrite": true }),
+                            json!({
+                                "docId": params.doc_id,
+                                "openSeq": params.open_seq,
+                                "path": params.doc_id,
+                                "text": NOTE,
+                                "canWrite": true,
+                                "diskRev": content_rev(NOTE.as_bytes()),
+                            }),
                         );
                     }
                     HostRequest::VaultBacklinks { request_id, .. } => {
@@ -89,15 +97,33 @@ async fn main() {
                     | HostRequest::DocClose { request_id, .. } => {
                         reply(&responder, request_id, json!({}));
                     }
-                    HostRequest::DocEdit { request_id, .. }
-                    | HostRequest::DocAwareness { request_id, .. } => {
+                    HostRequest::DocState { request_id, .. } => {
                         reply(&responder, request_id, json!({}));
                     }
-                    HostRequest::DocSave { request_id, .. } => {
-                        reply(&responder, request_id, json!({}));
+                    HostRequest::DocSave { request_id, params, .. } => {
+                        reply(
+                            &responder,
+                            request_id,
+                            json!({ "status": if params.expected_rev == content_rev(NOTE.as_bytes()) {
+                                "ok"
+                            } else {
+                                "err"
+                            }, "newRev": content_rev(params.text.as_bytes()), "message": "冒烟宿主不写盘" }),
+                        );
                     }
                     HostRequest::HistoryOpen { request_id, .. } => {
                         reply(&responder, request_id, json!({}));
+                    }
+                    // 历史记版是壳侧受理型调用：冒烟宿主不落版本，但要按同一通道回执
+                    HostRequest::HistoryRecord { request_id, .. } => {
+                        responder.resolve_ui_call(request_id, Ok(()));
+                    }
+                    // 本地仓库：没有协作房间，名册为空（插件据此不建协作基线）
+                    HostRequest::SpaceRoom { request_id, .. } => {
+                        reply(&responder, request_id, json!({ "kind": "local", "connected": false }));
+                    }
+                    HostRequest::CollabPeers { request_id, .. } => {
+                        reply(&responder, request_id, json!({ "connected": false }));
                     }
                     HostRequest::ClipboardWrite { request_id, text, .. } => {
                         *responder_clipboard.lock().unwrap() = Some(text);
@@ -131,7 +157,7 @@ async fn main() {
         "在文件面板或搜索面板单击一个 .md 笔记开始编辑。",
     );
 
-    runtime.notify_doc_open(PLUGIN, SURFACE, "a.md");
+    runtime.notify_doc_open(PLUGIN, SURFACE, "a.md", DOC, 1);
     let frame = wait_frame(&runtime, Duration::from_secs(5)).await.expect("打开笔记后应有帧");
     println!("只读帧：{} 条指令，{} 个命中区", frame.commands.len(), frame.hits.len());
 
@@ -229,21 +255,6 @@ async fn main() {
     let frame = wait_frame(&runtime, Duration::from_secs(5)).await.expect("恢复面尺寸后应有帧");
     println!("恢复只读帧：{} 条指令", frame.commands.len());
 
-    // 只读面的远端协作光标：竖线与名签叠在正文块上
-    let cursor_at = NOTE.find("第一段").expect("正文起点");
-    runtime.on_doc_presence(DocPresencePayload {
-        path: Some("a.md".into()),
-        cursors: vec![DocRemoteCursor {
-            name: "伙伴".into(),
-            color: "#4a90d9".into(),
-            anchor: Some(cursor_at),
-            head: Some(cursor_at),
-        }],
-    });
-    let cursor_frame = wait_remote_cursor(&runtime, "伙伴", Duration::from_secs(2)).await;
-    println!("只读面协作光标：{}", if cursor_frame.is_some() { "通过" } else { "未确认" });
-    assert!(cursor_frame.is_some(), "只读面应画出远端光标竖线与名签");
-
     if let Some(hit) = frame.hits.iter().find(|hit| hit.id == "note:mode:edit").cloned() {
         click_hit(&runtime, &hit);
         let frame = wait_gap_input(&runtime, Duration::from_secs(2))
@@ -254,10 +265,6 @@ async fn main() {
         let first_y = frame.hits.iter().find(|hit| hit.id == "note:block:0").map_or(-1.0, |hit| hit.y);
         println!("预览编辑块：{blocks}，空行输入面：{gaps}，首块 y：{first_y:.1}");
         assert!(first_y < 200.0, "工具条 / 属性面板不得吃满剩余高度（首块 y = {first_y}）");
-        // 编辑面同样叠远端光标：此刻没有活动块，正文块仍是渲染面
-        let edit_cursor = wait_remote_cursor(&runtime, "伙伴", Duration::from_secs(2)).await;
-        println!("编辑面协作光标：{}", if edit_cursor.is_some() { "通过" } else { "未确认" });
-        assert!(edit_cursor.is_some(), "编辑面应画出远端光标竖线与名签");
         // 揭示块：块后一根空行应显示为第二行（修复前会多算一行）
         if let Some(hit) = frame.hits.iter().find(|hit| hit.id == "note:block:0").cloned() {
             click_hit(&runtime, &hit);
@@ -346,20 +353,6 @@ async fn main() {
             println!("嵌套项揭示：父项 {parent}，兄弟 {sibling}，高度 {height:.1}");
             assert!(parent && sibling, "父项与兄弟子项要保持渲染");
             assert!(height < 32.0, "嵌套项揭示不得带上父项的行（高度 {height}）");
-            // 活动编辑框画的是源码：同一项内的远端光标也要落在输入面上
-            let active_at = NOTE.find("子项一").expect("活动项偏移");
-            runtime.on_doc_presence(DocPresencePayload {
-                path: Some("a.md".into()),
-                cursors: vec![DocRemoteCursor {
-                    name: "伙伴".into(),
-                    color: "#4a90d9".into(),
-                    anchor: Some(active_at),
-                    head: Some(active_at),
-                }],
-            });
-            let cursor = wait_remote_cursor(&runtime, "伙伴", Duration::from_secs(2)).await;
-            println!("活动编辑框协作光标：{}", if cursor.is_some() { "通过" } else { "未确认" });
-            assert!(cursor.is_some(), "活动编辑框内也应画远端光标竖线与名签");
         }
         // 引用内子块各自成揭示单元：点第二段只换第二段
         let frame = runtime.surface_frame(PLUGIN, SURFACE).expect("预览编辑帧");
@@ -601,7 +594,7 @@ async fn main() {
         println!("失焦退编辑：通过");
     }
     // 关档：插件必须交空态帧，否则面板停在上一份文档
-    runtime.notify_doc_close(PLUGIN, SURFACE, "a.md");
+    runtime.notify_doc_close(PLUGIN, SURFACE, "a.md", DOC, 1);
     let frame = wait_empty_state(&runtime, Duration::from_secs(2))
         .await
         .expect("关档后应出现空态帧");
@@ -774,32 +767,6 @@ async fn wait_frame(runtime: &Arc<PluginRuntime>, timeout: Duration) -> Option<A
         }
         if Instant::now() >= deadline {
             return last;
-        }
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
-}
-
-/// 等到帧里出现远端光标：2px 自绘竖线 + 名字签。
-async fn wait_remote_cursor(
-    runtime: &Arc<PluginRuntime>,
-    name: &str,
-    timeout: Duration,
-) -> Option<Arc<SurfaceFrame>> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if let Some(frame) = runtime.surface_frame(PLUGIN, SURFACE) {
-            let line = frame.commands.iter().any(|command| {
-                matches!(command, DrawCommand::Rect { w, fill: Some(PaintColor::Rgba { .. }), .. } if (*w - 2.0).abs() < 0.01)
-            });
-            let tag = frame.commands.iter().any(|command| {
-                matches!(command, DrawCommand::Text { content, .. } if content == name)
-            });
-            if line && tag {
-                return Some(frame);
-            }
-        }
-        if Instant::now() >= deadline {
-            return None;
         }
         tokio::time::sleep(Duration::from_millis(5)).await;
     }

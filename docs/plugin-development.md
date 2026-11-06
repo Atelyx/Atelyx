@@ -525,7 +525,7 @@ ctx.begin_window_drag("main").await?;   // 宿主接管拖动手势
 | `viewSlot` | 显示「视图」下拉时给出贡献槽（`tableView`），宿主按注册表列出可切换视图 |
 | `dirty` | 本面板有未落盘改动（在途编辑草稿也算）：宿主的脏拦截会先要求插件落盘再放行动作 |
 
-落盘握手：宿主要求立即保存时发 `panel:flush { target, token }`，插件保存完用 `panel.flushDone { token, ok, error }` 按令牌回执；成功宿主清脏并放行挂起的动作，失败保留脏并提示。
+落盘握手：宿主要求立即保存时发 `panel:flush { target, token, docId, openSeq }`（`docId` / `openSeq` 只在文档面出现），插件保存完用 `panel.flushDone { token, ok, error }` 按令牌回执；成功宿主清脏并放行挂起的动作，失败保留脏并提示。插件自己发现内容脏时也走同一条：先 `doc.state` 上报脏，宿主到点再发 `panel:flush`。
 
 ## 6. 能力面
 
@@ -538,8 +538,8 @@ ctx.begin_window_drag("main").await?;   // 宿主接管拖动手势
 | `state` | 按插件隔离的自持 JSON，落 `<插件目录>/data/state.json`；损坏时宿主先备份原文再降级 |
 | `fs` | `private_dir()` 给私有数据目录，`downloads_dir()` 给系统下载目录；其余接受**任意绝对路径**，父目录自动创建 |
 | `vault` | 路径相对当前仓库根，不能越出仓库；隐藏段可访问（插件自管附件可放 `.atelyx/temp/`），本地仓库与协作空间的 `vault_list` / `vault_exists` 同口径保留隐藏项（原子写残留 `.tmp` 除外）；**正被编辑器打开的文件拒写**。文本与二进制两条通道，二进制单次上限 32 MiB；更大的文件先落到插件私有目录再用 `vault_import_file` 让宿主按路径收进仓库（字节不进 RPC，源文件须在私有目录内，复制语义，见 §8.9）。`vault_image_info` 只解文件头给出图片固有像素尺寸（png / jpeg / gif / bmp / webp），不送回文件内容；`vault_tags()` 取宿主缓存的标签词表快照（按出现次数降序、最多 1000 条，属性标签值候选这类界面用；刚写入的新标签要等宿主下次重建词表才出现）；`vault_backlinks(path)` 取引用该文档的其它文档（wiki 链接索引，本地按增量索引、协作空间走服务端端点）；`vault_files()` 一次取全仓库可检索文件（树序，带行图标键与能否在面板内打开），按名检索 / 文件清单类界面用它，过滤与排序在插件做。结构变更用 `vault_rename(from, to)` / `vault_remove(path)`：文件或文件夹（递归），`to` 不可已存在、文件夹不可移入自身、仓库根不可删；改名会同步 `.md` 内部链接与画布节点引用。**路径正被笔记 / 表格 / 画布 / 插件文档打开，或被当前画布引用时拒收**——这些持有者仍按旧路径工作，放行后写回会产生幽灵文件，先关闭对应面再操作 |
-| `editor` | 当前文档的选区读写：`editor_selection()` 取文档路径、选区字节区间与选中文本（阅读态 / 未打开文档回空选区），`editor_replace_selection(text)` 替换选区（空串 = 删除，走文档同一套保存链）；`editor_open_file(path)` 让宿主按扩展名路由打开文件（布局里没有对应视图时新增并激活），`editor_open_file_quiet(path)` 只打开文件、不动布局（列表 / 跳板类入口用）；`open_files()` 取当前打开的文件（仓库相对路径，按打开顺序），候选列表这类「打开中的优先」的界面用它置顶；`editor_prefs()` 取宽松换行 / 页面内标题 / 正文宽度，变更经 `editor:prefs.changed` 下发 |
-| `doc` | 文档正文读写（宿主持真源与保存链）：`doc_open(path)` 载入并建立会话（换篇前要求旧篇无未落盘输入；同篇重开直接回内存正文，不读盘覆盖未落盘输入），`doc_edit(path, text)` 提交整篇（宿主与协作远端三方合并，合并结果经 `doc:changed` 回填），`doc_save(path)` 请求保存，`doc_close(path)` 关闭会话，`doc_awareness(path, anchor, head)` 上报选区，`doc_rename(path, name)` 改主名（同目录、保留扩展名；要求无未落盘修改）。订阅 `doc:changed` 收正文 / 脏标记 / 保存错误，订阅 `doc:presence` 收远端协作者光标区间；路径必须是当前会话那一篇 |
+| `editor` | `editor_open_file(path)` 让宿主按扩展名路由打开文件（布局里没有对应视图时新增并激活），`editor_open_file_quiet(path)` 只打开文件、不动布局（列表 / 跳板类入口用）；`open_files()` 取当前打开的文件（仓库相对路径，按打开顺序），候选列表这类「打开中的优先」的界面用它置顶；`editor_prefs()` 取宽松换行 / 页面内标题 / 正文宽度，变更经 `editor:prefs.changed` 下发 |
+| `doc` | 文档会话表（宿主只记状态与磁盘基线，正文与协作在插件）：`doc_open(doc_id, open_seq)` 读盘建立会话并回正文 / 可写性 / 磁盘基线（换篇前要求旧篇无未落盘输入），`doc_state(doc_id, open_seq, dirty, save_error)` 上报未落盘修改与保存失败原因（宿主据此排 500ms 自动保存），`doc_save(doc_id, open_seq, expected_rev, text, manual)` 提交整篇——宿主写前即时读盘比对 `expected_rev`，不符回 `Conflict{diskRev, diskContent}` 由插件合流重试，成功回 `Ok{newRev}`，失败回 `Err{message}`；`doc_close` 关闭会话，`doc_rename(path, name)` 改主名（同目录、保留扩展名；要求无未落盘修改）。订阅 `doc:changed` 收脏标记与保存错误、订阅 `doc:restore` 收历史回滚的新正文；路径必须是当前会话那一篇 |
 | `table` | 读写当前打开的表格：由预置表格插件提供（它持有模型与保存链），其它插件（第三方表格视图）经这些方法读快照、写改动，写入与用户编辑同一出口（同撤销栈、同保存链、同广播）；**禁止**用 `fs` 旁路读写 `.atb`。快照含稳定表格 id、列宽、行内单元格样式、用户当前选区与其他协作者选区（显示名 + 身份色）；向图片字段写图片用 `table_set_cell_image`（图片先经 `vault_write_binary` 落仓库，再传仓库相对路径） |
 | `notification` | 应用内通知条 |
 | `shortcuts` | 系统级全局快捷键（如 `Shift+Alt+E`）；被占用时注册返回可读错误，停用自动注销；同一组键重复注册幂等，触发上报的是最后一次注册的写法。`query_shortcut` 可事前问某键位是否被占用（`owner` 为占用方插件 id；被系统 / 其他应用占用时为缺省） |
@@ -659,9 +659,11 @@ ctx.window_show("palette").await?;
 ]
 ```
 
-`id` 在插件内稳定且唯一，`extensions` 是不带点的小写扩展名清单。`ownerPlugin` 是持内容真源、定解析 / 合并 / 保存语义的插件；`views` 是能承载该文档类型的视图贡献 id（当前须由同一插件用 `view.register` 注册为 `panel`），宿主按 `views` 决定可绑定视图。同一扩展名被多个插件争用时预置插件优先，其余按（插件 id、文档类型 id）字典序取首个并记入冲突。
+`id` 在插件内稳定且唯一，`extensions` 是不带点的小写扩展名清单。`ownerPlugin` 是持内容真源、定解析 / 合并 / 保存语义的插件（正文缓冲、协作合流与保存重试都在它这里，宿主只按 `doc.save` 校验磁盘基线后落盘）；`views` 是能承载该文档类型的视图贡献 id（当前须由同一插件用 `view.register` 注册为 `panel`），宿主按 `views` 决定可绑定视图。同一扩展名被多个插件争用时预置插件优先，其余按（插件 id、文档类型 id）字典序取首个并记入冲突。
 
-用户打开这类文件时宿主发 `host:doc.open { surfaceId, path }` 给 `ownerPlugin`（`surfaceId` = 首个承载视图 id），插件按 `surfaceId` 提交这一面的帧；关闭或换文件时先发 `host:doc.close`。同一时间至多一个打开的插件文档（切换文件即换实例）；文件被删除或切仓库也会关闭。
+用户打开这类文件时宿主发 `host:doc.open { surfaceId, docId, openSeq }` 给 `ownerPlugin`（`surfaceId` = 首个承载视图 id，`docId` 与路径同值），插件按 `surfaceId` 提交这一面的帧；关闭或换文件时先发 `host:doc.close`。每个文档类型只保留一份会话：打开同类型另一份文件时宿主先 flush 旧文档再结束它的会话，旧缓冲由插件在 `host:doc.close` 里落盘后释放；文件被删除或切仓库也会关闭。标签 × 只关这份文件，标签与布局保留回未打开态。
+
+属性面板经 `doc.props.read` / `doc.props.write` 找宿主；宿主按会话表定位 `ownerPlugin`，把整块载荷原样转给它的 `content` 服务（`props.read` / `props.write`）。写入由所有者改写正文并走自己的保存链，宿主不拼属性块。
 
 ### 8.4 AI 总线
 

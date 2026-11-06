@@ -30,7 +30,7 @@ pub(crate) const SERVICE_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 const BUS_NAMESPACE: &str = "service";
 
 /// 不可替换的内置服务：`query` 的量算与主题取自宿主 OS / 用户设置；`chat` 是会话真源，
-/// `doc` 是文档正文与保存链真源，只能由宿主按仓库身份读写。外置都会与宿主状态脱节。
+/// `doc` 是文档会话表与磁盘基线，只能由宿主按仓库身份读写。外置都会与宿主状态脱节。
 const NON_REPLACEABLE: &[&str] = &["query", "chat", "doc"];
 
 /// 宿主保留方法：工具名册、结果回报、工具执行与对话事件由宿主记账，服务被外部顶替后
@@ -986,7 +986,7 @@ mod tests {
         sorted.sort_unstable();
         assert_eq!(names, sorted);
         assert!(info(&list, "vault").methods.contains(&"readText".to_string()));
-        assert!(info(&list, "editor").methods.contains(&"selection".to_string()));
+        assert!(info(&list, "editor").methods.contains(&"prefs".to_string()));
         assert_eq!(info(&list, "vault").provider, None);
         assert!(!info(&list, "query").replaceable, "字体与主题不外置");
         assert!(info(&list, "vault").replaceable);
@@ -995,10 +995,10 @@ mod tests {
     #[test]
     fn external_registration_is_only_a_candidate() {
         let mut dir = ServiceDir::new();
-        dir.register("com.a", &params("editor", &["selection"])).unwrap();
+        dir.register("com.a", &params("editor", &["prefs"])).unwrap();
         assert_eq!(dir.route("editor"), Route::Builtin, "内置服务不得被静默顶替");
         assert_eq!(info(&dir.list(), "editor").candidates, vec!["com.a"]);
-        assert!(dir.provider_declares("com.a", "editor", "selection"));
+        assert!(dir.provider_declares("com.a", "editor", "prefs"));
         assert!(!dir.provider_declares("com.a", "editor", "render"));
 
         dir.set_active("editor", Some("com.a")).unwrap();

@@ -641,7 +641,7 @@ fn restore(app: &mut App, seq: u64) -> Task<Message> {
             match kind {
                 // 成功提示挂到保存链落盘回执（「已回滚」只在写盘成功后出现）
                 HistoryKind::Note => {
-                    app.history_restore_pending = true;
+                    app.history_restore_doc = Some(atelyx_core::doc_session::DocId::new(file.clone()));
                     app.history_restore(kind, version)
                 }
                 // 宿主把快照交回插件后即提示；插件自行替换并落入保存链

@@ -1179,6 +1179,8 @@ impl PluginHandler for TablesPlugin {
                 let done = atelyx_plugin_protocol::method::PanelFlushDoneParams {
                     target: Some(params.target.clone()),
                     token: params.token,
+                    doc_id: params.doc_id.clone(),
+                    open_seq: params.open_seq,
                     ok: result.is_ok(),
                     error: result.err(),
                 };

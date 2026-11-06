@@ -3,7 +3,7 @@ name = "atelyx-plugin-notes"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
-description = "Atelyx 笔记插件：只读 / 预览编辑 / 源码三档，正文真源与保存链在宿主"
+description = "Atelyx 笔记插件：只读 / 预览编辑 / 源码三档，正文缓冲与协作都在本插件"
 license = "Apache-2.0"
 
 [lib]
@@ -15,5 +15,7 @@ atelyx-plugin-protocol = { version = "0.1.0", path = "../../atelyx-plugin-protoc
 atelyx-plugin-sdk = { version = "0.1.0", path = "../../atelyx-plugin-sdk" }
 atelyx-plugin-props = { version = "0.1.0", path = "../shared/props" }
 async-trait = "0.1"
+base64 = "0.22"
 serde_json = "1"
 tokio = { version = "1", features = ["sync", "time"] }
+yrs = "0.28"

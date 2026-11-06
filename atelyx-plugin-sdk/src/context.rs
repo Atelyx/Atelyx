@@ -263,46 +263,60 @@ impl Context {
         self.call_unit(crate::protocol::event::EMIT, &params).await
     }
 
-    // ---------- doc（当前文档会话；正文真源与保存链在宿主） ----------
+    // ---------- doc（文档会话；正文真源在内容所有者插件，宿主只做基线校验与原子写） ----------
 
     /// 打开一个文档会话：宿主读盘并建立会话，回执正文与可写性（viewer 只读为 false）。
-    pub async fn doc_open(&self, path: &str) -> Result<DocOpenResult, RpcError> {
-        self.call_typed(method::doc::OPEN, &DocOpenParams { path: path.into() }).await
+    pub async fn doc_open(&self, doc_id: &str, open_seq: u64) -> Result<DocOpenResult, RpcError> {
+        self.call_typed(
+            method::doc::OPEN,
+            &DocOpenParams { doc_id: doc_id.into(), open_seq },
+        )
+        .await
     }
 
-    /// 提交一次编辑（完整正文 + 全文字节偏移的光标 / 选区）。内容有变化时宿主置脏并排
-    /// 自动保存，同时接入协作增量。
-    pub async fn doc_edit(
+    /// 上报文档会话状态（是否有未落盘修改、最近一次保存失败原因）。宿主只记账，不推断正文。
+    pub async fn doc_state(
         &self,
-        path: &str,
+        doc_id: &str,
+        open_seq: u64,
+        dirty: bool,
+        save_error: Option<&str>,
+    ) -> Result<(), RpcError> {
+        let params = DocStateParams {
+            doc_id: doc_id.into(),
+            open_seq,
+            dirty,
+            save_error: save_error.map(str::to_string),
+        };
+        self.call_unit(method::doc::STATE, &params).await
+    }
+
+    /// 提交完整正文保存；宿主写前即时读盘比对 `expected_rev`，冲突时把磁盘原文交回。
+    pub async fn doc_save(
+        &self,
+        doc_id: &str,
+        open_seq: u64,
+        expected_rev: &str,
         text: &str,
-        anchor: Option<usize>,
-        head: Option<usize>,
-    ) -> Result<(), RpcError> {
-        let params = DocEditParams { path: path.into(), text: text.into(), anchor, head };
-        self.call_unit(method::doc::EDIT, &params).await
+        manual: bool,
+    ) -> Result<DocSaveResult, RpcError> {
+        let params = DocSaveParams {
+            doc_id: doc_id.into(),
+            open_seq,
+            expected_rev: expected_rev.into(),
+            text: text.into(),
+            manual,
+        };
+        self.call_typed(method::doc::SAVE, &params).await
     }
 
-    /// 请求一次保存（`manual` = 手动保存）；回执只表示已受理，结果经 `doc:changed` 到达。
-    pub async fn doc_save(&self, path: &str, manual: bool) -> Result<(), RpcError> {
-        let params = DocSaveParams { path: path.into(), manual };
-        self.call_unit(method::doc::SAVE, &params).await
-    }
-
-    /// 关闭当前文档会话（换文件 / 关标签 / 切仓库）。
-    pub async fn doc_close(&self, path: &str) -> Result<(), RpcError> {
-        self.call_unit(method::doc::CLOSE, &PathParams { path: path.into() }).await
-    }
-
-    /// 上报本端选区（全文字节偏移；`None` = 只上报身份）。
-    pub async fn doc_awareness(
-        &self,
-        path: &str,
-        anchor: Option<usize>,
-        head: Option<usize>,
-    ) -> Result<(), RpcError> {
-        let params = DocAwarenessParams { path: path.into(), anchor, head };
-        self.call_unit(method::doc::AWARENESS, &params).await
+    /// 关闭文档会话（换文件 / 关标签 / 切仓库）。
+    pub async fn doc_close(&self, doc_id: &str, open_seq: u64) -> Result<(), RpcError> {
+        self.call_unit(
+            method::doc::CLOSE,
+            &DocCloseParams { doc_id: doc_id.into(), open_seq },
+        )
+        .await
     }
 
     /// 把当前文档改名为新的主名（同目录、保留扩展名）：有未落盘修改时宿主拒绝，先保存再调用。

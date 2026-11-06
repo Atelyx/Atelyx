@@ -65,15 +65,18 @@ pub mod name {
     /// 空间成员名册缓存变化（拉取开始 / 成功 / 失败、离开空间清空）。payload 为空对象；
     /// 订阅方重取 `space.members`。
     pub const SPACE_MEMBERS_CHANGED: &str = "space:members.changed";
+    /// 与服务端的实时频道重新接上（重连成功、补投完成）：payload 为空对象。
+    /// 订阅方按自己的通道重发当前状态——断连期间的帧已丢失，宿主不代存内容。
+    pub const SPACE_RESYNC: &str = "space:resync";
     /// 外部文件拖入窗口（宿主只转发绝对路径，读取由订阅方经 `fs` 自理）。
     /// payload 见 [`FileDropPayload`]；只投给指针所在面的插件，该面未挂载即不投递。
     pub const WINDOW_FILE_DROP: &str = "window:file.drop";
-    /// 当前文档会话的正文 / 落盘状态变化（协作远端合入、保存成功或失败、属性面板改写）。
-    /// payload 见 [`DocChangedPayload`]。
+    /// 当前文档会话状态变化（打开 / 落盘状态 / 改名 / 回滚）；正文归内容所有者插件，
+    /// 宿主只广播会话事实。payload 见 [`DocChangedPayload`]。
     pub const DOC_CHANGED: &str = "doc:changed";
-    /// 当前文档的远端协作者光标（进入 / 移动 / 离场都会发；无协作者 = 空清单）。
-    /// payload 见 [`DocPresencePayload`]。
-    pub const DOC_PRESENCE: &str = "doc:presence";
+    /// 历史回滚把某个版本交回当前文本文档：payload 见 [`DocRestorePayload`]
+    /// （订阅方按自己的会话身份匹配；`content` 是整篇正文）。
+    pub const DOC_RESTORE: &str = "doc:restore";
     /// 全局编辑偏好变更（软换行 / 页面内标题 / 正文宽度）。payload 同
     /// `editor.prefs` 的 result（[`crate::method::EditorPrefs`]）。
     pub const EDITOR_PREFS_CHANGED: &str = "editor:prefs.changed";
@@ -102,27 +105,15 @@ pub mod name {
     pub const PANEL_HEADER_ACTION: &str = "panel:header.action";
 }
 
-/// [`name::DOC_PRESENCE`] 的 payload：当前文档路径 + 远端协作者光标（不含本端）。
-/// `anchor` / `head` 与 `doc.open` 回执的 `text` 同一坐标系（全文字节偏移）；缺省 = 该成员没有光标。
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+/// [`name::DOC_RESTORE`] 的 payload：宿主把历史版本正文交回内容所有者插件。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DocPresencePayload {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub cursors: Vec<DocRemoteCursor>,
-}
-
-/// 一位远端协作者的光标（`color` 为 `#rrggbb` 或 `#rrggbbaa`）。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DocRemoteCursor {
-    pub name: String,
-    pub color: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub anchor: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub head: Option<usize>,
+pub struct DocRestorePayload {
+    /// 文档会话身份；插件只认当前热文档的 [`(docId, openSeq)`]。
+    pub doc_id: String,
+    pub open_seq: u64,
+    /// 整篇正文（回滚目标版本的原文）。
+    pub content: String,
 }
 
 /// 订阅事件名是否在封闭表内（宿主另允许 `ai::HOST_CHAT_EVENT`，见插件运行时）。
@@ -145,9 +136,10 @@ pub fn is_known(name: &str) -> bool {
             | name::SPACE_META_CHANGED
             | name::SPACE_PEERS_CHANGED
             | name::SPACE_MEMBERS_CHANGED
+            | name::SPACE_RESYNC
             | name::WINDOW_FILE_DROP
             | name::DOC_CHANGED
-            | name::DOC_PRESENCE
+            | name::DOC_RESTORE
             | name::EDITOR_PREFS_CHANGED
             | name::RECENT_CHANGED
             | name::HISTORY_CHANGED
@@ -160,14 +152,17 @@ pub fn is_known(name: &str) -> bool {
     )
 }
 
-/// [`name::DOC_CHANGED`] 的 payload：`text` 只在正文被宿主改写时给出（保存成功回填合流结果、
-/// 远端合入、属性面板改写）；`dirty` / `saveError` 反映当前落盘状态。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// [`name::DOC_CHANGED`] 的 payload：会话路径与落盘状态。
+/// 正文归内容所有者插件，宿主不转发副本；插件按 `(docId, openSeq)` 丢弃迟到通知。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DocChangedPayload {
     pub path: String,
+    /// 文档会话身份；插件只认当前热文档的 `(docId, openSeq)`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub text: Option<String>,
+    pub doc_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_seq: Option<u64>,
     #[serde(default)]
     pub dirty: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
