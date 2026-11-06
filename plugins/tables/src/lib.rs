@@ -607,7 +607,35 @@ impl PluginState {
 
     /// 导入图片：多选对话框 → 逐张落仓库（`.atelyx/temp/tables/<表 id>/`）→ 一次撤销合并进单元格。
     /// 单张失败跳过并计入失败清单，不阻断其余图片；结果按成功 / 部分失败 / 全部失败汇总提示。
+    /// 选图与上传期间会话可能被切换、目标行 / 字段可能被删：上传前与回填前都按目标校验，
+    /// 失效时清理本次刚上传的附件，避免留下无人引用的文件。
     async fn import_images(self: &Arc<Self>, ctx: &Context, row_id: &str, field_id: &str) {
+        let target = match self.with_session(|session| {
+            let target = ImageTarget {
+                table_id: session.data.id.clone(),
+                row_id: row_id.to_string(),
+                field_id: field_id.to_string(),
+            };
+            target.is_alive(session).then_some(target)
+        }) {
+            Some(Some(target)) => target,
+            other => {
+                // 点击到处理之间会话 / 目标已失效：与后续失败路径同口径，不静默
+                let reason = if other.is_none() {
+                    "表格已关闭或切换，图片未插入"
+                } else {
+                    "目标单元格已不存在，图片未插入"
+                };
+                let _ = ctx
+                    .notify(
+                        reason,
+                        None,
+                        atelyx_plugin_protocol::method::NotificationLevel::Error,
+                    )
+                    .await;
+                return;
+            }
+        };
         let params = atelyx_plugin_protocol::method::PickFileParams {
             title: Some("选择图片".to_string()),
             save: None,
@@ -635,9 +663,17 @@ impl PluginState {
         if paths.is_empty() {
             return;
         }
-        let Some(table_id) = self.with_session(|session| session.data.id.clone()) else {
+        // 选图期间表格可能已被切换或目标格被删：先校验再上传，不写出没人引用的附件
+        if let Some(reason) = self.image_target_failure(&target) {
+            let _ = ctx
+                .notify(
+                    reason,
+                    None,
+                    atelyx_plugin_protocol::method::NotificationLevel::Error,
+                )
+                .await;
             return;
-        };
+        }
         let mut written: Vec<String> = Vec::new();
         let mut failures: Vec<String> = Vec::new();
         for path in paths {
@@ -645,7 +681,7 @@ impl PluginState {
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            let Ok(rel) = atelyx_format::table::table_image_rel_path(&table_id, &file_name) else {
+            let Ok(rel) = atelyx_format::table::table_image_rel_path(&target.table_id, &file_name) else {
                 ctx.log_error(&format!("跳过不支持的图片：{file_name}"));
                 failures.push(format!("{file_name}：不支持的格式"));
                 continue;
@@ -671,28 +707,50 @@ impl PluginState {
             }
             written.push(rel);
         }
-        let changed = if written.is_empty() {
-            false
-        } else {
-            self.with_session_mut(|session| append_images(session, row_id, field_id, &written))
-                .unwrap_or(false)
-        };
-        if !written.is_empty() && !changed {
+        if written.is_empty() {
+            let (level, text) = import_report(0, &failures);
+            let _ = ctx.notify(&text, None, level).await;
+            self.render(ctx).await;
+            return;
+        }
+        if let Err(reason) = self.append_imported_images(&target, &written) {
+            discard_uploaded_images(ctx, &written).await;
             let _ = ctx
                 .notify(
-                    "未能写入任何图片：目标单元格已不存在",
+                    reason,
                     None,
                     atelyx_plugin_protocol::method::NotificationLevel::Error,
                 )
                 .await;
+            self.render(ctx).await;
             return;
         }
         let (level, text) = import_report(written.len(), &failures);
         let _ = ctx.notify(&text, None, level).await;
-        if changed {
-            self.schedule_save(ctx);
-        }
+        self.schedule_save(ctx);
         self.render(ctx).await;
+    }
+
+    /// 目标格失效原因（会话已换 / 行或字段已删）；仍有效返回 None。
+    fn image_target_failure(&self, target: &ImageTarget) -> Option<&'static str> {
+        match self.with_session(|session| target.is_alive(session)) {
+            None => Some("表格已关闭或切换，图片未插入"),
+            Some(false) => Some("目标单元格已不存在，图片未插入"),
+            Some(true) => None,
+        }
+    }
+
+    /// 把本次上传的引用追加进目标格；目标或会话已变时返回可读原因。
+    fn append_imported_images(&self, target: &ImageTarget, rels: &[String]) -> Result<(), &'static str> {
+        match self.with_session_mut(|session| {
+            target
+                .is_alive(session)
+                .then(|| append_images(session, &target.row_id, &target.field_id, rels))
+        }) {
+            None => Err("表格已关闭或切换，图片未插入"),
+            Some(None) | Some(Some(false)) => Err("目标单元格已不存在，图片未插入"),
+            Some(Some(true)) => Ok(()),
+        }
     }
 
     /// 剪贴板动作：复制 / 剪切写系统剪贴板，粘贴读回后落格。
@@ -1407,16 +1465,45 @@ fn import_report(
     )
 }
 
+/// 图片导入目标：表 id + 行 / 字段 id。选图与上传期间会话可能被换掉，回填前按表 id 校验。
+struct ImageTarget {
+    table_id: String,
+    row_id: String,
+    field_id: String,
+}
+
+impl ImageTarget {
+    /// 目标仍属于当前会话且是图片格（行 / 字段被删或字段改成非图片类型即失效）。
+    fn is_alive(&self, session: &Session) -> bool {
+        session.data.id == self.table_id
+            && session.data.fields.iter().any(|field| {
+                field.id == self.field_id && field.field_type == "image"
+            })
+            && session.data.rows.iter().any(|row| row.id == self.row_id)
+    }
+}
+
 /// 把新导入的图片引用追加到图片格（一次撤销、一次置脏）。
+/// 单元格没有值按空图片格处理；行 / 字段已删或字段已改成非图片类型时返回 false。
 fn append_images(session: &mut Session, row_id: &str, field_id: &str, rels: &[String]) -> bool {
-    let Some(row) = session.data.rows.iter().find(|row| row.id == row_id) else {
+    let field_is_image = session
+        .data
+        .fields
+        .iter()
+        .any(|field| field.id == field_id && field.field_type == "image");
+    if !field_is_image {
         return false;
+    }
+    let (mut list, display) = {
+        let Some(row) = session.data.rows.iter().find(|row| row.id == row_id) else {
+            return false;
+        };
+        let value = row.values.get(field_id);
+        (
+            crate::images::entries(value),
+            crate::images::display_mode(value).to_string(),
+        )
     };
-    let Some(value) = row.values.get(field_id) else {
-        return false;
-    };
-    let mut list: Vec<String> = crate::images::entries(Some(value));
-    let display = crate::images::display_mode(Some(value)).to_string();
     list.extend(rels.iter().cloned());
     let next = serde_json::json!({ "images": list, "display": display });
     crate::input::push_undo(session);
@@ -1430,6 +1517,15 @@ fn append_images(session: &mut Session, row_id: &str, field_id: &str, rels: &[St
         session.view.undo.pop();
     }
     changed
+}
+
+/// 目标失效时清理本次已上传的附件：它们没有被任何单元格引用，留着只会成为孤儿。
+async fn discard_uploaded_images(ctx: &Context, rels: &[String]) {
+    for rel in rels {
+        if let Err(error) = ctx.vault_remove(rel).await {
+            ctx.log_error(&format!("清理未引用的图片失败（{rel}）：{error}"));
+        }
+    }
 }
 
 /// 图片字节 → PNG（剪贴板只认 PNG；已是 PNG 直接透传）。
@@ -1584,5 +1680,129 @@ mod tests {
                 "只有字体菜单声明搜索行：{request:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod image_import_tests {
+    use atelyx_format::table::{TableField, TableFile, TableRow};
+    use serde_json::json;
+
+    use super::{append_images, ImageTarget};
+    use crate::model::Session;
+
+    fn table(id: &str, field_type: &str, value: Option<serde_json::Value>) -> TableFile {
+        let mut values = serde_json::Map::new();
+        if let Some(value) = value {
+            values.insert("f1".to_string(), value);
+        }
+        TableFile {
+            schema: atelyx_format::table::TABLE_SCHEMA.to_string(),
+            id: id.to_string(),
+            title: "表".to_string(),
+            fields: vec![TableField {
+                id: "f1".to_string(),
+                name: "图".to_string(),
+                field_type: field_type.to_string(),
+                options: None,
+                width: None,
+                calc_type: None,
+            }],
+            rows: vec![TableRow {
+                id: "r1".to_string(),
+                values,
+                height: None,
+                styles: None,
+            }],
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    fn session(field_type: &str, value: Option<serde_json::Value>) -> Session {
+        Session::new("表.atb".to_string(), table("t1", field_type, value))
+    }
+
+    // 空格在 values 里没有键；导入必须按空图片格追加，而不是判成「单元格不存在」。
+    #[test]
+    fn append_to_empty_image_cell_creates_value() {
+        let mut session = session("image", None);
+        assert!(append_images(&mut session, "r1", "f1", &["img-a.png".to_string()]));
+        let value = &session.data.rows[0].values["f1"];
+        assert_eq!(value["images"], json!(["img-a.png"]));
+        assert_eq!(value["display"], json!("carousel"));
+        assert!(session.dirty, "追加后应置脏");
+        assert_eq!(session.view.undo.len(), 1, "整批导入一步撤销");
+    }
+
+    // 已有图片的格保留展示模式，只追加引用。
+    #[test]
+    fn append_keeps_existing_images_and_display_mode() {
+        let existing = json!({ "images": ["a.png"], "display": "grid" });
+        let mut session = session("image", Some(existing));
+        assert!(append_images(&mut session, "r1", "f1", &["b.png".to_string()]));
+        let value = &session.data.rows[0].values["f1"];
+        assert_eq!(value["images"], json!(["a.png", "b.png"]));
+        assert_eq!(value["display"], json!("grid"));
+    }
+
+    // 行 / 字段 / 字段类型任一失效都不能写：否则会把图片引用挂到不存在的格或非图片字段上。
+    #[test]
+    fn append_rejects_missing_or_non_image_target() {
+        let mut missing_row = session("image", None);
+        assert!(!append_images(&mut missing_row, "r2", "f1", &["a.png".to_string()]));
+
+        let mut missing_field = session("image", None);
+        assert!(!append_images(&mut missing_field, "r1", "f2", &["a.png".to_string()]));
+
+        let mut text_field = session("text", None);
+        assert!(!append_images(&mut text_field, "r1", "f1", &["a.png".to_string()]));
+    }
+
+    // 目标按表 id 判定：换到另一张表（即便行 / 字段 id 相同）不再回填。
+    #[test]
+    fn target_is_alive_only_in_its_own_table() {
+        let session = session("image", None);
+        let target = ImageTarget {
+            table_id: "t1".to_string(),
+            row_id: "r1".to_string(),
+            field_id: "f1".to_string(),
+        };
+        assert!(target.is_alive(&session));
+
+        let other = Session::new("另一张.atb".to_string(), table("t2", "image", None));
+        assert!(!target.is_alive(&other));
+    }
+}
+
+#[cfg(test)]
+mod image_cleanup_tests {
+    use atelyx_plugin_protocol::envelope::Envelope;
+    use atelyx_plugin_protocol::method::{vault, PathParams};
+    use atelyx_plugin_sdk::Context;
+
+    use super::discard_uploaded_images;
+
+    // 清理必须走协议删除方法：目标失效后已上传的附件要真的从仓库删掉，不能只丢内存引用。
+    #[test]
+    fn discard_uploaded_images_removes_uploaded_file() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("测试运行时");
+        runtime.block_on(async {
+            let (out_tx, mut out_rx) = tokio::sync::mpsc::channel(4);
+            let ctx = Context::test_unbound(out_tx);
+            let call = tokio::spawn(async move {
+                discard_uploaded_images(&ctx, &["img-a.png".to_string()]).await;
+            });
+            let envelope = out_rx.recv().await.expect("应发出删除请求");
+            let Envelope::Request(request) = envelope else { panic!("应为请求信封") };
+            assert_eq!(request.method, vault::REMOVE);
+            let params: PathParams =
+                serde_json::from_value(request.params).expect("删除参数解析失败");
+            assert_eq!(params.path, "img-a.png");
+            call.abort();
+        });
     }
 }
