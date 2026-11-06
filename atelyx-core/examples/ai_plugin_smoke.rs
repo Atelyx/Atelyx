@@ -8,8 +8,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use atelyx_core::plugin_runtime::{
-    FileChangeKind, FrameInput, HostRequest, MeasureTextResult, PluginRuntime, PluginStatus,
-    SurfaceKind,
+    FrameInput, HostRequest, MeasureTextResult, PluginRuntime, PluginStatus, SurfaceKind,
 };
 use atelyx_plugin_protocol::event::VaultSwitchPayload;
 use atelyx_plugin_protocol::frame::SurfaceFrame;
@@ -167,17 +166,31 @@ async fn main() {
                     HostRequest::ChatSessionWrite { request_id, .. } => {
                         reply(&responder, request_id, json!({}));
                     }
-                    HostRequest::VaultList { request_id, path, .. } => {
+                    HostRequest::VaultListDirs { request_id, .. } => {
                         responder_counts.files.fetch_add(1, Ordering::Relaxed);
-                        let entries = if path.is_empty() {
-                            json!([
-                                { "name": "方案.md", "kind": "file" },
-                                { "name": "资料", "kind": "dir" }
-                            ])
-                        } else {
-                            json!([{ "name": "看板.atb", "kind": "file" }])
-                        };
-                        reply(&responder, request_id, json!({ "entries": entries }));
+                        reply(&responder, request_id, json!({ "dirs": ["资料"] }));
+                    }
+                    HostRequest::VaultFiles { request_id, .. } => {
+                        reply(
+                            &responder,
+                            request_id,
+                            json!({
+                                "files": [
+                                    {
+                                        "path": "方案.md",
+                                        "name": "方案.md",
+                                        "icon": "file",
+                                        "openable": true
+                                    },
+                                    {
+                                        "path": "资料/看板.atb",
+                                        "name": "看板.atb",
+                                        "icon": "table",
+                                        "openable": true
+                                    }
+                                ]
+                            }),
+                        );
                     }
                     // 打开文件：把「资料/看板.atb」报成打开中，候选里它应排到最前
                     HostRequest::EditorOpenFiles { request_id, .. } => {
@@ -666,9 +679,9 @@ async fn main() {
         "已挂面收广播即重取（不重扫文件树）：{}",
         if wait_chat_reload(&counts, base).await { "通过" } else { "未重取" }
     );
-    // 文件结构变化仍要让候选刷新：文件树的重扫走 VAULT_FILE_CHANGED
+    // 宿主文件索引重建后候选跟着重取（VAULT_FILES_CHANGED）
     let base = wait_quiet(&counts, Duration::from_millis(300)).await;
-    runtime.on_file_changed("资料/新方案.md", FileChangeKind::Created, None);
+    runtime.on_files_changed();
     println!(
         "文件变化重扫候选：{}",
         if wait_files_growth(&counts, base).await { "通过" } else { "未重扫" }
@@ -771,7 +784,7 @@ fn press_backspace(runtime: &Arc<PluginRuntime>) {
     );
 }
 
-/// 观测三类「全量重取」请求：模型清单 / 会话清单 / 仓库文件树。
+/// 观测三类「全量重取」请求：模型清单 / 会话清单 / 仓库目录清单。
 #[derive(Clone, Default)]
 struct Counts {
     models: Arc<AtomicUsize>,

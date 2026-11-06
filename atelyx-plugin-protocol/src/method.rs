@@ -227,7 +227,7 @@ pub mod chat {
     pub const SESSION_READ: &str = "chat.session.read";
     /// 提交一个批次（创建 / 元数据 / 追加 / 补丁 / 截断 / 删除 / 覆盖项）。
     pub const SESSION_WRITE: &str = "chat.session.write";
-    /// 读全仓库快照（会话清单 + 覆盖层 + 落盘失败）。
+    /// 读全仓库快照（会话清单元数据 + 覆盖层 + 落盘失败；消息按会话单独读）。
     pub const SESSION_SNAPSHOT: &str = "chat.session.snapshot";
 }
 

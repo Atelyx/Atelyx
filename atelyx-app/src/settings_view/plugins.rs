@@ -272,7 +272,8 @@ pub enum PluginsMsg {
     VaultWriteBinary { request_id: u64, path: String, bytes: Vec<u8> },
     /// 大文件导入：`source` 为插件私有目录内的绝对路径（运行时已校验并规范化）。
     VaultImportFile { request_id: u64, path: String, source: String },
-    /// 写入完成：成功后广播 `vault:file.changed`（Created / Updated）再回填。
+    /// 写入完成：成功后广播 `vault:file.changed`（Created / Updated），新建的可见文件
+    /// 再刷新宿主文件索引，然后回填。
     VaultWriteDone {
         request_id: u64,
         rel: String,
@@ -2215,6 +2216,7 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
             resolve_vault(app, request_id, result)
         }
         PluginsMsg::VaultWriteDone { request_id, rel, created, result } => {
+            let mut task = Task::none();
             // 只推宿主发起的写入；失败不广播（文件未被改动）
             if result.is_ok() {
                 let kind = match created {
@@ -2222,8 +2224,18 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
                     false => FileChangeKind::Updated,
                 };
                 app.plugins.on_file_changed(&rel, kind, None);
+                // 新建且会进文件索引的路径（隐藏段不进索引）：宿主索引跟随，
+                // 读 vault.files / 引用候选的插件不必等下一次结构操作
+                if created && !vault::has_hidden_segment(&rel) {
+                    task = match &app.repo_kind {
+                        crate::RepoKind::Space(_) => {
+                            crate::space_actions::refresh_space_tree(app)
+                        }
+                        crate::RepoKind::Local => app.refresh_note_files(),
+                    };
+                }
             }
-            resolve_vault(app, request_id, result)
+            task.chain(resolve_vault(app, request_id, result))
         }
         PluginsMsg::TraySetItems { request_id, plugin_id, params } => {
             let result = app

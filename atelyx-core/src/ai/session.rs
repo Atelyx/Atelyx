@@ -193,7 +193,8 @@ pub struct PersistError {
     pub at: i64,
 }
 
-/// 仓库读面快照（进仓 / 切仓 / 面板引导拉全量）。
+/// 仓库读面快照（进仓 / 切仓 / 面板引导拉全量）：会话只出元数据，
+/// 消息按会话经 `SessionStore::session_messages` 单独取，避免每次装载克隆全量历史。
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StoreSnapshot {
@@ -203,6 +204,15 @@ pub struct StoreSnapshot {
     pub effort_override: Option<String>,
     pub agent_override: Option<String>,
     pub persist_error: Option<PersistError>,
+}
+
+/// 会话清单行（不含消息）：侧栏这类只需要标题 / 更新时间 / 条数的读面。
+#[derive(Clone, Debug)]
+pub struct SessionSummary {
+    pub id: String,
+    pub title: Option<String>,
+    pub updated_at: i64,
+    pub message_count: u64,
 }
 
 // ===== 内部状态 =====
@@ -220,7 +230,8 @@ struct Session {
     messages: Vec<Value>,
 }
 
-/// 消息 .jsonl 的追加基线：上次成功落盘的内容前缀（确定性序列化，字符串比对判定可追加）。
+/// 消息 .jsonl 的追加基线：上次读回 / 落盘的磁盘内容（去尾换行）。
+/// 写盘轮用当前消息前缀的确定性序列化与它逐字比对，一致才追加。
 struct PersistedBase {
     len: usize,
     jsonl: String,
@@ -415,11 +426,22 @@ impl SessionStore {
     /// 单会话元数据出线（不含消息；编排方按需补消息，避免全仓库快照克隆）。
     pub fn session_meta(&self, session_id: &str) -> Option<Value> {
         let inner = self.lock();
-        inner.session(session_id).map(|s| {
-            let mut wire = session_to_wire(s);
-            wire.as_object_mut().map(|o| o.remove("messages"));
-            wire
-        })
+        inner.session(session_id).map(session_meta_wire)
+    }
+
+    /// 会话清单（不含消息，按存储序）：侧栏只取标题与计数时不克隆历史。
+    pub fn session_summaries(&self) -> Vec<SessionSummary> {
+        let inner = self.lock();
+        inner
+            .sessions
+            .iter()
+            .map(|s| SessionSummary {
+                id: s.id.clone(),
+                title: s.title.clone(),
+                updated_at: s.updated_at,
+                message_count: s.messages.len() as u64,
+            })
+            .collect()
     }
 
     /// 装载真源（进仓 / 切仓 / 进协作空间调用）：同源幂等；换源先落旧真源在途写。
@@ -444,8 +466,22 @@ impl SessionStore {
             self.run_write_cycle();
         }
         // 读真源：锁外完成（空间后端在此走网络，不能占着 io_lock 让别的装载排队）
-        let sessions = scan_sessions(io.as_ref())?;
+        let scanned = scan_sessions(io.as_ref())?;
         let editor_meta = io.read_overrides()?;
+        // 追加基线直接取磁盘原文（去尾换行），省掉装载时对每个会话的全量重序列化；
+        // 写盘轮用当前前缀的确定性序列化与它比对，一致才追加。
+        let mut sessions = Vec::with_capacity(scanned.len());
+        let mut persisted = HashMap::with_capacity(scanned.len());
+        for scanned in scanned {
+            persisted.insert(
+                scanned.session.id.clone(),
+                PersistedBase {
+                    len: scanned.session.messages.len(),
+                    jsonl: without_trailing_newline(&scanned.raw).to_string(),
+                },
+            );
+            sessions.push(scanned.session);
+        }
         let _io = self.io_lock.lock().unwrap_or_else(poison);
         if self.load_seq.load(std::sync::atomic::Ordering::SeqCst) != ticket {
             return Ok(None); // 期间已有更新的装载：真源状态不归本次改写
@@ -461,19 +497,7 @@ impl SessionStore {
         inner.dirty_messages.clear();
         inner.dirty_meta.clear();
         inner.overrides_dirty = false;
-        inner.persisted = inner
-            .sessions
-            .iter()
-            .map(|s| {
-                (
-                    s.id.clone(),
-                    PersistedBase {
-                        len: s.messages.len(),
-                        jsonl: serialize_messages_jsonl(&s.messages),
-                    },
-                )
-            })
-            .collect();
+        inner.persisted = persisted;
         inner.change_versions.clear();
         inner.patch_revs.clear();
         inner.model_override = editor_meta
@@ -823,8 +847,8 @@ fn poison<T>(e: std::sync::PoisonError<MutexGuard<'_, T>>) -> MutexGuard<'_, T> 
 
 // ===== 视图 / 序列化 =====
 
-/// 会话出线形状（payload 运行时缓存剥离；title/agentId/compaction 缺省 = 键不出现）。
-fn session_to_wire(s: &Session) -> Value {
+/// 会话元数据出线形状（不含消息；title/agentId/compaction 缺省 = 键不出现）。
+fn session_meta_wire(s: &Session) -> Value {
     let mut obj = serde_json::Map::new();
     obj.insert("id".into(), json!(s.id));
     obj.insert("file".into(), json!(s.file));
@@ -839,10 +863,6 @@ fn session_to_wire(s: &Session) -> Value {
     }
     obj.insert("createdAt".into(), json!(s.created_at));
     obj.insert("updatedAt".into(), json!(s.updated_at));
-    obj.insert(
-        "messages".into(),
-        Value::Array(s.messages.iter().map(strip_message).collect()),
-    );
     Value::Object(obj)
 }
 
@@ -853,7 +873,7 @@ fn snapshot_of(inner: &Inner) -> StoreSnapshot {
             .as_ref()
             .map(|io| io.vault_key())
             .unwrap_or_default(),
-        sessions: inner.sessions.iter().map(session_to_wire).collect(),
+        sessions: inner.sessions.iter().map(session_meta_wire).collect(),
         model_override: inner.model_override.clone(),
         effort_override: inner.effort_override.clone(),
         agent_override: inner.agent_override.clone(),
@@ -897,19 +917,26 @@ fn backend_key(inner: &Inner) -> Option<String> {
     inner.backend.as_ref().map(|io| io.vault_key())
 }
 
+/// 装载结果：内存镜像 + 磁盘原文（追加基线取原文，装载不再全量重序列化）。
+struct ScannedSession {
+    session: Session,
+    raw: String,
+}
+
 /// 装载磁盘真源：损坏行跳过、steps 收敛；单文件读取失败即跳过该会话并留日志——
 /// 读取失败的会话不进内存，写链就不会用空内容覆盖它（宁可这次看不到，不可丢内容）。
-fn scan_sessions(io: &dyn SessionIo) -> Result<Vec<Session>, String> {
+fn scan_sessions(io: &dyn SessionIo) -> Result<Vec<ScannedSession>, String> {
     let rows = io.list_sessions()?;
     let mut sessions = Vec::new();
     for row in rows {
-        let messages = match io.read_messages(&row.file) {
-            Ok(jsonl) => parse_messages_jsonl(&jsonl),
+        let raw = match io.read_messages(&row.file) {
+            Ok(jsonl) => jsonl,
             Err(e) => {
                 eprintln!("会话读取失败，本次跳过（不覆盖磁盘内容）：{} — {e}", row.file);
                 continue;
             }
         };
+        let messages = parse_messages_jsonl(&raw);
         let (title, agent_id, compaction) = match &row.meta {
             Some(meta) => (
                 meta.title.clone(),
@@ -920,23 +947,26 @@ fn scan_sessions(io: &dyn SessionIo) -> Result<Vec<Session>, String> {
             ),
             None => (None, None, None),
         };
-        sessions.push(Session {
-            id: row.id,
-            file: row.file,
-            title,
-            agent_id,
-            compaction,
-            created_at: messages
-                .first()
-                .and_then(|m| m.get("createdAt"))
-                .and_then(Value::as_i64)
-                .unwrap_or(0),
-            updated_at: messages
-                .last()
-                .and_then(|m| m.get("createdAt"))
-                .and_then(Value::as_i64)
-                .unwrap_or(0),
-            messages,
+        sessions.push(ScannedSession {
+            session: Session {
+                id: row.id,
+                file: row.file,
+                title,
+                agent_id,
+                compaction,
+                created_at: messages
+                    .first()
+                    .and_then(|m| m.get("createdAt"))
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0),
+                updated_at: messages
+                    .last()
+                    .and_then(|m| m.get("createdAt"))
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0),
+                messages,
+            },
+            raw,
         });
     }
     Ok(sessions)
@@ -1108,6 +1138,11 @@ fn serialize_message_line(m: &Value) -> String {
         m.get("createdAt").cloned().unwrap_or(Value::Null),
     );
     Value::Object(obj).to_string()
+}
+
+/// 追加基线口径：磁盘原文去掉写盘时补的尾换行。
+fn without_trailing_newline(content: &str) -> &str {
+    content.strip_suffix('\n').unwrap_or(content)
 }
 
 fn serialize_messages_jsonl(messages: &[Value]) -> String {
@@ -1699,12 +1734,8 @@ mod tests {
         let lines: Vec<&str> = on_disk.trim_end_matches('\n').split('\n').collect();
         assert_eq!(lines.len(), 4);
         let reread = store.snapshot();
-        let s = reread
-            .sessions
-            .iter()
-            .find(|s| s["id"] == json!(sid))
-            .unwrap();
-        assert_eq!(s["messages"].as_array().unwrap().len(), 4);
+        assert!(reread.sessions.iter().any(|s| s["id"] == json!(sid)));
+        assert_eq!(store.session_messages(sid).unwrap().len(), 4);
     }
 
     #[test]
@@ -1911,21 +1942,12 @@ mod tests {
         };
         store.commit(patch(3, "新")).unwrap();
         store.commit(patch(2, "旧")).unwrap(); // 迟到补丁被拒
-        let s = store
-            .snapshot()
-            .sessions
-            .into_iter()
-            .find(|s| s["id"] == json!("s1"))
-            .unwrap();
-        assert_eq!(s["messages"][0]["content"], json!("新"));
+        assert_eq!(store.session_messages("s1").unwrap()[0]["content"], json!("新"));
         store.commit(patch(3, "同 rev 覆盖")).unwrap(); // rev 相等仍应用（同帧重发语义）
-        let s = store
-            .snapshot()
-            .sessions
-            .into_iter()
-            .find(|s| s["id"] == json!("s1"))
-            .unwrap();
-        assert_eq!(s["messages"][0]["content"], json!("同 rev 覆盖"));
+        assert_eq!(
+            store.session_messages("s1").unwrap()[0]["content"],
+            json!("同 rev 覆盖")
+        );
     }
 
     #[test]
@@ -2068,6 +2090,75 @@ mod tests {
         assert_eq!(snap.session_vault_key, format!("local:{}", dir.to_string_lossy()));
     }
 
+    #[test]
+    fn snapshot_and_summaries_exclude_messages() {
+        let dir = TempDir::new("ai-session");
+        let store = SessionStore::new(test_config());
+        store.load(store.begin_load(), local_io(dir.to_path_buf())).unwrap();
+        store
+            .commit(CommitBatch {
+                created: vec![SessionDef {
+                    id: "s1".into(),
+                    file: chat_message_file("s1"),
+                    title: Some("标题".into()),
+                    agent_id: None,
+                    compaction: None,
+                    created_at: 1,
+                    updated_at: 2,
+                    messages: vec![msg("m1", "user", "你好")],
+                }],
+                ..Default::default()
+            })
+            .unwrap();
+        let snap = store.snapshot();
+        assert_eq!(snap.sessions.len(), 1);
+        assert!(
+            snap.sessions[0].get("messages").is_none(),
+            "快照只出元数据，消息按会话单独取"
+        );
+        let summaries = store.session_summaries();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].title.as_deref(), Some("标题"));
+        assert_eq!(summaries[0].message_count, 1);
+        assert_eq!(store.session_messages("s1").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn loaded_disk_content_is_reused_as_the_append_base() {
+        let file = chat_message_file("s1");
+        let first = msg("m1", "user", "原文");
+        let fake = Arc::new(FakeIo::default());
+        fake.seed(
+            &file,
+            &format!("{}\n", serialize_messages_jsonl(std::slice::from_ref(&first))),
+        );
+        let store = SessionStore::new(test_config());
+        let io: Arc<dyn SessionIo> = fake.clone();
+        store.load(store.begin_load(), io).unwrap();
+        store
+            .commit(CommitBatch {
+                appends: vec![AppendBatch {
+                    session_id: "s1".into(),
+                    messages: vec![msg("m2", "assistant", "回复")],
+                }],
+                ..Default::default()
+            })
+            .unwrap();
+        store.run_write_cycle();
+        assert_eq!(
+            fake.appends(),
+            vec![file.clone()],
+            "装载后的首条追加应走追加而不是全量重写"
+        );
+        assert_eq!(
+            fake.content(&file).unwrap(),
+            format!(
+                "{}\n",
+                serialize_messages_jsonl(&[first, msg("m2", "assistant", "回复")])
+            )
+        );
+    }
+
     // ===== 写链时序（注入真源后端：读失败与在途删除的不变量）=====
 
     /// 写盘门：让写轮停在中途，构造「写盘在途 + 删除」的真实交错。
@@ -2101,6 +2192,7 @@ mod tests {
         unreadable: Mutex<HashSet<String>>,
         gate: Option<Arc<Gate>>,
         write_log: Mutex<Vec<String>>,
+        append_log: Mutex<Vec<String>>,
         wrote: Mutex<bool>,
     }
 
@@ -2123,6 +2215,10 @@ mod tests {
 
         fn writes(&self) -> Vec<String> {
             self.write_log.lock().unwrap().clone()
+        }
+
+        fn appends(&self) -> Vec<String> {
+            self.append_log.lock().unwrap().clone()
         }
 
         /// 等写轮进入写盘（写轮在另一线程上跑，轮询到它真的开始再制造交错）。
@@ -2183,6 +2279,7 @@ mod tests {
         }
 
         fn append_messages(&self, file: &str, base: &str, tail: &str) -> Result<(), String> {
+            self.append_log.lock().unwrap().push(file.to_string());
             self.enter_write(file);
             let mut files = self.files.lock().unwrap();
             let existing = files.get(file).cloned().unwrap_or_default();

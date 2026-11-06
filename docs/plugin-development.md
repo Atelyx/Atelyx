@@ -699,7 +699,7 @@ ctx.register_tool("echo.search", "在笔记里搜索", json!({
 - `agent_id`：缺省时新建会话用内置「对话」工具集、续聊沿用会话已记录的 Agent；新建会话的记录会写入该 Agent，续聊时只作用于本轮；指定但不在当前仓库名册即拒绝。
 - `model` 缺省沿用对话面板当前选择；同一模型名被多个供应商配置时须给 `provider_id` 消歧（单独给 `provider_id` 拒绝）。
 - `images` 是仓库相对路径（png / jpg / jpeg / webp / gif），逐张校验，任一张不可用即整条拒绝（不部分发送）；`text` 为空时 `images` 必须非空。校验通过后、run 读取前文件仍可能消失，读不到的那张在该轮请求里跳过。
-- 会话真源在宿主：需要自己管理会话的插件（例如对话面板）用 `ctx.chat_session_read` / `chat_session_write` / `chat_session_snapshot`。写入是一个声明式 `CommitBatch`（创建 / 元数据补丁 / 追加 / 消息补丁 / 截断 / 删除 / 覆盖项），宿主在同一把锁内整体应用并走既有写盘链；批次被拒即整体不生效，落盘失败经快照的 `persistError` 反映。
+- 会话真源在宿主：需要自己管理会话的插件（例如对话面板）用 `ctx.chat_session_read` / `chat_session_write` / `chat_session_snapshot`。写入是一个声明式 `CommitBatch`（创建 / 元数据补丁 / 追加 / 消息补丁 / 截断 / 删除 / 覆盖项），宿主在同一把锁内整体应用并走既有写盘链；批次被拒即整体不生效，落盘失败经快照的 `persistError` 反映。快照只带会话元数据与覆盖层，消息按会话用 `chat_session_read` 取。
 - 模型流式走 `ctx.http_stream_open`（`http.stream.*`）：宿主建连后原始字节按块到达 `on_http_stream_chunk`，SSE 等协议解析归插件；`on_http_stream_end` 的 `error` / `cancelled` 区分失败与主动取消。
 
 ```rust

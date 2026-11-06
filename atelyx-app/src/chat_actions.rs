@@ -1638,19 +1638,15 @@ fn plugin_history(
             serde_json::to_value(result).map_err(|e| format!("会话出线序列化失败：{e}"))
         }
         None => {
+            // 清单只取元数据：面板每次会话变更都会重取，不能为此克隆全量历史
             let mut sessions: Vec<ChatSessionSummary> = store
-                .snapshot()
-                .sessions
-                .iter()
+                .session_summaries()
+                .into_iter()
                 .map(|s| ChatSessionSummary {
-                    id: s.get("id").and_then(Value::as_str).unwrap_or_default().to_string(),
-                    title: s.get("title").and_then(Value::as_str).map(str::to_string),
-                    updated_at: s.get("updatedAt").and_then(Value::as_i64).unwrap_or(0),
-                    message_count: s
-                        .get("messages")
-                        .and_then(Value::as_array)
-                        .map(|ms| ms.len())
-                        .unwrap_or(0) as u64,
+                    id: s.id,
+                    title: s.title,
+                    updated_at: s.updated_at,
+                    message_count: s.message_count,
                 })
                 .collect();
             sessions.sort_by_key(|s| std::cmp::Reverse(s.updated_at));

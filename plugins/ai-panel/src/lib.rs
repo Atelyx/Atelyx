@@ -14,14 +14,14 @@ use atelyx_plugin_protocol::chat::{
     AppendBatch, CommitBatch, MetaPatch, OverridesPatch, SessionDef, TruncateEntry,
 };
 use atelyx_plugin_protocol::event::{
-    self, ChatChangeKind, ChatChangedPayload, ChatPersistChangedPayload, FileChangeKind,
-    FileChangedPayload, FileDropPayload, PublishParams,
+    self, ChatChangeKind, ChatChangedPayload, ChatPersistChangedPayload, FileDropPayload,
+    PublishParams,
 };
 use atelyx_plugin_protocol::frame::{
     FrameInput, FrameInputParams, FrameTickParams, Key, KeyAction, NamedKey,
 };
 use atelyx_plugin_protocol::method::{
-    ChatEvent, ChatEventParams, ChatRef, ChatSendParams, ContributionSlot, FileFilter, FsEntryKind,
+    ChatEvent, ChatEventParams, ChatRef, ChatSendParams, ContributionSlot, FileFilter,
     PickFileParams, SurfaceAttachedParams, SurfaceDetachedParams,
 };
 use atelyx_plugin_sdk::frame_ui::{FrameUi, UiEvent};
@@ -33,7 +33,7 @@ use crate::model::{
 
 /// 插件 id（与 `plugin.json` 一致）。
 const PLUGIN_ID: &str = "atelyx.ai-panel";
-/// 引用候选的文件树条目上限（避免大仓库一次装载拖垮面板）。
+/// 引用候选的条目上限（目录与可引用文件合并后按路径取前 N 条）。
 const FILE_LIMIT: usize = 2000;
 /// 图片选择的扩展名（与消息附件收口一致）。
 const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "webp", "gif"];
@@ -126,52 +126,40 @@ impl AiPanelPlugin {
         }
     }
 
+    /// 引用候选 = 宿主目录清单 + 文件索引（各一次往返）：不逐目录递归拉取，
+    /// 大仓库 / 协作空间不会随目录数线性放大往返次数。
     async fn load_files(&self, ctx: &Context) {
-        let mut files = Vec::new();
-        let mut dirs = vec![String::new()];
-        let mut seen = 0usize;
+        let mut entries = Vec::new();
         let mut complete = true;
-        while let Some(dir) = dirs.pop() {
-            let entries = match ctx.vault_list(&dir).await {
-                Ok(entries) => entries,
-                Err(error) => {
-                    ctx.log_error(&format!("读取目录 {dir} 失败：{error}"));
-                    complete = false;
-                    break;
-                }
-            };
-            for entry in entries {
-                if entry.name.starts_with('.') {
-                    continue;
-                }
-                let path = if dir.is_empty() {
-                    entry.name.clone()
-                } else {
-                    format!("{dir}/{}", entry.name)
-                };
-                match entry.kind {
-                    FsEntryKind::Dir => {
-                        files.push(model::FileEntry { path: path.clone(), is_dir: true });
-                        dirs.push(path);
-                    }
-                    FsEntryKind::File if model::kind_of_file(&path).is_some() => {
-                        files.push(model::FileEntry { path, is_dir: false });
-                    }
-                    FsEntryKind::File => {}
-                }
-                seen += 1;
-                if seen >= FILE_LIMIT {
-                    break;
-                }
-            }
-            if seen >= FILE_LIMIT {
-                break;
+        match ctx.vault_list_dirs().await {
+            Ok(dirs) => entries.extend(
+                dirs.into_iter()
+                    .map(|path| model::FileEntry { path, is_dir: true }),
+            ),
+            Err(error) => {
+                ctx.log_error(&format!("读取目录清单失败：{error}"));
+                complete = false;
             }
         }
-        files.sort_by(|left, right| left.path.cmp(&right.path));
+        match ctx.vault_files().await {
+            Ok(files) => entries.extend(
+                files
+                    .files
+                    .into_iter()
+                    .filter(|file| model::kind_of_file(&file.path).is_some())
+                    .map(|file| model::FileEntry { path: file.path, is_dir: false }),
+            ),
+            Err(error) => {
+                ctx.log_error(&format!("读取文件清单失败：{error}"));
+                complete = false;
+            }
+        }
+        entries.sort_by(|left, right| left.path.cmp(&right.path));
+        let truncated = entries.len() > FILE_LIMIT;
+        entries.truncate(FILE_LIMIT);
         let mut model = self.model.lock().unwrap();
-        model.files = files;
-        model.files_ready = complete;
+        model.files = entries;
+        model.files_ready = complete && !truncated;
     }
 
     async fn attach_image(&self, ctx: &Context) {
@@ -1273,7 +1261,7 @@ impl PluginHandler for AiPanelPlugin {
             event::name::AI_CHAT_RELOAD,
             event::name::AI_CHAT_PERSIST,
             event::name::VAULT_SWITCH,
-            event::name::VAULT_FILE_CHANGED,
+            event::name::VAULT_FILES_CHANGED,
             event::name::WINDOW_FILE_DROP,
         ] {
             if let Err(error) = ctx.subscribe(name).await {
@@ -1294,8 +1282,10 @@ impl PluginHandler for AiPanelPlugin {
         self.render(ctx).await;
         // 挂面即全量重取：未挂面期间的数据事件已被门控，这里补齐错过的变更
         self.load_choices(ctx).await;
-        self.load_files(ctx).await;
         self.load_all(ctx).await;
+        // 会话数据先出帧，引用候选随后补齐（# 候选只在输入时用到，不挡首屏）
+        self.render(ctx).await;
+        self.load_files(ctx).await;
         self.render(ctx).await;
     }
 
@@ -1319,21 +1309,14 @@ impl PluginHandler for AiPanelPlugin {
                     model.files.clear();
                     model.files_ready = false;
                 }
-                self.load_files(ctx).await;
+                // 候选由宿主文件索引重建后的 VAULT_FILES_CHANGED 补齐，避免与旧索引混用
                 self.load_all(ctx).await;
                 self.render(ctx).await;
             }
-            event::name::VAULT_FILE_CHANGED => {
-                let Ok(payload) =
-                    serde_json::from_value::<FileChangedPayload>(params.payload.clone())
-                else {
-                    ctx.log_error("仓库文件变更载荷不可解析");
-                    return;
-                };
-                // 自动保存的 updated 不改候选集合；结构变化才重扫文件树
-                if payload.kind != FileChangeKind::Updated {
-                    self.load_files(ctx).await;
-                }
+            event::name::VAULT_FILES_CHANGED => {
+                // 宿主文件索引重建（新建 / 删除 / 改名 / 进容器）：候选跟着索引走
+                self.load_files(ctx).await;
+                self.render(ctx).await;
             }
             event::name::WINDOW_FILE_DROP => {
                 let Ok(payload) = serde_json::from_value::<FileDropPayload>(params.payload.clone())
@@ -1539,7 +1522,7 @@ mod tests {
         let (ctx, mut out_rx) = test_context();
         let plugin = AiPanelPlugin::new();
         for name in [
-            event::name::VAULT_FILE_CHANGED,
+            event::name::VAULT_FILES_CHANGED,
             event::name::AI_CHAT_CHANGED,
             event::name::AI_CHAT_PERSIST,
             event::name::AI_CHAT_RELOAD,
@@ -1626,7 +1609,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn vault_switch_rescans_reference_candidates() {
+    async fn vault_switch_resets_reference_candidates_and_reloads_sessions() {
         let (ctx, mut out_rx) = test_context();
         let plugin = Arc::new(AiPanelPlugin::new());
         *plugin.attached.lock().unwrap() = true;
@@ -1644,9 +1627,12 @@ mod tests {
         });
         assert_eq!(
             first_request_method(&mut out_rx).await.as_deref(),
-            Some(method::vault::LIST),
-            "换容器应重扫文件树补齐候选"
+            Some(method::ai::CHAT_HISTORY),
+            "换容器应先重取会话清单，引用候选随后按宿主索引补齐"
         );
+        let model = plugin.model.lock().unwrap();
+        assert!(model.files.is_empty(), "换容器应作废旧容器的引用候选");
+        assert!(!model.files_ready);
         task.abort();
     }
 
@@ -1663,8 +1649,8 @@ mod tests {
                     .on_host_event(
                         &ctx,
                         PublishParams {
-                            name: event::name::VAULT_FILE_CHANGED.into(),
-                            payload: json!({ "path": "方案.md", "kind": "created" }),
+                            name: event::name::VAULT_FILES_CHANGED.into(),
+                            payload: Value::Null,
                         },
                     )
                     .await
@@ -1672,8 +1658,8 @@ mod tests {
         });
         assert_eq!(
             first_request_method(&mut out_rx).await.as_deref(),
-            Some(method::vault::LIST),
-            "文件结构变化应重扫文件树"
+            Some(method::vault_ui::LIST_DIRS),
+            "文件索引重建后应重取目录清单补齐候选"
         );
         task.abort();
     }

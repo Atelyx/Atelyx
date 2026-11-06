@@ -182,7 +182,8 @@ pub struct ChatPersistError {
     pub at: i64,
 }
 
-/// 全仓库读面快照（进仓 / 切仓 / 覆盖层引导）。
+/// 全仓库读面快照（进仓 / 切仓 / 覆盖层引导）：会话只出元数据，
+/// 消息按会话用 `chat.session.read` 取，快照本身不随历史长度增长。
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatStoreSnapshot {
