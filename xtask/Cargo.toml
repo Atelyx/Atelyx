@@ -7,6 +7,6 @@ description = "仓库维护任务：从协议源码生成对外 API 参考（不
 
 # 文档生成只读源码文本；快照重生成要直接调用解析器（唯一真源），故依赖 core。
 [dependencies]
-atelyx-core = { path = "../atelyx-core" }
+atelyx-core = { path = "../crates/core" }
 # preserve_order：快照回写必须保持原有键序（否则整份文件被按字母重排）
 serde_json = { version = "1", features = ["preserve_order"] }

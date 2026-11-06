@@ -10,13 +10,13 @@ cd "$repo_root"
 dist="$repo_root/target/dist"
 presets_stage="$repo_root/target/preset-plugins"
 notices="$repo_root/docs/THIRD_PARTY_NOTICES.md"
-icon="$repo_root/atelyx-app/assets/icons/icon.ico"
-nsi="$repo_root/distribution/nsis/installer.nsi"
+icon="$repo_root/assets/icons/icon.ico"
+nsi="$repo_root/packaging/nsis/installer.nsi"
 
-# 版本号唯一来源：atelyx-app 的 [package] version
-version="$(sed -n '/^\[package\]/,/^\[/{s/^version = "\(.*\)"/\1/p;}' atelyx-app/Cargo.toml | head -n1)"
+# 版本号唯一来源：应用包 atelyx 的 [package] version
+version="$(sed -n '/^\[package\]/,/^\[/{s/^version = "\(.*\)"/\1/p;}' apps/atelyx/Cargo.toml | head -n1)"
 if [ -z "$version" ]; then
-  echo "错误：未能从 atelyx-app/Cargo.toml 读到版本号" >&2
+  echo "错误：未能从 apps/atelyx/Cargo.toml 读到版本号" >&2
   exit 1
 fi
 
@@ -65,9 +65,9 @@ package_windows() {
 # 组装 usr/ 数据布局（deb 与 AppImage 共用同一套文件清单）
 stage_payload() {
   local stage="$1" exe="$2"
-  local icons="$repo_root/atelyx-app/assets/icons"
+  local icons="$repo_root/assets/icons"
   install -Dm755 "$exe" "$stage/usr/bin/atelyx"
-  install -Dm644 "$repo_root/distribution/linux/com.atelyx.desktop" "$stage/usr/share/applications/com.atelyx.desktop"
+  install -Dm644 "$repo_root/packaging/linux/com.atelyx.desktop" "$stage/usr/share/applications/com.atelyx.desktop"
   install -Dm644 "$repo_root/LICENSE" "$stage/usr/share/licenses/atelyx/LICENSE"
   install -Dm644 "$notices" "$stage/usr/share/licenses/atelyx/THIRD_PARTY_NOTICES.md"
   install -Dm644 "$icons/32x32.png" "$stage/usr/share/icons/hicolor/32x32/apps/atelyx.png"
@@ -118,8 +118,8 @@ package_appimage() {
   stage_payload "$appdir" "$exe"
   # AppImage 惯例：AppRun、desktop 与图标置于 AppDir 根
   ln -s usr/bin/atelyx "$appdir/AppRun"
-  cp "$repo_root/distribution/linux/com.atelyx.desktop" "$appdir/atelyx.desktop"
-  cp "$repo_root/atelyx-app/assets/icons/128x128.png" "$appdir/atelyx.png"
+  cp "$repo_root/packaging/linux/com.atelyx.desktop" "$appdir/atelyx.desktop"
+  cp "$repo_root/assets/icons/128x128.png" "$appdir/atelyx.png"
   ln -sf atelyx.png "$appdir/.DirIcon"
   if ! command -v appimagetool >/dev/null 2>&1; then
     echo "错误：未找到 appimagetool；从 https://github.com/AppImage/appimagetool/releases 下载后放入 PATH" >&2
@@ -143,8 +143,8 @@ package_linux() {
 }
 
 mkdir -p "$dist"
-echo "==> cargo build -p atelyx-app --release（版本 $version）"
-cargo build -p atelyx-app --release
+echo "==> cargo build -p atelyx --release（版本 $version）"
+cargo build -p atelyx --release
 
 rm -rf "$presets_stage"
 echo "==> bash scripts/build-plugins.sh（预置插件）"

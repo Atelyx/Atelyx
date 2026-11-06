@@ -1,0 +1,19 @@
+[package]
+name = "atelyx-plugin-history"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Atelyx 仓库历史插件：按文件分组的版本聚合面板（版本明细与回滚由宿主弹层承载）"
+license = "Apache-2.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+atelyx-plugin-protocol = { version = "0.1.0", path = "../../plugin-protocol" }
+atelyx-plugin-sdk = { version = "0.1.0", path = "../../plugin-sdk" }
+async-trait = "0.1"
+tokio = { version = "1", features = ["sync"] }
+
+[dev-dependencies]
+serde_json = "1"

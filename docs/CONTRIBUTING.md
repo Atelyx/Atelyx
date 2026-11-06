@@ -15,14 +15,14 @@
 git clone https://github.com/Atelyx/Atelyx.git
 cd Atelyx
 bash patches/apply.sh    # 一次即可：物化本地依赖补丁的源码目录
-cargo run -p atelyx-app  # 启动桌面应用
+cargo run -p atelyx  # 启动桌面应用
 ```
 
 常用命令：
 
 ```bash
 cargo test --workspace                              # 工作区测试
-cargo test --manifest-path atelyx-server/Cargo.toml # 服务端测试
+cargo test --manifest-path apps/server/Cargo.toml # 服务端测试
 bash scripts/package.sh                             # 构建并产出安装包
 ```
 
@@ -34,13 +34,13 @@ bash scripts/package.sh                             # 构建并产出安装包
 
 | crate | 路径 | 职责 |
 | --- | --- | --- |
-| 应用壳 | `atelyx-app/` | iced 窗口与布局、视图、插件面适配 |
-| 界面组件库 | `atelyx-ui/` | 调色板、字体、图标、基元控件、浮层与菜单 |
-| 核心 | `atelyx-core/` | UI 无关：仓库存储、会话与布局模型、插件宿主运行时、进程托管 |
-| 格式库 | `atelyx-format/` | 零 I/O 的格式语义：Markdown 解析、frontmatter 定界 / 解析 / 序列化（宿主与插件共用） |
-| 协议 | `atelyx-plugin-protocol/` | 插件契约：握手、能力调用信封（请求 / 通知 / 响应）、整面帧与绘制指令、能力总线、manifest |
-| SDK | `atelyx-plugin-sdk/` | 插件侧封装：连接泵、能力面代理、绘制指令构造、控件层 |
-| 服务端 | `atelyx-server/` | 协作服务端（独立 Cargo 工程，不进 workspace） |
+| 应用壳 | `apps/atelyx/` | iced 窗口与布局、视图、插件面适配 |
+| 界面组件库 | `crates/ui/` | 调色板、字体、图标、基元控件、浮层与菜单 |
+| 核心 | `crates/core/` | UI 无关：仓库存储、会话与布局模型、插件宿主运行时、进程托管 |
+| 格式库 | `crates/format/` | 零 I/O 的格式语义：Markdown 解析、frontmatter 定界 / 解析 / 序列化（宿主与插件共用） |
+| 协议 | `crates/plugin-protocol/` | 插件契约：握手、能力调用信封（请求 / 通知 / 响应）、整面帧与绘制指令、能力总线、manifest |
+| SDK | `crates/plugin-sdk/` | 插件侧封装：连接泵、能力面代理、绘制指令构造、控件层 |
+| 服务端 | `apps/server/` | 协作服务端（独立 Cargo 工程，不进 workspace） |
 
 ### 风格
 

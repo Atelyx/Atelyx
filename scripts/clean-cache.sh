@@ -13,7 +13,7 @@ size_mb() {
 
 before=0
 after=0
-for t in "$repo_root/target" "$repo_root/atelyx-server/target"; do
+for t in "$repo_root/target" "$repo_root/apps/server/target"; do
   [ -d "$t" ] || continue
   before=$((before + $(size_mb "$t")))
   while IFS= read -r -d '' dir; do

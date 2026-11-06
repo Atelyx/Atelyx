@@ -1,0 +1,12 @@
+[package]
+name = "atelyx-plugin-props"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Atelyx 预置插件共用：frontmatter 属性面板（类型化渲染与槽位编辑）"
+license = "Apache-2.0"
+
+[dependencies]
+atelyx-format = { version = "0.1.0", path = "../../../format" }
+atelyx-plugin-protocol = { version = "0.1.0", path = "../../../plugin-protocol" }
+atelyx-plugin-sdk = { version = "0.1.0", path = "../../../plugin-sdk" }

@@ -1,0 +1,19 @@
+[package]
+name = "atelyx-plugin-inspector"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Atelyx 属性面板插件：笔记 frontmatter 属性编辑与画布属性只读展示"
+license = "Apache-2.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+atelyx-format = { version = "0.1.0", path = "../../format" }
+atelyx-plugin-protocol = { version = "0.1.0", path = "../../plugin-protocol" }
+atelyx-plugin-sdk = { version = "0.1.0", path = "../../plugin-sdk" }
+atelyx-plugin-props = { version = "0.1.0", path = "../shared/props" }
+async-trait = "0.1"
+serde_json = "1"
+tokio = { version = "1", features = ["sync", "time"] }

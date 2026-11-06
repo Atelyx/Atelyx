@@ -1,30 +1,30 @@
 [workspace]
 resolver = "2"
 members = [
-    "atelyx-app",
-    "atelyx-core",
-    "atelyx-format",
-    "atelyx-ui",
-    "atelyx-plugin-protocol",
-    "atelyx-plugin-sdk",
-    "plugins/calendar",
-    "plugins/ai-core",
-    "plugins/ai-panel",
-    "plugins/notes",
-    "plugins/recent",
-    "plugins/history",
-    "plugins/search",
-    "plugins/files",
-    "plugins/collab",
-    "plugins/tables",
-    "plugins/canvas",
-    "plugins/inspector",
-    "plugins/shared/props",
-    "atelyx-plugin-abi",
-    "atelyx-plugin-sample",
+    "apps/atelyx",
+    "crates/core",
+    "crates/format",
+    "crates/ui",
+    "crates/plugin-protocol",
+    "crates/plugin-sdk",
+    "crates/plugins/calendar",
+    "crates/plugins/ai-core",
+    "crates/plugins/ai-panel",
+    "crates/plugins/notes",
+    "crates/plugins/recent",
+    "crates/plugins/history",
+    "crates/plugins/search",
+    "crates/plugins/files",
+    "crates/plugins/collab",
+    "crates/plugins/tables",
+    "crates/plugins/canvas",
+    "crates/plugins/inspector",
+    "crates/plugins/shared/props",
+    "crates/plugin-abi",
+    "crates/plugin-sample",
     "xtask",
 ]
-exclude = ["atelyx-server"]
+exclude = ["apps/server"]
 
 # 本地补丁版 winit 与 iced_widget（基线、改动与移除条件见 patches/README.md，
 # 源码目录由 patches/apply.sh 从 crates.io 原始源码物化）。上游发布包含该修复的版本后可整目录移除。

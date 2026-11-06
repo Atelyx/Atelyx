@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 构建随包预置插件，按插件 id 铺到目标目录：<目标>/<id>/{plugin.json, 当前平台入口}。
-# 预置插件都在 plugins/<名字>/（带 plugin.json），脚本按目录发现，不维护 crate 清单。
+# 预置插件都在 crates/plugins/<名字>/（带 plugin.json），脚本按目录发现，不维护 crate 清单。
 # 用法：bash scripts/build-plugins.sh <目标目录> [debug|release]（缺省 release）
 # 开发期铺到 target/debug/preset-plugins；打包期铺到 target/preset-plugins 再进入安装包。
 set -euo pipefail
@@ -11,9 +11,9 @@ profile="${2:-release}"
 cd "$repo_root"
 
 shopt -s nullglob
-manifests=(plugins/*/plugin.json)
+manifests=(crates/plugins/*/plugin.json)
 shopt -u nullglob
-[ ${#manifests[@]} -gt 0 ] || { echo "错误：plugins/ 下没有插件清单" >&2; exit 1; }
+[ ${#manifests[@]} -gt 0 ] || { echo "错误：crates/plugins/ 下没有插件清单" >&2; exit 1; }
 
 cargo_cmd=(cargo build)
 if [ "$profile" = "release" ]; then cargo_cmd+=(--release); fi
