@@ -32,8 +32,13 @@ async fn main() {
     runtime.scan();
 
     let clipboard = Arc::new(std::sync::Mutex::new(None::<String>));
+    // 冒烟宿主持有磁盘正文并推进基线：连续保存的第二次才拿得到正确 expected_rev
+    let disk = Arc::new(std::sync::Mutex::new(NOTE.to_string()));
+    let saves = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let responder = runtime.clone();
     let responder_clipboard = clipboard.clone();
+    let responder_disk = disk.clone();
+    let responder_saves = saves.clone();
     std::thread::spawn(move || {
         let responder_runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -54,6 +59,7 @@ async fn main() {
                         reply(&responder, request_id, json!({ "sizes": sizes }));
                     }
                     HostRequest::DocOpen { request_id, params, .. } => {
+                        let text = responder_disk.lock().unwrap().clone();
                         reply(
                             &responder,
                             request_id,
@@ -61,9 +67,9 @@ async fn main() {
                                 "docId": params.doc_id,
                                 "openSeq": params.open_seq,
                                 "path": params.doc_id,
-                                "text": NOTE,
+                                "text": text,
                                 "canWrite": true,
-                                "diskRev": content_rev(NOTE.as_bytes()),
+                                "diskRev": content_rev(text.as_bytes()),
                             }),
                         );
                     }
@@ -100,16 +106,34 @@ async fn main() {
                     HostRequest::DocState { request_id, .. } => {
                         reply(&responder, request_id, json!({}));
                     }
+                    // 落盘回执是受理型界面调用：不回填会让插件那次 flush 一直等下去
+                    HostRequest::PanelFlushDone { request_id, .. } => {
+                        responder.resolve_ui_call(request_id, Ok(()));
+                    }
                     HostRequest::DocSave { request_id, params, .. } => {
-                        reply(
-                            &responder,
-                            request_id,
-                            json!({ "status": if params.expected_rev == content_rev(NOTE.as_bytes()) {
-                                "ok"
-                            } else {
-                                "err"
-                            }, "newRev": content_rev(params.text.as_bytes()), "message": "冒烟宿主不写盘" }),
-                        );
+                        let mut disk = responder_disk.lock().unwrap();
+                        if params.expected_rev == content_rev(disk.as_bytes()) {
+                            *disk = params.text.clone();
+                            responder_saves.lock().unwrap().push(params.text.clone());
+                            reply(
+                                &responder,
+                                request_id,
+                                json!({ "status": "ok", "newRev": content_rev(params.text.as_bytes()) }),
+                            );
+                        } else {
+                            // 磁盘被外部改写：按协议交回磁盘原文与基线，由插件合流后重试
+                            let disk_rev = content_rev(disk.as_bytes());
+                            let disk_content = disk.clone();
+                            reply(
+                                &responder,
+                                request_id,
+                                json!({
+                                    "status": "conflict",
+                                    "diskRev": disk_rev,
+                                    "diskContent": disk_content,
+                                }),
+                            );
+                        }
                     }
                     HostRequest::HistoryOpen { request_id, .. } => {
                         reply(&responder, request_id, json!({}));
@@ -120,7 +144,7 @@ async fn main() {
                     }
                     // 本地仓库：没有协作房间，名册为空（插件据此不建协作基线）
                     HostRequest::SpaceRoom { request_id, .. } => {
-                        reply(&responder, request_id, json!({ "kind": "local", "connected": false }));
+                        reply(&responder, request_id, json!({ "kind": "local", "connected": false, "canWrite": true }));
                     }
                     HostRequest::CollabPeers { request_id, .. } => {
                         reply(&responder, request_id, json!({ "connected": false }));
@@ -592,6 +616,75 @@ async fn main() {
         }
         assert!(read, "失焦后应回只读档：空行输入面（文本光标）撤掉、正文块仍可命中");
         println!("失焦退编辑：通过");
+    }
+    // 保存链：宿主按回执的 newRev 推进磁盘基线，连续两次保存都必须成功（旧宿主第二次必失败）；
+    // 第二轮先由「另一端」改磁盘再提交，回执 Conflict 后插件合流重试，两侧内容都要落盘
+    if let Some(hit) = runtime
+        .surface_frame(PLUGIN, SURFACE)
+        .and_then(|frame| frame.hits.iter().find(|hit| hit.id == "note:mode:edit").cloned())
+    {
+        click_hit(&runtime, &hit);
+        // 空行就地输入：块间空行命中区在编辑档才登记成文本光标，能稳定制造一次未落盘改动
+        wait_gap_input(&runtime, Duration::from_secs(2))
+            .await
+            .expect("编辑档应有空行输入面");
+        for (token, typed, external_change) in [(1u64, "一", false), (2u64, "二", true)] {
+            // 每轮重新聚焦：上一轮输入会新增段落，空行命中区随正文结构变化
+            if let Some(gap) = runtime
+                .surface_frame(PLUGIN, SURFACE)
+                .and_then(|frame| frame.hits.iter().find(|hit| is_gap_input(hit)).cloned())
+            {
+                click_hit(&runtime, &gap);
+                tokio::time::sleep(Duration::from_millis(80)).await;
+            }
+            runtime.notify_frame_input(
+                PLUGIN,
+                SURFACE,
+                &FrameInput::Text {
+                    text: typed.to_string(),
+                    composing: false,
+                    caret: None,
+                    candidates: None,
+                },
+            );
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            if external_change {
+                // 模拟另一台设备已落盘：只在末尾追加，保证与本端改动不重叠
+                let mut external = disk.lock().unwrap().clone();
+                external.push_str("\n外部追加。\n");
+                *disk.lock().unwrap() = external;
+            }
+            runtime.notify_plugin_event(
+                PLUGIN,
+                atelyx_plugin_protocol::event::name::PANEL_FLUSH,
+                &atelyx_plugin_protocol::method::PanelFlushParams {
+                    target: SURFACE.to_string(),
+                    token,
+                    doc_id: Some(DOC.to_string()),
+                    open_seq: Some(1),
+                },
+            );
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while Instant::now() < deadline && saves.lock().unwrap().len() < token as usize {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            let saved = saves.lock().unwrap().clone();
+            if saved.len() < token as usize {
+                let log = std::fs::read_to_string(
+                    root.join(PLUGIN).join("logs").join("runtime.log"),
+                )
+                .unwrap_or_default();
+                panic!("第 {token} 次保存应成功：{saved:?}\n插件日志：\n{log}");
+            }
+            let last = saved.last().cloned().unwrap_or_default();
+            assert_eq!(*disk.lock().unwrap(), last, "宿主持有的磁盘内容应等于最近一次成功落盘的正文");
+            assert!(last.contains(typed), "落盘内容应含本次输入：{saved:?}");
+            if external_change {
+                assert!(last.contains("外部追加"), "磁盘侧改动不得被合流丢弃：{last}");
+                assert!(last.contains(typed), "本端改动不得被合流丢弃：{last}");
+            }
+            println!("保存链第 {token} 次：通过");
+        }
     }
     // 关档：插件必须交空态帧，否则面板停在上一份文档
     runtime.notify_doc_close(PLUGIN, SURFACE, "a.md", DOC, 1);

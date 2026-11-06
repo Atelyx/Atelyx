@@ -771,7 +771,7 @@ fn serve(runtime: Arc<PluginRuntime>, state: Arc<HostState>, vault: PathBuf) {
                     reply(&runtime, request_id, json!({}));
                 }
                 HostRequest::SpaceRoom { request_id, .. } => {
-                    reply(&runtime, request_id, json!({ "kind": "local", "connected": false }));
+                    reply(&runtime, request_id, json!({ "kind": "local", "connected": false, "canWrite": true }));
                 }
                 HostRequest::CollabPeers { request_id, .. } => {
                     reply(&runtime, request_id, json!({ "connected": false }));

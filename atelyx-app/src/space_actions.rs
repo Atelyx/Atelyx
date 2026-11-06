@@ -823,20 +823,28 @@ pub fn enter_space(app: &mut App, session: SpaceSession, from_boot: bool) -> Tas
     if !from_boot {
         app.ui.open_docs.clear();
         app.doc_sessions.clear();
+        app.space_doc_saves.clear();
         app.plugins.on_table_changed(None);
         // 插件文档实例与文档会话随容器切换收口：旧的相对路径在新空间指向别的文件
         let _ = crate::plugin_actions::close_doc(app);
         app.history.clear();
     }
     let restore = crate::restore_open_requests(&app.ui, from_boot, app.global.auto_restore);
+    // 被同类型顶掉的旧条目从打开集合摘掉：标签与在场不再指向没打开的文件
+    for path in &restore.pruned {
+        app.ui.forget_open_doc(path);
+    }
+    if !restore.pruned.is_empty() {
+        app.schedule_persist();
+    }
     let mut finished = false;
-    if restore.is_empty() {
+    if restore.requests.is_empty() {
         // 没有待恢复的文档：文档闸门直接放行
         finished |= app.startup_arrive(crate::startup::Gate::RestoreDocs);
     } else {
         app.startup.enter(crate::startup::Step::RestoreDocs);
-        app.startup.expect_docs(restore.len(), Instant::now());
-        for (rel, mode) in restore {
+        app.startup.expect_docs(restore.requests.len(), Instant::now());
+        for (rel, mode) in restore.requests {
             task = task.chain(app.open_file(&rel, mode));
         }
     }
@@ -1258,13 +1266,31 @@ pub fn space_commit_doc(app: &mut App, request_id: u64, params: DocSaveParams) -
     let client = session.client;
     let space_id = session.space_id;
     let author = crate::history_author(app);
-    // 历史侧车按文档类型的载体记版，会话缺失即不记（宁缺不错记）
+    // 同一文档的在途保存只允许一笔：GET 回读与 PUT 之间再进来一笔会互相覆盖
+    if !app.space_doc_saves.insert(params.doc_id.clone()) {
+        app.plugins
+            .resolve_shell_call(request_id, Err("文档正在保存，稍后重试".into()));
+        return Task::none();
+    }
+    // 历史侧车按文档类型的载体记版：解析不出类型就把「没记版」写进插件日志，不留无痕
     let kind = app
         .doc_sessions
         .by_path(&params.doc_id)
-        .and_then(|session| crate::repo_history::parse_kind(session.doc_type.as_str()));
+        .and_then(|session| {
+            let typed = crate::repo_history::parse_kind(session.doc_type.as_str());
+            if typed.is_none() {
+                let line = format!("空间保存未记版：未知文档类型 {}", session.doc_type);
+                app.plugins.log_to_plugin(&session.plugin_id, &line);
+            }
+            typed
+        });
     let doc_id = params.doc_id.clone();
     let open_seq = params.open_seq;
+    let state_rev = app
+        .doc_sessions
+        .state_rev(&atelyx_core::doc_session::DocId::new(&params.doc_id))
+        .unwrap_or(0);
+    let manual = params.manual;
     let expected_rev = params.expected_rev.clone();
     let text = params.text.clone();
     let network_doc_id = doc_id.clone();
@@ -1280,14 +1306,18 @@ pub fn space_commit_doc(app: &mut App, request_id: u64, params: DocSaveParams) -
                 &author,
             )
             .await;
-            (outcome.result, outcome.history_error)
+            (outcome.result, outcome.history_error, outcome.history_recorded)
         },
-        move |(result, history_error)| {
+        move |(result, history_error, history_recorded)| {
             Message::Plugins(PluginsMsg::DocCommitDone(DocCommitDone {
                 request_id,
                 doc_id,
                 open_seq,
                 gen,
+                state_rev,
+                space: true,
+                history_recorded,
+                manual,
                 result,
                 history_error,
             }))
@@ -1295,10 +1325,11 @@ pub fn space_commit_doc(app: &mut App, request_id: u64, params: DocSaveParams) -
     )
 }
 
-/// 空间一次正文落盘的结果：回执 + 历史记版失败原因（侧车失败不回滚已完成的保存）。
+/// 空间一次正文落盘的结果：回执 + 历史记版结果（侧车失败不回滚已完成的保存）。
 struct SpaceDocWrite {
     result: DocSaveResult,
     history_error: Option<String>,
+    history_recorded: bool,
 }
 
 /// 写前回读服务端文本算基线，匹配才写；记版失败只带出原因，不改判落盘结果。
@@ -1319,6 +1350,7 @@ async fn write_space_doc(
             return SpaceDocWrite {
                 result: DocSaveResult::Err { message: err_text(e) },
                 history_error: None,
+                history_recorded: false,
             }
         }
     };
@@ -1327,12 +1359,14 @@ async fn write_space_doc(
         return SpaceDocWrite {
             result: DocSaveResult::Conflict { disk_rev, disk_content: server_text },
             history_error: None,
+            history_recorded: false,
         };
     }
     if let Err(e) = client.put_file_text(space_id, doc_id, text).await {
         return SpaceDocWrite {
             result: DocSaveResult::Err { message: err_text(e) },
             history_error: None,
+            history_recorded: false,
         };
     }
     let history_error = match kind {
@@ -1354,7 +1388,8 @@ async fn write_space_doc(
         result: DocSaveResult::Ok {
             new_rev: crate::doc_session::sha256_hex(text.as_bytes()),
         },
-        history_error,
+        history_error: history_error.clone(),
+        history_recorded: kind.is_some() && history_error.is_none(),
     }
 }
 

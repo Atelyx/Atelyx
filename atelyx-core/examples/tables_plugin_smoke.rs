@@ -347,7 +347,7 @@ fn serve(runtime: Arc<PluginRuntime>, state: Arc<HostState>, vault: PathBuf) {
                     runtime.resolve_ui_call(request_id, Ok(()));
                 }
                 HostRequest::SpaceRoom { request_id, .. } => {
-                    reply(&runtime, request_id, json!({ "kind": "local", "connected": false }));
+                    reply(&runtime, request_id, json!({ "kind": "local", "connected": false, "canWrite": true }));
                 }
                 HostRequest::EditorOpenFiles { request_id, .. } => {
                     reply(&runtime, request_id, json!({ "paths": ["demo.atb"] }));

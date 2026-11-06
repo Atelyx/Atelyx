@@ -102,6 +102,15 @@ async fn main() {
     runtime.notify_frame_input(INSPECTOR_ID, SURFACE, &FrameInput::PointerUp { x, y, button: MouseButton::Left, hit: Some("props:add".into()) });
     let block = wait_written(&state, 1).await;
     assert!(block.contains("property:"), "写回块应含占位属性：{block}");
+    // 写回的是属性块本身：`---` 定界齐全且能被格式库解析（不是整份信封）
+    assert!(block.starts_with("---\n") && block.trim_end().ends_with("---"), "属性块应带定界：{block}");
+    let parsed = atelyx_format::frontmatter::parse(&block);
+    assert!(parsed.ok, "写回块应可解析：{block}");
+    let keys = parsed.data.as_map().unwrap_or_default();
+    assert!(
+        keys.iter().any(|(key, _)| key == "property"),
+        "解析结果应含新属性：{block}"
+    );
 
     // 画布在前台：属性面切到画布统计
     if !running(&runtime, CANVAS_ID) {
@@ -207,11 +216,14 @@ fn serve(runtime: Arc<PluginRuntime>, state: Arc<HostState>, vault: PathBuf) {
                     );
                 }
                 HostRequest::DocPropsWrite { request_id, params, .. } => {
-                    state
-                        .written
-                        .lock()
-                        .unwrap()
-                        .push(params.value.to_string());
+                    // 内容所有者交回的是属性草稿信封：冒烟宿主按真实宿主口径只取属性块正文
+                    let block = params
+                        .value
+                        .get("frontmatter")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    state.written.lock().unwrap().push(block);
                     reply(&runtime, request_id, json!({}));
                 }
                 HostRequest::EditorOpenFiles { request_id, .. } => {

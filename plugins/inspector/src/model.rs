@@ -126,7 +126,7 @@ impl PropsHost for InspectorModel {
         &self.tags
     }
 
-    /// 属性面板只提交属性块，正文由宿主拼接并走自己的保存链。
+    /// 属性面板只提交属性块；正文由内容所有者拼回并走它自己的保存链。
     fn write_pairs(&mut self, pairs: Vec<(String, Yaml)>) -> Option<String> {
         self.pending_write = Some(if pairs.is_empty() {
             String::new()

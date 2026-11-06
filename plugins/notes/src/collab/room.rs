@@ -11,7 +11,7 @@ use yrs::{
     ClientID, Doc, GetString, OffsetKind, Options, ReadTxn, StateVector, Text, Transact, Update,
 };
 
-use atelyx_format::note::merge3::{diff_hunks, merge3, ConflictSide};
+use atelyx_format::note::merge3::{diff_hunks, merge3_checked, ConflictSide};
 use crate::collab::frame::{
     baseline_id_of, byte_to_utf16_offset, decode_note_payload, encode_note_baseline,
     encode_note_sync, read_var_bytes, read_var_uint, write_var_bytes, write_var_uint, DocTag,
@@ -27,7 +27,7 @@ const SEED_CLIENT_ID: u64 = 1;
 /// 异基线帧回通告的最小间隔（同一文件收敛窗口内防刷屏）。
 const BASELINE_REPLY_INTERVAL: Duration = Duration::from_secs(2);
 
-/// 打开文档的出站成果：两帧均已组好（含本端 tag），壳按序原样上行。
+/// 打开文档的出站成果：两帧均已组好（含本端 tag），插件按序原样上行。
 pub struct OpenOutcome {
     /// 基线通告帧（`note-sync` 通道载荷，`BASELINE` 类型）。
     pub baseline_frame: Vec<u8>,
@@ -40,10 +40,12 @@ pub struct OpenOutcome {
 pub struct RemoteOutcome {
     pub reply: Vec<Vec<u8>>,
     pub doc_changed: bool,
-    /// `doc_changed` 时的合并后新全文（供壳刷新视图，省一次 `current_text()`）。
+    /// `doc_changed` 时的合并后新全文（供插件刷新视图，省一次 `current_text()`）。
     pub text: Option<String>,
-    /// 文档已被重建（新实例、新基线）：壳须重发本端在场身份，选区随旧文本作废。
+    /// 文档已被重建（新实例、新基线）：插件须重发本端在场身份，选区随旧文本作废。
     pub rebuilt: bool,
+    /// 对端基线正文与本端正文无法安全对齐：本次不采纳、不发布新基线（两侧各自保留）。
+    pub merge_failed: bool,
 }
 
 struct ActiveDoc {
@@ -83,7 +85,7 @@ impl NoteCollab {
     }
 
     /// 打开/重挂文件：以磁盘正文重建确定性 seed 基线（不广播），随后通告基线并握手索取对端状态。
-    /// 若已有活动文档，旧文档被直接销毁（本端在场身份由壳层通道自行收尾）。
+    /// 若已有活动文档，旧文档被直接销毁（本端在场身份由插件的通道自行收尾）。
     pub fn open(&mut self, file: &str, text: &str) -> OpenOutcome {
         self.close();
         let (doc, ytext) = spawn_doc(text, &self.outbox);
@@ -349,7 +351,11 @@ impl NoteCollab {
             .as_ref()
             .map(|d| d.last_flushed.clone())
             .unwrap_or_default();
-        let merged = merge3(&last_flushed, &current, current_text, ConflictSide::Ours);
+        // 对不齐就不选边：采本端会静默丢掉对端整篇，发布新基线还会引发对齐不了的双方互刷
+        let Ok(merged) = merge3_checked(&last_flushed, &current, current_text, ConflictSide::Ours)
+        else {
+            return RemoteOutcome { merge_failed: true, ..RemoteOutcome::default() };
+        };
         let same_baseline = merged == current_text && baseline_id_of(current_text) == tag.id;
         let next_tag = if same_baseline {
             tag.clone()

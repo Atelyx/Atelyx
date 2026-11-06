@@ -525,7 +525,7 @@ ctx.begin_window_drag("main").await?;   // 宿主接管拖动手势
 | `viewSlot` | 显示「视图」下拉时给出贡献槽（`tableView`），宿主按注册表列出可切换视图 |
 | `dirty` | 本面板有未落盘改动（在途编辑草稿也算）：宿主的脏拦截会先要求插件落盘再放行动作 |
 
-落盘握手：宿主要求立即保存时发 `panel:flush { target, token, docId, openSeq }`（`docId` / `openSeq` 只在文档面出现），插件保存完用 `panel.flushDone { token, ok, error }` 按令牌回执；成功宿主清脏并放行挂起的动作，失败保留脏并提示。插件自己发现内容脏时也走同一条：先 `doc.state` 上报脏，宿主到点再发 `panel:flush`。
+落盘握手：宿主要求立即保存时发 `panel:flush { target, token, docId, openSeq }`（`docId` / `openSeq` 只在文档面出现），插件保存完用 `panel.flushDone { token, target, docId, openSeq, ok, error }` 按令牌回执——`target` 与文档身份原样带回，宿主按令牌结算、按 `target` 定位要清脏的面板；成功宿主清脏并放行挂起的动作，失败保留脏并提示。插件自己发现内容脏时也走同一条：先 `doc.state` 上报脏，宿主到点再发 `panel:flush`。打开着的文档面还会在每次脏拦截前收到一次无条件的 `panel:flush`：脏标记是异步上报的，宿主不能用「没收到脏」当成「没有未落盘输入」。
 
 ## 6. 能力面
 
@@ -551,7 +551,7 @@ ctx.begin_window_drag("main").await?;   // 宿主接管拖动手势
 | `ai` | 见 §8.4 |
 | `tray` | 见 §8.6 |
 | `collab` | 见 §8.7 |
-| `space` | 房间事实：`space_room()` 取容器种类 / 连接态 / 本端身份 / 在线设备（含各端打开的文件与行图标），`space_members()` 取成员名册快照（列表 / 加载中 / 错误，缓存为空时宿主顺带拉一次）；`open_space_menu()` / `open_space_settings()` 让宿主弹「协作空间」菜单与「协作设置」页；`space.file.patch` 提交一次空间文本文件的补丁保存（基线 + 冻结快照，宿主按 `kind` 交服务端仲裁并回最终路径），远端改动经 `space:file.patch` 事件送达。插件不连服务端；变化经 `space:peers.changed` / `space:members.changed` 到达，收到后重取对应快照 |
+| `space` | 房间事实：`space_room()` 取容器种类 / 连接态 / 本端可写性（`canWrite`：viewer 只读时据此提前禁用编辑入口）/ 本端身份 / 在线设备（含各端打开的文件与行图标），`space_members()` 取成员名册快照（列表 / 加载中 / 错误，缓存为空时宿主顺带拉一次）；`open_space_menu()` / `open_space_settings()` 让宿主弹「协作空间」菜单与「协作设置」页；`space.file.patch` 提交一次空间文本文件的补丁保存（基线 + 冻结快照，宿主按 `kind` 交服务端仲裁并回最终路径），远端改动经 `space:file.patch` 事件送达。插件不连服务端；变化经 `space:peers.changed` / `space:members.changed` 到达，收到后重取对应快照 |
 
 `vault` 的读写**必须**经能力面：直接改盘会绕过写盘队列与协作通道，属于内容丢失级缺陷。
 
@@ -661,7 +661,7 @@ ctx.window_show("palette").await?;
 
 `id` 在插件内稳定且唯一，`extensions` 是不带点的小写扩展名清单。`ownerPlugin` 是持内容真源、定解析 / 合并 / 保存语义的插件（正文缓冲、协作合流与保存重试都在它这里，宿主只按 `doc.save` 校验磁盘基线后落盘）；`views` 是能承载该文档类型的视图贡献 id（当前须由同一插件用 `view.register` 注册为 `panel`），宿主按 `views` 决定可绑定视图。同一扩展名被多个插件争用时预置插件优先，其余按（插件 id、文档类型 id）字典序取首个并记入冲突。
 
-用户打开这类文件时宿主发 `host:doc.open { surfaceId, docId, openSeq }` 给 `ownerPlugin`（`surfaceId` = 首个承载视图 id，`docId` 与路径同值），插件按 `surfaceId` 提交这一面的帧；关闭或换文件时先发 `host:doc.close`。每个文档类型只保留一份会话：打开同类型另一份文件时宿主先 flush 旧文档再结束它的会话，旧缓冲由插件在 `host:doc.close` 里落盘后释放；文件被删除或切仓库也会关闭。标签 × 只关这份文件，标签与布局保留回未打开态。
+用户打开这类文件时宿主发 `host:doc.open { surfaceId, docId, openSeq }` 给 `ownerPlugin`（`surfaceId` = 首个承载视图 id，`docId` 与路径同值），插件按 `surfaceId` 提交这一面的帧；关闭或换文件时先发 `host:doc.close`。同一文档类型同时只有一份热会话：打开同类型另一份文件时宿主先 flush 旧文档再结束它的会话，旧缓冲由插件在 `host:doc.close` 里落盘后释放；文件被删除或切仓库也会关闭。标签 × 只关这份文件，标签与布局保留回未打开态。
 
 属性面板经 `doc.props.read` / `doc.props.write` 找宿主；宿主按会话表定位 `ownerPlugin`，把整块载荷原样转给它的 `content` 服务（`props.read` / `props.write`）。写入由所有者改写正文并走自己的保存链，宿主不拼属性块。
 

@@ -42,6 +42,17 @@ const HISTORY_COALESCE_MS: i64 = 60_000;
 /// 挂着协作文档时的帧拍频率：在场保活与对端剔除按拍推进，静止时不需要更高。
 const COLLAB_TICK_HZ: u16 = 4;
 
+/// 已有在途保存时的可见原因：此刻的正文还没有落盘目标，不能假装成功。
+const SAVE_BUSY: &str = "文档正在保存，稍后重试";
+
+/// 等在途保存落地的间隔与轮数：同一文档不允许并发写，短暂等待比直接失败更少打扰。
+const SAVE_BUSY_WAIT: std::time::Duration = std::time::Duration::from_millis(20);
+const SAVE_BUSY_WAIT_ROUNDS: usize = 10;
+
+/// 磁盘改动与本端改动无法安全合并时的可见原因：两侧内容都保留，不自动选边。
+/// 撤销回到打开时的正文后重试即可接纳磁盘内容（撤销栈本身就是出口）。
+const SAVE_CONFLICT: &str = "磁盘已被外部修改且无法自动合并，本次未写入（可撤销回打开时的内容再保存）";
+
 struct NotesPlugin {
     model: Mutex<NoteModel>,
     /// 热文档唯一，切走的文档留冷缓冲：flush / 关闭按会话身份找到并提交。
@@ -358,6 +369,25 @@ impl NotesPlugin {
         }
     }
 
+    /// 冻结一次保存请求：有在途保存时按短间隔等它落地（同一文档不允许并发写）。
+    /// 正文在真正冻结的那一刻取，等到的不是等待前的旧快照。
+    /// 会话已关闭时返回 `None`（没有可提交的正文），与「等不到」同路收场。
+    async fn begin_save_when_free(&self) -> Option<crate::session::SaveRequest> {
+        for _ in 0..SAVE_BUSY_WAIT_ROUNDS {
+            let (request, open) = {
+                let mut model = self.model.lock().unwrap();
+                let open = model.doc.key().is_some();
+                let text = model.text.clone();
+                (model.doc.begin_save(&text), open)
+            };
+            if request.is_some() || !open {
+                return request;
+            }
+            tokio::time::sleep(SAVE_BUSY_WAIT).await;
+        }
+        None
+    }
+
     /// 保存热文档：正文全文提交，宿主按 `expected_rev` 校验后原子写；冲突拿磁盘原文合流重试。
     async fn save_hot(&self, ctx: &Context, manual: bool) -> Result<(), String> {
         self.save_hot_as(ctx, manual, "edit", Some(HISTORY_COALESCE_MS)).await
@@ -372,17 +402,20 @@ impl NotesPlugin {
         coalesce_ms: Option<i64>,
     ) -> Result<(), String> {
         for _ in 0..SAVE_ATTEMPTS {
-            let (key, request) = {
-                let mut model = self.model.lock().unwrap();
+            let key = {
+                let model = self.model.lock().unwrap();
                 if !model.can_write || !model.dirty {
                     return Ok(());
                 }
                 let Some(key) = model.doc.key().cloned() else { return Ok(()) };
-                let text = model.text.clone();
-                let Some(request) = model.doc.begin_save(&text) else {
-                    return Ok(());
-                };
-                (key, request)
+                key
+            };
+            // 已有在途保存：等它落地再冻结本次正文；等不到就如实失败，不能谎报成功
+            // （谎报会让宿主清掉脏标记，这一次的正文失去落盘目标）
+            let Some(request) = self.begin_save_when_free().await else {
+                self.model.lock().unwrap().save_error = Some(SAVE_BUSY.to_string());
+                self.report_state(ctx, &key).await;
+                return Err(SAVE_BUSY.to_string());
             };
             let result = match ctx
                 .doc_save(
@@ -460,6 +493,11 @@ impl NotesPlugin {
                         model.dirty = true;
                         model.save_error = Some(message.clone());
                     }
+                    // 磁盘改动与本端改动无法安全合并：正文保持脏，磁盘原样不动
+                    crate::session::SaveOutcome::Conflict => {
+                        model.dirty = true;
+                        model.save_error = Some(SAVE_CONFLICT.to_string());
+                    }
                     crate::session::SaveOutcome::Stale => {}
                 }
                 outcome
@@ -477,6 +515,10 @@ impl NotesPlugin {
                 crate::session::SaveOutcome::Failed(message) => {
                     self.report_state(ctx, &key).await;
                     return Err(message);
+                }
+                crate::session::SaveOutcome::Conflict => {
+                    self.report_state(ctx, &key).await;
+                    return Err(SAVE_CONFLICT.to_string());
                 }
             }
         }
@@ -549,6 +591,12 @@ impl NotesPlugin {
                     self.buffers.lock().unwrap().store_cold(key.clone(), cold);
                     self.report_cold_state(ctx, &key, true, Some(&message)).await;
                     return Err(message);
+                }
+                crate::session::SaveOutcome::Conflict => {
+                    cold.dirty = true;
+                    self.buffers.lock().unwrap().store_cold(key.clone(), cold);
+                    self.report_cold_state(ctx, &key, true, Some(SAVE_CONFLICT)).await;
+                    return Err(SAVE_CONFLICT.to_string());
                 }
                 crate::session::SaveOutcome::Stale => return Ok(()),
             }
@@ -2119,11 +2167,13 @@ impl NotesPlugin {
 }
 
 impl NoteModel {
-    /// 渲染闭包只读快照：避免渲染期间与输入处理争锁；撤销栈不参与渲染。
+    /// 渲染闭包只读快照：避免渲染期间与输入处理争锁。
+    /// 撤销栈与保存状态不参与渲染——保存状态含上次落盘正文与在途请求全文，每帧复制代价过高。
     fn clone_for_view(&self) -> NoteModel {
         NoteModel {
             undo: Vec::new(),
             redo: Vec::new(),
+            doc: crate::session::DocState::default(),
             ..self.clone()
         }
     }
@@ -2479,14 +2529,14 @@ impl PluginHandler for NotesPlugin {
             .unwrap()
             .is_current(&params.doc_id, params.open_seq);
         if hot {
-            let out = self.collab.lock().unwrap().close();
-            self.send_collab(ctx, out).await;
-            // 落盘失败即中止关闭：缓冲与正文都留着，宿主那边会话不结束，用户可以重试
+            // 先落盘再拆协作：写盘失败时文档还开着，协作通道不能被提前关掉
             if let Err(error) = self.save_hot(ctx, false).await {
                 ctx.log_error(&format!("关闭前落盘失败（{}）：{error}", params.doc_id));
                 self.render(ctx).await;
                 return;
             }
+            let out = self.collab.lock().unwrap().close();
+            self.send_collab(ctx, out).await;
             if let Err(error) = ctx.doc_close(&params.doc_id, params.open_seq).await {
                 ctx.log_error(&format!("关闭笔记失败（{}）：{error}", params.doc_id));
             }
@@ -2750,6 +2800,9 @@ impl PluginHandler for NotesPlugin {
                 out.push(collab::frames(&file, outcome.reply));
             }
             out.extend(presence);
+            if outcome.merge_failed {
+                ctx.log_error(&format!("协作基线正文无法与本端对齐，已保留本端正文：{file}"));
+            }
             if outcome.doc_changed {
                 text = outcome.text;
             }
@@ -2769,11 +2822,16 @@ impl PluginHandler for NotesPlugin {
                 model.props.draft.clear();
                 props::reset_suggest(&mut *model);
                 model.dirty = true;
+                // 远端合入即一次新的落盘尝试：上次失败原因不再拦住宿主排防抖保存
+                model.save_error = None;
             }
             self.sync_cursors();
             self.reset_inputs().await;
-            if let Err(error) = self.save_hot(ctx, false).await {
-                ctx.log_error(&format!("协作正文落盘失败：{error}"));
+            // 远端连续输入合并成一轮落盘：脏状态交给宿主 500ms 尾沿统一触发，
+            // 逐帧整篇原子写会在多人输入时打成风暴
+            let key = self.model.lock().unwrap().doc.key().cloned();
+            if let Some(key) = key {
+                self.report_state(ctx, &key).await;
             }
             self.render(ctx).await;
         }

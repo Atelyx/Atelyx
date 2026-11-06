@@ -348,6 +348,8 @@ pub(crate) struct PendingPanelFlush {
     pub purpose: PanelFlushPurpose,
     pub doc_id: Option<String>,
     pub open_seq: Option<u64>,
+    /// 发请求时的会话状态版本：回执只结算版本未变的那份状态。
+    pub doc_state_rev: Option<u64>,
 }
 
 /// 落盘请求的用途：脏拦截放行动作 / 回滚提示等落盘回执再给。
@@ -421,8 +423,8 @@ enum Message {
     RebuildLinks(settings_view::editor::RebuildLinksMsg),
     /// 历史记录/回滚落盘完成 → 重读版本列表。
     HistoryRecorded(u64, Option<String>),
-    /// 未打开笔记的历史回滚已写盘：成功后按普通打开链载入（插件读盘即读到回滚内容）。
-    NoteRestoreWritten(u64, String, Result<(), String>),
+    /// 未打开笔记的历史回滚已写盘：`Ok(Some)` = 正文已回滚但历史记版失败，按普通打开链载入。
+    NoteRestoreWritten(u64, String, Result<Option<String>, String>),
     /// 最近打开条目失效剔除（确认缺失的 (vaultKey, file) 对）。
     RecentPruned(Vec<(String, String)>),
     /// 仓库历史聚合落地（容器世代 + 聚合世代双重守卫）。
@@ -971,6 +973,16 @@ enum PendingAfterFlush {
     },
 }
 
+/// 打开着插件文档且它的内容所有者正在运行：脏拦截必须先请它确认一次落盘。
+/// 文档脏标记由插件异步上报，输入后立刻切换 / 关闭时它可能还没到宿主。
+fn open_doc_needs_confirm(
+    open: &Option<plugin_actions::DocOpenInstance>,
+    running: impl Fn(&str) -> bool,
+) -> bool {
+    open.as_ref()
+        .is_some_and(|doc| doc.ready && running(&doc.plugin_id))
+}
+
 /// 保存失败时丢弃关闭挂起：关闭类动作直接中止，打开类动作保留待重试。
 fn abort_close_on_save_failure(pending: &mut Option<PendingAfterFlush>) {
     if matches!(
@@ -981,6 +993,14 @@ fn abort_close_on_save_failure(pending: &mut Option<PendingAfterFlush>) {
     }
 }
 
+/// 启动自动恢复的计划：待打开的请求 + 需从打开集合摘掉的旧条目。
+pub(crate) struct RestorePlan {
+    pub requests: Vec<(String, OpenMode)>,
+    /// 同一文档类型只恢复最近一条，被顶掉的旧条目要摘掉——
+    /// 否则标签文件名与在场状态会指向一份没有打开的文档。
+    pub pruned: Vec<String>,
+}
+
 /// 启动自动恢复要打开的文件：遍历打开集合逐个发起一次，全部用 [`OpenMode::Restore`]
 /// （只把文件挂到已有视图，不新建标签、不改布局）。
 /// 每个文档类型只取最近打开的一条：同一类型只留一份会话，逐条恢复会互相顶掉。
@@ -989,21 +1009,22 @@ pub(crate) fn restore_open_requests(
     ui: &AppUiState,
     from_boot: bool,
     auto_restore: bool,
-) -> Vec<(String, OpenMode)> {
+) -> RestorePlan {
+    let mut plan = RestorePlan { requests: Vec::new(), pruned: Vec::new() };
     if !from_boot || !auto_restore {
-        return Vec::new();
+        return plan;
     }
     let mut seen: Vec<&str> = Vec::new();
-    let mut requests: Vec<(String, OpenMode)> = Vec::new();
     for doc in ui.open_docs.iter().rev() {
         if seen.contains(&doc.doc_type.as_str()) {
+            plan.pruned.push(doc.path.clone());
             continue;
         }
         seen.push(doc.doc_type.as_str());
-        requests.push((doc.path.clone(), OpenMode::Restore));
+        plan.requests.push((doc.path.clone(), OpenMode::Restore));
     }
-    requests.reverse();
-    requests
+    plan.requests.reverse();
+    plan
 }
 
 /// 仓库容器身份：本地文件夹仓库 or 协作空间（同一时刻互斥激活）。
@@ -1214,6 +1235,8 @@ pub struct App {
     vault: Arc<vault::VaultState>,
     /// 本轮 flush 是否还需画布插件确认：插件脏标记异步到达，打开画布时一律先落盘再放行动作。
     pub(crate) canvas_flush_pending: bool,
+    /// 同上，打开着插件文档时先请内容所有者确认一次（文档脏标记同样异步上报）。
+    pub(crate) doc_flush_pending: bool,
     /// flush 放行后待续的动作（笔记 / 表格 / 画布任一脏时挂起，全部落盘后执行）。
     pub(crate) flush_pending: Option<PendingAfterFlush>,
     /// 插件声明的面板头部状态（按面板视图 id）：宿主按它渲染那一行工具条。
@@ -1222,6 +1245,10 @@ pub struct App {
     pub(crate) panel_view: std::collections::HashMap<String, Option<String>>,
     /// 在途的面板落盘请求（等插件回 `panel.flushDone` 才结算并放行挂起动作）。
     pub(crate) pending_panel_flush: Option<PendingPanelFlush>,
+    /// 手动保存在等全部落盘回执：落地后统一给一次「已保存」。
+    pub(crate) manual_save_pending: bool,
+    /// 协作空间里正在保存的文档路径：GET 回读与 PUT 之间同一文档只允许一笔。
+    pub(crate) space_doc_saves: std::collections::HashSet<String>,
     /// 历史回滚待结算：内容已交回插件，等它的落盘回执后才记 restore 版本并报成功。
     pub(crate) pending_table_restore: Option<PendingTableRestore>,
     pub(crate) pending_canvas_restore: Option<PendingCanvasRestore>,
@@ -1568,13 +1595,12 @@ impl App {
 
     /// 登记打开：打开集合（持久化意图）与会话表（运行时事实）同时增加，目标文档置热。
     /// 同一路径重复打开复用原会话；同类型旧会话自动转冷（flush 由调用方在打开前完成）。
-    pub(crate) fn remember_open_doc(&mut self, rel: &str) -> Option<(DocId, u64, bool)> {
+    pub(crate) fn remember_open_doc(&mut self, rel: &str) -> Option<(DocId, u64)> {
         let route = self.registry.route_for_path(rel).cloned()?;
-        let created = self.doc_sessions.by_path(rel).is_none();
         let editable = route.editable && doc_session::can_write(self);
         let id = doc_session::register_open(&mut self.ui, &mut self.doc_sessions, rel, &route, editable);
         let open_seq = self.doc_sessions.session(&id)?.open_seq;
-        Some((id, open_seq, created))
+        Some((id, open_seq))
     }
 
     /// 关闭文档：打开集合与会话表同时移除（关闭前必须已 flush）。
@@ -1756,10 +1782,13 @@ impl App {
                 rebuild_links: settings_view::editor::RebuildLinksState::Idle,
                 history_kind: atelyx_core::history::HistoryKind::Note,
                 canvas_flush_pending: false,
+                doc_flush_pending: false,
                 flush_pending: None,
                 panel_headers: std::collections::HashMap::new(),
                 panel_view: std::collections::HashMap::new(),
                 pending_panel_flush: None,
+                manual_save_pending: false,
+                space_doc_saves: std::collections::HashSet::new(),
                 pending_table_restore: None,
             pending_canvas_restore: None,
                 canvas_displayed: false,
@@ -2206,19 +2235,7 @@ impl App {
                 self.notify(NoticeLevel::Error, format!("读取目录失败：{e}"));
                 Task::none()
             }
-            Message::Save => {
-                // Ctrl+S：先把活动文档交给插件落盘，再收画布与表格面（插件侧会先提交在途草稿）
-                let dirty_doc = self.dirty_doc().is_some();
-                let panel_file = self.canvas_file().is_some() || self.table_file().is_some();
-                let mut task = self.request_doc_flush(PanelFlushPurpose::Gate);
-                if panel_file {
-                    task = task.chain(self.request_panel_flush(PanelFlushPurpose::Gate));
-                }
-                if !dirty_doc && !panel_file {
-                    self.notify(NoticeLevel::Warning, "没有打开的文件");
-                }
-                task
-            }
+            Message::Save => self.manual_save(),
             Message::AutosaveTick => {
                 self.autosave_timer = false;
                 // 期限已到才触发；未到 = 输入推迟了期限，chain_autosave_timer 会按剩余时长续排
@@ -2300,7 +2317,18 @@ impl App {
                     return Task::none();
                 }
                 match result {
-                    Ok(()) => self.notify(NoticeLevel::Success, "已回滚".to_string()),
+                    Ok(history_error) => {
+                        // 正文已写回：有记版就一定有新版本，聚合缓存与订阅方都要失效
+                        repo_history::invalidate(self);
+                        self.plugins.on_history_changed();
+                        match history_error {
+                            Some(e) => self.notify(
+                                NoticeLevel::Warning,
+                                format!("已回滚，历史记版失败：{e}"),
+                            ),
+                            None => self.notify(NoticeLevel::Success, "已回滚".to_string()),
+                        }
+                    }
                     Err(e) => self.notify(NoticeLevel::Error, format!("回滚失败：{e}")),
                 }
                 self.open_file(&rel, OpenMode::Reveal)
@@ -4305,9 +4333,14 @@ impl App {
             .is_some_and(|pending| pending.plugin_id == plugin_id)
         {
             self.pending_panel_flush = None;
+            // 这次手动保存的回执不会再到，提示按失败收场（下面继续排剩余的落盘）
+            self.manual_save_pending = false;
         }
         if plugin_id == plugin_actions::CANVAS_PLUGIN {
             self.canvas_flush_pending = false;
+        }
+        if self.doc_open.as_ref().is_some_and(|doc| doc.plugin_id == plugin_id) {
+            self.doc_flush_pending = false;
         }
         let dropped: Vec<DocId> = self
             .doc_sessions
@@ -4329,10 +4362,21 @@ impl App {
             );
             crate::doc_session::publish_state(self, &id);
         }
-        if self.flush_pending.is_some() && !self.any_dirty() {
-            return self.after_any_flush();
+        if self.flush_pending.is_some() {
+            // 被停掉的面已撤回：继续排剩下的脏面与待确认文档，收尾后再放行挂起动作
+            let next = self.flush_dirty_now();
+            if self.pending_panel_flush.is_some() {
+                return next;
+            }
+            return next.chain(self.after_any_flush());
         }
         Task::none()
+    }
+
+    /// 全部落盘与确认都已收尾：没有脏内容，也没有等待回执的文档确认。
+    /// 放行挂起动作必须按它判定——只看脏会把「确认还没回来」当成可以前进。
+    fn flushes_settled(&self) -> bool {
+        !self.any_dirty() && !self.doc_flush_pending
     }
 
     /// 插件是否在运行（脏标记只认运行中的插件）。
@@ -4373,14 +4417,60 @@ impl App {
         {
             self.canvas_flush_pending = true;
         }
-        if self.any_dirty() || self.canvas_flush_pending {
+        // 同一竞态在插件文档上更致命：输入刚发生、doc.state 还没到，摘会话就丢了落盘目标
+        self.doc_flush_pending = open_doc_needs_confirm(&self.doc_open, |plugin_id| {
+            self.plugin_is_running(plugin_id)
+        });
+        if self.any_dirty() || self.canvas_flush_pending || self.doc_flush_pending {
             self.flush_pending = Some(pending);
             return self.flush_dirty_now();
         }
         self.proceed(pending)
     }
 
+    /// 手动保存（Ctrl+S）：有打开的文档 / 画布 / 表格就请各自所有者确认落盘，
+    /// 全部回执落地后统一提示「已保存」；没有可保存的面时如实提示。
+    fn manual_save(&mut self) -> Task<Message> {
+        let has_doc = self.doc_open.is_some();
+        let panel_file = self.canvas_file().is_some() || self.table_file().is_some();
+        if !has_doc && !panel_file {
+            self.notify(NoticeLevel::Warning, "没有打开的文件");
+            return Task::none();
+        }
+        // 与 gate 同口径：脏标记由插件异步上报，打开的面对齐后先无条件确认一次
+        if has_doc
+            && self.plugin_is_running(
+                self.doc_open.as_ref().map(|doc| doc.plugin_id.as_str()).unwrap_or_default(),
+            )
+        {
+            self.doc_flush_pending = true;
+        }
+        if panel_file && self.plugin_is_running(plugin_actions::CANVAS_PLUGIN) {
+            self.canvas_flush_pending = self.canvas_file().is_some();
+        }
+        let task = self.flush_dirty_now();
+        if self.pending_panel_flush.is_none() {
+            // 没有可提交的内容：按事实回执——载入中 / 所有者不在跑都不能说「已保存」
+            let loading = self.doc_open.as_ref().is_some_and(|doc| !doc.ready);
+            let stopped = self
+                .doc_open
+                .as_ref()
+                .is_some_and(|doc| !self.plugin_is_running(&doc.plugin_id));
+            match (loading, stopped) {
+                (true, _) => self.notify(NoticeLevel::Warning, "文档正在载入，稍后保存"),
+                (_, true) => {
+                    self.notify(NoticeLevel::Warning, "文档内容插件未运行，无法保存")
+                }
+                _ => self.notify(NoticeLevel::Success, "已保存"),
+            }
+            return Task::none();
+        }
+        self.manual_save_pending = true;
+        task
+    }
+
     /// 提交当前所有脏面的保存（flush 语义；全部落地后由回执侧放行 flush_pending）。
+    /// 一次只有一个在途请求，其余由回执侧按「下一个」继续排。
     fn flush_dirty_now(&mut self) -> Task<Message> {
         let mut task = Task::none();
         task = task.chain(self.request_panel_flush(PanelFlushPurpose::Gate));
@@ -4388,6 +4478,9 @@ impl App {
             task = task.chain(self.request_canvas_flush(PanelFlushPurpose::Gate));
         }
         task = task.chain(self.request_doc_flush(PanelFlushPurpose::Gate));
+        if self.pending_panel_flush.is_none() && self.doc_flush_pending {
+            task = task.chain(self.request_open_doc_flush(PanelFlushPurpose::Gate));
+        }
         task
     }
 
@@ -4439,6 +4532,30 @@ impl App {
         self.send_panel_flush(surface, plugin_id, purpose, Some((doc_id, open_seq)))
     }
 
+    /// 请打开中的插件文档所有者确认一次落盘：不依赖插件异步上报的脏标记。
+    /// 插件不在运行 / 已无实例时直接落标记，不留下永远等不到的回执。
+    fn request_open_doc_flush(&mut self, purpose: PanelFlushPurpose) -> Task<Message> {
+        if self.pending_panel_flush.is_some() {
+            return Task::none();
+        }
+        let Some(doc) = self.doc_open.as_ref() else {
+            self.doc_flush_pending = false;
+            return Task::none();
+        };
+        if !doc.ready || !self.plugin_is_running(&doc.plugin_id) {
+            // 读盘在途 / 插件不在跑：没有可提交的正文，别让这个标记挂着等回执
+            self.doc_flush_pending = false;
+            return Task::none();
+        }
+        let (plugin_id, surface, doc_id, open_seq) = (
+            doc.plugin_id.clone(),
+            doc.surface_id.clone(),
+            doc.doc_id.as_str().to_string(),
+            doc.open_seq,
+        );
+        self.send_panel_flush(surface, plugin_id, purpose, Some((doc_id, open_seq)))
+    }
+
     fn send_panel_flush(
         &mut self,
         target: String,
@@ -4448,6 +4565,9 @@ impl App {
     ) -> Task<Message> {
         self.panel_flush_seq = self.panel_flush_seq.wrapping_add(1);
         let token = self.panel_flush_seq;
+        let doc_state_rev = doc
+            .as_ref()
+            .and_then(|(id, _)| self.doc_sessions.state_rev(&DocId::new(id)));
         self.pending_panel_flush = Some(PendingPanelFlush {
             token,
             target: target.clone(),
@@ -4455,6 +4575,7 @@ impl App {
             purpose,
             doc_id: doc.as_ref().map(|(id, _)| id.clone()),
             open_seq: doc.as_ref().map(|(_, seq)| *seq),
+            doc_state_rev,
         });
         self.plugins.notify_plugin_event(
             &plugin_id,
@@ -4476,22 +4597,25 @@ impl App {
         )
     }
 
-    /// 文档落盘回执成功：只清同一会话的脏与错误；会话已切换或序号过期时保持原状。
-    fn clear_doc_flushed(&mut self, doc_id: &str, open_seq: u64) {
+    /// 文档落盘回执成功：只清同一会话、且期间未被更新上报取代的状态。
+    fn clear_doc_flushed(&mut self, doc_id: &str, open_seq: u64, state_rev: Option<u64>) {
         let id = DocId::new(doc_id);
-        let current = self
-            .doc_sessions
-            .session(&id)
-            .is_some_and(|session| session.open_seq == open_seq);
-        if !current {
-            return;
+        let settled = match state_rev {
+            Some(rev) => self.doc_sessions.update_state_if_rev(
+                &id,
+                open_seq,
+                rev,
+                DocStateUpdate { dirty: false, save_error: None, title: None },
+            ),
+            None => self.doc_sessions.update_state(
+                &id,
+                open_seq,
+                DocStateUpdate { dirty: false, save_error: None, title: None },
+            ),
+        };
+        if settled {
+            crate::doc_session::publish_state(self, &id);
         }
-        self.doc_sessions.update_state(
-            &id,
-            open_seq,
-            DocStateUpdate { dirty: false, save_error: None, title: None },
-        );
-        crate::doc_session::publish_state(self, &id);
     }
 
     /// 插件回报落盘完成：令牌与发起方都对上才结算；成功只清这个插件的脏。
@@ -4516,8 +4640,11 @@ impl App {
             _ => pending.doc_id.is_none(),
         };
         let doc = doc_matches.then(|| pending.doc_id.clone().zip(pending.open_seq)).flatten();
+        let doc_state_rev = doc_matches.then_some(pending.doc_state_rev).flatten();
         let purpose = pending.purpose;
         let target = params.target.clone().unwrap_or_else(|| pending.target.clone());
+        let pending_doc_id = pending.doc_id.clone();
+        let pending_open_seq = pending.open_seq;
         if pending.plugin_id != plugin_id {
             return Task::none();
         }
@@ -4525,15 +4652,24 @@ impl App {
         if target == "canvas" {
             self.canvas_flush_pending = false;
         }
+        // 打开文档的确认已到：无论成败都收掉这个标记（失败由下面中止动作）
+        let confirmed_open_doc = self.doc_open.as_ref().is_some_and(|open| {
+            pending_doc_id.as_deref() == Some(open.doc_id.as_str())
+                && pending_open_seq == Some(open.open_seq)
+        });
+        if confirmed_open_doc {
+            self.doc_flush_pending = false;
+        }
         if !params.ok {
             let reason = params.error.unwrap_or_else(|| "未知原因".to_string());
+            self.manual_save_pending = false;
             // 关闭类动作随失败中止：保留挂起会在下次保存成功后补执行关闭，与「失败后文档留着」相反
             abort_close_on_save_failure(&mut self.flush_pending);
             self.notify(NoticeLevel::Error, format!("保存失败，操作未执行：{reason}"));
             return Task::none();
         }
         if let Some((doc_id, open_seq)) = doc {
-            self.clear_doc_flushed(&doc_id, open_seq);
+            self.clear_doc_flushed(&doc_id, open_seq, doc_state_rev);
         }
         if let Some(entry) = self.panel_headers.get_mut(&target) {
             if entry.plugin_id == plugin_id {
@@ -4652,6 +4788,13 @@ impl App {
             }
         } else if self.canvas_flush_pending {
             self.request_canvas_flush(PanelFlushPurpose::Gate)
+        } else if self.doc_flush_pending {
+            let task = self.request_open_doc_flush(PanelFlushPurpose::Gate);
+            if self.pending_panel_flush.is_some() {
+                task
+            } else {
+                self.after_any_flush()
+            }
         } else if self.pending_canvas_restore.is_some() {
             let task = self.request_canvas_flush(PanelFlushPurpose::RestoreNotice);
             if self.pending_panel_flush.is_some() {
@@ -4677,8 +4820,16 @@ impl App {
         if self.pending_panel_flush.as_ref().map(|pending| pending.token) != Some(token) {
             return Task::none();
         }
+        let timed_out_doc = self.pending_panel_flush.as_ref().and_then(|pending| pending.doc_id.clone());
         self.pending_panel_flush = None;
         self.canvas_flush_pending = false;
+        self.doc_flush_pending = false;
+        self.manual_save_pending = false;
+        // 回滚的落盘回执等不到就不再结算，标记留着会让之后一次保存误报「已回滚」；
+        // 只清这次超时的那个文档，别的面超时与它无关
+        if self.history_restore_doc.as_ref().map(|doc| doc.as_str()) == timed_out_doc.as_deref() {
+            self.history_restore_doc = None;
+        }
         // 挂起动作一并放弃：保留它会让下一次放行在插件仍无响应时反复触发同一超时
         abort_close_on_save_failure(&mut self.flush_pending);
         self.flush_pending = None;
@@ -4692,7 +4843,16 @@ impl App {
 
     /// 任一保存回执后的放行判定：全部干净且有待续动作 = 执行。
     pub(crate) fn after_any_flush(&mut self) -> Task<Message> {
-        if self.flush_pending.is_some() && !self.any_dirty() {
+        // 手动保存的回执只结算一次：与挂起动作交叉时先给出提示再放行，不留陈旧标记
+        if self.manual_save_pending
+            && self.pending_panel_flush.is_none()
+            && self.flushes_settled()
+            && !self.canvas_flush_pending
+        {
+            self.manual_save_pending = false;
+            self.notify(NoticeLevel::Success, "已保存");
+        }
+        if self.flush_pending.is_some() && self.flushes_settled() {
             let pending = self.flush_pending.take().expect("flush_pending 已判存在");
             return self.proceed(pending);
         }
@@ -4750,6 +4910,8 @@ impl App {
         self.history.clear();
         self.autosave_deadline = None;
         self.autosave_timer = false;
+        // 回滚待结算挂在会话上：会话结束就不会再有落盘回执，标记必须一起清掉
+        self.history_restore_doc = None;
     }
 
     /// 结束该文档类型下除 `keep` 外的全部会话（同一类型只留一份）。
@@ -4784,6 +4946,14 @@ impl App {
     ) -> (Task<Message>, bool) {
         // 同一文档类型只留一份：换文档即结束同类型的其它会话（gate 已保证此刻无未落盘输入）
         let closed = self.close_stale_docs(&route.id, rel);
+        // 换文档即换回滚结算目标：旧文档的等待标记留着会让下一次保存误报「已回滚」
+        if self
+            .history_restore_doc
+            .as_ref()
+            .is_some_and(|doc| doc.as_str() != rel)
+        {
+            self.history_restore_doc = None;
+        }
         // 打开集合（持久化意图）与会话表（运行时事实）同时登记，目标文档置热。
         // 会话身份必须在通知插件前确定：插件按 `(docId, openSeq)` 寻址并丢弃迟到回执。
         let identity = self.remember_open_doc(rel);
@@ -4928,6 +5098,8 @@ impl App {
         if !from_boot {
             self.ui.open_docs.clear();
             self.doc_sessions.clear();
+            // 旧容器的在途保存随会话作废：不清会让同路径在新容器永远被判「正在保存」
+            self.space_doc_saves.clear();
             self.plugins.on_table_changed(None);
             // 打开中的插件文档实例随切仓库关闭（旧容器路径失效，实例面撤下；投影任务丢弃，后续刷新兜底）
             let _ = plugin_actions::close_doc(self);
@@ -4988,14 +5160,21 @@ impl App {
         task = task.chain(self.save_global());
         // 启动自动进入且「自动恢复」开启：把上次打开的文件挂回已有视图；运行中切换不恢复（文件已随切仓关闭）
         let restore = restore_open_requests(&self.ui, from_boot, self.global.auto_restore);
+        // 被同类型顶掉的旧条目从打开集合摘掉：标签与在场不再指向没打开的文件
+        for path in &restore.pruned {
+            self.ui.forget_open_doc(path);
+        }
+        if !restore.pruned.is_empty() {
+            self.schedule_persist();
+        }
         let mut finished = false;
-        if restore.is_empty() {
+        if restore.requests.is_empty() {
             // 没有待恢复的文档：文档闸门直接放行
             finished |= self.startup_arrive(Gate::RestoreDocs);
         } else {
             self.startup.enter(Step::RestoreDocs);
-            self.startup.expect_docs(restore.len(), Instant::now());
-            for (rel, mode) in restore {
+            self.startup.expect_docs(restore.requests.len(), Instant::now());
+            for (rel, mode) in restore.requests {
                 // 笔记由插件文档面承载：走同一套打开路由（插件未就绪时按恢复意图挂起）
                 task = task.chain(self.open_file(&rel, mode));
             }
@@ -5351,9 +5530,11 @@ impl App {
                     async move {
                         let (root, _, _) = state.session_snapshot()?;
                         let path = vault::safe_join(&root, &rel_for_task, false)?;
+                        // 正文写盘失败才算回滚失败
                         state.writes.write(path, content.clone()).await?;
+                        // 记版是侧车：已落盘的回滚不能因为它失败被判成没回滚
                         let record_root = root.clone();
-                        tokio::task::spawn_blocking(move || {
+                        let history_error = tokio::task::spawn_blocking(move || {
                             atelyx_core::history::record_version(
                                 &record_root,
                                 atelyx_core::history::HistoryKind::Note,
@@ -5369,8 +5550,10 @@ impl App {
                             )
                         })
                         .await
-                        .map_err(|e| e.to_string())??;
-                        Ok(())
+                        .map_err(|e| e.to_string())
+                        .and_then(|result| result)
+                        .err();
+                        Ok(history_error)
                     },
                     move |result| Message::NoteRestoreWritten(gen, rel, result),
                 )
@@ -7311,9 +7494,10 @@ mod restore_open_tests {
         ui.remember_open_doc("b.atb", "table");
         ui.remember_open_doc("c.atlx", "canvas");
         let before = tab_count(&ui);
-        let requests = restore_open_requests(&ui, true, true);
+        let plan = restore_open_requests(&ui, true, true);
+        assert!(plan.pruned.is_empty(), "每类型只有一条时没有要摘的条目");
         assert_eq!(
-            requests,
+            plan.requests,
             vec![
                 ("a.md".to_string(), OpenMode::Restore),
                 ("b.atb".to_string(), OpenMode::Restore),
@@ -7326,8 +7510,21 @@ mod restore_open_tests {
         assert!(!OpenMode::Restore.persists(), "恢复不落盘");
         assert!(!OpenMode::Restore.records_recent(), "恢复不重排最近打开");
         // 运行中切换容器、关闭「自动恢复」都不产生请求
-        assert!(restore_open_requests(&ui, false, true).is_empty());
-        assert!(restore_open_requests(&ui, true, false).is_empty());
+        assert!(restore_open_requests(&ui, false, true).requests.is_empty());
+        assert!(restore_open_requests(&ui, true, false).requests.is_empty());
+    }
+
+    /// 同一文档类型只恢复最近一条：被顶掉的旧条目要从打开集合摘掉，
+    /// 否则标签文件名与在场状态指向一份没有打开的文档。
+    #[test]
+    fn restore_prunes_superseded_entries_of_the_same_type() {
+        let mut ui = default_ui();
+        ui.remember_open_doc("old.md", "note");
+        ui.remember_open_doc("new.md", "note");
+        let plan = restore_open_requests(&ui, true, true);
+        assert_eq!(plan.requests.len(), 1);
+        assert_eq!(plan.requests[0].0, "new.md", "恢复最近打开的那条");
+        assert_eq!(plan.pruned, vec!["old.md".to_string()]);
     }
 
     #[test]
@@ -7335,7 +7532,7 @@ mod restore_open_tests {
         let mut ui = default_ui();
         add_view(&mut ui, NOTES_VIEW);
         let before = tab_count(&ui);
-        let _ = restore_open_requests(&ui, true, true);
+        let _ = restore_open_requests(&ui, true, true).requests;
         assert_eq!(tab_count(&ui), before);
         // 用户主动打开只会激活已有标签；恢复路径不调用这条
         assert!(matches!(
@@ -7387,14 +7584,32 @@ mod restore_open_tests {
         );
         // 同一视图存在于多个布局，恢复仍只产生一次打开请求
         ui.remember_open_doc("a.md", "note");
-        assert_eq!(restore_open_requests(&ui, true, true).len(), 1);
+        assert_eq!(restore_open_requests(&ui, true, true).requests.len(), 1);
     }
 }
 
 #[cfg(test)]
 mod close_tests {
-    use super::{abort_close_on_save_failure, PendingAfterFlush};
+    use super::{abort_close_on_save_failure, open_doc_needs_confirm, PendingAfterFlush};
     use atelyx_core::doc_session::DocId;
+
+    /// 打开着插件文档时必须先请所有者确认：脏标记异步上报，读不到不等于没有未落盘输入。
+    #[test]
+    fn open_doc_always_asks_owner_before_acting() {
+        assert!(!open_doc_needs_confirm(&None, |_| true));
+        let open = Some(crate::plugin_actions::DocOpenInstance {
+            plugin_id: "atelyx.notes".into(),
+            contribution_id: "note".into(),
+            path: "a.md".into(),
+            surface_id: "note".into(),
+            doc_id: DocId::new("a.md"),
+            open_seq: 1,
+            ready: true,
+            mode: crate::plugin_actions::OpenMode::Reveal,
+        });
+        assert!(open_doc_needs_confirm(&open, |id| id == "atelyx.notes"));
+        assert!(!open_doc_needs_confirm(&open, |_| false), "插件不在运行时没有可提交的正文");
+    }
 
     #[test]
     fn save_failure_aborts_close_but_keeps_other_pending() {

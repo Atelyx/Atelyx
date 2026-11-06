@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::doc_type::DocTypeId;
+use crate::write_queue::WriteQueue;
 
 /// 文档身份 = 仓库相对路径（磁盘上按字符串写出）。
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -36,6 +37,40 @@ pub fn content_rev(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
+/// 带基线的落盘结果：`Written` 回执新基线，`Conflict` 交回磁盘当前内容（不写盘）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DocWrite {
+    Written { new_rev: String },
+    Conflict { disk_rev: String, disk_content: String },
+}
+
+/// 在写盘队列的同一执行序位内完成「读盘 → 比基线 → 原子写」：先读后写的间隙里
+/// 外部编辑器的写入会被静默覆盖，所以比较与写入不能分两次排队。
+/// 文件被外部删除按空基线比对（缺失即内容为空），由冲突分支把事实交回调用方。
+pub async fn write_at_baseline(
+    queue: &WriteQueue,
+    path: std::path::PathBuf,
+    content: String,
+    expected_rev: &str,
+) -> Result<DocWrite, String> {
+    let expected_rev = expected_rev.to_string();
+    queue
+        .bulk(move || {
+            let disk_text = match std::fs::read_to_string(&path) {
+                Ok(text) => text,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+                Err(error) => return Err(format!("写前读盘失败：{error}")),
+            };
+            let disk_rev = content_rev(disk_text.as_bytes());
+            if disk_rev != expected_rev {
+                return Ok(DocWrite::Conflict { disk_rev, disk_content: disk_text });
+            }
+            crate::vault::atomic_write(&path, &content)?;
+            Ok(DocWrite::Written { new_rev: content_rev(content.as_bytes()) })
+        })
+        .await
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DocSession {
     pub id: DocId,
@@ -51,6 +86,8 @@ pub struct DocSession {
     pub save_error: Option<String>,
     /// 建立 / 复用本次会话时的打开序号；旧序号的回执会被拒绝。
     pub open_seq: u64,
+    /// 状态版本：每次打开 / 插件上报都推进。宿主发起的落盘回执按它判定是否已被更新的上报取代。
+    pub state_rev: u64,
 }
 
 /// 建立或复用会话所需的声明信息。
@@ -188,6 +225,7 @@ impl DocSessions {
                 session.title = spec.title;
                 session.editable = spec.editable;
                 session.open_seq = open_seq;
+                session.state_rev = session.state_rev.saturating_add(1);
             }
             None => {
                 self.docs.insert(
@@ -203,6 +241,7 @@ impl DocSessions {
                         dirty: false,
                         save_error: None,
                         open_seq,
+                        state_rev: 0,
                     },
                 );
             }
@@ -269,7 +308,29 @@ impl DocSessions {
         if let Some(title) = state.title {
             session.title = title;
         }
+        session.state_rev = session.state_rev.saturating_add(1);
         true
+    }
+
+    /// 会话当前状态版本：宿主在发起落盘 / 读盘时记下，回执结算时用 [`Self::update_state_if_rev`]。
+    pub fn state_rev(&self, id: &DocId) -> Option<u64> {
+        self.docs.get(id).map(|session| session.state_rev)
+    }
+
+    /// 按状态版本结算宿主动作：期间有更新的插件上报（`state_rev` 已推进）即拒绝，
+    /// 迟到的旧结论不得覆盖新状态。
+    pub fn update_state_if_rev(
+        &mut self,
+        id: &DocId,
+        open_seq: u64,
+        expected_rev: u64,
+        state: DocStateUpdate,
+    ) -> bool {
+        let Some(session) = self.docs.get(id) else { return false };
+        if session.open_seq != open_seq || session.state_rev != expected_rev {
+            return false;
+        }
+        self.update_state(id, open_seq, state)
     }
 
     /// 关闭会话。调用方必须先 flush；本方法不写盘、不推断脏状态。
@@ -351,6 +412,34 @@ mod tests {
 
     fn state(dirty: bool, error: Option<&str>) -> DocStateUpdate {
         DocStateUpdate { dirty, save_error: error.map(Into::into), title: None }
+    }
+
+    /// 基线写把「读—比—写」放在同一执行序位：基线不符不写盘，磁盘内容原样交回。
+    #[tokio::test]
+    async fn baseline_write_conflicts_without_touching_disk() {
+        let tmp = crate::vault::test_support::TempDir::new("doc-baseline");
+        let path = tmp.join("a.md");
+        std::fs::write(&path, "disk").unwrap();
+        let queue = WriteQueue::new();
+        let rev = content_rev(b"disk");
+        let written = write_at_baseline(&queue, path.clone(), "next".into(), &rev)
+            .await
+            .expect("写盘不应失败");
+        assert_eq!(written, DocWrite::Written { new_rev: content_rev(b"next") });
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "next");
+        // 外部改动后再用旧基线提交：不写盘，交回磁盘现状
+        std::fs::write(&path, "external").unwrap();
+        let stale = write_at_baseline(&queue, path.clone(), "ours".into(), &rev)
+            .await
+            .expect("冲突不是调用失败");
+        assert_eq!(
+            stale,
+            DocWrite::Conflict {
+                disk_rev: content_rev(b"external"),
+                disk_content: "external".into()
+            }
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "external", "冲突不得覆盖磁盘");
     }
 
     #[test]
@@ -500,6 +589,28 @@ mod tests {
         let id = sessions.finish_open(&second, 1, spec("b.md", "note")).unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions.session(&id).unwrap().path, "b.md");
+    }
+
+    /// 宿主动作的落盘回执按状态版本结算：期间插件又上报过（版本推进）即不得回写旧结论。
+    #[test]
+    fn guarded_settlement_respects_newer_plugin_state() {
+        let mut sessions = DocSessions::default();
+        let id = sessions.open_or_reuse(spec("a.md", "note"));
+        let seq = sessions.session(&id).unwrap().open_seq;
+        let rev = sessions.state_rev(&id).unwrap();
+        // 发起落盘后插件又上报了脏：宿主回执不得把这份新状态盖成干净
+        assert!(sessions.update_state(&id, seq, state(true, None)));
+        assert!(!sessions.update_state_if_rev(&id, seq, rev, state(false, None)));
+        assert!(sessions.session(&id).unwrap().dirty);
+        // 没有更新的上报时按回执结算
+        let rev = sessions.state_rev(&id).unwrap();
+        assert!(sessions.update_state_if_rev(&id, seq, rev, state(false, None)));
+        assert!(!sessions.session(&id).unwrap().dirty);
+        // 打开新序号同样让旧版本失效
+        let stale = sessions.state_rev(&id).unwrap();
+        sessions.open_or_reuse(spec("a.md", "note"));
+        let seq = sessions.session(&id).unwrap().open_seq;
+        assert!(!sessions.update_state_if_rev(&id, seq, stale, state(true, None)));
     }
 
     #[test]

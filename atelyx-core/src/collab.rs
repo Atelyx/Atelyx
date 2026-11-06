@@ -599,7 +599,7 @@ async fn close_quiet(ws: &mut WsStream) {
     .await;
 }
 
-/// 文本帧 → 事件：字段抽取与 base64 解码，业务匹配归壳层。
+/// 文本帧 → 事件：字段抽取与载荷解码，业务匹配归调用方。
 /// 握手完成前的业务帧忽略（服务端先发 hello-ack 再 peers）；载荷解码失败丢帧。
 async fn handle_text_frame(
     text: &str,

@@ -54,6 +54,10 @@ pub(crate) struct PluginState {
     presence: Mutex<presence::Presence>,
     /// 面最近一次上报的尺寸（会话未建立时也要记住，建立后补进视图态）。
     surface_size: Mutex<Size>,
+    /// 当前容器只读（协作空间 viewer）：禁止一切内容编辑，服务端 403 仍为最终兜底。
+    read_only: Mutex<bool>,
+    /// 只读提示是否已给过（每次进入只读容器只提示一次）。
+    read_only_notified: Mutex<bool>,
 }
 
 /// 自动保存防抖状态：新改动推后世代，同一时刻最多一个等待线程。
@@ -71,11 +75,57 @@ impl PluginState {
             save_debounce: Mutex::new(SaveDebounce::default()),
             presence: Mutex::new(presence::Presence::default()),
             surface_size: Mutex::new(Size { width: 0.0, height: 0.0 }),
+            read_only: Mutex::new(false),
+            read_only_notified: Mutex::new(false),
         })
     }
 
     fn is_attached(&self) -> bool {
         self.attached.lock().map(|attached| *attached).unwrap_or(false)
+    }
+
+    /// 当前容器是否只读（协作空间 viewer）。
+    pub(crate) fn is_read_only(&self) -> bool {
+        self.read_only.lock().map(|value| *value).unwrap_or(false)
+    }
+
+    /// 按容器事实刷新只读标记：容器可写时什么也不做，切到只读时重置提示闸门。
+    pub(crate) fn set_read_only(&self, read_only: bool) {
+        let mut current = match self.read_only.lock() {
+            Ok(current) => current,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if *current == read_only {
+            return;
+        }
+        *current = read_only;
+        if read_only {
+            if let Ok(mut notified) = self.read_only_notified.lock() {
+                *notified = false;
+            }
+        }
+    }
+
+    /// 拒绝一次写操作：只读身份给出一次可见提示并返回 true（调用方直接返回）。
+    pub(crate) async fn reject_when_read_only(&self, ctx: &Context) -> bool {
+        if !self.is_read_only() {
+            return false;
+        }
+        let first = self
+            .read_only_notified
+            .lock()
+            .map(|mut notified| !std::mem::replace(&mut *notified, true))
+            .unwrap_or(true);
+        if first {
+            let _ = ctx
+                .notify(
+                    "当前空间为只读身份，无法编辑",
+                    None,
+                    atelyx_plugin_protocol::method::NotificationLevel::Warning,
+                )
+                .await;
+        }
+        true
     }
 
     /// 取会话做只读操作（无会话 = None）。
@@ -327,6 +377,9 @@ impl PluginState {
 
     /// 菜单选中：剪贴板动作用宿主能力，其余落成模型变更。
     async fn apply_menu_choice(self: &Arc<Self>, ctx: &Context, id: &str) {
+        if self.reject_when_read_only(ctx).await {
+            return;
+        }
         match id {
             "copy" => return self.run_clipboard(ctx, input::ClipboardAction::Copy).await,
             "cut" => return self.run_clipboard(ctx, input::ClipboardAction::Cut).await,
@@ -521,7 +574,11 @@ impl PluginState {
         let Some(target) = ctx.pick_file(params).await.ok().flatten() else {
             return;
         };
-        let space = space_container(ctx).await;
+        let space = ctx
+            .space_room()
+            .await
+            .map(|room| room.kind == atelyx_plugin_protocol::method::SpaceContainerKind::Space)
+            .unwrap_or(false);
         // 预读外置附件图片（空间模式读不到，与原导出口径一致）
         let mut images = std::collections::HashMap::new();
         if !space {
@@ -872,6 +929,10 @@ impl PluginState {
 
     /// 宿主按表格作用域拦截的快捷键命令（非编辑态按键绑定归宿主，编辑态仍由输入通路处理）。
     async fn apply_table_command(self: &Arc<Self>, ctx: &Context, command: &str) {
+        // 复制与全选不产生内容改动：只读身份照常可用
+        if !matches!(command, "copy" | "select-all") && self.reject_when_read_only(ctx).await {
+            return;
+        }
         match command {
             "copy" | "cut" | "paste" => {
                 let action = match command {
@@ -1130,8 +1191,12 @@ impl PluginHandler for TablesPlugin {
         {
             ctx.log_error(&format!("登记表格服务失败：{error}"));
         }
+        refresh_writable(&self.state, ctx).await;
         for name in [
             event::name::EDITOR_OPEN_CHANGED,
+            event::name::VAULT_SWITCH,
+            event::name::SPACE_RESYNC,
+            event::name::SPACE_MEMBERS_CHANGED,
             event::name::TABLE_RESTORE,
             event::name::SPACE_FILE_PATCH,
             event::name::PANEL_FLUSH,
@@ -1158,6 +1223,9 @@ impl PluginHandler for TablesPlugin {
         if let Ok(mut attached) = self.state.attached.lock() {
             *attached = true;
         }
+        refresh_writable(&self.state, ctx).await;
+        // 插件重启后宿主只重发挂面：打开集合里的表格要在这里重新载入，否则停在空态
+        crate::session::reload_from_open_files(&self.state, ctx).await;
         crate::session::broadcast_selection(&self.state, ctx).await;
         self.state.render(ctx).await;
         self.state.publish_header(ctx).await;
@@ -1179,6 +1247,15 @@ impl PluginHandler for TablesPlugin {
     async fn on_host_event(&self, ctx: &Context, params: PublishParams) {
         match params.name.as_str() {
             event::name::EDITOR_OPEN_CHANGED => {
+                refresh_writable(&self.state, ctx).await;
+                crate::session::reload_from_open_files(&self.state, ctx).await;
+                self.state.render(ctx).await;
+                self.state.publish_header(ctx).await;
+            }
+            event::name::VAULT_SWITCH
+            | event::name::SPACE_RESYNC
+            | event::name::SPACE_MEMBERS_CHANGED => {
+                refresh_writable(&self.state, ctx).await;
                 crate::session::reload_from_open_files(&self.state, ctx).await;
                 self.state.render(ctx).await;
                 self.state.publish_header(ctx).await;
@@ -1356,6 +1433,9 @@ impl PluginHandler for TablesPlugin {
                 crate::geom::clamp_scroll(session);
             });
             self.state.render(ctx).await;
+            return;
+        }
+        if !view_only_input(&params.input) && self.state.reject_when_read_only(ctx).await {
             return;
         }
         let (outcome, menu_request) = self
@@ -1555,23 +1635,78 @@ fn unique_path(dir: &str, name: &str) -> std::path::PathBuf {
     path
 }
 
-/// 当前容器是否协作空间（`space.room` 的 `kind`）。
-async fn space_container(ctx: &Context) -> bool {
-    let Ok(value) = ctx
-        .call_raw(atelyx_plugin_protocol::method::space::ROOM, serde_json::Value::Null)
-        .await
-    else {
-        return false;
-    };
-    value
-        .get("kind")
-        .and_then(|kind| kind.as_str())
-        .is_some_and(|kind| kind == "space")
+/// 只读身份放行的输入：悬停 / 滚轮滚动，以及收尾与失焦这类不改内容的事件。
+/// 按下、双击与按键是编辑入口（选格后敲字、双击改值、拖列宽），一律拦下。
+fn view_only_input(input: &FrameInput) -> bool {
+    matches!(
+        input,
+        FrameInput::PointerMove { .. }
+            | FrameInput::PointerLeave
+            | FrameInput::PointerUp { .. }
+            | FrameInput::Outside { .. }
+            | FrameInput::Focus { .. }
+            | FrameInput::Wheel { .. }
+    )
+}
+
+/// 按容器事实刷新只读标记：协作空间 viewer 只读，本地仓库与可写空间可编辑。
+/// 查询失败保持已知状态并留日志：放宽会让人以为能写（写盘仍被服务端拒），收紧会误锁。
+pub(crate) async fn refresh_writable(state: &PluginState, ctx: &Context) {
+    match ctx.space_room().await {
+        Ok(room) => state.set_read_only(!room.can_write),
+        Err(error) => ctx.log_error(&format!("读取容器可写性失败：{error}")),
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::build_frame;
+    use super::{build_frame, PluginState as TableState};
+
+    /// 只读身份放行的输入只有查看类：按下 / 双击 / 按键是编辑入口，必须被拦。
+    #[test]
+    fn view_only_inputs_exclude_edit_entries() {
+        use atelyx_plugin_protocol::frame::{FrameInput, Key, KeyAction};
+        use atelyx_plugin_protocol::frame::MouseButton;
+        let point = |button| FrameInput::PointerDown { x: 1.0, y: 1.0, button, hit: None };
+        assert!(!super::view_only_input(&point(MouseButton::Left)), "按下会选格 / 拖列宽");
+        assert!(!super::view_only_input(&FrameInput::DoubleClick {
+            x: 1.0,
+            y: 1.0,
+            button: MouseButton::Left,
+            hit: None,
+        }));
+        assert!(!super::view_only_input(&FrameInput::Key {
+            key: Key::Character { text: "a".into() },
+            action: KeyAction::Press,
+            modifiers: Default::default(),
+            text: Some("a".into()),
+        }));
+        assert!(super::view_only_input(&FrameInput::PointerMove { x: 1.0, y: 1.0, hit: None }));
+        assert!(super::view_only_input(&FrameInput::PointerLeave));
+        assert!(super::view_only_input(&FrameInput::Wheel {
+            x: 1.0,
+            y: 1.0,
+            delta_x: 0.0,
+            delta_y: 1.0,
+            modifiers: Default::default(),
+            hit: None,
+        }));
+    }
+
+    /// 只读标记只随容器事实变化：重复刷新不重置提示闸门，重新进入只读容器才再提示一次。
+    #[test]
+    fn read_only_flag_resets_the_notice_gate() {
+        let state = TableState::new();
+        assert!(!state.is_read_only(), "默认按可写处理");
+        state.set_read_only(true);
+        assert!(state.is_read_only());
+        *state.read_only_notified.lock().unwrap() = true;
+        state.set_read_only(true);
+        assert!(*state.read_only_notified.lock().unwrap(), "同一容器重复刷新保持已提示");
+        state.set_read_only(false);
+        state.set_read_only(true);
+        assert!(!*state.read_only_notified.lock().unwrap(), "重新进入只读容器要再提示一次");
+    }
     use crate::model::Size;
     use atelyx_plugin_protocol::paint::DrawCommand;
 

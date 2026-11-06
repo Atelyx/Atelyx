@@ -1282,8 +1282,8 @@ pub struct DocOpenInstance {
     /// 文档会话身份；插件按 `(docId, openSeq)` 寻址并丢弃迟到回执。
     pub doc_id: atelyx_core::doc_session::DocId,
     pub open_seq: u64,
-    /// 本次打开是否新建会话；读盘失败时只撤销新建的那一份。
-    pub created: bool,
+    /// 正文是否已读盘到位：读盘在途时没有可提交的内容，脏拦截不该等它的确认。
+    pub(crate) ready: bool,
     /// 本次打开的意图：读盘完成时据此判定是否记最近打开。
     pub(crate) mode: OpenMode,
 }
@@ -1300,10 +1300,16 @@ pub fn begin_doc_open(
     rel: &str,
     mode: OpenMode,
     route: &DocTypeRoute,
-    identity: Option<(atelyx_core::doc_session::DocId, u64, bool)>,
+    identity: Option<(atelyx_core::doc_session::DocId, u64)>,
 ) {
     // 会话身份由统一打开链在通知插件前确定；缺失即调用顺序有误，不再自行登记。
-    let Some((doc_id, open_seq, created)) = identity else { return };
+    let Some((doc_id, open_seq)) = identity else {
+        app.notify(
+            crate::ui::notify::Level::Warning,
+            "会话身份缺失，未打开文档".to_string(),
+        );
+        return;
+    };
     let conflicts = atelyx_core::doc_type::extension_of(rel)
         .map(|extension| app.registry.doc_type_conflicts(extension))
         .unwrap_or(0);
@@ -1325,6 +1331,8 @@ pub fn begin_doc_open(
             old.open_seq,
         );
     }
+    // 换实例即换确认目标：旧文档的落盘确认不再拦新动作
+    app.doc_flush_pending = false;
     // 实例面标识 = 承载视图的贡献 id：渲染与清理共用同一键空间（单实例语义）
     let surface_id = route.views.first().map(|view| view.view_id.clone()).unwrap_or_default();
     app.plugins
@@ -1336,7 +1344,7 @@ pub fn begin_doc_open(
         surface_id,
         doc_id,
         open_seq,
-        created,
+        ready: false,
         mode,
     });
 }
@@ -1345,6 +1353,8 @@ pub fn begin_doc_open(
 pub fn close_doc(app: &mut App) -> Task<Message> {
     // 实例关闭后，在途读盘结果不得再把文档挂回会话
     app.doc_open_guard.invalidate();
+    // 实例没了就没有可确认的文档：标记一并收掉，免得 gate 反复请求
+    app.doc_flush_pending = false;
     let Some(doc) = app.doc_open.take() else {
         return Task::none();
     };

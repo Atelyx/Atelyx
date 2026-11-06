@@ -124,6 +124,7 @@ async fn main() {
     *state.room.lock().unwrap() = SpaceRoomResult {
         kind: SpaceContainerKind::Space,
         connected: false,
+        can_write: true,
         self_peer_id: None,
         self_identity: Some(self_identity()),
         peers: Vec::new(),
@@ -202,6 +203,7 @@ fn space_room() -> SpaceRoomResult {
     SpaceRoomResult {
         kind: SpaceContainerKind::Space,
         connected: true,
+        can_write: true,
         self_peer_id: Some("1".into()),
         self_identity: Some(self_identity()),
         peers: vec![

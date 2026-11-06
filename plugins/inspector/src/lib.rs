@@ -95,7 +95,7 @@ impl InspectorPlugin {
         }
     }
 
-    /// 渲染期攒下的属性块提交给宿主；宿主拼回正文后重读一次，保证草稿与磁盘口径一致。
+    /// 渲染期攒下的属性块提交给宿主；宿主按会话转发给内容所有者，落盘后本插件重读属性区。
     async fn flush_pending(&self, ctx: &Context) -> bool {
         let (block, path, fingerprint) = {
             let mut model = self.model.lock().unwrap();

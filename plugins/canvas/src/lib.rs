@@ -54,6 +54,10 @@ pub(crate) struct PluginState {
     models: Mutex<Vec<AiModelProvider>>,
     default_pick: Mutex<Option<AiModelPick>>,
     auto_materialize: Mutex<bool>,
+    /// 当前容器只读（协作空间 viewer）：禁止一切内容编辑。
+    read_only: Mutex<bool>,
+    /// 只读提示是否已给过（每次进入只读容器只提示一次）。
+    read_only_notified: Mutex<bool>,
 }
 
 #[derive(Default)]
@@ -62,6 +66,19 @@ struct SaveDebounce {
     running: bool,
 }
 
+/// 只读身份放行的输入：悬停、滚轮（缩放 / 平移）以及收尾与失焦这类不改内容的事件。
+/// 按下、双击与按键是编辑入口（选中后拖动 / 改尺寸 / 输入卡内文本），一律拦下。
+fn view_only_input(input: &FrameInput) -> bool {
+    matches!(
+        input,
+        FrameInput::PointerMove { .. }
+            | FrameInput::PointerLeave
+            | FrameInput::PointerUp { .. }
+            | FrameInput::Outside { .. }
+            | FrameInput::Focus { .. }
+            | FrameInput::Wheel { .. }
+    )
+}
 impl PluginState {
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
@@ -79,6 +96,8 @@ impl PluginState {
             models: Mutex::new(Vec::new()),
             default_pick: Mutex::new(None),
             auto_materialize: Mutex::new(true),
+            read_only: Mutex::new(false),
+            read_only_notified: Mutex::new(false),
         })
     }
 
@@ -113,6 +132,51 @@ impl PluginState {
         Some(write(&mut guard))
     }
 
+
+    /// 当前容器是否只读（协作空间 viewer）。
+    pub(crate) fn is_read_only(&self) -> bool {
+        self.read_only.lock().map(|value| *value).unwrap_or(false)
+    }
+
+    /// 按容器事实刷新只读标记；切到只读时重置提示闸门。
+    fn set_read_only(&self, read_only: bool) {
+        let mut current = match self.read_only.lock() {
+            Ok(current) => current,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if *current == read_only {
+            return;
+        }
+        *current = read_only;
+        if read_only {
+            if let Ok(mut notified) = self.read_only_notified.lock() {
+                *notified = false;
+            }
+        }
+    }
+
+    /// 拒绝一次写操作：只读身份给出一次可见提示并返回 true（调用方直接返回）。
+    pub(crate) async fn reject_when_read_only(&self, ctx: &Context) -> bool {
+        if !self.is_read_only() {
+            return false;
+        }
+        let first = self
+            .read_only_notified
+            .lock()
+            .map(|mut notified| !std::mem::replace(&mut *notified, true))
+            .unwrap_or(true);
+        if first {
+            let _ = ctx
+                .notify(
+                    "当前空间为只读身份，无法编辑",
+                    None,
+                    atelyx_plugin_protocol::method::NotificationLevel::Warning,
+                )
+                .await;
+        }
+        true
+    }
+
     /// 本端协作身份；无空间或查询失败 = None（在场载荷回落缺省名与按 peer 取色）。
     pub(crate) fn identity(&self) -> Option<SpaceSelfIdentity> {
         self.identity
@@ -121,11 +185,17 @@ impl PluginState {
             .and_then(|identity| identity.clone())
     }
 
-    /// 刷新本端身份缓存（进入空间 / 名册变化 / 挂面时）。
+    /// 刷新本端身份与可写性（进入空间 / 名册变化 / 挂面时）。
+    /// 查询失败保持已知的可写性并留日志：放宽会让人以为能写（写盘仍被服务端拒），收紧会误锁。
     async fn refresh_identity(&self, ctx: &Context) {
-        let identity = ctx.space_room().await.ok().and_then(|room| room.self_identity);
-        if let Ok(mut cached) = self.identity.lock() {
-            *cached = identity;
+        match ctx.space_room().await {
+            Ok(room) => {
+                if let Ok(mut cached) = self.identity.lock() {
+                    *cached = room.self_identity.clone();
+                }
+                self.set_read_only(!room.can_write);
+            }
+            Err(error) => ctx.log_error(&format!("读取容器可写性失败：{error}")),
         }
     }
 
@@ -415,6 +485,7 @@ impl PluginState {
             event::name::VAULT_SWITCH,
             event::name::VAULT_FILES_CHANGED,
             event::name::SPACE_PEERS_CHANGED,
+            event::name::SPACE_MEMBERS_CHANGED,
             event::name::WINDOW_FILE_DROP,
             method::ai::HOST_CHAT_EVENT,
         ] {
@@ -512,6 +583,9 @@ impl PluginState {
                 });
                 self.refresh_identity(ctx).await;
                 self.load_choices(ctx).await;
+            }
+            event::name::SPACE_MEMBERS_CHANGED => {
+                self.refresh_identity(ctx).await;
             }
             event::name::SPACE_PEERS_CHANGED => {
                 self.refresh_identity(ctx).await;
@@ -619,6 +693,12 @@ impl PluginState {
 
     /// 宿主拦截的画布快捷键命令。
     async fn command(self: &Arc<Self>, ctx: &Context, command: &str) {
+        // 复制、全选与 Esc 不产生内容改动：只读身份照常可用
+        if !matches!(command, "copy" | "select-all" | "escape")
+            && self.reject_when_read_only(ctx).await
+        {
+            return;
+        }
         // 卡内输入框持有焦点时快捷键归文本编辑：粘贴 / 撤销不能作用到画布选中集
         if self.ui.lock().await.focus_id().is_some() {
             return;
@@ -773,6 +853,9 @@ impl PluginState {
             ui.event(ctx, &input, |_| None).await;
             drop(ui);
             self.render(ctx).await;
+            return;
+        }
+        if !view_only_input(&input) && self.reject_when_read_only(ctx).await {
             return;
         }
         let size = self
@@ -1415,6 +1498,9 @@ impl PluginState {
 
     /// 右键菜单选中项；返回是否有数据变化（需要保存）。
     async fn menu_action(self: &Arc<Self>, ctx: &Context, id: &str) -> bool {
+        if self.reject_when_read_only(ctx).await {
+            return false;
+        }
         if let Some(rest) = id.strip_prefix("model:") {
             let mut parts = rest.splitn(3, ':');
             let (Some(node), Some(provider), Some(model)) =
@@ -1686,4 +1772,61 @@ pub extern "C" fn atelyx_plugin_api() -> *const atelyx_plugin_sdk::abi::PluginAp
             })
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{view_only_input, PluginState};
+    use atelyx_plugin_protocol::frame::{FrameInput, Key, KeyAction, MouseButton};
+
+    /// 只读身份放行的输入只有查看类：按下 / 双击 / 按键是编辑入口，必须被拦。
+    #[test]
+    fn view_only_inputs_exclude_edit_entries() {
+        assert!(view_only_input(&FrameInput::PointerMove { x: 1.0, y: 1.0, hit: None }));
+        assert!(view_only_input(&FrameInput::PointerLeave));
+        assert!(view_only_input(&FrameInput::Wheel {
+            x: 1.0,
+            y: 1.0,
+            delta_x: 0.0,
+            delta_y: 1.0,
+            modifiers: Default::default(),
+            hit: None,
+        }));
+        assert!(
+            !view_only_input(&FrameInput::PointerDown {
+                x: 1.0,
+                y: 1.0,
+                button: MouseButton::Left,
+                hit: None,
+            }),
+            "按下会选中并拖动卡片"
+        );
+        assert!(!view_only_input(&FrameInput::DoubleClick {
+            x: 1.0,
+            y: 1.0,
+            button: MouseButton::Left,
+            hit: None,
+        }));
+        assert!(!view_only_input(&FrameInput::Key {
+            key: Key::Character { text: "a".into() },
+            action: KeyAction::Press,
+            modifiers: Default::default(),
+            text: Some("a".into()),
+        }));
+    }
+
+    /// 只读标记只在进入只读容器时重置提示闸门：同一容器重复刷新保持已提示。
+    #[test]
+    fn read_only_flag_resets_the_notice_gate() {
+        let state = PluginState::new();
+        assert!(!state.is_read_only(), "默认按可写处理");
+        state.set_read_only(true);
+        assert!(state.is_read_only());
+        *state.read_only_notified.lock().unwrap() = true;
+        state.set_read_only(true);
+        assert!(*state.read_only_notified.lock().unwrap());
+        state.set_read_only(false);
+        state.set_read_only(true);
+        assert!(!*state.read_only_notified.lock().unwrap(), "重新进入只读容器要再提示一次");
+    }
 }

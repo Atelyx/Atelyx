@@ -1184,6 +1184,7 @@
       "value": {
         "kind": "space",
         "connected": true,
+        "canWrite": true,
         "selfPeerId": "1",
         "selfIdentity": {
           "name": "小明",
@@ -1220,7 +1221,8 @@
       "type": "SpaceRoomResult",
       "value": {
         "kind": "local",
-        "connected": false
+        "connected": false,
+        "canWrite": true
       }
     },
     {
@@ -1740,6 +1742,35 @@
           "width": 640.0,
           "height": 480.0
         }
+      }
+    },
+    {
+      "name": "doc.open params",
+      "type": "DocOpenParams",
+      "value": {
+        "docId": "notes/a.md",
+        "openSeq": 4
+      }
+    },
+    {
+      "name": "panel.flush params",
+      "type": "PanelFlushParams",
+      "value": {
+        "target": "note",
+        "token": 7,
+        "docId": "notes/a.md",
+        "openSeq": 4
+      }
+    },
+    {
+      "name": "panel.flushDone params",
+      "type": "PanelFlushDoneParams",
+      "value": {
+        "token": 7,
+        "target": "note",
+        "docId": "notes/a.md",
+        "openSeq": 4,
+        "ok": true
       }
     }
   ]

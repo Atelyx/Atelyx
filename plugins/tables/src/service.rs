@@ -31,6 +31,13 @@ pub async fn handle(plugin: &std::sync::Arc<PluginState>, ctx: &Context, params:
         return;
     }
     let method = params.method.as_str();
+    // 只读身份不提供写入方法：读快照与只改选区的 selectRow 照常，写入按可读原因拒绝
+    if !matches!(method, "snapshot" | "selectRow") && plugin.is_read_only() {
+        let _ = ctx
+            .service_error(&params.call_id, "当前空间为只读身份，无法编辑")
+            .await;
+        return;
+    }
     let result = match method {
         "snapshot" => plugin.with_session(|session| snapshot(plugin, session)).map(Ok).unwrap_or_else(|| {
             Ok(serde_json::to_value(TableSnapshot::default()).unwrap_or_default())

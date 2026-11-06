@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use atelyx_format::note::edit::merge_before_write;
+use atelyx_format::note::edit::{merge_before_write, MergeOutcome};
 use atelyx_plugin_protocol::method::DocSaveResult;
 
 /// 目录前缀跟随：路径等于 `old` 或位于 `old/` 之下时给出新路径，其余返回 `None`。
@@ -38,6 +38,8 @@ pub enum SaveOutcome {
     Dirty,
     /// 磁盘内容被外部改动：返回合流后的正文，调用方替换在屏正文后重试。
     Merged { text: String },
+    /// 磁盘改动与本端改动无法安全合并：两侧内容都保留，调用方不得自动选边覆盖磁盘。
+    Conflict,
     /// 落盘失败：正文保持脏，错误可见。
     Failed(String),
     /// 回执不属于当前在途请求（迟到 / 已切换会话）。
@@ -132,10 +134,15 @@ impl DocState {
             }
             DocSaveResult::Conflict { disk_rev, disk_content } => {
                 // 先按上次成功保存的正文为共同祖先合流，再用磁盘新基线重试
-                let merged = merge_before_write(Some(&self.saved_text), current, &disk_content);
-                self.expected_rev = disk_rev;
-                self.saved_text = disk_content;
-                SaveOutcome::Merged { text: merged }
+                match merge_before_write(Some(&self.saved_text), current, &disk_content) {
+                    MergeOutcome::Merged(text) => {
+                        self.expected_rev = disk_rev;
+                        self.saved_text = disk_content;
+                        SaveOutcome::Merged { text }
+                    }
+                    // 合并不了就不推进基线：按本端写入会覆盖磁盘新内容，只能交回冲突
+                    MergeOutcome::Conflict => SaveOutcome::Conflict,
+                }
             }
             DocSaveResult::Err { message } => SaveOutcome::Failed(message),
         }
@@ -173,11 +180,10 @@ impl DocBuffers {
     }
 
     /// 切到新文档：旧热文档按身份移入冷缓冲，新热文档从冷缓冲摘出。
+    /// 旧快照必须落冷——它已不是热文档，丢弃会让切走的正文失去落盘目标。
     pub fn activate(&mut self, key: DocKey, previous: Option<(DocKey, ColdDoc)>) {
         if let Some((old, snapshot)) = previous {
-            if self.hot.as_ref() != Some(&old) {
-                self.cold.insert(old, snapshot);
-            }
+            self.cold.insert(old, snapshot);
         }
         self.hot = Some(key.clone());
         self.cold.remove(&key);
@@ -196,10 +202,14 @@ impl DocBuffers {
         self.cold.get(key)
     }
 
-    /// 冷文档提交后回写；文档已被关闭时丢弃（不复活已 forgotten 的会话）。
+    /// 冷文档提交后回写；只更新已登记的冷会话，热会话与已 forget 的身份一律丢弃
+    /// （保存回写不得把已关闭的文档插回缓冲）。
     pub fn store_cold(&mut self, key: DocKey, doc: ColdDoc) {
-        if self.hot.as_ref() != Some(&key) {
-            self.cold.insert(key, doc);
+        if self.hot.as_ref() == Some(&key) {
+            return;
+        }
+        if let Some(slot) = self.cold.get_mut(&key) {
+            *slot = doc;
         }
     }
 
@@ -303,19 +313,29 @@ mod tests {
     #[test]
     fn rename_path_moves_hot_and_cold_identities() {
         let mut buffers = DocBuffers::default();
-        buffers.activate(key("notes/b.md", 4), None);
+        buffers.activate(key("notes/a.md", 3), None);
         let mut state = DocState::default();
         state.open(key("notes/a.md", 3), "a", "rev-a".to_string());
-        buffers.store_cold(
-            key("notes/a.md", 3),
-            ColdDoc { text: "a".to_string(), dirty: true, state },
-        );
+        let cold = ColdDoc { text: "a".to_string(), dirty: true, state };
+        buffers.activate(key("notes/b.md", 4), Some((key("notes/a.md", 3), cold)));
         buffers.rename_path("notes", "archive/notes");
         assert!(buffers.is_current("archive/notes/b.md", 4));
         let moved = buffers
             .cold(&key("archive/notes/a.md", 3))
             .expect("冷缓冲随目录换路");
         assert!(moved.state.is_current("archive/notes/a.md", 3), "冷缓冲内部身份同样换路");
+    }
+
+    /// 保存回写只更新已登记的冷会话：关闭后迟到的回写不得把正文插回缓冲。
+    #[test]
+    fn store_cold_does_not_resurrect_forgotten_session() {
+        let mut buffers = DocBuffers::default();
+        buffers.activate(key("a.md", 1), None);
+        buffers.activate(key("b.md", 2), Some((key("a.md", 1), ColdDoc::default())));
+        buffers.forget(&key("a.md", 1));
+        let late = ColdDoc { text: "late".to_string(), dirty: true, ..ColdDoc::default() };
+        buffers.store_cold(key("a.md", 1), late);
+        assert!(buffers.cold(&key("a.md", 1)).is_none(), "已 forget 的会话不得被回写插回");
     }
 
     #[test]

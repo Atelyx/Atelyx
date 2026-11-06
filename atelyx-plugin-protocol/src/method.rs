@@ -3045,6 +3045,9 @@ pub struct SpaceFilePatchPayload {
 pub struct SpaceRoomResult {
     pub kind: SpaceContainerKind,
     pub connected: bool,
+    /// 本端在当前容器是否可写（协作空间 viewer 只读；本地仓库恒可写）。
+    /// 插件据此提前禁用编辑入口，服务端 403 仍为最终兜底。
+    pub can_write: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub self_peer_id: Option<String>,
     /// 本端身份（协作空间才有；本地仓库 = 缺省）。
@@ -3344,6 +3347,9 @@ pub const BUILTIN_SERVICES: &[(&str, &str, &[&str])] = &[
             doc::SAVE,
             doc::CLOSE,
             doc::RENAME,
+            // 属性读写由宿主按会话转发给内容所有者，方法名挂在 doc 下
+            doc::PROPS_READ,
+            doc::PROPS_WRITE,
         ],
     ),
     // 历史读数取自宿主侧文件与服务端聚合，历史弹层也在宿主，与 doc 同理归平台自身

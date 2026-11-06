@@ -178,6 +178,14 @@ pub struct DocCommitDone {
     pub doc_id: String,
     pub open_seq: u64,
     pub gen: u64,
+    /// 发起保存时的会话状态版本：回执只结算版本未变的状态。
+    pub state_rev: u64,
+    /// 是否协作空间的保存：成功要补发文件变更广播（打开中的面板与属性面板据此重取）。
+    pub space: bool,
+    /// 本次落盘是否记上了历史版本：成功即失效聚合缓存并广播。
+    pub history_recorded: bool,
+    /// 用户手动保存（Ctrl+S）：成功给一次可见回执。
+    pub manual: bool,
     pub result: DocSaveResult,
     /// 历史侧车记版失败原因：正文已落盘，只提示不改变回执。
     pub history_error: Option<String>,
@@ -326,12 +334,12 @@ pub enum PluginsMsg {
     DocPropsForwarded { request_id: u64, result: Result<serde_json::Value, String> },
     DocOpenDone(crate::doc_session::OpenReadResult),
     /// 内容所有者上报会话状态（脏 / 保存错误）；正文由插件自己持有。
-    DocState { request_id: u64, params: DocStateParams },
+    DocState { request_id: u64, plugin_id: String, params: DocStateParams },
     /// 提交完整正文保存：回执 `Ok / Conflict / Err` 在写盘完成后返回。
-    DocSave { request_id: u64, params: DocSaveParams },
+    DocSave { request_id: u64, plugin_id: String, params: DocSaveParams },
     DocCommitDone(DocCommitDone),
-    /// 关闭文档会话（按 `(docId, openSeq)` 寻址）。
-    DocClose { request_id: u64, params: DocCloseParams },
+    /// 关闭文档会话（按 `(docId, openSeq)` 寻址，调用方须是内容所有者）。
+    DocClose { request_id: u64, plugin_id: String, params: DocCloseParams },
     /// 当前文档的反链。
     VaultBacklinks { request_id: u64, path: String },
     VaultBacklinksDone { request_id: u64, result: Result<serde_json::Value, String> },
@@ -794,14 +802,14 @@ pub fn host_requests_stream(spec: &RuntimeSpec) -> impl iced::futures::Stream<It
                 HostRequest::DocPropsWrite { request_id, params, .. } => {
                     Message::Plugins(PluginsMsg::DocPropsWrite { request_id, params })
                 }
-                HostRequest::DocState { request_id, params, .. } => {
-                    Message::Plugins(PluginsMsg::DocState { request_id, params })
+                HostRequest::DocState { plugin_id, request_id, params } => {
+                    Message::Plugins(PluginsMsg::DocState { request_id, plugin_id, params })
                 }
-                HostRequest::DocSave { request_id, params, .. } => {
-                    Message::Plugins(PluginsMsg::DocSave { request_id, params })
+                HostRequest::DocSave { plugin_id, request_id, params } => {
+                    Message::Plugins(PluginsMsg::DocSave { request_id, plugin_id, params })
                 }
-                HostRequest::DocClose { request_id, params, .. } => {
-                    Message::Plugins(PluginsMsg::DocClose { request_id, params })
+                HostRequest::DocClose { plugin_id, request_id, params } => {
+                    Message::Plugins(PluginsMsg::DocClose { request_id, plugin_id, params })
                 }
                 HostRequest::VaultBacklinks { request_id, path, .. } => {
                     Message::Plugins(PluginsMsg::VaultBacklinks { request_id, path })
@@ -1809,8 +1817,8 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
             crate::doc_session::rename(app, request_id, params)
         }
         PluginsMsg::DocOpenDone(done) => crate::doc_session::open_done(app, done),
-        PluginsMsg::DocState { request_id, params } => {
-            crate::doc_session::state(app, request_id, params)
+        PluginsMsg::DocState { request_id, plugin_id, params } => {
+            crate::doc_session::state(app, request_id, &plugin_id, params)
         }
         PluginsMsg::DocPropsRead { request_id, params } => {
             crate::doc_session::props_read(app, request_id, params)
@@ -1818,11 +1826,11 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
         PluginsMsg::DocPropsWrite { request_id, params } => {
             crate::doc_session::props_write(app, request_id, params)
         }
-        PluginsMsg::DocSave { request_id, params } => {
-            crate::doc_session::save(app, request_id, params)
+        PluginsMsg::DocSave { request_id, plugin_id, params } => {
+            crate::doc_session::save(app, request_id, &plugin_id, params)
         }
-        PluginsMsg::DocClose { request_id, params } => {
-            crate::doc_session::close(app, request_id, params)
+        PluginsMsg::DocClose { request_id, plugin_id, params } => {
+            crate::doc_session::close(app, request_id, &plugin_id, params)
         }
         PluginsMsg::DocCommitDone(done) => crate::doc_session::commit_done(app, done),
         PluginsMsg::DocPropsForwarded { request_id, result } => {
@@ -3113,6 +3121,7 @@ fn files_result(app: &App) -> FilesResult {
     }
 }
 
+
 /// 当前容器与在线成员快照：本端身份只在协作空间给（本地仓库没有设备行），
 /// 各端打开的文件带行图标（插件画不出宿主注册表里的领域文档图标）。
 fn space_room(app: &App) -> SpaceRoomResult {
@@ -3133,6 +3142,7 @@ fn space_room(app: &App) -> SpaceRoomResult {
     SpaceRoomResult {
         kind,
         connected: app.space_connected,
+        can_write: crate::doc_session::can_write(app),
         self_peer_id: app.space_own_peer_id.clone(),
         self_identity,
         peers: app

@@ -18,7 +18,7 @@ const TIMEOUT: Duration = Duration::from_secs(30);
 /// clientID 计数器：同一进程内多个通道实例的 id 不撞车。
 static NEXT_CLIENT: AtomicU64 = AtomicU64::new(1);
 
-/// 远端条目（壳层视图）。
+/// 远端条目（插件内视图）。
 pub struct RemoteState {
     /// 上报该条目的连接 id（锁声明等按连接归属判定用）。
     pub peer_id: String,
@@ -122,7 +122,7 @@ impl EphemeralChannel {
     /// 合入远端帧：更高 clock 覆盖、同 clock 视为保活重发照常刷新、更小 clock 丢弃；
     /// `state` 为 null 移除该端（同样受 clock 门槛约束：旧离场帧不得删掉新状态）。
     /// 缺 `clientId` / `clock` / `state` 字段视为畸形载荷整体丢弃。本端 clientID 跳过（回声）。
-    /// 返回远端集合是否变化（壳据此重绘）。
+    /// 返回远端集合是否变化（插件据此重绘）。
     pub fn apply_remote(&mut self, peer_id: &str, payload: &Value, now: Instant) -> bool {
         let Some(client_id) = payload.get("clientId").and_then(Value::as_u64) else {
             return false;

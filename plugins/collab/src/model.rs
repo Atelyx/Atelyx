@@ -202,6 +202,7 @@ mod tests {
         SpaceRoomResult {
             kind: SpaceContainerKind::Space,
             connected: true,
+            can_write: true,
             self_peer_id: Some("1".into()),
             self_identity: Some(SpaceSelfIdentity {
                 name: "我".into(),

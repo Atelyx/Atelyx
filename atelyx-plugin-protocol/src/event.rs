@@ -109,7 +109,7 @@ pub mod name {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DocRestorePayload {
-    /// 文档会话身份；插件只认当前热文档的 [`(docId, openSeq)`]。
+    /// 文档会话身份；插件只认当前热文档的 `(docId, openSeq)`。
     pub doc_id: String,
     pub open_seq: u64,
     /// 整篇正文（回滚目标版本的原文）。

@@ -5,9 +5,9 @@ use iced::Task;
 use serde_json::json;
 
 use atelyx_core::plugin_runtime::{
-    method, ContentPropsReadParams, ContentPropsResult, ContentPropsWriteParams, DocCloseParams,
-    DocOpenParams, DocPropsWriteParams, DocRenameParams, DocSaveParams, DocSaveResult,
-    DocStateParams, DocTargetParams, DocChangedPayload,
+    method, ContentPropsReadParams, ContentPropsResult, ContentPropsWriteParams, DocChangedPayload,
+    DocCloseParams, DocOpenParams, DocOpenResult, DocPropsWriteParams, DocRenameParams,
+    DocSaveParams, DocSaveResult, DocStateParams, DocTargetParams,
 };
 
 use crate::settings_view::plugins::{DocCommitDone, PluginsMsg};
@@ -15,7 +15,7 @@ use crate::{vault, App, Message, RepoKind};
 
 pub use atelyx_core::doc_session::DocOpenGuard;
 use atelyx_core::doc_session::{
-    discard_line, DocId, DocSession, DocSessions, DocSpec, DocStateUpdate, OpenTicket,
+    discard_line, DocId, DocSession, DocSessions, DocSpec, DocStateUpdate, DocWrite, OpenTicket,
 };
 use atelyx_core::doc_type::DocTypeRoute;
 use atelyx_core::layout::AppUiState;
@@ -60,11 +60,20 @@ pub struct OpenReadResult {
     can_write: bool,
     doc_id: DocId,
     open_seq: u64,
-    created: bool,
+    /// 发起读盘时的状态版本：回执据此判定期间插件是否已上报过新状态。
+    state_rev: u64,
 }
 
-/// 校验会话身份：文档存在且 open_seq 仍是当前序号；旧序号的调用一律拒绝。
-fn session_for(app: &App, doc_id: &str, open_seq: u64) -> Option<DocId> {
+/// 校验会话身份：文档存在、open_seq 仍是当前序号，且调用方就是该文档的内容所有者。
+/// 任一不符即拒绝——任一运行中插件都不得改别人的脏态、提交别人的正文或关别人的会话。
+fn session_for(app: &App, plugin_id: &str, doc_id: &str, open_seq: u64) -> Option<DocId> {
+    let id = DocId::new(doc_id);
+    let session = app.doc_sessions.session(&id)?;
+    (session.open_seq == open_seq && session.plugin_id == plugin_id).then_some(id)
+}
+
+/// 宿主内部寻址（落盘回执 / 读盘回填）：只认身份与序号，不看调用方。
+fn session_identity(app: &App, doc_id: &str, open_seq: u64) -> Option<DocId> {
     let id = DocId::new(doc_id);
     let session = app.doc_sessions.session(&id)?;
     (session.open_seq == open_seq).then_some(id)
@@ -118,14 +127,14 @@ pub fn open(
             return Task::none();
         }
     };
-    if session_for(app, &rel, params.open_seq).is_none() {
+    if session_for(app, plugin_id, &rel, params.open_seq).is_none() {
         app.plugins.resolve_shell_call(
             request_id,
-            Err("文档会话不存在或打开序号已过期，请重新打开".into()),
+            Err("文档会话不存在、打开序号已过期或不属于该插件，请重新打开".into()),
         );
         return Task::none();
     }
-    let created = app.doc_open.as_ref().is_some_and(|open| open.created);
+    let state_rev = app.doc_sessions.state_rev(&DocId::new(&rel)).unwrap_or(0);
     // 换篇前必须没有未落盘输入：正常打开走 gate，这里是插件直接调用的兜底。
     if app.doc_sessions.by_path(&rel).is_some_and(|session| session.dirty) {
         app.plugins
@@ -157,7 +166,7 @@ pub fn open(
                         can_write: true,
                         doc_id: DocId::new(&rel),
                         open_seq: params.open_seq,
-                        created,
+                        state_rev,
                     }))
                 },
             )
@@ -188,7 +197,7 @@ pub fn open(
                         can_write,
                         doc_id: DocId::new(&rel),
                         open_seq: params.open_seq,
-                        created,
+                        state_rev,
                     }))
                 },
             )
@@ -198,7 +207,7 @@ pub fn open(
 
 /// 读盘完成：守卫校验归属后写入会话基线并回执正文；被取代 / 跨世代的结果直接丢弃并留日志。
 pub fn open_done(app: &mut App, done: OpenReadResult) -> Task<Message> {
-    let OpenReadResult { ticket, result, can_write, doc_id, open_seq, created } = done;
+    let OpenReadResult { ticket, result, can_write, doc_id, open_seq, state_rev } = done;
     if let Err(reason) = app.doc_open_guard.accept(&ticket, app.epoch()) {
         let line = discard_line(ticket.path(), reason);
         if !app.plugins.log_to_plugin(ticket.plugin_id(), &line) {
@@ -217,13 +226,20 @@ pub fn open_done(app: &mut App, done: OpenReadResult) -> Task<Message> {
     match result {
         Ok(text) => {
             let disk_rev = sha256_hex(text.as_bytes());
-            // 读盘成功即新基线：会话按新序号记干净（打开前已由脏拦截保证没有未落盘输入）
-            app.doc_sessions.update_state(
+            // 读盘成功即新基线：只在期间未被插件上报的新状态取代时清脏（旧结论不得覆盖新状态）
+            let settled = app.doc_sessions.update_state_if_rev(
                 &doc_id,
                 open_seq,
+                state_rev,
                 DocStateUpdate { dirty: false, save_error: None, title: None },
             );
-            publish_state(app, &doc_id);
+            if settled {
+                publish_state(app, &doc_id);
+            }
+            // 正文到位：此后脏拦截才会向这位所有者要一次确认
+            if let Some(doc) = app.doc_open.as_mut().filter(|doc| doc.path == path) {
+                doc.ready = true;
+            }
             if !restored {
                 crate::recent_files::record(
                     app,
@@ -231,21 +247,25 @@ pub fn open_done(app: &mut App, done: OpenReadResult) -> Task<Message> {
                     atelyx_core::plugin_runtime::RecentKind::Note,
                 );
             }
-            let value = json!({
-                "docId": path.clone(),
-                "openSeq": open_seq,
-                "path": path,
-                "text": text,
-                "canWrite": can_write,
-                "diskRev": disk_rev,
-            });
+            let value = serde_json::to_value(DocOpenResult {
+                doc_id: path.clone(),
+                open_seq,
+                path,
+                text,
+                can_write,
+                disk_rev,
+            })
+            .unwrap_or_default();
             app.plugins.resolve_shell_call(request_id, Ok(value));
         }
         Err(e) => {
-            // 读盘失败只撤销本次新建的登记；已存在的会话保留。
-            if created {
-                app.forget_open_doc(&path);
-            }
+            // 读盘失败即本次打开作废：实例、视图绑定、打开集合与会话一并收掉，
+            // 不留「标签挂着、正文存不了也关不掉」的文档
+            discard_open(app, &path);
+            app.notify(
+                crate::ui::notify::Level::Error,
+                format!("打开文档失败：{e}"),
+            );
             app.plugins.resolve_shell_call(request_id, Err(e));
         }
     }
@@ -254,6 +274,39 @@ pub fn open_done(app: &mut App, done: OpenReadResult) -> Task<Message> {
         app.startup_restore_doc_done()
     } else {
         Task::none()
+    }
+}
+
+/// 作废一次打开：解绑承载视图、关闭插件实例、移除打开集合与会话。
+fn discard_open(app: &mut App, path: &str) {
+    let instance = app
+        .doc_open
+        .as_ref()
+        .filter(|doc| doc.path == path)
+        .map(|doc| {
+            (
+                doc.plugin_id.clone(),
+                doc.contribution_id.clone(),
+                doc.surface_id.clone(),
+                doc.doc_id.clone(),
+                doc.open_seq,
+            )
+        });
+    if let Some((plugin_id, contribution_id, surface_id, doc_id, open_seq)) = instance {
+        app.doc_open = None;
+        let _ = app.apply(atelyx_core::layout::LayoutOp::BindViewDoc {
+            view: crate::plugin_actions::doc_view_kind(&plugin_id, &contribution_id),
+            doc: None,
+        });
+        app.plugins
+            .notify_doc_close(&plugin_id, &surface_id, path, doc_id.as_str(), open_seq);
+    }
+    app.forget_open_doc(path);
+    app.notify_open_files();
+    app.schedule_persist();
+    // 打开时已把这份文件上行到在场清单：作废后要收回，否则对端一直显示「正在编辑」
+    if matches!(app.repo_kind, RepoKind::Space(_)) {
+        crate::space_actions::send_presence(app);
     }
 }
 
@@ -266,8 +319,13 @@ pub(crate) fn can_write(app: &App) -> bool {
 }
 
 /// 内容所有者上报一次会话状态：宿主只记脏与保存错误，并据此排自动保存。
-pub fn state(app: &mut App, request_id: u64, params: DocStateParams) -> Task<Message> {
-    if session_for(app, &params.doc_id, params.open_seq).is_none() {
+pub fn state(
+    app: &mut App,
+    request_id: u64,
+    plugin_id: &str,
+    params: DocStateParams,
+) -> Task<Message> {
+    if session_for(app, plugin_id, &params.doc_id, params.open_seq).is_none() {
         app.plugins
             .resolve_shell_call(request_id, Err("插件上报的文档会话与当前会话不一致".into()));
         return Task::none();
@@ -337,12 +395,15 @@ fn renamed_path(from: &str, input: &str) -> Option<String> {
 
 /// 写盘 / 基线校验完成：按回执三态改写会话的脏与错误并回执，正文差异仍以插件随后的上报为准。
 pub fn commit_done(app: &mut App, done: DocCommitDone) -> Task<Message> {
+    if done.space {
+        app.space_doc_saves.remove(&done.doc_id);
+    }
     if app.epoch() != done.gen {
         app.plugins
             .resolve_shell_call(done.request_id, Err("仓库已切换，写入结果作废".into()));
         return Task::none();
     }
-    let Some(id) = session_for(app, &done.doc_id, done.open_seq) else {
+    let Some(id) = session_identity(app, &done.doc_id, done.open_seq) else {
         app.plugins
             .resolve_shell_call(done.request_id, Err("文档会话已关闭或打开序号已过期".into()));
         return Task::none();
@@ -350,18 +411,40 @@ pub fn commit_done(app: &mut App, done: DocCommitDone) -> Task<Message> {
     if let Some(error) = &done.history_error {
         app.notify(crate::ui::notify::Level::Warning, error.clone());
     }
+    if matches!(&done.result, DocSaveResult::Ok { .. }) {
+        if done.manual {
+            app.notify(crate::ui::notify::Level::Success, "已保存".to_string());
+        }
+        // 空间内容不在本地写盘链上：落盘成功必须补文件变更广播，打开中的面板才会重取
+        if done.space {
+            app.plugins.on_file_changed(
+                &done.doc_id,
+                atelyx_core::plugin_runtime::FileChangeKind::Updated,
+                None,
+            );
+        }
+        // 记版成功：聚合缓存失效并通知订阅历史分组的插件重取
+        if done.history_recorded {
+            crate::repo_history::invalidate(app);
+            app.plugins.on_history_changed();
+        }
+    }
     let value = serde_json::to_value(&done.result).unwrap_or_default();
     let (dirty, error) = match &done.result {
         DocSaveResult::Ok { .. } => (false, None),
         DocSaveResult::Conflict { .. } => (true, None),
         DocSaveResult::Err { message } => (true, Some(message.clone())),
     };
-    app.doc_sessions.update_state(
+    // 期间插件上报过更新的状态（写盘在途又输入 / 另一次失败）：宿主的回执不得覆盖它
+    let settled = app.doc_sessions.update_state_if_rev(
         &id,
         done.open_seq,
+        done.state_rev,
         DocStateUpdate { dirty, save_error: error, title: None },
     );
-    publish_state(app, &id);
+    if settled {
+        publish_state(app, &id);
+    }
     // 回滚的成功提示挂在发起回滚那篇文档的落盘回执上：别的文档保存成功不算回滚完成
     if app.history_restore_doc.as_ref() == Some(&id) {
         app.settle_history_restore(&id, matches!(&done.result, DocSaveResult::Ok { .. }));
@@ -370,9 +453,14 @@ pub fn commit_done(app: &mut App, done: DocCommitDone) -> Task<Message> {
     Task::none()
 }
 
-/// 内容所有者提交完整正文：写前即时读盘比对 expected_rev，冲突把磁盘原文原样交回插件。
-pub fn save(app: &mut App, request_id: u64, params: DocSaveParams) -> Task<Message> {
-    if session_for(app, &params.doc_id, params.open_seq).is_none() {
+/// 内容所有者提交完整正文：写前比对 expected_rev，冲突把磁盘原文原样交回插件。
+pub fn save(
+    app: &mut App,
+    request_id: u64,
+    plugin_id: &str,
+    params: DocSaveParams,
+) -> Task<Message> {
+    if session_for(app, plugin_id, &params.doc_id, params.open_seq).is_none() {
         app.plugins
             .resolve_shell_call(request_id, Err("插件保存的文档会话与当前会话不一致".into()));
         return Task::none();
@@ -397,7 +485,9 @@ pub fn save(app: &mut App, request_id: u64, params: DocSaveParams) -> Task<Messa
     let queue = app.vault.writes.clone();
     let doc_id = params.doc_id.clone();
     let open_seq = params.open_seq;
+    let state_rev = app.doc_sessions.state_rev(&DocId::new(&doc_id)).unwrap_or(0);
     let expected_rev = params.expected_rev;
+    let manual = params.manual;
     let text = params.text;
     let async_doc_id = doc_id.clone();
     Task::perform(
@@ -406,25 +496,16 @@ pub fn save(app: &mut App, request_id: u64, params: DocSaveParams) -> Task<Messa
                 Ok(path) => path,
                 Err(e) => return DocSaveResult::Err { message: e },
             };
-            let disk_path = path.clone();
-            let disk = tokio::task::spawn_blocking(move || std::fs::read_to_string(disk_path)).await;
-            let disk_text = match disk {
-                Ok(Ok(text)) => text,
-                Ok(Err(e)) => {
-                    return DocSaveResult::Err { message: format!("写前读盘失败：{e}") }
+            // 读盘比对与写入在同一执行序位内完成：先读后写的间隙里外部编辑器写入会被静默覆盖
+            match atelyx_core::doc_session::write_at_baseline(&queue, path, text, &expected_rev)
+                .await
+            {
+                Ok(DocWrite::Written { new_rev }) => DocSaveResult::Ok { new_rev },
+                Ok(DocWrite::Conflict { disk_rev, disk_content }) => {
+                    DocSaveResult::Conflict { disk_rev, disk_content }
                 }
-                Err(e) => {
-                    return DocSaveResult::Err { message: format!("写前读盘任务失败：{e}") }
-                }
-            };
-            let disk_rev = sha256_hex(disk_text.as_bytes());
-            if disk_rev != expected_rev {
-                return DocSaveResult::Conflict { disk_rev, disk_content: disk_text };
+                Err(message) => DocSaveResult::Err { message },
             }
-            if let Err(e) = queue.write(path, text.clone()).await {
-                return DocSaveResult::Err { message: e };
-            }
-            DocSaveResult::Ok { new_rev: sha256_hex(text.as_bytes()) }
         },
         move |result| {
             Message::Plugins(PluginsMsg::DocCommitDone(DocCommitDone {
@@ -432,6 +513,10 @@ pub fn save(app: &mut App, request_id: u64, params: DocSaveParams) -> Task<Messa
                 doc_id,
                 open_seq,
                 gen,
+                state_rev,
+                space: false,
+                history_recorded: false,
+                manual,
                 result,
                 history_error: None,
             }))
@@ -440,10 +525,21 @@ pub fn save(app: &mut App, request_id: u64, params: DocSaveParams) -> Task<Messa
 }
 
 /// 关闭插件文档：先回执已受理，再经 gate 落盘后结束会话；保存失败即中止，文档留着。
-pub fn close(app: &mut App, request_id: u64, params: DocCloseParams) -> Task<Message> {
-    let Some(id) = session_for(app, &params.doc_id, params.open_seq) else {
+pub fn close(
+    app: &mut App,
+    request_id: u64,
+    plugin_id: &str,
+    params: DocCloseParams,
+) -> Task<Message> {
+    // 关闭是幂等的：会话已被宿主摘掉（换文件 / 关标签先收尾）时按已关闭回执，
+    // 插件不必为宿主先行的收尾报错
+    if app.doc_sessions.session(&DocId::new(&params.doc_id)).is_none() {
+        app.plugins.resolve_shell_call(request_id, Ok(json!({})));
+        return Task::none();
+    }
+    let Some(id) = session_for(app, plugin_id, &params.doc_id, params.open_seq) else {
         app.plugins
-            .resolve_shell_call(request_id, Err("文档会话不存在或打开序号已过期".into()));
+            .resolve_shell_call(request_id, Err("文档会话不属于该插件或打开序号已过期".into()));
         return Task::none();
     };
     // 先回执已受理：关闭要等 gate 落盘，不能让插件那次调用悬着
