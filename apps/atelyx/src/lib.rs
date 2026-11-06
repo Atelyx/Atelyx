@@ -386,6 +386,25 @@ pub(crate) enum PluginImage {
     Thumb(atelyx_core::image_thumb::Thumb),
 }
 
+/// 一次图片载入的产出：句柄原料，外加仓库来源顺带带回的原图字节。
+/// 字节写入图片字节缓存——缩略图与空间探针都要先拿到完整文件，
+/// 灯箱随后取上限图 / 原图不再重复读盘或下载（本地探针只读文件头、不入缓存）。
+#[derive(Clone, Debug)]
+pub(crate) struct ImageLoad {
+    pub image: PluginImage,
+    pub vault_bytes: Option<(String, std::sync::Arc<Vec<u8>>)>,
+}
+
+impl ImageLoad {
+    fn plain(image: PluginImage) -> Self {
+        ImageLoad { image, vault_bytes: None }
+    }
+
+    fn vault(image: PluginImage, path: String, bytes: std::sync::Arc<Vec<u8>>) -> Self {
+        ImageLoad { image, vault_bytes: Some((path, bytes)) }
+    }
+}
+
 #[derive(Debug, Clone)]
 enum Message {
     WindowOpened(window::Id),
@@ -455,7 +474,7 @@ enum Message {
     /// 面板内容槽切换视图（`None` = 该面板自己的默认视图）。
     PanelViewSelect { target: String, view: Option<String> },
     /// 图片落地（gen 守卫 + 内容键；失败按退避重试，用尽次数回落占位）。
-    ImageLoaded(u64, String, Result<PluginImage, String>),
+    ImageLoaded(u64, String, Result<ImageLoad, String>),
     /// 一次失败重试到点（gen 守卫）：重扫插件界面里仍缺句柄的来源。
     ImageRetryDue(u64),
     /// 取色器（表格字色/底色、文件夹图标色、协作展示色、插件取色）。
@@ -1218,12 +1237,24 @@ pub(crate) const WHEEL_LINE_PX: f32 = 40.0;
 pub type ImageHandles = HashMap<String, iced::widget::image::Handle>;
 
 /// 图片字节的固有像素尺寸（解码失败 = 0×0，调用方按「尺寸未知」处理）。
+/// 图片头尺寸（EXIF 旋转标记已换算成摆正后的宽高，与渲染层解码原图、缩略图的口径一致）。
 pub(crate) fn image_dimensions(bytes: &[u8]) -> (u32, u32) {
-    image::ImageReader::new(std::io::Cursor::new(bytes))
-        .with_guessed_format()
-        .ok()
-        .and_then(|r| r.into_dimensions().ok())
-        .unwrap_or((0, 0))
+    use image::{ImageDecoder, metadata::Orientation};
+    let Ok(reader) = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format()
+    else {
+        return (0, 0);
+    };
+    let Ok(mut decoder) = reader.into_decoder() else { return (0, 0) };
+    let (w, h) = decoder.dimensions();
+    // 旋转 90/270 与带翻转的旋转都交换宽高（EXIF 方向 5–8）
+    let swap = matches!(
+        decoder.orientation().unwrap_or(Orientation::NoTransforms),
+        Orientation::Rotate90
+            | Orientation::Rotate270
+            | Orientation::Rotate90FlipH
+            | Orientation::Rotate270FlipH
+    );
+    if swap { (h, w) } else { (w, h) }
 }
 
 pub struct App {
@@ -1433,6 +1464,11 @@ pub struct App {
     pub note_images: ImageHandles,
     /// 图片像素尺寸（key 同 `note_images`）：自绘贴片按 contain / cover 摆放要用原图长宽。
     pub note_image_sizes: HashMap<String, (u32, u32)>,
+
+    /// 仓库原图字节缓存（key = 仓库相对路径）：缩略图 / 探针载入顺带回填，灯箱的上限图与
+    /// 原图取数不再重复读盘 / 下载。FIFO 限量——原图单份可到几十 MB。
+    plugin_image_bytes: HashMap<String, std::sync::Arc<Vec<u8>>>,
+    plugin_image_bytes_order: Vec<String>,
 
     /// 图片句柄代数：句柄入表或整表清空即自增，自绘贴片据此作废已缓存的几何。
     pub note_image_epoch: u64,
@@ -1733,6 +1769,8 @@ impl App {
                 note_image_epoch: 0,
                 note_images_inflight: HashSet::new(),
                 note_images_failed: HashMap::new(),
+                plugin_image_bytes: HashMap::new(),
+                plugin_image_bytes_order: Vec::new(),
                 file_sort: "mtime-desc".to_string(),
                 exclude_folders: Vec::new(),
                 attachment_folder: None,
@@ -2467,10 +2505,14 @@ impl App {
                     return Task::none();
                 }
                 match result {
-                    Ok(image) => {
+                    Ok(load) => {
                         self.note_images_failed.remove(&key);
+                        // 仓库来源顺带带回的原图字节入缓存：灯箱取数不再重复读盘 / 下载
+                        if let Some((path, bytes)) = load.vault_bytes {
+                            self.cache_image_bytes(path, bytes);
+                        }
                         // 画布与图片贴片的 contain / cover 需要固有像素尺寸，装载点顺手记下
-                        let (handle, size) = match image {
+                        let (handle, size) = match load.image {
                             PluginImage::Bytes(bytes) => {
                                 let size = image_dimensions(&bytes);
                                 (iced::widget::image::Handle::from_bytes(bytes), size)
@@ -5113,6 +5155,7 @@ impl App {
         self.note_image_sizes.clear();
         self.note_images_inflight.clear();
         self.note_images_failed.clear();
+        self.clear_image_bytes();
         self.note_image_epoch = self.note_image_epoch.wrapping_add(1);
         // 仓库级配置会话态随切仓清空（VaultMetaLoaded 落地后回填）
         self.exclude_folders.clear();
@@ -6303,6 +6346,30 @@ impl App {
             None => true,
             Some(retry) => !retry.exhausted() && Instant::now() >= retry.retry_at,
         }
+    }
+
+    /// 原图字节入缓存：重复路径只更新字节，超限按最早写入逐出（FIFO）。
+    pub(crate) fn cache_image_bytes(&mut self, path: String, bytes: std::sync::Arc<Vec<u8>>) {
+        if !self.plugin_image_bytes.contains_key(&path) {
+            self.plugin_image_bytes_order.push(path.clone());
+        }
+        self.plugin_image_bytes.insert(path, bytes);
+        const IMAGE_BYTES_LIMIT: usize = 4;
+        while self.plugin_image_bytes_order.len() > IMAGE_BYTES_LIMIT {
+            let evicted = self.plugin_image_bytes_order.remove(0);
+            self.plugin_image_bytes.remove(&evicted);
+        }
+    }
+
+    /// 原图字节缓存命中（key = 仓库相对路径）。
+    pub(crate) fn cached_image_bytes(&self, path: &str) -> Option<std::sync::Arc<Vec<u8>>> {
+        self.plugin_image_bytes.get(path).cloned()
+    }
+
+    /// 整表作废原图字节缓存：换容器后同一路径指向别的文件。
+    pub(crate) fn clear_image_bytes(&mut self) {
+        self.plugin_image_bytes.clear();
+        self.plugin_image_bytes_order.clear();
     }
 
     /// 读取仓库元数据（仓库配置 / 提示词标记 / 文件夹颜色；缺省回落不阻塞）。

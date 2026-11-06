@@ -18,8 +18,8 @@ pub type RowCache = Arc<Mutex<Vec<(String, f32)>>>;
 
 /// 正文源码行高倍数（与阅读面同一口径）。
 const PROSE_LINE: f32 = 1.625;
-/// 列表嵌套一级的水平缩进（与 Markdown 版面的标号列同宽）。
-const LIST_STEP: f32 = crate::model::LIST_TEXT_X;
+/// 列表嵌套一级的水平缩进：容器子块（松散项续段等）按层级栅格；列表项本体按源码实测。
+const LIST_STEP: f32 = 20.0;
 /// 远端光标名签的字号 / 水平内边距 / 高度。
 const TAG_SIZE: f32 = 10.0;
 const TAG_PAD_X: f32 = 4.0;
@@ -594,12 +594,14 @@ fn unit_rows(
         }
         let source = &body[info.from..info.to];
         let draw = |ui: &mut Ui<'_, '_>| match info.kind {
-            UnitKind::Item { depth, ordinal } => {
-                // 首行缩进由层级缩进代替，避免 4 空格以上被 Markdown 当成代码块
+            UnitKind::Item { ordinal, .. } => {
+                // 首行缩进剥给 spacer（剥掉后才不会被 Markdown 当成代码块），宽度按源码行首
+                // 空白实测——SDK 标记列同样实测，富渲染正文列与揭示态源码逐点对齐
                 let shown = source.trim_start_matches([' ', '\t']);
-                let indent = depth as f32 * LIST_STEP;
+                let ws_len = source.len() - shown.len();
+                let indent = ui.text_width(&source[..ws_len], TextRole::Body);
                 with_cursors(ui, model, index, Some(unit), indent, line, true, |ui| {
-                    if depth == 0 {
+                    if indent <= 0.0 {
                         ui.markdown_list_item_named(&id, shown, ordinal, Vec::new());
                     } else {
                         ui.row(0.0, |row| {
@@ -698,7 +700,9 @@ fn with_cursors(
             layer.canvas(need, move |canvas| {
                 let area = canvas.area();
                 for (name, color, spot) in &spots {
-                    let x = area.x + indent + spot.base_x + canvas.measure(&spot.line_prefix, size).0;
+                    let marker_w = canvas.measure(&spot.marker, size).0;
+                    let x =
+                        area.x + indent + spot.base_x + marker_w + canvas.measure(&spot.line_prefix, size).0;
                     let y = area.y + spot.line as f32 * line;
                     canvas.draw(DrawCommand::Rect {
                         x,

@@ -1,6 +1,7 @@
 //! 文本文档协作在场：光标 / 选区经瞬时通道上行，远端状态解析为可绘制的远端光标。
 //! 载荷只带 UTF-16 偏移与身份色（不含正文），按文件过滤；换文件靠 state 变化生效，不发离场帧。
 
+use std::collections::HashMap;
 use std::time::Instant;
 
 use crate::collab::ephemeral::EphemeralChannel;
@@ -8,9 +9,6 @@ use serde_json::{json, Value};
 
 /// 在场帧通道名（瞬时档：不入缓存、不占序号，断线期间丢失由保活补上）。
 pub const CHANNEL: &str = "doc-presence";
-
-/// 对端没带身份色时的回落。
-const FALLBACK_COLOR: &str = "#9aa0a6";
 
 /// 本端身份（名签与成员色由空间名册给出；通道层不感知）。
 pub struct Identity<'a> {
@@ -34,6 +32,8 @@ pub struct DocPresenceChannel {
     sent: Option<(u32, u32)>,
     /// 已写入通道状态的身份（昵称 / 成员色）：设置里改名或换色也要让对端看到。
     sent_identity: Option<(String, String)>,
+    /// 宿主名册给出的对端身份（peer id → 昵称 / 成员色，各自可缺）：与表格 / 画布同源，跨面同色。
+    roster: HashMap<String, (Option<String>, Option<String>)>,
     /// 当前文件可绘制的远端光标（事件与 tick 驱动刷新，绘制只读）。
     remote: Vec<RemoteCaret>,
 }
@@ -45,6 +45,7 @@ impl DocPresenceChannel {
             file: None,
             sent: None,
             sent_identity: None,
+            roster: HashMap::new(),
             remote: Vec::new(),
         }
     }
@@ -117,7 +118,25 @@ impl DocPresenceChannel {
     }
 
     /// 合入他人帧并刷新视图；返回远端集合是否变化。
-    pub fn apply(&mut self, peer_id: &str, payload: &Value, now: Instant) -> bool {
+    /// `peer_name` / `peer_color` 是宿主按空间名册补的对面身份（None = 名册没给这项）。
+    pub fn apply(
+        &mut self,
+        peer_id: &str,
+        peer_name: Option<&str>,
+        peer_color: Option<&str>,
+        payload: &Value,
+        now: Instant,
+    ) -> bool {
+        let known = self.roster.contains_key(peer_id);
+        if known || peer_name.is_some() || peer_color.is_some() {
+            let entry = self.roster.entry(peer_id.to_owned()).or_default();
+            if peer_name.is_some() {
+                entry.0 = peer_name.map(str::to_owned);
+            }
+            if peer_color.is_some() {
+                entry.1 = peer_color.map(str::to_owned);
+            }
+        }
         if !self.channel.apply_remote(peer_id, payload, now) {
             return false;
         }
@@ -144,6 +163,7 @@ impl DocPresenceChannel {
     }
 
     /// 重新解析远端条目（超时剔除也在这里发生）：只保留与当前文件匹配的条目。
+    /// 身份取名册优先（跨面同色），帧内自报次之，最后按连接 id 取稳定色。
     pub fn refresh(&mut self, now: Instant) {
         let Some(file) = self.file.clone() else {
             self.remote.clear();
@@ -159,17 +179,30 @@ impl DocPresenceChannel {
                     return None;
                 }
                 let user = state.get("user");
-                let name = user
-                    .and_then(|u| u.get("name"))
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned();
-                let color = user
-                    .and_then(|u| u.get("color"))
-                    .and_then(Value::as_str)
-                    .filter(|c| !c.is_empty())
-                    .unwrap_or(FALLBACK_COLOR)
-                    .to_owned();
+                let roster = self.roster.get(&entry.peer_id);
+                let name = roster
+                    .and_then(|(name, _)| name.as_deref())
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_owned)
+                    .or_else(|| {
+                        user
+                            .and_then(|u| u.get("name"))
+                            .and_then(Value::as_str)
+                            .map(str::to_owned)
+                    })
+                    .unwrap_or_default();
+                let color = roster
+                    .and_then(|(_, color)| color.as_deref())
+                    .filter(|color| !color.is_empty())
+                    .map(str::to_owned)
+                    .or_else(|| {
+                        user
+                            .and_then(|u| u.get("color"))
+                            .and_then(Value::as_str)
+                            .filter(|c| !c.is_empty())
+                            .map(str::to_owned)
+                    })
+                    .unwrap_or_else(|| fallback_color(&entry.peer_id).to_owned());
                 let unit = |key: &str| {
                     state
                         .get("selection")
@@ -195,6 +228,7 @@ impl DocPresenceChannel {
         let mut changed = false;
         for peer_id in stale {
             changed |= self.channel.drop_peer(&peer_id);
+            self.roster.remove(&peer_id);
         }
         if changed {
             self.refresh(now);
@@ -205,8 +239,19 @@ impl DocPresenceChannel {
     /// 断开 / 离开空间：清远端（本端状态保留，重连后由 [`resend`](Self::resend) 重发）。
     pub fn clear_remotes(&mut self) {
         self.channel.clear_remotes();
+        self.roster.clear();
         self.remote.clear();
     }
+}
+
+/// 名册与帧内都没给色时按连接 id 取稳定色：同一连接恒同色，不同协作者不全是一种蓝。
+fn fallback_color(peer_id: &str) -> &'static str {
+    const COLORS: [&str; 6] =
+        ["#61afef", "#ef8f61", "#8fc977", "#c97fd0", "#efc961", "#77c9c9"];
+    let hash = peer_id
+        .bytes()
+        .fold(0usize, |acc, byte| acc.wrapping_mul(31).wrapping_add(byte as usize));
+    COLORS[hash % COLORS.len()]
 }
 
 impl Default for DocPresenceChannel {
@@ -267,11 +312,11 @@ mod tests {
         let renamed = Identity { name: "爱丽丝2", color: "#e0533d" };
         // 身份变化也产帧（限频窗口外）
         let renamed_frame = ch
-            .update(now + Duration::from_millis(60), &renamed, "a.md", Some((3, 7)))
+            .update(now + Duration::from_millis(300), &renamed, "a.md", Some((3, 7)))
             .expect("改名应对端可见");
         assert_eq!(renamed_frame["state"]["user"]["name"], "爱丽丝2");
         assert!(ch
-            .update(now + Duration::from_millis(120), &renamed, "a.md", Some((3, 7)))
+            .update(now + Duration::from_millis(350), &renamed, "a.md", Some((3, 7)))
             .is_none());
     }
 
@@ -280,11 +325,17 @@ mod tests {
         let mut ch = DocPresenceChannel::new();
         let now = Instant::now();
         ch.enter(now, &identity(), "notes/a.md", Some((3, 7))).expect("进入");
-        ch.apply("p1", &remote_payload(9, 1, "notes/a.md", json!({ "anchor": 1, "head": 2 })), now);
+        ch.apply(
+            "p1",
+            None,
+            None,
+            &remote_payload(9, 1, "notes/a.md", json!({ "anchor": 1, "head": 2 })),
+            now,
+        );
         assert_eq!(ch.remote().len(), 1);
 
         let moved = ch
-            .relocate(now + Duration::from_millis(60), &identity(), "notes/a.md", "笔记/a.md")
+            .relocate(now + Duration::from_millis(300), &identity(), "notes/a.md", "笔记/a.md")
             .expect("改名应重发在场状态");
         assert_eq!(moved["state"]["file"], "笔记/a.md");
         assert_eq!(moved["state"]["selection"]["anchor"], 3, "选区偏移与路径无关");
@@ -292,7 +343,7 @@ mod tests {
         assert!(ch.remote().is_empty(), "旧路径条目不属新视图");
         // 非本文件不改写
         assert!(ch
-            .relocate(now + Duration::from_millis(120), &identity(), "other.md", "x.md")
+            .relocate(now + Duration::from_millis(350), &identity(), "other.md", "x.md")
             .is_none());
         assert_eq!(ch.file(), Some("笔记/a.md"));
     }
@@ -309,7 +360,7 @@ mod tests {
             "state": { "file": "a.md", "user": { "name": "鲍勃", "color": "#3d7be0" },
                        "selection": { "anchor": 70_000, "head": 70_010 } },
         });
-        other.apply("p1", &payload, now);
+        other.apply("p1", None, None, &payload, now);
         let remote = other.remote();
         assert_eq!(remote[0].anchor, Some(70_000));
         assert_eq!(remote[0].head, Some(70_010));
@@ -320,13 +371,19 @@ mod tests {
         let mut ch = DocPresenceChannel::new();
         let now = Instant::now();
         ch.enter(now, &identity(), "a.md", None).expect("进入");
-        ch.apply("p1", &remote_payload(9, 1, "a.md", json!({ "anchor": 1, "head": 2 })), now);
+        ch.apply(
+            "p1",
+            None,
+            None,
+            &remote_payload(9, 1, "a.md", json!({ "anchor": 1, "head": 2 })),
+            now,
+        );
         assert_eq!(ch.remote().len(), 1);
 
         // 换文件落在限频窗口内：只记录，最新一份由 flush 补发
         assert!(ch.enter(now, &identity(), "b.md", None).is_none());
         assert!(ch.remote().is_empty(), "换文件后不保留旧文件光标");
-        let swapped = ch.flush(now + Duration::from_millis(60)).expect("到期应补发新文件状态");
+        let swapped = ch.flush(now + Duration::from_millis(300)).expect("到期应补发新文件状态");
         assert_eq!(swapped["state"]["file"], "b.md");
 
         let leave = ch.leave(now).expect("在场应产离场帧");
@@ -340,10 +397,16 @@ mod tests {
         let now = Instant::now();
         ch.enter(now, &identity(), "a.md", None).expect("进入");
 
-        ch.apply("p1", &remote_payload(9, 1, "b.md", json!({ "anchor": 1, "head": 2 })), now);
+        ch.apply("p1", None, None, &remote_payload(9, 1, "b.md", json!({ "anchor": 1, "head": 2 })), now);
         assert!(ch.remote().is_empty(), "别的文件不画");
 
-        ch.apply("p1", &remote_payload(9, 2, "a.md", Value::Null), now + Duration::from_millis(60));
+        ch.apply(
+            "p1",
+            None,
+            None,
+            &remote_payload(9, 2, "a.md", Value::Null),
+            now + Duration::from_millis(300),
+        );
         let remote = ch.remote();
         assert_eq!(remote.len(), 1);
         assert_eq!(remote[0].name, "鲍勃");
@@ -351,24 +414,57 @@ mod tests {
     }
 
     #[test]
-    fn 远端颜色缺失回落_对端断链摘除_超时剔除() {
+    fn 名册色优先_帧内色次之_对端断链摘除_超时剔除() {
         let mut ch = DocPresenceChannel::new();
         let now = Instant::now();
         ch.enter(now, &identity(), "a.md", None).expect("进入");
-        let no_color = json!({
-            "clientId": 7, "clock": 1,
-            "state": { "file": "a.md", "user": { "name": "鲍勃" },
-                       "selection": { "anchor": 1, "head": 2 } },
-        });
-        ch.apply("p1", &no_color, now);
-        assert_eq!(ch.remote()[0].color, FALLBACK_COLOR);
+        // 名册身份压过帧内自报：同一成员跨插件同色
+        ch.apply(
+            "p1",
+            Some("林"),
+            Some("#123456"),
+            &remote_payload(9, 1, "a.md", json!({ "anchor": 1, "head": 2 })),
+            now,
+        );
+        fn caret<'a>(remote: &'a [RemoteCaret], name: &str) -> &'a RemoteCaret {
+            remote.iter().find(|caret| caret.name == name).expect("对端条目")
+        }
+        assert_eq!(caret(&ch.remote(), "林").color, "#123456");
 
-        // 名册里没有 p1：对端条目立即摘除（不必等超时）
+        // 名册没给色：回落帧内色
+        ch.apply(
+            "p2",
+            None,
+            None,
+            &json!({
+                "clientId": 7, "clock": 1,
+                "state": { "file": "a.md", "user": { "name": "鲍勃", "color": "#3d7be0" },
+                           "selection": { "anchor": 1, "head": 2 } },
+            }),
+            now,
+        );
+        assert_eq!(caret(&ch.remote(), "鲍勃").color, "#3d7be0");
+
+        // 名册与帧内都没色：按连接 id 取稳定色
+        ch.apply(
+            "p3",
+            None,
+            None,
+            &json!({
+                "clientId": 8, "clock": 1,
+                "state": { "file": "a.md", "user": { "name": "卡尔" },
+                           "selection": { "anchor": 1, "head": 2 } },
+            }),
+            now,
+        );
+        assert_eq!(caret(&ch.remote(), "卡尔").color, fallback_color("p3"));
+
+        // 名册里消失的对端立即摘除（不必等超时）
         assert!(ch.retain_roster(&[]));
         assert!(ch.remote().is_empty());
         assert!(!ch.retain_roster(&[]), "已摘除的连接不再产生变化");
 
-        ch.apply("p1", &remote_payload(9, 1, "a.md", Value::Null), now);
+        ch.apply("p1", None, None, &remote_payload(9, 1, "a.md", Value::Null), now);
         assert_eq!(ch.remote().len(), 1);
         ch.refresh(now + Duration::from_secs(31));
         assert!(ch.remote().is_empty(), "30s 无更新应剔除");

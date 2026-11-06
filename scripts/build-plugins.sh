@@ -26,10 +26,17 @@ done
 "${cargo_cmd[@]}"
 
 mkdir -p "$dest"
+# 构建产物目录交给 cargo 解析（含环境变量与各层配置的 target-dir）；
+# metadata 不可用时回落仓库内 target。仓库路径含非 ASCII 字符时 MSVC 编 C 依赖会失败，
+# 用户可在 cargo 配置里把产物指到 ASCII 路径。
+bin_root="$(cargo metadata --format-version 1 --no-deps 2>/dev/null |
+  grep -o '"target_directory":"[^"]*"' | head -n1 | cut -d'"' -f4 | sed 's/\\\\/\\/g')"
+bin_root="${bin_root:-$repo_root/target}"
 for manifest in "${manifests[@]}"; do
   id="$(sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$manifest" | head -n1)"
   [ -n "$id" ] || { echo "错误：$manifest 未读出 id" >&2; exit 1; }
-  if [ "$profile" = "release" ]; then bin_dir="target/release"; else bin_dir="target/debug"; fi
+  if [ "$profile" = "release" ]; then profile_dir="release"; else profile_dir="debug"; fi
+  bin_dir="$bin_root/$profile_dir"
   case "$(uname -s)" in
     Linux*) entry="$(sed -n 's/.*"linux"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$manifest" | head -n1)" ;;
     MINGW*|MSYS*|CYGWIN*) entry="$(sed -n 's/.*"windows"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$manifest" | head -n1)" ;;

@@ -357,7 +357,8 @@ fn serve(runtime: Arc<PluginRuntime>, state: Arc<HostState>, vault: PathBuf) {
                 }
                 HostRequest::CollabSend { request_id, params, .. } => {
                     state.collabs.lock().unwrap().push(params.payload);
-                    reply(&runtime, request_id, json!({ "queued": false }));
+                    // 已连接语义：入队成功插件才记「已发」，限频用例依赖这个回执
+                    reply(&runtime, request_id, json!({ "queued": true }));
                 }
                 other => {
                     // 未接线时记下来：等待超时会把缺少的请求一并点名，不误报成时序问题

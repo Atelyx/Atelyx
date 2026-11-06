@@ -10,6 +10,9 @@ use crate::model::{Lightbox, Point, Rect, Session, Size};
 pub const HEADER_INSET: f32 = 30.0;
 /// 显示区内边距（px）。
 const INSET: f32 = 48.0;
+/// 上限图边长：灯箱先按它出图（秒开），原图由宿主后台解码就绪后盖上（渐进升级）。
+/// 面板显示通常只需约千像素宽，2048 已远超屏显需要；原图期间放大到高倍数会短暂偏糊。
+const PREVIEW_MAX_EDGE: u32 = 2048;
 /// 未声明排版口径时帧文本的相对行高（与宿主缺省一致）。
 const TEXT_LINE: f32 = 1.2;
 
@@ -90,8 +93,24 @@ pub fn popup_frame(session: &Session, size: Size) -> Option<SurfacePopup> {
     } else {
         match current_image(session, lightbox) {
             Some(rel) => {
+                // 渐进式：上限图先出（秒开），原图就绪后画在其上自然盖掉；
+                // 未载入的句柄宿主直接跳过该条指令，两层同一 Contain 矩形无缝衔接
                 commands.push(DrawCommand::Image {
-                    source: atelyx_plugin_protocol::paint::ImageSource::Vault { path: rel, max_edge: None },
+                    source: atelyx_plugin_protocol::paint::ImageSource::Vault {
+                        path: rel.clone(),
+                        max_edge: Some(PREVIEW_MAX_EDGE),
+                    },
+                    x: display.x,
+                    y: display.y,
+                    w: display.w,
+                    h: display.h,
+                    fit: Some(ImageFit::Contain),
+                });
+                commands.push(DrawCommand::Image {
+                    source: atelyx_plugin_protocol::paint::ImageSource::Vault {
+                        path: rel,
+                        max_edge: None,
+                    },
                     x: display.x,
                     y: display.y,
                     w: display.w,
@@ -168,6 +187,23 @@ pub fn popup_frame(session: &Session, size: Size) -> Option<SurfacePopup> {
     })
 }
 
+/// 图片实际绘制矩形：Contain 适配居中于 `display` 内（按探测到的原图比例）。
+/// 未探测到尺寸（仍在载入 / 失败）退回整个显示框——点外关闭退化为按显示框判定。
+pub fn image_rect(display: Rect, source: (u32, u32)) -> Rect {
+    if source.0 == 0 || source.1 == 0 {
+        return display;
+    }
+    let scale = (display.w / source.0 as f32).min(display.h / source.1 as f32).max(0.0);
+    let w = source.0 as f32 * scale;
+    let h = source.1 as f32 * scale;
+    Rect::new(
+        display.x + (display.w - w) / 2.0,
+        display.y + (display.h - h) / 2.0,
+        w,
+        h,
+    )
+}
+
 /// 图片显示区内水平居中、垂直居中的提示文字（与图片同区，不压到头部行）。
 fn centered_note(size: Size, content: &str, color: ColorToken) -> DrawCommand {
     let font = crate::theme::font_caption();
@@ -233,6 +269,8 @@ pub fn navigate(lightbox: &mut Lightbox, count: usize, dir: i32) {
     lightbox.reset_zoom();
     lightbox.loading = true;
     lightbox.error = None;
+    // 上一张的尺寸不再是这一张的：未探测前点外关闭退回按显示框判定
+    lightbox.source = (0, 0);
 }
 
 /// 滚轮缩放（以光标为锚）：协议里 `delta_y` 为正 = 向下滚 = 缩小。
@@ -342,5 +380,17 @@ mod tests {
         }
         let popup = popup_frame(&session, session.view.canvas_size).expect("应有浮层");
         assert!(popup.commands.iter().any(|command| matches!(command, DrawCommand::Image { .. })));
+    }
+
+    /// Contain 留白按原图比例收缩：竖图在宽框里两侧留白不算图内，点它应能退出。
+    #[test]
+    fn image_rect_shrinks_to_contain_fit() {
+        let display = super::Rect::new(0.0, 0.0, 400.0, 100.0);
+        let rect = super::image_rect(display, (100, 100));
+        assert_eq!(rect, super::Rect::new(150.0, 0.0, 100.0, 100.0));
+        assert!(!rect.contains(50.0, 50.0), "左留白不在图内");
+        assert!(rect.contains(200.0, 50.0));
+        // 未探测到尺寸退回整个显示框
+        assert_eq!(super::image_rect(display, (0, 0)), display);
     }
 }

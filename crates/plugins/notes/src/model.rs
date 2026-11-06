@@ -116,20 +116,20 @@ pub struct ItemInfo {
     pub kind: UnitKind,
 }
 
-/// 远端光标在某揭示单元内的位置：行序 + 装饰位移 + 行前文本（绘制时量宽）。
+/// 远端光标在某揭示单元内的位置：行序 + 装饰位移 + 标记串与行前文本（绘制时量宽）。
 #[derive(Clone, Debug, PartialEq)]
 pub struct CursorSpot {
     pub block: usize,
     pub unit: Option<usize>,
     pub line: usize,
-    /// 该行文字在单元左缘之后的位移（列表标记列 / 引用竖条留白），不含嵌套缩进。
+    /// 该行文字在单元左缘之后的位移（引用竖条留白等，不含嵌套缩进与列表标记列）。
     pub base_x: f32,
+    /// 渲染态下不进排版、画在正文列前的标记串（列表标记 / 任务框）：宽度由绘制时实测。
+    pub marker: String,
     /// 去掉列表标记与引用前缀后的行前文本。
     pub line_prefix: String,
 }
 
-/// 列表项文字相对单元左缘的位移（与 Markdown 渲染的标记列同口径）。
-pub const LIST_TEXT_X: f32 = 20.0;
 /// 引用块文字相对单元左缘的位移（与 Markdown 渲染的引用留白同口径）。
 pub const QUOTE_TEXT_X: f32 = 12.0;
 
@@ -169,6 +169,9 @@ pub struct NoteModel {
     pub pending_rename: Option<String>,
     /// 最近一次按下位置（面本地像素）：类型菜单这类就地弹层按它定位。
     pub pointer: (f32, f32),
+    /// 预览编辑档按在正文单元上的待揭示（命中 id + 按下位置）：抬起时位移小于阈值才揭示，
+    /// 按住拖动是跨块选区——立即揭示会把 markdown 块换成输入面，选区随之销毁。
+    pub reveal_pending: Option<(String, (f32, f32))>,
     /// 正文图片的探测结果（路径 → 原图像素尺寸；`None` = 不能解码）：失败的在只读面回落替代文字。
     pub image_probe: HashMap<String, Option<(u32, u32)>>,
     /// 仓库文件清单（`[[` 候选与内链解析用；宿主清单重建时重取）。
@@ -214,6 +217,7 @@ impl NoteModel {
         self.selection = None;
         self.active_block = None;
         self.active_item = None;
+        self.reveal_pending = None;
         self.renaming = None;
         self.pending_rename = None;
         self.menu_open = false;
@@ -241,6 +245,7 @@ impl NoteModel {
         self.selection = None;
         self.active_block = None;
         self.active_item = None;
+        self.reveal_pending = None;
         self.blocks.clear();
         self.image_probe.clear();
         self.wiki = None;
@@ -902,15 +907,26 @@ fn spot_of(
     let line = text.matches('\n').count();
     let line_start = text.rfind('\n').map_or(0, |index| index + 1);
     let raw = &text[line_start..];
-    let (base_x, line_prefix) = if rendered {
+    let (base_x, marker, line_prefix) = if rendered {
         match kind {
-            UnitKind::Item { .. } => (LIST_TEXT_X, item_prefix(body, from + line_start, raw)),
-            UnitKind::Block { .. } => block_line_prefix(body, from + line_start, raw),
+            // 渲染态：标记串画在正文列前由绘制时实测（与富渲染标记列同宽）；
+            // 续行同样落在首行标记列之后（悬挂缩进），标记取项首行
+            UnitKind::Item { .. } => {
+                let first = line_start_line(body, from);
+                let ws_len = first.len() - first.trim_start_matches([' ', '\t']).len();
+                let marker_end = crate::edit::list_marker_end(first).unwrap_or(0);
+                let marker = first[ws_len.min(marker_end)..marker_end].to_string();
+                (0.0, marker, item_prefix(body, from + line_start, raw))
+            }
+            UnitKind::Block { .. } => {
+                let (base, marker, prefix) = block_line_prefix(body, from + line_start, raw);
+                (base, marker, prefix)
+            }
         }
     } else {
-        (0.0, raw.to_string())
+        (0.0, String::new(), raw.to_string())
     };
-    CursorSpot { block, unit, line, base_x, line_prefix }
+    CursorSpot { block, unit, line, base_x, marker, line_prefix }
 }
 
 /// 列表项的行前文本：首行的标记（`- ` / `1. ` / 任务框）不参与量宽，落在标记内时贴住内容起点；
@@ -924,17 +940,24 @@ fn item_prefix(body: &str, line_abs_start: usize, raw: &str) -> String {
     line[marker_end..raw.len()].trim_start_matches([' ', '\t']).to_string()
 }
 
-/// 引用容器的行前文本：剥掉逐层 `>` 标记，文字位移按引用竖条的留白算；
-/// 引用内再起列表时，列表标记同样不参与量宽，落在标记内贴住内容起点。
-fn block_line_prefix(body: &str, line_abs_start: usize, raw: &str) -> (f32, String) {
+/// 引用容器的（位移，标记串，行前文本）：剥掉逐层 `>` 标记，文字位移按引用竖条的留白算；
+/// 引用内再起列表时，列表标记不进排版、由绘制时实测，落在标记内贴住内容起点。
+fn block_line_prefix(body: &str, line_abs_start: usize, raw: &str) -> (f32, String, String) {
+    // `quote_parts` 已剥掉行首空白与 `>` 层级：标记串从剥净后的行首取到标记结束
     let (levels, line_text) = quote_parts(line_start_line(body, line_abs_start));
     let marker_end = crate::edit::list_marker_end(line_text).unwrap_or(0);
-    let base = levels as f32 * QUOTE_TEXT_X + if marker_end > 0 { LIST_TEXT_X } else { 0.0 };
+    let marker = if marker_end > 0 {
+        line_text[..marker_end].to_string()
+    } else {
+        String::new()
+    };
     let (_, raw_text) = quote_parts(raw);
-    if raw_text.len() <= marker_end {
-        return (base, String::new());
-    }
-    (base, raw_text[marker_end..].trim_start_matches([' ', '\t']).to_string())
+    let prefix = if raw_text.len() <= marker_end {
+        String::new()
+    } else {
+        raw_text[marker_end..].trim_start_matches([' ', '\t']).to_string()
+    };
+    (levels as f32 * QUOTE_TEXT_X, marker, prefix)
 }
 
 /// 剥掉行首空白与逐层 `>` 标记。
@@ -1091,7 +1114,8 @@ mod tests {
         assert_eq!(text, "> 甲\n>\n> - 改\n");
     }
 
-    /// 远端光标按所在揭示单元的行首换算：返回块 / 项、行序、装饰位移与行前文本。
+    /// 远端光标按所在揭示单元的行首换算：返回块 / 项、行序、装饰位移、标记串与行前文本。
+    /// 标记串由绘制时实测（与富渲染标记列同源），这里只验它被剥出来。
     #[test]
     fn remote_cursor_maps_to_unit_line_and_prefix() {
         let mut model = NoteModel::default();
@@ -1100,10 +1124,12 @@ mod tests {
         let spot = model.cursor_spot(model.body_start + line).expect("落在嵌套项");
         assert_eq!((spot.block, spot.unit, spot.line), (1, Some(1), 0));
         assert_eq!(spot.line_prefix, "", "列表标记与缩进都不参与绘制");
-        assert_eq!(spot.base_x, LIST_TEXT_X, "文字从标记列之后起算");
+        assert_eq!(spot.base_x, 0.0, "缩进由绘制侧按源码实测");
+        assert_eq!(spot.marker, "- ", "标记串取项首行的标记与空白");
         // 活动编辑框画的是源码：前缀含缩进与标记，不做渲染位移
         let raw = model.source_cursor_spot(model.body_start + line).expect("源码落点");
         assert_eq!((raw.base_x, raw.line_prefix.as_str()), (0.0, "  - "));
+        assert!(raw.marker.is_empty());
 
         model.load("a.md".into(), "甲\n乙".into(), true);
         let line = model.body().find('乙').expect("找到第二行");
@@ -1117,12 +1143,13 @@ mod tests {
         assert_eq!(spot.line_prefix, "", "引用标记不上屏");
         assert_eq!(spot.base_x, QUOTE_TEXT_X);
 
-        // 引用内列表：引用留白之后再让出列表标记列
+        // 引用内列表：引用留白之后再让出列表标记串（绘制时实测）
         model.load("a.md".into(), "> - 甲\n".into(), true);
         let line = model.body().find('甲').expect("引用内列表项");
         let spot = model.cursor_spot(model.body_start + line).expect("落在引用内列表");
         assert_eq!(spot.line_prefix, "", "列表标记不上屏");
-        assert_eq!(spot.base_x, QUOTE_TEXT_X + LIST_TEXT_X);
+        assert_eq!(spot.base_x, QUOTE_TEXT_X);
+        assert_eq!(spot.marker, "- ");
     }
 
     /// 图片尺寸声明按 `|W` / `|WxH` 记入模型：宽高分开保存，缺省为 None。

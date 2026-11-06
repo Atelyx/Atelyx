@@ -30,9 +30,9 @@ const CODE_MAX_LINES: usize = 18;
 /// 引用竖条宽度与文字左移量。
 const QUOTE_BAR: f32 = 3.0;
 const QUOTE_PAD: f32 = 12.0;
-/// 列表标记列最小宽度（普通项按源标记实测，任务项的勾选框占此列）。
+/// 引用项回落的层级缩进栅格（普通项的缩进与标记列按源码实测，见 `item_columns`）。
 const LIST_MARKER_W: f32 = 20.0;
-/// 列表标记与内容的间距。
+/// 回落栅格里标记与内容的间距。
 const LIST_GAP: f32 = 6.0;
 /// 代码块头 / 正文内边距、外框圆角与边框宽度。
 const CODE_HEAD_PAD_Y: f32 = 3.0;
@@ -971,9 +971,8 @@ impl Builder<'_> {
         depth: u32,
         previous: &mut usize,
     ) {
-        let indent = depth as f32 * LIST_MARKER_W;
         let spec = FontSpec { size: self.base_size(), weight: None, family: None };
-        let marker_w = self.marker_width(item, ordered, index, spec);
+        let (indent, marker_w) = self.item_columns(item, ordered, index, depth, spec);
         let (content_from, content_to) = item_content_range(self.source, item);
         let raw = &self.source[content_from.min(content_to)..content_to];
         // 引用块里的项带着 `>` 前缀：先去前缀再解析行内（这类项的源偏移只用于绘制）
@@ -987,7 +986,7 @@ impl Builder<'_> {
         let start = self.height;
         let line = self.line_height(spec, PROSE_LINE);
         if item.task {
-            self.task_box(indent, start, line, item.checked);
+            self.task_box(indent, start, line, marker_w, item.checked);
         } else {
             let marker = if ordered { format!("{}.", index + 1) } else { "•".to_string() };
             self.lines.push(Line {
@@ -1014,19 +1013,46 @@ impl Builder<'_> {
         *previous = item.to;
     }
 
-    /// 标记列宽：普通项按源标记实测（不小于最小列宽），任务项固定占一列。
-    fn marker_width(&mut self, item: &MarkdownListItem, ordered: bool, index: usize, spec: FontSpec) -> f32 {
-        if item.task {
-            return LIST_MARKER_W + LIST_GAP;
+    /// 项的水平度量：缩进与标记列都按源码实测——缩进 = 首行行首空白宽，标记列 =
+    /// 标记串（标记符、其后空白与任务框标记）宽。揭示态源码从同一前缀逐字符起排，
+    /// 两侧正文列逐点对齐（不跳变）。引用前缀的项拿不到干净前缀，回落层级栅格。
+    fn item_columns(
+        &mut self,
+        item: &MarkdownListItem,
+        ordered: bool,
+        index: usize,
+        depth: u32,
+        spec: FontSpec,
+    ) -> (f32, f32) {
+        let fallback = |builder: &mut Self| {
+            if item.task {
+                return (depth as f32 * LIST_MARKER_W, LIST_MARKER_W + LIST_GAP);
+            }
+            let marker = if ordered { format!("{}.", index + 1) } else { "•".to_string() };
+            (
+                depth as f32 * LIST_MARKER_W,
+                builder.metrics.width(&marker, spec).max(LIST_MARKER_W - LIST_GAP) + LIST_GAP,
+            )
+        };
+        // 项的源区间从标记起（行首缩进不在区间内）：回溯到所在行行首，缩进从行首实测
+        let from = item.from.min(self.source.len());
+        let (content_from, _) = item_content_range(self.source, item);
+        let line_start = self.source[..from].rfind('\n').map_or(0, |index| index + 1);
+        let first_line = &self.source[line_start..content_from.max(from)];
+        let ws_len = first_line.len() - first_line.trim_start_matches([' ', '\t']).len();
+        if first_line.trim_start().starts_with('>') || ws_len >= first_line.len() {
+            return fallback(self);
         }
-        let marker = if ordered { format!("{}.", index + 1) } else { "•".to_string() };
-        self.metrics.width(&marker, spec).max(LIST_MARKER_W - LIST_GAP) + LIST_GAP
+        let indent = self.metrics.width(&first_line[..ws_len], spec);
+        let marker_w =
+            self.metrics.width(&first_line[ws_len..], spec).max(self.metrics.width("•", spec));
+        (indent, marker_w)
     }
 
-    /// 任务框：勾选态填强调色并画勾线，未勾选只描边。
-    fn task_box(&mut self, x: f32, y: f32, line: f32, checked: bool) {
+    /// 任务框：勾选态填强调色并画勾线，未勾选只描边。勾选框画在标记串起点（源码 `[ ]` 位）。
+    fn task_box(&mut self, x: f32, y: f32, line: f32, marker_w: f32, checked: bool) {
         // 整列都可点：勾选框只有 12px，命中区按标记列与行高放宽
-        self.tasks.push(Rect::new(x, y, LIST_MARKER_W + LIST_GAP, line));
+        self.tasks.push(Rect::new(x, y, marker_w, line));
         let top = y + (line - TASK_BOX) / 2.0;
         let fill = checked.then(|| theme::token(ColorToken::Accent));
         self.shapes.push(Shape {
@@ -1233,59 +1259,142 @@ impl Builder<'_> {
         let cols = header.len().max(rows.iter().map(Vec::len).max().unwrap_or(0)).max(1);
         let spec = FontSpec { size: self.base_size(), weight: None, family: None };
         let line = self.line_height(spec, PROSE_LINE);
-        // 先把每格的排版片段算出来，才能按最宽格定列宽（不换行、不裁字，超宽由块内横向滚动承接）
+        // 先把每格的排版片段算出来，列宽按各列最宽格自适应
         let mut parsed: Vec<(bool, Vec<Vec<Run>>)> = Vec::with_capacity(rows.len() + 1);
         parsed.push((true, self.table_row_runs(header, cols, spec, true)));
         for row in rows {
             parsed.push((false, self.table_row_runs(row, cols, spec, false)));
         }
-        let mut widest = 0.0_f32;
+        let mut natural = vec![0.0_f32; cols];
         for (_, cells) in &parsed {
-            for runs in cells {
-                widest = widest.max(self.runs_width(runs));
+            for (column, runs) in cells.iter().enumerate() {
+                natural[column] = natural[column].max(self.runs_width(runs));
             }
         }
-        let cell_w = (width / cols as f32).max(widest + CELL_PAD_X * 2.0);
+        // 列宽 = 容器宽按各列自然宽占比分摊：内容都放得下时摊满铺平，放不下按比例压缩、
+        // 格内换行承接——表格永不溢出容器、不出横向滚动条
+        let weights: Vec<f32> =
+            natural.iter().map(|w| (w + CELL_PAD_X * 2.0).max(1.0)).collect();
+        let weight_total: f32 = weights.iter().sum();
+        let cell_ws: Vec<f32> =
+            weights.iter().map(|w| width * w / weight_total).collect();
         let start = self.height;
         let mut y = start;
         for (head, cells) in parsed {
-            let row_h = line + CELL_PAD_Y * 2.0;
-            for (column, runs) in cells.into_iter().enumerate() {
-                let x = indent + column as f32 * cell_w;
+            let wrapped: Vec<Vec<Vec<Run>>> = cells
+                .iter()
+                .enumerate()
+                .map(|(column, runs)| {
+                    self.wrap_cell(runs, cell_ws[column] - CELL_PAD_X * 2.0)
+                })
+                .collect();
+            let row_lines = wrapped.iter().map(Vec::len).max().unwrap_or(1);
+            let row_h = row_lines as f32 * line + CELL_PAD_Y * 2.0;
+            for (column, lines) in wrapped.into_iter().enumerate() {
+                let x = indent + cell_ws[..column].iter().sum::<f32>();
+                let cell_w = cell_ws[column];
+                let parts = lines.len();
                 self.shapes.push(Shape {
                     rect: Rect::new(x, y, cell_w, row_h),
                     fill: head.then(|| theme::token(ColorToken::Surface)),
                     stroke: Some((theme::token(ColorToken::Border), TABLE_LINE)),
                     radius: None,
-                    scroll: true,
+                    scroll: false,
                 });
-                let runs = if runs.is_empty() {
-                    Vec::new()
-                } else {
-                    align_runs(
+                let mut line_y = y + CELL_PAD_Y;
+                for (part, runs) in lines.into_iter().enumerate() {
+                    // 首行带走行列分隔；格内续行以空格衔接（折行承接的是同一段散文）
+                    let sep = if part + 1 < parts {
+                        ' '
+                    } else if column + 1 == cols {
+                        '\n'
+                    } else {
+                        '\t'
+                    };
+                    let runs = if runs.is_empty() {
+                        Vec::new()
+                    } else {
+                        align_runs(
+                            runs,
+                            aligns.get(column).map(String::as_str),
+                            cell_w - CELL_PAD_X * 2.0,
+                            self.metrics,
+                            spec,
+                        )
+                    };
+                    self.lines.push(Line {
+                        x: x + CELL_PAD_X,
+                        y: line_y,
+                        height: line,
                         runs,
-                        aligns.get(column).map(String::as_str),
-                        cell_w - CELL_PAD_X * 2.0,
-                        self.metrics,
-                        spec,
-                    )
-                };
-                self.lines.push(Line {
-                    x: x + CELL_PAD_X,
-                    y: y + CELL_PAD_Y,
-                    height: line,
-                    runs,
-                    scroll: true,
-                    // 行内单元格以制表符分隔，行尾换行：整表复制后仍是行列结构
-                    selection_sep: Some(if column + 1 == cols { '\n' } else { '\t' }),
-                    atomic_code: None,
-                });
+                        scroll: false,
+                        selection_sep: Some(sep),
+                        atomic_code: None,
+                    });
+                    line_y += line;
+                }
             }
             y += row_h;
         }
-        self.content_right = self.content_right.max(indent + cell_w * cols as f32);
-        self.expand_scroll(Rect::new(indent, start, width, y - start));
         self.height = y;
+    }
+
+    /// 单元格片段按列宽折行：返回逐行的片段（不落版面，行高由调用方按最大行数决定）。
+    fn wrap_cell(&mut self, runs: &[Run], available: f32) -> Vec<Vec<Run>> {
+        let available = available.max(1.0);
+        let mut lines: Vec<Vec<Run>> = vec![Vec::new()];
+        let mut remaining = available;
+        for run in runs {
+            let mut rest: &str = &run.text;
+            while !rest.is_empty() {
+                if let Some(newline) = rest.find('\n') {
+                    if !rest[..newline].is_empty() {
+                        lines.last_mut().expect("至少一行").push(Run {
+                            text: rest[..newline].to_string(),
+                            spec: run.spec,
+                            style: run.style,
+                            link: run.link.clone(),
+                        });
+                    }
+                    lines.push(Vec::new());
+                    remaining = available;
+                    rest = &rest[newline + 1..];
+                    continue;
+                }
+                let (take, width) = fit_prefix(self.metrics, rest, run.spec, remaining.max(0.0));
+                if take == rest.len() {
+                    lines.last_mut().expect("至少一行").push(Run {
+                        text: rest.to_string(),
+                        spec: run.spec,
+                        style: run.style,
+                        link: run.link.clone(),
+                    });
+                    remaining -= width;
+                    rest = "";
+                } else if take > 0 {
+                    let (head, tail) = rest.split_at(take);
+                    lines.last_mut().expect("至少一行").push(Run {
+                        text: head.to_string(),
+                        spec: run.spec,
+                        style: run.style,
+                        link: run.link.clone(),
+                    });
+                    // 这一段正好填满余量：扣掉后下一轮从新行起排
+                    remaining -= width;
+                    rest = tail;
+                } else if lines.last().is_some_and(Vec::is_empty) {
+                    // 这列窄到连一个字都放不下：丢弃这段（与正文 flow 同口径），避免死循环
+                    rest = "";
+                } else {
+                    lines.push(Vec::new());
+                    remaining = available;
+                }
+            }
+        }
+        while lines.last().is_some_and(Vec::is_empty) && lines.len() > 1 {
+            lines.pop();
+        }
+        lines
     }
 
     fn table_row_runs(&self, cells: &[atelyx_format::markdown::MarkdownTableCell], cols: usize, spec: FontSpec, head: bool) -> Vec<Vec<Run>> {
@@ -1768,6 +1877,50 @@ mod tests {
             .count();
         assert_eq!(shown, 40, "展开后显示全部行");
         assert_eq!(expanded.expands.len(), 1);
+    }
+
+    /// 标记列与嵌套缩进按源码标记串实测：富渲染正文列与揭示态源码逐点对齐，不跳变。
+    #[test]
+    fn list_marker_column_matches_the_source_prefix() {
+        let theme = Theme::default();
+        let mut metrics = Metrics::default();
+        let spec = FontSpec { size: theme.sizes.body, weight: None, family: None };
+        let source = "- 顶层\n  - 嵌套\n- [ ] 任务\n";
+        let laid = layout(&mut metrics, &theme, source, &[], 300.0, 0, true);
+        let text_x = |text: &str| {
+            laid.lines
+                .iter()
+                .find(|line| line.runs.iter().any(|run| run.text == text))
+                .map(|line| line.x)
+                .expect("内容行")
+        };
+        let mut w = |text: &str| metrics.width(text, spec);
+        assert_eq!(text_x("顶层"), w("- "), "顶层项正文起于源码标记串宽度");
+        assert_eq!(text_x("嵌套"), w("  ") + w("- "), "嵌套项正文起于源码缩进加标记串宽度");
+        assert_eq!(text_x("任务"), w("- [ ] "), "任务框列按源码标记串实测");
+    }
+
+    /// 超宽格按比例压缩列宽、格内折行：整表自然宽不超过容器，长格被切成多行而非整段一行。
+    #[test]
+    fn wide_table_cells_wrap_within_the_container() {
+        let theme = Theme::default();
+        let mut metrics = Metrics::default();
+        let long = "一二三四五六七八九十一二三四五六七八九十";
+        let source = format!("| {long} | 乙 |\n| --- | --- |\n| 丙 | 丁 |");
+        let laid = layout(&mut metrics, &theme, &source, &[], 320.0, 0, true);
+        assert!(laid.content_width() <= 320.5, "表格自然宽应不超过容器：{}", laid.content_width());
+        let parts = laid
+            .lines
+            .iter()
+            .filter(|line| {
+                line.runs.iter().any(|run| !run.text.is_empty() && long.contains(run.text.as_str()))
+            })
+            .count();
+        assert!(parts >= 2, "超宽格应折成多行：{parts}");
+        assert!(
+            !laid.lines.iter().any(|line| line.runs.iter().any(|run| run.text == long)),
+            "长格不得整段挤在一行里"
+        );
     }
 
     #[test]

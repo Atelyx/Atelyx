@@ -170,12 +170,18 @@ impl Collab {
         (outcome, out)
     }
 
-    /// 入站在场帧：刷新远端光标集合。
-    pub fn apply_presence(&mut self, peer_id: &str, payload: &Value) -> bool {
+    /// 入站在场帧：刷新远端光标集合（对面身份由宿主按名册补齐）。
+    pub fn apply_presence(
+        &mut self,
+        peer_id: &str,
+        peer_name: Option<&str>,
+        peer_color: Option<&str>,
+        payload: &Value,
+    ) -> bool {
         if !self.in_space {
             return false;
         }
-        self.presence.apply(peer_id, payload, Instant::now())
+        self.presence.apply(peer_id, peer_name, peer_color, payload, Instant::now())
     }
 
     /// 重连 / 反熵：重发基线与握手，并强制重发在场身份。

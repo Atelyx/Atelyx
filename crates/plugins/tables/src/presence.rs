@@ -43,24 +43,30 @@ pub struct Presence {
     /// 最近一次上行的本端状态与时刻（保活重发用）。
     sent: Option<serde_json::Value>,
     sent_at: Option<Instant>,
-    /// 被最小上行间隔挡下的新状态：到点后由下一拍补发，避免停在旧状态。
+    /// 被最小上行间隔挡下 / 上行未受理的新状态：到点后由下一拍补发，避免停在旧状态。
     pending: Option<serde_json::Value>,
+    /// 未受理载荷的下一次重试时刻：按保活节奏退避，未连接期间不逐拍空转。
+    retry_at: Option<Instant>,
 }
 
 impl Presence {
-    /// 记录一次已受理的本端状态上行。
+    /// 记录一次已受理的本端状态上行。待发载荷与这版相同才算送达清掉（更新的待发保留）。
     pub fn note_sent(&mut self, payload: serde_json::Value) {
-        self.sent = Some(payload);
+        self.sent = Some(payload.clone());
         self.sent_at = Some(Instant::now());
+        if self.pending.as_ref() == Some(&payload) {
+            self.pending = None;
+        }
+        self.retry_at = None;
     }
 
     /// 到期保活：返回需要重发的本端状态（未到间隔 = None）。
+    /// 不在这里刷新时刻：上行由调用方受理后才记「已发」，未连接期间的保活下一拍重试。
     pub fn keepalive(&mut self) -> Option<serde_json::Value> {
         let at = self.sent_at?;
         if at.elapsed().as_millis() < KEEPALIVE_MS {
             return None;
         }
-        self.sent_at = Some(Instant::now());
         self.sent.clone()
     }
 
@@ -69,6 +75,7 @@ impl Presence {
         match (&self.sent, self.sent_at) {
             (Some(sent), _) if sent == payload => {
                 self.pending = None;
+                self.retry_at = None;
                 false
             }
             (Some(_), Some(at)) if at.elapsed().as_millis() < SEND_INTERVAL_MS => {
@@ -77,26 +84,45 @@ impl Presence {
             }
             _ => {
                 self.pending = None;
+                self.retry_at = None;
                 true
             }
         }
     }
 
-    /// 取被最小间隔挡下的新状态（未到间隔或无待发 = None）。
+    /// 到点取待发载荷：被上行间隔压下的新状态按间隔补发；未受理退回的按保活节奏重试。
+    /// 不在这里消费——上行受理由 `note_sent` 清掉，失败由 `defer` 重新排期。
     pub fn take_pending(&mut self) -> Option<serde_json::Value> {
-        let at = self.sent_at?;
-        if at.elapsed().as_millis() < SEND_INTERVAL_MS {
-            return None;
+        let payload = self.pending.as_ref()?;
+        if let Some(at) = self.retry_at {
+            if Instant::now() < at {
+                return None;
+            }
+            return Some(payload.clone());
         }
-        self.pending.take()
+        let at = self.sent_at?;
+        (at.elapsed().as_millis() >= SEND_INTERVAL_MS).then(|| payload.clone())
     }
 
-    /// 离场：清本端与对端记录（本端状态由调用方补发空载荷）。
-    pub fn leave(&mut self) {
+    /// 上行未受理（未连接 / 通道错误）：载荷退回待发并按保活节奏排期重试；
+    /// 已有待发载荷时保留它（在途的这版更旧）。
+    pub fn defer(&mut self, payload: serde_json::Value) {
+        if self.pending.is_none() {
+            self.pending = Some(payload);
+        }
+        let millis = u64::try_from(KEEPALIVE_MS).unwrap_or(u64::MAX);
+        self.retry_at = Some(Instant::now() + std::time::Duration::from_millis(millis));
+    }
+
+    /// 离场：清本端与对端记录（本端状态由调用方补发空载荷）。返回是否清掉了对端条目。
+    pub fn leave(&mut self) -> bool {
         self.sent = None;
         self.sent_at = None;
         self.pending = None;
+        self.retry_at = None;
+        let before = self.peers.len();
         self.peers.clear();
+        before != self.peers.len()
     }
 
     /// 收到一条对端选区（`selection` 缺省 = 该对端收起选区；非当前文件的条目忽略）。
@@ -237,7 +263,7 @@ fn fallback_color(peer_id: &str) -> [u8; 4] {
     COLORS[hash % COLORS.len()]
 }
 
-/// 发本端选区（空间模式下才有意义；未连接时宿主回 `queued=false`，只记本地状态）。
+/// 发本端选区（空间模式下才有意义；未连接时宿主回 `queued=false`，载荷退回待发连上即补）。
 /// 载荷未变直接跳过，变化受最小上行间隔限制（间隔内的连续变更只发最后一版）。
 pub async fn publish_selection(plugin: &PluginState, ctx: &Context) {
     let Some(payload) = plugin.with_session(|session| {
@@ -260,12 +286,18 @@ pub async fn publish_selection(plugin: &PluginState, ctx: &Context) {
     send(plugin, ctx, payload).await;
 }
 
-/// 上行一条本端状态：受理后记为已发，失败留日志（保活会在下一拍重发上一次状态）。
+/// 上行一条本端状态：只有宿主确认入队（`queued=true`）才记「已发」。
+/// 未连接（`queued=false`）退回待发按保活节奏重试；RPC 失败留日志，同样交 `defer` 排期。
 async fn send(plugin: &PluginState, ctx: &Context, payload: serde_json::Value) {
     match ctx.collab_send_ephemeral(CHANNEL, payload.clone(), None).await {
-        Ok(_) => {
+        Ok(result) if result.queued => {
             if let Ok(mut presence) = plugin.presence.lock() {
                 presence.note_sent(payload);
+            }
+        }
+        Ok(_) => {
+            if let Ok(mut presence) = plugin.presence.lock() {
+                presence.defer(payload);
             }
         }
         Err(error) => ctx.log_error(&format!("发送表格在场失败：{error}")),

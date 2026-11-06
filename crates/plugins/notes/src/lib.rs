@@ -42,6 +42,9 @@ const HISTORY_COALESCE_MS: i64 = 60_000;
 /// 挂着协作文档时的帧拍频率：在场保活与对端剔除按拍推进，静止时不需要更高。
 const COLLAB_TICK_HZ: u16 = 4;
 
+/// 待揭示单元的拖动阈值（px）：按下位移超过它 = 跨块拖选，不揭示（与控件层拖拽判定同档）。
+const REVEAL_DRAG_THRESHOLD: f32 = 4.0;
+
 /// 已有在途保存时的可见原因：此刻的正文还没有落盘目标，不能假装成功。
 const SAVE_BUSY: &str = "文档正在保存，稍后重试";
 
@@ -735,6 +738,7 @@ impl NotesPlugin {
                 model.mode = Mode::Read;
                 model.active_block = None;
                 model.active_item = None;
+                model.reveal_pending = None;
             }
         }
         self.remember_pointer(&input);
@@ -743,6 +747,9 @@ impl NotesPlugin {
         }
         if let FrameInput::PointerDown { hit, .. } = &input {
             self.on_pointer_down(ctx, hit.as_deref()).await;
+        }
+        if let FrameInput::PointerUp { .. } = &input {
+            self.on_pointer_up(ctx).await;
         }
         let editable = {
             let model = self.model.lock().unwrap();
@@ -873,7 +880,40 @@ impl NotesPlugin {
         if mode != Mode::Edit {
             return;
         }
-        if let Some((block, item)) = item_index(hit) {
+        // 按下只记待揭示：立即揭示会把 markdown 块换成输入面，按住拖动的跨块选区随之销毁。
+        // 抬起时位移小于阈值才真正揭示（见 on_pointer_up）。
+        if item_index(hit).is_some() || block_index(hit).is_some() {
+            let mut model = self.model.lock().unwrap();
+            let already = item_index(hit)
+                .is_some_and(|(block, item)| model.active_item == Some((block, item)))
+                || block_index(hit).is_some_and(|index| {
+                    model.active_block == Some(index)
+                        && model.blocks.get(index).is_some_and(|block| block.items.is_empty())
+                });
+            if !already {
+                model.reveal_pending = Some((hit.to_string(), model.pointer));
+            }
+            return;
+        }
+        if gap_input(hit).is_some() {
+            // 空行自己托管光标：不揭示相邻块，交给控件层把光标落到空行上
+            let mut model = self.model.lock().unwrap();
+            model.active_block = None;
+            model.active_item = None;
+        }
+    }
+
+    /// 抬起结算待揭示单元：位移超过阈值 = 拖跨块选区，不揭示（选区留在控件层）。
+    async fn on_pointer_up(&self, ctx: &Context) {
+        let (hit, from) = match self.model.lock().unwrap().reveal_pending.take() {
+            Some(pending) => pending,
+            None => return,
+        };
+        let (x, y) = self.model.lock().unwrap().pointer;
+        if (x - from.0).abs().max((y - from.1).abs()) >= REVEAL_DRAG_THRESHOLD {
+            return;
+        }
+        if let Some((block, item)) = item_index(&hit) {
             let active = {
                 let mut model = self.model.lock().unwrap();
                 if model.active_item == Some((block, item)) {
@@ -888,7 +928,7 @@ impl NotesPlugin {
             }
             return;
         }
-        if let Some(index) = block_index(hit) {
+        if let Some(index) = block_index(&hit) {
             let active = {
                 let mut model = self.model.lock().unwrap();
                 // 有揭示单元的块（列表 / 引用）只按单元揭示：块 id 不整块回显源码
@@ -905,13 +945,6 @@ impl NotesPlugin {
             if active {
                 self.focus_block(ctx, index, None).await;
             }
-            return;
-        }
-        if gap_input(hit).is_some() {
-            // 空行自己托管光标：不揭示相邻块，交给控件层把光标落到空行上
-            let mut model = self.model.lock().unwrap();
-            model.active_block = None;
-            model.active_item = None;
         }
     }
 
@@ -2770,11 +2803,12 @@ impl PluginHandler for NotesPlugin {
 
     async fn on_collab_message(&self, ctx: &Context, params: CollabMessageParams) {
         if params.channel == collab::presence::CHANNEL {
-            let changed = self
-                .collab
-                .lock()
-                .unwrap()
-                .apply_presence(&params.peer_id, &params.payload);
+            let changed = self.collab.lock().unwrap().apply_presence(
+                &params.peer_id,
+                params.peer_name.as_deref(),
+                params.peer_color.as_deref(),
+                &params.payload,
+            );
             if changed {
                 self.sync_cursors();
                 self.render(ctx).await;

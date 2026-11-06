@@ -24,8 +24,10 @@ const MIN_SEND_MS: u128 = 250;
 pub struct Presence {
     sent: Option<serde_json::Value>,
     sent_at: Option<Instant>,
-    /// 被最小间隔挡下的新状态：到点后由下一 tick 补发，避免停在旧状态。
+    /// 被最小间隔挡下 / 上行未受理的新状态：到点后由下一 tick 补发，避免停在旧状态。
     pending: Option<serde_json::Value>,
+    /// 未受理载荷的下一次重试时刻：按保活节奏退避，未连接期间不逐拍空转。
+    retry_at: Option<Instant>,
 }
 
 impl Presence {
@@ -34,6 +36,7 @@ impl Presence {
         match (&self.sent, self.sent_at) {
             (Some(sent), _) if sent == payload => {
                 self.pending = None;
+                self.retry_at = None;
                 false
             }
             (Some(_), Some(at)) if at.elapsed().as_millis() < MIN_SEND_MS => {
@@ -42,33 +45,52 @@ impl Presence {
             }
             _ => {
                 self.pending = None;
+                self.retry_at = None;
                 true
             }
         }
     }
 
-    /// 取到点的新状态（被最小间隔挡下的那次）。
+    /// 到点取待发载荷：被上行间隔压下的新状态按间隔补发；未受理退回的按保活节奏重试。
+    /// 不在这里消费——上行受理由 `note_sent` 清掉，失败由 `defer` 重新排期。
     pub fn take_pending(&mut self) -> Option<serde_json::Value> {
-        let at = self.sent_at?;
-        if at.elapsed().as_millis() < MIN_SEND_MS {
-            return None;
+        let payload = self.pending.as_ref()?;
+        if let Some(at) = self.retry_at {
+            if Instant::now() < at {
+                return None;
+            }
+            return Some(payload.clone());
         }
-        self.pending.take()
+        let at = self.sent_at?;
+        (at.elapsed().as_millis() >= MIN_SEND_MS).then(|| payload.clone())
     }
 
-    /// 记录一次已受理的本端状态上行。
+    /// 记录一次已受理的本端状态上行。待发载荷与这版相同才算送达清掉（更新的待发保留）。
     pub fn note_sent(&mut self, payload: serde_json::Value) {
-        self.sent = Some(payload);
+        self.sent = Some(payload.clone());
         self.sent_at = Some(Instant::now());
+        if self.pending.as_ref() == Some(&payload) {
+            self.pending = None;
+        }
+        self.retry_at = None;
+    }
+
+    /// 上行未受理（未连接）：载荷退回待发并按保活节奏排期重试；已有待发载荷时保留它。
+    pub fn defer(&mut self, payload: serde_json::Value) {
+        if self.pending.is_none() {
+            self.pending = Some(payload);
+        }
+        self.retry_at = Some(Instant::now()
+            + std::time::Duration::from_millis(u64::try_from(KEEPALIVE_MS).unwrap_or(u64::MAX)));
     }
 
     /// 到期保活：返回需要重发的本端状态（未到间隔 = None）。
+    /// 不在这里刷新时刻：上行由调用方受理后才记「已发」，未连接期间的保活下一拍重试。
     pub fn keepalive(&mut self) -> Option<serde_json::Value> {
         let at = self.sent_at?;
         if at.elapsed().as_millis() < KEEPALIVE_MS {
             return None;
         }
-        self.sent_at = Some(Instant::now());
         self.sent.clone()
     }
 
@@ -77,6 +99,7 @@ impl Presence {
         self.sent = None;
         self.sent_at = None;
         self.pending = None;
+        self.retry_at = None;
     }
 }
 
@@ -113,6 +136,7 @@ pub fn payload(session: &Session, identity: Option<&SpaceSelfIdentity>) -> serde
 }
 
 /// 上行本端状态：载荷相同即跳过，变化受最小间隔限制。
+/// 只有宿主确认入队（`queued=true`）才记「已发」；未连接退回待发下一拍重试。
 pub async fn send(plugin: &PluginState, ctx: &Context) {
     let Some(value) = plugin.with_session(|session| payload(session, plugin.identity().as_ref())) else {
         return;
@@ -127,8 +151,11 @@ pub async fn send(plugin: &PluginState, ctx: &Context) {
         .collab_send_ephemeral(CHANNEL, value.clone(), None)
         .await
     {
-        Ok(_) => {
+        Ok(result) if result.queued => {
             plugin.with_presence_mut(|presence| presence.note_sent(value));
+        }
+        Ok(_) => {
+            plugin.with_presence_mut(|presence| presence.defer(value));
         }
         Err(error) => ctx.log_error(&format!("发送画布在场失败：{error}")),
     }
@@ -142,8 +169,14 @@ pub async fn keepalive(plugin: &PluginState, ctx: &Context) {
     let Some(payload) = payload else {
         return;
     };
-    if let Err(error) = ctx.collab_send_ephemeral(CHANNEL, payload, None).await {
-        ctx.log_error(&format!("保活画布在场失败：{error}"));
+    match ctx.collab_send_ephemeral(CHANNEL, payload.clone(), None).await {
+        Ok(result) if result.queued => {
+            plugin.with_presence_mut(|presence| presence.note_sent(payload));
+        }
+        Ok(_) => {
+            plugin.with_presence_mut(|presence| presence.defer(payload));
+        }
+        Err(error) => ctx.log_error(&format!("保活画布在场失败：{error}")),
     }
 }
 

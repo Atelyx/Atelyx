@@ -16,6 +16,8 @@ use crate::model::{
 
 /// 侧栏宽度与并排显示的最小面板宽。
 const SIDEBAR_W: f32 = 228.0;
+/// 消息流滚动条的贴边槽宽（与画布对话卡的滚动槽同档）：气泡宽度估计要把它让出来。
+const FLOW_SLOT_W: f32 = 8.0;
 const SIDEBAR_INLINE_MIN_W: f32 = 640.0;
 /// 输入盒内文字区高度：静止高度与内容超高后的上限（超出后在框内滚动），图片缩略图边长。
 const INPUT_MIN_H: f32 = 96.0;
@@ -548,7 +550,8 @@ fn message_block(ui: &mut Ui<'_, '_>, model: &Model, message: &Value, chat_width
 fn user_block(ui: &mut Ui<'_, '_>, model: &Model, message: &Value, id: &str, chat_width: f32) {
     let display = display_of(message);
     let plain = is_plain_line(display);
-    let max_width = 560.0_f32.min((chat_width - 24.0).max(80.0));
+    // 与画布对话卡同口径：气泡可用宽 = 面板宽 − 滚动条槽 − 两侧消息留白
+    let max_width = 560.0_f32.min((chat_width - FLOW_SLOT_W - 24.0).max(80.0));
     let bubble_width = if plain {
         (ui.text_width(display, TextRole::Body) + 20.0).min(max_width)
     } else {

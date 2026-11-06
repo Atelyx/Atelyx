@@ -1279,13 +1279,11 @@ fn lightbox_input(
                 }
             }
             let Some(lightbox) = session.view.lightbox.as_mut() else { return None };
-            let image = crate::lightbox::display_rect(
-                crate::lightbox::inner_rect(size),
-                lightbox.zoom,
-                lightbox.pan,
-            );
-            let inside = image.contains(*x, *y);
-            if !inside {
+            let (zoom, pan, source) = (lightbox.zoom, lightbox.pan, lightbox.source);
+            let display = crate::lightbox::display_rect(crate::lightbox::inner_rect(size), zoom, pan);
+            // Contain 留白区域视觉上也在图片外：按实际图片矩形判定，点它同样退出
+            let image = crate::lightbox::image_rect(display, source);
+            if !image.contains(*x, *y) {
                 session.view.lightbox = None;
                 outcome.paint = true;
                 return None;

@@ -9,7 +9,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde_json::{json, Value};
 
 /// 本端状态上行的最小间隔：拖选 / 拖动等连续变化按此合并，最新一份由 [`EphemeralChannel::flush`] 补发。
-const MIN_INTERVAL: Duration = Duration::from_millis(50);
+/// 与表格 / 画布在场通道同档（同一成员的限频口径跨面一致）。
+const MIN_INTERVAL: Duration = Duration::from_millis(250);
 /// 保活重发间隔：空闲端不重发身份帧就会被对端按 [`TIMEOUT`] 剔除（互见消失）。
 const KEEPALIVE: Duration = Duration::from_secs(15);
 /// 远端条目超时：期间无更新视为离线剔除。

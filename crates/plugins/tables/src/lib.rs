@@ -84,6 +84,14 @@ impl PluginState {
         self.attached.lock().map(|attached| *attached).unwrap_or(false)
     }
 
+    /// 清空在场缓存（对端条目 + 已发记录）：重连后立即重发选区用。返回是否清掉了对端条目。
+    pub(crate) fn clear_presence(&self) -> bool {
+        self.presence
+            .lock()
+            .map(|mut presence| presence.leave())
+            .unwrap_or(false)
+    }
+
     /// 当前容器是否只读（协作空间 viewer）。
     pub(crate) fn is_read_only(&self) -> bool {
         self.read_only.lock().map(|value| *value).unwrap_or(false)
@@ -212,14 +220,24 @@ impl PluginState {
     pub(crate) async fn probe_lightbox(&self, ctx: &Context, path: &str) {
         let params = atelyx_plugin_protocol::method::PathParams { path: path.to_string() };
         let Ok(value) = serde_json::to_value(&params) else { return };
-        let failed = match ctx
+        let probe = ctx
             .call_raw(atelyx_plugin_protocol::method::vault::IMAGE_INFO, value)
-            .await
-        {
-            Ok(_) => None,
+            .await;
+        let (failed, source) = match probe {
+            Ok(value) => {
+                let info = serde_json::from_value::<
+                    atelyx_plugin_protocol::method::ImageInfoResult,
+                >(value)
+                .ok();
+                let source = info
+                    .map(|info| (info.width, info.height))
+                    .filter(|(w, h)| *w > 0 && *h > 0)
+                    .unwrap_or((0, 0));
+                (None, source)
+            }
             Err(error) => {
                 ctx.log_error(&format!("读取图片信息失败（{path}）：{error}"));
-                Some("无法加载图片".to_string())
+                (Some("无法加载图片".to_string()), (0, 0))
             }
         };
         let current = self
@@ -239,6 +257,7 @@ impl PluginState {
             if let Some(lightbox) = session.view.lightbox.as_mut() {
                 lightbox.loading = false;
                 lightbox.error = failed;
+                lightbox.source = source;
             }
         });
         self.render(ctx).await;
@@ -1252,12 +1271,21 @@ impl PluginHandler for TablesPlugin {
                 self.state.render(ctx).await;
                 self.state.publish_header(ctx).await;
             }
-            event::name::VAULT_SWITCH
-            | event::name::SPACE_RESYNC
-            | event::name::SPACE_MEMBERS_CHANGED => {
+            event::name::VAULT_SWITCH | event::name::SPACE_MEMBERS_CHANGED => {
                 refresh_writable(&self.state, ctx).await;
                 crate::session::reload_from_open_files(&self.state, ctx).await;
                 self.state.render(ctx).await;
+                self.state.publish_header(ctx).await;
+            }
+            event::name::SPACE_RESYNC => {
+                refresh_writable(&self.state, ctx).await;
+                crate::session::reload_from_open_files(&self.state, ctx).await;
+                // 重连后对端已按名册摘掉本端：清在场缓存（对端条目 + 已发记录），
+                // 立即重发本端选区，不空等保活间隔
+                if self.state.clear_presence() {
+                    self.state.render(ctx).await;
+                }
+                crate::presence::publish_selection(&self.state, ctx).await;
                 self.state.publish_header(ctx).await;
             }
             event::name::TABLE_RESTORE => {

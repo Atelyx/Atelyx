@@ -486,6 +486,7 @@ impl PluginState {
             event::name::VAULT_FILES_CHANGED,
             event::name::SPACE_PEERS_CHANGED,
             event::name::SPACE_MEMBERS_CHANGED,
+            event::name::SPACE_RESYNC,
             event::name::WINDOW_FILE_DROP,
             method::ai::HOST_CHAT_EVENT,
         ] {
@@ -586,6 +587,14 @@ impl PluginState {
             }
             event::name::SPACE_MEMBERS_CHANGED => {
                 self.refresh_identity(ctx).await;
+            }
+            event::name::SPACE_RESYNC => {
+                // 重连后对端已按名册摘掉本端：清已发记录与对端条目，立即重发本端在场
+                crate::presence::clear(self);
+                self.with_presence_mut(|presence| presence.reset());
+                self.refresh_identity(ctx).await;
+                crate::presence::send(self, ctx).await;
+                self.render(ctx).await;
             }
             event::name::SPACE_PEERS_CHANGED => {
                 self.refresh_identity(ctx).await;

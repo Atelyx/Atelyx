@@ -858,6 +858,8 @@ fn clear_session_state(app: &mut App) {
     app.note_image_sizes.clear();
     app.note_images_inflight.clear();
     app.note_images_failed.clear();
+    // 原图字节按仓库相对路径缓存：换容器后同一路径指向别的文件，一并作废
+    app.clear_image_bytes();
     app.note_image_epoch = app.note_image_epoch.wrapping_add(1);
     app.file_count = None;
 
@@ -1771,20 +1773,34 @@ pub fn space_load_image(
     src: String,
     max_edge: Option<u32>,
 ) -> Task<Message> {
+    // 字节缓存命中（缩略图 / 探针带回）：不再整文件下载
+    let cached = app.cached_image_bytes(&src);
     let Some(session) = session_of(app) else { return Task::none() };
     let client = session.client;
     let space_id = session.space_id;
     Task::perform(
         async move {
-            let bytes = client
-                .get_file_bytes(&space_id, &src)
-                .await
-                .map_err(err_text)?;
-            Ok::<crate::PluginImage, String>(match max_edge {
-                Some(max) => {
-                    crate::PluginImage::Thumb(atelyx_core::image_thumb::thumbnail(&bytes, max)?)
+            let bytes = match cached {
+                Some(bytes) => bytes,
+                None => {
+                    let bytes = client
+                        .get_file_bytes(&space_id, &src)
+                        .await
+                        .map_err(err_text)?;
+                    std::sync::Arc::new(bytes)
                 }
-                None => crate::PluginImage::Bytes(bytes),
+            };
+            Ok::<crate::ImageLoad, String>(match max_edge {
+                Some(max) => crate::ImageLoad::vault(
+                    crate::PluginImage::Thumb(atelyx_core::image_thumb::thumbnail(&bytes, max)?),
+                    src,
+                    bytes,
+                ),
+                None => crate::ImageLoad::vault(
+                    crate::PluginImage::Bytes((*bytes).clone()),
+                    src,
+                    bytes,
+                ),
             })
         },
         move |result| Message::ImageLoaded(gen, key.clone(), result),

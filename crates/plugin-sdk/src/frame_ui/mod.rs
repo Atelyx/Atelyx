@@ -1404,43 +1404,16 @@ let a = 1;
         assert!(bench.ui.lock().await.state.selection.is_none(), "端点块离帧后选区应作废");
     }
 
-    /// 超宽表格：按最宽格定列宽并把内容并进块内横向滚动，绘制裁在块矩形里。
+    /// 超宽表格：列宽按容器宽压缩、格内换行承接，整表不溢出容器也不出横向滚动条。
     #[tokio::test]
-    async fn wide_table_scrolls_inside_its_block() {
+    async fn wide_table_wraps_inside_its_block() {
         let long = "一二三四五六七八九十一二三四五六七八九十";
         let source = format!("| {long} | 乙 |\n| --- | --- |\n| 丙 | 丁 |");
         let mut bench = Bench::new(320.0, 200.0).await;
         let build = move |ui: &mut build::Ui<'_, '_>| ui.markdown_named("wide", source.clone(), Vec::new());
         let frame = bench.render(build.clone()).await.unwrap();
         let rect = frame.hits.iter().find(|hit| hit.id == "wide").cloned().expect("表格块命中区");
-        let content_w = {
-            let ui = bench.ui.lock().await;
-            match ui.state.layouts.get("wide") {
-                Some(Layout::Markdown { content_w, .. }) => *content_w,
-                _ => panic!("应记录为 Markdown 版面"),
-            }
-        };
-        assert!(content_w > rect.w + 0.5, "超宽表格的自然宽应大于外框：{content_w}/{}", rect.w);
-        assert!(has_hit(&frame, "wide::hbar"), "超宽内容应给横向滚动条");
-
-        let events = bench
-            .event(FrameInput::Wheel {
-                x: rect.x + rect.w * 0.5,
-                y: rect.y + rect.h * 0.5,
-                delta_x: 40.0,
-                delta_y: 0.0,
-                modifiers: Default::default(),
-                hit: None,
-            })
-            .await;
-        let UiEvent::Scroll { id, offset, max_offset } = &events[0] else {
-            panic!("横向滚动应回滚动位置：{events:?}");
-        };
-        assert_eq!(id, "wide");
-        assert!((*offset - 40.0).abs() < 0.01 && *max_offset > 40.0, "{offset}/{max_offset}");
-
-        let frame = bench.render(build).await.unwrap();
-        assert!(!texts(&frame).iter().any(|text| text == long), "滚出左缘的内容应被裁掉");
+        assert!(!has_hit(&frame, "wide::hbar"), "表格不再给横向滚动条");
         for command in &frame.commands {
             match command {
                 DrawCommand::Rect { x, y, w, .. } if (rect.y..=rect.y + rect.h).contains(y) => {

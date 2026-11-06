@@ -372,6 +372,9 @@ pub struct Lightbox {
     pub loading: bool,
     /// 载入失败文案（`loading` 清除后与图片同框显示）。
     pub error: Option<String>,
+    /// 探测到的原图像素尺寸（未探测 / 失败 = `(0, 0)`）：点外关闭按实际图片矩形判定，
+    /// 显示框内 Contain 留白的区域视觉上也在图片外。
+    pub source: (u32, u32),
 }
 
 impl Lightbox {
@@ -385,6 +388,7 @@ impl Lightbox {
             drag: None,
             loading: true,
             error: None,
+            source: (0, 0),
         }
     }
 

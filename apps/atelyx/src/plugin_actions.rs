@@ -20,7 +20,7 @@ use atelyx_core::plugin_runtime::{
 };
 
 use crate::registry::{Registry, Snapshot};
-use crate::{App, Message, PluginImage};
+use crate::{App, ImageLoad, Message, PluginImage};
 
 /// 壳侧插件视图 kind 前缀（预置插件视图词汇不被插件占用；插件 id 与贡献 id 都不含 `:`）。
 const KIND_PREFIX: &str = "plugin:";
@@ -710,7 +710,7 @@ fn load_image(app: &App, gen: u64, key: String, source: ImageSource) -> Task<Mes
             Task::perform(
                 async move {
                     std::fs::read(&path)
-                        .map(PluginImage::Bytes)
+                        .map(|bytes| ImageLoad::plain(PluginImage::Bytes(bytes)))
                         .map_err(|e| format!("读插件图片失败：{e}"))
                 },
                 move |result| Message::ImageLoaded(gen, key, result),
@@ -722,7 +722,7 @@ fn load_image(app: &App, gen: u64, key: String, source: ImageSource) -> Task<Mes
             Task::perform(
                 async move {
                     std::fs::read(&path)
-                        .map(PluginImage::Bytes)
+                        .map(|bytes| ImageLoad::plain(PluginImage::Bytes(bytes)))
                         .map_err(|e| format!("读插件图片失败：{e}"))
                 },
                 move |result| Message::ImageLoaded(gen, key, result),
@@ -734,15 +734,28 @@ fn load_image(app: &App, gen: u64, key: String, source: ImageSource) -> Task<Mes
             }
             match app.vault.root().ok() {
                 Some(root) => {
+                    // 字节缓存命中（缩略图 / 探针带回）：不再读盘
+                    let cached = app.cached_image_bytes(&path);
                     let rel = path.clone();
                     Task::perform(
                         async move {
-                            let bytes = atelyx_core::vault::read_file_bytes(&root, &rel)?;
-                            Ok::<PluginImage, String>(match max_edge {
-                                Some(max) => PluginImage::Thumb(
-                                    atelyx_core::image_thumb::thumbnail(&bytes, max)?,
+                            let bytes = match cached {
+                                Some(bytes) => bytes,
+                                None => {
+                                    std::sync::Arc::new(atelyx_core::vault::read_file_bytes(&root, &rel)?)
+                                }
+                            };
+                            Ok::<ImageLoad, String>(match max_edge {
+                                Some(max) => ImageLoad::vault(
+                                    PluginImage::Thumb(
+                                        atelyx_core::image_thumb::thumbnail(&bytes, max)?,
+                                    ),
+                                    rel,
+                                    bytes,
                                 ),
-                                None => PluginImage::Bytes(bytes),
+                                None => {
+                                    ImageLoad::vault(PluginImage::Bytes((*bytes).clone()), rel, bytes)
+                                }
                             })
                         },
                         move |result| Message::ImageLoaded(gen, key.clone(), result),
@@ -760,7 +773,7 @@ fn load_image(app: &App, gen: u64, key: String, source: ImageSource) -> Task<Mes
                     } else {
                         atelyx_core::remote_image::fetch_external_image(&url).await
                     };
-                    bytes.map(crate::PluginImage::Bytes)
+                    bytes.map(|bytes| ImageLoad::plain(PluginImage::Bytes(bytes)))
                 },
                 move |result| Message::ImageLoaded(gen, key, result),
             )

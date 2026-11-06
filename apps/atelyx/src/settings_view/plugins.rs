@@ -302,6 +302,13 @@ pub enum PluginsMsg {
     },
     /// 图片固有像素尺寸（只读文件头，不送回内容）。
     VaultImageInfo { request_id: u64, path: String },
+    /// 空间图片信息回执（整文件取回）：字节入缓存后按文件头解析尺寸再回填（gen 守卫防跨容器污染）。
+    VaultImageInfoSpace {
+        gen: u64,
+        request_id: u64,
+        rel: String,
+        result: Result<std::sync::Arc<Vec<u8>>, String>,
+    },
     /// 批量文字量算（`query.measure`）：顺序与请求条目一一对应。
     MeasureBatch { request_id: u64, params: MeasureBatchParams },
     /// 主题查询（`query.theme`）：颜色 / 字号档 / 圆角档。
@@ -1730,20 +1737,49 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
                     Err(e) => resolve_vault(app, request_id, Err(e)),
                 },
                 crate::RepoKind::Space(space) => {
+                    // 字节缓存命中（缩略图 / 原图载入带回）：不再整文件下载
+                    if let Some(bytes) = app.cached_image_bytes(&rel) {
+                        let head = &bytes[..bytes.len().min(IMAGE_HEADER_BYTES as usize)];
+                        let result = image_info_json(head, &rel);
+                        return resolve_vault(app, request_id, result);
+                    }
                     let (client, space_id) = (space.client.clone(), space.space_id.clone());
+                    let rel_cb = rel.clone();
+                    let gen = app.epoch();
                     Task::perform(
                         async move {
-                            // 空间侧无区间读接口，取回整文件后仍只解析起始段（服务端单文件限额封顶）
-                            let bytes = client
+                            // 空间侧无区间读接口：取回整文件（服务端单文件限额封顶），
+                            // 字节随回执入缓存，随后的上限图 / 原图取数不再重复下载
+                            client
                                 .get_file_bytes(&space_id, &rel)
                                 .await
-                                .map_err(|e| e.to_string())?;
-                            let head = &bytes[..bytes.len().min(IMAGE_HEADER_BYTES as usize)];
-                            image_info_json(head, &rel)
+                                .map(std::sync::Arc::new)
+                                .map_err(|e| e.to_string())
                         },
-                        move |result| Message::Plugins(PluginsMsg::VaultCallDone { request_id, result }),
+                        move |result| {
+                            Message::Plugins(PluginsMsg::VaultImageInfoSpace {
+                                gen,
+                                request_id,
+                                rel: rel_cb,
+                                result,
+                            })
+                        },
                     )
                 }
+            }
+        }
+        PluginsMsg::VaultImageInfoSpace { gen, request_id, rel, result } => {
+            // 下载在途切了容器：旧容器的字节不得进新容器的缓存
+            if gen != app.epoch() {
+                return Task::none();
+            }
+            match result {
+                Ok(bytes) => {
+                    app.cache_image_bytes(rel.clone(), bytes.clone());
+                    let head = &bytes[..bytes.len().min(IMAGE_HEADER_BYTES as usize)];
+                    resolve_vault(app, request_id, image_info_json(head, &rel))
+                }
+                Err(error) => resolve_vault(app, request_id, Err(error)),
             }
         }
         PluginsMsg::MeasureBatch { request_id, params } => {
