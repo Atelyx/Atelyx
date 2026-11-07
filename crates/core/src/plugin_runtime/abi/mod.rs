@@ -170,7 +170,8 @@ impl AbiSession {
             if !state.alive || state.token != token {
                 drop(state);
                 drop(entry);
-                plugin.destroy();
+                // 销毁交给专用线程：插件挂死时 destroy 里的 join 不能堵住持锁线程
+                std::thread::spawn(move || plugin.destroy());
                 return false;
             }
             state.plugin.replace(Arc::new(plugin))
@@ -424,7 +425,14 @@ fn fail_calls(calls: Vec<HostCall>, reason: &str) {
 /// 入口闸已持有时销毁实例；排队中的调用已全部收场。
 fn retire(plugin: Arc<PluginInstance>) {
     match Arc::try_unwrap(plugin) {
-        Ok(plugin) => plugin.destroy(),
+        // 销毁交给专用线程：destroy 要等插件工作线程收尾（join），插件处理循环挂死时
+        // 不能把调用方的会话收尾一起挂住。库句柄由实例的 Arc 持有，销毁线程结束前
+        // 引用不归零，动态库不会被卸载
+        Ok(plugin) => {
+            std::thread::spawn(move || plugin.destroy());
+        }
+        // 存在未释放克隆时不可达（所有克隆都在入口闸内随函数返回消亡）；若可达，
+        // Arc drop 会同步 teardown——destroy(self) 按值消费，共享 Arc 无法分离线程调用
         Err(plugin) => drop(plugin),
     }
 }

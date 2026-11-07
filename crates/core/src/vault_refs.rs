@@ -1,5 +1,6 @@
 //! 重命名/移动的引用同步事务：画布节点引用（.atlx）+ 全库笔记内部链接（.md）+ 路径类元数据
-//! （prompt-notes / agents / folder-colors）+ 历史侧文件迁移。先改名后统一写回，写回失败回滚改名。
+//! （prompt-notes / agents / folder-colors）+ 历史侧文件迁移。先改名后统一写回，写回失败回滚改名；
+//! 整个事务经写盘队列批量作业执行，与在途的笔记 / 画布保存串行。
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -23,7 +24,41 @@ fn normalize_rel(p: &str) -> Result<String, String> {
 
 /// 重命名/移动 `.md` 笔记并同步引用（画布精确匹配 + `.md` 链接精确匹配）。
 /// `exclude` = .md 链接扫描的排除目录；画布引用扫描不过滤（排除目录内的画布也可能引用）。
-pub fn rename_note_synced(
+/// 事务整体进写盘队列：与在途保存串行后，引用扫描读到的一律是已落地内容，写回也不会
+/// 插进在途保存的读改写之间——绕过队列时保存链的旧基线会把引用改写静默覆盖回退。
+pub async fn rename_note_synced(
+    queue: &crate::write_queue::WriteQueue,
+    root: &Path,
+    exclude: &[String],
+    old_file: &str,
+    new_file: &str,
+) -> Result<SyncResult, String> {
+    let root = root.to_path_buf();
+    let exclude = exclude.to_vec();
+    let old_file = old_file.to_string();
+    let new_file = new_file.to_string();
+    queue.bulk(move || rename_note_transaction(&root, &exclude, &old_file, &new_file)).await
+}
+
+/// 重命名/移动文件夹并同步引用（画布与 `.md` 链接按 `old/` 前缀替换）。
+/// 事务整体进写盘队列，理由同 [`rename_note_synced`]。
+pub async fn rename_folder_synced(
+    queue: &crate::write_queue::WriteQueue,
+    root: &Path,
+    exclude: &[String],
+    old_dir: &str,
+    new_dir: &str,
+) -> Result<SyncResult, String> {
+    let root = root.to_path_buf();
+    let exclude = exclude.to_vec();
+    let old_dir = old_dir.to_string();
+    let new_dir = new_dir.to_string();
+    queue.bulk(move || rename_folder_transaction(&root, &exclude, &old_dir, &new_dir)).await
+}
+
+/// 改名事务本体（同步）：必须经 [`rename_note_synced`] 在写盘队列内执行，
+/// 直接在队列外调用会与在途保存互相覆盖。已在队列内的调用方（插件的改名服务）直接用本函数。
+pub fn rename_note_transaction(
     root: &Path,
     exclude: &[String],
     old_file: &str,
@@ -69,9 +104,9 @@ pub fn rename_note_synced(
     Ok(SyncResult { rewritten: pending_md.into_iter().map(|(rel, _)| rel).collect() })
 }
 
-/// 重命名/移动文件夹并同步引用（画布与 `.md` 链接按 `old/` 前缀替换）。
-/// 先移动目录（旧路径已不存在），再扫描新树收集引用更新并统一写回；失败回滚移动。
-pub fn rename_folder_synced(
+/// 改名事务本体（同步）：必须经 [`rename_folder_synced`] 在写盘队列内执行，契约同
+/// [`rename_note_transaction`]。
+pub fn rename_folder_transaction(
     root: &Path,
     exclude: &[String],
     old_dir: &str,
@@ -319,6 +354,39 @@ mod tests {
         )
     }
 
+    /// 改名事务与在途内容写盘串行：先提交一个「读走旧内容、停顿后原样写回」的批量作业
+    /// 模拟在途保存，改名必须等它落地后才执行引用改写——绕过队列时改写会被旧内容覆盖。
+    #[tokio::test]
+    async fn rename_writeback_serializes_with_queued_content_writes() {
+        let tmp = TempDir::new("refs-queue");
+        let root = &*tmp;
+        write(root, "a.md", "正文");
+        write(root, "画布.atlx", &canvas_json("a.md"));
+        write(root, "b.md", "看 [它](a.md)");
+        let queue = crate::write_queue::WriteQueue::new();
+        let stale_root = root.to_path_buf();
+        let inflight = {
+            let queue = queue.clone();
+            tokio::spawn(async move {
+                queue
+                    .bulk(move || {
+                        let path = stale_root.join("b.md");
+                        let content = std::fs::read_to_string(&path).unwrap();
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                        std::fs::write(&path, content).unwrap();
+                        Ok::<(), String>(())
+                    })
+                    .await
+            })
+        };
+        // 等在途作业完成读盘并进入停顿，改名再提交
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        rename_note_synced(&queue, root, &[], "a.md", "dir/a.md").await.unwrap();
+        inflight.await.unwrap().unwrap();
+        let b = std::fs::read_to_string(root.join("b.md")).unwrap();
+        assert!(b.contains("(dir/a.md)"), "链接改写不得被在途保存的旧内容覆盖：{b}");
+    }
+
     #[test]
     fn rename_note_updates_canvas_and_md_refs() {
         let tmp = TempDir::new("refs-note");
@@ -326,7 +394,7 @@ mod tests {
         write(root, "a.md", "正文");
         write(root, "画布.atlx", &canvas_json("a.md"));
         write(root, "b.md", "看 [它](a.md) 与 [别的](other.md)");
-        let result = rename_note_synced(root, &[], "a.md", "dir/a.md").unwrap();
+        let result = rename_note_transaction(root, &[], "a.md", "dir/a.md").unwrap();
         // 画布引用同步（write_canvas_file 落盘为 pretty JSON）
         let canvas = std::fs::read_to_string(root.join("画布.atlx")).unwrap();
         assert!(canvas.contains(r#""file": "dir/a.md""#), "{canvas}");
@@ -346,7 +414,7 @@ mod tests {
         write(root, "a.md", "正文");
         // 目标已存在 → rename 拒绝，源保留
         write(root, "dir/a.md", "既有");
-        assert!(rename_note_synced(root, &[], "a.md", "dir/a.md").is_err());
+        assert!(rename_note_transaction(root, &[], "a.md", "dir/a.md").is_err());
         assert!(root.join("a.md").exists());
         assert_eq!(std::fs::read_to_string(root.join("dir/a.md")).unwrap(), "既有");
     }
@@ -359,7 +427,7 @@ mod tests {
         write(root, "old/sub/b.md", "内容");
         write(root, "画布.atlx", &canvas_json("old/a.md"));
         write(root, "c.md", "看 [它](old/a.md)");
-        let _ = rename_folder_synced(root, &[], "old", "new").unwrap();
+        let _ = rename_folder_transaction(root, &[], "old", "new").unwrap();
         let canvas = std::fs::read_to_string(root.join("画布.atlx")).unwrap();
         assert!(canvas.contains(r#""file": "new/a.md""#), "{canvas}");
         let c = std::fs::read_to_string(root.join("c.md")).unwrap();
@@ -415,7 +483,7 @@ mod tests {
             r#"{"schema":"atelyx-agents/v1","agents":[{"id":"a","name":"A","systemPromptFile":"old/p.md"}]}"#,
         );
         write(root, ".atelyx/folder-colors.json", r##"{"old":"#ff0000"}"##);
-        rename_folder_synced(root, &[], "old", "new").unwrap();
+        rename_folder_transaction(root, &[], "old", "new").unwrap();
         assert!(std::fs::read_to_string(root.join(".atelyx/prompt-notes.json")).unwrap().contains("new/p.md"));
         assert!(std::fs::read_to_string(root.join(".atelyx/agents.json")).unwrap().contains("new/p.md"));
         assert!(std::fs::read_to_string(root.join(".atelyx/folder-colors.json")).unwrap().contains("new"));

@@ -959,14 +959,14 @@ async fn move_file(ctx: &ToolCtx, args: &Value) -> ToolResult {
 /// 空间走服务端 rename（客户端引用改写由壳负责，与文件树操作同链）。
 async fn move_entry(ctx: &ToolCtx, from: &str, to: &str, ok: &str) -> ToolResult {
     match &ctx.repo {
-        RepoAccess::Local { root, .. } => {
+        RepoAccess::Local { root, queue } => {
             let is_dir = vault::safe_join(root, from, false)
                 .map(|path| path.is_dir())
                 .unwrap_or(false);
             let synced = if is_dir {
-                crate::vault_refs::rename_folder_synced(root, &ctx.exclude, from, to)
+                crate::vault_refs::rename_folder_synced(queue, root, &ctx.exclude, from, to).await
             } else {
-                crate::vault_refs::rename_note_synced(root, &ctx.exclude, from, to)
+                crate::vault_refs::rename_note_synced(queue, root, &ctx.exclude, from, to).await
             };
             synced.map(|_| ToolResult::ok(ok.to_string())).unwrap_or_else(|e| {
                 ToolResult::err(format!("操作失败：{e}"))
