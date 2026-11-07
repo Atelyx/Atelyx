@@ -521,7 +521,16 @@ impl PluginState {
                     )
                     .await;
             }
-            Err(error) => ctx.log_error(&format!("写入下载文件失败：{error}")),
+            Err(error) => {
+                ctx.log_error(&format!("写入下载文件失败：{error}"));
+                let _ = ctx
+                    .notify(
+                        "图片保存失败",
+                        Some(&error.to_string()),
+                        atelyx_plugin_protocol::method::NotificationLevel::Error,
+                    )
+                    .await;
+            }
         }
     }
 
@@ -1041,6 +1050,7 @@ impl PluginState {
                 if let Ok(mut debounce) = state.save_debounce.lock() {
                     debounce.running = false;
                 }
+                ctx.log_error("创建表格保存防抖线程失败，本次自动保存未排程");
                 return;
             };
             let mut saved = generation;

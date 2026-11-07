@@ -356,9 +356,9 @@ impl PluginState {
         }
     }
 
-    /// 自动保存防抖：新改动推后世代，同一时刻最多一个等待线程。
-    pub(crate) fn schedule_save(self: &Arc<Self>, ctx: &Context) {
-        self.panel_header_now(ctx);
+    /// 自动保存防抖：新改动推后世代，同一时刻最多一个等待线程。头部脏标随置脏即时声明。
+    pub(crate) async fn schedule_save(self: &Arc<Self>, ctx: &Context) {
+        self.panel_header(ctx).await;
         let generation = {
             let Ok(mut debounce) = self.save_debounce.lock() else {
                 return;
@@ -380,6 +380,7 @@ impl PluginState {
                 if let Ok(mut debounce) = state.save_debounce.lock() {
                     debounce.running = false;
                 }
+                ctx.log_error("创建画布保存防抖线程失败，本次自动保存未排程");
                 return;
             };
             let mut saved = generation;
@@ -424,34 +425,6 @@ impl PluginState {
         });
     }
 
-    fn panel_header_now(&self, ctx: &Context) {
-        let ctx = ctx.clone();
-        let dirty = self.with_session(|session| session.dirty).unwrap_or(false);
-        // 回调不保证跑在 Tokio 运行时里，另起线程自建运行时发这一次声明。
-        std::thread::spawn(move || {
-            let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            else {
-                return;
-            };
-            let header = if dirty {
-                Some(PanelHeaderState {
-                    dirty: true,
-                    ..Default::default()
-                })
-            } else {
-                None
-            };
-            let params = PanelHeaderParams {
-                target: VIEW.to_string(),
-                header,
-            };
-            runtime.block_on(async {
-                let _ = ctx.panel_header(&params).await;
-            });
-        });
-    }
 }
 
 fn uuid() -> String {
@@ -778,7 +751,7 @@ impl PluginState {
             .unwrap_or(false);
         if changed {
             crate::service::emit_changed(self, ctx).await;
-            self.schedule_save(ctx);
+            self.schedule_save(ctx).await;
             self.render(ctx).await;
         }
     }
@@ -804,11 +777,10 @@ impl PluginState {
 
     async fn paste(self: &Arc<Self>, ctx: &Context) {
         let Ok(text) = ctx.clipboard_read().await else {
-            self.with_session_mut(|session| {
-                for chat in session.view.card_chat.values_mut() {
-                    chat.error = None;
-                }
-            });
+            ctx.log_error("画布粘贴失败：读取剪贴板失败");
+            let _ = ctx
+                .notify("粘贴失败：无法读取剪贴板", None, method::NotificationLevel::Warning)
+                .await;
             return;
         };
         let changed = self
@@ -822,7 +794,7 @@ impl PluginState {
             .unwrap_or(false);
         if changed {
             crate::service::emit_changed(self, ctx).await;
-            self.schedule_save(ctx);
+            self.schedule_save(ctx).await;
             self.render(ctx).await;
         }
     }
@@ -836,7 +808,7 @@ impl PluginState {
         }
         if !removed.is_empty() {
             crate::service::emit_changed(self, ctx).await;
-            self.schedule_save(ctx);
+            self.schedule_save(ctx).await;
             self.render(ctx).await;
         }
     }
@@ -1063,7 +1035,7 @@ impl PluginState {
             self.render(ctx).await;
         }
         if dirty {
-            self.schedule_save(ctx);
+            self.schedule_save(ctx).await;
         }
     }
 
@@ -1210,7 +1182,9 @@ impl PluginState {
                     })
                     .flatten();
                 if let Some(text) = text {
-                    let _ = ctx.clipboard_write(&text).await;
+                    if let Err(error) = ctx.clipboard_write(&text).await {
+                        ctx.log_error(&format!("复制消息失败：{error}"));
+                    }
                 }
                 (false, false)
             }
@@ -1720,7 +1694,7 @@ impl PluginHandler for CanvasPlugin {
     async fn on_chat_event(&self, ctx: &Context, params: ChatEventParams) {
         crate::chat::on_chat_event(&self.state, ctx, params).await;
         crate::service::emit_changed(&self.state, ctx).await;
-        self.state.schedule_save(ctx);
+        self.state.schedule_save(ctx).await;
         self.state.render(ctx).await;
         // 流式开始 / 结束要即时上屏给对端，不能等下一次保活；面已卸载时不再上行，
         // 否则离场后迟到的结束事件会把本端重新广播成在场
@@ -1751,7 +1725,7 @@ impl PluginHandler for CanvasPlugin {
             return;
         }
         crate::service::emit_changed(&self.state, ctx).await;
-        self.state.schedule_save(ctx);
+        self.state.schedule_save(ctx).await;
         self.state.render(ctx).await;
     }
 }

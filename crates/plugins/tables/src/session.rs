@@ -303,9 +303,17 @@ pub async fn save(
             }
             // 盘上换了个文件（被替换 / 删了重建）：以本端全量为准
             Ok(_) => frozen.clone(),
-            Err(_) => frozen.clone(),
+            Err(error) => {
+                // 读到盘上内容但解析失败：以本端全量覆盖，失败原因必须留痕（不静默覆盖）
+                ctx.log_error(&format!("读表格磁盘内容失败，以本端为准覆盖（{file}）：{error}"));
+                frozen.clone()
+            }
         },
-        Err(_) => frozen.clone(),
+        // 读盘失败（瞬时 IO / 权限）：留痕后以本端为准，错误本体是唯一定位线索
+        Err(error) => {
+            ctx.log_error(&format!("读表格磁盘失败，以本端为准覆盖（{file}）：{error}"));
+            frozen.clone()
+        }
     };
     target.title = title_of(&file);
     target.updated_at = now_secs();
