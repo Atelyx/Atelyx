@@ -305,7 +305,8 @@ fn submenu_item<M: UiHost>(
     disabled: bool,
     pane: usize,
     window: iced::window::Id,
-) -> Element<'static, M> {    let text_color = if disabled { pal::TEXT_MUTED } else { pal::TEXT_PRIMARY };
+) -> Element<'static, M> {
+    let text_color = if disabled { pal::TEXT_MUTED } else { pal::TEXT_PRIMARY };
     let mut row = row![].spacing(6).width(Length::Fill);
     row = row.push(icon("chevron-right", 13.0, text_color));
     if let Some(name) = icon_name {

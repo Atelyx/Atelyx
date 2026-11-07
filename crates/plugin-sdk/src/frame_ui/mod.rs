@@ -283,7 +283,7 @@ impl FrameUi {
                     // 会话收尾期间量算必然失败：按估算字宽把这一帧交出去即可，不进日志
                     Err(err) => {
                         if !err.message.contains("会话已结束") {
-                            eprintln!("量算失败，按估算字宽出这一帧：{err}");
+                            ctx.log_error(&format!("量算失败，按估算字宽出这一帧：{err}"));
                         }
                     }
                 }
@@ -329,7 +329,7 @@ impl FrameUi {
         self.state.theme = Some(match ctx.query_theme().await {
             Ok(result) => theme::Theme::from(result),
             Err(err) => {
-                eprintln!("取宿主主题失败，按缺省样式绘制：{err}");
+                ctx.log_error(&format!("取宿主主题失败，按缺省样式绘制：{err}"));
                 theme::Theme::default()
             }
         });
@@ -1598,6 +1598,38 @@ let a = 1;
         assert!(!clamped.repaint, "偏移没动，画面不变");
     }
 
+    /// 改宽使内容变矮（max_offset 变小）时滚动位不被钳制写回：滚回原宽度仍在原内容位。
+    #[tokio::test]
+    async fn widening_beyond_content_keeps_the_scroll_offset() {
+        let mut bench = Bench::new(320.0, 240.0).await;
+        let build = |ui: &mut build::Ui<'_, '_>| {
+            let line = "字".repeat(80);
+            ui.scroll_sized("list", 120.0, 0.0, false, |ui| {
+                for index in 0..12 {
+                    ui.text(format!("{line}{index}"), TextRole::Label);
+                }
+            });
+        };
+        bench.render(build).await.unwrap();
+        bench
+            .event(FrameInput::Wheel {
+                x: 80.0,
+                y: 40.0,
+                delta_x: 0.0,
+                delta_y: 5000.0,
+                modifiers: Default::default(),
+                hit: None,
+            })
+            .await;
+        let deep = bench.ui.lock().await.state.scroll.get("list").copied().unwrap();
+        assert!(deep > 0.0, "先滚到深处");
+        // 面板改宽：行不再折行、内容变矮——滚动位原样保留（旧实现把钳制值写回，位置丢失）
+        bench.event(FrameInput::Resize { width: 900.0, height: 240.0 }).await;
+        bench.render(build).await.unwrap();
+        let kept = bench.ui.lock().await.state.scroll.get("list").copied().unwrap();
+        assert_eq!(kept, deep, "改宽后滚动位不被钳制写回");
+    }
+
     /// 聚焦即按拍推进（光标闪烁），闪烁的暗相只收竖条、不撤输入法锚点。
     #[tokio::test]
     async fn focused_input_blinks_the_caret_and_keeps_the_ime_anchor() {
@@ -2213,6 +2245,85 @@ let a = 1;
             bench.event(redo).await,
             vec![UiEvent::Text { id: "host".into(), value: "a".into() }],
             "重做前进一笔"
+        );
+    }
+
+    /// 剪切与粘贴同口径入撤销栈：一步撤销回到剪切前的值，不跳过剪切态。
+    #[tokio::test]
+    async fn cut_enters_the_undo_history() {
+        let mut bench = Bench::new(240.0, 120.0).await;
+        bench.render(|ui| ui.text_input("host", "", "")).await.unwrap();
+        bench.set_value("host", "");
+        bench
+            .event(FrameInput::PointerDown {
+                x: 20.0,
+                y: 10.0,
+                button: MouseButton::Left,
+                hit: Some("host".into()),
+            })
+            .await;
+        for (typed_char, value) in [("a", "a"), ("b", "ab"), ("c", "abc")] {
+            let events = bench.event(typed(typed_char)).await;
+            assert_eq!(events, vec![UiEvent::Text { id: "host".into(), value: value.into() }]);
+            bench.set_value("host", value);
+        }
+        let control = Modifiers { control: true, ..Modifiers::default() };
+        let key = |character: &str| FrameInput::Key {
+            key: Key::Character { text: character.into() },
+            action: KeyAction::Press,
+            modifiers: control,
+            text: None,
+        };
+        bench.event(key("a")).await;
+        let events = bench.event(key("x")).await;
+        assert_eq!(events, vec![UiEvent::Text { id: "host".into(), value: String::new() }]);
+        bench.set_value("host", "");
+        assert_eq!(
+            bench.event(key("z")).await,
+            vec![UiEvent::Text { id: "host".into(), value: "abc".into() }],
+            "一步撤销回到剪切前"
+        );
+    }
+
+    /// 点多行输入框只改光标与选区：撤销历史不得被整条替换成空。
+    #[tokio::test]
+    async fn clicking_a_text_area_keeps_the_undo_history() {
+        let mut bench = Bench::new(240.0, 120.0).await;
+        bench.render(|ui| ui.text_area_submit("area", "", "", 48.0)).await.unwrap();
+        bench.set_value("area", "");
+        bench
+            .event(FrameInput::PointerDown {
+                x: 20.0,
+                y: 10.0,
+                button: MouseButton::Left,
+                hit: Some("area".into()),
+            })
+            .await;
+        for (typed_char, value) in [("a", "a"), ("b", "ab")] {
+            let events = bench.event(typed(typed_char)).await;
+            assert_eq!(events, vec![UiEvent::Text { id: "area".into(), value: value.into() }]);
+            bench.set_value("area", value);
+        }
+        // 再点一次（落点换处）：旧实现用 InputState::default() 整条替换，撤销历史清空
+        bench
+            .event(FrameInput::PointerDown {
+                x: 30.0,
+                y: 20.0,
+                button: MouseButton::Left,
+                hit: Some("area".into()),
+            })
+            .await;
+        let control = Modifiers { control: true, ..Modifiers::default() };
+        let undo = FrameInput::Key {
+            key: Key::Character { text: "z".into() },
+            action: KeyAction::Press,
+            modifiers: control,
+            text: None,
+        };
+        assert_eq!(
+            bench.event(undo).await,
+            vec![UiEvent::Text { id: "area".into(), value: "a".into() }],
+            "点击后撤销历史仍在"
         );
     }
 

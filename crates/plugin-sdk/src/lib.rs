@@ -14,7 +14,6 @@ pub mod in_process;
 pub use atelyx_plugin_protocol as protocol;
 /// ABI 类型再导出：同进程插件导出函数表时使用。
 pub use atelyx_plugin_abi as abi;
-pub use connection::ConnectError;
 pub use context::Context;
 pub use handler::PluginHandler;
 pub use protocol::handshake::PluginInfo;

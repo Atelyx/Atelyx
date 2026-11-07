@@ -853,12 +853,12 @@ impl Builder<'_> {
         for block in blocks {
             let (from, to) = block_range(block);
             self.gap_before(*previous, from, self.prose_height(self.base_size()));
-            self.block(block, width, depth, previous, to);
+            self.block(block, width, depth, previous);
             *previous = to;
         }
     }
 
-    fn block(&mut self, block: &MarkdownBlock, width: f32, depth: u32, previous: &mut usize, to: usize) {
+    fn block(&mut self, block: &MarkdownBlock, width: f32, depth: u32, previous: &mut usize) {
         let indent = depth as f32 * LIST_MARKER_W;
         let inner = (width - indent).max(1.0);
         match block {
@@ -947,7 +947,6 @@ impl Builder<'_> {
                 self.flow(runs, indent, inner, line);
             }
         }
-        let _ = to;
     }
 
     fn heading_size(&self, level: u8) -> f32 {

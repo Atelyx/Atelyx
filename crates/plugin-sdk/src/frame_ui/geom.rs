@@ -30,7 +30,6 @@ impl Rect {
         x >= self.x && x <= self.right() && y >= self.y && y <= self.bottom()
     }
 
-    /// 交集；不相交时返回空矩形（宽或高为 0）。
     /// 是否整体落在 `outer` 内。求交会引入末位误差，这里按 0.01 的容差判，
     /// 直接比较求交结果与自身相等会把本就在视口内的矩形误判成越界。
     pub fn covered_by(&self, outer: Rect) -> bool {
@@ -41,6 +40,7 @@ impl Rect {
             && self.bottom() <= outer.bottom() + EPSILON
     }
 
+    /// 交集；不相交时返回空矩形（宽或高为 0）。
     pub fn intersect(&self, other: Rect) -> Rect {
         let x = self.x.max(other.x);
         let y = self.y.max(other.y);

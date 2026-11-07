@@ -2917,16 +2917,20 @@ fn draw_scroll(
     let offset = if follow_end && (!follow_before || previous >= previous_max - 0.5) {
         max_offset
     } else {
-        previous.clamp(0.0, max_offset)
+        previous
     };
+    // 写回未钳制的滚动位：面板改宽时内容重排使 max_offset 变小，钳制值一旦写回就把
+    // 滚动位永久压向边界（拖动分割条时表现为滚动条来回跳动、位置丢失）。钳制只作用于
+    // 本帧绘制，滚动位回到原内容位；量算在途的估算帧同样不得改写滚动位
     ctx.scrolls.insert(id.to_string(), offset);
     ctx.scroll_max.insert(id.to_string(), max_offset);
+    let painted = offset.min(max_offset);
     ctx.record(id, Layout::Scroll { viewport: visible, content: laid.content });
     // 内容按视口裁剪（并以槽左缘为右界）：滚出视口的条目不得画进工具栏 / 标题区或槽内
     let content_clip =
         Rect::new(rect.x, rect.y, (rect.w - SCROLLBAR_SLOT_W).max(1.0), rect.h).intersect(visible);
     ctx.with_clip(content_clip, |ctx| {
-        let mut y = rect.y - offset;
+        let mut y = rect.y - painted;
         for (index, item) in items.iter().enumerate() {
             let slot = Rect::new(rect.x, y, laid.widths[index], laid.heights[index]);
             let slot_visible = slot.intersect(visible);
@@ -2938,7 +2942,7 @@ fn draw_scroll(
     });
     if overflow {
         let track = Rect::new(rect.right() - SCROLLBAR_SLOT_W, rect.y, SCROLLBAR_SLOT_W, rect.h);
-        draw_scrollbar(ctx, id, track, visible, laid.content, offset, max_offset, true);
+        draw_scrollbar(ctx, id, track, visible, laid.content, painted, max_offset, true);
     }
 }
 

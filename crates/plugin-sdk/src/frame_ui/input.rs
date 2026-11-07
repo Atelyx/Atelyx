@@ -354,9 +354,12 @@ async fn pointer_down(
                 None => (caret, caret),
             };
             let scroll = state.inputs.get(id).map(|item| item.scroll).unwrap_or(0.0);
-            state
-                .inputs
-                .insert(id.to_string(), InputState { caret, anchor, scroll, ..InputState::default() });
+            // 只改光标/选区与滚动，不整条替换输入态：default() 会把撤销/重做历史一并清掉
+            let item = state.inputs.entry(id.to_string()).or_default();
+            item.caret = caret;
+            item.anchor = anchor;
+            item.scroll = scroll;
+            item.preedit.clear();
             set_focus(state, Some(id.to_string()), value_of, events);
             state.press = Some(Press { id: id.to_string(), from_input: true });
         }
@@ -691,8 +694,11 @@ fn wheel(state: &mut UiState, x: f32, y: f32, delta_x: f32, delta_y: f32) -> Opt
         .min_by(|a, b| (a.2.w * a.2.h).total_cmp(&(b.2.w * b.2.h)))?;
     let max_offset = (content - viewport.h).max(0.0);
     let current = state.scroll.get(&id).copied().unwrap_or(0.0);
-    let next = (current + delta_y).clamp(0.0, max_offset);
-    if (next - current).abs() < 0.01 {
+    // 滚动位可能大于 max（改宽后内容变矮，保留原内容位）：以可视位置为基准滚，
+    // 不把超出部分折叠进本次滚动
+    let base = current.min(max_offset);
+    let next = (base + delta_y).clamp(0.0, max_offset);
+    if (next - base).abs() < 0.01 {
         return None;
     }
     state.scroll.insert(id.clone(), next);
@@ -871,6 +877,8 @@ async fn edit_key(
                     if let Some((from, to)) = selection(&current, state.inputs.get(id)) {
                         clip_write(ctx, &current[from..to]).await;
                         let item = state.inputs.entry(id.to_string()).or_default();
+                        // 剪切与粘贴同口径入撤销栈：否则一步撤销会跳过剪切态直接回到更早的快照
+                        push_history(item, &current);
                         item.caret = from;
                         item.anchor = from;
                         let value = format!("{}{}", &current[..from], &current[to..]);
@@ -893,7 +901,7 @@ async fn edit_key(
                             events.push(UiEvent::Text { id: id.to_string(), value });
                         }
                     }
-                    Err(err) => eprintln!("读取剪贴板失败：{err}"),
+                    Err(err) => ctx.log_error(&format!("读取剪贴板失败：{err}")),
                 },
                 _ => {}
             }
@@ -1309,7 +1317,7 @@ async fn refill(state: &mut UiState, ctx: &Context, value: &str, font: FontSpec,
         match ctx.measure_batch(chunk.to_vec()).await {
             Ok(result) => state.metrics.apply(chunk, &result.sizes),
             Err(err) => {
-                eprintln!("量算失败，按估算字宽落光标：{err}");
+                ctx.log_error(&format!("量算失败，按估算字宽落光标：{err}"));
                 break;
             }
         }
@@ -1497,7 +1505,7 @@ async fn clip_write(ctx: &Context, text: &str) {
         return;
     }
     if let Err(err) = ctx.clipboard_write(text).await {
-        eprintln!("写剪贴板失败：{err}");
+        ctx.log_error(&format!("写剪贴板失败：{err}"));
     }
 }
 
