@@ -8,10 +8,11 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 # 二进制查找目录交给 cargo 解析（含环境变量与各层配置的 target-dir）：仓库路径含非 ASCII
-# 字符时 MSVC 编 C 依赖会失败，cargo 产物可能在仓库外的 ASCII 路径。发行暂存产物
-# （dist / 预置插件铺盘）固定落仓库内 target/，不跟随 cargo 产物目录。
+# 字符时 MSVC 编 C 依赖会失败，cargo 产物可能在仓库外的 ASCII 路径；metadata 解析失败时
+# 回落仓库内 target。发行暂存产物（dist / 预置插件铺盘）固定落仓库内 target/，不跟随
+# cargo 产物目录。
 target_dir="$(cargo metadata --format-version 1 --no-deps 2>/dev/null |
-  grep -o '"target_directory":"[^"]*"' | head -n1 | cut -d'"' -f4 | sed 's/\\\\/\\/g')"
+  grep -o '"target_directory":"[^"]*"' | head -n1 | cut -d'"' -f4 | sed 's/\\\\/\\/g' || true)"
 target_dir="${target_dir:-$repo_root/target}"
 dist="$repo_root/target/dist"
 presets_stage="$repo_root/target/preset-plugins"

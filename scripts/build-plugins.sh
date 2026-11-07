@@ -8,6 +8,10 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 dest="${1:?用法：build-plugins.sh <目标目录> [debug|release]}"
 profile="${2:-release}"
+case "$profile" in
+  debug|release) ;;
+  *) echo "错误：profile 只支持 debug 或 release" >&2; exit 1 ;;
+esac
 cd "$repo_root"
 
 shopt -s nullglob
@@ -26,11 +30,11 @@ done
 "${cargo_cmd[@]}"
 
 mkdir -p "$dest"
-# 构建产物目录交给 cargo 解析（含环境变量与各层配置的 target-dir）；
-# metadata 不可用时回落仓库内 target。仓库路径含非 ASCII 字符时 MSVC 编 C 依赖会失败，
-# 用户可在 cargo 配置里把产物指到 ASCII 路径。
+# 构建产物目录交给 cargo 解析（含环境变量与各层配置的 target-dir）；metadata 解析失败时
+# 回落仓库内 target。仓库路径含非 ASCII 字符时 MSVC 编 C 依赖会失败，用户可在 cargo
+# 配置里把产物指到 ASCII 路径。
 bin_root="$(cargo metadata --format-version 1 --no-deps 2>/dev/null |
-  grep -o '"target_directory":"[^"]*"' | head -n1 | cut -d'"' -f4 | sed 's/\\\\/\\/g')"
+  grep -o '"target_directory":"[^"]*"' | head -n1 | cut -d'"' -f4 | sed 's/\\\\/\\/g' || true)"
 bin_root="${bin_root:-$repo_root/target}"
 for manifest in "${manifests[@]}"; do
   id="$(sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$manifest" | head -n1)"
