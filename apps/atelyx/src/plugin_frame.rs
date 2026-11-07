@@ -848,6 +848,9 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginFrame<'_> {
             self.send(FrameInput::Resize { width: bounds.width, height: bounds.height });
         }
         let frame = &current;
+        // 几何缓存按帧声明尺寸作键：三角化结果只与帧内容有关（绘制期再按实际 bounds
+        // 平移与裁剪），stale 帧在改宽期间内容未变也不因画布尺寸变化逐拍重三角化
+        let cache_size = frame.size.map_or(bounds.size(), |size| Size::new(size.w, size.h));
         // 从没画过按当前尺寸排好的内容：画静态占位，不留白。有旧画面就照旧帧裁剪绘制。
         let has_content = state.painted.borrow().is_some();
         if !laid_out && !has_content {
@@ -935,7 +938,7 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginFrame<'_> {
                 }
                 match step {
                     plugin_paint::PaintStep::Shapes { range, clip: step_clip } => {
-                        let geometry = caches[slot].draw(renderer, bounds.size(), |canvas| {
+                        let geometry = caches[slot].draw(renderer, cache_size, |canvas| {
                             plugin_paint::execute_shapes(
                                 canvas,
                                 &frame.commands,
@@ -949,7 +952,7 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginFrame<'_> {
                         });
                     }
                     plugin_paint::PaintStep::Image { index, clip: step_clip } => {
-                        let geometry = caches[slot].draw(renderer, bounds.size(), |canvas| {
+                        let geometry = caches[slot].draw(renderer, cache_size, |canvas| {
                             plugin_paint::execute_shapes(
                                 canvas,
                                 &frame.commands,
