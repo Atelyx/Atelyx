@@ -208,7 +208,7 @@ fn load_region(region: &str) -> Result<Yaml, String> {
     while matches!(events.get(idx), Some(Event::StreamStart | Event::DocumentStart)) {
         idx += 1;
     }
-    let value = load_node(&events, &mut idx)?;
+    let value = load_node(&events, &mut idx, 0)?;
     while matches!(events.get(idx), Some(Event::DocumentEnd | Event::StreamEnd)) {
         idx += 1;
     }
@@ -218,7 +218,11 @@ fn load_region(region: &str) -> Result<Yaml, String> {
     Ok(value)
 }
 
-fn load_node(events: &[Event], idx: &mut usize) -> Result<Yaml, String> {
+/// 嵌套结构（序列 / 映射）递归深度上限：真实 frontmatter 远达不到，无上限的事件递归
+/// 会被 `a: [[[[…]]]]` 这类深嵌套打出栈溢出；到顶后该层按空标量降级并跳到配对结束。
+const MAX_YAML_DEPTH: u32 = 64;
+
+fn load_node(events: &[Event], idx: &mut usize, depth: u32) -> Result<Yaml, String> {
     let Some(ev) = events.get(*idx) else {
         return Err("YAML 事件缺失".into());
     };
@@ -239,7 +243,11 @@ fn load_node(events: &[Event], idx: &mut usize) -> Result<Yaml, String> {
             }
             let mut items = Vec::new();
             while !matches!(events.get(*idx), Some(Event::SequenceEnd)) {
-                items.push(load_node(events, idx)?);
+                if depth >= MAX_YAML_DEPTH {
+                    skip_to_end(events, idx, b']');
+                    return Ok(Yaml::Str(String::new()));
+                }
+                items.push(load_node(events, idx, depth + 1)?);
             }
             *idx += 1;
             Ok(Yaml::Seq(items))
@@ -250,8 +258,12 @@ fn load_node(events: &[Event], idx: &mut usize) -> Result<Yaml, String> {
             }
             let mut pairs: Vec<(String, Yaml)> = Vec::new();
             while !matches!(events.get(*idx), Some(Event::MappingEnd)) {
+                if depth >= MAX_YAML_DEPTH {
+                    skip_to_end(events, idx, b'}');
+                    return Ok(Yaml::Str(String::new()));
+                }
                 let key = load_key(events, idx)?;
-                let value = load_node(events, idx)?;
+                let value = load_node(events, idx, depth + 1)?;
                 pairs.retain(|(k, _)| k != &key);
                 pairs.push((key, value));
             }
@@ -260,6 +272,37 @@ fn load_node(events: &[Event], idx: &mut usize) -> Result<Yaml, String> {
         }
         Event::Alias(_) => Err("不支持的 YAML 锚点引用".into()),
         _ => Err("意外的 YAML 事件".into()),
+    }
+}
+
+/// 深度到顶后跳过本层剩余事件直到对应的序列 / 映射结束标记（`which` = `]` 或 `}`）。
+/// 序列与映射的 Start/End 对称计数：被跳过区域可混用两类容器，只按单侧计数会提前终止。
+fn skip_to_end(events: &[Event], idx: &mut usize, which: u8) {
+    let (end, mut seq, mut map) = match which {
+        b']' => (Event::SequenceEnd, 0usize, 0usize),
+        _ => (Event::MappingEnd, 0usize, 0usize),
+    };
+    while let Some(ev) = events.get(*idx) {
+        match ev {
+            Event::SequenceStart(..) => seq += 1,
+            Event::MappingStart(..) => map += 1,
+            Event::SequenceEnd => {
+                if seq == 0 && *ev == end && map == 0 {
+                    *idx += 1;
+                    return;
+                }
+                seq = seq.saturating_sub(1);
+            }
+            Event::MappingEnd => {
+                if map == 0 && *ev == end && seq == 0 {
+                    *idx += 1;
+                    return;
+                }
+                map = map.saturating_sub(1);
+            }
+            _ => {}
+        }
+        *idx += 1;
     }
 }
 

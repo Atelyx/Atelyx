@@ -7,12 +7,19 @@ use super::types::{InlineSpan, LinkForm, MentionCandidate, ParseOptions, RangeIn
 use regex::Regex;
 use std::sync::OnceLock;
 
-pub(super) fn parse_inline_range(ctx: &Ctx, from: usize, to: usize) -> Vec<InlineSpan> {
+/// 行内结构递归（强调 / 高亮 / HTML 组）深度上限：真实内容远达不到，无上限的互递归
+/// 会被 `*_*_*_…` 这类深嵌套强调打出栈溢出；到顶后整段按字面文本降级。
+const MAX_INLINE_DEPTH: u32 = 64;
+
+pub(super) fn parse_inline_range(ctx: &Ctx, from: usize, to: usize, depth: u32) -> Vec<InlineSpan> {
     if to <= from {
         return Vec::new();
     }
-    let mut atoms = scan_atoms(ctx, from, to);
-    let mut candidates = scan_line_matches(ctx, from, to);
+    if depth >= MAX_INLINE_DEPTH {
+        return vec![InlineSpan::Text { from, to, text: ctx.source[from..to].to_string() }];
+    }
+    let mut atoms = scan_atoms(ctx, from, to, depth);
+    let mut candidates = scan_line_matches(ctx, from, to, depth);
     candidates.sort_by(|a, b| a.from.cmp(&b.from).then(b.to.cmp(&a.to)));
 
     let mut accepted: Vec<Atom> = Vec::new();
@@ -61,7 +68,7 @@ fn push_text(out: &mut Vec<InlineSpan>, source: &str, from: usize, to: usize) {
 
 // ===== 结构原子扫描 =====
 
-fn scan_atoms(ctx: &Ctx, from: usize, to: usize) -> Vec<Atom> {
+fn scan_atoms(ctx: &Ctx, from: usize, to: usize, depth: u32) -> Vec<Atom> {
     let src = ctx.source;
     let bytes = src.as_bytes();
     let mut delims: Vec<Delim> = Vec::new();
@@ -272,7 +279,7 @@ fn scan_atoms(ctx: &Ctx, from: usize, to: usize) -> Vec<Atom> {
     flush_html(&mut html_group, &mut html_depth, &mut atoms);
 
     // 强调配对
-    let mut containers = process_emphasis(ctx, &mut delims, from, to);
+    let mut containers = process_emphasis(ctx, &mut delims, from, to, depth);
     // 容器内极大化：嵌套强调的外层保留，内层由 children 携带
     containers.sort_by(|a, b| a.from.cmp(&b.from).then(b.to.cmp(&a.to)));
     let mut maximal: Vec<Atom> = Vec::new();
@@ -810,7 +817,13 @@ fn is_punct_char(c: char) -> bool {
     c.is_ascii_punctuation() || (!c.is_alphanumeric() && !c.is_whitespace() && !c.is_ascii())
 }
 
-fn process_emphasis(ctx: &Ctx, delims: &mut Vec<Delim>, from: usize, to: usize) -> Vec<Atom> {
+fn process_emphasis(
+    ctx: &Ctx,
+    delims: &mut Vec<Delim>,
+    from: usize,
+    to: usize,
+    depth: u32,
+) -> Vec<Atom> {
     let _ = (from, to);
     let mut containers: Vec<Atom> = Vec::new();
     let mut closer_idx = 0usize;
@@ -857,10 +870,10 @@ fn process_emphasis(ctx: &Ctx, delims: &mut Vec<Delim>, from: usize, to: usize) 
         let children: Vec<InlineSpan> = if reuse {
             match last_node.take() {
                 Some(prev) => vec![prev.span],
-                None => parse_inline_range(ctx, delims[oi].end, delims[closer_idx].start),
+                None => parse_inline_range(ctx, delims[oi].end, delims[closer_idx].start, depth + 1),
             }
         } else {
-            parse_inline_range(ctx, delims[oi].end, delims[closer_idx].start)
+            parse_inline_range(ctx, delims[oi].end, delims[closer_idx].start, depth + 1)
         };
         let span = match (ch, strong) {
             (b'~', _) => InlineSpan::Strike { from: node_from, to: node_to, children },
@@ -902,14 +915,14 @@ fn process_emphasis(ctx: &Ctx, delims: &mut Vec<Delim>, from: usize, to: usize) 
 
 // ===== 按行正则补充 =====
 
-fn scan_line_matches(ctx: &Ctx, from: usize, to: usize) -> Vec<Atom> {
+fn scan_line_matches(ctx: &Ctx, from: usize, to: usize, depth: u32) -> Vec<Atom> {
     let src = ctx.source;
     let mut out: Vec<Atom> = Vec::new();
     let mut line_start = src[..from].rfind('\n').map(|i| i + 1).unwrap_or(0);
     while line_start < to {
         let nl = src[line_start..to].find('\n').map(|i| line_start + i).unwrap_or(to);
         let line_text = &src[line_start..nl];
-        scan_one_line(ctx, line_text, line_start, &mut out);
+        scan_one_line(ctx, line_text, line_start, depth, &mut out);
         line_start = nl + 1;
     }
     out
@@ -919,7 +932,7 @@ fn match_all<'a>(re: &Regex, text: &'a str) -> Vec<regex::Captures<'a>> {
     re.captures_iter(text).collect()
 }
 
-fn scan_one_line(ctx: &Ctx, line_text: &str, line_from: usize, out: &mut Vec<Atom>) {
+fn scan_one_line(ctx: &Ctx, line_text: &str, line_from: usize, depth: u32, out: &mut Vec<Atom>) {
     let push =
         |from: usize, to: usize, span: InlineSpan, out: &mut Vec<Atom>| out.push(Atom { from, to, span });
 
@@ -936,7 +949,7 @@ fn scan_one_line(ctx: &Ctx, line_text: &str, line_from: usize, out: &mut Vec<Ato
     for m in match_all(re_hl, line_text) {
         let from = line_from + m.get(0).unwrap().start();
         let to = from + m.get(0).unwrap().len();
-        let children = parse_inline_range(ctx, from + 2, to - 2);
+        let children = parse_inline_range(ctx, from + 2, to - 2, depth + 1);
         push(from, to, InlineSpan::Highlight { from, to, children }, out);
     }
 

@@ -24,7 +24,7 @@ pub(super) struct Ctx<'a> {
 pub fn parse_markdown(source: &str, options: &ParseOptions) -> MarkdownDocument {
     let ctx = Ctx { source, options, no_bare_autolink: false };
     // 第一遍取盲区：fence/缩进代码/HTML 块内的 `$$` 不是数学定界符
-    let blind: Vec<RangeInfo> = parse_blocks(&ctx, 0, source.len(), None)
+    let blind: Vec<RangeInfo> = parse_blocks(&ctx, 0, source.len(), None, 0)
         .into_iter()
         .filter(|b| {
             matches!(
@@ -45,6 +45,7 @@ pub fn parse_markdown(source: &str, options: &ParseOptions) -> MarkdownDocument 
         0,
         source.len(),
         Some(&mut MathState { ranges, used: HashSet::new() }),
+        0,
     );
     MarkdownDocument { source: source.to_string(), blocks }
 }
@@ -53,7 +54,7 @@ pub fn parse_markdown(source: &str, options: &ParseOptions) -> MarkdownDocument 
 /// 行内片段由渲染层按区间重解析（与正文同一套行内语义）。
 pub fn parse_inline(source: &str, from: usize, to: usize, options: &ParseOptions) -> Vec<InlineSpan> {
     let ctx = Ctx { source, options, no_bare_autolink: false };
-    inline::parse_inline_range(&ctx, from, to)
+    inline::parse_inline_range(&ctx, from, to, 0)
 }
 
 // ===== 行原语 =====
@@ -155,11 +156,16 @@ fn is_blank(text: &str) -> bool {
 
 // ===== 主解析 =====
 
+/// 容器递归（引用 / 列表嵌套）深度上限：真实内容远达不到。嵌套构造每层把全文复制进
+/// 缓冲再递归重解，互递归无上限会被深嵌套正文打出栈溢出；到顶后嵌套标记按段落文本降级。
+const MAX_CONTAINER_DEPTH: u32 = 64;
+
 fn parse_blocks(
     ctx: &Ctx,
     from: usize,
     to: usize,
     mut math: Option<&mut MathState>,
+    depth: u32,
 ) -> Vec<MarkdownBlock> {
     let src = ctx.source;
     let mut blocks = Vec::new();
@@ -184,7 +190,7 @@ fn parse_blocks(
                 // 块区间 = 整行（含尾 # 序列）；行内片段 = 剥标记后的内容区间
                 // h.from/h.to 相对去掉行首缩进的 body，回加 ind 才是行内绝对偏移
                 let base = line.start + ind;
-                let inline = inline::parse_inline_range(ctx, base + h.from, base + h.to);
+                let inline = inline::parse_inline_range(ctx, base + h.from, base + h.to, 0);
                 blocks.push(MarkdownBlock::Heading {
                     level: h.level,
                     from: base,
@@ -200,14 +206,14 @@ fn parse_blocks(
                 pos = next;
                 continue;
             }
-            if body.starts_with('>') {
-                let (block, next) = collect_blockquote(ctx, &line, to);
+            if body.starts_with('>') && depth < MAX_CONTAINER_DEPTH {
+                let (block, next) = collect_blockquote(ctx, &line, to, depth);
                 blocks.push(block);
                 pos = next;
                 continue;
             }
-            if let Some(kind) = list_kind(body) {
-                let (block, next) = collect_list(ctx, &line, ind, ind_cols, kind, to);
+            if let Some(kind) = list_kind(body).filter(|_| depth < MAX_CONTAINER_DEPTH) {
+                let (block, next) = collect_list(ctx, &line, ind, ind_cols, kind, to, depth);
                 blocks.push(block);
                 pos = next;
                 continue;
@@ -546,7 +552,7 @@ fn is_paragraph_continuation(text: &str) -> bool {
         || fence_open(body).is_some()
         || atx_heading(body).is_some()
         || is_hr(body)
-        || list_kind(body).is_some_and(|k| k.has_content())
+        || list_kind(body).is_some()
         || html_block_open(body).is_some()
         || is_link_ref_def_line(body)
     {
@@ -569,7 +575,7 @@ fn is_link_ref_def_line(body: &str) -> bool {
 }
 
 
-fn collect_blockquote(ctx: &Ctx, first: &Line, to: usize) -> (MarkdownBlock, usize) {
+fn collect_blockquote(ctx: &Ctx, first: &Line, to: usize, depth: u32) -> (MarkdownBlock, usize) {
     let src = ctx.source;
     let mut lines: Vec<Line> = vec![*first];
     let (first_skip, first_pad) = quote_prefix(first.text).unwrap_or((0, 0));
@@ -593,7 +599,7 @@ fn collect_blockquote(ctx: &Ctx, first: &Line, to: usize) -> (MarkdownBlock, usi
     let bq_to = lines.last().unwrap().end;
     let prefix_end = strips.first().map(|s| s.0 + s.1).unwrap_or(0);
     // 递归从行首起（strips 以行首为键；行首缩进由引用前缀一并剥掉）
-    let mut children = recurse_container(ctx, strips, first.start, bq_to);
+    let mut children = recurse_container(ctx, strips, first.start, bq_to, depth);
     // 续行 `>` 前缀剔除（贪婪逐行；只影响落在子块区间内的前缀）
     strip_quote_prefixes(&mut children, quote_line_prefixes(ctx.source, bq_from, bq_to), ctx.source);
 
@@ -701,12 +707,6 @@ enum ListKind {
     Ordered(u8),
 }
 
-impl ListKind {
-    fn has_content(&self) -> bool {
-        true
-    }
-}
-
 fn list_kind(body: &str) -> Option<ListKind> {
     let b = body.as_bytes();
     match b.first()? {
@@ -754,6 +754,7 @@ fn collect_list(
     first_ind_cols: usize,
     kind: ListKind,
     to: usize,
+    depth: u32,
 ) -> (MarkdownBlock, usize) {
     let src = ctx.source;
     let mut items: Vec<MarkdownListItem> = Vec::new();
@@ -851,7 +852,7 @@ fn collect_list(
             break;
         }
         let item_to = last;
-        let children_raw = recurse_container(ctx, strips, item_from, item_to);
+        let children_raw = recurse_container(ctx, strips, item_from, item_to, depth);
         // 首块为段落时跳过（内容交给渲染层剥标记后行内渲染）
         let children = match children_raw.first() {
             Some(MarkdownBlock::Paragraph { .. }) => children_raw.into_iter().skip(1).collect(),
@@ -1205,7 +1206,7 @@ fn collect_paragraph(
     if let Some(level) = heading {
         // 内容 = 下划线行之前的标题文本行
         let content_end = lines[lines.len() - 2].end;
-        let inline = inline::parse_inline_range(ctx, para_from, content_end);
+        let inline = inline::parse_inline_range(ctx, para_from, content_end, 0);
         return (
             vec![MarkdownBlock::Heading { level, from: para_from, to: para_end, inline }],
             pos,
@@ -1231,14 +1232,14 @@ fn collect_paragraph(
     // LinkReference 形态段落：URL 部分保持纯文本（不产裸 URL autolink）
     if is_link_ref_def_line(lines[0].text) {
         let ctx2 = Ctx { source: ctx.source, options: ctx.options, no_bare_autolink: true };
-        let inline = inline::parse_inline_range(&ctx2, para_from, para_end);
+        let inline = inline::parse_inline_range(&ctx2, para_from, para_end, 0);
         return (vec![MarkdownBlock::Paragraph { from: para_from, to: para_end, inline }], pos);
     }
     (vec![paragraph_block(ctx, para_from, para_end)], pos)
 }
 
 fn paragraph_block(ctx: &Ctx, from: usize, to: usize) -> MarkdownBlock {
-    let inline = inline::parse_inline_range(ctx, from, to);
+    let inline = inline::parse_inline_range(ctx, from, to, 0);
     MarkdownBlock::Paragraph { from, to, inline }
 }
 
@@ -1249,7 +1250,7 @@ fn math_block_of(ctx: &Ctx, r: RangeInfo) -> MarkdownBlock {
     if !inner.is_empty() {
         return MarkdownBlock::MathBlock { from: r.from, to: r.to, tex: inner.to_string() };
     }
-    let inline = inline::parse_inline_range(ctx, r.from, r.to);
+    let inline = inline::parse_inline_range(ctx, r.from, r.to, 0);
     MarkdownBlock::Paragraph { from: r.from, to: r.to, inline }
 }
 
@@ -1310,7 +1311,7 @@ fn footnote_def(ctx: &Ctx, first: &Line) -> Option<MarkdownBlock> {
     let content = after.trim_start_matches([' ', '\t']);
     let text_from = base + (line.len() - content.len());
     let ctx2 = Ctx { source: ctx.source, options: ctx.options, no_bare_autolink: true };
-    let inline = inline::parse_inline_range(&ctx2, text_from, base + line.len());
+    let inline = inline::parse_inline_range(&ctx2, text_from, base + line.len(), 0);
     Some(MarkdownBlock::FootnoteDef {
         from: base,
         to: base + line.len(),
@@ -1346,6 +1347,7 @@ fn recurse_container(
     strips: Vec<(usize, usize, usize)>,
     from: usize,
     to: usize,
+    depth: u32,
 ) -> Vec<MarkdownBlock> {
     let src = ctx.source;
     let mut buf = String::new();
@@ -1372,7 +1374,7 @@ fn recurse_container(
         pos = next_pos(&line, to, src);
     }
     let inner = Ctx { source: &buf, options: ctx.options, no_bare_autolink: false };
-    let blocks = parse_blocks(&inner, 0, buf.len(), None);
+    let blocks = parse_blocks(&inner, 0, buf.len(), None, depth + 1);
     let om = OffsetMap { segments: map };
     blocks.into_iter().map(|b| map_block(b, &om)).collect()
 }

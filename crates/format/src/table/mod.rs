@@ -104,7 +104,7 @@ pub fn reorder_by<T>(items: &mut [T], order: &[String], key: impl Fn(&T) -> &str
 
 /// 计算表格增量补丁：与落盘基线按值 diff，只含变化/新增/删除的字段与行；数组顺序是数组属性、
 /// 值 diff 看不见，id 序列不同即视为排序变更并经 field_order/row_order 显式携带。
-/// 无任何变化返回 None（调用方跳过写盘）。title 变化随补丁携带（改名同步磁盘标题）。
+/// 无任何变化返回 None（调用方跳过写盘）。title 不随补丁携带（文件改名链负责磁盘标题）。
 pub fn compute_table_patch(baseline: &TableFile, current: &TableFile) -> Option<TablePatch> {
     let last_fields: HashMap<&str, &TableField> =
         baseline.fields.iter().map(|f| (f.id.as_str(), f)).collect();
