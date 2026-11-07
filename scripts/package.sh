@@ -7,14 +7,14 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
-# 产物目录交给 cargo 解析（含环境变量与各层配置的 target-dir）；metadata 不可用时回落
-# 仓库内 target。仓库路径含非 ASCII 字符时 MSVC 编 C 依赖会失败，用户可在 cargo 配置里
-# 把产物指到 ASCII 路径。
+# 二进制查找目录交给 cargo 解析（含环境变量与各层配置的 target-dir）：仓库路径含非 ASCII
+# 字符时 MSVC 编 C 依赖会失败，cargo 产物可能在仓库外的 ASCII 路径。发行暂存产物
+# （dist / 预置插件铺盘）固定落仓库内 target/，不跟随 cargo 产物目录。
 target_dir="$(cargo metadata --format-version 1 --no-deps 2>/dev/null |
   grep -o '"target_directory":"[^"]*"' | head -n1 | cut -d'"' -f4 | sed 's/\\\\/\\/g')"
 target_dir="${target_dir:-$repo_root/target}"
-dist="$target_dir/dist"
-presets_stage="$target_dir/preset-plugins"
+dist="$repo_root/target/dist"
+presets_stage="$repo_root/target/preset-plugins"
 notices="$repo_root/docs/THIRD_PARTY_NOTICES.md"
 icon="$repo_root/assets/icons/icon.ico"
 nsi="$repo_root/packaging/nsis/installer.nsi"

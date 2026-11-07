@@ -13,7 +13,12 @@ size_mb() {
 
 before=0
 after=0
-for t in "$repo_root/target" "$repo_root/apps/server/target"; do
+# CARGO_TARGET_DIR 指向仓库外时（MSVC 非 ASCII 路径约束），真正的增量缓存也在那里
+targets=("$repo_root/target" "$repo_root/apps/server/target")
+if [ -n "${CARGO_TARGET_DIR:-}" ]; then
+  targets+=("$CARGO_TARGET_DIR")
+fi
+for t in "${targets[@]}"; do
   [ -d "$t" ] || continue
   before=$((before + $(size_mb "$t")))
   while IFS= read -r -d '' dir; do

@@ -379,7 +379,7 @@ pub enum PluginsMsg {
         gen: u64,
         request_id: u64,
         path: String,
-        result: Result<String, String>,
+        result: Result<(String, Option<String>), String>,
     },
     /// 当前容器与在线成员快照（`space.room`）。
     SpaceRoom { request_id: u64 },
@@ -2025,7 +2025,11 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
                 return Task::none();
             }
             match result {
-                Ok(new_file) => {
+                Ok((new_file, history_error)) => {
+                    // 内容已落服务端，历史记版失败单独提示（不报成保存失败）
+                    if let Some(error) = &history_error {
+                        app.notify(NoticeLevel::Warning, error.clone());
+                    }
                     let renamed = new_file != path;
                     // 补丁带标题时服务端已按标题改名：先把宿主打开路径同步到新路径，
                     // 再回执给插件——插件据回执改 session.file 时宿主已认新路径
@@ -2546,10 +2550,9 @@ fn execute_vault_rename_inner(
         crate::RepoKind::Local => match app.vault.root() {
             Ok(root) => {
                 let exclude = app.vault.exclude_folders().unwrap_or_default();
+                let writes = app.vault.writes.clone();
                 Task::perform(
-                    async move {
-                        run_blocking(move || rename_local(&root, &exclude, &from, &to)).await
-                    },
+                    async move { writes.bulk(move || rename_local(&root, &exclude, &from, &to)).await },
                     move |result| Message::Plugins(renamed_done(request_id, change, result)),
                 )
             }
@@ -2695,10 +2698,12 @@ fn rename_local(
             }
         }
     }
+    // 本函数整体在写盘队列批量作业内执行（调用方经 bulk 提交）：直接用事务本体，
+    // 与在途保存串行；再走 async 包装会嵌套提交
     let sync = if is_dir {
-        atelyx_core::vault_refs::rename_folder_synced(root, exclude, from, &to)?
+        atelyx_core::vault_refs::rename_folder_transaction(root, exclude, from, &to)?
     } else {
-        atelyx_core::vault_refs::rename_note_synced(root, exclude, from, &to)?
+        atelyx_core::vault_refs::rename_note_transaction(root, exclude, from, &to)?
     };
     // 占用名顺延后的最终路径随回执带回：壳按它更新打开文件 / 缓存
     Ok((serde_json::json!({ "path": to }), sync.rewritten))

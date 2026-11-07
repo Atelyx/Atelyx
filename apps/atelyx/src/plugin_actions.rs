@@ -710,8 +710,8 @@ fn load_image(app: &App, gen: u64, key: String, source: ImageSource) -> Task<Mes
             Task::perform(
                 async move {
                     std::fs::read(&path)
-                        .map(|bytes| ImageLoad::plain(PluginImage::Bytes(bytes)))
                         .map_err(|e| format!("读插件图片失败：{e}"))
+                        .and_then(|bytes| PluginImage::decoded(&bytes).map(ImageLoad::plain))
                 },
                 move |result| Message::ImageLoaded(gen, key, result),
             )
@@ -722,8 +722,8 @@ fn load_image(app: &App, gen: u64, key: String, source: ImageSource) -> Task<Mes
             Task::perform(
                 async move {
                     std::fs::read(&path)
-                        .map(|bytes| ImageLoad::plain(PluginImage::Bytes(bytes)))
                         .map_err(|e| format!("读插件图片失败：{e}"))
+                        .and_then(|bytes| PluginImage::decoded(&bytes).map(ImageLoad::plain))
                 },
                 move |result| Message::ImageLoaded(gen, key, result),
             )
@@ -753,9 +753,7 @@ fn load_image(app: &App, gen: u64, key: String, source: ImageSource) -> Task<Mes
                                     rel,
                                     bytes,
                                 ),
-                                None => {
-                                    ImageLoad::vault(PluginImage::Bytes((*bytes).clone()), rel, bytes)
-                                }
+                                None => ImageLoad::vault(PluginImage::decoded(&bytes)?, rel, bytes),
                             })
                         },
                         move |result| Message::ImageLoaded(gen, key.clone(), result),
@@ -773,7 +771,7 @@ fn load_image(app: &App, gen: u64, key: String, source: ImageSource) -> Task<Mes
                     } else {
                         atelyx_core::remote_image::fetch_external_image(&url).await
                     };
-                    bytes.map(|bytes| ImageLoad::plain(PluginImage::Bytes(bytes)))
+                    bytes.and_then(|bytes| PluginImage::decoded(&bytes).map(ImageLoad::plain))
                 },
                 move |result| Message::ImageLoaded(gen, key, result),
             )

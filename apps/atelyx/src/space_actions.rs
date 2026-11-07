@@ -1480,7 +1480,8 @@ pub fn submit_file_patch(
                 other => return Err(format!("不支持的空间文件类型：{other}")),
             };
             let summary = atelyx_core::history::version_summary(history_kind, &baseline, &content_json);
-            let _ = client
+            // 内容已落服务端，记版失败不能报成保存失败，但要随回执带回去给用户可见提示
+            let history_error = match client
                 .history_record(
                     &space_id,
                     &space_client::HistoryRecordReq {
@@ -1500,8 +1501,12 @@ pub fn submit_file_patch(
                         byte_budget: Some(atelyx_core::history::HISTORY_BYTE_BUDGET),
                     },
                 )
-                .await;
-            Ok::<String, String>(new_path)
+                .await
+            {
+                Ok(()) => None,
+                Err(e) => Some(format!("内容已保存，历史版本记录失败：{e}")),
+            };
+            Ok::<_, String>((new_path, history_error))
         },
         move |result| {
             Message::Plugins(crate::settings_view::plugins::PluginsMsg::SpaceFilePatchDone {
@@ -1796,11 +1801,7 @@ pub fn space_load_image(
                     src,
                     bytes,
                 ),
-                None => crate::ImageLoad::vault(
-                    crate::PluginImage::Bytes((*bytes).clone()),
-                    src,
-                    bytes,
-                ),
+                None => crate::ImageLoad::vault(crate::PluginImage::decoded(&bytes)?, src, bytes),
             })
         },
         move |result| Message::ImageLoaded(gen, key.clone(), result),

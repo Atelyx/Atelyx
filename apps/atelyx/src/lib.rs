@@ -378,12 +378,25 @@ pub(crate) struct PendingCanvasRestore {
 /// 面板落盘请求的等待上限：插件无响应时撤回请求并提示，不让脏拦截永久挂起。
 const PANEL_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// 界面图片落地的两种形态：原图字节（渲染层按需解码），或宿主已按上限解码好的 RGBA
-/// 缩略图（避免大图整幅上传，并按 EXIF 方向摆正）。
+/// 界面图片落地形态：宿主已在载入任务后台线程解码好的 RGBA 像素（按上限缩小或原图
+/// 尺寸，已按 EXIF 方向摆正）。解码不得推迟到渲染层——`Handle::from_bytes` 会让首次
+/// 绘制在 UI 线程整图解码，大图冻结消息循环（在途回执与输入全部滞留）。
 #[derive(Clone, Debug)]
 pub(crate) enum PluginImage {
-    Bytes(Vec<u8>),
     Thumb(atelyx_core::image_thumb::Thumb),
+}
+
+impl PluginImage {
+    /// 文件字节 → 原始尺寸 RGBA（灯箱原图等整幅载入用）。
+    pub(crate) fn decoded(bytes: &[u8]) -> Result<Self, String> {
+        let pixels = atelyx_core::image_thumb::decode_rgba(bytes)?;
+        Ok(Self::Thumb(atelyx_core::image_thumb::Thumb {
+            width: pixels.width,
+            height: pixels.height,
+            rgba: pixels.rgba,
+            source: (pixels.width, pixels.height),
+        }))
+    }
 }
 
 /// 一次图片载入的产出：句柄原料，外加仓库来源顺带带回的原图字节。
@@ -2513,10 +2526,6 @@ impl App {
                         }
                         // 画布与图片贴片的 contain / cover 需要固有像素尺寸，装载点顺手记下
                         let (handle, size) = match load.image {
-                            PluginImage::Bytes(bytes) => {
-                                let size = image_dimensions(&bytes);
-                                (iced::widget::image::Handle::from_bytes(bytes), size)
-                            }
                             PluginImage::Thumb(thumb) => (
                                 iced::widget::image::Handle::from_rgba(
                                     thumb.width,
@@ -4875,10 +4884,17 @@ impl App {
         // 挂起动作一并放弃：保留它会让下一次放行在插件仍无响应时反复触发同一超时
         abort_close_on_save_failure(&mut self.flush_pending);
         self.flush_pending = None;
-        let restore = self.pending_table_restore.take().is_some();
+        // 表格与画布的回滚挂起一并放弃：残留会让之后任意一次 flush 结算误报「已回滚」
+        // 并按过期快照记历史
+        let table_restore = self.pending_table_restore.take().is_some();
+        let canvas_restore = self.pending_canvas_restore.take().is_some();
         self.notify(
             NoticeLevel::Error,
-            if restore { "回滚未落盘".to_string() } else { "保存超时，操作未执行".to_string() },
+            if table_restore || canvas_restore {
+                "回滚未落盘".to_string()
+            } else {
+                "保存超时，操作未执行".to_string()
+            },
         );
         Task::none()
     }
@@ -6220,6 +6236,7 @@ impl App {
                 let old_for_task = old.clone();
                 let new_for_task = new.clone();
                 let Ok(exclude) = self.vault.exclude_folders() else { return Task::none() };
+                let writes = self.vault.writes.clone();
                 Task::perform(
                     async move {
                         // 目标已存在（排除自身）= 加序号静默落位，实际落点经 OpDone 回传
@@ -6249,7 +6266,8 @@ impl App {
                         if full == old_for_task {
                             return Ok((old_for_task.clone(), Vec::new()));
                         }
-                        let result = vault_refs::rename_note_synced(&root, &exclude, &old_for_task, &full)?;
+                        let result =
+                            vault_refs::rename_note_synced(&writes, &root, &exclude, &old_for_task, &full).await?;
                         Ok((full, result.rewritten))
                     },
                     move |result| match result {
@@ -6275,6 +6293,7 @@ impl App {
                 };
                 let old_for_task = old_dir.clone();
                 let Ok(exclude) = self.vault.exclude_folders() else { return Task::none() };
+                let writes = self.vault.writes.clone();
                 Task::perform(
                     async move {
                         // 目标已存在（排除自身）= 加序号静默落位；case-only 改名跳过查重
@@ -6300,7 +6319,8 @@ impl App {
                         if target == old_for_task {
                             return Ok((target, Vec::new()));
                         }
-                        let result = vault_refs::rename_folder_synced(&root, &exclude, &old_for_task, &target)?;
+                        let result =
+                            vault_refs::rename_folder_synced(&writes, &root, &exclude, &old_for_task, &target).await?;
                         Ok((target, result.rewritten))
                     },
                     move |result| match result {
@@ -6950,6 +6970,7 @@ impl App {
         }
         let Some(root) = self.vault.root().ok() else { return Task::none() };
         let Ok(exclude) = self.vault.exclude_folders() else { return Task::none() };
+        let writes = self.vault.writes.clone();
         let gen = self.epoch();
         let name = from.rsplit('/').next().unwrap_or(from).to_string();
         let from = from.to_string();
@@ -6975,9 +6996,13 @@ impl App {
                     return Ok((new_rel, Vec::new()));
                 }
                 let rewritten = if is_dir_for_task {
-                    vault_refs::rename_folder_synced(&root, &exclude, &from, &new_rel)?.rewritten
+                    vault_refs::rename_folder_synced(&writes, &root, &exclude, &from, &new_rel)
+                        .await?
+                        .rewritten
                 } else {
-                    vault_refs::rename_note_synced(&root, &exclude, &from, &new_rel)?.rewritten
+                    vault_refs::rename_note_synced(&writes, &root, &exclude, &from, &new_rel)
+                        .await?
+                        .rewritten
                 };
                 Ok((new_rel, rewritten))
             },
