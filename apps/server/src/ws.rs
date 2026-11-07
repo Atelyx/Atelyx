@@ -167,6 +167,8 @@ struct PeerEntry {
     tx: broadcast::Sender<WireFrame>,
     /// 所属设备会话（Hub::kick_sessions 按此匹配踢连接；不进 peers 快照广播）。
     session_id: String,
+    /// 入房时解析的空间可写性（内容写帧按此拒收）。
+    can_write: bool,
     /// 踢连接信号（Some = 原因）：会话被吊销/移出空间时由 Hub 触发。
     kick_tx: watch::Sender<Option<KickReason>>,
 }
@@ -189,6 +191,9 @@ pub struct PeerMeta {
     pub version: Option<String>,
     /// 所属设备会话（吊销会话时按此踢连接）。
     pub session_id: String,
+    /// 入房时解析的空间可写性：false = 内容补丁/笔记同步帧一律拒收（只读身份不因实时
+    /// 通道放行写操作，与 HTTP 端点的 403 同为兜底）。
+    pub can_write: bool,
 }
 
 /// C→S 帧类型（`type` 字段分派）：`hello`（首条必发，见 space_ws）/ `presence` /
@@ -721,6 +726,7 @@ pub(crate) async fn run_room_connection(
     let platform = meta.platform.clone();
     let version = meta.version.clone();
     let session_id = meta.session_id.clone();
+    let can_write = meta.can_write;
     {
         // 入房 + hello-ack 同锁内完成：hello-ack 先于 peers 帧（客户端据此把自己过滤出列表），
         // 并带房间插件序号头（客户端据此判定序号空间是否重置）
@@ -737,6 +743,7 @@ pub(crate) async fn run_room_connection(
                 presence: None,
                 tx: btx.clone(),
                 session_id: meta.session_id,
+                can_write,
                 kick_tx,
             },
         );
@@ -836,8 +843,14 @@ pub(crate) async fn run_room_connection(
                         }
                     }
                     // 表格/画布内容补丁：同构透传（不存储、不解析内容，原样转发房间内其他成员，
-                    // 客户端按 file 匹配只应用当前打开的文件）
+                    // 客户端按 file 匹配只应用当前打开的文件）。
+                    // 写帧按入房时的可写性拒收：只读身份不因实时通道放行写操作（HTTP 端点
+                    // 的 403 对转发帧无效，这里是同级的兜底）
                     "table-patch" | "canvas-patch" => {
+                        if !can_write {
+                            warn!(peer_id, room = %room_id, kind = %msg.kind, "只读身份发送内容补丁，拒收");
+                            continue;
+                        }
                         if let (Some(file), Some(patch)) = (msg.file, msg.patch) {
                             debug!(peer_id, room = %room_id, kind = %msg.kind, file = %file, "内容补丁转发");
                             let mut rooms = hub.0.lock().unwrap();
@@ -856,8 +869,12 @@ pub(crate) async fn run_room_connection(
                         }
                     }
                     // 笔记内容同步：不透明透传（base64 载荷），原样转发房间内其他成员
-                    // （客户端按 file 匹配只合入当前打开的笔记）
+                    // （客户端按 file 匹配只合入当前打开的笔记）；只读身份同写帧口径拒收
                     "note-sync" => {
+                        if !can_write {
+                            warn!(peer_id, room = %room_id, "只读身份发送笔记同步，拒收");
+                            continue;
+                        }
                         if let (Some(file), Some(payload)) = (
                             msg.file,
                             msg.payload.and_then(|p| p.as_str().map(str::to_string)),
@@ -1339,6 +1356,7 @@ mod tests {
             presence: None,
             tx,
             session_id: session.to_string(),
+            can_write: true,
             kick_tx: watch::channel(None).0,
         };
         let (tx_a, mut rx_a) = broadcast::channel::<WireFrame>(16);

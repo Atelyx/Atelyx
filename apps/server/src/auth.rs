@@ -11,8 +11,9 @@ use axum::response::IntoResponse;
 use axum::Json;
 use serde::Deserialize;
 use serde_json::json;
+use std::sync::OnceLock;
 
-use crate::state::{now_secs, random_hex, token_hash, Persisted, ServerState, Session, User};
+use crate::state::{internal, now_secs, random_hex, token_hash, Persisted, ServerState, Session, User};
 use crate::ws::KickReason;
 use crate::{ApiError, ApiResult};
 
@@ -32,13 +33,27 @@ pub(crate) fn hash_password(password: &str) -> Result<String, ApiError> {
     Argon2::default()
         .hash_password(password.as_bytes(), &salt)
         .map(|h| h.to_string())
-        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("密码哈希失败：{e}")))
+        .map_err(|e| internal(format!("密码哈希失败：{e}")))
 }
 
 fn verify_password(password: &str, hash: &str) -> bool {
     PasswordHash::new(hash)
         .map(|parsed| Argon2::default().verify_password(password.as_bytes(), &parsed).is_ok())
         .unwrap_or(false)
+}
+
+/// 运行时现算一次的占位哈希：登录对不存在的用户也跑一次等价 argon2 验证，
+/// 用户名存在性与「密码错误」分支的耗时同档，不给枚举账号的时序线索
+/// （存常量会随参数升级失效）。
+fn dummy_hash() -> &'static str {
+    static DUMMY: OnceLock<String> = OnceLock::new();
+    DUMMY.get_or_init(|| match hash_password("atelyx-login-timing") {
+        Ok(hash) => hash,
+        Err(e) => {
+            tracing::error!("占位哈希生成失败：{}", e.1);
+            String::new()
+        }
+    })
 }
 
 fn unauthorized() -> ApiError {
@@ -156,6 +171,8 @@ pub async fn register(State(state): State<ServerState>, Json(body): Json<Credent
 pub async fn login(State(state): State<ServerState>, Json(body): Json<Credentials>) -> ApiResult<axum::response::Response> {
     let user = state.read(|p| p.users.iter().find(|u| u.username == body.username).cloned());
     let Some(user) = user else {
+        // 用户不存在也跑一次等价 argon2 验证：与「密码错误」分支耗时同档
+        verify_password(&body.password, dummy_hash());
         return Err(ApiError(StatusCode::UNAUTHORIZED, "用户名或密码错误".to_string()));
     };
     if !verify_password(&body.password, &user.password_hash) {
@@ -209,6 +226,8 @@ pub async fn logout(State(state): State<ServerState>, user: AuthUser) -> ApiResu
         p.sessions.retain(|s| s.id != user.session_id);
         Ok(())
     })?;
+    // 实时连接不回查会话：吊销后须显式踢下线，否则该设备继续留在空间频道收发协作内容
+    state.hub().kick_sessions(None, std::slice::from_ref(&user.session_id), KickReason::SessionRevoked);
     Ok(Json(json!({})))
 }
 
@@ -248,5 +267,7 @@ pub async fn revoke_device(
         Ok(())
     })?;
     let _ = removed;
+    // 与 logout 同口径：吊销的设备会话若有在途实时连接，立即踢下线
+    state.hub().kick_sessions(None, std::slice::from_ref(&session_id), KickReason::SessionRevoked);
     Ok(Json(json!({})))
 }

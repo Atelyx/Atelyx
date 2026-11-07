@@ -139,7 +139,7 @@ pub async fn dated_notes(
         notes
     })
     .await
-    .map_err(|e| crate::ApiError(axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("扫描线程失败：{e}")))?;
+    .map_err(|e| crate::state::internal(format!("扫描线程失败：{e}")))?;
     Ok(Json(json!(notes)))
 }
 

@@ -70,8 +70,8 @@ pub async fn tree(
         }
     }
     let nodes = list_tree_in(&root.0, &dir, &exclude, query.include_hidden)
-        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    Ok(Json(serde_json::to_value(nodes).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?))
+        .map_err(|e| internal(e))?;
+    Ok(Json(serde_json::to_value(nodes).map_err(|e| internal(e.to_string()))?))
 }
 
 #[derive(serde::Serialize)]
@@ -148,7 +148,18 @@ pub async fn read_file(
     if !path.is_file() {
         return Err(not_found("文件不存在"));
     }
-    let bytes = std::fs::read(&path).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("读取失败：{e}")))?;
+    // 与写侧同一套限额（同走 override 口径）：读也是全量入内存，超限文件不读
+    let limit = max_file_bytes();
+    let size = std::fs::metadata(&path)
+        .map_err(|e| internal(format!("读取失败：{e}")))?
+        .len();
+    if size > limit as u64 {
+        return Err(bad_request(&format!(
+            "文件过大：单文件上限 {}MB",
+            limit / 1024 / 1024
+        )));
+    }
+    let bytes = std::fs::read(&path).map_err(|e| internal(format!("读取失败：{e}")))?;
     // updatedAt = 文件 mtime 秒（元数据；不再参与任何冲突判定）
     let updated_at = file_mtime_secs(&path);
     match query.encoding.as_deref() {
@@ -226,7 +237,7 @@ pub async fn write_file(
         return Err(not_found("文件已被改名或删除，写入被拒绝"));
     }
     atomic_write(&path, &bytes)
-        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|e| internal(e))?;
     // 新建文件 = 结构变更：广播在线协作者刷新文件树（覆盖写不广播，内容级各有专用通道）
     if !pre_exists {
         crate::ws::broadcast_fs_changed(&state.hub(), &format!("space:{space_id}"));
@@ -269,16 +280,15 @@ pub async fn rename(
     let _structure = state.structure_lock(&space_id).await;
     let from_is_dir;
     {
-        let (lock_from, lock_to) = if body.old_path <= body.new_path {
-            (
-                state.path_lock(&space_id, &body.old_path).await,
-                state.path_lock(&space_id, &body.new_path).await,
-            )
+        // case-only 改名（如 `文档.atb` → `文档.ATB`）与等价拼写两路径同键：锁不可重入，
+        // 第二把退化为 None。持有序与并发改名的锁序差异由先行的结构锁消解（改名彼此互斥）
+        let key_from = state.path_lock_key(&body.old_path);
+        let key_to = state.path_lock_key(&body.new_path);
+        let _lock_from = state.path_lock(&space_id, &body.old_path).await;
+        let _lock_to = if key_from == key_to {
+            None
         } else {
-            (
-                state.path_lock(&space_id, &body.new_path).await,
-                state.path_lock(&space_id, &body.old_path).await,
-            )
+            Some(state.path_lock(&space_id, &body.new_path).await)
         };
         if !from.exists() {
             return Err(not_found("源路径不存在"));
@@ -289,15 +299,15 @@ pub async fn rename(
             return Err(ApiError(StatusCode::CONFLICT, format!("目标已存在：{}", body.new_path)));
         }
         std::fs::rename(&from, &to).map_err(|e| {
-            ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("重命名失败：{e}"))
+            internal(format!("重命名失败：{e}"))
         })?;
         // 单文件改名换了主名：内嵌标题随文件名一并改写（目录改名不动文件名，无需处理）。
         // 锁内完成，与补丁的读改写互斥；改写失败只记日志——改名本身已落地，不因此回滚。
         if !from_is_dir {
             crate::patches::retitle_after_rename(&to);
         }
-        drop(lock_to);
-        drop(lock_from);
+        drop(_lock_to);
+        drop(_lock_from);
     }
     // 历史侧文件随内容改名 / 移动迁移：服务端知道每次改名，比客户端 watcher 可靠；
     // 迁移在每侧文件锁内进行（与历史追加互斥，防旧名侧文件被并发重建）；
@@ -341,7 +351,7 @@ pub async fn copy(
     tokio::task::spawn_blocking(move || copy_recursive(&from, &copy_to))
         .await
         .map_err(|e| internal(format!("复制失败：{e}")))?
-        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("复制失败：{e}")))?;
+        .map_err(|e| internal(format!("复制失败：{e}")))?;
     tracing::info!(space_id = %space_id, from = %body.from_path, to = %body.to_path, "内容复制");
     crate::ws::broadcast_fs_changed(&state.hub(), &format!("space:{space_id}"));
     Ok(Json(json!({})))
@@ -380,7 +390,7 @@ pub async fn delete_file(
     if path.is_dir() {
         return Err(bad_request("目标是目录，请走文件夹删除"));
     }
-    std::fs::remove_file(&path).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("删除失败：{e}")))?;
+    std::fs::remove_file(&path).map_err(|e| internal(format!("删除失败：{e}")))?;
     crate::ws::broadcast_fs_changed(&state.hub(), &format!("space:{space_id}"));
     tracing::info!(space_id = %space_id, path = %query.path, "内容删除");
     Ok(Json(json!({ "deleted": true })))
@@ -403,7 +413,7 @@ pub async fn create_folder(
     if path.exists() {
         return Err(ApiError(StatusCode::CONFLICT, format!("路径已存在：{}", body.path)));
     }
-    std::fs::create_dir_all(&path).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("创建目录失败：{e}")))?;
+    std::fs::create_dir_all(&path).map_err(|e| internal(format!("创建目录失败：{e}")))?;
     crate::ws::broadcast_fs_changed(&state.hub(), &format!("space:{space_id}"));
     Ok(Json(json!({ "path": body.path })))
 }
@@ -453,7 +463,7 @@ pub async fn delete_folder(
     })
     .await
     .map_err(|e| internal(format!("删除失败：{e}")))?;
-    result.map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("删除失败：{e}")))?;
+    result.map_err(|e| internal(format!("删除失败：{e}")))?;
     crate::ws::broadcast_fs_changed(&state.hub(), &format!("space:{space_id}"));
     tracing::info!(space_id = %space_id, path = %body.path, "文件夹删除");
     Ok(Json(json!({ "deleted": true, "itemCount": item_count })))
@@ -546,15 +556,15 @@ pub async fn media_list(
     }
     // 已存在的枚举点解出真实落点后必须仍在保留目录内（防符号链接把枚举点引出保留区）
     let media_canon = dunce::canonicalize(&media_root)
-        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("保留目录不可达：{e}")))?;
+        .map_err(|e| internal(format!("保留目录不可达：{e}")))?;
     let list_canon = dunce::canonicalize(&list_dir)
-        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("路径不可达：{e}")))?;
+        .map_err(|e| internal(format!("路径不可达：{e}")))?;
     if !list_canon.starts_with(&media_canon) {
         return Err(bad_request("路径越出保留媒体目录"));
     }
     let mut files: Vec<(String, u64)> = vec![];
     list_media_files(&list_dir, "", &mut files)
-        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|e| internal(e))?;
     files.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(Json(json!({
         "entries": files

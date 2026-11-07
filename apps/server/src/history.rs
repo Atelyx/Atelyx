@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 use crate::auth::AuthUser;
 use crate::access::{join_err, write_root};
 use crate::fsops::{atomic_write, percent_decode, SpaceRoot};
-use crate::state::ServerState;
+use crate::state::{internal, ServerState};
 use crate::{ApiError, ApiResult};
 
 /// 历史侧文件根与 kind 子目录（note 顶层，canvas/table 按 kind 分目录）。
@@ -257,14 +257,14 @@ pub async fn record_history(
     let pruned = prune_by_budget(versions, budget);
 
     let bytes = serde_json::to_vec(&json!({ "versions": pruned }))
-        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("序列化失败：{e}")))?;
+        .map_err(|e| internal(format!("序列化失败：{e}")))?;
     if bytes.len() > MAX_HISTORY_FILE_BYTES {
         return Err(ApiError(
             StatusCode::BAD_REQUEST,
             "历史侧文件过大，已拒绝写入".to_string(),
         ));
     }
-    atomic_write(&path, &bytes).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    atomic_write(&path, &bytes).map_err(|e| internal(e))?;
     Ok(Json(json!({ "ok": true })).into_response())
 }
 

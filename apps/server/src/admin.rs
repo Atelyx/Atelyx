@@ -21,7 +21,7 @@ use crate::ws::KickReason;
 use crate::{ApiError, ApiResult};
 
 /// 调用方是否为服务器管理员（用户数组首位 = 最早注册的账号）。
-fn is_admin(p: &Persisted, user_id: &str) -> bool {
+pub(crate) fn is_admin(p: &Persisted, user_id: &str) -> bool {
     p.users.first().map(|u| u.id == user_id).unwrap_or(false)
 }
 

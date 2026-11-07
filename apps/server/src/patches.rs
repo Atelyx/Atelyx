@@ -247,7 +247,7 @@ fn ensure_no_id_conflict(
 fn remove_replaced_file(old_path: &Path, new_path: &Path, kind: &str) -> Result<(), ApiError> {
     if old_path != new_path && old_path.exists() && !same_physical_file(old_path, new_path) {
         std::fs::remove_file(old_path)
-            .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("删除旧{kind}文件失败：{e}")))?;
+            .map_err(|e| internal(format!("删除旧{kind}文件失败：{e}")))?;
     }
     Ok(())
 }
@@ -304,7 +304,7 @@ fn parse_patch<T: serde::de::DeserializeOwned>(raw: &serde_json::Value, what: &s
 /// 读画布真源文件：schema 不符或解析失败（损坏）→ 400 拒绝覆盖，不静默重建。
 fn read_canvas_file(path: &Path) -> Result<CanvasFile, ApiError> {
     let text =
-        std::fs::read_to_string(path).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("读取失败：{e}")))?;
+        std::fs::read_to_string(path).map_err(|e| internal(format!("读取失败：{e}")))?;
     let canvas: CanvasFile = serde_json::from_str(&text)
         .map_err(|e| bad_request(&format!("画布文件无法解析（可能已损坏），拒绝覆盖：{e}")))?;
     if canvas.schema != CANVAS_SCHEMA {
@@ -497,7 +497,9 @@ async fn patch_entity<E: serde::de::DeserializeOwned, P>(
     // 漂移目标路径锁：目标路径上的并发 write_file（单路径锁，不进结构锁）可与本端点的
     // 「写新删旧」交错——不持锁时对方的整文件写会被随后的删旧静默吞掉。补丁与改名是仅有的
     // 双路径锁持有者且已被结构锁互斥，单锁持有方不会等待第二把锁，持一取二无死锁环。
-    let _drift_lock = if new_path != path {
+    // 漂移锁按锁键比较而非串比较：case-only / 等价拼写的漂移目标与请求路径同锁，
+    // 重复取锁会自死锁（锁不可重入）
+    let _drift_lock = if state.path_lock_key(&new_rel) != state.path_lock_key(body_path) {
         Some(state.path_lock(space_id, &new_rel).await)
     } else {
         None

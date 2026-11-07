@@ -1,6 +1,7 @@
 //! 空间实时频道（`/ws/space`）：凭令牌订阅空间房间，底层复用 ws.rs 的共享房间机制
 //! （入房 / presence / 补丁 / 笔记同步 / 插件消息转发 / 团队 meta 变更广播 / 心跳 / resync）。
-//! 本模块只负责入口鉴权：hello 须携带有效令牌且调用方为该空间成员（viewer 可只读入房），否则 error 帧后断开。
+//! 本模块只负责入口鉴权：hello 须携带有效令牌且调用方为该空间成员（viewer 可只读入房，
+//! 可写性随入房解析并交底层按写帧拒收），否则 error 帧后断开。
 
 use std::net::SocketAddr;
 
@@ -92,10 +93,16 @@ async fn handle(mut socket: WebSocket, state: ServerState, remote: SocketAddr) {
             .iter()
             .find(|u| u.id == identity.user_id)
             .map(|u| u.display_name.clone());
-        (member.is_some(), name)
+        (member.map(|m| m.role.clone()), name)
     });
-    let (is_member, display_name) = membership;
-    if !is_member {
+    let (role, display_name) = membership;
+    // 角色随入房定死：内容写帧按此拒收（角色变更/成员移除走重连生效）
+    // 与 HTTP 写端点同口径的白名单判定：未知角色值不因实时通道获得写权
+    let can_write = matches!(
+        role.as_deref(),
+        Some(crate::state::ROLE_OWNER) | Some(crate::state::ROLE_EDITOR)
+    );
+    if role.is_none() {
         warn!(user_id = %identity.user_id, space_id = %hello.space_id, "空间频道：非成员，拒绝连接");
         let _ = socket.send(Message::text(crate::ws::peer_error("不是该空间成员"))).await;
         return;
@@ -118,6 +125,7 @@ async fn handle(mut socket: WebSocket, state: ServerState, remote: SocketAddr) {
             platform: hello.platform,
             version: hello.version,
             session_id: identity.session_id,
+            can_write,
         },
         // 入房后回查：会话在鉴权与入房之间可能已被吊销（如管理台刚执行重置密码/吊销）；
         // 成员移除落在同一窗口时 kick 只触及已入房连接——回查须同时确认仍是该空间成员，

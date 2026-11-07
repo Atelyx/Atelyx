@@ -17,7 +17,7 @@ use serde_json::json;
 use crate::auth::AuthUser;
 use crate::access::member_root;
 use crate::fsops::{file_mtime_secs, percent_decode, walk_md_in, SpaceRoot};
-use crate::state::ServerState;
+use crate::state::{internal, ServerState};
 use crate::{ApiError, ApiResult};
 
 // ===== 索引缓存（进程内，随空间内容重建，不持久化） =====
@@ -716,7 +716,7 @@ pub async fn backlinks(
     let rows = state.index_cache().with_space(state.data_dir(), &space_id, &root.0, |index| {
         query_wiki_backlinks(&index.wiki, &query.note_name, &query.note_file)
     });
-    Ok(Json(serde_json::to_value(rows).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?))
+    Ok(Json(serde_json::to_value(rows).map_err(|e| internal(e.to_string()))?))
 }
 
 pub async fn tags(
@@ -726,7 +726,7 @@ pub async fn tags(
 ) -> ApiResult<Json<serde_json::Value>> {
     let root = member_root(&state, &space_id, &user)?;
     let rows = state.index_cache().with_space(state.data_dir(), &space_id, &root.0, |index| aggregate_tag_counts(&index.tags));
-    Ok(Json(serde_json::to_value(rows).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?))
+    Ok(Json(serde_json::to_value(rows).map_err(|e| internal(e.to_string()))?))
 }
 
 #[derive(Deserialize)]
@@ -748,7 +748,7 @@ pub async fn glob(
     let (base_rel, base_is_file) = resolve_base(&root, body.path.as_deref()).map_err(|e| ApiError(StatusCode::BAD_REQUEST, e))?;
     let exclude = crate::meta::space_exclusions(state.data_dir(), &space_id);
     let mut entries = collect_glob_files(&root.0, &base_rel, base_is_file, &matcher, &exclude)
-        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|e| internal(e))?;
     entries.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
     let total = entries.len();
     let capped = total > GLOB_MAX_RESULTS;
@@ -785,7 +785,7 @@ pub async fn grep(
     let mut retained: Vec<GrepMatchRow> = Vec::new();
     let mut total = 0usize;
     scan_for_matches(&root.0, &base_rel, base_is_file, &re, include_matcher.as_ref(), &exclude, &mut retained, &mut total)
-        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|e| internal(e))?;
     let capped = total > retained.len();
     tracing::debug!(space_id = %space_id, pattern_len = body.pattern.len(), total, "grep 完成");
     Ok(Json(json!({ "matches": retained, "total": total, "capped": capped })))

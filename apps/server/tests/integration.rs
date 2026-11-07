@@ -3444,3 +3444,239 @@ async fn tree_scope_and_stat_path() {
         .await;
     assert_eq!(status, 400, "越界路径应拒绝");
 }
+
+// ===== 实时通道与权限闸门 =====
+
+/// viewer 的内容写帧（table-patch / note-sync）在实时通道被服务端拒收：
+/// HTTP 403 之外的兜底——编辑者收不到只读成员注入的补丁，自己发的补丁照常转发。
+#[tokio::test]
+async fn viewer_ws_write_frames_are_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+    let space_id = setup_two_members(&ctx, "alice", "bob").await;
+    let (a_token, _, d_token) = add_viewer(&ctx, &space_id).await;
+
+    let mut a_ws = ws_connect(
+        &ctx.base,
+        "/ws/space",
+        json!({ "type": "hello", "spaceId": space_id, "token": a_token, "nickname": "艾", "color": "#ff0000", "deviceName": "A机" }),
+    )
+    .await;
+    let mut d_ws = ws_connect(
+        &ctx.base,
+        "/ws/space",
+        json!({ "type": "hello", "spaceId": space_id, "token": d_token, "nickname": "观", "color": "#00ff00", "deviceName": "D机" }),
+    )
+    .await;
+    // 等双方都完成入房（hello-ack + 含两端的 peers 快照）再发补丁，否则补丁会跑在入房前
+    let ack = next_frame(&mut d_ws).await;
+    assert_eq!(ack["type"], "hello-ack", "{ack}");
+    for _ in 0..5 {
+        let f = next_frame(&mut a_ws).await;
+        if f["type"] == "peers" && f["peers"].as_array().is_some_and(|p| p.len() == 2) {
+            break;
+        }
+    }
+    // 编辑者先发一个补丁：viewer 能收到 = 转发链路本身正常
+    a_ws
+        .send(Message::text(
+            json!({ "type": "table-patch", "file": "表.atb", "patch": { "kind": "note" } }).to_string(),
+        ))
+        .await
+        .unwrap();
+    let mut forwarded = None;
+    for _ in 0..10 {
+        let f = next_frame(&mut d_ws).await;
+        if f["type"] == "peers" || f["type"] == "hello-ack" {
+            continue;
+        }
+        forwarded = Some(f);
+        break;
+    }
+    let f = forwarded.expect("编辑者的补丁应转发给 viewer");
+    assert_eq!(f["type"], "table-patch", "{f}");
+
+    // viewer 连发三个帧：写帧 ×2 + presence（presence 正常转发，作到达标记）。
+    // 编辑者收到的第一个 viewer 帧必须是 presence——写帧在服务端被拒收不转发。
+    d_ws
+        .send(Message::text(
+            json!({ "type": "table-patch", "file": "表.atb", "patch": { "kind": "injected" } }).to_string(),
+        ))
+        .await
+        .unwrap();
+    d_ws
+        .send(Message::text(json!({ "type": "note-sync", "file": "笔记.md", "payload": "aGk=" }).to_string()))
+        .await
+        .unwrap();
+    d_ws.send(Message::text(json!({ "type": "presence" }).to_string())).await.unwrap();
+    let mut saw_marker = false;
+    for _ in 0..20 {
+        let f = next_frame(&mut a_ws).await;
+        match f["type"].as_str().unwrap_or_default() {
+            "peers" | "hello-ack" => continue,
+            "presence" => {
+                saw_marker = true;
+                break;
+            }
+            "table-patch" | "note-sync" => {
+                panic!("viewer 注入的写帧不应转发给编辑者：{f}");
+            }
+            _ => continue,
+        }
+    }
+    assert!(saw_marker, "编辑者应收到 viewer 的 presence（证明排帧窗口正常）");
+}
+
+/// 用户自行吊销设备会话与登出同样踢在途实时连接（不只管理台路径）。
+#[tokio::test]
+async fn self_revoked_session_kicks_live_ws_connections() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+    let space_id = setup_two_members(&ctx, "alice", "bob").await;
+    let b = login_as(&ctx, "bob").await;
+
+    let mut b_ws = ws_connect(
+        &ctx.base,
+        "/ws/space",
+        json!({ "type": "hello", "spaceId": space_id, "token": b, "nickname": "鲍勃", "color": "#00ff00", "deviceName": "B机" }),
+    )
+    .await;
+    let ack = next_frame(&mut b_ws).await;
+    assert_eq!(ack["type"], "hello-ack", "{ack}");
+
+    // 自行吊销当前设备会话 → 在途连接收到失效帧后断开
+    let (status, devices) = ctx.get("/api/auth/devices", Some(&b), &[]).await;
+    assert_eq!(status, 200, "{devices}");
+    let session_id = devices
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["current"] == true)
+        .expect("设备清单应含当前会话")["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (status, body) = ctx.delete(&format!("/api/auth/devices/{session_id}"), Some(&b)).await;
+    assert_eq!(status, 200, "{body}");
+    let mut kicked = None;
+    for _ in 0..10 {
+        let f = next_frame(&mut b_ws).await;
+        if f["type"] == "peers" {
+            continue;
+        }
+        if f["type"] == "error" {
+            kicked = Some(f);
+            break;
+        }
+    }
+    let frame = kicked.expect("自行吊销的会话应踢在途连接");
+    assert!(frame["message"].as_str().unwrap().contains("登录状态已失效"), "{frame}");
+}
+
+/// 登出同样踢在途实时连接。
+#[tokio::test]
+async fn logout_kicks_live_ws_connections() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+    let space_id = setup_two_members(&ctx, "alice", "bob").await;
+    let b = login_as(&ctx, "bob").await;
+
+    let mut b_ws = ws_connect(
+        &ctx.base,
+        "/ws/space",
+        json!({ "type": "hello", "spaceId": space_id, "token": b, "nickname": "鲍勃", "color": "#00ff00", "deviceName": "B机" }),
+    )
+    .await;
+    let ack = next_frame(&mut b_ws).await;
+    assert_eq!(ack["type"], "hello-ack", "{ack}");
+
+    let (status, _) = ctx.post("/api/auth/logout", Some(&b), json!({})).await;
+    assert_eq!(status, 200);
+    let mut kicked = None;
+    for _ in 0..10 {
+        let f = next_frame(&mut b_ws).await;
+        if f["type"] == "peers" {
+            continue;
+        }
+        if f["type"] == "error" {
+            kicked = Some(f);
+            break;
+        }
+    }
+    assert!(kicked.is_some(), "登出应踢在途实时连接");
+}
+
+/// 等价路径拼写（`a//b` 与 `a/b`）共享同一把每路径写锁：并发补丁按串行合并，不丢更新。
+#[tokio::test]
+async fn equivalent_path_spellings_share_one_write_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+    let space_id = setup_two_members(&ctx, "alice", "bob").await;
+    let a = login_as(&ctx, "alice").await;
+
+    let file = "深/并发.atlx";
+    let (status, _) = ctx
+        .put(
+            &format!("/api/spaces/{space_id}/file"),
+            Some(&a),
+            json!({ "path": file, "content": canvas_doc("cv-1", "并发", json!([text_node("n1", 1.0)])).to_string() }),
+        )
+        .await;
+    assert_eq!(status, 200);
+
+    // 同一物理文件两种拼写并发补丁：偶数用规范拼写，奇数用含空段与 `.` 段的等价拼写
+    let url = format!("/api/spaces/{space_id}/patches/canvas");
+    let patch_futs = (0..8u32).map(|i| {
+        let ctx = &ctx;
+        let a = &a;
+        let url = &url;
+        let path = if i % 2 == 0 { file.to_string() } else { "深//./并发.atlx".to_string() };
+        async move {
+            let patch = json!({ "id": "cv-1", "upsertNodes": [text_node(&format!("p{i}"), i as f64)] });
+            ctx.post(url, Some(a), json!({ "path": path, "patch": patch })).await
+        }
+    });
+    let results = join_all(patch_futs).await;
+    for (status, body) in &results {
+        assert_eq!(*status, 200, "等价拼写的并发补丁应全部成功：{body}");
+    }
+    let doc = read_json(&ctx, &a, &space_id, file).await;
+    let ids: Vec<&str> = doc["nodes"].as_array().unwrap().iter().map(|n| n["id"].as_str().unwrap()).collect();
+    assert_eq!(ids.len(), 9, "n1 + 8 个并发新增节点应全部在场（等价拼写同锁串行）：{ids:?}");
+}
+
+/// 收编目录是服务器管理员专属：普通注册账号的空间一律落数据目录内。
+#[tokio::test]
+async fn adopt_path_requires_server_admin() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+    let adopt_root = tempfile::tempdir().unwrap();
+    // alice = 首位注册者（管理员），bob = 普通账号
+    for name in ["alice", "bob"] {
+        let (status, body) =
+            ctx.post("/api/auth/register", None, json!({ "username": name, "password": "pass-123456" })).await;
+        assert_eq!(status, 200, "{body}");
+    }
+    let b = login_as(&ctx, "bob").await;
+    let adopted = adopt_root.path().join("adopted");
+    std::fs::create_dir_all(&adopted).unwrap();
+
+    let (status, body) = ctx
+        .post("/api/spaces", Some(&b), json!({ "name": "越权收编", "path": adopted.to_string_lossy() }))
+        .await;
+    assert_eq!(status, 403, "普通账号收编目录应被拒：{body}");
+
+    let a = login_as(&ctx, "alice").await;
+    let (status, body) = ctx
+        .post("/api/spaces", Some(&a), json!({ "name": "管理员收编", "path": adopted.to_string_lossy() }))
+        .await;
+    assert_eq!(status, 200, "管理员收编应放行：{body}");
+    assert!(
+        body["rootPath"].as_str().unwrap_or_default().ends_with("adopted"),
+        "回执应带收编根路径：{body}"
+    );
+
+    // 数据目录自身（或其内部）不可收编的防护保持生效
+    let (status, _) = ctx.post("/api/spaces", Some(&a), json!({ "name": "收编数据目录", "path": dir.path().to_string_lossy() })).await;
+    assert_eq!(status, 400, "收编数据目录应被拒");
+}

@@ -10,7 +10,7 @@ use serde_json::json;
 
 use crate::auth::AuthUser;
 use crate::state::{
-    bad_request, forbidden, not_found, now_secs, random_hex, Member, ServerState, Space,
+    bad_request, forbidden, internal, not_found, now_secs, random_hex, Member, ServerState, Space,
     ROLE_EDITOR, ROLE_OWNER, ROLE_VIEWER,
 };
 use crate::ws::KickReason;
@@ -66,10 +66,16 @@ pub async fn create_space(
     if !valid_name(&body.name) {
         return Err(bad_request("空间名不能为空且不超过 64 字"));
     }
-    // 收编目录：归一化为 canonical 路径存储（大小写/符号链接在创建时定死，后续比较一致）
+    // 收编目录：归一化为 canonical 路径存储（大小写/符号链接在创建时定死，后续比较一致）。
+    // 收编把服务器进程可读写的整个目录交给空间成员，只允许服务器管理员操作
+    // （NAS 挂载等运维者场景）；普通注册账号的空间一律落数据目录内
     let adopted: Option<String> = match body.path.as_deref() {
         None | Some("") => None,
         Some(p) => {
+            let is_admin = state.read(|persist| crate::admin::is_admin(persist, &user.user_id));
+            if !is_admin {
+                return Err(forbidden("收编目录需要服务器管理员权限"));
+            }
             let pb = std::path::PathBuf::from(p);
             if !pb.is_absolute() {
                 return Err(bad_request("内容根必须是绝对路径"));
@@ -103,7 +109,7 @@ pub async fn create_space(
     // 收编目录已存在且有内容，不建不碰
     if adopted.is_none() {
         std::fs::create_dir_all(state.default_space_root(&space.id))
-            .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("创建空间目录失败：{e}")))?;
+            .map_err(|e| internal(format!("创建空间目录失败：{e}")))?;
     }
     let id = space.id.clone();
     let name = space.name.clone();

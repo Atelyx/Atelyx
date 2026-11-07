@@ -121,6 +121,22 @@ pub(crate) struct PathLocks {
     map: Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
 }
 
+/// 路径锁键：剔空段与 `.` 段、统一分隔符、整体小写折叠——Windows 文件系统大小写
+/// 不敏感，`A.md` 与 `a.md` 也须同锁（Unix 上大小写不同的两个文件被并入同锁只是
+/// 多串行，方向无害）。
+fn path_lock_key(space_id: &str, rel: &str) -> String {
+    let text = rel.replace('\\', "/");
+    let mut key = String::with_capacity(space_id.len() + text.len() + 1);
+    key.push_str(&space_id.to_lowercase());
+    for seg in text.split('/') {
+        if !seg.is_empty() && seg != "." {
+            key.push('/');
+            key.push_str(&seg.to_lowercase());
+        }
+    }
+    key
+}
+
 /// 持有期间独占该路径的写权；释放时（Drop）顺带摘除无主条目。
 pub(crate) struct PathLockGuard {
     map: Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
@@ -168,7 +184,9 @@ impl Drop for PathLockGuard {
 
 /// 500 内部错误响应。
 pub fn internal(e: impl std::fmt::Display) -> ApiError {
-    ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+    // 错误原文（可能含服务器路径）只进日志留证；客户端拿通用文案，不外泄部署布局
+    tracing::error!("内部错误：{e}");
+    ApiError(StatusCode::INTERNAL_SERVER_ERROR, "服务器内部错误".to_string())
 }
 
 /// 400 请求错误响应。
@@ -357,10 +375,17 @@ impl ServerState {
         self.inner.hub.clone()
     }
 
-    /// 内容写按路径串行化的锁（同路径互斥、跨路径无碍；key = 空间 id + 相对路径，
-    /// 不同空间的同形路径互不阻塞）。
+    /// 内容写按路径串行化的锁（同路径互斥、跨路径无碍；key = 空间 id + 归一化相对路径，
+    /// 不同空间的同形路径互不阻塞）。键先归一：`a//b.md`、`a/./b.md`、`a/b.md` 与大小写
+    /// 变体是同一物理文件，按原始串取键会让等价拼写绕开互斥（归一口径见 [`path_lock_key`]）。
     pub(crate) async fn path_lock(&self, space_id: &str, rel: &str) -> PathLockGuard {
-        self.inner.path_locks.lock(&format!("{space_id}/{rel}")).await
+        self.inner.path_locks.lock(&path_lock_key(space_id, rel)).await
+    }
+
+    /// 与 [`Self::path_lock`] 同口径的锁键：多把路径锁的调用方据此对同键去重
+    /// （锁不可重入，等价拼写重复取锁会自死锁）。
+    pub(crate) fn path_lock_key(&self, rel: &str) -> String {
+        path_lock_key("", rel)
     }
 
     /// 空间级结构锁：补丁端点与改名端点都先取本锁再取路径锁。补丁显式携带 title 时按标题
