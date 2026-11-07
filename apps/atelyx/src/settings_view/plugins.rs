@@ -1737,6 +1737,11 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
                     Err(e) => resolve_vault(app, request_id, Err(e)),
                 },
                 crate::RepoKind::Space(space) => {
+                    // 已载入过的图直接用句柄记录的固有尺寸回答（任一上限档记录的都是原图尺寸）：
+                    // 网格显示过的图点开灯箱即刻有尺寸，不整文件下载
+                    if let Some((width, height)) = loaded_image_size(app, &rel) {
+                        return resolve_vault(app, request_id, image_info_value(width, height, &rel));
+                    }
                     // 字节缓存命中（缩略图 / 原图载入带回）：不再整文件下载
                     if let Some(bytes) = app.cached_image_bytes(&rel) {
                         let head = &bytes[..bytes.len().min(IMAGE_HEADER_BYTES as usize)];
@@ -2930,11 +2935,28 @@ fn read_image_info(root: &std::path::Path, rel: &str) -> Result<serde_json::Valu
 /// 图片头 → 协议尺寸；认不出格式可读失败（插件据此提示而不是拿 0 继续画）。
 fn image_info_json(bytes: &[u8], rel: &str) -> Result<serde_json::Value, String> {
     let (width, height) = crate::image_dimensions(bytes);
+    image_info_value(width, height, rel)
+}
+
+/// 协议尺寸回执组装（宽高任一为 0 视为不可识别）。
+fn image_info_value(width: u32, height: u32, rel: &str) -> Result<serde_json::Value, String> {
     if width == 0 || height == 0 {
         return Err(format!("不是可识别的图片（png / jpeg / gif / bmp / webp）：{rel}"));
     }
     serde_json::to_value(ImageInfoResult { width, height })
         .map_err(|e| format!("图片尺寸序列化失败：{e}"))
+}
+
+/// 已载入界面图片的固有尺寸：键精确命中（原图档），或任一上限档 `路径#<max>`。
+fn loaded_image_size(app: &App, rel: &str) -> Option<(u32, u32)> {
+    if let Some(size) = app.note_image_sizes.get(rel) {
+        return Some(*size);
+    }
+    let prefix = format!("{rel}#");
+    app.note_image_sizes
+        .iter()
+        .find(|(key, _)| key.starts_with(&prefix))
+        .map(|(_, size)| *size)
 }
 
 /// 可切换的容器清单：最近仓库按最近打开序在前，协作空间在后

@@ -6368,16 +6368,20 @@ impl App {
         }
     }
 
-    /// 原图字节入缓存：重复路径只更新字节，超限按最早写入逐出（FIFO）。
+    /// 原图字节入缓存：重复路径只更新字节，总字节量超预算按最早写入逐出；
+    /// 至少保留最新一份（单文件超预算也不空手）。
     pub(crate) fn cache_image_bytes(&mut self, path: String, bytes: std::sync::Arc<Vec<u8>>) {
+        const IMAGE_BYTES_BUDGET: usize = 64 * 1024 * 1024;
         if !self.plugin_image_bytes.contains_key(&path) {
             self.plugin_image_bytes_order.push(path.clone());
         }
         self.plugin_image_bytes.insert(path, bytes);
-        const IMAGE_BYTES_LIMIT: usize = 4;
-        while self.plugin_image_bytes_order.len() > IMAGE_BYTES_LIMIT {
+        let mut total: usize = self.plugin_image_bytes.values().map(|bytes| bytes.len()).sum();
+        while total > IMAGE_BYTES_BUDGET && self.plugin_image_bytes_order.len() > 1 {
             let evicted = self.plugin_image_bytes_order.remove(0);
-            self.plugin_image_bytes.remove(&evicted);
+            if let Some(bytes) = self.plugin_image_bytes.remove(&evicted) {
+                total = total.saturating_sub(bytes.len());
+            }
         }
     }
 

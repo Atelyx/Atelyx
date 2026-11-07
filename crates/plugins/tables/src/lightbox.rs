@@ -10,9 +10,9 @@ use crate::model::{Lightbox, Point, Rect, Session, Size};
 pub const HEADER_INSET: f32 = 30.0;
 /// 显示区内边距（px）。
 const INSET: f32 = 48.0;
-/// 上限图边长：灯箱先按它出图（秒开），原图由宿主后台解码就绪后盖上（渐进升级）。
-/// 面板显示通常只需约千像素宽，2048 已远超屏显需要；原图期间放大到高倍数会短暂偏糊。
-const PREVIEW_MAX_EDGE: u32 = 2048;
+/// 上限图边长：与图片格缩略图同档（宿主对同一张图共用已解码句柄，点开即出），
+/// 原图由宿主后台解码就绪后盖上（渐进升级）；原图期间放大到高倍数会短暂偏糊。
+const PREVIEW_MAX_EDGE: u32 = crate::model::THUMB_MAX_EDGE;
 /// 未声明排版口径时帧文本的相对行高（与宿主缺省一致）。
 const TEXT_LINE: f32 = 1.2;
 
@@ -86,15 +86,18 @@ pub fn popup_frame(session: &Session, size: Size) -> Option<SurfacePopup> {
     let display = display_rect(inner, lightbox.zoom, lightbox.pan);
     let count = image_count(session, lightbox);
     let mut hits = Vec::new();
-    if lightbox.loading {
-        commands.push(centered_note(size, "图片加载中…", ColorToken::TextMuted));
-    } else if let Some(error) = &lightbox.error {
+    if let Some(error) = &lightbox.error {
         commands.push(centered_note(size, error, ColorToken::Danger));
     } else {
         match current_image(session, lightbox) {
             Some(rel) => {
-                // 渐进式：上限图先出（秒开），原图就绪后画在其上自然盖掉；
-                // 未载入的句柄宿主直接跳过该条指令，两层同一 Contain 矩形无缝衔接
+                // 图片指令不等探针：协作空间下探针要整文件下载，等它收起占位会让
+                // 首帧图片白白串行在下裁之后。加载占位文字垫在图片指令下方，未载入的
+                // 句柄宿主直接跳过该条指令（文字露出），句柄一到即被盖住；上限图与
+                // 图片格缩略图同档共用宿主句柄，点开即出，原图就绪后盖上
+                if lightbox.loading {
+                    commands.push(centered_note(size, "图片加载中…", ColorToken::TextMuted));
+                }
                 commands.push(DrawCommand::Image {
                     source: atelyx_plugin_protocol::paint::ImageSource::Vault {
                         path: rel.clone(),
@@ -106,17 +109,21 @@ pub fn popup_frame(session: &Session, size: Size) -> Option<SurfacePopup> {
                     h: display.h,
                     fit: Some(ImageFit::Contain),
                 });
-                commands.push(DrawCommand::Image {
-                    source: atelyx_plugin_protocol::paint::ImageSource::Vault {
-                        path: rel,
-                        max_edge: None,
-                    },
-                    x: display.x,
-                    y: display.y,
-                    w: display.w,
-                    h: display.h,
-                    fit: Some(ImageFit::Contain),
-                });
+                // 原图层等探针回执后再发：探针已把整文件字节带入宿主缓存，此刻取数
+                // 不再重复下载（协作空间无区间读接口，原图提前发会与探针各下一次整文件）
+                if !lightbox.loading {
+                    commands.push(DrawCommand::Image {
+                        source: atelyx_plugin_protocol::paint::ImageSource::Vault {
+                            path: rel,
+                            max_edge: None,
+                        },
+                        x: display.x,
+                        y: display.y,
+                        w: display.w,
+                        h: display.h,
+                        fit: Some(ImageFit::Contain),
+                    });
+                }
             }
             None => commands.push(centered_note(size, "图片已清空", ColorToken::TextMuted)),
         }
@@ -295,7 +302,7 @@ pub fn zoom_at(lightbox: &mut Lightbox, size: Size, cursor: Point, delta_y: f32)
 #[cfg(test)]
 mod tests {
     use atelyx_format::table::{TableField, TableFile, TableRow};
-    use atelyx_plugin_protocol::paint::DrawCommand;
+    use atelyx_plugin_protocol::paint::{DrawCommand, ImageSource};
 
     use super::{nav_button, navigate, popup_frame};
     use crate::model::{Lightbox, Session, Size};
@@ -353,19 +360,52 @@ mod tests {
     }
 
     #[test]
-    fn loading_and_error_show_note_instead_of_image() {
-        let mut session = session();
+    fn loading_keeps_the_grid_tier_and_the_original_tier_waits_for_the_probe() {
+        let session = session();
         let popup = popup_frame(&session, session.view.canvas_size).expect("应有浮层");
-        assert!(!popup.commands.iter().any(|command| matches!(command, DrawCommand::Image { .. })));
+        // 加载中即发上限图（与图片格缩略图同档、共用宿主句柄），只此一层图片指令
+        let sources: Vec<_> = popup
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                DrawCommand::Image { source, .. } => Some(source.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sources.len(), 1);
+        assert!(matches!(
+            &sources[0],
+            ImageSource::Vault { max_edge: Some(edge), .. } if *edge == crate::model::THUMB_MAX_EDGE
+        ));
         assert!(popup.commands.iter().any(|command| matches!(
             command,
             DrawCommand::Text { content, .. } if content == "图片加载中…"
         )));
+        // 探针回执后补发原图层（共两层）
+        let mut session = session;
+        if let Some(lightbox) = session.view.lightbox.as_mut() {
+            lightbox.loading = false;
+        }
+        let popup = popup_frame(&session, session.view.canvas_size).expect("应有浮层");
+        assert_eq!(
+            popup
+                .commands
+                .iter()
+                .filter(|command| matches!(command, DrawCommand::Image { .. }))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn error_shows_note_instead_of_image() {
+        let mut session = session();
         if let Some(lightbox) = session.view.lightbox.as_mut() {
             lightbox.loading = false;
             lightbox.error = Some("无法加载图片".into());
         }
         let popup = popup_frame(&session, session.view.canvas_size).expect("应有浮层");
+        assert!(!popup.commands.iter().any(|command| matches!(command, DrawCommand::Image { .. })));
         assert!(popup.commands.iter().any(|command| matches!(
             command,
             DrawCommand::Text { content, .. } if content == "无法加载图片"
