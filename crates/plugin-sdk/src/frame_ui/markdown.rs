@@ -10,6 +10,7 @@ use atelyx_format::markdown::{
     parse_inline, parse_markdown, InlineSpan, MarkdownBlock, MarkdownListItem, MentionCandidate,
     ParseOptions,
 };
+use atelyx_format::markdown::MarkdownDocument;
 use atelyx_plugin_protocol::paint::{ColorToken, DrawCommand, PaintColor, PaintPoint, TextFamily, TextWeight};
 
 use super::build::BuildCtx;
@@ -168,7 +169,15 @@ pub(crate) struct LayoutCache {
 #[derive(Default)]
 struct LayoutCacheInner {
     entries: HashMap<CacheKey, CachedLayout>,
+    /// 解析结果按内容指纹缓存：排版键含宽度，换宽重排不再连带重新解析。
+    parsed: HashMap<u64, CachedDocument>,
     clock: u64,
+}
+
+struct CachedDocument {
+    document: Arc<MarkdownDocument>,
+    /// 最近使用刻度（按它淘汰）。
+    stamp: u64,
 }
 
 struct CachedLayout {
@@ -183,6 +192,8 @@ struct CachedLayout {
 
 /// 缓存条数上限：长文档按块缓存（滚动时逐块取高度），按最近使用淘汰。
 const MAX_LAYOUTS: usize = 16384;
+/// 解析缓存条数上限：解析结果与宽度无关，拖动改宽期间按内容持续复用。
+const MAX_PARSED: usize = 1024;
 
 impl Default for LayoutCache {
     fn default() -> Self {
@@ -223,6 +234,29 @@ impl LayoutCache {
         }
         inner.entries.insert(key, CachedLayout { layout, estimate, epoch, stamp });
     }
+
+    /// 取（或解析并缓存）一份 Markdown 文档：键 = 内容指纹（源文本 + 引用候选），
+    /// 与排版宽度无关——拖动改宽的重排不再连带重新解析。
+    fn parsed(&self, key: u64, parse: impl FnOnce() -> MarkdownDocument) -> Arc<MarkdownDocument> {
+        let mut inner = self.inner.lock().unwrap();
+        inner.clock = inner.clock.wrapping_add(1);
+        let stamp = inner.clock;
+        if let Some(cached) = inner.parsed.get_mut(&key) {
+            cached.stamp = stamp;
+            return Arc::clone(&cached.document);
+        }
+        let document = Arc::new(parse());
+        if inner.parsed.len() >= MAX_PARSED {
+            let mut ages: Vec<(u64, u64)> =
+                inner.parsed.iter().map(|(key, cached)| (cached.stamp, *key)).collect();
+            ages.sort_unstable_by_key(|(stamp, _)| *stamp);
+            for (_, key) in ages.into_iter().take(MAX_PARSED / 4) {
+                inner.parsed.remove(&key);
+            }
+        }
+        inner.parsed.insert(key, CachedDocument { document, stamp });
+        Arc::clone(&inner.parsed[&key].document)
+    }
 }
 
 /// 内容指纹：缓存键用（引用候选随会话变化，一并计入）。
@@ -260,12 +294,18 @@ fn laid_out(
     if let Some(hit) = cache.hit(full, epoch) {
         return hit;
     }
+    let parse_key = content_key(content, mentions);
+    let document = cache.parsed(parse_key, || {
+        let options = ParseOptions { mentions: mentions.to_vec(), ..ParseOptions::default() };
+        parse_markdown(content, &options)
+    });
     metrics.begin_layout();
-    let laid = Arc::new(layout_expanded(
+    let laid = Arc::new(layout_document(
         metrics,
         theme,
         owner,
         content,
+        &document,
         mentions,
         width,
         list_start,
@@ -759,7 +799,7 @@ struct Builder<'a> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn layout_expanded(
+pub(crate) fn layout_expanded(
     metrics: &mut Metrics,
     theme: &Theme,
     owner: &str,
@@ -772,6 +812,24 @@ fn layout_expanded(
 ) -> Layout {
     let options = ParseOptions { mentions: mentions.to_vec(), ..ParseOptions::default() };
     let document = parse_markdown(source, &options);
+    layout_document(metrics, theme, owner, source, &document, mentions, width, list_start, soft_wrap, expanded)
+}
+
+/// 按已解析文档排版（解析结果由调用方缓存复用）。
+#[allow(clippy::too_many_arguments)]
+fn layout_document(
+    metrics: &mut Metrics,
+    theme: &Theme,
+    owner: &str,
+    source: &str,
+    document: &MarkdownDocument,
+    mentions: &[MentionCandidate],
+    width: f32,
+    list_start: usize,
+    soft_wrap: bool,
+    expanded: &[usize],
+) -> Layout {
+    let options = ParseOptions { mentions: mentions.to_vec(), ..ParseOptions::default() };
     let mut builder = Builder {
         metrics,
         theme,
