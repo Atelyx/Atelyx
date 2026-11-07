@@ -172,6 +172,9 @@ pub struct NoteModel {
     /// 预览编辑档按在正文单元上的待揭示（命中 id + 按下位置）：抬起时位移小于阈值才揭示，
     /// 按住拖动是跨块选区——立即揭示会把 markdown 块换成输入面，选区随之销毁。
     pub reveal_pending: Option<(String, (f32, f32))>,
+    /// 按在活动输入面上的按下（面 id + 按下点）：拖出该面即收起活动态，
+    /// 让跨块拖选从本块起选（控件层锚点按按下点重建）。
+    pub drag_face: Option<(String, (f32, f32))>,
     /// 正文图片的探测结果（路径 → 原图像素尺寸；`None` = 不能解码）：失败的在只读面回落替代文字。
     pub image_probe: HashMap<String, Option<(u32, u32)>>,
     /// 仓库文件清单（`[[` 候选与内链解析用；宿主清单重建时重取）。
@@ -218,6 +221,7 @@ impl NoteModel {
         self.active_block = None;
         self.active_item = None;
         self.reveal_pending = None;
+        self.drag_face = None;
         self.renaming = None;
         self.pending_rename = None;
         self.menu_open = false;
@@ -246,6 +250,7 @@ impl NoteModel {
         self.active_block = None;
         self.active_item = None;
         self.reveal_pending = None;
+        self.drag_face = None;
         self.blocks.clear();
         self.image_probe.clear();
         self.wiki = None;

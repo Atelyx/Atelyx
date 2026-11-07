@@ -333,7 +333,7 @@ async fn pointer_down(
             item.caret = caret;
             item.anchor = caret;
             item.preedit.clear();
-            state.press = Some(Press { id: id.to_string(), from_input: true });
+            state.press = Some(Press { id: id.to_string(), from_input: true, origin: (x, y), converted: false });
         }
         Layout::TextArea { inner, font, value: shown, marks, line, .. } => {
             // 点回正文恢复光标跟随：人工滚动位并回输入态
@@ -361,35 +361,35 @@ async fn pointer_down(
             item.scroll = scroll;
             item.preedit.clear();
             set_focus(state, Some(id.to_string()), value_of, events);
-            state.press = Some(Press { id: id.to_string(), from_input: true });
+            state.press = Some(Press { id: id.to_string(), from_input: true, origin: (x, y), converted: false });
         }
         Layout::Select { .. } => {
             set_focus(state, Some(id.to_string()), value_of, events);
             let select = state.selects.entry(id.to_string()).or_default();
             select.open = !select.open;
             select.hover = None;
-            state.press = Some(Press { id: id.to_string(), from_input: false });
+            state.press = Some(Press { id: id.to_string(), from_input: false, origin: (x, y), converted: false });
         }
         Layout::Checkbox => {
             set_focus(state, Some(id.to_string()), value_of, events);
-            state.press = Some(Press { id: id.to_string(), from_input: false });
+            state.press = Some(Press { id: id.to_string(), from_input: false, origin: (x, y), converted: false });
         }
         Layout::Button
         | Layout::Option { .. }
         | Layout::Copy { .. }
         | Layout::Expand { .. }
         | Layout::Link { .. } => {
-            state.press = Some(Press { id: id.to_string(), from_input: false });
+            state.press = Some(Press { id: id.to_string(), from_input: false, origin: (x, y), converted: false });
         }
         Layout::Markdown { rect, .. } => {
             // 只读正文里按下即起选：拖过多少选多少，同一次按下内可跨块延伸
             let at = markdown_point(state, id, rect, x, y).unwrap_or((0, 0));
             let pos = BlockPos { id: id.to_string(), line: at.0, byte: at.1 };
             state.selection = Some(TextSelection { anchor: pos.clone(), focus: pos });
-            state.press = Some(Press { id: id.to_string(), from_input: true });
+            state.press = Some(Press { id: id.to_string(), from_input: true, origin: (x, y), converted: false });
         }
         Layout::Custom => {
-            state.press = Some(Press { id: id.to_string(), from_input: false });
+            state.press = Some(Press { id: id.to_string(), from_input: false, origin: (x, y), converted: false });
             // 只有光标声明为拖动形态的子区才吃拖拽；普通点选区的小抖动仍按点击解释
             if state.draggables.contains(id) {
                 state.drag = Some(Drag {
@@ -430,7 +430,8 @@ fn markdown_point(state: &mut UiState, id: &str, rect: Rect, x: f32, y: f32) -> 
     super::markdown::hit(&layout, &mut state.metrics, x - rect.x + offset, y - rect.y)
 }
 
-/// 指针落在哪个 Markdown 块：优先当前命中 id，落在块间空白时取纵向最近的块。
+/// 指针落在哪个 Markdown 块：优先当前命中 id，落在块间空白时取纵向最近的块
+/// （按绘制序遍历，等距取文档序在前者，端点不随迭代序抖动）。
 fn markdown_under(state: &UiState, hit: Option<&str>, x: f32, y: f32) -> Option<(String, Rect)> {
     if let Some(id) = hit {
         if let Some(Layout::Markdown { rect, .. }) = state.layouts.get(id) {
@@ -438,8 +439,8 @@ fn markdown_under(state: &UiState, hit: Option<&str>, x: f32, y: f32) -> Option<
         }
     }
     let mut best: Option<(String, Rect, f32)> = None;
-    for (id, layout) in &state.layouts {
-        let Layout::Markdown { rect, .. } = layout else { continue };
+    for id in &state.markdown_order {
+        let Some(Layout::Markdown { rect, .. }) = state.layouts.get(id) else { continue };
         let gap = if y < rect.y {
             rect.y - y
         } else if y > rect.bottom() {
@@ -456,6 +457,54 @@ fn markdown_under(state: &UiState, hit: Option<&str>, x: f32, y: f32) -> Option<
         }
     }
     best.map(|(id, rect, _)| (id, rect))
+}
+
+/// 拖出输入面后的锚点重建：按下点钳回块内换算成（行序，行内字节位）。
+fn anchor_in_block(
+    state: &mut UiState,
+    id: &str,
+    rect: &Rect,
+    origin: (f32, f32),
+) -> Option<BlockPos> {
+    let y = origin.1.clamp(rect.y, rect.bottom());
+    let (line, byte) = markdown_point(state, id, *rect, origin.0, y)?;
+    Some(BlockPos { id: id.to_string(), line, byte })
+}
+
+/// 输入面拖出转跨块选区时的锚点：取文档序里按压面上/下最近 Markdown 块的靠面端点
+/// （空行输入面无内容，边界即忠实；内容面随后由插件收块、锚点按按下点重建）。
+/// `target` = 拖动落点所在块：在面下方取上邻块末尾，在面上方取下邻块开头。
+fn boundary_anchor(state: &UiState, face: &Rect, target: &Rect) -> Option<BlockPos> {
+    let downward = target.y >= face.y;
+    let (mut above, mut below): (Option<(&String, &Rect)>, Option<(&String, &Rect)>) = (None, None);
+    for id in &state.markdown_order {
+        let Some(Layout::Markdown { rect, .. }) = state.layouts.get(id) else { continue };
+        if rect.bottom() <= face.y {
+            if above.as_ref().is_none_or(|(_, best)| rect.bottom() > best.bottom()) {
+                above = Some((id, rect));
+            }
+        } else if rect.y >= face.bottom()
+            && below.as_ref().is_none_or(|(_, best)| rect.y < best.y)
+        {
+            below = Some((id, rect));
+        }
+    }
+    let (id, end) = match (downward, above, below) {
+        (true, Some((id, _)), _) => (id, true),
+        // 面上方无块：锚点取下邻块开头（选区从第一块内容起）
+        (true, None, Some((id, _))) => (id, false),
+        (false, _, Some((id, _))) => (id, false),
+        // 面下方无块：锚点取上邻块末尾（选区到该块内容止）
+        (false, Some((id, _)), None) => (id, true),
+        _ => return None,
+    };
+    if end {
+        let layout = state.markdown_last.get(id)?;
+        let line = layout.line_count().saturating_sub(1);
+        Some(BlockPos { id: id.clone(), line, byte: super::markdown::line_len(layout, line) })
+    } else {
+        Some(BlockPos { id: id.clone(), line: 0, byte: 0 })
+    }
 }
 
 fn pointer_up(state: &mut UiState, x: f32, y: f32, hit: Option<&str>, events: &mut Vec<UiEvent>) {
@@ -549,18 +598,51 @@ async fn pointer_move(
         state.drag = Some(drag);
         return;
     }
-    // 只读正文里按住拖动：落点换算成行列，跨块时按块序延伸当前选择
-    if let Some(press) = state.press.clone().filter(|press| press.from_input) {
-        if matches!(state.layouts.get(&press.id), Some(Layout::Markdown { .. })) {
-            if let Some((target_id, rect)) = markdown_under(state, hit, x, y) {
-                if let Some(at) = markdown_point(state, &target_id, rect, x, y) {
-                    let pos = BlockPos { id: target_id, line: at.0, byte: at.1 };
-                    if let Some(selection) = state.selection.as_mut() {
-                        selection.focus = pos;
+    // 只读正文里按住拖动：落点换算成行列，跨块时按块序延伸当前选择。
+    // 按压在输入面上拖出该面同样转入跨块延伸：锚点先取邻块边界的近似值，
+    // 按压面重现为 Markdown 块（插件收块后同 id 回帧）时按按下点重建精确锚点。
+    if let Some(mut press) = state.press.clone().filter(|press| press.from_input) {
+        match state.layouts.get(&press.id).cloned() {
+            Some(Layout::Markdown { rect: press_rect, .. }) => {
+                if state.selection.is_none() || press.converted {
+                    if let Some(at) = anchor_in_block(state, &press.id, &press_rect, press.origin) {
+                        let focus = state.selection.as_ref().map(|selection| selection.focus.clone());
+                        state.selection = Some(TextSelection {
+                            anchor: at.clone(),
+                            focus: focus.unwrap_or(at),
+                        });
+                    }
+                    press.converted = false;
+                }
+                if let Some((target_id, rect)) = markdown_under(state, hit, x, y) {
+                    if let Some(at) = markdown_point(state, &target_id, rect, x, y) {
+                        let pos = BlockPos { id: target_id, line: at.0, byte: at.1 };
+                        if let Some(selection) = state.selection.as_mut() {
+                            selection.focus = pos;
+                        }
                     }
                 }
+                state.press = Some(press);
+                return;
             }
-            return;
+            Some(Layout::TextArea { inner, .. }) if !inner.contains(x, y) => {
+                if let Some((target_id, rect)) = markdown_under(state, hit, x, y) {
+                    if let Some(at) = markdown_point(state, &target_id, rect, x, y) {
+                        let focus = BlockPos { id: target_id, line: at.0, byte: at.1 };
+                        let anchor = match state.selection.as_ref().filter(|_| press.converted) {
+                            Some(selection) => Some(selection.anchor.clone()),
+                            None => boundary_anchor(state, &inner, &rect),
+                        };
+                        if let Some(anchor) = anchor {
+                            press.converted = true;
+                            state.selection = Some(TextSelection { anchor, focus });
+                        }
+                    }
+                    state.press = Some(press);
+                    return;
+                }
+            }
+            _ => {}
         }
     }
     let Some(press) = state.press.clone().filter(|press| press.from_input) else {

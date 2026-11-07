@@ -124,6 +124,11 @@ pub(crate) struct Press {
     pub id: String,
     /// 按下落在输入框：移动时按坐标延伸选区。
     pub from_input: bool,
+    /// 按下点（面本地坐标）：拖出输入面转跨块选区后，锚点按它重建。
+    pub origin: (f32, f32),
+    /// 跨块选区由「拖出输入面」转换而来：锚点是邻块边界的近似值，待按压面
+    /// 重现为 Markdown 块（同 id）后按按下点重建精确锚点。
+    pub converted: bool,
 }
 
 /// 自绘子区的拖拽会话：位移越过阈值才算开始，`dx` / `dy` 是从按下点的累计位移。
@@ -218,7 +223,13 @@ pub(crate) struct UiState {
     /// 虚拟列表各条目的最近一次实测高（列表 id + 条目 key）：只用于估算屏外条目，
     /// 改宽后优先按新宽度重排屏内条目。
     pub virtual_heights: Arc<Mutex<HashMap<(String, u64), f32>>>,
+    /// 相邻两块（按绘制序）之间源文里的空行数（插件按自己的文档模型提供）。
+    /// 跨块复制按它复原段落间隔；未设置时块间固定按一个换行拼接。
+    pub gap_of: Option<Box<dyn Fn(&str, &str) -> usize + Send + Sync>>,
 }
+
+/// 相邻两块之间空行数的解析器：入参为两块的控件 id（绘制序前后）。
+pub type GapResolver = Box<dyn Fn(&str, &str) -> usize + Send + Sync>;
 
 impl Default for UiState {
     fn default() -> Self {
@@ -251,6 +262,7 @@ impl Default for UiState {
             follow_prev: HashMap::new(),
             scroll_x: HashMap::new(),
             markdown_layouts: Arc::default(),
+            gap_of: None,
             submitted: None,
             resize_pending: false,
             overlays: Vec::new(),
@@ -329,11 +341,13 @@ impl UiState {
         self.hint.as_ref().is_some_and(|hint| hint.since.elapsed() < HINT_DELAY)
     }
 
-    /// 复制选择区内的文字（按块序逐块取，不含 Markdown 标记；块间用一个换行拼接）。
+    /// 复制选择区内的文字（按块序逐块取，不含 Markdown 标记）。块间分隔 = 一个换行 +
+    /// 插件解析器给出的块间空行数，跨块复制据此复原段落间隔。
     pub(crate) fn selection_text(&self) -> Option<String> {
         let selection = self.selection.as_ref()?;
         let (from_rank, to_rank, from, to) = self.selection_ends(selection)?;
-        let mut parts: Vec<String> = Vec::new();
+        let mut out = String::new();
+        let mut previous: Option<&str> = None;
         for (rank, id) in self.markdown_order.iter().enumerate() {
             if rank < from_rank || rank > to_rank {
                 continue;
@@ -342,11 +356,15 @@ impl UiState {
             let Some(range) = local_selection_range(layout, rank, from_rank, to_rank, from, to) else { continue };
             let text = markdown::selected_text(layout, range);
             if !text.is_empty() {
-                parts.push(text);
+                if let Some(prev) = previous {
+                    let gaps = self.gap_of.as_ref().map_or(1, |gap_of| 1 + gap_of(prev, id));
+                    out.push_str(&"\n".repeat(gaps));
+                }
+                out.push_str(&text);
+                previous = Some(id);
             }
         }
-        let text = parts.join("\n");
-        (!text.trim().is_empty()).then_some(text)
+        (!out.trim().is_empty()).then_some(out)
     }
 
     /// 本块在该次选择中的局部区间（行序，行内字节位）：本块不在选择范围返回 None。
@@ -461,6 +479,39 @@ mod tests {
         state.prune();
         assert!(state.inputs.is_empty() && state.selects.is_empty() && state.scroll.is_empty());
         assert!(state.focus.is_none(), "焦点不能留在已消失的控件上");
+    }
+
+    /// 跨块复制按插件解析器给出的块间空行数复原段落间隔。
+    #[test]
+    fn cross_block_copy_restores_document_gaps() {
+        let mut state = UiState::default();
+        state.markdown_order = vec!["a".into(), "b".into()];
+        let theme = Theme::default();
+        let mut metrics = Metrics::default();
+        let mut laid = |text: &str| {
+            Arc::new(super::super::markdown::layout_expanded(
+                &mut metrics,
+                &theme,
+                "x",
+                text,
+                &[],
+                300.0,
+                0,
+                true,
+                &[],
+            ))
+        };
+        state.markdown_last.insert("a".into(), laid("甲"));
+        state.markdown_last.insert("b".into(), laid("乙"));
+        state.selection = Some(TextSelection {
+            anchor: BlockPos { id: "a".into(), line: 0, byte: 0 },
+            focus: BlockPos { id: "b".into(), line: 0, byte: 3 },
+        });
+        // 未设解析器：块间一个换行
+        assert_eq!(state.selection_text().as_deref(), Some("甲\n乙"));
+        // 解析器给出两段空行：换行数 = 1 + 空行数
+        state.gap_of = Some(Box::new(|_, _| 2));
+        assert_eq!(state.selection_text().as_deref(), Some("甲\n\n\n乙"));
     }
 
     /// 静默半秒显、再半秒隐，循环往复；起点（刚编辑完）必然是亮的。

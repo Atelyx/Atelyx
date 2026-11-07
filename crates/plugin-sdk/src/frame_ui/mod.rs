@@ -39,6 +39,9 @@ const MAX_REBUILD_PASSES: usize = 3;
 /// 声明它只是为了让画面动起来——宿主对同内容帧会去重，闪烁一拍里通常只有相位翻转那几帧真正上屏。
 pub const TICK_HZ: u16 = 10;
 
+/// 相邻两块之间空行数的解析器类型（跨块复制复原段落间隔用）。
+pub use model::GapResolver;
+
 /// 原始输入解释出的语义事件。
 #[derive(Clone, Debug, PartialEq)]
 pub enum UiEvent {
@@ -87,6 +90,12 @@ impl Default for FrameUi {
 impl FrameUi {
     pub fn new() -> Self {
         Self { state: model::UiState::default(), fps: None }
+    }
+
+    /// 登记跨块复制时的块间空行解析器：入参为相邻两块的控件 id（绘制序前后），
+    /// 返回源文里两块之间的空行数。跨块选区复制按它复原段落间隔。
+    pub fn selection_gaps(&mut self, gap_of: model::GapResolver) {
+        self.state.gap_of = Some(gap_of);
     }
 
     /// 面最近一次上报的逻辑尺寸；宿主首次绘制后才可信。
@@ -1309,6 +1318,118 @@ let a = 1;
         assert_eq!(bench.clipboard.lock().unwrap().as_str(), "甲行\n乙行");
         let frame = bench.render(build).await.unwrap();
         assert!(!has_hit(&frame, super::model::COPY_MENU_ID), "复制后菜单收起");
+    }
+
+    /// 按在输入面上拖出该面：转成跨块选区，锚点取按压面上方最近块的末尾，
+    /// 复制按插件给的块间空行数复原段落间隔。
+    #[tokio::test]
+    async fn dragging_out_of_a_text_area_selects_across_blocks() {
+        let mut bench = Bench::new(320.0, 300.0).await;
+        bench.ui.lock().await.state.gap_of = Some(Box::new(|_, _| 1));
+        let build = |ui: &mut build::Ui<'_, '_>| {
+            ui.markdown_named("md-a", "甲行", Vec::new());
+            ui.text_area_plain_fixed("gap", "", 20.0, 12.0, Edges::symmetric(0.0, 0.0));
+            ui.markdown_named("md-b", "乙行", Vec::new());
+        };
+        let frame = bench.render(build).await.unwrap();
+        let gap = frame.hits.iter().find(|hit| hit.id == "gap").cloned().expect("输入面命中区");
+        let b = frame.hits.iter().find(|hit| hit.id == "md-b").cloned().expect("第二块命中区");
+        bench
+            .event(FrameInput::PointerDown {
+                x: gap.x + 2.0,
+                y: gap.y + gap.h * 0.5,
+                button: MouseButton::Left,
+                hit: Some("gap".into()),
+            })
+            .await;
+        bench
+            .event(FrameInput::PointerMove { x: b.x + b.w - 2.0, y: b.y + b.h * 0.5, hit: Some("md-b".into()) })
+            .await;
+        {
+            let state = bench.ui.lock().await;
+            let selection = state.state.selection.as_ref().expect("拖出输入面应起跨块选区");
+            assert_eq!(selection.anchor.id, "md-a", "向下拖锚点取上邻块末尾");
+            assert_eq!(selection.focus.id, "md-b");
+        }
+        let ctrl = Modifiers { control: true, ..Modifiers::default() };
+        bench
+            .event(FrameInput::Key {
+                key: Key::Character { text: "c".into() },
+                action: KeyAction::Press,
+                modifiers: ctrl,
+                text: None,
+            })
+            .await;
+        // 锚点在上邻块末尾（零内容）：复制从下一块的内容起算，不带上块间间隔
+        assert_eq!(bench.clipboard.lock().unwrap().as_str(), "乙行");
+    }
+
+    /// 拖出输入面后按压面重现为 Markdown 块（插件收块同 id 回帧）：锚点按按下点重建，
+    /// 跨块选区从按压位置起算而不是邻块边界。
+    #[tokio::test]
+    async fn converted_anchor_rebuilds_when_the_face_returns_as_markdown() {
+        let mut bench = Bench::new(320.0, 300.0).await;
+        let face = |ui: &mut build::Ui<'_, '_>| {
+            ui.text_area_plain_fixed("blk", "首行\n末行", 40.0, 12.0, Edges::symmetric(0.0, 0.0));
+        };
+        let frame = bench.render(face).await.unwrap();
+        let blk = frame.hits.iter().find(|hit| hit.id == "blk").cloned().expect("输入面命中区");
+        bench
+            .event(FrameInput::PointerDown {
+                x: blk.x + 2.0,
+                y: blk.y + 2.0,
+                button: MouseButton::Left,
+                hit: Some("blk".into()),
+            })
+            .await;
+        // 插件收块：同 id 从输入面换回 Markdown 块，随后指针拖向下方新块
+        let build = |ui: &mut build::Ui<'_, '_>| {
+            ui.markdown_named("blk", "首行\n末行", Vec::new());
+            ui.markdown_named("md-b", "乙行", Vec::new());
+        };
+        let frame = bench.render(build).await.unwrap();
+        let b = frame.hits.iter().find(|hit| hit.id == "md-b").cloned().expect("第二块命中区");
+        bench
+            .event(FrameInput::PointerMove { x: b.x + 2.0, y: b.y + b.h * 0.5, hit: Some("md-b".into()) })
+            .await;
+        {
+            let state = bench.ui.lock().await;
+            let selection = state.state.selection.as_ref().expect("跨块选区应在");
+            assert_eq!(selection.anchor.id, "blk", "锚点重建回按压块");
+            assert_eq!((selection.anchor.line, selection.anchor.byte), (0, 0), "按下点在块首");
+            assert_eq!(selection.focus.id, "md-b");
+            assert!(!state.state.press.as_ref().expect("按住中").converted, "重建后不再算近似锚点");
+        }
+    }
+
+    /// 未转换的普通 Markdown 按下：移动只延伸焦点，锚点不被按下点重建逻辑改写。
+    #[tokio::test]
+    async fn plain_markdown_drag_keeps_its_pointer_anchor() {
+        let mut bench = Bench::new(320.0, 200.0).await;
+        let build = |ui: &mut build::Ui<'_, '_>| {
+            ui.markdown_named("md-a", "甲行", Vec::new());
+            ui.markdown_named("md-b", "乙行", Vec::new());
+        };
+        let frame = bench.render(build).await.unwrap();
+        let a = frame.hits.iter().find(|hit| hit.id == "md-a").cloned().expect("第一块命中区");
+        let b = frame.hits.iter().find(|hit| hit.id == "md-b").cloned().expect("第二块命中区");
+        bench
+            .event(FrameInput::PointerDown {
+                x: a.x + a.w - 2.0,
+                y: a.y + a.h * 0.5,
+                button: MouseButton::Left,
+                hit: Some("md-a".into()),
+            })
+            .await;
+        bench
+            .event(FrameInput::PointerMove { x: b.x + b.w - 2.0, y: b.y + b.h * 0.5, hit: Some("md-b".into()) })
+            .await;
+        {
+            let state = bench.ui.lock().await;
+            let selection = state.state.selection.as_ref().expect("跨块选区应在");
+            assert_eq!(selection.anchor.id, "md-a");
+            assert!(selection.anchor.byte > 0, "锚点仍是块内按下落点，不是块首");
+        }
     }
 
     /// 没有选区时右键照旧报给插件，不弹菜单。

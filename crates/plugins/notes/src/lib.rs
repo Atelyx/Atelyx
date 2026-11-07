@@ -57,7 +57,7 @@ const SAVE_BUSY_WAIT_ROUNDS: usize = 10;
 const SAVE_CONFLICT: &str = "磁盘已被外部修改且无法自动合并，本次未写入（可撤销回打开时的内容再保存）";
 
 struct NotesPlugin {
-    model: Mutex<NoteModel>,
+    model: Arc<Mutex<NoteModel>>,
     /// 热文档唯一，切走的文档留冷缓冲：flush / 关闭按会话身份找到并提交。
     buffers: Mutex<crate::session::DocBuffers>,
     ui: AsyncMutex<FrameUi>,
@@ -71,10 +71,17 @@ struct NotesPlugin {
 
 impl NotesPlugin {
     fn new() -> Self {
+        let model = Arc::new(Mutex::new(NoteModel::default()));
+        let mut ui = FrameUi::new();
+        // 跨块复制按文档里的空行数复原段落间隔：解析器读活动文档的块模型
+        let gap_model = Arc::clone(&model);
+        ui.selection_gaps(Box::new(move |prev, id| {
+            markdown_gap(&gap_model.lock().unwrap(), prev, id)
+        }));
         Self {
-            model: Mutex::new(NoteModel::default()),
+            model,
             buffers: Mutex::new(crate::session::DocBuffers::default()),
-            ui: AsyncMutex::new(FrameUi::new()),
+            ui: AsyncMutex::new(ui),
             rows: Arc::new(Mutex::new(Vec::new())),
             refocus: Mutex::new(false),
             collab: Mutex::new(collab::Collab::new()),
@@ -751,6 +758,9 @@ impl NotesPlugin {
         if let FrameInput::PointerUp { .. } = &input {
             self.on_pointer_up(ctx).await;
         }
+        if let FrameInput::PointerMove { hit, .. } = &input {
+            self.on_pointer_move(hit.as_deref());
+        }
         let editable = {
             let model = self.model.lock().unwrap();
             model.mode != Mode::Read && model.can_write
@@ -840,11 +850,27 @@ impl NotesPlugin {
         let point = match input {
             FrameInput::PointerDown { x, y, .. }
             | FrameInput::PointerUp { x, y, .. }
+            | FrameInput::PointerMove { x, y, .. }
             | FrameInput::DoubleClick { x, y, .. } => Some((*x, *y)),
             _ => None,
         };
         if let Some(point) = point {
             self.model.lock().unwrap().pointer = point;
+        }
+    }
+
+    /// 按在活动输入面上拖出该面：收起活动态回到 Markdown 渲染（同 id 回帧）。
+    /// 控件层把跨块选区锚点按按下点重建，从正在编辑的块起选的拖选得以成立；
+    /// 面内拖动不动（hit 仍是面 id），面内选区不受影响。
+    fn on_pointer_move(&self, hit: Option<&str>) {
+        let Some((face, _)) = self.model.lock().unwrap().drag_face.clone() else { return };
+        if hit == Some(face.as_str()) {
+            return;
+        }
+        let mut model = self.model.lock().unwrap();
+        model.drag_face = None;
+        if model.active_block.take().is_some() || model.active_item.take().is_some() {
+            model.reveal_pending = None;
         }
     }
 
@@ -892,6 +918,9 @@ impl NotesPlugin {
                 });
             if !already {
                 model.reveal_pending = Some((hit.to_string(), model.pointer));
+            } else {
+                // 按在当前活动输入面上：记下面 id 与按下点，拖出该面即收块转跨块拖选
+                model.drag_face = Some((hit.to_string(), model.pointer));
             }
             return;
         }
@@ -905,6 +934,7 @@ impl NotesPlugin {
 
     /// 抬起结算待揭示单元：位移超过阈值 = 拖跨块选区，不揭示（选区留在控件层）。
     async fn on_pointer_up(&self, ctx: &Context) {
+        self.model.lock().unwrap().drag_face = None;
         let (hit, from) = match self.model.lock().unwrap().reveal_pending.take() {
             Some(pending) => pending,
             None => return,
@@ -2251,6 +2281,31 @@ fn item_gap_index(id: &str) -> Option<(usize, usize, usize)> {
     let (block, rest) = rest.split_once(':')?;
     let (item, line) = rest.split_once(':')?;
     Some((block.parse().ok()?, item.parse().ok()?, line.parse().ok()?))
+}
+
+/// 相邻两根 Markdown 部件（按绘制序）之间源文里的空行数：跨块复制据此复原段落间隔。
+/// 部件 id 有块（`note:block:`）与揭示单元（`note:item:`）两类，间隔取两侧单元之间那段源文。
+fn markdown_gap(model: &NoteModel, prev: &str, id: &str) -> usize {
+    let (Some((b1, u1)), Some((b2, u2))) = (widget_unit(prev), widget_unit(id)) else { return 0 };
+    let adjacent = match (u1, u2) {
+        (Some(u1), Some(u2)) => b1 == b2 && u2 == u1 + 1,
+        _ => b2 == b1 + 1,
+    };
+    if !adjacent {
+        return 0;
+    }
+    match (u1, u2) {
+        (Some(u1), Some(u2)) if b1 == b2 => model.item_gap_lines(b1, u2),
+        _ => model.gap_lines(b2).len(),
+    }
+}
+
+/// Markdown 部件 id →（块序，单元序）：块级部件无单元序。
+fn widget_unit(id: &str) -> Option<(usize, Option<usize>)> {
+    if let Some(index) = block_index(id) {
+        return Some((index, None));
+    }
+    item_index(id).map(|(block, item)| (block, Some(item)))
 }
 
 /// 空白双击挑最近的行：跳过空行（它们自己带命中区），取行顶不高于点击 y 的最后一行，
