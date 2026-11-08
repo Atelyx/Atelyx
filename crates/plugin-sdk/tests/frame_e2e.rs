@@ -1,6 +1,9 @@
-//! 整面帧端到端：以真实插件进程（`frame-stub` 夹具）验证帧提交落地、命中区随帧生效，
+//! 整面帧端到端：以真实插件（`frame-stub` 夹具）验证帧提交落地、命中区随帧生效，
 //! 以及点击 / 滚轮 / 键盘 / 输入法 / 尺寸 / 帧拍六条输入通知的往返。
 
+mod support;
+
+use support::stage;
 use std::time::{Duration, Instant};
 
 use atelyx_core::plugin_runtime::{
@@ -8,28 +11,12 @@ use atelyx_core::plugin_runtime::{
     SurfaceFrame,
 };
 use atelyx_core::vault::test_support::TempDir;
-use atelyx_plugin_sdk::protocol::manifest::MANIFEST_FILE;
-
-fn entry_name() -> &'static str {
-    if cfg!(windows) {
-        "plugin.exe"
-    } else {
-        "plugin"
-    }
-}
 
 fn install_frame_stub(tmp: &TempDir) -> (std::sync::Arc<PluginRuntime>, String) {
     let runtime = PluginRuntime::new(tmp.join("plugins"));
     let src = tmp.join("src");
     std::fs::create_dir_all(&src).unwrap();
-    std::fs::write(
-        src.join(MANIFEST_FILE),
-        r#"{"id":"com.atelyx.frame-stub","name":"FrameStub","version":"1.0.0","apiVersion":1,
-            "entry":{"windows":"plugin.exe","linux":"plugin"},"permissions":[]}"#,
-    )
-    .unwrap();
-    std::fs::copy(env!("CARGO_BIN_EXE_frame_stub"), src.join(entry_name()))
-        .expect("拷贝入口可执行文件失败");
+    stage(&src, "com.atelyx.frame-stub", "frame_stub", &[], "");
     let id = runtime
         .install_dir(&src)
         .expect("安装 frame-stub 应成功")

@@ -2,7 +2,7 @@
 //! 与终态写进自持数据——仅供 `ai_chat_e2e` 拉起真实进程验证对话与工具桥契约，非示例插件。
 
 use atelyx_plugin_sdk::protocol::method::{ChatEventParams, ToolCallParams};
-use atelyx_plugin_sdk::{run_stdio, Context, PluginHandler, PluginInfo};
+use atelyx_plugin_sdk::{Context, PluginHandler};
 use serde_json::{json, Map, Value};
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -91,15 +91,6 @@ impl PluginHandler for AiStub {
     }
 }
 
-#[tokio::main]
-async fn main() {
-    let fixture = PluginInfo {
-        id: "com.atelyx.ai-stub".into(),
-        name: "AiStub".into(),
-        version: "0.1.0".into(),
-    };
-    if let Err(e) = run_stdio(fixture, AiStub { model: AsyncMutex::default() }).await {
-        eprintln!("夹具启动失败：{e}");
-        std::process::exit(1);
-    }
-}
+atelyx_plugin_sdk::export_in_process_plugin!(AiStub {
+    model: AsyncMutex::default(),
+});

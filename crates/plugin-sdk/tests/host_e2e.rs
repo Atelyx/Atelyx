@@ -1,5 +1,9 @@
-//! 宿主运行时端到端：以真实插件进程（`stub` / `crasher` 夹具）验证安装即启用、握手与面提交、
-//! 停用结束进程、崩溃退避与熔断、切容器重载。宿主侧只经 `atelyx_core::plugin_runtime` 访问插件。
+//! 宿主运行时端到端：以真实插件动态库（`stub` / `crasher` 夹具）验证安装即启用、握手与面提交、
+//! 停用结束会话、崩溃退避与熔断、切容器重载。宿主侧只经 `atelyx_core::plugin_runtime` 访问插件。
+
+mod support;
+
+use support::stage;
 
 use std::time::{Duration, Instant};
 
@@ -7,31 +11,7 @@ use atelyx_core::plugin_runtime::{
     ChatChangeKind, PluginRuntime, PluginStatus, VaultSwitchPayload,
 };
 use atelyx_core::vault::test_support::TempDir;
-use atelyx_plugin_sdk::protocol::manifest::MANIFEST_FILE;
 
-/// 当前平台的可执行入口名（与 manifest 的 entry 映射一致）。
-fn entry_name() -> &'static str {
-    if cfg!(windows) {
-        "plugin.exe"
-    } else {
-        "plugin"
-    }
-}
-
-/// 造一个可安装的插件目录：拷贝给定可执行文件为入口，并按 id 写 manifest。
-/// `extra` 追加在 `permissions` 之后（形如 `,"keepMountedOnVaultSwitch":true`）。
-fn make_plugin(dir: &std::path::Path, id: &str, exe: &str, extra: &str) {
-    std::fs::create_dir_all(dir).unwrap();
-    std::fs::write(
-        dir.join(MANIFEST_FILE),
-        format!(
-            r#"{{"id":"{id}","name":"Fixture","version":"1.0.0","apiVersion":1,
-                "entry":{{"windows":"plugin.exe","linux":"plugin"}},"permissions":["state"]{extra}}}"#
-        ),
-    )
-    .unwrap();
-    std::fs::copy(exe, dir.join(entry_name())).expect("拷贝入口可执行文件失败");
-}
 
 /// 轮询等某插件的界面提交次数达到下限（超时即失败），返回实际次数。
 fn wait_submits(runtime: &PluginRuntime, id: &str, min: u64) -> u64 {
@@ -71,7 +51,7 @@ fn install_ready_stub(keep_mounted: bool) -> (TempDir, std::sync::Arc<PluginRunt
     let runtime = PluginRuntime::new(root.clone());
     let src = tmp.join("src");
     let extra = if keep_mounted { r#","keepMountedOnVaultSwitch":true"# } else { "" };
-    make_plugin(&src, "com.atelyx.stub", env!("CARGO_BIN_EXE_stub"), extra);
+    stage(&src, "com.atelyx.stub", "stub", &["state"], extra);
     let id = runtime.install_dir(&src).expect("安装 stub 应成功").id;
     runtime.set_enabled(&id, true).expect("启用应成功");
     wait_status(&runtime, &id, |s| *s == PluginStatus::Running, Duration::from_secs(10));
@@ -98,13 +78,13 @@ fn wait_status(runtime: &PluginRuntime, id: &str, want: fn(&PluginStatus) -> boo
     }
 }
 
-/// 安装即启用 → 握手完成并提交界面 → 停用结束进程 → 卸载移除。
+/// 安装即启用 → 握手完成并提交界面 → 停用结束会话 → 卸载移除。
 #[test]
 fn install_enable_view_submit_disable_uninstall() {
     let tmp = TempDir::new("plugin-host-stub");
     let runtime = PluginRuntime::new(tmp.join("plugins"));
     let src = tmp.join("src");
-    make_plugin(&src, "com.atelyx.stub", env!("CARGO_BIN_EXE_stub"), "");
+    stage(&src, "com.atelyx.stub", "stub", &["state"], "");
 
     let id = runtime.install_dir(&src).expect("安装 stub 应成功").id;
     assert_eq!(id, "com.atelyx.stub");
@@ -128,7 +108,7 @@ fn install_enable_view_submit_disable_uninstall() {
         std::thread::sleep(Duration::from_millis(100));
     }
 
-    // 停用：进程树结束，状态回到未运行
+    // 停用：会话收尾，状态回到未运行
     runtime.set_enabled(&id, false).expect("停用应成功");
     assert_eq!(
         runtime.list().into_iter().find(|p| p.id == id).unwrap().status,
@@ -140,13 +120,13 @@ fn install_enable_view_submit_disable_uninstall() {
     assert!(runtime.list().is_empty(), "卸载后不应再有插件条目");
 }
 
-/// 崩溃退避与熔断：入口启动即退出，连续崩溃达阈值后进入熔断（不再自动重启）。
+/// 崩溃退避与熔断：夹具在 `on_ready` 里 panic，连续崩溃达阈值后进入熔断（不再自动重启）。
 #[test]
 fn crash_restarts_then_circuit_breaks() {
     let tmp = TempDir::new("plugin-host-crash");
     let runtime = PluginRuntime::new(tmp.join("plugins"));
     let src = tmp.join("src");
-    make_plugin(&src, "com.atelyx.crasher", env!("CARGO_BIN_EXE_crasher"), "");
+    stage(&src, "com.atelyx.crasher", "crasher", &["state"], "");
 
     let id = runtime.install_dir(&src).expect("安装 crasher 应成功").id;
     runtime.set_enabled(&id, true).expect("启用应成功");
@@ -161,7 +141,7 @@ fn crash_restarts_then_circuit_breaks() {
 
     // 崩溃过程落进插件日志（正式构建没有控制台，日志是唯一可查处）
     let log = runtime.log_tail(&id).expect("读取日志应成功");
-    assert!(log.contains("[进程] 意外退出"), "日志应含退出记录：{log}");
+    assert!(log.contains("插件会话 panic"), "日志应含 panic 记录：{log}");
     assert!(log.contains("[熔断]"), "日志应含熔断记录：{log}");
 
     // 熔断后可手动重试：状态离开熔断（随即又因崩溃进入重启 / 熔断路径）
@@ -192,8 +172,8 @@ fn vault_switch_reloads_plugin_without_keep_mounted() {
     std::thread::sleep(Duration::from_secs(1));
     assert_eq!(submits_of(&runtime, &id), 1, "同一容器重复进入不该重载插件");
 
-    // 换容器：未声明保活的插件由宿主重载（停进程再起 → 重新提交整面帧），
-    // 新进程订阅后由宿主补发当前容器身份
+    // 换容器：未声明保活的插件由宿主重载（停会话再起 → 重新提交整面帧），
+    // 新会话订阅后由宿主补发当前容器身份
     runtime.on_vault_switch(VaultSwitchPayload::Local { root: "/vaults/other".into() });
     assert_eq!(wait_submits(&runtime, &id, 2), 2, "换容器应重载插件一次");
     wait_state_contains(&state_path, "/vaults/other");

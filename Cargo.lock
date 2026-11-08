@@ -405,6 +405,7 @@ dependencies = [
 name = "atelyx-core"
 version = "0.1.0"
 dependencies = [
+ "atelyx-plugin-abi",
  "atelyx-plugin-protocol",
  "base64 0.22.1",
  "dirs",
@@ -417,6 +418,7 @@ dependencies = [
  "image",
  "keyring",
  "libc",
+ "libloading",
  "memmap2",
  "nanoid",
  "regex",
@@ -436,6 +438,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "atelyx-plugin-abi"
+version = "0.1.0"
+
+[[package]]
 name = "atelyx-plugin-protocol"
 version = "0.1.0"
 dependencies = [
@@ -450,6 +456,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "atelyx-core",
+ "atelyx-plugin-abi",
  "atelyx-plugin-protocol",
  "base64 0.22.1",
  "memmap2",
@@ -4924,7 +4931,6 @@ dependencies = [
  "libc",
  "mio",
  "pin-project-lite",
- "signal-hook-registry",
  "socket2",
  "tokio-macros",
  "windows-sys 0.61.2",

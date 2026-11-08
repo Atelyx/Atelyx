@@ -15,7 +15,7 @@ use crate::protocol::envelope::{Envelope, Notification, RpcError};
 use crate::protocol::handshake::{self, InitializeParams, InitializeResult, PluginInfo};
 use crate::protocol::API_VERSION;
 
-/// 握手应答等待上限：插件进程启动到宿主应答之间的合理上限，超时即断链。
+/// 握手应答等待上限：插件会话建立到宿主应答之间的合理上限，超时即断链。
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, thiserror::Error)]
@@ -39,8 +39,8 @@ pub(crate) enum ConnectionOutcome {
 
 pub(crate) type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, RpcError>>>>>;
 
-/// 与宿主的活跃连接。读任务在 stdin EOF（正常）或协议违规 / 读写失败（异常）时结束，
-/// [`Connection::closed`] 带结果完成；异常结束使 [`run_stdio`] 返回错误，插件以非零码退出（失败可见）。
+/// 与宿主的活跃连接。读任务在宿主关闭通道（正常）或协议违规 / 读写失败（异常）时结束，
+/// [`Connection::closed`] 带结果完成；异常结束由承载记为会话失败，插件日志里留下可读原因。
 pub struct Connection {
     closed_rx: oneshot::Receiver<ConnectionOutcome>,
 }
@@ -48,7 +48,7 @@ pub struct Connection {
 impl Connection {
     /// 以给定流建立连接并完成握手。返回连接与能力面上下文；插件随后的全部交互经 `ctx`。
     /// 握手失败或帧共享内存映射失败都直接返回错误，此时读写任务与通知分发任务都已启动——
-    /// 错误被吞掉重试会泄漏持有流的任务；常规用法（[`run_stdio`]）失败即进程退出，不存在重试。
+    /// 错误被吞掉重试会泄漏持有流的任务；承载侧按「会话建立失败」一收了之，不存在重试。
     pub async fn bind<R, W, H>(input: R, output: W, plugin: PluginInfo, handler: Arc<H>) -> Result<(Connection, Context), ConnectError>
     where
         R: AsyncRead + Unpin + Send + 'static,
@@ -214,11 +214,6 @@ where
     }
 }
 
-/// 标准输入输出入口：插件主函数用这个跑。连接异常结束（协议违规 / 读写失败）返回错误，
-/// 插件应以非零码退出；宿主正常关闭连接返回 `Ok`。
-pub async fn run_stdio<H: PluginHandler>(plugin: PluginInfo, handler: H) -> Result<(), ConnectError> {
-    let handler = Arc::new(handler);
-    let (connection, ctx) = Connection::bind(tokio::io::stdin(), tokio::io::stdout(), plugin, handler.clone()).await?;
-    handler.on_ready(&ctx).await;
-    connection.closed().await
-}
+// 插件入口只有一种形态——同进程动态库（见 crate::in_process）；连接泵本身仍以「任意读写流」
+// 为参数，所以夹具与测试可以直接喂内存流。
+

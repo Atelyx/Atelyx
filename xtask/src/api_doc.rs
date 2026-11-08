@@ -382,11 +382,44 @@ const SECTIONS: &[Section] = &[
     },
 ];
 
+/// 同进程承载 ABI 的源码目录（相对仓库根）。
+const ABI_SRC_DIR: &str = "crates/plugin-abi/src";
+
+/// 同进程承载的 C ABI：宿主导出给插件的函数表与插件必须导出的符号。
+const ABI_SECTION: Section = Section {
+    title: "同进程承载 ABI",
+    intro: "插件声明 `crate-type = [\"cdylib\"]` 后由宿主按符号名装载：`create` 传入宿主函数表并返回句柄，\
+`send` 投递一条信封，`destroy` 结束会话并回报会话线程是否已退出（未退出时宿主保留动态库，不卸载\
+运行中的代码段）。信封字节流与进程承载完全相同。",
+    items: items!(
+        "lib.rs": "ABI_VERSION",
+        "lib.rs": "CREATE_SYMBOL",
+        "lib.rs": "SEND_SYMBOL",
+        "lib.rs": "DESTROY_SYMBOL",
+        "lib.rs": "HostApi",
+        "lib.rs": "PluginHandle",
+        "lib.rs": "CreateFn",
+        "lib.rs": "SendFn",
+        "lib.rs": "DestroyFn",
+        "lib.rs": "SEND_OK",
+        "lib.rs": "SEND_DROPPED",
+        "lib.rs": "SEND_CLOSED",
+        "lib.rs": "DESTROY_JOINED",
+        "lib.rs": "DESTROY_DETACHED",
+        "lib.rs": "LOG_DEBUG",
+        "lib.rs": "LOG_INFO",
+        "lib.rs": "LOG_WARN",
+        "lib.rs": "LOG_ERROR",
+    ),
+};
+
 /// 渲染整份文档。
 pub fn render(root: &Path) -> Result<String, String> {
-    let mut sources: HashMap<&str, String> = HashMap::new();
+    let mut sources: HashMap<String, String> = HashMap::new();
     let mut out = String::from(HEADER);
-    for (index, section) in SECTIONS.iter().enumerate() {
+    let sections = SECTIONS.iter().map(|section| (SRC_DIR, section));
+    let sections = sections.chain(std::iter::once((ABI_SRC_DIR, &ABI_SECTION)));
+    for (index, (dir, section)) in sections.enumerate() {
         out.push_str(&format!(
             "\n## {}. {}\n\n{}\n",
             index + 1,
@@ -394,17 +427,18 @@ pub fn render(root: &Path) -> Result<String, String> {
             section.intro
         ));
         for item in section.items {
-            if !sources.contains_key(item.file) {
-                let path = root.join(SRC_DIR).join(item.file);
+            let key = format!("{dir}/{}", item.file);
+            if !sources.contains_key(&key) {
+                let path = root.join(dir).join(item.file);
                 let text = std::fs::read_to_string(&path)
                     .map_err(|e| format!("读取 {} 失败：{e}", path.display()))?;
-                sources.insert(item.file, text);
+                sources.insert(key.clone(), text);
             }
-            let source = &sources[item.file];
+            let source = &sources[&key];
             let pasted = extract_item(source, item.name)
                 .map_err(|e| format!("{}：{e}", item.file))?;
             out.push_str(&format!(
-                "\n```rust\n// {SRC_DIR}/{}\n{pasted}\n```\n",
+                "\n```rust\n// {dir}/{}\n{pasted}\n```\n",
                 item.file
             ));
         }
@@ -459,7 +493,7 @@ fn is_item_header(line: &str, name: &str) -> bool {
     let Some(rest) = line.strip_prefix("pub ") else {
         return false;
     };
-    ["struct ", "enum ", "mod ", "const ", "fn "].iter().any(|kind| {
+    ["struct ", "enum ", "mod ", "const ", "fn ", "type "].iter().any(|kind| {
         rest.strip_prefix(kind).is_some_and(|tail| {
             let ident: String = tail
                 .chars()

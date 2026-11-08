@@ -1,10 +1,7 @@
-//! 端到端测试夹具：一个外部服务提供者兼调用方。
-//!
-//! 登记的服务由命令行第一个参数决定：`demo` = 登记 `demo.echo`；缺省 = 登记 `markdown`
-//! （方法 `parse`，应答带固定标记）——宿主拉起插件时不传参数，端到端用例走缺省形态。
-//! 收到 `host:service.call` 时回显服务 / 方法与入参；每次探针都同时走「直接调用
-//! `markdown.parse`」与「`service.call` 信封」两条路，把两者结果与两处错误一并写进自持数据，
-//! 供测试断言内置路径对拍、外部顶替与回落。
+//! 端到端测试夹具（同进程 cdylib）：一个外部服务提供者兼调用方，登记 `markdown.parse`
+//! （应答带固定标记）。收到 `host:service.call` 时回显服务 / 方法与入参；每次探针都同时走
+//! 「直接调用 `markdown.parse`」与「`service.call` 信封」两条路，把两者结果与两处错误一并写进
+//! 自持数据，供测试断言内置路径对拍、外部顶替与回落。
 //!
 //! 探针由 `vault:file.changed` 触发并在独立任务里执行：`host:service.call` 与探针共用同一个
 //! 通知 worker，探针若在回调里等自己提供的方法就会自锁。
@@ -16,44 +13,34 @@ use atelyx_plugin_sdk::protocol::envelope::RpcError;
 use atelyx_plugin_sdk::protocol::method;
 use atelyx_plugin_sdk::protocol::event::PublishParams;
 use atelyx_plugin_sdk::protocol::service::HostCallParams;
-use atelyx_plugin_sdk::{run_stdio, Context, PluginHandler, PluginInfo};
+use atelyx_plugin_sdk::{Context, PluginHandler};
 use serde_json::{json, Value};
 
 /// 探针比较的 Markdown 原文（两条路的入参必须一致）。
 const PROBE_MARKDOWN: &str = "# A";
 
+/// 夹具只登记 `markdown.parse`：端到端用例断言的是这条内置服务被外部提供者顶替。
 #[derive(Clone, Copy, PartialEq)]
 enum Mode {
     Markdown,
-    Demo,
 }
 
 impl Mode {
-    fn from_arg(arg: Option<&String>) -> Self {
-        match arg.map(String::as_str) {
-            Some("demo") => Self::Demo,
-            _ => Self::Markdown,
-        }
-    }
-
     fn service(self) -> &'static str {
         match self {
             Self::Markdown => "markdown",
-            Self::Demo => "demo",
         }
     }
 
     fn method(self) -> &'static str {
         match self {
             Self::Markdown => "parse",
-            Self::Demo => "echo",
         }
     }
 
     fn label(self) -> &'static str {
         match self {
             Self::Markdown => "markdown",
-            Self::Demo => "demo",
         }
     }
 }
@@ -149,24 +136,12 @@ impl PluginHandler for ServiceStub {
     }
 }
 
-#[tokio::main]
-async fn main() {
-    let mode = Mode::from_arg(std::env::args().nth(1).as_ref());
-    let fixture = PluginInfo {
-        id: "com.atelyx.service-stub".into(),
-        name: "ServiceStub".into(),
-        version: "1.0.0".into(),
-    };
-    let stub = ServiceStub {
-        inner: Arc::new(Inner {
-            mode,
-            probe: AtomicU64::new(0),
-            probe_lock: tokio::sync::Mutex::new(()),
-            query_registration: Mutex::new(None),
-        }),
-    };
-    if let Err(e) = run_stdio(fixture, stub).await {
-        eprintln!("夹具启动失败：{e}");
-        std::process::exit(1);
-    }
-}
+// 服务名固定为 markdown：端到端用例断言的是这条内置服务被外部顶替
+atelyx_plugin_sdk::export_in_process_plugin!(ServiceStub {
+    inner: Arc::new(Inner {
+        mode: Mode::Markdown,
+        probe: AtomicU64::new(0),
+        probe_lock: tokio::sync::Mutex::new(()),
+        query_registration: Mutex::new(None),
+    }),
+});

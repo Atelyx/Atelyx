@@ -1,6 +1,6 @@
 # Atelyx 插件开发
 
-Atelyx 的插件是一个**独立进程**：宿主启动它、通过标准输入输出与它说话；它把整个面画成一份帧（绘制指令 + 命中区）交给宿主执行，宿主再把原始输入原样回发。没有 WebView，也没有内置的 JS 运行时——插件可以用任何能读写 stdio 的语言写，本文以 Rust + 官方 SDK 为例。
+Atelyx 的插件是**原生动态库**（`cdylib`）：宿主按 C ABI 把它装载进自己的进程，经函数表双向投递 JSON-RPC 信封。插件把整个面画成一份帧（绘制指令 + 命中区）交给宿主执行，宿主再把原始输入原样回发。没有 WebView，没有内置的 JS 运行时，也没有独立进程——插件与宿主同地址空间。
 
 本文讲**怎么做**：插件形态、15 分钟跑起来的最小实现、界面与能力面的用法、构建打包、本地调试，以及上架到内置市场。逐字段、逐方法的契约在 [API 参考](plugin-api.md)——那份文档由协议源码生成，总会与当前版本一致。
 
@@ -10,15 +10,15 @@ Atelyx 的插件是一个**独立进程**：宿主启动它、通过标准输入
 
 | 事实 | 含义 |
 | --- | --- |
-| 插件 = 原生可执行文件 | 宿主按 `plugin.json` 里的 `entry` 启动它，不带参数，工作目录 = 插件目录 |
-| 通道 = stdin / stdout 上的 JSON-RPC 2.0（NDJSON） | stdout **只能**是协议信封；日志一律走 stderr |
+| 插件 = 原生动态库（`cdylib`） | `plugin.json` 的 `entry.windows` / `entry.linux` 指向该平台的库文件；宿主装载它并调 `atelyx_plugin_create` |
+| 通道 = JSON-RPC 2.0（NDJSON） | 经 C ABI 函数表双向投递；**信封里只能有协议内容**，日志走 `HostApi.log` 回调与 `eprintln!` |
 | 界面 = 一整面帧 | 插件提交整面帧（绘制指令 + 命中区 + 输入声明）：帧内容写进握手时拿到的共享内存槽位，信封只带槽位坐标；宿主按几何绘制并把原始输入经 `host:frame.input` 回发，插件进程里没有宿主 UI 代码，控件只存在于 SDK 控件层 |
 | 能力 = 服务 + 方法 | 内置能力（`vault` / `ai` / `fs` …）与插件提供的服务走同一条总线，方法名即 `服务.方法`（见 7） |
 | `permissions` = 公示与审计 | 声明用于告诉用户这份插件会碰哪些宿主资源；调用本身不按声明拦截，未声明的调用照常执行但记为「未声明」并在设置页可见 |
 | 信任模型 = 本地程序 | 宿主不做沙箱：插件本来就能读写文件、起进程、联网。声明是透明度与审计口径，不是隔离边界 |
-| 一个插件一个进程 | 宿主多窗口共享同一份进程；进程从启动到停用是一个「会话」 |
+| 一个插件一个会话 | 宿主多窗口共享同一份会话；从启用到停用是一个「会话」 |
 
-生命周期：启用即启动 → 握手（`initialize`，10 秒内未完成判失败）→ 运行 → 停用 / 崩溃 / 卸载。崩溃按 `1s → 2s → 4s → 8s …`（上限 30s）退避重启，60 秒内崩 5 次熔断，用户在设置页可手动重试。停用会结束**整棵**进程树，并收掉插件经能力面创建的一切（托管子进程、全局热键、托盘条目、打开的窗口、注册的 AI 工具、登记的服务）。
+生命周期：启用即装载动态库并建立会话 → 握手（`initialize`，10 秒内未完成判失败）→ 运行 → 停用 / 崩溃 / 卸载。崩溃（含 panic）按 `1s → 2s → 4s → 8s …`（上限 30s）退避重启，60 秒内崩 5 次熔断，用户在设置页可手动重试。停用销毁会话并收掉插件经能力面创建的一切（托管子进程、全局热键、托盘条目、打开的窗口、注册的 AI 工具、登记的服务）。
 
 ## 2. 环境准备
 
@@ -38,7 +38,7 @@ atelyx-plugin-sdk = { git = "https://github.com/Atelyx/Atelyx" }
 echo-panel/
 ├── Cargo.toml
 ├── plugin.json
-└── src/main.rs
+└── src/lib.rs        # cdylib 入口：导出 create / send / destroy
 ```
 
 ### 3.2 `plugin.json`
@@ -49,7 +49,7 @@ echo-panel/
   "name": "Echo",
   "version": "0.1.0",
   "apiVersion": 1,
-  "entry": { "windows": "echo-panel.exe", "linux": "echo-panel" },
+  "entry": { "windows": "echo_panel.dll", "linux": "libecho_panel.so" },
   "permissions": ["state", "notification"]
 }
 ```
@@ -58,12 +58,14 @@ echo-panel/
 
 - `id` 是反向域名（至少两段，每段字母 / 数字 / `-`），发布后不可变：它同时是安装目录名、数据命名空间与市场条目 id；
 - `apiVersion` 必须与宿主相等（当前 `1`），不等即拒绝装载，不做兼容推断；
-- `entry` 是相对插件目录的可执行路径，当前平台那一项必须存在且不得越出目录；
+- `entry` 是相对插件目录的动态库路径，当前平台那一项必须存在且不得越出目录；
 - `version` 是市场更新比对的版本号（与 Release tag 比对，只做升级方向）。
 
 **宿主保留的插件目录顶层名**：`data/`（你的私有数据）、`logs/`（宿主写日志）、`previous/`（上一代内容）、`enabled`（启用标记）、`source`（本地目录安装的来源记录）。插件内容里出现这些名字会被拒绝安装。
 
 ### 3.3 `Cargo.toml`
+
+插件与宿主同一地址空间，没有进程启动开销：
 
 ```toml
 [package]
@@ -74,13 +76,13 @@ edition = "2021"
 # 插件目录若正好在别的 Cargo workspace 里，声明自己为根，避免被合并进去
 [workspace]
 
-[[bin]]
-name = "echo-panel"          # 与 plugin.json 的 entry 同名
-path = "src/main.rs"
+[lib]
+name = "echo_panel"          # 与 plugin.json 的 entry 同名
+path = "src/lib.rs"
+crate-type = ["cdylib"]      # 插件以动态库交付
 
 [dependencies]
 atelyx-plugin-sdk = { git = "https://github.com/Atelyx/Atelyx" }
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 async-trait = "0.1"
 
 [profile.release]
@@ -88,7 +90,9 @@ strip = true
 lto = true
 ```
 
-### 3.4 `src/main.rs`
+插件必须是 `cdylib`：宿主按符号名装载它，普通 `bin` / `rlib` 装载不了。
+
+### 3.4 `src/lib.rs`
 
 ```rust
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -96,7 +100,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use atelyx_plugin_sdk::frame_ui::{FrameUi, TextRole, UiEvent};
 use atelyx_plugin_sdk::protocol::frame::FrameInputParams;
 use atelyx_plugin_sdk::protocol::method::{ContributionSlot, SurfaceAttachedParams};
-use atelyx_plugin_sdk::{run_stdio, Context, PluginHandler, PluginInfo};
+use atelyx_plugin_sdk::{Context, PluginHandler};
 
 /// 面板贡献 id，同时是该面的 surfaceId。
 const PANEL: &str = "main";
@@ -156,25 +160,16 @@ impl PluginHandler for Echo {
     }
 }
 
-#[tokio::main]
-async fn main() {
-    let info = PluginInfo {
-        id: "com.example.echo".into(),
-        name: "Echo".into(),
-        version: "0.1.0".into(),
-    };
-    let plugin = Echo { ui: tokio::sync::Mutex::new(FrameUi::new()), clicks: AtomicU32::new(0) };
-    // 连接结束分两种：宿主关闭 stdin（正常退出，返回 Ok）/ 协议违规或读写失败（Err，非零码退出）
-    if let Err(e) = run_stdio(info, plugin).await {
-        eprintln!("连接异常结束：{e}");
-        std::process::exit(1);
-    }
-}
+// 导出 create / send / destroy 三个 C ABI 符号：宿主装载动态库后按它们建会话
+atelyx_plugin_sdk::export_in_process_plugin!(Echo {
+    ui: tokio::sync::Mutex::new(FrameUi::new()),
+    clicks: AtomicU32::new(0),
+});
 ```
 
 四条容易踩的规则：
 
-1. **stdout 只允许协议**。`println!` 一行就足以让宿主判定「输出非协议内容」并停掉插件；调试输出用 `eprintln!`（进插件日志）。
+1. **信封通道只允许协议内容**。插件往 `send` 里塞的每一条都必须是 JSON-RPC 信封；调试输出用 `eprintln!`（进插件日志），别往信封通道里插打印。
 2. **帧要自己提交**。帧不自动重发：改完状态不 `render`，界面就停在上一帧；面重新挂载也一样，靠 `on_surface_attached` 补一帧。
 3. **输入要先声明**。帧里没有命中区，指针事件就没有 `hit`；没有 `keys` / `ime`，键盘与输入法不进你的回调（见 5.3）。
 4. **`on_ready` 里别做长耗时阻塞**。握手回执由 SDK 发出，但 `on_ready` 之后的调用都在同一个连接上；需要长时间准备的工作放 `tokio::spawn`。
@@ -184,7 +179,8 @@ async fn main() {
 - 插件 → 宿主：一律**请求**，SDK 的 `Context` 方法已经包好；默认等待上限 30 秒（`Context::call_raw`），对话框与 http 不设上限。
 - 宿主 → 插件：一律**通知**（`host:` 前缀的方法），由 `PluginHandler` 的对应回调接收。回调**按到达顺序逐个执行**（一条处理完才接下一条），因此改同一份状态不必自己加锁；代价是单个回调卡住会挡住后续通知——弹文件对话框、等长请求这类阻塞调用要么接受「界面整体暂停到用户点完」，要么在回调里另起任务自己驱动。回调可能早于 `on_ready` 到达，依赖初始化结果的逻辑要自带守卫。
 - 迟到 / 超时：调用超时只代表「本次调用放弃」，宿主侧业务可能仍在进行（`ai.chat.send` 这类有副作用的调用尤其如此），需要时用查询方法核对。
-- 宿主退出：stdin 被关闭，`run_stdio` 返回 `Ok`，插件应正常退出；此时宿主已结束整棵进程树，不要试图常驻。
+- 宿主结束会话：宿主撤掉投递口，插件的读端读到通道关闭；收尾即结束，不要试图常驻。
+- 承载的 ABI：宿主导出 `HostApi` 函数表（`send` / `log` / `closed` + 自报信息），插件的 `export_in_process_plugin!` 导出 `atelyx_plugin_create` / `atelyx_plugin_send` / `atelyx_plugin_destroy`。三处约定要记住：ABI 版本（`ABI_VERSION`）不等即拒绝创建；插件在自己的 tokio 运行时线程上跑会话，宿主线程只入队、从不等待插件执行；`destroy` 回报「会话线程仍在库内」时宿主保留动态库（卸载会让运行中的代码段消失）。
 
 ## 5. 界面：画一帧
 
@@ -711,7 +707,7 @@ ctx.remove(&staged).await.ok();                              // 导完自己清�
 ```bash
 cargo build --release
 mkdir -p dist
-cp target/release/echo-panel.exe dist/     # Linux: target/release/echo-panel
+cp target/release/echo_panel.dll dist/     # Linux: libecho_panel.so
 cp plugin.json dist/
 ```
 
@@ -732,7 +728,7 @@ cp plugin.json dist/
 - 插件内容里不能出现宿主保留名（`data` / `logs` / `previous` / `enabled` / `source`）；
 - 安装包里的 `plugin.json` id 必须与市场条目 id 一致（防止一份包覆盖另一个插件）。
 
-Linux 上宿主会为入口补可执行位（zip 不保留权限位也不影响），但建议打包时仍保留 `755`。
+`dist/` 里只需清单与库文件；安装不改权限位。
 
 ## 10. 本地调试
 
@@ -748,8 +744,9 @@ Linux 上宿主会为入口补可执行位（zip 不保留权限位也不影响�
 | --- | --- |
 | 列表里「不可装载：协议版本不匹配」 | `apiVersion` 与宿主不一致（当前 `1`） |
 | 「不可装载：入口文件不存在」 | `entry` 写的文件名 / 路径与包内不一致，或漏了当前平台 |
-| 启用后立刻「启动失败：插件未在 10 秒内完成握手」 | 没有走 `run_stdio`、进程启动即退出、或 `main` 前就阻塞了 |
-| 「输出非协议内容」并停机 | stdout 上出现了非协议的行（`println!`、第三方库日志） |
+| 「插件装载失败：动态库缺少符号」 | 没有用 `export_in_process_plugin!`（或符号被 strip / `#[no_mangle]` 漏写） |
+| 启用后立刻「启动失败：插件未在 10 秒内完成握手」 | 没有用 `export_in_process_plugin!` 导出符号，或 `create` 里 panic / 立刻返回空指针 |
+| 「输出非协议内容」并停机 | 插件经 `send` 通道发的内容不是 JSON-RPC 信封（例如把日志写进了协议通道），或不是 UTF-8 |
 | 安装了但面板菜单里没有条目 | 没有 `view.register`，或注册失败（看日志） |
 | 面一直显示「等待插件提交界面」 | 没提交帧，或提交的 `surfaceId` 与贡献 id 不一致（面按贡献 id 取帧） |
 | 界面停在旧内容 | 改了状态没重新提交帧——帧不自动重发，回调里要自己 `render` / `submit_frame` |
@@ -786,4 +783,4 @@ Linux 上宿主会为入口补可执行位（zip 不保留权限位也不影响�
 - 绘制指令、输入形态、贡献槽位、服务方法名都是封闭枚举 / 受限形状，扩容随协议升版；未知取值会被拒绝而不是被忽略。
 - 宿主正式发布 1.0.0 之前不承诺向后兼容：协议形状直接改，插件随宿主重建即对齐（`apiVersion` 仍要求严格相等）。
 - SDK 的 `PluginHandler` 新增通知回调都带缺省实现，不重写即忽略；`frame_ui` 的控件与容器新增不影响既有调用。
-- 插件应把「宿主关闭 stdin」当作正常退出信号，不要依赖宿主发来的额外终止通知。
+- 插件应把「宿主撤掉投递口、读端收到通道关闭」当作正常退出信号，不要依赖宿主发来的额外终止通知。

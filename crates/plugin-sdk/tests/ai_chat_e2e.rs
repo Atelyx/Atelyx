@@ -1,6 +1,9 @@
-//! AI 对话契约端到端：以真实插件进程（`ai-stub` 夹具）验证 `ai.chat.send` 请求路由、
+//! AI 对话契约端到端：以真实插件（`ai-stub` 夹具）验证 `ai.chat.send` 请求路由、
 //! run 循环对接本地假 SSE 供应商、`host:ai.chat.event` 快照流达插件、真源落盘的完整链路。
 
+mod support;
+
+use support::stage;
 use std::io::{Read, Write};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -10,13 +13,7 @@ use atelyx_core::ai::session::{AppendBatch, CommitBatch, SessionDef, SessionStor
 use atelyx_core::ai::tools::{SearchConfig, ToolCtx};
 use atelyx_core::plugin_runtime::{HostRequest, PluginRuntime, PluginStatus};
 use atelyx_core::vault::test_support::TempDir;
-use atelyx_plugin_sdk::protocol::manifest::MANIFEST_FILE;
 use serde_json::{json, Value};
-
-/// 当前平台的可执行入口名（与 manifest 的 entry 映射一致）。
-fn entry_name() -> &'static str {
-    if cfg!(windows) { "plugin.exe" } else { "plugin" }
-}
 
 /// 本地假 OpenAI SSE 供应商：接受一次对话请求，按分片回一段固定文本后 `[DONE]`。
 /// 返回（监听地址、关闭用守卫——drop 即断监听）。
@@ -88,17 +85,11 @@ fn wait_state(path: &std::path::Path, want: impl Fn(&Value) -> bool) -> Value {
     }
 }
 
-/// 安装并启用 ai-stub（权限 = 自持数据 + 对话 / 工具桥），等到进程运行。
+/// 安装并启用 ai-stub（权限 = 自持数据 + 对话 / 工具桥），等到会话运行。
 fn install_ai_stub(runtime: &Arc<PluginRuntime>, tmp: &std::path::Path) -> String {
     let src = tmp.join("src");
     std::fs::create_dir_all(&src).unwrap();
-    std::fs::write(
-        src.join(MANIFEST_FILE),
-        r#"{"id":"com.atelyx.ai-stub","name":"AiStub","version":"1.0.0","apiVersion":1,
-            "entry":{"windows":"plugin.exe","linux":"plugin"},"permissions":["state","ai"]}"#,
-    )
-    .unwrap();
-    std::fs::copy(env!("CARGO_BIN_EXE_ai_stub"), src.join(entry_name())).expect("拷贝入口失败");
+    stage(&src, "com.atelyx.ai-stub", "ai_stub", &["state", "ai"], "");
     let id = runtime.install_dir(&src).expect("安装 ai-stub 应成功").id;
     runtime.set_enabled(&id, true).expect("启用应成功");
     wait_status(runtime, &id, Duration::from_secs(20));

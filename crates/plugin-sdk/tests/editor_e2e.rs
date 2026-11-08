@@ -1,35 +1,23 @@
-//! `editor` 能力端到端：以真实插件进程（`editor-stub` 夹具）验证笔记插件名下的选区服务
+//! `editor` 能力端到端：以真实插件（`editor-stub` 夹具）验证笔记插件名下的选区服务
 //! 可被外部提供者顶替、两条调用路径都落到活动提供者，以及停用归属插件后服务离开能力总线。
 
+mod support;
+
+use support::stage;
 use std::time::{Duration, Instant};
 
 use atelyx_core::plugin_runtime::{PluginRuntime, PluginStatus};
 use atelyx_core::vault::test_support::TempDir;
-use atelyx_plugin_sdk::protocol::manifest::MANIFEST_FILE;
 use serde_json::Value;
 
 const STUB_ID: &str = "com.atelyx.editor-stub";
 const NOTES_PLUGIN: &str = "atelyx.notes";
 
-fn entry_name() -> &'static str {
-    if cfg!(windows) {
-        "plugin.exe"
-    } else {
-        "plugin"
-    }
-}
-
 fn install_editor_stub(tmp: &TempDir, runtime: &std::sync::Arc<PluginRuntime>) {
     let src = tmp.join("src");
     std::fs::create_dir_all(&src).unwrap();
-    std::fs::write(
-        src.join(MANIFEST_FILE),
-        r#"{"id":"com.atelyx.editor-stub","name":"EditorStub","version":"1.0.0","apiVersion":1,
-            "entry":{"windows":"plugin.exe","linux":"plugin"},"permissions":["state","vault"]}"#,
-    )
-    .unwrap();
-    std::fs::copy(env!("CARGO_BIN_EXE_editor_stub"), src.join(entry_name()))
-        .expect("拷贝入口可执行文件失败");
+    stage(&src, STUB_ID, "editor_stub", &["state", "vault"], "");
+
     let id = runtime.install_dir(&src).expect("安装 editor-stub 应成功").id;
     assert_eq!(id, STUB_ID);
     runtime.set_enabled(&id, true).expect("启用应成功");

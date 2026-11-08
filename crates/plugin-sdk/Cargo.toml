@@ -13,6 +13,8 @@ exclude = ["src/bin", "tests"]
 [dependencies]
 # version 供 crates.io 解析，path 供仓库内直接构建（打包时 path 会被去掉）
 atelyx-plugin-protocol = { version = "0.1.0", path = "../plugin-protocol" }
+# 同进程插件的 C 函数表（SDK 再导出，插件作者无需直接依赖）
+atelyx-plugin-abi = { version = "0.1.0", path = "../plugin-abi" }
 # Context 的定型调用借 serde 的 Serialize/DeserializeOwned trait（不用 derive）
 serde = { version = "1", default-features = false }
 serde_json = "1"
@@ -27,7 +29,31 @@ thiserror = "2"
 async-trait = "0.1"
 
 [dev-dependencies]
-# e2e：拉起 stub / crasher 子进程（process）与超时断言（macros/rt 已在主依赖，process 仅测试需要）
-tokio = { version = "1", features = ["process"] }
-# 宿主运行时端到端：仅测试用，插件侧生产依赖仍只有 protocol（core 不依赖 sdk，方向不反转）
+# 宿主运行时端到端：仅测试用，插件侧生产依赖仍只有 SDK（core 不依赖 sdk，方向不反转）
 atelyx-core = { path = "../core", features = ["test-support"] }
+
+# 端到端夹具：都编译成 cdylib（与真实插件同形态），测试直接把产物当插件入口安装
+[[example]]
+name = "stub"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "frame_stub"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "editor_stub"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "service_stub"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "ai_stub"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "crasher"
+crate-type = ["cdylib"]
+

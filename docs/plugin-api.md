@@ -50,7 +50,8 @@ pub struct Manifest {
 
 ```rust
 // crates/plugin-protocol/src/manifest.rs
-/// 按平台的可执行入口（相对插件目录的路径）。缺失 = 该平台不支持。
+/// 按平台的插件入口（相对插件目录的路径）。缺失 = 该平台不支持。
+/// 入口是原生动态库：宿主按 C ABI 装载到本进程，插件与宿主同地址空间。
 #[serde(rename_all = "camelCase", default)]
 pub struct Entry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3206,4 +3207,127 @@ pub struct SubscribeParams {
 pub struct SubscribeResult {
     pub subscribed: bool,
 }
+```
+
+## 16. 同进程承载 ABI
+
+插件声明 `crate-type = ["cdylib"]` 后由宿主按符号名装载：`create` 传入宿主函数表并返回句柄，`send` 投递一条信封，`destroy` 结束会话并回报会话线程是否已退出（未退出时宿主保留动态库，不卸载运行中的代码段）。信封字节流与进程承载完全相同。
+
+```rust
+// crates/plugin-abi/src/lib.rs
+/// ABI 版本：宿主与插件不一致即拒绝装载（不兼容就响亮失败，不做兼容层）。
+pub const ABI_VERSION: u32 = 1;
+```
+
+```rust
+// crates/plugin-abi/src/lib.rs
+/// 插件导出的三个符号名。宿主按名解析，导出宏按名声明——两处必须一致。
+pub const CREATE_SYMBOL: &str = "atelyx_plugin_create";
+```
+
+```rust
+// crates/plugin-abi/src/lib.rs
+pub const SEND_SYMBOL: &str = "atelyx_plugin_send";
+```
+
+```rust
+// crates/plugin-abi/src/lib.rs
+pub const DESTROY_SYMBOL: &str = "atelyx_plugin_destroy";
+```
+
+```rust
+// crates/plugin-abi/src/lib.rs
+pub struct HostApi {
+    /// 必须等于 [`ABI_VERSION`]，不等即拒绝创建。
+    pub abi_version: u32,
+    /// 宿主上下文：以下回调的首参原样回传。
+    pub ctx: *mut c_void,
+    /// 插件 → 宿主：一条 NDJSON 信封（UTF-8，不带换行）。返回 [`SEND_DROPPED`] / [`SEND_CLOSED`]
+    /// 表示这一笔没有落到宿主，插件据此留痕。
+    pub send: Option<unsafe extern "C" fn(ctx: *mut c_void, ptr: *const u8, len: usize) -> u32>,
+    /// 插件 → 宿主：一行诊断输出。
+    pub log: Option<unsafe extern "C" fn(ctx: *mut c_void, level: u32, ptr: *const u8, len: usize)>,
+    /// 插件 → 宿主：本会话已结束（正常收尾 `code = 0`，异常非零并带可读原因）。
+    pub closed: Option<unsafe extern "C" fn(ctx: *mut c_void, code: i32, ptr: *const u8, len: usize)>,
+    /// 安装 id / 名称 / 版本（NUL 结尾 UTF-8）：插件据此填握手自报信息。
+    pub plugin_id: *const c_char,
+    pub plugin_name: *const c_char,
+    pub plugin_version: *const c_char,
+}
+```
+
+```rust
+// crates/plugin-abi/src/lib.rs
+/// 插件实例句柄：`create` 返回，`send` / `destroy` 首参。
+pub type PluginHandle = *mut c_void;
+```
+
+```rust
+// crates/plugin-abi/src/lib.rs
+/// 插件导出：按宿主函数表建立会话，返回句柄；失败返回空指针。
+pub type CreateFn = unsafe extern "C" fn(api: *const HostApi) -> PluginHandle;
+```
+
+```rust
+// crates/plugin-abi/src/lib.rs
+/// 插件导出：投递一条宿主下发的信封（UTF-8，不带换行），返回 [`SEND_OK`] / [`SEND_DROPPED`] /
+/// [`SEND_CLOSED`]。
+pub type SendFn = unsafe extern "C" fn(handle: PluginHandle, ptr: *const u8, len: usize) -> u32;
+```
+
+```rust
+// crates/plugin-abi/src/lib.rs
+/// 插件导出：结束会话，返回 [`DESTROY_JOINED`] 或 [`DESTROY_DETACHED`]。
+pub type DestroyFn = unsafe extern "C" fn(handle: PluginHandle) -> u32;
+```
+
+```rust
+// crates/plugin-abi/src/lib.rs
+/// 宿主 → 插件投递的结果：已入队。
+pub const SEND_OK: u32 = 0;
+```
+
+```rust
+// crates/plugin-abi/src/lib.rs
+/// 宿主 → 插件投递的结果：插件队列已满，本笔已丢弃（插件长期不读下发）。
+pub const SEND_DROPPED: u32 = 1;
+```
+
+```rust
+// crates/plugin-abi/src/lib.rs
+/// 宿主 → 插件投递的结果：会话已结束，本笔无法送达。
+pub const SEND_CLOSED: u32 = 2;
+```
+
+```rust
+// crates/plugin-abi/src/lib.rs
+/// `destroy` 的结果：会话线程已退出，动态库可以卸载。
+pub const DESTROY_JOINED: u32 = 0;
+```
+
+```rust
+// crates/plugin-abi/src/lib.rs
+/// `destroy` 的结果：会话线程仍在库内运行，宿主必须保留动态库句柄（卸载会让运行中的代码段消失）。
+pub const DESTROY_DETACHED: u32 = 1;
+```
+
+```rust
+// crates/plugin-abi/src/lib.rs
+/// 诊断输出等级：只落插件日志，不改变会话状态。
+pub const LOG_DEBUG: u32 = 0;
+```
+
+```rust
+// crates/plugin-abi/src/lib.rs
+pub const LOG_INFO: u32 = 1;
+```
+
+```rust
+// crates/plugin-abi/src/lib.rs
+pub const LOG_WARN: u32 = 2;
+```
+
+```rust
+// crates/plugin-abi/src/lib.rs
+pub const LOG_ERROR: u32 = 3;
 ```

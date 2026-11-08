@@ -1,10 +1,12 @@
 //! 插件宿主运行时：发现 / 装载 / RPC 泵 / 权限仲裁 / 生命周期 / 安装卸载。
 //! 运行时为进程内单例（壳持 `Arc`，多窗口共享）；插件事件经 [`PluginRuntime::subscribe_events`]
-//! 的单一广播通道进入壳的 update。进程创建与清理一律经 [`crate::plugin_process`]。
+//! 的单一广播通道进入壳的 update。插件是宿主进程内的动态库，装载见 `carrier`；
+//! [`crate::plugin_process`] 只托管插件经 `process` 能力面自起的子进程。
 
 mod ai_tools;
 
 mod capability;
+mod carrier;
 mod child_process;
 mod fs;
 mod frame_region;
@@ -369,6 +371,7 @@ pub struct PluginRuntime {
     /// 宿主产品版本：比较插件 `minHostVersion` 与握手自报宿主信息用。
     /// core 自身的包版本与产品版本不同，故由壳在启动时传入（默认取 core 包版本）。
     host_version: String,
+    /// 插件经 `process` 能力面自起的子进程（插件本体不是进程，这里只托管它起的进程）。
     process_host: Arc<PluginProcessHost>,
     shortcuts: Arc<shortcut::Registrar>,
     events: tokio::sync::broadcast::Sender<PluginEvent>,
@@ -1514,6 +1517,7 @@ impl PluginRuntime {
         self.fail_all_shell_calls("宿主已退出");
         self.fail_all_tool_calls("宿主已退出");
         self.fail_all_service_calls("宿主已退出");
+        // 插件自起的服务进程随应用退出一起收尾（插件会话本身已在上面的 stop 里结束）
         self.process_host.shutdown_children();
     }
 

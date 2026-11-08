@@ -35,17 +35,18 @@ Atelyx 是一款以人为本的可拓展桌面工作台：对话、笔记、表�
 | `crates/core/` | UI 无关核心：仓库存储、Markdown 与 frontmatter 解析、会话与布局模型、插件宿主运行时、进程托管 |
 | `crates/ui/` | 界面组件库：调色板、字体、图标、基元控件、浮层与菜单 |
 | `crates/plugin-protocol/` | 插件协议契约：握手、JSON-RPC 信封、整面帧与绘制指令、能力总线、manifest |
-| `crates/plugin-sdk/` | 插件侧 SDK：连接泵、能力面代理、绘制指令构造、控件层 |
+| `crates/plugin-abi/` | 同进程插件的 C ABI：宿主函数表、导出符号与返回码 |
+| `crates/plugin-sdk/` | 插件侧 SDK：C ABI 承载与连接泵、能力面代理、绘制指令构造、控件层 |
 
-依赖方向：应用 `atelyx` → `atelyx-core` + `atelyx-ui`；`atelyx-plugin-sdk` → `atelyx-plugin-protocol`；`atelyx-core` → `atelyx-plugin-protocol`。`atelyx-core` 无 GUI 依赖；`atelyx-server` 不被任何 crate 依赖，客户端只经 HTTP/WS 访问。
+依赖方向：应用 `atelyx` → `atelyx-core` + `atelyx-ui`；`atelyx-plugin-sdk` → `atelyx-plugin-protocol` + `atelyx-plugin-abi`；`atelyx-core` → `atelyx-plugin-protocol` + `atelyx-plugin-abi`。`atelyx-core` 无 GUI 依赖；`atelyx-server` 不被任何 crate 依赖，客户端只经 HTTP/WS 访问。
 
 ## 插件开发
 
-插件是独立进程：宿主启动它，经 stdin/stdout 上的 JSON-RPC 与它通信；界面由插件提交整面帧（绘制指令），宿主按几何命中并回发原始输入。语言不限，官方提供 Rust SDK。
+插件是原生动态库，由宿主按 C ABI 装载进自己的进程，经 JSON-RPC 信封与整面帧通信：界面由插件提交整面帧（绘制指令），宿主按几何命中并回发原始输入。官方提供 Rust SDK。
 
 - 上手、构建打包、本地调试与上架：见 [插件开发文档](docs/plugin-development.md)。
 - 逐字段 / 逐方法的契约：[插件 API 参考](docs/plugin-api.md)（由协议源码生成，改协议后重跑 `cargo run -p xtask -- docs`）。
-- 契约真源 `crates/plugin-protocol/`，插件侧封装 `crates/plugin-sdk/`。
+- 契约真源 `crates/plugin-protocol/`（信封与帧）、`crates/plugin-abi/`（同进程函数表），插件侧封装 `crates/plugin-sdk/`。
 
 ## 平台
 

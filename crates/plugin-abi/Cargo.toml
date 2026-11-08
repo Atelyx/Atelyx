@@ -1,0 +1,11 @@
+[package]
+name = "atelyx-plugin-abi"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Atelyx 同进程原生插件的 C ABI：宿主导出的回调函数表与插件导出的符号约定"
+license = "Apache-2.0"
+repository = "https://github.com/Atelyx/Atelyx"
+readme = "../README.md"
+
+[dependencies]

@@ -1,10 +1,7 @@
-//! 单个插件的 RPC 泵：进程输出逐行解析、插件→宿主请求按权限闸门与能力分派应答。
-//! 方向约定：插件→宿主一律请求，宿主→插件一律通知（无请求 / 响应往返，故无需请求配对表）。
-//! stdout 只允许协议信封（非 JSON = 协议违规，停插件并给出可读原因）。
-//!
-//! 请求在进程 stdout 读线程上**顺序**处理（同一进程的读线程唯一，`state` 写后读天然保序）。
-//! 每次启动领一个运行令牌（[`Instance::run_token`]）：令牌不匹配的输出（上次启动遗留）一律丢弃，
-//! 否则「停用 → 启用」后到达的旧进程事件会被当成新进程的崩溃，抹掉新 pid 并再起一个实例。
+//! 单个插件的 RPC 泵：插件输出逐行解析、插件→宿主请求按权限闸门与能力分派应答。
+//! 方向约定：插件→宿主一律请求，宿主→插件一律通知（无往返配对）；承载只有一条输出通路，
+//! 进程走 stdout、同进程走函数表，非信封内容一律停机并给出可读原因。
+//! 请求在承载的读线程上顺序处理；每次启动领运行令牌，旧会话的迟到输出按令牌丢弃。
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -32,6 +29,7 @@ use crate::plugin_process::{EventSink, PluginProcessHost, ProcessEvent as HostEv
 use super::{capability, child_process, fs, http, log, shortcut};
 use super::frame_region::FrameRegionStore;
 use super::service_dir::{Forward, ServiceTarget};
+use super::carrier;
 use super::{
     AuditRecord, Contribution, DialogKind, DialogRequest, HostRequest, LayoutSpecNode, PaddingSpec,
     PluginEvent, PluginRuntime, PluginStatus, SurfaceKind, MAX_CLIPBOARD_IMAGE_BYTES,
@@ -59,7 +57,7 @@ const WRITE_ERROR_NOTE_INTERVAL: Duration = Duration::from_secs(5);
 /// 宿主自报信息（握手回应）。
 const HOST_NAME: &str = "Atelyx";
 
-/// 一个插件的运行实例：进程句柄、在途请求、订阅与审计。
+/// 一个插件的运行实例：承载会话、在途请求、订阅与审计。
 pub(crate) struct Instance {
     pub(crate) id: String,
     manifest: Manifest,
@@ -67,17 +65,18 @@ pub(crate) struct Instance {
     state_dir: PathBuf,
     /// 宿主产品版本（握手自报宿主信息用；由运行时在建立实例时给定）。
     host_version: String,
+    /// 插件自起的子进程的宿主（插件本体不占 pid）。
     process_host: Arc<PluginProcessHost>,
     shortcuts: Arc<shortcut::Registrar>,
     events: tokio::sync::broadcast::Sender<PluginEvent>,
     /// 供崩溃退避线程回调用（弱引用，避免与运行时的强引用成环）。
     runtime: Mutex<Weak<PluginRuntime>>,
-    /// 本插件托管的子进程 pid（`process.spawn` 起的是宿主的子进程，不在插件进程树下）。
+    /// 本插件托管的子进程 pid（`process.spawn` 起的是宿主的子进程，由宿主创建与收尾）。
     children: child_process::Spawned,
     /// 会话闸门：OS 资源获取（子进程 / 全局快捷键）与停用收尾互斥，见 [`Instance::with_session`]。
     resources: Mutex<()>,
-    /// 当前插件进程 pid（0 = 未在跑）。
-    pid: AtomicU64,
+    /// 承载会话（动态库 + 插件实例）；未装载时为 `None`。
+    carrier: Mutex<Option<Arc<carrier::Loaded>>>,
     /// 运行令牌：每次启动 / 停止递增，用于丢弃上次启动遗留的进程输出。
     run_token: AtomicU64,
     /// 会话是否仍活跃：启动成功后置真，停用 / 失败 / 崩溃收尾开始前置假。
@@ -210,7 +209,7 @@ impl Instance {
             runtime: Mutex::new(Weak::new()),
             children: child_process::Spawned::default(),
             resources: Mutex::new(()),
-            pid: AtomicU64::new(0),
+            carrier: Mutex::new(None),
             run_token: AtomicU64::new(0),
             session_active: AtomicBool::new(false),
             handshaken: AtomicBool::new(false),
@@ -368,7 +367,7 @@ impl Instance {
             return Ok(());
         }
         let Some(entry) = self.manifest.entry.for_current_platform() else {
-            let reason = "未声明当前平台的可执行入口".to_string();
+            let reason = "未声明当前平台的插件入口".to_string();
             self.set_status(PluginStatus::Failed(reason.clone()));
             return Err(reason);
         };
@@ -377,22 +376,14 @@ impl Instance {
             &super::layout::loaded_version_file(&self.dir),
             &self.manifest.version,
         );
-        let program = self.dir.join(entry).to_string_lossy().into_owned();
-        let cwd = self.dir.to_string_lossy().into_owned();
-        // 领本次运行的令牌：此后旧进程的输出与事件一律按令牌丢弃
+        // 领本次运行的令牌：此后旧会话的输出与事件一律按令牌丢弃
         let token = self.run_token.fetch_add(1, Ordering::SeqCst) + 1;
         self.handshaken.store(false, Ordering::SeqCst);
-        let instance = self.clone();
-        let sink: EventSink = Arc::new(move |event| instance.handle_process_event(token, event));
-        let pid = self
-            .process_host
-            .spawn(&program, &[], Some(&cwd), None, sink)
-            .map_err(|e| format!("启动插件进程失败：{e}"))?;
-        self.pid.store(pid as u64, Ordering::SeqCst);
+        let target = self.dir.join(entry).to_string_lossy().into_owned();
+        self.start_in_process(&target)?;
         self.session_active.store(true, Ordering::SeqCst);
         self.set_status(PluginStatus::Running);
-        self.log.line(&format!("[启动] 进程已启动（pid {pid}，入口 {entry}）"));
-        // 握手截止：到点仍未握手即判失败（进程在跑却永不通信不能被当成正常）
+        // 握手截止：到点仍未握手即判失败（会话在跑却永不通信不能被当成正常）
         let watchdog = self.clone();
         std::thread::spawn(move || {
             std::thread::sleep(HANDSHAKE_TIMEOUT);
@@ -400,6 +391,27 @@ impl Instance {
         });
         Ok(())
     }
+
+    /// 装载动态库：会话线程由插件自己起，宿主只经 C ABI 函数表投递信封。
+    fn start_in_process(self: &Arc<Self>, path: &str) -> Result<(), String> {
+        let loaded = carrier::Loaded::open(std::path::Path::new(path), self, &self.manifest)
+            .map_err(|e| {
+                let reason = format!("插件装载失败：{e}");
+                self.fail(reason.clone());
+                reason
+            })?;
+        // 先入册再激活：插件在 create 里就会发 initialize，宿主对它的应答要能找到本会话
+        let carrier = Arc::new(loaded);
+        *self.carrier.lock().unwrap() = Some(carrier.clone());
+        if let Err(e) = carrier.activate() {
+            let reason = format!("插件装载失败：{e}");
+            self.fail(reason.clone());
+            return Err(reason);
+        }
+        self.log.line(&format!("[启动] 会话已建立（入口 {path}）"));
+        Ok(())
+    }
+
 
     /// 停止插件：作废在途退避重启与本次运行的陈旧输出，并结束整棵进程树。
     pub(crate) fn stop(&self) {
@@ -425,12 +437,13 @@ impl Instance {
         self.teardown();
     }
 
-    /// 结束插件进程树（pid = 0 时跳过）并收掉随插件记账的宿主资源。
+    /// 结束本次会话并收掉随插件记账的宿主资源。
     fn teardown(&self) {
-        let pid = self.pid.swap(0, Ordering::SeqCst) as u32;
-        if pid != 0 {
-            if let Err(e) = self.process_host.kill_process_tree(pid) {
-                eprintln!("[plugin {}] 结束进程树失败：{e}", self.id);
+        // 先走插件自己的收尾：它撤掉投递口让会话线程读到 EOF，再由宿主决定能否卸载
+        let carrier = self.carrier.lock().unwrap().take();
+        if let Some(carrier) = carrier {
+            if !carrier.shutdown() {
+                self.log.line("[生命周期] 插件会话线程未能退出，动态库保留到进程结束");
             }
         }
         // 日志写端不跨会话持有：卸载要删整个插件目录，Windows 上打开着的文件会让删除失败
@@ -602,40 +615,6 @@ impl Instance {
         let _ = self.events.send(PluginEvent::StatusChanged { id: self.id.clone(), status });
     }
 
-    // ---------- 进程事件 ----------
-
-    fn handle_process_event(self: &Arc<Self>, token: u64, event: HostEvent) {
-        // 上次启动遗留的输出（含延迟到达的退出上报）一律丢弃：pid / 状态已被新一次启动改写
-        if token != self.run_token.load(Ordering::SeqCst) {
-            return;
-        }
-        match event {
-            HostEvent::Stdout { data } => {
-                for line in data.lines() {
-                    let line = line.trim();
-                    if !line.is_empty() {
-                        self.handle_line_for_session(token, line);
-                    }
-                }
-            }
-            // 插件 stderr 归入诊断输出（协议正文只走 stdout）：控制台 + 插件日志两处落点
-            HostEvent::Stderr { data } => {
-                for line in data.lines() {
-                    if line.trim().is_empty() {
-                        continue;
-                    }
-                    eprintln!("[plugin {}] {line}", self.id);
-                    self.log.line(&format!("[stderr] {line}"));
-                }
-            }
-            HostEvent::Terminated { code } => self.on_exit(code),
-            HostEvent::Error { message } => {
-                eprintln!("[plugin {}] {message}", self.id);
-                self.log.line(&format!("[进程] {message}"));
-            }
-        }
-    }
-
     /// 处理一行插件输出（当前会话）——测试与不关心会话身份的调用走这条。
     #[cfg(test)]
     fn handle_line(self: &Arc<Self>, line: &str) {
@@ -646,9 +625,9 @@ impl Instance {
         let envelope = match Envelope::parse(line) {
             Ok(envelope) => envelope,
             Err(e) => {
-                // 违规行原样落日志：stdout 被日志污染是插件最常见的一类故障
+                // 违规行原样落日志：往信封通道里写非协议内容是插件最常见的一类故障
                 self.log.line(&format!("[协议] 非信封输出（已停机）：{line}"));
-                self.fail(format!("插件输出非协议内容（stdout 只允许 JSON-RPC 信封）：{e}"));
+                self.fail(format!("插件输出非协议内容（只允许 JSON-RPC 信封）：{e}"));
                 return;
             }
         };
@@ -670,7 +649,47 @@ impl Instance {
         }
     }
 
-    /// 进程退出：主动停止 / 已判失败 / 已熔断时不动作，其余视为崩溃走退避或熔断。
+    /// 承载送来的一段输出（可能含多行，也可能只含半行）：按行进协议泵。
+    pub(crate) fn handle_carrier_output(self: &Arc<Self>, text: &str) {
+        let token = self.run_token.load(Ordering::SeqCst);
+        for line in text.lines() {
+            let line = line.trim();
+            if !line.is_empty() {
+                self.handle_line_for_session(token, line);
+            }
+        }
+    }
+
+    /// 承载送来的非 UTF-8 输出：与「信封通道被污染」同一条判定，停机并给出可读原因。
+    pub(crate) fn note_carrier_garbled(self: &Arc<Self>, reason: &str) {
+        self.log.line(&format!("[协议] 非 UTF-8 输出（已停机）：{reason}"));
+        self.fail(format!("插件输出非协议内容（须为 UTF-8 信封）：{reason}"));
+    }
+
+    /// 承载送来的一行诊断输出：控制台 + 插件日志两处落点。
+    pub(crate) fn note_carrier_log(&self, level: u32, text: &str) {
+        for line in text.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            eprintln!("[plugin {} {level}] {line}", self.id);
+            self.log.line(&format!("[日志] {line}"));
+        }
+    }
+
+    /// 承载报告会话已结束：正常收尾按主动停止处置，异常按崩溃走退避 / 熔断。
+    pub(crate) fn handle_carrier_closed(self: &Arc<Self>, code: i32, reason: &str) {
+        if !reason.trim().is_empty() {
+            self.log.line(&format!("[会话] 结束（码 {code}）：{reason}"));
+        }
+        if code == 0 {
+            // 正常收尾（宿主已撤投递口）：收尾流程已由宿主发起，这里不重复处置
+            return;
+        }
+        self.on_exit(Some(code));
+    }
+
+    /// 会话意外结束：主动停止 / 已判失败 / 已熔断时不动作，其余视为崩溃走退避或熔断。
     fn on_exit(self: &Arc<Self>, code: Option<i32>) {
         let status = self.status();
         if matches!(
@@ -679,15 +698,14 @@ impl Instance {
         ) {
             return;
         }
-        self.pid.store(0, Ordering::SeqCst);
         // 本次会话就此结束：令牌换代让在途的资源获取请求作废（读线程上一次请求可能正在起子进程 /
-        // 注册热键），再把随它记账的资源收掉——托管服务不能因宿主崩溃而留成孤儿。
+        // 注册热键），再把随它记账的资源收掉——托管服务不能因插件崩溃而留成孤儿。
         // 先置会话失效再跑收尾：收尾扫过之后到达的工具调用登记不得落表（否则等满调用超时）。
         self.session_active.store(false, Ordering::SeqCst);
         self.run_token.fetch_add(1, Ordering::SeqCst);
         self.release_resources();
         let count = record_crash(&mut self.crash_times.lock().unwrap(), Instant::now());
-        self.log.line(&format!("[进程] 意外退出（退出码 {code:?}）"));
+        self.log.line(&format!("[会话] 意外结束（码 {code:?}）"));
         if count >= CRASH_LIMIT {
             eprintln!(
                 "[plugin {}] {} 秒内崩溃 {count} 次，已熔断（需手动重试）",
@@ -703,7 +721,7 @@ impl Instance {
         }
         let delay = backoff_delay(count);
         eprintln!(
-            "[plugin {}] 进程意外退出（退出码 {:?}），{:.1} 秒后自动重试",
+            "[plugin {}] 会话意外结束（码 {:?}），{:.1} 秒后自动重试",
             self.id,
             code,
             delay.as_secs_f64()
@@ -2119,15 +2137,17 @@ impl Instance {
         self.write_envelope(envelope, what);
     }
 
-    /// 写一条信封到插件 stdin。进程已停时静默丢弃（对端已不在）；写失败按限频记入插件日志。
+    /// 写一条信封到插件（进程 stdin 或同进程函数表）。会话已停时静默丢弃（对端已不在）；
+    /// 写失败按限频记入插件日志。
     fn write_envelope(&self, envelope: Envelope, what: &str) {
-        let pid = self.pid.load(Ordering::SeqCst) as u32;
-        if pid == 0 {
+        let Some(carrier) = self.carrier.lock().unwrap().clone() else {
+            // 会话已收尾：对端已不在，静默丢弃
             return;
-        }
+        };
+        // 行分隔必须保留：插件的读端按行切分信封，少一个换行就等于永不回执
         let mut line = envelope.to_line();
         line.push('\n');
-        if let Err(e) = self.process_host.send_stdin(pid, &line) {
+        if let Err(e) = carrier.deliver(&line) {
             self.note_write_failure(what, &e);
         }
     }
@@ -3152,17 +3172,14 @@ mod tests {
         }
     }
 
+    /// 承载报告会话结束：正常收尾（码 0）不判崩溃，异常按崩溃进退避重启。
     #[test]
-    fn stale_process_events_do_not_count_as_crash() {
+    fn carrier_closed_counts_as_crash_only_on_failure() {
         let (_tmp, instance) = make_instance(Vec::new());
         instance.set_status(PluginStatus::Running);
-        // 令牌不匹配（上次启动遗留）的退出上报必须被丢弃：不判崩溃、不改状态
-        let stale = instance.run_token.load(Ordering::SeqCst) + 1;
-        instance.handle_process_event(stale, HostEvent::Terminated { code: Some(1) });
-        assert_eq!(instance.status(), PluginStatus::Running);
-        // 令牌匹配时按崩溃处理：进入退避重启
-        let current = instance.run_token.load(Ordering::SeqCst);
-        instance.handle_process_event(current, HostEvent::Terminated { code: Some(1) });
+        instance.handle_carrier_closed(0, "");
+        assert_eq!(instance.status(), PluginStatus::Running, "正常收尾不判崩溃");
+        instance.handle_carrier_closed(1, "插件会话 panic：x");
         assert_eq!(instance.status(), PluginStatus::Restarting);
     }
 

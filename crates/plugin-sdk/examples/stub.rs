@@ -1,4 +1,4 @@
-//! 端到端测试夹具：注册一个面板贡献、提交一帧文本，并把收到的领域事件写进自持数据。
+//! 端到端测试夹具（同进程 cdylib）：注册一个面板贡献、提交一帧文本，并把收到的领域事件写进自持数据。
 //! 覆盖「安装即启用 → 握手 → 提交面 → 停用收尾」与容器切换 / 会话广播的投递，帧内交互通路
 //! 由 `frame_stub` 覆盖。
 
@@ -6,7 +6,7 @@ use atelyx_plugin_sdk::frame_builders::{frame, text, token};
 use atelyx_plugin_sdk::protocol::event::PublishParams;
 use atelyx_plugin_sdk::protocol::method::ContributionSlot;
 use atelyx_plugin_sdk::protocol::paint::ColorToken;
-use atelyx_plugin_sdk::{run_stdio, Context, PluginHandler, PluginInfo};
+use atelyx_plugin_sdk::{Context, PluginHandler};
 
 /// 面板贡献 id，同时是该面挂载后的 surfaceId。
 const PANEL: &str = "panel";
@@ -58,12 +58,5 @@ impl PluginHandler for Stub {
     }
 }
 
-#[tokio::main]
-async fn main() {
-    let fixture =
-        PluginInfo { id: "com.atelyx.stub".into(), name: "Stub".into(), version: "1.0.0".into() };
-    if let Err(e) = run_stdio(fixture, Stub).await {
-        eprintln!("夹具启动失败：{e}");
-        std::process::exit(1);
-    }
-}
+// 夹具以 cdylib 交付：宿主按 C ABI 符号建会话，与真实插件同一条通路
+atelyx_plugin_sdk::export_in_process_plugin!(Stub);

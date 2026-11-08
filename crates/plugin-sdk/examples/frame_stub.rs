@@ -10,7 +10,7 @@ use atelyx_plugin_sdk::protocol::frame::{FrameInput, FrameInputParams, FrameTick
 use atelyx_plugin_sdk::protocol::method::ContributionSlot;
 use atelyx_plugin_sdk::protocol::frame::Key;
 use atelyx_plugin_sdk::protocol::paint::ColorToken;
-use atelyx_plugin_sdk::{run_stdio, Context, PluginHandler, PluginInfo};
+use atelyx_plugin_sdk::{Context, PluginHandler};
 
 /// 面板贡献 id，同时是该面挂载后的 surfaceId。
 const PANEL: &str = "frame";
@@ -200,16 +200,6 @@ impl PluginHandler for FrameStub {
     }
 }
 
-#[tokio::main]
-async fn main() {
-    let fixture = PluginInfo {
-        id: "com.atelyx.frame-stub".into(),
-        name: "FrameStub".into(),
-        version: "0.1.0".into(),
-    };
-    let stub = FrameStub { model: Arc::new(Mutex::new(Model::default())) };
-    if let Err(e) = run_stdio(fixture, stub).await {
-        eprintln!("夹具启动失败：{e}");
-        std::process::exit(1);
-    }
-}
+atelyx_plugin_sdk::export_in_process_plugin!(FrameStub {
+    model: Arc::new(Mutex::new(Model::default())),
+});

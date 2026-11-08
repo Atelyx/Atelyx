@@ -11,7 +11,7 @@ use atelyx_plugin_sdk::protocol::envelope::RpcError;
 use atelyx_plugin_sdk::protocol::event::PublishParams;
 use atelyx_plugin_sdk::protocol::method;
 use atelyx_plugin_sdk::protocol::service::{ChangedParams, HostCallParams};
-use atelyx_plugin_sdk::{run_stdio, Context, PluginHandler, PluginInfo};
+use atelyx_plugin_sdk::{Context, PluginHandler};
 use serde_json::{json, Value};
 
 const STUB_ID: &str = "com.atelyx.editor-stub";
@@ -106,22 +106,10 @@ impl PluginHandler for EditorStub {
     }
 }
 
-#[tokio::main]
-async fn main() {
-    let fixture = PluginInfo {
-        id: STUB_ID.into(),
-        name: "EditorStub".into(),
-        version: "1.0.0".into(),
-    };
-    let stub = EditorStub {
-        inner: Arc::new(Inner {
-            probe: AtomicU64::new(0),
-            probe_lock: tokio::sync::Mutex::new(()),
-            active: AtomicBool::new(false),
-        }),
-    };
-    if let Err(e) = run_stdio(fixture, stub).await {
-        eprintln!("夹具启动失败：{e}");
-        std::process::exit(1);
-    }
-}
+atelyx_plugin_sdk::export_in_process_plugin!(EditorStub {
+    inner: Arc::new(Inner {
+        probe: AtomicU64::new(0),
+        probe_lock: tokio::sync::Mutex::new(()),
+        active: AtomicBool::new(false),
+    }),
+});

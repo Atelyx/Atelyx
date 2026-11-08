@@ -1,4 +1,5 @@
-//! 插件托管进程的宿主：启动（`ctx.process.exec`/`spawn` 的后端）、stdin 写入与「随应用退出收干净」。
+//! 插件自起子进程的宿主：启动（`ctx.process.exec` / `spawn` 的后端）、stdin 写入与「随应用退出收干净」。
+//! 插件本体不是进程（它是宿主进程内的动态库），这里托管的只有插件主动起的服务进程。
 //! 清理归属必须在创建那一刻定下：先跑起来再补登记，`sh -c`/`cmd.exe /C` 包装进程可能已派生出
 //! 真正的服务进程，孙进程会漏在清理范围外（「应用关掉了，本机服务还在占端口与显存」的成因）。
 //! 失败不静默：纳入清理范围失败即终止本次启动并返回原因；插件停用/卸载按调用方记账走 `kill_process_tree`。
@@ -51,7 +52,7 @@ pub fn resolve_program(program: &str) -> Result<String, String> {
     Ok(program.to_string())
 }
 
-/// 插件托管进程的宿主（应用内单例，经 `app.manage(Arc<PluginProcessHost>)` 托管）。
+/// 插件自起子进程的宿主（应用内单例，运行时持一份，随应用退出统一收尾）。
 pub struct PluginProcessHost {
     #[cfg(windows)]
     job: Mutex<Option<JobHandle>>,

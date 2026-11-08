@@ -30,7 +30,8 @@ pub struct Manifest {
     pub doc_type_registrations: Vec<DocTypeRegistration>,
 }
 
-/// 按平台的可执行入口（相对插件目录的路径）。缺失 = 该平台不支持。
+/// 按平台的插件入口（相对插件目录的路径）。缺失 = 该平台不支持。
+/// 入口是原生动态库：宿主按 C ABI 装载到本进程，插件与宿主同地址空间。
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Entry {
@@ -41,7 +42,7 @@ pub struct Entry {
 }
 
 impl Entry {
-    /// 当前平台的可执行相对路径；缺失即本平台不支持装载。
+    /// 当前平台的动态库相对路径；缺失即本平台不支持装载。
     pub fn for_current_platform(&self) -> Option<&str> {
         #[cfg(target_os = "windows")]
         {
@@ -176,7 +177,11 @@ mod tests {
             name: "Echo".into(),
             version: "0.1.0".into(),
             api_version: 1,
-            entry: Entry { windows: Some("echo.exe".into()), linux: Some("echo".into()) },
+            entry: Entry {
+                windows: Some("echo.exe".into()),
+                linux: Some("echo".into()),
+                ..Entry::default()
+            },
             permissions: vec![Permission::State],
             ..Manifest::default()
         }
@@ -224,5 +229,20 @@ mod tests {
         let out = serde_json::to_string(&m).unwrap();
         assert!(!out.contains("\"linux\""));
         assert!(out.contains("\"apiVersion\":1"));
+    }
+
+    /// 入口按平台取：只声明 Windows 时本平台（Linux）不可装载。
+    #[test]
+    fn entry_resolves_per_platform() {
+        let m = valid();
+        assert_eq!(
+            m.entry.for_current_platform(),
+            Some(if cfg!(windows) { "echo.exe" } else { "echo" })
+        );
+        let windows_only = Entry { windows: Some("echo.dll".into()), ..Entry::default() };
+        assert_eq!(
+            windows_only.for_current_platform(),
+            cfg!(windows).then_some("echo.dll")
+        );
     }
 }

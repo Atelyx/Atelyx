@@ -42,7 +42,7 @@ pub(crate) fn read_manifest(dir: &Path) -> Result<Manifest, String> {
     let entry = manifest
         .entry
         .for_current_platform()
-        .ok_or_else(|| "未声明当前平台的可执行入口".to_string())?;
+        .ok_or_else(|| "未声明当前平台的插件入口".to_string())?;
     validate_entry(entry)?;
     if !dir.join(entry).is_file() {
         return Err(format!("入口文件不存在：{entry}"));
@@ -79,7 +79,11 @@ mod tests {
             version: "1.0.0".into(),
             api_version: API_VERSION,
             min_host_version: min.map(str::to_string),
-            entry: Entry { windows: Some("app.exe".into()), linux: Some("app".into()) },
+            entry: Entry {
+                windows: Some("app.exe".into()),
+                linux: Some("app".into()),
+                ..Entry::default()
+            },
             ..Manifest::default()
         }
     }

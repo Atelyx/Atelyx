@@ -43,7 +43,6 @@ fn stage_dir(root: &Path, src: &Path, record_source: bool) -> Result<String, Str
         copy_published_tree(src, &temp)?;
         reject_reserved(&temp)?;
         require_staged_entry(&temp, &manifest)?;
-        grant_entry_execute(&temp, &manifest)?;
         if record_source {
             // 来源记录写进暂存内容：与这一代内容一起落位，换代时随旧内容一起轮换掉
             let recorded = source.to_string_lossy();
@@ -82,7 +81,6 @@ pub(crate) fn install_from_zip(
                 ));
             }
         }
-        grant_entry_execute(&plugin_root, &manifest)?;
         let id = manifest.id.clone();
         // 来源记录不随压缩包带进来：旧记录随上一代轮换掉，避免「从来源更新」拿旧目录内容
         // 覆盖这次的压缩包内容
@@ -114,31 +112,6 @@ fn source_outside_root(root: &Path, src: &Path) -> Result<PathBuf, String> {
         ));
     }
     Ok(src_abs)
-}
-
-/// 入口补可执行位：zip 只是按字节落盘，Windows 打的包也不带 unix 权限位，装完启动会
-/// Permission denied。入口是插件唯一要执行的路径，安装时统一补上（Windows 无此概念）。
-fn grant_entry_execute(dir: &Path, manifest: &Manifest) -> Result<(), String> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let Some(entry) = manifest.entry.for_current_platform() else {
-            return Ok(());
-        };
-        let path = dir.join(entry);
-        let mut perms = std::fs::metadata(&path)
-            .map_err(|e| format!("读取入口文件失败：{e}"))?
-            .permissions();
-        let mode = perms.mode();
-        if mode & 0o111 == 0 {
-            perms.set_mode(mode | 0o111);
-            std::fs::set_permissions(&path, perms)
-                .map_err(|e| format!("设置入口可执行权限失败：{e}"))?;
-        }
-    }
-    #[cfg(not(unix))]
-    let _ = (dir, manifest);
-    Ok(())
 }
 
 /// 卸载：删整个插件目录（安装内容、私有数据、上一代与启用标记都在其内）。调用方须先停插件。
@@ -852,23 +825,18 @@ mod tests {
         assert!(err.contains("压缩比"), "{err}");
     }
 
-    #[cfg(unix)]
+    /// 入口是动态库：装了不改权限位，也不要求可执行位。
     #[test]
-    fn zip_install_grants_entry_execute() {
-        use std::os::unix::fs::PermissionsExt;
-        let tmp = TempDir::new("plugin-zip-exec");
+    fn zip_install_leaves_entry_permissions_alone() {
+        let tmp = TempDir::new("plugin-zip-perms");
         let root = plugin_root(&tmp);
         let zip = tmp.join("demo.zip");
-        // 只写清单与入口、不带 unix 权限位（等同 Windows 上打的包）：落盘后入口默认可执行位为 0
         zip_entries(
             &zip,
-            &[(MANIFEST_FILE, manifest_json("com.example.demo").as_bytes()), ("app", b"#!/bin/sh\n")],
+            &[(MANIFEST_FILE, manifest_json("com.example.demo").as_bytes()), (entry_name(), b"stub")],
         );
         let id = install_from_zip(&root, &zip, None).unwrap();
-        let mode = std::fs::metadata(layout::plugin_dir(&root, &id).join("app"))
-            .unwrap()
-            .permissions()
-            .mode();
-        assert_eq!(mode & 0o111, 0o111, "入口应具备可执行位：{mode:o}");
+        let installed = layout::plugin_dir(&root, &id).join(entry_name());
+        assert!(installed.is_file(), "入口应原样落盘");
     }
 }

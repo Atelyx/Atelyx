@@ -1,39 +1,26 @@
-//! 能力总线端到端：以真实插件进程（`service-stub` 夹具）验证内置目录、`service.call` 与直接
+//! 能力总线端到端：以真实插件（`service-stub` 夹具）验证内置目录、`service.call` 与直接
 //! 调用对拍、外部提供者顶替、提供者停用后的回落，以及未知服务 / 未知方法 / 不可替换服务的拒绝。
 //!
 //! 探针由夹具自己发起（同时走直接调用与 `service.call`），结果写进它的自持数据；宿主侧用
 //! `vault:file.changed` 广播触发新一轮探针。
 
+mod support;
+
+use support::stage;
 use std::time::{Duration, Instant};
 
 use atelyx_core::plugin_runtime::service::ServiceInfo;
 use atelyx_core::plugin_runtime::{FileChangeKind, PluginRuntime, PluginStatus};
 use atelyx_core::vault::test_support::TempDir;
-use atelyx_plugin_sdk::protocol::manifest::MANIFEST_FILE;
 use serde_json::Value;
 
 const STUB_ID: &str = "com.atelyx.service-stub";
-
-fn entry_name() -> &'static str {
-    if cfg!(windows) {
-        "plugin.exe"
-    } else {
-        "plugin"
-    }
-}
 
 /// 装并启用 `service-stub`，等到它跑起来并落下第一次探针。
 fn install_service_stub(tmp: &TempDir, runtime: &std::sync::Arc<PluginRuntime>) {
     let src = tmp.join("src");
     std::fs::create_dir_all(&src).unwrap();
-    std::fs::write(
-        src.join(MANIFEST_FILE),
-        r#"{"id":"com.atelyx.service-stub","name":"ServiceStub","version":"1.0.0","apiVersion":1,
-            "entry":{"windows":"plugin.exe","linux":"plugin"},"permissions":["state"]}"#,
-    )
-    .unwrap();
-    std::fs::copy(env!("CARGO_BIN_EXE_service_stub"), src.join(entry_name()))
-        .expect("拷贝入口可执行文件失败");
+    stage(&src, "com.atelyx.service-stub", "service_stub", &["state"], "");
     let id = runtime.install_dir(&src).expect("安装 service-stub 应成功").id;
     assert_eq!(id, STUB_ID);
     runtime.set_enabled(&id, true).expect("启用应成功");
