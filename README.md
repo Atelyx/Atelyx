@@ -1,6 +1,6 @@
 <div align="center" style="padding:6px 0 10px">
 
-<img src="atelyx-app/assets/icons/icon.png" alt="Atelyx" width="92">
+<img src="assets/icons/icon.png" alt="Atelyx" width="92">
 
 <h1 style="color:#E5E0D5;font-weight:700;letter-spacing:3px;margin:16px 0 10px">ATELYX</h1>
 
@@ -30,14 +30,15 @@ Atelyx 是一款以人为本的可拓展桌面工作台：对话、笔记、表�
 
 | 目录 | 职责 |
 | --- | --- |
-| `atelyx-app/` | iced 桌面壳：窗口与布局、编辑器与各功能视图、插件面适配 |
-| `atelyx-ui/` | 界面组件库：调色板、字体、图标、基元控件、浮层与菜单 |
-| `atelyx-core/` | UI 无关核心：仓库存储、Markdown 与 frontmatter 解析、会话与布局模型、插件宿主运行时、进程托管 |
-| `atelyx-plugin-protocol/` | 插件协议契约：握手、JSON-RPC 信封、整面帧与绘制指令、能力总线、manifest |
-| `atelyx-plugin-sdk/` | 插件侧 SDK：连接泵、能力面代理、绘制指令构造、控件层 |
-| `atelyx-server/` | 协作服务端（独立 Cargo 工程，不进 workspace） |
+| `apps/atelyx/` | iced 桌面壳：窗口与布局、编辑器与各功能视图、插件面适配 |
+| `apps/server/` | 协作服务端（独立 Cargo 工程，不进 workspace） |
+| `crates/core/` | UI 无关核心：仓库存储、Markdown 与 frontmatter 解析、会话与布局模型、插件宿主运行时、进程托管 |
+| `crates/ui/` | 界面组件库：调色板、字体、图标、基元控件、浮层与菜单 |
+| `crates/plugin-protocol/` | 插件协议契约：握手、JSON-RPC 信封、整面帧与绘制指令、能力总线、manifest |
+| `crates/plugin-sdk/` | 插件侧 SDK：连接泵、能力面代理、绘制指令构造、控件层 |
+| `crates/plugins/calendar/` | 随包预置日历插件（独立进程；面板 + `calendar.*` 服务） |
 
-依赖方向：`atelyx-app` → `atelyx-core` + `atelyx-ui`；`atelyx-plugin-sdk` → `atelyx-plugin-protocol`；`atelyx-core` → `atelyx-plugin-protocol`。`atelyx-core` 无 GUI 依赖；`atelyx-server` 不被任何 crate 依赖，客户端只经 HTTP/WS 访问。
+依赖方向：应用 `atelyx` → `atelyx-core` + `atelyx-ui`；`atelyx-plugin-sdk` → `atelyx-plugin-protocol`；`atelyx-core` → `atelyx-plugin-protocol`。`atelyx-core` 无 GUI 依赖；`atelyx-server` 不被任何 crate 依赖，客户端只经 HTTP/WS 访问。
 
 ## 插件开发
 
@@ -45,7 +46,7 @@ Atelyx 是一款以人为本的可拓展桌面工作台：对话、笔记、表�
 
 - 上手、构建打包、本地调试与上架：见 [插件开发文档](docs/plugin-development.md)。
 - 逐字段 / 逐方法的契约：[插件 API 参考](docs/plugin-api.md)（由协议源码生成，改协议后重跑 `cargo run -p xtask -- docs`）。
-- 契约真源 `atelyx-plugin-protocol/`，插件侧封装 `atelyx-plugin-sdk/`。
+- 契约真源 `crates/plugin-protocol/`，插件侧封装 `crates/plugin-sdk/`。
 
 ## 平台
 
@@ -55,10 +56,10 @@ Windows 10/11（x64）+ Linux（Wayland 原生，兼容 X11）。
 
 ```bash
 bash patches/apply.sh    # 新克隆后执行一次：物化本地依赖补丁的源码目录
-cargo run -p atelyx-app  # 启动桌面应用
+cargo run -p atelyx      # 启动桌面应用
 cargo test --workspace   # 工作区测试
 cargo run -p xtask -- docs  # 重新生成插件 API 参考（协议改动后）
-cargo test --manifest-path atelyx-server/Cargo.toml  # 服务端测试
+cargo test --manifest-path apps/server/Cargo.toml  # 服务端测试
 bash scripts/package.sh  # 构建 release 并产出当前平台安装包到 target/dist/
 ```
 
@@ -66,18 +67,18 @@ bash scripts/package.sh  # 构建 release 并产出当前平台安装包到 targ
 
 ## 自建协作服务端
 
-`atelyx-server/` 是协作空间的内容真源（Rust 单进程），一台 Linux 机器或 NAS 即可部署：
+`apps/server/` 是协作空间的内容真源（Rust 单进程），一台 Linux 机器或 NAS 即可部署：
 
 ```bash
 # 方式一：Docker Compose（数据落在 ./data，备份 = 拷贝该目录）
-cd atelyx-server && docker compose up -d
+cd apps/server && docker compose up -d
 
 # 方式二：Linux + systemd（自动构建并注册服务，数据目录 /var/lib/atelyx）
-sudo bash atelyx-server/install.sh
-# 自定义端口 / 数据目录：sudo bash atelyx-server/install.sh 13000 /mnt/nas/atelyx-data
+sudo bash apps/server/install.sh
+# 自定义端口 / 数据目录：sudo bash apps/server/install.sh 13000 /mnt/nas/atelyx-data
 ```
 
-- 默认端口 `11224`；设 `TLS_CERT` + `TLS_KEY` 即启用 HTTPS/WSS，其余配置见 `atelyx-server/docker-compose.yml` 与 `install.sh`。
+- 默认端口 `11224`；设 `TLS_CERT` + `TLS_KEY` 即启用 HTTPS/WSS，其余配置见 `apps/server/docker-compose.yml` 与 `install.sh`。
 - 部署后打开 `http://<服务器>:11224` 进入管理台：注册账号（首个为管理员）、创建空间、邀请成员。
 
 ## 参与贡献

@@ -8,7 +8,7 @@ use std::fs;
 use std::path::PathBuf;
 
 fn fixture_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fixtures/markdown/parse.json")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/markdown/parse.json")
 }
 
 fn snapshot_cases() -> Vec<(String, Value)> {

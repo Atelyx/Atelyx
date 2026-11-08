@@ -2,9 +2,9 @@
 # Atelyx 协作服务端一键安装/更新（Linux + systemd 宿主机直跑，不用 Docker）。
 #
 # 用法（在仓库克隆目录内）：
-#   sudo bash atelyx-server/install.sh            # 默认端口 11224，数据目录 /var/lib/atelyx
-#   sudo bash atelyx-server/install.sh 13000      # 自定义端口
-#   sudo bash atelyx-server/install.sh 11224 /mnt/nas/atelyx-data   # 自定义数据目录（如 NAS 挂载点）
+#   sudo bash apps/server/install.sh            # 默认端口 11224，数据目录 /var/lib/atelyx
+#   sudo bash apps/server/install.sh 13000      # 自定义端口
+#   sudo bash apps/server/install.sh 11224 /mnt/nas/atelyx-data   # 自定义数据目录（如 NAS 挂载点）
 #
 # 每次执行完成完整更新：拉取最新代码 → 增量编译 → 安装并重启服务，数据不受影响。
 # 不带参数重复执行时沿用上次安装的端口/数据目录（记录于 /opt/atelyx-server/install.conf），
@@ -21,7 +21,7 @@ SERVICE=/etc/systemd/system/atelyx-server.service
 SERVICE_USER="atelyx"
 CONF_FILE="$INSTALL_DIR/install.conf"
 SRC_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPO_DIR="$(dirname "$SRC_DIR")"
+REPO_DIR="$(dirname "$(dirname "$SRC_DIR")")"
 BIN_SRC="$SRC_DIR/target/release/atelyx-server"
 
 [ "$(id -u)" = 0 ] || { echo "请用 sudo 运行"; exit 1; }
@@ -70,7 +70,7 @@ fi
 
 if find_cargo; then
     echo "编译（增量构建，通常很快）…"
-    (cd "$SRC_DIR" && cargo build --release)
+    (cd "$SRC_DIR" && CARGO_TARGET_DIR="$SRC_DIR/target" cargo build --release)
 elif [ -x "$BIN_SRC" ]; then
     echo "警告：本机没有可用 cargo，跳过编译，安装已有产物 $BIN_SRC（可能不含最新代码）。"
 else

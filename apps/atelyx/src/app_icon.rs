@@ -1,7 +1,7 @@
 //! 应用图标资源与句柄：窗口图标与界面上展示的同一枚 PNG。
 
 /// 应用图标（随应用分发的 PNG 资源）。
-pub const ICON_PNG: &[u8] = include_bytes!("../assets/icons/icon.png");
+pub const ICON_PNG: &[u8] = include_bytes!("../../../assets/icons/icon.png");
 
 /// 应用图标句柄（进程内单例：同一 Handle 复用纹理，避免每帧重上传）。
 pub fn icon_handle() -> iced::widget::image::Handle {

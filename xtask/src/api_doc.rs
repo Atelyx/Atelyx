@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 /// 协议源码目录（相对仓库根）。
-const SRC_DIR: &str = "atelyx-plugin-protocol/src";
+const SRC_DIR: &str = "crates/plugin-protocol/src";
 
 /// 文档开头的说明。
 const HEADER: &str = "\
@@ -14,7 +14,7 @@ const HEADER: &str = "\
 
 Atelyx 插件协议的全部公开类型与方法名。概念、取舍与常见坑见 [插件开发](plugin-development.md)；这里只列契约本身。
 
-> 本文件由 `cargo run -p xtask -- docs` 从 `atelyx-plugin-protocol/` 源码生成，请勿手改。
+> 本文件由 `cargo run -p xtask -- docs` 从 `crates/plugin-protocol/` 源码生成，请勿手改。
 > 协议改动后重跑一次即可；忘记重跑时 `cargo test --workspace` 会失败。
 ";
 

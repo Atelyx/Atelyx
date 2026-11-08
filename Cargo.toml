@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
-members = ["atelyx-app", "atelyx-core", "atelyx-ui", "atelyx-plugin-protocol", "atelyx-plugin-sdk", "atelyx-plugin-calendar", "xtask"]
-exclude = ["atelyx-server"]
+members = ["apps/atelyx", "crates/core", "crates/ui", "crates/plugin-protocol", "crates/plugin-sdk", "crates/plugins/calendar", "xtask"]
+exclude = ["apps/server"]
 
 # 本地补丁版 winit 与 iced_widget（基线、改动与移除条件见 patches/README.md，
 # 源码目录由 patches/apply.sh 从 crates.io 原始源码物化）。上游发布包含该修复的版本后可整目录移除。

@@ -12,7 +12,7 @@ exclude = ["src/bin", "tests"]
 
 [dependencies]
 # version 供 crates.io 解析，path 供仓库内直接构建（打包时 path 会被去掉）
-atelyx-plugin-protocol = { version = "0.1.0", path = "../atelyx-plugin-protocol" }
+atelyx-plugin-protocol = { version = "0.1.0", path = "../plugin-protocol" }
 # Context 的定型调用借 serde 的 Serialize/DeserializeOwned trait（不用 derive）
 serde = { version = "1", default-features = false }
 serde_json = "1"
@@ -30,4 +30,4 @@ async-trait = "0.1"
 # e2e：拉起 stub / crasher 子进程（process）与超时断言（macros/rt 已在主依赖，process 仅测试需要）
 tokio = { version = "1", features = ["process"] }
 # 宿主运行时端到端：仅测试用，插件侧生产依赖仍只有 protocol（core 不依赖 sdk，方向不反转）
-atelyx-core = { path = "../atelyx-core", features = ["test-support"] }
+atelyx-core = { path = "../core", features = ["test-support"] }

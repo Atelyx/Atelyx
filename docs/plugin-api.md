@@ -2,7 +2,7 @@
 
 Atelyx 插件协议的全部公开类型与方法名。概念、取舍与常见坑见 [插件开发](plugin-development.md)；这里只列契约本身。
 
-> 本文件由 `cargo run -p xtask -- docs` 从 `atelyx-plugin-protocol/` 源码生成，请勿手改。
+> 本文件由 `cargo run -p xtask -- docs` 从 `crates/plugin-protocol/` 源码生成，请勿手改。
 > 协议改动后重跑一次即可；忘记重跑时 `cargo test --workspace` 会失败。
 
 ## 1. 协议版本与清单
@@ -10,20 +10,20 @@ Atelyx 插件协议的全部公开类型与方法名。概念、取舍与常见�
 `plugin.json` 的结构、能力声明与宿主保留的清单文件名。`apiVersion` 必须与宿主相等，不等即拒绝装载。
 
 ```rust
-// atelyx-plugin-protocol/src/lib.rs
+// crates/plugin-protocol/src/lib.rs
 /// API 版本。破坏性变更（方法/指令/事件语义不兼容）递增后，握手时双方不一致即失败。
 /// 协议冻结为稳定契约前不递增本号（同版本发布，避免每次扩容都要求重建在装插件）。
 pub const API_VERSION: u32 = 1;
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/manifest.rs
+// crates/plugin-protocol/src/manifest.rs
 /// manifest 文件名（固定放在插件目录根部）。
 pub const MANIFEST_FILE: &str = "plugin.json";
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/manifest.rs
+// crates/plugin-protocol/src/manifest.rs
 /// 插件 manifest。缺字段按 [`Default`] 补齐，未知字段忽略。
 #[serde(rename_all = "camelCase", default)]
 pub struct Manifest {
@@ -49,7 +49,7 @@ pub struct Manifest {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/manifest.rs
+// crates/plugin-protocol/src/manifest.rs
 /// 按平台的可执行入口（相对插件目录的路径）。缺失 = 该平台不支持。
 #[serde(rename_all = "camelCase", default)]
 pub struct Entry {
@@ -61,7 +61,7 @@ pub struct Entry {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/manifest.rs
+// crates/plugin-protocol/src/manifest.rs
 /// 能力面枚举（封闭）：扩容随协议升版。名字与宿主能力面一一对应。
 #[serde(rename_all = "camelCase")]
 pub enum Permission {
@@ -83,7 +83,7 @@ pub enum Permission {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/manifest.rs
+// crates/plugin-protocol/src/manifest.rs
 /// 领域文档类型注册：扩展名、展示标签、图标名与承载文档内容的贡献 id。
 #[serde(rename_all = "camelCase")]
 pub struct DocTypeRegistration {
@@ -103,12 +103,12 @@ pub struct DocTypeRegistration {
 插件启动后的第一个请求是 `initialize`；此后双向都是一行一个 JSON-RPC 2.0 信封（NDJSON）。
 
 ```rust
-// atelyx-plugin-protocol/src/handshake.rs
+// crates/plugin-protocol/src/handshake.rs
 pub const INITIALIZE: &str = "initialize";
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/handshake.rs
+// crates/plugin-protocol/src/handshake.rs
 #[serde(rename_all = "camelCase")]
 pub struct InitializeParams {
     pub api_version: u32,
@@ -117,7 +117,7 @@ pub struct InitializeParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/handshake.rs
+// crates/plugin-protocol/src/handshake.rs
 #[serde(rename_all = "camelCase")]
 pub struct PluginInfo {
     pub id: String,
@@ -127,7 +127,7 @@ pub struct PluginInfo {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/handshake.rs
+// crates/plugin-protocol/src/handshake.rs
 #[serde(rename_all = "camelCase")]
 pub struct InitializeResult {
     pub api_version: u32,
@@ -138,7 +138,7 @@ pub struct InitializeResult {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/handshake.rs
+// crates/plugin-protocol/src/handshake.rs
 #[serde(rename_all = "camelCase")]
 pub struct HostInfo {
     pub name: String,
@@ -147,7 +147,7 @@ pub struct HostInfo {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/envelope.rs
+// crates/plugin-protocol/src/envelope.rs
 /// 一行信封的三种形态。解析失败给出可读原因（含行首片段），不静默丢弃。
 ///
 /// 行为契约：`id` 必须是数字（字符串 id 与显式 `null` 都按形态非法拒绝）；响应携带 `params`
@@ -160,7 +160,7 @@ pub enum Envelope {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/envelope.rs
+// crates/plugin-protocol/src/envelope.rs
 pub struct Request {
     pub jsonrpc: &'static str,
     /// 请求 id：本协议只认数字（发起方自增，单调不复用）。
@@ -172,7 +172,7 @@ pub struct Request {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/envelope.rs
+// crates/plugin-protocol/src/envelope.rs
 pub struct Notification {
     pub jsonrpc: &'static str,
     pub method: String,
@@ -182,7 +182,7 @@ pub struct Notification {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/envelope.rs
+// crates/plugin-protocol/src/envelope.rs
 pub struct Response {
     pub jsonrpc: &'static str,
     pub id: u64,
@@ -194,7 +194,7 @@ pub struct Response {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/envelope.rs
+// crates/plugin-protocol/src/envelope.rs
 /// 错误码：-32700..-32603 为 JSON-RPC 规范保留段；-32001..-32099 为本协议自定义段。
 pub struct RpcError {
     pub code: i64,
@@ -209,7 +209,7 @@ pub struct RpcError {
 能力按「服务 + 方法」登记：方法名本身就是 `服务.方法`，所以目录按第一个 `.` 切分即得。内置实现是出厂的活动提供者；外部提供者登记后只成为候选，切换由用户决定。`service.call` 是名字要到运行时才知道时的信封形态，与直接调用同名方法解析到同一条目、同一个实现。
 
 ```rust
-// atelyx-plugin-protocol/src/service.rs
+// crates/plugin-protocol/src/service.rs
 /// 方法名常量：提供者登记与调用。
 pub mod method {
     /// 提供者声明自己提供哪些服务方法（`{ service, version, methods }`）。登记不等于生效：
@@ -231,25 +231,25 @@ pub mod method {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/service.rs
+// crates/plugin-protocol/src/service.rs
 /// 服务版本的当前取值。契约不兼容的改动递增它，调用方据此判断能否沿用旧参数。
 pub const SERVICE_VERSION: u32 = 1;
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/service.rs
+// crates/plugin-protocol/src/service.rs
 /// 服务名与方法名的字节上限（两者同口径）。
 pub const MAX_METHOD_NAME: usize = 64;
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/service.rs
+// crates/plugin-protocol/src/service.rs
 /// 单个服务声明的方法数上限（`RegisterParams::methods` 的长度上限）。
 pub const MAX_METHODS_PER_SERVICE: usize = 128;
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/service.rs
+// crates/plugin-protocol/src/service.rs
 /// `service.register` 的 params：声明本插件提供某个服务的若干方法。
 #[serde(rename_all = "camelCase")]
 pub struct RegisterParams {
@@ -264,7 +264,7 @@ pub struct RegisterParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/service.rs
+// crates/plugin-protocol/src/service.rs
 /// `service.unregister` 的 params。
 #[serde(rename_all = "camelCase")]
 pub struct UnregisterParams {
@@ -273,7 +273,7 @@ pub struct UnregisterParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/service.rs
+// crates/plugin-protocol/src/service.rs
 /// 一个服务的当前状态（`service.list` 的条目）。
 #[serde(rename_all = "camelCase")]
 pub struct ServiceInfo {
@@ -294,7 +294,7 @@ pub struct ServiceInfo {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/service.rs
+// crates/plugin-protocol/src/service.rs
 /// `service.list` 的 result：按服务名排序。
 #[serde(rename_all = "camelCase")]
 pub struct ListResult {
@@ -303,7 +303,7 @@ pub struct ListResult {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/service.rs
+// crates/plugin-protocol/src/service.rs
 /// `service.call` 的 params。`params` 就是目标方法自己的入参（可为 null）。
 #[serde(rename_all = "camelCase")]
 pub struct CallParams {
@@ -316,7 +316,7 @@ pub struct CallParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/service.rs
+// crates/plugin-protocol/src/service.rs
 /// `host:service.call` 的 params：宿主代调用方请求提供者执行一次调用。
 #[serde(rename_all = "camelCase")]
 pub struct HostCallParams {
@@ -329,7 +329,7 @@ pub struct HostCallParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/service.rs
+// crates/plugin-protocol/src/service.rs
 /// `service.result` 的 params：`result` 与 `error` 二选一（同时给出按错误处理）。
 #[serde(rename_all = "camelCase")]
 pub struct ResultParams {
@@ -342,7 +342,7 @@ pub struct ResultParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/service.rs
+// crates/plugin-protocol/src/service.rs
 /// `host:service.changed` 的 params：活动提供者变化（含提供者下线）。
 #[serde(rename_all = "camelCase")]
 pub struct ChangedParams {
@@ -356,7 +356,7 @@ pub struct ChangedParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/service.rs
+// crates/plugin-protocol/src/service.rs
 /// 调用失败的可读原因（作为 JSON-RPC 错误的 data 回给调用方）。
 pub mod error {
     /// 服务无人提供（既无内置实现，也没有活动的外部提供者）。
@@ -371,7 +371,7 @@ pub mod error {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// 内置能力目录：服务名 → 归属插件 → 它提供的方法（全名，形如 `vault.readText`）。
 ///
 /// 这是「能力只有一种描述方式」的落地：方法名本身就是 `服务.方法`，目录按第一个 `.` 切分即得；
@@ -406,7 +406,7 @@ pub const BUILTIN_SERVICES: &[(&str, &str, &[&str])] = &[
 插件把界面画成指令：一条指令一个形状或一段文字，坐标是面本地逻辑像素、左上原点。指令集封闭，`fill` 与 `stroke` 至少声明其一；命中由命中区（见下一节）表达，绘制指令本身不带交互语义。
 
 ```rust
-// atelyx-plugin-protocol/src/paint.rs
+// crates/plugin-protocol/src/paint.rs
 /// 绘图指令。矩形 / 路径 / 圆：`fill` 与 `stroke` 至少声明其一，`stroke_width` 只在 `stroke`
 /// 存在时生效（缺省 1.0）；线只有 `stroke`（字段名 `width`）；文字与图片没有描边概念。
 #[serde(tag = "kind", rename_all = "camelCase")]
@@ -486,7 +486,7 @@ pub enum DrawCommand {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/paint.rs
+// crates/plugin-protocol/src/paint.rs
 /// 颜色：主题 token（跟随宿主主题）或插件自带 RGBA（内容谱系色，如连线分类、播放头高亮）。
 #[serde(tag = "type", rename_all = "camelCase")]
 #[serde(rename_all_fields = "camelCase")]
@@ -502,7 +502,7 @@ pub enum PaintColor {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/paint.rs
+// crates/plugin-protocol/src/paint.rs
 /// 矩形投影：偏移、模糊半径与颜色。模糊按宿主渲染层的 quad 阴影实现，只对矩形生效。
 #[serde(rename_all = "camelCase")]
 pub struct PaintShadow {
@@ -517,7 +517,7 @@ pub struct PaintShadow {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/paint.rs
+// crates/plugin-protocol/src/paint.rs
 /// 二维坐标点（逻辑像素）。
 pub struct PaintPoint {
     pub x: f32,
@@ -526,7 +526,7 @@ pub struct PaintPoint {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/paint.rs
+// crates/plugin-protocol/src/paint.rs
 /// 文字水平对齐：以 `maxWidth` 为对齐区域、`x` 为区域左缘，按量算出的整段宽度换算
 /// （换行后段内各行仍左对齐）。
 #[serde(rename_all = "camelCase")]
@@ -538,7 +538,7 @@ pub enum TextAlign {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/paint.rs
+// crates/plugin-protocol/src/paint.rs
 /// 字体族：界面字体（跟随用户设置）或系统等宽族。
 #[serde(rename_all = "camelCase")]
 pub enum TextFamily {
@@ -548,7 +548,7 @@ pub enum TextFamily {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/paint.rs
+// crates/plugin-protocol/src/paint.rs
 /// 字重三档。
 #[serde(rename_all = "camelCase")]
 pub enum TextWeight {
@@ -559,7 +559,7 @@ pub enum TextWeight {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/paint.rs
+// crates/plugin-protocol/src/paint.rs
 /// 主题 token：取色引用宿主调色板，主题变化时自动跟随。
 /// `accentSoft` / `warningSoft` / `dangerSoft` / `successSoft` 为对应语义色的低饱和底，
 /// `surface*` / `hover` / `border*` 为层次底色与边界。
@@ -592,7 +592,7 @@ pub enum ColorToken {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/paint.rs
+// crates/plugin-protocol/src/paint.rs
 /// 图片填充方式：`contain` 等比完整可见（留空边），`cover` 等比覆盖并裁剪溢出，缺省 = 拉伸填满。
 #[serde(rename_all = "camelCase")]
 pub enum ImageFit {
@@ -603,7 +603,7 @@ pub enum ImageFit {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/paint.rs
+// crates/plugin-protocol/src/paint.rs
 /// 图片来源：`private` = 插件私有目录内相对路径；`vault` = 仓库根相对路径（宿主按仓库内容读取，
 /// 协作空间走同构内容面）；`url` = http(s) 地址（缺省按公网策略下载并缓存，`local` 改为本机 /
 /// 局域网策略）；`file` = 本机绝对路径（插件自己读得到的文件，交给宿主显示）。
@@ -624,13 +624,13 @@ pub enum ImageSource {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/paint.rs
+// crates/plugin-protocol/src/paint.rs
 /// 帧率上限（帧声明的 `fps` 上限，也是宿主调度帧通知的最细节拍）。
 pub const MAX_FPS: u16 = 120;
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// 纯查询：不改界面、不产生帧。
 pub mod query {
     /// 批量量算文字占位尺寸（排版按真实字宽摆放，不能按字符数估）。
@@ -641,7 +641,7 @@ pub mod query {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// Markdown 解析：内容不变则结果不变，插件应按原文缓存，不必逐帧往返。
 pub mod markdown {
     /// 把 Markdown 文本转成结构化块（与笔记同一套解析语义），排版与绘制仍归插件。
@@ -651,13 +651,13 @@ pub mod markdown {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// 单次批量量算的条目上限。
 pub const MAX_MEASURE_ITEMS: usize = 512;
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// [`query::MEASURE`] 的一条：字段与 [`MeasureBatchParams`] 的条目同口径。
 #[serde(rename_all = "camelCase")]
 pub struct MeasureItem {
@@ -673,7 +673,7 @@ pub struct MeasureItem {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// [`query::MEASURE`] 的 params：一次量算多段文字（排一屏文本的量算往返要落在单批里）。
 #[serde(rename_all = "camelCase")]
 pub struct MeasureBatchParams {
@@ -682,7 +682,7 @@ pub struct MeasureBatchParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// [`query::MEASURE`] 的 result：顺序与 params 的 `items` 一一对应。
 #[serde(rename_all = "camelCase")]
 pub struct MeasureBatchResult {
@@ -691,7 +691,7 @@ pub struct MeasureBatchResult {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// [`query::MEASURE`] 的 result：占位宽高（逻辑像素）与换行后的行数（单行量算恒为 1）。
 #[serde(rename_all = "camelCase")]
 pub struct MeasureTextResult {
@@ -702,7 +702,7 @@ pub struct MeasureTextResult {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// [`query::THEME`] 的 result：颜色 / 字号档 / 圆角档 / 事件色板
 /// （值随用户的主题与字号设置变化）。
 #[serde(rename_all = "camelCase")]
@@ -717,7 +717,7 @@ pub struct ThemeResult {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// 主题色：十六进制 `#rrggbb` / `#rrggbbaa`，字段名与 [`crate::paint::ColorToken`] 的 wire 名一致。
 #[serde(rename_all = "camelCase")]
 pub struct ThemeColors {
@@ -743,7 +743,7 @@ pub struct ThemeColors {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// 字号档（绝对逻辑像素）：`micro` / `caption` / `ui` / `body` / `h2` / `h1`。
 #[serde(rename_all = "camelCase")]
 pub struct FontSizes {
@@ -757,7 +757,7 @@ pub struct FontSizes {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// 圆角档（逻辑像素）。
 #[serde(rename_all = "camelCase")]
 pub struct Radii {
@@ -768,7 +768,7 @@ pub struct Radii {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// 内边距声明：数字 = 四边等距；`{horizontal, vertical}` = 分轴；`{top, right, bottom, left}` = 分边。
 /// 两个对象形态都不接受未声明字段，避免分边写法被分轴形态吞掉。
 #[serde(untagged)]
@@ -780,7 +780,7 @@ pub enum PaddingSpec {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AxesPadding {
     #[serde(default)]
@@ -791,7 +791,7 @@ pub struct AxesPadding {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EdgesPadding {
     #[serde(default)]
@@ -810,7 +810,7 @@ pub struct EdgesPadding {
 `frame.submitShared` 一帧即该面的完整界面（指令 + 命中区 + 输入声明），帧内容写进共享内存槽位，信封只带槽位坐标；宿主只按几何绘制并把原始输入经 `host:frame.input` 原样回发，插件按帧自行维护悬停 / 按下 / 焦点 / 滚动 / 文本编辑状态。
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// 面帧：整个面交给插件自绘，一帧即当前完整界面。
 pub mod frame {
     /// 插件提交一份整面帧：内容写在共享内存槽里，params 只带槽位定位与校验信息。整帧替换。
@@ -825,7 +825,7 @@ pub mod frame {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/frame.rs
+// crates/plugin-protocol/src/frame.rs
 /// 一面一帧的完整内容。
 #[serde(rename_all = "camelCase")]
 pub struct SurfaceFrame {
@@ -845,7 +845,7 @@ pub struct SurfaceFrame {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/frame.rs
+// crates/plugin-protocol/src/frame.rs
 /// 命中区：矩形 + 标识 + 光标形状。同帧内按声明序叠放（后声明的在上）。
 /// 宿主把落在其上的指针事件的 `hit` 填成该 id，插件按 id 自行解释语义。
 #[serde(rename_all = "camelCase")]
@@ -863,7 +863,7 @@ pub struct HitRegion {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/frame.rs
+// crates/plugin-protocol/src/frame.rs
 /// 命中区光标形状（悬停时的鼠标指针）。
 #[serde(rename_all = "camelCase")]
 pub enum HitCursor {
@@ -881,7 +881,7 @@ pub enum HitCursor {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/frame.rs
+// crates/plugin-protocol/src/frame.rs
 /// 面本地矩形（输入法光标 / 候选框锚点）。
 #[serde(rename_all = "camelCase")]
 pub struct FrameRect {
@@ -893,7 +893,7 @@ pub struct FrameRect {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/frame.rs
+// crates/plugin-protocol/src/frame.rs
 /// 宿主回发的原始输入。坐标 = 面本地逻辑像素；`hit` 为命中的命中区 id（未命中缺省）。
 /// 插件按帧自行维护交互状态（悬停 / 按下 / 焦点 / 滚动位置 / 文本编辑）。
 #[serde(tag = "kind", rename_all = "camelCase")]
@@ -964,19 +964,19 @@ pub enum FrameInput {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/frame.rs
+// crates/plugin-protocol/src/frame.rs
 /// 命中区数量上限（单帧）。
 pub const MAX_HITS: usize = 4096;
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/frame.rs
+// crates/plugin-protocol/src/frame.rs
 /// 命中区 id 上限（字节）。
 pub const MAX_HIT_ID_LEN: usize = 64;
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/frame.rs
+// crates/plugin-protocol/src/frame.rs
 /// `frame.submitShared` 的 params：帧内容写在共享内存的 `slot` 槽里，信封只带定位与校验信息。
 /// 宿主按 `generation` 拒绝过期映射，按 `seq` / `len` 校验槽内内容是否仍是本次写入。
 #[serde(rename_all = "camelCase")]
@@ -990,7 +990,7 @@ pub struct FrameSubmitSharedParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/frame.rs
+// crates/plugin-protocol/src/frame.rs
 /// `frame.region` 的 params：帧超出当前槽容量时请求宿主换一份更大的区域。
 #[serde(rename_all = "camelCase")]
 pub struct FrameRegionRequest {
@@ -1000,7 +1000,7 @@ pub struct FrameRegionRequest {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/frame.rs
+// crates/plugin-protocol/src/frame.rs
 /// `host:frame.input` 的 params。
 #[serde(rename_all = "camelCase")]
 pub struct FrameInputParams {
@@ -1010,7 +1010,7 @@ pub struct FrameInputParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/frame.rs
+// crates/plugin-protocol/src/frame.rs
 /// `host:frame.tick` 的 params：帧序号与距上一帧的毫秒数（首帧为 0）。
 #[serde(rename_all = "camelCase")]
 pub struct FrameTickParams {
@@ -1021,7 +1021,7 @@ pub struct FrameTickParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/frame.rs
+// crates/plugin-protocol/src/frame.rs
 /// 鼠标按键。
 #[serde(rename_all = "camelCase")]
 pub enum MouseButton {
@@ -1032,7 +1032,7 @@ pub enum MouseButton {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/frame.rs
+// crates/plugin-protocol/src/frame.rs
 /// 按键：具名键（功能键与编辑键）或可打印字符。字符按布局产出（与用户所见一致），
 /// 大小写与符号跟随 Shift，因此 `a` 与 `A` 是两个值、`1` 与 `!` 也是两个值。
 #[serde(tag = "type", rename_all = "camelCase")]
@@ -1043,7 +1043,7 @@ pub enum Key {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/frame.rs
+// crates/plugin-protocol/src/frame.rs
 /// 具名键。可打印字符走 [`Key::Character`]；这里放不可打印的编辑 / 功能键，外加空格
 /// （它与编辑语义绑定，且布局差异下字符形态不稳定）。
 #[serde(rename_all = "camelCase")]
@@ -1079,7 +1079,7 @@ pub enum NamedKey {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/frame.rs
+// crates/plugin-protocol/src/frame.rs
 /// 键盘焦点事件与按键的归属：`Press` 含系统重复按键（长按方向键逐次到达），`Release` 在抬起时到达。
 #[serde(rename_all = "camelCase")]
 pub enum KeyAction {
@@ -1089,7 +1089,7 @@ pub enum KeyAction {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/frame.rs
+// crates/plugin-protocol/src/frame.rs
 /// 修饰键状态（按键发生时的快照）：`control` = Ctrl（macOS 的 Control，不含 Command），
 /// `meta` = Windows / Super / Command 键。
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -1106,13 +1106,13 @@ pub struct Modifiers {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// 单次转换的源文本上限（字节）：超限按可读错误拒绝，插件应自行分段。
 pub const MAX_MARKDOWN_BYTES: usize = 512 * 1024;
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// [`markdown::PARSE`] 的 params：交给宿主按笔记同一套解析语义转成结构化块。
 /// 宿主只做解析（块与行内片段），排版与绘制仍归插件。
 #[serde(rename_all = "camelCase")]
@@ -1122,7 +1122,7 @@ pub struct MarkdownParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// [`markdown::PARSE`] 的 result：按源序排列的块。
 #[serde(rename_all = "camelCase")]
 pub struct MarkdownResult {
@@ -1131,7 +1131,7 @@ pub struct MarkdownResult {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// 块：`depth` 为嵌套层数（列表 / 引用内部块递增），由插件换算缩进。
 /// 表格单元格只给纯文本（单元格行内样式不展开）。
 #[serde(tag = "kind", rename_all = "camelCase")]
@@ -1173,7 +1173,7 @@ pub enum MarkdownBlock {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// 行内片段：同一段文字里的样式差异（字重、等宽、链接目标）。
 #[serde(rename_all = "camelCase")]
 pub struct MarkdownSpan {
@@ -1192,7 +1192,7 @@ pub struct MarkdownSpan {
 握手应答给出区域描述（路径 / 代次 / 槽数 / 槽容量）：插件把编码后的帧写进一个槽位，再以`frame.submitShared` 报告槽位坐标。区域文件全部小端：64 字节区域头（魔数 `ATLXFRM\0` / 版本 / 槽数 /槽容量 / 代次 / 头长 / 槽步长），每槽 16 字节槽头（序号 u64、长度 u32）+ 槽容量。写入顺序是「序号置奇 →写长度与内容 → 序号置偶」，序号取非零偶数、每次 +2；宿主首尾序号一致才认这一帧，撕裂或错位的整帧丢弃。帧超出槽容量时用 `frame.region` 请求扩容，宿主换新文件并递增代次，旧代次的提交一律拒绝。
 
 ```rust
-// atelyx-plugin-protocol/src/frame_region.rs
+// crates/plugin-protocol/src/frame_region.rs
 /// 一个共享内存区域的描述（握手应答与 `frame.region` 扩容应答同形）。
 #[serde(rename_all = "camelCase")]
 pub struct FrameRegionInfo {
@@ -1207,49 +1207,49 @@ pub struct FrameRegionInfo {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/frame_region.rs
+// crates/plugin-protocol/src/frame_region.rs
 /// 区域头魔数（8 字节）。
 pub const REGION_MAGIC: [u8; 8] = *b"ATLXFRM\0";
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/frame_region.rs
+// crates/plugin-protocol/src/frame_region.rs
 /// 区域布局版本：字段含义变化即递增，双端不一致按不可用报错。
 pub const REGION_VERSION: u32 = 1;
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/frame_region.rs
+// crates/plugin-protocol/src/frame_region.rs
 /// 区域头长度。
 pub const REGION_HEADER_SIZE: usize = 64;
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/frame_region.rs
+// crates/plugin-protocol/src/frame_region.rs
 /// 槽头长度。
 pub const SLOT_HEADER_SIZE: usize = 16;
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/frame_region.rs
+// crates/plugin-protocol/src/frame_region.rs
 /// 槽数：写入端同时只占一槽，其余留作宿主读取与紧邻两次提交的隔离。
 pub const SLOT_COUNT: u32 = 4;
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/frame_region.rs
+// crates/plugin-protocol/src/frame_region.rs
 /// 槽容量（字节）：帧只装绘制指令与图片来源，不装图片像素。
 pub const SLOT_CAPACITY: u32 = 256 * 1024;
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/frame_region.rs
+// crates/plugin-protocol/src/frame_region.rs
 /// 槽容量上限：超出即报可读错误，不再扩容。
 pub const MAX_SLOT_CAPACITY: u32 = 16 * 1024 * 1024;
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/frame_region.rs
+// crates/plugin-protocol/src/frame_region.rs
 /// 填区域头：调用方须已把文件扩到 [`FrameRegionInfo::byte_len`]，且槽位从全零起步（新建文件即全零，
 /// 槽序号从 2 起递增，全零槽不会被误认）。
 ///
@@ -1276,7 +1276,7 @@ pub fn init_region(map: &mut [u8], info: &FrameRegionInfo) -> Result<(), String>
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/frame_region.rs
+// crates/plugin-protocol/src/frame_region.rs
 /// 校验区域头与描述一致（映射端开箱即用的一次把关）。
 ///
 /// 缓冲不足、魔数 / 版本 / 代次不符或槽数与步长和描述不同即报错。
@@ -1315,7 +1315,7 @@ pub fn validate_region(map: &[u8], info: &FrameRegionInfo) -> Result<(), String>
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/frame_region.rs
+// crates/plugin-protocol/src/frame_region.rs
 /// 把一帧编码后的内容写进槽位：序号必须是大于零的偶数。
 ///
 /// 区域头与描述不符、槽位越界、内容超出槽容量或序号非法即报错，槽内内容不动。
@@ -1351,7 +1351,7 @@ pub fn write_slot(
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/frame_region.rs
+// crates/plugin-protocol/src/frame_region.rs
 /// 读一槽内容：序号对得上且首尾一致才返回 `Some`。
 ///
 /// 写入进行中 / 被后续写入覆盖返回 `None`（按错位丢弃）；区域头与描述不符、序号非法、槽位或
@@ -1393,7 +1393,7 @@ pub fn read_slot(
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/frame_codec.rs
+// crates/plugin-protocol/src/frame_codec.rs
 /// 把一帧编成字节序列。
 pub fn encode(frame: &SurfaceFrame) -> Vec<u8> {
     let mut out = Vec::new();
@@ -1405,7 +1405,7 @@ pub fn encode(frame: &SurfaceFrame) -> Vec<u8> {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/frame_codec.rs
+// crates/plugin-protocol/src/frame_codec.rs
 /// 从字节序列还原一帧：魔数 / 版本 / 长度对不上或内容截断都返回可读错误。
 pub fn decode(bytes: &[u8]) -> Result<SurfaceFrame, String> {
     if bytes.len() < MAGIC.len() + 1 {
@@ -1431,7 +1431,7 @@ pub fn decode(bytes: &[u8]) -> Result<SurfaceFrame, String> {
 贡献点决定插件界面出现在哪里；`surfaceId` 即贡献 id（文档实例另由宿主分配 id，插件窗口面由 `window.open` 的 `id` 指定）。
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// 贡献点位置（封闭枚举；扩容随协议升版）。
 #[serde(rename_all = "camelCase")]
 pub enum ContributionSlot {
@@ -1445,7 +1445,7 @@ pub enum ContributionSlot {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 #[serde(rename_all = "camelCase")]
 pub enum SurfaceKind {
     Panel,
@@ -1459,7 +1459,7 @@ pub enum SurfaceKind {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 #[serde(rename_all = "camelCase")]
 pub struct SurfaceAttachedParams {
     pub surface_id: String,
@@ -1469,7 +1469,7 @@ pub struct SurfaceAttachedParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 #[serde(rename_all = "camelCase")]
 pub struct SurfaceDetachedParams {
     pub surface_id: String,
@@ -1477,7 +1477,7 @@ pub struct SurfaceDetachedParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// 界面提交类方法的回执（`frame.submitShared`）：`applied` = 宿主已接受并生效。
 #[serde(rename_all = "camelCase")]
 pub struct SubmitResult {
@@ -1486,7 +1486,7 @@ pub struct SubmitResult {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// `view.register` 的 params：声明一个贡献点。`id` 插件内唯一且不得含 `:`（宿主的面标识以它作分隔），
 /// 同时是该面挂载后的 `surfaceId`；`icon` 为宿主内置形状名或插件自备形状名
 /// （内置名优先），缺省 / 未注册时宿主用拼图图标。
@@ -1505,7 +1505,7 @@ pub struct RegisterParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// `view.unregister` 的 params：按 id 撤销自己的贡献；id 未注册时报可读错误。
 #[serde(rename_all = "camelCase")]
 pub struct UnregisterParams {
@@ -1514,7 +1514,7 @@ pub struct UnregisterParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// 接管范围（封闭枚举）。`page` = 内容区全给插件（宿主标题栏保留）；`full` = 整窗归插件呈现
 /// （含标题栏区域，窗口拖动 / 缩放 / 关闭由宿主代执行）。
 #[serde(rename_all = "camelCase")]
@@ -1525,7 +1525,7 @@ pub enum TakeoverScope {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// `view.takeover` 的 params：把本插件的一个贡献面接管到当前聚焦窗口。`surfaceId` 须为
 /// 已注册的贡献 id（接管的就是该面自己的整面帧）；退出接管入口由宿主常驻提供，插件无需声明退路。
 #[serde(rename_all = "camelCase")]
@@ -1536,7 +1536,7 @@ pub struct TakeoverParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// `window.open` 的 params：`id` 插件内唯一、非空且不含 `:`，同时是该窗口面的 `surfaceId`。
 #[serde(rename_all = "camelCase")]
 pub struct WindowOpenParams {
@@ -1569,7 +1569,7 @@ pub struct WindowOpenParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// `window.close` 的 params。
 #[serde(rename_all = "camelCase")]
 pub struct WindowCloseParams {
@@ -1578,7 +1578,7 @@ pub struct WindowCloseParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// `window.update` 的 params：运行时改一个已打开窗口的属性（缺省字段不动）。至少给一项。
 /// 「不进任务栏」是开窗期设置，运行时不支持改。
 #[serde(rename_all = "camelCase")]
@@ -1599,7 +1599,7 @@ pub struct WindowUpdateParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// `window.show` / `host:window.hidden` 的 params：按插件声明的窗口 id。
 #[serde(rename_all = "camelCase")]
 pub struct WindowIdParams {
@@ -1608,7 +1608,7 @@ pub struct WindowIdParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// [`window::HOST_CLOSED`] 的 params：用户（而非插件）关闭了该窗口。
 #[serde(rename_all = "camelCase")]
 pub struct WindowClosedParams {
@@ -1617,7 +1617,7 @@ pub struct WindowClosedParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// `window.beginDrag` 的 params：要拖动的窗口按承载该面的窗口解析（插件窗口 / 接管面 / 所在面板）。
 #[serde(rename_all = "camelCase")]
 pub struct WindowDragParams {
@@ -1630,7 +1630,7 @@ pub struct WindowDragParams {
 插件声明自己期望的默认布局：宿主在插件首次启用时摆进当前场景，之后改名 / 删除都不再补回。`views` 填视图 kind（本插件贡献为 `plugin:<插件 id>:<贡献 id>`）。
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// 当前场景的布局面：插件声明自己期望的默认布局，宿主在首次启用时摆进当前场景。
 pub mod layout {
     /// 声明默认布局（每个插件至多生效一次；用户可自行改名 / 删除）。
@@ -1639,7 +1639,7 @@ pub mod layout {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// `layout.declareDefaultLayout` 的 params：给宿主一套默认面板布局。`name` 为布局名
 /// （与既有布局重名时宿主追加序号），`spec` 只描述结构与视图 kind。
 #[serde(rename_all = "camelCase")]
@@ -1650,7 +1650,7 @@ pub struct DeclareDefaultLayoutParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/layout.rs
+// crates/plugin-protocol/src/layout.rs
 /// 插件默认布局规格节点（`layout.declareDefaultLayout` 载荷）。
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum LayoutSpecNode {
@@ -1666,7 +1666,7 @@ pub enum LayoutSpecNode {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/layout.rs
+// crates/plugin-protocol/src/layout.rs
 /// 分割方向。
 #[serde(rename_all = "camelCase")]
 pub enum Axis {
@@ -1676,25 +1676,25 @@ pub enum Axis {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/layout.rs
+// crates/plugin-protocol/src/layout.rs
 /// 默认布局名的字节上限（多字节字符按字节计）。
 pub const MAX_NAME_BYTES: usize = 64;
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/layout.rs
+// crates/plugin-protocol/src/layout.rs
 /// 规格树的深度上限。
 pub const MAX_DEPTH: usize = 16;
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/layout.rs
+// crates/plugin-protocol/src/layout.rs
 /// 规格树的面板数上限。
 pub const MAX_PANELS: usize = 32;
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/layout.rs
+// crates/plugin-protocol/src/layout.rs
 /// 单个面板的视图数上限。
 pub const MAX_VIEWS_PER_PANEL: usize = 16;
 ```
@@ -1704,7 +1704,7 @@ pub const MAX_VIEWS_PER_PANEL: usize = 16;
 每个模块是一类能力面的方法名常量，与 `permissions` 里的能力声明一一对应；声明用于公示与审计，不是拦截：插件是原生进程，能力面上的限制只作便利层语义。
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 pub mod view {
     /// 插件注册一个贡献点（面板 / 表格视图 / 设置页），使其出现在宿主对应的入口里。
     pub const REGISTER: &str = "view.register";
@@ -1719,7 +1719,7 @@ pub mod view {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 pub mod window {
     /// 插件请求打开一个独立窗口承载自己的面（声明的 `id` 即该窗口面的 `surfaceId`）。
     /// 缺省用系统窗口边框；`decorations: false` 时去掉系统边框，由宿主提供标题栏
@@ -1745,7 +1745,7 @@ pub mod window {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 pub mod fs {
     pub const PRIVATE_DIR: &str = "fs.privateDir";
     pub const READ_TEXT: &str = "fs.readText";
@@ -1759,7 +1759,7 @@ pub mod fs {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 pub mod process {
     pub const SPAWN: &str = "process.spawn";
     pub const WRITE_STDIN: &str = "process.writeStdin";
@@ -1771,7 +1771,7 @@ pub mod process {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// 当前激活仓库的按路径读写（`path` 为相对仓库根的路径）。协作空间模式下同一能力面
 /// 由宿主转发到服务端，插件不感知容器类型。写入与宿主自身写同出口（写盘队列 / 服务端内容面），
 /// 插件不得用 `fs` 直改仓库（会与内存态和协作广播互踩）。
@@ -1798,7 +1798,7 @@ pub mod vault {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// 表格面：读写当前打开表格。写入与宿主自身编辑同一出口（宿主合并落盘并广播协作补丁），
 /// 插件不得旁路读写 `.atb` 真源。
 pub mod table {
@@ -1817,7 +1817,7 @@ pub mod table {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 pub mod state {
     pub const READ: &str = "state.read";
     pub const WRITE: &str = "state.write";
@@ -1825,7 +1825,7 @@ pub mod state {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 pub mod notification {
     /// 在应用内弹一条通知（宿主已收尾、通知未投递时报可读错误）。
     pub const SHOW: &str = "notification.show";
@@ -1833,7 +1833,7 @@ pub mod notification {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 pub mod shortcut {
     pub const REGISTER: &str = "shortcut.register";
     pub const UNREGISTER: &str = "shortcut.unregister";
@@ -1845,7 +1845,7 @@ pub mod shortcut {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 pub mod clipboard {
     pub const WRITE_TEXT: &str = "clipboard.writeText";
     pub const READ_TEXT: &str = "clipboard.readText";
@@ -1857,7 +1857,7 @@ pub mod clipboard {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 pub mod dialog {
     pub const PICK_FILE: &str = "dialog.pickFile";
     pub const PICK_DIRECTORY: &str = "dialog.pickDirectory";
@@ -1865,14 +1865,14 @@ pub mod dialog {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 pub mod http {
     pub const REQUEST: &str = "http.request";
 }
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 pub mod doc {
     /// 用户打开了插件注册的领域文档类型文件（通知）。`surfaceId` 为宿主分配的实例面标识，
     /// 插件据此以 `frame.submitShared` 提交该文档实例的界面。
@@ -1883,7 +1883,7 @@ pub mod doc {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// 编辑器：当前打开笔记的选区读写（由笔记插件提供，其他插件据此做「改写选中内容」这类动作）。
 /// 只在编辑状态有意义；阅读态选区不属于编辑器能力。
 pub mod editor {
@@ -1895,7 +1895,7 @@ pub mod editor {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 pub mod history {
     /// 按天聚合的仓库活动：新建 / 修改 / 删除的文件数合计。
     pub const ACTIVITY: &str = "history.activity";
@@ -1907,7 +1907,7 @@ pub mod history {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 pub mod ai {
     /// 插件发起 / 续聊一轮对话（须声明 `ai` 权限）。回执 = run 已就位，事件随后经
     /// [`HOST_CHAT_EVENT`] 流达。会话 = 仓库普通会话（主面板可见）；可指定 Agent / 模型 /
@@ -1944,7 +1944,7 @@ pub mod ai {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// 系统托盘：插件提交自己的菜单条目，宿主维护唯一托盘图标（无条目时图标消失）。
 pub mod tray {
     /// 整发整换本插件的托盘菜单（空清单 = 收起）。宿主自有的「显示 / 退出」条目恒在末尾。
@@ -1955,7 +1955,7 @@ pub mod tray {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// 协作空间内的插件消息与团队元数据：消息按「通道」隔离，宿主把插件 id 作为通道前缀，
 /// 同空间的同插件实例互通（跨空间不达、不可抢占他人通道）；元数据是空间团队层共享键值。
 pub mod collab {
@@ -1977,7 +1977,7 @@ pub mod collab {
 上表方法的 params / result 形态（`path` 在 `fs` 面是绝对路径，在 `vault` 面是仓库相对路径）。
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 #[serde(rename_all = "camelCase")]
 pub struct PrivateDirResult {
     pub path: String,
@@ -1985,7 +1985,7 @@ pub struct PrivateDirResult {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// `path` 的口径由能力面决定：`fs` 用绝对路径，`vault` 用相对仓库根的路径。
 /// 信任模型与进程托管一致：插件本就是任意权限的用户进程，
 /// 声明式权限是透明度机制而非沙箱边界；`fs` 服务的价值在统一出口与审计事实。
@@ -1996,7 +1996,7 @@ pub struct PathParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 #[serde(rename_all = "camelCase")]
 pub struct TextContent {
     pub content: String,
@@ -2004,7 +2004,7 @@ pub struct TextContent {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 #[serde(rename_all = "camelCase")]
 pub struct BinaryContent {
     pub base64: String,
@@ -2012,7 +2012,7 @@ pub struct BinaryContent {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 #[serde(rename_all = "camelCase")]
 pub struct WriteTextParams {
     pub path: String,
@@ -2021,7 +2021,7 @@ pub struct WriteTextParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 #[serde(rename_all = "camelCase")]
 pub struct WriteBinaryParams {
     pub path: String,
@@ -2030,7 +2030,7 @@ pub struct WriteBinaryParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// [`vault::IMPORT_FILE`] 的 params：`path` 为仓库相对目标，`source` 为插件私有目录内的绝对路径。
 /// 复制语义：落库成功后源文件仍归插件，由插件自行清理。
 #[serde(rename_all = "camelCase")]
@@ -2041,7 +2041,7 @@ pub struct ImportFileParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 #[serde(rename_all = "camelCase")]
 pub struct ExistsResult {
     pub exists: bool,
@@ -2049,7 +2049,7 @@ pub struct ExistsResult {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// [`vault::IMAGE_INFO`] 的 result：图片固有像素尺寸（不随界面缩放）。
 #[serde(rename_all = "camelCase")]
 pub struct ImageInfoResult {
@@ -2059,7 +2059,7 @@ pub struct ImageInfoResult {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// [`vault::RENAME`] 的 params：`from` / `to` 均为仓库相对路径，`to` 不可已存在。
 #[serde(rename_all = "camelCase")]
 pub struct VaultRenameParams {
@@ -2069,7 +2069,7 @@ pub struct VaultRenameParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 #[serde(rename_all = "camelCase")]
 pub struct ListResult {
     pub entries: Vec<FsEntry>,
@@ -2077,7 +2077,7 @@ pub struct ListResult {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 #[serde(rename_all = "camelCase")]
 pub struct FsEntry {
     pub name: String,
@@ -2086,7 +2086,7 @@ pub struct FsEntry {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 #[serde(rename_all = "camelCase")]
 pub enum FsEntryKind {
     File,
@@ -2095,7 +2095,7 @@ pub enum FsEntryKind {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 #[serde(rename_all = "camelCase")]
 pub struct SpawnParams {
     pub program: String,
@@ -2110,7 +2110,7 @@ pub struct SpawnParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 #[serde(rename_all = "camelCase")]
 pub struct SpawnResult {
     pub pid: u32,
@@ -2118,7 +2118,7 @@ pub struct SpawnResult {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 #[serde(rename_all = "camelCase")]
 pub struct PidParams {
     pub pid: u32,
@@ -2126,7 +2126,7 @@ pub struct PidParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 #[serde(rename_all = "camelCase")]
 pub struct WriteStdinParams {
     pub pid: u32,
@@ -2135,7 +2135,7 @@ pub struct WriteStdinParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// 托管进程事件负载（[`process::HOST_EVENT`]）。形态与宿主进程托管的上报一一对应。
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum ProcessEvent {
@@ -2147,7 +2147,7 @@ pub enum ProcessEvent {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 #[serde(rename_all = "camelCase")]
 pub struct ProcessEventParams {
     pub pid: u32,
@@ -2156,7 +2156,7 @@ pub struct ProcessEventParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 #[serde(rename_all = "camelCase")]
 pub struct StateReadResult {
     /// 该插件的自持数据；从未写过时为 null。
@@ -2165,7 +2165,7 @@ pub struct StateReadResult {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 #[serde(rename_all = "camelCase")]
 pub struct StateWriteParams {
     pub json: Value,
@@ -2173,7 +2173,7 @@ pub struct StateWriteParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 #[serde(rename_all = "camelCase")]
 pub struct ShowNotificationParams {
     pub title: String,
@@ -2185,7 +2185,7 @@ pub struct ShowNotificationParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 #[serde(rename_all = "camelCase")]
 pub enum NotificationLevel {
     #[default]
@@ -2197,7 +2197,7 @@ pub enum NotificationLevel {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 #[serde(rename_all = "camelCase")]
 pub struct RegisterShortcutParams {
     /// 加速键描述（如 `Shift+Alt+E`）；与既注册项冲突时报可读错误。
@@ -2206,7 +2206,7 @@ pub struct RegisterShortcutParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 #[serde(rename_all = "camelCase")]
 pub struct AcceleratorParams {
     pub accelerator: String,
@@ -2214,7 +2214,7 @@ pub struct AcceleratorParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 #[serde(rename_all = "camelCase")]
 pub struct ShortcutTriggeredParams {
     pub accelerator: String,
@@ -2222,7 +2222,7 @@ pub struct ShortcutTriggeredParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// `shortcut.query` 的 params。
 #[serde(rename_all = "camelCase")]
 pub struct ShortcutQueryParams {
@@ -2231,7 +2231,7 @@ pub struct ShortcutQueryParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// `shortcut.query` 的 result：`available` = 可注册；`owner` = 占用方插件 id（被系统 / 其他应用占用
 /// 或无占用时为缺省——此时只有 `available` 可信，宿主无从得知占用者身份）。
 #[serde(rename_all = "camelCase")]
@@ -2243,7 +2243,7 @@ pub struct ShortcutQueryResult {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// 剪贴板写 params 与读 result 共用：一段纯文本。
 #[serde(rename_all = "camelCase")]
 pub struct TextPayload {
@@ -2252,7 +2252,7 @@ pub struct TextPayload {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// 剪贴板图片：统一编成 PNG（插件不需要自己处理系统剪贴板的像素格式）。
 #[serde(rename_all = "camelCase")]
 pub struct ClipboardImage {
@@ -2263,7 +2263,7 @@ pub struct ClipboardImage {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 #[serde(rename_all = "camelCase")]
 pub struct ClipboardImageResult {
     /// 剪贴板里没有图片时整个字段缺省（与「有图片但为空」不做区分——空图片不成立）。
@@ -2273,7 +2273,7 @@ pub struct ClipboardImageResult {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// [`clipboard::WRITE_IMAGE`] 的 params：PNG 字节的 base64。
 #[serde(rename_all = "camelCase")]
 pub struct ClipboardWriteImageParams {
@@ -2282,7 +2282,7 @@ pub struct ClipboardWriteImageParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 #[serde(rename_all = "camelCase")]
 pub struct PickFileParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2299,7 +2299,7 @@ pub struct PickFileParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 #[serde(rename_all = "camelCase")]
 pub struct FileFilter {
     pub name: String,
@@ -2309,7 +2309,7 @@ pub struct FileFilter {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 #[serde(rename_all = "camelCase")]
 pub struct PickDirectoryParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2318,7 +2318,7 @@ pub struct PickDirectoryParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 #[serde(rename_all = "camelCase")]
 pub struct PickedPath {
     /// 用户取消时该字段缺省（serde 对 null 与缺省等价处理）。
@@ -2328,7 +2328,7 @@ pub struct PickedPath {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 #[serde(rename_all = "camelCase")]
 pub struct HttpRequestParams {
     pub method: String,
@@ -2343,7 +2343,7 @@ pub struct HttpRequestParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 #[serde(rename_all = "camelCase")]
 pub struct HttpResult {
     pub status: u16,
@@ -2357,7 +2357,7 @@ pub struct HttpResult {
 领域文档实例、AI 对话与工具桥的负载形态。
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 #[serde(rename_all = "camelCase")]
 pub struct DocOpenParams {
     /// 仓库容器内的相对路径（本地仓库）或服务端内容路径（协作空间），与 vault 口径一致。
@@ -2368,7 +2368,7 @@ pub struct DocOpenParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// [`doc::HOST_CLOSE`] 的 params：实例随标签关闭 / 换文件被关闭。
 #[serde(rename_all = "camelCase")]
 pub struct DocCloseParams {
@@ -2378,13 +2378,13 @@ pub struct DocCloseParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// 单次替换文本的字节上限（超限按可读错误拒绝）。
 pub const MAX_EDITOR_TEXT_BYTES: usize = 512 * 1024;
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// [`editor::SELECTION`] 的 result：当前文档与选区。
 /// `path` 缺省 = 未打开笔记；`from` / `to` 是正文字节偏移（frontmatter 之后的部分）。
 #[serde(rename_all = "camelCase")]
@@ -2398,7 +2398,7 @@ pub struct EditorSelection {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// [`editor::REPLACE_SELECTION`] 的 params：替换文本（空串 = 删除当前选区）。
 #[serde(rename_all = "camelCase")]
 pub struct EditorReplaceParams {
@@ -2407,7 +2407,7 @@ pub struct EditorReplaceParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// [`ai::CHAT_SEND`] 的 params：`session_id` 缺省 = 新建会话；非缺省 = 在该会话续聊
 /// （会话须存在于当前仓库，否则可读拒绝）。同会话已有活跃 run 时拒绝（每会话单 run）。
 #[serde(rename_all = "camelCase")]
@@ -2434,7 +2434,7 @@ pub struct ChatSendParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// [`ai::CHAT_SEND`] 的 result：run 已就位；流式事件随后经 [`ai::HOST_CHAT_EVENT`] 流达。
 #[serde(rename_all = "camelCase")]
 pub struct ChatSendResult {
@@ -2445,7 +2445,7 @@ pub struct ChatSendResult {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// [`ai::CHAT_STOP`] 的 params。
 #[serde(rename_all = "camelCase")]
 pub struct ChatStopParams {
@@ -2454,7 +2454,7 @@ pub struct ChatStopParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// [`ai::CHAT_HISTORY`] 的 params：`session_id` 缺省 = 列会话清单；非缺省 = 读该会话消息。
 /// 单会话模式可给 `offset` / `query` 做分页与搜索（`offset` 为末尾起算的跳过条数）。
 #[serde(rename_all = "camelCase")]
@@ -2474,7 +2474,7 @@ pub struct ChatHistoryParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// [`ai::CHAT_RENAME`] 的 params。
 #[serde(rename_all = "camelCase")]
 pub struct ChatRenameParams {
@@ -2485,7 +2485,7 @@ pub struct ChatRenameParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// [`ai::CHAT_DELETE`] / [`ai::CHAT_COMPACT`] 的 params。
 #[serde(rename_all = "camelCase")]
 pub struct ChatSessionParams {
@@ -2494,7 +2494,7 @@ pub struct ChatSessionParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// 一条会话摘要（清单模式）。
 #[serde(rename_all = "camelCase")]
 pub struct ChatSessionSummary {
@@ -2507,7 +2507,7 @@ pub struct ChatSessionSummary {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// 单会话读取模式的 result：元数据 + 消息数组（消息形态与会话磁盘格式同源：
 /// `id` / `role` / `content` / `displayContent` / `steps` / 压缩注解）。
 #[serde(rename_all = "camelCase")]
@@ -2522,7 +2522,7 @@ pub struct ChatSessionWire {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// [`ai::CHAT_HISTORY`] 的 result：清单模式只填 `sessions`；单会话模式只填 `session`。
 #[serde(rename_all = "camelCase")]
 pub struct ChatHistoryResult {
@@ -2534,7 +2534,7 @@ pub struct ChatHistoryResult {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 #[serde(rename_all = "camelCase")]
 pub struct AiModel {
     /// 模型名（`ChatSendParams.model` 的取值）。
@@ -2545,7 +2545,7 @@ pub struct AiModel {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// 一个供应商及其模型（不含地址与密钥）。
 #[serde(rename_all = "camelCase")]
 pub struct AiModelProvider {
@@ -2556,7 +2556,7 @@ pub struct AiModelProvider {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// 面板当前的模型选择（供应商 id + 模型名）。
 #[serde(rename_all = "camelCase")]
 pub struct AiModelPick {
@@ -2566,7 +2566,7 @@ pub struct AiModelPick {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// [`ai::MODELS`] 的 result：`current` = 面板当前选择，未显式选择时缺省。
 #[serde(rename_all = "camelCase")]
 pub struct AiModelsResult {
@@ -2578,7 +2578,7 @@ pub struct AiModelsResult {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// 一个可用 Agent（内置 + 仓库自定义）。
 #[serde(rename_all = "camelCase")]
 pub struct AiAgent {
@@ -2590,7 +2590,7 @@ pub struct AiAgent {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// [`ai::AGENTS`] 的 result：`current` = 面板当前生效的 Agent id，无生效项时缺省。
 #[serde(rename_all = "camelCase")]
 pub struct AiAgentsResult {
@@ -2602,7 +2602,7 @@ pub struct AiAgentsResult {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// [`ai::HOST_CHAT_EVENT`] 的 params：载荷按 [`ChatEvent`] 分型。
 #[serde(rename_all = "camelCase")]
 pub struct ChatEventParams {
@@ -2613,7 +2613,7 @@ pub struct ChatEventParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// 对话事件（快照级）：整条消息替换渲染，丢拍由后拍自愈；终态只发一次。
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum ChatEvent {
@@ -2629,7 +2629,7 @@ pub enum ChatEvent {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// [`ai::REGISTER_TOOL`] 的 params：`name` 为模型可见的工具名（字母 / 数字 / `_` / `-`，
 /// 最长 64 字符），`parameters` 为 JSON Schema 对象。
 #[serde(rename_all = "camelCase")]
@@ -2641,7 +2641,7 @@ pub struct RegisterToolParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// [`ai::UNREGISTER_TOOL`] 的 params。
 #[serde(rename_all = "camelCase")]
 pub struct UnregisterToolParams {
@@ -2650,7 +2650,7 @@ pub struct UnregisterToolParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// [`ai::HOST_TOOL_CALL`] 的 params：插件须用同一 `callId` 经 [`ai::TOOL_RESULT`] 回报。
 #[serde(rename_all = "camelCase")]
 pub struct ToolCallParams {
@@ -2661,7 +2661,7 @@ pub struct ToolCallParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// [`ai::TOOL_RESULT`] 的 params：`content` 即模型可见结果文本。
 #[serde(rename_all = "camelCase")]
 pub struct ToolResultParams {
@@ -2677,7 +2677,7 @@ pub struct ToolResultParams {
 表格面读写当前打开的表格；真源在宿主会话，插件不得旁路读写 `.atb`。
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// [`table::SNAPSHOT`] 的 result：当前打开表格的只读快照。未打开表格 = `open: false`（其余字段缺省）。
 #[serde(rename_all = "camelCase", default)]
 pub struct TableSnapshot {
@@ -2702,7 +2702,7 @@ pub struct TableSnapshot {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// 表格选区形态（与宿主表格会话同构）：插件据此把视图对齐到用户正在看的行 / 格。
 #[serde(tag = "kind", rename_all = "camelCase")]
 #[serde(rename_all_fields = "camelCase")]
@@ -2721,7 +2721,7 @@ pub enum TableSelection {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// 快照里的远端协作者选区：显示名、身份色（`#rrggbb`）与范围。
 #[serde(rename_all = "camelCase")]
 pub struct TableRemoteSelection {
@@ -2732,7 +2732,7 @@ pub struct TableRemoteSelection {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// 快照里的字段：id / 名称 / 类型 / 选项 / 列宽。
 #[serde(rename_all = "camelCase")]
 pub struct TableField {
@@ -2749,7 +2749,7 @@ pub struct TableField {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// 快照里的行：单元格值按字段 id 存（缺 key = 空单元格）。
 #[serde(rename_all = "camelCase")]
 pub struct TableRow {
@@ -2764,7 +2764,7 @@ pub struct TableRow {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// [`table::UPDATE_CELL`] 的 params：`value` 为单元格新值（`null` = 清空；形态随字段类型）。
 #[serde(rename_all = "camelCase")]
 pub struct TableUpdateCellParams {
@@ -2775,7 +2775,7 @@ pub struct TableUpdateCellParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// [`table::ADD_ROW`] 的 result：新行 id（宿主分配，插件按它继续引用该行）。
 #[serde(rename_all = "camelCase")]
 pub struct TableAddRowResult {
@@ -2784,7 +2784,7 @@ pub struct TableAddRowResult {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// [`table::REMOVE_ROW`] 与 [`table::SELECT_ROW`] 的 params。
 #[serde(rename_all = "camelCase")]
 pub struct TableRowIdParams {
@@ -2793,7 +2793,7 @@ pub struct TableRowIdParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// [`table::SET_CELL_IMAGE`] 的 params：整格替换图片引用列表（`images` 为仓库相对路径，
 /// 须先经 `vault.writeBinary` 落盘）。`display` 为显示形态（如 `grid`），缺省保持宿主默认。
 #[serde(rename_all = "camelCase")]
@@ -2811,7 +2811,7 @@ pub struct TableSetCellImageParams {
 日程读写由预置插件 `com.atelyx.calendar` 以 `calendar` 服务开放，宿主不内置实现：调用方经 `service.call` 传 `service = calendar` 与下列方法名，或直接调 `calendar.<方法>`——两条路径落到同一登记。插件停用时该服务随之消失，调用方收到「服务不可用」。日程真源随容器走（本地仓库 `.atelyx/calendar.json` / 协作空间团队 meta）。
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// 日历服务（由日历插件提供）：方法名即 `calendar.<方法>`，也可经 `service.call` 以
 /// `service = calendar` 调用。日程真源随容器走（本地仓库 / 协作空间团队 meta），插件不自留副本。
 pub mod calendar {
@@ -2829,7 +2829,7 @@ pub mod calendar {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// 一条日程（`date` 为本地日期 `YYYY-MM-DD`；`color` 为 hex，缺省 = 默认强调色）。
 #[serde(rename_all = "camelCase")]
 pub struct CalendarItem {
@@ -2850,7 +2850,7 @@ pub struct CalendarItem {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// [`calendar::LIST`] 的 result：当前仓库的日程（按开始日期排序）。
 #[serde(rename_all = "camelCase")]
 pub struct CalendarListResult {
@@ -2859,7 +2859,7 @@ pub struct CalendarListResult {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// [`calendar::ADD`] 的 params：`id` / `createdAt` 由日历服务补齐；`color` 未给出即按强调色显示。
 #[serde(rename_all = "camelCase")]
 pub struct CalendarAddParams {
@@ -2874,7 +2874,7 @@ pub struct CalendarAddParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// [`calendar::UPDATE`] 的 params：只改给出的字段（`None` = 保持原值；空串清空备注）。
 #[serde(rename_all = "camelCase")]
 pub struct CalendarUpdateParams {
@@ -2891,7 +2891,7 @@ pub struct CalendarUpdateParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// [`calendar::REMOVE`] 的 params。
 #[serde(rename_all = "camelCase")]
 pub struct CalendarIdParams {
@@ -2900,7 +2900,7 @@ pub struct CalendarIdParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// 标题字符上限（超限按可读错误拒绝）。
 pub const MAX_CALENDAR_TITLE_CHARS: usize = 200;
 ```
@@ -2910,7 +2910,7 @@ pub const MAX_CALENDAR_TITLE_CHARS: usize = 200;
 按天聚合的文件活动计数与当日版本记录；取自当前仓库（本地历史侧文件 / 空间聚合），按本地日界归日。
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// 一天的活动计数（`day` = 自纪元天数）。
 #[serde(rename_all = "camelCase")]
 pub struct DayActivity {
@@ -2920,7 +2920,7 @@ pub struct DayActivity {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// [`history::ACTIVITY`] 的 result：按天升序的活动计数。
 #[serde(rename_all = "camelCase")]
 pub struct HistoryActivityResult {
@@ -2929,7 +2929,7 @@ pub struct HistoryActivityResult {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// [`history::DAY`] 的 params：`day` 为本地日期 `YYYY-MM-DD`。
 #[serde(rename_all = "camelCase")]
 pub struct HistoryDayParams {
@@ -2938,7 +2938,7 @@ pub struct HistoryDayParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// 一条当日版本记录：`kind` / `action` 取宿主历史侧文件的取值域（`note` / `canvas` / `table`、
 /// `edit` / `restore`）；`file` 为仓库相对路径，`ts` 为毫秒时间戳。
 #[serde(rename_all = "camelCase")]
@@ -2954,7 +2954,7 @@ pub struct HistoryDayEntry {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// [`history::DAY`] 的 result：按时间新→旧排列。
 #[serde(rename_all = "camelCase")]
 pub struct HistoryDayResult {
@@ -2963,13 +2963,13 @@ pub struct HistoryDayResult {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// 历史弹层支持的文件类型。
 pub const HISTORY_KINDS: &[&str] = &["note", "canvas", "table"];
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// [`history::OPEN`] 的 params：打开某文件的宿主历史弹层。
 #[serde(rename_all = "camelCase")]
 pub struct HistoryOpenParams {
@@ -2983,7 +2983,7 @@ pub struct HistoryOpenParams {
 系统托盘条目与空间内插件间消息的负载形态；两类能力的可用性都随宿主平台与容器类型而变。
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// 托盘菜单条目：`id` 插件内唯一、非空，用户点击时原样随 [`tray::HOST_CLICK`] 回发。
 #[serde(rename_all = "camelCase")]
 pub struct TrayItemSpec {
@@ -2997,7 +2997,7 @@ pub struct TrayItemSpec {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// [`tray::SET_ITEMS`] 的 params：整发整换本插件的托盘菜单，空清单 = 收起。
 #[serde(rename_all = "camelCase")]
 pub struct SetTrayItemsParams {
@@ -3006,7 +3006,7 @@ pub struct SetTrayItemsParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// [`tray::HOST_CLICK`] 的 params：用户点击的条目 id。
 #[serde(rename_all = "camelCase")]
 pub struct TrayClickParams {
@@ -3015,7 +3015,7 @@ pub struct TrayClickParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// 同空间的一个在场成员。
 #[serde(rename_all = "camelCase")]
 pub struct CollabPeer {
@@ -3026,7 +3026,7 @@ pub struct CollabPeer {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// [`collab::PEERS`] 的 result：`connected` = 当前空间连接可用；未连接时 `selfId` 与 `peers` 缺省。
 /// `peers` 不含自己，宿主已剔除。
 #[serde(rename_all = "camelCase")]
@@ -3040,7 +3040,7 @@ pub struct CollabPeersResult {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// 协作消息投递语义。`reliable` = 广播帧按房间序号缓存、重连后可补投（内容类增量）；
 /// `ephemeral` = 不缓存、不补投、不占序号（光标 / 选中这类随时可被新状态覆盖的在场数据）。
 #[serde(rename_all = "camelCase")]
@@ -3052,7 +3052,7 @@ pub enum CollabSendQos {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// [`collab::SEND`] 的 params：`channel` 为插件自定义的通道名（非空、不含 `:`、≤ 64 字符），
 /// 宿主在投递时加插件前缀；`payload` 任意 JSON。`targetPeerId` 取 [`CollabPeersResult`] 里的
 /// `peerId` 原值，缺省 = 广播给全部对端。
@@ -3069,7 +3069,7 @@ pub struct CollabSendParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// [`collab::SEND`] 的 result：`queued` = 消息已交本机空间连接发出。
 /// 发出不等于送达：广播不确认，单播目标离线时被服务端丢弃，`queued` 仍为 true；
 /// 未连接空间时 `queued` = false。
@@ -3080,7 +3080,7 @@ pub struct CollabSendResult {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// [`collab::HOST_MESSAGE`] 的 params：`channel` 为发送方给的通道名（不含插件前缀），
 /// `peerId` / `peerName` 标识发送方。
 #[serde(rename_all = "camelCase")]
@@ -3094,19 +3094,19 @@ pub struct CollabMessageParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// 团队元数据键的字节上限。
 pub const MAX_META_KEY_BYTES: usize = 200;
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// 团队元数据单键值的字节上限（与服务端默认单键上限同口径）。
 pub const MAX_META_VALUE_BYTES: usize = 10 * 1024 * 1024;
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// [`collab::META_GET`] 的 params：`key` 缺省 = 读全部键。
 #[serde(rename_all = "camelCase")]
 pub struct CollabMetaGetParams {
@@ -3116,7 +3116,7 @@ pub struct CollabMetaGetParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// 团队元数据快照：键 → UTF-8 文本值（键按字典序，读全量时输出稳定）。
 #[serde(rename_all = "camelCase")]
 pub struct CollabMetaResult {
@@ -3125,7 +3125,7 @@ pub struct CollabMetaResult {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// 一次按键写入。
 #[serde(rename_all = "camelCase")]
 pub struct CollabMetaEntry {
@@ -3135,7 +3135,7 @@ pub struct CollabMetaEntry {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/method.rs
+// crates/plugin-protocol/src/method.rs
 /// [`collab::META_PATCH`] 的 params：只写给出的键，未列出的键保持原值。
 #[serde(rename_all = "camelCase")]
 pub struct CollabMetaPatchParams {
@@ -3148,18 +3148,18 @@ pub struct CollabMetaPatchParams {
 插件经 `event.subscribe` 声明订阅的事件名与载荷；未上表的名字宿主拒绝订阅。
 
 ```rust
-// atelyx-plugin-protocol/src/event.rs
+// crates/plugin-protocol/src/event.rs
 /// 方法常量：插件订阅请求与宿主广播通知。
 pub const SUBSCRIBE: &str = "event.subscribe";
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/event.rs
+// crates/plugin-protocol/src/event.rs
 pub const HOST_PUBLISH: &str = "host:event";
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/event.rs
+// crates/plugin-protocol/src/event.rs
 /// 事件名常量。订阅不存在的名字宿主回 `RpcError::FAILED`。
 pub mod name {
     /// 当前仓库容器切换（本地仓库 ↔ 协作空间，或换仓库）。payload 见 [`VaultSwitchPayload`]。
@@ -3183,7 +3183,7 @@ pub mod name {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/event.rs
+// crates/plugin-protocol/src/event.rs
 /// [`name::VAULT_SWITCH`] 的 payload（`kind` 与字段名均 camelCase，与协议其余类型同一口径）。
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum VaultSwitchPayload {
@@ -3198,7 +3198,7 @@ pub enum VaultSwitchPayload {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/event.rs
+// crates/plugin-protocol/src/event.rs
 /// [`name::TABLE_CHANGED`] 的 payload：当前打开表格的仓库相对路径（无打开表格 = 缺省）。
 #[serde(rename_all = "camelCase", default)]
 pub struct TableChangedPayload {
@@ -3208,7 +3208,7 @@ pub struct TableChangedPayload {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/event.rs
+// crates/plugin-protocol/src/event.rs
 /// [`name::TABLE_SELECTION_CHANGED`] 的 payload：当前表格路径 + 本端与远端选区。
 /// 无打开表格 = 全缺省。
 #[serde(rename_all = "camelCase", default)]
@@ -3224,7 +3224,7 @@ pub struct TableSelectionChangedPayload {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/event.rs
+// crates/plugin-protocol/src/event.rs
 /// [`name::AI_CHAT_CHANGED`] 的 payload。
 #[serde(rename_all = "camelCase")]
 pub struct ChatChangedPayload {
@@ -3234,7 +3234,7 @@ pub struct ChatChangedPayload {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/event.rs
+// crates/plugin-protocol/src/event.rs
 /// 会话变更种类：创建 / 消息列表变化 / 元数据变化 / 删除。
 #[serde(rename_all = "camelCase")]
 pub enum ChatChangeKind {
@@ -3246,7 +3246,7 @@ pub enum ChatChangeKind {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/event.rs
+// crates/plugin-protocol/src/event.rs
 /// [`name::VAULT_FILE_CHANGED`] 的 payload：仓库相对路径 + 变更种类（改名另带旧路径）。
 #[serde(rename_all = "camelCase")]
 pub struct FileChangedPayload {
@@ -3259,7 +3259,7 @@ pub struct FileChangedPayload {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/event.rs
+// crates/plugin-protocol/src/event.rs
 /// 文件变更种类：新建 / 内容写入 / 删除 / 改名或移动。
 #[serde(rename_all = "camelCase")]
 pub enum FileChangeKind {
@@ -3271,7 +3271,7 @@ pub enum FileChangeKind {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/event.rs
+// crates/plugin-protocol/src/event.rs
 /// [`name::SPACE_META_CHANGED`] 的 payload：变更的键名（团队元数据单键）。
 #[serde(rename_all = "camelCase")]
 pub struct SpaceMetaChangedPayload {
@@ -3280,7 +3280,7 @@ pub struct SpaceMetaChangedPayload {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/event.rs
+// crates/plugin-protocol/src/event.rs
 /// 宿主广播的通知 params（[`HOST_PUBLISH`]）。
 #[serde(rename_all = "camelCase")]
 pub struct PublishParams {
@@ -3291,7 +3291,7 @@ pub struct PublishParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/event.rs
+// crates/plugin-protocol/src/event.rs
 /// 插件订阅请求（[`SUBSCRIBE`]）的 params 与结果。
 #[serde(rename_all = "camelCase")]
 pub struct SubscribeParams {
@@ -3300,7 +3300,7 @@ pub struct SubscribeParams {
 ```
 
 ```rust
-// atelyx-plugin-protocol/src/event.rs
+// crates/plugin-protocol/src/event.rs
 #[serde(rename_all = "camelCase")]
 pub struct SubscribeResult {
     pub subscribed: bool,

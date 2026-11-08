@@ -9,7 +9,7 @@ use std::fs;
 use std::path::PathBuf;
 
 fn fixture_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fixtures/frontmatter/parse.json")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/frontmatter/parse.json")
 }
 
 #[test]

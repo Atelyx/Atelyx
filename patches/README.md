@@ -33,7 +33,7 @@ iced 依赖栈拉到含上游 #4341 的 winit 发布版后，删除本补丁、�
   会走错分支把子树数组与 key 数组错位对齐——同 key 控件种类在整树重发间变化即
   downcast panic。修法：复用回调改走 `Tree::diff`（tag 不同整树重建），与上游
   iced-rs/iced#3488 的修法一致（未随任何 0.14.x 发布）。
-  对账语义回归测试：`atelyx-app/tests/keyed_column_diff.rs`。
+  对账语义回归测试：`apps/atelyx/tests/keyed_column_diff.rs`。
 - `text_input.rs` / `text_editor.rs`：IME 组合中的回车是确认候选（`KeyPressed` 先于
   `Ime::Commit` 送达），原样触发 `on_submit` / 键位绑定会把未上屏的组合串当一次提交。
   组合期（preedit 挂起）的 Enter 不进提交路径，文本由随后的 `Ime::Commit` 上屏。

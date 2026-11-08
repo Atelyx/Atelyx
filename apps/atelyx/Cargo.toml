@@ -1,5 +1,5 @@
 [package]
-name = "atelyx-app"
+name = "atelyx"
 version = "0.6.5"
 edition = "2021"
 
@@ -10,9 +10,9 @@ path = "src/main.rs"
 
 [dependencies]
 # 核心能力（仓库存储/原子写/目录过滤）：与壳共享同一实现
-atelyx-core = { path = "../atelyx-core" }
+atelyx-core = { path = "../../crates/core" }
 # 界面组件库：调色板 / 字体 / 图标 / 基元控件 / 弹层 / 滚动容器
-atelyx-ui = { path = "../atelyx-ui" }
+atelyx-ui = { path = "../../crates/ui" }
 # AI 对话：会话 id / 消息 id 生成（与 core 写链同版本）
 uuid = { version = "1", features = ["v4"] }
 # 最近打开条目（ui-state 透传字段）的序列化派生
@@ -50,4 +50,4 @@ winresource = "0.1"
 
 [dev-dependencies]
 # 临时仓库夹具（与 core 测试同源；仅测试构建启用）
-atelyx-core = { path = "../atelyx-core", features = ["test-support"] }
+atelyx-core = { path = "../../crates/core", features = ["test-support"] }

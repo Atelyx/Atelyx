@@ -4,9 +4,9 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         // 声明任一路径后 cargo 不再按包内任意文件变更重跑本脚本，版本号与图标都要列全
         println!("cargo:rerun-if-changed=Cargo.toml");
-        println!("cargo:rerun-if-changed=assets/icons/icon.ico");
+        println!("cargo:rerun-if-changed=../../assets/icons/icon.ico");
         winresource::WindowsResource::new()
-            .set_icon("assets/icons/icon.ico")
+            .set_icon("../../assets/icons/icon.ico")
             .compile()
             .expect("exe 图标资源编译失败（需要 Windows SDK 的 rc.exe）");
     }

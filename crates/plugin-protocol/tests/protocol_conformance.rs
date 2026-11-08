@@ -28,7 +28,7 @@ use std::fs;
 use std::path::PathBuf;
 
 fn fixture_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fixtures/plugin-protocol/protocol.json")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/plugin-protocol/protocol.json")
 }
 
 fn load() -> Value {
