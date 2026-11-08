@@ -292,20 +292,10 @@ impl Context {
     }
 
     /// 拖动承载某个面的窗口：自绘标题栏按下时调用，宿主接管拖动手势（插件不必自己算窗口坐标）。
-    /// 面先按接管面 / 插件窗口解析，解析不到即拖动当前聚焦窗口。
+    /// 面先按插件窗口解析，解析不到即拖动当前聚焦窗口。
     pub async fn begin_window_drag(&self, surface_id: &str) -> Result<(), RpcError> {
         let params = crate::protocol::method::WindowDragParams { surface_id: surface_id.into() };
         self.call_unit(method::window::BEGIN_DRAG, &params).await
-    }
-
-    /// 请求把本插件的一个贡献面接管到当前聚焦窗口（整页 / 全接管）。`surface_id` 须为已注册的
-    /// 贡献 id；退出接管入口由宿主常驻提供，接管期间布局真源不动，退出即恢复原布局。
-    pub async fn takeover(&self, scope: TakeoverScope, surface_id: &str) -> Result<(), RpcError> {
-        self.call_unit(
-            method::view::TAKEOVER,
-            &TakeoverParams { scope, surface_id: surface_id.into() },
-        )
-        .await
     }
 
     /// 打开一个独立窗口承载自己的整面帧：`id` 插件内唯一且不得含 `:`，同时是该窗口面的
@@ -462,13 +452,13 @@ impl Context {
 
     // ---------- 能力总线（服务目录 / 跨插件提供者） ----------
 
-    /// 枚举在册服务：服务名、活动提供者的版本与方法名、是否可替换、其余候选。
+    /// 枚举在册服务：服务名、提供者的版本与方法名。
     pub async fn service_list(&self) -> Result<service::ListResult, RpcError> {
         self.call_null(service::method::LIST).await
     }
 
     /// 按「服务 + 方法」调用：`params` 就是目标方法自己的入参，应答就是该方法的结果。
-    /// 与直接调用 `服务.方法` 等价——活动提供者是内置实现时两者落到同一实现。
+    /// 与直接调用 `服务.方法` 等价——两者落到同一提供者。
     pub async fn service_call(
         &self,
         service_name: &str,
@@ -488,8 +478,7 @@ impl Context {
     /// 声明本插件提供某个服务的若干方法（方法名不含服务前缀）——收到
     /// [`crate::PluginHandler::on_service_call`] 后按方法名执行。
     ///
-    /// 登记不等于生效：同一服务同时只有一个活动提供者，已有内置实现的服务只成为候选，
-    /// 是否顶替由用户在设置页决定；目录里没有的服务首个提供者即活动提供者。
+    /// 只能登记**新**服务名：内置服务名归宿主，已被其他插件占用的名字都以可读错误拒收。
     pub async fn register_service(&self, service_name: &str, methods: &[&str]) -> Result<(), RpcError> {
         let params = service::RegisterParams {
             service: service_name.into(),
@@ -499,7 +488,7 @@ impl Context {
         self.call_unit(service::method::REGISTER, &params).await
     }
 
-    /// 撤销本插件对某个服务的登记（活动提供者撤销即回落内置实现）。
+    /// 撤销本插件对某个服务的登记（该服务随之离开能力总线）。
     pub async fn unregister_service(&self, service_name: &str) -> Result<(), RpcError> {
         let params = service::UnregisterParams { service: service_name.into() };
         self.call_unit(service::method::UNREGISTER, &params).await

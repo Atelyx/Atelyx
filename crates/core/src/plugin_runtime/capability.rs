@@ -1,4 +1,4 @@
-//! 能力面的归类与 `state` 自持数据实现：方法 → 权限映射（公示与审计用），以及自持数据的读写。
+//! 能力面的归类与 `state` 自持数据实现：方法 → 权限键映射（公示与审计用），以及自持数据的读写。
 //! 其余能力面的方法分派在 `instance`。
 //!
 //! 调用本身不设闸门（信任模型见协议 `PathParams` 的说明：插件本就是任意权限的用户进程，
@@ -7,49 +7,49 @@
 
 use std::path::Path;
 
-use atelyx_plugin_protocol::manifest::Permission;
+use atelyx_plugin_protocol::manifest::PermissionKey;
 use atelyx_plugin_protocol::method;
 use atelyx_plugin_protocol::service;
 use serde_json::Value;
 
 /// 方法所属能力面。`None` = 不占权限声明的方法：运行时时序方法（握手 / 事件订阅 / 视图提交 /
-/// 贡献声明 / 接管请求）只编排插件自己的界面与声明，不触碰宿主资源；`markdown.parse` 是纯文本
+/// 贡献声明）只编排插件自己的界面与声明，不触碰宿主资源；`markdown.parse` 是纯文本
 /// 变换；能力总线自身的入口（`service.*`）也不属任何能力类——被调用的方法按其自身归类审计。
 /// OS 资源消耗型方法（起进程 / 开窗等）一律占权限。
-pub(crate) fn permission_for(name: &str) -> Option<Permission> {
-    use Permission::*;
+pub(crate) fn permission_for(name: &str) -> Option<PermissionKey> {
     use method::{
         ai, clipboard, collab, dialog, editor, fs, history, http, notification, process, shortcut,
         state, table, tray, vault, window,
     };
+    use PermissionKey::*;
     match name {
         fs::PRIVATE_DIR | fs::READ_TEXT | fs::WRITE_TEXT | fs::READ_BINARY | fs::WRITE_BINARY
-        | fs::REMOVE | fs::EXISTS | fs::LIST => Some(Fs),
+        | fs::REMOVE | fs::EXISTS | fs::LIST => Some(Files),
         vault::READ_TEXT | vault::WRITE_TEXT | vault::READ_BINARY | vault::WRITE_BINARY
         | vault::IMPORT_FILE | vault::IMAGE_INFO | vault::LIST | vault::EXISTS | vault::REMOVE
-        | vault::RENAME => Some(Vault),
+        | vault::RENAME => Some(Files),
         table::SNAPSHOT | table::UPDATE_CELL | table::ADD_ROW | table::REMOVE_ROW
-        | table::SELECT_ROW | table::SET_CELL_IMAGE => Some(Table),
+        | table::SELECT_ROW | table::SET_CELL_IMAGE => Some(Files),
         process::SPAWN | process::WRITE_STDIN | process::CLOSE_STDIN | process::KILL => Some(Process),
         state::READ | state::WRITE => Some(State),
         notification::SHOW => Some(Notification),
         tray::SET_ITEMS => Some(Tray),
-        shortcut::REGISTER | shortcut::UNREGISTER | shortcut::QUERY => Some(Shortcuts),
+        shortcut::REGISTER | shortcut::UNREGISTER | shortcut::QUERY => Some(Shortcut),
         clipboard::WRITE_TEXT | clipboard::READ_TEXT | clipboard::READ_IMAGE
         | clipboard::WRITE_IMAGE => Some(Clipboard),
         dialog::PICK_FILE | dialog::PICK_DIRECTORY => Some(Dialog),
-        http::REQUEST => Some(Http),
+        http::REQUEST => Some(Network),
         collab::PEERS | collab::SEND | collab::META_GET | collab::META_PATCH => Some(Collab),
         // 读写当前笔记的选区即读写用户正文，按仓库内容权限归类
-        editor::SELECTION | editor::REPLACE_SELECTION => Some(Vault),
+        editor::SELECTION | editor::REPLACE_SELECTION => Some(Files),
         // 活动统计取自当前仓库内容，同样按仓库内容权限归类
-        history::ACTIVITY | history::DAY | history::OPEN => Some(Vault),
+        history::ACTIVITY | history::DAY | history::OPEN => Some(Files),
         window::OPEN | window::CLOSE | window::UPDATE | window::SHOW | window::BEGIN_DRAG
         | window::MINIMIZE | window::TOGGLE_MAXIMIZE => Some(Window),
         ai::CHAT_SEND | ai::CHAT_STOP | ai::CHAT_HISTORY | ai::CHAT_RENAME | ai::CHAT_DELETE
         | ai::CHAT_COMPACT | ai::MODELS | ai::AGENTS | ai::REGISTER_TOOL | ai::UNREGISTER_TOOL
         | ai::TOOL_RESULT => Some(Ai),
-        // 解析只读插件递来的文本，不触碰宿主资源；外部提供者顶替后同理
+        // 解析只读插件递来的文本，不触碰宿主资源
         method::markdown::PARSE => None,
         // 能力总线入口：实际权限由目标方法自己承担
         service::method::REGISTER
@@ -95,55 +95,33 @@ mod tests {
 
     #[test]
     fn permission_map_covers_capability_faces() {
-        assert_eq!(permission_for(method::fs::READ_TEXT), Some(Permission::Fs));
-        assert_eq!(permission_for(method::process::SPAWN), Some(Permission::Process));
-        assert_eq!(permission_for(method::state::WRITE), Some(Permission::State));
-        assert_eq!(permission_for(method::notification::SHOW), Some(Permission::Notification));
-        assert_eq!(permission_for(method::shortcut::REGISTER), Some(Permission::Shortcuts));
-        assert_eq!(permission_for(method::clipboard::READ_TEXT), Some(Permission::Clipboard));
-        assert_eq!(permission_for(method::clipboard::READ_IMAGE), Some(Permission::Clipboard));
-        assert_eq!(permission_for(method::vault::WRITE_TEXT), Some(Permission::Vault));
-        assert_eq!(permission_for(method::vault::READ_BINARY), Some(Permission::Vault));
-        assert_eq!(permission_for(method::vault::WRITE_BINARY), Some(Permission::Vault));
-        assert_eq!(permission_for(method::vault::REMOVE), Some(Permission::Vault));
-        assert_eq!(permission_for(method::vault::RENAME), Some(Permission::Vault));
-        assert_eq!(permission_for(method::clipboard::WRITE_IMAGE), Some(Permission::Clipboard));
-        assert_eq!(permission_for(method::ai::MODELS), Some(Permission::Ai));
-        assert_eq!(permission_for(method::ai::AGENTS), Some(Permission::Ai));
-        assert_eq!(permission_for(method::table::SNAPSHOT), Some(Permission::Table));
-        assert_eq!(permission_for(method::table::UPDATE_CELL), Some(Permission::Table));
-        assert_eq!(permission_for(method::table::ADD_ROW), Some(Permission::Table));
-        assert_eq!(permission_for(method::table::REMOVE_ROW), Some(Permission::Table));
-        assert_eq!(permission_for(method::table::SELECT_ROW), Some(Permission::Table));
-        assert_eq!(permission_for(method::http::REQUEST), Some(Permission::Http));
-        assert_eq!(permission_for(method::ai::CHAT_SEND), Some(Permission::Ai));
-        assert_eq!(permission_for(method::ai::CHAT_STOP), Some(Permission::Ai));
-        assert_eq!(permission_for(method::ai::CHAT_HISTORY), Some(Permission::Ai));
-        assert_eq!(permission_for(method::ai::REGISTER_TOOL), Some(Permission::Ai));
-        assert_eq!(permission_for(method::ai::TOOL_RESULT), Some(Permission::Ai));
+        use PermissionKey::*;
+        for (name, expected) in [
+            (method::fs::READ_TEXT, Files),
+            (method::vault::WRITE_TEXT, Files),
+            (method::table::SNAPSHOT, Files),
+            (method::editor::SELECTION, Files),
+            (method::history::ACTIVITY, Files),
+            (method::process::SPAWN, Process),
+            (method::state::WRITE, State),
+            (method::notification::SHOW, Notification),
+            (method::shortcut::REGISTER, Shortcut),
+            (method::clipboard::READ_IMAGE, Clipboard),
+            (method::dialog::PICK_FILE, Dialog),
+            (method::http::REQUEST, Network),
+            (method::collab::SEND, Collab),
+            (method::window::OPEN, Window),
+            (method::tray::SET_ITEMS, Tray),
+            (method::ai::CHAT_SEND, Ai),
+            (method::ai::TOOL_RESULT, Ai),
+        ] {
+            assert_eq!(permission_for(name), Some(expected), "{name}");
+        }
         // 运行时时序方法不占权限
         assert_eq!(permission_for("initialize"), None);
         assert_eq!(permission_for(method::view::REGISTER), None);
         assert_eq!(permission_for(method::frame::SUBMIT_SHARED), None, "整面帧是界面通道，不占权限声明");
         assert_eq!(permission_for(method::frame::REGION), None, "帧区域扩容是界面通道，不占权限声明");
-        assert_eq!(permission_for(method::window::UPDATE), Some(Permission::Window));
-        assert_eq!(permission_for(method::window::SHOW), Some(Permission::Window));
-        assert_eq!(permission_for(method::shortcut::QUERY), Some(Permission::Shortcuts));
-        assert_eq!(permission_for(method::table::SET_CELL_IMAGE), Some(Permission::Table));
-        assert_eq!(permission_for(method::ai::CHAT_RENAME), Some(Permission::Ai));
-        assert_eq!(permission_for(method::ai::CHAT_DELETE), Some(Permission::Ai));
-        assert_eq!(permission_for(method::ai::CHAT_COMPACT), Some(Permission::Ai));
-        assert_eq!(permission_for(method::vault::IMAGE_INFO), Some(Permission::Vault));
-        assert_eq!(permission_for(method::tray::SET_ITEMS), Some(Permission::Tray));
-        assert_eq!(permission_for(method::collab::PEERS), Some(Permission::Collab));
-        assert_eq!(permission_for(method::collab::SEND), Some(Permission::Collab));
-        assert_eq!(permission_for(method::collab::META_GET), Some(Permission::Collab));
-        assert_eq!(permission_for(method::collab::META_PATCH), Some(Permission::Collab));
-        assert_eq!(permission_for(method::editor::SELECTION), Some(Permission::Vault));
-        assert_eq!(permission_for(method::editor::REPLACE_SELECTION), Some(Permission::Vault));
-        assert_eq!(permission_for(method::history::ACTIVITY), Some(Permission::Vault));
-        assert_eq!(permission_for(method::history::DAY), Some(Permission::Vault));
-        assert_eq!(permission_for(method::history::OPEN), Some(Permission::Vault));
         // 纯文本变换与能力总线入口不占权限类（调用照常执行，审计按各自归类记录）
         assert_eq!(permission_for(method::markdown::PARSE), None);
         for name in [

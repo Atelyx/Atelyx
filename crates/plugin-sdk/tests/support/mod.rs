@@ -38,19 +38,36 @@ pub fn example_library(name: &str) -> PathBuf {
 }
 
 /// 把一个 example 动态库铺成可安装的插件目录：写清单 + 拷入口。
-/// `permissions` 是清单里的能力声明，`extra` 追加在对象末尾（如 `,"keepMountedOnVaultSwitch":true`）。
+/// `permissions` 是清单里的权限键，`extra` 追加在清单正文之后（如 `singleton = true`）。
 pub fn stage(dir: &Path, id: &str, example: &str, permissions: &[&str], extra: &str) {
     std::fs::create_dir_all(dir).unwrap();
     let declared = permissions
         .iter()
-        .map(|name| format!("\"{name}\""))
-        .collect::<Vec<_>>()
-        .join(",");
+        .map(|name| format!("{name} = \"测试\"\n"))
+        .collect::<String>();
+    let table = if declared.is_empty() {
+        String::new()
+    } else {
+        format!("\n[permissions]\n{declared}")
+    };
     std::fs::write(
         dir.join(MANIFEST_FILE),
         format!(
-            r#"{{"id":"{id}","name":"Fixture","version":"1.0.0","apiVersion":1,
-                "entry":{{"windows":"{entry}","linux":"{entry}"}},"permissions":[{declared}]{extra}}}"#,
+            r#"schema_version = "1.0.0"
+id = "{id}"
+name = "Fixture"
+tagline = "测试夹具"
+version = "1.0.0"
+type = "add-on"
+maintainer = "Test"
+license = ["SPDX:Apache-2.0"]
+host_version_min = "0.1.0"
+api_version = 1
+{extra}{table}
+[entry]
+windows = "{entry}"
+linux = "{entry}"
+"#,
             entry = entry_name()
         ),
     )

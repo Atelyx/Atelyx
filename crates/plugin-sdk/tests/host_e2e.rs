@@ -50,7 +50,7 @@ fn install_ready_stub(keep_mounted: bool) -> (TempDir, std::sync::Arc<PluginRunt
     let root = tmp.join("plugins");
     let runtime = PluginRuntime::new(root.clone());
     let src = tmp.join("src");
-    let extra = if keep_mounted { r#","keepMountedOnVaultSwitch":true"# } else { "" };
+    let extra = if keep_mounted { "keep_mounted_on_vault_switch = true\n" } else { "" };
     stage(&src, "com.atelyx.stub", "stub", &["state"], extra);
     let id = runtime.install_dir(&src).expect("安装 stub 应成功").id;
     runtime.set_enabled(&id, true).expect("启用应成功");

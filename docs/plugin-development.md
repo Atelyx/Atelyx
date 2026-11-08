@@ -10,7 +10,7 @@ Atelyx 的插件是**原生动态库**（`cdylib`）：宿主按 C ABI 把它装
 
 | 事实 | 含义 |
 | --- | --- |
-| 插件 = 原生动态库（`cdylib`） | `plugin.json` 的 `entry.windows` / `entry.linux` 指向该平台的库文件；宿主装载它并调 `atelyx_plugin_create` |
+| 插件 = 原生动态库（`cdylib`） | `atelyx_manifest.toml` 的 `[entry]` 指向该平台的库文件；宿主装载它并调 `atelyx_plugin_create` |
 | 通道 = JSON-RPC 2.0（NDJSON） | 经 C ABI 函数表双向投递；**信封里只能有协议内容**，日志走 `HostApi.log` 回调与 `eprintln!` |
 | 界面 = 一整面帧 | 插件提交整面帧（绘制指令 + 命中区 + 输入声明）：帧内容写进握手时拿到的共享内存槽位，信封只带槽位坐标；宿主按几何绘制并把原始输入经 `host:frame.input` 回发，插件进程里没有宿主 UI 代码，控件只存在于 SDK 控件层 |
 | 能力 = 服务 + 方法 | 内置能力（`vault` / `ai` / `fs` …）与插件提供的服务走同一条总线，方法名即 `服务.方法`（见 7） |
@@ -37,29 +37,42 @@ atelyx-plugin-sdk = { git = "https://github.com/Atelyx/Atelyx" }
 ```
 echo-panel/
 ├── Cargo.toml
-├── plugin.json
+├── atelyx_manifest.toml
 └── src/lib.rs        # cdylib 入口：导出 create / send / destroy
 ```
 
-### 3.2 `plugin.json`
+### 3.2 `atelyx_manifest.toml`
 
-```json
-{
-  "id": "com.example.echo",
-  "name": "Echo",
-  "version": "0.1.0",
-  "apiVersion": 1,
-  "entry": { "windows": "echo_panel.dll", "linux": "libecho_panel.so" },
-  "permissions": ["state", "notification"]
-}
+```toml
+schema_version = "1.0.0"
+id = "com.example.echo"
+name = "Echo"
+tagline = "在工作台里做一件事"
+version = "0.1.0"
+type = "add-on"
+maintainer = "Your Name <dev@example.com>"
+license = ["SPDX:Apache-2.0"]
+host_version_min = "0.6.0"
+api_version = 1
+
+[permissions]
+state = "记住面板里的设置"
+
+[entry]
+windows = "echo_panel.dll"
+linux = "libecho_panel.so"
 ```
 
-字段含义与取值见 [API 参考 · 协议版本与清单](plugin-api.md#1-协议版本与清单)。四条硬约束不在类型里，写在这里：
+字段含义与取值见 [API 参考 · 协议版本与清单](plugin-api.md#1-协议版本与清单)。硬约束不在类型里，写在这里：
 
 - `id` 是反向域名（至少两段，每段字母 / 数字 / `-`），发布后不可变：它同时是安装目录名、数据命名空间与市场条目 id；
-- `apiVersion` 必须与宿主相等（当前 `1`），不等即拒绝装载，不做兼容推断；
+- `schema_version` 是**清单格式版本**，只认 `"1.0.0"`；字段增删随它升版，旧格式不做兼容读取；
+- `api_version` 必须与宿主相等（当前 `1`），不等即拒绝装载，不做兼容推断；
+- `host_version_min` 必填、`host_version_max` 可省（缺省不限），宿主版本落在区间外即拒绝装载；
 - `entry` 是相对插件目录的动态库路径，当前平台那一项必须存在且不得越出目录；
-- `version` 是市场更新比对的版本号（与 Release tag 比对，只做升级方向）。
+- `platforms` 可省（缺省 = 全平台），取值 `windows-x64` / `linux-x64`；
+- `version` 是市场更新比对的版本号（与 Release tag 比对，只做升级方向）；
+- 未知键**拒收**：拼错的键会静默丢掉声明，宁可装载时报错。
 
 **宿主保留的插件目录顶层名**：`data/`（你的私有数据）、`logs/`（宿主写日志）、`previous/`（上一代内容）、`enabled`（启用标记）、`source`（本地目录安装的来源记录）。插件内容里出现这些名字会被拒绝安装。
 
@@ -77,7 +90,7 @@ edition = "2021"
 [workspace]
 
 [lib]
-name = "echo_panel"          # 与 plugin.json 的 entry 同名
+name = "echo_panel"          # 与清单 [entry] 指向的文件同名
 path = "src/lib.rs"
 crate-type = ["cdylib"]      # 插件以动态库交付
 
@@ -429,30 +442,55 @@ Markdown 不要自己解析：`ui.markdown(text)` 首次出现时向宿主发一
 
 ### 5.6 自绘标题栏与无边框窗口
 
-全接管面与插件窗口可以自绘标题栏。拖动不要自己算窗口坐标，把按下交给宿主：
+插件窗口可以自绘标题栏。拖动不要自己算窗口坐标，把按下交给宿主：
 
 ```rust
 // 标题栏的命中区收到 pointerDown 后
 ctx.begin_window_drag("main").await?;   // 宿主接管拖动手势
 ```
 
-面在插件窗口 / 接管面里就拖那个窗口；解析不到时拖当前聚焦窗口。缩放沿用窗口边缘，关闭走宿主关窗链。插件窗口用 `window.open` 开且 `decorations: false` 时，缺省由宿主补一条标题栏（标题 / 拖动 / 最小化 / 最大化 / 关闭）；再给 `titlebar: Some(false)` 就整面归插件，自绘标题栏里的最小化 / 最大化按钮调 `ctx.window_minimize(id)` / `ctx.window_toggle_maximize(id)`。
+面在插件窗口里就拖那个窗口；解析不到时拖当前聚焦窗口。缩放沿用窗口边缘，关闭走宿主关窗链。插件窗口用 `window.open` 开且 `decorations: false` 时，缺省由宿主补一条标题栏（标题 / 拖动 / 最小化 / 最大化 / 关闭）；再给 `titlebar: Some(false)` 就整面归插件，自绘标题栏里的最小化 / 最大化按钮调 `ctx.window_minimize(id)` / `ctx.window_toggle_maximize(id)`。
 
 ### 5.7 面外层内边距
 
-面板、表格视图与设置页这三个面，宿主默认把帧铺满内容区（贴边）；接管面与插件窗口同样贴边，且不受 `padding` 影响。需要留白时在注册这三个面的贡献时给 `padding`：数字 = 四边等距，也可按轴 `{ "horizontal": 16, "vertical": 8 }` 或按边 `{ "top": 4, "right": 0, "bottom": 4, "left": 0 }` 声明，缺省 / `0` 即贴边。
+面板、表格视图与设置页这三个面，宿主默认把帧铺满内容区（贴边）；插件窗口同样贴边，且不受 `padding` 影响。需要留白时在注册这三个面的贡献时给 `padding`：数字 = 四边等距，也可按轴 `{ "horizontal": 16, "vertical": 8 }` 或按边 `{ "top": 4, "right": 0, "bottom": 4, "left": 0 }` 声明，缺省 / `0` 即贴边。
 
 ## 6. 能力面
 
-`plugin.json` 的 `permissions` 是**公示与审计**口径，不是开关：调用本身不按声明拦截，未声明的调用照常执行，但会被记为「未声明」——插件详情页的「能力调用记录」里能看见，首次出现还会给用户弹一条提示。所以声明要写全：漏写不会让功能坏掉，但会让用户看到一条不该出现的记录。
+清单里的 `[permissions]` 表是**公示与审计**口径，不是开关。每项写「键 = 给用户看的一句理由」，理由为空会被拒收：
 
-每个权限名对应的 SDK 方法与协议方法名、params / result 形态，以 [API 参考 · 能力面方法名](plugin-api.md#9-能力面方法名) 为准。这里只记各自的边界与坑：
+```toml
+[permissions]
+vault = "把面板里整理的内容写进当前仓库"
+network = "拉取素材元数据"
+```
 
-| 权限 | 边界与约束 |
+这行理由是安装确认与插件详情页上给用户看的解释，所以写清楚「为什么要」，不要写「需要仓库权限」。调用本身不按声明拦截，未声明的调用照常执行，但会被记为「未声明」——插件详情页的「能力调用记录」里能看见，首次出现还会给用户弹一条提示。所以声明要写全：漏写不会让功能坏掉，但会让用户看到一条不该出现的记录。
+
+12 个权限键与它们覆盖的能力面：
+
+| 键 | 覆盖 |
+| --- | --- |
+| `files` | `fs` / `vault` / `table` 与编辑选区、活动统计——凡读写仓库内容都算 |
+| `network` | `http` |
+| `clipboard` | 剪贴板文本与图片 |
+| `process` | 自起子进程 |
+| `window` | 插件窗口 |
+| `tray` | 托盘条目 |
+| `shortcut` | 全局快捷键 |
+| `notification` | 应用内通知 |
+| `collab` | 协作空间收发与元数据 |
+| `ai` | AI 对话与工具 |
+| `dialog` | 系统文件 / 目录对话框 |
+| `state` | 插件私有数据 |
+
+各能力面的 SDK 方法与协议方法名、params / result 形态，以 [API 参考 · 能力面方法名](plugin-api.md#9-能力面方法名) 为准。这里只记各自的边界与坑：
+
+| 能力面 | 边界与约束 |
 | --- | --- |
 | `state` | 按插件隔离的自持 JSON，落 `<插件目录>/data/state.json`；损坏时宿主先备份原文再降级 |
 | `fs` | `private_dir()` 给私有数据目录；其余接受**任意绝对路径**，父目录自动创建 |
-| `vault` | 路径相对当前仓库根，不能越出仓库；隐藏段可访问（插件自管附件可放 `.atelyx/temp/`），本地仓库与协作空间的 `vault_list` / `vault_exists` 同口径保留隐藏项（原子写残留 `.tmp` 除外）；**正被编辑器打开的文件拒写**。文本与二进制两条通道，二进制单次上限 32 MiB；更大的文件先落到插件私有目录再用 `vault_import_file` 让宿主按路径收进仓库（字节不进 RPC，源文件须在私有目录内，复制语义，见 §8.9）。`vault_image_info` 只解文件头给出图片固有像素尺寸（png / jpeg / gif / bmp / webp），不送回文件内容。结构变更用 `vault_rename(from, to)` / `vault_remove(path)`：文件或文件夹（递归），`to` 不可已存在、文件夹不可移入自身、仓库根不可删；改名会同步 `.md` 内部链接与画布节点引用。**路径正被笔记 / 表格 / 画布 / 插件文档打开，或被当前画布引用时拒收**——这些持有者仍按旧路径工作，放行后写回会产生幽灵文件，先关闭对应面再操作 |
+| `vault` | 路径相对当前仓库根，不能越出仓库；隐藏段可访问（插件自管附件可放 `.atelyx/temp/`），本地仓库与协作空间的 `vault_list` / `vault_exists` 同口径保留隐藏项（原子写残留 `.tmp` 除外）；**正被编辑器打开的文件拒写**。文本与二进制两条通道，二进制单次上限 32 MiB；更大的文件先落到插件私有目录再用 `vault_import_file` 让宿主按路径收进仓库（字节不进 RPC，源文件须在私有目录内，复制语义，见 §8.8）。`vault_image_info` 只解文件头给出图片固有像素尺寸（png / jpeg / gif / bmp / webp），不送回文件内容。结构变更用 `vault_rename(from, to)` / `vault_remove(path)`：文件或文件夹（递归），`to` 不可已存在、文件夹不可移入自身、仓库根不可删；改名会同步 `.md` 内部链接与画布节点引用。**路径正被笔记 / 表格 / 画布 / 插件文档打开，或被当前画布引用时拒收**——这些持有者仍按旧路径工作，放行后写回会产生幽灵文件，先关闭对应面再操作 |
 | `table` | 读写当前打开的表格。真源在宿主，写入与用户编辑同一出口（合并落盘 + 协作补丁）；**禁止**用 `fs` 旁路读写 `.atb`。快照含稳定表格 id、列宽、行内单元格样式、用户当前选区与其他协作者选区（显示名 + 身份色）；向图片字段写图片用 `table_set_cell_image`（图片先经 `vault_write_binary` 落仓库，再传仓库相对路径） |
 | `notification` | 应用内通知条 |
 | `shortcuts` | 系统级全局快捷键（如 `Shift+Alt+E`）；被占用时注册返回可读错误，停用自动注销；同一组键重复注册幂等，触发上报的是最后一次注册的写法。`query_shortcut` 可事前问某键位是否被占用（`owner` 为占用方插件 id；被系统 / 其他应用占用时为缺省） |
@@ -460,10 +498,10 @@ ctx.begin_window_drag("main").await?;   // 宿主接管拖动手势
 | `dialog` | 系统对话框，等用户交互不设上限；取消返回 `None` |
 | `http` | 便利层：目标地址、方法、大小、超时全由插件自负，宿主不设限。响应体以 base64 返回；大文件请插件进程自己直连 |
 | `process` | 托管子进程：输出与退出经 `host:process.event` 转发；停用 / 崩溃 / 卸载时连同子孙进程一起结束 |
-| `window` | 见 §8.2 |
-| `ai` | 见 §8.4 |
-| `tray` | 见 §8.6 |
-| `collab` | 见 §8.7 |
+| `window` | 见 §8.1 |
+| `ai` | 见 §8.3 |
+| `tray` | 见 §8.5 |
+| `collab` | 见 §8.6 |
 
 `vault` 的读写**必须**经能力面：直接改盘会绕过写盘队列与协作通道，属于内容丢失级缺陷。
 
@@ -476,7 +514,7 @@ let dir = ctx.service_list().await?;   // 每个条目：service / version / met
 let text = ctx.service_call("vault", "readText", json!({ "path": "notes/a.md" })).await?;
 ```
 
-- `service_list` 是目录：`provider` 缺省表示当前由内置实现承载，给了值就是提供它的插件 id；`candidates` 是其余候选；`replaceable: false` 表示这个服务不允许被顶替。
+- `service_list` 是目录：`provider` 缺省表示内置实现（归宿主），给了值就是提供它的插件 id。
 - `service_call` 只是「名字要到运行时才知道」时的调用形态（例如让用户在下拉里选服务再调）；名字写死的场合直接用 `Context` 的定型方法，等价且更省心。
 
 ### 7.1 做提供者
@@ -493,7 +531,7 @@ impl PluginHandler for Demo {
         }
     }
 
-    /// 本插件是 demo 的活动提供者时，宿主把调用转到这里；用同一个 callId 回报。
+    /// 本插件是 demo 的提供者时，宿主把调用转到这里；用同一个 callId 回报。
     async fn on_service_call(&self, ctx: &Context, params: HostCallParams) {
         let replied = match params.method.as_str() {
             "echo" => ctx.service_result(&params.call_id, json!({ "echo": params.params })).await,
@@ -506,28 +544,17 @@ impl PluginHandler for Demo {
 }
 ```
 
-- **登记不等于生效**：同一服务同时只有一个活动提供者。已有内置实现的服务（`vault` / `ai` / `markdown` …）登记后只成为候选，是否顶替由用户在设置页决定；内置实现的归属插件停用期间该实现不在场，此时登记的候选直接接任（用户重新启用归属插件后再由设置页决定）；目录里没有的服务，首个提供者即活动提供者。调用方最终拿到的是**你回报的那份数据**：`service_result` 给结果、`service_error` 给可读原因，二者都带调用方的 `callId`；不实现 `on_service_call` 时默认回报「本插件不提供该服务」，宿主不必等到超时。
-- 30 秒不回报按 `timeout` 失败；**停用 / 崩溃 / 卸载时在途调用以 `provider_unavailable` 失败**，之后的调用回落内置实现（没有内置实现就成了 `unknown_service`）。`host:service.changed` 广播活动提供者变化（`{ service, provider, available }`，`provider` 缺省 = 内置），要靠「本插件现在是否生效」改界面就覆写 `on_service_changed`。
+- **只能登记新服务名**：内置服务（`vault` / `ai` / `markdown` …）的名字归宿主，登记同名会被拒；已被其他插件占用的名字同样拒收——一个服务名同时只有一个提供者，先登记者拥有它。调用方最终拿到的是**你回报的那份数据**：`service_result` 给结果、`service_error` 给可读原因，二者都带调用方的 `callId`；不实现 `on_service_call` 时默认回报「本插件不提供该服务」，宿主不必等到超时。
+- 30 秒不回报按 `timeout` 失败；**停用 / 崩溃 / 卸载时在途调用以 `provider_unavailable` 失败**，之后该服务离开能力总线，再调就是 `unknown_service`。`host:service.changed` 广播服务可用性变化（`{ service, provider, available }`，`provider` 缺省 = 内置），要按它改界面就覆写 `on_service_changed`。
 - **不要在自己的 `on_service_call` 里等自己提供的方法**：宿主通知与这条调用走同一个通知 worker，会自锁。要自检就 `tokio::spawn` 到别的任务里调。
 
 ### 7.2 不能做的
 
-- 不能登记宿主的通道命名空间：`service` / `view` / `frame` / `layout` / `event` / `doc`。这些是界面提交与事件通路的入口，被接管等于把插件自己从界面上摘掉，登记时直接拒收。
-- 不能替换 `query`：字体与主题取的是宿主 OS 与用户设置资源，外置后宿主自身外观会和设置脱节。
-- `markdown.parse` **可以**被替换（解析语义与宿主笔记同源即可）。替换生效后，已经按原文缓存过解析结果的内容不会自动重取——重建 `FrameUi` 或内容变化才会再取一次。
+- 不能占用内置服务名与宿主的通道命名空间（`service` / `view` / `frame` / `layout` / `event` / `doc`）。前者是宿主 API，后者是界面提交与事件通路的入口；两者都在登记时直接拒收。
 
 ## 8. 进阶
 
-### 8.1 接管窗口
-
-```rust
-ctx.takeover(TakeoverScope::Page, "main").await?;   // 内容区归插件，宿主标题栏保留
-ctx.takeover(TakeoverScope::Full, "main").await?;   // 整窗归插件（含标题栏区域）
-```
-
-`surfaceId` 必须是已注册贡献的 id——该面的帧原样接管过去。接管按窗口生效：布局真源不动，退出即恢复原视图。全接管时插件自绘标题栏：标题栏的命中区收到按下后调 `ctx.begin_window_drag("main")` 交给宿主拖动手势，缩放沿用窗口边缘，关闭走宿主关窗链；退出入口由宿主常驻（右上角按钮 + Esc）。
-
-### 8.2 插件窗口
+### 8.1 插件窗口
 
 ```rust
 let params = WindowOpenParams {
@@ -552,19 +579,21 @@ ctx.window_show("palette").await?;
 
 `title` 就是窗口标题：有系统边框时作为 OS 标题栏文字，`decorations: Some(false)` 时由宿主画在自己的标题栏上（附带拖动、双击切换最大化、最小化 / 最大化 / 关闭），插件内容占满标题栏以下的区域。`titlebar: Some(false)` 则宿主连标题栏也不画，整面归插件自绘（拖动 / 最小化 / 最大化 / 关闭见 5.6）。`window_update` 改 `title` 更新宿主自绘标题栏上的文字；系统边框窗口的 OS 标题由系统绘制，运行期不随之变化。仍开着的同一 id 会被拒，但**插件请求关闭后可以立刻用同 id 重开**——`window_close` 的回执表示「关闭已受理」，不必等系统销毁完成。用户关窗时宿主先发 `host:window.closed`（`{ id }`）、再发 `host:surface.detached`（`kind: "window"`）；插件自己请求的关闭只发后者。`hideOnBlur` 是「隐藏窗口」而非关闭：宿主隐藏时发 `host:window.hidden`，插件可用 `window_show` 重新显示。
 
-### 8.3 领域文档类型
+### 8.2 领域文档类型
 
-在 `plugin.json` 里注册扩展名，宿主负责文件树图标、新建菜单与打开路由：
+在清单里注册扩展名，宿主负责文件树图标、新建菜单与打开路由：
 
-```json
-"docTypeRegistrations": [
-  { "extension": "board", "label": "白板", "icon": "layout-dashboard", "surface": "doc" }
-]
+```toml
+[[doc_type_registrations]]
+extension = "board"
+label = "白板"
+icon = "layout-dashboard"
+surface = "doc"
 ```
 
 `surface` 必须同时用 `view.register` 注册为 `panel` 贡献。用户打开这类文件时宿主发 `host:doc.open { surfaceId, path }`，插件按 `surfaceId` 提交这一面的帧；关闭或换文件时先发 `host:doc.close`。同一时间至多一个打开的插件文档（切换文件即换实例）；文件被删除或切仓库也会关闭。同一扩展名被多个插件注册时按插件 id 取第一个并提示。
 
-### 8.4 AI 总线
+### 8.3 AI 总线
 
 ```rust
 use atelyx_plugin_sdk::protocol::method::ChatSendParams;
@@ -609,7 +638,7 @@ async fn on_tool_call(&self, ctx: &Context, params: ToolCallParams) {
 - 对话事件：`message`（流式快照，整条消息替换）、`finished`（正常收敛或用户中断）、`failed`、`titled`（话题自动命名结果）。
 - 停用 / 崩溃 / 卸载自动摘除工具登记，插件不需要自己收尾。
 
-### 8.5 事件订阅
+### 8.4 事件订阅
 
 ```rust
 ctx.subscribe("vault:switch").await?;    // 容器切换（本地仓库 / 协作空间 / 换仓库）
@@ -625,7 +654,7 @@ ctx.subscribe("vault:file.changed").await?; // 仓库文件被宿主写入（保
 - `table:selection.changed` payload：`{ path?, selection?, remoteSelections? }`——当前表格路径、本端选区与协作者选区（`name` / `color`（`#rrggbb`）/ `selection`），选区形态为 `cell` / `range` / `row` / `column` / `all`。内容不变、只有选区移动也发；没有打开表格时用空载荷通知一次。载荷直接带选区，不必为一次拖选重取快照。
 - `vault:file.changed` payload：`{ path, kind, oldPath? }`，`kind` 为 `created` / `updated` / `deleted` / `renamed`（改名另带旧路径）。只覆盖**宿主发起的写入**——壳自身保存 / 新建 / 复制 / 删除 / 改名与插件经 `vault` 的写入；外部程序直接改磁盘不发，需要感知外部改动仍要按 mtime 轮询。删除目录只发目录本身一条，其下文件不逐条发（按前缀作废缓存，需要明细就重新列举）。
 
-### 8.6 系统托盘
+### 8.5 系统托盘
 
 ```rust
 ctx.tray_set_items(vec![
@@ -640,7 +669,7 @@ ctx.tray_set_items(vec![
 - 停用 / 崩溃 / 卸载时宿主摘掉本插件的条目，重启后需要重新提交；插件不必自己收尾。
 - 托盘目前只有 Windows 实现，其余平台调用返回可读错误。按失败降级、不要在循环里重试，也别把托盘当必需的入口。
 
-### 8.7 同空间插件互联
+### 8.6 同空间插件互联
 
 只在协作空间里生效，收发双方是**同一空间的同一个插件的其他实例**（各客户端上跑着的本插件）。
 
@@ -662,7 +691,7 @@ ctx.collab_send_ephemeral("cursor", payload, None).await?;
   - 瞬时档：不缓存、不补投、不占房间序号，延迟最低；对端断线期间发出的消息**不会**在重连后补达。把本端状态整份重发即可自愈——变化时发、空闲时按十几秒的节奏重发一次，对端据此判断你在场；对端消失后你那份状态会在半分钟内自然过期，不必发「离开」也能收敛。
 - 需要可靠的共享请落在仓库内容上，这两档都只适合在线协作期的状态同步。
 
-### 8.8 默认布局声明
+### 8.7 默认布局声明
 
 插件可以声明一套默认面板分栏，首次启用时宿主自动摆进当前场景：
 
@@ -686,7 +715,7 @@ ctx.declare_default_layout(
 - 只摆一次：宿主在 `ui-state.json` 记账，用户改名 / 删除后不会再补回；首次启用时当前场景已含规格里的任一视图则只记账不新建，避免与用户已摆好的界面重复。
 - 布局名与既有布局重名时宿主追加序号并激活新布局；规格超限（深度 16、面板 32、单面板视图 16、名字 64 字节）或非法即拒收。
 
-### 8.9 大文件进仓库
+### 8.8 大文件进仓库
 
 超过单次载荷上限（32 MiB）的文件不走字节通道：先落到插件私有目录，再让宿主按路径收进去。
 
@@ -708,10 +737,10 @@ ctx.remove(&staged).await.ok();                              // 导完自己清�
 cargo build --release
 mkdir -p dist
 cp target/release/echo_panel.dll dist/     # Linux: libecho_panel.so
-cp plugin.json dist/
+cp atelyx_manifest.toml dist/
 ```
 
-`dist/` 里**只放** `plugin.json` 与平台入口（以及确实需要的随包文件）——宿主会整目录复制安装，别把 `target/`、`.git/`、源码打进去。
+`dist/` 里**只放** `atelyx_manifest.toml` 与平台入口（以及确实需要的随包文件）——宿主会整目录复制安装，别把 `target/`、`.git/`、源码打进去。
 
 发布用的 zip 必须按市场约定命名：
 
@@ -726,7 +755,7 @@ cp plugin.json dist/
 - 解压总量 ≤ 4 GiB；
 - 不允许符号链接，不允许绝对路径或 `..`；
 - 插件内容里不能出现宿主保留名（`data` / `logs` / `previous` / `enabled` / `source`）；
-- 安装包里的 `plugin.json` id 必须与市场条目 id 一致（防止一份包覆盖另一个插件）。
+- 安装包里的清单 id 必须与市场条目 id 一致（防止一份包覆盖另一个插件）。
 
 `dist/` 里只需清单与库文件；安装不改权限位。
 
@@ -742,7 +771,7 @@ cp plugin.json dist/
 
 | 现象 | 原因 |
 | --- | --- |
-| 列表里「不可装载：协议版本不匹配」 | `apiVersion` 与宿主不一致（当前 `1`） |
+| 列表里「不可装载：协议版本不匹配」 | `api_version` 与宿主不一致（当前 `1`） |
 | 「不可装载：入口文件不存在」 | `entry` 写的文件名 / 路径与包内不一致，或漏了当前平台 |
 | 「插件装载失败：动态库缺少符号」 | 没有用 `export_in_process_plugin!`（或符号被 strip / `#[no_mangle]` 漏写） |
 | 启用后立刻「启动失败：插件未在 10 秒内完成握手」 | 没有用 `export_in_process_plugin!` 导出符号，或 `create` 里 panic / 立刻返回空指针 |
@@ -755,7 +784,7 @@ cp plugin.json dist/
 | 文字重叠或错位 | 没走 `query.measure` 而按字符数估宽；换行只在给了 `maxWidth` 时成立 |
 | 声明的快捷键被界面吞掉 | 帧声明了 `keys`：键盘整体归本面（含 Ctrl / Alt 组合），只在真有键盘交互时声明 |
 | 插件详情页出现「未声明」记录 | `permissions` 漏了对应项：调用照常执行，但会被记为未声明并提示用户 |
-| `service.call` 报 `provider_unavailable` | 提供者没启用、已停用 / 崩溃，或活动提供者已被用户切回内置 |
+| `service.call` 报 `provider_unavailable` | 提供者没启用、已停用或崩溃 |
 | `service.register` 被拒 | 服务名落在宿主通道命名空间（`view` / `frame` / …），或该服务不可替换（`query`） |
 | 安装被拒「含宿主保留路径」 | 包里有 `data/`、`logs/` 等宿主保留名 |
 | 安装被拒「入口文件不在安装内容里」 | 入口被源目录的 `.gitignore` 排除了（常见于产物目录被忽略） |
@@ -765,13 +794,13 @@ cp plugin.json dist/
 
 插件 = 一个独立 git 仓库（一插件一仓库）。上架零申请：
 
-1. 仓库根放 `plugin.json`（与发布包一致），源码照常提交；
+1. 仓库根放 `atelyx_manifest.toml`（与发布包一致），源码照常提交；
 2. 用标签发布 Release：tag 形如 `v0.1.0`，资产名严格按 §9 的约定挂平台 zip（没有对应平台的资产，该平台市场里点了也只会提示「未挂本平台安装包」）；
 3. 给仓库打 topic `atelyx-plugin`。
 
-官方索引每 6 小时扫描一次带该 topic 的仓库：读默认分支的 `plugin.json`、校验 id / 版本 / 协议版本 / 平台入口，并核对最新 Release 是否挂了约定命名的平台包，通过即收录。收录后所有用户能在「设置 → 插件 → 市场」里搜到。
+官方索引每 6 小时扫描一次带该 topic 的仓库：读默认分支的 `atelyx_manifest.toml`、校验 id / 版本 / 协议版本 / 平台入口，并核对最新 Release 是否挂了约定命名的平台包，通过即收录。收录后所有用户能在「设置 → 插件 → 市场」里搜到。
 
-想在市场里带类型筛选，可在 `plugin.json` 额外写一个索引用的 `type` 字段（如 `"type": "panel"` / `"type": "tableview"`）——宿主运行时不读它，只用于市场分类展示。
+市场按清单的 `tags` 做类型筛选（`tags = ["panel", "media"]` 之类）——宿主运行时不读它做逻辑分派，只用于分类展示。
 
 条目徽标按**仓库归属**判定（不按自报 id）：仓库 owner 在官方名单里的显示「官方」，其余条目不显示徽标。
 
@@ -779,8 +808,8 @@ cp plugin.json dist/
 
 ## 12. 兼容性
 
-- `apiVersion` 是硬闸门：宿主只接受完全相等的版本，版本不符的插件响亮拒绝，不做兼容推断。破坏性变更是否递增版本号以宿主 1.0.0 为界——之前不递增（握手仍要求严格相等，插件随宿主更新重建即对齐），之后必须递增。
+- `api_version` 是硬闸门：宿主只接受完全相等的版本，版本不符的插件响亮拒绝，不做兼容推断。破坏性变更是否递增版本号以宿主 1.0.0 为界——之前不递增（握手仍要求严格相等，插件随宿主更新重建即对齐），之后必须递增。
 - 绘制指令、输入形态、贡献槽位、服务方法名都是封闭枚举 / 受限形状，扩容随协议升版；未知取值会被拒绝而不是被忽略。
-- 宿主正式发布 1.0.0 之前不承诺向后兼容：协议形状直接改，插件随宿主重建即对齐（`apiVersion` 仍要求严格相等）。
+- 宿主正式发布 1.0.0 之前不承诺向后兼容：协议形状直接改，插件随宿主重建即对齐（`api_version` 仍要求严格相等）。
 - SDK 的 `PluginHandler` 新增通知回调都带缺省实现，不重写即忽略；`frame_ui` 的控件与容器新增不影响既有调用。
 - 插件应把「宿主撤掉投递口、读端收到通道关闭」当作正常退出信号，不要依赖宿主发来的额外终止通知。

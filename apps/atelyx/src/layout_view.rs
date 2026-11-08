@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::text::{LineHeight, Wrapping};
-use iced::widget::{button, column, container, mouse_area, row, scrollable, space, stack, text_editor, text_input, Stack};
+use iced::widget::{button, column, container, mouse_area, row, scrollable, space, stack, text_editor, text_input};
 use iced::{Color, Element, Length, Padding, Point, Rectangle, Size, border, widget::container::Style};
 use serde_json::Value;
 
@@ -378,10 +378,6 @@ pub(crate) fn license_popup(window: iced::window::Id) -> Message {
 
 /// 主窗口：标题栏 + 内容（设置整页或面板网格）+ 状态栏，顶层叠弹层/提示/通知。
 pub fn main_view<'a>(app: &'a App, window: iced::window::Id) -> Element<'a, Message> {
-    // 接管中的窗口：整窗视图由插件面替换（page 保留宿主标题栏与状态栏），退出入口常驻
-    if let Some(t) = app.plugin_takeovers.get(&window) {
-        return takeover_view(app, window, t);
-    }
     let content: Element<'a, Message> = if app.settings_open {
         crate::settings_view::settings_view(app, window)
     } else {
@@ -401,30 +397,6 @@ pub fn main_view<'a>(app: &'a App, window: iced::window::Id) -> Element<'a, Mess
     let base = workspace_chrome(app, window, content);
 
     with_overlays(app, window, base)
-}
-
-/// 接管视图（按窗生效）：page = 宿主标题栏与状态栏保留、内容区归插件；full = 整窗归插件呈现
-/// （含标题栏区域：缩放沿用边缘命中带、关闭走宿主关窗拦截链）。
-/// 右上角退出入口常驻（Esc 为后备）。接管期间布局真源不动，退出即恢复原视图。
-pub fn takeover_view<'a>(
-    app: &'a App,
-    window: iced::window::Id,
-    t: &'a crate::plugin_actions::TakeoverActive,
-) -> Element<'a, Message> {
-    let content = crate::plugin_view::takeover_content(app, window, &t.plugin_id, &t.surface_id);
-    let base: Element<'a, Message> = if t.full {
-        container(content)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .style(|_t| Style {
-                background: Some(pal::BG_PRIMARY.into()),
-                ..Style::default()
-            })
-            .into()
-    } else {
-        workspace_chrome(app, window, content)
-    };
-    takeover_shell(app, window, base)
 }
 
 /// 插件窗口：面树铺满整窗，弹层 / 悬停提示 / 通知沿用工作区覆盖层（窗口内下拉与菜单依赖它）。
@@ -489,35 +461,7 @@ fn plugin_window_chrome<'a>(
     .into()
 }
 
-/// 接管视图的退出浮层与覆盖层组装（base 之上叠右上角常驻退出入口，
-/// 再挂工作区同一套弹层 / 悬停提示 / 通知 / 边缘缩放命中带）。
-fn takeover_shell<'a>(
-    app: &'a App,
-    window: iced::window::Id,
-    base: Element<'a, Message>,
-) -> Element<'a, Message> {
-    let exit: Element<'static, Message> = container(controls::btn(
-        "退出接管",
-        &controls::btn_sm(),
-        controls::Variant::Ghost,
-        Some(Message::PluginExitTakeover(window)),
-    ))
-    .padding(Padding::from(6.0))
-    .into();
-    let overlay = container(exit)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .align_x(Horizontal::Right)
-        .align_y(Vertical::Top);
-    let inner = Stack::new()
-        .push(base)
-        .push(overlay)
-        .width(Length::Fill)
-        .height(Length::Fill);
-    with_overlays(app, window, inner.into())
-}
-
-/// 工作区 chrome 骨架（标题栏 + 分隔线 + 内容 + 分隔线 + 状态栏）；主窗与整页接管共用。
+/// 工作区 chrome 骨架（标题栏 + 分隔线 + 内容 + 分隔线 + 状态栏）。
 fn workspace_chrome<'a>(
     app: &'a App,
     window: iced::window::Id,
@@ -2251,10 +2195,6 @@ pub fn detached_view<'a>(
     let Some(w) = app.ui.detached_windows.iter().find(|w| w.id == model_id) else {
         return space().into();
     };
-    // 接管中的撕裂窗口：整窗视图由插件面替换（与主窗同一套接管组装）
-    if let Some(t) = app.plugin_takeovers.get(&window) {
-        return takeover_view(app, window, t);
-    }
     let cursor = app.cursor_for(window);
 
     let mut tab_row = row![].spacing(2).height(Length::Fill);

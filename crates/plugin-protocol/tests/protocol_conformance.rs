@@ -16,7 +16,7 @@ use atelyx_plugin_protocol::method::{
     MeasureTextResult, PathParams, PickFileParams, PickedPath, ProcessEventParams, RegisterParams,
     RegisterShortcutParams, RegisterToolParams, SetTrayItemsParams, ShortcutQueryParams,
     ShortcutQueryResult, ShowNotificationParams, SurfaceAttachedParams, TableAddRowResult,
-    TableRowIdParams, TableSetCellImageParams, TableSnapshot, TableUpdateCellParams, TakeoverParams,
+    TableRowIdParams, TableSetCellImageParams, TableSnapshot, TableUpdateCellParams,
     TextPayload, ToolCallParams, ToolResultParams, TrayClickParams, UnregisterParams,
     UnregisterToolParams, WindowCloseParams, WindowClosedParams, WindowIdParams, WindowOpenParams,
     WindowUpdateParams,
@@ -157,25 +157,37 @@ fn handshake_shape_is_frozen_and_version_checked() {
     assert!(!handshake::compatible(1, 2), "版本不一致必须判不兼容");
 }
 
-/// manifest 编码冻结：camelCase 字段名、平台入口映射、权限封闭枚举与未知字段忽略。
+/// manifest 编码冻结：快照 `fixtures/plugin-protocol/manifest.toml` 是唯一期望源。
 #[test]
 fn manifest_shape_is_frozen() {
-    let snapshot = load();
-    let value = snapshot["manifest"].clone();
+    let raw = fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/plugin-protocol/manifest.toml"),
+    )
+    .expect("fixtures/plugin-protocol/manifest.toml 缺失：清单快照应随源码入库");
     let manifest: atelyx_plugin_protocol::manifest::Manifest =
-        serde_json::from_value(value.clone()).expect("快照 manifest 应可反序列化");
+        toml::from_str(&raw).expect("快照 manifest 应可反序列化");
     manifest.validate_shape().expect("快照 manifest 应通过结构校验");
-    assert_eq!(manifest.entry.windows.as_deref(), Some("bin/studio.exe"));
+    assert_eq!(manifest.entry.windows.as_deref(), Some("bin/studio.dll"));
+    assert_eq!(manifest.build.paths, vec!["bin".to_string()]);
+    assert!(manifest.singleton && !manifest.keep_mounted_on_vault_switch);
+    assert!(manifest.supports_current_platform(), "快照声明了两个平台");
+    // 权限是「键 → 原因」表，原因必填
+    let declared: Vec<_> = manifest.permission_list().into_iter().map(|(key, _)| key).collect();
     assert_eq!(
-        manifest.permissions,
+        declared,
         vec![
-            atelyx_plugin_protocol::manifest::Permission::Fs,
-            atelyx_plugin_protocol::manifest::Permission::Process,
-            atelyx_plugin_protocol::manifest::Permission::Notification,
+            atelyx_plugin_protocol::manifest::PermissionKey::Network,
+            atelyx_plugin_protocol::manifest::PermissionKey::Files,
+            atelyx_plugin_protocol::manifest::PermissionKey::Notification,
         ]
     );
-    assert!(manifest.singleton && !manifest.keep_mounted_on_vault_switch);
-    assert_eq!(serde_json::to_value(&manifest).unwrap(), value, "manifest 编码与快照不一致");
+    assert!(manifest.declares(atelyx_plugin_protocol::manifest::PermissionKey::Files));
+    assert!(!manifest.declares(atelyx_plugin_protocol::manifest::PermissionKey::Process));
+    // 往返编码：解析 → 序列化 → 再解析结果一致
+    let encoded = toml::to_string(&manifest).unwrap();
+    let again: atelyx_plugin_protocol::manifest::Manifest = toml::from_str(&encoded).unwrap();
+    assert_eq!(again, manifest, "manifest 往返编码不一致");
 }
 
 /// host: 前缀判定：宿主保留命名空间的方向约定。
@@ -241,7 +253,6 @@ fn method_type_shapes_are_frozen() {
             "UnregisterParams" => frozen_roundtrip::<UnregisterParams>(&value),
             "DocOpenParams" => frozen_roundtrip::<DocOpenParams>(&value),
             "DocCloseParams" => frozen_roundtrip::<DocCloseParams>(&value),
-            "TakeoverParams" => frozen_roundtrip::<TakeoverParams>(&value),
             "WindowOpenParams" => frozen_roundtrip::<WindowOpenParams>(&value),
             "WindowCloseParams" => frozen_roundtrip::<WindowCloseParams>(&value),
             "WindowClosedParams" => frozen_roundtrip::<WindowClosedParams>(&value),

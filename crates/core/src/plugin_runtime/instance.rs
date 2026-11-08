@@ -509,7 +509,7 @@ impl Instance {
         }
     }
 
-    /// 让本插件在途的接管 / 插件窗口请求以可读失败收场（等待壳回填的线程不再悬挂）。
+    /// 让本插件在途的插件窗口请求以可读失败收场（等待壳回填的线程不再悬挂）。
     fn fail_pending_ui_calls(&self, reason: &str) {
         let runtime = self.runtime.lock().unwrap().clone();
         if let Some(runtime) = runtime.upgrade() {
@@ -534,7 +534,7 @@ impl Instance {
         }
     }
 
-    /// 摘除本插件的服务登记（活动提供者消失即回落内置）并让以它为提供者的在途调用立即失败。
+    /// 摘除本插件的服务登记（它的服务随之离开能力总线）并让以它为提供者的在途调用立即失败。
     fn release_services(&self) {
         let runtime = self.runtime.lock().unwrap().clone();
         if let Some(runtime) = runtime.upgrade() {
@@ -560,7 +560,7 @@ impl Instance {
         self.notify(service::method::HOST_CALL, &params);
     }
 
-    /// 广播活动提供者的变化（`host:service.changed`）。进程不在跑时由写端静默丢弃。
+    /// 广播服务可用性变化（`host:service.changed`）。进程不在跑时由写端静默丢弃。
     pub(crate) fn notify_service_changed(&self, params: &service::ChangedParams) {
         self.notify(service::method::HOST_CHANGED, params);
     }
@@ -755,11 +755,11 @@ impl Instance {
         self.route_request(token, id, method, &request.params);
     }
 
-    /// 把一条请求落到实现：对话框 / 界面 / 壳侧服务分流为异步应答；活动提供者是外部插件的
+    /// 把一条请求落到实现：对话框 / 界面 / 壳侧服务分流为异步应答；服务提供者是外部插件的
     /// 普通方法转发出去；其余同步分派。
     fn route_request(self: &Arc<Self>, token: u64, id: u64, method: &str, params: &Value) {
-        // 普通方法先过目录：外部提供者顶替某服务后，直接调 `vault.readText` 的老插件同样被
-        // 路由到它；没有顶替则维持本地内置实现。转发判定必须早于壳侧分流——被顶替的方法
+        // 普通方法先过目录：插件登记的服务由它的提供者应答，直接调 `demo.echo` 同样被
+        // 路由到它；内置服务名归宿主，一律维持本地实现。转发判定必须早于壳侧分流——外部提供的方法
         // 本来就是壳侧实现的那些。
         if let Some((service_name, method_name)) = PluginRuntime::split_service(method) {
             if let Ok(runtime) = self.runtime_upgrade() {
@@ -767,11 +767,6 @@ impl Instance {
                     Forward::Local => {}
                     Forward::Undeclared => {
                         let error = PluginRuntime::undeclared_service_method(service_name, method_name);
-                        self.respond(id, None, Some(error));
-                        return;
-                    }
-                    Forward::Unavailable => {
-                        let error = PluginRuntime::unavailable_service(service_name);
                         self.respond(id, None, Some(error));
                         return;
                     }
@@ -796,8 +791,8 @@ impl Instance {
             self.handle_dialog_request(token, id, method, params);
             return;
         }
-        // 接管与插件窗口的落地在壳（OS 窗口副作用只由壳触发），结果由壳回填——分流为异步应答，
-        // 读线程不等待窗口创建与接管应用。
+        // 插件窗口的落地在壳（OS 窗口副作用只由壳触发），结果由壳回填——分流为异步应答，
+        // 读线程不等待窗口创建。
         if is_ui_method(method) {
             self.handle_ui_request(token, id, method, params);
             return;
@@ -814,7 +809,7 @@ impl Instance {
         }
     }
 
-    /// 一次 `service.call`：先校验服务 / 方法与活动提供者的声明，再用。内置提供者按规范化后的
+    /// 一次 `service.call`：先校验服务 / 方法与提供者的声明，再用。内置实现按规范化后的
     /// 完整方法名重走 [`Instance::route_request`]（与直接调用同名方法同一条分支，不复制实现）。
     fn handle_service_call(self: &Arc<Self>, token: u64, id: u64, params: &Value) {
         let call: CallParams = match parse(params) {
@@ -880,7 +875,7 @@ impl Instance {
         });
     }
 
-    /// 接管与插件窗口请求：登记后在独立线程上等壳回填结果（窗口创建与接管应用由壳执行）。
+    /// 插件窗口请求：登记后在独立线程上等壳回填结果（窗口创建由壳执行）。
     fn handle_ui_request(
         self: &Arc<Self>,
         token: u64,
@@ -896,10 +891,6 @@ impl Instance {
         let opened = self.with_session(token, || {
             // parse 的 RpcError 统一转可读串（本闭包的错误类型是 String）
             match method_name {
-                method::view::TAKEOVER => {
-                    let p: method::TakeoverParams = parse(params).map_err(|e| e.to_string())?;
-                    runtime.open_takeover(&self.id, p.scope, &p.surface_id)
-                }
                 method::window::OPEN => {
                     let p: method::WindowOpenParams =
                         parse(params).map_err(|e| e.to_string())?;
@@ -2074,7 +2065,7 @@ impl Instance {
         if permission.is_none() && method_name != service::method::CALL {
             return;
         }
-        let declared = permission.map_or(true, |p| self.manifest.permissions.contains(&p));
+        let declared = permission.is_none_or(|p| self.manifest.declares(p));
         let detail = target
             .and_then(|inner| inner.get("path"))
             .and_then(Value::as_str)
@@ -2220,12 +2211,11 @@ fn is_shell_method(method_name: &str) -> bool {
     )
 }
 
-/// 走壳侧界面服务的方法（接管 / 插件窗口）：落地依赖 OS 窗口副作用，只由壳执行。
+/// 走壳侧界面服务的方法（插件窗口）：落地依赖 OS 窗口副作用，只由壳执行。
 fn is_ui_method(method_name: &str) -> bool {
     matches!(
         method_name,
-        method::view::TAKEOVER
-            | method::window::OPEN
+        method::window::OPEN
             | method::window::CLOSE
             | method::window::UPDATE
             | method::window::SHOW
@@ -2348,20 +2338,45 @@ mod tests {
     use crate::vault::test_support::TempDir;
     use atelyx_plugin_protocol::frame_codec;
     use atelyx_plugin_protocol::frame_region;
-    use atelyx_plugin_protocol::manifest::{Entry, Permission};
+    use atelyx_plugin_protocol::manifest::PermissionKey;
 
     #[allow(unused_imports)]
     use super::super::HostRequest;
 
+    /// 测试用清单：走 TOML 解析而不是字段字面量，字段增删时只改这里。
+    /// 入口留空 = 不落进程，只驱动请求分派与状态。
+    fn test_manifest(id: &str, permissions: Vec<PermissionKey>) -> Manifest {
+        let mut manifest: Manifest = toml::from_str(&format!(
+            r#"
+schema_version = "1.0.0"
+id = "{id}"
+name = "Demo"
+tagline = "测试"
+version = "1.0.0"
+type = "add-on"
+maintainer = "Test"
+license = ["SPDX:Apache-2.0"]
+host_version_min = "0.1.0"
+api_version = 1
+
+[entry]
+"#
+        ))
+        .expect("测试清单应可解析");
+        manifest.permissions =
+            permissions.into_iter().map(|key| (key, "测试".to_string())).collect();
+        manifest
+    }
+
     /// 构造一个不落进程的实例（`entry` 留空：单元测试只驱动请求分派与状态，不启动进程）。
-    fn make_instance(permissions: Vec<Permission>) -> (TempDir, Arc<Instance>) {
+    fn make_instance(permissions: Vec<PermissionKey>) -> (TempDir, Arc<Instance>) {
         let (tmp, instance, _rx) = make_instance_with_events(permissions);
         (tmp, instance)
     }
 
     /// 同 [`make_instance`]，但保留事件订阅端（验证通知确实投递到壳侧）。
     fn make_instance_with_events(
-        permissions: Vec<Permission>,
+        permissions: Vec<PermissionKey>,
     ) -> (
         TempDir,
         Arc<Instance>,
@@ -2373,7 +2388,7 @@ mod tests {
     /// 同 [`make_instance_with_events`]，但用给定的插件 id（跨插件路由要用两个不同 id 的实例）。
     fn make_named_instance_with_events(
         id: &str,
-        permissions: Vec<Permission>,
+        permissions: Vec<PermissionKey>,
     ) -> (
         TempDir,
         Arc<Instance>,
@@ -2382,15 +2397,7 @@ mod tests {
         let tmp = TempDir::new("plugin-instance");
         let dir = tmp.join(id);
         std::fs::create_dir_all(&dir).unwrap();
-        let manifest = Manifest {
-            id: id.into(),
-            name: "Demo".into(),
-            version: "1.0.0".into(),
-            api_version: API_VERSION,
-            entry: Entry::default(),
-            permissions,
-            ..Manifest::default()
-        };
+        let manifest = test_manifest(id, permissions);
         let (events, rx) = tokio::sync::broadcast::channel(16);
         let instance = Instance::new(
             manifest,
@@ -2439,7 +2446,7 @@ mod tests {
     /// 通知必须真正投递；事件通道无订阅者时回可读错误，不把「塞进通道」当成已弹出。
     #[test]
     fn notification_show_reports_delivery() {
-        let (_tmp, instance, mut rx) = make_instance_with_events(vec![Permission::Notification]);
+        let (_tmp, instance, mut rx) = make_instance_with_events(vec![PermissionKey::Notification]);
         instance
             .dispatch(
                 method::notification::SHOW,
@@ -2452,7 +2459,7 @@ mod tests {
                 if title == "完成" && body.as_deref() == Some("已生成")
         ));
 
-        let (_tmp, instance) = make_instance(vec![Permission::Notification]);
+        let (_tmp, instance) = make_instance(vec![PermissionKey::Notification]);
         let err = instance
             .dispatch(
                 method::notification::SHOW,
@@ -2555,7 +2562,7 @@ mod tests {
     /// 声明过的调用同样进审计，但不计入「未声明」计数，也不广播提示。
     #[test]
     fn declared_capability_is_audited_without_a_warning() {
-        let (tmp, instance, mut rx) = make_instance_with_events(vec![Permission::Fs]);
+        let (tmp, instance, mut rx) = make_instance_with_events(vec![PermissionKey::Files]);
         let file = tmp.join("note.txt").to_string_lossy().into_owned();
         instance.handle_line(&request_line(
             method::fs::WRITE_TEXT,
@@ -2621,7 +2628,7 @@ mod tests {
     fn chat_requests_route_to_shell_and_resolve() {
         let tmp = TempDir::new("instance-chat-request");
         let runtime = PluginRuntime::new(tmp.to_path_buf());
-        let (_t, instance) = make_instance(vec![Permission::Ai]);
+        let (_t, instance) = make_instance(vec![PermissionKey::Ai]);
         instance.attach_runtime(&runtime);
         runtime
             .instances
@@ -2661,17 +2668,17 @@ mod tests {
     /// 各能力面未声明也执行：审计留痕，且不再以 `PERMISSION_DENIED` 收场。
     #[test]
     fn undeclared_calls_of_each_face_are_audited_not_denied() {
-        let cases: [(Permission, &str, Value); 9] = [
+        let cases: [(PermissionKey, &str, Value); 9] = [
             // 入参一律取「必然执行失败但不会真的落盘 / 出网 / 弹框」的形态
-            (Permission::Process, method::process::SPAWN, json!({ "program": "atelyx-no-such-program" })),
-            (Permission::Fs, method::fs::LIST, json!({ "path": "atelyx-no-such-dir" })),
-            (Permission::Shortcuts, method::shortcut::REGISTER, json!({ "accelerator": "Ctrl+F9" })),
-            (Permission::Shortcuts, method::shortcut::QUERY, json!({ "accelerator": "Ctrl+F9" })),
-            (Permission::Http, method::http::REQUEST, json!({ "method": "GET", "url": "ftp://example.com" })),
-            (Permission::Dialog, method::dialog::PICK_DIRECTORY, Value::Null),
-            (Permission::Table, method::table::SNAPSHOT, Value::Null),
-            (Permission::Table, method::table::SET_CELL_IMAGE, json!({ "rowId": "r1", "fieldId": "f1", "images": [] })),
-            (Permission::Ai, method::ai::CHAT_RENAME, json!({ "sessionId": "s1", "title": "T" })),
+            (PermissionKey::Process, method::process::SPAWN, json!({ "program": "atelyx-no-such-program" })),
+            (PermissionKey::Files, method::fs::LIST, json!({ "path": "atelyx-no-such-dir" })),
+            (PermissionKey::Shortcut, method::shortcut::REGISTER, json!({ "accelerator": "Ctrl+F9" })),
+            (PermissionKey::Shortcut, method::shortcut::QUERY, json!({ "accelerator": "Ctrl+F9" })),
+            (PermissionKey::Network, method::http::REQUEST, json!({ "method": "GET", "url": "ftp://example.com" })),
+            (PermissionKey::Dialog, method::dialog::PICK_DIRECTORY, Value::Null),
+            (PermissionKey::Files, method::table::SNAPSHOT, Value::Null),
+            (PermissionKey::Files, method::table::SET_CELL_IMAGE, json!({ "rowId": "r1", "fieldId": "f1", "images": [] })),
+            (PermissionKey::Ai, method::ai::CHAT_RENAME, json!({ "sessionId": "s1", "title": "T" })),
         ];
         for (permission, method_name, params) in cases {
             // 未声明：照常进入执行路径并留痕（响应写往不存在的插件进程，观测点在审计记录）
@@ -2692,7 +2699,7 @@ mod tests {
 
     #[test]
     fn fs_roundtrip_through_dispatch() {
-        let (tmp, instance) = make_instance(vec![Permission::Fs]);
+        let (tmp, instance) = make_instance(vec![PermissionKey::Files]);
         let file = tmp.join("note.txt").to_string_lossy().into_owned();
         instance
             .dispatch(method::fs::WRITE_TEXT, &json!({ "path": file, "content": "hello" }))
@@ -2721,7 +2728,7 @@ mod tests {
 
     #[test]
     fn process_child_calls_are_confined_to_own_bookkeeping() {
-        let (_tmp, instance) = make_instance(vec![Permission::Process]);
+        let (_tmp, instance) = make_instance(vec![PermissionKey::Process]);
         for (method_name, params) in [
             (method::process::KILL, json!({ "pid": 4242 })),
             (method::process::WRITE_STDIN, json!({ "pid": 4242, "data": "x" })),
@@ -2734,7 +2741,7 @@ mod tests {
 
     #[test]
     fn shortcut_registration_reports_platform_unavailability() {
-        let (_tmp, instance) = make_instance(vec![Permission::Shortcuts]);
+        let (_tmp, instance) = make_instance(vec![PermissionKey::Shortcut]);
         let error = instance
             .dispatch(method::shortcut::REGISTER, &json!({ "accelerator": "Ctrl+F9" }))
             .expect_err("无 OS 层时注册必须可读失败");
@@ -2749,7 +2756,7 @@ mod tests {
     /// 之后才落表的子进程 / 全局快捷键会逃过本次收尾（「插件已停、本机服务仍在跑 / 热键仍被占用」）。
     #[test]
     fn stale_session_resource_acquisition_is_refused() {
-        let (_tmp, instance) = make_instance(vec![Permission::Process, Permission::Shortcuts]);
+        let (_tmp, instance) = make_instance(vec![PermissionKey::Process, PermissionKey::Shortcut]);
         let stale = instance.run_token.load(Ordering::SeqCst) + 1;
         for (method_name, params) in [
             (method::process::SPAWN, json!({ "program": "atelyx-no-such-program" })),
@@ -2845,9 +2852,9 @@ mod tests {
         assert!(bus.message.contains(service::error::UNKNOWN_SERVICE));
     }
 
-    /// 活动提供者是外部插件时普通方法与 `service.call` 都转发；提供者下线即回落内置。
+    /// 插件登记的新服务：普通方法与 `service.call` 都转发给它；提供者下线即从目录消失。
     #[tokio::test]
-    async fn external_provider_takes_over_vault_routing() {
+    async fn external_provider_routes_its_own_service() {
         let tmp = TempDir::new("instance-service-forward");
         let runtime = PluginRuntime::new(tmp.to_path_buf());
         let (_t, provider, _provider_events) =
@@ -2864,9 +2871,9 @@ mod tests {
             .register_service(
                 &provider.id,
                 service::RegisterParams {
-                    service: "vault".into(),
+                    service: "demo".into(),
                     version: None,
-                    methods: vec!["readText".into()],
+                    methods: vec!["echo".into()],
                 },
             )
             .expect("登记应成功");
@@ -2875,13 +2882,9 @@ mod tests {
                 .service_list()
                 .services
                 .iter()
-                .find(|s| s.service == "vault")
+                .find(|s| s.service == "demo")
                 .and_then(|s| s.provider.clone())
         };
-        assert_eq!(provider_of(&runtime), None, "登记不自动顶替内置");
-        runtime
-            .set_service_provider("vault", Some(&provider.id))
-            .expect("切换应成功");
         assert_eq!(provider_of(&runtime).as_deref(), Some(provider.id.as_str()));
 
         let (_t2, caller, _caller_events) =
@@ -2894,10 +2897,7 @@ mod tests {
             .insert(caller.id.clone(), caller.clone());
 
         // 普通方法走转发：在途条目按提供者记账，别家回报不得认领
-        caller.handle_line(&request_line(
-            method::vault::READ_TEXT,
-            &json!({ "path": "notes/a.md" }),
-        ));
+        caller.handle_line(&request_line("demo.echo", &json!({ "text": "hi" })));
         let call_id = wait_service_call(&runtime).await;
         assert!(
             runtime
@@ -2915,7 +2915,7 @@ mod tests {
         // `service.call` 同样走外部提供者
         caller.handle_line(&request_line(
             service::method::CALL,
-            &json!({ "service": "vault", "method": "readText", "params": { "path": "notes/b.md" } }),
+            &json!({ "service": "demo", "method": "echo", "params": { "text": "hi" } }),
         ));
         let second = wait_service_call_other_than(&runtime, &call_id).await;
         for id in [call_id, second] {
@@ -2931,9 +2931,10 @@ mod tests {
                 .expect("提供者回报应被接受");
         }
 
-        // 提供者下线：登记摘除、活动回落内置
+        // 提供者下线：登记摘除，服务从目录消失
         provider.stop();
         assert_eq!(provider_of(&runtime), None);
+        assert!(!runtime.service_available("demo"));
     }
 
     /// 在途调用遇提供者停用立即以 `provider_unavailable` 收场，不等 30 秒超时。
@@ -2955,15 +2956,12 @@ mod tests {
             .register_service(
                 &provider.id,
                 service::RegisterParams {
-                    service: "vault".into(),
+                    service: "demo".into(),
                     version: None,
-                    methods: vec!["readText".into()],
+                    methods: vec!["echo".into()],
                 },
             )
             .expect("登记应成功");
-        runtime
-            .set_service_provider("vault", Some(&provider.id))
-            .expect("切换应成功");
 
         let (_t2, caller, _caller_events) =
             make_named_instance_with_events("com.example.caller", Vec::new());
@@ -2973,10 +2971,7 @@ mod tests {
             .lock()
             .unwrap()
             .insert(caller.id.clone(), caller.clone());
-        caller.handle_line(&request_line(
-            method::vault::READ_TEXT,
-            &json!({ "path": "notes/a.md" }),
-        ));
+        caller.handle_line(&request_line("demo.echo", &json!({ "text": "hi" })));
         let call_id = wait_service_call(&runtime).await;
 
         provider.stop();
@@ -3024,29 +3019,24 @@ mod tests {
         assert!(tool_result.message.contains(service::error::UNKNOWN_METHOD));
     }
 
-    /// `ai` 被外部提供者顶替后，工具名册与回报仍由宿主处理，不被提供者截走。
+    /// 内置服务名不可被插件占用：登记被拒，内置分派照旧。
     #[test]
-    fn host_owned_ai_methods_are_never_forwarded() {
-        let tmp = TempDir::new("instance-service-host-owned");
+    fn builtin_service_names_reject_registration() {
+        let tmp = TempDir::new("instance-service-builtin");
         let runtime = PluginRuntime::new(tmp.to_path_buf());
-        runtime
+        let error = runtime
             .register_service(
                 "com.example.provider",
                 service::RegisterParams {
                     service: "ai".into(),
                     version: None,
-                    methods: vec!["chat.send".into(), "toolResult".into(), "registerTool".into()],
+                    methods: vec!["chat.send".into()],
                 },
             )
-            .expect("登记应成功");
-        runtime
-            .set_service_provider("ai", Some("com.example.provider"))
-            .expect("切换应成功");
-        assert_eq!(
-            runtime.forward_to("ai", "chat.send"),
-            Forward::Plugin("com.example.provider".into()),
-            "对话能力可以被外部提供者接管"
-        );
+            .expect_err("内置服务名应被拒");
+        assert!(error.contains("已被占用"), "{error}");
+        assert_eq!(runtime.forward_to("ai", "chat.send"), Forward::Local, "内置服务仍走本地");
+        // 宿主保留方法不经转发（外部服务实现也截不走）
         for (service_name, method_name) in [
             ("ai", "toolResult"),
             ("ai", "registerTool"),
@@ -3058,24 +3048,6 @@ mod tests {
                 "{service_name}.{method_name} 是宿主保留方法"
             );
         }
-    }
-
-    /// 归属插件停用后，直接调它的方法（不经 `service.call`）也不能落到本地实现。
-    #[test]
-    fn a_disabled_owner_blocks_direct_service_methods() {
-        let tmp = TempDir::new("instance-service-blocked");
-        let runtime = PluginRuntime::new(tmp.to_path_buf());
-        runtime.set_builtin_owner_enabled("atelyx.notes", false);
-        assert_eq!(runtime.forward_to("markdown", "parse"), Forward::Unavailable);
-        assert!(runtime
-            .service_target(service::CallParams {
-                service: "markdown".into(),
-                method: "parse".into(),
-                params: Value::Null,
-            })
-            .is_err_and(|error| error.message.contains(service::error::UNKNOWN_SERVICE)));
-        runtime.set_builtin_owner_enabled("atelyx.notes", true);
-        assert_eq!(runtime.forward_to("markdown", "parse"), Forward::Local, "重新启用即回到内置分派");
     }
 
     /// 等在途服务调用落表（转发任务被调度后才登记）。
@@ -3110,7 +3082,7 @@ mod tests {
     /// 快捷键占用查询：无 OS 层时以可读失败收场（与注册同一原因），非法加速键亦拒。
     #[test]
     fn shortcut_query_reports_platform_unavailability() {
-        let (_tmp, instance) = make_instance(vec![Permission::Shortcuts]);
+        let (_tmp, instance) = make_instance(vec![PermissionKey::Shortcut]);
         let error = instance
             .dispatch(method::shortcut::QUERY, &json!({ "accelerator": "Ctrl+F9" }))
             .expect_err("无 OS 层时查询应可读失败");
@@ -3123,7 +3095,7 @@ mod tests {
 
     #[test]
     fn state_roundtrip_through_dispatch() {
-        let (_tmp, instance) = make_instance(vec![Permission::State]);
+        let (_tmp, instance) = make_instance(vec![PermissionKey::State]);
         instance
             .dispatch(method::state::WRITE, &json!({ "json": { "n": 1 } }))
             .expect("写 state 应成功");
@@ -3353,7 +3325,7 @@ mod tests {
     async fn ai_tool_registration_and_call_roundtrip() {
         let tmp = TempDir::new("instance-ai-tool");
         let runtime = PluginRuntime::new(tmp.to_path_buf());
-        let (_t, instance) = make_instance(vec![Permission::Ai]);
+        let (_t, instance) = make_instance(vec![PermissionKey::Ai]);
         instance.attach_runtime(&runtime);
         instance.set_status(PluginStatus::Running);
         instance.session_active.store(true, Ordering::SeqCst);
@@ -3421,7 +3393,7 @@ mod tests {
     async fn tool_call_is_refused_once_session_is_inactive() {
         let tmp = TempDir::new("instance-ai-tool-session");
         let runtime = PluginRuntime::new(tmp.to_path_buf());
-        let (_t, instance) = make_instance(vec![Permission::Ai]);
+        let (_t, instance) = make_instance(vec![PermissionKey::Ai]);
         instance.attach_runtime(&runtime);
         instance.set_status(PluginStatus::Running);
         instance.session_active.store(true, Ordering::SeqCst);
@@ -3454,7 +3426,7 @@ mod tests {
     /// 导入源只能是插件私有目录内的既有文件：目录外、目录本身、空路径都拒收。
     #[test]
     fn import_source_must_be_a_file_inside_private_dir() {
-        let (tmp, instance) = make_instance(vec![Permission::Vault, Permission::Fs]);
+        let (tmp, instance) = make_instance(vec![PermissionKey::Files]);
         let private = fs::private_dir(&instance.state_dir).unwrap();
         let inside = PathBuf::from(&private).join("staged.bin");
         std::fs::write(&inside, b"abc").unwrap();
@@ -3477,7 +3449,7 @@ mod tests {
     fn import_file_routes_to_shell() {
         let tmp = TempDir::new("instance-import-file");
         let runtime = PluginRuntime::new(tmp.to_path_buf());
-        let (_t, instance) = make_instance(vec![Permission::Vault, Permission::Fs]);
+        let (_t, instance) = make_instance(vec![PermissionKey::Files]);
         instance.attach_runtime(&runtime);
         runtime
             .instances

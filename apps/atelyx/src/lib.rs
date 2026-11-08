@@ -20,6 +20,7 @@ mod chat_actions;
 mod chat_composer;
 mod chat_input;
 mod chat_stream;
+mod cli;
 mod app_icon;
 mod chat_view;
 mod color_picker_actions;
@@ -250,6 +251,11 @@ fn open_external(url: &str) {
 
 /// 启动 daemon：建主窗口、装配功能模块、跑 iced 事件循环。
 pub fn run() -> iced::Result {
+    // 命令行分流在建窗口之前：扩展的打包 / 校验 / 装卸不需要界面，跑完直接退出
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(code) = cli::dispatch(&args) {
+        std::process::exit(code);
+    }
     // 字体族清单必须在建渲染器之前备好：default_font 只在渲染器创建时读一次
     ui::font::init();
     iced::daemon(App::boot, App::update, App::view)
@@ -639,13 +645,6 @@ enum Message {
     PluginEvent(Box<PluginEvent>),
     /// 托盘选择（插件条目回发 `host:tray.click`，宿主条目由壳处理）。
     Tray(tray::TrayEvent),
-    /// 插件请求接管聚焦窗口（壳应用后经运行时回填插件）。
-    PluginTakeoverAsk {
-        request_id: u64,
-        plugin_id: String,
-        scope: atelyx_core::plugin_runtime::TakeoverScope,
-        surface_id: String,
-    },
     /// 插件请求打开独立窗口。
     PluginWindowOpen {
         request_id: u64,
@@ -680,7 +679,6 @@ enum Message {
     /// 一拍帧通知已写完（复位在飞标记）。
     PluginFramePumped,
     /// 退出接管（常驻退出入口 / Esc）。
-    PluginExitTakeover(window::Id),
     /// 窗口获得焦点（接管请求作用域 = 最近聚焦窗口）。
     WindowFocused(window::Id),
     /// 打开弹层（几何规格 + 内容形态由 layout_view 定义）。
@@ -1322,7 +1320,6 @@ pub struct App {
     /// 帧拍是否还在飞（同一时刻只推一拍，慢插件不积压帧任务）。
     pub plugin_frame_pumping: bool,
     /// 各窗口的接管态（键 = OS 窗口 id；布局真源不动，退出即恢复）。
-    pub plugin_takeovers: HashMap<window::Id, plugin_actions::TakeoverActive>,
     /// 插件窗口记账（键 = OS 窗口 id；随窗口关闭 / 插件停用收尾）。
     pub plugin_windows: HashMap<window::Id, plugin_actions::PluginWindowActive>,
     /// 打开中的插件文档实例（单实例；切换文件即换实例）。
@@ -1731,7 +1728,6 @@ impl App {
                 plugin_frames: HashMap::new(),
                 plugin_frame_focus: None,
                 plugin_frame_pumping: false,
-                plugin_takeovers: HashMap::new(),
                 plugin_windows: HashMap::new(),
                 doc_open: None,
                 focused_window: None,
@@ -2049,8 +2045,6 @@ impl App {
                 } else {
                     self.detached_os.remove(&id);
                     self.os_shown.remove(&id);
-                    // 被接管窗口的接管条目随窗口消失（防悬挂：插件重启不再向死面重发 attached）
-                    let takeover_task = plugin_actions::exit_takeover(self, id);
                     if self.focused_window == Some(id) {
                         self.focused_window = None;
                     }
@@ -2060,7 +2054,7 @@ impl App {
                     if self.tooltip.as_ref().is_some_and(|(w, _, _, _, _, _)| *w == id) {
                         self.tooltip = None;
                     }
-                    takeover_task
+                    Task::none()
                 }
             }
             Message::PickVault => self.gate(PendingAfterFlush::PickVault),
@@ -3600,9 +3594,6 @@ impl App {
                 }
                 if self.popup.as_ref().is_some_and(|(w, _)| *w == window) {
                     self.dismiss_popup();
-                } else if self.plugin_takeovers.contains_key(&window) {
-                    // 接管窗口：弹层已关（上一分支），Esc = 退出接管（退出入口常驻，Esc 是后备通道）
-                    return plugin_actions::exit_takeover(self, window);
                 } else if self.main_id == Some(window) && self.props.editing.is_some() {
                     return self.on_props(PropsMsg::CancelSlot);
                 } else if self.calendar.edit.take().is_some() {
@@ -3749,9 +3740,6 @@ impl App {
                     plugin_actions::refresh_projection(self)
                 })
             }
-            Message::PluginTakeoverAsk { request_id, plugin_id, scope, surface_id } => {
-                plugin_actions::on_takeover_request(self, request_id, plugin_id, scope, surface_id)
-            }
             Message::PluginWindowOpen { request_id, plugin_id, params } => {
                 plugin_actions::on_window_open(self, request_id, plugin_id, params)
             }
@@ -3794,7 +3782,6 @@ impl App {
                 self.plugin_frame_pumping = false;
                 Task::none()
             }
-            Message::PluginExitTakeover(id) => plugin_actions::exit_takeover(self, id),
             Message::WindowFocused(id) => {
                 self.focused_window = Some(id);
                 Task::none()

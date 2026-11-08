@@ -19,12 +19,6 @@
       "line": "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"view.register\",\"params\":{\"id\":\"com.atelyx.llama.models\",\"label\":\"模型\",\"slot\":\"panel\"}}"
     },
     {
-      "name": "view-takeover-request",
-      "kind": "request",
-      "method": "view.takeover",
-      "line": "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"view.takeover\",\"params\":{\"scope\":\"full\",\"surfaceId\":\"main\"}}"
-    },
-    {
       "name": "window-closed-notification",
       "kind": "notification",
       "method": "host:window.closed",
@@ -71,32 +65,6 @@
         "slotCapacity": 262144
       }
     }
-  },
-  "manifest": {
-    "id": "com.example.studio",
-    "name": "Studio",
-    "version": "1.2.0",
-    "apiVersion": 1,
-    "minHostVersion": "0.4.0",
-    "entry": {
-      "windows": "bin/studio.exe",
-      "linux": "bin/studio"
-    },
-    "permissions": [
-      "fs",
-      "process",
-      "notification"
-    ],
-    "singleton": true,
-    "keepMountedOnVaultSwitch": false,
-    "docTypeRegistrations": [
-      {
-        "extension": "board",
-        "label": "画板",
-        "icon": "layout-dashboard",
-        "surface": "board-view"
-      }
-    ]
   },
   "methods": [
     {
@@ -312,14 +280,6 @@
       "value": {
         "path": "docs/board",
         "surfaceId": "doc:1"
-      }
-    },
-    {
-      "name": "view.takeover params",
-      "type": "TakeoverParams",
-      "value": {
-        "scope": "page",
-        "surfaceId": "main"
       }
     },
     {
@@ -1407,15 +1367,12 @@
       "value": {
         "services": [
           {
-            "service": "markdown",
+            "service": "demo",
             "version": 1,
             "methods": [
-              "parse"
+              "echo"
             ],
-            "replaceable": true,
-            "candidates": [
-              "com.example.parser"
-            ]
+            "provider": "com.example.echo"
           },
           {
             "service": "vault",
@@ -1423,8 +1380,7 @@
             "methods": [
               "readText",
               "writeText"
-            ],
-            "replaceable": true
+            ]
           }
         ]
       }

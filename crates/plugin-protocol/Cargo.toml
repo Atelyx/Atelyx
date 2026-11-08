@@ -13,4 +13,6 @@ exclude = ["tests"]
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# 清单（atelyx_manifest.toml）编解码
+toml = { version = "1", features = ["serde"] }
 thiserror = "2"

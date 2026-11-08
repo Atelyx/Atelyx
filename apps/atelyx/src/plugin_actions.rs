@@ -13,7 +13,7 @@ use iced::{Task, window};
 use atelyx_core::layout::{self, LayoutNode, LayoutOp};
 use atelyx_core::plugin_runtime::{
     Contribution, ContributionSlot, DrawCommand, FrameInput, ImageSource, SurfaceKind,
-    TakeoverScope, WindowOpenParams, WindowUpdateParams,
+    WindowOpenParams, WindowUpdateParams,
 };
 
 use crate::registry::{Registry, Snapshot};
@@ -200,11 +200,6 @@ pub fn refresh_frames(app: &mut App) -> Task<Message> {
         app.plugin_windows
             .values()
             .map(|w| (w.plugin_id.clone(), w.window_key.clone())),
-    );
-    surfaces.extend(
-        app.plugin_takeovers
-            .values()
-            .map(|t| (t.plugin_id.clone(), t.surface_id.clone())),
     );
     if let Some(doc) = &app.doc_open {
         surfaces.push((doc.plugin_id.clone(), doc.surface_id.clone()));
@@ -427,17 +422,7 @@ pub(crate) fn collect_draw_images<'a>(
     }
 }
 
-// ===== 接管与插件窗口 =====
-
-/// 一个窗口的接管态（按窗生效；布局真源不动，退出即恢复原视图）。
-#[derive(Clone, Debug)]
-pub struct TakeoverActive {
-    pub plugin_id: String,
-    /// 接管的贡献 id（与面板共用同一面 id）。
-    pub surface_id: String,
-    /// true = 全接管（含标题栏区域：拖动 / 缩放 / 关闭由宿主代执行）；false = 只接管内容区。
-    pub full: bool,
-}
+// ===== 插件窗口 =====
 
 /// 一个插件窗口的壳侧记账（os 窗口 id → 条目）。
 #[derive(Clone, Debug)]
@@ -461,85 +446,6 @@ pub struct PluginWindowActive {
     /// 插件已请求关闭、OS 窗口尚未销毁：同 id 可立即重新开窗，销毁事件到达时按是否已有新窗
     /// 决定要不要通知插件（见 [`on_plugin_window_closed`]）。
     pub closing: bool,
-}
-
-/// 插件接管请求：应用到当前聚焦窗口。贡献未注册 / 目标不可接管（插件窗口 / 已关闭窗口 /
-/// 已在接管中）都以可读原因回填失败。接管不占权限声明——它是渲染编排（只呈现插件自己注册
-/// 的贡献面），且退出入口由宿主常驻提供。
-pub fn on_takeover_request(
-    app: &mut App,
-    request_id: u64,
-    plugin_id: String,
-    scope: TakeoverScope,
-    surface_id: String,
-) -> Task<Message> {
-    let result = (|| -> Result<(), String> {
-        let Some(os_id) = app.focused_window else {
-            return Err("没有可接管的窗口".to_string());
-        };
-        // 接管只作用于工作区窗口（主窗 / 撕裂窗）：插件窗口有自己的承载语义
-        if app.plugin_windows.contains_key(&os_id) {
-            return Err("插件窗口不可被接管".to_string());
-        }
-        let is_workspace_window =
-            app.main_id == Some(os_id) || app.detached_os.contains_key(&os_id);
-        if !is_workspace_window {
-            return Err("目标窗口已关闭".to_string());
-        }
-        if app.plugin_takeovers.contains_key(&os_id) {
-            return Err("该窗口已在接管中".to_string());
-        }
-        if !app
-            .plugin_contributions
-            .iter()
-            .any(|c| c.plugin_id == plugin_id && c.id == surface_id)
-        {
-            return Err(format!("接管的贡献未注册：{surface_id}"));
-        }
-        let full = matches!(scope, TakeoverScope::Full);
-        app.plugin_takeovers.insert(
-            os_id,
-            TakeoverActive { plugin_id: plugin_id.clone(), surface_id: surface_id.clone(), full },
-        );
-        // 面就绪通知：贡献面未挂载时插件尚未提交帧，接管成功即告知（与面板挂载同一通知形态）
-        let kind = if full { SurfaceKind::Takeover } else { SurfaceKind::Page };
-        app.plugins.notify_surface_attached(&plugin_id, &surface_id, kind);
-        Ok(())
-    })();
-    app.plugins.resolve_ui_call(request_id, result);
-    refresh_projection(app)
-}
-
-/// 退出某窗口的接管（宿主常驻退出入口 / Esc / 窗口关闭随清理）。未在接管中 = 空操作。
-/// 该面没有其他挂载点（布局 / 设置 / 插件窗口 / 接管面 / 文档实例）时一并撤投影并通知插件。
-pub fn exit_takeover(app: &mut App, os_id: window::Id) -> Task<Message> {
-    let Some(entry) = app.plugin_takeovers.remove(&os_id) else {
-        return Task::none();
-    };
-    // 布局事件（拖拽命中带等）在接管期间被抑制，退出即恢复
-    app.schedule_persist();
-    let mounted_elsewhere = app
-        .plugin_surfaces
-        .contains(&(entry.plugin_id.clone(), entry.surface_id.clone()))
-        || app
-            .plugin_settings_surfaces
-            .contains(&(entry.plugin_id.clone(), entry.surface_id.clone()))
-        || app
-            .plugin_windows
-            .values()
-            .any(|w| w.plugin_id == entry.plugin_id && w.window_key == entry.surface_id)
-        || app
-            .plugin_takeovers
-            .values()
-            .any(|t| t.plugin_id == entry.plugin_id && t.surface_id == entry.surface_id)
-        || app.doc_open.as_ref().is_some_and(|doc| {
-            doc.plugin_id == entry.plugin_id && doc.surface_id == entry.surface_id
-        });
-    if !mounted_elsewhere {
-        app.plugins
-            .notify_surface_detached(&entry.plugin_id, &entry.surface_id);
-    }
-    refresh_projection(app)
 }
 
 /// 插件开窗请求：校验后建 OS 窗口（重复 id 以可读原因拒绝；窗口参数声明标题 / 尺寸 / 置顶 /
@@ -650,9 +556,7 @@ pub fn on_window_close(app: &mut App, request_id: u64, plugin_id: String, window
 /// OS 窗口已关闭（用户关闭或插件请求关闭的窗口真正销毁）：摘记账。同 id 还有其他条目时只摘记账
 /// （面仍挂着，不发卸下通知），否则发 `host:surface.detached` 并清节点态。用户关窗（条目非
 /// 关闭在途）另发 `host:window.closed`——包括「同 id 的旧窗还在途、用户关掉最后一个活窗」的序列。
-/// 若该窗口在接管中（不可达路径，防御性清理）一并摘除接管条目。
 pub fn on_plugin_window_closed(app: &mut App, os_id: window::Id) -> Task<Message> {
-    app.plugin_takeovers.remove(&os_id);
     if app.focused_window == Some(os_id) {
         app.focused_window = None;
     }
@@ -761,20 +665,14 @@ pub fn on_window_toggle_maximize(
     iced::window::toggle_maximize(os_id)
 }
 
-/// 拖动承载某个面的窗口：面先按接管面 / 插件窗口解析出口，解析不到即用当前聚焦窗口。
+/// 拖动承载某个面的窗口：面先按插件窗口解析出口，解析不到即用当前聚焦窗口。
 pub fn on_window_begin_drag(
     app: &mut App,
     request_id: u64,
     plugin_id: String,
     surface_id: String,
 ) -> Task<Message> {
-    let target = app
-        .plugin_takeovers
-        .iter()
-        .find(|(_, t)| t.plugin_id == plugin_id && t.surface_id == surface_id)
-        .map(|(id, _)| *id)
-        .or_else(|| live_plugin_window(app, &plugin_id, &surface_id))
-        .or(app.focused_window);
+    let target = live_plugin_window(app, &plugin_id, &surface_id).or(app.focused_window);
     let Some(window) = target else {
         app.plugins.resolve_ui_call(request_id, Err("没有可拖动的窗口".to_string()));
         return Task::none();
@@ -804,19 +702,9 @@ pub fn on_plugin_window_blur(app: &mut App, os_id: window::Id) -> Task<Message> 
     iced::window::set_mode(os_id, iced::window::Mode::Hidden)
 }
 
-/// 插件停用 / 崩溃后重启就绪：按当前壳侧状态重发面就绪通知（面板 / 设置 / 表格视图 / 插件窗口 / 接管面），
+/// 插件停用 / 崩溃后重启就绪：按当前壳侧状态重发面就绪通知（面板 / 设置 / 表格视图 / 插件窗口），
 /// 插件据此重建全部界面。
 pub fn resync_surfaces_on_running(app: &mut App, plugin_id: &str) {
-    let takeovers: Vec<(String, String, bool)> = app
-        .plugin_takeovers
-        .values()
-        .filter(|t| t.plugin_id == plugin_id)
-        .map(|t| (t.plugin_id.clone(), t.surface_id.clone(), t.full))
-        .collect();
-    for (pid, surface_id, full) in takeovers {
-        let kind = if full { SurfaceKind::Takeover } else { SurfaceKind::Page };
-        app.plugins.notify_surface_attached(&pid, &surface_id, kind);
-    }
     // 表格视图面：挂载状态由壳侧会话选择决定、不随贡献增删差分，重启后须显式重发
     let table_surfaces: Vec<(String, String)> = app.plugin_table_surfaces.iter().cloned().collect();
     for (pid, surface_id) in table_surfaces {

@@ -1,0 +1,38 @@
+# 清单对拍快照：字段形态与默认值冻结在这份文件里。
+# 改字段即改本文件与 conformance 测试（协议破坏性变更同批升 schema_version）。
+schema_version = "1.0.0"
+id = "com.example.studio"
+name = "Studio"
+tagline = "把工作室流程搬进工作台"
+version = "1.2.0"
+type = "add-on"
+tags = ["panel", "media"]
+maintainer = "Example <dev@example.com>"
+license = ["SPDX:Apache-2.0"]
+copyright = ["2026 Example"]
+website = "https://example.com/studio"
+platforms = ["windows-x64", "linux-x64"]
+host_version_min = "0.4.0"
+host_version_max = "0.9.0"
+api_version = 1
+singleton = true
+keep_mounted_on_vault_switch = false
+
+[permissions]
+network = "拉取素材元数据"
+files = "导入导出素材"
+notification = "渲染完成提醒"
+
+[entry]
+windows = "bin/studio.dll"
+linux = "bin/libstudio.so"
+
+[build]
+paths = ["bin"]
+paths_exclude_pattern = ["target/", ".*"]
+
+[[doc_type_registrations]]
+extension = "board"
+label = "画板"
+icon = "layout-dashboard"
+surface = "board-view"

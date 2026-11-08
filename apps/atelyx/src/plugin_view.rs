@@ -40,22 +40,6 @@ pub fn window_view<'a>(
     }
 }
 
-/// 接管面内容：与面板同一套帧渲染，无内边距铺满可用区域（接管态由 layout_view 组装）。
-pub fn takeover_content<'a>(
-    app: &'a App,
-    window: iced::window::Id,
-    plugin_id: &str,
-    surface_id: &str,
-) -> Element<'a, Message> {
-    let key = (plugin_id.to_string(), surface_id.to_string());
-    match app.plugin_frames.get(&key) {
-        Some(frame) => {
-            crate::plugin_frame::frame_view(app, window, plugin_id, surface_id, frame, Padding::ZERO)
-        }
-        None => placeholder("puzzle", "接管面", "等待插件提交界面"),
-    }
-}
-
 /// 面内容渲染（面板 / 表格视图共用）：按壳侧视图 kind 取插件贡献与帧。
 pub(crate) fn surface_view<'a>(
     app: &'a App,

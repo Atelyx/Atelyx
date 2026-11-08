@@ -55,7 +55,7 @@ pub trait PluginHandler: Send + Sync + 'static {
             .await;
     }
 
-    /// 服务调用（`host:service.call`）：本插件是这个服务的活动提供者，须用同一 `callId` 经
+    /// 服务调用（`host:service.call`）：本插件是这个服务的提供者，须用同一 `callId` 经
     /// [`Context::service_result`] 回报结果、经 [`Context::service_error`] 回报失败。
     /// 默认回报「本插件不提供该服务」，宿主不必等到调用超时。
     async fn on_service_call(&self, ctx: &Context, params: HostCallParams) {
@@ -67,8 +67,8 @@ pub trait PluginHandler: Send + Sync + 'static {
             .await;
     }
 
-    /// 某服务的活动提供者变了（`host:service.changed`，广播给全部运行中插件）。
-    /// 需要据此更新「本插件提供的服务是否生效」的界面时覆盖它；默认忽略。
+    /// 某服务的可用性变了（`host:service.changed`，广播给全部运行中插件）。
+    /// 需要据此更新服务状态的界面时覆盖它；默认忽略。
     async fn on_service_changed(&self, _ctx: &Context, _params: ChangedParams) {}
 
     /// 未知通知：默认写 stderr（宿主把插件 stderr 归入诊断输出）。

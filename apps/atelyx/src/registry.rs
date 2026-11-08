@@ -49,14 +49,12 @@ pub struct Entry {
     pub slot: Option<ContributionSlot>,
     /// 可选 / 可用：原生视图恒可用，外部插件看启用态。
     pub enabled: bool,
-    /// 能否被外部提供者替换。原生视图与平台自救面恒 false。
+    /// 能否被外部提供者替换。原生视图与内置服务恒 false。
     pub replaceable: bool,
     /// 服务：活动提供者 + 方法数，供设置页一行显示；其它类别为空串。
     pub detail: String,
     /// 服务：活动提供者（`None` = 宿主实现）；其它类别为 `None`。
     pub provider: Option<String>,
-    /// 服务：其余候选提供者；其它类别为空。
-    pub candidates: Vec<String>,
     /// 服务：是否有宿主实现可回落；其它类别为 false。
     pub builtin: bool,
 }
@@ -102,7 +100,6 @@ impl Registry {
                 replaceable: false,
                 detail: String::new(),
                 provider: None,
-                candidates: Vec::new(),
                 builtin: false,
             });
         }
@@ -118,7 +115,6 @@ impl Registry {
                 replaceable: false,
                 detail: String::new(),
                 provider: None,
-                candidates: Vec::new(),
                 builtin: false,
             });
         }
@@ -134,10 +130,9 @@ impl Registry {
                 },
                 slot: None,
                 enabled: true,
-                replaceable: info.replaceable,
+                replaceable: false,
                 detail: service_detail(info),
                 provider: info.provider.clone(),
-                candidates: info.candidates.clone(),
                 builtin: info.provider.is_none(),
             });
         }
@@ -268,14 +263,12 @@ mod tests {
         }
     }
 
-    fn service(name: &str, provider: Option<&str>, replaceable: bool) -> ServiceInfo {
+    fn service(name: &str, provider: Option<&str>) -> ServiceInfo {
         ServiceInfo {
             service: name.into(),
             version: 1,
             methods: vec!["read".into(), "write".into()],
             provider: provider.map(str::to_string),
-            replaceable,
-            candidates: vec!["com.b".into()],
         }
     }
 
@@ -284,9 +277,9 @@ mod tests {
         let contributions = [contribution()];
         let plugins = [plugin_summary(enabled)];
         let services = [
-            service("vault", None, true),
-            service("query", None, false),
-            service("table", None, true),
+            service("vault", None),
+            service("query", None),
+            service("table", None),
         ];
         Registry::build(Snapshot {
             views: &views,
@@ -346,12 +339,12 @@ mod tests {
     }
 
     #[test]
-    fn native_views_are_not_replaceable() {
+    fn nothing_in_the_registry_is_replaceable() {
         let registry = registry(true);
         assert!(!registry.get("note").expect("原生视图").replaceable);
         assert!(!registry.get("plugin:com.a:models").expect("插件视图").replaceable);
         let vault = registry.service("vault").expect("服务");
-        assert!(vault.replaceable);
+        assert!(!vault.replaceable, "内置服务归宿主，不可被插件顶替");
         assert!(vault.builtin);
         assert_eq!(vault.detail, "宿主 · 2 个方法");
     }

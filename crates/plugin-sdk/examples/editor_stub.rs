@@ -1,28 +1,25 @@
-//! 端到端测试夹具：`editor` 服务的外部提供者。
+//! 端到端测试夹具：一个登记自有服务（`demoeditor`）的外部提供者。
 //!
-//! 登记时只是候选（内置实现仍活动）；成为活动提供者后才会发起探针——内置路径由壳执行，
-//! 没有壳的进程内测试里那些调用不会返回。探针同时走「直接调用 `editor.selection`」与
-//! 「`service.call` 信封」，把两侧结果写进自持数据，供测试断言顶替后两条路都落到本插件。
+//! 登记后立即成为该服务的提供者，随后发起探针——探针同时走「直接调用 `demoeditor.selection`」
+//! 与「`service.call` 信封」，把两侧结果写进自持数据，供测试断言两条路都落到本插件。
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use atelyx_plugin_sdk::protocol::envelope::RpcError;
 use atelyx_plugin_sdk::protocol::event::PublishParams;
-use atelyx_plugin_sdk::protocol::method;
-use atelyx_plugin_sdk::protocol::service::{ChangedParams, HostCallParams};
+use atelyx_plugin_sdk::protocol::service::HostCallParams;
 use atelyx_plugin_sdk::{Context, PluginHandler};
 use serde_json::{json, Value};
 
-const STUB_ID: &str = "com.atelyx.editor-stub";
+/// 夹具自有的服务名（不与内置服务重名：内置名归宿主，登记会被拒）。
+const SERVICE: &str = "demoeditor";
 
 struct Inner {
     /// 探针序号：每次落盘都带它，测试据此等新一次探针。
     probe: AtomicU64,
     /// 探针串行化：同一时刻只有一次探针在跑，落盘顺序与触发顺序一致。
     probe_lock: tokio::sync::Mutex<()>,
-    /// 最近一次 `host:service.changed` 是否把自己报为活动提供者。
-    active: AtomicBool,
 }
 
 fn outcome<T: serde::Serialize>(result: Result<T, RpcError>) -> Value {
@@ -34,16 +31,13 @@ fn outcome<T: serde::Serialize>(result: Result<T, RpcError>) -> Value {
 
 impl Inner {
     async fn probe(&self, ctx: &Context) {
-        if !self.active.load(Ordering::SeqCst) {
-            return;
-        }
         let _guard = self.probe_lock.lock().await;
         let seq = self.probe.fetch_add(1, Ordering::SeqCst) + 1;
-        let selection = ctx.service_call("editor", "selection", json!({})).await;
+        let selection = ctx.service_call(SERVICE, "selection", json!({})).await;
         let replace = ctx
-            .service_call("editor", "replaceSelection", json!({ "text": "*" }))
+            .service_call(SERVICE, "replaceSelection", json!({ "text": "*" }))
             .await;
-        let direct = ctx.call_raw(method::editor::SELECTION, json!({})).await;
+        let direct = ctx.call_raw(&format!("{SERVICE}.selection"), json!({})).await;
         let state = json!({
             "probe": seq,
             "selection": outcome(selection),
@@ -64,30 +58,19 @@ struct EditorStub {
 impl PluginHandler for EditorStub {
     async fn on_ready(&self, ctx: &Context) {
         if let Err(e) = ctx
-            .register_service("editor", &["selection", "replaceSelection"])
+            .register_service(SERVICE, &["selection", "replaceSelection"])
             .await
         {
-            eprintln!("登记 editor 服务失败：{e}");
+            eprintln!("登记 {SERVICE} 服务失败：{e}");
         }
         if let Err(e) = ctx.subscribe("vault:file.changed").await {
             eprintln!("订阅文件变更失败：{e}");
         }
-    }
-
-    async fn on_service_changed(&self, ctx: &Context, params: ChangedParams) {
-        if params.service != "editor" {
-            return;
-        }
-        self.inner
-            .active
-            .store(params.provider.as_deref() == Some(STUB_ID) && params.available, Ordering::SeqCst);
-        // 通知 worker 必须空出来处理 `host:service.call`：探针会调到本插件自己
-        let inner = self.inner.clone();
-        let ctx = ctx.clone();
-        tokio::spawn(async move { inner.probe(&ctx).await });
+        self.inner.probe(ctx).await;
     }
 
     async fn on_host_event(&self, ctx: &Context, _params: PublishParams) {
+        // 通知 worker 必须空出来处理 `host:service.call`：探针会调到本插件自己
         let inner = self.inner.clone();
         let ctx = ctx.clone();
         tokio::spawn(async move { inner.probe(&ctx).await });
@@ -110,6 +93,5 @@ atelyx_plugin_sdk::export_in_process_plugin!(EditorStub {
     inner: Arc::new(Inner {
         probe: AtomicU64::new(0),
         probe_lock: tokio::sync::Mutex::new(()),
-        active: AtomicBool::new(false),
     }),
 });

@@ -7,7 +7,7 @@ Atelyx 插件协议的全部公开类型与方法名。概念、取舍与常见�
 
 ## 1. 协议版本与清单
 
-`plugin.json` 的结构、能力声明与宿主保留的清单文件名。`apiVersion` 必须与宿主相等，不等即拒绝装载。
+`atelyx_manifest.toml` 的结构、权限声明与宿主保留的清单文件名。`api_version` 必须与宿主相等，不等即拒绝装载；`permissions` 是「键 → 给用户看的原因」表，不拦调用。
 
 ```rust
 // crates/plugin-protocol/src/lib.rs
@@ -18,32 +18,74 @@ pub const API_VERSION: u32 = 1;
 
 ```rust
 // crates/plugin-protocol/src/manifest.rs
-/// manifest 文件名（固定放在插件目录根部）。
-pub const MANIFEST_FILE: &str = "plugin.json";
+/// 清单文件名（固定放在插件目录根部）。
+pub const MANIFEST_FILE: &str = "atelyx_manifest.toml";
 ```
 
 ```rust
 // crates/plugin-protocol/src/manifest.rs
-/// 插件 manifest。缺字段按 [`Default`] 补齐，未知字段忽略。
-#[serde(rename_all = "camelCase", default)]
+/// 清单格式版本。字段增删改即升版，旧版清单按「格式不识别」拒收。
+pub const SCHEMA_VERSION: &str = "1.0.0";
+```
+
+```rust
+// crates/plugin-protocol/src/manifest.rs
+/// 支持的平台标签。
+pub const PLATFORMS: [&str; 2] = ["windows-x64", "linux-x64"];
+```
+
+```rust
+// crates/plugin-protocol/src/manifest.rs
+/// 插件清单。未知键拒收：拼错的键会静默丢掉声明，宁可报错。
+#[serde(deny_unknown_fields)]
 pub struct Manifest {
+    /// 清单格式版本，必须等于 [`SCHEMA_VERSION`]。
+    pub schema_version: String,
     /// 反向域名 id（如 `com.atelyx.echo`），发布后不可变；同时是插件目录名与隔离命名空间。
     pub id: String,
     pub name: String,
+    /// 一句话说明（安装页与详情页展示）。
+    pub tagline: String,
     pub version: String,
+    /// 扩展类型，只收 `add-on`。
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// 分类标签（安装页筛选用），可缺省。
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// 维护者自述（宿主不校验形态）。
+    pub maintainer: String,
+    /// SPDX 标识列表（如 `SPDX:Apache-2.0`）。
+    pub license: Vec<String>,
+    #[serde(default)]
+    pub copyright: Vec<String>,
+    #[serde(default)]
+    pub website: Option<String>,
+    /// 支持的平台标签；缺省 = 全平台。
+    #[serde(default)]
+    pub platforms: Vec<String>,
+    /// 最低宿主版本（语义化版本）；低于它即拒绝装载。
+    pub host_version_min: String,
+    /// 最高宿主版本（含）；缺省 = 不限。
+    #[serde(default)]
+    pub host_version_max: Option<String>,
     /// 协议版本，必须等于宿主的 [`crate::API_VERSION`]。
     pub api_version: u32,
-    /// 最低宿主版本（语义化版本，如 `0.4.0`）；缺省 = 不限。宿主低于它即拒绝装载。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub min_host_version: Option<String>,
-    pub entry: Entry,
-    /// 能力声明清单：用于向用户公示与审计，不拦截调用——插件是原生进程，闸门拦住的是
-    /// 守规矩的插件。宿主据此标出「用到但未声明」的调用。
-    pub permissions: Vec<Permission>,
-    /// 进程型插件的单实例约束（多窗口共享同一宿主运行时全局单例）。
+    /// 生效的插件只有一份实例（多窗口共享同一宿主运行时单例）。
+    #[serde(default)]
     pub singleton: bool,
-    /// 切换仓库容器（本地 ↔ 空间 / 换仓库）时保持挂载；false = 宿主重载插件进程。
+    /// 切换仓库容器（本地 ↔ 空间 / 换仓库）时保持挂载；false = 宿主重载插件。
+    #[serde(default)]
     pub keep_mounted_on_vault_switch: bool,
+    /// 权限表：键 = 能力面，值 = 给用户看的原因。用于安装公示、详情展示与审计归类，
+    /// 不拦截调用——插件与宿主同地址空间，这份声明是知情权而非沙箱边界。
+    #[serde(default)]
+    pub permissions: BTreeMap<PermissionKey, String>,
+    pub entry: Entry,
+    #[serde(default)]
+    pub build: BuildSpec,
+    /// 领域文档类型注册（扩展名 → 承载贡献）。
+    #[serde(default)]
     pub doc_type_registrations: Vec<DocTypeRegistration>,
 }
 ```
@@ -52,7 +94,7 @@ pub struct Manifest {
 // crates/plugin-protocol/src/manifest.rs
 /// 按平台的插件入口（相对插件目录的路径）。缺失 = 该平台不支持。
 /// 入口是原生动态库：宿主按 C ABI 装载到本进程，插件与宿主同地址空间。
-#[serde(rename_all = "camelCase", default)]
+#[serde(deny_unknown_fields)]
 pub struct Entry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub windows: Option<String>,
@@ -63,30 +105,49 @@ pub struct Entry {
 
 ```rust
 // crates/plugin-protocol/src/manifest.rs
-/// 能力面枚举（封闭）：扩容随协议升版。名字与宿主能力面一一对应。
-#[serde(rename_all = "camelCase")]
-pub enum Permission {
-    Fs,
-    Http,
-    Process,
-    State,
-    Notification,
-    Shortcuts,
-    Vault,
-    Table,
+/// 打包设置（只被 `extension build` 读取，宿主装载时不用）。
+#[serde(deny_unknown_fields)]
+pub struct BuildSpec {
+    /// 要打进包的文件路径（相对清单目录）；缺省 = 整目录。
+    #[serde(default)]
+    pub paths: Vec<String>,
+    /// 打包时排除的路径模式。
+    #[serde(default)]
+    pub paths_exclude_pattern: Vec<String>,
+}
+```
+
+```rust
+// crates/plugin-protocol/src/manifest.rs
+/// 权限键：一键对应一组能力面，键集合即安装公示的粒度。增删随协议升版。
+#[serde(rename_all = "snake_case")]
+pub enum PermissionKey {
+    /// `http`。
+    Network,
+    /// `fs` / `vault` / `table` / 编辑选区 / 活动统计——凡读写仓库内容都算。
+    Files,
     Clipboard,
+    /// 自起子进程。
+    Process,
+    /// 插件窗口。
     Window,
     Tray,
+    /// 全局快捷键。
+    Shortcut,
+    Notification,
     Collab,
     Ai,
+    /// 系统文件 / 目录对话框。
     Dialog,
+    /// 插件私有数据。
+    State,
 }
 ```
 
 ```rust
 // crates/plugin-protocol/src/manifest.rs
 /// 领域文档类型注册：扩展名、展示标签、图标名与承载文档内容的贡献 id。
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct DocTypeRegistration {
     /// 不带点的扩展名（如 `board`）。
     pub extension: String,
@@ -94,8 +155,47 @@ pub struct DocTypeRegistration {
     /// 宿主内置形状名（未知名回落拼图）。
     pub icon: String,
     /// 承载该文档实例的贡献 id（插件须同时以 `view.register` 注册同名贡献，
-    /// `slot` 为面板）；打开该扩展名文件时宿主分配 surfaceId 并通知插件提交整面帧。
+    /// `slot` 为面板）；打开该扩展名文件时宿主分配 surfaceId 并通知插件。
     pub surface: String,
+}
+```
+
+```rust
+// crates/plugin-protocol/src/manifest.rs
+/// 当前平台的清单标签（与 [`PLATFORMS`] 同口径）。
+pub fn current_platform() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "windows-x64"
+    } else if cfg!(target_os = "linux") {
+        "linux-x64"
+    } else {
+        "unknown"
+    }
+}
+```
+
+```rust
+// crates/plugin-protocol/src/manifest.rs
+/// 宽松语义化版本解析：`x` / `x.y` / `x.y.z`（缺段补 0），可带 `-` 预发布后缀（忽略）。
+/// 返回 `None` = 非法形态。宿主与插件两侧共用同一口径做版本比较。
+pub fn parse_semver(version: &str) -> Option<(u32, u32, u32)> {
+    let core = version.trim().split('-').next().unwrap_or("");
+    if core.is_empty() {
+        return None;
+    }
+    let mut parts = [0u32; 3];
+    let mut count = 0;
+    for (index, segment) in core.split('.').enumerate() {
+        if index >= 3 {
+            return None;
+        }
+        if segment.is_empty() || !segment.chars().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        parts[index] = segment.parse().ok()?;
+        count += 1;
+    }
+    (count >= 1).then_some((parts[0], parts[1], parts[2]))
 }
 ```
 
@@ -213,12 +313,12 @@ pub struct RpcError {
 // crates/plugin-protocol/src/service.rs
 /// 方法名常量：提供者登记与调用。
 pub mod method {
-    /// 提供者声明自己提供哪些服务方法（`{ service, version, methods }`）。登记不等于生效：
-    /// 同一服务同时只有一个活动提供者，切换由用户决定（见 [`ServiceInfo::active`]）。
+    /// 提供者声明自己提供哪些服务方法（`{ service, version, methods }`）。
+    /// 只能登记**新**服务名：内置服务名归宿主，已被占用的名字以可读错误拒收。
     pub const REGISTER: &str = "service.register";
-    /// 撤销自己声明的服务（连带把它从候选中摘掉；活动提供者撤销后该服务回落内置实现）。
+    /// 撤销自己声明的服务（该服务随之离开能力总线）。
     pub const UNREGISTER: &str = "service.unregister";
-    /// 枚举在册服务：服务名、版本、方法名、活动提供者与其余候选。
+    /// 枚举在册服务：服务名、版本、方法名与提供者（`None` = 内置实现）。
     pub const LIST: &str = "service.list";
     /// 调用某个服务的方法：`{ service, method, params }`，应答就是该方法自己的结果。
     pub const CALL: &str = "service.call";
@@ -254,7 +354,7 @@ pub const MAX_METHODS_PER_SERVICE: usize = 128;
 /// `service.register` 的 params：声明本插件提供某个服务的若干方法。
 #[serde(rename_all = "camelCase")]
 pub struct RegisterParams {
-    /// 服务名（与内置服务同名即成为它的候选提供者）。
+    /// 服务名（须为内置服务目录之外的新名字）。
     pub service: String,
     /// 契约版本；缺省 = [`SERVICE_VERSION`]。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -279,18 +379,13 @@ pub struct UnregisterParams {
 #[serde(rename_all = "camelCase")]
 pub struct ServiceInfo {
     pub service: String,
-    /// 活动提供者的契约版本。
+    /// 提供者的契约版本。
     pub version: u32,
-    /// 活动提供者实现的方法名。
+    /// 提供者实现的方法名。
     pub methods: Vec<String>,
-    /// 活动提供者：`None` = 内置实现。
+    /// 提供者：`None` = 内置（宿主）实现。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
-    /// 内置实现能否被替换（字体 / 主题这类平台自救面不可替换）。
-    pub replaceable: bool,
-    /// 其余候选提供者（插件 id，按登记序）。
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub candidates: Vec<String>,
 }
 ```
 
@@ -344,14 +439,14 @@ pub struct ResultParams {
 
 ```rust
 // crates/plugin-protocol/src/service.rs
-/// `host:service.changed` 的 params：活动提供者变化（含提供者下线）。
+/// `host:service.changed` 的 params：服务可用性变化（登记 / 撤销 / 提供者下线）。
 #[serde(rename_all = "camelCase")]
 pub struct ChangedParams {
     pub service: String,
-    /// 新的活动提供者：`None` = 内置实现。
+    /// 该服务的提供者：`None` = 内置实现或服务不在册。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
-    /// 该服务当前是否可用（提供者全不可用且无内置实现时 false）。
+    /// 该服务当前是否可用（不在册即 false）。
     pub available: bool,
 }
 ```
@@ -360,9 +455,9 @@ pub struct ChangedParams {
 // crates/plugin-protocol/src/service.rs
 /// 调用失败的可读原因（作为 JSON-RPC 错误的 data 回给调用方）。
 pub mod error {
-    /// 服务无人提供（既无内置实现，也没有活动的外部提供者）。
+    /// 服务不在册。
     pub const UNKNOWN_SERVICE: &str = "unknown_service";
-    /// 活动提供者没有声明该方法。
+    /// 提供者没有声明该方法。
     pub const UNKNOWN_METHOD: &str = "unknown_method";
     /// 提供者在调用途中下线 / 停用 / 崩溃。
     pub const PROVIDER_UNAVAILABLE: &str = "provider_unavailable";
@@ -373,32 +468,33 @@ pub mod error {
 
 ```rust
 // crates/plugin-protocol/src/method.rs
-/// 内置能力目录：服务名 → 归属插件 → 它提供的方法（全名，形如 `vault.readText`）。
+/// 内置能力目录：服务名 → 它提供的方法（全名，形如 `vault.readText`）。
 ///
 /// 这是「能力只有一种描述方式」的落地：方法名本身就是 `服务.方法`，目录按第一个 `.` 切分即得；
 /// `host:` 方法的宿主→插件通知不在其列（那不是插件可调用的能力）。条目引用常量而非字面量，
-/// 改名 / 删除常量会直接编译失败，目录不会悄悄漂移。服务随归属插件启停：停用笔记插件后
-/// 别的插件调不到 `markdown`，除非另有外部提供者接管。
-pub const BUILTIN_SERVICES: &[(&str, &str, &[&str])] = &[
-    ("fs", PLATFORM_PLUGIN, &[fs::PRIVATE_DIR, fs::READ_TEXT, fs::WRITE_TEXT, fs::READ_BINARY, fs::WRITE_BINARY, fs::REMOVE, fs::EXISTS, fs::LIST]),
-    ("process", PLATFORM_PLUGIN, &[process::SPAWN, process::WRITE_STDIN, process::CLOSE_STDIN, process::KILL]),
-    ("vault", PLATFORM_PLUGIN, &[vault::READ_TEXT, vault::WRITE_TEXT, vault::READ_BINARY, vault::WRITE_BINARY, vault::IMPORT_FILE, vault::IMAGE_INFO, vault::LIST, vault::EXISTS, vault::REMOVE, vault::RENAME]),
-    ("collab", PLATFORM_PLUGIN, &[collab::PEERS, collab::SEND, collab::META_GET, collab::META_PATCH]),
-    ("table", "atelyx.tables", &[table::SNAPSHOT, table::UPDATE_CELL, table::ADD_ROW, table::REMOVE_ROW, table::SELECT_ROW, table::SET_CELL_IMAGE]),
-    ("state", PLATFORM_PLUGIN, &[state::READ, state::WRITE]),
-    ("notification", PLATFORM_PLUGIN, &[notification::SHOW]),
-    ("tray", PLATFORM_PLUGIN, &[tray::SET_ITEMS]),
-    ("shortcut", PLATFORM_PLUGIN, &[shortcut::REGISTER, shortcut::UNREGISTER, shortcut::QUERY]),
-    ("clipboard", PLATFORM_PLUGIN, &[clipboard::WRITE_TEXT, clipboard::READ_TEXT, clipboard::READ_IMAGE, clipboard::WRITE_IMAGE]),
-    ("dialog", PLATFORM_PLUGIN, &[dialog::PICK_FILE, dialog::PICK_DIRECTORY]),
-    ("http", PLATFORM_PLUGIN, &[http::REQUEST]),
-    // 工具名册与结果回报是宿主记账，不是可由外部提供者接管的能力，故不在目录里
-    ("ai", "atelyx.ai", &[ai::CHAT_SEND, ai::CHAT_STOP, ai::CHAT_HISTORY, ai::MODELS, ai::AGENTS, ai::CHAT_RENAME, ai::CHAT_DELETE, ai::CHAT_COMPACT]),
-    ("window", PLATFORM_PLUGIN, &[window::OPEN, window::CLOSE, window::UPDATE, window::SHOW, window::BEGIN_DRAG, window::MINIMIZE, window::TOGGLE_MAXIMIZE]),
-    ("query", PLATFORM_PLUGIN, &[query::MEASURE, query::THEME]),
-    ("markdown", "atelyx.notes", &[markdown::PARSE]),
-    ("editor", "atelyx.notes", &[editor::SELECTION, editor::REPLACE_SELECTION]),
-    ("history", "atelyx.history", &[history::ACTIVITY, history::DAY, history::OPEN]),
+/// 改名 / 删除常量会直接编译失败，目录不会悄悄漂移。
+///
+/// 内置服务是宿主 API：不可停用、不可被插件占用。插件经 `service.register` 只能登记新服务名。
+pub const BUILTIN_SERVICES: &[(&str, &[&str])] = &[
+    ("fs", &[fs::PRIVATE_DIR, fs::READ_TEXT, fs::WRITE_TEXT, fs::READ_BINARY, fs::WRITE_BINARY, fs::REMOVE, fs::EXISTS, fs::LIST]),
+    ("process", &[process::SPAWN, process::WRITE_STDIN, process::CLOSE_STDIN, process::KILL]),
+    ("vault", &[vault::READ_TEXT, vault::WRITE_TEXT, vault::READ_BINARY, vault::WRITE_BINARY, vault::IMPORT_FILE, vault::IMAGE_INFO, vault::LIST, vault::EXISTS, vault::REMOVE, vault::RENAME]),
+    ("collab", &[collab::PEERS, collab::SEND, collab::META_GET, collab::META_PATCH]),
+    ("table", &[table::SNAPSHOT, table::UPDATE_CELL, table::ADD_ROW, table::REMOVE_ROW, table::SELECT_ROW, table::SET_CELL_IMAGE]),
+    ("state", &[state::READ, state::WRITE]),
+    ("notification", &[notification::SHOW]),
+    ("tray", &[tray::SET_ITEMS]),
+    ("shortcut", &[shortcut::REGISTER, shortcut::UNREGISTER, shortcut::QUERY]),
+    ("clipboard", &[clipboard::WRITE_TEXT, clipboard::READ_TEXT, clipboard::READ_IMAGE, clipboard::WRITE_IMAGE]),
+    ("dialog", &[dialog::PICK_FILE, dialog::PICK_DIRECTORY]),
+    ("http", &[http::REQUEST]),
+    // 工具名册与结果回报是宿主记账，不是可被提供的服务方法，故不在目录里
+    ("ai", &[ai::CHAT_SEND, ai::CHAT_STOP, ai::CHAT_HISTORY, ai::MODELS, ai::AGENTS, ai::CHAT_RENAME, ai::CHAT_DELETE, ai::CHAT_COMPACT]),
+    ("window", &[window::OPEN, window::CLOSE, window::UPDATE, window::SHOW, window::BEGIN_DRAG, window::MINIMIZE, window::TOGGLE_MAXIMIZE]),
+    ("query", &[query::MEASURE, query::THEME]),
+    ("markdown", &[markdown::PARSE]),
+    ("editor", &[editor::SELECTION, editor::REPLACE_SELECTION]),
+    ("history", &[history::ACTIVITY, history::DAY, history::OPEN]),
 ];
 ```
 
@@ -1451,8 +1547,6 @@ pub enum ContributionSlot {
 pub enum SurfaceKind {
     Panel,
     Window,
-    Page,
-    Takeover,
     Settings,
     /// 表格编辑器内的插件表格视图（挂载在表格面板内，替掉网格）。
     TableView,
@@ -1464,7 +1558,7 @@ pub enum SurfaceKind {
 #[serde(rename_all = "camelCase")]
 pub struct SurfaceAttachedParams {
     pub surface_id: String,
-    /// 面的类型：面板 / 插件窗口 / 整页接管 / 全接管 / 设置页。
+    /// 面的类型：面板 / 插件窗口 / 设置页 / 表格视图。
     pub kind: SurfaceKind,
 }
 ```
@@ -1511,28 +1605,6 @@ pub struct RegisterParams {
 #[serde(rename_all = "camelCase")]
 pub struct UnregisterParams {
     pub id: String,
-}
-```
-
-```rust
-// crates/plugin-protocol/src/method.rs
-/// 接管范围（封闭枚举）。`page` = 内容区全给插件（宿主标题栏保留）；`full` = 整窗归插件呈现
-/// （含标题栏区域，窗口拖动 / 缩放 / 关闭由宿主代执行）。
-#[serde(rename_all = "camelCase")]
-pub enum TakeoverScope {
-    Page,
-    Full,
-}
-```
-
-```rust
-// crates/plugin-protocol/src/method.rs
-/// `view.takeover` 的 params：把本插件的一个贡献面接管到当前聚焦窗口。`surfaceId` 须为
-/// 已注册的贡献 id（接管的就是该面自己的整面帧）；退出接管入口由宿主常驻提供，插件无需声明退路。
-#[serde(rename_all = "camelCase")]
-pub struct TakeoverParams {
-    pub scope: TakeoverScope,
-    pub surface_id: String,
 }
 ```
 
@@ -1619,7 +1691,7 @@ pub struct WindowClosedParams {
 
 ```rust
 // crates/plugin-protocol/src/method.rs
-/// `window.beginDrag` 的 params：要拖动的窗口按承载该面的窗口解析（插件窗口 / 接管面 / 所在面板）。
+/// `window.beginDrag` 的 params：要拖动的窗口按承载该面的窗口解析（插件窗口 / 所在面板）。
 #[serde(rename_all = "camelCase")]
 pub struct WindowDragParams {
     pub surface_id: String,
@@ -1711,8 +1783,6 @@ pub mod view {
     pub const REGISTER: &str = "view.register";
     /// 插件按 id 撤销自己的一个贡献点。
     pub const UNREGISTER: &str = "view.unregister";
-    /// 插件请求接管当前聚焦窗口（整页 / 全接管）。宿主按窗应用，退出入口由宿主常驻提供。
-    pub const TAKEOVER: &str = "view.takeover";
     /// 宿主告知插件某个面已就绪 / 已移除（通知）。
     pub const HOST_ATTACHED: &str = "host:surface.attached";
     pub const HOST_DETACHED: &str = "host:surface.detached";

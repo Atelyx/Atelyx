@@ -2556,10 +2556,8 @@ fn bar_in_window<'a>(
     window: iced::window::Id,
     viewport: Size,
 ) -> Option<(&'a TableSession, BarPlacement)> {
-    // 接管面与设置整页把整窗内容换掉（布局真源不动），此时网格不在场
-    if app.plugin_takeovers.contains_key(&window)
-        || (app.main_id == Some(window) && app.settings_open)
-    {
+    // 设置整页把整窗内容换掉（布局真源不动），此时网格不在场
+    if app.main_id == Some(window) && app.settings_open {
         return None;
     }
     if !crate::layout_view::window_shows_table(app, window) {

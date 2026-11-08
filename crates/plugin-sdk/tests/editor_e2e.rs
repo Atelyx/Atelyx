@@ -1,5 +1,5 @@
-//! `editor` 能力端到端：以真实插件（`editor-stub` 夹具）验证笔记插件名下的选区服务
-//! 可被外部提供者顶替、两条调用路径都落到活动提供者，以及停用归属插件后服务离开能力总线。
+//! `editor` 能力端到端：以真实插件（`editor-stub` 夹具）验证插件登记的自有服务可被直接调用与
+//! `service.call` 两条路命中同一实现，并在提供者停用后从能力总线消失。
 
 mod support;
 
@@ -11,12 +11,13 @@ use atelyx_core::vault::test_support::TempDir;
 use serde_json::Value;
 
 const STUB_ID: &str = "com.atelyx.editor-stub";
-const NOTES_PLUGIN: &str = "atelyx.notes";
+/// 夹具自有的服务名（与内置服务不重名）。
+const SERVICE: &str = "demoeditor";
 
 fn install_editor_stub(tmp: &TempDir, runtime: &std::sync::Arc<PluginRuntime>) {
     let src = tmp.join("src");
     std::fs::create_dir_all(&src).unwrap();
-    stage(&src, STUB_ID, "editor_stub", &["state", "vault"], "");
+    stage(&src, STUB_ID, "editor_stub", &["state", "files"], "");
 
     let id = runtime.install_dir(&src).expect("安装 editor-stub 应成功").id;
     assert_eq!(id, STUB_ID);
@@ -48,7 +49,7 @@ fn state_path(runtime: &PluginRuntime, id: &str) -> std::path::PathBuf {
         .join("state.json")
 }
 
-/// 等探针落盘（夹具只在成为活动提供者后才发起探针）。
+/// 等探针落盘（夹具登记完服务后立即发起探针）。
 fn wait_probe(runtime: &PluginRuntime) -> Value {
     let path = state_path(runtime, STUB_ID);
     let deadline = Instant::now() + Duration::from_secs(20);
@@ -65,37 +66,27 @@ fn wait_probe(runtime: &PluginRuntime) -> Value {
     }
 }
 
-/// 等夹具完成登记（握手先于 `on_ready` 完成，`Running` 不代表服务已在册）。
-fn wait_candidate(runtime: &PluginRuntime) {
-    let deadline = Instant::now() + Duration::from_secs(20);
-    loop {
-        let registered = editor_entry(runtime)
-            .is_some_and(|entry| entry.candidates.iter().any(|id| id == STUB_ID));
-        if registered {
-            return;
-        }
-        assert!(Instant::now() < deadline, "等待 editor 服务登记超时");
-        std::thread::sleep(Duration::from_millis(50));
-    }
-}
-
-fn editor_entry(runtime: &PluginRuntime) -> Option<atelyx_core::plugin_runtime::service::ServiceInfo> {
+fn service_entry(runtime: &PluginRuntime) -> Option<atelyx_core::plugin_runtime::service::ServiceInfo> {
     runtime
         .service_list()
         .services
         .into_iter()
-        .find(|entry| entry.service == "editor")
+        .find(|entry| entry.service == SERVICE)
 }
 
 #[test]
-fn editor_service_takeover_and_owner_shutdown() {
+fn editor_service_scope_and_owner_shutdown() {
     let tmp = TempDir::new("plugin-editor");
     let runtime = PluginRuntime::new(tmp.join("plugins"));
 
-    // 1. 出厂：editor 由笔记插件的内置实现承载，两个方法都在册
-    let editor = editor_entry(&runtime).expect("目录里应有 editor 服务");
+    // 1. 出厂：内置 `editor` 服务归宿主，两个方法都在册
+    let editor = runtime
+        .service_list()
+        .services
+        .into_iter()
+        .find(|entry| entry.service == "editor")
+        .expect("目录里应有 editor 服务");
     assert_eq!(editor.provider, None, "内置实现不落 provider");
-    assert!(editor.replaceable);
     for method in ["selection", "replaceSelection"] {
         assert!(
             editor.methods.iter().any(|name| name == method),
@@ -104,22 +95,8 @@ fn editor_service_takeover_and_owner_shutdown() {
         );
     }
 
-    // 2. 外部登记只是候选，内置实现仍活动（夹具此时不发探针）
+    // 2. 装好夹具：它登记自有服务，两条路径都落到它
     install_editor_stub(&tmp, &runtime);
-    wait_candidate(&runtime);
-    let editor = editor_entry(&runtime).expect("目录里应有 editor 服务");
-    assert_eq!(editor.provider, None, "登记不等于生效");
-    assert_eq!(editor.candidates, vec![STUB_ID.to_string()]);
-    assert!(!state_path(&runtime, STUB_ID).exists(), "候选身份下不应发起探针");
-
-    // 3. 切换后两条路径都落到外部提供者
-    runtime
-        .set_service_provider("editor", Some(STUB_ID))
-        .expect("切换到候选提供者应成功");
-    assert_eq!(
-        editor_entry(&runtime).and_then(|entry| entry.provider).as_deref(),
-        Some(STUB_ID)
-    );
     let state = wait_probe(&runtime);
     let selection = &state["selection"]["ok"];
     assert_eq!(selection["marker"], "stub-editor", "{state}");
@@ -130,30 +107,17 @@ fn editor_service_takeover_and_owner_shutdown() {
     let direct = &state["direct"]["ok"];
     assert_eq!(direct, selection, "直接调用与 `service.call` 必须落到同一提供者：{state}");
 
-    // 4. 停用笔记插件：服务仍由外部提供者承载，但不能回落内置
-    runtime.set_builtin_owner_enabled(NOTES_PLUGIN, false);
+    // 3. 自有服务在册，内置服务不受影响
     assert_eq!(
-        editor_entry(&runtime).and_then(|entry| entry.provider).as_deref(),
-        Some(STUB_ID),
-        "外部提供者不受归属插件停用影响"
+        service_entry(&runtime).and_then(|entry| entry.provider).as_deref(),
+        Some(STUB_ID)
     );
-    let fallback = runtime
-        .set_service_provider("editor", None)
-        .expect_err("内置实现所属插件已停用，不应允许回落");
-    assert!(fallback.contains("已停用"), "应可读拒绝：{fallback}");
+    assert!(runtime.service_available("editor"), "内置服务照旧在册");
 
-    // 5. 提供者与归属插件都不在：服务离开能力总线
+    // 4. 提供者停用：自有服务离开能力总线
     runtime.set_enabled(STUB_ID, false).expect("停用应成功");
     wait_status(&runtime, STUB_ID, |status| *status == PluginStatus::Stopped);
-    assert!(!runtime.service_available("editor"), "无人提供时服务不可用");
-    assert!(editor_entry(&runtime).is_none(), "无人提供时服务离开目录");
-
-    // 6. 重新启用笔记插件：内置登记留位，服务恢复
-    runtime.set_builtin_owner_enabled(NOTES_PLUGIN, true);
-    assert!(runtime.service_available("editor"));
-    assert_eq!(
-        editor_entry(&runtime).and_then(|entry| entry.provider),
-        None,
-        "恢复的是内置实现"
-    );
+    assert!(!runtime.service_available(SERVICE), "无人提供时服务不可用");
+    assert!(service_entry(&runtime).is_none(), "无人提供时服务离开目录");
+    assert!(runtime.service_available("editor"), "内置服务不随插件停用");
 }

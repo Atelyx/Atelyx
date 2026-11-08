@@ -19,8 +19,12 @@ mod manifest;
 mod markdown;
 /// 市场数据源（公开给壳：索引拉取 / 缓存 / Release 取数）。
 pub mod market;
+/// 扩展打包与校验（`extension build` / `extension validate` 共用）。
+pub mod package;
 mod service_dir;
 mod shortcut;
+#[cfg(test)]
+mod test_support;
 /// 表格服务面的纯映射（公开给壳：表格真源 → 协议只读快照）。
 pub mod table;
 
@@ -56,13 +60,13 @@ pub use atelyx_plugin_protocol::event::{
     SpaceMetaChangedPayload, TableChangedPayload, TableSelectionChangedPayload, VaultSwitchPayload,
 };
 pub use atelyx_plugin_protocol::layout::LayoutSpecNode;
-pub use atelyx_plugin_protocol::manifest::{DocTypeRegistration, Permission};
+pub use atelyx_plugin_protocol::manifest::{DocTypeRegistration, PermissionKey};
 /// 能力总线的对外契约类型（服务清单 / 登记参数 / 错误原因）。
 pub use atelyx_plugin_protocol::service;
 /// 随包预置插件同步的结果。
 pub use atelyx_plugin_protocol::method::{
     AiAgent, AiAgentsResult, AiModel, AiModelPick, AiModelProvider, AiModelsResult,
-    AxesPadding, BUILTIN_SERVICES, PLATFORM_PLUGIN, EditorReplaceParams, EditorSelection,
+    AxesPadding, BUILTIN_SERVICES, EditorReplaceParams, EditorSelection,
     CollabMetaEntry, CollabMetaGetParams, CollabMetaPatchParams, CollabMetaResult, DayActivity,
     HistoryActivityResult, HistoryDayEntry, HistoryDayParams, HistoryDayResult, HistoryOpenParams,
     ChatEvent, ChatEventParams, ChatHistoryParams, ChatHistoryResult,
@@ -72,7 +76,7 @@ pub use atelyx_plugin_protocol::method::{
     FontSizes, ImageInfoResult, MeasureBatchParams, MeasureBatchResult, MeasureItem,
     MeasureTextResult, NotificationLevel, PaddingSpec, Radii,
     SetTrayItemsParams, ShortcutQueryResult, SurfaceKind, TableField, TableRemoteSelection,
-    TableSelection, TableRow, TableSetCellImageParams, TableSnapshot, TakeoverScope, ThemeColors,
+    TableSelection, TableRow, TableSetCellImageParams, TableSnapshot, ThemeColors,
     ThemeResult, TrayClickParams, TrayItemSpec, WindowOpenParams, WindowUpdateParams,
 };
 
@@ -135,7 +139,7 @@ pub struct Contribution {
     /// 宿主图标形状表里的图标名；插件未声明时为 `None`（宿主回落拼图）。
     pub icon: Option<String>,
     /// 面外壳内边距，只作用于面板 / 设置 / 表格视图这类有宿主外壳的面；
-    /// `None` = 贴边（宿主不加内边距）。插件窗口与接管面无宿主外壳内边距。
+    /// `None` = 贴边（宿主不加内边距）。插件窗口面没有宿主外壳内边距。
     pub padding: Option<PaddingSpec>,
 }
 
@@ -197,9 +201,6 @@ pub fn clipboard_image_payload(image: Option<ClipboardImage>) -> Value {
 #[derive(Clone, Debug)]
 pub enum HostRequest {
     Dialog { plugin_id: String, request_id: u64, dialog: DialogRequest },
-    /// 插件请求接管当前聚焦窗口（scope = 整页 / 全接管，surface = 插件的贡献 id）；壳应用后经
-    /// [`PluginRuntime::resolve_ui_call`] 回填结果（失败带可读原因）。
-    Takeover { plugin_id: String, request_id: u64, scope: TakeoverScope, surface_id: String },
     /// 插件请求打开一个独立窗口承载自己的界面树。
     OpenWindow { plugin_id: String, request_id: u64, params: WindowOpenParams },
     /// 插件请求关闭自己打开的一个窗口。
@@ -315,7 +316,8 @@ pub struct PluginSummary {
     pub name: String,
     pub version: String,
     pub api_version: u32,
-    pub permissions: Vec<Permission>,
+    /// 清单声明的权限表（键 + 给用户看的原因），按权限键序。
+    pub permissions: Vec<(PermissionKey, String)>,
     pub singleton: bool,
     pub keep_mounted_on_vault_switch: bool,
     /// 是否启用（`.enabled/` 标记存在）。
@@ -353,7 +355,7 @@ type DialogReplyTx = std::sync::mpsc::Sender<Result<Option<String>, String>>;
 /// 在途对话框等待项：发起插件 id + 结果回传通道。
 type DialogWait = (String, DialogReplyTx);
 
-/// 界面服务（接管 / 插件窗口）结果回传通道。
+/// 界面服务（插件窗口）结果回传通道。
 type UiReplyTx = std::sync::mpsc::Sender<Result<(), String>>;
 
 /// 在途界面服务等待项：发起插件 id + 结果回传通道。
@@ -381,7 +383,7 @@ pub struct PluginRuntime {
     /// 在途对话框：request_id → 等待项。插件进程的读线程在此等待壳回填结果。
     dialogs: Mutex<HashMap<u64, DialogWait>>,
     next_dialog_id: AtomicU64,
-    /// 在途界面服务请求（接管 / 插件窗口）：request_id → 等待项。
+    /// 在途界面服务请求（插件窗口）：request_id → 等待项。
     ui_calls: Mutex<HashMap<u64, UiCallWait>>,
     next_ui_call_id: AtomicU64,
     /// 在途壳侧服务调用（AI 对话 / 剪贴板 / 仓库读写）：request_id → 等待项。
@@ -392,7 +394,7 @@ pub struct PluginRuntime {
     /// 在途 AI 工具调用：callId → 等待项。
     tool_calls: Mutex<HashMap<String, ToolCallWait>>,
     next_tool_call_id: AtomicU64,
-    /// 服务目录：服务名 → 活动提供者与候选（能力总线的单例型语义）。
+    /// 服务目录：服务名 → 内置实现或它的外部提供者。
     services: Mutex<ServiceDir>,
     /// 在途跨插件服务调用：callId → (提供者 id, 结果回传通道)。
     service_calls: Mutex<HashMap<String, ServiceCallWait>>,
@@ -536,17 +538,11 @@ impl PluginRuntime {
         }
     }
 
-    /// 登记一个界面服务请求（接管 / 插件窗口）并把请求交给壳，返回结果接收端。
+    /// 登记一个界面服务请求（插件窗口）并把请求交给壳，返回结果接收端。
     fn open_ui_call(&self, request: HostRequest) -> Result<std::sync::mpsc::Receiver<Result<(), String>>, String> {
         let request_id = self.next_ui_call_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = std::sync::mpsc::channel();
         let request = match request {
-            HostRequest::Takeover { plugin_id, scope, surface_id, .. } => HostRequest::Takeover {
-                plugin_id,
-                request_id,
-                scope,
-                surface_id,
-            },
             HostRequest::OpenWindow { plugin_id, params, .. } => HostRequest::OpenWindow {
                 plugin_id,
                 request_id,
@@ -637,7 +633,7 @@ impl PluginRuntime {
         Ok(rx)
     }
 
-    /// 壳侧回填界面服务请求结果（接管已应用 / 窗口已创建或关闭；失败带可读原因）。
+    /// 壳侧回填界面服务请求结果（窗口已创建或关闭；失败带可读原因）。
     pub fn resolve_ui_call(&self, request_id: u64, result: Result<(), String>) {
         let waiter = self.ui_calls.lock().unwrap().remove(&request_id);
         if let Some((_, tx)) = waiter {
@@ -952,34 +948,6 @@ impl PluginRuntime {
     }
 
     // ---------- 界面服务请求入口（instance 调用） ----------
-
-    /// 插件请求接管当前聚焦窗口（`surface_id` 须为已注册的贡献 id：接管面与该贡献共享同一棵提交树）。
-    fn open_takeover(
-        &self,
-        plugin_id: &str,
-        scope: TakeoverScope,
-        surface_id: &str,
-    ) -> Result<std::sync::mpsc::Receiver<Result<(), String>>, String> {
-        if surface_id.trim().is_empty() {
-            return Err("接管的贡献 id 不能为空".to_string());
-        }
-        let registered = self
-            .instances
-            .lock()
-            .unwrap()
-            .get(plugin_id)
-            .map(|i| i.contributions().iter().any(|c| c.id == surface_id))
-            .unwrap_or(false);
-        if !registered {
-            return Err(format!("接管的贡献未注册：{surface_id}"));
-        }
-        self.open_ui_call(HostRequest::Takeover {
-            plugin_id: plugin_id.to_string(),
-            request_id: 0,
-            scope,
-            surface_id: surface_id.to_string(),
-        })
-    }
 
     /// 插件请求打开一个独立窗口（重复 id 由壳拒绝并回填可读原因）。
     fn open_plugin_window(&self, plugin_id: &str, params: WindowOpenParams) -> Result<std::sync::mpsc::Receiver<Result<(), String>>, String> {
@@ -1368,7 +1336,7 @@ impl PluginRuntime {
                         name: manifest.map(|m| m.name.clone()).unwrap_or_default(),
                         version: manifest.map(|m| m.version.clone()).unwrap_or_default(),
                         api_version: manifest.map(|m| m.api_version).unwrap_or(0),
-                        permissions: manifest.map(|m| m.permissions.clone()).unwrap_or_default(),
+                        permissions: manifest.map(Manifest::permission_list).unwrap_or_default(),
                         singleton: manifest.is_some_and(|m| m.singleton),
                         keep_mounted_on_vault_switch: manifest
                             .is_some_and(|m| m.keep_mounted_on_vault_switch),
@@ -1762,7 +1730,6 @@ fn container_identity(payload: &VaultSwitchPayload) -> String {
 fn request_plugin_id(request: &HostRequest) -> &str {
     match request {
         HostRequest::Dialog { plugin_id, .. }
-        | HostRequest::Takeover { plugin_id, .. }
         | HostRequest::OpenWindow { plugin_id, .. }
         | HostRequest::CloseWindow { plugin_id, .. }
         | HostRequest::ChatSend { plugin_id, .. }
@@ -1822,31 +1789,22 @@ impl Drop for PluginRuntime {
 
 #[cfg(test)]
 mod tests {
+    use super::test_support::{manifest_toml, seed_plugin};
     use super::*;
     use crate::vault::test_support::TempDir;
     use atelyx_plugin_protocol::manifest::MANIFEST_FILE;
 
-    /// 造一个可扫描到的插件目录（合法 manifest + 平台入口占位文件）。
-    fn seed_plugin(root: &Path, id: &str) {
-        let dir = layout::plugin_dir(root, id);
-        std::fs::create_dir_all(&dir).unwrap();
-        let entry = if cfg!(windows) { "app.exe" } else { "app" };
-        std::fs::write(
-            dir.join(MANIFEST_FILE),
-            format!(
-                r#"{{"id":"{id}","name":"Demo","version":"1.0.0","apiVersion":1,"entry":{{"windows":"app.exe","linux":"app"}},"permissions":[]}}"#
-            ),
-        )
-        .unwrap();
-        std::fs::write(dir.join(entry), b"stub").unwrap();
+    /// 在插件根下按 id 造一个可扫描到的插件目录。
+    fn seed(root: &Path, id: &str) {
+        seed_plugin(&layout::plugin_dir(root, id), id, "");
     }
 
     #[test]
     fn scan_and_list_reflect_enabled_marks() {
         let tmp = TempDir::new("runtime-scan");
         let root: &Path = &tmp;
-        seed_plugin(root, "com.example.one");
-        seed_plugin(root, "com.example.two");
+        seed(root, "com.example.one");
+        seed(root, "com.example.two");
         let runtime = PluginRuntime::new(root.to_path_buf());
         runtime.scan();
         let listed = runtime.list();
@@ -1881,7 +1839,7 @@ mod tests {
     fn disable_removes_marker_and_rejects_uninstalled_enable() {
         let tmp = TempDir::new("runtime-disable");
         let root: &Path = &tmp;
-        seed_plugin(root, "com.example.one");
+        seed(root, "com.example.one");
         let runtime = PluginRuntime::new(root.to_path_buf());
         let _ = layout::set_enabled(root, "com.example.one", true);
         runtime.scan();
@@ -1970,9 +1928,6 @@ mod tests {
     fn ui_call_roundtrip_and_per_plugin_failure() {
         let tmp = TempDir::new("runtime-ui-call");
         let runtime = PluginRuntime::new(tmp.to_path_buf());
-        // 接管要求贡献已注册：未注册即拒绝（无实例时的可读失败路径）
-        assert!(runtime.open_takeover("com.a.one", TakeoverScope::Full, "main").is_err());
-
         let rx = runtime
             .open_plugin_window(
                 "com.a.one",
@@ -2067,13 +2022,20 @@ mod tests {
         let entry = if cfg!(windows) { "app.exe" } else { "app" };
         std::fs::write(
             dir.join(MANIFEST_FILE),
-            r#"{"id":"com.example.board","name":"Board","version":"1.0.0","apiVersion":1,
-                "entry":{"windows":"app.exe","linux":"app"},"permissions":[],
-                "docTypeRegistrations":[{"extension":"board","label":"画板","icon":"layout-dashboard","surface":"board-view"}]}"#,
+            manifest_toml(
+                "com.example.board",
+                r#"
+[[doc_type_registrations]]
+extension = "board"
+label = "画板"
+icon = "layout-dashboard"
+surface = "board-view"
+"#,
+            ),
         )
         .unwrap();
         std::fs::write(dir.join(entry), b"stub").unwrap();
-        seed_plugin(root, "com.example.plain");
+        seed(root, "com.example.plain");
         let runtime = PluginRuntime::new(root.to_path_buf());
         runtime.scan();
         let doc_types = runtime.doc_types();
@@ -2168,8 +2130,7 @@ mod tests {
         let entry = if cfg!(windows) { "app.exe" } else { "app" };
         std::fs::write(
             src.join(MANIFEST_FILE),
-            r#"{"id":"com.example.demo","name":"Demo","version":"1.0.0","apiVersion":1,
-                "entry":{"windows":"app.exe","linux":"app"},"permissions":[]}"#,
+            manifest_toml("com.example.demo", ""),
         )
         .unwrap();
         std::fs::write(src.join(entry), b"v1").unwrap();
@@ -2192,8 +2153,7 @@ mod tests {
         // 来源清单换成另一个 id：拒收（否则会用别的插件覆盖这一份）
         std::fs::write(
             src.join(MANIFEST_FILE),
-            r#"{"id":"com.example.other","name":"Other","version":"1.0.0","apiVersion":1,
-                "entry":{"windows":"app.exe","linux":"app"},"permissions":[]}"#,
+            manifest_toml("com.example.other", ""),
         )
         .unwrap();
         let err = runtime

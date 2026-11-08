@@ -8,12 +8,12 @@ use serde_json::Value;
 
 /// 方法名常量：提供者登记与调用。
 pub mod method {
-    /// 提供者声明自己提供哪些服务方法（`{ service, version, methods }`）。登记不等于生效：
-    /// 同一服务同时只有一个活动提供者，切换由用户决定（见 [`ServiceInfo::active`]）。
+    /// 提供者声明自己提供哪些服务方法（`{ service, version, methods }`）。
+    /// 只能登记**新**服务名：内置服务名归宿主，已被占用的名字以可读错误拒收。
     pub const REGISTER: &str = "service.register";
-    /// 撤销自己声明的服务（连带把它从候选中摘掉；活动提供者撤销后该服务回落内置实现）。
+    /// 撤销自己声明的服务（该服务随之离开能力总线）。
     pub const UNREGISTER: &str = "service.unregister";
-    /// 枚举在册服务：服务名、版本、方法名、活动提供者与其余候选。
+    /// 枚举在册服务：服务名、版本、方法名与提供者（`None` = 内置实现）。
     pub const LIST: &str = "service.list";
     /// 调用某个服务的方法：`{ service, method, params }`，应答就是该方法自己的结果。
     pub const CALL: &str = "service.call";
@@ -37,7 +37,7 @@ pub const MAX_METHODS_PER_SERVICE: usize = 128;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RegisterParams {
-    /// 服务名（与内置服务同名即成为它的候选提供者）。
+    /// 服务名（须为内置服务目录之外的新名字）。
     pub service: String,
     /// 契约版本；缺省 = [`SERVICE_VERSION`]。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -108,18 +108,13 @@ pub struct UnregisterParams {
 #[serde(rename_all = "camelCase")]
 pub struct ServiceInfo {
     pub service: String,
-    /// 活动提供者的契约版本。
+    /// 提供者的契约版本。
     pub version: u32,
-    /// 活动提供者实现的方法名。
+    /// 提供者实现的方法名。
     pub methods: Vec<String>,
-    /// 活动提供者：`None` = 内置实现。
+    /// 提供者：`None` = 内置（宿主）实现。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
-    /// 内置实现能否被替换（字体 / 主题这类平台自救面不可替换）。
-    pub replaceable: bool,
-    /// 其余候选提供者（插件 id，按登记序）。
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub candidates: Vec<String>,
 }
 
 /// `service.list` 的 result：按服务名排序。
@@ -174,23 +169,23 @@ pub struct ResultParams {
     pub error: Option<String>,
 }
 
-/// `host:service.changed` 的 params：活动提供者变化（含提供者下线）。
+/// `host:service.changed` 的 params：服务可用性变化（登记 / 撤销 / 提供者下线）。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChangedParams {
     pub service: String,
-    /// 新的活动提供者：`None` = 内置实现。
+    /// 该服务的提供者：`None` = 内置实现或服务不在册。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
-    /// 该服务当前是否可用（提供者全不可用且无内置实现时 false）。
+    /// 该服务当前是否可用（不在册即 false）。
     pub available: bool,
 }
 
 /// 调用失败的可读原因（作为 JSON-RPC 错误的 data 回给调用方）。
 pub mod error {
-    /// 服务无人提供（既无内置实现，也没有活动的外部提供者）。
+    /// 服务不在册。
     pub const UNKNOWN_SERVICE: &str = "unknown_service";
-    /// 活动提供者没有声明该方法。
+    /// 提供者没有声明该方法。
     pub const UNKNOWN_METHOD: &str = "unknown_method";
     /// 提供者在调用途中下线 / 停用 / 崩溃。
     pub const PROVIDER_UNAVAILABLE: &str = "provider_unavailable";

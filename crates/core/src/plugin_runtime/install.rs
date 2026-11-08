@@ -477,28 +477,20 @@ fn now_millis() -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plugin_runtime::test_support::{entry_name, manifest_toml as toml_of, seed_plugin};
     use crate::vault::test_support::TempDir;
     use std::io::Write;
 
-    fn manifest_json(id: &str) -> String {
-        format!(
-            r#"{{"id":"{id}","name":"Demo","version":"1.0.0","apiVersion":1,"entry":{{"windows":"app.exe","linux":"app"}},"permissions":["state"]}}"#
-        )
-    }
+    /// 清单附加段：声明 `state` 权限（原因为必填项）。
+    const EXTRA: &str = "\n[permissions]\nstate = \"保存界面状态\"\n";
 
-    fn entry_name() -> &'static str {
-        if cfg!(windows) {
-            "app.exe"
-        } else {
-            "app"
-        }
+    fn manifest_toml(id: &str) -> String {
+        toml_of(id, EXTRA)
     }
 
     /// 造一个可安装的插件目录（含平台入口占位文件）。
     fn make_plugin(dir: &Path, id: &str) {
-        std::fs::create_dir_all(dir).unwrap();
-        std::fs::write(dir.join(MANIFEST_FILE), manifest_json(id)).unwrap();
-        std::fs::write(dir.join(entry_name()), b"stub").unwrap();
+        seed_plugin(dir, id, EXTRA);
     }
 
     fn zip_entries(path: &Path, entries: &[(&str, &[u8])]) {
@@ -521,7 +513,7 @@ mod tests {
         let zip = tmp.join("demo.zip");
         zip_entries(
             &zip,
-            &[(MANIFEST_FILE, manifest_json(id).as_bytes()), (entry_name(), b"stub")],
+            &[(MANIFEST_FILE, manifest_toml(id).as_bytes()), (entry_name(), b"stub")],
         );
         zip
     }
@@ -771,7 +763,7 @@ mod tests {
         zip_entries(
             &zip,
             &[
-                ("pkg/plugin.json", manifest_json("com.example.demo").as_bytes()),
+                (&format!("pkg/{MANIFEST_FILE}"), manifest_toml("com.example.demo").as_bytes()),
                 (entry.as_str(), b"stub"),
             ],
         );
@@ -799,7 +791,7 @@ mod tests {
         let mut writer = zip::ZipWriter::new(file);
         let options = zip::write::SimpleFileOptions::default().unix_permissions(0o777);
         writer.start_file(MANIFEST_FILE, options).unwrap();
-        writer.write_all(manifest_json("com.example.demo").as_bytes()).unwrap();
+        writer.write_all(manifest_toml("com.example.demo").as_bytes()).unwrap();
         writer.add_symlink("link", "target", options).unwrap();
         writer.finish().unwrap();
         let err = install_from_zip(&root, &zip, None).expect_err("符号链接应被拒");
@@ -816,7 +808,7 @@ mod tests {
         let options = zip::write::SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Deflated);
         writer.start_file(MANIFEST_FILE, options).unwrap();
-        writer.write_all(manifest_json("com.example.demo").as_bytes()).unwrap();
+        writer.write_all(manifest_toml("com.example.demo").as_bytes()).unwrap();
         // 1 MiB 全零：压缩比远超阈值
         writer.start_file("blob.bin", options).unwrap();
         writer.write_all(&vec![0u8; 1024 * 1024]).unwrap();
@@ -833,7 +825,7 @@ mod tests {
         let zip = tmp.join("demo.zip");
         zip_entries(
             &zip,
-            &[(MANIFEST_FILE, manifest_json("com.example.demo").as_bytes()), (entry_name(), b"stub")],
+            &[(MANIFEST_FILE, manifest_toml("com.example.demo").as_bytes()), (entry_name(), b"stub")],
         );
         let id = install_from_zip(&root, &zip, None).unwrap();
         let installed = layout::plugin_dir(&root, &id).join(entry_name());

@@ -35,6 +35,8 @@ atelyx-plugin-abi = { path = "../plugin-abi" }
 libloading = "0.8"
 # 整面帧共享内存映射（宿主只读映射插件写入的区域）
 memmap2 = "0.9"
+# 插件清单（plugin_runtime/manifest）：atelyx_manifest.toml 解析
+toml = "1"
 # 插件安装（plugin_runtime）：zip 解压（仅 deflate；防御见 install.rs）
 zip = { version = "2", default-features = false, features = ["deflate"] }
 # 目录安装按源目录 .gitignore 过滤（git 语义：嵌套规则 / 反选 / `**` / 目录锚定）

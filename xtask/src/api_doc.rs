@@ -40,15 +40,20 @@ macro_rules! items {
 const SECTIONS: &[Section] = &[
     Section {
         title: "协议版本与清单",
-        intro: "`plugin.json` 的结构、能力声明与宿主保留的清单文件名。`apiVersion` 必须与宿主相等，\
-不等即拒绝装载。",
+        intro: "`atelyx_manifest.toml` 的结构、权限声明与宿主保留的清单文件名。`api_version` 必须与宿主相等，\
+不等即拒绝装载；`permissions` 是「键 → 给用户看的原因」表，不拦调用。",
         items: items!(
             "lib.rs": "API_VERSION",
             "manifest.rs": "MANIFEST_FILE",
+            "manifest.rs": "SCHEMA_VERSION",
+            "manifest.rs": "PLATFORMS",
             "manifest.rs": "Manifest",
             "manifest.rs": "Entry",
-            "manifest.rs": "Permission",
+            "manifest.rs": "BuildSpec",
+            "manifest.rs": "PermissionKey",
             "manifest.rs": "DocTypeRegistration",
+            "manifest.rs": "current_platform",
+            "manifest.rs": "parse_semver",
         ),
     },
     Section {
@@ -184,8 +189,6 @@ const SECTIONS: &[Section] = &[
             "method.rs": "SubmitResult",
             "method.rs": "RegisterParams",
             "method.rs": "UnregisterParams",
-            "method.rs": "TakeoverScope",
-            "method.rs": "TakeoverParams",
             "method.rs": "WindowOpenParams",
             "method.rs": "WindowCloseParams",
             "method.rs": "WindowUpdateParams",

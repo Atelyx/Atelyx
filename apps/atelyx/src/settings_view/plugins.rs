@@ -17,7 +17,7 @@ use atelyx_core::plugin_runtime::{
     CollabPeersResult, CollabSendParams, CollabSendQos, CollabSendResult, DayActivity,
     DialogKind, DialogRequest, FileChangeKind, HistoryActivityResult, HistoryDayParams,
     HistoryOpenParams, HostRequest, ImageInfoResult, InstallOutcome, MeasureBatchParams,
-    MeasureBatchResult, NotificationLevel, Permission, PluginEvent, PluginRuntime, PluginStatus,
+    MeasureBatchResult, NotificationLevel, PluginEvent, PluginRuntime, PluginStatus,
     PluginSummary, SetTrayItemsParams, MAX_VAULT_BINARY_BYTES,
 };
 use atelyx_core::space_client::SpaceError;
@@ -316,9 +316,6 @@ pub fn host_requests_stream(spec: &RuntimeSpec) -> impl iced::futures::Stream<It
             let message = match request {
                 HostRequest::Dialog { request_id, dialog, .. } => {
                     Message::Plugins(PluginsMsg::DialogAsk { request_id, dialog })
-                }
-                HostRequest::Takeover { plugin_id, request_id, scope, surface_id } => {
-                    Message::PluginTakeoverAsk { request_id, plugin_id, scope, surface_id }
                 }
                 HostRequest::OpenWindow { plugin_id, request_id, params } => {
                     Message::PluginWindowOpen { request_id, plugin_id, params }
@@ -2719,16 +2716,19 @@ fn detail_overview(app: &App, summary: &PluginSummary) -> Element<'static, Messa
                 .into(),
         );
     } else {
-        for chunk in summary.permissions.chunks(5) {
-            let mut line = row![].spacing(6);
-            for permission in chunk {
-                line = line.push(controls::badge(
-                    permission_label(*permission),
-                    pal::BG_TERTIARY,
-                    pal::TEXT_SECONDARY,
-                ));
-            }
-            rows.push(line.into());
+        // 键 + 清单里写的理由：权限声明的意义在于让用户看懂「为什么需要」
+        for (key, reason) in &summary.permissions {
+            rows.push(
+                row![
+                    controls::badge(key.label(), pal::BG_TERTIARY, pal::TEXT_SECONDARY),
+                    text(reason.clone())
+                        .size(pal::fs_caption())
+                        .color(pal::TEXT_SECONDARY),
+                ]
+                .spacing(8)
+                .align_y(iced::alignment::Vertical::Center)
+                .into(),
+            );
         }
     }
 
@@ -3094,25 +3094,6 @@ fn status_label(status: &PluginStatus) -> (&'static str, iced::Color) {
         PluginStatus::Restarting => ("重启中", pal::WARNING),
         PluginStatus::CircuitBroken => ("已熔断", pal::DANGER),
         PluginStatus::Failed(_) => ("失败", pal::DANGER),
-    }
-}
-
-fn permission_label(permission: Permission) -> &'static str {
-    match permission {
-        Permission::Fs => "文件",
-        Permission::Http => "网络",
-        Permission::Process => "进程",
-        Permission::State => "数据",
-        Permission::Notification => "通知",
-        Permission::Shortcuts => "快捷键",
-        Permission::Vault => "仓库",
-        Permission::Table => "表格",
-        Permission::Clipboard => "剪贴板",
-        Permission::Window => "窗口",
-        Permission::Tray => "托盘",
-        Permission::Collab => "协作",
-        Permission::Ai => "AI",
-        Permission::Dialog => "对话框",
     }
 }
 

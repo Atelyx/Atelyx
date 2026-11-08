@@ -11,8 +11,6 @@ pub mod view {
     pub const REGISTER: &str = "view.register";
     /// 插件按 id 撤销自己的一个贡献点。
     pub const UNREGISTER: &str = "view.unregister";
-    /// 插件请求接管当前聚焦窗口（整页 / 全接管）。宿主按窗应用，退出入口由宿主常驻提供。
-    pub const TAKEOVER: &str = "view.takeover";
     /// 宿主告知插件某个面已就绪 / 已移除（通知）。
     pub const HOST_ATTACHED: &str = "host:surface.attached";
     pub const HOST_DETACHED: &str = "host:surface.detached";
@@ -260,7 +258,7 @@ pub mod ai {
 #[serde(rename_all = "camelCase")]
 pub struct SurfaceAttachedParams {
     pub surface_id: String,
-    /// 面的类型：面板 / 插件窗口 / 整页接管 / 全接管 / 设置页。
+    /// 面的类型：面板 / 插件窗口 / 设置页 / 表格视图。
     pub kind: SurfaceKind,
 }
 
@@ -269,8 +267,6 @@ pub struct SurfaceAttachedParams {
 pub enum SurfaceKind {
     Panel,
     Window,
-    Page,
-    Takeover,
     Settings,
     /// 表格编辑器内的插件表格视图（挂载在表格面板内，替掉网格）。
     TableView,
@@ -411,24 +407,6 @@ pub struct UnregisterParams {
     pub id: String,
 }
 
-/// 接管范围（封闭枚举）。`page` = 内容区全给插件（宿主标题栏保留）；`full` = 整窗归插件呈现
-/// （含标题栏区域，窗口拖动 / 缩放 / 关闭由宿主代执行）。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum TakeoverScope {
-    Page,
-    Full,
-}
-
-/// `view.takeover` 的 params：把本插件的一个贡献面接管到当前聚焦窗口。`surfaceId` 须为
-/// 已注册的贡献 id（接管的就是该面自己的整面帧）；退出接管入口由宿主常驻提供，插件无需声明退路。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TakeoverParams {
-    pub scope: TakeoverScope,
-    pub surface_id: String,
-}
-
 /// `window.open` 的 params：`id` 插件内唯一、非空且不含 `:`，同时是该窗口面的 `surfaceId`。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -474,7 +452,7 @@ pub struct WindowClosedParams {
     pub id: String,
 }
 
-/// `window.beginDrag` 的 params：要拖动的窗口按承载该面的窗口解析（插件窗口 / 接管面 / 所在面板）。
+/// `window.beginDrag` 的 params：要拖动的窗口按承载该面的窗口解析（插件窗口 / 所在面板）。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WindowDragParams {
@@ -1714,35 +1692,33 @@ impl CollabMetaPatchParams {
     }
 }
 
-/// 平台自身的内置插件 id：存储、协作、出网这类基础能力归它，不可停用。
-pub const PLATFORM_PLUGIN: &str = "atelyx.platform";
-
-/// 内置能力目录：服务名 → 归属插件 → 它提供的方法（全名，形如 `vault.readText`）。
+/// 内置能力目录：服务名 → 它提供的方法（全名，形如 `vault.readText`）。
 ///
 /// 这是「能力只有一种描述方式」的落地：方法名本身就是 `服务.方法`，目录按第一个 `.` 切分即得；
 /// `host:` 方法的宿主→插件通知不在其列（那不是插件可调用的能力）。条目引用常量而非字面量，
-/// 改名 / 删除常量会直接编译失败，目录不会悄悄漂移。服务随归属插件启停：停用笔记插件后
-/// 别的插件调不到 `markdown`，除非另有外部提供者接管。
-pub const BUILTIN_SERVICES: &[(&str, &str, &[&str])] = &[
-    ("fs", PLATFORM_PLUGIN, &[fs::PRIVATE_DIR, fs::READ_TEXT, fs::WRITE_TEXT, fs::READ_BINARY, fs::WRITE_BINARY, fs::REMOVE, fs::EXISTS, fs::LIST]),
-    ("process", PLATFORM_PLUGIN, &[process::SPAWN, process::WRITE_STDIN, process::CLOSE_STDIN, process::KILL]),
-    ("vault", PLATFORM_PLUGIN, &[vault::READ_TEXT, vault::WRITE_TEXT, vault::READ_BINARY, vault::WRITE_BINARY, vault::IMPORT_FILE, vault::IMAGE_INFO, vault::LIST, vault::EXISTS, vault::REMOVE, vault::RENAME]),
-    ("collab", PLATFORM_PLUGIN, &[collab::PEERS, collab::SEND, collab::META_GET, collab::META_PATCH]),
-    ("table", "atelyx.tables", &[table::SNAPSHOT, table::UPDATE_CELL, table::ADD_ROW, table::REMOVE_ROW, table::SELECT_ROW, table::SET_CELL_IMAGE]),
-    ("state", PLATFORM_PLUGIN, &[state::READ, state::WRITE]),
-    ("notification", PLATFORM_PLUGIN, &[notification::SHOW]),
-    ("tray", PLATFORM_PLUGIN, &[tray::SET_ITEMS]),
-    ("shortcut", PLATFORM_PLUGIN, &[shortcut::REGISTER, shortcut::UNREGISTER, shortcut::QUERY]),
-    ("clipboard", PLATFORM_PLUGIN, &[clipboard::WRITE_TEXT, clipboard::READ_TEXT, clipboard::READ_IMAGE, clipboard::WRITE_IMAGE]),
-    ("dialog", PLATFORM_PLUGIN, &[dialog::PICK_FILE, dialog::PICK_DIRECTORY]),
-    ("http", PLATFORM_PLUGIN, &[http::REQUEST]),
-    // 工具名册与结果回报是宿主记账，不是可由外部提供者接管的能力，故不在目录里
-    ("ai", "atelyx.ai", &[ai::CHAT_SEND, ai::CHAT_STOP, ai::CHAT_HISTORY, ai::MODELS, ai::AGENTS, ai::CHAT_RENAME, ai::CHAT_DELETE, ai::CHAT_COMPACT]),
-    ("window", PLATFORM_PLUGIN, &[window::OPEN, window::CLOSE, window::UPDATE, window::SHOW, window::BEGIN_DRAG, window::MINIMIZE, window::TOGGLE_MAXIMIZE]),
-    ("query", PLATFORM_PLUGIN, &[query::MEASURE, query::THEME]),
-    ("markdown", "atelyx.notes", &[markdown::PARSE]),
-    ("editor", "atelyx.notes", &[editor::SELECTION, editor::REPLACE_SELECTION]),
-    ("history", "atelyx.history", &[history::ACTIVITY, history::DAY, history::OPEN]),
+/// 改名 / 删除常量会直接编译失败，目录不会悄悄漂移。
+///
+/// 内置服务是宿主 API：不可停用、不可被插件占用。插件经 `service.register` 只能登记新服务名。
+pub const BUILTIN_SERVICES: &[(&str, &[&str])] = &[
+    ("fs", &[fs::PRIVATE_DIR, fs::READ_TEXT, fs::WRITE_TEXT, fs::READ_BINARY, fs::WRITE_BINARY, fs::REMOVE, fs::EXISTS, fs::LIST]),
+    ("process", &[process::SPAWN, process::WRITE_STDIN, process::CLOSE_STDIN, process::KILL]),
+    ("vault", &[vault::READ_TEXT, vault::WRITE_TEXT, vault::READ_BINARY, vault::WRITE_BINARY, vault::IMPORT_FILE, vault::IMAGE_INFO, vault::LIST, vault::EXISTS, vault::REMOVE, vault::RENAME]),
+    ("collab", &[collab::PEERS, collab::SEND, collab::META_GET, collab::META_PATCH]),
+    ("table", &[table::SNAPSHOT, table::UPDATE_CELL, table::ADD_ROW, table::REMOVE_ROW, table::SELECT_ROW, table::SET_CELL_IMAGE]),
+    ("state", &[state::READ, state::WRITE]),
+    ("notification", &[notification::SHOW]),
+    ("tray", &[tray::SET_ITEMS]),
+    ("shortcut", &[shortcut::REGISTER, shortcut::UNREGISTER, shortcut::QUERY]),
+    ("clipboard", &[clipboard::WRITE_TEXT, clipboard::READ_TEXT, clipboard::READ_IMAGE, clipboard::WRITE_IMAGE]),
+    ("dialog", &[dialog::PICK_FILE, dialog::PICK_DIRECTORY]),
+    ("http", &[http::REQUEST]),
+    // 工具名册与结果回报是宿主记账，不是可被提供的服务方法，故不在目录里
+    ("ai", &[ai::CHAT_SEND, ai::CHAT_STOP, ai::CHAT_HISTORY, ai::MODELS, ai::AGENTS, ai::CHAT_RENAME, ai::CHAT_DELETE, ai::CHAT_COMPACT]),
+    ("window", &[window::OPEN, window::CLOSE, window::UPDATE, window::SHOW, window::BEGIN_DRAG, window::MINIMIZE, window::TOGGLE_MAXIMIZE]),
+    ("query", &[query::MEASURE, query::THEME]),
+    ("markdown", &[markdown::PARSE]),
+    ("editor", &[editor::SELECTION, editor::REPLACE_SELECTION]),
+    ("history", &[history::ACTIVITY, history::DAY, history::OPEN]),
 ];
 
 #[cfg(test)]
@@ -1756,14 +1732,10 @@ mod tests {
         assert_eq!(serde_json::to_value(ContributionSlot::Settings).unwrap(), "settings");
         assert_eq!(serde_json::to_value(SurfaceKind::Settings).unwrap(), "settings");
         assert_eq!(serde_json::to_value(SurfaceKind::TableView).unwrap(), "tableView");
-        assert_eq!(serde_json::to_value(TakeoverScope::Page).unwrap(), "page");
-        assert_eq!(serde_json::to_value(TakeoverScope::Full).unwrap(), "full");
         let kind: SurfaceKind = serde_json::from_value(serde_json::json!("settings")).unwrap();
         assert_eq!(kind, SurfaceKind::Settings);
         let slot: ContributionSlot = serde_json::from_value(serde_json::json!("settings")).unwrap();
         assert_eq!(slot, ContributionSlot::Settings);
-        let scope: TakeoverScope = serde_json::from_value(serde_json::json!("full")).unwrap();
-        assert_eq!(scope, TakeoverScope::Full);
         // table 面：字段名与类型字段走 camelCase / `type` 原名，缺省行按空值集
         let snapshot: TableSnapshot = serde_json::from_value(serde_json::json!({
             "open": true,
