@@ -284,7 +284,12 @@ pub(crate) fn activity_json(timestamps: &[i64]) -> Result<serde_json::Value, Str
 /// 仓库历史视图：文件组卡片列表 + 组头（图标 + 文件名 + 全路径 + 版本数徽标）。
 pub fn repohistory_view(app: &App, window: iced::window::Id) -> Element<'_, Message> {
     if !container_ready(app) {
-        return controls::empty_state("history", "未打开仓库", "打开仓库后显示", None);
+        return controls::empty_state(
+            "history",
+            "打开仓库",
+            "打开仓库后在这里查看各文件的版本记录",
+            None,
+        );
     }
     let body: Element<'_, Message> = match &app.repo_history {
         Some(Err(e)) => controls::empty_state(
@@ -296,7 +301,7 @@ pub fn repohistory_view(app: &App, window: iced::window::Id) -> Element<'_, Mess
         Some(Ok(history)) if history.groups.is_empty() => controls::empty_state(
             "history",
             "暂无历史记录",
-            "暂无版本记录",
+            "编辑并保存文件后，版本会出现在这里",
             None,
         ),
         Some(Ok(history)) => group_list(&history.groups, window),

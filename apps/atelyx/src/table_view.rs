@@ -2262,7 +2262,12 @@ fn circle_btn(frame: &mut canvas::Frame, area: Rectangle, icon_name: &str) {
 /// 表格视图（工具条 + 自绘主体 + 浮层）；未打开文件 = 空态。
 pub fn table_view<'a>(app: &'a crate::App, window: iced::window::Id) -> Element<'a, Message> {
     let Some(session) = &app.table else {
-        return crate::ui::controls::empty_state("table", "未打开表格", "从文件面板打开一个 .atb 文件", None);
+        return crate::ui::controls::empty_state(
+            "table",
+            "打开表格",
+            "在文件面板或搜索面板单击一个 .atb 表格文件",
+            None,
+        );
     };
 
     // 插件表格视图：面板内以插件面替掉网格（工具条保留，「视图」下拉可切回内置网格）

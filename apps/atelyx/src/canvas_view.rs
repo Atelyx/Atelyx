@@ -1885,7 +1885,12 @@ fn draw_icon_glyph(frame: &mut Frame, name: &str, x: f32, y: f32, size: f32, col
 /// 整体经 responsive 组装：工具条缩放钮与浮层锚点共用同一视口尺寸（视口高 = 总高 − 工具条高）。
 pub fn canvas_view<'a>(app: &'a App, window: iced::window::Id) -> Element<'a> {
     let Some(session) = &app.canvas else {
-        return controls::empty_state("palette", "未打开画布", "从文件面板打开一个 .atlx 文件", None);
+        return controls::empty_state(
+            "palette",
+            "打开画布",
+            "在文件面板或搜索面板单击一个 .atlx 画布文件",
+            None,
+        );
     };
 
     responsive(move |size| {
@@ -2731,7 +2736,12 @@ fn props_row(label: &str, value: String) -> iced::Element<'static, Message> {
 /// 画布属性面板：选中卡 = 坐标尺寸 / 类型 / 引用来源 / 消费关系；无选中 = 画布概况。只读展示。
 pub fn props_panel(app: &App) -> iced::Element<'static, Message> {
     let Some(session) = &app.canvas else {
-        return controls::view_placeholder("info", "画布属性", "打开一篇画布后在此查看其属性。");
+        return controls::empty_state(
+            "info",
+            "画布属性",
+            "打开一篇画布后在此查看其属性",
+            None,
+        );
     };
     let mut col = column![].spacing(4).padding(Padding::ZERO.horizontal(12.0).vertical(8.0));
     match session

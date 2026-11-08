@@ -1769,13 +1769,14 @@ pub(crate) fn collab_room_view(app: &App, _window: iced::window::Id) -> Element<
                 );
             }
         }
+        // 未进空间：整面板居中空态（不进滚动列，否则只按固有高度贴顶）
         crate::RepoKind::Local => {
-            col = col.push(controls::empty_state(
+            return controls::empty_state(
                 "users",
                 "未进入协作空间",
-                "登录并进入空间后显示在线成员",
+                "登录并进入空间后在这里查看成员与在线设备",
                 Some(("协作空间".into(), Message::SpaceMenuOpen)),
-            ));
+            );
         }
     }
     scroll::v(container(col).width(Length::Fill).height(Length::Fill))
@@ -1974,7 +1975,7 @@ pub(crate) fn search_view(app: &App, window: iced::window::Id) -> Element<'_, Me
         controls::empty_state(
             "files",
             "还没有可搜索的文件",
-            "在文件面板打开仓库后，在这里按名称检索",
+            "在文件面板打开仓库后，在这里按名称检索文件",
             None,
         )
     } else if total == 0 {
@@ -2155,10 +2156,11 @@ pub(crate) fn inspector_view<'a>(app: &'a App, window: iced::window::Id) -> Elem
         return crate::canvas_view::props_panel(app);
     }
     if app.ui.last_note_file.is_none() {
-        return controls::view_placeholder(
+        return controls::empty_state(
             "info",
             "笔记属性",
-            "打开一篇笔记后在此查看与编辑其属性。",
+            "打开一篇笔记后在此查看与编辑其属性",
+            None,
         );
     }
     crate::properties_view::props_panel(app, window, true)
@@ -3220,10 +3222,11 @@ pub fn file_label(rel: &str) -> String {
 /// note 视图：工具条（模式分段 + ···菜单）+ 对应档位的内容面。
 pub(crate) fn note_view(app: &App, window: iced::window::Id) -> Element<'_, Message> {
     if app.ui.last_note_file.is_none() {
-        return controls::view_placeholder(
-            "file-text",
+        return controls::empty_state(
+            "sticky-note",
             "打开笔记",
-            "在文件面板或搜索面板单击一个 .md 笔记开始编辑。",
+            "在文件面板或搜索面板单击一个 .md 笔记开始编辑",
+            None,
         );
     }
     let cursor = app.cursor_for(window);

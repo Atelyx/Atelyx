@@ -488,7 +488,12 @@ fn message_flow(app: &App, window: iced::window::Id) -> iced::Element<'_, Messag
 }
 
 fn empty_flow() -> iced::Element<'static, Message> {
-    controls::empty_state("message-square", "开始新的 AI 对话", "", None)
+    controls::empty_state(
+        "message-square",
+        "开始新的 AI 对话",
+        "在下方输入消息，Enter 发送",
+        None,
+    )
 }
 
 /// 消息操作按钮组（复制 / 回到此处 / 重新生成；条件与对话面板约定一致）。

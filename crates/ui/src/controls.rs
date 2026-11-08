@@ -280,38 +280,80 @@ pub fn status_pill<M: 'static>(status: PillStatus, label: impl Into<String>) -> 
     .into()
 }
 
-/// 空态（图标 + 标题 + 描述 + 可选动作）。
+/// 空态图标盒边长（与信息卡图标槽同档）。
+const EMPTY_ICON_BOX: f32 = 48.0;
+/// 空态图标在盒内的边长。
+const EMPTY_ICON_PX: f32 = 20.0;
+/// 占位引导（未实现视图 / 无文件）的图标盒与图标：同一形态大一号。
+const EMPTY_ICON_BOX_LG: f32 = 64.0;
+const EMPTY_ICON_PX_LG: f32 = 26.0;
+/// 空态描述换行宽度上限（长说明不横贯整个面板）。
+const EMPTY_DESC_MAX_W: f32 = 340.0;
+
+/// 空态（图标盒 + 标题 + 描述 + 可选动作）：无内容 / 未打开 / 出错重试的统一形态。
+///
+/// 图标盒 = 三级底 + 细描边圆角，图标取次文字色（比正文弱一档、比说明强一档）；
+/// 描述为空串时不出该行，避免留一段空行把标题顶偏。
 pub fn empty_state<M: Clone + 'static>(
     icon_name: &str,
     title: impl Into<String>,
     desc: impl Into<String>,
     action: Option<(String, M)>,
 ) -> Element<'static, M> {
-    let mut col = column![
-        container(icon(icon_name, 18.0, pal::TEXT_MUTED))
-            .width(Length::Fixed(40.0))
-            .height(Length::Fixed(40.0))
-            .align_x(iced::alignment::Horizontal::Center)
-            .align_y(iced::alignment::Vertical::Center)
-            .style(|_t| Style {
-                background: Some(pal::BG_TERTIARY.into()),
-                border: border::rounded(pal::RADIUS_MD),
-                ..Style::default()
-            }),
-        text(title.into())
-            .size(pal::fs_body())
-            .color(pal::TEXT_PRIMARY)
-            .font(bold()),
-        text(desc.into())
-            .size(pal::fs_ui())
-            .color(pal::TEXT_MUTED),
-    ]
-    .spacing(8)
-    .align_x(iced::alignment::Horizontal::Center);
-    if let Some((label, msg)) = action {
+    empty_state_body(icon_name, title, desc.into(), None, action, EMPTY_ICON_BOX, EMPTY_ICON_PX)
+}
+
+
+fn empty_state_body<M: Clone + 'static>(
+    icon_name: &str,
+    title: impl Into<String>,
+    desc: String,
+    action_el: Option<Element<'static, M>>,
+    action_btn: Option<(String, M)>,
+    icon_box: f32,
+    icon_px: f32,
+) -> Element<'static, M> {
+    let boxed = container(icon(icon_name, icon_px, pal::TEXT_SECONDARY))
+        .width(Length::Fixed(icon_box))
+        .height(Length::Fixed(icon_box))
+        .align_x(iced::alignment::Horizontal::Center)
+        .align_y(iced::alignment::Vertical::Center)
+        .style(|_t| Style {
+            background: Some(pal::BG_TERTIARY.into()),
+            border: border::rounded(pal::RADIUS_MD).color(pal::BORDER).width(1.0),
+            ..Style::default()
+        });
+    let mut col = column![boxed]
+        .spacing(0)
+        .align_x(iced::alignment::Horizontal::Center);
+    col = col.push(
+        container(
+            text(title.into())
+                .size(pal::fs_h2())
+                .color(pal::TEXT_PRIMARY)
+                .font(bold())
+                .align_x(iced::alignment::Horizontal::Center),
+        )
+        .padding(Padding::ZERO.top(14.0)),
+    );
+    if !desc.is_empty() {
+        col = col.push(
+            container(
+                text(desc)
+                    .size(pal::fs_ui())
+                    .color(pal::TEXT_MUTED)
+                    .align_x(iced::alignment::Horizontal::Center),
+            )
+            .max_width(EMPTY_DESC_MAX_W)
+            .padding(Padding::ZERO.top(6.0)),
+        );
+    }
+    if let Some(el) = action_el {
+        col = col.push(container(el).padding(Padding::ZERO.top(14.0)));
+    } else if let Some((label, msg)) = action_btn {
         col = col.push(
             container(btn(label, &btn_sm(), Variant::Secondary, Some(msg)))
-            .padding(Padding::ZERO.top(4.0)),
+                .padding(Padding::ZERO.top(14.0)),
         );
     }
     container(col)
@@ -322,8 +364,8 @@ pub fn empty_state<M: Clone + 'static>(
         .into()
 }
 
-/// 视图占位引导（无文件/空视图）：64px 细描边图标 + 标题 + 描述，居中。
-pub fn view_placeholder<M: 'static>(
+/// 视图占位引导（无文件 / 未实现视图）：与 empty_state 同形态，图标盒大一号。
+pub fn view_placeholder<M: Clone + 'static>(
     icon_name: &str,
     title: impl Into<String>,
     desc: impl Into<String>,
@@ -332,33 +374,13 @@ pub fn view_placeholder<M: 'static>(
 }
 
 /// 同上，可附一个操作（如停用视图的「重新启用」）。
-pub fn view_placeholder_action<M: 'static>(
+pub fn view_placeholder_action<M: Clone + 'static>(
     icon_name: &str,
     title: impl Into<String>,
     desc: impl Into<String>,
     action: Option<Element<'static, M>>,
 ) -> Element<'static, M> {
-    let mut body = column![
-        icon_stroke(icon_name, 64.0, pal::TEXT_MUTED.scale_alpha(0.6), 1.5),
-        text(title.into())
-            .size(pal::fs_h1())
-            .color(pal::TEXT_PRIMARY)
-            .font(bold()),
-        text(desc.into())
-            .size(pal::fs_body())
-            .color(pal::TEXT_MUTED),
-    ]
-    .spacing(16)
-    .align_x(iced::alignment::Horizontal::Center);
-    if let Some(action) = action {
-        body = body.push(action);
-    }
-    container(body)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .center_x(Length::Fill)
-        .center_y(Length::Fill)
-        .into()
+    empty_state_body(icon_name, title, desc.into(), action, None, EMPTY_ICON_BOX_LG, EMPTY_ICON_PX_LG)
 }
 
 /// 水平分隔线（`subtle` = 次级线色，用于工具条/分组分隔）。
