@@ -202,21 +202,6 @@ pub mod markdown {
     pub const PARSE: &str = "markdown.parse";
 }
 
-/// 日历服务（由日历插件提供）：方法名即 `calendar.<方法>`，也可经 `service.call` 以
-/// `service = calendar` 调用。日程真源随容器走（本地仓库 / 协作空间团队 meta），插件不自留副本。
-pub mod calendar {
-    /// 服务名。
-    pub const SERVICE: &str = "calendar";
-    /// 当前仓库的日程（按日期、创建时间与 id 排序）。
-    pub const LIST: &str = "list";
-    /// 新增一条日程；`id` 与创建时刻由服务补齐。
-    pub const ADD: &str = "add";
-    /// 改写一条日程（只改给出的字段）。
-    pub const UPDATE: &str = "update";
-    /// 删除一条日程。
-    pub const REMOVE: &str = "remove";
-}
-
 pub mod history {
     /// 按天聚合的仓库活动：新建 / 修改 / 删除的文件数合计。
     pub const ACTIVITY: &str = "history.activity";
@@ -661,137 +646,6 @@ impl EditorReplaceParams {
     }
 }
 
-// ---------- calendar ----------
-
-/// 一条日程（`date` 为本地日期 `YYYY-MM-DD`；`color` 为 hex，缺省 = 默认强调色）。
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CalendarItem {
-    #[serde(default)]
-    pub id: String,
-    #[serde(default)]
-    pub date: String,
-    #[serde(default)]
-    pub title: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub note: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub color: Option<String>,
-    /// 创建时刻（Unix 毫秒），同日条目按它排序。
-    #[serde(default)]
-    pub created_at: i64,
-}
-
-/// 标题字符上限（超限按可读错误拒绝）。
-pub const MAX_CALENDAR_TITLE_CHARS: usize = 200;
-
-/// `YYYY-MM-DD` 形态校验（只查形状与范围，不查该日是否存在）。
-pub(crate) fn is_calendar_date(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
-        return false;
-    }
-    let digits = |range: std::ops::Range<usize>| {
-        bytes[range].iter().all(u8::is_ascii_digit)
-    };
-    if !(digits(0..4) && digits(5..7) && digits(8..10)) {
-        return false;
-    }
-    let month: u32 = value[5..7].parse().unwrap_or(0);
-    let day: u32 = value[8..10].parse().unwrap_or(0);
-    (1..=12).contains(&month) && (1..=31).contains(&day)
-}
-
-fn validate_calendar_title(title: &str) -> Result<(), String> {
-    if title.chars().count() > MAX_CALENDAR_TITLE_CHARS {
-        return Err(format!("标题不得超过 {MAX_CALENDAR_TITLE_CHARS} 字"));
-    }
-    Ok(())
-}
-
-/// [`calendar::LIST`] 的 result：当前仓库的日程（按开始日期排序）。
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CalendarListResult {
-    pub items: Vec<CalendarItem>,
-}
-
-/// [`calendar::ADD`] 的 params：`id` / `createdAt` 由日历服务补齐；`color` 未给出即按强调色显示。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CalendarAddParams {
-    pub date: String,
-    #[serde(default)]
-    pub title: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub note: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub color: Option<String>,
-}
-
-impl CalendarAddParams {
-    pub fn validate(&self) -> Result<(), String> {
-        if !is_calendar_date(&self.date) {
-            return Err(format!("日期须为 YYYY-MM-DD：{}", self.date));
-        }
-        if self.title.trim().is_empty() {
-            return Err("标题不能为空".to_string());
-        }
-        validate_calendar_title(&self.title)
-    }
-}
-
-/// [`calendar::UPDATE`] 的 params：只改给出的字段（`None` = 保持原值；空串清空备注）。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CalendarUpdateParams {
-    pub id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub date: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub note: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub color: Option<String>,
-}
-
-impl CalendarUpdateParams {
-    pub fn validate(&self) -> Result<(), String> {
-        if self.id.is_empty() {
-            return Err("id 不能为空".to_string());
-        }
-        if let Some(date) = &self.date {
-            if !is_calendar_date(date) {
-                return Err(format!("日期须为 YYYY-MM-DD：{date}"));
-            }
-        }
-        if let Some(title) = &self.title {
-            if title.trim().is_empty() {
-                return Err("标题不能为空".to_string());
-            }
-            validate_calendar_title(title)?;
-        }
-        Ok(())
-    }
-}
-
-/// [`calendar::REMOVE`] 的 params。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CalendarIdParams {
-    pub id: String,
-}
-
-impl CalendarIdParams {
-    pub fn validate(&self) -> Result<(), String> {
-        if self.id.is_empty() {
-            return Err("id 不能为空".to_string());
-        }
-        Ok(())
-    }
-}
-
 // ---------- history ----------
 
 /// 一天的活动计数（`day` = 自纪元天数）。
@@ -809,6 +663,21 @@ pub struct HistoryActivityResult {
     pub days: Vec<DayActivity>,
 }
 
+/// `YYYY-MM-DD` 形态校验（只查形状与范围，不查该日是否存在）。
+fn is_iso_date(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+        return false;
+    }
+    let digits = |range: std::ops::Range<usize>| bytes[range].iter().all(u8::is_ascii_digit);
+    if !(digits(0..4) && digits(5..7) && digits(8..10)) {
+        return false;
+    }
+    let month: u32 = value[5..7].parse().unwrap_or(0);
+    let day: u32 = value[8..10].parse().unwrap_or(0);
+    (1..=12).contains(&month) && (1..=31).contains(&day)
+}
+
 /// [`history::DAY`] 的 params：`day` 为本地日期 `YYYY-MM-DD`。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -818,7 +687,7 @@ pub struct HistoryDayParams {
 
 impl HistoryDayParams {
     pub fn validate(&self) -> Result<(), String> {
-        if !is_calendar_date(&self.day) {
+        if !is_iso_date(&self.day) {
             return Err(format!("日期须为 YYYY-MM-DD：{}", self.day));
         }
         Ok(())
@@ -2033,50 +1902,6 @@ mod tests {
             serde_json::to_value(CollabPeersResult::default()).unwrap(),
             serde_json::json!({ "connected": false })
         );
-    }
-
-    #[test]
-    fn calendar_params_validate_shape_and_defaults() {
-        let ok = CalendarAddParams {
-            date: "2026-10-30".into(),
-            title: "会议".into(),
-            note: None,
-            color: None,
-        };
-        assert!(ok.validate().is_ok());
-        assert_eq!(
-            serde_json::to_value(&ok).unwrap(),
-            serde_json::json!({ "date": "2026-10-30", "title": "会议" })
-        );
-        for date in ["2026-1-1", "2026-13-01", "2026-10-32", " 2026-10-30"] {
-            let bad = CalendarAddParams { date: date.into(), ..ok.clone() };
-            assert!(bad.validate().is_err(), "应拒绝日期：{date}");
-        }
-        let blank = CalendarAddParams { title: "  ".into(), ..ok.clone() };
-        assert!(blank.validate().is_err());
-        let long = CalendarAddParams {
-            title: "字".repeat(MAX_CALENDAR_TITLE_CHARS + 1),
-            ..ok
-        };
-        assert!(long.validate().is_err());
-
-        // 未给出的字段不落线（更新语义：缺省 = 保持原值）
-        let update = CalendarUpdateParams {
-            id: "ev-1".into(),
-            date: None,
-            title: Some("改".into()),
-            note: None,
-            color: None,
-        };
-        assert!(update.validate().is_ok());
-        assert_eq!(
-            serde_json::to_value(&update).unwrap(),
-            serde_json::json!({ "id": "ev-1", "title": "改" })
-        );
-        assert!(CalendarUpdateParams { id: String::new(), ..update }.validate().is_err());
-
-        assert!(CalendarIdParams { id: "ev-1".into() }.validate().is_ok());
-        assert!(CalendarIdParams { id: String::new() }.validate().is_err());
     }
 
     #[test]

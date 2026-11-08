@@ -17,7 +17,6 @@ mod manifest;
 mod markdown;
 /// 市场数据源（公开给壳：索引拉取 / 缓存 / Release 取数）。
 pub mod market;
-mod preset;
 mod service_dir;
 mod shortcut;
 /// 表格服务面的纯映射（公开给壳：表格真源 → 协议只读快照）。
@@ -59,11 +58,9 @@ pub use atelyx_plugin_protocol::manifest::{DocTypeRegistration, Permission};
 /// 能力总线的对外契约类型（服务清单 / 登记参数 / 错误原因）。
 pub use atelyx_plugin_protocol::service;
 /// 随包预置插件同步的结果。
-pub use preset::PresetSyncReport;
 pub use atelyx_plugin_protocol::method::{
     AiAgent, AiAgentsResult, AiModel, AiModelPick, AiModelProvider, AiModelsResult,
     AxesPadding, BUILTIN_SERVICES, PLATFORM_PLUGIN, EditorReplaceParams, EditorSelection,
-    CalendarAddParams, CalendarIdParams, CalendarItem, CalendarListResult, CalendarUpdateParams,
     CollabMetaEntry, CollabMetaGetParams, CollabMetaPatchParams, CollabMetaResult, DayActivity,
     HistoryActivityResult, HistoryDayEntry, HistoryDayParams, HistoryDayResult, HistoryOpenParams,
     ChatEvent, ChatEventParams, ChatHistoryParams, ChatHistoryResult,
@@ -330,8 +327,6 @@ pub struct PluginSummary {
     pub submits: u64,
     /// 安装来源目录（本地目录安装时记下的绝对路径；zip / 市场安装为 `None`）。
     pub source: Option<String>,
-    /// 随包预置：内容由发行包的 `preset-plugins/` 铺盘（设置页归入内置插件）。
-    pub preset: bool,
 }
 
 /// 一次安装的结果：内容已落位。`start_error` = 曾启用的插件未能用新内容启动——
@@ -1380,15 +1375,13 @@ impl PluginRuntime {
                         undeclared: instance.map(|i| i.undeclared_count()).unwrap_or(0),
                         submits: instance.map(|i| i.submits()).unwrap_or(0),
                         source: None,
-                        preset: false,
                     }
                 })
                 .collect()
         };
-        // 安装来源与预置标记是磁盘事实（不进 discovered 缓存）：出锁后再读，不持锁做 I/O
+        // 安装来源是磁盘事实（不进 discovered 缓存）：出锁后再读，不持锁做 I/O
         for summary in &mut summaries {
             summary.source = layout::read_source(&self.root, &summary.id);
-            summary.preset = layout::is_preset(&self.root, &summary.id);
         }
         summaries
     }
@@ -1444,10 +1437,6 @@ impl PluginRuntime {
 
     /// 同步随包预置插件：`bundled` = 发行包内插件目录，`marker` = 记录装过哪些预置项的标记文件。
     /// 首装即启用，已装在随包版本更新或内容变化时替换；只落位内容，不启动进程。
-    pub fn sync_presets(&self, bundled: &Path, marker: &Path) -> Result<PresetSyncReport, String> {
-        preset::sync(&self.root, bundled, marker)
-    }
-
     /// 用上次的安装来源目录重新安装（开发回路：构建产物更新后一键重装并重启）。
     /// 来源缺失 / 目录已不存在 / 来源清单 id 与已安装插件不一致都以可读原因拒绝。
     pub fn install_from_source(self: &Arc<Self>, id: &str) -> Result<InstallOutcome, String> {

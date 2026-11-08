@@ -372,7 +372,7 @@ fn group_card(g: &RepoHistoryGroup, window: iced::window::Id) -> Element<'static
 }
 
 /// kind → 行首图标。
-fn kind_icon(kind: HistoryKind) -> &'static str {
+pub(crate) fn kind_icon(kind: HistoryKind) -> &'static str {
     match kind {
         HistoryKind::Note => "file-text",
         HistoryKind::Table => "table",

@@ -19,7 +19,7 @@ use atelyx_core::plugin_runtime::{
 use crate::registry::{Registry, Snapshot};
 use crate::{App, Message};
 
-/// 壳侧插件视图 kind 前缀（预置插件视图词汇不被插件占用；插件 id 与贡献 id 都不含 `:`）。
+/// 壳侧插件视图 kind 前缀（原生视图词汇不被插件占用；插件 id 与贡献 id 都不含 `:`）。
 const KIND_PREFIX: &str = "plugin:";
 
 // ===== 视图 kind 编解码 =====
@@ -165,19 +165,18 @@ pub fn sync_table_surfaces(app: &mut App) -> bool {
     true
 }
 
-/// 唯一注册表的唯一重建入口：内置插件表 + 插件贡献 + 文档类型 + 在册服务 + 内置停用表。
+/// 唯一注册表的唯一重建入口：原生视图 + 插件贡献 + 文档类型 + 在册服务。
 /// 选择器、标签与设置页都读这张表，任何一侧变化后都必须经此整体重建。
 pub fn rebuild_registry(app: &mut App) {
     let services = app.plugins.service_list();
     let plugins = app.plugins.list();
     let doc_types = app.plugins.doc_types();
     let registry = Registry::build(Snapshot {
-        builtin_plugins: crate::pack::BUILTIN_PLUGINS,
+        views: crate::pack::NATIVE_VIEWS,
         contributions: &app.plugin_contributions,
         doc_types: &doc_types,
         services: &services.services,
         plugins: &plugins,
-        disabled_plugins: &app.ui.disabled_plugins,
     });
     app.registry = registry;
 }

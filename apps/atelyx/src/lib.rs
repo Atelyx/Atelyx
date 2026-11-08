@@ -7,6 +7,12 @@
 //! 进程入口在 `main.rs`，只调 [`run`]。
 
 mod autostart;
+mod calendar_actions;
+mod calendar_day;
+mod calendar_grid;
+mod calendar_heat;
+mod calendar_month;
+mod calendar_view;
 mod canvas_actions;
 mod canvas_chat;
 mod canvas_view;
@@ -292,15 +298,6 @@ fn app_data_dir() -> Option<PathBuf> {
 /// ui-state.json 落盘路径（应用级 UI 状态）。
 fn ui_state_path() -> Option<PathBuf> {
     app_data_dir().map(|d| d.join("ui-state.json"))
-}
-
-/// 发行包内的预置插件目录：Windows 安装目录下 `preset-plugins/`，Linux 安装布局在
-/// `<exe>/../lib/atelyx/preset-plugins`。取第一个存在的。
-fn bundled_presets_dir() -> Option<PathBuf> {
-    let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
-    [exe_dir.join("preset-plugins"), exe_dir.join("../lib/atelyx/preset-plugins")]
-        .into_iter()
-        .find(|dir| dir.is_dir())
 }
 
 /// global.json 落盘路径（应用级全局配置：最近仓库列表）。
@@ -608,6 +605,7 @@ enum Message {
     /// 表格视图消息（交互 / 命令 / 保存链回执）。
     Table(table_view::TableMsg),
     Canvas(canvas_view::CanvasMsg),
+    Calendar(calendar_actions::CalendarMsg),
     /// 表格可见图片批量加载落地（gen 守卫）。
     TableImagesLoaded(u64, ImageLoadBatch),
     /// 键盘修饰态（Ctrl+滚轮缩放 / Shift+滚轮横滚判定源）。
@@ -1254,6 +1252,8 @@ pub struct App {
     pub canvas: Option<canvas_view::CanvasSession>,
     /// 画布实时在场（选中 / 对话卡锁 / 流式上行 + 远端条目；None = 不在任何画布上）。
     pub canvas_collab: Option<canvas_collab::CanvasCollab>,
+    /// 日历视图会话态（月份偏移 / 选中日 / 手动日程；容器切换重置）。
+    pub calendar: calendar_actions::CalendarState,
     /// flush 放行后待续的动作（笔记 / 表格 / 画布任一脏时挂起，全部落盘后执行）。
     pub(crate) flush_pending: Option<PendingAfterFlush>,
     /// 键盘修饰态（Ctrl+滚轮缩放判定源）。
@@ -1836,6 +1836,7 @@ impl App {
                 table: None,
                 canvas: None,
                 canvas_collab: None,
+                calendar: calendar_actions::CalendarState::default(),
                 flush_pending: None,
                 mods: keyboard::Modifiers::default(),
                 table_popup_draft: String::new(),
@@ -1885,27 +1886,9 @@ impl App {
                     .insert(root.clone(), app.ui.file_explorer_expanded.clone());
             }
         }
-        // 随包预置插件：发行包内的预置目录补进用户插件根（首装启用；版本更新或内容变化即替换，
-        // 用户卸过的不装回）。这里只补内容，启动交给随后的 scan + start_enabled
-        if let Some(data) = app_data_dir() {
-            if let Some(bundled) = bundled_presets_dir() {
-                match app.plugins.sync_presets(&bundled, &data.join("preset-plugins.json")) {
-                    Ok(report) => {
-                        for (id, reason) in report.failed {
-                            app.notify(NoticeLevel::Warning, format!("预置插件 {id} 同步失败：{reason}"));
-                        }
-                    }
-                    Err(e) => app.notify(NoticeLevel::Warning, format!("预置插件同步失败：{e}")),
-                }
-            }
-        }
         // 插件运行时：扫描已安装清单并启动已启用插件；布局里现存的插件面就绪即通知
         app.plugins.scan();
         app.plugins.start_enabled();
-        // 内置插件的停用态要落到能力总线：停用插件的内置服务不进目录（外部候选可接手）
-        for plugin in app.ui.disabled_plugins.clone() {
-            app.plugins.set_builtin_owner_enabled(&plugin, false);
-        }
         plugin_actions::sync_surfaces(&mut app);
         plugin_actions::rebuild_registry(&mut app);
         boot = boot.chain(plugin_actions::refresh_projection(&mut app));
@@ -2543,8 +2526,9 @@ impl App {
                 if let Some(e) = err {
                     self.notify(NoticeLevel::Error, format!("历史版本记录失败：{e}"));
                 }
-                // 侧文件有新版本：面板聚合缓存失效，下个 tick 重取（展示中）
+                // 侧文件有新版本：面板聚合缓存失效，下个 tick 重取（展示中）；日历活动密度一并失效
                 self.repo_history = None;
+                calendar_actions::invalidate_activity(self);
                 if gen == self.epoch() {
                     self.reload_history()
                 } else {
@@ -3097,6 +3081,7 @@ impl App {
                 // 主页面板懒加载搭载：历史面板缓存失效时聚合，最近打开条目按节流校验存在性
                 let lazy = repohistory_view::tick(self)
                     .chain(recent_view::tick(self))
+                    .chain(calendar_actions::tick(self))
                     .chain(space_actions::members_tick(self))
                     // 绘制期同步取走的帧不走通知：投影可能落后，心跳里补一次
                     // （图片载入与键位声明读的是投影缓存）
@@ -3307,6 +3292,16 @@ impl App {
                         return self.update(Message::LayoutRenameCommit);
                     }
                 }
+                // 日历日程标题编辑失焦提交：按压不在输入行内 = 提交（Enter 同路径；编辑会话至多一个）
+                if self.calendar.edit.is_some() {
+                    if self.calendar.press_inside {
+                        self.calendar.press_inside = false;
+                    } else {
+                        return Task::perform(async {}, |_| {
+                            Message::Calendar(calendar_actions::CalendarMsg::EditCommit)
+                        });
+                    }
+                }
                 // 表格编辑器失焦提交：按压不在编辑器浮层内 = 提交（同批 widget 消息已先置 editor_inside）
                 if self.table.as_ref().is_some_and(|t| t.view.editing.is_some()) {
                     if self.table.as_ref().is_some_and(|t| t.view.editor_inside) {
@@ -3466,6 +3461,8 @@ impl App {
                 Task::none()
             }
             Message::Release => {
+                // 日历热力图拖拽：松手按位移方向翻月。
+                calendar_actions::finish_heat_drag(self);
                 // 选区：拖选在途 → 松手收口并保留；按压落在选区菜单内 → 保留（复制在释放时
                 // 才回发）；其余 = 按压在正文外 → 清空。
                 let keep = std::mem::take(&mut self.selection_menu_press);
@@ -3526,6 +3523,7 @@ impl App {
             }
             Message::Ui(msg) => self.on_ui(msg),
             Message::Update(msg) => self.on_update(msg),
+            Message::Calendar(m) => calendar_actions::on_msg(self, m),
             Message::Table(msg) => {
                 // 数据版本变化 = 表格编辑：与笔记同口径推迟自动保存期限
                 let version_before = self.table.as_ref().map(|t| t.version);
@@ -3607,6 +3605,8 @@ impl App {
                     return plugin_actions::exit_takeover(self, window);
                 } else if self.main_id == Some(window) && self.props.editing.is_some() {
                     return self.on_props(PropsMsg::CancelSlot);
+                } else if self.calendar.edit.take().is_some() {
+                    // 日历日程标题编辑 Esc = 取消（草稿丢弃）
                 } else if self.rename.as_ref().is_some_and(|r| r.window == window) {
                     // 行内重命名 Esc = 取消
                     self.rename = None;
@@ -5045,6 +5045,8 @@ impl App {
         // 仓库历史面板缓存随切仓失效（进面板后重取）
         self.repo_history = None;
         self.repo_history_loading = false;
+        // 日历会话态随容器切换重置
+        self.calendar = calendar_actions::CalendarState::default();
         // 等聚合落地的按日查询随切仓作废：逐个回绝，插件调用不会悬着
         settings_view::plugins::fail_pending_history_day(self, "仓库已切换");
         self.rebuild_links = settings_view::editor::RebuildLinksState::Idle;

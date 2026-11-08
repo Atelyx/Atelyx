@@ -4,6 +4,7 @@
 //! （序列化、异步运行时、时间与标识、正则 / glob、网络客户端）。
 
 pub mod ai;
+pub mod calendar;
 pub mod collab;
 pub mod credentials;
 pub mod canvas_collab;

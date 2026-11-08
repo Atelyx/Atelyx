@@ -1,7 +1,6 @@
 //! 设置-插件：已安装列表 / 启停 / 卸载 / 本地与 zip 安装 / 详情（版本、声明权限、失败原因、
 //! 用到但未声明的调用）/ 市场（官方索引浏览 / 安装 / 更新）。
-//! 列表与状态来自 `atelyx_core::plugin_runtime`（运行时为进程内单例，壳持有 `Arc`）；
-//! 「内置插件」区块（内置插件停用与服务提供者切换）读壳的唯一注册表。
+//! 列表与状态来自 `atelyx_core::plugin_runtime`（运行时为进程内单例，壳持有 `Arc`）。
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -19,11 +18,11 @@ use atelyx_core::plugin_runtime::{
     DialogKind, DialogRequest, FileChangeKind, HistoryActivityResult, HistoryDayParams,
     HistoryOpenParams, HostRequest, ImageInfoResult, InstallOutcome, MeasureBatchParams,
     MeasureBatchResult, NotificationLevel, Permission, PluginEvent, PluginRuntime, PluginStatus,
-    PluginSummary, SetTrayItemsParams, MAX_VAULT_BINARY_BYTES, PLATFORM_PLUGIN,
+    PluginSummary, SetTrayItemsParams, MAX_VAULT_BINARY_BYTES,
 };
 use atelyx_core::space_client::SpaceError;
 
-use crate::registry::{BuiltinPluginInfo, Entry, EntryKind};
+
 use crate::settings_view::{card, group_head};
 use crate::ui::controls;
 use crate::ui::icon::icon;
@@ -38,8 +37,6 @@ const MS_PER_SEC: u64 = 1000;
 
 /// 插件详情模态卡宽（日志页要放下等宽日志行）。
 const DETAIL_CARD_WIDTH: f32 = 620.0;
-/// 内置插件详情模态卡宽（只有视图 / 服务列表，窄一档）。
-const BUILTIN_CARD_WIDTH: f32 = 520.0;
 /// 能力调用记录区固定滚动高度（避免长列表把模态撑出窗口）。
 const DETAIL_AUDIT_MAX_H: f32 = 180.0;
 /// 日志面板固定高度。
@@ -108,8 +105,6 @@ pub struct PluginsState {
     pub list: Vec<PluginSummary>,
     /// 详情打开的插件 id。
     pub detail: Option<String>,
-    /// 内置插件（进程内）详情打开的插件 id：贡献与服务在这里列出。
-    pub builtin_detail: Option<String>,
     /// 详情页审计记录（打开详情时拉取）。
     pub detail_audit: Vec<AuditRecord>,
     /// 卸载二段确认目标。
@@ -152,10 +147,6 @@ pub enum PluginsMsg {
     Refresh,
     /// 启用 / 停用。
     Toggle(String, bool),
-    /// 内置插件：启用 / 停用（停用后其视图不再进选择器、服务离开能力总线；已开的标签显示停用占位）。
-    SetBuiltinPluginEnabled(String, bool),
-    /// 服务目录：切换活动提供者（`None` = 回落内置实现）。
-    SetServiceProvider(String, Option<String>),
     /// 熔断后手动重试。
     Retry(String),
     /// 卸载二段确认（进入 / 确认 / 取消）。
@@ -175,9 +166,6 @@ pub enum PluginsMsg {
     /// 打开 / 关闭详情。
     Detail(String),
     DetailClose,
-    /// 打开 / 关闭内置插件（进程内）详情。
-    BuiltinDetail(String),
-    BuiltinDetailClose,
     /// 详情分页切换（切到日志页即读尾部）。
     DetailTab(DetailTab),
     /// 日志页：重读尾部 / 清空二段确认（进入 / 取消 / 执行）/ 清空回执。
@@ -529,27 +517,6 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
             refresh(app);
             Task::none()
         }
-        PluginsMsg::SetBuiltinPluginEnabled(id, on) => {
-            let disabled = &mut app.ui.disabled_plugins;
-            if on {
-                disabled.retain(|plugin| plugin != &id);
-            } else if !disabled.iter().any(|plugin| plugin == &id) {
-                disabled.push(id.clone());
-            }
-            app.schedule_persist();
-            // 服务目录按归属插件启停：停用即让它实现的那些服务离开总线（有外部候选则由候选接手）
-            app.plugins.set_builtin_owner_enabled(&id, on);
-            // 停用态在注册表里是 enabled 投影，改完即重建（选择器与标签都读它）
-            crate::plugin_actions::rebuild_registry(app);
-            Task::none()
-        }
-        PluginsMsg::SetServiceProvider(service, provider) => {
-            match app.plugins.set_service_provider(&service, provider.as_deref()) {
-                Ok(()) => crate::plugin_actions::rebuild_registry(app),
-                Err(e) => app.notify(NoticeLevel::Error, format!("切换提供者失败：{e}")),
-            }
-            Task::none()
-        }
         PluginsMsg::Retry(id) => {
             if let Err(e) = app.plugins.retry(&id) {
                 app.notify(NoticeLevel::Error, format!("插件重试失败：{e}"));
@@ -629,7 +596,6 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
         PluginsMsg::Detail(id) => {
             app.plugins_state.detail_audit = app.plugins.audit(&id);
             app.plugins_state.detail = Some(id);
-            app.plugins_state.builtin_detail = None;
             app.plugins_state.detail_tab = DetailTab::Overview;
             app.plugins_state.log_text = None;
             app.plugins_state.log_error = None;
@@ -641,15 +607,6 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
             app.plugins_state.log_text = None;
             app.plugins_state.log_error = None;
             app.plugins_state.log_clear_ask = false;
-            Task::none()
-        }
-        PluginsMsg::BuiltinDetail(id) => {
-            app.plugins_state.builtin_detail = Some(id);
-            app.plugins_state.detail = None;
-            Task::none()
-        }
-        PluginsMsg::BuiltinDetailClose => {
-            app.plugins_state.builtin_detail = None;
             Task::none()
         }
         PluginsMsg::DetailTab(tab) => {
@@ -2343,15 +2300,9 @@ pub fn view(app: &App) -> Element<'static, Message> {
 }
 
 /// 已安装页：安装入口 + 已装列表（卡片含启停 / 详情 / 卸载 / 重试）。
-/// 随包预置插件归入内置插件区块，这里只列用户自行安装的插件。
 fn installed_group(app: &App) -> Element<'static, Message> {
     let installing = app.plugins_state.installing;
-    let installed: Vec<&PluginSummary> = app
-        .plugins_state
-        .list
-        .iter()
-        .filter(|summary| !summary.preset)
-        .collect();
+    let installed: Vec<&PluginSummary> = app.plugins_state.list.iter().collect();
     let mut col = Column::new().spacing(8);
     col = col.push(group_head("安装", "本地目录 / zip 包", false));
     col = col.push(card(
@@ -2366,8 +2317,6 @@ fn installed_group(app: &App) -> Element<'static, Message> {
         .spacing(8)
         .align_y(iced::alignment::Vertical::Center),
     ));
-    col = col.push(group_head("内置插件", "随应用分发，可整体停用；贡献与服务见详情", false));
-    col = col.push(builtin_group(app));
     col = col.push(group_head("已安装", &format!("共 {} 个", installed.len()), false));
     if installed.is_empty() {
         col = col.push(controls::empty_state(
@@ -2381,95 +2330,6 @@ fn installed_group(app: &App) -> Element<'static, Message> {
         col = col.push(plugin_card(app, summary));
     }
     col.into()
-}
-
-/// 内置插件：进程内插件每个一张卡片（插件级启停开关 + 详情），随包预置插件沿用已装插件卡片。
-fn builtin_group(app: &App) -> Element<'static, Message> {
-    let mut col = Column::new().spacing(6);
-    for plugin in app.registry.builtin_plugins() {
-        col = col.push(stacked_card(vec![builtin_plugin_row(plugin)]));
-    }
-    for summary in app.plugins_state.list.iter().filter(|summary| summary.preset) {
-        col = col.push(plugin_card(app, summary));
-    }
-    col.into()
-}
-
-/// 内置插件行：名称 + id + 详情 + 插件级启停开关（平台插件标不可停用）。
-fn builtin_plugin_row(plugin: &BuiltinPluginInfo) -> Element<'static, Message> {
-    let mut line = row![
-        icon(plugin.icon.as_ref(), 14.0, pal::TEXT_SECONDARY),
-        text(plugin.label.clone()).size(pal::fs_body()).color(pal::TEXT_PRIMARY),
-        text(plugin.id.clone()).size(pal::fs_caption()).color(pal::TEXT_MUTED),
-        space().width(Length::Fill),
-    ]
-    .spacing(8)
-    .align_y(iced::alignment::Vertical::Center);
-    line = line.push(controls::btn(
-        "详情",
-        &controls::btn_sm(),
-        controls::Variant::Ghost,
-        Some(Message::Plugins(PluginsMsg::BuiltinDetail(plugin.id.clone()))),
-    ));
-    line = if plugin.id == PLATFORM_PLUGIN {
-        line.push(controls::badge("不可停用", pal::BG_TERTIARY, pal::TEXT_MUTED))
-    } else {
-        line.push(controls::toggle(
-            plugin.enabled,
-            Some(Message::Plugins(PluginsMsg::SetBuiltinPluginEnabled(
-                plugin.id.clone(),
-                !plugin.enabled,
-            ))),
-        ))
-    };
-    line.into()
-}
-
-/// 预置插件视图行：随所属插件整体启停，只显示名称与 id。
-fn builtin_view_row(entry: &Entry) -> Element<'static, Message> {
-    row![
-        icon(entry.icon.as_ref(), 14.0, pal::TEXT_MUTED),
-        text(entry.label.clone()).size(pal::fs_body()).color(pal::TEXT_SECONDARY),
-        text(entry.id.clone()).size(pal::fs_caption()).color(pal::TEXT_MUTED),
-    ]
-    .spacing(8)
-    .align_y(iced::alignment::Vertical::Center)
-    .into()
-}
-
-/// 服务行：活动提供者与方法数一行显示；候选可切换，外部提供者在任时可回落内置。
-fn service_row(entry: &Entry) -> Element<'static, Message> {
-    let mut line = row![
-        icon(entry.icon.as_ref(), 14.0, pal::TEXT_SECONDARY),
-        text(entry.label.clone()).size(pal::fs_body()).color(pal::TEXT_PRIMARY),
-        text(entry.detail.clone()).size(pal::fs_caption()).color(pal::TEXT_MUTED),
-    ]
-    .spacing(8)
-    .align_y(iced::alignment::Vertical::Center);
-    if !entry.replaceable {
-        line = line.push(controls::badge("不可替换", pal::BG_TERTIARY, pal::TEXT_MUTED));
-    }
-    line = line.push(space().width(Length::Fill));
-    for candidate in &entry.candidates {
-        line = line.push(controls::btn(
-            format!("切换到 {candidate}"),
-            &controls::btn_sm(),
-            controls::Variant::Ghost,
-            Some(Message::Plugins(PluginsMsg::SetServiceProvider(
-                entry.id.clone(),
-                Some(candidate.clone()),
-            ))),
-        ));
-    }
-    if entry.replaceable && entry.builtin && entry.provider.is_some() {
-        line = line.push(controls::btn(
-            "回落内置",
-            &controls::btn_sm(),
-            controls::Variant::Ghost,
-            Some(Message::Plugins(PluginsMsg::SetServiceProvider(entry.id.clone(), None))),
-        ));
-    }
-    line.into()
 }
 
 /// 市场页：搜索 / 刷新 / 类型筛选 + 条目卡片（徽标 / 安装 / 更新）。
@@ -2784,9 +2644,6 @@ pub fn overlay(app: &App, window: iced::window::Id) -> Option<Element<'static, M
     }
     if let Some(ask) = &app.plugins_state.confirm_install {
         return Some(install_confirm_modal(ask));
-    }
-    if let Some(id) = app.plugins_state.builtin_detail.as_ref() {
-        return Some(builtin_detail_modal(app, window, id));
     }
     let id = app.plugins_state.detail.as_ref()?;
     let summary = app.plugins_state.list.iter().find(|p| &p.id == id)?;
@@ -3158,72 +3015,6 @@ fn panel(content: Element<'static, Message>, height: f32) -> Element<'static, Me
             ..Style::default()
         })
         .into()
-}
-
-/// 内置插件（进程内）详情模态：它提供的视图与服务；服务行可就地切换 / 回落提供者。
-fn builtin_detail_modal(app: &App, window: iced::window::Id, id: &str) -> Element<'static, Message> {
-    let Some(plugin) = app
-        .registry
-        .builtin_plugins()
-        .iter()
-        .find(|plugin| plugin.id == id)
-    else {
-        return row![
-            text("内置插件未登记")
-                .size(pal::fs_caption())
-                .color(pal::TEXT_MUTED),
-        ]
-        .into();
-    };
-    let header = modal_title(
-        plugin.icon.as_ref(),
-        plugin.label.clone(),
-        plugin.id.clone(),
-        None,
-        Message::Plugins(PluginsMsg::BuiltinDetailClose),
-        window,
-    );
-
-    let views: Vec<&Entry> = app
-        .registry
-        .all()
-        .filter(|entry| entry.kind == EntryKind::View && entry.source.plugin_id() == plugin.id)
-        .collect();
-    let services: Vec<&Entry> = app
-        .registry
-        .services()
-        .filter(|entry| entry.source.plugin_id() == plugin.id)
-        .collect();
-    let mut rows: Vec<Element<'static, Message>> = vec![text(if plugin.id == PLATFORM_PLUGIN {
-        "平台自救面：设置入口、通知、对话框与 query 服务一直取用，不可停用。"
-    } else {
-        "随应用分发：停用后其视图离开选择器、服务离开能力总线。"
-    })
-    .size(pal::fs_caption())
-    .color(pal::TEXT_MUTED)
-    .into()];
-    if !views.is_empty() {
-        rows.push(section_head("提供的视图", Some(views.len())));
-        rows.extend(views.into_iter().map(builtin_view_row));
-    }
-    if !services.is_empty() {
-        rows.push(section_head("提供的服务", Some(services.len())));
-        rows.extend(services.into_iter().map(service_row));
-    }
-
-    let content = Column::with_children(
-        std::iter::once(header.into())
-            .chain(std::iter::once(controls::h_divider_subtle()))
-            .chain(rows)
-            .collect::<Vec<Element<'static, Message>>>(),
-    )
-    .spacing(8)
-    .padding(12.0);
-    modal_card(
-        BUILTIN_CARD_WIDTH,
-        content.into(),
-        Message::Plugins(PluginsMsg::BuiltinDetailClose),
-    )
 }
 
 /// 市场安装确认模态（非官方插件；官方插件直接安装，不经此窗）。

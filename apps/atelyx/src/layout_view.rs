@@ -1683,44 +1683,12 @@ fn note_status_pill(app: &App) -> Option<Element<'static, Message>> {
     }
 }
 
-/// 按视图 kind 分派内容（所属内置插件停用时先给占位；预置插件视图按 id 查渲染表；插件面板按整面帧渲染）。
+/// 按视图 kind 分派内容（壳内原生视图按 id 查渲染表；插件面板按整面帧渲染）。
 fn view_content<'a>(app: &'a App, window: iced::window::Id, kind: &str) -> Element<'a, Message> {
-    let disabled_builtin = app
-        .registry
-        .get(kind)
-        .is_some_and(|entry| entry.source.is_builtin() && !entry.enabled);
-    if disabled_builtin {
-        return disabled_view(app, kind);
-    }
     if crate::plugin_actions::parse_view_kind(kind).is_some() {
         return crate::plugin_view::panel_view(app, window, kind);
     }
     crate::pack::render(kind, app, window).unwrap_or_else(|| placeholder_view(app, kind))
-}
-
-/// 停用视图的占位：标签保留（不关标签、不动布局），内容区就地给重新启用入口。
-fn disabled_view(app: &App, kind: &str) -> Element<'static, Message> {
-    let plugin_id = app
-        .registry
-        .get(kind)
-        .map(|entry| entry.source.plugin_id().to_string())
-        .unwrap_or_default();
-    let action = (!plugin_id.is_empty()).then(|| {
-        Element::from(controls::btn(
-            "重新启用",
-            &controls::btn_sm(),
-            Variant::Primary,
-            Some(Message::Plugins(
-                crate::settings_view::plugins::PluginsMsg::SetBuiltinPluginEnabled(plugin_id, true),
-            )),
-        ))
-    });
-    controls::view_placeholder_action(
-        &view_icon(app, kind),
-        view_label(app, kind),
-        "所属内置插件已停用".to_string(),
-        action,
-    )
 }
 
 /// 协作房间视图：连接状态头部 + 空间成员名册 + 在线设备（打开文件可点开）+ 设置入口。

@@ -2806,106 +2806,7 @@ pub struct TableSetCellImageParams {
 }
 ```
 
-## 13. 日历服务（插件提供）
-
-日程读写由预置插件 `com.atelyx.calendar` 以 `calendar` 服务开放，宿主不内置实现：调用方经 `service.call` 传 `service = calendar` 与下列方法名，或直接调 `calendar.<方法>`——两条路径落到同一登记。插件停用时该服务随之消失，调用方收到「服务不可用」。日程真源随容器走（本地仓库 `.atelyx/calendar.json` / 协作空间团队 meta）。
-
-```rust
-// crates/plugin-protocol/src/method.rs
-/// 日历服务（由日历插件提供）：方法名即 `calendar.<方法>`，也可经 `service.call` 以
-/// `service = calendar` 调用。日程真源随容器走（本地仓库 / 协作空间团队 meta），插件不自留副本。
-pub mod calendar {
-    /// 服务名。
-    pub const SERVICE: &str = "calendar";
-    /// 当前仓库的日程（按日期、创建时间与 id 排序）。
-    pub const LIST: &str = "list";
-    /// 新增一条日程；`id` 与创建时刻由服务补齐。
-    pub const ADD: &str = "add";
-    /// 改写一条日程（只改给出的字段）。
-    pub const UPDATE: &str = "update";
-    /// 删除一条日程。
-    pub const REMOVE: &str = "remove";
-}
-```
-
-```rust
-// crates/plugin-protocol/src/method.rs
-/// 一条日程（`date` 为本地日期 `YYYY-MM-DD`；`color` 为 hex，缺省 = 默认强调色）。
-#[serde(rename_all = "camelCase")]
-pub struct CalendarItem {
-    #[serde(default)]
-    pub id: String,
-    #[serde(default)]
-    pub date: String,
-    #[serde(default)]
-    pub title: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub note: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub color: Option<String>,
-    /// 创建时刻（Unix 毫秒），同日条目按它排序。
-    #[serde(default)]
-    pub created_at: i64,
-}
-```
-
-```rust
-// crates/plugin-protocol/src/method.rs
-/// [`calendar::LIST`] 的 result：当前仓库的日程（按开始日期排序）。
-#[serde(rename_all = "camelCase")]
-pub struct CalendarListResult {
-    pub items: Vec<CalendarItem>,
-}
-```
-
-```rust
-// crates/plugin-protocol/src/method.rs
-/// [`calendar::ADD`] 的 params：`id` / `createdAt` 由日历服务补齐；`color` 未给出即按强调色显示。
-#[serde(rename_all = "camelCase")]
-pub struct CalendarAddParams {
-    pub date: String,
-    #[serde(default)]
-    pub title: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub note: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub color: Option<String>,
-}
-```
-
-```rust
-// crates/plugin-protocol/src/method.rs
-/// [`calendar::UPDATE`] 的 params：只改给出的字段（`None` = 保持原值；空串清空备注）。
-#[serde(rename_all = "camelCase")]
-pub struct CalendarUpdateParams {
-    pub id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub date: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub note: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub color: Option<String>,
-}
-```
-
-```rust
-// crates/plugin-protocol/src/method.rs
-/// [`calendar::REMOVE`] 的 params。
-#[serde(rename_all = "camelCase")]
-pub struct CalendarIdParams {
-    pub id: String,
-}
-```
-
-```rust
-// crates/plugin-protocol/src/method.rs
-/// 标题字符上限（超限按可读错误拒绝）。
-pub const MAX_CALENDAR_TITLE_CHARS: usize = 200;
-```
-
-## 14. 能力面负载：仓库活动
+## 13. 能力面负载：仓库活动
 
 按天聚合的文件活动计数与当日版本记录；取自当前仓库（本地历史侧文件 / 空间聚合），按本地日界归日。
 
@@ -2978,7 +2879,7 @@ pub struct HistoryOpenParams {
 }
 ```
 
-## 15. 能力面负载：托盘与协作
+## 14. 能力面负载：托盘与协作
 
 系统托盘条目与空间内插件间消息的负载形态；两类能力的可用性都随宿主平台与容器类型而变。
 
@@ -3143,7 +3044,7 @@ pub struct CollabMetaPatchParams {
 }
 ```
 
-## 16. 宿主广播事件
+## 15. 宿主广播事件
 
 插件经 `event.subscribe` 声明订阅的事件名与载荷；未上表的名字宿主拒绝订阅。
 

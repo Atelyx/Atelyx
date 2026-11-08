@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["apps/atelyx", "crates/core", "crates/ui", "crates/plugin-protocol", "crates/plugin-sdk", "crates/plugins/calendar", "xtask"]
+members = ["apps/atelyx", "crates/core", "crates/ui", "crates/plugin-protocol", "crates/plugin-sdk", "xtask"]
 exclude = ["apps/server"]
 
 # 本地补丁版 winit 与 iced_widget（基线、改动与移除条件见 patches/README.md，

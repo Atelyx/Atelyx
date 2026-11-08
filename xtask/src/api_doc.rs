@@ -326,22 +326,6 @@ const SECTIONS: &[Section] = &[
         ),
     },
     Section {
-        title: "日历服务（插件提供）",
-        intro: "日程读写由预置插件 `com.atelyx.calendar` 以 `calendar` 服务开放，宿主不内置实现：\
-调用方经 `service.call` 传 `service = calendar` 与下列方法名，或直接调 `calendar.<方法>`——两条路径落到\
-同一登记。插件停用时该服务随之消失，调用方收到「服务不可用」。日程真源随容器走（本地仓库 \
-`.atelyx/calendar.json` / 协作空间团队 meta）。",
-        items: items!(
-            "method.rs": "calendar",
-            "method.rs": "CalendarItem",
-            "method.rs": "CalendarListResult",
-            "method.rs": "CalendarAddParams",
-            "method.rs": "CalendarUpdateParams",
-            "method.rs": "CalendarIdParams",
-            "method.rs": "MAX_CALENDAR_TITLE_CHARS",
-        ),
-    },
-    Section {
         title: "能力面负载：仓库活动",
         intro: "按天聚合的文件活动计数与当日版本记录；取自当前仓库（本地历史侧文件 / 空间聚合），\
 按本地日界归日。",

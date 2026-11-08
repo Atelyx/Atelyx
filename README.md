@@ -36,7 +36,6 @@ Atelyx 是一款以人为本的可拓展桌面工作台：对话、笔记、表�
 | `crates/ui/` | 界面组件库：调色板、字体、图标、基元控件、浮层与菜单 |
 | `crates/plugin-protocol/` | 插件协议契约：握手、JSON-RPC 信封、整面帧与绘制指令、能力总线、manifest |
 | `crates/plugin-sdk/` | 插件侧 SDK：连接泵、能力面代理、绘制指令构造、控件层 |
-| `crates/plugins/calendar/` | 随包预置日历插件（独立进程；面板 + `calendar.*` 服务） |
 
 依赖方向：应用 `atelyx` → `atelyx-core` + `atelyx-ui`；`atelyx-plugin-sdk` → `atelyx-plugin-protocol`；`atelyx-core` → `atelyx-plugin-protocol`。`atelyx-core` 无 GUI 依赖；`atelyx-server` 不被任何 crate 依赖，客户端只经 HTTP/WS 访问。
 

@@ -686,7 +686,7 @@ ctx.declare_default_layout(
 ).await?;
 ```
 
-- `spec` 是分割树：`split { direction: "horizontal" | "vertical", children, sizes }` 或 `panel { views }`；`views` 写视图 kind——本插件的面板贡献为 `plugin:<插件 id>:<贡献 id>`，预置插件的视图用 `canvas` / `note` / `table` / `files` / `search` / `aichat` 等，首个为激活标签。
+- `spec` 是分割树：`split { direction: "horizontal" | "vertical", children, sizes }` 或 `panel { views }`；`views` 写视图 kind——本插件的面板贡献为 `plugin:<插件 id>:<贡献 id>`，壳内原生视图用 `canvas` / `note` / `table` / `files` / `search` / `aichat` 等，首个为激活标签。
 - 只摆一次：宿主在 `ui-state.json` 记账，用户改名 / 删除后不会再补回；首次启用时当前场景已含规格里的任一视图则只记账不新建，避免与用户已摆好的界面重复。
 - 布局名与既有布局重名时宿主追加序号并激活新布局；规格超限（深度 16、面板 32、单面板视图 16、名字 64 字节）或非法即拒收。
 
