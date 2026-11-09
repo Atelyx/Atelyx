@@ -2414,6 +2414,10 @@ struct TreeRow {
 
 /// 行侧缝宽度：条目不满宽的视觉留白，同时是拖拽回仓库根的落点。
 const FILE_GUTTER: f32 = 8.0;
+/// 行体水平内衬（与 iced Button 默认左右内衬一致）；上下内衬恒为 0，行内叠层贯穿整行。
+const FILE_ROW_PAD_X: f32 = 10.0;
+/// 行内图标与名称槽位、名称槽位与后缀徽标之间的间距。
+const FILE_ROW_GAP: f32 = 8.0;
 
 /// 行侧缝（根落点）：行体两侧各一条，自下而上每一行都有，任意滚动位置都能放下。
 fn root_seam(rel: &str, right: bool) -> Element<'static, Message> {
@@ -2927,7 +2931,7 @@ fn tree_row_element(
         pal::TEXT_SECONDARY
     };
 
-    let mut content = row![].spacing(8);
+    let mut content = row![].spacing(FILE_ROW_GAP).width(Length::Fill);
     if r.is_dir {
         content = content.push(icon(
             if r.expanded { "chevron-down" } else { "chevron-right" },
@@ -2936,16 +2940,8 @@ fn tree_row_element(
         ));
     }
     content = content.push(icon_stroke(&icon_name, 14.0, icon_color, 1.5));
-    content = content.push(text(r.name.clone()).size(pal::fs_caption()).color(name_color));
-    if !r.is_dir {
-        content = content.push(space().width(Length::Fill));
-        content = content.push(
-            text(ext_label(&r.name))
-                .size(pal::fs_micro())
-                .color(if r.active { pal::ACCENT } else { pal::TEXT_MUTED })
-                .font(mono()),
-        );
-    }
+    let ext_color = if r.active { pal::ACCENT } else { pal::TEXT_MUTED };
+    content = content.push(tree_name_slot(r, name_color, ext_color));
 
     let rejected = app
         .file_drag
@@ -2996,6 +2992,8 @@ fn tree_row_element(
         button(body)
             .width(Length::Fill)
             .height(Length::Fixed(32.0))
+            // 上下内衬置 0：指示线与激活轨贯穿整行，相邻行的线首尾相接
+            .padding(Padding::ZERO.horizontal(FILE_ROW_PAD_X))
             .style(|_t, status| button::Style {
                 background: matches!(status, button::Status::Hovered | button::Status::Pressed)
                     .then_some(pal::HOVER.into()),
@@ -3018,8 +3016,22 @@ fn tree_row_element(
     )
     .into();
     // 两侧缝 = 仓库根落点（行体不占满宽度，拖到缝隙即移到根）
-    row![root_seam(&r.rel, false), row, root_seam(&r.rel, true)]
-        .height(Length::Fixed(32.0))
+    let element: Element<'static, Message> =
+        row![root_seam(&r.rel, false), row, root_seam(&r.rel, true)]
+            .height(Length::Fixed(32.0))
+            .into();
+    // 名称按可用宽省略：悬停给完整文件名（拖拽会话中不出提示）
+    if app.file_drag.is_some() {
+        return element;
+    }
+    let tip = r.name.clone();
+    mouse_area(element)
+        .on_enter(Message::Ui(crate::ui::UiMsg::HoverTip {
+            window,
+            label: tip.clone(),
+            box_px: 32.0,
+        }))
+        .on_exit(Message::Ui(crate::ui::UiMsg::HoverTipEnd { window, label: tip }))
         .into()
 }
 
@@ -3152,6 +3164,52 @@ fn ext_label(name: &str) -> String {
         Some(i) if i > 0 => name[i + 1..].to_uppercase(),
         _ => String::new(),
     }
+}
+
+/// 名称槽位宽 = 行内容宽 − 后缀徽标预留（不小于 0）。
+fn name_slot(row_w: f32, ext: &str) -> f32 {
+    (row_w - ext_badge_reserve(ext)).max(0.0)
+}
+
+/// 后缀徽标预留宽：等宽字比估宽口径宽，按估宽 ×1.3 取保守值，再加与名称的间距。
+fn ext_badge_reserve(ext: &str) -> f32 {
+    if ext.is_empty() {
+        0.0
+    } else {
+        estimate_text_width(ext, pal::fs_micro()) * 1.3 + FILE_ROW_GAP
+    }
+}
+
+/// 行名槽位：占满图标之后的剩余宽，超宽按槽位宽尾部省略；
+/// 文件行的后缀徽标接在槽位之后，恒由行的剩余宽定在右缘。
+fn tree_name_slot(r: &TreeRow, name_color: Color, ext_color: Color) -> Element<'static, Message> {
+    let name = r.name.clone();
+    let ext = if r.is_dir { String::new() } else { ext_label(&r.name) };
+    iced::widget::responsive(move |size| {
+        // 极窄面板下可用宽可能为负：槽位按 0 兜底
+        let slot_w = size.width.max(0.0);
+        let name_w = name_slot(slot_w, &ext);
+        let mut slot = row![
+            container(
+                text(ellipsize(&name, name_w, pal::fs_caption()))
+                    .size(pal::fs_caption())
+                    .color(name_color)
+                    .wrapping(Wrapping::None),
+            )
+            .width(Length::Fill)
+            .clip(true),
+        ];
+        if !ext.is_empty() {
+            slot = slot.push(
+                text(ext.clone()).size(pal::fs_micro()).color(ext_color).font(mono()),
+            );
+        }
+        // 外层行按固有宽压缩 Fill：内层行定宽为分到的剩余宽，徽标才恒贴行右缘
+        slot.spacing(FILE_ROW_GAP).width(Length::Fixed(slot_w)).into()
+    })
+    .width(Length::Fill)
+    .height(Length::Shrink)
+    .into()
 }
 
 /// 十六进制颜色串（`#rrggbb`）→ Color；非法输入返回 None（回落默认图标色）。
@@ -7046,8 +7104,10 @@ pub fn drop_zone_at(zone: &PanelZone, global: iced::Point) -> DropZone {
 #[cfg(test)]
 mod tests {
     use super::{
-        device_meta_line, divider_size, file_label, merge_peers, truncate_to_width, UiMetrics,
+        device_meta_line, divider_size, ellipsize, estimate_text_width, ext_badge_reserve,
+        file_label, merge_peers, name_slot, truncate_to_width, UiMetrics,
     };
+    use crate::ui::palette as pal;
     use atelyx_core::collab::PeerInfo;
     use iced::Length;
 
@@ -7133,5 +7193,23 @@ mod tests {
     #[test]
     fn clips_at_char_boundary() {
         assert_eq!(truncate_to_width("中文测试", 3.0, per_char), "中文…");
+    }
+
+    #[test]
+    fn name_slot_reserves_room_for_ext_badge() {
+        // 后缀越长预留越宽；无后缀不预留，槽位吃满整行
+        assert_eq!(ext_badge_reserve(""), 0.0);
+        assert!(ext_badge_reserve("CANVAS") > ext_badge_reserve("MD"));
+        assert_eq!(name_slot(120.0, ""), 120.0);
+        assert!(name_slot(120.0, "MD") < 120.0);
+        // 窄行钳到 0：名称退到省略号，徽标仍按行宽贴右缘
+        assert_eq!(name_slot(2.0, "CANVAS"), 0.0);
+    }
+
+    #[test]
+    fn ellipsized_name_fits_the_badge_slot() {
+        let slot = name_slot(120.0, "CANVAS");
+        let shown = ellipsize("一个很长的文件名用来测槽位宽度.md", slot, pal::fs_caption());
+        assert!(estimate_text_width(&shown, pal::fs_caption()) <= slot + 0.01);
     }
 }
