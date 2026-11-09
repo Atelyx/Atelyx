@@ -676,6 +676,8 @@ enum Message {
     },
     /// 帧节拍：给声明了帧率的整面帧发一条帧通知（只在有动画面时订阅）。
     PluginFrameTick,
+    /// 某插件面画出的界面图片来源变了：壳按需载入这些图片。
+    PluginFrameImages,
     /// 一拍帧通知已写完（复位在飞标记）。
     PluginFramePumped,
     /// 退出接管（常驻退出入口 / Esc）。
@@ -1312,9 +1314,6 @@ pub struct App {
     pub table_event_path: Option<String>,
     /// 最近一次广播 `table:selection.changed` 的载荷（选区差分用；None = 尚未广播）。
     pub table_selection_event: Option<atelyx_core::plugin_runtime::TableSelectionChangedPayload>,
-    /// 各面的最新整面帧（键 = 插件 id + 面 id）。
-    pub plugin_frames:
-        HashMap<(String, String), std::sync::Arc<atelyx_core::plugin_runtime::SurfaceFrame>>,
     /// 整面帧的键盘焦点（全局单槽：OS 只给聚焦窗口发键盘，窗口失焦即清除）。
     pub plugin_frame_focus: Option<plugin_actions::FrameFocus>,
     /// 帧拍是否还在飞（同一时刻只推一拍，慢插件不积压帧任务）。
@@ -1725,7 +1724,6 @@ impl App {
                 plugin_table_surfaces: HashSet::new(),
                 table_event_path: None,
                 table_selection_event: None,
-                plugin_frames: HashMap::new(),
                 plugin_frame_focus: None,
                 plugin_frame_pumping: false,
                 plugin_windows: HashMap::new(),
@@ -3077,13 +3075,8 @@ impl App {
                     .chain(recent_view::tick(self))
                     .chain(calendar_actions::tick(self))
                     .chain(space_actions::members_tick(self))
-                    // 绘制期同步取走的帧不走通知：投影可能落后，心跳里补一次
-                    // （图片载入与键位声明读的是投影缓存）
-                    .chain(if self.plugins.take_observed_pending() {
-                        plugin_actions::refresh_frames(self)
-                    } else {
-                        Task::none()
-                    });
+                    // 面挂载变化与界面图片按需载入的兜底：这两件事都不发事件
+                    .chain(plugin_actions::refresh_frames(self));
                 if !self.persist_dirty {
                     return lazy;
                 }
@@ -3194,9 +3187,7 @@ impl App {
                         }
                     }
                 }
-                // 拖动窗口边缘时插件帧在绘制期被取走、不再发通知：这一拍把投影补上
-                // （事件本身已经触发重建，补投影不多花一次）
-                plugin_actions::refresh_frames(self)
+                Task::none()
             }
             Message::Press(id) => {
                 // 焦点窗口跟踪（接管请求作用域 = 最近按压的窗口）
@@ -3495,8 +3486,7 @@ impl App {
                     return self.resolve_file_drop(d);
                 }
                 if self.divider.take().is_some() {
-                    // 拖动期间的帧在绘制期被取走、不再发通知：收手时把投影补上
-                    return plugin_actions::refresh_frames(self);
+                    return Task::none();
                 }
                 let Some(d) = self.drag.take() else {
                     self.drag_hover = None;
@@ -3731,10 +3721,10 @@ impl App {
                 if let PluginEvent::DefaultLayoutDeclared { id, .. } = event.as_ref() {
                     task = task.chain(plugin_actions::apply_declared_default_layout(self, id));
                 }
-                let frames_only = matches!(event.as_ref(), PluginEvent::ViewSubmitted { .. });
+                let redraw_only = matches!(event.as_ref(), PluginEvent::RedrawRequested { .. });
                 settings_view::plugins::on_event(self, *event);
-                // 帧提交只重投影取帧（帧率驱动下不逐帧重建注册表）；其余事件连注册表一起重建
-                task.chain(if frames_only {
+                // 重绘请求不起注册表；其余事件连注册表一起重建
+                task.chain(if redraw_only {
                     plugin_actions::refresh_frames(self)
                 } else {
                     plugin_actions::refresh_projection(self)
@@ -3782,6 +3772,7 @@ impl App {
                 self.plugin_frame_pumping = false;
                 Task::none()
             }
+            Message::PluginFrameImages => plugin_actions::refresh_frames(self),
             Message::WindowFocused(id) => {
                 self.focused_window = Some(id);
                 Task::none()

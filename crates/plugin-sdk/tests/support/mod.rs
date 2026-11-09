@@ -75,3 +75,80 @@ linux = "{entry}"
     std::fs::copy(example_library(example), dir.join(entry_name()))
         .expect("拷贝插件动态库失败");
 }
+
+/// 端到端测试用的宿主动面：绘制期的量算 / Markdown / 主题都按固定口径回答。
+/// 只有面帧相关的 e2e 会用到它，其余 e2e 共用本模块时允许闲置。
+#[allow(dead_code)]
+pub struct TestHost;
+
+impl atelyx_core::plugin_runtime::DrawHost for TestHost {
+    fn measure(
+        &self,
+        request: atelyx_core::plugin_runtime::MeasureRequest<'_>,
+    ) -> atelyx_plugin_protocol::method::MeasureTextResult {
+        let width: f32 = request
+            .text
+            .chars()
+            .map(|c| if c.is_ascii() { 0.5 } else { 1.0 })
+            .sum::<f32>()
+            * request.size;
+        let lines = match request.max_width {
+            Some(limit) if width > limit => (width / limit).ceil().max(1.0) as u32,
+            _ => 1,
+        };
+        atelyx_plugin_protocol::method::MeasureTextResult {
+            width: width.min(request.max_width.unwrap_or(width)),
+            height: request.size * 1.2 * lines as f32,
+            lines,
+        }
+    }
+
+    fn markdown(
+        &self,
+        content: &str,
+    ) -> Result<Vec<atelyx_plugin_protocol::method::MarkdownBlock>, String> {
+        Ok(vec![atelyx_plugin_protocol::method::MarkdownBlock::Paragraph {
+            depth: 0,
+            spans: vec![atelyx_plugin_protocol::method::MarkdownSpan {
+                text: content.to_string(),
+                strong: false,
+                code: false,
+                link: None,
+            }],
+        }])
+    }
+
+    fn theme(&self) -> atelyx_plugin_protocol::method::ThemeResult {
+        atelyx_plugin_protocol::method::ThemeResult {
+            colors: atelyx_plugin_protocol::method::ThemeColors {
+                accent: "#e0a94e".into(),
+                ..Default::default()
+            },
+            font_sizes: atelyx_plugin_protocol::method::FontSizes {
+                micro: 11.0,
+                caption: 12.0,
+                ui: 13.0,
+                body: 14.0,
+                h2: 16.0,
+                h1: 20.0,
+            },
+            radii: atelyx_plugin_protocol::method::Radii { xs: 4.0, sm: 6.0, md: 10.0 },
+            event_colors: Vec::new(),
+        }
+    }
+}
+
+/// 模拟宿主重绘拍里的那一次同步绘制。
+#[allow(dead_code)]
+pub fn draw(
+    runtime: &atelyx_core::plugin_runtime::PluginRuntime,
+    id: &str,
+    surface: &str,
+    width: f32,
+    height: f32,
+) -> Option<std::sync::Arc<atelyx_plugin_protocol::frame::SurfaceFrame>> {
+    match runtime.draw_surface(id, surface, width, height, &TestHost) {
+        atelyx_core::plugin_runtime::DrawOutcome::Painted(frame) => Some(frame),
+        atelyx_core::plugin_runtime::DrawOutcome::Skipped => None,
+    }
+}

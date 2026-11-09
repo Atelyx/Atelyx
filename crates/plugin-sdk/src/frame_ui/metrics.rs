@@ -1,5 +1,5 @@
 //! 文字量算缓存：按「文本 + 字号 + 字重 + 字体族 + 可用宽度」缓存宿主的真实字宽。
-//! 量算是异步往返：缺项先按估算排版并记下待量算键，补齐后重建这一帧——插件看不到重试。
+//! 量算在绘制调用里同步补齐：缺项先按估算排版并记下待量算键，补齐后重建这一帧——插件看不到重试。
 
 use std::collections::{HashMap, HashSet};
 
@@ -47,7 +47,8 @@ impl Metrics {
     /// 取量算结果：未命中时按估算值排版并登记待量算。
     /// 换行宽度钳到至少 1 像素：宿主拒收 `max_width <= 0` 的条目（整批丢失，估算也会除零）。
     pub(crate) fn measure(&mut self, text: &str, spec: FontSpec, max_width: Option<f32>) -> MeasureTextResult {
-        let max_width = max_width.map(|width| width.max(1.0));
+        // 与宿主绘制用同一档折行宽度：量到的行数就是画出来的行数，档内改宽不必重量
+        let max_width = max_width.map(atelyx_plugin_protocol::paint::layout_width);
         let key = key_of(text, spec, max_width);
         if let Some(hit) = self.cache.get(&key) {
             return *hit;

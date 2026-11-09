@@ -2,8 +2,6 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::frame_region::FrameRegionInfo;
-
 pub const INITIALIZE: &str = "initialize";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -26,8 +24,6 @@ pub struct PluginInfo {
 pub struct InitializeResult {
     pub api_version: u32,
     pub host: HostInfo,
-    /// 整面帧共享内存区域：插件按它映射，此后每次提交只走这条通路。
-    pub frame_region: FrameRegionInfo,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

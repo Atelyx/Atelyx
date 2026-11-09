@@ -1,9 +1,10 @@
-//! 插件整面帧部件：执行帧的绘制指令清单，按命中区回发原始指针 / 键盘 / 输入法输入。
-//! 坐标一律面本地逻辑像素；形状与图片按帧缓存几何，文字按段落缓存跨帧复用。
+//! 插件整面帧部件：在宿主重绘拍里同步调插件绘制入口拿到这一面，执行它的绘制指令并把原始
+//! 指针 / 键盘 / 输入法输入按命中区回发。坐标一律面本地逻辑像素；形状按内容指纹缓存几何，
+//! 文字按段落缓存跨帧复用。
 
 use std::cell::{Cell, RefCell};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use iced::advanced::clipboard::Clipboard;
 use iced::advanced::input_method::{Event as ImeEvent, InputMethod, Purpose};
@@ -20,8 +21,8 @@ use iced::window;
 use iced::{Element, Length, Padding, Point, Rectangle, Size, Vector};
 
 use atelyx_core::plugin_runtime::{
-    FrameInput, HitCursor, Key as FrameKey, KeyAction, Modifiers as FrameModifiers, MouseButton,
-    NamedKey, SurfaceFrame,
+    DrawCommand, DrawOutcome, FrameInput, HitCursor, Key as FrameKey, KeyAction,
+    Modifiers as FrameModifiers, MouseButton, NamedKey, SurfaceFrame,
 };
 
 use crate::plugin_paint::{self, PaintCtx};
@@ -31,13 +32,6 @@ use crate::{App, Message};
 const DOUBLE_CLICK_MS: u64 = 500;
 /// 双击判定：两次按下间的最大位移（逻辑像素；拖动不算双击）。
 const DOUBLE_CLICK_SLOP: f32 = 4.0;
-/// 改宽那一拍等插件新帧的上限：插件回帧实测往返 0.5 ms 以内，留出余量给重排重的面。
-/// 超时即按手上的帧画（下一拍再换新帧），不把 UI 线程压在慢插件上。
-const RESIZE_FRAME_WAIT: Duration = Duration::from_millis(4);
-/// 等帧超时后的冷却：这段时间内的尺寸变化不再同步等帧。拖动中慢插件每拍都超时，
-/// 每拍白等一次比「内容晚一个往返」更伤手感。
-const RESIZE_WAIT_COOLDOWN: Duration = Duration::from_millis(500);
-
 /// 标识哈希（FNV-1a；面 / 面 id 的身份判定用，不参与协议）。
 fn hash_id(value: &str) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
@@ -78,21 +72,20 @@ fn mouse_button(button: mouse::Button) -> Option<MouseButton> {
 
 /// 部件跨帧状态（存 `tree::State`）：绘制缓存 + 拖拽 / 悬停 / 双击判定 + 输入法开关。
 struct FrameState {
-    /// 形状段缓存：按绘制步骤下标各持一块，帧内容变化时整体作废。
+    /// 形状段缓存：按绘制步骤下标各持一块，指令内容变了才作废。
     caches: RefCell<Vec<canvas::Cache>>,
     /// 已排版的文字段落：内容不变跨帧复用，改宽 / 滚动 / 悬停不重新成形。
     texts: RefCell<plugin_paint::TextCache>,
-    /// 上次绘制的帧：按 Arc 身份判换帧。持有引用，帧对象地址不会被分配器复用。
+    /// 上次真的画上去的那一帧：命中判定与光标都对着它，保证「点的是眼前看到的画面」。
     painted: RefCell<Option<Arc<SurfaceFrame>>>,
     /// 上次绘制用的界面字体族变更计数。
     font_epoch: Cell<u64>,
     /// 上次绘制用的界面图片句柄代数。
     image_epoch: Cell<u64>,
-    /// 上次上报给插件的面身份与尺寸（逻辑像素）；变化即回发 `Resize`。
-    reported: Cell<Option<(u64, f32, f32)>>,
-    /// 改宽等帧超时后的冷却截止：冷却内不再同步等帧。
-    /// 不能在下一帧到达时提前解除——慢插件每拍都会超时，解除等于每拍都白等 4ms。
-    resize_wait_until: Cell<Option<Instant>>,
+    /// 上次绘制时的界面图片来源指纹：变了才需要让壳按需载入新图片。
+    image_signature: Cell<u64>,
+    /// 图片来源变过、还没通知壳（下一次重绘事件里发一条消息）。
+    images_pending: Cell<bool>,
     /// 本部件当前承载的面身份：变化即说明换了面，指针瞬态一律作废。
     identity: Cell<u64>,
     /// 按下中的键（`None` = 未按下）：抬笔只认这一个键，中途混按其它键不会错发 `PointerUp`。
@@ -114,8 +107,8 @@ impl Default for FrameState {
             painted: RefCell::new(None),
             font_epoch: Cell::new(0),
             image_epoch: Cell::new(0),
-            reported: Cell::new(None),
-            resize_wait_until: Cell::new(None),
+            image_signature: Cell::new(0),
+            images_pending: Cell::new(false),
             identity: Cell::new(0),
             pressed: Cell::new(None),
             inside: Cell::new(false),
@@ -132,7 +125,8 @@ pub struct PluginFrame<'a> {
     pub window: window::Id,
     pub plugin_id: String,
     pub surface_id: String,
-    pub frame: &'a Arc<SurfaceFrame>,
+    /// 宿主手上最近一拍的帧：绘制被跳过（该面正被输入回调占用 / 插件刚停）时沿用它。
+    pub frame: Option<Arc<SurfaceFrame>>,
     /// 本面当前是否持有键盘焦点（渲染期由壳侧焦点槽投影）。
     pub focused: bool,
 }
@@ -142,12 +136,29 @@ impl PluginFrame<'_> {
         surface_identity(&self.plugin_id, &self.surface_id)
     }
 
-    /// 命中的基准是实际画在屏幕上的那一帧：改宽期间投影缓存可能还没追上，
-    /// 但用户点的是眼前看到的画面。
+    /// 帧里界面图片的指纹（按壳侧解析出的来源键取）：只有它变了才需要重新按需载入。
+    fn image_signature(&self, frame: &SurfaceFrame) -> u64 {
+        let mut signature: u64 = 0;
+        for command in &frame.commands {
+            if let DrawCommand::Image { source, .. } = command {
+                if let Some(key) = crate::plugin_actions::image_key(self.app, &self.plugin_id, source)
+                {
+                    signature ^= hash_id(&key).rotate_left((signature % 31) as u32);
+                }
+            }
+        }
+        signature
+    }
+
+    /// 当前该画 / 该命中的那一帧：优先取上一拍真的画上去的那张，退回交给部件的那张。
+    fn current(&self, state: &FrameState) -> Option<Arc<SurfaceFrame>> {
+        state.painted.borrow().clone().or_else(|| self.frame.clone())
+    }
+
+    /// 命中的基准是实际画在屏幕上的那一帧：用户点的是眼前看到的画面。
     fn hit(&self, state: &FrameState, point: Point) -> Option<String> {
-        let painted = state.painted.borrow();
-        let frame = painted.as_deref().unwrap_or(self.frame.as_ref());
-        frame.hit_at(point.x, point.y).map(str::to_string)
+        self.current(state)
+            .and_then(|frame| frame.hit_at(point.x, point.y).map(str::to_string))
     }
 
     /// 回发一条原始输入（坐标已换算到面本地）。
@@ -222,8 +233,10 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginFrame<'_> {
             state.painted.borrow_mut().take();
             state.caches.borrow().iter().for_each(canvas::Cache::clear);
             state.texts.borrow_mut().clear();
-            state.resize_wait_until.set(None);
+            state.image_signature.set(0);
         }
+        // 键盘与输入法按「眼前这一帧」的声明转发（取在换面清理之后：换了面就不能再用旧面的声明）
+        let frame = self.current(state);
         match event {
             Event::Mouse(mouse::Event::ButtonPressed(button)) => {
                 let Some(point) = cursor.position_in(bounds) else {
@@ -356,7 +369,7 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginFrame<'_> {
                 shell.capture_event();
             }
             Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, text, .. }) => {
-                if !self.focused || !self.frame.keys {
+                if !self.focused || !frame.as_ref().is_some_and(|frame| frame.keys) {
                     return;
                 }
                 let Some(key) = frame_key(key) else {
@@ -375,7 +388,7 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginFrame<'_> {
                 shell.capture_event();
             }
             Event::Keyboard(keyboard::Event::KeyReleased { key, modifiers, .. }) => {
-                if !self.focused || !self.frame.keys {
+                if !self.focused || !frame.as_ref().is_some_and(|frame| frame.keys) {
                     return;
                 }
                 let Some(key) = frame_key(key) else {
@@ -390,7 +403,7 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginFrame<'_> {
                 shell.capture_event();
             }
             Event::InputMethod(ime) => {
-                if !self.focused || self.frame.ime.is_none() {
+                if !self.focused || frame.as_ref().is_none_or(|frame| frame.ime.is_none()) {
                     return;
                 }
                 let input = match ime {
@@ -398,20 +411,20 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginFrame<'_> {
                         text: content.clone(),
                         composing: true,
                         caret: range.as_ref().map(|range| range.end as u32),
-                        candidates: self.frame.ime,
+                        candidates: frame.as_ref().and_then(|frame| frame.ime),
                     },
                     ImeEvent::Commit(content) => FrameInput::Text {
                         text: content.clone(),
                         composing: false,
                         caret: None,
-                        candidates: self.frame.ime,
+                        candidates: frame.as_ref().and_then(|frame| frame.ime),
                     },
                     // 组合结束且无提交：空串表示放弃组合，不插入文本
                     ImeEvent::Closed => FrameInput::Text {
                         text: String::new(),
                         composing: true,
                         caret: None,
-                        candidates: self.frame.ime,
+                        candidates: frame.as_ref().and_then(|frame| frame.ime),
                     },
                     ImeEvent::Opened => return,
                 };
@@ -419,8 +432,12 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginFrame<'_> {
                 shell.capture_event();
             }
             Event::Window(window::Event::RedrawRequested(_)) => {
-                let enabled = self.focused && self.frame.ime.is_some();
-                if let Some(ime) = self.frame.ime.filter(|_| enabled) {
+                if state.images_pending.take() {
+                    shell.publish(Message::PluginFrameImages);
+                }
+                let ime = frame.as_ref().and_then(|frame| frame.ime);
+                let enabled = self.focused && ime.is_some();
+                if let Some(ime) = ime.filter(|_| enabled) {
                     let request: InputMethod<&str> = InputMethod::Enabled {
                         cursor: Rectangle::new(
                             bounds.position() + Vector::new(ime.x, ime.y),
@@ -475,57 +492,28 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginFrame<'_> {
         let state = tree.state.downcast_ref::<FrameState>();
         let epoch = crate::ui::epoch();
         let image_epoch = self.app.note_image_epoch;
-        // 取运行时最新帧：改宽期间投影可能还没追上（那一帧已在绘制期取走、不再发通知），
-        // 但这里必须画最新的一张，否则下一拍会退回投影里的旧帧。
-        let current = self
-            .app
-            .plugins
-            .surface_frame(&self.plugin_id, &self.surface_id)
-            .unwrap_or_else(|| self.frame.clone());
-        // 面身份或尺寸变化即上报插件：绘制拿到的是真实分配尺寸，这是插件重排的唯一来源。
-        // 插件在另一进程，新尺寸的帧要一个往返才回来；这一拍就等它回来画进去——否则画出的内容
-        // 永远是上一拍尺寸的，拖动时字样与右对齐项明显拖在分割线后面。
-        let mut resized = None;
-        let reported = (self.identity(), bounds.width, bounds.height);
-        if state.reported.get() != Some(reported) {
-            state.reported.set(Some(reported));
-            let now = Instant::now();
-            let cooling =
-                state.resize_wait_until.get().is_some_and(|until| now < until);
-            if cooling {
-                self.send(FrameInput::Resize { width: bounds.width, height: bounds.height });
-            } else {
-                // 等的是「比已画的那一帧更新」：投影可能落后，拿它当基准会立刻返回旧帧
-                let seen = state.painted.borrow().clone().unwrap_or_else(|| current.clone());
-                // 先登记再发尺寸：登记期间回来的帧由这一拍取走画上，不再另发一条通知
-                self.app.plugins.begin_surface_wait(
-                    &self.plugin_id,
-                    &self.surface_id,
-                    seen,
-                );
-                self.send(FrameInput::Resize { width: bounds.width, height: bounds.height });
-                match self.app.plugins.finish_surface_wait(
-                    &self.plugin_id,
-                    &self.surface_id,
-                    RESIZE_FRAME_WAIT,
-                ) {
-                    Some(frame) => {
-                        resized = Some(frame);
-                        state.resize_wait_until.set(None);
-                    }
-                    None => state
-                        .resize_wait_until
-                        .set(Some(now + RESIZE_WAIT_COOLDOWN)),
-                }
-            }
-        }
-        let frame = resized.as_ref().unwrap_or(&current);
-        // 按已画的那一帧判失效：同步等到的新帧下一拍追进投影时，同一帧不再重画一遍
+        // 同步画：本拍分配到的尺寸就在手上，插件当场按它排好版把指令推回来，
+        // 画出的内容与眼前的分割线位置一致——不存在「等一个往返」的那一帧。
+        let drawn = match self.app.plugins.draw_surface(
+            &self.plugin_id,
+            &self.surface_id,
+            bounds.width,
+            bounds.height,
+            &crate::plugin_theme::SurfaceHost,
+        ) {
+            // 该面正被输入回调占用（或插件刚停）：沿用上一拍，下一拍再试，不占用重绘线程等待
+            DrawOutcome::Skipped => self.frame.clone(),
+            DrawOutcome::Painted(frame) => Some(frame),
+        };
+        let Some(frame) = drawn else {
+            return;
+        };
+        // 换帧判内容而不是判身份：同步通路每拍都给一张新帧，按身份判会让缓存每拍作废
         let frame_changed = !state
             .painted
             .borrow()
             .as_ref()
-            .is_some_and(|painted| Arc::ptr_eq(painted, frame));
+            .is_some_and(|painted| Arc::ptr_eq(painted, &frame) || painted.commands == frame.commands);
         if frame_changed
             || state.font_epoch.get() != epoch
             || state.image_epoch.get() != image_epoch
@@ -537,8 +525,14 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginFrame<'_> {
             }
             state.font_epoch.set(epoch);
             state.image_epoch.set(image_epoch);
-            if frame_changed {
-                *state.painted.borrow_mut() = Some(frame.clone());
+        }
+        *state.painted.borrow_mut() = Some(frame.clone());
+        // 图片来源变了才通知壳：界面上出现的图片要等壳按需载入句柄，晚一步就是一块空白
+        if frame_changed {
+            let signature = self.image_signature(&frame);
+            if state.image_signature.get() != signature {
+                state.image_signature.set(signature);
+                state.images_pending.set(true);
             }
         }
         let steps = plugin_paint::plan(&frame.commands);
@@ -611,10 +605,11 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginFrame<'_> {
             return mouse::Interaction::None;
         };
         let state = tree.state.downcast_ref::<FrameState>();
-        let painted = state.painted.borrow();
-        let frame = painted.as_deref().unwrap_or(self.frame.as_ref());
-        match frame.hit_at(point.x, point.y) {
-            Some(id) => interaction_of(frame.hit_cursor(id)),
+        match self.current(state) {
+            Some(frame) => match frame.hit_at(point.x, point.y) {
+                Some(id) => interaction_of(frame.hit_cursor(id)),
+                None => mouse::Interaction::None,
+            },
             None => mouse::Interaction::None,
         }
     }
@@ -626,7 +621,7 @@ pub fn frame_view<'a>(
     window: window::Id,
     plugin_id: &str,
     surface_id: &str,
-    frame: &'a Arc<SurfaceFrame>,
+    frame: Option<Arc<SurfaceFrame>>,
     padding: Padding,
 ) -> Element<'a, Message> {
     let focused = app.plugin_frame_focus.as_ref().is_some_and(|focus| {

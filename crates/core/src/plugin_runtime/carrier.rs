@@ -31,6 +31,7 @@ pub(super) struct Loaded {
     stage: Mutex<Stage>,
     create: abi::CreateFn,
     send: abi::SendFn,
+    draw: abi::DrawFn,
     destroy: abi::DestroyFn,
     /// 宿主函数表：插件侧持有它的地址，会话期间不得移动；会话没收尾时连带常留（见 Drop）。
     host: Option<Box<abi::HostApi>>,
@@ -126,6 +127,7 @@ impl Loaded {
             .map_err(|e| format!("装载动态库失败（{}）：{e}", path.display()))?;
         let create = symbol::<abi::CreateFn>(&library, path, abi::CREATE_SYMBOL)?;
         let send = symbol::<abi::SendFn>(&library, path, abi::SEND_SYMBOL)?;
+        let draw = symbol::<abi::DrawFn>(&library, path, abi::DRAW_SYMBOL)?;
         let destroy = symbol::<abi::DestroyFn>(&library, path, abi::DESTROY_SYMBOL)?;
         let info = SessionInfo {
             id: cstring(&manifest.id)?,
@@ -151,6 +153,7 @@ impl Loaded {
             stage: Mutex::new(Stage::Starting(Vec::new())),
             create,
             send,
+            draw,
             destroy,
             host: Some(host),
             info: Some(info),
@@ -202,6 +205,23 @@ impl Loaded {
             abi::SEND_DROPPED => Err("插件未接收本笔下发（队列已满或内容非法）".into()),
             _ => Err("插件会话已结束，下发未送达".into()),
         }
+    }
+
+    /// 同步画一面：会话未就绪（创建前 / 已收尾）时按「被占用」上报，宿主沿用上一拍。
+    pub(super) fn draw(
+        &self,
+        surface_id: &str,
+        width: f32,
+        height: f32,
+        host: &dyn super::draw::DrawHost,
+        log: &dyn Fn(u32, &str),
+    ) -> super::draw::DrawCall {
+        let stage = self.stage.lock().unwrap();
+        let Stage::Ready(handle) = *stage else {
+            return super::draw::DrawCall::Busy;
+        };
+        // 持 stage 锁调进插件：会话收尾（destroy）与绘制不得交错，否则函数指针背后的代码段可能已卸载
+        super::draw::invoke(self.draw, handle, surface_id, width, height, host, log)
     }
 
     /// 结束会话；返回 true = 会话线程已退出、库可卸载。

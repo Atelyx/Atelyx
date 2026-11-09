@@ -1,4 +1,4 @@
-﻿//! 原始输入 → 语义事件：指针按命中 id 与上次布局解释成点击 / 聚焦，键盘与输入法落到聚焦控件上编辑。
+//! 原始输入 → 语义事件：指针按命中 id 与上次布局解释成点击 / 聚焦，键盘与输入法落到聚焦控件上编辑。
 
 use atelyx_plugin_protocol::frame::FrameInput;
 use atelyx_plugin_protocol::frame::{Key, Modifiers, MouseButton, NamedKey};
@@ -13,7 +13,7 @@ use crate::Context;
 /// 自绘子区起拖的最小位移（逻辑像素）：小于它仍按点击 / 双击解释。
 const DRAG_THRESHOLD: f32 = 4.0;
 
-/// 一条输入对应的语义事件；改完状态后由插件调用 `render` 提交新一帧。
+/// 一条输入对应的语义事件；改完状态后由插件请求重绘（`Context::request_redraw`）。
 pub(crate) async fn handle(
     state: &mut UiState,
     ctx: &Context,
@@ -90,13 +90,6 @@ pub(crate) async fn handle(
                     events.push(UiEvent::Focus { id, focused: false });
                 }
             }
-        }
-        FrameInput::Resize { width, height } => {
-            state.size = (*width, *height);
-            // 面重新挂载（或真改尺寸）时宿主手里未必还有上一帧：同内容去重必须从这里失效
-            state.submitted = None;
-            // 下一帧先按估算字宽交一版，拖动中的尺寸变化不必等量算往返
-            state.resize_pending = true;
         }
     }
     events

@@ -110,80 +110,60 @@ lto = true
 ```rust
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use atelyx_plugin_sdk::frame_ui::{FrameUi, TextRole, UiEvent};
+use atelyx_plugin_sdk::frame_ui::{TextRole, UiEvent};
 use atelyx_plugin_sdk::protocol::frame::FrameInputParams;
-use atelyx_plugin_sdk::protocol::method::{ContributionSlot, SurfaceAttachedParams};
-use atelyx_plugin_sdk::{Context, PluginHandler};
+use atelyx_plugin_sdk::protocol::method::ContributionSlot;
+use atelyx_plugin_sdk::{Context, DrawFrame, FrameUi, PluginHandler};
 
 /// 面板贡献 id，同时是该面的 surfaceId。
 const PANEL: &str = "main";
 
 struct Echo {
-    /// 一个面持一个控件层：交互态、量算缓存与主题都随它跨帧保留。
-    ui: tokio::sync::Mutex<FrameUi>,
     clicks: AtomicU32,
 }
 
-impl Echo {
-    /// 出帧 = 提交：状态怎么变，界面就怎么变；帧不会被自动重发。
-    async fn render(&self, ctx: &Context) {
+#[async_trait::async_trait]
+impl PluginHandler for Echo {
+    /// 握手完成：注册贡献点、登记服务与订阅都放这里。
+    async fn on_ready(&self, ctx: &Context) {
+        if let Err(e) = ctx.register(ContributionSlot::Panel, PANEL, "Echo", None, None).await {
+            eprintln!("注册贡献失败：{e}");
+        }
+    }
+
+    /// 宿主在自己的重绘拍里调它：当场把这一面画出来，尺寸由宿主给。
+    fn on_draw(&self, frame: &mut DrawFrame<'_, '_>) {
         let clicks = self.clicks.load(Ordering::SeqCst);
-        let mut ui = self.ui.lock().await;
-        let drawn = ui.render(ctx, PANEL, |ui| {
+        let _ = frame.build(|ui| {
             ui.column(8.0, |c| {
                 c.text("你好，Atelyx", TextRole::Heading);
                 c.text(format!("点击次数：{clicks}"), TextRole::Label);
                 c.button("ping", "点我");
             });
         });
-        if let Err(e) = drawn.await {
-            eprintln!("提交面帧失败：{e}");
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl PluginHandler for Echo {
-    /// 握手完成：注册贡献点、登记服务、提交订阅与首帧都放这里。
-    async fn on_ready(&self, ctx: &Context) {
-        if let Err(e) = ctx.register(ContributionSlot::Panel, PANEL, "Echo", None, None).await {
-            eprintln!("注册贡献失败：{e}");
-        }
-        self.render(ctx).await;
     }
 
-    /// 面重新进入布局（面板被重新添加 / 插件重启）：补交当前这一帧。
-    async fn on_surface_attached(&self, ctx: &Context, params: SurfaceAttachedParams) {
-        if params.surface_id == PANEL { self.render(ctx).await; }
-    }
-
-    /// 原始输入按到达顺序逐条进来：先出语义事件并改状态，再重画。
-    async fn on_frame_input(&self, ctx: &Context, params: FrameInputParams) {
+    /// 原始输入按到达顺序逐条进来：先翻成语义事件、改状态，再请宿主重绘。
+    async fn on_frame_input(&self, ctx: &Context, params: FrameInputParams, ui: &mut FrameUi) {
         if params.surface_id != PANEL { return; }
-        let events = {
-            let mut ui = self.ui.lock().await;
-            ui.event(ctx, &params.input, |_| None).await
-        };
+        let events = ui.event(ctx, &params.input, |_| None).await;
         for event in events {
             if let UiEvent::Click { id } = event {
                 if id == "ping" { self.clicks.fetch_add(1, Ordering::SeqCst); }
             }
         }
-        self.render(ctx).await;
+        let _ = ctx.request_redraw().await;
     }
 }
 
-// 导出 create / send / destroy 三个 C ABI 符号：宿主装载动态库后按它们建会话
-atelyx_plugin_sdk::export_in_process_plugin!(Echo {
-    ui: tokio::sync::Mutex::new(FrameUi::new()),
-    clicks: AtomicU32::new(0),
-});
+// 导出 create / send / draw / destroy 四个 C ABI 符号：宿主装载动态库后按它们建会话
+atelyx_plugin_sdk::export_in_process_plugin!(Echo { clicks: AtomicU32::new(0) });
 ```
 
 四条容易踩的规则：
 
 1. **信封通道只允许协议内容**。插件往 `send` 里塞的每一条都必须是 JSON-RPC 信封；调试输出用 `eprintln!`（进插件日志），别往信封通道里插打印。
-2. **帧要自己提交**。帧不自动重发：改完状态不 `render`，界面就停在上一帧；面重新挂载也一样，靠 `on_surface_attached` 补一帧。
+2. **绘制是宿主驱动的**。`on_draw` 只在宿主重绘这一面时被调；改完状态不调 `ctx.request_redraw()`，画面就停在上一拍。
 3. **输入要先声明**。帧里没有命中区，指针事件就没有 `hit`；没有 `keys` / `ime`，键盘与输入法不进你的回调（见 5.3）。
 4. **`on_ready` 里别做长耗时阻塞**。握手回执由 SDK 发出，但 `on_ready` 之后的调用都在同一个连接上；需要长时间准备的工作放 `tokio::spawn`。
 
@@ -193,30 +173,30 @@ atelyx_plugin_sdk::export_in_process_plugin!(Echo {
 - 宿主 → 插件：一律**通知**（`host:` 前缀的方法），由 `PluginHandler` 的对应回调接收。回调**按到达顺序逐个执行**（一条处理完才接下一条），因此改同一份状态不必自己加锁；代价是单个回调卡住会挡住后续通知——弹文件对话框、等长请求这类阻塞调用要么接受「界面整体暂停到用户点完」，要么在回调里另起任务自己驱动。回调可能早于 `on_ready` 到达，依赖初始化结果的逻辑要自带守卫。
 - 迟到 / 超时：调用超时只代表「本次调用放弃」，宿主侧业务可能仍在进行（`ai.chat.send` 这类有副作用的调用尤其如此），需要时用查询方法核对。
 - 宿主结束会话：宿主撤掉投递口，插件的读端读到通道关闭；收尾即结束，不要试图常驻。
-- 承载的 ABI：宿主导出 `HostApi` 函数表（`send` / `log` / `closed` + 自报信息），插件的 `export_in_process_plugin!` 导出 `atelyx_plugin_create` / `atelyx_plugin_send` / `atelyx_plugin_destroy`。三处约定要记住：ABI 版本（`ABI_VERSION`）不等即拒绝创建；插件在自己的 tokio 运行时线程上跑会话，宿主线程只入队、从不等待插件执行；`destroy` 回报「会话线程仍在库内」时宿主保留动态库（卸载会让运行中的代码段消失）。
+- 承载的 ABI：宿主导出控制函数表 `HostApi`（`send` / `log` / `closed` + 自报信息）与绘制函数表 `DrawSink`（量算 / Markdown / 主题 / 指令 / 命中 / 输入声明），插件的 `export_in_process_plugin!` 导出 `atelyx_plugin_create` / `atelyx_plugin_send` / `atelyx_plugin_draw` / `atelyx_plugin_destroy`。四处约定要记住：ABI 版本（`ABI_VERSION`）不等即拒绝创建；插件在自己的 tokio 运行时线程上跑会话，宿主线程只入队、从不等待插件执行；绘制是例外——它在宿主的重绘线程上同步执行，取不到该面的控件层状态（正被输入回调占用）就跳过这一拍；`destroy` 回报「会话线程仍在库内」时宿主保留动态库（卸载会让运行中的代码段消失）。
 
-## 5. 界面：画一帧
+## 5. 界面：同步绘制
 
-一个面一份帧，`ctx.submit_frame(surface_id, frame)` 一次交齐绘制内容、命中区与输入声明；`surface_id` 是 `register` 时的贡献 id，插件窗口面用 `window.open` 的 `id`，文档实例面由宿主分配。帧的逻辑内容如下（SDK 编码后写进握手时拿到的共享内存槽位，信封只带槽位坐标；裸协议自行映射见《插件 API 参考》的「帧共享内存」）：
+一个面一份帧。宿主在自己的重绘拍里调插件的 `on_draw`，插件在这一次调用里把整面画成「绘制指令 + 命中区 + 输入声明」推回去，宿主当场执行。`surface_id` 是 `register` 时的贡献 id，插件窗口面用 `window.open` 的 `id`，文档实例面由宿主分配。
 
-```json
-{
-  "commands": [
-    { "kind": "rect", "x": 12, "y": 12, "w": 120, "h": 32,
-      "fill": { "type": "token", "name": "surface" },
-      "stroke": { "type": "token", "name": "border" }, "cornerRadius": 6 },
-    { "kind": "text", "x": 28, "y": 20, "content": "点我", "size": 13, "color": { "type": "token", "name": "text" } }
-  ],
-  "hits": [{ "id": "ping", "x": 12, "y": 12, "w": 120, "h": 32, "cursor": "pointer" }],
-  "keys": true
+```rust
+fn on_draw(&self, frame: &mut DrawFrame<'_, '_) {
+    let (width, height) = frame.size();          // 宿主这一拍给该面的真实尺寸
+    let host = frame.surface();                   // 端到端能力面：同步量算 / 取主题 / 直接推指令
+    host.command(&rect(0.0, 0.0, width, height, Some(token(ColorToken::Surface)), None));
+    host.hit(&HitRegion { id: "ping".into(), x: 12.0, y: 12.0, w: 120.0, h: 32.0, cursor: None });
+    host.policy(None, true, None);                // ime / 收键盘 / 帧拍
 }
 ```
 
-三条固定语义：
+固定语义：
 
-- **整帧替换**：这一帧就是该面此刻的完整界面，没画的东西就没了；空指令 = 空面。要改任何一处都重发整帧，宿主不做增量。
-- **没有提交过的面显示占位**（「等待插件提交界面」）；贡献注册了但一直不提交，用户看到的就是这块占位。
-- 帧只描述画面与几何，**宿主不理解语义**（哪个矩形是按钮、点下去该做什么，全在插件里），并在提交时校验：指令逐条（错误带指令下标）、命中区 id 非空且唯一、矩形有限非负、`fps` 在 1–120。不合法的帧整份拒收，不会半帧生效。
+- **绘制只读状态**。一次 `on_draw` 就是该面此刻的完整画面：这次没画的就没了，宿主不做增量。绘制期间**不得**调用 `Context` 的能力面（文件 / 网络 / AI 这些）——那会重入宿主，本次绘制作废并写日志；要改状态请回输入回调。
+- **重绘由插件请求**。改完状态调 `ctx.request_redraw()`，宿主尽快重绘这一面。宿主也会因为别处的界面变化重绘并顺带调 `on_draw`，所以绘制要便宜且只读。
+- **尺寸只从绘制入口来**。没有单独的尺寸通知：`frame.size()` 就是这一拍分配到的空间，布局按它算。
+- **界面状态归 SDK**。控件层（`FrameUi`）由 SDK 持有：输入回调拿到 `&mut FrameUi`，绘制经 `frame.build(..)` 用它；两边不会同时占用，绘制取不到就跳过这一拍。
+- 宿主在执行前校验：指令逐条（错误带指令下标）、命中区 id 非空且唯一、矩形有限非负、`fps` 在 1–120。不合法的整帧丢弃，并写进插件日志。
+- 面还没画过时宿主显示占位（「等待插件绘制界面」）。
 
 ### 5.1 绘制指令
 
@@ -233,27 +213,22 @@ atelyx_plugin_sdk::export_in_process_plugin!(Echo {
 
 ```rust
 use atelyx_plugin_sdk::frame_builders::{
-    circle, frame, hit_with_cursor, keys, line, rect, rounded_rect, text, text_wrapped, token,
+    circle, hit_with_cursor, line, rect, rounded_rect, text, text_wrapped, token,
 };
-use atelyx_plugin_sdk::protocol::frame::{HitCursor, SurfaceFrame};
+use atelyx_plugin_sdk::protocol::frame::HitCursor;
 use atelyx_plugin_sdk::protocol::paint::ColorToken;
 
-fn frame_of(size: (f32, f32), clicks: u32) -> SurfaceFrame {
-    let (w, h) = size;
-    let surface = frame(
-        vec![
-            rect(0.0, 0.0, w, h, Some(token(ColorToken::SurfaceSunken)), None),
-            rounded_rect(12.0, 12.0, 120.0, 32.0, 6.0,
-                Some(token(ColorToken::Surface)), Some(token(ColorToken::Border))),
-            text(28.0, 20.0, format!("点我 {clicks}"), 13.0, token(ColorToken::Text)),
-            circle(w - 24.0, 28.0, 6.0, Some(token(ColorToken::Accent)), None),
-            line(12.0, 56.0, w - 12.0, 56.0, token(ColorToken::Border)),
-            text_wrapped(12.0, 64.0, "长说明按可用宽度换行", 12.0,
-                token(ColorToken::TextMuted), w - 24.0, None),
-        ],
-        vec![hit_with_cursor("ping", 12.0, 12.0, 120.0, 32.0, HitCursor::Pointer)],
-    );
-    keys(surface)   // 需要键盘才声明，见 5.3
+fn paint_panel(host: &dyn DrawSurface, width: f32, height: f32, clicks: u32) {
+    host.command(&rect(0.0, 0.0, width, height, Some(token(ColorToken::SurfaceSunken)), None));
+    host.command(&rounded_rect(12.0, 12.0, 120.0, 32.0, 6.0,
+        Some(token(ColorToken::Surface)), Some(token(ColorToken::Border))));
+    host.command(&text(28.0, 20.0, format!("点我 {clicks}"), 13.0, token(ColorToken::Text)));
+    host.command(&circle(width - 24.0, 28.0, 6.0, Some(token(ColorToken::Accent)), None));
+    host.command(&line(12.0, 56.0, width - 12.0, 56.0, token(ColorToken::Border)));
+    host.command(&text_wrapped(12.0, 64.0, "长说明按可用宽度换行", 12.0,
+        token(ColorToken::TextMuted), width - 24.0, None));
+    host.hit(&hit_with_cursor("ping", 12.0, 12.0, 120.0, 32.0, HitCursor::Pointer));
+    host.policy(None, true, None);   // 需要键盘才声明 keys，见 5.3
 }
 ```
 
@@ -286,7 +261,6 @@ fn frame_of(size: (f32, f32), clicks: u32) -> SurfaceFrame {
 | `key` | `key` `action` `modifiers` `text` | `key` 是 `{ "type": "named", "name": "arrowLeft" }` 或 `{ "type": "character", "text": "A" }`；`action` = `press` / `release`（长按会连发 press）；`modifiers` 是 `shift` / `control` / `alt` / `meta` 快照 |
 | `text` | `text` `composing` `caret` `candidates` | 输入法：`composing: true` 是组合串更新（空串 = 组合结束，不插入文本），`false` 是已提交文本；`candidates` 是候选窗锚点 |
 | `focus` | `focused` | 指针在面内按下即取焦，按到面外即失焦 |
-| `resize` | `width` `height` | 面的实际分配尺寸变化时发一次，按它重排 |
 
 三种声明决定你收什么：
 
@@ -294,55 +268,55 @@ fn frame_of(size: (f32, f32), clicks: u32) -> SurfaceFrame {
 - `ime: { x, y, w, h }` 才收 `text`，该矩形是输入光标位置，宿主据此摆放候选窗。**不声明就收不到中文**——输入框必须声明它。
 - `fps: 30` 才收 `host:frame.tick { frame, deltaMs }`（1–120）。`frame` 从 0 起自增，`deltaMs` 是距上一拍的实际间隔（首帧 0）；落后多拍时宿主只补一拍。不声明就没有周期唤醒，动画停了下一次出帧把 `fps` 去掉即停拍。
 
-帧输入与帧拍都**不会**自动重发帧：回调里改完状态要自己提交新的一帧。
+输入与帧拍都**不会**自动重绘：回调里改完状态要调 `ctx.request_redraw()`。面的尺寸不进输入——它随每次绘制由 `frame.size()` 给出。
 
 ### 5.4 文字量算与主题
 
 指令里的文字按 `(x, y)` 原样绘制，宿主不做排版，所以「这段字有多宽」要自己算。**不要按字符数估**：中文近似 1 字宽、西文只有一半左右，混排会错位。
 
-```rust
-use atelyx_plugin_sdk::protocol::method::MeasureItem;
+绘制期量算是同步的：宿主就在调用栈上，当场给结果，没有往返。
 
-let items = vec![
-    MeasureItem { text: "标题".into(), size: 14.0, weight: None, family: None, max_width: None },
-    MeasureItem { text: "说明文字".into(), size: 12.0, weight: None, family: None, max_width: Some(240.0) },
-];
-let sizes = ctx.measure_batch(items).await?.sizes;   // 顺序与入参一一对应：width / height / lines
+```rust
+let measured = frame.surface().measure("标题", 14.0, None, None, None);
+// measured.width / measured.height / measured.lines；给 max_width 即按该宽度换行
 ```
 
-- 单批最多 **512** 条；给 `max_width` 就按该宽度换行量算并回行数，不给按单行量。一屏文字攒成一批量完，别一条一个往返。
-- 结果按「文本 + 字号 + 字重 + 字体族 + 可用宽度」缓存，同一段字反复要用的（行高、列宽、省略位置）自己存住，别在帧回调里每帧量。
-- `ctx.query_theme()` 取宿主主题：`colors`（各 token 的 `#rrggbb`）、`fontSizes`（`micro` / `caption` / `ui` / `body` / `h2` / `h1`）、`radii`（`xs` / `sm` / `md`）。主题变了没有通知通道，面重新挂载时重取。
+- 结果按「文本 + 字号 + 字重 + 字体族 + 可用宽度」在 SDK 里缓存，控件层自动复用；自己手画的文字建议照同样的口径缓存，别在每次 `on_draw` 里量几百条。
+- 主题也在绘制期同步取：`frame.surface().theme()` 每拍都是当前值，不需要在面重新挂载时重取。颜色一律走 `ColorToken`，宿主换主题自动跟随。
+- 输入回调里仍可用 `ctx.measure_batch(items)` 异步量算（光标定位这类需要精确字宽的地方）；单批最多 512 条。
 
 ### 5.5 控件层（推荐写法）
 
 不想自己算坐标、命中区与文本编辑，用 `atelyx_plugin_sdk::frame_ui`：控件编译成绘制指令与命中区，悬停 / 按下 / 焦点 / 光标 / 选区 / 输入法组合串 / 复制粘贴 / Tab 切换都在控件层里。宿主仍然只收帧，不认识控件。
 
-一个面持一个 `FrameUi`，按两阶段出帧：**先把输入翻成事件并改状态，再声明控件**。
+控件层状态（`FrameUi`）由 SDK 持有：输入回调拿到 `&mut FrameUi` 解释输入，绘制里用同一个（经 `frame.build`）声明界面。按两阶段走：**先把输入翻成事件并改状态，再请求重绘**。
 
 ```rust
 use std::sync::Mutex;
 
-use atelyx_plugin_sdk::frame_ui::{FrameUi, Icon, TextRole, UiEvent};
+use atelyx_plugin_sdk::frame_ui::{Icon, TextRole, UiEvent};
 use atelyx_plugin_sdk::protocol::frame::FrameInputParams;
-use atelyx_plugin_sdk::{Context, PluginHandler};
+use atelyx_plugin_sdk::{Context, DrawFrame, FrameUi, PluginHandler};
 
 #[derive(Default)]
 struct TodoState { items: Vec<String>, draft: String }
 
 struct Todo {
-    ui: tokio::sync::Mutex<FrameUi>,
     state: Mutex<TodoState>,
 }
 
-impl Todo {
-    async fn render(&self, ctx: &Context) {
+#[async_trait::async_trait]
+impl PluginHandler for Todo {
+    async fn on_ready(&self, ctx: &Context) {
+        let _ = ctx.register(ContributionSlot::Panel, "main", "待办", None, None).await;
+    }
+
+    fn on_draw(&self, frame: &mut DrawFrame<'_, '_>) {
         let (items, draft) = {
             let state = self.state.lock().unwrap();
             (state.items.clone(), state.draft.clone())
         };
-        let mut ui = self.ui.lock().await;
-        let drawn = ui.render(ctx, "main", |ui| {
+        let _ = frame.build(|ui| {
             ui.column(8.0, |c| {
                 c.text("待办", TextRole::Heading);
                 c.text_input("draft", draft.clone(), "输入后回车添加");
@@ -358,24 +332,14 @@ impl Todo {
                 });
             });
         });
-        if let Err(e) = drawn.await {
-            eprintln!("提交面帧失败：{e}");
-        }
     }
-}
 
-#[async_trait::async_trait]
-impl PluginHandler for Todo {
-    async fn on_ready(&self, ctx: &Context) { self.render(ctx).await; }
-
-    async fn on_frame_input(&self, ctx: &Context, params: FrameInputParams) {
+    async fn on_frame_input(&self, ctx: &Context, params: FrameInputParams, ui: &mut FrameUi) {
         // 输入框的值以插件状态为准：先取一份快照，闭包里别再取同一把锁
         let draft = self.state.lock().unwrap().draft.clone();
-        let events = {
-            let mut ui = self.ui.lock().await;
-            ui.event(ctx, &params.input, move |id| (id == "draft").then(|| draft.clone())).await
-        };
-        // 改状态的作用域要先收掉：出帧还要再取一次锁，不能带过去
+        let events = ui
+            .event(ctx, &params.input, move |id| (id == "draft").then(|| draft.clone()))
+            .await;
         {
             let mut state = self.state.lock().unwrap();
             for event in events {
@@ -394,7 +358,7 @@ impl PluginHandler for Todo {
                 }
             }
         }
-        self.render(ctx).await;
+        let _ = ctx.request_redraw().await;
     }
 }
 ```
@@ -402,11 +366,13 @@ impl PluginHandler for Todo {
 几条用法约定：
 
 - **`event` 已经把交互态就地更新**（焦点、光标、选区、组合串、滚动位置），返回的是语义事件：`Click` / `RightClick` / `Text`（完整新值）/ `Submit`（单行输入框回车）/ `Select`（选项下标）/ `Focus` / `Scroll`（偏移与可滚余量）。插件只改自己的业务状态。
-- **`value_of` 每次现读**：`event(ctx, input, |id| …)` 按 id 返回输入框当前值，编辑永远从事实出发；**`Text` 要写回**，收到 `UiEvent::Text { value, .. }` 就存进自己的状态，不写回下一帧还是旧值。
-- **`render` 的闭包会被调用多次**（文字量算缺项时先按估算排、量完重建，最多 3 轮）：闭包必须只读状态，不要在里面改状态或发请求。
-- **内容相同的帧不会重复提交**：指针移动这类没改画面的输入不会把宿主拖进重绘风暴，不必自己判重。
-- **尺寸变化立即跟手**：`resize` 到了而文字量算还没补齐时，`render` 会先按估算字宽交一帧，量算落地后再交精确帧（画面没变则不再交）。宿主同一面同时只等一笔尺寸回帧，拖动中的中间尺寸只留最新一笔；拖动持续而插件迟迟不回帧时按 150ms 重发最新尺寸，2 秒仍无新帧就撤掉等待、等下一次尺寸变化。
-- **主题只取一次**：首次 `render` 查 `query.theme` 拿字号 / 圆角 / 颜色；面重新挂载时新建一个 `FrameUi` 即重取。**尺寸**由宿主回发的 `resize` 决定并按它排版，首次绘制前用缺省尺寸（首帧可能偏窄，`resize` 一到就重排）。
+- **`value_of` 每次现读**：`event(ctx, input, |id| …)` 按 id 返回输入框当前值，编辑永远从事实出发；**`Text` 要写回**，收到 `UiEvent::Text { value, .. }` 就存进自己的状态，不写回下一拍还是旧值。
+- **`build` 的闭包会被调用多次**（文字量算 / Markdown 缺项时要重建，最多 3 轮）：闭包必须只读状态，不要在里面改状态或发请求。
+- **尺寸跟手**：`frame.size()` 就是这一拍的真实尺寸，不存在「先按旧尺寸画、下拍再修正」的那一帧；改宽时文字量算与 Markdown 缺项在同一个调用里补齐。
+- **重绘要自己请求**：宿主也会因为别处的界面变化重绘并顺带调 `on_draw`，但那是不可预期的；改完状态要调 `ctx.request_redraw()` 让宿主这一拍就重画。绘制因此必须便宜且只读——它可能比你想的更频繁地被调。
+- **绘制里别调 `Context`**：量算、Markdown、主题都在 `frame.surface()` 上同步取，不需要（也不允许）在绘制里走能力面。
+- **帧拍在绘制里声明**：`frame.set_fps(Some(30))`，或经 `frame.surface().policy(ime, keys, fps)` 一次给全；不声明就不推 `host:frame.tick`。
+- **绘制期的错要去日志里看**：绘制跑在宿主线程上，发布版没有 stderr 可看；控件层校验失败、Markdown 解析失败这类问题都会写进插件日志（设置页「详情 → 日志」）。
 
 控件（细节以源码文档注释为准）：
 
@@ -427,14 +393,14 @@ impl PluginHandler for Todo {
 | `overlay(rect, ...)` | 覆盖层：子项按 `rect` 浮在主内容之后绘制，整块承接点击（子控件优先，空白处不穿透下层）；打开期间滚轮只落到浮层内声明过的滚动容器 |
 | `panel(...)` | 圆角表面容器，承接子项、不承接点击 |
 | `notice(text, color)` | 提示块：整行底色 + 语义色描边与文字 |
-| `markdown(content)` | 只读 Markdown：块由宿主解析（`markdown.parse`），控件层按宽度折行并画列表标记 / 引用条 / 代码底 |
+| `markdown(content)` | 只读 Markdown：块由宿主在绘制期同步解析，控件层按宽度折行并画列表标记 / 引用条 / 代码底 |
 | `scroll(id, gap, ...)` / `list(id, gap, ...)` | 滚动容器（吃父容器剩余高度，只画视口内的子项），滚轮回 `Scroll { id, offset, max_offset }`，右下细滚动条可拖 |
 | `scroll_sized(id, height, gap, follow_end, ...)` | 定高滚动区；`follow_end` 时停在终点就跟到新终点（日志、消息流） |
 | `rule()` / `spacer(h)` / `grow()` | 分隔线 / 固定高度空白 / 吃剩余宽度的弹簧 |
 | `pad(horizontal, vertical, ...)` | 内边距容器：子项按列排布并整体内缩（滚动条要贴边、内容又要留白时用） |
 | `column(gap, ...)` / `row(gap, ...)` / `row_fill(gap, ...)` | 纵向 / 横向 / 占满剩余高度的横向容器（并排分栏各自滚动） |
 
-Markdown 不要自己解析：`ui.markdown(text)` 首次出现时向宿主发一次 `markdown.parse`，按原文缓存（缓存有限，滚出视野的旧内容会被收敛掉），内容不变不重取。
+Markdown 不要自己解析：`ui.markdown(text)` 由宿主按笔记同一套语义解析，内容按原文缓存（缓存有限，滚出视野的旧内容会被收敛掉），内容不变不重解析。
 
 三条边界：指令集没有裁剪，滚动只画视口内的子项；需要覆盖主内容的浮层用 `ui.overlay(rect, ...)`（画在主内容之后，打开时滚轮只落到浮层里的滚动区），下拉仍就地展开；无障碍基本没有（自绘帧对读屏器只是一块区域，键鼠可达性要自己保证）；观感一致性靠 SDK 默认样式，不要写死色值和像素。
 
@@ -565,7 +531,7 @@ let params = WindowOpenParams {
     decorations: None,          // Some(false) = 去掉系统边框，由宿主补标题栏（标题 / 拖动 / 最小化 / 最大化 / 关闭）
     titlebar: None,             // 仅 decorations: Some(false) 时生效；Some(false) = 标题栏也交给自己画
 };
-ctx.window_open(params).await?;   // 窗口内容同样是帧：ui.render(ctx, "palette", ...) 提交
+ctx.window_open(params).await?;   // 窗口内容同样是面：在 on_draw 里按 frame.surface_id() 分支绘制
 // 运行时改尺寸 / 置顶 / 标题（只给一维时另一维取现值；「不进任务栏」只能在开窗时给）
 ctx.window_update(WindowUpdateParams {
     id: "palette".into(), width: Some(640.0), height: None, always_on_top: None, title: None,
@@ -773,15 +739,17 @@ cp atelyx_manifest.toml dist/
 | --- | --- |
 | 列表里「不可装载：协议版本不匹配」 | `api_version` 与宿主不一致（当前 `1`） |
 | 「不可装载：入口文件不存在」 | `entry` 写的文件名 / 路径与包内不一致，或漏了当前平台 |
-| 「插件装载失败：动态库缺少符号」 | 没有用 `export_in_process_plugin!`（或符号被 strip / `#[no_mangle]` 漏写） |
+| 「插件装载失败：动态库缺少符号」 | 没有用 `export_in_process_plugin!`（或符号被 strip / `#[no_mangle]` 漏写）；旧插件缺 `atelyx_plugin_draw` 也走这条 |
 | 启用后立刻「启动失败：插件未在 10 秒内完成握手」 | 没有用 `export_in_process_plugin!` 导出符号，或 `create` 里 panic / 立刻返回空指针 |
 | 「输出非协议内容」并停机 | 插件经 `send` 通道发的内容不是 JSON-RPC 信封（例如把日志写进了协议通道），或不是 UTF-8 |
 | 安装了但面板菜单里没有条目 | 没有 `view.register`，或注册失败（看日志） |
-| 面一直显示「等待插件提交界面」 | 没提交帧，或提交的 `surfaceId` 与贡献 id 不一致（面按贡献 id 取帧） |
-| 界面停在旧内容 | 改了状态没重新提交帧——帧不自动重发，回调里要自己 `render` / `submit_frame` |
+| 面一直显示「等待插件绘制界面」 | 没实现 `on_draw`，或绘制的 `surfaceId` 与贡献 id 不一致（面按贡献 id 取帧） |
+| 界面停在旧内容 | 改了状态没调 `ctx.request_redraw()`——宿主只在重绘这一面时才调 `on_draw` |
+| 日志里「draw 期间调用了宿主能力面」 | 在 `on_draw` 里调了 `Context`：量算 / Markdown / 主题改用 `frame.surface()`，改状态回输入回调 |
+| 日志里「面 xx 绘制失败」 | 绘制里的帧不合法（命中区 id 重复 / 为空、矩形为负、`fps` 越界），按日志里的原因改 |
 | 点了没反应 | 帧里没声明该处的命中区、`hit` 的 id 与处理分支不一致，或点击被后声明的命中区抢走 |
 | 中文打不进 / 收不到按键 | 帧没声明 `ime`（输入法）/ `keys`（按键）；输入框聚焦后要重新出帧才会带上 `ime` 光标 |
-| 文字重叠或错位 | 没走 `query.measure` 而按字符数估宽；换行只在给了 `maxWidth` 时成立 |
+| 文字重叠或错位 | 没走 `frame.surface().measure(..)` 而按字符数估宽；换行只在给了 `maxWidth` 时成立 |
 | 声明的快捷键被界面吞掉 | 帧声明了 `keys`：键盘整体归本面（含 Ctrl / Alt 组合），只在真有键盘交互时声明 |
 | 插件详情页出现「未声明」记录 | `permissions` 漏了对应项：调用照常执行，但会被记为未声明并提示用户 |
 | `service.call` 报 `provider_unavailable` | 提供者没启用、已停用或崩溃 |

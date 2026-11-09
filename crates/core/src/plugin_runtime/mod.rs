@@ -8,8 +8,8 @@ mod ai_tools;
 mod capability;
 mod carrier;
 mod child_process;
+mod draw;
 mod fs;
-mod frame_region;
 mod http;
 mod install;
 mod instance;
@@ -52,8 +52,8 @@ pub use atelyx_plugin_protocol::frame::{
     SurfaceFrame,
 };
 pub use atelyx_plugin_protocol::paint::{
-    ColorToken, DrawCommand, ImageFit, ImageSource, PaintColor, PaintPoint, PaintShadow, TextAlign,
-    TextFamily, TextWeight,
+    layout_width, ColorToken, DrawCommand, ImageFit, ImageSource, PaintColor, PaintPoint,
+    PaintShadow, TextAlign, TextFamily, TextWeight, TEXT_LAYOUT_STEP,
 };
 pub use atelyx_plugin_protocol::event::{
     ChatChangeKind, ChatChangedPayload, FileChangeKind, FileChangedPayload,
@@ -73,8 +73,8 @@ pub use atelyx_plugin_protocol::method::{
     ChatRenameParams, ChatSendParams, ChatSessionParams, ChatSessionSummary, ChatSessionWire,
     ChatStopParams, ClipboardImage, CollabMessageParams, CollabPeer, CollabPeersResult,
     CollabSendParams, CollabSendQos, CollabSendResult, ContributionSlot, EdgesPadding, FileFilter,
-    FontSizes, ImageInfoResult, MeasureBatchParams, MeasureBatchResult, MeasureItem,
-    MeasureTextResult, NotificationLevel, PaddingSpec, Radii,
+    FontSizes, ImageInfoResult, MarkdownBlock, MarkdownSpan, MeasureBatchParams,
+    MeasureBatchResult, MeasureItem, MeasureTextResult, NotificationLevel, PaddingSpec, Radii,
     SetTrayItemsParams, ShortcutQueryResult, SurfaceKind, TableField, TableRemoteSelection,
     TableSelection, TableRow, TableSetCellImageParams, TableSnapshot, ThemeColors,
     ThemeResult, TrayClickParams, TrayItemSpec, WindowOpenParams, WindowUpdateParams,
@@ -108,6 +108,13 @@ pub struct AuditRecord {
     pub declared: bool,
 }
 
+pub use draw::{DrawHost, DrawOutcome, MeasureRequest};
+
+/// 把 Markdown 原文解析成插件可排版的块：绘制期的同步解析与 `markdown.parse` 共用同一份语义。
+pub fn markdown_blocks(content: &str) -> Vec<method::MarkdownBlock> {
+    markdown::blocks(content).blocks
+}
+
 /// 运行时 → 壳的广播事件（状态 / 通知 / 未声明调用 / 界面与贡献变化；允许落后丢帧）。
 #[derive(Clone, Debug)]
 pub enum PluginEvent {
@@ -116,8 +123,8 @@ pub enum PluginEvent {
     /// 某插件用到了未在 manifest 声明过的能力：调用照常执行，这里只做知情提示
     /// （同一方法每次会话只广播第一次，避免提示刷屏）。
     PermissionDenied { id: String, method: String, detail: String },
-    /// 某插件提交了新的整面帧（壳经 [`PluginRuntime::surface_frame`] 取；丢帧不影响最终渲染）。
-    ViewSubmitted { id: String },
+    /// 某插件请求重绘自己的面（状态已变）：壳据此触发一次重绘，绘制本身在重绘拍里同步发生。
+    RedrawRequested { id: String },
     /// 某插件的贡献注册表变化（注册 / 撤销 / 随会话收尾清空）。
     ContributionsChanged { id: String },
     /// 某插件注册的 AI 工具变化（注册 / 撤销 / 随会话收尾清空）。
@@ -327,8 +334,8 @@ pub struct PluginSummary {
     pub load_error: Option<String>,
     /// 实际用到但未在 manifest 声明过的能力调用条数。
     pub undeclared: usize,
-    /// 已接收的整面帧提交次数。
-    pub submits: u64,
+    /// 已完成的界面绘制次数。
+    pub draws: u64,
     /// 安装来源目录（本地目录安装时记下的绝对路径；zip / 市场安装为 `None`）。
     pub source: Option<String>,
 }
@@ -422,7 +429,6 @@ impl PluginRuntime {
     /// 建立运行时并显式给出宿主产品版本（`minHostVersion` 校验与握手自报都用它）。
     pub fn with_host_version(root: PathBuf, host_version: impl Into<String>) -> Arc<Self> {
         layout::sweep_temp(&root);
-        frame_region::sweep_stale_regions();
         let (events, _) = tokio::sync::broadcast::channel(256);
         let (host_requests, host_requests_rx) = tokio::sync::mpsc::unbounded_channel();
         let runtime = Arc::new(Self {
@@ -1153,6 +1159,7 @@ impl PluginRuntime {
     }
 
 
+    /// 某面最近一拍的整面帧（最后一次 draw 的产物）。
     pub fn surface_frame(
         &self,
         plugin_id: &str,
@@ -1165,64 +1172,26 @@ impl PluginRuntime {
             .and_then(|i| i.surface_frame(surface_id))
     }
 
-    /// 登记一次改宽等帧：须在向插件发 `Resize` 之前登记。登记期间退回的帧由
-    /// [`PluginRuntime::finish_surface_wait`] 取走画上，运行时不再为它发 `ViewSubmitted`
-    /// （一条通知会让 iced 整窗重建一遍，拖动期间那等于每拍白重建一次）。
-    pub fn begin_surface_wait(
+    /// 画一面：同步调插件绘制入口，当场得到这一拍的内容。
+    ///
+    /// 必须在壳的重绘拍里调用——[`DrawHost`] 的量算与取色都直接落到界面层，这里没有跨线程等待。
+    /// 插件未在跑、该面正被输入回调占用或绘制失败时返回 [`DrawOutcome::Skipped`]，调用方沿用上一拍画面。
+    pub fn draw_surface(
         &self,
         plugin_id: &str,
         surface_id: &str,
-        seen: std::sync::Arc<atelyx_plugin_protocol::frame::SurfaceFrame>,
-    ) {
+        width: f32,
+        height: f32,
+        host: &dyn DrawHost,
+    ) -> DrawOutcome {
         let instance = self.instances.lock().unwrap().get(plugin_id).cloned();
-        if let Some(instance) = instance {
-            if matches!(instance.status(), PluginStatus::Running) {
-                instance.begin_frame_wait(surface_id, seen);
-            }
-        }
-    }
-
-    /// 等登记过的面出现一张新帧（改宽那一拍同步取新帧用）。插件不在运行态、未登记、
-    /// 超时都返回 `None`，调用方按手上的帧画。
-    pub fn finish_surface_wait(
-        &self,
-        plugin_id: &str,
-        surface_id: &str,
-        timeout: std::time::Duration,
-    ) -> Option<std::sync::Arc<atelyx_plugin_protocol::frame::SurfaceFrame>> {
-        let instance = self.instances.lock().unwrap().get(plugin_id).cloned()?;
+        let Some(instance) = instance else {
+            return DrawOutcome::Skipped;
+        };
         if !matches!(instance.status(), PluginStatus::Running) {
-            return None;
+            return DrawOutcome::Skipped;
         }
-        instance.finish_frame_wait(surface_id, timeout)
-    }
-
-    /// 等某面出现一张不同于 `seen` 的新帧（登记与等待一步完成，供不需要抢先登记的调用方与测试）。
-    pub fn wait_surface_frame(
-        &self,
-        plugin_id: &str,
-        surface_id: &str,
-        seen: &std::sync::Arc<atelyx_plugin_protocol::frame::SurfaceFrame>,
-        timeout: std::time::Duration,
-    ) -> Option<std::sync::Arc<atelyx_plugin_protocol::frame::SurfaceFrame>> {
-        let instance = self.instances.lock().unwrap().get(plugin_id).cloned()?;
-        if !matches!(instance.status(), PluginStatus::Running) {
-            return None;
-        }
-        instance.begin_frame_wait(surface_id, seen.clone());
-        instance.finish_frame_wait(surface_id, timeout)
-    }
-
-    /// 是否有帧被绘制期同步取走、投影尚未补齐。壳在心跳里据此补一次投影
-    /// （图片载入与键位声明读的是投影缓存，同步取走的帧不走通知）。
-    pub fn take_observed_pending(&self) -> bool {
-        let instances: Vec<Arc<Instance>> =
-            self.instances.lock().unwrap().values().cloned().collect();
-        let mut pending = false;
-        for instance in instances {
-            pending |= instance.take_observed_pending();
-        }
-        pending
+        instance.draw(surface_id, width, height, host)
     }
 
     /// 向某插件的运行日志追加一条宿主侧诊断（如帧里引用了未注册的图片源）。
@@ -1344,7 +1313,7 @@ impl PluginRuntime {
                         status: instance.map(|i| i.status()).unwrap_or(PluginStatus::Stopped),
                         load_error: entry.manifest.as_ref().err().cloned(),
                         undeclared: instance.map(|i| i.undeclared_count()).unwrap_or(0),
-                        submits: instance.map(|i| i.submits()).unwrap_or(0),
+                        draws: instance.map(|i| i.draws()).unwrap_or(0),
                         source: None,
                     }
                 })

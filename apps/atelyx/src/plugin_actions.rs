@@ -1,11 +1,11 @@
 //! 插件面的状态与接线：壳侧视图 kind 编解码、贡献查询、整面帧的投影刷新、界面图片按需载入；
 //! 接管与插件窗口的壳侧应用、领域文档实例的打开路由。
 //!
-//! 贡献与帧的投影缓存在 `App`（`plugin_contributions` / `plugin_surfaces` / `plugin_frames`），
-//! 由 [`refresh_projection`] 随运行时事件刷新；渲染在 [`crate::plugin_view`]。
+//! 贡献与已挂面的投影缓存在 `App`（`plugin_contributions` / `plugin_surfaces`），
+//! 由 [`refresh_projection`] 随运行时事件刷新；帧本身在重绘拍里同步现取，渲染在 [`crate::plugin_view`]。
 
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 
 use iced::{Task, window};
@@ -181,7 +181,7 @@ pub fn rebuild_registry(app: &mut App) {
     app.registry = registry;
 }
 
-/// 整面帧投影 + 注册表重建（贡献 / 状态 / 服务变化后走这条）。
+/// 贡献投影 + 注册表重建（贡献 / 状态 / 服务变化后走这条）。
 pub fn refresh_projection(app: &mut App) -> Task<Message> {
     let contributions = app.plugins.contributions();
     app.plugin_contributions = contributions;
@@ -189,10 +189,10 @@ pub fn refresh_projection(app: &mut App) -> Task<Message> {
     refresh_frames(app)
 }
 
-/// 只重取已挂面的帧：帧提交不改注册表，帧率驱动下走这条，避免逐帧重建表。
-pub fn refresh_frames(app: &mut App) -> Task<Message> {
-    sync_settings_surfaces(app);
-    sync_table_surfaces(app);
+/// 已挂到界面上的插件面（键 = 插件 id + 面 id）。
+///
+/// 帧本身由宿主在重绘拍里同步取，这里只用来做「这一面还在不在」与界面图片的差分。
+pub fn mounted_surfaces(app: &App) -> Vec<(String, String)> {
     let mut surfaces: Vec<(String, String)> = app.plugin_surfaces.iter().cloned().collect();
     surfaces.extend(app.plugin_settings_surfaces.iter().cloned());
     surfaces.extend(app.plugin_table_surfaces.iter().cloned());
@@ -204,28 +204,27 @@ pub fn refresh_frames(app: &mut App) -> Task<Message> {
     if let Some(doc) = &app.doc_open {
         surfaces.push((doc.plugin_id.clone(), doc.surface_id.clone()));
     }
-    let mut frames = HashMap::new();
-    for (plugin_id, surface_id) in surfaces {
-        let key = (plugin_id.clone(), surface_id.clone());
-        let Some(frame) = app.plugins.surface_frame(&plugin_id, &surface_id) else {
-            continue;
-        };
-        frames.insert(key, frame);
-    }
-    app.plugin_frames = frames;
+    surfaces
+}
+
+/// 面挂载变化后的收尾：挂载差分、焦点槽有效性与界面图片按需载入。
+///
+/// 绘制是宿主驱动的，这里不缓存帧——用一个地方记「哪一面还在」，其余按需现取。
+pub fn refresh_frames(app: &mut App) -> Task<Message> {
+    sync_settings_surfaces(app);
+    sync_table_surfaces(app);
     sync_frame_focus(app);
-    // 这次投影已经覆盖到最新帧，心跳里不再重复补
-    let _ = app.plugins.take_observed_pending();
     ensure_images(app)
 }
 
-/// 帧焦点槽只对仍在投影里的帧有效：面不再有帧即释放并回发失焦。
+/// 帧焦点槽只对仍在界面上、且插件仍在供货的面有效：面撤掉或插件停止即释放并回发失焦
+/// （否则重启后的插件不必用户再点就重新拿到键盘，宿主快捷键一直让位）。
 fn sync_frame_focus(app: &mut App) {
     let Some(focus) = app.plugin_frame_focus.clone() else { return };
-    let mounted = app
-        .plugin_frames
-        .contains_key(&(focus.plugin_id.clone(), focus.surface_id.clone()));
-    if !mounted {
+    let key = (focus.plugin_id.clone(), focus.surface_id.clone());
+    let alive = mounted_surfaces(app).contains(&key)
+        && app.plugins.surface_frame(&focus.plugin_id, &focus.surface_id).is_some();
+    if !alive {
         app.plugin_frame_focus = None;
         notify_frame_focus(app, &focus.plugin_id, &focus.surface_id, false);
     }
@@ -292,7 +291,6 @@ pub fn frame_takes_keyboard(app: &App) -> bool {
     };
     app.plugins
         .surface_frame(&focus.plugin_id, &focus.surface_id)
-        .or_else(|| app.plugin_frames.get(&(focus.plugin_id.clone(), focus.surface_id.clone())).cloned())
         .is_some_and(|frame| frame.keys)
 }
 
@@ -338,10 +336,14 @@ fn safe_private_path(dir: &Path, rel: &str) -> Option<PathBuf> {
 /// 界面图片按需载入：缺句柄且未在途 / 未失败的来源发起读盘或下载任务。
 /// 句柄与笔记图片共用同一缓存（同来源即同字节，键不重叠）。
 pub(crate) fn ensure_images(app: &mut App) -> Task<Message> {
+    let surfaces = mounted_surfaces(app);
     let mut pending: Vec<(String, ImageSource)> = Vec::new();
-    for ((plugin_id, _), frame) in &app.plugin_frames {
+    for (plugin_id, surface_id) in surfaces {
+        let Some(frame) = app.plugins.surface_frame(&plugin_id, &surface_id) else {
+            continue;
+        };
         collect_draw_images(&frame.commands, &mut |source| {
-            if let Some(key) = image_key(app, plugin_id, source) {
+            if let Some(key) = image_key(app, &plugin_id, source) {
                 pending.push((key, source.clone()));
             }
         });
@@ -503,7 +505,7 @@ pub fn on_window_open(
         },
     );
     app.plugins.resolve_ui_call(request_id, Ok(()));
-    // 面就绪通知先于窗口可见（进程在跑时插件即刻可提交帧；帧投影由 ViewSubmitted 事件刷新）
+    // 面就绪通知先于窗口可见：窗口进入重绘拍后会同步调绘制入口，插件不必自己补帧
     app.plugins.notify_surface_attached(&plugin_id, &params.id, SurfaceKind::Window);
     let level = if always_on_top {
         iced::window::Level::AlwaysOnTop

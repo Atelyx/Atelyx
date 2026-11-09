@@ -1,5 +1,5 @@
-//! 插件面渲染适配：按 surfaceId 取整面帧交给 [`crate::plugin_frame`]，未提交 / 插件不可用时给
-//! 可读占位。面外壳内边距取自贡献声明（缺省贴边），本模块不参与布局与命中判定。
+//! 插件面渲染适配：把这一面最近一拍的帧交给 [`crate::plugin_frame`]，插件不可用时给可读占位。
+//! 面外壳内边距取自贡献声明（缺省贴边），本模块不参与布局与命中判定。
 
 use iced::{Element, Padding};
 
@@ -10,7 +10,7 @@ use crate::Message;
 use crate::plugin_actions::contribution;
 use crate::ui::controls;
 
-/// 插件面板内容：取投影缓存里的帧渲染；贡献缺失 / 帧未提交时给可读占位。
+/// 插件面板内容：交出这一面最近一拍的帧；贡献缺失时给可读占位。
 pub fn panel_view<'a>(app: &'a App, window: iced::window::Id, view: &str) -> Element<'a, Message> {
     surface_view(app, window, view, "插件面板")
 }
@@ -26,18 +26,18 @@ pub fn window_view<'a>(
     window: iced::window::Id,
     entry: &crate::plugin_actions::PluginWindowActive,
 ) -> Element<'a, Message> {
-    let key = (entry.plugin_id.clone(), entry.window_key.clone());
-    match app.plugin_frames.get(&key) {
-        Some(frame) => crate::plugin_frame::frame_view(
-            app,
-            window,
-            &entry.plugin_id,
-            &entry.window_key,
-            frame,
-            Padding::ZERO,
-        ),
-        None => placeholder("puzzle", "插件窗口", "等待插件提交界面（插件未运行或尚未就绪）"),
-    }
+    // 部件必须无条件构造：帧是它在宿主重绘拍里画出来的，拿帧当构造前提就永远等不到第一帧
+    let frame = app
+        .plugins
+        .surface_frame(&entry.plugin_id, &entry.window_key);
+    crate::plugin_frame::frame_view(
+        app,
+        window,
+        &entry.plugin_id,
+        &entry.window_key,
+        frame,
+        Padding::ZERO,
+    )
 }
 
 /// 面内容渲染（面板 / 表格视图共用）：按壳侧视图 kind 取插件贡献与帧。
@@ -57,18 +57,10 @@ pub(crate) fn surface_view<'a>(
             "插件不可用：未安装、未启用或已卸载",
         );
     };
-    let key = (plugin_id.to_string(), surface_id.to_string());
     let outer_pad = contribution.padding.map(padding_of).unwrap_or(Padding::ZERO);
-    match app.plugin_frames.get(&key) {
-        Some(frame) => {
-            crate::plugin_frame::frame_view(app, window, plugin_id, surface_id, frame, outer_pad)
-        }
-        None => {
-            let icon_key =
-                crate::plugin_actions::plugin_icon_key(contribution.icon.as_deref(), "puzzle");
-            placeholder(&icon_key, &contribution.label, "等待插件提交界面（插件未运行或尚未就绪）")
-        }
-    }
+    // 部件必须无条件构造：帧是它在宿主重绘拍里画出来的，拿帧当构造前提就永远等不到第一帧
+    let frame = app.plugins.surface_frame(plugin_id, surface_id);
+    crate::plugin_frame::frame_view(app, window, plugin_id, surface_id, frame, outer_pad)
 }
 
 /// 面外壳内边距 → iced 内边距（上 / 右 / 下 / 左）。

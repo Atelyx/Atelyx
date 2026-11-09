@@ -25,6 +25,7 @@ type TextParagraph = <iced::Renderer as iced::advanced::text::Renderer>::Paragra
 
 /// 文字缓存条数上限：一屏通常远小于此，超出只留本帧用到的。
 const MAX_TEXT_ENTRIES: usize = 1024;
+
 /// 文字缓存内容字节上限：超出的帧退回逐帧排版（与不缓存时的成本相同），
 /// 不拿插件正文去换宿主内存。
 const MAX_TEXT_BYTES: usize = 512 << 10;
@@ -134,7 +135,7 @@ struct TextEntry {
     last_used: u64,
 }
 
-/// 插件面的文字段落缓存：按内容 + 字号 + 字重 + 字族 + 最大宽度查段落。
+/// 插件面的文字段落缓存：按内容 + 字号 + 字重 + 字族 + 折行宽度查段落。
 /// 帧换了不清（改宽 / 滚动 / 悬停时文字内容通常不变），字体族变更时整体清空。
 #[derive(Default)]
 pub struct TextCache {
@@ -197,7 +198,9 @@ impl TextCache {
         max_width: Option<f32>,
     ) -> (&TextParagraph, f32) {
         let size_bits = size.to_bits();
-        let max_width_bits = max_width.map(f32::to_bits);
+        // 折行宽度落在固定档位上：拖动改宽时档内宽度复用同一份排版（量算侧用同一档位）
+        let layout_width = max_width.map(atelyx_core::plugin_runtime::layout_width);
+        let max_width_bits = layout_width.map(f32::to_bits);
         let hash = text_hash(content, size_bits, weight, family, max_width_bits);
         let frame = self.frame;
         let bucket = self.buckets.entry(hash).or_default();
@@ -211,7 +214,7 @@ impl TextCache {
         let index = match index {
             Some(index) => index,
             None => {
-                let paragraph = build_paragraph(content, size, weight, family, max_width);
+                let paragraph = build_paragraph(content, size, weight, family, layout_width);
                 let width = paragraph.min_bounds().width;
                 self.entries += 1;
                 self.bytes += content.len();
@@ -274,7 +277,8 @@ fn build_paragraph(
         content,
         bounds: Size::new(max_width.unwrap_or(f32::INFINITY), f32::INFINITY),
         size: Pixels(size),
-        line_height: LineHeight::Relative(1.2),
+        // 行高与文字量算同一口径：量出的占位就是画出的占位
+        line_height: LineHeight::default(),
         font: crate::plugin_theme::text_font(weight, family),
         align_x: Alignment::Default,
         align_y: Vertical::Top,

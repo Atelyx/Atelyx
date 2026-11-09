@@ -13,20 +13,36 @@ use atelyx_core::plugin_runtime::{
 use atelyx_core::vault::test_support::TempDir;
 
 
-/// 轮询等某插件的界面提交次数达到下限（超时即失败），返回实际次数。
-fn wait_submits(runtime: &PluginRuntime, id: &str, min: u64) -> u64 {
+/// 某插件已建立的会话次数：每次启动都在插件日志里留一条握手记录，重启即多一条。
+/// 这是「被宿主重载」的可观测信号（绘制是宿主驱动的，不能用来数重启）。
+fn sessions_of(runtime: &PluginRuntime, id: &str) -> u64 {
+    runtime
+        .log_tail(id)
+        .map(|log| log.matches("[握手] 完成").count() as u64)
+        .unwrap_or(0)
+}
+
+/// 轮询等某插件把贡献登记上（= 它的 on_ready 跑完了）。
+fn wait_ready(runtime: &PluginRuntime, id: &str) {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let submits = runtime
-            .list()
-            .into_iter()
-            .find(|p| p.id == id)
-            .map(|p| p.submits)
-            .unwrap_or(0);
-        if submits >= min {
-            return submits;
+        if runtime.contributions().iter().any(|c| c.plugin_id == id) {
+            return;
         }
-        assert!(Instant::now() < deadline, "等待 {id} 界面提交次数 ≥ {min} 超时，当前 {submits}");
+        assert!(Instant::now() < deadline, "等待 {id} 完成 on_ready 超时");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// 轮询等某插件的会话次数达到下限（超时即失败），返回实际次数。
+fn wait_sessions(runtime: &PluginRuntime, id: &str, min: u64) -> u64 {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let sessions = sessions_of(runtime, id);
+        if sessions >= min {
+            return sessions;
+        }
+        assert!(Instant::now() < deadline, "等待 {id} 会话次数 ≥ {min} 超时，当前 {sessions}");
         std::thread::sleep(Duration::from_millis(100));
     }
 }
@@ -44,7 +60,7 @@ fn wait_state_contains(path: &std::path::Path, needle: &str) {
     }
 }
 
-/// 装一个 stub、启用并等到首次界面提交。返回（临时目录守卫、运行时、插件 id、插件自持数据路径）。
+/// 装一个 stub、启用并等到会话建立。返回（临时目录守卫、运行时、插件 id、插件自持数据路径）。
 fn install_ready_stub(keep_mounted: bool) -> (TempDir, std::sync::Arc<PluginRuntime>, String, std::path::PathBuf) {
     let tmp = TempDir::new("plugin-host-vault-switch");
     let root = tmp.join("plugins");
@@ -55,7 +71,7 @@ fn install_ready_stub(keep_mounted: bool) -> (TempDir, std::sync::Arc<PluginRunt
     let id = runtime.install_dir(&src).expect("安装 stub 应成功").id;
     runtime.set_enabled(&id, true).expect("启用应成功");
     wait_status(&runtime, &id, |s| *s == PluginStatus::Running, Duration::from_secs(10));
-    wait_submits(&runtime, &id, 1);
+    wait_ready(&runtime, &id);
     let state = root.join(&id).join("data").join("state.json");
     (tmp, runtime, id, state)
 }
@@ -78,7 +94,7 @@ fn wait_status(runtime: &PluginRuntime, id: &str, want: fn(&PluginStatus) -> boo
     }
 }
 
-/// 安装即启用 → 握手完成并提交界面 → 停用结束会话 → 卸载移除。
+/// 安装即启用 → 握手完成 → 停用结束会话 → 卸载移除。
 #[test]
 fn install_enable_view_submit_disable_uninstall() {
     let tmp = TempDir::new("plugin-host-stub");
@@ -95,18 +111,10 @@ fn install_enable_view_submit_disable_uninstall() {
         PluginStatus::Stopped
     );
 
-    // 启用：握手 + on_ready（订阅 + 提交整面帧）跑通，状态运行中且已收到帧提交
+    // 启用：握手 + on_ready（注册贡献 + 订阅）跑通，状态运行中
     runtime.set_enabled(&id, true).expect("启用应成功");
     wait_status(&runtime, &id, |s| *s == PluginStatus::Running, Duration::from_secs(20));
-    let deadline = Instant::now() + Duration::from_secs(20);
-    loop {
-        let submits = runtime.list().into_iter().find(|p| p.id == id).unwrap().submits;
-        if submits >= 1 {
-            break;
-        }
-        assert!(Instant::now() < deadline, "等待 stub 首次界面提交超时");
-        std::thread::sleep(Duration::from_millis(100));
-    }
+    wait_sessions(&runtime, &id, 1);
 
     // 停用：会话收尾，状态回到未运行
     runtime.set_enabled(&id, false).expect("停用应成功");
@@ -152,11 +160,6 @@ fn crash_restarts_then_circuit_breaks() {
     );
 }
 
-/// 某插件的界面提交次数（重启即重新提交，是「被宿主重载」的可观测信号）。
-fn submits_of(runtime: &PluginRuntime, id: &str) -> u64 {
-    runtime.list().into_iter().find(|p| p.id == id).map(|p| p.submits).unwrap_or(0)
-}
-
 /// 切仓库容器：首次激活（启动自动进入）只广播不重载——插件刚由宿主启动、本就没有旧容器上下文；
 /// 首次激活与「同一容器再次进入」都不重载，真正换容器才重载未声明保活的插件。
 #[test]
@@ -165,17 +168,17 @@ fn vault_switch_reloads_plugin_without_keep_mounted() {
 
     runtime.on_vault_switch(VaultSwitchPayload::Local { root: "/vaults/first".into() });
     wait_state_contains(&state_path, "/vaults/first");
-    assert_eq!(submits_of(&runtime, &id), 1, "首次激活不该重载插件");
+    assert_eq!(sessions_of(&runtime, &id), 1, "首次激活不该重载插件");
 
     // 同一容器再次进入：容器身份未变，同样不动作
     runtime.on_vault_switch(VaultSwitchPayload::Local { root: "/vaults/first".into() });
     std::thread::sleep(Duration::from_secs(1));
-    assert_eq!(submits_of(&runtime, &id), 1, "同一容器重复进入不该重载插件");
+    assert_eq!(sessions_of(&runtime, &id), 1, "同一容器重复进入不该重载插件");
 
-    // 换容器：未声明保活的插件由宿主重载（停会话再起 → 重新提交整面帧），
+    // 换容器：未声明保活的插件由宿主重载（停会话再起 → 重新握手），
     // 新会话订阅后由宿主补发当前容器身份
     runtime.on_vault_switch(VaultSwitchPayload::Local { root: "/vaults/other".into() });
-    assert_eq!(wait_submits(&runtime, &id, 2), 2, "换容器应重载插件一次");
+    assert_eq!(wait_sessions(&runtime, &id, 2), 2, "换容器应重载插件一次");
     wait_state_contains(&state_path, "/vaults/other");
 }
 
@@ -192,7 +195,7 @@ fn vault_switch_keeps_mounted_subscriber_informed() {
     wait_state_contains(&state_path, "/vaults/other");
 
     // 保活即不重载：界面提交次数仍是 on_ready 那一次
-    assert_eq!(submits_of(&runtime, &id), 1, "声明保活的插件不应被重载");
+    assert_eq!(sessions_of(&runtime, &id), 1, "声明保活的插件不应被重载");
 }
 
 /// 会话变更广播：订阅了 ai:chat.changed 的运行中插件收到载荷并写进自持数据。

@@ -3,6 +3,8 @@
 use serde_json::Value;
 
 use crate::context::Context;
+use crate::frame_ui::{DrawFrame, FrameUi};
+use crate::in_process::Surfaces;
 use crate::protocol::event::PublishParams;
 use crate::protocol::frame::{FrameInputParams, FrameTickParams};
 use crate::protocol::method::{
@@ -21,10 +23,16 @@ use crate::protocol::service::{self, ChangedParams, HostCallParams};
 /// 「尚未 ready」的情形。
 #[async_trait::async_trait]
 pub trait PluginHandler: Send + Sync + 'static {
-    /// 握手完成后调用一次：注册贡献点、提交首帧、声明订阅都应在这里做。
+    /// 握手完成后调用一次：注册贡献点、声明订阅都应在这里做。
     async fn on_ready(&self, ctx: &Context);
 
-    /// 面重新进入布局（面板被添加 / 插件重启后重发）：补交该面当前的一帧。
+    /// 宿主重绘拍里同步画一面：只读插件状态，经 `frame` 推这一拍的指令、命中区与输入声明。
+    ///
+    /// 尺寸由 `frame` 给出，插件不必另存；绘制期间不得调用 [`Context`] 的任何能力面
+    /// （那会重入宿主，本次绘制作废并记日志）。要重画就改状态后调 [`Context::request_redraw`]。
+    fn on_draw(&self, _frame: &mut DrawFrame<'_, '_>) {}
+
+    /// 面重新进入布局（面板被添加 / 插件重启后重发）：按新的尺寸重画即可，不需要补交帧。
     async fn on_surface_attached(&self, _ctx: &Context, _params: SurfaceAttachedParams) {}
     async fn on_surface_detached(&self, _ctx: &Context, _params: SurfaceDetachedParams) {}
     async fn on_host_event(&self, _ctx: &Context, _params: PublishParams) {}
@@ -41,10 +49,10 @@ pub trait PluginHandler: Send + Sync + 'static {
     async fn on_collab_message(&self, _ctx: &Context, _params: CollabMessageParams) {}
     /// 对话事件流（`host:ai.chat.event`）：快照节流拍 + 终态 + 命名结果。
     async fn on_chat_event(&self, _ctx: &Context, _params: ChatEventParams) {}
-    /// 整面帧的原始输入（`host:frame.input`）：指针 / 滚轮 / 键盘 / 输入法 / 焦点 / 尺寸。
-    /// 状态变化后由插件自行 `submit_frame`。
-    async fn on_frame_input(&self, _ctx: &Context, _params: FrameInputParams) {}
-    /// 整面帧的帧拍（`host:frame.tick`）：帧声明了 `fps` 才有，两拍之间应提交新内容。
+    /// 整面帧的原始输入（`host:frame.input`）：指针 / 滚轮 / 键盘 / 输入法 / 焦点。
+    /// `ui` 是这一面的控件层状态；应用完事件后改自己的状态并调 [`Context::request_redraw`]。
+    async fn on_frame_input(&self, _ctx: &Context, _params: FrameInputParams, _ui: &mut FrameUi) {}
+    /// 整面帧的帧拍（`host:frame.tick`）：面声明了 `fps` 才有，在回调里推进动画后请求重绘。
     async fn on_frame_tick(&self, _ctx: &Context, _params: FrameTickParams) {}
 
     /// 工具调用（`host:ai.toolCall`）：须用同一 `callId` 经 [`Context::tool_result`] 回报结果。
@@ -78,9 +86,10 @@ pub trait PluginHandler: Send + Sync + 'static {
 }
 
 /// 按方法名分派一条宿主通知。params 解析失败按未知通知处理并注明原因（不静默丢弃）。
-pub(crate) async fn dispatch<H: PluginHandler + ?Sized>(
-    handler: &H,
+pub(crate) async fn dispatch(
+    handler: &dyn PluginHandler,
     ctx: &Context,
+    surfaces: &Surfaces,
     method: &str,
     params: Value,
 ) {
@@ -109,7 +118,16 @@ pub(crate) async fn dispatch<H: PluginHandler + ?Sized>(
         m::doc::HOST_CLOSE => typed!(DocCloseParams, |p| handler.on_doc_close(ctx, p)),
         m::window::HOST_CLOSED => typed!(WindowClosedParams, |p| handler.on_window_closed(ctx, p)),
         m::window::HOST_HIDDEN => typed!(WindowIdParams, |p| handler.on_window_hidden(ctx, p)),
-        m::frame::HOST_INPUT => typed!(FrameInputParams, |p| handler.on_frame_input(ctx, p)),
+        m::frame::HOST_INPUT => match serde_json::from_value::<FrameInputParams>(params) {
+            Ok(p) => {
+                let mut ui = surfaces.lock(&p.surface_id).await;
+                handler.on_frame_input(ctx, p, &mut ui).await
+            }
+            Err(e) => {
+                let note = format!("params 不可解析：{e}");
+                handler.on_unknown_notification(ctx, method, Value::String(note)).await
+            }
+        },
         m::frame::HOST_TICK => typed!(FrameTickParams, |p| handler.on_frame_tick(ctx, p)),
         m::tray::HOST_CLICK => typed!(TrayClickParams, |p| handler.on_tray_click(ctx, p)),
         m::collab::HOST_MESSAGE => typed!(CollabMessageParams, |p| handler.on_collab_message(ctx, p)),
@@ -134,7 +152,7 @@ mod tests {
     #[async_trait::async_trait]
     impl PluginHandler for InputWatcher {
         async fn on_ready(&self, _ctx: &Context) {}
-        async fn on_frame_input(&self, _ctx: &Context, params: FrameInputParams) {
+        async fn on_frame_input(&self, _ctx: &Context, params: FrameInputParams, _ui: &mut FrameUi) {
             assert_eq!(params.surface_id, "panel");
             let crate::protocol::frame::FrameInput::PointerDown { x, hit, .. } = params.input else {
                 panic!("应为指针按下");
@@ -160,10 +178,12 @@ mod tests {
     async fn frame_input_maps_to_its_own_callback() {
         let (tx, _rx) = mpsc::channel(8);
         let ctx = Context::new(tx);
+        let surfaces = Surfaces::default();
         let watcher = InputWatcher(std::sync::Mutex::new(Vec::new()));
         dispatch(
             &watcher,
             &ctx,
+            &surfaces,
             crate::protocol::method::frame::HOST_INPUT,
             serde_json::json!({
                 "surfaceId": "panel",
@@ -178,10 +198,12 @@ mod tests {
     async fn frame_tick_maps_to_its_own_callback() {
         let (tx, _rx) = mpsc::channel(8);
         let ctx = Context::new(tx);
+        let surfaces = Surfaces::default();
         let watcher = TickWatcher(std::sync::atomic::AtomicUsize::new(0));
         dispatch(
             &watcher,
             &ctx,
+            &surfaces,
             crate::protocol::method::frame::HOST_TICK,
             serde_json::json!({ "surfaceId": "panel", "frame": 3, "deltaMs": 16 }),
         )
@@ -203,10 +225,12 @@ mod tests {
 
         let (tx, _rx) = mpsc::channel(8);
         let ctx = Context::new(tx);
+        let surfaces = Surfaces::default();
         let recorder = Recorder(std::sync::Mutex::new(Vec::new()));
         dispatch(
             &recorder,
             &ctx,
+            &surfaces,
             crate::protocol::method::frame::HOST_INPUT,
             serde_json::json!({ "nope": 1 }),
         )

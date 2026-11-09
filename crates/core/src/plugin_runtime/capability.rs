@@ -120,8 +120,7 @@ mod tests {
         // 运行时时序方法不占权限
         assert_eq!(permission_for("initialize"), None);
         assert_eq!(permission_for(method::view::REGISTER), None);
-        assert_eq!(permission_for(method::frame::SUBMIT_SHARED), None, "整面帧是界面通道，不占权限声明");
-        assert_eq!(permission_for(method::frame::REGION), None, "帧区域扩容是界面通道，不占权限声明");
+        assert_eq!(permission_for(method::frame::REQUEST_REDRAW), None, "重绘请求是界面通道，不占权限声明");
         // 纯文本变换与能力总线入口不占权限类（调用照常执行，审计按各自归类记录）
         assert_eq!(permission_for(method::markdown::PARSE), None);
         for name in [

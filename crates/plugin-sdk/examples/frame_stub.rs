@@ -1,21 +1,21 @@
-//! 端到端测试夹具：注册面板贡献并提交整面帧（计数按钮 + 文本输入区 + 滚轮视口），
-//! 全部原始输入经 `host:frame.input` 驱动整帧重发——仅覆盖面帧通路，非示例插件。
+//! 端到端测试夹具：注册面板贡献，在宿主重绘拍里同步画出这一面（计数按钮 + 文本输入区 + 滚轮视口）。
+//! 全部原始输入经 `host:frame.input` 到达，改完状态请求重绘——仅覆盖面帧通路，非示例插件。
 
 use std::sync::{Arc, Mutex};
 
 use atelyx_plugin_sdk::frame_builders::{rect, text as draw_text, token};
-use atelyx_plugin_sdk::frame_builders::{fps, frame, hit, ime, ime_rect, keys};
-use atelyx_plugin_sdk::protocol::paint::DrawCommand;
-use atelyx_plugin_sdk::protocol::frame::{FrameInput, FrameInputParams, FrameTickParams};
+use atelyx_plugin_sdk::protocol::frame::{
+    FrameInput, FrameInputParams, FrameRect, FrameTickParams, HitRegion,
+};
 use atelyx_plugin_sdk::protocol::method::ContributionSlot;
 use atelyx_plugin_sdk::protocol::frame::Key;
-use atelyx_plugin_sdk::protocol::paint::ColorToken;
-use atelyx_plugin_sdk::{Context, PluginHandler};
+use atelyx_plugin_sdk::protocol::paint::{ColorToken, DrawCommand};
+use atelyx_plugin_sdk::{Context, DrawFrame, FrameUi, PluginHandler};
 
 /// 面板贡献 id，同时是该面挂载后的 surfaceId。
 const PANEL: &str = "frame";
 
-/// 夹具自持状态：任一输入都整帧重发，帧即状态的投影。
+/// 夹具自持状态：绘制永远是它在这一拍上的投影。
 struct Model {
     count: i64,
     typed: String,
@@ -23,8 +23,6 @@ struct Model {
     last_key: String,
     offset: f32,
     tick: u64,
-    size: (f32, f32),
-    resizes: u64,
     focused: bool,
 }
 
@@ -37,8 +35,6 @@ impl Default for Model {
             last_key: "无".into(),
             offset: 0.0,
             tick: 0,
-            size: (320.0, 280.0),
-            resizes: 0,
             focused: false,
         }
     }
@@ -52,8 +48,7 @@ fn key_label(key: &Key) -> String {
 }
 
 impl Model {
-    fn commands(&self) -> Vec<DrawCommand> {
-        let (w, h) = self.size;
+    fn commands(&self, w: f32, h: f32) -> Vec<DrawCommand> {
         let text = token(ColorToken::Text);
         let muted = token(ColorToken::TextMuted);
         let field = token(ColorToken::SurfaceSunken);
@@ -65,7 +60,6 @@ impl Model {
             draw_text(12.0, 52.0, format!("组合：{}", self.composing), 13.0, muted.clone()),
             draw_text(12.0, 72.0, format!("键：{}", self.last_key), 13.0, muted.clone()),
             draw_text(12.0, 92.0, format!("尺寸：{w:.0}x{h:.0}"), 13.0, muted.clone()),
-            draw_text(12.0, 108.0, format!("尺寸变更：{}", self.resizes), 13.0, muted.clone()),
             draw_text(12.0, 128.0, format!("滚动：{:.0}", self.offset), 13.0, muted.clone()),
             draw_text(12.0, 148.0, format!("帧：{}", self.tick), 13.0, muted.clone()),
             draw_text(12.0, 168.0, format!("焦点：{}", self.focused), 13.0, muted),
@@ -74,13 +68,7 @@ impl Model {
             rect(112.0, 192.0, 70.0, 28.0, Some(token(ColorToken::SurfaceMuted)), Some(border.clone())),
             draw_text(128.0, 200.0, "清空", 13.0, text.clone()),
             rect(12.0, 230.0, w - 24.0, 30.0, Some(field), Some(border)),
-            draw_text(
-                18.0,
-                238.0,
-                format!("{}{}", self.typed, self.composing),
-                13.0,
-                text,
-            ),
+            draw_text(18.0, 238.0, format!("{}{}", self.typed, self.composing), 13.0, text),
             // 视口：一条随滚轮下移的标记线
             rect(12.0, 268.0, w - 24.0, 4.0, Some(token(ColorToken::TextMuted)), None),
         ];
@@ -95,16 +83,13 @@ impl Model {
         out
     }
 
-    fn frame(&self) -> atelyx_plugin_sdk::protocol::frame::SurfaceFrame {
-        let (w, _) = self.size;
-        let hits = vec![
-            hit("surface", 0.0, 0.0, w, self.size.1),
-            hit("inc", 12.0, 192.0, 90.0, 28.0),
-            hit("clear", 112.0, 192.0, 70.0, 28.0),
-            hit("field", 12.0, 230.0, w - 24.0, 30.0),
-        ];
-        let base = frame(self.commands(), hits);
-        fps(ime(keys(base), ime_rect(18.0, 238.0, 2.0, 18.0)), 4)
+    fn hits(&self, w: f32, h: f32) -> Vec<HitRegion> {
+        vec![
+            HitRegion { id: "surface".into(), x: 0.0, y: 0.0, w, h, cursor: None },
+            HitRegion { id: "inc".into(), x: 12.0, y: 192.0, w: 90.0, h: 28.0, cursor: None },
+            HitRegion { id: "clear".into(), x: 112.0, y: 192.0, w: 70.0, h: 28.0, cursor: None },
+            HitRegion { id: "field".into(), x: 12.0, y: 230.0, w: w - 24.0, h: 30.0, cursor: None },
+        ]
     }
 }
 
@@ -113,15 +98,11 @@ struct FrameStub {
 }
 
 impl FrameStub {
-    /// 改状态后整帧重发：输入回调按到达顺序执行，提交即在回调内串行完成。
+    /// 改状态后请求重绘：下一次绘制就是新状态的投影。
     async fn apply(&self, ctx: &Context, update: impl FnOnce(&mut Model)) {
-        let frame = {
-            let mut model = self.model.lock().unwrap();
-            update(&mut model);
-            model.frame()
-        };
-        if let Err(e) = ctx.submit_frame(PANEL, frame).await {
-            eprintln!("提交面帧失败：{e}");
+        update(&mut self.model.lock().unwrap());
+        if let Err(e) = ctx.request_redraw().await {
+            eprintln!("请求重绘失败：{e}");
         }
     }
 }
@@ -135,10 +116,27 @@ impl PluginHandler for FrameStub {
         {
             eprintln!("注册面板贡献失败：{e}");
         }
-        self.apply(ctx, |_| {}).await;
     }
 
-    async fn on_frame_input(&self, ctx: &Context, params: FrameInputParams) {
+    fn on_draw(&self, frame: &mut DrawFrame<'_, '_>) {
+        let (w, h) = frame.size();
+        let model = self.model.lock().unwrap();
+        for command in model.commands(w, h) {
+            frame.surface().command(&command);
+        }
+        for hit in model.hits(w, h) {
+            frame.surface().hit(&hit);
+        }
+        // 输入法光标随文本区；有可聚焦输入区即收键盘；帧拍 4 Hz
+        frame.set_fps(Some(4));
+        frame.surface().policy(
+            Some(FrameRect { x: 18.0, y: 238.0, w: 2.0, h: 18.0 }),
+            true,
+            Some(4),
+        );
+    }
+
+    async fn on_frame_input(&self, ctx: &Context, params: FrameInputParams, _ui: &mut FrameUi) {
         if params.surface_id != PANEL {
             return;
         }
@@ -152,16 +150,22 @@ impl PluginHandler for FrameStub {
                     })
                     .await
                 }
+                "field" => self.apply(ctx, |m| m.focused = true).await,
                 _ => {}
             },
             FrameInput::Wheel { delta_y, .. } => {
+                self.apply(ctx, |m| m.offset += delta_y).await
+            }
+            FrameInput::Key { key, action: _, modifiers: _, text } => {
+                let label = key_label(&key);
+                let typed = text.unwrap_or_default();
                 self.apply(ctx, |m| {
-                    m.offset = (m.offset + delta_y * 8.0).clamp(0.0, 80.0);
+                    m.last_key = label;
+                    if !typed.is_empty() {
+                        m.typed.push_str(&typed);
+                    }
                 })
                 .await
-            }
-            FrameInput::Key { key, .. } => {
-                self.apply(ctx, |m| m.last_key = key_label(&key)).await
             }
             FrameInput::Text { text, composing, .. } => {
                 self.apply(ctx, |m| {
@@ -174,32 +178,17 @@ impl PluginHandler for FrameStub {
                 })
                 .await
             }
-            FrameInput::Focus { focused } => {
-                self.apply(ctx, |m| {
-                    m.focused = focused;
-                    m.last_key = format!("focus:{focused}");
-                })
-                .await
-            }
-            FrameInput::Resize { width, height } => {
-                self.apply(ctx, |m| {
-                    m.size = (width, height);
-                    m.resizes += 1;
-                })
-                .await
-            }
+            FrameInput::Focus { focused } => self.apply(ctx, |m| m.focused = focused).await,
             _ => {}
         }
     }
 
-    async fn on_frame_tick(&self, ctx: &Context, params: FrameTickParams) {
-        if params.surface_id != PANEL {
-            return;
-        }
-        self.apply(ctx, |m| m.tick = params.frame).await;
+    async fn on_frame_tick(&self, ctx: &Context, _params: FrameTickParams) {
+        self.apply(ctx, |m| m.tick += 1).await;
     }
 }
 
+// 夹具以 cdylib 交付：宿主按 C ABI 符号建会话，与真实插件同一条通路
 atelyx_plugin_sdk::export_in_process_plugin!(FrameStub {
-    model: Arc::new(Mutex::new(Model::default())),
+    model: Arc::new(Mutex::new(Model::default()))
 });

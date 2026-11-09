@@ -1,9 +1,8 @@
-//! 插件承载：宿主经 C ABI 调用本模块投递 NDJSON 信封，握手 / 整面帧 / 能力面都走同一条协议通路。
-//! 插件 crate 声明 `crate-type = ["cdylib"]` 后用 `export_in_process_plugin` 导出三个符号，
-//! 其余代码与进程插件别无二致（实现 `PluginHandler`）。
-//!
-//! 会话跑在插件自己的 tokio 运行时线程上：宿主线程只入队，绝不等待插件执行。
+//! 插件承载：宿主经 C ABI 投递 NDJSON 信封（控制通道），并在自己的重绘拍里同步调绘制入口。
+//! `export_in_process_plugin!` 导出 create / send / draw / destroy 四个符号；会话跑在插件自己的
+//! tokio 运行时上（宿主线程只入队），绘制是唯一例外——它在宿主重绘线程上同步执行。
 
+use std::collections::HashMap;
 use std::ffi::{c_void, CStr};
 use std::pin::Pin;
 use std::sync::mpsc::{self, Receiver};
@@ -15,9 +14,13 @@ use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::mpsc as tokio_mpsc;
 
+use crate::abi;
 use crate::connection::Connection;
+use crate::context::DrawGuard;
+use crate::frame_ui::{DrawFrame, FrameUi};
 use crate::handler::PluginHandler;
 use crate::protocol::handshake::PluginInfo;
+use crate::surface::AbiSurface;
 
 /// 会话线程自行收尾的等待上限：超时即视为仍在库内运行，动态库不能卸载。
 const JOIN_TIMEOUT: Duration = Duration::from_secs(3);
@@ -31,6 +34,38 @@ struct Session {
     /// 会话线程 id：宿主在插件线程上调用 destroy 时不能自己等自己。
     thread_id: Mutex<Option<ThreadId>>,
     thread: Mutex<Option<JoinHandle<()>>>,
+    /// 处理器与各面控件层：绘制入口与输入回调共用（处理器按 `&self` 调）。
+    handler: Arc<dyn PluginHandler>,
+    surfaces: Surfaces,
+}
+
+/// 各面的控件层状态。
+///
+/// 输入回调在插件线程上等得到它；绘制在宿主重绘线程上只做非阻塞获取——拿不到（该面正被
+/// 输入回调占用）就跳过这一拍，绝不让宿主重绘线程等插件。
+#[derive(Clone, Default)]
+pub(crate) struct Surfaces {
+    slots: Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<FrameUi>>>>>,
+}
+
+impl Surfaces {
+    fn slot(&self, surface_id: &str) -> Arc<tokio::sync::Mutex<FrameUi>> {
+        let mut slots = self.slots.lock().unwrap();
+        slots.entry(surface_id.to_string()).or_default().clone()
+    }
+
+    /// 输入回调：等该面的控件层空出来（插件线程上等待可接受）。
+    pub(crate) async fn lock(&self, surface_id: &str) -> tokio::sync::OwnedMutexGuard<FrameUi> {
+        self.slot(surface_id).lock_owned().await
+    }
+
+    /// 绘制：拿不到就返回 `None`，由宿主沿用上一拍。
+    pub(crate) fn try_lock(
+        &self,
+        surface_id: &str,
+    ) -> Option<tokio::sync::OwnedMutexGuard<FrameUi>> {
+        self.slot(surface_id).try_lock_owned().ok()
+    }
 }
 
 /// 宿主导出的函数表在插件侧的副本（回调指针在会话期间恒定）。
@@ -153,6 +188,10 @@ pub unsafe fn serve<H: PluginHandler>(
     let (done_tx, done_rx) = mpsc::channel::<()>();
     let session_thread = Arc::new(Mutex::new(None::<ThreadId>));
     let thread_marker = session_thread.clone();
+    let handler: Arc<dyn PluginHandler> = Arc::new(handler);
+    let session_handler = handler.clone();
+    let surfaces = Surfaces::default();
+    let session_surfaces = surfaces.clone();
 
     let thread = thread::Builder::new()
         .name(format!("atelyx-plugin-{}", plugin.id))
@@ -160,7 +199,7 @@ pub unsafe fn serve<H: PluginHandler>(
             *thread_marker.lock().unwrap() = Some(thread::current().id());
             // panic 在插件侧就收住：插件与宿主同地址空间，逃出去的 panic 会把整个应用带走
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                run_session(link, plugin, handler, in_rx, out_tx, out_rx)
+                run_session(link, plugin, session_handler, session_surfaces, in_rx, out_tx, out_rx)
             }))
             .unwrap_or_else(|payload| Err(format!("插件会话 panic：{}", panic_message(&payload))));
             let (code, reason) = match outcome {
@@ -187,6 +226,8 @@ pub unsafe fn serve<H: PluginHandler>(
         done: done_rx,
         thread_id: Mutex::new(*session_thread.lock().unwrap()),
         thread: Mutex::new(Some(thread)),
+        handler,
+        surfaces,
     });
     Box::into_raw(session) as crate::abi::PluginHandle
 }
@@ -241,11 +282,71 @@ pub unsafe fn shutdown(handle: crate::abi::PluginHandle) -> u32 {
     crate::abi::DESTROY_JOINED
 }
 
+
+/// 宿主重绘拍里同步画一面：取该面的控件层状态、调插件的 `on_draw`，结果由宿主当场收下。
+///
+/// 返回值：`DRAW_OK` 画成；`DRAW_BUSY` 该面正被输入回调占用（宿主沿用上一拍）；
+/// `DRAW_REJECTED` draw 里调了宿主能力面；`DRAW_FAILED` 插件 panic 或入参不可读。
+///
+/// # Safety
+/// `handle` 须是 `serve` 返回且尚未 `shutdown` 的句柄；`target` / `sink` 由宿主在调用期间持有。
+pub unsafe fn draw_surface(
+    handle: crate::abi::PluginHandle,
+    target: *const abi::DrawTarget,
+    sink: *const abi::DrawSink,
+) -> u32 {
+    if handle.is_null() || target.is_null() || sink.is_null() {
+        return abi::DRAW_FAILED;
+    }
+    let session = &*(handle as *const Session);
+    let target = &*target;
+    let sink = &*sink;
+    let id = std::slice::from_raw_parts(target.surface_id, target.surface_id_len);
+    let Ok(surface_id) = std::str::from_utf8(id) else {
+        return abi::DRAW_FAILED;
+    };
+    let Some(mut ui) = session.surfaces.try_lock(surface_id) else {
+        return abi::DRAW_BUSY;
+    };
+    let surface = AbiSurface::new(sink, surface_id, target.width, target.height);
+    let guard = DrawGuard::enter();
+    // panic 不能越过 FFI 边界：收住后按绘制失败上报，宿主沿用上一拍
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut frame = DrawFrame::new(&surface, &mut ui);
+        session.handler.on_draw(&mut frame);
+        frame.failed()
+    }));
+    match outcome {
+        Ok(false) => {}
+        Ok(true) => {
+            // 控件层校验失败：插件可能忽略了 build 的错误，这里替它留痕
+            log_draw(sink, &format!("面 {surface_id} 绘制失败：帧不合法"));
+            return abi::DRAW_FAILED;
+        }
+        Err(payload) => {
+            log_draw(sink, &format!("面 {surface_id} 绘制 panic：{}", panic_message(&payload)));
+            return abi::DRAW_FAILED;
+        }
+    }
+    if guard.violated() {
+        return abi::DRAW_REJECTED;
+    }
+    abi::DRAW_OK
+}
+
+/// 绘制期的一条诊断：走宿主的绘制函数表落插件日志（发布版没有 stderr 可看）。
+fn log_draw(sink: &abi::DrawSink, text: &str) {
+    if let Some(log) = sink.log {
+        unsafe { log(sink.ctx, abi::LOG_ERROR, text.as_ptr(), text.len()) };
+    }
+}
+
 /// 会话主体：跑在本插件专用的 tokio 运行时上，握手与全部交互交给 `Connection`。
-fn run_session<H: PluginHandler>(
+fn run_session(
     link: HostLink,
     plugin: PluginInfo,
-    handler: H,
+    handler: Arc<dyn PluginHandler>,
+    surfaces: Surfaces,
     in_rx: tokio_mpsc::UnboundedReceiver<Vec<u8>>,
     out_tx: tokio_mpsc::UnboundedSender<Vec<u8>>,
     mut out_rx: tokio_mpsc::UnboundedReceiver<Vec<u8>>,
@@ -267,10 +368,9 @@ fn run_session<H: PluginHandler>(
                 }
             }
         });
-        let handler = Arc::new(handler);
         let input = Incoming { rx: in_rx, buf: Vec::new(), pos: 0 };
         let output = Outgoing { tx: out_tx };
-        let (connection, ctx) = Connection::bind(input, output, plugin, handler.clone())
+        let (connection, ctx) = Connection::bind(input, output, plugin, handler.clone(), surfaces)
             .await
             .map_err(|e| e.to_string())?;
         handler.on_ready(&ctx).await;
@@ -301,7 +401,7 @@ fn cstr(ptr: *const std::ffi::c_char) -> Option<String> {
     unsafe { CStr::from_ptr(ptr) }.to_str().ok().map(str::to_string)
 }
 
-/// 导出一个插件：三个符号一次生成，插件 crate 只需给出处理器构造表达式。
+/// 导出一个插件：四个符号一次生成，插件 crate 只需给出处理器构造表达式。
 /// 插件 crate 须声明 `crate-type = ["cdylib"]`。
 #[macro_export]
 macro_rules! export_in_process_plugin {
@@ -323,10 +423,42 @@ macro_rules! export_in_process_plugin {
         }
 
         #[no_mangle]
+        pub unsafe extern "C" fn atelyx_plugin_draw(
+            handle: $crate::abi::PluginHandle,
+            target: *const $crate::abi::DrawTarget,
+            sink: *const $crate::abi::DrawSink,
+        ) -> u32 {
+            $crate::in_process::draw_surface(handle, target, sink)
+        }
+
+        #[no_mangle]
         pub unsafe extern "C" fn atelyx_plugin_destroy(
             handle: $crate::abi::PluginHandle,
         ) -> u32 {
             $crate::in_process::shutdown(handle)
         }
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 输入回调占着该面时，绘制必须当场放弃而不是排队等——等就等于把宿主重绘线程挂在插件上。
+    #[tokio::test]
+    async fn draw_gives_up_while_the_surface_is_held() {
+        let surfaces = Surfaces::default();
+        let held = surfaces.lock("panel").await;
+        assert!(surfaces.try_lock("panel").is_none(), "被占用时应放弃这一拍");
+        drop(held);
+        assert!(surfaces.try_lock("panel").is_some(), "空下来即恢复");
+    }
+
+    /// 面各自独立：一个面被占用不影响另一个面这一拍的绘制。
+    #[tokio::test]
+    async fn surfaces_are_independent() {
+        let surfaces = Surfaces::default();
+        let _held = surfaces.lock("panel").await;
+        assert!(surfaces.try_lock("inspector").is_some());
+    }
 }

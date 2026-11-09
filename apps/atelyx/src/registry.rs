@@ -258,7 +258,7 @@ mod tests {
             status: PluginStatus::Running,
             load_error: None,
             undeclared: 0,
-            submits: 0,
+            draws: 0,
             source: None,
         }
     }

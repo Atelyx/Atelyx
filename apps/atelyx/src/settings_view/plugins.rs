@@ -2134,7 +2134,7 @@ pub fn on_event(app: &mut App, event: PluginEvent) {
             }
         }
         // 界面 / 贡献 / AI 工具 / 服务目录 / 默认布局声明由壳的投影与布局接线统一处理（见 lib.rs 的事件分支）
-        PluginEvent::ViewSubmitted { .. }
+        PluginEvent::RedrawRequested { .. }
         | PluginEvent::ContributionsChanged { .. }
         | PluginEvent::AiToolsChanged { .. }
         | PluginEvent::ServiceChanged { .. }
@@ -2690,7 +2690,7 @@ fn detail_overview(app: &App, summary: &PluginSummary) -> Element<'static, Messa
     let mut rows: Vec<Element<'static, Message>> = vec![
         meta_row("版本", summary.version.clone()),
         meta_row("协议", format!("apiVersion {}", summary.api_version)),
-        meta_row("界面提交", format!("{} 次", summary.submits)),
+        meta_row("界面绘制", format!("{} 次", summary.draws)),
         meta_row("未声明调用", format!("{} 条", summary.undeclared)),
     ];
     let mut flags: Vec<&str> = Vec::new();

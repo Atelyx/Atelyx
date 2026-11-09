@@ -5,8 +5,6 @@
 pub mod envelope;
 pub mod event;
 pub mod frame;
-pub mod frame_codec;
-pub mod frame_region;
 pub mod handshake;
 pub mod layout;
 pub mod manifest;

@@ -167,7 +167,7 @@ pub mod http {
 
 pub mod doc {
     /// 用户打开了插件注册的领域文档类型文件（通知）。`surfaceId` 为宿主分配的实例面标识，
-    /// 插件据此以 `frame.submitShared` 提交该文档实例的界面。
+    /// 插件据此作为绘制入口的 `surfaceId`，给该文档实例画界面。
     pub const HOST_OPEN: &str = "host:doc.open";
     /// 文档实例已关闭 / 已切换走（通知）。插件此后不得再向该 surfaceId 提交帧。
     pub const HOST_CLOSE: &str = "host:doc.close";
@@ -175,14 +175,12 @@ pub mod doc {
 
 /// 面帧：整个面交给插件自绘，一帧即当前完整界面。
 pub mod frame {
-    /// 插件提交一份整面帧：内容写在共享内存槽里，params 只带槽位定位与校验信息。整帧替换。
-    pub const SUBMIT_SHARED: &str = "frame.submitShared";
-    /// 帧超出当前槽容量时请求宿主换一份更大的共享内存区域（应答 = 新区域描述）。
-    pub const REGION: &str = "frame.region";
-    /// 宿主回发原始输入（通知）：指针 / 滚轮 / 按键 / 输入法 / 焦点 / 尺寸。
+    /// 宿主回发原始输入（通知）：指针 / 滚轮 / 按键 / 输入法 / 焦点。
     pub const HOST_INPUT: &str = "host:frame.input";
-    /// 宿主按面声明的帧率发帧拍（通知）：插件收到后提交该帧的内容。
+    /// 宿主按面声明的帧率发帧拍（通知）：插件在回调里推进状态并请求重绘。
     pub const HOST_TICK: &str = "host:frame.tick";
+    /// 插件 → 宿主：状态已变，宿主在下一拍重绘本插件的面（无参数，回执只表示已受理）。
+    pub const REQUEST_REDRAW: &str = "frame.requestRedraw";
 }
 
 /// 纯查询：不改界面、不产生帧。
@@ -276,13 +274,6 @@ pub enum SurfaceKind {
 #[serde(rename_all = "camelCase")]
 pub struct SurfaceDetachedParams {
     pub surface_id: String,
-}
-
-/// 界面提交类方法的回执（`frame.submitShared`）：`applied` = 宿主已接受并生效。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SubmitResult {
-    pub applied: bool,
 }
 
 /// 贡献点位置（封闭枚举；扩容随协议升版）。
@@ -561,6 +552,33 @@ pub struct ThemeColors {
     pub border: String,
     pub border_strong: String,
     pub transparent: String,
+}
+
+impl ThemeColors {
+    /// 按 token 取色（十六进制串）。
+    pub fn get(&self, token: crate::paint::ColorToken) -> &str {
+        use crate::paint::ColorToken;
+        match token {
+            ColorToken::Text => &self.text,
+            ColorToken::TextSecondary => &self.text_secondary,
+            ColorToken::TextMuted => &self.text_muted,
+            ColorToken::Accent => &self.accent,
+            ColorToken::AccentSoft => &self.accent_soft,
+            ColorToken::Danger => &self.danger,
+            ColorToken::DangerSoft => &self.danger_soft,
+            ColorToken::Success => &self.success,
+            ColorToken::SuccessSoft => &self.success_soft,
+            ColorToken::Warning => &self.warning,
+            ColorToken::WarningSoft => &self.warning_soft,
+            ColorToken::Surface => &self.surface,
+            ColorToken::SurfaceMuted => &self.surface_muted,
+            ColorToken::SurfaceSunken => &self.surface_sunken,
+            ColorToken::Hover => &self.hover,
+            ColorToken::Border => &self.border,
+            ColorToken::BorderStrong => &self.border_strong,
+            ColorToken::Transparent => &self.transparent,
+        }
+    }
 }
 
 /// 字号档（绝对逻辑像素）：`micro` / `caption` / `ui` / `body` / `h2` / `h1`。
@@ -1107,7 +1125,7 @@ pub struct HttpResult {
 pub struct DocOpenParams {
     /// 仓库容器内的相对路径（本地仓库）或服务端内容路径（协作空间），与 vault 口径一致。
     pub path: String,
-    /// 宿主为本实例分配的面标识：插件据此以 `frame.submitShared` 提交该文档实例的界面。
+    /// 宿主为本实例分配的面标识：插件据此作为绘制入口的 `surfaceId` 画该文档实例的界面。
     pub surface_id: String,
 }
 

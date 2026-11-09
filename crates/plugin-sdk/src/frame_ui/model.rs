@@ -4,14 +4,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use atelyx_plugin_protocol::frame::SurfaceFrame;
 use atelyx_plugin_protocol::method::MarkdownBlock;
 use atelyx_plugin_protocol::paint::{TextFamily, TextWeight};
 
 use super::geom::Rect;
 use super::markdown;
 use super::metrics::Metrics;
-use super::theme::Theme;
 
 /// 输入框架内文字的火型：字号 + 字重 + 字体族。
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -80,7 +78,6 @@ pub(crate) struct Drag {
 
 pub(crate) struct UiState {
     pub size: (f32, f32),
-    pub theme: Option<Theme>,
     pub metrics: Metrics,
     pub layouts: HashMap<String, Layout>,
     pub focusables: Vec<String>,
@@ -104,11 +101,6 @@ pub(crate) struct UiState {
     pub markdown: HashMap<String, Vec<MarkdownBlock>>,
     /// Markdown 版面缓存（键含内容、宽度与量算代次）：滚动时长内容不必每帧重排。
     pub markdown_layouts: Arc<markdown::LayoutCache>,
-    /// 上次已提交的帧与所在面：同内容帧不再提交（宿主每收一帧都要重投影并整窗重绘）。
-    /// 面重新挂载时宿主会再发一次 `Resize`，据此清空——否则重挂后同内容帧被吞，面会停在空态。
-    pub submitted: Option<(String, SurfaceFrame)>,
-    /// 尺寸刚变、下一帧还没交：让 `render` 先按估算字宽交一帧，不再等量算往返。
-    pub resize_pending: bool,
     /// 上一帧声明的浮层区域：有浮层时滚轮只作用于浮层内的滚动区。
     pub overlays: Vec<Rect>,
     /// 浮层内的滚动容器 id：浮层打开时不把滚轮落到下层列表。
@@ -120,7 +112,6 @@ impl Default for UiState {
         Self {
             // 宿主在首次绘制时才回发真实尺寸，这里先给一个可用占位
             size: (320.0, 400.0),
-            theme: None,
             metrics: Metrics::default(),
             layouts: HashMap::new(),
             focusables: Vec::new(),
@@ -137,8 +128,6 @@ impl Default for UiState {
             follow_prev: HashMap::new(),
             markdown: HashMap::new(),
             markdown_layouts: Arc::default(),
-            submitted: None,
-            resize_pending: false,
             overlays: Vec::new(),
             overlay_scrolls: std::collections::HashSet::new(),
         }

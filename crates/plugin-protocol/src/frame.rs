@@ -1,10 +1,12 @@
-//! 面帧：插件把整个面画成一份指令清单 + 命中区，宿主执行绘制并把原始输入原样回发。
+//! 面帧：一次 draw 的产物——指令清单 + 命中区 + 输入声明。宿主执行绘制并把原始输入原样回发。
 //! 坐标一律面本地逻辑像素、左上原点；宿主不理解命中区语义，只按几何做命中与光标形状。
 
 use serde::{Deserialize, Serialize};
 
 use crate::paint::{validate_commands, DrawCommand, MAX_FPS};
 
+/// 单帧绘制指令数上限：插件在绘制里推得再多也只收这么多，超出即整帧丢弃。
+pub const MAX_COMMANDS: usize = 65536;
 /// 命中区数量上限（单帧）。
 pub const MAX_HITS: usize = 4096;
 /// 命中区 id 上限（字节）。
@@ -52,7 +54,7 @@ pub struct FrameRect {
     pub h: f32,
 }
 
-/// 一面一帧的完整内容。
+/// 一面一帧的完整内容：插件在宿主重绘拍里同步画出的这一份。
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SurfaceFrame {
@@ -133,26 +135,6 @@ fn ensure_rect(x: f32, y: f32, w: f32, h: f32, name: &str) -> Result<(), String>
         return Err(format!("{name}的宽高不可为负"));
     }
     Ok(())
-}
-
-/// `frame.submitShared` 的 params：帧内容写在共享内存的 `slot` 槽里，信封只带定位与校验信息。
-/// 宿主按 `generation` 拒绝过期映射，按 `seq` / `len` 校验槽内内容是否仍是本次写入。
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FrameSubmitSharedParams {
-    pub surface_id: String,
-    pub generation: u64,
-    pub slot: u32,
-    pub seq: u64,
-    pub len: u32,
-}
-
-/// `frame.region` 的 params：帧超出当前槽容量时请求宿主换一份更大的区域。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FrameRegionRequest {
-    /// 本次至少要能放下的帧字节数；实际容量按倍增取到不小于它的值。
-    pub min_bytes: u32,
 }
 
 /// 键盘焦点事件与按键的归属：`Press` 含系统重复按键（长按方向键逐次到达），`Release` 在抬起时到达。
@@ -295,8 +277,6 @@ pub enum FrameInput {
     },
     /// 焦点进入 / 离开本面（按下即取焦，按在面外即失焦）。
     Focus { focused: bool },
-    /// 面尺寸变化（逻辑像素）：插件据此重排并重绘。
-    Resize { width: f32, height: f32 },
 }
 
 /// `host:frame.input` 的 params。
@@ -385,31 +365,6 @@ mod tests {
         assert_eq!(frame.hit_at(15.0, 15.0), Some("button"));
         assert_eq!(frame.hit_at(90.0, 90.0), Some("panel"));
         assert_eq!(frame.hit_at(200.0, 0.0), None);
-    }
-
-    #[test]
-    fn shared_submit_params_carry_locator_only() {
-        let params = FrameSubmitSharedParams {
-            surface_id: "board".into(),
-            generation: 3,
-            slot: 1,
-            seq: 8,
-            len: 128,
-        };
-        let wire = serde_json::to_value(&params).unwrap();
-        assert_eq!(
-            wire,
-            serde_json::json!({
-                "surfaceId": "board",
-                "generation": 3,
-                "slot": 1,
-                "seq": 8,
-                "len": 128
-            })
-        );
-        assert_eq!(serde_json::from_value::<FrameSubmitSharedParams>(wire).unwrap(), params);
-        let request = FrameRegionRequest { min_bytes: 4096 };
-        assert_eq!(serde_json::to_value(request).unwrap(), serde_json::json!({ "minBytes": 4096 }));
     }
 
     #[test]

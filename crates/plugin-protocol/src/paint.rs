@@ -7,6 +7,21 @@ use serde::{Deserialize, Serialize};
 /// 帧率上限（帧声明的 `fps` 上限，也是宿主调度帧通知的最细节拍）。
 pub const MAX_FPS: u16 = 120;
 
+/// 文字折行宽度的档位（逻辑像素）。宿主绘制与插件量算共用同一档位：量到的行数才与画出的
+/// 行数一致，档内的宽度变化又不必重排整屏文字。
+pub const TEXT_LAYOUT_STEP: f32 = 8.0;
+
+/// 折行宽度落到档位（向下取整）：不足一档时保留原宽度，免得窄控件被硬撑宽。
+pub fn layout_width(width: f32) -> f32 {
+    let width = width.max(1.0);
+    let stepped = (width / TEXT_LAYOUT_STEP).floor() * TEXT_LAYOUT_STEP;
+    if stepped < TEXT_LAYOUT_STEP {
+        width
+    } else {
+        stepped
+    }
+}
+
 /// 文字水平对齐：以 `maxWidth` 为对齐区域、`x` 为区域左缘，按量算出的整段宽度换算
 /// （换行后段内各行仍左对齐）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,6 +78,43 @@ pub enum ColorToken {
     BorderStrong,
     /// 无底色 / 无边框。
     Transparent,
+}
+
+/// 主题 token 的定序表：主题表与 ABI 都按这个顺序传色，两侧只认这张表的序号。
+pub const COLOR_TOKENS: [ColorToken; 18] = [
+    ColorToken::Text,
+    ColorToken::TextSecondary,
+    ColorToken::TextMuted,
+    ColorToken::Accent,
+    ColorToken::AccentSoft,
+    ColorToken::Danger,
+    ColorToken::DangerSoft,
+    ColorToken::Success,
+    ColorToken::SuccessSoft,
+    ColorToken::Warning,
+    ColorToken::WarningSoft,
+    ColorToken::Surface,
+    ColorToken::SurfaceMuted,
+    ColorToken::SurfaceSunken,
+    ColorToken::Hover,
+    ColorToken::Border,
+    ColorToken::BorderStrong,
+    ColorToken::Transparent,
+];
+
+impl ColorToken {
+    /// 在 [`COLOR_TOKENS`] 里的下标。
+    pub fn index(self) -> u32 {
+        COLOR_TOKENS
+            .iter()
+            .position(|token| *token == self)
+            .expect("COLOR_TOKENS 覆盖全部 token") as u32
+    }
+
+    /// 按下标还原 token；越界返回 `None`。
+    pub fn from_index(index: u32) -> Option<Self> {
+        COLOR_TOKENS.get(index as usize).copied()
+    }
 }
 
 /// 图片填充方式：`contain` 等比完整可见（留空边），`cover` 等比覆盖并裁剪溢出，缺省 = 拉伸填满。

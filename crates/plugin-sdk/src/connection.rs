@@ -11,6 +11,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::context::Context;
 use crate::handler::{dispatch, PluginHandler};
+use crate::in_process::Surfaces;
 use crate::protocol::envelope::{Envelope, Notification, RpcError};
 use crate::protocol::handshake::{self, InitializeParams, InitializeResult, PluginInfo};
 use crate::protocol::API_VERSION;
@@ -24,8 +25,6 @@ pub enum ConnectError {
     Handshake(String),
     #[error("协议版本不一致：插件 {plugin}，宿主 {host}")]
     VersionMismatch { plugin: u32, host: u32 },
-    #[error("帧共享内存不可用：{0}")]
-    FrameRegion(String),
     #[error("连接异常结束：{0}")]
     Abnormal(String),
 }
@@ -47,13 +46,19 @@ pub struct Connection {
 
 impl Connection {
     /// 以给定流建立连接并完成握手。返回连接与能力面上下文；插件随后的全部交互经 `ctx`。
-    /// 握手失败或帧共享内存映射失败都直接返回错误，此时读写任务与通知分发任务都已启动——
+    /// 握手失败直接返回错误，此时读写任务与通知分发任务都已启动——
     /// 错误被吞掉重试会泄漏持有流的任务；承载侧按「会话建立失败」一收了之，不存在重试。
-    pub async fn bind<R, W, H>(input: R, output: W, plugin: PluginInfo, handler: Arc<H>) -> Result<(Connection, Context), ConnectError>
+    /// 承载侧专用：把一条读写流接上协议泵，面表与处理器由会话持有（绘制入口要用同一份）。
+    pub(crate) async fn bind<R, W>(
+        input: R,
+        output: W,
+        plugin: PluginInfo,
+        handler: Arc<dyn PluginHandler>,
+        surfaces: Surfaces,
+    ) -> Result<(Connection, Context), ConnectError>
     where
         R: AsyncRead + Unpin + Send + 'static,
         W: AsyncWrite + Unpin + Send + 'static,
-        H: crate::handler::PluginHandler + 'static,
     {
         let (out_tx, out_rx) = mpsc::channel::<Envelope>(64);
         let ctx = Context::new(out_tx.clone());
@@ -61,13 +66,10 @@ impl Connection {
 
         // 读任务必须先于握手启动：握手应答本身要靠读任务配对回送，先后颠倒即互等死锁
         let (closed_tx, closed_rx) = oneshot::channel();
-        let notify_tx = spawn_notify_worker(handler.clone(), ctx.clone());
+        let notify_tx = spawn_notify_worker(handler, ctx.clone(), surfaces);
         spawn_reader(input, ctx.clone(), notify_tx, closed_tx);
 
-        let result = Self::handshake(&ctx, &plugin).await?;
-        // 首帧之前映射必须就绪：接不上就拒绝启动，不让插件带着「提交必失败」跑起来
-        ctx.attach_frame_region(result.frame_region)
-            .map_err(ConnectError::FrameRegion)?;
+        Self::handshake(&ctx, &plugin).await?;
         Ok((Self { closed_rx }, ctx))
     }
 
@@ -121,14 +123,22 @@ fn spawn_writer<W: AsyncWrite + Unpin + Send + 'static>(mut output: W, mut rx: m
 /// 读循环只负责入队，因此单个回调卡住（比如在回调里等宿主应答）既不拖住读取，也不会与响应
 /// 配对互等死锁——配对仍在读循环上。代价是队头阻塞：一个慢回调会挡住其后全部通知。
 /// 连接结束后不保证队列排空——宿主已关闭，剩下的通知没有执行意义，主进程随即可退出。
-fn spawn_notify_worker<H: PluginHandler + 'static>(
-    handler: Arc<H>,
+fn spawn_notify_worker(
+    handler: Arc<dyn PluginHandler>,
     ctx: Context,
+    surfaces: Surfaces,
 ) -> mpsc::UnboundedSender<Notification> {
     let (tx, mut rx) = mpsc::unbounded_channel::<Notification>();
     tokio::spawn(async move {
         while let Some(notification) = rx.recv().await {
-            dispatch(&*handler, &ctx, &notification.method, notification.params).await;
+            dispatch(
+                &*handler,
+                &ctx,
+                &surfaces,
+                &notification.method,
+                notification.params,
+            )
+            .await;
         }
     });
     tx

@@ -1,9 +1,10 @@
-//! 插件面的宿主侧界面资源：文字量算与主题取色。
+//! 插件面的宿主侧界面资源：绘制期的文字量算、Markdown 解析与主题取色。
 //! 量算口径与原生视图同一套字体与行高：插件按它摆放，量出的占位就是宿主渲染的占位。
 //! 主题取色把协议颜色 token 映射到当前调色板，插件与宿主观感不漂移。
 
 use atelyx_core::plugin_runtime::{
-    ColorToken, FontSizes, MeasureTextResult, Radii, TextFamily, TextWeight, ThemeColors, ThemeResult,
+    ColorToken, DrawHost, FontSizes, MarkdownBlock, MeasureRequest, MeasureTextResult, Radii,
+    TextFamily, TextWeight, ThemeColors, ThemeResult,
 };
 use iced::advanced::text::paragraph;
 use iced::advanced::text::{Alignment, LineHeight, Shaping, Text, Wrapping};
@@ -14,7 +15,32 @@ use crate::ui::palette as pal;
 
 type TextParagraph = <Renderer as iced::advanced::text::Renderer>::Paragraph;
 
-/// 量算一段文字：`max_width` 给定时按该宽度换行，缺省按单行。
+/// 绘制期的宿主动作面：插件在自己的绘制调用里当场问、当场得到答案。
+///
+/// 实现全部落在界面层（core 不认识 iced），所以绘制必须跑在壳的重绘线程上。
+pub struct SurfaceHost;
+
+impl DrawHost for SurfaceHost {
+    fn measure(&self, request: MeasureRequest<'_>) -> MeasureTextResult {
+        measure_text(
+            request.text,
+            request.size,
+            request.weight,
+            request.family,
+            request.max_width,
+        )
+    }
+
+    fn markdown(&self, content: &str) -> Result<Vec<MarkdownBlock>, String> {
+        Ok(atelyx_core::plugin_runtime::markdown_blocks(content))
+    }
+
+    fn theme(&self) -> ThemeResult {
+        theme_result()
+    }
+}
+
+/// 量算一段文字：`max_width` 给定时按该宽度换行（折行落在固定档位上），缺省按单行。
 /// 返回的宽高为排版实际占位（换行时宽不超过 `max_width`），行数按默认行高折算。
 pub fn measure_text(
     content: &str,
@@ -23,6 +49,8 @@ pub fn measure_text(
     family: Option<TextFamily>,
     max_width: Option<f32>,
 ) -> MeasureTextResult {
+    // 折行宽度落在固定档位上：与绘制侧同一档，量到的行数才与画出的行数一致
+    let max_width = max_width.map(atelyx_core::plugin_runtime::layout_width);
     let line_height = LineHeight::default().to_absolute(Pixels(size)).0;
     let wrapping = match max_width {
         Some(_) => Wrapping::Word,
