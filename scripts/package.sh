@@ -47,7 +47,9 @@ package_windows() {
   local log="$dist/nsis-build.log"
   echo "==> makensis：产出 Windows 安装包"
   # 编译器输出整份落日志：失败必须把尾部回显到 stderr，不得只留一个非零退出码
+  # 脚本是 UTF-8：显式声明编码，不靠 BOM 与系统 ACP（缺了会在第 1 行报 Bad text encoding）
   if ! "$makensis" \
+    -INPUTCHARSET UTF8 \
     -DVERSION="$version" \
     -DEXE="$(win_path "$exe")" \
     -DLICENSE="$(win_path "$repo_root/LICENSE")" \
