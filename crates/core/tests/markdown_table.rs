@@ -91,6 +91,41 @@ fn escaped_pipe_cell_is_not_whitespace() {
 }
 
 #[test]
+fn gfm_optional_outer_pipes_and_alignment() {
+    let source = "| abc | defghi |\n:-: | -----------:\nbar | baz\n";
+    let parsed = blocks(source);
+    let MarkdownBlock::Table { header, aligns, rows, .. } = &parsed[0] else {
+        panic!("应为 GFM 表格")
+    };
+    assert_eq!(header.len(), 2);
+    assert_eq!(aligns, &["center".to_string(), "right".to_string()]);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(&source[rows[0][0].from..rows[0][0].to], "bar");
+    assert_eq!(&source[rows[0][1].from..rows[0][1].to], "baz");
+}
+
+#[test]
+fn header_and_delimiter_cell_count_must_match() {
+    // GFM：表头与分隔行格数不一致时不成表，整段按段落处理
+    let source = "| abc | def |\n| --- |\n| bar |\n";
+    let parsed = blocks(source);
+    assert!(!parsed.iter().any(|b| matches!(b, MarkdownBlock::Table { .. })));
+    let source = "| abc |\n| --- | --- |\n| bar |\n";
+    let parsed = blocks(source);
+    assert!(!parsed.iter().any(|b| matches!(b, MarkdownBlock::Table { .. })));
+}
+
+#[test]
+fn extra_body_cells_are_ignored() {
+    // GFM：数据行格数多于表头时多出的部分忽略
+    let source = "| a | b |\n| --- | --- |\n| 1 | 2 | 3 |\n";
+    let parsed = blocks(source);
+    let MarkdownBlock::Table { header, rows, .. } = &parsed[0] else { panic!("首块应为表格") };
+    assert_eq!(header.len(), 2);
+    assert_eq!(rows[0].len(), 2);
+}
+
+#[test]
 fn crlf_rows_trim_cell_edges() {
     let source = "| a | b |\r\n| --- | --- |\r\n| c | d |\r\n";
     let parsed = blocks(source);

@@ -30,6 +30,7 @@ mod image_clipboard;
 mod layout_view;
 mod markdown_edit;
 mod markdown_select;
+mod markdown_table;
 mod markdown_view;
 mod pack;
 mod plugin_actions;
@@ -54,8 +55,10 @@ mod tray;
 pub use atelyx_ui as ui;
 mod update;
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -458,6 +461,8 @@ enum Message {
     NoteSelectStart(usize),
     /// 只读档拖选移动中的落点（文档源字节偏移）。
     NoteSelectTo(usize),
+    /// 笔记正文滚动回执（编辑档窗口化据此截取可见行）。
+    NoteScrolled(iced::widget::scrollable::Viewport),
     /// 对话正文拖选起点（消息段标识 + 段内文档源字节偏移）。
     ChatSelectStart { scope: markdown_select::SelectScope, offset: usize },
     /// 对话正文拖选移动中的落点（段标识 + 段内偏移）。
@@ -1470,6 +1475,13 @@ pub struct App {
     note_edit_caret_pending: bool,
     /// 只读档的解析产物：进入只读档或文件载入时重建，避免每帧重解析。
     pub preview_doc: Option<MarkdownDocument>,
+    /// 编辑档行高缓存（编辑面布局回写；应用层据此截取视口窗口）。
+    pub(crate) note_row_metrics: Rc<RefCell<markdown_edit::RowMetrics>>,
+    /// 编辑面滚动位置与视口尺寸（滚动事件播种；窗口计算用）。
+    pub note_scroll_y: f32,
+    pub note_viewport_h: f32,
+    /// 已收到过滚动回执（未收到前不做窗口化，避免旧偏移截错行）。
+    pub note_scroll_ready: bool,
     /// 笔记图片句柄缓存（key = src 原文；随文件载入清空，在途与失败集合防重复发起）。
     pub note_images: markdown_view::ImageHandles,
     /// 图片像素尺寸（key 同 `note_images`）：自绘画布按 contain / cover 摆放贴片要用原图长宽。
@@ -1773,6 +1785,10 @@ impl App {
                 selection_menu_press: false,
                 note_edit_caret_pending: false,
                 preview_doc: None,
+                note_row_metrics: Rc::new(RefCell::new(markdown_edit::RowMetrics::default())),
+                note_scroll_y: 0.0,
+                note_viewport_h: 0.0,
+                note_scroll_ready: false,
                 note_images: markdown_view::ImageHandles::new(),
                 note_image_sizes: HashMap::new(),
                 note_image_epoch: 0,
@@ -2102,6 +2118,7 @@ impl App {
                 // 内容载入成功即登记最近打开（本地与空间模式同链回执）
                 recent_view::record(self, &rel, recent_view::RecentKind::Note);
                 self.note_text = text.clone();
+                self.reset_note_rows();
                 // 空间模式：载入成功即磁盘基线（三方合流的祖先）
                 self.space_note_flushed = matches!(self.repo_kind, RepoKind::Space(_)).then(|| text.clone());
                 self.source_editor = text_editor::Content::with_text(&self.note_text);
@@ -2140,6 +2157,7 @@ impl App {
                 self.edit_meta.clear();
                 self.dirty = false;
                 self.preview_doc = None;
+                self.reset_note_rows();
                 self.reset_props();
                 self.space_note_flushed = None;
                 self.note_collab = None;
@@ -2152,11 +2170,10 @@ impl App {
             Message::Edited(action) => {
                 // 动作须全部执行（widget 只发布不应用）；置脏只看内容是否实际变化
                 let may_edit = action.is_edit();
-                let before = may_edit.then(|| self.source_editor.text());
                 self.source_editor.perform(action);
-                if let Some(before) = before {
+                if may_edit {
                     let after = self.source_editor.text();
-                    if after != before {
+                    if after != self.note_text {
                         self.note_text = after;
                         self.dirty = true;
                         self.save_error = None;
@@ -2277,6 +2294,7 @@ impl App {
                     }
                     NoteMode::Source => {
                         self.note_mode = NoteMode::Source;
+                        self.reset_note_metrics();
                         self.preview_doc = None;
                         self.edit_doc = None;
                         self.edit_meta.clear();
@@ -2315,6 +2333,12 @@ impl App {
                         sel.head = offset;
                     }
                 }
+                Task::none()
+            }
+            Message::NoteScrolled(viewport) => {
+                self.note_scroll_y = viewport.absolute_offset().y;
+                self.note_viewport_h = viewport.bounds().height;
+                self.note_scroll_ready = true;
                 Task::none()
             }
             Message::ChatSelectStart { scope, offset } => {
@@ -3812,6 +3836,7 @@ impl App {
                         self.global.font_size = size;
                         ui::palette::set_ui_base(size);
                         // 编辑面块度量以行高换算落点，字号变更须随基字号重建
+                        self.reset_note_metrics();
                         self.refresh_edit();
                         if let Some(t) = self.table.as_mut() {
                             t.rebuild_layout();
@@ -3836,6 +3861,7 @@ impl App {
                 ui::set_family(name.as_deref());
                 self.dismiss_popup();
                 // 族名变了，行段度量与编辑面块度量都要按新字体重算
+                self.reset_note_metrics();
                 self.refresh_edit();
                 if let Some(t) = self.table.as_mut() {
                     t.rebuild_layout();
@@ -3888,6 +3914,7 @@ impl App {
                 if let Some(w) = self.content_width_draft.take().and_then(|d| d.parse::<u32>().ok()) {
                     if w <= 5000 && w != self.global.content_width {
                         self.global.content_width = w;
+                        self.reset_note_metrics();
                         self.save_global_now();
                     }
                 }
@@ -5562,6 +5589,7 @@ impl App {
     fn note_history_restore(&mut self, version: atelyx_core::history::HistoryVersion) -> Task<Message> {
         self.edit.snapshot(&self.note_text);
         self.note_text = version.content.clone();
+        self.reset_note_metrics();
         // 源码档正文真源 = note_text 派生的编辑器内容：程序化替换须同步重建
         if self.note_mode == NoteMode::Source {
             self.source_editor = text_editor::Content::with_text(&self.note_text);
@@ -6407,9 +6435,21 @@ impl App {
         )
     }
 
+    /// 笔记正文换文件：行高缓存与滚动回执一起作废，下一帧整篇测量。
+    fn reset_note_rows(&mut self) {
+        self.reset_note_metrics();
+        self.note_scroll_ready = false;
+    }
+
+    /// 换档 / 远端正文替换：滚动容器与偏移沿用（同型同位），只作废行高。
+    pub(crate) fn reset_note_metrics(&mut self) {
+        self.note_row_metrics.borrow_mut().reset();
+    }
+
     /// 进入只读档：清编辑态解析产物并重建只读渲染。
     fn enter_read_mode(&mut self) {
         self.note_mode = NoteMode::Read;
+        self.reset_note_metrics();
         self.edit_doc = None;
         self.edit_meta.clear();
         self.edit.focused = false;
@@ -6458,6 +6498,7 @@ impl App {
     /// 进入预览编辑档：不揭示任何块、不持光标，首帧全篇按块渲染。
     fn enter_edit_mode(&mut self) {
         self.note_mode = NoteMode::Edit;
+        self.reset_note_metrics();
         self.preview_doc = None;
         self.edit.active = None;
         self.edit.preedit = None;
@@ -7054,6 +7095,56 @@ impl App {
         self.after_edit();
     }
 
+    /// 光标移出可视区时把它滚回视口（窗口化编辑面只构建可见行，光标不能停在未构建区）。
+    fn ensure_caret_visible(&self) -> Task<Message> {
+        if self.note_mode != NoteMode::Edit
+            || !self.note_scroll_ready
+            || self.note_viewport_h <= 0.0
+        {
+            return Task::none();
+        }
+        let Some(doc) = self.edit_doc.as_ref() else { return Task::none() };
+        let metrics = self.note_row_metrics.borrow();
+        if metrics.rows == 0
+            || metrics.heights.len() != metrics.rows
+            || metrics.heights.iter().any(|height| *height <= 0.0)
+        {
+            return Task::none();
+        }
+        let body = self.edit_body();
+        let caret = self.edit.caret.min(body.len());
+        let rows = markdown_view::edit_rows_window(
+            body,
+            &doc.blocks,
+            &self.theme,
+            &self.note_images,
+            Some(0..0),
+        );
+        let Some(index) = rows.iter().position(|row| caret >= row.from && caret <= row.to)
+        else {
+            return Task::none();
+        };
+        if index >= metrics.heights.len() {
+            return Task::none();
+        }
+        let top: f32 = metrics.heights[..index].iter().sum();
+        let height = metrics.heights[index];
+        let margin = 24.0;
+        let view_bottom = self.note_scroll_y + self.note_viewport_h;
+        let target = if top < self.note_scroll_y + margin {
+            Some((top - margin).max(0.0))
+        } else if top + height > view_bottom - margin {
+            Some((top + height - self.note_viewport_h + margin).max(0.0))
+        } else {
+            None
+        };
+        let Some(y) = target else { return Task::none() };
+        iced::widget::operation::scroll_to(
+            layout_view::note_scroll_id(),
+            iced::widget::scrollable::AbsoluteOffset { x: None, y: Some(y) },
+        )
+    }
+
     /// 光标移动（上下越界时跨块）。
     fn edit_move(&mut self, motion: markdown_edit::Motion, extend: bool) {
         use markdown_edit::Motion;
@@ -7071,6 +7162,19 @@ impl App {
             }
             Motion::Down => {
                 self.edit_move_line(true, extend);
+                return;
+            }
+            Motion::PageUp | Motion::PageDown => {
+                let line_px = markdown_view::base_size() * markdown_view::LINE_HEIGHT;
+                let page = if self.note_viewport_h > 0.0 {
+                    (self.note_viewport_h / line_px).floor().max(1.0) as usize
+                } else {
+                    10
+                };
+                let forward = motion == Motion::PageDown;
+                for _ in 0..page {
+                    self.edit_move_line(forward, extend);
+                }
                 return;
             }
         };
@@ -7112,6 +7216,7 @@ impl App {
             // 属性槽编辑态随内容失效（槽序号可能越界），一律取消
             self.clear_props_edit();
             self.note_text = text;
+            self.reset_note_metrics();
             self.dirty = true;
             let body_len = self.edit_body().len();
             self.edit.caret = caret.min(body_len);
@@ -7125,6 +7230,7 @@ impl App {
         if let Some((text, caret, anchor)) = self.edit.redo(&self.note_text) {
             self.clear_props_edit();
             self.note_text = text;
+            self.reset_note_metrics();
             self.dirty = true;
             let body_len = self.edit_body().len();
             self.edit.caret = caret.min(body_len);
@@ -7278,7 +7384,7 @@ impl App {
                 self.edit.caret = offset;
                 self.sync_active();
                 space_actions::collab_after_caret(self);
-                Task::none()
+                self.ensure_caret_visible()
             }
             E::Insert(text) => {
                 self.edit_insert(text);
@@ -7313,7 +7419,7 @@ impl App {
             E::Move { motion, extend } => {
                 self.edit_move(motion, extend);
                 space_actions::collab_after_caret(self);
-                Task::none()
+                self.ensure_caret_visible()
             }
             E::Undo => {
                 self.edit_undo();

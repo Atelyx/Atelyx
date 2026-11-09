@@ -19,41 +19,58 @@ pub(super) struct Ctx<'a> {
     pub options: &'a ParseOptions,
     /// LinkReference/脚注定义段落：URL 部分不参与裸 URL autolink。
     pub no_bare_autolink: bool,
+    /// 是否构造行内片段：首遍只取块级盲区，跳过行内解析。
+    pub inline: bool,
 }
 
 pub fn parse_markdown(source: &str, options: &ParseOptions) -> MarkdownDocument {
-    let ctx = Ctx { source, options, no_bare_autolink: false };
-    // 第一遍取盲区：fence/缩进代码/HTML 块内的 `$$` 不是数学定界符
-    let blind: Vec<RangeInfo> = parse_blocks(&ctx, 0, source.len(), None)
-        .into_iter()
-        .filter(|b| {
-            matches!(
-                b,
-                MarkdownBlock::FencedCode { .. }
-                    | MarkdownBlock::IndentedCode { .. }
-                    | MarkdownBlock::HtmlBlock { .. }
-            )
-        })
-        .map(|b| RangeInfo { from: block_from(&b), to: block_to(&b) })
-        .collect();
-    let ranges: Vec<RangeInfo> = block_math_ranges(source)
-        .into_iter()
-        .filter(|r| !blind.iter().any(|o| r.from < o.to && r.to > o.from))
-        .collect();
-    let blocks = parse_blocks(
-        &ctx,
-        0,
-        source.len(),
-        Some(&mut MathState { ranges, used: HashSet::new() }),
-    );
+    let ctx = Ctx { source, options, no_bare_autolink: false, inline: true };
+    let math = block_math_ranges(source);
+    // 无数学定界符时不存在代码块内定界符误判，省掉为盲区做的一整遍块解析
+    let blocks = if math.is_empty() {
+        parse_blocks(&ctx, 0, source.len(), None)
+    } else {
+        let blind_ctx = Ctx { source, options, no_bare_autolink: false, inline: false };
+        let blind: Vec<RangeInfo> = parse_blocks(&blind_ctx, 0, source.len(), None)
+            .into_iter()
+            .filter(|b| {
+                matches!(
+                    b,
+                    MarkdownBlock::FencedCode { .. }
+                        | MarkdownBlock::IndentedCode { .. }
+                        | MarkdownBlock::HtmlBlock { .. }
+                )
+            })
+            .map(|b| RangeInfo { from: block_from(&b), to: block_to(&b) })
+            .collect();
+        let ranges: Vec<RangeInfo> = math
+            .into_iter()
+            .filter(|r| !blind.iter().any(|o| r.from < o.to && r.to > o.from))
+            .collect();
+        parse_blocks(
+            &ctx,
+            0,
+            source.len(),
+            Some(&mut MathState { ranges, used: HashSet::new() }),
+        )
+    };
     MarkdownDocument { source: source.to_string(), blocks }
 }
 
 /// 按源区间做行内解析：表格单元格与列表项内容在块规格里只带 from/to，
 /// 行内片段由渲染层按区间重解析（与正文同一套行内语义）。
 pub fn parse_inline(source: &str, from: usize, to: usize, options: &ParseOptions) -> Vec<InlineSpan> {
-    let ctx = Ctx { source, options, no_bare_autolink: false };
+    let ctx = Ctx { source, options, no_bare_autolink: false, inline: true };
     inline::parse_inline_range(&ctx, from, to)
+}
+
+/// 行内片段：首遍（`inline == false`）返回空，块级结构不受影响。
+fn parse_inline_at(ctx: &Ctx<'_>, from: usize, to: usize) -> Vec<InlineSpan> {
+    if ctx.inline {
+        inline::parse_inline_range(ctx, from, to)
+    } else {
+        Vec::new()
+    }
 }
 
 // ===== 行原语 =====
@@ -184,7 +201,7 @@ fn parse_blocks(
                 // 块区间 = 整行（含尾 # 序列）；行内片段 = 剥标记后的内容区间
                 // h.from/h.to 相对去掉行首缩进的 body，回加 ind 才是行内绝对偏移
                 let base = line.start + ind;
-                let inline = inline::parse_inline_range(ctx, base + h.from, base + h.to);
+                let inline = parse_inline_at(ctx, base + h.from, base + h.to);
                 blocks.push(MarkdownBlock::Heading {
                     level: h.level,
                     from: base,
@@ -219,7 +236,7 @@ fn parse_blocks(
             }
             if body.contains('|') {
                 if let Some(next_line) = peek_next_line(src, &line, to) {
-                    if is_table_delim_row(trim_indent(next_line.text)) {
+                    if is_table_start(body, trim_indent(next_line.text)) {
                         let (block, next) = collect_table(ctx, &line, to);
                         blocks.push(block);
                         pos = next;
@@ -936,6 +953,16 @@ fn is_table_delim_row(body: &str) -> bool {
         })
 }
 
+/// 表头 + 分隔行成表：分隔行合法且两行格数一致（GFM 要求，格数不符整段按段落处理）。
+fn is_table_start(header: &str, delim: &str) -> bool {
+    is_table_delim_row(delim) && table_cell_count(header) == table_cell_count(delim)
+}
+
+/// 一行按 `|` 切出的格数（行首尾 `|` 不计，`\|` 不切）。
+fn table_cell_count(text: &str) -> usize {
+    split_row_text(text.trim()).len()
+}
+
 /// 虚拟字符：`\|` 占位为一个字符（源码占两字节）。
 struct Vc {
     c: char,
@@ -1051,9 +1078,15 @@ fn collect_table(ctx: &Ctx, first: &Line, to: usize) -> (MarkdownBlock, usize) {
                 .collect()
         })
         .unwrap_or_default();
+    // 表头列数即表宽：数据行多出的格忽略，缺格由渲染侧补空格（GFM 口径）
+    let cols = header.len();
     let rows: Vec<Vec<MarkdownTableCell>> = row_texts[2..]
         .iter()
-        .map(|(t, off)| table_cells(t, *off))
+        .map(|(t, off)| {
+            let mut cells = table_cells(t, *off);
+            cells.truncate(cols);
+            cells
+        })
         .collect();
     let last = lines.last().unwrap();
     let block = MarkdownBlock::Table {
@@ -1190,7 +1223,7 @@ fn collect_paragraph(
         // GFM 表格可打断段落
         if body.contains('|') {
             if let Some(nl) = peek_next_line(src, &line, to) {
-                if is_table_delim_row(trim_indent(nl.text)) {
+                if is_table_start(body, trim_indent(nl.text)) {
                     break;
                 }
             }
@@ -1205,7 +1238,7 @@ fn collect_paragraph(
     if let Some(level) = heading {
         // 内容 = 下划线行之前的标题文本行
         let content_end = lines[lines.len() - 2].end;
-        let inline = inline::parse_inline_range(ctx, para_from, content_end);
+        let inline = parse_inline_at(ctx, para_from, content_end);
         return (
             vec![MarkdownBlock::Heading { level, from: para_from, to: para_end, inline }],
             pos,
@@ -1230,15 +1263,15 @@ fn collect_paragraph(
     }
     // LinkReference 形态段落：URL 部分保持纯文本（不产裸 URL autolink）
     if is_link_ref_def_line(lines[0].text) {
-        let ctx2 = Ctx { source: ctx.source, options: ctx.options, no_bare_autolink: true };
-        let inline = inline::parse_inline_range(&ctx2, para_from, para_end);
+        let ctx2 = Ctx { source: ctx.source, options: ctx.options, no_bare_autolink: true, inline: ctx.inline };
+        let inline = parse_inline_at(&ctx2, para_from, para_end);
         return (vec![MarkdownBlock::Paragraph { from: para_from, to: para_end, inline }], pos);
     }
     (vec![paragraph_block(ctx, para_from, para_end)], pos)
 }
 
 fn paragraph_block(ctx: &Ctx, from: usize, to: usize) -> MarkdownBlock {
-    let inline = inline::parse_inline_range(ctx, from, to);
+    let inline = parse_inline_at(ctx, from, to);
     MarkdownBlock::Paragraph { from, to, inline }
 }
 
@@ -1249,7 +1282,7 @@ fn math_block_of(ctx: &Ctx, r: RangeInfo) -> MarkdownBlock {
     if !inner.is_empty() {
         return MarkdownBlock::MathBlock { from: r.from, to: r.to, tex: inner.to_string() };
     }
-    let inline = inline::parse_inline_range(ctx, r.from, r.to);
+    let inline = parse_inline_at(ctx, r.from, r.to);
     MarkdownBlock::Paragraph { from: r.from, to: r.to, inline }
 }
 
@@ -1309,8 +1342,8 @@ fn footnote_def(ctx: &Ctx, first: &Line) -> Option<MarkdownBlock> {
     let after = rest[rb + 1..].strip_prefix(':')?;
     let content = after.trim_start_matches([' ', '\t']);
     let text_from = base + (line.len() - content.len());
-    let ctx2 = Ctx { source: ctx.source, options: ctx.options, no_bare_autolink: true };
-    let inline = inline::parse_inline_range(&ctx2, text_from, base + line.len());
+    let ctx2 = Ctx { source: ctx.source, options: ctx.options, no_bare_autolink: true, inline: ctx.inline };
+    let inline = parse_inline_at(&ctx2, text_from, base + line.len());
     Some(MarkdownBlock::FootnoteDef {
         from: base,
         to: base + line.len(),
@@ -1371,7 +1404,7 @@ fn recurse_container(
         map.push((buf_from, buf.len(), content_start as isize - (buf_from + pad) as isize));
         pos = next_pos(&line, to, src);
     }
-    let inner = Ctx { source: &buf, options: ctx.options, no_bare_autolink: false };
+    let inner = Ctx { source: &buf, options: ctx.options, no_bare_autolink: false, inline: ctx.inline };
     let blocks = parse_blocks(&inner, 0, buf.len(), None);
     let om = OffsetMap { segments: map };
     blocks.into_iter().map(|b| map_block(b, &om)).collect()

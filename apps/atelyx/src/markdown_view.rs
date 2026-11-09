@@ -12,7 +12,7 @@ use iced::advanced::text::{self as advanced_text, Paragraph as _};
 use iced::alignment;
 use iced::widget::text::{LineHeight, Rich, Span, Wrapping};
 use iced::widget::{
-    button, checkbox, column, container, row, scrollable, table, Space, Stack,
+    button, checkbox, column, container, row, scrollable, Space, Stack,
 };
 use iced::{Border, Color, Element, Font, Length, Padding, Size};
 
@@ -20,6 +20,7 @@ use crate::markdown_edit::ParagraphT;
 use crate::markdown_select::{
     ChatSelection, NoteSelection, SelectRun, SelectScope, SelectableRich,
 };
+use crate::markdown_table::MarkdownTable;
 use crate::ui::text;
 use crate::Message;
 
@@ -48,6 +49,9 @@ pub(crate) fn without_cr(mut text: String) -> String {
 
 /// 行高倍数（空行行的间距按此折算；编辑面空行预编辑同源）。
 pub(crate) const LINE_HEIGHT: f32 = 1.625;
+/// 表格单元格内边距（自然宽同口径计入）。
+const CELL_PAD_X: f32 = 8.0;
+const CELL_PAD_Y: f32 = 4.0;
 /// 代码字号与代码块最多展示行数（超出转块内纵向滚动）。
 fn mono_size() -> f32 {
     crate::ui::palette::fs_caption()
@@ -189,6 +193,7 @@ fn document_body_with<'a>(
         soft_break,
         scale,
         select,
+        window: None,
     };
     let mut body = column![].width(Length::Fill).spacing(0);
     for chunk in render.chunks(&doc.source, &doc.blocks) {
@@ -475,8 +480,8 @@ pub struct EditRow<'a> {
     pub code: Option<(usize, usize)>,
     /// 行装饰（渲染与揭示态共用）。
     pub wraps: Vec<RowWrap>,
-    /// 未揭示时的富渲染件。
-    pub element: Element<'a, Message>,
+    /// 未揭示时的富渲染件；窗口外的行不构建（None）。
+    pub element: Option<Element<'a, Message>>,
 }
 
 impl<'a> EditRow<'a> {
@@ -487,11 +492,24 @@ impl<'a> EditRow<'a> {
 }
 
 /// 编辑档行清单入口（富渲染 + 源锚 + 可见片段）。
+#[cfg(test)]
 pub fn edit_rows<'a>(
     source: &'a str,
     blocks: &'a [MarkdownBlock],
     theme: &iced::Theme,
     images: &'a ImageHandles,
+) -> Vec<EditRow<'a>> {
+    edit_rows_window(source, blocks, theme, images, None)
+}
+
+/// 编辑档行清单（可只构建窗口内的富渲染件）。窗口外的行只保留源锚与空行信息，
+/// `EditRow::element` 为 None；调用方按窗口切片后交给编辑面。
+pub fn edit_rows_window<'a>(
+    source: &'a str,
+    blocks: &'a [MarkdownBlock],
+    theme: &iced::Theme,
+    images: &'a ImageHandles,
+    window: Option<std::ops::Range<usize>>,
 ) -> Vec<EditRow<'a>> {
     let render = Render {
         pal: Palette::from_theme(theme),
@@ -501,6 +519,7 @@ pub fn edit_rows<'a>(
         soft_break: true,
         scale: 1.0,
         select: SelectMode::Off,
+        window,
     };
     render.rows(source, blocks)
 }
@@ -517,11 +536,18 @@ struct Render<'a> {
     scale: f32,
     /// 行内段落拖选档位（含应用层选区；随档位下发给段落）。
     select: SelectMode<'a>,
+    /// 编辑档只构建该行窗口内的元素（None = 全量；只读面恒 None）。
+    window: Option<std::ops::Range<usize>>,
 }
 
 impl Render<'_> {
     fn selectable(&self) -> bool {
         self.select.selectable()
+    }
+
+    /// 当前行是否在构建窗口内（None = 全量）。
+    fn row_visible(&self, index: usize) -> bool {
+        self.window.as_ref().is_none_or(|window| window.contains(&index))
     }
     // 字号助手：渲染链上的字号一律经此，随 scale 等比。
     fn base(&self) -> f32 {
@@ -639,7 +665,7 @@ impl Render<'_> {
         if first_from > 0 {
             let lines = crate::markdown_edit::edge_blank_starts(source, 0, first_from);
             if !lines.is_empty() {
-                rows.push(self.gap_row(lines, 0, first_from, Vec::new()));
+                rows.push(self.gap_row(lines, 0, first_from, Vec::new(), self.row_visible(rows.len())));
             }
         }
         for (index, block) in blocks.iter().enumerate() {
@@ -653,7 +679,7 @@ impl Render<'_> {
         if source.len() > last_to {
             let lines = crate::markdown_edit::tail_blank_starts(source, last_to);
             if !lines.is_empty() {
-                rows.push(self.gap_row(lines, last_to, source.len() + 1, Vec::new()));
+                rows.push(self.gap_row(lines, last_to, source.len() + 1, Vec::new(), self.row_visible(rows.len())));
             }
         }
         rows
@@ -666,6 +692,7 @@ impl Render<'_> {
         from: usize,
         to: usize,
         wraps: Vec<RowWrap>,
+        render: bool,
     ) -> EditRow<'a> {
         let height = lines.len().max(1);
         EditRow {
@@ -678,7 +705,7 @@ impl Render<'_> {
             source: SourceKind::Prose { size: self.base(), line_height: LINE_HEIGHT },
             gap_lines: lines,
             code: None,
-            element: wrap_row(&wraps, gap(height, self.scale)),
+            element: render.then(|| wrap_row(&wraps, gap(height, self.scale))),
             wraps,
         }
     }
@@ -703,7 +730,7 @@ impl Render<'_> {
         if lines.is_empty() {
             return;
         }
-        rows.push(self.gap_row(lines, from, to, wraps.to_vec()));
+        rows.push(self.gap_row(lines, from, to, wraps.to_vec(), self.row_visible(rows.len())));
     }
 
     fn push_block_rows<'a>(
@@ -713,6 +740,7 @@ impl Render<'_> {
         wraps: Vec<RowWrap>,
         rows: &mut Vec<EditRow<'a>>,
     ) {
+        let render = self.row_visible(rows.len());
         match block {
             MarkdownBlock::List { ordered, items, .. } => {
                 self.push_list_rows(source, *ordered, items, wraps, rows)
@@ -720,7 +748,7 @@ impl Render<'_> {
             MarkdownBlock::Blockquote { from, callout, children, .. } => {
                 self.push_quote_rows(source, *from, callout.as_deref(), children, wraps, rows)
             }
-            _ => rows.push(self.block_row(source, block, wraps)),
+            _ => rows.push(self.block_row(source, block, wraps, render)),
         }
     }
 
@@ -730,65 +758,82 @@ impl Render<'_> {
         source: &'a str,
         block: &'a MarkdownBlock,
         wraps: Vec<RowWrap>,
+        render: bool,
     ) -> EditRow<'a> {
         let (from, to) = (block_from(block), block_to(block));
         let mut runs = Vec::new();
         let mut code = None;
         let mut row_wraps = wraps.clone();
-        let inner: Element<'a, Message> = match block {
-            MarkdownBlock::Heading { level, inline, .. } => {
-                let st = TextStyle {
-                    font: crate::ui::bold(),
-                    ..self.text_style()
-                };
-                runs = self.runs(source, inline, st);
-                self.rich_runs(
-                    &runs,
-                    self.heading(*level),
-                    1.3,
-                    None,
-                    iced::alignment::Horizontal::Left,
-                )
-            }
-            MarkdownBlock::Paragraph { inline, .. } => {
-                if let Some(InlineSpan::Image { src, alt, width, height, .. }) = image_only(inline) {
-                    self.image_block(src, alt, width.as_deref(), height.as_deref())
-                } else {
-                    runs = self.runs(source, inline, self.text_style());
-                    self.rich_runs(
+        if matches!(block, MarkdownBlock::FootnoteDef { .. }) {
+            row_wraps.push(RowWrap::Bar {
+                color: self.pal.border,
+                width: FOOTNOTE_BAR_W,
+                pad: 8.0,
+                bg: None,
+            });
+        }
+        let inner: Option<Element<'a, Message>> = if !render {
+            None
+        } else {
+            match block {
+                MarkdownBlock::Heading { level, inline, .. } => {
+                    let st = TextStyle {
+                        font: crate::ui::bold(),
+                        ..self.text_style()
+                    };
+                    runs = self.runs(source, inline, st);
+                    Some(self.rich_runs(
                         &runs,
-                        self.base(),
-                        LINE_HEIGHT,
+                        self.heading(*level),
+                        1.3,
                         None,
                         iced::alignment::Horizontal::Left,
-                    )
+                    ))
                 }
-            }
-            MarkdownBlock::FencedCode { lang, code: body, content_from, content_to, .. } => {
-                code = Some((*content_from, *content_to));
-                self.code_block(lang, body, Some(((*content_from, *content_to), self.mono())))
-            }
-            MarkdownBlock::IndentedCode { code: body, .. } => self.code_block("", body, None),
-            MarkdownBlock::Hr { .. } => self.hr(),
-            MarkdownBlock::Table { header, aligns, rows, .. } => self.table(source, header, aligns, rows),
-            MarkdownBlock::MathBlock { tex, .. } => self.source_block(format!("$$\n{tex}\n$$")),
-            MarkdownBlock::HtmlBlock { html, .. } => self.source_block(html.clone()),
-            MarkdownBlock::FootnoteDef { label, inline, .. } => {
-                runs = self.footnote_runs(source, from, label, inline);
-                row_wraps.push(RowWrap::Bar {
-                    color: self.pal.border,
-                    width: FOOTNOTE_BAR_W,
-                    pad: 8.0,
-                    bg: None,
-                });
-                footnote_content(
-                    self.run_spans(runs.clone()),
-                    self.base() * 0.9,
-                    self.pal.muted,
-                )
-            }
-            MarkdownBlock::List { .. } | MarkdownBlock::Blockquote { .. } => {
-                unreachable!("列表与引用按行拆开，不产生整块行")
+                MarkdownBlock::Paragraph { inline, .. } => {
+                    if let Some(InlineSpan::Image { src, alt, width, height, .. }) = image_only(inline) {
+                        Some(self.image_block(src, alt, width.as_deref(), height.as_deref()))
+                    } else {
+                        runs = self.runs(source, inline, self.text_style());
+                        Some(self.rich_runs(
+                            &runs,
+                            self.base(),
+                            LINE_HEIGHT,
+                            None,
+                            iced::alignment::Horizontal::Left,
+                        ))
+                    }
+                }
+                MarkdownBlock::FencedCode { lang, code: body, content_from, content_to, .. } => {
+                    code = Some((*content_from, *content_to));
+                    Some(self.code_block(
+                        lang,
+                        body,
+                        Some(((*content_from, *content_to), self.mono())),
+                    ))
+                }
+                MarkdownBlock::IndentedCode { code: body, .. } => {
+                    Some(self.code_block("", body, None))
+                }
+                MarkdownBlock::Hr { .. } => Some(self.hr()),
+                MarkdownBlock::Table { header, aligns, rows, .. } => {
+                    Some(self.table(source, header, aligns, rows))
+                }
+                MarkdownBlock::MathBlock { tex, .. } => {
+                    Some(self.source_block(format!("$$\n{tex}\n$$")))
+                }
+                MarkdownBlock::HtmlBlock { html, .. } => Some(self.source_block(html.clone())),
+                MarkdownBlock::FootnoteDef { label, inline, .. } => {
+                    runs = self.footnote_runs(source, from, label, inline);
+                    Some(footnote_content(
+                        self.run_spans(runs.clone()),
+                        self.base() * 0.9,
+                        self.pal.muted,
+                    ))
+                }
+                MarkdownBlock::List { .. } | MarkdownBlock::Blockquote { .. } => {
+                    unreachable!("列表与引用按行拆开，不产生整块行")
+                }
             }
         };
         EditRow {
@@ -801,7 +846,7 @@ impl Render<'_> {
             source: block_source_style(block, 1.0),
             gap_lines: Vec::new(),
             code,
-            element: wrap_row(&row_wraps, inner),
+            element: inner.map(|inner| wrap_row(&row_wraps, inner)),
             wraps: row_wraps,
         }
     }
@@ -820,11 +865,27 @@ impl Render<'_> {
             if pos > 0 {
                 self.push_blank_rows(source, items[pos - 1].to, item.from, &wraps, rows);
             }
+            let render = self.row_visible(rows.len());
             let (marker_len, ordinal) = item_marker(&source[item.from..item.to]);
-            let marker_w = item_marker_width(source, item, marker_len, self.scale);
-            let (runs, content) = self.item_content_row(source, item);
+            // 窗口从本项的子块开始时要保留缩进列宽；完全在窗口外的项不必实测字宽
+            let marker_w = if render
+                || self.window.as_ref().is_some_and(|window| window.end > rows.len() + 1)
+            {
+                item_marker_width(source, item, marker_len, self.scale)
+            } else {
+                0.0
+            };
+            let (runs, content) = if render {
+                let (runs, content) = self.item_content_row(source, item);
+                (runs, Some(content))
+            } else {
+                (Vec::new(), None)
+            };
             let (_, content_to) = item_content_range(source, item);
-            let marker = self.item_marker_cell(item, ordered, &ordinal, marker_w);
+            let element = content.map(|content| {
+                let marker = self.item_marker_cell(item, ordered, &ordinal, marker_w);
+                wrap_row(&wraps, row![marker, content].width(Length::Fill).into())
+            });
             rows.push(EditRow {
                 kind: RowKind::Unit,
                 from: item.from,
@@ -835,7 +896,7 @@ impl Render<'_> {
                 source: SourceKind::Prose { size: self.base(), line_height: LINE_HEIGHT },
                 gap_lines: Vec::new(),
                 code: None,
-                element: wrap_row(&wraps, row![marker, content].width(Length::Fill).into()),
+                element,
                 wraps: wraps.clone(),
             });
             if item.children.is_empty() {
@@ -871,7 +932,8 @@ impl Render<'_> {
         let mut inner_wraps = wraps;
         inner_wraps.push(RowWrap::Bar { color, width: QUOTE_BAR_W, pad: QUOTE_PAD, bg });
         if let Some(name) = callout {
-            let badge = callout_badge(name, color, self.scale);
+            let render = self.row_visible(rows.len());
+            let badge = render.then(|| callout_badge(name, color, self.scale));
             rows.push(EditRow {
                 kind: RowKind::Deco,
                 from,
@@ -882,10 +944,12 @@ impl Render<'_> {
                 source: SourceKind::Prose { size: self.base(), line_height: LINE_HEIGHT },
                 gap_lines: Vec::new(),
                 code: None,
-                element: wrap_row(
-                    &inner_wraps,
-                    container(badge).padding(Padding { bottom: 4.0, ..Padding::default() }).into(),
-                ),
+                element: badge.map(|badge| {
+                    wrap_row(
+                        &inner_wraps,
+                        container(badge).padding(Padding { bottom: 4.0, ..Padding::default() }).into(),
+                    )
+                }),
                 wraps: inner_wraps.clone(),
             });
         }
@@ -1143,37 +1207,25 @@ fn code_body<'a>(code: &str, hit: Option<((usize, usize), f32)>, scale: f32) -> 
         aligns: &'a [String],
         rows: &'a [Vec<MarkdownTableCell>],
     ) -> Element<'a, Message> {
-        let cols = header
-            .len()
-            .max(aligns.len())
-            .max(rows.iter().map(Vec::len).max().unwrap_or(0))
-            .max(1);
+        // 表头列数即表宽（GFM：数据行多出的格忽略、缺格渲染为空）
+        let cols = header.len().max(1);
+        let mut cells = Vec::with_capacity((rows.len() + 1) * cols);
+        let mut natural = vec![0.0f32; cols];
+        for column in 0..cols {
+            let (cell, width) = self.table_cell(source, header.get(column), aligns.get(column), true);
+            natural[column] = natural[column].max(width);
+            cells.push(cell);
+        }
+        for row in rows {
+            for column in 0..cols {
+                let (cell, width) =
+                    self.table_cell(source, row.get(column), aligns.get(column), false);
+                natural[column] = natural[column].max(width);
+                cells.push(cell);
+            }
+        }
         let border = self.pal.border;
-        let pal = self.pal;
-        let columns = (0..cols).map(|i| {
-            let head = self.cell(source, header.get(i), aligns.get(i), true);
-            // 单元格生成器随行闭包独立持有调色板与解析选项，不借用 self
-            let images = self.images;
-            let cells = Render {
-                pal,
-                opts: link_options(),
-                interactive: self.interactive,
-                images,
-                soft_break: self.soft_break,
-                scale: self.scale,
-                select: self.select,
-            };
-            table::column(head, move |row: usize| {
-                let cell = rows.get(row).and_then(|r| r.get(i));
-                cells.cell(source, cell, aligns.get(i), false)
-            })
-            .width(Length::Fill)
-        });
-        let grid = table::table(columns, 0..rows.len())
-            .width(Length::Fill)
-            .padding(0.0)
-            .separator(1.0);
-        container(grid)
+        container(MarkdownTable::new(cols, cells, natural, border, self.pal.panel, 1.0))
             .width(Length::Fill)
             .style(move |_theme: &iced::Theme| container::Style {
                 border: Border { color: border, width: 1.0, ..Border::default() },
@@ -1182,34 +1234,53 @@ fn code_body<'a>(code: &str, hit: Option<((usize, usize), f32)>, scale: f32) -> 
             .into()
     }
 
-    fn cell<'a>(
+    /// 单元格：可见片段、自然宽（文字宽 + 左右内边距）与富渲染件。
+    /// 空单元格按下限宽占位，行高由同行的非空单元格撑起。
+    fn table_cell<'a>(
         &self,
         source: &str,
         cell: Option<&MarkdownTableCell>,
         align: Option<&String>,
         header: bool,
-    ) -> Element<'a, Message> {
+    ) -> (Element<'a, Message>, f32) {
         let inline = match cell {
             Some(c) if c.to > c.from => parse_inline(source, c.from, c.to, &self.opts),
             _ => Vec::new(),
         };
-        let bg = if header { Some(self.pal.panel) } else { None };
-        let border = self.pal.border;
+        let mut style = self.text_style();
+        if header {
+            style.font = crate::ui::bold();
+        }
+        let runs = self.runs(source, &inline, style);
+        let size = self.base();
+        let text_width: f32 = runs
+            .iter()
+            .map(|run| text_width_cached(&run.text, size * run.scale, run.font()))
+            .sum();
+        let natural = text_width + CELL_PAD_X * 2.0;
         let alignment = match align.map(String::as_str) {
             Some("center") => iced::alignment::Horizontal::Center,
             Some("right") => iced::alignment::Horizontal::Right,
             _ => iced::alignment::Horizontal::Left,
         };
-        let runs = self.runs(source, &inline, self.text_style());
-        container(self.rich_runs(&runs, self.base(), LINE_HEIGHT, None, alignment))
-        .width(Length::Fill)
-        .padding([4.0, 8.0])
-        .style(move |_theme: &iced::Theme| container::Style {
-            background: bg.map(Into::into),
-            border: Border { color: border, width: 1.0, ..Border::default() },
-            ..Default::default()
-        })
-        .into()
+        let content: Element<'a, Message> = if runs.is_empty() {
+            Space::new().width(Length::Fill).height(Length::Fixed(size * LINE_HEIGHT)).into()
+        } else {
+            self.rich_runs_with(
+                &runs,
+                size,
+                LINE_HEIGHT,
+                None,
+                alignment,
+                Wrapping::WordOrGlyph,
+            )
+        };
+        // 表头底色由表格整行铺（同一行单元格高度不齐也覆盖），单元格自身不叠底色
+        let cell = container(content)
+            .width(Length::Fill)
+            .padding([CELL_PAD_Y, CELL_PAD_X])
+            .into();
+        (cell, natural)
     }
 
     /// 公式 / raw HTML 的降级形态：源码文本放进等宽底块。
@@ -1300,12 +1371,53 @@ fn code_body<'a>(code: &str, hit: Option<((usize, usize), f32)>, scale: f32) -> 
         match span {
             InlineSpan::Text { from, to, text } => {
                 // 宽松换行折叠：CRLF 先归一为 LF，孤 \r 同样按换行折叠为空格
-                let text = if self.soft_break {
-                    text.clone()
-                } else {
-                    text.replace("\r\n", "\n").replace(['\r', '\n'], " ")
-                };
-                out.push(LineRun { text, src: (*from, *to), st, scale: 1.0, link: None });
+                if !self.soft_break {
+                    let text = text.replace("\r\n", "\n").replace(['\r', '\n'], " ");
+                    out.push(LineRun { text, src: (*from, *to), st, scale: 1.0, link: None });
+                    return;
+                }
+                // LF 文本一行一片段即可；只有 CRLF 需要逐行剥离 \r 并单独记换行符
+                if !text.contains('\r') && source.get(*from..*to) == Some(text.as_str()) {
+                    out.push(LineRun { text: text.clone(), src: (*from, *to), st, scale: 1.0, link: None });
+                    return;
+                }
+                if source.get(*from..*to) != Some(text.as_str()) {
+                    out.push(LineRun {
+                        text: without_cr(text.clone()),
+                        src: (*from, *to),
+                        st,
+                        scale: 1.0,
+                        link: None,
+                    });
+                    return;
+                }
+                // 逐源码行拆片段：行尾 \r 是行尾风格填充，不进文本也不计入映射区间，
+                // 换行符单独成原子片段（CRLF 文档的点击/选区才与可见字符逐字对齐）。
+                let mut pos = *from;
+                for segment in text.split_inclusive('\n') {
+                    let end = pos + segment.len();
+                    let line = segment.strip_suffix('\n').unwrap_or(segment);
+                    let line = line.strip_suffix('\r').unwrap_or(line);
+                    if !line.is_empty() {
+                        out.push(LineRun {
+                            text: line.to_string(),
+                            src: (pos, pos + line.len()),
+                            st,
+                            scale: 1.0,
+                            link: None,
+                        });
+                    }
+                    if segment.ends_with('\n') {
+                        out.push(LineRun {
+                            text: "\n".to_string(),
+                            src: (pos + line.len(), end),
+                            st,
+                            scale: 1.0,
+                            link: None,
+                        });
+                    }
+                    pos = end;
+                }
             }
             InlineSpan::Strong { children, .. } => {
                 let inner = TextStyle { font: Font { weight: iced::font::Weight::Bold, ..st.font }, ..st };
@@ -1498,8 +1610,21 @@ fn code_body<'a>(code: &str, hit: Option<((usize, usize), f32)>, scale: f32) -> 
         color: Option<Color>,
         align: alignment::Horizontal,
     ) -> Element<'a, Message> {
+        self.rich_runs_with(runs, size, line_height, color, align, Wrapping::default())
+    }
+
+    /// 与 [`Self::rich_runs`] 同源，可指定折行策略（表格单元格按词/字形兜底）。
+    fn rich_runs_with<'a>(
+        &self,
+        runs: &[LineRun],
+        size: f32,
+        line_height: f32,
+        color: Option<Color>,
+        align: alignment::Horizontal,
+        wrapping: Wrapping,
+    ) -> Element<'a, Message> {
         if !self.selectable() {
-            return rich(self.run_spans(runs.to_vec()), size, line_height, color, align);
+            return rich_with(self.run_spans(runs.to_vec()), size, line_height, color, align, wrapping);
         }
         let mut spans = Vec::with_capacity(runs.len());
         let mut srcs = Vec::with_capacity(runs.len());
@@ -1511,7 +1636,8 @@ fn code_body<'a>(code: &str, hit: Option<((usize, usize), f32)>, scale: f32) -> 
             .size(size)
             .line_height(line_height)
             .align_x(align)
-            .color_maybe(color);
+            .color_maybe(color)
+            .wrapping(wrapping);
         match self.select {
             SelectMode::Off => {}
             SelectMode::Note(selection) => {
@@ -1692,6 +1818,7 @@ pub fn selected_text(
         soft_break,
         scale: 1.0,
         select: SelectMode::Off,
+        window: None,
     };
     let mut pieces = Vec::new();
     render.collect_text(&doc.source, &doc.blocks, range, &mut pieces);
@@ -1857,12 +1984,25 @@ fn rich<'a>(
     color: Option<Color>,
     align: iced::alignment::Horizontal,
 ) -> Element<'a, Message> {
+    rich_with(spans, size, line_height, color, align, Wrapping::default())
+}
+
+/// 行内富文本（可指定折行策略，表格单元格用 WordOrGlyph）。
+fn rich_with<'a>(
+    spans: Vec<Span<'a, LinkTarget, Font>>,
+    size: f32,
+    line_height: f32,
+    color: Option<Color>,
+    align: iced::alignment::Horizontal,
+    wrapping: Wrapping,
+) -> Element<'a, Message> {
     let mut text = Rich::<'a, LinkTarget, Message>::with_spans(spans)
         .font(crate::ui::regular())
         .size(size)
         .line_height(LineHeight::Relative(line_height))
         .align_x(align)
         .width(Length::Fill)
+        .wrapping(wrapping)
         .on_link_click(link_message);
     if let Some(c) = color {
         text = text.color(c);
@@ -1987,6 +2127,32 @@ thread_local! {
 /// 字宽表条数上限（超出整体清空）。
 const MARKER_WIDTH_CAP: usize = 4096;
 
+thread_local! {
+    /// 表格自然宽字宽表（键 = 文本 + 字号位 + 字体）：单元格内容不变时不重复 shaping。
+    static TEXT_WIDTHS: std::cell::RefCell<HashMap<(String, u32, Font), f32>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// 字宽表条数上限（超出整体清空）。
+const TEXT_WIDTH_CAP: usize = 8192;
+
+/// 单行字宽（同字体字号实测），按文本缓存。
+fn text_width_cached(text: &str, size: f32, font: Font) -> f32 {
+    let key = (text.to_string(), size.to_bits(), font);
+    if let Some(width) = TEXT_WIDTHS.with(|cache| cache.borrow().get(&key).copied()) {
+        return width;
+    }
+    let width = crate::markdown_edit::measured_text_width(text, size, 1.0, font);
+    TEXT_WIDTHS.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.len() > TEXT_WIDTH_CAP {
+            cache.clear();
+        }
+        cache.insert(key, width);
+    });
+    width
+}
+
 /// 标记串字宽：与源码面同一逐字符 span 排版实测（列宽与揭示态对齐才不横移），
 /// 按 (串, 字号, 字体) 复用字宽表，免长列表每帧逐项重排。
 fn marker_column_width(marker: &str, scale: f32) -> f32 {
@@ -2089,6 +2255,20 @@ mod tests {
 
     /// 段落行的渲染文本只保留源码里的换行：CRLF 不得在渲染侧多出一个换行。
     #[test]
+    fn edit_rows_window_only_builds_visible_rows() {
+        let source = "甲\n\n乙\n\n丙\n\n丁\n";
+        let doc = parse_document(source);
+        let images = ImageHandles::default();
+        let theme = iced::Theme::Dark;
+        let all = edit_rows_window(source, &doc.blocks, &theme, &images, None);
+        let windowed = edit_rows_window(source, &doc.blocks, &theme, &images, Some(2..6));
+        assert_eq!(all.len(), windowed.len());
+        assert!(windowed[..2].iter().all(|row| row.element.is_none()));
+        assert!(windowed[2..6].iter().all(|row| row.element.is_some()));
+        assert!(windowed[6..].iter().all(|row| row.element.is_none()));
+    }
+
+    #[test]
     fn crlf_row_keeps_one_break_per_source_line() {
         let source = "甲乙\r\n丙丁\r\n";
         let doc = parse_document(source);
@@ -2097,6 +2277,12 @@ mod tests {
         let row = rows.iter().find(|r| !r.runs.is_empty()).expect("段落在编辑档有可见片段");
         let laid: String = row.runs.iter().map(|r| without_cr(r.text.clone())).collect();
         assert_eq!(laid, "甲乙\n丙丁");
+        // 内容片段源区间不含行尾 \r：点击/选区按可见字符逐字对齐
+        for run in &row.runs {
+            if run.text != "\n" {
+                assert!(!source[run.src.0..run.src.1].contains('\r'));
+            }
+        }
     }
 
     /// 复制走文档可见文本：块间单个换行、列表不带标记、表格单元格制表符。

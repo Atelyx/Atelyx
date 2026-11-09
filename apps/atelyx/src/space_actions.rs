@@ -1570,6 +1570,7 @@ pub fn apply_remote_text(app: &mut App, new_text: String) {
     let new_body = &new_text[new_body_start..];
     let hunks = atelyx_core::merge3::diff_hunks(old_body, new_body);
     app.note_text = new_text.clone();
+    app.reset_note_metrics();
     if app.note_mode == NoteMode::Edit {
         // 光标映射（正文相对坐标）：hunks 全基于旧文本坐标，p 保持原坐标、按区间相对位置
         // 累计平移量（否则 p 的「部分映射坐标」与后续 hunk 的旧坐标混用，多 hunk 时漂移）

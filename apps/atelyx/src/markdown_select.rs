@@ -92,6 +92,7 @@ pub struct SelectableRich<'a> {
     align_x: alignment::Horizontal,
     width: Length,
     color: Option<Color>,
+    wrapping: advanced_text::Wrapping,
     /// 文档源区间（已排序；None = 无选区）
     selection: Option<(usize, usize)>,
     dragging: bool,
@@ -109,6 +110,7 @@ impl<'a> SelectableRich<'a> {
             align_x: alignment::Horizontal::Left,
             width: Length::Fill,
             color: None,
+            wrapping: advanced_text::Wrapping::default(),
             selection: None,
             dragging: false,
             chat: None,
@@ -138,6 +140,12 @@ impl<'a> SelectableRich<'a> {
 
     pub fn color_maybe(mut self, color: Option<Color>) -> Self {
         self.color = color;
+        self
+    }
+
+    /// 折行策略（表格单元格传 WordOrGlyph，长词/URL 也能断行）。
+    pub fn wrapping(mut self, wrapping: advanced_text::Wrapping) -> Self {
+        self.wrapping = wrapping;
         self
     }
 
@@ -173,11 +181,16 @@ impl<'a> SelectableRich<'a> {
 struct State {
     spans: Vec<Span<'static, LinkTarget, Font>>,
     paragraph: ParagraphT,
+    wrapping: advanced_text::Wrapping,
 }
 
 impl State {
     fn new() -> Self {
-        Self { spans: Vec::new(), paragraph: ParagraphT::default() }
+        Self {
+            spans: Vec::new(),
+            paragraph: ParagraphT::default(),
+            wrapping: advanced_text::Wrapping::default(),
+        }
     }
 }
 
@@ -348,11 +361,12 @@ impl Widget<Message, iced::Theme, iced::Renderer> for SelectableRich<'_> {
                 align_x: self.align_x.into(),
                 align_y: alignment::Vertical::Top,
                 shaping: advanced_text::Shaping::Advanced,
-                wrapping: advanced_text::Wrapping::default(),
+                wrapping: self.wrapping,
             };
-            if state.spans != self.spans {
+            if state.spans != self.spans || state.wrapping != self.wrapping {
                 state.paragraph = ParagraphT::with_spans(text());
                 state.spans = self.spans.iter().cloned().map(|span| span.to_static()).collect();
+                state.wrapping = self.wrapping;
             } else {
                 match state.paragraph.compare(advanced_text::Text {
                     content: (),
@@ -363,7 +377,7 @@ impl Widget<Message, iced::Theme, iced::Renderer> for SelectableRich<'_> {
                     align_x: self.align_x.into(),
                     align_y: alignment::Vertical::Top,
                     shaping: advanced_text::Shaping::Advanced,
-                    wrapping: advanced_text::Wrapping::default(),
+                    wrapping: self.wrapping,
                 }) {
                     advanced_text::Difference::None => {}
                     advanced_text::Difference::Bounds => state.paragraph.resize(bounds),

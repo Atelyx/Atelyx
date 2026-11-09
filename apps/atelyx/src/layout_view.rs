@@ -3385,8 +3385,10 @@ pub(crate) fn note_view(app: &App, window: iced::window::Id) -> Element<'_, Mess
             // 正文行宽：>0 时钳制正文区最大宽度并水平居中（三档同一列宽）
             let scrolled =
                 scroll::v(bounded_column(inner, app.global.content_width, Length::Shrink))
+                    .id(note_scroll_id())
                     .width(Length::Fill)
-                    .height(Length::Fill);
+                    .height(Length::Fill)
+                    .on_scroll(Message::NoteScrolled);
             // 两档同包一层 mouse_area（同型同位保滚动状态）；双击进编辑只在只读档挂处理器
             // （编辑档不挂：编辑面按压即捕获，双击语义由块内自管）
             if app.note_mode == NoteMode::Edit {
@@ -3443,6 +3445,11 @@ pub(crate) fn note_view(app: &App, window: iced::window::Id) -> Element<'_, Mess
         Message::NotePressInside,
     )
     .into()
+}
+
+/// 笔记正文滚动容器 id（视图挂载与光标跟随滚动共用）。
+pub(crate) fn note_scroll_id() -> iced::widget::Id {
+    iced::widget::Id::new("note-scroll")
 }
 
 /// 正文行宽钳制：宽度 > 0 时给正文列加上限宽并水平居中，0 = 不限（铺满面板）。
@@ -3684,6 +3691,57 @@ fn source_block_element<'a>(
     .into()
 }
 
+/// 编辑面视口窗口：按行高缓存截出可见行（上下各留一段余量）。
+/// 返回（行区间，区间前缀高，区间后缀高）；缓存不可用返回 None（整篇构建）。
+fn note_row_window(app: &App) -> Option<(std::ops::Range<usize>, f32, f32)> {
+    if app.note_viewport_h <= 0.0 {
+        return None;
+    }
+    let metrics = app.note_row_metrics.borrow();
+    if !app.note_scroll_ready {
+        return None;
+    }
+    let rows = metrics.rows;
+    if rows == 0 || metrics.heights.len() != rows || metrics.width <= 0.0 {
+        return None;
+    }
+    if metrics.heights.iter().any(|height| *height <= 0.0) {
+        return None;
+    }
+    row_window(&metrics.heights, app.note_scroll_y, app.note_viewport_h)
+}
+
+/// 行高表 + 滚动偏移 → 可见行区间（上下各留 0.75 屏余量）与区间前后高度。
+fn row_window(
+    heights: &[f32],
+    scroll_y: f32,
+    viewport_h: f32,
+) -> Option<(std::ops::Range<usize>, f32, f32)> {
+    if heights.is_empty() || viewport_h <= 0.0 {
+        return None;
+    }
+    let top_limit = (scroll_y - viewport_h * 0.75).max(0.0);
+    let bottom_limit = scroll_y + viewport_h * 1.75;
+    let mut y = 0.0;
+    let mut start = None;
+    let mut end = heights.len();
+    for (index, height) in heights.iter().enumerate() {
+        let next = y + height;
+        if start.is_none() && next >= top_limit {
+            start = Some(index);
+        }
+        if next >= bottom_limit {
+            end = index + 1;
+            break;
+        }
+        y = next;
+    }
+    let start = start?;
+    let prefix: f32 = heights[..start].iter().sum();
+    let suffix: f32 = heights[end..].iter().sum();
+    Some((start..end.max(start + 1), prefix, suffix))
+}
+
 /// 预览编辑档：行清单由渲染面产出（富渲染件 + 源锚 + 可见片段），已揭示的行以源码面
 /// 替换其内容、行装饰照旧；块内空行与块间空行同为可点的空行行（光标由编辑面自绘）。
 fn edit_view(app: &App) -> Element<'_, Message> {
@@ -3739,10 +3797,49 @@ fn edit_view(app: &App) -> Element<'_, Message> {
             &app.remote_cursors,
             body_start,
         )
+        .with_window(app.note_row_metrics.clone(), 0, 0.0, 0.0, 1)
         .into();
     }
 
-    for row in markdown_view::edit_rows(body, &doc.blocks, &app.theme, &app.note_images) {
+    let metrics = app.note_row_metrics.clone();
+    let known_rows = app.note_row_metrics.borrow().rows;
+    let window = note_row_window(app);
+    let mut all_rows = match &window {
+        Some((range, _, _)) => markdown_view::edit_rows_window(
+            body,
+            &doc.blocks,
+            &app.theme,
+            &app.note_images,
+            Some(range.clone()),
+        ),
+        None => markdown_view::edit_rows_window(
+            body,
+            &doc.blocks,
+            &app.theme,
+            &app.note_images,
+            None,
+        ),
+    };
+    let (start, end, top, bottom) = match window {
+        Some((range, top, bottom)) if all_rows.len() == known_rows => {
+            (range.start, range.end.min(all_rows.len()), top, bottom)
+        }
+        _ => {
+            all_rows = markdown_view::edit_rows_window(
+                body,
+                &doc.blocks,
+                &app.theme,
+                &app.note_images,
+                None,
+            );
+            (0, all_rows.len(), 0.0, 0.0)
+        }
+    };
+    let total_rows = all_rows.len();
+    for (index, row) in all_rows.into_iter().enumerate() {
+        if index < start || index >= end || row.element.is_none() {
+            continue;
+        }
         let (from, to) = (row.from, row.to);
         match row.kind {
             RowKind::Gap => {
@@ -3754,7 +3851,7 @@ fn edit_view(app: &App) -> Element<'_, Message> {
                     line_starts: row.gap_lines,
                     covered,
                     indent: row.indent,
-                    element: row.element,
+                    element: row.element.expect("窗口内的行有元素"),
                 });
             }
             RowKind::Deco => {
@@ -3768,7 +3865,7 @@ fn edit_view(app: &App) -> Element<'_, Message> {
                     source: row.source,
                     code: None,
                     covered: false,
-                    element: row.element,
+                    element: row.element.expect("窗口内的行有元素"),
                 });
             }
             RowKind::Block | RowKind::Unit => {
@@ -3792,7 +3889,7 @@ fn edit_view(app: &App) -> Element<'_, Message> {
                         body_start,
                     ))
                 } else {
-                    row.element
+                    row.element.expect("窗口内的行有元素")
                 };
                 rows.push(SurfaceRow::Row {
                     from,
@@ -3821,6 +3918,7 @@ fn edit_view(app: &App) -> Element<'_, Message> {
         &app.remote_cursors,
         body_start,
     )
+    .with_window(metrics, start, top, bottom, total_rows)
     .into()
 }
 
@@ -7105,7 +7203,7 @@ pub fn drop_zone_at(zone: &PanelZone, global: iced::Point) -> DropZone {
 mod tests {
     use super::{
         device_meta_line, divider_size, ellipsize, estimate_text_width, ext_badge_reserve,
-        file_label, merge_peers, name_slot, truncate_to_width, UiMetrics,
+        file_label, merge_peers, name_slot, row_window, truncate_to_width, UiMetrics,
     };
     use crate::ui::palette as pal;
     use atelyx_core::collab::PeerInfo;
@@ -7211,5 +7309,30 @@ mod tests {
         let slot = name_slot(120.0, "CANVAS");
         let shown = ellipsize("一个很长的文件名用来测槽位宽度.md", slot, pal::fs_caption());
         assert!(estimate_text_width(&shown, pal::fs_caption()) <= slot + 0.01);
+    }
+
+    #[test]
+    fn row_window_keeps_viewport_with_overscan() {
+        let heights = vec![100.0; 100];
+        let (range, top, bottom) = row_window(&heights, 1000.0, 400.0).expect("窗口可用");
+        assert!(range.start <= 10, "起点应向前留余量：{range:?}");
+        assert!(range.end >= 14, "终点应覆盖视口下缘：{range:?}");
+        assert_eq!(top, range.start as f32 * 100.0);
+        assert_eq!(bottom, (100 - range.end) as f32 * 100.0);
+    }
+
+    #[test]
+    fn row_window_at_top_starts_at_zero() {
+        let heights = vec![20.0; 10];
+        let (range, top, _) = row_window(&heights, 0.0, 60.0).expect("窗口可用");
+        assert_eq!(range.start, 0);
+        assert_eq!(top, 0.0);
+        assert!(range.end >= 3);
+    }
+
+    #[test]
+    fn row_window_requires_rows_and_viewport() {
+        assert!(row_window(&[], 0.0, 100.0).is_none());
+        assert!(row_window(&[10.0], 0.0, 0.0).is_none());
     }
 }

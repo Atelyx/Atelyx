@@ -20,6 +20,8 @@ use iced::keyboard::Key;
 use iced::window;
 use iced::{Color, Element, Font, Length, Padding, Point, Rectangle, Size, Theme, Vector};
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use crate::commands::{self, NoteBindings};
@@ -377,6 +379,8 @@ pub enum Motion {
     Right,
     Up,
     Down,
+    PageUp,
+    PageDown,
     Home,
     End,
 }
@@ -531,14 +535,19 @@ fn source_styles(
     collect_runs(&inline, CharStyle::default(), &mut runs);
     runs.sort_by_key(|r| r.0);
     let mut out = Vec::new();
+    // run 已按起点排序：随字符位置前移游标，避免每个字符扫全表（长段多强调时是平方级）
+    let mut run_index = 0usize;
     for (idx, ch) in source[from..to].char_indices() {
         if is_cr(ch) {
             continue;
         }
         let abs = from + idx;
+        while runs.get(run_index).is_some_and(|(_, to, _)| *to <= abs) {
+            run_index += 1;
+        }
         let st = runs
-            .iter()
-            .find(|(a, b, _)| *a <= abs && abs < *b)
+            .get(run_index)
+            .filter(|(a, b, _)| *a <= abs && abs < *b)
             .map(|(_, _, s)| *s)
             .unwrap_or(CharStyle { muted: true, ..CharStyle::default() });
         out.push(st);
@@ -1379,6 +1388,14 @@ fn key_action(
         })),
         Key::Named(Named::ArrowUp) => Some(KeyAction::LineUp(extend)),
         Key::Named(Named::ArrowDown) => Some(KeyAction::LineDown(extend)),
+        Key::Named(Named::PageUp) => Some(KeyAction::Event(EditorEvent::Move {
+            motion: Motion::PageUp,
+            extend,
+        })),
+        Key::Named(Named::PageDown) => Some(KeyAction::Event(EditorEvent::Move {
+            motion: Motion::PageDown,
+            extend,
+        })),
         Key::Named(Named::Home) => Some(KeyAction::Event(EditorEvent::Move { motion: Motion::Home, extend })),
         Key::Named(Named::End) => Some(KeyAction::Event(EditorEvent::Move { motion: Motion::End, extend })),
         Key::Named(Named::Backspace) => Some(KeyAction::Event(EditorEvent::Backspace)),
@@ -1555,6 +1572,16 @@ pub struct EditSurface<'a> {
     cursors: &'a [crate::RemoteCursorView],
     /// 正文在 note_text 中的起点（远端偏移 → 行内坐标换算基准）。
     body_start: usize,
+    /// 全篇行高缓存（应用层持有；窗口化时回写可见行高度）。
+    metrics: Option<Rc<RefCell<RowMetrics>>>,
+    /// 可视窗口首行的全篇序号。
+    first_row: usize,
+    /// 窗口之前已缓存的行高总和（滚动内容的纵向起点）。
+    top: f32,
+    /// 窗口之后已缓存的行高总和（用于内容总高）。
+    bottom: f32,
+    /// 全篇行数（布局回写缓存用）。
+    total_rows: usize,
 }
 
 /// 编辑面容器的持久状态（跨帧存活：拖选在途）。
@@ -1602,7 +1629,29 @@ impl<'a> EditSurface<'a> {
             bindings,
             cursors,
             body_start,
+            metrics: None,
+            first_row: 0,
+            top: 0.0,
+            bottom: 0.0,
+            total_rows: 0,
         }
+    }
+
+    /// 视口窗口：只排布可见行，行高回写全篇缓存；内容总高 = 窗口前 + 可见 + 窗口后。
+    pub(crate) fn with_window(
+        mut self,
+        metrics: Rc<RefCell<RowMetrics>>,
+        first_row: usize,
+        top: f32,
+        bottom: f32,
+        total_rows: usize,
+    ) -> Self {
+        self.metrics = Some(metrics);
+        self.first_row = first_row;
+        self.top = top;
+        self.bottom = bottom;
+        self.total_rows = total_rows;
+        self
     }
 
     /// 命中行：返回 (行号, 行内局部坐标, 行宽, 行高)；行间无空隙，仅区分上下越界。
@@ -1880,18 +1929,36 @@ impl Widget<Message, Theme, iced::Renderer> for EditSurface<'_> {
             right: SURFACE_PAD,
         });
         let mut nodes = Vec::with_capacity(self.rows.len());
-        let mut y = 0.0f32;
+        let mut y = self.top;
         for (i, row) in self.rows.iter_mut().enumerate() {
             let node = row
                 .element_mut()
                 .as_widget_mut()
                 .layout(&mut tree.children[i], renderer, &child_limits);
             let height = node.size().height;
+            if let Some(metrics) = self.metrics.as_ref() {
+                let mut metrics = metrics.borrow_mut();
+                let width = limits.max().width;
+                // 换宽后旧行高全部失效：清缓存让下一帧整篇重测，避免按旧高截窗口
+                if metrics.width > 0.0 && (metrics.width - width).abs() > 0.5 {
+                    metrics.heights.clear();
+                }
+                if metrics.heights.len() != self.total_rows {
+                    metrics.heights.resize(self.total_rows, 0.0);
+                }
+                let index = self.first_row + i;
+                if index < metrics.heights.len() {
+                    metrics.heights[index] = height;
+                }
+                metrics.rows = self.total_rows;
+                metrics.width = width;
+            }
             nodes.push(node.move_to(Point::new(SURFACE_PAD, SURFACE_PAD + y)));
             y += height;
         }
         let available = limits.max();
-        layout::Node::with_children(Size::new(available.width, y + SURFACE_PAD * 2.0), nodes)
+        let total = SURFACE_PAD * 2.0 + y + self.bottom;
+        layout::Node::with_children(Size::new(available.width, total), nodes)
     }
 
     fn draw(
@@ -1908,13 +1975,13 @@ impl Widget<Message, Theme, iced::Renderer> for EditSurface<'_> {
         // 闪烁相位：半周期可见（墙钟取模，与帧时机无关）
         let blink_on = (unix_millis() / BLINK_MS).is_multiple_of(2);
         for ((row, state), child_layout) in self.rows.iter().zip(&tree.children).zip(layout.children()) {
-            row.element()
-                .as_widget()
-                .draw(state, renderer, theme, style, child_layout, cursor, viewport);
             let bounds = child_layout.bounds();
             if !bounds.intersects(viewport) {
                 continue;
             }
+            row.element()
+                .as_widget()
+                .draw(state, renderer, theme, style, child_layout, cursor, viewport);
             match row {
                 SurfaceRow::Row { covered: true, .. } => {
                     renderer.fill_quad(Quad { bounds, ..Quad::default() }, tint);
@@ -2008,9 +2075,24 @@ impl Widget<Message, Theme, iced::Renderer> for EditSurface<'_> {
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
     ) {
-        for ((row, state), child_layout) in
-            self.rows.iter_mut().zip(&mut tree.children).zip(layout.children())
+        // 鼠标事件只交给光标所在行（其余行即使全量构建也不需要本次事件）
+        let mouse_row = if matches!(event, Event::Mouse(_)) {
+            cursor
+                .position()
+                .and_then(|point| layout.children().position(|child| child.bounds().contains(point)))
+        } else {
+            None
+        };
+        for (index, ((row, state), child_layout)) in self
+            .rows
+            .iter_mut()
+            .zip(&mut tree.children)
+            .zip(layout.children())
+            .enumerate()
         {
+            if matches!(event, Event::Mouse(_)) && mouse_row != Some(index) {
+                continue;
+            }
             row.element_mut().as_widget_mut().update(
                 state,
                 event,
@@ -2135,25 +2217,27 @@ impl Widget<Message, Theme, iced::Renderer> for EditSurface<'_> {
         viewport: &Rectangle,
         renderer: &iced::Renderer,
     ) -> mouse::Interaction {
-        let child = self
-            .rows
-            .iter()
-            .zip(&tree.children)
-            .zip(layout.children())
-            .map(|((row, state), child_layout)| {
-                row.element()
-                    .as_widget()
-                    .mouse_interaction(state, child_layout, cursor, viewport, renderer)
-            })
-            .max()
-            .unwrap_or_default();
-        if child != mouse::Interaction::None {
-            child
-        } else if cursor.is_over(layout.bounds()) {
-            mouse::Interaction::Text
-        } else {
-            mouse::Interaction::None
+        let Some(point) = cursor.position().filter(|point| layout.bounds().contains(*point)) else {
+            return mouse::Interaction::None;
+        };
+        for ((row, state), child_layout) in
+            self.rows.iter().zip(&tree.children).zip(layout.children())
+        {
+            if !child_layout.bounds().contains(point) {
+                continue;
+            }
+            let interaction = row.element().as_widget().mouse_interaction(
+                state,
+                child_layout,
+                cursor,
+                viewport,
+                renderer,
+            );
+            if interaction != mouse::Interaction::None {
+                return interaction;
+            }
         }
+        mouse::Interaction::Text
     }
 }
 
@@ -2452,6 +2536,26 @@ pub(crate) fn offset_in_block(
     };
     let paragraph = build_paragraph(content, size, line_height, width.max(1.0), &styles, pal);
     from + hit_offset(&paragraph, content, point)
+}
+
+/// 笔记行高缓存：编辑面布局回写可见行高度，应用层据此算视口窗口与内容总高。
+#[derive(Default)]
+pub(crate) struct RowMetrics {
+    /// 建缓存时的内容宽（换宽即整体失效）。
+    pub width: f32,
+    /// 全篇行数（行结构变化时由应用层整篇重建）。
+    pub rows: usize,
+    /// 每行高度；未测量的行为 0。
+    pub heights: Vec<f32>,
+}
+
+impl RowMetrics {
+    /// 清空缓存（换文件 / 换档 / 换宽）。
+    pub fn reset(&mut self) {
+        self.width = 0.0;
+        self.rows = 0;
+        self.heights.clear();
+    }
 }
 
 /// 编辑面状态（应用层持有）：光标/选区/活动块/撤销栈/组合态。
