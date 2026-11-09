@@ -75,6 +75,11 @@ pub trait PluginHandler: Send + Sync + 'static {
             .await;
     }
 
+    /// 会话收尾：宿主已断开连接、实例即将销毁，在此释放插件自己的资源（后台线程 / 定时任务 /
+    /// 自起的运行时）。此时能力面已不可用，任何 `Context` 调用都会失败——只做本地收尾，
+    /// 经 [`Context::log_error`] 记下的原因仍会进插件日志。
+    async fn on_shutdown(&self, _ctx: &Context) {}
+
     /// 某服务的可用性变了（`host:service.changed`，广播给全部运行中插件）。
     /// 需要据此更新服务状态的界面时覆盖它；默认忽略。
     async fn on_service_changed(&self, _ctx: &Context, _params: ChangedParams) {}

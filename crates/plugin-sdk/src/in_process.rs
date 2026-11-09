@@ -373,8 +373,12 @@ fn run_session(
         let (connection, ctx) = Connection::bind(input, output, plugin, handler.clone(), surfaces)
             .await
             .map_err(|e| e.to_string())?;
+        // 诊断口直连宿主插件日志：协议连接断开后（收尾阶段）仍能留痕
+        ctx.set_log(Arc::new(move |level, text| link.log(level, text)));
         handler.on_ready(&ctx).await;
         let closed = connection.closed().await;
+        // 收尾：连接已断，能力面调用会失败，这里只做本地资源的释放
+        handler.on_shutdown(&ctx).await;
         drain.abort();
         closed.map_err(|e| e.to_string())
     });
@@ -460,5 +464,30 @@ mod tests {
         let surfaces = Surfaces::default();
         let _held = surfaces.lock("panel").await;
         assert!(surfaces.try_lock("inspector").is_some());
+    }
+
+    /// 诊断口未接入时退回 stderr，不会丢信息也不会 panic（单测与独立运行走这条）。
+    #[tokio::test]
+    async fn log_error_falls_back_without_a_host_sink() {
+        let (tx, _rx) = tokio_mpsc::channel(8);
+        let ctx = crate::Context::new(tx);
+        ctx.log_error("无输出口时也要写得出");
+    }
+
+    /// 接入诊断口后经它落日志：级别恒为 error，会话收尾（能力面已断）时仍可写。
+    #[tokio::test]
+    async fn log_error_goes_through_the_host_sink() {
+        let (tx, _rx) = tokio_mpsc::channel(8);
+        let ctx = crate::Context::new(tx);
+        let seen: Arc<Mutex<Vec<(u32, String)>>> = Arc::default();
+        let sink = Arc::clone(&seen);
+        ctx.set_log(Arc::new(move |level, text| {
+            sink.lock().unwrap().push((level, text.to_string()));
+        }));
+        ctx.log_error("收尾期间的诊断");
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            &[(crate::abi::LOG_ERROR, "收尾期间的诊断".to_string())]
+        );
     }
 }

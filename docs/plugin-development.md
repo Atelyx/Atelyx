@@ -11,14 +11,14 @@ Atelyx 的插件是**原生动态库**（`cdylib`）：宿主按 C ABI 把它装
 | 事实 | 含义 |
 | --- | --- |
 | 插件 = 原生动态库（`cdylib`） | `atelyx_manifest.toml` 的 `[entry]` 指向该平台的库文件；宿主装载它并调 `atelyx_plugin_create` |
-| 通道 = JSON-RPC 2.0（NDJSON） | 经 C ABI 函数表双向投递；**信封里只能有协议内容**，日志走 `HostApi.log` 回调与 `eprintln!` |
-| 界面 = 一整面帧 | 插件提交整面帧（绘制指令 + 命中区 + 输入声明）：帧内容写进握手时拿到的共享内存槽位，信封只带槽位坐标；宿主按几何绘制并把原始输入经 `host:frame.input` 回发，插件进程里没有宿主 UI 代码，控件只存在于 SDK 控件层 |
+| 通道 = JSON-RPC 2.0（NDJSON） | 经 C ABI 函数表双向投递；**信封里只能有协议内容**，诊断走 `Context::log_error`（直达插件日志） |
+| 界面 = 同步绘制 | 宿主在自己的重绘拍里同步调 `atelyx_plugin_draw`：插件当场用这个尺寸排出绘制指令 + 命中区 + 输入声明，宿主当场执行；原始输入经 `host:frame.input` 回发，插件进程里没有宿主 UI 代码，控件只存在于 SDK 控件层 |
 | 能力 = 服务 + 方法 | 内置能力（`vault` / `ai` / `fs` …）与插件提供的服务走同一条总线，方法名即 `服务.方法`（见 7） |
 | `permissions` = 公示与审计 | 声明用于告诉用户这份插件会碰哪些宿主资源；调用本身不按声明拦截，未声明的调用照常执行但记为「未声明」并在设置页可见 |
 | 信任模型 = 本地程序 | 宿主不做沙箱：插件本来就能读写文件、起进程、联网。声明是透明度与审计口径，不是隔离边界 |
 | 一个插件一个会话 | 宿主多窗口共享同一份会话；从启用到停用是一个「会话」 |
 
-生命周期：启用即装载动态库并建立会话 → 握手（`initialize`，10 秒内未完成判失败）→ 运行 → 停用 / 崩溃 / 卸载。崩溃（含 panic）按 `1s → 2s → 4s → 8s …`（上限 30s）退避重启，60 秒内崩 5 次熔断，用户在设置页可手动重试。停用销毁会话并收掉插件经能力面创建的一切（托管子进程、全局热键、托盘条目、打开的窗口、注册的 AI 工具、登记的服务）。
+生命周期：启用即装载动态库并建立会话 → 握手（`initialize`，10 秒内未完成判失败）→ 运行 → 停用 / 崩溃 / 卸载。崩溃（含 panic）按 `1s → 2s → 4s → 8s …`（上限 30s）退避重启，60 秒内崩 5 次熔断，用户在设置页可手动重试。停用按两步收尾：先由宿主摘除插件经能力面创建的一切（托管子进程、全局热键、托盘条目、打开的窗口、注册的 AI 工具、登记的服务），再回调 `on_shutdown` 让插件释放自己的资源（后台线程、定时任务、自建运行时）——此时连接已断，`Context` 调用都会失败，诊断仍可经 `Context::log_error` 落盘。
 
 ## 2. 环境准备
 
@@ -127,7 +127,7 @@ impl PluginHandler for Echo {
     /// 握手完成：注册贡献点、登记服务与订阅都放这里。
     async fn on_ready(&self, ctx: &Context) {
         if let Err(e) = ctx.register(ContributionSlot::Panel, PANEL, "Echo", None, None).await {
-            eprintln!("注册贡献失败：{e}");
+            ctx.log_error(&format!("注册贡献失败：{e}"));
         }
     }
 
@@ -162,7 +162,7 @@ atelyx_plugin_sdk::export_in_process_plugin!(Echo { clicks: AtomicU32::new(0) })
 
 四条容易踩的规则：
 
-1. **信封通道只允许协议内容**。插件往 `send` 里塞的每一条都必须是 JSON-RPC 信封；调试输出用 `eprintln!`（进插件日志），别往信封通道里插打印。
+1. **信封通道只允许协议内容**。插件往 `send` 里塞的每一条都必须是 JSON-RPC 信封；诊断输出用 `Context::log_error`（直达插件日志，发布版没有 stderr 可看），别往信封通道里插打印。
 2. **绘制是宿主驱动的**。`on_draw` 只在宿主重绘这一面时被调；改完状态不调 `ctx.request_redraw()`，画面就停在上一拍。
 3. **输入要先声明**。帧里没有命中区，指针事件就没有 `hit`；没有 `keys` / `ime`，键盘与输入法不进你的回调（见 5.3）。
 4. **`on_ready` 里别做长耗时阻塞**。握手回执由 SDK 发出，但 `on_ready` 之后的调用都在同一个连接上；需要长时间准备的工作放 `tokio::spawn`。
@@ -493,7 +493,7 @@ use atelyx_plugin_sdk::protocol::service::HostCallParams;
 impl PluginHandler for Demo {
     async fn on_ready(&self, ctx: &Context) {
         if let Err(e) = ctx.register_service("demo", &["echo"]).await {
-            eprintln!("登记服务失败：{e}");
+            ctx.log_error(&format!("登记服务失败：{e}"));
         }
     }
 
@@ -504,7 +504,7 @@ impl PluginHandler for Demo {
             other => ctx.service_error(&params.call_id, &format!("unknown_method：{other}")).await,
         };
         if let Err(e) = replied {
-            eprintln!("回报服务调用失败：{e}");
+            ctx.log_error(&format!("回报服务调用失败：{e}"));
         }
     }
 }

@@ -26,10 +26,15 @@ pub struct Context {
     inner: Arc<Inner>,
 }
 
+/// 插件诊断输出口：同进程承载时直达宿主插件日志（不经协议通道，会话收尾后仍可写）。
+pub(crate) type LogFn = Arc<dyn Fn(u32, &str) + Send + Sync>;
+
 struct Inner {
     out_tx: mpsc::Sender<Envelope>,
     pending: PendingMap,
     next_id: AtomicU64,
+    /// 承载侧在建立会话后接入；未接入（测试 / 独立运行）时退回 stderr。
+    log: std::sync::OnceLock<LogFn>,
 }
 
 impl Context {
@@ -39,7 +44,21 @@ impl Context {
                 out_tx,
                 pending: Arc::new(Mutex::new(std::collections::HashMap::new())),
                 next_id: AtomicU64::new(1),
+                log: std::sync::OnceLock::new(),
             }),
+        }
+    }
+
+    /// 接入诊断输出口。经共享的 Arc 生效，已克隆出去的所有句柄一并可用。
+    pub(crate) fn set_log(&self, log: LogFn) {
+        let _ = self.inner.log.set(log);
+    }
+
+    /// 写一条插件诊断。走承载侧的输出口而不是协议通道：会话收尾（连接已断）时仍能留痕。
+    pub fn log_error(&self, message: &str) {
+        match self.inner.log.get() {
+            Some(log) => log(crate::abi::LOG_ERROR, message),
+            None => eprintln!("{message}"),
         }
     }
 

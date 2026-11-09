@@ -79,6 +79,12 @@ impl<'a, 'ui> DrawFrame<'a, 'ui> {
         self.ui.set_fps(fps);
     }
 
+    /// 程序化聚焦输入框（浮层接管键盘、行内编辑这类场景）：须在 `build` 之前调用。
+    /// 语义见 [`FrameUi::focus_input`]。
+    pub fn focus_input(&mut self, id: &str, value: &str) {
+        self.ui.focus_input(id, value);
+    }
+
     /// 用控件层声明这一面。`build` 只读插件状态：改状态归输入回调，改完请调
     /// [`crate::Context::request_redraw`]。
     pub fn build(&mut self, build: impl Fn(&mut Ui<'_, '_>)) -> Result<(), RpcError> {
