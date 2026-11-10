@@ -19,13 +19,6 @@ pub struct EditActor {
     pub agent: AiIdentity,
 }
 
-/// 文档类型（历史 kind 与保存链按此分派）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DocKind {
-    Note,
-    Table,
-    Canvas,
-}
 
 /// 文件系统操作（改名 / 移动 / 删除）：由壳先收尾打开中的编辑面再动磁盘。
 #[derive(Debug, Clone, PartialEq, Eq)]
