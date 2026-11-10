@@ -284,12 +284,19 @@ impl ServerState {
     }
 
     /// 按令牌摘要查会话并刷新内存 last_seen（不落盘：会话集合不变的高频请求不写盘）。
+    /// 顺带带出账号显示名：署名类写入只认令牌反查的身份，不采信请求体。
     pub(crate) fn authenticate(&self, token_hash: &str) -> Option<crate::auth::AuthUser> {
         let now = now_secs();
         let mut guard = self.inner.persistent.lock().unwrap();
-        let session = guard.sessions.iter_mut().find(|s| s.token_hash == token_hash)?;
-        session.last_seen_at = now;
-        Some(crate::auth::AuthUser { user_id: session.user_id.clone(), session_id: session.id.clone() })
+        let (user_id, session_id) = {
+            let session = guard.sessions.iter_mut().find(|s| s.token_hash == token_hash)?;
+            session.last_seen_at = now;
+            (session.user_id.clone(), session.id.clone())
+        };
+        let account = guard.users.iter().find(|u| u.id == user_id);
+        let username = account.map(|u| u.username.clone()).unwrap_or_default();
+        let display_name = account.map(|u| u.display_name.clone()).unwrap_or_default();
+        Some(crate::auth::AuthUser { user_id, session_id, username, display_name })
     }
 
     /// 刷新会话的内存 last_seen（随下次结构变更落盘）。

@@ -99,7 +99,8 @@ pub struct HistoryAuthor {
     pub device: String,
 }
 
-/// 版本来源：AI 编辑时携带的 Agent 身份（服务端只校验形状，不校验真伪）。
+/// 版本来源：AI 编辑时携带的 Agent 身份。Agent 身份由客户端自报——服务端没有 Agent 身份签发渠道，
+/// 只校验形状原样落盘；署名可信度依赖客户端自律（操作者署名已由服务端按令牌覆盖，见 `record_history`）。
 #[derive(Deserialize, Serialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct HistoryEditorWire {
@@ -123,7 +124,7 @@ pub struct RecordBody {
     note: Option<String>,
     #[serde(default)]
     co_authors: Option<Vec<HistoryAuthor>>,
-    /// AI 编辑来源（只校验形状；agent 身份真伪不校验，与昵称/颜色同口径）。
+    /// AI 编辑来源（只校验形状；Agent 身份无签发渠道，真伪不校验）。
     #[serde(default)]
     editor: Option<HistoryEditorWire>,
     #[serde(default)]
@@ -167,6 +168,12 @@ fn prune_by_budget(mut versions: Vec<Value>, budget: usize) -> Vec<Value> {
     versions
 }
 
+/// 服务端署名 id：`space:<username>`。由令牌反查的账号生成，客户端无法伪造，
+/// 连续编辑合并据此判定「同一操作者」。
+fn server_author_id(user: &AuthUser) -> String {
+    format!("space:{}", user.username)
+}
+
 /// 追加一个历史版本（判重 → 同作者连续编辑合并 → 追加 → 剪枝 → 原子写）。
 /// 全程在每路径串行锁内完成，多端并发保存严格按到达序落地、不丢版本——
 /// 合并必须在服务端锁内：客户端各自读改写整个侧文件，并发保存会互相覆盖、版本静默丢失。
@@ -195,7 +202,15 @@ pub async fn record_history(
         }
     }
 
-    let author = serde_json::to_value(&body.author).unwrap_or(Value::Null);
+    // 署名只认令牌反查的身份：名字取账号显示名，id 由服务端按 `space:<username>` 生成，
+    // 客户端自报的 id / name 一律不采信（设备名是客户端自报的展示字段，原样保留）
+    let author_id = server_author_id(&user);
+    let author = serde_json::to_value(HistoryAuthor {
+        id: author_id.clone(),
+        name: user.display_name.clone(),
+        device: body.author.device.clone(),
+    })
+    .unwrap_or(Value::Null);
     let now = now_millis();
     let window = body.coalesce_edit_ms.unwrap_or(0);
     // 连续编辑节流：上一版为 edit、action 为 edit、作者相同、在窗口内 → 就地滑动更新（seq 不变）
@@ -207,7 +222,8 @@ pub async fn record_history(
             .and_then(|l| l.get("author"))
             .and_then(|a| a.get("id"))
             .and_then(|i| i.as_str())
-            == Some(body.author.id.as_str())
+            // 合并判据用服务端生成的署名 id（客户端自报 id 不再参与）
+            == Some(author_id.as_str())
         && last
             .as_ref()
             .and_then(|l| l.get("ts"))

@@ -181,10 +181,13 @@ pub async fn login(State(state): State<ServerState>, Json(body): Json<Credential
 }
 
 /// 鉴权后的调用方身份（user_id 归属人，session_id 归属设备会话）。
+/// `username` / `display_name` 由令牌反查账号得到：服务端写署名时以它为准，不采信客户端自报。
 #[derive(Clone)]
 pub struct AuthUser {
     pub user_id: String,
     pub session_id: String,
+    pub username: String,
+    pub display_name: String,
 }
 
 impl FromRequestParts<ServerState> for AuthUser {

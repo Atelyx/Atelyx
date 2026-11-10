@@ -723,6 +723,14 @@ async fn history_record_aggregate_and_rename_migration() {
     let (status, _) = record("笔记/a.md", "v3", "edit", 60_000).await;
     assert_eq!(status, 200);
 
+    // 署名只认令牌身份：客户端自报的 id / name 不落盘（名字取账号显示名，id 由服务端生成）
+    let (_, agg) = ctx
+        .get(&format!("/api/spaces/{space_id}/history/aggregate"), Some(&a_token), &[])
+        .await;
+    let first = &agg["entries"].as_array().unwrap()[0];
+    assert_eq!(first["authorId"], "space:alice", "署名 id 应由服务端按账号生成：{agg}");
+    assert_eq!(first["authorName"], "alice", "署名应取账号显示名：{agg}");
+
     // 聚合：版本流 + 时间戳（v1 与滑动更新后的 v3 = 两版）
     let (status, agg) = ctx
         .get(&format!("/api/spaces/{space_id}/history/aggregate"), Some(&a_token), &[])
