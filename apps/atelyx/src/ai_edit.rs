@@ -258,17 +258,12 @@ fn apply_local_note(
             return iced::Task::none();
         }
     };
-    let base = if open && app.dirty {
-        // 草稿的祖先必须是上次落盘正文；磁盘已变说明外部也改过，无法安全对齐
-        if disk != app.note_base {
-            let _ = reply.send(Err(format!(
-                "文件已被外部修改，且你有未保存的改动；请先保存或重新打开 {path} 后再让 AI 修改"
-            )));
+    let base = match atelyx_core::ai::note_edit::local_base(open, app.dirty, &disk, &app.note_base, &path) {
+        Ok(base) => base,
+        Err(e) => {
+            let _ = reply.send(Err(e));
             return iced::Task::none();
         }
-        app.note_base.clone()
-    } else {
-        disk.clone()
     };
     let (ai_text, replaced) = match atelyx_core::ai::edit_host::apply_note_op(&base, &op) {
         Ok(value) => value,
@@ -378,7 +373,7 @@ fn apply_space_note(
     let client = session.client.clone();
     let space_id = session.space_id.clone();
     let base = app.space_note_flushed.clone().unwrap_or_default();
-    let source = server_text.unwrap_or_else(|| base.clone());
+    let source = atelyx_core::ai::note_edit::space_source(server_text.as_deref(), Some(&base));
     let (ai_text, replaced) = match atelyx_core::ai::edit_host::apply_note_op(&source, &op) {
         Ok(value) => value,
         Err(e) => {
@@ -386,15 +381,20 @@ fn apply_space_note(
             return iced::Task::none();
         }
     };
-    // 打开且本端有未落盘内容：AI 结果以最新服务端文本为源，要求两侧共同祖先成立——
-    // 服务端既非落盘基线也非本端文本 = 双方都改过，无法安全对齐，拒绝写入不动草稿
-    let diverged = open && app.note_text != base;
-    if diverged && source != base && source != app.note_text {
-        let _ = reply.send(Err(format!(
-            "文件已被他人修改，且你有未保存的改动；请先保存或重新打开 {path} 后再让 AI 修改"
-        )));
-        return iced::Task::none();
-    }
+    // 打开且本端有未落盘内容：AI 结果以最新服务端文本为源，要求两侧共同祖先成立
+    let diverged = match atelyx_core::ai::note_edit::space_diverged_conflict(
+        open,
+        &app.note_text,
+        &base,
+        &source,
+        &path,
+    ) {
+        Ok(diverged) => diverged,
+        Err(e) => {
+            let _ = reply.send(Err(e));
+            return iced::Task::none();
+        }
+    };
     let merged = if diverged {
         match atelyx_core::ai::edit_host::merge_note_edit(&base, &app.note_text, &ai_text) {
             Ok(text) => text,
@@ -550,16 +550,23 @@ pub fn on_done(
     end_presence(app);
     // 只有「当前打开的笔记」才回填编辑面状态：写别的文件失败不得污染本篇的脏标记与错误条
     let is_open_note = app.ui.last_note_file.as_deref() == Some(path.as_str());
+    let settle = atelyx_core::ai::note_edit::settle_note_done(
+        is_open_note,
+        &content,
+        &app.note_text,
+        err.as_deref(),
+    );
+    if let Some(base) = settle.note_base {
+        app.note_base = base;
+    }
+    if let Some(dirty) = settle.dirty {
+        app.dirty = dirty;
+    }
+    if let Some(error) = settle.save_error {
+        app.save_error = error;
+    }
     match err {
         None => {
-            if is_open_note {
-                // 落盘正文即基线（纠正期间在途保存回执可能带来的回退）；期间新输入保持脏
-                app.note_base = content.clone();
-                if app.note_text == content {
-                    app.dirty = false;
-                }
-                app.save_error = None;
-            }
             if matches!(app.repo_kind, RepoKind::Space(_)) && is_open_note {
                 app.space_note_flushed = Some(content);
             }
@@ -569,10 +576,6 @@ pub fn on_done(
             app.reload_history()
         }
         Some(e) => {
-            if is_open_note {
-                app.save_error = Some(e.clone());
-                app.dirty = true;
-            }
             app.notify(NoticeLevel::Error, format!("AI 修改未落盘：{e}"));
             iced::Task::none()
         }
