@@ -287,7 +287,8 @@ fn apply_local_note(
         space_actions::apply_remote_text(app, merged.clone());
     }
     if open {
-        app.note_base = merged.clone();
+        // 基线只在落盘回执里推进（见 on_done）：这里提前推进会让写盘失败后的下一次编辑
+        // 把「上次 AI 写入未落盘」误判成外部改动
         app.dirty = false;
         app.save_error = None;
     }

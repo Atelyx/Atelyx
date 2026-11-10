@@ -48,8 +48,8 @@ impl Default for AiPresence {
 impl AiPresence {
     pub fn new() -> Self {
         AiPresence {
-            // 编辑结束后的「刚刚修改」要在对端留满展示窗口：通道超时按窗口取，
-            // 空闲态由壳的周期拍保活续期（见 keepalive）
+            // 编辑结束后的「刚刚修改」要在对端留满展示窗口：通道超时按窗口取；
+            // 空闲态不保活，条目到期由对端剔除
             channel: EphemeralChannel::with_timeout(IDLE_WINDOW),
             view: String::new(),
             file: None,

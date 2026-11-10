@@ -121,7 +121,7 @@ impl EphemeralChannel {
         self.resend(now)
     }
 
-    /// 立即重发（重连后对端旧条目将在 [`TIMEOUT`] 过期，用当前状态覆盖）。
+    /// 立即重发（重连后对端旧条目按本通道超时过期，用当前状态覆盖）。
     pub fn resend(&mut self, now: Instant) -> Option<Value> {
         let state = self.local_state.clone()?;
         self.emit(now, state)
