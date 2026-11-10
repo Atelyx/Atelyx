@@ -3,6 +3,7 @@
 
 use tokio::sync::oneshot;
 
+use atelyx_core::ai::doc_edit::{self, PlanError};
 use atelyx_core::ai::edit_host::{CanvasOp, EditActor, TableOp};
 use atelyx_core::history::{HistoryAction, HistoryEditor, HistoryKind, RecordOpts};
 use atelyx_core::space_client::{HistoryAuthorReq, HistoryRecordReq, SpaceError};
@@ -54,75 +55,54 @@ fn apply_local_table(
     let Ok(root) = app.vault.root() else {
         return fail(app, reply, "仓库未打开".to_string());
     };
-    let disk = match atelyx_core::vault::read_table_file_cached(&app.vault, &root, &path) {
-        Ok((_, table)) => table,
-        // 文件不存在 = 本次创建：从空模型起算（坏文件不可当空表覆盖）
-        Err(_) if !vault_file_exists(&root, &path).unwrap_or(false) => {
-            atelyx_core::table_ops::new_table_file(&crate::layout_view::file_label(&path))
-        }
+    let title = doc_edit::file_label(&path);
+    let disk = match doc_edit::read_local_or_new::<TableFile>(&app.vault, &root, &path, &title) {
+        Ok(model) => model,
         Err(e) => return fail(app, reply, format!("表格不存在或不可读：{path}（{e}）")),
     };
     let open = app.table.as_ref().filter(|s| s.file == path);
     // 打开会话：补丁以保存基线为源（用户未保存编辑随本次落盘一并上行）；未打开：以磁盘真源为源
-    let baseline = match open {
-        Some(s) => s.saved.clone(),
-        None => disk.clone(),
-    };
-    let base = match open {
-        Some(s) => s.data.clone(),
-        None => disk.clone(),
-    };
-    let mut after = base.clone();
-    if let Err(e) = atelyx_core::ai::doc_ops::apply_table_ops(&mut after, &ops) {
-        return fail(app, reply, e);
-    }
-    let Some(patch) = atelyx_core::vault::compute_table_patch(&baseline, &after) else {
-        let _ = reply.send(Ok(format!("表格未变化：{path}（操作与现值相同）")));
-        return iced::Task::none();
-    };
-    let label = crate::layout_view::file_label(&path);
+    let baseline = open.map(|s| s.saved.clone()).unwrap_or_else(|| disk.clone());
+    let base = open.map(|s| s.data.clone()).unwrap_or_else(|| disk.clone());
     let updated_at = crate::now_secs() as i64;
-    after.title = label.clone();
+    let planned = match doc_edit::plan(&baseline, &base, &ops, &title, updated_at) {
+        Ok(planned) => planned,
+        Err(PlanError::Unchanged) => {
+            let _ = reply.send(Ok(format!("表格未变化：{path}（操作与现值相同）")));
+            return iced::Task::none();
+        }
+        Err(PlanError::Ops(e)) => return fail(app, reply, e),
+    };
     // 打开会话先合入：用户未保存编辑保留，随后整份落盘（与既有保存链同口径）
-    merge_table_into_session(app, &path, &after, updated_at);
-    let summary = atelyx_core::history::version_summary(
-        HistoryKind::Table,
-        &base_json(&baseline),
-        &base_json(&after),
-    );
-    let ok_text = format!("已编辑 {path}（{} 项操作：{summary}）", ops.len());
+    merge_table_into_session(app, &path, &planned.after, updated_at);
+    let ok_text = format!("已编辑 {path}（{} 项操作：{}）", ops.len(), planned.summary);
     let queue = app.vault.writes.clone();
     let state = app.vault.clone();
     let author = actor.author.clone();
     let editor = editor_of(&actor);
     crate::ai_edit::begin_presence_for(app, "table", &path, &actor, &ok_text);
     let rel = path.clone();
-    let frozen = after.clone();
-    let frozen_msg = after;
+    let frozen = planned.after.clone();
+    let frozen_msg = planned.after.clone();
+    let patch = planned.patch.clone();
+    let expected_id = planned.after.id.clone();
     let reply_text = ok_text.clone();
     iced::Task::perform(
         async move {
             let outcome = async {
+                let written = doc_edit::commit_local::<TableFile>(
+                    &queue,
+                    &root,
+                    &rel,
+                    &expected_id,
+                    &frozen,
+                    &patch,
+                    &title,
+                    updated_at,
+                )
+                .await?;
                 let file = atelyx_core::vault::safe_join(&root, &rel, false)?;
-                let cache_file = file.clone();
-                // 读盘到落盘之间磁盘可能被外部改过：重读与合并放进写盘队列，
-                // 外部改动落在未触及实体上时随本次落盘保留（与人工保存同一合并口径）
-                let written = queue
-                    .bulk(move || {
-                        let mut disk = match atelyx_core::vault::read_table_file(&file) {
-                            // 磁盘被外部替换为其他实体：本端整份重建（等同文件缺失）
-                            Ok(t) if t.id == frozen.id => t,
-                            _ => frozen,
-                        };
-                        atelyx_core::vault::apply_table_patch(&mut disk, &patch);
-                        disk.title = label;
-                        disk.updated_at = updated_at;
-                        let json = serde_json::to_string_pretty(&disk).map_err(|e| e.to_string())?;
-                        atelyx_core::vault::atomic_write(&file, &json)?;
-                        Ok(disk)
-                    })
-                    .await?;
-                atelyx_core::vault::cache_put_table(&state, &cache_file, &rel, &written);
+                atelyx_core::vault::cache_put_table(&state, &file, &rel, &written);
                 let content = base_json(&written);
                 record_table_version(root.clone(), rel.clone(), content, author, editor).await;
                 Ok::<TableFile, String>(written)
@@ -149,7 +129,7 @@ fn apply_local_table(
     .chain(iced::Task::done(Message::AiEditDone(gen, path, String::new(), None)))
 }
 
-/// 本地画布：口径同 apply_local_table。
+/// 本地画布：口径同 apply_local_table（画布额外收敛视图态与引用补读）。
 fn apply_local_canvas(
     app: &mut App,
     path: String,
@@ -161,45 +141,29 @@ fn apply_local_canvas(
     let Ok(root) = app.vault.root() else {
         return fail(app, reply, "仓库未打开".to_string());
     };
-    let disk = match atelyx_core::vault::read_canvas_file_cached(&app.vault, &root, &path) {
-        Ok((_, canvas)) => canvas,
-        // 文件不存在 = 本次创建：从空模型起算（坏文件不可当空画布覆盖）
-        Err(_) if !vault_file_exists(&root, &path).unwrap_or(false) => {
-            atelyx_core::table_ops::new_canvas_file(&crate::layout_view::file_label(&path))
-        }
+    let title = doc_edit::file_label(&path);
+    let disk = match doc_edit::read_local_or_new::<CanvasFile>(&app.vault, &root, &path, &title) {
+        Ok(model) => model,
         Err(e) => return fail(app, reply, format!("画布不存在或不可读：{path}（{e}）")),
     };
     let open = app.canvas.as_ref().filter(|s| s.file == path);
-    // 打开会话：补丁以保存基线为源（用户未保存编辑随本次落盘一并上行）；未打开：以磁盘真源为源
-    let baseline = match open {
-        Some(s) => s.saved.clone(),
-        None => disk.clone(),
-    };
-    let base = match open {
-        Some(s) => s.data.clone(),
-        None => disk.clone(),
-    };
-    let mut after = base.clone();
-    if let Err(e) = atelyx_core::ai::doc_ops::apply_canvas_ops(&mut after, &ops) {
-        return fail(app, reply, e);
-    }
-    let Some(patch) = atelyx_core::vault::compute_canvas_patch(&baseline, &after) else {
-        let _ = reply.send(Ok(format!("画布未变化：{path}（操作与现值相同）")));
-        return iced::Task::none();
-    };
-    let label = crate::layout_view::file_label(&path);
+    let baseline = open.map(|s| s.saved.clone()).unwrap_or_else(|| disk.clone());
+    let base = open.map(|s| s.data.clone()).unwrap_or_else(|| disk.clone());
     let updated_at = crate::now_secs() as i64;
-    after.title = label.clone();
-    let merge = merge_canvas_into_session(app, &path, &after, &patch, updated_at);
-    let summary = atelyx_core::history::version_summary(
-        HistoryKind::Canvas,
-        &base_json(&baseline),
-        &base_json(&after),
-    );
+    let planned = match doc_edit::plan(&baseline, &base, &ops, &title, updated_at) {
+        Ok(planned) => planned,
+        Err(PlanError::Unchanged) => {
+            let _ = reply.send(Ok(format!("画布未变化：{path}（操作与现值相同）")));
+            return iced::Task::none();
+        }
+        Err(PlanError::Ops(e)) => return fail(app, reply, e),
+    };
+    let merge = merge_canvas_into_session(app, &path, &planned.after, &planned.patch, updated_at);
     let ok_text = format!(
-        "已编辑 {path}（{} 项操作：{summary}）；实体：{}",
+        "已编辑 {path}（{} 项操作：{}）；实体：{}",
         ops.len(),
-        touched_ids(&patch).join("、")
+        planned.summary,
+        touched_ids(&planned.patch).join("、")
     );
     let queue = app.vault.writes.clone();
     let state = app.vault.clone();
@@ -207,32 +171,28 @@ fn apply_local_canvas(
     let editor = editor_of(&actor);
     crate::ai_edit::begin_presence_for(app, "canvas", &path, &actor, &ok_text);
     let rel = path.clone();
-    let frozen = after.clone();
-    let frozen_msg = after;
+    let frozen = planned.after.clone();
+    let frozen_msg = planned.after.clone();
+    let patch = planned.patch.clone();
+    let expected_id = planned.after.id.clone();
     let reply_text = ok_text.clone();
     merge.chain(
         iced::Task::perform(
             async move {
                 let outcome = async {
+                    let written = doc_edit::commit_local::<CanvasFile>(
+                        &queue,
+                        &root,
+                        &rel,
+                        &expected_id,
+                        &frozen,
+                        &patch,
+                        &title,
+                        updated_at,
+                    )
+                    .await?;
                     let file = atelyx_core::vault::safe_join(&root, &rel, false)?;
-                    let cache_file = file.clone();
-                    // 读盘到落盘之间磁盘可能被外部改过：重读与合并放进写盘队列（同 apply_local_table）
-                    let written = queue
-                        .bulk(move || {
-                            let mut disk = match atelyx_core::vault::read_canvas_file(&file) {
-                                Ok(c) if c.id == frozen.id => c,
-                                _ => frozen,
-                            };
-                            atelyx_core::vault::apply_canvas_patch(&mut disk, &patch);
-                            disk.title = label;
-                            disk.updated_at = updated_at;
-                            let json =
-                                serde_json::to_string_pretty(&disk).map_err(|e| e.to_string())?;
-                            atelyx_core::vault::atomic_write(&file, &json)?;
-                            Ok(disk)
-                        })
-                        .await?;
-                    atelyx_core::vault::cache_put_canvas(&state, &cache_file, &rel, &written);
+                    atelyx_core::vault::cache_put_canvas(&state, &file, &rel, &written);
                     let content = base_json(&written);
                     record_canvas_version(root.clone(), rel.clone(), content, author, editor).await;
                     Ok::<CanvasFile, String>(written)
@@ -365,20 +325,20 @@ fn apply_space_table(
     };
     let baseline = s.saved.clone();
     let base = s.data.clone();
-    let mut after = base.clone();
-    if let Err(e) = atelyx_core::ai::doc_ops::apply_table_ops(&mut after, &ops) {
-        return fail(app, reply, e);
-    }
-    let Some(patch) = atelyx_core::vault::compute_table_patch(&baseline, &after) else {
-        let _ = reply.send(Ok(format!("表格未变化：{path}（操作与现值相同）")));
-        return iced::Task::none();
+    let title = doc_edit::file_label(&path);
+    let updated_at = crate::now_secs() as i64;
+    let planned = match doc_edit::plan(&baseline, &base, &ops, &title, updated_at) {
+        Ok(planned) => planned,
+        Err(PlanError::Unchanged) => {
+            let _ = reply.send(Ok(format!("表格未变化：{path}（操作与现值相同）")));
+            return iced::Task::none();
+        }
+        Err(PlanError::Ops(e)) => return fail(app, reply, e),
     };
-    merge_table_into_session(app, &path, &after, after.updated_at);
-    let summary = atelyx_core::history::version_summary(
-        HistoryKind::Table,
-        &base_json(&baseline),
-        &base_json(&after),
-    );
+    let patch = planned.patch;
+    let after = planned.after;
+    let summary = planned.summary;
+    merge_table_into_session(app, &path, &after, updated_at);
     let ok_text = format!("已编辑 {path}（{} 项操作：{summary}）", ops.len());
     let content = base_json(&after);
     let author = actor.author.clone();
@@ -467,35 +427,31 @@ fn apply_space_table_from_server(
                     }
                     Err(e) => return Err(format!("表格不存在或不可读：{e}")),
                 };
-                let mut after = base.clone();
-                atelyx_core::ai::doc_ops::apply_table_ops(&mut after, &ops)?;
-                let Some(patch) = atelyx_core::vault::compute_table_patch(&base, &after) else {
-                    return Ok((rel.clone(), after, "未产生补丁".to_string()));
-                };
-                let summary = atelyx_core::history::version_summary(
-                    HistoryKind::Table,
-                    &base_json(&base),
-                    &base_json(&after),
-                );
-                let new_file = match client.table_patch(&space_id, &rel, &patch).await {
-                    Ok(ack) => ack.file,
-                    Err(SpaceError::BadRequest(m)) => {
-                        return Err(format!("表格已被他人修改，请刷新后重试（{m}）"));
+                let title = doc_edit::file_label(&rel);
+                let updated_at = crate::now_secs() as i64;
+                let planned = match doc_edit::plan(&base, &base, &ops, &title, updated_at) {
+                    Ok(planned) => planned,
+                    Err(PlanError::Unchanged) => {
+                        return Ok((rel.clone(), base, "未产生补丁".to_string()));
                     }
-                    Err(e) => return Err(e.to_string()),
+                    Err(PlanError::Ops(e)) => return Err(e),
                 };
+                let new_file = doc_edit::commit_space::<TableFile>(
+                    &client, &space_id, &rel, &planned.patch,
+                )
+                .await?;
                 space_history_record(
                     client.clone(),
                     space_id.clone(),
                     "table".to_string(),
                     rel.clone(),
-                    base_json(&after),
-                    summary.clone(),
+                    base_json(&planned.after),
+                    planned.summary.clone(),
                     author,
                     editor,
                 )
                 .await;
-                Ok((new_file, after, summary))
+                Ok((new_file, planned.after, planned.summary))
             }
             .await;
             let receipt = match &outcome {
@@ -563,19 +519,19 @@ fn apply_space_canvas(
     };
     let baseline = s.saved.clone();
     let base = s.data.clone();
-    let mut after = base.clone();
-    if let Err(e) = atelyx_core::ai::doc_ops::apply_canvas_ops(&mut after, &ops) {
-        return fail(app, reply, e);
-    }
-    let Some(patch) = atelyx_core::vault::compute_canvas_patch(&baseline, &after) else {
-        let _ = reply.send(Ok(format!("画布未变化：{path}（操作与现值相同）")));
-        return iced::Task::none();
+    let title = doc_edit::file_label(&path);
+    let updated_at = crate::now_secs() as i64;
+    let planned = match doc_edit::plan(&baseline, &base, &ops, &title, updated_at) {
+        Ok(planned) => planned,
+        Err(PlanError::Unchanged) => {
+            let _ = reply.send(Ok(format!("画布未变化：{path}（操作与现值相同）")));
+            return iced::Task::none();
+        }
+        Err(PlanError::Ops(e)) => return fail(app, reply, e),
     };
-    let summary = atelyx_core::history::version_summary(
-        HistoryKind::Canvas,
-        &base_json(&baseline),
-        &base_json(&after),
-    );
+    let patch = planned.patch;
+    let after = planned.after;
+    let summary = planned.summary;
     let ok_text = format!(
         "已编辑 {path}（{} 项操作：{summary}）；实体：{}",
         ops.len(),
@@ -670,35 +626,31 @@ fn apply_space_canvas_from_server(
                     }
                     Err(e) => return Err(format!("画布不存在或不可读：{e}")),
                 };
-                let mut after = base.clone();
-                atelyx_core::ai::doc_ops::apply_canvas_ops(&mut after, &ops)?;
-                let Some(patch) = atelyx_core::vault::compute_canvas_patch(&base, &after) else {
-                    return Ok((rel.clone(), after, "未产生补丁".to_string()));
-                };
-                let summary = atelyx_core::history::version_summary(
-                    HistoryKind::Canvas,
-                    &base_json(&base),
-                    &base_json(&after),
-                );
-                let new_file = match client.canvas_patch(&space_id, &rel, &patch).await {
-                    Ok(ack) => ack.file,
-                    Err(SpaceError::BadRequest(m)) => {
-                        return Err(format!("画布已被他人修改，请刷新后重试（{m}）"));
+                let title = doc_edit::file_label(&rel);
+                let updated_at = crate::now_secs() as i64;
+                let planned = match doc_edit::plan(&base, &base, &ops, &title, updated_at) {
+                    Ok(planned) => planned,
+                    Err(PlanError::Unchanged) => {
+                        return Ok((rel.clone(), base, "未产生补丁".to_string()));
                     }
-                    Err(e) => return Err(e.to_string()),
+                    Err(PlanError::Ops(e)) => return Err(e),
                 };
+                let new_file = doc_edit::commit_space::<CanvasFile>(
+                    &client, &space_id, &rel, &planned.patch,
+                )
+                .await?;
                 space_history_record(
                     client.clone(),
                     space_id.clone(),
                     "canvas".to_string(),
                     rel.clone(),
-                    base_json(&after),
-                    summary.clone(),
+                    base_json(&planned.after),
+                    planned.summary.clone(),
                     author,
                     editor,
                 )
                 .await;
-                Ok((new_file, after, summary))
+                Ok((new_file, planned.after, planned.summary))
             }
             .await;
             let receipt = match &outcome {
@@ -742,15 +694,6 @@ fn apply_space_canvas_from_server(
 }
 
 // ===== 共用小件 =====
-
-/// 仓库相对路径是否存在：路径本身非法（越界 / 绝对路径）向上报错，父目录缺失按不存在处理。
-fn vault_file_exists(root: &std::path::Path, rel: &str) -> Result<bool, String> {
-    match atelyx_core::vault::safe_join(root, rel, false) {
-        Ok(path) => Ok(path.is_file()),
-        Err(e) if atelyx_core::vault::validate_tool_path(rel).is_err() => Err(e),
-        Err(_) => Ok(false),
-    }
-}
 
 /// 可读失败回执：提示层可见 + 工具回执 Err（不静默）。
 fn fail(

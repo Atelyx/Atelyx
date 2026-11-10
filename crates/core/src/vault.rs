@@ -767,7 +767,7 @@ pub fn same_physical_file(a: &Path, b: &Path) -> bool {
 
 /// 画布增量保存补丁（对应 `.atlx` schema）：只含变化/新增/删除的实体，
 /// 按稳定 id 合并——removed 幂等（缺 id 不报错），upsert 覆盖同 id 或追加。
-#[derive(Serialize, Deserialize, Default)]
+#[derive(Serialize, Deserialize, Default, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct CanvasPatch {
     /// 画布 id（防串文件守卫）。
@@ -787,7 +787,7 @@ pub struct CanvasPatch {
 }
 
 /// 表格增量保存补丁（对应 `.atb` schema）。
-#[derive(Serialize, Deserialize, Default)]
+#[derive(Serialize, Deserialize, Default, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct TablePatch {
     /// 表格 id（防串文件守卫）。

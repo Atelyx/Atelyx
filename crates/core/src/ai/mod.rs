@@ -4,6 +4,7 @@
 
 pub mod agent;
 pub mod canvas_refs;
+pub mod doc_edit;
 pub mod doc_ops;
 pub mod edit_host;
 
