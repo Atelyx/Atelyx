@@ -6124,6 +6124,27 @@ impl App {
                         self.schedule_persist();
                     }
                 }
+                // 打开中的插件文档跟随路径：插件按 host:doc.open 给的路径读文件，
+                // 停旧路径会让它后续保存写到已不存在的位置
+                let doc_next = self.doc_open.as_ref().and_then(|d| {
+                    if d.path == *from {
+                        Some(to.clone())
+                    } else {
+                        d.path
+                            .starts_with(&format!("{from}/"))
+                            .then(|| d.path.replacen(from, to, 1))
+                    }
+                });
+                if let Some(next) = doc_next {
+                    if let Some(doc) = self.doc_open.as_mut() {
+                        let old = std::mem::replace(&mut doc.path, next.clone());
+                        let (plugin_id, surface_id) = (doc.plugin_id.clone(), doc.surface_id.clone());
+                        self.plugins.notify_doc_close(&plugin_id, &surface_id, &old);
+                        self.plugins.notify_doc_open(&plugin_id, &surface_id, &next);
+                    }
+                    self.ui.last_doc_file = Some(next);
+                    self.schedule_persist();
+                }
                 space_actions::collab_follow_rename(self, from, to);
             }
             FollowUp::Deleted { rel, is_dir } => {
