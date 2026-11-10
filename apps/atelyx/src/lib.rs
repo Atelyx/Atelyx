@@ -6284,17 +6284,7 @@ impl App {
                                         vault::write_table_file(&path, &table).map(|_| rel)
                                     }
                                     DraftKind::Canvas => {
-                                        // 初始 = 空画布（标题随文件名起稿）
-                                        let now = now_secs() as i64;
-                                        let canvas = atelyx_core::vault::CanvasFile {
-                                            schema: vault::CANVAS_SCHEMA.into(),
-                                            id: uuid::Uuid::new_v4().to_string(),
-                                            title: name,
-                                            nodes: vec![],
-                                            edges: vec![],
-                                            created_at: now,
-                                            updated_at: now,
-                                        };
+                                        let canvas = atelyx_core::table_ops::new_canvas_file(&name);
                                         let path = vault::safe_join(&root, &rel, true)?;
                                         vault::write_canvas_file(&path, &canvas).map(|_| rel)
                                     }

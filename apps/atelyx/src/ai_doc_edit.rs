@@ -56,6 +56,10 @@ fn apply_local_table(
     };
     let disk = match atelyx_core::vault::read_table_file_cached(&app.vault, &root, &path) {
         Ok((_, table)) => table,
+        // 文件不存在 = 本次创建：从空模型起算（坏文件不可当空表覆盖）
+        Err(_) if !vault_file_exists(&root, &path).unwrap_or(false) => {
+            atelyx_core::table_ops::new_table_file(&crate::layout_view::file_label(&path))
+        }
         Err(e) => return fail(app, reply, format!("表格不存在或不可读：{path}（{e}）")),
     };
     let open = app.table.as_ref().filter(|s| s.file == path);
@@ -159,6 +163,10 @@ fn apply_local_canvas(
     };
     let disk = match atelyx_core::vault::read_canvas_file_cached(&app.vault, &root, &path) {
         Ok((_, canvas)) => canvas,
+        // 文件不存在 = 本次创建：从空模型起算（坏文件不可当空画布覆盖）
+        Err(_) if !vault_file_exists(&root, &path).unwrap_or(false) => {
+            atelyx_core::table_ops::new_canvas_file(&crate::layout_view::file_label(&path))
+        }
         Err(e) => return fail(app, reply, format!("画布不存在或不可读：{path}（{e}）")),
     };
     let open = app.canvas.as_ref().filter(|s| s.file == path);
@@ -443,11 +451,22 @@ fn apply_space_table_from_server(
     iced::Task::perform(
         async move {
             let outcome: Result<(String, TableFile, String), String> = async {
-                let text = client
-                    .get_file_text(&space_id, &rel)
-                    .await
-                    .map_err(|e| format!("表格不存在或不可读：{e}"))?;
-                let base = parse_table(&text)?;
+                // 服务端还没有这个文件 = 本次创建：先落空模型，再按补丁上行
+                let base = match client.get_file_text(&space_id, &rel).await {
+                    Ok(text) => parse_table(&text)?,
+                    Err(SpaceError::NotFound) => {
+                        let created =
+                            atelyx_core::table_ops::new_table_file(&crate::layout_view::file_label(&rel));
+                        let json = serde_json::to_string_pretty(&created)
+                            .map_err(|e| e.to_string())?;
+                        client
+                            .put_file_text(&space_id, &rel, &json)
+                            .await
+                            .map_err(|e| format!("新建表格失败：{e}"))?;
+                        created
+                    }
+                    Err(e) => return Err(format!("表格不存在或不可读：{e}")),
+                };
                 let mut after = base.clone();
                 atelyx_core::ai::doc_ops::apply_table_ops(&mut after, &ops)?;
                 let Some(patch) = atelyx_core::vault::compute_table_patch(&base, &after) else {
@@ -636,11 +655,21 @@ fn apply_space_canvas_from_server(
     iced::Task::perform(
         async move {
             let outcome: Result<(String, CanvasFile, String), String> = async {
-                let text = client
-                    .get_file_text(&space_id, &rel)
-                    .await
-                    .map_err(|e| format!("画布不存在或不可读：{e}"))?;
-                let base = parse_canvas(&text)?;
+                // 服务端还没有这个文件 = 本次创建：先落空模型，再按补丁上行
+                let base = match client.get_file_text(&space_id, &rel).await {
+                    Ok(text) => parse_canvas(&text)?,
+                    Err(SpaceError::NotFound) => {
+                        let created = atelyx_core::table_ops::new_canvas_file(&crate::layout_view::file_label(&rel));
+                        let json = serde_json::to_string_pretty(&created)
+                            .map_err(|e| e.to_string())?;
+                        client
+                            .put_file_text(&space_id, &rel, &json)
+                            .await
+                            .map_err(|e| format!("新建画布失败：{e}"))?;
+                        created
+                    }
+                    Err(e) => return Err(format!("画布不存在或不可读：{e}")),
+                };
                 let mut after = base.clone();
                 atelyx_core::ai::doc_ops::apply_canvas_ops(&mut after, &ops)?;
                 let Some(patch) = atelyx_core::vault::compute_canvas_patch(&base, &after) else {
@@ -713,6 +742,15 @@ fn apply_space_canvas_from_server(
 }
 
 // ===== 共用小件 =====
+
+/// 仓库相对路径是否存在：路径本身非法（越界 / 绝对路径）向上报错，父目录缺失按不存在处理。
+fn vault_file_exists(root: &std::path::Path, rel: &str) -> Result<bool, String> {
+    match atelyx_core::vault::safe_join(root, rel, false) {
+        Ok(path) => Ok(path.is_file()),
+        Err(e) if atelyx_core::vault::validate_tool_path(rel).is_err() => Err(e),
+        Err(_) => Ok(false),
+    }
+}
 
 /// 可读失败回执：提示层可见 + 工具回执 Err（不静默）。
 fn fail(

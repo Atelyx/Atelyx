@@ -76,6 +76,23 @@ pub fn column_auto_width(field: &TableField, rows: &[TableRow]) -> f64 {
     name_width.max(content_width).clamp(MIN_COL_WIDTH, MAX_COL_WIDTH)
 }
 
+/// 新建空画布（标题随文件名起稿；id 与表格同口径用 nanoid）。
+pub fn new_canvas_file(title: &str) -> crate::vault::CanvasFile {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    crate::vault::CanvasFile {
+        schema: crate::vault::CANVAS_SCHEMA.into(),
+        id: nanoid::nanoid!(),
+        title: title.to_string(),
+        nodes: vec![],
+        edges: vec![],
+        created_at: now,
+        updated_at: now,
+    }
+}
+
 /// 新建空表格（自带一个「名称」文本字段，空白表无字段难用）。
 pub fn new_table_file(title: &str) -> TableFile {
     let now = std::time::SystemTime::now()

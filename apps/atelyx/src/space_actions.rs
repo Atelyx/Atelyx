@@ -2451,20 +2451,8 @@ pub fn space_create_entry(app: &mut App, dir: &str, kind: DraftKind, name: &str)
     let initial = match kind {
         DraftKind::Table => serde_json::to_string_pretty(&atelyx_core::table_ops::new_table_file(name))
             .unwrap_or_default(),
-        DraftKind::Canvas => {
-            // 初始 = 空画布（标题随文件名起稿）
-            let now = crate::now_secs() as i64;
-            serde_json::to_string_pretty(&atelyx_core::vault::CanvasFile {
-                schema: atelyx_core::vault::CANVAS_SCHEMA.into(),
-                id: uuid::Uuid::new_v4().to_string(),
-                title: name.to_string(),
-                nodes: vec![],
-                edges: vec![],
-                created_at: now,
-                updated_at: now,
-            })
-            .unwrap_or_default()
-        }
+        DraftKind::Canvas => serde_json::to_string_pretty(&atelyx_core::table_ops::new_canvas_file(name))
+            .unwrap_or_default(),
         _ => String::new(),
     };
     Task::perform(

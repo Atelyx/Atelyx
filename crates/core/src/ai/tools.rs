@@ -305,7 +305,7 @@ pub fn builtin_tools() -> &'static [ToolDef] {
                 name: "table_edit",
                 label: "编辑表格",
                 icon: "pencil",
-                description: "编辑表格（.atb）：一次调用提交一批操作，整批落成一个补丁。op = set_cell（按 rowId / fieldId 写单元格，value 传 null 清空）| add_row（cells 按字段 id 给初值）| delete_rows（rowIds）。表格不能用文件工具整文件写。",
+                description: "编辑表格（.atb）：一次调用提交一批操作，整批落成一个补丁。op = set_cell（按 rowId / fieldId 写单元格，value 传 null 清空）| add_row（cells 按字段 id 给初值）| delete_rows（rowIds）。表格文件不存在时按给定路径新建（标题取文件名）。表格不能用文件工具整文件写。",
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -351,7 +351,7 @@ pub fn builtin_tools() -> &'static [ToolDef] {
                 name: "canvas_edit",
                 label: "编辑画布",
                 icon: "layers",
-                description: "编辑画布（.atlx）：一次调用提交一批操作，整批落成一个补丁。op = add_text_card（text，x/y 缺省自动落位）| add_note_card（path 引用仓库笔记）| connect（from / to 节点 id，kind = data 数据流 / link 关联）| update_text（nodeId / text）| delete_node（nodeId）。画布不能用文件工具整文件写。",
+                description: "编辑画布（.atlx）：一次调用提交一批操作，整批落成一个补丁。op = add_text_card（text，x/y 缺省自动落位）| add_note_card（path 引用仓库笔记）| connect（from / to 节点 id，kind = data 数据流 / link 关联）| update_text（nodeId / text）| delete_node（nodeId）。画布文件不存在时按给定路径新建（标题取文件名）。画布不能用文件工具整文件写。",
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -1181,6 +1181,58 @@ async fn read_table_model(ctx: &ToolCtx, rel: &str) -> Result<vault::TableFile, 
     }
 }
 
+/// 编辑源模型：文件不存在 = 本次新建（空模型起算）；存在但读不出 = 报错（坏文件不得当空表覆盖）。
+async fn edit_source_table(ctx: &ToolCtx, rel: &str) -> Result<vault::TableFile, String> {
+    match &ctx.repo {
+        RepoAccess::Local { root, .. } => {
+            // 先查存在性：父目录缺失时 safe_join 会报错，不能把「不存在」当成「不可读」
+            if !vault::file_exists(root, rel)? {
+                return Ok(crate::table_ops::new_table_file(&file_label_of(rel)));
+            }
+            let path = vault::safe_join(root, rel, false)?;
+            vault::read_table_file(&path)
+        }
+        RepoAccess::Space { client, space_id } => {
+            match client.get_file_text(space_id, rel).await {
+                Ok(text) => parse_table_model(&text),
+                Err(crate::space_client::SpaceError::NotFound) => {
+                    Ok(crate::table_ops::new_table_file(&file_label_of(rel)))
+                }
+                Err(e) => Err(e.to_string()),
+            }
+        }
+    }
+}
+
+/// 编辑源画布（口径同 [`edit_source_table`]）。
+async fn edit_source_canvas(ctx: &ToolCtx, rel: &str) -> Result<vault::CanvasFile, String> {
+    match &ctx.repo {
+        RepoAccess::Local { root, .. } => {
+            // 先查存在性：父目录缺失时 safe_join 会报错，不能把「不存在」当成「不可读」
+            if !vault::file_exists(root, rel)? {
+                return Ok(crate::table_ops::new_canvas_file(&file_label_of(rel)));
+            }
+            let path = vault::safe_join(root, rel, false)?;
+            vault::read_canvas_file(&path)
+        }
+        RepoAccess::Space { client, space_id } => {
+            match client.get_file_text(space_id, rel).await {
+                Ok(text) => parse_canvas_model(&text),
+                Err(crate::space_client::SpaceError::NotFound) => {
+                    Ok(crate::table_ops::new_canvas_file(&file_label_of(rel)))
+                }
+                Err(e) => Err(e.to_string()),
+            }
+        }
+    }
+}
+
+/// 文件显示标题：末段去扩展名（新建表格 / 画布的标题口径与壳一致）。
+fn file_label_of(rel: &str) -> String {
+    let name = rel.rsplit('/').next().unwrap_or(rel);
+    vault::file_stem(name).to_string()
+}
+
 /// 读画布模型（口径同 read_table_model）。
 async fn read_canvas_model(ctx: &ToolCtx, rel: &str) -> Result<vault::CanvasFile, String> {
     match &ctx.repo {
@@ -1481,7 +1533,8 @@ async fn table_edit(ctx: &ToolCtx, args: &Value) -> ToolResult {
     if let Some(result) = apply_table_via_host(ctx, &rel, ops.clone()).await {
         return result;
     }
-    let base = match read_table_model(ctx, &rel).await {
+    // 不存在 = 本次新建（从空模型起算）；坏文件报错，不当空表覆盖
+    let base = match edit_source_table(ctx, &rel).await {
         Ok(table) => table,
         Err(e) => return ToolResult::err(format!("表格不存在或不可读：{rel}（{e}）")),
     };
@@ -1501,7 +1554,8 @@ async fn table_edit(ctx: &ToolCtx, args: &Value) -> ToolResult {
     let receipt = format!("已编辑 {rel}（{} 项操作：{summary}）", ops.len());
     match &ctx.repo {
         RepoAccess::Local { root, queue } => {
-            let path = match vault::safe_join(root, &rel, false) {
+            // 新建表格的父目录可能还不存在：写路径按建父目录取绝对路径
+            let path = match vault::safe_join(root, &rel, true) {
                 Ok(path) => path,
                 Err(e) => return ToolResult::err(e),
             };
@@ -1540,7 +1594,8 @@ async fn canvas_edit(ctx: &ToolCtx, args: &Value) -> ToolResult {
     if let Some(result) = apply_canvas_via_host(ctx, &rel, ops.clone()).await {
         return result;
     }
-    let base = match read_canvas_model(ctx, &rel).await {
+    // 不存在 = 本次新建（从空模型起算）；坏文件报错，不当空画布覆盖
+    let base = match edit_source_canvas(ctx, &rel).await {
         Ok(canvas) => canvas,
         Err(e) => return ToolResult::err(format!("画布不存在或不可读：{rel}（{e}）")),
     };
@@ -1565,7 +1620,8 @@ async fn canvas_edit(ctx: &ToolCtx, args: &Value) -> ToolResult {
     );
     match &ctx.repo {
         RepoAccess::Local { root, queue } => {
-            let path = match vault::safe_join(root, &rel, false) {
+            // 新建画布的父目录可能还不存在：写路径按建父目录取绝对路径
+            let path = match vault::safe_join(root, &rel, true) {
                 Ok(path) => path,
                 Err(e) => return ToolResult::err(e),
             };
@@ -2302,11 +2358,15 @@ mod tests {
             (json!({ "path": "表.atb", "ops": [{ "op": "boom" }] }), "未知操作"),
             (json!({ "path": "表.atb" }), "缺少 ops"),
             (json!({ "path": "笔记.md" }), "不是表格文件"),
-            (json!({ "path": "无此表.atb", "ops": [{ "op": "add_row" }] }), "不存在或不可读"),
         ] {
             let r = execute(&ctx, "table_edit", args).await;
             assert!(r.is_error && r.text.contains(want), "期望「{want}」，实际：{}", r.text);
         }
+        // 编辑不存在的表格 = 按路径新建（读仍然要求文件存在）
+        let r = execute(&ctx, "table_edit", json!({ "path": "新表.atb", "ops": [{ "op": "add_row" }] })).await;
+        assert!(!r.is_error, "{}", r.text);
+        queue_of(&ctx).drain().await.unwrap();
+        assert!(dir.join("新表.atb").is_file());
         let r = execute(&ctx, "table_read", json!({ "path": "无此表.atb" })).await;
         assert!(r.is_error && r.text.contains("不存在或不可读"), "{}", r.text);
     }
@@ -2505,6 +2565,41 @@ mod tests {
         )
         .await;
         assert!(r.is_error && r.text.contains("宿主拒绝写入"), "{}", r.text);
+    }
+
+    #[tokio::test]
+    async fn domain_edit_creates_missing_file() {
+        let dir = TempDir::new("ai-domain-create");
+        let ctx = ctx(&dir);
+        // 文件不存在：按路径新建空模型再应用 ops（标题取文件名）
+        let r = execute(
+            &ctx,
+            "table_edit",
+            json!({ "path": "计划/排期.atb", "ops": [{ "op": "add_row", "cells": {} }] }),
+        )
+        .await;
+        assert!(!r.is_error, "{}", r.text);
+        queue_of(&ctx).drain().await.unwrap();
+        let table = vault::read_table_file(&dir.join("计划/排期.atb")).unwrap();
+        assert_eq!(table.title, "排期");
+        assert_eq!(table.rows.len(), 1, "ops 应作用在新建的空表上");
+        let r = execute(
+            &ctx,
+            "canvas_edit",
+            json!({ "path": "方案.atlx", "ops": [{ "op": "add_text_card", "text": "首卡" }] }),
+        )
+        .await;
+        assert!(!r.is_error, "{}", r.text);
+        queue_of(&ctx).drain().await.unwrap();
+        let canvas = vault::read_canvas_file(&dir.join("方案.atlx")).unwrap();
+        assert_eq!(canvas.title, "方案");
+        assert_eq!(canvas.nodes.len(), 1);
+        // 坏文件不得当空模型覆盖（解析失败即报错，磁盘原样）
+        std::fs::write(dir.join("坏.atb"), "{不是 JSON").unwrap();
+        let r = execute(&ctx, "table_edit", json!({ "path": "坏.atb", "ops": [{ "op": "add_row" }] })).await;
+        assert!(r.is_error, "{}", r.text);
+        queue_of(&ctx).drain().await.unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("坏.atb")).unwrap(), "{不是 JSON");
     }
 
     #[test]
