@@ -3350,12 +3350,8 @@ fn push_children(
 
 // ===== note 视图 =====
 
-/// 文件显示标题：相对路径末段去掉扩展名（页面内标题、标题栏与改名初值同源——
-/// 改名输入框只给主名，后缀由提交时按原名补回）。
-pub fn file_label(rel: &str) -> String {
-    let name = rel.rsplit('/').next().unwrap_or(rel);
-    atelyx_core::vault::file_stem(name).to_string()
-}
+/// 文件显示标题（改名输入框只给主名，后缀由提交时按原名补回）。
+pub use atelyx_core::vault::file_label;
 
 /// note 视图：工具条（模式分段 + ···菜单）+ 对应档位的内容面。
 pub(crate) fn note_view(app: &App, window: iced::window::Id) -> Element<'_, Message> {

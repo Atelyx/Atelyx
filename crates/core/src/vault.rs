@@ -2463,6 +2463,12 @@ pub fn file_stem(name: &str) -> &str {
     }
 }
 
+/// 仓库相对路径的显示标题：末段去掉扩展名（页面标题、标签与新建文档的标题同源）。
+pub fn file_label(rel: &str) -> String {
+    let name = rel.rsplit('/').next().unwrap_or(rel);
+    file_stem(name).to_string()
+}
+
 /// 名称尾部若恰好是本文件的扩展名（忽略大小写）则剥掉：重命名输入框只显示主名，
 /// 用户补打后缀时不该落成 `名字.atb.atb`。
 pub fn strip_own_extension<'a>(name: &'a str, ext: &str) -> &'a str {

@@ -55,7 +55,7 @@ fn apply_local_table(
     let Ok(root) = app.vault.root() else {
         return fail(app, reply, "仓库未打开".to_string());
     };
-    let title = doc_edit::file_label(&path);
+    let title = atelyx_core::vault::file_label(&path);
     let disk = match doc_edit::read_local_or_new::<TableFile>(&app.vault, &root, &path, &title) {
         Ok(model) => model,
         Err(e) => return fail(app, reply, format!("表格不存在或不可读：{path}（{e}）")),
@@ -141,7 +141,7 @@ fn apply_local_canvas(
     let Ok(root) = app.vault.root() else {
         return fail(app, reply, "仓库未打开".to_string());
     };
-    let title = doc_edit::file_label(&path);
+    let title = atelyx_core::vault::file_label(&path);
     let disk = match doc_edit::read_local_or_new::<CanvasFile>(&app.vault, &root, &path, &title) {
         Ok(model) => model,
         Err(e) => return fail(app, reply, format!("画布不存在或不可读：{path}（{e}）")),
@@ -325,7 +325,7 @@ fn apply_space_table(
     };
     let baseline = s.saved.clone();
     let base = s.data.clone();
-    let title = doc_edit::file_label(&path);
+    let title = atelyx_core::vault::file_label(&path);
     let updated_at = crate::now_secs() as i64;
     let planned = match doc_edit::plan(&baseline, &base, &ops, &title, updated_at) {
         Ok(planned) => planned,
@@ -508,7 +508,7 @@ fn apply_space_canvas(
     };
     let baseline = s.saved.clone();
     let base = s.data.clone();
-    let title = doc_edit::file_label(&path);
+    let title = atelyx_core::vault::file_label(&path);
     let updated_at = crate::now_secs() as i64;
     let planned = match doc_edit::plan(&baseline, &base, &ops, &title, updated_at) {
         Ok(planned) => planned,
