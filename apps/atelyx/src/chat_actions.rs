@@ -2713,8 +2713,8 @@ fn resolve_plugin_session(
     }
 }
 
-/// 插件图片是否落在自己的临时区（`temp/` 段且不在会话附件目录）：这类引用随插件目录被清理即失效，
-/// 需要先归档进会话附件目录。仓库内普通图片路径（用户有意引用）保持原样。
+/// 插件图片是否落在自己的临时区（`temp/` 段且不在宿主托管的附件目录）：这类引用随插件目录被清理
+/// 即失效，需要先归档进会话附件目录。仓库内普通图片路径（用户有意引用）保持原样。
 fn needs_archive(attachments: &[Value]) -> bool {
     attachments.iter().any(|a| {
         a.get("file")
@@ -2723,10 +2723,13 @@ fn needs_archive(attachments: &[Value]) -> bool {
     })
 }
 
-/// 路径是否落在插件临时区（`.atelyx/temp/` 下、且不在会话附件目录）：只有这一段的引用会随插件
-/// 自行清理失效；仓库其它位置（含用户自建的 temp 目录）保持原样。
+/// 路径是否落在插件临时区（`.atelyx/temp/` 下、且不在会话 / 表格附件目录）：只有这一段的引用会随
+/// 插件自行清理失效。表格附件目录由表格删除链回收，归宿主管理，不随插件搬走（否则仓库内留两份）。
 fn is_plugin_temp(file: &str) -> bool {
-    file.starts_with(".atelyx/temp/") && !file.starts_with(".atelyx/temp/chats/")
+    if file.starts_with(".atelyx/temp/chats/") || file.starts_with(".atelyx/temp/tables/") {
+        return false;
+    }
+    file.starts_with(".atelyx/temp/")
 }
 
 /// 把插件临时区的图片复制进会话附件目录，返回替换路径后的 attachments。
@@ -2809,6 +2812,8 @@ fn plugin_chat_send_now(
         Some((id, created)) => {
             // 本次新建的会话记在计划里：后续步骤失败时据此回收，不留空会话
             plan.created_session = created.then(|| id.clone());
+            // 回执重入同一函数：会话已在手，必须写回计划，否则会再建一个会话
+            plan.params.session_id = Some(id.clone());
             id
         }
         None => return iced::Task::none(),
@@ -3146,8 +3151,9 @@ mod tests {
     fn plugin_images_in_temp_need_archiving() {
         // 插件自管的临时区图片随目录清理即失效，发送前归档进会话附件目录
         assert!(needs_archive(&[json!({ "kind": "image", "file": ".atelyx/temp/quick-chat/a.png" })]));
-        // 已落会话目录 / 仓库内普通图片：不搬（用户有意引用）
+        // 已落会话目录 / 表格附件目录 / 仓库内普通图片：不搬（宿主托管，用户有意引用）
         assert!(!needs_archive(&[json!({ "kind": "image", "file": ".atelyx/temp/chats/s1/a.png" })]));
+        assert!(!needs_archive(&[json!({ "kind": "image", "file": ".atelyx/temp/tables/t1/a.png" })]));
         assert!(!needs_archive(&[json!({ "kind": "image", "file": "图片/a.png" })]));
         // 仓库里用户自建的 temp 目录不算插件临时区
         assert!(!needs_archive(&[json!({ "kind": "image", "file": "temp/a.png" })]));
