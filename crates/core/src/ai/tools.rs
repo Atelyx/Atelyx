@@ -217,7 +217,7 @@ pub fn builtin_tools() -> &'static [ToolDef] {
                 name: "append_file",
                 label: "追加内容",
                 icon: "file-plus",
-                description: "在文件末尾追加内容（文件不存在则创建）；表格与画布文件不支持用文件工具写入。",
+                description: "在文件末尾追加内容（文件不存在则创建；原内容末尾无换行时自动补一个换行）；表格与画布文件不支持用文件工具写入。",
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -1054,7 +1054,8 @@ async fn append_file(ctx: &ToolCtx, args: &Value) -> ToolResult {
                 .bulk(move || {
                     let path = vault::safe_join(&root, &target, true)?;
                     let existing = read_existing_text(&path, &target)?;
-                    vault::write_note(&root, &target, &format!("{existing}{content}"))
+                    let next = crate::ai::edit_host::append_text(&existing, &content);
+                    vault::write_note(&root, &target, &next)
                 })
                 .await
                 .map(|_| ToolResult::ok(format!("已追加到 {rel}")))
@@ -1068,8 +1069,9 @@ async fn append_file(ctx: &ToolCtx, args: &Value) -> ToolResult {
                 Err(crate::space_client::SpaceError::NotFound) => String::new(),
                 Err(e) => return ToolResult::err(format!("文件不可读：{rel}（{e}）")),
             };
+            let next = crate::ai::edit_host::append_text(&existing, content);
             client
-                .put_file_text(space_id, &rel, &format!("{existing}{content}"))
+                .put_file_text(space_id, &rel, &next)
                 .await
                 .map(|_| ToolResult::ok(format!("已追加到 {rel}")))
                 .unwrap_or_else(|e| ToolResult::err(format!("追加失败：{e}")))
@@ -2065,11 +2067,11 @@ mod tests {
         assert!(!r.is_error, "{}", r.text);
         let r = execute(&ctx, "read_file", json!({ "path": "笔记/待办.md" })).await;
         assert!(r.text.contains("1| # 待办"));
-        // 追加
+        // 追加：原内容末尾无换行时自动补一个，新内容自成一行而不是接在上一行尾
         let r = execute(
             &ctx,
             "append_file",
-            json!({ "path": "笔记/待办.md", "content": "\n- [ ] 二" }),
+            json!({ "path": "笔记/待办.md", "content": "- [ ] 二" }),
         )
         .await;
         assert!(!r.is_error, "{}", r.text);

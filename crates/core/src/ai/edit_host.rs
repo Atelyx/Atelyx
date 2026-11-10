@@ -107,11 +107,20 @@ pub fn merge_note_edit(base: &str, draft: &str, ai_text: &str) -> Result<String,
     Ok(crate::merge3::merge3(base, draft, ai_text, crate::merge3::ConflictSide::Ours))
 }
 
+/// 末尾追加：现有内容非空且不以换行结尾时先补一个换行，避免新内容接在上一行尾部。
+pub fn append_text(base: &str, text: &str) -> String {
+    if base.is_empty() || base.ends_with('\n') {
+        format!("{base}{text}")
+    } else {
+        format!("{base}\n{text}")
+    }
+}
+
 /// 在基线正文上应用一次编辑操作：返回 (结果全文, 替换处数)。
 pub fn apply_note_op(base: &str, op: &NoteOp) -> Result<(String, usize), String> {
     match op {
         NoteOp::Write(text) => Ok((text.clone(), 0)),
-        NoteOp::Append(text) => Ok((format!("{base}{text}"), 0)),
+        NoteOp::Append(text) => Ok((append_text(base, text), 0)),
         NoteOp::Replace { find, replace, all } => replace_exact(base, find, replace, *all),
     }
 }
@@ -124,7 +133,10 @@ mod tests {
     fn note_ops_apply_to_base() {
         let base = "# 标题\n\n- 一\n- 一\n";
         assert_eq!(apply_note_op(base, &NoteOp::Write("新".into())).unwrap().0, "新");
-        assert_eq!(apply_note_op("a", &NoteOp::Append("b".into())).unwrap().0, "ab");
+        assert_eq!(apply_note_op("a", &NoteOp::Append("b".into())).unwrap().0, "a\nb");
+        // 末尾已有换行 / 空文件：原样拼接，不叠空行
+        assert_eq!(apply_note_op("a\n", &NoteOp::Append("b".into())).unwrap().0, "a\nb");
+        assert_eq!(apply_note_op("", &NoteOp::Append("b".into())).unwrap().0, "b");
         let op = NoteOp::Replace { find: "- 一".into(), replace: "- 二".into(), all: false };
         // 多处命中且未开 all：报错（不动内容）
         assert!(apply_note_op(base, &op).unwrap_err().contains("2 次"));
