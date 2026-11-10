@@ -23,6 +23,7 @@ mod chat_stream;
 mod cli;
 mod ai_doc_edit;
 mod ai_edit;
+mod ai_fs_edit;
 mod ai_presence;
 mod app_icon;
 mod chat_view;
@@ -516,6 +517,9 @@ enum Message {
     AiEdit(u64),
     /// AI 编辑落盘回执（gen 守卫；失败恢复脏标记并提示）。
     AiEditDone(u64, String, String, Option<String>),
+    /// AI 文件系统操作回执：回执句柄只在此处交出，失败不静默。
+    /// 回执句柄不可克隆，故本变体不参与 `Message` 的 Clone 派生（见 `Message::clone` 的替换实现）。
+    AiFsDone(Box<AiFsDone>),
     /// 无操作（后台任务回执无界面变化时的统一落点）。
     Noop,
     /// 打开链接（外链 / 仓库路径 / wiki）。
@@ -800,6 +804,20 @@ pub enum FileDropKey {
     Bottom,
 }
 
+/// AI 文件系统操作回执载荷（盒装：字段多，避免撑大消息枚举）。
+#[derive(Debug, Clone)]
+pub struct AiFsDone {
+    /// 回执 id（工具线程在途登记表的主键）。
+    pub id: u64,
+    pub gen: u64,
+    pub dir: String,
+    pub from: String,
+    pub to: String,
+    pub rewritten: Vec<String>,
+    pub deleted: Option<(String, bool)>,
+    pub result: Result<(), String>,
+}
+
 /// 文件操作成功后对打开中笔记的跟随语义。
 #[derive(Debug, Clone)]
 pub enum FollowUp {
@@ -1013,6 +1031,8 @@ pub enum SaveReason {
 /// flush 放行后继续的动作（挂起输入已落盘才可执行，否则动作会丢失未保存内容或在途写打到旧路径）。
 #[derive(Debug, Clone)]
 enum PendingAfterFlush {
+    /// AI 发起的改名 / 移动 / 删除：先落盘未保存内容，再动磁盘并把回执交回工具线程。
+    AiFs { op: atelyx_core::ai::edit_host::FsOp, id: u64 },
     OpenFile(String),
     PickVault,
     /// 从最近仓库列表进入指定仓库（from_boot 区分启动进入与运行中切换）。
@@ -2750,6 +2770,10 @@ impl App {
                 task
             }
             Message::AiEdit(id) => ai_edit::apply(self, id),
+            Message::AiFsDone(done) => {
+                let AiFsDone { id, gen, dir, from, to, rewritten, deleted, result } = *done;
+                ai_fs_edit::on_done(self, id, gen, dir, from, to, rewritten, deleted, result)
+            }
             Message::AiEditDone(gen, path, content, err) => {
                 ai_edit::on_done(self, gen, path, content, err)
             }
@@ -4951,6 +4975,7 @@ impl App {
             PendingAfterFlush::PluginVaultRename { request_id, from, to } => {
                 settings_view::plugins::execute_vault_rename(self, request_id, from, to)
             }
+            PendingAfterFlush::AiFs { op, id } => ai_fs_edit::execute(self, op, id),
             PendingAfterFlush::SelectSpace { server_url, space_id, name } => {
                 // 脏拦截已过：直接进入（不得再经 gate，否则空脏判定重复放行成环）
                 space_actions::handle(

@@ -8,9 +8,7 @@ use std::time::Duration;
 use iced::Subscription;
 use tokio::sync::{broadcast, oneshot};
 
-use atelyx_core::ai::edit_host::{
-    AiEditHost, CanvasOp, DocKind, EditActor, EditFuture, NoteOp, TableOp,
-};
+use atelyx_core::ai::edit_host::{AiEditHost, CanvasOp, EditActor, EditFuture, FsOp, NoteOp, TableOp};
 use atelyx_core::history::{HistoryAction, HistoryEditor, HistoryKind, RecordOpts};
 use atelyx_core::space_client::{HistoryAuthorReq, HistoryRecordReq};
 
@@ -23,18 +21,19 @@ const REPLY_TIMEOUT: Duration = Duration::from_secs(120);
 /// 唤醒通道容量（同一时刻在途请求数远小于此）。
 const WAKE_CAP: usize = 64;
 
-/// 一次编辑的操作体（笔记 / 表格 / 画布共用一条请求通道）。
+/// 一次编辑的操作体（笔记 / 表格 / 画布 / 文件系统操作共用一条请求通道）。
 pub enum EditOp {
     Note(NoteOp),
     Table(Vec<TableOp>),
     Canvas(Vec<CanvasOp>),
+    /// 改名 / 移动 / 删除：壳先 flush 再动磁盘，打开中的面随 `FollowUp` 收尾。
+    Fs(FsOp),
 }
 
 /// 一次待执行的编辑请求：请求体与回执句柄只在总线持有，Message 只带 id。
 pub struct EditRequest {
     /// 发起请求时的仓库世代：切仓 / 进空间后旧请求作废（不得写到新容器同名路径）。
     pub gen: u64,
-    pub kind: DocKind,
     pub path: String,
     pub op: EditOp,
     /// 空间笔记：工具线程先取回的服务端正文（None = 本地或取不到）。
@@ -111,7 +110,6 @@ impl ShellEditHost {
 
     fn submit(
         &self,
-        kind: DocKind,
         path: String,
         op: EditOp,
         server_text: Option<String>,
@@ -131,7 +129,7 @@ impl ShellEditHost {
                 let mut pending = bus().pending.lock().unwrap_or_else(|e| e.into_inner());
                 pending.push_back((
                     id,
-                    EditRequest { gen, kind, path, op, server_text, actor, reply },
+                    EditRequest { gen, path, op, server_text, actor, reply },
                 ));
             }
             if bus().wake.send(id).is_err() {
@@ -167,7 +165,7 @@ impl AiEditHost for ShellEditHost {
                 None => None,
             };
             ShellEditHost { space: None, gen: self.gen }
-                .submit(DocKind::Note, path, EditOp::Note(op), server_text, &actor)
+                .submit(path, EditOp::Note(op), server_text, &actor)
                 .await
         })
     }
@@ -177,7 +175,7 @@ impl AiEditHost for ShellEditHost {
         let actor = actor.clone();
         Box::pin(async move {
             ShellEditHost { space: None, gen: self.gen }
-                .submit(DocKind::Table, path, EditOp::Table(ops), None, &actor)
+                .submit(path, EditOp::Table(ops), None, &actor)
                 .await
         })
     }
@@ -187,7 +185,21 @@ impl AiEditHost for ShellEditHost {
         let actor = actor.clone();
         Box::pin(async move {
             ShellEditHost { space: None, gen: self.gen }
-                .submit(DocKind::Canvas, path, EditOp::Canvas(ops), None, &actor)
+                .submit(path, EditOp::Canvas(ops), None, &actor)
+                .await
+        })
+    }
+
+    fn apply_fs(&self, op: FsOp, actor: &EditActor) -> EditFuture<'_> {
+        // 路径只用于请求日志与作废判定；真正的动盘与收尾在壳 update 内完成
+        let path = match &op {
+            FsOp::Move { from, .. } => from.clone(),
+            FsOp::Delete { path, .. } => path.clone(),
+        };
+        let actor = actor.clone();
+        Box::pin(async move {
+            ShellEditHost { space: None, gen: self.gen }
+                .submit(path, EditOp::Fs(op), None, &actor)
                 .await
         })
     }
@@ -196,23 +208,16 @@ impl AiEditHost for ShellEditHost {
 /// 执行一次待处理编辑（update 内调用）：打开且脏走三方合流，冲突拒绝写入。
 pub fn apply(app: &mut App, id: u64) -> iced::Task<Message> {
     let Some(req) = take(id) else { return iced::Task::none() };
-    let EditRequest { gen, kind, path, op, server_text, actor, reply } = req;
+    let EditRequest { gen, path, op, server_text, actor, reply } = req;
     if gen != app.epoch() {
         let _ = reply.send(Err("仓库已切换，AI 编辑已取消".to_string()));
         return iced::Task::none();
     }
-    match (kind, op) {
-        (DocKind::Note, EditOp::Note(op)) => apply_note(app, path, op, server_text, actor, reply),
-        (DocKind::Table, EditOp::Table(ops)) => {
-            crate::ai_doc_edit::apply_table(app, path, ops, actor, reply)
-        }
-        (DocKind::Canvas, EditOp::Canvas(ops)) => {
-            crate::ai_doc_edit::apply_canvas(app, path, ops, actor, reply)
-        }
-        _ => {
-            let _ = reply.send(Err("AI 编辑请求与文档类型不匹配".to_string()));
-            iced::Task::none()
-        }
+    match op {
+        EditOp::Note(op) => apply_note(app, path, op, server_text, actor, reply),
+        EditOp::Table(ops) => crate::ai_doc_edit::apply_table(app, path, ops, actor, reply),
+        EditOp::Canvas(ops) => crate::ai_doc_edit::apply_canvas(app, path, ops, actor, reply),
+        EditOp::Fs(op) => crate::ai_fs_edit::apply(app, op, reply),
     }
 }
 

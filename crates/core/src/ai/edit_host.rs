@@ -27,6 +27,15 @@ pub enum DocKind {
     Canvas,
 }
 
+/// 文件系统操作（改名 / 移动 / 删除）：由壳先收尾打开中的编辑面再动磁盘。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FsOp {
+    /// 改名或移动（`from` → `to` 全路径）；目录与文件同形，壳按磁盘事实判定。
+    Move { from: String, to: String },
+    /// 删除（目录非空需 `force`）。
+    Delete { path: String, force: bool },
+}
+
 /// 笔记编辑操作：统一作用于宿主给出的基线正文。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NoteOp {
@@ -68,6 +77,7 @@ pub enum CanvasOp {
 pub type EditFuture<'a> = Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>>;
 
 /// 宿主编辑出口：壳实现保存链（本地写盘队列 / 空间端点）+ 历史 + 在场。
+/// 文件系统操作同样走这里：AI 不得绕过壳直接改磁盘（打开中的编辑面与引用同步要一起收尾）。
 pub trait AiEditHost: Send + Sync {
     /// 应用一次笔记编辑：`Ok(成功提示文本)` / `Err(可读失败原因)`，失败不得静默。
     fn apply_note(&self, path: &str, op: NoteOp, actor: &EditActor) -> EditFuture<'_>;
@@ -75,6 +85,8 @@ pub trait AiEditHost: Send + Sync {
     fn apply_table(&self, path: &str, ops: Vec<TableOp>, actor: &EditActor) -> EditFuture<'_>;
     /// 应用一次画布编辑（补丁按稳定 id 合并，打开会话先合入再保存）。
     fn apply_canvas(&self, path: &str, ops: Vec<CanvasOp>, actor: &EditActor) -> EditFuture<'_>;
+    /// 应用一次文件系统操作：壳先 flush 未落盘内容、收尾受影响的打开面，再动磁盘并同步引用。
+    fn apply_fs(&self, op: FsOp, actor: &EditActor) -> EditFuture<'_>;
 }
 
 /// 精确替换：缺省要求唯一命中（多处命中报错、不写入）；`all` = 替换全部出现。

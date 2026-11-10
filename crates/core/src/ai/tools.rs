@@ -1814,6 +1814,17 @@ async fn move_tool(ctx: &ToolCtx, args: &Value) -> ToolResult {
 /// 改名 / 移动共用实现：本地经引用同步（全库 `.md` 链接、元数据路径一并改写）；
 /// 空间只走服务端 rename（引用改写是壳的文件树改名链的第二步，本路径不经过它）。
 async fn move_entry(ctx: &ToolCtx, from: &str, to: &str, ok: &str) -> ToolResult {
+    // 有宿主 = 交壳执行：壳先落盘未保存内容、收尾打开中的面，再改磁盘并同步引用
+    if let Some(host) = ctx.host.as_ref() {
+        let Some(actor) = ctx.actor.as_ref() else {
+            return ToolResult::err("AI 编辑身份缺失，已拒绝写入");
+        };
+        let op = crate::ai::edit_host::FsOp::Move { from: from.to_string(), to: to.to_string() };
+        return match host.apply_fs(op, actor).await {
+            Ok(_) => ToolResult::ok(ok.to_string()),
+            Err(e) => ToolResult::err(format!("操作失败：{e}")),
+        };
+    }
     match &ctx.repo {
         RepoAccess::Local { root, .. } => {
             let is_dir = vault::safe_join(root, from, false)
@@ -1846,6 +1857,17 @@ async fn delete_tool(ctx: &ToolCtx, args: &Value) -> ToolResult {
         Err(e) => return e,
     };
     let force = args.get("force").and_then(Value::as_bool).unwrap_or(false);
+    // 有宿主 = 交壳执行：壳先落盘未保存内容、收尾打开中的面，再删磁盘
+    if let Some(host) = ctx.host.as_ref() {
+        let Some(actor) = ctx.actor.as_ref() else {
+            return ToolResult::err("AI 编辑身份缺失，已拒绝写入");
+        };
+        let op = crate::ai::edit_host::FsOp::Delete { path: rel.clone(), force };
+        return match host.apply_fs(op, actor).await {
+            Ok(text) => ToolResult::ok(text),
+            Err(e) => ToolResult::err(e),
+        };
+    }
     match &ctx.repo {
         RepoAccess::Local { root, .. } => {
             let path = match vault::safe_join(root, &rel, false) {
@@ -2502,6 +2524,26 @@ mod tests {
                 Ok("已编辑画布".to_string())
             })
         }
+
+        fn apply_fs(
+            &self,
+            op: crate::ai::edit_host::FsOp,
+            _actor: &crate::ai::edit_host::EditActor,
+        ) -> crate::ai::edit_host::EditFuture<'_> {
+            let calls = self.calls.clone();
+            Box::pin(async move {
+                match op {
+                    crate::ai::edit_host::FsOp::Move { from, to } => {
+                        calls.lock().unwrap().push(format!("move:{from}->{to}"));
+                        Ok("已移动".to_string())
+                    }
+                    crate::ai::edit_host::FsOp::Delete { path, force } => {
+                        calls.lock().unwrap().push(format!("delete:{path}:{force}"));
+                        Ok("已删除".to_string())
+                    }
+                }
+            })
+        }
     }
 
     fn actor() -> crate::ai::edit_host::EditActor {
@@ -2555,6 +2597,14 @@ mod tests {
         )
         .await;
         assert!(r.is_error && r.text.contains("身份缺失"), "{}", r.text);
+        // 文件系统操作同样走宿主出口（壳负责收尾打开中的面与引用同步）
+        let r = execute(&ctx, "move", json!({ "from": "旧.md", "to": "新.md" })).await;
+        assert!(!r.is_error, "{}", r.text);
+        let r = execute(&ctx, "delete", json!({ "path": "旧.md" })).await;
+        assert!(!r.is_error, "{}", r.text);
+        let recorded = calls.lock().unwrap().clone();
+        assert!(recorded.contains(&"move:旧.md->新.md".to_string()), "{recorded:?}");
+        assert!(recorded.contains(&"delete:旧.md:false".to_string()), "{recorded:?}");
         // 宿主失败：错误文本原样回传模型
         let mut failing = ctx.clone();
         failing.host = Some(Arc::new(FakeHost { calls: calls.clone(), fail: true }));
