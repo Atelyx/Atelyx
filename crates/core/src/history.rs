@@ -55,7 +55,7 @@ pub enum HistoryAction {
 }
 
 /// 一个历史版本（全文快照；summary = 相对上一版的展示摘要）。
-/// `coAuthors` = 协作署名（由协作侧写入的字段，读侧解析保留、coalesce 滑动更新原样带出）。
+/// `coAuthors` = 协作署名（只读兼容：服务端不再写入该字段，旧侧文件里的值原样解析保留）。
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct HistoryVersion {

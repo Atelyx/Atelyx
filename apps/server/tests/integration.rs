@@ -126,9 +126,22 @@ async fn register(ctx: &Ctx, username: &str) -> String {
     body["token"].as_str().expect("注册应返回令牌").to_string()
 }
 
+/// 注册并返回令牌，显示名可与账号名不同（署名用例据此区分两者）。
+async fn register_named(ctx: &Ctx, username: &str, display_name: &str) -> String {
+    let (status, body) = ctx
+        .post(
+            "/api/auth/register",
+            None,
+            json!({ "username": username, "password": "pass-123456", "displayName": display_name }),
+        )
+        .await;
+    assert_eq!(status, 200, "注册应成功：{body}");
+    body["token"].as_str().expect("注册应返回令牌").to_string()
+}
+
 /// A 建空间 + 给 B 签发 editor 邀请码，B 接受。返回 spaceId。
 async fn setup_two_members(ctx: &Ctx, a: &str, b: &str) -> String {
-    let a_token = register(ctx, a).await;
+    let a_token = register_named(ctx, a, "爱丽丝").await;
     let (_, body) = ctx.post("/api/spaces", Some(&a_token), json!({ "name": "项目空间" })).await;
     let space_id = body["spaceId"].as_str().unwrap().to_string();
     let (_, invite) = ctx
@@ -723,13 +736,13 @@ async fn history_record_aggregate_and_rename_migration() {
     let (status, _) = record("笔记/a.md", "v3", "edit", 60_000).await;
     assert_eq!(status, 200);
 
-    // 署名只认令牌身份：客户端自报的 id / name 不落盘（名字取账号显示名，id 由服务端生成）
+    // 署名只认令牌身份：客户端自报的 id / name 不落盘（id 由服务端生成，名字取账号显示名）
     let (_, agg) = ctx
         .get(&format!("/api/spaces/{space_id}/history/aggregate"), Some(&a_token), &[])
         .await;
     let first = &agg["entries"].as_array().unwrap()[0];
     assert_eq!(first["authorId"], "space:alice", "署名 id 应由服务端按账号生成：{agg}");
-    assert_eq!(first["authorName"], "alice", "署名应取账号显示名：{agg}");
+    assert_eq!(first["authorName"], "爱丽丝", "署名应取账号显示名而非账号名：{agg}");
 
     // 聚合：版本流 + 时间戳（v1 与滑动更新后的 v3 = 两版）
     let (status, agg) = ctx

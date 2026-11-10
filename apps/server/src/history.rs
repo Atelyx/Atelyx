@@ -91,7 +91,17 @@ fn now_millis() -> i64 {
         .unwrap_or(0)
 }
 
-#[derive(Deserialize, Serialize, Clone)]
+/// 客户端自报的署名附属信息：只取设备名（纯展示字段）。
+/// 署名 id 与名字由服务端按令牌身份生成，请求体里的同名字段解析时忽略（旧客户端仍可原样发送）。
+#[derive(Deserialize, Serialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryAuthorWire {
+    #[serde(default)]
+    pub device: String,
+}
+
+/// 侧文件里的署名（服务端写入）。
+#[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct HistoryAuthor {
     pub id: String,
@@ -117,13 +127,12 @@ pub struct RecordBody {
     file: String,
     content: String,
     action: String,
-    author: HistoryAuthor,
+    #[serde(default)]
+    author: HistoryAuthorWire,
     #[serde(default)]
     summary: Option<String>,
     #[serde(default)]
     note: Option<String>,
-    #[serde(default)]
-    co_authors: Option<Vec<HistoryAuthor>>,
     /// AI 编辑来源（只校验形状；Agent 身份无签发渠道，真伪不校验）。
     #[serde(default)]
     editor: Option<HistoryEditorWire>,
@@ -133,26 +142,6 @@ pub struct RecordBody {
     max_versions: Option<usize>,
     #[serde(default)]
     byte_budget: Option<usize>,
-}
-
-/// 合并协作作者集合（按 id 去重，主作者之外）：coalesce 滑动更新时保留前序协作者。
-fn merge_co_authors(existing: Option<&Value>, incoming: &[HistoryAuthor]) -> Vec<Value> {
-    let mut out: Vec<Value> = vec![];
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    if let Some(arr) = existing.and_then(|v| v.as_array()) {
-        for a in arr {
-            let id = a.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string();
-            if seen.insert(id) {
-                out.push(a.clone());
-            }
-        }
-    }
-    for a in incoming {
-        if seen.insert(a.id.clone()) {
-            out.push(serde_json::to_value(a).unwrap_or(Value::Null));
-        }
-    }
-    out
 }
 
 /// 按字节预算剪枝（从最旧丢起；仅剩 1 版也超预算时保留 1 版兜底）。
@@ -172,6 +161,15 @@ fn prune_by_budget(mut versions: Vec<Value>, budget: usize) -> Vec<Value> {
 /// 连续编辑合并据此判定「同一操作者」。
 fn server_author_id(user: &AuthUser) -> String {
     format!("space:{}", user.username)
+}
+
+/// 服务端署名显示名：取账号显示名，缺失（账号数据异常）时回落账号名，不留空署名。
+fn server_author_name(user: &AuthUser) -> String {
+    if user.display_name.is_empty() {
+        user.username.clone()
+    } else {
+        user.display_name.clone()
+    }
 }
 
 /// 追加一个历史版本（判重 → 同作者连续编辑合并 → 追加 → 剪枝 → 原子写）。
@@ -202,12 +200,11 @@ pub async fn record_history(
         }
     }
 
-    // 署名只认令牌反查的身份：名字取账号显示名，id 由服务端按 `space:<username>` 生成，
-    // 客户端自报的 id / name 一律不采信（设备名是客户端自报的展示字段，原样保留）
+    // 署名 id / 名字只认令牌反查的账号；设备名是纯展示字段，取客户端自报值
     let author_id = server_author_id(&user);
     let author = serde_json::to_value(HistoryAuthor {
         id: author_id.clone(),
-        name: user.display_name.clone(),
+        name: server_author_name(&user),
         device: body.author.device.clone(),
     })
     .unwrap_or(Value::Null);
@@ -222,7 +219,6 @@ pub async fn record_history(
             .and_then(|l| l.get("author"))
             .and_then(|a| a.get("id"))
             .and_then(|i| i.as_str())
-            // 合并判据用服务端生成的署名 id（客户端自报 id 不再参与）
             == Some(author_id.as_str())
         && last
             .as_ref()
@@ -239,12 +235,6 @@ pub async fn record_history(
         l["content"] = json!(body.content);
         l["ts"] = json!(now);
         l["author"] = author;
-        if let Some(ca) = &body.co_authors {
-            if !ca.is_empty() {
-                let existing = l.get("coAuthors").cloned();
-                l["coAuthors"] = Value::Array(merge_co_authors(existing.as_ref(), ca));
-            }
-        }
         if let Some(s) = &body.summary {
             l["summary"] = json!(s);
         }
@@ -267,11 +257,6 @@ pub async fn record_history(
         });
         if let Some(s) = &body.summary {
             version["summary"] = json!(s);
-        }
-        if let Some(ca) = &body.co_authors {
-            if !ca.is_empty() {
-                version["coAuthors"] = serde_json::to_value(ca).unwrap_or(Value::Null);
-            }
         }
         if let Some(n) = &body.note {
             version["note"] = json!(n);
