@@ -437,6 +437,13 @@ pub enum ChatMsg {
         plan: Box<PluginSendPlan>,
         result: Result<PluginSendPrepared, String>,
     },
+    /// 插件图片归档回执：临时区图片复制进会话附件目录后继续发送（会话已就位）。
+    PluginImagesArchived {
+        gen: u64,
+        plan: Box<PluginSendPlan>,
+        space_prompt: Option<String>,
+        result: Result<Vec<Value>, String>,
+    },
     /// 插件请求中断一个会话的活跃 run（ai.chat.stop）。
     PluginStop { request_id: u64, session_id: String },
     /// 插件请求读会话清单或单会话消息（ai.chat.history）。
@@ -1121,6 +1128,19 @@ fn update_inner(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
                 Ok(prepared) => {
                     plugin_chat_send_now(app, *plan, prepared.space_prompt, prepared.attachments)
                 }
+                Err(e) => {
+                    app.plugins.resolve_shell_call(plan.request_id, Err(e));
+                    iced::Task::none()
+                }
+            }
+        }
+        ChatMsg::PluginImagesArchived { gen, plan, space_prompt, result } => {
+            if gen != app.epoch() {
+                app.plugins.resolve_shell_call(plan.request_id, Err("仓库已切换，发送已取消".into()));
+                return iced::Task::none();
+            }
+            match result {
+                Ok(attachments) => plugin_chat_send_now(app, *plan, space_prompt, attachments),
                 Err(e) => {
                     app.plugins.resolve_shell_call(plan.request_id, Err(e));
                     iced::Task::none()
@@ -2637,37 +2657,19 @@ async fn space_image_attachments(
     Ok(out)
 }
 
-/// 插件发送第二段（配置与前置已就绪）：会话就位 → user 消息落真源 → 起 run。
-fn plugin_chat_send_now(
+/// 解析本次发送的会话：续聊要求会话存在，新建则先落会话元数据（回执与事件同人工发送口径）。
+fn resolve_plugin_session(
     app: &mut App,
-    plan: PluginSendPlan,
-    space_prompt: Option<String>,
-    attachments: Vec<Value>,
-) -> iced::Task<Message> {
-    let request_id = plan.request_id;
-    let deny = |app: &App, reason: String| {
-        app.plugins.resolve_shell_call(request_id, Err(reason));
-    };
-    let config = match resolve_run_config(
-        app,
-        plan.params.agent_id.as_deref(),
-        space_prompt,
-        true,
-        plan.pick.as_ref().map(|(provider, model)| (provider.as_str(), model.as_str())),
-    ) {
-        Ok(config) => config,
-        Err(e) => {
-            deny(app, e);
-            return iced::Task::none();
-        }
-    };
-    let session_id = match plan.params.session_id.clone() {
+    plan: &PluginSendPlan,
+    deny: &impl Fn(&App, String),
+) -> Option<String> {
+    match plan.params.session_id.clone() {
         Some(id) => {
             if store().session_meta(&id).is_none() {
                 deny(app, format!("会话 {id} 不存在"));
-                return iced::Task::none();
+                return None;
             }
-            id
+            Some(id)
         }
         None => {
             let id = uuid_v4();
@@ -2688,13 +2690,136 @@ fn plugin_chat_send_now(
                 .is_err()
             {
                 deny(app, "会话创建失败".to_string());
-                return iced::Task::none();
+                return None;
             }
             app.chat.refresh_session(&id);
             app.plugins.on_chat_changed(&id, ChatChangeKind::Created);
-            id
+            Some(id)
+        }
+    }
+}
+
+/// 插件图片是否落在自己的临时区（`temp/` 段且不在会话附件目录）：这类引用随插件目录被清理即失效，
+/// 需要先归档进会话附件目录。仓库内普通图片路径（用户有意引用）保持原样。
+fn needs_archive(attachments: &[Value]) -> bool {
+    attachments.iter().any(|a| {
+        a.get("file")
+            .and_then(Value::as_str)
+            .is_some_and(is_plugin_temp)
+    })
+}
+
+/// 路径是否落在插件临时区（`.atelyx/temp/` 下、且不在会话附件目录）：只有这一段的引用会随插件
+/// 自行清理失效；仓库其它位置（含用户自建的 temp 目录）保持原样。
+fn is_plugin_temp(file: &str) -> bool {
+    file.starts_with(".atelyx/temp/") && !file.starts_with(".atelyx/temp/chats/")
+}
+
+/// 把插件临时区的图片复制进会话附件目录，返回替换路径后的 attachments。
+/// 单张失败即整批失败（不产生半引用消息）；旧临时文件由插件自行清理。
+async fn archive_plugin_images(
+    backend: ImageBackend,
+    session_id: &str,
+    attachments: Vec<Value>,
+) -> Result<Vec<Value>, String> {
+    let mut out = Vec::with_capacity(attachments.len());
+    for attachment in attachments {
+        let Some(file) = attachment.get("file").and_then(Value::as_str) else {
+            out.push(attachment);
+            continue;
+        };
+        if !is_plugin_temp(file) {
+            out.push(attachment);
+            continue;
+        }
+        let rel = atelyx_core::vault::chat_image_rel_path(session_id, file)?;
+        match &backend {
+            ImageBackend::Local { root, queue } => {
+                let source = atelyx_core::vault::safe_join(root, file, false)
+                    .map_err(|e| format!("图片路径不合法（{file}）：{e}"))?;
+                let bytes = std::fs::read(&source)
+                    .map_err(|e| format!("图片读取失败（{file}）：{e}"))?;
+                let target = atelyx_core::vault::safe_join(root, &rel, true)
+                    .map_err(|e| format!("图片落盘失败（{rel}）：{e}"))?;
+                queue
+                    .write_bytes(target, bytes)
+                    .await
+                    .map_err(|e| format!("图片归档失败（{rel}）：{e}"))?;
+            }
+            ImageBackend::Space { client, space_id } => {
+                let bytes = client
+                    .get_file_bytes(space_id, file)
+                    .await
+                    .map_err(|e| format!("图片读取失败（{file}）：{e}"))?;
+                client
+                    .put_file_bytes(space_id, &rel, &bytes)
+                    .await
+                    .map_err(|e| format!("图片归档失败（{rel}）：{e}"))?;
+            }
+        }
+        let mut next = attachment.clone();
+        if let Some(obj) = next.as_object_mut() {
+            obj.insert("file".to_string(), json!(rel));
+        }
+        out.push(next);
+    }
+    Ok(out)
+}
+
+/// 插件发送第二段（配置与前置已就绪）：会话就位 → user 消息落真源 → 起 run。
+fn plugin_chat_send_now(
+    app: &mut App,
+    plan: PluginSendPlan,
+    space_prompt: Option<String>,
+    attachments: Vec<Value>,
+) -> iced::Task<Message> {
+    let request_id = plan.request_id;
+    let deny = |app: &App, reason: String| {
+        app.plugins.resolve_shell_call(request_id, Err(reason));
+    };
+    let config = match resolve_run_config(
+        app,
+        plan.params.agent_id.as_deref(),
+        space_prompt.clone(),
+        true,
+        plan.pick.as_ref().map(|(provider, model)| (provider.as_str(), model.as_str())),
+    ) {
+        Ok(config) => config,
+        Err(e) => {
+            deny(app, e);
+            return iced::Task::none();
         }
     };
+    let session_id = match resolve_plugin_session(app, &plan, &deny) {
+        Some(id) => id,
+        None => return iced::Task::none(),
+    };
+    // 插件暂存的图片先进会话附件目录：消息只引用会话目录，插件自己的临时区随之不再被引用
+    // （插件可自由清理该目录；会话删除时宿主整体清理会话目录）
+    if needs_archive(&attachments) {
+        let gen = app.epoch();
+        let archive_plan = plan;
+        let entries = attachments;
+        let backend = match image_backend(app) {
+            Ok(backend) => backend,
+            Err(e) => {
+                deny(app, e);
+                return iced::Task::none();
+            }
+        };
+        let session_for_task = session_id.clone();
+        return iced::Task::perform(
+            async move { archive_plugin_images(backend, &session_for_task, entries).await },
+            move |result| {
+                Message::Chat(ChatMsg::PluginImagesArchived {
+                    gen,
+                    plan: Box::new(archive_plan.clone()),
+                    space_prompt: space_prompt.clone(),
+                    result,
+                })
+            },
+        );
+    }
     if app.chat.compacting.as_deref() == Some(session_id.as_str()) {
         deny(app, "该会话正在压缩上下文".to_string());
         return iced::Task::none();
@@ -2997,6 +3122,18 @@ fn forward_plugin_event(app: &mut App, event: &RunEvent, due: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plugin_images_in_temp_need_archiving() {
+        // 插件自管的临时区图片随目录清理即失效，发送前归档进会话附件目录
+        assert!(needs_archive(&[json!({ "kind": "image", "file": ".atelyx/temp/quick-chat/a.png" })]));
+        // 已落会话目录 / 仓库内普通图片：不搬（用户有意引用）
+        assert!(!needs_archive(&[json!({ "kind": "image", "file": ".atelyx/temp/chats/s1/a.png" })]));
+        assert!(!needs_archive(&[json!({ "kind": "image", "file": "图片/a.png" })]));
+        // 仓库里用户自建的 temp 目录不算插件临时区
+        assert!(!needs_archive(&[json!({ "kind": "image", "file": "temp/a.png" })]));
+        assert!(!needs_archive(&[]));
+    }
 
     fn event_of(event: RunEvent, message: Option<Value>) -> Option<ChatEvent> {
         plugin_chat_event_of(&event, message, 7)
