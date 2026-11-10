@@ -1494,6 +1494,7 @@ fn on_note_saved(
             app.settle_history_restore(false);
             app.save_error = Some(e.clone());
             if matches!(reason, SaveReason::Flush) {
+                crate::ai_fs_edit::abort_pending(app, &e);
                 app.notify(NoticeLevel::Error, format!("保存失败，操作未执行：{e}"));
             } else {
                 app.notify(NoticeLevel::Error, format!("保存失败：{e}"));

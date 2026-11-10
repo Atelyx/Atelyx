@@ -52,6 +52,17 @@ pub fn apply(
     app.gate(crate::PendingAfterFlush::AiFs { op, id })
 }
 
+/// flush 失败（脏面没落盘）：挂起的 AI 文件操作不得继续，回填可读原因并摘除挂起项。
+/// 与其它挂起动作不同，工具线程在等回执——不回填会让模型空等至超时。
+pub(crate) fn abort_pending(app: &mut App, reason: &str) {
+    let Some(crate::PendingAfterFlush::AiFs { id, .. }) = app.flush_pending.as_ref() else {
+        return;
+    };
+    let id = *id;
+    app.flush_pending = None;
+    settle(id, Err(format!("保存失败，操作未执行：{reason}")));
+}
+
 /// flush 放行后的执行体：改磁盘 + 同步引用 + 收尾打开中的面。
 pub(crate) fn execute(app: &mut App, op: FsOp, id: u64) -> iced::Task<Message> {
     match op {

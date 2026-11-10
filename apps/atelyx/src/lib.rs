@@ -2328,8 +2328,10 @@ impl App {
             }
             Message::Saved(_, _, _, reason, Err(e)) => {
                 self.settle_history_restore(false);
-                // flush 被保存失败打断：动作不放行（放行会丢弃未落盘内容），挂起输入保留待重试
+                // flush 被保存失败打断：动作不放行（放行会丢弃未落盘内容），挂起输入保留待重试；
+                // 等回执的 AI 文件操作不能一直挂着，就地回填失败原因
                 if matches!(reason, SaveReason::Flush) {
+                    ai_fs_edit::abort_pending(self, &e);
                     self.notify(NoticeLevel::Error, format!("保存失败，操作未执行：{e}"));
                 } else {
                     self.notify(NoticeLevel::Error, format!("保存失败：{e}"));
