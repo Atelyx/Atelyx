@@ -77,49 +77,66 @@ fn apply_local_table(
         return iced::Task::none();
     };
     let label = crate::layout_view::file_label(&path);
-    // 写盘模型 = 磁盘真源 + 补丁（外部未触及的行/字段不被 AI 编辑冲掉）；文件被外部替换即按本端整份重建
-    let mut written = if disk.id == after.id { disk } else { after.clone() };
-    atelyx_core::vault::apply_table_patch(&mut written, &patch);
-    written.title = label.clone();
-    written.updated_at = crate::now_secs() as i64;
+    let updated_at = crate::now_secs() as i64;
     after.title = label.clone();
     // 打开会话先合入：用户未保存编辑保留，随后整份落盘（与既有保存链同口径）
-    merge_table_into_session(app, &path, &after, written.updated_at);
+    merge_table_into_session(app, &path, &after, updated_at);
     let summary = atelyx_core::history::version_summary(
         HistoryKind::Table,
         &base_json(&baseline),
         &base_json(&after),
     );
     let ok_text = format!("已编辑 {path}（{} 项操作：{summary}）", ops.len());
-    let content = base_json(&written);
     let queue = app.vault.writes.clone();
     let state = app.vault.clone();
     let author = actor.author.clone();
     let editor = editor_of(&actor);
     crate::ai_edit::begin_presence_for(app, "table", &path, &actor, &ok_text);
     let rel = path.clone();
-    let body = written.clone();
+    let frozen = after.clone();
+    let frozen_msg = after;
     let reply_text = ok_text.clone();
     iced::Task::perform(
         async move {
             let outcome = async {
                 let file = atelyx_core::vault::safe_join(&root, &rel, false)?;
-                let json = serde_json::to_string_pretty(&body).map_err(|e| e.to_string())?;
-                queue.write(file.clone(), json).await?;
-                atelyx_core::vault::cache_put_table(&state, &file, &rel, &body);
+                let cache_file = file.clone();
+                // 读盘到落盘之间磁盘可能被外部改过：重读与合并放进写盘队列，
+                // 外部改动落在未触及实体上时随本次落盘保留（与人工保存同一合并口径）
+                let written = queue
+                    .bulk(move || {
+                        let mut disk = match atelyx_core::vault::read_table_file(&file) {
+                            // 磁盘被外部替换为其他实体：本端整份重建（等同文件缺失）
+                            Ok(t) if t.id == frozen.id => t,
+                            _ => frozen,
+                        };
+                        atelyx_core::vault::apply_table_patch(&mut disk, &patch);
+                        disk.title = label;
+                        disk.updated_at = updated_at;
+                        let json = serde_json::to_string_pretty(&disk).map_err(|e| e.to_string())?;
+                        atelyx_core::vault::atomic_write(&file, &json)?;
+                        Ok(disk)
+                    })
+                    .await?;
+                atelyx_core::vault::cache_put_table(&state, &cache_file, &rel, &written);
+                let content = base_json(&written);
                 record_table_version(root.clone(), rel.clone(), content, author, editor).await;
-                Ok::<(), String>(())
+                Ok::<TableFile, String>(written)
             }
             .await;
             let _ = reply.send(match &outcome {
-                Ok(()) => Ok(reply_text),
+                Ok(_) => Ok(reply_text),
                 Err(e) => Err(format!("写入失败：{e}")),
             });
+            let (result, body) = match outcome {
+                Ok(written) => (Ok(()), written),
+                Err(e) => (Err(e), frozen_msg),
+            };
             Message::Table(crate::table_view::TableMsg::TableSaved(
                 gen,
                 rel,
                 TableSaveReason::AutoSave,
-                outcome.map(|_| ()),
+                result,
                 body,
             ))
         },
@@ -163,12 +180,9 @@ fn apply_local_canvas(
         return iced::Task::none();
     };
     let label = crate::layout_view::file_label(&path);
-    let mut written = if disk.id == after.id { disk } else { after.clone() };
-    atelyx_core::vault::apply_canvas_patch(&mut written, &patch);
-    written.title = label.clone();
-    written.updated_at = crate::now_secs() as i64;
+    let updated_at = crate::now_secs() as i64;
     after.title = label.clone();
-    let merge = merge_canvas_into_session(app, &path, &after, &patch, written.updated_at);
+    let merge = merge_canvas_into_session(app, &path, &after, &patch, updated_at);
     let summary = atelyx_core::history::version_summary(
         HistoryKind::Canvas,
         &base_json(&baseline),
@@ -179,36 +193,56 @@ fn apply_local_canvas(
         ops.len(),
         touched_ids(&patch).join("、")
     );
-    let content = base_json(&written);
     let queue = app.vault.writes.clone();
     let state = app.vault.clone();
     let author = actor.author.clone();
     let editor = editor_of(&actor);
     crate::ai_edit::begin_presence_for(app, "canvas", &path, &actor, &ok_text);
     let rel = path.clone();
-    let body = written.clone();
+    let frozen = after.clone();
+    let frozen_msg = after;
     let reply_text = ok_text.clone();
     merge.chain(
         iced::Task::perform(
             async move {
                 let outcome = async {
                     let file = atelyx_core::vault::safe_join(&root, &rel, false)?;
-                    let json = serde_json::to_string_pretty(&body).map_err(|e| e.to_string())?;
-                    queue.write(file.clone(), json).await?;
-                    atelyx_core::vault::cache_put_canvas(&state, &file, &rel, &body);
+                    let cache_file = file.clone();
+                    // 读盘到落盘之间磁盘可能被外部改过：重读与合并放进写盘队列（同 apply_local_table）
+                    let written = queue
+                        .bulk(move || {
+                            let mut disk = match atelyx_core::vault::read_canvas_file(&file) {
+                                Ok(c) if c.id == frozen.id => c,
+                                _ => frozen,
+                            };
+                            atelyx_core::vault::apply_canvas_patch(&mut disk, &patch);
+                            disk.title = label;
+                            disk.updated_at = updated_at;
+                            let json =
+                                serde_json::to_string_pretty(&disk).map_err(|e| e.to_string())?;
+                            atelyx_core::vault::atomic_write(&file, &json)?;
+                            Ok(disk)
+                        })
+                        .await?;
+                    atelyx_core::vault::cache_put_canvas(&state, &cache_file, &rel, &written);
+                    let content = base_json(&written);
                     record_canvas_version(root.clone(), rel.clone(), content, author, editor).await;
-                    Ok::<(), String>(())
+                    Ok::<CanvasFile, String>(written)
                 }
                 .await;
                 let _ = reply.send(match &outcome {
-                    Ok(()) => Ok(reply_text),
+                    Ok(_) => Ok(reply_text),
                     Err(e) => Err(format!("写入失败：{e}")),
                 });
+                let (result, body) = match outcome {
+                    Ok(written) => (Ok(()), written),
+                    Err(e) => (Err(e), frozen_msg),
+                };
                 Message::Canvas(crate::canvas_view::CanvasMsg::Saved(
                     gen,
                     rel,
                     CanvasSaveReason::AutoSave,
-                    outcome.map(|_| ()),
+                    result,
                     body,
                 ))
             },
