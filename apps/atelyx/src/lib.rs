@@ -816,6 +816,8 @@ pub struct AiFsDone {
     pub to: String,
     pub rewritten: Vec<String>,
     pub deleted: Option<(String, bool)>,
+    /// 主操作已落地但收尾步骤失败的原因（引用同步等）；None = 全成功。
+    pub warning: Option<String>,
     pub result: Result<(), String>,
 }
 
@@ -2774,8 +2776,10 @@ impl App {
             }
             Message::AiEdit(id) => ai_edit::apply(self, id),
             Message::AiFsDone(done) => {
-                let AiFsDone { id, gen, dir, from, to, rewritten, deleted, result } = *done;
-                ai_fs_edit::on_done(self, id, gen, dir, from, to, rewritten, deleted, result)
+                let AiFsDone { id, gen, dir, from, to, rewritten, deleted, warning, result } = *done;
+                ai_fs_edit::on_done(
+                    self, id, gen, dir, from, to, rewritten, deleted, warning, result,
+                )
             }
             Message::AiEditDone(gen, path, content, err) => {
                 ai_edit::on_done(self, gen, path, content, err)

@@ -81,9 +81,20 @@ fn done(
     to: String,
     rewritten: Vec<String>,
     deleted: Option<(String, bool)>,
+    warning: Option<String>,
     result: Result<(), String>,
 ) -> Message {
-    Message::AiFsDone(Box::new(AiFsDone { id, gen, dir, from, to, rewritten, deleted, result }))
+    Message::AiFsDone(Box::new(AiFsDone {
+        id,
+        gen,
+        dir,
+        from,
+        to,
+        rewritten,
+        deleted,
+        warning,
+        result,
+    }))
 }
 /// 改名 / 移动：本地经引用同步事务，空间走服务端 rename + 引用改写；成功后按 Renamed 跟随语义
 /// 收尾打开中的编辑面（与文件树改名同一链），失败只回执不动状态。
@@ -130,9 +141,10 @@ fn move_entry(app: &mut App, from: String, to: String, id: u64) -> iced::Task<Me
                         to.clone(),
                         sync.rewritten,
                         None,
+                        None,
                         Ok(()),
                     ),
-                    Err(e) => done(id, gen, String::new(), from, to, Vec::new(), None, Err(e)),
+                    Err(e) => done(id, gen, String::new(), from, to, Vec::new(), None, None, Err(e)),
                 },
             )
         }
@@ -151,18 +163,21 @@ fn move_entry(app: &mut App, from: String, to: String, id: u64) -> iced::Task<Me
                         .rename_file(&space_id, &from_task, &to_task)
                         .await
                         .map_err(|e| e.to_string())?;
-                    // 树现拉：引用改写要基于最新全库清单（未就绪时不得静默零执行）
-                    let tree = client.tree(&space_id).await.map_err(|e| e.to_string())?;
-                    Ok::<Vec<String>, String>(
-                        space_actions::rewrite_links_after_rename(
-                            &client, &space_id, &tree, &from_task, &to_task,
-                        )
-                        .await,
-                    )
+                    // 改名已落地：引用改写与树清单只是收尾，取不到清单记可见提示，
+                    // 不改判为整体失败（否则模型收到「操作失败」而磁盘已改名，面与树停在旧路径）
+                    match client.tree(&space_id).await {
+                        Ok(tree) => Ok((
+                            space_actions::rewrite_links_after_rename(
+                                &client, &space_id, &tree, &from_task, &to_task,
+                            )
+                            .await,
+                            None,
+                        )),
+                        Err(e) => Ok((Vec::new(), Some(format!("引用同步失败（文件树读取）：{e}")))),
+                    }
                 },
-                move |result| {
-                    let rewritten = result.as_ref().map(|r| r.clone()).unwrap_or_default();
-                    done(
+                move |result| match result {
+                    Ok((rewritten, warning)) => done(
                         id,
                         gen,
                         parent.clone(),
@@ -170,8 +185,10 @@ fn move_entry(app: &mut App, from: String, to: String, id: u64) -> iced::Task<Me
                         to.clone(),
                         rewritten,
                         None,
-                        result.map(|_| ()),
-                    )
+                        warning,
+                        Ok(()),
+                    ),
+                    Err(e) => done(id, gen, String::new(), from, to, Vec::new(), None, None, Err(e)),
                 },
             )
         }
@@ -191,19 +208,20 @@ fn delete_entry(app: &mut App, path: String, force: bool, id: u64) -> iced::Task
             let path_task = path.clone();
             iced::Task::perform(
                 async move {
-                    // 附件目录需在文件仍在盘上时收集（删掉后读不到表 id）
+                    let abs = atelyx_core::vault::safe_join(&root, &path_task, false)?;
+                    // 附件目录需在文件仍在盘上时收集（删掉后读不到表 id）；目录按整棵子树收集
                     let root_for_scan = root.clone();
                     let rel_for_scan = path_task.clone();
+                    let is_dir = abs.is_dir();
                     let attachment_dirs = tokio::task::spawn_blocking(move || {
                         atelyx_core::vault::table_attachment_dirs(
                             &root_for_scan,
                             &rel_for_scan,
-                            false,
+                            is_dir,
                         )
                     })
                     .await
                     .unwrap_or_default();
-                    let abs = atelyx_core::vault::safe_join(&root, &path_task, false)?;
                     let removed = if abs.is_dir() {
                         let ack = atelyx_core::vault::delete_folder(&root, &path_task, force)?;
                         if !ack.deleted {
@@ -229,6 +247,7 @@ fn delete_entry(app: &mut App, path: String, force: bool, id: u64) -> iced::Task
                         String::new(),
                         Vec::new(),
                         deleted,
+                        None,
                         result.map(|_| ()),
                     )
                 },
@@ -274,6 +293,7 @@ fn delete_entry(app: &mut App, path: String, force: bool, id: u64) -> iced::Task
                         String::new(),
                         Vec::new(),
                         deleted,
+                        None,
                         result.map(|_| ()),
                     )
                 },
@@ -290,6 +310,7 @@ fn parent_of(rel: &str) -> String {
     }
 }
 /// 落盘回执：先交回工具线程（模型可见），再按跟随语义收尾打开中的面并刷新文件树。
+/// warning = 主操作已落地但收尾步骤失败（如引用同步）：仍按成功收尾，提示另给。
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn on_done(
     app: &mut App,
@@ -300,6 +321,7 @@ pub(crate) fn on_done(
     to: String,
     rewritten: Vec<String>,
     deleted: Option<(String, bool)>,
+    warning: Option<String>,
     result: Result<(), String>,
 ) -> iced::Task<Message> {
     if gen != app.epoch() {
@@ -325,11 +347,14 @@ pub(crate) fn on_done(
             format!("已移动 {from} → {to}"),
         ),
         (Err(e), _) => {
-            settle(id, Err(format!("操作失败：{e}")));
+            settle(id, Err(e.clone()));
             app.notify(NoticeLevel::Error, format!("AI 文件操作失败：{e}"));
             return iced::Task::none();
         }
     };
+    if let Some(warning) = &warning {
+        app.notify(NoticeLevel::Warning, format!("{ok_text}；{warning}"));
+    }
     settle(id, Ok(ok_text));
     // 与文件树操作同一条收尾链：插件广播 → 打开中的面跟随 → 树 / 名册 / 反链刷新
     match &follow {
@@ -366,11 +391,12 @@ pub(crate) fn on_done(
     } else {
         app.load_children(&dir)
     };
+    // 跨目录移动：源目录与目标目录的子项都要重取（dir 是源目录）
     if !matches!(app.repo_kind, RepoKind::Space(_)) {
-        if let crate::FollowUp::Renamed { from, .. } = &follow {
-            let from_dir = parent_of(from);
-            if from_dir != dir {
-                next = next.chain(app.load_children(&from_dir));
+        if let crate::FollowUp::Renamed { to, .. } = &follow {
+            let to_dir = parent_of(to);
+            if to_dir != dir {
+                next = next.chain(app.load_children(&to_dir));
             }
         }
     }
