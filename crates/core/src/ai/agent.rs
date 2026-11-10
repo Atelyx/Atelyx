@@ -604,12 +604,12 @@ async fn run_loop(p: RunParams) {
     ctx.plugin_tools
         .retain(|t| config.tool_ids.iter().any(|id| id == &t.selection_id()));
     let mut tool_defs: Vec<ToolDecl> = builtin_tools()
-        .into_iter()
+        .iter()
         .filter(|t| config.tool_ids.iter().any(|id| id == t.name))
         .map(|t| ToolDecl {
             name: t.name.to_string(),
             description: t.description.to_string(),
-            parameters: t.parameters,
+            parameters: t.parameters.clone(),
         })
         .collect();
     tool_defs.extend(ctx.plugin_tools.iter().map(|t| ToolDecl {

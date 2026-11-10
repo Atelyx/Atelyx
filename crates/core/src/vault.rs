@@ -1834,13 +1834,11 @@ pub fn builtin_agents() -> Vec<AgentConfig> {
                 "grep",
                 "list_dir",
                 "read_history",
-                "edit_file",
-                "append_file",
                 "write_file",
-                "rename_file",
-                "move_file",
-                "delete_file",
-                "delete_dir",
+                "append_file",
+                "edit_file",
+                "move",
+                "delete",
                 "todo_write",
             ]
             .iter()
@@ -1861,16 +1859,38 @@ pub fn ensure_builtin_agents(agents: Vec<AgentConfig>) -> Vec<AgentConfig> {
     merged
 }
 
+/// 工具 id 迁移：合并前的旧工具名映射到新名（去重保序），写回只写新名。
+pub fn migrate_tool_ids(tools: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(tools.len());
+    for id in tools {
+        let id = match id.as_str() {
+            "rename_file" | "move_file" => "move",
+            "delete_file" | "delete_dir" => "delete",
+            other => other,
+        }
+        .to_string();
+        if !out.contains(&id) {
+            out.push(id);
+        }
+    }
+    out
+}
+
 /// 读 Agent 配置列表（不存在/解析失败返回空——手编辑损坏不阻塞，与 prompt-notes 同策略）。
+/// 装载时迁移旧工具 id，存量配置可继续使用。
 pub fn read_agents_file(root: &Path) -> Result<Vec<AgentConfig>, String> {
     let path = root.join(".atelyx").join("agents.json");
     if !path.exists() {
         return Ok(Vec::new());
     }
     let json = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    Ok(serde_json::from_str::<AgentConfigFile>(&json)
+    let mut agents = serde_json::from_str::<AgentConfigFile>(&json)
         .map(|f| f.agents)
-        .unwrap_or_default())
+        .unwrap_or_default();
+    for agent in agents.iter_mut() {
+        agent.tools = migrate_tool_ids(std::mem::take(&mut agent.tools));
+    }
+    Ok(agents)
 }
 
 /// 写 Agent 配置列表（原子写 .atelyx/agents.json）。

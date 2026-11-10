@@ -204,8 +204,36 @@ pub fn reference_path_block(hits: &[RefHit]) -> String {
     format!("[引用文件：\n{}\n]\n\n", lines.join("\n"))
 }
 
-/// 系统提示词引导段（Agent 工具名册含 read_file 时追加；与路径块配套）。
+/// 引用读取引导（名册含 read_file 时下发；与消息开头「引用文件」路径块配套）。
 pub const FILE_REFERENCE_PROMPT: &str = "以 # 前缀引用的文件是用户明确指定的内容，其相对仓库根路径列在消息开头「引用文件」列表中。需要其内容时用 read_file 工具读取，在读取之前不要声称已查看过该文件。以 / 结尾的引用是目录：先用 list_dir 工具列出其中的内容，再按需 read_file；glob 用于按模式检索文件。以 . 开头的目录/文件（如 .git、.atelyx）不可被 AI 工具访问。已读取过的文件内容在对话历史中，无需重复读取；仅在需要确认内容是否变更时重读。";
+
+/// 检索上限引导（名册含 glob / grep 时下发）。
+const SEARCH_PROMPT: &str = "检索结果有上限，超限会截断：按提示收窄 pattern、include 或 path 后再查，不要凭截断结果下结论。";
+
+/// 写入纪律引导（名册含任一写文件工具时下发）。
+const EDIT_PROMPT: &str = "改文件前先 read_file 确认现状；edit_file 的 find 缺省要求唯一命中，多处命中时补足上下文或显式设 replace_all=true；表格（.atb）与画布（.atlx）文件不能整文件改写。";
+
+/// 破坏性操作引导（名册含 move / delete 时下发）。
+const DESTRUCTIVE_PROMPT: &str = "move 与 delete 直接改动仓库：删除不可恢复、目录非空需 force=true，仅在用户明确要求时使用；改名会同步更新引用链接。";
+
+/// 系统提示词引导段：按工具名册拼接，名册缺某工具则对应条目不下发。
+pub fn tool_guidance(tool_ids: &[String]) -> String {
+    let has = |name: &str| tool_ids.iter().any(|id| id == name);
+    let mut parts: Vec<&str> = Vec::new();
+    if has("read_file") {
+        parts.push(FILE_REFERENCE_PROMPT);
+    }
+    if has("glob") || has("grep") {
+        parts.push(SEARCH_PROMPT);
+    }
+    if has("write_file") || has("append_file") || has("edit_file") {
+        parts.push(EDIT_PROMPT);
+    }
+    if has("move") || has("delete") {
+        parts.push(DESTRUCTIVE_PROMPT);
+    }
+    parts.join("\n\n")
+}
 
 /// `#` 是否构成引用触发（行首或前一个字符是空白才弹选择器；`#` 前是正文则只是普通文本）。
 pub fn is_trigger_position(before: &str) -> bool {
@@ -334,5 +362,23 @@ mod tests {
         assert!(is_trigger_position("第一行\n"));
         assert!(!is_trigger_position("abc#"));
         assert!(!is_trigger_position("C#"));
+    }
+
+    #[test]
+    fn guidance_follows_roster() {
+        fn ids(list: &[&str]) -> Vec<String> {
+            list.iter().map(|s| s.to_string()).collect()
+        }
+        // 名册无相关工具：不下发任何引导
+        assert!(tool_guidance(&ids(&["todo_write"])).is_empty());
+        // 各段随对应工具出现（互不越界）
+        assert!(tool_guidance(&ids(&["read_file"])).contains("read_file"));
+        assert!(tool_guidance(&ids(&["grep"])).contains("收窄"));
+        assert!(tool_guidance(&ids(&["edit_file"])).contains("replace_all"));
+        assert!(tool_guidance(&ids(&["delete"])).contains("不可恢复"));
+        assert!(!tool_guidance(&ids(&["read_file"])).contains("replace_all"));
+        // 多工具拼接：段间空行分隔
+        let all = tool_guidance(&ids(&["read_file", "write_file", "move"]));
+        assert_eq!(all.split("\n\n").count(), 3);
     }
 }

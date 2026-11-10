@@ -4,6 +4,7 @@
 use iced::widget::{button, column, container, row, space};
 use iced::{Element, Length, Padding, Task, border, widget::container::Style};
 
+use atelyx_core::ai::tools::{builtin_tools, ToolCategory};
 use atelyx_core::credentials;
 use atelyx_core::vault;
 
@@ -42,74 +43,44 @@ pub(crate) const PROVIDER_PRESETS: &[ProviderPreset] = &[
     },
 ];
 
-/// 工具分组（id 与 AI 工具注册名一致；空清单 = 纯对话）。
-struct ToolCategory {
-    label: &'static str,
-    tools: &'static [&'static str],
+/// 一类工具的一项（内置取名册，插件组按运行时注册清单生成；只读性未知 = None）。
+struct ToolItem {
+    id: String,
+    label: String,
+    read_only: Option<bool>,
 }
 
-const TOOL_CATEGORIES: &[ToolCategory] = &[
-    ToolCategory { label: "联网", tools: &["web_search", "web_fetch"] },
-    ToolCategory {
-        label: "文件",
-        tools: &[
-            "read_file", "glob", "grep", "list_dir", "read_history", "edit_file", "append_file",
-            "write_file", "rename_file", "move_file", "delete_file", "delete_dir",
-        ],
-    },
-    ToolCategory { label: "任务清单", tools: &["todo_write"] },
-];
-
-/// 插件工具在 `TOOL_CATEGORIES` 之后单列一组（动态清单，不占静态表）。
+/// 插件组在全部内置分组之后单列（索引 = 内置分组数）。
 fn plugin_cat_index() -> usize {
-    TOOL_CATEGORIES.len()
+    ToolCategory::ALL.len()
 }
 
-/// 一类工具的勾选清单（id + 显示名）：静态分类取名册，插件组取当前注册工具的 selection id。
-fn category_items(app: &App, index: usize) -> Vec<(String, String)> {
+/// 一类工具的勾选清单：内置分组取名册，插件组取当前注册工具的 selection id。
+fn category_items(app: &App, index: usize) -> Vec<ToolItem> {
     if index == plugin_cat_index() {
         app.plugins
             .plugin_tools()
             .into_iter()
-            .map(|t| {
-                let label = format!("{} · {}", t.plugin_name, t.name);
-                (t.selection_id(), label)
+            .map(|t| ToolItem {
+                id: t.selection_id(),
+                label: format!("{} · {}", t.plugin_name, t.name),
+                read_only: None,
             })
             .collect()
     } else {
-        TOOL_CATEGORIES
-            .get(index)
-            .map(|cat| {
-                cat.tools
-                    .iter()
-                    .map(|t| (t.to_string(), tool_label(t)))
-                    .collect()
+        let Some(cat) = ToolCategory::ALL.get(index) else {
+            return Vec::new();
+        };
+        builtin_tools()
+            .iter()
+            .filter(|t| t.category == *cat)
+            .map(|t| ToolItem {
+                id: t.name.to_string(),
+                label: t.label.to_string(),
+                read_only: Some(t.read_only),
             })
-            .unwrap_or_default()
+            .collect()
     }
-}
-
-/// 工具显示名（对话面板工具行 / 设置页工具清单共用）。未知 id 原样返回。
-pub(crate) fn tool_label(id: &str) -> String {
-    match id {
-        "web_search" => "联网搜索",
-        "web_fetch" => "抓取网页",
-        "read_file" => "读取文件",
-        "glob" => "查找文件",
-        "grep" => "搜索内容",
-        "list_dir" => "列出目录",
-        "read_history" => "读取历史",
-        "edit_file" => "编辑文件",
-        "append_file" => "追加内容",
-        "write_file" => "写入文件",
-        "rename_file" => "重命名文件",
-        "move_file" => "移动文件",
-        "delete_file" => "删除文件",
-        "delete_dir" => "删除目录",
-        "todo_write" => "任务清单",
-        other => other,
-    }
-    .to_string()
 }
 
 /// 话题自动命名模式。
@@ -154,8 +125,8 @@ pub fn ensure_selection(app: &mut App) {
         app.ai.agent_sel = app.agents.first().map(|a| a.id.clone());
         app.ai.agent_draft = app.agents.first().map(agent_draft_of);
     }
-    if app.ai.collapsed_cats.len() != TOOL_CATEGORIES.len() + 1 {
-        app.ai.collapsed_cats = vec![true; TOOL_CATEGORIES.len() + 1];
+    if app.ai.collapsed_cats.len() != ToolCategory::ALL.len() + 1 {
+        app.ai.collapsed_cats = vec![true; ToolCategory::ALL.len() + 1];
     }
     app.ai.search_ready = search_source_ready(app);
 }
@@ -837,13 +808,13 @@ pub fn update(app: &mut App, msg: AiMsg) -> Task<Message> {
                 return Task::none();
             }
             if let Some(d) = app.ai.agent_draft.as_mut() {
-                let all_on = items.iter().all(|(t, _)| d.tools.iter().any(|x| x == t));
+                let all_on = items.iter().all(|item| d.tools.iter().any(|x| x == &item.id));
                 if all_on {
-                    d.tools.retain(|x| !items.iter().any(|(t, _)| t == x));
+                    d.tools.retain(|x| !items.iter().any(|item| &item.id == x));
                 } else {
-                    for (t, _) in &items {
-                        if !d.tools.iter().any(|x| x == t) {
-                            d.tools.push(t.clone());
+                    for item in &items {
+                        if !d.tools.iter().any(|x| x == &item.id) {
+                            d.tools.push(item.id.clone());
                         }
                     }
                 }
@@ -1813,9 +1784,9 @@ fn agent_form(app: &App, a: &vault::AgentConfig, window: iced::window::Id) -> El
     ));
 
     col = col.push(super::group_head("工具", "勾选后该 Agent 的对话可调用", true));
-    for (ci, cat) in TOOL_CATEGORIES.iter().enumerate() {
+    for (ci, cat) in ToolCategory::ALL.iter().enumerate() {
         let items = category_items(app, ci);
-        col = col.push(tool_category_block(app, &tools, ro, ci, cat.label, &items));
+        col = col.push(tool_category_block(app, &tools, ro, ci, cat.label(), &items));
     }
     let plugin_items = category_items(app, plugin_cat_index());
     if !plugin_items.is_empty() {
@@ -1855,15 +1826,15 @@ fn tool_category_block<'a>(
     ro: bool,
     index: usize,
     label: &str,
-    items: &[(String, String)],
+    items: &[ToolItem],
 ) -> Element<'a, Message> {
     if items.len() == 1 {
-        let (id, name) = &items[0];
+        let item = &items[0];
         return tool_row(
-            tool_state(tools, id),
-            name,
-            (!ro).then(|| Message::Ai(AiMsg::AgentToolToggle(id.clone()))),
-            tool_note(app, id),
+            tool_state(tools, &item.id),
+            item,
+            (!ro).then(|| Message::Ai(AiMsg::AgentToolToggle(item.id.clone()))),
+            tool_note(app, &item.id),
         );
     }
     let (hit, total) = checked_count(tools, items);
@@ -1898,12 +1869,12 @@ fn tool_category_block<'a>(
     if collapsed {
         return col.into();
     }
-    for (id, name) in items {
+    for item in items {
         col = col.push(tool_row(
-            tool_state(tools, id),
-            name,
-            (!ro).then(|| Message::Ai(AiMsg::AgentToolToggle(id.clone()))),
-            tool_note(app, id),
+            tool_state(tools, &item.id),
+            item,
+            (!ro).then(|| Message::Ai(AiMsg::AgentToolToggle(item.id.clone()))),
+            tool_note(app, &item.id),
         ));
     }
     col.into()
@@ -1913,17 +1884,23 @@ fn tool_category_block<'a>(
 /// 勾选框只作展示，按下由整行承担——避免行与框两个命中区互相抢。
 fn tool_row<'a>(
     state: controls::CheckState,
-    name: &str,
+    item: &ToolItem,
     on_press: Option<Message>,
     note: Option<Element<'a, Message>>,
 ) -> Element<'a, Message> {
     let mut line = row![
         space().width(Length::Fixed(12.0)),
         controls::checkbox(state, None),
-        text(name.to_string()).size(pal::fs_caption()).color(pal::TEXT_SECONDARY),
+        text(item.label.clone()).size(pal::fs_caption()).color(pal::TEXT_SECONDARY),
     ]
     .spacing(6)
     .align_y(iced::alignment::Vertical::Center);
+    // 读写标记：只读工具不写仓库，写入工具会改内容（金色底提示可写）；插件工具只读性未知不标
+    match item.read_only {
+        Some(true) => line = line.push(controls::badge("只读", pal::BG_TERTIARY, pal::TEXT_MUTED)),
+        Some(false) => line = line.push(controls::badge("写入", pal::ACCENT_SOFT, pal::ACCENT)),
+        None => {}
+    }
     if let Some(note) = note {
         line = line.push(note);
     }
@@ -1948,8 +1925,8 @@ fn tool_note(app: &App, id: &str) -> Option<Element<'static, Message>> {
 }
 
 /// 一类工具的已选数 / 总数。
-fn checked_count(tools: &[String], items: &[(String, String)]) -> (usize, usize) {
-    let hit = items.iter().filter(|(id, _)| tools.iter().any(|x| x == id)).count();
+fn checked_count(tools: &[String], items: &[ToolItem]) -> (usize, usize) {
+    let hit = items.iter().filter(|item| tools.iter().any(|x| x == &item.id)).count();
     (hit, items.len())
 }
 
@@ -1962,7 +1939,7 @@ fn tool_state(tools: &[String], id: &str) -> controls::CheckState {
     }
 }
 
-fn state_of(tools: &[String], items: &[(String, String)]) -> controls::CheckState {
+fn state_of(tools: &[String], items: &[ToolItem]) -> controls::CheckState {
     let (hit, total) = checked_count(tools, items);
     if hit == 0 {
         controls::CheckState::Off
@@ -2048,8 +2025,14 @@ fn search_view(app: &App, window: iced::window::Id) -> Element<'static, Message>
 mod tests {
     use super::*;
 
-    fn items(ids: &[&str]) -> Vec<(String, String)> {
-        ids.iter().map(|id| (id.to_string(), tool_label(id))).collect()
+    fn items(ids: &[&str]) -> Vec<ToolItem> {
+        ids.iter()
+            .map(|id| ToolItem {
+                id: id.to_string(),
+                label: atelyx_core::ai::tools::tool_label(id).to_string(),
+                read_only: Some(false),
+            })
+            .collect()
     }
 
     fn tools(ids: &[&str]) -> Vec<String> {

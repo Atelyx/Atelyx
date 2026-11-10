@@ -353,10 +353,14 @@ fn tool_block<'a>(ctx: &StreamCtx<'a>, s: &'a Value, key: &str) -> iced::Element
         key,
         StepBlock {
             leading: vec![
-                icon(tool_icon(&name), 12.0 * ctx.scale, pal::TEXT_MUTED),
+                icon(
+                    atelyx_core::ai::tools::tool_icon(&name),
+                    12.0 * ctx.scale,
+                    pal::TEXT_MUTED,
+                ),
                 icon(status_icon, 11.0 * ctx.scale, status_color),
             ],
-            title: crate::settings_view::ai::tool_label(&name),
+            title: atelyx_core::ai::tools::tool_label(&name).to_string(),
             summary,
             mono_summary: true,
             body: detail,
@@ -367,18 +371,6 @@ fn tool_block<'a>(ctx: &StreamCtx<'a>, s: &'a Value, key: &str) -> iced::Element
 
 fn pretty_json(v: &Value) -> String {
     serde_json::to_string_pretty(v).unwrap_or_else(|_| v.to_string())
-}
-
-fn tool_icon(name: &str) -> &'static str {
-    match name {
-        "web_search" => "globe",
-        "web_fetch" => "link",
-        "read_file" | "read_history" => "file-text",
-        "glob" | "grep" => "search",
-        "edit_file" => "pen-line",
-        "write_file" | "append_file" => "file-plus",
-        _ => "wrench",
-    }
 }
 
 /// 步骤块的展示内容：折叠态（前置图形 + 标题 + 摘要）与展开态正文。

@@ -1728,12 +1728,14 @@ fn materialize(app: &mut App, node_id: &str, message_id: &str) -> Option<Task<Me
             let Some(path) = run.get("args").and_then(|a| a.get("path")).and_then(Value::as_str) else {
                 continue;
             };
-            match name {
-                "write_file" | "append_file" | "edit_file" => {
-                    materials.push(Material::OutputFile(path.to_string()))
-                }
-                "read_file" => materials.push(Material::InputFile(path.to_string())),
-                _ => {}
+            // 只读工具 → 输入卡；写工具 → 输出卡（删除的目标已不存在，不落卡）
+            let Some(def) = atelyx_core::ai::tools::builtin_tool(name) else {
+                continue;
+            };
+            if def.read_only {
+                materials.push(Material::InputFile(path.to_string()));
+            } else if name != "delete" {
+                materials.push(Material::OutputFile(path.to_string()));
             }
         }
     }

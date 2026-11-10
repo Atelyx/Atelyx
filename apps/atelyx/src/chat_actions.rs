@@ -680,17 +680,24 @@ pub(crate) fn resolve_run_config(
             .map(|a| a.tools)
             .unwrap_or_default()
     });
-    // # 引用 / 打开文件上下文只发路径，读取引导随名册含 read_file 才追加
-    // （模型没有读取能力时注入无意义）
-    let system_prompt = system_prompt.map(|mut prompt| {
-        if tool_ids.iter().any(|t| t == "read_file") {
-            if !prompt.trim().is_empty() {
-                prompt.push_str("\n\n");
+    // 工具使用引导按名册拼接（缺某工具则对应条目不下发）；辅助调用不带工具，不下发
+    let system_prompt = if for_run {
+        let guidance = ai_refs::tool_guidance(&tool_ids);
+        match system_prompt {
+            None => (!guidance.is_empty()).then_some(guidance),
+            Some(mut prompt) => {
+                if !guidance.is_empty() {
+                    if !prompt.trim().is_empty() {
+                        prompt.push_str("\n\n");
+                    }
+                    prompt.push_str(&guidance);
+                }
+                Some(prompt)
             }
-            prompt.push_str(ai_refs::FILE_REFERENCE_PROMPT);
         }
-        prompt
-    });
+    } else {
+        system_prompt
+    };
     Ok(RunConfig {
         base_url: provider.base_url.clone(),
         api_key,

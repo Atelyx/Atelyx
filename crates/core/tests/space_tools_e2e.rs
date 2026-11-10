@@ -295,16 +295,16 @@ async fn 写读改删检索全链路() {
     let out = atelyx_core::ai::tools::execute(&ctx, "read_history", json!({ "path": "notes/a.md" })).await;
     assert_eq!(ok_text(out), "无历史版本");
 
-    // 重命名 → 删除
+    // 改名（同目录 move）→ 删除
     let out = atelyx_core::ai::tools::execute(
         &ctx,
-        "rename_file",
-        json!({ "path": "notes/a.md", "newName": "b.md" }),
+        "move",
+        json!({ "from": "notes/a.md", "to": "notes/b.md" }),
     )
     .await;
-    assert!(ok_text(out).contains("已重命名"));
+    assert!(ok_text(out).contains("已移动"));
     assert!(state.files.lock().unwrap().contains_key("notes/b.md"));
-    let out = atelyx_core::ai::tools::execute(&ctx, "delete_file", json!({ "path": "notes/b.md" })).await;
+    let out = atelyx_core::ai::tools::execute(&ctx, "delete", json!({ "path": "notes/b.md" })).await;
     assert!(ok_text(out).contains("已删除"));
     assert!(!state.files.lock().unwrap().contains_key("notes/b.md"));
 }

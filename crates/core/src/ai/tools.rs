@@ -3,7 +3,7 @@
 //! Agent 工具名册与执行：内置工具按分类归组，插件工具由宿主名册单列；文件写经 `WriteQueue` 与壳同出口。
 //! 路径一律仓库相对，执行前做越界校验；结果一律以文本回传模型。
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use base64::Engine as _;
 use serde_json::{json, Value};
@@ -35,238 +35,293 @@ impl ToolResult {
     }
 }
 
-/// 内置工具分类（与 Agent 设置页的勾选分组一致）。
+/// 内置工具分类（Agent 设置页按此分组，声明顺序即展示顺序）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolCategory {
     Web,
-    File,
+    Read,
+    Edit,
     Task,
 }
 
-/// 工具名册项：schema、归属分类、是否可并行执行。
+impl ToolCategory {
+    /// 全部分类（展示顺序）。
+    pub const ALL: [ToolCategory; 4] = [Self::Web, Self::Read, Self::Edit, Self::Task];
+
+    /// 分组显示名。
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Web => "联网",
+            Self::Read => "读取",
+            Self::Edit => "编辑与整理",
+            Self::Task => "任务清单",
+        }
+    }
+}
+
+/// 工具名册项：schema、展示元数据与执行语义的唯一真源。
 #[derive(Debug, Clone)]
 pub struct ToolDef {
     pub name: &'static str,
+    /// 设置页与对话工具行的中文名。
+    pub label: &'static str,
+    /// 工具行图标（`ui::icon` 的形状名）。
+    pub icon: &'static str,
     pub description: &'static str,
     pub parameters: Value,
     pub category: ToolCategory,
+    /// 只读工具：画布自动落卡按此分输入卡，只读 Agent 的工具校验按此排除写工具。
+    pub read_only: bool,
     /// 与其他 parallel_safe 工具并发执行（读写/未知工具串行屏障）。
     pub parallel_safe: bool,
 }
 
 /// 内置名册（与仓库 agents.json 的工具 id 集一致）。
-pub fn builtin_tools() -> Vec<ToolDef> {
-    use ToolCategory::{File as F, Task as T, Web as W};
-    vec![
-        ToolDef {
-            name: "web_search",
-            description: "联网搜索。返回标题、链接与摘要的结果列表。",
-            parameters: json!({
-                "type": "object",
-                "properties": { "query": { "type": "string", "description": "搜索关键词" } },
-                "required": ["query"]
-            }),
-            category: W,
-            parallel_safe: true,
-        },
-        ToolDef {
-            name: "web_fetch",
-            description: "抓取网页正文（纯文本）。用于读取搜索结果中的具体页面。",
-            parameters: json!({
-                "type": "object",
-                "properties": { "url": { "type": "string", "description": "完整的 http(s) URL" } },
-                "required": ["url"]
-            }),
-            category: W,
-            parallel_safe: true,
-        },
-        ToolDef {
-            name: "read_file",
-            description: "读取仓库内文本文件，返回带行号的正文（分页：默认前 2000 行，按页脚提示翻页）。",
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string", "description": "仓库相对路径" },
-                    "offset": { "type": "integer", "description": "起始行（1 起，缺省 1）" },
-                    "limit": { "type": "integer", "description": "行数（缺省 2000）" }
-                },
-                "required": ["path"]
-            }),
-            category: F,
-            parallel_safe: true,
-        },
-        ToolDef {
-            name: "glob",
-            description: "按 glob 模式枚举仓库文件（`**/` 任意深度），返回相对路径列表。",
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "pattern": { "type": "string", "description": "glob 模式，如 \"笔记/**/*.md\"" },
-                    "path": { "type": "string", "description": "限定子目录（缺省仓库根）" }
-                },
-                "required": ["pattern"]
-            }),
-            category: F,
-            parallel_safe: true,
-        },
-        ToolDef {
-            name: "grep",
-            description: "在仓库文件内容中检索正则，返回命中文件与行预览。",
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "pattern": { "type": "string", "description": "正则表达式" },
-                    "path": { "type": "string", "description": "限定子目录（缺省仓库根）" },
-                    "include": { "type": "string", "description": "文件名过滤 glob，如 \"*.md\"" }
-                },
-                "required": ["pattern"]
-            }),
-            category: F,
-            parallel_safe: true,
-        },
-        ToolDef {
-            name: "list_dir",
-            description: "列出目录下的文件与子目录（单层，标注类型）。",
-            parameters: json!({
-                "type": "object",
-                "properties": { "dir": { "type": "string", "description": "仓库相对目录（缺省根）" } }
-            }),
-            category: F,
-            parallel_safe: true,
-        },
-        ToolDef {
-            name: "read_history",
-            description: "读取文件的历史版本列表（时间、作者、摘要）。",
-            parameters: json!({
-                "type": "object",
-                "properties": { "path": { "type": "string", "description": "仓库相对路径" } },
-                "required": ["path"]
-            }),
-            category: F,
-            parallel_safe: true,
-        },
-        ToolDef {
-            name: "write_file",
-            description: "整文件写入（覆盖原内容）。先读后写：覆盖前应已 read_file 确认现状。",
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string", "description": "仓库相对路径" },
-                    "content": { "type": "string", "description": "完整文件内容" }
-                },
-                "required": ["path", "content"]
-            }),
-            category: F,
-            parallel_safe: false,
-        },
-        ToolDef {
-            name: "append_file",
-            description: "在文件末尾追加内容（文件不存在则创建）。",
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string", "description": "仓库相对路径" },
-                    "content": { "type": "string", "description": "追加内容" }
-                },
-                "required": ["path", "content"]
-            }),
-            category: F,
-            parallel_safe: false,
-        },
-        ToolDef {
-            name: "edit_file",
-            description: "对文件做精确替换（find 全部出现替换为 replace；找不到即报错不写入）。",
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string", "description": "仓库相对路径" },
-                    "find": { "type": "string", "description": "要替换的原文（精确匹配）" },
-                    "replace": { "type": "string", "description": "替换后的文本" }
-                },
-                "required": ["path", "find", "replace"]
-            }),
-            category: F,
-            parallel_safe: false,
-        },
-        ToolDef {
-            name: "rename_file",
-            description: "重命名文件或目录。",
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string", "description": "仓库相对路径" },
-                    "newName": { "type": "string", "description": "新名称（不含路径）" }
-                },
-                "required": ["path", "newName"]
-            }),
-            category: F,
-            parallel_safe: false,
-        },
-        ToolDef {
-            name: "move_file",
-            description: "移动文件或目录到新位置。",
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "from": { "type": "string", "description": "源相对路径" },
-                    "to": { "type": "string", "description": "目标相对路径" }
-                },
-                "required": ["from", "to"]
-            }),
-            category: F,
-            parallel_safe: false,
-        },
-        ToolDef {
-            name: "delete_file",
-            description: "删除文件（不可恢复，谨慎使用）。",
-            parameters: json!({
-                "type": "object",
-                "properties": { "path": { "type": "string", "description": "仓库相对路径" } },
-                "required": ["path"]
-            }),
-            category: F,
-            parallel_safe: false,
-        },
-        ToolDef {
-            name: "delete_dir",
-            description: "删除目录及其全部内容（不可恢复，仅在用户明确要求清理时使用）。",
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dir": { "type": "string", "description": "仓库相对目录" },
-                    "force": { "type": "boolean", "description": "非空也删（缺省仅删空目录）" }
-                },
-                "required": ["dir"]
-            }),
-            category: F,
-            parallel_safe: false,
-        },
-        ToolDef {
-            name: "todo_write",
-            description: "写入当前任务清单（全量覆盖）。任务进行中时应维护此清单让用户看到进展。",
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "todos": {
-                        "type": "array",
-                        "description": "任务条目全量列表",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "id": { "type": "string", "description": "稳定 id（更新时保持不变）" },
-                                "text": { "type": "string", "description": "任务内容" },
-                                "done": { "type": "boolean", "description": "是否完成" }
-                            },
-                            "required": ["id", "text"]
+pub fn builtin_tools() -> &'static [ToolDef] {
+    static ROSTER: OnceLock<Vec<ToolDef>> = OnceLock::new();
+    ROSTER.get_or_init(|| {
+        use ToolCategory::{Edit as E, Read as R, Task as T, Web as W};
+        vec![
+            ToolDef {
+                name: "web_search",
+                label: "联网搜索",
+                icon: "globe",
+                description: "联网搜索。返回标题、链接与摘要的结果列表。",
+                parameters: json!({
+                    "type": "object",
+                    "properties": { "query": { "type": "string", "description": "搜索关键词" } },
+                    "required": ["query"]
+                }),
+                category: W,
+                read_only: true,
+                parallel_safe: true,
+            },
+            ToolDef {
+                name: "web_fetch",
+                label: "抓取网页",
+                icon: "link",
+                description: "抓取网页正文（纯文本）。用于读取搜索结果中的具体页面。",
+                parameters: json!({
+                    "type": "object",
+                    "properties": { "url": { "type": "string", "description": "完整的 http(s) URL" } },
+                    "required": ["url"]
+                }),
+                category: W,
+                read_only: true,
+                parallel_safe: true,
+            },
+            ToolDef {
+                name: "read_file",
+                label: "读取文件",
+                icon: "file-text",
+                description: "读取仓库内文本文件，返回带行号的正文（分页：默认前 2000 行，按页脚提示翻页）。",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "仓库相对路径" },
+                        "offset": { "type": "integer", "description": "起始行（1 起，缺省 1）" },
+                        "limit": { "type": "integer", "description": "行数（缺省 2000）" }
+                    },
+                    "required": ["path"]
+                }),
+                category: R,
+                read_only: true,
+                parallel_safe: true,
+            },
+            ToolDef {
+                name: "glob",
+                label: "查找文件",
+                icon: "files",
+                description: "按 glob 模式枚举仓库文件（**/ 任意深度），返回相对路径列表；结果超上限会截断，收窄 pattern 或限定 path 后再查。",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "pattern": { "type": "string", "description": "glob 模式，如 \"笔记/**/*.md\"" },
+                        "path": { "type": "string", "description": "限定子目录（缺省仓库根）" }
+                    },
+                    "required": ["pattern"]
+                }),
+                category: R,
+                read_only: true,
+                parallel_safe: true,
+            },
+            ToolDef {
+                name: "grep",
+                label: "搜索内容",
+                icon: "search",
+                description: "在仓库文件内容中检索正则，返回命中文件与行预览；结果超上限会截断，收窄 pattern 或 include 后再查。",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "pattern": { "type": "string", "description": "正则表达式" },
+                        "path": { "type": "string", "description": "限定子目录（缺省仓库根）" },
+                        "include": { "type": "string", "description": "文件名过滤 glob，如 \"*.md\"" }
+                    },
+                    "required": ["pattern"]
+                }),
+                category: R,
+                read_only: true,
+                parallel_safe: true,
+            },
+            ToolDef {
+                name: "list_dir",
+                label: "列出目录",
+                icon: "folder",
+                description: "列出目录下的文件与子目录（单层，标注类型）。",
+                parameters: json!({
+                    "type": "object",
+                    "properties": { "dir": { "type": "string", "description": "仓库相对目录（缺省根）" } }
+                }),
+                category: R,
+                read_only: true,
+                parallel_safe: true,
+            },
+            ToolDef {
+                name: "read_history",
+                label: "读取历史",
+                icon: "history",
+                description: "读取文件的历史版本列表（时间、作者、摘要）。",
+                parameters: json!({
+                    "type": "object",
+                    "properties": { "path": { "type": "string", "description": "仓库相对路径" } },
+                    "required": ["path"]
+                }),
+                category: R,
+                read_only: true,
+                parallel_safe: true,
+            },
+            ToolDef {
+                name: "write_file",
+                label: "写入文件",
+                icon: "file-plus",
+                description: "整文件写入（覆盖原内容）。先 read_file 确认现状；表格（.atb）与画布（.atlx）文件不支持用文件工具写入。",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "仓库相对路径" },
+                        "content": { "type": "string", "description": "完整文件内容" }
+                    },
+                    "required": ["path", "content"]
+                }),
+                category: E,
+                read_only: false,
+                parallel_safe: false,
+            },
+            ToolDef {
+                name: "append_file",
+                label: "追加内容",
+                icon: "file-plus",
+                description: "在文件末尾追加内容（文件不存在则创建）；表格与画布文件不支持用文件工具写入。",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "仓库相对路径" },
+                        "content": { "type": "string", "description": "追加内容" }
+                    },
+                    "required": ["path", "content"]
+                }),
+                category: E,
+                read_only: false,
+                parallel_safe: false,
+            },
+            ToolDef {
+                name: "edit_file",
+                label: "编辑文件",
+                icon: "pen-line",
+                description: "对文件做精确替换：缺省要求 find 唯一命中（多处命中报错），replace_all=true 替换全部出现；找不到即报错不写入。",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "仓库相对路径" },
+                        "find": { "type": "string", "description": "要替换的原文（精确匹配）" },
+                        "replace": { "type": "string", "description": "替换后的文本" },
+                        "replace_all": { "type": "boolean", "description": "替换全部出现（缺省 false：find 必须唯一）" }
+                    },
+                    "required": ["path", "find", "replace"]
+                }),
+                category: E,
+                read_only: false,
+                parallel_safe: false,
+            },
+            ToolDef {
+                name: "move",
+                label: "移动 / 重命名",
+                icon: "arrow-right",
+                description: "移动或重命名文件与目录：from → to 全路径（同目录改名即重命名）。改名会同步更新仓库内引用链接。",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "from": { "type": "string", "description": "源相对路径" },
+                        "to": { "type": "string", "description": "目标相对路径" }
+                    },
+                    "required": ["from", "to"]
+                }),
+                category: E,
+                read_only: false,
+                parallel_safe: false,
+            },
+            ToolDef {
+                name: "delete",
+                label: "删除",
+                icon: "trash-2",
+                description: "删除文件或目录（不可恢复）。目录非空时需 force=true；仅在用户明确要求时使用。",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "仓库相对路径（文件或目录）" },
+                        "force": { "type": "boolean", "description": "目录非空也删（缺省仅删空目录）" }
+                    },
+                    "required": ["path"]
+                }),
+                category: E,
+                read_only: false,
+                parallel_safe: false,
+            },
+            ToolDef {
+                name: "todo_write",
+                label: "任务清单",
+                icon: "list",
+                description: "写入当前任务清单（全量覆盖）。任务进行中时应维护此清单让用户看到进展。",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "todos": {
+                            "type": "array",
+                            "description": "任务条目全量列表",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "id": { "type": "string", "description": "稳定 id（更新时保持不变）" },
+                                    "text": { "type": "string", "description": "任务内容" },
+                                    "done": { "type": "boolean", "description": "是否完成" }
+                                },
+                                "required": ["id", "text"]
+                            }
                         }
-                    }
-                },
-                "required": ["todos"]
-            }),
-            category: T,
-            parallel_safe: false,
-        },
-    ]
+                    },
+                    "required": ["todos"]
+                }),
+                category: T,
+                read_only: false,
+                parallel_safe: false,
+            },
+        ]
+    })
+}
+
+/// 按名取内置工具（插件工具不在名册内）。
+pub fn builtin_tool(name: &str) -> Option<&'static ToolDef> {
+    builtin_tools().iter().find(|t| t.name == name)
+}
+
+/// 工具显示名：内置取名册，未知（插件工具）原样返回 id。
+pub fn tool_label(name: &str) -> &str {
+    builtin_tool(name).map(|t| t.label).unwrap_or(name)
+}
+
+/// 工具行图标：内置取名册，未知（插件工具）用通用扳手。
+pub fn tool_icon(name: &str) -> &str {
+    builtin_tool(name).map(|t| t.icon).unwrap_or("wrench")
 }
 
 /// 联网搜索配置（运行前由调用方从仓库 AI 设置解析好；未配置 = web_search 降级报错文本）。
@@ -369,10 +424,8 @@ pub async fn execute(ctx: &ToolCtx, name: &str, args: Value) -> ToolResult {
         "write_file" => write_file(ctx, &args).await,
         "append_file" => append_file(ctx, &args).await,
         "edit_file" => edit_file(ctx, &args).await,
-        "rename_file" => rename_file(ctx, &args).await,
-        "move_file" => move_file(ctx, &args).await,
-        "delete_file" => delete_file(ctx, &args).await,
-        "delete_dir" => delete_dir(ctx, &args).await,
+        "move" => move_tool(ctx, &args).await,
+        "delete" => delete_tool(ctx, &args).await,
         "todo_write" => todo_write(ctx, &args).await,
         other => match ctx.plugin_tools.iter().find(|t| t.name == other) {
             Some(spec) => execute_plugin_tool(ctx, spec, args).await,
@@ -777,6 +830,36 @@ async fn read_history(ctx: &ToolCtx, args: &Value) -> ToolResult {
     ToolResult::ok(lines.join("\n"))
 }
 
+/// 表格 / 画布文件禁止整文件写：绕过补丁仲裁、历史与协作广播。
+fn structured_write_guard(rel: &str) -> Result<(), ToolResult> {
+    let lower = rel.to_ascii_lowercase();
+    let kind = if lower.ends_with(".atb") {
+        "表格"
+    } else if lower.ends_with(".atlx") {
+        "画布"
+    } else {
+        return Ok(());
+    };
+    Err(ToolResult::err(format!(
+        "{rel} 是{kind}文件，不支持用文件工具写入（会绕过补丁合并与历史）；请在{kind}视图中编辑"
+    )))
+}
+
+/// 精确替换：缺省要求唯一命中（多处命中报错、不写入）；`all` = 替换全部出现。
+/// 返回替换后的全文与替换处数。
+fn replace_exact(text: &str, find: &str, replace: &str, all: bool) -> Result<(String, usize), String> {
+    if find.is_empty() {
+        return Err("find 不能为空".to_string());
+    }
+    let count = text.matches(find).count();
+    if count == 0 {
+        return Err("未找到要替换的原文（find 精确匹配失败）".to_string());
+    }
+    if count > 1 && !all {
+        return Err(format!("find 出现 {count} 次，请提供更精确的原文或设 replace_all=true"));
+    }
+    Ok((text.replace(find, replace), count))
+}
 async fn write_file(ctx: &ToolCtx, args: &Value) -> ToolResult {
     let (Ok(rel), Some(content)) = (
         arg(args, "path").map(str::to_string),
@@ -788,6 +871,9 @@ async fn write_file(ctx: &ToolCtx, args: &Value) -> ToolResult {
         Ok(rel) => rel,
         Err(e) => return e,
     };
+    if let Err(e) = structured_write_guard(&rel) {
+        return e;
+    }
     match &ctx.repo {
         RepoAccess::Local { root, queue } => {
             let path = match vault::safe_join(root, &rel, true) {
@@ -819,6 +905,9 @@ async fn append_file(ctx: &ToolCtx, args: &Value) -> ToolResult {
         Ok(rel) => rel,
         Err(e) => return e,
     };
+    if let Err(e) = structured_write_guard(&rel) {
+        return e;
+    }
     match &ctx.repo {
         RepoAccess::Local { root, queue } => {
             let root = root.clone();
@@ -866,42 +955,46 @@ async fn edit_file(ctx: &ToolCtx, args: &Value) -> ToolResult {
         Ok(rel) => rel,
         Err(e) => return e,
     };
+    if let Err(e) = structured_write_guard(&rel) {
+        return e;
+    }
+    let all = args.get("replace_all").and_then(Value::as_bool).unwrap_or(false);
     let find = find.to_string();
     let replace = replace.to_string();
     match &ctx.repo {
         RepoAccess::Local { root, queue } => {
             let root = root.clone();
             let target = rel.clone();
-            queue
+            let outcome = queue
                 .bulk(move || {
                     let path = vault::safe_join(&root, &target, false)?;
                     let existing = read_existing_text(&path, &target)?;
-                    if find.is_empty() || !existing.contains(&find) {
-                        return Err(format!("未找到要替换的原文（find 精确匹配失败）：{target}"));
-                    }
-                    vault::write_note(&root, &target, &existing.replace(&find, &replace))
+                    let (next, count) = replace_exact(&existing, &find, &replace, all)?;
+                    vault::write_note(&root, &target, &next).map(|_| count)
                 })
-                .await
-                .map(|_| ToolResult::ok(format!("已编辑 {rel}")))
-                .unwrap_or_else(ToolResult::err)
+                .await;
+            match outcome {
+                Ok(count) => ToolResult::ok(format!("已编辑 {rel}（替换 {count} 处）")),
+                Err(e) => ToolResult::err(e),
+            }
         }
         RepoAccess::Space { client, space_id } => {
             let existing = match client.get_file_text(space_id, &rel).await {
                 Ok(text) => text,
                 Err(e) => return ToolResult::err(format!("文件不存在或不可读：{rel}（{e}）")),
             };
-            if find.is_empty() || !existing.contains(&find) {
-                return ToolResult::err(format!("未找到要替换的原文（find 精确匹配失败）：{rel}"));
-            }
+            let (next, count) = match replace_exact(&existing, &find, &replace, all) {
+                Ok(value) => value,
+                Err(e) => return ToolResult::err(e),
+            };
             client
-                .put_file_text(space_id, &rel, &existing.replace(&find, &replace))
+                .put_file_text(space_id, &rel, &next)
                 .await
-                .map(|_| ToolResult::ok(format!("已编辑 {rel}")))
+                .map(|_| ToolResult::ok(format!("已编辑 {rel}（替换 {count} 处）")))
                 .unwrap_or_else(|e| ToolResult::err(format!("写入失败：{e}")))
         }
     }
 }
-
 /// 读既有文本：不存在 = 空（新建），不可读 = 错误（不得当空内容覆盖）。
 fn read_existing_text(path: &std::path::Path, rel: &str) -> Result<String, String> {
     if !path.exists() {
@@ -910,34 +1003,8 @@ fn read_existing_text(path: &std::path::Path, rel: &str) -> Result<String, Strin
     std::fs::read_to_string(path).map_err(|e| format!("文件不可读：{rel}（{e}）"))
 }
 
-async fn rename_file(ctx: &ToolCtx, args: &Value) -> ToolResult {
-    let Ok(rel) = arg(args, "path") else {
-        return ToolResult::err("工具参数错误：缺少 path");
-    };
-    let Ok(new_name) = arg(args, "newName") else {
-        return ToolResult::err("工具参数错误：缺少 newName");
-    };
-    if new_name.contains(['/', '\\']) || new_name == "." || new_name == ".." {
-        return ToolResult::err("newName 只能是名称，不含路径分隔符");
-    }
-    let rel = match rel_path(rel) {
-        Ok(rel) => rel,
-        Err(e) => return e,
-    };
-    let parent = rel.rsplit_once('/').map(|(dir, _)| dir.to_string()).unwrap_or_default();
-    let target = if parent.is_empty() {
-        new_name.to_string()
-    } else {
-        format!("{parent}/{new_name}")
-    };
-    let target = match rel_path(&target) {
-        Ok(target) => target,
-        Err(e) => return e,
-    };
-    move_entry(ctx, &rel, &target, &format!("已重命名 {rel} → {new_name}")).await
-}
-
-async fn move_file(ctx: &ToolCtx, args: &Value) -> ToolResult {
+/// 移动 / 重命名工具：改名 = 同目录 move（引用同步与空间端点共用一套实现）。
+async fn move_tool(ctx: &ToolCtx, args: &Value) -> ToolResult {
     let Ok(from) = arg(args, "from") else {
         return ToolResult::err("工具参数错误：缺少 from");
     };
@@ -952,6 +1019,9 @@ async fn move_file(ctx: &ToolCtx, args: &Value) -> ToolResult {
         Ok(to) => to,
         Err(e) => return e,
     };
+    if from == to {
+        return ToolResult::err("from 与 to 相同，无需移动");
+    }
     move_entry(ctx, &from, &to, &format!("已移动 {from} → {to}")).await
 }
 
@@ -968,9 +1038,9 @@ async fn move_entry(ctx: &ToolCtx, from: &str, to: &str, ok: &str) -> ToolResult
             } else {
                 crate::vault_refs::rename_note_synced(root, &ctx.exclude, from, to)
             };
-            synced.map(|_| ToolResult::ok(ok.to_string())).unwrap_or_else(|e| {
-                ToolResult::err(format!("操作失败：{e}"))
-            })
+            synced
+                .map(|_| ToolResult::ok(ok.to_string()))
+                .unwrap_or_else(|e| ToolResult::err(format!("操作失败：{e}")))
         }
         RepoAccess::Space { client, space_id } => client
             .rename_file(space_id, from, to)
@@ -980,7 +1050,8 @@ async fn move_entry(ctx: &ToolCtx, from: &str, to: &str, ok: &str) -> ToolResult
     }
 }
 
-async fn delete_file(ctx: &ToolCtx, args: &Value) -> ToolResult {
+/// 删除工具：按路径类型分派文件 / 目录（目录非空需 force），空间侧按树节点类型判定。
+async fn delete_tool(ctx: &ToolCtx, args: &Value) -> ToolResult {
     let Ok(rel) = arg(args, "path") else {
         return ToolResult::err("工具参数错误：缺少 path");
     };
@@ -988,43 +1059,56 @@ async fn delete_file(ctx: &ToolCtx, args: &Value) -> ToolResult {
         Ok(rel) => rel,
         Err(e) => return e,
     };
-    match &ctx.repo {
-        RepoAccess::Local { root, .. } => vault::delete_vault_file(root, &rel)
-            .map(|_| ToolResult::ok(format!("已删除 {rel}")))
-            .unwrap_or_else(ToolResult::err),
-        RepoAccess::Space { client, space_id } => client
-            .delete_file(space_id, &rel)
-            .await
-            .map(|_| ToolResult::ok(format!("已删除 {rel}")))
-            .unwrap_or_else(|e| ToolResult::err(format!("删除失败：{e}"))),
-    }
-}
-
-async fn delete_dir(ctx: &ToolCtx, args: &Value) -> ToolResult {
-    let Ok(rel) = arg(args, "dir") else {
-        return ToolResult::err("工具参数错误：缺少 dir");
-    };
-    let rel = match rel_path(rel) {
-        Ok(rel) => rel,
-        Err(e) => return e,
-    };
     let force = args.get("force").and_then(Value::as_bool).unwrap_or(false);
     match &ctx.repo {
-        RepoAccess::Local { root, .. } => match vault::delete_folder(root, &rel, force) {
-            Ok(result) if result.deleted => ToolResult::ok(format!("已删除目录 {rel}")),
-            Ok(_) => ToolResult::err(format!("目录非空（force 可强制删除）：{rel}")),
-            Err(e) => ToolResult::err(format!("删除失败：{e}")),
-        },
+        RepoAccess::Local { root, .. } => {
+            let path = match vault::safe_join(root, &rel, false) {
+                Ok(path) => path,
+                Err(e) => return ToolResult::err(e),
+            };
+            if path.is_dir() {
+                delete_dir_entry(root, &rel, force)
+            } else if path.is_file() {
+                vault::delete_vault_file(root, &rel)
+                    .map(|_| ToolResult::ok(format!("已删除 {rel}")))
+                    .unwrap_or_else(|e| ToolResult::err(format!("删除失败：{e}")))
+            } else {
+                ToolResult::err(format!("路径不存在：{rel}"))
+            }
+        }
         RepoAccess::Space { client, space_id } => {
-            match client.delete_folder(space_id, &rel, force).await {
-                Ok(ack) if ack.deleted => ToolResult::ok(format!("已删除目录 {rel}")),
-                Ok(_) => ToolResult::err(format!("目录非空（force 可强制删除）：{rel}")),
-                Err(e) => ToolResult::err(format!("删除失败：{e}")),
+            let tree = match client.tree(space_id).await {
+                Ok(tree) => tree,
+                Err(e) => return ToolResult::err(format!("路径不存在或不可读：{e}")),
+            };
+            let Some(node) = find_tree_node(&tree, &rel) else {
+                return ToolResult::err(format!("路径不存在：{rel}"));
+            };
+            if node.is_dir {
+                match client.delete_folder(space_id, &rel, force).await {
+                    Ok(ack) if ack.deleted => ToolResult::ok(format!("已删除目录 {rel}")),
+                    Ok(_) => ToolResult::err(format!("目录非空（force 可强制删除）：{rel}")),
+                    Err(e) => ToolResult::err(format!("删除失败：{e}")),
+                }
+            } else {
+                client
+                    .delete_file(space_id, &rel)
+                    .await
+                    .map(|_| ToolResult::ok(format!("已删除 {rel}")))
+                    .unwrap_or_else(|e| ToolResult::err(format!("删除失败：{e}")))
             }
         }
     }
 }
 
+/// 本地目录删除：空目录 / force 两种结果同一口径（`deleted = false` 即非空未删）。
+fn delete_dir_entry(root: &std::path::Path, rel: &str, force: bool) -> ToolResult {
+    match vault::delete_folder(root, rel, force) {
+        Ok(result) if result.deleted => ToolResult::ok(format!("已删除目录 {rel}")),
+        Ok(_) => ToolResult::err(format!("目录非空（force 可强制删除）：{rel}")),
+        Err(e) => ToolResult::err(format!("删除失败：{e}")),
+    }
+}
 /// 任务清单落点（仓库相对；空间落用户元数据同键）。
 pub const TODO_FILE: &str = ".atelyx/todos/agent.json";
 
@@ -1100,6 +1184,74 @@ mod tests {
             RepoAccess::Local { queue, .. } => queue,
             RepoAccess::Space { .. } => panic!("测试上下文恒为本地后端"),
         }
+    }
+
+    #[test]
+    fn roster_is_unique_and_fully_described() {
+        let tools = builtin_tools();
+        assert_eq!(tools.len(), 13, "名册长度");
+        for (i, tool) in tools.iter().enumerate() {
+            assert!(!tool.label.is_empty(), "{} 缺显示名", tool.name);
+            assert!(!tool.icon.is_empty(), "{} 缺图标", tool.name);
+            assert!(!tool.description.is_empty(), "{} 缺描述", tool.name);
+            assert!(tool.parameters.get("type").is_some(), "{} 缺参数 schema", tool.name);
+            assert!(
+                tools[i + 1..].iter().all(|other| other.name != tool.name),
+                "{} 重名",
+                tool.name
+            );
+        }
+        // 每组至少一项（设置页分组不出现空组）
+        for cat in ToolCategory::ALL {
+            assert!(tools.iter().any(|t| t.category == cat), "{} 分组为空", cat.label());
+        }
+        // 只读工具可并行、写工具串行屏障
+        assert!(tools.iter().filter(|t| t.read_only).all(|t| t.parallel_safe));
+        assert!(tools.iter().filter(|t| !t.read_only).all(|t| !t.parallel_safe));
+        // 旧 id 已合并：按名取新工具、旧名不再在册
+        assert!(builtin_tool("move").is_some() && builtin_tool("rename_file").is_none());
+        assert!(builtin_tool("delete").is_some() && builtin_tool("delete_dir").is_none());
+        assert_eq!(tool_label("write_file"), "写入文件");
+        assert_eq!(tool_label("plugin:x:y"), "plugin:x:y");
+        assert_eq!(tool_icon("plugin:x:y"), "wrench");
+    }
+
+    #[test]
+    fn builtin_agents_track_roster_and_chat_stays_read_only() {
+        let agents = crate::vault::builtin_agents();
+        let roster: Vec<&str> = builtin_tools().iter().map(|t| t.name).collect();
+        for agent in &agents {
+            for id in &agent.tools {
+                assert!(roster.contains(&id.as_str()), "{} 引用了名册外工具 {id}", agent.name);
+            }
+        }
+        // 只读 Agent 不得含写工具（新增写工具漏进缺省对话集即失败）
+        let chat = &agents[0];
+        assert!(
+            chat.tools
+                .iter()
+                .all(|id| builtin_tool(id).is_some_and(|t| t.read_only)),
+            "只读 Agent 含写工具：{:?}",
+            chat.tools
+        );
+        // 全量 Agent 覆盖整个名册
+        let full = &agents[1];
+        for name in roster {
+            assert!(full.tools.iter().any(|t| t == name), "全量 Agent 缺 {name}");
+        }
+    }
+
+    #[test]
+    fn legacy_agent_tool_ids_migrate_on_load() {
+        let dir = TempDir::new("ai-agents");
+        std::fs::create_dir_all(dir.join(".atelyx")).unwrap();
+        std::fs::write(
+            dir.join(".atelyx/agents.json"),
+            r#"{"schema":"1","agents":[{"id":"a","name":"A","tools":["rename_file","move_file","delete_file","delete_dir","read_file"]}]}"#,
+        )
+        .unwrap();
+        let agents = crate::vault::read_agents_file(&dir.to_path_buf()).unwrap();
+        assert_eq!(agents[0].tools, vec!["move", "delete", "read_file"]);
     }
 
     #[test]
@@ -1220,6 +1372,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn edit_file_requires_unique_match_unless_replace_all() {
+        let dir = TempDir::new("ai-edit");
+        let ctx = ctx(&dir);
+        execute(&ctx, "write_file", json!({ "path": "a.md", "content": "项\n项\n" })).await;
+        // 多处命中且未开 replace_all：报错并给出命中次数，磁盘不变
+        let r = execute(&ctx, "edit_file", json!({ "path": "a.md", "find": "项", "replace": "条" })).await;
+        assert!(r.is_error && r.text.contains("2 次"), "{}", r.text);
+        queue_of(&ctx).drain().await.unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("a.md")).unwrap(), "项\n项\n");
+        // 显式 replace_all：全部替换
+        let r = execute(
+            &ctx,
+            "edit_file",
+            json!({ "path": "a.md", "find": "项", "replace": "条", "replace_all": true }),
+        )
+        .await;
+        assert!(!r.is_error, "{}", r.text);
+        assert!(r.text.contains("替换 2 处"), "{}", r.text);
+        queue_of(&ctx).drain().await.unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("a.md")).unwrap(), "条\n条\n");
+    }
+
+    #[tokio::test]
+    async fn structured_files_reject_file_tool_writes() {
+        let dir = TempDir::new("ai-structured");
+        let ctx = ctx(&dir);
+        for (tool, args) in [
+            ("write_file", json!({ "path": "表.atb", "content": "{}" })),
+            ("append_file", json!({ "path": "画布.atlx", "content": "{}" })),
+            ("edit_file", json!({ "path": "表.ATB", "find": "a", "replace": "b" })),
+        ] {
+            let r = execute(&ctx, tool, args).await;
+            assert!(r.is_error && r.text.contains("补丁合并"), "{tool}：{}", r.text);
+        }
+        assert!(!dir.join("表.atb").exists() && !dir.join("画布.atlx").exists());
+    }
+
+    #[tokio::test]
     async fn path_guards_reject_escape_and_absolute() {
         let dir = TempDir::new("ai-tools");
         let ctx = ctx(&dir);
@@ -1240,33 +1430,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_dir_delete_and_rename() {
+    async fn list_dir_move_and_delete() {
         let dir = TempDir::new("ai-tools");
         let ctx = ctx(&dir);
         std::fs::create_dir_all(dir.join("子目录")).unwrap();
         std::fs::write(dir.join("子目录/a.md"), "A").unwrap();
         let r = execute(&ctx, "list_dir", json!({ "dir": "子目录" })).await;
         assert!(r.text.contains("a.md"));
-        let r = execute(
-            &ctx,
-            "rename_file",
-            json!({ "path": "子目录/a.md", "newName": "b.md" }),
-        )
-        .await;
+        // 同目录改名 = move
+        let r = execute(&ctx, "move", json!({ "from": "子目录/a.md", "to": "子目录/b.md" })).await;
         assert!(!r.is_error, "{}", r.text);
         assert!(!dir.join("子目录/a.md").exists());
         assert!(dir.join("子目录/b.md").exists());
-        // 非空目录：无 force 报错，force 删除
-        let r = execute(&ctx, "delete_dir", json!({ "dir": "子目录" })).await;
-        assert!(r.is_error);
-        let r = execute(
-            &ctx,
-            "delete_dir",
-            json!({ "dir": "子目录", "force": true }),
-        )
-        .await;
+        // 目录：无 force 报错，force 删除
+        let r = execute(&ctx, "delete", json!({ "path": "子目录" })).await;
+        assert!(r.is_error, "{}", r.text);
+        let r = execute(&ctx, "delete", json!({ "path": "子目录", "force": true })).await;
         assert!(!r.is_error, "{}", r.text);
         assert!(!dir.join("子目录").exists());
+        // 不存在的路径：可读报错
+        let r = execute(&ctx, "delete", json!({ "path": "无此文件.md" })).await;
+        assert!(r.is_error && r.text.contains("不存在"), "{}", r.text);
     }
 
     #[tokio::test]
@@ -1295,18 +1479,5 @@ mod tests {
         let ctx = ctx(&dir);
         let r = execute(&ctx, "web_search", json!({ "query": "rust" })).await;
         assert!(r.is_error && r.text.contains("未配置搜索源"));
-    }
-
-    #[test]
-    fn registry_covers_categories() {
-        let tools = builtin_tools();
-        assert_eq!(tools.iter().filter(|t| t.name == "web_search").count(), 1);
-        let by_cat = |c: ToolCategory| tools.iter().filter(|t| t.category == c).count();
-        assert!(by_cat(ToolCategory::Web) >= 2);
-        assert!(by_cat(ToolCategory::File) >= 10);
-        assert_eq!(by_cat(ToolCategory::Task), 1);
-        // 读写屏障：write 类不可并行
-        assert!(!tools.iter().any(|t| t.name == "write_file" && t.parallel_safe));
-        assert!(tools.iter().any(|t| t.name == "read_file" && t.parallel_safe));
     }
 }
