@@ -138,13 +138,10 @@ pub(crate) fn children_of_tree(tree: &[space_client::TreeNode], rel: &str) -> Ve
 
 /// 树中定位一个路径并回它是否目录（不存在 = None）。
 pub(crate) fn tree_node_is_dir(tree: &[space_client::TreeNode], rel: &str) -> Option<bool> {
-    let (parent, name) = match rel.rsplit_once('/') {
-        Some((parent, name)) => (parent, name),
-        None => ("", rel),
-    };
+    let parent = rel.rsplit_once('/').map(|(parent, _)| parent).unwrap_or("");
     children_of_tree(tree, parent)
         .into_iter()
-        .find(|child| child.rel == rel && child.rel.rsplit('/').next() == Some(name))
+        .find(|child| child.rel == rel)
         .map(|child| child.is_dir)
 }
 

@@ -1849,7 +1849,7 @@ async fn move_entry(ctx: &ToolCtx, from: &str, to: &str, ok: &str) -> ToolResult
         let op = crate::ai::edit_host::FsOp::Move { from: from.to_string(), to: to.to_string() };
         return match host.apply_fs(op, actor).await {
             Ok(_) => ToolResult::ok(ok.to_string()),
-            Err(e) => ToolResult::err(format!("操作失败：{e}")),
+            Err(e) => ToolResult::err(e),
         };
     }
     match &ctx.repo {
