@@ -483,8 +483,9 @@ async fn 空间表格编辑按补丁上行且不覆盖并发新建() {
     assert_eq!(table.title, "排期");
     assert_eq!(table.rows.len(), 1, "ops 应作用在新建的空表上");
 
-    // 并发新建：读到不存在 → 对端先建出并写入一行 → 本次只新建必然 409，不得覆盖对端内容
-    let mut raced = atelyx_core::table_ops::new_table_file("并发");
+    // 并发新建：读到不存在 → 对端先建出并写入一行 → 本次只新建被拒（409），
+    // 重读对端真源后按补丁上行：对端内容保留，本次操作叠加在其上
+    let mut raced = atelyx_core::vault::TableFile::new_file("并发");
     raced.rows.push(atelyx_core::vault::TableRow {
         id: "对端".into(),
         values: Default::default(),
@@ -502,11 +503,11 @@ async fn 空间表格编辑按补丁上行且不覆盖并发新建() {
         json!({ "path": "表格/并发.atb", "ops": [{ "op": "add_row", "cells": {} }] }),
     )
     .await;
-    assert!(out.is_error, "并发新建应报冲突而不是覆盖：{}", out.text);
+    assert!(!out.is_error, "并发新建应重读后合并而不是失败：{}", out.text);
     let text = state.files.lock().unwrap().get("表格/并发.atb").cloned().expect("对端文件仍在");
     let table: atelyx_core::vault::TableFile = serde_json::from_str(&text).unwrap();
-    assert_eq!(table.rows.len(), 1, "对端内容不得被覆盖");
-    assert_eq!(table.rows[0].id, "对端");
+    assert_eq!(table.rows.len(), 2, "对端行 + 本次新增行并存：{}", table.rows.len());
+    assert_eq!(table.rows[0].id, "对端", "对端内容不得被覆盖");
 }
 
 /// 画布口径同表格：新建走只新建 + 补丁，坏文件不得当空画布覆盖。

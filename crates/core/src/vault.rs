@@ -2463,6 +2463,59 @@ pub fn file_stem(name: &str) -> &str {
     }
 }
 
+impl TableFile {
+    /// 新建空表格（自带一个「名称」文本字段，空白表无字段难用）。
+    pub fn new_file(title: &str) -> Self {
+        let now = now_secs();
+        Self {
+            schema: TABLE_SCHEMA.to_string(),
+            id: nanoid::nanoid!(),
+            title: title.to_string(),
+            fields: vec![TableField {
+                id: nanoid::nanoid!(),
+                name: "名称".to_string(),
+                field_type: "text".to_string(),
+                options: None,
+                width: None,
+                calc_type: None,
+            }],
+            rows: Vec::new(),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+}
+
+impl CanvasFile {
+    /// 新建空画布（标题随文件名起稿；id 与表格同口径用 nanoid）。
+    pub fn new_file(title: &str) -> Self {
+        let now = now_secs();
+        Self {
+            schema: CANVAS_SCHEMA.to_string(),
+            id: nanoid::nanoid!(),
+            title: title.to_string(),
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+}
+
+/// 仓库内临时附件区（插件写入的临时媒体、宿主托管的会话 / 表格附件都在其下）。
+pub const TEMP_DIR: &str = ".atelyx/temp/";
+
+/// 会话图片附件目录前缀（临时区内的宿主托管目录）。
+pub const CHAT_TEMP_DIR: &str = ".atelyx/temp/chats/";
+
+/// 表格图片附件目录前缀（临时区内的宿主托管目录）。
+pub const TABLE_TEMP_DIR: &str = ".atelyx/temp/tables/";
+
+/// 仓库相对路径的父目录（根 = 空串；末段为文件名或目录名）。
+pub fn parent_rel(rel: &str) -> String {
+    rel.rsplit_once('/').map(|(parent, _)| parent).unwrap_or("").to_string()
+}
+
 /// 仓库相对路径的显示标题：末段去掉扩展名（页面标题、标签与新建文档的标题同源）。
 pub fn file_label(rel: &str) -> String {
     let name = rel.rsplit('/').next().unwrap_or(rel);

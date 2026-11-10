@@ -159,19 +159,19 @@ pub async fn read_space<M: DocModel>(
 }
 
 /// 空间新建空模型（补丁端点要求目标已存在）。只新建：目标已存在即 `Conflict`，不覆盖。
+/// 落盘的模型必须与随后上行的补丁同源（补丁 id 即该模型 id），否则服务端按串文件拒绝。
 async fn create_space<M: DocModel>(
     client: &SpaceClient,
     space_id: &str,
     rel: &str,
-    title: &str,
+    model: &M,
 ) -> Result<(), SpaceError> {
-    let model = M::new_model(title);
-    let json = serde_json::to_string_pretty(&model).map_err(|e| SpaceError::Network(e.to_string()))?;
+    let json = serde_json::to_string_pretty(model).map_err(|e| SpaceError::Network(e.to_string()))?;
     client.create_file_text(space_id, rel, &json).await
 }
 
-/// 补丁端点错误 → 模型可读原因（409 = 补丁与文件不匹配，须刷新重算）。
-fn patch_error(e: SpaceError, what: &str) -> String {
+/// 补丁端点错误 → 模型可读原因（400 / 409 = 补丁与文件不匹配，须刷新重算）。
+pub fn patch_error(e: SpaceError, what: &str) -> String {
     match e {
         SpaceError::BadRequest(m) | SpaceError::Conflict(m) => {
             format!("{what}已被他人修改，请刷新后重试（{m}）")
@@ -204,7 +204,7 @@ pub async fn apply_space<M: DocModel>(
                     Err(PlanError::Unchanged) => return Ok(None),
                     Err(PlanError::Ops(e)) => return Err(e),
                 };
-                match create_space::<M>(client, space_id, rel, title).await {
+                match create_space::<M>(client, space_id, rel, &fresh).await {
                     Ok(()) => {}
                     // 读到不存在之后被他人建出：重读后按补丁上行
                     Err(SpaceError::Conflict(_)) if attempt == 0 => continue,
@@ -296,7 +296,7 @@ impl DocModel for TableFile {
     }
 
     fn new_model(title: &str) -> Self {
-        crate::table_ops::new_table_file(title)
+        vault::TableFile::new_file(title)
     }
 
     fn read_cached(state: &VaultState, root: &Path, rel: &str) -> Result<(PathBuf, Self), String> {
@@ -362,7 +362,7 @@ impl DocModel for CanvasFile {
     }
 
     fn new_model(title: &str) -> Self {
-        crate::table_ops::new_canvas_file(title)
+        vault::CanvasFile::new_file(title)
     }
 
     fn read_cached(state: &VaultState, root: &Path, rel: &str) -> Result<(PathBuf, Self), String> {
@@ -386,7 +386,7 @@ mod tests {
     use serde_json::json;
 
     fn table() -> TableFile {
-        let mut model = crate::table_ops::new_table_file("任务");
+        let mut model = vault::TableFile::new_file("任务");
         model.rows.push(vault::TableRow {
             id: "r1".into(),
             values: Default::default(),
@@ -445,7 +445,7 @@ mod tests {
 
     #[test]
     fn plan_canvas_patch_carries_new_node() {
-        let baseline = crate::table_ops::new_canvas_file("画");
+        let baseline = vault::CanvasFile::new_file("画");
         let ops = vec![CanvasOp::AddTextCard { text: "卡".into(), x: Some(16.0), y: Some(16.0) }];
         let planned = plan(&baseline, &baseline, &ops, "画", 1).expect("应产出计划");
         assert_eq!(planned.patch.upsert_nodes.len(), 1);
