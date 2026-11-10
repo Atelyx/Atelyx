@@ -2329,7 +2329,11 @@ impl App {
                 // 落盘即记历史版本（edit；内容 no-op 由记录侧跳过），随后刷新版本列表
                 proceed.chain(self.record_note_history(saved))
             }
-            Message::Saved(_, _, _, reason, Err(e)) => {
+            Message::Saved(gen, _, _, reason, Err(e)) => {
+                // 世代守卫与成功回执同口径：切仓库后旧仓库的保存失败不得动新仓库的挂起动作
+                if gen != self.epoch() {
+                    return Task::none();
+                }
                 self.settle_history_restore(false);
                 // flush 被保存失败打断：动作不放行（放行会丢弃未落盘内容），挂起输入保留待重试；
                 // 等回执的 AI 文件操作不能一直挂着，就地回填失败原因
