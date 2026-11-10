@@ -110,7 +110,8 @@ pub async fn commit_local<M: DocModel>(
     title: &str,
     updated_at: i64,
 ) -> Result<M, String> {
-    let path = vault::safe_join(root, rel, false)?;
+    // 写路径按建父目录取绝对路径：新建表格 / 画布的落点目录可能还不存在
+    let path = vault::safe_join(root, rel, true)?;
     let expected_id = expected_id.to_string();
     let after = after.clone();
     let patch = patch.clone();
