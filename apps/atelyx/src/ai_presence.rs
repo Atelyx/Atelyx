@@ -1,7 +1,7 @@
 //! AI 协作者在场：本端 AI 编辑状态经 host.ai 瞬时通道上行，远端解析为工具条胶囊。
 //! 通道载荷对服务端不透明（与插件通道同构），AI 不进 peers 名册、不建独立连接。
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use atelyx_core::ai::edit_host::{AiIdentity, EditActor};
 use atelyx_core::ephemeral::EphemeralChannel;
@@ -25,6 +25,10 @@ pub struct RemoteAi {
     pub last_edit_summary: Option<String>,
 }
 
+/// 远端「刚刚修改」的展示窗口：编辑结束后条目要在对端留这么久（协作者胶囊同档）。
+/// 通道超时即保活上限，所以取展示窗口本身，而不是通道缺省的 30 秒。
+const IDLE_WINDOW: Duration = Duration::from_secs(60);
+
 /// 本端 AI 在场状态机（瞬时通道封装）。
 pub struct AiPresence {
     channel: EphemeralChannel,
@@ -44,7 +48,9 @@ impl Default for AiPresence {
 impl AiPresence {
     pub fn new() -> Self {
         AiPresence {
-            channel: EphemeralChannel::new(),
+            // 编辑结束后的「刚刚修改」要在对端留满展示窗口：通道超时按窗口取，
+            // 空闲态由壳的周期拍保活续期（见 keepalive）
+            channel: EphemeralChannel::with_timeout(IDLE_WINDOW),
             view: String::new(),
             file: None,
             agent: None,
@@ -63,8 +69,12 @@ impl AiPresence {
         self.channel.flush(now)
     }
 
-    /// 到期保活：编辑态长于保活间隔时续期，避免对端按超时剔除。
+    /// 到期保活：只在编辑态续期（编辑久于保活间隔时对端不能按超时剔除）。
+    /// 空闲态的「刚刚修改」不续期——续期会让胶囊在对端永不消失，展示窗口由通道超时收口。
     pub fn keepalive(&mut self, now: Instant) -> Option<Value> {
+        if !self.editing {
+            return None;
+        }
         self.channel.keepalive_if_due(now)
     }
 
@@ -264,6 +274,30 @@ mod tests {
         assert!(!remotes[0].editing);
         assert_eq!(remotes[0].last_edit_ts, 123);
         assert_eq!(remotes[0].last_edit_summary.as_deref(), Some("已编辑 a.md"));
+    }
+
+    #[test]
+    fn idle_entry_survives_the_show_window() {
+        let mut presence = AiPresence::new();
+        let now = Instant::now();
+        let payload = serde_json::json!({
+            "clientId": 7u64,
+            "clock": 1u64,
+            "state": {
+                "view": "note",
+                "file": "a.md",
+                "action": "idle",
+                "agent": { "id": "builtin-agent", "name": "Agent" },
+                "operator": { "name": "甲", "color": "#3b82f6" },
+                "lastEdit": { "ts": 123, "summary": "已编辑 a.md" }
+            }
+        });
+        assert!(presence.apply("peer-1", &payload, now));
+        // 通道缺省超时 30 秒；「刚刚修改」按展示窗口（60 秒）保留
+        assert_eq!(presence.remotes(now + Duration::from_secs(45)).len(), 1);
+        assert!(presence
+            .remotes(now + IDLE_WINDOW + Duration::from_millis(1))
+            .is_empty());
     }
 
     #[test]

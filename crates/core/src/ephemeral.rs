@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 const MIN_INTERVAL: Duration = Duration::from_millis(50);
 /// 保活重发间隔：空闲端不重发身份帧就会被对端按 [`TIMEOUT`] 剔除（互见消失）。
 const KEEPALIVE: Duration = Duration::from_secs(15);
-/// 远端条目超时：期间无更新视为离线剔除。
+/// 远端条目缺省超时：期间无更新视为离线剔除（按通道可覆盖，见 [`EphemeralChannel::with_timeout`]）。
 const TIMEOUT: Duration = Duration::from_secs(30);
 
 /// clientID 计数器：同一进程内多个通道实例的 id 不撞车。
@@ -42,6 +42,8 @@ pub struct EphemeralChannel {
     local_sent: Option<Value>,
     clock: u64,
     sent_at: Option<Instant>,
+    /// 远端条目超时（缺省 [`TIMEOUT`]）。
+    timeout: Duration,
     remotes: HashMap<u64, Entry>,
     /// 各远端 clientID 见过的最大 clock：条目移除后仍保留水位，
     /// 否则乱序到达的旧帧会把已离场的端重新插回来。
@@ -56,12 +58,18 @@ impl Default for EphemeralChannel {
 
 impl EphemeralChannel {
     pub fn new() -> Self {
+        Self::with_timeout(TIMEOUT)
+    }
+
+    /// 指定远端条目超时的通道：条目需要展示得比缺省 30 秒更久时用（超时同时是保活上限）。
+    pub fn with_timeout(timeout: Duration) -> Self {
         EphemeralChannel {
             client_id: new_client_id(),
             local_state: None,
             local_sent: None,
             clock: 0,
             sent_at: None,
+            timeout,
             remotes: HashMap::new(),
             clocks: HashMap::new(),
         }
@@ -169,7 +177,7 @@ impl EphemeralChannel {
 
     /// 远端条目（按 clientID 排序）；超时未刷新的先剔除。
     pub fn remotes(&mut self, now: Instant) -> Vec<RemoteState> {
-        self.remotes.retain(|_, entry| now.duration_since(entry.seen) <= TIMEOUT);
+        self.remotes.retain(|_, entry| now.duration_since(entry.seen) <= self.timeout);
         let mut list: Vec<(u64, RemoteState)> = self
             .remotes
             .iter()
