@@ -390,7 +390,6 @@ pub fn record_version(root: &Path, kind: HistoryKind, file: &str, opts: &RecordO
         last.content = opts.content.clone();
         last.ts = now;
         last.author = opts.author.clone();
-        last.editor = opts.editor.clone();
         last.summary = Some(version_summary(kind, &prev, &opts.content));
         if opts.note.is_some() {
             last.note = opts.note.clone();

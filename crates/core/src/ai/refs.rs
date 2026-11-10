@@ -214,7 +214,10 @@ const SEARCH_PROMPT: &str = "检索结果有上限，超限会截断：按提示
 const EDIT_PROMPT: &str = "改文件前先 read_file 确认现状；edit_file 的 find 缺省要求唯一命中，多处命中时补足上下文或显式设 replace_all=true；表格（.atb）与画布（.atlx）文件不能整文件改写。";
 
 /// 破坏性操作引导（名册含 move / delete 时下发）。
-const DESTRUCTIVE_PROMPT: &str = "move 与 delete 直接改动仓库：删除不可恢复、目录非空需 force=true，仅在用户明确要求时使用；改名会同步更新引用链接。";
+const DESTRUCTIVE_PROMPT: &str = "move 与 delete 直接改动仓库：删除不可恢复、目录非空需 force=true，仅在用户明确要求时使用。";
+
+/// 表格 / 画布领域工具引导（名册含 table_edit / canvas_edit 时下发）。
+const DOMAIN_PROMPT: &str = "表格（.atb）用 table_read / table_edit、画布（.atlx）用 canvas_read / canvas_edit：先读出行、字段或节点 id，编辑时一次提交一批 ops，按稳定 id 定位；这两类文件不能用文件工具改写。";
 
 /// 系统提示词引导段：按工具名册拼接，名册缺某工具则对应条目不下发。
 pub fn tool_guidance(tool_ids: &[String]) -> String {
@@ -231,6 +234,9 @@ pub fn tool_guidance(tool_ids: &[String]) -> String {
     }
     if has("move") || has("delete") {
         parts.push(DESTRUCTIVE_PROMPT);
+    }
+    if has("table_edit") || has("canvas_edit") {
+        parts.push(DOMAIN_PROMPT);
     }
     parts.join("\n\n")
 }

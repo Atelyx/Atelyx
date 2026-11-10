@@ -3185,6 +3185,14 @@ impl App {
                 // 限频压下的选区变化（拖选连续位移）由本拍补发最新一份：断线期产出即丢弃，
                 // 重连时的强制重发以最新状态兜底
                 space_actions::note_presence_flush(self);
+                // AI 在场：限频补发 + 空闲保活（编辑态长于保活间隔需续期）
+                let ai_payload = self.ai_presence.as_mut().and_then(|presence| {
+                    let now = Instant::now();
+                    presence.flush(now).or_else(|| presence.keepalive(now))
+                });
+                if let Some(payload) = ai_payload {
+                    space_actions::send_ai_presence(self, payload);
+                }
                 // AI 在场：远端条目超时剔除 + 胶囊脉冲相位
                 if !self.remote_ai.is_empty() {
                     self.ai_pulse = !self.ai_pulse;
@@ -7644,6 +7652,10 @@ impl App {
             || !self.chat.renaming.is_empty()
             // AI 协作者在场：远端条目过期剔除与胶囊脉冲
             || !self.remote_ai.is_empty()
+            || self
+                .ai_presence
+                .as_ref()
+                .is_some_and(|presence| presence.has_pending() || presence.is_editing())
             || (self.settings_open && self.settings_tab == "shortcuts")
             || self.table.as_ref().is_some_and(|t| {
                 t.view.press.as_ref().is_some_and(|p| p.img.is_some() && !p.active)

@@ -1914,7 +1914,10 @@ pub fn canvas_view<'a>(app: &'a App, window: iced::window::Id) -> Element<'a> {
             layered = layered.push(overlay);
         }
         layered = layered.push(minimap_layer(session, view, viewport));
-        column![toolbar(session, window, viewport, view.zoom), layered.width(Length::Fill).height(Length::Fill)]
+        column![
+            toolbar(app, session, window, viewport, view.zoom),
+            layered.width(Length::Fill).height(Length::Fill)
+        ]
             .width(Length::Fill)
             .height(Length::Fill)
             .into()
@@ -1925,7 +1928,13 @@ pub fn canvas_view<'a>(app: &'a App, window: iced::window::Id) -> Element<'a> {
 }
 
 /// 工具条：统计 + 保存态 + 缩放钮（以视口中心为锚）；`zoom` 传本帧生效缩放（适应视图待收口时为适配值）。
-fn toolbar<'a>(session: &'a CanvasSession, window: iced::window::Id, viewport: Size, zoom: f32) -> Element<'a> {
+fn toolbar<'a>(
+    app: &'a crate::App,
+    session: &'a CanvasSession,
+    window: iced::window::Id,
+    viewport: Size,
+    zoom: f32,
+) -> Element<'a> {
     let stats = if session.view.selection.is_empty() {
         format!("{} 卡 · {} 连线", session.data.nodes.len(), session.data.edges.len())
     } else {
@@ -1971,10 +1980,19 @@ fn toolbar<'a>(session: &'a CanvasSession, window: iced::window::Id, viewport: S
             )
         });
 
+    // AI 协作者胶囊（按当前画布过滤）
+    let ai_remotes: Vec<crate::ai_presence::RemoteAi> = app
+        .remote_ai
+        .iter()
+        .filter(|r| r.view == "canvas" && r.file.as_deref() == Some(session.file.as_str()))
+        .cloned()
+        .collect();
+    let ai_pills: Element<'static> = layout_view::ai_pill_row(&ai_remotes, app.ai_pulse, window);
     row![
         space().width(Length::Fill),
         dirty_pill,
         save_state,
+        ai_pills,
         open_in_panel,
         controls::icon_button("maximize", 13.0, 24.0, controls::Variant::Ghost,
             Some(Message::Canvas(CanvasMsg::FitView)), Some((window, "适应视图".into()))),

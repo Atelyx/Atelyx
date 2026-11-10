@@ -684,9 +684,16 @@ pub(crate) fn resolve_run_config(
     // 本次 run 的 Agent 身份（历史署名 / 在场展示）；缺省 = 内置「对话」
     let agent_identity = agent
         .map(|a| AiIdentity { agent_id: a.id.clone(), agent_name: a.name.clone() })
-        .unwrap_or_else(|| AiIdentity {
-            agent_id: atelyx_core::vault::BUILTIN_AGENT_CHAT_ID.to_string(),
-            agent_name: "对话".to_string(),
+        .unwrap_or_else(|| {
+            // 缺省 = 内置「对话」Agent：名字与工具集同源取名册，改名后署名一致
+            let builtin = atelyx_core::vault::builtin_agents().into_iter().next();
+            AiIdentity {
+                agent_id: builtin
+                    .as_ref()
+                    .map(|a| a.id.clone())
+                    .unwrap_or_else(|| atelyx_core::vault::BUILTIN_AGENT_CHAT_ID.to_string()),
+                agent_name: builtin.map(|a| a.name).unwrap_or_else(|| "对话".to_string()),
+            }
         });
     // 工具使用引导按名册拼接（缺某工具则对应条目不下发）；辅助调用不带工具，不下发
     let system_prompt = if for_run {

@@ -309,6 +309,7 @@ const SECTIONS: &[Section] = &[
             "method.rs": "DayActivity",
             "method.rs": "HistoryActivityResult",
             "method.rs": "HistoryDayParams",
+            "method.rs": "HistoryEditor",
             "method.rs": "HistoryDayEntry",
             "method.rs": "HistoryDayResult",
             "method.rs": "HISTORY_KINDS",

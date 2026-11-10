@@ -2218,11 +2218,12 @@ pub fn space_load_agents(app: &App) -> Task<Message> {
         async move {
             match client.get_file_text(&space_id, ".atelyx/agents.json").await {
                 Ok(raw) => {
-                    Ok::<_, SpaceError>(
-                        serde_json::from_str::<vault::AgentConfigFile>(&raw)
-                            .map(|f| f.agents)
-                            .unwrap_or_default(),
-                    )
+                    // 与本地读路径同口径：装载时迁移旧工具 id 与未改过的内置 Agent 默认集
+                    let mut agents = serde_json::from_str::<vault::AgentConfigFile>(&raw)
+                        .map(|f| f.agents)
+                        .unwrap_or_default();
+                    vault::migrate_agent_configs(&mut agents);
+                    Ok::<_, SpaceError>(agents)
                 }
                 // 缺失 = 尚无配置（与本地读路径同口径，不算错误）
                 Err(SpaceError::NotFound) => Ok(Vec::new()),
@@ -3661,6 +3662,10 @@ fn on_space_event(app: &mut App, event: atelyx_core::collab::SpaceEvent) -> Task
             // 画布在场同理（选中 / 对话卡锁 / 流式）
             if let Some(frame) = app.canvas_collab.as_mut().and_then(|c| c.resend(now)) {
                 send_canvas_frame(app, frame);
+            }
+            // AI 在场同理（重连后对端旧条目将在超时后过期）
+            if let Some(payload) = app.ai_presence.as_mut().and_then(|p| p.resend(now)) {
+                send_ai_presence(app, payload);
             }
             canvas_collab_sync(app);
             Task::none()

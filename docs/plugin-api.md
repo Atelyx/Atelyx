@@ -2633,6 +2633,16 @@ pub struct HistoryDayParams {
 
 ```rust
 // crates/plugin-protocol/src/method.rs
+/// AI 编辑来源（历史版本由 Agent 编辑时携带；缺省 = 人类编辑）。
+#[serde(rename_all = "camelCase")]
+pub struct HistoryEditor {
+    pub agent_id: String,
+    pub agent_name: String,
+}
+```
+
+```rust
+// crates/plugin-protocol/src/method.rs
 /// 一条当日版本记录：`kind` / `action` 取宿主历史侧文件的取值域（`note` / `canvas` / `table`、
 /// `edit` / `restore`）；`file` 为仓库相对路径，`ts` 为毫秒时间戳。
 #[serde(rename_all = "camelCase")]

@@ -99,6 +99,16 @@ pub struct HistoryAuthor {
     pub device: String,
 }
 
+/// 版本来源：AI 编辑时携带的 Agent 身份（服务端只校验形状，不校验真伪）。
+#[derive(Deserialize, Serialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryEditorWire {
+    #[serde(default)]
+    pub agent_id: String,
+    #[serde(default)]
+    pub agent_name: String,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RecordBody {
@@ -113,9 +123,9 @@ pub struct RecordBody {
     note: Option<String>,
     #[serde(default)]
     co_authors: Option<Vec<HistoryAuthor>>,
-    /// AI 编辑来源（原样落盘；服务端不校验 agent 身份，与昵称/颜色同口径）。
+    /// AI 编辑来源（只校验形状；agent 身份真伪不校验，与昵称/颜色同口径）。
     #[serde(default)]
-    editor: Option<Value>,
+    editor: Option<HistoryEditorWire>,
     #[serde(default)]
     coalesce_edit_ms: Option<i64>,
     #[serde(default)]
@@ -251,7 +261,7 @@ pub async fn record_history(
             version["note"] = json!(n);
         }
         if let Some(e) = &body.editor {
-            version["editor"] = e.clone();
+            version["editor"] = serde_json::to_value(e).unwrap_or(Value::Null);
         }
         versions.push(version);
     }
@@ -350,7 +360,12 @@ fn collect_history_dir(dir: &Path, kind: &str, entries: &mut Vec<RepoHistoryEntr
                 action: v.get("action").and_then(|x| x.as_str()).unwrap_or("edit").to_string(),
                 summary: v.get("summary").and_then(|x| x.as_str()).map(|s| s.to_string()),
                 note: v.get("note").and_then(|x| x.as_str()).map(|s| s.to_string()),
-                editor: v.get("editor").filter(|e| e.is_object()).cloned(),
+                // 形状容错：非对象 / 缺字段的存量数据按空字段输出，客户端严格解码不会整份失败
+                editor: v
+                    .get("editor")
+                    .and_then(|e| serde_json::from_value::<HistoryEditorWire>(e.clone()).ok())
+                    .and_then(|e| serde_json::to_value(e).ok())
+                    .filter(|e| e.is_object()),
             });
         }
     }

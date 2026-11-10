@@ -2770,7 +2770,13 @@ pub(crate) fn ai_pill_row(
         let tip = if remote.editing {
             format!("由 {} 的 AI（{}）编辑中", remote.operator_name, remote.agent_name)
         } else {
-            format!("刚刚由 {} 的 AI（{}）修改", remote.operator_name, remote.agent_name)
+            match &remote.last_edit_summary {
+                Some(summary) => format!(
+                    "刚刚由 {} 的 AI（{}）修改：{summary}",
+                    remote.operator_name, remote.agent_name
+                ),
+                None => format!("刚刚由 {} 的 AI（{}）修改", remote.operator_name, remote.agent_name),
+            }
         };
         let pill = container(
             iced::widget::row![

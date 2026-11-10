@@ -277,9 +277,26 @@ pub struct HistoryFeedEntry {
     pub summary: Option<String>,
     #[serde(default)]
     pub note: Option<String>,
-    /// AI 编辑来源（旧服务端缺字段 = 人类编辑）。
-    #[serde(default)]
+    /// AI 编辑来源（旧服务端缺字段 = 人类编辑；形状容错：非对象或字段类型不符按缺省处理，
+    /// 不让一条畸形存量条目拖垮整份聚合解码）。
+    #[serde(default, deserialize_with = "tolerant_editor")]
     pub editor: Option<crate::history::HistoryEditor>,
+}
+
+/// 宽松解码 AI 编辑来源：只认对象里的字符串字段，其余形状按空字段 / 缺省处理。
+fn tolerant_editor<'de, D>(deserializer: D) -> Result<Option<crate::history::HistoryEditor>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|v| {
+        let agent_id = v.get("agentId").and_then(|x| x.as_str()).unwrap_or_default();
+        let agent_name = v.get("agentName").and_then(|x| x.as_str()).unwrap_or_default();
+        (!agent_id.is_empty() || !agent_name.is_empty()).then(|| crate::history::HistoryEditor {
+            agent_id: agent_id.to_string(),
+            agent_name: agent_name.to_string(),
+        })
+    }))
 }
 
 #[derive(Debug, Clone, Deserialize)]

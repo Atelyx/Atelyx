@@ -1,6 +1,7 @@
 //! Agent 工具协议与内置工具：名册（schema 声明）、参数校验、执行与结果回传文本。
 //!
-//! Agent 工具名册与执行：内置工具按分类归组，插件工具由宿主名册单列；文件写经 `WriteQueue` 与壳同出口。
+//! 内置工具按分类归组，插件工具由宿主名册单列；内容写入经 `AiEditHost` 交壳的保存链落盘
+//! （无宿主时才直写兜底），表格 / 画布操作由 `doc_ops` 纯函数应用到领域模型。
 //! 路径一律仓库相对，执行前做越界校验；结果一律以文本回传模型。
 
 use std::sync::{Arc, OnceLock};
@@ -41,12 +42,15 @@ pub enum ToolCategory {
     Web,
     Read,
     Edit,
+    Table,
+    Canvas,
     Task,
 }
 
 impl ToolCategory {
     /// 全部分类（展示顺序）。
-    pub const ALL: [ToolCategory; 4] = [Self::Web, Self::Read, Self::Edit, Self::Task];
+    pub const ALL: [ToolCategory; 6] =
+        [Self::Web, Self::Read, Self::Edit, Self::Table, Self::Canvas, Self::Task];
 
     /// 分组显示名。
     pub fn label(self) -> &'static str {
@@ -54,6 +58,8 @@ impl ToolCategory {
             Self::Web => "联网",
             Self::Read => "读取",
             Self::Edit => "编辑与整理",
+            Self::Table => "表格",
+            Self::Canvas => "画布",
             Self::Task => "任务清单",
         }
     }
@@ -80,7 +86,7 @@ pub struct ToolDef {
 pub fn builtin_tools() -> &'static [ToolDef] {
     static ROSTER: OnceLock<Vec<ToolDef>> = OnceLock::new();
     ROSTER.get_or_init(|| {
-        use ToolCategory::{Edit as E, Read as R, Task as T, Web as W};
+        use ToolCategory::{Canvas as CV, Edit as E, Read as R, Table as TB, Task as T, Web as W};
         vec![
             ToolDef {
                 name: "web_search",
@@ -247,7 +253,7 @@ pub fn builtin_tools() -> &'static [ToolDef] {
                 name: "move",
                 label: "移动 / 重命名",
                 icon: "arrow-right",
-                description: "移动或重命名文件与目录：from → to 全路径（同目录改名即重命名）。改名会同步更新仓库内引用链接。",
+                description: "移动或重命名文件与目录：from → to 全路径（同目录改名即重命名）。本地仓库改名会同步更新引用链接。",
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -274,6 +280,105 @@ pub fn builtin_tools() -> &'static [ToolDef] {
                     "required": ["path"]
                 }),
                 category: E,
+                read_only: false,
+                parallel_safe: false,
+            },
+            ToolDef {
+                name: "table_read",
+                label: "读取表格",
+                icon: "table",
+                description: "读取表格（.atb）的表头与行：字段 id / 名称 / 类型、每行 id 与各字段值；分页缺省 50 行、最多 200 行。编辑前先用它取行 id 与字段 id。",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "仓库相对路径（.atb）" },
+                        "offset": { "type": "integer", "description": "起始行（1 起，缺省 1）" },
+                        "limit": { "type": "integer", "description": "行数（缺省 50，上限 200）" }
+                    },
+                    "required": ["path"]
+                }),
+                category: TB,
+                read_only: true,
+                parallel_safe: true,
+            },
+            ToolDef {
+                name: "table_edit",
+                label: "编辑表格",
+                icon: "pencil",
+                description: "编辑表格（.atb）：一次调用提交一批操作，整批落成一个补丁。op = set_cell（按 rowId / fieldId 写单元格，value 传 null 清空）| add_row（cells 按字段 id 给初值）| delete_rows（rowIds）。表格不能用文件工具整文件写。",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "仓库相对路径（.atb）" },
+                        "ops": {
+                            "type": "array",
+                            "description": "操作列表（按顺序应用）",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "op": { "type": "string", "enum": ["set_cell", "add_row", "delete_rows"], "description": "操作类型" },
+                                    "rowId": { "type": "string", "description": "set_cell：行 id" },
+                                    "fieldId": { "type": "string", "description": "set_cell：字段 id" },
+                                    "value": { "description": "set_cell：值（文本 / 数字 / 单调选项；null 清空）" },
+                                    "cells": { "type": "object", "description": "add_row：字段 id → 值" },
+                                    "rowIds": { "type": "array", "items": { "type": "string" }, "description": "delete_rows：行 id 列表" }
+                                },
+                                "required": ["op"]
+                            }
+                        }
+                    },
+                    "required": ["path", "ops"]
+                }),
+                category: TB,
+                read_only: false,
+                parallel_safe: false,
+            },
+            ToolDef {
+                name: "canvas_read",
+                label: "读取画布",
+                icon: "sticky-note",
+                description: "读取画布（.atlx）：画布名、节点（id / 类型 / 标题或正文 / 坐标 / 引用文件）与连线（id / from / to / 类型）。",
+                parameters: json!({
+                    "type": "object",
+                    "properties": { "path": { "type": "string", "description": "仓库相对路径（.atlx）" } },
+                    "required": ["path"]
+                }),
+                category: CV,
+                read_only: true,
+                parallel_safe: true,
+            },
+            ToolDef {
+                name: "canvas_edit",
+                label: "编辑画布",
+                icon: "layers",
+                description: "编辑画布（.atlx）：一次调用提交一批操作，整批落成一个补丁。op = add_text_card（text，x/y 缺省自动落位）| add_note_card（path 引用仓库笔记）| connect（from / to 节点 id，kind = data 数据流 / link 关联）| update_text（nodeId / text）| delete_node（nodeId）。画布不能用文件工具整文件写。",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "仓库相对路径（.atlx）" },
+                        "ops": {
+                            "type": "array",
+                            "description": "操作列表（按顺序应用）",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "op": { "type": "string", "enum": ["add_text_card", "add_note_card", "connect", "update_text", "delete_node"], "description": "操作类型" },
+                                    "text": { "type": "string", "description": "add_text_card / update_text：正文（Markdown）" },
+                                    "path": { "type": "string", "description": "add_note_card：要引用的仓库笔记路径（.md）" },
+                                    "x": { "type": "number", "description": "新卡横坐标（缺省自动放在现有卡右侧）" },
+                                    "y": { "type": "number", "description": "新卡纵坐标（缺省自动放在现有卡右侧）" },
+                                    "from": { "type": "string", "description": "connect：起点节点 id" },
+                                    "to": { "type": "string", "description": "connect：终点节点 id" },
+                                    "kind": { "type": "string", "enum": ["data", "link"], "description": "connect：连线类型（缺省 data）" },
+                                    "nodeId": { "type": "string", "description": "update_text / delete_node：节点 id" }
+                                },
+                                "required": ["op"]
+                            }
+                        }
+                    },
+                    "required": ["path", "ops"]
+                }),
+                category: CV,
                 read_only: false,
                 parallel_safe: false,
             },
@@ -430,6 +535,10 @@ pub async fn execute(ctx: &ToolCtx, name: &str, args: Value) -> ToolResult {
         "edit_file" => edit_file(ctx, &args).await,
         "move" => move_tool(ctx, &args).await,
         "delete" => delete_tool(ctx, &args).await,
+        "table_read" => table_read(ctx, &args).await,
+        "table_edit" => table_edit(ctx, &args).await,
+        "canvas_read" => canvas_read(ctx, &args).await,
+        "canvas_edit" => canvas_edit(ctx, &args).await,
         "todo_write" => todo_write(ctx, &args).await,
         other => match ctx.plugin_tools.iter().find(|t| t.name == other) {
             Some(spec) => execute_plugin_tool(ctx, spec, args).await,
@@ -842,15 +951,15 @@ async fn read_history(ctx: &ToolCtx, args: &Value) -> ToolResult {
 /// 表格 / 画布文件禁止整文件写：绕过补丁仲裁、历史与协作广播。
 fn structured_write_guard(rel: &str) -> Result<(), ToolResult> {
     let lower = rel.to_ascii_lowercase();
-    let kind = if lower.ends_with(".atb") {
-        "表格"
+    let (kind, tool) = if lower.ends_with(".atb") {
+        ("表格", "table_edit")
     } else if lower.ends_with(".atlx") {
-        "画布"
+        ("画布", "canvas_edit")
     } else {
         return Ok(());
     };
     Err(ToolResult::err(format!(
-        "{rel} 是{kind}文件，不支持用文件工具写入（会绕过补丁合并与历史）；请在{kind}视图中编辑"
+        "{rel} 是{kind}文件，不支持用文件工具写入（会绕过补丁合并与历史）；请改用 {tool} 按稳定 id 增量修改"
     )))
 }
 
@@ -1036,6 +1145,585 @@ fn read_existing_text(path: &std::path::Path, rel: &str) -> Result<String, Strin
     std::fs::read_to_string(path).map_err(|e| format!("文件不可读：{rel}（{e}）"))
 }
 
+// ===== 表格 / 画布领域工具 =====
+
+/// 表格读取缺省行数与上限（一次结果不撑爆上下文）。
+const TABLE_READ_ROWS: usize = 50;
+const TABLE_READ_ROWS_MAX: usize = 200;
+/// 单元格值 / 正文在结果文本里的字符上限（长文本按省略号收口）。
+const CELL_TEXT_CAP: usize = 80;
+/// 画布读取的节点 / 连线显示上限（超出截断并提示）。
+const CANVAS_READ_CAP: usize = 200;
+
+/// 读表格模型：本地读盘（schema 校验）、空间取服务端文本后同口径校验。
+async fn read_table_model(ctx: &ToolCtx, rel: &str) -> Result<vault::TableFile, String> {
+    match &ctx.repo {
+        RepoAccess::Local { root, .. } => {
+            let path = vault::safe_join(root, rel, false)?;
+            vault::read_table_file(&path)
+        }
+        RepoAccess::Space { client, space_id } => {
+            let text = client
+                .get_file_text(space_id, rel)
+                .await
+                .map_err(|e| e.to_string())?;
+            parse_table_model(&text)
+        }
+    }
+}
+
+/// 读画布模型（口径同 read_table_model）。
+async fn read_canvas_model(ctx: &ToolCtx, rel: &str) -> Result<vault::CanvasFile, String> {
+    match &ctx.repo {
+        RepoAccess::Local { root, .. } => {
+            let path = vault::safe_join(root, rel, false)?;
+            vault::read_canvas_file(&path)
+        }
+        RepoAccess::Space { client, space_id } => {
+            let text = client
+                .get_file_text(space_id, rel)
+                .await
+                .map_err(|e| e.to_string())?;
+            parse_canvas_model(&text)
+        }
+    }
+}
+
+fn parse_table_model(text: &str) -> Result<vault::TableFile, String> {
+    let table: vault::TableFile =
+        serde_json::from_str(text).map_err(|e| format!("表格解析失败：{e}"))?;
+    if table.schema != vault::TABLE_SCHEMA {
+        return Err(format!("表格 schema 不匹配：{}", table.schema));
+    }
+    Ok(table)
+}
+
+fn parse_canvas_model(text: &str) -> Result<vault::CanvasFile, String> {
+    let canvas: vault::CanvasFile =
+        serde_json::from_str(text).map_err(|e| format!("画布解析失败：{e}"))?;
+    if canvas.schema != vault::CANVAS_SCHEMA {
+        return Err(format!("画布 schema 不匹配：{}", canvas.schema));
+    }
+    Ok(canvas)
+}
+
+/// 领域工具的文件类型守卫（错误文本指向正确工具）。
+fn require_ext(rel: &str, ext: &str, kind: &str, tool: &str) -> Option<ToolResult> {
+    if rel.to_ascii_lowercase().ends_with(ext) {
+        None
+    } else {
+        Some(ToolResult::err(format!(
+            "{rel} 不是{kind}文件：{kind}工具只处理 {ext} 文件（.md 用文件工具，{ext} 用 {tool}）"
+        )))
+    }
+}
+
+async fn table_read(ctx: &ToolCtx, args: &Value) -> ToolResult {
+    let Ok(rel) = arg(args, "path") else {
+        return ToolResult::err("工具参数错误：缺少 path");
+    };
+    let rel = match rel_path(rel) {
+        Ok(rel) => rel,
+        Err(e) => return e,
+    };
+    if let Some(e) = require_ext(&rel, ".atb", "表格", "table_read") {
+        return e;
+    }
+    match read_table_model(ctx, &rel).await {
+        Ok(table) => ToolResult::ok(render_table(&table, args, &rel)),
+        Err(e) => ToolResult::err(format!("表格不存在或不可读：{rel}（{e}）")),
+    }
+}
+
+/// 表格结果文本：字段（id / 名称 / 类型）、行（id + 按字段 id 的值）、总行数与续读位。
+fn render_table(table: &vault::TableFile, args: &Value, rel: &str) -> String {
+    let offset = args
+        .get("offset")
+        .and_then(Value::as_u64)
+        .map(|v| v.max(1) as usize - 1)
+        .unwrap_or(0);
+    let limit = args
+        .get("limit")
+        .and_then(Value::as_u64)
+        .map(|v| v as usize)
+        .unwrap_or(TABLE_READ_ROWS)
+        .clamp(1, TABLE_READ_ROWS_MAX);
+    let mut out = format!(
+        "表：{}（{} 字段 · {} 行）\n",
+        table.title,
+        table.fields.len(),
+        table.rows.len()
+    );
+    if table.fields.is_empty() {
+        out.push_str("字段：（无，表格没有列）\n");
+    } else {
+        out.push_str("字段：\n");
+        for f in &table.fields {
+            let options = f
+                .options
+                .as_ref()
+                .filter(|o| !o.is_empty())
+                .map(|o| format!("：{}", o.join(" / ")))
+                .unwrap_or_default();
+            out.push_str(&format!("- {} {}（{}{options}）\n", f.id, f.name, f.field_type));
+        }
+    }
+    let total = table.rows.len();
+    if total == 0 {
+        out.push_str("行：（无）");
+        return out;
+    }
+    let start = offset.min(total);
+    if start >= total {
+        out.push_str(&format!("（共 {total} 行，offset 超出范围：从 1 起）"));
+        return out;
+    }
+    let end = (start + limit).min(total);
+    out.push_str(&format!("行 {}-{}/共 {total}：\n", start + 1, end));
+    let mut shown = start;
+    for (idx, row) in table.rows[start..end].iter().enumerate() {
+        let mut line = format!("- {}", row.id);
+        for f in &table.fields {
+            line.push_str(&format!(" | {}={}", f.id, cell_text(row.values.get(&f.id))));
+        }
+        out.push_str(&line);
+        out.push('\n');
+        shown = start + idx + 1;
+        if out.len() > READ_CHARS_CAP {
+            out.push_str("…（结果过长截断）\n");
+            break;
+        }
+    }
+    // 续读位按实际渲染到的行给（字符上限截断时不得按整页末尾给，否则被截掉的行永远读不到）
+    if shown < total {
+        out.push_str(&format!("（已显示到第 {shown} 行；续读传 offset={}）", shown + 1));
+    } else {
+        out.push_str("（已到末行）");
+    }
+    out.push_str(&format!("\n文件：{rel}"));
+    out
+}
+
+/// 单元格值 → 单行文本（图片按占位、字符串带引号便于区分空值）。
+fn cell_text(v: Option<&Value>) -> String {
+    match v {
+        None | Some(Value::Null) => "null".to_string(),
+        Some(v) if v.is_array() || v.get("images").is_some() => "[图片]".to_string(),
+        Some(v) => truncate_chars(&v.to_string(), CELL_TEXT_CAP),
+    }
+}
+
+fn truncate_chars(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let mut out: String = text.chars().take(max).collect();
+    out.push('…');
+    out
+}
+
+async fn canvas_read(ctx: &ToolCtx, args: &Value) -> ToolResult {
+    let Ok(rel) = arg(args, "path") else {
+        return ToolResult::err("工具参数错误：缺少 path");
+    };
+    let rel = match rel_path(rel) {
+        Ok(rel) => rel,
+        Err(e) => return e,
+    };
+    if let Some(e) = require_ext(&rel, ".atlx", "画布", "canvas_read") {
+        return e;
+    }
+    match read_canvas_model(ctx, &rel).await {
+        Ok(canvas) => ToolResult::ok(render_canvas(&canvas, &rel)),
+        Err(e) => ToolResult::err(format!("画布不存在或不可读：{rel}（{e}）")),
+    }
+}
+
+/// 画布结果文本：画布名、节点（id / 类型 / 标题或正文 / 坐标 / 引用文件）、连线。
+fn render_canvas(canvas: &vault::CanvasFile, rel: &str) -> String {
+    let mut out = format!(
+        "画布：{}（{} 节点 · {} 连线）\n",
+        canvas.title,
+        canvas.nodes.len(),
+        canvas.edges.len()
+    );
+    if canvas.nodes.is_empty() {
+        out.push_str("节点：（无）\n");
+    } else {
+        out.push_str("节点：\n");
+        for n in canvas.nodes.iter().take(CANVAS_READ_CAP) {
+            out.push_str(&canvas_node_line(n));
+            out.push('\n');
+            if out.len() > READ_CHARS_CAP {
+                out.push_str("…（结果过长截断）\n");
+                break;
+            }
+        }
+        if canvas.nodes.len() > CANVAS_READ_CAP {
+            out.push_str(&format!(
+                "…（共 {} 节点，仅显示前 {CANVAS_READ_CAP} 个）\n",
+                canvas.nodes.len()
+            ));
+        }
+    }
+    if canvas.edges.is_empty() {
+        out.push_str("连线：（无）\n");
+    } else {
+        out.push_str("连线：\n");
+        for e in canvas.edges.iter().take(CANVAS_READ_CAP) {
+            let kind = if e.directed == Some(false) { "关联" } else { "数据流" };
+            out.push_str(&format!("- {} {} → {}（{kind}）\n", e.id, e.source, e.target));
+        }
+        if canvas.edges.len() > CANVAS_READ_CAP {
+            out.push_str(&format!(
+                "…（共 {} 连线，仅显示前 {CANVAS_READ_CAP} 条）\n",
+                canvas.edges.len()
+            ));
+        }
+    }
+    out.push_str(&format!("文件：{rel}"));
+    out
+}
+
+/// 单节点摘要行：类型标签 + 标题 + 坐标 + 引用文件 / 正文预览 / 消息数。
+fn canvas_node_line(n: &vault::CanvasFileNode) -> String {
+    let file = n.data.get("file").and_then(Value::as_str);
+    let title = n.data.get("title").and_then(Value::as_str).unwrap_or("");
+    let kind = match n.node_type.as_str() {
+        "text" if file.is_some() => "笔记卡",
+        "text" => "文本卡",
+        "table" => "表格卡",
+        "media" => "媒体卡",
+        "conversation" => "对话卡",
+        "group" => "分组",
+        other => other,
+    };
+    let mut line = format!("- {} {kind}「{title}」({}, {})", n.id, n.x, n.y);
+    match file {
+        Some(file) => line.push_str(&format!(" → {file}")),
+        None if n.node_type == "text" => {
+            let body = n.data.get("bodyMd").and_then(Value::as_str).unwrap_or("");
+            let preview: String = body.split_whitespace().collect::<Vec<_>>().join(" ");
+            if !preview.is_empty() {
+                line.push_str(&format!(" 正文：{}", truncate_chars(&preview, CELL_TEXT_CAP)));
+            }
+        }
+        None if n.node_type == "conversation" => {
+            let count = n
+                .data
+                .get("messages")
+                .and_then(Value::as_array)
+                .map(Vec::len)
+                .unwrap_or(0);
+            line.push_str(&format!(" {count} 条消息"));
+        }
+        None => {}
+    }
+    line
+}
+
+/// 有宿主时把表格编辑交给宿主保存链（历史 / 协作 / 打开会话）；无宿主 = 返回 None 走直写兜底。
+async fn apply_table_via_host(
+    ctx: &ToolCtx,
+    rel: &str,
+    ops: Vec<crate::ai::edit_host::TableOp>,
+) -> Option<ToolResult> {
+    let host = ctx.host.as_ref()?;
+    let Some(actor) = ctx.actor.as_ref() else {
+        return Some(ToolResult::err("AI 编辑身份缺失，已拒绝写入"));
+    };
+    Some(match host.apply_table(rel, ops, actor).await {
+        Ok(text) => ToolResult::ok(text),
+        Err(e) => ToolResult::err(e),
+    })
+}
+
+/// 有宿主时把画布编辑交给宿主保存链；无宿主 = 返回 None 走直写兜底。
+async fn apply_canvas_via_host(
+    ctx: &ToolCtx,
+    rel: &str,
+    ops: Vec<crate::ai::edit_host::CanvasOp>,
+) -> Option<ToolResult> {
+    let host = ctx.host.as_ref()?;
+    let Some(actor) = ctx.actor.as_ref() else {
+        return Some(ToolResult::err("AI 编辑身份缺失，已拒绝写入"));
+    };
+    Some(match host.apply_canvas(rel, ops, actor).await {
+        Ok(text) => ToolResult::ok(text),
+        Err(e) => ToolResult::err(e),
+    })
+}
+
+async fn table_edit(ctx: &ToolCtx, args: &Value) -> ToolResult {
+    let Ok(rel) = arg(args, "path") else {
+        return ToolResult::err("工具参数错误：缺少 path");
+    };
+    let rel = match rel_path(rel) {
+        Ok(rel) => rel,
+        Err(e) => return e,
+    };
+    if let Some(e) = require_ext(&rel, ".atb", "表格", "table_edit") {
+        return e;
+    }
+    let ops = match parse_table_ops(args) {
+        Ok(ops) => ops,
+        Err(e) => return ToolResult::err(e),
+    };
+    if let Some(result) = apply_table_via_host(ctx, &rel, ops.clone()).await {
+        return result;
+    }
+    let base = match read_table_model(ctx, &rel).await {
+        Ok(table) => table,
+        Err(e) => return ToolResult::err(format!("表格不存在或不可读：{rel}（{e}）")),
+    };
+    let mut next = base.clone();
+    if let Err(e) = crate::ai::doc_ops::apply_table_ops(&mut next, &ops) {
+        return ToolResult::err(e);
+    }
+    let Some(patch) = vault::compute_table_patch(&base, &next) else {
+        return ToolResult::ok(format!("表格未变化：{rel}（操作与现值相同）"));
+    };
+    next.updated_at = now_secs();
+    let summary = crate::history::version_summary(
+        crate::history::HistoryKind::Table,
+        &base_json(&base),
+        &base_json(&next),
+    );
+    let receipt = format!("已编辑 {rel}（{} 项操作：{summary}）", ops.len());
+    match &ctx.repo {
+        RepoAccess::Local { root, queue } => {
+            let path = match vault::safe_join(root, &rel, false) {
+                Ok(path) => path,
+                Err(e) => return ToolResult::err(e),
+            };
+            let Ok(json) = serde_json::to_string_pretty(&next) else {
+                return ToolResult::err("表格序列化失败".to_string());
+            };
+            queue
+                .write(path, json)
+                .await
+                .map(|_| ToolResult::ok(receipt))
+                .unwrap_or_else(|e| ToolResult::err(format!("写入失败：{e}")))
+        }
+        RepoAccess::Space { client, space_id } => client
+            .table_patch(space_id, &rel, &patch)
+            .await
+            .map(|_| ToolResult::ok(receipt))
+            .unwrap_or_else(|e| ToolResult::err(format!("写入失败：{e}"))),
+    }
+}
+
+async fn canvas_edit(ctx: &ToolCtx, args: &Value) -> ToolResult {
+    let Ok(rel) = arg(args, "path") else {
+        return ToolResult::err("工具参数错误：缺少 path");
+    };
+    let rel = match rel_path(rel) {
+        Ok(rel) => rel,
+        Err(e) => return e,
+    };
+    if let Some(e) = require_ext(&rel, ".atlx", "画布", "canvas_edit") {
+        return e;
+    }
+    let ops = match parse_canvas_ops(args) {
+        Ok(ops) => ops,
+        Err(e) => return ToolResult::err(e),
+    };
+    if let Some(result) = apply_canvas_via_host(ctx, &rel, ops.clone()).await {
+        return result;
+    }
+    let base = match read_canvas_model(ctx, &rel).await {
+        Ok(canvas) => canvas,
+        Err(e) => return ToolResult::err(format!("画布不存在或不可读：{rel}（{e}）")),
+    };
+    let mut next = base.clone();
+    let touched = match crate::ai::doc_ops::apply_canvas_ops(&mut next, &ops) {
+        Ok(touched) => touched,
+        Err(e) => return ToolResult::err(e),
+    };
+    let Some(patch) = vault::compute_canvas_patch(&base, &next) else {
+        return ToolResult::ok(format!("画布未变化：{rel}（操作与现值相同）"));
+    };
+    next.updated_at = now_secs();
+    let summary = crate::history::version_summary(
+        crate::history::HistoryKind::Canvas,
+        &base_json(&base),
+        &base_json(&next),
+    );
+    let receipt = format!(
+        "已编辑 {rel}（{} 项操作：{summary}）；实体：{}",
+        ops.len(),
+        touched.join("、")
+    );
+    match &ctx.repo {
+        RepoAccess::Local { root, queue } => {
+            let path = match vault::safe_join(root, &rel, false) {
+                Ok(path) => path,
+                Err(e) => return ToolResult::err(e),
+            };
+            let Ok(json) = serde_json::to_string_pretty(&next) else {
+                return ToolResult::err("画布序列化失败".to_string());
+            };
+            queue
+                .write(path, json)
+                .await
+                .map(|_| ToolResult::ok(receipt))
+                .unwrap_or_else(|e| ToolResult::err(format!("写入失败：{e}")))
+        }
+        RepoAccess::Space { client, space_id } => client
+            .canvas_patch(space_id, &rel, &patch)
+            .await
+            .map(|_| ToolResult::ok(receipt))
+            .unwrap_or_else(|e| ToolResult::err(format!("写入失败：{e}"))),
+    }
+}
+
+fn base_json<T: serde::Serialize>(model: &T) -> String {
+    serde_json::to_string(model).unwrap_or_default()
+}
+
+/// 表格 ops 参数解析：缺少必填字段 / 未知操作给可读错误（不 panic）。
+fn parse_table_ops(args: &Value) -> Result<Vec<crate::ai::edit_host::TableOp>, String> {
+    use crate::ai::edit_host::TableOp;
+    let Some(items) = args.get("ops").and_then(Value::as_array) else {
+        return Err("工具参数错误：缺少 ops".to_string());
+    };
+    if items.is_empty() {
+        return Err("工具参数错误：ops 为空".to_string());
+    }
+    let mut ops = Vec::with_capacity(items.len());
+    for (i, item) in items.iter().enumerate() {
+        let at = i + 1;
+        let kind = item
+            .get("op")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("第 {at} 项操作缺少 op"))?;
+        match kind {
+            "set_cell" => {
+                let row_id = op_str(item, "rowId", at)?;
+                let field_id = op_str(item, "fieldId", at)?;
+                let value = item
+                    .get("value")
+                    .cloned()
+                    .ok_or_else(|| format!("第 {at} 项操作缺少 value（清空传 null）"))?;
+                ops.push(TableOp::SetCell { row_id, field_id, value });
+            }
+            "add_row" => {
+                let cells = match item.get("cells") {
+                    None | Some(Value::Null) => Vec::new(),
+                    Some(Value::Object(map)) => {
+                        map.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+                    }
+                    Some(_) => return Err(format!("第 {at} 项操作：cells 需要对象（字段 id → 值）")),
+                };
+                ops.push(TableOp::AddRow { cells });
+            }
+            "delete_rows" => {
+                let row_ids = strings_of(item.get("rowIds"))
+                    .ok_or_else(|| format!("第 {at} 项操作缺少 rowIds（行 id 数组）"))?;
+                if row_ids.is_empty() {
+                    return Err(format!("第 {at} 项操作：rowIds 不能为空"));
+                }
+                ops.push(TableOp::DeleteRows { row_ids });
+            }
+            other => {
+                return Err(format!(
+                    "第 {at} 项操作：未知操作 {other}（set_cell / add_row / delete_rows）"
+                ));
+            }
+        }
+    }
+    Ok(ops)
+}
+
+/// 画布 ops 参数解析（口径同 parse_table_ops）。
+fn parse_canvas_ops(args: &Value) -> Result<Vec<crate::ai::edit_host::CanvasOp>, String> {
+    use crate::ai::edit_host::CanvasOp;
+    let Some(items) = args.get("ops").and_then(Value::as_array) else {
+        return Err("工具参数错误：缺少 ops".to_string());
+    };
+    if items.is_empty() {
+        return Err("工具参数错误：ops 为空".to_string());
+    }
+    let mut ops = Vec::with_capacity(items.len());
+    for (i, item) in items.iter().enumerate() {
+        let at = i + 1;
+        let kind = item
+            .get("op")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("第 {at} 项操作缺少 op"))?;
+        match kind {
+            "add_text_card" => {
+                let text = op_str(item, "text", at)?;
+                ops.push(CanvasOp::AddTextCard {
+                    text,
+                    x: item.get("x").and_then(Value::as_f64),
+                    y: item.get("y").and_then(Value::as_f64),
+                });
+            }
+            "add_note_card" => {
+                let path = op_str(item, "path", at)?;
+                let path = match rel_path(&path) {
+                    Ok(path) => path,
+                    Err(e) => return Err(e.text),
+                };
+                ops.push(CanvasOp::AddNoteCard {
+                    path,
+                    x: item.get("x").and_then(Value::as_f64),
+                    y: item.get("y").and_then(Value::as_f64),
+                });
+            }
+            "connect" => {
+                let from = op_str(item, "from", at)?;
+                let to = op_str(item, "to", at)?;
+                ops.push(CanvasOp::Connect {
+                    from,
+                    to,
+                    kind: item.get("kind").and_then(Value::as_str).map(str::to_string),
+                });
+            }
+            "update_text" => {
+                let node_id = op_str(item, "nodeId", at)?;
+                let text = op_str(item, "text", at)?;
+                ops.push(CanvasOp::UpdateText { node_id, text });
+            }
+            "delete_node" => {
+                let node_id = op_str(item, "nodeId", at)?;
+                ops.push(CanvasOp::DeleteNode { node_id });
+            }
+            other => {
+                return Err(format!(
+                    "第 {at} 项操作：未知操作 {other}（add_text_card / add_note_card / connect / update_text / delete_node）"
+                ));
+            }
+        }
+    }
+    Ok(ops)
+}
+
+fn op_str(item: &Value, key: &str, at: usize) -> Result<String, String> {
+    item.get(key)
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| format!("第 {at} 项操作缺少 {key}"))
+}
+
+fn strings_of(value: Option<&Value>) -> Option<Vec<String>> {
+    let items = value?.as_array()?;
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        out.push(item.as_str()?.to_string());
+    }
+    Some(out)
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 /// 移动 / 重命名工具：改名 = 同目录 move（引用同步与空间端点共用一套实现）。
 async fn move_tool(ctx: &ToolCtx, args: &Value) -> ToolResult {
     let Ok(from) = arg(args, "from") else {
@@ -1058,8 +1746,8 @@ async fn move_tool(ctx: &ToolCtx, args: &Value) -> ToolResult {
     move_entry(ctx, &from, &to, &format!("已移动 {from} → {to}")).await
 }
 
-/// 改名 / 移动共用实现：本地经引用同步（全库 `.md` 链接、元数据路径一并改写），
-/// 空间走服务端 rename（客户端引用改写由壳负责，与文件树操作同链）。
+/// 改名 / 移动共用实现：本地经引用同步（全库 `.md` 链接、元数据路径一并改写）；
+/// 空间只走服务端 rename（引用改写是壳的文件树改名链的第二步，本路径不经过它）。
 async fn move_entry(ctx: &ToolCtx, from: &str, to: &str, ok: &str) -> ToolResult {
     match &ctx.repo {
         RepoAccess::Local { root, .. } => {
@@ -1224,7 +1912,7 @@ mod tests {
     #[test]
     fn roster_is_unique_and_fully_described() {
         let tools = builtin_tools();
-        assert_eq!(tools.len(), 13, "名册长度");
+        assert_eq!(tools.len(), 17, "名册长度");
         for (i, tool) in tools.iter().enumerate() {
             assert!(!tool.label.is_empty(), "{} 缺显示名", tool.name);
             assert!(!tool.icon.is_empty(), "{} 缺图标", tool.name);
@@ -1433,13 +2121,14 @@ mod tests {
     async fn structured_files_reject_file_tool_writes() {
         let dir = TempDir::new("ai-structured");
         let ctx = ctx(&dir);
-        for (tool, args) in [
-            ("write_file", json!({ "path": "表.atb", "content": "{}" })),
-            ("append_file", json!({ "path": "画布.atlx", "content": "{}" })),
-            ("edit_file", json!({ "path": "表.ATB", "find": "a", "replace": "b" })),
+        for (tool, args, want) in [
+            ("write_file", json!({ "path": "表.atb", "content": "{}" }), "table_edit"),
+            ("append_file", json!({ "path": "画布.atlx", "content": "{}" }), "canvas_edit"),
+            ("edit_file", json!({ "path": "表.ATB", "find": "a", "replace": "b" }), "table_edit"),
         ] {
             let r = execute(&ctx, tool, args).await;
             assert!(r.is_error && r.text.contains("补丁合并"), "{tool}：{}", r.text);
+            assert!(r.text.contains(want), "{tool} 未指向 {want}：{}", r.text);
         }
         assert!(!dir.join("表.atb").exists() && !dir.join("画布.atlx").exists());
     }
@@ -1509,10 +2198,323 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn table_read_and_edit_roundtrip() {
+        let dir = TempDir::new("ai-table");
+        let ctx = ctx(&dir);
+        let table = crate::vault::TableFile {
+            schema: crate::vault::TABLE_SCHEMA.into(),
+            id: "t1".into(),
+            title: "任务".into(),
+            fields: vec![
+                crate::vault::TableField {
+                    id: "f1".into(),
+                    name: "名称".into(),
+                    field_type: "text".into(),
+                    options: None,
+                    width: None,
+                    calc_type: None,
+                },
+                crate::vault::TableField {
+                    id: "f2".into(),
+                    name: "状态".into(),
+                    field_type: "singleSelect".into(),
+                    options: Some(vec!["待办".into(), "完成".into()]),
+                    width: None,
+                    calc_type: None,
+                },
+            ],
+            rows: vec![crate::vault::TableRow {
+                id: "r1".into(),
+                values: Default::default(),
+                height: None,
+                styles: None,
+            }],
+            created_at: 0,
+            updated_at: 0,
+        };
+        std::fs::write(
+            dir.join("表.atb"),
+            serde_json::to_string_pretty(&table).unwrap(),
+        )
+        .unwrap();
+        let r = execute(&ctx, "table_read", json!({ "path": "表.atb" })).await;
+        assert!(!r.is_error, "{}", r.text);
+        assert!(r.text.contains("f1 名称（text）"), "{}", r.text);
+        assert!(r.text.contains("f2 状态（singleSelect：待办 / 完成）"), "{}", r.text);
+        assert!(r.text.contains("r1 | f1=null | f2=null"), "{}", r.text);
+        assert!(r.text.contains("已到末行"), "{}", r.text);
+        // 编辑：写单元格 + 新增行，落盘后行数变化
+        let r = execute(
+            &ctx,
+            "table_edit",
+            json!({ "path": "表.atb", "ops": [
+                { "op": "set_cell", "rowId": "r1", "fieldId": "f1", "value": "写文档" },
+                { "op": "add_row", "cells": { "f2": "完成" } }
+            ] }),
+        )
+        .await;
+        assert!(!r.is_error, "{}", r.text);
+        assert!(r.text.contains("2 项操作"), "{}", r.text);
+        queue_of(&ctx).drain().await.unwrap();
+        let saved: crate::vault::TableFile =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("表.atb")).unwrap()).unwrap();
+        assert_eq!(saved.rows.len(), 2);
+        assert_eq!(saved.rows[0].values["f1"], json!("写文档"));
+        assert_eq!(saved.rows[1].values["f2"], json!("完成"));
+        // 错误路径：行 / 字段 id 不存在、类型不符、扩展名不符
+        for (args, want) in [
+            (json!({ "path": "表.atb", "ops": [{ "op": "set_cell", "rowId": "nope", "fieldId": "f1", "value": "x" }] }), "行 id 不存在"),
+            (json!({ "path": "表.atb", "ops": [{ "op": "set_cell", "rowId": "r1", "fieldId": "nope", "value": "x" }] }), "字段 id 不存在"),
+            (json!({ "path": "表.atb", "ops": [{ "op": "set_cell", "rowId": "r1", "fieldId": "f2", "value": "未定义" }] }), "可选值"),
+            (json!({ "path": "表.atb", "ops": [{ "op": "boom" }] }), "未知操作"),
+            (json!({ "path": "表.atb" }), "缺少 ops"),
+            (json!({ "path": "笔记.md" }), "不是表格文件"),
+            (json!({ "path": "无此表.atb", "ops": [{ "op": "add_row" }] }), "不存在或不可读"),
+        ] {
+            let r = execute(&ctx, "table_edit", args).await;
+            assert!(r.is_error && r.text.contains(want), "期望「{want}」，实际：{}", r.text);
+        }
+        let r = execute(&ctx, "table_read", json!({ "path": "无此表.atb" })).await;
+        assert!(r.is_error && r.text.contains("不存在或不可读"), "{}", r.text);
+    }
+
+    #[tokio::test]
+    async fn canvas_read_and_edit_roundtrip() {
+        let dir = TempDir::new("ai-canvas");
+        let ctx = ctx(&dir);
+        std::fs::create_dir_all(dir.join("笔记")).unwrap();
+        let canvas = crate::vault::CanvasFile {
+            schema: crate::vault::CANVAS_SCHEMA.into(),
+            id: "c1".into(),
+            title: "画布".into(),
+            nodes: vec![],
+            edges: vec![],
+            created_at: 0,
+            updated_at: 0,
+        };
+        std::fs::write(
+            dir.join("画布.atlx"),
+            serde_json::to_string_pretty(&canvas).unwrap(),
+        )
+        .unwrap();
+        let r = execute(
+            &ctx,
+            "canvas_edit",
+            json!({ "path": "画布.atlx", "ops": [
+                { "op": "add_text_card", "text": "第一行\n正文" },
+                { "op": "add_note_card", "path": "笔记/方案.md" }
+            ] }),
+        )
+        .await;
+        assert!(!r.is_error, "{}", r.text);
+        assert!(r.text.contains("2 项操作"), "{}", r.text);
+        queue_of(&ctx).drain().await.unwrap();
+        let r = execute(&ctx, "canvas_read", json!({ "path": "画布.atlx" })).await;
+        assert!(!r.is_error, "{}", r.text);
+        assert!(r.text.contains("文本卡「第一行」"), "{}", r.text);
+        assert!(r.text.contains("笔记卡「方案」") && r.text.contains("→ 笔记/方案.md"), "{}", r.text);
+        let saved: crate::vault::CanvasFile =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("画布.atlx")).unwrap()).unwrap();
+        let (a, b) = (saved.nodes[0].id.clone(), saved.nodes[1].id.clone());
+        // 连线 + 改正文 + 删节点
+        let r = execute(
+            &ctx,
+            "canvas_edit",
+            json!({ "path": "画布.atlx", "ops": [
+                { "op": "connect", "from": a.clone(), "to": b.clone(), "kind": "link" },
+                { "op": "update_text", "nodeId": a.clone(), "text": "改后" }
+            ] }),
+        )
+        .await;
+        assert!(!r.is_error, "{}", r.text);
+        queue_of(&ctx).drain().await.unwrap();
+        let r = execute(&ctx, "canvas_read", json!({ "path": "画布.atlx" })).await;
+        assert!(r.text.contains("（关联）"), "{}", r.text);
+        assert!(r.text.contains("正文：改后"), "{}", r.text);
+        let r = execute(
+            &ctx,
+            "canvas_edit",
+            json!({ "path": "画布.atlx", "ops": [{ "op": "delete_node", "nodeId": b.clone() }] }),
+        )
+        .await;
+        assert!(!r.is_error, "{}", r.text);
+        // 错误路径：节点不存在、非画布扩展名
+        let r = execute(
+            &ctx,
+            "canvas_edit",
+            json!({ "path": "画布.atlx", "ops": [{ "op": "update_text", "nodeId": b, "text": "x" }] }),
+        )
+        .await;
+        assert!(r.is_error && r.text.contains("节点 id 不存在"), "{}", r.text);
+        let r = execute(&ctx, "canvas_edit", json!({ "path": "笔记.md", "ops": [] })).await;
+        assert!(r.is_error && r.text.contains("不是画布文件"), "{}", r.text);
+        let r = execute(&ctx, "canvas_read", json!({ "path": "无此画布.atlx" })).await;
+        assert!(r.is_error && r.text.contains("不存在或不可读"), "{}", r.text);
+    }
+
+    /// fake 宿主：记录编辑调用（工具层只经 host 写，不落盘）。
+    struct FakeHost {
+        calls: Arc<std::sync::Mutex<Vec<String>>>,
+        fail: bool,
+    }
+
+    impl crate::ai::edit_host::AiEditHost for FakeHost {
+        fn apply_note(
+            &self,
+            path: &str,
+            _op: crate::ai::edit_host::NoteOp,
+            _actor: &crate::ai::edit_host::EditActor,
+        ) -> crate::ai::edit_host::EditFuture<'_> {
+            let calls = self.calls.clone();
+            let path = path.to_string();
+            Box::pin(async move {
+                calls.lock().unwrap().push(format!("note:{path}"));
+                Ok("已写入".to_string())
+            })
+        }
+
+        fn apply_table(
+            &self,
+            path: &str,
+            ops: Vec<crate::ai::edit_host::TableOp>,
+            actor: &crate::ai::edit_host::EditActor,
+        ) -> crate::ai::edit_host::EditFuture<'_> {
+            let calls = self.calls.clone();
+            let path = path.to_string();
+            let count = ops.len();
+            let agent = actor.agent.agent_name.clone();
+            let fail = self.fail;
+            Box::pin(async move {
+                calls.lock().unwrap().push(format!("table:{path}:{count}:{agent}"));
+                if fail {
+                    Err("宿主拒绝写入".to_string())
+                } else {
+                    Ok("已编辑表".to_string())
+                }
+            })
+        }
+
+        fn apply_canvas(
+            &self,
+            path: &str,
+            ops: Vec<crate::ai::edit_host::CanvasOp>,
+            actor: &crate::ai::edit_host::EditActor,
+        ) -> crate::ai::edit_host::EditFuture<'_> {
+            let calls = self.calls.clone();
+            let path = path.to_string();
+            let count = ops.len();
+            let agent = actor.agent.agent_name.clone();
+            Box::pin(async move {
+                calls.lock().unwrap().push(format!("canvas:{path}:{count}:{agent}"));
+                Ok("已编辑画布".to_string())
+            })
+        }
+    }
+
+    fn actor() -> crate::ai::edit_host::EditActor {
+        crate::ai::edit_host::EditActor {
+            author: crate::history::HistoryAuthor {
+                id: "u1".into(),
+                name: "用户".into(),
+                device: "PC".into(),
+            },
+            agent: crate::ai::edit_host::AiIdentity {
+                agent_id: "builtin-agent".into(),
+                agent_name: "Agent".into(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn domain_edits_route_through_host() {
+        let dir = TempDir::new("ai-table-host");
+        let mut ctx = ctx(&dir);
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        ctx.host = Some(Arc::new(FakeHost { calls: calls.clone(), fail: false }));
+        ctx.actor = Some(actor());
+        let r = execute(
+            &ctx,
+            "table_edit",
+            json!({ "path": "表.atb", "ops": [{ "op": "add_row" }] }),
+        )
+        .await;
+        assert!(!r.is_error, "{}", r.text);
+        assert_eq!(r.text, "已编辑表");
+        let r = execute(
+            &ctx,
+            "canvas_edit",
+            json!({ "path": "画布.atlx", "ops": [{ "op": "add_text_card", "text": "x" }] }),
+        )
+        .await;
+        assert!(!r.is_error, "{}", r.text);
+        assert_eq!(r.text, "已编辑画布");
+        assert_eq!(
+            calls.lock().unwrap().clone(),
+            vec!["table:表.atb:1:Agent".to_string(), "canvas:画布.atlx:1:Agent".to_string()]
+        );
+        // 无宿主身份：拒绝写入（不静默）
+        let mut no_actor = ctx.clone();
+        no_actor.actor = None;
+        let r = execute(
+            &no_actor,
+            "table_edit",
+            json!({ "path": "表.atb", "ops": [{ "op": "add_row" }] }),
+        )
+        .await;
+        assert!(r.is_error && r.text.contains("身份缺失"), "{}", r.text);
+        // 宿主失败：错误文本原样回传模型
+        let mut failing = ctx.clone();
+        failing.host = Some(Arc::new(FakeHost { calls: calls.clone(), fail: true }));
+        let r = execute(
+            &failing,
+            "table_edit",
+            json!({ "path": "表.atb", "ops": [{ "op": "add_row" }] }),
+        )
+        .await;
+        assert!(r.is_error && r.text.contains("宿主拒绝写入"), "{}", r.text);
+    }
+
+    #[test]
+    fn domain_reads_reject_non_domain_files() {
+        let dir = TempDir::new("ai-domain-ext");
+        let ctx = ctx(&dir);
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let r = rt.block_on(execute(&ctx, "table_read", json!({ "path": "a.md" })));
+        assert!(r.is_error && r.text.contains("不是表格文件"), "{}", r.text);
+        let r = rt.block_on(execute(&ctx, "canvas_read", json!({ "path": "a.atb" })));
+        assert!(r.is_error && r.text.contains("不是画布文件"), "{}", r.text);
+    }
+    #[tokio::test]
     async fn web_search_without_provider_degrades() {
         let dir = TempDir::new("ai-tools");
         let ctx = ctx(&dir);
         let r = execute(&ctx, "web_search", json!({ "query": "rust" })).await;
         assert!(r.is_error && r.text.contains("未配置搜索源"));
+    }
+
+    #[test]
+    fn legacy_builtin_agent_tools_migrate_to_current_defaults() {
+        // 存量内置 Agent 若仍是旧默认集（用户未改过），装载迁移补上领域工具
+        let mut agents = crate::vault::builtin_agents();
+        agents[0].tools = ["web_search", "web_fetch", "read_file", "glob", "grep", "list_dir", "read_history"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        agents[1].tools = [
+            "web_search", "web_fetch", "read_file", "glob", "grep", "list_dir", "read_history",
+            "write_file", "append_file", "edit_file", "move", "delete", "todo_write",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        crate::vault::migrate_agent_configs(&mut agents);
+        let defaults = crate::vault::builtin_agents();
+        assert_eq!(agents[0].tools, defaults[0].tools, "只读 Agent 应补上表格/画布读工具");
+        assert_eq!(agents[1].tools, defaults[1].tools, "全量 Agent 应补上领域工具");
+        // 用户改过的工具集不动
+        let mut custom = crate::vault::builtin_agents();
+        custom[1].tools = vec!["read_file".to_string()];
+        crate::vault::migrate_agent_configs(&mut custom);
+        assert_eq!(custom[1].tools, vec!["read_file"]);
     }
 }

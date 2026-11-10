@@ -854,6 +854,24 @@ async fn history_editor_is_stored_and_never_coalesced() {
     assert_eq!(ai_entries.len(), 1, "只有 AI 版带 editor：{agg}");
     assert_eq!(ai_entries[0]["editor"]["agentName"], "Agent");
     assert_eq!(ai_entries[0]["editor"]["agentId"], "builtin-agent");
+
+    // 形状非法（非对象）的 editor 被拒：聚合侧客户端按严格类型解码，脏形状不得落盘
+    let (status, _) = ctx
+        .post(
+            &format!("/api/spaces/{space_id}/history/record"),
+            Some(&token),
+            json!({
+                "kind": "note", "file": "a.md", "content": "v4", "action": "edit",
+                "author": { "id": "dev-1", "name": "甲", "device": "dev-1" },
+                "editor": "not-an-object",
+            }),
+        )
+        .await;
+    // 反序列化拒绝（axum Json 提取失败 400/422 均属拒绝），关键是不得落盘
+    assert!(
+        status == 400 || status == 422,
+        "editor 形状非法应拒绝，实际 {status}"
+    );
 }
 
 #[tokio::test]

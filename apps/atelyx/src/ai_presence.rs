@@ -21,6 +21,8 @@ pub struct RemoteAi {
     pub editing: bool,
     /// 最近一次编辑时刻（毫秒；无 = 0）。
     pub last_edit_ts: i64,
+    /// 最近一次编辑摘要（悬停展示；无 = 空）。
+    pub last_edit_summary: Option<String>,
 }
 
 /// 本端 AI 在场状态机（瞬时通道封装）。
@@ -51,8 +53,29 @@ impl AiPresence {
         }
     }
 
+    /// 本端是否处于编辑态（壳据此挂周期拍做保活）。
     pub fn is_editing(&self) -> bool {
         self.editing
+    }
+
+    /// 限频压下的本端状态补发（壳 tick 调用）。
+    pub fn flush(&mut self, now: Instant) -> Option<Value> {
+        self.channel.flush(now)
+    }
+
+    /// 到期保活：编辑态长于保活间隔时续期，避免对端按超时剔除。
+    pub fn keepalive(&mut self, now: Instant) -> Option<Value> {
+        self.channel.keepalive_if_due(now)
+    }
+
+    /// 重连后重发当前状态（对端旧条目会在超时后消失，重发即恢复）。
+    pub fn resend(&mut self, now: Instant) -> Option<Value> {
+        self.channel.resend(now)
+    }
+
+    /// 是否有被限频压下的状态待补发（壳据此挂周期拍）。
+    pub fn has_pending(&self) -> bool {
+        self.channel.has_pending()
     }
 
     /// 开始编辑：上报 editing 状态（同状态重复调用不产帧）。
@@ -74,7 +97,7 @@ impl AiPresence {
         self.channel.set_local_state(now, state)
     }
 
-    /// 编辑结束：上报 idle + lastEdit（60s 内的对端展示「刚刚修改」）。
+    /// 编辑结束：上报 idle + lastEdit（对端在条目存活期内展示「刚刚修改」，超时后自然消失）。
     pub fn idle(&mut self, now: Instant, operator: &(String, String)) -> Option<Value> {
         if !self.editing {
             return None;
@@ -126,6 +149,12 @@ impl AiPresence {
                         .and_then(|e| e.get("ts"))
                         .and_then(Value::as_i64)
                         .unwrap_or(0),
+                    last_edit_summary: state
+                        .get("lastEdit")
+                        .and_then(|e| e.get("summary"))
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string),
                 })
             })
             .collect()
@@ -157,4 +186,96 @@ fn now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn actor() -> EditActor {
+        EditActor {
+            author: atelyx_core::history::HistoryAuthor {
+                id: "u".into(),
+                name: "甲".into(),
+                device: "d".into(),
+            },
+            agent: AiIdentity { agent_id: "builtin-agent".into(), agent_name: "Agent".into() },
+        }
+    }
+
+    fn identity() -> (String, String) {
+        ("甲".to_string(), "#3b82f6".to_string())
+    }
+
+    #[test]
+    fn begin_publishes_editing_state() {
+        let mut presence = AiPresence::new();
+        let state = presence
+            .begin(Instant::now(), "note", "a.md", &actor(), "已编辑 a.md", &identity())
+            .expect("首次上报必产帧");
+        assert_eq!(state["state"]["action"], "editing");
+        assert_eq!(state["state"]["file"], "a.md");
+        assert_eq!(state["state"]["agent"]["name"], "Agent");
+        assert_eq!(state["state"]["operator"]["name"], "甲");
+        assert!(presence.is_editing());
+    }
+
+    #[test]
+    fn idle_state_is_flushed_after_throttle_window() {
+        let mut presence = AiPresence::new();
+        let now = Instant::now();
+        presence
+            .begin(now, "note", "a.md", &actor(), "已编辑 a.md", &identity())
+            .expect("首次上报必产帧");
+        // 50ms 限频窗口内：idle 被压下，标记待补发（壳 tick 到点补发）
+        assert!(presence.idle(Instant::now(), &identity()).is_none());
+        assert!(presence.has_pending());
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        let state = presence.flush(Instant::now()).expect("到窗口后补发");
+        assert_eq!(state["state"]["action"], "idle");
+        assert!(state["state"]["lastEdit"]["ts"].as_i64().unwrap() > 0);
+        assert!(!presence.has_pending());
+        // 重复 idle 不产帧
+        assert!(presence.idle(Instant::now(), &identity()).is_none());
+    }
+
+    #[test]
+    fn remote_state_decodes_agent_and_last_edit() {
+        let mut presence = AiPresence::new();
+        let now = Instant::now();
+        let payload = serde_json::json!({
+            "clientId": 7u64,
+            "clock": 1u64,
+            "state": {
+                "view": "note",
+                "file": "a.md",
+                "action": "idle",
+                "agent": { "id": "builtin-agent", "name": "Agent" },
+                "operator": { "name": "甲", "color": "#3b82f6" },
+                "lastEdit": { "ts": 123, "summary": "已编辑 a.md" }
+            }
+        });
+        assert!(presence.apply("peer-1", &payload, now));
+        let remotes = presence.remotes(now);
+        assert_eq!(remotes.len(), 1);
+        assert_eq!(remotes[0].agent_name, "Agent");
+        assert_eq!(remotes[0].operator_name, "甲");
+        assert_eq!(remotes[0].file.as_deref(), Some("a.md"));
+        assert!(!remotes[0].editing);
+        assert_eq!(remotes[0].last_edit_ts, 123);
+        assert_eq!(remotes[0].last_edit_summary.as_deref(), Some("已编辑 a.md"));
+    }
+
+    #[test]
+    fn leave_publishes_null_state_once() {
+        let mut presence = AiPresence::new();
+        let now = Instant::now();
+        presence
+            .begin(now, "note", "a.md", &actor(), "x", &identity())
+            .expect("首次上报必产帧");
+        let left = presence.leave(now).expect("在场中离场必产帧");
+        assert!(left["state"].is_null());
+        assert!(presence.leave(now).is_none());
+        assert!(!presence.is_editing());
+    }
 }

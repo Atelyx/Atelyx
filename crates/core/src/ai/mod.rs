@@ -4,6 +4,7 @@
 
 pub mod agent;
 pub mod canvas_refs;
+pub mod doc_ops;
 pub mod edit_host;
 
 /// 参数生成中的合成工具步 id 前缀（流式占位行；收敛时 running 态归一为已中断）。

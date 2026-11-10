@@ -1816,6 +1816,8 @@ pub fn builtin_agents() -> Vec<AgentConfig> {
                 "grep",
                 "list_dir",
                 "read_history",
+                "table_read",
+                "canvas_read",
             ]
             .iter()
             .map(|s| s.to_string())
@@ -1839,6 +1841,10 @@ pub fn builtin_agents() -> Vec<AgentConfig> {
                 "edit_file",
                 "move",
                 "delete",
+                "table_read",
+                "table_edit",
+                "canvas_read",
+                "canvas_edit",
                 "todo_write",
             ]
             .iter()
@@ -1859,7 +1865,8 @@ pub fn ensure_builtin_agents(agents: Vec<AgentConfig>) -> Vec<AgentConfig> {
     merged
 }
 
-/// 工具 id 迁移：合并前的旧工具名映射到新名（去重保序），写回只写新名。
+/// 工具 id 迁移：旧工具名映射到当前名（去重保序），写回只写当前名。
+/// 旧 id 分别对应「移动 / 重命名」与「删文件 / 删目录」两种意图，迁移后由同一工具承载。
 pub fn migrate_tool_ids(tools: Vec<String>) -> Vec<String> {
     let mut out: Vec<String> = Vec::with_capacity(tools.len());
     for id in tools {
@@ -1876,8 +1883,57 @@ pub fn migrate_tool_ids(tools: Vec<String>) -> Vec<String> {
     out
 }
 
+/// 内置 Agent 的历史默认工具集（迁移判据：工具集完全等于它 = 用户未改过，可整体换成当前默认）。
+fn legacy_builtin_tools(id: &str) -> Option<&'static [&'static str]> {
+    match id {
+        BUILTIN_AGENT_CHAT_ID => Some(&[
+            "web_search",
+            "web_fetch",
+            "read_file",
+            "glob",
+            "grep",
+            "list_dir",
+            "read_history",
+        ]),
+        BUILTIN_AGENT_AGENT_ID => Some(&[
+            "web_search",
+            "web_fetch",
+            "read_file",
+            "glob",
+            "grep",
+            "list_dir",
+            "read_history",
+            "write_file",
+            "append_file",
+            "edit_file",
+            "move",
+            "delete",
+            "todo_write",
+        ]),
+        _ => None,
+    }
+}
+
+/// Agent 配置装载迁移（本地与空间同口径）：工具 id 归一 + 未改过的内置 Agent 换成当前默认集。
+/// 用户改过的内置 Agent 与自建 Agent 的工具集不动。
+pub fn migrate_agent_configs(agents: &mut [AgentConfig]) {
+    let defaults = builtin_agents();
+    for agent in agents.iter_mut() {
+        agent.tools = migrate_tool_ids(std::mem::take(&mut agent.tools));
+        let (Some(default), Some(legacy)) =
+            (defaults.iter().find(|d| d.id == agent.id), legacy_builtin_tools(&agent.id))
+        else {
+            continue;
+        };
+        let legacy: Vec<String> = legacy.iter().map(|s| s.to_string()).collect();
+        if agent.tools == legacy {
+            agent.tools = default.tools.clone();
+        }
+    }
+}
+
 /// 读 Agent 配置列表（不存在/解析失败返回空——手编辑损坏不阻塞，与 prompt-notes 同策略）。
-/// 装载时迁移旧工具 id，存量配置可继续使用。
+/// 装载时做工具 id 与内置 Agent 默认集的迁移，存量配置可继续使用。
 pub fn read_agents_file(root: &Path) -> Result<Vec<AgentConfig>, String> {
     let path = root.join(".atelyx").join("agents.json");
     if !path.exists() {
@@ -1887,9 +1943,7 @@ pub fn read_agents_file(root: &Path) -> Result<Vec<AgentConfig>, String> {
     let mut agents = serde_json::from_str::<AgentConfigFile>(&json)
         .map(|f| f.agents)
         .unwrap_or_default();
-    for agent in agents.iter_mut() {
-        agent.tools = migrate_tool_ids(std::mem::take(&mut agent.tools));
-    }
+    migrate_agent_configs(&mut agents);
     Ok(agents)
 }
 
