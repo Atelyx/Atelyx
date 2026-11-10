@@ -1763,6 +1763,10 @@ fn on_table_patch_done(
                     app.schedule_persist();
                 }
                 task = task.chain(refresh_space_tree(app));
+                // 路径变了：在途图片回执按旧路径丢弃，按新路径补拉
+                task = task.chain(
+                    crate::table_actions::ensure_image_loads(app).unwrap_or_default(),
+                );
             }
             let stable = app
                 .table
@@ -3826,10 +3830,11 @@ fn on_remote_table_patch(
     }
     // 远端补丁落地即广播：打开中的插件表格视图由此重读（本地结算点不覆盖这条路径）
     app.plugins.on_table_changed(Some(file.as_str()));
-    if refresh {
-        return refresh_space_tree(app);
-    }
-    Task::none()
+    let mut task = if refresh { refresh_space_tree(app) } else { Task::none() };
+    // 补丁可能改掉灯箱当前图：旧原图作废并按新图重读；随后按当前视口补拉可见图片
+    task = task.chain(crate::table_actions::refresh_lightbox_after_data_change(app));
+    task = task.chain(crate::table_actions::ensure_image_loads(app).unwrap_or_default());
+    task
 }
 
 /// 服务端改名广播：打开中文件路径与协作绑定跟随（内容不动，不重载）。
@@ -3872,7 +3877,9 @@ fn on_space_renamed(app: &mut App, old_path: &str, new_path: &str) -> Task<Messa
             }
         })
         .collect();
-    refresh_space_tree(app)
+    // 换名会改表格会话路径：在途图片回执按旧路径丢弃，这里按新路径补拉
+    let tree = refresh_space_tree(app);
+    tree.chain(crate::table_actions::ensure_image_loads(app).unwrap_or_default())
 }
 
 /// 他端结构变更（新建/删除/复制）：重拉整树。600ms 窗口合并连续事件（批量建删/图片

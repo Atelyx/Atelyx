@@ -425,7 +425,7 @@ struct DividerDrag {
 pub(crate) type VaultMetaResult =
     Result<(vault::VaultConfig, Vec<String>, HashMap<String, String>), String>;
 
-/// 表格可见图片批量加载回执：相对路径 + 文件指纹 + 载入结果（原图字节与缩略图）或错误。
+/// 表格可见图片批量加载回执：相对路径 + 文件指纹 + 载入结果（单元格缩略图）或错误。
 pub(crate) type ImageLoadBatch =
     Vec<(String, (u128, u64), Result<table_view::LoadedImage, String>)>;
 
@@ -617,8 +617,8 @@ enum Message {
     Table(table_view::TableMsg),
     Canvas(canvas_view::CanvasMsg),
     Calendar(calendar_actions::CalendarMsg),
-    /// 表格可见图片批量加载落地（gen 守卫）。
-    TableImagesLoaded(u64, ImageLoadBatch),
+    /// 表格可见图片批量加载落地（gen + 文件路径 + 表格 id 三重守卫）。
+    TableImagesLoaded(u64, String, String, ImageLoadBatch),
     /// 键盘修饰态（Ctrl+滚轮缩放 / Shift+滚轮横滚判定源）。
     ModsChanged(keyboard::Modifiers),
     /// 标题栏空白区按下：拖拽窗口 / 双击最大化。
@@ -2050,6 +2050,15 @@ impl App {
             }
             Message::WindowClosed(id) => {
                 plugin_actions::release_plugin_focus(self, id);
+                // 表格画布尺寸按窗口记账：关窗即摘掉该窗视口与失效的交互原点
+                if let Some(table) = self.table.as_mut() {
+                    if table.view.canvas_viewport.is_some_and(|(window, _)| window == id) {
+                        table.view.canvas_viewport = None;
+                    }
+                    if table.view.canvas_origin.is_some_and(|(origin, _)| origin == id) {
+                        table.view.canvas_origin = None;
+                    }
+                }
                 if self.main_id == Some(id) {
                     // 主窗关闭即退出：显式收尾插件运行时（停全部插件并结束托管进程树）
                     self.plugins.shutdown();
@@ -3552,8 +3561,15 @@ impl App {
                 space_actions::canvas_collab_sync(self);
                 task
             }
-            Message::TableImagesLoaded(gen, results) => {
-                if gen != self.epoch() {
+            Message::TableImagesLoaded(gen, file, table_id, results) => {
+                // 仓库世代 + 路径 + 表 id 三重守卫：加载途中切表 / 改名换入另一份文件，
+                // 旧回执不得写入当前会话缓存（改名后由文件操作收尾补拉）
+                if gen != self.epoch()
+                    || !self
+                        .table
+                        .as_ref()
+                        .is_some_and(|table| table.file == file && table.data.id == table_id)
+                {
                     return Task::none();
                 }
                 Task::batch(results.into_iter().map(|(rel, fp, result)| {
@@ -4250,7 +4266,10 @@ impl App {
                         }
                     }
                 }
+                // 改名会换掉表格会话路径：在途图片回执按旧路径丢弃，这里按新路径补拉
+                let images = table_actions::ensure_image_loads(self).unwrap_or_default();
                 let mut next = refresh
+                    .chain(images)
                     .chain(self.refresh_note_files())
                     .chain(self.refresh_tag_vocab())
                     .chain(self.refresh_backlinks());
@@ -5472,9 +5491,12 @@ impl App {
                 if table_actions::apply_history_snapshot(self, table) {
                     self.autosave_deadline = Some(Instant::now() + AUTOSAVE_DEBOUNCE);
                 }
-                let Some(rel) = self.ui.last_table_file.clone() else { return Task::none() };
+                // 回滚替换了可见内容：按当前视口补拉图片（不依赖之后是否还有指针事件）
+                let images = table_actions::ensure_image_loads(self).unwrap_or_default();
+                let Some(rel) = self.ui.last_table_file.clone() else { return images };
                 if matches!(self.repo_kind, RepoKind::Space(_)) {
-                    return space_actions::space_record_table_restore(self, rel, version.content);
+                    return space_actions::space_record_table_restore(self, rel, version.content)
+                        .chain(images);
                 }
                 let gen = self.epoch();
                 let state = self.vault.clone();
@@ -5504,6 +5526,7 @@ impl App {
                     },
                     move |r: Result<(), String>| Message::HistoryRecorded(gen, r.err()),
                 )
+                .chain(images)
             }
             atelyx_core::history::HistoryKind::Note => self.note_history_restore(version),
             // 画布回滚走 canvas_history_restore（快照直写仓库，无会话链）

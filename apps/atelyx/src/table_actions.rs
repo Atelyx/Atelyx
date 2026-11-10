@@ -3,6 +3,8 @@
 //! 模型变更一律经 `table_ops` 纯函数 + `TableSession::touch()`；落盘与磁盘真源
 //! 按补丁合并（只写变化实体，外部改动未触及的行/字段不被冲掉）。
 
+use std::time::Instant;
+
 use iced::Task;
 use iced::{Point, Rectangle, Size};
 
@@ -109,6 +111,7 @@ fn on_msg_open(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
         tv::TableMsg::Press { window, pos, size, origin } => on_press(app, window, pos, size, origin),
         tv::TableMsg::Context { window, pos, size } => on_context(app, window, pos, size),
         tv::TableMsg::Move { window, pos, size, origin } => on_move(app, window, pos, size, origin),
+        tv::TableMsg::Viewport { window, size } => on_viewport(app, window, size),
         tv::TableMsg::Release(pos) => on_release(app, pos),
         tv::TableMsg::Wheel { delta_y, delta_x } => on_wheel(app, delta_y, delta_x),
         tv::TableMsg::Edited(action) => {
@@ -485,13 +488,39 @@ fn on_msg_open(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
                     s.view.pins.borrow_mut().unpin(&rel);
                     s.view.images.insert(rel.clone(), tv::CachedImage::new(fp, loaded));
                     s.view.image_failed.remove(&rel);
+                    Task::none()
                 }
                 Err(_) => {
-                    s.view.image_failed.insert(rel);
+                    s.view.image_failed.insert(rel, Instant::now());
+                    retry_after(tv::IMAGE_RETRY_INTERVAL, tv::TableMsg::RetryImages)
                 }
             }
-            Task::none()
         }
+        tv::TableMsg::LightboxImageLoaded { rel, result } => {
+            let Some(s) = app.table.as_mut() else { return Task::none() };
+            // 用户已翻页 / 关灯箱：旧图回执作废（同一 rel 才落地）
+            let current = s.view.lightbox.as_ref().and_then(|lb| tv::lightbox_rel(s, lb));
+            if current.as_deref() != Some(rel.as_str()) {
+                return Task::none();
+            }
+            let Some(lb) = s.view.lightbox.as_mut() else { return Task::none() };
+            match result {
+                Ok(bytes) => {
+                    lb.original = Some(iced::widget::image::Handle::from_bytes(bytes));
+                    lb.original_rel = Some(rel);
+                    lb.original_error = None;
+                    Task::none()
+                }
+                Err(e) => {
+                    lb.original = None;
+                    lb.original_rel = Some(rel);
+                    lb.original_error = Some(e);
+                    retry_after(tv::IMAGE_RETRY_INTERVAL, tv::TableMsg::LightboxRetry)
+                }
+            }
+        }
+        tv::TableMsg::RetryImages => retry_failed_images(app).unwrap_or_default(),
+        tv::TableMsg::LightboxRetry => retry_lightbox_original(app),
         tv::TableMsg::LightboxClose => {
             if let Some(s) = app.table.as_mut() {
                 s.view.lightbox = None;
@@ -499,22 +528,27 @@ fn on_msg_open(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
             Task::none()
         }
         tv::TableMsg::LightboxNav(delta) => {
-            let Some(s) = app.table.as_mut() else { return Task::none() };
-            let Some(lb) = s.view.lightbox.as_mut() else { return Task::none() };
-            let count = s
-                .data
-                .rows
-                .iter()
-                .find(|r| r.id == lb.row_id)
-                .and_then(|r| r.values.get(&lb.field_id))
-                .map(|v| ops::image_entries(v).len())
-                .unwrap_or(0);
-            if count == 0 {
-                return Task::none();
+            {
+                let Some(s) = app.table.as_mut() else { return Task::none() };
+                let Some(lb) = s.view.lightbox.as_mut() else { return Task::none() };
+                let count = s
+                    .data
+                    .rows
+                    .iter()
+                    .find(|r| r.id == lb.row_id)
+                    .and_then(|r| r.values.get(&lb.field_id))
+                    .map(|v| ops::image_entries(v).len())
+                    .unwrap_or(0);
+                if count == 0 {
+                    return Task::none();
+                }
+                lb.index = (lb.index as i32 + delta).rem_euclid(count as i32) as usize;
+                lb.reset_view();
+                lb.original = None;
+                lb.original_rel = None;
+                lb.original_error = None;
             }
-            lb.index = (lb.index as i32 + delta).rem_euclid(count as i32) as usize;
-            lb.reset_view();
-            Task::none()
+            load_lightbox_original(app)
         }
         tv::TableMsg::LightboxZoom { pos, view, delta_y } => on_lightbox_zoom(app, pos, view, delta_y),
         tv::TableMsg::LightboxPress(pos) => on_lightbox_press(app, pos),
@@ -759,6 +793,7 @@ pub fn apply_history_snapshot(app: &mut App, table: TableFile) -> bool {
     s.view.edit_session = None;
     s.view.selection = None;
     s.view.bar_shown = false;
+    s.view.lightbox = None;
     s.data = table;
     s.dirty = true;
     s.save_error = None;
@@ -1052,8 +1087,13 @@ fn scroll_target_for_row(session: &tv::TableSession, index: usize) -> Option<f32
 
 /// 内容尺寸缩小时把滚动钳回有效范围（缩放 / 删行删列 / 历史回滚后调用），防整面滚出视口。
 fn clamp_scroll(s: &mut tv::TableSession) {
+    clamp_scroll_at(s, s.view.canvas_size);
+}
+
+/// 按指定画布尺寸钳滚动（滚轮 / 视口上报走本窗尺寸，避免多窗口互相覆盖）。
+fn clamp_scroll_at(s: &mut tv::TableSession, size: Size) {
     let (max_x, max_y) = {
-        let g = tv::geo(s, s.view.canvas_size);
+        let g = tv::geo(s, size);
         (g.max_scroll_x(), g.max_scroll_y())
     };
     s.view.scroll_x = s.view.scroll_x.clamp(0.0, max_x);
@@ -1065,6 +1105,7 @@ fn on_press(app: &mut App, window: iced::window::Id, pos: Point, size: Size, ori
     s.view.focused = true;
     s.view.press_seen = true;
     s.view.canvas_size = size;
+    s.view.canvas_viewport = Some((window, size));
     s.view.canvas_origin = Some((window, origin));
     // 防御：按压落在编辑器矩形内 = 编辑器内部交互（移光标 / 拖选），画布不接管不提交
     // （正常路径下编辑器内按压被 text_editor 捕获、画布收不到；此分支兜底捕获行为变化）
@@ -1130,8 +1171,13 @@ fn on_press(app: &mut App, window: iced::window::Id, pos: Point, size: Size, ori
         tv::Hit::HeaderResize(c) => {
             let field = s.data.fields[c].clone();
             let start_w = field.width.unwrap_or_else(|| ops::field_default_width(&field.name));
-            s.view.col_drag =
-                Some(tv::ColDrag { field_id: field.id, start_x: pos.x, start_w, pushed: false });
+            s.view.col_drag = Some(tv::ColDrag {
+                field_id: field.id,
+                start_x: pos.x,
+                start_w,
+                pushed: false,
+                snapshot: None,
+            });
             CellAction::None
         }
         tv::Hit::Gutter(r) => {
@@ -1224,9 +1270,7 @@ fn cell_press_plan(
         // carousel 停留页在图片删减后可能越界，钳到现存末页（绘制侧同口径）
         let idx = s
             .view
-            .carousel
-            .get(&(row_id.clone(), field_id.clone()))
-            .copied()
+            .carousel_index(&row_id, &field_id)
             .unwrap_or(0)
             .min(images.saturating_sub(1));
         let layout = tv::image_layout_of(cell, v, s.view.zoom, idx);
@@ -1242,7 +1286,7 @@ fn cell_press_plan(
         }
         for (img_idx, _, rect) in layout.thumbs.iter().chain(layout.tiles.iter()) {
             if rect.contains(pos) {
-                s.view.carousel.insert((row_id.clone(), field_id.clone()), *img_idx);
+                s.view.set_carousel_index(&row_id, &field_id, *img_idx);
                 s.view.press = Some(tv::PressState {
                     start: pos,
                     active: false,
@@ -1461,6 +1505,7 @@ fn on_context(app: &mut App, window: iced::window::Id, pos: Point, size: Size) -
     let Some(s) = app.table.as_mut() else { return Task::none() };
     s.view.focused = true;
     s.view.canvas_size = size;
+    s.view.canvas_viewport = Some((window, size));
     s.view.bar_shown = false;
     let g = tv::geo(s, size);
     // 右键点在当前选区内保留选区，否则落单格 / 整行 / 整列
@@ -1511,6 +1556,15 @@ fn on_context(app: &mut App, window: iced::window::Id, pos: Point, size: Size) -
     Task::none()
 }
 
+/// 重绘上报的画布尺寸：首帧 / 面板或窗口改尺寸时由重绘事件带来。
+/// 图片加载与滚动上限据此取当前可见区。
+fn on_viewport(app: &mut App, window: iced::window::Id, size: Size) -> Task<Message> {
+    let Some(s) = app.table.as_mut() else { return Task::none() };
+    s.view.record_viewport(window, size);
+    clamp_scroll(s);
+    Task::none()
+}
+
 fn on_move(app: &mut App, window: iced::window::Id, pos: Point, size: Size, origin: Point) -> Task<Message> {
     let Some(s) = app.table.as_mut() else { return Task::none() };
     s.view.hover = pos;
@@ -1520,6 +1574,7 @@ fn on_move(app: &mut App, window: iced::window::Id, pos: Point, size: Size, orig
         // 首帧悬停播种画布尺寸（打开表格后图片即按可见区加载，无需先按压）；
         // 尺寸变化收口滚动视口，旧滚动值一并钳回新上限
         s.view.canvas_size = size;
+        s.view.canvas_viewport = Some((window, size));
         clamp_scroll(s);
     }
     // 竖向滚动条拖拽（滑块按 grab 偏移跟手）
@@ -1557,13 +1612,44 @@ fn on_move(app: &mut App, window: iced::window::Id, pos: Point, size: Size, orig
     if let Some((field_id, start_x, start_w, pushed)) = col_drag {
         let w = (start_w + ((pos.x - start_x) / s.view.zoom) as f64)
             .clamp(ops::MIN_COL_WIDTH, ops::MAX_COL_WIDTH);
-        let changed = w != start_w;
-        if !pushed && changed {
+        // 与当前列宽比较（拖回起点也要写回）；是否入撤销栈看是否离开过起点
+        let current = s
+            .data
+            .fields
+            .iter()
+            .find(|field| field.id == field_id)
+            .map(|field| field.width.unwrap_or_else(|| ops::field_default_width(&field.name)))
+            .unwrap_or(start_w);
+        let left_start = w != start_w;
+        if !pushed && left_start {
             push_undo(s);
             s.view.col_drag.as_mut().expect("col_drag 已判存在").pushed = true;
         }
-        if (pushed || changed) && ops::set_field_width(&mut s.data, &field_id, Some(w)) {
-            s.touch();
+        if w == current {
+            return Task::none();
+        }
+        // 快照在首次变化前建立；远端补丁 / 缩放让版本失配时就地重算
+        let stale = s.view.col_drag.as_ref().is_some_and(|drag| {
+            drag.snapshot
+                .as_ref()
+                .is_none_or(|snap| {
+                    snap.version != s.version
+                        || snap.zoom != s.view.zoom
+                        || snap.layout_epoch != s.view.layout_epoch
+                })
+        });
+        if stale {
+            let snapshot = s.col_drag_snapshot(&field_id);
+            if let Some(drag) = s.view.col_drag.as_mut() {
+                drag.snapshot = snapshot;
+            }
+        }
+        if ops::set_field_width(&mut s.data, &field_id, Some(w)) {
+            s.touch_data_only();
+            // 拖拽中只重算被拖列，不再整表重排；快照不可用时退回整表重建兜底
+            if !s.apply_col_drag_layout() {
+                s.rebuild_layout();
+            }
         }
         return Task::none();
     }
@@ -1581,7 +1667,11 @@ fn on_move(app: &mut App, window: iced::window::Id, pos: Point, size: Size, orig
             s.view.row_drag.as_mut().expect("row_drag 已判存在").pushed = true;
         }
         if (pushed || changed) && ops::set_row_height(&mut s.data, &row_id, Some(h)) {
-            s.touch();
+            s.touch_data_only();
+            // 行高只影响该行与后续行位置：就地更新，拖拽中不再整表重排
+            if !s.apply_row_drag_layout(&row_id) {
+                s.rebuild_layout();
+            }
         }
         return Task::none();
     }
@@ -1628,12 +1718,7 @@ fn on_move(app: &mut App, window: iced::window::Id, pos: Point, size: Size, orig
             let press = s.view.press.as_mut().expect("press 已判存在");
             press.active = true;
             if let tv::ImagePressKind::Main = kind {
-                let idx = s
-                    .view
-                    .carousel
-                    .get(&(row_id.clone(), field_id.clone()))
-                    .copied()
-                    .unwrap_or(0);
+                let idx = s.view.carousel_index(&row_id, &field_id).unwrap_or(0);
                 let count = row_images_len(s, &row_id, &field_id);
                 s.view.swipe = Some(tv::SwipeState {
                     row_id,
@@ -1707,7 +1792,7 @@ fn on_release(app: &mut App, pos: Point) -> Task<Message> {
         if sw.dx.abs() >= tv::IMAGE_SWIPE_THRESHOLD * s.view.zoom {
             let dir = if sw.dx < 0.0 { 1i32 } else { -1 };
             let next = (sw.index as i32 + dir).clamp(0, sw.count as i32 - 1) as usize;
-            s.view.carousel.insert((sw.row_id, sw.field_id), next);
+            s.view.set_carousel_index(&sw.row_id, &sw.field_id, next);
         }
         return Task::none();
     }
@@ -1717,15 +1802,12 @@ fn on_release(app: &mut App, pos: Point) -> Task<Message> {
     }
     // 干净松手：主图/九宫格 = 灯箱；轮播缩略图已在按下时跳转
     let Some(img) = press.img else { return Task::none() };
-    let idx = s
-        .view
-        .carousel
-        .get(&(img.row_id.clone(), img.field_id.clone()))
-        .copied()
-        .unwrap_or(0);
+    let idx = s.view.carousel_index(&img.row_id, &img.field_id).unwrap_or(0);
+    let mut opened = false;
     match img.kind {
         tv::ImagePressKind::Main => {
             s.view.lightbox = Some(tv::Lightbox::new(img.row_id, img.field_id, idx));
+            opened = true;
         }
         tv::ImagePressKind::Thumb(i) => {
             let is_grid = s
@@ -1738,24 +1820,31 @@ fn on_release(app: &mut App, pos: Point) -> Task<Message> {
                 == Some("grid");
             if is_grid {
                 s.view.lightbox = Some(tv::Lightbox::new(img.row_id, img.field_id, i));
+                opened = true;
             }
         }
     }
-    Task::none()
+    if opened {
+        load_lightbox_original(app)
+    } else {
+        Task::none()
+    }
 }
 
 fn on_wheel(app: &mut App, delta_y: f32, delta_x: f32) -> Task<Message> {
     let Some(s) = app.table.as_mut() else { return Task::none() };
+    // 滚动上限按本窗画布尺寸算（首帧还没收到指针事件时也有正确尺寸）
+    let size = s.view.viewport_size();
     if app.mods.control() {
         // Ctrl+滚轮缩放（winit 滚上为正 → 放大）：exp 曲线 + 两位小数
         let z = (s.view.zoom * (delta_y * 0.0015f32).exp()).clamp(tv::MIN_ZOOM, tv::MAX_ZOOM);
         s.view.zoom = (z * 100.0).round() / 100.0;
         s.rebuild_layout();
-        clamp_scroll(s);
+        clamp_scroll_at(s, size);
         return Task::none();
     }
     let (max_x, max_y) = {
-        let g = tv::geo(s, s.view.canvas_size);
+        let g = tv::geo(s, size);
         (g.max_scroll_x(), g.max_scroll_y())
     };
     // winit 滚上 / 滚右为正：视口取负（内容随手势同向移动）
@@ -2340,12 +2429,7 @@ fn commit_image_drag(s: &mut tv::TableSession, drag: tv::ImageDrag) {
         Some(v) => v.clone(),
         None => return,
     };
-    let idx = s
-        .view
-        .carousel
-        .get(&(drag.row_id.clone(), drag.field_id.clone()))
-        .copied()
-        .unwrap_or(0);
+    let idx = s.view.carousel_index(&drag.row_id, &drag.field_id).unwrap_or(0);
     let layout = tv::image_layout_of(cell, &v, s.view.zoom, idx);
     let slots: Vec<(usize, &Rectangle)> = if layout.tiles.is_empty() {
         layout.thumbs.iter().map(|(i, _, r)| (*i, r)).collect()
@@ -2407,24 +2491,112 @@ pub fn check_long_press(app: &mut App) {
     s.view.img_drag = Some(tv::ImageDrag { row_id, field_id, rel, from, pos });
 }
 
-/// 灯箱当前图的仓库相对路径（越界 / 图已删 = None）。
-fn lightbox_rel(s: &tv::TableSession, lb: &tv::Lightbox) -> Option<String> {
-    let entries = s
-        .data
-        .rows
-        .iter()
-        .find(|r| r.id == lb.row_id)?
-        .values
-        .get(&lb.field_id)
-        .map(|v| ops::image_entries(v))?;
-    entries.get(lb.index).map(|rel| rel.to_string())
+/// 按需读取灯箱当前原图（缩略图之外不常驻原图字节；打开 / 翻页各取一次）。
+fn load_lightbox_original(app: &mut App) -> Task<Message> {
+    let Some(rel) = ({
+        let Some(s) = app.table.as_ref() else { return Task::none() };
+        let Some(lb) = s.view.lightbox.as_ref() else { return Task::none() };
+        tv::lightbox_rel(s, lb)
+    }) else {
+        return Task::none();
+    };
+    let rel_cb = rel.clone();
+    if matches!(app.repo_kind, crate::RepoKind::Space(_)) {
+        let Some(session) = space_actions::session_of(app) else { return Task::none() };
+        let client = session.client;
+        let space_id = session.space_id;
+        // 请求发起即记账当前路径：同一路径的在途请求不重复发起，换图后旧回执不得落地
+        mark_lightbox_original_request(app, &rel);
+        return Task::perform(
+            async move {
+                if rel.starts_with("data:") {
+                    atelyx_core::table_xlsx::decode_data_url(&rel)
+                        .ok_or_else(|| "图片数据解码失败".to_string())
+                } else {
+                    client.get_file_bytes(&space_id, &rel).await.map_err(|e| e.to_string())
+                }
+            },
+            move |result| Message::Table(tv::TableMsg::LightboxImageLoaded { rel: rel_cb, result }),
+        );
+    }
+    let Some(root) = app.vault.root().ok() else { return Task::none() };
+    mark_lightbox_original_request(app, &rel);
+    Task::perform(
+        async move {
+            tokio::task::spawn_blocking(move || {
+                if rel.starts_with("data:") {
+                    atelyx_core::table_xlsx::decode_data_url(&rel)
+                        .ok_or_else(|| "图片数据解码失败".to_string())
+                } else {
+                    let path = vault::safe_join(&root, &rel, false)?;
+                    std::fs::read(&path).map_err(|e| format!("读取图片失败：{e}"))
+                }
+            })
+            .await
+            .map_err(|e| e.to_string())?
+        },
+        move |result| Message::Table(tv::TableMsg::LightboxImageLoaded { rel: rel_cb, result }),
+    )
+}
+
+/// 登记一次原图请求：清掉旧图与错误，记住请求路径供回执 / 重试守卫。
+fn mark_lightbox_original_request(app: &mut App, rel: &str) {
+    if let Some(s) = app.table.as_mut() {
+        if let Some(lb) = s.view.lightbox.as_mut() {
+            lb.original = None;
+            lb.original_error = None;
+            lb.original_rel = Some(rel.to_string());
+        }
+    }
+}
+
+/// 失败后的定时重试：一次性延时任务投递，不依赖 UI 心跳。
+fn retry_after(delay: std::time::Duration, msg: tv::TableMsg) -> Task<Message> {
+    Task::perform(tokio::time::sleep(delay), move |_| Message::Table(msg))
+}
+
+/// 原图读取失败后的定时重试（当前图未变、仍未就绪才发起）。
+fn retry_lightbox_original(app: &mut App) -> Task<Message> {
+    let Some(s) = app.table.as_ref() else { return Task::none() };
+    let Some(lb) = s.view.lightbox.as_ref() else { return Task::none() };
+    if lb.original.is_some() || lb.original_error.is_none() {
+        return Task::none();
+    }
+    let current = tv::lightbox_rel(s, lb);
+    if lb.original_rel.as_deref() != current.as_deref() {
+        return Task::none();
+    }
+    load_lightbox_original(app)
+}
+
+/// 数据被远端补丁 / 历史回滚替换后校正灯箱：当前图变了就丢掉旧原图并重读；图没了就关灯箱。
+pub(crate) fn refresh_lightbox_after_data_change(app: &mut App) -> Task<Message> {
+    let Some(current) = ({
+        let Some(s) = app.table.as_ref() else { return Task::none() };
+        let Some(lb) = s.view.lightbox.as_ref() else { return Task::none() };
+        tv::lightbox_rel(s, lb)
+    }) else {
+        if let Some(s) = app.table.as_mut() {
+            s.view.lightbox = None;
+        }
+        return Task::none();
+    };
+    let same = app
+        .table
+        .as_ref()
+        .and_then(|s| s.view.lightbox.as_ref())
+        .is_some_and(|lb| lb.original_rel.as_deref() == Some(current.as_str()));
+    if same {
+        return Task::none();
+    }
+    load_lightbox_original(app)
 }
 
 /// 下载灯箱当前图到系统 Downloads（文件名 = 附件名；重名自动加序号）。
 fn download_lightbox_image(app: &App) -> Task<Message> {
     let Some(s) = app.table.as_ref() else { return Task::none() };
     let Some(lb) = s.view.lightbox.clone() else { return Task::none() };
-    let Some(rel) = lightbox_rel(s, &lb) else { return Task::none() };
+    let Some(rel) = tv::lightbox_rel(s, &lb) else { return Task::none() };
     // 空间模式：图片字节走服务端读取后落下载目录
     if matches!(app.repo_kind, crate::RepoKind::Space(_)) {
         let Some(session) = space_actions::session_of(app) else { return Task::none() };
@@ -2466,7 +2638,7 @@ fn download_lightbox_image(app: &App) -> Task<Message> {
 fn copy_lightbox_image(app: &App) -> Task<Message> {
     let Some(s) = app.table.as_ref() else { return Task::none() };
     let Some(lb) = s.view.lightbox.clone() else { return Task::none() };
-    let Some(rel) = lightbox_rel(s, &lb) else { return Task::none() };
+    let Some(rel) = tv::lightbox_rel(s, &lb) else { return Task::none() };
     // 遗留内嵌 dataURL：解码即用
     if rel.starts_with("data:") {
         return Task::perform(
@@ -2545,40 +2717,41 @@ fn export_xlsx(app: &App, path: Option<std::path::PathBuf>) -> Task<Message> {
 
 // ===== 图片句柄缓存 =====
 
-/// 确保可见区域的图片句柄已发起加载（滚动/载入后调用；失败集不重试）。
+/// 确保当前绘制到的图片已发起加载（打开 / 滚动 / 缩放 / 翻页后调用）。
+/// 失败条目按固定间隔重试（可见的到期即重新发起，离屏的等重新可见）。
 pub fn ensure_image_loads(app: &mut App) -> Option<Task<Message>> {
     let s = app.table.as_ref()?;
-    let view = &s.view;
-    if view.canvas_size.width <= 0.0 {
+    if !s.data.fields.iter().any(|field| field.field_type == "image") {
         return None;
     }
-    let g = tv::geo(s, view.canvas_size);
-    let data = &s.data;
-    let (first, last) = g.visible_rows(data.rows.len());
+    let view = &s.view;
+    let size = view.viewport_size();
+    if size.width < 1.0 || size.height < 1.0 {
+        return None;
+    }
+    let visible = tv::visible_image_rels(s, size);
+    if visible.is_empty() {
+        return None;
+    }
+    let now = Instant::now();
     let mut rels: Vec<String> = Vec::new();
-    for r in first..=last {
-        let Some(row) = data.rows.get(r) else { continue };
-        for f in &data.fields {
-            if f.field_type != "image" {
+    for rel in visible {
+        if view.images.contains_key(&rel) || view.image_inflight.contains(&rel) {
+            continue;
+        }
+        if let Some(failed_at) = view.image_failed.get(&rel) {
+            if now.duration_since(*failed_at) < tv::IMAGE_RETRY_INTERVAL {
                 continue;
             }
-            let Some(v) = row.values.get(&f.id) else { continue };
-            for rel in ops::image_entries(v) {
-                let rel = rel.to_string();
-                if view.images.contains_key(&rel)
-                    || view.image_inflight.contains(&rel)
-                    || view.image_failed.contains(&rel)
-                {
-                    continue;
-                }
-                rels.push(rel);
-            }
         }
+        rels.push(rel);
     }
     if rels.is_empty() {
         return None;
     }
     let gen = app.epoch();
+    let file = s.file.clone();
+    let table_id = s.data.id.clone();
     let inflight = rels.clone();
     // 空间模式：逐张走服务端字节读取（无文件指纹，dataURL 同样解码即用）
     let task = if matches!(app.repo_kind, crate::RepoKind::Space(_)) {
@@ -2606,9 +2779,11 @@ pub fn ensure_image_loads(app: &mut App) -> Option<Task<Message>> {
                 })
                 .await
                 .unwrap_or_default();
-                (gen, results)
+                (gen, file, table_id, results)
             },
-            |(gen, results)| Message::TableImagesLoaded(gen, results),
+            |(gen, file, table_id, results)| {
+                Message::TableImagesLoaded(gen, file, table_id, results)
+            },
         )
     } else {
         let root = app.vault.root().ok()?;
@@ -2652,22 +2827,48 @@ pub fn ensure_image_loads(app: &mut App) -> Option<Task<Message>> {
                 })
                 .await
                 .unwrap_or_default();
-            (gen, results)
+            (gen, file, table_id, results)
         },
-        |(gen, results)| Message::TableImagesLoaded(gen, results),
+        |(gen, file, table_id, results)| Message::TableImagesLoaded(gen, file, table_id, results),
         )
     };
     if let Some(s) = app.table.as_mut() {
         for rel in inflight {
+            // 已发起本次重试：失败时间戳作废，避免重试 tick 在同一张图上反复扫
+            s.view.image_failed.remove(&rel);
             s.view.image_inflight.insert(rel);
         }
     }
     Some(task)
 }
 
-/// 载入结果：原图字节（灯箱解码）+ 缩略图像素（单元格绘制）。解码与缩放在调用线程做。
+/// UI tick 兜底：失败条目到期就摘掉重试标记并重新发起（可见的立即拉，离屏的等重新可见）。
+/// 没有到期项 = 无任务，不扫可见区。
+fn retry_failed_images(app: &mut App) -> Option<Task<Message>> {
+    let s = app.table.as_ref()?;
+    if s.view.image_failed.is_empty() {
+        return None;
+    }
+    let now = Instant::now();
+    let due = s
+        .view
+        .image_failed
+        .values()
+        .any(|failed_at| now.duration_since(*failed_at) >= tv::IMAGE_RETRY_INTERVAL);
+    if !due {
+        return None;
+    }
+    if let Some(s) = app.table.as_mut() {
+        s.view
+            .image_failed
+            .retain(|_, failed_at| now.duration_since(*failed_at) < tv::IMAGE_RETRY_INTERVAL);
+    }
+    ensure_image_loads(app)
+}
+
+/// 载入结果：只产出单元格缩略图（原图字节用完即丢，灯箱打开时另行按需读取）。
 fn loaded_image(bytes: Vec<u8>) -> Result<tv::LoadedImage, String> {
     let thumb = image_thumb::thumbnail(&bytes, image_thumb::THUMB_MAX_EDGE)?;
     let size = (thumb.source.0 as f32, thumb.source.1 as f32);
-    Ok(tv::LoadedImage { bytes, size, thumb })
+    Ok(tv::LoadedImage { size, thumb })
 }

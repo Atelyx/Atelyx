@@ -110,6 +110,8 @@ pub const IMAGE_SWIPE_THRESHOLD: f32 = 48.0;
 pub const IMAGE_EDGE_DAMPING: f32 = 0.35;
 /// 单个图片文件导入上限（与服务端单文件写限额一致）。
 pub const IMAGE_MAX_BYTES: usize = 50 * 1024 * 1024;
+/// 加载失败后的重试间隔（固定间隔；仍在可见区时也按此间隔重试）。
+pub const IMAGE_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// 编辑器浮层的 widget id（挂焦点用）。
 pub const CELL_EDITOR_ID: &str = "table-cell-editor";
@@ -164,15 +166,22 @@ impl TableSession {
 
     /// 数据已变更：置脏 + 排自动保存 + 重建布局缓存；新变更作废重做栈。
     pub fn touch(&mut self) {
+        self.touch_data_only();
+        self.rebuild_layout();
+    }
+
+    /// 只登记数据变更（置脏 / 版本 / 作废重做），不重建布局。
+    /// 调用方须在同一次变更里就地增量更新布局（失败回退 rebuild_layout），松手后再整表重建。
+    pub fn touch_data_only(&mut self) {
         self.dirty = true;
         self.save_error = None;
         self.version += 1;
         self.view.redo.clear();
-        self.rebuild_layout();
     }
 
     /// 布局重建（数据版本或 zoom 变化时调用；zoom 变更后由调用方补调）。
     pub fn rebuild_layout(&mut self) {
+        self.view.layout_epoch = self.view.layout_epoch.wrapping_add(1);
         let zoom = self.view.zoom;
         let data = &self.data;
         let col_w: Vec<f32> = data
@@ -209,14 +218,20 @@ impl TableSession {
             }
             let h = match row.height {
                 // 磁盘存量可能小于下限（写入侧钳制不覆盖旧数据）：读取侧同样钳到把手命中区下限
-                Some(h) => (h as f32).max(table_ops::MIN_ROW_HEIGHT as f32) * zoom,
-                None => (content + 2.0 * CELL_PAD_Y * zoom).max(32.0 * zoom),
+                Some(h) => manual_row_height(h, zoom),
+                None => auto_row_height(content, zoom),
             };
             row_h.push(h);
             y += h;
         }
         row_y.push(y);
         wrap.end_pass();
+        // 状态栏列计算随数据版本重建：绘制只查结果，不在每次重绘扫全表
+        let calc = data
+            .fields
+            .iter()
+            .map(|field| table_ops::compute_column_calc(field, &data.rows))
+            .collect();
         self.view.layout = Some(LayoutCache {
             version: self.version,
             zoom,
@@ -227,7 +242,140 @@ impl TableSession {
             row_y,
             content_h: y + NEW_ROW_H * zoom,
             wrap,
+            calc,
         });
+    }
+
+    /// 列宽拖拽起点的行高快照：先量一遍被拖列之外的内容高度（拖拽期间只重算被拖列）。
+    pub fn col_drag_snapshot(&mut self, field_id: &str) -> Option<ColDragSnapshot> {
+        let zoom = self.view.zoom;
+        let layout_epoch = self.view.layout_epoch;
+        let mut cache = self.view.layout.take()?;
+        let data = &self.data;
+        let mut other_max = Vec::with_capacity(data.rows.len());
+        for row in &data.rows {
+            if row.height.is_some() {
+                other_max.push(0.0);
+                continue;
+            }
+            let mut content = 0.0f32;
+            for (i, field) in data.fields.iter().enumerate() {
+                if field.id == field_id {
+                    continue;
+                }
+                content = content.max(cell_content_height(
+                    Some(&mut cache.wrap),
+                    field,
+                    row,
+                    row.values.get(&field.id),
+                    cache.col_w[i],
+                    zoom,
+                ));
+            }
+            other_max.push(content);
+        }
+        self.view.layout = Some(cache);
+        Some(ColDragSnapshot { other_max, version: self.version, zoom, layout_epoch })
+    }
+
+    /// 拖拽中的列宽已写入数据后，就地更新布局（只重算被拖列，不整表重排）。
+    /// 调用方须先确认快照与当前版本 / 缩放一致；成功后就位刷新快照版本。
+    pub fn apply_col_drag_layout(&mut self) -> bool {
+        let Some(drag) = self.view.col_drag.as_mut() else { return false };
+        let Some(mut snapshot) = drag.snapshot.take() else { return false };
+        let field_id = drag.field_id.clone();
+        let Some(ci) = self.data.fields.iter().position(|field| field.id == field_id) else {
+            self.restore_col_drag_snapshot(snapshot);
+            return false;
+        };
+        let zoom = self.view.zoom;
+        let new_w = self.data.fields[ci]
+            .width
+            .unwrap_or_else(|| table_ops::field_default_width(&self.data.fields[ci].name)) as f32
+            * zoom;
+        let Some(mut cache) = self.view.layout.take() else {
+            self.restore_col_drag_snapshot(snapshot);
+            return false;
+        };
+        if cache.col_w.len() != self.data.fields.len()
+            || cache.col_x.len() != self.data.fields.len() + 1
+            || cache.row_h.len() != self.data.rows.len()
+            || cache.row_y.len() != self.data.rows.len() + 1
+            || snapshot.other_max.len() != self.data.rows.len()
+        {
+            self.view.layout = Some(cache);
+            self.restore_col_drag_snapshot(snapshot);
+            return false;
+        }
+        cache.col_w[ci] = new_w;
+        let mut x = 0.0f32;
+        for i in 0..cache.col_w.len() {
+            cache.col_x[i] = x;
+            x += cache.col_w[i];
+        }
+        cache.col_x[cache.col_w.len()] = x;
+        cache.total_w = x + ADD_COL_W * zoom;
+        let field = &self.data.fields[ci];
+        let mut y = 0.0f32;
+        for (r, row) in self.data.rows.iter().enumerate() {
+            let h = match row.height {
+                Some(h) => manual_row_height(h, zoom),
+                None => {
+                    let content = cell_content_height(
+                        None,
+                        field,
+                        row,
+                        row.values.get(&field.id),
+                        new_w,
+                        zoom,
+                    );
+                    auto_row_height(content.max(snapshot.other_max[r]), zoom)
+                }
+            };
+            cache.row_h[r] = h;
+            cache.row_y[r] = y;
+            y += h;
+        }
+        cache.row_y[self.data.rows.len()] = y;
+        cache.content_h = y + NEW_ROW_H * zoom;
+        cache.version = self.version;
+        cache.zoom = zoom;
+        self.view.layout = Some(cache);
+        snapshot.version = self.version;
+        self.restore_col_drag_snapshot(snapshot);
+        true
+    }
+
+    fn restore_col_drag_snapshot(&mut self, snapshot: ColDragSnapshot) {
+        if let Some(drag) = self.view.col_drag.as_mut() {
+            drag.snapshot = Some(snapshot);
+        }
+    }
+
+    /// 拖拽中的行高已写入数据后，就地更新该行高度与后续行位置（不整表重排）。
+    pub fn apply_row_drag_layout(&mut self, row_id: &str) -> bool {
+        let Some(ri) = self.data.rows.iter().position(|row| row.id == row_id) else {
+            return false;
+        };
+        let Some(height) = self.data.rows[ri].height else { return false };
+        let zoom = self.view.zoom;
+        let Some(cache) = self.view.layout.as_mut() else { return false };
+        if cache.row_h.len() != self.data.rows.len() || cache.row_y.len() != self.data.rows.len() + 1 {
+            return false;
+        }
+        let next_h = manual_row_height(height, zoom);
+        cache.row_h[ri] = next_h;
+        // 从该行末尾按行高前缀和重算后续位置：逐次 += delta 会在长拖拽中累积浮点漂移
+        let mut y = cache.row_y[ri] + next_h;
+        for r in (ri + 1)..cache.row_h.len() {
+            cache.row_y[r] = y;
+            y += cache.row_h[r];
+        }
+        cache.row_y[cache.row_h.len()] = y;
+        cache.content_h = y + NEW_ROW_H * zoom;
+        cache.version = self.version;
+        cache.zoom = zoom;
+        true
     }
 
     /// 在途草稿的即时行高：只重排被编辑行（手动行高的行保持原高；草稿实测不写换行缓存）。
@@ -254,7 +402,7 @@ impl TableSession {
             };
             content = content.max(h);
         }
-        let h = (content + 2.0 * CELL_PAD_Y * zoom).max(32.0 * zoom);
+        let h = auto_row_height(content, zoom);
         let delta = h - cache.row_h[ri];
         if delta.abs() < 0.01 {
             return;
@@ -304,21 +452,27 @@ pub struct TableViewState {
     pub redo: Vec<TableSnapshot>,
     /// 编辑会话（起稿快照 + 单元格）：提交有变化才入撤销栈，取消/无改动直接丢弃。
     pub edit_session: Option<EditSession>,
-    /// 轮播当前页（key = (row, field)）。
-    pub carousel: HashMap<(String, String), usize>,
+    /// 轮播当前页（行 id → 字段 id → 页）。
+    pub carousel: HashMap<String, HashMap<String, usize>>,
     pub images: HashMap<String, CachedImage>,
     pub image_inflight: HashSet<String>,
-    pub image_failed: HashSet<String>,
+    /// 加载失败时间（固定间隔重试；仍在可见区内也按间隔重试）。
+    pub image_failed: HashMap<String, Instant>,
     /// 缩略图纹理常驻登记（绘制时登记，见 [`ThumbPins`]）。
     pub pins: RefCell<ThumbPins>,
     pub lightbox: Option<Lightbox>,
     /// 上次按压（双击判定）。
     pub last_press: Option<(Instant, Point)>,
-    /// 画布尺寸（Press/Context 播种；Move/Release 期间的命中几何用）。
+    /// 最近一次交互窗口或视口上报的画布尺寸（命中几何用）。
     pub canvas_size: Size,
+    /// 最近一次重绘上报 / 指针事件播种的画布尺寸与来源窗口。
+    /// 前提：表格视图全局唯一（布局层的 view_occupied 保证同一视图不会同时占两个标签）。
+    pub canvas_viewport: Option<(iced::window::Id, Size)>,
     /// 画布在窗口中的原点与来源窗口（Press/Move 播种）：格式气泡据此把选区偏移换算成窗口锚点。
     /// 窗口不符（切窗 / 撕裂）或画布未收到过事件 = 锚点不成立，气泡不弹。
     pub canvas_origin: Option<(iced::window::Id, Point)>,
+    /// 布局重建计数：字号 / 字体 / 缩放等不改变数据版本的重建也据此让拖拽快照失效。
+    pub layout_epoch: u64,
     pub layout: Option<LayoutCache>,
     /// 编辑器浮层按压标志（全局 Press 的「点在编辑器内」判定；由编辑器的鼠标动作消息置位）。
     pub editor_inside: bool,
@@ -326,6 +480,28 @@ pub struct TableViewState {
     pub focused: bool,
     /// 本批按压来自表格面（画布或其菜单，不失焦；供全局 Press 区分；同事件批内 widget 消息先于 subscription 消息）。
     pub press_seen: bool,
+}
+
+impl TableViewState {
+    /// 轮播当前页（行 / 字段 id 查表；无记录 = 首页）。
+    pub fn carousel_index(&self, row_id: &str, field_id: &str) -> Option<usize> {
+        self.carousel.get(row_id)?.get(field_id).copied()
+    }
+
+    pub fn set_carousel_index(&mut self, row_id: &str, field_id: &str, index: usize) {
+        self.carousel.entry(row_id.to_string()).or_default().insert(field_id.to_string(), index);
+    }
+
+    /// 记录画布真实尺寸（重绘上报 / 指针事件）：表格视图全局唯一，最近一次即当前视口。
+    pub fn record_viewport(&mut self, window: iced::window::Id, size: Size) {
+        self.canvas_viewport = Some((window, size));
+        self.canvas_size = size;
+    }
+
+    /// 图片加载用的可见画布尺寸：当前视口；还没有任何上报时用交互尺寸。
+    pub fn viewport_size(&self) -> Size {
+        self.canvas_viewport.map(|(_, size)| size).unwrap_or(self.canvas_size)
+    }
 }
 
 #[derive(Clone)]
@@ -392,6 +568,18 @@ pub struct ColDrag {
     pub start_w: f64,
     /// 首次实际变化才入撤销栈（整段拖拽 = 一步）。
     pub pushed: bool,
+    /// 被拖列之外各行内容高度的快照：拖拽期间只重算被拖列，行高由快照取上限。
+    pub snapshot: Option<ColDragSnapshot>,
+}
+
+/// 列宽拖拽的行高快照（首次实际变化时建立，松手整表重建后丢弃）。
+pub struct ColDragSnapshot {
+    /// 除被拖列外每行内容高度的最大值（不含上下内衬；手动行高的行记为 0）。
+    pub other_max: Vec<f32>,
+    /// 快照对应的数据版本、缩放与布局重建计数：远端补丁 / 缩放 / 字号字体变化即失效。
+    pub version: u64,
+    pub zoom: f32,
+    pub layout_epoch: u64,
 }
 
 pub struct RowDrag {
@@ -430,11 +618,9 @@ pub struct SwipeState {
 #[derive(Clone)]
 pub struct CachedImage {
     pub fp: (u128, u64),
-    /// 原图句柄（灯箱按全分辨率绘制）。
-    pub handle: iced::widget::image::Handle,
     /// 单元格缩略图句柄（长边不超过 `THUMB_MAX_EDGE`，绘制即用它）。
     pub thumb: iced::widget::image::Handle,
-    /// 原图像素尺寸（contain 缩放与灯箱几何用；与 `handle` 解码所得一致）。
+    /// 原图像素尺寸（contain 缩放与灯箱几何用；与渲染层解码原图所得一致）。
     pub size: (f32, f32),
     /// 缩略图是否已绘制过（纹理已上传）。常驻登记以此为前提：登记只取分配、不触发上传。
     pub drawn: Cell<bool>,
@@ -446,7 +632,6 @@ impl CachedImage {
         let thumb = loaded.thumb;
         Self {
             fp,
-            handle: iced::widget::image::Handle::from_bytes(loaded.bytes),
             thumb: iced::widget::image::Handle::from_rgba(thumb.width, thumb.height, thumb.rgba),
             size: loaded.size,
             drawn: Cell::new(false),
@@ -454,10 +639,9 @@ impl CachedImage {
     }
 }
 
-/// 图片加载结果：原图字节（灯箱按需解码）与单元格缩略图。
+/// 图片加载结果：单元格缩略图（原图字节只在灯箱打开时另行读取，不随会话常驻）。
 #[derive(Clone)]
 pub struct LoadedImage {
-    pub bytes: Vec<u8>,
     pub size: (f32, f32),
     pub thumb: atelyx_core::image_thumb::Thumb,
 }
@@ -466,7 +650,6 @@ impl std::fmt::Debug for LoadedImage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LoadedImage")
             .field("size", &self.size)
-            .field("bytes", &self.bytes.len())
             .field("thumb", &self.thumb)
             .finish_non_exhaustive()
     }
@@ -579,11 +762,28 @@ pub struct Lightbox {
     pub drag: Option<Point>,
     /// 上次按压（双击复位判定）。
     pub last_press: Option<(Instant, Point)>,
+    /// 按需读取的原图句柄（打开 / 翻页时读取；关闭灯箱即释放）。
+    pub original: Option<iced::widget::image::Handle>,
+    /// 原图对应的仓库相对路径：数据变化后旧图不得盖在新缩略图上。
+    pub original_rel: Option<String>,
+    /// 原图读取失败原因（有缩略图时仍可继续看缩略图）。
+    pub original_error: Option<String>,
 }
 
 impl Lightbox {
     pub fn new(row_id: String, field_id: String, index: usize) -> Self {
-        Self { row_id, field_id, index, zoom: 1.0, pan: Vector::ZERO, drag: None, last_press: None }
+        Self {
+            row_id,
+            field_id,
+            index,
+            zoom: 1.0,
+            pan: Vector::ZERO,
+            drag: None,
+            last_press: None,
+            original: None,
+            original_rel: None,
+            original_error: None,
+        }
     }
 
     /// 回到适应窗口（双击复位 / 翻页）。
@@ -607,6 +807,8 @@ pub struct LayoutCache {
     pub content_h: f32,
     /// 本轮布局的断行结果（行高与绘制共用）。
     pub wrap: WrapCache,
+    /// 状态栏各列自动计算的结果（随数据版本重建）。
+    pub calc: Vec<Option<String>>,
 }
 
 // ===== 消息 =====
@@ -620,6 +822,8 @@ pub enum TableMsg {
     Context { window: iced::window::Id, pos: Point, size: Size },
     /// 画布内鼠标移动（携带画布尺寸与画布原点：首帧悬停即播种 canvas_size / canvas_origin）。
     Move { window: iced::window::Id, pos: Point, size: Size, origin: Point },
+    /// 重绘时上报的画布真实尺寸（打开 / 切标签 / 面板与窗口改尺寸；指针事件另会播种同尺寸）。
+    Viewport { window: iced::window::Id, size: Size },
     Release(Point),
     /// 滚轮（ctrl = 缩放，修饰态由 App.mods 维护）。
     Wheel { delta_y: f32, delta_x: f32 },
@@ -674,6 +878,12 @@ pub enum TableMsg {
     ImageImportPick { row_id: String, field_id: String },
     ImagesPicked { row_id: String, field_id: String, files: Vec<(String, Vec<u8>)> },
     ImageLoaded { rel: String, fp: (u128, u64), result: Result<LoadedImage, String> },
+    /// 灯箱原图按需读取回执（rel 对应当前灯箱图才落地）。
+    LightboxImageLoaded { rel: String, result: Result<Vec<u8>, String> },
+    /// 图片加载失败后的定时重试（一次性延时任务投递，不依赖 UI 心跳）。
+    RetryImages,
+    /// 灯箱原图读取失败后的定时重试。
+    LightboxRetry,
     ImagesWritten { row_id: String, field_id: String, rels: Vec<String>, failed: usize },
     LightboxClose,
     LightboxNav(i32),
@@ -804,7 +1014,11 @@ impl<'a> Geo<'a> {
         self.height - self.status_h()
     }
     /// 当前可见行范围（首/末行索引；绘制与图片播种共用，保证两口径一致）。
+    /// 行区没有露出（面板过矮）时返回空区间，避免调用方遍历全表。
     pub fn visible_rows(&self, total_rows: usize) -> (usize, usize) {
+        if total_rows == 0 || self.rows_viewport_bottom() <= self.header_h() {
+            return (1, 0);
+        }
         let first = self.row_at(self.content_y(self.header_h())).unwrap_or(0);
         let last = self
             .row_at(self.content_y(self.rows_viewport_bottom() - 1.0))
@@ -818,7 +1032,28 @@ impl<'a> Geo<'a> {
         local_x - self.gutter_w() + self.session.view.scroll_x
     }
     pub fn cols_w(&self) -> f32 {
-        self.cache.col_w.iter().sum()
+        // col_x 末项即各列宽累计和（无列时为 0），避免每次重绘线性求和
+        self.cache.col_x.last().copied().unwrap_or(0.0)
+    }
+    /// 当前可见列范围（含左右被面板边缘截断的列）；无列区（面板过窄）返回 None。
+    /// 绘制、图片加载与纹理常驻共用，避免横向滚动后仍处理不可见列。
+    pub fn visible_cols(&self, total_fields: usize) -> Option<(usize, usize)> {
+        if total_fields == 0 {
+            return None;
+        }
+        let cols_w = self.cols_w();
+        let left = self.content_x(self.gutter_w()).max(0.0);
+        let right = self.content_x(self.cols_viewport_right() - 1.0);
+        if right < 0.0 || left >= cols_w {
+            return None;
+        }
+        let first = self.col_at(left).unwrap_or(0);
+        let last = if right >= cols_w {
+            total_fields - 1
+        } else {
+            self.col_at(right)?
+        };
+        (first <= last).then_some((first, last.min(total_fields - 1)))
     }
     pub fn total_w(&self) -> f32 {
         self.cache.total_w
@@ -899,33 +1134,23 @@ impl<'a> Geo<'a> {
             thumb_h,
         ))
     }
+    /// 内容坐标 → 列下标（col_x 为累计起点，二分定位；内容右界外 = None）。
     pub fn col_at(&self, content_x: f32) -> Option<usize> {
         let n = self.cache.col_w.len();
         if content_x < 0.0 || n == 0 {
             return None;
         }
-        for c in 0..n {
-            let x0 = self.cache.col_x[c];
-            let x1 = x0 + self.cache.col_w[c];
-            if content_x < x1 {
-                return (content_x >= x0).then_some(c);
-            }
-        }
-        None
+        let index = self.cache.col_x.partition_point(|&x| x <= content_x).checked_sub(1)?;
+        (index < n).then_some(index)
     }
+    /// 内容坐标 → 行下标（row_y 为累计起点，二分定位；内容下界外 = None）。
     pub fn row_at(&self, content_y: f32) -> Option<usize> {
         let n = self.cache.row_h.len();
         if content_y < 0.0 || n == 0 {
             return None;
         }
-        for r in 0..n {
-            let y0 = self.cache.row_y[r];
-            let y1 = y0 + self.cache.row_h[r];
-            if content_y < y1 {
-                return (content_y >= y0).then_some(r);
-            }
-        }
-        None
+        let index = self.cache.row_y.partition_point(|&y| y <= content_y).checked_sub(1)?;
+        (index < n).then_some(index)
     }
 }
 
@@ -1030,6 +1255,16 @@ pub fn cell_rect(g: &Geo, r: usize, c: usize) -> Rectangle {
     let x = g.cache.col_x[c] - g.session.view.scroll_x + g.gutter_w();
     let y = g.cache.row_y[r] - g.session.view.scroll_y + g.header_h();
     Rectangle::new(Point::new(x, y), Size::new(g.cache.col_w[c], g.cache.row_h[r]))
+}
+
+/// 自动行高：内容高 + 上下内衬，不低于 32 逻辑像素（随缩放）。
+fn auto_row_height(content: f32, zoom: f32) -> f32 {
+    (content + 2.0 * CELL_PAD_Y * zoom).max(32.0 * zoom)
+}
+
+/// 手动行高：磁盘存量可能小于下限，读取侧同样钳到把手命中区，再随缩放。
+fn manual_row_height(height: f64, zoom: f32) -> f32 {
+    (height as f32).max(table_ops::MIN_ROW_HEIGHT as f32) * zoom
 }
 
 /// 单元格内容自然高度（不含上下内衬；image 区自带高度）。字号、字体与换行宽口径与绘制一致：
@@ -1296,6 +1531,101 @@ pub fn image_layout_of(cell: Rectangle, v: &serde_json::Value, zoom: f32, curren
     }
 }
 
+/// 灯箱当前图的仓库相对路径（与绘制同口径：越界索引钳到末页；图已删 = None）。
+pub fn lightbox_rel(session: &TableSession, lb: &Lightbox) -> Option<String> {
+    let entries = session
+        .data
+        .rows
+        .iter()
+        .find(|row| row.id == lb.row_id)?
+        .values
+        .get(&lb.field_id)
+        .map(table_ops::image_entries)?;
+    let index = lb.index.min(entries.len().checked_sub(1)?);
+    entries.get(index).map(|rel| (*rel).to_string())
+}
+
+/// 当前真正会画出来的图片引用（去重）：轮播当前页 + 可见队列缩略图、九宫格全部图块，
+/// 以及打开中的灯箱当前页。加载与纹理常驻都以此为准，不预载画不到的图。
+pub fn visible_image_rels(session: &TableSession, size: Size) -> Vec<String> {
+    if session.view.layout.is_none()
+        || !session.data.fields.iter().any(|field| field.field_type == "image")
+    {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    if size.width >= 1.0 && size.height >= 1.0 {
+        let g = geo(session, size);
+        let data = &session.data;
+        let view = &session.view;
+        // 面板太矮时 visible_rows 会回落成全表：先确认行区真的露出了一部分
+        let rows_fit = g.rows_viewport_bottom() > g.header_h();
+        let (first, last) = g.visible_rows(data.rows.len());
+        if rows_fit {
+            if let Some((c0, c1)) = g.visible_cols(data.fields.len()) {
+                for r in first..=last {
+                    let Some(row) = data.rows.get(r) else { continue };
+                    for c in c0..=c1 {
+                        let Some(field) = data.fields.get(c) else { continue };
+                        if field.field_type != "image" {
+                            continue;
+                        }
+                        let Some(value) = row.values.get(&field.id) else { continue };
+                        let images = table_ops::image_entries(value);
+                        if images.is_empty() {
+                            continue;
+                        }
+                        let current = view
+                            .carousel_index(&row.id, &field.id)
+                            .unwrap_or(0)
+                            .min(images.len() - 1);
+                        let layout = image_layout_of(cell_rect(&g, r, c), value, g.z, current);
+                        // 轮播主图 = 当前页；九宫格没有主图，图块在 tiles 里
+                        if layout.main.is_some() {
+                            let rel = images[current].to_string();
+                            if seen.insert(rel.clone()) {
+                                out.push(rel);
+                            }
+                        }
+                        // 滑动跟手时绘制相邻页，预载跟着带上
+                        let swiping = view.swipe.as_ref().is_some_and(|swipe| {
+                            swipe.row_id == row.id
+                                && swipe.field_id == field.id
+                                && swipe.dx != 0.0
+                        });
+                        if swiping {
+                            for offset in [-1i32, 1] {
+                                let page = current.checked_add_signed(offset as isize);
+                                let Some(page) = page else { continue };
+                                let Some(rel) = images.get(page) else { continue };
+                                if seen.insert((*rel).to_string()) {
+                                    out.push((*rel).to_string());
+                                }
+                            }
+                        }
+                        for (_, rel, _) in layout.thumbs.iter().chain(layout.tiles.iter()) {
+                            if seen.insert(rel.clone()) {
+                                out.push(rel.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if let Some(rel) = view_lightbox_rel(session) {
+        if seen.insert(rel.clone()) {
+            out.push(rel);
+        }
+    }
+    out
+}
+
+fn view_lightbox_rel(session: &TableSession) -> Option<String> {
+    session.view.lightbox.as_ref().and_then(|lightbox| lightbox_rel(session, lightbox))
+}
+
 // ===== 部件 =====
 
 /// 表格自绘部件（State = ()；全部会话态在 App.table.view）。
@@ -1359,7 +1689,26 @@ impl canvas::Program<Message> for TableView<'_> {
                     iced::mouse::ScrollDelta::Lines { x, y } => (x * WHEEL_LINE_PX, y * WHEEL_LINE_PX),
                     iced::mouse::ScrollDelta::Pixels { x, y } => (*x, *y),
                 };
-                Some(iced::widget::Action::publish(Message::Table(TableMsg::Wheel { delta_y: dy, delta_x: dx })))
+                Some(iced::widget::Action::publish(Message::Table(TableMsg::Wheel {
+                    delta_y: dy,
+                    delta_x: dx,
+                })))
+            }
+            // 画布真实尺寸只有重绘时拿得到：尺寸变了就上报，打开 / 切标签 / 改面板尺寸后
+            // 图片不必等鼠标事件才加载；表格视图全局唯一，同一窗口同一尺寸只上报一次，不会回环
+            Ev::Window(iced::window::Event::RedrawRequested(_)) => {
+                let size = bounds.size();
+                if size.width < 1.0 || size.height < 1.0 {
+                    return None;
+                }
+                let known = self
+                    .session
+                    .view
+                    .canvas_viewport
+                    .is_some_and(|known| known == (window, size));
+                (!known).then(|| {
+                    iced::widget::Action::publish(Message::Table(TableMsg::Viewport { window, size }))
+                })
             }
             _ => None,
         }
@@ -1476,20 +1825,7 @@ fn pin_visible_thumbs(session: &TableSession, renderer: &iced::Renderer, size: S
     if session.view.images.is_empty() || session.view.layout.is_none() {
         return;
     }
-    let g = geo(session, size);
-    let (first, last) = g.visible_rows(session.data.rows.len());
-    let mut visible: HashSet<String> = HashSet::new();
-    for r in first..=last {
-        let Some(row) = session.data.rows.get(r) else { continue };
-        for field in &session.data.fields {
-            if field.field_type != "image" {
-                continue;
-            }
-            if let Some(value) = row.values.get(&field.id) {
-                visible.extend(table_ops::image_entries(value).into_iter().map(str::to_string));
-            }
-        }
-    }
+    let visible: HashSet<String> = visible_image_rels(session, size).into_iter().collect();
     for rel in &visible {
         if session.view.pins.borrow().contains(rel) {
             continue;
@@ -1547,8 +1883,9 @@ fn draw_table(
         _ => {}
     }
 
-    // 可见行范围
+    // 可见行 / 列范围（横向不可见的列不参与遍历）
     let (first, last) = g.visible_rows(data.rows.len());
+    let cols = g.visible_cols(data.fields.len());
 
     for r in first..=last {
         let Some(row) = data.rows.get(r) else { continue };
@@ -1561,11 +1898,10 @@ fn draw_table(
         frame.fill_rectangle(Point::new(g.gutter_w(), y + rh - 1.0), Size::new(w - g.gutter_w(), 1.0), pal::BORDER_SUBTLE);
 
         // 各列
-        for (c, field) in data.fields.iter().enumerate() {
+        let Some((c0, c1)) = cols else { continue };
+        for c in c0..=c1 {
+            let Some(field) = data.fields.get(c) else { continue };
             let x = g.cache.col_x[c] - view.scroll_x + g.gutter_w();
-            if x > w || x + g.cache.col_w[c] < g.gutter_w() {
-                continue;
-            }
             let cell = rect(x, y, g.cache.col_w[c], rh);
             let st = table_ops::style_of(row, &field.id);
             if let Some(bg) = st.bg.as_deref().and_then(parse_hex) {
@@ -1886,18 +2222,21 @@ fn draw_image_buttons(session: &TableSession, g: &Geo, frame: &mut canvas::Frame
     let view = &session.view;
     let data = &session.data;
     let (first, last) = g.visible_rows(data.rows.len());
+    let cols = g.visible_cols(data.fields.len());
     for r in first..=last {
         let y = g.cache.row_y[r] - view.scroll_y + g.header_h();
         let rh = g.cache.row_h[r];
         if y + rh < g.header_h() || y > g.rows_bottom() || !(y..y + rh).contains(&pos.y) {
             continue;
         }
-        for (c, field) in data.fields.iter().enumerate() {
+        let Some((c0, c1)) = cols else { continue };
+        for c in c0..=c1 {
+            let Some(field) = data.fields.get(c) else { continue };
             if field.field_type != "image" {
                 continue;
             }
             let x = g.cache.col_x[c] - view.scroll_x + g.gutter_w();
-            if x > g.width || x + g.cache.col_w[c] < g.gutter_w() || !(x..x + g.cache.col_w[c]).contains(&pos.x) {
+            if !(x..x + g.cache.col_w[c]).contains(&pos.x) {
                 continue;
             }
             let empty = serde_json::json!({ "images": [] });
@@ -1906,11 +2245,7 @@ fn draw_image_buttons(session: &TableSession, g: &Geo, frame: &mut canvas::Frame
                 continue;
             }
             let row = &data.rows[r];
-            let idx = view
-                .carousel
-                .get(&(row.id.clone(), field.id.clone()))
-                .copied()
-                .unwrap_or(0);
+            let idx = view.carousel_index(&row.id, &field.id).unwrap_or(0);
             let layout = image_layout_of(rect(x, y, g.cache.col_w[c], rh), v, g.z, idx);
             if let Some(btn) = layout.mode_btn {
                 circle_btn(frame, btn, "columns-2");
@@ -1966,31 +2301,37 @@ fn draw_header(session: &TableSession, g: &Geo, frame: &mut canvas::Frame) {
     let h = g.header_h();
     let font_size = num_font() * g.z;
     draw_icon(frame, "maximize-2", Point::new(g.gutter_w() / 2.0 - 5.0 * g.z, (h - 10.0 * g.z) / 2.0), 10.0 * g.z, pal::TEXT_MUTED);
-    for (c, field) in session.data.fields.iter().enumerate() {
-        let x = g.cache.col_x[c] - view.scroll_x + g.gutter_w();
-        let w = g.cache.col_w[c];
-        if x > g.width || x + w < g.gutter_w() {
-            continue;
+    if let Some((c0, c1)) = g.visible_cols(session.data.fields.len()) {
+        for c in c0..=c1 {
+            let Some(field) = session.data.fields.get(c) else { continue };
+            let x = g.cache.col_x[c] - view.scroll_x + g.gutter_w();
+            let w = g.cache.col_w[c];
+            let col_selected = matches!(&view.selection, Some(TableSelection::Column(id)) if &field.id == id);
+            if col_selected {
+                frame.fill_rectangle(Point::new(x, 0.0), Size::new(w, h), pal::ACCENT_SOFT);
+            }
+            let name = ellipsize_text(&field.name, w - 2.0 * CELL_PAD_X * g.z - FIELD_BTN_W * g.z, font_size);
+            fill_text(
+                frame,
+                &name,
+                Point::new(x + CELL_PAD_X * g.z, (h - font_size * LINE_FACTOR) / 2.0),
+                font_size,
+                ui_font(),
+                pal::TEXT_SECONDARY,
+            );
+            // ⋮ 居于菜单命中区（右缘 18px 内、避开 8px 拖宽把手）
+            draw_icon(frame, "ellipsis", Point::new(x + w - FIELD_BTN_W * g.z + (FIELD_BTN_W * g.z - 11.0 * g.z) / 2.0 - 4.0 * g.z, (h - 11.0 * g.z) / 2.0), 11.0 * g.z, pal::TEXT_MUTED);
+            frame.fill_rectangle(Point::new(x + w - 1.0, 0.0), Size::new(1.0, h), pal::BORDER);
+            frame.fill_rectangle(Point::new(x + w - COL_HANDLE_W * g.z, h - 3.0 * g.z), Size::new(COL_HANDLE_W * g.z, 3.0 * g.z), pal::ACCENT.scale_alpha(0.5));
+            frame.fill_rectangle(Point::new(x, h - 1.0), Size::new(w, 1.0), pal::BORDER);
         }
-        let col_selected = matches!(&view.selection, Some(TableSelection::Column(id)) if &session.data.fields[c].id == id);
-        if col_selected {
-            frame.fill_rectangle(Point::new(x, 0.0), Size::new(w, h), pal::ACCENT_SOFT);
-        }
-        let name = ellipsize_text(&field.name, w - 2.0 * CELL_PAD_X * g.z - FIELD_BTN_W * g.z, font_size);
-        fill_text(
-            frame,
-            &name,
-            Point::new(x + CELL_PAD_X * g.z, (h - font_size * LINE_FACTOR) / 2.0),
-            font_size,
-            ui_font(),
-            pal::TEXT_SECONDARY,
-        );
-        // ⋮ 居于菜单命中区（右缘 18px 内、避开 8px 拖宽把手）
-        draw_icon(frame, "ellipsis", Point::new(x + w - FIELD_BTN_W * g.z + (FIELD_BTN_W * g.z - 11.0 * g.z) / 2.0 - 4.0 * g.z, (h - 11.0 * g.z) / 2.0), 11.0 * g.z, pal::TEXT_MUTED);
-        frame.fill_rectangle(Point::new(x + w - 1.0, 0.0), Size::new(1.0, h), pal::BORDER);
-        frame.fill_rectangle(Point::new(x + w - COL_HANDLE_W * g.z, h - 3.0 * g.z), Size::new(COL_HANDLE_W * g.z, 3.0 * g.z), pal::ACCENT.scale_alpha(0.5));
-        frame.fill_rectangle(Point::new(x, h - 1.0), Size::new(w, 1.0), pal::BORDER);
     }
+    draw_add_field_col(g, frame, view, h);
+    frame.fill_rectangle(Point::new(0.0, h - 1.0), Size::new(g.width, 1.0), pal::BORDER);
+}
+
+/// 表头右端的「添加字段」列（贴在最后可见列之后）。
+fn draw_add_field_col(g: &Geo, frame: &mut canvas::Frame, view: &TableViewState, h: f32) {
     let add_x = g.gutter_w() + g.cols_w() - view.scroll_x;
     if add_x < g.width {
         frame.fill_rectangle(Point::new(add_x, 0.0), Size::new(g.add_col_w(), h), pal::BG_SECONDARY);
@@ -1998,7 +2339,6 @@ fn draw_header(session: &TableSession, g: &Geo, frame: &mut canvas::Frame) {
         frame.fill_rectangle(Point::new(add_x - 1.0, 0.0), Size::new(1.0, h), pal::BORDER);
         frame.fill_rectangle(Point::new(add_x + g.add_col_w() - 1.0, 0.0), Size::new(1.0, h), pal::BORDER);
     }
-    frame.fill_rectangle(Point::new(0.0, h - 1.0), Size::new(g.width, 1.0), pal::BORDER);
 }
 
 /// 状态栏：Σ 角格 + 各列计算值。
@@ -2006,13 +2346,15 @@ fn draw_status(session: &TableSession, g: &Geo, frame: &mut canvas::Frame) {
     let y = g.rows_bottom();
     let h = g.status_h();
     draw_icon(frame, "sigma", Point::new((g.gutter_w() - 13.0 * g.z) / 2.0, y + (h - 13.0 * g.z) / 2.0), 13.0 * g.z, pal::TEXT_MUTED);
-    for (c, field) in session.data.fields.iter().enumerate() {
+    let Some((c0, c1)) = g.visible_cols(session.data.fields.len()) else {
+        frame.fill_rectangle(Point::new(0.0, y), Size::new(g.width, 1.0), pal::BORDER);
+        return;
+    };
+    for c in c0..=c1 {
+        let Some(field) = session.data.fields.get(c) else { continue };
+        let Some(calc) = g.cache.calc.get(c).and_then(|value| value.as_deref()) else { continue };
         let x = g.cache.col_x[c] - session.view.scroll_x + g.gutter_w();
         let w = g.cache.col_w[c];
-        if x > g.width || x + w < g.gutter_w() {
-            continue;
-        }
-        let Some(calc) = table_ops::compute_column_calc(field, &session.data.rows) else { continue };
         let label = format!("{} {}", table_ops::calc_type_label(field.calc_type.as_deref().unwrap_or("")), calc);
         let size = num_font() * g.z;
         let text = ellipsize_text(&label, w - 2.0 * CELL_PAD_X * g.z, size);
@@ -2144,9 +2486,7 @@ fn draw_image_cell(
     let row = &session.data.rows[r];
     let images = table_ops::image_entries(v);
     let idx = view
-        .carousel
-        .get(&(row.id.clone(), field.id.clone()))
-        .copied()
+        .carousel_index(&row.id, &field.id)
         .unwrap_or(0)
         .min(images.len().saturating_sub(1));
     let layout = image_layout_of(cell, v, g.z, idx);
@@ -2904,9 +3244,15 @@ impl canvas::Program<Message> for LightboxCanvas<'_> {
         }
         let mut frame = canvas::Frame::new(renderer, bounds.size());
         let rect = lightbox_rect(bounds.size(), (w, h), self.lb.zoom, self.lb.pan);
-        // 原图解码未完成时先铺缩略图（同矩形；原图就绪后覆盖其上）
-        for handle in [cached.thumb.clone(), cached.handle.clone()] {
-            frame.draw_image(rect, iced::advanced::image::Image::new(handle));
+        // 缩略图先出图；原图按需读取就绪后覆盖其上（同一矩形，无需等待解码）。
+        // 只画与当前图同路径的原图：数据被替换后旧原图不得盖在新缩略图上。
+        cached.drawn.set(true);
+        frame.draw_image(rect, iced::advanced::image::Image::new(cached.thumb.clone()));
+        let current = lightbox_rel(self.session, self.lb);
+        if self.lb.original_rel.as_deref() == current.as_deref() {
+            if let Some(original) = &self.lb.original {
+                frame.draw_image(rect, iced::advanced::image::Image::new(original.clone()));
+            }
         }
         vec![frame.into_geometry()]
     }
@@ -2971,7 +3317,35 @@ fn lightbox_overlay<'a>(
     if empty {
         stack = stack.push(lightbox_placeholder("图片已清空"));
     } else if lightbox_image(session, lb).is_none() {
-        stack = stack.push(lightbox_placeholder("图片加载中"));
+        let failed = lightbox_rel(session, lb)
+            .is_some_and(|rel| session.view.image_failed.contains_key(&rel));
+        stack = stack.push(lightbox_placeholder(if failed {
+            "图片加载失败，重试中"
+        } else {
+            "图片加载中"
+        }));
+    }
+    if let Some(error) = &lb.original_error {
+        // 原图按需读取失败：继续显示已就绪的缩略图，同时给出可读状态（不静默）
+        let badge = container(
+            text(format!("原图读取失败：{error}"))
+                .size(pal::fs_micro())
+                .color(pal::TEXT_SECONDARY),
+        )
+        .padding(iced::Padding::ZERO.horizontal(pal::VIEWPORT_GAP).vertical(pal::VIEWPORT_GAP))
+        .style(|_t| iced::widget::container::Style {
+            background: Some(pal::BG_OVERLAY.into()),
+            border: iced::border::rounded(pal::RADIUS_SM).color(pal::BORDER).width(1.0),
+            ..Default::default()
+        });
+        stack = stack.push(
+            container(badge)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(alignment::Horizontal::Left)
+                .align_y(alignment::Vertical::Top)
+                .padding(pal::VIEWPORT_GAP),
+        );
     }
     if multi {
         let nav_btn = |name: &'static str, msg: Message| -> Element<'static, Message> {
@@ -3283,6 +3657,9 @@ mod tests {
             pan: Vector::ZERO,
             drag: None,
             last_press: None,
+            original: None,
+            original_rel: None,
+            original_error: None,
         });
         assert!(bar_placement(&s, window, viewport).is_none(), "灯箱预览期间不弹");
         let mut s = bar_session(window, origin, "r0");
@@ -3333,6 +3710,7 @@ mod tests {
             row_y: vec![0.0, 32.0],
             content_h,
             wrap: Default::default(),
+            calc: Vec::new(),
         });
         s
     }
@@ -3421,5 +3799,236 @@ mod tests {
             "滚到底条带须在行区视口内"
         );
         assert!(matches!(hit_at(&g, Point::new(100.0, strip_top + strip_h / 2.0)), Hit::NewRow));
+    }
+
+    /// 首帧重绘上报一次画布尺寸；同一窗口同一尺寸不重复发布（避免重绘回环）。
+    #[test]
+    fn redraw_reports_canvas_viewport_once() {
+        let mut s = text_session(&["短"]);
+        let window = iced::window::Id::unique();
+        let bounds = Rectangle::new(Point::ORIGIN, Size::new(640.0, 480.0));
+        let event =
+            canvas::Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now()));
+        let mut state = ();
+        let view = TableView { session: &s, window, remote: &[] };
+        let action = canvas::Program::update(
+            &view,
+            &mut state,
+            &event,
+            bounds,
+            iced::mouse::Cursor::Unavailable,
+        )
+        .expect("首帧重绘应上报视口");
+        match action.into_inner().0 {
+            Some(Message::Table(TableMsg::Viewport { window: reported, size })) => {
+                assert_eq!(reported, window);
+                assert_eq!(size, bounds.size());
+            }
+            _ => panic!("首帧重绘应发布视口消息"),
+        }
+        s.view.record_viewport(window, bounds.size());
+        let view = TableView { session: &s, window, remote: &[] };
+        assert!(
+            canvas::Program::update(
+                &view,
+                &mut state,
+                &event,
+                bounds,
+                iced::mouse::Cursor::Unavailable,
+            )
+            .is_none(),
+            "同一尺寸不重复上报"
+        );
+    }
+
+    fn test_field(id: &str, name: &str, field_type: &str, width: f64) -> TableField {
+        TableField {
+            id: id.to_string(),
+            name: name.to_string(),
+            field_type: field_type.to_string(),
+            options: None,
+            width: Some(width),
+            calc_type: None,
+        }
+    }
+
+    fn test_row(id: &str, values: serde_json::Map<String, serde_json::Value>) -> TableRow {
+        TableRow { id: id.to_string(), values, height: None, styles: None }
+    }
+
+    fn session_with(fields: Vec<TableField>, rows: Vec<TableRow>) -> TableSession {
+        TableSession::new(
+            "t.atb".to_string(),
+            TableFile {
+                schema: String::new(),
+                id: "t".to_string(),
+                title: String::new(),
+                fields,
+                rows,
+                created_at: 0,
+                updated_at: 0,
+            },
+        )
+    }
+
+    /// 图片只取当前真正画出来的：横向不可见列不加载，同路径去重。
+    #[test]
+    fn visible_images_follow_drawn_cells_and_columns() {
+        let fields = vec![
+            test_field("f1", "名称", "text", 120.0),
+            test_field("f2", "图集", "image", 120.0),
+            test_field("f3", "备注", "text", 120.0),
+            test_field("f4", "封面", "image", 120.0),
+        ];
+        let mut values = serde_json::Map::new();
+        values.insert("f1".to_string(), serde_json::json!("名"));
+        values.insert("f2".to_string(), serde_json::json!({ "images": ["a.png", "b.png"] }));
+        values.insert("f3".to_string(), serde_json::json!("注"));
+        values.insert("f4".to_string(), serde_json::json!({ "images": ["a.png"] }));
+        let mut s = session_with(fields, vec![test_row("r0", values)]);
+
+        let wide = visible_image_rels(&s, Size::new(760.0, 300.0));
+        assert_eq!(wide, vec!["a.png".to_string(), "b.png".to_string()]);
+
+        // 横向滚到第二列：只看见图集列，同一路径跨格不重复
+        s.view.scroll_x = 120.0;
+        let mid = visible_image_rels(&s, Size::new(260.0, 300.0));
+        assert_eq!(mid, vec!["a.png".to_string(), "b.png".to_string()]);
+
+        // 只露出第一列（文本列）：不加载任何图片
+        s.view.scroll_x = 0.0;
+        assert!(visible_image_rels(&s, Size::new(120.0, 300.0)).is_empty());
+    }
+
+    /// 行 / 列命中按累计起点二分：边界归下一行 / 下一列，内容末尾之外 = None。
+    #[test]
+    fn row_and_column_hit_follow_cumulative_bounds() {
+        let s = text_session(&["a", "b", "c"]);
+        let g = geo(&s, Size::new(800.0, 600.0));
+        assert_eq!(g.row_at(-1.0), None);
+        assert_eq!(g.row_at(0.0), Some(0));
+        assert_eq!(g.row_at(31.99), Some(0));
+        assert_eq!(g.row_at(32.0), Some(1));
+        assert_eq!(g.row_at(95.99), Some(2));
+        assert_eq!(g.row_at(96.0), None);
+        assert_eq!(g.col_at(0.0), Some(0));
+        assert_eq!(g.col_at(119.99), Some(0));
+        assert_eq!(g.col_at(120.0), None);
+    }
+
+    /// 状态栏计算随布局重建：编辑后计数即时变，不靠绘制时重算。
+    #[test]
+    fn layout_calc_cache_tracks_data_version() {
+        let mut s = text_session(&["a", "b", "c"]);
+        s.data.fields[0].calc_type = Some("count".to_string());
+        s.rebuild_layout();
+        assert_eq!(s.view.layout.as_ref().unwrap().calc[0].as_deref(), Some("3"));
+        s.data.rows[0].values.insert("f1".to_string(), serde_json::json!(""));
+        s.touch();
+        assert_eq!(s.view.layout.as_ref().unwrap().calc[0].as_deref(), Some("2"));
+    }
+
+    fn layout_facts(s: &TableSession) -> (Vec<f32>, Vec<f32>, f32, Vec<f32>, Vec<f32>, f32) {
+        let layout = s.view.layout.as_ref().expect("布局缓存");
+        (
+            layout.col_w.clone(),
+            layout.col_x.clone(),
+            layout.total_w,
+            layout.row_h.clone(),
+            layout.row_y.clone(),
+            layout.content_h,
+        )
+    }
+
+    /// 列宽拖拽的增量布局与松手后的整表重建同结果（被拖列短、未拖列长文本决定行高）。
+    #[test]
+    fn column_drag_layout_matches_full_rebuild() {
+        let long = "需要折行的很长很长很长很长很长很长很长很长很长的一段中文正文";
+        let fields = vec![
+            test_field("f1", "正文", "text", 120.0),
+            test_field("f2", "备注", "text", 120.0),
+        ];
+        let mut rows = Vec::new();
+        for i in 0..3 {
+            let mut values = serde_json::Map::new();
+            values.insert("f1".to_string(), serde_json::json!(long));
+            values.insert("f2".to_string(), serde_json::json!("短"));
+            rows.push(test_row(&format!("r{i}"), values));
+        }
+        let mut s = session_with(fields, rows);
+        let snapshot = s.col_drag_snapshot("f2").expect("布局存在");
+        s.view.col_drag = Some(ColDrag {
+            field_id: "f2".to_string(),
+            start_x: 0.0,
+            start_w: 120.0,
+            pushed: true,
+            snapshot: Some(snapshot),
+        });
+        assert!(table_ops::set_field_width(&mut s.data, "f2", Some(180.0)));
+        s.touch_data_only();
+        assert!(s.apply_col_drag_layout(), "快照有效时走增量布局");
+        let incremental = layout_facts(&s);
+        // 松手后拖拽态已清：重建走实测口径，对拍增量结果
+        s.view.col_drag = None;
+        s.rebuild_layout();
+        assert_eq!(incremental, layout_facts(&s), "增量结果与整表重建一致");
+    }
+
+    /// 字号 / 字体等不改变数据版本的重建也要让拖拽快照失效。
+    #[test]
+    fn column_drag_snapshot_invalidated_by_rebuild() {
+        let mut s = text_session(&["长文本"]);
+        let snapshot = s.col_drag_snapshot("f1").expect("布局存在");
+        let before = snapshot.layout_epoch;
+        s.rebuild_layout();
+        assert_ne!(before, s.view.layout_epoch, "重建后快照应失效");
+    }
+
+    /// 行高拖拽的增量布局与整表重建同结果（只移动该行之后的行位置）。
+    #[test]
+    fn row_drag_layout_matches_full_rebuild() {
+        let mut s = text_session(&["a", "b", "c"]);
+        assert!(table_ops::set_row_height(&mut s.data, "r0", Some(80.0)));
+        s.touch_data_only();
+        assert!(s.apply_row_drag_layout("r0"));
+        let incremental = layout_facts(&s);
+        s.rebuild_layout();
+        assert_eq!(incremental, layout_facts(&s), "行高增量结果与整表重建一致");
+    }
+
+    /// 连续多步行高拖拽不累积浮点漂移：逐步增量结果与一次整表重建一致。
+    #[test]
+    fn row_drag_steps_match_full_rebuild() {
+        let mut s = text_session(&["a", "b", "c"]);
+        for step in 0..20 {
+            let h = 40.0 + (step as f64) * 3.0;
+            assert!(table_ops::set_row_height(&mut s.data, "r0", Some(h)));
+            s.touch_data_only();
+            assert!(s.apply_row_drag_layout("r0"));
+        }
+        let incremental = layout_facts(&s);
+        s.view.col_drag = None;
+        s.rebuild_layout();
+        assert_eq!(incremental, layout_facts(&s), "连续拖拽结果与整表重建一致");
+    }
+
+    /// 灯箱索引越界（远端删图 / 陈旧轮播页）时与绘制同口径钳到末页，复制 / 原图读取不空转。
+    #[test]
+    fn lightbox_rel_clamps_stale_index() {
+        let fields = vec![test_field("f1", "图集", "image", 120.0)];
+        let mut values = serde_json::Map::new();
+        values.insert("f1".to_string(), serde_json::json!({ "images": ["a.png", "b.png"] }));
+        let s = session_with(fields, vec![test_row("r0", values)]);
+        let lb = Lightbox::new("r0".to_string(), "f1".to_string(), 9);
+        assert_eq!(lightbox_rel(&s, &lb).as_deref(), Some("b.png"));
+    }
+
+    /// 表格视图唯一：新窗口的上报替换旧条目，不保留陈旧的大尺寸。
+    #[test]
+    fn viewport_report_replaces_previous_window() {
+        let mut s = text_session(&["短"]);
+        s.view.record_viewport(iced::window::Id::unique(), Size::new(800.0, 600.0));
+        s.view.record_viewport(iced::window::Id::unique(), Size::new(400.0, 300.0));
+        assert_eq!(s.view.viewport_size(), Size::new(400.0, 300.0));
     }
 }
