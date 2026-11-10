@@ -26,7 +26,7 @@ pub enum EditOp {
     Note(NoteOp),
     Table(Vec<TableOp>),
     Canvas(Vec<CanvasOp>),
-    /// 改名 / 移动 / 删除：壳先 flush 再动磁盘，打开中的面随 `FollowUp` 收尾。
+    /// 改名 / 移动 / 删除：壳先 flush 再动磁盘，动盘成功后按 `FollowUp` 收尾打开中的面。
     Fs(FsOp),
 }
 
@@ -191,7 +191,7 @@ impl AiEditHost for ShellEditHost {
     }
 
     fn apply_fs(&self, op: FsOp, actor: &EditActor) -> EditFuture<'_> {
-        // 路径只用于请求日志与作废判定；真正的动盘与收尾在壳 update 内完成
+        // 请求体仍按操作类型带路径（总线按路径做在途去重与日志）；动盘与收尾在壳 update 内完成
         let path = match &op {
             FsOp::Move { from, .. } => from.clone(),
             FsOp::Delete { path, .. } => path.clone(),
@@ -287,9 +287,9 @@ fn apply_local_note(
         space_actions::apply_remote_text(app, merged.clone());
     }
     if open {
-        // 基线只在落盘回执里推进（见 on_done）：这里提前推进会让写盘失败后的下一次编辑
-        // 把「上次 AI 写入未落盘」误判成外部改动
-        app.dirty = false;
+        // 脏标记与基线都只在落盘回执里结算（见 on_done）：提前清脏会让写盘失败后界面显示「已保存」。
+        // 写入在途期间按「当前正文 vs 上次落盘基线」置脏，脏拦截（切文件 / 关窗）才会等这次写入。
+        app.dirty = app.note_text != app.note_base;
         app.save_error = None;
     }
     let editor = editor_of(&actor);
@@ -411,9 +411,9 @@ fn apply_space_note(
         if merged != app.note_text {
             space_actions::apply_remote_text(app, merged.clone());
         }
-        // 与人工输入同一条路：协作文档增量上行，打开者实时看到 AI 修改
-        space_actions::collab_after_edit(app);
-        app.dirty = false;
+        // 写入在途期间按「当前正文 vs 上次落盘基线」置脏，失败由回执恢复
+        let flushed = app.space_note_flushed.clone().unwrap_or_default();
+        app.dirty = app.note_text != flushed;
         app.save_error = None;
     }
     let summary = atelyx_core::history::version_summary(HistoryKind::Note, &source, &merged);
@@ -570,6 +570,8 @@ pub fn on_done(
         None => {
             if matches!(app.repo_kind, RepoKind::Space(_)) && is_open_note {
                 app.space_note_flushed = Some(content);
+                // 落盘成功才上行 CRDT 增量：PUT 被拒时对端不得先看到服务端没有的正文
+                space_actions::collab_after_edit(app);
             }
             // AI 落盘属宿主发起的写入：与人工保存同口径通知插件
             app.plugins
