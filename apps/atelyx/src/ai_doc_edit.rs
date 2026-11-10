@@ -411,23 +411,12 @@ fn apply_space_table_from_server(
     iced::Task::perform(
         async move {
             let outcome: Result<(String, TableFile, String), String> = async {
-                // 服务端还没有这个文件 = 本次创建：先落空模型，再按补丁上行
-                let base = match client.get_file_text(&space_id, &rel).await {
-                    Ok(text) => parse_table(&text)?,
-                    Err(SpaceError::NotFound) => {
-                        let created =
-                            atelyx_core::table_ops::new_table_file(&crate::layout_view::file_label(&rel));
-                        let json = serde_json::to_string_pretty(&created)
-                            .map_err(|e| e.to_string())?;
-                        client
-                            .put_file_text(&space_id, &rel, &json)
-                            .await
-                            .map_err(|e| format!("新建表格失败：{e}"))?;
-                        created
-                    }
-                    Err(e) => return Err(format!("表格不存在或不可读：{e}")),
-                };
                 let title = doc_edit::file_label(&rel);
+                // 服务端还没有这个文件 = 本次创建：先落空模型，再按补丁上行
+                let base = match doc_edit::read_space::<TableFile>(&client, &space_id, &rel).await? {
+                    Some(model) => model,
+                    None => doc_edit::create_space::<TableFile>(&client, &space_id, &rel, &title).await?,
+                };
                 let updated_at = crate::now_secs() as i64;
                 let planned = match doc_edit::plan(&base, &base, &ops, &title, updated_at) {
                     Ok(planned) => planned,
@@ -611,22 +600,12 @@ fn apply_space_canvas_from_server(
     iced::Task::perform(
         async move {
             let outcome: Result<(String, CanvasFile, String), String> = async {
-                // 服务端还没有这个文件 = 本次创建：先落空模型，再按补丁上行
-                let base = match client.get_file_text(&space_id, &rel).await {
-                    Ok(text) => parse_canvas(&text)?,
-                    Err(SpaceError::NotFound) => {
-                        let created = atelyx_core::table_ops::new_canvas_file(&crate::layout_view::file_label(&rel));
-                        let json = serde_json::to_string_pretty(&created)
-                            .map_err(|e| e.to_string())?;
-                        client
-                            .put_file_text(&space_id, &rel, &json)
-                            .await
-                            .map_err(|e| format!("新建画布失败：{e}"))?;
-                        created
-                    }
-                    Err(e) => return Err(format!("画布不存在或不可读：{e}")),
-                };
                 let title = doc_edit::file_label(&rel);
+                // 服务端还没有这个文件 = 本次创建：先落空模型，再按补丁上行
+                let base = match doc_edit::read_space::<CanvasFile>(&client, &space_id, &rel).await? {
+                    Some(model) => model,
+                    None => doc_edit::create_space::<CanvasFile>(&client, &space_id, &rel, &title).await?,
+                };
                 let updated_at = crate::now_secs() as i64;
                 let planned = match doc_edit::plan(&base, &base, &ops, &title, updated_at) {
                     Ok(planned) => planned,
@@ -807,23 +786,6 @@ fn base_json<T: serde::Serialize>(model: &T) -> String {
     serde_json::to_string(model).unwrap_or_default()
 }
 
-fn parse_table(text: &str) -> Result<TableFile, String> {
-    let table: TableFile =
-        serde_json::from_str(text).map_err(|e| format!("表格解析失败：{e}"))?;
-    if table.schema != atelyx_core::vault::TABLE_SCHEMA {
-        return Err(format!("表格 schema 不匹配：{}", table.schema));
-    }
-    Ok(table)
-}
-
-fn parse_canvas(text: &str) -> Result<CanvasFile, String> {
-    let canvas: CanvasFile =
-        serde_json::from_str(text).map_err(|e| format!("画布解析失败：{e}"))?;
-    if canvas.schema != atelyx_core::vault::CANVAS_SCHEMA {
-        return Err(format!("画布 schema 不匹配：{}", canvas.schema));
-    }
-    Ok(canvas)
-}
 
 /// 画布补丁受影响实体（新增 / 修改节点与连线，按补丁顺序）：
 /// 从合入后模型里取本次新增的稳定 id，供回执告诉模型后续操作可用的 id。
