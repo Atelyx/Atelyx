@@ -1142,6 +1142,12 @@ fn update_inner(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
             match result {
                 Ok(attachments) => plugin_chat_send_now(app, *plan, space_prompt, attachments),
                 Err(e) => {
+                    // 归档失败 = 本条消息未发出：本次新建的会话（无消息）一并回收，不留空会话
+                    if let Some(session_id) = &plan.created_session {
+                        if let Err(cleanup) = delete_session_now(app, session_id) {
+                            app.notify(crate::NoticeLevel::Warning, format!("空会话回收失败：{cleanup}"));
+                        }
+                    }
                     app.plugins.resolve_shell_call(plan.request_id, Err(e));
                     iced::Task::none()
                 }
@@ -2447,6 +2453,8 @@ pub struct PluginSendPlan {
     params: ChatSendParams,
     /// 插件指定的模型（供应商 id + 模型 id）；None = 面板当前选择。
     pick: Option<(String, String)>,
+    /// 本次发送新建的会话 id（后续步骤失败时据此回收，避免留空会话）。
+    created_session: Option<String>,
 }
 
 /// 空间前置结果：Agent 提示词正文（无提示词 = None）与已确认存在的图片附件元数据。
@@ -2526,7 +2534,13 @@ fn plugin_chat_send(
             .find(|a| &a.id == id)
             .and_then(|a| a.system_prompt_file.clone())
     });
-    let plan = PluginSendPlan { request_id, plugin_id: plugin_id.to_string(), params, pick };
+    let plan = PluginSendPlan {
+        request_id,
+        plugin_id: plugin_id.to_string(),
+        params,
+        pick,
+        created_session: None,
+    };
     if !matches!(app.repo_kind, RepoKind::Space(_)) {
         return match local_image_attachments(app, entries) {
             Ok(attachments) => plugin_chat_send_now(app, plan, None, attachments),
@@ -2662,14 +2676,14 @@ fn resolve_plugin_session(
     app: &mut App,
     plan: &PluginSendPlan,
     deny: &impl Fn(&App, String),
-) -> Option<String> {
+) -> Option<(String, bool)> {
     match plan.params.session_id.clone() {
         Some(id) => {
             if store().session_meta(&id).is_none() {
                 deny(app, format!("会话 {id} 不存在"));
                 return None;
             }
-            Some(id)
+            Some((id, false))
         }
         None => {
             let id = uuid_v4();
@@ -2694,7 +2708,7 @@ fn resolve_plugin_session(
             }
             app.chat.refresh_session(&id);
             app.plugins.on_chat_changed(&id, ChatChangeKind::Created);
-            Some(id)
+            Some((id, true))
         }
     }
 }
@@ -2790,8 +2804,13 @@ fn plugin_chat_send_now(
             return iced::Task::none();
         }
     };
+    let mut plan = plan;
     let session_id = match resolve_plugin_session(app, &plan, &deny) {
-        Some(id) => id,
+        Some((id, created)) => {
+            // 本次新建的会话记在计划里：后续步骤失败时据此回收，不留空会话
+            plan.created_session = created.then(|| id.clone());
+            id
+        }
         None => return iced::Task::none(),
     };
     // 插件暂存的图片先进会话附件目录：消息只引用会话目录，插件自己的临时区随之不再被引用
