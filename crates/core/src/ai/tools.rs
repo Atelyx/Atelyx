@@ -1559,19 +1559,22 @@ async fn table_edit(ctx: &ToolCtx, args: &Value) -> ToolResult {
     let receipt = format!("已编辑 {rel}（{} 项操作：{summary}）", ops.len());
     match &ctx.repo {
         RepoAccess::Local { root, queue } => {
-            // 新建表格的父目录可能还不存在：写路径按建父目录取绝对路径
-            let path = match vault::safe_join(root, &rel, true) {
-                Ok(path) => path,
-                Err(e) => return ToolResult::err(e),
-            };
-            let Ok(json) = serde_json::to_string_pretty(&next) else {
-                return ToolResult::err("表格序列化失败".to_string());
-            };
-            queue
-                .write(path, json)
-                .await
-                .map(|_| ToolResult::ok(receipt))
-                .unwrap_or_else(|e| ToolResult::err(format!("写入失败：{e}")))
+            // 写盘队列内重读磁盘并按 id 合并补丁：与宿主保存链同一口径，不整份覆盖他方改动
+            match crate::ai::doc_edit::commit_local::<vault::TableFile>(
+                queue,
+                root,
+                &rel,
+                &base.id,
+                &next,
+                &patch,
+                &vault::file_label(&rel),
+                next.updated_at,
+            )
+            .await
+            {
+                Ok(_) => ToolResult::ok(receipt),
+                Err(e) => ToolResult::err(format!("写入失败：{e}")),
+            }
         }
         // 补丁端点要求目标已存在：本次新建的先落空模型（只新建，不覆盖并发方建出的文件）
         RepoAccess::Space { client, space_id } => {
@@ -1633,19 +1636,22 @@ async fn canvas_edit(ctx: &ToolCtx, args: &Value) -> ToolResult {
     );
     match &ctx.repo {
         RepoAccess::Local { root, queue } => {
-            // 新建画布的父目录可能还不存在：写路径按建父目录取绝对路径
-            let path = match vault::safe_join(root, &rel, true) {
-                Ok(path) => path,
-                Err(e) => return ToolResult::err(e),
-            };
-            let Ok(json) = serde_json::to_string_pretty(&next) else {
-                return ToolResult::err("画布序列化失败".to_string());
-            };
-            queue
-                .write(path, json)
-                .await
-                .map(|_| ToolResult::ok(receipt))
-                .unwrap_or_else(|e| ToolResult::err(format!("写入失败：{e}")))
+            // 写盘队列内重读磁盘并按 id 合并补丁：与宿主保存链同一口径，不整份覆盖他方改动
+            match crate::ai::doc_edit::commit_local::<vault::CanvasFile>(
+                queue,
+                root,
+                &rel,
+                &base.id,
+                &next,
+                &patch,
+                &vault::file_label(&rel),
+                next.updated_at,
+            )
+            .await
+            {
+                Ok(_) => ToolResult::ok(receipt),
+                Err(e) => ToolResult::err(format!("写入失败：{e}")),
+            }
         }
         // 补丁端点要求目标已存在：本次新建的先落空模型（只新建，不覆盖并发方建出的文件）
         RepoAccess::Space { client, space_id } => {

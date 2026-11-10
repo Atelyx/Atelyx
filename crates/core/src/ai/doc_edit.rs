@@ -105,7 +105,10 @@ pub fn read_local_or_new<M: DocModel>(
 }
 
 /// 本地落盘：在写盘队列内重读磁盘、按稳定 id 合并补丁后原子写。
-/// 磁盘实体 id 与期望不符（被外部替换 / 缺失）= 按本端整份重建，与人工保存同一口径。
+///
+/// 磁盘缺失 / 被外部替换为其他实体 = 按本端整份重建，与人工保存同一口径；
+/// 读盘失败（权限 / 占用 / 损坏）如实报错——不拿内存模型覆盖一个仍然存在的文件。
+/// 父目录在队列内创建：与写盘同一执行序，作业失败不留空目录。
 pub async fn commit_local<M: DocModel>(
     queue: &WriteQueue,
     root: &Path,
@@ -116,17 +119,22 @@ pub async fn commit_local<M: DocModel>(
     title: &str,
     updated_at: i64,
 ) -> Result<M, String> {
-    // 写路径按建父目录取绝对路径：新建表格 / 画布的落点目录可能还不存在
-    let path = vault::safe_join(root, rel, true)?;
+    let root = root.to_path_buf();
+    let rel = rel.to_string();
     let expected_id = expected_id.to_string();
     let after = after.clone();
     let patch = patch.clone();
     let title = title.to_string();
     queue
         .bulk(move || {
+            // 建父目录随写盘一并执行：新建表格 / 画布的落点目录可能还不存在
+            let path = vault::safe_join(&root, &rel, true)?;
             let mut disk = match M::read_file(&path) {
                 Ok(model) if model.id() == expected_id => model,
-                _ => after,
+                Err(_) if !path.is_file() => after,
+                // 文件仍在盘上却读不出：不覆盖，把原因交回调用方
+                Err(e) => return Err(format!("读取失败：{e}")),
+                Ok(_) => after,
             };
             M::merge_patch(&mut disk, &patch);
             disk.set_title(&title);
@@ -493,5 +501,45 @@ mod tests {
         std::fs::write(root.join("坏.atb"), "{不是 JSON").unwrap();
         assert!(read_local_or_new::<TableFile>(&state, &root, "坏.atb", "坏").is_err());
     }
-}
 
+    #[test]
+    fn commit_local_creates_parent_and_refuses_unreadable_file() {
+        let dir = crate::vault::test_support::TempDir::new("doc-edit-commit-guard");
+        let root = dir.to_path_buf();
+        let queue = WriteQueue::new();
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let baseline = table();
+        let ops = vec![TableOp::AddRow { cells: vec![] }];
+        let planned = plan(&baseline, &baseline, &ops, "排期", 1).expect("应产出计划");
+        // 落点目录不存在：父目录随写盘一并创建
+        runtime
+            .block_on(commit_local(
+                &queue,
+                &root,
+                "计划/排期.atb",
+                &baseline.id,
+                &planned.after,
+                &planned.patch,
+                "排期",
+                1,
+            ))
+            .expect("新建应成功");
+        assert!(root.join("计划/排期.atb").is_file());
+        // 文件仍在盘上却读不出（损坏）：不覆盖，报错带出原因
+        std::fs::write(root.join("坏.atb"), "{不是 JSON").unwrap();
+        let err = runtime
+            .block_on(commit_local(
+                &queue,
+                &root,
+                "坏.atb",
+                &baseline.id,
+                &planned.after,
+                &planned.patch,
+                "坏",
+                1,
+            ))
+            .expect_err("读不出的文件不得被覆盖");
+        assert!(err.contains("读取失败"), "{err}");
+        assert_eq!(std::fs::read_to_string(root.join("坏.atb")).unwrap(), "{不是 JSON");
+    }
+}
