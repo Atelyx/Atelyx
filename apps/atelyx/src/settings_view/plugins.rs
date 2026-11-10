@@ -1611,10 +1611,10 @@ fn refresh_after_vault_change(app: &mut App, change: &VaultChange) -> Task<Messa
         crate::space_actions::refresh_space_tree(app)
     } else {
         match change {
-            VaultChange::Removed { rel } => app.load_children(&crate::parent_of(rel)),
+            VaultChange::Removed { rel } => app.load_children(&atelyx_core::vault::parent_rel(rel)),
             VaultChange::Renamed { from, to } => app
-                .load_children(&crate::parent_of(from))
-                .chain(app.load_children(&crate::parent_of(to))),
+                .load_children(&atelyx_core::vault::parent_rel(from))
+                .chain(app.load_children(&atelyx_core::vault::parent_rel(to))),
         }
     };
     task = task

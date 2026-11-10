@@ -1482,6 +1482,10 @@ fn on_note_saved(
     if result.is_ok() {
         app.plugins.on_file_changed(rel, FileChangeKind::Updated, None);
     }
+    // flush 失败先回填挂起的 AI 文件操作：失败面可能已被切走，挂起项不得残留到之后的放行
+    if let (Err(e), true) = (&result, matches!(reason, SaveReason::Flush)) {
+        crate::ai_fs_edit::abort_pending(app, e);
+    }
     if app.ui.last_note_file.as_deref() != Some(rel) {
         return Task::none();
     }
@@ -1491,7 +1495,6 @@ fn on_note_saved(
             app.settle_history_restore(false);
             app.save_error = Some(e.clone());
             if matches!(reason, SaveReason::Flush) {
-                crate::ai_fs_edit::abort_pending(app, &e);
                 app.notify(NoticeLevel::Error, format!("保存失败，操作未执行：{e}"));
             } else {
                 app.notify(NoticeLevel::Error, format!("保存失败：{e}"));
@@ -2459,9 +2462,9 @@ pub fn space_create_entry(app: &mut App, dir: &str, kind: DraftKind, name: &str)
     let space_id = session.space_id;
     let dir_for_cb = dir.clone();
     let initial = match kind {
-        DraftKind::Table => serde_json::to_string_pretty(&atelyx_core::table_ops::new_table_file(name))
+        DraftKind::Table => serde_json::to_string_pretty(&atelyx_core::vault::TableFile::new_file(name))
             .unwrap_or_default(),
-        DraftKind::Canvas => serde_json::to_string_pretty(&atelyx_core::table_ops::new_canvas_file(name))
+        DraftKind::Canvas => serde_json::to_string_pretty(&atelyx_core::vault::CanvasFile::new_file(name))
             .unwrap_or_default(),
         _ => String::new(),
     };
@@ -2521,7 +2524,7 @@ pub fn space_delete_entry(app: &mut App, rel: &str, is_dir: bool, confirm: bool)
             move |result| {
                 Message::OpDone(
                     gen,
-                    parent_of(&rel_for_cb),
+                    atelyx_core::vault::parent_rel(&rel_for_cb),
                     result.map_err(err_text),
                     crate::FollowUp::Deleted { rel: rel_for_cb, is_dir: false },
                 )
@@ -2549,7 +2552,7 @@ pub fn space_delete_entry(app: &mut App, rel: &str, is_dir: bool, confirm: bool)
                 FolderDelete::Force => Message::Space(SpaceMsg::ForceDeleteFolder { gen, rel: rel_for_cb }),
                 FolderDelete::Failed(e) => Message::OpDone(
                     gen,
-                    parent_of(&rel_for_cb),
+                    atelyx_core::vault::parent_rel(&rel_for_cb),
                     Err(e),
                     crate::FollowUp::None,
                 ),
@@ -2569,7 +2572,7 @@ fn space_force_delete_folder(session: &SpaceSession, gen: u64, rel: &str) -> Tas
         move |result| {
             Message::OpDone(
                 gen,
-                parent_of(&rel_for_cb),
+                atelyx_core::vault::parent_rel(&rel_for_cb),
                 result.map_err(err_text),
                 crate::FollowUp::Deleted { rel: rel_for_cb, is_dir: true },
             )
@@ -2586,7 +2589,7 @@ pub fn space_commit_rename(app: &mut App, r: RenameState) -> Task<Message> {
             // 输入框只给主名：扩展名恒取原名（重命名不改类型），手打的同名后缀先剥掉
             let old_name = old.rsplit('/').next().unwrap_or(old);
             let Some(new_name) = vault::rename_file_name(&r.value, old_name) else { return Task::none() };
-            let parent = parent_of(old);
+            let parent = atelyx_core::vault::parent_rel(old);
             let new_rel = if parent.is_empty() { new_name } else { format!("{parent}/{new_name}") };
             (old.clone(), new_rel, false)
         }
@@ -2623,11 +2626,11 @@ pub fn space_commit_rename(app: &mut App, r: RenameState) -> Task<Message> {
         move |result| match result {
             Ok((full, rewritten)) => Message::OpDone(
                 gen,
-                parent_of(&old_for_cb),
+                atelyx_core::vault::parent_rel(&old_for_cb),
                 Ok(full.clone()),
                 crate::FollowUp::Renamed { from: old_for_cb, to: full, rewritten, announce: false },
             ),
-            Err(e) => Message::OpDone(gen, parent_of(&old_for_cb), Err(err_text(e)), crate::FollowUp::None),
+            Err(e) => Message::OpDone(gen, atelyx_core::vault::parent_rel(&old_for_cb), Err(err_text(e)), crate::FollowUp::None),
         },
     )
 }
@@ -2721,7 +2724,7 @@ pub fn space_duplicate_entry(app: &mut App, rel: &str, is_dir: bool) -> Task<Mes
     let space_id = session.space_id;
     Task::perform(
         async move {
-            let parent = parent_of(&rel);
+            let parent = atelyx_core::vault::parent_rel(&rel);
             let name = rel.rsplit('/').next().unwrap_or(&rel).to_string();
             // 同名去重：name-2、name-3 …（服务端 copy 目标已存在 409 兜底，前置避让减少报错）
             let tree = client.tree(&space_id).await?;
@@ -2767,7 +2770,7 @@ pub fn space_duplicate_entry(app: &mut App, rel: &str, is_dir: bool) -> Task<Mes
             Ok::<_, SpaceError>(new_rel)
         },
         move |result| {
-            let parent = parent_of(&rel_for_cb);
+            let parent = atelyx_core::vault::parent_rel(&rel_for_cb);
             let follow = match &result {
                 Ok(rel) => crate::FollowUp::Created { rel: rel.clone() },
                 Err(_) => crate::FollowUp::None,
@@ -2798,7 +2801,7 @@ pub fn space_move_entry(app: &mut App, from: &str, to_dir: &str) -> Task<Message
         move |result| match result {
             Ok(to) => Message::OpDone(
                 gen,
-                parent_of(&from_for_cb),
+                atelyx_core::vault::parent_rel(&from_for_cb),
                 Ok(to.clone()),
                 crate::FollowUp::Renamed {
                     from: from_for_cb.clone(),
@@ -2807,7 +2810,7 @@ pub fn space_move_entry(app: &mut App, from: &str, to_dir: &str) -> Task<Message
                     announce: true,
                 },
             ),
-            Err(e) => Message::OpDone(gen, parent_of(&from_for_cb), Err(err_text(e)), crate::FollowUp::None),
+            Err(e) => Message::OpDone(gen, atelyx_core::vault::parent_rel(&from_for_cb), Err(err_text(e)), crate::FollowUp::None),
         },
     )
 }
@@ -4013,13 +4016,6 @@ pub fn collab_follow_rename(app: &mut App, old: &str, new: &str) {
         .and_then(|channel| channel.relocate(now, &identity, old, new))
     {
         send_note_presence(app, payload);
-    }
-}
-
-fn parent_of(rel: &str) -> String {
-    match rel.rfind('/') {
-        Some(i) => rel[..i].to_string(),
-        None => String::new(),
     }
 }
 

@@ -482,6 +482,10 @@ fn on_saved(
     if result.is_ok() {
         app.plugins.on_file_changed(&file, atelyx_core::plugin_runtime::FileChangeKind::Updated, None);
     }
+    // flush 失败先回填挂起的 AI 文件操作：失败面可能已被切走，挂起项不得残留到之后的放行
+    if let (Err(e), true) = (&result, matches!(reason, SaveReason::Flush)) {
+        crate::ai_fs_edit::abort_pending(app, e);
+    }
     if !app.canvas.as_ref().is_some_and(|s| s.file == file) {
         return Task::none();
     }
@@ -491,7 +495,6 @@ fn on_saved(
             let Some(s) = app.canvas.as_mut() else { return Task::none() };
             s.save_error = Some(e.clone());
             if matches!(reason, SaveReason::Flush) {
-                crate::ai_fs_edit::abort_pending(app, &e);
                 app.notify(crate::NoticeLevel::Error, format!("保存失败，操作未执行：{e}"));
             } else {
                 app.notify(crate::NoticeLevel::Error, format!("保存失败：{e}"));
