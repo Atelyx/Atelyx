@@ -1142,12 +1142,8 @@ fn update_inner(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
             match result {
                 Ok(attachments) => plugin_chat_send_now(app, *plan, space_prompt, attachments),
                 Err(e) => {
-                    // 归档失败 = 本条消息未发出：本次新建的会话（无消息）一并回收，不留空会话
-                    if let Some(session_id) = &plan.created_session {
-                        if let Err(cleanup) = delete_session_now(app, session_id) {
-                            app.notify(crate::NoticeLevel::Warning, format!("空会话回收失败：{cleanup}"));
-                        }
-                    }
+                    // 归档失败 = 本条消息未发出：本次新建的会话（无消息）一并回收
+                    recycle_created_session(app, &plan);
                     app.plugins.resolve_shell_call(plan.request_id, Err(e));
                     iced::Task::none()
                 }
@@ -2713,6 +2709,14 @@ fn resolve_plugin_session(
     }
 }
 
+/// 本次发送新建的会话在后续步骤失败时回收（不留无消息的空会话）。
+fn recycle_created_session(app: &mut App, plan: &PluginSendPlan) {
+    let Some(session_id) = &plan.created_session else { return };
+    if let Err(e) = delete_session_now(app, session_id) {
+        app.notify(crate::NoticeLevel::Warning, format!("空会话回收失败：{e}"));
+    }
+}
+
 /// 插件图片是否落在自己的临时区（`temp/` 段且不在宿主托管的附件目录）：这类引用随插件目录被清理
 /// 即失效，需要先归档进会话附件目录。仓库内普通图片路径（用户有意引用）保持原样。
 fn needs_archive(attachments: &[Value]) -> bool {
@@ -2726,10 +2730,12 @@ fn needs_archive(attachments: &[Value]) -> bool {
 /// 路径是否落在插件临时区（`.atelyx/temp/` 下、且不在会话 / 表格附件目录）：只有这一段的引用会随
 /// 插件自行清理失效。表格附件目录由表格删除链回收，归宿主管理，不随插件搬走（否则仓库内留两份）。
 fn is_plugin_temp(file: &str) -> bool {
-    if file.starts_with(".atelyx/temp/chats/") || file.starts_with(".atelyx/temp/tables/") {
+    use atelyx_core::vault::{CHAT_TEMP_DIR, TABLE_TEMP_DIR, TEMP_DIR};
+    // 会话与表格附件目录归宿主托管（生命周期各自随会话 / 表格），不算插件临时区
+    if file.starts_with(CHAT_TEMP_DIR) || file.starts_with(TABLE_TEMP_DIR) {
         return false;
     }
-    file.starts_with(".atelyx/temp/")
+    file.starts_with(TEMP_DIR)
 }
 
 /// 把插件临时区的图片复制进会话附件目录，返回替换路径后的 attachments。
@@ -2818,6 +2824,17 @@ fn plugin_chat_send_now(
         }
         None => return iced::Task::none(),
     };
+    // 会话可用性先于任何副作用（归档会往会话目录写文件）：拒绝时不留孤儿附件
+    if app.chat.compacting.as_deref() == Some(session_id.as_str()) {
+        recycle_created_session(app, &plan);
+        deny(app, "该会话正在压缩上下文".to_string());
+        return iced::Task::none();
+    }
+    if hub().is_running(&session_id) {
+        recycle_created_session(app, &plan);
+        deny(app, "该会话已有进行中的对话".to_string());
+        return iced::Task::none();
+    }
     // 插件暂存的图片先进会话附件目录：消息只引用会话目录，插件自己的临时区随之不再被引用
     // （插件可自由清理该目录；会话删除时宿主整体清理会话目录）
     if needs_archive(&attachments) {
@@ -2827,6 +2844,7 @@ fn plugin_chat_send_now(
         let backend = match image_backend(app) {
             Ok(backend) => backend,
             Err(e) => {
+                recycle_created_session(app, &archive_plan);
                 deny(app, e);
                 return iced::Task::none();
             }
@@ -2843,14 +2861,6 @@ fn plugin_chat_send_now(
                 })
             },
         );
-    }
-    if app.chat.compacting.as_deref() == Some(session_id.as_str()) {
-        deny(app, "该会话正在压缩上下文".to_string());
-        return iced::Task::none();
-    }
-    if hub().is_running(&session_id) {
-        deny(app, "该会话已有进行中的对话".to_string());
-        return iced::Task::none();
     }
     // 历史快照先于追加（user 消息由 run 入参携带）
     let mut history = store().session_messages(&session_id).unwrap_or_default();
