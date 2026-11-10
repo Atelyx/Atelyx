@@ -1839,8 +1839,11 @@ fn delete_dir_entry(root: &std::path::Path, rel: &str, force: bool) -> ToolResul
         Err(e) => ToolResult::err(format!("删除失败：{e}")),
     }
 }
-/// 任务清单落点（仓库相对；空间落用户元数据同键）。
+/// 任务清单落点（仓库相对路径）。
 pub const TODO_FILE: &str = ".atelyx/todos/agent.json";
+/// 任务清单在空间用户元数据里的键：元数据键不接受隐藏段（首段以 `.` 开头即被服务端拒绝），
+/// 与本地路径分开命名；同一份清单在两种容器各存一份，内容形状一致。
+pub const TODO_META_KEY: &str = "todos/agent";
 
 async fn todo_write(ctx: &ToolCtx, args: &Value) -> ToolResult {
     let Some(todos) = args.get("todos").and_then(Value::as_array) else {
@@ -1883,7 +1886,7 @@ async fn todo_write(ctx: &ToolCtx, args: &Value) -> ToolResult {
                 .unwrap_or_else(|e| ToolResult::err(format!("写入失败：{e}")))
         }
         RepoAccess::Space { client, space_id } => client
-            .my_meta_patch(space_id, &[(TODO_FILE.to_string(), content)])
+            .my_meta_patch(space_id, &[(TODO_META_KEY.to_string(), content)])
             .await
             .map(|_| ToolResult::ok(format!("任务清单已更新（{} 项）", todos.len())))
             .unwrap_or_else(|e| ToolResult::err(format!("写入失败：{e}"))),

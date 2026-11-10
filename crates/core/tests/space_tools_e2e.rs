@@ -214,7 +214,13 @@ fn handle(mut stream: TcpStream, state: &FakeSpace) -> std::io::Result<()> {
             }
         }
         ("PATCH", p) if p.ends_with("/meta/me") => {
-            if let Some(values) = req.body.get("values").and_then(Value::as_object) {
+            let values = req.body.get("values").and_then(Value::as_object);
+            // 与真服务端同口径的键校验：隐藏段 / 空段 / 非法字符一律 400，键位错误在单测里就能暴露
+            if let Some(values) = values {
+                if let Some(reason) = values.keys().find_map(|key| meta_key_guard(key)) {
+                    respond(&mut stream, 400, json!({ "error": reason }))?;
+                    return Ok(());
+                }
                 let mut meta = state.meta.lock().unwrap();
                 for (k, v) in values {
                     if let Some(s) = v.as_str() {
@@ -227,6 +233,25 @@ fn handle(mut stream: TcpStream, state: &FakeSpace) -> std::io::Result<()> {
         _ => not_found(&mut stream)?,
     }
     Ok(())
+}
+
+/// 元数据键守卫（与 `apps/server/src/meta.rs::validate_key` 同口径的段规则）：返回拒绝原因。
+fn meta_key_guard(key: &str) -> Option<String> {
+    if key.is_empty() || key.starts_with('/') || key.ends_with('/') {
+        return Some(format!("键不合法：{key}"));
+    }
+    for seg in key.split('/') {
+        let bad = seg.is_empty()
+            || seg == "."
+            || seg == ".."
+            || seg.starts_with('.')
+            || seg.ends_with('.')
+            || !seg.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+        if bad {
+            return Some(format!("键段不合法：{seg}（键 {key}）"));
+        }
+    }
+    None
 }
 
 fn space_ctx(server_url: &str) -> ToolCtx {
@@ -324,11 +349,14 @@ async fn 任务清单落用户元数据() {
     )
     .await;
     assert!(ok_text(out).contains("任务清单已更新"));
+    // 元数据键不得含隐藏段（服务端按段校验拒绝 `.` 开头的段），与本地落点路径分开命名
+    let key = atelyx_core::ai::tools::TODO_META_KEY;
+    assert!(!key.split('/').any(|seg| seg.starts_with('.')), "元数据键不能含隐藏段：{key}");
     let stored = state
         .meta
         .lock()
         .unwrap()
-        .get(atelyx_core::ai::tools::TODO_FILE)
+        .get(key)
         .cloned()
         .expect("todo 内容应写入 meta");
     assert!(stored.contains("调研"));
