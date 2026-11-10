@@ -517,8 +517,10 @@ enum Message {
     AiEdit(u64),
     /// AI 笔记编辑落盘回执（gen 守卫；失败恢复脏标记并提示）。
     AiEditDone(u64, String, String, Option<String>),
-    /// AI 表格 / 画布编辑收尾（gen 守卫）：只收在场态并按成败提示；文件变更与历史由保存链回执结算。
-    AiDocDone(u64, Option<String>),
+    /// AI 表格 / 画布编辑收尾（gen 守卫）：只收在场态；文件变更与历史由保存链回执结算。
+    AiDocDone(u64),
+    /// AI 表格 / 画布未落盘（gen 守卫）：提示原因并重取当前面，不按成功结算。
+    AiDocFailed(u64, String),
     /// AI 文件系统操作回执（盒装：载荷含跟随语义所需的全部字段）。
     AiFsDone(Box<AiFsDone>),
     /// 无操作（后台任务回执无界面变化时的统一落点）。
@@ -834,14 +836,6 @@ pub enum FollowUp {
     Deleted { rel: String, is_dir: bool },
 }
 
-/// 相对路径的父目录（根为 ""）。
-fn parent_of(rel: &str) -> String {
-    match rel.rfind('/') {
-        Some(i) => rel[..i].to_string(),
-        None => String::new(),
-    }
-}
-
 /// 行内重命名输入挂焦点并全选：输入行随本帧视图重建挂载，操作在重建后的树上执行；
 /// 进入即整体替换，避免在原名末尾追加。
 fn rename_focus_task() -> Task<Message> {
@@ -894,7 +888,7 @@ fn file_drop_check(
     if !target_is_dir {
         return Err(DropReject::NotADir);
     }
-    if parent_of(from) == target {
+    if atelyx_core::vault::parent_rel(from) == target {
         return Err(DropReject::SameDir);
     }
     if target == from
@@ -1035,7 +1029,8 @@ pub enum SaveReason {
 #[derive(Debug, Clone)]
 enum PendingAfterFlush {
     /// AI 发起的改名 / 移动 / 删除：先落盘未保存内容，再动磁盘并把回执交回工具线程。
-    AiFs { op: atelyx_core::ai::edit_host::FsOp, id: u64 },
+    /// gen = 提交时的仓库世代：放行时容器已切换即作废，不得在另一容器上按相对路径执行。
+    AiFs { op: atelyx_core::ai::edit_host::FsOp, id: u64, gen: u64 },
     OpenFile(String),
     PickVault,
     /// 从最近仓库列表进入指定仓库（from_boot 区分启动进入与运行中切换）。
@@ -2779,23 +2774,35 @@ impl App {
                 task
             }
             Message::AiEdit(id) => ai_edit::apply(self, id),
-            Message::AiFsDone(done) => {
-                let AiFsDone { id, gen, dir, from, to, rewritten, deleted, warning, result } = *done;
-                ai_fs_edit::on_done(
-                    self, id, gen, dir, from, to, rewritten, deleted, warning, result,
-                )
-            }
+            Message::AiFsDone(done) => ai_fs_edit::on_done(self, *done),
             Message::AiEditDone(gen, path, content, err) => {
                 ai_edit::on_done(self, gen, path, content, err)
             }
-            Message::AiDocDone(gen, err) => {
+            Message::AiDocDone(gen) => {
                 if gen == self.epoch() {
                     ai_edit::end_presence(self);
-                    if let Some(e) = err {
-                        self.notify(NoticeLevel::Error, format!("AI 修改未落盘：{e}"));
-                    }
                 }
                 Task::none()
+            }
+            Message::AiDocFailed(gen, reason) => {
+                if gen != self.epoch() {
+                    return Task::none();
+                }
+                ai_edit::end_presence(self);
+                self.notify(NoticeLevel::Error, format!("AI 修改未落盘：{reason}"));
+                // 失败时打开面可能与磁盘事实不一致：按容器重取当前表格 / 画布 / 整树
+                match self.repo_kind {
+                    RepoKind::Space(_) => space_actions::refresh_space_tree(self),
+                    RepoKind::Local => {
+                        let table = self.table.as_ref().map(|s| s.file.clone());
+                        let canvas = self.canvas.as_ref().map(|s| s.file.clone());
+                        match (table, canvas) {
+                            (Some(f), _) => table_actions::load_table(self, &f),
+                            (_, Some(f)) => canvas_actions::load_canvas(self, &f),
+                            _ => Task::none(),
+                        }
+                    }
+                }
             }
             Message::Noop => Task::none(),
             Message::FileRowPress { window, rel, is_dir } => {
@@ -4172,12 +4179,12 @@ impl App {
                     move |result| match result {
                         Ok((false, _)) => Message::OpDone(
                             gen,
-                            parent_of(&rel),
+                            atelyx_core::vault::parent_rel(&rel),
                             Ok(rel.clone()),
                             FollowUp::Deleted { rel, is_dir: true },
                         ),
                         Ok((true, n)) => Message::FolderCounted(rel, n),
-                        Err(e) => Message::OpDone(gen, parent_of(&rel), Err(e), FollowUp::None),
+                        Err(e) => Message::OpDone(gen, atelyx_core::vault::parent_rel(&rel), Err(e), FollowUp::None),
                     },
                 )
             }
@@ -4292,7 +4299,7 @@ impl App {
                 }
                 if let FollowUp::Renamed { to, announce, .. } = &follow {
                     if *announce {
-                        let dir = parent_of(to);
+                        let dir = atelyx_core::vault::parent_rel(to);
                         self.notify(
                             NoticeLevel::Success,
                             if dir.is_empty() {
@@ -4349,7 +4356,7 @@ impl App {
                 };
                 if !matches!(self.repo_kind, RepoKind::Space(_)) {
                     if let FollowUp::Renamed { from, .. } = &follow {
-                        let from_dir = parent_of(from);
+                        let from_dir = atelyx_core::vault::parent_rel(from);
                         if from_dir != dir {
                             refresh = refresh.chain(self.load_children(&from_dir));
                         }
@@ -4919,19 +4926,21 @@ impl App {
         if self.table.as_ref().is_some_and(|t| t.view.editing.is_some()) {
             table_actions::commit_edit(self);
         }
-        // 在途的插件结构变更 / AI 文件操作将被更晚的 pending 取代：先回填可读错误，调用方不悬挂
-        match self.flush_pending.as_ref() {
+        // 在途的插件结构变更 / AI 文件操作将被更晚的 pending 取代：先回填可读错误并摘除挂起项，
+        // 调用方不悬挂、旧动作也不会在之后某次 flush 回执里被放行执行
+        match self.flush_pending.take() {
             Some(
                 PendingAfterFlush::PluginVaultRemove { request_id, .. }
                 | PendingAfterFlush::PluginVaultRename { request_id, .. },
             ) => {
                 self.plugins
-                    .resolve_shell_call(*request_id, Err("被更晚的宿主操作取代，请重试".into()));
+                    .resolve_shell_call(request_id, Err("被更晚的宿主操作取代，请重试".into()));
             }
             Some(PendingAfterFlush::AiFs { id, .. }) => {
-                ai_fs_edit::settle(*id, Err("被更晚的宿主操作取代，请重试".to_string()));
+                ai_fs_edit::settle(id, Err("被更晚的宿主操作取代，请重试".to_string()));
             }
-            _ => {}
+            // 未被取代的其它挂起动作原样保留（放行由保存回执触发）
+            other => self.flush_pending = other,
         }
         if self.any_dirty() {
             self.flush_pending = Some(pending);
@@ -5000,7 +5009,7 @@ impl App {
             PendingAfterFlush::PluginVaultRename { request_id, from, to } => {
                 settings_view::plugins::execute_vault_rename(self, request_id, from, to)
             }
-            PendingAfterFlush::AiFs { op, id } => ai_fs_edit::execute(self, op, id),
+            PendingAfterFlush::AiFs { op, id, gen } => ai_fs_edit::execute(self, op, id, gen),
             PendingAfterFlush::SelectSpace { server_url, space_id, name } => {
                 // 脏拦截已过：直接进入（不得再经 gate，否则空脏判定重复放行成环）
                 space_actions::handle(
@@ -6350,12 +6359,12 @@ impl App {
                                     DraftKind::Folder => vault::create_folder(&root, &rel).map(|_| rel),
                                     DraftKind::Table => {
                                         // 初始 = 一个「名称」文本字段（空白表无字段难用）
-                                        let table = atelyx_core::table_ops::new_table_file(&name);
+                                        let table = atelyx_core::vault::TableFile::new_file(&name);
                                         let path = vault::safe_join(&root, &rel, true)?;
                                         vault::write_table_file(&path, &table).map(|_| rel)
                                     }
                                     DraftKind::Canvas => {
-                                        let canvas = atelyx_core::table_ops::new_canvas_file(&name);
+                                        let canvas = atelyx_core::vault::CanvasFile::new_file(&name);
                                         let path = vault::safe_join(&root, &rel, true)?;
                                         vault::write_canvas_file(&path, &canvas).map(|_| rel)
                                     }
@@ -6379,7 +6388,7 @@ impl App {
                 // 输入框只给主名：扩展名恒取原名（重命名不改类型），手打的同名后缀先剥掉
                 let old_name = old.rsplit('/').next().unwrap_or(&old);
                 let Some(new_name) = vault::rename_file_name(&r.value, old_name) else { return Task::none() };
-                let parent = parent_of(&old);
+                let parent = atelyx_core::vault::parent_rel(&old);
                 let new = full_rel(&parent, &new_name);
                 let parent_for_task = parent.clone();
                 let old_for_task = old.clone();
@@ -6433,7 +6442,7 @@ impl App {
                 if name.is_empty() {
                     return Task::none();
                 }
-                let parent = parent_of(&old_dir);
+                let parent = atelyx_core::vault::parent_rel(&old_dir);
                 let new_for_task = match old_dir.rfind('/') {
                     Some(i) => format!("{}/{name}", &old_dir[..i]),
                     None => name,
@@ -6493,7 +6502,7 @@ impl App {
         }
         let Some(root) = self.vault.root().ok() else { return Task::none() };
         let gen = self.epoch();
-        let parent = parent_of(rel);
+        let parent = atelyx_core::vault::parent_rel(rel);
         let rel_for_task = rel.to_string();
         let rel_for_follow = rel.to_string();
         Task::perform(
@@ -6820,7 +6829,7 @@ impl App {
         }
         let Some(root) = self.vault.root().ok() else { return Task::none() };
         let gen = self.epoch();
-        let parent = parent_of(rel);
+        let parent = atelyx_core::vault::parent_rel(rel);
         let name = rel.rsplit('/').next().unwrap_or(rel).to_string();
         let rel = rel.to_string();
         let is_dir_for_task = is_dir;

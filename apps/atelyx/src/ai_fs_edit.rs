@@ -49,11 +49,14 @@ pub fn apply(
         settle(id, Err("宿主保存进行中，请稍后重试".to_string()));
         return iced::Task::none();
     }
-    app.gate(crate::PendingAfterFlush::AiFs { op, id })
+    // 提交时的世代随挂起项一起保存：放行时容器已切换即作废（不得在另一容器上按相对路径动盘）
+    let gen = app.epoch();
+    app.gate(crate::PendingAfterFlush::AiFs { op, id, gen })
 }
 
 /// flush 失败（脏面没落盘）：挂起的 AI 文件操作不得继续，回填可读原因并摘除挂起项。
 /// 与其它挂起动作不同，工具线程在等回执——不回填会让模型空等至超时。
+/// 只摘挂起项与回执，不依赖失败面是否仍是当前面（失败面被切走后挂起项同样不得残留）。
 pub(crate) fn abort_pending(app: &mut App, reason: &str) {
     let Some(crate::PendingAfterFlush::AiFs { id, .. }) = app.flush_pending.as_ref() else {
         return;
@@ -63,8 +66,18 @@ pub(crate) fn abort_pending(app: &mut App, reason: &str) {
     settle(id, Err(format!("保存失败，操作未执行：{reason}")));
 }
 
+/// 挂起项被放行时是否仍可执行：提交时与放行时的仓库世代一致才算有效。
+pub(crate) fn pending_is_live(app: &App, gen: u64) -> bool {
+    gen == app.epoch()
+}
+
 /// flush 放行后的执行体：改磁盘 + 同步引用 + 收尾打开中的面。
-pub(crate) fn execute(app: &mut App, op: FsOp, id: u64) -> iced::Task<Message> {
+pub(crate) fn execute(app: &mut App, op: FsOp, id: u64, gen: u64) -> iced::Task<Message> {
+    // 放行前容器已切换：旧容器的相对路径在新容器上无意义（可能是同名文件）
+    if !pending_is_live(app, gen) {
+        settle(id, Err("仓库已切换，AI 操作已取消".to_string()));
+        return iced::Task::none();
+    }
     match op {
         FsOp::Move { from, to } => move_entry(app, from, to, id),
         FsOp::Delete { path, force } => delete_entry(app, path, force, id),
@@ -72,29 +85,8 @@ pub(crate) fn execute(app: &mut App, op: FsOp, id: u64) -> iced::Task<Message> {
 }
 
 /// 回执消息（盒装：载荷含跟随语义所需的全部字段）。
-#[allow(clippy::too_many_arguments)]
-fn done(
-    id: u64,
-    gen: u64,
-    dir: String,
-    from: String,
-    to: String,
-    rewritten: Vec<String>,
-    deleted: Option<(String, bool)>,
-    warning: Option<String>,
-    result: Result<(), String>,
-) -> Message {
-    Message::AiFsDone(Box::new(AiFsDone {
-        id,
-        gen,
-        dir,
-        from,
-        to,
-        rewritten,
-        deleted,
-        warning,
-        result,
-    }))
+fn done(payload: AiFsDone) -> Message {
+    Message::AiFsDone(Box::new(payload))
 }
 /// 改名 / 移动：本地经引用同步事务，空间走服务端 rename + 引用改写；成功后按 Renamed 跟随语义
 /// 收尾打开中的编辑面（与文件树改名同一链），失败只回执不动状态。
@@ -104,7 +96,7 @@ fn move_entry(app: &mut App, from: String, to: String, id: u64) -> iced::Task<Me
         return iced::Task::none();
     }
     let gen = app.epoch();
-    let parent = parent_of(&from);
+    let parent = atelyx_core::vault::parent_rel(&from);
     match &app.repo_kind {
         RepoKind::Local => {
             let Ok(root) = app.vault.root() else {
@@ -133,18 +125,28 @@ fn move_entry(app: &mut App, from: String, to: String, id: u64) -> iced::Task<Me
                     }
                 },
                 move |result| match result {
-                    Ok(sync) => done(
+                    Ok(sync) => done(AiFsDone {
                         id,
                         gen,
-                        parent.clone(),
-                        from.clone(),
-                        to.clone(),
-                        sync.rewritten,
-                        None,
-                        None,
-                        Ok(()),
-                    ),
-                    Err(e) => done(id, gen, String::new(), from, to, Vec::new(), None, None, Err(e)),
+                        dir: parent.clone(),
+                        from: from.clone(),
+                        to: to.clone(),
+                        rewritten: sync.rewritten,
+                        deleted: None,
+                        warning: None,
+                        result: Ok(()),
+                    }),
+                    Err(e) => done(AiFsDone {
+                        id,
+                        gen,
+                        dir: String::new(),
+                        from,
+                        to,
+                        rewritten: Vec::new(),
+                        deleted: None,
+                        warning: None,
+                        result: Err(e),
+                    }),
                 },
             )
         }
@@ -177,18 +179,28 @@ fn move_entry(app: &mut App, from: String, to: String, id: u64) -> iced::Task<Me
                     }
                 },
                 move |result| match result {
-                    Ok((rewritten, warning)) => done(
+                    Ok((rewritten, warning)) => done(AiFsDone {
                         id,
                         gen,
-                        parent.clone(),
-                        from.clone(),
-                        to.clone(),
+                        dir: parent.clone(),
+                        from: from.clone(),
+                        to: to.clone(),
                         rewritten,
-                        None,
+                        deleted: None,
                         warning,
-                        Ok(()),
-                    ),
-                    Err(e) => done(id, gen, String::new(), from, to, Vec::new(), None, None, Err(e)),
+                        result: Ok(()),
+                    }),
+                    Err(e) => done(AiFsDone {
+                        id,
+                        gen,
+                        dir: String::new(),
+                        from,
+                        to,
+                        rewritten: Vec::new(),
+                        deleted: None,
+                        warning: None,
+                        result: Err(e),
+                    }),
                 },
             )
         }
@@ -198,7 +210,7 @@ fn move_entry(app: &mut App, from: String, to: String, id: u64) -> iced::Task<Me
 /// 成功后按 Deleted 跟随语义收尾打开中的面。
 fn delete_entry(app: &mut App, path: String, force: bool, id: u64) -> iced::Task<Message> {
     let gen = app.epoch();
-    let parent = parent_of(&path);
+    let parent = atelyx_core::vault::parent_rel(&path);
     match &app.repo_kind {
         RepoKind::Local => {
             let Ok(root) = app.vault.root() else {
@@ -239,17 +251,17 @@ fn delete_entry(app: &mut App, path: String, force: bool, id: u64) -> iced::Task
                 },
                 move |result| {
                     let deleted = result.as_ref().ok().cloned();
-                    done(
+                    done(AiFsDone {
                         id,
                         gen,
-                        parent.clone(),
-                        String::new(),
-                        String::new(),
-                        Vec::new(),
+                        dir: parent.clone(),
+                        from: String::new(),
+                        to: String::new(),
+                        rewritten: Vec::new(),
                         deleted,
-                        None,
-                        result.map(|_| ()),
-                    )
+                        warning: None,
+                        result: result.map(|_| ()),
+                    })
                 },
             )
         }
@@ -285,45 +297,27 @@ fn delete_entry(app: &mut App, path: String, force: bool, id: u64) -> iced::Task
                 },
                 move |result| {
                     let deleted = result.as_ref().ok().cloned();
-                    done(
+                    done(AiFsDone {
                         id,
                         gen,
-                        parent.clone(),
-                        String::new(),
-                        String::new(),
-                        Vec::new(),
+                        dir: parent.clone(),
+                        from: String::new(),
+                        to: String::new(),
+                        rewritten: Vec::new(),
                         deleted,
-                        None,
-                        result.map(|_| ()),
-                    )
+                        warning: None,
+                        result: result.map(|_| ()),
+                    })
                 },
             )
         }
     }
 }
 
-/// 相对路径的父目录（根为 ""）。
-fn parent_of(rel: &str) -> String {
-    match rel.rfind('/') {
-        Some(i) => rel[..i].to_string(),
-        None => String::new(),
-    }
-}
 /// 落盘回执：先交回工具线程（模型可见），再按跟随语义收尾打开中的面并刷新文件树。
 /// warning = 主操作已落地但收尾步骤失败（如引用同步）：仍按成功收尾，提示另给。
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn on_done(
-    app: &mut App,
-    id: u64,
-    gen: u64,
-    dir: String,
-    from: String,
-    to: String,
-    rewritten: Vec<String>,
-    deleted: Option<(String, bool)>,
-    warning: Option<String>,
-    result: Result<(), String>,
-) -> iced::Task<Message> {
+pub(crate) fn on_done(app: &mut App, done: AiFsDone) -> iced::Task<Message> {
+    let AiFsDone { id, gen, dir, from, to, rewritten, deleted, warning, result } = done;
     if gen != app.epoch() {
         settle(id, Err("仓库已切换，AI 操作已取消".to_string()));
         return iced::Task::none();
@@ -394,7 +388,7 @@ pub(crate) fn on_done(
     // 跨目录移动：源目录与目标目录的子项都要重取（dir 是源目录）
     if !matches!(app.repo_kind, RepoKind::Space(_)) {
         if let crate::FollowUp::Renamed { to, .. } = &follow {
-            let to_dir = parent_of(to);
+            let to_dir = atelyx_core::vault::parent_rel(to);
             if to_dir != dir {
                 next = next.chain(app.load_children(&to_dir));
             }
@@ -411,4 +405,32 @@ pub(crate) fn on_done(
         next = next.chain(app.load_note(&rel));
     }
     next
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 回执登记表：交出结果后条目摘除（同一 id 的第二次回填不得再送达，防重复结算）。
+    #[test]
+    fn settle_delivers_once_and_drops_entry() {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let id = register_reply(tx);
+        settle(id, Ok("已移动 a → b".to_string()));
+        assert_eq!(rx.blocking_recv().unwrap(), Ok("已移动 a → b".to_string()));
+        // 已摘除：再交一次是空操作（接收端已取走，不会二次送达）
+        settle(id, Err("重复回填".to_string()));
+        assert!(replies().lock().unwrap().get(&id).is_none());
+    }
+
+    /// 被更晚动作取代时交出的失败原因要能被工具线程读到（不得悬挂等超时）。
+    #[test]
+    fn settle_reports_replaced_reason() {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let id = register_reply(tx);
+        settle(id, Err("被更晚的宿主操作取代，请重试".to_string()));
+        let got = rx.blocking_recv().unwrap();
+        assert!(got.is_err());
+        assert!(got.unwrap_err().contains("取代"));
+    }
 }
