@@ -9,7 +9,7 @@ use iced::Subscription;
 use tokio::sync::{broadcast, oneshot};
 
 use atelyx_core::ai::edit_host::{
-    AiEditHost, DocKind, EditActor, EditFuture, NoteOp,
+    AiEditHost, CanvasOp, DocKind, EditActor, EditFuture, NoteOp, TableOp,
 };
 use atelyx_core::history::{HistoryAction, HistoryEditor, HistoryKind, RecordOpts};
 use atelyx_core::space_client::{HistoryAuthorReq, HistoryRecordReq};
@@ -23,11 +23,18 @@ const REPLY_TIMEOUT: Duration = Duration::from_secs(120);
 /// 唤醒通道容量（同一时刻在途请求数远小于此）。
 const WAKE_CAP: usize = 64;
 
+/// 一次编辑的操作体（笔记 / 表格 / 画布共用一条请求通道）。
+pub enum EditOp {
+    Note(NoteOp),
+    Table(Vec<TableOp>),
+    Canvas(Vec<CanvasOp>),
+}
+
 /// 一次待执行的编辑请求：请求体与回执句柄只在总线持有，Message 只带 id。
 pub struct EditRequest {
     pub kind: DocKind,
     pub path: String,
-    pub op: NoteOp,
+    pub op: EditOp,
     /// 空间笔记：工具线程先取回的服务端正文（None = 本地或取不到）。
     pub server_text: Option<String>,
     pub actor: EditActor,
@@ -102,7 +109,7 @@ impl ShellEditHost {
         &self,
         kind: DocKind,
         path: String,
-        op: NoteOp,
+        op: EditOp,
         server_text: Option<String>,
         actor: &EditActor,
     ) -> EditFuture<'_> {
@@ -151,7 +158,27 @@ impl AiEditHost for ShellEditHost {
                 None => None,
             };
             ShellEditHost { space: None }
-                .submit(DocKind::Note, path, op, server_text, &actor)
+                .submit(DocKind::Note, path, EditOp::Note(op), server_text, &actor)
+                .await
+        })
+    }
+
+    fn apply_table(&self, path: &str, ops: Vec<TableOp>, actor: &EditActor) -> EditFuture<'_> {
+        let path = path.to_string();
+        let actor = actor.clone();
+        Box::pin(async move {
+            ShellEditHost { space: None }
+                .submit(DocKind::Table, path, EditOp::Table(ops), None, &actor)
+                .await
+        })
+    }
+
+    fn apply_canvas(&self, path: &str, ops: Vec<CanvasOp>, actor: &EditActor) -> EditFuture<'_> {
+        let path = path.to_string();
+        let actor = actor.clone();
+        Box::pin(async move {
+            ShellEditHost { space: None }
+                .submit(DocKind::Canvas, path, EditOp::Canvas(ops), None, &actor)
                 .await
         })
     }
@@ -161,10 +188,16 @@ impl AiEditHost for ShellEditHost {
 pub fn apply(app: &mut App, id: u64) -> iced::Task<Message> {
     let Some(req) = take(id) else { return iced::Task::none() };
     let EditRequest { kind, path, op, server_text, actor, reply } = req;
-    match kind {
-        DocKind::Note => apply_note(app, path, op, server_text, actor, reply),
-        DocKind::Table | DocKind::Canvas => {
-            let _ = reply.send(Err("表格 / 画布的 AI 编辑尚未开放".to_string()));
+    match (kind, op) {
+        (DocKind::Note, EditOp::Note(op)) => apply_note(app, path, op, server_text, actor, reply),
+        (DocKind::Table, EditOp::Table(ops)) => {
+            crate::ai_doc_edit::apply_table(app, path, ops, actor, reply)
+        }
+        (DocKind::Canvas, EditOp::Canvas(ops)) => {
+            crate::ai_doc_edit::apply_canvas(app, path, ops, actor, reply)
+        }
+        _ => {
+            let _ = reply.send(Err("AI 编辑请求与文档类型不匹配".to_string()));
             iced::Task::none()
         }
     }
@@ -328,13 +361,8 @@ fn apply_space_note(
         if merged != app.note_text {
             space_actions::apply_remote_text(app, merged.clone());
         }
-        // 静默对齐本地 CRDT 文档：否则下一次本地编辑的差分以旧文档为基准，对端会看到重复文本
-        if app.note_collab_file.as_deref() == Some(path.as_str()) {
-            let aligned = app.note_text.clone();
-            if let Some(nc) = app.note_collab.as_mut() {
-                nc.align_silent(&aligned);
-            }
-        }
+        // 与人工输入同一条路：协作文档增量上行，打开者实时看到 AI 修改
+        space_actions::collab_after_edit(app);
         app.dirty = false;
         app.save_error = None;
     }
@@ -344,6 +372,7 @@ fn apply_space_note(
     let rel = path.clone();
     let content = merged.clone();
     let ok_text = success_text(&op, &path, replaced);
+    begin_presence(app, &path, &actor, &ok_text);
     let gen = app.epoch();
     iced::Task::perform(
         async move {
@@ -388,6 +417,41 @@ fn apply_space_note(
     )
 }
 
+/// AI 开始编辑：空间模式下上报在场状态（编辑中 + 操作者 + Agent），本地无协作通道。
+fn begin_presence(app: &mut App, path: &str, actor: &EditActor, summary: &str) {
+    if !matches!(app.repo_kind, RepoKind::Space(_)) {
+        return;
+    }
+    let identity = crate::space_actions::local_identity(app);
+    let presence = app
+        .ai_presence
+        .get_or_insert_with(crate::ai_presence::AiPresence::new);
+    if let Some(payload) = presence.begin(
+        std::time::Instant::now(),
+        "note",
+        path,
+        actor,
+        summary,
+        &identity,
+    ) {
+        crate::space_actions::send_ai_presence(app, payload);
+    }
+}
+
+/// AI 编辑结束：上报 idle + lastEdit（失败同样收场，不留下「编辑中」幽灵条目）。
+fn end_presence(app: &mut App) {
+    if !matches!(app.repo_kind, RepoKind::Space(_)) {
+        return;
+    }
+    let identity = crate::space_actions::local_identity(app);
+    let Some(presence) = app.ai_presence.as_mut() else {
+        return;
+    };
+    if let Some(payload) = presence.idle(std::time::Instant::now(), &identity) {
+        crate::space_actions::send_ai_presence(app, payload);
+    }
+}
+
 /// AI 版本的历史来源标记（agent 名进展示，id 供归因）。
 fn editor_of(actor: &EditActor) -> Option<HistoryEditor> {
     Some(HistoryEditor {
@@ -416,6 +480,7 @@ pub fn on_done(
     if gen != app.epoch() {
         return iced::Task::none();
     }
+    end_presence(app);
     match err {
         None => {
             if matches!(app.repo_kind, RepoKind::Space(_))

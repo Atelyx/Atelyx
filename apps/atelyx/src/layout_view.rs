@@ -2748,6 +2748,80 @@ fn vault_row(
         .into()
 }
 
+/// AI 协作者胶囊（sparkles + 「AI · Agent 名」；编辑中带脉冲点，悬停给操作者与状态）。
+pub(crate) fn ai_pill_row(
+    remotes: &[crate::ai_presence::RemoteAi],
+    pulse: bool,
+    window: iced::window::Id,
+) -> Element<'static, Message> {
+    const MAX_SHOWN: usize = 2;
+    let mut row = iced::widget::Row::<Message>::new().spacing(4);
+    for remote in remotes.iter().take(MAX_SHOWN) {
+        let dot = if remote.editing && pulse {
+            pal::ACCENT
+        } else {
+            pal::ACCENT.scale_alpha(0.4)
+        };
+        let label = if remote.editing {
+            format!("AI · {}", remote.agent_name)
+        } else {
+            format!("AI · {} · 刚刚修改", remote.agent_name)
+        };
+        let tip = if remote.editing {
+            format!("由 {} 的 AI（{}）编辑中", remote.operator_name, remote.agent_name)
+        } else {
+            format!("刚刚由 {} 的 AI（{}）修改", remote.operator_name, remote.agent_name)
+        };
+        let pill = container(
+            iced::widget::row![
+                icon("sparkles", 11.0, pal::ACCENT),
+                container(space())
+                    .width(Length::Fixed(8.0))
+                    .height(Length::Fixed(8.0))
+                    .style(move |_t| Style {
+                        background: Some(dot.into()),
+                        border: border::rounded(999.0),
+                        ..Style::default()
+                    }),
+                text(label).size(pal::fs_micro()).color(pal::TEXT_PRIMARY),
+            ]
+            .spacing(5)
+            .align_y(Vertical::Center),
+        )
+        .padding(Padding::ZERO.horizontal(8.0).vertical(4.0))
+        .style(|_t| Style {
+            background: Some(pal::ACCENT_SOFT.into()),
+            border: border::rounded(999.0),
+            ..Style::default()
+        });
+        row = row.push(
+            iced::widget::mouse_area(pill)
+                .on_enter(Message::Ui(crate::ui::UiMsg::HoverTip {
+                    window,
+                    label: tip.clone(),
+                    box_px: 22.0,
+                }))
+                .on_exit(Message::Ui(crate::ui::UiMsg::HoverTipEnd { window, label: tip })),
+        );
+    }
+    if remotes.len() > MAX_SHOWN {
+        row = row.push(
+            container(
+                text(format!("+{}", remotes.len() - MAX_SHOWN))
+                    .size(pal::fs_micro())
+                    .color(pal::TEXT_SECONDARY),
+            )
+            .padding(Padding::ZERO.horizontal(8.0).vertical(4.0))
+            .style(|_t| Style {
+                background: Some(pal::ACCENT_SOFT.into()),
+                border: border::rounded(999.0),
+                ..Style::default()
+            }),
+        );
+    }
+    row.into()
+}
+
 /// 协作者胶囊条（色点 + 昵称；超过 3 个折叠为「+N」）。笔记工具条与表格工具条共用，
 /// 展示顺序由调用方给定的成员序决定（不可点击的纯展示）。
 pub(crate) fn collab_pill_row(members: &[(iced::Color, String)]) -> Element<'static, Message> {
@@ -3321,6 +3395,16 @@ pub(crate) fn note_view(app: &App, window: iced::window::Id) -> Element<'_, Mess
             })
             .collect();
         toolbar_row = toolbar_row.push(collab_pill_row(&members));
+    }
+    // AI 协作者胶囊（与成员胶囊并列；按当前笔记过滤）
+    let ai_remotes: Vec<crate::ai_presence::RemoteAi> = app
+        .remote_ai
+        .iter()
+        .filter(|r| r.view == "note" && r.file.as_deref() == app.ui.last_note_file.as_deref())
+        .cloned()
+        .collect();
+    if matches!(app.repo_kind, crate::RepoKind::Space(_)) && !ai_remotes.is_empty() {
+        toolbar_row = toolbar_row.push(ai_pill_row(&ai_remotes, app.ai_pulse, window));
     }
     let toolbar = container(
         toolbar_row

@@ -38,6 +38,32 @@ pub enum NoteOp {
     Replace { find: String, replace: String, all: bool },
 }
 
+/// 表格编辑操作（行 / 字段按稳定 id 定位；一次调用 = 一个补丁）。
+#[derive(Debug, Clone, PartialEq)]
+pub enum TableOp {
+    /// 写单元格（value 形态随字段类型；null = 清空）。
+    SetCell { row_id: String, field_id: String, value: serde_json::Value },
+    /// 新增行（cells 按字段 id 给初值；缺省 = 空行）。
+    AddRow { cells: Vec<(String, serde_json::Value)> },
+    /// 删除行（稳定 id）。
+    DeleteRows { row_ids: Vec<String> },
+}
+
+/// 画布编辑操作（节点 / 连线按稳定 id 定位；一次调用 = 一个补丁）。
+#[derive(Debug, Clone, PartialEq)]
+pub enum CanvasOp {
+    /// 新建文本卡（x / y 缺省 = 自动落位）。
+    AddTextCard { text: String, x: Option<f64>, y: Option<f64> },
+    /// 新建笔记卡（引用仓库内笔记）。
+    AddNoteCard { path: String, x: Option<f64>, y: Option<f64> },
+    /// 连线（from / to = 节点 id）。
+    Connect { from: String, to: String, kind: Option<String> },
+    /// 改写文本卡正文。
+    UpdateText { node_id: String, text: String },
+    /// 删除节点（连带其连线）。
+    DeleteNode { node_id: String },
+}
+
 /// 异步编辑结果（不引入 async-trait 依赖）。
 pub type EditFuture<'a> = Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>>;
 
@@ -45,6 +71,10 @@ pub type EditFuture<'a> = Pin<Box<dyn Future<Output = Result<String, String>> + 
 pub trait AiEditHost: Send + Sync {
     /// 应用一次笔记编辑：`Ok(成功提示文本)` / `Err(可读失败原因)`，失败不得静默。
     fn apply_note(&self, path: &str, op: NoteOp, actor: &EditActor) -> EditFuture<'_>;
+    /// 应用一次表格编辑（补丁按稳定 id 合并，打开会话先合入再保存）。
+    fn apply_table(&self, path: &str, ops: Vec<TableOp>, actor: &EditActor) -> EditFuture<'_>;
+    /// 应用一次画布编辑（补丁按稳定 id 合并，打开会话先合入再保存）。
+    fn apply_canvas(&self, path: &str, ops: Vec<CanvasOp>, actor: &EditActor) -> EditFuture<'_>;
 }
 
 /// 精确替换：缺省要求唯一命中（多处命中报错、不写入）；`all` = 替换全部出现。

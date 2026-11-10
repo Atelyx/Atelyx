@@ -2830,6 +2830,23 @@ fn teardown_pump(app: &mut App) {
             });
         }
     }
+    // AI 离场帧（对端即时移除 AI 胶囊）
+    if let Some(cmds) = &app.space_cmds {
+        let now = std::time::Instant::now();
+        if let Some(payload) = app
+            .ai_presence
+            .as_mut()
+            .and_then(|presence| presence.leave(now))
+        {
+            let _ = cmds.send(atelyx_core::collab::SpaceCmd::Ephemeral {
+                channel: crate::ai_presence::CHANNEL.to_string(),
+                payload,
+                target_peer_id: None,
+            });
+        }
+    }
+    app.ai_presence = None;
+    app.remote_ai.clear();
     if let Some(nc) = app.note_collab.as_mut() {
         nc.close();
     }
@@ -2910,6 +2927,18 @@ fn send_note_frames(app: &App, file: &str, frames: Vec<Vec<u8>>) {
             });
         }
     }
+}
+
+/// AI 在场帧上行（编辑中 / 刚刚修改 / 离场共用出口）。
+pub(crate) fn send_ai_presence(app: &App, payload: serde_json::Value) {
+    send_cmd(
+        app,
+        atelyx_core::collab::SpaceCmd::Ephemeral {
+            channel: crate::ai_presence::CHANNEL.to_string(),
+            payload,
+            target_peer_id: None,
+        },
+    );
 }
 
 /// 笔记在场帧上行（编辑选区随行、保活补发与离场共用出口）。
@@ -3062,8 +3091,8 @@ pub(crate) fn peer_open_files(presence: Option<&serde_json::Value>) -> Vec<Strin
         .unwrap_or_default()
 }
 
-/// 本端协作身份（昵称 + 成员色）：笔记在场与表格在场共用同一份身份。
-fn local_identity(app: &App) -> (String, String) {
+/// 本端协作身份（昵称 + 成员色）：笔记 / 表格 / AI 在场共用同一份身份。
+pub(crate) fn local_identity(app: &App) -> (String, String) {
     let name = app
         .global
         .last_identity
@@ -3728,6 +3757,19 @@ fn on_space_event(app: &mut App, event: atelyx_core::collab::SpaceEvent) -> Task
                 if changed {
                     refresh_remote_cursors(app);
                 }
+            } else if channel == crate::ai_presence::CHANNEL {
+                let presence = app
+                    .ai_presence
+                    .get_or_insert_with(crate::ai_presence::AiPresence::new);
+                let changed = presence.apply(&peer_id, &payload, now);
+                if changed {
+                    app.remote_ai = app
+                        .ai_presence
+                        .as_mut()
+                        .map(|p| p.remotes(now))
+                        .unwrap_or_default();
+                    return ai_presence_openers(app);
+                }
             } else {
                 deliver_plugin_message(app, &peer_id, &channel, payload);
             }
@@ -3758,6 +3800,30 @@ fn on_space_event(app: &mut App, event: atelyx_core::collab::SpaceEvent) -> Task
         }
         E::Reconnecting { .. } => Task::none(),
     }
+}
+
+/// 收到远端 AI「刚刚修改」：该文件打开且无未保存改动时重取真源对齐（未打开无需处理）。
+/// 有未保存改动时不重载——用户草稿优先，下一次保存经三方合流带入 AI 结果。
+fn ai_presence_openers(app: &mut App) -> Task<Message> {
+    if !matches!(app.repo_kind, crate::RepoKind::Space(_)) {
+        return Task::none();
+    }
+    let Some(file) = app.ui.last_note_file.clone() else {
+        return Task::none();
+    };
+    if app.dirty {
+        return Task::none();
+    }
+    let hit = app.remote_ai.iter().any(|remote| {
+        !remote.editing
+            && remote.view == "note"
+            && remote.last_edit_ts > 0
+            && remote.file.as_deref() == Some(file.as_str())
+    });
+    if !hit {
+        return Task::none();
+    }
+    app.load_note(&file)
 }
 
 /// 远端 note-sync 帧合入：协议应答上行、文档变化回填编辑面、换路跟随。

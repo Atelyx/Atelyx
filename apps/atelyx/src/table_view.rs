@@ -2686,12 +2686,22 @@ fn toolbar<'a>(
         space().width(Length::Shrink).into()
     };
     let collab_pills: Element<'static, Message> = crate::layout_view::collab_pill_row(collab_members);
+    // AI 协作者胶囊（按当前表格过滤）
+    let ai_remotes: Vec<crate::ai_presence::RemoteAi> = app
+        .remote_ai
+        .iter()
+        .filter(|r| r.view == "table" && r.file.as_deref() == Some(session.file.as_str()))
+        .cloned()
+        .collect();
+    let ai_pills: Element<'static, Message> =
+        crate::layout_view::ai_pill_row(&ai_remotes, app.ai_pulse, window);
     row![
         view_select(app, session, window),
         dirty_pill,
         space().width(Length::Fill),
         save_state,
         collab_pills,
+        ai_pills,
         text(zoom_label).size(pal::fs_caption()).color(pal::TEXT_MUTED),
         text(stats).size(pal::fs_caption()).color(pal::TEXT_SECONDARY),
         icon_btn(window, "ellipsis", "更多", Message::Table(TableMsg::OpenMoreMenu(window))),

@@ -21,7 +21,9 @@ mod chat_composer;
 mod chat_input;
 mod chat_stream;
 mod cli;
+mod ai_doc_edit;
 mod ai_edit;
+mod ai_presence;
 mod app_icon;
 mod chat_view;
 mod color_picker_actions;
@@ -1452,6 +1454,12 @@ pub struct App {
     pub note_text: String,
     /// 上次落盘正文（打开 / 保存 / 回滚时更新；AI 三方合流的共同祖先）。
     pub note_base: String,
+    /// AI 协作者在场（空间模式：本端上行状态 + 远端条目）。
+    pub ai_presence: Option<ai_presence::AiPresence>,
+    /// 远端 AI 条目（工具条胶囊；随瞬时通道帧与 tick 刷新）。
+    pub remote_ai: Vec<ai_presence::RemoteAi>,
+    /// AI 胶囊脉冲相位（编辑中闪烁；tick 翻转）。
+    pub ai_pulse: bool,
     /// 源码档编辑器（进出档按正文重建）。
     pub source_editor: text_editor::Content,
     /// 编辑档状态（光标 / 选区 / 活动块 / 撤销栈 / 组合态）。
@@ -1777,6 +1785,9 @@ impl App {
                 children: HashMap::new(),
                 note_text: String::new(),
                 note_base: String::new(),
+                ai_presence: None,
+                remote_ai: Vec::new(),
+                ai_pulse: false,
                 source_editor: text_editor::Content::new(),
                 edit: markdown_edit::EditorState::default(),
                 edit_doc: None,
@@ -3174,6 +3185,16 @@ impl App {
                 // 限频压下的选区变化（拖选连续位移）由本拍补发最新一份：断线期产出即丢弃，
                 // 重连时的强制重发以最新状态兜底
                 space_actions::note_presence_flush(self);
+                // AI 在场：远端条目超时剔除 + 胶囊脉冲相位
+                if !self.remote_ai.is_empty() {
+                    self.ai_pulse = !self.ai_pulse;
+                    let now = Instant::now();
+                    self.remote_ai = self
+                        .ai_presence
+                        .as_mut()
+                        .map(|presence| presence.remotes(now))
+                        .unwrap_or_default();
+                }
                 // 表格在场：远端超时剔除、限频补发、空闲保活
                 space_actions::table_collab_tick(self);
                 // 画布在场：同上（选中 / 对话卡锁 / 流式）
@@ -7543,7 +7564,7 @@ impl App {
 
     /// 读 note 视图文件内容（仓库切换恢复与文件点击共用；根在发起时冻结，
     /// 任务在途时切换仓库不会让读盘落到新仓库路径）。
-    fn load_note(&self, rel: &str) -> Task<Message> {
+    pub(crate) fn load_note(&self, rel: &str) -> Task<Message> {
         if matches!(self.repo_kind, RepoKind::Space(_)) {
             return space_actions::space_load_note(self, rel);
         }
@@ -7621,6 +7642,8 @@ impl App {
                 .as_ref()
                 .is_some_and(|tc| tc.has_pending() || tc.has_peers())
             || !self.chat.renaming.is_empty()
+            // AI 协作者在场：远端条目过期剔除与胶囊脉冲
+            || !self.remote_ai.is_empty()
             || (self.settings_open && self.settings_tab == "shortcuts")
             || self.table.as_ref().is_some_and(|t| {
                 t.view.press.as_ref().is_some_and(|p| p.img.is_some() && !p.active)
