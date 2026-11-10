@@ -374,8 +374,3 @@ pub(crate) fn on_done(
     }
     next
 }
-/// 在途回执数（诊断用）。
-#[cfg(test)]
-pub(crate) fn pending_replies() -> usize {
-    replies().lock().unwrap_or_else(|e| e.into_inner()).len()
-}
