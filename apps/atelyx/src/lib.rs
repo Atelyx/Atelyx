@@ -515,10 +515,11 @@ enum Message {
     Chat(chat_actions::ChatMsg),
     /// AI 编辑请求（工具线程投递，update 内串行执行）。
     AiEdit(u64),
-    /// AI 编辑落盘回执（gen 守卫；失败恢复脏标记并提示）。
+    /// AI 笔记编辑落盘回执（gen 守卫；失败恢复脏标记并提示）。
     AiEditDone(u64, String, String, Option<String>),
-    /// AI 文件系统操作回执：回执句柄只在此处交出，失败不静默。
-    /// 回执句柄不可克隆，故本变体不参与 `Message` 的 Clone 派生（见 `Message::clone` 的替换实现）。
+    /// AI 表格 / 画布编辑收尾（gen 守卫）：只收在场态并按成败提示；文件变更与历史由保存链回执结算。
+    AiDocDone(u64, Option<String>),
+    /// AI 文件系统操作回执（盒装：载荷含跟随语义所需的全部字段）。
     AiFsDone(Box<AiFsDone>),
     /// 无操作（后台任务回执无界面变化时的统一落点）。
     Noop,
@@ -2778,6 +2779,15 @@ impl App {
             }
             Message::AiEditDone(gen, path, content, err) => {
                 ai_edit::on_done(self, gen, path, content, err)
+            }
+            Message::AiDocDone(gen, err) => {
+                if gen == self.epoch() {
+                    ai_edit::end_presence(self);
+                    if let Some(e) = err {
+                        self.notify(NoticeLevel::Error, format!("AI 修改未落盘：{e}"));
+                    }
+                }
+                Task::none()
             }
             Message::Noop => Task::none(),
             Message::FileRowPress { window, rel, is_dir } => {

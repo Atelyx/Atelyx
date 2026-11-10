@@ -126,7 +126,7 @@ fn apply_local_table(
         },
         |m| m,
     )
-    .chain(iced::Task::done(Message::AiEditDone(gen, path, String::new(), None)))
+    .chain(iced::Task::done(Message::AiDocDone(gen, None)))
 }
 
 /// 本地画布：口径同 apply_local_table（画布额外收敛视图态与引用补读）。
@@ -217,7 +217,7 @@ fn apply_local_canvas(
             |m| m,
         ),
     )
-    .chain(iced::Task::done(Message::AiEditDone(gen, path, String::new(), None)))
+    .chain(iced::Task::done(Message::AiDocDone(gen, None)))
 }
 
 /// 合入打开中的表格会话：会话模型即操作后的模型（含用户未保存编辑），撤销栈整体作废。
@@ -389,7 +389,7 @@ fn apply_space_table(
         },
         |m| m,
     )
-    .chain(iced::Task::done(Message::AiEditDone(gen, path, String::new(), None)))
+    .chain(iced::Task::done(Message::AiDocDone(gen, None)))
 }
 
 /// 空间表格（未打开）：读服务端真源 → 计划 → 补丁上行（文件不存在时只新建，不覆盖）。
@@ -408,7 +408,6 @@ fn apply_space_table_from_server(
     let editor = editor_of(&actor);
     crate::ai_edit::begin_presence_for(app, "table", &path, &actor, "编辑表格");
     let rel = path.clone();
-    let path_for_done = path.clone();
     iced::Task::perform(
         async move {
             let outcome = async {
@@ -452,10 +451,8 @@ fn apply_space_table_from_server(
                     outcome.after.clone(),
                 ),
                 // 未产生补丁 / 写入失败：没有落盘，不按保存成功结算
-                // 未产生补丁：没有落盘，按无错误收尾
-                Ok(None) => return Message::AiEditDone(gen, path_for_done.clone(), String::new(), None),
-                // 写入失败：把原因交回收尾，不按保存成功结算
-                Err(e) => return Message::AiEditDone(gen, path_for_done.clone(), String::new(), Some(e.clone())),
+                Ok(None) => return Message::AiDocDone(gen, None),
+                Err(e) => return Message::AiDocDone(gen, Some(e.clone())),
             };
             Message::Space(crate::SpaceMsg::TablePatchDone {
                 gen,
@@ -468,7 +465,7 @@ fn apply_space_table_from_server(
         },
         |m| m,
     )
-    .chain(iced::Task::done(Message::AiEditDone(gen, path, String::new(), None)))
+    .chain(iced::Task::done(Message::AiDocDone(gen, None)))
 }
 
 /// 空间画布：口径同 apply_space_table。
@@ -566,7 +563,7 @@ fn apply_space_canvas(
             |m| m,
         ),
     )
-    .chain(iced::Task::done(Message::AiEditDone(gen, path, String::new(), None)))
+    .chain(iced::Task::done(Message::AiDocDone(gen, None)))
 }
 
 /// 空间画布（未打开）：口径同 apply_space_table_from_server。
@@ -585,7 +582,6 @@ fn apply_space_canvas_from_server(
     let editor = editor_of(&actor);
     crate::ai_edit::begin_presence_for(app, "canvas", &path, &actor, "编辑画布");
     let rel = path.clone();
-    let path_for_done = path.clone();
     iced::Task::perform(
         async move {
             let outcome = async {
@@ -630,10 +626,8 @@ fn apply_space_canvas_from_server(
                     outcome.after.clone(),
                 ),
                 // 未产生补丁 / 写入失败：没有落盘，不按保存成功结算
-                // 未产生补丁：没有落盘，按无错误收尾
-                Ok(None) => return Message::AiEditDone(gen, path_for_done.clone(), String::new(), None),
-                // 写入失败：把原因交回收尾，不按保存成功结算
-                Err(e) => return Message::AiEditDone(gen, path_for_done.clone(), String::new(), Some(e.clone())),
+                Ok(None) => return Message::AiDocDone(gen, None),
+                Err(e) => return Message::AiDocDone(gen, Some(e.clone())),
             };
             Message::Space(crate::SpaceMsg::CanvasPatchDone {
                 gen,
@@ -646,7 +640,7 @@ fn apply_space_canvas_from_server(
         },
         |m| m,
     )
-    .chain(iced::Task::done(Message::AiEditDone(gen, path, String::new(), None)))
+    .chain(iced::Task::done(Message::AiDocDone(gen, None)))
 }
 
 // ===== 共用小件 =====
