@@ -647,7 +647,16 @@ fn render_numbered(content: &str, args: &Value, rel: &str) -> ToolResult {
         .map(|v| v as usize)
         .unwrap_or(READ_LINE_CAP)
         .clamp(1, READ_LINE_CAP);
-    let start = offset.min(total);
+    // 空文件与越界分开报：越界时无行可渲染，不能落进「空文件」分支骗模型判定内容为空
+    if total == 0 {
+        return ToolResult::ok(format!("（空文件：{rel}）"));
+    }
+    if offset >= total {
+        return ToolResult::ok(format!(
+            "（offset 超出范围：共 {total} 行，offset 从 1 起）"
+        ));
+    }
+    let start = offset;
     let end = (start + limit).min(total);
     let mut out = String::new();
     let mut shown_until = start;
@@ -666,8 +675,6 @@ fn render_numbered(content: &str, args: &Value, rel: &str) -> ToolResult {
             shown_until,
             shown_until + 1
         ));
-    } else if out.is_empty() {
-        out.push_str(&format!("（空文件：{rel}）"));
     }
     ToolResult::ok(out)
 }
@@ -2092,6 +2099,27 @@ mod tests {
             std::fs::read_to_string(dir.join("笔记/待办.md")).unwrap(),
             content
         );
+    }
+
+    #[tokio::test]
+    async fn read_file_offset_out_of_range_reports_range_not_empty() {
+        let dir = TempDir::new("ai-read-offset");
+        let ctx = ctx(&dir);
+        execute(&ctx, "write_file", json!({ "path": "a.md", "content": "一\n二\n" })).await;
+        queue_of(&ctx).drain().await.unwrap();
+        // offset 越过末行：非空文件不得报成空文件（模型会据此判定内容为空）
+        let r = execute(&ctx, "read_file", json!({ "path": "a.md", "offset": 9 })).await;
+        assert!(!r.is_error, "{}", r.text);
+        assert!(!r.text.contains("空文件"), "{}", r.text);
+        assert!(r.text.contains("offset 超出范围") && r.text.contains("共 2 行"), "{}", r.text);
+        // 恰为末行的 offset 照常渲染
+        let r = execute(&ctx, "read_file", json!({ "path": "a.md", "offset": 2 })).await;
+        assert!(r.text.contains("2| 二"), "{}", r.text);
+        // 真空文件仍报空文件
+        execute(&ctx, "write_file", json!({ "path": "empty.md", "content": "" })).await;
+        queue_of(&ctx).drain().await.unwrap();
+        let r = execute(&ctx, "read_file", json!({ "path": "empty.md" })).await;
+        assert!(r.text.contains("空文件"), "{}", r.text);
     }
 
     #[tokio::test]
