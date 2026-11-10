@@ -230,6 +230,20 @@ fn on_msg_open(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
             app.dismiss_popup();
             Task::none()
         }
+        tv::TableMsg::InsertRow { row_id, side } => {
+            with_session(app, |s| {
+                push_undo(s);
+                let Some(new_id) = ops::insert_row_near(&mut s.data, &row_id, side, nanoid::nanoid!()) else {
+                    drop_undo(s);
+                    return;
+                };
+                s.touch();
+                // 新空行即操作落点：选中跟着它，插入位置一眼可见
+                s.view.selection = Some(ops::TableSelection::Row(new_id));
+            });
+            app.dismiss_popup();
+            Task::none()
+        }
         tv::TableMsg::MoveRow { row_id, delta } => {
             with_session(app, |s| {
                 let Some(from) = s.data.rows.iter().position(|r| r.id == row_id) else { return };
@@ -1527,7 +1541,8 @@ fn on_context(app: &mut App, window: iced::window::Id, pos: Point, size: Size) -
         tv::Hit::HeaderMenu(c) => {
             Some(crate::layout_view::PopupState::TableFieldMenu { field_id: s.data.fields[c].id.clone() })
         }
-        tv::Hit::Gutter(r) => {
+        // 行号列整列都是行菜单入口：行号、拖拽排序把手与行高把手右键同出该行菜单
+        tv::Hit::Gutter(r) | tv::Hit::GutterGrip(r) | tv::Hit::GutterHandle(r) => {
             s.view.editing = None;
             s.view.selection = Some(ops::TableSelection::Row(s.data.rows[r].id.clone()));
             Some(crate::layout_view::PopupState::TableRowMenu { row_id: s.data.rows[r].id.clone() })

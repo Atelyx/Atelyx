@@ -4746,6 +4746,22 @@ fn popup_element<'a>(
                 ),
                 (
                     0,
+                    MenuEntry::action_icon(
+                        "上方插入空行",
+                        "arrow-up",
+                        Message::Table(crate::table_view::TableMsg::InsertRow { row_id: rid.clone(), side: -1 }),
+                    ),
+                ),
+                (
+                    0,
+                    MenuEntry::action_icon(
+                        "下方插入空行",
+                        "arrow-down",
+                        Message::Table(crate::table_view::TableMsg::InsertRow { row_id: rid.clone(), side: 1 }),
+                    ),
+                ),
+                (
+                    0,
                     MenuEntry::action("上移", Message::Table(crate::table_view::TableMsg::MoveRow { row_id: rid.clone(), delta: -1 })),
                 ),
                 (

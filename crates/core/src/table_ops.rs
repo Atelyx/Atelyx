@@ -750,8 +750,21 @@ pub struct StyleSummary {
 
 /// 行尾追加空行（返回新行 id）。
 pub fn add_row(table: &mut TableFile, id: String) -> String {
-    table.rows.push(TableRow { id: id.clone(), values: Default::default(), height: None, styles: None });
+    insert_row(table, table.rows.len(), id)
+}
+
+/// 在下标处插入空行（下标钳制到表长内；返回新行 id）。
+pub fn insert_row(table: &mut TableFile, index: usize, id: String) -> String {
+    let index = index.min(table.rows.len());
+    table.rows.insert(index, TableRow { id: id.clone(), values: Default::default(), height: None, styles: None });
     id
+}
+
+/// 在指定行的上 / 下插入空行（side < 0 = 上方，否则下方；返回新行 id）。
+/// 锚点行不存在返回 None（调用方据此不入撤销栈）。
+pub fn insert_row_near(table: &mut TableFile, row_id: &str, side: i32, id: String) -> Option<String> {
+    let index = table.rows.iter().position(|r| r.id == row_id)?;
+    Some(insert_row(table, if side < 0 { index } else { index + 1 }, id))
 }
 
 /// 复制行（值 + 样式全拷，浅拷贝共享字符串），插入原行下方；目标不存在返回 false。
@@ -1212,6 +1225,35 @@ mod tests {
         let clear = StylePatch { font: KeyOp::Set(None), ..Default::default() };
         assert!(apply_style_patch(&back.fields, &mut back.rows, &region, &clear));
         assert!(back.rows[0].styles.is_none(), "清除字体后全默认样式应删键");
+    }
+
+    /// 相对行插入：上插落锚点行之前、下插落锚点行之后，首行 / 末行两端成立，锚点缺失不插入。
+    #[test]
+    fn insert_row_near_places_above_and_below_anchor() {
+        let mut t = table(vec![field("f1", "a", "text")], vec![row("r1", vec![]), row("r2", vec![]), row("r3", vec![])]);
+        let ids = |t: &TableFile| t.rows.iter().map(|r| r.id.clone()).collect::<Vec<_>>();
+        assert_eq!(insert_row_near(&mut t, "r2", -1, "a".into()).as_deref(), Some("a"));
+        assert_eq!(ids(&t), vec!["r1", "a", "r2", "r3"]);
+        assert_eq!(insert_row_near(&mut t, "r2", 1, "b".into()).as_deref(), Some("b"));
+        assert_eq!(ids(&t), vec!["r1", "a", "r2", "b", "r3"]);
+        // 首行上插 / 末行下插：落在表头与表尾
+        insert_row_near(&mut t, "r1", -1, "head".into());
+        insert_row_near(&mut t, "r3", 1, "tail".into());
+        assert_eq!(ids(&t), vec!["head", "r1", "a", "r2", "b", "r3", "tail"]);
+        // 锚点缺失 = 不插入（不落撤销步）
+        assert_eq!(insert_row_near(&mut t, "无此行", 1, "ghost".into()), None);
+        assert_eq!(ids(&t).len(), 7);
+    }
+
+    #[test]
+    fn insert_row_clamps_index_and_starts_empty() {
+        let mut t = table(vec![field("f1", "a", "text")], vec![row("r1", vec![]), row("r2", vec![])]);
+        assert_eq!(insert_row(&mut t, 1, "r9".into()), "r9");
+        assert_eq!(t.rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), vec!["r1", "r9", "r2"]);
+        assert!(t.rows[1].values.is_empty() && t.rows[1].height.is_none(), "新行是空行");
+        // 越界下标钳到表尾（与表尾追加同落点）
+        insert_row(&mut t, 9, "r8".into());
+        assert_eq!(t.rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), vec!["r1", "r9", "r2", "r8"]);
     }
 
     #[test]

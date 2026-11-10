@@ -852,6 +852,8 @@ pub enum TableMsg {
     Redo,
     // 行列命令
     DuplicateRow(String),
+    /// 在指定行的上 / 下插入空行（side = -1 上插 / 1 下插）。
+    InsertRow { row_id: String, side: i32 },
     MoveRow { row_id: String, delta: i32 },
     DeleteRows(Vec<String>),
     AddField { name: String, ftype: String },
@@ -3924,6 +3926,29 @@ mod tests {
         assert_eq!(g.col_at(0.0), Some(0));
         assert_eq!(g.col_at(119.99), Some(0));
         assert_eq!(g.col_at(120.0), None);
+    }
+
+    /// 行号列整列由三种行级命中铺满：行号、拖拽排序把手与行高把手指向同一行，
+    /// 列内任意高度都不落到单元格或无命中——右键据此统一出该行菜单。
+    #[test]
+    fn gutter_column_is_all_row_menu_zone() {
+        let s = text_session(&["a", "b"]);
+        let g = geo(&s, Size::new(800.0, 600.0));
+        let row_h = g.cache.row_h[0];
+        let mut kinds = Vec::new();
+        for frac in [0.05, 0.3, 0.5, 0.7, 0.95] {
+            let y = g.header_h() + row_h * frac;
+            let hit = hit_at(&g, Point::new(g.gutter_w() / 2.0, y));
+            let kind = match hit {
+                Hit::Gutter(0) => 0,
+                Hit::GutterGrip(0) => 1,
+                Hit::GutterHandle(0) => 2,
+                _ => panic!("行号列 y 比例 {frac} 应命中行 0"),
+            };
+            kinds.push(kind);
+        }
+        // 三种命中在同一行高内都出现：菜单入口覆盖整列，不是只剩行号那一档
+        assert!(kinds.contains(&0) && kinds.contains(&1) && kinds.contains(&2), "三种行级命中都应可达：{kinds:?}");
     }
 
     /// 状态栏计算随布局重建：编辑后计数即时变，不靠绘制时重算。
