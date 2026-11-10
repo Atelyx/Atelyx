@@ -29,7 +29,8 @@ fn register_reply(tx: oneshot::Sender<Result<String, String>>) -> u64 {
 }
 
 /// 交出结果并摘除登记（接收端已放弃等待 = 模型已收到超时，结果丢弃）。
-fn settle_reply(id: u64, result: Result<String, String>) {
+/// 被更晚的宿主操作取代时由 gate 回填可读错误，工具线程不悬挂。
+pub(crate) fn settle(id: u64, result: Result<String, String>) {
     let Some(tx) = replies().lock().unwrap_or_else(|e| e.into_inner()).remove(&id) else {
         return;
     };
@@ -45,7 +46,7 @@ pub fn apply(
     let id = register_reply(reply);
     // 已有 flush 动作在途：不排队（同一时刻只有一个放行动作，排队会与它的回执抢放行）
     if app.flush_pending.is_some() {
-        settle_reply(id, Err("宿主保存进行中，请稍后重试".to_string()));
+        settle(id, Err("宿主保存进行中，请稍后重试".to_string()));
         return iced::Task::none();
     }
     app.gate(crate::PendingAfterFlush::AiFs { op, id })
@@ -77,7 +78,7 @@ fn done(
 /// 收尾打开中的编辑面（与文件树改名同一链），失败只回执不动状态。
 fn move_entry(app: &mut App, from: String, to: String, id: u64) -> iced::Task<Message> {
     if from == to {
-        settle_reply(id, Err("源与目标相同，无需移动".to_string()));
+        settle(id, Err("源与目标相同，无需移动".to_string()));
         return iced::Task::none();
     }
     let gen = app.epoch();
@@ -85,11 +86,11 @@ fn move_entry(app: &mut App, from: String, to: String, id: u64) -> iced::Task<Me
     match &app.repo_kind {
         RepoKind::Local => {
             let Ok(root) = app.vault.root() else {
-                settle_reply(id, Err("仓库未打开".to_string()));
+                settle(id, Err("仓库未打开".to_string()));
                 return iced::Task::none();
             };
             let Ok(exclude) = app.vault.exclude_folders() else {
-                settle_reply(id, Err("仓库配置读取失败".to_string()));
+                settle(id, Err("仓库配置读取失败".to_string()));
                 return iced::Task::none();
             };
             let is_dir = atelyx_core::vault::safe_join(&root, &from, false)
@@ -126,7 +127,7 @@ fn move_entry(app: &mut App, from: String, to: String, id: u64) -> iced::Task<Me
         }
         RepoKind::Space(session) => {
             if !session.role.can_write() {
-                settle_reply(id, Err("该空间为只读身份，无法编辑".to_string()));
+                settle(id, Err("该空间为只读身份，无法编辑".to_string()));
                 return iced::Task::none();
             }
             let client = session.client.clone();
@@ -173,7 +174,7 @@ fn delete_entry(app: &mut App, path: String, force: bool, id: u64) -> iced::Task
     match &app.repo_kind {
         RepoKind::Local => {
             let Ok(root) = app.vault.root() else {
-                settle_reply(id, Err("仓库未打开".to_string()));
+                settle(id, Err("仓库未打开".to_string()));
                 return iced::Task::none();
             };
             let path_task = path.clone();
@@ -224,7 +225,7 @@ fn delete_entry(app: &mut App, path: String, force: bool, id: u64) -> iced::Task
         }
         RepoKind::Space(session) => {
             if !session.role.can_write() {
-                settle_reply(id, Err("该空间为只读身份，无法编辑".to_string()));
+                settle(id, Err("该空间为只读身份，无法编辑".to_string()));
                 return iced::Task::none();
             }
             let client = session.client.clone();
@@ -291,7 +292,7 @@ pub(crate) fn on_done(
     result: Result<(), String>,
 ) -> iced::Task<Message> {
     if gen != app.epoch() {
-        settle_reply(id, Err("仓库已切换，AI 操作已取消".to_string()));
+        settle(id, Err("仓库已切换，AI 操作已取消".to_string()));
         return iced::Task::none();
     }
     let (follow, ok_text) = match (&result, &deleted) {
@@ -313,12 +314,12 @@ pub(crate) fn on_done(
             format!("已移动 {from} → {to}"),
         ),
         (Err(e), _) => {
-            settle_reply(id, Err(format!("操作失败：{e}")));
+            settle(id, Err(format!("操作失败：{e}")));
             app.notify(NoticeLevel::Error, format!("AI 文件操作失败：{e}"));
             return iced::Task::none();
         }
     };
-    settle_reply(id, Ok(ok_text));
+    settle(id, Ok(ok_text));
     // 与文件树操作同一条收尾链：插件广播 → 打开中的面跟随 → 树 / 名册 / 反链刷新
     match &follow {
         crate::FollowUp::Renamed { from, to, .. } if from != to => {

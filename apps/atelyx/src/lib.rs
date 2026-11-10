@@ -4899,14 +4899,19 @@ impl App {
         if self.table.as_ref().is_some_and(|t| t.view.editing.is_some()) {
             table_actions::commit_edit(self);
         }
-        // 在途的插件结构变更将被更晚的 pending 取代：先回填可读错误，插件调用不悬挂
-        if let Some(
-            PendingAfterFlush::PluginVaultRemove { request_id, .. }
-            | PendingAfterFlush::PluginVaultRename { request_id, .. },
-        ) = &self.flush_pending
-        {
-            self.plugins
-                .resolve_shell_call(*request_id, Err("被更晚的宿主操作取代，请重试".into()));
+        // 在途的插件结构变更 / AI 文件操作将被更晚的 pending 取代：先回填可读错误，调用方不悬挂
+        match self.flush_pending.as_ref() {
+            Some(
+                PendingAfterFlush::PluginVaultRemove { request_id, .. }
+                | PendingAfterFlush::PluginVaultRename { request_id, .. },
+            ) => {
+                self.plugins
+                    .resolve_shell_call(*request_id, Err("被更晚的宿主操作取代，请重试".into()));
+            }
+            Some(PendingAfterFlush::AiFs { id, .. }) => {
+                ai_fs_edit::settle(*id, Err("被更晚的宿主操作取代，请重试".to_string()));
+            }
+            _ => {}
         }
         if self.any_dirty() {
             self.flush_pending = Some(pending);
