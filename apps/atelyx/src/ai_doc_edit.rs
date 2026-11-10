@@ -6,7 +6,7 @@ use tokio::sync::oneshot;
 use atelyx_core::ai::doc_edit::{self, PlanError};
 use atelyx_core::ai::edit_host::{CanvasOp, EditActor, TableOp};
 use atelyx_core::history::{HistoryAction, HistoryEditor, HistoryKind, RecordOpts};
-use atelyx_core::space_client::{HistoryAuthorReq, HistoryRecordReq, SpaceError};
+use atelyx_core::space_client::{HistoryAuthorReq, HistoryRecordReq};
 use atelyx_core::vault::{CanvasFile, CanvasPatch, TableFile};
 
 use crate::canvas_view::SaveReason as CanvasSaveReason;
@@ -126,7 +126,7 @@ fn apply_local_table(
         },
         |m| m,
     )
-    .chain(iced::Task::done(Message::AiDocDone(gen, None)))
+    .chain(iced::Task::done(Message::AiDocDone(gen)))
 }
 
 /// 本地画布：口径同 apply_local_table（画布额外收敛视图态与引用补读）。
@@ -217,23 +217,27 @@ fn apply_local_canvas(
             |m| m,
         ),
     )
-    .chain(iced::Task::done(Message::AiDocDone(gen, None)))
+    .chain(iced::Task::done(Message::AiDocDone(gen)))
 }
 
 /// 合入打开中的表格会话：会话模型即操作后的模型（含用户未保存编辑），撤销栈整体作废。
 fn merge_table_into_session(app: &mut App, path: &str, after: &TableFile, updated_at: i64) {
-    let Some(s) = app.table.as_mut().filter(|s| s.file == path) else {
-        return;
-    };
-    s.data = after.clone();
-    s.data.updated_at = updated_at;
-    s.version += 1;
-    s.dirty = true;
-    s.save_error = None;
-    s.rebuild_layout();
-    // 合入后撤销栈内是合入前的全量快照：按 Ctrl+Z 会把刚落盘内容回滚并随下次保存广播（内容丢失）
-    s.view.undo.clear();
-    s.view.redo.clear();
+    {
+        let Some(s) = app.table.as_mut().filter(|s| s.file == path) else {
+            return;
+        };
+        s.data = after.clone();
+        s.data.updated_at = updated_at;
+        s.version += 1;
+        s.dirty = true;
+        s.save_error = None;
+        s.rebuild_layout();
+        // 合入后撤销栈内是合入前的全量快照：按 Ctrl+Z 会把刚落盘内容回滚并随下次保存广播（内容丢失）
+        s.view.undo.clear();
+        s.view.redo.clear();
+    }
+    // 合入即排自动保存：写盘失败后由防抖重试，不留「脏但无重试拍」的悬空会话
+    app.autosave_deadline = Some(std::time::Instant::now() + crate::AUTOSAVE_DEBOUNCE);
     // 打开中的表格内容变更属宿主发起的编辑结算：与人工保存同口径通知插件
     app.plugins.on_table_changed(Some(path));
 }
@@ -288,6 +292,8 @@ fn merge_canvas_into_session(
             s.view.locks.remove(id);
         }
     }
+    // 合入即排自动保存：写盘失败后由防抖重试，不留「脏但无重试拍」的悬空会话
+    app.schedule_canvas_save();
     crate::canvas_chat::sync_card_chats(app);
     if text_changed {
         if let Some(s) = app.canvas.as_mut() {
@@ -349,13 +355,11 @@ fn apply_space_table(
     iced::Task::perform(
         async move {
             let outcome: Result<String, String> = async {
-                let new_file = match client.table_patch(&space_id, &rel, &patch).await {
-                    Ok(ack) => ack.file,
-                    Err(SpaceError::BadRequest(m)) => {
-                        return Err(format!("表格已被他人修改，请刷新后重试（{m}）"));
-                    }
-                    Err(e) => return Err(e.to_string()),
-                };
+                let new_file = client
+                    .table_patch(&space_id, &rel, &patch)
+                    .await
+                    .map(|ack| ack.file)
+                    .map_err(|e| doc_edit::patch_error(e, "表格"))?;
                 space_history_record(
                     client.clone(),
                     space_id.clone(),
@@ -389,7 +393,7 @@ fn apply_space_table(
         },
         |m| m,
     )
-    .chain(iced::Task::done(Message::AiDocDone(gen, None)))
+    .chain(iced::Task::done(Message::AiDocDone(gen)))
 }
 
 /// 空间表格（未打开）：读服务端真源 → 计划 → 补丁上行（文件不存在时只新建，不覆盖）。
@@ -450,9 +454,11 @@ fn apply_space_table_from_server(
                     Ok(outcome.file.clone()),
                     outcome.after.clone(),
                 ),
-                // 未产生补丁 / 写入失败：没有落盘，不按保存成功结算
-                Ok(None) => return Message::AiDocDone(gen, None),
-                Err(e) => return Message::AiDocDone(gen, Some(e.clone())),
+                // 未产生补丁 / 写入失败：没有落盘。失败仍交保存链收尾（提示 + 重取整树），
+                // 但不得按成功结算（result = Err 即不推进基线、不记历史）
+                // 未落盘：提前收尾（提示 + 重取当前面），不按成功结算；保存链回执只用于已落盘的成功路径
+                Ok(None) => return Message::AiDocDone(gen),
+                Err(e) => return Message::AiDocFailed(gen, e.clone()),
             };
             Message::Space(crate::SpaceMsg::TablePatchDone {
                 gen,
@@ -465,7 +471,7 @@ fn apply_space_table_from_server(
         },
         |m| m,
     )
-    .chain(iced::Task::done(Message::AiDocDone(gen, None)))
+    .chain(iced::Task::done(Message::AiDocDone(gen)))
 }
 
 /// 空间画布：口径同 apply_space_table。
@@ -522,13 +528,11 @@ fn apply_space_canvas(
         iced::Task::perform(
             async move {
                 let outcome: Result<String, String> = async {
-                    let new_file = match client.canvas_patch(&space_id, &rel, &patch).await {
-                        Ok(ack) => ack.file,
-                        Err(SpaceError::BadRequest(m)) => {
-                            return Err(format!("画布已被他人修改，请刷新后重试（{m}）"));
-                        }
-                        Err(e) => return Err(e.to_string()),
-                    };
+                    let new_file = client
+                        .canvas_patch(&space_id, &rel, &patch)
+                        .await
+                        .map(|ack| ack.file)
+                        .map_err(|e| doc_edit::patch_error(e, "画布"))?;
                     space_history_record(
                         client.clone(),
                         space_id.clone(),
@@ -563,7 +567,7 @@ fn apply_space_canvas(
             |m| m,
         ),
     )
-    .chain(iced::Task::done(Message::AiDocDone(gen, None)))
+    .chain(iced::Task::done(Message::AiDocDone(gen)))
 }
 
 /// 空间画布（未打开）：口径同 apply_space_table_from_server。
@@ -625,9 +629,11 @@ fn apply_space_canvas_from_server(
                     Ok(outcome.file.clone()),
                     outcome.after.clone(),
                 ),
-                // 未产生补丁 / 写入失败：没有落盘，不按保存成功结算
-                Ok(None) => return Message::AiDocDone(gen, None),
-                Err(e) => return Message::AiDocDone(gen, Some(e.clone())),
+                // 未产生补丁 / 写入失败：没有落盘。失败仍交保存链收尾（提示 + 重取整树），
+                // 但不得按成功结算（result = Err 即不推进基线、不记历史）
+                // 未落盘：提前收尾（提示 + 重取当前面），不按成功结算；保存链回执只用于已落盘的成功路径
+                Ok(None) => return Message::AiDocDone(gen),
+                Err(e) => return Message::AiDocFailed(gen, e.clone()),
             };
             Message::Space(crate::SpaceMsg::CanvasPatchDone {
                 gen,
@@ -640,7 +646,7 @@ fn apply_space_canvas_from_server(
         },
         |m| m,
     )
-    .chain(iced::Task::done(Message::AiDocDone(gen, None)))
+    .chain(iced::Task::done(Message::AiDocDone(gen)))
 }
 
 // ===== 共用小件 =====
