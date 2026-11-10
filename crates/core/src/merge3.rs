@@ -143,6 +143,19 @@ fn hunks_overlap(a: &TextHunk, b: &TextHunk) -> bool {
     insert.at > remove.at && insert.at < remove.at + remove.remove
 }
 
+/// 三方合流是否存在重叠改动：重叠即无法安全对齐（调用方应拒绝写入而不是选边）。
+/// 两侧完全相同的改动不算冲突（合并时只落一份）。
+pub fn merge3_conflict(base: &str, ours: &str, theirs: &str) -> bool {
+    if ours == theirs || base == ours || base == theirs {
+        return false;
+    }
+    let our_hunks = diff_hunks(base, ours);
+    let their_hunks = diff_hunks(base, theirs);
+    our_hunks
+        .iter()
+        .any(|a| their_hunks.iter().any(|b| a != b && hunks_overlap(a, b)))
+}
+
 /// 三方合并：以 `base` 为共同祖先，把 `ours` / `theirs` 的差异都保留。
 /// 重叠冲突按 `side` 取一侧、另一侧与之重叠的 hunk 一并消费——结果只由入参决定。
 pub fn merge3(base: &str, ours: &str, theirs: &str, side: ConflictSide) -> String {
@@ -267,6 +280,19 @@ mod tests {
         assert_eq!(merge3("base", "base", "theirs", ConflictSide::Ours), "theirs");
         assert_eq!(merge3("base", "ours", "base", ConflictSide::Theirs), "ours");
         assert_eq!(merge3("base", "same", "same", ConflictSide::Ours), "same");
+    }
+
+    #[test]
+    fn 冲突判定只看重叠改动() {
+        let base = "a\nb\nc\n";
+        // 不同行各自改动：无冲突
+        assert!(!merge3_conflict(base, "A\nb\nc\n", "a\nb\nC\n"));
+        // 同一行两侧都改：冲突
+        assert!(merge3_conflict(base, "a\nX\nc\n", "a\nY\nc\n"));
+        // 两侧相同改动：不算冲突（合并只落一份）
+        assert!(!merge3_conflict(base, "a\nX\nc\n", "a\nX\nc\n"));
+        // 单侧未改：无冲突
+        assert!(!merge3_conflict(base, "a\nb\nc\nd\n", base));
     }
 
     #[test]

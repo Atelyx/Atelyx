@@ -36,6 +36,16 @@ pub struct HistoryAuthor {
     pub device: String,
 }
 
+/// AI 编辑来源（存在即本次版本由 Agent 编辑；人类编辑不写该字段）。
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryEditor {
+    #[serde(default)]
+    pub agent_id: String,
+    #[serde(default)]
+    pub agent_name: String,
+}
+
 /// 版本行为（edit = 常规编辑；restore = 回滚落盘）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -52,6 +62,9 @@ pub struct HistoryVersion {
     pub seq: u64,
     pub ts: i64,
     pub author: HistoryAuthor,
+    /// AI 编辑来源（None = 人类编辑；旧侧文件缺字段同样按人类处理）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub editor: Option<HistoryEditor>,
     pub action: HistoryAction,
     pub content: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -119,6 +132,8 @@ pub struct VersionMeta {
     #[serde(default)]
     pub summary: Option<String>,
     pub author: HistoryAuthor,
+    #[serde(default)]
+    pub editor: Option<HistoryEditor>,
 }
 
 #[derive(Deserialize)]
@@ -336,6 +351,8 @@ pub struct RecordOpts {
     pub max_versions: usize,
     /// 补充说明。
     pub note: Option<String>,
+    /// AI 编辑来源（None = 人类；AI 版本不参与连续编辑合并）。
+    pub editor: Option<HistoryEditor>,
 }
 
 /// 追加一个历史版本（本地路径全量读改写，无锁——调用方需避免并发写同一侧文件；
@@ -354,6 +371,8 @@ pub fn record_version(root: &Path, kind: HistoryKind, file: &str, opts: &RecordO
         (Some(last), Some(window)) if opts.action == HistoryAction::Edit
             && last.action == HistoryAction::Edit
             && last.author.id == opts.author.id
+            && last.editor.is_none()
+            && opts.editor.is_none()
             && now - last.ts < window =>
         {
             Some(last.seq)
@@ -371,6 +390,7 @@ pub fn record_version(root: &Path, kind: HistoryKind, file: &str, opts: &RecordO
         last.content = opts.content.clone();
         last.ts = now;
         last.author = opts.author.clone();
+        last.editor = opts.editor.clone();
         last.summary = Some(version_summary(kind, &prev, &opts.content));
         if opts.note.is_some() {
             last.note = opts.note.clone();
@@ -383,6 +403,7 @@ pub fn record_version(root: &Path, kind: HistoryKind, file: &str, opts: &RecordO
         seq,
         ts: now,
         author: opts.author.clone(),
+        editor: opts.editor.clone(),
         action: opts.action,
         content: opts.content.clone(),
         summary: Some(version_summary(kind, &prev_content, &opts.content)),
@@ -515,6 +536,7 @@ mod tests {
             coalesce_edit_ms: Some(60_000),
             max_versions: 0,
             note: None,
+            editor: None,
         }
     }
 
@@ -534,6 +556,39 @@ mod tests {
     }
 
     #[test]
+    fn ai_versions_do_not_coalesce() {
+        let tmp = crate::vault::test_support::TempDir::new("hist-ai");
+        record_version(&tmp, HistoryKind::Note, "a.md", &opts("v1")).unwrap();
+        let mut ai = opts("v2");
+        ai.editor = Some(HistoryEditor {
+            agent_id: "builtin-agent".into(),
+            agent_name: "Agent".into(),
+        });
+        record_version(&tmp, HistoryKind::Note, "a.md", &ai).unwrap();
+        // 人工版不并入 AI 版（同作者 + 窗口内）
+        record_version(&tmp, HistoryKind::Note, "a.md", &opts("v3")).unwrap();
+        let versions = load_history(&tmp, HistoryKind::Note, "a.md");
+        assert_eq!(versions.len(), 3);
+        assert_eq!(versions[1].editor.as_ref().map(|e| e.agent_name.as_str()), Some("Agent"));
+        assert!(versions[0].editor.is_none() && versions[2].editor.is_none());
+    }
+
+    #[test]
+    fn legacy_side_file_without_editor_reads_as_human() {
+        let tmp = crate::vault::test_support::TempDir::new("hist-legacy-editor");
+        let dir = tmp.join(".atelyx/history");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("a.md.json"),
+            r#"{"versions":[{"seq":1,"ts":1,"author":{"id":"t","name":"T","device":"T"},"action":"edit","content":"x"}]}"#,
+        )
+        .unwrap();
+        let versions = load_history(&tmp, HistoryKind::Note, "a.md");
+        assert_eq!(versions.len(), 1);
+        assert!(versions[0].editor.is_none());
+    }
+
+    #[test]
     fn restore_action_breaks_coalesce() {
         let tmp = crate::vault::test_support::TempDir::new("hist-restore");
         record_version(&tmp, HistoryKind::Note, "a.md", &opts("v1")).unwrap();
@@ -548,6 +603,7 @@ mod tests {
                 coalesce_edit_ms: Some(60_000),
                 max_versions: 0,
                 note: None,
+                editor: None,
             },
         )
         .unwrap();

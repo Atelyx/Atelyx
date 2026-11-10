@@ -21,6 +21,7 @@ mod chat_composer;
 mod chat_input;
 mod chat_stream;
 mod cli;
+mod ai_edit;
 mod app_icon;
 mod chat_view;
 mod color_picker_actions;
@@ -509,6 +510,10 @@ enum Message {
     RepoHistoryRefresh,
     /// AI 对话面板消息（会话 / run 事件 / 编排）。
     Chat(chat_actions::ChatMsg),
+    /// AI 编辑请求（工具线程投递，update 内串行执行）。
+    AiEdit(u64),
+    /// AI 编辑落盘回执（gen 守卫；失败恢复脏标记并提示）。
+    AiEditDone(u64, String, String, Option<String>),
     /// 无操作（后台任务回执无界面变化时的统一落点）。
     Noop,
     /// 打开链接（外链 / 仓库路径 / wiki）。
@@ -1445,6 +1450,8 @@ pub struct App {
     pub children: HashMap<String, Vec<vault::DirChild>>,
     /// note 正文真相（与磁盘逐字节一致；源码档与编辑档共用）。
     pub note_text: String,
+    /// 上次落盘正文（打开 / 保存 / 回滚时更新；AI 三方合流的共同祖先）。
+    pub note_base: String,
     /// 源码档编辑器（进出档按正文重建）。
     pub source_editor: text_editor::Content,
     /// 编辑档状态（光标 / 选区 / 活动块 / 撤销栈 / 组合态）。
@@ -1769,6 +1776,7 @@ impl App {
                 os_shown: HashMap::new(),
                 children: HashMap::new(),
                 note_text: String::new(),
+                note_base: String::new(),
                 source_editor: text_editor::Content::new(),
                 edit: markdown_edit::EditorState::default(),
                 edit_doc: None,
@@ -2127,6 +2135,7 @@ impl App {
                 // 内容载入成功即登记最近打开（本地与空间模式同链回执）
                 recent_view::record(self, &rel, recent_view::RecentKind::Note);
                 self.note_text = text.clone();
+                self.note_base = text.clone();
                 self.reset_note_rows();
                 // 空间模式：载入成功即磁盘基线（三方合流的祖先）
                 self.space_note_flushed = matches!(self.repo_kind, RepoKind::Space(_)).then(|| text.clone());
@@ -2160,6 +2169,7 @@ impl App {
                 // 载入失败必须清空编辑器：last_note_file 已指向新文件，残留旧内容
                 // 会让 Ctrl+S 把旧内容写进新路径；空间合流基线与协作绑定同样不得残留
                 self.note_text.clear();
+                self.note_base.clear();
                 self.source_editor = text_editor::Content::new();
                 self.edit.reset(0);
                 self.edit_doc = None;
@@ -2251,6 +2261,8 @@ impl App {
                 }
                 self.plugins.on_file_changed(&rel, FileChangeKind::Updated, None);
                 self.save_error = None;
+                // 落盘即基线（AI 三方合流的共同祖先）
+                self.note_base = saved.clone();
                 let proceed = match reason {
                     SaveReason::Flush => {
                         // 保存发起时冻结的内容与当前一致才算落盘；期间又有输入则再收一轮
@@ -2725,6 +2737,10 @@ impl App {
                 // 画布卡会话的 run 快照经 Chat 通道进入，落卡后同样要排自动保存
                 self.schedule_canvas_save();
                 task
+            }
+            Message::AiEdit(id) => ai_edit::apply(self, id),
+            Message::AiEditDone(gen, path, content, err) => {
+                ai_edit::on_done(self, gen, path, content, err)
             }
             Message::Noop => Task::none(),
             Message::FileRowPress { window, rel, is_dir } => {
@@ -5187,6 +5203,7 @@ impl App {
                 }
                 self.ui.last_note_file = None;
                 self.note_text.clear();
+                self.note_base.clear();
                 self.source_editor = text_editor::Content::new();
                 self.edit.reset(0);
                 self.edit_doc = None;
@@ -5399,7 +5416,7 @@ impl App {
     // ===== 历史侧车 =====
 
     /// 读取当前上下文（笔记 / 表格 / 画布）的历史版本（尽力而为，读失败 = 空列表）。
-    fn reload_history(&self) -> Task<Message> {
+    pub(crate) fn reload_history(&self) -> Task<Message> {
         let (kind, rel) = match self.history_kind {
             atelyx_core::history::HistoryKind::Note => {
                 (atelyx_core::history::HistoryKind::Note, self.ui.last_note_file.clone())
@@ -5464,6 +5481,7 @@ impl App {
                             coalesce_edit_ms: Some(60_000),
                             max_versions: 0,
                             note: None,
+                            editor: None,
                         },
                     )
                 })
@@ -5517,6 +5535,7 @@ impl App {
                                     coalesce_edit_ms: None,
                                     max_versions: 0,
                                     note: None,
+                                    editor: None,
                                 },
                             )
                         })
@@ -5596,6 +5615,7 @@ impl App {
                             coalesce_edit_ms: None,
                             max_versions: 0,
                             note: None,
+                            editor: None,
                         },
                     )
                 })
@@ -5645,6 +5665,7 @@ impl App {
                             coalesce_edit_ms: None,
                             max_versions: 0,
                             note: None,
+                            editor: None,
                         },
                     )
                 })
@@ -7754,6 +7775,8 @@ impl App {
             Subscription::run_with(self.tray.spec(), tray::events_stream).map(Message::Tray),
             chat_actions::run_events_subscription(),
             chat_actions::control_subscription(),
+            // AI 编辑请求：工具线程投递 → update 内串行执行
+            ai_edit::subscription(),
         ])
     }
 

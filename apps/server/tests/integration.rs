@@ -800,6 +800,62 @@ async fn history_record_aggregate_and_rename_migration() {
     );
 }
 
+
+/// 历史记录入参（editor 传 null = 人类编辑）；固定同作者 + 60s 合并窗口。
+async fn record_note_with_editor(
+    ctx: &Ctx,
+    token: &str,
+    space: &str,
+    content: &str,
+    editor: Value,
+) -> (u16, Value) {
+    ctx.post(
+        &format!("/api/spaces/{space}/history/record"),
+        Some(token),
+        json!({
+            "kind": "note",
+            "file": "a.md",
+            "content": content,
+            "action": "edit",
+            "author": { "id": "dev-1", "name": "甲", "device": "dev-1" },
+            "editor": editor,
+            "coalesceEditMs": 60_000,
+        }),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn history_editor_is_stored_and_never_coalesced() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+    let space_id = setup_two_members(&ctx, "alice", "bob").await;
+    let token = login_as(&ctx, "alice").await;
+
+    // 人工版 → AI 版（窗口内同作者也不并入）→ 人工版（也不并入 AI 版）
+    let (status, _) = record_note_with_editor(&ctx, &token, &space_id, "v1", Value::Null).await;
+    assert_eq!(status, 200);
+    let ai = json!({ "agentId": "builtin-agent", "agentName": "Agent" });
+    let (status, _) = record_note_with_editor(&ctx, &token, &space_id, "v2", ai).await;
+    assert_eq!(status, 200);
+    let (status, _) = record_note_with_editor(&ctx, &token, &space_id, "v3", Value::Null).await;
+    assert_eq!(status, 200);
+
+    let (status, agg) = ctx
+        .get(&format!("/api/spaces/{space_id}/history/aggregate"), Some(&token), &[])
+        .await;
+    assert_eq!(status, 200);
+    let entries = agg["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 3, "AI 版本不参与连续编辑合并：{agg}");
+    let ai_entries: Vec<&Value> = entries
+        .iter()
+        .filter(|e| e.get("editor").is_some_and(|x| !x.is_null()))
+        .collect();
+    assert_eq!(ai_entries.len(), 1, "只有 AI 版带 editor：{agg}");
+    assert_eq!(ai_entries[0]["editor"]["agentName"], "Agent");
+    assert_eq!(ai_entries[0]["editor"]["agentId"], "builtin-agent");
+}
+
 #[tokio::test]
 async fn history_record_rejected_for_viewer() {
     let dir = tempfile::tempdir().unwrap();

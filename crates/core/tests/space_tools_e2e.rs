@@ -237,6 +237,8 @@ fn space_ctx(server_url: &str) -> ToolCtx {
         exclude: Vec::new(),
         plugin_tools: Vec::new(),
         plugins: None,
+        host: None,
+        actor: None,
     }
 }
 

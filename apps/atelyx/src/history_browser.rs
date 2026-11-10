@@ -265,25 +265,38 @@ fn version_row(v: &HistoryVersion, viewer: bool, expanded: bool, window: iced::w
         HistoryAction::Restore => "回滚",
     };
     let seq = v.seq;
-    let expand = button(
-        row![
-            icon(
-                if expanded { "chevron-down" } else { "chevron-right" },
-                12.0,
-                pal::TEXT_MUTED,
-            ),
-            text(action)
-                .size(pal::fs_caption())
-                .color(pal::ACCENT)
-                .font(crate::ui::bold()),
-            text(author_line(v)).size(pal::fs_micro()).color(pal::TEXT_SECONDARY),
-            text(v.summary.clone().unwrap_or_default()).size(pal::fs_micro()).color(pal::TEXT_MUTED),
-            space().width(Length::Fill),
-            text(format_ts(v.ts)).size(pal::fs_micro()).color(pal::TEXT_MUTED),
-        ]
-        .spacing(8)
-        .align_y(Vertical::Center),
-    )
+    let mut head = row![
+        icon(
+            if expanded { "chevron-down" } else { "chevron-right" },
+            12.0,
+            pal::TEXT_MUTED,
+        ),
+        text(action)
+            .size(pal::fs_caption())
+            .color(pal::ACCENT)
+            .font(crate::ui::bold()),
+    ]
+    .spacing(8)
+    .align_y(Vertical::Center);
+    // AI 编辑版本：动作后标 AI 徽标（悬停给 Agent 名；作者行仍显示操作者）
+    if let Some(editor) = &v.editor {
+        let label = format!("由 AI（{}）编辑", editor.agent_name);
+        head = head.push(
+            iced::widget::mouse_area(controls::badge("AI", pal::ACCENT_SOFT, pal::ACCENT))
+                .on_enter(Message::Ui(crate::ui::UiMsg::HoverTip {
+                    window,
+                    label: label.clone(),
+                    box_px: 18.0,
+                }))
+                .on_exit(Message::Ui(crate::ui::UiMsg::HoverTipEnd { window, label })),
+        );
+    }
+    head = head
+        .push(text(author_line(v)).size(pal::fs_micro()).color(pal::TEXT_SECONDARY))
+        .push(text(v.summary.clone().unwrap_or_default()).size(pal::fs_micro()).color(pal::TEXT_MUTED))
+        .push(space().width(Length::Fill))
+        .push(text(format_ts(v.ts)).size(pal::fs_micro()).color(pal::TEXT_MUTED));
+    let expand = button(head)
     .padding(0.0)
     .width(Length::Fill)
     .style(controls::row_style(false, pal::RADIUS_SM))

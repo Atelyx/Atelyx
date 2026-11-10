@@ -690,6 +690,14 @@ impl HistoryDayParams {
     }
 }
 
+/// AI 编辑来源（历史版本由 Agent 编辑时携带；缺省 = 人类编辑）。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryEditor {
+    pub agent_id: String,
+    pub agent_name: String,
+}
+
 /// 一条当日版本记录：`kind` / `action` 取宿主历史侧文件的取值域（`note` / `canvas` / `table`、
 /// `edit` / `restore`）；`file` 为仓库相对路径，`ts` 为毫秒时间戳。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -702,6 +710,9 @@ pub struct HistoryDayEntry {
     pub author_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    /// AI 编辑来源（缺省 = 人类编辑）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub editor: Option<HistoryEditor>,
 }
 
 /// [`history::DAY`] 的 result：按时间新→旧排列。
@@ -1948,6 +1959,7 @@ mod tests {
             action: "edit".into(),
             author_name: "作者".into(),
             summary: None,
+            editor: None,
         };
         assert_eq!(
             serde_json::to_value(&entry).unwrap(),

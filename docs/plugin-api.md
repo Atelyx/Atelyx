@@ -2644,6 +2644,9 @@ pub struct HistoryDayEntry {
     pub author_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    /// AI 编辑来源（缺省 = 人类编辑）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub editor: Option<HistoryEditor>,
 }
 ```
 

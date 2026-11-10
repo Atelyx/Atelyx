@@ -7,7 +7,7 @@ use iced::{Element, Length, Padding, Task};
 
 use atelyx_core::history::{HistoryAction, HistoryKind};
 use atelyx_core::plugin_runtime::{
-    DayActivity, HistoryActivityResult, HistoryDayEntry, HistoryDayResult,
+    DayActivity, HistoryActivityResult, HistoryDayEntry, HistoryDayResult, HistoryEditor,
 };
 use atelyx_core::space_client::HistoryAggregate;
 
@@ -27,6 +27,8 @@ pub struct RepoVersionRow {
     pub action: atelyx_core::history::HistoryAction,
     pub author_name: String,
     pub summary: Option<String>,
+    /// AI 编辑来源（None = 人类编辑）。
+    pub editor: Option<atelyx_core::history::HistoryEditor>,
 }
 
 /// 按文件分组的历史条目（版本行新→旧；分组按最近版本时间新→旧）。
@@ -60,6 +62,7 @@ pub fn groups_from_local(files: Vec<atelyx_core::history::RepoHistoryFile>) -> V
                     action: v.action,
                     author_name: v.author.name,
                     summary: v.summary,
+                    editor: v.editor,
                 })
                 .collect(),
         })
@@ -82,6 +85,7 @@ pub fn groups_from_space(agg: HistoryAggregate) -> Vec<RepoHistoryGroup> {
             action: parse_action(&e.action),
             author_name: e.author_name,
             summary: e.summary,
+            editor: e.editor,
         };
         if let Some(g) = groups.iter_mut().find(|g| g.kind == kind && g.file == e.file) {
             g.versions.push(version);
@@ -148,6 +152,10 @@ pub(crate) fn day_entries(groups: &[RepoHistoryGroup], day: i64) -> Vec<HistoryD
                     action: action_key(version.action).to_string(),
                     author_name: version.author_name.clone(),
                     summary: version.summary.clone(),
+                    editor: version.editor.as_ref().map(|e| HistoryEditor {
+                        agent_id: e.agent_id.clone(),
+                        agent_name: e.agent_name.clone(),
+                    }),
                 })
         })
         .collect();
@@ -397,6 +405,7 @@ mod tests {
             action: HistoryAction::Edit,
             summary: None,
             author: HistoryAuthor { id: "u".into(), name: "alice".into(), device: "d".into() },
+            editor: None,
         }
     }
 

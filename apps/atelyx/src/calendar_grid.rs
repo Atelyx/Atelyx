@@ -115,6 +115,8 @@ pub struct DayEntry {
     pub action: HistoryAction,
     pub author_name: String,
     pub summary: Option<String>,
+    /// AI 编辑来源（None = 人类编辑）。
+    pub editor: Option<atelyx_core::history::HistoryEditor>,
 }
 
 /// 历史聚合版本按本地日界过滤（ts 毫秒；day = 自纪元天数）。
@@ -132,6 +134,7 @@ pub fn entries_on_day(groups: &[RepoHistoryGroup], day: i64) -> Vec<DayEntry> {
                     action: v.action,
                     author_name: v.author_name.clone(),
                     summary: v.summary.clone(),
+                    editor: v.editor.clone(),
                 })
         })
         .collect();
@@ -261,6 +264,7 @@ mod tests {
                 action: HistoryAction::Edit,
                 author_name: "a".into(),
                 summary: None,
+                editor: None,
             }],
         };
         // 相邻整天（86_400_000 ms 间隔，环境时区无关：不同整天必不同日）
@@ -291,6 +295,7 @@ mod tests {
                 action: HistoryAction::Edit,
                 author_name: "a".into(),
                 summary: None,
+                editor: None,
             }],
         };
         let counts = activity_from_groups(&[group(5_000), group(6_000), group(90_000_000)]);

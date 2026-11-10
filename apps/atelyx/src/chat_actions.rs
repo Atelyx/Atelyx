@@ -14,6 +14,7 @@ use tokio::sync::mpsc;
 
 use atelyx_core::ai::{
     agent::{self, AgentHub, RunConfig, RunEvent},
+    edit_host::AiIdentity,
     refs as ai_refs,
     session::{
         AppendBatch, CommitBatch, DeleteEntry, MetaPatch, OverridesPatch, SessionDef, SessionStore,
@@ -680,6 +681,13 @@ pub(crate) fn resolve_run_config(
             .map(|a| a.tools)
             .unwrap_or_default()
     });
+    // 本次 run 的 Agent 身份（历史署名 / 在场展示）；缺省 = 内置「对话」
+    let agent_identity = agent
+        .map(|a| AiIdentity { agent_id: a.id.clone(), agent_name: a.name.clone() })
+        .unwrap_or_else(|| AiIdentity {
+            agent_id: atelyx_core::vault::BUILTIN_AGENT_CHAT_ID.to_string(),
+            agent_name: "对话".to_string(),
+        });
     // 工具使用引导按名册拼接（缺某工具则对应条目不下发）；辅助调用不带工具，不下发
     let system_prompt = if for_run {
         let guidance = ai_refs::tool_guidance(&tool_ids);
@@ -704,6 +712,7 @@ pub(crate) fn resolve_run_config(
         model,
         reasoning_effort,
         system_prompt,
+        agent: agent_identity,
         tool_ids,
         search: search_config(app),
         exclude: app.repo_config.exclude_folders.clone().unwrap_or_default(),
@@ -783,8 +792,9 @@ fn key_scope(app: &App) -> Option<String> {
     }
 }
 
-/// 工具执行环境：按容器身份选仓库访问后端（本地 = 仓库根 + 写盘队列；空间 = 服务端客户端）。
-pub(crate) fn tool_ctx(app: &App) -> ToolCtx {
+/// 工具执行环境：按容器身份选仓库访问后端（本地 = 仓库根 + 写盘队列；空间 = 服务端客户端），
+/// 并注入内容写入出口与本次 run 的身份（操作者 + Agent）。
+pub(crate) fn tool_ctx(app: &App, agent: &AiIdentity) -> ToolCtx {
     let repo = match &app.repo_kind {
         RepoKind::Local => RepoAccess::Local {
             root: app.vault_root.clone().unwrap_or_default(),
@@ -801,6 +811,11 @@ pub(crate) fn tool_ctx(app: &App) -> ToolCtx {
         exclude: app.repo_config.exclude_folders.clone().unwrap_or_default(),
         plugin_tools: app.plugins.plugin_tools(),
         plugins: Some(app.plugins.clone()),
+        host: Some(Arc::new(crate::ai_edit::ShellEditHost::new(app))),
+        actor: Some(atelyx_core::ai::edit_host::EditActor {
+            author: crate::history_author(app),
+            agent: agent.clone(),
+        }),
     }
 }
 
@@ -2037,7 +2052,7 @@ fn start_run(
     history: Vec<Value>,
     app: &App,
 ) -> iced::Task<Message> {
-    let ctx = tool_ctx(app);
+    let ctx = tool_ctx(app, &config.agent);
     let store = Arc::clone(store());
     let hub = Arc::clone(hub());
     let events = run_event_channel().0.clone();
@@ -2712,7 +2727,7 @@ fn plugin_chat_send_now(
         .and_then(|s| s.get("compaction").cloned())
         .filter(|c| !c.is_null());
     history.push(user_message);
-    let ctx = tool_ctx(app);
+    let ctx = tool_ctx(app, &config.agent);
     let store = Arc::clone(store());
     let hub = Arc::clone(hub());
     let events = run_event_channel().0.clone();

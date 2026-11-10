@@ -1224,7 +1224,7 @@ fn config_for(app: &App, plan: &SendPlan, space_prompt: Option<String>) -> Resul
 fn start_run(app: &App, node_id: &str, config: RunConfig, history: Vec<Value>) -> Task<Message> {
     let Some(node) = node(app, node_id) else { return Task::none() };
     let compaction = node.data.get("compaction").cloned().filter(|c| !c.is_null());
-    let ctx = chat_actions::tool_ctx(app);
+    let ctx = chat_actions::tool_ctx(app, &config.agent);
     let hub = std::sync::Arc::clone(chat_actions::hub());
     let events = chat_actions::run_event_channel().0.clone();
     let sid = session_id(node_id);

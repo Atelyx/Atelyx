@@ -38,6 +38,8 @@ pub struct RunConfig {
     pub reasoning_effort: Option<ReasoningEffort>,
     /// 系统提示词（Agent 提示词 + 提示词标记注入后的最终文本；None = 无 system）。
     pub system_prompt: Option<String>,
+    /// 本次 run 使用的 Agent 身份（历史署名 / 在场展示）。
+    pub agent: crate::ai::edit_host::AiIdentity,
     /// Agent 勾选的工具 id 清单（内置工具取工具名，插件工具取 `plugin:<插件 id>:<工具名>`）。
     pub tool_ids: Vec<String>,
     pub search: SearchConfig,
@@ -53,6 +55,7 @@ impl std::fmt::Debug for RunConfig {
             .field("model", &self.model)
             .field("reasoning_effort", &self.reasoning_effort)
             .field("system_prompt", &self.system_prompt)
+            .field("agent", &self.agent)
             .field("tool_ids", &self.tool_ids)
             .field("search", &self.search)
             .field("exclude", &self.exclude)

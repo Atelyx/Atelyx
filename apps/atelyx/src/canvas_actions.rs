@@ -549,6 +549,7 @@ fn record_canvas_history(app: &App, content: &str) -> Task<Message> {
         coalesce_edit_ms: Some(HISTORY_COALESCE_MS),
         max_versions: 0,
         note: None,
+        editor: None,
     };
     Task::perform(
         async move {

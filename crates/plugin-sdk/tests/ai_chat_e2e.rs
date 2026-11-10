@@ -182,6 +182,10 @@ async fn chat_contract_roundtrip_via_plugin() {
                     model: "test-model".into(),
                     reasoning_effort: None,
                     system_prompt: None,
+                    agent: atelyx_core::ai::edit_host::AiIdentity {
+                        agent_id: "test-agent".into(),
+                        agent_name: "测试 Agent".into(),
+                    },
                     tool_ids: Vec::new(),
                     search: SearchConfig::default(),
                     exclude: Vec::new(),
@@ -195,6 +199,8 @@ async fn chat_contract_roundtrip_via_plugin() {
                     search: SearchConfig::default(),
                     exclude: Vec::new(),
                     plugin_tools: Vec::new(),
+                    host: None,
+                    actor: None,
                     plugins: None,
                 },
             )

@@ -938,6 +938,7 @@ fn record_table_history(app: &App, content: String) -> Task<Message> {
                         coalesce_edit_ms: Some(HISTORY_COALESCE_MS),
                         max_versions: 0,
                         note: None,
+                        editor: None,
                     },
                 )
             })

@@ -113,6 +113,9 @@ pub struct RecordBody {
     note: Option<String>,
     #[serde(default)]
     co_authors: Option<Vec<HistoryAuthor>>,
+    /// AI 编辑来源（原样落盘；服务端不校验 agent 身份，与昵称/颜色同口径）。
+    #[serde(default)]
+    editor: Option<Value>,
     #[serde(default)]
     coalesce_edit_ms: Option<i64>,
     #[serde(default)]
@@ -200,7 +203,10 @@ pub async fn record_history(
             .and_then(|l| l.get("ts"))
             .and_then(|t| t.as_i64())
             .map(|ts| now - ts < window)
-            .unwrap_or(false);
+            .unwrap_or(false)
+        // AI 版本不参与连续编辑合并（即使客户端传了窗口）
+        && body.editor.is_none()
+        && last.as_ref().and_then(|l| l.get("editor")).is_none();
 
     if coalesce {
         let l = versions.last_mut().expect("coalesce 分支必有上一版本");
@@ -244,6 +250,9 @@ pub async fn record_history(
         if let Some(n) = &body.note {
             version["note"] = json!(n);
         }
+        if let Some(e) = &body.editor {
+            version["editor"] = e.clone();
+        }
         versions.push(version);
     }
 
@@ -282,6 +291,8 @@ struct RepoHistoryEntry {
     summary: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     note: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    editor: Option<Value>,
 }
 
 /// 递归收集侧文件版本（子目录白名单 canvas/table；根目录 = note）。
@@ -339,6 +350,7 @@ fn collect_history_dir(dir: &Path, kind: &str, entries: &mut Vec<RepoHistoryEntr
                 action: v.get("action").and_then(|x| x.as_str()).unwrap_or("edit").to_string(),
                 summary: v.get("summary").and_then(|x| x.as_str()).map(|s| s.to_string()),
                 note: v.get("note").and_then(|x| x.as_str()).map(|s| s.to_string()),
+                editor: v.get("editor").filter(|e| e.is_object()).cloned(),
             });
         }
     }

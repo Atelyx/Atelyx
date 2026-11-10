@@ -350,6 +350,10 @@ pub struct ToolCtx {
     pub plugin_tools: Vec<crate::plugin_runtime::PluginToolSpec>,
     /// 插件运行时（`None` = 无插件工具可执行）。
     pub plugins: Option<Arc<crate::plugin_runtime::PluginRuntime>>,
+    /// 内容写入出口（壳注入；`None` = 无宿主，写工具走直写兜底——单测与插件直调路径）。
+    pub host: Option<Arc<dyn crate::ai::edit_host::AiEditHost>>,
+    /// 本次 run 的操作者与 Agent 身份（历史署名 / 在场）。
+    pub actor: Option<crate::ai::edit_host::EditActor>,
 }
 
 /// 把历史 user 消息里图片附件的路径引用读回 dataURL 填进 `payload`
@@ -818,8 +822,13 @@ async fn read_history(ctx: &ToolCtx, args: &Value) -> ToolResult {
     let lines: Vec<String> = versions
         .iter()
         .map(|v| {
+            let editor = v
+                .editor
+                .as_ref()
+                .map(|e| format!("（AI：{}）", e.agent_name))
+                .unwrap_or_default();
             format!(
-                "- seq {} {} {}: {}",
+                "- seq {} {} {}{editor}: {}",
                 v.seq,
                 v.ts,
                 v.author.name,
@@ -845,21 +854,22 @@ fn structured_write_guard(rel: &str) -> Result<(), ToolResult> {
     )))
 }
 
-/// 精确替换：缺省要求唯一命中（多处命中报错、不写入）；`all` = 替换全部出现。
-/// 返回替换后的全文与替换处数。
-fn replace_exact(text: &str, find: &str, replace: &str, all: bool) -> Result<(String, usize), String> {
-    if find.is_empty() {
-        return Err("find 不能为空".to_string());
-    }
-    let count = text.matches(find).count();
-    if count == 0 {
-        return Err("未找到要替换的原文（find 精确匹配失败）".to_string());
-    }
-    if count > 1 && !all {
-        return Err(format!("find 出现 {count} 次，请提供更精确的原文或设 replace_all=true"));
-    }
-    Ok((text.replace(find, replace), count))
+/// 有宿主时把笔记写入交给宿主保存链（历史 / 协作 / 打开会话）；无宿主 = 返回 None 走直写兜底。
+async fn apply_via_host(
+    ctx: &ToolCtx,
+    rel: &str,
+    op: crate::ai::edit_host::NoteOp,
+) -> Option<ToolResult> {
+    let host = ctx.host.as_ref()?;
+    let Some(actor) = ctx.actor.as_ref() else {
+        return Some(ToolResult::err("AI 编辑身份缺失，已拒绝写入"));
+    };
+    Some(match host.apply_note(rel, op, actor).await {
+        Ok(text) => ToolResult::ok(text),
+        Err(e) => ToolResult::err(e),
+    })
 }
+
 async fn write_file(ctx: &ToolCtx, args: &Value) -> ToolResult {
     let (Ok(rel), Some(content)) = (
         arg(args, "path").map(str::to_string),
@@ -873,6 +883,11 @@ async fn write_file(ctx: &ToolCtx, args: &Value) -> ToolResult {
     };
     if let Err(e) = structured_write_guard(&rel) {
         return e;
+    }
+    if let Some(result) =
+        apply_via_host(ctx, &rel, crate::ai::edit_host::NoteOp::Write(content.to_string())).await
+    {
+        return result;
     }
     match &ctx.repo {
         RepoAccess::Local { root, queue } => {
@@ -907,6 +922,11 @@ async fn append_file(ctx: &ToolCtx, args: &Value) -> ToolResult {
     };
     if let Err(e) = structured_write_guard(&rel) {
         return e;
+    }
+    if let Some(result) =
+        apply_via_host(ctx, &rel, crate::ai::edit_host::NoteOp::Append(content.to_string())).await
+    {
+        return result;
     }
     match &ctx.repo {
         RepoAccess::Local { root, queue } => {
@@ -961,6 +981,19 @@ async fn edit_file(ctx: &ToolCtx, args: &Value) -> ToolResult {
     let all = args.get("replace_all").and_then(Value::as_bool).unwrap_or(false);
     let find = find.to_string();
     let replace = replace.to_string();
+    if let Some(result) = apply_via_host(
+        ctx,
+        &rel,
+        crate::ai::edit_host::NoteOp::Replace {
+            find: find.clone(),
+            replace: replace.clone(),
+            all,
+        },
+    )
+    .await
+    {
+        return result;
+    }
     match &ctx.repo {
         RepoAccess::Local { root, queue } => {
             let root = root.clone();
@@ -969,7 +1002,7 @@ async fn edit_file(ctx: &ToolCtx, args: &Value) -> ToolResult {
                 .bulk(move || {
                     let path = vault::safe_join(&root, &target, false)?;
                     let existing = read_existing_text(&path, &target)?;
-                    let (next, count) = replace_exact(&existing, &find, &replace, all)?;
+                    let (next, count) = crate::ai::edit_host::replace_exact(&existing, &find, &replace, all)?;
                     vault::write_note(&root, &target, &next).map(|_| count)
                 })
                 .await;
@@ -983,7 +1016,7 @@ async fn edit_file(ctx: &ToolCtx, args: &Value) -> ToolResult {
                 Ok(text) => text,
                 Err(e) => return ToolResult::err(format!("文件不存在或不可读：{rel}（{e}）")),
             };
-            let (next, count) = match replace_exact(&existing, &find, &replace, all) {
+            let (next, count) = match crate::ai::edit_host::replace_exact(&existing, &find, &replace, all) {
                 Ok(value) => value,
                 Err(e) => return ToolResult::err(e),
             };
@@ -1175,6 +1208,8 @@ mod tests {
             exclude: Vec::new(),
             plugin_tools: Vec::new(),
             plugins: None,
+            host: None,
+            actor: None,
         }
     }
 

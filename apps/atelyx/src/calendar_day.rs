@@ -80,19 +80,23 @@ fn day_history(app: &App, day: i64, window: iced::window::Id) -> Element<'static
         };
         let (h, mi) = history::local_time_hm(e.ts);
         let summary = e.summary.clone().unwrap_or_default();
+        let mut line = row![
+            icon(repohistory_view::kind_icon(e.kind), 12.0, pal::TEXT_MUTED),
+            text(format!("{h:02}:{mi:02}")).size(pal::fs_micro()).color(pal::TEXT_MUTED),
+            text(action).size(pal::fs_micro()).color(pal::TEXT_SECONDARY),
+        ]
+        .spacing(8);
+        // AI 编辑版本：动作后标 AI 徽标（作者名仍是操作者）
+        if e.editor.is_some() {
+            line = line.push(controls::badge("AI", pal::ACCENT_SOFT, pal::ACCENT));
+        }
+        line = line
+            .push(text(e.author_name.clone()).size(pal::fs_micro()).color(pal::TEXT_MUTED))
+            .push(space().width(Length::Fill))
+            .push(text(summary).size(pal::fs_micro()).color(pal::TEXT_MUTED));
         col = col.push(
             container(
-                button(
-                    row![
-                        icon(repohistory_view::kind_icon(e.kind), 12.0, pal::TEXT_MUTED),
-                        text(format!("{h:02}:{mi:02}")).size(pal::fs_micro()).color(pal::TEXT_MUTED),
-                        text(action).size(pal::fs_micro()).color(pal::TEXT_SECONDARY),
-                        text(e.author_name.clone()).size(pal::fs_micro()).color(pal::TEXT_MUTED),
-                        space().width(Length::Fill),
-                        text(summary).size(pal::fs_micro()).color(pal::TEXT_MUTED),
-                    ]
-                    .spacing(8),
-                )
+                button(line)
                 .width(Length::Fill)
                 .padding(Padding::ZERO.horizontal(8.0).vertical(4.0))
                 .style(controls::row_style(false, pal::RADIUS_SM))

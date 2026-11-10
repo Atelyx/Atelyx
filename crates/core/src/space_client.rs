@@ -243,6 +243,9 @@ pub struct HistoryRecordReq {
     pub summary: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// AI 编辑来源（None = 人类编辑）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub editor: Option<crate::history::HistoryEditor>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub coalesce_edit_ms: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -274,6 +277,9 @@ pub struct HistoryFeedEntry {
     pub summary: Option<String>,
     #[serde(default)]
     pub note: Option<String>,
+    /// AI 编辑来源（旧服务端缺字段 = 人类编辑）。
+    #[serde(default)]
+    pub editor: Option<crate::history::HistoryEditor>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
