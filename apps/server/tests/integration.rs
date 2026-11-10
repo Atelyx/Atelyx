@@ -1948,6 +1948,39 @@ async fn same_path_writes_serialize_no_lost_update() {
 }
 
 #[tokio::test]
+async fn create_only_write_never_overwrites_existing_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+    let space_id = setup_two_members(&ctx, "alice", "bob").await;
+    let a = login_as(&ctx, "alice").await;
+    let file_url = format!("/api/spaces/{space_id}/file");
+
+    // 首次只新建：created = true
+    let (status, body) = ctx
+        .put(&file_url, Some(&a), json!({ "path": "表格/排期.atb", "content": "初版", "createOnly": true }))
+        .await;
+    assert_eq!(status, 200, "首次只新建应成功：{body}");
+    assert_eq!(body["created"], true);
+
+    // 再只新建同一路径：409 且磁盘内容不变（不覆盖并发方已写入的内容）
+    let (status, body) = ctx
+        .put(&file_url, Some(&a), json!({ "path": "表格/排期.atb", "content": "覆盖尝试", "createOnly": true }))
+        .await;
+    assert_eq!(status, 409, "已存在应拒绝：{body}");
+    let (_, read) = ctx.get(&file_url, Some(&a), &[("path", "表格/排期.atb")]).await;
+    assert_eq!(read["content"], "初版", "并发方内容不得被覆盖");
+
+    // 覆盖写（缺省 createOnly = false）照常可用
+    let (status, body) = ctx
+        .put(&file_url, Some(&a), json!({ "path": "表格/排期.atb", "content": "改写" }))
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["created"], false);
+    let (_, read) = ctx.get(&file_url, Some(&a), &[("path", "表格/排期.atb")]).await;
+    assert_eq!(read["content"], "改写");
+}
+
+#[tokio::test]
 async fn patch_landing_broadcasts_frame_to_room() {
     let dir = tempfile::tempdir().unwrap();
     let ctx = Ctx::new(spawn_server(dir.path()).await);

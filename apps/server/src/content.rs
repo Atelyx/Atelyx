@@ -134,6 +134,10 @@ pub struct WriteBody {
     /// （附件/媒体二进制写入口）。字节限额按解码后的磁盘字节数计。
     #[serde(default)]
     encoding: Option<String>,
+    /// 只允许新建：写锁内发现目标已存在即 409，不覆盖。缺省 = 覆盖写。
+    /// 供「读到不存在 → 建空文件 → 补丁上行」的调用方消除读到写之间的窗口。
+    #[serde(default)]
+    create_only: bool,
 }
 
 /// 读文本文件（非 UTF-8 字节按替换字符容错）。
@@ -224,6 +228,10 @@ pub async fn write_file(
     let _lock = state.path_lock(&space_id, &body.path).await;
     if pre_exists && !path.is_file() {
         return Err(not_found("文件已被改名或删除，写入被拒绝"));
+    }
+    // 只新建：存在性判定与落盘同在写锁内，调用方无需再赌「读到不存在」的结论
+    if body.create_only && path.is_file() {
+        return Err(ApiError(StatusCode::CONFLICT, format!("目标已存在：{}", body.path)));
     }
     atomic_write(&path, &bytes)
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;

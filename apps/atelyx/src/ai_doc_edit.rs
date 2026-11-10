@@ -392,7 +392,7 @@ fn apply_space_table(
     .chain(iced::Task::done(Message::AiEditDone(gen, path, String::new(), None)))
 }
 
-/// 空间表格（未打开）：先取服务端真源，应用操作后按一次补丁上行。
+/// 空间表格（未打开）：读服务端真源 → 计划 → 补丁上行（文件不存在时只新建，不覆盖）。
 #[allow(clippy::too_many_arguments)]
 fn apply_space_table_from_server(
     app: &mut App,
@@ -408,66 +408,54 @@ fn apply_space_table_from_server(
     let editor = editor_of(&actor);
     crate::ai_edit::begin_presence_for(app, "table", &path, &actor, "编辑表格");
     let rel = path.clone();
+    let path_for_done = path.clone();
     iced::Task::perform(
         async move {
-            let outcome: Result<(String, TableFile, String), String> = async {
-                let title = doc_edit::file_label(&rel);
-                // 服务端还没有这个文件 = 本次创建：先落空模型，再按补丁上行
-                let base = match doc_edit::read_space::<TableFile>(&client, &space_id, &rel).await? {
-                    Some(model) => model,
-                    None => doc_edit::create_space::<TableFile>(&client, &space_id, &rel, &title).await?,
-                };
+            let outcome = async {
+                let title = atelyx_core::vault::file_label(&rel);
                 let updated_at = crate::now_secs() as i64;
-                let planned = match doc_edit::plan(&base, &base, &ops, &title, updated_at) {
-                    Ok(planned) => planned,
-                    Err(PlanError::Unchanged) => {
-                        return Ok((rel.clone(), base, "未产生补丁".to_string()));
-                    }
-                    Err(PlanError::Ops(e)) => return Err(e),
-                };
-                let new_file = doc_edit::commit_space::<TableFile>(
-                    &client, &space_id, &rel, &planned.patch,
+                let Some(outcome) = doc_edit::apply_space::<TableFile>(
+                    &client, &space_id, &rel, &title, updated_at, &ops, "表格",
                 )
-                .await?;
+                .await?
+                else {
+                    return Ok::<Option<_>, String>(None);
+                };
                 space_history_record(
                     client.clone(),
                     space_id.clone(),
                     "table".to_string(),
-                    rel.clone(),
-                    base_json(&planned.after),
-                    planned.summary.clone(),
+                    outcome.file.clone(),
+                    base_json(&outcome.after),
+                    outcome.summary.clone(),
                     author,
                     editor,
                 )
                 .await;
-                Ok((new_file, planned.after, planned.summary))
+                Ok(Some(outcome))
             }
             .await;
-            let receipt = match &outcome {
-                Ok((new_file, _, summary)) => {
-                    format!("已编辑 {new_file}（{} 项操作：{summary}）", ops.len())
-                }
-                Err(e) => e.clone(),
-            };
             let _ = reply.send(match &outcome {
-                Ok(_) => Ok(receipt),
+                Ok(Some(outcome)) => Ok(format!(
+                    "已编辑 {}（{} 项操作：{}）",
+                    outcome.file,
+                    ops.len(),
+                    outcome.summary
+                )),
+                Ok(None) => Ok(format!("表格未变化：{rel}（操作与现值相同）")),
                 Err(e) => Err(format!("写入失败：{e}")),
             });
-            let (new_file, result, frozen) = match outcome {
-                Ok((new_file, after, _)) => (new_file.clone(), Ok(new_file), after),
-                Err(e) => (
-                    rel.clone(),
-                    Err(e),
-                    TableFile {
-                        schema: String::new(),
-                        id: String::new(),
-                        title: String::new(),
-                        fields: vec![],
-                        rows: vec![],
-                        created_at: 0,
-                        updated_at: 0,
-                    },
+            let (new_file, result, frozen) = match &outcome {
+                Ok(Some(outcome)) => (
+                    outcome.file.clone(),
+                    Ok(outcome.file.clone()),
+                    outcome.after.clone(),
                 ),
+                // 未产生补丁 / 写入失败：没有落盘，不按保存成功结算
+                // 未产生补丁：没有落盘，按无错误收尾
+                Ok(None) => return Message::AiEditDone(gen, path_for_done.clone(), String::new(), None),
+                // 写入失败：把原因交回收尾，不按保存成功结算
+                Err(e) => return Message::AiEditDone(gen, path_for_done.clone(), String::new(), Some(e.clone())),
             };
             Message::Space(crate::SpaceMsg::TablePatchDone {
                 gen,
@@ -581,7 +569,7 @@ fn apply_space_canvas(
     .chain(iced::Task::done(Message::AiEditDone(gen, path, String::new(), None)))
 }
 
-/// 空间画布（未打开）：先取服务端真源，应用操作后按一次补丁上行。
+/// 空间画布（未打开）：口径同 apply_space_table_from_server。
 #[allow(clippy::too_many_arguments)]
 fn apply_space_canvas_from_server(
     app: &mut App,
@@ -597,66 +585,55 @@ fn apply_space_canvas_from_server(
     let editor = editor_of(&actor);
     crate::ai_edit::begin_presence_for(app, "canvas", &path, &actor, "编辑画布");
     let rel = path.clone();
+    let path_for_done = path.clone();
     iced::Task::perform(
         async move {
-            let outcome: Result<(String, CanvasFile, String), String> = async {
-                let title = doc_edit::file_label(&rel);
-                // 服务端还没有这个文件 = 本次创建：先落空模型，再按补丁上行
-                let base = match doc_edit::read_space::<CanvasFile>(&client, &space_id, &rel).await? {
-                    Some(model) => model,
-                    None => doc_edit::create_space::<CanvasFile>(&client, &space_id, &rel, &title).await?,
-                };
+            let outcome = async {
+                let title = atelyx_core::vault::file_label(&rel);
                 let updated_at = crate::now_secs() as i64;
-                let planned = match doc_edit::plan(&base, &base, &ops, &title, updated_at) {
-                    Ok(planned) => planned,
-                    Err(PlanError::Unchanged) => {
-                        return Ok((rel.clone(), base, "未产生补丁".to_string()));
-                    }
-                    Err(PlanError::Ops(e)) => return Err(e),
-                };
-                let new_file = doc_edit::commit_space::<CanvasFile>(
-                    &client, &space_id, &rel, &planned.patch,
+                let Some(outcome) = doc_edit::apply_space::<CanvasFile>(
+                    &client, &space_id, &rel, &title, updated_at, &ops, "画布",
                 )
-                .await?;
+                .await?
+                else {
+                    return Ok::<Option<_>, String>(None);
+                };
                 space_history_record(
                     client.clone(),
                     space_id.clone(),
                     "canvas".to_string(),
-                    rel.clone(),
-                    base_json(&planned.after),
-                    planned.summary.clone(),
+                    outcome.file.clone(),
+                    base_json(&outcome.after),
+                    outcome.summary.clone(),
                     author,
                     editor,
                 )
                 .await;
-                Ok((new_file, planned.after, planned.summary))
+                Ok(Some(outcome))
             }
             .await;
-            let receipt = match &outcome {
-                Ok((new_file, _, summary)) => {
-                    format!("已编辑 {new_file}（{} 项操作：{summary}）", ops.len())
-                }
-                Err(e) => e.clone(),
-            };
             let _ = reply.send(match &outcome {
-                Ok(_) => Ok(receipt),
+                Ok(Some(outcome)) => Ok(format!(
+                    "已编辑 {}（{} 项操作：{}）；实体：{}",
+                    outcome.file,
+                    ops.len(),
+                    outcome.summary,
+                    touched_ids(&outcome.patch).join("、")
+                )),
+                Ok(None) => Ok(format!("画布未变化：{rel}（操作与现值相同）")),
                 Err(e) => Err(format!("写入失败：{e}")),
             });
-            let (new_file, result, frozen) = match outcome {
-                Ok((new_file, after, _)) => (new_file.clone(), Ok(new_file), after),
-                Err(e) => (
-                    rel.clone(),
-                    Err(e),
-                    CanvasFile {
-                        schema: String::new(),
-                        id: String::new(),
-                        title: String::new(),
-                        nodes: vec![],
-                        edges: vec![],
-                        created_at: 0,
-                        updated_at: 0,
-                    },
+            let (new_file, result, frozen) = match &outcome {
+                Ok(Some(outcome)) => (
+                    outcome.file.clone(),
+                    Ok(outcome.file.clone()),
+                    outcome.after.clone(),
                 ),
+                // 未产生补丁 / 写入失败：没有落盘，不按保存成功结算
+                // 未产生补丁：没有落盘，按无错误收尾
+                Ok(None) => return Message::AiEditDone(gen, path_for_done.clone(), String::new(), None),
+                // 写入失败：把原因交回收尾，不按保存成功结算
+                Err(e) => return Message::AiEditDone(gen, path_for_done.clone(), String::new(), Some(e.clone())),
             };
             Message::Space(crate::SpaceMsg::CanvasPatchDone {
                 gen,

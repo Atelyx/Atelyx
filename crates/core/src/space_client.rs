@@ -622,15 +622,30 @@ impl SpaceClient {
     /// 写文本文件（原子写，自动建父目录；单文件 50MB 限额由服务端强制）。
     /// 返回是否新建（服务端在写锁内判定存在性）。
     pub async fn put_file_text(&self, space_id: &str, path: &str, content: &str) -> Result<bool, SpaceError> {
-        self.put_file_raw(space_id, path, content.as_bytes(), false).await
+        self.put_file_raw(space_id, path, content.as_bytes(), false, false).await
+    }
+
+    /// 只新建文本文件：写锁内发现目标已存在即 `Conflict`，不覆盖。
+    /// 供「读到不存在 → 建空文件 → 补丁上行」的调用方消除读到写之间的覆盖窗口。
+    pub async fn create_file_text(&self, space_id: &str, path: &str, content: &str) -> Result<(), SpaceError> {
+        self.put_file_raw(space_id, path, content.as_bytes(), false, true)
+            .await
+            .map(|_| ())
     }
 
     /// 写二进制文件（base64 编码上行）。返回是否新建。
     pub async fn put_file_bytes(&self, space_id: &str, path: &str, bytes: &[u8]) -> Result<bool, SpaceError> {
-        self.put_file_raw(space_id, path, bytes, true).await
+        self.put_file_raw(space_id, path, bytes, true, false).await
     }
 
-    async fn put_file_raw(&self, space_id: &str, path: &str, bytes: &[u8], base64_enc: bool) -> Result<bool, SpaceError> {
+    async fn put_file_raw(
+        &self,
+        space_id: &str,
+        path: &str,
+        bytes: &[u8],
+        base64_enc: bool,
+        create_only: bool,
+    ) -> Result<bool, SpaceError> {
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
         struct WriteAck {
@@ -645,14 +660,18 @@ impl SpaceClient {
         } else {
             String::from_utf8_lossy(bytes).into_owned()
         };
+        let mut body = match base64_enc {
+            // 二进制走 base64；文本不传 encoding（服务端缺省即文本，无 text 值）
+            true => serde_json::json!({ "path": path, "content": content, "encoding": "base64" }),
+            false => serde_json::json!({ "path": path, "content": content }),
+        };
+        if create_only {
+            body["createOnly"] = serde_json::Value::Bool(true);
+        }
         self.send_json::<WriteAck, serde_json::Value>(
             reqwest::Method::PUT,
             &format!("/api/spaces/{space_id}/file"),
-            Some(&match base64_enc {
-                // 二进制走 base64；文本不传 encoding（服务端缺省即文本，无 text 值）
-                true => serde_json::json!({ "path": path, "content": content, "encoding": "base64" }),
-                false => serde_json::json!({ "path": path, "content": content }),
-            }),
+            Some(&body),
         )
         .await
         .map(|ack| ack.created)

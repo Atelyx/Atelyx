@@ -14,6 +14,8 @@ use std::sync::{Arc, Mutex};
 struct FakeSpace {
     files: Mutex<HashMap<String, String>>,
     meta: Mutex<HashMap<String, String>>,
+    /// 「读到不存在之后被他人建出」的路径：GET 未命中即插入该内容（模拟并发新建）。
+    race: Mutex<HashMap<String, String>>,
 }
 
 /// 逐请求回 `Connection: close` 的回环服务端（reqwest 每请求新建连接，串行处理即足够）。
@@ -125,16 +127,32 @@ fn handle(mut stream: TcpStream, state: &FakeSpace) -> std::io::Result<()> {
     match (req.method.as_str(), req.path.as_str()) {
         ("GET", p) if p.ends_with("/file") => {
             let path = req.query.get("path").cloned().unwrap_or_default();
-            match state.files.lock().unwrap().get(&path) {
-                Some(content) => ok(&mut stream, json!({ "content": content }))?,
-                None => not_found(&mut stream)?,
+            // 并发新建模拟：本次读到不存在，但对端内容随即落地（本次写入必然撞上）
+            let raced = state.race.lock().unwrap().remove(&path);
+            let hit = state.files.lock().unwrap().get(&path).cloned();
+            match (hit, raced) {
+                (None, Some(content)) => {
+                    state.files.lock().unwrap().insert(path, content);
+                    not_found(&mut stream)?;
+                }
+                (Some(content), _) => ok(&mut stream, json!({ "content": content }))?,
+                (None, None) => not_found(&mut stream)?,
             }
         }
         ("PUT", p) if p.ends_with("/file") => {
             let path = req.body.get("path").and_then(Value::as_str).unwrap_or_default().to_string();
             let content = req.body.get("content").and_then(Value::as_str).unwrap_or_default().to_string();
-            state.files.lock().unwrap().insert(path, content);
-            ok(&mut stream, json!({ "updatedAt": 1 }))?;
+            let create_only = req.body.get("createOnly").and_then(Value::as_bool).unwrap_or(false);
+            let mut files = state.files.lock().unwrap();
+            // 与真服务端同口径：只新建写在锁内判存在性，已存在即 409（不覆盖）
+            if create_only && files.contains_key(&path) {
+                drop(files);
+                respond(&mut stream, 409, json!({ "error": format!("目标已存在：{path}") }))?;
+                return Ok(());
+            }
+            let created = files.insert(path, content).is_none();
+            drop(files);
+            ok(&mut stream, json!({ "updatedAt": 1, "created": created }))?;
         }
         ("DELETE", p) if p.ends_with("/file") => {
             let path = req.query.get("path").cloned().unwrap_or_default();
@@ -206,6 +224,53 @@ fn handle(mut stream: TcpStream, state: &FakeSpace) -> std::io::Result<()> {
             }
             ok(&mut stream, Value::Array(roots))?;
         }
+        ("POST", p) if p.ends_with("/patches/table") => {
+            let path = req.body.get("path").and_then(Value::as_str).unwrap_or_default().to_string();
+            let raw = req.body.get("patch").cloned().unwrap_or(Value::Null);
+            let patch: atelyx_core::vault::TablePatch =
+                serde_json::from_value(raw).expect("表格补丁应可解码");
+            let mut files = state.files.lock().unwrap();
+            let Some(text) = files.get(&path) else {
+                drop(files);
+                not_found(&mut stream)?;
+                return Ok(());
+            };
+            let mut table: atelyx_core::vault::TableFile =
+                serde_json::from_str(text).expect("表格文件应可解码");
+            // 与真服务端同口径：补丁 id 与文件 id 不符即拒绝（防串文件）
+            if patch.id != table.id {
+                drop(files);
+                respond(&mut stream, 400, json!({ "error": "补丁与文件不匹配" }))?;
+                return Ok(());
+            }
+            atelyx_core::vault::apply_table_patch(&mut table, &patch);
+            files.insert(path.clone(), serde_json::to_string(&table).unwrap());
+            drop(files);
+            ok(&mut stream, json!({ "file": path, "updatedAt": 1 }))?;
+        }
+        ("POST", p) if p.ends_with("/patches/canvas") => {
+            let path = req.body.get("path").and_then(Value::as_str).unwrap_or_default().to_string();
+            let raw = req.body.get("patch").cloned().unwrap_or(Value::Null);
+            let patch: atelyx_core::vault::CanvasPatch =
+                serde_json::from_value(raw).expect("画布补丁应可解码");
+            let mut files = state.files.lock().unwrap();
+            let Some(text) = files.get(&path) else {
+                drop(files);
+                not_found(&mut stream)?;
+                return Ok(());
+            };
+            let mut canvas: atelyx_core::vault::CanvasFile =
+                serde_json::from_str(text).expect("画布文件应可解码");
+            if patch.id != canvas.id {
+                drop(files);
+                respond(&mut stream, 400, json!({ "error": "补丁与文件不匹配" }))?;
+                return Ok(());
+            }
+            atelyx_core::vault::apply_canvas_patch(&mut canvas, &patch);
+            files.insert(path.clone(), serde_json::to_string(&canvas).unwrap());
+            drop(files);
+            ok(&mut stream, json!({ "file": path, "updatedAt": 1 }))?;
+        }
         ("GET", p) if p.ends_with("/meta/me") => {
             let key = req.query.get("key").cloned().unwrap_or_default();
             match state.meta.lock().unwrap().get(&key) {
@@ -246,12 +311,24 @@ fn meta_key_guard(key: &str) -> Option<String> {
             || seg == ".."
             || seg.starts_with('.')
             || seg.ends_with('.')
+            || is_windows_reserved_name(seg)
             || !seg.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
         if bad {
             return Some(format!("键段不合法：{seg}（键 {key}）"));
         }
     }
     None
+}
+
+/// Windows 保留设备名（与真服务端同口径：这类键段在数据目录落盘时会被系统改写，回读错位）。
+fn is_windows_reserved_name(seg: &str) -> bool {
+    let up = seg.to_ascii_uppercase();
+    matches!(
+        up.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL"
+            | "COM1" | "COM2" | "COM3" | "COM4" | "COM5" | "COM6" | "COM7" | "COM8" | "COM9"
+            | "LPT1" | "LPT2" | "LPT3" | "LPT4" | "LPT5" | "LPT6" | "LPT7" | "LPT8" | "LPT9"
+    )
 }
 
 fn space_ctx(server_url: &str) -> ToolCtx {
@@ -383,4 +460,81 @@ async fn 路径守卫在空间后端同样生效() {
     assert!(e.contains("非法路径"), "实际：{e}");
     // 守卫在请求之前：服务端零命中
     assert!(state.files.lock().unwrap().is_empty());
+}
+
+/// 表格 / 画布在空间侧的编辑：文件不存在时「只新建」再按补丁上行；读到不存在之后被他人建出
+/// 时不整份覆盖（假服务端在 GET 未命中时插入对端内容，模拟并发新建窗口）。
+#[tokio::test]
+async fn 空间表格编辑按补丁上行且不覆盖并发新建() {
+    let state = Arc::new(FakeSpace::default());
+    let url = spawn_server(state.clone());
+    let ctx = space_ctx(&url);
+
+    // 新建：服务端没有该文件 → 先只新建空模型，再上行补丁
+    let out = atelyx_core::ai::tools::execute(
+        &ctx,
+        "table_edit",
+        json!({ "path": "表格/排期.atb", "ops": [{ "op": "add_row", "cells": {} }] }),
+    )
+    .await;
+    assert!(!out.is_error, "{}", out.text);
+    let text = state.files.lock().unwrap().get("表格/排期.atb").cloned().expect("表格应已落盘");
+    let table: atelyx_core::vault::TableFile = serde_json::from_str(&text).unwrap();
+    assert_eq!(table.title, "排期");
+    assert_eq!(table.rows.len(), 1, "ops 应作用在新建的空表上");
+
+    // 并发新建：读到不存在 → 对端先建出并写入一行 → 本次只新建必然 409，不得覆盖对端内容
+    let mut raced = atelyx_core::table_ops::new_table_file("并发");
+    raced.rows.push(atelyx_core::vault::TableRow {
+        id: "对端".into(),
+        values: Default::default(),
+        height: None,
+        styles: None,
+    });
+    state
+        .race
+        .lock()
+        .unwrap()
+        .insert("表格/并发.atb".into(), serde_json::to_string(&raced).unwrap());
+    let out = atelyx_core::ai::tools::execute(
+        &ctx,
+        "table_edit",
+        json!({ "path": "表格/并发.atb", "ops": [{ "op": "add_row", "cells": {} }] }),
+    )
+    .await;
+    assert!(out.is_error, "并发新建应报冲突而不是覆盖：{}", out.text);
+    let text = state.files.lock().unwrap().get("表格/并发.atb").cloned().expect("对端文件仍在");
+    let table: atelyx_core::vault::TableFile = serde_json::from_str(&text).unwrap();
+    assert_eq!(table.rows.len(), 1, "对端内容不得被覆盖");
+    assert_eq!(table.rows[0].id, "对端");
+}
+
+/// 画布口径同表格：新建走只新建 + 补丁，坏文件不得当空画布覆盖。
+#[tokio::test]
+async fn 空间画布编辑新建后按补丁上行() {
+    let state = Arc::new(FakeSpace::default());
+    let url = spawn_server(state.clone());
+    let ctx = space_ctx(&url);
+    let out = atelyx_core::ai::tools::execute(
+        &ctx,
+        "canvas_edit",
+        json!({ "path": "画布/方案.atlx", "ops": [{ "op": "add_text_card", "text": "首卡" }] }),
+    )
+    .await;
+    assert!(!out.is_error, "{}", out.text);
+    let text = state.files.lock().unwrap().get("画布/方案.atlx").cloned().expect("画布应已落盘");
+    let canvas: atelyx_core::vault::CanvasFile = serde_json::from_str(&text).unwrap();
+    assert_eq!(canvas.title, "方案");
+    assert_eq!(canvas.nodes.len(), 1);
+
+    // 存在但解析失败：报错且磁盘原样
+    state.files.lock().unwrap().insert("画布/坏.atlx".into(), "{不是 JSON".into());
+    let out = atelyx_core::ai::tools::execute(
+        &ctx,
+        "canvas_edit",
+        json!({ "path": "画布/坏.atlx", "ops": [{ "op": "add_text_card", "text": "x" }] }),
+    )
+    .await;
+    assert!(out.is_error, "{}", out.text);
+    assert_eq!(state.files.lock().unwrap()["画布/坏.atlx"], "{不是 JSON");
 }

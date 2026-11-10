@@ -1181,56 +1181,47 @@ async fn read_table_model(ctx: &ToolCtx, rel: &str) -> Result<vault::TableFile, 
     }
 }
 
-/// 编辑源模型：文件不存在 = 本次新建（空模型起算）；存在但读不出 = 报错（坏文件不得当空表覆盖）。
-async fn edit_source_table(ctx: &ToolCtx, rel: &str) -> Result<vault::TableFile, String> {
+/// 编辑源模型：文件不存在 = 本次新建（空模型起算，标志为 false）；存在但读不出 = 报错
+/// （坏文件不得当空表覆盖）。
+async fn edit_source_table(ctx: &ToolCtx, rel: &str) -> Result<(vault::TableFile, bool), String> {
     match &ctx.repo {
         RepoAccess::Local { root, .. } => {
             // 先查存在性：父目录缺失时 safe_join 会报错，不能把「不存在」当成「不可读」
             if !vault::file_exists(root, rel)? {
-                return Ok(crate::table_ops::new_table_file(&file_label_of(rel)));
+                return Ok((crate::table_ops::new_table_file(&vault::file_label(rel)), false));
             }
             let path = vault::safe_join(root, rel, false)?;
-            vault::read_table_file(&path)
+            vault::read_table_file(&path).map(|model| (model, true))
         }
-        RepoAccess::Space { client, space_id } => {
-            match client.get_file_text(space_id, rel).await {
-                Ok(text) => parse_table_model(&text),
-                Err(crate::space_client::SpaceError::NotFound) => {
-                    Ok(crate::table_ops::new_table_file(&file_label_of(rel)))
-                }
-                Err(e) => Err(e.to_string()),
+        RepoAccess::Space { client, space_id } => match client.get_file_text(space_id, rel).await {
+            Ok(text) => parse_table_model(&text).map(|model| (model, true)),
+            Err(crate::space_client::SpaceError::NotFound) => {
+                Ok((crate::table_ops::new_table_file(&vault::file_label(rel)), false))
             }
-        }
+            Err(e) => Err(e.to_string()),
+        },
     }
 }
 
 /// 编辑源画布（口径同 [`edit_source_table`]）。
-async fn edit_source_canvas(ctx: &ToolCtx, rel: &str) -> Result<vault::CanvasFile, String> {
+async fn edit_source_canvas(ctx: &ToolCtx, rel: &str) -> Result<(vault::CanvasFile, bool), String> {
     match &ctx.repo {
         RepoAccess::Local { root, .. } => {
             // 先查存在性：父目录缺失时 safe_join 会报错，不能把「不存在」当成「不可读」
             if !vault::file_exists(root, rel)? {
-                return Ok(crate::table_ops::new_canvas_file(&file_label_of(rel)));
+                return Ok((crate::table_ops::new_canvas_file(&vault::file_label(rel)), false));
             }
             let path = vault::safe_join(root, rel, false)?;
-            vault::read_canvas_file(&path)
+            vault::read_canvas_file(&path).map(|model| (model, true))
         }
-        RepoAccess::Space { client, space_id } => {
-            match client.get_file_text(space_id, rel).await {
-                Ok(text) => parse_canvas_model(&text),
-                Err(crate::space_client::SpaceError::NotFound) => {
-                    Ok(crate::table_ops::new_canvas_file(&file_label_of(rel)))
-                }
-                Err(e) => Err(e.to_string()),
+        RepoAccess::Space { client, space_id } => match client.get_file_text(space_id, rel).await {
+            Ok(text) => parse_canvas_model(&text).map(|model| (model, true)),
+            Err(crate::space_client::SpaceError::NotFound) => {
+                Ok((crate::table_ops::new_canvas_file(&vault::file_label(rel)), false))
             }
-        }
+            Err(e) => Err(e.to_string()),
+        },
     }
-}
-
-/// 文件显示标题：末段去扩展名（新建表格 / 画布的标题口径与壳一致）。
-fn file_label_of(rel: &str) -> String {
-    let name = rel.rsplit('/').next().unwrap_or(rel);
-    vault::file_stem(name).to_string()
 }
 
 /// 读画布模型（口径同 read_table_model）。
@@ -1248,6 +1239,20 @@ async fn read_canvas_model(ctx: &ToolCtx, rel: &str) -> Result<vault::CanvasFile
             parse_canvas_model(&text)
         }
     }
+}
+
+/// 空间新建：只新建落一个空模型（目标已存在即报错，不覆盖并发方写入）。
+async fn create_space_empty<M: serde::Serialize>(
+    client: &crate::space_client::SpaceClient,
+    space_id: &str,
+    rel: &str,
+    model: &M,
+) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(model).map_err(|e| format!("序列化失败：{e}"))?;
+    client
+        .create_file_text(space_id, rel, &json)
+        .await
+        .map_err(|e| format!("新建失败：{e}"))
 }
 
 fn parse_table_model(text: &str) -> Result<vault::TableFile, String> {
@@ -1534,8 +1539,8 @@ async fn table_edit(ctx: &ToolCtx, args: &Value) -> ToolResult {
         return result;
     }
     // 不存在 = 本次新建（从空模型起算）；坏文件报错，不当空表覆盖
-    let base = match edit_source_table(ctx, &rel).await {
-        Ok(table) => table,
+    let (base, existed) = match edit_source_table(ctx, &rel).await {
+        Ok(found) => found,
         Err(e) => return ToolResult::err(format!("表格不存在或不可读：{rel}（{e}）")),
     };
     let mut next = base.clone();
@@ -1568,11 +1573,19 @@ async fn table_edit(ctx: &ToolCtx, args: &Value) -> ToolResult {
                 .map(|_| ToolResult::ok(receipt))
                 .unwrap_or_else(|e| ToolResult::err(format!("写入失败：{e}")))
         }
-        RepoAccess::Space { client, space_id } => client
-            .table_patch(space_id, &rel, &patch)
-            .await
-            .map(|_| ToolResult::ok(receipt))
-            .unwrap_or_else(|e| ToolResult::err(format!("写入失败：{e}"))),
+        // 补丁端点要求目标已存在：本次新建的先落空模型（只新建，不覆盖并发方建出的文件）
+        RepoAccess::Space { client, space_id } => {
+            if !existed {
+                if let Err(e) = create_space_empty(client, space_id, &rel, &base).await {
+                    return ToolResult::err(e);
+                }
+            }
+            client
+                .table_patch(space_id, &rel, &patch)
+                .await
+                .map(|_| ToolResult::ok(receipt))
+                .unwrap_or_else(|e| ToolResult::err(format!("写入失败：{e}")))
+        }
     }
 }
 
@@ -1595,8 +1608,8 @@ async fn canvas_edit(ctx: &ToolCtx, args: &Value) -> ToolResult {
         return result;
     }
     // 不存在 = 本次新建（从空模型起算）；坏文件报错，不当空画布覆盖
-    let base = match edit_source_canvas(ctx, &rel).await {
-        Ok(canvas) => canvas,
+    let (base, existed) = match edit_source_canvas(ctx, &rel).await {
+        Ok(found) => found,
         Err(e) => return ToolResult::err(format!("画布不存在或不可读：{rel}（{e}）")),
     };
     let mut next = base.clone();
@@ -1634,11 +1647,19 @@ async fn canvas_edit(ctx: &ToolCtx, args: &Value) -> ToolResult {
                 .map(|_| ToolResult::ok(receipt))
                 .unwrap_or_else(|e| ToolResult::err(format!("写入失败：{e}")))
         }
-        RepoAccess::Space { client, space_id } => client
-            .canvas_patch(space_id, &rel, &patch)
-            .await
-            .map(|_| ToolResult::ok(receipt))
-            .unwrap_or_else(|e| ToolResult::err(format!("写入失败：{e}"))),
+        // 补丁端点要求目标已存在：本次新建的先落空模型（只新建，不覆盖并发方建出的文件）
+        RepoAccess::Space { client, space_id } => {
+            if !existed {
+                if let Err(e) = create_space_empty(client, space_id, &rel, &base).await {
+                    return ToolResult::err(e);
+                }
+            }
+            client
+                .canvas_patch(space_id, &rel, &patch)
+                .await
+                .map(|_| ToolResult::ok(receipt))
+                .unwrap_or_else(|e| ToolResult::err(format!("写入失败：{e}")))
+        }
     }
 }
 

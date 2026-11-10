@@ -8,12 +8,12 @@ use std::pin::Pin;
 use serde::Serialize;
 
 use crate::history::{self, HistoryKind};
-use crate::space_client::SpaceClient;
+use crate::space_client::{SpaceClient, SpaceError};
 use crate::vault::{self, CanvasFile, TableFile, VaultState};
 use crate::write_queue::WriteQueue;
 
 /// 空间补丁上行（表 / 画布各自的端点）。
-pub type PatchFuture<'a> = Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>>;
+pub type PatchFuture<'a> = Pin<Box<dyn Future<Output = Result<String, SpaceError>> + Send + 'a>>;
 
 /// 领域文档模型：表与画布的差异面（其余步骤共用本模块实现）。
 pub trait DocModel: Clone + Serialize + Send + 'static {
@@ -35,7 +35,6 @@ pub trait DocModel: Clone + Serialize + Send + 'static {
     fn parse(text: &str) -> Result<Self, String>;
     fn new_model(title: &str) -> Self;
     fn read_cached(state: &VaultState, root: &Path, rel: &str) -> Result<(PathBuf, Self), String>;
-    fn cache_put(state: &VaultState, path: &Path, rel: &str, model: &Self);
     /// 空间补丁端点（回执 = 落地后的仓库相对路径）。
     fn submit_patch<'a>(
         client: &'a SpaceClient,
@@ -45,13 +44,20 @@ pub trait DocModel: Clone + Serialize + Send + 'static {
     ) -> PatchFuture<'a>;
 }
 
-/// 一次编辑的中间结果：基线、操作后模型、补丁、摘要与受影响实体。
+/// 一次编辑的计划：操作后模型、补丁与摘要。
 pub struct EditPlan<M: DocModel> {
-    pub baseline: M,
     pub after: M,
     pub patch: M::Patch,
     pub summary: String,
-    pub touched: Vec<String>,
+}
+
+/// 一次编辑的落地结果：补丁落地后的仓库相对路径（服务端可能按标题改名）、操作后模型、
+/// 实际上行补丁与摘要。
+pub struct EditOutcome<M: DocModel> {
+    pub file: String,
+    pub after: M,
+    pub patch: M::Patch,
+    pub summary: String,
 }
 
 /// 计划失败原因：调用方按自己的文档类型给可读文案。
@@ -73,7 +79,7 @@ pub fn plan<M: DocModel>(
     updated_at: i64,
 ) -> Result<EditPlan<M>, PlanError> {
     let mut after = base.clone();
-    let touched = M::apply_ops(&mut after, ops).map_err(PlanError::Ops)?;
+    M::apply_ops(&mut after, ops).map_err(PlanError::Ops)?;
     let Some(patch) = M::diff(baseline, &after) else {
         return Err(PlanError::Unchanged);
     };
@@ -81,7 +87,7 @@ pub fn plan<M: DocModel>(
     M::set_title(&mut stamped, title);
     M::set_updated_at(&mut stamped, updated_at);
     let summary = history::version_summary(M::kind(), &json(baseline), &json(&stamped));
-    Ok(EditPlan { baseline: baseline.clone(), after: stamped, patch, summary, touched })
+    Ok(EditPlan { after: stamped, patch, summary })
 }
 
 /// 读本地真源；文件不存在 = 按标题新建空模型（坏文件仍报错，不得当空模型覆盖）。
@@ -139,41 +145,94 @@ pub async fn read_space<M: DocModel>(
 ) -> Result<Option<M>, String> {
     match client.get_file_text(space_id, rel).await {
         Ok(text) => M::parse(&text).map(Some),
-        Err(crate::space_client::SpaceError::NotFound) => Ok(None),
+        Err(SpaceError::NotFound) => Ok(None),
         Err(e) => Err(e.to_string()),
     }
 }
 
-/// 空间新建：先把空模型整份上行（补丁端点要求目标已存在），返回该模型作为后续操作的基线。
-pub async fn create_space<M: DocModel>(
+/// 空间新建空模型（补丁端点要求目标已存在）。只新建：目标已存在即 `Conflict`，不覆盖。
+async fn create_space<M: DocModel>(
     client: &SpaceClient,
     space_id: &str,
     rel: &str,
     title: &str,
-) -> Result<M, String> {
+) -> Result<(), SpaceError> {
     let model = M::new_model(title);
-    let json = serde_json::to_string_pretty(&model).map_err(|e| e.to_string())?;
-    client
-        .put_file_text(space_id, rel, &json)
-        .await
-        .map_err(|e| format!("新建失败：{e}"))?;
-    Ok(model)
+    let json = serde_json::to_string_pretty(&model).map_err(|e| SpaceError::Network(e.to_string()))?;
+    client.create_file_text(space_id, rel, &json).await
 }
 
-/// 空间落盘：按一次补丁上行（服务端按稳定 id 仲裁），返回落地后的仓库相对路径。
-pub async fn commit_space<M: DocModel>(
+/// 补丁端点错误 → 模型可读原因（409 = 补丁与文件不匹配，须刷新重算）。
+fn patch_error(e: SpaceError, what: &str) -> String {
+    match e {
+        SpaceError::BadRequest(m) | SpaceError::Conflict(m) => {
+            format!("{what}已被他人修改，请刷新后重试（{m}）")
+        }
+        e => e.to_string(),
+    }
+}
+/// 空间落盘：读真源 → 计划 → 补丁上行（服务端按稳定 id 仲裁）。
+///
+/// 读到不存在时按空模型起算并「只新建」落一个空模型，再上行补丁；建与补丁之间目标被他人
+/// 建出 / 删除（`Conflict` / `NotFound`）时重读重算一次，不整份覆盖他人内容。
+/// 操作未产生变化返回 `None`（不写盘、不记版本）。
+pub async fn apply_space<M: DocModel>(
     client: &SpaceClient,
     space_id: &str,
     rel: &str,
-    patch: &M::Patch,
-) -> Result<String, String> {
-    M::submit_patch(client, space_id, rel, patch).await
-}
-
-/// 领域文件显示标题：末段去扩展名（新建表格 / 画布的标题口径与壳一致）。
-pub fn file_label(rel: &str) -> String {
-    let name = rel.rsplit('/').next().unwrap_or(rel);
-    vault::file_stem(name).to_string()
+    title: &str,
+    updated_at: i64,
+    ops: &M::Ops,
+    what: &str,
+) -> Result<Option<EditOutcome<M>>, String> {
+    // 一次重试足够：重试读到的真源已是并发方落地后的内容，再冲突属持续争用，如实报错
+    for attempt in 0..2 {
+        let base = match read_space::<M>(client, space_id, rel).await? {
+            Some(model) => model,
+            None => {
+                let fresh = M::new_model(title);
+                let planned = match plan(&fresh, &fresh, ops, title, updated_at) {
+                    Ok(planned) => planned,
+                    Err(PlanError::Unchanged) => return Ok(None),
+                    Err(PlanError::Ops(e)) => return Err(e),
+                };
+                match create_space::<M>(client, space_id, rel, title).await {
+                    Ok(()) => {}
+                    // 读到不存在之后被他人建出：重读后按补丁上行
+                    Err(SpaceError::Conflict(_)) if attempt == 0 => continue,
+                    Err(e) => return Err(format!("新建失败：{e}")),
+                }
+                let file = M::submit_patch(client, space_id, rel, &planned.patch)
+                    .await
+                    .map_err(|e| patch_error(e, what))?;
+                return Ok(Some(EditOutcome {
+                    file,
+                    after: planned.after,
+                    patch: planned.patch,
+                    summary: planned.summary,
+                }));
+            }
+        };
+        let planned = match plan(&base, &base, ops, title, updated_at) {
+            Ok(planned) => planned,
+            Err(PlanError::Unchanged) => return Ok(None),
+            Err(PlanError::Ops(e)) => return Err(e),
+        };
+        match M::submit_patch(client, space_id, rel, &planned.patch).await {
+            Ok(file) => {
+                return Ok(Some(EditOutcome {
+                    file,
+                    after: planned.after,
+                    patch: planned.patch,
+                    summary: planned.summary,
+                }))
+            }
+            // 读到存在之后被删除：重读后按新建处理（补丁端点要求目标已存在）
+            Err(SpaceError::NotFound) if attempt == 0 => continue,
+            Err(e) => return Err(patch_error(e, what)),
+        }
+    }
+    Err(format!("{what}正在被他人修改，请稍后重试"))
 }
 
 fn json<T: Serialize>(model: &T) -> String {
@@ -236,25 +295,13 @@ impl DocModel for TableFile {
         vault::read_table_file_cached(state, root, rel)
     }
 
-    fn cache_put(state: &VaultState, path: &Path, rel: &str, model: &Self) {
-        vault::cache_put_table(state, path, rel, model);
-    }
-
     fn submit_patch<'a>(
         client: &'a SpaceClient,
         space_id: &'a str,
         rel: &'a str,
         patch: &'a Self::Patch,
     ) -> PatchFuture<'a> {
-        Box::pin(async move {
-            match client.table_patch(space_id, rel, patch).await {
-                Ok(ack) => Ok(ack.file),
-                Err(crate::space_client::SpaceError::BadRequest(m)) => {
-                    Err(format!("表格已被他人修改，请刷新后重试（{m}）"))
-                }
-                Err(e) => Err(e.to_string()),
-            }
-        })
+        Box::pin(async move { client.table_patch(space_id, rel, patch).await.map(|ack| ack.file) })
     }
 }
 
@@ -314,25 +361,13 @@ impl DocModel for CanvasFile {
         vault::read_canvas_file_cached(state, root, rel)
     }
 
-    fn cache_put(state: &VaultState, path: &Path, rel: &str, model: &Self) {
-        vault::cache_put_canvas(state, path, rel, model);
-    }
-
     fn submit_patch<'a>(
         client: &'a SpaceClient,
         space_id: &'a str,
         rel: &'a str,
         patch: &'a Self::Patch,
     ) -> PatchFuture<'a> {
-        Box::pin(async move {
-            match client.canvas_patch(space_id, rel, patch).await {
-                Ok(ack) => Ok(ack.file),
-                Err(crate::space_client::SpaceError::BadRequest(m)) => {
-                    Err(format!("画布已被他人修改，请刷新后重试（{m}）"))
-                }
-                Err(e) => Err(e.to_string()),
-            }
-        })
+        Box::pin(async move { client.canvas_patch(space_id, rel, patch).await.map(|ack| ack.file) })
     }
 }
 
@@ -365,12 +400,12 @@ mod tests {
         let planned = plan(&baseline, &baseline, &ops, "新名", 42).expect("应产出计划");
         assert_eq!(planned.after.title, "新名");
         assert_eq!(planned.after.updated_at, 42);
-        assert_eq!(planned.touched, vec!["r1".to_string()]);
+        assert_eq!(planned.patch.upsert_rows.len(), 1, "补丁只带受影响行");
         assert!(!planned.summary.is_empty());
         // 操作与现值相同 = 未变化（不写盘）
         let same = vec![TableOp::SetCell {
             row_id: "r1".into(),
-            field_id: planned.baseline.fields[0].id.clone(),
+            field_id: baseline.fields[0].id.clone(),
             value: json!("写文档"),
         }];
         assert!(matches!(
@@ -401,11 +436,10 @@ mod tests {
     }
 
     #[test]
-    fn plan_canvas_reports_touched_entities() {
+    fn plan_canvas_patch_carries_new_node() {
         let baseline = crate::table_ops::new_canvas_file("画");
         let ops = vec![CanvasOp::AddTextCard { text: "卡".into(), x: Some(16.0), y: Some(16.0) }];
         let planned = plan(&baseline, &baseline, &ops, "画", 1).expect("应产出计划");
-        assert_eq!(planned.touched.len(), 1);
         assert_eq!(planned.patch.upsert_nodes.len(), 1);
     }
 
@@ -460,3 +494,4 @@ mod tests {
         assert!(read_local_or_new::<TableFile>(&state, &root, "坏.atb", "坏").is_err());
     }
 }
+
