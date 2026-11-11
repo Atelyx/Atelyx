@@ -2131,13 +2131,13 @@ fn fill_text(frame: &mut canvas::Frame, content: &str, pos: Point, size: f32, fo
     );
 }
 
-/// 图标描边（24 单位视框缩放到 size 见方，2 单位描边随缩放）。
+/// 图标描边（24 单位视框缩放到 size 见方，2 单位描边随缩放，下限 1px）。
 fn draw_icon(frame: &mut canvas::Frame, name: &str, pos: Point, size: f32, color: Color) {
     let Some(subpaths) = polylines(name) else { return };
     let k = size / 24.0;
     let stroke = Stroke {
         style: canvas::Style::Solid(color),
-        width: 2.0 * k,
+        width: (2.0 * k).max(1.0),
         line_cap: LineCap::Round,
         line_join: LineJoin::Round,
         line_dash: LineDash { segments: &[], offset: 0 },

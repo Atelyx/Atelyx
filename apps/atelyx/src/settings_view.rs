@@ -64,7 +64,7 @@ fn settings_item_dyn(id: &str, label: &str, icon_name: &str, active_tab: &str) -
     let active = id == active_tab;
     button(
         row![
-            icon_stroke(icon_name, 14.0, if active { pal::ACCENT } else { pal::TEXT_SECONDARY }, 1.5),
+            icon_stroke(icon_name, 14.0, if active { pal::ACCENT } else { pal::TEXT_SECONDARY }, 2.0),
             text(label.to_string())
                 .size(pal::fs_caption())
                 .color(if active { pal::ACCENT } else { pal::TEXT_SECONDARY })

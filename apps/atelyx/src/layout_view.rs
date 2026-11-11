@@ -648,7 +648,7 @@ fn with_overlays<'a>(
                 let local = Point::new(drag.current.x - wpos.x, drag.current.y - wpos.y);
                 let ghost = container(
                     row![
-                        icon_stroke(&view_icon(app, &drag.view), 13.0, pal::TEXT_PRIMARY, 1.5),
+                        icon_stroke(&view_icon(app, &drag.view), 13.0, pal::TEXT_PRIMARY, 2.0),
                         text(drag.label.clone()).size(pal::fs_caption()).color(pal::TEXT_PRIMARY),
                     ]
                     .spacing(6),
@@ -699,7 +699,7 @@ fn with_overlays<'a>(
                 let reject = reject.is_some();
                 let mut card = column![
                     row![
-                        icon_stroke(&icon_name, 13.0, pal::TEXT_PRIMARY, 1.5),
+                        icon_stroke(&icon_name, 13.0, pal::TEXT_PRIMARY, 2.0),
                         text(drag.label.clone()).size(pal::fs_caption()).color(pal::TEXT_PRIMARY),
                     ]
                     .spacing(6),
@@ -1479,7 +1479,7 @@ fn panel_tab<'a>(
 
     let text_color = if active { pal::TEXT_PRIMARY } else { pal::TEXT_SECONDARY };
     let mut label_row = row![].spacing(4);
-    label_row = label_row.push(icon_stroke(&view_icon(app, &t.view), 13.0, text_color, 1.5));
+    label_row = label_row.push(icon_stroke(&view_icon(app, &t.view), 13.0, text_color, 2.0));
     label_row = label_row.push(
         text(ellipsize(&label, UiMetrics::TAB_TEXT_MAX_W, 12.0))
             .size(pal::fs_caption())
@@ -2200,7 +2200,7 @@ pub fn detached_view<'a>(
                 .is_some_and(|d| crate::plugin_actions::doc_view_kind(&d.plugin_id, &d.contribution_id) == t.view);
         let text_color = if active { pal::TEXT_PRIMARY } else { pal::TEXT_SECONDARY };
         let mut label_row = row![].spacing(4);
-        label_row = label_row.push(icon_stroke(&view_icon(app, &t.view), 13.0, text_color, 1.5));
+        label_row = label_row.push(icon_stroke(&view_icon(app, &t.view), 13.0, text_color, 2.0));
         label_row = label_row.push(
             text(ellipsize(&label, UiMetrics::TAB_TEXT_MAX_W, 12.0))
                 .size(pal::fs_caption())
@@ -2998,7 +2998,7 @@ fn tree_row_element(
             pal::TEXT_MUTED,
         ));
     }
-    content = content.push(icon_stroke(&icon_name, 14.0, icon_color, 1.5));
+    content = content.push(icon_stroke(&icon_name, 14.0, icon_color, 2.0));
     let ext_color = if r.active { pal::ACCENT } else { pal::TEXT_MUTED };
     content = content.push(tree_name_slot(r, name_color, ext_color));
 

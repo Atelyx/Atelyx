@@ -199,7 +199,7 @@ fn item<M: UiHost>(
     };
     let mut row = row![].spacing(6).width(Length::Fill);
     if let Some(name) = icon_name {
-        row = row.push(icon_stroke(&name, 13.0, text_color, 1.5));
+        row = row.push(icon_stroke(&name, 13.0, text_color, 2.0));
     }
     row = row.push(text(label.to_string()).size(pal::fs_caption()).color(text_color));
     if let Some(note) = note {
@@ -232,7 +232,7 @@ fn submenu_item<M: UiHost>(
     let mut row = row![].spacing(6).width(Length::Fill);
     row = row.push(icon("chevron-right", 13.0, text_color));
     if let Some(name) = icon_name {
-        row = row.push(icon_stroke(&name, 13.0, text_color, 1.5));
+        row = row.push(icon_stroke(&name, 13.0, text_color, 2.0));
     }
     row = row.push(text(label.to_string()).size(pal::fs_caption()).color(text_color));
     if disabled {

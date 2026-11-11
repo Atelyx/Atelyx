@@ -1,7 +1,8 @@
 //! 矢量图标部件：形状表（24 单位视框）在 iced Canvas 上描边绘制。
 //!
-//! 展平在 `init` 时一次完成并缓存；绘制帧只做坐标缩放与描边，
-//! 描边宽度 2 单位随帧缩放（14px 时约 1.17px 线宽）。
+//! 展平在 `init` 时一次完成并缓存；绘制帧只做坐标缩放与描边。
+//! 描边按视框单位随尺寸缩放（2 单位在 14px ≈ 1.17px），但绘制宽度不低于
+//! 1 逻辑像素——小图标再细会发灰。
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -152,7 +153,8 @@ where
         );
         let stroke = Stroke {
             style: canvas::Style::Solid(self.color),
-            width: self.stroke_units,
+            // 视框单位 → 逻辑像素；小图标缩完不足 1px 时钉在下限，避免细线发灰。
+            width: (self.stroke_units * k).max(1.0),
             line_cap: LineCap::Round,
             line_join: LineJoin::Round,
             line_dash: LineDash { segments: &[], offset: 0 },
@@ -193,9 +195,9 @@ pub fn icon_name(name: &str) -> &'static str {
     icons::names().find(|n| *n == name).unwrap_or("")
 }
 
-/// 图标元素（`size` 见方、缺省 1.5 单位描边；未知图标名画空）。
+/// 图标元素（`size` 见方、缺省 2 单位描边；未知图标名画空）。
 pub fn icon<Message: 'static>(name: &str, size: f32, color: Color) -> Element<'static, Message> {
-    icon_stroke(name, size, color, 1.5)
+    icon_stroke(name, size, color, 2.0)
 }
 
 /// 图标元素（自定描边宽度；stroke_units 用 24 单位视框坐标）。

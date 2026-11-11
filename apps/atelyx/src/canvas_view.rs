@@ -1869,7 +1869,8 @@ fn draw_icon_glyph(frame: &mut Frame, name: &str, x: f32, y: f32, size: f32, col
                 &path,
                 Stroke {
                     style: canvas::Style::Solid(color),
-                    width: 2.0,
+                    // 视框单位随图标尺寸缩放；小图标不足 1px 时保持可读
+                    width: (2.0 * k).max(1.0),
                     line_cap: iced::widget::canvas::LineCap::Round,
                     line_join: iced::widget::canvas::LineJoin::Round,
                     ..Stroke::default()
