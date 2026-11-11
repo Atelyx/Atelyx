@@ -3698,7 +3698,8 @@ fn mode_button(
                     .font(crate::ui::bold())
                     .color(if active { pal::ACCENT } else { pal::TEXT_SECONDARY }),
             ]
-            .spacing(4),
+            .spacing(4)
+            .align_y(Vertical::Center),
         )
         .height(Length::Fill)
         .align_y(Vertical::Center),
