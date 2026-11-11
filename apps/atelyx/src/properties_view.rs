@@ -189,7 +189,7 @@ pub fn props_panel<'a>(
     let body: Element<'a, Message> = match parsed {
         // YAML 解析失败：红条 + 源码模式入口（面板编辑全部禁用，防 stringify 丢弃旧数据）
         (_data, false) => row![
-            icon("triangle-alert", 13.0, pal::DANGER),
+            icon("alert", 13.0, pal::DANGER),
             text("YAML 格式错误，属性面板暂不可编辑")
                 .size(pal::fs_caption())
                 .color(pal::TEXT_SECONDARY),

@@ -269,7 +269,7 @@ pub fn builtin_tools() -> &'static [ToolDef] {
             ToolDef {
                 name: "delete",
                 label: "删除",
-                icon: "trash-2",
+                icon: "bin",
                 description: "删除文件或目录（不可恢复）。目录非空时需 force=true；仅在用户明确要求时使用。",
                 parameters: json!({
                     "type": "object",

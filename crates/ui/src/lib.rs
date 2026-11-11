@@ -13,7 +13,6 @@ pub mod notify;
 pub mod palette;
 pub mod popup;
 pub mod scroll;
-mod svgpath;
 
 pub use font::{bold, epoch, family, italic, mono, regular, set_family, text};
 

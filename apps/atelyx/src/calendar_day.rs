@@ -187,7 +187,7 @@ fn schedule_row(app: &App, item: &CalendarItem, window: iced::window::Id) -> Ele
             .into()
         } else {
             controls::icon_button(
-                "trash-2",
+                "bin",
                 12.0,
                 22.0,
                 controls::Variant::Secondary,

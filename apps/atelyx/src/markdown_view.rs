@@ -11,9 +11,7 @@ use atelyx_core::markdown::{
 use iced::advanced::text::{self as advanced_text, Paragraph as _};
 use iced::alignment;
 use iced::widget::text::{LineHeight, Rich, Span, Wrapping};
-use iced::widget::{
-    button, checkbox, column, container, row, scrollable, Space, Stack,
-};
+use iced::widget::{button, column, container, row, scrollable, Space, Stack};
 use iced::{Border, Color, Element, Font, Length, Padding, Size};
 
 use crate::markdown_edit::ParagraphT;
@@ -21,6 +19,7 @@ use crate::markdown_select::{
     ChatSelection, NoteSelection, SelectRun, SelectScope, SelectableRich,
 };
 use crate::markdown_table::MarkdownTable;
+use crate::ui::controls;
 use crate::ui::text;
 use crate::Message;
 
@@ -1034,12 +1033,11 @@ impl Render<'_> {
     ) -> Element<'a, Message> {
         if item.task {
             let from = item.from;
-            let box_widget = checkbox(item.checked);
-            let box_widget = if self.interactive {
-                box_widget.on_toggle(move |_| Message::ToggleTask(from))
-            } else {
-                box_widget
-            };
+            // 任务框走 ui 自绘（iced 内建 checkbox 的勾是内嵌图标字体的字形，不满足全应用自绘图标）
+            let state =
+                if item.checked { controls::CheckState::On } else { controls::CheckState::Off };
+            let box_widget =
+                controls::checkbox(state, self.interactive.then_some(Message::ToggleTask(from)));
             container(box_widget)
                 .width(Length::Fixed(width))
                 .padding(Padding { top: 2.0, ..Padding::default() })

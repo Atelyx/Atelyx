@@ -532,13 +532,13 @@ pub fn card_header_controls<'a>(
     // 流式占位槽：固定宽度让压缩钮不随流式起止横移
     let slot = (12.0 * s).clamp(8.0, 14.0);
     row = row.push(if streaming {
-        iced::Element::from(icon("loader-circle", slot, pal::ACCENT))
+        iced::Element::from(icon("loader", slot, pal::ACCENT))
     } else {
         Space::new().width(Length::Fixed(slot)).into()
     });
     row = row.push(if compacting {
         controls::icon_button(
-            "loader-circle",
+            "loader",
             (13.0 * s).clamp(8.0, 14.0),
             (24.0 * s).clamp(16.0, 26.0),
             controls::Variant::Ghost,

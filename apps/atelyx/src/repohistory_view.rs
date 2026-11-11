@@ -301,7 +301,7 @@ pub fn repohistory_view(app: &App, window: iced::window::Id) -> Element<'_, Mess
     }
     let body: Element<'_, Message> = match &app.repo_history {
         Some(Err(e)) => controls::empty_state(
-            "triangle-alert",
+            "alert",
             "历史聚合失败",
             e.clone(),
             Some(("重试".into(), Message::RepoHistoryRefresh)),

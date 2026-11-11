@@ -26,8 +26,8 @@ impl Level {
     fn icon(self) -> &'static str {
         match self {
             Level::Info => "info",
-            Level::Success => "circle-check-big",
-            Level::Warning => "triangle-alert",
+            Level::Success => "check-circle",
+            Level::Warning => "alert",
             Level::Error => "circle-x",
         }
     }

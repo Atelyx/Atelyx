@@ -188,7 +188,7 @@ fn rebuild_card(app: &App) -> Element<'static, Message> {
     let mut card = column![
         row![
             column![
-                row![icon("triangle-alert", 13.0, pal::DANGER), text("重建内部链接").size(pal::fs_body()).color(pal::TEXT_PRIMARY).font(bold())]
+                row![icon("alert", 13.0, pal::DANGER), text("重建内部链接").size(pal::fs_body()).color(pal::TEXT_PRIMARY).font(bold())]
                     .spacing(6)
                     .align_y(Vertical::Center),
                 text("把全库 .md 链接统一改写为标准 Markdown 链接，不可撤销")

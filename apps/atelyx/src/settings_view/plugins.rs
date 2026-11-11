@@ -2356,7 +2356,7 @@ fn market_group(app: &App) -> Element<'static, Message> {
     if app.plugins_state.market.is_none() {
         return col
             .push(if loading {
-                controls::empty_state("loader-circle", "加载市场…", "正在拉取官方索引", None)
+                controls::empty_state("loader", "加载市场…", "正在拉取官方索引", None)
             } else {
                 controls::empty_state("puzzle", "市场未加载", "刷新索引后浏览可安装的插件", None)
             })
@@ -2835,7 +2835,7 @@ fn detail_log(app: &App, summary: &PluginSummary) -> Element<'static, Message> {
     let body: Element<'static, Message> =
         match (&app.plugins_state.log_error, &app.plugins_state.log_text) {
             (Some(err), _) => controls::empty_state(
-                "triangle-alert",
+                "alert",
                 "读取失败",
                 err.clone(),
                 Some(("重试".to_string(), Message::Plugins(PluginsMsg::LogRefresh))),
@@ -2855,7 +2855,7 @@ fn detail_log(app: &App, summary: &PluginSummary) -> Element<'static, Message> {
                 "插件 stderr、协议违规与生命周期失败会写在这里",
                 None,
             ),
-            (None, None) => controls::empty_state("loader-circle", "读取中…", "正在读取日志尾部", None),
+            (None, None) => controls::empty_state("loader", "读取中…", "正在读取日志尾部", None),
         };
     Column::new()
         .spacing(8)
@@ -3020,7 +3020,7 @@ fn panel(content: Element<'static, Message>, height: f32) -> Element<'static, Me
 /// 市场安装确认模态（非官方插件；官方插件直接安装，不经此窗）。
 fn install_confirm_modal(ask: &MarketInstallAsk) -> Element<'static, Message> {
     let header = row![
-        icon("triangle-alert", 14.0, pal::WARNING),
+        icon("alert", 14.0, pal::WARNING),
         text(format!("安装「{}」", ask.name))
             .size(pal::fs_body())
             .color(pal::TEXT_PRIMARY)

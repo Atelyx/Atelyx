@@ -1,4 +1,4 @@
-//! 「关于」分区：居中品牌区（Logo / 名称 / 版本 / 定位）+ 信息卡片（检查更新 / 项目主页 / 开源许可）。
+//! 「关于」分区：居中品牌区（Logo / 名称 / 版本 / 定位）+ 信息卡片（检查更新 / 项目主页）。
 
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::{column, container, row, space};
@@ -14,26 +14,19 @@ use crate::app_icon::icon_handle;
 use crate::ui::bold;
 use crate::{update, App, Message};
 
-/// 开源许可条目（名称 + 许可 + 官方主页）：只列随应用分发的第三方资产。
-const LICENSES: [(&str, &str, &str); 1] = [
-    ("Lucide 图标形状数据", "ISC", "https://lucide.dev"),
-];
-/// 许可模态卡宽。
-pub(crate) const LICENSE_CARD_WIDTH: f32 = 380.0;
-
 /// 字节数 → MB 文案（一位小数）。
 fn mb(bytes: u64) -> String {
     format!("{:.1}", bytes as f32 / (1024.0 * 1024.0))
 }
 
-pub fn view(app: &App, window: iced::window::Id) -> Element<'static, Message> {
+pub fn view(app: &App) -> Element<'static, Message> {
     let version = env!("CARGO_PKG_VERSION");
     let mut col = column![].spacing(8).padding(Padding::ZERO.horizontal(20.0));
     col = col.push(brand_block(version));
     // 信息卡片限宽居中，与品牌区同轴（容器居中须包住限宽列，max_width 钳的是自身宽度）
     let mut cards = column![].spacing(8);
     cards = cards.push(info_card(
-        "refresh-cw",
+        "refresh",
         "检查更新",
         update_subline(app, version),
         update_button(app),
@@ -54,21 +47,6 @@ pub fn view(app: &App, window: iced::window::Id) -> Element<'static, Message> {
                 String::from("https://github.com/Atelyx/Atelyx"),
                 LinkForm::External,
             )),
-        )
-        .into(),
-    ));
-    cards = cards.push(info_card(
-        "file-text",
-        "开源许可",
-        text("Lucide 图标形状数据（ISC）")
-            .size(pal::fs_micro())
-            .color(pal::TEXT_SECONDARY)
-            .into(),
-        controls::btn(
-            "查看",
-            &controls::btn_pill(),
-            controls::Variant::Outline,
-            Some(crate::layout_view::license_popup(window)),
         )
         .into(),
     ));
@@ -158,74 +136,6 @@ fn info_card(
     .into()
 }
 
-/// 许可模态覆盖层：遮罩捕获层 + 居中卡（非本形态弹层 / 非本窗口返回 None）。
-pub fn license_overlay(app: &App, window: iced::window::Id) -> Option<Element<'static, Message>> {
-    let (w, open) = app.popup.as_ref()?;
-    if *w != window || !matches!(open.state, crate::layout_view::PopupState::LicenseInfo) {
-        return None;
-    }
-    let header = container(
-        row![
-            icon("file-text", 14.0, pal::TEXT_SECONDARY),
-            text("开源许可").size(pal::fs_body()).color(pal::TEXT_PRIMARY).font(bold()),
-            space().width(Length::Fill),
-            controls::icon_button(
-                "x",
-                14.0,
-                26.0,
-                controls::Variant::Ghost,
-                Some(Message::Ui(crate::ui::UiMsg::PopupClose { window })),
-                Some((window, "关闭".into())),
-            ),
-        ]
-        .spacing(8)
-        .align_y(Vertical::Center),
-    )
-    .width(Length::Fill)
-    .padding(Padding::ZERO.horizontal(12.0).vertical(10.0));
-    let mut rows = column![].spacing(8).padding(12.0);
-    for (name, license, url) in LICENSES {
-        rows = rows.push(license_row(name, license, url));
-    }
-    let card = container(column![header, controls::h_divider_subtle(), rows].width(Length::Fill))
-        .width(Length::Fixed(LICENSE_CARD_WIDTH))
-        .style(|_t| iced::widget::container::Style {
-            background: Some(pal::BG_OVERLAY.into()),
-            border: iced::border::rounded(pal::RADIUS_MD).color(pal::BORDER).width(1.0),
-            ..iced::widget::container::Style::default()
-        });
-    Some(crate::ui::popup::modal_overlay(window, card.into()))
-}
-
-/// 许可条目行：名称与许可证类型，右侧前往官方主页。
-fn license_row(name: &'static str, license: &'static str, url: &'static str) -> Element<'static, Message> {
-    container(
-        row![
-            column![
-                text(name).size(pal::fs_body()).color(pal::TEXT_PRIMARY),
-                text(license).size(pal::fs_micro()).color(pal::TEXT_MUTED),
-            ]
-            .spacing(2),
-            space().width(Length::Fill),
-            controls::btn(
-                "前往",
-                &controls::btn_pill(),
-                controls::Variant::Outline,
-                Some(Message::OpenLink(url.to_string(), LinkForm::External)),
-            ),
-        ]
-        .spacing(12)
-        .align_y(Vertical::Center),
-    )
-    .width(Length::Fill)
-    .padding(Padding::ZERO.horizontal(12.0).vertical(8.0))
-    .style(|_t| iced::widget::container::Style {
-        background: Some(pal::BG_TERTIARY.into()),
-        border: iced::border::rounded(pal::RADIUS_MD),
-        ..iced::widget::container::Style::default()
-    })
-    .into()
-}
 
 /// 检查更新行的说明文案（随流程态变化）。
 fn update_subline(app: &App, version: &str) -> Element<'static, Message> {

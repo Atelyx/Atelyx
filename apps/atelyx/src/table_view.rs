@@ -2131,7 +2131,7 @@ fn fill_text(frame: &mut canvas::Frame, content: &str, pos: Point, size: f32, fo
     );
 }
 
-/// 图标描边（24 单位视框缩放到 size 见方，lucide 2 单位描边随缩放）。
+/// 图标描边（24 单位视框缩放到 size 见方，2 单位描边随缩放）。
 fn draw_icon(frame: &mut canvas::Frame, name: &str, pos: Point, size: f32, color: Color) {
     let Some(subpaths) = polylines(name) else { return };
     let k = size / 24.0;
@@ -2302,7 +2302,7 @@ fn draw_header(session: &TableSession, g: &Geo, frame: &mut canvas::Frame) {
     let view = &session.view;
     let h = g.header_h();
     let font_size = num_font() * g.z;
-    draw_icon(frame, "maximize-2", Point::new(g.gutter_w() / 2.0 - 5.0 * g.z, (h - 10.0 * g.z) / 2.0), 10.0 * g.z, pal::TEXT_MUTED);
+    draw_icon(frame, "expand", Point::new(g.gutter_w() / 2.0 - 5.0 * g.z, (h - 10.0 * g.z) / 2.0), 10.0 * g.z, pal::TEXT_MUTED);
     if let Some((c0, c1)) = g.visible_cols(session.data.fields.len()) {
         for c in c0..=c1 {
             let Some(field) = session.data.fields.get(c) else { continue };

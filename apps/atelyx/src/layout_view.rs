@@ -54,7 +54,7 @@ pub fn view_label(app: &App, kind: &str) -> String {
     app.registry.label(kind)
 }
 
-/// 视图图标（壳内 lucide 名）：注册表的一条查询；未在册回落拼图。
+/// 视图图标（壳内图标名）：注册表的一条查询；未在册回落拼图。
 pub fn view_icon(app: &App, kind: &str) -> Cow<'static, str> {
     app.registry.icon(kind)
 }
@@ -249,8 +249,6 @@ pub(crate) enum PopupState {
     AiAgentDeleteMenu,
     /// 设置-AI：搜索源下拉。
     AiSearchProviderMenu,
-    /// 设置-关于：开源许可条目（第三方资产官方主页外链）。
-    LicenseInfo,
     /// 历史记录弹层（居中模态；kind+file 定位侧文件）。
     HistoryBrowser { kind: atelyx_core::history::HistoryKind, file: String },
     /// 只读正文 / 对话消息的选区右键菜单（复制）。
@@ -314,7 +312,6 @@ impl PopupState {
             PopupState::AiProviderDeleteMenu | PopupState::AiAgentDeleteMenu => 208.0,
             PopupState::AiSearchProviderMenu => 144.0,
             // 居中模态不走锚点几何，估高由各自 overlay 钳制
-            PopupState::LicenseInfo => crate::settings_view::LICENSE_CARD_WIDTH,
             PopupState::HistoryBrowser { .. } => crate::history_browser::CARD_WIDTH,
         }
     }
@@ -361,19 +358,6 @@ pub(crate) fn selection_popup(
     target: crate::markdown_select::SelectionTarget,
 ) -> Message {
     ctx_popup(window, cursor, PopupState::SelectionMenu { target })
-}
-
-/// 设置-关于：开源许可模态的打开消息（居中模态不走锚点几何）。
-pub(crate) fn license_popup(window: iced::window::Id) -> Message {
-    Message::PopupOpen(
-        window,
-        PopupOpen {
-            point: Point::ORIGIN,
-            flip_y: None,
-            state: PopupState::LicenseInfo,
-            min_width: 0.0,
-        },
-    )
 }
 
 /// 主窗口：标题栏 + 内容（设置整页或面板网格）+ 状态栏，顶层叠弹层/提示/通知。
@@ -594,7 +578,7 @@ fn with_overlays<'a>(
     // 弹层（同窗口至多一个；捕获层点击 = 外点关闭；居中模态另行渲染，见下方）
     if let Some((w, open)) = &app.popup {
         if *w == window
-            && !matches!(open.state, PopupState::HistoryBrowser { .. } | PopupState::LicenseInfo)
+            && !matches!(open.state, PopupState::HistoryBrowser { .. })
         {
             let (content, height) = popup_element(app, &open.state, app.popup_pane, window);
             let spec = PopupSpec {
@@ -615,11 +599,6 @@ fn with_overlays<'a>(
 
     // 历史记录模态（优先级在锚点弹层之上、通知之下）
     if let Some(el) = crate::history_browser::overlay(app, window, viewport) {
-        root = root.push(el);
-    }
-
-    // 开源许可模态（与历史记录同级）
-    if let Some(el) = crate::settings_view::license_overlay(app, window) {
         root = root.push(el);
     }
 
@@ -2486,7 +2465,7 @@ pub(crate) fn files_view(app: &App, _window: iced::window::Id) -> Element<'_, Me
             controls::icon_button("arrow-up-down", 14.0, controls::ICON_MD, Variant::Ghost,
                 Some(btn_popup(window, cursor, PopupState::SortMenu)), Some((window, "排序方式".into()))),
             space().width(Length::Fill),
-            controls::icon_button("refresh-cw", 14.0, controls::ICON_MD, Variant::Ghost,
+            controls::icon_button("refresh", 14.0, controls::ICON_MD, Variant::Ghost,
                 in_repo.then_some(Message::FileTreeRefresh), Some((window, "重新读取文件树".into()))),
             controls::icon_button(expand_icon, 14.0, controls::ICON_MD, Variant::Ghost,
                 Some(Message::ExpandAllToggle), Some((window, expand_label.into()))),
@@ -4147,7 +4126,7 @@ fn popup_element<'a>(
                 MenuEntry::action("重命名", Message::LayoutRenameStart(id.clone())),
             )];
             if deletable {
-                entries.push((0, MenuEntry::danger("删除", "trash-2", Message::LayoutDelete(id))));
+                entries.push((0, MenuEntry::danger("删除", "bin", Message::LayoutDelete(id))));
             }
             entries
         }
@@ -4766,7 +4745,7 @@ fn popup_element<'a>(
                 ),
                 (
                     0,
-                    MenuEntry::action_icon("行高自适应", "align-vertical-space-around", Message::Table(crate::table_view::TableMsg::RowHeightAuto(Some(rid.clone())))),
+                    MenuEntry::action_icon("行高自适应", "space-around", Message::Table(crate::table_view::TableMsg::RowHeightAuto(Some(rid.clone())))),
                 ),
                 (
                     0,
@@ -4775,7 +4754,7 @@ fn popup_element<'a>(
                 (0, MenuEntry::Divider),
                 (
                     0,
-                    MenuEntry::danger("删除行", "trash-2", Message::Table(crate::table_view::TableMsg::DeleteRows(vec![rid]))),
+                    MenuEntry::danger("删除行", "bin", Message::Table(crate::table_view::TableMsg::DeleteRows(vec![rid]))),
                 ),
             ]
         }
@@ -4842,7 +4821,7 @@ fn popup_element<'a>(
             }
             entries.push((
                 2,
-                MenuEntry::danger("删除", "trash-2", canvas_menu(crate::canvas_view::CanvasMenuAction::DeleteSelection)),
+                MenuEntry::danger("删除", "bin", canvas_menu(crate::canvas_view::CanvasMenuAction::DeleteSelection)),
             ));
             entries
         }
@@ -4889,7 +4868,7 @@ fn popup_element<'a>(
                 (
                     2,
                     // 删组只删容器：成员卡保留（成员判定是空间关系）
-                    MenuEntry::danger("删除分组", "trash-2", canvas_menu(crate::canvas_view::CanvasMenuAction::DeleteSelection)),
+                    MenuEntry::danger("删除分组", "bin", canvas_menu(crate::canvas_view::CanvasMenuAction::DeleteSelection)),
                 ),
             ];
             // 颜色子面板（pane 1）：色板行 + 当前色角标
@@ -4947,7 +4926,7 @@ fn popup_element<'a>(
             ),
             (
                 2,
-                MenuEntry::danger("删除", "trash-2", canvas_menu(crate::canvas_view::CanvasMenuAction::DeleteSelection)),
+                MenuEntry::danger("删除", "bin", canvas_menu(crate::canvas_view::CanvasMenuAction::DeleteSelection)),
             ),
         ],
         PopupState::CanvasBlankMenu { x, y } => {
@@ -5094,7 +5073,7 @@ fn popup_element<'a>(
             ),
             (
                 0,
-                MenuEntry::action_icon("行高自适应", "align-vertical-space-around", Message::Table(crate::table_view::TableMsg::RowHeightAuto(None))),
+                MenuEntry::action_icon("行高自适应", "space-around", Message::Table(crate::table_view::TableMsg::RowHeightAuto(None))),
             ),
             (
                 0,
@@ -5491,11 +5470,11 @@ fn popup_element<'a>(
             vec![
                 (
                     0,
-                    MenuEntry::Submenu { label: "删除供应商".into(), icon: Some("trash-2".into()), disabled: false, pane: 1 },
+                    MenuEntry::Submenu { label: "删除供应商".into(), icon: Some("bin".into()), disabled: false, pane: 1 },
                 ),
                 (
                     1,
-                    MenuEntry::danger("确认删除（并清除其密钥链条目）", "trash-2", Message::Ai(ai::AiMsg::ProviderDelete)),
+                    MenuEntry::danger("确认删除（并清除其密钥链条目）", "bin", Message::Ai(ai::AiMsg::ProviderDelete)),
                 ),
                 (1, MenuEntry::action("取消", Message::Ui(crate::ui::UiMsg::PopupClose { window }))),
             ]
@@ -5504,9 +5483,9 @@ fn popup_element<'a>(
             vec![
                 (
                     0,
-                    MenuEntry::Submenu { label: "删除 Agent".into(), icon: Some("trash-2".into()), disabled: false, pane: 1 },
+                    MenuEntry::Submenu { label: "删除 Agent".into(), icon: Some("bin".into()), disabled: false, pane: 1 },
                 ),
-                (1, MenuEntry::danger("确认删除", "trash-2", Message::Ai(ai::AiMsg::AgentDelete))),
+                (1, MenuEntry::danger("确认删除", "bin", Message::Ai(ai::AiMsg::AgentDelete))),
                 (1, MenuEntry::action("取消", Message::Ui(crate::ui::UiMsg::PopupClose { window }))),
             ]
         }
@@ -5533,7 +5512,7 @@ fn popup_element<'a>(
                 .collect()
         }
         // 居中模态不经锚点渲染（with_overlays 分流到各自 overlay）
-        PopupState::HistoryBrowser { .. } | PopupState::LicenseInfo => Vec::new(),
+        PopupState::HistoryBrowser { .. } => Vec::new(),
     };
     crate::ui::menu::pane_view(entries, pane, window)
 }
@@ -5989,7 +5968,7 @@ fn scene_selector_entries(app: &App, confirm: &Option<String>) -> Vec<(usize, Me
                     .on_press(Message::SceneRenameStart(id.clone())),
             );
             row = row.push(
-                button(icon("trash-2", 11.0, pal::DANGER))
+                button(icon("bin", 11.0, pal::DANGER))
                     .padding(2.0)
                     .style(|_t, status| button::Style {
                         background: matches!(status, button::Status::Hovered | button::Status::Pressed)
@@ -6939,7 +6918,7 @@ fn file_menu_entries(
             }
             entries.push((0, MenuEntry::action_icon("重命名", "pencil",
                 Message::RenameStartFolder(rel.to_string()))));
-            entries.push((0, MenuEntry::danger("删除", "trash-2",
+            entries.push((0, MenuEntry::danger("删除", "bin",
                 Message::FolderDeleteAsk(rel.to_string()))));
         } else {
             // 根行没有条目本身：只给本机路径类（相对路径无意义，由 helper 略去）
@@ -6983,7 +6962,7 @@ fn file_menu_entries(
         }
         entries.push((0, MenuEntry::action_icon("重命名", "pencil",
             Message::RenameStartFile(rel.to_string()))));
-        entries.push((0, MenuEntry::danger("删除", "trash-2",
+        entries.push((0, MenuEntry::danger("删除", "bin",
             Message::DeleteAsk(rel.to_string()))));
     }
 
@@ -7011,7 +6990,7 @@ fn file_menu_entries(
                     .color(pal::TEXT_MUTED),
             );
             entries.push((1, MenuEntry::Custom(pane_col.into(), height)));
-            entries.push((1, MenuEntry::danger("确认删除", "trash-2",
+            entries.push((1, MenuEntry::danger("确认删除", "bin",
                 Message::DeleteEntry(r.to_string(), *dir))));
             entries.push((1, MenuEntry::action("取消", Message::DeleteCancel)));
         }

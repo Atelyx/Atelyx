@@ -346,7 +346,7 @@ fn tool_block<'a>(ctx: &StreamCtx<'a>, s: &'a Value, key: &str) -> iced::Element
     let (status_icon, status_color) = match status {
         "error" => ("circle-x", pal::DANGER),
         "done" => ("check", pal::SUCCESS),
-        _ => ("loader-circle", pal::TEXT_MUTED),
+        _ => ("loader", pal::TEXT_MUTED),
     };
     details_block(
         ctx,

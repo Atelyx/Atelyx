@@ -1,7 +1,7 @@
-//! 矢量图标部件：lucide 形状（24 单位视框）在 iced Canvas 上描边绘制。
+//! 矢量图标部件：形状表（24 单位视框）在 iced Canvas 上描边绘制。
 //!
 //! 展平在 `init` 时一次完成并缓存；绘制帧只做坐标缩放与描边，
-//! 描边宽度 2 单位随帧缩放，等价 lucide 的矢量缩放（14px 时 ≈1.17px 线宽）。
+//! 描边宽度 2 单位随帧缩放（14px 时约 1.17px 线宽）。
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -10,10 +10,12 @@ use iced::widget::canvas::{self, Canvas, LineCap, LineDash, LineJoin, Path, Stro
 use iced::{Color, Element, Length, Point, Rectangle, Vector};
 
 use super::icons::{self, Shape};
-use super::svgpath;
+
+/// 一条展平后的子路径（24 单位坐标）。
+pub type Polyline = Vec<[f32; 2]>;
 
 /// 图标几何缓存：kebab 名 → 展平子路径（24 单位坐标）。
-static CACHE: OnceLock<HashMap<&'static str, Vec<svgpath::Polyline>>> = OnceLock::new();
+static CACHE: OnceLock<HashMap<&'static str, Vec<Polyline>>> = OnceLock::new();
 
 // 每帧重绘（State = ()）：canvas::Cache 只按尺寸失效，挂实例 State 会把
 // 变色/换形图标画到陈旧几何；展平结果已在静态缓存，每帧只剩描边。
@@ -22,49 +24,68 @@ static CACHE: OnceLock<HashMap<&'static str, Vec<svgpath::Polyline>>> = OnceLock
 pub fn init() {
     CACHE.get_or_init(|| {
         let mut map = HashMap::new();
-        for &name in icons::NAMES {
+        for name in icons::names() {
             map.insert(name, flatten_icon(name));
         }
         map
     });
 }
 
-fn flatten_icon(name: &str) -> Vec<svgpath::Polyline> {
+fn flatten_icon(name: &str) -> Vec<Polyline> {
     let Some(shapes) = icons::icon(name) else {
         return Vec::new();
     };
-    let mut out = Vec::new();
-    for shape in shapes {
-        match *shape {
-            Shape::Path(d) => out.extend(svgpath::flatten_path(d)),
-            Shape::Circle(cx, cy, r) => {
-                // 圆用 48 段折线逼近（描边后与圆弧无可见差）
-                let segs = 48;
-                let mut poly = Vec::with_capacity(segs + 1);
-                for i in 0..=segs {
-                    let a = (i as f32) * std::f32::consts::TAU / segs as f32;
-                    poly.push([cx + r * a.cos(), cy + r * a.sin()]);
-                }
-                out.push(poly);
-            }
-            Shape::Rect(x, y, w, h, rx) => {
-                if rx > 0.0 {
-                    out.extend(rounded_rect(x, y, w, h, rx));
-                } else {
-                    out.push(vec![[x, y], [x + w, y], [x + w, y + h], [x, y + h], [x, y]]);
-                }
-            }
-            Shape::Line([x1, y1, x2, y2]) => out.push(vec![[x1, y1], [x2, y2]]),
-        }
-    }
-    out
+    shapes.iter().flat_map(flatten_shape).collect()
 }
 
-/// 圆角矩形（rx 统一圆角）单条闭合折线：四段 90° 角弧 + 直边连线。
-fn rounded_rect(x: f32, y: f32, w: f32, h: f32, r: f32) -> Vec<svgpath::Polyline> {
+fn flatten_shape(shape: &Shape) -> Vec<Polyline> {
+    match *shape {
+        Shape::Line([x1, y1, x2, y2]) => vec![vec![[x1, y1], [x2, y2]]],
+        Shape::Polyline { points, closed } => {
+            let mut poly = points.to_vec();
+            if closed {
+                poly.push(points[0]);
+            }
+            vec![poly]
+        }
+        Shape::Circle { cx, cy, r } => {
+            // 圆按 48 段折线逼近（描边后与圆弧无可见差）
+            const SEG: usize = 48;
+            vec![(0..=SEG)
+                .map(|i| {
+                    let a = (i as f32) * std::f32::consts::TAU / SEG as f32;
+                    [cx + r * a.cos(), cy + r * a.sin()]
+                })
+                .collect()]
+        }
+        Shape::Arc { cx, cy, r, from, to } => vec![arc(cx, cy, r, from, to)],
+        Shape::Rect { x, y, w, h, radius } => {
+            if radius > 0.0 {
+                rounded_rect(x, y, w, h, radius)
+            } else {
+                vec![vec![[x, y], [x + w, y], [x + w, y + h], [x, y + h], [x, y]]]
+            }
+        }
+    }
+}
+
+/// 圆弧折线：每 6° 一段（最小 2 段），端点落在给定角度上。
+fn arc(cx: f32, cy: f32, r: f32, from: f32, to: f32) -> Polyline {
+    let sweep = (to - from).to_radians();
+    let segs = ((sweep.abs().to_degrees() / 6.0).ceil() as usize).max(2);
+    (0..=segs)
+        .map(|i| {
+            let a = from.to_radians() + sweep * (i as f32 / segs as f32);
+            [cx + r * a.cos(), cy + r * a.sin()]
+        })
+        .collect()
+}
+
+/// 圆角矩形（radius 统一圆角）单条闭合折线：四段 90° 角弧 + 直边连线。
+fn rounded_rect(x: f32, y: f32, w: f32, h: f32, r: f32) -> Vec<Polyline> {
     let r = r.min(w / 2.0).min(h / 2.0);
     const SEG: usize = 8;
-    let arc = |cx: f32, cy: f32, a0: f32| -> Vec<[f32; 2]> {
+    let corner = |cx: f32, cy: f32, a0: f32| -> Vec<[f32; 2]> {
         (0..=SEG)
             .map(|i| {
                 let a = a0 + (i as f32 / SEG as f32) * std::f32::consts::FRAC_PI_2;
@@ -73,18 +94,18 @@ fn rounded_rect(x: f32, y: f32, w: f32, h: f32, r: f32) -> Vec<svgpath::Polyline
             .collect()
     };
     // 右上 → 右下 → 左下 → 左上；相邻弧端点间由直线段自然连接（即四条直边）
-    let mut poly = arc(x + w - r, y + r, -std::f32::consts::FRAC_PI_2);
-    poly.extend(arc(x + w - r, y + h - r, 0.0));
-    poly.extend(arc(x + r, y + h - r, std::f32::consts::FRAC_PI_2));
-    poly.extend(arc(x + r, y + r, std::f32::consts::PI));
+    let mut poly = corner(x + w - r, y + r, -std::f32::consts::FRAC_PI_2);
+    poly.extend(corner(x + w - r, y + h - r, 0.0));
+    poly.extend(corner(x + r, y + h - r, std::f32::consts::FRAC_PI_2));
+    poly.extend(corner(x + r, y + r, std::f32::consts::PI));
     // 闭合回起点（首点 = (x, y)）
     poly.push(poly[0]);
     vec![poly]
 }
 
 /// 图标展平折线（画布内自绘用）：kebab 名 → 24 单位坐标子路径；未展平（init 前）返回 None。
-pub fn polylines(name: &str) -> Option<&'static [svgpath::Polyline]> {
-    let name: &'static str = icons::NAMES.iter().copied().find(|n| *n == name)?;
+pub fn polylines(name: &str) -> Option<&'static [Polyline]> {
+    let name: &'static str = icons::names().find(|n| *n == name)?;
     CACHE.get().and_then(|m| m.get(name)).map(|v| v.as_slice())
 }
 
@@ -92,7 +113,7 @@ pub fn polylines(name: &str) -> Option<&'static [svgpath::Polyline]> {
 pub struct Icon {
     pub name: &'static str,
     pub color: Color,
-    /// 描边宽度（24 单位视框坐标；lucide 缺省 2）。
+    /// 描边宽度（24 单位视框坐标；缺省 2）。
     pub stroke_units: f32,
     /// 旋转角（弧度；0 = 不转，转圈动画用）。
     pub rotation: f32,
@@ -162,9 +183,14 @@ where
     }
 }
 
+/// 全部图标名（kebab-case）：文档、校验与开发期工具按它枚举。
+pub fn names() -> impl Iterator<Item = &'static str> {
+    icons::names()
+}
+
 /// 图标名归一：命中形状表返回 'static 名，未知 / 空串返回空（画空图标）。
 pub fn icon_name(name: &str) -> &'static str {
-    icons::NAMES.iter().copied().find(|n| *n == name).unwrap_or("")
+    icons::names().find(|n| *n == name).unwrap_or("")
 }
 
 /// 图标元素（`size` 见方、缺省 1.5 单位描边；未知图标名画空）。
@@ -172,7 +198,7 @@ pub fn icon<Message: 'static>(name: &str, size: f32, color: Color) -> Element<'s
     icon_stroke(name, size, color, 1.5)
 }
 
-/// 图标元素（自定描边宽度；lucide strokeWidth 1.5 档等价 stroke_units = 1.5）。
+/// 图标元素（自定描边宽度；stroke_units 用 24 单位视框坐标）。
 pub fn icon_stroke<Message: 'static>(
     name: &str,
     size: f32,

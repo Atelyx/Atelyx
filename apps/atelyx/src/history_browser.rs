@@ -304,7 +304,7 @@ fn version_row(v: &HistoryVersion, viewer: bool, expanded: bool, window: iced::w
     // 回滚：金色文字钮（viewer 无 on_press = 禁用态，内容降透明度并补只读提示）
     let fg = if viewer { pal::ACCENT.scale_alpha(0.4) } else { pal::ACCENT };
     let rollback_inner = row![
-        icon("rotate-ccw", 12.0, fg),
+        icon("undo", 12.0, fg),
         text("回滚").size(pal::fs_caption()).color(fg),
     ]
     .spacing(4)

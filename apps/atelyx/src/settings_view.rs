@@ -25,8 +25,6 @@ mod general;
 pub(crate) mod plugins;
 mod shortcuts;
 mod workspace;
-// 关于页许可模态由 layout_view 的覆盖层分派挂载
-pub(crate) use about::{LICENSE_CARD_WIDTH, license_overlay};
 
 /// 当前仓库容器（本地仓库或协作空间）的展示名；未打开 = None。
 pub(crate) fn repo_display_name(app: &App) -> Option<String> {
@@ -53,7 +51,7 @@ const APP_SETTINGS: &[SettingsItem] = &[
 const REPO_SETTINGS: &[SettingsItem] = &[
     SettingsItem { id: "ai", label: "AI 设置", icon: "bot" },
     SettingsItem { id: "files", label: "文件与路径", icon: "folder-tree" },
-    SettingsItem { id: "workspace", label: "工作区", icon: "panels-top-left" },
+    SettingsItem { id: "workspace", label: "工作区", icon: "panel-layout" },
     SettingsItem { id: "editor", label: "编辑器", icon: "pen-line" },
 ];
 
@@ -264,7 +262,7 @@ fn settings_tab_body<'a>(app: &'a App, window: iced::window::Id) -> Element<'a, 
         "files" => files::view(app),
         "workspace" => workspace::view(app, window),
         "editor" => editor::view(app),
-        "about" => about::view(app, window),
+        "about" => about::view(app),
         // 插件设置 tab：tab id = 插件面的 view kind，渲染复用面板的面树解释器
         tab if crate::plugin_actions::parse_view_kind(tab).is_some() => {
             crate::plugin_view::settings_view(app, window, tab)

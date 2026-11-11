@@ -1848,7 +1848,7 @@ fn draw_hint(frame: &mut Frame, hint: &str, area: Rectangle, size: f32, color: C
     });
 }
 
-/// 图标描边（lucide 24 视框缩放）。
+/// 图标描边（24 单位视框缩放到 size 见方）。
 fn draw_icon_glyph(frame: &mut Frame, name: &str, x: f32, y: f32, size: f32, color: Color) {
     let Some(subpaths) = polylines(name) else { return };
     let k = size / 24.0;
@@ -2298,7 +2298,7 @@ fn card_action_row<'a>(
     }
     if is_assistant && !content.is_empty() && !content.starts_with("[错误]") && !streaming {
         row = row.push(controls::icon_button(
-            "corner-up-left",
+            "undo-turn",
             12.0,
             22.0,
             controls::Variant::Ghost,
@@ -2321,7 +2321,7 @@ fn card_action_row<'a>(
         ));
         if last_id == Some(message_id.as_str()) {
             row = row.push(controls::icon_button(
-                "refresh-cw",
+                "refresh",
                 12.0,
                 22.0,
                 controls::Variant::Ghost,

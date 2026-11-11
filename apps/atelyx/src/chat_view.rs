@@ -178,7 +178,7 @@ fn session_row<'a>(app: &'a App, s: &'a Value) -> iced::Element<'a, Message> {
         );
     } else if hovered || menu_open {
         inner = inner.push(
-            button(icon(if menu_open { "trash-2" } else { "more-horizontal" }, 12.0, pal::TEXT_MUTED))
+            button(icon(if menu_open { "bin" } else { "ellipsis" }, 12.0, pal::TEXT_MUTED))
                 .padding(4.0)
                 .style(controls::row_style(false, pal::RADIUS_XS))
                 .on_press(if menu_open {
@@ -275,7 +275,7 @@ fn top_bar(app: &App, window: iced::window::Id) -> iced::Element<'_, Message> {
                 // 转圈：UiTick 100ms 一拍递增 spin_tick，视图按计数取旋转角
                 let angle = app.chat.spin_tick as f32 * SPIN_STEP_RAD;
                 left = left.push(crate::ui::icon::icon_spin(
-                    "loader-circle",
+                    "loader",
                     14.0,
                     pal::ACCENT,
                     1.5,
@@ -283,7 +283,7 @@ fn top_bar(app: &App, window: iced::window::Id) -> iced::Element<'_, Message> {
                 ));
             } else {
                 left = left.push(controls::icon_button(
-                    "refresh-cw",
+                    "refresh",
                     12.0,
                     22.0,
                     controls::Variant::Ghost,
@@ -323,7 +323,7 @@ fn top_bar(app: &App, window: iced::window::Id) -> iced::Element<'_, Message> {
     .spacing(4);
     if compactions {
         right = right.push(if app.chat.compacting.is_some() {
-            controls::icon_button("loader-circle", 13.0, 24.0, controls::Variant::Ghost, None, None)
+            controls::icon_button("loader", 13.0, 24.0, controls::Variant::Ghost, None, None)
         } else {
             controls::icon_button(
                 "layers",
@@ -524,7 +524,7 @@ fn action_row<'a>(
     }
     if is_assistant && !content.is_empty() && !content.starts_with("[错误]") {
         row = row.push(controls::icon_button(
-            "corner-up-left",
+            "undo-turn",
             12.0,
             22.0,
             controls::Variant::Ghost,
@@ -534,7 +534,7 @@ fn action_row<'a>(
         // 重新生成回复常驻显示（中断 / 历史消息位置不消失）；仅在「最后一条 + 非流式」时可点
         let actionable = is_last_message(app, m) && !is_streaming(app);
         row = row.push(controls::icon_button(
-            "refresh-cw",
+            "refresh",
             12.0,
             22.0,
             controls::Variant::Ghost,
@@ -597,4 +597,3 @@ fn input_area(app: &App, window: iced::window::Id) -> iced::Element<'_, Message>
     }
     container(area).width(Length::Fill).into()
 }
-

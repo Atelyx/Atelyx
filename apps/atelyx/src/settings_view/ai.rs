@@ -1728,7 +1728,7 @@ fn agent_card(
         if !builtin {
             let del = super::open_popup(app, window, PopupState::AiAgentDeleteMenu);
             line = line.push(controls::icon_button(
-                "trash-2",
+                "bin",
                 12.0,
                 22.0,
                 controls::Variant::Ghost,
