@@ -245,6 +245,21 @@ pub fn sync_card_chats(app: &mut App) {
     for id in live {
         session.view.card_chat.entry(id).or_default();
     }
+    // 浮层槽位：新节点追加、末尾删除回收；中间删除保留空槽，后续卡的下标不前移
+    let ids: Vec<String> = session.data.nodes.iter().map(|n| n.id.clone()).collect();
+    sync_overlay_slots(&mut session.view.overlay_slots, &ids);
+}
+
+/// 浮层槽位对齐（纯逻辑）：末尾已删槽位回收，中间已删槽位保留，新节点追加到末尾。
+fn sync_overlay_slots(slots: &mut Vec<String>, ids: &[String]) {
+    while slots.last().is_some_and(|id| !ids.iter().any(|x| x == id)) {
+        slots.pop();
+    }
+    for id in ids {
+        if !slots.iter().any(|s| s == id) {
+            slots.push(id.clone());
+        }
+    }
 }
 
 /// 清掉全部卡输入焦点（面板输入取得焦点 / 画布空白按压时调用）。
@@ -2151,6 +2166,22 @@ fn scroll_bottom(node_id: &str) -> Task<Message> {
 
 #[cfg(test)]
 mod tests {
+    /// 槽位对齐：中间删卡留空槽（后续卡下标不变），末尾删卡回收，新卡追加。
+    #[test]
+    fn overlay_slots_keep_middle_indexes_stable() {
+        let mut slots = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        sync_overlay_slots(&mut slots, &["a".to_string(), "c".to_string()]);
+        assert_eq!(slots, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+        sync_overlay_slots(&mut slots, &["a".to_string(), "c".to_string(), "d".to_string()]);
+        assert_eq!(
+            slots,
+            vec!["a".to_string(), "b".to_string(), "c".to_string(), "d".to_string()]
+        );
+        // 末尾连续删除才回收
+        sync_overlay_slots(&mut slots, &["a".to_string(), "b".to_string()]);
+        assert_eq!(slots, vec!["a".to_string(), "b".to_string()]);
+    }
+
     /// 压缩锚点取请求时刻的末条消息，与回执时刻的消息集合无关。
     #[test]
     fn compaction_anchor_uses_request_time_last_message() {

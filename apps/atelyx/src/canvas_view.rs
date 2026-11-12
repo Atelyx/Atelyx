@@ -381,6 +381,7 @@ impl CanvasSession {
     pub fn new(file: String, data: atelyx_core::vault::CanvasFile) -> Self {
         let saved = data.clone();
         let mut view = CanvasViewState::default();
+        view.overlay_slots = data.nodes.iter().map(|n| n.id.clone()).collect();
         // 每张对话卡一份运行态（草稿 / 引用 / 附件 / 流式）；节点集合变化由 sync_card_chats 对齐
         for n in &data.nodes {
             if n.node_type == "conversation" {
@@ -489,6 +490,8 @@ pub struct CanvasViewState {
     pub content_cache: canvas::Cache,
     /// viewer 只读提示是否已出（同一会话只提示一次）。
     pub readonly_hint: bool,
+    /// 卡浮层槽位（节点 id，含已删节点的空槽）：按下标复用树状态，删卡不移位。
+    pub overlay_slots: Vec<String>,
 }
 
 impl Default for CanvasViewState {
@@ -516,6 +519,7 @@ impl Default for CanvasViewState {
             grid_cache: canvas::Cache::new(),
             content_cache: canvas::Cache::new(),
             readonly_hint: false,
+            overlay_slots: Vec::new(),
         }
     }
 }
@@ -2071,8 +2075,15 @@ fn card_overlays<'a>(
     window: iced::window::Id,
 ) -> Vec<Element<'a>> {
     let (vw, vh) = (viewport.width, viewport.height);
-    let mut out = Vec::with_capacity(session.data.nodes.len());
-    for n in &session.data.nodes {
+    // 槽位按节点 id 持久化：中途删卡只留空槽，后续卡的滚动 / 输入状态不随下标前移串位
+    let mut out = Vec::with_capacity(session.view.overlay_slots.len() * 2);
+    for id in &session.view.overlay_slots {
+        let Some(n) = session.data.nodes.iter().find(|n| &n.id == id) else {
+            // 已删节点：正文与卡头各留一个空槽
+            out.push(space().width(Length::Shrink).height(Length::Shrink).into());
+            out.push(space().width(Length::Shrink).height(Length::Shrink).into());
+            continue;
+        };
         let (w, h) = session.card_size(n);
         let (sx, sy) = view.screen(n.x, n.y);
         let (sw, sh) = (w as f32 * view.zoom, h as f32 * view.zoom);
@@ -2119,10 +2130,8 @@ fn card_overlays<'a>(
             }
             None => space().width(Length::Shrink).height(Length::Shrink).into(),
         });
-    }
-    // 对话卡头控制浮层（流式标注 / 压缩）为第二组：与正文浮层同序各占一槽，
-    // 不可见卡以空位占槽，保证 Stack 槽位只随节点集合增减
-    for n in &session.data.nodes {
+    // 卡头控制（流式标注 / 压缩）与所属卡同槽相邻：z 序随卡走，
+    // 不再恒压在其他卡正文浮层之上；不可见卡仍占空槽保证下标稳定
         let slot: Element<'_> = if n.node_type == "conversation"
             && (!hidden_by_collapsed(&session.data.nodes, &n.id) || session.is_dragged(&n.id))
         {
