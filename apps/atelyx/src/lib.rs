@@ -574,6 +574,8 @@ enum Message {
     ToggleTask(usize),
     /// 复制代码块正文到系统剪贴板。
     CopyCode(String),
+    /// 复制任意文本到系统剪贴板（提示不带「代码」语义）。
+    CopyText(String),
     PanelTab(String, String),
     /// 空面板右键添加视图。
     PanelAddView { panel_id: String, view: String },
@@ -2871,6 +2873,10 @@ impl App {
             Message::CopyCode(code) => {
                 self.notify(NoticeLevel::Success, "已复制代码");
                 iced::clipboard::write(code)
+            }
+            Message::CopyText(value) => {
+                self.notify(NoticeLevel::Success, "已复制");
+                iced::clipboard::write(value)
             }
             Message::PanelTab(panel_id, tab_id) => {
                 // 拖拽会话结束的按钮释放不触发激活

@@ -940,7 +940,7 @@ pub fn apply_table_patch(table: &mut TableFile, patch: &TablePatch) {
 /// 计算画布增量补丁：与落盘基线按值 diff，只含变化/新增/删除的卡与连线。
 /// 卡坐标/尺寸/data 任一变化即整卡 upsert（补丁粒度 = 整卡，与合并语义对齐）；
 /// 数组顺序无业务语义（位置在 x/y 里），不做全序重排。无任何变化返回 None（调用方跳过写盘）。
-/// title 变化随补丁携带（title 变更 = 同目录改文件名，由壳侧执行改名）。
+/// 标题随文件名，不由本函数携带；`title` 字段只为兼容旧客户端的补丁，合并端照常应用。
 pub fn compute_canvas_patch(baseline: &CanvasFile, current: &CanvasFile) -> Option<CanvasPatch> {
     let last_nodes: HashMap<&str, &CanvasFileNode> =
         baseline.nodes.iter().map(|n| (n.id.as_str(), n)).collect();

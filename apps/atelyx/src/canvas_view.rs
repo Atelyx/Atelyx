@@ -60,8 +60,9 @@ const HEADER_CTRL_W: f32 = 64.0;
 
 /// 对话卡头控制段占宽：额定宽按缩放取值，窄卡钳到留出最短标题（26 = 图标位，24 = 最短标题）。
 fn header_ctrl_reserve(sw: f32, zoom: f32) -> f32 {
-    let max = (sw - 26.0 * zoom - 24.0 * zoom).max(0.0);
-    (HEADER_CTRL_W * zoom).min(max)
+    let max = (sw - CARD_TITLE_X * zoom - 24.0 * zoom).max(0.0);
+    // 按钮有像素下限：预留宽不低于 28px；窄卡再钳到可用宽
+    (HEADER_CTRL_W * zoom).min(max).max(28.0f32.min(max))
 }
 /// 卡可缩放到的最小尺寸（世界坐标）。
 pub(crate) const CARD_MIN_W: f64 = 120.0;
@@ -92,6 +93,18 @@ const MINIMAP_MARGIN: f32 = 12.0;
 /// 双击判定：两次按下的最大间隔与最大位移。
 const DOUBLE_CLICK_MS: u128 = 400;
 const DOUBLE_CLICK_TOL: f32 = 5.0;
+/// 连接点命中容差与绘制半径（屏幕像素；容差按缩放反推世界空间）。
+const LINK_HIT_TOL: f32 = 6.0;
+const LINK_DOT_R: f32 = 4.5;
+/// 卡头标题起点与右留白（世界坐标，按缩放换算）。
+const CARD_TITLE_X: f32 = 26.0;
+const CARD_TITLE_PAD: f32 = 8.0;
+/// 连线箭头尺寸（屏幕像素）。
+const ARROW_LEN: f32 = 9.0;
+const ARROW_HALF: f32 = 4.0;
+/// 小地图内边距与最大比例（防小画布放大失真）。
+const MINIMAP_PAD: f64 = 8.0;
+const MINIMAP_SCALE_MAX: f64 = 0.5;
 
 /// 画布保存动机（与表格 SaveReason 同构）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -482,7 +495,7 @@ pub struct CanvasViewState {
     pub marquee_to: Option<(f32, f32)>,
     /// 分组改名弹层草稿（节点 id，草稿）。
     pub group_rename: Option<(String, String)>,
-    /// 最近一次上报的视口尺寸（粘贴落位与小地图跳转用；首帧指针事件前无值）。
+    /// 最近一次上报的视口尺寸（粘贴落位与小地图跳转用；首帧指针事件前按典型窗口取默认值）。
     pub viewport: (f32, f32),
     /// 网格层缓存（随平移缩放失效）。
     pub grid_cache: canvas::Cache,
@@ -515,7 +528,7 @@ impl Default for CanvasViewState {
             guides: Vec::new(),
             marquee_to: None,
             group_rename: None,
-            viewport: (1.0, 1.0),
+            viewport: (800.0, 600.0),
             grid_cache: canvas::Cache::new(),
             content_cache: canvas::Cache::new(),
             readonly_hint: false,
@@ -631,7 +644,7 @@ pub fn hit_link_handle(
     zoom: f32,
     world: (f64, f64),
 ) -> Option<String> {
-    let tol = 6.0 / zoom as f64;
+    let tol = LINK_HIT_TOL as f64 / zoom as f64;
     for n in canvas.nodes.iter().rev() {
         if matches!(n.node_type.as_str(), "group" | "conversation")
             || hidden_by_collapsed(&canvas.nodes, &n.id)
@@ -1593,8 +1606,8 @@ fn side_normal(side: &str) -> (f32, f32) {
 
 /// 箭头三角（tip 在端点上，指向 dir 方向）。
 fn draw_arrow(frame: &mut Frame, tip: Point, dir: (f32, f32), color: Color) {
-    let len = 9.0;
-    let half = 4.0;
+    let len = ARROW_LEN;
+    let half = ARROW_HALF;
     // 法线方向
     let (nx, ny) = (-dir.1, dir.0);
     let base = Point::new(tip.x - dir.0 * len, tip.y - dir.1 * len);
@@ -1634,15 +1647,6 @@ fn draw_card(
 
     // 框体
     frame.fill(&rounded_rect(sx, sy, sw, sh, CARD_RADIUS * z), pal::BG_SECONDARY);
-    let border_color = if selected { pal::ACCENT } else { pal::BORDER };
-    frame.stroke(
-        &rounded_rect(sx, sy, sw, sh, CARD_RADIUS * z),
-        Stroke {
-            style: canvas::Style::Solid(border_color),
-            width: if selected { 2.0 } else { 1.0 },
-            ..Stroke::default()
-        },
-    );
 
     // 头部条（异常小高度按卡高钳制，标题不得画到卡外）
     let head_h = (CARD_HEADER_H * z).min(sh);
@@ -1652,14 +1656,24 @@ fn draw_card(
         &Path::rectangle(Point::new(sx, sy + head_h / 2.0), Size::new(sw, head_h / 2.0)),
         pal::BG_TERTIARY,
     );
+    // 描边最后画：卡头填充不得压掉边框内侧（选中框保持完整）
+    let border_color = if selected { pal::ACCENT } else { pal::BORDER };
+    frame.stroke(
+        &rounded_rect(sx, sy, sw, sh, CARD_RADIUS * z),
+        Stroke {
+            style: canvas::Style::Solid(border_color),
+            width: if selected { 2.0 } else { 1.0 },
+            ..Stroke::default()
+        },
+    );
     draw_icon_glyph(frame, icon_name, sx + 9.0 * z, sy + (head_h - 12.0 * z) / 2.0, 12.0 * z, pal::TEXT_MUTED);
     let title_size = pal::fs_caption() * z;
-    let title_x = sx + 26.0 * z;
+    let title_x = sx + CARD_TITLE_X * z;
     // 对话卡头右段留给压缩控制（浮层见 card_overlays），标题省略到控制段前
     let title_limit = if n.node_type == "conversation" {
-        (sx + sw - title_x - 8.0 * z - header_ctrl_reserve(sw, z)).max(0.0)
+        (sx + sw - title_x - CARD_TITLE_PAD * z - header_ctrl_reserve(sw, z)).max(0.0)
     } else {
-        (sx + sw - title_x - 8.0 * z).max(0.0)
+        (sx + sw - title_x - CARD_TITLE_PAD * z).max(0.0)
     };
     frame.fill_text(CanvasText {
         content: layout_view::ellipsize(&title, title_limit, title_size),
@@ -1709,13 +1723,26 @@ fn draw_card(
     // 拖线连接点（右侧中点；悬停 / 选中的资产卡显形）
     if link_handle && n.node_type != "conversation" {
         frame.fill(
-            &Path::circle(Point::new(sx + sw, sy + sh / 2.0), 4.5),
+            &Path::circle(Point::new(sx + sw, sy + sh / 2.0), LINK_DOT_R),
             pal::ACCENT,
         );
         frame.stroke(
-            &Path::circle(Point::new(sx + sw, sy + sh / 2.0), 4.5),
+            &Path::circle(Point::new(sx + sw, sy + sh / 2.0), LINK_DOT_R),
             Stroke { style: canvas::Style::Solid(pal::BG_SECONDARY), width: 1.5, ..Stroke::default() },
         );
+    }
+}
+
+/// 卡类型 → 用户可见名称（属性面板等界面文案）。
+fn node_type_label(node_type: &str) -> &'static str {
+    match node_type {
+        "conversation" => "对话卡",
+        "text" => "文本卡",
+        "media" => "媒体卡",
+        "table" => "表格卡",
+        "link" => "链接卡",
+        "group" => "分组",
+        _ => "未知卡",
     }
 }
 
@@ -1750,7 +1777,7 @@ fn card_head(n: &atelyx_core::vault::CanvasFileNode) -> (&'static str, String) {
 }
 
 /// 路径取文件名（去扩展名后缀的显示标题；根级与子目录一致）。
-fn file_title(path: &str) -> String {
+pub(crate) fn file_title(path: &str) -> String {
     let name = path.rsplit('/').next().unwrap_or(path);
     match name.rsplit_once('.') {
         Some((stem, _)) if !stem.is_empty() => stem.to_string(),
@@ -2380,7 +2407,7 @@ fn card_action_row<'a>(
             12.0,
             22.0,
             controls::Variant::Ghost,
-            Some(Message::CopyCode(display.to_string())),
+            Some(Message::CopyText(display.to_string())),
             Some((window, "复制".to_string())),
         ));
     }
@@ -2621,12 +2648,12 @@ fn minimap_transform(rects: &[(f64, f64, f64, f64)]) -> (f64, (f64, f64)) {
             (x0.min(*x), y0.min(*y), x1.max(x + w), y1.max(y + h))
         },
     );
-    let pad = 8.0;
-    let avail_w = (MINIMAP_W - pad * 2.0).max(1.0) as f64;
-    let avail_h = (MINIMAP_H - pad * 2.0).max(1.0) as f64;
+    let pad = MINIMAP_PAD;
+    let avail_w = (MINIMAP_W as f64 - pad * 2.0).max(1.0);
+    let avail_h = (MINIMAP_H as f64 - pad * 2.0).max(1.0);
     let scale = (avail_w / (bx1 - bx0).max(1.0))
         .min(avail_h / (by1 - by0).max(1.0))
-        .min(0.5);
+        .min(MINIMAP_SCALE_MAX);
     let ox = (MINIMAP_W as f64 - (bx1 - bx0) * scale) / 2.0 - bx0 * scale;
     let oy = (MINIMAP_H as f64 - (by1 - by0) * scale) / 2.0 - by0 * scale;
     (scale, (ox, oy))
@@ -2807,7 +2834,7 @@ fn minimap_layer<'a>(session: &'a CanvasSession, view: View, viewport: Size) -> 
     )
     .width(Length::Fixed(MINIMAP_W))
     .height(Length::Fixed(MINIMAP_H))
-        .style(|_| container::Style {
+    .style(|_| container::Style {
             background: Some(pal::BG_OVERLAY.into()),
             border: iced::border::Border {
                 width: 1.0,
@@ -2834,6 +2861,8 @@ fn minimap_layer<'a>(session: &'a CanvasSession, view: View, viewport: Size) -> 
 
 /// 属性行（标签 + 值）。
 fn props_row(label: &str, value: String) -> iced::Element<'static, Message> {
+    // 长路径 / 长标题截断：属性面板宽度有限，值不得把面板撑高
+    let value = layout_view::ellipsize(&value, 240.0, pal::fs_micro());
     row![
         text(label.to_string()).size(pal::fs_micro()).color(pal::TEXT_MUTED),
         space().width(Length::Fill),
@@ -2862,7 +2891,8 @@ pub fn props_panel(app: &App) -> iced::Element<'static, Message> {
         .and_then(|id| session.data.nodes.iter().find(|n| &n.id == id))
     {
         Some(n) => {
-            let (w, h) = session.card_size(n);
+            // 尺寸取磁盘几何（收起只改显示形态，不是落盘尺寸）
+            let (w, h) = node_size(n);
             let (icon_name, title) = card_head(n);
             col = col.push(
                 row![
@@ -2871,7 +2901,7 @@ pub fn props_panel(app: &App) -> iced::Element<'static, Message> {
                 ]
                 .spacing(6),
             );
-            col = col.push(props_row("类型", n.node_type.clone()));
+            col = col.push(props_row("类型", node_type_label(&n.node_type).to_string()));
             col = col.push(props_row("位置", format!("x {:.0} · y {:.0}", n.x, n.y)));
             col = col.push(props_row("尺寸", format!("{:.0} × {:.0}", w, h)));
             // 引用来源（笔记 / 媒体 / 表格卡的 file 字段）

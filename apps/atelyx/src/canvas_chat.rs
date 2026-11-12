@@ -13,7 +13,7 @@ use atelyx_core::ai::{
     stream::ReasoningEffort,
 };
 
-use crate::canvas_view::{CanvasMsg, CanvasSession, RefContent};
+use crate::canvas_view::{file_title, CanvasMsg, CanvasSession, RefContent};
 use crate::text_preedit;
 use crate::chat_actions::{self, MentionPicker, MentionTarget, PendingImage};
 use crate::{App, Message, RepoKind};
@@ -613,7 +613,7 @@ pub(crate) fn card_candidates(app: &App, node_id: &str, query: &str) -> Vec<Ment
 fn card_ref_title(n: &atelyx_core::vault::CanvasFileNode) -> String {
     if n.node_type == "text" {
         if let Some(f) = n.data.get("file").and_then(Value::as_str) {
-            return file_stem(f);
+            return file_title(f);
         }
     }
     if let Some(title) = n.data.get("title").and_then(Value::as_str).filter(|t| !t.trim().is_empty()) {
@@ -623,14 +623,9 @@ fn card_ref_title(n: &atelyx_core::vault::CanvasFileNode) -> String {
         return name.to_string();
     }
     match n.data.get("file").and_then(Value::as_str) {
-        Some(f) => file_stem(f),
+        Some(f) => file_title(f),
         None => n.node_type.clone(),
     }
-}
-
-fn file_stem(path: &str) -> String {
-    let name = path.rsplit('/').next().unwrap_or(path);
-    name.rsplit_once('.').map(|(s, _)| s).unwrap_or(name).to_string()
 }
 
 /// 候选落地：卡片引用登记 + 建数据流边；文件引用沿用路径标签。触发段替换为标签文本。
@@ -1202,7 +1197,7 @@ fn finish_send(app: &mut App, plan: SendPlan, attachments: Vec<Value>) -> Task<M
     }
     history.push(user_message);
     session.touch();
-    refresh_card_docs(session, &node_id);
+    refresh_card_docs(session);
     if let Some(chat) = session.view.card_chat.get_mut(&node_id) {
         chat.error = None;
         chat.follow_bottom = true;
@@ -1409,7 +1404,7 @@ fn begin_regen(
     if let Some(session) = app.canvas.as_mut() {
         replace_messages(session, node_id, &history);
         session.touch();
-        refresh_card_docs(session, node_id);
+        refresh_card_docs(session);
         if let Some(chat) = session.view.card_chat.get_mut(node_id) {
             chat.error = None;
             chat.streaming = true;
@@ -1463,7 +1458,7 @@ fn rollback(app: &mut App, node_id: &str, message_id: &str) {
     let keep = messages[..=idx].to_vec();
     replace_messages(session, node_id, &keep);
     session.touch();
-    refresh_card_docs(session, node_id);
+    refresh_card_docs(session);
     refresh_panel_if_bound(app, node_id);
 }
 
@@ -1633,7 +1628,7 @@ pub(crate) fn compact_done(app: &mut App, node_id: &str, result: Option<String>)
         );
     }
     session.touch();
-    refresh_card_docs(session, node_id);
+    refresh_card_docs(session);
     refresh_panel_if_bound(app, node_id);
 }
 
@@ -1673,7 +1668,7 @@ pub fn on_run_event(app: &mut App, event: RunEvent) -> Task<Message> {
             let changed = upsert_message(session, &node_id, message);
             if changed {
                 session.touch();
-                refresh_card_docs(session, &node_id);
+                refresh_card_docs(session);
             }
             let follow = session
                 .view
@@ -1696,7 +1691,7 @@ pub fn on_run_event(app: &mut App, event: RunEvent) -> Task<Message> {
             let Some(session) = app.canvas.as_mut() else { return Task::none() };
             if remove_message(session, &node_id, &message_id) {
                 session.touch();
-                refresh_card_docs(session, &node_id);
+                refresh_card_docs(session);
             }
             refresh_panel_if_bound(app, &node_id);
         }
@@ -1706,7 +1701,7 @@ pub fn on_run_event(app: &mut App, event: RunEvent) -> Task<Message> {
                 chat.streaming = false;
                 chat.follow_bottom = true;
             }
-            refresh_card_docs(session, &node_id);
+            refresh_card_docs(session);
             refresh_panel_if_bound(app, &node_id);
             if let Some(task) = materialize(app, &node_id, &message_id) {
                 return task;
@@ -1720,7 +1715,7 @@ pub fn on_run_event(app: &mut App, event: RunEvent) -> Task<Message> {
                     chat.error = Some(error);
                 }
             }
-            refresh_card_docs(session, &node_id);
+            refresh_card_docs(session);
             refresh_panel_if_bound(app, &node_id);
         }
         _ => {
@@ -1887,7 +1882,7 @@ fn apply_materials(app: &mut App, conversation: &str, materials: Vec<Material>) 
     }
     if changed {
         session.touch();
-        refresh_card_docs(session, conversation);
+        refresh_card_docs(session);
     }
     if new_paths.is_empty() {
         None
@@ -1934,7 +1929,7 @@ fn has_edge(session: &CanvasSession, source: &str, target: &str) -> bool {
 fn file_card(path: &str) -> Option<(&'static str, f64, f64, Value)> {
     let name = path.rsplit('/').next().unwrap_or(path);
     let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
-    let title = file_stem(path);
+    let title = file_title(path);
     match ext.as_str() {
         "md" => Some(("text", TEXT_CARD_W, TEXT_CARD_H, json!({ "title": title, "file": path }))),
         "atb" => Some(("table", 300.0, 110.0, json!({ "title": title, "file": path }))),
@@ -2077,7 +2072,7 @@ fn replace_messages(session: &mut CanvasSession, node_id: &str, messages: &[Valu
 }
 
 /// 画布消息正文的 markdown 解析缓存（多张对话卡共用一份；按全部卡的哈希收敛）。
-pub(crate) fn refresh_card_docs(session: &mut CanvasSession, _node_id: &str) {
+pub(crate) fn refresh_card_docs(session: &mut CanvasSession) {
     let mut docs = std::mem::take(&mut session.view.docs);
     let mut used: HashSet<u64> = HashSet::new();
     for n in &session.data.nodes {

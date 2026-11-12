@@ -1619,18 +1619,23 @@ fn create_card_at(app: &mut App, node_type: &str, data: Value, x: f64, y: f64) {
 /// 分组改色（data.color = "1"-"6"）。
 fn set_group_color(app: &mut App, node_id: &str, index: usize) {
     let Some(s) = app.canvas.as_mut() else { return };
-    if !s
+    let next = index.to_string();
+    let Some(node) = s
         .data
         .nodes
         .iter()
-        .any(|n| n.id == node_id && n.node_type == "group")
-    {
+        .find(|n| n.id == node_id && n.node_type == "group")
+    else {
+        return;
+    };
+    // 点当前同色 = 无变化：不压撤销单元、不置脏
+    if node.data.get("color").and_then(Value::as_str) == Some(next.as_str()) {
         return;
     }
     push_undo(s);
     if let Some(n) = s.data.nodes.iter_mut().find(|n| n.id == node_id) {
         if let Some(obj) = n.data.as_object_mut() {
-            obj.insert("color".into(), Value::String(index.to_string()));
+            obj.insert("color".into(), Value::String(next));
         }
     }
     s.touch();
@@ -1701,12 +1706,16 @@ fn group_rename_start(
 fn group_rename_commit(app: &mut App, node: String, name: String) {
     let name = name.trim().to_string();
     let Some(s) = app.canvas.as_mut() else { return };
-    if !s
+    let current = s
         .data
         .nodes
         .iter()
-        .any(|n| n.id == node && n.node_type == "group")
-    {
+        .find(|n| n.id == node && n.node_type == "group")
+        .and_then(|n| n.data.get("label").and_then(Value::as_str))
+        .unwrap_or("");
+    if current == name {
+        // 名字没变：不产生空撤销单元，也不把会话弄脏
+        s.view.group_rename = None;
         return;
     }
     push_undo(s);

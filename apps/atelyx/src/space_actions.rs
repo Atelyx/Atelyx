@@ -1735,7 +1735,7 @@ fn on_table_patch_done(
         return Task::none();
     }
     if result.is_ok() {
-        // 补丁带 title 时服务端已按标题改名：对端按 Renamed 跟随路径
+        // 旧客户端补丁可能带 title（服务端按它改名）：对端按 Renamed 跟随路径
         if new_file != file {
             app.plugins.on_file_changed(
                 &new_file,
@@ -2001,7 +2001,7 @@ fn on_canvas_patch_done(
         return Task::none();
     }
     if result.is_ok() {
-        // 补丁带 title 时服务端已按标题改名：对端按 Renamed 跟随路径
+        // 旧客户端补丁可能带 title（服务端按它改名）：对端按 Renamed 跟随路径
         if new_file != file {
             app.plugins.on_file_changed(
                 &new_file,
@@ -3522,7 +3522,7 @@ fn on_remote_canvas_patch(
     if !conversation_ids.is_empty() {
         // 消息流解析缓存随新消息重建；面板绑定了被更新卡时跟随刷新
         if let Some(s) = app.canvas.as_mut() {
-            crate::canvas_chat::refresh_card_docs(s, "");
+            crate::canvas_chat::refresh_card_docs(s);
         }
         for id in &conversation_ids {
             crate::canvas_chat::refresh_panel_if_bound(app, id);
