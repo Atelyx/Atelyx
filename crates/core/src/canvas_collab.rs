@@ -41,7 +41,7 @@ pub fn apply_remote_patch(
         ..RemoteApplyOutcome::default()
     };
     // 本端未落盘消息保护名单：合入前该卡 data 消息与基线不一致的对话卡
-    let mut unsaved_messages: Vec<(String, Vec<Value>)> = Vec::new();
+    let mut unsaved_messages: Vec<(String, Vec<Value>, Vec<String>)> = Vec::new();
     for n in &patch.upsert_nodes {
         if n.node_type != "conversation" {
             continue;
@@ -51,18 +51,23 @@ pub fn apply_remote_patch(
             continue;
         };
         let remote_msgs = node_messages(saved_node(saved, &n.id));
-        if node_messages(Some(existing)) != remote_msgs {
-            unsaved_messages.push((n.id.clone(), node_messages(Some(existing)).to_vec()));
+        let local_msgs = node_messages(Some(existing));
+        if local_msgs != remote_msgs {
+            let baseline_ids = remote_msgs
+                .iter()
+                .filter_map(|m| m.get("id").and_then(Value::as_str).map(str::to_string))
+                .collect();
+            unsaved_messages.push((n.id.clone(), local_msgs.to_vec(), baseline_ids));
         }
     }
     if advance_baseline {
         apply_canvas_patch(saved, patch);
     }
     apply_canvas_patch(data, patch);
-    for (id, local) in unsaved_messages {
+    for (id, local, baseline_ids) in unsaved_messages {
         let Some(node) = data.nodes.iter_mut().find(|x| x.id == id) else { continue };
         let remote = node_messages(Some(node)).to_vec();
-        set_node_messages(node, merge_messages(&remote, &local));
+        set_node_messages(node, merge_messages(&remote, &local, &baseline_ids));
     }
     for n in &patch.upsert_nodes {
         if let Some(file) = n.data.get("file").and_then(Value::as_str) {
@@ -89,20 +94,42 @@ fn set_node_messages(node: &mut CanvasFileNode, messages: Vec<Value>) {
     }
 }
 
-/// 对话卡消息合并：远端为基底，本端独有消息（对端尚未见到的流式 / 未落盘消息）按原序补尾；
-/// 同 id 以远端为胜。锁模型下对端不并发写同一张卡的消息，合并只为兜底对端搬动本端
-/// 正在生成的卡时陈旧节点快照不冲掉进行中内容。
-fn merge_messages(remote: &[Value], local: &[Value]) -> Vec<Value> {
+/// 对话卡消息合并：远端为基底，本端基线外新增（对流式 / 未落盘消息）按原序补尾，
+/// 同 id 以远端为胜；本端截断（回滚）优先于远端陈旧快照——基线内且本端已删除的消息不复活。
+/// 锁模型下对端不并发写同一张卡的消息，合并只为兜底对端搬动该卡时陈旧快照不冲掉进行中内容。
+fn merge_messages(remote: &[Value], local: &[Value], baseline_ids: &[String]) -> Vec<Value> {
+    let id_of = |m: &Value| m.get("id").and_then(Value::as_str).map(str::to_string);
+    let local_ids: Vec<String> = local.iter().filter_map(id_of).collect();
+    // 本端截断（回滚）：local 是基线的严格前缀 → 删除意图优先，基线内被删的消息不因远端复现
+    if local_ids.len() < baseline_ids.len()
+        && local_ids.iter().zip(baseline_ids).all(|(a, b)| a == b)
+    {
+        let keep: HashSet<&str> = local_ids.iter().map(String::as_str).collect();
+        return remote
+            .iter()
+            .filter(|m| {
+                let Some(id) = m.get("id").and_then(Value::as_str) else { return false };
+                if baseline_ids.iter().any(|b| b == id) {
+                    keep.contains(id)
+                } else {
+                    // 远端在基线之外新增的消息照常保留
+                    true
+                }
+            })
+            .cloned()
+            .collect();
+    }
     let mut merged = remote.to_vec();
-    let remote_ids: HashSet<&str> = remote
-        .iter()
-        .filter_map(|m| m.get("id").and_then(Value::as_str))
-        .collect();
+    let mut seen: HashSet<String> = merged.iter().filter_map(id_of).collect();
+    let baseline: HashSet<&str> = baseline_ids.iter().map(String::as_str).collect();
     for m in local {
-        let Some(id) = m.get("id").and_then(Value::as_str) else { continue };
-        if !remote_ids.contains(id) {
-            merged.push(m.clone());
+        let Some(id) = id_of(m) else { continue };
+        // 只补基线外新增：基线内 = 本端可能有删除，不得复活
+        if seen.contains(&id) || baseline.contains(id.as_str()) {
+            continue;
         }
+        seen.insert(id);
+        merged.push(m.clone());
     }
     merged
 }
@@ -244,7 +271,8 @@ mod tests {
             json!({"id": "m0", "text": "本端独有"}),
             json!({"id": "m2", "text": "本端二"}),
         ];
-        let merged = merge_messages(&remote, &local);
+        let baseline = vec!["m1".to_string(), "m2".to_string()];
+        let merged = merge_messages(&remote, &local, &baseline);
         assert_eq!(
             merged,
             vec![
@@ -253,6 +281,10 @@ mod tests {
                 json!({"id": "m0", "text": "本端独有"}),
             ]
         );
+        // 本端回滚（基线内消息被删）不得被远端陈旧快照复活
+        let rolled_back = vec![json!({"id": "m1", "text": "本端"})];
+        let merged = merge_messages(&remote, &rolled_back, &baseline);
+        assert_eq!(merged, vec![json!({"id": "m1", "text": "远端"})]);
     }
 
     /// 未确认落地（advance_baseline = false）：data 合入、基线不动（下轮补丁重含远端内容）。
