@@ -420,6 +420,11 @@ impl CanvasSession {
         self.view.locks.entry(node_id.to_string()).or_insert(now_ms);
     }
 
+    /// 是否正被本端拖拽（收起组的隐藏规则对拖拽中的卡失效，防拖动途中消失）。
+    pub fn is_dragged(&self, id: &str) -> bool {
+        self.view.drag.as_ref().is_some_and(|d| d.orig.contains_key(id))
+    }
+
     /// 以已知视口尺寸提交适应视图。
     pub fn apply_fit(&mut self, vw: f32, vh: f32) {
         let (zoom, pan) = fit_transform(&self.data.nodes, |n| self.card_size(n), vw, vh);
@@ -585,13 +590,20 @@ pub fn hit_resize_handle(
     }
     let tol = HANDLE_SIZE as f64 / zoom as f64;
     for n in canvas.nodes.iter().rev() {
-        if n.node_type == "group" || !selection.iter().any(|s| s == &n.id) {
+        if n.node_type == "group"
+            || hidden_by_collapsed(&canvas.nodes, &n.id)
+            || !selection.iter().any(|s| s == &n.id)
+        {
             continue;
         }
         let (w, h) = display_size(n);
         let (hx, hy) = (n.x + w, n.y + h);
         if world.0 >= hx - tol && world.0 <= hx + tol && world.1 >= hy - tol && world.1 <= hy + tol {
-            return Some(n.id.clone());
+            // 视觉顶层才可操作：被后声明卡盖住的把手不截获按压
+            if hit_card(canvas, world).is_some_and(|i| canvas.nodes[i].id == n.id) {
+                return Some(n.id.clone());
+            }
+            continue;
         }
     }
     None
@@ -1155,7 +1167,9 @@ fn draw_world(
 
     // 卡（非分组，数据序；收起分组成员隐藏）
     for n in &session.data.nodes {
-        if n.node_type == "group" || hidden_by_collapsed(&session.data.nodes, &n.id) {
+        if n.node_type == "group"
+            || (hidden_by_collapsed(&session.data.nodes, &n.id) && !session.is_dragged(&n.id))
+        {
             continue;
         }
         let (w, h) = session.card_size(n);
@@ -2030,7 +2044,7 @@ fn card_overlays<'a>(
         let (sw, sh) = (w as f32 * view.zoom, h as f32 * view.zoom);
         // 完全越出视口的卡不建正文；每张卡仍占一个槽位，Stack 按子级下标复用树状态，
         // 动态增删层会让后续卡的滚动位置串到别的卡上（收起分组的隐藏成员同此槽位处理）
-        let hidden = hidden_by_collapsed(&session.data.nodes, &n.id);
+        let hidden = hidden_by_collapsed(&session.data.nodes, &n.id) && !session.is_dragged(&n.id);
         let offscreen = hidden || sx + sw < 0.0 || sy + sh < 0.0 || sx > vw || sy > vh;
         let inner: Option<Element<'a>> = if offscreen {
             None
@@ -2076,7 +2090,7 @@ fn card_overlays<'a>(
     // 不可见卡以空位占槽，保证 Stack 槽位只随节点集合增减
     for n in &session.data.nodes {
         let slot: Element<'_> = if n.node_type == "conversation"
-            && !hidden_by_collapsed(&session.data.nodes, &n.id)
+            && (!hidden_by_collapsed(&session.data.nodes, &n.id) || session.is_dragged(&n.id))
         {
             let (w, _) = session.card_size(n);
             let (sx, sy) = view.screen(n.x, n.y);
@@ -2934,6 +2948,31 @@ mod tests {
         assert_eq!(hit_card(&c2, (60.0, 60.0)).map(|i| c2.nodes[i].id.as_str()), Some("b"));
         // 空白 = None
         assert_eq!(hit_card(&c, (900.0, 900.0)), None);
+    }
+
+    #[test]
+    fn resize_handle_skips_hidden_and_covered_cards() {
+        // 收起组内的成员不可见：其把手不得命中
+        let c = canvas(
+            vec![
+                group("g", 0.0, 0.0, 500.0, 500.0, true),
+                node("m", "text", 50.0, 50.0, Some(100.0), Some(100.0)),
+            ],
+            vec![],
+        );
+        assert_eq!(hit_resize_handle(&c, &["m".to_string()], 1.0, (150.0, 150.0)), None);
+        // 被后声明卡完全覆盖的选中卡：把手让位给顶层卡
+        let covered = canvas(
+            vec![
+                node("a", "text", 0.0, 0.0, Some(100.0), Some(100.0)),
+                node("b", "text", 0.0, 0.0, Some(100.0), Some(100.0)),
+            ],
+            vec![],
+        );
+        assert_eq!(
+            hit_resize_handle(&covered, &["a".to_string()], 1.0, (100.0, 100.0)),
+            None
+        );
     }
 
     #[test]

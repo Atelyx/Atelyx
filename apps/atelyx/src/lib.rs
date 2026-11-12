@@ -3035,6 +3035,8 @@ impl App {
                 self.apply(LayoutOp::SetDetachedWindowPinned { window_id, pinned: !pinned })
             }
             Message::DetachedFocusLost(os_id) => {
+                // 失焦期间系统不再投递鼠标释放：画布拖拽会话必须就地收口
+                canvas_actions::cancel_drag(self);
                 plugin_actions::release_plugin_focus(self, os_id);
                 // 插件窗口：声明 hide_on_blur 的隐藏（浮窗形态）
                 if self.plugin_windows.contains_key(&os_id) {

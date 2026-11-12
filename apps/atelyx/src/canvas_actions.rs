@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 use atelyx_core::vault::CanvasFileNode;
 
 use crate::canvas_view::{
-    bbox_of_rects, display_size, group_members, hidden_by_collapsed, hit_card, hit_link_handle,
+    bbox_of_rects, display_size, group_members, group_of, hidden_by_collapsed, hit_card, hit_link_handle,
     hit_resize_handle, marquee_hit, snap_move, snap_size, world_from_screen, CanvasKey,
     CanvasMenuAction, CanvasMsg, CanvasSession, CanvasSnapshot, DragKind, GROUP_PAD, RefContent,
     SaveReason, View, CARD_HEADER_H, MARQUEE_MIN, SNAP_GRID, UNDO_DEPTH,
@@ -933,6 +933,51 @@ fn on_move(app: &mut App, pos: iced::Point, size: iced::Size) -> Task<Message> {
     Task::none()
 }
 
+/// 落点被收起分组收纳：展开该组，避免卡落进不可见区域（收起只改显示形态）。
+/// 返回是否真的展开了组（调用方据此决定是否按数据变更收口）。
+fn expand_collapsed_for(s: &mut CanvasSession, moved: &[String]) -> bool {
+    let mut expand: Vec<usize> = Vec::new();
+    for id in moved {
+        if let Some(gi) = group_of(&s.data.nodes, id) {
+            if s.data.nodes[gi].data.get("collapsed").and_then(Value::as_bool) == Some(true) {
+                expand.push(gi);
+            }
+        }
+    }
+    let mut changed = false;
+    for gi in expand {
+        if let Some(obj) = s.data.nodes[gi].data.as_object_mut() {
+            obj.remove("collapsed");
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// 拖拽兜底收口：窗口失焦 / 系统丢失释放时清会话（按是否真的改动过结算撤销栈）。
+/// 返回 false = 当时没有拖拽会话。
+pub(crate) fn cancel_drag(app: &mut App) -> bool {
+    let Some(s) = app.canvas.as_mut() else { return false };
+    let Some(drag) = s.view.drag.take() else { return false };
+    s.view.link_to = None;
+    s.view.marquee_to = None;
+    s.view.guides.clear();
+    match drag.kind {
+        DragKind::Card | DragKind::Resize(_) => {
+            if drag.mutated {
+                s.version += 1;
+            } else {
+                s.view.undo.pop();
+            }
+        }
+        // 未完成框选：回到起手选中，不保留半途并集
+        DragKind::Marquee { base } => s.view.selection = base,
+        DragKind::Pan | DragKind::Link(_) => {}
+    }
+    s.redraw();
+    true
+}
+
 /// 标记拖拽会话已改写几何（松手判定无操作回退用）。
 fn mark_drag_mutated(s: &mut CanvasSession) {
     if let Some(d) = s.view.drag.as_mut() {
@@ -947,15 +992,15 @@ fn on_release(app: &mut App) -> Task<Message> {
         let Some(s) = app.canvas.as_mut() else { return Task::none() };
         let to = s.view.link_to;
         let marquee_end = s.view.marquee_to;
-        let (kind, mutated, base, start) = match s.view.drag.take() {
+        let (kind, mutated, base, start, orig) = match s.view.drag.take() {
             Some(d) => {
                 let base = match &d.kind {
                     DragKind::Marquee { base } => Some(base.clone()),
                     _ => None,
                 };
-                (Some(d.kind), d.mutated, base, Some(d.start))
+                (Some(d.kind), d.mutated, base, Some(d.start), d.orig)
             }
-            None => (None, false, None, None),
+            None => (None, false, None, None, HashMap::new()),
         };
         s.view.link_to = None;
         s.view.marquee_to = None;
@@ -974,8 +1019,14 @@ fn on_release(app: &mut App) -> Task<Message> {
             }
             Some(DragKind::Card) | Some(DragKind::Resize(_)) => {
                 if mutated {
-                    // 拖拽期内容变化正式收口：版本自增触发主循环排自动保存
-                    s.version += 1;
+                    // 落点被收起分组收纳时展开该组：卡不得落进不可见区域
+                    let moved: Vec<String> = orig.into_keys().collect();
+                    if expand_collapsed_for(s, &moved) {
+                        s.touch();
+                    } else {
+                        // 拖拽期内容变化正式收口：版本自增触发主循环排自动保存
+                        s.version += 1;
+                    }
                 } else {
                     // 起手未动 = 无操作：丢弃起手快照（点击不产生撤销单元）
                     s.view.undo.pop();
@@ -1728,6 +1779,46 @@ mod tests {
         push_snapshot(&mut s);
         assert_eq!(s.view.undo.len(), 3);
         assert_eq!(s.view.redo.len(), 1);
+    }
+
+    /// 拖拽落进收起分组：落点收口时展开该组，卡不会停在不可见区域。
+    #[test]
+    fn expanding_collapsed_group_keeps_dropped_card_visible() {
+        let mut nodes = vec![
+            atelyx_core::vault::CanvasFileNode {
+                id: "g".into(),
+                node_type: "group".into(),
+                x: 0.0,
+                y: 0.0,
+                width: Some(500.0),
+                height: Some(500.0),
+                data: serde_json::json!({ "collapsed": true }),
+            },
+            atelyx_core::vault::CanvasFileNode {
+                id: "m".into(),
+                node_type: "text".into(),
+                x: 50.0,
+                y: 50.0,
+                width: Some(100.0),
+                height: Some(100.0),
+                data: serde_json::json!({}),
+            },
+        ];
+        let canvas = atelyx_core::vault::CanvasFile {
+            schema: atelyx_core::vault::CANVAS_SCHEMA.into(),
+            id: "c1".into(),
+            title: "t".into(),
+            nodes: std::mem::take(&mut nodes),
+            edges: vec![],
+            created_at: 0,
+            updated_at: 0,
+        };
+        let mut s = CanvasSession::new("t.atlx".into(), canvas);
+        assert!(hidden_by_collapsed(&s.data.nodes, "m"));
+        assert!(expand_collapsed_for(&mut s, &["m".to_string()]));
+        assert!(!hidden_by_collapsed(&s.data.nodes, "m"));
+        // 已展开时无变化
+        assert!(!expand_collapsed_for(&mut s, &["m".to_string()]));
     }
 
     /// 引用读取口径：文件存在但读不出文本 = 二进制占位，路径不存在 = 缺失降级。
