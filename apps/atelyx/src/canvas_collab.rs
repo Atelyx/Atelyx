@@ -22,6 +22,7 @@ pub struct Identity<'a> {
 }
 
 /// 远端协作者在当前画布上的在场条目（只收同文件条目；身份色畸形回落灰）。
+#[derive(Clone, PartialEq)]
 pub struct RemotePeer {
     /// 上报该条目的连接 id（锁主判定的声明归属）。
     pub peer_id: String,
@@ -205,12 +206,14 @@ impl CanvasCollab {
     }
 
     /// 重新解析远端条目（超时剔除也在这里发生）：只保留与当前文件匹配的条目。
-    pub fn refresh(&mut self, now: Instant) {
+    /// 返回条目集合是否变化（调用方据此作废世界层缓存）。
+    pub fn refresh(&mut self, now: Instant) -> bool {
         let Some(file) = self.file.clone() else {
+            let changed = !self.remote.is_empty();
             self.remote.clear();
-            return;
+            return changed;
         };
-        self.remote = self
+        let next: Vec<RemotePeer> = self
             .channel
             .remotes(now)
             .into_iter()
@@ -242,6 +245,9 @@ impl CanvasCollab {
                 })
             })
             .collect();
+        let changed = next != self.remote;
+        self.remote = next;
+        changed
     }
 
     /// 对端连接消失：摘除其条目并刷新。
@@ -249,7 +255,7 @@ impl CanvasCollab {
         if !self.channel.drop_peer(peer_id) {
             return false;
         }
-        self.refresh(Instant::now());
+        let _ = self.refresh(Instant::now());
         true
     }
 
@@ -454,6 +460,19 @@ mod tests {
 
         assert!(collab.drop_peer("p1"));
         assert!(collab.remote().is_empty());
+    }
+
+    #[test]
+    fn refresh_only_reports_actual_remote_changes() {
+        let mut collab = CanvasCollab::new();
+        let now = Instant::now();
+        collab
+            .enter(now, &identity(), "a.atlx", Vec::new(), Vec::new(), Vec::new())
+            .expect("进入");
+        assert!(!collab.refresh(now), "无远端条目不算变化");
+        collab.apply("p1", &remote_payload(9, 1, "a.atlx", json!(["n1"]), json!([]), json!([])), now);
+        assert!(!collab.refresh(now + Duration::from_secs(1)), "在场未变不报告变化");
+        assert!(collab.refresh(now + Duration::from_secs(31)), "超时剔除应报告变化");
     }
 
     #[test]

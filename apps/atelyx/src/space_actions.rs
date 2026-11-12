@@ -3228,6 +3228,7 @@ fn clear_remote_presence(app: &mut App) {
     if let Some(collab) = app.canvas_collab.as_mut() {
         collab.clear_remotes();
     }
+    invalidate_canvas_presence(app);
     app.remote_cursors.clear();
 }
 
@@ -3265,6 +3266,13 @@ fn send_table_frame(app: &App, payload: serde_json::Value) {
 }
 
 // ===== 画布协作（presence + canvas-patch 合入） =====
+
+/// 远端在场条目画在画布世界层缓存里：条目变化后必须作废缓存（描边 / 名签 / 生成中）。
+fn invalidate_canvas_presence(app: &mut App) {
+    if let Some(s) = app.canvas.as_mut() {
+        s.redraw();
+    }
+}
 
 /// 画布在场同步：进入 / 切换 / 关闭与选中、对话卡锁、流式变化都从这里收口
 /// （事件与 tick 共用，幂等）。锁的失效收敛也在此：失焦且无草稿且不在流式的锁释放。
@@ -3361,8 +3369,9 @@ pub(crate) fn canvas_collab_tick(app: &mut App) {
     let connected = app.space_connected;
     let now = Instant::now();
     let mut frames = Vec::new();
+    let mut presence_changed = false;
     if let Some(collab) = app.canvas_collab.as_mut() {
-        collab.refresh(now);
+        presence_changed = collab.refresh(now);
         if let Some(frame) = collab.flush(now) {
             frames.push(frame);
         }
@@ -3371,6 +3380,9 @@ pub(crate) fn canvas_collab_tick(app: &mut App) {
                 frames.push(frame);
             }
         }
+    }
+    if presence_changed {
+        invalidate_canvas_presence(app);
     }
     for frame in frames {
         send_canvas_frame(app, frame);
@@ -3698,10 +3710,14 @@ fn on_space_event(app: &mut App, event: atelyx_core::collab::SpaceEvent) -> Task
                     collab.drop_peer(peer);
                 }
             }
+            let mut canvas_dropped = false;
             if let Some(collab) = app.canvas_collab.as_mut() {
                 for peer in &gone {
-                    collab.drop_peer(peer);
+                    canvas_dropped |= collab.drop_peer(peer);
                 }
+            }
+            if canvas_dropped {
+                invalidate_canvas_presence(app);
             }
             Task::none()
         }
@@ -3752,8 +3768,12 @@ fn on_space_event(app: &mut App, event: atelyx_core::collab::SpaceEvent) -> Task
                     collab.apply(&peer_id, &payload, now);
                 }
             } else if channel == crate::canvas_collab::CHANNEL {
-                if let Some(collab) = app.canvas_collab.as_mut() {
-                    collab.apply(&peer_id, &payload, now);
+                let changed = app
+                    .canvas_collab
+                    .as_mut()
+                    .is_some_and(|c| c.apply(&peer_id, &payload, now));
+                if changed {
+                    invalidate_canvas_presence(app);
                 }
             } else if channel == crate::note_collab_channel::CHANNEL {
                 let changed = app
