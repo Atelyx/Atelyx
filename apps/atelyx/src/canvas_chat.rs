@@ -82,6 +82,8 @@ pub struct CardChat {
     pub rollback_confirm: Option<String>,
     /// 卡会话压缩在途（摘要回执前不再接受新压缩）。
     pub compacting: bool,
+    /// 压缩请求时刻的消息锚点（末条 id + 条数）：回执沿用它，期间新增消息不并入摘要。
+    compact_anchor: Option<(String, usize)>,
     /// 空间模式提示词预取在途（回执后续跑发送）。
     pending_send: Option<SendPlan>,
     /// 空间模式重生成的待跑历史（提示词取回后启动）。
@@ -1547,6 +1549,10 @@ fn compact_card(app: &mut App, node_id: &str) -> Task<Message> {
         set_error(app, node_id, "对话内容太少，无需压缩".to_string());
         return Task::none();
     }
+    let Some(anchor) = compaction_anchor(&messages) else {
+        set_error(app, node_id, "压缩失败：末条消息缺少 id".to_string());
+        return Task::none();
+    };
     let Some((agent_id, model_pick, effort)) = card_run_pick(app, node_id) else {
         return Task::none();
     };
@@ -1566,30 +1572,39 @@ fn compact_card(app: &mut App, node_id: &str) -> Task<Message> {
         .filter(|c| !c.is_null());
     if let Some(chat) = app.canvas.as_mut().and_then(|s| s.view.card_chat.get_mut(node_id)) {
         chat.compacting = true;
+        chat.compact_anchor = Some(anchor);
     }
     chat_actions::compact_task(session_id(node_id), config, &messages, compaction)
 }
 
-/// 卡会话压缩回执：摘要写节点 `data.compaction`（锚点 = 回执时的末条消息），失败提示进卡。
+/// 压缩锚点：请求时刻的末条消息 id 与条数。回执沿用同一锚点，
+/// 压缩在途的新消息不并入摘要、也不被锚点覆盖。
+fn compaction_anchor(messages: &[Value]) -> Option<(String, usize)> {
+    let id = messages.last()?.get("id")?.as_str()?.to_string();
+    Some((id, messages.len()))
+}
+
+/// 卡会话压缩回执：摘要写节点 `data.compaction`（锚点 = 请求时刻末条），失败提示进卡。
 pub(crate) fn compact_done(app: &mut App, node_id: &str, result: Option<String>) {
-    if let Some(chat) = app.canvas.as_mut().and_then(|s| s.view.card_chat.get_mut(node_id)) {
-        chat.compacting = false;
-    }
+    let anchor = app
+        .canvas
+        .as_mut()
+        .and_then(|s| s.view.card_chat.get_mut(node_id))
+        .and_then(|chat| {
+            chat.compacting = false;
+            chat.compact_anchor.take()
+        });
     let summary_empty = result.as_ref().is_some_and(|s| s.trim().is_empty());
     let Some(summary) = result.filter(|s| !s.trim().is_empty()) else {
         let message = if summary_empty { "压缩失败：摘要为空" } else { "压缩失败" };
         set_error(app, node_id, message.to_string());
         return;
     };
+    let Some((anchor, count)) = anchor else {
+        set_error(app, node_id, "压缩失败：消息锚点缺失".to_string());
+        return;
+    };
     let Some(session) = app.canvas.as_mut() else { return };
-    let anchor_count = messages_of_session(session, node_id)
-        .and_then(|ms| ms.last())
-        .and_then(|m| m.get("id").and_then(Value::as_str).map(|id| id.to_string()))
-        .map(|anchor| {
-            let count = messages_of_session(session, node_id).map_or(0, |ms| ms.len());
-            (anchor, count)
-        });
-    let Some((anchor, count)) = anchor_count else { return };
     let Some(node) = session.data.nodes.iter_mut().find(|n| n.id == node_id) else { return };
     if let Some(obj) = node.data.as_object_mut() {
         obj.insert(
@@ -2136,6 +2151,15 @@ fn scroll_bottom(node_id: &str) -> Task<Message> {
 
 #[cfg(test)]
 mod tests {
+    /// 压缩锚点取请求时刻的末条消息，与回执时刻的消息集合无关。
+    #[test]
+    fn compaction_anchor_uses_request_time_last_message() {
+        let messages = vec![json!({ "id": "m1" }), json!({ "id": "m2" })];
+        assert_eq!(compaction_anchor(&messages), Some(("m2".to_string(), 2)));
+        assert_eq!(compaction_anchor(&[]), None);
+        assert_eq!(compaction_anchor(&[json!({ "role": "user" })]), None);
+    }
+
     use super::*;
 
     #[test]
