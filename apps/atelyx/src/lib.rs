@@ -4964,6 +4964,22 @@ impl App {
         self.proceed(pending)
     }
 
+    /// flush 失败：挂起的后续动作不再执行（否则脏面会让关闭 / 切换永久挂起）。
+    pub(crate) fn abort_pending_flush(&mut self, why: &str) {
+        match self.flush_pending.take() {
+            Some(PendingAfterFlush::AiFs { id, .. }) => {
+                ai_fs_edit::settle(id, Err(why.to_string()));
+            }
+            Some(
+                PendingAfterFlush::PluginVaultRemove { request_id, .. }
+                | PendingAfterFlush::PluginVaultRename { request_id, .. },
+            ) => {
+                self.plugins.resolve_shell_call(request_id, Err(why.to_string()));
+            }
+            _ => {}
+        }
+    }
+
     /// 提交当前所有脏面的保存（flush 语义；全部落地后由回执侧放行 flush_pending）。
     fn flush_dirty_now(&mut self) -> Task<Message> {
         let mut task = Task::none();

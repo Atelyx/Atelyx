@@ -499,6 +499,9 @@ fn on_saved(
     match result {
         Err(e) => {
             app.settle_history_restore(false);
+            if matches!(reason, SaveReason::Flush) {
+                app.abort_pending_flush("保存失败，操作未执行");
+            }
             let Some(s) = app.canvas.as_mut() else { return Task::none() };
             s.save_error = Some(e.clone());
             if matches!(reason, SaveReason::Flush) {
@@ -579,9 +582,53 @@ fn record_canvas_history(app: &App, content: &str) -> Task<Message> {
 
 // ===== 消息处理 =====
 
+/// 空间 viewer：画布只读（写入口在消息分派处统一拦下）。
+fn readonly_viewer(app: &App) -> bool {
+    matches!(&app.repo_kind, RepoKind::Space(session) if !session.role.can_write())
+}
+
+/// 该消息是否属于写入口（查看、视口操作与收尾事件放行）。
+fn readonly_message(msg: &CanvasMsg) -> bool {
+    use crate::canvas_chat::CanvasChatMsg as C;
+    match msg {
+        CanvasMsg::Press { .. }
+        | CanvasMsg::DoublePress { .. }
+        | CanvasMsg::Context { .. }
+        | CanvasMsg::PasteText(_)
+        | CanvasMsg::Menu(_)
+        | CanvasMsg::GroupRenameDraft(_) => true,
+        CanvasMsg::Key(key) => !matches!(key, CanvasKey::Copy | CanvasKey::SelectAll),
+        CanvasMsg::Chat(chat) => !matches!(
+            chat,
+            C::FlowScrolled { .. }
+                | C::ScrollBottom(_)
+                | C::OpenInPanel(_)
+                | C::ClearError(_)
+        ),
+        _ => false,
+    }
+}
+
+/// viewer 的写入口拦下并提示一次；返回 true = 本条消息不执行。
+fn block_readonly(app: &mut App, msg: &CanvasMsg) -> bool {
+    if !readonly_viewer(app) || !readonly_message(msg) {
+        return false;
+    }
+    if app.canvas.as_ref().is_some_and(|s| !s.view.readonly_hint) {
+        if let Some(s) = app.canvas.as_mut() {
+            s.view.readonly_hint = true;
+        }
+        app.notify(crate::NoticeLevel::Warning, "该空间为只读身份，画布不可编辑");
+    }
+    true
+}
+
 /// 画布消息入口（对称表格 on_msg；数据版本变化由主循环判脏排自动保存）。
 pub fn on_msg(app: &mut App, msg: CanvasMsg) -> Task<Message> {
     crate::canvas_chat::sync_card_chats(app);
+    if block_readonly(app, &msg) {
+        return Task::none();
+    }
     match msg {
         CanvasMsg::Loaded(gen, file, result) => on_loaded(app, gen, file, result),
         CanvasMsg::Saved(gen, file, reason, result, frozen) => on_saved(app, gen, file, reason, result, frozen),
@@ -1629,6 +1676,34 @@ fn group_rename_commit(app: &mut App, node: String, name: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// viewer 只读拦截口径：写入口拦下，查看 / 视口 / 剪贴板读取放行。
+    #[test]
+    fn readonly_message_blocks_writes_only() {
+        let press = CanvasMsg::Press { pos: iced::Point::ORIGIN, size: iced::Size::ZERO };
+        assert!(readonly_message(&press));
+        assert!(readonly_message(&CanvasMsg::DoublePress {
+            window: iced::window::Id::unique(),
+            pos: iced::Point::ORIGIN,
+            size: iced::Size::ZERO,
+        }));
+        assert!(readonly_message(&CanvasMsg::Key(CanvasKey::DeleteSelection)));
+        assert!(!readonly_message(&CanvasMsg::Key(CanvasKey::Copy)));
+        assert!(!readonly_message(&CanvasMsg::Key(CanvasKey::SelectAll)));
+        assert!(!readonly_message(&CanvasMsg::Hover(None)));
+        assert!(!readonly_message(&CanvasMsg::Wheel {
+            delta_y: 0.0,
+            delta_x: 0.0,
+            pos: iced::Point::ORIGIN,
+            size: iced::Size::ZERO,
+        }));
+        assert!(readonly_message(&CanvasMsg::Chat(
+            crate::canvas_chat::CanvasChatMsg::Send("n1".into())
+        )));
+        assert!(!readonly_message(&CanvasMsg::Chat(
+            crate::canvas_chat::CanvasChatMsg::ScrollBottom("n1".into())
+        )));
+    }
 
     /// 撤销栈语义：变更前 push 清重做栈（新分支生效），重做回填不清重做栈
     /// （多步重做不被单步清空）。

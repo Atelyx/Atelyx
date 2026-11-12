@@ -940,6 +940,11 @@ fn send_with(
         restore_inputs(app, node_id, origin, images, refs);
         return Task::none();
     }
+    if matches!(&app.repo_kind, RepoKind::Space(session) if !session.role.can_write()) {
+        restore_inputs(app, node_id, origin, images, refs);
+        app.notify(crate::NoticeLevel::Warning, "该空间为只读身份，无法发送");
+        return Task::none();
+    }
     if display.is_empty() && images.is_empty() {
         restore_inputs(app, node_id, origin, images, refs);
         return Task::none();

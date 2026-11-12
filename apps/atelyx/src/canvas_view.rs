@@ -474,6 +474,8 @@ pub struct CanvasViewState {
     pub grid_cache: canvas::Cache,
     /// 内容层缓存（随数据或视图态变化失效）。
     pub content_cache: canvas::Cache,
+    /// viewer 只读提示是否已出（同一会话只提示一次）。
+    pub readonly_hint: bool,
 }
 
 impl Default for CanvasViewState {
@@ -500,6 +502,7 @@ impl Default for CanvasViewState {
             viewport: (1.0, 1.0),
             grid_cache: canvas::Cache::new(),
             content_cache: canvas::Cache::new(),
+            readonly_hint: false,
         }
     }
 }
@@ -2237,6 +2240,19 @@ fn conversation_card_overlay<'a>(
         );
     }
     col = col.push(flow);
+    // viewer 只读：输入区收敛为提示条（写入口已在消息分派处统一拦截）
+    if matches!(&app.repo_kind, crate::RepoKind::Space(session) if !session.role.can_write()) {
+        col = col.push(
+            container(
+                text("只读身份，无法在此编辑")
+                    .size((pal::fs_caption() * zoom).max(9.0))
+                    .color(pal::TEXT_MUTED),
+            )
+            .width(Length::Fill)
+            .padding(Padding::new((6.0 * zoom).max(3.0))),
+        );
+        return Some(col.into());
+    }
     // 被对端独占编辑：候选浮层 / 附件托盘 / 输入面一并收敛为只读提示条
     // （卡头与消息流保持可看；发送等已同源守卫）
     if let crate::space_actions::LockHolder::Peer { name, color_hex } =
@@ -2286,6 +2302,8 @@ fn card_action_row<'a>(
         .and_then(|s| s.view.card_chat.get(node_id))
         .and_then(|c| c.rollback_confirm.as_deref())
         == Some(message_id.as_str());
+    // viewer 只读：回滚 / 分支 / 重生成入口不出现（写入口同样被分派拦截）
+    let readonly = matches!(&app.repo_kind, crate::RepoKind::Space(session) if !session.role.can_write());
     let mut row = row![].spacing(2);
     if !display.is_empty() {
         row = row.push(controls::icon_button(
@@ -2297,7 +2315,7 @@ fn card_action_row<'a>(
             Some((window, "复制".to_string())),
         ));
     }
-    if is_assistant && !content.is_empty() && !content.starts_with("[错误]") && !streaming {
+    if !readonly && is_assistant && !content.is_empty() && !content.starts_with("[错误]") && !streaming {
         row = row.push(controls::icon_button(
             "undo-turn",
             12.0,

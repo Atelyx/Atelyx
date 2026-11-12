@@ -1022,6 +1022,9 @@ fn on_saved(
     match result {
         Err(e) => {
             app.settle_history_restore(false);
+            if matches!(reason, tv::SaveReason::Flush) {
+                app.abort_pending_flush("保存失败，操作未执行");
+            }
             let Some(s) = app.table.as_mut() else { return Task::none() };
             s.save_error = Some(e.clone());
             if matches!(reason, tv::SaveReason::Flush) {

@@ -1880,17 +1880,21 @@ pub fn space_submit_canvas_save(app: &mut App, reason: crate::canvas_view::SaveR
     if !s.dirty {
         return Task::none();
     }
-    let Some(session) = session_of(app) else { return Task::none() };
-    if !session.role.can_write() {
-        if !matches!(reason, crate::canvas_view::SaveReason::AutoSave) {
-            app.notify(NoticeLevel::Warning, "该空间为只读身份，无法保存");
-        }
-        return Task::none();
-    }
     let gen = app.epoch();
     let file = s.file.clone();
     let baseline = s.saved.clone();
     let frozen = s.data.clone();
+    let Some(session) = session_of(app) else { return Task::none() };
+    if !session.role.can_write() {
+        // 只读拒绝也要回执：脏拦截靠保存回执放行，早退会让关闭 / 切换永久挂起
+        return Task::done(Message::Canvas(crate::canvas_view::CanvasMsg::Saved(
+            gen,
+            file,
+            reason,
+            Err("该空间为只读身份，无法保存".to_string()),
+            frozen,
+        )));
+    }
     let client = session.client;
     let space_id = session.space_id;
     let author = crate::history_author(app);
