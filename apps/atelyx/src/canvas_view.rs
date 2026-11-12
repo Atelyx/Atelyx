@@ -1177,9 +1177,19 @@ fn draw_grid(view: &View, frame: &mut Frame, size: Size) {
 }
 
 /// 内容层：分组 → 连线 → 卡（数据序，后画者在上）→ 远端在场 → 框选与参考线。
-/// 世界矩形是否与视口相交（绘制裁剪；外扩 8px 容纳描边与箭头）。
-fn world_rect_visible(view: &View, vw: f32, vh: f32, x: f64, y: f64, w: f64, h: f64) -> bool {
-    let pad = 8.0 / view.zoom.max(0.1) as f64;
+/// 世界矩形是否与视口相交（绘制裁剪）。
+/// `pad_px` 为屏幕像素余量：卡取少量描边余量，连线要容纳贝塞尔控制点外扩。
+fn world_rect_visible(
+    view: &View,
+    vw: f32,
+    vh: f32,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    pad_px: f32,
+) -> bool {
+    let pad = pad_px as f64 / view.zoom.max(0.1) as f64;
     let (wx0, wy0) = view.world(0.0, 0.0);
     let (wx1, wy1) = view.world(vw, vh);
     x + w >= wx0 - pad && x <= wx1 + pad && y + h >= wy0 - pad && y <= wy1 + pad
@@ -1201,7 +1211,7 @@ fn draw_world(
             continue;
         }
         let (w, h) = session.card_size(n);
-        if !world_rect_visible(view, frame_width, frame_height, n.x, n.y, w, h) {
+        if !world_rect_visible(view, frame_width, frame_height, n.x, n.y, w, h, 8.0) {
             continue;
         }
         draw_group(frame, view, n, w, h, sel.contains(n.id.as_str()));
@@ -1216,7 +1226,17 @@ fn draw_world(
             continue;
         };
         let (ex, ey) = (x0.min(x1), y0.min(y1));
-        if !world_rect_visible(view, frame_width, frame_height, ex, ey, (x1 - x0).abs(), (y1 - y0).abs()) {
+        // 箭头控制点沿端点法线最多外扩 90px：余量按屏幕像素给足以免误裁曲线
+        if !world_rect_visible(
+            view,
+            frame_width,
+            frame_height,
+            ex,
+            ey,
+            (x1 - x0).abs(),
+            (y1 - y0).abs(),
+            100.0,
+        ) {
             continue;
         }
         draw_edge(session, view, frame, e);
@@ -1230,7 +1250,7 @@ fn draw_world(
             continue;
         }
         let (w, h) = session.card_size(n);
-        if !world_rect_visible(view, frame_width, frame_height, n.x, n.y, w, h) {
+        if !world_rect_visible(view, frame_width, frame_height, n.x, n.y, w, h, 8.0) {
             continue;
         }
         let link_handle = session.view.hover.as_deref() == Some(n.id.as_str())
@@ -3256,12 +3276,15 @@ mod tests {
     fn world_rect_culling_keeps_edge_overlap() {
         let view = View { zoom: 1.0, pan: (0.0, 0.0) };
         // 视口 800×600：完全在外的不画
-        assert!(!world_rect_visible(&view, 800.0, 600.0, 1000.0, 700.0, 100.0, 100.0));
+        assert!(!world_rect_visible(&view, 800.0, 600.0, 1000.0, 700.0, 100.0, 100.0, 8.0));
         // 只压边缘（含描边余量）仍要画
-        assert!(world_rect_visible(&view, 800.0, 600.0, 795.0, 595.0, 100.0, 100.0));
-        assert!(world_rect_visible(&view, 800.0, 600.0, -50.0, -50.0, 100.0, 100.0));
+        assert!(world_rect_visible(&view, 800.0, 600.0, 795.0, 595.0, 100.0, 100.0, 8.0));
+        assert!(world_rect_visible(&view, 800.0, 600.0, -50.0, -50.0, 100.0, 100.0, 8.0));
         // 视口内正常绘制
-        assert!(world_rect_visible(&view, 800.0, 600.0, 100.0, 100.0, 200.0, 200.0));
+        assert!(world_rect_visible(&view, 800.0, 600.0, 100.0, 100.0, 200.0, 200.0, 8.0));
+        // 连线余量更大：端点刚出视口但曲线外扩仍可见
+        assert!(world_rect_visible(&view, 800.0, 600.0, 850.0, 100.0, 0.0, 0.0, 100.0));
+        assert!(!world_rect_visible(&view, 800.0, 600.0, 950.0, 100.0, 0.0, 0.0, 100.0));
     }
 
     #[test]
