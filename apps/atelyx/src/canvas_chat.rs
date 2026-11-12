@@ -251,15 +251,19 @@ pub fn sync_card_chats(app: &mut App) {
 }
 
 /// 浮层槽位对齐（纯逻辑）：末尾已删槽位回收，中间已删槽位保留，新节点追加到末尾。
+/// 每次画布消息都会调用，按集合比较保持 O(n)，不做嵌套线性查找。
 fn sync_overlay_slots(slots: &mut Vec<String>, ids: &[String]) {
-    while slots.last().is_some_and(|id| !ids.iter().any(|x| x == id)) {
+    let live: HashSet<&str> = ids.iter().map(String::as_str).collect();
+    while slots.last().is_some_and(|id| !live.contains(id.as_str())) {
         slots.pop();
     }
-    for id in ids {
-        if !slots.iter().any(|s| s == id) {
-            slots.push(id.clone());
-        }
-    }
+    let existing: HashSet<&str> = slots.iter().map(String::as_str).collect();
+    let missing: Vec<String> = ids
+        .iter()
+        .filter(|id| !existing.contains(id.as_str()))
+        .cloned()
+        .collect();
+    slots.extend(missing);
 }
 
 /// 清掉全部卡输入焦点（面板输入取得焦点 / 画布空白按压时调用）。
