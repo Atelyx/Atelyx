@@ -607,10 +607,10 @@ fn restore(app: &mut App, seq: u64) -> Task<Message> {
             app.history_restore_pending = true;
             app.history_restore(kind, version)
         }
-        // 画布无会话链：快照经写盘队列直写仓库，回执通知
+        // 画布无会话链：先走统一 flush 收口在途编辑，再经写盘队列直写仓库
         HistoryKind::Canvas => {
             app.dismiss_popup();
-            app.canvas_history_restore(file, version)
+            app.gate(crate::PendingAfterFlush::CanvasRestore { rel: file, version })
         }
     }
 }

@@ -1043,6 +1043,8 @@ enum PendingAfterFlush {
     CloseMain(window::Id),
     /// 关文件留标签（kind = "note" / "table" / "canvas"，只关对应面）。
     CloseFileTab(String),
+    /// 画布历史回滚：挂起输入先落盘，再把快照写回真源（空间模式先写服务端再记史）。
+    CanvasRestore { rel: String, version: atelyx_core::history::HistoryVersion },
     /// 仓库内笔记链接（已解码；能进 flush 的只有 Path/Wiki/Create 形态，外链直接打开）。
     OpenLink(String),
     Delete { rel: String, is_dir: bool },
@@ -1170,7 +1172,8 @@ pub enum SpaceMsg {
     ForceDeleteFolder { gen: u64, rel: String },
     HistoryRecorded { err: Option<String> },
     /// 画布回滚回执（成功且该画布仍打开则按服务端事实重读）。
-    CanvasRestored { gen: u64, rel: String, result: Result<(), String> },
+    /// Ok(Some(msg)) = 正文已写回但历史记版失败（只警告，不判回滚失败）。
+    CanvasRestored { gen: u64, rel: String, result: Result<Option<String>, String> },
     /// 设备会话列表落地（设置页「多人协作」）。
     DevicesLoaded {
         result: Result<Vec<atelyx_core::space_client::DeviceEntry>, atelyx_core::space_client::SpaceError>,
@@ -5006,6 +5009,9 @@ impl App {
                 chat_actions::flush_sessions().chain(window::close(id))
             }
             PendingAfterFlush::CloseFileTab(kind) => self.close_file_tab(&kind),
+            PendingAfterFlush::CanvasRestore { rel, version } => {
+                self.canvas_history_restore(rel, version)
+            }
             PendingAfterFlush::OpenLink(href) => self.open_link_inner(href),
             PendingAfterFlush::Delete { rel, is_dir } => {
                 self.dismiss_popup();

@@ -1018,7 +1018,10 @@ pub fn handle(app: &mut App, msg: SpaceMsg) -> Task<Message> {
                     app.repo_history = None;
                     Task::none()
                 }
-                Ok(()) => {
+                Ok(history_error) => {
+                    if let Some(e) = history_error {
+                        app.notify(NoticeLevel::Warning, e);
+                    }
                     app.notify(NoticeLevel::Success, "已回滚");
                     app.repo_history = None;
                     // 快照直写不经会话链：仍打开的画布须按服务端事实重读，否则界面与 `saved` 基线停在回滚前
@@ -2435,10 +2438,13 @@ pub fn space_restore_canvas(app: &mut App, rel: String, content: String) -> Task
                 max_versions: None,
                 byte_budget: Some(atelyx_core::history::HISTORY_BYTE_BUDGET),
             };
-            client
+            // 正文已写回：历史是尽力而为的侧车，记版失败不得改判回滚结果
+            let history_error = client
                 .history_record(&space_id, &req)
                 .await
-                .map_err(|e| format!("历史版本记录失败：{e}"))
+                .err()
+                .map(|e| format!("历史版本记录失败：{e}"));
+            Ok(history_error)
         },
         move |result| Message::Space(SpaceMsg::CanvasRestored { gen, rel: rel_cb, result }),
     )
