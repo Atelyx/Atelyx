@@ -46,6 +46,14 @@ const GROUP_RADIUS: f32 = 14.0;
 pub(crate) const CARD_HEADER_H: f32 = 30.0;
 /// 卡内边距（世界坐标）。
 const CARD_PAD: f32 = 10.0;
+/// 卡片屏幕宽低于该值时只画卡头与居中图标（正文与输入不建）。
+const NARROW_CARD_PX: f32 = 120.0;
+
+/// 是否走窄卡形态（屏幕像素判断，与缩放无关）。
+fn header_only(sw: f32) -> bool {
+    sw <= NARROW_CARD_PX
+}
+
 /// 对话卡头控制段（流式标注 + 压缩）额定宽（屏幕像素 @ zoom 1）：
 /// 标题省略与头控制浮层锚定共用 [`header_ctrl_reserve`] 一份口径。
 const HEADER_CTRL_W: f32 = 64.0;
@@ -557,6 +565,8 @@ pub enum RefContent {
     Table { summary: String, body: String },
     /// 二进制附件（非文本、非图片，只显示占位说明）。
     Binary,
+    /// 图片字节无法解码（损坏 / 不支持的格式）：失败占位，不冒充"加载中"。
+    BrokenImage,
     /// 引用缺失（外部删除 / 读取失败）。
     Missing,
 }
@@ -1618,8 +1628,8 @@ fn draw_card(
         },
     );
 
-    // 头部条
-    let head_h = CARD_HEADER_H * z;
+    // 头部条（异常小高度按卡高钳制，标题不得画到卡外）
+    let head_h = (CARD_HEADER_H * z).min(sh);
     frame.fill(&rounded_rect(sx, sy, sw, head_h, CARD_RADIUS * z), pal::BG_TERTIARY);
     // 圆角矩形下半覆盖为直角（头底边平直）
     frame.fill(
@@ -1648,16 +1658,29 @@ fn draw_card(
         shaping: Shaping::Advanced,
     });
 
-    // 正文区（对话卡消息流与文本卡正文由原生浮层渲染，见 card_overlays）
-    let body_y = sy + head_h;
-    let body = Size::new(sw - CARD_PAD * 2.0 * z, sh - head_h - CARD_PAD * 2.0 * z);
-    draw_card_body(
-        session,
-        view,
-        frame,
-        n,
-        Rectangle::new(Point::new(sx + CARD_PAD * z, body_y + CARD_PAD * z), body.max(Size::ZERO)),
-    );
+    if header_only(sw) {
+        // 窄卡：只画卡头与居中图标，正文 / 输入一并省掉（浮层侧同口径收敛）
+        let icon = (18.0 * z).min(sw * 0.5).max(8.0);
+        draw_icon_glyph(
+            frame,
+            icon_name,
+            sx + (sw - icon) / 2.0,
+            sy + (sh - icon) / 2.0,
+            icon,
+            pal::TEXT_MUTED,
+        );
+    } else {
+        // 正文区（对话卡消息流与文本卡正文由原生浮层渲染，见 card_overlays）
+        let body_y = sy + head_h;
+        let body = Size::new(sw - CARD_PAD * 2.0 * z, (sh - head_h - CARD_PAD * 2.0 * z).max(0.0));
+        draw_card_body(
+            session,
+            view,
+            frame,
+            n,
+            Rectangle::new(Point::new(sx + CARD_PAD * z, body_y + CARD_PAD * z), body),
+        );
+    }
 
     // 选中 resize 把手（右下角，仅单选）
     if resize_handle {
@@ -1740,6 +1763,7 @@ fn draw_card_body(
                 Some(Some(RefContent::Missing)) => ("引用文件缺失", pal::DANGER),
                 Some(Some(RefContent::Binary)) => ("二进制附件", pal::TEXT_MUTED),
                 Some(Some(RefContent::Image { .. } | RefContent::Table { .. })) => ("引用内容非文本", pal::TEXT_MUTED),
+                Some(Some(RefContent::BrokenImage)) => ("图片无法解码", pal::DANGER),
                 Some(None) => ("加载中…", pal::TEXT_MUTED),
                 _ => ("（空）", pal::TEXT_MUTED),
             };
@@ -1763,6 +1787,9 @@ fn draw_card_body(
                 }
                 Some(RefContent::Image { .. }) if kind == "image" => {
                     draw_hint(frame, "图片加载中…", area, size, pal::TEXT_MUTED)
+                }
+                Some(RefContent::BrokenImage) => {
+                    draw_hint(frame, "图片无法解码", area, size, pal::DANGER)
                 }
                 Some(RefContent::Text(body)) => draw_preview_lines(frame, body, area, size),
                 Some(RefContent::Binary) => draw_hint(frame, "二进制附件", area, size, pal::TEXT_MUTED),
@@ -1790,6 +1817,10 @@ fn draw_card_body(
 
 /// 预览文本：按估宽折行 + 超出区域截断。
 fn draw_preview_lines(frame: &mut Frame, body: &str, area: Rectangle, size: f32) {
+    // 高度不足以落一行时不画：异常小的卡不得把正文画到卡外
+    if area.width <= 0.0 || area.height < size * 1.45 {
+        return;
+    }
     if body.trim().is_empty() {
         draw_hint(frame, "（空）", area, size, pal::TEXT_MUTED);
         return;
@@ -1851,6 +1882,9 @@ fn wrap_line(line: &str, max_w: f32, size: f32) -> Vec<String> {
 }
 
 fn draw_hint(frame: &mut Frame, hint: &str, area: Rectangle, size: f32, color: Color) {
+    if area.width <= 0.0 || area.height < size * 1.4 {
+        return;
+    }
     frame.fill_text(CanvasText {
         content: hint.to_string(),
         position: Point::new(area.x, area.y),
@@ -2046,7 +2080,7 @@ fn card_overlays<'a>(
         // 动态增删层会让后续卡的滚动位置串到别的卡上（收起分组的隐藏成员同此槽位处理）
         let hidden = hidden_by_collapsed(&session.data.nodes, &n.id) && !session.is_dragged(&n.id);
         let offscreen = hidden || sx + sw < 0.0 || sy + sh < 0.0 || sx > vw || sy > vh;
-        let inner: Option<Element<'a>> = if offscreen {
+        let inner: Option<Element<'a>> = if offscreen || header_only(sw) {
             None
         } else {
             match n.node_type.as_str() {
@@ -2825,6 +2859,7 @@ pub fn props_panel(app: &App) -> iced::Element<'static, Message> {
                 let state = match session.view.refs.get(f) {
                     Some(RefContent::Text(_)) | Some(RefContent::Image { .. }) | Some(RefContent::Table { .. }) => "已加载",
                     Some(RefContent::Binary) => "二进制",
+                    Some(RefContent::BrokenImage) => "无法解码",
                     Some(RefContent::Missing) => "缺失",
                     _ => "加载中",
                 };
@@ -3119,6 +3154,14 @@ mod tests {
             hit_link_handle(&c, Some("conv"), &[], 1.0, (300.0, 50.0)),
             None
         );
+    }
+
+    #[test]
+    fn narrow_card_switches_to_header_only() {
+        assert!(header_only(NARROW_CARD_PX));
+        assert!(header_only(60.0));
+        assert!(!header_only(NARROW_CARD_PX + 0.5));
+        assert!(!header_only(320.0));
     }
 
     #[test]

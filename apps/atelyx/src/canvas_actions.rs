@@ -77,16 +77,16 @@ fn on_loaded(app: &mut App, gen: u64, file: String, result: Result<LoadOut, Stri
             for (path, raw) in out.refs {
                 let content = match raw {
                     RefRaw::Text(t) => RefContent::Text(t),
-                    RefRaw::Image { bytes, width, height } => {
+                    RefRaw::Image { bytes, width, height } if width > 0 && height > 0 => {
                         let handle = iced::widget::image::Handle::from_bytes(bytes);
                         // 消息流附件缩略图与笔记图片共用句柄缓存（键 = 仓库相对路径）
                         app.note_images.insert(path.clone(), handle.clone());
                         app.note_image_epoch = app.note_image_epoch.wrapping_add(1);
-                        if width > 0 && height > 0 {
-                            app.note_image_sizes.insert(path.clone(), (width, height));
-                        }
+                        app.note_image_sizes.insert(path.clone(), (width, height));
                         RefContent::Image { handle, width, height }
                     }
+                    // 解码失败：失败占位，不把损坏图片当"加载中"永久转圈
+                    RefRaw::Image { .. } => RefContent::BrokenImage,
                     RefRaw::Table { summary, body } => RefContent::Table { summary, body },
                     RefRaw::Binary => RefContent::Binary,
                     RefRaw::Missing => RefContent::Missing,
@@ -298,15 +298,14 @@ fn on_refs_loaded(app: &mut App, gen: u64, refs: HashMap<String, RefRaw>) -> Tas
     for (path, raw) in refs {
         let content = match raw {
             RefRaw::Text(t) => RefContent::Text(t),
-            RefRaw::Image { bytes, width, height } => {
+            RefRaw::Image { bytes, width, height } if width > 0 && height > 0 => {
                 let handle = iced::widget::image::Handle::from_bytes(bytes);
                 app.note_images.insert(path.clone(), handle.clone());
                 app.note_image_epoch = app.note_image_epoch.wrapping_add(1);
-                if width > 0 && height > 0 {
-                    app.note_image_sizes.insert(path.clone(), (width, height));
-                }
+                app.note_image_sizes.insert(path.clone(), (width, height));
                 RefContent::Image { handle, width, height }
             }
+            RefRaw::Image { .. } => RefContent::BrokenImage,
             RefRaw::Table { summary, body } => RefContent::Table { summary, body },
             RefRaw::Binary => RefContent::Binary,
             RefRaw::Missing => RefContent::Missing,
