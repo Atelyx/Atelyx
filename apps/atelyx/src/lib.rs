@@ -294,6 +294,9 @@ const FRAME_TICK: std::time::Duration = std::time::Duration::from_millis(8);
 /// 自动保存防抖：最近一次内容变更后停止输入该时长才写回（尾沿 debounce，单定时器链续排）。
 pub(crate) const AUTOSAVE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(500);
 
+/// 标签候选词表的最小刷新间隔：反复点开/关闭候选不重复扫仓库（保存链不刷，只在开候选时刷）。
+pub(crate) const TAG_VOCAB_REFRESH_GAP: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// 应用数据目录（bundle identifier = com.atelyx.desktop）；ui-state.json 与 global.json 同放此处。
 fn app_data_dir() -> Option<PathBuf> {
     #[cfg(windows)]
@@ -1557,8 +1560,10 @@ pub struct App {
     panel_tab_scroll_x: HashMap<String, f32>,
     /// 反链（当前笔记；文件载入与改名/移动后刷新）。
     pub backlinks: Vec<vault::BacklinkRow>,
-    /// 全仓库标签词汇表（tags 候选；打开仓库与载入笔记后刷新）。
+    /// 全仓库标签词汇表（tags 候选；打开仓库、文件变更与打开标签候选时刷新）。
     pub tag_vocab: Vec<vault::TagRow>,
+    /// 上次启动标签词表刷新的时刻（候选开启的合并窗口，见 TAG_VOCAB_REFRESH_GAP）。
+    pub(crate) tag_vocab_at: Option<Instant>,
     /// 全仓库文件清单（双链候选与搜索面板数据源；树序，全部文件类型）。
     pub note_files: Vec<(String, String)>,
     /// 双链候选开启态（None = 关闭；from = 触发符之后的正文起点）。
@@ -1863,6 +1868,7 @@ impl App {
                 panel_tab_scroll_x: HashMap::new(),
                 backlinks: Vec::new(),
                 tag_vocab: Vec::new(),
+                tag_vocab_at: None,
                 note_files: Vec::new(),
                 wiki_picker: None,
                 wiki_dismissed_from: None,

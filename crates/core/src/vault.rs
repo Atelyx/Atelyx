@@ -8,7 +8,6 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use nanoid::nanoid;
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 /// 磁盘文件缓存条目：mtime（纳秒）+ 长度作失效指纹——外部编辑/同步盘改动命中指纹变化，
@@ -2942,7 +2941,7 @@ fn file_stamp(path: &Path) -> Option<FileStamp> {
 // - 正文提取跳过 frontmatter/围栏代码（含 ≤3 空格缩进）/缩进代码（≥4 空格行首）/行内代码；
 //   识别规则：渲染层额外跳过链接内文本（链接内标签仅入索引不渲染，视觉从简）。
 
-/// 标签行：标签名 + 全仓库出现次数（scan_vault_tags 返回，候选按 count 降序）。
+/// 标签行：标签名 + 含该标签的笔记数（聚合结果按 count 降序，候选按常用优先）。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TagRow {
@@ -2985,7 +2984,7 @@ pub fn refresh_tag_index(
     Ok(())
 }
 
-/// 聚合标签计数：count 降序 + 名称升序，上限 1000（候选建议按常用优先）。
+/// 聚合标签计数：count 降序 + 名称升序；不截断——候选清单自带滚动，键入过滤优先于频次。
 pub fn aggregate_tag_counts(index: &TagIndex) -> Vec<TagRow> {
     let mut counts: HashMap<&str, u32> = HashMap::new();
     for set in index.tags.values() {
@@ -2998,7 +2997,6 @@ pub fn aggregate_tag_counts(index: &TagIndex) -> Vec<TagRow> {
         .map(|(tag, count)| TagRow { tag: tag.to_string(), count })
         .collect();
     rows.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.tag.cmp(&b.tag)));
-    rows.truncate(1000);
     rows
 }
 
@@ -3094,61 +3092,94 @@ fn extract_note_tags(content: &str) -> HashSet<String> {
     tags
 }
 
-/// 解析 frontmatter 块的 `tags` 键：`tags: [a, b]` 内联数组、`tags:\n  - a` 块列表、`tags: foo` 标量，
-/// 去引号去空。块列表项正则要求 `-` 后跟空白（防 `---` 文档结束符被当成 `-` 列表项）。
+/// 解析 frontmatter 块的 `tags` 键：`tags: [a, b]`（可跨行）、`tags:\n  - a` 块列表、
+/// `tags: foo` 标量。只认顶层键——整块映射可统一缩进，嵌套键与 block scalar 文本里的 `tags:` 不算；
+/// 值位的 ` #` 行内注释按 YAML 口径剥离，未闭合的流式数组整体忽略（不造半截标签）。
 fn parse_fm_tags(fm: &str, tags: &mut HashSet<String>) {
-    static INLINE_RE: OnceLock<Regex> = OnceLock::new();
-    static KEY_LINE_RE: OnceLock<Regex> = OnceLock::new();
-    static ITEM_RE: OnceLock<Regex> = OnceLock::new();
-    static SCALAR_RE: OnceLock<Regex> = OnceLock::new();
-    let inline = INLINE_RE.get_or_init(|| Regex::new(r"(?m)^\s*tags\s*:\s*\[([^\]]*)\]").unwrap());
-    let key_line = KEY_LINE_RE.get_or_init(|| Regex::new(r"(?m)^\s*tags\s*:\s*$").unwrap());
-    let item = ITEM_RE.get_or_init(|| Regex::new(r"^\s*-\s+(.+?)\s*$").unwrap());
-    let scalar = SCALAR_RE.get_or_init(|| Regex::new(r"(?m)^\s*tags\s*:\s*(.+?)\s*$").unwrap());
-    // 内联数组优先（`tags: [a, b]`；括号捕获天然排除尾部注释）
-    if let Some(caps) = inline.captures(fm) {
-        if let Some(group) = caps.get(1) {
-            for raw in group.as_str().split(',') {
-                let t = clean_tag_value(raw);
-                if !t.is_empty() {
-                    tags.insert(t.to_string());
-                }
+    // 顶层键缩进：YAML 允许整块映射统一缩进，嵌套键更深——按最小缩进判定顶层
+    let root = root_indent(fm);
+    let mut lines = fm.lines();
+    while let Some(line) = lines.next() {
+        if line.len() - line.trim_start_matches(' ').len() != root {
+            continue;
+        }
+        let Some(rest) = line[root..].strip_prefix("tags").map(str::trim_start) else { continue };
+        let Some(value) = rest.strip_prefix(':') else { continue };
+        let value = strip_comment(value).trim();
+        // 值位为空（含只有注释）= 块列表；`[` 开头 = 流式数组；其余按标量处理
+        if value.is_empty() {
+            collect_block_list(&mut lines, tags);
+        } else if let Some(flow) = value.strip_prefix('[') {
+            let Some(flow) = collect_flow(flow, &mut lines) else { return };
+            for raw in flow.split(',') {
+                insert_tag(raw, tags);
             }
+        } else {
+            insert_tag(value, tags);
         }
         return;
-    }
-    // 块列表：`tags:` 行后连续 `- x` 行（空行跳过，首个非空非列表行结束该块）
-    if let Some(m) = key_line.find(fm) {
-        for line in fm[m.end()..].lines() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            match item.captures(line) {
-                Some(caps) => {
-                    let t = clean_tag_value(caps.get(1).unwrap().as_str());
-                    if !t.is_empty() {
-                        tags.insert(t.to_string());
-                    }
-                }
-                None => break,
-            }
-        }
-        return;
-    }
-    // 标量（`tags: foo`；剥离 ` # 注释`）
-    if let Some(caps) = scalar.captures(fm) {
-        if let Some(group) = caps.get(1) {
-            let t = clean_tag_value(group.as_str());
-            if !t.is_empty() {
-                tags.insert(t.to_string());
-            }
-        }
     }
 }
 
-/// 剥离 YAML 行内注释（` # ...`，`foo#bar` 无空格前缀不算注释）与引号，返回干净标签值。
-fn clean_tag_value(raw: &str) -> &str {
-    raw.split(" #").next().unwrap_or(raw).trim().trim_matches(['"', '\''])
+/// 顶层键的缩进：非空、非注释、非 `---` 行的最小前导空格数（整块映射可统一缩进）。
+fn root_indent(fm: &str) -> usize {
+    fm.lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            !trimmed.is_empty() && !trimmed.starts_with('#') && !trimmed.starts_with("---")
+        })
+        .map(|line| line.len() - line.trim_start_matches(' ').len())
+        .min()
+        .unwrap_or(0)
+}
+
+/// 剥离 YAML 行内注释：`#` 前须有空白（`foo#bar` 不算注释），返回 `#` 之前的部分。
+fn strip_comment(raw: &str) -> &str {
+    let bytes = raw.as_bytes();
+    for i in 1..bytes.len() {
+        if bytes[i] == b'#' && matches!(bytes[i - 1], b' ' | b'\t') {
+            return &raw[..i];
+        }
+    }
+    raw
+}
+
+/// 块列表：`tags:` 之后连续的 `- 项` 行（空行跳过，首个非列表行结束；`---` 结束符不算项）。
+fn collect_block_list<'a>(lines: &mut impl Iterator<Item = &'a str>, tags: &mut HashSet<String>) {
+    for line in lines {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Some(rest) = line.trim_start().strip_prefix('-') else { break };
+        if !rest.starts_with([' ', '\t']) {
+            break;
+        }
+        insert_tag(rest, tags);
+    }
+}
+
+/// 收集流式数组（首行 `[` 之后到闭合 `]` 之前，可跨行）；未闭合返回 None。
+/// 跨行时按行补分隔逗号：合法 YAML 本就要求逗号，缺失时宁可拆开也不拼成一个标签。
+fn collect_flow<'a>(first: &'a str, lines: &mut impl Iterator<Item = &'a str>) -> Option<String> {
+    let mut text = String::new();
+    let mut rest = first;
+    loop {
+        if let Some(end) = rest.find(']') {
+            text.push_str(&rest[..end]);
+            return Some(text);
+        }
+        text.push_str(strip_comment(rest));
+        text.push(',');
+        rest = lines.next()?;
+    }
+}
+
+/// 清洗并收下一个标签值：剥行内注释、引号与首尾空白；空值与 `#` 开头的纯注释段忽略。
+fn insert_tag(raw: &str, tags: &mut HashSet<String>) {
+    let tag = strip_comment(raw).trim().trim_matches(['"', '\'']).trim();
+    if !tag.is_empty() && !tag.starts_with('#') {
+        tags.insert(tag.to_string());
+    }
 }
 
 /// 从正文（已剥 frontmatter）提取内联 `#标签`：跳过围栏代码（含 ≤3 空格缩进）/缩进代码/行内代码；
@@ -4399,6 +4430,66 @@ mod tag_index_tests {
     fn url_fragment_not_tag() {
         // URL 片段 `#` 前是 `/`，不是标签
         assert_tags("见 https://x.com/#faq\n", &[]);
+    }
+
+    #[test]
+    fn frontmatter_comment_only_value_is_empty() {
+        // `tags: # 备注` 只有注释：既不是标量标签，也不造出 `# 备注`
+        assert_tags("---\ntags: # 备注\n---\n", &[]);
+    }
+
+    #[test]
+    fn frontmatter_comment_then_block_list() {
+        // 值位只有注释时后续 `- 项` 仍是块列表
+        assert_tags("---\ntags: # 备注\n  - a\n  - b\n---\n", &["a", "b"]);
+    }
+
+    #[test]
+    fn frontmatter_indented_root_mapping() {
+        // YAML 允许整块映射统一缩进：缩进与顶层一致时仍是顶层 `tags`
+        assert_tags("---\n  tags: [a]\n---\n", &["a"]);
+        assert_tags("---\n  tags:\n    - a\n---\n", &["a"]);
+    }
+
+    #[test]
+    fn frontmatter_nested_tags_ignored() {
+        // 只认列首顶层键：缩进嵌套键与 block scalar 文本里的 `tags:` 都不算
+        assert_tags("---\nmeta:\n  tags: [x]\n---\n", &[]);
+        assert_tags("---\nnote: |\n  tags: [y]\n---\n", &[]);
+    }
+
+    #[test]
+    fn frontmatter_unclosed_flow_ignored() {
+        // 未闭合的流式数组（YAML 非法）整体忽略，不留下 `[a, b` 这类半截标签
+        assert_tags("---\ntags: [a, b\n---\n", &[]);
+    }
+
+    #[test]
+    fn frontmatter_multiline_flow_array() {
+        assert_tags("---\ntags: [\n  a, # 一\n  b\n]\n---\n", &["a", "b"]);
+    }
+
+    #[test]
+    fn aggregate_keeps_every_tag_sorted_by_count() {
+        let mut index = TagIndex::default();
+        for i in 0..1004 {
+            let mut set = HashSet::new();
+            set.insert(format!("t{i:04}"));
+            index.tags.insert(format!("f{i}.md"), set);
+        }
+        let mut hot = HashSet::new();
+        hot.insert("hot".to_string());
+        hot.insert("t0000".to_string());
+        index.tags.insert("a.md".to_string(), hot);
+        index.tags.insert("b.md".to_string(), HashSet::from(["hot".to_string()]));
+        let rows = aggregate_tag_counts(&index);
+        assert_eq!(rows.len(), 1005, "候选池不截断");
+        assert_eq!(rows[0].tag, "hot", "按含该标签的笔记数降序");
+        assert_eq!(rows[0].count, 2);
+        let rest: Vec<&str> = rows[1..].iter().map(|r| r.tag.as_str()).collect();
+        let mut sorted = rest.clone();
+        sorted.sort_unstable();
+        assert_eq!(rest, sorted, "同频按名称升序");
     }
 }
 

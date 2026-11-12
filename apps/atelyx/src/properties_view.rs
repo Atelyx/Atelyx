@@ -51,6 +51,15 @@ pub enum Slot {
     NewItem(usize),
 }
 
+impl Slot {
+    /// 槽所属的属性行序号（键 / 值 / 数组项 / 新项都在同一行）。
+    pub(crate) fn row(&self) -> usize {
+        match self {
+            Slot::Key(i) | Slot::Value(i) | Slot::Item(i, _) | Slot::NewItem(i) => *i,
+        }
+    }
+}
+
 /// 行内动作的行身份：渲染时的键名 + （数组项）下标与文本。
 /// 提交式失焦可能删行 / 拆项使下标漂移，动作先按身份重定位再执行，找不到即放弃。
 #[derive(Clone, Debug, PartialEq)]
@@ -805,6 +814,23 @@ impl App {
             .chain(self.scroll_suggest(0.0))
     }
 
+    /// 打开标签候选前刷新全仓词表：保存链不刷（自动保存频繁），只在真要选标签时刷，
+    /// 并用最小间隔合并反复开合（见 TAG_VOCAB_REFRESH_GAP）。
+    fn refresh_tag_vocab_for_slot(&mut self) -> Task<Message> {
+        let Some(slot) = self.props.editing.as_ref() else { return Task::none() };
+        let is_tag = self
+            .props_data()
+            .is_some_and(|data| data.get(slot.row()).is_some_and(|(key, _)| is_badge_key(key)));
+        if !is_tag {
+            return Task::none();
+        }
+        if self.tag_vocab_at.is_some_and(|at| at.elapsed() < crate::TAG_VOCAB_REFRESH_GAP) {
+            return Task::none();
+        }
+        self.tag_vocab_at = Some(std::time::Instant::now());
+        self.refresh_tag_vocab()
+    }
+
     fn reset_suggest(&mut self) {
         self.props.suggest = Suggest::default();
     }
@@ -886,7 +912,7 @@ impl App {
                 self.props.draft = self.slot_text();
                 self.props.duplicate = None;
                 self.reset_suggest();
-                self.begin_slot_edit()
+                self.begin_slot_edit().chain(self.refresh_tag_vocab_for_slot())
             }
             PropsMsg::Draft(s) => {
                 if self.props.editing.is_some() {
@@ -993,7 +1019,7 @@ impl App {
                 self.props.draft.clear();
                 self.props.duplicate = None;
                 self.reset_suggest();
-                self.begin_slot_edit()
+                self.begin_slot_edit().chain(self.refresh_tag_vocab_for_slot())
             }
             PropsMsg::StartAdd => {
                 // 入口可能在弹层里（笔记面板菜单）：先收掉弹层再动手。
