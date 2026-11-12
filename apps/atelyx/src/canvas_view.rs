@@ -1177,6 +1177,14 @@ fn draw_grid(view: &View, frame: &mut Frame, size: Size) {
 }
 
 /// 内容层：分组 → 连线 → 卡（数据序，后画者在上）→ 远端在场 → 框选与参考线。
+/// 世界矩形是否与视口相交（绘制裁剪；外扩 8px 容纳描边与箭头）。
+fn world_rect_visible(view: &View, vw: f32, vh: f32, x: f64, y: f64, w: f64, h: f64) -> bool {
+    let pad = 8.0 / view.zoom.max(0.1) as f64;
+    let (wx0, wy0) = view.world(0.0, 0.0);
+    let (wx1, wy1) = view.world(vw, vh);
+    x + w >= wx0 - pad && x <= wx1 + pad && y + h >= wy0 - pad && y <= wy1 + pad
+}
+
 fn draw_world(
     session: &CanvasSession,
     view: &View,
@@ -1187,18 +1195,28 @@ fn draw_world(
     let (frame_width, frame_height) = (size.width, size.height);
     let sel: HashSet<&str> = session.view.selection.iter().map(|s| s.as_str()).collect();
 
-    // 分组背景（组内卡之上无内容，先画沉底）
+    // 分组背景（组内卡之上无内容，先画沉底；视口外整组跳过）
     for n in &session.data.nodes {
         if n.node_type != "group" {
             continue;
         }
         let (w, h) = session.card_size(n);
+        if !world_rect_visible(view, frame_width, frame_height, n.x, n.y, w, h) {
+            continue;
+        }
         draw_group(frame, view, n, w, h, sel.contains(n.id.as_str()));
     }
 
-    // 连线（组内成员互连的边随收起隐藏）
+    // 连线（组内成员互连的边随收起隐藏；两端包围盒在视口外跳过）
     for e in &session.data.edges {
         if edge_hidden(&session.data, e) {
+            continue;
+        }
+        let Some(((x0, y0), (x1, y1))) = edge_endpoints(&session.data, e) else {
+            continue;
+        };
+        let (ex, ey) = (x0.min(x1), y0.min(y1));
+        if !world_rect_visible(view, frame_width, frame_height, ex, ey, (x1 - x0).abs(), (y1 - y0).abs()) {
             continue;
         }
         draw_edge(session, view, frame, e);
@@ -1212,6 +1230,9 @@ fn draw_world(
             continue;
         }
         let (w, h) = session.card_size(n);
+        if !world_rect_visible(view, frame_width, frame_height, n.x, n.y, w, h) {
+            continue;
+        }
         let link_handle = session.view.hover.as_deref() == Some(n.id.as_str())
             || sel.contains(n.id.as_str());
         // resize 把手仅单选卡（多选不提供批量缩放）
@@ -3177,7 +3198,7 @@ mod tests {
         let mut src = node("src", "text", 0.0, 0.0, Some(100.0), Some(100.0));
         src.data = json!({ "file": "笔记/a.md" });
         let mut conv = node("conv", "conversation", 300.0, 0.0, Some(200.0), Some(200.0));
-        conv.data = json!({ "messages": [ { "id": "m1", "role": "assistant", "content": "", "steps": [ { "kind": "tool", "run": { "id": "t1", "name": "read_file", "args": { "path": "笔记/a.md" } } } ] } ] });
+        conv.data = json!({ "messages": [ { "id": "m1", "role": "assistant", "content": "", "steps": [ { "kind": "tool", "run": { "id": "t1", "name": "read_file", "status": "done", "args": { "path": "笔记/a.md" } } } ] } ] });
         let c2 = canvas(vec![src, conv], vec![edge("e", "src", "conv")]);
         assert_eq!(role(&c2), EdgeRole::Reference { consumed: true });
         // 资产 ↔ 资产的有向边不冒充「产出」语义
@@ -3229,6 +3250,18 @@ mod tests {
             hit_link_handle(&c, Some("conv"), &[], 1.0, (300.0, 50.0)),
             None
         );
+    }
+
+    #[test]
+    fn world_rect_culling_keeps_edge_overlap() {
+        let view = View { zoom: 1.0, pan: (0.0, 0.0) };
+        // 视口 800×600：完全在外的不画
+        assert!(!world_rect_visible(&view, 800.0, 600.0, 1000.0, 700.0, 100.0, 100.0));
+        // 只压边缘（含描边余量）仍要画
+        assert!(world_rect_visible(&view, 800.0, 600.0, 795.0, 595.0, 100.0, 100.0));
+        assert!(world_rect_visible(&view, 800.0, 600.0, -50.0, -50.0, 100.0, 100.0));
+        // 视口内正常绘制
+        assert!(world_rect_visible(&view, 800.0, 600.0, 100.0, 100.0, 200.0, 200.0));
     }
 
     #[test]
