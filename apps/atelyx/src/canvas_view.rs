@@ -2712,9 +2712,14 @@ impl canvas::Program<Message> for Minimap<'_> {
 /// 小地图浮层：右下角固定尺寸，容器自带底色与描边。
 /// 外层对齐容器填满视口但只在内容矩形产生交互（小地图部件自身区域化 interaction）。
 fn minimap_layer<'a>(session: &'a CanvasSession, view: View, viewport: Size) -> Element<'a> {
-    let inner = container(Canvas::new(Minimap { session, view, viewport }))
-        .width(Length::Fixed(MINIMAP_W))
-        .height(Length::Fixed(MINIMAP_H))
+    // iced Canvas 缺省尺寸是 100×100：必须显式定尺寸，否则自绘面与 MINIMAP_W/H 映射不一致
+    let inner = container(
+        Canvas::new(Minimap { session, view, viewport })
+            .width(Length::Fixed(MINIMAP_W))
+            .height(Length::Fixed(MINIMAP_H)),
+    )
+    .width(Length::Fixed(MINIMAP_W))
+    .height(Length::Fixed(MINIMAP_H))
         .style(|_| container::Style {
             background: Some(pal::BG_OVERLAY.into()),
             border: iced::border::Border {
