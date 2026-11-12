@@ -7417,6 +7417,14 @@ impl App {
         }
     }
 
+    /// 画布命令让位给已聚焦的文本输入面（面板输入 / 笔记编辑面 / 表格单元格）。
+    /// 画布卡输入由 `canvas_actions::key_ready` 自判，此处覆盖其余输入面。
+    fn canvas_keys_yield(&self) -> bool {
+        self.edit.focused
+            || self.chat.input.focused
+            || self.table.as_ref().is_some_and(|t| t.view.focused)
+    }
+
     /// 命令候选键分派：录制态先吃按键；注册表按序先到先得——Note 域让位给
     /// 编辑面部件内的绑定表（部件持焦点即已消费本键，未持焦点则放行后命者），
     /// Table 域在表格持焦点时转发既有 TableMsg。注册表外的 Ctrl+S（保存）与
@@ -7444,7 +7452,7 @@ impl App {
                     }
                 }
                 commands::Scope::Canvas => {
-                    if canvas_actions::key_ready(self) {
+                    if canvas_actions::key_ready(self) && !self.canvas_keys_yield() {
                         if let Some(msg) = canvas_actions::canvas_key_msg(*id) {
                             return self.handle(Message::Canvas(msg));
                         }
@@ -7467,6 +7475,7 @@ impl App {
                 return self.handle(Message::Table(tv::TableMsg::Redo));
             }
             if canvas_actions::key_ready(self)
+                && !self.canvas_keys_yield()
                 && commands::redo_alias_active(&self.global.command_shortcuts, commands::Scope::Canvas)
             {
                 return self.handle(Message::Canvas(crate::canvas_view::CanvasMsg::Key(
@@ -7491,6 +7500,7 @@ impl App {
             }
             if clear_binding(commands::CommandId::CanvasClear).as_deref() == Some("delete")
                 && canvas_actions::key_ready(self)
+                && !self.canvas_keys_yield()
             {
                 return self.handle(Message::Canvas(crate::canvas_view::CanvasMsg::Key(
                     crate::canvas_view::CanvasKey::DeleteSelection,
