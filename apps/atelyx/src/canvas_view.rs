@@ -787,8 +787,14 @@ fn reference_consumed(
     })
 }
 
-/// 消息的工具步里是否实际读取过该文件（`read_file` 的 `args.path` 命中）。
+/// 卡可消费的读取工具（与产出落卡同一口径）。
+const READ_TOOLS: [&str; 4] = ["read_file", "read_history", "table_read", "canvas_read"];
+
+/// 消息的工具步里是否实际读取过该文件：只认成功步，路径按仓库相对路径归一后比较。
 fn message_read_file(message: &Value, file: &str) -> bool {
+    let Ok(target) = atelyx_core::vault::normalize_relative_path(file) else {
+        return false;
+    };
     message
         .get("steps")
         .and_then(Value::as_array)
@@ -797,12 +803,18 @@ fn message_read_file(message: &Value, file: &str) -> bool {
         .filter(|s| s.get("kind").and_then(Value::as_str) == Some("tool"))
         .any(|s| {
             let run = s.get("run");
-            run.and_then(|r| r.get("name")).and_then(Value::as_str) == Some("read_file")
-                && run
-                    .and_then(|r| r.get("args"))
-                    .and_then(|a| a.get("path"))
-                    .and_then(Value::as_str)
-                    == Some(file)
+            let name = run.and_then(|r| r.get("name")).and_then(Value::as_str).unwrap_or("");
+            if !READ_TOOLS.contains(&name) {
+                return false;
+            }
+            if run.and_then(|r| r.get("status")).and_then(Value::as_str) != Some("done") {
+                return false;
+            }
+            run.and_then(|r| r.get("args"))
+                .and_then(|a| a.get("path"))
+                .and_then(Value::as_str)
+                .and_then(|p| atelyx_core::vault::normalize_relative_path(p).ok())
+                .is_some_and(|p| p == target)
         })
 }
 
@@ -3094,6 +3106,30 @@ mod tests {
             vec![e2],
         );
         assert_eq!(role(&c3), EdgeRole::Association);
+    }
+
+    #[test]
+    fn reads_of_all_tool_kinds_count_as_consumed() {
+        let mut src = node("src", "text", 0.0, 0.0, Some(100.0), Some(100.0));
+        src.data = json!({ "file": "笔记/a.md" });
+        let conv = |step: serde_json::Value| {
+            let mut conv = node("conv", "conversation", 300.0, 0.0, Some(200.0), Some(200.0));
+            conv.data = json!({ "messages": [ { "id": "m1", "role": "assistant", "content": "",
+                "steps": [ { "kind": "tool", "run": step } ] } ] });
+            conv
+        };
+        let consumed = |step: serde_json::Value| {
+            let c = canvas(vec![src.clone(), conv(step)], vec![edge("e", "src", "conv")]);
+            role(&c) == EdgeRole::Reference { consumed: true }
+        };
+        // 等价路径写法归一后命中
+        assert!(consumed(json!({ "name": "read_file", "status": "done", "args": { "path": "./笔记\\a.md" } })));
+        // 其余读取工具同口径
+        assert!(consumed(json!({ "name": "read_history", "status": "done", "args": { "path": "笔记/a.md" } })));
+        // 失败步不算消费
+        assert!(!consumed(json!({ "name": "read_file", "status": "error", "args": { "path": "笔记/a.md" } })));
+        // 非读取工具不算消费
+        assert!(!consumed(json!({ "name": "grep", "status": "done", "args": { "path": "笔记/a.md" } })));
     }
 
     #[test]
