@@ -439,9 +439,16 @@ pub fn submit_canvas_save(app: &mut App, reason: SaveReason) -> Task<Message> {
             let r = async {
                 let path = vault::safe_join(&root, &file.clone(), false)?;
                 let mut disk = match vault::read_canvas_file_cached(&state, &root, &file.clone()) {
-                    // 磁盘被外部替换为其他实体：本端全量重建（等同文件缺失）
                     Ok((_, c)) if c.id == frozen.id => c,
-                    _ => frozen.clone(),
+                    // id 不符 = 磁盘被替换成另一个实体：补丁无处可合，整份重建
+                    Ok(_) => frozen.clone(),
+                    // 只有文件确实不存在才按新建处理；IO / 权限 / 解析 / schema 失败一律不写，
+                    // 否则会用内存快照静默覆盖磁盘上的外部内容
+                    Err(e) => match std::fs::metadata(&path) {
+                        Err(io) if io.kind() == std::io::ErrorKind::NotFound => frozen.clone(),
+                        Err(io) => return Err(format!("读取画布失败：{e}（{io}）")),
+                        Ok(_) => return Err(format!("读取画布失败：{e}")),
+                    },
                 };
                 if let Some(patch) = vault::compute_canvas_patch(&baseline, &frozen) {
                     vault::apply_canvas_patch(&mut disk, &patch);
