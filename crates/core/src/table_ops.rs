@@ -457,6 +457,7 @@ pub fn apply_paste_grid(
                 options: None,
                 width: None,
                 calc_type: None,
+                ai: None,
             });
         }
     }
@@ -466,13 +467,14 @@ pub fn apply_paste_grid(
     for (g, line) in grid.iter().enumerate() {
         let r = anchor_row + g;
         while rows.len() <= r {
-            rows.push(TableRow { id: new_id(), values: Default::default(), height: None, styles: None });
+            rows.push(TableRow { id: new_id(), values: Default::default(), height: None, styles: None, ai: None });
         }
         let row = &mut rows[r];
         let mut row_changed = false;
         for (c, raw) in line.iter().enumerate() {
             let field = &fields[anchor_col + c];
             let next = match field.field_type.as_str() {
+                crate::table_ai::FIELD_TYPE => continue,
                 "singleSelect" => {
                     if raw.is_empty() {
                         None
@@ -732,7 +734,7 @@ pub fn add_row(table: &mut TableFile, id: String) -> String {
 /// 在下标处插入空行（下标钳制到表长内；返回新行 id）。
 pub fn insert_row(table: &mut TableFile, index: usize, id: String) -> String {
     let index = index.min(table.rows.len());
-    table.rows.insert(index, TableRow { id: id.clone(), values: Default::default(), height: None, styles: None });
+    table.rows.insert(index, TableRow { id: id.clone(), values: Default::default(), height: None, styles: None, ai: None });
     id
 }
 
@@ -785,11 +787,12 @@ pub fn insert_field(table: &mut TableFile, index: usize, id: String, name: &str,
             options: (field_type == "singleSelect").then(Default::default),
             width: None,
             calc_type: None,
+            ai: (field_type == crate::table_ai::FIELD_TYPE).then(Default::default),
         },
     );
 }
 
-/// 删除字段：同步清全行 values/styles 该键。
+/// 删除字段：同步清全行 values/styles/ai 该键。
 pub fn remove_field(table: &mut TableFile, field_id: &str) {
     table.fields.retain(|f| f.id != field_id);
     for row in &mut table.rows {
@@ -800,25 +803,60 @@ pub fn remove_field(table: &mut TableFile, field_id: &str) {
                 row.styles = None;
             }
         }
+        if let Some(map) = &mut row.ai {
+            map.remove(field_id);
+            if map.is_empty() {
+                row.ai = None;
+            }
+        }
     }
 }
 
-/// 字段改名（trim 后空名保留原名）；返回是否变化。
+/// 字段改名（trim 后空名保留原名）；同步改写模板里指向该字段的 `#旧名` 引用。返回是否变化。
 pub fn rename_field(table: &mut TableFile, field_id: &str, name: &str) -> bool {
     let name = name.trim();
     if name.is_empty() {
         return false;
     }
-    let Some(f) = table.fields.iter_mut().find(|f| f.id == field_id) else { return false };
-    if f.name == name {
+    let Some(current) = table.fields.iter().find(|f| f.id == field_id).map(|f| f.name.clone()) else {
+        return false;
+    };
+    if current == name {
         return false;
     }
-    f.name = name.to_string();
+    // 目标名与既有字段重名且本字段被 AI 模板引用：改名会让模板引用歧义，直接拒绝
+    if table.fields.iter().any(|f| f.id != field_id && f.name == name) {
+        let referenced = table
+            .fields
+            .iter()
+            .filter(|f| crate::table_ai::is_ai(f))
+            .filter_map(|f| f.ai.as_ref())
+            .any(|config| {
+                crate::table_ai::parse_refs(&config.prompt, &table.fields)
+                    .map(|refs| refs.iter().any(|r| r.field_id == field_id))
+                    .unwrap_or(true)
+            });
+        if referenced {
+            return false;
+        }
+    }
+    let old_fields = table.fields.clone();
+    if let Some(f) = table.fields.iter_mut().find(|f| f.id == field_id) {
+        f.name = name.to_string();
+    }
+    for field in &mut table.fields {
+        if !crate::table_ai::is_ai(field) {
+            continue;
+        }
+        if let Some(config) = field.ai.as_mut() {
+            config.prompt = crate::table_ai::retarget_refs(&config.prompt, &old_fields, field_id, name);
+        }
+    }
     true
 }
 
 /// 字段改类型：仅改 type；calcType 不属新类型可用集则清；转入单选补空选项集；
-/// 单元格值不转换。返回是否变化。
+/// 单元格值不转换；进出 AI 类型时同步建 / 清配置与生成记录。返回是否变化。
 pub fn retype_field(table: &mut TableFile, field_id: &str, field_type: &str) -> bool {
     let Some(f) = table.fields.iter_mut().find(|f| f.id == field_id) else { return false };
     if f.field_type == field_type {
@@ -832,9 +870,20 @@ pub fn retype_field(table: &mut TableFile, field_id: &str, field_type: &str) -> 
     } else {
         f.options = None;
     }
+    f.ai = (field_type == crate::table_ai::FIELD_TYPE).then(Default::default);
     if let Some(calc) = &f.calc_type {
         if !calc_types_for(field_type).contains(&calc.as_str()) {
             f.calc_type = None;
+        }
+    }
+    if f.ai.is_none() {
+        for row in &mut table.rows {
+            if let Some(map) = &mut row.ai {
+                map.remove(field_id);
+                if map.is_empty() {
+                    row.ai = None;
+                }
+            }
         }
     }
     true
@@ -915,8 +964,8 @@ mod tests {
             id: "t".into(),
             title: "表".into(),
             fields: vec![
-                TableField { id: "f1".into(), name: "名称".into(), field_type: "text".into(), options: None, width: None, calc_type: None },
-                TableField { id: "f2".into(), name: "图".into(), field_type: "image".into(), options: None, width: None, calc_type: None },
+                TableField { id: "f1".into(), name: "名称".into(), field_type: "text".into(), options: None, width: None, calc_type: None, ai: None },
+                TableField { id: "f2".into(), name: "图".into(), field_type: "image".into(), options: None, width: None, calc_type: None, ai: None },
             ],
             rows: vec![TableRow {
                 id: "r1".into(),
@@ -928,6 +977,7 @@ mod tests {
                 .collect(),
                 height: None,
                 styles: None,
+                ai: None,
             }],
             created_at: 0,
             updated_at: 0,
@@ -975,6 +1025,7 @@ mod tests {
             options: None,
             width: None,
             calc_type: None,
+            ai: None,
         }
     }
 
@@ -984,7 +1035,90 @@ mod tests {
             values: values.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
             height: None,
             styles: None,
+            ai: None,
         }
+    }
+
+
+
+    #[test]
+    fn ai_meta_is_cleared_by_remove_and_retype() {
+        let ai_config = crate::vault::AiFieldConfig {
+            prompt: "#名称".into(),
+            ..Default::default()
+        };
+        let mut t = table(
+            vec![field("f1", "名称", "text"), {
+                let mut f = field("f2", "提示词", "ai");
+                f.ai = Some(ai_config);
+                f
+            }],
+            vec![row("r1", vec![("f2", Value::String("结果".into()))])],
+        );
+        t.rows[0].ai = Some([(
+            "f2".to_string(),
+            crate::vault::AiCellMeta::ok("h".into(), 1, None),
+        )]
+        .into_iter()
+        .collect());
+        assert!(retype_field(&mut t, "f2", "text"));
+        assert!(t.rows[0].ai.is_none(), "转文本应清生成记录");
+        t.rows[0].ai = Some([(
+            "f2".to_string(),
+            crate::vault::AiCellMeta::ok("h".into(), 1, None),
+        )]
+        .into_iter()
+        .collect());
+        remove_field(&mut t, "f2");
+        assert!(t.rows[0].ai.is_none(), "删字段应清生成记录");
+    }
+
+    #[test]
+    fn paste_skips_ai_column() {
+        let mut fields = vec![field("f1", "名称", "text"), {
+            let mut f = field("f2", "提示词", "ai");
+            f.ai = Some(Default::default());
+            f
+        }];
+        let mut rows = vec![row("r1", vec![])];
+        let grid = vec![vec!["甲".to_string(), "乙".to_string()]];
+        assert!(apply_paste_grid(&mut fields, &mut rows, 0, 0, &grid, || "x".into()));
+        assert_eq!(rows[0].values.get("f1"), Some(&Value::String("甲".into())));
+        assert!(rows[0].values.get("f2").is_none(), "AI 列应跳过粘贴");
+    }
+
+    #[test]
+    fn rename_to_duplicate_name_is_refused_when_referenced() {
+        let mut t = table(
+            vec![field("f1", "画面", "text"), field("f2", "镜头", "text"), {
+                let mut f = field("f3", "提示词", "ai");
+                f.ai = Some(crate::vault::AiFieldConfig {
+                    prompt: "#画面".into(),
+                    ..Default::default()
+                });
+                f
+            }],
+            vec![],
+        );
+        assert!(!rename_field(&mut t, "f1", "镜头"), "重名且被引用应拒绝");
+        assert_eq!(t.fields[0].name, "画面");
+    }
+
+    #[test]
+    fn rename_field_retargets_ai_prompt_refs() {
+        let mut table = table(
+            vec![field("f1", "画面描述", "text"), {
+                let mut f = field("f2", "提示词", "ai");
+                f.ai = Some(crate::vault::AiFieldConfig {
+                    prompt: "根据#画面描述写提示词".into(),
+                    ..Default::default()
+                });
+                f
+            }],
+            vec![row("r1", vec![])],
+        );
+        assert!(rename_field(&mut table, "f1", "画面"));
+        assert_eq!(table.fields[1].ai.as_ref().expect("配置").prompt, "根据#画面写提示词");
     }
 
     fn table(fields: Vec<TableField>, rows: Vec<TableRow>) -> TableFile {

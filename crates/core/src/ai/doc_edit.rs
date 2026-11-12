@@ -392,6 +392,7 @@ mod tests {
             values: Default::default(),
             height: None,
             styles: None,
+            ai: None,
         });
         model
     }
@@ -466,6 +467,7 @@ mod tests {
             values: Default::default(),
             height: None,
             styles: None,
+            ai: None,
         });
         crate::vault::write_table_file(&root.join("表.atb"), &external).unwrap();
         let queue = WriteQueue::new();

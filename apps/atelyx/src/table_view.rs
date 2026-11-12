@@ -244,6 +244,46 @@ impl TableSession {
             wrap,
             calc,
         });
+        self.refresh_ai_state();
+    }
+
+    /// 重建 AI 字段的引用解析与过期标记：绘制只读，不在每帧解析模板。
+    fn refresh_ai_state(&mut self) {
+        let fields = &self.data.fields;
+        let mut refs = HashMap::new();
+        let mut stale = HashMap::new();
+        for field in fields.iter().filter(|f| atelyx_core::table_ai::is_ai(f)) {
+            let prompt = field
+                .ai
+                .as_ref()
+                .map(|config| config.prompt.clone())
+                .unwrap_or_default();
+            // 解析失败（同名字段歧义等）也要保留字段条目：有值的格仍按过期标记提示，错误不静默吞掉
+            let parsed = atelyx_core::table_ai::parse_refs(&prompt, fields).unwrap_or_default();
+            refs.insert(field.id.clone(), parsed);
+            let rows = self
+                .data
+                .rows
+                .iter()
+                .filter(|row| atelyx_core::table_ai::stale(field, fields, row))
+                .map(|row| row.id.clone())
+                .collect();
+            stale.insert(field.id.clone(), rows);
+        }
+        self.view.ai.refs = refs;
+        self.view.ai.stale = stale;
+        let row_ids: HashSet<&str> = self.data.rows.iter().map(|row| row.id.as_str()).collect();
+        let field_ids: HashSet<&str> = self
+            .data
+            .fields
+            .iter()
+            .map(|field| field.id.as_str())
+            .collect();
+        self.view.ai.fresh_rows.retain(|id| row_ids.contains(id.as_str()));
+        self.view
+            .ai
+            .auto_due
+            .retain(|(field, row)| field_ids.contains(field.as_str()) && row_ids.contains(row.as_str()));
     }
 
     /// 列宽拖拽起点的行高快照：先量一遍被拖列之外的内容高度（拖拽期间只重算被拖列）。
@@ -478,6 +518,8 @@ pub struct TableViewState {
     pub editor_inside: bool,
     /// 表格视图持有键盘焦点（画布按压置位、外点清除；键盘分派门控）。
     pub focused: bool,
+    /// AI 字段的配置草稿 / 生成队列 / 过期标记（随会话生命周期重建）。
+    pub ai: crate::table_ai::TableAiState,
     /// 本批按压来自表格面（画布或其菜单，不失焦；供全局 Press 区分；同事件批内 widget 消息先于 subscription 消息）。
     pub press_seen: bool,
 }
@@ -943,6 +985,32 @@ pub enum TableMsg {
         images: Vec<String>,
         display: Option<String>,
     },
+    // AI 字段
+    /// 按列内筛选口径生成（全部 / 空值 / 待更新 / 失败）。
+    AiStart { field_id: String, filter: atelyx_core::table_ai::AiRowFilter },
+    /// 指定行生成（试跑 / 右键更新选中行）。
+    AiStartRows { field_id: String, rows: Vec<String> },
+    AiStop,
+    AiOpenConfig { window: iced::window::Id, field_id: String },
+    AiCreateField { window: iced::window::Id, name: String },
+    AiCellDone {
+        batch: u64,
+        field_id: String,
+        row_id: String,
+        input: String,
+        result: Result<String, String>,
+    },
+    AiSystemReady { gen: u64, path: String, result: Result<String, String> },
+    AiDraftSystemMode(crate::table_ai::AiSystemMode),
+    AiDraftSystemEdited(text_editor::Action),
+    AiDraftPromptEdited(text_editor::Action),
+    AiDraftNote(String),
+    AiDraftOutput(String),
+    AiDraftAutoNew(bool),
+    AiDraftAutoSource(bool),
+    AiDraftInsert(String),
+    AiDraftToggleFields,
+    AiSaveConfig { trial: bool },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1295,6 +1363,12 @@ fn cell_content_height(
     };
     if text.is_empty() {
         return 0.0;
+    }
+    // 短文本 AI 字段单行省略展示：高度固定一行，长内容不撑高
+    if field.field_type == "ai"
+        && field.ai.as_ref().is_some_and(|c| c.output == atelyx_core::vault::AI_OUTPUT_SHORT)
+    {
+        return size * LINE_FACTOR;
     }
     let wrap_w = wrap_width(col_w, zoom);
     let lines = match wrap {
@@ -2312,11 +2386,26 @@ fn draw_header(session: &TableSession, g: &Geo, frame: &mut canvas::Frame) {
             if col_selected {
                 frame.fill_rectangle(Point::new(x, 0.0), Size::new(w, h), pal::ACCENT_SOFT);
             }
-            let name = ellipsize_text(&field.name, w - 2.0 * CELL_PAD_X * g.z - FIELD_BTN_W * g.z, font_size);
+            let ai_mark = atelyx_core::table_ai::is_ai(field);
+            let mark_w = if ai_mark { 15.0 * g.z } else { 0.0 };
+            if ai_mark {
+                draw_icon(
+                    frame,
+                    "bot",
+                    Point::new(x + CELL_PAD_X * g.z, (h - 12.0 * g.z) / 2.0),
+                    12.0 * g.z,
+                    pal::TEXT_MUTED,
+                );
+            }
+            let name = ellipsize_text(
+                &field.name,
+                w - 2.0 * CELL_PAD_X * g.z - FIELD_BTN_W * g.z - mark_w,
+                font_size,
+            );
             fill_text(
                 frame,
                 &name,
-                Point::new(x + CELL_PAD_X * g.z, (h - font_size * LINE_FACTOR) / 2.0),
+                Point::new(x + CELL_PAD_X * g.z + mark_w, (h - font_size * LINE_FACTOR) / 2.0),
                 font_size,
                 ui_font(),
                 pal::TEXT_SECONDARY,
@@ -2397,6 +2486,7 @@ fn draw_cell_content(
     let v = row.values.get(&field.id);
     let base = base_font_size(field) * g.z;
     match field.field_type.as_str() {
+        "ai" => draw_ai_cell(session, g, frame, cell, row, field, st),
         "image" => draw_image_cell(session, g, frame, r, c, cell, v, hover),
         "singleSelect" => {
             let text = v.and_then(serde_json::Value::as_str).unwrap_or("未选择");
@@ -2440,34 +2530,152 @@ fn draw_cell_content(
             if s.is_empty() {
                 return;
             }
-            let size = style_size(st, base, g.z);
-            let font = cell_text_font(st);
-            let wrap_w = wrap_width(cell.width, g.z);
-            // 行段来自本轮布局的实测（与编辑浮层同折行口径）；缺键说明该口径没被覆盖，兜底仍按字符估算断行
-            let fallback: Vec<TextLine>;
-            let lines: &[TextLine] = match g.cache.wrap.peek(s, size, font, wrap_w) {
-                Some(lines) => lines,
-                None => {
-                    fallback = estimate_lines(s, size, wrap_w);
-                    &fallback
-                }
-            };
-            let lh = size * LINE_FACTOR;
-            let mut y = cell.y + CELL_PAD_Y * g.z;
-            for line in lines {
-                fill_text(frame, &line.text, Point::new(cell.x + CELL_PAD_X * g.z, y), size, font, style_color(st));
-                let w = line.width.min(wrap_w);
-                if st.u {
-                    frame.fill_rectangle(Point::new(cell.x + CELL_PAD_X * g.z, y + lh - 1.5), Size::new(w, 1.0), style_color(st));
-                }
-                if st.s {
-                    frame.fill_rectangle(Point::new(cell.x + CELL_PAD_X * g.z, y + lh / 2.0), Size::new(w, 1.0), style_color(st));
-                }
-                y += lh;
-            }
+            draw_wrapped_text(g, frame, cell, st, base, s);
         }
     }
 }
+
+/// 文本按本轮布局的折行段绘制（AI 字段的已生成值同口径）。
+fn draw_wrapped_text(
+    g: &Geo,
+    frame: &mut canvas::Frame,
+    cell: Rectangle,
+    st: &CellStyle,
+    base: f32,
+    text: &str,
+) {
+    let size = style_size(st, base, g.z);
+    let font = cell_text_font(st);
+    let wrap_w = wrap_width(cell.width, g.z);
+    // 行段来自本轮布局的实测（与编辑浮层同折行口径）；缺键说明该口径没被覆盖，兜底仍按字符估算断行
+    let fallback: Vec<TextLine>;
+    let lines: &[TextLine] = match g.cache.wrap.peek(text, size, font, wrap_w) {
+        Some(lines) => lines,
+        None => {
+            fallback = estimate_lines(text, size, wrap_w);
+            &fallback
+        }
+    };
+    let lh = size * LINE_FACTOR;
+    let mut y = cell.y + CELL_PAD_Y * g.z;
+    for line in lines {
+        fill_text(frame, &line.text, Point::new(cell.x + CELL_PAD_X * g.z, y), size, font, style_color(st));
+        let w = line.width.min(wrap_w);
+        if st.u {
+            frame.fill_rectangle(Point::new(cell.x + CELL_PAD_X * g.z, y + lh - 1.5), Size::new(w, 1.0), style_color(st));
+        }
+        if st.s {
+            frame.fill_rectangle(Point::new(cell.x + CELL_PAD_X * g.z, y + lh / 2.0), Size::new(w, 1.0), style_color(st));
+        }
+        y += lh;
+    }
+}
+
+/// AI 单元格：生成中 / 未生成 / 无输入 / 失败占位，已生成值按文本折行；过期与失败带角标。
+fn draw_ai_cell(
+    session: &TableSession,
+    g: &Geo,
+    frame: &mut canvas::Frame,
+    cell: Rectangle,
+    row: &TableRow,
+    field: &TableField,
+    st: &CellStyle,
+) {
+    let view = &session.view;
+    let size = style_size(st, base_font_size(field) * g.z, g.z);
+    let running = view
+        .ai
+        .runs
+        .contains(&(row.id.clone(), field.id.clone()));
+    if running {
+        draw_ai_label(frame, cell, g, size, "生成中…", pal::TEXT_MUTED);
+        return;
+    }
+    let value = row.values.get(&field.id).and_then(|v| v.as_str()).unwrap_or("");
+    let meta = row.ai.as_ref().and_then(|map| map.get(&field.id));
+    if value.is_empty() {
+        match meta {
+            Some(meta) if meta.status == "failed" => {
+                draw_ai_label(frame, cell, g, size, "生成失败", pal::DANGER);
+            }
+            _ => {
+                let configured = view
+                    .ai
+                    .refs
+                    .get(&field.id)
+                    .is_some_and(|refs| !refs.is_empty());
+                let no_input = view.ai.refs.get(&field.id).is_some_and(|refs| {
+                    !refs.is_empty() && atelyx_core::table_ai::no_input(&session.data.fields, refs, row)
+                });
+                let label = if !configured {
+                    "待配置"
+                } else if no_input {
+                    "无输入"
+                } else {
+                    "未生成"
+                };
+                draw_ai_label(frame, cell, g, size, label, pal::TEXT_MUTED);
+            }
+        }
+        return;
+    }
+    if field
+        .ai
+        .as_ref()
+        .is_some_and(|config| config.output == atelyx_core::vault::AI_OUTPUT_SHORT)
+    {
+        let text = ellipsize_text(value, cell.width - 2.0 * CELL_PAD_X * g.z, size);
+        fill_text(
+            frame,
+            &text,
+            Point::new(cell.x + CELL_PAD_X * g.z, cell.y + CELL_PAD_Y * g.z),
+            size,
+            cell_text_font(st),
+            style_color(st),
+        );
+    } else {
+        draw_wrapped_text(g, frame, cell, st, base_font_size(field) * g.z, value);
+    }
+    let icon_color = if meta.is_some_and(|m| m.status == "failed") {
+        Some(pal::DANGER)
+    } else if view
+        .ai
+        .stale
+        .get(&field.id)
+        .is_some_and(|rows| rows.contains(&row.id))
+    {
+        Some(pal::WARNING)
+    } else {
+        None
+    };
+    if let Some(color) = icon_color {
+        let dot = 4.0 * g.z;
+        frame.fill_rectangle(
+            Point::new(cell.x + cell.width - dot - 6.0 * g.z, cell.y + 6.0 * g.z),
+            Size::new(dot, dot),
+            color,
+        );
+    }
+}
+
+fn draw_ai_label(
+    frame: &mut canvas::Frame,
+    cell: Rectangle,
+    g: &Geo,
+    size: f32,
+    label: &str,
+    color: iced::Color,
+) {
+    fill_text(
+        frame,
+        label,
+        Point::new(cell.x + CELL_PAD_X * g.z, cell.y + CELL_PAD_Y * g.z),
+        size,
+        ui_font(),
+        color,
+    );
+}
+
 
 /// 图片单元格（轮播 / 九宫格 + hover 圆钮 + 拖拽影子）。
 #[allow(clippy::too_many_arguments)]
@@ -2697,10 +2905,31 @@ fn toolbar<'a>(
         .collect();
     let ai_pills: Element<'static, Message> =
         crate::layout_view::ai_pill_row(&ai_remotes, app.ai_pulse, window);
+    let ai_progress: Element<'static, Message> = match session.view.ai.batch.as_ref() {
+        Some(batch) => {
+            let finished = batch.done + batch.failed + batch.skipped;
+            row![
+                text(format!("AI 生成中 {finished}/{}", batch.total))
+                    .size(pal::fs_micro())
+                    .color(pal::TEXT_SECONDARY),
+                crate::ui::controls::btn(
+                    "停止",
+                    &crate::ui::controls::btn_sm(),
+                    crate::ui::controls::Variant::Ghost,
+                    Some(Message::Table(TableMsg::AiStop)),
+                ),
+            ]
+            .spacing(6)
+            .align_y(alignment::Vertical::Center)
+            .into()
+        }
+        None => space().width(Length::Shrink).into(),
+    };
     row![
         view_select(app, session, window),
         dirty_pill,
         space().width(Length::Fill),
+        ai_progress,
         save_state,
         collab_pills,
         ai_pills,
@@ -3436,6 +3665,7 @@ mod tests {
             options: None,
             width: Some(120.0),
             calc_type: None,
+            ai: None,
         };
         let rows = values
             .iter()
@@ -3443,7 +3673,7 @@ mod tests {
             .map(|(i, v)| {
                 let mut cell = serde_json::Map::new();
                 cell.insert("f1".to_string(), serde_json::Value::String(v.to_string()));
-                TableRow { id: format!("r{i}"), values: cell, height: None, styles: None }
+                TableRow { id: format!("r{i}"), values: cell, height: None, styles: None, ai: None }
             })
             .collect();
         TableSession::new(
@@ -3861,11 +4091,12 @@ mod tests {
             options: None,
             width: Some(width),
             calc_type: None,
+            ai: None,
         }
     }
 
     fn test_row(id: &str, values: serde_json::Map<String, serde_json::Value>) -> TableRow {
-        TableRow { id: id.to_string(), values, height: None, styles: None }
+        TableRow { id: id.to_string(), values, height: None, styles: None, ai: None }
     }
 
     fn session_with(fields: Vec<TableField>, rows: Vec<TableRow>) -> TableSession {

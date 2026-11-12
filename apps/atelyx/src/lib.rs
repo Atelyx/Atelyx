@@ -49,6 +49,8 @@ mod repohistory_view;
 mod settings_view;
 mod space_actions;
 mod table_actions;
+mod table_ai;
+mod table_ai_view;
 mod table_collab;
 mod note_collab_channel;
 mod canvas_collab;

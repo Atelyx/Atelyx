@@ -491,6 +491,7 @@ async fn 空间表格编辑按补丁上行且不覆盖并发新建() {
         values: Default::default(),
         height: None,
         styles: None,
+        ai: None,
     });
     state
         .race

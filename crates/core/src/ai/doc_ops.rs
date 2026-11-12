@@ -46,6 +46,7 @@ pub fn apply_table_ops(table: &mut TableFile, ops: &[TableOp]) -> Result<Vec<Str
                     values: Default::default(),
                     height: None,
                     styles: None,
+                    ai: None,
                 };
                 for (field_id, value) in cells {
                     let field = table
@@ -89,6 +90,13 @@ pub fn apply_table_ops(table: &mut TableFile, ops: &[TableOp]) -> Result<Vec<Str
 
 /// 工具值 → 磁盘值形态（null / 空文本 = 清空）；按字段类型校验，越界给可读原因。
 fn coerce_cell_value(field: &TableField, value: &Value) -> Result<Option<Value>, String> {
+    // AI 字段先拒：null 也属写入（清空），不能走「null = 清空」的通用捷径
+    if field.field_type == "ai" {
+        return Err(format!(
+            "字段「{}」是 AI 字段，不能直接写入；请改字段设置后重新生成",
+            field.name
+        ));
+    }
     if value.is_null() {
         return Ok(None);
     }
@@ -307,11 +315,11 @@ mod tests {
             id: "t1".into(),
             title: "任务".into(),
             fields: vec![
-                TableField { id: "f1".into(), name: "名称".into(), field_type: "text".into(), options: None, width: None, calc_type: None },
-                TableField { id: "f2".into(), name: "状态".into(), field_type: "singleSelect".into(), options: Some(vec!["待办".into(), "完成".into()]), width: None, calc_type: None },
-                TableField { id: "f3".into(), name: "工时".into(), field_type: "number".into(), options: None, width: None, calc_type: None },
+                TableField { id: "f1".into(), name: "名称".into(), field_type: "text".into(), options: None, width: None, calc_type: None, ai: None },
+                TableField { id: "f2".into(), name: "状态".into(), field_type: "singleSelect".into(), options: Some(vec!["待办".into(), "完成".into()]), width: None, calc_type: None, ai: None },
+                TableField { id: "f3".into(), name: "工时".into(), field_type: "number".into(), options: None, width: None, calc_type: None, ai: None },
             ],
-            rows: vec![TableRow { id: "r1".into(), values: Default::default(), height: None, styles: None }],
+            rows: vec![TableRow { id: "r1".into(), values: Default::default(), height: None, styles: None, ai: None }],
             created_at: 0,
             updated_at: 0,
         }
@@ -327,6 +335,30 @@ mod tests {
             created_at: 0,
             updated_at: 0,
         }
+    }
+
+
+    #[test]
+    fn ai_field_rejects_null_and_text_writes() {
+        let mut t = table();
+        t.fields.push(TableField {
+            id: "f4".into(),
+            name: "提示词".into(),
+            field_type: "ai".into(),
+            options: None,
+            width: None,
+            calc_type: None,
+            ai: Some(Default::default()),
+        });
+        for value in [json!(null), json!("手写")] {
+            let err = apply_table_ops(
+                &mut t,
+                &[TableOp::SetCell { row_id: "r1".into(), field_id: "f4".into(), value }],
+            )
+            .expect_err("AI 字段应拒绝写入");
+            assert!(err.contains("AI 字段"), "{err}");
+        }
+        assert!(t.rows[0].values.get("f4").is_none());
     }
 
     #[test]

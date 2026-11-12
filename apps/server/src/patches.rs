@@ -131,6 +131,9 @@ pub struct TableField {
     /// 状态栏列自动计算类型（sum/avg/max/min/count；缺省 = 无计算）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub calc_type: Option<String>,
+    /// AI 字段配置（客户端私有形态，服务端原样透传）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai: Option<serde_json::Value>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
@@ -145,6 +148,9 @@ pub struct TableRow {
     /// 单元格显示样式按字段 id 存（与值正交；缺 key = 默认样式）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub styles: Option<serde_json::Map<String, serde_json::Value>>,
+    /// AI 单元格生成记录按字段 id 存（客户端私有形态，服务端原样透传）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai: Option<serde_json::Value>,
 }
 
 /// 表格增量补丁（与客户端 types/table.ts 的 TablePatch 同形状）。

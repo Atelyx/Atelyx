@@ -251,6 +251,8 @@ pub(crate) enum PopupState {
     AiSearchProviderMenu,
     /// 历史记录弹层（居中模态；kind+file 定位侧文件）。
     HistoryBrowser { kind: atelyx_core::history::HistoryKind, file: String },
+    /// AI 字段配置弹层（居中模态；字段 id 定位）。
+    TableAiField { field_id: String },
     /// 只读正文 / 对话消息的选区右键菜单（复制）。
     SelectionMenu { target: crate::markdown_select::SelectionTarget },
 }
@@ -280,7 +282,7 @@ impl PopupState {
             PopupState::NoteMenu => 144.0,
             PopupState::SelectionMenu { .. } => 128.0,
             PopupState::PropTypeMenu { .. } => 128.0,
-            PopupState::TableCellMenu => 128.0,
+            PopupState::TableCellMenu => 152.0,
             PopupState::TableFieldMenu { .. } => 176.0,
             PopupState::TableFieldRename { .. } => 200.0,
             PopupState::TableOptionsEdit { .. } => 208.0,
@@ -313,6 +315,7 @@ impl PopupState {
             PopupState::AiSearchProviderMenu => 144.0,
             // 居中模态不走锚点几何，估高由各自 overlay 钳制
             PopupState::HistoryBrowser { .. } => crate::history_browser::CARD_WIDTH,
+            PopupState::TableAiField { .. } => crate::table_ai_view::MODAL_WIDTH,
         }
     }
 }
@@ -578,7 +581,10 @@ fn with_overlays<'a>(
     // 弹层（同窗口至多一个；捕获层点击 = 外点关闭；居中模态另行渲染，见下方）
     if let Some((w, open)) = &app.popup {
         if *w == window
-            && !matches!(open.state, PopupState::HistoryBrowser { .. })
+            && !matches!(
+                open.state,
+                PopupState::HistoryBrowser { .. } | PopupState::TableAiField { .. }
+            )
         {
             let (content, height) = popup_element(app, &open.state, app.popup_pane, window);
             let spec = PopupSpec {
@@ -599,6 +605,11 @@ fn with_overlays<'a>(
 
     // 历史记录模态（优先级在锚点弹层之上、通知之下）
     if let Some(el) = crate::history_browser::overlay(app, window, viewport) {
+        root = root.push(el);
+    }
+
+    // AI 字段配置模态（与历史记录同级）
+    if let Some(el) = crate::table_ai_view::overlay(app, window, viewport) {
         root = root.push(el);
     }
 
@@ -4464,12 +4475,37 @@ fn popup_element<'a>(
                 })
                 .collect()
         }
-        PopupState::TableCellMenu => vec![
-            (0, MenuEntry::action_icon("复制", "copy", Message::Table(crate::table_view::TableMsg::Menu(Box::new(crate::table_view::TableMsg::Copy))))),
-            (0, MenuEntry::action_icon("剪切", "scissors", Message::Table(crate::table_view::TableMsg::Menu(Box::new(crate::table_view::TableMsg::Cut))))),
-            (0, MenuEntry::action_icon("粘贴", "clipboard-paste", Message::Table(crate::table_view::TableMsg::Menu(Box::new(crate::table_view::TableMsg::Paste))))),
-            (0, MenuEntry::action_icon("格式", "type", Message::Table(crate::table_view::TableMsg::ShowStyleBar))),
-        ],
+        PopupState::TableCellMenu => {
+            let mut entries: Vec<(usize, MenuEntry<Message>)> = vec![
+                (0, MenuEntry::action_icon("复制", "copy", Message::Table(crate::table_view::TableMsg::Menu(Box::new(crate::table_view::TableMsg::Copy))))),
+                (0, MenuEntry::action_icon("剪切", "scissors", Message::Table(crate::table_view::TableMsg::Menu(Box::new(crate::table_view::TableMsg::Cut))))),
+                (0, MenuEntry::action_icon("粘贴", "clipboard-paste", Message::Table(crate::table_view::TableMsg::Menu(Box::new(crate::table_view::TableMsg::Paste))))),
+                (0, MenuEntry::action_icon("格式", "type", Message::Table(crate::table_view::TableMsg::ShowStyleBar))),
+            ];
+            if let Some((field_id, rows)) = crate::table_ai::selected_field(app) {
+                entries.push((0, MenuEntry::Divider));
+                entries.push((
+                    0,
+                    MenuEntry::action_icon(
+                        "更新",
+                        "refresh",
+                        Message::Table(crate::table_view::TableMsg::AiStartRows {
+                            field_id: field_id.clone(),
+                            rows,
+                        }),
+                    ),
+                ));
+                entries.push((
+                    0,
+                    MenuEntry::action_icon(
+                        "AI 字段设置…",
+                        "bot",
+                        Message::Table(crate::table_view::TableMsg::AiOpenConfig { window, field_id }),
+                    ),
+                ));
+            }
+            entries
+        }
         PopupState::SelectionMenu { target } => {
             let has_text = match target {
                 crate::markdown_select::SelectionTarget::Note => {
@@ -4542,18 +4578,75 @@ fn popup_element<'a>(
                     ),
                 ));
             }
+            if ftype.as_deref() == Some("ai") {
+                let running = app
+                    .table
+                    .as_ref()
+                    .is_some_and(|s| s.view.ai.batch.is_some());
+                entries.push((
+                    0,
+                    MenuEntry::action_icon(
+                        "AI 字段设置…",
+                        "bot",
+                        Message::Table(crate::table_view::TableMsg::AiOpenConfig {
+                            window,
+                            field_id: fid.clone(),
+                        }),
+                    ),
+                ));
+                entries.push((
+                    0,
+                    MenuEntry::Submenu { label: "生成".into(), icon: Some("bot".into()), disabled: false, pane: 4 },
+                ));
+                entries.push((
+                    0,
+                    MenuEntry::action(
+                        "转为文本字段",
+                        Message::Table(crate::table_view::TableMsg::RetypeField {
+                            field_id: fid.clone(),
+                            ftype: "text".into(),
+                        }),
+                    ),
+                ));
+                // pane 4：按筛选口径生成 + 停止
+                const AI_GEN: [(&str, atelyx_core::table_ai::AiRowFilter); 4] = [
+                    ("整列生成", atelyx_core::table_ai::AiRowFilter::All),
+                    ("仅空值", atelyx_core::table_ai::AiRowFilter::Empty),
+                    ("仅待更新", atelyx_core::table_ai::AiRowFilter::Stale),
+                    ("仅失败项", atelyx_core::table_ai::AiRowFilter::Failed),
+                ];
+                for (label, filter) in AI_GEN {
+                    entries.push((
+                        4,
+                        MenuEntry::action(
+                            label,
+                            Message::Table(crate::table_view::TableMsg::AiStart {
+                                field_id: fid.clone(),
+                                filter,
+                            }),
+                        ),
+                    ));
+                }
+                if running {
+                    entries.push((
+                        4,
+                        MenuEntry::action("停止生成", Message::Table(crate::table_view::TableMsg::AiStop)),
+                    ));
+                }
+            }
             entries.push((0, MenuEntry::Divider));
             entries.push((
                 0,
                 MenuEntry::Submenu { label: "删除字段".into(), icon: None, disabled: false, pane: 3 },
             ));
             // pane 2：类型列表；pane 3：删除确认
-            const FTYPES: [(&str, &str); 5] = [
+            const FTYPES: [(&str, &str); 6] = [
                 ("text", "文本"),
                 ("number", "数字"),
                 ("duration", "时长（秒）"),
                 ("singleSelect", "单选"),
                 ("image", "图片"),
+                ("ai", "AI 字段"),
             ];
             for (ft, label) in FTYPES {
                 let is_current = ftype.as_deref() == Some(ft);
@@ -4762,14 +4855,26 @@ fn popup_element<'a>(
         PopupState::TableAddField => {
             let draft = app.table_popup_draft.clone();
             let mut entries = vec![(0, MenuEntry::Custom(table_popup_input(&draft), 30.0))];
-            const FTYPES: [(&str, &str); 5] = [
+            const FTYPES: [(&str, &str); 6] = [
                 ("text", "文本"),
                 ("number", "数字"),
                 ("duration", "时长（秒）"),
                 ("singleSelect", "单选"),
                 ("image", "图片"),
+                ("ai", "AI"),
             ];
             for (ft, label) in FTYPES {
+                let on_press = if ft == "ai" {
+                    Message::Table(crate::table_view::TableMsg::AiCreateField {
+                        window,
+                        name: draft.clone(),
+                    })
+                } else {
+                    Message::Table(crate::table_view::TableMsg::AddField {
+                        name: draft.clone(),
+                        ftype: ft.to_string(),
+                    })
+                };
                 entries.push((
                     0,
                     MenuEntry::Action {
@@ -4777,10 +4882,7 @@ fn popup_element<'a>(
                         icon: None,
                         danger: false,
                         disabled: false,
-                        on_press: Some(Message::Table(crate::table_view::TableMsg::AddField {
-                            name: draft.clone(),
-                            ftype: ft.to_string(),
-                        })),
+                        on_press: Some(on_press),
                         note: None,
                         hint: None,
                     },
@@ -5513,7 +5615,7 @@ fn popup_element<'a>(
                 .collect()
         }
         // 居中模态不经锚点渲染（with_overlays 分流到各自 overlay）
-        PopupState::HistoryBrowser { .. } => Vec::new(),
+        PopupState::HistoryBrowser { .. } | PopupState::TableAiField { .. } => Vec::new(),
     };
     crate::ui::menu::pane_view(entries, pane, window)
 }

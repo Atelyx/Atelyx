@@ -65,7 +65,8 @@ pub fn on_msg(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
     let task = dispatch(app, msg);
     // 选区可能已变（点选 / 拖选 / 键盘 / 行头列头 / 回滚清空）：全部消息的唯一收口
     space_actions::table_collab_sync(app);
-    task
+    // 自动生成队列在消息收口统一续跑（新增行 / 引用列变化只登记，不在这里直接发请求）
+    task.chain(crate::table_ai::drain_auto(app))
 }
 
 fn dispatch(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
@@ -178,6 +179,22 @@ fn on_msg_open(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
                 // 初值即用户敲下的字符：会话已属「输入」，提交必须落值
                 return begin_edit_with(app, r, ci, c.to_string(), false, true);
             }
+            let hint = app.table.as_mut().is_some_and(|s| {
+                let ai_selected = selection_cell(s)
+                    .is_some_and(|(_, ci)| atelyx_core::table_ai::is_ai(&s.data.fields[ci]));
+                if ai_selected && !s.view.ai.hint_shown {
+                    s.view.ai.hint_shown = true;
+                    true
+                } else {
+                    false
+                }
+            });
+            if hint {
+                app.notify(
+                    NoticeLevel::Warning,
+                    "AI 字段由模型生成：右键选「更新」，或双击打开字段设置",
+                );
+            }
             Task::none()
         }
         tv::TableMsg::NavKey(dir) => on_nav_key(app, dir),
@@ -211,10 +228,23 @@ fn on_msg_open(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
             Task::none()
         }
         tv::TableMsg::Undo => {
+            // 只有确实会执行撤销时才取消在途批次（空栈 / 未聚焦的按键不改批次状态）
+            let applies = app.table.as_ref().is_some_and(|s| {
+                s.view.focused && s.view.editing.is_none() && !s.view.undo.is_empty()
+            });
+            if applies {
+                crate::table_ai::cancel_before_undo(app);
+            }
             undo(app);
             Task::none()
         }
         tv::TableMsg::Redo => {
+            let applies = app.table.as_ref().is_some_and(|s| {
+                s.view.focused && s.view.editing.is_none() && !s.view.redo.is_empty()
+            });
+            if applies {
+                crate::table_ai::cancel_before_undo(app);
+            }
             redo(app);
             Task::none()
         }
@@ -231,6 +261,7 @@ fn on_msg_open(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
             Task::none()
         }
         tv::TableMsg::InsertRow { row_id, side } => {
+            let mut added = None;
             with_session(app, |s| {
                 push_undo(s);
                 let Some(new_id) = ops::insert_row_near(&mut s.data, &row_id, side, nanoid::nanoid!()) else {
@@ -239,8 +270,12 @@ fn on_msg_open(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
                 };
                 s.touch();
                 // 新空行即操作落点：选中跟着它，插入位置一眼可见
-                s.view.selection = Some(ops::TableSelection::Row(new_id));
+                s.view.selection = Some(ops::TableSelection::Row(new_id.clone()));
+                added = Some(new_id);
             });
+            if let Some(id) = added {
+                crate::table_ai::note_new_rows(app, &[id]);
+            }
             app.dismiss_popup();
             Task::none()
         }
@@ -311,14 +346,19 @@ fn on_msg_open(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
             Task::none()
         }
         tv::TableMsg::RenameField { field_id, name } => {
+            let mut blocked = false;
             with_session(app, |s| {
                 push_undo(s);
                 if ops::rename_field(&mut s.data, &field_id, &name) {
                     s.touch();
                 } else {
                     drop_undo(s);
+                    blocked = s.data.fields.iter().any(|f| f.id != field_id && f.name == name.trim());
                 }
             });
+            if blocked {
+                app.notify(NoticeLevel::Warning, "字段名已存在，且改名会让 AI 字段的模板引用歧义");
+            }
             app.dismiss_popup();
             Task::none()
         }
@@ -334,6 +374,92 @@ fn on_msg_open(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
             app.dismiss_popup();
             Task::none()
         }
+        // AI 字段：生成 / 停止 / 配置
+        tv::TableMsg::AiStart { field_id, filter } => {
+            app.dismiss_popup();
+            crate::table_ai::start_filtered(app, &field_id, filter)
+        }
+        tv::TableMsg::AiStartRows { field_id, rows } => {
+            app.dismiss_popup();
+            crate::table_ai::start_rows(app, &field_id, rows)
+        }
+        tv::TableMsg::AiStop => {
+            crate::table_ai::stop(app);
+            Task::none()
+        }
+        tv::TableMsg::AiOpenConfig { window, field_id } => {
+            crate::table_ai::open_config(app, window, &field_id)
+        }
+        tv::TableMsg::AiCreateField { window, name } => {
+            let field_id = {
+                let Some(s) = app.table.as_mut() else { return Task::none() };
+                push_undo(s);
+                let label = if name.trim().is_empty() {
+                    "AI 字段".to_string()
+                } else {
+                    name.trim().to_string()
+                };
+                let id = nanoid::nanoid!();
+                let index = s.data.fields.len();
+                ops::insert_field(&mut s.data, index, id.clone(), &label, "ai");
+                s.touch();
+                id
+            };
+            app.dismiss_popup();
+            crate::table_ai::open_config(app, window, &field_id)
+        }
+        tv::TableMsg::AiCellDone { batch, field_id, row_id, input, result } => {
+            crate::table_ai::on_cell_done(app, batch, field_id, row_id, input, result)
+        }
+        tv::TableMsg::AiSystemReady { gen, path, result } => {
+            crate::table_ai::on_system_ready(app, gen, path, result)
+        }
+        tv::TableMsg::AiDraftSystemMode(mode) => {
+            crate::table_ai::edit_draft(app, |draft| {
+                draft.system_mode = mode;
+                draft.error = None;
+            });
+            Task::none()
+        }
+        tv::TableMsg::AiDraftSystemEdited(action) => {
+            crate::table_ai::edit_draft(app, |draft| draft.system_text.perform(action));
+            Task::none()
+        }
+        tv::TableMsg::AiDraftPromptEdited(action) => {
+            crate::table_ai::edit_draft(app, |draft| {
+                draft.prompt.perform(action);
+                draft.error = None;
+            });
+            Task::none()
+        }
+        tv::TableMsg::AiDraftNote(path) => {
+            crate::table_ai::edit_draft(app, |draft| {
+                draft.note = path;
+                draft.system_mode = crate::table_ai::AiSystemMode::Note;
+            });
+            Task::none()
+        }
+        tv::TableMsg::AiDraftOutput(output) => {
+            crate::table_ai::edit_draft(app, |draft| draft.output = output);
+            Task::none()
+        }
+        tv::TableMsg::AiDraftAutoNew(on) => {
+            crate::table_ai::edit_draft(app, |draft| draft.auto_new = on);
+            Task::none()
+        }
+        tv::TableMsg::AiDraftAutoSource(on) => {
+            crate::table_ai::edit_draft(app, |draft| draft.auto_source = on);
+            Task::none()
+        }
+        tv::TableMsg::AiDraftInsert(field_id) => {
+            crate::table_ai::insert_ref(app, &field_id);
+            Task::none()
+        }
+        tv::TableMsg::AiDraftToggleFields => {
+            crate::table_ai::edit_draft(app, |draft| draft.show_fields = !draft.show_fields);
+            Task::none()
+        }
+        tv::TableMsg::AiSaveConfig { trial } => crate::table_ai::save_draft(app, trial),
         tv::TableMsg::OptionsAdd { field_id, name } => {
             let name = name.trim().to_string();
             if name.is_empty() {
@@ -448,16 +574,21 @@ fn on_msg_open(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
             task
         }
         tv::TableMsg::SelectOption { row_id, field_id, value } => {
+            let mut changed = false;
             with_session(app, |s| {
                 push_undo(s);
                 let Some(row) = s.data.rows.iter_mut().find(|r| r.id == row_id) else { return };
                 let next = value.map(serde_json::Value::String);
                 if ops::set_cell_value(row, &field_id, next) {
                     s.touch();
+                    changed = true;
                 } else {
                     drop_undo(s);
                 }
             });
+            if changed {
+                crate::table_ai::note_source_edit(app, &row_id, &field_id);
+            }
             app.dismiss_popup();
             Task::none()
         }
@@ -999,8 +1130,11 @@ fn plugin_set_cell(
     let Some(session) = app.table.as_mut() else {
         return Err("未打开表格，无法写入".to_string());
     };
-    if !session.data.fields.iter().any(|f| f.id == field_id) {
+    let Some(field) = session.data.fields.iter().find(|f| f.id == field_id) else {
         return Err(format!("字段不存在：{field_id}"));
+    };
+    if field.field_type == "ai" {
+        return Err(format!("字段「{}」是 AI 字段，不能直接写入", field.name));
     }
     if !session.data.rows.iter().any(|r| r.id == row_id) {
         return Err(format!("行不存在：{row_id}"));
@@ -1176,12 +1310,7 @@ fn on_press(app: &mut App, window: iced::window::Id, pos: Point, size: Size, ori
         tv::Hit::AddFieldCol => CellAction::AddFieldMenu,
         tv::Hit::Status(c) => CellAction::StatMenu { field_id: s.data.fields[c].id.clone() },
         tv::Hit::HeaderMenu(c) => CellAction::FieldMenu { field_id: s.data.fields[c].id.clone() },
-        tv::Hit::NewRow => {
-            push_undo(s);
-            ops::add_row(&mut s.data, nanoid::nanoid!());
-            s.touch();
-            CellAction::None
-        }
+        tv::Hit::NewRow => CellAction::NewRow,
         tv::Hit::Header(c) => {
             s.view.editing = None;
             s.view.selection = Some(ops::TableSelection::Column(s.data.fields[c].id.clone()));
@@ -1339,6 +1468,15 @@ fn cell_press_plan(
         }
         return CellAction::None;
     }
+    if field_type == "ai" {
+        s.view.editing = None;
+        s.view.selection =
+            Some(ops::TableSelection::Cell { row_id: row_id.clone(), field_id: field_id.clone() });
+        if double {
+            return CellAction::OpenAiConfig { field_id };
+        }
+        return CellAction::None;
+    }
     if field_type == "singleSelect" {
         s.view.editing = None;
         s.view.selection =
@@ -1397,6 +1535,8 @@ enum CellAction {
     RemoveImage { row_id: String, field_id: String, index: usize },
     FieldMenu { field_id: String },
     StatMenu { field_id: String },
+    NewRow,
+    OpenAiConfig { field_id: String },
 }
 
 fn exec_cell_action(app: &mut App, window: iced::window::Id, action: CellAction, origin: Point) -> Task<Message> {
@@ -1428,6 +1568,18 @@ fn exec_cell_action(app: &mut App, window: iced::window::Id, action: CellAction,
             Task::none()
         }
         CellAction::BeginEdit { r, c, draft } => begin_edit_with(app, r, c, draft, true, false),
+        CellAction::NewRow => {
+            let id = {
+                let Some(s) = app.table.as_mut() else { return Task::none() };
+                push_undo(s);
+                let id = ops::add_row(&mut s.data, nanoid::nanoid!());
+                s.touch();
+                id
+            };
+            crate::table_ai::note_new_rows(app, &[id]);
+            Task::none()
+        }
+        CellAction::OpenAiConfig { field_id } => crate::table_ai::open_config(app, window, &field_id),
         CellAction::ShowBar { row_id, field_id } => {
             // 仍选中该格且未进入编辑 = 单击已选格（非双击首击），此时弹样式工具条
             let selected = app.table.as_ref().is_some_and(|s| {
@@ -2051,6 +2203,8 @@ pub fn commit_edit(app: &mut App) {
             s.touch();
         }
     }
+    let (row_id, field_id) = (edit.row_id, edit.field_id);
+    crate::table_ai::note_source_edit(app, &row_id, &field_id);
 }
 
 /// Enter 提交并下移一行（保持同列选中）。
@@ -2190,6 +2344,9 @@ fn on_paste(app: &mut App, text: String) -> Task<Message> {
     if grid.is_empty() {
         return Task::none();
     }
+    let mut pasted_rows: Vec<String> = Vec::new();
+    let mut pasted_fields: Vec<String> = Vec::new();
+    let mut created_rows: Vec<String> = Vec::new();
     with_session(app, |s| {
         if !table_active(s) {
             return;
@@ -2198,6 +2355,8 @@ fn on_paste(app: &mut App, text: String) -> Task<Message> {
             return;
         };
         push_undo(s);
+        let cols = grid.iter().map(Vec::len).max().unwrap_or(0);
+        let before = s.data.rows.len();
         if ops::apply_paste_grid(
             &mut s.data.fields,
             &mut s.data.rows,
@@ -2207,14 +2366,45 @@ fn on_paste(app: &mut App, text: String) -> Task<Message> {
             || nanoid::nanoid!(),
         ) {
             s.touch();
+            created_rows = s.data.rows[before..].iter().map(|row| row.id.clone()).collect();
+            pasted_rows = s.data.rows[region.row_start..]
+                .iter()
+                .take(grid.len())
+                .map(|row| row.id.clone())
+                .collect();
+            pasted_fields = s.data.fields[region.col_start..]
+                .iter()
+                .take(cols)
+                .map(|field| field.id.clone())
+                .collect();
         } else {
             drop_undo(s);
         }
     });
+    if !created_rows.is_empty() {
+        crate::table_ai::note_new_rows(app, &created_rows);
+    }
+    if !pasted_rows.is_empty() {
+        crate::table_ai::note_source_rows(app, &pasted_rows, &pasted_fields);
+    }
+    let pasted_ai = app.table.as_ref().is_some_and(|session| {
+        pasted_fields.iter().any(|id| {
+            session
+                .data
+                .fields
+                .iter()
+                .any(|field| &field.id == id && field.field_type == "ai")
+        })
+    });
+    if pasted_ai {
+        app.notify(NoticeLevel::Warning, "AI 字段为计算列，粘贴已跳过");
+    }
     Task::none()
 }
 
 fn on_clear_selection(app: &mut App) -> Task<Message> {
+    let mut cleared_rows: Vec<String> = Vec::new();
+    let mut cleared_fields: Vec<String> = Vec::new();
     with_session(app, |s| {
         if !table_active(s) {
             return;
@@ -2227,10 +2417,14 @@ fn on_clear_selection(app: &mut App) -> Task<Message> {
         for r in region.row_start..=region.row_end {
             for c in region.col_start..=region.col_end {
                 let field_id = s.data.fields[c].id.clone();
-                if s.data.fields[c].field_type == "image" {
+                if matches!(s.data.fields[c].field_type.as_str(), "image" | "ai") {
                     continue;
                 }
-                changed |= ops::set_cell_value(&mut s.data.rows[r], &field_id, None);
+                if ops::set_cell_value(&mut s.data.rows[r], &field_id, None) {
+                    changed = true;
+                    cleared_rows.push(s.data.rows[r].id.clone());
+                    cleared_fields.push(field_id);
+                }
             }
         }
         if changed {
@@ -2239,6 +2433,13 @@ fn on_clear_selection(app: &mut App) -> Task<Message> {
             drop_undo(s);
         }
     });
+    cleared_rows.sort();
+    cleared_rows.dedup();
+    cleared_fields.sort();
+    cleared_fields.dedup();
+    if !cleared_rows.is_empty() {
+        crate::table_ai::note_source_rows(app, &cleared_rows, &cleared_fields);
+    }
     Task::none()
 }
 

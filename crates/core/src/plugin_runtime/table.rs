@@ -97,6 +97,7 @@ mod tests {
                 options: Some(vec!["甲".into(), "乙".into()]),
                 width: Some(180.0),
                 calc_type: None,
+                ai: None,
             }],
             rows: vec![SourceRow {
                 id: "r1".into(),
@@ -108,6 +109,7 @@ mod tests {
                         .unwrap()
                         .clone(),
                 ),
+                ai: None,
             }],
             created_at: 0,
             updated_at: 0,

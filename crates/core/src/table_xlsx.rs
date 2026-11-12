@@ -66,7 +66,7 @@ pub fn export_table_xlsx(table: &TableFile, root: Option<&Path>, target_path: &P
                         }
                     }
                 }
-                "text" => {
+                "text" | "ai" => {
                     if let Some(s) = value.as_str() {
                         let _ = sheet.write_string_with_format(excel_row, col, s, &wrap_fmt);
                     }
@@ -192,6 +192,7 @@ mod tests {
             options: None,
             width: None,
             calc_type: None,
+            ai: None,
         };
         let field_image = crate::vault::TableField {
             id: "f2".into(),
@@ -200,11 +201,12 @@ mod tests {
             options: None,
             width: None,
             calc_type: None,
+            ai: None,
         };
         let mut values = serde_json::Map::new();
         values.insert("f1".into(), serde_json::json!("单元值"));
         values.insert("f2".into(), serde_json::json!({ "images": ["缺失.png"] }));
-        let row = crate::vault::TableRow { id: "r1".into(), values, height: None, styles: None };
+        let row = crate::vault::TableRow { id: "r1".into(), values, height: None, styles: None, ai: None };
         let table = crate::vault::TableFile {
             schema: crate::vault::TABLE_SCHEMA.into(),
             id: "t1".into(),

@@ -611,6 +611,7 @@ mod tests {
             options: None,
             width: None,
             calc_type: None,
+            ai: None,
         }
     }
 
@@ -620,6 +621,7 @@ mod tests {
             values: values.iter().map(|(k, v)| ((*k).to_string(), v.clone())).collect(),
             height: None,
             styles: None,
+            ai: None,
         }
     }
 

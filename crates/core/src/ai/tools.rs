@@ -2346,6 +2346,7 @@ mod tests {
                     options: None,
                     width: None,
                     calc_type: None,
+                    ai: None,
                 },
                 crate::vault::TableField {
                     id: "f2".into(),
@@ -2354,6 +2355,7 @@ mod tests {
                     options: Some(vec!["待办".into(), "完成".into()]),
                     width: None,
                     calc_type: None,
+                    ai: None,
                 },
             ],
             rows: vec![crate::vault::TableRow {
@@ -2361,6 +2363,7 @@ mod tests {
                 values: Default::default(),
                 height: None,
                 styles: None,
+                ai: None,
             }],
             created_at: 0,
             updated_at: 0,

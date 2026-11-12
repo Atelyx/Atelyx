@@ -16,4 +16,8 @@ pub mod refs;
 pub mod session;
 pub mod session_io;
 pub mod stream;
+pub mod table_field;
+
+/// 单元格生成复用的 HTTP 客户端句柄（同一批次共享连接池）。
+pub type AiClient = reqwest::Client;
 pub mod tools;
