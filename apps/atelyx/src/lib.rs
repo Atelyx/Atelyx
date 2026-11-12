@@ -3961,6 +3961,10 @@ impl App {
                         if let Some(t) = self.table.as_mut() {
                             t.rebuild_layout();
                         }
+                        // 画布世界层字号由 fs_* 实时取基字号，内容缓存须显式作废
+                        if let Some(c) = self.canvas.as_mut() {
+                            c.redraw();
+                        }
                         self.save_global_now();
                     }
                 }
