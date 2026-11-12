@@ -470,7 +470,8 @@ fn on_input(app: &mut App, node_id: &str, event: crate::chat_input::InputEvent) 
         InputEvent::Redo => chat.draft.redo_step(),
         InputEvent::Send => {
             let node = node_id.to_string();
-            let _ = send(app, &node);
+            // 发送任务必须交回 Elm 运行时：丢弃会既不发送，也不归还已取走的附件与引用
+            return send(app, &node).chain(sync_mention_picker(app, &node));
         }
         InputEvent::PickerNav(delta) => {
             if let Some(p) = &mut chat.mention_picker {
