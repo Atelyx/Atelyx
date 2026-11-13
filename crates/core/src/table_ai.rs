@@ -221,7 +221,20 @@ pub fn fingerprint(field: &TableField, fields: &[TableField], row: &TableRow) ->
 
 /// 影响模型输出的配置是否一致（自动开关不改变输出，不应作废在途结果）。
 pub fn same_output_config(a: &AiFieldConfig, b: &AiFieldConfig) -> bool {
-    a.system == b.system && a.prompt == b.prompt && a.output == b.output
+    a.system == b.system
+        && a.prompt == b.prompt
+        && a.output == b.output
+        && model_descriptor(a) == model_descriptor(b)
+}
+
+/// 指定模型的指纹描述；跟随默认返回 None（默认模型在设置里切换不追溯既有结果）。
+fn model_descriptor(config: &AiFieldConfig) -> Option<String> {
+    match (config.provider_id.as_deref(), config.model.as_deref()) {
+        (Some(provider), Some(model)) if !provider.is_empty() && !model.is_empty() => {
+            Some(format!("{provider}/{model}"))
+        }
+        _ => None,
+    }
 }
 
 /// 以冻结的配置计算指纹（批次在途时用发起时的配置，避免配置中途变更导致口径不一致）。
@@ -241,6 +254,10 @@ pub fn fingerprint_with_config(
     hasher.update(normalize_refs(&config.prompt, fields).as_bytes());
     hasher.update([0]);
     hasher.update(config.output.as_bytes());
+    if let Some(model) = model_descriptor(config) {
+        hasher.update([0]);
+        hasher.update(model.as_bytes());
+    }
     for reference in &refs {
         let field = fields.iter().find(|f| f.id == reference.field_id)?;
         hasher.update([0]);
@@ -494,6 +511,22 @@ mod tests {
     }
 
     #[test]
+    fn fingerprint_changes_with_explicit_model() {
+        let mut target = ai_field("#画面");
+        let fields = vec![field("f1", "画面", "text")];
+        let row = row(&[("f1", json!("甲"))]);
+        let follow_default = fingerprint(&target, &fields, &row).expect("指纹");
+        let config = target.ai.as_mut().expect("配置");
+        config.provider_id = Some("p1".into());
+        config.model = Some("m1".into());
+        assert_ne!(follow_default, fingerprint(&target, &fields, &row).expect("指纹"));
+        // 同一显式模型不变；只换模型即视为输入变化
+        let with_m1 = fingerprint(&target, &fields, &row).expect("指纹");
+        target.ai.as_mut().unwrap().model = Some("m2".into());
+        assert_ne!(with_m1, fingerprint(&target, &fields, &row).expect("指纹"));
+    }
+
+    #[test]
     fn rename_retargets_refs_without_touching_other_text() {
         let old_fields = vec![field("f1", "画面描述", "text"), field("f2", "镜头", "text")];
         let prompt = "根据#画面描述和#镜头写";
@@ -523,12 +556,16 @@ mod tests {
             system: AiSystem::Note { path: "提示词/分镜.md".into() },
             prompt: "#画面".into(),
             output: "short".into(),
+            provider_id: Some("p1".into()),
+            model: Some("m1".into()),
             auto_new_row: true,
             auto_source_change: false,
         };
         let value = serde_json::to_value(&config).expect("序列化");
         assert_eq!(value["system"]["kind"], serde_json::json!("note"));
         assert_eq!(value["system"]["path"], serde_json::json!("提示词/分镜.md"));
+        assert_eq!(value["providerId"], serde_json::json!("p1"));
+        assert_eq!(value["model"], serde_json::json!("m1"));
         assert_eq!(value["autoNewRow"], serde_json::json!(true));
         assert_eq!(value["autoSourceChange"], serde_json::json!(false));
         let back: AiFieldConfig = serde_json::from_value(value).expect("反序列化");

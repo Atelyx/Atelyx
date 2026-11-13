@@ -58,6 +58,8 @@ fn wrap_width(cell_w: f32, zoom: f32) -> f32 {
 }
 
 const COL_HANDLE_W: f32 = 8.0;
+/// 字段拖拽排序把手宽度（px，表头左缘；与行号列 grip 同形）。
+const FIELD_GRIP_W: f32 = 16.0;
 const ROW_HANDLE_H: f32 = 6.0;
 /// 按压转框选 / 行拖拽排序的位移阈值（px）。
 pub const DRAG_THRESHOLD: f32 = 5.0;
@@ -484,6 +486,7 @@ pub struct TableViewState {
     pub col_drag: Option<ColDrag>,
     pub row_drag: Option<RowDrag>,
     pub reorder: Option<RowReorder>,
+    pub field_reorder: Option<FieldReorder>,
     pub img_drag: Option<ImageDrag>,
     pub swipe: Option<SwipeState>,
     /// 光标位置（画布局部；hover 表达用）。
@@ -633,6 +636,15 @@ pub struct RowDrag {
 
 pub struct RowReorder {
     pub row_id: String,
+    pub from: usize,
+    pub insert_at: usize,
+    pub active: bool,
+    pub start: Point,
+}
+
+/// 字段拖拽排序会话（表头 grip 起手；位移超阈值才进入排序）。
+pub struct FieldReorder {
+    pub field_id: String,
     pub from: usize,
     pub insert_at: usize,
     pub active: bool,
@@ -988,7 +1000,7 @@ pub enum TableMsg {
     // AI 字段
     /// 按列内筛选口径生成（全部 / 空值 / 待更新 / 失败）。
     AiStart { field_id: String, filter: atelyx_core::table_ai::AiRowFilter },
-    /// 指定行生成（试跑 / 右键更新选中行）。
+    /// 指定行生成（右键更新选中行）。
     AiStartRows { field_id: String, rows: Vec<String> },
     AiStop,
     AiOpenConfig { window: iced::window::Id, field_id: String },
@@ -1010,7 +1022,10 @@ pub enum TableMsg {
     AiDraftAutoSource(bool),
     AiDraftInsert(String),
     AiDraftToggleFields,
-    AiSaveConfig { trial: bool },
+    /// 选择该字段的生成模型（None = 跟随仓库默认模型）。
+    AiDraftModelPick { provider_id: Option<String>, model: Option<String> },
+    AiDraftToggleModels,
+    AiSaveConfig,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1231,6 +1246,8 @@ pub enum Hit {
     Header(usize),
     HeaderMenu(usize),
     HeaderResize(usize),
+    /// 表头左缘的字段拖拽排序把手。
+    HeaderGrip(usize),
     AddFieldCol,
     Gutter(usize),
     /// 行号格底部行高把手。
@@ -1260,6 +1277,7 @@ pub fn hit_at(g: &Geo, pos: Point) -> Hit {
         }
         if let Some(c) = g.col_at(cx) {
             let right = g.cache.col_x[c] + g.cache.col_w[c];
+            let left = g.cache.col_x[c];
             let local_x = pos.x - g.gutter_w() + g.session.view.scroll_x;
             // 拖宽把手（右缘 8px）先于 ⋮ 菜单（其左侧 10px）判定：两者区间相邻不重叠
             if local_x > right - COL_HANDLE_W * g.z {
@@ -1267,6 +1285,9 @@ pub fn hit_at(g: &Geo, pos: Point) -> Hit {
             }
             if local_x > right - FIELD_BTN_W * g.z {
                 return Hit::HeaderMenu(c);
+            }
+            if local_x < left + FIELD_GRIP_W * g.z {
+                return Hit::HeaderGrip(c);
             }
             return Hit::Header(c);
         }
@@ -1823,7 +1844,7 @@ impl canvas::Program<Message> for TableView<'_> {
         match hit_at(&g, p) {
             Hit::GutterHandle(_) => iced::mouse::Interaction::ResizingRow,
             Hit::HeaderResize(_) => iced::mouse::Interaction::ResizingColumn,
-            Hit::GutterGrip(_) => iced::mouse::Interaction::Grab,
+            Hit::GutterGrip(_) | Hit::HeaderGrip(_) => iced::mouse::Interaction::Grab,
             _ => iced::mouse::Interaction::default(),
         }
     }
@@ -2051,6 +2072,23 @@ fn draw_table(
             frame.fill_rectangle(Point::new(g.gutter_w(), y - 1.0), Size::new(w - g.gutter_w(), 2.0), pal::ACCENT);
         }
     }
+    // 字段拖拽插入线（表头以下的内容区；表头带体由 chrome 覆盖层绘制，线画上去会被盖掉）
+    if let Some(reo) = &view.field_reorder {
+        if reo.active {
+            let x = field_insert_line_x(&g, reo.insert_at);
+            let top = g.header_h();
+            let bottom = g.rows_viewport_bottom();
+            if x >= g.gutter_w() && x <= g.cols_viewport_right() && bottom > top {
+                frame.fill_rectangle(Point::new(x - 1.0, top), Size::new(2.0, bottom - top), pal::ACCENT);
+            }
+        }
+    }
+}
+
+/// 字段插入线 x（画布局部坐标）：插入位左缘；列尾取最后一列右缘。
+fn field_insert_line_x(g: &Geo, at: usize) -> f32 {
+    let x = g.cache.col_x.get(at).copied().unwrap_or_else(|| g.cols_w());
+    x - g.session.view.scroll_x + g.gutter_w()
 }
 
 /// 远端选区 → 行列区域（行 / 字段 id 已失效的条目跳过：对端删行后自然不画）。
@@ -2386,26 +2424,37 @@ fn draw_header(session: &TableSession, g: &Geo, frame: &mut canvas::Frame) {
             if col_selected {
                 frame.fill_rectangle(Point::new(x, 0.0), Size::new(w, h), pal::ACCENT_SOFT);
             }
+            let grip_w = FIELD_GRIP_W * g.z;
+            // 列左缘滚出行号列右缘后把手不再画：避免压到固定的角钮区
+            if x >= g.gutter_w() {
+                draw_icon(
+                    frame,
+                    "grip-horizontal",
+                    Point::new(x + 4.0 * g.z, (h - 10.0 * g.z) / 2.0),
+                    10.0 * g.z,
+                    if col_selected { pal::TEXT_SECONDARY } else { pal::BORDER_STRONG },
+                );
+            }
             let ai_mark = atelyx_core::table_ai::is_ai(field);
             let mark_w = if ai_mark { 15.0 * g.z } else { 0.0 };
             if ai_mark {
                 draw_icon(
                     frame,
                     "bot",
-                    Point::new(x + CELL_PAD_X * g.z, (h - 12.0 * g.z) / 2.0),
+                    Point::new(x + grip_w + CELL_PAD_X * g.z, (h - 12.0 * g.z) / 2.0),
                     12.0 * g.z,
                     pal::TEXT_MUTED,
                 );
             }
             let name = ellipsize_text(
                 &field.name,
-                w - 2.0 * CELL_PAD_X * g.z - FIELD_BTN_W * g.z - mark_w,
+                w - grip_w - 2.0 * CELL_PAD_X * g.z - FIELD_BTN_W * g.z - mark_w,
                 font_size,
             );
             fill_text(
                 frame,
                 &name,
-                Point::new(x + CELL_PAD_X * g.z + mark_w, (h - font_size * LINE_FACTOR) / 2.0),
+                Point::new(x + grip_w + CELL_PAD_X * g.z + mark_w, (h - font_size * LINE_FACTOR) / 2.0),
                 font_size,
                 ui_font(),
                 pal::TEXT_SECONDARY,
@@ -2419,6 +2468,15 @@ fn draw_header(session: &TableSession, g: &Geo, frame: &mut canvas::Frame) {
     }
     draw_add_field_col(g, frame, view, h);
     frame.fill_rectangle(Point::new(0.0, h - 1.0), Size::new(g.width, 1.0), pal::BORDER);
+    // 字段拖拽插入线：表头带体内补一段（内容区的线由主体画布绘制，覆盖层会压住表头部分）
+    if let Some(reo) = &view.field_reorder {
+        if reo.active {
+            let x = field_insert_line_x(g, reo.insert_at);
+            if x >= g.gutter_w() && x <= g.cols_viewport_right() {
+                frame.fill_rectangle(Point::new(x - 1.0, 0.0), Size::new(2.0, h), pal::ACCENT);
+            }
+        }
+    }
 }
 
 /// 表头右端的「添加字段」列（贴在最后可见列之后）。
@@ -4180,6 +4238,16 @@ mod tests {
         }
         // 三种命中在同一行高内都出现：菜单入口覆盖整列，不是只剩行号那一档
         assert!(kinds.contains(&0) && kinds.contains(&1) && kinds.contains(&2), "三种行级命中都应可达：{kinds:?}");
+    }
+
+    /// 表头左缘是字段拖拽把手，其余名称区仍是列选中 / 右键列菜单。
+    #[test]
+    fn header_grip_and_name_zone_are_distinct() {
+        let s = text_session(&["a"]);
+        let g = geo(&s, Size::new(800.0, 600.0));
+        let y = g.header_h() / 2.0;
+        assert!(matches!(hit_at(&g, Point::new(g.gutter_w() + 4.0, y)), Hit::HeaderGrip(0)));
+        assert!(matches!(hit_at(&g, Point::new(g.gutter_w() + 40.0, y)), Hit::Header(0)));
     }
 
     /// 状态栏计算随布局重建：编辑后计数即时变，不靠绘制时重算。

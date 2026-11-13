@@ -36,10 +36,13 @@ pub struct AiDraft {
     pub note: String,
     pub prompt: text_editor::Content,
     pub output: String,
+    /// 生成模型（供应商 id + 模型 id；None = 跟随仓库默认模型）。
+    pub provider_id: Option<String>,
+    pub model: Option<String>,
     pub auto_new: bool,
     pub auto_source: bool,
     pub show_fields: bool,
-    pub error: Option<String>,
+    pub show_models: bool,
 }
 
 /// 一次生成批次的固定输入（配置在发起时冻结；提交前按指纹复核）。
@@ -61,6 +64,9 @@ pub struct AiBatch {
     pub spec: AiRunSpec,
     /// 发起时冻结的字段配置（在途中改配置 = 结果作废）。
     pub config: AiFieldConfig,
+    /// 发起时各待生成格的取值（行 id → 值）：批次期间被改写（手动编辑 / 远端补丁）的格
+    /// 不再派发，回执也不落地——用户内容优先于模型输出。
+    pub baseline: HashMap<String, Option<serde_json::Value>>,
     pub client: atelyx_core::ai::AiClient,
 }
 
@@ -99,7 +105,6 @@ pub struct TableAiState {
     pub auto_due: BTreeSet<(String, String)>,
     /// 本端新增、尚未生成过结果的行（「新增行时生成」的触发范围）。
     pub fresh_rows: HashSet<String>,
-    pub hint_shown: bool,
 }
 
 impl TableAiState {
@@ -154,10 +159,12 @@ fn draft_for(field: &TableField) -> AiDraft {
         } else {
             vault::AI_OUTPUT_LONG.to_string()
         },
+        provider_id: config.provider_id.clone(),
+        model: config.model.clone(),
         auto_new: config.auto_new_row,
         auto_source: config.auto_source_change,
         show_fields: false,
-        error: None,
+        show_models: false,
     }
 }
 
@@ -184,8 +191,8 @@ pub fn insert_ref(app: &mut App, field_id: &str) {
     }
 }
 
-/// 保存草稿；trial = 保存后立即对选中行试跑。
-pub fn save_draft(app: &mut App, trial: bool) -> Task<Message> {
+/// 保存草稿：允许留下未填项（配置可先存下，缺项在生成 / 更新时再报错）。
+pub fn save_draft(app: &mut App) -> Task<Message> {
     if matches!(&app.repo_kind, RepoKind::Space(space) if !space.role.can_write()) {
         app.notify(crate::ui::notify::Level::Warning, "该空间为只读身份，无法修改 AI 字段");
         return Task::none();
@@ -197,18 +204,7 @@ pub fn save_draft(app: &mut App, trial: bool) -> Task<Message> {
         return Task::none();
     };
     let config = config_from_draft(draft);
-    let mut candidate = field.clone();
-    candidate.ai = Some(config.clone());
-    if let Err(error) = ai::validate(&candidate, &session.data.fields) {
-        if let Some(session) = app.table.as_mut() {
-            if let Some(draft) = session.view.ai.draft.as_mut() {
-                draft.error = Some(error);
-            }
-        }
-        return Task::none();
-    }
     let changed = field.ai.as_ref() != Some(&config);
-    let rows = if trial { selected_rows(session, &field_id) } else { Vec::new() };
     let mut stopped = false;
     if changed {
         if let Some(session) = app.table.as_mut() {
@@ -243,14 +239,7 @@ pub fn save_draft(app: &mut App, trial: bool) -> Task<Message> {
         session.view.ai.draft = None;
     }
     app.dismiss_popup();
-    if !trial {
-        return Task::none();
-    }
-    if rows.is_empty() {
-        app.notify(crate::ui::notify::Level::Warning, "先选中要试跑的行，或直接点字段菜单里的生成");
-        return Task::none();
-    }
-    start_rows(app, &field_id, rows)
+    Task::none()
 }
 
 fn config_from_draft(draft: &AiDraft) -> AiFieldConfig {
@@ -263,40 +252,31 @@ fn config_from_draft(draft: &AiDraft) -> AiFieldConfig {
         system,
         prompt: draft.prompt.text(),
         output: draft.output.clone(),
+        provider_id: draft.provider_id.clone(),
+        model: draft.model.clone(),
         auto_new_row: draft.auto_new,
         auto_source_change: draft.auto_source,
     }
 }
 
-/// 当前选区涉及的行（单格 / 区域 / 整行 / 整列 / 全表）；不含该字段时返回空。
-pub fn selected_rows(session: &tv::TableSession, field_id: &str) -> Vec<String> {
-    let Some(region) = atelyx_core::table_ops::region_of(
-        session.view.selection.as_ref(),
-        &session.data.fields,
-        &session.data.rows,
-    ) else {
-        return Vec::new();
-    };
-    let Some(field_index) = session.data.fields.iter().position(|f| f.id == field_id) else {
-        return Vec::new();
-    };
-    if field_index < region.col_start || field_index > region.col_end {
-        return Vec::new();
-    }
-    session.data.rows[region.row_start..=region.row_end]
-        .iter()
-        .map(|row| row.id.clone())
-        .collect()
-}
-
 /// 列内的生成入口：按筛选口径取行（全部 / 空值 / 待更新 / 失败）。
+/// 配置合法性在这里报错：保存配置不拦缺项，生成时才要求填全。
 pub fn start_filtered(app: &mut App, field_id: &str, filter: ai::AiRowFilter) -> Task<Message> {
-    let rows = match app.table.as_ref() {
+    let picked = match app.table.as_ref() {
         Some(session) => match session.data.fields.iter().find(|f| f.id == field_id) {
-            Some(field) => ai::filter_rows(field, &session.data.fields, &session.data.rows, filter),
-            None => Vec::new(),
+            Some(field) => ai::validate(field, &session.data.fields).map(|_| {
+                ai::filter_rows(field, &session.data.fields, &session.data.rows, filter)
+            }),
+            None => Ok(Vec::new()),
         },
-        None => Vec::new(),
+        None => Ok(Vec::new()),
+    };
+    let rows = match picked {
+        Ok(rows) => rows,
+        Err(error) => {
+            app.notify(crate::ui::notify::Level::Warning, error);
+            return Task::none();
+        }
     };
     if rows.is_empty() {
         app.notify(crate::ui::notify::Level::Warning, "没有可生成的行（引用列为空或配置不完整）");
@@ -445,7 +425,7 @@ pub fn launch(app: &mut App, field_id: &str, rows: Vec<String>, system: Option<S
     if session.view.ai.batch.is_some() {
         return Task::none();
     }
-    let (provider_id, model) = match default_model(app) {
+    let (provider_id, model) = match config_model(app, &config) {
         Ok(pick) => pick,
         Err(error) => {
             app.notify(crate::ui::notify::Level::Warning, error);
@@ -477,6 +457,17 @@ pub fn launch(app: &mut App, field_id: &str, rows: Vec<String>, system: Option<S
     let system = system.map(|text| text.chars().take(SYSTEM_NOTE_CHAR_CAP).collect::<String>());
     let file = session.file.clone();
     let gen = app.epoch();
+    let baseline: HashMap<String, Option<serde_json::Value>> = rows
+        .iter()
+        .filter_map(|id| {
+            session
+                .data
+                .rows
+                .iter()
+                .find(|r| &r.id == id)
+                .map(|row| (id.clone(), row.values.get(field_id).cloned()))
+        })
+        .collect();
     let Some(session) = app.table.as_mut() else { return Task::none() };
     let id = session.view.ai.next_id();
     let total = rows.len();
@@ -503,22 +494,66 @@ pub fn launch(app: &mut App, field_id: &str, rows: Vec<String>, system: Option<S
         pushed_undo: false,
         spec,
         config,
+        baseline,
         client,
     });
     pump(app)
 }
 
-fn default_model(app: &App) -> Result<(String, String), String> {
-    match (&app.repo_config.model, &app.repo_config.model_provider_id) {
-        (Some(model), Some(provider)) if !model.trim().is_empty() && !provider.trim().is_empty() => {
-            Ok((provider.clone(), model.clone()))
+/// 字段指定的模型优先；未指定回落仓库默认模型。
+fn config_model(app: &App, config: &AiFieldConfig) -> Result<(String, String), String> {
+    match (config.provider_id.as_deref(), config.model.as_deref()) {
+        (Some(provider), Some(model)) if !provider.trim().is_empty() && !model.trim().is_empty() => {
+            Ok((provider.to_string(), model.to_string()))
         }
-        _ => Err("未设置默认模型：请在「设置 → AI」里选择模型".to_string()),
+        _ => match (&app.repo_config.model, &app.repo_config.model_provider_id) {
+            (Some(model), Some(provider))
+                if !model.trim().is_empty() && !provider.trim().is_empty() =>
+            {
+                Ok((provider.clone(), model.clone()))
+            }
+            _ => Err("未设置模型：在 AI 字段设置里选择模型，或在「设置 → AI」里设置默认模型"
+                .to_string()),
+        },
     }
 }
 
-/// 泵出请求：保持至多 CONCURRENCY 个在途，回执按批次 id 与输入指纹守卫。
+/// 泵出请求：保持至多 CONCURRENCY 个在途，回执按批次 id、输入指纹与格值守卫。
 pub fn pump(app: &mut App) -> Task<Message> {
+    // 发起后被改写的格（手动编辑 / 远端补丁）不再派发：用户内容优先于模型输出
+    let (dropped, settled) = {
+        let Some(session) = app.table.as_mut() else { return Task::none() };
+        let Some(batch) = session.view.ai.batch.as_mut() else { return Task::none() };
+        if batch.cancelled {
+            return Task::none();
+        }
+        let field_id = batch.field_id.clone();
+        let rows = &session.data.rows;
+        let mut queue = std::mem::take(&mut batch.queue);
+        let mut dropped = 0usize;
+        queue.retain(|row_id| {
+            let same = batch.baseline.get(row_id).is_some_and(|before| {
+                rows.iter()
+                    .find(|row| &row.id == row_id)
+                    .is_some_and(|row| {
+                        atelyx_core::table_ops::cell_value_equal(
+                            row.values.get(&field_id),
+                            before.as_ref(),
+                        )
+                    })
+            });
+            if !same {
+                dropped += 1;
+            }
+            same
+        });
+        batch.queue = queue;
+        batch.skipped += dropped;
+        (dropped, batch.queue.is_empty() && batch.running == 0)
+    };
+    if dropped > 0 && settled {
+        return finish(app);
+    }
     // 队列里已没有任何「行还在 + 配置可算指纹」的项：清空并收尾，避免批次空转
     let dispatchable = {
         let Some(session) = app.table.as_ref() else { return Task::none() };
@@ -661,9 +696,17 @@ pub fn on_cell_done(
             let same_config = field
                 .and_then(|field| field.ai.as_ref())
                 .is_some_and(|config| ai::same_output_config(config, &batch.config));
+            // 发起后该格又被写过（手动编辑 / 远端补丁）＝ 结果作废，不用模型输出覆盖用户内容
+            let row = session.data.rows.iter().find(|r| r.id == row_id);
+            let value_same = row.is_some_and(|row| {
+                batch.baseline.get(&row_id).is_some_and(|before| {
+                    atelyx_core::table_ops::cell_value_equal(row.values.get(&field_id), before.as_ref())
+                })
+            });
             let matches = same_config
+                && value_same
                 && field
-                    .zip(session.data.rows.iter().find(|r| r.id == row_id))
+                    .zip(row)
                     .and_then(|(_, row)| {
                         ai::fingerprint_with_config(&batch.config, &session.data.fields, row)
                     })
@@ -772,7 +815,7 @@ pub fn finish(app: &mut App) -> Task<Message> {
     } else if failed == 0 && skipped == 0 {
         app.notify(crate::ui::notify::Level::Success, format!("AI 生成完成：{done} 格"));
     } else {
-        let level = if done == 0 {
+        let level = if done == 0 && failed > 0 {
             crate::ui::notify::Level::Error
         } else {
             crate::ui::notify::Level::Warning

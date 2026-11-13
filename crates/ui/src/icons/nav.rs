@@ -60,6 +60,15 @@ const GRIP_VERTICAL: &[Shape] = &[
     Shape::circle(15.0, 12.0, 1.0),
     Shape::circle(15.0, 19.0, 1.0),
 ];
+/// 两列三点横排（表格字段拖拽把手）。
+const GRIP_HORIZONTAL: &[Shape] = &[
+    Shape::circle(9.0, 9.0, 1.0),
+    Shape::circle(15.0, 9.0, 1.0),
+    Shape::circle(9.0, 12.0, 1.0),
+    Shape::circle(15.0, 12.0, 1.0),
+    Shape::circle(9.0, 15.0, 1.0),
+    Shape::circle(15.0, 15.0, 1.0),
+];
 const MAXIMIZE: &[Shape] = &[
     Shape::poly(&[[9.0, 3.0], [5.0, 3.0], [3.0, 5.0], [3.0, 9.0]]),
     Shape::poly(&[[15.0, 3.0], [19.0, 3.0], [21.0, 5.0], [21.0, 9.0]]),
@@ -111,6 +120,7 @@ pub(super) const ICONS: &[(&str, &[Shape])] = &[
     ("more-horizontal", THREE_DOTS),
     ("ellipsis", THREE_DOTS),
     ("grip-vertical", GRIP_VERTICAL),
+    ("grip-horizontal", GRIP_HORIZONTAL),
     ("maximize", MAXIMIZE),
     ("minimize", MINIMIZE),
     ("expand", EXPAND),

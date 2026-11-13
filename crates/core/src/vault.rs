@@ -1088,6 +1088,12 @@ pub struct AiFieldConfig {
     pub prompt: String,
     /// 输出规格：short（≤120 字，单行）/ long（≤2000 字，多行）。
     pub output: String,
+    /// 生成所用模型所属供应商（缺省 = 跟随仓库默认模型）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_id: Option<String>,
+    /// 生成所用模型 id（缺省 = 跟随仓库默认模型）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     /// 新增行自动生成。
     pub auto_new_row: bool,
     /// 引用列在本行变化时自动更新。
@@ -1107,6 +1113,8 @@ impl Default for AiFieldConfig {
             system: AiSystem::Inline { text: DEFAULT_AI_SYSTEM.to_string() },
             prompt: String::new(),
             output: AI_OUTPUT_LONG.to_string(),
+            provider_id: None,
+            model: None,
             auto_new_row: false,
             auto_source_change: false,
         }

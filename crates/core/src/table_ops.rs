@@ -202,6 +202,16 @@ pub fn set_cell_value(row: &mut TableRow, field_id: &str, v: Option<Value>) -> b
     true
 }
 
+/// 手动改写 AI 字段单元格后清掉该格生成记录：值不再由模型产出，状态回到未生成 / 待更新。
+pub fn clear_cell_ai_meta(row: &mut TableRow, field_id: &str) {
+    if let Some(map) = &mut row.ai {
+        map.remove(field_id);
+        if map.is_empty() {
+            row.ai = None;
+        }
+    }
+}
+
 /// 数值显示：整数原样，小数保留两位去尾 0（状态栏计算口径）；round 链路可能产 -0.0，加 0.0 规格化。
 fn format_calc_number(n: f64) -> String {
     format!("{}", (n * 100.0).round() / 100.0 + 0.0)
@@ -424,9 +434,9 @@ pub fn parse_tsv(text: &str) -> Vec<Vec<String>> {
     lines
 }
 
-/// 粘贴值强转：text 原串（空 → None）；number/duration 数值化（非有限数/空 → None）。
+/// 粘贴值强转：text / AI 原串（空 → None）；number/duration 数值化（非有限数/空 → None）。
 fn coerce_paste_value(raw: &str, field: &TableField) -> Option<Value> {
-    if field.field_type == "text" {
+    if field.field_type == "text" || field.field_type == crate::table_ai::FIELD_TYPE {
         return if raw.is_empty() { None } else { Some(Value::String(raw.to_string())) };
     }
     let t = raw.trim();
@@ -437,8 +447,9 @@ fn coerce_paste_value(raw: &str, field: &TableField) -> Option<Value> {
 }
 
 /// 把粘贴网格应用到锚点 (anchor_row, anchor_col) 右下展开：越界自动补行（空行）/补列
-/// （text 字段「字段N」）；按目标字段类型强转（singleSelect 命中选项才写否则跳过、image 跳过）；
-/// 空格清空目标格。返回是否实际写入（全跳过/全空 = false，调用方丢弃补出的空行/空列不置脏）。
+/// （text 字段「字段N」）；按目标字段类型强转（singleSelect 命中选项才写否则跳过、image 跳过、
+/// AI 按文本写入）；空格清空目标格。返回是否实际写入（全跳过/全空 = false，调用方丢弃补出的
+/// 空行/空列不置脏）。
 pub fn apply_paste_grid(
     fields: &mut Vec<TableField>,
     rows: &mut Vec<TableRow>,
@@ -474,7 +485,6 @@ pub fn apply_paste_grid(
         for (c, raw) in line.iter().enumerate() {
             let field = &fields[anchor_col + c];
             let next = match field.field_type.as_str() {
-                crate::table_ai::FIELD_TYPE => continue,
                 "singleSelect" => {
                     if raw.is_empty() {
                         None
@@ -488,6 +498,9 @@ pub fn apply_paste_grid(
                 _ => coerce_paste_value(raw, field),
             };
             if set_cell_value(row, &field.id, next) {
+                if field.field_type == crate::table_ai::FIELD_TYPE {
+                    clear_cell_ai_meta(row, &field.id);
+                }
                 row_changed = true;
             }
         }
@@ -772,6 +785,20 @@ pub fn move_row(table: &mut TableFile, row_id: &str, target: usize) -> bool {
     }
     let row = table.rows.remove(from);
     table.rows.insert(corrected, row);
+    true
+}
+
+/// 字段移动到目标插入位（target = 原数组语义的插入下标，越界钳制到表尾；from < target 时 -1
+/// 校正；校正后与原位相等 = 无操作返回 false，不入栈）。
+pub fn move_field(table: &mut TableFile, field_id: &str, target: usize) -> bool {
+    let Some(from) = table.fields.iter().position(|f| f.id == field_id) else { return false };
+    let target = target.min(table.fields.len());
+    let corrected = if from < target { target - 1 } else { target };
+    if corrected == from {
+        return false;
+    }
+    let field = table.fields.remove(from);
+    table.fields.insert(corrected, field);
     true
 }
 
@@ -1074,7 +1101,7 @@ mod tests {
     }
 
     #[test]
-    fn paste_skips_ai_column() {
+    fn paste_writes_ai_column_as_text() {
         let mut fields = vec![field("f1", "名称", "text"), {
             let mut f = field("f2", "提示词", "ai");
             f.ai = Some(Default::default());
@@ -1084,7 +1111,11 @@ mod tests {
         let grid = vec![vec!["甲".to_string(), "乙".to_string()]];
         assert!(apply_paste_grid(&mut fields, &mut rows, 0, 0, &grid, || "x".into()));
         assert_eq!(rows[0].values.get("f1"), Some(&Value::String("甲".into())));
-        assert!(rows[0].values.get("f2").is_none(), "AI 列应跳过粘贴");
+        assert_eq!(
+            rows[0].values.get("f2"),
+            Some(&Value::String("乙".into())),
+            "AI 列与文本列同口径接收粘贴"
+        );
     }
 
     #[test]
@@ -1364,6 +1395,26 @@ mod tests {
         // 越界下标钳到表尾（与表尾追加同落点）
         insert_row(&mut t, 9, "r8".into());
         assert_eq!(t.rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), vec!["r1", "r9", "r2", "r8"]);
+    }
+
+    #[test]
+    fn field_ops_move_between_columns() {
+        let mut t = table(
+            vec![field("f1", "a", "text"), field("f2", "b", "text"), field("f3", "c", "text")],
+            vec![],
+        );
+        let ids = |t: &TableFile| t.fields.iter().map(|f| f.id.clone()).collect::<Vec<_>>();
+        // 末列拖到表首
+        assert!(move_field(&mut t, "f3", 0));
+        assert_eq!(ids(&t), vec!["f3", "f1", "f2"]);
+        // 同行插入位（自身前后）= no-op
+        assert!(!move_field(&mut t, "f3", 0));
+        assert!(!move_field(&mut t, "f3", 1));
+        // 越界钳到表尾；首列拖到表尾
+        assert!(move_field(&mut t, "f3", 9));
+        assert_eq!(ids(&t), vec!["f1", "f2", "f3"]);
+        assert!(!move_field(&mut t, "f3", 9), "已在表尾");
+        assert!(!move_field(&mut t, "无此列", 0));
     }
 
     #[test]

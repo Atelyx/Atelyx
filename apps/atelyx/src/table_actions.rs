@@ -169,7 +169,8 @@ fn on_msg_open(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
                 }
                 let (r, ci) = selection_cell(s)?;
                 let type_ok = match s.data.fields[ci].field_type.as_str() {
-                    "text" => true,
+                    // AI 字段的已生成值可像文本一样直接改写
+                    "text" | "ai" => true,
                     "number" | "duration" => c.is_ascii_digit() || matches!(c, '-' | '.' | '+'),
                     _ => false,
                 };
@@ -178,22 +179,6 @@ fn on_msg_open(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
             if let Some((r, ci)) = hit {
                 // 初值即用户敲下的字符：会话已属「输入」，提交必须落值
                 return begin_edit_with(app, r, ci, c.to_string(), false, true);
-            }
-            let hint = app.table.as_mut().is_some_and(|s| {
-                let ai_selected = selection_cell(s)
-                    .is_some_and(|(_, ci)| atelyx_core::table_ai::is_ai(&s.data.fields[ci]));
-                if ai_selected && !s.view.ai.hint_shown {
-                    s.view.ai.hint_shown = true;
-                    true
-                } else {
-                    false
-                }
-            });
-            if hint {
-                app.notify(
-                    NoticeLevel::Warning,
-                    "AI 字段由模型生成：右键选「更新」，或双击打开字段设置",
-                );
             }
             Task::none()
         }
@@ -415,10 +400,7 @@ fn on_msg_open(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
             crate::table_ai::on_system_ready(app, gen, path, result)
         }
         tv::TableMsg::AiDraftSystemMode(mode) => {
-            crate::table_ai::edit_draft(app, |draft| {
-                draft.system_mode = mode;
-                draft.error = None;
-            });
+            crate::table_ai::edit_draft(app, |draft| draft.system_mode = mode);
             Task::none()
         }
         tv::TableMsg::AiDraftSystemEdited(action) => {
@@ -426,10 +408,7 @@ fn on_msg_open(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
             Task::none()
         }
         tv::TableMsg::AiDraftPromptEdited(action) => {
-            crate::table_ai::edit_draft(app, |draft| {
-                draft.prompt.perform(action);
-                draft.error = None;
-            });
+            crate::table_ai::edit_draft(app, |draft| draft.prompt.perform(action));
             Task::none()
         }
         tv::TableMsg::AiDraftNote(path) => {
@@ -459,7 +438,19 @@ fn on_msg_open(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
             crate::table_ai::edit_draft(app, |draft| draft.show_fields = !draft.show_fields);
             Task::none()
         }
-        tv::TableMsg::AiSaveConfig { trial } => crate::table_ai::save_draft(app, trial),
+        tv::TableMsg::AiDraftModelPick { provider_id, model } => {
+            crate::table_ai::edit_draft(app, |draft| {
+                draft.provider_id = provider_id;
+                draft.model = model;
+                draft.show_models = false;
+            });
+            Task::none()
+        }
+        tv::TableMsg::AiDraftToggleModels => {
+            crate::table_ai::edit_draft(app, |draft| draft.show_models = !draft.show_models);
+            Task::none()
+        }
+        tv::TableMsg::AiSaveConfig => crate::table_ai::save_draft(app),
         tv::TableMsg::OptionsAdd { field_id, name } => {
             let name = name.trim().to_string();
             if name.is_empty() {
@@ -1319,6 +1310,18 @@ fn on_press(app: &mut App, window: iced::window::Id, pos: Point, size: Size, ori
             s.view.selection = Some(ops::TableSelection::Column(s.data.fields[c].id.clone()));
             CellAction::None
         }
+        tv::Hit::HeaderGrip(c) => {
+            s.view.editing = None;
+            s.view.selection = Some(ops::TableSelection::Column(s.data.fields[c].id.clone()));
+            s.view.field_reorder = Some(tv::FieldReorder {
+                field_id: s.data.fields[c].id.clone(),
+                from: c,
+                insert_at: c + 1,
+                active: false,
+                start: pos,
+            });
+            CellAction::None
+        }
         tv::Hit::HeaderResize(c) => {
             let field = s.data.fields[c].clone();
             let start_w = field.width.unwrap_or_else(|| ops::field_default_width(&field.name));
@@ -1471,15 +1474,6 @@ fn cell_press_plan(
         }
         return CellAction::None;
     }
-    if field_type == "ai" {
-        s.view.editing = None;
-        s.view.selection =
-            Some(ops::TableSelection::Cell { row_id: row_id.clone(), field_id: field_id.clone() });
-        if double {
-            return CellAction::OpenAiConfig { field_id };
-        }
-        return CellAction::None;
-    }
     if field_type == "singleSelect" {
         s.view.editing = None;
         s.view.selection =
@@ -1539,7 +1533,6 @@ enum CellAction {
     FieldMenu { field_id: String },
     StatMenu { field_id: String },
     NewRow,
-    OpenAiConfig { field_id: String },
 }
 
 fn exec_cell_action(app: &mut App, window: iced::window::Id, action: CellAction, origin: Point) -> Task<Message> {
@@ -1582,7 +1575,6 @@ fn exec_cell_action(app: &mut App, window: iced::window::Id, action: CellAction,
             crate::table_ai::note_new_rows(app, &[id]);
             Task::none()
         }
-        CellAction::OpenAiConfig { field_id } => crate::table_ai::open_config(app, window, &field_id),
         CellAction::ShowBar { row_id, field_id } => {
             // 仍选中该格且未进入编辑 = 单击已选格（非双击首击），此时弹样式工具条
             let selected = app.table.as_ref().is_some_and(|s| {
@@ -1692,7 +1684,7 @@ fn on_context(app: &mut App, window: iced::window::Id, pos: Point, size: Size) -
             s.view.selection = Some(ops::TableSelection::All);
             Some(crate::layout_view::PopupState::TableSelectAllMenu)
         }
-        tv::Hit::Header(c) => {
+        tv::Hit::Header(c) | tv::Hit::HeaderGrip(c) => {
             s.view.editing = None;
             s.view.selection = Some(ops::TableSelection::Column(s.data.fields[c].id.clone()));
             Some(crate::layout_view::PopupState::TableColumnMenu { field_id: s.data.fields[c].id.clone() })
@@ -1860,13 +1852,33 @@ fn on_move(app: &mut App, window: iced::window::Id, pos: Point, size: Size, orig
             let g = tv::geo(s, size);
             let cy = g.content_y(pos.y);
             let mut at = s.data.rows.len();
-            for (i, y) in g.cache.row_y.iter().enumerate() {
+            for (i, y) in g.cache.row_y.iter().take(s.data.rows.len()).enumerate() {
                 if cy < y + g.cache.row_h[i] / 2.0 {
                     at = i;
                     break;
                 }
             }
             s.view.reorder.as_mut().expect("reorder 已判存在").insert_at = at;
+        }
+        return Task::none();
+    }
+    let field_reorder = s.view.field_reorder.as_ref().map(|r| (r.active, r.start));
+    if let Some((active, start)) = field_reorder {
+        if !active && distance(pos, start) > tv::DRAG_THRESHOLD {
+            s.view.field_reorder.as_mut().expect("field_reorder 已判存在").active = true;
+        }
+        let active = s.view.field_reorder.as_ref().is_some_and(|r| r.active);
+        if active {
+            let g = tv::geo(s, size);
+            let cx = g.content_x(pos.x);
+            let mut at = s.data.fields.len();
+            for (i, x) in g.cache.col_x.iter().take(s.data.fields.len()).enumerate() {
+                if cx < x + g.cache.col_w[i] / 2.0 {
+                    at = i;
+                    break;
+                }
+            }
+            s.view.field_reorder.as_mut().expect("field_reorder 已判存在").insert_at = at;
         }
         return Task::none();
     }
@@ -1951,6 +1963,17 @@ fn on_release(app: &mut App, pos: Point) -> Task<Message> {
         if reo.active {
             push_undo(s);
             if ops::move_row(&mut s.data, &reo.row_id, reo.insert_at) {
+                s.touch();
+            } else {
+                drop_undo(s);
+            }
+        }
+        return Task::none();
+    }
+    if let Some(reo) = s.view.field_reorder.take() {
+        if reo.active {
+            push_undo(s);
+            if ops::move_field(&mut s.data, &reo.field_id, reo.insert_at) {
                 s.touch();
             } else {
                 drop_undo(s);
@@ -2201,8 +2224,17 @@ pub fn commit_edit(app: &mut App) {
         return;
     }
     push_snapshot(s, session.snapshot);
+    let is_ai = s
+        .data
+        .fields
+        .iter()
+        .find(|f| f.id == edit.field_id)
+        .is_some_and(atelyx_core::table_ai::is_ai);
     if let Some(row) = s.data.rows.iter_mut().find(|r| r.id == edit.row_id) {
         if ops::set_cell_value(row, &edit.field_id, next) {
+            if is_ai {
+                ops::clear_cell_ai_meta(row, &edit.field_id);
+            }
             s.touch();
         }
     }
@@ -2390,18 +2422,6 @@ fn on_paste(app: &mut App, text: String) -> Task<Message> {
     if !pasted_rows.is_empty() {
         crate::table_ai::note_source_rows(app, &pasted_rows, &pasted_fields);
     }
-    let pasted_ai = app.table.as_ref().is_some_and(|session| {
-        pasted_fields.iter().any(|id| {
-            session
-                .data
-                .fields
-                .iter()
-                .any(|field| &field.id == id && field.field_type == "ai")
-        })
-    });
-    if pasted_ai {
-        app.notify(NoticeLevel::Warning, "AI 字段为计算列，粘贴已跳过");
-    }
     Task::none()
 }
 
@@ -2419,11 +2439,16 @@ fn on_clear_selection(app: &mut App) -> Task<Message> {
         let mut changed = false;
         for r in region.row_start..=region.row_end {
             for c in region.col_start..=region.col_end {
-                let field_id = s.data.fields[c].id.clone();
-                if matches!(s.data.fields[c].field_type.as_str(), "image" | "ai") {
+                let field = &s.data.fields[c];
+                let field_id = field.id.clone();
+                if field.field_type == "image" {
                     continue;
                 }
+                let is_ai = field.field_type == "ai";
                 if ops::set_cell_value(&mut s.data.rows[r], &field_id, None) {
+                    if is_ai {
+                        ops::clear_cell_ai_meta(&mut s.data.rows[r], &field_id);
+                    }
                     changed = true;
                     cleared_rows.push(s.data.rows[r].id.clone());
                     cleared_fields.push(field_id);

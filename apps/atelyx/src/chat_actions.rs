@@ -659,7 +659,7 @@ pub(crate) fn resolve_run_config(
         .as_ref()
         .and_then(|ps| ps.iter().find(|p| p.id == provider_id))
     else {
-        return Err("所选模型的供应商已失效，请在输入区重新选择".to_string());
+        return Err("所选模型的供应商已失效，请重新选择模型".to_string());
     };
     let api_key = match &provider.api_key {
         Some(k) if !k.is_empty() => k.clone(),

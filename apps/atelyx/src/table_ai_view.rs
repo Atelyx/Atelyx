@@ -1,4 +1,4 @@
-//! 表格 AI 字段的配置弹层（居中模态）：系统提示词、指令模板、输出与自动开关。
+//! 表格 AI 字段的配置弹层（居中模态）：系统提示词、指令模板、输出、模型与自动开关。
 
 use iced::widget::text_editor::Action;
 use iced::widget::{button, column, container, row, space, text, text_editor};
@@ -19,7 +19,7 @@ pub const MODAL_WIDTH: f32 = 640.0;
 const PROMPT_EDITOR_H: f32 = 150.0;
 /// 系统提示词编辑器高度。
 const SYSTEM_EDITOR_H: f32 = 88.0;
-/// 字段 / 笔记候选列表高度。
+/// 字段 / 笔记 / 模型候选列表高度。
 const PICKER_H: f32 = 112.0;
 pub(crate) const PROMPT_EDITOR_ID: &str = "table-ai-prompt-editor";
 const SYSTEM_EDITOR_ID: &str = "table-ai-system-editor";
@@ -66,7 +66,7 @@ fn config_card<'a>(
     .padding(Padding::ZERO.horizontal(14.0).vertical(10.0));
 
     let system_block = column![
-        section_label("系统提示词", "设定该字段的身份与输出格式；引用笔记时生成前读取正文"),
+        section_label("系统提示词", ""),
         row![
             system_mode_button("无", AiSystemMode::None, draft.system_mode),
             system_mode_button("手写", AiSystemMode::Inline, draft.system_mode),
@@ -105,12 +105,12 @@ fn config_card<'a>(
         })
         .collect();
     let ref_hint = if ref_names.is_empty() {
-        "模板至少引用一列：点「插入字段」或输入 #字段名".to_string()
+        "至少引用一列（点「插入字段」）".to_string()
     } else {
         format!("已引用：{}", ref_names.join("、"))
     };
     let mut prompt_block = column![
-        section_label("指令模板", "用 #字段名 引用同一行的列；引用值发送时以「」包裹"),
+        section_label("指令模板", "用 #字段名 引用同行列"),
         multiline_editor(
             &draft.prompt,
             PROMPT_EDITOR_ID,
@@ -139,7 +139,7 @@ fn config_card<'a>(
 
     body = body.push(
         column![
-            section_label("输出", "短文本单行省略；长文本按内容换行撑高"),
+            section_label("输出", ""),
             row![
                 output_button("短文本", vault::AI_OUTPUT_SHORT, &draft.output),
                 output_button("长文本", vault::AI_OUTPUT_LONG, &draft.output),
@@ -151,7 +151,31 @@ fn config_card<'a>(
 
     body = body.push(
         column![
-            section_label("自动", "只在本端编辑触发生成"),
+            section_label("模型", ""),
+            row![
+                text(model_label(app, draft))
+                    .size(pal::fs_caption())
+                    .color(pal::TEXT_SECONDARY)
+                    .width(Length::Fill),
+                controls::btn(
+                    if draft.show_models { "收起" } else { "更换" },
+                    &controls::btn_sm(),
+                    controls::Variant::Outline,
+                    Some(Message::Table(tv::TableMsg::AiDraftToggleModels)),
+                ),
+            ]
+            .spacing(10)
+            .align_y(alignment::Vertical::Center),
+        ]
+        .spacing(6),
+    );
+    if draft.show_models {
+        body = body.push(model_picker(app, draft));
+    }
+
+    body = body.push(
+        column![
+            section_label("自动", ""),
             checkbox_row(
                 "新增行时生成",
                 draft.auto_new,
@@ -166,13 +190,8 @@ fn config_card<'a>(
         .spacing(6),
     );
 
-    if let Some(error) = &draft.error {
-        body = body.push(text(error.clone()).size(pal::fs_micro()).color(pal::DANGER));
-    }
-
     let read_only = matches!(&app.repo_kind, RepoKind::Space(space) if !space.role.can_write());
-    let save = (!read_only).then_some(Message::Table(tv::TableMsg::AiSaveConfig { trial: false }));
-    let trial = (!read_only).then_some(Message::Table(tv::TableMsg::AiSaveConfig { trial: true }));
+    let save = (!read_only).then_some(Message::Table(tv::TableMsg::AiSaveConfig));
     let ro_hint: Element<'static, Message> = text("只读身份：AI 字段配置不可保存")
         .size(pal::fs_micro())
         .color(pal::TEXT_MUTED)
@@ -186,8 +205,7 @@ fn config_card<'a>(
             },
             space().width(Length::Fill),
             controls::btn("取消", &controls::btn_sm(), controls::Variant::Ghost, Some(close)),
-            controls::btn("保存", &controls::btn_sm(), controls::Variant::Outline, save),
-            controls::btn("保存并试跑选中行", &controls::btn_sm(), controls::Variant::Primary, trial),
+            controls::btn("保存", &controls::btn_sm(), controls::Variant::Primary, save),
         ]
         .spacing(8)
         .align_y(alignment::Vertical::Center),
@@ -218,15 +236,15 @@ fn config_card<'a>(
 }
 
 fn section_label(title: &str, hint: &str) -> Element<'static, Message> {
-    column![
-        text(title.to_string())
-            .size(pal::fs_caption())
-            .color(pal::TEXT_PRIMARY)
-            .font(crate::ui::bold()),
-        text(hint.to_string()).size(pal::fs_micro()).color(pal::TEXT_MUTED),
-    ]
-    .spacing(2)
-    .into()
+    let mut block = column![text(title.to_string())
+        .size(pal::fs_caption())
+        .color(pal::TEXT_PRIMARY)
+        .font(crate::ui::bold())]
+    .spacing(2);
+    if !hint.is_empty() {
+        block = block.push(text(hint.to_string()).size(pal::fs_micro()).color(pal::TEXT_MUTED));
+    }
+    block.into()
 }
 
 fn system_mode_button(label: &str, mode: AiSystemMode, current: AiSystemMode) -> Element<'static, Message> {
@@ -299,7 +317,7 @@ fn note_picker<'a>(app: &'a App, draft: &'a AiDraft) -> Element<'a, Message> {
     let mut list = column![].spacing(2);
     if app.prompt_notes.is_empty() {
         list = list.push(
-            text("暂无提示词标记：在文件面板右键笔记即可注册")
+            text("暂无提示词标记（文件右键笔记可注册）")
                 .size(pal::fs_micro())
                 .color(pal::TEXT_MUTED),
         );
@@ -340,6 +358,125 @@ fn note_picker<'a>(app: &'a App, draft: &'a AiDraft) -> Element<'a, Message> {
     scroll::v(container(list).padding(4.0))
         .height(Length::Fixed(PICKER_H.min(58.0 + app.prompt_notes.len() as f32 * 26.0)))
         .into()
+}
+
+/// 当前选择的模型显示名：字段指定优先，否则显示跟随的仓库默认模型。
+fn model_label(app: &App, draft: &AiDraft) -> String {
+    match (draft.provider_id.as_deref(), draft.model.as_deref()) {
+        (Some(provider), Some(model)) if !provider.is_empty() && !model.is_empty() => {
+            model_name(app, provider, model)
+        }
+        _ => match default_model_name(app) {
+            Some(name) => format!("跟随默认（{name}）"),
+            None => "跟随默认（未设置）".to_string(),
+        },
+    }
+}
+
+/// 模型显示名：昵称优先（空昵称回落 id）；供应商或模型已删仍显示模型 id。
+fn model_name(app: &App, provider: &str, model: &str) -> String {
+    app.repo_config
+        .providers
+        .iter()
+        .flatten()
+        .find(|p| p.id == provider)
+        .and_then(|p| p.models.iter().find(|m| m.id == model))
+        .map(|m| {
+            m.nickname
+                .clone()
+                .filter(|n| !n.trim().is_empty())
+                .unwrap_or_else(|| m.id.clone())
+        })
+        .unwrap_or_else(|| model.to_string())
+}
+
+fn default_model_name(app: &App) -> Option<String> {
+    match (app.repo_config.model.as_deref(), app.repo_config.model_provider_id.as_deref()) {
+        (Some(model), Some(provider)) if !model.is_empty() && !provider.is_empty() => {
+            Some(model_name(app, provider, model))
+        }
+        _ => None,
+    }
+}
+
+/// 模型清单：跟随默认 + 按供应商分组的模型；定高内滚动。
+fn model_picker<'a>(app: &'a App, draft: &AiDraft) -> Element<'a, Message> {
+    let follow_selected = draft.provider_id.is_none() || draft.model.is_none();
+    let follow_label = format!(
+        "跟随默认 · {}",
+        default_model_name(app).unwrap_or_else(|| "未设置".to_string())
+    );
+    let mut list = column![].spacing(2).push(pick_row(
+        follow_label,
+        follow_selected,
+        Message::Table(tv::TableMsg::AiDraftModelPick { provider_id: None, model: None }),
+    ));
+    let mut any_model = false;
+    for provider in app.repo_config.providers.iter().flatten() {
+        if provider.models.is_empty() {
+            continue;
+        }
+        any_model = true;
+        list = list.push(
+            container(
+                text(provider.name.clone()).size(pal::fs_micro()).color(pal::TEXT_MUTED),
+            )
+            .width(Length::Fill)
+            .padding(Padding::ZERO.horizontal(8.0).vertical(3.0)),
+        );
+        for model in &provider.models {
+            let selected = draft.provider_id.as_deref() == Some(provider.id.as_str())
+                && draft.model.as_deref() == Some(model.id.as_str());
+            let label = model
+                .nickname
+                .clone()
+                .filter(|n| !n.trim().is_empty())
+                .unwrap_or_else(|| model.id.clone());
+            list = list.push(pick_row(
+                label,
+                selected,
+                Message::Table(tv::TableMsg::AiDraftModelPick {
+                    provider_id: Some(provider.id.clone()),
+                    model: Some(model.id.clone()),
+                }),
+            ));
+        }
+    }
+    if !any_model {
+        list = list.push(
+            text("暂无模型：先在「设置 → AI → 供应商」添加")
+                .size(pal::fs_micro())
+                .color(pal::TEXT_MUTED),
+        );
+    }
+    scroll::v(container(list).padding(4.0)).height(Length::Fixed(PICKER_H)).into()
+}
+
+/// 单行可选项（模型清单用；选中项带勾选框）。
+fn pick_row(label: String, selected: bool, on_press: Message) -> Element<'static, Message> {
+    button(
+        row![
+            controls::checkbox(
+                if selected { controls::CheckState::On } else { controls::CheckState::Off },
+                None
+            ),
+            text(label)
+                .size(pal::fs_caption())
+                .color(if selected { pal::TEXT_PRIMARY } else { pal::TEXT_SECONDARY })
+                .width(Length::Fill),
+        ]
+        .spacing(8)
+        .align_y(alignment::Vertical::Center),
+    )
+    .width(Length::Fill)
+    .padding(Padding::ZERO.horizontal(8.0).vertical(5.0))
+    .style(|_t, status| iced::widget::button::Style {
+        background: matches!(status, iced::widget::button::Status::Hovered)
+            .then_some(pal::HOVER.into()),
+        ..Default::default()
+    })
+    .on_press(on_press)
+    .into()
 }
 
 fn field_picker<'a>(session: &'a tv::TableSession, current: &TableField) -> Element<'a, Message> {
