@@ -160,6 +160,31 @@ pub(crate) fn history_author(app: &App) -> atelyx_core::history::HistoryAuthor {
     atelyx_core::history::HistoryAuthor { id: format!("desktop:{user}"), name: user.clone(), device: user }
 }
 
+/// 双链选中后的正文替换：`from` 为触发符起点、`caret` 为查询词末端（已写闭合符 `]]`
+/// 时一并吃掉），插入 `[标题](编码路径)`。光标之后的正文原样保留。
+/// 返回（新正文，替换段之后的正文偏移）。
+fn wiki_splice(body: &str, from: usize, caret: usize, name: &str, file: &str) -> (String, usize) {
+    // 区间端点按字符边界收回：越界或落在多字节字符中间时退到最近的合法边界，不切碎字符
+    let floor = |mut b: usize| {
+        b = b.min(body.len());
+        while !body.is_char_boundary(b) {
+            b -= 1;
+        }
+        b
+    };
+    let from = floor(from);
+    let caret = floor(caret).max(from);
+    let end = if body[caret..].starts_with("]]") { caret + 2 } else { caret };
+    let label = name.trim_end_matches(".md").replace(['[', ']'], "");
+    let insert = format!("[{}]({})", label, encode_md_href(file));
+    let mut next = String::with_capacity(body.len() - (end - from) + insert.len());
+    next.push_str(&body[..from]);
+    next.push_str(&insert);
+    next.push_str(&body[end..]);
+    let after = from + insert.len();
+    (next, after)
+}
+
 /// markdown 链接 href 编码：空格 / 括号 / 百分号百分号化，其余（含中文）原样。
 fn encode_md_href(file: &str) -> String {
     let mut out = String::with_capacity(file.len());
@@ -1520,6 +1545,8 @@ pub struct App {
     pub preview_doc: Option<MarkdownDocument>,
     /// 编辑档行高缓存（编辑面布局回写；应用层据此截取视口窗口）。
     pub(crate) note_row_metrics: Rc<RefCell<markdown_edit::RowMetrics>>,
+    /// 编辑面光标几何（块部件每帧回写；双链候选浮层贴着输入点落位）。
+    pub(crate) note_caret_probe: markdown_edit::CaretProbeSlot,
     /// 编辑面滚动位置与视口尺寸（滚动事件播种；窗口计算用）。
     pub note_scroll_y: f32,
     pub note_viewport_h: f32,
@@ -1577,8 +1604,6 @@ pub struct App {
     pub wiki_picker: Option<WikiPicker>,
     /// 最近一次 Esc 关闭的双链触发位置（同位置不再自动重开，直到出现新触发符）。
     wiki_dismissed_from: Option<usize>,
-    /// 双链候选选中后吞掉随后的编辑面 Newline（Enter 键全局订阅与部件事件双发，见 wiki_pick）。
-    wiki_swallow_newline: bool,
     /// 搜索面板查询词。
     pub search_query: String,
     /// 历史弹层/上下文的版本列表（打开弹层与每次保存后刷新；旧→新序）。
@@ -1684,6 +1709,8 @@ pub struct WikiPicker {
     pub from: usize,
     pub query: String,
     pub active: usize,
+    /// 用户按过 ↑↓：仅此时 Enter 选中候选，否则 Enter 换行（与属性面板候选同口径）。
+    pub armed: bool,
 }
 
 impl App {
@@ -1835,6 +1862,7 @@ impl App {
                 note_edit_caret_pending: false,
                 preview_doc: None,
                 note_row_metrics: Rc::new(RefCell::new(markdown_edit::RowMetrics::default())),
+                note_caret_probe: Rc::new(RefCell::new(markdown_edit::CaretProbe::default())),
                 note_scroll_y: 0.0,
                 note_viewport_h: 0.0,
                 note_scroll_ready: false,
@@ -1879,7 +1907,6 @@ impl App {
                 note_files: Vec::new(),
                 wiki_picker: None,
                 wiki_dismissed_from: None,
-                wiki_swallow_newline: false,
                 search_query: String::new(),
                 history: Vec::new(),
                 history_gen: 0,
@@ -2482,6 +2509,8 @@ impl App {
                     if n > 0 {
                         if let Some(p) = self.wiki_picker.as_mut() {
                             p.active = if positive { (p.active + 1) % n } else { (p.active + n - 1) % n };
+                            // 高亮即接管 Enter：此后 Enter 选中候选而非换行
+                            p.armed = true;
                         }
                     }
                     Task::none()
@@ -2500,7 +2529,9 @@ impl App {
                 }
             }
             Message::EnterKey => {
-                if self.wiki_picker.is_some() {
+                // 双链候选：仅按过 ↑↓ 时 Enter 选中（未按过则照常换行，避免把正在敲的 `[[名` 吃掉）。
+                // 编辑面持键盘时 Enter 被部件捕获（走 Editor Newline），这里是源码档 / 无编辑面时的兜底
+                if self.wiki_picker.as_ref().is_some_and(|p| p.armed) {
                     let active = self.wiki_picker.as_ref().map(|p| p.active).unwrap_or(0);
                     let picked = self.wiki_candidates().get(active).copied().unwrap_or(0);
                     self.wiki_pick(picked);
@@ -5428,14 +5459,18 @@ impl App {
     }
 
     /// 双链候选的过滤序号（.md 笔记按文件名子串过滤、树序，上限 50）。
+    /// 当前笔记自身不入候选（`[[` 不该链到自己）；查询词为空时列全部，否则按文件名子串。
     fn wiki_candidates(&self) -> Vec<usize> {
         let Some(p) = &self.wiki_picker else { return Vec::new() };
         let q = p.query.trim().to_lowercase();
+        let current = self.ui.last_note_file.as_deref();
         self.note_files
             .iter()
             .enumerate()
             .filter(|(_, (rel, name))| {
-                rel.ends_with(".md") && (q.is_empty() || name.to_lowercase().contains(&q))
+                rel.ends_with(".md")
+                    && Some(rel.as_str()) != current
+                    && (q.is_empty() || name.to_lowercase().contains(&q))
             })
             .map(|(i, _)| i)
             .take(50)
@@ -5488,7 +5523,7 @@ impl App {
                 _ => {
                     if self.wiki_dismissed_from != Some(from) {
                         self.wiki_dismissed_from = None;
-                        self.wiki_picker = Some(WikiPicker { from, query, active: 0 });
+                        self.wiki_picker = Some(WikiPicker { from, query, active: 0, armed: false });
                     }
                 }
             },
@@ -5514,7 +5549,8 @@ impl App {
         }
     }
 
-    /// 选中双链候选：片段替换为 `[标题](路径)` markdown 链接。
+    /// 选中双链候选：把触发符之后到光标（或已闭合的 `]]` 为止）替换为 `[标题](路径)`。
+    /// 光标之后的正文原样保留——`[[` 只是片段起点，不是整段替换。
     fn wiki_pick(&mut self, candidate_index: usize) {
         let Some(picker) = self.wiki_picker.clone() else { return };
         let candidates = self.wiki_candidates();
@@ -5526,20 +5562,13 @@ impl App {
             self.wiki_picker = None;
             return;
         }
-        let label = name.trim_end_matches(".md").replace(['[', ']'], "");
-        let insert = format!("[{}]({})", label, encode_md_href(&file));
-        let mut next = String::with_capacity(body.len() - (caret - picker.from) + insert.len());
-        next.push_str(&body[..picker.from]);
-        next.push_str(&insert);
-        next.push_str(&body[caret..]);
+        let (next, caret_after) = wiki_splice(&body, picker.from, caret, &name, &file);
         self.edit.snapshot(&self.note_text);
         self.set_edit_body(next);
-        self.edit.caret = picker.from + insert.len();
+        self.edit.caret = caret_after;
         self.edit.anchor = self.edit.caret;
         self.wiki_picker = None;
         self.wiki_dismissed_from = None;
-        // 全局 Enter 订阅与编辑面 Newline 事件对同一次按键双发：本路径先落则吞掉随后的 Newline
-        self.wiki_swallow_newline = true;
         self.after_edit();
     }
 
@@ -7594,10 +7623,13 @@ impl App {
                 Task::none()
             }
             E::Newline => {
-                // 双链候选开启时 Enter 归候选选中（编辑面无条件上报 Newline）；
-                // 选中路径已先行时吞掉本次 Newline，防换行混入候选替换区间
-                if self.wiki_picker.is_some() || self.wiki_swallow_newline {
-                    self.wiki_swallow_newline = false;
+                // 编辑面捕获 Enter 并上报 Newline，全局 EnterKey 订阅在这条路径上不会触发——
+                // 候选选中必须在此处理，否则 Enter 只换行不选中。
+                // 未按过 ↑↓ 时候选只是提示，换行照常（不能吃掉正在敲的 `[[名`）
+                if self.wiki_picker.as_ref().is_some_and(|p| p.armed) {
+                    let active = self.wiki_picker.as_ref().map(|p| p.active).unwrap_or(0);
+                    let picked = self.wiki_candidates().get(active).copied().unwrap_or(0);
+                    self.wiki_pick(picked);
                     return Task::none();
                 }
                 self.edit_newline();
@@ -8080,6 +8112,31 @@ mod file_drop_tests {
             file_drop_check("docs/sub", true, "docs", true),
             Err(DropReject::SameDir)
         );
+    }
+
+    #[test]
+    fn wiki_splice_keeps_text_after_caret() {
+        // 光标停在查询词末尾：触发符到光标被替换，光标后的正文原样保留
+        let body = "见 [[甲 之后";
+        let (out, caret) = super::wiki_splice(body, 4, 9, "甲.md", "n/甲.md");
+        assert_eq!(out, "见 [甲](n/甲.md) 之后");
+        assert_eq!(caret, "见 [甲](n/甲.md)".len());
+    }
+
+    #[test]
+    fn wiki_splice_eats_written_closer() {
+        // 已写闭合符 `]]`：连闭合符一起替换，不留半截括号
+        let (out, caret) = super::wiki_splice("[[甲]]尾", 0, 5, "甲.md", "甲.md");
+        assert_eq!(out, "[甲](甲.md)尾");
+        assert_eq!(caret, "[甲](甲.md)".len());
+    }
+
+    #[test]
+    fn wiki_splice_keeps_wide_trigger_tail() {
+        // 全角触发符与中文标签：按字节算区间，不切碎多字节字符
+        let body = "【【乙";
+        let (out, _) = super::wiki_splice(body, 0, body.len(), "乙.md", "a b.md");
+        assert_eq!(out, "[乙](a%20b.md)");
     }
 
     #[test]

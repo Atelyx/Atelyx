@@ -578,6 +578,11 @@ fn with_overlays<'a>(
         root = root.push(el);
     }
 
+    // 双链候选：锚在正文光标右下方，须叠在正文滚动区之外（滚动区会裁掉越界内容）
+    if let Some(el) = wiki_picker_overlay(app, window) {
+        root = root.push(el);
+    }
+
     // 弹层（同窗口至多一个；捕获层点击 = 外点关闭；居中模态另行渲染，见下方）
     if let Some((w, open)) = &app.popup {
         if *w == window
@@ -3468,7 +3473,7 @@ pub(crate) fn note_view(app: &App, window: iced::window::Id) -> Element<'_, Mess
             // 两档同包一层 mouse_area（同型同位保滚动状态）；双击进编辑只在只读档挂处理器
             // （编辑档不挂：编辑面按压即捕获，双击语义由块内自管）
             if app.note_mode == NoteMode::Edit {
-                wiki_picker_overlay(app, mouse_area(scrolled).into())
+                mouse_area(scrolled).into()
             } else {
                 // 只读档双击正文进预览编辑档（光标落点由编辑面按释放点换算）；右键 = 选区复制菜单
                 mouse_area(scrolled)
@@ -3764,6 +3769,8 @@ fn source_block_element<'a>(
         cursors: &app.remote_cursors,
         body_start,
         bindings,
+        probe: app.note_caret_probe.clone(),
+        picker_open: app.wiki_picker.is_some(),
     }
     .into()
 }
@@ -3873,6 +3880,8 @@ fn edit_view(app: &App) -> Element<'_, Message> {
             note_bindings,
             &app.remote_cursors,
             body_start,
+            app.note_caret_probe.clone(),
+            app.wiki_picker.is_some(),
         )
         .with_window(app.note_row_metrics.clone(), 0, 0.0, 0.0, 1)
         .into();
@@ -3994,68 +4003,153 @@ fn edit_view(app: &App) -> Element<'_, Message> {
         note_bindings,
         &app.remote_cursors,
         body_start,
+        app.note_caret_probe.clone(),
+        app.wiki_picker.is_some(),
     )
     .with_window(metrics, start, top, bottom, total_rows)
     .into()
 }
 
-/// 双链候选浮层（编辑面顶部右侧覆盖；↑↓ 导航、Enter 选中、Esc 关闭）。
-fn wiki_picker_overlay<'a>(app: &'a App, surface: Element<'a, Message>) -> Element<'a, Message> {
-    let Some(picker) = &app.wiki_picker else { return surface };
+/// 双链候选浮层宽度与行度量：整行可点，行高随界面字号放大（大字号下不裁行）。
+const SUGGEST_W: f32 = 288.0;
+const SUGGEST_MAX_H: f32 = 264.0;
+const SUGGEST_ROW_H: f32 = 26.0;
+const SUGGEST_PAD_X: f32 = 10.0;
+const SUGGEST_PAD_Y: f32 = 4.0;
+/// 浮层与光标的间距（横向让出光标竖条，纵向落到下一行）。
+const SUGGEST_GAP_X: f32 = 6.0;
+const SUGGEST_GAP_Y: f32 = 2.0;
+
+/// 双链候选浮层内容（锚在光标右下方；↑↓ 导航并接管 Enter、Enter 选中、Esc 关闭）。
+/// 落位在窗口级浮层里完成——浮层不能被正文滚动区裁剪。
+fn wiki_picker_panel<'a>(app: &'a App) -> Option<Element<'a, Message>> {
+    // 浮层挂在窗口层：只在预览编辑档且编辑面持键盘时出现，切档 / 失焦即不再显示
+    if app.note_mode != NoteMode::Edit || !app.edit.focused {
+        return None;
+    }
+    let picker = app.wiki_picker.as_ref()?;
     let candidates = app.wiki_candidates();
+    // 候选里出现同名笔记时补出所在目录（跨目录同名才需要区分）
+    let duplicates = {
+        let mut names: Vec<&str> = candidates
+            .iter()
+            .map(|i| app.note_files[*i].1.as_str())
+            .collect();
+        names.sort_unstable();
+        names.windows(2).any(|w| w[0] == w[1])
+    };
+    let rows = candidates.len().max(1);
+    let panel_h = (rows as f32 * SUGGEST_ROW_H).min(SUGGEST_MAX_H) + SUGGEST_PAD_Y * 2.0;
     let mut col = iced::widget::Column::<Message>::new().spacing(0);
     if candidates.is_empty() {
         col = col.push(
             container(text("无匹配笔记").size(pal::fs_caption()).color(pal::TEXT_MUTED))
-                .padding(Padding::ZERO.horizontal(12.0).vertical(6.0)),
+                .padding(Padding::ZERO.horizontal(SUGGEST_PAD_X).vertical(6.0)),
         );
     } else {
         let active = picker.active.min(candidates.len() - 1);
         for (pos, fi) in candidates.iter().enumerate() {
-            let (_, name) = &app.note_files[*fi];
+            let (rel, name) = &app.note_files[*fi];
             let title = name.trim_end_matches(".md").to_string();
+            // 同名笔记跨目录：同名时补出所在目录，候选才分得清
+            let dir = rel.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+            let sub = (!dir.is_empty() && duplicates).then_some(dir);
             let is_active = pos == active;
+            let mut body = column![row![
+                icon("file-text", 13.0, if is_active { pal::TEXT_PRIMARY } else { pal::TEXT_MUTED }),
+                text(title.clone())
+                    .size(pal::fs_caption())
+                    .wrapping(Wrapping::None)
+                    .color(if is_active { pal::TEXT_PRIMARY } else { pal::TEXT_SECONDARY }),
+            ]
+            .spacing(6)
+            .align_y(iced::alignment::Vertical::Center)]
+            .spacing(1);
+            if let Some(dir) = sub {
+                body = body.push(
+                    container(
+                        text(dir.to_string())
+                            .size(pal::fs_micro())
+                            .wrapping(Wrapping::None)
+                            .color(pal::TEXT_MUTED),
+                    )
+                    .padding(Padding::ZERO.left(19.0)),
+                );
+            }
+            // 键盘高亮 = ACCENT 底；鼠标悬停 / 按下 = HOVER 底（与对话面板 # 引用候选同一套行样式）
             col = col.push(
-                button(
-                    row![
-                        icon("file-text", 13.0, if is_active { pal::TEXT_PRIMARY } else { pal::TEXT_MUTED }),
-                        text(title.clone())
-                            .size(pal::fs_caption())
-                            .color(if is_active { pal::TEXT_PRIMARY } else { pal::TEXT_SECONDARY }),
-                    ]
-                    .spacing(6),
-                )
-                .width(Length::Fill)
-                .padding(Padding::ZERO.horizontal(12.0).vertical(5.0))
-                .style(move |_t, _s| button::Style {
-                    background: is_active.then_some(pal::ACCENT.into()),
-                    ..button::Style::default()
-                })
-                .on_press(Message::WikiPick(*fi)),
+                button(body)
+                    .width(Length::Fill)
+                    .padding(Padding::ZERO.horizontal(SUGGEST_PAD_X).vertical(5.0))
+                    .style(move |_t, status| button::Style {
+                        background: if is_active {
+                            Some(pal::ACCENT.into())
+                        } else if matches!(status, button::Status::Hovered | button::Status::Pressed) {
+                            Some(pal::HOVER.into())
+                        } else {
+                            None
+                        },
+                        border: border::rounded(pal::RADIUS_SM),
+                        text_color: pal::TEXT_PRIMARY,
+                        ..button::Style::default()
+                    })
+                    .on_press(Message::WikiPick(*fi)),
             );
         }
     }
-    let panel = container(
-        scroll::v(col)
-            .width(Length::Fill)
-            .height(Length::Fixed(264.0)),
+    Some(
+        container(scroll::v(col).width(Length::Fill).height(Length::Shrink))
+            .width(Length::Fixed(SUGGEST_W))
+            .max_height(panel_h)
+            .style(|_t| Style {
+                background: Some(pal::BG_SECONDARY.into()),
+                border: border::rounded(pal::RADIUS_MD).color(pal::BORDER).width(1.0),
+                ..Style::default()
+            })
+            .into(),
     )
-    .width(Length::Fixed(288.0))
-    .style(|_t| Style {
-        background: Some(pal::BG_SECONDARY.into()),
-        border: border::rounded(pal::RADIUS_MD).color(pal::BORDER).width(1.0),
-        ..Style::default()
-    });
-    stack![
-        surface,
-        container(panel)
+}
+
+/// 候选浮层落位：锚在光标右下方（下方放不下时翻到光标上方，越右缘时左移）。
+/// 光标几何由编辑面每帧回写，坐标为窗口局部坐标。
+pub(crate) fn wiki_picker_overlay<'a>(
+    app: &'a App,
+    window: iced::window::Id,
+) -> Option<Element<'a, Message>> {
+    let panel = wiki_picker_panel(app)?;
+    let probe = *app.note_caret_probe.borrow();
+    let geom = wiki_picker_geom(probe, viewport_of(app, window));
+    // 浮层在窗口层、已脱离笔记面板的 PressReporter：点候选会被判成「面板外按压」而先退出
+    // 编辑档（候选随之消失，按钮收不到释放）。卡片自身自报面板内按压，与面板内控件同语义
+    // （只包卡片，不包整窗——否则弹层开着时点任何地方都不再退出编辑档）。
+    let card = controls::PressReporter::new(panel, Message::NotePressInside);
+    Some(
+        container(Element::from(card))
             .width(Length::Fill)
             .height(Length::Fill)
-            .align_x(iced::alignment::Horizontal::Right)
+            .align_x(iced::alignment::Horizontal::Left)
             .align_y(iced::alignment::Vertical::Top)
-            .padding(8.0),
-    ]
-    .into()
+            .padding(Padding::ZERO.left(geom.x).top(geom.y))
+            .into(),
+    )
+}
+
+/// 候选浮层落位：锚在光标右下方，下方放不下且上方放得下时翻到光标上方，
+/// 越出右缘时由弹层壳左移钳回（同一套视口钳制）。
+fn wiki_picker_geom(
+    probe: markdown_edit::CaretProbe,
+    viewport: Size,
+) -> popup::PopupGeom {
+    popup::resolve(
+        &PopupSpec {
+            anchor: Point::new(probe.x + SUGGEST_GAP_X, probe.y + probe.line_h + SUGGEST_GAP_Y),
+            width: SUGGEST_W,
+            height: SUGGEST_MAX_H,
+            flip_y: Some(probe.y - SUGGEST_GAP_Y),
+            min_width: 0.0,
+        },
+        viewport,
+    )
 }
 
 /// 反链区（常驻）：引用当前笔记的笔记列表，点击打开。
@@ -7387,11 +7481,38 @@ pub fn drop_zone_at(zone: &PanelZone, global: iced::Point) -> DropZone {
 mod tests {
     use super::{
         device_meta_line, divider_size, ellipsize, estimate_text_width, ext_badge_reserve,
-        file_label, merge_peers, name_slot, row_window, truncate_to_width, UiMetrics,
+        file_label, merge_peers, name_slot, row_window, truncate_to_width, wiki_picker_geom,
+        UiMetrics, SUGGEST_W,
     };
     use crate::ui::palette as pal;
     use atelyx_core::collab::PeerInfo;
     use iced::Length;
+
+    #[test]
+    fn wiki_picker_lands_below_and_right_of_caret() {
+        // 候选浮层锚在输入点右下方：x 让出光标竖条，y 落到光标行之下
+        let probe = crate::markdown_edit::CaretProbe { x: 200.0, y: 300.0, line_h: 22.0 };
+        let geom = wiki_picker_geom(probe, iced::Size::new(1200.0, 800.0));
+        assert!(geom.x > probe.x, "浮层应在光标右侧");
+        assert!(geom.y >= probe.y + probe.line_h, "浮层应在光标行下方");
+        assert_eq!(geom.w, SUGGEST_W);
+    }
+
+    #[test]
+    fn wiki_picker_flips_above_near_bottom() {
+        // 贴窗口底边时翻到光标上方，仍留在视口内
+        let probe = crate::markdown_edit::CaretProbe { x: 200.0, y: 780.0, line_h: 22.0 };
+        let geom = wiki_picker_geom(probe, iced::Size::new(1200.0, 800.0));
+        assert!(geom.y < probe.y, "下方放不下应翻到上方");
+    }
+
+    #[test]
+    fn wiki_picker_clamps_inside_right_edge() {
+        // 贴右缘时整体左移，不溢出视口
+        let probe = crate::markdown_edit::CaretProbe { x: 1150.0, y: 100.0, line_h: 22.0 };
+        let geom = wiki_picker_geom(probe, iced::Size::new(1200.0, 800.0));
+        assert!(geom.x + geom.w <= 1200.0, "浮层右缘不得越出视口");
+    }
 
     #[test]
     fn divider_thickness_follows_split_axis() {

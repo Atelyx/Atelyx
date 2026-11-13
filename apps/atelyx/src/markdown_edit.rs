@@ -838,6 +838,21 @@ fn remote_span_in_block(
     (hi > lo || caret.is_some()).then_some((lo, hi, caret))
 }
 
+/// 编辑面光标探针：块部件绘制时把自己的光标几何写回应用层，供双链候选浮层贴着输入点落位。
+/// 坐标为窗口局部坐标——布局坐标系已含滚动偏移（滚动容器的平移只在绘制期施加）。
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CaretProbe {
+    /// 光标左缘 x（窗口局部坐标）。
+    pub x: f32,
+    /// 光标顶边 y（窗口局部坐标）。
+    pub y: f32,
+    /// 光标行高（浮层落到光标下一行用）。
+    pub line_h: f32,
+}
+
+/// 探针共享槽（应用层持有，部件每帧写回）。
+pub(crate) type CaretProbeSlot = Rc<RefCell<CaretProbe>>;
+
 /// 源码态块部件：整块源码（标记显形）+ 光标/选区，托管输入法。
 pub struct SourceBlock<'a> {
     pub from: usize,
@@ -857,6 +872,10 @@ pub struct SourceBlock<'a> {
     pub body_start: usize,
     /// 撤销/重做键位（设置覆盖解析结果，每帧由壳传入）。
     pub bindings: NoteBindings,
+    /// 光标几何回写槽（双链候选浮层落位用）。
+    pub probe: CaretProbeSlot,
+    /// 双链候选浮层开启：↑↓ 归候选高亮，本块不再移动光标。
+    pub picker_open: bool,
 }
 
 /// 源码态排版口径：字号与行高倍数。
@@ -1021,6 +1040,13 @@ impl Widget<Message, Theme, iced::Renderer> for SourceBlock<'_> {
         let clamped = self.caret.clamp(self.from, self.to);
         let caret_char = char_index(&state.content, clamped - self.from);
         let (x, y, h) = caret_xy(p, laid_count, at.caret(caret_char), line_px);
+        // 光标几何回写（浮层落位；闪烁相位无关，隐藏帧也照写）
+        {
+            let mut probe = self.probe.borrow_mut();
+            probe.x = origin.x + x;
+            probe.y = origin.y + y;
+            probe.line_h = h;
+        }
         // 闪烁相位：半周期可见
         let on = state
             .blink_anchor
@@ -1087,6 +1113,12 @@ impl Widget<Message, Theme, iced::Renderer> for SourceBlock<'_> {
                             return;
                         }
                     }
+                }
+                // 候选浮层开启时 ↑↓ 归候选高亮：编辑面不再同步移动光标（否则选候选会带走光标）
+                if self.picker_open
+                    && matches!(key, Key::Named(Named::ArrowUp | Named::ArrowDown))
+                {
+                    return;
                 }
                 if let Some(action) = key_action(key, *modifiers, text.as_deref(), &self.bindings) {
                     self.apply_key(action, state, shell);
@@ -1582,6 +1614,10 @@ pub struct EditSurface<'a> {
     bottom: f32,
     /// 全篇行数（布局回写缓存用）。
     total_rows: usize,
+    /// 光标几何回写槽（双链候选浮层落位用）。
+    probe: CaretProbeSlot,
+    /// 双链候选浮层开启（空行光标路径同样让出 ↑↓）。
+    picker_open: bool,
 }
 
 /// 编辑面容器的持久状态（跨帧存活：拖选在途）。
@@ -1616,6 +1652,8 @@ impl<'a> EditSurface<'a> {
         bindings: NoteBindings,
         cursors: &'a [crate::RemoteCursorView],
         body_start: usize,
+        probe: CaretProbeSlot,
+        picker_open: bool,
     ) -> Self {
         Self {
             rows,
@@ -1634,6 +1672,8 @@ impl<'a> EditSurface<'a> {
             top: 0.0,
             bottom: 0.0,
             total_rows: 0,
+            probe,
+            picker_open,
         }
     }
 
@@ -2027,6 +2067,12 @@ impl Widget<Message, Theme, iced::Renderer> for EditSurface<'_> {
                         )
                     });
                     let caret_x = caret_after_preedit(x0, pre_w, bounds.x + bounds.width);
+                    {
+                        let mut probe = self.probe.borrow_mut();
+                        probe.x = caret_x;
+                        probe.y = y;
+                        probe.line_h = GAP_CARET_H;
+                    }
                     if blink_on {
                         renderer.fill_quad(
                             Quad {
@@ -2184,6 +2230,11 @@ impl Widget<Message, Theme, iced::Renderer> for EditSurface<'_> {
                             return;
                         }
                     }
+                }
+                if self.picker_open
+                    && matches!(key, Key::Named(Named::ArrowUp | Named::ArrowDown))
+                {
+                    return;
                 }
                 if let Some(action) = key_action(key, *modifiers, text.as_deref(), &self.bindings) {
                     self.apply_key(action, shell);
