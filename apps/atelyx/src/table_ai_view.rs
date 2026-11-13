@@ -121,12 +121,12 @@ fn config_card<'a>(
             controls::btn(
                 if draft.show_fields { "收起字段" } else { "插入字段" },
                 &controls::btn_sm(),
-                controls::Variant::Outline,
+                controls::Variant::Soft,
                 Some(Message::Table(tv::TableMsg::AiDraftToggleFields)),
             ),
             text(ref_hint)
                 .size(pal::fs_micro())
-                .color(if ref_names.is_empty() { pal::WARNING } else { pal::TEXT_MUTED }),
+                .color(if ref_names.is_empty() { pal::TEXT_SECONDARY } else { pal::TEXT_MUTED }),
         ]
         .spacing(10)
         .align_y(alignment::Vertical::Center),
@@ -160,7 +160,7 @@ fn config_card<'a>(
                 controls::btn(
                     if draft.show_models { "收起" } else { "更换" },
                     &controls::btn_sm(),
-                    controls::Variant::Outline,
+                    controls::Variant::Soft,
                     Some(Message::Table(tv::TableMsg::AiDraftToggleModels)),
                 ),
             ]
@@ -251,7 +251,7 @@ fn system_mode_button(label: &str, mode: AiSystemMode, current: AiSystemMode) ->
     controls::btn(
         label,
         &controls::btn_sm(),
-        if mode == current { controls::Variant::Primary } else { controls::Variant::Outline },
+        if mode == current { controls::Variant::Primary } else { controls::Variant::Soft },
         Some(Message::Table(tv::TableMsg::AiDraftSystemMode(mode))),
     )
     .into()
@@ -261,7 +261,7 @@ fn output_button(label: &str, output: &str, current: &str) -> Element<'static, M
     controls::btn(
         label,
         &controls::btn_sm(),
-        if output == current { controls::Variant::Primary } else { controls::Variant::Outline },
+        if output == current { controls::Variant::Primary } else { controls::Variant::Soft },
         Some(Message::Table(tv::TableMsg::AiDraftOutput(output.to_string()))),
     )
     .into()
@@ -302,7 +302,7 @@ fn multiline_editor<'a>(
             .height(Length::Fixed(height))
             .padding(8)
             .style(|_t: &Theme, _s| text_editor::Style {
-                background: pal::BG_SUNKEN.into(),
+                background: pal::BG_SECONDARY.into(),
                 border: Border { color: pal::BORDER, width: 1.0, radius: pal::RADIUS_SM.into() },
                 placeholder: pal::TEXT_MUTED,
                 value: pal::TEXT_PRIMARY,

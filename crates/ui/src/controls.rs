@@ -22,6 +22,8 @@ pub enum Variant {
     Primary,
     /// 深底描边（卡片次级动作）。
     Outline,
+    /// 浅底描边（浮层内次级控件 / 分段未选项；hover 提亮一档）。
+    Soft,
     /// 透明底 + hover 出三级底（工具条「+」等触发钮）。
     SubtleBg,
     /// 危险动作（回滚确认 / 批量重建等）：红调文字，hover 出红色淡底。
@@ -106,6 +108,13 @@ fn variant_style(v: Variant) -> VariantStyle {
             text: pal::TEXT_PRIMARY,
             text_hover: pal::TEXT_PRIMARY,
             border: pal::BORDER_STRONG,
+        },
+        Variant::Soft => VariantStyle {
+            bg: pal::BG_SECONDARY,
+            bg_hover: pal::BG_TERTIARY,
+            text: pal::TEXT_SECONDARY,
+            text_hover: pal::TEXT_PRIMARY,
+            border: pal::BORDER,
         },
         Variant::SubtleBg => VariantStyle {
             bg: Color::TRANSPARENT,
