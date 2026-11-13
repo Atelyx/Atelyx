@@ -1,6 +1,7 @@
 //! AI 对话面板：会话侧栏 + 顶部行 + 输入区（发送/停止圆钮）；消息流渲染走
 //! [`crate::chat_stream`] 公共段（面板与画布对话卡共用，悬浮操作按钮组经操作钩子注入）。
 
+use iced::widget::text::Wrapping;
 use iced::widget::{button, column, container, mouse_area, row, space, stack, Space};
 use iced::widget::container::Style;
 use iced::{Length, Padding};
@@ -247,12 +248,7 @@ fn top_bar(app: &App, window: iced::window::Id) -> iced::Element<'_, Message> {
             (None, None) => String::new(),
         };
         left = left.push(icon("circle-x", 13.0, pal::DANGER));
-        left = left.push(
-            text(text_value)
-                .size(pal::fs_caption())
-                .color(pal::DANGER)
-                .width(Length::Fill),
-        );
+        left = left.push(error_line(window, text_value));
     } else {
         left = left.push(icon("message-square", 13.0, pal::TEXT_SECONDARY));
         left = left.push(
@@ -494,6 +490,39 @@ fn empty_flow() -> iced::Element<'static, Message> {
         "在下方输入消息，Enter 发送",
         None,
     )
+}
+
+/// 顶部行错误文案：恒一行、尾部省略（错误详情可带多行与数百字 JSON，整段展开会把
+/// 顶部行撑成半屏）；悬停给完整原文。
+fn error_line(window: iced::window::Id, message: String) -> iced::Element<'static, Message> {
+    let tip = message.clone();
+    iced::widget::responsive(move |size| {
+        let clipped = crate::layout_view::ellipsize(&message, size.width, pal::fs_caption());
+        let area = mouse_area(
+            container(
+                text(clipped)
+                    .size(pal::fs_caption())
+                    .color(pal::DANGER)
+                    .wrapping(Wrapping::None),
+            )
+            .width(Length::Fill)
+            .clip(true),
+        );
+        container(
+            area.on_enter(Message::Ui(crate::ui::UiMsg::HoverTip {
+                window,
+                label: tip.clone(),
+                box_px: 13.0,
+            }))
+            .on_exit(Message::Ui(crate::ui::UiMsg::HoverTipEnd { window, label: tip.clone() })),
+        )
+        .width(Length::Fill)
+        .height(Length::Shrink)
+        .into()
+    })
+    .width(Length::Fill)
+    .height(Length::Shrink)
+    .into()
 }
 
 /// 消息操作按钮组（复制 / 回到此处 / 重新生成；条件与对话面板约定一致）。

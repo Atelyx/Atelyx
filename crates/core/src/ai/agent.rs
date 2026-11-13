@@ -1052,13 +1052,28 @@ fn finalize_interrupted(
 
 fn stream_error_text(e: crate::ai::stream::StreamError) -> String {
     match e {
-        crate::ai::stream::StreamError::Http(code, body) => format!(
-            "请求失败：HTTP {code}（{}）",
-            body.chars().take(300).collect::<String>()
-        ),
+        crate::ai::stream::StreamError::Http(code, body) => {
+            format!("请求失败：HTTP {code}（{}）", http_error_reason(&body))
+        }
         crate::ai::stream::StreamError::Transport(m) => format!("请求失败：{m}"),
         crate::ai::stream::StreamError::MidStream(m) => format!("流式响应中断：{m}"),
         crate::ai::stream::StreamError::Aborted => ABORTED.to_string(),
+    }
+}
+
+/// HTTP 错误体的可读原因：OpenAI 兼容端点的错误是 JSON（`{"error":{"message":…}}`
+/// 或 `{"message":…}`），取其中 message 一句；解析不出就退回压成一行的原文。
+fn http_error_reason(body: &str) -> String {
+    let parsed = serde_json::from_str::<serde_json::Value>(body).ok();
+    let message = parsed
+        .as_ref()
+        .and_then(|v| v.get("error").and_then(|e| e.get("message")).or_else(|| v.get("message")))
+        .and_then(|m| m.as_str())
+        .map(str::to_string);
+    match message {
+        Some(m) if !m.trim().is_empty() => m.trim().chars().take(300).collect(),
+        // 非 JSON 错误体（代理页 / 网关文本）：换行压成空格，别把半屏版面撑开
+        _ => body.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(300).collect(),
     }
 }
 
@@ -1353,6 +1368,17 @@ mod tests {
         }
         let bad = json!({ "summary": "x", "upToMessageId": "不存在" });
         assert_eq!(history_to_llm_messages(&history, Some(&bad)).len(), 3);
+    }
+
+    #[test]
+    fn http_error_body_yields_readable_reason() {
+        // OpenAI 兼容端点：错误体是嵌套 JSON，只留 message 一句
+        let nested = r#"{"error":{"message":"Loading model","type":"unavailable_error"}}"#;
+        assert_eq!(http_error_reason(nested), "Loading model");
+        // 扁平形态（部分网关直接给 message）
+        assert_eq!(http_error_reason(r#"{"message":"鉴权失败"}"#), "鉴权失败");
+        // 非 JSON 错误体：换行压成空格，不撑开版面
+        assert_eq!(http_error_reason("502\nBad Gateway"), "502 Bad Gateway");
     }
 
     #[test]

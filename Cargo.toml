@@ -22,6 +22,11 @@ iced_widget = { path = "patches/iced_widget" }
 [profile.dev]
 debug = "line-tables-only"
 
+# 仓库路径含非 ASCII 时，cl 的 /Z7 调试记录装不下命令行（MSVC D8050）：
+# 只对经 cc 编 C 的依赖关调试信息，Rust 侧行表照旧保留。
+[profile.dev.package.ring]
+debug = false
+
 # profile 仅在 workspace 根生效；发版用 thin LTO + strip。
 [profile.release]
 lto = "thin"
