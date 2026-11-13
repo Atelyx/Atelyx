@@ -1,11 +1,11 @@
-//! 表格 AI 字段的配置弹层（居中模态）：系统提示词、指令模板、输出、模型与自动开关。
+//! 表格 AI 字段的配置弹层（居中模态）：系统提示词、指令模板、模型与自动开关。
 
 use iced::widget::text_editor::Action;
 use iced::widget::{button, column, container, row, space, text, text_editor};
 use iced::{alignment, Border, Element, Length, Padding, Size, Theme};
 
 use atelyx_core::table_ai as ai;
-use atelyx_core::vault::{self, TableField};
+use atelyx_core::vault::TableField;
 
 use crate::layout_view::PopupState;
 use crate::table_ai::{AiDraft, AiSystemMode};
@@ -139,18 +139,6 @@ fn config_card<'a>(
 
     body = body.push(
         column![
-            section_label("输出", ""),
-            row![
-                output_button("短文本", vault::AI_OUTPUT_SHORT, &draft.output),
-                output_button("长文本", vault::AI_OUTPUT_LONG, &draft.output),
-            ]
-            .spacing(6),
-        ]
-        .spacing(6),
-    );
-
-    body = body.push(
-        column![
             section_label("模型", ""),
             row![
                 text(model_label(app, draft))
@@ -253,16 +241,6 @@ fn system_mode_button(label: &str, mode: AiSystemMode, current: AiSystemMode) ->
         &controls::btn_sm(),
         if mode == current { controls::Variant::Primary } else { controls::Variant::Soft },
         Some(Message::Table(tv::TableMsg::AiDraftSystemMode(mode))),
-    )
-    .into()
-}
-
-fn output_button(label: &str, output: &str, current: &str) -> Element<'static, Message> {
-    controls::btn(
-        label,
-        &controls::btn_sm(),
-        if output == current { controls::Variant::Primary } else { controls::Variant::Soft },
-        Some(Message::Table(tv::TableMsg::AiDraftOutput(output.to_string()))),
     )
     .into()
 }

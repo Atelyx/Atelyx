@@ -1086,8 +1086,6 @@ pub struct AiFieldConfig {
     pub system: AiSystem,
     /// 指令模板：\#字段名 引用同行单元格，引用列值以「」包裹代入。
     pub prompt: String,
-    /// 输出规格：short（≤120 字，单行）/ long（≤2000 字，多行）。
-    pub output: String,
     /// 生成所用模型所属供应商（缺省 = 跟随仓库默认模型）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_id: Option<String>,
@@ -1100,8 +1098,8 @@ pub struct AiFieldConfig {
     pub auto_source_change: bool,
 }
 
-/// AI 字段输出规格（缺省 = 长文本）。
-pub const AI_OUTPUT_SHORT: &str = "short";
+/// AI 字段输出规格：恒为长文本。
+/// 该值仍参与输入指纹，按短文本生成过的格因此判为待更新。
 pub const AI_OUTPUT_LONG: &str = "long";
 
 /// 新建 AI 字段的默认系统提示词（可改可删）。
@@ -1112,7 +1110,6 @@ impl Default for AiFieldConfig {
         Self {
             system: AiSystem::Inline { text: DEFAULT_AI_SYSTEM.to_string() },
             prompt: String::new(),
-            output: AI_OUTPUT_LONG.to_string(),
             provider_id: None,
             model: None,
             auto_new_row: false,

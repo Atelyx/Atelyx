@@ -35,7 +35,6 @@ pub struct AiDraft {
     pub system_text: text_editor::Content,
     pub note: String,
     pub prompt: text_editor::Content,
-    pub output: String,
     /// 生成模型（供应商 id + 模型 id；None = 跟随仓库默认模型）。
     pub provider_id: Option<String>,
     pub model: Option<String>,
@@ -154,11 +153,6 @@ fn draft_for(field: &TableField) -> AiDraft {
         system_text: text_editor::Content::with_text(&system_text),
         note,
         prompt: text_editor::Content::with_text(&config.prompt),
-        output: if config.output == vault::AI_OUTPUT_SHORT {
-            vault::AI_OUTPUT_SHORT.to_string()
-        } else {
-            vault::AI_OUTPUT_LONG.to_string()
-        },
         provider_id: config.provider_id.clone(),
         model: config.model.clone(),
         auto_new: config.auto_new_row,
@@ -251,7 +245,6 @@ fn config_from_draft(draft: &AiDraft) -> AiFieldConfig {
     AiFieldConfig {
         system,
         prompt: draft.prompt.text(),
-        output: draft.output.clone(),
         provider_id: draft.provider_id.clone(),
         model: draft.model.clone(),
         auto_new_row: draft.auto_new,
@@ -445,11 +438,7 @@ pub fn launch(app: &mut App, field_id: &str, rows: Vec<String>, system: Option<S
             return Task::none();
         }
     };
-    let max_tokens = if config.output == vault::AI_OUTPUT_SHORT {
-        atelyx_core::ai::table_field::SHORT_MAX_TOKENS
-    } else {
-        atelyx_core::ai::table_field::LONG_MAX_TOKENS
-    };
+    let max_tokens = atelyx_core::ai::table_field::MAX_TOKENS;
     let Some(client) = atelyx_core::ai::agent::aid_client(&run.base_url) else {
         app.notify(crate::ui::notify::Level::Error, "无法建立模型连接，请检查网络或供应商地址");
         return Task::none();

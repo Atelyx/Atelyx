@@ -1017,7 +1017,6 @@ pub enum TableMsg {
     AiDraftSystemEdited(text_editor::Action),
     AiDraftPromptEdited(text_editor::Action),
     AiDraftNote(String),
-    AiDraftOutput(String),
     AiDraftAutoNew(bool),
     AiDraftAutoSource(bool),
     AiDraftInsert(String),
@@ -1385,17 +1384,16 @@ fn cell_content_height(
     if text.is_empty() {
         return 0.0;
     }
-    // 短文本 AI 字段单行省略展示：高度固定一行，长内容不撑高
-    if field.field_type == "ai"
-        && field.ai.as_ref().is_some_and(|c| c.output == atelyx_core::vault::AI_OUTPUT_SHORT)
-    {
-        return size * LINE_FACTOR;
-    }
     let wrap_w = wrap_width(col_w, zoom);
+    // 行段照常实测：AI 格多出的行绘制时要截断，折行点得与编辑浮层同口径
     let lines = match wrap {
         Some(wrap) => wrap.lines(&text, size, cell_text_font(&st), wrap_w).len(),
         None => estimate_lines(&text, size, wrap_w).len(),
     };
+    // AI 单元格不撑高行：恒按一行参与行高，超出部分绘制时截断（原文进编辑态看）
+    if field.field_type == "ai" {
+        return size * LINE_FACTOR;
+    }
     lines as f32 * size * LINE_FACTOR
 }
 
@@ -1406,6 +1404,10 @@ fn live_content_height(field: &TableField, row: &TableRow, draft: &str, col_w: f
     }
     let st = table_ops::style_of(row, &field.id);
     let size = style_size(&st, base_font_size(field) * zoom, zoom).max(1.0);
+    // AI 单元格的草稿同样不撑高行：原文在编辑浮层里看
+    if field.field_type == "ai" {
+        return size * LINE_FACTOR;
+    }
     let lines = measure_live_lines(draft, size, cell_text_font(&st), wrap_width(col_w, zoom));
     lines as f32 * size * LINE_FACTOR
 }
@@ -2588,12 +2590,13 @@ fn draw_cell_content(
             if s.is_empty() {
                 return;
             }
-            draw_wrapped_text(g, frame, cell, st, base, s);
+            draw_wrapped_text(g, frame, cell, st, base, s, None);
         }
     }
 }
 
 /// 文本按本轮布局的折行段绘制（AI 字段的已生成值同口径）。
+/// clip_h = 可画高度（None = 有多少画多少）；超出部分不画，末行补省略号。
 fn draw_wrapped_text(
     g: &Geo,
     frame: &mut canvas::Frame,
@@ -2601,6 +2604,7 @@ fn draw_wrapped_text(
     st: &CellStyle,
     base: f32,
     text: &str,
+    clip_h: Option<f32>,
 ) {
     let size = style_size(st, base, g.z);
     let font = cell_text_font(st);
@@ -2615,10 +2619,21 @@ fn draw_wrapped_text(
         }
     };
     let lh = size * LINE_FACTOR;
+    let max_lines = clip_h.map(|h| clip_lines(h, lh));
     let mut y = cell.y + CELL_PAD_Y * g.z;
-    for line in lines {
-        fill_text(frame, &line.text, Point::new(cell.x + CELL_PAD_X * g.z, y), size, font, style_color(st));
-        let w = line.width.min(wrap_w);
+    let mut cut: Option<String> = None;
+    for (i, line) in lines.iter().enumerate() {
+        if max_lines.is_some_and(|max| i >= max) {
+            break;
+        }
+        if max_lines.is_some_and(|max| i + 1 == max && lines.len() > max) {
+            cut = Some(ellipsize_text(&line.text, wrap_w, size));
+        }
+        let (label, w) = match cut.as_deref() {
+            Some(label) => (label, text_width(label, size).min(wrap_w)),
+            None => (line.text.as_str(), line.width.min(wrap_w)),
+        };
+        fill_text(frame, label, Point::new(cell.x + CELL_PAD_X * g.z, y), size, font, style_color(st));
         if st.u {
             frame.fill_rectangle(Point::new(cell.x + CELL_PAD_X * g.z, y + lh - 1.5), Size::new(w, 1.0), style_color(st));
         }
@@ -2629,7 +2644,12 @@ fn draw_wrapped_text(
     }
 }
 
-/// AI 单元格：生成中 / 未生成 / 无输入 / 失败占位，已生成值按文本折行；过期与失败带角标。
+/// 可画整行数：可用高度放得下的行数，至少一行（+0.01 抵浮点误差：恰好一行时不吞行）。
+fn clip_lines(avail_h: f32, line_h: f32) -> usize {
+    ((avail_h / line_h) + 0.01).floor().max(1.0) as usize
+}
+
+/// AI 单元格：生成中 / 未生成 / 无输入 / 失败占位，已生成值按格高折行截断；过期与失败带角标。
 fn draw_ai_cell(
     session: &TableSession,
     g: &Geo,
@@ -2677,23 +2697,9 @@ fn draw_ai_cell(
         }
         return;
     }
-    if field
-        .ai
-        .as_ref()
-        .is_some_and(|config| config.output == atelyx_core::vault::AI_OUTPUT_SHORT)
-    {
-        let text = ellipsize_text(value, cell.width - 2.0 * CELL_PAD_X * g.z, size);
-        fill_text(
-            frame,
-            &text,
-            Point::new(cell.x + CELL_PAD_X * g.z, cell.y + CELL_PAD_Y * g.z),
-            size,
-            cell_text_font(st),
-            style_color(st),
-        );
-    } else {
-        draw_wrapped_text(g, frame, cell, st, base_font_size(field) * g.z, value);
-    }
+    // 内容不撑高格：按格高截断，超出部分末行省略（原文进编辑态看）
+    let clip_h = cell.height - 2.0 * CELL_PAD_Y * g.z;
+    draw_wrapped_text(g, frame, cell, st, base_font_size(field) * g.z, value, Some(clip_h));
     let icon_color = if meta.is_some_and(|m| m.status == "failed") {
         Some(pal::DANGER)
     } else if view
@@ -3068,6 +3074,16 @@ fn editor_overlay<'a>(session: &'a TableSession) -> Option<Element<'a, Message>>
     } else {
         ((cell.height - size * LINE_FACTOR) / 2.0).max(0.0)
     };
+    // AI 格按格高截断显示，原文在编辑态看：浮层按草稿行数临时加高，最多到网格底（不压状态栏）
+    let mut height = cell.height.max(24.0);
+    if field.field_type == "ai" {
+        let lines = estimate_lines(&edit.content.text(), size, wrap_width(cell.width, zoom)).len();
+        let want = lines as f32 * size * LINE_FACTOR + 2.0 * pad_y;
+        let bottom = session.view.canvas_size.height - g.status_h() - 4.0 * zoom;
+        height = want.max(height).min(bottom.max(height));
+    }
+    // 加高后浮层压住下方行：给不透明底，下层行文字不透出来
+    let expanded_bg = (height > cell.height.max(24.0) + 0.5).then_some(pal::BG_OVERLAY);
     let style_color_value = style_color(&st);
     let editor = text_editor(&edit.content)
         .id(iced::widget::Id::new(CELL_EDITOR_ID))
@@ -3080,9 +3096,9 @@ fn editor_overlay<'a>(session: &'a TableSession) -> Option<Element<'a, Message>>
         .wrapping(iced::advanced::text::Wrapping::WordOrGlyph)
         .padding(iced::Padding::ZERO.horizontal(CELL_PAD_X * zoom).vertical(pad_y))
         .width(cell.width.max(40.0))
-        .height(cell.height.max(24.0))
+        .height(height)
         .style(move |_t, _s| text_editor::Style {
-            background: iced::Background::Color(Color::TRANSPARENT),
+            background: iced::Background::Color(expanded_bg.unwrap_or(Color::TRANSPARENT)),
             // 编辑框不另画边框：选中框（2px 强调色贴格缘）即编辑态边框（与单元格编辑同款式）
             border: iced::Border { color: Color::TRANSPARENT, width: 0.0, radius: 0.0.into() },
             placeholder: pal::TEXT_MUTED,
@@ -3713,7 +3729,7 @@ impl TableSession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vault::{TableField, TableFile, TableRow};
+    use crate::vault::{AiFieldConfig, TableField, TableFile, TableRow};
 
     fn text_session(values: &[&str]) -> TableSession {
         let field = TableField {
@@ -3763,6 +3779,31 @@ mod tests {
             .expect("布局实测后行段可取");
         assert!(lines.len() > 1, "放不进一行的正文要折出多行");
         assert_eq!(layout.row_h[1], lines.len() as f32 * size * LINE_FACTOR + 2.0 * CELL_PAD_Y);
+    }
+
+    /// 恰好一行的格不吞行：AI 格按格高截断时，可用高度等于一行也应画满这一行。
+    #[test]
+    fn clip_lines_keeps_exactly_fitting_line() {
+        assert_eq!(clip_lines(20.3, 20.3), 1);
+        assert_eq!(clip_lines(0.0, 20.0), 1);
+        assert_eq!(clip_lines(45.0, 20.0), 2);
+    }
+
+    /// AI 单元格不撑高行：长文与长草稿都只按一行计，原文留给编辑浮层。
+    #[test]
+    fn ai_cell_does_not_grow_row() {
+        let long = "需要折行的很长很长很长很长很长很长很长很长很长的一段中文正文";
+        let mut s = text_session(&["短", long]);
+        s.data.fields[0].field_type = "ai".to_string();
+        s.data.fields[0].ai = Some(AiFieldConfig { prompt: "#正文".into(), ..Default::default() });
+        s.rebuild_layout();
+        let layout = s.view.layout.as_ref().expect("布局缓存");
+        assert_eq!(layout.row_h[0], 32.0);
+        assert_eq!(layout.row_h[1], 32.0, "长文不把行撑高");
+
+        s.reflow_edit_row("r1", "f1", long);
+        let layout = s.view.layout.as_ref().expect("布局缓存");
+        assert_eq!(layout.row_h[1], 32.0, "在途草稿同样不撑高行");
     }
 
     /// 在途草稿即时撑高：未提交的正文按草稿实测写入行高，后续行与内容总高整体下移。

@@ -93,9 +93,6 @@ pub fn validate(field: &TableField, fields: &[TableField]) -> Result<Vec<AiRef>,
     if config.prompt.chars().count() > 4000 {
         return Err("指令模板过长（上限 4000 字）".to_string());
     }
-    if config.output != crate::vault::AI_OUTPUT_SHORT && config.output != crate::vault::AI_OUTPUT_LONG {
-        return Err(format!("输出规格无效：{}", config.output));
-    }
     if let AiSystem::Note { path } = &config.system {
         if path.trim().is_empty() {
             return Err("系统提示词笔记未选择".to_string());
@@ -223,7 +220,6 @@ pub fn fingerprint(field: &TableField, fields: &[TableField], row: &TableRow) ->
 pub fn same_output_config(a: &AiFieldConfig, b: &AiFieldConfig) -> bool {
     a.system == b.system
         && a.prompt == b.prompt
-        && a.output == b.output
         && model_descriptor(a) == model_descriptor(b)
 }
 
@@ -253,7 +249,7 @@ pub fn fingerprint_with_config(
     // 引用按字段 id 归一：改字段名（模板同步改写）不改变输入语义，不判过期
     hasher.update(normalize_refs(&config.prompt, fields).as_bytes());
     hasher.update([0]);
-    hasher.update(config.output.as_bytes());
+    hasher.update(crate::vault::AI_OUTPUT_LONG.as_bytes());
     if let Some(model) = model_descriptor(config) {
         hasher.update([0]);
         hasher.update(model.as_bytes());
@@ -555,7 +551,6 @@ mod tests {
         let config = AiFieldConfig {
             system: AiSystem::Note { path: "提示词/分镜.md".into() },
             prompt: "#画面".into(),
-            output: "short".into(),
             provider_id: Some("p1".into()),
             model: Some("m1".into()),
             auto_new_row: true,
@@ -568,8 +563,17 @@ mod tests {
         assert_eq!(value["model"], serde_json::json!("m1"));
         assert_eq!(value["autoNewRow"], serde_json::json!(true));
         assert_eq!(value["autoSourceChange"], serde_json::json!(false));
+        assert!(value.get("output").is_none(), "输出规格不再落盘");
         let back: AiFieldConfig = serde_json::from_value(value).expect("反序列化");
         assert_eq!(back, config);
+    }
+
+    /// 存量文件里的输出规格键按未知字段忽略：配置照常读出，不因该键失败。
+    #[test]
+    fn legacy_output_key_is_ignored() {
+        let legacy = serde_json::json!({ "prompt": "#画面", "output": "short" });
+        let back: AiFieldConfig = serde_json::from_value(legacy).expect("存量配置可读");
+        assert_eq!(back.prompt, "#画面");
     }
 
     #[test]

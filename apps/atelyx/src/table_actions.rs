@@ -418,10 +418,6 @@ fn on_msg_open(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
             });
             Task::none()
         }
-        tv::TableMsg::AiDraftOutput(output) => {
-            crate::table_ai::edit_draft(app, |draft| draft.output = output);
-            Task::none()
-        }
         tv::TableMsg::AiDraftAutoNew(on) => {
             crate::table_ai::edit_draft(app, |draft| draft.auto_new = on);
             Task::none()

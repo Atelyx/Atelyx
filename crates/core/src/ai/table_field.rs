@@ -2,10 +2,8 @@
 
 use crate::ai::stream::{stream, LlmMessage, StreamError, StreamEvent, StreamRequest};
 
-/// 短文本输出上限（token）。
-pub const SHORT_MAX_TOKENS: u32 = 400;
-/// 长文本输出上限（token）。
-pub const LONG_MAX_TOKENS: u32 = 1800;
+/// 单次生成的输出上限（token）。
+pub const MAX_TOKENS: u32 = 1800;
 
 /// 生成一个单元格内容：`system` 为空 = 不下发 system；失败返回可直接展示的中文原因。
 pub async fn generate(
