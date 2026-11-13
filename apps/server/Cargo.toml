@@ -9,7 +9,7 @@ axum = { version = "0.8", features = ["ws"] }
 # CORS：跨源客户端直连 LAN 服务器，预检 OPTIONS 必须由服务端应答
 tower-http = { version = "0.6", features = ["cors"] }
 axum-server = { version = "0.7", features = ["tls-rustls-no-provider"] }
-# rustls 的 crypto provider 显式锁 ring（reqwest 的 rustls-tls 同为 ring；两个 provider 并存时 rustls 拒绝自动抉择）
+# rustls provider 锁 ring（与 reqwest 一致）。
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 futures-util = { version = "0.3.31", features = ["sink"] }
 serde = { version = "1", features = ["derive"] }
@@ -36,6 +36,6 @@ tokio-tungstenite = "0.24"
 tempfile = "3"
 rcgen = "0.13"
 
-# 开发档只保留行表调试信息，避免 MSVC 完整 debuginfo 把 pdb 撑到数百 MB（同 workspace 根口径）。
+# 只保留行表，避免 pdb 膨胀（同 workspace 根）。
 [profile.dev]
 debug = "line-tables-only"

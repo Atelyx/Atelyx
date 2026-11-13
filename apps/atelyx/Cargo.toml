@@ -3,15 +3,12 @@ name = "atelyx"
 version = "0.6.6"
 edition = "2021"
 
-# 可执行文件定名 atelyx（安装器 / 快捷方式 / 任务栏进程名的统一基准）。
 [[bin]]
 name = "atelyx"
 path = "src/main.rs"
 
 [dependencies]
-# 核心能力（仓库存储/原子写/目录过滤）：与壳共享同一实现
 atelyx-core = { path = "../../crates/core" }
-# 界面组件库：调色板 / 字体 / 图标 / 基元控件 / 弹层 / 滚动容器
 atelyx-ui = { path = "../../crates/ui" }
 # AI 对话：会话 id / 消息 id 生成（与 core 写链同版本）
 uuid = { version = "1", features = ["v4"] }
@@ -19,23 +16,20 @@ uuid = { version = "1", features = ["v4"] }
 serde = { version = "1", features = ["derive"] }
 # 布局状态（ui-state.json）序列化
 serde_json = "1"
-# GUI 框架：advanced/canvas 为自定义部件与几何绘制接口（自研编辑器部件依赖，
-# 提前引入避免特性变更触发全量重编译）；image 供标题栏应用图标
+# iced：advanced/canvas 自定义部件，image 标题栏图标。
 iced = { version = "0.14", features = ["advanced", "canvas", "tokio", "image"] }
-# 系统文件夹选择对话框（AsyncFileDialog 走 iced Task）
+# 文件夹选择对话框。
 rfd = "0.15"
-# 表格稳定 id（新建行/列/字段）与图片尺寸读取
+# 表格稳定 id。
 nanoid = "0.4"
-# 图片尺寸读取（附件白名单口径：png/jpeg/gif/bmp/webp；与 core 转码声明合并取并集）
+# 图片解码（png/jpeg/gif/bmp/webp）。
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp"] }
-# 图片写系统剪贴板（灯箱「复制图片」）：Windows 写 DIB，Linux 写 X11 / Wayland data-control
+# 剪贴板图片（Windows DIB / Linux data-control）。
 arboard = { version = "3", features = ["wayland-data-control"] }
-# 自动保存防抖定时器与索引扫描线程池（一次性 sleep / spawn_blocking；执行体为 iced 的 tokio runtime）
-# 插件事件订阅用 tokio::sync::broadcast 接收端
+# 定时器 / 线程池 / 插件事件 broadcast。
 tokio = { version = "1", default-features = false, features = ["time", "rt", "sync"] }
 
-# 开机自启（autostart）：Windows 注册表 Run 键；应用内更新（update）：ShellExecuteW 拉起安装器；
-# 系统托盘（tray）：Shell_NotifyIconW + 专用线程消息窗
+# Windows：Run 键 / ShellExecuteW / 托盘消息窗。
 [target.'cfg(target_os = "windows")'.dependencies]
 winreg = "0.55"
 windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }

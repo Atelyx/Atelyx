@@ -14,13 +14,10 @@ serde_json = "1"
 # frontmatter：YAML 解析（事件级 API 供自研 1.1 解析表使用，标量样式可区分引号形态）
 yaml-rust2 = "0.10"
 dunce = "1"
-# 会话容器（chat_container）：持久 op 建 id / 写链线程与广播回执（spawn + oneshot + sleep）
-# 协作帧泵（collab）：WS 连接建立用 tokio::net（超时包裹），net 特性显式声明不靠传递启用
+# 会话写链 / WS 连接（time / rt / sync / net）。
 tokio = { version = "1", features = ["rt", "sync", "time", "macros", "net"] }
 uuid = { version = "1", features = ["v4"] }
-# 出网校验（net_guard）：URL 解析与地址枚举；blocking 供插件 http 能力面
-# （宿主侧在插件进程的 stdout 读线程上同步执行请求，见 plugin_runtime/http.rs）
-# stream 供 AI 对话流式客户端（bytes_stream 逐块读 SSE）
+# 出网校验 / AI 流式 / 插件 http（blocking）。
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking", "stream"] }
 # 仓库内文件检索（filesearch）：glob 模式匹配（`**/` 任意深度语义，即 ripgrep 所用引擎）
 globset = "0.4"
@@ -54,12 +51,10 @@ sha2 = "0.10"
 hex = "0.4"
 # 协作帧泵（collab）：tungstenite 流的 Sink/Stream 组合子
 futures-util = "0.3"
-# 全局快捷键（plugin_runtime/shortcut）：OS 级热键注册与触发；Windows 走消息窗 + RegisterHotKey，
-# Linux 走 X11 XGrabKey（Wayland 无标准机制，按平台预检判不可用）
+# OS 级热键；Wayland 不可用。
 global-hotkey = "0.8"
 
-# 凭据（credentials）：令牌存系统密钥链，不落明文。按平台启用真实后端——
-# 不带平台 feature 时 keyring 3.x 落到内存 mock（写入不出进程，跨启动即 NoEntry）
+# 系统密钥链；缺平台 feature 时落内存 mock。
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3.6", features = ["apple-native"] }
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -69,8 +64,7 @@ keyring = { version = "3.6", features = ["sync-secret-service"] }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
-# 插件进程托管（plugin_process）：作业对象（创建/配置/加入/结束）与「挂起创建 → 恢复主线程」、
-# 插件卸载前递归清只读位
+# 作业对象与卸载前清只读位。
 [target.'cfg(target_os = "windows")'.dependencies]
 winapi = { version = "0.3", features = ["winnt", "processthreadsapi", "handleapi", "errhandlingapi", "minwinbase", "jobapi", "jobapi2", "tlhelp32", "winerror", "winuser"] }
 keyring = { version = "3.6", features = ["windows-native"] }

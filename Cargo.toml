@@ -11,19 +11,16 @@ members = [
 ]
 exclude = ["apps/server"]
 
-# 本地补丁版 winit 与 iced_widget（基线、改动与移除条件见 patches/README.md，
-# 源码目录由 patches/apply.sh 从 crates.io 原始源码物化）。上游发布包含该修复的版本后可整目录移除。
+# 本地补丁版 winit / iced_widget（物化与基线见 patches/README.md）。
 [patch.crates-io]
 winit = { path = "patches/winit" }
 iced_widget = { path = "patches/iced_widget" }
 
-# 开发档只保留行表调试信息：MSVC 的完整 debuginfo 会让每个 pdb 涨到数百 MB，
-# 而 deps/incremental 里的旧产物 Cargo 永不回收。栈回溯仍有 文件:行号，断点看变量需临时改回 true。
+# 只保留行表：完整 debuginfo 让 pdb 与 deps 持续膨胀。
 [profile.dev]
 debug = "line-tables-only"
 
-# 仓库路径含非 ASCII 时，cl 的 /Z7 调试记录装不下命令行（MSVC D8050）：
-# 只对经 cc 编 C 的依赖关调试信息，Rust 侧行表照旧保留。
+# 非 ASCII 路径下 ring 的 cl /Z7 记录触发 D8050，只对该依赖关调试信息。
 [profile.dev.package.ring]
 debug = false
 
