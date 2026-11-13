@@ -1244,6 +1244,7 @@ fn update_inner(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
                     }
                 }
                 AidKind::AutoRename => {
+                    // 命名失败静默：标题只补空标题，失败时界面保持原名，原因留日志
                     app.chat.renaming.remove(&session_id);
                     if let Some(title) = result.clone() {
                         match store().commit(CommitBatch {
@@ -1257,8 +1258,10 @@ fn update_inner(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
                             ..Default::default()
                         }) {
                             Ok(()) => app.plugins.on_chat_changed(&session_id, ChatChangeKind::Meta),
-                            Err(e) => app.chat.error = Some(format!("标题保存失败：{e}")),
+                            Err(e) => eprintln!("会话标题保存失败：{e}"),
                         }
+                    } else {
+                        eprintln!("会话标题生成失败：{session_id}");
                     }
                 }
             }
@@ -2386,10 +2389,8 @@ fn regenerate_title(app: &mut App) -> iced::Task<Message> {
     {
         return iced::Task::none();
     }
-    spawn_title_task(app, &session_id, &messages).unwrap_or_else(|| {
-        app.chat.error = Some("标题生成不可用：未选择模型或命名模型未配置".to_string());
-        iced::Task::none()
-    })
+    // 命名不可用（无模型 / 命名模型未配置）静默：标题保持原名，面板不弹提示
+    spawn_title_task(app, &session_id, &messages).unwrap_or_else(iced::Task::none)
 }
 
 /// 发布命名任务：命名路由 = 设置指定模型 > 面板当前模型；发起即登记 renaming（回执按会话摘除）。
