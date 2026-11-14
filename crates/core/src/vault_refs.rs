@@ -4,22 +4,13 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::path;
 use crate::vault::{self, collect_md_link_updates, CanvasFile};
 use crate::write_queue::WriteQueue;
 
 /// 同步结果：`rewritten` = 内部链接被代写的 `.md` 相对路径清单（调用方据此刷新对应笔记）。
 pub struct SyncResult {
     pub rewritten: Vec<String>,
-}
-
-/// 入参路径归一化：剥尾部 `/` `\`，空串拒绝——引用匹配按字符串比较，非规范形态会
-/// 静默零命中（底层 rename 照常成功），必须在入口挡掉。
-fn normalize_rel(p: &str) -> Result<String, String> {
-    let trimmed = p.trim_end_matches(['/', '\\']);
-    if trimmed.is_empty() {
-        return Err(format!("非法路径：{p:?}"));
-    }
-    Ok(trimmed.to_string())
 }
 
 /// 重命名/移动 `.md` 笔记并同步引用（画布精确匹配 + `.md` 链接精确匹配）。
@@ -51,8 +42,8 @@ fn rename_note_synced_inner(
     old_file: &str,
     new_file: &str,
 ) -> Result<SyncResult, String> {
-    let old_file = normalize_rel(old_file)?;
-    let new_file = normalize_rel(new_file)?;
+    let old_file = path::normalize_item(old_file)?;
+    let new_file = path::normalize_item(new_file)?;
     let (old_file, new_file) = (old_file.as_str(), new_file.as_str());
     let pending = collect_canvas_updates(root, &mut |canvas| {
         remap_canvas_refs(canvas, old_file, new_file)
@@ -116,8 +107,8 @@ fn rename_folder_synced_inner(
     old_dir: &str,
     new_dir: &str,
 ) -> Result<SyncResult, String> {
-    let old_dir = normalize_rel(old_dir)?;
-    let new_dir = normalize_rel(new_dir)?;
+    let old_dir = path::normalize_item(old_dir)?;
+    let new_dir = path::normalize_item(new_dir)?;
     let (old_dir, new_dir) = (old_dir.as_str(), new_dir.as_str());
     vault::rename_folder(root, old_dir, new_dir)?;
     let pending = match collect_canvas_updates(root, &mut |canvas| {
@@ -226,7 +217,8 @@ fn ref_field_of(node_type: &str) -> Option<&'static str> {
 /// 每个引用只改写一次（`new_rel` 落在 `old_rel` 内部时不会被前缀匹配二次改写）。
 /// 返回是否有变更；改名事务（笔记 / 文件夹）与协作空间的链接改写共用。
 pub fn remap_canvas_refs(canvas: &mut CanvasFile, old_rel: &str, new_rel: &str) -> bool {
-    let (Ok(old_rel), Ok(new_rel)) = (normalize_rel(old_rel), normalize_rel(new_rel)) else {
+    // 引用匹配按字符串比较：非规范入参（尾斜杠 / `./` / 反斜杠）会静默零命中，先在入口归一
+    let (Ok(old_rel), Ok(new_rel)) = (path::normalize_item(old_rel), path::normalize_item(new_rel)) else {
         return false;
     };
     let old_prefix = format!("{old_rel}/");

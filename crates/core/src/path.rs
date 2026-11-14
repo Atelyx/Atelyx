@@ -1,4 +1,4 @@
-//! 路径与命名基元：重名顺延与改名后路径跟随的唯一口径。
+//! 路径与命名基元：重名顺延、改名后路径跟随与相对路径归一化的唯一口径。
 
 /// 重名顺延：stem.ext 已被占用时依次尝试 stem-2.ext、stem-3.ext…，返回首个未占用的名字。
 ///
@@ -22,6 +22,47 @@ pub fn unique_stem(stem: &str, ext: &str, taken: impl Fn(&str) -> bool) -> Strin
 /// 同 [unique_stem]，无扩展名。
 pub fn unique_name(base: &str, taken: impl Fn(&str) -> bool) -> String {
     unique_stem(base, "", taken)
+}
+
+/// 仓库相对路径的规范形态：`\` 与 `/` 同作分隔符，退掉 `.` 段与重复分隔符，返回以 `/`
+/// 分隔的净化路径；拒绝空路径 / 绝对路径 / `..` 段 / 盘符前缀。纯 `.` 归一为空串（= 仓库根），
+/// 要指向具体条目用 [normalize_item]。
+///
+/// 内容路径在 Windows 与 Linux 客户端之间共享，两端口径必须一致：盘符前缀在 Unix 上只是普通
+/// 文件名，落进共享内容后 Windows 客户端会解析成绝对路径。
+pub fn normalize(rel: &str) -> Result<String, String> {
+    if rel.is_empty() {
+        return Err("非法路径：空路径".to_string());
+    }
+    let text = rel.replace('\\', "/");
+    if text.starts_with('/') {
+        return Err(format!("非法路径：绝对路径 ({rel})"));
+    }
+    let mut segs: Vec<&str> = Vec::new();
+    for seg in text.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => return Err(format!("非法路径：含越界段 ({rel})")),
+            s if is_drive_prefix(s) => return Err(format!("非法路径：盘符前缀 ({rel})")),
+            s => segs.push(s),
+        }
+    }
+    Ok(segs.join("/"))
+}
+
+/// 同 [normalize]，但归一结果必须指向具体条目（`.` / `./` 这类空结果判为非法）。
+pub fn normalize_item(rel: &str) -> Result<String, String> {
+    let text = normalize(rel)?;
+    if text.is_empty() {
+        return Err(format!("非法路径：空路径 ({rel})"));
+    }
+    Ok(text)
+}
+
+/// 段是否为盘符形态（`C:` / `C:x.md`）：Windows 上非法或绝对，Unix 上只是普通名字。
+fn is_drive_prefix(seg: &str) -> bool {
+    let bytes = seg.as_bytes();
+    bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic()
 }
 
 /// `rel` 等于 `base` 或位于其子树内（`base` 为规范仓库相对路径，不带首尾斜杠）。
@@ -61,6 +102,28 @@ mod tests {
         assert_eq!(remap_prefix("a/bc.md", "a/b", "x"), None);
         assert_eq!(remap_prefix("other.md", "a/b", "x"), None);
         assert_eq!(remap_prefix("a/b", "a", "z").as_deref(), Some("z/b"));
+    }
+
+    #[test]
+    fn normalize_folds_separators_and_rejects_escapes() {
+        // 尾斜杠 / `./` 前缀 / 反斜杠 / 中间双斜杠 / 中间 `.` 段 → 同一规范形态
+        assert_eq!(normalize("notes/").as_deref(), Ok("notes"));
+        assert_eq!(normalize("./notes").as_deref(), Ok("notes"));
+        assert_eq!(normalize("a//b").as_deref(), Ok("a/b"));
+        assert_eq!(normalize("a\\b").as_deref(), Ok("a/b"));
+        assert_eq!(normalize("a/./b/").as_deref(), Ok("a/b"));
+        // 纯 `.` = 仓库根（空串），不是具体条目
+        assert_eq!(normalize(".").as_deref(), Ok(""));
+        for bad in ["", "/abs", "../x", "a/../b", "C:x.md"] {
+            assert!(normalize(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn normalize_item_rejects_root_forms() {
+        assert_eq!(normalize_item("a/b.md").as_deref(), Ok("a/b.md"));
+        assert!(normalize_item(".").is_err());
+        assert!(normalize_item("./").is_err());
     }
 
     #[test]

@@ -516,34 +516,9 @@ fn validate_relative_path(file: &str) -> Result<PathBuf, String> {
     Ok(clean)
 }
 
-/// 跨平台相对路径归一：`\` 与 `/` 同作分隔符，退掉 `.` 段与重复分隔符，拒绝空路径 /
-/// 绝对路径 / `..` 段 / 盘符前缀；返回以 `/` 分隔的净化路径（`"."` 归为空串，由调用方按根处理）。
-/// 内容路径在 Windows 与 Linux 客户端之间共享，两端口径必须一致：盘符前缀在 Unix 上
-/// 只是普通文件名，落进共享内容后 Windows 客户端会解析成绝对路径。
+/// 跨平台相对路径归一（口径见 [crate::path::normalize]）。
 pub fn normalize_relative_path(rel: &str) -> Result<String, String> {
-    if rel.is_empty() {
-        return Err("非法路径：空路径".to_string());
-    }
-    let text = rel.replace('\\', "/");
-    if text.starts_with('/') {
-        return Err(format!("非法路径：绝对路径 ({rel})"));
-    }
-    let mut segs: Vec<&str> = Vec::new();
-    for seg in text.split('/') {
-        match seg {
-            "" | "." => {}
-            ".." => return Err(format!("非法路径：含越界段 ({rel})")),
-            s if is_drive_prefix(s) => return Err(format!("非法路径：盘符前缀 ({rel})")),
-            s => segs.push(s),
-        }
-    }
-    Ok(segs.join("/"))
-}
-
-/// 段是否为盘符形态（`C:` / `C:x.md`）：Windows 上非法或绝对，Unix 上只是普通名字。
-fn is_drive_prefix(seg: &str) -> bool {
-    let bytes = seg.as_bytes();
-    bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic()
+    crate::path::normalize(rel)
 }
 
 /// AI 工具路径校验：在跨平台相对路径归一之上拒绝隐藏段（`.atelyx` / `.git` 等——仓库配置与
@@ -3325,25 +3300,15 @@ fn extract_refs(content: &str) -> Vec<WikiRef> {
     refs
 }
 
-/// 归一化链接路径：percent 解码、反斜杠→`/`、去 `./` 与前导 `/`；含 `..` 段返回 None（防越出仓库）。
+/// 归一化链接路径：percent 解码、退掉前导分隔符（跨平台链接形如 `/notes/a.md`），
+/// 再交给 [crate::path::normalize] 统一口径；含 `..` 段或空结果返回 None（防越出仓库）。
 fn normalize_link_path(raw: &str) -> Option<String> {
-    let mut s = percent_decode(raw);
-    s = s.replace('\\', "/");
-    while let Some(stripped) = s.strip_prefix("./") {
-        s = stripped.to_string();
-    }
-    while let Some(stripped) = s.strip_prefix('/') {
-        s = stripped.to_string();
-    }
-    if s.is_empty() {
+    let decoded = percent_decode(raw).replace('\\', "/");
+    let rel = decoded.trim_start_matches('/');
+    if rel.is_empty() {
         return None;
     }
-    for seg in s.split('/') {
-        if seg == ".." {
-            return None;
-        }
-    }
-    Some(s)
+    crate::path::normalize(rel).ok()
 }
 
 /// 简易 percent 解码（%XX）；非法序列原样保留（匹配不上自然不命中，不报错）。

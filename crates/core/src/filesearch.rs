@@ -78,36 +78,23 @@ fn build_glob_matcher(pattern: &str) -> Result<globset::GlobMatcher, String> {
     Ok(glob.compile_matcher())
 }
 
-/// 归一化 path 参数为规范相对路径（`\` → `/`、去尾斜杠、去 `./` 前缀、折叠中间 `//`；空/`.` = 仓库根）。
-/// 防模型传入 `notes/` / `./notes` 时 walk 拼出 `notes//a.md` 双斜杠 rel，导致锚定 glob
-/// （`notes/*.md`）全串失配返回空结果——AI 传目录带尾斜杠/`./` 前缀是常见形态。
-fn normalize_base_path(p: &str) -> String {
-    let mut s = p.replace('\\', "/");
-    while s.ends_with('/') {
-        s.pop();
-    }
-    while s.starts_with("./") {
-        s.drain(0..2);
-    }
-    while s.contains("//") {
-        s = s.replace("//", "/");
-    }
-    if s == "." {
-        String::new()
-    } else {
-        s
-    }
-}
-
-/// 解析 `path` 参数：缺省 = 仓库根（目录）；给出 = 归一化 + `safe_join` 校验后按「文件/目录」区分。
-/// 指向隐藏目录（. 开头段）拒绝（AI 发现层完全屏蔽）。返回（相对仓库根的展示前缀，是否单文件）。
+/// 解析 `path` 参数：缺省 = 仓库根（目录）；给出 = 归一化（口径见 [crate::path::normalize]）
+/// + `safe_join` 校验后按「文件/目录」区分。前导分隔符按仓库根理解（模型常把根写成 `/`、
+/// 把目录写成 `/notes`）。指向隐藏目录（. 开头段）拒绝（AI 发现层完全屏蔽）。
+/// 返回（相对仓库根的展示前缀，是否单文件）。
+///
+/// 前缀必须是规范形态：walk 拼出的 rel 都用 `/` 分隔且无 `.`/`//`，锚定 glob（`notes/*.md`）
+/// 才匹配得上——AI 传目录带尾斜杠/`./` 前缀是常见形态。
 fn resolve_base(root: &Path, path: Option<&str>) -> Result<(String, bool), String> {
     let p = match path {
         None => return Ok((String::new(), false)),
-        Some(p) => normalize_base_path(p),
+        Some(p) => match p.trim_start_matches(['/', '\\']) {
+            "" => return Ok((String::new(), false)),
+            p => crate::path::normalize(p)?,
+        },
     };
     if p.is_empty() {
-        // 归一化后为空（`"/"`/`"./"`/`"."`）→ 视作仓库根
+        // 归一化后为空（`"./"`/`"."`）→ 视作仓库根
         return Ok((String::new(), false));
     }
     if has_hidden_segment(&p) {
@@ -401,19 +388,18 @@ mod filesearch_tests {
     }
 
     #[test]
-    fn normalize_base_path_variants() {
-        // 尾斜杠 / `./` 前缀 / 反斜杠 / 中间双斜杠 → 规范相对路径；空/`.`/`/` → 仓库根
-        assert_eq!(normalize_base_path("notes/"), "notes");
-        assert_eq!(normalize_base_path("./notes"), "notes");
-        assert_eq!(normalize_base_path("./notes/"), "notes");
-        assert_eq!(normalize_base_path("a//b"), "a/b");
-        assert_eq!(normalize_base_path("a\\b"), "a/b");
-        assert_eq!(normalize_base_path("notes"), "notes");
-        assert_eq!(normalize_base_path("./"), "");
-        assert_eq!(normalize_base_path("."), "");
-        assert_eq!(normalize_base_path("/"), "");
-        // `..` 不归一化（留给 safe_join 的穿越校验拒绝）
-        assert_eq!(normalize_base_path("../x"), "../x");
+    fn base_path_root_forms_land_on_root() {
+        // 根的各种写法（空 / `.` / `./` / `/` / 反斜杠）都落到仓库根，且不打文件系统
+        for p in ["", ".", "./", "/", "\\", "//"] {
+            assert_eq!(resolve_base(Path::new("."), Some(p)).unwrap(), (String::new(), false), "{p:?}");
+        }
+    }
+
+    #[test]
+    fn base_path_rejects_traversal() {
+        // 越界段在入口即拒（不再下探到 safe_join）
+        assert!(resolve_base(Path::new("."), Some("../x")).is_err());
+        assert!(resolve_base(Path::new("."), Some("notes/../../x")).is_err());
     }
 
     #[test]
