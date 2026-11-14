@@ -9,6 +9,7 @@ use atelyx_core::history::{HistoryAction, HistoryEditor, HistoryKind, RecordOpts
 use atelyx_core::space_client::{HistoryAuthorReq, HistoryRecordReq};
 use atelyx_core::vault::{CanvasFile, CanvasPatch, TableFile};
 
+use crate::ai_edit::editor_of;
 use crate::canvas_view::SaveReason as CanvasSaveReason;
 use crate::table_view::SaveReason as TableSaveReason;
 use crate::{App, Message, RepoKind};
@@ -749,14 +750,6 @@ async fn space_history_record(
             },
         )
         .await;
-}
-
-/// AI 版本的历史来源标记（agent 名进展示，id 供归因）。
-fn editor_of(actor: &EditActor) -> Option<HistoryEditor> {
-    Some(HistoryEditor {
-        agent_id: actor.agent.agent_id.clone(),
-        agent_name: actor.agent.agent_name.clone(),
-    })
 }
 
 fn base_json<T: serde::Serialize>(model: &T) -> String {

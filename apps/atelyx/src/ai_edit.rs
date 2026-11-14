@@ -521,7 +521,7 @@ pub(crate) fn end_presence(app: &mut App) {
 }
 
 /// AI 版本的历史来源标记（agent 名进展示，id 供归因）。
-fn editor_of(actor: &EditActor) -> Option<HistoryEditor> {
+pub(crate) fn editor_of(actor: &EditActor) -> Option<HistoryEditor> {
     Some(HistoryEditor {
         agent_id: actor.agent.agent_id.clone(),
         agent_name: actor.agent.agent_name.clone(),
