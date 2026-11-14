@@ -2276,7 +2276,7 @@ pub fn space_patch_config(app: &mut App, patch: serde_json::Value) -> Task<Messa
     )
 }
 
-/// Agent 配置读取（空间模式：GET `.atelyx/agents.json`，缺失/损坏按空清单）。
+/// Agent 配置读取（空间模式：GET `.atelyx/agents.json`，缺失 = 空清单，损坏 = 报错）。
 pub fn space_load_agents(app: &App) -> Task<Message> {
     let Some(session) = session_of(app) else { return Task::none() };
     let gen = app.epoch();
@@ -2285,14 +2285,9 @@ pub fn space_load_agents(app: &App) -> Task<Message> {
     Task::perform(
         async move {
             match client.get_file_text(&space_id, ".atelyx/agents.json").await {
-                Ok(raw) => {
-                    // 与本地读路径同口径：装载时迁移旧工具 id 与未改过的内置 Agent 默认集
-                    let mut agents = serde_json::from_str::<vault::AgentConfigFile>(&raw)
-                        .map(|f| f.agents)
-                        .unwrap_or_default();
-                    vault::migrate_agent_configs(&mut agents);
-                    Ok::<_, SpaceError>(agents)
-                }
+                // 与本地读路径同口径：解析失败不降级为空名单（否则下次保存覆盖团队清单）
+                Ok(raw) => vault::parse_agents_json(&raw)
+                    .map_err(|e| SpaceError::Network(format!("Agent 配置已损坏：{e}"))),
                 // 缺失 = 尚无配置（与本地读路径同口径，不算错误）
                 Err(SpaceError::NotFound) => Ok(Vec::new()),
                 Err(e) => Err(e),
@@ -2314,9 +2309,9 @@ pub fn space_write_agents(app: &mut App, agents: Vec<vault::AgentConfig>) -> Tas
             let raw = serde_json::to_string_pretty(&file).unwrap_or_default();
             client.put_file_text(&space_id, ".atelyx/agents.json", &raw).await?;
             match client.get_file_text(&space_id, ".atelyx/agents.json").await {
-                Ok(raw) => Ok(serde_json::from_str::<vault::AgentConfigFile>(&raw)
-                    .map(|f| f.agents)
-                    .unwrap_or_default()),
+                // 回读解析失败按错误回执：内存名单保持上一版，不因一次坏回包变成空名单
+                Ok(raw) => vault::parse_agents_json(&raw)
+                    .map_err(|e| SpaceError::Network(format!("Agent 配置回读解析失败：{e}"))),
                 Err(SpaceError::NotFound) => Ok(Vec::new()),
                 Err(e) => Err(e),
             }

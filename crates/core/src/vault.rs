@@ -1885,6 +1885,8 @@ pub struct AgentConfig {
 /// Agent 配置文件根结构（带 schema 便于后续演进）。
 #[derive(Serialize, Deserialize, Clone, Default)]
 pub struct AgentConfigFile {
+    /// 缺省仍可解析：schema 只是演进标记，缺一段标记不足以否定一份结构完整的名单。
+    #[serde(default)]
     pub schema: String,
     pub agents: Vec<AgentConfig>,
 }
@@ -2027,19 +2029,41 @@ pub fn migrate_agent_configs(agents: &mut [AgentConfig]) {
     }
 }
 
-/// 读 Agent 配置列表（不存在/解析失败返回空——手编辑损坏不阻塞，与 prompt-notes 同策略）。
-/// 装载时做工具 id 与内置 Agent 默认集的迁移，存量配置可继续使用。
+/// 解析 agents.json 正文（本地与空间同口径）：严格解析 + 工具 id / 内置默认集迁移。
+///
+/// 解析失败必须是错误而不是空名单：名单走「读 → 改 → 写」整文件覆盖，把损坏读成空
+/// 会让下一次保存把用户的全部 Agent 抹掉。缺 `schema` 不算损坏（见 `AgentConfigFile`）。
+pub fn parse_agents_json(raw: &str) -> Result<Vec<AgentConfig>, String> {
+    let file: AgentConfigFile = serde_json::from_str(raw).map_err(|e| e.to_string())?;
+    let mut agents = file.agents;
+    migrate_agent_configs(&mut agents);
+    Ok(agents)
+}
+
+/// 读 Agent 配置列表：文件不存在 = 空名单；内容损坏 = 备份原文后返回错误（不降级为空名单）。
+///
+/// 备份失败同样报错：留不下原文还继续，调用方紧接着的保存就会把它永久覆盖。
 pub fn read_agents_file(root: &Path) -> Result<Vec<AgentConfig>, String> {
     let path = root.join(".atelyx").join("agents.json");
     if !path.exists() {
         return Ok(Vec::new());
     }
     let json = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    let mut agents = serde_json::from_str::<AgentConfigFile>(&json)
-        .map(|f| f.agents)
-        .unwrap_or_default();
-    migrate_agent_configs(&mut agents);
-    Ok(agents)
+    match parse_agents_json(&json) {
+        Ok(agents) => Ok(agents),
+        Err(e) => {
+            let Some(backup) = backup_corrupt_config(&path, "agents") else {
+                return Err(format!(
+                    "Agent 配置已损坏且原文备份失败（{}），已中止读取以免覆盖原文：{e}",
+                    path.display()
+                ));
+            };
+            Err(format!(
+                "Agent 配置已损坏，原文已备份为 {}：{e}",
+                backup.display()
+            ))
+        }
+    }
 }
 
 /// 写 Agent 配置列表（原子写 .atelyx/agents.json）。
@@ -5137,6 +5161,122 @@ mod merge_vault_config_tests {
         );
         // 原路径已让开：后续写盘不会与备份互相覆盖
         assert!(!path.exists());
+    }
+}
+
+#[cfg(test)]
+mod agents_file_tests {
+    use super::test_support::TempDir;
+    use super::*;
+
+    fn corrupt_backups(root: &Path) -> Vec<String> {
+        std::fs::read_dir(root.join(".atelyx"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("agents.json.corrupt-"))
+            .collect()
+    }
+
+    fn write_raw(root: &Path, raw: &str) {
+        let dir = root.join(".atelyx");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("agents.json"), raw).unwrap();
+    }
+
+    #[test]
+    fn missing_file_reads_as_empty_without_creating_it() {
+        let root = TempDir::new("agents-missing");
+        assert!(read_agents_file(&root).unwrap().is_empty());
+        assert!(!root.join(".atelyx/agents.json").exists(), "读不落盘");
+    }
+
+    /// 缺 schema 的名单仍可解析：否则旧版/手编辑文件会被判损坏，进而被清空。
+    #[test]
+    fn missing_schema_still_parses() {
+        let root = TempDir::new("agents-noschema");
+        write_raw(
+            &root,
+            r#"{"agents":[{"id":"a","name":"A","tools":["read_file"]}]}"#,
+        );
+        let agents = read_agents_file(&root).unwrap();
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].id, "a");
+        assert_eq!(agents[0].tools, vec!["read_file".to_string()]);
+        assert!(corrupt_backups(&root).is_empty(), "可解析的文件不当损坏处理");
+    }
+
+    /// 损坏 = 备份原文 + 报错；不得降级为空名单（否则下一次保存把名单写成空）。
+    #[test]
+    fn corrupt_file_is_backed_up_and_reported() {
+        let root = TempDir::new("agents-corrupt");
+        write_raw(&root, "{ 这不是 JSON");
+        let path = root.join(".atelyx/agents.json");
+
+        let err = read_agents_file(&root).unwrap_err();
+        assert!(err.contains("已备份"), "{err}");
+        assert!(!path.exists(), "损坏原文已让开，后续写盘不会覆盖它");
+        let backups = corrupt_backups(&root);
+        assert_eq!(backups.len(), 1, "应且只应留下一个备份：{backups:?}");
+        assert_eq!(
+            std::fs::read_to_string(root.join(".atelyx").join(&backups[0])).unwrap(),
+            "{ 这不是 JSON",
+            "备份逐字保留原文"
+        );
+        // 备份后原路径为空：后续读取按「尚无配置」放行，用户已从错误里知道原文位置
+        assert!(read_agents_file(&root).unwrap().is_empty());
+        assert_eq!(corrupt_backups(&root).len(), 1, "不再重复备份同一份内容");
+    }
+
+    /// 空文件不是「名单为空」，与损坏同处理：否则一次误触清空会连带清掉全部 Agent。
+    #[test]
+    fn empty_file_is_corrupt_not_empty_roster() {
+        let root = TempDir::new("agents-empty");
+        write_raw(&root, "");
+        assert!(read_agents_file(&root).is_err());
+        let backups = corrupt_backups(&root);
+        assert_eq!(backups.len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(root.join(".atelyx").join(&backups[0])).unwrap(),
+            "",
+            "空文件原样留档"
+        );
+    }
+
+    #[test]
+    fn write_then_read_roundtrip_keeps_agents() {
+        let root = TempDir::new("agents-roundtrip");
+        let agents = vec![
+            AgentConfig {
+                id: "a".into(),
+                name: "A".into(),
+                system_prompt_file: Some("笔记/提示词.md".into()),
+                tools: vec!["read_file".into(), "grep".into()],
+                builtin: None,
+            },
+            AgentConfig {
+                id: BUILTIN_AGENT_CHAT_ID.into(),
+                name: "对话".into(),
+                system_prompt_file: None,
+                tools: vec!["read_file".into()],
+                builtin: Some(true),
+            },
+        ];
+        write_agents_file(&root, &agents).unwrap();
+        let raw = std::fs::read_to_string(root.join(".atelyx/agents.json")).unwrap();
+        assert!(raw.contains(AGENTS_SCHEMA), "写盘带 schema：{raw}");
+        assert_eq!(read_agents_file(&root).unwrap(), agents);
+        assert!(corrupt_backups(&root).is_empty());
+    }
+
+    /// 解析口径：数组根、缺 agents 字段都算损坏（不是空名单）。
+    #[test]
+    fn structurally_wrong_json_is_an_error() {
+        let root = TempDir::new("agents-shape");
+        write_raw(&root, "[]");
+        assert!(read_agents_file(&root).is_err());
+        write_raw(&root, r#"{"schema":"atelyx-agents/v1"}"#);
+        assert!(read_agents_file(&root).is_err());
     }
 }
 
