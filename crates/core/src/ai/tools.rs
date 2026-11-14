@@ -519,6 +519,16 @@ fn arg<'a>(args: &'a Value, key: &str) -> Result<&'a str, ToolResult> {
         .ok_or_else(|| ToolResult::err(format!("工具参数错误：缺少 {key}")))
 }
 
+/// 取必填字符串参数，缺失即从工具函数早退（错误文本原样回传模型，不 panic）。
+macro_rules! arg {
+    ($args:expr, $key:literal) => {
+        match arg($args, $key) {
+            Ok(found) => found,
+            Err(e) => return e,
+        }
+    };
+}
+
 /// 执行内置工具与插件注册的工具。名称未知 = 错误文本；实现内部失败 = 错误文本
 /// （不抛断对话循环）。插件工具只在当前上下文登记过时才可执行。
 pub async fn execute(ctx: &ToolCtx, name: &str, args: Value) -> ToolResult {
@@ -577,9 +587,7 @@ async fn execute_plugin_tool(
 }
 
 async fn web_search(ctx: &ToolCtx, args: &Value) -> ToolResult {
-    let Ok(query) = arg(args, "query") else {
-        return ToolResult::err("工具参数错误：缺少 query");
-    };
+    let query = arg!(args, "query");
     let Some(provider) = ctx.search.provider.clone().filter(|p| !p.is_empty()) else {
         return ToolResult::err("未配置搜索源（设置 → AI 设置 → 联网搜索），无法联网搜索");
     };
@@ -606,9 +614,7 @@ async fn web_search(ctx: &ToolCtx, args: &Value) -> ToolResult {
 }
 
 async fn web_fetch(args: &Value) -> ToolResult {
-    let Ok(url) = arg(args, "url") else {
-        return ToolResult::err("工具参数错误：缺少 url");
-    };
+    let url = arg!(args, "url");
     match crate::web::fetch_web(url.to_string()).await {
         Ok(page) => {
             let mut text = String::new();
@@ -680,9 +686,7 @@ fn render_numbered(content: &str, args: &Value, rel: &str) -> ToolResult {
 }
 
 async fn read_file(ctx: &ToolCtx, args: &Value) -> ToolResult {
-    let Ok(rel) = arg(args, "path") else {
-        return ToolResult::err("工具参数错误：缺少 path");
-    };
+    let rel = arg!(args, "path");
     let rel = match rel_path(rel) {
         Ok(rel) => rel,
         Err(e) => return e,
@@ -712,9 +716,7 @@ async fn read_file(ctx: &ToolCtx, args: &Value) -> ToolResult {
 }
 
 async fn glob(ctx: &ToolCtx, args: &Value) -> ToolResult {
-    let Ok(pattern) = arg(args, "pattern") else {
-        return ToolResult::err("工具参数错误：缺少 pattern");
-    };
+    let pattern = arg!(args, "pattern");
     let sub = match args.get("path").and_then(Value::as_str).filter(|s| !s.is_empty()) {
         Some(path) => match rel_path(path) {
             Ok(path) => Some(path),
@@ -752,9 +754,7 @@ async fn glob(ctx: &ToolCtx, args: &Value) -> ToolResult {
 }
 
 async fn grep(ctx: &ToolCtx, args: &Value) -> ToolResult {
-    let Ok(pattern) = arg(args, "pattern") else {
-        return ToolResult::err("工具参数错误：缺少 pattern");
-    };
+    let pattern = arg!(args, "pattern");
     let sub = match args.get("path").and_then(Value::as_str).filter(|s| !s.is_empty()) {
         Some(path) => match rel_path(path) {
             Ok(path) => Some(path),
@@ -910,9 +910,7 @@ fn find_tree_node<'a>(
 }
 
 async fn read_history(ctx: &ToolCtx, args: &Value) -> ToolResult {
-    let Ok(rel) = arg(args, "path") else {
-        return ToolResult::err("工具参数错误：缺少 path");
-    };
+    let rel = arg!(args, "path");
     let rel = match rel_path(rel) {
         Ok(rel) => rel,
         Err(e) => return e,
@@ -987,11 +985,9 @@ async fn apply_via_host(
 }
 
 async fn write_file(ctx: &ToolCtx, args: &Value) -> ToolResult {
-    let (Ok(rel), Some(content)) = (
-        arg(args, "path").map(str::to_string),
-        args.get("content").and_then(Value::as_str),
-    ) else {
-        return ToolResult::err("工具参数错误：需要 path 与 content");
+    let rel = arg!(args, "path").to_string();
+    let Some(content) = args.get("content").and_then(Value::as_str) else {
+        return ToolResult::err("工具参数错误：缺少 content");
     };
     let rel = match rel_path(&rel) {
         Ok(rel) => rel,
@@ -1026,11 +1022,9 @@ async fn write_file(ctx: &ToolCtx, args: &Value) -> ToolResult {
 }
 
 async fn append_file(ctx: &ToolCtx, args: &Value) -> ToolResult {
-    let (Ok(rel), Some(content)) = (
-        arg(args, "path").map(str::to_string),
-        args.get("content").and_then(Value::as_str),
-    ) else {
-        return ToolResult::err("工具参数错误：需要 path 与 content");
+    let rel = arg!(args, "path").to_string();
+    let Some(content) = args.get("content").and_then(Value::as_str) else {
+        return ToolResult::err("工具参数错误：缺少 content");
     };
     let rel = match rel_path(&rel) {
         Ok(rel) => rel,
@@ -1080,12 +1074,8 @@ async fn append_file(ctx: &ToolCtx, args: &Value) -> ToolResult {
 }
 
 async fn edit_file(ctx: &ToolCtx, args: &Value) -> ToolResult {
-    let Ok(rel) = arg(args, "path") else {
-        return ToolResult::err("工具参数错误：缺少 path");
-    };
-    let Ok(find) = arg(args, "find") else {
-        return ToolResult::err("工具参数错误：缺少 find");
-    };
+    let rel = arg!(args, "path");
+    let find = arg!(args, "find");
     let Some(replace) = args.get("replace").and_then(Value::as_str) else {
         return ToolResult::err("工具参数错误：缺少 replace");
     };
@@ -1270,9 +1260,7 @@ fn require_ext(rel: &str, ext: &str, kind: &str, tool: &str) -> Option<ToolResul
 }
 
 async fn table_read(ctx: &ToolCtx, args: &Value) -> ToolResult {
-    let Ok(rel) = arg(args, "path") else {
-        return ToolResult::err("工具参数错误：缺少 path");
-    };
+    let rel = arg!(args, "path");
     let rel = match rel_path(rel) {
         Ok(rel) => rel,
         Err(e) => return e,
@@ -1374,9 +1362,7 @@ fn truncate_chars(text: &str, max: usize) -> String {
 }
 
 async fn canvas_read(ctx: &ToolCtx, args: &Value) -> ToolResult {
-    let Ok(rel) = arg(args, "path") else {
-        return ToolResult::err("工具参数错误：缺少 path");
-    };
+    let rel = arg!(args, "path");
     let rel = match rel_path(rel) {
         Ok(rel) => rel,
         Err(e) => return e,
@@ -1506,9 +1492,7 @@ async fn apply_canvas_via_host(
 }
 
 async fn table_edit(ctx: &ToolCtx, args: &Value) -> ToolResult {
-    let Ok(rel) = arg(args, "path") else {
-        return ToolResult::err("工具参数错误：缺少 path");
-    };
+    let rel = arg!(args, "path");
     let rel = match rel_path(rel) {
         Ok(rel) => rel,
         Err(e) => return e,
@@ -1583,9 +1567,7 @@ async fn table_edit(ctx: &ToolCtx, args: &Value) -> ToolResult {
 }
 
 async fn canvas_edit(ctx: &ToolCtx, args: &Value) -> ToolResult {
-    let Ok(rel) = arg(args, "path") else {
-        return ToolResult::err("工具参数错误：缺少 path");
-    };
+    let rel = arg!(args, "path");
     let rel = match rel_path(rel) {
         Ok(rel) => rel,
         Err(e) => return e,
@@ -1668,15 +1650,21 @@ fn base_json<T: serde::Serialize>(model: &T) -> String {
     serde_json::to_string(model).unwrap_or_default()
 }
 
-/// 表格 ops 参数解析：缺少必填字段 / 未知操作给可读错误（不 panic）。
-fn parse_table_ops(args: &Value) -> Result<Vec<crate::ai::edit_host::TableOp>, String> {
-    use crate::ai::edit_host::TableOp;
+/// ops 参数公共前置：缺失或空都给可读错误（不 panic）。
+fn ops_items(args: &Value) -> Result<&[Value], String> {
     let Some(items) = args.get("ops").and_then(Value::as_array) else {
         return Err("工具参数错误：缺少 ops".to_string());
     };
     if items.is_empty() {
         return Err("工具参数错误：ops 为空".to_string());
     }
+    Ok(items)
+}
+
+/// 表格 ops 参数解析：缺少必填字段 / 未知操作给可读错误（不 panic）。
+fn parse_table_ops(args: &Value) -> Result<Vec<crate::ai::edit_host::TableOp>, String> {
+    use crate::ai::edit_host::TableOp;
+    let items = ops_items(args)?;
     let mut ops = Vec::with_capacity(items.len());
     for (i, item) in items.iter().enumerate() {
         let at = i + 1;
@@ -1725,12 +1713,7 @@ fn parse_table_ops(args: &Value) -> Result<Vec<crate::ai::edit_host::TableOp>, S
 /// 画布 ops 参数解析（口径同 parse_table_ops）。
 fn parse_canvas_ops(args: &Value) -> Result<Vec<crate::ai::edit_host::CanvasOp>, String> {
     use crate::ai::edit_host::CanvasOp;
-    let Some(items) = args.get("ops").and_then(Value::as_array) else {
-        return Err("工具参数错误：缺少 ops".to_string());
-    };
-    if items.is_empty() {
-        return Err("工具参数错误：ops 为空".to_string());
-    }
+    let items = ops_items(args)?;
     let mut ops = Vec::with_capacity(items.len());
     for (i, item) in items.iter().enumerate() {
         let at = i + 1;
@@ -1810,12 +1793,8 @@ fn now_secs() -> i64 {
 
 /// 移动 / 重命名工具：改名 = 同目录 move（引用同步与空间端点共用一套实现）。
 async fn move_tool(ctx: &ToolCtx, args: &Value) -> ToolResult {
-    let Ok(from) = arg(args, "from") else {
-        return ToolResult::err("工具参数错误：缺少 from");
-    };
-    let Ok(to) = arg(args, "to") else {
-        return ToolResult::err("工具参数错误：缺少 to");
-    };
+    let from = arg!(args, "from");
+    let to = arg!(args, "to");
     let from = match rel_path(from) {
         Ok(from) => from,
         Err(e) => return e,
@@ -1868,9 +1847,7 @@ async fn move_entry(ctx: &ToolCtx, from: &str, to: &str, ok: &str) -> ToolResult
 
 /// 删除工具：按路径类型分派文件 / 目录（目录非空需 force），空间侧按树节点类型判定。
 async fn delete_tool(ctx: &ToolCtx, args: &Value) -> ToolResult {
-    let Ok(rel) = arg(args, "path") else {
-        return ToolResult::err("工具参数错误：缺少 path");
-    };
+    let rel = arg!(args, "path");
     let rel = match rel_path(rel) {
         Ok(rel) => rel,
         Err(e) => return e,
