@@ -9,6 +9,8 @@ members = [
     "crates/plugin-sdk",
     "xtask",
 ]
+# cargo 命令默认作用于应用壳。
+default-members = ["apps/atelyx"]
 exclude = ["apps/server"]
 
 # 本地补丁版 winit / iced_widget（物化与基线见 patches/README.md）。

@@ -14,8 +14,8 @@
 ```bash
 git clone https://github.com/Atelyx/Atelyx.git
 cd Atelyx
-bash patches/apply.sh    # 一次即可：物化本地依赖补丁的源码目录
-cargo run -p atelyx      # 启动桌面应用
+bash patches/apply.sh  # 一次即可：物化本地依赖补丁的源码目录
+cargo run --release    # 启动桌面应用
 ```
 
 常用命令：
