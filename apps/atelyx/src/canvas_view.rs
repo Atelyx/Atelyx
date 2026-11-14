@@ -20,6 +20,7 @@ use iced::{alignment, Color, Length, Padding, Point, Rectangle, Size, Vector};
 use serde_json::Value;
 
 use crate::ui::icon::{icon, polylines};
+use crate::ui::timing::{DOUBLE_CLICK_MS, DOUBLE_CLICK_SLOP};
 use crate::ui::{controls, palette as pal};
 use crate::ui::scroll;
 use crate::ui::text;
@@ -91,7 +92,6 @@ pub(crate) const UNDO_DEPTH: usize = 50;
 pub(crate) const MINIMAP_W: f32 = 180.0;
 pub(crate) const MINIMAP_H: f32 = 120.0;
 const MINIMAP_MARGIN: f32 = 12.0;
-use crate::ui::timing::{DOUBLE_CLICK_MS, DOUBLE_CLICK_SLOP};
 /// 连接点命中容差与绘制半径（屏幕像素；容差按缩放反推世界空间）。
 const LINK_HIT_TOL: f32 = 6.0;
 const LINK_DOT_R: f32 = 4.5;
@@ -2442,7 +2442,7 @@ fn card_action_row<'a>(
     }
     if !readonly && is_assistant && !content.is_empty() && !content.starts_with("[错误]") && !streaming {
         row = row.push(controls::icon_button(
-            "undo-turn",
+            "corner-up-left",
             12.0,
             22.0,
             controls::Variant::Ghost,

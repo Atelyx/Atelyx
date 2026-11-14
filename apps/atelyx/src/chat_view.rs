@@ -546,7 +546,7 @@ fn action_row<'a>(
     }
     if is_assistant && !content.is_empty() && !content.starts_with("[错误]") {
         row = row.push(controls::icon_button(
-            "undo-turn",
+            "corner-up-left",
             12.0,
             22.0,
             controls::Variant::Ghost,
