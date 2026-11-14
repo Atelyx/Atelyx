@@ -3244,6 +3244,8 @@ impl App {
             }
             Message::ToggleTask(item_from) => {
                 if self.note_readonly() {
+                    // 只读档任务框仍是可点样式：点了要有反馈，不能静默无反应
+                    self.notify(NoticeLevel::Warning, "只读身份：任务改动不会写入空间");
                     return Task::none();
                 }
                 if let Some((next, at)) = markdown_edit::toggle_task(self.edit_body(), item_from) {
@@ -3260,10 +3262,12 @@ impl App {
                 Task::none()
             }
             Message::ToggleCodeBlock(from) => {
-                // 展开态只改渲染档位（正文与解析产物都没变）：不重建预览，选区与块高缓存照旧
+                // 正文与解析产物都没变（不动选区），但块高会变：块高缓存必须作废，
+                // 否则收起后仍按展开高度截块，下沿的后续块要等下次滚动才出现
                 if !self.note_code_expanded.remove(&from) {
                     self.note_code_expanded.insert(from);
                 }
+                self.note_block_metrics.borrow_mut().reset();
                 Task::none()
             }
             Message::CopyCode(code) => {
