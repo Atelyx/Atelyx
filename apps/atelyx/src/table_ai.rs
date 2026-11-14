@@ -90,7 +90,7 @@ struct PendingStart {
 
 #[derive(Default)]
 pub struct TableAiState {
-    /// 在途单元格（field_id, row_id）。
+    /// 在途单元格（row_id, field_id）。
     pub runs: HashSet<(String, String)>,
     pub batch: Option<AiBatch>,
     next_batch_id: u64,
@@ -740,7 +740,7 @@ pub fn on_cell_done(
             .and_then(|s| s.view.ai.batch.as_ref())
             .map(|b| b.spec.model.clone());
         if let Some(session) = app.table.as_mut() {
-            let at = vault::now_secs();
+            let at = atelyx_core::time::now_secs();
             if let Some(row) = session.data.rows.iter_mut().find(|r| r.id == row_id) {
                 let meta = if ok {
                     AiCellMeta::ok(input, at, model)
@@ -930,6 +930,9 @@ pub fn drain_auto(app: &mut App) -> Task<Message> {
 /// 撤销前取消在途批次（回执丢弃）；没有在途请求时立即收尾，避免留一个永远不结束的空批次。
 pub fn cancel_before_undo(app: &mut App) {
     let Some(session) = app.table.as_mut() else { return };
+    // 撤销把值改回去了：从旧值派生的待生成行一并作废，否则撤销后还会多跑一轮模型调用、
+    // 把 AI 列覆盖成按旧值算出的结果
+    session.view.ai.auto_due.clear();
     let Some(batch) = session.view.ai.batch.as_mut() else { return };
     batch.cancelled = true;
     batch.queue.clear();
