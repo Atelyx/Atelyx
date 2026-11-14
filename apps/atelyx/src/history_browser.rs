@@ -355,16 +355,16 @@ fn confirm_bar(seq: u64, ts: i64) -> Element<'static, Message> {
                 .color(pal::TEXT_SECONDARY)
                 .width(Length::Fill),
             controls::btn(
-                "取消",
-                &controls::btn_sm(),
-                controls::Variant::Ghost,
-                Some(Message::History(HistoryBrowserMsg::CancelAsk)),
-            ),
-            controls::btn(
                 "确认回滚",
                 &controls::btn_sm(),
                 controls::Variant::Danger,
                 Some(Message::History(HistoryBrowserMsg::Restore(seq))),
+            ),
+            controls::btn(
+                "取消",
+                &controls::btn_sm(),
+                controls::Variant::Ghost,
+                Some(Message::History(HistoryBrowserMsg::CancelAsk)),
             ),
         ]
         .spacing(8)
