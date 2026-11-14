@@ -4,6 +4,7 @@
 
 pub mod agent;
 pub mod canvas_refs;
+pub mod chat_send;
 pub mod doc_edit;
 pub mod doc_ops;
 pub mod note_edit;

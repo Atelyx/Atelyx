@@ -9,13 +9,15 @@ use serde_json::{json, Value};
 use atelyx_core::ai::{
     agent::{RunConfig, RunEvent, RunPersist},
     canvas_refs::{self, CardContent, CardSource},
-    refs as ai_refs,
+    chat_send::{self, RefsShape},
+    refs::{self as ai_refs, RefEntry, RefHit},
     stream::ReasoningEffort,
 };
 
 use crate::canvas_view::{file_title, CanvasMsg, CanvasSession, RefContent};
-use crate::text_preedit;
+use crate::chat_actions::flow::{self, ChatAction, ChatStore, SendReady};
 use crate::chat_actions::{self, MentionPicker, MentionTarget, PendingImage};
+use crate::text_preedit;
 use crate::{App, Message, RepoKind};
 
 /// 画布卡会话 id 前缀（与面板会话 id 区分；Hub 与 run 事件按它路由）。
@@ -429,7 +431,14 @@ pub fn on_msg(app: &mut App, msg: CanvasChatMsg) -> Task<Message> {
                 return Task::none();
             }
             match result {
-                Ok(prompt) => return begin_regen(app, &node, history, Some(prompt)),
+                Ok(prompt) => {
+                    return flow::regenerate(
+                        app,
+                        &CardStore::new(&node),
+                        Some(prompt),
+                        Some(history),
+                    )
+                }
                 Err(e) => set_error(app, &node, format!("Agent 提示词读取失败，已取消重生成：{e}")),
             }
             Task::none()
@@ -518,19 +527,12 @@ fn on_input(app: &mut App, node_id: &str, event: crate::chat_input::InputEvent) 
 // ===== # 引用候选 =====
 
 fn sync_mention_picker(app: &mut App, node_id: &str) -> Task<Message> {
-    // 先只读取出触发态与查询串（候选收集要读整张画布与文件树）
-    let Some((at, query, same_trigger, stale)) = app
+    // 先只读取出触发段（候选收集要读整张画布与文件树）
+    let Some(sync) = app
         .canvas
         .as_ref()
         .and_then(|s| s.view.card_chat.get(node_id))
-        .and_then(|chat| {
-            let at = chat.draft.active_mention_at()?;
-            let caret = chat.draft.caret.min(chat.draft.text.len());
-            let query = chat.draft.text[at + 1..caret].to_string();
-            let same_trigger = chat.mention_picker.as_ref().is_some_and(|p| p.at == at);
-            let stale = chat.mention_picker.as_ref().is_some_and(|p| p.query != query);
-            Some((at, query, same_trigger, stale))
-        })
+        .and_then(|chat| flow::MentionSync::of(&chat.draft, chat.mention_picker.as_ref()))
     else {
         if let Some(chat) = app
             .canvas
@@ -541,34 +543,13 @@ fn sync_mention_picker(app: &mut App, node_id: &str) -> Task<Message> {
         }
         return Task::none();
     };
-    let candidates = card_candidates(app, node_id, &query);
-    let Some(chat) = app
+    let candidates = card_candidates(app, node_id, sync.query());
+    if let Some(chat) = app
         .canvas
         .as_mut()
         .and_then(|s| s.view.card_chat.get_mut(node_id))
-    else {
-        return Task::none();
-    };
-    if !same_trigger {
-        chat.mention_picker = (!candidates.is_empty()).then_some(MentionPicker {
-            at,
-            query,
-            selected: 0,
-            candidates,
-        });
-    } else if stale {
-        if let Some(p) = chat.mention_picker.as_mut() {
-            p.query = query;
-            p.candidates = candidates;
-            p.selected = 0;
-        }
-    }
-    if chat
-        .mention_picker
-        .as_ref()
-        .is_some_and(|p| p.candidates.is_empty())
     {
-        chat.mention_picker = None;
+        sync.apply(&mut chat.mention_picker, candidates);
     }
     card_mention_follow(app, node_id)
 }
@@ -648,14 +629,6 @@ fn commit_mention(app: &mut App, node_id: &str, index: usize) {
             append_card_ref(app, node_id, &source);
         }
         MentionTarget::Vault { rel, is_dir } => {
-            let kind = if is_dir {
-                ai_refs::RefKind::Dir
-            } else {
-                match ai_refs::kind_of_file(&rel) {
-                    Some(k) => k,
-                    None => return,
-                }
-            };
             let Some(chat) = app
                 .canvas
                 .as_mut()
@@ -663,27 +636,17 @@ fn commit_mention(app: &mut App, node_id: &str, index: usize) {
             else {
                 return;
             };
-            let at = chat
-                .mention_picker
-                .as_ref()
-                .map_or(chat.draft.caret, |p| p.at);
-            let taken: Vec<(&str, &str)> = chat
-                .mention_refs
-                .iter()
-                .map(|r| (r.path.as_str(), r.label.as_str()))
-                .collect();
-            let label = ai_refs::make_label(&rel, &taken);
-            let tag = format!("#{}：{} ", kind.prefix(), label);
-            insert_tag(&mut chat.draft, at, &tag);
-            if !chat.mention_refs.iter().any(|r| r.path == rel) {
-                chat.mention_refs.push(ai_refs::RefEntry {
-                    path: rel,
-                    label,
-                    kind,
-                    node_id: None,
-                });
+            let at = chat.mention_picker.as_ref().map(|p| p.at);
+            let inserted = flow::commit_vault_ref(
+                &mut chat.draft,
+                &mut chat.mention_refs,
+                rel,
+                is_dir,
+                at,
+            );
+            if inserted {
+                chat.mention_picker = None;
             }
-            chat.mention_picker = None;
         }
     }
 }
@@ -786,15 +749,8 @@ fn unique_card_label(title: &str, taken: &[(&str, &str)]) -> String {
 }
 
 fn insert_tag(draft: &mut crate::chat_input::Draft, at: usize, tag: &str) {
-    let text = draft.text.clone();
-    let caret = draft.caret.min(text.len());
-    let to = caret.max(at + 1).min(text.len());
-    let mut next = String::with_capacity(text.len() - (to - at) + tag.len());
-    next.push_str(&text[..at]);
-    next.push_str(tag);
-    next.push_str(&text[to..]);
-    let caret_after = at + tag.len();
-    draft.apply_edited(next, caret_after, caret_after);
+    let (text, caret) = chat_send::insert_mention(&draft.text, draft.caret, at, tag);
+    draft.apply_edited(text, caret, caret);
 }
 
 fn trigger_mention(app: &mut App, node_id: &str) -> Task<Message> {
@@ -1115,109 +1071,11 @@ fn finish_send(app: &mut App, plan: SendPlan, attachments: Vec<Value>) -> Task<M
         restore_inputs(app, &node_id, origin, images, refs);
         return Task::none();
     };
-    if is_streaming(app, &node_id) {
-        restore_inputs(app, &node_id, origin, images, refs);
-        app.notify(crate::NoticeLevel::Warning, "该对话已有回复进行中，消息未发送");
-        return Task::none();
-    }
-    if node(app, &node_id).is_none() {
-        restore_inputs(app, &node_id, origin, images, refs);
-        return Task::none();
-    }
-    let refs = refs;
-    let hits = ai_refs::scan_hits(&display, &refs);
-    let path_block = ai_refs::reference_path_block(&hits);
-    let (card_block, image_files) = card_injection(app, &hits, &node_id);
-    let mut content = String::with_capacity(path_block.len() + card_block.len() + display.len() + 2);
-    content.push_str(&path_block);
-    content.push_str(&card_block);
-    content.push_str(&display);
-    let refs_json: Vec<Value> = refs
-        .iter()
-        .filter(|r| {
-            hits.iter().any(|h| match (&h.node_id, &r.node_id) {
-                (Some(a), Some(b)) => a == b,
-                _ => h.path == r.path,
-            })
-        })
-        .map(|r| {
-            let mut v = json!({
-                "kind": "file",
-                "label": r.label,
-                "refKind": r.kind.key(),
-            });
-            // 画布内文本卡以节点 id 作 path 身份：有实际文件路径时才落 path
-            if r.kind != ai_refs::RefKind::Card || r.node_id.as_deref() != Some(r.path.as_str()) {
-                v["path"] = json!(r.path);
-            }
-            if let Some(id) = &r.node_id {
-                v["nodeId"] = json!(id);
-            }
-            v
-        })
-        .collect();
-    // 图片卡引用作为 vision 附件（同文件只挂一次）
-    let mut attachments = attachments;
-    for file in image_files {
-        if !attachments.iter().any(|a| a.get("file").and_then(Value::as_str) == Some(file.as_str())) {
-            let ext = file.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
-            attachments.push(json!({
-                "kind": "image",
-                "mime": chat_actions::image_mime(&ext),
-                "file": file,
-            }));
-        }
-    }
-    for id in refs.iter().filter_map(|r| r.node_id.clone()) {
-        ensure_edge(app, &id, &node_id);
-    }
-    // 新发送图片立刻补句柄（气泡缩略图不必等重开画布）
-    let image_paths: Vec<String> = attachments
-        .iter()
-        .filter(|a| a.get("kind").and_then(Value::as_str) == Some("image"))
-        .filter_map(|a| a.get("file").and_then(Value::as_str).map(str::to_string))
-        .collect();
-    let user_message = json!({
-        "id": chat_actions::uuid_v4(),
-        "role": "user",
-        "content": content,
-        "displayContent": display,
-        "refs": refs_json,
-        "attachments": attachments,
-        "createdAt": chat_actions::now_ms(),
-    });
-    let Some(session) = app.canvas.as_mut() else { return Task::none() };
-    let mut history = messages_of_session(session, &node_id).unwrap_or(&[]).to_vec();
-    if !upsert_message(session, &node_id, user_message.clone()) {
-        app.notify(crate::NoticeLevel::Error, "消息写入失败：对话卡不存在");
-        return Task::none();
-    }
-    history.push(user_message);
-    session.touch();
-    refresh_card_docs(session);
-    if let Some(chat) = session.view.card_chat.get_mut(&node_id) {
-        chat.error = None;
-        chat.follow_bottom = true;
-        chat.streaming = true;
-        match origin {
-            SendOrigin::Card => {
-                chat.draft.clear();
-                chat.mention_picker = None;
-            }
-            SendOrigin::Panel => {}
-        }
-    }
-    if origin == SendOrigin::Panel {
-        app.chat.input.clear();
-        app.chat.mention_picker = None;
-        app.chat.follow_bottom = true;
-    }
-    refresh_panel_if_bound(app, &node_id);
-    let mut task = start_run(app, &node_id, config, history).chain(scroll_bottom(&node_id));
-    if !image_paths.is_empty() {
-        task = task.chain(crate::canvas_actions::load_refs(app, image_paths));
-    }
-    task
+    flow::finish_send(
+        app,
+        &CardStore::new(&node_id),
+        SendReady { config, display, refs, images, attachments, origin },
+    )
 }
 
 fn config_for(app: &App, plan: &SendPlan, space_prompt: Option<String>) -> Result<RunConfig, String> {
@@ -1327,25 +1185,10 @@ fn card_injection(app: &App, hits: &[ai_refs::RefHit], conversation: &str) -> (S
 }
 
 fn regenerate(app: &mut App, node_id: &str) -> Task<Message> {
-    if is_streaming(app, node_id) || locked_by_peer(app, node_id) {
-        return Task::none();
-    }
-    let Some(session) = app.canvas.as_mut() else { return Task::none() };
-    let Some(messages) = messages_of_session(session, node_id) else { return Task::none() };
-    let Some(last_user) = messages.iter().rposition(|m| m["role"] == json!("user")) else {
-        return Task::none();
-    };
-    let keep = messages[..=last_user].to_vec();
-    let mut history = keep;
-    let Some(message) = history.get_mut(last_user) else { return Task::none() };
-    rebuild_user_content(app, message);
-    // 空间模式 Agent 提示词文件在服务端：先取回再续跑
-    if let Some(task) = prefetch_regen_prompt(app, node_id, history.clone()) {
-        return task;
-    }
-    begin_regen(app, node_id, history, None)
+    flow::regenerate(app, &CardStore::new(node_id), None, None)
 }
 
+/// 空间模式 Agent 提示词文件在服务端：重生成前异步取一次（回执带待跑历史续跑）。
 fn prefetch_regen_prompt(app: &mut App, node_id: &str, history: Vec<Value>) -> Option<Task<Message>> {
     let RepoKind::Space(session) = &app.repo_kind else {
         return None;
@@ -1385,78 +1228,8 @@ fn prefetch_regen_prompt(app: &mut App, node_id: &str, history: Vec<Value>) -> O
     ))
 }
 
-fn begin_regen(
-    app: &mut App,
-    node_id: &str,
-    history: Vec<Value>,
-    space_prompt: Option<String>,
-) -> Task<Message> {
-    let config = match regen_config(app, node_id, space_prompt) {
-        Ok(c) => c,
-        Err(e) => {
-            set_error(app, node_id, e);
-            return Task::none();
-        }
-    };
-    if let Some(session) = app.canvas.as_mut() {
-        replace_messages(session, node_id, &history);
-        session.touch();
-        refresh_card_docs(session);
-        if let Some(chat) = session.view.card_chat.get_mut(node_id) {
-            chat.error = None;
-            chat.streaming = true;
-            chat.follow_bottom = true;
-        }
-    }
-    refresh_panel_if_bound(app, node_id);
-    start_run(app, node_id, config, history)
-}
-
-fn regen_config(app: &App, node_id: &str, space_prompt: Option<String>) -> Result<RunConfig, String> {
-    let (agent_id, model_pick, effort) =
-        card_run_pick(app, node_id).ok_or_else(|| "对话卡不存在".to_string())?;
-    let pick = model_pick.as_ref().map(|(p, m)| (p.as_str(), m.as_str()));
-    let mut config = chat_actions::resolve_run_config(app, agent_id.as_deref(), space_prompt, true, pick)?;
-    config.reasoning_effort = effort;
-    Ok(config)
-}
-
-/// 重生成路径按当下卡内容重建注入块（与发送同源；引用标签被删 = 该引用作废）。
-fn rebuild_user_content(app: &App, message: &mut Value) {
-    let refs = chat_actions::message_refs(message);
-    let display = message
-        .get("displayContent")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| message.get("content").and_then(Value::as_str).unwrap_or(""))
-        .to_string();
-    let hits = ai_refs::scan_hits(&display, &refs);
-    let path_block = ai_refs::reference_path_block(&hits);
-    let (card_block, _) = card_injection(app, &hits, "");
-    let content = format!("{path_block}{card_block}{display}");
-    message["content"] = json!(content);
-}
-
 fn rollback(app: &mut App, node_id: &str, message_id: &str) {
-    if is_streaming(app, node_id) || locked_by_peer(app, node_id) {
-        return;
-    }
-    let Some(session) = app.canvas.as_mut() else { return };
-    let Some(messages) = messages_of_session(session, node_id) else { return };
-    let Some(idx) = messages
-        .iter()
-        .position(|m| m.get("id").and_then(Value::as_str) == Some(message_id))
-    else {
-        return;
-    };
-    if idx + 1 >= messages.len() {
-        return;
-    }
-    let keep = messages[..=idx].to_vec();
-    replace_messages(session, node_id, &keep);
-    session.touch();
-    refresh_card_docs(session);
-    refresh_panel_if_bound(app, node_id);
+    let _ = flow::rollback(app, &CardStore::new(node_id), message_id);
 }
 
 fn branch(app: &mut App, node_id: &str, message_id: &str) -> Task<Message> {
@@ -1531,102 +1304,14 @@ fn set_card_config(app: &mut App, node_id: &str, key: &str, value: Option<Value>
     session.touch();
 }
 
-/// 卡会话压缩：全部消息折进检查点（≥2 条），摘要写节点 `data.compaction`（非破坏）。
+/// 卡会话压缩：全部消息折进检查点（≥2 条），摘要写节点压缩注解（非破坏）。
 fn compact_card(app: &mut App, node_id: &str) -> Task<Message> {
-    if is_streaming(app, node_id) || locked_by_peer(app, node_id) {
-        return Task::none();
-    }
-    if app
-        .canvas
-        .as_ref()
-        .and_then(|s| s.view.card_chat.get(node_id))
-        .is_some_and(|c| c.compacting)
-    {
-        return Task::none();
-    }
-    let Some(messages) = app
-        .canvas
-        .as_ref()
-        .and_then(|s| messages_of_session(s, node_id))
-        .map(Vec::from)
-    else {
-        return Task::none();
-    };
-    if messages.len() < 2 {
-        set_error(app, node_id, "对话内容太少，无需压缩".to_string());
-        return Task::none();
-    }
-    let Some(anchor) = compaction_anchor(&messages) else {
-        set_error(app, node_id, "压缩失败：末条消息缺少 id".to_string());
-        return Task::none();
-    };
-    let Some((agent_id, model_pick, effort)) = card_run_pick(app, node_id) else {
-        return Task::none();
-    };
-    let pick = model_pick.as_ref().map(|(p, m)| (p.as_str(), m.as_str()));
-    let config = match chat_actions::resolve_run_config(app, agent_id.as_deref(), None, false, pick) {
-        Ok(mut c) => {
-            c.reasoning_effort = effort;
-            c
-        }
-        Err(e) => {
-            set_error(app, node_id, e);
-            return Task::none();
-        }
-    };
-    let compaction = node(app, node_id)
-        .and_then(|n| n.data.get("compaction").cloned())
-        .filter(|c| !c.is_null());
-    if let Some(chat) = app.canvas.as_mut().and_then(|s| s.view.card_chat.get_mut(node_id)) {
-        chat.compacting = true;
-        chat.compact_anchor = Some(anchor);
-    }
-    chat_actions::compact_task(session_id(node_id), config, &messages, compaction)
+    flow::compact(app, &CardStore::new(node_id))
 }
 
-/// 压缩锚点：请求时刻的末条消息 id 与条数。回执沿用同一锚点，
-/// 压缩在途的新消息不并入摘要、也不被锚点覆盖。
-fn compaction_anchor(messages: &[Value]) -> Option<(String, usize)> {
-    let id = messages.last()?.get("id")?.as_str()?.to_string();
-    Some((id, messages.len()))
-}
-
-/// 卡会话压缩回执：摘要写节点 `data.compaction`（锚点 = 请求时刻末条），失败提示进卡。
+/// 卡会话压缩回执：摘要写节点压缩注解（锚点 = 请求时刻末条），失败提示进卡。
 pub(crate) fn compact_done(app: &mut App, node_id: &str, result: Option<String>) {
-    let anchor = app
-        .canvas
-        .as_mut()
-        .and_then(|s| s.view.card_chat.get_mut(node_id))
-        .and_then(|chat| {
-            chat.compacting = false;
-            chat.compact_anchor.take()
-        });
-    let summary_empty = result.as_ref().is_some_and(|s| s.trim().is_empty());
-    let Some(summary) = result.filter(|s| !s.trim().is_empty()) else {
-        let message = if summary_empty { "压缩失败：摘要为空" } else { "压缩失败" };
-        set_error(app, node_id, message.to_string());
-        return;
-    };
-    let Some((anchor, count)) = anchor else {
-        set_error(app, node_id, "压缩失败：消息锚点缺失".to_string());
-        return;
-    };
-    let Some(session) = app.canvas.as_mut() else { return };
-    let Some(node) = session.data.nodes.iter_mut().find(|n| n.id == node_id) else { return };
-    if let Some(obj) = node.data.as_object_mut() {
-        obj.insert(
-            "compaction".into(),
-            json!({
-                "summary": summary,
-                "upToMessageId": anchor,
-                "messageCount": count,
-                "createdAt": chat_actions::now_ms(),
-            }),
-        );
-    }
-    session.touch();
-    refresh_card_docs(session);
-    refresh_panel_if_bound(app, node_id);
+    flow::compact_done(app, &CardStore::new(node_id), result);
 }
 
 // ===== run 事件 =====
@@ -1951,6 +1636,248 @@ fn file_card(path: &str) -> Option<(&'static str, f64, f64, Value)> {
     }
 }
 
+// ===== 存储视图（面板骨架的卡侧实现） =====
+
+/// 画布卡会话的存储视图：消息真源在节点 data.messages，写入即节点脏。
+struct CardStore {
+    node: String,
+}
+
+impl CardStore {
+    fn new(node: &str) -> Self {
+        Self { node: node.to_string() }
+    }
+}
+
+impl ChatStore for CardStore {
+    fn session_id(&self) -> String {
+        session_id(&self.node)
+    }
+
+    fn messages(&self, app: &App) -> Vec<Value> {
+        messages_of(app, &self.session_id()).unwrap_or(&[]).to_vec()
+    }
+
+    fn history(&self, app: &App) -> Vec<Value> {
+        self.messages(app)
+    }
+
+    fn append(&self, app: &mut App, message: Value) -> Result<(), String> {
+        let Some(session) = app.canvas.as_mut() else {
+            return Err("画布未打开".to_string());
+        };
+        if !upsert_message(session, &self.node, message) {
+            return Err("对话卡不存在".to_string());
+        }
+        session.touch();
+        refresh_card_docs(session);
+        Ok(())
+    }
+
+    fn truncate_to(&self, app: &mut App, history: &mut Vec<Value>) -> Result<(), String> {
+        let Some(session) = app.canvas.as_mut() else {
+            return Err("画布未打开".to_string());
+        };
+        if messages_of_session(session, &self.node).is_none() {
+            return Err("对话卡不存在".to_string());
+        }
+        replace_messages(session, &self.node, history);
+        session.touch();
+        refresh_card_docs(session);
+        Ok(())
+    }
+
+    fn write_compaction(&self, app: &mut App, record: Value) -> Result<(), String> {
+        let Some(session) = app.canvas.as_mut() else {
+            return Err("画布未打开".to_string());
+        };
+        let Some(node) = session.data.nodes.iter_mut().find(|n| n.id == self.node) else {
+            return Err("对话卡不存在".to_string());
+        };
+        if let Some(data) = node.data.as_object_mut() {
+            data.insert("compaction".into(), record);
+        }
+        session.touch();
+        refresh_card_docs(session);
+        refresh_panel_if_bound(app, &self.node);
+        Ok(())
+    }
+
+    fn compaction(&self, app: &App) -> Option<Value> {
+        node(app, &self.node)
+            .and_then(|n| n.data.get("compaction").cloned())
+            .filter(|c| !c.is_null())
+    }
+
+    fn streaming(&self, app: &App) -> bool {
+        is_streaming(app, &self.node)
+    }
+
+    fn blocked(&self, app: &App, action: ChatAction) -> bool {
+        let streaming = is_streaming(app, &self.node);
+        let locked = locked_by_peer(app, &self.node);
+        match action {
+            ChatAction::Regenerate | ChatAction::Rollback => streaming || locked,
+            ChatAction::Compact => {
+                streaming || locked || card_chat(app, &self.node).is_some_and(|c| c.compacting)
+            }
+        }
+    }
+
+    fn run_config(
+        &self,
+        app: &App,
+        space_prompt: Option<String>,
+        for_run: bool,
+    ) -> Result<RunConfig, String> {
+        let (agent_id, model_pick, effort) =
+            card_run_pick(app, &self.node).ok_or_else(|| "对话卡不存在".to_string())?;
+        let pick = model_pick.as_ref().map(|(p, m)| (p.as_str(), m.as_str()));
+        let mut config =
+            chat_actions::resolve_run_config(app, agent_id.as_deref(), space_prompt, for_run, pick)?;
+        config.reasoning_effort = effort;
+        Ok(config)
+    }
+
+    fn ref_shape(&self) -> RefsShape {
+        RefsShape::Card
+    }
+
+    fn injection(&self, app: &App, hits: &[RefHit]) -> (String, Vec<String>) {
+        card_injection(app, hits, &self.node)
+    }
+
+    fn link_refs(&self, app: &mut App, refs: &[RefEntry]) {
+        for id in refs.iter().filter_map(|r| r.node_id.clone()) {
+            ensure_edge(app, &id, &self.node);
+        }
+    }
+
+    fn target_ready(&self, app: &App) -> bool {
+        node(app, &self.node).is_some()
+    }
+
+    fn restore_inputs(
+        &self,
+        app: &mut App,
+        images: Vec<PendingImage>,
+        refs: Vec<RefEntry>,
+        origin: SendOrigin,
+    ) {
+        restore_inputs(app, &self.node, origin, images, refs);
+    }
+
+    fn set_error(&self, app: &mut App, error: String) {
+        set_error(app, &self.node, error);
+    }
+
+    fn append_failed(&self, app: &mut App, error: String) {
+        app.notify(crate::NoticeLevel::Error, error);
+    }
+
+    fn busy_notice(&self) -> &'static str {
+        "该对话已有回复进行中，消息未发送"
+    }
+
+    fn after_append(&self, app: &mut App, origin: SendOrigin) {
+        let Some(session) = app.canvas.as_mut() else { return };
+        if let Some(chat) = session.view.card_chat.get_mut(&self.node) {
+            chat.error = None;
+            chat.follow_bottom = true;
+            chat.streaming = true;
+            if origin == SendOrigin::Card {
+                chat.draft.clear();
+                chat.mention_picker = None;
+            }
+        }
+        if origin == SendOrigin::Panel {
+            app.chat.input.clear();
+            app.chat.mention_picker = None;
+            app.chat.follow_bottom = true;
+        }
+        refresh_panel_if_bound(app, &self.node);
+    }
+
+    fn rebuild_user_content(&self, app: &App, message: &mut Value) {
+        let refs = chat_actions::message_refs(message);
+        let display = message
+            .get("displayContent")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| message.get("content").and_then(Value::as_str).unwrap_or(""))
+            .to_string();
+        let hits = ai_refs::scan_hits(&display, &refs);
+        let path_block = ai_refs::reference_path_block(&hits);
+        // 重生成按当下卡内容重拼：会话身份缺省（自引用也照常注入）
+        let (card_block, _) = card_injection(app, &hits, "");
+        message["content"] = json!(chat_send::message_content(&path_block, &card_block, &display));
+    }
+
+    fn prefetch_regenerate(&self, app: &mut App, history: Vec<Value>) -> Option<Task<Message>> {
+        prefetch_regen_prompt(app, &self.node, history)
+    }
+
+    fn refresh(&self, app: &mut App, action: ChatAction) {
+        if action == ChatAction::Regenerate {
+            if let Some(chat) = app
+                .canvas
+                .as_mut()
+                .and_then(|s| s.view.card_chat.get_mut(&self.node))
+            {
+                chat.error = None;
+                chat.streaming = true;
+                chat.follow_bottom = true;
+            }
+        }
+        refresh_panel_if_bound(app, &self.node);
+    }
+
+    fn start_run(&self, app: &App, config: RunConfig, history: Vec<Value>) -> Task<Message> {
+        start_run(app, &self.node, config, history)
+    }
+
+    fn tail(&self, app: &App, image_files: &[String]) -> Task<Message> {
+        let task = scroll_bottom(&self.node);
+        if image_files.is_empty() {
+            return task;
+        }
+        task.chain(crate::canvas_actions::load_refs(app, image_files.to_vec()))
+    }
+
+    fn compact_precheck(&self, _app: &App, messages: &[Value]) -> Result<(), String> {
+        match atelyx_core::ai::chat_send::compaction_anchor(messages) {
+            Some(_) => Ok(()),
+            None => Err("压缩失败：末条消息缺少 id".to_string()),
+        }
+    }
+
+    fn mark_compacting(&self, app: &mut App, messages: &[Value]) {
+        let anchor = atelyx_core::ai::chat_send::compaction_anchor(messages);
+        if let Some(chat) = app
+            .canvas
+            .as_mut()
+            .and_then(|s| s.view.card_chat.get_mut(&self.node))
+        {
+            chat.compacting = true;
+            chat.compact_anchor = anchor;
+        }
+    }
+
+    fn clear_compacting(&self, app: &mut App) -> Option<(String, usize)> {
+        app.canvas
+            .as_mut()
+            .and_then(|s| s.view.card_chat.get_mut(&self.node))
+            .and_then(|chat| {
+                chat.compacting = false;
+                chat.compact_anchor.take()
+            })
+    }
+
+    fn missing_anchor_error(&self) -> Option<&'static str> {
+        Some("压缩失败：消息锚点缺失")
+    }
+}
+
 // ===== 面板同会话 =====
 
 /// 面板绑定会话的重新生成（委托卡内实现）。
@@ -2172,15 +2099,6 @@ mod tests {
         // 末尾连续删除才回收
         sync_overlay_slots(&mut slots, &["a".to_string(), "b".to_string()]);
         assert_eq!(slots, vec!["a".to_string(), "b".to_string()]);
-    }
-
-    /// 压缩锚点取请求时刻的末条消息，与回执时刻的消息集合无关。
-    #[test]
-    fn compaction_anchor_uses_request_time_last_message() {
-        let messages = vec![json!({ "id": "m1" }), json!({ "id": "m2" })];
-        assert_eq!(compaction_anchor(&messages), Some(("m2".to_string(), 2)));
-        assert_eq!(compaction_anchor(&[]), None);
-        assert_eq!(compaction_anchor(&[json!({ "role": "user" })]), None);
     }
 
     use super::*;
