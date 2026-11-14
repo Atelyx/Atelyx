@@ -280,9 +280,6 @@ const DEFAULT_WINDOW_SIZE: Size = Size::new(1440.0, 900.0);
 /// 主窗口最小大小（逻辑像素）。
 const MIN_WINDOW_SIZE: Size = Size::new(1100.0, 760.0);
 
-/// 双击判定窗口：同一目标两次按压的间隔上限（标题栏空白最大化与布局 tab 改名共用）。
-const DOUBLE_CLICK_MS: u128 = 350;
-
 /// 防抖落盘周期：期间多次模型变更合并为一次写盘（拖宽/拖拽等连续操作不逐帧写）。
 const PERSIST_TICK: std::time::Duration = std::time::Duration::from_millis(800);
 
@@ -3093,7 +3090,8 @@ impl App {
                     let double = self
                         .layout_tab_last_press
                         .take_if(|(id, t)| {
-                            id == &layout_id && now.duration_since(*t).as_millis() < DOUBLE_CLICK_MS
+                            id == &layout_id
+                                && now.duration_since(*t).as_millis() < ui::timing::DOUBLE_CLICK_MS
                         })
                         .is_some();
                     if double {
@@ -3869,7 +3867,8 @@ impl App {
                 let double = self
                     .last_titlebar_press
                     .take_if(|(w, t)| {
-                        *w == id && now.duration_since(*t).as_millis() < DOUBLE_CLICK_MS
+                        *w == id
+                            && now.duration_since(*t).as_millis() < ui::timing::DOUBLE_CLICK_MS
                     })
                     .is_some();
                 self.last_titlebar_press = Some((id, now));
