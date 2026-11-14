@@ -569,12 +569,10 @@ pub fn collect_tabs<'a>(tree: &'a LayoutNode, out: &mut Vec<&'a TabItem>) {
 
 /// 在树中按面板 id 查找（返回该面板标签克隆；无则 None）。
 pub fn find_panel(tree: &LayoutNode, panel_id: &str) -> Option<Vec<TabItem>> {
-    let mut panels = Vec::new();
-    collect_panels(tree, &mut panels);
-    panels.into_iter().find(|p| p.node_id() == panel_id).map(|p| match p {
-        LayoutNode::Panel { tabs, .. } => tabs.clone(),
-        _ => unreachable!("collect_panels 只产出 Panel 节点"),
-    })
+    match find_node(tree, panel_id)? {
+        LayoutNode::Panel { tabs, .. } => Some(tabs.clone()),
+        _ => None,
+    }
 }
 
 /// 在树中按标签 id 查找（返回所在面板 id + 标签克隆）。
@@ -603,41 +601,42 @@ pub fn find_tab_in_detached(detached: &[DetachedWindow], tab_id: &str) -> Option
 
 /// 查找面板节点的父 split 与下标（无父（根面板）返回 None；分割/关闭用）。
 fn parent_split_of(tree: &LayoutNode, panel_id: &str) -> Option<(String, usize)> {
-    match tree {
-        LayoutNode::Panel { .. } => None,
-        LayoutNode::Split { id, children, .. } => {
-            for (i, child) in children.iter().enumerate() {
-                match child {
-                    LayoutNode::Panel { id: cid, .. } => {
-                        if cid == panel_id {
-                            return Some((id.clone(), i));
-                        }
-                    }
-                    LayoutNode::Split { .. } => {
-                        if let Some(hit) = parent_split_of(child, panel_id) {
-                            return Some(hit);
-                        }
-                    }
-                }
-            }
-            None
-        }
+    let LayoutNode::Split { id, children, .. } = tree else { return None };
+    // 只有面板节点有父级语义：目标 id 落在 Split 上时按未命中处理（与 wrap 回退一致）
+    if let Some(index) = children
+        .iter()
+        .position(|c| matches!(c, LayoutNode::Panel { .. }) && c.node_id() == panel_id)
+    {
+        return Some((id.clone(), index));
     }
+    children.iter().find_map(|c| parent_split_of(c, panel_id))
 }
 
-/// 按 id 查找节点（SplitPanel 判定父方向用）。
-fn tree_node_by_id<'a>(tree: &'a LayoutNode, id: &str) -> Option<&'a LayoutNode> {
+/// 按 id 查找树中节点（面板或分割；先序深度优先）。
+pub fn find_node<'a>(tree: &'a LayoutNode, id: &str) -> Option<&'a LayoutNode> {
     if tree.node_id() == id {
         return Some(tree);
     }
-    if let LayoutNode::Split { children, .. } = tree {
-        for c in children {
-            if let Some(hit) = tree_node_by_id(c, id) {
-                return Some(hit);
-            }
-        }
+    match tree {
+        LayoutNode::Panel { .. } => None,
+        LayoutNode::Split { children, .. } => children.iter().find_map(|c| find_node(c, id)),
     }
-    None
+}
+
+/// 用 `f` 替换命中 id 的节点（未命中原样克隆；`f` 只对命中节点调用一次）。
+fn replace_node(tree: &LayoutNode, id: &str, f: &dyn Fn(&LayoutNode) -> LayoutNode) -> LayoutNode {
+    if tree.node_id() == id {
+        return f(tree);
+    }
+    match tree {
+        LayoutNode::Panel { .. } => tree.clone(),
+        LayoutNode::Split { id: split_id, direction, children, sizes } => LayoutNode::Split {
+            id: split_id.clone(),
+            direction: direction.clone(),
+            children: children.iter().map(|c| replace_node(c, id, f)).collect(),
+            sizes: sizes.clone(),
+        },
+    }
 }
 
 /// 激活布局（主页 = 激活场景的专属主页；场景内布局失效/未设时回退该场景主页；
@@ -688,6 +687,7 @@ pub fn set_active_tree(ui: &mut AppUiState, tree: LayoutNode) {
 }
 
 /// 标签组投影（Panel 与 DetachedWindow 的 {tabs, activeTabId} 同构）。
+#[derive(Clone, Debug, PartialEq)]
 pub struct TabGroup {
     pub tabs: Vec<TabItem>,
     pub active_tab_id: Option<String>,
@@ -728,19 +728,10 @@ pub fn apply_tab_group_detached(win: &DetachedWindow, patch: Option<TabGroup>) -
 
 /// 递归更新目标面板（未命中返回原树）。
 pub fn map_panel(tree: &LayoutNode, panel_id: &str, f: &dyn Fn(&LayoutNode) -> LayoutNode) -> LayoutNode {
-    match tree {
-        LayoutNode::Panel { .. } => {
-            if tree.node_id() == panel_id {
-                f(tree)
-            } else {
-                tree.clone()
-            }
-        }
-        LayoutNode::Split { id, direction, children, sizes } => {
-            let children: Vec<LayoutNode> = children.iter().map(|c| map_panel(c, panel_id, f)).collect();
-            LayoutNode::Split { id: id.clone(), direction: direction.clone(), children, sizes: sizes.clone() }
-        }
-    }
+    replace_node(tree, panel_id, &|n| match n {
+        LayoutNode::Panel { .. } => f(n),
+        _ => n.clone(),
+    })
 }
 
 /// 递归更新目标撕裂窗口（未命中返回原数组）。
@@ -825,51 +816,32 @@ pub fn group_move_tab(g: &TabGroup, tab_id: &str, to_index: usize) -> Option<Tab
 
 /// 同级插入：把新面板插到父 split children 的 index 相邻位，尺寸从该面板均分一半。
 fn insert_sibling(tree: &LayoutNode, split_id: &str, index: usize, new_panel: &LayoutNode, position: &str) -> LayoutNode {
-    match tree {
-        LayoutNode::Panel { .. } => tree.clone(),
+    replace_node(tree, split_id, &|n| match n {
         LayoutNode::Split { id, direction, children, sizes } => {
-            if id == split_id {
-                let insert_at = if position == "before" { index } else { index + 1 };
-                let half = sizes.get(index).copied().unwrap_or(100.0) / 2.0;
-                let mut children = children.clone();
-                let mut sizes = sizes.clone();
-                children.insert(insert_at, new_panel.clone());
-                sizes.insert(insert_at, half);
-                let other = if position == "before" { index + 1 } else { index };
-                sizes[other] = half;
-                LayoutNode::Split { id: id.clone(), direction: direction.clone(), children, sizes }
-            } else {
-                LayoutNode::Split {
-                    id: id.clone(),
-                    direction: direction.clone(),
-                    children: children.iter().map(|c| insert_sibling(c, split_id, index, new_panel, position)).collect(),
-                    sizes: sizes.clone(),
-                }
-            }
+            let insert_at = if position == "before" { index } else { index + 1 };
+            let half = sizes.get(index).copied().unwrap_or(100.0) / 2.0;
+            let mut children = children.clone();
+            let mut sizes = sizes.clone();
+            children.insert(insert_at, new_panel.clone());
+            sizes.insert(insert_at, half);
+            let other = if position == "before" { index + 1 } else { index };
+            sizes[other] = half;
+            LayoutNode::Split { id: id.clone(), direction: direction.clone(), children, sizes }
         }
-    }
+        _ => n.clone(),
+    })
 }
 
 /// 嵌套回退：把面板替换为 Split[该面板, 新空面板]（direction，新面板按 position 放前/后）。
 fn wrap_panel(tree: &LayoutNode, panel_id: &str, direction: &str, new_panel: &LayoutNode, position: &str) -> LayoutNode {
-    match tree {
+    replace_node(tree, panel_id, &|n| match n {
         LayoutNode::Panel { .. } => {
-            if tree.node_id() == panel_id {
-                let (a, b) = if position == "before" { (new_panel.clone(), tree.clone()) } else { (tree.clone(), new_panel.clone()) };
-                LayoutNode::Split { id: nanoid!(), direction: direction.to_string(), children: vec![a, b], sizes: vec![50.0, 50.0] }
-            } else {
-                tree.clone()
-            }
+            let (a, b) = if position == "before" { (new_panel.clone(), n.clone()) } else { (n.clone(), new_panel.clone()) };
+            LayoutNode::Split { id: nanoid!(), direction: direction.to_string(), children: vec![a, b], sizes: vec![50.0, 50.0] }
         }
-        LayoutNode::Split { id, direction: d, children, sizes } => {
-            LayoutNode::Split {
-                id: id.clone(),
-                direction: d.clone(),
-                children: children.iter().map(|c| wrap_panel(c, panel_id, direction, new_panel, position)).collect(),
-                sizes: sizes.clone(),
-            }
-        }
-    }
+        // 目标 id 落在 Split 上：原样保留（面板替换语义只认叶子）
+        _ => n.clone(),
+    })
 }
 
 /// 分割面板：插入新空面板承载新面板（父方向匹配同级插入，否则嵌套回退）。返回新树与新面板 id。
@@ -877,7 +849,7 @@ pub fn split_panel_op(tree: &LayoutNode, panel_id: &str, direction: &str, positi
     let new_panel = LayoutNode::Panel { id: nanoid!(), tabs: vec![], active_tab_id: None };
     let new_id = new_panel.node_id().to_string();
     if let Some((split_id, index)) = parent_split_of(tree, panel_id) {
-        if let Some(LayoutNode::Split { direction: d, .. }) = tree_node_by_id(tree, &split_id) {
+        if let Some(LayoutNode::Split { direction: d, .. }) = find_node(tree, &split_id) {
             if d.as_str() == direction {
                 return (insert_sibling(tree, &split_id, index, &new_panel, position), new_id);
             }
@@ -941,19 +913,20 @@ pub fn close_panel_op(tree: &LayoutNode, panel_id: &str) -> Option<LayoutNode> {
 
 /// 回写 Split 子树尺寸比例。
 pub fn set_layout_sizes_op(tree: &LayoutNode, split_id: &str, sizes: &[f64]) -> LayoutNode {
-    match tree {
-        LayoutNode::Panel { .. } => tree.clone(),
-        LayoutNode::Split { id, direction, children, sizes: old } => {
-            let children: Vec<LayoutNode> = children.iter().map(|c| set_layout_sizes_op(c, split_id, sizes)).collect();
-            let next_sizes = if id == split_id { sizes.to_vec() } else { old.clone() };
-            LayoutNode::Split { id: id.clone(), direction: direction.clone(), children, sizes: next_sizes }
-        }
-    }
+    replace_node(tree, split_id, &|n| match n {
+        LayoutNode::Split { id, direction, children, .. } => LayoutNode::Split {
+            id: id.clone(),
+            direction: direction.clone(),
+            children: children.clone(),
+            sizes: sizes.to_vec(),
+        },
+        _ => n.clone(),
+    })
 }
 
 /// 目标 Split 的 children 数量（回写尺寸前做形状校验用；未命中返回 None）。
 pub fn split_children_count(tree: &LayoutNode, split_id: &str) -> Option<usize> {
-    match tree_node_by_id(tree, split_id) {
+    match find_node(tree, split_id) {
         Some(LayoutNode::Split { children, .. }) => Some(children.len()),
         _ => None,
     }
@@ -1157,72 +1130,105 @@ fn view_occupied(ui: &AppUiState, view: &str, except_tab_id: Option<&str>) -> bo
     ui.detached_windows.iter().flat_map(|w| &w.tabs).any(|t| t.view == view && except_tab_id != Some(t.id.as_str()))
 }
 
+/// 标签组作用位置：主窗口布局树内的面板，或独立撕裂窗口。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Target {
+    Panel(String),
+    Detached(String),
+}
+
+/// 读取目标处的标签组；面板/窗口不存在 = 未命中。
+fn group_at(ui: &AppUiState, target: &Target) -> Option<TabGroup> {
+    match target {
+        Target::Panel(panel_id) => match find_node(&active_layout(ui).tree, panel_id) {
+            Some(panel @ LayoutNode::Panel { .. }) => Some(group_of(panel)),
+            _ => None,
+        },
+        Target::Detached(window_id) => ui.detached_windows.iter().find(|w| w.id == *window_id).map(group_of_detached),
+    }
+}
+
+/// 把标签组补丁写回目标：面板留空面板，撕裂窗口拖空后回收条目。
+/// `f` 返回 None = 组语义未命中（如移除不存在的标签），模型不动。
+pub fn with_group(ui: &mut AppUiState, target: &Target, f: &dyn Fn(&TabGroup) -> Option<TabGroup>) {
+    let Some(group) = group_at(ui, target) else { return };
+    let Some(next) = f(&group) else { return };
+    match target {
+        Target::Panel(panel_id) => {
+            let tree = active_layout(ui).tree;
+            let tree = map_panel(&tree, panel_id, &|p| apply_tab_group_panel(p, Some(next.clone())));
+            set_active_tree(ui, tree);
+        }
+        Target::Detached(window_id) => {
+            let windows = map_detached(&ui.detached_windows, window_id, &|w| {
+                apply_tab_group_detached(w, Some(next.clone()))
+            });
+            ui.detached_windows = prune_empty_windows(windows);
+        }
+    }
+}
+
+// ---- 标签组操作（面板与撕裂窗口共用一份实现）----
+
+/// 添加视图：面板路径在组内已有同视图时激活它；撕裂窗口路径把组内同视图视作已占用而忽略。
+/// 两条路径都只在视图全局未被占用时追加标签并激活。
+fn add_view(ui: &mut AppUiState, target: &Target, view: &str, activate_existing: bool) {
+    if activate_existing {
+        if let Some(existing) = group_at(ui, target).and_then(|g| g.tabs.into_iter().find(|t| t.view == view)) {
+            let tab_id = existing.id;
+            with_group(ui, target, &|g| group_activate_tab(g, &tab_id));
+            return;
+        }
+    }
+    if view_occupied(ui, view, None) {
+        return;
+    }
+    let tab = create_tab(view);
+    with_group(ui, target, &|g| Some(group_add_tab(g, tab.clone(), None)));
+}
+
+fn activate_tab(ui: &mut AppUiState, target: &Target, tab_id: &str) {
+    with_group(ui, target, &|g| group_activate_tab(g, tab_id));
+}
+
+/// 关闭标签：锁定标签拒关（组语义未命中 = 模型不动）。
+fn close_tab(ui: &mut AppUiState, target: &Target, tab_id: &str) {
+    let closable = group_at(ui, target).is_some_and(|g| g.tabs.iter().any(|t| t.id == tab_id && !t.locked));
+    if closable {
+        with_group(ui, target, &|g| group_remove_tab(g, tab_id));
+    }
+}
+
+fn set_tab_locked(ui: &mut AppUiState, target: &Target, tab_id: &str, locked: bool) {
+    with_group(ui, target, &|g| Some(group_set_tab_locked(g, tab_id, locked)));
+}
+
+/// 切换标签视图：锁定拒改；目标视图被其他位置占用时忽略（切回自身当前视图恒允许）。
+fn set_tab_view(ui: &mut AppUiState, target: &Target, tab_id: &str, view: &str) {
+    let Some(tab) = group_at(ui, target).and_then(|g| g.tabs.into_iter().find(|t| t.id == tab_id)) else {
+        return;
+    };
+    if tab.locked || (tab.view != view && view_occupied(ui, view, Some(tab_id))) {
+        return;
+    }
+    with_group(ui, target, &|g| Some(group_set_tab_view(g, tab_id, view)));
+}
+
+fn move_tab_within(ui: &mut AppUiState, target: &Target, tab_id: &str, to_index: usize) {
+    with_group(ui, target, &|g| group_move_tab(g, tab_id, to_index));
+}
+
 /// 应用一个布局操作并返回结果。模型变更后由调用方负责广播 + 调度落盘。
 pub fn apply_layout_op(ui: &mut AppUiState, op: &LayoutOp) -> LayoutOpResult {
     let mut result = LayoutOpResult::default();
     match op {
-        LayoutOp::AddView { panel_id, view } => {
-            let tree = active_layout(ui).tree;
-            if let Some(p) = find_panel(&tree, panel_id) {
-                if let Some(existing) = p.iter().find(|t| t.view == *view) {
-                    // 组内已有 = 激活
-                    let tid = existing.id.clone();
-                    let tree = map_panel(&tree, panel_id, &|p| apply_tab_group_panel(p, group_activate_tab(&group_of(p), &tid)));
-                    set_active_tree(ui, tree);
-                } else if !view_occupied(ui, view, None) {
-                    let tab = create_tab(view);
-                    let tree = map_panel(&tree, panel_id, &|p| apply_tab_group_panel(p, Some(group_add_tab(&group_of(p), tab.clone(), None))));
-                    set_active_tree(ui, tree);
-                }
-            }
-        }
-        LayoutOp::SetActive { panel_id, tab_id } => {
-            let tree = active_layout(ui).tree;
-            let tree = map_panel(&tree, panel_id, &|p| apply_tab_group_panel(p, group_activate_tab(&group_of(p), tab_id)));
-            set_active_tree(ui, tree);
-        }
-        LayoutOp::CloseTab { panel_id, tab_id } => {
-            let tree = active_layout(ui).tree;
-            if let Some(p) = find_panel(&tree, panel_id) {
-                if p.iter().any(|t| t.id == *tab_id && !t.locked) {
-                    let tree = map_panel(&tree, panel_id, &|p| apply_tab_group_panel(p, group_remove_tab(&group_of(p), tab_id)));
-                    set_active_tree(ui, tree);
-                }
-            }
-        }
-        LayoutOp::SetLocked { panel_id, tab_id, locked } => {
-            let tree = active_layout(ui).tree;
-            let tree = map_panel(&tree, panel_id, &|p| apply_tab_group_panel(p, Some(group_set_tab_locked(&group_of(p), tab_id, *locked))));
-            set_active_tree(ui, tree);
-        }
-        LayoutOp::SetTabView { panel_id, tab_id, view } => {
-            let tree = active_layout(ui).tree;
-            if let Some(p) = find_panel(&tree, panel_id) {
-                if let Some(tab) = p.iter().find(|t| t.id == *tab_id) {
-                    let currently = tab.view.clone();
-                    let locked = tab.locked;
-                    if !locked && (currently == *view || !view_occupied(ui, view, Some(tab_id))) {
-                        let tree = map_panel(&tree, panel_id, &|p| apply_tab_group_panel(p, Some(group_set_tab_view(&group_of(p), tab_id, view))));
-                        set_active_tree(ui, tree);
-                    }
-                }
-            }
-        }
-        LayoutOp::MoveTabWithin { panel_id, tab_id, to_index } => {
-            let tree = active_layout(ui).tree;
-            let tree = map_panel(&tree, panel_id, &|p| apply_tab_group_panel(p, group_move_tab(&group_of(p), tab_id, *to_index)));
-            set_active_tree(ui, tree);
-        }
-        LayoutOp::MoveTabBetween { from_panel_id, to_panel_id, tab_id, index } => {
-            let tree = active_layout(ui).tree;
-            if let Some((src, tab)) = find_tab_in_tree(&tree, tab_id) {
-                if src == *from_panel_id {
-                    let tree = map_panel(&tree, from_panel_id, &|p| apply_tab_group_panel(p, group_remove_tab(&group_of(p), tab_id)));
-                    let tree = map_panel(&tree, to_panel_id, &|p| apply_tab_group_panel(p, Some(group_add_tab(&group_of(p), tab.clone(), *index))));
-                    set_active_tree(ui, tree);
-                }
-            }
-        }
+        LayoutOp::AddView { panel_id, view } => add_view(ui, &Target::Panel(panel_id.clone()), view, true),
+        LayoutOp::SetActive { panel_id, tab_id } => activate_tab(ui, &Target::Panel(panel_id.clone()), tab_id),
+        LayoutOp::CloseTab { panel_id, tab_id } => close_tab(ui, &Target::Panel(panel_id.clone()), tab_id),
+        LayoutOp::SetLocked { panel_id, tab_id, locked } => set_tab_locked(ui, &Target::Panel(panel_id.clone()), tab_id, *locked),
+        LayoutOp::SetTabView { panel_id, tab_id, view } => set_tab_view(ui, &Target::Panel(panel_id.clone()), tab_id, view),
+        LayoutOp::MoveTabWithin { panel_id, tab_id, to_index } => move_tab_within(ui, &Target::Panel(panel_id.clone()), tab_id, *to_index),
+        LayoutOp::MoveTabBetween { from_panel_id, to_panel_id, tab_id, index } => move_tab_between(ui, from_panel_id, to_panel_id, tab_id, *index),
         LayoutOp::SplitPanel { panel_id, direction, position } => {
             let pos = position.as_deref().unwrap_or("after");
             let tree = active_layout(ui).tree;
@@ -1242,330 +1248,339 @@ pub fn apply_layout_op(ui: &mut AppUiState, op: &LayoutOp) -> LayoutOpResult {
         LayoutOp::TearOffFromDetached { window_id, tab_id, bounds } => {
             result.detached_window = tear_off_from_detached(ui, window_id, tab_id, bounds, None);
         }
-        LayoutOp::DockIntoPanel { panel_id, tab_id, index } => {
-            if let Some((src, tab)) = find_tab_in_detached(&ui.detached_windows, tab_id) {
-                let tree = active_layout(ui).tree;
-                let tree = map_panel(&tree, panel_id, &|p| apply_tab_group_panel(p, Some(group_add_tab(&group_of(p), tab.clone(), *index))));
-                set_active_tree(ui, tree);
-                ui.detached_windows = prune_empty_windows(map_detached(&ui.detached_windows, &src, &|w| apply_tab_group_detached(w, group_remove_tab(&group_of_detached(w), tab_id))));
-            }
-        }
-        LayoutOp::DockIntoDetached { window_id, tab_id, index } => {
-            // 目标撕裂窗口必须存在（防停靠进幽灵窗口：OS 窗口尚在但条目已移除——否则标签
-            // 从源移除后无处可去，直接丢失）。解析层已先按窗外处理，此处再兜底一次。
-            if !ui.detached_windows.iter().any(|w| w.id == *window_id) {
-                return result;
-            }
-            // 同窗口 = 组内排序
-            let same = ui.detached_windows.iter().find(|w| w.id == *window_id);
-            if let Some(w) = same {
-                if w.tabs.iter().any(|t| t.id == *tab_id) {
-                    let len = w.tabs.len();
-                    ui.detached_windows = map_detached(&ui.detached_windows, window_id, &|w| apply_tab_group_detached(w, group_move_tab(&group_of_detached(w), tab_id, index.unwrap_or(len))));
-                    return result;
-                }
-            }
-            // 来源 = 树面板
-            if let Some((src, tab)) = find_tab_in_tree(&active_layout(ui).tree, tab_id) {
-                let tree = active_layout(ui).tree;
-                let tree = map_panel(&tree, &src, &|p| apply_tab_group_panel(p, group_remove_tab(&group_of(p), tab_id)));
-                set_active_tree(ui, tree);
-                ui.detached_windows = map_detached(&ui.detached_windows, window_id, &|w| apply_tab_group_detached(w, Some(group_add_tab(&group_of_detached(w), tab.clone(), *index))));
-                return result;
-            }
-            // 来源 = 另一撕裂窗口
-            if let Some((src, tab)) = find_tab_in_detached(&ui.detached_windows, tab_id) {
-                let next = map_detached(&ui.detached_windows, &src, &|w| apply_tab_group_detached(w, group_remove_tab(&group_of_detached(w), tab_id)));
-                let next = prune_empty_windows(next);
-                ui.detached_windows = map_detached(&next, window_id, &|w| apply_tab_group_detached(w, Some(group_add_tab(&group_of_detached(w), tab.clone(), *index))));
-            }
-        }
-        LayoutOp::DetachedAddView { window_id, view } => {
-            if !view_occupied(ui, view, None) {
-                let tab = create_tab(view);
-                ui.detached_windows = map_detached(&ui.detached_windows, window_id, &|w| apply_tab_group_detached(w, Some(group_add_tab(&group_of_detached(w), tab.clone(), None))));
-            }
-        }
-        LayoutOp::DetachedSetActive { window_id, tab_id } => {
-            ui.detached_windows = map_detached(&ui.detached_windows, window_id, &|w| apply_tab_group_detached(w, group_activate_tab(&group_of_detached(w), tab_id)));
-        }
-        LayoutOp::DetachedCloseTab { window_id, tab_id } => {
-            let win = ui.detached_windows.iter().find(|w| w.id == *window_id);
-            if let Some(w) = win {
-                if w.tabs.iter().any(|t| t.id == *tab_id && !t.locked) {
-                    ui.detached_windows = prune_empty_windows(map_detached(&ui.detached_windows, window_id, &|w| apply_tab_group_detached(w, group_remove_tab(&group_of_detached(w), tab_id))));
-                }
-            }
-        }
-        LayoutOp::DetachedSetLocked { window_id, tab_id, locked } => {
-            ui.detached_windows = map_detached(&ui.detached_windows, window_id, &|w| apply_tab_group_detached(w, Some(group_set_tab_locked(&group_of_detached(w), tab_id, *locked))));
-        }
-        LayoutOp::DetachedSetTabView { window_id, tab_id, view } => {
-            let win = ui.detached_windows.iter().find(|w| w.id == *window_id);
-            if let Some(w) = win {
-                if let Some(tab) = w.tabs.iter().find(|t| t.id == *tab_id) {
-                    if !tab.locked && (tab.view == *view || !view_occupied(ui, view, Some(tab_id))) {
-                        ui.detached_windows = map_detached(&ui.detached_windows, window_id, &|w| apply_tab_group_detached(w, Some(group_set_tab_view(&group_of_detached(w), tab_id, view))));
-                    }
-                }
-            }
-        }
-        LayoutOp::DetachedMoveTab { window_id, tab_id, to_index } => {
-            ui.detached_windows = map_detached(&ui.detached_windows, window_id, &|w| apply_tab_group_detached(w, group_move_tab(&group_of_detached(w), tab_id, *to_index)));
-        }
+        LayoutOp::DockIntoPanel { panel_id, tab_id, index } => dock_into_panel(ui, panel_id, tab_id, *index),
+        LayoutOp::DockIntoDetached { window_id, tab_id, index } => dock_into_detached(ui, window_id, tab_id, *index),
+        LayoutOp::DetachedAddView { window_id, view } => add_view(ui, &Target::Detached(window_id.clone()), view, false),
+        LayoutOp::DetachedSetActive { window_id, tab_id } => activate_tab(ui, &Target::Detached(window_id.clone()), tab_id),
+        LayoutOp::DetachedCloseTab { window_id, tab_id } => close_tab(ui, &Target::Detached(window_id.clone()), tab_id),
+        LayoutOp::DetachedSetLocked { window_id, tab_id, locked } => set_tab_locked(ui, &Target::Detached(window_id.clone()), tab_id, *locked),
+        LayoutOp::DetachedSetTabView { window_id, tab_id, view } => set_tab_view(ui, &Target::Detached(window_id.clone()), tab_id, view),
+        LayoutOp::DetachedMoveTab { window_id, tab_id, to_index } => move_tab_within(ui, &Target::Detached(window_id.clone()), tab_id, *to_index),
         LayoutOp::RemoveDetachedWindow { window_id } => {
             ui.detached_windows.retain(|w| w.id != *window_id);
         }
-        LayoutOp::CreateDetachedWindow { view, bounds, restore_on_launch } => {
-            // 视图全局唯一（与 AddView 同口径）：被占用 = 忽略（不建窗不建条目）
-            if !view_occupied(ui, view, None) {
-                let tab = create_tab(view);
-                let win = DetachedWindow {
-                    id: nanoid::nanoid!(),
-                    tabs: vec![tab.clone()],
-                    active_tab_id: Some(tab.id.clone()),
-                    bounds: bounds.clone(),
-                    hidden: false,
-                    restore_on_launch: restore_on_launch.unwrap_or(true),
-                    options: WindowOptions::default(),
-                    pinned: false,
-                };
-                ui.detached_windows.push(win.clone());
-                result.detached_window = Some(win);
-            }
-        }
+        LayoutOp::CreateDetachedWindow { view, bounds, restore_on_launch } => result.detached_window = create_detached_window(ui, view, bounds, *restore_on_launch),
         // 聚焦 = 纯 OS 动作（命令层在调和后执行），模型不动
         LayoutOp::FocusDetachedWindow { .. } => {}
-        LayoutOp::HideDetachedWindow { window_id } => {
-            if let Some(w) = ui.detached_windows.iter_mut().find(|w| w.id == *window_id) {
-                w.hidden = true;
-            }
-        }
-        LayoutOp::ShowDetachedWindow { window_id } => {
-            if let Some(w) = ui.detached_windows.iter_mut().find(|w| w.id == *window_id) {
-                w.hidden = false;
-            }
-        }
-        LayoutOp::ToggleDetachedWindow { view, bounds, options } => {
-            // 按视图定位条目（一个视图至多一个 toggle 窗口）：有 = 显隐翻转 + 选项随本次声明收敛；
-            // 无 = 以给定边界与选项新建（视图全局唯一，被占用 = 忽略）。bounds 仅新建时使用。
-            if let Some(w) = ui
-                .detached_windows
-                .iter_mut()
-                .find(|w| w.tabs.iter().any(|t| t.view == *view))
-            {
-                w.options = *options;
-                w.hidden = !w.hidden;
-                result.detached_window = Some(w.clone());
-            } else if !view_occupied(ui, view, None) {
-                let tab = create_tab(view);
-                let win = DetachedWindow {
-                    id: nanoid::nanoid!(),
-                    tabs: vec![tab.clone()],
-                    active_tab_id: Some(tab.id.clone()),
-                    bounds: bounds.clone(),
-                    hidden: false,
-                    restore_on_launch: false,
-                    options: *options,
-                    pinned: false,
-                };
-                ui.detached_windows.push(win.clone());
-                result.detached_window = Some(win);
-            }
-        }
-        LayoutOp::SetDetachedWindowPinned { window_id, pinned } => {
-            if let Some(w) = ui
-                .detached_windows
-                .iter_mut()
-                .find(|w| w.id == *window_id && w.options.hide_on_blur)
-            {
-                w.pinned = *pinned;
-            }
-        }
-        LayoutOp::SetLayoutSizes { split_id, sizes } => {
-            let tree = active_layout(ui).tree;
-            // 形状校验（长度 = children 数、有限非负、和 > 0）：坏值一旦落进模型就会被广播并持久化，
-            // 随后按它布局可能越界/塌陷，且坏状态每次启动都被读回。不合法 = 忽略本次操作。
-            let valid = split_children_count(&tree, split_id)
-                .is_some_and(|n| sizes_valid_for(sizes, n));
-            if valid {
-                let tree = set_layout_sizes_op(&tree, split_id, sizes);
-                set_active_tree(ui, tree);
-            }
-        }
-        LayoutOp::AddLayout => {
-            let new_id = {
-                let scene = active_scene_mut(ui);
-                let names: Vec<String> = scene.layouts.iter().map(|l| l.name.clone()).collect();
-                let blank = WorkspaceLayout { id: nanoid::nanoid!(), name: next_layout_name(&names), tree: create_blank_tree() };
-                let new_id = blank.id.clone();
-                scene.layouts.push(blank);
-                scene.active_layout_id = Some(new_id.clone());
-                new_id
-            };
-            ui.active_layout_id = Some(new_id);
-            ui.focused_panel_id = None;
-        }
-        LayoutOp::AddLayoutFromSpec { name, spec } => {
-            let new_id = {
-                let scene = active_scene_mut(ui);
-                let names: Vec<String> = scene.layouts.iter().map(|l| l.name.clone()).collect();
-                let layout = WorkspaceLayout {
-                    id: nanoid::nanoid!(),
-                    name: unique_layout_name(&names, name.trim()),
-                    tree: instantiate_layout_spec(spec),
-                };
-                let new_id = layout.id.clone();
-                scene.layouts.push(layout);
-                scene.active_layout_id = Some(new_id.clone());
-                new_id
-            };
-            ui.active_layout_id = Some(new_id);
-            ui.focused_panel_id = None;
-        }
-        LayoutOp::RenameLayout { id, name } => {
-            if id == HOME_LAYOUT_ID {
-                return result;
-            }
-            let scene = active_scene_mut(ui);
-            let Some(final_name) = renamed_layout_name(scene, id, name) else {
-                return result;
-            };
-            if let Some(l) = scene.layouts.iter_mut().find(|l| l.id == *id) {
-                l.name = final_name;
-            }
-        }
-        LayoutOp::DeleteLayout { id } => {
-            if id == HOME_LAYOUT_ID {
-                return result;
-            }
-            let fallback: Option<String> = {
-                let scene = active_scene_mut(ui);
-                if scene.layouts.len() <= 1 {
-                    return result;
-                }
-                scene.layouts.retain(|l| l.id != *id);
-                // 场景记忆指向被删布局 → 回落场景内第一个（记忆与顶层激活是两个独立态：
-                // normalize 允许记忆 ≠ 顶层激活，二者须各自修复，不能只看顶层）
-                if scene.active_layout_id.as_deref() == Some(id) {
-                    let first = scene.layouts.first().map(|l| l.id.clone());
-                    scene.active_layout_id = first.clone();
-                    first
-                } else {
-                    scene.active_layout_id.clone()
-                }
-            };
-            // 顶层激活指向被删布局 → 跟随场景记忆（上一步已保证记忆指向存活布局）
-            if ui.active_layout_id.as_deref() == Some(id) {
-                ui.active_layout_id = fallback;
-                ui.focused_panel_id = None;
-            }
-        }
-        LayoutOp::ActivateLayout { id } => {
-            if id == HOME_LAYOUT_ID {
-                // 主页是激活场景的专属槽位：激活它并记入场景记忆（切回本场景时恢复）
-                active_scene_mut(ui).active_layout_id = Some(id.clone());
-                ui.active_layout_id = Some(id.clone());
-                ui.focused_panel_id = None;
-                return result;
-            }
-            if !active_scene(ui).layouts.iter().any(|l| l.id == *id) {
-                return result;
-            }
-            active_scene_mut(ui).active_layout_id = Some(id.clone());
-            ui.active_layout_id = Some(id.clone());
-            ui.focused_panel_id = None;
-        }
-        LayoutOp::MoveLayout { from_index, to_index } => {
-            // 合成序 = tab 条可见序：0 = 固定主页，场景内布局从 1 起。
-            // 主页不可拖动（from 0），其他布局不可拖到主页之前（to 0）。
-            if *from_index == 0 || *to_index == 0 || from_index == to_index {
-                return result;
-            }
-            let scene = active_scene_mut(ui);
-            let len = scene.layouts.len();
-            let from = *from_index - 1;
-            let to = *to_index - 1;
-            if from >= len || to >= len {
-                return result;
-            }
-            let moved = scene.layouts.remove(from);
-            scene.layouts.insert(to, moved);
-        }
-        LayoutOp::AddScene => {
-            let names: Vec<String> = ui.scenes.iter().map(|s| s.name.clone()).collect();
-            let source = active_scene(ui);
-            // 复制源场景（布局与专属主页均复制：布局 id 与树内节点/标签 id 重新生成防跨场景串扰，
-            // 主页 id 恒为 HOME_LAYOUT_ID），激活记忆指向记忆布局的复制件
-            let active_index = source
-                .layouts
-                .iter()
-                .position(|l| Some(&l.id) == source.active_layout_id.as_ref());
-            let layouts: Vec<WorkspaceLayout> = source
-                .layouts
-                .iter()
-                .map(|l| WorkspaceLayout { id: nanoid::nanoid!(), name: l.name.clone(), tree: regenerate_ids(&l.tree) })
-                .collect();
-            let copy = Scene {
-                id: nanoid::nanoid!(),
-                name: next_scene_name(&names),
-                home_layout: WorkspaceLayout {
-                    id: HOME_LAYOUT_ID.to_string(),
-                    name: source.home_layout.name.clone(),
-                    tree: regenerate_ids(&source.home_layout.tree),
-                },
-                active_layout_id: match source.active_layout_id.as_deref() {
-                    Some(HOME_LAYOUT_ID) => Some(HOME_LAYOUT_ID.to_string()),
-                    _ => active_index.and_then(|i| layouts.get(i)).map(|l| l.id.clone()),
-                },
-                layouts,
-            };
-            ui.active_layout_id = copy.active_layout_id.clone();
-            ui.scenes.push(copy);
-            ui.active_scene_id = ui.scenes.last().map(|s| s.id.clone());
-            ui.focused_panel_id = None;
-        }
-        LayoutOp::RenameScene { id, name } => {
-            if id == DEFAULT_SCENE_ID {
-                return result;
-            }
-            let trimmed = name.trim();
-            if trimmed.is_empty() {
-                return result;
-            }
-            for s in &mut ui.scenes {
-                if s.id == *id {
-                    s.name = trimmed.to_string();
-                    break;
-                }
-            }
-        }
-        LayoutOp::DeleteScene { id } => {
-            if id == DEFAULT_SCENE_ID {
-                return result;
-            }
-            let removing_active = ui.active_scene_id.as_deref() == Some(id);
-            ui.scenes.retain(|s| s.id != *id);
-            if removing_active {
-                // 删除激活场景 → 回到默认场景（默认场景不可删，恒在首位）及其记忆布局
-                ui.active_scene_id = Some(ui.scenes[0].id.clone());
-                ui.active_layout_id = ui.scenes[0].active_layout_id.clone();
-                ui.focused_panel_id = None;
-            }
-        }
-        LayoutOp::ActivateScene { id } => {
-            let Some(scene) = ui.scenes.iter_mut().find(|s| s.id == *id) else {
-                return result;
-            };
-            // 恢复目标场景记忆的激活布局（normalize 保证记忆恒有效）
-            ui.active_layout_id = scene.active_layout_id.clone();
-            ui.active_scene_id = Some(id.clone());
-            ui.focused_panel_id = None;
-        }
+        LayoutOp::HideDetachedWindow { window_id } => set_detached_hidden(ui, window_id, true),
+        LayoutOp::ShowDetachedWindow { window_id } => set_detached_hidden(ui, window_id, false),
+        LayoutOp::ToggleDetachedWindow { view, bounds, options } => result.detached_window = toggle_detached_window(ui, view, bounds, options),
+        LayoutOp::SetDetachedWindowPinned { window_id, pinned } => set_detached_pinned(ui, window_id, *pinned),
+        LayoutOp::SetLayoutSizes { split_id, sizes } => set_layout_sizes(ui, split_id, sizes),
+        LayoutOp::AddLayout => add_layout(ui, None),
+        LayoutOp::AddLayoutFromSpec { name, spec } => add_layout(ui, Some((name.as_str(), spec))),
+        LayoutOp::RenameLayout { id, name } => rename_layout(ui, id, name),
+        LayoutOp::DeleteLayout { id } => delete_layout(ui, id),
+        LayoutOp::ActivateLayout { id } => activate_layout(ui, id),
+        LayoutOp::MoveLayout { from_index, to_index } => move_layout(ui, *from_index, *to_index),
+        LayoutOp::AddScene => add_scene(ui),
+        LayoutOp::RenameScene { id, name } => rename_scene(ui, id, name),
+        LayoutOp::DeleteScene { id } => delete_scene(ui, id),
+        LayoutOp::ActivateScene { id } => activate_scene(ui, id),
     }
     result
 }
 
+// ---- 跨组移动 / 撕裂窗口 / 布局与场景 ----
+
+/// 窗口内跨面板移动标签（源面板须确实持有该标签）。
+fn move_tab_between(ui: &mut AppUiState, from_panel_id: &str, to_panel_id: &str, tab_id: &str, index: Option<usize>) {
+    let tree = active_layout(ui).tree;
+    let Some((src, tab)) = find_tab_in_tree(&tree, tab_id) else { return };
+    if src != from_panel_id {
+        return;
+    }
+    let tree = map_panel(&tree, from_panel_id, &|p| apply_tab_group_panel(p, group_remove_tab(&group_of(p), tab_id)));
+    let tree = map_panel(&tree, to_panel_id, &|p| apply_tab_group_panel(p, Some(group_add_tab(&group_of(p), tab.clone(), index))));
+    set_active_tree(ui, tree);
+}
+
+/// 撕裂窗口标签停靠回面板（源窗口拖空后回收条目）。
+fn dock_into_panel(ui: &mut AppUiState, panel_id: &str, tab_id: &str, index: Option<usize>) {
+    let Some((src, tab)) = find_tab_in_detached(&ui.detached_windows, tab_id) else { return };
+    let tree = active_layout(ui).tree;
+    let tree = map_panel(&tree, panel_id, &|p| apply_tab_group_panel(p, Some(group_add_tab(&group_of(p), tab.clone(), index))));
+    set_active_tree(ui, tree);
+    let windows = map_detached(&ui.detached_windows, &src, &|w| {
+        apply_tab_group_detached(w, group_remove_tab(&group_of_detached(w), tab_id))
+    });
+    ui.detached_windows = prune_empty_windows(windows);
+}
+
+/// 标签停靠进撕裂窗口（同窗口 = 组内排序）。
+fn dock_into_detached(ui: &mut AppUiState, window_id: &str, tab_id: &str, index: Option<usize>) {
+    // 目标窗口必须存在：OS 窗口尚在而条目已移除时，源标签移出后无处可去会直接丢失
+    if !ui.detached_windows.iter().any(|w| w.id == window_id) {
+        return;
+    }
+    if let Some(w) = ui.detached_windows.iter().find(|w| w.id == window_id) {
+        if w.tabs.iter().any(|t| t.id == tab_id) {
+            let len = w.tabs.len();
+            ui.detached_windows = map_detached(&ui.detached_windows, window_id, &|w| {
+                apply_tab_group_detached(w, group_move_tab(&group_of_detached(w), tab_id, index.unwrap_or(len)))
+            });
+            return;
+        }
+    }
+    if let Some((src, tab)) = find_tab_in_tree(&active_layout(ui).tree, tab_id) {
+        let tree = active_layout(ui).tree;
+        let tree = map_panel(&tree, &src, &|p| apply_tab_group_panel(p, group_remove_tab(&group_of(p), tab_id)));
+        set_active_tree(ui, tree);
+        ui.detached_windows = map_detached(&ui.detached_windows, window_id, &|w| {
+            apply_tab_group_detached(w, Some(group_add_tab(&group_of_detached(w), tab.clone(), index)))
+        });
+        return;
+    }
+    if let Some((src, tab)) = find_tab_in_detached(&ui.detached_windows, tab_id) {
+        let next = map_detached(&ui.detached_windows, &src, &|w| {
+            apply_tab_group_detached(w, group_remove_tab(&group_of_detached(w), tab_id))
+        });
+        let next = prune_empty_windows(next);
+        ui.detached_windows = map_detached(&next, window_id, &|w| {
+            apply_tab_group_detached(w, Some(group_add_tab(&group_of_detached(w), tab.clone(), index)))
+        });
+    }
+}
+
+/// 免面板直撕：新建承载单个视图的撕裂窗口条目（视图全局已占用 = None）。
+fn create_detached_window(
+    ui: &mut AppUiState,
+    view: &str,
+    bounds: &WindowBounds,
+    restore_on_launch: Option<bool>,
+) -> Option<DetachedWindow> {
+    if view_occupied(ui, view, None) {
+        return None;
+    }
+    let tab = create_tab(view);
+    let win = DetachedWindow {
+        id: nanoid::nanoid!(),
+        tabs: vec![tab.clone()],
+        active_tab_id: Some(tab.id.clone()),
+        bounds: bounds.clone(),
+        hidden: false,
+        restore_on_launch: restore_on_launch.unwrap_or(true),
+        options: WindowOptions::default(),
+        pinned: false,
+    };
+    ui.detached_windows.push(win.clone());
+    Some(win)
+}
+
+/// 按视图定位并显隐翻转撕裂窗口；无则按声明新建（新建条目不参与启动恢复，由创建方显式触发出现）。
+fn toggle_detached_window(
+    ui: &mut AppUiState,
+    view: &str,
+    bounds: &WindowBounds,
+    options: &WindowOptions,
+) -> Option<DetachedWindow> {
+    if let Some(w) = ui.detached_windows.iter_mut().find(|w| w.tabs.iter().any(|t| t.view == view)) {
+        w.options = *options;
+        w.hidden = !w.hidden;
+        return Some(w.clone());
+    }
+    if view_occupied(ui, view, None) {
+        return None;
+    }
+    let tab = create_tab(view);
+    let win = DetachedWindow {
+        id: nanoid::nanoid!(),
+        tabs: vec![tab.clone()],
+        active_tab_id: Some(tab.id.clone()),
+        bounds: bounds.clone(),
+        hidden: false,
+        restore_on_launch: false,
+        options: *options,
+        pinned: false,
+    };
+    ui.detached_windows.push(win.clone());
+    Some(win)
+}
+
+fn set_detached_hidden(ui: &mut AppUiState, window_id: &str, hidden: bool) {
+    if let Some(w) = ui.detached_windows.iter_mut().find(|w| w.id == window_id) {
+        w.hidden = hidden;
+    }
+}
+
+/// 图钉只对声明失焦收起的窗口有意义（其余窗口忽略）。
+fn set_detached_pinned(ui: &mut AppUiState, window_id: &str, pinned: bool) {
+    if let Some(w) = ui.detached_windows.iter_mut().find(|w| w.id == window_id && w.options.hide_on_blur) {
+        w.pinned = pinned;
+    }
+}
+
+fn set_layout_sizes(ui: &mut AppUiState, split_id: &str, sizes: &[f64]) {
+    let tree = active_layout(ui).tree;
+    // 形状校验（长度 = children 数、有限非负、和 > 0）：坏值一旦落进模型就会被广播并持久化，
+    // 随后按它布局可能越界/塌陷，且坏状态每次启动都被读回。不合法 = 忽略本次操作。
+    let valid = split_children_count(&tree, split_id).is_some_and(|n| sizes_valid_for(sizes, n));
+    if valid {
+        set_active_tree(ui, set_layout_sizes_op(&tree, split_id, sizes));
+    }
+}
+
+/// 新建布局并激活（spec = 插件默认布局规格；None = 空白单面板）。
+fn add_layout(ui: &mut AppUiState, spec: Option<(&str, &LayoutSpecNode)>) {
+    let new_id = {
+        let scene = active_scene_mut(ui);
+        let names: Vec<String> = scene.layouts.iter().map(|l| l.name.clone()).collect();
+        let (name, tree) = match spec {
+            Some((name, spec)) => (unique_layout_name(&names, name.trim()), instantiate_layout_spec(spec)),
+            None => (next_layout_name(&names), create_blank_tree()),
+        };
+        let layout = WorkspaceLayout { id: nanoid::nanoid!(), name, tree };
+        let new_id = layout.id.clone();
+        scene.layouts.push(layout);
+        scene.active_layout_id = Some(new_id.clone());
+        new_id
+    };
+    ui.active_layout_id = Some(new_id);
+    ui.focused_panel_id = None;
+}
+
+fn rename_layout(ui: &mut AppUiState, id: &str, name: &str) {
+    if id == HOME_LAYOUT_ID {
+        return;
+    }
+    let scene = active_scene_mut(ui);
+    let Some(final_name) = renamed_layout_name(scene, id, name) else { return };
+    if let Some(l) = scene.layouts.iter_mut().find(|l| l.id == id) {
+        l.name = final_name;
+    }
+}
+
+fn delete_layout(ui: &mut AppUiState, id: &str) {
+    if id == HOME_LAYOUT_ID {
+        return;
+    }
+    let fallback: Option<String> = {
+        let scene = active_scene_mut(ui);
+        if scene.layouts.len() <= 1 {
+            return;
+        }
+        scene.layouts.retain(|l| l.id != id);
+        // 场景记忆指向被删布局 → 回落场景内第一个（记忆与顶层激活是两个独立态：
+        // normalize 允许记忆 ≠ 顶层激活，二者须各自修复，不能只看顶层）
+        if scene.active_layout_id.as_deref() == Some(id) {
+            let first = scene.layouts.first().map(|l| l.id.clone());
+            scene.active_layout_id = first.clone();
+            first
+        } else {
+            scene.active_layout_id.clone()
+        }
+    };
+    // 顶层激活指向被删布局 → 跟随场景记忆（上一步已保证记忆指向存活布局）
+    if ui.active_layout_id.as_deref() == Some(id) {
+        ui.active_layout_id = fallback;
+        ui.focused_panel_id = None;
+    }
+}
+
+fn activate_layout(ui: &mut AppUiState, id: &str) {
+    if id == HOME_LAYOUT_ID {
+        // 主页是激活场景的专属槽位：激活它并记入场景记忆（切回本场景时恢复）
+        active_scene_mut(ui).active_layout_id = Some(id.to_string());
+        ui.active_layout_id = Some(id.to_string());
+        ui.focused_panel_id = None;
+        return;
+    }
+    if !active_scene(ui).layouts.iter().any(|l| l.id == id) {
+        return;
+    }
+    active_scene_mut(ui).active_layout_id = Some(id.to_string());
+    ui.active_layout_id = Some(id.to_string());
+    ui.focused_panel_id = None;
+}
+
+fn move_layout(ui: &mut AppUiState, from_index: usize, to_index: usize) {
+    // 合成序 = tab 条可见序：0 = 固定主页，场景内布局从 1 起。
+    // 主页不可拖动（from 0），其他布局不可拖到主页之前（to 0）。
+    if from_index == 0 || to_index == 0 || from_index == to_index {
+        return;
+    }
+    let scene = active_scene_mut(ui);
+    let len = scene.layouts.len();
+    let from = from_index - 1;
+    let to = to_index - 1;
+    if from >= len || to >= len {
+        return;
+    }
+    let moved = scene.layouts.remove(from);
+    scene.layouts.insert(to, moved);
+}
+
+fn add_scene(ui: &mut AppUiState) {
+    let names: Vec<String> = ui.scenes.iter().map(|s| s.name.clone()).collect();
+    let source = active_scene(ui);
+    // 复制源场景（布局与专属主页均复制：布局 id 与树内节点/标签 id 重新生成防跨场景串扰，
+    // 主页 id 恒为 HOME_LAYOUT_ID），激活记忆指向记忆布局的复制件
+    let active_index = source
+        .layouts
+        .iter()
+        .position(|l| Some(&l.id) == source.active_layout_id.as_ref());
+    let layouts: Vec<WorkspaceLayout> = source
+        .layouts
+        .iter()
+        .map(|l| WorkspaceLayout { id: nanoid::nanoid!(), name: l.name.clone(), tree: regenerate_ids(&l.tree) })
+        .collect();
+    let copy = Scene {
+        id: nanoid::nanoid!(),
+        name: next_scene_name(&names),
+        home_layout: WorkspaceLayout {
+            id: HOME_LAYOUT_ID.to_string(),
+            name: source.home_layout.name.clone(),
+            tree: regenerate_ids(&source.home_layout.tree),
+        },
+        active_layout_id: match source.active_layout_id.as_deref() {
+            Some(HOME_LAYOUT_ID) => Some(HOME_LAYOUT_ID.to_string()),
+            _ => active_index.and_then(|i| layouts.get(i)).map(|l| l.id.clone()),
+        },
+        layouts,
+    };
+    ui.active_layout_id = copy.active_layout_id.clone();
+    ui.scenes.push(copy);
+    ui.active_scene_id = ui.scenes.last().map(|s| s.id.clone());
+    ui.focused_panel_id = None;
+}
+
+fn rename_scene(ui: &mut AppUiState, id: &str, name: &str) {
+    if id == DEFAULT_SCENE_ID {
+        return;
+    }
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    for s in &mut ui.scenes {
+        if s.id == id {
+            s.name = trimmed.to_string();
+            break;
+        }
+    }
+}
+
+fn delete_scene(ui: &mut AppUiState, id: &str) {
+    if id == DEFAULT_SCENE_ID {
+        return;
+    }
+    let removing_active = ui.active_scene_id.as_deref() == Some(id);
+    ui.scenes.retain(|s| s.id != id);
+    if removing_active {
+        // 删除激活场景 → 回到默认场景（默认场景不可删，恒在首位）及其记忆布局
+        ui.active_scene_id = Some(ui.scenes[0].id.clone());
+        ui.active_layout_id = ui.scenes[0].active_layout_id.clone();
+        ui.focused_panel_id = None;
+    }
+}
+
+fn activate_scene(ui: &mut AppUiState, id: &str) {
+    let Some(scene) = ui.scenes.iter_mut().find(|s| s.id == id) else { return };
+    // 恢复目标场景记忆的激活布局（normalize 保证记忆恒有效）
+    ui.active_layout_id = scene.active_layout_id.clone();
+    ui.active_scene_id = Some(id.to_string());
+    ui.focused_panel_id = None;
+}
 /// 尺寸补丁是否可应用（用于在变更前挡掉坏值：坏值既不该进模型，也不该触发落盘/广播）。
 /// 其余操作恒为 true（各自在校验分支内决定是否真正改动）。
 pub fn op_passes_shape_check(ui: &AppUiState, op: &LayoutOp) -> bool {
@@ -2047,5 +2062,181 @@ mod tests {
         let _ = apply_layout_op(&mut ui, &LayoutOp::RenameLayout { id: HOME_LAYOUT_ID.into(), name: "首页".into() });
         assert_eq!(ui.scenes[0].home_layout.name, "主页");
         assert_eq!(ui.scenes[0].layouts.last().unwrap().name, before);
+    }
+
+    // ---- 面板与撕裂窗口的标签组语义同构（两条路径共用 with_group）----
+
+    /// 同一棵树保证两侧的视图占用环境一致，比较只落在 p1 / w1 的标签组上。
+    fn group_case_tree(views: &[&str], active: Option<&str>) -> LayoutNode {
+        LayoutNode::Split {
+            id: "s1".into(),
+            direction: "horizontal".into(),
+            children: vec![grouped_panel("p1", views, active), panel("p-other", &["canvas"])],
+            sizes: vec![50.0, 50.0],
+        }
+    }
+
+    fn grouped_panel(id: &str, views: &[&str], active: Option<&str>) -> LayoutNode {
+        let tabs: Vec<TabItem> = views
+            .iter()
+            .map(|v| TabItem { id: format!("t-{v}"), view: v.to_string(), locked: false })
+            .collect();
+        let active = active.map(|v| format!("t-{v}")).or_else(|| tabs.first().map(|t| t.id.clone()));
+        LayoutNode::Panel { id: id.to_string(), tabs, active_tab_id: active }
+    }
+
+    fn grouped_detached(id: &str, views: &[&str], active: Option<&str>) -> DetachedWindow {
+        let LayoutNode::Panel { tabs, active_tab_id, .. } = grouped_panel(id, views, active) else {
+            unreachable!("grouped_panel 恒为面板");
+        };
+        DetachedWindow {
+            id: id.to_string(),
+            tabs,
+            active_tab_id,
+            bounds: WindowBounds { x: 0.0, y: 0.0, width: 100.0, height: 100.0, scale: 1.0 },
+            hidden: false,
+            restore_on_launch: true,
+            options: WindowOptions::default(),
+            pinned: false,
+        }
+    }
+
+    fn panel_case(views: &[&str], active: Option<&str>) -> AppUiState {
+        ui_with(group_case_tree(views, active))
+    }
+
+    fn detached_case(views: &[&str], active: Option<&str>) -> AppUiState {
+        // 目标组只在撕裂窗口：面板树留一个别的视图，避免占用判定被面板侧副本提前满足
+        let mut ui = ui_with(panel("p-other", &["canvas"]));
+        ui.detached_windows.push(grouped_detached("w1", views, active));
+        ui
+    }
+
+    fn panel_group(ui: &AppUiState) -> Option<TabGroup> {
+        match find_node(&active_layout(ui).tree, "p1")? {
+            LayoutNode::Panel { tabs, active_tab_id, .. } => {
+                Some(TabGroup { tabs: tabs.clone(), active_tab_id: active_tab_id.clone() })
+            }
+            _ => None,
+        }
+    }
+
+    fn window_group(ui: &AppUiState) -> Option<TabGroup> {
+        ui.detached_windows.iter().find(|w| w.id == "w1").map(group_of_detached)
+    }
+
+    /// 去掉随机标签 id（新加标签由 core 现场生成，两侧必然不同），只留视图序列与激活位。
+    fn group_shape(g: &TabGroup) -> (Vec<(String, bool)>, Option<usize>) {
+        let active = g.active_tab_id.as_ref().and_then(|id| g.tabs.iter().position(|t| &t.id == id));
+        (g.tabs.iter().map(|t| (t.view.clone(), t.locked)).collect(), active)
+    }
+
+    #[test]
+    fn add_view_panel_and_detached_share_group_semantics() {
+        let mut panel_ui = panel_case(&["files"], None);
+        let mut detached_ui = detached_case(&["files"], None);
+        let _ = apply_layout_op(&mut panel_ui, &LayoutOp::AddView { panel_id: "p1".into(), view: "note".into() });
+        let _ = apply_layout_op(&mut detached_ui, &LayoutOp::DetachedAddView { window_id: "w1".into(), view: "note".into() });
+        assert_eq!(
+            panel_group(&panel_ui).as_ref().map(group_shape),
+            window_group(&detached_ui).as_ref().map(group_shape)
+        );
+        let added = window_group(&detached_ui).unwrap();
+        assert_eq!(added.active_tab_id.as_deref(), Some(added.tabs[1].id.as_str()), "新加标签即激活");
+        // 组内已有同视图：面板路径激活该标签；撕裂窗口按「视图已占用」忽略，不切换激活位
+        let _ = apply_layout_op(&mut panel_ui, &LayoutOp::AddView { panel_id: "p1".into(), view: "files".into() });
+        let _ = apply_layout_op(&mut detached_ui, &LayoutOp::DetachedAddView { window_id: "w1".into(), view: "files".into() });
+        assert_eq!(panel_group(&panel_ui).unwrap().active_tab_id.as_deref(), Some("t-files"));
+        let kept = window_group(&detached_ui).unwrap();
+        assert_eq!(kept.active_tab_id.as_deref(), Some(kept.tabs[1].id.as_str()), "激活位不变");
+    }
+
+    #[test]
+    fn set_active_panel_and_detached_share_group_semantics() {
+        let mut panel_ui = panel_case(&["files", "note"], Some("files"));
+        let mut detached_ui = detached_case(&["files", "note"], Some("files"));
+        let _ = apply_layout_op(&mut panel_ui, &LayoutOp::SetActive { panel_id: "p1".into(), tab_id: "t-note".into() });
+        let _ = apply_layout_op(&mut detached_ui, &LayoutOp::DetachedSetActive { window_id: "w1".into(), tab_id: "t-note".into() });
+        assert_eq!(
+            panel_group(&panel_ui).as_ref().map(group_shape),
+            window_group(&detached_ui).as_ref().map(group_shape)
+        );
+        assert_eq!(window_group(&detached_ui).unwrap().active_tab_id.as_deref(), Some("t-note"));
+    }
+
+    #[test]
+    fn close_tab_panel_and_detached_share_group_semantics() {
+        let mut panel_ui = panel_case(&["files", "note"], Some("files"));
+        let mut detached_ui = detached_case(&["files", "note"], Some("files"));
+        let _ = apply_layout_op(&mut panel_ui, &LayoutOp::CloseTab { panel_id: "p1".into(), tab_id: "t-files".into() });
+        let _ = apply_layout_op(&mut detached_ui, &LayoutOp::DetachedCloseTab { window_id: "w1".into(), tab_id: "t-files".into() });
+        assert_eq!(
+            panel_group(&panel_ui).as_ref().map(group_shape),
+            window_group(&detached_ui).as_ref().map(group_shape)
+        );
+        assert_eq!(window_group(&detached_ui).unwrap().active_tab_id.as_deref(), Some("t-note"));
+        // 关掉最后一个标签：组同为空，但面板留空面板、撕裂窗口回收条目
+        let _ = apply_layout_op(&mut panel_ui, &LayoutOp::CloseTab { panel_id: "p1".into(), tab_id: "t-note".into() });
+        let _ = apply_layout_op(&mut detached_ui, &LayoutOp::DetachedCloseTab { window_id: "w1".into(), tab_id: "t-note".into() });
+        assert_eq!(panel_group(&panel_ui), Some(TabGroup { tabs: vec![], active_tab_id: None }));
+        assert!(window_group(&detached_ui).is_none());
+    }
+
+    #[test]
+    fn set_locked_panel_and_detached_share_group_semantics() {
+        let mut panel_ui = panel_case(&["files", "note"], None);
+        let mut detached_ui = detached_case(&["files", "note"], None);
+        let _ = apply_layout_op(&mut panel_ui, &LayoutOp::SetLocked { panel_id: "p1".into(), tab_id: "t-note".into(), locked: true });
+        let _ = apply_layout_op(&mut detached_ui, &LayoutOp::DetachedSetLocked { window_id: "w1".into(), tab_id: "t-note".into(), locked: true });
+        assert_eq!(
+            panel_group(&panel_ui).as_ref().map(group_shape),
+            window_group(&detached_ui).as_ref().map(group_shape)
+        );
+        assert!(window_group(&detached_ui).unwrap().tabs.iter().find(|t| t.id == "t-note").unwrap().locked);
+    }
+
+    #[test]
+    fn set_tab_view_panel_and_detached_share_group_semantics() {
+        let mut panel_ui = panel_case(&["files", "note"], None);
+        let mut detached_ui = detached_case(&["files", "note"], None);
+        let _ = apply_layout_op(&mut panel_ui, &LayoutOp::SetTabView { panel_id: "p1".into(), tab_id: "t-note".into(), view: "calendar".into() });
+        let _ = apply_layout_op(&mut detached_ui, &LayoutOp::DetachedSetTabView { window_id: "w1".into(), tab_id: "t-note".into(), view: "calendar".into() });
+        assert_eq!(
+            panel_group(&panel_ui).as_ref().map(group_shape),
+            window_group(&detached_ui).as_ref().map(group_shape)
+        );
+        // 目标视图已被其他位置占用：两条路径都忽略
+        let _ = apply_layout_op(&mut panel_ui, &LayoutOp::SetTabView { panel_id: "p1".into(), tab_id: "t-note".into(), view: "canvas".into() });
+        let _ = apply_layout_op(&mut detached_ui, &LayoutOp::DetachedSetTabView { window_id: "w1".into(), tab_id: "t-note".into(), view: "canvas".into() });
+        assert_eq!(
+            panel_group(&panel_ui).as_ref().map(group_shape),
+            window_group(&detached_ui).as_ref().map(group_shape)
+        );
+        assert_eq!(window_group(&detached_ui).unwrap().tabs[1].view, "calendar");
+    }
+
+    #[test]
+    fn move_tab_within_panel_and_detached_share_group_semantics() {
+        let mut panel_ui = panel_case(&["files", "note", "calendar"], Some("files"));
+        let mut detached_ui = detached_case(&["files", "note", "calendar"], Some("files"));
+        let _ = apply_layout_op(&mut panel_ui, &LayoutOp::MoveTabWithin { panel_id: "p1".into(), tab_id: "t-files".into(), to_index: 2 });
+        let _ = apply_layout_op(&mut detached_ui, &LayoutOp::DetachedMoveTab { window_id: "w1".into(), tab_id: "t-files".into(), to_index: 2 });
+        assert_eq!(
+            panel_group(&panel_ui).as_ref().map(group_shape),
+            window_group(&detached_ui).as_ref().map(group_shape)
+        );
+        let group = window_group(&detached_ui).unwrap();
+        let ids: Vec<&str> = group.tabs.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, vec!["t-note", "t-files", "t-calendar"]);
+    }
+
+    #[test]
+    fn find_node_locates_panel_and_split() {
+        let tree = two_panels_horizontal();
+        assert!(matches!(find_node(&tree, "p1"), Some(LayoutNode::Panel { .. })));
+        assert!(matches!(find_node(&tree, "s1"), Some(LayoutNode::Split { .. })));
+        assert!(find_node(&tree, "nope").is_none());
+        // 只认叶子：id 落在分割上不算面板
+        assert!(find_panel(&tree, "s1").is_none());
     }
 }

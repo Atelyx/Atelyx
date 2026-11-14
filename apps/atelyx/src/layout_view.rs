@@ -6223,21 +6223,12 @@ pub fn panel_tab_ids_in(tree: &LayoutNode, panel_id: &str) -> Vec<String> {
 
 /// 主树活动标签信息（(tab_id, locked)）。
 fn find_active_tab_in(app: &App, panel_id: &str) -> Option<(String, bool)> {
-    fn walk(node: &LayoutNode, panel_id: &str) -> Option<(String, bool)> {
-        match node {
-            LayoutNode::Panel { id, tabs, active_tab_id } if id == panel_id => {
-                let active_id = active_tab_id.as_deref()?;
-                tabs.iter()
-                    .find(|t| t.id == active_id)
-                    .map(|t| (t.id.clone(), t.locked))
-            }
-            LayoutNode::Split { children, .. } => children.iter().find_map(|c| walk(c, panel_id)),
-            _ => None,
-        }
-    }
-    // active_layout 返回 owned（克隆）；树上查询只取owned 数据，无借用外泄
     let tree = layout::active_layout(&app.ui).tree;
-    walk(&tree, panel_id)
+    let LayoutNode::Panel { tabs, active_tab_id, .. } = layout::find_node(&tree, panel_id)? else {
+        return None;
+    };
+    let active_id = active_tab_id.as_deref()?;
+    tabs.iter().find(|t| t.id == active_id).map(|t| (t.id.clone(), t.locked))
 }
 
 fn count_panels(node: &LayoutNode) -> usize {
@@ -6300,17 +6291,8 @@ fn tab_context_entries(
 
 /// 主树标签信息（(view, locked)）。
 fn find_tab_in_active(app: &App, tab_id: &str) -> Option<(String, bool)> {
-    fn walk(node: &LayoutNode, tab_id: &str) -> Option<(String, bool)> {
-        match node {
-            LayoutNode::Panel { tabs, .. } => tabs
-                .iter()
-                .find(|t| t.id == tab_id)
-                .map(|t| (t.view.clone(), t.locked)),
-            LayoutNode::Split { children, .. } => children.iter().find_map(|c| walk(c, tab_id)),
-        }
-    }
     let tree = layout::active_layout(&app.ui).tree;
-    walk(&tree, tab_id)
+    layout::find_tab_in_tree(&tree, tab_id).map(|(_, t)| (t.view, t.locked))
 }
 
 /// 空面板右键的视图选择器：本组 = 点击激活已有标签（角标「本组」）；已占用停用；其余添加。
@@ -6344,29 +6326,16 @@ fn view_picker_entries(app: &App, panel_id: &str) -> Vec<(usize, MenuEntry<'stat
 
 /// 面板内持有该视图的标签 id。
 fn panel_tab_with_view(app: &App, panel_id: &str, kind: &str) -> Option<String> {
-    fn walk(node: &LayoutNode, panel_id: &str, kind: &str) -> Option<String> {
-        match node {
-            LayoutNode::Panel { id, tabs, .. } if id == panel_id => {
-                tabs.iter().find(|t| t.view == kind).map(|t| t.id.clone())
-            }
-            LayoutNode::Split { children, .. } => {
-                children.iter().find_map(|c| walk(c, panel_id, kind))
-            }
-            _ => None,
-        }
-    }
-    walk(&layout::active_layout(&app.ui).tree, panel_id, kind)
+    let tree = layout::active_layout(&app.ui).tree;
+    layout::find_panel(&tree, panel_id)?.iter().find(|t| t.view == kind).map(|t| t.id.clone())
 }
 
 /// 当前布局内是否存在某视图的面板标签（外部文件拖入的路由判据）。
 pub(crate) fn window_has_view(app: &App, kind: &str) -> bool {
-    fn walk(node: &LayoutNode, kind: &str) -> bool {
-        match node {
-            LayoutNode::Panel { tabs, .. } => tabs.iter().any(|t| t.view == kind),
-            LayoutNode::Split { children, .. } => children.iter().any(|c| walk(c, kind)),
-        }
-    }
-    walk(&layout::active_layout(&app.ui).tree, kind)
+    let tree = layout::active_layout(&app.ui).tree;
+    let mut tabs = Vec::new();
+    layout::collect_tabs(&tree, &mut tabs);
+    tabs.iter().any(|t| t.view == kind)
 }
 
 /// 最近仓库行菜单：在系统文件管理器中打开 / 从列表移除（激活仓库行不可移除）。
