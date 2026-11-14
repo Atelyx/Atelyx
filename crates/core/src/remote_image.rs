@@ -29,25 +29,20 @@ async fn fetch_image(url: &str, policy: HostPolicy) -> Result<Vec<u8>, String> {
     }
     let checked = net_guard::ensure_http_url(url, policy)?;
     let client = net_guard::client_for(policy, ClientTimeout::Total(30))?;
-    let mut response = client
+    let response = client
         .get(checked)
         .send()
         .await
-        .map_err(|e| format!("图片下载失败：{e}"))?
-        .error_for_status()
         .map_err(|e| format!("图片下载失败：{e}"))?;
     if let Some(len) = response.content_length() {
         if len > MAX_BYTES as u64 {
             return Err("图片超过 20MB 上限".to_string());
         }
     }
-    // 分块累计、到上限即断：content-length 缺失或虚报时同样受控
-    let mut bytes: Vec<u8> = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(|e| format!("图片读取失败：{e}"))? {
-        if bytes.len() + chunk.len() > MAX_BYTES {
-            return Err("图片超过 20MB 上限".to_string());
-        }
-        bytes.extend_from_slice(&chunk);
+    // 分块累计、到上限即断：content-length 缺失或虚报时同样受控；图片超限是错误，不截断
+    let (bytes, truncated) = net_guard::read_capped(response, MAX_BYTES, "图片下载失败").await?;
+    if truncated {
+        return Err("图片超过 20MB 上限".to_string());
     }
     if bytes.is_empty() {
         return Err("图片内容为空".to_string());

@@ -6,7 +6,7 @@ use reqwest::header::{ACCEPT, USER_AGENT};
 
 use serde::Serialize;
 
-use crate::net_guard::{client_for, ensure_public_http_url, ClientTimeout, HostPolicy};
+use crate::net_guard::{client_for, ensure_public_http_url, read_capped, ClientTimeout, HostPolicy};
 
 /// 抓取响应上限（字节）。防超大页面/二进制拖死请求，超出即截断。
 const MAX_RESPONSE_BYTES: usize = 1_000_000;
@@ -34,10 +34,7 @@ pub async fn fetch_web(url: String) -> Result<FetchedWebPage, String> {
         .send()
         .await
         .map_err(|e| format!("抓取失败：{}", e))?;
-    if !resp.status().is_success() {
-        return Err(format!("抓取失败：HTTP {}", resp.status()));
-    }
-    let (bytes, _) = read_capped(resp, MAX_RESPONSE_BYTES).await?;
+    let (bytes, _) = read_capped(resp, MAX_RESPONSE_BYTES, "抓取失败").await?;
     // 非 UTF-8（如部分 GBK 页）用替换字符容错，不阻塞
     let html = String::from_utf8_lossy(&bytes).into_owned();
     let title = extract_title(&html);
@@ -48,21 +45,6 @@ pub async fn fetch_web(url: String) -> Result<FetchedWebPage, String> {
         content,
         truncated,
     })
-}
-
-/// 边收边计读到上限即停：避免把超大响应整包读进内存（`bytes()` 先全量下载再截断，
-/// 上限形同虚设——2GB 响应会在超时前把内存打满）。返回值第二项 = 是否被上限截断。
-async fn read_capped(mut resp: reqwest::Response, cap: usize) -> Result<(Vec<u8>, bool), String> {
-    let mut out: Vec<u8> = Vec::new();
-    while let Some(chunk) = resp.chunk().await.map_err(|e| format!("读取响应失败：{e}"))? {
-        let room = cap - out.len();
-        if chunk.len() > room {
-            out.extend_from_slice(&chunk[..room]);
-            return Ok((out, true));
-        }
-        out.extend_from_slice(&chunk);
-    }
-    Ok((out, false))
 }
 
 /// 提取 `<title>` 内容（去标签、去空白）。基于 ASCII 小写做字节定位（长度不变，安全）。

@@ -188,6 +188,29 @@ pub fn blocking_client_for(
         .map_err(|e| format!("客户端初始化失败：{e}"))
 }
 
+/// 校验状态码并读出响应体（有上限）：非 2xx 直接报 `what：HTTP <状态码>`，响应体边收边计读到
+/// `cap` 即停——`bytes()` 会先把整包下载进内存，上限形同虚设（2GB 响应在超时前就把内存打满）。
+/// 返回（字节，是否被上限截断）；截断是该容忍还是报错由调用方决定。`what` 是动作名，直接进错误文案。
+pub async fn read_capped(
+    mut resp: reqwest::Response,
+    cap: usize,
+    what: &str,
+) -> Result<(Vec<u8>, bool), String> {
+    if !resp.status().is_success() {
+        return Err(format!("{what}：HTTP {}", resp.status()));
+    }
+    let mut out: Vec<u8> = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(|e| format!("{what}：读取响应失败 ({e})"))? {
+        let room = cap.saturating_sub(out.len());
+        if chunk.len() > room {
+            out.extend_from_slice(&chunk[..room]);
+            return Ok((out, true));
+        }
+        out.extend_from_slice(&chunk);
+    }
+    Ok((out, false))
+}
+
 /// 该跳是否放行：跳数在上限内且目标过同一策略校验。
 fn redirect_allowed(hops: usize, url: &str, check: fn(&str) -> Result<Url, String>) -> bool {
     hops < MAX_REDIRECTS && check(url).is_ok()

@@ -5,7 +5,10 @@
 use reqwest::Url;
 use serde::Serialize;
 
-use crate::net_guard::{client_for, ensure_local_service_http_url, ClientTimeout, HostPolicy};
+use crate::net_guard::{client_for, ensure_local_service_http_url, read_capped, ClientTimeout, HostPolicy};
+
+/// 搜索响应体上限（字节）：结果列表只有几十条，超过这个量级说明对端返回的不是搜索结果。
+const MAX_JSON_BYTES: usize = 2 * 1024 * 1024;
 
 /// 单条搜索结果（camelCase 序列化）。
 #[derive(Serialize)]
@@ -50,10 +53,9 @@ async fn tavily_search(key: &str, query: &str) -> Result<Vec<SearchResultItem>, 
         .send()
         .await
         .map_err(|e| format!("Tavily 请求失败：{}", e))?;
-    if !resp.status().is_success() {
-        return Err(format!("Tavily 请求失败：HTTP {}", resp.status()));
-    }
-    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let (bytes, _) = read_capped(resp, MAX_JSON_BYTES, "Tavily 请求失败").await?;
+    let json: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|e| format!("Tavily 响应解析失败：{e}"))?;
     Ok(parse_results(json.get("results")))
 }
 
@@ -65,14 +67,16 @@ async fn searxng_search(instance_url: &str, query: &str) -> Result<Vec<SearchRes
         .send()
         .await
         .map_err(|e| format!("SearXNG 请求失败：{}", e))?;
-    if !resp.status().is_success() {
+    if resp.status() == reqwest::StatusCode::FORBIDDEN {
         // 403 = 实例未启用 json 格式（settings.yml 的 search.formats 需加入 json）
-        return Err(format!(
-            "SearXNG 请求失败：HTTP {}（若 403，需在实例 settings.yml 的 search.formats 加入 json）",
-            resp.status()
-        ));
+        return Err(
+            "SearXNG 请求失败：HTTP 403（需在实例 settings.yml 的 search.formats 加入 json）"
+                .to_string(),
+        );
     }
-    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let (bytes, _) = read_capped(resp, MAX_JSON_BYTES, "SearXNG 请求失败").await?;
+    let json: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|e| format!("SearXNG 响应解析失败：{e}"))?;
     Ok(parse_results(json.get("results")))
 }
 
