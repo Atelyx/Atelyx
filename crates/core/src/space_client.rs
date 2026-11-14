@@ -584,6 +584,9 @@ impl SpaceClient {
     }
 
     /// 读文本文件（非 UTF-8 字节按替换字符容错；encoding 缺省即文本，服务端无 text 值）。
+    ///
+    /// 回执缺 `content` 按错误返回：调用方会拿返回值当真内容做三方合流与写回，
+    /// 「缺字段读成空串」等于把空文写回用户的文件。
     pub async fn get_file_text(&self, space_id: &str, path: &str) -> Result<String, SpaceError> {
         let resp = self
             .get(&format!(
@@ -592,13 +595,7 @@ impl SpaceClient {
             ))
             .await?;
         let text = resp.text().await.map_err(|e| SpaceError::Network(e.to_string()))?;
-        let parsed: serde_json::Value =
-            serde_json::from_str(&text).map_err(|e| SpaceError::Network(format!("响应解析失败：{e}")))?;
-        Ok(parsed
-            .get("content")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string())
+        parse_file_text_body(&text)
     }
 
     /// 读二进制文件（`encoding=base64`，服务端返回标准 base64，此处解码为原始字节）。
@@ -923,6 +920,17 @@ async fn parse_json<T: serde::de::DeserializeOwned>(resp: reqwest::Response) -> 
     resp.json::<T>().await.map_err(|e| SpaceError::Network(format!("响应解析失败：{e}")))
 }
 
+/// 读文件回执解析：`content` 必填——缺字段与 null 都是响应损坏，不是「文件为空」。
+fn parse_file_text_body(text: &str) -> Result<String, SpaceError> {
+    #[derive(Deserialize)]
+    struct FileBody {
+        content: String,
+    }
+    let body: FileBody =
+        serde_json::from_str(text).map_err(|e| SpaceError::Network(format!("响应解析失败：{e}")))?;
+    Ok(body.content)
+}
+
 /// 查询参数段转义：非 RFC 3986 unreserved 字符按字节 `%XX` 编码。
 pub(crate) fn urlencode_component(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -1040,6 +1048,30 @@ mod tests {
             .put_file_text("s1", "notes/a.md", "正文")
             .await
             .expect("camelCase 回执应可解码");
+        server.join().expect("服务端线程不 panic");
+    }
+
+    /// 读文件回执缺 content / content 为 null 必须报错：读成空串会让调用方把空文写回文件。
+    #[tokio::test]
+    async fn 读文件回执缺内容视为错误() {
+        for body in [r#"{}"#, r#"{"content":null}"#, r#"{"encoding":"text"}"#] {
+            let (base, server) = spawn_json_server(body);
+            let client = SpaceClient::new(&base, "tok".to_string()).expect("回环放行");
+            let result = client.get_file_text("s1", "notes/a.md").await;
+            assert!(
+                matches!(result, Err(SpaceError::Network(_))),
+                "{body} 应回错误而不是空串：{result:?}"
+            );
+            server.join().expect("服务端线程不 panic");
+        }
+    }
+
+    /// 二进制读回执同样要求 content 必填（与文本读同口径）。
+    #[tokio::test]
+    async fn 读字节回执缺内容视为错误() {
+        let (base, server) = spawn_json_server(r#"{}"#);
+        let client = SpaceClient::new(&base, "tok".to_string()).expect("回环放行");
+        assert!(client.get_file_bytes("s1", "a.png").await.is_err());
         server.join().expect("服务端线程不 panic");
     }
 
