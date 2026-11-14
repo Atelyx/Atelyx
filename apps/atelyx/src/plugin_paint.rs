@@ -6,13 +6,10 @@ use std::hash::{Hash, Hasher};
 use std::ops::Range;
 
 use iced::advanced::text::paragraph;
-use iced::advanced::text::{
-    Alignment, LineHeight, Renderer as _, Shaping, Text as TextDef, Wrapping,
-};
+use iced::advanced::text::Renderer as _;
 use iced::advanced::Renderer as _;
-use iced::alignment::Vertical;
 use iced::widget::canvas::{self, Path as CanvasPath, Stroke};
-use iced::{Color, Pixels, Point, Rectangle, Size};
+use iced::{Color, Point, Rectangle, Size};
 
 use atelyx_core::plugin_runtime::{
     PaintColor, PaintPoint, DrawCommand, ImageFit, ImageSource, TextAlign, TextFamily, TextWeight,
@@ -273,18 +270,7 @@ fn build_paragraph(
     max_width: Option<f32>,
 ) -> paragraph::Plain<TextParagraph> {
     let mut paragraph = paragraph::Plain::default();
-    paragraph.update(TextDef {
-        content,
-        bounds: Size::new(max_width.unwrap_or(f32::INFINITY), f32::INFINITY),
-        size: Pixels(size),
-        // 行高与文字量算同一口径：量出的占位就是画出的占位
-        line_height: LineHeight::default(),
-        font: crate::plugin_theme::text_font(weight, family),
-        align_x: Alignment::Default,
-        align_y: Vertical::Top,
-        shaping: Shaping::default(),
-        wrapping: Wrapping::default(),
-    });
+    paragraph.update(crate::plugin_theme::text_spec(content, size, weight, family, max_width));
     paragraph
 }
 

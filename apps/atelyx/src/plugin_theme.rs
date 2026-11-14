@@ -40,6 +40,31 @@ impl DrawHost for SurfaceHost {
     }
 }
 
+/// 插件文字的排版定义：量算与绘制共用一份，否则同一段文字在两条路径下的换行与占位不一致。
+/// `max_width` 必须是折行档位（`layout_width` 的结果）；`None` = 单行。
+pub fn text_spec<'a>(
+    content: &'a str,
+    size: f32,
+    weight: Option<TextWeight>,
+    family: Option<TextFamily>,
+    max_width: Option<f32>,
+) -> Text<&'a str> {
+    Text {
+        content,
+        bounds: Size::new(max_width.unwrap_or(f32::INFINITY), f32::INFINITY),
+        size: Pixels(size),
+        line_height: LineHeight::default(),
+        font: text_font(weight, family),
+        align_x: Alignment::Default,
+        align_y: Vertical::Top,
+        shaping: Shaping::default(),
+        wrapping: match max_width {
+            Some(_) => Wrapping::Word,
+            None => Wrapping::None,
+        },
+    }
+}
+
 /// 量算一段文字：`max_width` 给定时按该宽度换行（折行落在固定档位上），缺省按单行。
 /// 返回的宽高为排版实际占位（换行时宽不超过 `max_width`），行数按默认行高折算。
 pub fn measure_text(
@@ -52,21 +77,7 @@ pub fn measure_text(
     // 折行宽度落在固定档位上：与绘制侧同一档，量到的行数才与画出的行数一致
     let max_width = max_width.map(atelyx_core::plugin_runtime::layout_width);
     let line_height = LineHeight::default().to_absolute(Pixels(size)).0;
-    let wrapping = match max_width {
-        Some(_) => Wrapping::Word,
-        None => Wrapping::None,
-    };
-    let definition = Text {
-        content,
-        bounds: Size::new(max_width.unwrap_or(f32::INFINITY), f32::INFINITY),
-        size: Pixels(size),
-        line_height: LineHeight::default(),
-        font: text_font(weight, family),
-        align_x: Alignment::Default,
-        align_y: Vertical::Top,
-        shaping: Shaping::default(),
-        wrapping,
-    };
+    let definition = text_spec(content, size, weight, family, max_width);
     let mut paragraph = paragraph::Plain::<TextParagraph>::default();
     paragraph.update(definition);
     let measured = paragraph.min_bounds();
