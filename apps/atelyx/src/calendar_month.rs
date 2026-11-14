@@ -31,7 +31,7 @@ const ITEM_TIP_BOX: f32 = 16.0;
 pub fn month_grid(app: &App, window: iced::window::Id) -> Element<'static, Message> {
     let (y, m) = display_month(app);
     let cells = calendar_grid::month_cells(y, m);
-    let first = calendar_grid::days_from_civil(y, m, 1);
+    let first = atelyx_core::date::days_from_civil(y, m, 1);
     let today = today();
     let by_day = items_by_day(&app.calendar.items);
     let mut grid = iced::widget::Column::<Message>::new().spacing(4);
@@ -75,7 +75,7 @@ pub fn month_grid(app: &App, window: iced::window::Id) -> Element<'static, Messa
 fn items_by_day(items: &[CalendarItem]) -> HashMap<i64, Vec<CalendarItem>> {
     let mut map: HashMap<i64, Vec<CalendarItem>> = HashMap::new();
     for it in items {
-        if let Some(day) = calendar_grid::parse_date(&it.date) {
+        if let Some(day) = atelyx_core::date::parse_day(&it.date) {
             map.entry(day).or_default().push(it.clone());
         }
     }

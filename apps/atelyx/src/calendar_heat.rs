@@ -111,7 +111,7 @@ fn month_block(
     counts: &HashMap<i64, u32>,
 ) -> Element<'static, Message> {
     let cells = calendar_grid::month_cells(y, m);
-    let first = calendar_grid::days_from_civil(y, m, 1);
+    let first = atelyx_core::date::days_from_civil(y, m, 1);
     let mut weeks_row = Row::<Message>::new().spacing(CELL_GAP);
     for w in 0..cells.len() / 7 {
         let mut week_col = Column::<Message>::new().spacing(CELL_GAP);
@@ -160,7 +160,7 @@ fn activity_counts(app: &App) -> HashMap<i64, u32> {
 
 /// 单格：色阶底 + 悬停提示「M月d日 · N 条活动」。
 fn heat_cell(window: iced::window::Id, days: i64, count: u32) -> Element<'static, Message> {
-    let (_y, m, d) = calendar_grid::civil_from_days(days);
+    let (_y, m, d) = atelyx_core::date::civil_from_days(days);
     let label = format!("{m}月{d}日 · {count} 条活动");
     let bg = match calendar_grid::activity_level(count) {
         0 => pal::BG_TERTIARY,

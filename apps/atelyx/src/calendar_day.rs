@@ -5,7 +5,7 @@ use iced::widget::{button, column, container, row, space};
 use iced::{Element, Length, Padding, border};
 
 use atelyx_core::calendar::CalendarItem;
-use atelyx_core::history::{self, HistoryAction};
+use atelyx_core::history::HistoryAction;
 
 use crate::calendar_actions::{CalendarMsg, EDIT_INPUT_ID};
 use crate::calendar_grid;
@@ -37,7 +37,7 @@ pub fn day_detail(app: &App, window: iced::window::Id) -> Element<'static, Messa
         .padding(Padding::ZERO.vertical(8.0))
         .into();
     };
-    let (_y, m, d) = calendar_grid::civil_from_days(day);
+    let (_y, m, d) = atelyx_core::date::civil_from_days(day);
     column![
         section_title(&format!("{m}月{d}日")),
         day_history(app, day, window),
@@ -78,7 +78,7 @@ fn day_history(app: &App, day: i64, window: iced::window::Id) -> Element<'static
             HistoryAction::Edit => "编辑",
             HistoryAction::Restore => "回滚",
         };
-        let (h, mi) = history::local_time_hm(e.ts);
+        let (h, mi) = atelyx_core::date::local_time_hm(e.ts);
         let summary = e.summary.clone().unwrap_or_default();
         let mut line = row![
             icon(repohistory_view::kind_icon(e.kind), 12.0, pal::TEXT_MUTED),
@@ -121,7 +121,7 @@ fn schedule_section(app: &App, day: i64, window: iced::window::Id) -> Element<'s
         .calendar
         .items
         .iter()
-        .filter(|it| calendar_grid::parse_date(&it.date) == Some(day))
+        .filter(|it| atelyx_core::date::parse_day(&it.date) == Some(day))
         .cloned()
         .collect();
     items.sort_by_key(|it| it.created_at);

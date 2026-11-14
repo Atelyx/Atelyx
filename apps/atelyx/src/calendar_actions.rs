@@ -7,10 +7,8 @@ use std::sync::Arc;
 use iced::{Task, widget::operation::focus};
 
 use atelyx_core::calendar::{self, CalendarItem};
-use atelyx_core::history::day_key;
 use atelyx_core::space_client::{SpaceClient, SpaceError};
 
-use crate::calendar_grid;
 use crate::space_actions;
 use crate::ui::notify::Level as NoticeLevel;
 use crate::ui::palette as pal;
@@ -169,7 +167,7 @@ pub fn on_msg(app: &mut App, msg: CalendarMsg) -> Task<Message> {
         }
         CalendarMsg::Today => {
             app.calendar.month_offset = 0;
-            app.calendar.selected = Some(day_key(crate::now_secs() as i64 * 1000));
+            app.calendar.selected = Some(atelyx_core::date::today());
             app.calendar.delete_confirm = None;
             Task::none()
         }
@@ -439,7 +437,7 @@ fn add_from_draft(app: &mut App) -> Task<Message> {
     let now_ms = crate::now_millis();
     let item = CalendarItem {
         id: next_item_id(now_ms, app.calendar.seq),
-        date: calendar_grid::date_string(day),
+        date: atelyx_core::date::day_string(day),
         title,
         note: None,
         color: Some(color_hex(app.calendar.draft_color)),

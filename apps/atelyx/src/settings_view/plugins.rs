@@ -30,7 +30,7 @@ use crate::ui::notify::Level as NoticeLevel;
 use crate::ui::palette as pal;
 use crate::ui::scroll;
 use crate::ui::{bold, mono, text};
-use crate::{layout_view, vault, App, Message};
+use crate::{vault, App, Message};
 
 /// 数据落盘时刻格式化用的毫秒口径（审计记录为 unix 秒）。
 const MS_PER_SEC: u64 = 1000;
@@ -1258,7 +1258,7 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
             resolve_vault(app, request_id, result)
         }
         PluginsMsg::HistoryDay { request_id, params } => {
-            let Some(day) = atelyx_core::history::parse_day(&params.day) else {
+            let Some(day) = atelyx_core::date::parse_day(&params.day) else {
                 return resolve_vault(app, request_id, Err(format!("日期非法：{}", params.day)));
             };
             // 聚合缓存在手即答；缺失则挂起并等下一次落地回填（未在途才发起）
@@ -2753,7 +2753,7 @@ fn detail_overview(app: &App, summary: &PluginSummary) -> Element<'static, Messa
     } else {
         for record in &app.plugins_state.detail_audit {
             let mut line = row![
-                text(layout_view::format_ts(record.at.saturating_mul(MS_PER_SEC) as i64))
+                text(atelyx_core::date::format_minutes(record.at.saturating_mul(MS_PER_SEC) as i64))
                     .size(pal::fs_caption())
                     .color(pal::TEXT_MUTED)
                     .font(mono()),

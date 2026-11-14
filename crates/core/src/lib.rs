@@ -7,6 +7,7 @@ pub mod ai;
 pub mod calendar;
 pub mod collab;
 pub mod config;
+pub mod date;
 pub mod credentials;
 pub mod canvas_collab;
 pub mod ephemeral;

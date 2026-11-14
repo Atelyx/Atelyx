@@ -189,9 +189,9 @@ fn now_ms() -> i64 {
 
 /// 本地时间戳 `MM-DD HH:MM:SS`（与历史面板同一时区口径）。
 fn stamp(now_ms: i64) -> String {
-    let shifted = now_ms + crate::history::local_offset_ms();
+    let shifted = now_ms + crate::date::local_offset_ms();
     let secs = shifted.rem_euclid(86_400_000) / 1000;
-    let (_, month, day) = crate::frontmatter::civil_from_days(shifted.div_euclid(86_400_000));
+    let (_, month, day) = crate::date::civil_from_days(shifted.div_euclid(86_400_000));
     format!(
         "{month:02}-{day:02} {:02}:{:02}:{:02}",
         secs / 3600,

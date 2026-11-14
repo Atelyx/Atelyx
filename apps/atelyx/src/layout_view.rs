@@ -4185,26 +4185,6 @@ fn backlinks_section(app: &App) -> Element<'_, Message> {
     container(col).width(Length::Fill).into()
 }
 
-/// 毫秒时间戳 → 本地短文本（YYYY-MM-DD HH:MM；纪元前显示原值）。
-pub(crate) fn format_ts(ms: i64) -> String {
-    // 天数 → 日期（与 core 历史模块同一 civil 算法的简版；仅展示用，按本地时区偏移折算）
-    let secs = (ms + atelyx_core::history::local_offset_ms()).div_euclid(1000);
-    let days = secs.div_euclid(86400);
-    let secs_of_day = secs.rem_euclid(86400);
-    let (h, m) = (secs_of_day / 3600, (secs_of_day % 3600) / 60);
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let mon = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = y + i64::from(mon <= 2);
-    format!("{year:04}-{mon:02}-{d:02} {h:02}:{m:02}")
-}
-
 // ===== 弹层内容 =====
 
 /// 弹层内容构造：按形态产出（元素, 估算高度）。
@@ -6732,7 +6712,7 @@ fn invite_meta_line(info: &atelyx_core::space_client::InviteInfo) -> String {
     };
     let expires = match info.expires_at {
         None => "永久有效".to_string(),
-        Some(secs) => format!("过期于 {}", format_ts(secs * 1000)),
+        Some(secs) => format!("过期于 {}", atelyx_core::date::format_minutes(secs * 1000)),
     };
     let uses = match info.max_uses {
         None => "不限次数".to_string(),

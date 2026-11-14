@@ -186,7 +186,7 @@ pub(crate) fn relative_ts(secs: i64, now: i64) -> String {
     if d < 30 * 86_400 {
         return format!("{} 天前", d / 86_400);
     }
-    crate::layout_view::format_ts(secs * 1000)
+    atelyx_core::date::format_minutes(secs * 1000)
         .split(' ')
         .next()
         .unwrap_or_default()

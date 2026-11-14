@@ -5,7 +5,6 @@ use iced::widget::{column, container, row, space};
 use iced::{Element, Length, Padding};
 
 use atelyx_core::calendar::CalendarItem;
-use atelyx_core::history;
 
 use crate::calendar_actions::CalendarMsg;
 use crate::calendar_day;
@@ -46,13 +45,13 @@ pub fn calendar_view(app: &App, window: iced::window::Id) -> Element<'_, Message
 
 /// 当前导航到的月份（本月 + month_offset）。
 pub(crate) fn display_month(app: &App) -> (i64, u32) {
-    let (cy, cm, _) = crate::calendar_grid::civil_from_days(today());
-    crate::calendar_grid::month_add(cy, cm, app.calendar.month_offset)
+    let (cy, cm, _) = atelyx_core::date::civil_from_days(today());
+    atelyx_core::date::month_add(cy, cm, app.calendar.month_offset)
 }
 
 /// 本地当下（自纪元天数，本地日界）。
 pub(crate) fn today() -> i64 {
-    history::day_key(crate::now_secs() as i64 * 1000)
+    atelyx_core::date::today()
 }
 
 /// 条目色（缺省 = 强调色）。

@@ -143,7 +143,7 @@ pub(crate) fn day_entries(groups: &[RepoHistoryGroup], day: i64) -> Vec<HistoryD
             group
                 .versions
                 .iter()
-                .filter(|version| atelyx_core::history::day_key(version.ts) == day)
+                .filter(|version| atelyx_core::date::day_key(version.ts) == day)
                 .map(move |version| HistoryDayEntry {
                     kind: kind_key(group.kind).to_string(),
                     file: group.file.clone(),
@@ -272,7 +272,7 @@ pub(crate) fn history_day_json(entries: Vec<HistoryDayEntry>) -> Result<serde_js
 pub(crate) fn activity_json(timestamps: &[i64]) -> Result<serde_json::Value, String> {
     let mut counts: std::collections::BTreeMap<i64, u32> = std::collections::BTreeMap::new();
     for ts in timestamps {
-        *counts.entry(atelyx_core::history::day_key(*ts)).or_default() += 1;
+        *counts.entry(atelyx_core::date::day_key(*ts)).or_default() += 1;
     }
     let days: Vec<DayActivity> =
         counts.into_iter().map(|(day, count)| DayActivity { day, count }).collect();

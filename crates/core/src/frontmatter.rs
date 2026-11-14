@@ -453,29 +453,15 @@ fn timestamp_to_date(s: &str) -> Option<String> {
     Some(format!("{ry:04}-{rm:02}-{rd:02}"))
 }
 
-/// 日期 → 格里历日数（Howard Hinnant 算法；day 0 = 1970-01-01）。
+/// 日期 → 格里历日数（day 0 = 1970-01-01；历法换算在 core::date，不另写一份）。
 pub(crate) fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = y - era * 400;
-    let mp = if m > 2 { m - 3 } else { m + 9 };
-    let doy = (153 * mp + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146097 + doe - 719468
+    crate::date::days_from_civil(y, m as u32, d as u32)
 }
 
-/// 自纪元天数 → 日期（`MM-DD HH:MM:SS` 这类展示格式化复用同一口径，不另写一份历法换算）。
+/// 自纪元天数 → 日期（展示格式化复用同一口径，不另写一份历法换算）。
 pub(crate) fn civil_from_days(z: i64) -> (i64, i64, i64) {
-    let z = z + 719468;
-    let era = if z >= 0 { z } else { z - 146096 } / 146097;
-    let doe = z - era * 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    (y + i64::from(m <= 2), m, d)
+    let (y, m, d) = crate::date::civil_from_days(z);
+    (y, m as i64, d as i64)
 }
 
 // ===== 序列化（js-yaml dump 形状）=====

@@ -8,7 +8,7 @@ use iced::{Element, Length, Padding, Point, Size, Task, border, widget::containe
 use atelyx_core::history::{HistoryAction, HistoryKind, HistoryVersion};
 use atelyx_core::history_diff::{DiffLine, DiffLineKind, TableDiffItem};
 
-use crate::layout_view::{PopupOpen, PopupState, format_ts};
+use crate::layout_view::{PopupOpen, PopupState};
 use crate::ui::controls;
 use crate::ui::icon::icon;
 use crate::ui::mono;
@@ -295,7 +295,7 @@ fn version_row(v: &HistoryVersion, viewer: bool, expanded: bool, window: iced::w
         .push(text(author_line(v)).size(pal::fs_micro()).color(pal::TEXT_SECONDARY))
         .push(text(v.summary.clone().unwrap_or_default()).size(pal::fs_micro()).color(pal::TEXT_MUTED))
         .push(space().width(Length::Fill))
-        .push(text(format_ts(v.ts)).size(pal::fs_micro()).color(pal::TEXT_MUTED));
+        .push(text(atelyx_core::date::format_minutes(v.ts)).size(pal::fs_micro()).color(pal::TEXT_MUTED));
     let expand = button(head)
     .padding(0.0)
     .width(Length::Fill)
@@ -350,7 +350,7 @@ fn version_row(v: &HistoryVersion, viewer: bool, expanded: bool, window: iced::w
 fn confirm_bar(seq: u64, ts: i64) -> Element<'static, Message> {
     container(
         row![
-            text(format!("回滚到 {} 的版本？未保存的编辑将被覆盖", format_ts(ts)))
+            text(format!("回滚到 {} 的版本？未保存的编辑将被覆盖", atelyx_core::date::format_minutes(ts)))
                 .size(pal::fs_caption())
                 .color(pal::TEXT_SECONDARY)
                 .width(Length::Fill),

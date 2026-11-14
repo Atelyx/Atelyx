@@ -8,7 +8,7 @@ use iced::{Element, Length, Padding, Point, border, widget::container::Style};
 
 use atelyx_core::plugin_runtime::ContributionSlot;
 
-use crate::layout_view::{PopupOpen, PopupState, format_ts, parse_hex_color};
+use crate::layout_view::{PopupOpen, PopupState, parse_hex_color};
 use crate::ui::controls;
 use crate::ui::icon::{icon, icon_stroke};
 use crate::ui::palette as pal;
@@ -436,7 +436,7 @@ fn collab_settings_view(app: &App, window: iced::window::Id) -> Element<'static,
                             .size(pal::fs_body())
                             .color(pal::TEXT_PRIMARY)
                             .font(bold()),
-                        text(format!("最近活跃 {}", format_ts(d.last_seen_at * 1000)))
+                        text(format!("最近活跃 {}", atelyx_core::date::format_minutes(d.last_seen_at * 1000)))
                             .size(pal::fs_caption())
                             .color(pal::TEXT_MUTED),
                         space().width(Length::Fill),

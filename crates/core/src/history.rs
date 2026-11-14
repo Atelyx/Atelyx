@@ -192,119 +192,16 @@ fn scan_kind_dir(dir: &Path, kind: HistoryKind, out: &mut Vec<RepoHistoryFile>) 
     Ok(())
 }
 
-/// 当前本地时区相对 UTC 的偏移（毫秒，东正西负）。对全部时间戳统一用当前偏移折算
-/// 本地日界（与展示层对历史时间的换算口径一致，不逐时间戳回算历史时区）；取不到按 UTC。
-#[cfg(target_os = "windows")]
-fn local_utc_offset_ms() -> i64 {
-    #[repr(C)]
-    struct SystemTime {
-        year: u16,
-        month: u16,
-        day_of_week: u16,
-        day: u16,
-        hour: u16,
-        minute: u16,
-        second: u16,
-        millis: u16,
-    }
-    #[repr(C)]
-    struct TimeZoneInformation {
-        bias: i32,
-        standard_name: [u16; 32],
-        standard_date: SystemTime,
-        standard_bias: i32,
-        daylight_name: [u16; 32],
-        daylight_date: SystemTime,
-        daylight_bias: i32,
-    }
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn GetTimeZoneInformation(info: *mut TimeZoneInformation) -> u32;
-    }
-    let mut info = TimeZoneInformation {
-        bias: 0,
-        standard_name: [0; 32],
-        standard_date: SystemTime { year: 0, month: 0, day_of_week: 0, day: 0, hour: 0, minute: 0, second: 0, millis: 0 },
-        standard_bias: 0,
-        daylight_name: [0; 32],
-        daylight_date: SystemTime { year: 0, month: 0, day_of_week: 0, day: 0, hour: 0, minute: 0, second: 0, millis: 0 },
-        daylight_bias: 0,
-    };
-    // 返回值：0 未知 / 1 标准时 / 2 夏令时；UTC = 本地 + bias + 当前段 bias（分钟），本地偏移取负
-    let id = unsafe { GetTimeZoneInformation(&mut info) };
-    let extra = if id == 2 { info.daylight_bias } else { info.standard_bias };
-    -((info.bias + extra) as i64) * 60_000
-}
-
-#[cfg(unix)]
-fn local_utc_offset_ms() -> i64 {
-    unsafe {
-        let now = libc::time(std::ptr::null_mut());
-        let mut tm: libc::tm = std::mem::zeroed();
-        if libc::localtime_r(&now, &mut tm).is_null() {
-            return 0;
-        }
-        tm.tm_gmtoff * 1000
-    }
-}
-
-#[cfg(not(any(target_os = "windows", unix)))]
-fn local_utc_offset_ms() -> i64 {
-    0
-}
-
 /// 时间戳（毫秒）按本地日界折算进计数表（key = 自纪元天数）。
 fn bump_day(counts: &mut HashMap<i64, u32>, ts_ms: i64, offset_ms: i64) {
-    *counts.entry(day_key_with(ts_ms, offset_ms)).or_insert(0) += 1;
-}
-
-/// 毫秒时间戳按 `offset_ms` 时区偏移折算自纪元天数（`offset_ms` 可注入便于测试）。
-/// 活动密度计数与展示层按日过滤共用此口径，避免两处实现漂移。
-pub fn day_key_with(ts_ms: i64, offset_ms: i64) -> i64 {
-    (ts_ms + offset_ms).div_euclid(86_400_000)
-}
-
-/// `day_key_with` 取当前系统时区偏移。
-pub fn day_key(ts_ms: i64) -> i64 {
-    day_key_with(ts_ms, local_utc_offset_ms())
-}
-
-/// 本地日历日字符串（`YYYY-MM-DD`）→ 自纪元天数，与 [`day_key`] 同口径。
-/// 形状或历法非法（月超 12、日超当月天数）返回 `None`。
-pub fn parse_day(value: &str) -> Option<i64> {
-    let (year, rest) = value.split_once('-')?;
-    let (month, day) = rest.split_once('-')?;
-    let digits = |s: &str, len: usize| -> Option<i64> {
-        if s.len() != len || !s.bytes().all(|b| b.is_ascii_digit()) {
-            return None;
-        }
-        s.parse().ok()
-    };
-    let (year, month, day) = (digits(year, 4)?, digits(month, 2)?, digits(day, 2)?);
-    if !(1..=12).contains(&month) {
-        return None;
-    }
-    let days = crate::frontmatter::days_from_civil(year, month, day);
-    // 往返校验吸收日超当月天数（2 月 31 日会进位到下月）
-    (crate::frontmatter::civil_from_days(days) == (year, month, day)).then_some(days)
-}
-
-/// 毫秒时间戳 → 本地时刻 (时, 分)（当日版本行的展示粒度）。
-pub fn local_time_hm(ts_ms: i64) -> (u32, u32) {
-    let secs = (ts_ms + local_utc_offset_ms()).div_euclid(1000).rem_euclid(86_400);
-    ((secs / 3600) as u32, ((secs % 3600) / 60) as u32)
-}
-
-/// 当前本地时区相对 UTC 的偏移（毫秒，东正西负）；展示层历史时间换算与 `local_time_hm` 同口径。
-pub fn local_offset_ms() -> i64 {
-    local_utc_offset_ms()
+    *counts.entry(crate::date::day_key_with(ts_ms, offset_ms)).or_insert(0) += 1;
 }
 
 /// 活动密度：`.atelyx/history` 全部版本按日计数 + 全库可见文件 mtime 按日计数
 /// （read_dir_filtered 同过滤：隐藏与排除目录不计）。key = 本地日界的自纪元天数。
 /// 本地仓库用；协作空间由调用方走服务端聚合。尽力而为：损坏侧文件与读失败文件跳过。
 pub fn activity_by_day(root: &Path, exclude: &[String]) -> HashMap<i64, u32> {
-    let offset = local_utc_offset_ms();
+    let offset = crate::date::local_offset_ms();
     let mut counts: HashMap<i64, u32> = HashMap::new();
     if let Ok(files) = collect_all(root) {
         for f in files {
@@ -931,7 +828,7 @@ mod tests {
         std::fs::write(root.join("a.md"), "x").unwrap();
         std::fs::write(root.join("b.md"), "y").unwrap();
         let now = now_ms();
-        let today = (now + local_utc_offset_ms()).div_euclid(86_400_000);
+        let today = (now + crate::date::local_offset_ms()).div_euclid(86_400_000);
         // 偏移取常量口径：±24h 恒跨一天
         let yesterday = today - 1;
         // 历史：今天 1 版 + 昨天 2 版（手工写侧文件固定 ts；canvas 子目录顺带覆盖扫描）
@@ -958,40 +855,8 @@ mod tests {
         let root = &*tmp;
         std::fs::create_dir_all(root.join("secret")).unwrap();
         std::fs::write(root.join("secret/c.md"), "x").unwrap();
-        let today = (now_ms() + local_utc_offset_ms()).div_euclid(86_400_000);
+        let today = (now_ms() + crate::date::local_offset_ms()).div_euclid(86_400_000);
         assert_eq!(activity_by_day(root, &["secret".to_string()]).get(&today), None);
         assert_eq!(activity_by_day(root, &[]).get(&today), Some(&1));
-    }
-
-    #[test]
-    fn day_key_splits_at_local_midnight() {
-        // 偏移 0 = UTC 日界；东八区日界在 UTC 16:00；西五区日界在 UTC 05:00
-        assert_eq!(day_key_with(0, 0), 0);
-        assert_eq!(day_key_with(86_399_999, 0), 0);
-        assert_eq!(day_key_with(86_400_000, 0), 1);
-        assert_eq!(day_key_with(15 * 3_600_000 - 1, 8 * 3_600_000), 0);
-        assert_eq!(day_key_with(16 * 3_600_000, 8 * 3_600_000), 1);
-        // 西五区日界在 UTC 05:00（05:00 前属前一本地日）
-        assert_eq!(day_key_with(4 * 3_600_000 + 3_599_999, -5 * 3_600_000), -1);
-        assert_eq!(day_key_with(5 * 3_600_000, -5 * 3_600_000), 0);
-        // 负时刻（1970 前）同样按偏移归日
-        assert_eq!(day_key_with(-1, 0), -1);
-        assert_eq!(day_key_with(-8 * 3_600_000 - 1, 8 * 3_600_000), -1);
-    }
-
-    #[test]
-    fn parse_day_matches_day_key_and_rejects_impossible_dates() {
-        assert_eq!(parse_day("1970-01-01"), Some(0));
-        assert_eq!(parse_day("2026-10-30"), Some(day_key_with(1_793_318_400_000, 0)));
-        assert_eq!(parse_day("2024-02-29"), Some(19_782));
-        // 形状 / 历法非法一律 None：不臆造折日
-        assert_eq!(parse_day("2026-2-30"), None);
-        assert_eq!(parse_day("2026-13-01"), None);
-        assert_eq!(parse_day("2026-02-30"), None);
-        assert_eq!(parse_day("2026-00-10"), None);
-        assert_eq!(parse_day("2026-10-00"), None);
-        assert_eq!(parse_day("2026/10/30"), None);
-        assert_eq!(parse_day("2026-10-30T00:00"), None);
-        assert_eq!(parse_day(""), None);
     }
 }
