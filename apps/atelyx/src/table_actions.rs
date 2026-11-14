@@ -637,10 +637,11 @@ fn on_structure(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
             Task::none()
         }
         tv::TableMsg::DeleteRows(ids) => {
-            // 现状口径：即使没有命中任何行也置脏并保留撤销步（不做「是否有行被删」判定）
+            // 没命中任何行不算变更：不置脏也不留撤销步（否则自动保存会为一次空操作写盘）
             mutate_table(app, |s| {
+                let before = s.data.rows.len();
                 ops::remove_rows(&mut s.data, &ids);
-                true
+                s.data.rows.len() != before
             });
             with_session(app, |s| {
                 clear_invalid_selection(s);
@@ -678,10 +679,11 @@ fn on_structure(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
             Task::none()
         }
         tv::TableMsg::DeleteField(field_id) => {
-            // 现状口径：即使字段已不存在也置脏并保留撤销步（不做「是否命中」判定）
+            // 字段已不存在 / 只剩一个字段而删不掉，都不算变更
             mutate_table(app, |s| {
+                let before = s.data.fields.len();
                 ops::remove_field(&mut s.data, &field_id);
-                true
+                s.data.fields.len() != before
             });
             with_session(app, |s| {
                 clear_invalid_selection(s);
@@ -1997,7 +1999,10 @@ fn on_move(app: &mut App, window: iced::window::Id, pos: Point, size: Size, orig
 fn on_release(app: &mut App, pos: Point) -> Task<Message> {
     let Some(s) = app.table.as_mut() else { return Task::none() };
     s.view.hover = pos;
-    if s.view.vscroll_drag.take().is_some() || s.view.hscroll_drag.take().is_some() {
+    // 两个滚动条都必须摘下：短路求值会让另一个滞留成永远在拖的状态
+    let vscroll = s.view.vscroll_drag.take();
+    let hscroll = s.view.hscroll_drag.take();
+    if vscroll.is_some() || hscroll.is_some() {
         return Task::none();
     }
     if s.view.col_drag.take().is_some() || s.view.row_drag.take().is_some() {
@@ -3262,6 +3267,38 @@ mod tests {
         assert_eq!(insert_at_index(&starts, &sizes, 10.0), 0);
         assert_eq!(insert_at_index(&starts, &sizes, 40.0), 1);
         assert_eq!(insert_at_index(&starts, &sizes, 100.0), 2);
+    }
+
+    /// 删不存在的行 / 字段不算变更：不置脏、不留撤销步（自动保存不该为空操作写盘）。
+    #[test]
+    fn deleting_missing_rows_or_fields_reports_no_change() {
+        let mut s = session(&["a"]);
+        let removed = mutate_session(&mut s, |s| {
+            let before = s.data.rows.len();
+            ops::remove_rows(&mut s.data, &["nope".to_string()]);
+            s.data.rows.len() != before
+        });
+        assert!(!removed);
+        assert!(!s.dirty);
+        assert!(s.view.undo.is_empty());
+        let gone = mutate_session(&mut s, |s| {
+            let before = s.data.fields.len();
+            ops::remove_field(&mut s.data, &"nope".to_string());
+            s.data.fields.len() != before
+        });
+        assert!(!gone);
+        assert!(!s.dirty);
+        assert!(s.view.undo.is_empty());
+        // 正例：删存在的字段仍算变更
+        let field = s.data.fields[0].id.clone();
+        let deleted = mutate_session(&mut s, |s| {
+            let before = s.data.fields.len();
+            ops::remove_field(&mut s.data, &field);
+            s.data.fields.len() != before
+        });
+        assert!(deleted);
+        assert!(s.dirty);
+        assert_eq!(s.view.undo.len(), 1);
     }
 
     /// 无变更的记账不压栈：撤销栈满时也不能挤掉最旧一步。
