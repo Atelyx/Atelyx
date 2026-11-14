@@ -129,7 +129,6 @@ fn item_spans(source: &str, item: &MarkdownListItem, options: &ParseOptions) -> 
     out
 }
 
-
 /// 有序列表项在源里的序号（`3.` / `3)` → 3）；非有序标记返回 None。
 fn item_ordinal(raw: &str) -> Option<u32> {
     let start = raw.len() - raw.trim_start_matches([' ', '\t']).len();

@@ -234,7 +234,6 @@ fn line_end_of(text: &str, at: usize) -> usize {
     text[at..].find('\n').map_or(text.len(), |i| at + i)
 }
 
-
 /// 外链交系统浏览器打开：只放行常见协议，命令行走原样拼接并整串加引号，
 /// 拒绝引号/百分号/换行——避免 URL 内容被命令行解释成命令分隔或变量展开。
 fn open_external(url: &str) {

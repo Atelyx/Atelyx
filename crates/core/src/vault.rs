@@ -1623,7 +1623,6 @@ pub struct VaultConfig {
 /// 路径（相对 `.atelyx/`）与读写的唯一出口：命令层不自行拼路径，避免两处口径漂移。
 const VAULT_CONFIG_FILE: &str = "config.json";
 
-
 /// 读仓库级配置（文件不存在返回空覆盖）。
 pub fn read_vault_config(root: &Path) -> Result<VaultConfig, String> {
     read_vault_config_with_backup(root).map(|(config, _)| config)
@@ -1649,7 +1648,6 @@ pub fn read_vault_config_with_backup(root: &Path) -> Result<(VaultConfig, Option
 pub fn write_vault_config(root: &Path, config: &VaultConfig) -> Result<(), String> {
     crate::config::write(&root.join(".atelyx").join(VAULT_CONFIG_FILE), config)
 }
-
 
 /// 删除「残留明文 key」的指令只在合并后仍不是同步模式时生效。
 ///

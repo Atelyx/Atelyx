@@ -98,11 +98,6 @@ pub fn read_or_default<T: DeserializeOwned + Default>(path: &Path, tag: &str) ->
     read::<T>(path, tag, OnMissing::Default, OnCorrupt::BackupDefault).map(|(value, _)| value)
 }
 
-/// 缺一不可：文件不存在或内容损坏都报错。
-pub fn read_required<T: DeserializeOwned + Default>(path: &Path, tag: &str) -> Result<T, String> {
-    read::<T>(path, tag, OnMissing::Error, OnCorrupt::BackupError).map(|(value, _)| value)
-}
-
 /// 原子写 JSON（pretty 覆盖整文件）。
 pub fn write<T: Serialize + ?Sized>(path: &Path, value: &T) -> Result<(), String> {
     let json = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
@@ -122,25 +117,6 @@ pub fn lock(path: &Path) -> Arc<Mutex<()>> {
         .entry(path.to_path_buf())
         .or_insert_with(|| Arc::new(Mutex::new(())))
         .clone()
-}
-
-/// 持锁读改写：`f` 返回 true 才写盘。返回 `(是否写入, 损坏备份文件名)`。
-///
-/// 锁覆盖整个读改周期，不可在持锁期间 await。
-pub fn update<T, F>(path: &Path, tag: &str, f: F) -> Result<(bool, Option<String>), String>
-where
-    T: DeserializeOwned + Default + Serialize,
-    F: FnOnce(&mut T) -> bool,
-{
-    let guard = lock(path);
-    let _held = guard.lock().unwrap_or_else(|e| e.into_inner());
-    let (mut value, backup) =
-        read::<T>(path, tag, OnMissing::Default, OnCorrupt::BackupDefault)?;
-    if !f(&mut value) {
-        return Ok((false, backup));
-    }
-    write(path, &value)?;
-    Ok((true, backup))
 }
 
 /// 剥掉开头 UTF-8 BOM：它是编辑器写出的编码标记，不是 JSON 内容（留着会让解析首字符失败）。
@@ -206,9 +182,10 @@ mod tests {
         assert_eq!(read_or_default::<Vec<String>>(&path, "cfg").unwrap(), vec!["a".to_string()]);
     }
 
+    /// 按路径的读改写锁：并发读改写不丢改动（本地配置补丁就是持这把锁做「读—合并—写」）。
     #[test]
-    fn update_holds_lock_across_read_modify_write() {
-        let tmp = TempDir::new("cfg-update");
+    fn lock_serialises_read_modify_write() {
+        let tmp = TempDir::new("cfg-lock");
         let path = tmp.join("cfg.json");
         std::fs::write(&path, r#"{"n":0}"#).unwrap();
         let threads: Vec<_> = (0..4)
@@ -216,12 +193,11 @@ mod tests {
                 let path = path.clone();
                 std::thread::spawn(move || {
                     for _ in 0..10 {
-                        update::<HashMap<String, u32>, _>(&path, "cfg", |cfg| {
-                            let n = cfg.entry("n".into()).or_insert(0);
-                            *n += 1;
-                            true
-                        })
-                        .unwrap();
+                        let guard = lock(&path);
+                        let _held = guard.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut cfg: HashMap<String, u32> = read_or_default(&path, "cfg").unwrap();
+                        *cfg.entry("n".into()).or_insert(0) += 1;
+                        write(&path, &cfg).unwrap();
                     }
                 })
             })
@@ -231,19 +207,5 @@ mod tests {
         }
         let cfg: HashMap<String, u32> = read_or_default(&path, "cfg").unwrap();
         assert_eq!(cfg["n"], 40, "并发读改写不得丢改动");
-    }
-
-    #[test]
-    fn update_skips_write_when_unchanged() {
-        let tmp = TempDir::new("cfg-nochange");
-        let path = tmp.join("cfg.json");
-        std::fs::write(&path, r#"["a"]"#).unwrap();
-        let (wrote, _) = update::<Vec<String>, _>(&path, "cfg", |_| false).unwrap();
-        assert!(!wrote);
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            r#"["a"]"#,
-            "无改动不留写盘痕迹"
-        );
     }
 }

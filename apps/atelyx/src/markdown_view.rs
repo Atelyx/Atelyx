@@ -2422,7 +2422,6 @@ fn blank_line_count(source: &str, from: usize, to: usize) -> usize {
         .count()
 }
 
-
 /// 列表项标记（含任务框）的字节长度与有序序号文本；非列表标记返回 (0, "")。
 fn item_marker(raw: &str) -> (usize, String) {
     let bytes = raw.as_bytes();
@@ -2772,7 +2771,6 @@ mod tests {
         assert_eq!(callout_color("warning"), Some(pal::CALLOUT_WARNING));
         assert!(callout_color("unknown-type").is_none());
     }
-
 
     #[test]
     fn edit_rows_make_in_block_blank_lines_rows() {
