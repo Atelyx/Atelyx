@@ -5,8 +5,8 @@ use tokio::sync::oneshot;
 
 use atelyx_core::ai::doc_edit::{self, PlanError};
 use atelyx_core::ai::edit_host::{CanvasOp, EditActor, TableOp};
-use atelyx_core::history::{HistoryAction, HistoryEditor, HistoryKind, RecordOpts};
-use atelyx_core::space_client::{HistoryAuthorReq, HistoryRecordReq};
+use atelyx_core::history::{HistoryEditor, HistoryKind, RecordOpts};
+use atelyx_core::space_client::HistoryRecordReq;
 use atelyx_core::vault::{CanvasFile, CanvasPatch, TableFile};
 
 use crate::ai_edit::editor_of;
@@ -105,7 +105,7 @@ fn apply_local_table(
                 let file = atelyx_core::vault::safe_join(&root, &rel, false)?;
                 atelyx_core::vault::cache_put_table(&state, &file, &rel, &written);
                 let content = base_json(&written);
-                record_table_version(root.clone(), rel.clone(), content, author, editor).await;
+                record_doc_version(root.clone(), HistoryKind::Table, rel.clone(), content, author, editor).await;
                 Ok::<TableFile, String>(written)
             }
             .await;
@@ -195,7 +195,7 @@ fn apply_local_canvas(
                     let file = atelyx_core::vault::safe_join(&root, &rel, false)?;
                     atelyx_core::vault::cache_put_canvas(&state, &file, &rel, &written);
                     let content = base_json(&written);
-                    record_canvas_version(root.clone(), rel.clone(), content, author, editor).await;
+                    record_doc_version(root.clone(), HistoryKind::Canvas, rel.clone(), content, author, editor).await;
                     Ok::<CanvasFile, String>(written)
                 }
                 .await;
@@ -663,56 +663,17 @@ fn fail(
     iced::Task::none()
 }
 
-/// 本地表格历史版本（editor = Agent、不参与连续编辑合并；尽力而为，失败不阻塞正文）。
-async fn record_table_version(
+/// 本地历史版本（editor = Agent、不参与连续编辑合并；尽力而为，失败不阻塞正文）。
+async fn record_doc_version(
     root: std::path::PathBuf,
+    kind: HistoryKind,
     rel: String,
     content: String,
     author: atelyx_core::history::HistoryAuthor,
     editor: Option<HistoryEditor>,
 ) {
     let _ = tokio::task::spawn_blocking(move || {
-        atelyx_core::history::record_version(
-            &root,
-            HistoryKind::Table,
-            &rel,
-            &RecordOpts {
-                content,
-                action: HistoryAction::Edit,
-                author,
-                coalesce_edit_ms: None,
-                max_versions: 0,
-                note: None,
-                editor,
-            },
-        )
-    })
-    .await;
-}
-
-/// 本地画布历史版本（口径同 record_table_version）。
-async fn record_canvas_version(
-    root: std::path::PathBuf,
-    rel: String,
-    content: String,
-    author: atelyx_core::history::HistoryAuthor,
-    editor: Option<HistoryEditor>,
-) {
-    let _ = tokio::task::spawn_blocking(move || {
-        atelyx_core::history::record_version(
-            &root,
-            HistoryKind::Canvas,
-            &rel,
-            &RecordOpts {
-                content,
-                action: HistoryAction::Edit,
-                author,
-                coalesce_edit_ms: None,
-                max_versions: 0,
-                note: None,
-                editor,
-            },
-        )
+        atelyx_core::history::record_version(&root, kind, &rel, &RecordOpts::agent_edit(content, author, editor))
     })
     .await;
 }
@@ -731,23 +692,7 @@ async fn space_history_record(
     let _ = client
         .history_record(
             &space_id,
-            &HistoryRecordReq {
-                kind,
-                file,
-                content,
-                action: "edit".to_string(),
-                author: HistoryAuthorReq {
-                    id: author.id,
-                    name: author.name,
-                    device: author.device,
-                },
-                summary: Some(summary),
-                note: None,
-                editor,
-                coalesce_edit_ms: None,
-                max_versions: None,
-                byte_budget: Some(atelyx_core::history::HISTORY_BYTE_BUDGET),
-            },
+            &HistoryRecordReq::agent_edit(&kind, file, content, &author, Some(summary), editor),
         )
         .await;
 }

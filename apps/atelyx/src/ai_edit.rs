@@ -9,8 +9,8 @@ use iced::Subscription;
 use tokio::sync::{broadcast, oneshot};
 
 use atelyx_core::ai::edit_host::{AiEditHost, CanvasOp, EditActor, EditFuture, FsOp, NoteOp, TableOp};
-use atelyx_core::history::{HistoryAction, HistoryEditor, HistoryKind, RecordOpts};
-use atelyx_core::space_client::{HistoryAuthorReq, HistoryRecordReq};
+use atelyx_core::history::{HistoryEditor, HistoryKind, RecordOpts};
+use atelyx_core::space_client::HistoryRecordReq;
 
 use crate::space_actions;
 use crate::ui::notify::Level as NoticeLevel;
@@ -317,15 +317,7 @@ fn apply_local_note(
                         &root_for_task,
                         HistoryKind::Note,
                         &rel,
-                        &RecordOpts {
-                            content,
-                            action: HistoryAction::Edit,
-                            author,
-                            coalesce_edit_ms: None,
-                            max_versions: 0,
-                            note: None,
-                            editor,
-                        },
+                        &RecordOpts::agent_edit(content, author, editor),
                     );
                     Ok(())
                 })
@@ -446,23 +438,7 @@ fn apply_space_note(
                 let _ = client
                     .history_record(
                         &space_id,
-                        &HistoryRecordReq {
-                            kind: "note".into(),
-                            file: rel.clone(),
-                            content: content.clone(),
-                            action: "edit".into(),
-                            author: HistoryAuthorReq {
-                                id: author.id.clone(),
-                                name: author.name.clone(),
-                                device: author.device.clone(),
-                            },
-                            summary: Some(summary),
-                            note: None,
-                            editor,
-                            coalesce_edit_ms: None,
-                            max_versions: None,
-                            byte_budget: Some(atelyx_core::history::HISTORY_BYTE_BUDGET),
-                        },
+                        &HistoryRecordReq::agent_edit("note", rel.clone(), content.clone(), &author, Some(summary), editor),
                     )
                     .await;
                 Ok::<(), String>(())

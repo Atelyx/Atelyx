@@ -254,12 +254,82 @@ pub struct HistoryRecordReq {
     pub byte_budget: Option<usize>,
 }
 
+impl HistoryRecordReq {
+    /// 人工编辑入库：同一作者的连续编辑在窗口内由服务端合并成一条。
+    pub fn edit(
+        kind: &str,
+        file: String,
+        content: String,
+        author: &crate::history::HistoryAuthor,
+        summary: Option<String>,
+    ) -> Self {
+        Self::new(kind, file, content, "edit", author, summary, None, Some(crate::history::EDIT_COALESCE_MS))
+    }
+
+    /// AI 编辑入库：带来源标记，不参与连续编辑合并。
+    pub fn agent_edit(
+        kind: &str,
+        file: String,
+        content: String,
+        author: &crate::history::HistoryAuthor,
+        summary: Option<String>,
+        editor: Option<crate::history::HistoryEditor>,
+    ) -> Self {
+        Self::new(kind, file, content, "edit", author, summary, editor, None)
+    }
+
+    /// 回滚落盘后入库：显式意图，不与前一版合并。
+    pub fn restore(
+        kind: &str,
+        file: String,
+        content: String,
+        author: &crate::history::HistoryAuthor,
+    ) -> Self {
+        Self::new(kind, file, content, "restore", author, None, None, None)
+    }
+
+    fn new(
+        kind: &str,
+        file: String,
+        content: String,
+        action: &str,
+        author: &crate::history::HistoryAuthor,
+        summary: Option<String>,
+        editor: Option<crate::history::HistoryEditor>,
+        coalesce_edit_ms: Option<i64>,
+    ) -> Self {
+        Self {
+            kind: kind.to_string(),
+            file,
+            content,
+            action: action.to_string(),
+            author: HistoryAuthorReq::from(author),
+            summary,
+            note: None,
+            editor,
+            coalesce_edit_ms,
+            max_versions: None,
+            byte_budget: Some(crate::history::HISTORY_BYTE_BUDGET),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HistoryAuthorReq {
     pub id: String,
     pub name: String,
     pub device: String,
+}
+
+impl From<&crate::history::HistoryAuthor> for HistoryAuthorReq {
+    fn from(author: &crate::history::HistoryAuthor) -> Self {
+        Self {
+            id: author.id.clone(),
+            name: author.name.clone(),
+            device: author.device.clone(),
+        }
+    }
 }
 
 /// 历史聚合条目（不含全文）。
@@ -1073,6 +1143,39 @@ mod tests {
         let client = SpaceClient::new(&base, "tok".to_string()).expect("回环放行");
         assert!(client.get_file_bytes("s1", "a.png").await.is_err());
         server.join().expect("服务端线程不 panic");
+    }
+
+    /// 历史入参构造器把「谁改的 / 合不合并」定死：服务端只认这些字段，壳侧不再手拼。
+    #[test]
+    fn 历史入参按意图构造() {
+        use crate::history::{HistoryAuthor, HistoryEditor};
+        let author = HistoryAuthor { id: "u1".into(), name: "U".into(), device: "D".into() };
+
+        let edit = HistoryRecordReq::edit("note", "a.md".into(), "x".into(), &author, Some("+1 行".into()));
+        let v = serde_json::to_value(&edit).unwrap();
+        assert_eq!(v["action"], "edit");
+        assert_eq!(v["author"], serde_json::json!({"id": "u1", "name": "U", "device": "D"}));
+        assert_eq!(v["coalesceEditMs"], crate::history::EDIT_COALESCE_MS);
+        assert_eq!(v["byteBudget"], crate::history::HISTORY_BYTE_BUDGET);
+        assert_eq!(v["summary"], "+1 行");
+
+        let ai = HistoryRecordReq::agent_edit(
+            "table",
+            "a.atb".into(),
+            "{}".into(),
+            &author,
+            None,
+            Some(HistoryEditor { agent_id: "builtin-agent".into(), agent_name: "Agent".into() }),
+        );
+        let v = serde_json::to_value(&ai).unwrap();
+        assert!(v.get("coalesceEditMs").is_none(), "AI 版不设合并窗口");
+        assert_eq!(v["editor"], serde_json::json!({"agentId": "builtin-agent", "agentName": "Agent"}));
+        assert!(v.get("summary").is_none());
+
+        let restore = HistoryRecordReq::restore("canvas", "a.atlx".into(), "{}".into(), &author);
+        let v = serde_json::to_value(&restore).unwrap();
+        assert_eq!(v["action"], "restore");
+        assert!(v.get("coalesceEditMs").is_none() && v.get("editor").is_none());
     }
 
     /// 删文件夹落地回执不含 needsConfirm（仅确认询问响应携带）：缺省按 false 解码。

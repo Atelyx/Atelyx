@@ -22,9 +22,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-/// 历史合并窗口（毫秒），与本地侧车同口径。
-const HISTORY_COALESCE_MS: i64 = 60_000;
-
 /// 设备名缺省值（登录表单留空 / WS hello）。
 pub(crate) const DEFAULT_DEVICE_NAME: &str = "桌面端";
 
@@ -1457,23 +1454,7 @@ pub fn space_submit_save(app: &mut App, reason: SaveReason) -> Task<Message> {
             let _ = client
                 .history_record(
                     &space_id,
-                    &space_client::HistoryRecordReq {
-                        kind: "note".into(),
-                        file: rel.clone(),
-                        content: merged.clone(),
-                        action: "edit".into(),
-                        author: space_client::HistoryAuthorReq {
-                            id: author.id.clone(),
-                            name: author.name.clone(),
-                            device: author.device.clone(),
-                        },
-                        summary: Some(summary),
-                        note: None,
-                        editor: None,
-                        coalesce_edit_ms: Some(HISTORY_COALESCE_MS),
-                        max_versions: None,
-                        byte_budget: Some(atelyx_core::history::HISTORY_BYTE_BUDGET),
-                    },
+                    &space_client::HistoryRecordReq::edit("note", rel.clone(), merged.clone(), &author, Some(summary)),
                 )
                 .await;
             Ok(merged)
@@ -1738,23 +1719,7 @@ pub fn space_submit_table_save(app: &mut App, reason: tv::SaveReason) -> Task<Me
             let _ = client
                 .history_record(
                     &space_id,
-                    &space_client::HistoryRecordReq {
-                        kind: "table".into(),
-                        file: file.clone(),
-                        content: content_json,
-                        action: "edit".into(),
-                        author: space_client::HistoryAuthorReq {
-                            id: author.id.clone(),
-                            name: author.name.clone(),
-                            device: author.device.clone(),
-                        },
-                        summary: Some(summary),
-                        note: None,
-                        editor: None,
-                        coalesce_edit_ms: Some(HISTORY_COALESCE_MS),
-                        max_versions: None,
-                        byte_budget: Some(atelyx_core::history::HISTORY_BYTE_BUDGET),
-                    },
+                    &space_client::HistoryRecordReq::edit("table", file.clone(), content_json, &author, Some(summary)),
                 )
                 .await;
             Ok(new_file)
@@ -1997,23 +1962,7 @@ pub fn space_submit_canvas_save(app: &mut App, reason: crate::canvas_view::SaveR
             let _ = client
                 .history_record(
                     &space_id,
-                    &space_client::HistoryRecordReq {
-                        kind: "canvas".into(),
-                        file: file.clone(),
-                        content: content_json,
-                        action: "edit".into(),
-                        author: space_client::HistoryAuthorReq {
-                            id: author.id.clone(),
-                            name: author.name.clone(),
-                            device: author.device.clone(),
-                        },
-                        summary: Some(summary),
-                        note: None,
-                        editor: None,
-                        coalesce_edit_ms: Some(HISTORY_COALESCE_MS),
-                        max_versions: None,
-                        byte_budget: Some(atelyx_core::history::HISTORY_BYTE_BUDGET),
-                    },
+                    &space_client::HistoryRecordReq::edit("canvas", file.clone(), content_json, &author, Some(summary)),
                 )
                 .await;
             Ok(new_file)
@@ -2408,37 +2357,16 @@ pub fn space_history_task(app: &App, kind: atelyx_core::history::HistoryKind, re
     )
 }
 
-/// 服务端历史记录（note/table × edit/restore 共用出口；失败仅提示不阻塞正文链）。
-fn record_space_history(app: &App, kind: &str, rel: String, content: String, action: &str) -> Task<Message> {
+/// 回滚后的服务端记版（失败仅提示不阻塞正文链）。
+fn record_space_restore(app: &App, kind: &'static str, rel: String, content: String) -> Task<Message> {
     let Some(session) = session_of(app) else { return Task::none() };
     let client = session.client;
     let space_id = session.space_id;
     let author = crate::history_author(app);
-    let kind = kind.to_string();
-    let action = action.to_string();
     Task::perform(
         async move {
             client
-                .history_record(
-                    &space_id,
-                    &space_client::HistoryRecordReq {
-                        kind,
-                        file: rel,
-                        content,
-                        action,
-                        author: space_client::HistoryAuthorReq {
-                            id: author.id.clone(),
-                            name: author.name.clone(),
-                            device: author.device.clone(),
-                        },
-                        summary: None,
-                        note: None,
-                        editor: None,
-                        coalesce_edit_ms: None,
-                        max_versions: None,
-                        byte_budget: Some(atelyx_core::history::HISTORY_BYTE_BUDGET),
-                    },
-                )
+                .history_record(&space_id, &space_client::HistoryRecordReq::restore(kind, rel, content, &author))
                 .await
         },
         move |result| {
@@ -2449,12 +2377,12 @@ fn record_space_history(app: &App, kind: &str, rel: String, content: String, act
 
 /// 笔记回滚记录（空间模式）。
 pub fn space_record_note_restore(app: &App, rel: String, content: String) -> Task<Message> {
-    record_space_history(app, "note", rel, content, "restore")
+    record_space_restore(app, "note", rel, content)
 }
 
 /// 表格回滚记录（空间模式）。
 pub fn space_record_table_restore(app: &App, rel: String, content: String) -> Task<Message> {
-    record_space_history(app, "table", rel, content, "restore")
+    record_space_restore(app, "table", rel, content)
 }
 
 /// 画布回滚（空间模式）：快照写回服务端真源后记 restore 历史；打开中的画布随服务端事实重读
@@ -2472,23 +2400,7 @@ pub fn space_restore_canvas(app: &mut App, rel: String, content: String) -> Task
                 .put_file_text(&space_id, &rel, &content)
                 .await
                 .map_err(|e| format!("回滚写入失败：{e}"))?;
-            let req = space_client::HistoryRecordReq {
-                kind: "canvas".into(),
-                file: rel,
-                content,
-                action: "restore".into(),
-                author: space_client::HistoryAuthorReq {
-                    id: author.id.clone(),
-                    name: author.name.clone(),
-                    device: author.device.clone(),
-                },
-                summary: None,
-                note: None,
-                editor: None,
-                coalesce_edit_ms: None,
-                max_versions: None,
-                byte_budget: Some(atelyx_core::history::HISTORY_BYTE_BUDGET),
-            };
+            let req = space_client::HistoryRecordReq::restore("canvas", rel, content, &author);
             // 正文已写回：历史是尽力而为的侧车，记版失败不得改判回滚结果
             let history_error = client
                 .history_record(&space_id, &req)

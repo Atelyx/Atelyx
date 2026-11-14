@@ -5838,15 +5838,7 @@ impl App {
                         &root,
                         atelyx_core::history::HistoryKind::Note,
                         &rel,
-                        &atelyx_core::history::RecordOpts {
-                            content,
-                            action: atelyx_core::history::HistoryAction::Edit,
-                            author,
-                            coalesce_edit_ms: Some(60_000),
-                            max_versions: 0,
-                            note: None,
-                            editor: None,
-                        },
+                        &atelyx_core::history::RecordOpts::edit(content, author),
                     )
                 })
                 .await
@@ -5894,15 +5886,7 @@ impl App {
                                 &root,
                                 atelyx_core::history::HistoryKind::Table,
                                 &rel,
-                                &atelyx_core::history::RecordOpts {
-                                    content,
-                                    action: atelyx_core::history::HistoryAction::Restore,
-                                    author,
-                                    coalesce_edit_ms: None,
-                                    max_versions: 0,
-                                    note: None,
-                                    editor: None,
-                                },
+                                &atelyx_core::history::RecordOpts::restore(content, author),
                             )
                         })
                         .await
@@ -5974,15 +5958,7 @@ impl App {
                         &root,
                         atelyx_core::history::HistoryKind::Canvas,
                         &rel,
-                        &atelyx_core::history::RecordOpts {
-                            content,
-                            action: atelyx_core::history::HistoryAction::Restore,
-                            author,
-                            coalesce_edit_ms: None,
-                            max_versions: 0,
-                            note: None,
-                            editor: None,
-                        },
+                        &atelyx_core::history::RecordOpts::restore(content, author),
                     )
                 })
                 .await
@@ -6041,15 +6017,7 @@ impl App {
                         &root,
                         atelyx_core::history::HistoryKind::Note,
                         &rel,
-                        &atelyx_core::history::RecordOpts {
-                            content,
-                            action: atelyx_core::history::HistoryAction::Restore,
-                            author,
-                            coalesce_edit_ms: None,
-                            max_versions: 0,
-                            note: None,
-                            editor: None,
-                        },
+                        &atelyx_core::history::RecordOpts::restore(content, author),
                     )
                 })
                 .await

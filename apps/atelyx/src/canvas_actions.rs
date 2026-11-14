@@ -18,8 +18,6 @@ pub(crate) use crate::canvas_view::{LoadOut, RefRaw};
 use crate::layout_view::{PopupOpen, PopupState};
 use crate::{chat_actions, recent_view, vault, App, Message, RepoKind};
 
-/// 画布历史记版合并窗口（与表格 / 空间侧口径一致）。
-const HISTORY_COALESCE_MS: i64 = 60_000;
 /// 粘贴整组避让的纵向搜索步长（世界坐标，同产出落卡）。
 const PASTE_SPOT_STEP: f64 = 24.0;
 
@@ -555,15 +553,7 @@ fn record_canvas_history(app: &App, content: &str) -> Task<Message> {
     let gen = app.epoch();
     let state = app.vault.clone();
     let author = crate::history_author(app);
-    let opts = atelyx_core::history::RecordOpts {
-        content: content.to_string(),
-        action: atelyx_core::history::HistoryAction::Edit,
-        author,
-        coalesce_edit_ms: Some(HISTORY_COALESCE_MS),
-        max_versions: 0,
-        note: None,
-        editor: None,
-    };
+    let opts = atelyx_core::history::RecordOpts::edit(content.to_string(), author);
     Task::perform(
         async move {
             let r = tokio::task::spawn_blocking(move || {

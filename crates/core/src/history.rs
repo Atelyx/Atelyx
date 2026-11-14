@@ -356,6 +356,50 @@ pub struct RecordOpts {
     pub editor: Option<HistoryEditor>,
 }
 
+/// 人工保存的连续编辑合并窗口：同作者在窗口内的连续编辑滑动成一条版本。
+pub const EDIT_COALESCE_MS: i64 = 60_000;
+
+impl RecordOpts {
+    /// 人工编辑：窗口内同作者连续保存合并为一条版本。
+    pub fn edit(content: String, author: HistoryAuthor) -> Self {
+        Self {
+            content,
+            action: HistoryAction::Edit,
+            author,
+            coalesce_edit_ms: Some(EDIT_COALESCE_MS),
+            max_versions: 0,
+            note: None,
+            editor: None,
+        }
+    }
+
+    /// AI 编辑：带来源标记，且不参与连续编辑合并（每次修改各留一条）。
+    pub fn agent_edit(content: String, author: HistoryAuthor, editor: Option<HistoryEditor>) -> Self {
+        Self {
+            content,
+            action: HistoryAction::Edit,
+            author,
+            coalesce_edit_ms: None,
+            max_versions: 0,
+            note: None,
+            editor,
+        }
+    }
+
+    /// 回滚落盘后的记版：显式意图，不与前一版合并。
+    pub fn restore(content: String, author: HistoryAuthor) -> Self {
+        Self {
+            content,
+            action: HistoryAction::Restore,
+            author,
+            coalesce_edit_ms: None,
+            max_versions: 0,
+            note: None,
+            editor: None,
+        }
+    }
+}
+
 /// 侧文件「读改写」串行锁：同一文件的并发记录（正文保存链 / AI 编辑 / 回滚记版）会各自读到
 /// 旧列表再整体覆盖，后写者把先写者的版本吞掉。进程内全局锁即可——历史是尽力而为侧车。
 static RECORD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -577,15 +621,29 @@ mod tests {
     }
 
     fn opts(content: &str) -> RecordOpts {
-        RecordOpts {
-            content: content.into(),
-            action: HistoryAction::Edit,
-            author: author(),
-            coalesce_edit_ms: Some(60_000),
-            max_versions: 0,
-            note: None,
-            editor: None,
-        }
+        RecordOpts::edit(content.into(), author())
+    }
+
+    #[test]
+    fn 构造器按意图定合并窗口与来源() {
+        let edit = RecordOpts::edit("v".into(), author());
+        assert_eq!(edit.action, HistoryAction::Edit);
+        assert_eq!(edit.coalesce_edit_ms, Some(EDIT_COALESCE_MS));
+        assert!(edit.editor.is_none());
+
+        // AI 编辑：带来源且不落合并窗口
+        let ai = RecordOpts::agent_edit(
+            "v".into(),
+            author(),
+            Some(HistoryEditor { agent_id: "builtin-agent".into(), agent_name: "Agent".into() }),
+        );
+        assert_eq!(ai.action, HistoryAction::Edit);
+        assert_eq!(ai.coalesce_edit_ms, None);
+        assert_eq!(ai.editor.map(|e| e.agent_id), Some("builtin-agent".into()));
+
+        let restore = RecordOpts::restore("v".into(), author());
+        assert_eq!(restore.action, HistoryAction::Restore);
+        assert_eq!(restore.coalesce_edit_ms, None);
     }
 
     #[test]

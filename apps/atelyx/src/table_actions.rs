@@ -19,9 +19,6 @@ use iced::widget::text_editor;
 
 use crate::ui::notify::Level as NoticeLevel;
 
-/// 历史合并窗口（毫秒）。
-const HISTORY_COALESCE_MS: i64 = 60_000;
-
 /// 选区变更广播：无订阅者时不做差分（载荷要克隆路径与协作者名单）。
 /// 调用点在壳的 update 收口，每条消息处理后比较一次（本地操作、协作远端变化、远端超时剔除、
 /// 开合切换表格都经这里）；内容不变、只有选区移动也发。
@@ -1070,15 +1067,7 @@ fn record_table_history(app: &App, content: String) -> Task<Message> {
                     &root,
                     atelyx_core::history::HistoryKind::Table,
                     &rel,
-                    &atelyx_core::history::RecordOpts {
-                        content,
-                        action: atelyx_core::history::HistoryAction::Edit,
-                        author,
-                        coalesce_edit_ms: Some(HISTORY_COALESCE_MS),
-                        max_versions: 0,
-                        note: None,
-                        editor: None,
-                    },
+                    &atelyx_core::history::RecordOpts::edit(content, author),
                 )
             })
             .await
