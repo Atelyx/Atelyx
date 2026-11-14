@@ -1132,7 +1132,7 @@ fn view_occupied(ui: &AppUiState, view: &str, except_tab_id: Option<&str>) -> bo
 
 /// 标签组作用位置：主窗口布局树内的面板，或独立撕裂窗口。
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Target {
+pub(crate) enum Target {
     Panel(String),
     Detached(String),
 }
@@ -1150,7 +1150,7 @@ fn group_at(ui: &AppUiState, target: &Target) -> Option<TabGroup> {
 
 /// 把标签组补丁写回目标：面板留空面板，撕裂窗口拖空后回收条目。
 /// `f` 返回 None = 组语义未命中（如移除不存在的标签），模型不动。
-pub fn with_group(ui: &mut AppUiState, target: &Target, f: &dyn Fn(&TabGroup) -> Option<TabGroup>) {
+pub(crate) fn with_group(ui: &mut AppUiState, target: &Target, f: &dyn Fn(&TabGroup) -> Option<TabGroup>) {
     let Some(group) = group_at(ui, target) else { return };
     let Some(next) = f(&group) else { return };
     match target {
