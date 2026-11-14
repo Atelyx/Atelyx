@@ -1,8 +1,5 @@
-//! 矢量图标部件：形状表（24 单位视框）在 iced Canvas 上描边绘制。
-//!
-//! 展平在 `init` 时一次完成并缓存；绘制帧只做坐标缩放与描边。
-//! 描边按视框单位随尺寸缩放（2 单位在 14px ≈ 1.17px），但绘制宽度不低于
-//! 1 逻辑像素——小图标再细会发灰。
+//! 矢量图标部件：形状表（24 单位视框）在 iced Canvas 上描边绘制，
+//! 展平在 `init` 时一次完成并缓存，绘制帧只做坐标缩放与描边。
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -185,13 +182,24 @@ where
     }
 }
 
-/// 全部图标名（kebab-case）：文档、校验与开发期工具按它枚举。
-pub fn names() -> impl Iterator<Item = &'static str> {
-    icons::names()
-}
+/// 改名前的内置形状名 → 现名：外部插件清单里的 `icon` 可能仍写着旧名，
+/// 不认别名会静默回落成占位图形。
+const RENAMED: &[(&str, &str)] = &[
+    ("trash-2", "bin"),
+    ("circle-check-big", "check-circle"),
+    ("triangle-alert", "alert"),
+    ("panels-top-left", "panel-layout"),
+    ("layout-template", "template"),
+    ("refresh-cw", "refresh"),
+    ("rotate-ccw", "undo"),
+    ("loader-circle", "loader"),
+    ("maximize-2", "expand"),
+    ("align-vertical-space-around", "space-around"),
+];
 
-/// 图标名归一：命中形状表返回 'static 名，未知 / 空串返回空（画空图标）。
+/// 图标名归一：命中形状表返回 'static 名，未知 / 空串返回空（画空图标）。旧名按 [RENAMED] 解析。
 pub fn icon_name(name: &str) -> &'static str {
+    let name = RENAMED.iter().find(|(old, _)| *old == name).map_or(name, |(_, new)| *new);
     icons::names().find(|n| *n == name).unwrap_or("")
 }
 
