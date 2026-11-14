@@ -129,7 +129,7 @@ fn day_cell(
     if extra > 0 {
         // 溢出条目不可见：悬停「+N」提示被隐藏的日程数
         let label = format!("还有 {extra} 条日程");
-        body = body.push(crate::layout_view::with_tip(
+        body = body.push(crate::hover_tip::with_tip(
             mouse_area(
                 text(format!("+{extra}"))
                     .size(pal::fs_micro())

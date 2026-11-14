@@ -3056,7 +3056,7 @@ fn icon_btn(
             ..Default::default()
         })
         .on_press(on_press);
-    crate::layout_view::with_tip(iced::widget::mouse_area(btn), window, tip, 21.0).into()
+    crate::hover_tip::with_tip(iced::widget::mouse_area(btn), window, tip, 21.0).into()
 }
 
 /// 编辑器浮层（覆盖阶段画布仍显示原值；可见编辑 = 画布停画原值、浮层即单元格本身）。

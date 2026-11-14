@@ -281,7 +281,7 @@ fn version_row(v: &HistoryVersion, viewer: bool, expanded: bool, window: iced::w
     // AI 编辑版本：动作后标 AI 徽标（悬停给 Agent 名；作者行仍显示操作者）
     if let Some(editor) = &v.editor {
         let label = format!("由 AI（{}）编辑", editor.agent_name);
-        head = head.push(crate::layout_view::with_tip(
+        head = head.push(crate::hover_tip::with_tip(
             iced::widget::mouse_area(controls::badge("AI", pal::ACCENT_SOFT, pal::ACCENT)),
             window,
             label,
@@ -317,7 +317,7 @@ fn version_row(v: &HistoryVersion, viewer: bool, expanded: bool, window: iced::w
             });
         let widget = if viewer { widget } else { widget.on_press(Message::History(HistoryBrowserMsg::Ask(seq))) };
         if viewer {
-            crate::layout_view::with_tip(
+            crate::hover_tip::with_tip(
                 iced::widget::mouse_area(widget),
                 window,
                 "当前角色为只读",

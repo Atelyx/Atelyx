@@ -30,6 +30,7 @@ mod color_picker_actions;
 mod commands;
 mod doc_save;
 mod history_browser;
+mod hover_tip;
 mod image_clipboard;
 mod layout_view;
 mod markdown_edit;

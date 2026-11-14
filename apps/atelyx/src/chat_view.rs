@@ -508,7 +508,7 @@ fn error_line(window: iced::window::Id, message: String) -> iced::Element<'stati
             .width(Length::Fill)
             .clip(true),
         );
-        container(crate::layout_view::with_tip(area, window, tip.clone(), 13.0))
+        container(crate::hover_tip::with_tip(area, window, tip.clone(), 13.0))
         .width(Length::Fill)
         .height(Length::Shrink)
         .into()

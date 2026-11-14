@@ -10,12 +10,13 @@ use std::path::PathBuf;
 
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::text::{LineHeight, Wrapping};
-use iced::widget::{MouseArea, button, column, container, mouse_area, row, scrollable, space, stack, text_editor, text_input};
+use iced::widget::{button, column, container, mouse_area, row, scrollable, space, stack, text_editor, text_input};
 use iced::{Color, Element, Length, Padding, Point, Rectangle, Size, border, widget::container::Style};
 
 use atelyx_core::global_config::RecentVault;
 use atelyx_core::layout::{self, AppUiState, LayoutNode, TabItem};
 
+use crate::hover_tip::with_tip;
 use crate::ui::controls::{self, Variant};
 use crate::ui::icon::{icon, icon_stroke};
 use crate::ui::palette as pal;
@@ -261,18 +262,6 @@ pub(crate) fn open_popup(app: &App, window: iced::window::Id, state: PopupState)
 /// 右键菜单类弹层：锚点 = 光标点，无翻转。
 fn ctx_popup(window: iced::window::Id, cursor: Point, state: PopupState) -> Message {
     Message::PopupOpen(window, PopupOpen { point: cursor, flip_y: None, state, min_width: 0.0 })
-}
-
-/// 给已挂好按下 / 双击 / 右键处理的悬停区补全文提示；`box_px` 为触发区边长（提示锚在光标下方半边长 + 4）。
-pub(crate) fn with_tip<'a>(
-    area: MouseArea<'a, Message>,
-    window: iced::window::Id,
-    label: impl Into<String>,
-    box_px: f32,
-) -> MouseArea<'a, Message> {
-    let label = label.into();
-    area.on_enter(Message::Ui(crate::ui::UiMsg::HoverTip { window, label: label.clone(), box_px }))
-        .on_exit(Message::Ui(crate::ui::UiMsg::HoverTipEnd { window, label }))
 }
 
 /// 只读正文右键：选区复制菜单（锚点 = 光标点）。

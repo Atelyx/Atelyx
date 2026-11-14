@@ -165,7 +165,7 @@ fn heat_cell(window: iced::window::Id, days: i64, count: u32) -> Element<'static
         0 => pal::BG_TERTIARY,
         i => pal::ACCENT.scale_alpha(LEVEL_ALPHAS[(i - 1) as usize]),
     };
-    crate::layout_view::with_tip(
+    crate::hover_tip::with_tip(
         mouse_area(
             container(space())
                 .width(Length::Fixed(CELL))

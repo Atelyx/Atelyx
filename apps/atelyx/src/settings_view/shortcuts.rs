@@ -134,7 +134,7 @@ fn conflict_mark(
     let tip = format!("与 {} 冲突，按键时先登记的命令生效", names.join("、"));
     let bg = if crate::now_secs().is_multiple_of(2) { pal::ACCENT_SOFT } else { pal::BG_TERTIARY };
     Some(
-        crate::layout_view::with_tip(
+        crate::hover_tip::with_tip(
             mouse_area(controls::badge("冲突", bg, pal::WARNING)),
             window,
             tip,
