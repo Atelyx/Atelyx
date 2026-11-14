@@ -499,6 +499,84 @@ pub fn host_requests_stream(spec: &RuntimeSpec) -> impl iced::futures::Stream<It
 /// 处理插件页消息；安装走异步文件选择器，其余动作同步完成。
 pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
     match msg {
+        m @ (PluginsMsg::Refresh
+            | PluginsMsg::Toggle(..)
+            | PluginsMsg::Retry(..)) => on_refresh(app, m),
+        m @ (PluginsMsg::UninstallAsk(..)
+            | PluginsMsg::UninstallCancel
+            | PluginsMsg::UninstallConfirm(..)
+            | PluginsMsg::InstallDir
+            | PluginsMsg::InstallZip
+            | PluginsMsg::Installed(..)
+            | PluginsMsg::ReinstallSource(..)
+            | PluginsMsg::Reinstalled(..)
+            | PluginsMsg::Uninstalled(..)) => on_install(app, m),
+        m @ (PluginsMsg::MarketRefresh
+            | PluginsMsg::MarketReload
+            | PluginsMsg::SetMode(..)
+            | PluginsMsg::MarketQuery(..)
+            | PluginsMsg::MarketType(..)
+            | PluginsMsg::MarketInstallAsk(..)
+            | PluginsMsg::MarketInstallConfirm
+            | PluginsMsg::MarketInstallCancel
+            | PluginsMsg::MarketLoaded(..)
+            | PluginsMsg::MarketUpdate { .. }
+            | PluginsMsg::MarketDone(..)) => on_market(app, m),
+        m @ (PluginsMsg::Detail(..)
+            | PluginsMsg::DetailClose
+            | PluginsMsg::DetailTab(..)) => on_detail(app, m),
+        m @ (PluginsMsg::LogRefresh
+            | PluginsMsg::LogClearAsk
+            | PluginsMsg::LogClearCancel
+            | PluginsMsg::LogClear(..)
+            | PluginsMsg::LogCleared(..)
+            | PluginsMsg::CopyLogPath(..)
+            | PluginsMsg::LogLoaded { .. }) => on_log(app, m),
+        m @ (PluginsMsg::VaultRead { .. }
+            | PluginsMsg::VaultReadBinary { .. }
+            | PluginsMsg::VaultList { .. }
+            | PluginsMsg::VaultExists { .. }
+            | PluginsMsg::VaultImageInfo { .. }
+            | PluginsMsg::VaultCallDone { .. }) => on_vault_read(app, m),
+        m @ (PluginsMsg::VaultWrite { .. }
+            | PluginsMsg::VaultWriteBinary { .. }
+            | PluginsMsg::VaultImportFile { .. }
+            | PluginsMsg::VaultWriteDone { .. }) => on_vault_write(app, m),
+        m @ (PluginsMsg::VaultRemove { .. }
+            | PluginsMsg::VaultRename { .. }
+            | PluginsMsg::VaultChangeDone { .. }) => on_vault_change(app, m),
+        m @ (PluginsMsg::DialogAsk { .. }
+            | PluginsMsg::DialogDone { .. }
+            | PluginsMsg::ClipboardWrite { .. }
+            | PluginsMsg::ClipboardWritten { .. }
+            | PluginsMsg::ClipboardRead { .. }
+            | PluginsMsg::ClipboardReadDone { .. }
+            | PluginsMsg::ClipboardReadImage { .. }
+            | PluginsMsg::ClipboardImageDone { .. }
+            | PluginsMsg::ClipboardWriteImage { .. }
+            | PluginsMsg::ClipboardImageWritten { .. }
+            | PluginsMsg::AiModels { .. }
+            | PluginsMsg::AiAgents { .. }
+            | PluginsMsg::MeasureBatch { .. }
+            | PluginsMsg::QueryTheme { .. }
+            | PluginsMsg::EditorSelection { .. }
+            | PluginsMsg::EditorReplaceSelection { .. }
+            | PluginsMsg::HistoryActivity { .. }
+            | PluginsMsg::HistoryActivityDone { .. }
+            | PluginsMsg::HistoryDay { .. }
+            | PluginsMsg::HistoryOpen { .. }
+            | PluginsMsg::CollabMetaGet { .. }
+            | PluginsMsg::CollabMetaPatch { .. }
+            | PluginsMsg::CollabMetaDone { .. }
+            | PluginsMsg::TraySetItems { .. }
+            | PluginsMsg::CollabPeers { .. }
+            | PluginsMsg::CollabSend { .. }
+            | PluginsMsg::TableSnapshot { .. }) => on_service(app, m),
+    }
+}
+
+fn on_refresh(app: &mut App, msg: PluginsMsg) -> Task<Message> {
+    match msg {
         PluginsMsg::Refresh => {
             refresh(app);
             // 市场首开：缓存先行，未过期即不联网（见 market_auto_load）
@@ -521,6 +599,12 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
             refresh(app);
             Task::none()
         }
+        _ => Task::none(),
+    }
+}
+
+fn on_install(app: &mut App, msg: PluginsMsg) -> Task<Message> {
+    match msg {
         PluginsMsg::UninstallAsk(id) => {
             app.plugins_state.confirm_uninstall = Some(id);
             Task::none()
@@ -590,101 +674,12 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
             refresh(app);
             Task::none()
         }
-        PluginsMsg::Detail(id) => {
-            app.plugins_state.detail_audit = app.plugins.audit(&id);
-            app.plugins_state.detail = Some(id);
-            app.plugins_state.detail_tab = DetailTab::Overview;
-            app.plugins_state.log_text = None;
-            app.plugins_state.log_error = None;
-            app.plugins_state.log_clear_ask = false;
-            Task::none()
-        }
-        PluginsMsg::DetailClose => {
-            app.plugins_state.detail = None;
-            app.plugins_state.log_text = None;
-            app.plugins_state.log_error = None;
-            app.plugins_state.log_clear_ask = false;
-            Task::none()
-        }
-        PluginsMsg::DetailTab(tab) => {
-            app.plugins_state.detail_tab = tab;
-            app.plugins_state.log_clear_ask = false;
-            match tab {
-                DetailTab::Overview => Task::none(),
-                DetailTab::Log => load_log(app),
-            }
-        }
-        PluginsMsg::LogRefresh => load_log(app),
-        PluginsMsg::LogClearAsk => {
-            app.plugins_state.log_clear_ask = true;
-            Task::none()
-        }
-        PluginsMsg::LogClearCancel => {
-            app.plugins_state.log_clear_ask = false;
-            Task::none()
-        }
-        PluginsMsg::LogClear(id) => {
-            app.plugins_state.log_clear_ask = false;
-            let runtime = app.plugins.clone();
-            let for_task = id.clone();
-            Task::perform(
-                async move { run_blocking(move || runtime.clear_log(&for_task)).await },
-                move |result| Message::Plugins(PluginsMsg::LogCleared(id.clone(), result)),
-            )
-        }
-        PluginsMsg::LogCleared(id, result) => {
-            match result {
-                Ok(()) => {
-                    // 清空即推进纪元：清空前发起的读取回执一律作废
-                    app.plugins_state.log_seq = app.plugins_state.log_seq.wrapping_add(1);
-                    app.plugins_state.log_error = None;
-                    if app.plugins_state.detail.as_deref() == Some(id.as_str())
-                        && app.plugins_state.detail_tab == DetailTab::Log
-                    {
-                        // 插件可能已写入新行：按磁盘再读一次才是当前真相
-                        load_log(app)
-                    } else {
-                        app.plugins_state.log_text = None;
-                        Task::none()
-                    }
-                }
-                Err(e) => {
-                    app.notify(NoticeLevel::Error, format!("清空日志失败：{e}"));
-                    Task::none()
-                }
-            }
-        }
-        PluginsMsg::CopyLogPath(path) => {
-            app.notify(NoticeLevel::Success, "已复制日志路径");
-            iced::clipboard::write(path).map(|_: ()| Message::Noop)
-        }
-        PluginsMsg::LogLoaded { id, seq, result } => {
-            // 详情已换插件、换分页，或读取已被清空 / 后来的读取取代：这次回执不作数
-            if app.plugins_state.log_seq != seq
-                || app.plugins_state.detail.as_deref() != Some(id.as_str())
-                || app.plugins_state.detail_tab != DetailTab::Log
-            {
-                return Task::none();
-            }
-            match result {
-                Ok(text) => {
-                    app.plugins_state.log_text = Some(text);
-                    app.plugins_state.log_error = None;
-                }
-                Err(e) => {
-                    app.plugins_state.log_text = None;
-                    app.plugins_state.log_error = Some(e);
-                }
-            }
-            Task::none()
-        }
-        PluginsMsg::DialogAsk { request_id, dialog } => Task::perform(pick(dialog), move |path| {
-            Message::Plugins(PluginsMsg::DialogDone { request_id, path })
-        }),
-        PluginsMsg::DialogDone { request_id, path } => {
-            app.plugins.resolve_dialog(request_id, path);
-            Task::none()
-        }
+        _ => Task::none(),
+    }
+}
+
+fn on_market(app: &mut App, msg: PluginsMsg) -> Task<Message> {
+    match msg {
         PluginsMsg::MarketRefresh => market_auto_load(app),
         PluginsMsg::MarketReload => match market_cache_path(app) {
             Some(cache) => start_market_load(app, cache),
@@ -762,40 +757,112 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
             }
             Task::none()
         }
-        PluginsMsg::ClipboardWrite { request_id, text } => iced::clipboard::write(text)
-            .map(move |_: ()| Message::Plugins(PluginsMsg::ClipboardWritten { request_id })),
-        PluginsMsg::ClipboardWritten { request_id } => {
-            app.plugins
-                .resolve_shell_call(request_id, Ok(serde_json::json!({})));
+        _ => Task::none(),
+    }
+}
+
+fn on_detail(app: &mut App, msg: PluginsMsg) -> Task<Message> {
+    match msg {
+        PluginsMsg::Detail(id) => {
+            app.plugins_state.detail_audit = app.plugins.audit(&id);
+            app.plugins_state.detail = Some(id);
+            app.plugins_state.detail_tab = DetailTab::Overview;
+            app.plugins_state.log_text = None;
+            app.plugins_state.log_error = None;
+            app.plugins_state.log_clear_ask = false;
             Task::none()
         }
-        PluginsMsg::ClipboardRead { request_id } => iced::clipboard::read().map(move |text| {
-            Message::Plugins(PluginsMsg::ClipboardReadDone { request_id, text })
-        }),
-        PluginsMsg::ClipboardReadDone { request_id, text } => {
-            let text = text.unwrap_or_default();
-            app.plugins
-                .resolve_shell_call(request_id, Ok(serde_json::json!({ "text": text })));
+        PluginsMsg::DetailClose => {
+            app.plugins_state.detail = None;
+            app.plugins_state.log_text = None;
+            app.plugins_state.log_error = None;
+            app.plugins_state.log_clear_ask = false;
             Task::none()
         }
-        PluginsMsg::ClipboardReadImage { request_id } => Task::perform(
-            async move { run_blocking(read_clipboard_image).await },
-            move |result| Message::Plugins(PluginsMsg::ClipboardImageDone { request_id, result }),
-        ),
-        PluginsMsg::ClipboardImageDone { request_id, result } => {
-            let result = result.map(atelyx_core::plugin_runtime::clipboard_image_payload);
-            app.plugins.resolve_shell_call(request_id, result);
+        PluginsMsg::DetailTab(tab) => {
+            app.plugins_state.detail_tab = tab;
+            app.plugins_state.log_clear_ask = false;
+            match tab {
+                DetailTab::Overview => Task::none(),
+                DetailTab::Log => load_log(app),
+            }
+        }
+        _ => Task::none(),
+    }
+}
+
+fn on_log(app: &mut App, msg: PluginsMsg) -> Task<Message> {
+    match msg {
+        PluginsMsg::LogRefresh => load_log(app),
+        PluginsMsg::LogClearAsk => {
+            app.plugins_state.log_clear_ask = true;
             Task::none()
         }
-        PluginsMsg::ClipboardWriteImage { request_id, bytes } => Task::perform(
-            async move { run_blocking(move || write_clipboard_image(&bytes)).await },
-            move |result| Message::Plugins(PluginsMsg::ClipboardImageWritten { request_id, result }),
-        ),
-        PluginsMsg::ClipboardImageWritten { request_id, result } => {
-            let result = result.map(|_| serde_json::json!({}));
-            app.plugins.resolve_shell_call(request_id, result);
+        PluginsMsg::LogClearCancel => {
+            app.plugins_state.log_clear_ask = false;
             Task::none()
         }
+        PluginsMsg::LogClear(id) => {
+            app.plugins_state.log_clear_ask = false;
+            let runtime = app.plugins.clone();
+            let for_task = id.clone();
+            Task::perform(
+                async move { run_blocking(move || runtime.clear_log(&for_task)).await },
+                move |result| Message::Plugins(PluginsMsg::LogCleared(id.clone(), result)),
+            )
+        }
+        PluginsMsg::LogCleared(id, result) => {
+            match result {
+                Ok(()) => {
+                    // 清空即推进纪元：清空前发起的读取回执一律作废
+                    app.plugins_state.log_seq = app.plugins_state.log_seq.wrapping_add(1);
+                    app.plugins_state.log_error = None;
+                    if app.plugins_state.detail.as_deref() == Some(id.as_str())
+                        && app.plugins_state.detail_tab == DetailTab::Log
+                    {
+                        // 插件可能已写入新行：按磁盘再读一次才是当前真相
+                        load_log(app)
+                    } else {
+                        app.plugins_state.log_text = None;
+                        Task::none()
+                    }
+                }
+                Err(e) => {
+                    app.notify(NoticeLevel::Error, format!("清空日志失败：{e}"));
+                    Task::none()
+                }
+            }
+        }
+        PluginsMsg::CopyLogPath(path) => {
+            app.notify(NoticeLevel::Success, "已复制日志路径");
+            iced::clipboard::write(path).map(|_: ()| Message::Noop)
+        }
+        PluginsMsg::LogLoaded { id, seq, result } => {
+            // 详情已换插件、换分页，或读取已被清空 / 后来的读取取代：这次回执不作数
+            if app.plugins_state.log_seq != seq
+                || app.plugins_state.detail.as_deref() != Some(id.as_str())
+                || app.plugins_state.detail_tab != DetailTab::Log
+            {
+                return Task::none();
+            }
+            match result {
+                Ok(text) => {
+                    app.plugins_state.log_text = Some(text);
+                    app.plugins_state.log_error = None;
+                }
+                Err(e) => {
+                    app.plugins_state.log_text = None;
+                    app.plugins_state.log_error = Some(e);
+                }
+            }
+            Task::none()
+        }
+        _ => Task::none(),
+    }
+}
+
+fn on_vault_read(app: &mut App, msg: PluginsMsg) -> Task<Message> {
+    match msg {
         PluginsMsg::VaultRead { request_id, path } => {
             let rel = match plugin_path(Some(&path)) {
                 Ok(rel) => rel,
@@ -828,6 +895,152 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
                 }
             }
         }
+        PluginsMsg::VaultReadBinary { request_id, path } => {
+            let rel = match plugin_path(Some(&path)) {
+                Ok(rel) => rel,
+                Err(e) => return resolve_vault(app, request_id, Err(e)),
+            };
+            match app.repo_kind.clone() {
+                crate::RepoKind::Local => match app.vault.root() {
+                    Ok(root) => Task::perform(
+                        async move {
+                            run_blocking(move || read_vault_binary(&root, &rel))
+                                .await
+                                .map(|bytes| atelyx_core::plugin_runtime::binary_payload(&bytes))
+                        },
+                        move |result| Message::Plugins(PluginsMsg::VaultCallDone { request_id, result }),
+                    ),
+                    Err(e) => resolve_vault(app, request_id, Err(e)),
+                },
+                crate::RepoKind::Space(space) => {
+                    let (client, space_id) = (space.client.clone(), space.space_id.clone());
+                    Task::perform(
+                        async move {
+                            let bytes = client
+                                .get_file_bytes(&space_id, &rel)
+                                .await
+                                .map_err(|e| e.to_string())?;
+                            if bytes.len() > MAX_VAULT_BINARY_BYTES {
+                                return Err(vault_binary_too_large());
+                            }
+                            Ok(atelyx_core::plugin_runtime::binary_payload(&bytes))
+                        },
+                        move |result| Message::Plugins(PluginsMsg::VaultCallDone { request_id, result }),
+                    )
+                }
+            }
+        }
+        PluginsMsg::VaultList { request_id, path } => {
+            let rel = match plugin_path((!path.is_empty()).then_some(path.as_str())) {
+                Ok(rel) => rel,
+                Err(e) => return resolve_vault(app, request_id, Err(e)),
+            };
+            match app.repo_kind.clone() {
+                crate::RepoKind::Local => match app.vault.root() {
+                    Ok(root) => {
+                        let exclude = app.vault.exclude_folders().unwrap_or_default();
+                        Task::perform(
+                            async move {
+                                run_blocking(move || {
+                                    let children = vault::read_dir_entries_all(&root, &rel, &exclude)?;
+                                    Ok(dir_entries_json(&children))
+                                })
+                                .await
+                            },
+                            move |result| Message::Plugins(PluginsMsg::VaultCallDone { request_id, result }),
+                        )
+                    }
+                    Err(e) => resolve_vault(app, request_id, Err(e)),
+                },
+                crate::RepoKind::Space(space) => {
+                    let (client, space_id) = (space.client.clone(), space.space_id.clone());
+                    Task::perform(
+                        async move {
+                            // 插件面与本地同口径：隐藏项可见（.tmp 残留由服务端过滤）
+                            let dir = (!rel.is_empty()).then_some(rel.as_str());
+                            let tree = client
+                                .tree_including_hidden(&space_id, dir)
+                                .await
+                                .map_err(|e| e.to_string())?;
+                            Ok(dir_entries_json(&crate::space_actions::children_of_tree(&tree, "")))
+                        },
+                        move |result| Message::Plugins(PluginsMsg::VaultCallDone { request_id, result }),
+                    )
+                }
+            }
+        }
+        PluginsMsg::VaultExists { request_id, path } => {
+            let rel = match plugin_path(Some(&path)) {
+                Ok(rel) => rel,
+                Err(e) => return resolve_vault(app, request_id, Err(e)),
+            };
+            match app.repo_kind.clone() {
+                crate::RepoKind::Local => match app.vault.root() {
+                    Ok(root) => Task::perform(
+                        async move {
+                            let rel = rel.clone();
+                            let exists =
+                                run_blocking(move || vault::file_exists(&root, &rel)).await?;
+                            Ok(serde_json::json!({ "exists": exists }))
+                        },
+                        move |result| Message::Plugins(PluginsMsg::VaultCallDone { request_id, result }),
+                    ),
+                    Err(e) => resolve_vault(app, request_id, Err(e)),
+                },
+                crate::RepoKind::Space(space) => {
+                    let (client, space_id) = (space.client.clone(), space.space_id.clone());
+                    Task::perform(
+                        async move {
+                            let exists = client
+                                .file_exists(&space_id, &rel)
+                                .await
+                                .map_err(|e| e.to_string())?;
+                            Ok(serde_json::json!({ "exists": exists }))
+                        },
+                        move |result| Message::Plugins(PluginsMsg::VaultCallDone { request_id, result }),
+                    )
+                }
+            }
+        }
+        PluginsMsg::VaultImageInfo { request_id, path } => {
+            let rel = match plugin_path(Some(&path)) {
+                Ok(rel) => rel,
+                Err(e) => return resolve_vault(app, request_id, Err(e)),
+            };
+            match app.repo_kind.clone() {
+                crate::RepoKind::Local => match app.vault.root() {
+                    Ok(root) => Task::perform(
+                        async move { run_blocking(move || read_image_info(&root, &rel)).await },
+                        move |result| Message::Plugins(PluginsMsg::VaultCallDone { request_id, result }),
+                    ),
+                    Err(e) => resolve_vault(app, request_id, Err(e)),
+                },
+                crate::RepoKind::Space(space) => {
+                    let (client, space_id) = (space.client.clone(), space.space_id.clone());
+                    Task::perform(
+                        async move {
+                            // 空间侧无区间读接口，取回整文件后仍只解析起始段（服务端单文件限额封顶）
+                            let bytes = client
+                                .get_file_bytes(&space_id, &rel)
+                                .await
+                                .map_err(|e| e.to_string())?;
+                            let head = &bytes[..bytes.len().min(IMAGE_HEADER_BYTES as usize)];
+                            image_info_json(head, &rel)
+                        },
+                        move |result| Message::Plugins(PluginsMsg::VaultCallDone { request_id, result }),
+                    )
+                }
+            }
+        }
+        PluginsMsg::VaultCallDone { request_id, result } => {
+            resolve_vault(app, request_id, result)
+        }
+        _ => Task::none(),
+    }
+}
+
+fn on_vault_write(app: &mut App, msg: PluginsMsg) -> Task<Message> {
+    match msg {
         PluginsMsg::VaultWrite { request_id, path, content } => {
             let rel = match plugin_path(Some(&path)) {
                 Ok(rel) => rel,
@@ -872,41 +1085,6 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
                                 .map_err(|e| e.to_string())
                         },
                         move |result| vault_write_done(request_id, done_rel, result),
-                    )
-                }
-            }
-        }
-        PluginsMsg::VaultReadBinary { request_id, path } => {
-            let rel = match plugin_path(Some(&path)) {
-                Ok(rel) => rel,
-                Err(e) => return resolve_vault(app, request_id, Err(e)),
-            };
-            match app.repo_kind.clone() {
-                crate::RepoKind::Local => match app.vault.root() {
-                    Ok(root) => Task::perform(
-                        async move {
-                            run_blocking(move || read_vault_binary(&root, &rel))
-                                .await
-                                .map(|bytes| atelyx_core::plugin_runtime::binary_payload(&bytes))
-                        },
-                        move |result| Message::Plugins(PluginsMsg::VaultCallDone { request_id, result }),
-                    ),
-                    Err(e) => resolve_vault(app, request_id, Err(e)),
-                },
-                crate::RepoKind::Space(space) => {
-                    let (client, space_id) = (space.client.clone(), space.space_id.clone());
-                    Task::perform(
-                        async move {
-                            let bytes = client
-                                .get_file_bytes(&space_id, &rel)
-                                .await
-                                .map_err(|e| e.to_string())?;
-                            if bytes.len() > MAX_VAULT_BINARY_BYTES {
-                                return Err(vault_binary_too_large());
-                            }
-                            Ok(atelyx_core::plugin_runtime::binary_payload(&bytes))
-                        },
-                        move |result| Message::Plugins(PluginsMsg::VaultCallDone { request_id, result }),
                     )
                 }
             }
@@ -1019,78 +1197,23 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
                 }
             }
         }
-        PluginsMsg::VaultList { request_id, path } => {
-            let rel = match plugin_path((!path.is_empty()).then_some(path.as_str())) {
-                Ok(rel) => rel,
-                Err(e) => return resolve_vault(app, request_id, Err(e)),
-            };
-            match app.repo_kind.clone() {
-                crate::RepoKind::Local => match app.vault.root() {
-                    Ok(root) => {
-                        let exclude = app.vault.exclude_folders().unwrap_or_default();
-                        Task::perform(
-                            async move {
-                                run_blocking(move || {
-                                    let children = vault::read_dir_entries_all(&root, &rel, &exclude)?;
-                                    Ok(dir_entries_json(&children))
-                                })
-                                .await
-                            },
-                            move |result| Message::Plugins(PluginsMsg::VaultCallDone { request_id, result }),
-                        )
-                    }
-                    Err(e) => resolve_vault(app, request_id, Err(e)),
-                },
-                crate::RepoKind::Space(space) => {
-                    let (client, space_id) = (space.client.clone(), space.space_id.clone());
-                    Task::perform(
-                        async move {
-                            // 插件面与本地同口径：隐藏项可见（.tmp 残留由服务端过滤）
-                            let dir = (!rel.is_empty()).then_some(rel.as_str());
-                            let tree = client
-                                .tree_including_hidden(&space_id, dir)
-                                .await
-                                .map_err(|e| e.to_string())?;
-                            Ok(dir_entries_json(&crate::space_actions::children_of_tree(&tree, "")))
-                        },
-                        move |result| Message::Plugins(PluginsMsg::VaultCallDone { request_id, result }),
-                    )
-                }
+        PluginsMsg::VaultWriteDone { request_id, rel, created, result } => {
+            // 只推宿主发起的写入；失败不广播（文件未被改动）
+            if result.is_ok() {
+                let kind = match created {
+                    true => FileChangeKind::Created,
+                    false => FileChangeKind::Updated,
+                };
+                app.plugins.on_file_changed(&rel, kind, None);
             }
+            resolve_vault(app, request_id, result)
         }
-        PluginsMsg::VaultExists { request_id, path } => {
-            let rel = match plugin_path(Some(&path)) {
-                Ok(rel) => rel,
-                Err(e) => return resolve_vault(app, request_id, Err(e)),
-            };
-            match app.repo_kind.clone() {
-                crate::RepoKind::Local => match app.vault.root() {
-                    Ok(root) => Task::perform(
-                        async move {
-                            let rel = rel.clone();
-                            let exists =
-                                run_blocking(move || vault::file_exists(&root, &rel)).await?;
-                            Ok(serde_json::json!({ "exists": exists }))
-                        },
-                        move |result| Message::Plugins(PluginsMsg::VaultCallDone { request_id, result }),
-                    ),
-                    Err(e) => resolve_vault(app, request_id, Err(e)),
-                },
-                crate::RepoKind::Space(space) => {
-                    let (client, space_id) = (space.client.clone(), space.space_id.clone());
-                    Task::perform(
-                        async move {
-                            let exists = client
-                                .file_exists(&space_id, &rel)
-                                .await
-                                .map_err(|e| e.to_string())?;
-                            Ok(serde_json::json!({ "exists": exists }))
-                        },
-                        move |result| Message::Plugins(PluginsMsg::VaultCallDone { request_id, result }),
-                    )
-                }
-            }
-        }
+        _ => Task::none(),
+    }
+}
+
+fn on_vault_change(app: &mut App, msg: PluginsMsg) -> Task<Message> {
+    match msg {
         PluginsMsg::VaultRemove { request_id, path } => {
             vault_change_gated(
                 app,
@@ -1138,6 +1261,53 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
                 None => refresh,
             }
         }
+        _ => Task::none(),
+    }
+}
+
+fn on_service(app: &mut App, msg: PluginsMsg) -> Task<Message> {
+    match msg {
+        PluginsMsg::DialogAsk { request_id, dialog } => Task::perform(pick(dialog), move |path| {
+            Message::Plugins(PluginsMsg::DialogDone { request_id, path })
+        }),
+        PluginsMsg::DialogDone { request_id, path } => {
+            app.plugins.resolve_dialog(request_id, path);
+            Task::none()
+        }
+        PluginsMsg::ClipboardWrite { request_id, text } => iced::clipboard::write(text)
+            .map(move |_: ()| Message::Plugins(PluginsMsg::ClipboardWritten { request_id })),
+        PluginsMsg::ClipboardWritten { request_id } => {
+            app.plugins
+                .resolve_shell_call(request_id, Ok(serde_json::json!({})));
+            Task::none()
+        }
+        PluginsMsg::ClipboardRead { request_id } => iced::clipboard::read().map(move |text| {
+            Message::Plugins(PluginsMsg::ClipboardReadDone { request_id, text })
+        }),
+        PluginsMsg::ClipboardReadDone { request_id, text } => {
+            let text = text.unwrap_or_default();
+            app.plugins
+                .resolve_shell_call(request_id, Ok(serde_json::json!({ "text": text })));
+            Task::none()
+        }
+        PluginsMsg::ClipboardReadImage { request_id } => Task::perform(
+            async move { run_blocking(read_clipboard_image).await },
+            move |result| Message::Plugins(PluginsMsg::ClipboardImageDone { request_id, result }),
+        ),
+        PluginsMsg::ClipboardImageDone { request_id, result } => {
+            let result = result.map(atelyx_core::plugin_runtime::clipboard_image_payload);
+            app.plugins.resolve_shell_call(request_id, result);
+            Task::none()
+        }
+        PluginsMsg::ClipboardWriteImage { request_id, bytes } => Task::perform(
+            async move { run_blocking(move || write_clipboard_image(&bytes)).await },
+            move |result| Message::Plugins(PluginsMsg::ClipboardImageWritten { request_id, result }),
+        ),
+        PluginsMsg::ClipboardImageWritten { request_id, result } => {
+            let result = result.map(|_| serde_json::json!({}));
+            app.plugins.resolve_shell_call(request_id, result);
+            Task::none()
+        }
         PluginsMsg::AiModels { request_id } => {
             let result = serde_json::to_value(ai_models(app))
                 .map_err(|e| format!("模型清单序列化失败：{e}"));
@@ -1149,36 +1319,6 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
                 .map_err(|e| format!("Agent 清单序列化失败：{e}"));
             app.plugins.resolve_shell_call(request_id, result);
             Task::none()
-        }
-        PluginsMsg::VaultImageInfo { request_id, path } => {
-            let rel = match plugin_path(Some(&path)) {
-                Ok(rel) => rel,
-                Err(e) => return resolve_vault(app, request_id, Err(e)),
-            };
-            match app.repo_kind.clone() {
-                crate::RepoKind::Local => match app.vault.root() {
-                    Ok(root) => Task::perform(
-                        async move { run_blocking(move || read_image_info(&root, &rel)).await },
-                        move |result| Message::Plugins(PluginsMsg::VaultCallDone { request_id, result }),
-                    ),
-                    Err(e) => resolve_vault(app, request_id, Err(e)),
-                },
-                crate::RepoKind::Space(space) => {
-                    let (client, space_id) = (space.client.clone(), space.space_id.clone());
-                    Task::perform(
-                        async move {
-                            // 空间侧无区间读接口，取回整文件后仍只解析起始段（服务端单文件限额封顶）
-                            let bytes = client
-                                .get_file_bytes(&space_id, &rel)
-                                .await
-                                .map_err(|e| e.to_string())?;
-                            let head = &bytes[..bytes.len().min(IMAGE_HEADER_BYTES as usize)];
-                            image_info_json(head, &rel)
-                        },
-                        move |result| Message::Plugins(PluginsMsg::VaultCallDone { request_id, result }),
-                    )
-                }
-            }
         }
         PluginsMsg::MeasureBatch { request_id, params } => {
             let sizes = params
@@ -1363,20 +1503,6 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
             // 键变更由服务端向空间成员广播（含本端）后经 `space:meta.changed` 送达订阅插件
             resolve_vault(app, request_id, result)
         }
-        PluginsMsg::VaultCallDone { request_id, result } => {
-            resolve_vault(app, request_id, result)
-        }
-        PluginsMsg::VaultWriteDone { request_id, rel, created, result } => {
-            // 只推宿主发起的写入；失败不广播（文件未被改动）
-            if result.is_ok() {
-                let kind = match created {
-                    true => FileChangeKind::Created,
-                    false => FileChangeKind::Updated,
-                };
-                app.plugins.on_file_changed(&rel, kind, None);
-            }
-            resolve_vault(app, request_id, result)
-        }
         PluginsMsg::TraySetItems { request_id, plugin_id, params } => {
             let result = app
                 .tray
@@ -1425,6 +1551,7 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
             app.plugins.resolve_shell_call(request_id, result);
             Task::none()
         }
+        _ => Task::none(),
     }
 }
 

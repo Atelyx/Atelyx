@@ -843,6 +843,55 @@ pub fn update(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
 
 fn update_inner(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
     match msg {
+        m @ (ChatMsg::PersistStatus(..)
+            | ChatMsg::ModelPicked(..)
+            | ChatMsg::EffortPicked(..)
+            | ChatMsg::FlowScrolled(..)
+            | ChatMsg::RowHover(..)
+            | ChatMsg::OverlayPress
+            | ChatMsg::RegenTitle
+            | ChatMsg::ScrollToBottom
+            | ChatMsg::ToggleStep(..)
+            | ChatMsg::ClearError
+            | ChatMsg::FlushDone(..)
+            | ChatMsg::ToggleSidebar
+            | ChatMsg::SidebarSearch(..)
+            | ChatMsg::SessionMenu(..)
+            | ChatMsg::AgentPick(..)
+            | ChatMsg::SessionPicked(..)
+            | ChatMsg::NewSession
+            | ChatMsg::DeleteSession(..)) => on_panel(app, m),
+        m @ (ChatMsg::Input(..)
+            | ChatMsg::MentionPick(..)
+            | ChatMsg::TriggerMention
+            | ChatMsg::UploadAttachment
+            | ChatMsg::AttachmentsPicked(..)
+            | ChatMsg::RemoveAttachment(..)
+            | ChatMsg::FileDropped { .. }) => on_composer(app, m),
+        m @ (ChatMsg::Stop
+            | ChatMsg::Send
+            | ChatMsg::Regenerate
+            | ChatMsg::SendReady { .. }
+            | ChatMsg::RepoLoaded(..)
+            | ChatMsg::PromptReady(..)
+            | ChatMsg::Rollback(..)
+            | ChatMsg::RollbackCancel
+            | ChatMsg::Compact
+            | ChatMsg::Run(..)
+            | ChatMsg::AidDone(..)) => on_send(app, m),
+        m @ (ChatMsg::PluginSend { .. }
+            | ChatMsg::PluginSendReady { .. }
+            | ChatMsg::PluginImagesArchived { .. }
+            | ChatMsg::PluginStop { .. }
+            | ChatMsg::PluginHistory { .. }
+            | ChatMsg::PluginRename { .. }
+            | ChatMsg::PluginDelete { .. }
+            | ChatMsg::PluginCompact { .. }) => on_plugin(app, m),
+    }
+}
+
+fn on_panel(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
+    match msg {
         ChatMsg::PersistStatus(status) => {
             app.chat.persist_error = status;
             iced::Task::none()
@@ -1008,6 +1057,12 @@ fn update_inner(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
             }
             iced::Task::none()
         }
+        _ => iced::Task::none(),
+    }
+}
+
+fn on_composer(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
+    match msg {
         ChatMsg::Input(event) => on_input(app, event),
         ChatMsg::MentionPick(index) => {
             // 点选浮层行不算外点：保持输入面焦点，继续键入接在插入的标签之后
@@ -1045,6 +1100,12 @@ fn update_inner(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
             }
             iced::Task::none()
         }
+        _ => iced::Task::none(),
+    }
+}
+
+fn on_send(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
+    match msg {
         ChatMsg::Stop => {
             if let Some(id) = app.chat.active.clone() {
                 hub().stop(&id);
@@ -1115,72 +1176,6 @@ fn update_inner(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
             compact(app, &session_id)
         }
         ChatMsg::Run(event) => on_run_event(app, event),
-        ChatMsg::PluginSend { request_id, plugin_id, params } => {
-            plugin_chat_send(app, request_id, &plugin_id, params)
-        }
-        ChatMsg::PluginSendReady { gen, plan, result } => {
-            if gen != app.epoch() {
-                // 仓库已切换：前置结果属于旧仓库，不再落消息
-                app.plugins.resolve_shell_call(plan.request_id, Err("仓库已切换，发送已取消".into()));
-                return iced::Task::none();
-            }
-            match result {
-                Ok(prepared) => {
-                    plugin_chat_send_now(app, *plan, prepared.space_prompt, prepared.attachments)
-                }
-                Err(e) => {
-                    app.plugins.resolve_shell_call(plan.request_id, Err(e));
-                    iced::Task::none()
-                }
-            }
-        }
-        ChatMsg::PluginImagesArchived { gen, plan, space_prompt, result } => {
-            if gen != app.epoch() {
-                app.plugins.resolve_shell_call(plan.request_id, Err("仓库已切换，发送已取消".into()));
-                return iced::Task::none();
-            }
-            match result {
-                Ok(attachments) => plugin_chat_send_now(app, *plan, space_prompt, attachments),
-                Err(e) => {
-                    // 归档失败 = 本条消息未发出：本次新建的会话（无消息）一并回收
-                    recycle_created_session(app, &plan);
-                    app.plugins.resolve_shell_call(plan.request_id, Err(e));
-                    iced::Task::none()
-                }
-            }
-        }
-        ChatMsg::PluginStop { request_id, session_id } => {
-            hub().stop(&session_id);
-            app.plugins.resolve_shell_call(request_id, Ok(json!({})));
-            iced::Task::none()
-        }
-        ChatMsg::PluginHistory { request_id, session_id, limit, offset, query } => {
-            let result = plugin_history(&session_id, limit, offset, query.as_deref());
-            app.plugins.resolve_shell_call(request_id, result);
-            iced::Task::none()
-        }
-        ChatMsg::PluginRename { request_id, session_id, title } => {
-            let result = plugin_rename(app, &session_id, &title);
-            app.plugins.resolve_shell_call(request_id, result);
-            iced::Task::none()
-        }
-        ChatMsg::PluginDelete { request_id, session_id } => {
-            let result = plugin_delete(app, &session_id);
-            app.plugins.resolve_shell_call(request_id, result);
-            iced::Task::none()
-        }
-        ChatMsg::PluginCompact { request_id, session_id } => {
-            match plugin_compact_check(app, &session_id) {
-                Ok(()) => {
-                    app.plugins.resolve_shell_call(request_id, Ok(json!({})));
-                    compact(app, &session_id)
-                }
-                Err(e) => {
-                    app.plugins.resolve_shell_call(request_id, Err(e));
-                    iced::Task::none()
-                }
-            }
-        }
         ChatMsg::AidDone(kind, session_id, result) => {
             match kind {
                 AidKind::Compact => {
@@ -1283,6 +1278,79 @@ fn update_inner(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
             }
             iced::Task::none()
         }
+        _ => iced::Task::none(),
+    }
+}
+
+fn on_plugin(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
+    match msg {
+        ChatMsg::PluginSend { request_id, plugin_id, params } => {
+            plugin_chat_send(app, request_id, &plugin_id, params)
+        }
+        ChatMsg::PluginSendReady { gen, plan, result } => {
+            if gen != app.epoch() {
+                // 仓库已切换：前置结果属于旧仓库，不再落消息
+                app.plugins.resolve_shell_call(plan.request_id, Err("仓库已切换，发送已取消".into()));
+                return iced::Task::none();
+            }
+            match result {
+                Ok(prepared) => {
+                    plugin_chat_send_now(app, *plan, prepared.space_prompt, prepared.attachments)
+                }
+                Err(e) => {
+                    app.plugins.resolve_shell_call(plan.request_id, Err(e));
+                    iced::Task::none()
+                }
+            }
+        }
+        ChatMsg::PluginImagesArchived { gen, plan, space_prompt, result } => {
+            if gen != app.epoch() {
+                app.plugins.resolve_shell_call(plan.request_id, Err("仓库已切换，发送已取消".into()));
+                return iced::Task::none();
+            }
+            match result {
+                Ok(attachments) => plugin_chat_send_now(app, *plan, space_prompt, attachments),
+                Err(e) => {
+                    // 归档失败 = 本条消息未发出：本次新建的会话（无消息）一并回收
+                    recycle_created_session(app, &plan);
+                    app.plugins.resolve_shell_call(plan.request_id, Err(e));
+                    iced::Task::none()
+                }
+            }
+        }
+        ChatMsg::PluginStop { request_id, session_id } => {
+            hub().stop(&session_id);
+            app.plugins.resolve_shell_call(request_id, Ok(json!({})));
+            iced::Task::none()
+        }
+        ChatMsg::PluginHistory { request_id, session_id, limit, offset, query } => {
+            let result = plugin_history(&session_id, limit, offset, query.as_deref());
+            app.plugins.resolve_shell_call(request_id, result);
+            iced::Task::none()
+        }
+        ChatMsg::PluginRename { request_id, session_id, title } => {
+            let result = plugin_rename(app, &session_id, &title);
+            app.plugins.resolve_shell_call(request_id, result);
+            iced::Task::none()
+        }
+        ChatMsg::PluginDelete { request_id, session_id } => {
+            let result = plugin_delete(app, &session_id);
+            app.plugins.resolve_shell_call(request_id, result);
+            iced::Task::none()
+        }
+        ChatMsg::PluginCompact { request_id, session_id } => {
+            match plugin_compact_check(app, &session_id) {
+                Ok(()) => {
+                    app.plugins.resolve_shell_call(request_id, Ok(json!({})));
+                    compact(app, &session_id)
+                }
+                Err(e) => {
+                    app.plugins.resolve_shell_call(request_id, Err(e));
+                    iced::Task::none()
+                }
+            }
+        }
+        _ => iced::Task::none(),
     }
 }
 

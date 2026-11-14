@@ -100,18 +100,362 @@ fn dispatch(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
 
 fn on_msg_open(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
     match msg {
-        // Menu 已在 on_msg 入口解包（此处不可达，match 穷尽性要求）
+        m @ (tv::TableMsg::Loaded(..)
+            | tv::TableMsg::TableSaved(..)
+            | tv::TableMsg::ImageImportPick { .. }
+            | tv::TableMsg::ImagesPicked { .. }
+            | tv::TableMsg::ImagesWritten { .. }
+            | tv::TableMsg::ImageLoaded { .. }
+            | tv::TableMsg::LightboxImageLoaded { .. }
+            | tv::TableMsg::RetryImages
+            | tv::TableMsg::LightboxRetry
+            | tv::TableMsg::Downloaded(..)
+            | tv::TableMsg::ExportXlsxPick
+            | tv::TableMsg::ExportPathPicked(..)
+            | tv::TableMsg::Exported(..)) => on_load(app, m),
+        m @ (tv::TableMsg::Press { .. }
+            | tv::TableMsg::Context { .. }
+            | tv::TableMsg::Move { .. }
+            | tv::TableMsg::Viewport { .. }
+            | tv::TableMsg::Release(..)
+            | tv::TableMsg::Wheel { .. }
+            | tv::TableMsg::ShowStyleBar
+            | tv::TableMsg::NavKey(..)
+            | tv::TableMsg::ClearSelection
+            | tv::TableMsg::SelectAll
+            | tv::TableMsg::ShowBar { .. }
+            | tv::TableMsg::LightboxClose
+            | tv::TableMsg::LightboxNav(..)
+            | tv::TableMsg::LightboxZoom { .. }
+            | tv::TableMsg::LightboxPress(..)
+            | tv::TableMsg::LightboxPan { .. }
+            | tv::TableMsg::LightboxDownload
+            | tv::TableMsg::LightboxCopy
+            | tv::TableMsg::Copied(..)
+            | tv::TableMsg::OpenLightboxMenu(..)
+            | tv::TableMsg::OpenViewMenu(..)
+            | tv::TableMsg::SetView(..)
+            | tv::TableMsg::OpenMoreMenu(..)
+            | tv::TableMsg::OpenFontMenu(..)
+            | tv::TableMsg::OpenSizeMenu(..)
+            | tv::TableMsg::OpenColorMenu { .. }
+            | tv::TableMsg::Noop) => on_gesture(app, m),
+        m @ (tv::TableMsg::Edited(..)
+            | tv::TableMsg::CommitEnter
+            | tv::TableMsg::CancelEdit
+            | tv::TableMsg::CharKey(..)
+            | tv::TableMsg::Copy
+            | tv::TableMsg::Cut
+            | tv::TableMsg::Paste
+            | tv::TableMsg::PasteText(..)
+            | tv::TableMsg::Undo
+            | tv::TableMsg::Redo
+            | tv::TableMsg::StyleToggle(..)
+            | tv::TableMsg::SetFont(..)
+            | tv::TableMsg::SetSize(..)
+            | tv::TableMsg::SetColor { .. }
+            | tv::TableMsg::ClearFormat
+            | tv::TableMsg::SelectOption { .. }
+            | tv::TableMsg::PopupDraft(..)) => on_edit(app, m),
+        m @ (tv::TableMsg::DuplicateRow(..)
+            | tv::TableMsg::InsertRow { .. }
+            | tv::TableMsg::MoveRow { .. }
+            | tv::TableMsg::DeleteRows(..)
+            | tv::TableMsg::AddField { .. }
+            | tv::TableMsg::InsertField { .. }
+            | tv::TableMsg::DeleteField(..)
+            | tv::TableMsg::RenameField { .. }
+            | tv::TableMsg::RetypeField { .. }
+            | tv::TableMsg::OptionsAdd { .. }
+            | tv::TableMsg::OptionsRemove { .. }
+            | tv::TableMsg::ColumnAutoWidth(..)
+            | tv::TableMsg::RowHeightAuto(..)
+            | tv::TableMsg::SetCalc { .. }) => on_structure(app, m),
+        m @ (tv::TableMsg::AiStart { .. }
+            | tv::TableMsg::AiStartRows { .. }
+            | tv::TableMsg::AiStop
+            | tv::TableMsg::AiOpenConfig { .. }
+            | tv::TableMsg::AiCreateField { .. }
+            | tv::TableMsg::AiCellDone { .. }
+            | tv::TableMsg::AiSystemReady { .. }
+            | tv::TableMsg::AiDraftSystemMode(..)
+            | tv::TableMsg::AiDraftSystemEdited(..)
+            | tv::TableMsg::AiDraftPromptEdited(..)
+            | tv::TableMsg::AiDraftNote(..)
+            | tv::TableMsg::AiDraftAutoNew(..)
+            | tv::TableMsg::AiDraftAutoSource(..)
+            | tv::TableMsg::AiDraftInsert(..)
+            | tv::TableMsg::AiDraftToggleFields
+            | tv::TableMsg::AiDraftModelPick { .. }
+            | tv::TableMsg::AiDraftToggleModels
+            | tv::TableMsg::AiSaveConfig) => on_ai(app, m),
+        m @ (tv::TableMsg::PluginSetCell { .. }
+            | tv::TableMsg::PluginAddRow { .. }
+            | tv::TableMsg::PluginRemoveRow { .. }
+            | tv::TableMsg::PluginSelectRow { .. }
+            | tv::TableMsg::PluginSetCellImage { .. }) => on_plugin(app, m),
+        // Menu 已由 dispatch 入口解包（构造点只包 Copy/Cut/Paste），这里列出来只为保住穷尽性检查
         tv::TableMsg::Menu(_) => Task::none(),
+    }
+}
+
+fn on_load(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
+    match msg {
         tv::TableMsg::Loaded(gen, file, result) => on_loaded(app, gen, file, result),
         tv::TableMsg::TableSaved(gen, file, reason, result, frozen) => {
             on_saved(app, gen, file, reason, result, frozen)
         }
+        tv::TableMsg::ImageImportPick { row_id, field_id } => pick_images(row_id, field_id),
+        tv::TableMsg::ImagesPicked { row_id, field_id, files } => import_images(app, row_id, field_id, files),
+        tv::TableMsg::ImagesWritten { row_id, field_id, rels, failed } => {
+            if failed > 0 {
+                app.notify(NoticeLevel::Warning, format!("有 {failed} 张图片写入失败"));
+            }
+            if rels.is_empty() {
+                return Task::none();
+            }
+            with_session(app, |s| {
+                push_undo(s);
+                let Some(row) = s.data.rows.iter_mut().find(|r| r.id == row_id) else {
+                    drop_undo(s);
+                    return;
+                };
+                // 旧形态（string[]/标量）不携带 display，一律换新对象；对象形态保留 display
+                let mut value = match row.values.get(&field_id) {
+                    Some(v) if v.is_object() => v.clone(),
+                    _ => serde_json::json!({ "images": [] }),
+                };
+                let mut images: Vec<serde_json::Value> = value
+                    .get("images")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                images.extend(rels.iter().map(|r| serde_json::Value::String(r.clone())));
+                value["images"] = serde_json::Value::Array(images);
+                row.values.insert(field_id, value);
+                s.touch();
+            });
+            Task::none()
+        }
+        tv::TableMsg::ImageLoaded { rel, fp, result } => {
+            let Some(s) = app.table.as_mut() else { return Task::none() };
+            s.view.image_inflight.remove(&rel);
+            match result {
+                Ok(loaded) => {
+                    // 同一路径换了新字节：旧缩略图的常驻登记作废（新句柄另行登记）
+                    s.view.pins.borrow_mut().unpin(&rel);
+                    s.view.images.insert(rel.clone(), tv::CachedImage::new(fp, loaded));
+                    s.view.image_failed.remove(&rel);
+                    Task::none()
+                }
+                Err(_) => {
+                    s.view.image_failed.insert(rel, Instant::now());
+                    retry_after(tv::IMAGE_RETRY_INTERVAL, tv::TableMsg::RetryImages)
+                }
+            }
+        }
+        tv::TableMsg::LightboxImageLoaded { rel, result } => {
+            let Some(s) = app.table.as_mut() else { return Task::none() };
+            // 用户已翻页 / 关灯箱：旧图回执作废（同一 rel 才落地）
+            let current = s.view.lightbox.as_ref().and_then(|lb| tv::lightbox_rel(s, lb));
+            if current.as_deref() != Some(rel.as_str()) {
+                return Task::none();
+            }
+            let Some(lb) = s.view.lightbox.as_mut() else { return Task::none() };
+            match result {
+                Ok(bytes) => {
+                    lb.original = Some(iced::widget::image::Handle::from_bytes(bytes));
+                    lb.original_rel = Some(rel);
+                    lb.original_error = None;
+                    Task::none()
+                }
+                Err(e) => {
+                    lb.original = None;
+                    lb.original_rel = Some(rel);
+                    lb.original_error = Some(e);
+                    retry_after(tv::IMAGE_RETRY_INTERVAL, tv::TableMsg::LightboxRetry)
+                }
+            }
+        }
+        tv::TableMsg::RetryImages => retry_failed_images(app).unwrap_or_default(),
+        tv::TableMsg::LightboxRetry => retry_lightbox_original(app),
+        tv::TableMsg::Downloaded(result) => {
+            match result {
+                Ok(path) => app.notify(NoticeLevel::Success, format!("已保存到 {}", path.display())),
+                Err(e) => app.notify(NoticeLevel::Error, e),
+            }
+            Task::none()
+        }
+        tv::TableMsg::ExportXlsxPick => {
+            app.dismiss_popup();
+            // 导出默认名取文件名主名：文件名是唯一真源，会话内嵌标题可能落后于改名
+            let title = app
+                .table
+                .as_ref()
+                .map(|s| crate::layout_view::file_label(&s.file))
+                .unwrap_or_default();
+            Task::perform(
+                async move {
+                    rfd::AsyncFileDialog::new()
+                        .add_filter("Excel 工作簿", &["xlsx"])
+                        .set_file_name(format!("{title}.xlsx"))
+                        .save_file()
+                        .await
+                        .map(|h| h.path().to_path_buf())
+                },
+                |path| Message::Table(tv::TableMsg::ExportPathPicked(path)),
+            )
+        }
+        tv::TableMsg::ExportPathPicked(path) => export_xlsx(app, path),
+        tv::TableMsg::Exported(result) => {
+            match result {
+                Ok(0) => app.notify(NoticeLevel::Success, "已导出 xlsx"),
+                Ok(n) => app.notify(
+                    NoticeLevel::Warning,
+                    if matches!(app.repo_kind, crate::RepoKind::Space(_)) {
+                        format!("已导出 xlsx（{n} 张图片附件在服务端，未嵌入）")
+                    } else {
+                        format!("已导出 xlsx（{n} 张图片无法嵌入）")
+                    },
+                ),
+                Err(e) => app.notify(NoticeLevel::Error, e),
+            }
+            Task::none()
+        }
+        _ => Task::none(),
+    }
+}
+
+fn on_gesture(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
+    match msg {
         tv::TableMsg::Press { window, pos, size, origin } => on_press(app, window, pos, size, origin),
         tv::TableMsg::Context { window, pos, size } => on_context(app, window, pos, size),
         tv::TableMsg::Move { window, pos, size, origin } => on_move(app, window, pos, size, origin),
         tv::TableMsg::Viewport { window, size } => on_viewport(app, window, size),
         tv::TableMsg::Release(pos) => on_release(app, pos),
         tv::TableMsg::Wheel { delta_y, delta_x } => on_wheel(app, delta_y, delta_x),
+        tv::TableMsg::ShowStyleBar => {
+            app.dismiss_popup();
+            if let Some(s) = app.table.as_mut() {
+                if s.view.editing.is_none() && s.view.selection.is_some() {
+                    s.view.bar_shown = true;
+                }
+            }
+            Task::none()
+        }
+        tv::TableMsg::NavKey(dir) => on_nav_key(app, dir),
+        tv::TableMsg::ClearSelection => on_clear_selection(app),
+        tv::TableMsg::SelectAll => {
+            if let Some(s) = app.table.as_mut() {
+                if table_active(s) {
+                    s.view.selection = Some(ops::TableSelection::All);
+                }
+            }
+            Task::none()
+        }
+        tv::TableMsg::ShowBar { row_id, field_id } => {
+            if let Some(s) = app.table.as_mut() {
+                let selected = matches!(
+                    &s.view.selection,
+                    Some(ops::TableSelection::Cell { row_id: r, field_id: f }) if *r == row_id && *f == field_id
+                );
+                if table_active(s) && selected {
+                    s.view.bar_shown = true;
+                }
+            }
+            Task::none()
+        }
+        tv::TableMsg::LightboxClose => {
+            if let Some(s) = app.table.as_mut() {
+                s.view.lightbox = None;
+            }
+            Task::none()
+        }
+        tv::TableMsg::LightboxNav(delta) => {
+            {
+                let Some(s) = app.table.as_mut() else { return Task::none() };
+                let Some(lb) = s.view.lightbox.as_mut() else { return Task::none() };
+                let count = s
+                    .data
+                    .rows
+                    .iter()
+                    .find(|r| r.id == lb.row_id)
+                    .and_then(|r| r.values.get(&lb.field_id))
+                    .map(|v| ops::image_entries(v).len())
+                    .unwrap_or(0);
+                if count == 0 {
+                    return Task::none();
+                }
+                lb.index = (lb.index as i32 + delta).rem_euclid(count as i32) as usize;
+                lb.reset_view();
+                lb.original = None;
+                lb.original_rel = None;
+                lb.original_error = None;
+            }
+            load_lightbox_original(app)
+        }
+        tv::TableMsg::LightboxZoom { pos, view, delta_y } => on_lightbox_zoom(app, pos, view, delta_y),
+        tv::TableMsg::LightboxPress(pos) => on_lightbox_press(app, pos),
+        tv::TableMsg::LightboxPan { pos, view } => on_lightbox_pan(app, pos, view),
+        tv::TableMsg::LightboxDownload => {
+            app.dismiss_popup();
+            download_lightbox_image(app)
+        }
+        tv::TableMsg::LightboxCopy => {
+            app.dismiss_popup();
+            copy_lightbox_image(app)
+        }
+        tv::TableMsg::Copied(result) => {
+            match result {
+                Ok(()) => app.notify(NoticeLevel::Success, "已复制图片到剪贴板"),
+                Err(e) => app.notify(NoticeLevel::Error, e),
+            }
+            Task::none()
+        }
+        tv::TableMsg::OpenLightboxMenu(window) => {
+            open_table_popup(app, window, crate::layout_view::PopupState::TableLightboxMenu, None);
+            Task::none()
+        }
+        tv::TableMsg::OpenViewMenu(window) => {
+            open_table_popup(app, window, crate::layout_view::PopupState::TableViewMenu, None);
+            Task::none()
+        }
+        tv::TableMsg::SetView(kind) => {
+            if let Some(session) = app.table.as_mut() {
+                session.view.active_view = kind;
+            }
+            app.dismiss_popup();
+            Task::none()
+        }
+        tv::TableMsg::OpenMoreMenu(window) => {
+            open_table_popup(app, window, crate::layout_view::PopupState::TableMoreMenu, None);
+            Task::none()
+        }
+        tv::TableMsg::OpenFontMenu(window) => {
+            app.font_picker_query.clear();
+            open_table_popup(
+                app,
+                window,
+                crate::layout_view::PopupState::FontPicker { for_table: true },
+                None,
+            );
+            Task::none()
+        }
+        tv::TableMsg::OpenSizeMenu(window) => {
+            open_table_popup(app, window, crate::layout_view::PopupState::TableSizeMenu, None);
+            Task::none()
+        }
+        tv::TableMsg::OpenColorMenu { window, bg } => {
+            crate::color_picker_actions::open_table(app, window, bg);
+            Task::none()
+        }
+        tv::TableMsg::Noop => Task::none(),
+        _ => Task::none(),
+    }
+}
+
+fn on_edit(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
+    match msg {
         tv::TableMsg::Edited(action) => {
             let Some(s) = app.table.as_mut() else { return Task::none() };
             let mut live = None;
@@ -144,15 +488,6 @@ fn on_msg_open(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
             }
             Task::none()
         }
-        tv::TableMsg::ShowStyleBar => {
-            app.dismiss_popup();
-            if let Some(s) = app.table.as_mut() {
-                if s.view.editing.is_none() && s.view.selection.is_some() {
-                    s.view.bar_shown = true;
-                }
-            }
-            Task::none()
-        }
         tv::TableMsg::CommitEnter => on_commit_enter(app),
         tv::TableMsg::CancelEdit => {
             cancel_edit(app);
@@ -179,7 +514,6 @@ fn on_msg_open(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
             }
             Task::none()
         }
-        tv::TableMsg::NavKey(dir) => on_nav_key(app, dir),
         tv::TableMsg::Copy => on_copy(app, false),
         tv::TableMsg::Cut => on_copy(app, true),
         tv::TableMsg::Paste => {
@@ -188,27 +522,6 @@ fn on_msg_open(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
             })
         }
         tv::TableMsg::PasteText(text) => on_paste(app, text),
-        tv::TableMsg::ClearSelection => on_clear_selection(app),
-        tv::TableMsg::SelectAll => {
-            if let Some(s) = app.table.as_mut() {
-                if table_active(s) {
-                    s.view.selection = Some(ops::TableSelection::All);
-                }
-            }
-            Task::none()
-        }
-        tv::TableMsg::ShowBar { row_id, field_id } => {
-            if let Some(s) = app.table.as_mut() {
-                let selected = matches!(
-                    &s.view.selection,
-                    Some(ops::TableSelection::Cell { row_id: r, field_id: f }) if *r == row_id && *f == field_id
-                );
-                if table_active(s) && selected {
-                    s.view.bar_shown = true;
-                }
-            }
-            Task::none()
-        }
         tv::TableMsg::Undo => {
             // 只有确实会执行撤销时才取消在途批次（空栈 / 未聚焦的按键不改批次状态）
             let applies = app.table.as_ref().is_some_and(|s| {
@@ -230,6 +543,64 @@ fn on_msg_open(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
             redo(app);
             Task::none()
         }
+        tv::TableMsg::StyleToggle(key) => apply_style(app, style_toggle_patch(app, key)),
+        tv::TableMsg::SetFont(font) => {
+            // default = 清除
+            let task = apply_style(
+                app,
+                ops::StylePatch { font: ops::KeyOp::Set(font.filter(|f| f != "default")), ..Default::default() },
+            );
+            app.dismiss_popup();
+            task
+        }
+        tv::TableMsg::SetSize(size) => {
+            let task = apply_style(app, ops::StylePatch { size: ops::KeyOp::Set(size), ..Default::default() });
+            app.dismiss_popup();
+            task
+        }
+        tv::TableMsg::SetColor { bg, color } => {
+            let patch = if bg {
+                ops::StylePatch { bg: ops::KeyOp::Set(color), ..Default::default() }
+            } else {
+                ops::StylePatch { color: ops::KeyOp::Set(color), ..Default::default() }
+            };
+            // 取色器选色后弹层保持打开（连续比较）；关闭由外点 / Esc 承担
+            apply_style(app, patch)
+        }
+        tv::TableMsg::ClearFormat => {
+            let task = apply_style(app, clear_format_patch());
+            app.dismiss_popup();
+            task
+        }
+        tv::TableMsg::SelectOption { row_id, field_id, value } => {
+            let mut changed = false;
+            with_session(app, |s| {
+                push_undo(s);
+                let Some(row) = s.data.rows.iter_mut().find(|r| r.id == row_id) else { return };
+                let next = value.map(serde_json::Value::String);
+                if ops::set_cell_value(row, &field_id, next) {
+                    s.touch();
+                    changed = true;
+                } else {
+                    drop_undo(s);
+                }
+            });
+            if changed {
+                crate::table_ai::note_source_edit(app, &row_id, &field_id);
+            }
+            app.dismiss_popup();
+            Task::none()
+        }
+        tv::TableMsg::PopupDraft(v) => {
+            app.table_popup_draft = v;
+            Task::none()
+        }
+        _ => Task::none(),
+    }
+}
+
+fn on_structure(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
+    match msg {
         tv::TableMsg::DuplicateRow(row_id) => {
             with_session(app, |s| {
                 push_undo(s);
@@ -356,6 +727,96 @@ fn on_msg_open(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
             app.dismiss_popup();
             Task::none()
         }
+        tv::TableMsg::OptionsAdd { field_id, name } => {
+            let name = name.trim().to_string();
+            if name.is_empty() {
+                return Task::none();
+            }
+            with_session(app, |s| {
+                let mut options = current_options(s, &field_id);
+                options.push(name);
+                push_undo(s);
+                if ops::set_field_options(&mut s.data, &field_id, options) {
+                    s.touch();
+                } else {
+                    drop_undo(s);
+                }
+            });
+            app.table_popup_draft.clear();
+            Task::none()
+        }
+        tv::TableMsg::OptionsRemove { field_id, index } => {
+            with_session(app, |s| {
+                let mut options = current_options(s, &field_id);
+                if index >= options.len() {
+                    return;
+                }
+                options.remove(index);
+                push_undo(s);
+                if ops::set_field_options(&mut s.data, &field_id, options) {
+                    s.touch();
+                } else {
+                    drop_undo(s);
+                }
+            });
+            Task::none()
+        }
+        tv::TableMsg::ColumnAutoWidth(field_id) => {
+            with_session(app, |s| {
+                push_undo(s);
+                let targets: Vec<String> = match field_id {
+                    Some(id) => vec![id],
+                    None => s.data.fields.iter().map(|f| f.id.clone()).collect(),
+                };
+                let mut changed = false;
+                for id in targets {
+                    let Some(f) = s.data.fields.iter().find(|f| f.id == id).cloned() else { continue };
+                    let w = ops::column_auto_width(&f, &s.data.rows);
+                    changed |= ops::set_field_width(&mut s.data, &id, Some(w));
+                }
+                if changed {
+                    s.touch();
+                } else {
+                    drop_undo(s);
+                }
+            });
+            app.dismiss_popup();
+            Task::none()
+        }
+        tv::TableMsg::RowHeightAuto(row_id) => {
+            with_session(app, |s| {
+                push_undo(s);
+                let ids: Vec<String> = match row_id {
+                    Some(id) => vec![id],
+                    None => s.data.rows.iter().filter(|r| r.height.is_some()).map(|r| r.id.clone()).collect(),
+                };
+                if ops::clear_row_heights(&mut s.data, &ids) {
+                    s.touch();
+                } else {
+                    drop_undo(s);
+                }
+            });
+            app.dismiss_popup();
+            Task::none()
+        }
+        tv::TableMsg::SetCalc { field_id, calc } => {
+            with_session(app, |s| {
+                push_undo(s);
+                if ops::set_calc_type(&mut s.data, &field_id, calc.as_deref()) {
+                    s.touch();
+                } else {
+                    drop_undo(s);
+                }
+            });
+            app.dismiss_popup();
+            Task::none()
+        }
+        _ => Task::none(),
+    }
+}
+
+fn on_ai(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
+    match msg {
         // AI 字段：生成 / 停止 / 配置
         tv::TableMsg::AiStart { field_id, filter } => {
             app.dismiss_popup();
@@ -444,274 +905,12 @@ fn on_msg_open(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
             Task::none()
         }
         tv::TableMsg::AiSaveConfig => crate::table_ai::save_draft(app),
-        tv::TableMsg::OptionsAdd { field_id, name } => {
-            let name = name.trim().to_string();
-            if name.is_empty() {
-                return Task::none();
-            }
-            with_session(app, |s| {
-                let mut options = current_options(s, &field_id);
-                options.push(name);
-                push_undo(s);
-                if ops::set_field_options(&mut s.data, &field_id, options) {
-                    s.touch();
-                } else {
-                    drop_undo(s);
-                }
-            });
-            app.table_popup_draft.clear();
-            Task::none()
-        }
-        tv::TableMsg::OptionsRemove { field_id, index } => {
-            with_session(app, |s| {
-                let mut options = current_options(s, &field_id);
-                if index >= options.len() {
-                    return;
-                }
-                options.remove(index);
-                push_undo(s);
-                if ops::set_field_options(&mut s.data, &field_id, options) {
-                    s.touch();
-                } else {
-                    drop_undo(s);
-                }
-            });
-            Task::none()
-        }
-        tv::TableMsg::ColumnAutoWidth(field_id) => {
-            with_session(app, |s| {
-                push_undo(s);
-                let targets: Vec<String> = match field_id {
-                    Some(id) => vec![id],
-                    None => s.data.fields.iter().map(|f| f.id.clone()).collect(),
-                };
-                let mut changed = false;
-                for id in targets {
-                    let Some(f) = s.data.fields.iter().find(|f| f.id == id).cloned() else { continue };
-                    let w = ops::column_auto_width(&f, &s.data.rows);
-                    changed |= ops::set_field_width(&mut s.data, &id, Some(w));
-                }
-                if changed {
-                    s.touch();
-                } else {
-                    drop_undo(s);
-                }
-            });
-            app.dismiss_popup();
-            Task::none()
-        }
-        tv::TableMsg::RowHeightAuto(row_id) => {
-            with_session(app, |s| {
-                push_undo(s);
-                let ids: Vec<String> = match row_id {
-                    Some(id) => vec![id],
-                    None => s.data.rows.iter().filter(|r| r.height.is_some()).map(|r| r.id.clone()).collect(),
-                };
-                if ops::clear_row_heights(&mut s.data, &ids) {
-                    s.touch();
-                } else {
-                    drop_undo(s);
-                }
-            });
-            app.dismiss_popup();
-            Task::none()
-        }
-        tv::TableMsg::SetCalc { field_id, calc } => {
-            with_session(app, |s| {
-                push_undo(s);
-                if ops::set_calc_type(&mut s.data, &field_id, calc.as_deref()) {
-                    s.touch();
-                } else {
-                    drop_undo(s);
-                }
-            });
-            app.dismiss_popup();
-            Task::none()
-        }
-        tv::TableMsg::StyleToggle(key) => apply_style(app, style_toggle_patch(app, key)),
-        tv::TableMsg::SetFont(font) => {
-            // default = 清除
-            let task = apply_style(
-                app,
-                ops::StylePatch { font: ops::KeyOp::Set(font.filter(|f| f != "default")), ..Default::default() },
-            );
-            app.dismiss_popup();
-            task
-        }
-        tv::TableMsg::SetSize(size) => {
-            let task = apply_style(app, ops::StylePatch { size: ops::KeyOp::Set(size), ..Default::default() });
-            app.dismiss_popup();
-            task
-        }
-        tv::TableMsg::SetColor { bg, color } => {
-            let patch = if bg {
-                ops::StylePatch { bg: ops::KeyOp::Set(color), ..Default::default() }
-            } else {
-                ops::StylePatch { color: ops::KeyOp::Set(color), ..Default::default() }
-            };
-            // 取色器选色后弹层保持打开（连续比较）；关闭由外点 / Esc 承担
-            apply_style(app, patch)
-        }
-        tv::TableMsg::ClearFormat => {
-            let task = apply_style(app, clear_format_patch());
-            app.dismiss_popup();
-            task
-        }
-        tv::TableMsg::SelectOption { row_id, field_id, value } => {
-            let mut changed = false;
-            with_session(app, |s| {
-                push_undo(s);
-                let Some(row) = s.data.rows.iter_mut().find(|r| r.id == row_id) else { return };
-                let next = value.map(serde_json::Value::String);
-                if ops::set_cell_value(row, &field_id, next) {
-                    s.touch();
-                    changed = true;
-                } else {
-                    drop_undo(s);
-                }
-            });
-            if changed {
-                crate::table_ai::note_source_edit(app, &row_id, &field_id);
-            }
-            app.dismiss_popup();
-            Task::none()
-        }
-        tv::TableMsg::ImageImportPick { row_id, field_id } => pick_images(row_id, field_id),
-        tv::TableMsg::ImagesPicked { row_id, field_id, files } => import_images(app, row_id, field_id, files),
-        tv::TableMsg::ImagesWritten { row_id, field_id, rels, failed } => {
-            if failed > 0 {
-                app.notify(NoticeLevel::Warning, format!("有 {failed} 张图片写入失败"));
-            }
-            if rels.is_empty() {
-                return Task::none();
-            }
-            with_session(app, |s| {
-                push_undo(s);
-                let Some(row) = s.data.rows.iter_mut().find(|r| r.id == row_id) else {
-                    drop_undo(s);
-                    return;
-                };
-                // 旧形态（string[]/标量）不携带 display，一律换新对象；对象形态保留 display
-                let mut value = match row.values.get(&field_id) {
-                    Some(v) if v.is_object() => v.clone(),
-                    _ => serde_json::json!({ "images": [] }),
-                };
-                let mut images: Vec<serde_json::Value> = value
-                    .get("images")
-                    .and_then(|v| v.as_array())
-                    .cloned()
-                    .unwrap_or_default();
-                images.extend(rels.iter().map(|r| serde_json::Value::String(r.clone())));
-                value["images"] = serde_json::Value::Array(images);
-                row.values.insert(field_id, value);
-                s.touch();
-            });
-            Task::none()
-        }
-        tv::TableMsg::ImageLoaded { rel, fp, result } => {
-            let Some(s) = app.table.as_mut() else { return Task::none() };
-            s.view.image_inflight.remove(&rel);
-            match result {
-                Ok(loaded) => {
-                    // 同一路径换了新字节：旧缩略图的常驻登记作废（新句柄另行登记）
-                    s.view.pins.borrow_mut().unpin(&rel);
-                    s.view.images.insert(rel.clone(), tv::CachedImage::new(fp, loaded));
-                    s.view.image_failed.remove(&rel);
-                    Task::none()
-                }
-                Err(_) => {
-                    s.view.image_failed.insert(rel, Instant::now());
-                    retry_after(tv::IMAGE_RETRY_INTERVAL, tv::TableMsg::RetryImages)
-                }
-            }
-        }
-        tv::TableMsg::LightboxImageLoaded { rel, result } => {
-            let Some(s) = app.table.as_mut() else { return Task::none() };
-            // 用户已翻页 / 关灯箱：旧图回执作废（同一 rel 才落地）
-            let current = s.view.lightbox.as_ref().and_then(|lb| tv::lightbox_rel(s, lb));
-            if current.as_deref() != Some(rel.as_str()) {
-                return Task::none();
-            }
-            let Some(lb) = s.view.lightbox.as_mut() else { return Task::none() };
-            match result {
-                Ok(bytes) => {
-                    lb.original = Some(iced::widget::image::Handle::from_bytes(bytes));
-                    lb.original_rel = Some(rel);
-                    lb.original_error = None;
-                    Task::none()
-                }
-                Err(e) => {
-                    lb.original = None;
-                    lb.original_rel = Some(rel);
-                    lb.original_error = Some(e);
-                    retry_after(tv::IMAGE_RETRY_INTERVAL, tv::TableMsg::LightboxRetry)
-                }
-            }
-        }
-        tv::TableMsg::RetryImages => retry_failed_images(app).unwrap_or_default(),
-        tv::TableMsg::LightboxRetry => retry_lightbox_original(app),
-        tv::TableMsg::LightboxClose => {
-            if let Some(s) = app.table.as_mut() {
-                s.view.lightbox = None;
-            }
-            Task::none()
-        }
-        tv::TableMsg::LightboxNav(delta) => {
-            {
-                let Some(s) = app.table.as_mut() else { return Task::none() };
-                let Some(lb) = s.view.lightbox.as_mut() else { return Task::none() };
-                let count = s
-                    .data
-                    .rows
-                    .iter()
-                    .find(|r| r.id == lb.row_id)
-                    .and_then(|r| r.values.get(&lb.field_id))
-                    .map(|v| ops::image_entries(v).len())
-                    .unwrap_or(0);
-                if count == 0 {
-                    return Task::none();
-                }
-                lb.index = (lb.index as i32 + delta).rem_euclid(count as i32) as usize;
-                lb.reset_view();
-                lb.original = None;
-                lb.original_rel = None;
-                lb.original_error = None;
-            }
-            load_lightbox_original(app)
-        }
-        tv::TableMsg::LightboxZoom { pos, view, delta_y } => on_lightbox_zoom(app, pos, view, delta_y),
-        tv::TableMsg::LightboxPress(pos) => on_lightbox_press(app, pos),
-        tv::TableMsg::LightboxPan { pos, view } => on_lightbox_pan(app, pos, view),
-        tv::TableMsg::LightboxDownload => {
-            app.dismiss_popup();
-            download_lightbox_image(app)
-        }
-        tv::TableMsg::LightboxCopy => {
-            app.dismiss_popup();
-            copy_lightbox_image(app)
-        }
-        tv::TableMsg::Copied(result) => {
-            match result {
-                Ok(()) => app.notify(NoticeLevel::Success, "已复制图片到剪贴板"),
-                Err(e) => app.notify(NoticeLevel::Error, e),
-            }
-            Task::none()
-        }
-        tv::TableMsg::OpenLightboxMenu(window) => {
-            open_table_popup(app, window, crate::layout_view::PopupState::TableLightboxMenu, None);
-            Task::none()
-        }
-        tv::TableMsg::OpenViewMenu(window) => {
-            open_table_popup(app, window, crate::layout_view::PopupState::TableViewMenu, None);
-            Task::none()
-        }
-        tv::TableMsg::SetView(kind) => {
-            if let Some(session) = app.table.as_mut() {
-                session.view.active_view = kind;
-            }
-            app.dismiss_popup();
-            Task::none()
-        }
+        _ => Task::none(),
+    }
+}
+
+fn on_plugin(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
+    match msg {
         // 插件表格写：与本地编辑同一出口（同撤销栈、同置脏与保存链），结果按 request_id 回填
         tv::TableMsg::PluginSetCell { request_id, row_id, field_id, value } => {
             let result = plugin_set_cell(app, &row_id, &field_id, value);
@@ -742,76 +941,7 @@ fn on_msg_open(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
             resolve_plugin_call(app, request_id, result.map(|()| serde_json::json!({})));
             Task::none()
         }
-        tv::TableMsg::Downloaded(result) => {
-            match result {
-                Ok(path) => app.notify(NoticeLevel::Success, format!("已保存到 {}", path.display())),
-                Err(e) => app.notify(NoticeLevel::Error, e),
-            }
-            Task::none()
-        }
-        tv::TableMsg::ExportXlsxPick => {
-            app.dismiss_popup();
-            // 导出默认名取文件名主名：文件名是唯一真源，会话内嵌标题可能落后于改名
-            let title = app
-                .table
-                .as_ref()
-                .map(|s| crate::layout_view::file_label(&s.file))
-                .unwrap_or_default();
-            Task::perform(
-                async move {
-                    rfd::AsyncFileDialog::new()
-                        .add_filter("Excel 工作簿", &["xlsx"])
-                        .set_file_name(format!("{title}.xlsx"))
-                        .save_file()
-                        .await
-                        .map(|h| h.path().to_path_buf())
-                },
-                |path| Message::Table(tv::TableMsg::ExportPathPicked(path)),
-            )
-        }
-        tv::TableMsg::ExportPathPicked(path) => export_xlsx(app, path),
-        tv::TableMsg::Exported(result) => {
-            match result {
-                Ok(0) => app.notify(NoticeLevel::Success, "已导出 xlsx"),
-                Ok(n) => app.notify(
-                    NoticeLevel::Warning,
-                    if matches!(app.repo_kind, crate::RepoKind::Space(_)) {
-                        format!("已导出 xlsx（{n} 张图片附件在服务端，未嵌入）")
-                    } else {
-                        format!("已导出 xlsx（{n} 张图片无法嵌入）")
-                    },
-                ),
-                Err(e) => app.notify(NoticeLevel::Error, e),
-            }
-            Task::none()
-        }
-        tv::TableMsg::OpenMoreMenu(window) => {
-            open_table_popup(app, window, crate::layout_view::PopupState::TableMoreMenu, None);
-            Task::none()
-        }
-        tv::TableMsg::OpenFontMenu(window) => {
-            app.font_picker_query.clear();
-            open_table_popup(
-                app,
-                window,
-                crate::layout_view::PopupState::FontPicker { for_table: true },
-                None,
-            );
-            Task::none()
-        }
-        tv::TableMsg::OpenSizeMenu(window) => {
-            open_table_popup(app, window, crate::layout_view::PopupState::TableSizeMenu, None);
-            Task::none()
-        }
-        tv::TableMsg::OpenColorMenu { window, bg } => {
-            crate::color_picker_actions::open_table(app, window, bg);
-            Task::none()
-        }
-        tv::TableMsg::PopupDraft(v) => {
-            app.table_popup_draft = v;
-            Task::none()
-        }
-        tv::TableMsg::Noop => Task::none(),
+        _ => Task::none(),
     }
 }
 
