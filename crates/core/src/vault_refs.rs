@@ -277,13 +277,7 @@ fn remap_note_paths(root: &Path, pairs: &[(String, String)]) {
 /// 目录前缀类元数据同步：提示词标记 / Agent 提示词引用 / 文件夹颜色键按前缀替换
 /// （颜色键可为目录本身，精确匹配也替换）。
 fn remap_dir_paths(root: &Path, old_dir: &str, new_dir: &str) {
-    let old_prefix = format!("{old_dir}/");
-    let remap = |p: &str| -> Option<String> {
-        if p == old_dir {
-            return Some(new_dir.to_string());
-        }
-        p.strip_prefix(&old_prefix).map(|rest| format!("{new_dir}/{rest}"))
-    };
+    let remap = |p: &str| crate::path::remap_prefix(p, old_dir, new_dir);
     if let Ok(mut notes) = vault::read_prompt_notes_file(root) {
         let mut changed = false;
         for note in &mut notes {

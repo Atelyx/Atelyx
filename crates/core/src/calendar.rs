@@ -50,9 +50,10 @@ pub fn read_calendar(root: &Path) -> Result<Vec<CalendarItem>, String> {
         .map(|file| file.items)
 }
 
-/// 条目清单 → 日程 JSON 原文（schema 包装；写盘与空间 meta 值共用同一编码）。
+/// 条目清单 → 日程 JSON 原文（schema 包装；写盘与空间 meta 值共用同一编码，
+/// 两者都用 pretty，否则同一份日程在本地文件与服务端 meta 里是两种字节）。
 pub fn calendar_json(items: &[CalendarItem]) -> Result<String, String> {
-    serde_json::to_string(&CalendarFile {
+    serde_json::to_string_pretty(&CalendarFile {
         schema: CALENDAR_SCHEMA.into(),
         items: items.to_vec(),
     })

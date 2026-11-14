@@ -2,7 +2,6 @@
 //!
 //! 读写口径与仓库配置一致：读路径解析失败先备份原文再降级为空，写路径原子覆盖整文件。
 
-
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
