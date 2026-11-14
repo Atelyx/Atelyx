@@ -1,0 +1,316 @@
+{
+  "description": "标签解析对拍夹具：客户端标签面板（vault::extract_note_tags）与服务端派生索引（index::extract_note_tags）共用。每条 content 分别喂给两端，提取结果须与 tags 完全一致（顺序无关）。cases = 探测时两端已一致的形态；alignedCases = 探测时两端不一致、已按客户端口径修正服务端 frontmatter 定界后的回归用例（期望值取自客户端）。",
+  "cases": [
+    {
+      "name": "inline_cjk_and_ascii",
+      "description": "正文内联中英文标签，中文逗号结束标签",
+      "content": "正文里写 #工作 和 #frontend，都在同一行。\n",
+      "tags": [
+        "工作",
+        "frontend"
+      ]
+    },
+    {
+      "name": "nested_slash",
+      "description": "#tag 与层级标签 #tag/sub、#项目/前端",
+      "content": "#tag 与 #tag/sub 与 #项目/前端 三种层级写法\n",
+      "tags": [
+        "tag",
+        "tag/sub",
+        "项目/前端"
+      ]
+    },
+    {
+      "name": "tag_charset",
+      "description": "连字符、下划线、尾随数字都算标签字符",
+      "content": "#kebab-case 与 #snake_case 与 #tag-1\n",
+      "tags": [
+        "kebab-case",
+        "snake_case",
+        "tag-1"
+      ]
+    },
+    {
+      "name": "case_sensitive",
+      "description": "标签名大小写敏感：Work / work / WORK 是三个不同标签",
+      "content": "#Work 与 #work 与 #WORK\n",
+      "tags": [
+        "Work",
+        "work",
+        "WORK"
+      ]
+    },
+    {
+      "name": "whitespace_dedup",
+      "description": "标签前后空白不进标签名，重复标签去重",
+      "content": "   #tag   前后空白   #tag 重复\n",
+      "tags": [
+        "tag"
+      ]
+    },
+    {
+      "name": "long_tag",
+      "description": "200 个字符的超长标签照常提取（无长度上限）",
+      "content": "#aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+      "tags": [
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      ]
+    },
+    {
+      "name": "escaped_hash",
+      "description": "反斜杠不是 Markdown 转义：\\#转义 仍按标签提取",
+      "content": "\\#转义 反斜杠不转义\n",
+      "tags": [
+        "转义"
+      ]
+    },
+    {
+      "name": "heading_lines",
+      "description": "ATX 标题行的 # 不是标签，正文 #real 才是",
+      "content": "# 一级标题\n## 二级标题\n### 三级标题\n正文 #real\n",
+      "tags": [
+        "real"
+      ]
+    },
+    {
+      "name": "pure_number",
+      "description": "纯数字不算标签；字母数字混合（abc123 / 123abc）算",
+      "content": "#123 与 #2024 与 #abc123 与 #123abc\n",
+      "tags": [
+        "abc123",
+        "123abc"
+      ]
+    },
+    {
+      "name": "word_boundary",
+      "description": "foo#bar 与 ##nope 不算，独立 #ok 算",
+      "content": "foo#bar ##nope #ok\n",
+      "tags": [
+        "ok"
+      ]
+    },
+    {
+      "name": "url_fragment",
+      "description": "URL 片段 #faq 的 # 前是 /，不算标签",
+      "content": "见 https://x.com/#faq 不是标签\n",
+      "tags": []
+    },
+    {
+      "name": "cjk_punct_after_hash",
+      "description": "# 后紧跟中文标点：空标签不算；标签在中文逗号处结束",
+      "content": "#重要，另一个#不是标签。\n#。空标签\n",
+      "tags": [
+        "重要"
+      ]
+    },
+    {
+      "name": "inline_code",
+      "description": "行内代码里的 #code_tag 不算",
+      "content": "行内代码 `#code_tag` 不算，真正的标签 #real 才算。\n",
+      "tags": [
+        "real"
+      ]
+    },
+    {
+      "name": "fenced_code",
+      "description": "围栏代码块里的 #fenced 不算，块前后的标签都算",
+      "content": "正文 #before\n\n```rust\nfn main() {}\n// #fenced\n```\n\n#after\n",
+      "tags": [
+        "before",
+        "after"
+      ]
+    },
+    {
+      "name": "tilde_fence",
+      "description": "~~~ 围栏同样跳过",
+      "content": "~~~\n#tilde_fenced\n~~~\n#visible\n",
+      "tags": [
+        "visible"
+      ]
+    },
+    {
+      "name": "indented_code",
+      "description": "≥4 空格缩进代码行里的 #indented_code 不算",
+      "content": "段落\n\n    #indented_code\n\n#visible\n",
+      "tags": [
+        "visible"
+      ]
+    },
+    {
+      "name": "frontmatter_flow",
+      "description": "frontmatter 流式数组 + 正文内联标签合并",
+      "content": "---\ntags: [工作, \"休息\"]\n---\n正文 #生活\n",
+      "tags": [
+        "工作",
+        "休息",
+        "生活"
+      ]
+    },
+    {
+      "name": "frontmatter_block_list",
+      "description": "frontmatter 块列表写法",
+      "content": "---\ntags:\n  - x\n  - y\n---\nbody\n",
+      "tags": [
+        "x",
+        "y"
+      ]
+    },
+    {
+      "name": "frontmatter_scalar",
+      "description": "frontmatter 标量写法",
+      "content": "---\ntags: 标签\n---\n",
+      "tags": [
+        "标签"
+      ]
+    },
+    {
+      "name": "frontmatter_quoted_list",
+      "description": "块列表引号剥离 + 值位行内注释剥离",
+      "content": "---\ntags:\n  - '单个引号'\n  - x # 备注\n---\n",
+      "tags": [
+        "单个引号",
+        "x"
+      ]
+    },
+    {
+      "name": "frontmatter_comment_only",
+      "description": "值位只有注释时按块列表处理，后续 - 项仍算",
+      "content": "---\ntags: # 备注\n  - a\n---\n",
+      "tags": [
+        "a"
+      ]
+    },
+    {
+      "name": "frontmatter_multiline_flow",
+      "description": "跨行流式数组 + 行内注释",
+      "content": "---\ntags: [\n  甲, # 一\n  乙\n]\n---\n",
+      "tags": [
+        "甲",
+        "乙"
+      ]
+    },
+    {
+      "name": "frontmatter_unclosed_flow",
+      "description": "未闭合流式数组整体忽略，不造半截标签",
+      "content": "---\ntags: [a, b\n---\n",
+      "tags": []
+    },
+    {
+      "name": "frontmatter_nested_ignored",
+      "description": "嵌套键里的 tags 不算顶层键",
+      "content": "---\nmeta:\n  tags: [x]\n---\n",
+      "tags": []
+    },
+    {
+      "name": "frontmatter_indented_root",
+      "description": "整块映射统一缩进时仍是顶层 tags",
+      "content": "---\n  tags: [a]\n---\n",
+      "tags": [
+        "a"
+      ]
+    },
+    {
+      "name": "crlf_frontmatter",
+      "description": "CRLF 行尾的 frontmatter 与正文",
+      "content": "---\r\ntags: [甲, 乙]\r\n---\r\n正文 #丙\r\n",
+      "tags": [
+        "甲",
+        "乙",
+        "丙"
+      ]
+    },
+    {
+      "name": "fm_body_duplicate",
+      "description": "frontmatter 与正文重复标签只留一份",
+      "content": "---\ntags: [dup]\n---\n#dup\n#dup\n",
+      "tags": [
+        "dup"
+      ]
+    },
+    {
+      "name": "hr_not_frontmatter",
+      "description": "非开头的 --- 是正文横隔条，其后 #tag 仍算正文标签",
+      "content": "正文\n---\n#tag\n",
+      "tags": [
+        "tag"
+      ]
+    }
+  ],
+  "alignedCases": {
+    "description": "服务端与客户端必须用同一 frontmatter 定界：BOM 跳过、起始行以 `---` 起始即可（其后可有尾注）、闭合行 = 其后首条以 `---` 起始的行。这组边界形态锁住该对齐（期望值取自客户端）。",
+    "cases": [
+      {
+        "name": "bom_frontmatter",
+        "description": "带 UTF-8 BOM 的 frontmatter 仍算块，其 tags 入索引",
+        "content": "\uFEFF---\ntags: [bom]\n---\n正文 #body\n",
+        "tags": [
+          "bom",
+          "body"
+        ]
+      },
+      {
+        "name": "opener_trailing_space",
+        "description": "起始行 `--- ` 带尾随空格仍算 frontmatter",
+        "content": "--- \ntags: [a]\n---\n正文 #b\n",
+        "tags": [
+          "a",
+          "b"
+        ]
+      },
+      {
+        "name": "opener_extra_chars",
+        "description": "起始行 `---yaml` 带尾注仍算 frontmatter",
+        "content": "---yaml\ntags: [a]\n---\n正文 #b\n",
+        "tags": [
+          "a",
+          "b"
+        ]
+      },
+      {
+        "name": "opener_title",
+        "description": "起始行 `--- title` 带尾注仍算 frontmatter",
+        "content": "--- title\ntags: [a]\n---\n正文 #b\n",
+        "tags": [
+          "a",
+          "b"
+        ]
+      },
+      {
+        "name": "four_dashes",
+        "description": "`----` 起始/闭合行都按 `---` 起始行识别",
+        "content": "----\ntags: [a]\n----\n正文 #b\n",
+        "tags": [
+          "a",
+          "b"
+        ]
+      },
+      {
+        "name": "closer_trailing_space",
+        "description": "闭合行 `--- ` 带尾随空格仍闭合",
+        "content": "---\ntags: [a]\n--- \n正文 #b\n",
+        "tags": [
+          "a",
+          "b"
+        ]
+      },
+      {
+        "name": "closer_extra_chars",
+        "description": "闭合行 `---end` 带尾注仍闭合",
+        "content": "---\ntags: [a]\n---end\n正文 #b\n",
+        "tags": [
+          "a",
+          "b"
+        ]
+      },
+      {
+        "name": "fm_hash_body",
+        "description": "frontmatter 字段里的 #内部 不算正文标签",
+        "content": "--- \ntags: [a]\ndesc: 参考 #内部 说明\n---\n正文 #b\n",
+        "tags": [
+          "a",
+          "b"
+        ]
+      }
+    ]
+  }
+}

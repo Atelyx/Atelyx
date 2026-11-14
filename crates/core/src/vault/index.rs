@@ -653,4 +653,35 @@ mod tag_index_tests {
         sorted.sort_unstable();
         assert_eq!(rest, sorted, "同频按名称升序");
     }
+
+    /// 两端共用 `fixtures/tag-parse.json`：`cases` 是常规形态，`alignedCases` 是
+    /// frontmatter 定界边界（BOM、非规范分隔行），期望值取自客户端；两端必须切在同一位置。
+    /// 任一形态两端提取结果都必须与 tags 完全一致（顺序无关）。
+    #[test]
+    fn tag_parse_fixture() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/tag-parse.json");
+        let raw = std::fs::read_to_string(path)
+            .expect("夹具缺失：fixtures/tag-parse.json 应随源码入库");
+        let fixture: serde_json::Value = serde_json::from_str(&raw).expect("夹具不是合法 JSON");
+        let cases = fixture["cases"].as_array().expect("夹具缺 cases 数组");
+        let aligned = fixture["alignedCases"]["cases"]
+            .as_array()
+            .expect("夹具缺 alignedCases.cases 数组");
+        assert!(cases.len() >= 25, "语料规模兜底：cases 疑似被清空");
+        assert!(aligned.len() >= 8, "语料规模兜底：alignedCases 疑似被清空");
+        for case in cases.iter().chain(aligned) {
+            let name = case["name"].as_str().unwrap_or_default();
+            let content = case["content"].as_str().expect("语料缺 content");
+            let mut want: Vec<String> = case["tags"]
+                .as_array()
+                .expect("语料缺 tags")
+                .iter()
+                .map(|tag| tag.as_str().expect("tags 项须为字符串").to_string())
+                .collect();
+            let mut got: Vec<String> = extract_note_tags(content).into_iter().collect();
+            got.sort();
+            want.sort();
+            assert_eq!(got, want, "语料 {name} 标签不一致：content = {content:?}");
+        }
+    }
 }

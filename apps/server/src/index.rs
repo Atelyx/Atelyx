@@ -194,11 +194,9 @@ fn extract_note_tags(content: &str) -> HashSet<String> {
     let mut tags: HashSet<String> = HashSet::new();
     let mut body_start = 0;
     // 仅文档开头 `---` 块内的 `tags` 键算 frontmatter（非开头 `---` 是正文横隔条，不算）
-    if content.starts_with("---\n") || content.starts_with("---\r\n") {
-        if let Some(end) = frontmatter_end(content) {
-            parse_fm_tags(&content[..end], &mut tags);
-            body_start = end;
-        }
+    if let Some(end) = frontmatter_end(content) {
+        parse_fm_tags(&content[..end], &mut tags);
+        body_start = end;
     }
     extract_inline_tags(&content[body_start..], &mut tags);
     tags
@@ -465,15 +463,21 @@ fn fence_close_end(rest: &str, open_char: char, open_len: usize) -> Option<usize
     None
 }
 
-/// 文档开头 frontmatter 结束位置（`---\n ... ---\n` 闭合行之后）；无闭合返回 None。
+/// 文档开头 frontmatter 块结束位置（含闭合行行尾换行）；无块或未闭合返回 None。
+/// 定界与客户端 `frontmatter::block_end` 同口径：BOM 跳过、起始行以 `---` 起始即可（其后可有尾注）、
+/// 闭合行 = 其后第一条以 `---` 起始的行。两端必须切在同一位置，否则 frontmatter 正文会被当正文扫描。
 fn frontmatter_end(content: &str) -> Option<usize> {
-    let first_nl = content.find('\n')?;
-    let mut pos = first_nl + 1;
-    for line in content[first_nl + 1..].split_inclusive('\n') {
-        let start = pos;
+    let open_end = content.find('\n')?;
+    if !content[..open_end].trim_start_matches('\u{feff}').starts_with("---") {
+        return None;
+    }
+    let mut pos = open_end;
+    for line in content[open_end..].split_inclusive('\n') {
         pos += line.len();
-        if line.trim_end_matches(['\n', '\r']) == "---" {
-            return Some(start + line.len());
+        let trimmed = line.strip_suffix('\n').unwrap_or(line);
+        let trimmed = trimmed.strip_suffix('\r').unwrap_or(trimmed);
+        if trimmed.starts_with("---") {
+            return Some(pos);
         }
     }
     None
@@ -931,6 +935,37 @@ mod tests {
         assert_eq!(rows.len(), 1005, "不截断");
         assert_eq!(rows[0].tag, "hot");
         assert_eq!(rows[0].count, 2);
+    }
+
+    /// 两端共用 `fixtures/tag-parse.json`：`cases` 是常规形态，`alignedCases` 是
+    /// frontmatter 定界边界（BOM、非规范分隔行），期望值取自客户端；两端必须切在同一位置。
+    /// 任一形态两端提取结果都必须与 tags 完全一致（顺序无关）。
+    #[test]
+    fn tag_parse_fixture() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/tag-parse.json");
+        let raw = std::fs::read_to_string(path)
+            .expect("夹具缺失：fixtures/tag-parse.json 应随源码入库");
+        let fixture: serde_json::Value = serde_json::from_str(&raw).expect("夹具不是合法 JSON");
+        let cases = fixture["cases"].as_array().expect("夹具缺 cases 数组");
+        let aligned = fixture["alignedCases"]["cases"]
+            .as_array()
+            .expect("夹具缺 alignedCases.cases 数组");
+        assert!(cases.len() >= 25, "语料规模兜底：cases 疑似被清空");
+        assert!(aligned.len() >= 8, "语料规模兜底：alignedCases 疑似被清空");
+        for case in cases.iter().chain(aligned) {
+            let name = case["name"].as_str().unwrap_or_default();
+            let content = case["content"].as_str().expect("语料缺 content");
+            let mut want: Vec<String> = case["tags"]
+                .as_array()
+                .expect("语料缺 tags")
+                .iter()
+                .map(|tag| tag.as_str().expect("tags 项须为字符串").to_string())
+                .collect();
+            let mut got: Vec<String> = extract_note_tags(content).into_iter().collect();
+            got.sort();
+            want.sort();
+            assert_eq!(got, want, "语料 {name} 标签不一致：content = {content:?}");
+        }
     }
 
     // ===== glob / grep =====
