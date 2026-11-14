@@ -90,9 +90,7 @@ pub(crate) const UNDO_DEPTH: usize = 50;
 pub(crate) const MINIMAP_W: f32 = 180.0;
 pub(crate) const MINIMAP_H: f32 = 120.0;
 const MINIMAP_MARGIN: f32 = 12.0;
-/// 双击判定：两次按下的最大间隔与最大位移。
-const DOUBLE_CLICK_MS: u128 = 400;
-const DOUBLE_CLICK_TOL: f32 = 5.0;
+use crate::ui::timing::{DOUBLE_CLICK_MS, DOUBLE_CLICK_SLOP};
 /// 连接点命中容差与绘制半径（屏幕像素；容差按缩放反推世界空间）。
 const LINK_HIT_TOL: f32 = 6.0;
 const LINK_DOT_R: f32 = 4.5;
@@ -979,7 +977,7 @@ impl canvas::Program<Message> for WorldLayer<'_> {
                     .last
                     .take_if(|(t, last)| {
                         now.duration_since(*t).as_millis() < DOUBLE_CLICK_MS
-                            && last.distance(p) <= DOUBLE_CLICK_TOL
+                            && last.distance(p) <= DOUBLE_CLICK_SLOP
                     })
                     .is_some();
                 state.last = Some((now, p));

@@ -28,10 +28,7 @@ use atelyx_core::plugin_runtime::{
 use crate::plugin_paint::{self, PaintCtx};
 use crate::{App, Message};
 
-/// 双击判定：同键二次按下的最大间隔。
-const DOUBLE_CLICK_MS: u64 = 500;
-/// 双击判定：两次按下间的最大位移（逻辑像素；拖动不算双击）。
-const DOUBLE_CLICK_SLOP: f32 = 4.0;
+use crate::ui::timing::{PLUGIN_DOUBLE_CLICK_MS, DOUBLE_CLICK_SLOP};
 /// 标识哈希（FNV-1a；面 / 面 id 的身份判定用，不参与协议）。
 fn hash_id(value: &str) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
@@ -275,7 +272,7 @@ impl Widget<Message, iced::Theme, iced::Renderer> for PluginFrame<'_> {
                 let mut last = state.last_press.borrow_mut();
                 let double_click = last.is_some_and(|(last_button, at, last_point)| {
                     last_button == mouse_button
-                        && now.duration_since(at).as_millis() < u128::from(DOUBLE_CLICK_MS)
+                        && now.duration_since(at).as_millis() < PLUGIN_DOUBLE_CLICK_MS
                         && distance_sq(point, last_point) < DOUBLE_CLICK_SLOP * DOUBLE_CLICK_SLOP
                 });
                 *last = if double_click { None } else { Some((mouse_button, now, point)) };

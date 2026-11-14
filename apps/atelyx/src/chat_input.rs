@@ -43,9 +43,7 @@ const MAX_HEIGHT: f32 = 240.0;
 const BLINK_MS: u128 = 500;
 /// 撤销栈深度上限（全文快照，超限淘汰最旧）。
 const UNDO_DEPTH: usize = 200;
-/// 双击判定的最大间隔与位移。
-const DOUBLE_CLICK_MS: u128 = 350;
-const DOUBLE_CLICK_DRIFT: f32 = 4.0;
+use crate::ui::timing::{DOUBLE_CLICK_MS, DOUBLE_CLICK_SLOP};
 
 /// 输入草稿真相（应用层持有；部件按帧投影）。
 #[derive(Default, Debug, Clone)]
@@ -795,7 +793,7 @@ impl Widget<Message, Theme, iced::Renderer> for Input<'_> {
                 // 双击 = 选词
                 if let Some((t, p)) = state.last_click {
                     if t.elapsed().as_millis() <= DOUBLE_CLICK_MS
-                        && { let d = p - pos; d.x * d.x + d.y * d.y <= DOUBLE_CLICK_DRIFT * DOUBLE_CLICK_DRIFT }
+                        && { let d = p - pos; d.x * d.x + d.y * d.y <= DOUBLE_CLICK_SLOP * DOUBLE_CLICK_SLOP }
                     {
                         let byte = state.paragraph.as_ref().map_or(0, |p| {
                             hit_offset_rows(&state.rows, p, &state.content, local, line_px)

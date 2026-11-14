@@ -65,8 +65,6 @@ const ROW_HANDLE_H: f32 = 6.0;
 pub const DRAG_THRESHOLD: f32 = 5.0;
 /// 撤销栈深度（快照式）。
 pub const UNDO_DEPTH: usize = 50;
-/// 双击判定窗口（毫秒）。
-pub const DOUBLE_CLICK_MS: u128 = 350;
 const FIELD_BTN_W: f32 = 18.0;
 /// 行拖拽把手（grip）中线命中半径（px，随缩放）。
 const GRIP_HIT_R: f32 = 9.0;
