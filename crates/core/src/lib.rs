@@ -20,6 +20,7 @@ pub mod layout;
 pub mod markdown;
 pub mod merge3;
 pub mod net_guard;
+pub mod path;
 pub mod note_collab;
 pub mod plugin_process;
 pub mod plugin_runtime;

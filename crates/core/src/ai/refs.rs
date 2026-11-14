@@ -109,13 +109,7 @@ pub fn make_label(path: &str, taken: &[(&str, &str)]) -> String {
         .last()
         .cloned()
         .unwrap_or_else(|| path.to_string());
-    for n in 2u32.. {
-        let cand = format!("{base} ({n})");
-        if !conflict(&cand) {
-            return cand;
-        }
-    }
-    unreachable!("conflict 集合有限，序号递增必收敛")
+    crate::path::unique_name(&base, conflict)
 }
 
 /// 一条已登记引用（消息 refs 字段的内存形态）。

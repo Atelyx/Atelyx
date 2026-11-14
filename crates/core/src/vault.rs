@@ -1286,8 +1286,8 @@ pub fn purge_table_attachments(dirs: Vec<PathBuf>) {
     }
 }
 
-/// 保存图片字节到系统 Downloads（取文件名主干净化 + 重名自动追加 ` (n)` 序号，不覆盖已有
-/// 文件），返回落盘绝对路径。目录定位失败兜底用户主目录。
+/// 保存图片字节到系统 Downloads（取文件名主干净化 + 重名按 `-n` 顺延，不覆盖已有文件），
+/// 返回落盘绝对路径。目录定位失败兜底用户主目录。
 pub fn save_image_to_downloads(file_name: &str, bytes: &[u8]) -> Result<PathBuf, String> {
     let ext = image_ext_of(file_name).ok_or_else(|| format!("非图片文件：{file_name}"))?;
     let dir = dirs::download_dir()
@@ -1300,12 +1300,11 @@ pub fn save_image_to_downloads(file_name: &str, bytes: &[u8]) -> Result<PathBuf,
         .unwrap_or(file_name);
     let base = sanitize_filename(stem);
     let base = if base.is_empty() { "图片".to_string() } else { base };
-    let mut path = dir.join(format!("{base}.{ext}"));
-    let mut n = 1;
-    while path.exists() {
-        path = dir.join(format!("{base} ({n}).{ext}"));
-        n += 1;
-    }
+    let ext_dotted = format!(".{ext}");
+    let name = crate::path::unique_stem(&base, &ext_dotted, |candidate| {
+        dir.join(candidate).exists()
+    });
+    let path = dir.join(name);
     std::fs::write(&path, bytes).map_err(|e| format!("写入失败：{e}"))?;
     Ok(path)
 }

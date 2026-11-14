@@ -780,16 +780,9 @@ pub fn append_card_ref_to_panel(app: &mut App, source: &str) {
 }
 
 fn unique_card_label(title: &str, taken: &[(&str, &str)]) -> String {
-    if !taken.iter().any(|(_, l)| *l == title) {
-        return title.to_string();
-    }
-    for n in 2u32.. {
-        let cand = format!("{title} ({n})");
-        if !taken.iter().any(|(_, l)| *l == cand) {
-            return cand;
-        }
-    }
-    unreachable!("候选标签有限，序号递增必收敛")
+    atelyx_core::path::unique_name(title, |candidate| {
+        taken.iter().any(|(_, label)| *label == candidate)
+    })
 }
 
 fn insert_tag(draft: &mut crate::chat_input::Draft, at: usize, tag: &str) {

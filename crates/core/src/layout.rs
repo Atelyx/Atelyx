@@ -1124,19 +1124,9 @@ pub fn instantiate_layout_spec(node: &LayoutSpecNode) -> LayoutNode {
     }
 }
 
-/// 布局名去重：与既有布局重名时追加「 N」序号（默认布局名由插件提供，可能与用户布局重名）。
+/// 布局名去重：与既有布局重名时按 `-n` 顺延（默认布局名由插件提供，可能与用户布局重名）。
 pub fn unique_layout_name(names: &[String], base: &str) -> String {
-    if !names.iter().any(|n| n == base) {
-        return base.to_string();
-    }
-    let mut n = 2usize;
-    loop {
-        let candidate = format!("{base} {n}");
-        if !names.iter().any(|name| name == &candidate) {
-            return candidate;
-        }
-        n += 1;
-    }
+    crate::path::unique_name(base, |candidate| names.iter().any(|name| name == candidate))
 }
 
 /// 布局改名的最终名称：去首尾空白；空白或目标不在场景内 = None；
@@ -2003,9 +1993,9 @@ mod tests {
     fn unique_layout_name_appends_sequence_on_conflict() {
         let names = vec!["主页".to_string(), "画布".to_string()];
         assert_eq!(unique_layout_name(&names, "LLaMA"), "LLaMA");
-        assert_eq!(unique_layout_name(&names, "画布"), "画布 2");
-        let names = vec!["画布".to_string(), "画布 2".to_string(), "画布 3".to_string()];
-        assert_eq!(unique_layout_name(&names, "画布"), "画布 4");
+        assert_eq!(unique_layout_name(&names, "画布"), "画布-2");
+        let names = vec!["画布".to_string(), "画布-2".to_string(), "画布-3".to_string()];
+        assert_eq!(unique_layout_name(&names, "画布"), "画布-4");
     }
 
     #[test]
@@ -2016,7 +2006,7 @@ mod tests {
             &LayoutOp::AddLayoutFromSpec { name: "L".into(), spec: spec_panel(&["note"]) },
         );
         let added = ui.scenes[0].layouts.last().unwrap();
-        assert_eq!(added.name, "L 2", "与既有布局重名时追加序号");
+        assert_eq!(added.name, "L-2", "与既有布局重名时按 -n 顺延");
         assert_eq!(ui.scenes[0].active_layout_id.as_deref(), Some(added.id.as_str()));
         assert_eq!(ui.active_layout_id.as_deref(), Some(added.id.as_str()));
         assert!(ui.focused_panel_id.is_none());
@@ -2046,10 +2036,10 @@ mod tests {
         assert_eq!(ui.scenes[0].layouts.last().unwrap().name, "设计");
         // 与其它布局重名 = 追加序号
         let _ = apply_layout_op(&mut ui, &LayoutOp::RenameLayout { id: second.clone(), name: "L".into() });
-        assert_eq!(ui.scenes[0].layouts.last().unwrap().name, "L 2");
+        assert_eq!(ui.scenes[0].layouts.last().unwrap().name, "L-2");
         // 与主页重名同样让位（标签条里主页恒在）
         let _ = apply_layout_op(&mut ui, &LayoutOp::RenameLayout { id: second, name: "主页".into() });
-        assert_eq!(ui.scenes[0].layouts.last().unwrap().name, "主页 2");
+        assert_eq!(ui.scenes[0].layouts.last().unwrap().name, "主页-2");
         // 空白名与主页自身改名不进模型
         let before = ui.scenes[0].layouts.last().unwrap().name.clone();
         let _ = apply_layout_op(&mut ui, &LayoutOp::RenameLayout { id: "l1".into(), name: "   ".into() });
