@@ -684,7 +684,7 @@ pub fn append_card_ref(app: &mut App, conversation: &str, source: &str) {
         .map(|r| (r.path.as_str(), r.label.as_str()))
         .collect();
     let label = unique_card_label(&title, &taken);
-    let tag = format!("#{}：{} ", kind.prefix(), label);
+    let tag = atelyx_core::ai::chat_send::mention_tag(kind, &label);
     let at = chat
         .mention_picker
         .as_ref()
@@ -725,7 +725,7 @@ pub fn append_card_ref_to_panel(app: &mut App, source: &str) {
         .map(|r| (r.path.as_str(), r.label.as_str()))
         .collect();
     let label = unique_card_label(&title, &taken);
-    let tag = format!("#{}：{} ", kind.prefix(), label);
+    let tag = atelyx_core::ai::chat_send::mention_tag(kind, &label);
     let at = app
         .chat
         .mention_picker
