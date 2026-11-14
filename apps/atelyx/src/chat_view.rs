@@ -451,12 +451,18 @@ fn message_flow(app: &App, window: iced::window::Id) -> iced::Element<'_, Messag
             .on_scroll(|v| Message::Chat(ChatMsg::FlowScrolled(v.relative_offset().y)))
             .width(Length::Fill)
             .height(Length::Fill),
-    )
-    .on_right_press(crate::layout_view::selection_popup(
-        window,
-        app.cursor_for(window),
-        crate::markdown_select::SelectionTarget::Chat,
-    ));
+    );
+    // 无选区不挂右键菜单：菜单只有「复制选区」一项，空选区时无事可做
+    let flow = match app.chat.selection {
+        Some(selection) if selection.range().0 < selection.range().1 => {
+            flow.on_right_press(crate::layout_view::selection_popup(
+                window,
+                app.cursor_for(window),
+                crate::markdown_select::SelectionTarget::Chat,
+            ))
+        }
+        _ => flow,
+    };
     let mut layered = stack![flow].width(Length::Fill).height(Length::Fill);
     if !app.chat.follow_bottom {
         // 上翻即脱离跟随：浮钮一键回底（贴底状态由 on_scroll 恢复）

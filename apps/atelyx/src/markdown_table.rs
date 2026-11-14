@@ -62,8 +62,13 @@ pub(crate) fn column_widths(
         .collect();
     let gaps = separator.max(0.0) * columns.saturating_sub(1) as f32;
     let usable = (available - gaps).max(0.0);
-    if !available.is_finite() || usable <= 0.0 {
+    if !available.is_finite() {
+        // 宽度无界（横向滚动容器内）：按自然宽铺开
         return natural;
+    }
+    if usable <= 0.0 {
+        // 面板窄到连分隔线都放不下：等分可用宽（退回自然宽会撑破容器）
+        return vec![(available.max(0.0) / columns as f32).max(0.0); columns];
     }
 
     let min_w = MIN_COL_W.min(usable / columns as f32);
@@ -358,6 +363,15 @@ mod tests {
         let widths = column_widths(&[400.0, 400.0, 400.0], 300.0, 1.0, 3);
         assert_sum(&widths, 300.0, 1.0);
         assert!(widths.iter().all(|width| *width >= MIN_COL_W.min(98.0)));
+    }
+
+    /// 面板窄到放不下分隔线时列宽等分可用宽，绝不退回自然宽（否则整表撑破容器）。
+    #[test]
+    fn narrow_panel_never_overflows() {
+        let widths = column_widths(&[400.0, 400.0], 0.5, 1.0, 2);
+        let sum: f32 = widths.iter().sum();
+        assert!(sum <= 0.5 + 0.01, "{widths:?}");
+        assert!(widths.iter().all(|w| *w >= 0.0));
     }
 
     #[test]

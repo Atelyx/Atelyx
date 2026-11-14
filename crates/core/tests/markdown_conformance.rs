@@ -115,21 +115,19 @@ fn parse_conformance() {
 fn indented_atx_heading_does_not_panic() {
     // 列表项内缩进的 ATX 标题：行内片段偏移必须回加行首缩进（`line.start + ind + h.to`），
     // 否则偏移落在行首缩进字节内、切进多字节字符而 panic。语料覆盖 3/4 字节字符与嵌套层级。
-    for source in [
-        "- # 顶层\n\t- ## 二级\n\t  # 三级\n",
-        "- 甲\n  # 标题\n",
-        "- 甲\n\t# 😀四字节字符\n",
-        "\t#### 四级标题\n",
+    // 断言每例自己的标题文本：三种文本任一命中等于恒真，断言不过滤任何回归
+    for (source, heading) in [
+        ("- # 顶层\n\t- ## 二级\n\t  # 三级\n", "三级"),
+        ("- 甲\n  # 标题\n", "标题"),
+        ("- 甲\n\t# 😀四字节字符\n", "四字节字符"),
+        ("\t#### 四级标题\n", "四级标题"),
     ] {
         let doc = atelyx_core::markdown::parse_markdown(
             source,
             &atelyx_core::markdown::ParseOptions::default(),
         );
         let json = serde_json::to_string(&doc).unwrap();
-        assert!(
-            json.contains("顶层") || json.contains("标题") || json.contains("甲"),
-            "{source:?} 未产出正文"
-        );
+        assert!(json.contains(heading), "{source:?} 缺标题文本 {heading:?}");
     }
 }
 

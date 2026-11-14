@@ -319,7 +319,7 @@ impl EditPalette {
             muted: p.text.scale_alpha(0.6),
             accent: p.primary,
             panel: p.text.scale_alpha(0.06),
-            mark_bg: Color::from_rgba(1.0, 0.84, 0.28, 0.35),
+            mark_bg: pal::MARK_BG,
         }
     }
 }
@@ -383,6 +383,9 @@ pub enum Motion {
     PageDown,
     Home,
     End,
+    /// 文首 / 文末（Ctrl/Cmd + Home / End）。
+    DocStart,
+    DocEnd,
 }
 
 /// 源码态光标闪烁半周期。
@@ -1400,6 +1403,16 @@ fn key_action(
         if bindings.redo_alias && modifiers.shift() && commands::key_text(key) == "z" {
             return Some(KeyAction::Event(EditorEvent::Redo));
         }
+        // Ctrl/Cmd + Home / End = 文首 / 文末（无修饰的 Home / End 才是行首 / 行尾）
+        match key {
+            Key::Named(Named::Home) => {
+                return Some(KeyAction::Event(EditorEvent::Move { motion: Motion::DocStart, extend }))
+            }
+            Key::Named(Named::End) => {
+                return Some(KeyAction::Event(EditorEvent::Move { motion: Motion::DocEnd, extend }))
+            }
+            _ => {}
+        }
         let ch = match key {
             Key::Character(c) => c.to_lowercase(),
             _ => return None,
@@ -2190,7 +2203,9 @@ impl Widget<Message, Theme, iced::Renderer> for EditSurface<'_> {
                         shell.capture_event();
                         shell.request_redraw();
                     }
-                    None => shell.publish(Message::Editor(EditorEvent::Blur)),
+                    // 按压落在编辑面外但仍被派发到这里（面板内工具条 / 属性 / 空白区）不清光标：
+                    // 退编辑档只由应用层按「按压是否落在笔记面板内」判定，此处清会误伤面板内点击
+                    None => {}
                 }
             }
             Event::Mouse(mouse::Event::CursorMoved { .. }) if state.dragging => {
@@ -2563,6 +2578,45 @@ pub(crate) fn line_is_blank(text: &str, offset: usize) -> bool {
     line_text_at(text, offset).trim().is_empty()
 }
 
+/// 纯文本编辑面光标位置（行号 + 行内字节列）→ 全文字节偏移。列按字节计（与编辑面
+/// 内部命中口径一致）；行号越界（文本比光标短）时钳到末行。
+pub(crate) fn editor_offset(text: &str, position: iced::widget::text_editor::Position) -> usize {
+    let mut line = 0;
+    let mut start = 0;
+    for (index, ch) in text.char_indices() {
+        if line == position.line {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            start = index + 1;
+        }
+    }
+    let line_len = text[start..].find('\n').unwrap_or(text.len() - start);
+    start + position.column.min(line_len)
+}
+
+/// 全文字节偏移 → 纯文本编辑面光标位置（列按字节计，落在字符中间时回到字符起点）。
+pub(crate) fn editor_position(text: &str, offset: usize) -> iced::widget::text_editor::Position {
+    let offset = offset.min(text.len());
+    let mut line = 0;
+    let mut start = 0;
+    for (index, ch) in text.char_indices() {
+        if index >= offset {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            start = index + 1;
+        }
+    }
+    let mut column = offset.saturating_sub(start);
+    while column > 0 && !text.is_char_boundary(start + column) {
+        column -= 1;
+    }
+    iced::widget::text_editor::Position { line, column }
+}
+
 /// 命中换算：在已揭示块内按源码排版求落点（块外或富渲染块不走此入口）。
 pub(crate) fn offset_in_block(
     source: &str,
@@ -2639,6 +2693,18 @@ impl EditorState {
         (self.anchor.min(self.caret), self.anchor.max(self.caret))
     }
 
+    /// 光标 / 锚点收进正文范围（程序化替换正文后偏移可能越界）。
+    pub fn clamp_caret(&mut self, body_len: usize) {
+        self.caret = self.caret.min(body_len);
+        self.anchor = self.anchor.min(body_len);
+    }
+
+    /// 非入栈的正文变更（源码档输入 / 远端合入 / 属性重写）后作废重做：
+    /// 重做栈里是变更前的全文，按重做会把整篇回退并随下一次保存落盘。
+    pub fn invalidate_redo(&mut self) {
+        self.redo.clear();
+    }
+
     /// 撤销：返回 (正文, 光标, 锚点)。
     pub fn undo(&mut self, text: &str) -> Option<(String, usize, usize)> {
         let (prev, caret, anchor) = self.undo.pop()?;
@@ -2668,6 +2734,23 @@ impl EditorState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 编辑面光标位置与全文字节偏移互为逆映射（列按字节计，字符中间的偏移收到字符起点）。
+    /// CRLF 与空行都覆盖：行尾回车符算行内字节，不能被当成换行。
+    #[test]
+    fn editor_position_round_trips_offsets() {
+        let text = ["甲😀乙", "\r\n", "丙", "\n\n", "末"].join("");
+        let text = text.as_str();
+        for offset in 0..=text.len() {
+            let position = editor_position(text, offset);
+            let back = editor_offset(text, position);
+            if text.is_char_boundary(offset) {
+                assert_eq!(back, offset, "偏移 {offset} 未还原");
+            } else {
+                assert!(back <= offset, "偏移 {offset} 收到字符起点");
+            }
+        }
+    }
 
     /// 组合串字宽须等于绘制末字的右缘（竖条才落在拼音末尾）：同参数造单 span 段落取几何比对；
     /// 顺带确认字宽随串长增长（测量没有退化成 0）。

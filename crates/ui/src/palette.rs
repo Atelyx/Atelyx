@@ -80,6 +80,19 @@ pub const SUCCESS_SOFT: Color = rgba(0x5f, 0xbf, 0x8b, 0.14);
 pub const WARNING_SOFT: Color = rgba(0xef, 0xc7, 0x5e, 0.14);
 /// 危险软底
 pub const DANGER_SOFT: Color = rgba(0xe8, 0x77, 0x6c, 0.14);
+// ===== Markdown 语义色 =====
+/// 行内高亮底色（`==文字==`）。
+pub const MARK_BG: Color = rgba(255, 214, 71, 0.35);
+/// callout 强调色（按类型取，未知类型回落强调金）。
+pub const CALLOUT_NOTE: Color = rgb(0x44, 0x8a, 0xff);
+pub const CALLOUT_INFO: Color = rgb(0x00, 0xb0, 0xff);
+pub const CALLOUT_TIP: Color = rgb(0x00, 0xb0, 0xa6);
+pub const CALLOUT_QUESTION: Color = rgb(0xeb, 0x98, 0x4e);
+pub const CALLOUT_WARNING: Color = rgb(0xff, 0x95, 0x00);
+pub const CALLOUT_DANGER: Color = rgb(0xff, 0x4d, 0x4d);
+pub const CALLOUT_IMPORTANT: Color = rgb(0xff, 0x66, 0x80);
+pub const CALLOUT_EXAMPLE: Color = rgb(0xa8, 0x55, 0xf7);
+pub const CALLOUT_QUOTE: Color = rgb(0x80, 0x80, 0x80);
 
 // ===== 日程色板 =====
 /// 日程标记 7 色循环（`CalendarItem.color` 存对应 hex，顺序即循环序）

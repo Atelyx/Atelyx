@@ -482,7 +482,8 @@ enum Message {
     Edited(text_editor::Action),
     Save,
     /// 携带保存发起时冻结的内容与保存动机：落地后与编辑器现值比对，区分保存完成与在途新编辑。
-    Saved(u64, String, String, SaveReason, Result<(), String>),
+    /// Ok = 实际落盘正文（磁盘已被外部修改时先合流，可能不等于冻结内容）。
+    Saved(u64, String, String, SaveReason, Result<String, String>),
     /// 自动保存防抖定时器到期（单定时器链，见 chain_autosave_timer）。
     AutosaveTick,
     /// 切换 note 视图模式（只读 / 预览编辑 / 源码）。
@@ -599,6 +600,8 @@ enum Message {
     ToggleTask(usize),
     /// 复制代码块正文到系统剪贴板。
     CopyCode(String),
+    /// 只读面折叠代码块的展开 / 收起（携带块起始源偏移）。
+    ToggleCodeBlock(usize),
     /// 复制任意文本到系统剪贴板（提示不带「代码」语义）。
     CopyText(String),
     PanelTab(String, String),
@@ -1440,10 +1443,11 @@ pub struct App {
     session_token: Option<(String, String)>,
     /// 当前打开笔记的「上次确认落盘基线」（空间模式三方合流的祖先；None = 尚未落盘）。
     pub space_note_flushed: Option<String>,
-    /// 空间笔记保存在途标志（回执即清）：空间保存无写队列可依赖，并发两笔会乱序落地覆盖服务端。
-    space_note_save_inflight: bool,
-    /// 在途保存期间收到 Flush 请求：回执后补一笔串行收尾（关窗/切文件的脏拦截依赖它）。
-    space_note_save_flush_queued: bool,
+    /// 空间笔记保存在途项（键 = 世代 + 相对路径，回执即摘）：空间保存无写队列可依赖，
+    /// 同文件并发两笔会乱序落地覆盖服务端；按文件分键则切文件后旧回执不阻塞也不误伤新文件。
+    space_note_save_inflight: Vec<(u64, String)>,
+    /// 在途保存期间同一文件又收到 Flush：回执后补一笔串行收尾（关窗/切文件的脏拦截依赖它）。
+    space_note_save_flush_queued: Vec<(u64, String)>,
     /// 各空间独立的文件树展开集（会话内记忆；键 = 服务器/空间 id）。
     expanded_by_space: HashMap<String, Vec<String>>,
     /// 设备会话列表（设置页「多人协作」；打开该页时拉取）。
@@ -1531,6 +1535,11 @@ pub struct App {
     autosave_deadline: Option<Instant>,
     /// 自动保存定时器在途标志（单定时器链：到期检查期限，被推迟则续排剩余时长）。
     autosave_timer: bool,
+    /// 本地笔记保存在途项（键 = 世代 + 相对路径）：同文件不再并发提交——后一笔只能拿到
+    /// 旧基线，会把本端上一笔刚写下的内容误判成外部修改。按文件分键，切文件不互相阻塞。
+    note_save_inflight: Vec<(u64, String)>,
+    /// 在途保存期间同一文件又收到 Flush：回执后补一笔收尾（关窗 / 切文件的拦截依赖它）。
+    note_save_flush_queued: Vec<(u64, String)>,
     /// note 视图模式（缺省只读）。
     pub note_mode: NoteMode,
     /// 笔记面板内按压标志（NotePressInside 同批置位，全局 Press 消费）。
@@ -1543,8 +1552,16 @@ pub struct App {
     note_edit_caret_pending: bool,
     /// 只读档的解析产物：进入只读档或文件载入时重建，避免每帧重解析。
     pub preview_doc: Option<MarkdownDocument>,
+    /// 已展开的长代码块（键 = 块起始源偏移；换文件即清，偏移属于上一份正文）。
+    pub note_code_expanded: HashSet<usize>,
+    /// 最近一次笔记载入失败原因（成功后清）：属性面板据此给失败态与「重试」而不是整块消失。
+    pub note_load_error: Option<String>,
     /// 编辑档行高缓存（编辑面布局回写；应用层据此截取视口窗口）。
     pub(crate) note_row_metrics: Rc<RefCell<markdown_edit::RowMetrics>>,
+    /// 只读档块高缓存（只读面布局回写；应用层据此截取块窗口）。
+    pub(crate) note_block_metrics: Rc<RefCell<markdown_view::BlockMetrics>>,
+    /// 只读档表格单元格行内解析缓存（正文重建即丢弃）。
+    pub(crate) note_cell_cache: RefCell<markdown_view::InlineSpanCache>,
     /// 编辑面光标几何（块部件每帧回写；双链候选浮层贴着输入点落位）。
     pub(crate) note_caret_probe: markdown_edit::CaretProbeSlot,
     /// 编辑面滚动位置与视口尺寸（滚动事件播种；窗口计算用）。
@@ -1620,6 +1637,9 @@ pub struct App {
     pub history_confirm: Option<u64>,
     /// 回滚已发起、等待保存链稳定落盘的一次性标志（成功回执消费并提示，失败/切容器清除）。
     pub(crate) history_restore_pending: bool,
+    /// 待落盘的笔记回滚目标（文件相对路径 + 回滚正文）：restore 版本只在回滚正文真正写盘后
+    /// 记录，写失败或换文档即作废（否则历史里会留下一条从未落盘的「回滚」）。
+    pending_restore_note: Option<(String, String)>,
     /// 仓库历史面板缓存（None = 未加载/已失效；Err = 加载失败待手动刷新）。
     pub repo_history: Option<Result<repohistory_view::RepoHistory, String>>,
     /// 仓库历史聚合在途。
@@ -1855,13 +1875,19 @@ impl App {
                 save_error: None,
                 autosave_deadline: None,
                 autosave_timer: false,
+                note_save_inflight: Vec::new(),
+                note_save_flush_queued: Vec::new(),
                 note_mode: NoteMode::Read,
                 note_press_inside: false,
                 note_selection: None,
                 selection_menu_press: false,
                 note_edit_caret_pending: false,
                 preview_doc: None,
+                note_code_expanded: HashSet::new(),
+                note_load_error: None,
                 note_row_metrics: Rc::new(RefCell::new(markdown_edit::RowMetrics::default())),
+                note_block_metrics: Rc::new(RefCell::new(markdown_view::BlockMetrics::default())),
+                note_cell_cache: RefCell::new(markdown_view::InlineSpanCache::default()),
                 note_caret_probe: Rc::new(RefCell::new(markdown_edit::CaretProbe::default())),
                 note_scroll_y: 0.0,
                 note_viewport_h: 0.0,
@@ -1911,6 +1937,7 @@ impl App {
                 history: Vec::new(),
                 history_gen: 0,
                 history_restore_pending: false,
+                pending_restore_note: None,
                 history_loading: false,
                 history_expanded: None,
                 history_preview: None,
@@ -1935,8 +1962,8 @@ impl App {
                 space_pending: None,
                 session_token: None,
                 space_note_flushed: None,
-                space_note_save_inflight: false,
-                space_note_save_flush_queued: false,
+                space_note_save_inflight: Vec::new(),
+                space_note_save_flush_queued: Vec::new(),
                 expanded_by_space: HashMap::new(),
                 space_devices: Vec::new(),
                 space_token: None,
@@ -2203,14 +2230,50 @@ impl App {
                 }
                 // 内容载入成功即登记最近打开（本地与空间模式同链回执）
                 recent_view::record(self, &rel, recent_view::RecentKind::Note);
+                // UTF-8 BOM 是编码标记不是正文：载入即剥。留着会让首行标题 / 列表全部退化成段落，
+                // 且渲染与编辑面各自按不同起点切正文，落点与光标整体错位
+                let text = text.strip_prefix('\u{feff}').map(str::to_string).unwrap_or(text);
+                // 磁盘事实（去 BOM）：基线与合流祖先用它，合并结果只进编辑面
+                let disk = text.clone();
+                // 同文件重载（协作文档还挂在本文件）：CRDT 文档可能已含对端尚未落盘的差分，
+                // 直接用回读文本覆盖正文会让两侧分叉——随后本端输入会把这些差分当删除广播出去
+                let text = if self.note_collab_file.as_deref() == Some(rel.as_str()) {
+                    match self.note_collab.as_ref().and_then(|nc| nc.current_text()) {
+                        Some(doc_text) if doc_text != text => {
+                            // 本端有未落盘改动时草稿优先：重载不得回退正在输入的内容
+                            if self.dirty {
+                                self.notify(NoticeLevel::Info, "笔记有未保存改动，已保留本端内容");
+                                return Task::none();
+                            }
+                            let base = self.space_note_flushed.clone().unwrap_or_default();
+                            if atelyx_core::merge3::merge3_conflict(&base, &doc_text, &text) {
+                                self.notify(NoticeLevel::Warning, "该笔记有并发修改，已保留本端内容");
+                                return Task::none();
+                            }
+                            atelyx_core::merge3::merge3(
+                                &base,
+                                &doc_text,
+                                &text,
+                                atelyx_core::merge3::ConflictSide::Ours,
+                            )
+                        }
+                        _ => text,
+                    }
+                } else {
+                    text
+                };
                 self.note_text = text.clone();
-                self.note_base = text.clone();
+                // 基线只认磁盘：CRDT 独有的差分不算落盘事实，下一笔合流会以磁盘为祖先再并进来
+                self.note_base = disk.clone();
                 self.reset_note_rows();
                 // 空间模式：载入成功即磁盘基线（三方合流的祖先）
-                self.space_note_flushed = matches!(self.repo_kind, RepoKind::Space(_)).then(|| text.clone());
+                self.space_note_flushed =
+                    matches!(self.repo_kind, RepoKind::Space(_)).then(|| disk.clone());
                 self.source_editor = text_editor::Content::with_text(&self.note_text);
                 self.edit.reset(0);
                 self.dirty = false;
+                self.props.loading = false;
+                self.note_load_error = None;
                 self.reset_props();
                 self.backlinks.clear();
                 self.history.clear();
@@ -2223,6 +2286,13 @@ impl App {
                 self.refresh_preview();
                 self.refresh_edit();
                 self.notify(NoticeLevel::Success, "已打开");
+                // 同文件重载合流后把文档静默对齐到正文（远端已在文档里的差分保持在场，不重播上行）
+                if self.note_collab_file.as_deref() == Some(rel.as_str()) {
+                    let aligned = self.note_text.clone();
+                    if let Some(nc) = self.note_collab.as_mut() {
+                        nc.align_silent(&aligned);
+                    }
+                }
                 // 空间模式：笔记接入协作文档（内容已就位，基线通告 + 握手 + 身份帧）
                 if matches!(self.repo_kind, RepoKind::Space(_)) {
                     space_actions::collab_note_loaded(self, &rel);
@@ -2246,12 +2316,14 @@ impl App {
                 self.dirty = false;
                 self.preview_doc = None;
                 self.reset_note_rows();
+                self.props.loading = false;
                 self.reset_props();
                 self.space_note_flushed = None;
                 self.note_collab = None;
                 self.note_collab_file = None;
                 self.note_collab_channel = None;
                 self.remote_cursors.clear();
+                self.note_load_error = Some(e.clone());
                 self.notify(NoticeLevel::Error, e);
                 Task::none()
             }
@@ -2263,6 +2335,8 @@ impl App {
                     let after = self.source_editor.text();
                     if after != self.note_text {
                         self.note_text = after;
+                        // 源码档输入不经编辑面快照：重做栈里的旧全文已对不上本屏正文，直接作废
+                        self.edit.invalidate_redo();
                         self.dirty = true;
                         self.save_error = None;
                         self.autosave_deadline = Some(Instant::now() + AUTOSAVE_DEBOUNCE);
@@ -2324,52 +2398,111 @@ impl App {
                 }
                 Task::none()
             }
-            Message::Saved(gen, rel, saved, reason, Ok(())) => {
+            Message::Saved(gen, rel, frozen, reason, Ok(disk)) => {
                 if gen != self.epoch() {
                     return Task::none();
                 }
                 self.plugins.on_file_changed(&rel, FileChangeKind::Updated, None);
-                self.save_error = None;
-                // 落盘即基线（AI 三方合流的共同祖先）
-                self.note_base = saved.clone();
-                let proceed = match reason {
-                    SaveReason::Flush => {
+                // 回执只结算它所属的文件：切文件后旧回执不得改新文件的基线与脏态
+                let mine = self.ui.last_note_file.as_deref() == Some(rel.as_str());
+                // 本笔结清在途标记；在途期间排队的 Flush / 到期的自动保存在结果处理完后补发
+                let key = (gen, rel.clone());
+                let was_inflight = self.note_save_inflight.contains(&key);
+                self.note_save_inflight.retain(|entry| entry != &key);
+                let queued_flush = self.note_save_flush_queued.contains(&key);
+                self.note_save_flush_queued.retain(|entry| entry != &key);
+                // 本笔落盘正文就是某次回滚的目标：历史记一条 Restore，而不是普通 edit
+                // （只按 rel 判会把回滚前发出、此刻才回执的普通保存也标成 Restore）
+                let restoring = self
+                    .pending_restore_note
+                    .as_ref()
+                    .is_some_and(|(pending_rel, pending_text)| {
+                        pending_rel == &rel && pending_text == &disk
+                    });
+                if restoring {
+                    self.pending_restore_note = None;
+                }
+                let mut task = Task::none();
+                if mine {
+                    self.save_error = None;
+                    if self.note_text == frozen {
+                        // 编辑面与冻结内容一致：落盘合流结果就是新基线
+                        self.note_base = disk.clone();
+                        if self.note_text != disk {
+                            // 外部改动已并入落盘结果且本端无在途输入：采纳磁盘事实
+                            space_actions::apply_remote_text(self, disk.clone());
+                            self.notify(NoticeLevel::Info, "已合并外部修改");
+                        }
+                        self.dirty = false;
+                        self.settle_history_restore(true);
+                    } else if was_inflight {
+                        // 保存期间又有输入：编辑面没有采纳合流结果，基线退回本笔冻结内容
+                        // （它是当前输入与磁盘真源的共同祖先），下一笔以它为祖先再合流，
+                        // 外部改动不会被「current == base 直写」覆盖掉。
+                        // 非本笔（重开后迟到的回执）不动新载入的基线。
+                        self.note_base = frozen.clone();
+                    }
+                    let clean = !self.dirty;
+                    task = match reason {
                         // 保存发起时冻结的内容与当前一致才算落盘；期间又有输入则再收一轮
-                        if self.note_text == saved {
-                            self.dirty = false;
-                            self.settle_history_restore(true);
-                            self.after_any_flush()
-                        } else {
-                            self.submit_save(SaveReason::Flush)
-                        }
-                    }
-                    SaveReason::Manual => {
-                        if self.note_text == saved {
-                            self.dirty = false;
-                            self.settle_history_restore(true);
+                        SaveReason::Flush if clean => self.after_any_flush(),
+                        SaveReason::Flush => self.submit_save(SaveReason::Flush),
+                        SaveReason::Manual if clean => {
                             self.notify(NoticeLevel::Success, "已保存");
-                        } else {
+                            Task::none()
+                        }
+                        SaveReason::Manual => {
                             self.notify(NoticeLevel::Info, "保存完成，期间有新修改");
+                            Task::none()
                         }
-                        Task::none()
-                    }
-                    SaveReason::AutoSave => {
-                        if self.note_text == saved {
-                            self.dirty = false;
-                            self.settle_history_restore(true);
-                        }
-                        Task::none()
-                    }
+                        SaveReason::AutoSave => Task::none(),
+                    };
+                }
+                // 落盘即记历史版本（内容 no-op 由记录侧跳过），按回执所属文件记账。
+                // 回滚落盘记 Restore：同一笔若再记 edit，Restore 会因内容相同被跳过而丢标签
+                let history = if restoring {
+                    self.record_note_restore_version(&rel, disk.clone())
+                } else {
+                    self.record_note_history(&rel, disk)
                 };
-                // 落盘即记历史版本（edit；内容 no-op 由记录侧跳过），随后刷新版本列表
-                proceed.chain(self.record_note_history(saved))
+                let mut task = task.chain(history);
+                if mine {
+                    // 在途期间排队的 Flush：内容已落稳即放行挂起动作，仍有新输入就立即补一笔
+                    if queued_flush {
+                        task = if self.dirty {
+                            task.chain(self.submit_save(SaveReason::Flush))
+                        } else {
+                            task.chain(self.after_any_flush())
+                        };
+                    } else if self.dirty && self.autosave_deadline.is_none() {
+                        // 在途期间到期的自动保存被顺延掉了：补排一次，防停笔后内容滞留在脏态
+                        self.autosave_deadline = Some(Instant::now() + AUTOSAVE_DEBOUNCE);
+                        self.autosave_timer = false;
+                        task = task.chain(self.chain_autosave_timer(Task::none()));
+                    }
+                }
+                task
             }
-            Message::Saved(gen, _, _, reason, Err(e)) => {
+            Message::Saved(gen, rel, _, reason, Err(e)) => {
                 // 世代守卫与成功回执同口径：切仓库后旧仓库的保存失败不得动新仓库的挂起动作
                 if gen != self.epoch() {
                     return Task::none();
                 }
+                // 本笔失败也要结清在途标记，否则该文件后续保存会被永久挡住
+                let key = (gen, rel.clone());
+                self.note_save_inflight.retain(|entry| entry != &key);
+                self.note_save_flush_queued.retain(|entry| entry != &key);
+                // 旧文件的失败仍须可见，但不得覆盖当前文件的错误位与挂起动作
+                if self.ui.last_note_file.as_deref() != Some(rel.as_str()) {
+                    self.notify(
+                        NoticeLevel::Error,
+                        format!("「{}」保存失败：{e}", rel.rsplit('/').next().unwrap_or(&rel)),
+                    );
+                    return Task::none();
+                }
                 self.settle_history_restore(false);
+                // 回滚没写进磁盘：Restore 版本作废（不得留一条从未落盘的回滚记录）
+                self.pending_restore_note = None;
                 // flush 被保存失败打断：动作不放行（放行会丢弃未落盘内容），挂起输入保留待重试；
                 // 等回执的 AI 文件操作不能一直挂着，就地回填失败原因
                 if matches!(reason, SaveReason::Flush) {
@@ -2382,6 +2515,11 @@ impl App {
                 Task::none()
             }
             Message::NoteMode(mode) => {
+                // 只读身份只允许留在只读档：编辑档会启用撤销栈与写盘链，入口层面直接拦下
+                if mode != NoteMode::Read && self.note_readonly() {
+                    self.notify(NoticeLevel::Warning, "当前身份为只读，无法编辑");
+                    return Task::none();
+                }
                 match mode {
                     NoteMode::Read => self.enter_read_mode(),
                     NoteMode::Edit => {
@@ -2406,6 +2544,9 @@ impl App {
                 Task::none()
             }
             Message::NoteEnterEdit => {
+                if self.note_readonly() {
+                    return Task::none();
+                }
                 self.enter_edit_mode();
                 // 光标落点交给编辑面在释放事件消化（同批按压由 PressRelay 上报，不误判外点退出）
                 self.note_edit_caret_pending = true;
@@ -2892,12 +3033,26 @@ impl App {
                 Task::none()
             }
             Message::ToggleTask(item_from) => {
+                if self.note_readonly() {
+                    return Task::none();
+                }
                 if let Some((next, at)) = markdown_edit::toggle_task(self.edit_body(), item_from) {
                     self.edit.snapshot(&self.note_text);
                     self.set_edit_body(next);
                     self.edit.caret = at;
                     self.edit.anchor = at;
                     self.after_edit();
+                    // 只读档勾选要重建只读渲染，否则方框视觉不变（正文其实已改）
+                    if self.note_mode == NoteMode::Read {
+                        self.refresh_preview();
+                    }
+                }
+                Task::none()
+            }
+            Message::ToggleCodeBlock(from) => {
+                // 展开态只改渲染档位（正文与解析产物都没变）：不重建预览，选区与块高缓存照旧
+                if !self.note_code_expanded.remove(&from) {
+                    self.note_code_expanded.insert(from);
                 }
                 Task::none()
             }
@@ -5109,21 +5264,113 @@ impl App {
             return Task::none();
         };
         let gen = self.epoch();
+        // 上一笔在途：同文件不并发提交。第二笔只能拿到上一笔落盘前的旧基线，
+        // 会把本端上一笔刚写下的内容误判成「外部修改」而拒写（Flush 还会让关窗 / 切文件白等）
+        self.note_save_inflight.retain(|(inflight_gen, _)| *inflight_gen == gen);
+        self.note_save_flush_queued.retain(|(queued_gen, _)| *queued_gen == gen);
+        let key = (gen, rel.clone());
+        if self.note_save_inflight.contains(&key) {
+            match reason {
+                // Flush 必须最终收尾：记账留在回执后补发
+                SaveReason::Flush => {
+                    if !self.note_save_flush_queued.contains(&key) {
+                        self.note_save_flush_queued.push(key);
+                    }
+                }
+                SaveReason::Manual => {
+                    self.notify(NoticeLevel::Info, "正在写入，完成后自动保存新改动");
+                }
+                SaveReason::AutoSave => {}
+            }
+            return Task::none();
+        }
+        self.note_save_inflight.push(key);
         let content = self.note_text.clone();
-        let saved = content.clone();
+        let frozen = content.clone();
+        // 上次确认落盘正文 = 三方合流祖先；磁盘已变则先合流，无法安全对齐即拒绝写入。
+        let base = self.note_base.clone();
         let queue = self.vault.writes.clone();
         let rel_for_done = rel.clone();
         Task::perform(
             async move {
-                let path = vault::safe_join(&root, &rel, false)?;
-                queue.write(path, content).await
+                queue
+                    .bulk(move || {
+                        let path = vault::safe_join(&root, &rel, false)?;
+                        let raw = match std::fs::read_to_string(&path) {
+                            Ok(text) => text,
+                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+                            Err(e) => return Err(e.to_string()),
+                        };
+                        // BOM 是编码标记不是正文：合流比较用去 BOM 文本，写回按原文件还原
+                        let (current, had_bom) = atelyx_core::frontmatter::split_bom(&raw);
+                        let current = current.to_string();
+                        let disk = match atelyx_core::merge3::plan_save(&base, &content, &current) {
+                            atelyx_core::merge3::SavePlan::Write(text)
+                            | atelyx_core::merge3::SavePlan::Merge(text) => text,
+                            atelyx_core::merge3::SavePlan::Conflict => {
+                                return Err(
+                                    "文件已被外部修改，本次保存未写入；请撤销本地改动后重试".into()
+                                );
+                            }
+                        };
+                        vault::atomic_write(
+                            &path,
+                            &atelyx_core::frontmatter::with_bom(&disk, had_bom),
+                        )?;
+                        Ok(disk)
+                    })
+                    .await
             },
-            move |result| Message::Saved(gen, rel_for_done, saved, reason, result),
+            move |result| Message::Saved(gen, rel_for_done, frozen, reason, result),
         )
     }
 
+    /// 进入笔记载入：先把上一文件的会话态复位到「空正文、只读、无脏」，再发起读盘。
+    /// 载入在途期间编辑面必须是空正文且属性面板不接受输入——否则 Ctrl+S / 属性提交会拿
+    /// 上一文件的内容写进新路径。载入回执（FileLoaded 成功或失败）负责解除载入态。
+    fn begin_note_load(&mut self, rel: &str) -> Task<Message> {
+        self.history_kind = atelyx_core::history::HistoryKind::Note;
+        self.ui.last_note_file = Some(rel.to_string());
+        // 笔记视图按文件重新挂载：档位不跨文件延续
+        self.note_mode = NoteMode::Read;
+        self.note_text.clear();
+        self.note_base.clear();
+        self.source_editor = text_editor::Content::new();
+        self.edit.reset(0);
+        self.edit_doc = None;
+        self.edit_meta.clear();
+        self.preview_doc = None;
+        // 代码块展开键是源偏移：换文件后属于上一份正文
+        self.note_code_expanded.clear();
+        self.note_load_error = None;
+        // 选区偏移属于上一文件正文，换文件即失效（新正文到达后不会重新落选）
+        self.note_selection = None;
+        self.dirty = false;
+        self.save_error = None;
+        self.note_edit_caret_pending = false;
+        // 回滚提示与待记版本属于上一文件：换文档后不得再挂到新文件上
+        self.history_restore_pending = false;
+        self.pending_restore_note = None;
+        // 空间合流基线与协作绑定一并作废：新文件由载入回执重新建文档
+        self.space_note_flushed = None;
+        self.note_collab = None;
+        self.note_collab_file = None;
+        self.note_collab_channel = None;
+        self.remote_cursors.clear();
+        self.reset_note_rows();
+        // 上一轮同文件在途保存在回执时不得改写新载入的基线（别的文件的在途项不在此列）
+        let load_key = (self.epoch(), rel.to_string());
+        self.note_save_inflight.retain(|entry| entry != &load_key);
+        self.note_save_flush_queued.retain(|entry| entry != &load_key);
+        // 载入期间属性面板只有「载入中」，旧块不得被编辑后回写到新文件
+        self.props.loading = true;
+        self.reset_props();
+        self.schedule_persist();
+        self.load_note(rel)
+    }
+
     /// 打开文件（脏拦截已由 gate 处理）：按扩展名分流（.atlx → 画布、.atb → 表格、
-    /// 插件注册的领域扩展名 → 插件文档面），复位只读并清掉上一文件的解析产物。
+    /// 插件注册的领域扩展名 → 插件文档面），笔记走 begin_note_load。
     fn open_file(&mut self, rel: &str) -> Task<Message> {
         if rel.ends_with(".atlx") {
             return canvas_actions::open_canvas(self, rel);
@@ -5141,16 +5388,7 @@ impl App {
                 return plugin_actions::open_doc(self, rel);
             }
         }
-        self.history_kind = atelyx_core::history::HistoryKind::Note;
-        self.ui.last_note_file = Some(rel.to_string());
-        // 打开文件复位只读：笔记视图按文件重新挂载，档位不跨文件延续
-        self.note_mode = NoteMode::Read;
-        // 清掉上一文件的解析产物：载入在途期间两档都不留旧内容
-        self.preview_doc = None;
-        self.edit_doc = None;
-        self.edit_meta.clear();
-        self.schedule_persist();
-        self.load_note(rel)
+        self.begin_note_load(rel)
     }
 
     /// 系统文件夹选择器（切仓库入口，脏拦截已由 gate 处理）。
@@ -5619,15 +5857,16 @@ impl App {
     }
 
     /// 记录一次保存为历史版本（edit；60s 窗口内同作者连续编辑合并为一版）。
-    /// 历史为尽力而为侧车：写失败静默丢弃（不打扰正文保存链），与读取侧空列表降级同口径。
-    fn record_note_history(&self, content: String) -> Task<Message> {
-        let Some(rel) = self.ui.last_note_file.clone() else { return Task::none() };
+    /// 按回执所属文件记账：保存期间切文件后，旧文件内容不得记到新文件头上。
+    /// 写失败只警告（历史尽力而为，不阻塞正文保存链）。
+    fn record_note_history(&self, rel: &str, content: String) -> Task<Message> {
         let gen = self.epoch();
         let state = self.vault.clone();
         let author = history_author(self);
+        let rel = rel.to_string();
         Task::perform(
             async move {
-                let _ = tokio::task::spawn_blocking(move || {
+                let outcome = tokio::task::spawn_blocking(move || {
                     let (root, _, _) = state.session_snapshot()?;
                     atelyx_core::history::record_version(
                         &root,
@@ -5644,8 +5883,10 @@ impl App {
                         },
                     )
                 })
-                .await;
-                Message::HistoryRecorded(gen, None)
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|r| r);
+                Message::HistoryRecorded(gen, outcome.err())
             },
             |msg| msg,
         )
@@ -5789,9 +6030,16 @@ impl App {
 
     /// 笔记回滚：全文快照替换正文（撤销可回退），保存链写回并记 restore 版本。
     fn note_history_restore(&mut self, version: atelyx_core::history::HistoryVersion) -> Task<Message> {
+        // 只读身份不得改正文：历史回滚会替换编辑面并把 Restore 记进历史，入口一律拦下
+        if self.note_readonly() {
+            self.notify(NoticeLevel::Warning, "当前身份为只读，无法回滚");
+            return Task::none();
+        }
         self.edit.snapshot(&self.note_text);
         self.note_text = version.content.clone();
         self.reset_note_metrics();
+        // 回滚目标正文可能更短：偏移先收进范围，否则编辑面按越界光标取块会落空
+        self.edit.clamp_caret(self.edit_body().len());
         // 源码档正文真源 = note_text 派生的编辑器内容：程序化替换须同步重建
         if self.note_mode == NoteMode::Source {
             self.source_editor = text_editor::Content::with_text(&self.note_text);
@@ -5804,11 +6052,21 @@ impl App {
         self.refresh_props();
         let Some(rel) = self.ui.last_note_file.clone() else { return Task::none() };
         if matches!(self.repo_kind, RepoKind::Space(_)) {
+            // 空间真源在服务端：回滚内容随下一笔保存上行，服务端落盘后自带历史
             return space_actions::space_record_note_restore(self, rel, version.content);
         }
+        // 本地：正文要等防抖保存才落盘，Restore 版本挂到那笔回执上（写失败即作废）。
+        // 带上回滚正文：回滚前发出、此刻才回执的普通保存不能被误记成 Restore
+        self.pending_restore_note = Some((rel, version.content));
+        Task::none()
+    }
+
+    /// 回滚正文落盘后补记 Restore 版本（按回执文件与真实落盘内容，内容 no-op 由记录侧跳过）。
+    fn record_note_restore_version(&self, rel: &str, content: String) -> Task<Message> {
         let gen = self.epoch();
         let state = self.vault.clone();
         let author = history_author(self);
+        let rel = rel.to_string();
         Task::perform(
             async move {
                 tokio::task::spawn_blocking(move || {
@@ -5818,7 +6076,7 @@ impl App {
                         atelyx_core::history::HistoryKind::Note,
                         &rel,
                         &atelyx_core::history::RecordOpts {
-                            content: version.content,
+                            content,
                             action: atelyx_core::history::HistoryAction::Restore,
                             author,
                             coalesce_edit_ms: None,
@@ -6660,6 +6918,25 @@ impl App {
         self.note_row_metrics.borrow_mut().reset();
     }
 
+    /// 只读面块窗口的输入（滚动偏移, 视口高）：滚动回执未到或视口未知时整篇构建。
+    pub(crate) fn note_read_window(&self) -> Option<(f32, f32)> {
+        (self.note_scroll_ready && self.note_viewport_h > 0.0)
+            .then_some((self.note_scroll_y, self.note_viewport_h))
+    }
+
+    /// 该文件是否有本世代在途的空间保存（AI 整文写与人工保存互斥用）。
+    pub(crate) fn space_note_saving(&self, rel: &str) -> bool {
+        let gen = self.epoch();
+        self.space_note_save_inflight
+            .iter()
+            .any(|(flight_gen, flight_rel)| *flight_gen == gen && flight_rel == rel)
+    }
+
+    /// 当前身份对笔记是否只读：协作空间 Viewer 只能查看（编辑入口与属性写入口一律拦截）。
+    pub(crate) fn note_readonly(&self) -> bool {
+        matches!(&self.repo_kind, RepoKind::Space(s) if !s.role.can_write())
+    }
+
     /// 进入只读档：清编辑态解析产物并重建只读渲染。
     fn enter_read_mode(&mut self) {
         self.note_mode = NoteMode::Read;
@@ -6714,6 +6991,9 @@ impl App {
         self.note_mode = NoteMode::Edit;
         self.reset_note_metrics();
         self.preview_doc = None;
+        // 源码档可能已把正文改短：光标 / 锚点收进正文范围再交给编辑面
+        let body_len = self.edit_body().len();
+        self.edit.clamp_caret(body_len);
         self.edit.active = None;
         self.edit.preedit = None;
         self.edit.focused = false;
@@ -6724,6 +7004,9 @@ impl App {
     pub(crate) fn refresh_preview(&mut self) {
         // 选区按旧正文的源偏移持有：解析产物重建即作废
         self.note_selection = None;
+        // 块高与单元格解析产物都按旧正文持有：重建前丢弃，下一帧整篇测量
+        self.note_block_metrics.borrow_mut().reset();
+        self.note_cell_cache.borrow_mut().clear();
         if self.note_mode != NoteMode::Read {
             self.preview_doc = None;
             return;
@@ -7271,9 +7554,8 @@ impl App {
 
     /// 回车：列表块内延续项标记，否则插入换行。
     fn edit_newline(&mut self) {
-        if self.delete_selection() {
-            return;
-        }
+        // 有选区先删选区，再照常换行（只删不换会让 Enter 看起来没生效）
+        self.delete_selection();
         let body = self.edit_body().to_string();
         if self.is_in_list() {
             if let Some((next, caret)) =
@@ -7310,20 +7592,32 @@ impl App {
     }
 
     /// 光标移出可视区时把它滚回视口（窗口化编辑面只构建可见行，光标不能停在未构建区）。
-    fn ensure_caret_visible(&self) -> Task<Message> {
+    fn ensure_caret_visible(&mut self) -> Task<Message> {
+        let Some(y) = self.caret_scroll_target() else { return Task::none() };
+        // 程序化滚动不保证回调 on_scroll（视口就绪只来自用户滚动事件）：就地推进偏移，
+        // 否则本帧的行窗口仍按旧偏移截取，光标会落在未构建区（空白/错位）
+        self.note_scroll_y = y;
+        iced::widget::operation::scroll_to(
+            layout_view::note_scroll_id(),
+            iced::widget::scrollable::AbsoluteOffset { x: None, y: Some(y) },
+        )
+    }
+
+    /// 光标落在视口外时的目标滚动偏移（None = 无需滚动或视口条件不足）。
+    fn caret_scroll_target(&self) -> Option<f32> {
         if self.note_mode != NoteMode::Edit
             || !self.note_scroll_ready
             || self.note_viewport_h <= 0.0
         {
-            return Task::none();
+            return None;
         }
-        let Some(doc) = self.edit_doc.as_ref() else { return Task::none() };
+        let doc = self.edit_doc.as_ref()?;
         let metrics = self.note_row_metrics.borrow();
         if metrics.rows == 0
             || metrics.heights.len() != metrics.rows
             || metrics.heights.iter().any(|height| *height <= 0.0)
         {
-            return Task::none();
+            return None;
         }
         let body = self.edit_body();
         let caret = self.edit.caret.min(body.len());
@@ -7334,12 +7628,9 @@ impl App {
             &self.note_images,
             Some(0..0),
         );
-        let Some(index) = rows.iter().position(|row| caret >= row.from && caret <= row.to)
-        else {
-            return Task::none();
-        };
+        let index = rows.iter().position(|row| caret >= row.from && caret <= row.to)?;
         if index >= metrics.heights.len() {
-            return Task::none();
+            return None;
         }
         let top: f32 = metrics.heights[..index].iter().sum();
         let height = metrics.heights[index];
@@ -7352,11 +7643,7 @@ impl App {
         } else {
             None
         };
-        let Some(y) = target else { return Task::none() };
-        iced::widget::operation::scroll_to(
-            layout_view::note_scroll_id(),
-            iced::widget::scrollable::AbsoluteOffset { x: None, y: Some(y) },
-        )
+        target
     }
 
     /// 光标移动（上下越界时跨块）。
@@ -7370,6 +7657,8 @@ impl App {
             Motion::Right => next_boundary(body, caret),
             Motion::Home => line_start_of(body, caret),
             Motion::End => line_end_of(body, caret),
+            Motion::DocStart => 0,
+            Motion::DocEnd => len,
             Motion::Up => {
                 self.edit_move_line(false, extend);
                 return;
@@ -7579,6 +7868,10 @@ impl App {
     /// 编辑面事件处理。
     fn on_editor(&mut self, event: markdown_edit::EditorEvent) -> Task<Message> {
         use markdown_edit::EditorEvent as E;
+        // 只读身份不得改动正文：入口已禁进编辑档，此处守住部件误发的路径
+        if self.note_readonly() {
+            return Task::none();
+        }
         // 进编辑档待落光标在首个编辑面事件消化（部件侧据此定位光标，见 EditSurface 释放路径）
         self.note_edit_caret_pending = false;
         match event {
@@ -7618,8 +7911,13 @@ impl App {
                 self.edit_backspace();
                 Task::none()
             }
-            E::Delete | E::DeleteSelection => {
+            E::Delete => {
                 self.edit_delete();
+                Task::none()
+            }
+            E::DeleteSelection => {
+                // 剪切只删选区：选区在此期间被撤销 / 清空时不得转而删掉光标后的字符
+                self.delete_selection();
                 Task::none()
             }
             E::Newline => {
@@ -7688,17 +7986,15 @@ impl App {
     /// 打开仓库内笔记链接（flush 放行后执行；落点以磁盘事实为准）。
     fn open_link_inner(&mut self, decoded: String) -> Task<Message> {
         let path = decoded.split('#').next().unwrap_or("").trim().to_string();
+        // 纯片段锚点（#标题）没有文件部分：不当作「文件没找到」
+        if path.is_empty() {
+            return Task::none();
+        }
         match self.resolve_note_path(&path) {
             Some(rel) => {
-                self.ui.last_note_file = Some(rel.clone());
-                // 与文件树点击同口径：打开即复位只读
-                self.note_mode = NoteMode::Read;
-                self.preview_doc = None;
-                self.edit_doc = None;
-                self.edit_meta.clear();
-                self.schedule_persist();
+                // 与文件树点击同口径：先复位上一文件会话态再载入
                 self.notify(NoticeLevel::Success, "打开链接");
-                self.load_note(&rel)
+                self.begin_note_load(&rel)
             }
             None => {
                 self.notify(NoticeLevel::Error, format!("未找到笔记：{path}"));

@@ -4,7 +4,8 @@
 
 use atelyx_core::frontmatter::{self, PropType, Yaml};
 use iced::widget::{button, column, container, mouse_area, operation, row, scrollable, space, text_input, Column, Id};
-use iced::{border, Color, Element, Length, Padding, Point, Task};
+use iced::{border, Color, Element, Length, Padding, Point, Size, Task};
+use std::rc::Rc;
 use std::time::Instant;
 
 use crate::layout_view::{estimate_text_width, PopupState};
@@ -66,15 +67,50 @@ impl Slot {
 pub struct RowRef {
     pub key: String,
     pub item: Option<(usize, String)>,
+    /// 本行由哪个面渲染：编辑态要落到该面自己的输入框焦点 id 上。
+    pub surface: PropsSurface,
+}
+
+/// 属性面板的挂载面：内联（笔记面板内）与 inspector 各自持有输入焦点 id 与候选滚动 id，
+/// 两面同时挂载同一个槽时不会争用同一路焦点。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PropsSurface {
+    Inline,
+    Inspector,
 }
 
 impl RowRef {
-    fn row(key: &str) -> Self {
-        Self { key: key.to_string(), item: None }
+    fn row(key: &str, surface: PropsSurface) -> Self {
+        Self { key: key.to_string(), item: None, surface }
     }
 
-    fn item(key: &str, index: usize, value: &Yaml) -> Self {
-        Self { key: key.to_string(), item: Some((index, item_text(value))) }
+    fn item(key: &str, index: usize, value: &Yaml, surface: PropsSurface) -> Self {
+        Self { key: key.to_string(), item: Some((index, item_text(value))), surface }
+    }
+}
+
+/// 候选浮层锚点：编辑槽输入框的窗口矩形（面板每帧绘制时回写；键 = 面）。
+/// 浮层在窗口层渲染，靠它贴输入框弹出而不是挤进面板布局。
+#[derive(Default)]
+pub struct SuggestAnchor {
+    inline: Option<iced::Rectangle>,
+    inspector: Option<iced::Rectangle>,
+    /// 进入编辑那一帧还没有实测矩形时的兜底（同批按压点）。
+    fallback: Option<Point>,
+    /// 发起编辑的窗口：浮层只在那个窗口渲染（属性面板所在窗口，避免别的窗口也冒出来）。
+    window: Option<iced::window::Id>,
+}
+
+impl SuggestAnchor {
+    fn rect(&self, surface: PropsSurface) -> Option<iced::Rectangle> {
+        let measured = match surface {
+            PropsSurface::Inline => self.inline,
+            PropsSurface::Inspector => self.inspector,
+        };
+        measured.or_else(|| {
+            self.fallback
+                .map(|p| iced::Rectangle::new(p, Size::new(160.0, 20.0)))
+        })
     }
 }
 
@@ -104,6 +140,8 @@ impl SuggestList {
 /// 属性面板交互状态（渲染数据缓存在 `parsed`，随文件载入 / 属性提交 / 撤销重做重建）。
 pub struct PropsPanel {
     pub collapsed: bool,
+    /// 载入在途：正文尚未就位，面板不接受任何编辑提交（否则旧块会写进新文件）。
+    pub loading: bool,
     /// 当前编辑槽（None = 无槽编辑）。
     pub editing: Option<Slot>,
     /// 编辑槽的草稿文本。
@@ -119,16 +157,25 @@ pub struct PropsPanel {
     hover_item: Option<(usize, usize)>,
     /// 同批按压落在属性面板内（PressReporter 上报，`Message::Press` 消费）。
     pub press_inside: bool,
-    /// 当前编辑输入框的焦点 id（同时至多一个输入框挂载，共用一个 id）。
+    /// 当前编辑的面（决定聚焦哪一路输入框 id）。
+    editing_surface: PropsSurface,
+    /// 内联面板的输入框焦点 id。
     focus_id: Id,
-    /// 候选清单滚动区 id（键盘高亮跟随滚动用）。
+    /// inspector 面板的输入框焦点 id（与内联分开：两面可同时挂载同一个槽）。
+    inspector_focus_id: Id,
+    /// 内联面板的候选清单滚动区 id（键盘高亮跟随滚动用）。
     suggest_scroll: Id,
+    /// inspector 面板的候选清单滚动区 id。
+    inspector_suggest_scroll: Id,
+    /// 候选浮层锚点（输入框实测矩形，按面存）。
+    suggest_anchor: Rc<std::cell::RefCell<SuggestAnchor>>,
 }
 
 impl Default for PropsPanel {
     fn default() -> Self {
         Self {
             collapsed: false,
+            loading: false,
             editing: None,
             draft: String::new(),
             duplicate: None,
@@ -137,8 +184,30 @@ impl Default for PropsPanel {
             hover_row: None,
             hover_item: None,
             press_inside: false,
+            editing_surface: PropsSurface::Inline,
             focus_id: Id::unique(),
+            inspector_focus_id: Id::unique(),
             suggest_scroll: Id::unique(),
+            inspector_suggest_scroll: Id::unique(),
+            suggest_anchor: Rc::new(std::cell::RefCell::new(SuggestAnchor::default())),
+        }
+    }
+}
+
+impl PropsPanel {
+    /// 该面编辑输入框的焦点 id。
+    fn focus_id_for(&self, surface: PropsSurface) -> Id {
+        match surface {
+            PropsSurface::Inline => self.focus_id.clone(),
+            PropsSurface::Inspector => self.inspector_focus_id.clone(),
+        }
+    }
+
+    /// 该面候选清单滚动区的 id。
+    fn suggest_scroll_for(&self, surface: PropsSurface) -> Id {
+        match surface {
+            PropsSurface::Inline => self.suggest_scroll.clone(),
+            PropsSurface::Inspector => self.inspector_suggest_scroll.clone(),
         }
     }
 }
@@ -161,7 +230,7 @@ pub enum PropsMsg {
     ToggleBool(RowRef),
     AddItem(RowRef),
     /// 追加一条空属性（占位键立即写盘）并进入键名编辑。
-    StartAdd,
+    StartAdd(PropsSurface),
     /// 候选点击（恒选中）。
     SuggestPick(String),
     /// 候选高亮移动（↑↓）。
@@ -181,6 +250,137 @@ pub enum PropsMsg {
     PressInside,
 }
 
+/// 带锚点探针的槽位输入框：候选浮层据此贴住输入框（输入框本身仍在面板布局里）。
+fn probed_slot_input<'a>(
+    app: &'a App,
+    placeholder: &str,
+    width: Length,
+    surface: PropsSurface,
+) -> Element<'a, Message> {
+    AnchorProbe::new(
+        slot_input(app, placeholder, width, surface).into(),
+        app.props.suggest_anchor.clone(),
+        surface,
+    )
+    .into()
+}
+
+/// 锚点探针：包住编辑槽输入框，绘制时把自身窗口矩形回写给候选浮层。
+/// 与只读面的光标探针同口径（绘制期取绝对矩形），脱离面板布局也能贴住输入框。
+struct AnchorProbe<'a> {
+    inner: Element<'a, Message>,
+    anchor: Rc<std::cell::RefCell<SuggestAnchor>>,
+    surface: PropsSurface,
+}
+
+impl<'a> AnchorProbe<'a> {
+    fn new(
+        inner: Element<'a, Message>,
+        anchor: Rc<std::cell::RefCell<SuggestAnchor>>,
+        surface: PropsSurface,
+    ) -> Self {
+        Self { inner, anchor, surface }
+    }
+}
+
+impl iced::advanced::Widget<Message, iced::Theme, iced::Renderer> for AnchorProbe<'_> {
+    fn tag(&self) -> iced::advanced::widget::tree::Tag {
+        self.inner.as_widget().tag()
+    }
+
+    fn state(&self) -> iced::advanced::widget::tree::State {
+        self.inner.as_widget().state()
+    }
+
+    fn children(&self) -> Vec<iced::advanced::widget::Tree> {
+        self.inner.as_widget().children()
+    }
+
+    fn diff(&self, tree: &mut iced::advanced::widget::Tree) {
+        self.inner.as_widget().diff(tree)
+    }
+
+    fn size(&self) -> Size<Length> {
+        self.inner.as_widget().size()
+    }
+
+    fn layout(
+        &mut self,
+        tree: &mut iced::advanced::widget::Tree,
+        renderer: &iced::Renderer,
+        limits: &iced::advanced::layout::Limits,
+    ) -> iced::advanced::layout::Node {
+        self.inner.as_widget_mut().layout(tree, renderer, limits)
+    }
+
+    fn draw(
+        &self,
+        tree: &iced::advanced::widget::Tree,
+        renderer: &mut iced::Renderer,
+        theme: &iced::Theme,
+        style: &iced::advanced::renderer::Style,
+        layout: iced::advanced::Layout<'_>,
+        cursor: iced::advanced::mouse::Cursor,
+        viewport: &iced::Rectangle,
+    ) {
+        {
+            let mut anchor = self.anchor.borrow_mut();
+            let bounds = layout.bounds();
+            match self.surface {
+                PropsSurface::Inline => anchor.inline = Some(bounds),
+                PropsSurface::Inspector => anchor.inspector = Some(bounds),
+            }
+        }
+        self.inner.as_widget().draw(tree, renderer, theme, style, layout, cursor, viewport);
+    }
+
+    fn update(
+        &mut self,
+        tree: &mut iced::advanced::widget::Tree,
+        event: &iced::Event,
+        layout: iced::advanced::Layout<'_>,
+        cursor: iced::advanced::mouse::Cursor,
+        renderer: &iced::Renderer,
+        clipboard: &mut dyn iced::advanced::Clipboard,
+        shell: &mut iced::advanced::Shell<'_, Message>,
+        viewport: &iced::Rectangle,
+    ) {
+        self.inner.as_widget_mut().update(
+            tree, event, layout, cursor, renderer, clipboard, shell, viewport,
+        );
+    }
+
+    fn mouse_interaction(
+        &self,
+        tree: &iced::advanced::widget::Tree,
+        layout: iced::advanced::Layout<'_>,
+        cursor: iced::advanced::mouse::Cursor,
+        viewport: &iced::Rectangle,
+        renderer: &iced::Renderer,
+    ) -> iced::advanced::mouse::Interaction {
+        self.inner
+            .as_widget()
+            .mouse_interaction(tree, layout, cursor, viewport, renderer)
+    }
+
+    fn operate(
+        &mut self,
+        tree: &mut iced::advanced::widget::Tree,
+        layout: iced::advanced::Layout<'_>,
+        renderer: &iced::Renderer,
+        operation: &mut dyn iced::advanced::widget::Operation,
+    ) {
+        self.inner
+            .as_widget_mut()
+            .operate(tree, layout, renderer, operation);
+    }
+}
+
+impl<'a> From<AnchorProbe<'a>> for Element<'a, Message> {
+    fn from(probe: AnchorProbe<'a>) -> Self {
+        Element::new(probe)
+    }
+}
 /// 属性面板渲染：Some(element) = 应显示面板。
 /// `standalone` = inspector 视图形态（不随源码档隐藏）；note 视图内源码档不渲染。
 pub fn props_panel<'a>(
@@ -190,6 +390,24 @@ pub fn props_panel<'a>(
 ) -> Option<Element<'a, Message>> {
     if app.ui.last_note_file.is_none() || (!standalone && app.note_mode == NoteMode::Source) {
         return None;
+    }
+    // 载入在途 / 载入失败先给状态，不给空态：否则面板整块消失，用户无从知道为什么没有属性
+    if app.props.loading {
+        return Some(status_row(
+            "载入中…",
+            pal::TEXT_MUTED,
+            "loader",
+            None,
+        ));
+    }
+    if let Some(reason) = &app.note_load_error {
+        let retry = app.ui.last_note_file.clone().map(Message::OpenFile);
+        return Some(status_row(
+            &format!("笔记载入失败，属性不可用：{reason}"),
+            pal::DANGER,
+            "alert",
+            retry,
+        ));
     }
     let parsed = app.props.parsed.as_ref();
     // 无块（无 frontmatter）时整块不显示；菜单「添加笔记属性」会先把占位属性写进文件，块随之出现
@@ -215,7 +433,8 @@ pub fn props_panel<'a>(
         .into(),
         (data, true) => {
             let Yaml::Map(pairs) = data else { return None };
-            props_column(app, window, cursor, pairs).into()
+            let surface = if standalone { PropsSurface::Inspector } else { PropsSurface::Inline };
+            props_column(app, window, cursor, pairs, surface).into()
         }
     };
     // 面板内按压转播：外点失焦提交的「内 / 外」判定源（按钮与输入框会捕获按压，mouse_area 不上报）
@@ -228,12 +447,43 @@ pub fn props_panel<'a>(
     )
 }
 
+/// 面板状态行（载入中 / 载入失败 + 可选重试按钮）：与属性列同样占一条 divider 收尾。
+fn status_row(
+    label: &str,
+    color: iced::Color,
+    icon_name: &'static str,
+    retry: Option<Message>,
+) -> Element<'static, Message> {
+    let mut row = row![
+        icon(icon_name, 13.0, color),
+        text(label.to_string()).size(pal::fs_caption()).color(pal::TEXT_SECONDARY),
+    ]
+    .spacing(8)
+    .align_y(iced::alignment::Vertical::Center);
+    if let Some(msg) = retry {
+        row = row.push(space()).push(controls::btn(
+            "重试",
+            &btn_tiny(),
+            controls::Variant::Secondary,
+            Some(msg),
+        ));
+    }
+    column![
+        container(row)
+            .width(Length::Fill)
+            .padding(Padding::ZERO.horizontal(16.0).vertical(6.0)),
+        controls::h_divider_subtle(),
+    ]
+    .into()
+}
+
 /// 属性列（折叠头 + 属性行 + 底部添加入口）；`pairs` = 解析出的键值对。
 fn props_column<'a>(
     app: &'a App,
     window: iced::window::Id,
     cursor: Point,
     pairs: &'a [(String, Yaml)],
+    surface: PropsSurface,
 ) -> Column<'a, Message> {
     let mut col = Column::<Message>::new()
         .padding(Padding::ZERO.horizontal(16.0).vertical(6.0))
@@ -257,9 +507,9 @@ fn props_column<'a>(
     }
     if !app.props.collapsed {
         for (i, (key, value)) in pairs.iter().enumerate() {
-            col = col.push(prop_row(app, window, cursor, i, key, value));
+            col = col.push(prop_row(app, window, cursor, i, key, value, surface));
         }
-        col = col.push(add_area(app));
+        col = col.push(add_area(app, surface));
     }
     col
 }
@@ -301,9 +551,10 @@ fn prop_row<'a>(
     index: usize,
     key: &str,
     value: &'a Yaml,
+    surface: PropsSurface,
 ) -> Element<'a, Message> {
     let ptype = frontmatter::infer_type(is_badge_key(key), value);
-    let key_ref = RowRef::row(key);
+    let key_ref = RowRef::row(key, surface);
 
     let type_btn = button(
         container(icon(type_icon(ptype), 13.0, pal::TEXT_MUTED))
@@ -323,7 +574,7 @@ fn prop_row<'a>(
     }));
 
     let key_cell: Element<'a, Message> = if app.props.editing.as_ref() == Some(&Slot::Key(index)) {
-        slot_input(app, "键名", Length::Fill).into()
+        probed_slot_input(app, "键名", Length::Fill, surface)
     } else {
         button(
             container(text(key.to_string()).size(pal::fs_caption()).color(pal::TEXT_MUTED))
@@ -356,16 +607,11 @@ fn prop_row<'a>(
     .on_enter(Message::Props(PropsMsg::HoverRow(index)))
     .on_exit(Message::Props(PropsMsg::UnhoverRow(index)));
 
-    let value_cell = value_display(app, index, key, value, ptype);
+    let value_cell = value_display(app, index, key, value, ptype, surface);
     let header = row![type_btn, key_area, value_cell].spacing(6).width(Length::Fill);
 
-    let mut col = Column::<Message>::new().spacing(2).push(header);
-    if let Some((list, tags)) = row_suggestions(app, index) {
-        if !list.hidden() {
-            col = col.push(suggest_card(app, &list, tags));
-        }
-    }
-    col.into()
+    // 候选清单不再排在行下方参与布局：由 `suggest_overlay` 在窗口层贴输入框弹出
+    Column::<Message>::new().spacing(2).push(header).into()
 }
 
 /// 值区展示与编辑入口（按类型分形态：布尔开关 / 徽章流 / 列表 / 可编辑文本 / 只读展示）。
@@ -375,6 +621,7 @@ fn value_display<'a>(
     key: &str,
     value: &'a Yaml,
     ptype: PropType,
+    surface: PropsSurface,
 ) -> Element<'a, Message> {
     let editing = app.props.editing.as_ref();
     match value {
@@ -382,15 +629,15 @@ fn value_display<'a>(
             if *b { "true" } else { "false" },
             &btn_tiny(),
             controls::Variant::Secondary,
-            Some(Message::Props(PropsMsg::ToggleBool(RowRef::row(key)))),
+            Some(Message::Props(PropsMsg::ToggleBool(RowRef::row(key, surface)))),
         )
         .into(),
         Yaml::Seq(items) if ptype == PropType::List => {
             let mut list = Column::<Message>::new().spacing(0);
             for (j, item) in items.iter().enumerate() {
-                let row_ref = RowRef::item(key, j, item);
+                let row_ref = RowRef::item(key, j, item, surface);
                 let item_cell: Element<'a, Message> = if editing == Some(&Slot::Item(index, j)) {
-                    slot_input(app, "项", item_input_width(&app.props.draft)).into()
+                    probed_slot_input(app, "项", item_input_width(&app.props.draft), surface)
                 } else if scalar_text(item).is_some() {
                     button(text(item_text(item)).size(pal::fs_caption()).color(pal::TEXT_PRIMARY))
                         .padding(Padding::ZERO.horizontal(4.0).vertical(1.0))
@@ -421,7 +668,7 @@ fn value_display<'a>(
                 list = list.push(
                     row![
                         icon("clock", 11.0, pal::TEXT_MUTED),
-                        slot_input(app, "项", item_input_width(&app.props.draft)),
+                        probed_slot_input(app, "项", item_input_width(&app.props.draft), surface),
                     ]
                     .spacing(4)
                     .align_y(iced::alignment::Vertical::Center),
@@ -431,7 +678,7 @@ fn value_display<'a>(
                     button(text("添加").size(pal::fs_micro()).color(pal::TEXT_MUTED))
                         .padding(Padding::ZERO.horizontal(4.0).vertical(1.0))
                         .style(|_t, _s| plain_btn())
-                        .on_press(Message::Props(PropsMsg::AddItem(RowRef::row(key)))),
+                        .on_press(Message::Props(PropsMsg::AddItem(RowRef::row(key, surface)))),
                 );
             }
             list.into()
@@ -439,9 +686,14 @@ fn value_display<'a>(
         Yaml::Seq(items) => {
             let mut flow = row!().spacing(4).align_y(iced::alignment::Vertical::Center);
             for (j, item) in items.iter().enumerate() {
-                let row_ref = RowRef::item(key, j, item);
+                let row_ref = RowRef::item(key, j, item, surface);
                 if editing == Some(&Slot::Item(index, j)) {
-                    flow = flow.push(slot_input(app, "标签", item_input_width(&app.props.draft)));
+                    flow = flow.push(probed_slot_input(
+                        app,
+                        "标签",
+                        item_input_width(&app.props.draft),
+                        surface,
+                    ));
                     continue;
                 }
                 let editable = scalar_text(item).is_some();
@@ -480,7 +732,12 @@ fn value_display<'a>(
                 );
             }
             if editing == Some(&Slot::NewItem(index)) {
-                flow = flow.push(slot_input(app, "标签", item_input_width(&app.props.draft)));
+                flow = flow.push(probed_slot_input(
+                    app,
+                    "标签",
+                    item_input_width(&app.props.draft),
+                    surface,
+                ));
             } else {
                 flow = flow.push(
                     button(
@@ -501,14 +758,14 @@ fn value_display<'a>(
                         },
                         ..plain_btn()
                     })
-                    .on_press(Message::Props(PropsMsg::AddItem(RowRef::row(key)))),
+                    .on_press(Message::Props(PropsMsg::AddItem(RowRef::row(key, surface)))),
                 );
             }
             flow.into()
         }
         Yaml::Str(s) => {
             if editing == Some(&Slot::Value(index)) {
-                slot_input(app, "属性值", Length::Fill).into()
+                probed_slot_input(app, "属性值", Length::Fill, surface)
             } else {
                 let shown = if s.is_empty() { "（空）".to_string() } else { s.clone() };
                 button(
@@ -523,7 +780,10 @@ fn value_display<'a>(
                 .width(Length::Fill)
                 .padding(Padding::ZERO.horizontal(4.0).vertical(3.0))
                 .style(|_t, _s| plain_btn())
-                .on_press(Message::Props(PropsMsg::StartEdit(Slot::Value(index), RowRef::row(key))))
+                .on_press(Message::Props(PropsMsg::StartEdit(
+                    Slot::Value(index),
+                    RowRef::row(key, surface),
+                )))
                 .into()
             }
         }
@@ -532,7 +792,7 @@ fn value_display<'a>(
 }
 
 /// 面板底部「添加属性」入口：常驻；有槽正在编辑时不可再点（免得同时多出第二条空属性）。
-fn add_area<'a>(app: &'a App) -> Element<'a, Message> {
+fn add_area<'a>(app: &'a App, surface: PropsSurface) -> Element<'a, Message> {
     let idle = app.props.editing.is_none();
     let mut col = Column::<Message>::new().spacing(2);
     col = col.push(
@@ -548,7 +808,7 @@ fn add_area<'a>(app: &'a App) -> Element<'a, Message> {
         )
         .padding(Padding::ZERO.horizontal(4.0).vertical(3.0))
         .style(|_t, _s| plain_btn())
-        .on_press_maybe(idle.then(|| Message::Props(PropsMsg::StartAdd))),
+        .on_press_maybe(idle.then(|| Message::Props(PropsMsg::StartAdd(surface)))),
     );
     if let Some(dup) = &app.props.duplicate {
         col = col.push(text(dup.clone()).size(pal::fs_micro()).color(pal::DANGER));
@@ -573,7 +833,12 @@ fn row_suggestions(app: &App, index: usize) -> Option<(SuggestList, bool)> {
 }
 
 /// 行内候选卡：定高清单（超过可视行数走内滚动），整行可点，键盘高亮只在按过 ↑↓ 后出现。
-fn suggest_card<'a>(app: &'a App, list: &SuggestList, tags: bool) -> Element<'a, Message> {
+fn suggest_card<'a>(
+    app: &'a App,
+    list: &SuggestList,
+    tags: bool,
+    surface: PropsSurface,
+) -> Element<'a, Message> {
     if list.items.is_empty() {
         // 池非空而过滤无命中：留一行提示，卡片高度不随键入忽隐忽现
         let hint = if tags { "没有匹配的标签" } else { "没有匹配的键名" };
@@ -624,7 +889,7 @@ fn suggest_card<'a>(app: &'a App, list: &SuggestList, tags: bool) -> Element<'a,
     // 溢出的清单挂内滚动区（滚动条只在溢出时占位）；不溢出时直接铺开，省掉无用的滚动状态
     let content: Element<'a, Message> = if list.items.len() > SUGGEST_MAX_ROWS {
         scroll::v(rows)
-            .id(app.props.suggest_scroll.clone())
+            .id(app.props.suggest_scroll_for(surface))
             .width(Length::Fill)
             .height(list_h)
             .into()
@@ -645,6 +910,67 @@ fn suggest_card_frame<'a>(content: Element<'a, Message>) -> Element<'a, Message>
             ..iced::widget::container::Style::default()
         })
         .into()
+}
+
+/// 候选浮层的最小宽度（键名列只有 96px，浮层要能放下完整键名）。
+const SUGGEST_MIN_W: f32 = 180.0;
+
+/// 编辑槽所在行下标（键名 / 数组项槽才有候选）。
+fn editing_row_index(app: &App) -> Option<usize> {
+    match app.props.editing.as_ref()? {
+        Slot::Key(index) => Some(*index),
+        Slot::Item(index, _) | Slot::NewItem(index) => Some(*index),
+        Slot::Value(_) => None,
+    }
+}
+
+/// 候选浮层（窗口层）：贴编辑槽输入框下沿弹出，下方放不下翻到上方，限高内滚。
+/// 不铺捕获层：外点仍按面板外按压处理（提交并落到被点控件），与内联时代的交互一致。
+pub fn suggest_overlay<'a>(
+    app: &'a App,
+    window: iced::window::Id,
+    viewport: Size,
+) -> Option<Element<'a, Message>> {
+    // 面板不渲染的两种情形（没打开笔记 / 内联面在源码档隐藏）不出浮层
+    if app.ui.last_note_file.is_none() {
+        return None;
+    }
+    if app.props.editing_surface == PropsSurface::Inline && app.note_mode == NoteMode::Source {
+        return None;
+    }
+    // 只在发起编辑的那个窗口出浮层（编辑态是全应用共享的，别的窗口不该跟着冒出来）
+    let owner = app.props.suggest_anchor.borrow().window;
+    if owner.is_some_and(|w| w != window) {
+        return None;
+    }
+    let index = editing_row_index(app)?;
+    let (list, tags) = row_suggestions(app, index)?;
+    if list.hidden() {
+        return None;
+    }
+    let surface = app.props.editing_surface;
+    // 首帧还没有实测矩形：先用当前光标兜底（绘制后由锚点探针修正），保证候选一定可见
+    let rect = app
+        .props
+        .suggest_anchor
+        .borrow()
+        .rect(surface)
+        .unwrap_or_else(|| iced::Rectangle::new(app.cursor_for(window), Size::new(SUGGEST_MIN_W, 20.0)));
+    let rows = list.items.len().clamp(1, SUGGEST_MAX_ROWS) as f32;
+    let geom = crate::ui::popup::resolve(
+        &crate::ui::popup::PopupSpec {
+            anchor: Point::new(rect.x, rect.y + rect.height + 2.0),
+            width: rect.width.max(SUGGEST_MIN_W),
+            height: rows * suggest_row_h() + 4.0,
+            flip_y: Some(rect.y - 2.0),
+            min_width: SUGGEST_MIN_W,
+        },
+        viewport,
+    );
+    let card = suggest_card(app, &list, tags, surface);
+    // 卡片内按压算「属性面板内」：否则外点提交会先把编辑槽收掉，候选按钮收不到释放
+    let card = controls::PressReporter::new(card, Message::Props(PropsMsg::PressInside));
+    Some(crate::ui::popup::floating(geom, card.into()))
 }
 
 /// 候选行样式：卡片底与 `HOVER` 同色，卡内悬停改叠一档白光（否则悬停无视觉反馈）。
@@ -733,13 +1059,18 @@ fn suggest_scroll_ratio(index: usize, total: usize) -> f32 {
 }
 
 /// 槽位输入框（透明底、聚焦描边；输入统一写 draft，Enter 走 `Submit` 统一决策）。
-fn slot_input<'a>(app: &'a App, placeholder: &str, width: Length) -> text_input::TextInput<'a, Message> {
+fn slot_input<'a>(
+    app: &'a App,
+    placeholder: &str,
+    width: Length,
+    surface: PropsSurface,
+) -> text_input::TextInput<'a, Message> {
     text_input(placeholder, &app.props.draft)
         .size(pal::fs_caption())
         .font(crate::ui::regular())
         .padding(Padding::ZERO.horizontal(4.0).vertical(2.0))
         .width(width)
-        .id(app.props.focus_id.clone())
+        .id(app.props.focus_id_for(surface))
         .on_input(|s| Message::Props(PropsMsg::Draft(s)))
         .on_submit(Message::Props(PropsMsg::Submit))
         .style(|_theme, status| text_input::Style {
@@ -774,6 +1105,7 @@ fn item_text(v: &Yaml) -> String {
     match v {
         Yaml::Null => String::new(),
         Yaml::Date(d) => d.clone(),
+        Yaml::Timestamp(s) => s.clone(),
         Yaml::Num(f) => display_num(*f),
         Yaml::Bool(b) => if *b { "true" } else { "false" }.into(),
         Yaml::Str(s) => s.clone(),
@@ -807,8 +1139,17 @@ fn open_type_menu(window: iced::window::Id, cursor: Point, key: String) -> Messa
 impl App {
     /// 开始编辑一个槽：聚焦当前槽输入框并全选（进入编辑即全选），候选清单回到顶部。
     /// 清单滚动区按位置复用状态，上一槽滚到过的偏移会带进来，故每次开新槽都压回原点。
+    /// 换槽 / 换面即重锚：实测矩形属于上一行，先清掉用同批按压点兜底，绘制后自动修正。
+    fn reset_suggest_anchor(&self) {
+        let mut anchor = self.props.suggest_anchor.borrow_mut();
+        anchor.inline = None;
+        anchor.inspector = None;
+        anchor.fallback = self.focused_window.map(|w| self.cursor_for(w));
+        anchor.window = self.focused_window;
+    }
+
     fn begin_slot_edit(&self) -> Task<Message> {
-        let id = self.props.focus_id.clone();
+        let id = self.props.focus_id_for(self.props.editing_surface);
         operation::focus(id.clone())
             .chain(operation::select_all(id))
             .chain(self.scroll_suggest(0.0))
@@ -863,6 +1204,20 @@ impl App {
     }
 
     pub(crate) fn on_props(&mut self, m: PropsMsg) -> Task<Message> {
+        // 载入在途：正文未就位，属性提交会把上一文件的块写进新路径；此时面板无编辑行，只留悬停反馈
+        let passive = matches!(
+            m,
+            PropsMsg::PressInside
+                | PropsMsg::HoverRow(_)
+                | PropsMsg::UnhoverRow(_)
+                | PropsMsg::HoverItem(..)
+                | PropsMsg::UnhoverItem(..)
+                | PropsMsg::ToggleCollapse
+        );
+        // 只读身份同样拒绝提交：属性写的是正文文件头，与正文同一权限面
+        if (self.props.loading || self.note_readonly()) && !passive {
+            return Task::none();
+        }
         match m {
             PropsMsg::PressInside => {
                 self.props.press_inside = true;
@@ -908,6 +1263,9 @@ impl App {
                     None => None,
                 };
                 let Some(resolved) = resolved else { return Task::none() };
+                // 编辑态归属点击的那一面：输入框焦点只给该面的 id
+                self.props.editing_surface = row.surface;
+                self.reset_suggest_anchor();
                 self.props.editing = Some(resolved);
                 self.props.draft = self.slot_text();
                 self.props.duplicate = None;
@@ -1021,13 +1379,16 @@ impl App {
                 self.reset_suggest();
                 self.begin_slot_edit().chain(self.refresh_tag_vocab_for_slot())
             }
-            PropsMsg::StartAdd => {
+            PropsMsg::StartAdd(surface) => {
+                // 编辑态归属发起的面：输入框焦点随面走
+                self.props.editing_surface = surface;
+                self.reset_suggest_anchor();
                 // 入口可能在弹层里（笔记面板菜单）：先收掉弹层再动手。
                 // 弹层留在屏上时，关它的那次按压落在属性面板之外，同批会按「外点失焦」把新建的行收掉
                 self.dismiss_popup();
                 // 已在编辑槽位：不再插第二条空属性，只把焦点还给当前输入框
                 if self.props.editing.is_some() {
-                    return operation::focus(self.props.focus_id.clone());
+                    return operation::focus(self.props.focus_id_for(self.props.editing_surface));
                 }
                 // 数据取自当前文本而非面板缓存：源码档与缓存滞后的时刻都能拿到真实属性
                 let open = frontmatter::block_end(&self.note_text).is_some();
@@ -1144,7 +1505,7 @@ impl App {
     /// 候选清单滚到相对位置（清单未挂滚动区 / 不溢出时无操作）。
     fn scroll_suggest(&self, y: f32) -> Task<Message> {
         operation::snap_to(
-            self.props.suggest_scroll.clone(),
+            self.props.suggest_scroll_for(self.props.editing_surface),
             scrollable::RelativeOffset { x: 0.0, y },
         )
     }
@@ -1242,18 +1603,43 @@ impl App {
     }
 
     /// 用新属性数据重写 frontmatter 并走正文保存链（空映射 = 删块回到无 frontmatter 态）。
+    /// 正文未变（如提交了与原值相同的文本）时只重建面板缓存：不入撤销栈、不置脏、不发协作帧。
     fn apply_props(&mut self, data: Vec<(String, Yaml)>) {
-        self.edit.snapshot(&self.note_text);
         let body = crate::strip_frontmatter(&self.note_text).to_string();
-        self.note_text = frontmatter::stringify(&Yaml::Map(data), &body);
+        let next = frontmatter::stringify(&Yaml::Map(data), &body);
+        if next == self.note_text {
+            self.refresh_props();
+            return;
+        }
+        // 源码档的编辑面持有自己的文本副本：重写前记下光标的正文相对偏移，重写后搬回去，
+        // 否则光标跳回文首、视图跟着回顶
+        let cursor = (self.note_mode == NoteMode::Source).then(|| {
+            let cursor = self.source_editor.cursor();
+            (
+                cursor_body_offset(&self.note_text, cursor.position),
+                cursor.selection.map(|p| cursor_body_offset(&self.note_text, p)),
+            )
+        });
+        self.edit.snapshot(&self.note_text);
+        self.note_text = next;
         // 源码档的编辑面持有自己的文本副本，重写正文后必须同步，否则下一次按键会把属性块写回旧文本
         if self.note_mode == NoteMode::Source {
             self.source_editor = text_editor::Content::with_text(&self.note_text);
+            if let Some((position, selection)) = cursor {
+                let position = body_editor_position(&self.source_editor, &self.note_text, position);
+                let selection = selection
+                    .map(|body| body_editor_position(&self.source_editor, &self.note_text, body));
+                self.source_editor.move_to(text_editor::Cursor { position, selection });
+            }
+            // 属性重写不经编辑面快照栈：旧全文重做会让属性块整体回退
+            self.edit.invalidate_redo();
         }
         self.dirty = true;
         self.save_error = None;
         self.autosave_deadline = Some(Instant::now() + crate::AUTOSAVE_DEBOUNCE);
         self.refresh_props();
+        // 空间模式：正文以协作文档为真源，属性改动同样要差分上行（否则对端看不到、下次远端合入退回旧块）
+        crate::space_actions::collab_after_edit(self);
     }
 
     /// 重建属性面板解析缓存（文件载入 / 属性提交 / 撤销重做后调用）。
@@ -1440,6 +1826,7 @@ fn scalar_text(v: &Yaml) -> Option<String> {
     match v {
         Yaml::Str(s) => Some(s.clone()),
         Yaml::Date(d) => Some(d.clone()),
+        Yaml::Timestamp(s) => Some(s.clone()),
         Yaml::Num(f) => Some(display_num(*f)),
         _ => None,
     }
@@ -1470,9 +1857,52 @@ fn placeholder_key<'a>(existing: impl Iterator<Item = &'a str>) -> String {
     }
 }
 
+/// 源码档光标 → 正文相对偏移：属性块只在正文之前增删行，正文内位置不变；
+/// 落在属性块内的端点收到正文首。
+fn cursor_body_offset(text: &str, position: text_editor::Position) -> usize {
+    let end = frontmatter::block_end(text).unwrap_or(0);
+    crate::markdown_edit::editor_offset(text, position).saturating_sub(end)
+}
+
+/// 正文相对偏移 → 新文本里的编辑面光标位置（行号越界、列落在字符中间时收到可落点）。
+fn body_editor_position(
+    content: &text_editor::Content,
+    text: &str,
+    body: usize,
+) -> text_editor::Position {
+    let end = frontmatter::block_end(text).unwrap_or(0);
+    let mut position = crate::markdown_edit::editor_position(text, end + body);
+    position.line = position.line.min(content.line_count().saturating_sub(1));
+    let max = content.line(position.line).map_or(0, |line| line.text.len());
+    position.column = position.column.min(max);
+    while position.column > 0
+        && !content
+            .line(position.line)
+            .is_some_and(|line| line.text.is_char_boundary(position.column))
+    {
+        position.column -= 1;
+    }
+    position
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 属性块增行后源码档光标按正文相对偏移落在同一行（不回到文首）。
+    #[test]
+    fn cursor_body_offset_survives_property_growth() {
+        let before = "---\na: 1\n---\n正文\n第二行";
+        let after = "---\na: 1\nb: 2\n---\n正文\n第二行";
+        let body = cursor_body_offset(before, text_editor::Position { line: 4, column: 0 });
+        assert_eq!(body, before.find("第二行").unwrap() - frontmatter::block_end(before).unwrap());
+        let placed = crate::markdown_edit::editor_position(
+            after,
+            frontmatter::block_end(after).unwrap() + body,
+        );
+        assert_eq!(placed.line, 5);
+        assert_eq!(placed.column, 0);
+    }
 
     fn data() -> Vec<(String, Yaml)> {
         vec![
@@ -1578,23 +2008,71 @@ mod tests {
         assert_eq!(items(&d, 0), vec!["a", "b", "c", "d"]);
     }
 
+    /// 候选锚点按面分开：实测优先、兜底其次，且两面不串锚（否则浮层会贴到另一面的输入框上）。
+    #[test]
+    fn anchor_prefers_measured_rect_per_surface() {
+        let mut anchor = SuggestAnchor::default();
+        assert!(anchor.rect(PropsSurface::Inline).is_none());
+        anchor.fallback = Some(Point::new(10.0, 20.0));
+        assert_eq!(anchor.rect(PropsSurface::Inline).expect("兜底").y, 20.0);
+        anchor.inline =
+            Some(iced::Rectangle::new(Point::new(5.0, 6.0), Size::new(80.0, 18.0)));
+        assert_eq!(anchor.rect(PropsSurface::Inline).expect("实测").y, 6.0);
+        assert_eq!(anchor.rect(PropsSurface::Inspector).expect("兜底").y, 20.0);
+    }
+
+    /// 内联与 inspector 各持自己的输入焦点 / 候选滚动 id：两面同时挂载同一槽时不争同一路焦点。
+    #[test]
+    fn inline_and_inspector_use_distinct_ids() {
+        let panel = PropsPanel::default();
+        assert_ne!(
+            panel.focus_id_for(PropsSurface::Inline),
+            panel.focus_id_for(PropsSurface::Inspector)
+        );
+        assert_ne!(
+            panel.suggest_scroll_for(PropsSurface::Inline),
+            panel.suggest_scroll_for(PropsSurface::Inspector)
+        );
+    }
+
     #[test]
     fn row_ref_tracks_row_after_removal() {
         let mut d = data();
         d.remove(0);
-        assert_eq!(resolve_row(&d, &RowRef::row("status")), Some(0));
-        assert!(resolve_row(&d, &RowRef::row("tags")).is_none());
+        assert_eq!(resolve_row(&d, &RowRef::row("status", PropsSurface::Inline)), Some(0));
+        assert!(resolve_row(&d, &RowRef::row("tags", PropsSurface::Inline)).is_none());
     }
 
     #[test]
     fn item_row_ref_requires_same_text() {
         let d = data();
-        let hit = RowRef { key: "tags".into(), item: Some((0, "a".into())) };
-        let miss = RowRef { key: "tags".into(), item: Some((0, "b".into())) };
-        let out_of_range = RowRef { key: "tags".into(), item: Some((9, "a".into())) };
+        let hit = RowRef {
+            key: "tags".into(),
+            item: Some((0, "a".into())),
+            surface: PropsSurface::Inline,
+        };
+        let miss = RowRef {
+            key: "tags".into(),
+            item: Some((0, "b".into())),
+            surface: PropsSurface::Inline,
+        };
+        let out_of_range = RowRef {
+            key: "tags".into(),
+            item: Some((9, "a".into())),
+            surface: PropsSurface::Inline,
+        };
         assert_eq!(resolve_row(&d, &hit), Some(0));
         assert!(resolve_row(&d, &miss).is_none());
         assert!(resolve_row(&d, &out_of_range).is_none());
+    }
+
+    /// 时间戳项仍是可编辑标量：否则数组里的时间值点不开、Tab 也跳过（改动前是字符串可编辑）。
+    #[test]
+    fn timestamp_items_stay_editable() {
+        let value = Yaml::Timestamp("2024-01-02 09:30:00".into());
+        assert_eq!(scalar_text(&value), Some("2024-01-02 09:30:00".to_string()));
+        let d = vec![("dates".to_string(), Yaml::Seq(vec![value]))];
+        assert_eq!(flatten_slots(&d), vec![Slot::Key(0), Slot::Item(0, 0)]);
     }
 
     #[test]

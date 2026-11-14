@@ -583,6 +583,11 @@ fn with_overlays<'a>(
         root = root.push(el);
     }
 
+    // 属性候选：贴编辑槽输入框弹出（不参与面板布局，属性多时不把正文挤到 0）
+    if let Some(el) = crate::properties_view::suggest_overlay(app, window, viewport) {
+        root = root.push(el);
+    }
+
     // 弹层（同窗口至多一个；捕获层点击 = 外点关闭；居中模态另行渲染，见下方）
     if let Some((w, open)) = &app.popup {
         if *w == window
@@ -3359,12 +3364,14 @@ pub(crate) fn note_view(app: &App, window: iced::window::Id) -> Element<'_, Mess
         );
     }
     let cursor = app.cursor_for(window);
+    // 只读身份（协作空间 Viewer）：编辑入口在渲染层即禁用，常驻提示条说明原因
+    let readonly = app.note_readonly();
 
     let mode_control = container(
         row![
-            mode_button(window, "eye", "只读", "只读：仅查看，双击正文进入编辑", NoteMode::Read, app.note_mode),
-            mode_button(window, "pencil", "预览编辑", "预览编辑：正文可直接修改", NoteMode::Edit, app.note_mode),
-            mode_button(window, "code", "源码", "源码：直接编辑 Markdown 源文", NoteMode::Source, app.note_mode),
+            mode_button(window, "eye", "只读", "只读：仅查看，双击正文进入编辑", NoteMode::Read, app.note_mode, readonly),
+            mode_button(window, "pencil", "预览编辑", "预览编辑：正文可直接修改", NoteMode::Edit, app.note_mode, readonly),
+            mode_button(window, "code", "源码", "源码：直接编辑 Markdown 源文", NoteMode::Source, app.note_mode, readonly),
         ]
         .spacing(2),
     )
@@ -3458,6 +3465,11 @@ pub(crate) fn note_view(app: &App, window: iced::window::Id) -> Element<'_, Mess
                             &app.note_images,
                             app.global.soft_wrap,
                             app.note_selection.as_ref(),
+                            &app.note_code_expanded,
+                            &app.note_block_metrics,
+                            &app.note_cell_cache,
+                            app.note_read_window(),
+                            app.note_image_epoch,
                         )
                     }
                     None => placeholder_panel("正在渲染…"),
@@ -3475,15 +3487,27 @@ pub(crate) fn note_view(app: &App, window: iced::window::Id) -> Element<'_, Mess
             if app.note_mode == NoteMode::Edit {
                 mouse_area(scrolled).into()
             } else {
-                // 只读档双击正文进预览编辑档（光标落点由编辑面按释放点换算）；右键 = 选区复制菜单
-                mouse_area(scrolled)
-                    .on_double_click(Message::NoteEnterEdit)
-                    .on_right_press(selection_popup(
+                // 只读档双击正文进预览编辑档（光标落点由编辑面按释放点换算）；右键 = 选区复制菜单。
+                // 只读身份不挂双击：进编辑档的入口连渲染层都不存在；无选区不挂右键（菜单无事可做）
+                let has_selection = app
+                    .note_selection
+                    .as_ref()
+                    .is_some_and(|sel| sel.range().0 < sel.range().1);
+                let area = mouse_area(scrolled);
+                let area = if has_selection {
+                    area.on_right_press(selection_popup(
                         window,
                         cursor,
                         crate::markdown_select::SelectionTarget::Note,
                     ))
-                    .into()
+                } else {
+                    area
+                };
+                if readonly {
+                    area.into()
+                } else {
+                    area.on_double_click(Message::NoteEnterEdit).into()
+                }
             }
         }
     };
@@ -3502,6 +3526,9 @@ pub(crate) fn note_view(app: &App, window: iced::window::Id) -> Element<'_, Mess
         .then(|| bounded_column(page_title(app, window), app.global.content_width, Length::Shrink));
 
     let mut body = column![toolbar, controls::h_divider_subtle()];
+    if readonly {
+        body = body.push(readonly_banner());
+    }
     if let Some(t) = title {
         body = body.push(t);
     }
@@ -3696,6 +3723,7 @@ fn title_text_width(s: &str) -> f32 {
 }
 
 /// 模式分段按钮（Button sm 档：高 24 / px-8 / 11px / 强调字重；激活 = 强调淡底，悬停文字提亮）。
+/// 只读身份下非只读档禁用（不挂 on_press，文字降为弱色，提示改为只读原因）。
 fn mode_button(
     window: iced::window::Id,
     icon_name: &'static str,
@@ -3703,16 +3731,26 @@ fn mode_button(
     hint: &str,
     mode: NoteMode,
     current: NoteMode,
+    readonly: bool,
 ) -> Element<'static, Message> {
     let active = mode == current;
+    let disabled = readonly && mode != NoteMode::Read;
+    let tint = if disabled {
+        pal::TEXT_MUTED
+    } else if active {
+        pal::ACCENT
+    } else {
+        pal::TEXT_SECONDARY
+    };
+    let tip = if disabled { "当前身份为只读，无法编辑" } else { hint };
     let btn = button(
         container(
             row![
-                icon(icon_name, 12.0, if active { pal::ACCENT } else { pal::TEXT_SECONDARY }),
+                icon(icon_name, 12.0, tint),
                 text(label.to_string())
                     .size(pal::fs_micro())
                     .font(crate::ui::bold())
-                    .color(if active { pal::ACCENT } else { pal::TEXT_SECONDARY }),
+                    .color(tint),
             ]
             .spacing(4)
             .align_y(Vertical::Center),
@@ -3724,23 +3762,45 @@ fn mode_button(
     .height(Length::Fixed(24.0))
     .style(move |_t, status| button::Style {
         background: active.then_some(pal::ACCENT_SOFT.into()),
-        text_color: if matches!(status, button::Status::Hovered | button::Status::Pressed) && !active {
-            pal::TEXT_PRIMARY
-        } else {
-            pal::TEXT_SECONDARY
+        text_color: match status {
+            _ if disabled => pal::TEXT_MUTED,
+            button::Status::Hovered | button::Status::Pressed if !active => pal::TEXT_PRIMARY,
+            _ => pal::TEXT_SECONDARY,
         },
         border: border::rounded(pal::RADIUS_SM),
         ..Default::default()
-    })
-    .on_press(Message::NoteMode(mode));
+    });
+    // 禁用档不挂按压：只读身份的编辑入口在渲染层就不存在
+    let btn = if disabled { btn } else { btn.on_press(Message::NoteMode(mode)) };
     iced::widget::mouse_area(btn)
         .on_enter(Message::Ui(crate::ui::UiMsg::HoverTip {
             window,
-            label: hint.to_string(),
+            label: tip.to_string(),
             box_px: 24.0,
         }))
-        .on_exit(Message::Ui(crate::ui::UiMsg::HoverTipEnd { window, label: hint.to_string() }))
+        .on_exit(Message::Ui(crate::ui::UiMsg::HoverTipEnd { window, label: tip.to_string() }))
         .into()
+}
+
+/// 只读身份提示条：常驻工具条下，说明为什么编辑入口是禁用的。
+fn readonly_banner() -> Element<'static, Message> {
+    container(
+        row![
+            icon("lock", 13.0, pal::WARNING),
+            text("当前身份为只读，无法编辑".to_string())
+                .size(pal::fs_caption())
+                .color(pal::TEXT_SECONDARY),
+        ]
+        .spacing(6)
+        .align_y(Vertical::Center),
+    )
+    .width(Length::Fill)
+    .padding(Padding::ZERO.horizontal(12.0).vertical(6.0))
+    .style(|_t| Style {
+        background: Some(pal::WARNING_SOFT.into()),
+        ..Style::default()
+    })
+    .into()
 }
 
 /// 揭示态的源码面元素（行装饰由渲染面给出的包装沿用）。
@@ -3921,6 +3981,13 @@ fn edit_view(app: &App) -> Element<'_, Message> {
             (0, all_rows.len(), 0.0, 0.0)
         }
     };
+    // 块内空行（代码块 / 引用里的空行）不生成独立空行行：光标落在其中时仍须揭示所在块，
+    // 否则源码面不存在、键盘没有宿主，该行永远打不进字
+    let caret_on_gap = all_rows
+        .iter()
+        .any(|row| matches!(row.kind, RowKind::Gap) && row.from <= caret && caret < row.to);
+    // 落在空行行上才由空行行托管光标（不揭示块）；否则空行在块内，必须揭示
+    let caret_blank = caret_blank && !caret_on_gap;
     let total_rows = all_rows.len();
     for (index, row) in all_rows.into_iter().enumerate() {
         if index < start || index >= end || row.element.is_none() {
@@ -4506,24 +4573,54 @@ fn popup_element<'a>(
         PopupState::SpaceInvite => space_invite_entries(app),
         PopupState::NoteMenu => {
             let note_open = app.ui.last_note_file.is_some();
+            // 只读身份：属性写入与历史回滚都改正文，菜单项直接禁用（不留下点击无反应的入口）
+            let readonly = app.note_readonly();
+            let readonly_hint = readonly.then(|| "当前身份为只读".to_string());
             vec![
-                (0, MenuEntry::action("添加笔记属性", Message::Props(crate::properties_view::PropsMsg::StartAdd))),
+                (
+                    0,
+                    MenuEntry::Action {
+                        label: "添加笔记属性".into(),
+                        icon: None,
+                        danger: false,
+                        disabled: !note_open || readonly,
+                        on_press: (!readonly).then_some(Message::Props(
+                            crate::properties_view::PropsMsg::StartAdd(
+                                crate::properties_view::PropsSurface::Inline,
+                            ),
+                        )),
+                        note: None,
+                        hint: if !note_open {
+                            Some("未打开笔记".to_string())
+                        } else {
+                            readonly_hint.clone()
+                        },
+                    },
+                ),
                 (
                     0,
                     MenuEntry::Action {
                         label: "历史记录".into(),
                         icon: Some("history".into()),
                         danger: false,
-                        disabled: !note_open,
-                        on_press: app.ui.last_note_file.clone().map(|file| {
-                            Message::History(crate::history_browser::HistoryBrowserMsg::Open {
-                                window,
-                                kind: atelyx_core::history::HistoryKind::Note,
-                                file,
+                        disabled: !note_open || readonly,
+                        on_press: if readonly {
+                            None
+                        } else {
+                            app.ui.last_note_file.clone().map(|file| {
+                                Message::History(crate::history_browser::HistoryBrowserMsg::Open {
+                                    window,
+                                    kind: atelyx_core::history::HistoryKind::Note,
+                                    file,
+                                })
                             })
-                        }),
+                        },
                         note: None,
-                        hint: (!note_open).then(|| "未打开笔记".to_string()),
+                        hint: if !note_open {
+                            Some("未打开笔记".to_string())
+                        } else {
+                            readonly_hint.clone()
+                        },
                     },
                 ),
             ]

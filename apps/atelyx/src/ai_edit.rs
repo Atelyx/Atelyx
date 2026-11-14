@@ -366,8 +366,8 @@ fn apply_space_note(
         let _ = reply.send(Err("该空间为只读身份，无法编辑".to_string()));
         return iced::Task::none();
     }
-    // 在途人工保存会整文上行：先等它收尾，避免两笔整文写交错
-    if app.space_note_save_inflight {
+    // 同一文件在途的人工保存会整文上行：先等它收尾，避免两笔整文写交错（别的文件在途无关）
+    if app.space_note_saving(&path) {
         let _ = reply.send(Err("正在保存该笔记，请稍后重试".to_string()));
         return iced::Task::none();
     }

@@ -224,7 +224,7 @@ fn parse_blocks(
                 continue;
             }
             if let Some(kind) = list_kind(body) {
-                let (block, next) = collect_list(ctx, &line, ind, ind_cols, kind, to);
+                let (block, next) = collect_list(ctx, &line, ind, kind, to);
                 blocks.push(block);
                 pos = next;
                 continue;
@@ -768,7 +768,6 @@ fn collect_list(
     ctx: &Ctx,
     first: &Line,
     first_ind: usize,
-    first_ind_cols: usize,
     kind: ListKind,
     to: usize,
 ) -> (MarkdownBlock, usize) {
@@ -803,6 +802,10 @@ fn collect_list(
         let Some(marker_len) = (ind_cols <= 3).then_some(marker_len).flatten() else {
             break;
         };
+        // 标记后必须空白或行尾：项 '---' 后面紧跟的分割线不是又一个项（否则 Hr 被吞进列表）
+        if marker_spaces_of(body, marker_len) == 0 && !body[marker_len..].is_empty() {
+            break;
+        }
         let spaces = marker_spaces_of(body, marker_len);
         let has_content = !body[marker_len + spaces..].trim().is_empty();
         if !has_content {
@@ -820,7 +823,8 @@ fn collect_list(
             continue;
         }
         // 收集项：首行 + 续行（缩进 ≥W 或 lazy）
-        let width = first_ind_cols + item_content_width(marker_len, spaces);
+        // 续行缩进口径按当前项算：同一列表里各项缩进可以不同（0..3 列）
+        let width = ind_cols + item_content_width(marker_len, spaces);
         let item_from = line.start;
         let mark_from = line.start + ind;
         let content_off = marker_len + spaces;
@@ -1105,19 +1109,23 @@ fn table_cells(text: &str, abs_start: usize) -> Vec<MarkdownTableCell> {
     let v = vchars(text);
     let mut out: Vec<MarkdownTableCell> = Vec::new();
     let mut seg: Vec<&Vc> = Vec::new();
+    // 段起点（相对 text）：空段 / 全空格段没有字符可定位，用它钉住单元格位置。
+    // 首段起点取剥离行首 `|` 后第一个字符的位置，回落到 0 会钉在前导 `|` 上
+    let mut seg_from = v.first().map_or(0, |vc| vc.off);
     for vc in &v {
         if vc.c == '|' {
-            out.push(cell_range(&seg, abs_start));
+            out.push(cell_range(&seg, abs_start + seg_from, abs_start));
             seg.clear();
+            seg_from = vc.off + vc.len;
         } else {
             seg.push(vc);
         }
     }
-    out.push(cell_range(&seg, abs_start));
+    out.push(cell_range(&seg, abs_start + seg_from, abs_start));
     out
 }
 
-fn cell_range(seg: &[&Vc], abs_start: usize) -> MarkdownTableCell {
+fn cell_range(seg: &[&Vc], cell_from: usize, abs_start: usize) -> MarkdownTableCell {
     // 与行级裁空同一空白口径（含 CRLF 源的 `\r` 与全角空格）；`\|` 占位符的 `\0` 不属空白
     let is_space = |v: &Vc| v.c.is_whitespace();
     let mut lo = 0;
@@ -1129,9 +1137,8 @@ fn cell_range(seg: &[&Vc], abs_start: usize) -> MarkdownTableCell {
         hi -= 1;
     }
     if lo >= hi {
-        let at = seg.first().map(|v| v.off).unwrap_or(0);
-        let p = abs_start + at;
-        return MarkdownTableCell { from: p, to: p };
+        // 空段 / 全空格段：区间钉在单元格起点（回落到行首会让落点跑到别的列上）
+        return MarkdownTableCell { from: cell_from, to: cell_from };
     }
     let first = seg[lo];
     let last = seg[hi - 1];
@@ -1262,7 +1269,7 @@ fn collect_paragraph(
         }
     }
     // LinkReference 形态段落：URL 部分保持纯文本（不产裸 URL autolink）
-    if is_link_ref_def_line(lines[0].text) {
+    if is_link_ref_def_line(trim_indent(lines[0].text)) {
         let ctx2 = Ctx { source: ctx.source, options: ctx.options, no_bare_autolink: true, inline: ctx.inline };
         let inline = parse_inline_at(&ctx2, para_from, para_end);
         return (vec![MarkdownBlock::Paragraph { from: para_from, to: para_end, inline }], pos);
@@ -1627,5 +1634,52 @@ pub(super) fn block_to(b: &MarkdownBlock) -> usize {
         | MarkdownBlock::MathBlock { to, .. }
         | MarkdownBlock::HtmlBlock { to, .. }
         | MarkdownBlock::FootnoteDef { to, .. } => *to,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(source: &str) -> MarkdownDocument {
+        parse_markdown(source, &ParseOptions::default())
+    }
+
+    /// 列表后紧跟分割线：标记后没有空白就不是项，Hr 不得被吞成列表项。
+    #[test]
+    fn list_does_not_swallow_thematic_break() {
+        let doc = parse("- a\n\n---\n");
+        assert_eq!(doc.blocks.len(), 2, "{:?}", doc.blocks);
+        assert!(matches!(doc.blocks[0], MarkdownBlock::List { .. }));
+        assert!(matches!(doc.blocks[1], MarkdownBlock::Hr { .. }));
+    }
+
+    /// 空单元格 / 全空格首格的源区间钉在本格起点：回落到行首（或前导竖线）会把落点算到别的列上。
+    #[test]
+    fn empty_table_cell_keeps_its_column_position() {
+        // 真空段：两个竖线之间没有任何字符，区间起点取前一个竖线之后
+        let source = "| a || c |\n| - | - | - |\n| 1 || 3 |\n";
+        let doc = parse(source);
+        let MarkdownBlock::Table { rows, .. } = &doc.blocks[0] else {
+            panic!("应解析为表格：{:?}", doc.blocks);
+        };
+        let row = &rows[0];
+        assert_eq!(row.len(), 3);
+        let row_start = source.find("| 1 || 3 |").expect("表体行");
+        let empty = row[1];
+        assert_eq!(empty.from, empty.to);
+        assert_eq!(empty.from, row_start + 5, "真空段起点 = 前一个竖线之后");
+        assert!(empty.from > row[0].to && empty.from < row[2].from, "{row:?}");
+
+        // 首列全空格：区间起点取剥离前导竖线后的第一个字符
+        let source = "|   | b |\n| - | - |\n|   | d |\n";
+        let doc = parse(source);
+        let MarkdownBlock::Table { rows, .. } = &doc.blocks[0] else {
+            panic!("应解析为表格：{:?}", doc.blocks);
+        };
+        let row_start = source.find("|   | d |").expect("表体行");
+        let blank = rows[0][0];
+        assert_eq!(blank.from, blank.to);
+        assert_eq!(blank.from, row_start + 1, "首格起点 = 前导竖线之后");
     }
 }

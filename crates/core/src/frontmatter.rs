@@ -18,6 +18,8 @@ pub enum Yaml {
     Num(f64),
     /// UTC 日历日（YYYY-MM-DD）：js-yaml 把时间戳解析为 Date，此处存其 UTC 日历日。
     Date(String),
+    /// 带时间部分的时间戳：保留源文本原样写回（日期换算会把 09:30 丢掉，改任一属性即永久丢失）。
+    Timestamp(String),
     Str(String),
     Seq(Vec<Yaml>),
     /// 键序保留（属性编辑按原序写回）。
@@ -56,13 +58,22 @@ pub fn parse(content: &str) -> ParsedFrontmatter {
     let Some(open_end) = content.find('\n').or_else(|| content.is_empty().then_some(0)) else {
         return ParsedFrontmatter { data: Yaml::empty_map(), body: content.into(), fm_prefix: String::new(), ok: true };
     };
-    let open_line = &content[..open_end];
+    // 开头 BOM 是编码标记，不是内容：定界判定须跳过它（否则整篇被当成一个段落）
+    let open_line = content[..open_end].trim_start_matches('\u{feff}');
     if !open_line.starts_with("---") {
         return ParsedFrontmatter { data: Yaml::empty_map(), body: content.into(), fm_prefix: String::new(), ok: true };
     }
     let (close_start, close_end, closed) = find_close(content, open_end);
     let region = &content[open_end..close_start];
     match load_region(region) {
+        // 闭合块必须是键值映射：整块按列表 / 标量写的属性没有键值语义，面板改写会把它清空。
+        // 定界仍然成立（与 block_end 同口径），正文与块前缀照常切开，只把属性编辑判为不可用
+        Ok(data) if closed && !matches!(data, Yaml::Map(_)) => ParsedFrontmatter {
+            data: Yaml::empty_map(),
+            body: content[close_end..].into(),
+            fm_prefix: content[..close_end].into(),
+            ok: false,
+        },
         Ok(data) => {
             if closed {
                 ParsedFrontmatter { data, body: content[close_end..].into(), fm_prefix: content[..close_end].into(), ok: true }
@@ -116,6 +127,7 @@ pub fn snapshot_json(y: &Yaml) -> serde_json::Value {
             json!({ "t": "num", "v": v })
         }
         Yaml::Date(d) => json!({ "t": "date", "v": d }),
+        Yaml::Timestamp(s) => json!({ "t": "timestamp", "v": s }),
         Yaml::Str(s) => json!({ "t": "str", "v": s }),
         Yaml::Seq(items) => json!({ "t": "seq", "v": items.iter().map(snapshot_json).collect::<Vec<_>>() }),
         Yaml::Map(pairs) => json!({
@@ -133,6 +145,7 @@ pub fn yaml_from_snapshot(v: &serde_json::Value) -> Yaml {
         "bool" => Yaml::Bool(inner.as_bool().unwrap_or(false)),
         "num" => Yaml::Num(inner.as_f64().unwrap_or_default()),
         "date" => Yaml::Date(inner.as_str().unwrap_or_default().into()),
+        "timestamp" => Yaml::Timestamp(inner.as_str().unwrap_or_default().into()),
         "str" => Yaml::Str(inner.as_str().unwrap_or_default().into()),
         "seq" => Yaml::Seq(
             inner
@@ -161,12 +174,32 @@ pub fn yaml_from_snapshot(v: &serde_json::Value) -> Yaml {
     }
 }
 
+// ===== 编码 =====
+
+/// 拆出 UTF-8 BOM：返回（去 BOM 的文本, 是否有 BOM）。
+/// 载入与合流都按去 BOM 文本比较，写回时按原文件是否带 BOM 还原（否则 BOM 会被当成正文差异）。
+pub fn split_bom(text: &str) -> (&str, bool) {
+    match text.strip_prefix('\u{feff}') {
+        Some(rest) => (rest, true),
+        None => (text, false),
+    }
+}
+
+/// 按原文件是否有 BOM 还原落盘文本。
+pub fn with_bom(text: &str, had_bom: bool) -> String {
+    if had_bom {
+        format!("\u{feff}{text}")
+    } else {
+        text.to_string()
+    }
+}
+
 // ===== 定位 =====
 
 /// 文档开头 frontmatter 块的结束字节位置（闭合行行尾，含换行）；无块返回 None。
 pub fn block_end(content: &str) -> Option<usize> {
     let open_end = content.find('\n')?;
-    if !content[..open_end].starts_with("---") {
+    if !content[..open_end].trim_start_matches('\u{feff}').starts_with("---") {
         return None;
     }
     let (_, close_end, closed) = find_close(content, open_end);
@@ -300,7 +333,14 @@ fn resolve_scalar(s: &str) -> Yaml {
         return Yaml::Num(v);
     }
     if let Some(d) = timestamp_to_date(s) {
-        return Yaml::Date(d);
+        // 带时间部分的时间戳保留源文本：换算成日历日会把 09:30 丢掉，改任一属性即永久丢失。
+        // 规范零点形态（日期序列化的产物）仍归 Date，保证「日期属性」读写一轮后类型不变。
+        let canonical = format!("{d}T00:00:00.000Z");
+        return if s.contains(':') && s != canonical {
+            Yaml::Timestamp(s.to_string())
+        } else {
+            Yaml::Date(d)
+        };
     }
     Yaml::Str(s.into())
 }
@@ -523,22 +563,14 @@ fn emit_literal(out: &mut String, s: &str, indent: usize) {
 /// 多行字符串标量：无行首空白走字面量块（js-yaml 缺省），否则双引号 + 转义（字面量块
 /// 对行首空白不安全，单引号/plain 无法承载换行）。
 fn emit_literal_safe(out: &mut String, s: &str, indent: usize) {
-    let literal_ok = s.split('\n').all(|line| !line.starts_with([' ', '\t']));
+    // 字面量块只承载纯文本行：行首空白会改变读侧缩进，控制字符（含 \r）读侧会被归一或拒绝
+    let literal_ok = s.split('\n').all(|line| !line.starts_with([' ', '\t']))
+        && !s.chars().any(|c| c != '\n' && c.is_control());
     if literal_ok {
         emit_literal(out, s, indent);
     } else {
-        let mut escaped = String::with_capacity(s.len() + 8);
-        for c in s.chars() {
-            match c {
-                '"' => escaped.push_str("\\\""),
-                '\\' => escaped.push_str("\\\\"),
-                '\n' => escaped.push_str("\\n"),
-                '\t' => escaped.push_str("\\t"),
-                '\r' => escaped.push_str("\\r"),
-                other => escaped.push(other),
-            }
-        }
-        out.push_str(&format!("\"{escaped}\"\n"));
+        out.push_str(&double_quoted(s));
+        out.push('\n');
     }
 }
 
@@ -555,6 +587,14 @@ fn scalar_token(v: &Yaml) -> String {
         Yaml::Bool(b) => if *b { "true" } else { "false" }.into(),
         Yaml::Num(f) => js_num(*f),
         Yaml::Date(d) => format!("{d}T00:00:00.000Z"),
+        // 带时间的时间戳原样明文写回（加引号会被读侧当字符串，时间戳类型随之一轮丢失）
+        Yaml::Timestamp(s) => {
+            if timestamp_to_date(s).is_some() && !s.contains(['\n', '\r']) {
+                s.clone()
+            } else {
+                string_token(s)
+            }
+        }
         Yaml::Str(s) => string_token(s),
         Yaml::Seq(_) | Yaml::Map(_) => String::new(),
     }
@@ -562,16 +602,42 @@ fn scalar_token(v: &Yaml) -> String {
 
 fn string_token(s: &str) -> String {
     if plain_ok(s) {
-        s.to_string()
-    } else {
-        format!("'{}'", s.replace('\'', "''"))
+        return s.to_string();
     }
+    // 控制字符只能用双引号转义承载（单引号里写 raw 控制字符读侧会报错或丢字符）
+    if s.chars().any(|c| c.is_control()) {
+        return double_quoted(s);
+    }
+    format!("'{}'", s.replace('\'', "''"))
+}
+
+/// 双引号标量（转义引号 / 反斜杠 / 控制字符）；非 ASCII 原样保留。
+fn double_quoted(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            c if c.is_control() => out.push_str(&format!("\\u{:04X}", c as u32)),
+            other => out.push(other),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// plain 形态判定（js-yaml dumper 规则）：空、首尾空白、指示符开头、含冒号/制表符/" #"、
 /// 或命中 1.1 解析表（会被读侧转成非字符串）→ 必须加引号。
 fn plain_ok(s: &str) -> bool {
     if s.is_empty() || s.trim() != s || s.contains('\t') {
+        return false;
+    }
+    // 控制字符（含孤立 CR）在 plain / 单引号里都无法安全承载：交给双引号转义
+    if s.chars().any(|c| c.is_control()) {
         return false;
     }
     let first = s.chars().next().unwrap();
@@ -645,7 +711,7 @@ pub fn infer_type(badge_key: bool, value: &Yaml) -> PropType {
     match value {
         Yaml::Seq(_) if badge_key => PropType::Tag,
         Yaml::Seq(_) => PropType::List,
-        Yaml::Date(_) => PropType::Date,
+        Yaml::Date(_) | Yaml::Timestamp(_) => PropType::Date,
         Yaml::Num(_) => PropType::Number,
         Yaml::Bool(_) => PropType::Boolean,
         _ => PropType::Text,
@@ -658,6 +724,7 @@ pub fn convert_value(value: &Yaml, target: PropType) -> Option<Yaml> {
         PropType::Text => Some(Yaml::Str(match value {
             Yaml::Null => String::new(),
             Yaml::Date(d) => d.clone(),
+            Yaml::Timestamp(s) => s.clone(),
             Yaml::Num(f) => js_num(*f),
             Yaml::Bool(b) => if *b { "true" } else { "false" }.into(),
             Yaml::Str(s) => s.clone(),
@@ -680,6 +747,8 @@ pub fn convert_value(value: &Yaml, target: PropType) -> Option<Yaml> {
         }
         PropType::Date => match value {
             Yaml::Date(d) => Some(Yaml::Date(d.clone())),
+            // 带时间的时间戳本就归日期类型：再选「日期」是 no-op，不能报无法转换（否则时间被吞）
+            Yaml::Timestamp(s) => Some(Yaml::Timestamp(s.clone())),
             Yaml::Num(f) if f.fract() == 0.0 => {
                 let days = (*f as i64).div_euclid(86400);
                 let (y, m, d) = civil_from_days(days);
@@ -714,9 +783,106 @@ fn item_text(v: &Yaml) -> String {
     match v {
         Yaml::Null => String::new(),
         Yaml::Date(d) => d.clone(),
+        Yaml::Timestamp(s) => s.clone(),
         Yaml::Num(f) => js_num(*f),
         Yaml::Bool(b) => if *b { "true" } else { "false" }.into(),
         Yaml::Str(s) => s.clone(),
         Yaml::Seq(_) | Yaml::Map(_) => "[object Object]".into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn map_data(source: &str) -> Yaml {
+        parse(source).data
+    }
+
+    /// 闭合块的根不是映射：按解析失败处理（属性面板锁编辑而不是把整块清空）。
+    #[test]
+    fn non_map_root_is_refused() {
+        let source = r#"---
+- a
+- b
+---
+正文"#;
+        let parsed = parse(source);
+        assert!(!parsed.ok);
+        assert_eq!(parsed.data, Yaml::Map(Vec::new()));
+        // 与 block_end 同口径：块仍被切开，正文只剩余下部分（否则画布文本卡会把 YAML 当正文显示）
+        assert_eq!(parsed.body, "正文");
+        assert_eq!(parsed.fm_prefix, "---\n- a\n- b\n---\n");
+    }
+
+    /// 控制字符（含孤立 CR）走双引号转义：写出去再读回来必须还是同一段文本。
+    #[test]
+    fn control_chars_survive_a_round_trip() {
+        let cr = char::from(13u8).to_string();
+        let soh = char::from(1u8).to_string();
+        let value = format!("前{soh}中{cr}后");
+        let data = Yaml::Map(vec![("k".to_string(), Yaml::Str(value.clone()))]);
+        let text = stringify(&data, "正文");
+        assert_eq!(parse(&text).data, data, "写回后读不回同一个值：{text:?}");
+    }
+
+    /// 多行值里夹行尾回车 / 其他控制字符时改走双引号转义：字面量块会让读侧把回车归一成
+    /// 换行、或直接拒绝该控制字符，值与读回结果不一致。
+    #[test]
+    fn multiline_control_chars_survive_a_round_trip() {
+        let cr = char::from(13u8).to_string();
+        let soh = char::from(1u8).to_string();
+        let value = format!("首行{cr}{soh}\n次行\n末段");
+        let data = Yaml::Map(vec![("k".to_string(), Yaml::Str(value))]);
+        let text = stringify(&data, "正文");
+        assert_eq!(parse(&text).data, data, "写回后读不回同一个值：{text:?}");
+    }
+
+    /// BOM 只在编解码层出现：拆出后文本与原文件一致，写回按原编码标记还原。
+    #[test]
+    fn bom_round_trips_through_split_and_with() {
+        let text = "\u{feff}---\ntitle: 甲\n---\n正文";
+        let (body, had_bom) = split_bom(text);
+        assert!(had_bom);
+        assert_eq!(body, "---\ntitle: 甲\n---\n正文");
+        assert_eq!(with_bom(body, true), text);
+        assert_eq!(with_bom(body, false), body);
+        assert_eq!(split_bom("正文"), ("正文", false));
+    }
+
+    /// 带时间的时间戳已属日期类型：再转日期是 no-op（不能报无法转换，也不能把时间吞掉）。
+    #[test]
+    fn timestamp_is_already_a_date_type() {
+        let value = Yaml::Timestamp("2024-01-02 09:30:00".into());
+        assert_eq!(infer_type(false, &value), PropType::Date);
+        assert_eq!(convert_value(&value, PropType::Date), Some(value.clone()));
+    }
+
+    /// 带时间部分的时间戳保留原文：改别的属性不该把 09:30 抹成 00:00。
+    #[test]
+    fn timestamp_keeps_its_time_part() {
+        let source = r#"---
+created: 2024-01-02 09:30:00
+title: 甲
+---
+正文"#;
+        let data = map_data(source);
+        let Yaml::Map(pairs) = &data else { panic!("根应为映射") };
+        assert_eq!(pairs[0].1, Yaml::Timestamp("2024-01-02 09:30:00".into()));
+        let rewritten = stringify(&data, "正文");
+        assert!(rewritten.contains("2024-01-02 09:30:00"), "{rewritten}");
+        assert_eq!(map_data(&rewritten), data);
+    }
+
+    /// 开头 BOM 不挡 frontmatter 定界（否则整篇被当成一个段落）。
+    #[test]
+    fn bom_does_not_hide_the_block() {
+        let bom = char::from_u32(0xfeff).expect("BOM 是合法字符").to_string();
+        let nl = char::from(10u8).to_string();
+        let source = format!("{bom}---{nl}a: 1{nl}---{nl}正文");
+        let parsed = parse(&source);
+        assert!(parsed.ok, "带 BOM 的块应能解析");
+        assert_eq!(parsed.data, Yaml::Map(vec![("a".to_string(), Yaml::Num(1.0))]));
+        assert!(block_end(&source).is_some());
     }
 }

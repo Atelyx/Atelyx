@@ -458,9 +458,21 @@ fn messages_of(json: &str) -> Vec<Value> {
 /// 笔记两版正文的行级差异（全量行序列）：含当前版本全部行与被删行（插入在删除位置），
 /// 供预览按行着色。公共前后缀先裁掉，中段按 LCS 对齐；中段规模超限时降级为整段替换。
 pub fn note_diff(prev: &str, cur: &str) -> Vec<DiffLine> {
+    // 行尾风格不参与比对：CRLF 的行尾 `\r` 先剥掉，否则换个换行风格会把每一行都算成改动
+    fn strip(line: &str) -> &str {
+        line.strip_suffix('\r').unwrap_or(line)
+    }
     // 空正文 = 零行（而非「一个空行」）：否则「空 → 有内容」会多出一条删除空行
-    let a: Vec<&str> = if prev.is_empty() { Vec::new() } else { prev.split('\n').collect() };
-    let b: Vec<&str> = if cur.is_empty() { Vec::new() } else { cur.split('\n').collect() };
+    let a: Vec<&str> = if prev.is_empty() {
+        Vec::new()
+    } else {
+        prev.split('\n').map(strip).collect()
+    };
+    let b: Vec<&str> = if cur.is_empty() {
+        Vec::new()
+    } else {
+        cur.split('\n').map(strip).collect()
+    };
     let (mut pre, mut suf) = (0, 0);
     while pre < a.len() && pre < b.len() && a[pre] == b[pre] {
         pre += 1;
@@ -896,6 +908,22 @@ mod tests {
         assert_eq!(
             canvas_diff(&prev, &cur).iter().map(|l| l.text.clone()).collect::<Vec<_>>(),
             vec!["连线「甲 → 甲」已修改", "消息「新话」已修改"]
+        );
+    }
+
+    /// 只改换行风格（LF ↔ CRLF）不算内容改动：预览全同、摘要不报增删。
+    #[test]
+    fn crlf_only_change_is_not_a_content_change() {
+        let crlf = "甲\r\n乙\r\n";
+        let lf = "甲\n乙\n";
+        let lines = note_diff(crlf, lf);
+        assert!(
+            lines.iter().all(|line| line.kind == DiffLineKind::Same),
+            "换行风格差异不该算改动：{lines:?}"
+        );
+        assert_eq!(
+            crate::history::diff_summary(crlf, lf),
+            crate::history::diff_summary(lf, lf)
         );
     }
 

@@ -231,7 +231,9 @@ pub fn utf16_to_byte_offset(text: &str, u16off: usize) -> usize {
     let mut byte = 0usize;
     let mut units = 0usize;
     for ch in text.chars() {
-        if units >= u16off {
+        // 偏移落在本字符内部（代理对中间）时停在字符起点：越过整个字符会把落点挪到下一个
+        // 字符之后，选区起点与高亮都偏一个字
+        if units + ch.len_utf16() > u16off {
             break;
         }
         units += ch.len_utf16();
@@ -257,6 +259,20 @@ pub fn byte_to_utf16_offset(text: &str, byte: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 偏移落在代理对中间（JS 侧可能发出这种值）时取该字符起点，不越过整个字符。
+    #[test]
+    fn utf16偏移落在代理对中间时取字符起点() {
+        let text = "a😀b";
+        // 字节：a=1，😀=4（2 个 UTF-16 单元），b=1
+        assert_eq!(utf16_to_byte_offset(text, 0), 0);
+        assert_eq!(utf16_to_byte_offset(text, 1), 1);
+        // 落进 😀 的两个单元之间：钳到 😀 起点
+        assert_eq!(utf16_to_byte_offset(text, 2), 1);
+        assert_eq!(utf16_to_byte_offset(text, 3), 5);
+        assert_eq!(utf16_to_byte_offset(text, 4), 6);
+        assert_eq!(utf16_to_byte_offset(text, 99), 6);
+    }
 
     #[test]
     fn 基线内容标识与_yjs_侧字节一致() {

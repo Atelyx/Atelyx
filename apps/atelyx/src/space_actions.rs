@@ -874,8 +874,8 @@ fn clear_session_state(app: &mut App) {
     // 画布在场同理（detach_canvas 已清锁与卡运行态，通道状态一并作废）
     app.canvas_collab = None;
     app.space_note_flushed = None;
-    app.space_note_save_inflight = false;
-    app.space_note_save_flush_queued = false;
+    app.space_note_save_inflight.clear();
+    app.space_note_save_flush_queued.clear();
     app.backlinks.clear();
     app.tag_vocab.clear();
     app.note_files.clear();
@@ -1373,27 +1373,38 @@ pub fn space_load_table(app: &App, rel: &str) -> Task<Message> {
 pub fn space_submit_save(app: &mut App, reason: SaveReason) -> Task<Message> {
     let Some(session) = session_of(app) else { return Task::none() };
     if !session.role.can_write() {
-        // viewer 的自动保存静默跳过（编辑面只读）；手动保存与脏拦截放行前明确告知
+        // 只读身份没有可写的地方：残留脏态必须就地丢弃，否则 flush 永远等不到落盘回执，
+        // gate 挂起的关窗 / 切文件会一起挂死（权限在编辑途中被收回时就是这条路径）
+        if app.dirty {
+            app.dirty = false;
+            app.save_error = None;
+            app.autosave_deadline = None;
+            app.notify(NoticeLevel::Warning, "只读身份：未保存的改动不会写入空间");
+            return app.after_any_flush();
+        }
+        // 自动保存静默跳过（无内容可写）；手动保存与脏拦截放行前明确告知
         if !matches!(reason, SaveReason::AutoSave) {
             app.notify(NoticeLevel::Warning, "该空间为只读身份，无法保存");
         }
-        return Task::none();
+        return app.after_any_flush();
     }
     let Some(rel) = app.ui.last_note_file.clone() else {
         app.notify(NoticeLevel::Warning, "没有打开的文件");
         return Task::none();
     };
-    if app.space_note_save_inflight {
+    // 在途键 = 本世代 + 本文件：同键才排队，别的文件在途不阻塞本文件
+    let gen = app.epoch();
+    let key = (gen, rel.clone());
+    if app.space_note_save_inflight.contains(&key) {
         // 在途回执后串行补发收尾（关窗/切文件的脏拦截依赖它）
-        if let SaveReason::Flush = reason {
-            app.space_note_save_flush_queued = true;
+        if matches!(reason, SaveReason::Flush) && !app.space_note_save_flush_queued.contains(&key) {
+            app.space_note_save_flush_queued.push(key);
         }
         // 手动/自动顺延：在途保存的冻结内容已覆盖提交时刻的全文；此后若仍有输入，
         // 编辑链自会排防抖计时器接续，无需在此重挂（避免留下无定时器的死期限）
         return Task::none();
     }
-    app.space_note_save_inflight = true;
-    let gen = app.epoch();
+    app.space_note_save_inflight.push(key);
     let content = app.note_text.clone();
     let content_for_msg = content.clone();
     let rel_for_msg = rel.clone();
@@ -1410,18 +1421,31 @@ pub fn space_submit_save(app: &mut App, reason: SaveReason) -> Task<Message> {
                 Err(SpaceError::NotFound) => String::new(),
                 Err(e) => return Err(e),
             };
+            // BOM 是编码标记不是正文：合流比较用去 BOM 文本，上行写回按服务端原文还原
+            let (server_text, had_bom) = atelyx_core::frontmatter::split_bom(&server_text);
+            let server_text = server_text.to_string();
             // 编辑器内容未载入（打开失败的空态）禁止保存：本端空 + 服务端有正文时 PUT 会
             // 清空他人可见的文件。正常清空已有全文走 base（落盘基线）在场的合流路径，不受影响
             if base.is_none() && content.is_empty() && !server_text.is_empty() {
                 return Err(SpaceError::BadRequest("文件内容未载入，已取消保存".into()));
             }
             let merged = match &base {
-                Some(b) if *b != server_text => {
-                    atelyx_core::merge3::merge3(b, &content, &server_text, atelyx_core::merge3::ConflictSide::Ours)
-                }
-                _ => content.clone(),
+                Some(b) => match atelyx_core::merge3::plan_save(b, &content, &server_text) {
+                    atelyx_core::merge3::SavePlan::Write(text)
+                    | atelyx_core::merge3::SavePlan::Merge(text) => text,
+                    // 服务端已被他人改写且两侧改到同一处：拒绝写入（选边会静默丢掉对端内容，
+                    // 保存失败只是这一笔没写进去，正文仍在编辑面且可重试）
+                    atelyx_core::merge3::SavePlan::Conflict => {
+                        return Err(SpaceError::BadRequest(
+                            "文档有并发冲突，本次保存未写入，请稍后重试".into(),
+                        ));
+                    }
+                },
+                None => content.clone(),
             };
-            client.put_file_text(&space_id, &rel, &merged).await?;
+            client
+                .put_file_text(&space_id, &rel, &atelyx_core::frontmatter::with_bom(&merged, had_bom))
+                .await?;
             // 摘要对比 PUT 前回读的服务端内容（本次被替换的上一版；他人已写入时合并前的真源）；
             // 其他端记录的内容与序号以服务端为准，此处仅算展示用摘要
             let summary = atelyx_core::history::version_summary(
@@ -1474,9 +1498,11 @@ fn on_note_saved(
     reason: SaveReason,
     result: Result<String, String>,
 ) -> Task<Message> {
-    // 回执即清在途标志（无论回执归属）：过期回执不会再有第二笔，不清会永久阻塞后续保存
-    app.space_note_save_inflight = false;
-    let queued = std::mem::take(&mut app.space_note_save_flush_queued);
+    // 回执即摘本笔在途（无论回执归属）：同键不会再有第二笔，不摘会永久阻塞该文件的后续保存
+    let key = (gen, rel.to_string());
+    app.space_note_save_inflight.retain(|entry| entry != &key);
+    let queued = app.space_note_save_flush_queued.contains(&key);
+    app.space_note_save_flush_queued.retain(|entry| entry != &key);
     // 世代 + 文件身份双守卫：保存期间切换文件后，旧文件回执不得回填新文件的编辑面与合流基线
     // （世代过期作废；文件身份不符仍要广播已落盘事件，切换文件不改变服务端已写入的事实）
     if gen != app.epoch() {
@@ -1490,6 +1516,13 @@ fn on_note_saved(
         crate::ai_fs_edit::abort_pending(app, e);
     }
     if app.ui.last_note_file.as_deref() != Some(rel) {
+        // 旧文件的失败仍须可见（内容没写进去是用户要知道的事实），但不得覆盖当前文件的错误位与挂起动作
+        if let Err(e) = &result {
+            app.notify(
+                NoticeLevel::Error,
+                format!("「{}」保存失败：{e}", rel.rsplit('/').next().unwrap_or(rel)),
+            );
+        }
         return Task::none();
     }
     let mut task = Task::none();
@@ -1563,9 +1596,16 @@ fn on_note_saved(
                     |_| crate::Message::AutosaveTick,
                 ));
             }
-            // 在途保存期间到来的 Flush（关窗/切文件拦截）：串行补发一笔收尾
+            // 在途保存期间到来的 Flush 排队项：内容已落稳则放行挂起动作（关窗 / 切文件），
+            // 仍有未落盘输入则立刻补一笔 Flush 串行收尾——等防抖会让挂起动作白等一轮
             if queued {
-                return task.chain(space_submit_save(app, SaveReason::Flush));
+                if app.dirty {
+                    if !app.space_note_saving(rel) {
+                        task = task.chain(space_submit_save(app, SaveReason::Flush));
+                    }
+                } else {
+                    task = task.chain(app.after_any_flush());
+                }
             }
             task = task.chain(reload_space_history(app));
         }
@@ -1613,6 +1653,14 @@ pub fn apply_remote_text(app: &mut App, new_text: String) {
         // Source 档编辑面回填：远端合入后 source_editor 若滞留旧全文，本端继续输入会以
         // 旧全文覆盖 note_text（静默回退远端内容）
         app.source_editor = text_editor::Content::with_text(&new_text);
+        // 源码档输入不留快照：重做栈里的旧全文已被远端合入取代，按重做会把整篇回退
+        app.edit.invalidate_redo();
+    }
+    // 属性面板的解析缓存按旧正文持有：只有远端改到 frontmatter 时槽位编辑态与缓存才失效，
+    // 只改正文时保留正在填写的属性草稿
+    if old[..old_body_start] != new_text[..new_body_start] {
+        app.clear_props_edit();
+        app.refresh_props();
     }
     app.refresh_preview();
     app.refresh_edit();
@@ -3132,24 +3180,6 @@ fn selection_units(text: &str, anchor: usize, head: usize) -> Option<(u32, u32)>
     Some((unit(anchor)?, unit(head)?))
 }
 
-/// 纯文本编辑面光标位置（行号 + 行内字节列）→ 全文字节偏移。列按字节计（与编辑面
-/// 内部命中口径一致）；行号越界（文本比光标短）时钳到末行。
-fn source_offset(text: &str, pos: text_editor::Position) -> usize {
-    let mut line = 0;
-    let mut start = 0;
-    for (i, ch) in text.char_indices() {
-        if line == pos.line {
-            break;
-        }
-        if ch == '\n' {
-            line += 1;
-            start = i + 1;
-        }
-    }
-    let line_len = text[start..].find('\n').unwrap_or(text.len() - start);
-    start + pos.column.min(line_len)
-}
-
 /// 本端选区（上行口径：全文 UTF-16，anchor = 锚点、head = 光标）。源码档取纯文本
 /// 编辑面光标；预览编辑档取正文编辑面（偏移相对正文，剥 frontmatter 前缀）；只读档无光标。
 fn local_selection(app: &App) -> Option<(u32, u32)> {
@@ -3158,8 +3188,11 @@ fn local_selection(app: &App) -> Option<(u32, u32)> {
         NoteMode::Read => None,
         NoteMode::Source => {
             let cursor = app.source_editor.cursor();
-            let anchor = source_offset(text, cursor.selection.unwrap_or(cursor.position));
-            selection_units(text, anchor, source_offset(text, cursor.position))
+            let anchor = crate::markdown_edit::editor_offset(
+                text,
+                cursor.selection.unwrap_or(cursor.position),
+            );
+            selection_units(text, anchor, crate::markdown_edit::editor_offset(text, cursor.position))
         }
         NoteMode::Edit => {
             let base = atelyx_core::frontmatter::block_end(text).unwrap_or(0);
@@ -3588,6 +3621,10 @@ fn collab_author() -> String {
 /// 本地编辑推进协作文档：差分基于文档真值（core 侧以文档当前文本求差，保存合流造成的
 /// 文档落后会被自动补齐）→ Update 帧上行；在场选区随行。
 pub fn collab_after_edit(app: &mut App) {
+    // 只读身份不产生内容增量：服务端会拒绝 viewer 的补丁，本端也不该把增量发出去
+    if app.note_readonly() {
+        return;
+    }
     if !matches!(app.repo_kind, crate::RepoKind::Space(_)) || app.note_collab_file.is_none() {
         return;
     }

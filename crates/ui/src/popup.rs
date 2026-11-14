@@ -99,6 +99,39 @@ pub fn overlay<'a, M: Clone + 'a>(
         .into()
 }
 
+/// 非模态浮动卡：只做定位与阴影，不铺捕获层——外点是否关闭由调用方的状态机决定
+/// （属性候选这类「外点即提交、且要照常落到被点控件」的浮层不能用捕获层吞按压）。
+pub fn floating<'a, M: Clone + 'a>(geom: PopupGeom, content: Element<'a, M>) -> Element<'a, M> {
+    let card = opaque(
+        container(content)
+            .width(Length::Fixed(geom.w))
+            .style(move |_t| Style {
+                background: Some(pal::BG_OVERLAY.into()),
+                border: border::rounded(pal::RADIUS_SM).color(pal::BORDER).width(1.0),
+                ..Style::default()
+            }),
+    );
+    let shadow_wrap = container(card)
+        .padding(Padding {
+            left: SHADOW_PAD_LEFT,
+            top: SHADOW_PAD_TOP,
+            right: SHADOW_PAD_LEFT,
+            bottom: SHADOW_PAD_BOTTOM,
+        })
+        .style(move |_t| Style {
+            background: Some(Color::BLACK.scale_alpha(0.35).into()),
+            border: border::rounded(pal::RADIUS_SM + SHADOW_PAD_LEFT),
+            ..Style::default()
+        });
+    container(shadow_wrap)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(iced::alignment::Horizontal::Left)
+        .align_y(iced::alignment::Vertical::Top)
+        .padding(Padding::ZERO.left(geom.x - SHADOW_PAD_LEFT).top(geom.y - SHADOW_PAD_TOP))
+        .into()
+}
+
 /// 居中模态覆盖层：全屏半透明黑遮罩（点击关闭）+ 阴影环 + 水平垂直居中卡。
 /// 卡片内容与尺寸由调用方构建（历史记录 / 许可信息等阻断式面板共用此壳）。
 pub fn modal_overlay<'a, M: UiHost>(window: iced::window::Id, card: Element<'a, M>) -> Element<'a, M> {

@@ -12,6 +12,8 @@ use iced::advanced::{Clipboard, Layout, Renderer as _, Shell, Widget};
 use iced::alignment;
 use iced::{Color, Element, Event, Font, Length, Point, Rectangle, Size, Vector};
 
+use atelyx_core::markdown::LinkForm;
+
 use crate::markdown_edit::ParagraphT;
 use crate::markdown_view::LinkTarget;
 use crate::ui::palette as pal;
@@ -182,6 +184,8 @@ struct State {
     spans: Vec<Span<'static, LinkTarget, Font>>,
     paragraph: ParagraphT,
     wrapping: advanced_text::Wrapping,
+    /// 按下的链接（href + 按点）：松开时未拖远且仍命中同一链接才算点击，否则算拖选。
+    pressed_link: Option<(String, Point)>,
 }
 
 impl State {
@@ -190,9 +194,13 @@ impl State {
             spans: Vec::new(),
             paragraph: ParagraphT::default(),
             wrapping: advanced_text::Wrapping::default(),
+            pressed_link: None,
         }
     }
 }
+
+/// 按下到松开的位移上限（逻辑像素）：超过即视为拖选，不再打开链接。
+const LINK_CLICK_SLOP: f32 = 4.0;
 
 /// 选区几何的最小单元：一段源区间与它的矩形（原子片段跨行时按行拆开，源区间相同）。
 struct Cell {
@@ -265,6 +273,15 @@ impl<'a> SelectableRich<'a> {
         out
     }
 
+    /// 源偏移命中的链接片段（区间覆盖该偏移；非链接片段返回 None）。
+    fn link_at(&self, offset: usize) -> Option<(&str, LinkForm)> {
+        let index = self.spans.iter().zip(&self.srcs).position(|(span, run)| {
+            span.link.is_some() && run.src.0 <= offset && offset <= run.src.1
+        })?;
+        let link = self.spans[index].link.as_ref()?;
+        Some((link.href.as_str(), link.form))
+    }
+
     /// 落点 → 文档源偏移：取最近字形，按左右半选边界（行方向 RTL 时镜像）。
     fn offset_at(&self, cells: &[Cell], point: Point) -> Option<usize> {
         let mut best: Option<(f32, &Cell, &Rectangle)> = None;
@@ -309,7 +326,15 @@ fn selection_rects(cells: &[Cell], range: (usize, usize)) -> Vec<Rectangle> {
     let (from, to) = range;
     let mut rects: Vec<Rectangle> = cells
         .iter()
-        .filter(|cell| cell.src.1 > cell.src.0 && cell.src.0 < to && from < cell.src.1)
+        .filter(|cell| {
+            if cell.src.1 == cell.src.0 {
+                // 零宽片段（脚注标记等）：落点覆盖即算命中，与复制的取值口径一致
+                // （原先只按区间相交判定，导致这段文字被复制却不被高亮）
+                cell.src.0 >= from && cell.src.0 < to
+            } else {
+                cell.src.0 < to && from < cell.src.1
+            }
+        })
         .flat_map(|cell| cell.rects.iter().copied())
         .collect();
     rects.sort_by(|a, b| a.y.total_cmp(&b.y).then(a.x.total_cmp(&b.x)));
@@ -503,16 +528,51 @@ impl Widget<Message, iced::Theme, iced::Renderer> for SelectableRich<'_> {
         match event {
             // 不捕获按压：外层双击进编辑仍要收到同一事件
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
-                let state = tree.state.downcast_ref::<State>();
-                if let Some(offset) = self.offset_at(&self.geometry(&state.paragraph), position) {
-                    shell.publish(match self.chat {
-                        Some(scope) => Message::ChatSelectStart { scope, offset },
-                        None => Message::NoteSelectStart(offset),
-                    });
+                let hit = {
+                    let state = tree.state.downcast_ref::<State>();
+                    self.offset_at(&self.geometry(&state.paragraph), position)
+                        .map(|offset| (offset, self.link_at(offset).map(|(href, _)| href.to_string())))
+                };
+                let Some((offset, link)) = hit else { return };
+                // 链接片段记下按点：拖选优先，松开未拖远才当点击
+                tree.state.downcast_mut::<State>().pressed_link =
+                    link.map(|href| (href, position));
+                shell.publish(match self.chat {
+                    Some(scope) => Message::ChatSelectStart { scope, offset },
+                    None => Message::NoteSelectStart(offset),
+                });
+            }
+            // 松开：未拖远且仍命中同一链接 = 点击（打开链接 / 外链）
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                let Some((href, at)) = tree.state.downcast_mut::<State>().pressed_link.take()
+                else {
+                    return;
+                };
+                if (position - at).x.abs() > LINK_CLICK_SLOP
+                    || (position - at).y.abs() > LINK_CLICK_SLOP
+                {
+                    return;
+                }
+                let hit = {
+                    let state = tree.state.downcast_ref::<State>();
+                    self.offset_at(&self.geometry(&state.paragraph), position)
+                        .and_then(|offset| self.link_at(offset))
+                        .map(|(href, form)| (href.to_string(), form))
+                };
+                if let Some((target, form)) = hit.filter(|(target, _)| *target == href) {
+                    shell.publish(Message::OpenLink(target, form));
                 }
             }
             // 拖选在途：只有光标落在本块内才按本块几何推进（块间空隙保留上一个落点）
             Event::Mouse(mouse::Event::CursorMoved { .. }) => {
+                // 按下后拖远即取消待定点击
+                let pressed = tree.state.downcast_ref::<State>().pressed_link.as_ref();
+                if pressed.is_some_and(|(_, at)| {
+                    (position - *at).x.abs() > LINK_CLICK_SLOP
+                        || (position - *at).y.abs() > LINK_CLICK_SLOP
+                }) {
+                    tree.state.downcast_mut::<State>().pressed_link = None;
+                }
                 if !self.dragging {
                     return;
                 }
@@ -530,16 +590,23 @@ impl Widget<Message, iced::Theme, iced::Renderer> for SelectableRich<'_> {
 
     fn mouse_interaction(
         &self,
-        _tree: &Tree,
+        tree: &Tree,
         layout: Layout<'_>,
         cursor: mouse::Cursor,
         _viewport: &Rectangle,
         _renderer: &iced::Renderer,
     ) -> mouse::Interaction {
-        if cursor.is_over(layout.bounds()) {
-            mouse::Interaction::Text
+        let Some(position) = cursor.position_in(layout.bounds()) else {
+            return mouse::Interaction::None;
+        };
+        let state = tree.state.downcast_ref::<State>();
+        let over_link = self
+            .offset_at(&self.geometry(&state.paragraph), position)
+            .is_some_and(|offset| self.link_at(offset).is_some());
+        if over_link {
+            mouse::Interaction::Pointer
         } else {
-            mouse::Interaction::None
+            mouse::Interaction::Text
         }
     }
 }
@@ -599,6 +666,18 @@ mod tests {
         assert_eq!(widget.offset_at(&cells, right), Some(1));
         let merged = selection_rects(&cells, (0, 2));
         assert_eq!(merged.len(), 1);
+    }
+
+    /// 零宽片段（脚注标记等）只要有落点覆盖就高亮：复制会取到这段文字，高亮不能漏。
+    #[test]
+    fn zero_width_cell_is_highlighted_when_covered() {
+        let cell = || Cell {
+            src: (5, 5),
+            rects: vec![Rectangle::new(Point::ORIGIN, Size::new(4.0, 12.0))],
+            rtl: false,
+        };
+        assert_eq!(selection_rects(&[cell()], (5, 6)).len(), 1);
+        assert!(selection_rects(&[cell()], (6, 7)).is_empty());
     }
 
     /// 选区只落到所属消息段：他段标识即便偏移相同也不参与高亮与拖拽。

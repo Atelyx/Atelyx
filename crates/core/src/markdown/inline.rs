@@ -73,6 +73,9 @@ fn scan_atoms(ctx: &Ctx, from: usize, to: usize) -> Vec<Atom> {
     let flush_html = |group: &mut Vec<Atom>, depth: &mut usize, atoms: &mut Vec<Atom>| {
         if let (Some(first), Some(last)) = (group.first(), group.last()) {
             let (from, to) = (first.from, last.to);
+            // 组内已扫出的原子（代码 / 自动链接）并入组整体降级输出：组原文已含这段源码，
+            // 再叠一个原子会让同一段文字渲染（与复制）两遍
+            atoms.retain(|atom| !(from <= atom.from && atom.to <= to));
             atoms.push(Atom {
                 from,
                 to,
@@ -286,7 +289,19 @@ fn scan_atoms(ctx: &Ctx, from: usize, to: usize) -> Vec<Atom> {
     }
     // 被容器包含的其他原子剔除（children 由容器递归重现）
     atoms.retain(|a| !maximal.iter().any(|c| c.from <= a.from && a.to <= c.to));
-    atoms.extend(maximal);
+    // 原子覆盖强调时同样二选一：原子整体降级输出，容器内容不再重复渲染
+    // （HTML 组包强调时，两边都留下会让同一段源码被输出两遍）
+    maximal.retain(|c| !atoms.iter().any(|a| a.from < c.to && c.from < a.to));
+    // 交叉强调（*a _b* c_）会配对出两段重叠容器：只留先开始的一对，否则重叠那段源码
+    // 在渲染与复制里出现两遍（标准算法在配对时就把内侧定界符一并消费掉）
+    let mut kept: Vec<Atom> = Vec::with_capacity(maximal.len());
+    for atom in maximal {
+        if kept.iter().any(|other| other.from < atom.to && atom.from < other.to) {
+            continue;
+        }
+        kept.push(atom);
+    }
+    atoms.extend(kept);
     atoms
 }
 
@@ -1149,6 +1164,44 @@ mod tests {
                 "{source:?} 不应识别为硬换行：{spans:?}"
             );
         }
+    }
+
+    /// HTML 组包强调：原子与强调不共存，否则同一段源码在渲染/复制里出现两遍。
+    #[test]
+    fn html_group_and_emphasis_do_not_both_survive() {
+        let source = "<b>**x**</b>";
+        let spans = inline(source);
+
+        assert_eq!(spans.len(), 1, "整段只留 HTML 原子（源码降级）：{spans:?}");
+        assert!(matches!(spans[0], InlineSpan::Html { .. }), "{spans:?}");
+    }
+
+    /// 交叉强调只留先配对的一对：两段重叠会让同一段源码渲染两遍。
+    #[test]
+    fn crossing_emphasis_keeps_one_pair() {
+        let spans = inline("*a _b* c_");
+        assert_eq!(
+            spans.iter().filter(|span| matches!(span, InlineSpan::Em { .. })).count(),
+            1,
+            "{spans:?}"
+        );
+        assert!(
+            spans.iter().any(|span| matches!(span, InlineSpan::Em { from: 0, to: 6, .. })),
+            "{spans:?}"
+        );
+        // 嵌套强调仍是外层单节点（内层由 children 携带）
+        let nested = inline("**a *b* c**");
+        assert_eq!(nested.len(), 1, "{nested:?}");
+        assert!(matches!(nested[0], InlineSpan::Strong { from: 0, to: 11, .. }));
+    }
+
+    /// HTML 组内的代码 / 自动链接并入组整体降级：组原文已含这段源码，不能再渲染一遍。
+    #[test]
+    fn html_group_swallows_inner_atoms() {
+        let source = "<b>x `c` y</b>";
+        let spans = inline(source);
+        assert_eq!(spans.len(), 1, "整段只留 HTML 原子：{spans:?}");
+        assert!(matches!(spans[0], InlineSpan::Html { .. }), "{spans:?}");
     }
 
     /// 整行只有空格时行尾扫描不越出区间起点（区间之前没有字节可数）。

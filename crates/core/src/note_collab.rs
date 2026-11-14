@@ -69,6 +69,7 @@ pub struct NoteCollab {
     /// 各文件已知最大基线序号（含本端已发；提案取更高序）。量级 = 出现过的路径数，
     /// 不做淘汰：淘汰后提案序号可能回退引发额外一轮协商。
     room_seqs: HashMap<String, u64>,
+    /// 异基线回通告限频（键 = `peer\0file`）：按对端计时，一个对端刚被回过不影响另一个对端拿到通告。
     baseline_reply_at: HashMap<String, Instant>,
     /// 实证与本地基线正文不符的对端（键 = `peer_id\0file`）：其 sync 帧一律不应用，基线重建时解除。
     incompatible: HashSet<String>,
@@ -117,7 +118,8 @@ impl NoteCollab {
         let Some(active) = self.doc.take() else { return };
         let file = active.file;
         self.clear_incompatible(&file);
-        self.baseline_reply_at.remove(&file);
+        self.baseline_reply_at
+            .retain(|key, _| !key.ends_with(&format!("\0{file}")));
         // 更新订阅按命名挂在 doc 上，随 doc drop 一同消失
     }
 
@@ -259,7 +261,7 @@ impl NoteCollab {
             // 异正文基线共享 seed 时钟空间，合并会按本地状态向量截断对端 struct（尾部混入异文本/
             // 静默分歧）：只回通告、不做跨基线合并。
             let mut out = RemoteOutcome::default();
-            if let Some(frame) = self.reply_baseline(file) {
+            if let Some(frame) = self.reply_baseline(peer_id, file) {
                 out.reply.push(frame);
             }
             return out;
@@ -341,7 +343,7 @@ impl NoteCollab {
                 // 若此前因标识碰撞把它记成不兼容，回一次通告让对方也解除（否则单向永久拉黑）
                 let mut out = RemoteOutcome::default();
                 if self.incompatible.remove(&peer_key(peer_id, file)) {
-                    if let Some(frame) = self.reply_baseline(file) {
+                    if let Some(frame) = self.reply_baseline(peer_id, file) {
                         out.reply.push(frame);
                     }
                 }
@@ -355,7 +357,7 @@ impl NoteCollab {
         }
         if tag.compare(&local_tag) <= std::cmp::Ordering::Equal {
             let mut out = RemoteOutcome::default();
-            if let Some(frame) = self.reply_baseline(file) {
+            if let Some(frame) = self.reply_baseline(peer_id, file) {
                 out.reply.push(frame);
             }
             return out;
@@ -427,15 +429,16 @@ impl NoteCollab {
         self.remember_room_seq(file, tag.seq);
     }
 
-    /// 回通告本端基线（2s 限频）：让异基线对端采纳本端，而不是做跨基线合并。
-    fn reply_baseline(&mut self, file: &str) -> Option<Vec<u8>> {
+    /// 回通告本端基线（每对端 2s 限频）：让异基线对端采纳本端，而不是做跨基线合并。
+    fn reply_baseline(&mut self, peer_id: &str, file: &str) -> Option<Vec<u8>> {
+        let key = peer_key(peer_id, file);
         let now = Instant::now();
-        if let Some(last) = self.baseline_reply_at.get(file) {
+        if let Some(last) = self.baseline_reply_at.get(&key) {
             if now.duration_since(*last) < BASELINE_REPLY_INTERVAL {
                 return None;
             }
         }
-        self.baseline_reply_at.insert(file.to_owned(), now);
+        self.baseline_reply_at.insert(key, now);
         self.baseline_frame()
     }
 
@@ -490,10 +493,14 @@ impl NoteCollab {
                 *slot = value;
             }
         }
+        // 回通告限频键 = `对端\0文件`：迁移时只重映射文件段（对端身份保持不变）
         let moved_replies: Vec<(String, String)> = self
             .baseline_reply_at
             .keys()
-            .filter_map(|k| map(k).map(|n| (k.clone(), n)))
+            .filter_map(|k| {
+                let (peer, file) = k.split_once('\0')?;
+                map(file).map(|n| (k.clone(), peer_key(peer, &n)))
+            })
             .collect();
         for (old_key, new_key) in moved_replies {
             let at = self.baseline_reply_at.remove(&old_key).expect("键刚查到");
@@ -792,6 +799,20 @@ mod tests {
         let low = DocTag { seq: 0, author: "z".to_owned(), id: baseline_id_of("v3\n") };
         let out = b.apply_remote("p", "f.md", &encode_note_baseline(&low, "v3\n", "v3\n"));
         assert_eq!(out.reply.len(), 1);
+    }
+
+    /// 回通告限频按对端计时：一个对端刚被回过，另一个对端仍要拿到通告（否则它停在异基线上）。
+    #[test]
+    fn 回通告限频按对端计时() {
+        let mut a = NoteCollab::new("a".to_owned());
+        a.open("f.md", "v1\n");
+        let other = DocTag { seq: 1, author: "p".to_owned(), id: baseline_id_of("v2\n") };
+        let sync = sync_frame(&other, &[0, 1, 2]);
+        assert_eq!(a.apply_remote("peer-1", "f.md", &sync).reply.len(), 1);
+        // 同一对端立刻再来：限频不回
+        assert!(a.apply_remote("peer-1", "f.md", &sync).reply.is_empty());
+        // 另一个对端：各自计时，必须回
+        assert_eq!(a.apply_remote("peer-2", "f.md", &sync).reply.len(), 1);
     }
 
     #[test]

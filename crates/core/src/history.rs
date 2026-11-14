@@ -1,6 +1,6 @@
 //! 文件历史侧车（笔记/画布/表格）：每文件一个隐藏 JSON 侧文件（全文快照 + 行级 diff 摘要），独立于磁盘真相的审计/回滚轴。
 //! 侧文件格式为 `{ versions: [...] }`，path = `.atelyx/history/[<kind>/]<最小编码>.json`（canvas/table 有 kind 子目录）；
-//! 记录尽力而为——读缺失/损坏返回空、写失败由调用方决定降级。
+//! 记录尽力而为——读缺失返回空、侧文件损坏与写失败向上报错由调用方降级（损坏文件不覆盖）。
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -345,7 +345,8 @@ pub struct RecordOpts {
     pub content: String,
     pub action: HistoryAction,
     pub author: HistoryAuthor,
-    /// 连续编辑合并窗口（毫秒）：上一版为同作者 edit 且距今 < 该值 → 滑动更新不新增 seq。
+    /// 连续编辑合并窗口（毫秒）：上一版为同作者 edit 且间隔非负且小于该值 → 滑动更新不新增 seq
+    /// （时间戳回退成负间隔时不算窗口内，否则该文件的历史会永远并进上一版）。
     pub coalesce_edit_ms: Option<i64>,
     /// 版本数上限（0 = 全留）。
     pub max_versions: usize,
@@ -355,11 +356,47 @@ pub struct RecordOpts {
     pub editor: Option<HistoryEditor>,
 }
 
-/// 追加一个历史版本（本地路径全量读改写，无锁——调用方需避免并发写同一侧文件；
-/// 内容与上一版相同则跳过防重复存档点）。
-/// 写失败向上传播，调用方按「历史尽力而为」降级（不得阻塞正文保存）。
+/// 侧文件「读改写」串行锁：同一文件的并发记录（正文保存链 / AI 编辑 / 回滚记版）会各自读到
+/// 旧列表再整体覆盖，后写者把先写者的版本吞掉。进程内全局锁即可——历史是尽力而为侧车。
+static RECORD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// 读取侧文件并区分「不存在」与「存在但解析失败」：后者不得被当作空列表覆盖（会毁掉整段历史）。
+fn read_sidecar(
+    root: &Path,
+    kind: HistoryKind,
+    file: &str,
+) -> Result<Option<Vec<HistoryVersion>>, String> {
+    let canonical = history_path_for(kind, file);
+    match std::fs::read_to_string(root.join(&canonical)) {
+        Ok(raw) => {
+            return serde_json::from_str::<HistoryFile>(&raw)
+                .map(|parsed| Some(parsed.versions))
+                .map_err(|e| format!("历史侧文件 {canonical} 无法解析：{e}"));
+        }
+        // 读错误不是「不存在」：当作损坏处理，避免把读不到的历史当空列表覆盖掉
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            return Err(format!("历史侧文件 {canonical} 读取失败：{e}"));
+        }
+        Err(_) => {}
+    }
+    // 新名缺失才回退存量名；存量文件永不被写入，解析失败当没有（原文件留在磁盘上）
+    let legacy = legacy_history_path_for(kind, file);
+    let Ok(raw) = std::fs::read_to_string(root.join(&legacy)) else { return Ok(None) };
+    Ok(serde_json::from_str::<HistoryFile>(&raw).ok().map(|parsed| parsed.versions))
+}
+
+/// 追加一个历史版本（进程内按侧文件串行；内容与上一版相同则跳过防重复存档点）。
+/// 写失败与侧文件损坏向上传播，调用方按「历史尽力而为」降级（不得阻塞正文保存）；
+/// 损坏时保留原文件不覆盖，版本列表从此不再增长（用户仍可在磁盘上找到旧快照）。
 pub fn record_version(root: &Path, kind: HistoryKind, file: &str, opts: &RecordOpts) -> Result<(), String> {
-    let mut versions = load_history(root, kind, file);
+    let guard = RECORD_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let result = record_version_locked(root, kind, file, opts);
+    drop(guard);
+    result
+}
+
+fn record_version_locked(root: &Path, kind: HistoryKind, file: &str, opts: &RecordOpts) -> Result<(), String> {
+    let mut versions = read_sidecar(root, kind, file)?.unwrap_or_default();
     if let Some(last) = versions.last() {
         // 内容 no-op：不产生新版本（回滚后同内容的常规保存同样跳过）
         if last.content == opts.content {
@@ -367,13 +404,16 @@ pub fn record_version(root: &Path, kind: HistoryKind, file: &str, opts: &RecordO
         }
     }
     let now = now_ms();
+    // 时间戳回退（时钟被校准 / 跨机器同步）时不得落进「负间隔恒小于窗口」的合并分支：
+    // 那会让该文件的连续编辑永远并进上一版，历史不再增长
     let coalesce = match (&versions.last(), opts.coalesce_edit_ms) {
-        (Some(last), Some(window)) if opts.action == HistoryAction::Edit
-            && last.action == HistoryAction::Edit
-            && last.author.id == opts.author.id
-            && last.editor.is_none()
-            && opts.editor.is_none()
-            && now - last.ts < window =>
+        (Some(last), Some(window))
+            if opts.action == HistoryAction::Edit
+                && last.action == HistoryAction::Edit
+                && last.author.id == opts.author.id
+                && last.editor.is_none()
+                && opts.editor.is_none()
+                && (0..window).contains(&(now - last.ts)) =>
         {
             Some(last.seq)
         }
@@ -394,7 +434,8 @@ pub fn record_version(root: &Path, kind: HistoryKind, file: &str, opts: &RecordO
         if opts.note.is_some() {
             last.note = opts.note.clone();
         }
-        return write_history(root, kind, file, &versions);
+        // 合并同样要剪枝：只增不减的正文（超长合并窗口内持续编辑）会绕过字节预算
+        return write_history(root, kind, file, &prune_bytes(versions, HISTORY_BYTE_BUDGET));
     }
     let prev_content = versions.last().map(|v| v.content.clone()).unwrap_or_default();
     let seq = versions.last().map(|v| v.seq + 1).unwrap_or(1);
@@ -497,8 +538,19 @@ pub fn diff_summary(prev: &str, next: &str) -> String {
     if prev == next {
         return "未改动".into();
     }
-    let a: Vec<&str> = prev.split('\n').collect();
-    let b: Vec<&str> = next.split('\n').collect();
+    // 只改换行风格（LF ↔ CRLF）不算内容改动：摘要按归一后的正文比对
+    let normalized_prev = prev.replace("\r\n", "\n");
+    let normalized_next = next.replace("\r\n", "\n");
+    if normalized_prev == normalized_next {
+        return "未改动".into();
+    }
+    let (prev, next) = (normalized_prev.as_str(), normalized_next.as_str());
+    // 行尾风格不参与计数：CRLF 的行尾 `\r` 先剥掉（换个换行风格不该报成整篇行改写）
+    fn strip(line: &str) -> &str {
+        line.strip_suffix('\r').unwrap_or(line)
+    }
+    let a: Vec<&str> = prev.split('\n').map(strip).collect();
+    let b: Vec<&str> = next.split('\n').map(strip).collect();
     let count_added = |list: &[&str], other: &[&str]| -> usize {
         let common: std::collections::HashSet<&str> = other.iter().copied().collect();
         list.iter().filter(|l| !l.is_empty() && !common.contains(**l)).count()
@@ -552,6 +604,62 @@ mod tests {
         assert_eq!(versions.len(), 1);
         assert_eq!(versions[0].content, "v2");
         assert_eq!(versions[0].seq, 1);
+    }
+
+    #[test]
+    fn 损坏侧文件不被覆盖() {
+        let tmp = crate::vault::test_support::TempDir::new("hist-corrupt");
+        let path = tmp.join(&history_path_for(HistoryKind::Note, "a.md"));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "{ broken").unwrap();
+        // 解析失败 → 报错且原文件原样保留（旧快照仍可在磁盘上找回）
+        assert!(record_version(&tmp, HistoryKind::Note, "a.md", &opts("v1")).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ broken");
+    }
+
+    #[test]
+    fn 时间戳回退不落进合并分支() {
+        let tmp = crate::vault::test_support::TempDir::new("hist-future-ts");
+        let path = tmp.join(&history_path_for(HistoryKind::Note, "a.md"));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // 上一版时间戳在未来：负间隔不得被当成「窗口内」，否则该文件的历史永远不再增长
+        let future = now_ms() + 3_600_000;
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{"versions":[{{"seq":1,"ts":{future},"author":{{"id":"t","name":"T","device":"T"}},"action":"edit","content":"v1"}}]}}"#
+            ),
+        )
+        .unwrap();
+        record_version(&tmp, HistoryKind::Note, "a.md", &opts("v2")).unwrap();
+        let versions = load_history(&tmp, HistoryKind::Note, "a.md");
+        assert_eq!(versions.len(), 2);
+        assert_eq!(versions[1].seq, 2);
+    }
+
+    #[test]
+    fn 并发记录不丢版本() {
+        let tmp = crate::vault::test_support::TempDir::new("hist-concurrent");
+        let root = tmp.to_path_buf();
+        // 关闭合并窗口：每个内容都必须独立成版（读改写若不加锁，后写者会把先写者覆盖掉）
+        let handles: Vec<_> = (0..8)
+            .map(|i| {
+                let root = root.clone();
+                std::thread::spawn(move || {
+                    let mut o = opts(&format!("v{i}"));
+                    o.coalesce_edit_ms = None;
+                    record_version(&root, HistoryKind::Note, "a.md", &o).unwrap();
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        let versions = load_history(&tmp, HistoryKind::Note, "a.md");
+        assert_eq!(versions.len(), 8);
+        let mut seqs: Vec<u64> = versions.iter().map(|v| v.seq).collect();
+        seqs.sort_unstable();
+        assert_eq!(seqs, (1..=8).collect::<Vec<u64>>());
     }
 
     #[test]
