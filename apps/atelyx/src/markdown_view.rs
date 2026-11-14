@@ -1282,7 +1282,7 @@ impl Render<'_> {
     ) -> (Vec<LineRun>, Element<'a, Message>) {
         let (content_from, content_to) = item_content_range(source, item);
         let raw = &source[content_from..content_to];
-        let stripped = strip_quote_marks(raw);
+        let stripped = atelyx_core::markdown::strip_quote_marks(raw);
         if stripped == raw {
             let inline = parse_inline(source, content_from, content_to, &self.opts);
             if let Some(InlineSpan::Image { src, alt, width, height, .. }) = image_only(&inline) {
@@ -2119,7 +2119,7 @@ fn item_content_range(source: &str, item: &MarkdownListItem) -> (usize, usize) {
 /// 止于第一个嵌套子块起点（项内后续段落归 children）。渲染与图片收集共用。
 fn item_content(source: &str, item: &MarkdownListItem) -> String {
     let (from, to) = item_content_range(source, item);
-    strip_quote_marks(&source[from..to])
+    atelyx_core::markdown::strip_quote_marks(&source[from..to])
 }
 
 /// 收集文档中按块渲染的图片 src（图片段落与列表项图片内容；行内图片不收集不载入）。
@@ -2277,7 +2277,7 @@ impl Render<'_> {
                 MarkdownBlock::List { items, .. } => {
                     for item in items {
                         let (content_from, content_to) = item_content_range(source, item);
-                        let stripped = strip_quote_marks(&source[content_from..content_to]);
+                        let stripped = atelyx_core::markdown::strip_quote_marks(&source[content_from..content_to]);
                         if stripped == source[content_from..content_to] {
                             let inline = parse_inline(source, content_from, content_to, &self.opts);
                             let runs = self.runs(source, &inline, self.text_style());
@@ -2422,32 +2422,6 @@ fn blank_line_count(source: &str, from: usize, to: usize) -> usize {
         .count()
 }
 
-/// 剥掉每行行首的引用标记（可嵌套的 `>` 前缀，宽度口径与内核一致）。
-fn strip_quote_marks(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for (index, line) in text.split('\n').enumerate() {
-        if index > 0 {
-            out.push('\n');
-        }
-        let mut rest = line;
-        while let Some(width) = quote_prefix_len(rest) {
-            rest = &rest[width..];
-        }
-        out.push_str(rest);
-    }
-    out
-}
-
-/// 单层引用前缀宽度（缩进 ≤3 + `>` + 至多一个空格）；非引用行返回 None。
-fn quote_prefix_len(text: &str) -> Option<usize> {
-    let indent = text.len() - text.trim_start_matches([' ', '\t']).len();
-    if indent > 3 || !text[indent..].starts_with('>') {
-        return None;
-    }
-    let after = &text[indent + 1..];
-    let spaces = after.len() - after.trim_start_matches([' ', '\t']).len();
-    Some(indent + 1 + spaces.min(1))
-}
 
 /// 列表项标记（含任务框）的字节长度与有序序号文本；非列表标记返回 (0, "")。
 fn item_marker(raw: &str) -> (usize, String) {
@@ -2799,15 +2773,6 @@ mod tests {
         assert!(callout_color("unknown-type").is_none());
     }
 
-    #[test]
-    fn strip_quote_marks_drops_line_prefixes() {
-        // 续行的引用标记剥掉，标记后的缩进保留
-        assert_eq!(strip_quote_marks("- item\n>   cont"), "- item\n  cont");
-        // 嵌套引用逐层剥
-        assert_eq!(strip_quote_marks("a\n> > b"), "a\nb");
-        // 无引用标记的行（含缩进）不动
-        assert_eq!(strip_quote_marks("a\n  lazy"), "a\n  lazy");
-    }
 
     #[test]
     fn edit_rows_make_in_block_blank_lines_rows() {

@@ -1,4 +1,4 @@
-﻿//! `markdown.parse`：把 Markdown 文本按笔记同一套解析语义转成插件可排版的块。
+//! `markdown.parse`：把 Markdown 文本按笔记同一套解析语义转成插件可排版的块。
 //!
 //! 只做解析与降级（块 / 行内片段 / 嵌套层数），不排版、不量算——宽度与字体的决定权在插件侧；
 //! 嵌套块一律展开成平铺序列并用 `depth` 记层数，插件据此换算缩进与左侧标记。
@@ -117,7 +117,7 @@ fn item_spans(source: &str, item: &MarkdownListItem, options: &ParseOptions) -> 
     let content_from = item.from + item_marker_len(&source[item.from..item.to]);
     let content_end = item.children.first().map(block_from).unwrap_or(item.to).max(content_from);
     let content_to = content_from + source[content_from..content_end].trim_end().len();
-    let content = strip_quote_marks(&source[content_from..content_to]);
+    let content = crate::markdown::strip_quote_marks(&source[content_from..content_to]);
     if content.trim().is_empty() {
         return Vec::new();
     }
@@ -129,31 +129,6 @@ fn item_spans(source: &str, item: &MarkdownListItem, options: &ParseOptions) -> 
     out
 }
 
-/// 逐行剥掉引用前缀（缩进 ≤3 + `>` + 至多一个空格，可叠层）。
-fn strip_quote_marks(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for (index, line) in text.split('\n').enumerate() {
-        if index > 0 {
-            out.push('\n');
-        }
-        let mut rest = line;
-        while let Some(width) = quote_prefix_len(rest) {
-            rest = &rest[width..];
-        }
-        out.push_str(rest);
-    }
-    out
-}
-
-fn quote_prefix_len(text: &str) -> Option<usize> {
-    let indent = text.len() - text.trim_start_matches([' ', '\t']).len();
-    if indent > 3 || !text[indent..].starts_with('>') {
-        return None;
-    }
-    let after = &text[indent + 1..];
-    let spaces = after.len() - after.trim_start_matches([' ', '\t']).len();
-    Some(indent + 1 + spaces.min(1))
-}
 
 /// 有序列表项在源里的序号（`3.` / `3)` → 3）；非有序标记返回 None。
 fn item_ordinal(raw: &str) -> Option<u32> {

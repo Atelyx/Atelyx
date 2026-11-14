@@ -539,6 +539,33 @@ fn contains_ignore_case(haystack: &str, needle: &[u8]) -> bool {
 // ===== 引用块 =====
 
 /// 一层引用前缀 `[ ]{0,3}>` + 至多 1 列空白：返回（跳过字节数，剩余缩进折成的空格列数）。
+/// 逐行剥掉引用前缀（缩进 ≤3 + `>` + 至多一个空格，可叠层）——只读渲染与插件占位共用。
+pub fn strip_quote_marks(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for (index, line) in text.split('\n').enumerate() {
+        if index > 0 {
+            out.push('\n');
+        }
+        let mut rest = line;
+        while let Some(width) = quote_mark_width(rest) {
+            rest = &rest[width..];
+        }
+        out.push_str(rest);
+    }
+    out
+}
+
+/// 单层引用标记宽度（缩进 ≤3 + `>` + 至多一个空白分隔）；非引用行返回 None。
+fn quote_mark_width(text: &str) -> Option<usize> {
+    let indent = text.len() - text.trim_start_matches([' ', '\t']).len();
+    if indent > 3 || !text[indent..].starts_with('>') {
+        return None;
+    }
+    let after = &text[indent + 1..];
+    let spaces = after.len() - after.trim_start_matches([' ', '\t']).len();
+    Some(indent + 1 + spaces.min(1))
+}
+
 fn quote_prefix(text: &str) -> Option<(usize, usize)> {
     let (ind, ind_cols) = indent_prefix(text);
     if ind_cols > 3 || !text[ind..].starts_with('>') {
@@ -1640,6 +1667,18 @@ pub(super) fn block_to(b: &MarkdownBlock) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strip_quote_marks_drops_line_prefixes() {
+        // 续行的引用标记剥掉，标记后的缩进保留
+        assert_eq!(strip_quote_marks("- item\n>   cont"), "- item\n  cont");
+        // 嵌套引用逐层剥
+        assert_eq!(strip_quote_marks("a\n> > b"), "a\nb");
+        // 无引用标记的行（含缩进）不动
+        assert_eq!(strip_quote_marks("a\n  lazy"), "a\n  lazy");
+        // 缩进超过 3 列不算引用标记
+        assert_eq!(strip_quote_marks("    > x"), "    > x");
+    }
 
     fn parse(source: &str) -> MarkdownDocument {
         parse_markdown(source, &ParseOptions::default())
