@@ -18,10 +18,7 @@ use crate::ai::tools::{builtin_tools, resolve_image_attachments, SearchConfig, T
 const MAX_PARALLEL_TOOLS: usize = 10;
 
 fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
+    crate::time::now_ms()
 }
 
 fn uuid_v4() -> String {

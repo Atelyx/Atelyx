@@ -184,10 +184,7 @@ fn truncate_line(line: &str) -> String {
 }
 
 fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
+    crate::time::now_ms()
 }
 
 /// 本地时间戳 `MM-DD HH:MM:SS`（与历史面板同一时区口径）。

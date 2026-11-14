@@ -29,6 +29,7 @@ pub mod search;
 pub mod space_client;
 pub mod space_frame;
 pub mod table_ai;
+pub mod time;
 pub mod table_ops;
 pub mod table_xlsx;
 pub mod updater;

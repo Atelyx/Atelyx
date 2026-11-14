@@ -488,10 +488,7 @@ pub(crate) fn mtime_of(md: &std::fs::Metadata) -> i64 {
 
 /// 当前 Unix 秒（引用同步等落盘时间戳用）。
 pub fn now_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+    crate::time::now_secs()
 }
 
 // ===== 路径校验 =====

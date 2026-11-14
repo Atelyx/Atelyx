@@ -1091,10 +1091,7 @@ fn record_table_history(app: &App, content: String) -> Task<Message> {
 }
 
 fn now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    crate::now_secs()
 }
 
 // ===== 交互 =====

@@ -1805,10 +1805,7 @@ fn strings_of(value: Option<&Value>) -> Option<Vec<String>> {
 }
 
 fn now_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+    crate::time::now_secs()
 }
 
 /// 移动 / 重命名工具：改名 = 同目录 move（引用同步与空间端点共用一套实现）。
@@ -1963,10 +1960,7 @@ async fn todo_write(ctx: &ToolCtx, args: &Value) -> ToolResult {
         .collect();
     let payload = json!({
         "schema": 1,
-        "updatedAt": std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(0),
+        "updatedAt": crate::time::now_ms(),
         "todos": cleaned,
     });
     let Ok(content) = serde_json::to_string_pretty(&payload) else {

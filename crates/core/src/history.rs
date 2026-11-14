@@ -509,10 +509,7 @@ fn prune_bytes(versions: Vec<HistoryVersion>, budget: usize) -> Vec<HistoryVersi
 }
 
 fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
+    crate::time::now_ms()
 }
 
 /// 版本摘要按文件类型生成：笔记取正文行级增删，表格/画布取实体计数（新增/删除 N 行、修改 N 个单元格…）。

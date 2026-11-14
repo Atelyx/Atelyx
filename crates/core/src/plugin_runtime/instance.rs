@@ -2131,10 +2131,7 @@ fn decode_clipboard_image(base64_text: &str) -> Result<Vec<u8>, String> {
 }
 
 fn now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    crate::time::now_secs().max(0) as u64
 }
 
 /// 审计对象：`service.call` 记规范化后的完整方法名，并给出目标方法自己的入参（取路径用）。

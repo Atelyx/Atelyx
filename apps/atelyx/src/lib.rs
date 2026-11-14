@@ -374,18 +374,12 @@ fn load_global_boot() -> (global_config::GlobalConfig, Option<String>) {
 
 /// 当前 unix 秒（最近仓库的打开时间戳）。
 pub(crate) fn now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    atelyx_core::time::now_secs().max(0) as u64
 }
 
 /// 当前 unix 毫秒（对话卡编辑锁的 since 取值）。
 pub(crate) fn now_millis() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
+    atelyx_core::time::now_ms()
 }
 
 /// 命令候选键形态：Ctrl/Cmd + 单字符（撤销/重做/剪贴板类），或命名键（任意修饰，

@@ -468,10 +468,7 @@ fn remove_dir_all_with_retry(dir: &Path) -> Result<(), String> {
 }
 
 fn now_millis() -> u128 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0)
+    crate::time::now_ms().max(0) as u128
 }
 
 #[cfg(test)]

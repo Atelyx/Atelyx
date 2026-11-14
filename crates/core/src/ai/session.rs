@@ -18,10 +18,7 @@ use crate::vault::{
 const PERSIST_ERROR_MESSAGE: &str = "会话保存失败，将自动重试";
 
 fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
+    crate::time::now_ms()
 }
 
 fn uuid_v4() -> String {

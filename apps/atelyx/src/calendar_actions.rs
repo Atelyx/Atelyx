@@ -437,7 +437,7 @@ fn add_from_draft(app: &mut App) -> Task<Message> {
         return Task::none();
     }
     app.calendar.seq += 1;
-    let now_ms = crate::now_secs() as i64 * 1000;
+    let now_ms = crate::now_millis();
     let item = CalendarItem {
         id: next_item_id(now_ms, app.calendar.seq),
         date: calendar_grid::date_string(day),
