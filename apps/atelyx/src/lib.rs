@@ -894,7 +894,7 @@ fn file_drop_check(
     }
     if target == from
         || (from_is_dir
-            && (target.starts_with(&format!("{from}/")) || from.starts_with(&format!("{target}/"))))
+            && (atelyx_core::path::under(target, from) || atelyx_core::path::under(from, target)))
     {
         return Err(DropReject::SelfTree);
     }
@@ -4394,7 +4394,7 @@ impl App {
                 // 删除命中打开中的文件：挂起输入先落盘（防未保存内容被静默清空）
                 let hits = |open: &str| {
                     if is_dir {
-                        open == rel || open.starts_with(&format!("{rel}/"))
+                        atelyx_core::path::under(open, &rel)
                     } else {
                         open == rel
                     }
@@ -6351,79 +6351,42 @@ impl App {
             FollowUp::None => {}
             FollowUp::Created { .. } => {}
             FollowUp::Renamed { from, to, .. } => {
+                let remap = |p: &str| atelyx_core::path::remap_prefix(p, from, to);
                 // 展开集路径跟随（目录改名/移动；文件路径不会成为展开键，前缀判空转无害）
-                let prefix = format!("{from}/");
                 for d in &mut self.ui.file_explorer_expanded {
-                    if d == from {
-                        *d = to.clone();
-                    } else if let Some(rest) = d.strip_prefix(&prefix) {
-                        *d = format!("{to}/{rest}");
+                    if let Some(next) = remap(d) {
+                        *d = next;
                     }
                 }
-                if let Some(f) = &self.ui.last_note_file {
-                    let next = if f == from {
-                        Some(to.clone())
-                    } else if f.starts_with(&format!("{from}/")) {
-                        Some(f.replacen(from, to, 1))
-                    } else {
-                        None
-                    };
-                    if let Some(n) = next {
-                        self.ui.last_note_file = Some(n);
-                        self.schedule_persist();
+                if let Some(next) = self.ui.last_note_file.as_deref().and_then(remap) {
+                    self.ui.last_note_file = Some(next);
+                    self.schedule_persist();
+                }
+                if let Some(s) = &mut self.table {
+                    if let Some(next) = remap(&s.file) {
+                        s.file = next.clone();
+                        // 会话内嵌标题跟随文件名（标题不由内容保存落盘，不置脏）
+                        s.data.title = layout_view::file_label(&next);
                     }
                 }
-                if let Some(f) = &self.ui.last_table_file {
-                    let next = if f == from {
-                        Some(to.clone())
-                    } else if f.starts_with(&format!("{from}/")) {
-                        Some(f.replacen(from, to, 1))
-                    } else {
-                        None
-                    };
-                    if let Some(n) = next {
-                        if let Some(s) = &mut self.table {
-                            if s.file == *f || s.file.starts_with(&format!("{from}/")) {
-                                s.file = n.clone();
-                                // 会话内嵌标题跟随文件名（标题不由内容保存落盘，不置脏）
-                                s.data.title = layout_view::file_label(&n);
-                            }
-                        }
-                        self.ui.last_table_file = Some(n);
-                        self.schedule_persist();
+                if let Some(next) = self.ui.last_table_file.as_deref().and_then(remap) {
+                    self.ui.last_table_file = Some(next);
+                    self.schedule_persist();
+                }
+                if let Some(s) = &mut self.canvas {
+                    if let Some(next) = remap(&s.file) {
+                        s.file = next.clone();
+                        // 会话内嵌标题跟随文件名（标题不由内容保存落盘，不置脏）
+                        s.data.title = layout_view::file_label(&next);
                     }
                 }
-                if let Some(f) = &self.ui.last_canvas_file {
-                    let next = if f == from {
-                        Some(to.clone())
-                    } else if f.starts_with(&format!("{from}/")) {
-                        Some(f.replacen(from, to, 1))
-                    } else {
-                        None
-                    };
-                    if let Some(n) = next {
-                        if let Some(s) = &mut self.canvas {
-                            if s.file == *f || s.file.starts_with(&format!("{from}/")) {
-                                s.file = n.clone();
-                                // 会话内嵌标题跟随文件名（标题不由内容保存落盘，不置脏）
-                                s.data.title = layout_view::file_label(&n);
-                            }
-                        }
-                        self.ui.last_canvas_file = Some(n);
-                        self.schedule_persist();
-                    }
+                if let Some(next) = self.ui.last_canvas_file.as_deref().and_then(remap) {
+                    self.ui.last_canvas_file = Some(next);
+                    self.schedule_persist();
                 }
                 // 打开中的插件文档跟随路径：插件按 host:doc.open 给的路径读文件，
                 // 停旧路径会让它后续保存写到已不存在的位置
-                let doc_next = self.doc_open.as_ref().and_then(|d| {
-                    if d.path == *from {
-                        Some(to.clone())
-                    } else {
-                        d.path
-                            .starts_with(&format!("{from}/"))
-                            .then(|| d.path.replacen(from, to, 1))
-                    }
-                });
+                let doc_next = self.doc_open.as_ref().and_then(|d| remap(&d.path));
                 if let Some(next) = doc_next {
                     if let Some(doc) = self.doc_open.as_mut() {
                         let old = std::mem::replace(&mut doc.path, next.clone());
@@ -6439,7 +6402,7 @@ impl App {
             FollowUp::Deleted { rel, is_dir } => {
                 let hit = self.ui.last_note_file.as_deref().is_some_and(|f| {
                     if *is_dir {
-                        f == rel || f.starts_with(&format!("{rel}/"))
+                        atelyx_core::path::under(f, rel)
                     } else {
                         f == rel
                     }
@@ -6462,7 +6425,7 @@ impl App {
                 }
                 let hit_table = self.ui.last_table_file.as_deref().is_some_and(|f| {
                     if *is_dir {
-                        f == rel || f.starts_with(&format!("{rel}/"))
+                        atelyx_core::path::under(f, rel)
                     } else {
                         f == rel
                     }
@@ -6477,7 +6440,7 @@ impl App {
                 }
                 let hit_canvas = self.ui.last_canvas_file.as_deref().is_some_and(|f| {
                     if *is_dir {
-                        f == rel || f.starts_with(&format!("{rel}/"))
+                        atelyx_core::path::under(f, rel)
                     } else {
                         f == rel
                     }
@@ -6494,7 +6457,7 @@ impl App {
                 // 打开中的插件文档被删 / 所在目录被删：实例随磁盘事实关闭
                 let hit_doc = self.doc_open.as_ref().is_some_and(|d| {
                     if *is_dir {
-                        d.path == *rel || d.path.starts_with(&format!("{rel}/"))
+                        atelyx_core::path::under(&d.path, rel)
                     } else {
                         d.path == *rel
                     }
@@ -6508,18 +6471,12 @@ impl App {
 
     /// 目录改名/移动后的文件树子目录缓存按前缀换路（精确命中与 `from/` 前缀两种）。
     fn follow_children_cache(&mut self, from: &str, to: &str) {
-        let prefix = format!("{from}/");
         self.children = self
             .children
             .drain()
-            .map(|(k, v)| {
-                if k == from {
-                    (to.to_string(), v)
-                } else if let Some(rest) = k.strip_prefix(&prefix) {
-                    (format!("{to}/{rest}"), v)
-                } else {
-                    (k, v)
-                }
+            .map(|(k, v)| match atelyx_core::path::remap_prefix(&k, from, to) {
+                Some(next) => (next, v),
+                None => (k, v),
             })
             .collect();
     }

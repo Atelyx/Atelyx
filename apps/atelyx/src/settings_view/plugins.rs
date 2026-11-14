@@ -1690,7 +1690,7 @@ async fn rename_local(
     let meta = std::fs::metadata(&source)
         .map_err(|e| format!("源路径不存在或不可访问（{from}）：{e}"))?;
     let is_dir = meta.is_dir();
-    if is_dir && to.starts_with(&format!("{from}/")) {
+    if is_dir && atelyx_core::path::under(&to, &from) {
         return Err("不能把文件夹移动到自身内部".to_string());
     }
     // case-only 改名不查重：Windows 的存在性判断大小写不敏感，会把源自身当占用
@@ -1746,7 +1746,7 @@ async fn rename_space(
     let is_dir = find_tree_entry(&tree, from)
         .map(|node| node.is_dir)
         .ok_or_else(|| format!("源路径不存在：{from}"))?;
-    if is_dir && to.starts_with(&format!("{from}/")) {
+    if is_dir && atelyx_core::path::under(&to, &from) {
         return Err("不能把文件夹移动到自身内部".to_string());
     }
     if find_tree_entry(&tree, to).is_some() {

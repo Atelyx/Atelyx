@@ -466,15 +466,7 @@ impl NoteCollab {
     /// 文件换路跟随（远端 Relocate 帧 / 改名广播）：活动文档挂靠路径与该路径的
     /// 序号、限频记忆一并改写（文档内容不动；含目录换路的前缀跟随，路径不符仅迁移记忆）。
     pub fn relocate(&mut self, old: &str, new: &str) {
-        let map = |p: &str| -> Option<String> {
-            if p == old {
-                Some(new.to_owned())
-            } else {
-                p.strip_prefix(old)
-                    .and_then(|r| r.strip_prefix('/'))
-                    .map(|rest| format!("{new}/{rest}"))
-            }
-        };
+        let map = |p: &str| crate::path::remap_prefix(p, old, new);
         if let Some(active) = self.doc.as_mut() {
             if let Some(next) = map(&active.file) {
                 active.file = next;

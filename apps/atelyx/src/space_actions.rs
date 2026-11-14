@@ -2661,18 +2661,12 @@ fn collect_paths_with_ext(tree: &[space_client::TreeNode], ext: &str, out: &mut 
 /// 不误伤）。经链接跨度引擎逐跨度处理（跳过 frontmatter / 代码块 / 行内代码 / 图片链接）。
 /// 返回 None = 无需改写。
 fn rewrite_note_links(text: &str, old_rel: &str, new_rel: &str) -> Option<String> {
-    let old_prefix = format!("{old_rel}/");
-    let new_prefix = format!("{new_rel}/");
     let mut changed = false;
     let out = atelyx_core::vault::rewrite_link_spans(text, &mut |span: &str| {
         let Some(path) = atelyx_core::vault::markdown_link_path(span) else {
             return span.to_string();
         };
-        let new_target = if path == old_rel {
-            new_rel.to_string()
-        } else if let Some(rest) = path.strip_prefix(&old_prefix) {
-            format!("{new_prefix}{rest}")
-        } else {
+        let Some(new_target) = atelyx_core::path::remap_prefix(&path, old_rel, new_rel) else {
             return span.to_string();
         };
         changed = true;
@@ -3918,18 +3912,12 @@ fn on_space_renamed(app: &mut App, old_path: &str, new_path: &str) -> Task<Messa
         }
     }
     collab_follow_rename(app, old_path, new_path);
-    let prefix = format!("{old_path}/");
     app.children = app
         .children
         .drain()
-        .map(|(k, v)| {
-            if k == old_path {
-                (new_path.to_string(), v)
-            } else if let Some(rest) = k.strip_prefix(&prefix) {
-                (format!("{new_path}/{rest}"), v)
-            } else {
-                (k, v)
-            }
+        .map(|(k, v)| match atelyx_core::path::remap_prefix(&k, &old_path, &new_path) {
+            Some(next) => (next, v),
+            None => (k, v),
         })
         .collect();
     // 换名会改表格会话路径：在途图片回执按旧路径丢弃，这里按新路径补拉
@@ -3969,15 +3957,7 @@ fn on_fs_tree_refresh_tick(app: &mut App) -> Task<Message> {
 
 /// 改名/移动的协作绑定跟随（本端 OpDone 与远端广播共用；前缀下文件一并跟随，幂等）。
 pub fn collab_follow_rename(app: &mut App, old: &str, new: &str) {
-    let map = |p: &str| -> Option<String> {
-        if p == old {
-            Some(new.to_owned())
-        } else {
-            p.strip_prefix(old)
-                .and_then(|r| r.strip_prefix('/'))
-                .map(|rest| format!("{new}/{rest}"))
-        }
-    };
+    let map = |p: &str| atelyx_core::path::remap_prefix(p, old, new);
     if let Some(next) = app.note_collab_file.clone().and_then(|p| map(&p)) {
         app.note_collab_file = Some(next);
     }
