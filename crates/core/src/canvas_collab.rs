@@ -95,7 +95,10 @@ fn set_node_messages(node: &mut CanvasFileNode, messages: Vec<Value>) {
 }
 
 /// 对话卡消息合并：远端为基底，本端基线外新增（对流式 / 未落盘消息）按原序补尾，
-/// 同 id 以远端为胜；本端截断（回滚）优先于远端陈旧快照——基线内且本端已删除的消息不复活。
+/// 同 id 以远端为胜；本端回滚（= 尾部截断）优先于远端陈旧快照，基线内被截掉的消息不复活。
+///
+/// 删除意图只认「本端列表是基线的严格前缀」：回滚只能从尾部截断，而放宽成「基线内本端缺失
+/// 即视为删除」会把「本端没读到某些消息」误判成删除意图，比陈旧复现更危险（会批量删消息）。
 /// 锁模型下对端不并发写同一张卡的消息，合并只为兜底对端搬动该卡时陈旧快照不冲掉进行中内容。
 fn merge_messages(remote: &[Value], local: &[Value], baseline_ids: &[String]) -> Vec<Value> {
     let id_of = |m: &Value| m.get("id").and_then(Value::as_str).map(str::to_string);
@@ -107,14 +110,11 @@ fn merge_messages(remote: &[Value], local: &[Value], baseline_ids: &[String]) ->
         let keep: HashSet<&str> = local_ids.iter().map(String::as_str).collect();
         return remote
             .iter()
-            .filter(|m| {
-                let Some(id) = m.get("id").and_then(Value::as_str) else { return false };
-                if baseline_ids.iter().any(|b| b == id) {
-                    keep.contains(id)
-                } else {
-                    // 远端在基线之外新增的消息照常保留
-                    true
-                }
+            .filter(|m| match m.get("id").and_then(Value::as_str) {
+                // 基线内被截掉的不复活；远端在基线之外新增的照常保留
+                Some(id) => !baseline_ids.iter().any(|b| b == id) || keep.contains(id),
+                // 无 id 的远端消息无从比对删除意图，按远端保留（不能因本端回滚连带丢掉它）
+                None => true,
             })
             .cloned()
             .collect();
@@ -285,6 +285,38 @@ mod tests {
         let rolled_back = vec![json!({"id": "m1", "text": "本端"})];
         let merged = merge_messages(&remote, &rolled_back, &baseline);
         assert_eq!(merged, vec![json!({"id": "m1", "text": "远端"})]);
+    }
+
+    /// 回滚分支里无 id 的远端消息按远端保留：无从比对删除意图，不能连带丢掉。
+    #[test]
+    fn rollback_keeps_idless_remote_messages() {
+        let remote = vec![
+            json!({"id": "m1", "text": "远端"}),
+            json!({"text": "历史消息（无 id）"}),
+            json!({"id": "m2", "text": "远端二"}),
+        ];
+        let local = vec![json!({"id": "m1", "text": "本端"})];
+        let baseline = vec!["m1".to_string(), "m2".to_string()];
+        let merged = merge_messages(&remote, &local, &baseline);
+        assert_eq!(
+            merged,
+            vec![json!({"id": "m1", "text": "远端"}), json!({"text": "历史消息（无 id）"})]
+        );
+    }
+
+    /// 已知边界：删除意图只认「尾部截断」，中段删除会被远端陈旧快照复现。
+    /// 放宽成「基线内缺失即视为删除」会把「本端没读到」误判成删除，风险更大，故保持现状。
+    #[test]
+    fn middle_deletion_is_not_recognised() {
+        let remote = vec![
+            json!({"id": "m1", "text": "远端"}),
+            json!({"id": "m2", "text": "远端二"}),
+            json!({"id": "m3", "text": "远端三"}),
+        ];
+        let local = vec![json!({"id": "m1", "text": "本端"}), json!({"id": "m3", "text": "本端三"})];
+        let baseline = vec!["m1".to_string(), "m2".to_string(), "m3".to_string()];
+        let merged = merge_messages(&remote, &local, &baseline);
+        assert_eq!(merged.len(), 3, "中段被删的 m2 仍由远端保留（现状口径）");
     }
 
     /// 未确认落地（advance_baseline = false）：data 合入、基线不动（下轮补丁重含远端内容）。
