@@ -14,6 +14,7 @@ use crate::calendar_view::{display_month, item_color, today};
 use crate::ui::controls;
 use crate::ui::palette as pal;
 use crate::ui::text;
+use crate::ui::text::ellipsize_estimated;
 use crate::{App, Message};
 
 /// 月视图格子高度（日号 + 两条日程条目块的最小内容高，留 2px 余量）。
@@ -109,7 +110,7 @@ fn day_cell(
             container(
                 row![
                     controls::dot(c, ITEM_DOT),
-                    text(crate::layout_view::ellipsize(&it.title, ITEM_TEXT_MAX_W, pal::fs_micro()))
+                    text(ellipsize_estimated(&it.title, ITEM_TEXT_MAX_W, pal::fs_micro()))
                         .size(pal::fs_micro())
                         .color(pal::TEXT_PRIMARY),
                 ]

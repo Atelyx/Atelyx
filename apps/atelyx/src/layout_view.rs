@@ -27,6 +27,7 @@ use crate::ui::{mono, text};
 use crate::ui::popup::{self, PopupSpec};
 use crate::ui::notify;
 use crate::ui::scroll;
+use crate::ui::text::{ellipsize, ellipsize_estimated, estimate_width, measure};
 use crate::{App, DraftKind, Message, NoteMode, markdown_edit, markdown_view};
 
 pub struct UiMetrics;
@@ -64,43 +65,6 @@ pub fn available_view_kinds(app: &App) -> Vec<String> {
     app.registry.views().map(|entry| entry.id.clone()).collect()
 }
 
-/// 估宽的单字符口径（估宽与表格行内换行估算共用：两处漂移即行高/命中失配）。
-pub fn estimate_char_w(c: char, font_size: f32) -> f32 {
-    let k = font_size / 12.0;
-    if c.is_ascii() {
-        6.5 * k
-    } else {
-        13.5 * k
-    }
-}
-
-/// 估算文字宽度（拉丁 ≈6.5px、CJK ≈13.5px / 12px 字号；按字号线性缩放）。
-/// 渲染宽度全部由内容自适应（Shrink），本估算服务于拖拽命中几何的插入位判定
-/// （标题栏 tab 条起点/宽度、面板标签条插入索引）与弹层定宽（插件列表）；
-/// 与真实 shaping 存在逐字符累积的估宽偏差，不影响渲染。
-pub fn estimate_text_width(text: &str, font_size: f32) -> f32 {
-    text.chars().map(|c| estimate_char_w(c, font_size)).sum()
-}
-
-/// 按估宽截断：超出 `max_w` 时逐字收缩并补省略号（截断口径与渲染定宽同源）。
-pub fn ellipsize(text: &str, max_w: f32, font_size: f32) -> String {
-    truncate_to_width(text, max_w, |s| estimate_text_width(s, font_size))
-}
-
-/// 截断到 max_w：超宽时逐字收缩并补省略号（measure 注入：估宽与实测宽共用同一截断口径）。
-fn truncate_to_width(text: &str, max_w: f32, measure: impl Fn(&str) -> f32) -> String {
-    if measure(text) <= max_w {
-        return text.to_string();
-    }
-    for (i, _) in text.char_indices().rev() {
-        let candidate = format!("{}…", &text[..i]);
-        if measure(&candidate) <= max_w {
-            return candidate;
-        }
-    }
-    "…".to_string()
-}
-
 /// 面板标签文字（笔记/表格/画布视图打开文件 = 文件名去扩展名后缀，否则视图名）。
 pub fn tab_label(app: &App, view: &str) -> String {
     let open = match view {
@@ -117,7 +81,7 @@ pub fn tab_label(app: &App, view: &str) -> String {
 
 /// 面板标签近似宽度（拖拽命中几何用；渲染宽度由内容自适应，见 panel_tab）。
 fn approx_tab_width(label: &str, locked: bool, has_file: bool) -> f32 {
-    let text_w = estimate_text_width(label, 12.0).min(UiMetrics::TAB_TEXT_MAX_W);
+    let text_w = estimate_width(label, 12.0).min(UiMetrics::TAB_TEXT_MAX_W);
     13.0 + 4.0 + text_w + 16.0 + 2.0
         + if locked { 13.0 } else { 0.0 }
         + if has_file && !locked { 19.0 } else { 0.0 }
@@ -433,7 +397,7 @@ fn plugin_window_chrome<'a>(
         row![
             mouse_area(
                 row![
-                    text(ellipsize(title, PLUGIN_TITLEBAR_TITLE_W, pal::fs_caption()))
+                    text(ellipsize_estimated(title, PLUGIN_TITLEBAR_TITLE_W, pal::fs_caption()))
                         .size(pal::fs_caption())
                         .color(pal::TEXT_SECONDARY),
                     space().width(Length::Fill).height(Length::Fill),
@@ -656,7 +620,7 @@ fn with_overlays<'a>(
                     ..Style::default()
                 });
             let pos = app.cursor_for(window);
-            let tip_w = (estimate_text_width(label, pal::fs_micro()) + 16.0).min(260.0);
+            let tip_w = (estimate_width(label, pal::fs_micro()) + 16.0).min(260.0);
             let tip_h = 16.0 + 8.0;
             let half = app.tooltip_half.unwrap_or(14.0);
             let spec = PopupSpec {
@@ -801,7 +765,7 @@ const BRAND_TEXT: &str = "Atelyx";
 /// 渲染序 = 内边距 4 + 品牌（内衬 8 + 图标 16 + 间距 6 + 定宽文字）+ 行间距 4。
 pub fn titlebar_tab_strip(app: &App) -> (f32, Vec<(String, String, f32)>) {
     // 品牌行宽 = 左右内衬 8 + 图标 16 + 间距 6 + 定宽文字
-    let brand_w = 8.0 + 16.0 + 6.0 + estimate_text_width(BRAND_TEXT, 12.0) + 8.0;
+    let brand_w = 8.0 + 16.0 + 6.0 + estimate_width(BRAND_TEXT, 12.0) + 8.0;
     let mut out = vec![(
         layout::HOME_LAYOUT_ID.to_string(),
         "主页".to_string(),
@@ -825,12 +789,12 @@ pub fn titlebar_tab_strip(app: &App) -> (f32, Vec<(String, String, f32)>) {
 
 /// 布局 tab 宽度：文字估宽 + 内边距 20，钳制 48–120。
 fn layout_tab_width(name: &str) -> f32 {
-    (estimate_text_width(name, 12.0) + 20.0).clamp(48.0, 120.0)
+    (estimate_width(name, 12.0) + 20.0).clamp(48.0, 120.0)
 }
 
 /// 布局 tab 改名编辑态宽度：按当前输入随内容增长，钳制 140–260（提交后收回正常宽度）。
 fn layout_tab_edit_width(value: &str) -> f32 {
-    (estimate_text_width(value, 12.0) + 20.0).clamp(140.0, 260.0)
+    (estimate_width(value, 12.0) + 20.0).clamp(140.0, 260.0)
 }
 
 /// 布局 tab 条释放插入位：光标在标题栏区域且越过条带起点时，命中标签中点之前为插入位
@@ -900,11 +864,13 @@ fn titlebar<'a>(app: &'a App, window: iced::window::Id) -> Element<'a, Message> 
 
     // 场景选择器
     let scene_name = app.active_scene().map(|s| s.name.clone()).unwrap_or_default();
-    let trigger_w = estimate_text_width(&scene_name, 12.0) + 16.0 + 4.0 + 12.0;
+    let trigger_w = estimate_width(&scene_name, 12.0) + 16.0 + 4.0 + 12.0;
     let selector = button(
         container(
             row![
-                text(ellipsize(&scene_name, 120.0, pal::fs_caption())).size(pal::fs_caption()).color(pal::TEXT_SECONDARY),
+                text(ellipsize_estimated(&scene_name, 120.0, pal::fs_caption()))
+                    .size(pal::fs_caption())
+                    .color(pal::TEXT_SECONDARY),
                 icon("chevron-down", 12.0, pal::TEXT_SECONDARY),
             ]
             .spacing(4),
@@ -953,7 +919,7 @@ fn titlebar<'a>(app: &'a App, window: iced::window::Id) -> Element<'a, Message> 
             .size(pal::fs_caption())
             .color(pal::TEXT_SECONDARY)
             .font(crate::ui::bold())
-            .width(Length::Fixed(estimate_text_width(BRAND_TEXT, 12.0))),
+            .width(Length::Fixed(estimate_width(BRAND_TEXT, 12.0))),
     ]
     .spacing(6)
     .padding(Padding::ZERO.horizontal(8.0));
@@ -1012,7 +978,7 @@ fn layout_tab(
         _ => None,
     });
     let highlighted = active || draft.is_some();
-    let display = ellipsize(name, UiMetrics::TAB_TEXT_MAX_W, 12.0);
+    let display = ellipsize_estimated(name, UiMetrics::TAB_TEXT_MAX_W, 12.0);
     let truncated = draft.is_none() && display != name;
     let text_area: Element<'static, Message> = match draft {
         Some(value) => controls::inline_input(
@@ -1487,7 +1453,7 @@ fn tab_button<'a>(
     let mut label_row = row![].spacing(4);
     label_row = label_row.push(icon_stroke(&view_icon(app, &t.view), 13.0, text_color, 2.0));
     label_row = label_row.push(
-        text(ellipsize(&label, UiMetrics::TAB_TEXT_MAX_W, 12.0))
+        text(ellipsize_estimated(&label, UiMetrics::TAB_TEXT_MAX_W, 12.0))
             .size(pal::fs_caption())
             .color(text_color),
     );
@@ -1592,8 +1558,12 @@ fn note_status_pill(app: &App) -> Option<Element<'static, Message>> {
         Some(
             container(
                 row![
-                    text(ellipsize(app.save_error.as_deref().unwrap_or("保存失败"), 160.0, 11.0))
-                        .size(pal::fs_micro())
+                    text(ellipsize_estimated(
+                        app.save_error.as_deref().unwrap_or("保存失败"),
+                        160.0,
+                        11.0,
+                    ))
+                    .size(pal::fs_micro())
                         .color(pal::DANGER),
                     button(text("重试").size(pal::fs_micro()).color(pal::DANGER))
                         .padding(Padding::ZERO.horizontal(6.0).vertical(1.0))
@@ -2068,7 +2038,7 @@ fn search_row(hit: &SearchHit, name_w: f32, window: iced::window::Id) -> Element
     let mut lines = column![
         row![
             icon(hit.icon.as_ref(), SEARCH_ROW_ICON, pal::TEXT_MUTED),
-            text(ellipsize(&hit.name, name_w, pal::fs_caption()))
+            text(ellipsize_estimated(&hit.name, name_w, pal::fs_caption()))
                 .size(pal::fs_caption())
                 .color(name_color),
         ]
@@ -2081,7 +2051,7 @@ fn search_row(hit: &SearchHit, name_w: f32, window: iced::window::Id) -> Element
         let parent_w = (name_w - SEARCH_ROW_ICON - SEARCH_ROW_GAP).max(0.0);
         lines = lines.push(
             container(
-                text(ellipsize(&hit.parent, parent_w, pal::fs_micro()))
+                text(ellipsize_estimated(&hit.parent, parent_w, pal::fs_micro()))
                     .size(pal::fs_micro())
                     .color(pal::TEXT_MUTED),
             )
@@ -3090,7 +3060,7 @@ fn ext_badge_reserve(ext: &str) -> f32 {
     if ext.is_empty() {
         0.0
     } else {
-        estimate_text_width(ext, pal::fs_micro()) * 1.3 + FILE_ROW_GAP
+        estimate_width(ext, pal::fs_micro()) * 1.3 + FILE_ROW_GAP
     }
 }
 
@@ -3105,7 +3075,7 @@ fn tree_name_slot(r: &TreeRow, name_color: Color, ext_color: Color) -> Element<'
         let name_w = name_slot(slot_w, &ext);
         let mut slot = row![
             container(
-                text(ellipsize(&name, name_w, pal::fs_caption()))
+                text(ellipsize_estimated(&name, name_w, pal::fs_caption()))
                     .size(pal::fs_caption())
                     .color(name_color)
                     .wrapping(Wrapping::None),
@@ -3534,7 +3504,7 @@ fn clipped_title(title: &str, avail_w: f32) -> String {
     if let Some(hit) = TITLE_CLIP.with(|c| c.borrow().get(&key).cloned()) {
         return hit;
     }
-    let clipped = truncate_to_width(title, avail_w, title_text_width);
+    let clipped = ellipsize(title, avail_w, |s| measure(s, pal::fs_h1(), crate::ui::bold()));
     TITLE_CLIP.with(|c| {
         let mut cache = c.borrow_mut();
         if cache.len() >= TITLE_CLIP_CAP {
@@ -3543,11 +3513,6 @@ fn clipped_title(title: &str, avail_w: f32) -> String {
         cache.insert(key, clipped.clone());
     });
     clipped
-}
-
-/// 单行标题实测宽（与标题渲染同字号同字重 shaping）。
-fn title_text_width(s: &str) -> f32 {
-    crate::markdown_edit::measured_text_width(s, pal::fs_h1(), TITLE_LINE_RATIO, crate::ui::bold())
 }
 
 /// 模式分段按钮（Button sm 档：高 24 / px-8 / 11px / 强调字重；激活 = 强调淡底，悬停文字提亮）。
@@ -7269,11 +7234,11 @@ pub fn drop_zone_at(zone: &PanelZone, global: iced::Point) -> DropZone {
 #[cfg(test)]
 mod tests {
     use super::{
-        device_meta_line, divider_size, ellipsize, estimate_text_width, ext_badge_reserve,
-        file_label, merge_peers, name_slot, row_window, truncate_to_width, wiki_picker_geom,
-        UiMetrics, SUGGEST_W,
+        device_meta_line, divider_size, ext_badge_reserve, file_label, merge_peers, name_slot,
+        row_window, wiki_picker_geom, UiMetrics, SUGGEST_W,
     };
     use crate::ui::palette as pal;
+    use crate::ui::text::{ellipsize_estimated, estimate_width};
     use atelyx_core::collab::PeerInfo;
     use iced::Length;
 
@@ -7308,11 +7273,6 @@ mod tests {
         let bar = Length::Fixed(UiMetrics::DIVIDER_W);
         assert_eq!(divider_size(true), (bar, Length::Fill));
         assert_eq!(divider_size(false), (Length::Fill, bar));
-    }
-
-    /// 固定度量：每字符 1 单位（截断只按字符数收缩，与字体 shaping 解耦）。
-    fn per_char(s: &str) -> f32 {
-        s.chars().count() as f32
     }
 
     #[test]
@@ -7365,29 +7325,6 @@ mod tests {
     }
 
     #[test]
-    fn keeps_title_that_fits() {
-        assert_eq!(truncate_to_width("abc", 3.0, per_char), "abc");
-        assert_eq!(truncate_to_width("", 0.0, per_char), "");
-    }
-
-    #[test]
-    fn clips_and_appends_ellipsis() {
-        // 宽 4：保留 3 字 + 省略号（省略号自身占 1 单位）
-        assert_eq!(truncate_to_width("abcdef", 4.0, per_char), "abc…");
-    }
-
-    #[test]
-    fn clips_to_ellipsis_only_when_no_room() {
-        assert_eq!(truncate_to_width("abcdef", 1.0, per_char), "…");
-        assert_eq!(truncate_to_width("abcdef", 0.0, per_char), "…");
-    }
-
-    #[test]
-    fn clips_at_char_boundary() {
-        assert_eq!(truncate_to_width("中文测试", 3.0, per_char), "中文…");
-    }
-
-    #[test]
     fn name_slot_reserves_room_for_ext_badge() {
         // 后缀越长预留越宽；无后缀不预留，槽位吃满整行
         assert_eq!(ext_badge_reserve(""), 0.0);
@@ -7401,8 +7338,8 @@ mod tests {
     #[test]
     fn ellipsized_name_fits_the_badge_slot() {
         let slot = name_slot(120.0, "CANVAS");
-        let shown = ellipsize("一个很长的文件名用来测槽位宽度.md", slot, pal::fs_caption());
-        assert!(estimate_text_width(&shown, pal::fs_caption()) <= slot + 0.01);
+        let shown = ellipsize_estimated("一个很长的文件名用来测槽位宽度.md", slot, pal::fs_caption());
+        assert!(estimate_width(&shown, pal::fs_caption()) <= slot + 0.01);
     }
 
     #[test]

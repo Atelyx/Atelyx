@@ -10,13 +10,11 @@ use atelyx_core::markdown::{
     parse_inline, parse_markdown, InlineSpan, LinkForm, MarkdownBlock, MarkdownDocument,
     MarkdownListItem, MarkdownTableCell, ParseOptions,
 };
-use iced::advanced::text::{self as advanced_text, Paragraph as _};
 use iced::alignment;
 use iced::widget::text::{LineHeight, Rich, Span, Wrapping};
 use iced::widget::{button, column, container, row, scrollable, Space, Stack};
 use iced::{Border, Color, Element, Font, Length, Padding, Size};
 
-use crate::markdown_edit::ParagraphT;
 use crate::markdown_select::{
     ChatSelection, NoteSelection, SelectRun, SelectScope, SelectableRich,
 };
@@ -1587,7 +1585,7 @@ fn code_body<'a>(code: &str, hit: Option<((usize, usize), f32)>, scale: f32) -> 
         let size = self.base();
         let text_width: f32 = runs
             .iter()
-            .map(|run| text_width_cached(&run.text, size * run.scale, run.font()))
+            .map(|run| crate::ui::text::measure(&run.text, size * run.scale, run.font()))
             .sum();
         let natural = text_width + CELL_PAD_X * 2.0;
         let alignment = match align.map(String::as_str) {
@@ -2469,74 +2467,10 @@ fn item_marker_width(source: &str, item: &MarkdownListItem, marker_len: usize, s
     marker_column_width(&source[item.from..item.from + marker_len], scale)
 }
 
-thread_local! {
-    /// 标记串字宽表（键 = 串 + 字号位 + 界面字体）：字宽由这三者决定，换字体族即换键。
-    static MARKER_WIDTHS: std::cell::RefCell<HashMap<(String, u32, Font), f32>> =
-        std::cell::RefCell::new(HashMap::new());
-}
-
-/// 字宽表条数上限（超出整体清空）。
-const MARKER_WIDTH_CAP: usize = 4096;
-
-thread_local! {
-    /// 表格自然宽字宽表（键 = 文本 + 字号位 + 字体）：单元格内容不变时不重复 shaping。
-    static TEXT_WIDTHS: std::cell::RefCell<HashMap<(String, u32, Font), f32>> =
-        std::cell::RefCell::new(HashMap::new());
-}
-
-/// 字宽表条数上限（超出整体清空）。
-const TEXT_WIDTH_CAP: usize = 8192;
-
-/// 单行字宽（同字体字号实测），按文本缓存。
-fn text_width_cached(text: &str, size: f32, font: Font) -> f32 {
-    let key = (text.to_string(), size.to_bits(), font);
-    if let Some(width) = TEXT_WIDTHS.with(|cache| cache.borrow().get(&key).copied()) {
-        return width;
-    }
-    let width = crate::markdown_edit::measured_text_width(text, size, 1.0, font);
-    TEXT_WIDTHS.with(|cache| {
-        let mut cache = cache.borrow_mut();
-        if cache.len() > TEXT_WIDTH_CAP {
-            cache.clear();
-        }
-        cache.insert(key, width);
-    });
-    width
-}
-
-/// 标记串字宽：与源码面同一逐字符 span 排版实测（列宽与揭示态对齐才不横移），
-/// 按 (串, 字号, 字体) 复用字宽表，免长列表每帧逐项重排。
+/// 标记串字宽：与源码面同一逐字符 span 排版实测（列宽与揭示态对齐才不横移）。
+/// 字宽表由 ui::text 统一缓存，长列表每帧不逐项重排。
 fn marker_column_width(marker: &str, scale: f32) -> f32 {
-    let size = base_size() * scale;
-    let font = crate::ui::regular();
-    let key = (marker.to_string(), size.to_bits(), font);
-    let cached = MARKER_WIDTHS.with(|cache| cache.borrow().get(&key).copied());
-    if let Some(width) = cached {
-        return width;
-    }
-    let spans: Vec<Span<'static, (), Font>> =
-        marker.chars().map(|ch| Span::new(ch.to_string()).font(font)).collect();
-    let width = ParagraphT::with_spans(advanced_text::Text {
-        content: spans.as_slice(),
-        bounds: Size::new(f32::INFINITY, f32::INFINITY),
-        size: size.into(),
-        line_height: LineHeight::Relative(LINE_HEIGHT),
-        font,
-        align_x: advanced_text::Alignment::Left,
-        align_y: alignment::Vertical::Top,
-        shaping: advanced_text::Shaping::Advanced,
-        wrapping: Wrapping::None,
-    })
-    .min_bounds()
-    .width;
-    MARKER_WIDTHS.with(|cache| {
-        let mut cache = cache.borrow_mut();
-        if cache.len() > MARKER_WIDTH_CAP {
-            cache.clear();
-        }
-        cache.insert(key, width);
-    });
-    width
+    crate::ui::text::measure_per_char(marker, base_size() * scale, crate::ui::regular())
 }
 
 fn block_from(block: &MarkdownBlock) -> usize {

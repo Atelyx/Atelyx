@@ -8,13 +8,14 @@ use iced::{border, Color, Element, Length, Padding, Point, Size, Task};
 use std::rc::Rc;
 use std::time::Instant;
 
-use crate::layout_view::{estimate_text_width, PopupState};
+use crate::layout_view::PopupState;
 use crate::ui::controls;
 use crate::ui::icon::icon;
 use crate::ui::notify::Level as NoticeLevel;
 use crate::ui::palette as pal;
 use crate::ui::scroll;
 use crate::ui::text;
+use crate::ui::text::estimate_width;
 use crate::{App, Message, NoteMode};
 use iced::widget::text_editor;
 
@@ -1087,7 +1088,7 @@ fn slot_input<'a>(
 
 /// 数组项输入框定宽：按草稿估宽 + 内衬与光标余量（只服务输入宽度，不参与渲染排版口径）。
 fn item_input_width(draft: &str) -> Length {
-    Length::Fixed((estimate_text_width(draft, pal::fs_caption()) + 20.0).max(44.0))
+    Length::Fixed((estimate_width(draft, pal::fs_caption()) + 20.0).max(44.0))
 }
 
 fn type_icon(t: PropType) -> &'static str {

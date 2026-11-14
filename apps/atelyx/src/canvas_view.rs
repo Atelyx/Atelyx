@@ -23,6 +23,7 @@ use crate::ui::icon::{icon, polylines};
 use crate::ui::{controls, palette as pal};
 use crate::ui::scroll;
 use crate::ui::text;
+use crate::ui::text::{ellipsize_estimated, estimate_char_width, greedy_wrap};
 use crate::{layout_view, App, Message};
 
 // ===== 常量 =====
@@ -1504,7 +1505,7 @@ fn draw_group(frame: &mut Frame, view: &View, n: &atelyx_core::vault::CanvasFile
         sy + (head_h - size * 1.3) / 2.0
     };
     frame.fill_text(canvas::Text {
-        content: layout_view::ellipsize(content, (sw - CARD_PAD * 2.0 * z).max(0.0), size),
+        content: ellipsize_estimated(content, (sw - CARD_PAD * 2.0 * z).max(0.0), size),
         position: Point::new(sx + CARD_PAD * z, ty),
         max_width: f32::INFINITY,
         color: title_color,
@@ -1718,7 +1719,7 @@ fn draw_card(
         (sx + sw - title_x - CARD_TITLE_PAD * z).max(0.0)
     };
     frame.fill_text(CanvasText {
-        content: layout_view::ellipsize(&title, title_limit, title_size),
+        content: ellipsize_estimated(&title, title_limit, title_size),
         position: Point::new(title_x, sy + (head_h - title_size * 1.3) / 2.0),
         max_width: f32::INFINITY,
         color: pal::TEXT_PRIMARY,
@@ -1894,7 +1895,7 @@ fn draw_card_body(
         }
         "link" => {
             let url = n.data.get("url").and_then(Value::as_str).unwrap_or("");
-            draw_hint(frame, &layout_view::ellipsize(url, area.width, size), area, size, pal::ACCENT);
+            draw_hint(frame, &ellipsize_estimated(url, area.width, size), area, size, pal::ACCENT);
         }
         _ => draw_hint(frame, "未支持的卡类型（只读展示）", area, size, pal::TEXT_MUTED),
     }
@@ -1924,7 +1925,9 @@ fn draw_preview_lines(frame: &mut Frame, body: &str, area: Rectangle, size: f32)
             drawn += 1;
             continue;
         }
-        for seg in wrap_line(src_line, area.width, size) {
+        let cells: Vec<(char, f32)> =
+            src_line.chars().map(|c| (c, estimate_char_width(c, size))).collect();
+        for (seg, _) in greedy_wrap(&cells, area.width) {
             if drawn >= max_lines {
                 break;
             }
@@ -1944,26 +1947,6 @@ fn draw_preview_lines(frame: &mut Frame, body: &str, area: Rectangle, size: f32)
             drawn += 1;
         }
     }
-}
-
-/// 单行按估宽折行（超出 `max_w` 截断；返回一行或多行片段）。
-fn wrap_line(line: &str, max_w: f32, size: f32) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut cur = String::new();
-    let mut w = 0.0f32;
-    for c in line.chars() {
-        let cw = layout_view::estimate_char_w(c, size);
-        if w + cw > max_w && !cur.is_empty() {
-            out.push(std::mem::take(&mut cur));
-            w = 0.0;
-        }
-        cur.push(c);
-        w += cw;
-    }
-    if !cur.is_empty() || out.is_empty() {
-        out.push(cur);
-    }
-    out
 }
 
 fn draw_hint(frame: &mut Frame, hint: &str, area: Rectangle, size: f32, color: Color) {
@@ -2089,7 +2072,7 @@ fn toolbar<'a>(
         space().width(Length::Shrink).into()
     };
     let save_state: Element<'_> = if let Some(err) = &session.save_error {
-        text(layout_view::ellipsize(err, 220.0, pal::fs_micro()))
+        text(ellipsize_estimated(err, 220.0, pal::fs_micro()))
             .size(pal::fs_micro())
             .color(pal::DANGER)
             .into()
@@ -2358,8 +2341,12 @@ fn conversation_card_overlay<'a>(
         col = col.push(
             container(
                 row![
-                    text(layout_view::ellipsize(error, 200.0 * zoom, (pal::fs_micro() * zoom).max(8.0)))
-                        .size((pal::fs_micro() * zoom).max(8.0))
+                    text(ellipsize_estimated(
+                        error,
+                        200.0 * zoom,
+                        (pal::fs_micro() * zoom).max(8.0),
+                    ))
+                    .size((pal::fs_micro() * zoom).max(8.0))
                         .color(pal::DANGER)
                         .width(Length::Fill),
                     controls::icon_button(
@@ -2904,7 +2891,7 @@ fn minimap_layer<'a>(session: &'a CanvasSession, view: View, viewport: Size) -> 
 /// 属性行（标签 + 值）。
 fn props_row(label: &str, value: String) -> iced::Element<'static, Message> {
     // 长路径 / 长标题截断：属性面板宽度有限，值不得把面板撑高
-    let value = layout_view::ellipsize(&value, 240.0, pal::fs_micro());
+    let value = ellipsize_estimated(&value, 240.0, pal::fs_micro());
     row![
         text(label.to_string()).size(pal::fs_micro()).color(pal::TEXT_MUTED),
         space().width(Length::Fill),
@@ -3297,14 +3284,6 @@ mod tests {
         assert!(header_only(60.0));
         assert!(!header_only(NARROW_CARD_PX + 0.5));
         assert!(!header_only(320.0));
-    }
-
-    #[test]
-    fn wrap_line_respects_width() {
-        // 8 个 CJK 字符 ≈ 8 * 13.5 = 108px（12px 字号），限宽 60 → 两行
-        let lines = wrap_line("一二三四五六七八", 60.0, 12.0);
-        assert!(lines.len() >= 2);
-        assert_eq!(lines.concat(), "一二三四五六七八");
     }
 
     #[test]

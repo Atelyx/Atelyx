@@ -9,6 +9,7 @@ use serde_json::Value;
 use crate::canvas_view::CanvasMsg;
 use crate::chat_actions::{ChatMsg, MentionPicker, MentionTarget, PendingImage};
 use crate::ui::icon::icon;
+use crate::ui::text::ellipsize_estimated;
 use crate::ui::{controls, palette as pal, scroll, text};
 use crate::{App, Message};
 
@@ -371,7 +372,7 @@ fn mention_picker_view<'a>(
                         icon_px,
                         if selected { pal::ACCENT } else { pal::TEXT_SECONDARY },
                     ),
-                    text(crate::layout_view::ellipsize(&name, name_w, fs_name))
+                    text(ellipsize_estimated(&name, name_w, fs_name))
                         .size(fs_name)
                         .wrapping(Wrapping::None)
                         .color(if selected { pal::TEXT_PRIMARY } else { pal::TEXT_SECONDARY }),
@@ -383,7 +384,7 @@ fn mention_picker_view<'a>(
             if let Some(sub) = picker_row_sub(target) {
                 lines = lines.push(
                     container(
-                        text(crate::layout_view::ellipsize(sub, sub_w, fs_sub))
+                        text(ellipsize_estimated(sub, sub_w, fs_sub))
                             .size(fs_sub)
                             .wrapping(Wrapping::None)
                             .color(pal::TEXT_MUTED),

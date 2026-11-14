@@ -11,13 +11,13 @@ use iced::widget::text_editor;
 use iced::widget::{column, container, opaque, row, space};
 use iced::{alignment, Color, Element, Length, Point, Rectangle, Size, Vector};
 
-use crate::layout_view::estimate_text_width;
 use crate::table_text::{measure_live_lines, TextLine, WrapCache, LINE_FACTOR};
 use crate::ui::color_picker::parse_hex;
 use crate::ui::controls;
 use crate::ui::icon::polylines;
 use crate::ui::palette as pal;
 use crate::ui::text;
+use crate::ui::text::{ellipsize_estimated, estimate_char_width, estimate_width, greedy_wrap};
 use crate::Message;
 
 use atelyx_core::table_ops::{self, CellStyle, OptState, TableSelection};
@@ -1444,31 +1444,20 @@ fn grid_tile_w(col_w: f32, zoom: f32, cols: usize) -> f32 {
     ((inner - (cols.saturating_sub(1)) as f32 * IMAGE_GAP * zoom) / cols as f32).max(24.0 * zoom)
 }
 
-// ===== 文本估算（复用 chrome 估宽的单字符口径；单行截断与缺行段时的兜底）=====
-
-fn text_width(text: &str, size: f32) -> f32 {
-    text.chars().map(|c| crate::layout_view::estimate_char_w(c, size)).sum()
-}
+// ===== 文本估算（估宽口径见 ui::text；单行截断与缺行段时的兜底）=====
 
 /// 按字符单位贪心断行的行段：本轮布局没覆盖该口径时的兜底，正文照样画得出，
 /// 折行点与编辑浮层可能有字符级差异。
 fn estimate_lines(text: &str, size: f32, max_w: f32) -> Vec<TextLine> {
-    let mut out = Vec::new();
-    for line in text.split('\n') {
-        let mut cur = String::new();
-        let mut w = 0.0f32;
-        for ch in line.chars() {
-            let cw = crate::layout_view::estimate_char_w(ch, size);
-            if w + cw > max_w && w > 0.0 {
-                out.push(TextLine { text: std::mem::take(&mut cur), width: w });
-                w = 0.0;
-            }
-            cur.push(ch);
-            w += cw;
-        }
-        out.push(TextLine { text: cur, width: w });
-    }
-    out
+    text.split('\n')
+        .flat_map(|line| {
+            let cells: Vec<(char, f32)> =
+                line.chars().map(|ch| (ch, estimate_char_width(ch, size))).collect();
+            greedy_wrap(&cells, max_w)
+                .into_iter()
+                .map(|(text, width)| TextLine { text, width })
+        })
+        .collect()
 }
 
 /// 字段基准字号：数字 / 时长列小一档。
@@ -2168,8 +2157,8 @@ fn draw_remote_tag(
         return;
     }
     let size = pal::fs_micro();
-    let label = ellipsize_text(name, pal::REMOTE_TAG_MAX_W, size);
-    let tag_w = text_width(&label, size) + pal::REMOTE_TAG_PAD_X * 2.0;
+    let label = ellipsize_estimated(name, pal::REMOTE_TAG_MAX_W, size);
+    let tag_w = estimate_width(&label, size) + pal::REMOTE_TAG_PAD_X * 2.0;
     let tag_h = size + pal::REMOTE_TAG_PAD_Y * 2.0;
     let mut tag_x = at.x + 12.0;
     if tag_x + tag_w > max_w {
@@ -2271,21 +2260,6 @@ fn draw_icon(frame: &mut canvas::Frame, name: &str, pos: Point, size: f32, color
             f.stroke(&path, stroke);
         }
     });
-}
-
-/// 估算宽截断（列头 / 状态栏单行文本）。
-fn ellipsize_text(text: &str, max_w: f32, size: f32) -> String {
-    if text_width(text, size) <= max_w {
-        return text.to_string();
-    }
-    let mut out = String::new();
-    for ch in text.chars() {
-        if text_width(&format!("{out}{ch}…"), size) > max_w {
-            break;
-        }
-        out.push(ch);
-    }
-    format!("{out}…")
 }
 
 /// chrome 覆盖层内容：行号列 / 表头 / 状态栏带体 + 滚动条 + 图片单元格 hover 圆钮
@@ -2447,7 +2421,7 @@ fn draw_header(session: &TableSession, g: &Geo, frame: &mut canvas::Frame) {
                     pal::TEXT_MUTED,
                 );
             }
-            let name = ellipsize_text(
+            let name = ellipsize_estimated(
                 &field.name,
                 w - grip_w - 2.0 * CELL_PAD_X * g.z - FIELD_BTN_W * g.z - mark_w,
                 font_size,
@@ -2507,7 +2481,7 @@ fn draw_status(session: &TableSession, g: &Geo, frame: &mut canvas::Frame) {
         let w = g.cache.col_w[c];
         let label = format!("{} {}", table_ops::calc_type_label(field.calc_type.as_deref().unwrap_or("")), calc);
         let size = num_font() * g.z;
-        let text = ellipsize_text(&label, w - 2.0 * CELL_PAD_X * g.z, size);
+        let text = ellipsize_estimated(&label, w - 2.0 * CELL_PAD_X * g.z, size);
         fill_text(
             frame,
             &text,
@@ -2553,7 +2527,7 @@ fn draw_cell_content(
             let size = style_size(st, base, g.z);
             // 右缘常显下拉箭头（选择弹层入口示意），文本避让箭头区
             let chevron_x = cell.x + cell.width - (CELL_PAD_X + 12.0) * g.z;
-            let text = ellipsize_text(text, chevron_x - cell.x - CELL_PAD_X * g.z, size);
+            let text = ellipsize_estimated(text, chevron_x - cell.x - CELL_PAD_X * g.z, size);
             fill_text(
                 frame,
                 &text,
@@ -2574,7 +2548,7 @@ fn draw_cell_content(
             let Some(n) = v.and_then(serde_json::Value::as_f64) else { return };
             let text = if field.field_type == "duration" { format!("{n} 秒") } else { format!("{n}") };
             let size = style_size(st, base, g.z);
-            let text = ellipsize_text(&text, cell.width - 2.0 * CELL_PAD_X * g.z, size);
+            let text = ellipsize_estimated(&text, cell.width - 2.0 * CELL_PAD_X * g.z, size);
             fill_text(
                 frame,
                 &text,
@@ -2626,10 +2600,10 @@ fn draw_wrapped_text(
             break;
         }
         if max_lines.is_some_and(|max| i + 1 == max && lines.len() > max) {
-            cut = Some(ellipsize_text(&line.text, wrap_w, size));
+            cut = Some(ellipsize_estimated(&line.text, wrap_w, size));
         }
         let (label, w) = match cut.as_deref() {
-            Some(label) => (label, text_width(label, size).min(wrap_w)),
+            Some(label) => (label, estimate_width(label, size).min(wrap_w)),
             None => (line.text.as_str(), line.width.min(wrap_w)),
         };
         fill_text(frame, label, Point::new(cell.x + CELL_PAD_X * g.z, y), size, font, style_color(st));
@@ -2951,7 +2925,7 @@ fn toolbar<'a>(
         space().width(Length::Shrink).into()
     };
     let save_state: Element<Message> = if let Some(err) = &session.save_error {
-        text(crate::layout_view::ellipsize(err, 220.0, pal::fs_micro()))
+        text(ellipsize_estimated(err, 220.0, pal::fs_micro()))
             .size(pal::fs_micro())
             .color(pal::DANGER)
             .into()
@@ -3189,12 +3163,12 @@ fn bar_est_height() -> f32 {
 /// 格式气泡估宽：当前标签的估字宽 + 固定件之和 + 余量（仅供钳制与命中判定，不参与渲染）。
 fn bar_est_width(font_label: &str, size_label: &str) -> f32 {
     let fs = pal::fs_caption();
-    let chip = |label: &str| estimate_text_width(label, fs) + 2.0 * BAR_BTN_PAD_X;
+    let chip = |label: &str| estimate_width(label, fs) + 2.0 * BAR_BTN_PAD_X;
     2.0 * BAR_PAD_X
         + chip(font_label)
         + chip(size_label)
         + 4.0 * chip("B")
-        + 2.0 * (estimate_text_width("字", fs) + BAR_SWATCH + BAR_SWATCH_GAP + 2.0 * BAR_BTN_PAD_X)
+        + 2.0 * (estimate_width("字", fs) + BAR_SWATCH + BAR_SWATCH_GAP + 2.0 * BAR_BTN_PAD_X)
         + (BAR_ERASER_ICON + 2.0 * BAR_ERASER_PAD_X)
         + 3.0 * BAR_DIVIDER_W
         + 11.0 * BAR_ITEM_GAP

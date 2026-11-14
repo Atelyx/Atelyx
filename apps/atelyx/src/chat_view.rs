@@ -12,6 +12,7 @@ use crate::ui::icon::icon;
 use crate::ui::{controls, palette as pal};
 use crate::ui::scroll;
 use crate::ui::text;
+use crate::ui::text::ellipsize_estimated;
 use crate::{App, Message};
 
 pub fn chat_view(app: &App, window: iced::window::Id) -> iced::Element<'_, Message> {
@@ -496,7 +497,7 @@ fn empty_flow() -> iced::Element<'static, Message> {
 fn error_line(window: iced::window::Id, message: String) -> iced::Element<'static, Message> {
     let tip = message.clone();
     iced::widget::responsive(move |size| {
-        let clipped = crate::layout_view::ellipsize(&message, size.width, pal::fs_caption());
+        let clipped = ellipsize_estimated(&message, size.width, pal::fs_caption());
         let area = mouse_area(
             container(
                 text(clipped)

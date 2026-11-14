@@ -401,23 +401,6 @@ fn unix_millis() -> u128 {
 
 pub(crate) type ParagraphT = <iced::Renderer as advanced_text::Renderer>::Paragraph;
 
-/// 单行文本实测宽（不换行）：与 iced 文本部件同字体字号 shaping，供自绘与截断判宽用。
-pub(crate) fn measured_text_width(text: &str, size: f32, line_height: f32, font: Font) -> f32 {
-    ParagraphT::with_text(advanced_text::Text {
-        content: text,
-        bounds: Size::new(f32::INFINITY, f32::INFINITY),
-        size: size.into(),
-        line_height: advanced_text::LineHeight::Relative(line_height),
-        font,
-        align_x: advanced_text::Alignment::Left,
-        align_y: alignment::Vertical::Top,
-        shaping: advanced_text::Shaping::Auto,
-        wrapping: advanced_text::Wrapping::None,
-    })
-    .min_bounds()
-    .width
-}
-
 /// 源码态单字符样式。
 #[derive(Clone, Copy, Default)]
 struct CharStyle {
@@ -632,8 +615,8 @@ pub(crate) fn visible_count(content: &str) -> usize {
 }
 
 /// 组合串（未上屏文本）单行字宽：与画组合串同字体字号实测，光标竖条据此落在串尾。
-fn preedit_width(pre: &str, size: f32, line_height: f32) -> f32 {
-    measured_text_width(pre, size, line_height, crate::ui::regular())
+fn preedit_width(pre: &str, size: f32) -> f32 {
+    crate::ui::text::measure(pre, size, crate::ui::regular())
 }
 
 /// 组合串尾的光标竖条 x：让到串尾，串尾越出可用右缘 `right` 即贴边（不早于串首 `x`，
@@ -787,7 +770,8 @@ fn draw_remote_caret(
         return;
     }
     let tag_h = pal::fs_micro() + pal::REMOTE_TAG_PAD_Y * 2.0;
-    let tag_w = measured_text_width(name, pal::fs_micro(), 1.0, bold()) + pal::REMOTE_TAG_PAD_X * 2.0;
+    let tag_w =
+        crate::ui::text::measure(name, pal::fs_micro(), bold()) + pal::REMOTE_TAG_PAD_X * 2.0;
     let tag_y = top - tag_h - pal::REMOTE_TAG_GAP;
     let tag_x = if x + tag_w > clip.x + clip.width {
         (x - tag_w).max(clip.x)
@@ -2073,11 +2057,7 @@ impl Widget<Message, Theme, iced::Renderer> for EditSurface<'_> {
                     // 未上屏组合串画在光标处、竖条让到串尾（与源码态块同口径）
                     let preedit = self.preedit.as_deref().filter(|s| !s.is_empty());
                     let pre_w = preedit.map_or(0.0, |pre| {
-                        preedit_width(
-                            pre,
-                            crate::markdown_view::base_size(),
-                            crate::markdown_view::LINE_HEIGHT,
-                        )
+                        preedit_width(pre, crate::markdown_view::base_size())
                     });
                     let caret_x = caret_after_preedit(x0, pre_w, bounds.x + bounds.width);
                     {
@@ -2770,8 +2750,8 @@ mod tests {
             wrapping: advanced_text::Wrapping::None,
         });
         let line = paragraph.span_bounds(0).into_iter().next().unwrap();
-        assert!((preedit_width(text, size, line_height) - (line.x + line.width)).abs() < 0.5);
-        assert!(preedit_width("gai", size, line_height) > preedit_width("g", size, line_height));
+        assert!((preedit_width(text, size) - (line.x + line.width)).abs() < 0.5);
+        assert!(preedit_width("gai", size) > preedit_width("g", size));
     }
 
     /// 组合串样式按插入点空区间插入（不改正文样式），插入点在文末也不越界。
