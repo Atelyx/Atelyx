@@ -1245,7 +1245,7 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
                 };
                 return resolve_vault(app, request_id, result);
             }
-            if !crate::repohistory_view::container_ready(app) {
+            if !app.container_ready() {
                 return resolve_vault(app, request_id, Err("未打开仓库".into()));
             }
             app.plugins_state.pending_history_activity.push(request_id);
@@ -1271,7 +1271,7 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
                 };
                 return resolve_vault(app, request_id, result);
             }
-            if !crate::repohistory_view::container_ready(app) {
+            if !app.container_ready() {
                 return resolve_vault(app, request_id, Err("未打开仓库".into()));
             }
             app.plugins_state.pending_history_day.push((request_id, day));
@@ -1282,7 +1282,7 @@ pub fn update(app: &mut App, msg: PluginsMsg) -> Task<Message> {
         }
         PluginsMsg::HistoryOpen { request_id, params } => {
             let opened = (|| -> Result<_, String> {
-                if !crate::repohistory_view::container_ready(app) {
+                if !app.container_ready() {
                     return Err("未打开仓库".to_string());
                 }
                 let kind = crate::repohistory_view::parse_kind(&params.kind)

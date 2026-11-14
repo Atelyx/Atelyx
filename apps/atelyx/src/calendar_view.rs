@@ -20,7 +20,7 @@ use crate::{App, Message, layout_view};
 
 /// 日历视图（kind "calendar"）：垂直滚动承载各分区。
 pub fn calendar_view(app: &App, window: iced::window::Id) -> Element<'_, Message> {
-    if !crate::repohistory_view::container_ready(app) {
+    if !app.container_ready() {
         return controls::empty_state(
             "calendar-days",
             "打开仓库",

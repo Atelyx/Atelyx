@@ -2469,7 +2469,7 @@ pub(crate) fn files_view(app: &App, _window: iced::window::Id) -> Element<'_, Me
     let window = app.main_id.unwrap_or(iced::window::Id::unique());
     let cursor = app.cursor_for(window);
     // 树可刷新 = 已在容器内（本地仓库或协作空间）
-    let in_repo = app.vault_root.is_some() || matches!(app.repo_kind, crate::RepoKind::Space(_));
+    let in_repo = app.container_ready();
 
     // 工具条（未开仓库也渲染：空态文案指向工具条的打开按钮）
     let (expand_icon, expand_label) = if app.expand_all {
@@ -2634,9 +2634,7 @@ pub(crate) fn files_view(app: &App, _window: iced::window::Id) -> Element<'_, Me
             .height(Length::Fill),
     );
     // 空白处右键 = 在激活仓库/空间根目录新建（未激活时无根可建，不挂菜单）
-    let tree: Element<'static, Message> = if app.vault_root.is_some()
-        || matches!(app.repo_kind, crate::RepoKind::Space(_))
-    {
+    let tree: Element<'static, Message> = if app.container_ready() {
         body.on_right_press(ctx_popup(
             window,
             cursor,

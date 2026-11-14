@@ -13,7 +13,7 @@ use crate::{App, Message, RepoKind};
 
 pub fn view(app: &App, window: iced::window::Id) -> Element<'static, Message> {
     let space_mode = matches!(app.repo_kind, RepoKind::Space(_));
-    if app.vault_root.is_none() && !space_mode {
+    if !app.container_ready() {
         return container(controls::empty_state(
             "panel-layout",
             "未打开仓库",

@@ -11,7 +11,6 @@ use atelyx_core::plugin_runtime::{
 };
 use atelyx_core::space_client::HistoryAggregate;
 
-use crate::space_actions;
 use crate::ui::controls;
 use crate::ui::icon::icon;
 use crate::ui::notify::Level as NoticeLevel;
@@ -163,14 +162,6 @@ pub(crate) fn day_entries(groups: &[RepoHistoryGroup], day: i64) -> Vec<HistoryD
     out
 }
 
-/// 当前仓库容器是否就绪（本地仓库根可用 / 空间会话在位；仓库历史与日历共用）。
-pub(crate) fn container_ready(app: &App) -> bool {
-    match &app.repo_kind {
-        RepoKind::Local => app.vault.root().is_ok(),
-        RepoKind::Space(_) => space_actions::space_key_of(app).is_some(),
-    }
-}
-
 /// 拉取仓库历史聚合（本地 spawn_blocking 扫侧文件元数据 / 空间走服务端聚合端点）。
 pub fn load(app: &mut App) -> Task<Message> {
     app.repo_history_loading = true;
@@ -220,7 +211,7 @@ pub fn tick(app: &mut App) -> Task<Message> {
     if app.repo_history_loading || app.repo_history.is_some() {
         return Task::none();
     }
-    if !container_ready(app) || !layout_view::view_displayed(app, "repohistory") {
+    if !app.container_ready() || !layout_view::view_displayed(app, "repohistory") {
         return Task::none();
     }
     load(app)
@@ -229,7 +220,7 @@ pub fn tick(app: &mut App) -> Task<Message> {
 /// 刷新：失效缓存重取（在途时不重复发起，回执自会落地）。
 pub fn refresh(app: &mut App) -> Task<Message> {
     app.repo_history = None;
-    if app.repo_history_loading || !container_ready(app) {
+    if app.repo_history_loading || !app.container_ready() {
         return Task::none();
     }
     load(app)
@@ -291,7 +282,7 @@ pub(crate) fn activity_json(timestamps: &[i64]) -> Result<serde_json::Value, Str
 
 /// 仓库历史视图：文件组卡片列表 + 组头（图标 + 文件名 + 全路径 + 版本数徽标）。
 pub fn repohistory_view(app: &App, window: iced::window::Id) -> Element<'_, Message> {
-    if !container_ready(app) {
+    if !app.container_ready() {
         return controls::empty_state(
             "history",
             "打开仓库",

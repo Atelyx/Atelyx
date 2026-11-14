@@ -12,7 +12,7 @@ use crate::{App, Message, RepoKind};
 
 pub fn view(app: &App) -> Element<'static, Message> {
     let space_mode = matches!(app.repo_kind, RepoKind::Space(_));
-    if app.vault_root.is_none() && !space_mode {
+    if !app.container_ready() {
         return container(controls::empty_state(
             "folder-tree",
             "未打开仓库",

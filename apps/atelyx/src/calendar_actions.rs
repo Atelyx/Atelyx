@@ -11,7 +11,6 @@ use atelyx_core::history::day_key;
 use atelyx_core::space_client::{SpaceClient, SpaceError};
 
 use crate::calendar_grid;
-use crate::repohistory_view;
 use crate::space_actions;
 use crate::ui::notify::Level as NoticeLevel;
 use crate::ui::palette as pal;
@@ -245,7 +244,7 @@ fn heat_drag_step(dx: f32) -> i32 {
 
 /// PersistTick 搭载：面板展示中按需装载日程与活动密度。
 pub fn tick(app: &mut App) -> Task<Message> {
-    if !repohistory_view::container_ready(app) || !layout_view::view_displayed(app, "calendar") {
+    if !app.container_ready() || !layout_view::view_displayed(app, "calendar") {
         return Task::none();
     }
     let mut task = Task::none();

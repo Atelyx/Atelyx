@@ -13,7 +13,6 @@ use serde::{Deserialize, Serialize};
 use atelyx_core::layout::{AppUiState, MAX_RECENT_FILES};
 use atelyx_core::vault;
 
-use crate::space_actions;
 use crate::ui::controls;
 use crate::ui::icon::icon;
 use crate::ui::palette as pal;
@@ -75,18 +74,10 @@ fn encode(app: &mut App, list: Vec<RecentFile>) {
     app.schedule_persist();
 }
 
-/// 当前仓库容器身份键（记录与过滤同源）：本地 = 仓库根路径串；空间 = 服务器/空间 id。
-fn vault_key_of(app: &App) -> Option<String> {
-    match &app.repo_kind {
-        RepoKind::Local => app.vault.root().ok().map(|p| p.to_string_lossy().into_owned()),
-        RepoKind::Space(_) => space_actions::space_key_of(app),
-    }
-}
-
 /// 文件确认打开成功后记录（去重置顶 + 上限截断 + 置脏落盘）；时刻 = 当前秒。
 /// 无身份键（仓库未就绪）不记录。
 pub fn record(app: &mut App, file: &str, kind: RecentKind) {
-    let Some(vault_key) = vault_key_of(app) else { return };
+    let Some(vault_key) = app.container_key() else { return };
     let entry = RecentFile {
         file: file.to_string(),
         kind,
@@ -204,7 +195,7 @@ pub(crate) fn relative_ts(secs: i64, now: i64) -> String {
 
 /// 最近打开视图：按当前仓库身份过滤，行点击打开（复用 OpenFile，按扩展名分流笔记/表格/画布）。
 pub fn recent_view(app: &App, _window: iced::window::Id) -> Element<'_, Message> {
-    let Some(key) = vault_key_of(app) else {
+    let Some(key) = app.container_key() else {
         return controls::empty_state(
             "clock",
             "打开仓库",

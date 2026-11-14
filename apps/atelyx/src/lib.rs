@@ -1700,6 +1700,23 @@ pub struct WikiPicker {
 }
 
 impl App {
+    /// 容器身份键：本地 = 仓库根路径串，空间 = 服务器/空间 id；未就绪 = None。
+    /// 最近文件与仓库历史都按它归属，切换容器即换键。
+    pub(crate) fn container_key(&self) -> Option<String> {
+        match &self.repo_kind {
+            RepoKind::Local => self.vault.root().ok().map(|p| p.to_string_lossy().into_owned()),
+            RepoKind::Space(_) => space_actions::space_key_of(self),
+        }
+    }
+
+    /// 容器是否就绪（本地仓库根可用 / 空间会话在位）。
+    pub(crate) fn container_ready(&self) -> bool {
+        match &self.repo_kind {
+            RepoKind::Local => self.vault.root().is_ok(),
+            RepoKind::Space(_) => space_actions::space_key_of(self).is_some(),
+        }
+    }
+
     /// 编辑面是否持键盘：属性槽位输入激活时键盘归属性面板，直到 Enter/Tab/Esc 退出。
     pub(crate) fn edit_surface_focused(&self) -> bool {
         self.edit.focused && self.props.editing.is_none()
