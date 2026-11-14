@@ -72,7 +72,7 @@ const CLIPBOARD_PASTE: &[Shape] = &[
 const UNDO: &[Shape] = &[
     Shape::poly(&[[9.0, 4.5], [4.0, 9.0], [9.0, 13.5]]),
     Shape::line(4.0, 9.0, 14.0, 9.0),
-    Shape::arc(14.0, 14.5, 5.5, 270.0, 90.0),
+    Shape::arc(14.0, 14.5, 5.5, 270.0, 450.0),
     Shape::line(14.0, 20.0, 10.0, 20.0),
 ];
 
