@@ -1510,14 +1510,16 @@ async fn table_edit(ctx: &ToolCtx, args: &Value) -> ToolResult {
     // 不存在 = 本次新建（从空模型起算）；坏文件报错，不当空表覆盖
     let base = match edit_source_table(ctx, &rel).await {
         Ok(base) => base,
-        Err(e) => return ToolResult::err(format!("表格不存在或不可读：{rel}（{e}）")),
+        Err(e) => {
+            return ToolResult::err(crate::ai::doc_edit::unreadable_receipt::<vault::TableFile>(&rel, &e))
+        }
     };
     let mut next = base.clone();
     if let Err(e) = crate::ai::doc_ops::apply_table_ops(&mut next, &ops) {
         return ToolResult::err(e);
     }
     let Some(patch) = vault::compute_table_patch(&base, &next) else {
-        return ToolResult::ok(format!("表格未变化：{rel}（操作与现值相同）"));
+        return ToolResult::ok(crate::ai::doc_edit::unchanged_receipt::<vault::TableFile>(&rel));
     };
     next.updated_at = now_secs();
     let summary = crate::history::version_summary(
@@ -1525,7 +1527,7 @@ async fn table_edit(ctx: &ToolCtx, args: &Value) -> ToolResult {
         &base_json(&base),
         &base_json(&next),
     );
-    let receipt = format!("已编辑 {rel}（{} 项操作：{summary}）", ops.len());
+    let receipt = crate::ai::doc_edit::edited_receipt::<vault::TableFile>(&rel, ops.len(), &summary, &patch);
     match &ctx.repo {
         RepoAccess::Local { root, queue } => {
             // 写盘队列内重读磁盘并按 id 合并补丁：与宿主保存链同一口径，不整份覆盖他方改动
@@ -1542,7 +1544,7 @@ async fn table_edit(ctx: &ToolCtx, args: &Value) -> ToolResult {
             .await
             {
                 Ok(_) => ToolResult::ok(receipt),
-                Err(e) => ToolResult::err(format!("写入失败：{e}")),
+                Err(e) => ToolResult::err(crate::ai::doc_edit::write_failed(&e)),
             }
         }
         // 空间侧与壳共用同一条落盘口径（只新建 + 补丁 + 冲突重读重算）
@@ -1559,8 +1561,8 @@ async fn table_edit(ctx: &ToolCtx, args: &Value) -> ToolResult {
             .await
             {
                 Ok(Some(_)) => ToolResult::ok(receipt),
-                Ok(None) => ToolResult::ok(format!("表格未变化：{rel}（操作与现值相同）")),
-                Err(e) => ToolResult::err(format!("写入失败：{e}")),
+                Ok(None) => ToolResult::ok(crate::ai::doc_edit::unchanged_receipt::<vault::TableFile>(&rel)),
+                Err(e) => ToolResult::err(crate::ai::doc_edit::write_failed(&e)),
             }
         }
     }
@@ -1588,12 +1590,11 @@ async fn canvas_edit(ctx: &ToolCtx, args: &Value) -> ToolResult {
         Err(e) => return ToolResult::err(format!("画布不存在或不可读：{rel}（{e}）")),
     };
     let mut next = base.clone();
-    let touched = match crate::ai::doc_ops::apply_canvas_ops(&mut next, &ops) {
-        Ok(touched) => touched,
-        Err(e) => return ToolResult::err(e),
-    };
+    if let Err(e) = crate::ai::doc_ops::apply_canvas_ops(&mut next, &ops) {
+        return ToolResult::err(e);
+    }
     let Some(patch) = vault::compute_canvas_patch(&base, &next) else {
-        return ToolResult::ok(format!("画布未变化：{rel}（操作与现值相同）"));
+        return ToolResult::ok(crate::ai::doc_edit::unchanged_receipt::<vault::CanvasFile>(&rel));
     };
     next.updated_at = now_secs();
     let summary = crate::history::version_summary(
@@ -1601,11 +1602,7 @@ async fn canvas_edit(ctx: &ToolCtx, args: &Value) -> ToolResult {
         &base_json(&base),
         &base_json(&next),
     );
-    let receipt = format!(
-        "已编辑 {rel}（{} 项操作：{summary}）；实体：{}",
-        ops.len(),
-        touched.join("、")
-    );
+    let receipt = crate::ai::doc_edit::edited_receipt::<vault::CanvasFile>(&rel, ops.len(), &summary, &patch);
     match &ctx.repo {
         RepoAccess::Local { root, queue } => {
             // 写盘队列内重读磁盘并按 id 合并补丁：与宿主保存链同一口径，不整份覆盖他方改动
@@ -1622,7 +1619,7 @@ async fn canvas_edit(ctx: &ToolCtx, args: &Value) -> ToolResult {
             .await
             {
                 Ok(_) => ToolResult::ok(receipt),
-                Err(e) => ToolResult::err(format!("写入失败：{e}")),
+                Err(e) => ToolResult::err(crate::ai::doc_edit::write_failed(&e)),
             }
         }
         // 空间侧与壳共用同一条落盘口径（只新建 + 补丁 + 冲突重读重算）
@@ -1639,8 +1636,8 @@ async fn canvas_edit(ctx: &ToolCtx, args: &Value) -> ToolResult {
             .await
             {
                 Ok(Some(_)) => ToolResult::ok(receipt),
-                Ok(None) => ToolResult::ok(format!("画布未变化：{rel}（操作与现值相同）")),
-                Err(e) => ToolResult::err(format!("写入失败：{e}")),
+                Ok(None) => ToolResult::ok(crate::ai::doc_edit::unchanged_receipt::<vault::CanvasFile>(&rel)),
+                Err(e) => ToolResult::err(crate::ai::doc_edit::write_failed(&e)),
             }
         }
     }
