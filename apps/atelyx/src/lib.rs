@@ -6979,6 +6979,15 @@ impl App {
         }
     }
 
+    /// 图片载入前的统一门禁：已有句柄、本帧不可载入（失败退避未到 / 重试耗尽）、已在途都不重复
+    /// 发起。笔记图片与插件界面图片两条载入链共用，门禁只有这一处。
+    pub(crate) fn begin_image_load(&mut self, key: &str) -> bool {
+        if self.note_images.contains_key(key) || !self.can_load_image(key) {
+            return false;
+        }
+        self.note_images_inflight.insert(key.to_string())
+    }
+
     /// 一组图片 src 的按需载入：缺句柄且未在途/未失败的 src 发起读盘（仓库相对路径）或
     /// 公网策略下载（http/https）任务，任务经 update 收尾统一链出。失败不重试（失败集）。
     pub(crate) fn ensure_image_srcs(&mut self, srcs: Vec<String>) {
@@ -6989,10 +6998,7 @@ impl App {
         let root = self.vault.root().ok();
         let mut tasks = Vec::new();
         for src in srcs {
-            if self.note_images.contains_key(&src)
-                || !self.can_load_image(&src)
-                || !self.note_images_inflight.insert(src.clone())
-            {
+            if !self.begin_image_load(&src) {
                 continue;
             }
             let task = match (&root, src.starts_with("http://") || src.starts_with("https://")) {

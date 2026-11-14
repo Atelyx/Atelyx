@@ -62,6 +62,26 @@ pub fn load_canvas(app: &App, rel: &str) -> Task<Message> {
     )
 }
 
+/// 引用原文 → 渲染内容：图片在此转句柄并登记缓存（载入与补读两条回执同一分派）。
+/// 解码失败给失败占位，不把损坏图片当「加载中」永久转圈。
+fn ref_content(app: &mut App, path: String, raw: RefRaw) -> RefContent {
+    match raw {
+        RefRaw::Text(t) => RefContent::Text(t),
+        RefRaw::Image { bytes, width, height } if width > 0 && height > 0 => {
+            let handle = iced::widget::image::Handle::from_bytes(bytes);
+            // 消息流附件缩略图与笔记图片共用句柄缓存（键 = 仓库相对路径）
+            app.note_images.insert(path.clone(), handle.clone());
+            app.note_image_epoch = app.note_image_epoch.wrapping_add(1);
+            app.note_image_sizes.insert(path, (width, height));
+            RefContent::Image { handle, width, height }
+        }
+        RefRaw::Image { .. } => RefContent::BrokenImage,
+        RefRaw::Table { summary, body } => RefContent::Table { summary, body },
+        RefRaw::Binary => RefContent::Binary,
+        RefRaw::Missing => RefContent::Missing,
+    }
+}
+
 /// 载入回执：构建会话 + 图片字节转句柄 + 最近打开记录 + 在场跟随 + 历史刷新。
 fn on_loaded(app: &mut App, gen: u64, file: String, result: Result<LoadOut, String>) -> Task<Message> {
     if gen != app.epoch() || app.ui.last_canvas_file.as_deref() != Some(file.as_str()) {
@@ -73,22 +93,7 @@ fn on_loaded(app: &mut App, gen: u64, file: String, result: Result<LoadOut, Stri
             session.view.docs = out.docs;
             session.view.text_docs = out.text_docs;
             for (path, raw) in out.refs {
-                let content = match raw {
-                    RefRaw::Text(t) => RefContent::Text(t),
-                    RefRaw::Image { bytes, width, height } if width > 0 && height > 0 => {
-                        let handle = iced::widget::image::Handle::from_bytes(bytes);
-                        // 消息流附件缩略图与笔记图片共用句柄缓存（键 = 仓库相对路径）
-                        app.note_images.insert(path.clone(), handle.clone());
-                        app.note_image_epoch = app.note_image_epoch.wrapping_add(1);
-                        app.note_image_sizes.insert(path.clone(), (width, height));
-                        RefContent::Image { handle, width, height }
-                    }
-                    // 解码失败：失败占位，不把损坏图片当"加载中"永久转圈
-                    RefRaw::Image { .. } => RefContent::BrokenImage,
-                    RefRaw::Table { summary, body } => RefContent::Table { summary, body },
-                    RefRaw::Binary => RefContent::Binary,
-                    RefRaw::Missing => RefContent::Missing,
-                };
+                let content = ref_content(app, path.clone(), raw);
                 session.view.refs.insert(path, content);
             }
             // 打开即呈现全貌（覆盖变换渲染；首个指针事件收口进会话状态）
@@ -292,22 +297,16 @@ fn on_refs_loaded(app: &mut App, gen: u64, refs: HashMap<String, RefRaw>) -> Tas
     if gen != app.epoch() {
         return Task::none();
     }
+    if app.canvas.is_none() {
+        return Task::none();
+    }
+    // 先分派再取会话借用：图片分派要改句柄缓存（另一字段），与会话借用不能同时持有
+    let mapped: Vec<(String, RefContent)> = refs
+        .into_iter()
+        .map(|(path, raw)| (path.clone(), ref_content(app, path, raw)))
+        .collect();
     let Some(session) = app.canvas.as_mut() else { return Task::none() };
-    for (path, raw) in refs {
-        let content = match raw {
-            RefRaw::Text(t) => RefContent::Text(t),
-            RefRaw::Image { bytes, width, height } if width > 0 && height > 0 => {
-                let handle = iced::widget::image::Handle::from_bytes(bytes);
-                app.note_images.insert(path.clone(), handle.clone());
-                app.note_image_epoch = app.note_image_epoch.wrapping_add(1);
-                app.note_image_sizes.insert(path.clone(), (width, height));
-                RefContent::Image { handle, width, height }
-            }
-            RefRaw::Image { .. } => RefContent::BrokenImage,
-            RefRaw::Table { summary, body } => RefContent::Table { summary, body },
-            RefRaw::Binary => RefContent::Binary,
-            RefRaw::Missing => RefContent::Missing,
-        };
+    for (path, content) in mapped {
         session.view.refs.insert(path, content);
     }
     let text_raw: HashMap<String, RefRaw> = session

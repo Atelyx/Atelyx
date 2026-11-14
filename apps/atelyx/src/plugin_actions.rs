@@ -346,10 +346,7 @@ pub(crate) fn ensure_images(app: &mut App) -> Task<Message> {
     let gen = app.epoch();
     let mut tasks = Vec::new();
     for (key, source) in pending {
-        if app.note_images.contains_key(&key)
-            || !app.can_load_image(&key)
-            || !app.note_images_inflight.insert(key.clone())
-        {
+        if !app.begin_image_load(&key) {
             continue;
         }
         tasks.push(load_image(app, gen, key, source));
