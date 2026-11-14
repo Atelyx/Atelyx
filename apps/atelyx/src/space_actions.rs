@@ -1568,26 +1568,9 @@ fn on_note_saved(
                     }
                 }
             }
-            // 回执后仍有未落盘的新输入且无在排计时器（在途期间到命的自动保存已被互斥顺延）：
-            // 补排一次，防停笔后内容滞留脏态
-            if app.dirty && app.autosave_deadline.is_none() {
-                app.autosave_deadline = Some(Instant::now() + crate::AUTOSAVE_DEBOUNCE);
-                // 走与本地保存同一条挂拍路径：置位 autosave_timer 后 update 末尾才会补挂，
-                // 否则这里内联排一拍、末尾再挂一拍，同一期限出现两个 AutosaveTick
-                app.autosave_timer = false;
-                task = task.chain(app.chain_autosave_timer(Task::none()));
-            }
-            // 在途保存期间到来的 Flush 排队项：内容已落稳则放行挂起动作（关窗 / 切文件），
-            // 仍有未落盘输入则立刻补一笔 Flush 串行收尾——等防抖会让挂起动作白等一轮
-            if queued {
-                if app.dirty {
-                    if !app.space_note_saving(rel) {
-                        task = task.chain(space_submit_save(app, SaveReason::Flush));
-                    }
-                } else {
-                    task = task.chain(app.after_any_flush());
-                }
-            }
+            task = app.settle_receipt_tail(task, queued, |app| {
+                space_submit_save(app, SaveReason::Flush)
+            });
             task = task.chain(reload_space_history(app));
         }
     }

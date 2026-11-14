@@ -2100,6 +2100,30 @@ impl App {
         task
     }
 
+    /// 保存回执结清本笔后的统一收尾（本地与协作空间两条保存链共用，放行与补排的顺序只有这一处）：
+    /// 在途期间排队的 Flush 先放行——内容已落稳就执行挂起动作，仍有新输入就立刻补一笔；
+    /// 没有排队项但有未落盘输入、防抖计时器又已丢（在途期间到命被顺延）时补排一次。
+    fn settle_receipt_tail(
+        &mut self,
+        task: Task<Message>,
+        queued_flush: bool,
+        resubmit_flush: fn(&mut App) -> Task<Message>,
+    ) -> Task<Message> {
+        if queued_flush {
+            return if self.dirty {
+                task.chain(resubmit_flush(self))
+            } else {
+                task.chain(self.after_any_flush())
+            };
+        }
+        if !self.dirty || self.autosave_deadline.is_some() {
+            return task;
+        }
+        self.autosave_deadline = Some(Instant::now() + AUTOSAVE_DEBOUNCE);
+        self.autosave_timer = false;
+        task.chain(self.chain_autosave_timer(Task::none()))
+    }
+
     fn handle(&mut self, message: Message) -> Task<Message> {
         // 整面帧声明 keys 时连命令组合也归它：宿主的键盘派生消息与快捷键动作同样让位
         if plugin_actions::frame_takes_keyboard(self) && is_frame_keyboard_message(&message) {
@@ -2448,23 +2472,13 @@ impl App {
                 } else {
                     self.record_note_history(&rel, disk)
                 };
-                let mut task = task.chain(history);
-                if mine {
-                    // 在途期间排队的 Flush：内容已落稳即放行挂起动作，仍有新输入就立即补一笔
-                    if queued_flush {
-                        task = if self.dirty {
-                            task.chain(self.submit_save(SaveReason::Flush))
-                        } else {
-                            task.chain(self.after_any_flush())
-                        };
-                    } else if self.dirty && self.autosave_deadline.is_none() {
-                        // 在途期间到期的自动保存被顺延掉了：补排一次，防停笔后内容滞留在脏态
-                        self.autosave_deadline = Some(Instant::now() + AUTOSAVE_DEBOUNCE);
-                        self.autosave_timer = false;
-                        task = task.chain(self.chain_autosave_timer(Task::none()));
-                    }
+                let task = task.chain(history);
+                if !mine {
+                    return task;
                 }
-                task
+                self.settle_receipt_tail(task, queued_flush, |app| {
+                    app.submit_save(SaveReason::Flush)
+                })
             }
             Message::Saved(gen, rel, _, reason, Err(e)) => {
                 // 世代守卫与成功回执同口径：切仓库后旧仓库的保存失败不得动新仓库的挂起动作
