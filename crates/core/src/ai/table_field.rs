@@ -5,6 +5,9 @@ use crate::ai::stream::{stream, LlmMessage, StreamError, StreamEvent, StreamRequ
 /// 单次生成的输出上限（token）。
 pub const MAX_TOKENS: u32 = 1800;
 
+/// 可重试失败后的重试间隔：一次生成最多重试两轮，间隔固定不递增。
+const RETRY_DELAY_MS: u64 = 800;
+
 /// 生成一个单元格内容：`system` 为空 = 不下发 system；失败返回可直接展示的中文原因。
 pub async fn generate(
     client: &reqwest::Client,
@@ -43,7 +46,7 @@ pub async fn generate(
         match outcome {
             Ok(_) => break Ok(()),
             Err(error) if attempt < 2 && retryable(&error) => {
-                tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(RETRY_DELAY_MS)).await;
             }
             Err(error) => break Err(describe(error)),
         }
