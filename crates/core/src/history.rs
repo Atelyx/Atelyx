@@ -309,11 +309,20 @@ fn read_sidecar(
 ) -> Result<Option<Vec<HistoryVersion>>, String> {
     let canonical = history_path_for(kind, file);
     match std::fs::read_to_string(root.join(&canonical)) {
-        Ok(raw) => {
-            return serde_json::from_str::<HistoryFile>(&raw)
-                .map(|parsed| Some(parsed.versions))
-                .map_err(|e| format!("历史侧文件 {canonical} 无法解析：{e}"));
-        }
+        Ok(raw) => match serde_json::from_str::<HistoryFile>(&raw) {
+            Ok(parsed) => return Ok(Some(parsed.versions)),
+            // 解析失败既不能当空列表覆盖（会毁掉整段历史），也不能让该文件此后每次保存都报错：
+            // 原文改名留档，报一次错即自愈（下一笔读到 NotFound，从空列表重新记录）。
+            Err(e) => {
+                return Err(match crate::config::backup(&root.join(&canonical), "history") {
+                    Some(backup) => format!(
+                        "历史侧文件 {canonical} 无法解析，已备份为 {}（下一笔保存起重新记录）：{e}",
+                        backup.file_name().unwrap_or_default().to_string_lossy()
+                    ),
+                    None => format!("历史侧文件 {canonical} 无法解析，且备份失败，请手动移走该文件：{e}"),
+                });
+            }
+        },
         // 读错误不是「不存在」：当作损坏处理，避免把读不到的历史当空列表覆盖掉
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
             return Err(format!("历史侧文件 {canonical} 读取失败：{e}"));
@@ -559,14 +568,24 @@ mod tests {
     }
 
     #[test]
-    fn 损坏侧文件不被覆盖() {
+    fn 损坏侧文件改名留档后自愈() {
         let tmp = crate::vault::test_support::TempDir::new("hist-corrupt");
+        let dir = tmp.join(".atelyx/history");
         let path = tmp.join(&history_path_for(HistoryKind::Note, "a.md"));
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(dir.clone()).unwrap();
         std::fs::write(&path, "{ broken").unwrap();
-        // 解析失败 → 报错且原文件原样保留（旧快照仍可在磁盘上找回）
+        // 解析失败 → 报错；原文改名留档（旧快照仍可在磁盘上找回），不再原地挡住后续记录
         assert!(record_version(&tmp, HistoryKind::Note, "a.md", &opts("v1")).is_err());
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ broken");
+        assert!(!path.exists(), "损坏侧文件应已改名留档");
+        let backup = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .find(|e| e.file_name().to_string_lossy().contains(".corrupt-"))
+            .expect("应留下 .corrupt- 备份");
+        assert_eq!(std::fs::read_to_string(backup.path()).unwrap(), "{ broken");
+        // 自愈：下一笔正常记录，不再永久报错
+        record_version(&tmp, HistoryKind::Note, "a.md", &opts("v1")).unwrap();
+        assert_eq!(load_history(&tmp, HistoryKind::Note, "a.md").len(), 1);
     }
 
     #[test]
