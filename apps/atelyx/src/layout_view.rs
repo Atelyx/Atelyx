@@ -26,10 +26,6 @@ use crate::ui::scroll;
 use crate::ui::text::{ellipsize, ellipsize_estimated, estimate_width, measure};
 use crate::{App, DraftKind, Message, NoteMode, markdown_edit, markdown_view};
 
-// 弹层内容按域拆在 src/popup/（#[path] 声明，壳入口不另加模块表条目）。
-#[path = "popup/mod.rs"]
-mod popup;
-
 pub struct UiMetrics;
 
 impl UiMetrics {
@@ -224,7 +220,7 @@ pub(crate) enum PopupState {
 impl PopupState {
     /// 宽度随各域渲染体就近定义（popup/<域>::width），这里只保留入口。
     fn width(&self) -> f32 {
-        popup::width(self)
+        crate::popup::width(self)
     }
 }
 
@@ -521,7 +517,7 @@ fn with_overlays<'a>(
                 PopupState::HistoryBrowser { .. } | PopupState::TableAiField { .. }
             )
         {
-            let (content, height) = popup::element(app, &open.state, app.popup_pane, window);
+            let (content, height) = crate::popup::element(app, &open.state, app.popup_pane, window);
             let spec = PopupSpec {
                 anchor: open.point,
                 width: open.state.width(),

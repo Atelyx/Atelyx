@@ -42,6 +42,7 @@ mod plugin_theme;
 mod plugin_frame;
 mod plugin_paint;
 mod plugin_view;
+mod popup;
 mod properties_view;
 mod recent_view;
 mod registry;
