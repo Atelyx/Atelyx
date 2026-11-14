@@ -334,7 +334,7 @@ fn group_list<'a>(groups: &'a [RepoHistoryGroup], window: iced::window::Id) -> E
 fn group_card(g: &RepoHistoryGroup, window: iced::window::Id) -> Element<'static, Message> {
     let name = g.file.rsplit('/').next().unwrap_or(&g.file).to_string();
     let count = format!("{} 版", g.versions.len());
-    container(
+    controls::card(
         button(
             row![
                 icon(kind_icon(g.kind), 14.0, pal::TEXT_MUTED),
@@ -364,15 +364,8 @@ fn group_card(g: &RepoHistoryGroup, window: iced::window::Id) -> Element<'static
             kind: g.kind,
             file: g.file.clone(),
         })),
+        Padding::ZERO.horizontal(10.0).vertical(8.0),
     )
-    .width(Length::Fill)
-    .padding(Padding::ZERO.horizontal(10.0).vertical(8.0))
-    .style(|_t| iced::widget::container::Style {
-        background: Some(pal::BG_TERTIARY.into()),
-        border: iced::border::rounded(pal::RADIUS_MD),
-        ..iced::widget::container::Style::default()
-    })
-    .into()
 }
 
 /// kind → 行首图标（与文件树、最近列表同一张映射表）。

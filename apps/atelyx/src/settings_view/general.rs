@@ -3,7 +3,7 @@
 use iced::widget::{column, container};
 use iced::{Element, Length, Padding};
 
-use crate::layout_view::PopupState;
+use crate::layout_view::{open_popup, PopupState};
 use crate::settings_view::{group_head, setting_row};
 use crate::ui::controls;
 use crate::ui::scroll;
@@ -27,7 +27,7 @@ pub fn view(app: &App, window: iced::window::Id) -> Element<'static, Message> {
         controls::dropdown_trigger(
             &font_label,
             TRIGGER_W,
-            Some(super::open_popup(app, window, PopupState::FontPicker { for_table: false })),
+            Some(open_popup(app, window, PopupState::FontPicker { for_table: false })),
         ),
     ));
     col = col.push(setting_row(

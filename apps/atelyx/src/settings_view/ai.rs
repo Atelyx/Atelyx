@@ -8,7 +8,7 @@ use atelyx_core::ai::tools::{builtin_tools, ToolCategory};
 use atelyx_core::credentials;
 use atelyx_core::vault;
 
-use crate::layout_view::PopupState;
+use crate::layout_view::{open_popup, PopupState};
 use crate::space_actions;
 use crate::ui::controls;
 use crate::ui::icon::icon;
@@ -1209,7 +1209,7 @@ fn providers_view(app: &App, window: iced::window::Id) -> Element<'static, Messa
 
     let body = row![
         left,
-        list_divider(),
+        controls::divider(true, pal::BORDER_SUBTLE, Length::Fill),
         container(right).width(Length::Fill).height(Length::Fill),
     ]
     .height(Length::Fill);
@@ -1275,18 +1275,6 @@ fn quick_add_row(label: &str, on_press: Option<Message>) -> Element<'static, Mes
     .style(controls::row_style(false, pal::RADIUS_SM))
     .on_press_maybe(on_press)
     .into()
-}
-
-/// 列表列与表单列之间的 1px 分隔（两个功能区）。
-fn list_divider() -> Element<'static, Message> {
-    container(space())
-        .width(Length::Fixed(1.0))
-        .height(Length::Fill)
-        .style(|_t| Style {
-            background: Some(pal::BORDER_SUBTLE.into()),
-            ..Style::default()
-        })
-        .into()
 }
 
 /// 供应商卡片：名称 + 模型数徽标 + 去 协议 主机名（选中 = 强调描边 + 柔底）。
@@ -1538,7 +1526,7 @@ fn provider_form(app: &App, p: &vault::VaultProvider, window: iced::window::Id) 
                 "删除该供应商",
                 &controls::btn_sm(),
                 controls::Variant::Ghost,
-                Some(super::open_popup(app, window, PopupState::AiProviderDeleteMenu)),
+                Some(open_popup(app, window, PopupState::AiProviderDeleteMenu)),
             ))
             .width(Length::Fill)
             .align_x(iced::alignment::Horizontal::Right)
@@ -1571,14 +1559,14 @@ fn models_view(app: &App, window: iced::window::Id) -> Element<'static, Message>
     let mode_trigger = controls::dropdown_trigger(
         naming_label(mode),
         FORM_W,
-        (!ro).then(|| super::open_popup(app, window, PopupState::AiNamingMenu)),
+        (!ro).then(|| open_popup(app, window, PopupState::AiNamingMenu)),
     );
     col = col.push(super::setting_row("自动命名", "新话题首条消息后自动起标题", mode_trigger));
     if mode == NamingMode::Custom {
         let model_trigger = controls::dropdown_trigger(
             &naming_model_label(app),
             FORM_W,
-            (!ro && model_count > 0).then(|| super::open_popup(app, window, PopupState::AiModelMenu)),
+            (!ro && model_count > 0).then(|| open_popup(app, window, PopupState::AiModelMenu)),
         );
         col = col.push(super::setting_row("命名模型", "话题命名一般用小模型；跟随所选 = 用对话时选择的模型", model_trigger));
     }
@@ -1678,7 +1666,7 @@ fn agents_view(app: &App, window: iced::window::Id) -> Element<'static, Message>
         )
         .width(Length::Fixed(LIST_W))
         .height(Length::Fill),
-        list_divider(),
+        controls::divider(true, pal::BORDER_SUBTLE, Length::Fill),
         container(right).width(Length::Fill).height(Length::Fill),
     ]
     .height(Length::Fill)
@@ -1726,7 +1714,7 @@ fn agent_card(
             Some((window, "复制 Agent".to_string())),
         ));
         if !builtin {
-            let del = super::open_popup(app, window, PopupState::AiAgentDeleteMenu);
+            let del = open_popup(app, window, PopupState::AiAgentDeleteMenu);
             line = line.push(controls::icon_button(
                 "bin",
                 12.0,
@@ -1771,7 +1759,7 @@ fn agent_form(app: &App, a: &vault::AgentConfig, window: iced::window::Id) -> El
     let prompt_control = if ro {
         value_text(&prompt_label)
     } else {
-        controls::dropdown_trigger(&prompt_label, FORM_W, Some(super::open_popup(app, window, PopupState::AiAgentPromptMenu)))
+        controls::dropdown_trigger(&prompt_label, FORM_W, Some(open_popup(app, window, PopupState::AiAgentPromptMenu)))
     };
 
     let mut col = column![].spacing(8);
@@ -1806,7 +1794,7 @@ fn agent_form(app: &App, a: &vault::AgentConfig, window: iced::window::Id) -> El
             "删除",
             &controls::btn_sm(),
             controls::Variant::Ghost,
-            Some(super::open_popup(app, window, PopupState::AiAgentDeleteMenu)),
+            Some(open_popup(app, window, PopupState::AiAgentDeleteMenu)),
         ));
     }
     col = col.push(container(actions).width(Length::Fill));
@@ -1974,7 +1962,7 @@ fn search_view(app: &App, window: iced::window::Id) -> Element<'static, Message>
     let provider_control = if ro {
         value_text(provider_label)
     } else {
-        controls::dropdown_trigger(provider_label, FORM_W, Some(super::open_popup(app, window, PopupState::AiSearchProviderMenu)))
+        controls::dropdown_trigger(provider_label, FORM_W, Some(open_popup(app, window, PopupState::AiSearchProviderMenu)))
     };
 
     let mut col = column![].spacing(8);

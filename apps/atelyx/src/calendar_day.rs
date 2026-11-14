@@ -9,7 +9,7 @@ use atelyx_core::history::HistoryAction;
 
 use crate::calendar_actions::{CalendarMsg, EDIT_INPUT_ID};
 use crate::calendar_grid;
-use crate::calendar_view::{dot, item_color};
+use crate::calendar_view::item_color;
 use crate::repohistory_view;
 use crate::ui::controls;
 use crate::ui::icon::icon;
@@ -196,7 +196,7 @@ fn schedule_row(app: &App, item: &CalendarItem, window: iced::window::Id) -> Ele
             )
         };
     row![
-        button(dot(color, DOT))
+        button(controls::dot(color, DOT))
             .padding(0.0)
             .style(controls::row_style(false, pal::RADIUS_XS))
             .on_press(Message::Calendar(CalendarMsg::CycleColor(item.id.clone()))),
@@ -216,7 +216,7 @@ fn add_row(app: &App) -> Element<'static, Message> {
     for (i, c) in pal::EVENT_COLORS.iter().enumerate() {
         let on = selected == i;
         colors = colors.push(
-            button(dot(*c, DOT))
+            button(controls::dot(*c, DOT))
                 .padding(1.0)
                 .style(move |_t, _s| button::Style {
                     border: if on {

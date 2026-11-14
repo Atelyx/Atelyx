@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::text::{LineHeight, Wrapping};
-use iced::widget::{button, column, container, mouse_area, row, scrollable, space, stack, text_editor, text_input};
+use iced::widget::{MouseArea, button, column, container, mouse_area, row, scrollable, space, stack, text_editor, text_input};
 use iced::{Color, Element, Length, Padding, Point, Rectangle, Size, border, widget::container::Style};
 use serde_json::Value;
 
@@ -349,9 +349,26 @@ pub(crate) fn btn_popup_min(window: iced::window::Id, cursor: Point, state: Popu
     )
 }
 
+/// 光标锚定的弹层打开消息（表单下拉统一入口；锚点与翻转口径同按钮弹层）。
+pub(crate) fn open_popup(app: &App, window: iced::window::Id, state: PopupState) -> Message {
+    btn_popup(window, app.cursor_for(window), state)
+}
+
 /// 右键菜单类弹层：锚点 = 光标点，无翻转。
 fn ctx_popup(window: iced::window::Id, cursor: Point, state: PopupState) -> Message {
     Message::PopupOpen(window, PopupOpen { point: cursor, flip_y: None, state, min_width: 0.0 })
+}
+
+/// 给已挂好按下 / 双击 / 右键处理的悬停区补全文提示；`box_px` 为触发区边长（提示锚在光标下方半边长 + 4）。
+pub(crate) fn with_tip<'a>(
+    area: MouseArea<'a, Message>,
+    window: iced::window::Id,
+    label: impl Into<String>,
+    box_px: f32,
+) -> MouseArea<'a, Message> {
+    let label = label.into();
+    area.on_enter(Message::Ui(crate::ui::UiMsg::HoverTip { window, label: label.clone(), box_px }))
+        .on_exit(Message::Ui(crate::ui::UiMsg::HoverTipEnd { window, label }))
 }
 
 /// 只读正文右键：选区复制菜单（锚点 = 光标点）。
@@ -456,7 +473,7 @@ fn workspace_chrome<'a>(
 ) -> Element<'a, Message> {
     column![
         titlebar(app, window),
-        hline(),
+        controls::divider(false, pal::BORDER, Length::Fill),
         container(content)
             .width(Length::Fill)
             .height(Length::Fill)
@@ -1079,13 +1096,7 @@ fn layout_tab(
     ));
     // 省略号截断时悬停给完整名称（改名前先能看清叫什么）
     let area = if truncated {
-        let tip = name.to_string();
-        area.on_enter(Message::Ui(crate::ui::UiMsg::HoverTip {
-            window,
-            label: tip.clone(),
-            box_px: 28.0,
-        }))
-        .on_exit(Message::Ui(crate::ui::UiMsg::HoverTipEnd { window, label: tip }))
+        with_tip(area, window, name.to_string(), 28.0)
     } else {
         area
     };
@@ -1132,7 +1143,7 @@ fn status_bar(app: &App) -> Element<'static, Message> {
     .spacing(12);
     if let Some(n) = app.file_count {
         left = left
-            .push(vrule())
+            .push(controls::divider(true, pal::BORDER, Length::Fixed(12.0)))
             .push(
                 text(format!("{n} 文件"))
                     .size(pal::fs_micro())
@@ -1147,29 +1158,6 @@ fn status_bar(app: &App) -> Element<'static, Message> {
         .align_y(Vertical::Center)
         .style(|_t| Style {
             background: Some(pal::BG_SECONDARY.into()),
-            ..Style::default()
-        })
-        .into()
-}
-
-fn vrule() -> Element<'static, Message> {
-    container(space())
-        .width(Length::Fixed(1.0))
-        .height(Length::Fixed(12.0))
-        .style(|_t| Style {
-            background: Some(pal::BORDER.into()),
-            ..Style::default()
-        })
-        .into()
-}
-
-/// 通栏水平细线（分隔用；iced Border 无按边着色，分隔线一律走独立元素）。
-fn hline() -> Element<'static, Message> {
-    container(space())
-        .width(Length::Fill)
-        .height(Length::Fixed(1.0))
-        .style(|_t| Style {
-            background: Some(pal::BORDER.into()),
             ..Style::default()
         })
         .into()
@@ -1348,7 +1336,7 @@ fn panel_view<'a>(
                 ..Style::default()
             }),
         // 底边线贴底 1px：container 背景铺满自身 bounds，靠上内边距只会把整块染成线色
-        container(hline())
+        container(controls::divider(false, pal::BORDER, Length::Fill))
             .height(Length::Fill)
             .align_y(Vertical::Bottom),
         row![
@@ -1700,33 +1688,25 @@ pub(crate) fn collab_room_view(app: &App, _window: iced::window::Id) -> Element<
                 (None, Some(list)) => {
                     for m in list {
                         // 成员卡片：显示名 + 角色徽标一行，@username 次行
-                        col = col.push(
-                            container(
-                                column![
-                                    row![
-                                        text(m.display_name.clone())
-                                            .size(pal::fs_body())
-                                            .color(pal::TEXT_PRIMARY)
-                                            .font(crate::ui::bold()),
-                                        space().width(Length::Fill),
-                                        role_badge(m.role),
-                                    ]
-                                    .spacing(6)
-                                    .align_y(iced::alignment::Vertical::Center),
-                                    text(format!("@{}", m.username))
-                                        .size(pal::fs_micro())
-                                        .color(pal::TEXT_MUTED),
+                        col = col.push(controls::card(
+                            column![
+                                row![
+                                    text(m.display_name.clone())
+                                        .size(pal::fs_body())
+                                        .color(pal::TEXT_PRIMARY)
+                                        .font(crate::ui::bold()),
+                                    space().width(Length::Fill),
+                                    role_badge(m.role),
                                 ]
-                                .spacing(2),
-                            )
-                            .width(Length::Fill)
-                            .padding(Padding::ZERO.horizontal(10.0).vertical(6.0))
-                            .style(|_t| Style {
-                                background: Some(pal::BG_TERTIARY.into()),
-                                border: border::rounded(pal::RADIUS_MD),
-                                ..Style::default()
-                            }),
-                        );
+                                .spacing(6)
+                                .align_y(iced::alignment::Vertical::Center),
+                                text(format!("@{}", m.username))
+                                    .size(pal::fs_micro())
+                                    .color(pal::TEXT_MUTED),
+                            ]
+                            .spacing(2),
+                            Padding::ZERO.horizontal(10.0).vertical(6.0),
+                        ));
                     }
                 }
                 (None, None) => {
@@ -1807,14 +1787,7 @@ fn device_row(
 ) -> Element<'static, Message> {
     let color = parse_hex_color(&color_hex).unwrap_or(pal::TEXT_MUTED);
     let mut head = row![
-        container(space())
-            .width(Length::Fixed(8.0))
-            .height(Length::Fixed(8.0))
-            .style(move |_t| Style {
-                background: Some(color.into()),
-                border: border::rounded(999.0),
-                ..Style::default()
-            }),
+        controls::dot(color, 8.0),
         text(nickname).size(pal::fs_body()).color(pal::TEXT_PRIMARY).font(crate::ui::bold()),
     ]
     .spacing(6)
@@ -1855,15 +1828,7 @@ fn device_row(
             );
         }
     }
-    container(col)
-        .width(Length::Fill)
-        .padding(Padding::ZERO.horizontal(10.0).vertical(6.0))
-        .style(|_t| Style {
-            background: Some(pal::BG_TERTIARY.into()),
-            border: border::rounded(pal::RADIUS_MD),
-            ..Style::default()
-        })
-        .into()
+    controls::card(col, Padding::ZERO.horizontal(10.0).vertical(6.0))
 }
 
 /// 平台 · 版本展示行：旧端未上报的字段显式标注未知。
@@ -2056,18 +2021,7 @@ fn search_mode_row(window: iced::window::Id) -> Element<'static, Message> {
         ("全局搜索", "暂未实现：搜索正文内容"),
         ("按标签搜索", "暂未实现：按标签筛选文件"),
     ] {
-        modes = modes.push(
-            mouse_area(chip(label, false))
-                .on_enter(Message::Ui(crate::ui::UiMsg::HoverTip {
-                    window,
-                    label: tip.to_string(),
-                    box_px: 22.0,
-                }))
-                .on_exit(Message::Ui(crate::ui::UiMsg::HoverTipEnd {
-                    window,
-                    label: tip.to_string(),
-                })),
-        );
+        modes = modes.push(with_tip(mouse_area(chip(label, false)), window, tip.to_string(), 22.0));
     }
     modes.into()
 }
@@ -2147,15 +2101,7 @@ fn search_row(hit: &SearchHit, name_w: f32, window: iced::window::Id) -> Element
     };
     // 悬停给完整相对路径：行内文件名与所在文件夹都可能被省略号截断。
     // 提示锚在光标下方「半行高 + 4」处，故按双行行高给锚点。
-    let tip = hit.rel.clone();
-    mouse_area(body)
-        .on_enter(Message::Ui(crate::ui::UiMsg::HoverTip {
-            window,
-            label: tip.clone(),
-            box_px: 40.0,
-        }))
-        .on_exit(Message::Ui(crate::ui::UiMsg::HoverTipEnd { window, label: tip }))
-        .into()
+    with_tip(mouse_area(body), window, hit.rel.clone(), 40.0).into()
 }
 
 /// 属性面板视图：画布正作为激活标签展示（任一窗口前台）= 画布属性区，否则笔记属性
@@ -2262,7 +2208,7 @@ pub fn detached_view<'a>(
             ..Style::default()
         }),
         // 底边线贴底 1px：container 背景铺满自身 bounds，靠上内边距只会把整块染成线色
-        container(hline())
+        container(controls::divider(false, pal::BORDER, Length::Fill))
             .height(Length::Fill)
             .align_y(Vertical::Bottom),
         row![
@@ -2667,14 +2613,7 @@ fn vault_row(
             })
             .on_exit(Message::FileDragExit { drop: crate::FileDropKey::Vault })
     } else {
-        let path = vault.root.clone();
-        row_elem
-            .on_enter(Message::Ui(crate::ui::UiMsg::HoverTip {
-                window,
-                label: path.clone(),
-                box_px: 32.0,
-            }))
-            .on_exit(Message::Ui(crate::ui::UiMsg::HoverTipEnd { window, label: path }))
+        with_tip(row_elem, window, vault.root.clone(), 32.0)
     };
     let row_elem: Element<'static, Message> = row_elem
         .on_right_press(ctx_popup(window, cursor, PopupState::VaultMenu { root: vault.root.clone() }))
@@ -2717,14 +2656,7 @@ pub(crate) fn ai_pill_row(
         let pill = container(
             iced::widget::row![
                 icon("sparkles", 11.0, pal::ACCENT),
-                container(space())
-                    .width(Length::Fixed(8.0))
-                    .height(Length::Fixed(8.0))
-                    .style(move |_t| Style {
-                        background: Some(dot.into()),
-                        border: border::rounded(999.0),
-                        ..Style::default()
-                    }),
+                controls::dot(dot, 8.0),
                 text(label).size(pal::fs_micro()).color(pal::TEXT_PRIMARY),
             ]
             .spacing(5)
@@ -2736,15 +2668,7 @@ pub(crate) fn ai_pill_row(
             border: border::rounded(999.0),
             ..Style::default()
         });
-        row = row.push(
-            iced::widget::mouse_area(pill)
-                .on_enter(Message::Ui(crate::ui::UiMsg::HoverTip {
-                    window,
-                    label: tip.clone(),
-                    box_px: 22.0,
-                }))
-                .on_exit(Message::Ui(crate::ui::UiMsg::HoverTipEnd { window, label: tip })),
-        );
+        row = row.push(with_tip(iced::widget::mouse_area(pill), window, tip, 22.0));
     }
     if remotes.len() > MAX_SHOWN {
         row = row.push(
@@ -2774,14 +2698,7 @@ pub(crate) fn collab_pill_row(members: &[(iced::Color, String)]) -> Element<'sta
         row = row.push(
             container(
                 iced::widget::row![
-                    container(space())
-                        .width(Length::Fixed(8.0))
-                        .height(Length::Fixed(8.0))
-                        .style(move |_t| Style {
-                            background: Some(dot.into()),
-                            border: border::rounded(999.0),
-                            ..Style::default()
-                        }),
+                    controls::dot(dot, 8.0),
                     text(name.clone())
                         .size(pal::fs_micro())
                         .color(pal::TEXT_PRIMARY),
@@ -2897,10 +2814,7 @@ fn space_row(
             })
             .on_exit(Message::FileDragExit { drop: crate::FileDropKey::Space })
     } else {
-        let label = format!("{} · {}", space.name, space.server_url);
-        row_elem
-            .on_enter(Message::Ui(crate::ui::UiMsg::HoverTip { window, label: label.clone(), box_px: 32.0 }))
-            .on_exit(Message::Ui(crate::ui::UiMsg::HoverTipEnd { window, label }))
+        with_tip(row_elem, window, format!("{} · {}", space.name, space.server_url), 32.0)
     };
     let row_elem: Element<'static, Message> = row_elem
         .on_right_press(ctx_popup(
@@ -3040,15 +2954,7 @@ fn tree_row_element(
     if app.file_drag.is_some() {
         return element;
     }
-    let tip = r.name.clone();
-    mouse_area(element)
-        .on_enter(Message::Ui(crate::ui::UiMsg::HoverTip {
-            window,
-            label: tip.clone(),
-            box_px: 32.0,
-        }))
-        .on_exit(Message::Ui(crate::ui::UiMsg::HoverTipEnd { window, label: tip }))
-        .into()
+    with_tip(mouse_area(element), window, r.name.clone(), 32.0).into()
 }
 
 /// 行内叠加竖线（宽 `w` px、左偏移 `x`；行体之上的叠层画法）。
@@ -3616,13 +3522,7 @@ fn title_input(value: &str) -> Element<'static, Message> {
     column![
         // 输入框内按压 = 不触发失焦提交（与文件树行内输入同一标志）
         controls::PressReporter::new(input.into(), Message::RenamePressInside),
-        container(space())
-            .width(Length::Fill)
-            .height(Length::Fixed(1.0))
-            .style(|_t| Style {
-                background: Some(pal::BORDER_STRONG.into()),
-                ..Style::default()
-            }),
+        controls::divider(false, pal::BORDER_STRONG, Length::Fill),
     ]
     .into()
 }
@@ -3700,14 +3600,7 @@ fn mode_button(
     });
     // 禁用档不挂按压：只读身份的编辑入口在渲染层就不存在
     let btn = if disabled { btn } else { btn.on_press(Message::NoteMode(mode)) };
-    iced::widget::mouse_area(btn)
-        .on_enter(Message::Ui(crate::ui::UiMsg::HoverTip {
-            window,
-            label: tip.to_string(),
-            box_px: 24.0,
-        }))
-        .on_exit(Message::Ui(crate::ui::UiMsg::HoverTipEnd { window, label: tip.to_string() }))
-        .into()
+    with_tip(iced::widget::mouse_area(btn), window, tip, 24.0).into()
 }
 
 /// 只读身份提示条：常驻工具条下，说明为什么编辑入口是禁用的。

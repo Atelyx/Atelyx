@@ -14,6 +14,7 @@ use iced::{alignment, Color, Element, Length, Point, Rectangle, Size, Vector};
 use crate::layout_view::estimate_text_width;
 use crate::table_text::{measure_live_lines, TextLine, WrapCache, LINE_FACTOR};
 use crate::ui::color_picker::parse_hex;
+use crate::ui::controls;
 use crate::ui::icon::polylines;
 use crate::ui::palette as pal;
 use crate::ui::text;
@@ -3043,15 +3044,7 @@ fn icon_btn(
             ..Default::default()
         })
         .on_press(on_press);
-    let tip_label = tip.to_string();
-    iced::widget::mouse_area(btn)
-        .on_enter(Message::Ui(crate::ui::UiMsg::HoverTip {
-            window,
-            label: tip_label.clone(),
-            box_px: 21.0,
-        }))
-        .on_exit(Message::Ui(crate::ui::UiMsg::HoverTipEnd { window, label: tip_label }))
-        .into()
+    crate::layout_view::with_tip(iced::widget::mouse_area(btn), window, tip, 21.0).into()
 }
 
 /// 编辑器浮层（覆盖阶段画布仍显示原值；可见编辑 = 画布停画原值、浮层即单元格本身）。
@@ -3242,15 +3235,15 @@ pub fn format_bar_overlay<'a>(
     let bar = row![
         font_pick(app, window, summary),
         size_pick(window, summary),
-        divider_el(),
+        controls::divider(true, pal::BORDER, Length::Fixed(18.0)),
         tri_btn("B", StyleKey::Bold, &summary.bold),
         tri_btn("I", StyleKey::Italic, &summary.italic),
         tri_btn("U", StyleKey::Underline, &summary.underline),
         tri_btn("S", StyleKey::Strike, &summary.strike),
-        divider_el(),
+        controls::divider(true, pal::BORDER, Length::Fixed(18.0)),
         color_btn(app, window, false, &summary.color),
         color_btn(app, window, true, &summary.bg),
-        divider_el(),
+        controls::divider(true, pal::BORDER, Length::Fixed(18.0)),
         clear_btn(),
     ]
     .spacing(BAR_ITEM_GAP)
@@ -3270,17 +3263,6 @@ pub fn format_bar_overlay<'a>(
             .padding(iced::Padding::ZERO.left(placement.rect.x).top(placement.rect.y))
             .into(),
     )
-}
-
-fn divider_el() -> Element<'static, Message> {
-    container(space())
-        .width(Length::Fixed(BAR_DIVIDER_W))
-        .height(Length::Fixed(18.0))
-        .style(|_t| iced::widget::container::Style {
-            background: Some(pal::BORDER.into()),
-            ..Default::default()
-        })
-        .into()
 }
 
 /// 字体按钮标签（估宽与渲染同一取词口径）。

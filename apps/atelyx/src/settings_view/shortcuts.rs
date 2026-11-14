@@ -10,7 +10,6 @@ use crate::ui::controls;
 use crate::ui::palette as pal;
 use crate::ui::scroll;
 use crate::ui::text;
-use crate::ui::UiMsg;
 use crate::{App, Message};
 
 pub fn view(app: &App, window: iced::window::Id) -> Element<'static, Message> {
@@ -51,14 +50,7 @@ fn scope_group(
     for (id, binding) in resolved.iter().filter(|(id, _)| id.scope() == scope) {
         inner = inner.push(command_row(app, window, *id, binding, resolved));
     }
-    container(inner)
-        .width(Length::Fill)
-        .style(|_t| iced::widget::container::Style {
-            background: Some(pal::BG_TERTIARY.into()),
-            border: border::rounded(pal::RADIUS_MD),
-            ..iced::widget::container::Style::default()
-        })
-        .into()
+    controls::card(inner, Padding::ZERO)
 }
 
 /// 单命令行：命令名，右侧键串输入框（点击进入录制）+ 冲突警示 + 恢复默认。
@@ -142,10 +134,13 @@ fn conflict_mark(
     let tip = format!("与 {} 冲突，按键时先登记的命令生效", names.join("、"));
     let bg = if crate::now_secs().is_multiple_of(2) { pal::ACCENT_SOFT } else { pal::BG_TERTIARY };
     Some(
-        mouse_area(controls::badge("冲突", bg, pal::WARNING))
-            .on_enter(Message::Ui(UiMsg::HoverTip { window, label: tip.clone(), box_px: 24.0 }))
-            .on_exit(Message::Ui(UiMsg::HoverTipEnd { window, label: tip }))
-            .into(),
+        crate::layout_view::with_tip(
+            mouse_area(controls::badge("冲突", bg, pal::WARNING)),
+            window,
+            tip,
+            24.0,
+        )
+        .into(),
     )
 }
 

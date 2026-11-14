@@ -507,14 +507,7 @@ fn error_line(window: iced::window::Id, message: String) -> iced::Element<'stati
             .width(Length::Fill)
             .clip(true),
         );
-        container(
-            area.on_enter(Message::Ui(crate::ui::UiMsg::HoverTip {
-                window,
-                label: tip.clone(),
-                box_px: 13.0,
-            }))
-            .on_exit(Message::Ui(crate::ui::UiMsg::HoverTipEnd { window, label: tip.clone() })),
-        )
+        container(crate::layout_view::with_tip(area, window, tip.clone(), 13.0))
         .width(Length::Fill)
         .height(Length::Shrink)
         .into()

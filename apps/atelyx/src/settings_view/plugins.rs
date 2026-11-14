@@ -23,7 +23,7 @@ use atelyx_core::plugin_runtime::{
 use atelyx_core::space_client::SpaceError;
 
 
-use crate::settings_view::{card, group_head};
+use crate::settings_view::group_head;
 use crate::ui::controls;
 use crate::ui::icon::icon;
 use crate::ui::notify::Level as NoticeLevel;
@@ -2430,7 +2430,7 @@ fn installed_group(app: &App) -> Element<'static, Message> {
     let installed: Vec<&PluginSummary> = app.plugins_state.list.iter().collect();
     let mut col = Column::new().spacing(8);
     col = col.push(group_head("安装", "本地目录 / zip 包", false));
-    col = col.push(card(
+    col = col.push(controls::card(
         row![
             text("从本地目录或压缩包安装插件")
                 .size(pal::fs_caption())
@@ -2441,6 +2441,7 @@ fn installed_group(app: &App) -> Element<'static, Message> {
         ]
         .spacing(8)
         .align_y(iced::alignment::Vertical::Center),
+        Padding::ZERO.horizontal(12.0).vertical(10.0),
     ));
     col = col.push(group_head("已安装", &format!("共 {} 个", installed.len()), false));
     if installed.is_empty() {

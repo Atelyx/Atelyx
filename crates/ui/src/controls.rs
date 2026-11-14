@@ -1,4 +1,4 @@
-//! 基础控件：按钮 / 图标按钮 / 列表行 / 徽标 / 复选框 / 分段 tab / 空态 / 分隔线 / 输入框 / 进度条。
+//! 基础控件：按钮 / 图标按钮 / 列表行 / 徽标 / 卡片 / 复选框 / 分段 tab / 空态 / 分隔线与色点 / 输入框 / 进度条。
 //!
 //! 颜色与尺寸档取自 [`super::palette`]；
 //! hover/禁用反馈经 `button::Status` 在样式闭包内表达。
@@ -275,14 +275,7 @@ impl PillStatus {
 pub fn status_pill<M: 'static>(status: PillStatus, label: impl Into<String>) -> Element<'static, M> {
     let color = status.color();
     row![
-        container(space())
-            .width(Length::Fixed(6.0))
-            .height(Length::Fixed(6.0))
-            .style(move |_t| Style {
-                background: Some(color.into()),
-                border: border::rounded(3.0),
-                ..Style::default()
-            }),
+        dot(color, 6.0),
         text(label.into()).size(pal::fs_micro()).color(color),
     ]
     .spacing(6)
@@ -392,17 +385,45 @@ pub fn view_placeholder_action<M: Clone + 'static>(
     empty_state_body(icon_name, title, desc.into(), action, None, EMPTY_ICON_BOX_LG, EMPTY_ICON_PX_LG)
 }
 
-/// 水平分隔线（`subtle` = 次级线色，用于工具条/分组分隔）。
-pub fn h_divider_subtle<M: 'static>() -> Element<'static, M> {
-    h_divider_with(pal::BORDER_SUBTLE)
+/// 卡片表面：三级底 + 中圆角；`padding` 为内容内衬（同一形态的内衬由调用方按行距给）。
+pub fn card<'a, M: 'a>(content: impl Into<Element<'a, M>>, padding: Padding) -> Element<'a, M> {
+    container(content)
+        .width(Length::Fill)
+        .padding(padding)
+        .style(|_t| Style {
+            background: Some(pal::BG_TERTIARY.into()),
+            border: border::rounded(pal::RADIUS_MD),
+            ..Style::default()
+        })
+        .into()
 }
 
-fn h_divider_with<M: 'static>(color: iced::Color) -> Element<'static, M> {
+/// 1px 分隔线：`vertical` 取轴向，`length` 取轴向长度（另一轴固定 1px），颜色按层级由调用方给。
+pub fn divider<M: 'static>(vertical: bool, color: Color, length: Length) -> Element<'static, M> {
+    let line = container(space()).style(move |_t| Style {
+        background: Some(color.into()),
+        ..Style::default()
+    });
+    if vertical {
+        line.width(Length::Fixed(1.0)).height(length).into()
+    } else {
+        line.width(length).height(Length::Fixed(1.0)).into()
+    }
+}
+
+/// 水平分隔线（`subtle` = 次级线色，用于工具条/分组分隔）。
+pub fn h_divider_subtle<M: 'static>() -> Element<'static, M> {
+    divider(false, pal::BORDER_SUBTLE, Length::Fill)
+}
+
+/// 色点（直径 size，满圆）：协作色 / 状态点共用。
+pub fn dot<M: 'static>(color: Color, size: f32) -> Element<'static, M> {
     container(space())
-        .width(Length::Fill)
-        .height(Length::Fixed(1.0))
+        .width(Length::Fixed(size))
+        .height(Length::Fixed(size))
         .style(move |_t| Style {
             background: Some(color.into()),
+            border: border::rounded(size / 2.0),
             ..Style::default()
         })
         .into()

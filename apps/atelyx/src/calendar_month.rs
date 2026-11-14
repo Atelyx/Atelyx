@@ -10,8 +10,8 @@ use atelyx_core::calendar::CalendarItem;
 
 use crate::calendar_actions::CalendarMsg;
 use crate::calendar_grid;
-use crate::calendar_view::{display_month, dot, item_color, today};
-use crate::ui::UiMsg;
+use crate::calendar_view::{display_month, item_color, today};
+use crate::ui::controls;
 use crate::ui::palette as pal;
 use crate::ui::text;
 use crate::{App, Message};
@@ -108,7 +108,7 @@ fn day_cell(
         body = body.push(
             container(
                 row![
-                    dot(c, ITEM_DOT),
+                    controls::dot(c, ITEM_DOT),
                     text(crate::layout_view::ellipsize(&it.title, ITEM_TEXT_MAX_W, pal::fs_micro()))
                         .size(pal::fs_micro())
                         .color(pal::TEXT_PRIMARY),
@@ -128,19 +128,16 @@ fn day_cell(
     if extra > 0 {
         // 溢出条目不可见：悬停「+N」提示被隐藏的日程数
         let label = format!("还有 {extra} 条日程");
-        body = body.push(
+        body = body.push(crate::layout_view::with_tip(
             mouse_area(
                 text(format!("+{extra}"))
                     .size(pal::fs_micro())
                     .color(pal::TEXT_MUTED),
-            )
-            .on_enter(Message::Ui(UiMsg::HoverTip {
-                window,
-                label: label.clone(),
-                box_px: ITEM_TIP_BOX,
-            }))
-            .on_exit(Message::Ui(UiMsg::HoverTipEnd { window, label })),
-        );
+            ),
+            window,
+            label,
+            ITEM_TIP_BOX,
+        ));
     }
     button(
         container(body)

@@ -204,7 +204,7 @@ pub fn recent_view(app: &App, _window: iced::window::Id) -> Element<'_, Message>
             RecentKind::Canvas => crate::registry::doc_icon("atlx"),
         };
         col = col.push(
-            container(
+            controls::card(
                 button(
                     row![
                         icon(kind_icon, 14.0, pal::TEXT_MUTED),
@@ -229,14 +229,8 @@ pub fn recent_view(app: &App, _window: iced::window::Id) -> Element<'_, Message>
                 .padding(0.0)
                 .style(controls::row_style(false, pal::RADIUS_MD))
                 .on_press(Message::OpenFile(e.file.clone())),
-            )
-            .width(Length::Fill)
-            .padding(Padding::ZERO.horizontal(10.0).vertical(8.0))
-            .style(|_t| iced::widget::container::Style {
-                background: Some(pal::BG_TERTIARY.into()),
-                border: iced::border::rounded(pal::RADIUS_MD),
-                ..iced::widget::container::Style::default()
-            }),
+                Padding::ZERO.horizontal(10.0).vertical(8.0),
+            ),
         );
     }
     scroll::v(container(col).width(Length::Fill).height(Length::Fill))

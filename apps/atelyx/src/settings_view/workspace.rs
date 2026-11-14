@@ -3,7 +3,7 @@
 use iced::widget::{column, container};
 use iced::{Element, Length, Padding};
 
-use crate::layout_view::PopupState;
+use crate::layout_view::{open_popup, PopupState};
 use crate::settings_view::{group_head, setting_row};
 use crate::ui::controls;
 use crate::ui::palette as pal;
@@ -39,7 +39,7 @@ pub fn view(app: &App, window: iced::window::Id) -> Element<'static, Message> {
     let trigger = controls::dropdown_trigger(
         &current,
         160.0,
-        (!space_mode).then(|| super::open_popup(app, window, PopupState::EntrySceneMenu)),
+        (!space_mode).then(|| open_popup(app, window, PopupState::EntrySceneMenu)),
     );
     let mut col = column![].spacing(8).padding(Padding::ZERO.horizontal(20.0));
     if space_mode {

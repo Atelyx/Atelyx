@@ -62,19 +62,6 @@ pub(crate) fn item_color(item: &CalendarItem) -> iced::Color {
         .unwrap_or(pal::ACCENT)
 }
 
-/// 圆点（直径 size）。
-pub(crate) fn dot(color: iced::Color, size: f32) -> Element<'static, Message> {
-    container(iced::widget::space())
-        .width(Length::Fixed(size))
-        .height(Length::Fixed(size))
-        .style(move |_| iced::widget::container::Style {
-            background: Some(color.into()),
-            border: iced::border::rounded(size / 2.0),
-            ..iced::widget::container::Style::default()
-        })
-        .into()
-}
-
 /// 顶部月份导航：‹ YYYY年M月 › 组偏左居中，「今天」贴右侧。
 fn nav_bar(app: &App, window: iced::window::Id) -> Element<'static, Message> {
     let (y, m) = display_month(app);

@@ -13,7 +13,6 @@ use crate::calendar_grid;
 use crate::calendar_view::display_month;
 use crate::ui::palette as pal;
 use crate::ui::text;
-use crate::ui::UiMsg;
 use crate::{App, Message, RepoKind};
 
 /// 热力图格子边长与间距。
@@ -166,22 +165,21 @@ fn heat_cell(window: iced::window::Id, days: i64, count: u32) -> Element<'static
         0 => pal::BG_TERTIARY,
         i => pal::ACCENT.scale_alpha(LEVEL_ALPHAS[(i - 1) as usize]),
     };
-    mouse_area(
-        container(space())
-            .width(Length::Fixed(CELL))
-            .height(Length::Fixed(CELL))
-            .style(move |_| Style {
-                background: Some(bg.into()),
-                border: border::rounded(3.0),
-                ..Style::default()
-            }),
-    )
-    .on_enter(Message::Ui(UiMsg::HoverTip {
+    crate::layout_view::with_tip(
+        mouse_area(
+            container(space())
+                .width(Length::Fixed(CELL))
+                .height(Length::Fixed(CELL))
+                .style(move |_| Style {
+                    background: Some(bg.into()),
+                    border: border::rounded(3.0),
+                    ..Style::default()
+                }),
+        ),
         window,
-        label: label.clone(),
-        box_px: CELL,
-    }))
-    .on_exit(Message::Ui(UiMsg::HoverTipEnd { window, label }))
+        label,
+        CELL,
+    )
     .into()
 }
 

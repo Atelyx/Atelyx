@@ -4,11 +4,11 @@
 use std::borrow::Cow;
 
 use iced::widget::{button, column, container, row, space};
-use iced::{Element, Length, Padding, Point, border, widget::container::Style};
+use iced::{Element, Length, Padding, border, widget::container::Style};
 
 use atelyx_core::plugin_runtime::ContributionSlot;
 
-use crate::layout_view::{PopupOpen, PopupState, parse_hex_color};
+use crate::layout_view::parse_hex_color;
 use crate::ui::controls;
 use crate::ui::icon::{icon, icon_stroke};
 use crate::ui::palette as pal;
@@ -224,21 +224,9 @@ pub fn settings_view<'a>(app: &'a App, window: iced::window::Id) -> Element<'a, 
     .width(Length::Fill)
     .height(Length::Fill);
 
-    row![aside, vline(), container(body).width(Length::Fill).height(Length::Fill)]
+    row![aside, controls::divider(true, pal::BORDER_SUBTLE, Length::Fill), container(body).width(Length::Fill).height(Length::Fill)]
         .width(Length::Fill)
         .height(Length::Fill)
-        .into()
-}
-
-/// 分隔竖线（左栏与内容区之间）。
-fn vline() -> Element<'static, Message> {
-    container(space())
-        .width(Length::Fixed(1.0))
-        .height(Length::Fill)
-        .style(|_t| Style {
-            background: Some(pal::BORDER_SUBTLE.into()),
-            ..Style::default()
-        })
         .into()
 }
 
@@ -277,7 +265,7 @@ pub fn setting_row(
     desc: &str,
     control: Element<'static, Message>,
 ) -> Element<'static, Message> {
-    card(
+    controls::card(
         row![
             column![
                 text(title.to_string())
@@ -292,33 +280,7 @@ pub fn setting_row(
         ]
         .spacing(12)
         .align_y(iced::alignment::Vertical::Center),
-    )
-}
-
-/// 设置页卡片容器（条目行 / 信息行的统一体块形态）。
-pub(crate) fn card(content: iced::widget::Row<'static, Message>) -> Element<'static, Message> {
-    container(content)
-        .width(Length::Fill)
-        .padding(Padding::ZERO.horizontal(12.0).vertical(10.0))
-        .style(|_t| Style {
-            background: Some(pal::BG_TERTIARY.into()),
-            border: border::rounded(pal::RADIUS_MD),
-            ..Style::default()
-        })
-        .into()
-}
-
-/// 光标锚定的弹层打开消息（设置页表单下拉统一入口）。
-pub(crate) fn open_popup(app: &App, window: iced::window::Id, state: PopupState) -> Message {
-    let cursor = app.cursor_for(window);
-    Message::PopupOpen(
-        window,
-        PopupOpen {
-            point: Point::new(cursor.x, cursor.y + 16.0),
-            flip_y: Some(cursor.y - 12.0),
-            state,
-            min_width: 0.0,
-        },
+        Padding::ZERO.horizontal(12.0).vertical(10.0),
     )
 }
 
@@ -357,7 +319,7 @@ fn collab_settings_view(app: &App, window: iced::window::Id) -> Element<'static,
         }
         Some(identity) => {
             col = col.push(group_head("登录身份", &identity.server_url, false));
-            col = col.push(card(
+            col = col.push(controls::card(
                 row![
                     icon("user", 14.0, pal::ACCENT),
                     text(identity.display_name.clone())
@@ -377,6 +339,7 @@ fn collab_settings_view(app: &App, window: iced::window::Id) -> Element<'static,
                 ]
                 .spacing(8)
                 .align_y(iced::alignment::Vertical::Center),
+                Padding::ZERO.horizontal(12.0).vertical(10.0),
             ));
             // 协作展示色（取色器选色；远端光标 / 名单同源）
             col = col.push(group_head("协作展示色", "远端光标 / 名单", false));
@@ -387,14 +350,7 @@ fn collab_settings_view(app: &App, window: iced::window::Id) -> Element<'static,
                 .and_then(|hex| parse_hex_color(&hex))
                 .unwrap_or(pal::TEXT_MUTED);
             let swatch_row = row![
-                container(space())
-                    .width(Length::Fixed(12.0))
-                    .height(Length::Fixed(12.0))
-                    .style(move |_t| Style {
-                        background: Some(color_swatch.into()),
-                        border: border::rounded(999.0),
-                        ..Style::default()
-                    }),
+                controls::dot(color_swatch, 12.0),
                 text(app.global.collab_color.clone().unwrap_or_else(|| "未指派".into()))
                     .size(pal::fs_caption())
                     .color(pal::TEXT_SECONDARY)
@@ -404,13 +360,16 @@ fn collab_settings_view(app: &App, window: iced::window::Id) -> Element<'static,
             ]
             .spacing(8)
             .align_y(iced::alignment::Vertical::Center);
-            col = col.push(card(row![button(swatch_row)
-                .width(Length::Fill)
-                .padding(0.0)
-                .style(controls::row_style(false, pal::RADIUS_SM))
-                .on_press(Message::ColorPicker(
-                    crate::color_picker_actions::ColorPickerMsg::OpenCollab { window },
-                ))]));
+            col = col.push(controls::card(
+                row![button(swatch_row)
+                    .width(Length::Fill)
+                    .padding(0.0)
+                    .style(controls::row_style(false, pal::RADIUS_SM))
+                    .on_press(Message::ColorPicker(
+                        crate::color_picker_actions::ColorPickerMsg::OpenCollab { window },
+                    ))],
+                Padding::ZERO.horizontal(12.0).vertical(10.0),
+            ));
             // 设备会话
             col = col.push(group_head("设备会话", &format!("{} 台在线记录", app.space_devices.len()), false));
             for d in &app.space_devices {
@@ -425,7 +384,7 @@ fn collab_settings_view(app: &App, window: iced::window::Id) -> Element<'static,
                     )
                     .into()
                 };
-                col = col.push(card(
+                col = col.push(controls::card(
                     row![
                         icon(
                             if d.current { "monitor-check" } else { "monitor" },
@@ -444,6 +403,7 @@ fn collab_settings_view(app: &App, window: iced::window::Id) -> Element<'static,
                     ]
                     .spacing(8)
                     .align_y(iced::alignment::Vertical::Center),
+                    Padding::ZERO.horizontal(12.0).vertical(10.0),
                 ));
             }
             if app.space_devices.is_empty() {

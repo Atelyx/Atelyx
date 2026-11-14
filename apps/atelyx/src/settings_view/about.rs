@@ -100,7 +100,7 @@ fn info_card(
     subline: Element<'static, Message>,
     action: Element<'static, Message>,
 ) -> Element<'static, Message> {
-    container(
+    controls::card(
         row![
             container(icon(icon_name, 14.0, pal::ACCENT))
                 .width(Length::Fixed(30.0))
@@ -125,15 +125,8 @@ fn info_card(
         ]
         .spacing(12)
         .align_y(Vertical::Center),
+        Padding::ZERO.horizontal(12.0).vertical(10.0),
     )
-    .width(Length::Fill)
-    .padding(Padding::ZERO.horizontal(12.0).vertical(10.0))
-    .style(|_t| iced::widget::container::Style {
-        background: Some(pal::BG_TERTIARY.into()),
-        border: iced::border::rounded(pal::RADIUS_MD),
-        ..iced::widget::container::Style::default()
-    })
-    .into()
 }
 
 

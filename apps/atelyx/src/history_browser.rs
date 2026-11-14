@@ -281,15 +281,12 @@ fn version_row(v: &HistoryVersion, viewer: bool, expanded: bool, window: iced::w
     // AI 编辑版本：动作后标 AI 徽标（悬停给 Agent 名；作者行仍显示操作者）
     if let Some(editor) = &v.editor {
         let label = format!("由 AI（{}）编辑", editor.agent_name);
-        head = head.push(
-            iced::widget::mouse_area(controls::badge("AI", pal::ACCENT_SOFT, pal::ACCENT))
-                .on_enter(Message::Ui(crate::ui::UiMsg::HoverTip {
-                    window,
-                    label: label.clone(),
-                    box_px: 18.0,
-                }))
-                .on_exit(Message::Ui(crate::ui::UiMsg::HoverTipEnd { window, label })),
-        );
+        head = head.push(crate::layout_view::with_tip(
+            iced::widget::mouse_area(controls::badge("AI", pal::ACCENT_SOFT, pal::ACCENT)),
+            window,
+            label,
+            18.0,
+        ));
     }
     head = head
         .push(text(author_line(v)).size(pal::fs_micro()).color(pal::TEXT_SECONDARY))
@@ -320,30 +317,21 @@ fn version_row(v: &HistoryVersion, viewer: bool, expanded: bool, window: iced::w
             });
         let widget = if viewer { widget } else { widget.on_press(Message::History(HistoryBrowserMsg::Ask(seq))) };
         if viewer {
-            iced::widget::mouse_area(widget)
-                .on_enter(Message::Ui(crate::ui::UiMsg::HoverTip {
-                    window,
-                    label: "当前角色为只读".to_string(),
-                    box_px: controls::btn_sm().h,
-                }))
-                .on_exit(Message::Ui(crate::ui::UiMsg::HoverTipEnd {
-                    window,
-                    label: "当前角色为只读".to_string(),
-                }))
-                .into()
+            crate::layout_view::with_tip(
+                iced::widget::mouse_area(widget),
+                window,
+                "当前角色为只读",
+                controls::btn_sm().h,
+            )
+            .into()
         } else {
             widget.into()
         }
     };
-    container(row![expand, rollback].spacing(6).align_y(Vertical::Center))
-        .width(Length::Fill)
-        .padding(Padding::ZERO.horizontal(8.0).vertical(6.0))
-        .style(|_t| Style {
-            background: Some(pal::BG_TERTIARY.into()),
-            border: border::rounded(pal::RADIUS_MD),
-            ..Style::default()
-        })
-        .into()
+    controls::card(
+        row![expand, rollback].spacing(6).align_y(Vertical::Center),
+        Padding::ZERO.horizontal(8.0).vertical(6.0),
+    )
 }
 
 /// 回滚二段确认条。
