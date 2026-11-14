@@ -1478,15 +1478,14 @@ fn drop_indicator(kind: DropZone) -> Element<'static, Message> {
     }
 }
 
-/// 面板标签（自适应宽 + 视图图标 + 顶部圆角；激活 = 内容区同色底 + 2px 金下边盖线；
-/// 打开文件的 × = 关文件留标签）。
-fn panel_tab<'a>(
+/// 标签外框：视图图标 + 省略后的标题 + 锁标记 + 关文件 ×，激活时内容同色底并以 2px 金线压底。
+/// 关闭动作由调用方给（主窗面板与撕裂窗各有关文件消息）。
+fn tab_button<'a>(
     app: &'a App,
-    panel_id: &str,
     t: &'a TabItem,
-    active_tab_id: &Option<String>,
-) -> Element<'a, Message> {
-    let active = active_tab_id.as_deref() == Some(t.id.as_str());
+    active: bool,
+    close: Message,
+) -> iced::widget::Button<'a, Message> {
     let label = tab_label(app, &t.view);
     let has_file = (t.view == "note" && app.ui.last_note_file.is_some())
         || (t.view == "table" && app.ui.last_table_file.is_some())
@@ -1495,8 +1494,6 @@ fn panel_tab<'a>(
             .doc_open
             .as_ref()
             .is_some_and(|d| crate::plugin_actions::doc_view_kind(&d.plugin_id, &d.contribution_id) == t.view);
-    let window = app.main_id.unwrap_or(iced::window::Id::unique());
-    let cursor = app.cursor_for(window);
 
     let text_color = if active { pal::TEXT_PRIMARY } else { pal::TEXT_SECONDARY };
     let mut label_row = row![].spacing(4);
@@ -1523,7 +1520,7 @@ fn panel_tab<'a>(
                     border: border::rounded(pal::RADIUS_XS),
                     ..Default::default()
                 })
-                .on_press(Message::PanelTabFileClose(t.view.clone())),
+                .on_press(close),
         );
     }
 
@@ -1540,7 +1537,7 @@ fn panel_tab<'a>(
         .align_y(Vertical::Center);
 
     // 显式零内边距：估宽（approx_tab_width）按内容记账，默认内边距会让命中几何偏窄
-    let btn = button(container(column![
+    button(container(column![
         content,
         container(space())
             .width(Length::Fill)
@@ -1564,7 +1561,20 @@ fn panel_tab<'a>(
         border: iced::border::Border { color: iced::Color::TRANSPARENT, width: 0.0, radius: top_radius },
         ..Default::default()
     })
-    .on_press_maybe((!active).then(|| Message::PanelTab(panel_id.to_string(), t.id.clone())));
+}
+
+/// 面板标签（激活 = 内容区同色底 + 2px 金下边盖线；打开文件的 × = 关文件留标签）。
+fn panel_tab<'a>(
+    app: &'a App,
+    panel_id: &str,
+    t: &'a TabItem,
+    active_tab_id: &Option<String>,
+) -> Element<'a, Message> {
+    let active = active_tab_id.as_deref() == Some(t.id.as_str());
+    let window = app.main_id.unwrap_or(iced::window::Id::unique());
+    let cursor = app.cursor_for(window);
+    let btn = tab_button(app, t, active, Message::PanelTabFileClose(t.view.clone()))
+        .on_press_maybe((!active).then(|| Message::PanelTab(panel_id.to_string(), t.id.clone())));
 
     // 按下候选经 PressReporter 上报（mouse_area 对被按钮捕获的按下事件不触发）；
     // 锁定标签右键仍开菜单（iced mouse_area 无 maybe 变体），条目全部禁用表达锁定语义
@@ -2211,84 +2221,12 @@ pub fn detached_view<'a>(
             tab_row = tab_row.push(insertion_marker());
         }
         let active = w.active_tab_id.as_deref() == Some(t.id.as_str());
-        let label = tab_label(app, &t.view);
-        let has_file = (t.view == "note" && app.ui.last_note_file.is_some())
-            || (t.view == "table" && app.ui.last_table_file.is_some())
-            || (t.view == "canvas" && app.ui.last_canvas_file.is_some())
-            || app
-                .doc_open
-                .as_ref()
-                .is_some_and(|d| crate::plugin_actions::doc_view_kind(&d.plugin_id, &d.contribution_id) == t.view);
-        let text_color = if active { pal::TEXT_PRIMARY } else { pal::TEXT_SECONDARY };
-        let mut label_row = row![].spacing(4);
-        label_row = label_row.push(icon_stroke(&view_icon(app, &t.view), 13.0, text_color, 2.0));
-        label_row = label_row.push(
-            text(ellipsize(&label, UiMetrics::TAB_TEXT_MAX_W, 12.0))
-                .size(pal::fs_caption())
-                .color(text_color),
-        );
-        if t.locked {
-            label_row = label_row.push(icon("lock", 9.0, text_color));
-        }
-        if has_file && !t.locked {
-            label_row = label_row.push(
-                button(icon("x", 11.0, pal::TEXT_MUTED))
-                    .padding(2.0)
-                    .style(|_t, status| button::Style {
-                        background: None,
-                        text_color: if matches!(status, button::Status::Hovered | button::Status::Pressed) {
-                            pal::TEXT_MUTED.scale_alpha(0.7)
-                        } else {
-                            pal::TEXT_MUTED
-                        },
-                        border: border::rounded(pal::RADIUS_XS),
-                        ..Default::default()
-                    })
-                    .on_press(Message::DetachedTabFileClose(t.view.clone())),
-            );
-        }
-        let top_radius = iced::border::Radius {
-            top_left: pal::RADIUS_SM,
-            top_right: pal::RADIUS_SM,
-            bottom_right: 0.0,
-            bottom_left: 0.0,
-        };
-        let content = container(label_row)
-            .height(Length::Fill)
-            .padding(Padding::ZERO.horizontal(8.0))
-            .align_y(Vertical::Center);
+        let btn = tab_button(app, t, active, Message::DetachedTabFileClose(t.view.clone()))
+            .on_press_maybe((!active).then(|| Message::DetachedTab(w.id.clone(), t.id.clone())));
         tab_row = tab_row.push(controls::PressReporter::new(
-            mouse_area(
-                button(container(column![
-                    content,
-                    container(space())
-                        .width(Length::Fill)
-                        .height(Length::Fixed(2.0))
-                        .style(move |_t| Style {
-                            background: if active { Some(pal::ACCENT.into()) } else { None },
-                            ..Style::default()
-                        }),
-                ])
-                .height(Length::Fill))
-                .padding(0.0)
-                .height(Length::Fixed(UiMetrics::TAB_BAR_H))
-                .style(move |_t, status| button::Style {
-                    background: if active {
-                        Some(pal::BG_PRIMARY.into())
-                    } else if matches!(status, button::Status::Hovered | button::Status::Pressed) {
-                        Some(pal::HOVER.into())
-                    } else {
-                        None
-                    },
-                    border: iced::border::Border { color: iced::Color::TRANSPARENT, width: 0.0, radius: top_radius },
-                    ..Default::default()
-                })
-                .on_press_maybe(
-                    (!active).then(|| Message::DetachedTab(w.id.clone(), t.id.clone())),
-                ),
-            )
-            .on_right_press(ctx_popup(window, cursor, PopupState::DetachedTabContext { window_id: w.id.clone(), tab_id: t.id.clone(), }))
-            .into(),
+            mouse_area(btn)
+                .on_right_press(ctx_popup(window, cursor, PopupState::DetachedTabContext { window_id: w.id.clone(), tab_id: t.id.clone(), }))
+                .into(),
             Message::DetachedTabPress {
                 window_id: w.id.clone(),
                 tab_id: t.id.clone(),
