@@ -129,7 +129,6 @@ fn info_card(
     )
 }
 
-
 /// 检查更新行的说明文案（随流程态变化）。
 fn update_subline(app: &App, version: &str) -> Element<'static, Message> {
     let label = match &app.update {
