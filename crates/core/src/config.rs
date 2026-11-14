@@ -104,7 +104,7 @@ pub fn read_required<T: DeserializeOwned + Default>(path: &Path, tag: &str) -> R
 }
 
 /// 原子写 JSON（pretty 覆盖整文件）。
-pub fn write<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
+pub fn write<T: Serialize + ?Sized>(path: &Path, value: &T) -> Result<(), String> {
     let json = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
     crate::vault::atomic_write(path, &json)
 }

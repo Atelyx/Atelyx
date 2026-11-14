@@ -73,7 +73,7 @@ pub(crate) fn read_state(dir: &Path) -> Result<Value, String> {
         Ok(value) => Ok(value),
         Err(e) => {
             // 备份失败即报错：留不下原文还按空数据继续，后续写盘会覆盖掉它
-            if crate::vault::backup_corrupt_config(&path, "plugin-state").is_none() {
+            if crate::config::backup(&path, "plugin-state").is_none() {
                 return Err(format!("插件数据损坏且原文备份失败，已中止读取以免覆盖原文：{e}"));
             }
             Ok(Value::Null)

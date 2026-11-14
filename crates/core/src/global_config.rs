@@ -2,7 +2,7 @@
 //!
 //! 读写口径与仓库配置一致：读路径解析失败先备份原文再降级为空，写路径原子覆盖整文件。
 
-use crate::vault::{atomic_write, backup_corrupt_config};
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -213,39 +213,19 @@ impl GlobalConfig {
 /// 读全局配置：文件缺失回落空配置；解析失败先备份原文再降级为空，并回传备份文件名。
 ///
 /// 为什么读路径必须备份：本配置走「读 → 改 → 写」整文件覆盖，读到的空配置会被写回磁盘，
-/// 等于一次外部编辑/磁盘异常就静默清空最近仓库列表。备份失败即报错（与仓库配置同口径）——
-/// 留不下原文还按空配置继续，调用方紧接着就会用空配置覆盖它。
+/// 等于一次外部编辑/磁盘异常就静默清空最近仓库列表。
 pub fn read_global_config(path: &Path) -> Result<(GlobalConfig, Option<String>), String> {
-    let raw = match std::fs::read_to_string(path) {
-        Ok(raw) => raw,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok((GlobalConfig::default(), None))
-        }
-        Err(e) => return Err(format!("读取全局配置失败：{e}")),
-    };
-    match serde_json::from_str::<GlobalConfig>(&raw) {
-        Ok(config) => Ok((config, None)),
-        Err(e) => {
-            let Some(backup) = backup_corrupt_config(path, "global") else {
-                return Err(format!(
-                    "全局配置已损坏且原文备份失败（{}），已中止读取以免覆盖原文：{e}",
-                    path.display()
-                ));
-            };
-            eprintln!(
-                "[global] 全局配置损坏，已备份为 {}（按空配置继续）：{e}",
-                backup.display()
-            );
-            let name = backup.file_name().map(|n| n.to_string_lossy().into_owned());
-            Ok((GlobalConfig::default(), name))
-        }
-    }
+    crate::config::read::<GlobalConfig>(
+        path,
+        "global",
+        crate::config::OnMissing::Default,
+        crate::config::OnCorrupt::BackupDefault,
+    )
 }
 
 /// 写全局配置（原子覆盖整文件）。
 pub fn write_global_config(path: &Path, config: &GlobalConfig) -> Result<(), String> {
-    let json = serde_json::to_string_pretty(config).map_err(|e| e.to_string())?;
-    atomic_write(path, &json)
+    crate::config::write(path, config)
 }
 
 #[cfg(test)]

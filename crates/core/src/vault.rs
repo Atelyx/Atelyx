@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use nanoid::nanoid;
@@ -1626,23 +1626,6 @@ pub struct VaultConfig {
 /// 路径（相对 `.atelyx/`）与读写的唯一出口：命令层不自行拼路径，避免两处口径漂移。
 const VAULT_CONFIG_FILE: &str = "config.json";
 
-/// 把损坏的 JSON 配置文件改名备份（原文完整保留供排查/人工取回），返回备份路径（失败 = None）。
-///
-/// 为什么读路径必须备份而不是直接降级为空：这些文件都走「读 → 改 → 写」或被后续写盘整文件覆盖，
-/// 读到的空状态会被写回磁盘，等于一次外部编辑/磁盘异常就静默清空用户配置。
-/// 名字带随机后缀：同名目标在 Windows 上会被 rename 静默替换，固定名会让新的损坏冲掉旧备份。
-/// `tag` 只用于日志前缀（便于按模块定位）。
-pub fn backup_corrupt_config(path: &Path, tag: &str) -> Option<PathBuf> {
-    let name = path.file_name()?.to_string_lossy().into_owned();
-    let backup = path.with_file_name(format!("{name}.corrupt-{}", nanoid::nanoid!()));
-    match std::fs::rename(path, &backup) {
-        Ok(()) => Some(backup),
-        Err(e) => {
-            eprintln!("[{tag}] 损坏配置备份失败：{e}");
-            None
-        }
-    }
-}
 
 /// 读仓库级配置（文件不存在返回空覆盖）。
 pub fn read_vault_config(root: &Path) -> Result<VaultConfig, String> {
@@ -1658,53 +1641,18 @@ pub fn read_vault_config(root: &Path) -> Result<VaultConfig, String> {
 /// 空配置覆盖它——原文既没留档、用户也没被告知。
 pub fn read_vault_config_with_backup(root: &Path) -> Result<(VaultConfig, Option<String>), String> {
     let path = root.join(".atelyx").join(VAULT_CONFIG_FILE);
-    if !path.exists() {
-        return Ok((VaultConfig::default(), None));
-    }
-    let json = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    match serde_json::from_str::<VaultConfig>(&json) {
-        Ok(config) => Ok((config, None)),
-        Err(e) => {
-            let Some(backup) = backup_corrupt_config(&path, "vault") else {
-                return Err(format!(
-                    "仓库配置已损坏且原文备份失败（{}），已中止读取以免覆盖原文：{e}",
-                    path.display()
-                ));
-            };
-            eprintln!(
-                "[vault] 仓库配置损坏，已备份为 {}（按空配置继续）：{e}",
-                backup.display()
-            );
-            let name = backup
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned());
-            Ok((VaultConfig::default(), name))
-        }
-    }
+    crate::config::read::<VaultConfig>(
+        &path,
+        "vault",
+        crate::config::OnMissing::Default,
+        crate::config::OnCorrupt::BackupDefault,
+    )
 }
 
 pub fn write_vault_config(root: &Path, config: &VaultConfig) -> Result<(), String> {
-    let path = root.join(".atelyx").join(VAULT_CONFIG_FILE);
-    let json = serde_json::to_string_pretty(config).map_err(|e| e.to_string())?;
-    atomic_write(&path, &json)
+    crate::config::write(&root.join(".atelyx").join(VAULT_CONFIG_FILE), config)
 }
 
-/// 配置补丁写盘的按路径互斥锁表：`patch_vault_config` 是「读—合并—写」三步，
-/// 两个写入者（多窗口设置页、另一个仓库的设置在途写）交错会让先写者的字段被后写者的旧基线覆盖。
-/// 锁只覆盖该文件的读改写过程，不进任何长期状态；条目按路径保留（每条仅一把空锁，量级可忽略）。
-static CONFIG_PATCH_LOCKS: OnceLock<Mutex<HashMap<PathBuf, std::sync::Arc<Mutex<()>>>>> =
-    OnceLock::new();
-
-/// 取某个配置文件的写锁（同一路径共享一把；调用方持锁覆盖整个读改动周期，不可在持锁期间 await）。
-fn config_patch_lock(path: &Path) -> std::sync::Arc<Mutex<()>> {
-    let table = CONFIG_PATCH_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
-    // 锁表自身的锁必须短暂：中毒（持锁者 panic）时取回内层继续，不让一次 panic 永久拒绝写盘
-    let mut table = table.lock().unwrap_or_else(|e| e.into_inner());
-    table
-        .entry(path.to_path_buf())
-        .or_insert_with(|| std::sync::Arc::new(Mutex::new(())))
-        .clone()
-}
 
 /// 删除「残留明文 key」的指令只在合并后仍不是同步模式时生效。
 ///
@@ -1750,45 +1698,21 @@ fn guard_stale_key_deletion(base_json: &str, patch: &serde_json::Value) -> serde
 /// 的字段必须保留**磁盘上的当前值**。撕裂窗口持独立 store 副本，其内存态可能落后于主窗口刚写入的值；
 /// 若以内存态为基线整文件写，会把主窗口的改动整片抹掉（供应商丢失即此因）。
 ///
-/// 基线损坏**不得当空配置继续**：那会把「仅含补丁字段」的配置写回，其余字段（providers/model…）
-/// 永久删除且不留档（调用方只在进仓时读一次配置，之后文件被外部改坏不会有第二次读来触发备份）。
-/// 故这里与读路径同口径：先备份原文，再按空基线继续——用户下次改动设置时重新配置，但原文可人工取回。
-/// 损坏判定走类型级反序列化（不只「是不是 JSON」）：合法 JSON 但字段类型错（`{"providers":"oops"}`）
-/// 同样会让合并失败并静默丢掉用户改动，必须与解析失败同口径先留档。备份失败则直接报错不写盘——
-/// 留不下原文就继续覆盖，等于把用户配置一次性抹掉且无从取回。
+/// 基线损坏不得当空配置继续（否则只剩补丁字段写回、其余字段永久删除且不留档），故与读路径同口径
+/// 先备份再按空基线合并；损坏判定走类型级反序列化（合法 JSON 但字段类型错同样会丢掉用户改动）。
 pub fn patch_vault_config(root: &Path, patch: &serde_json::Value) -> Result<Option<String>, String> {
     let path = root.join(".atelyx").join(VAULT_CONFIG_FILE);
     // 读—合并—写整体持锁（同路径串行）：并发的两次补丁不会各自基于旧基线合并，谁都不会丢字段
-    let lock = config_patch_lock(&path);
+    let lock = crate::config::lock(&path);
     let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-    let mut corrupt_backup: Option<String> = None;
-    let base = match std::fs::read_to_string(&path) {
-        Ok(raw) => {
-            if serde_json::from_str::<VaultConfig>(&raw).is_err() {
-                let Some(backup) = backup_corrupt_config(&path, "vault") else {
-                    return Err(
-                        "仓库配置已损坏且原文备份失败，已取消本次保存（检查文件权限后重试）".to_string(),
-                    );
-                };
-                eprintln!(
-                    "[vault] 仓库配置损坏，已备份为 {}（按空配置继续合并补丁）",
-                    backup.display()
-                );
-                corrupt_backup = backup
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned());
-                // 损坏原文已留档：本次按空基线合并（继续拿损坏文本当基线会连补丁一起失败，
-                // 用户的这次改动也会丢掉）
-                String::new()
-            } else {
-                raw
-            }
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        // 读不进来（句柄被占用/权限）不能当空基线：会静默清空配置，如实上报调用方
-        Err(e) => return Err(format!("读取仓库配置失败：{e}")),
-    };
-    let merged = merge_vault_config(&base, &guard_stale_key_deletion(&base, patch))?;
+    let (base, corrupt_backup) = crate::config::read::<VaultConfig>(
+        &path,
+        "vault",
+        crate::config::OnMissing::Default,
+        crate::config::OnCorrupt::BackupDefault,
+    )?;
+    let base_json = serde_json::to_string(&base).map_err(|e| e.to_string())?;
+    let merged = merge_vault_config(&base_json, &guard_stale_key_deletion(&base_json, patch))?;
     write_vault_config(root, &merged)?;
     Ok(corrupt_backup)
 }
@@ -1840,22 +1764,15 @@ pub fn merge_json_objects(
 // ===== 系统提示词标记（.atelyx/prompt-notes.json，独立于 config.json）=====
 // config.json 只保存仓库配置；标记列表单独落盘，避免混入配置字段。
 
-/// 读系统提示词标记列表（不存在/解析失败返回空——手编辑损坏不阻塞，与 config 同策略）。
-/// 内容为相对仓库根的 `.md` 路径数组（如 `["笔记/提示词.md"]`）。
+/// 读系统提示词标记列表（不存在 = 空；损坏先备份原文再按空继续）。
+/// 内容为相对仓库根的 `.md` 路径数组（如 `["笔记/提示词.md"]`）——本文件可重建，不因损坏阻塞进仓。
 pub fn read_prompt_notes_file(root: &Path) -> Result<Vec<String>, String> {
-    let path = root.join(".atelyx").join("prompt-notes.json");
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let json = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    Ok(serde_json::from_str::<Vec<String>>(&json).unwrap_or_default())
+    crate::config::read_or_default(&root.join(".atelyx").join("prompt-notes.json"), "prompt-notes")
 }
 
 /// 写系统提示词标记列表（原子写 .atelyx/prompt-notes.json）。
 pub fn write_prompt_notes_file(root: &Path, files: &[String]) -> Result<(), String> {
-    let path = root.join(".atelyx").join("prompt-notes.json");
-    let json = serde_json::to_string_pretty(files).map_err(|e| e.to_string())?;
-    atomic_write(&path, &json)
+    crate::config::write(&root.join(".atelyx").join("prompt-notes.json"), files)
 }
 
 // ===== Agent 配置（.atelyx/agents.json，独立于 config.json）=====
@@ -2052,7 +1969,7 @@ pub fn read_agents_file(root: &Path) -> Result<Vec<AgentConfig>, String> {
     match parse_agents_json(&json) {
         Ok(agents) => Ok(agents),
         Err(e) => {
-            let Some(backup) = backup_corrupt_config(&path, "agents") else {
+            let Some(backup) = crate::config::backup(&path, "agents") else {
                 return Err(format!(
                     "Agent 配置已损坏且原文备份失败（{}），已中止读取以免覆盖原文：{e}",
                     path.display()
@@ -2080,14 +1997,9 @@ pub fn write_agents_file(root: &Path, agents: &[AgentConfig]) -> Result<(), Stri
 // ===== 文件夹图标颜色（.atelyx/folder-colors.json，独立于 config.json）=====
 // config.json 只保存仓库配置；文件夹颜色单独落盘，避免混入配置字段（与 prompt-notes.json 同策略）。
 
-/// 读文件夹图标颜色映射（相对仓库根路径 → hex 色；不存在/解析失败返回空——手编辑损坏不阻塞）。
+/// 读文件夹图标颜色映射（相对仓库根路径 → hex 色；不存在 = 空；损坏先备份原文再按空继续）。
 pub fn read_folder_colors_file(root: &Path) -> Result<HashMap<String, String>, String> {
-    let path = root.join(".atelyx").join("folder-colors.json");
-    if !path.exists() {
-        return Ok(HashMap::new());
-    }
-    let json = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    Ok(serde_json::from_str::<HashMap<String, String>>(&json).unwrap_or_default())
+    crate::config::read_or_default(&root.join(".atelyx").join("folder-colors.json"), "folder-colors")
 }
 
 /// 写文件夹图标颜色映射（原子写 .atelyx/folder-colors.json）。
@@ -2095,9 +2007,7 @@ pub fn write_folder_colors_file(
     root: &Path,
     colors: &HashMap<String, String>,
 ) -> Result<(), String> {
-    let path = root.join(".atelyx").join("folder-colors.json");
-    let json = serde_json::to_string_pretty(colors).map_err(|e| e.to_string())?;
-    atomic_write(&path, &json)
+    crate::config::write(&root.join(".atelyx").join("folder-colors.json"), colors)
 }
 
 // ===== AI 对话面板会话（.atelyx/对话历史/*.jsonl + *.meta.json）=====
@@ -2169,6 +2079,8 @@ pub struct EditorChatModelOverride {
 #[derive(Serialize, Deserialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatMetaFile {
+    /// 缺失仍可解析：schema 只是演进标记，缺一段标记不足以否定一份结构完整的覆盖。
+    #[serde(default)]
     pub schema: String,
     #[serde(default)]
     pub model_override: Option<EditorChatModelOverride>,
@@ -2180,15 +2092,11 @@ pub struct ChatMetaFile {
     pub agent_override: Option<String>,
 }
 
-/// 读面板级覆盖（.atelyx/editor-chats-meta.json；不存在/解析失败返回默认）。
+/// 读面板级覆盖（.atelyx/editor-chats-meta.json；不存在 = 默认，损坏先备份原文再按默认继续）。
 pub fn read_editor_chats_meta_file(root: &Path) -> Result<ChatMetaFile, String> {
-    let path = root.join(EDITOR_CHATS_META_FILE);
-    if !path.exists() {
-        return Ok(ChatMetaFile::default());
-    }
-    let json = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    let file = serde_json::from_str::<ChatMetaFile>(&json).unwrap_or_default();
-    // schema 校验：只认 v1——旧版存量视为空覆盖（不报错）
+    let file: ChatMetaFile =
+        crate::config::read_or_default(&root.join(EDITOR_CHATS_META_FILE), "editor-chats-meta")?;
+    // schema 校验：只认 v1——旧版存量视为空覆盖（不报错，也不当损坏备份）
     if file.schema != EDITOR_CHATS_META_SCHEMA {
         return Ok(ChatMetaFile::default());
     }
@@ -2197,9 +2105,7 @@ pub fn read_editor_chats_meta_file(root: &Path) -> Result<ChatMetaFile, String> 
 
 /// 写面板级覆盖（原子写 .atelyx/editor-chats-meta.json）。
 pub fn write_editor_chats_meta_file(root: &Path, file: &ChatMetaFile) -> Result<(), String> {
-    let path = root.join(EDITOR_CHATS_META_FILE);
-    let json = serde_json::to_string_pretty(file).map_err(|e| e.to_string())?;
-    atomic_write(&path, &json)
+    crate::config::write(&root.join(EDITOR_CHATS_META_FILE), file)
 }
 
 // ===== 会话消息正文（.atelyx/对话历史/*.jsonl）=====
@@ -2345,7 +2251,7 @@ fn chat_meta_path(root: &Path, file: &str) -> Result<PathBuf, String> {
     safe_join(root, file, false)
 }
 
-/// 读会话元数据侧车（不存在/损坏返回 None——缺省标题/Agent）。
+/// 读会话元数据侧车（不存在 = None；损坏先备份原文再按 None 继续——缺省标题/Agent）。
 pub fn read_chat_session_meta_file(
     root: &Path,
     file: &str,
@@ -2354,8 +2260,14 @@ pub fn read_chat_session_meta_file(
     if !path.exists() {
         return Ok(None);
     }
-    let json = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    Ok(serde_json::from_str(&json).ok())
+    let (meta, backup) = crate::config::read::<ChatSessionMeta>(
+        &path,
+        "chat-meta",
+        crate::config::OnMissing::Default,
+        crate::config::OnCorrupt::BackupDefault,
+    )?;
+    // 损坏（已留档）与缺失同视：会话照常可读，只是回到无标题/无 Agent 的状态
+    Ok(backup.is_none().then_some(meta))
 }
 
 /// 写会话元数据侧车（自动建目录 + 原子写）。
@@ -2364,9 +2276,7 @@ pub fn write_chat_session_meta_file(
     file: &str,
     meta: &ChatSessionMeta,
 ) -> Result<(), String> {
-    let path = chat_meta_path(root, file)?;
-    let json = serde_json::to_string_pretty(meta).map_err(|e| e.to_string())?;
-    atomic_write(&path, &json)
+    crate::config::write(&chat_meta_path(root, file)?, meta)
 }
 
 /// 删会话元数据侧车（不存在视为成功——幂等）。
@@ -5277,6 +5187,56 @@ mod agents_file_tests {
         assert!(read_agents_file(&root).is_err());
         write_raw(&root, r#"{"schema":"atelyx-agents/v1"}"#);
         assert!(read_agents_file(&root).is_err());
+    }
+}
+
+#[cfg(test)]
+mod config_files_tests {
+    use super::test_support::TempDir;
+    use super::*;
+
+    fn backups(root: &Path, name: &str) -> Vec<String> {
+        std::fs::read_dir(root.join(".atelyx"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(&format!("{name}.corrupt-")))
+            .collect()
+    }
+
+    /// 可重建的配置清单损坏时必须留档：读成空再被下一次保存写回，等于静默清空用户设置。
+    #[test]
+    fn corrupt_roster_files_are_backed_up_not_silently_emptied() {
+        let root = TempDir::new("cfg-roster-corrupt");
+        let dir = root.join(".atelyx");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        std::fs::write(dir.join("prompt-notes.json"), "{ 坏").unwrap();
+        assert!(read_prompt_notes_file(&root).unwrap().is_empty());
+        assert_eq!(backups(&root, "prompt-notes.json").len(), 1);
+        assert!(!dir.join("prompt-notes.json").exists(), "原文已让开");
+
+        std::fs::write(dir.join("folder-colors.json"), "不是 JSON").unwrap();
+        assert!(read_folder_colors_file(&root).unwrap().is_empty());
+        assert_eq!(backups(&root, "folder-colors.json").len(), 1);
+
+        std::fs::write(dir.join("editor-chats-meta.json"), "{\"schema\":").unwrap();
+        let meta = read_editor_chats_meta_file(&root).unwrap();
+        assert!(meta.model_override.is_none());
+        assert_eq!(backups(&root, "editor-chats-meta.json").len(), 1);
+    }
+
+    /// schema 标记缺失的文件仍在口径内：只更新 schema 版本不算损坏，不产生备份。
+    #[test]
+    fn editor_meta_without_schema_is_not_corrupt() {
+        let root = TempDir::new("cfg-editor-meta-noschema");
+        let dir = root.join(".atelyx");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("editor-chats-meta.json"), r#"{"agentOverride":"a"}"#).unwrap();
+        let meta = read_editor_chats_meta_file(&root).unwrap();
+        // 缺 schema 按空覆盖处理（与 schema 不符同视），但不留备份
+        assert!(meta.agent_override.is_none());
+        assert!(backups(&root, "editor-chats-meta.json").is_empty());
     }
 }
 

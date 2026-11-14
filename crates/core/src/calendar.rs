@@ -41,34 +41,13 @@ fn calendar_path(root: &Path) -> PathBuf {
     root.join(CALENDAR_FILE)
 }
 
-/// 读取手动日程：缺失 → 空列表；其余失败一律 Err，不降级为空清单。
+/// 读取手动日程：缺失 → 空列表；损坏 → 备份原文后仍返回 Err（数据在备份里，本体待用户处理后重写）。
 ///
 /// 为什么不按空继续：本地写路径是「读 → 改 → 整文件覆盖」，读失败按空继续会在用户
-/// 下一次添加日程时把既有日程整文件清空。损坏时原文经 `backup_corrupt_config` 改名
-/// 留档后仍返回 Err（数据在备份里，本体待用户处理后重写）。
+/// 下一次添加日程时把既有日程整文件清空。
 pub fn read_calendar(root: &Path) -> Result<Vec<CalendarItem>, String> {
-    let path = calendar_path(root);
-    let raw = match std::fs::read_to_string(&path) {
-        Ok(raw) => raw,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(format!("读取日程文件失败（{}）：{e}", path.display())),
-    };
-    match serde_json::from_str::<CalendarFile>(&raw) {
-        Ok(file) => Ok(file.items),
-        Err(e) => {
-            let Some(backup) = crate::vault::backup_corrupt_config(&path, "calendar") else {
-                return Err(format!(
-                    "日程文件损坏且原文备份失败（{}），已中止读取以免覆盖原文：{e}",
-                    path.display()
-                ));
-            };
-            eprintln!("[calendar] 日程文件损坏，已备份为 {}：{e}", backup.display());
-            Err(format!(
-                "日程文件损坏，原文已备份为 {}，修复或删除后重试",
-                backup.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
-            ))
-        }
-    }
+    crate::config::read_or_error::<CalendarFile>(&calendar_path(root), "calendar")
+        .map(|file| file.items)
 }
 
 /// 条目清单 → 日程 JSON 原文（schema 包装；写盘与空间 meta 值共用同一编码）。
@@ -97,9 +76,15 @@ pub fn parse_calendar_json_strict(raw: &str) -> Result<Vec<CalendarItem>, String
         .map_err(|e| format!("日程数据损坏：{e}"))
 }
 
-/// 全量写入手动日程（经 `vault::atomic_write` 原子落盘）。
+/// 全量写入手动日程（原子落盘，schema 包装与空间 meta 值同形）。
 pub fn write_calendar(root: &Path, items: &[CalendarItem]) -> Result<(), String> {
-    crate::vault::atomic_write(&calendar_path(root), &calendar_json(items)?)
+    crate::config::write(
+        &calendar_path(root),
+        &CalendarFile {
+            schema: CALENDAR_SCHEMA.into(),
+            items: items.to_vec(),
+        },
+    )
 }
 
 /// 按 id 替换（保持原位）或追加条目。
