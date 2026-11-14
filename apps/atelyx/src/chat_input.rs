@@ -30,6 +30,7 @@ use crate::markdown_edit::{
 };
 use crate::markdown_view::is_cr;
 use crate::text_preedit::{self, Composed};
+use crate::ui::timing::{DOUBLE_CLICK_MS, DOUBLE_CLICK_SLOP};
 use crate::ui::palette as pal;
 use crate::Message;
 
@@ -43,7 +44,6 @@ const MAX_HEIGHT: f32 = 240.0;
 const BLINK_MS: u128 = 500;
 /// 撤销栈深度上限（全文快照，超限淘汰最旧）。
 const UNDO_DEPTH: usize = 200;
-use crate::ui::timing::{DOUBLE_CLICK_MS, DOUBLE_CLICK_SLOP};
 
 /// 输入草稿真相（应用层持有；部件按帧投影）。
 #[derive(Default, Debug, Clone)]

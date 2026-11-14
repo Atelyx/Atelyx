@@ -26,9 +26,9 @@ use atelyx_core::plugin_runtime::{
 };
 
 use crate::plugin_paint::{self, PaintCtx};
+use crate::ui::timing::{DOUBLE_CLICK_SLOP, PLUGIN_DOUBLE_CLICK_MS};
 use crate::{App, Message};
 
-use crate::ui::timing::{PLUGIN_DOUBLE_CLICK_MS, DOUBLE_CLICK_SLOP};
 /// 标识哈希（FNV-1a；面 / 面 id 的身份判定用，不参与协议）。
 fn hash_id(value: &str) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
