@@ -12,8 +12,8 @@ use iced::{Task, window};
 
 use atelyx_core::layout::{self, LayoutNode, LayoutOp};
 use atelyx_core::plugin_runtime::{
-    Contribution, ContributionSlot, DrawCommand, FrameInput, ImageSource, SurfaceKind,
-    WindowOpenParams, WindowUpdateParams,
+    Contribution, ContributionSlot, DrawCommand, FrameInput, ImageSource, PluginRuntime,
+    SurfaceKind, WindowOpenParams, WindowUpdateParams,
 };
 
 use crate::registry::{Registry, Snapshot};
@@ -97,23 +97,33 @@ pub fn surfaces_in_layout(app: &App) -> HashSet<(String, String)> {
     found
 }
 
-/// 布局变化后重算已挂面并差额通知插件：新出现的面发 attached，消失的面发 detached。
-/// 返回已挂面集合是否变化——未变化（改分割比例等）时调用方无需重投影。
-pub fn sync_surfaces(app: &mut App) -> bool {
-    let now = surfaces_in_layout(app);
-    if now == app.plugin_surfaces {
+/// 面挂载差分：新出现的面发 attached、消失的面发 detached，并记下新集合。
+/// 返回集合是否变化——未变化（改分割比例等）时调用方无需重投影。
+fn diff_surfaces(
+    plugins: &PluginRuntime,
+    mounted: &mut HashSet<(String, String)>,
+    now: HashSet<(String, String)>,
+    kind: SurfaceKind,
+) -> bool {
+    if *mounted == now {
         return false;
     }
-    for (plugin_id, surface_id) in now.difference(&app.plugin_surfaces) {
-        app.plugins
-            .notify_surface_attached(plugin_id, surface_id, SurfaceKind::Panel);
+    let added: Vec<(String, String)> = now.difference(mounted).cloned().collect();
+    let removed: Vec<(String, String)> = mounted.difference(&now).cloned().collect();
+    for (plugin_id, surface_id) in &added {
+        plugins.notify_surface_attached(plugin_id, surface_id, kind);
     }
-    let removed: Vec<(String, String)> = app.plugin_surfaces.difference(&now).cloned().collect();
     for (plugin_id, surface_id) in &removed {
-        app.plugins.notify_surface_detached(plugin_id, surface_id);
+        plugins.notify_surface_detached(plugin_id, surface_id);
     }
-    app.plugin_surfaces = now;
+    *mounted = now;
     true
+}
+
+/// 布局变化后重算已挂面并差额通知插件。
+pub fn sync_surfaces(app: &mut App) -> bool {
+    let now = surfaces_in_layout(app);
+    diff_surfaces(&app.plugins, &mut app.plugin_surfaces, now, SurfaceKind::Panel)
 }
 
 /// 设置贡献的挂载差分：注册即挂载（宿主立即回 attached，插件常驻设置面），
@@ -123,19 +133,12 @@ pub fn sync_settings_surfaces(app: &mut App) {
     let now: HashSet<(String, String)> = contributions_of(app, ContributionSlot::Settings)
         .map(|c| (c.plugin_id.clone(), c.id.clone()))
         .collect();
-    if now == app.plugin_settings_surfaces {
-        return;
-    }
-    for (plugin_id, surface_id) in now.difference(&app.plugin_settings_surfaces) {
-        app.plugins
-            .notify_surface_attached(plugin_id, surface_id, SurfaceKind::Settings);
-    }
-    let removed: Vec<(String, String)> =
-        app.plugin_settings_surfaces.difference(&now).cloned().collect();
-    for (plugin_id, surface_id) in &removed {
-        app.plugins.notify_surface_detached(plugin_id, surface_id);
-    }
-    app.plugin_settings_surfaces = now;
+    diff_surfaces(
+        &app.plugins,
+        &mut app.plugin_settings_surfaces,
+        now,
+        SurfaceKind::Settings,
+    );
 }
 
 /// 表格视图面挂载差分：面板里当前选中的插件表格视图即挂在表格面板上的面
@@ -149,20 +152,12 @@ pub fn sync_table_surfaces(app: &mut App) -> bool {
         .map(|(plugin_id, id)| (plugin_id.to_string(), id.to_string()))
         .into_iter()
         .collect();
-    if now == app.plugin_table_surfaces {
-        return false;
-    }
-    for (plugin_id, surface_id) in now.difference(&app.plugin_table_surfaces) {
-        app.plugins
-            .notify_surface_attached(plugin_id, surface_id, SurfaceKind::TableView);
-    }
-    let removed: Vec<(String, String)> =
-        app.plugin_table_surfaces.difference(&now).cloned().collect();
-    for (plugin_id, surface_id) in &removed {
-        app.plugins.notify_surface_detached(plugin_id, surface_id);
-    }
-    app.plugin_table_surfaces = now;
-    true
+    diff_surfaces(
+        &app.plugins,
+        &mut app.plugin_table_surfaces,
+        now,
+        SurfaceKind::TableView,
+    )
 }
 
 /// 唯一注册表的唯一重建入口：原生视图 + 插件贡献 + 文档类型 + 在册服务。
