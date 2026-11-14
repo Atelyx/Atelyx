@@ -29,9 +29,10 @@ pub(crate) const SERVICE_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 /// 能力总线自身的命名空间：不是可登记的服务，也不进目录。
 const BUS_NAMESPACE: &str = "service";
 
-/// 宿主保留方法：工具名册与结果回报由宿主记账，不能被外部服务实现截走。
-const HOST_OWNED: &[&str] =
-    &[method::ai::REGISTER_TOOL, method::ai::UNREGISTER_TOOL, method::ai::TOOL_RESULT];
+/// 宿主保留方法：工具名册与结果回报由宿主记账，不能被外部服务实现截走（名单在协议方法表）。
+fn is_host_owned(wire: &str) -> bool {
+    method::HOST_OWNED_METHODS.iter().any(|spec| spec.name == wire)
+}
 
 /// 一次调用的落点：服务不在目录里 / 走内置实现 / 转给外部提供者。
 #[derive(Clone, Debug, PartialEq)]
@@ -364,7 +365,7 @@ impl PluginRuntime {
     /// 普通方法的转发判定：服务段的提供者是外部插件时转给它；宿主保留方法恒走本地。
     pub(crate) fn forward_to(&self, service_name: &str, method_name: &str) -> Forward {
         let wire = format!("{service_name}.{method_name}");
-        if HOST_OWNED.contains(&wire.as_str()) {
+        if is_host_owned(&wire) {
             return Forward::Local;
         }
         let dir = self.services.lock().unwrap();
@@ -632,6 +633,17 @@ mod tests {
         assert!(info(&list, "vault").methods.contains(&"readText".to_string()));
         assert!(info(&list, "markdown").methods.contains(&"parse".to_string()));
         assert_eq!(info(&list, "vault").provider, None, "内置服务归宿主");
+    }
+
+    /// 宿主保留方法名单只有协议方法表一处：改表即改转发判定。
+    #[test]
+    fn host_owned_methods_come_from_the_protocol_table() {
+        for spec in method::HOST_OWNED_METHODS {
+            assert!(is_host_owned(spec.name), "{} 应归宿主本地实现", spec.name);
+        }
+        for name in [method::ai::CHAT_SEND, method::fs::READ_TEXT, method::vault::READ_TEXT] {
+            assert!(!is_host_owned(name), "{name} 不是宿主保留方法");
+        }
     }
 
     /// 内置服务是宿主 API：插件不能占用这些名字，只能登记新服务名。

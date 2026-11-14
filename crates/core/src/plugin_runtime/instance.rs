@@ -14,8 +14,8 @@ use atelyx_plugin_protocol::event;
 use atelyx_plugin_protocol::handshake::{self, HostInfo, InitializeParams, InitializeResult};
 use atelyx_plugin_protocol::manifest::Manifest;
 use atelyx_plugin_protocol::method::{
-    self, ContributionSlot, RegisterParams, SurfaceAttachedParams, SurfaceDetachedParams,
-    UnregisterParams,
+    self, ContributionSlot, MethodFace, RegisterParams, SurfaceAttachedParams,
+    SurfaceDetachedParams, UnregisterParams,
 };
 use atelyx_plugin_protocol::service::{self, CallParams, ResultParams};
 use atelyx_plugin_protocol::{frame, API_VERSION};
@@ -780,7 +780,7 @@ impl Instance {
         // 对话框由用户决定耗时（无上限），不能在读线程上等：分流为异步应答（结果由回填线程写回），
         // 读线程继续消费插件输出——否则对话框期间插件输出与退出上报都被拖住。
         // （http 有明确超时上限，按顺序处理不破「读线程串行处理请求」这条既有语义。）
-        if method == method::dialog::PICK_FILE || method == method::dialog::PICK_DIRECTORY {
+        if is_dialog_method(method) {
             self.handle_dialog_request(token, id, method, params);
             return;
         }
@@ -941,6 +941,11 @@ impl Instance {
         method_name: &str,
         params: &Value,
     ) {
+        // 面先于分派校验：表与 match 失配时不得把别的面当本地实现执行
+        if !is_shell_method(method_name) {
+            self.respond(id, None, Some(RpcError::failed("未知宿主服务请求")));
+            return;
+        }
         let runtime = self.runtime.lock().unwrap().clone();
         let Some(runtime) = runtime.upgrade() else {
             self.respond(id, None, Some(RpcError::failed("宿主服务不可用：宿主运行时不可用")));
@@ -1313,6 +1318,18 @@ impl Instance {
         name: &str,
         params: &Value,
     ) -> Result<Value, RpcError> {
+        // 面由方法表决定：壳侧方法即使误入这里也不执行本地实现，按原有分流失败文案收场。
+        if let Some(spec) = method::method_spec(name) {
+            match spec.face {
+                MethodFace::Core => {}
+                MethodFace::Shell | MethodFace::Ui => {
+                    return Err(RpcError::failed("宿主服务请求须走异步应答路径"));
+                }
+                MethodFace::Dialog => {
+                    return Err(RpcError::failed("对话框请求须走异步应答路径"));
+                }
+            }
+        }
         match name {
             handshake::INITIALIZE => self.on_initialize(params),
             event::SUBSCRIBE => self.on_subscribe(params),
@@ -1483,13 +1500,21 @@ impl Instance {
             // 壳侧服务方法不在这里执行（`handle_request` 已分流到异步应答）；走到这里说明分流
             // 名单与分派名单失配，按可读失败收场而不是当成未知方法
             other if is_shell_method(other) || is_ui_method(other) => {
+                #[cfg(test)]
+                assert_core_method_handled(other);
                 Err(RpcError::failed("宿主服务请求须走异步应答路径"))
             }
             // 已声明但尚未实现的能力面：以可读失败收场，不静默成功
             other if capability::permission_for(other).is_some() => {
+                #[cfg(test)]
+                assert_core_method_handled(other);
                 Err(RpcError::failed(format!("能力面尚未实现：{other}")))
             }
-            other => Err(RpcError::failed(format!("未知方法：{other}"))),
+            other => {
+                #[cfg(test)]
+                assert_core_method_handled(other);
+                Err(RpcError::failed(format!("未知方法：{other}")))
+            }
         }
     }
 
@@ -1978,72 +2003,36 @@ struct SpawnSlot {
     pending: Vec<HostEvent>,
 }
 
-/// 走壳侧异步应答的方法（对话编排 / 剪贴板 / 仓库读写 / 表格 / 托盘 / 协作 / 滚动 / 文字量算）。
+/// 走壳侧异步应答的方法（对话编排 / 剪贴板 / 仓库读写 / 表格 / 托盘 / 协作 / 文字量算）。
 ///
-/// 分流判定与「不得同步分派」的防御共用这一份清单：两处各写一遍时，新增方法只改一处会
-/// 落进「未知方法」——功能静默不可用，编译与测试都发现不了。
+/// 落点由协议的方法表决定：分流判定与「不得同步分派」的防御共用同一份数据，不再各写一遍名单。
 fn is_shell_method(method_name: &str) -> bool {
-    matches!(
-        method_name,
-        method::ai::CHAT_SEND
-            | method::ai::CHAT_STOP
-            | method::ai::CHAT_HISTORY
-            | method::ai::CHAT_RENAME
-            | method::ai::CHAT_DELETE
-            | method::ai::CHAT_COMPACT
-            | method::ai::MODELS
-            | method::ai::AGENTS
-            | method::clipboard::WRITE_TEXT
-            | method::clipboard::READ_TEXT
-            | method::clipboard::READ_IMAGE
-            | method::clipboard::WRITE_IMAGE
-            | method::vault::READ_TEXT
-            | method::vault::WRITE_TEXT
-            | method::vault::READ_BINARY
-            | method::vault::WRITE_BINARY
-            | method::vault::IMPORT_FILE
-            | method::vault::IMAGE_INFO
-            | method::vault::LIST
-            | method::vault::EXISTS
-            | method::vault::REMOVE
-            | method::vault::RENAME
-            | method::table::SNAPSHOT
-            | method::table::UPDATE_CELL
-            | method::table::ADD_ROW
-            | method::table::REMOVE_ROW
-            | method::table::SELECT_ROW
-            | method::table::SET_CELL_IMAGE
-            | method::tray::SET_ITEMS
-            | method::collab::PEERS
-            | method::collab::SEND
-            | method::collab::META_GET
-            | method::collab::META_PATCH
-            | method::query::MEASURE
-            | method::query::THEME
-            | method::editor::SELECTION
-            | method::editor::REPLACE_SELECTION
-            | method::history::ACTIVITY
-            | method::history::DAY
-            | method::history::OPEN
-    )
+    method::method_spec(method_name).is_some_and(|spec| spec.face == MethodFace::Shell)
 }
 
 /// 走壳侧界面服务的方法（插件窗口）：落地依赖 OS 窗口副作用，只由壳执行。
 fn is_ui_method(method_name: &str) -> bool {
-    matches!(
-        method_name,
-        method::window::OPEN
-            | method::window::CLOSE
-            | method::window::UPDATE
-            | method::window::SHOW
-            | method::window::MINIMIZE
-            | method::window::TOGGLE_MAXIMIZE
-            | method::window::BEGIN_DRAG
-    )
+    method::method_spec(method_name).is_some_and(|spec| spec.face == MethodFace::Ui)
+}
+
+/// 走壳侧系统对话框的方法：结果由用户操作决定，不能在读线程上等。
+fn is_dialog_method(method_name: &str) -> bool {
+    method::method_spec(method_name).is_some_and(|spec| spec.face == MethodFace::Dialog)
+}
+
+/// 测试下兜底分支命中 Core 方法即说明方法表与分派失配，直接 panic；生产仍返回可读失败。
+#[cfg(test)]
+fn assert_core_method_handled(name: &str) {
+    if method::method_spec(name).is_some_and(|spec| spec.face == MethodFace::Core) {
+        panic!("Core 方法 {name} 未在 dispatch_builtin 分派");
+    }
 }
 
 /// 按方法名解析对话框请求（`dialog.pickFile` / `dialog.pickDirectory`）。
 fn dialog_request(method_name: &str, params: &Value) -> Result<DialogRequest, RpcError> {
+    if !is_dialog_method(method_name) {
+        return Err(RpcError::failed(format!("不是对话框方法：{method_name}")));
+    }
     match method_name {
         method::dialog::PICK_FILE => {
             let p: method::PickFileParams = parse(params)?;
@@ -2610,7 +2599,10 @@ api_version = 1
     #[test]
     fn unknown_method_fails() {
         let (_tmp, instance) = make_instance(Vec::new());
-        assert!(instance.dispatch("nope.method", &Value::Null).is_err());
+        for name in ["nope.method", "vault.notAMethod"] {
+            let error = instance.dispatch(name, &Value::Null).unwrap_err();
+            assert_eq!(error.message, format!("未知方法：{name}"), "未知方法文案不变");
+        }
     }
 
     /// `service.call` 的内置路径与直接调用同一条实现；未知服务 / 未知方法都以错误原因常量收场。
@@ -2938,6 +2930,75 @@ api_version = 1
         // 关闭表格 = 缓存清空，迟到订阅者不再补发旧路径
         runtime.on_table_changed(None);
         assert_eq!(runtime.current_table_path(), None);
+    }
+
+    /// 表里每个 Core 方法都必须由 `dispatch_builtin` 接住：空参数只允许参数 / 环境错误，
+    /// 不允许落进「未知方法 / 能力面尚未实现 / 走异步应答」。
+    #[test]
+    fn core_face_methods_reach_the_builtin_dispatch() {
+        let (_tmp, instance) = make_instance(Vec::new());
+        for spec in method::method_specs().filter(|spec| spec.face == MethodFace::Core) {
+            match instance.dispatch(spec.name, &Value::Null) {
+                Ok(_) => {}
+                Err(error) => {
+                    assert!(
+                        !error.message.starts_with("未知方法")
+                            && !error.message.starts_with("能力面尚未实现")
+                            && error.message != "宿主服务请求须走异步应答路径"
+                            && error.message != "对话框请求须走异步应答路径",
+                        "{} 没有落到实现：{}",
+                        spec.name,
+                        error.message
+                    );
+                }
+            }
+        }
+    }
+
+    /// Shell / Ui / Dialog 名单全部来自同一张表：每个方法只落在自己的面。
+    #[test]
+    fn shell_ui_and_dialog_lists_follow_the_method_table() {
+        let mut counts = [0usize; 3];
+        for spec in method::method_specs() {
+            match spec.face {
+                MethodFace::Shell => {
+                    counts[0] += 1;
+                    assert!(is_shell_method(spec.name), "{}", spec.name);
+                    assert!(!is_ui_method(spec.name), "{}", spec.name);
+                    assert!(!is_dialog_method(spec.name), "{}", spec.name);
+                }
+                MethodFace::Ui => {
+                    counts[1] += 1;
+                    assert!(is_ui_method(spec.name), "{}", spec.name);
+                    assert!(!is_shell_method(spec.name), "{}", spec.name);
+                    assert!(!is_dialog_method(spec.name), "{}", spec.name);
+                }
+                MethodFace::Dialog => {
+                    counts[2] += 1;
+                    assert!(is_dialog_method(spec.name), "{}", spec.name);
+                    assert!(!is_shell_method(spec.name), "{}", spec.name);
+                    assert!(!is_ui_method(spec.name), "{}", spec.name);
+                }
+                MethodFace::Core => {}
+            }
+        }
+        assert!(counts.iter().all(|count| *count > 0), "每个壳侧面都应有方法：{counts:?}");
+    }
+
+    /// 面与同步分派失配时不得执行本地实现：壳侧方法按原有分流失败文案收场。
+    #[test]
+    fn non_core_faces_are_refused_by_the_builtin_dispatch() {
+        let (_tmp, instance) = make_instance(Vec::new());
+        for spec in method::method_specs().filter(|spec| spec.face != MethodFace::Core) {
+            let error = instance
+                .dispatch(spec.name, &Value::Null)
+                .expect_err("壳侧方法不得在同步分派里执行");
+            let expected = match spec.face {
+                MethodFace::Dialog => "对话框请求须走异步应答路径",
+                _ => "宿主服务请求须走异步应答路径",
+            };
+            assert_eq!(error.message, expected, "{}", spec.name);
+        }
     }
 
     #[test]

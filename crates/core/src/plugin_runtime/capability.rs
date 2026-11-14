@@ -9,7 +9,6 @@ use std::path::Path;
 
 use atelyx_plugin_protocol::manifest::PermissionKey;
 use atelyx_plugin_protocol::method;
-use atelyx_plugin_protocol::service;
 use serde_json::Value;
 
 /// 方法所属能力面。`None` = 不占权限声明的方法：运行时时序方法（握手 / 事件订阅 / 视图提交 /
@@ -17,48 +16,7 @@ use serde_json::Value;
 /// 变换；能力总线自身的入口（`service.*`）也不属任何能力类——被调用的方法按其自身归类审计。
 /// OS 资源消耗型方法（起进程 / 开窗等）一律占权限。
 pub(crate) fn permission_for(name: &str) -> Option<PermissionKey> {
-    use method::{
-        ai, clipboard, collab, dialog, editor, fs, history, http, notification, process, shortcut,
-        state, table, tray, vault, window,
-    };
-    use PermissionKey::*;
-    match name {
-        fs::PRIVATE_DIR | fs::READ_TEXT | fs::WRITE_TEXT | fs::READ_BINARY | fs::WRITE_BINARY
-        | fs::REMOVE | fs::EXISTS | fs::LIST => Some(Files),
-        vault::READ_TEXT | vault::WRITE_TEXT | vault::READ_BINARY | vault::WRITE_BINARY
-        | vault::IMPORT_FILE | vault::IMAGE_INFO | vault::LIST | vault::EXISTS | vault::REMOVE
-        | vault::RENAME => Some(Files),
-        table::SNAPSHOT | table::UPDATE_CELL | table::ADD_ROW | table::REMOVE_ROW
-        | table::SELECT_ROW | table::SET_CELL_IMAGE => Some(Files),
-        process::SPAWN | process::WRITE_STDIN | process::CLOSE_STDIN | process::KILL => Some(Process),
-        state::READ | state::WRITE => Some(State),
-        notification::SHOW => Some(Notification),
-        tray::SET_ITEMS => Some(Tray),
-        shortcut::REGISTER | shortcut::UNREGISTER | shortcut::QUERY => Some(Shortcut),
-        clipboard::WRITE_TEXT | clipboard::READ_TEXT | clipboard::READ_IMAGE
-        | clipboard::WRITE_IMAGE => Some(Clipboard),
-        dialog::PICK_FILE | dialog::PICK_DIRECTORY => Some(Dialog),
-        http::REQUEST => Some(Network),
-        collab::PEERS | collab::SEND | collab::META_GET | collab::META_PATCH => Some(Collab),
-        // 读写当前笔记的选区即读写用户正文，按仓库内容权限归类
-        editor::SELECTION | editor::REPLACE_SELECTION => Some(Files),
-        // 活动统计取自当前仓库内容，同样按仓库内容权限归类
-        history::ACTIVITY | history::DAY | history::OPEN => Some(Files),
-        window::OPEN | window::CLOSE | window::UPDATE | window::SHOW | window::BEGIN_DRAG
-        | window::MINIMIZE | window::TOGGLE_MAXIMIZE => Some(Window),
-        ai::CHAT_SEND | ai::CHAT_STOP | ai::CHAT_HISTORY | ai::CHAT_RENAME | ai::CHAT_DELETE
-        | ai::CHAT_COMPACT | ai::MODELS | ai::AGENTS | ai::REGISTER_TOOL | ai::UNREGISTER_TOOL
-        | ai::TOOL_RESULT => Some(Ai),
-        // 解析只读插件递来的文本，不触碰宿主资源
-        method::markdown::PARSE => None,
-        // 能力总线入口：实际权限由目标方法自己承担
-        service::method::REGISTER
-        | service::method::UNREGISTER
-        | service::method::LIST
-        | service::method::CALL
-        | service::method::RESULT => None,
-        _ => None,
-    }
+    method::method_spec(name).and_then(|spec| spec.permission)
 }
 
 /// 读插件自持数据：文件不存在返回 `null`；解析失败先备份原文再按 `null`（绝不静默清空用户数据）。
@@ -91,6 +49,7 @@ pub(crate) fn write_state(dir: &Path, json: &Value) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use atelyx_plugin_protocol::service;
     use crate::vault::test_support::TempDir;
 
     #[test]
@@ -131,6 +90,15 @@ mod tests {
             service::method::RESULT,
         ] {
             assert_eq!(permission_for(name), None, "{name} 不属任何能力类");
+        }
+    }
+
+
+    /// 权限归类与协议方法表逐条一致（含不在目录里的宿主自持方法）。
+    #[test]
+    fn permission_lookup_covers_every_tabled_method() {
+        for spec in method::method_specs() {
+            assert_eq!(permission_for(spec.name), spec.permission, "{}", spec.name);
         }
     }
 

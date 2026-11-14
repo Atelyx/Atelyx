@@ -4,6 +4,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::manifest::PermissionKey;
+
 // ---------- 方法名常量 ----------
 
 pub mod view {
@@ -1750,6 +1752,145 @@ pub const BUILTIN_SERVICES: &[(&str, &[&str])] = &[
     ("history", &[history::ACTIVITY, history::DAY, history::OPEN]),
 ];
 
+/// 能力面方法的落点：宿主内同步实现、壳侧异步服务、壳侧窗口、壳侧对话框。
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MethodFace {
+    /// 宿主进程内直接实现。
+    Core,
+    /// 壳侧异步执行，结果由壳回填。
+    Shell,
+    /// 壳侧窗口操作，结果由壳回填。
+    Ui,
+    /// 壳侧系统对话框，结果由壳回填。
+    Dialog,
+}
+
+/// 一个能力面方法的路由面与权限归类；`name` 是全局唯一键。
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MethodSpec {
+    pub name: &'static str,
+    pub face: MethodFace,
+    pub permission: Option<PermissionKey>,
+}
+
+/// 宿主自持的方法：由宿主记账，不能被外部服务实现截走，故不进 [`BUILTIN_SERVICES`]。
+#[doc(hidden)]
+pub const HOST_OWNED_METHODS: &[MethodSpec] = &[
+    MethodSpec {
+        name: ai::REGISTER_TOOL,
+        face: MethodFace::Core,
+        permission: Some(PermissionKey::Ai),
+    },
+    MethodSpec {
+        name: ai::UNREGISTER_TOOL,
+        face: MethodFace::Core,
+        permission: Some(PermissionKey::Ai),
+    },
+    MethodSpec {
+        name: ai::TOOL_RESULT,
+        face: MethodFace::Core,
+        permission: Some(PermissionKey::Ai),
+    },
+];
+
+/// 服务级归类：同一服务下的方法同面同权限，方法名仍只在 [`BUILTIN_SERVICES`] 写一次。
+const SERVICE_SPECS: &[(&str, MethodFace, Option<PermissionKey>)] = &[
+    ("fs", MethodFace::Core, Some(PermissionKey::Files)),
+    ("process", MethodFace::Core, Some(PermissionKey::Process)),
+    ("vault", MethodFace::Shell, Some(PermissionKey::Files)),
+    ("collab", MethodFace::Shell, Some(PermissionKey::Collab)),
+    ("table", MethodFace::Shell, Some(PermissionKey::Files)),
+    ("state", MethodFace::Core, Some(PermissionKey::State)),
+    ("notification", MethodFace::Core, Some(PermissionKey::Notification)),
+    ("tray", MethodFace::Shell, Some(PermissionKey::Tray)),
+    ("shortcut", MethodFace::Core, Some(PermissionKey::Shortcut)),
+    ("clipboard", MethodFace::Shell, Some(PermissionKey::Clipboard)),
+    ("dialog", MethodFace::Dialog, Some(PermissionKey::Dialog)),
+    ("http", MethodFace::Core, Some(PermissionKey::Network)),
+    ("ai", MethodFace::Shell, Some(PermissionKey::Ai)),
+    ("window", MethodFace::Ui, Some(PermissionKey::Window)),
+    // 纯查询只读插件递来的量算请求，不触碰宿主资源
+    ("query", MethodFace::Shell, None),
+    // 解析只读插件递来的文本
+    ("markdown", MethodFace::Core, None),
+    // 读写当前笔记的选区即读写用户正文，按仓库内容权限归类
+    ("editor", MethodFace::Shell, Some(PermissionKey::Files)),
+    // 活动统计取自当前仓库内容，同样按仓库内容权限归类
+    ("history", MethodFace::Shell, Some(PermissionKey::Files)),
+];
+
+/// 新增内置服务若忘了登记面 / 权限，在这里编译失败（方法名仍只在目录写一次）。
+const _: () = assert_service_specs_cover_catalog();
+
+const fn assert_service_specs_cover_catalog() {
+    let mut index = 0;
+    while index < BUILTIN_SERVICES.len() {
+        let mut spec_index = 0;
+        let mut found = false;
+        while spec_index < SERVICE_SPECS.len() {
+            if str_eq(BUILTIN_SERVICES[index].0, SERVICE_SPECS[spec_index].0) {
+                found = true;
+            }
+            spec_index += 1;
+        }
+        assert!(found, "内置服务缺少面/权限归类");
+        index += 1;
+    }
+}
+
+const fn str_eq(left: &str, right: &str) -> bool {
+    let left = left.as_bytes();
+    let right = right.as_bytes();
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut index = 0;
+    while index < left.len() {
+        if left[index] != right[index] {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+fn service_spec(service: &str) -> Option<(MethodFace, Option<PermissionKey>)> {
+    SERVICE_SPECS
+        .iter()
+        .find(|(name, _, _)| *name == service)
+        .map(|(_, face, permission)| (*face, *permission))
+}
+
+/// 按方法名查表；未知方法返回 `None`，调用方据此维持原有的「未知方法」失败文案。
+#[doc(hidden)]
+pub fn method_spec(name: &str) -> Option<MethodSpec> {
+    if let Some(spec) = HOST_OWNED_METHODS.iter().find(|spec| spec.name == name) {
+        return Some(*spec);
+    }
+    let (service, _) = name.split_once('.')?;
+    let (face, permission) = service_spec(service)?;
+    let (_, methods) = BUILTIN_SERVICES
+        .iter()
+        .find(|(candidate, _)| *candidate == service)?;
+    let wire = *methods.iter().find(|candidate| **candidate == name)?;
+    Some(MethodSpec { name: wire, face, permission })
+}
+
+/// 遍历整张表：宿主自持方法在前，内置目录按原服务 / 方法顺序在后。
+#[doc(hidden)]
+pub fn method_specs() -> impl Iterator<Item = MethodSpec> {
+    HOST_OWNED_METHODS.iter().copied().chain(
+        BUILTIN_SERVICES.iter().flat_map(|(service, methods)| {
+            let (face, permission) = service_spec(service).unwrap_or((MethodFace::Core, None));
+            methods
+                .iter()
+                .map(move |name| MethodSpec { name: *name, face, permission })
+        }),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1986,5 +2127,67 @@ mod tests {
         legacy.as_object_mut().unwrap().remove("eventColors");
         let old: ThemeResult = serde_json::from_value(legacy).unwrap();
         assert!(old.event_colors.is_empty(), "旧宿主不带色板时按空清单");
+    }
+
+    #[test]
+    fn method_specs_are_unique_and_cover_the_catalog() {
+        let mut names = std::collections::HashSet::new();
+        for spec in method_specs() {
+            assert!(names.insert(spec.name), "方法名重复：{}", spec.name);
+        }
+        for (service, methods) in BUILTIN_SERVICES {
+            let (face, permission) = service_spec(service)
+                .unwrap_or_else(|| panic!("内置服务缺少面/权限归类：{service}"));
+            for name in *methods {
+                let spec = method_spec(name)
+                    .unwrap_or_else(|| panic!("目录方法查不到表项：{name}"));
+                assert_eq!(spec.name, *name);
+                assert_eq!(spec.face, face, "{name} 的落点应与服务一致");
+                assert_eq!(spec.permission, permission, "{name} 的权限应与服务一致");
+            }
+        }
+        for spec in HOST_OWNED_METHODS {
+            assert_eq!(method_spec(spec.name), Some(*spec), "宿主自持方法要能被查表");
+        }
+        assert_eq!(method_spec("vault.notAMethod"), None, "未知方法不得落进任何面");
+        assert_eq!(method_spec("notAService.x"), None);
+        assert_eq!(method_spec("initialize"), None, "运行时时序方法不在能力面表里");
+        for face in [
+            MethodFace::Core,
+            MethodFace::Shell,
+            MethodFace::Ui,
+            MethodFace::Dialog,
+        ] {
+            assert!(method_specs().any(|spec| spec.face == face), "{face:?} 一个方法都没有");
+        }
+    }
+
+    #[test]
+    fn method_specs_carry_the_expected_face_and_permission() {
+        let cases = [
+            (fs::READ_TEXT, MethodFace::Core, Some(PermissionKey::Files)),
+            (vault::READ_TEXT, MethodFace::Shell, Some(PermissionKey::Files)),
+            (table::SNAPSHOT, MethodFace::Shell, Some(PermissionKey::Files)),
+            (process::SPAWN, MethodFace::Core, Some(PermissionKey::Process)),
+            (state::READ, MethodFace::Core, Some(PermissionKey::State)),
+            (notification::SHOW, MethodFace::Core, Some(PermissionKey::Notification)),
+            (tray::SET_ITEMS, MethodFace::Shell, Some(PermissionKey::Tray)),
+            (shortcut::REGISTER, MethodFace::Core, Some(PermissionKey::Shortcut)),
+            (clipboard::READ_TEXT, MethodFace::Shell, Some(PermissionKey::Clipboard)),
+            (dialog::PICK_FILE, MethodFace::Dialog, Some(PermissionKey::Dialog)),
+            (http::REQUEST, MethodFace::Core, Some(PermissionKey::Network)),
+            (ai::CHAT_SEND, MethodFace::Shell, Some(PermissionKey::Ai)),
+            (ai::REGISTER_TOOL, MethodFace::Core, Some(PermissionKey::Ai)),
+            (window::OPEN, MethodFace::Ui, Some(PermissionKey::Window)),
+            (query::MEASURE, MethodFace::Shell, None),
+            (markdown::PARSE, MethodFace::Core, None),
+            (editor::SELECTION, MethodFace::Shell, Some(PermissionKey::Files)),
+            (history::ACTIVITY, MethodFace::Shell, Some(PermissionKey::Files)),
+            (collab::SEND, MethodFace::Shell, Some(PermissionKey::Collab)),
+        ];
+        for (name, face, permission) in cases {
+            let spec = method_spec(name).unwrap_or_else(|| panic!("查不到 {name}"));
+            assert_eq!((spec.face, spec.permission), (face, permission), "{name}");
+        }
     }
 }
