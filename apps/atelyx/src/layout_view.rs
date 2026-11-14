@@ -3220,22 +3220,14 @@ fn file_icon(app: &App, name: &str) -> Cow<'static, str> {
     Cow::Borrowed(file_icon_base(name))
 }
 
-/// 内置扩展名图标映射（无 app 上下文的调用点用）。
+/// 内置扩展名图标映射（无 app 上下文的调用点用；映射表在注册表旁，与最近/历史面板同源）。
 fn file_icon_base(name: &str) -> &'static str {
     let lower = name.to_lowercase();
     if atelyx_core::vault::image_ext_of(&lower).is_some() {
-        "image"
-    } else if lower.ends_with(".atlx") {
-        "palette"
-    } else if lower.ends_with(".canvas") {
-        "layout-dashboard"
-    } else if lower.ends_with(".md") {
-        "sticky-note"
-    } else if lower.ends_with(".atb") {
-        "table"
-    } else {
-        "paperclip"
+        return "image";
     }
+    let ext = lower.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
+    crate::registry::doc_icon(ext)
 }
 
 /// 扩展名标签（ATLX / CANVAS / MD / ATB / 大写扩展名；前导点文件 = 空串不显示）。

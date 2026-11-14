@@ -7,6 +7,20 @@ use std::borrow::Cow;
 use atelyx_core::plugin_runtime::service::ServiceInfo;
 use atelyx_core::plugin_runtime::{Contribution, ContributionSlot, DocTypeInfo, PluginSummary};
 
+/// 内容文件类型的图标键：按扩展名唯一映射。
+///
+/// 文件树、最近列表、仓库历史面板都读这一份——同类文档在不同面板用不同图标会让用户以为不是一种东西。
+/// 插件领域文档另走注册图标（见 `layout_view::file_icon`），不进这张表。
+pub fn doc_icon(ext: &str) -> &'static str {
+    match ext.trim_start_matches('.').to_ascii_lowercase().as_str() {
+        "md" => "sticky-note",
+        "atb" => "table",
+        "atlx" => "palette",
+        "canvas" => "layout-dashboard",
+        _ => "paperclip",
+    }
+}
+
 /// 条目类别：视图与服务各成一片，查询与展示共用同一结构。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EntryKind {

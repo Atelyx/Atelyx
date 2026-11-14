@@ -230,9 +230,9 @@ pub fn recent_view(app: &App, _window: iced::window::Id) -> Element<'_, Message>
         let parent = e.file.rsplit_once('/').map(|(d, _)| d.to_string()).unwrap_or_default();
         let time = relative_ts(e.opened_at, now);
         let kind_icon = match e.kind {
-            RecentKind::Note => "file-text",
-            RecentKind::Table => "table",
-            RecentKind::Canvas => "palette",
+            RecentKind::Note => crate::registry::doc_icon("md"),
+            RecentKind::Table => crate::registry::doc_icon("atb"),
+            RecentKind::Canvas => crate::registry::doc_icon("atlx"),
         };
         col = col.push(
             container(

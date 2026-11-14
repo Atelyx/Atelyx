@@ -384,12 +384,12 @@ fn group_card(g: &RepoHistoryGroup, window: iced::window::Id) -> Element<'static
     .into()
 }
 
-/// kind → 行首图标。
+/// kind → 行首图标（与文件树、最近列表同一张映射表）。
 pub(crate) fn kind_icon(kind: HistoryKind) -> &'static str {
     match kind {
-        HistoryKind::Note => "file-text",
-        HistoryKind::Table => "table",
-        HistoryKind::Canvas => "pencil",
+        HistoryKind::Note => crate::registry::doc_icon("md"),
+        HistoryKind::Table => crate::registry::doc_icon("atb"),
+        HistoryKind::Canvas => crate::registry::doc_icon("atlx"),
     }
 }
 
