@@ -7136,16 +7136,22 @@ impl App {
         let Some(root) = self.vault.root().ok() else { return Task::none() };
         let rel = rel.to_string();
         let gen = self.epoch();
+        let writes = self.vault.writes.clone();
         Task::perform(
             async move {
-                let mut notes = vault::read_prompt_notes_file(&root)?;
-                if let Some(i) = notes.iter().position(|n| n == &rel) {
-                    notes.remove(i);
-                } else {
-                    notes.push(rel.clone());
-                }
-                vault::write_prompt_notes_file(&root, &notes)?;
-                vault::read_prompt_notes_file(&root)
+                // 读改写在写盘队列执行序内完成：连续切换不会互相覆盖（后提交者胜）
+                writes
+                    .bulk(move || {
+                        let mut notes = vault::read_prompt_notes_file(&root)?;
+                        if let Some(i) = notes.iter().position(|n| n == &rel) {
+                            notes.remove(i);
+                        } else {
+                            notes.push(rel.clone());
+                        }
+                        vault::write_prompt_notes_file(&root, &notes)?;
+                        vault::read_prompt_notes_file(&root)
+                    })
+                    .await
             },
             move |result| Message::PromptNotesLoaded(gen, result),
         )

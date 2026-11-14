@@ -2141,18 +2141,17 @@ pub fn load_space_meta(app: &App) -> Task<Message> {
     let space_id = session.space_id;
     Task::perform(
         async move {
-            let config: vault::VaultConfig =
-                match client.get_file_text(&space_id, ".atelyx/config.json").await {
-                    Ok(raw) => serde_json::from_str(&raw).unwrap_or_default(),
-                    Err(_) => vault::VaultConfig::default(),
-                };
-            let prompts = read_json_string_list(&client, &space_id, ".atelyx/prompt-notes.json").await;
-            let colors: HashMap<String, String> =
-                match client.get_file_text(&space_id, ".atelyx/folder-colors.json").await {
-                    Ok(raw) => serde_json::from_str(&raw).unwrap_or_default(),
-                    Err(_) => HashMap::new(),
-                };
-            Ok((config, prompts, colors))
+            // 只读不进写链：单个文件读不到就按默认继续（界面显示空态），不会反向覆盖服务端
+            let config = read_space_json(&client, &space_id, ".atelyx/config.json")
+                .await
+                .unwrap_or_default();
+            let prompts = read_space_json(&client, &space_id, ".atelyx/prompt-notes.json")
+                .await
+                .unwrap_or_default();
+            let colors = read_space_json(&client, &space_id, ".atelyx/folder-colors.json")
+                .await
+                .unwrap_or_default();
+            Ok::<_, SpaceError>((config, prompts, colors))
         },
         move |result| {
             Message::VaultMetaLoaded(gen, result.map_err(err_text))
@@ -2160,11 +2159,33 @@ pub fn load_space_meta(app: &App) -> Task<Message> {
     )
 }
 
-async fn read_json_string_list(client: &SpaceClient, space_id: &str, path: &str) -> Vec<String> {
+/// 读空间 `.atelyx/` 下的 JSON 配置：缺失 = 默认值；损坏与请求失败都返回 Err。
+///
+/// 读失败不得按空继续：这些配置都是「读 → 改 → 整份 PUT」，一次网络抖动就写成空配置，
+/// 把团队共享的供应商 / 提示词标记 / 颜色映射整份清掉。
+async fn read_space_json<T: serde::de::DeserializeOwned + Default>(
+    client: &SpaceClient,
+    space_id: &str,
+    path: &str,
+) -> Result<T, SpaceError> {
     match client.get_file_text(space_id, path).await {
-        Ok(raw) => serde_json::from_str(&raw).unwrap_or_default(),
-        Err(_) => Vec::new(),
+        Ok(raw) => serde_json::from_str::<T>(&raw)
+            .map_err(|e| SpaceError::Network(format!("{path} 解析失败：{e}"))),
+        Err(SpaceError::NotFound) => Ok(T::default()),
+        Err(e) => Err(e),
     }
+}
+
+/// 写空间 `.atelyx/` 下的 JSON 配置（整份覆盖）。
+async fn write_space_json<T: serde::Serialize + ?Sized>(
+    client: &SpaceClient,
+    space_id: &str,
+    path: &str,
+    value: &T,
+) -> Result<(), SpaceError> {
+    let raw = serde_json::to_string(value)
+        .map_err(|e| SpaceError::Network(format!("{path} 序列化失败：{e}")))?;
+    client.put_file_text(space_id, path, &raw).await.map(|_| ())
 }
 
 /// 提示词标记切换（空间模式：读改写 `.atelyx/prompt-notes.json`）。
@@ -2176,15 +2197,14 @@ pub fn space_toggle_prompt_note(app: &mut App, rel: &str) -> Task<Message> {
     let space_id = session.space_id;
     Task::perform(
         async move {
-            let mut notes = read_json_string_list(&client, &space_id, ".atelyx/prompt-notes.json").await;
+            let mut notes: Vec<String> =
+                read_space_json(&client, &space_id, ".atelyx/prompt-notes.json").await?;
             if let Some(i) = notes.iter().position(|n| n == &rel) {
                 notes.remove(i);
             } else {
                 notes.push(rel.clone());
             }
-            client
-                .put_file_text(&space_id, ".atelyx/prompt-notes.json", &serde_json::to_string(&notes).unwrap_or_default())
-                .await?;
+            write_space_json(&client, &space_id, ".atelyx/prompt-notes.json", &notes).await?;
             Ok::<_, SpaceError>(notes)
         },
         move |result| Message::PromptNotesLoaded(gen, result.map_err(err_text)),
@@ -2201,17 +2221,12 @@ pub fn space_set_folder_color(app: &mut App, rel: &str, color: Option<String>) -
     Task::perform(
         async move {
             let mut colors: HashMap<String, String> =
-                match client.get_file_text(&space_id, ".atelyx/folder-colors.json").await {
-                    Ok(raw) => serde_json::from_str(&raw).unwrap_or_default(),
-                    Err(_) => HashMap::new(),
-                };
+                read_space_json(&client, &space_id, ".atelyx/folder-colors.json").await?;
             match color {
                 Some(c) => colors.insert(rel, c),
                 None => colors.remove(&rel),
             };
-            client
-                .put_file_text(&space_id, ".atelyx/folder-colors.json", &serde_json::to_string(&colors).unwrap_or_default())
-                .await?;
+            write_space_json(&client, &space_id, ".atelyx/folder-colors.json", &colors).await?;
             Ok::<_, SpaceError>(colors)
         },
         move |result| Message::FolderColorsLoaded(gen, result.map_err(err_text)),
@@ -2228,14 +2243,12 @@ pub fn space_set_sort(app: &mut App, sort: &str) -> Task<Message> {
     Task::perform(
         async move {
             let mut config: serde_json::Value =
-                match client.get_file_text(&space_id, ".atelyx/config.json").await {
-                    Ok(raw) => serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({})),
-                    Err(_) => serde_json::json!({}),
-                };
-            config["fileExplorerSort"] = serde_json::Value::String(value);
-            client
-                .put_file_text(&space_id, ".atelyx/config.json", &serde_json::to_string_pretty(&config).unwrap_or_default())
-                .await?;
+                read_space_json(&client, &space_id, ".atelyx/config.json").await?;
+            let Some(obj) = config.as_object_mut() else {
+                return Err(SpaceError::Network("空间配置不是 JSON 对象，已取消本次保存".into()));
+            };
+            obj.insert("fileExplorerSort".into(), serde_json::Value::String(value));
+            write_space_json(&client, &space_id, ".atelyx/config.json", &config).await?;
             Ok::<_, SpaceError>(())
         },
         move |result| Message::ConfigSaved(gen, result.map_err(err_text)),
@@ -2251,25 +2264,16 @@ pub fn space_patch_config(app: &mut App, patch: serde_json::Value) -> Task<Messa
     Task::perform(
         async move {
             let mut config: serde_json::Value =
-                match client.get_file_text(&space_id, ".atelyx/config.json").await {
-                    Ok(raw) => serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({})),
-                    Err(_) => serde_json::json!({}),
-                };
-            if let (serde_json::Value::Object(base), serde_json::Value::Object(keys)) =
-                (&mut config, patch)
-            {
-                // 与本地补丁同口径：null = 删键（缺省语义回正）
-                for (key, value) in keys {
-                    if value.is_null() {
-                        base.remove(&key);
-                    } else {
-                        base.insert(key, value);
-                    }
-                }
-            }
-            client
-                .put_file_text(&space_id, ".atelyx/config.json", &serde_json::to_string_pretty(&config).unwrap_or_default())
-                .await?;
+                read_space_json(&client, &space_id, ".atelyx/config.json").await?;
+            let Some(keys) = patch.as_object() else {
+                return Err(SpaceError::Network("配置补丁必须是 JSON 对象".into()));
+            };
+            let Some(base) = config.as_object_mut() else {
+                return Err(SpaceError::Network("空间配置不是 JSON 对象，已取消本次保存".into()));
+            };
+            // 与本地补丁同口径：null = 删键、两侧同为对象递归合并、其余整体替换
+            vault::merge_json_objects(base, keys);
+            write_space_json(&client, &space_id, ".atelyx/config.json", &config).await?;
             Ok::<_, SpaceError>(())
         },
         move |result| Message::ConfigSaved(gen, result.map_err(err_text)),
