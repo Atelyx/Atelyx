@@ -1585,10 +1585,9 @@ pub(crate) fn execute_vault_rename(
         crate::RepoKind::Local => match app.vault.root() {
             Ok(root) => {
                 let exclude = app.vault.exclude_folders().unwrap_or_default();
+                let queue = app.vault.writes.clone();
                 Task::perform(
-                    async move {
-                        run_blocking(move || rename_local(&root, &exclude, &from, &to)).await
-                    },
+                    async move { rename_local(&queue, &root, &exclude, &from, &to).await },
                     move |result| Message::Plugins(renamed_done(request_id, change, result)),
                 )
             }
@@ -1677,8 +1676,10 @@ fn remove_local(root: &std::path::Path, rel: &str) -> Result<serde_json::Value, 
     Ok(serde_json::json!({}))
 }
 
-/// 本地重命名 / 移动：目标不可已存在（case-only 改名豁免），引用由 core 事务同步。
-fn rename_local(
+/// 本地重命名 / 移动：目标不可已存在（case-only 改名豁免），引用由 core 事务同步
+/// （事务整体排在写盘队列里，不与在途保存交错）。
+async fn rename_local(
+    queue: &atelyx_core::write_queue::WriteQueue,
     root: &std::path::Path,
     exclude: &[String],
     from: &str,
@@ -1700,9 +1701,9 @@ fn rename_local(
         }
     }
     let sync = if is_dir {
-        atelyx_core::vault_refs::rename_folder_synced(root, exclude, from, to)?
+        atelyx_core::vault_refs::rename_folder_synced(queue, root, exclude, from, to).await?
     } else {
-        atelyx_core::vault_refs::rename_note_synced(root, exclude, from, to)?
+        atelyx_core::vault_refs::rename_note_synced(queue, root, exclude, from, to).await?
     };
     Ok((serde_json::json!({}), sync.rewritten))
 }
@@ -3132,8 +3133,9 @@ mod tests {
         std::fs::write(path, content).unwrap();
     }
 
-    #[test]
-    fn rename_local_rewrites_links_and_canvas_refs() {
+    #[tokio::test]
+    async fn rename_local_rewrites_links_and_canvas_refs() {
+        let queue = atelyx_core::write_queue::WriteQueue::new();
         let tmp = TempDir::new("plugin-rename");
         let root = &*tmp;
         write(root, "a.md", "正文");
@@ -3143,7 +3145,7 @@ mod tests {
             "c.atlx",
             r#"{"schema":"atelyx-canvas/v1","id":"c1","title":"c","nodes":[{"id":"n1","type":"text","x":0,"y":0,"data":{"file":"a.md"}}],"edges":[]}"#,
         );
-        let (_, rewritten) = rename_local(root, &[], "a.md", "dir/a.md").unwrap();
+        let (_, rewritten) = rename_local(&queue, root, &[], "a.md", "dir/a.md").await.unwrap();
         assert_eq!(rewritten, vec!["b.md".to_string()]);
         assert!(root.join("dir/a.md").exists());
         assert!(!root.join("a.md").exists());
@@ -3151,23 +3153,25 @@ mod tests {
         assert!(canvas.contains(r#""file": "dir/a.md""#), "{canvas}");
     }
 
-    #[test]
-    fn rename_local_rejects_occupied_target_and_keeps_source() {
+    #[tokio::test]
+    async fn rename_local_rejects_occupied_target_and_keeps_source() {
+        let queue = atelyx_core::write_queue::WriteQueue::new();
         let tmp = TempDir::new("plugin-rename-occupied");
         let root = &*tmp;
         write(root, "a.md", "源");
         write(root, "dir/a.md", "既有");
-        assert!(rename_local(root, &[], "a.md", "dir/a.md").is_err());
+        assert!(rename_local(&queue, root, &[], "a.md", "dir/a.md").await.is_err());
         assert_eq!(std::fs::read_to_string(root.join("a.md")).unwrap(), "源");
         assert_eq!(std::fs::read_to_string(root.join("dir/a.md")).unwrap(), "既有");
     }
 
-    #[test]
-    fn rename_local_rejects_moving_folder_into_itself() {
+    #[tokio::test]
+    async fn rename_local_rejects_moving_folder_into_itself() {
+        let queue = atelyx_core::write_queue::WriteQueue::new();
         let tmp = TempDir::new("plugin-rename-nested");
         let root = &*tmp;
         write(root, "dir/a.md", "内容");
-        assert!(rename_local(root, &[], "dir", "dir/sub").is_err());
+        assert!(rename_local(&queue, root, &[], "dir", "dir/sub").await.is_err());
         assert!(root.join("dir/a.md").exists());
     }
 

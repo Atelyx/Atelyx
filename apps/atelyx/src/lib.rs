@@ -6723,6 +6723,7 @@ impl App {
                 let old_for_task = old.clone();
                 let new_for_task = new.clone();
                 let Ok(exclude) = self.vault.exclude_folders() else { return Task::none() };
+                let queue = self.vault.writes.clone();
                 Task::perform(
                     async move {
                         // 目标已存在（排除自身）= 加序号静默落位，实际落点经 OpDone 回传
@@ -6752,7 +6753,8 @@ impl App {
                         if full == old_for_task {
                             return Ok((old_for_task.clone(), Vec::new()));
                         }
-                        let result = vault_refs::rename_note_synced(&root, &exclude, &old_for_task, &full)?;
+                        let result =
+                            vault_refs::rename_note_synced(&queue, &root, &exclude, &old_for_task, &full).await?;
                         Ok((full, result.rewritten))
                     },
                     move |result| match result {
@@ -6778,6 +6780,7 @@ impl App {
                 };
                 let old_for_task = old_dir.clone();
                 let Ok(exclude) = self.vault.exclude_folders() else { return Task::none() };
+                let queue = self.vault.writes.clone();
                 Task::perform(
                     async move {
                         // 目标已存在（排除自身）= 加序号静默落位；case-only 改名跳过查重
@@ -6803,7 +6806,8 @@ impl App {
                         if target == old_for_task {
                             return Ok((target, Vec::new()));
                         }
-                        let result = vault_refs::rename_folder_synced(&root, &exclude, &old_for_task, &target)?;
+                        let result =
+                            vault_refs::rename_folder_synced(&queue, &root, &exclude, &old_for_task, &target).await?;
                         Ok((target, result.rewritten))
                     },
                     move |result| match result {
@@ -7293,6 +7297,7 @@ impl App {
         let to_dir = to_dir.to_string();
         let to_dir_for_task = to_dir.clone();
         let is_dir_for_task = is_dir;
+        let queue = self.vault.writes.clone();
         Task::perform(
             async move {
                 let to_dir = to_dir_for_task;
@@ -7311,9 +7316,13 @@ impl App {
                     return Ok((new_rel, Vec::new()));
                 }
                 let rewritten = if is_dir_for_task {
-                    vault_refs::rename_folder_synced(&root, &exclude, &from, &new_rel)?.rewritten
+                    vault_refs::rename_folder_synced(&queue, &root, &exclude, &from, &new_rel)
+                        .await?
+                        .rewritten
                 } else {
-                    vault_refs::rename_note_synced(&root, &exclude, &from, &new_rel)?.rewritten
+                    vault_refs::rename_note_synced(&queue, &root, &exclude, &from, &new_rel)
+                        .await?
+                        .rewritten
                 };
                 Ok((new_rel, rewritten))
             },

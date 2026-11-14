@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::vault::{self, collect_md_link_updates, CanvasFile};
+use crate::write_queue::WriteQueue;
 
 /// 同步结果：`rewritten` = 内部链接被代写的 `.md` 相对路径清单（调用方据此刷新对应笔记）。
 pub struct SyncResult {
@@ -22,8 +23,29 @@ fn normalize_rel(p: &str) -> Result<String, String> {
 }
 
 /// 重命名/移动 `.md` 笔记并同步引用（画布精确匹配 + `.md` 链接精确匹配）。
+///
+/// 整个事务（扫描 → 改名 → 写回）占用写盘队列一个执行序位：排在它前面的在途保存先落地，
+/// 扫描读到的才是最新正文，排在它后面的写盘也不会插进事务中间。不排队就会交错——
+/// 保存晚一步落地，用改名前的旧链接盖掉刚写回的引用。
+pub async fn rename_note_synced(
+    queue: &WriteQueue,
+    root: &Path,
+    exclude: &[String],
+    old_file: &str,
+    new_file: &str,
+) -> Result<SyncResult, String> {
+    let root = root.to_path_buf();
+    let exclude = exclude.to_vec();
+    let old_file = old_file.to_string();
+    let new_file = new_file.to_string();
+    queue
+        .bulk(move || rename_note_synced_inner(&root, &exclude, &old_file, &new_file))
+        .await
+}
+
+/// 事务本体：调用方必须在写盘队列执行序内（见 [`rename_note_synced`]）。
 /// `exclude` = .md 链接扫描的排除目录；画布引用扫描不过滤（排除目录内的画布也可能引用）。
-pub fn rename_note_synced(
+fn rename_note_synced_inner(
     root: &Path,
     exclude: &[String],
     old_file: &str,
@@ -70,8 +92,25 @@ pub fn rename_note_synced(
 }
 
 /// 重命名/移动文件夹并同步引用（画布与 `.md` 链接按 `old/` 前缀替换）。
-/// 先移动目录（旧路径已不存在），再扫描新树收集引用更新并统一写回；失败回滚移动。
-pub fn rename_folder_synced(
+/// 整库扫描期间整段排队（理由见 [`rename_note_synced`]），不与在途写盘交错。
+pub async fn rename_folder_synced(
+    queue: &WriteQueue,
+    root: &Path,
+    exclude: &[String],
+    old_dir: &str,
+    new_dir: &str,
+) -> Result<SyncResult, String> {
+    let root = root.to_path_buf();
+    let exclude = exclude.to_vec();
+    let old_dir = old_dir.to_string();
+    let new_dir = new_dir.to_string();
+    queue
+        .bulk(move || rename_folder_synced_inner(&root, &exclude, &old_dir, &new_dir))
+        .await
+}
+
+/// 事务本体：先移动目录（旧路径已不存在），再扫描新树收集引用更新并统一写回；失败回滚移动。
+fn rename_folder_synced_inner(
     root: &Path,
     exclude: &[String],
     old_dir: &str,
@@ -319,14 +358,60 @@ mod tests {
         )
     }
 
-    #[test]
-    fn rename_note_updates_canvas_and_md_refs() {
+    /// 在途保存与改名事务交错：事务写回的链接不得被随后落地的旧内容覆盖。
+    ///
+    /// 用队列闸门占住执行序，让「用户刚编辑完的保存」停在队列里，事务先跑：
+    /// 事务不排队就会在保存落地前扫描/写回，保存随后用旧链接把它盖掉。
+    #[tokio::test]
+    async fn rename_lands_after_inflight_save() {
+        use crate::write_queue::WriteQueue;
+        use std::time::Duration;
+
+        let tmp = TempDir::new("refs-inflight");
+        let root = &*tmp;
+        write(root, "a.md", "正文");
+        write(root, "b.md", "看 [它](a.md)");
+        let queue = WriteQueue::new();
+
+        // 慢作业占住执行序：后续提交的保存因此停在队列里（模拟写盘在途）
+        let q = queue.clone();
+        let slow = async move {
+            q.bulk(|| {
+                std::thread::sleep(Duration::from_millis(100));
+                Ok(())
+            })
+            .await
+        };
+        // 在途保存排在慢作业之后：内容仍是旧链接
+        let b = root.join("b.md");
+        let q = queue.clone();
+        let stale = "看 [它](a.md) 与 [别的](other.md)".to_string();
+        let save = async move { q.write(b.clone(), stale).await };
+
+        // join 的轮询序即提交序：慢作业 → 保存 → 事务
+        let (slow_ok, saved, synced) = tokio::join!(slow, save, async {
+            rename_note_synced(&queue, root, &[], "a.md", "dir/a.md").await
+        });
+        slow_ok.unwrap();
+        saved.unwrap();
+        let sync = synced.expect("改名事务成功");
+        assert_eq!(sync.rewritten, vec!["b.md".to_string()]);
+        assert_eq!(
+            std::fs::read_to_string(root.join("b.md")).unwrap(),
+            "看 [它](dir/a.md) 与 [别的](other.md)",
+            "在途保存不得把链接改写覆盖成旧路径"
+        );
+    }
+
+    #[tokio::test]
+    async fn rename_note_updates_canvas_and_md_refs() {
         let tmp = TempDir::new("refs-note");
         let root = &*tmp;
+        let queue = WriteQueue::new();
         write(root, "a.md", "正文");
         write(root, "画布.atlx", &canvas_json("a.md"));
         write(root, "b.md", "看 [它](a.md) 与 [别的](other.md)");
-        let result = rename_note_synced(root, &[], "a.md", "dir/a.md").unwrap();
+        let result = rename_note_synced(&queue, root, &[], "a.md", "dir/a.md").await.unwrap();
         // 画布引用同步（write_canvas_file 落盘为 pretty JSON）
         let canvas = std::fs::read_to_string(root.join("画布.atlx")).unwrap();
         assert!(canvas.contains(r#""file": "dir/a.md""#), "{canvas}");
@@ -339,27 +424,29 @@ mod tests {
         assert!(!root.join("a.md").exists());
     }
 
-    #[test]
-    fn rename_failure_keeps_original_state() {
+    #[tokio::test]
+    async fn rename_failure_keeps_original_state() {
         let tmp = TempDir::new("refs-rollback");
         let root = &*tmp;
         write(root, "a.md", "正文");
         // 目标已存在 → rename 拒绝，源保留
         write(root, "dir/a.md", "既有");
-        assert!(rename_note_synced(root, &[], "a.md", "dir/a.md").is_err());
+        let queue = WriteQueue::new();
+        assert!(rename_note_synced(&queue, root, &[], "a.md", "dir/a.md").await.is_err());
         assert!(root.join("a.md").exists());
         assert_eq!(std::fs::read_to_string(root.join("dir/a.md")).unwrap(), "既有");
     }
 
-    #[test]
-    fn rename_folder_remaps_prefix_refs() {
+    #[tokio::test]
+    async fn rename_folder_remaps_prefix_refs() {
         let tmp = TempDir::new("refs-dir");
         let root = &*tmp;
+        let queue = WriteQueue::new();
         write(root, "old/a.md", "正文");
         write(root, "old/sub/b.md", "内容");
         write(root, "画布.atlx", &canvas_json("old/a.md"));
         write(root, "c.md", "看 [它](old/a.md)");
-        let _ = rename_folder_synced(root, &[], "old", "new").unwrap();
+        let _ = rename_folder_synced(&queue, root, &[], "old", "new").await.unwrap();
         let canvas = std::fs::read_to_string(root.join("画布.atlx")).unwrap();
         assert!(canvas.contains(r#""file": "new/a.md""#), "{canvas}");
         let c = std::fs::read_to_string(root.join("c.md")).unwrap();
@@ -402,10 +489,11 @@ mod tests {
         assert_eq!(canvas.nodes[1].data["file"], "old/sub/a.md");
     }
 
-    #[test]
-    fn metadata_paths_follow_renames() {
+    #[tokio::test]
+    async fn metadata_paths_follow_renames() {
         let tmp = TempDir::new("refs-meta");
         let root = &*tmp;
+        let queue = WriteQueue::new();
         write(root, "old/p.md", "提示词");
         // 预置元数据
         write(root, ".atelyx/prompt-notes.json", "[\"old/p.md\"]");
@@ -415,7 +503,7 @@ mod tests {
             r#"{"schema":"atelyx-agents/v1","agents":[{"id":"a","name":"A","systemPromptFile":"old/p.md"}]}"#,
         );
         write(root, ".atelyx/folder-colors.json", r##"{"old":"#ff0000"}"##);
-        rename_folder_synced(root, &[], "old", "new").unwrap();
+        rename_folder_synced(&queue, root, &[], "old", "new").await.unwrap();
         assert!(std::fs::read_to_string(root.join(".atelyx/prompt-notes.json")).unwrap().contains("new/p.md"));
         assert!(std::fs::read_to_string(root.join(".atelyx/agents.json")).unwrap().contains("new/p.md"));
         assert!(std::fs::read_to_string(root.join(".atelyx/folder-colors.json")).unwrap().contains("new"));

@@ -112,16 +112,19 @@ fn move_entry(app: &mut App, from: String, to: String, id: u64) -> iced::Task<Me
                 .unwrap_or(false);
             let from_task = from.clone();
             let to_task = to.clone();
+            let queue = app.vault.writes.clone();
             iced::Task::perform(
                 async move {
                     if is_dir {
                         atelyx_core::vault_refs::rename_folder_synced(
-                            &root, &exclude, &from_task, &to_task,
+                            &queue, &root, &exclude, &from_task, &to_task,
                         )
+                        .await
                     } else {
                         atelyx_core::vault_refs::rename_note_synced(
-                            &root, &exclude, &from_task, &to_task,
+                            &queue, &root, &exclude, &from_task, &to_task,
                         )
+                        .await
                     }
                 },
                 move |result| match result {
