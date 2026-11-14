@@ -544,7 +544,7 @@ fn with_overlays<'a>(
         root = root.push(el);
     }
 
-    // 插件页模态（详情 / 市场安装确认；与开源许可同级）
+    // 插件页模态（详情 / 市场安装确认）
     if let Some(el) = crate::settings_view::plugins::overlay(app, window) {
         root = root.push(el);
     }
@@ -3815,12 +3815,17 @@ const SUGGEST_GAP_Y: f32 = 2.0;
 
 /// 双链候选浮层内容（锚在光标右下方；↑↓ 导航并接管 Enter、Enter 选中、Esc 关闭）。
 /// 落位在窗口级浮层里完成——浮层不能被正文滚动区裁剪。
-fn wiki_picker_panel<'a>(app: &'a App) -> Option<Element<'a, Message>> {
+fn wiki_picker_panel<'a>(app: &'a App, window: iced::window::Id) -> Option<Element<'a, Message>> {
     // 浮层挂在窗口层：只在预览编辑档且编辑面持键盘时出现，切档 / 失焦即不再显示
     if app.note_mode != NoteMode::Edit || !app.edit.focused {
         return None;
     }
     let picker = app.wiki_picker.as_ref()?;
+    // 坐标是开启窗口的光标局部坐标：别的窗口按同一坐标再画一份会跑到无关位置，且点一下就把链接
+    // 插进另一窗口正在编辑的正文
+    if picker.window != window {
+        return None;
+    }
     let candidates = app.wiki_candidates();
     // 候选里出现同名笔记时补出所在目录（跨目录同名才需要区分）
     let duplicates = {
@@ -3909,7 +3914,7 @@ pub(crate) fn wiki_picker_overlay<'a>(
     app: &'a App,
     window: iced::window::Id,
 ) -> Option<Element<'a, Message>> {
-    let panel = wiki_picker_panel(app)?;
+    let panel = wiki_picker_panel(app, window)?;
     let probe = *app.note_caret_probe.borrow();
     let geom = wiki_picker_geom(probe, viewport_of(app, window));
     // 浮层在窗口层、已脱离笔记面板的 PressReporter：点候选会被判成「面板外按压」而先退出
@@ -4029,7 +4034,7 @@ pub(crate) fn card_model_pick(app: &App, node_id: &str) -> Option<(String, Strin
 }
 
 /// 模型显示名（昵称；同名模型跨供应商时带供应商名消歧，供应商已删回落 id）。
-pub(crate) fn model_pick_label(app: &App, pid: &str, model: &str) -> String {
+fn model_pick_label(app: &App, pid: &str, model: &str) -> String {
     // 昵称取自所指向的供应商（同名模型跨供应商昵称可能不同）
     let display = app
         .repo_config
@@ -4116,7 +4121,7 @@ pub(crate) fn role_badge(role: atelyx_core::space_client::SpaceRole) -> Element<
 }
 
 /// 小徽标（淡底圆角 + 着色文字）。
-pub(crate) fn mini_badge(label: &str, color: iced::Color) -> Element<'static, Message> {
+fn mini_badge(label: &str, color: iced::Color) -> Element<'static, Message> {
     container(text(label.to_string()).size(pal::fs_micro()).color(color))
         .padding(Padding::ZERO.horizontal(6.0).vertical(1.0))
         .style(move |_t| Style {

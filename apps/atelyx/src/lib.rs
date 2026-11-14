@@ -1300,6 +1300,8 @@ pub struct App {
     expand_pending: usize,
     /// 各窗口最近光标位置（右键菜单锚点 / 提示定位）。
     pub cursors: HashMap<window::Id, Point>,
+    /// 最近一次收到指针事件的窗口：窗口级浮层据此判定归属（不靠光标坐标猜）。
+    pub(crate) last_cursor_window: Option<window::Id>,
     /// 打开的弹层（同窗口同时至多一个）。
     pub(crate) popup: Option<(window::Id, PopupOpen)>,
     /// 弹层面板导航（两 pane 菜单）。
@@ -1679,6 +1681,8 @@ pub struct WikiPicker {
     pub active: usize,
     /// 用户按过 ↑↓：仅此时 Enter 选中候选，否则 Enter 换行（与属性面板候选同口径）。
     pub armed: bool,
+    /// 归属窗口：浮层画在窗口层，别的窗口不得跟着画一份（候选可点击、会把链接插进正文）。
+    pub window: iced::window::Id,
 }
 
 impl App {
@@ -1778,6 +1782,7 @@ impl App {
                 expand_all: false,
                 expand_pending: 0,
                 cursors: HashMap::new(),
+                last_cursor_window: None,
                 popup: None,
                 popup_pane: 0,
                 arm_commit: None,
@@ -2624,10 +2629,12 @@ impl App {
                     }
                 }
                 self.press = Some((id, cursor));
+                self.last_cursor_window = Some(id);
                 Task::none()
             }
             Message::CursorMoved(id, pos) => {
                 self.cursors.insert(id, pos);
+                self.last_cursor_window = Some(id);
                 if self.divider.is_some() {
                     if self.main_id != Some(id) {
                         return Task::none();
@@ -6102,7 +6109,16 @@ impl App {
                 _ => {
                     if self.wiki_dismissed_from != Some(from) {
                         self.wiki_dismissed_from = None;
-                        self.wiki_picker = Some(WikiPicker { from, query, active: 0, armed: false });
+                        // 归属 = 进入编辑面时按过的那个窗口（此后打字期间指针不会换窗口）
+                        if let Some(window) = self.last_cursor_window {
+                            self.wiki_picker = Some(WikiPicker {
+                                from,
+                                query,
+                                active: 0,
+                                armed: false,
+                                window,
+                            });
+                        }
                     }
                 }
             },
