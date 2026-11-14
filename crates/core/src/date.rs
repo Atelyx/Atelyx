@@ -172,9 +172,42 @@ pub fn format_minutes(ms: i64) -> String {
     format!("{y:04}-{m:02}-{d:02} {:02}:{:02}", secs_of_day / 3600, (secs_of_day % 3600) / 60)
 }
 
+/// 毫秒时间戳 → 相对文案：刚刚 / N 分钟前 / N 小时前 / N 天前 / 本地日期。
+/// 只作列表行的时间点缀：超过 30 天给绝对日期，比「更早」更容易回查。
+pub fn relative(ts_ms: i64, now_ms: i64) -> String {
+    let d = now_ms - ts_ms;
+    if d < 60_000 {
+        return "刚刚".to_string();
+    }
+    if d < 3_600_000 {
+        return format!("{} 分钟前", d / 60_000);
+    }
+    if d < 86_400_000 {
+        return format!("{} 小时前", d / 3_600_000);
+    }
+    if d < 30 * 86_400_000 {
+        return format!("{} 天前", d / 86_400_000);
+    }
+    day_string(day_key(ts_ms))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relative_ladder() {
+        let now = 1_000_000_000_000;
+        assert_eq!(relative(now, now), "刚刚");
+        assert_eq!(relative(now + 60_000, now), "刚刚");
+        assert_eq!(relative(now - 120_000, now), "2 分钟前");
+        assert_eq!(relative(now - 7_200_000, now), "2 小时前");
+        assert_eq!(relative(now - 3 * 86_400_000, now), "3 天前");
+        // 超过 30 天转本地日期
+        let old = relative(now - 40 * 86_400_000, now);
+        assert_eq!(old.len(), "YYYY-MM-DD".len());
+        assert!(old.contains('-'));
+    }
 
     #[test]
     fn civil_round_trip() {

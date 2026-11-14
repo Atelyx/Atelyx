@@ -209,19 +209,12 @@ fn session_row<'a>(app: &'a App, s: &'a Value) -> iced::Element<'a, Message> {
     .into()
 }
 
+/// 会话行的更新时间：缺更新时间（0）的旧会话不显示，避免落成 1970 年的日期。
 fn rel_time(ts: i64) -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0);
-    let mins = (now - ts).max(0) / 60_000;
-    match mins {
-        0 => "刚刚".to_string(),
-        m if m < 60 => format!("{m} 分钟前"),
-        h if h < 60 * 24 => format!("{} 小时前", h / 60),
-        d if d < 60 * 24 * 30 => format!("{} 天前", d / (60 * 24)),
-        _ => "更早".to_string(),
+    if ts <= 0 {
+        return String::new();
     }
+    atelyx_core::date::relative(ts, atelyx_core::time::now_ms())
 }
 
 // ===== 对话列 =====

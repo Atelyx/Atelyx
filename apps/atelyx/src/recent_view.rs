@@ -171,28 +171,6 @@ fn start_local_check(app: &App) -> Task<Message> {
     )
 }
 
-/// 秒级时间戳 → 相对文案：刚刚 / N 分钟前 / N 小时前 / N 天前 / 日期（YYYY-MM-DD）。
-pub(crate) fn relative_ts(secs: i64, now: i64) -> String {
-    let d = now - secs;
-    if d < 60 {
-        return "刚刚".into();
-    }
-    if d < 3600 {
-        return format!("{} 分钟前", d / 60);
-    }
-    if d < 86_400 {
-        return format!("{} 小时前", d / 3600);
-    }
-    if d < 30 * 86_400 {
-        return format!("{} 天前", d / 86_400);
-    }
-    atelyx_core::date::format_minutes(secs * 1000)
-        .split(' ')
-        .next()
-        .unwrap_or_default()
-        .to_string()
-}
-
 /// 最近打开视图：按当前仓库身份过滤，行点击打开（复用 OpenFile，按扩展名分流笔记/表格/画布）。
 pub fn recent_view(app: &App, _window: iced::window::Id) -> Element<'_, Message> {
     let Some(key) = app.container_key() else {
@@ -212,14 +190,14 @@ pub fn recent_view(app: &App, _window: iced::window::Id) -> Element<'_, Message>
             None,
         );
     }
-    let now = crate::now_secs() as i64;
+    let now = atelyx_core::time::now_ms();
     let mut col = iced::widget::Column::<Message>::new()
         .padding(Padding::ZERO.horizontal(12.0).vertical(10.0))
         .spacing(6);
     for e in items {
         let name = e.file.rsplit('/').next().unwrap_or(&e.file).to_string();
         let parent = e.file.rsplit_once('/').map(|(d, _)| d.to_string()).unwrap_or_default();
-        let time = relative_ts(e.opened_at, now);
+        let time = atelyx_core::date::relative(e.opened_at * 1000, now);
         let kind_icon = match e.kind {
             RecentKind::Note => crate::registry::doc_icon("md"),
             RecentKind::Table => crate::registry::doc_icon("atb"),
@@ -313,16 +291,4 @@ mod tests {
         assert_eq!(out.iter().map(|e| e.file.as_str()).collect::<Vec<_>>(), ["a.md", "c.md"]);
     }
 
-    #[test]
-    fn relative_ts_ladder() {
-        let now = 1_000_000_000;
-        assert_eq!(relative_ts(now, now), "刚刚");
-        assert_eq!(relative_ts(now - 120, now), "2 分钟前");
-        assert_eq!(relative_ts(now - 7_200, now), "2 小时前");
-        assert_eq!(relative_ts(now - 3 * 86_400, now), "3 天前");
-        assert_eq!(relative_ts(now + 100, now), "刚刚");
-        let old = relative_ts(now - 40 * 86_400, now);
-        assert_eq!(old.len(), "YYYY-MM-DD".len());
-        assert!(old.contains('-'));
-    }
 }
