@@ -13,6 +13,7 @@ use crate::{
     layout_view, vault, App, DraftKind, Message, NoteMode, SaveReason, SpaceField, SpaceForm,
     SpaceMsg,
 };
+use atelyx_core::ai::doc_edit::DocModel;
 use atelyx_core::space_client::{
     self, AcceptAck, InviteInfo, MemberInfo, SpaceClient, SpaceError, SpaceRole, SpaceSummary,
 };
@@ -977,12 +978,6 @@ pub fn handle(app: &mut App, msg: SpaceMsg) -> Task<Message> {
         SpaceMsg::NoteSaved { gen, rel, frozen, reason, result } => {
             on_note_saved(app, gen, &rel, frozen, reason, result)
         }
-        SpaceMsg::TablePatchDone { gen, file, new_file, reason, result, frozen } => {
-            on_table_patch_done(app, gen, file, new_file, reason, result, frozen)
-        }
-        SpaceMsg::CanvasPatchDone { gen, file, new_file, reason, result, frozen } => {
-            on_canvas_patch_done(app, gen, file, new_file, reason, result, frozen)
-        }
         SpaceMsg::ForceDeleteFolder { gen, rel } => {
             app.dismiss_popup();
             app.delete_confirm = None;
@@ -1708,22 +1703,30 @@ pub fn space_submit_table_save(app: &mut App, reason: tv::SaveReason) -> Task<Me
             Ok(new_file)
         },
         move |result| {
-            let (new_file, inner) = match &result {
-                Ok(f) => (f.clone(), Ok(f.clone())),
+            let (new_file, outcome) = match &result {
+                Ok(f) => (f.clone(), Ok(())),
                 Err(e) => (file_for_msg.clone(), Err(e.to_string())),
             };
-            Message::Space(SpaceMsg::TablePatchDone { gen, file: file_for_msg, new_file, reason, result: inner, frozen: frozen_for_msg })
+            Message::DocSaved(Box::new(crate::doc_save::DocSaved {
+                gen,
+                space: true,
+                file: file_for_msg,
+                new_file,
+                result: outcome,
+                flush: matches!(reason, tv::SaveReason::Flush),
+                frozen: crate::doc_save::Frozen::Table(frozen_for_msg),
+            }))
         },
     )
 }
 
 #[allow(clippy::too_many_arguments)]
-fn on_table_patch_done(
+pub(crate) fn on_table_patch_done(
     app: &mut App,
     gen: u64,
     file: String,
     new_file: String,
-    reason: tv::SaveReason,
+    flush: bool,
     result: Result<String, String>,
     frozen: atelyx_core::vault::TableFile,
 ) -> Task<Message> {
@@ -1743,7 +1746,11 @@ fn on_table_patch_done(
         }
     }
     // 身份守卫：gen + 文件路径（或标题漂移后的新路径）双校验
-    if !app.table.as_ref().is_some_and(|s| s.file == file || s.file == new_file) {
+    if !atelyx_core::ai::doc_edit::receipt_file_matches(
+        app.table.as_ref().map(|s| s.file.as_str()),
+        &file,
+        &new_file,
+    ) {
         return Task::none();
     }
     let mut task = Task::none();
@@ -1758,7 +1765,7 @@ fn on_table_patch_done(
             } else {
                 "保存失败"
             };
-            if matches!(reason, tv::SaveReason::Flush) {
+            if flush {
                 app.notify(NoticeLevel::Error, format!("{hint}，操作未执行：{e}"));
             } else {
                 app.notify(NoticeLevel::Error, format!("{hint}：{e}"));
@@ -1785,7 +1792,7 @@ fn on_table_patch_done(
             let stable = app
                 .table
                 .as_ref()
-                .is_some_and(|s| s.data.fields == frozen.fields && s.data.rows == frozen.rows);
+                .is_some_and(|s| s.data.same_content(&frozen));
             {
                 let Some(s) = app.table.as_mut() else { return Task::none() };
                 s.save_error = None;
@@ -1799,7 +1806,7 @@ fn on_table_patch_done(
             }
             // Flush 回执期间有新编辑（unstable）：重收一轮 Flush——脏拦截已在放行前 flush，
             // 此轮丢失会让关闭/切换动作静默挂起（对齐笔记保存链）
-            if let tv::SaveReason::Flush = reason {
+            if flush {
                 if stable {
                     task = task.chain(app.after_any_flush());
                 } else {
@@ -1951,29 +1958,30 @@ pub fn space_submit_canvas_save(app: &mut App, reason: crate::canvas_view::SaveR
             Ok(new_file)
         },
         move |result| {
-            let (new_file, inner) = match &result {
-                Ok(f) => (f.clone(), Ok(f.clone())),
+            let (new_file, outcome) = match &result {
+                Ok(f) => (f.clone(), Ok(())),
                 Err(e) => (file_for_msg.clone(), Err(e.to_string())),
             };
-            Message::Space(SpaceMsg::CanvasPatchDone {
+            Message::DocSaved(Box::new(crate::doc_save::DocSaved {
                 gen,
+                space: true,
                 file: file_for_msg,
                 new_file,
-                reason,
-                result: inner,
-                frozen: frozen_for_msg,
-            })
+                result: outcome,
+                flush: matches!(reason, crate::canvas_view::SaveReason::Flush),
+                frozen: crate::doc_save::Frozen::Canvas(frozen_for_msg),
+            }))
         },
     )
 }
 
 #[allow(clippy::too_many_arguments)]
-fn on_canvas_patch_done(
+pub(crate) fn on_canvas_patch_done(
     app: &mut App,
     gen: u64,
     file: String,
     new_file: String,
-    reason: crate::canvas_view::SaveReason,
+    flush: bool,
     result: Result<String, String>,
     frozen: atelyx_core::vault::CanvasFile,
 ) -> Task<Message> {
@@ -1993,7 +2001,11 @@ fn on_canvas_patch_done(
         }
     }
     // 身份守卫：gen + 文件路径（或标题漂移后的新路径）双校验
-    if !app.canvas.as_ref().is_some_and(|s| s.file == file || s.file == new_file) {
+    if !atelyx_core::ai::doc_edit::receipt_file_matches(
+        app.canvas.as_ref().map(|s| s.file.as_str()),
+        &file,
+        &new_file,
+    ) {
         return Task::none();
     }
     let mut task = Task::none();
@@ -2008,7 +2020,7 @@ fn on_canvas_patch_done(
             } else {
                 "保存失败"
             };
-            if matches!(reason, crate::canvas_view::SaveReason::Flush) {
+            if flush {
                 app.notify(NoticeLevel::Error, format!("{hint}，操作未执行：{e}"));
             } else {
                 app.notify(NoticeLevel::Error, format!("{hint}：{e}"));
@@ -2029,14 +2041,7 @@ fn on_canvas_patch_done(
                 task = task.chain(refresh_space_tree(app));
             }
             // 只认磁盘事实：冻结快照与当前数据一致才算落盘（时间戳不参与）
-            let stable = app
-                .canvas
-                .as_ref()
-                .is_some_and(|s| {
-                    s.data.title == frozen.title
-                        && s.data.nodes == frozen.nodes
-                        && s.data.edges == frozen.edges
-                });
+            let stable = app.canvas.as_ref().is_some_and(|s| s.data.same_content(&frozen));
             {
                 let Some(s) = app.canvas.as_mut() else { return Task::none() };
                 s.save_error = None;
@@ -2050,7 +2055,7 @@ fn on_canvas_patch_done(
             }
             // Flush 回执期间有新编辑（unstable）：重收一轮 Flush——脏拦截已在放行前 flush，
             // 此轮丢失会让关闭/切换动作静默挂起（对齐笔记 / 表格保存链）
-            if let crate::canvas_view::SaveReason::Flush = reason {
+            if flush {
                 if stable {
                     task = task.chain(app.after_any_flush());
                 } else {

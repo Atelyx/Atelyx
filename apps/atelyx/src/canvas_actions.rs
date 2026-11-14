@@ -6,6 +6,7 @@ use std::io::Cursor;
 use iced::Task;
 use serde_json::{json, Value};
 
+use atelyx_core::ai::doc_edit::DocModel;
 use atelyx_core::vault::CanvasFileNode;
 
 use crate::canvas_view::{
@@ -464,16 +465,11 @@ pub fn submit_canvas_save(app: &mut App, reason: SaveReason) -> Task<Message> {
     )
 }
 
-/// 「落盘期间无新编辑」判定：标题 + 卡 + 连线与冻结快照一致（时间戳不参与）。
-fn canvas_matches(s: &CanvasSession, frozen: &atelyx_core::vault::CanvasFile) -> bool {
-    s.data.title == frozen.title && s.data.nodes == frozen.nodes && s.data.edges == frozen.edges
-}
-
-fn on_saved(
+pub(crate) fn on_saved(
     app: &mut App,
     gen: u64,
     file: String,
-    reason: SaveReason,
+    flush: bool,
     result: Result<(), String>,
     frozen: atelyx_core::vault::CanvasFile,
 ) -> Task<Message> {
@@ -486,21 +482,25 @@ fn on_saved(
         app.plugins.on_file_changed(&file, atelyx_core::plugin_runtime::FileChangeKind::Updated, None);
     }
     // flush 失败先回填挂起的 AI 文件操作：失败面可能已被切走，挂起项不得残留到之后的放行
-    if let (Err(e), true) = (&result, matches!(reason, SaveReason::Flush)) {
+    if let (Err(e), true) = (&result, flush) {
         crate::ai_fs_edit::abort_pending(app, e);
     }
-    if !app.canvas.as_ref().is_some_and(|s| s.file == file) {
+    if !atelyx_core::ai::doc_edit::receipt_file_matches(
+        app.canvas.as_ref().map(|s| s.file.as_str()),
+        &file,
+        &file,
+    ) {
         return Task::none();
     }
     match result {
         Err(e) => {
             app.settle_history_restore(false);
-            if matches!(reason, SaveReason::Flush) {
+            if flush {
                 app.abort_pending_flush("保存失败，操作未执行");
             }
             let Some(s) = app.canvas.as_mut() else { return Task::none() };
             s.save_error = Some(e.clone());
-            if matches!(reason, SaveReason::Flush) {
+            if flush {
                 app.notify(crate::NoticeLevel::Error, format!("保存失败，操作未执行：{e}"));
             } else {
                 app.notify(crate::NoticeLevel::Error, format!("保存失败：{e}"));
@@ -509,7 +509,7 @@ fn on_saved(
         }
         Ok(()) => {
             // 只认磁盘事实：冻结快照与当前数据一致才算落盘；期间又有编辑则保持脏，下一轮补写
-            let stable = app.canvas.as_ref().is_some_and(|s| canvas_matches(s, &frozen));
+            let stable = app.canvas.as_ref().is_some_and(|s| s.data.same_content(&frozen));
             let mut task = Task::none();
             {
                 let Some(s) = app.canvas.as_mut() else { return Task::none() };
@@ -519,7 +519,7 @@ fn on_saved(
                     s.saved = frozen.clone();
                 }
             }
-            if matches!(reason, SaveReason::Flush) {
+            if flush {
                 // 落盘期间有新编辑（unstable）：重收一轮 Flush——脏拦截已在放行前 flush，
                 // 此轮丢失会让关闭 / 切换动作静默挂起
                 if stable {
@@ -619,7 +619,9 @@ pub fn on_msg(app: &mut App, msg: CanvasMsg) -> Task<Message> {
     }
     match msg {
         CanvasMsg::Loaded(gen, file, result) => on_loaded(app, gen, file, result),
-        CanvasMsg::Saved(gen, file, reason, result, frozen) => on_saved(app, gen, file, reason, result, frozen),
+        CanvasMsg::Saved(gen, file, reason, result, frozen) => {
+            on_saved(app, gen, file, matches!(reason, SaveReason::Flush), result, frozen)
+        }
         CanvasMsg::Chat(msg) => crate::canvas_chat::on_msg(app, msg),
         CanvasMsg::Hover(hover) => {
             let Some(s) = app.canvas.as_mut() else { return Task::none() };

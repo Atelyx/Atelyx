@@ -10,6 +10,7 @@ use iced::{Point, Rectangle, Size};
 
 use crate::table_view as tv;
 use crate::{space_actions, App, ImageLoadBatch, Message};
+use atelyx_core::ai::doc_edit::DocModel;
 use atelyx_core::image_thumb;
 use atelyx_core::table_ops as ops;
 use atelyx_core::vault;
@@ -203,7 +204,7 @@ fn on_load(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
     match msg {
         tv::TableMsg::Loaded(gen, file, result) => on_loaded(app, gen, file, result),
         tv::TableMsg::TableSaved(gen, file, reason, result, frozen) => {
-            on_saved(app, gen, file, reason, result, frozen)
+            on_saved(app, gen, file, matches!(reason, tv::SaveReason::Flush), result, frozen)
         }
         tv::TableMsg::ImageImportPick { row_id, field_id } => pick_images(row_id, field_id),
         tv::TableMsg::ImagesPicked { row_id, field_id, files } => import_images(app, row_id, field_id, files),
@@ -1110,11 +1111,11 @@ pub fn submit_table_save(app: &mut App, reason: tv::SaveReason) -> Task<Message>
     )
 }
 
-fn on_saved(
+pub(crate) fn on_saved(
     app: &mut App,
     gen: u64,
     file: String,
-    reason: tv::SaveReason,
+    flush: bool,
     result: Result<(), String>,
     frozen: TableFile,
 ) -> Task<Message> {
@@ -1127,21 +1128,25 @@ fn on_saved(
         app.plugins.on_file_changed(&file, atelyx_core::plugin_runtime::FileChangeKind::Updated, None);
     }
     // flush 失败先回填挂起的 AI 文件操作：失败面可能已被切走，挂起项不得残留到之后的放行
-    if let (Err(e), true) = (&result, matches!(reason, tv::SaveReason::Flush)) {
+    if let (Err(e), true) = (&result, flush) {
         crate::ai_fs_edit::abort_pending(app, e);
     }
-    if !app.table.as_ref().is_some_and(|s| s.file == file) {
+    if !atelyx_core::ai::doc_edit::receipt_file_matches(
+        app.table.as_ref().map(|s| s.file.as_str()),
+        &file,
+        &file,
+    ) {
         return Task::none();
     }
     match result {
         Err(e) => {
             app.settle_history_restore(false);
-            if matches!(reason, tv::SaveReason::Flush) {
+            if flush {
                 app.abort_pending_flush("保存失败，操作未执行");
             }
             let Some(s) = app.table.as_mut() else { return Task::none() };
             s.save_error = Some(e.clone());
-            if matches!(reason, tv::SaveReason::Flush) {
+            if flush {
                 app.notify(NoticeLevel::Error, format!("保存失败，操作未执行：{e}"));
             } else {
                 app.notify(NoticeLevel::Error, format!("保存失败：{e}"));
@@ -1153,7 +1158,7 @@ fn on_saved(
             let stable = app
                 .table
                 .as_ref()
-                .is_some_and(|s| s.data.fields == frozen.fields && s.data.rows == frozen.rows);
+                .is_some_and(|s| s.data.same_content(&frozen));
             let mut task = Task::none();
             {
                 let Some(s) = app.table.as_mut() else { return Task::none() };
@@ -1163,7 +1168,7 @@ fn on_saved(
                     s.saved = frozen.clone();
                 }
             }
-            if matches!(reason, tv::SaveReason::Flush) {
+            if flush {
                 task = task.chain(app.after_any_flush());
             }
             if stable {

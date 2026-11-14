@@ -39,7 +39,43 @@ pub struct EditRequest {
     /// 空间笔记：工具线程先取回的服务端正文（None = 本地或取不到）。
     pub server_text: Option<String>,
     pub actor: EditActor,
-    reply: oneshot::Sender<Result<String, String>>,
+    reply: Reply,
+}
+
+/// 工具回执句柄：每次请求恰好一个结论；未显式回填即 Drop 时落可读失败，工具线程不会无限等待。
+pub struct Reply(Option<oneshot::Sender<Result<String, String>>>);
+
+impl Reply {
+    fn new(tx: oneshot::Sender<Result<String, String>>) -> Self {
+        Self(Some(tx))
+    }
+
+    /// 成功回执（模型可读的结果文本）。
+    pub(crate) fn ok(mut self, text: String) {
+        if let Some(tx) = self.0.take() {
+            let _ = tx.send(Ok(text));
+        }
+    }
+
+    /// 失败回执（可读原因）；是否另发界面提示由调用方决定（见 `doc_save::fail`）。
+    pub(crate) fn err(mut self, reason: String) {
+        if let Some(tx) = self.0.take() {
+            let _ = tx.send(Err(reason));
+        }
+    }
+
+    /// 交出原始句柄：文件系统操作把回执登记进自己的在途表，后续回填由它接管。
+    pub(crate) fn into_sender(mut self) -> oneshot::Sender<Result<String, String>> {
+        self.0.take().expect("回执句柄只能交出一次")
+    }
+}
+
+impl Drop for Reply {
+    fn drop(&mut self) {
+        if let Some(tx) = self.0.take() {
+            let _ = tx.send(Err("AI 编辑请求已被丢弃（界面未回执）".to_string()));
+        }
+    }
 }
 
 struct Bus {
@@ -129,7 +165,7 @@ impl ShellEditHost {
                 let mut pending = bus().pending.lock().unwrap_or_else(|e| e.into_inner());
                 pending.push_back((
                     id,
-                    EditRequest { gen, path, op, server_text, actor, reply },
+                    EditRequest { gen, path, op, server_text, actor, reply: Reply::new(reply) },
                 ));
             }
             if bus().wake.send(id).is_err() {
@@ -210,14 +246,18 @@ pub fn apply(app: &mut App, id: u64) -> iced::Task<Message> {
     let Some(req) = take(id) else { return iced::Task::none() };
     let EditRequest { gen, path, op, server_text, actor, reply } = req;
     if gen != app.epoch() {
-        let _ = reply.send(Err("仓库已切换，AI 编辑已取消".to_string()));
+        reply.err("仓库已切换，AI 编辑已取消".to_string());
         return iced::Task::none();
     }
     match op {
         EditOp::Note(op) => apply_note(app, path, op, server_text, actor, reply),
-        EditOp::Table(ops) => crate::ai_doc_edit::apply_table(app, path, ops, actor, reply),
-        EditOp::Canvas(ops) => crate::ai_doc_edit::apply_canvas(app, path, ops, actor, reply),
-        EditOp::Fs(op) => crate::ai_fs_edit::apply(app, op, reply),
+        EditOp::Table(ops) => {
+            crate::doc_save::apply(&crate::doc_save::TABLE, app, path, ops, actor, reply)
+        }
+        EditOp::Canvas(ops) => {
+            crate::doc_save::apply(&crate::doc_save::CANVAS, app, path, ops, actor, reply)
+        }
+        EditOp::Fs(op) => crate::ai_fs_edit::apply(app, op, reply.into_sender()),
     }
 }
 
@@ -227,7 +267,7 @@ fn apply_note(
     op: NoteOp,
     server_text: Option<String>,
     actor: EditActor,
-    reply: oneshot::Sender<Result<String, String>>,
+    reply: Reply,
 ) -> iced::Task<Message> {
     let open = app.ui.last_note_file.as_deref() == Some(path.as_str());
     match &app.repo_kind {
@@ -243,10 +283,10 @@ fn apply_local_note(
     op: NoteOp,
     open: bool,
     actor: EditActor,
-    reply: oneshot::Sender<Result<String, String>>,
+    reply: Reply,
 ) -> iced::Task<Message> {
     let Ok(root) = app.vault.root() else {
-        let _ = reply.send(Err("仓库未打开".to_string()));
+        reply.err("仓库未打开".to_string());
         return iced::Task::none();
     };
     // 整写 / 追加允许新建（父目录不存在时一并创建）；精确替换要求文件已在
@@ -254,21 +294,21 @@ fn apply_local_note(
     let disk = match read_note_text(&root, &path, create_parents) {
         Ok(text) => text,
         Err(e) => {
-            let _ = reply.send(Err(e));
+            reply.err(e);
             return iced::Task::none();
         }
     };
     let base = match atelyx_core::ai::note_edit::local_base(open, app.dirty, &disk, &app.note_base, &path) {
         Ok(base) => base,
         Err(e) => {
-            let _ = reply.send(Err(e));
+            reply.err(e);
             return iced::Task::none();
         }
     };
     let (ai_text, replaced) = match atelyx_core::ai::edit_host::apply_note_op(&base, &op) {
         Ok(value) => value,
         Err(e) => {
-            let _ = reply.send(Err(e));
+            reply.err(e);
             return iced::Task::none();
         }
     };
@@ -276,7 +316,7 @@ fn apply_local_note(
         match atelyx_core::ai::edit_host::merge_note_edit(&base, &app.note_text, &ai_text) {
             Ok(text) => text,
             Err(e) => {
-                let _ = reply.send(Err(format!("{e}：{path}")));
+                reply.err(format!("{e}：{path}"));
                 return iced::Task::none();
             }
         }
@@ -322,10 +362,10 @@ fn apply_local_note(
                     Ok(())
                 })
                 .await;
-            let _ = reply.send(match &outcome {
-                Ok(()) => Ok(ok_text),
-                Err(e) => Err(format!("写入失败：{e}")),
-            });
+            match &outcome {
+                Ok(()) => reply.ok(ok_text),
+                Err(e) => reply.err(atelyx_core::ai::doc_edit::write_failed(e)),
+            }
             Message::AiEditDone(gen, rel_msg, content_msg, outcome.err())
         },
         |msg| msg,
@@ -348,19 +388,19 @@ fn apply_space_note(
     server_text: Option<String>,
     open: bool,
     actor: EditActor,
-    reply: oneshot::Sender<Result<String, String>>,
+    reply: Reply,
 ) -> iced::Task<Message> {
     let RepoKind::Space(session) = &app.repo_kind else {
-        let _ = reply.send(Err("仓库类型不匹配".to_string()));
+        reply.err("仓库类型不匹配".to_string());
         return iced::Task::none();
     };
     if !session.role.can_write() {
-        let _ = reply.send(Err("该空间为只读身份，无法编辑".to_string()));
+        reply.err("该空间为只读身份，无法编辑".to_string());
         return iced::Task::none();
     }
     // 同一文件在途的人工保存会整文上行：先等它收尾，避免两笔整文写交错（别的文件在途无关）
     if app.space_note_saving(&path) {
-        let _ = reply.send(Err("正在保存该笔记，请稍后重试".to_string()));
+        reply.err("正在保存该笔记，请稍后重试".to_string());
         return iced::Task::none();
     }
     let client = session.client.clone();
@@ -370,7 +410,7 @@ fn apply_space_note(
     let (ai_text, replaced) = match atelyx_core::ai::edit_host::apply_note_op(&source, &op) {
         Ok(value) => value,
         Err(e) => {
-            let _ = reply.send(Err(e));
+            reply.err(e);
             return iced::Task::none();
         }
     };
@@ -384,7 +424,7 @@ fn apply_space_note(
     ) {
         Ok(diverged) => diverged,
         Err(e) => {
-            let _ = reply.send(Err(e));
+            reply.err(e);
             return iced::Task::none();
         }
     };
@@ -392,7 +432,7 @@ fn apply_space_note(
         match atelyx_core::ai::edit_host::merge_note_edit(&base, &app.note_text, &ai_text) {
             Ok(text) => text,
             Err(e) => {
-                let _ = reply.send(Err(format!("{e}：{path}")));
+                reply.err(format!("{e}：{path}"));
                 return iced::Task::none();
             }
         }
@@ -444,10 +484,10 @@ fn apply_space_note(
                 Ok::<(), String>(())
             }
             .await;
-            let _ = reply.send(match &outcome {
-                Ok(()) => Ok(ok_text),
-                Err(e) => Err(format!("写入失败：{e}")),
-            });
+            match &outcome {
+                Ok(()) => reply.ok(ok_text),
+                Err(e) => reply.err(atelyx_core::ai::doc_edit::write_failed(e)),
+            }
             Message::AiEditDone(gen, rel, content, outcome.err())
         },
         |msg| msg,
@@ -558,5 +598,26 @@ pub fn on_done(
             app.notify(NoticeLevel::Error, format!("AI 修改未落盘：{e}"));
             iced::Task::none()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 未回填即丢弃：工具线程收到可读失败，不会挂到超时。
+    #[tokio::test]
+    async fn dropped_reply_reports_failure() {
+        let (tx, rx) = oneshot::channel();
+        drop(Reply::new(tx));
+        assert!(matches!(rx.await, Ok(Err(_))), "丢弃必须落 Err");
+    }
+
+    /// 显式回填后 Drop 不得改写结论（成功回执不被覆盖为失败）。
+    #[tokio::test]
+    async fn replied_guard_keeps_single_outcome() {
+        let (tx, rx) = oneshot::channel();
+        Reply::new(tx).ok("已写入".to_string());
+        assert_eq!(rx.await.expect("应收到回执").expect("应为成功"), "已写入");
     }
 }

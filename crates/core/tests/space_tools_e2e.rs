@@ -1,5 +1,5 @@
-//! 空间后端工具全链路 e2e：本地起假 HTTP 服务端（与 space_client 同一套端点契约），
-//! 走 `RepoAccess::Space` 执行工具，并验证路径守卫（`..` 逃逸 / 隐藏段）在两侧一致。
+//! 空间后端全链路 e2e：本地起假 HTTP 服务端（与 space_client 同一套端点契约），
+//! 走 `RepoAccess::Space` 执行工具 / 文档补丁链，并验证路径守卫（`..` 逃逸 / 隐藏段）在两侧一致。
 
 use atelyx_core::ai::tools::{RepoAccess, ToolCtx};
 use atelyx_core::space_client::SpaceClient;
@@ -539,4 +539,84 @@ async fn 空间画布编辑新建后按补丁上行() {
     .await;
     assert!(out.is_error, "{}", out.text);
     assert_eq!(state.files.lock().unwrap()["画布/坏.atlx"], "{不是 JSON");
+}
+
+/// 文档补丁矩阵（空间）：未打开新建 / 已打开按基线合入 / 未变化不产生补丁 / 坏文件如实报错 /
+/// 补丁 id 不符按「已被他人修改」回执且不覆盖内容。
+#[tokio::test]
+async fn 空间文档补丁矩阵按基线合入并如实报错() {
+    use atelyx_core::ai::doc_edit::{self, DocModel};
+    use atelyx_core::ai::edit_host::{CanvasOp, TableOp};
+    use atelyx_core::vault::{CanvasFile, TableFile};
+
+    let state = Arc::new(FakeSpace::default());
+    let url = spawn_server(state.clone());
+    let client = SpaceClient::new(&url, "test-token".to_string()).expect("回环地址应放行");
+    let path = "表/排期.atb";
+
+    // 未打开（服务端无文件）：先只新建再按补丁上行
+    let ops = vec![TableOp::AddRow { cells: vec![] }];
+    let outcome = doc_edit::apply_space::<TableFile>(&client, "s1", path, "排期", 7, &ops, "表格")
+        .await
+        .expect("未打开应成功")
+        .expect("应产生补丁");
+    assert_eq!(outcome.file, path);
+    assert_eq!(outcome.after.rows.len(), 1, "操作作用在新建空表上");
+
+    // 已打开：基线 = 上次落盘、模型 = 含用户未保存编辑；补丁同时覆盖两侧，服务端按 id 合并
+    let baseline: TableFile = serde_json::from_str(state.files.lock().unwrap()[path].as_str()).unwrap();
+    let mut opened = baseline.clone();
+    opened.rows[0].values.insert(baseline.fields[0].id.clone(), json!("用户改的"));
+    let ops = vec![TableOp::AddRow { cells: vec![] }];
+    let planned = doc_edit::plan(&baseline, &opened, &ops, "排期", 8).expect("应产出计划");
+    let file = <TableFile as DocModel>::submit_patch(&client, "s1", path, &planned.patch)
+        .await
+        .expect("补丁应上行");
+    assert_eq!(file, path);
+    let table: TableFile = serde_json::from_str(state.files.lock().unwrap()[path].as_str()).unwrap();
+    assert_eq!(table.rows.len(), 2, "用户编辑行 + AI 新增行");
+    assert_eq!(table.rows[0].values[&baseline.fields[0].id], json!("用户改的"));
+    assert_eq!(table.title, "排期", "标题随文件名走，补丁不改名");
+
+    // 操作与现值相同：不产生补丁（不写盘、不记版本）
+    let same = vec![TableOp::SetCell {
+        row_id: table.rows[1].id.clone(),
+        field_id: table.fields[0].id.clone(),
+        value: table.rows[1].values.get(&table.fields[0].id).cloned().unwrap_or(Value::Null),
+    }];
+    let unchanged = doc_edit::apply_space::<TableFile>(&client, "s1", path, "排期", 9, &same, "表格")
+        .await
+        .expect("无变化不算失败");
+    assert!(unchanged.is_none(), "操作与现值相同不写盘");
+
+    // 补丁 id 与文件不符（他端已换入另一份表）：按「已被他人修改」回执，内容不覆盖
+    let foreign = TableFile::new_file("别的");
+    let ops = vec![TableOp::AddRow { cells: vec![] }];
+    let planned = doc_edit::plan(&foreign, &foreign, &ops, "别的", 1).expect("应产出计划");
+    let err = <TableFile as DocModel>::submit_patch(&client, "s1", path, &planned.patch)
+        .await
+        .expect_err("补丁 id 不符应被拒");
+    assert_eq!(
+        doc_edit::patch_error(err, "表格"),
+        "表格已被他人修改，请刷新后重试（补丁与文件不匹配）"
+    );
+    assert_eq!(state.files.lock().unwrap()[path], serde_json::to_string(&table).unwrap(), "被拒时不改动服务端");
+
+    // 坏文件：如实报解析失败，不当空表覆盖
+    state.files.lock().unwrap().insert("表/坏.atb".into(), "{不是 JSON".into());
+    let err = match doc_edit::apply_space::<TableFile>(&client, "s1", "表/坏.atb", "坏", 1, &ops, "表格").await {
+        Ok(_) => panic!("坏文件应报错"),
+        Err(e) => e,
+    };
+    assert!(err.contains("表格解析失败"), "实际：{err}");
+    assert_eq!(state.files.lock().unwrap()["表/坏.atb"], "{不是 JSON");
+
+    // 画布口径同表格（新建 → 补丁）
+    let ops = vec![CanvasOp::AddTextCard { text: "首卡".into(), x: Some(1.0), y: Some(1.0) }];
+    let outcome = doc_edit::apply_space::<CanvasFile>(&client, "s1", "画/方案.atlx", "方案", 3, &ops, "画布")
+        .await
+        .expect("画布应成功")
+        .expect("应产生补丁");
+    assert_eq!(outcome.after.nodes.len(), 1);
+    assert_eq!(outcome.patch.upsert_nodes.len(), 1);
 }

@@ -21,7 +21,6 @@ mod chat_composer;
 mod chat_input;
 mod chat_stream;
 mod cli;
-mod ai_doc_edit;
 mod ai_edit;
 mod ai_fs_edit;
 mod ai_presence;
@@ -29,6 +28,7 @@ mod app_icon;
 mod chat_view;
 mod color_picker_actions;
 mod commands;
+mod doc_save;
 mod history_browser;
 mod image_clipboard;
 mod layout_view;
@@ -514,6 +514,8 @@ enum Message {
     AiEdit(u64),
     /// AI 笔记编辑落盘回执（gen 守卫；失败恢复脏标记并提示）。
     AiEditDone(u64, String, String, Option<String>),
+    /// AI 文档（表格 / 画布）落盘回执（盒装：载荷含冻结快照与落点）：交保存链结算脏态与基线。
+    DocSaved(Box<doc_save::DocSaved>),
     /// AI 表格 / 画布编辑收尾（gen 守卫）：只收在场态；文件变更与历史由保存链回执结算。
     AiDocDone(u64),
     /// AI 表格 / 画布未落盘（gen 守卫）：提示原因并重取当前面，不按成功结算。
@@ -1145,24 +1147,6 @@ pub enum SpaceMsg {
         frozen: String,
         reason: SaveReason,
         result: Result<String, String>,
-    },
-    /// 空间表格补丁回执（new_file = 补丁落地后的实际路径；带 title 的补丁会改名）。
-    TablePatchDone {
-        gen: u64,
-        file: String,
-        new_file: String,
-        reason: tv::SaveReason,
-        result: Result<String, String>,
-        frozen: atelyx_core::vault::TableFile,
-    },
-    /// 空间画布补丁回执（new_file = 补丁落地后的实际路径；带 title 的补丁会改名）。
-    CanvasPatchDone {
-        gen: u64,
-        file: String,
-        new_file: String,
-        reason: canvas_view::SaveReason,
-        result: Result<String, String>,
-        frozen: atelyx_core::vault::CanvasFile,
     },
     /// 文件夹确认删除（needsConfirm 二段式的 force 步）。
     ForceDeleteFolder { gen: u64, rel: String },
@@ -2960,6 +2944,7 @@ impl App {
             Message::AiEditDone(gen, path, content, err) => {
                 ai_edit::on_done(self, gen, path, content, err)
             }
+            Message::DocSaved(saved) => doc_save::on_saved(self, *saved),
             Message::AiDocDone(gen) => {
                 if gen == self.epoch() {
                     ai_edit::end_presence(self);
