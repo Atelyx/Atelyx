@@ -16,6 +16,7 @@ use crate::ui::color_picker::parse_hex;
 use crate::ui::controls;
 use crate::ui::icon::polylines;
 use crate::ui::palette as pal;
+use crate::ui::popup;
 use crate::ui::text;
 use crate::ui::text::{ellipsize_estimated, estimate_char_width, estimate_width, greedy_wrap};
 use crate::Message;
@@ -1235,6 +1236,39 @@ impl<'a> Geo<'a> {
         let index = self.cache.row_y.partition_point(|&y| y <= content_y).checked_sub(1)?;
         (index < n).then_some(index)
     }
+    /// 只取位置口径（不携带视口宽高；伪尺寸取几何的替代入口）。
+    pub fn positions(&self) -> LayoutPositions<'_> {
+        LayoutPositions { session: self.session, cache: self.cache }
+    }
+}
+
+/// 只依赖行高列宽与滚动量的位置换算：不持有视口宽高，`max_scroll` / `rows_bottom`
+/// 这类依赖视口尺寸的派生量在类型上不可达。
+pub struct LayoutPositions<'a> {
+    session: &'a TableSession,
+    cache: &'a LayoutCache,
+}
+
+impl LayoutPositions<'_> {
+    pub fn header_h(&self) -> f32 {
+        HEADER_H * self.session.view.zoom
+    }
+    pub fn status_h(&self) -> f32 {
+        STATUS_H * self.session.view.zoom
+    }
+    pub fn gutter_w(&self) -> f32 {
+        GUTTER_W * self.session.view.zoom
+    }
+    /// 单元格矩形（画布局部坐标）：与 [`cell_rect`] 同一算式，只取行高列宽与滚动量。
+    pub fn cell_rect(&self, r: usize, c: usize) -> Rectangle {
+        let x = self.cache.col_x[c] - self.session.view.scroll_x + self.gutter_w();
+        let y = self.cache.row_y[r] - self.session.view.scroll_y + self.header_h();
+        Rectangle::new(Point::new(x, y), Size::new(self.cache.col_w[c], self.cache.row_h[r]))
+    }
+    /// 行下缘 y（画布局部坐标）：气泡锚点用，算子与 [`cell_rect`] 的高度同源。
+    pub fn row_bottom(&self, r: usize) -> f32 {
+        self.cache.row_y[r] + self.cache.row_h[r] - self.session.view.scroll_y + self.header_h()
+    }
 }
 
 /// 命中区域。
@@ -1341,9 +1375,7 @@ pub fn hit_at(g: &Geo, pos: Point) -> Hit {
 
 /// 单元格矩形（画布局部坐标）。
 pub fn cell_rect(g: &Geo, r: usize, c: usize) -> Rectangle {
-    let x = g.cache.col_x[c] - g.session.view.scroll_x + g.gutter_w();
-    let y = g.cache.row_y[r] - g.session.view.scroll_y + g.header_h();
-    Rectangle::new(Point::new(x, y), Size::new(g.cache.col_w[c], g.cache.row_h[r]))
+    g.positions().cell_rect(r, c)
 }
 
 /// 自动行高：内容高 + 上下内衬，不低于 32 逻辑像素（随缩放）。
@@ -1899,6 +1931,12 @@ impl<'a> From<TableChrome<'a>> for Element<'a, Message> {
 pub fn geo(session: &TableSession, size: Size) -> Geo<'_> {
     let cache = session.view.layout.as_ref().expect("布局缓存未初始化");
     Geo { session, cache, width: size.width, height: size.height, z: session.view.zoom }
+}
+
+/// 位置口径入口：同一份布局缓存与滚动量，不含视口尺寸。
+pub fn layout_positions(session: &TableSession) -> LayoutPositions<'_> {
+    let cache = session.view.layout.as_ref().expect("布局缓存未初始化");
+    LayoutPositions { session, cache }
 }
 
 // ===== 绘制 =====
@@ -3025,9 +3063,9 @@ fn icon_btn(
 fn editor_overlay<'a>(session: &'a TableSession) -> Option<Element<'a, Message>> {
     let edit = session.view.editing.as_ref()?;
     let (ri, ci) = session.cell_index(&edit.row_id, &edit.field_id)?;
-    // 伪尺寸取几何：只用于 cell_rect 等纯位置换算，不得触 max_scroll/rows_bottom（依赖真实宽高）
-    let g = geo(session, Size::new(f32::MAX, f32::MAX));
-    let cell = cell_rect(&g, ri, ci);
+    // 只取位置换算：单元格矩形不依赖视口宽高
+    let pos = layout_positions(session);
+    let cell = pos.cell_rect(ri, ci);
     let field = &session.data.fields[ci];
     let st = table_ops::style_of(&session.data.rows[ri], &field.id);
     let is_text = !matches!(field.field_type.as_str(), "number" | "duration" | "image" | "singleSelect");
@@ -3044,7 +3082,7 @@ fn editor_overlay<'a>(session: &'a TableSession) -> Option<Element<'a, Message>>
     if field.field_type == "ai" {
         let lines = estimate_lines(&edit.content.text(), size, wrap_width(cell.width, zoom)).len();
         let want = lines as f32 * size * LINE_FACTOR + 2.0 * pad_y;
-        let bottom = session.view.canvas_size.height - g.status_h() - 4.0 * zoom;
+        let bottom = session.view.canvas_size.height - pos.status_h() - 4.0 * zoom;
         height = want.max(height).min(bottom.max(height));
     }
     // 加高后浮层压住下方行：给不透明底，下层行文字不透出来
@@ -3128,11 +3166,12 @@ fn bar_placement(
     }
     let (_, origin) = view.canvas_origin.filter(|(w, _)| *w == window)?;
     let region = table_ops::region_of(view.selection.as_ref(), &session.data.fields, &session.data.rows)?;
-    // 伪尺寸取几何：只用于 cell_rect 等纯位置换算，不得触 max_scroll/rows_bottom（依赖真实宽高）
-    let g = geo(session, Size::new(f32::MAX, f32::MAX));
-    let x0 = (g.cache.col_x[region.col_start] - view.scroll_x + g.gutter_w()).max(8.0);
-    let y0 = g.cache.row_y[region.row_start] - view.scroll_y + g.header_h();
-    let y1 = g.cache.row_y[region.row_end] + g.cache.row_h[region.row_end] - view.scroll_y + g.header_h();
+    // 只取位置换算：气泡锚点由行高列宽与滚动量决定，不依赖视口宽高
+    let pos = layout_positions(session);
+    let cell = pos.cell_rect(region.row_start, region.col_start);
+    let x0 = cell.x.max(8.0);
+    let y0 = cell.y;
+    let y1 = pos.row_bottom(region.row_end);
     let summary = table_ops::style_summary(&session.data.fields, &session.data.rows, &region);
     let w = bar_est_width(&bar_font_label(&summary), &bar_size_label(&summary));
     let h = bar_est_height();
@@ -3140,16 +3179,25 @@ fn bar_placement(
     // 越界则贴网格上下缘——气泡只横向越出面板，不压宿主标题栏与状态栏
     let grid_top = origin.y;
     let grid_bottom = (origin.y + view.canvas_size.height).min(viewport.height);
-    let above = grid_top + y0 - h - BAR_GAP;
-    let want_y = if above >= grid_top { above } else { grid_top + y1 + BAR_GAP };
-    let max_y = (grid_bottom - h - pal::VIEWPORT_GAP).max(grid_top);
-    // 横向钳位用估宽：真实气泡不大于估宽，钳后左侧起点仍留得住完整一条
-    let max_x = (viewport.width - w - pal::VIEWPORT_GAP).max(pal::VIEWPORT_GAP);
+    let spec = popup::PopupSpec {
+        anchor: Point::new(origin.x + x0, grid_top + y1 + BAR_GAP),
+        width: w,
+        height: h,
+        // 上方候选位的下缘：优先贴选区上缘，上方放不下才翻到下方
+        flip_y: Some(grid_top + y0 - BAR_GAP),
+        min_width: 0.0,
+    };
+    let bounds = popup::PopupBounds {
+        // 横向按窗口收口，竖向按网格区收口（top 留白 = 网格区顶缘）
+        area: Rectangle::new(Point::ORIGIN, Size::new(viewport.width, grid_bottom)),
+        left: pal::VIEWPORT_GAP,
+        top: grid_top,
+        right: pal::VIEWPORT_GAP,
+        bottom: pal::VIEWPORT_GAP,
+    };
+    let geom = popup::resolve_in(&spec, bounds, popup::VFlip::AboveFirst);
     Some(BarPlacement {
-        rect: Rectangle::new(
-            Point::new((origin.x + x0).clamp(pal::VIEWPORT_GAP, max_x), want_y.clamp(grid_top, max_y)),
-            Size::new(w, h),
-        ),
+        rect: Rectangle::new(Point::new(geom.x, geom.y), Size::new(w, h)),
         summary,
     })
 }
@@ -3718,6 +3766,95 @@ mod tests {
         )
     }
 
+    /// 多行多列会话：列宽固定，部分行带手工行高（覆盖布局缓存的两种行高来源）。
+    fn grid_session(rows: usize, widths: &[f64], heights: &[Option<f64>]) -> TableSession {
+        let fields = widths
+            .iter()
+            .enumerate()
+            .map(|(i, w)| TableField {
+                id: format!("f{i}"),
+                name: format!("字段{i}"),
+                field_type: "text".to_string(),
+                options: None,
+                width: Some(*w),
+                calc_type: None,
+                ai: None,
+            })
+            .collect();
+        let rows = (0..rows)
+            .map(|r| {
+                let mut cell = serde_json::Map::new();
+                for c in 0..widths.len() {
+                    cell.insert(format!("f{c}"), serde_json::Value::String(format!("r{r}c{c}")));
+                }
+                TableRow {
+                    id: format!("r{r}"),
+                    values: cell,
+                    height: heights.get(r).copied().flatten(),
+                    styles: None,
+                    ai: None,
+                }
+            })
+            .collect();
+        TableSession::new(
+            "t.atb".to_string(),
+            TableFile {
+                schema: String::new(),
+                id: "t".to_string(),
+                title: String::new(),
+                fields,
+                rows,
+                created_at: 0,
+                updated_at: 0,
+            },
+        )
+    }
+
+    fn rand01(seed: &mut u32) -> f32 {
+        *seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        ((*seed >> 8) & 0xFF_FFFF) as f32 / 16_777_216.0
+    }
+
+    /// 位置入口与真实尺寸 Geo 的逐格坐标一致（行列数 / 列宽 / 手工行高 / 滚动 / 缩放组合）。
+    #[test]
+    fn layout_positions_match_geo_coordinates() {
+        let sizes = [Size::new(640.0, 480.0), Size::new(1600.0, 900.0), Size::new(80.0, 60.0)];
+        let zooms = [0.5, 1.0, 1.75, 2.0];
+        let mut seed = 0x1234_5678u32;
+        for case in 0..8 {
+            let rows = (rand01(&mut seed) * 20.0) as usize;
+            let cols = 1 + (rand01(&mut seed) * 5.0) as usize;
+            let widths: Vec<f64> =
+                (0..cols).map(|_| 40.0 + rand01(&mut seed) as f64 * 260.0).collect();
+            let heights: Vec<Option<f64>> = (0..rows)
+                .map(|_| (rand01(&mut seed) < 0.25).then(|| 40.0 + rand01(&mut seed) as f64 * 80.0))
+                .collect();
+            let mut s = grid_session(rows, &widths, &heights);
+            s.view.zoom = zooms[case % zooms.len()];
+            s.rebuild_layout();
+            s.view.scroll_x = rand01(&mut seed) * 500.0;
+            s.view.scroll_y = rand01(&mut seed) * 800.0;
+            let pos = layout_positions(&s);
+            for size in sizes {
+                let g = geo(&s, size);
+                assert_eq!(g.width, size.width, "真实尺寸进入 Geo");
+                for r in 0..rows {
+                    assert_eq!(
+                        pos.row_bottom(r),
+                        g.cache.row_y[r] + g.cache.row_h[r] - s.view.scroll_y + g.header_h()
+                    );
+                    for c in 0..cols {
+                        assert_eq!(
+                            pos.cell_rect(r, c),
+                            cell_rect(&g, r, c),
+                            "case {case} size {size:?} r{r} c{c}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     /// 自动行高按实测行段累加：一行放不下的正文把行撑高（同批行段供画布绘制与编辑浮层共用）。
     #[test]
     fn auto_row_height_follows_measured_lines() {
@@ -3874,10 +4011,8 @@ mod tests {
 
     /// 网格几何里的选区上下缘换算到窗口坐标（zoom 1 时 header_h 与行高均为 32）。
     fn sel_edges(s: &TableSession, origin: Point, row: usize) -> (f32, f32) {
-        let g = geo(s, Size::new(f32::MAX, f32::MAX));
-        let top = origin.y + g.cache.row_y[row] - s.view.scroll_y + g.header_h();
-        let bottom = origin.y + g.cache.row_y[row] + g.cache.row_h[row] - s.view.scroll_y + g.header_h();
-        (top, bottom)
+        let pos = layout_positions(s);
+        (origin.y + pos.cell_rect(row, 0).y, origin.y + pos.row_bottom(row))
     }
 
     /// 靠右窗边的选区：气泡按窗口视口钳位、整条留在窗口内（钳制基准是窗口，不是面板）。
@@ -3960,6 +4095,59 @@ mod tests {
         let mut s = bar_session(window, origin, "r0");
         s.view.active_view = Some("plugin:view".to_string());
         assert!(bar_placement(&s, window, viewport).is_none(), "插件表格面在场时不弹");
+    }
+
+    /// 重构前的气泡落位算式（仅测试对照：伪尺寸几何 + 手写翻转/钳制）。
+    fn legacy_bar_rect(s: &TableSession, window: iced::window::Id, viewport: Size) -> Rectangle {
+        let view = &s.view;
+        let (_, origin) = view.canvas_origin.filter(|(w, _)| *w == window).expect("锚点");
+        let region = table_ops::region_of(view.selection.as_ref(), &s.data.fields, &s.data.rows).expect("选区");
+        // 旧路径用伪尺寸 Geo 只取这几个位置量；这里直接照抄同一算式（尺寸不参与）
+        let cache = s.view.layout.as_ref().expect("布局缓存");
+        let (header_h, gutter_w) = (HEADER_H * view.zoom, GUTTER_W * view.zoom);
+        let x0 = (cache.col_x[region.col_start] - view.scroll_x + gutter_w).max(8.0);
+        let y0 = cache.row_y[region.row_start] - view.scroll_y + header_h;
+        let y1 = cache.row_y[region.row_end] + cache.row_h[region.row_end] - view.scroll_y + header_h;
+        let summary = table_ops::style_summary(&s.data.fields, &s.data.rows, &region);
+        let w = bar_est_width(&bar_font_label(&summary), &bar_size_label(&summary));
+        let h = bar_est_height();
+        let grid_top = origin.y;
+        let grid_bottom = (origin.y + view.canvas_size.height).min(viewport.height);
+        let above = grid_top + y0 - h - BAR_GAP;
+        let want_y = if above >= grid_top { above } else { grid_top + y1 + BAR_GAP };
+        let max_y = (grid_bottom - h - pal::VIEWPORT_GAP).max(grid_top);
+        let max_x = (viewport.width - w - pal::VIEWPORT_GAP).max(pal::VIEWPORT_GAP);
+        Rectangle::new(
+            Point::new((origin.x + x0).clamp(pal::VIEWPORT_GAP, max_x), want_y.clamp(grid_top, max_y)),
+            Size::new(w, h),
+        )
+    }
+
+    /// 气泡落位复用弹层算式后与旧算式同矩形（亚像素内）：窗口 / 原点 / 滚动 / 网格高组合。
+    #[test]
+    fn format_bar_placement_matches_legacy_rect() {
+        let origins = [Point::new(0.0, 0.0), Point::new(100.0, 200.0), Point::new(640.0, 460.0)];
+        let viewports = [Size::new(900.0, 500.0), Size::new(600.0, 320.0), Size::new(1920.0, 1080.0)];
+        let canvases = [Size::new(600.0, 300.0), Size::new(200.0, 40.0)];
+        for origin in origins {
+            for viewport in viewports {
+                for canvas in canvases {
+                    for row in ["r0", "r1"] {
+                        let window = iced::window::Id::unique();
+                        let mut s = bar_session(window, Some(origin), row);
+                        s.view.canvas_size = canvas;
+                        s.view.scroll_x = 17.0;
+                        s.view.scroll_y = 33.0;
+                        let got = bar_placement(&s, window, viewport).expect("会话成立").rect;
+                        let want = legacy_bar_rect(&s, window, viewport);
+                        assert!((got.x - want.x).abs() < 0.001, "x {got:?} vs {want:?}");
+                        assert!((got.y - want.y).abs() < 0.001, "y {got:?} vs {want:?}");
+                        assert_eq!(got.width, want.width);
+                        assert_eq!(got.height, want.height);
+                    }
+                }
+            }
+        }
     }
 
     fn rels(keys: &[&str]) -> HashSet<String> {

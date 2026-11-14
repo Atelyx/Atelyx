@@ -215,11 +215,9 @@ fn on_load(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
             if rels.is_empty() {
                 return Task::none();
             }
-            with_session(app, |s| {
-                push_undo(s);
+            mutate_table(app, |s| {
                 let Some(row) = s.data.rows.iter_mut().find(|r| r.id == row_id) else {
-                    drop_undo(s);
-                    return;
+                    return false;
                 };
                 // 旧形态（string[]/标量）不携带 display，一律换新对象；对象形态保留 display
                 let mut value = match row.values.get(&field_id) {
@@ -234,7 +232,7 @@ fn on_load(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
                 images.extend(rels.iter().map(|r| serde_json::Value::String(r.clone())));
                 value["images"] = serde_json::Value::Array(images);
                 row.values.insert(field_id, value);
-                s.touch();
+                true
             });
             Task::none()
         }
@@ -455,6 +453,19 @@ fn on_gesture(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
     }
 }
 
+/// 单选格改值（弹层条目）：行已失效 = 无变更，不留空撤销步。
+fn select_option(
+    s: &mut tv::TableSession,
+    row_id: &str,
+    field_id: &str,
+    value: Option<String>,
+) -> bool {
+    mutate_session(s, |s| {
+        let Some(row) = s.data.rows.iter_mut().find(|r| r.id == row_id) else { return false };
+        ops::set_cell_value(row, field_id, value.map(serde_json::Value::String))
+    })
+}
+
 fn on_edit(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
     match msg {
         tv::TableMsg::Edited(action) => {
@@ -531,7 +542,7 @@ fn on_edit(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
             if applies {
                 crate::table_ai::cancel_before_undo(app);
             }
-            undo(app);
+            history_step(app, false);
             Task::none()
         }
         tv::TableMsg::Redo => {
@@ -541,7 +552,7 @@ fn on_edit(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
             if applies {
                 crate::table_ai::cancel_before_undo(app);
             }
-            redo(app);
+            history_step(app, true);
             Task::none()
         }
         tv::TableMsg::StyleToggle(key) => apply_style(app, style_toggle_patch(app, key)),
@@ -574,18 +585,10 @@ fn on_edit(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
             task
         }
         tv::TableMsg::SelectOption { row_id, field_id, value } => {
-            let mut changed = false;
-            with_session(app, |s| {
-                push_undo(s);
-                let Some(row) = s.data.rows.iter_mut().find(|r| r.id == row_id) else { return };
-                let next = value.map(serde_json::Value::String);
-                if ops::set_cell_value(row, &field_id, next) {
-                    s.touch();
-                    changed = true;
-                } else {
-                    drop_undo(s);
-                }
-            });
+            let changed = app
+                .table
+                .as_mut()
+                .is_some_and(|s| select_option(s, &row_id, &field_id, value));
             if changed {
                 crate::table_ai::note_source_edit(app, &row_id, &field_id);
             }
@@ -603,55 +606,43 @@ fn on_edit(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
 fn on_structure(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
     match msg {
         tv::TableMsg::DuplicateRow(row_id) => {
-            with_session(app, |s| {
-                push_undo(s);
-                if ops::duplicate_row(&mut s.data, &row_id, nanoid::nanoid!()) {
-                    s.touch();
-                } else {
-                    drop_undo(s);
-                }
-            });
+            mutate_table(app, |s| ops::duplicate_row(&mut s.data, &row_id, nanoid::nanoid!()));
             app.dismiss_popup();
             Task::none()
         }
         tv::TableMsg::InsertRow { row_id, side } => {
             let mut added = None;
-            with_session(app, |s| {
-                push_undo(s);
+            mutate_table(app, |s| {
                 let Some(new_id) = ops::insert_row_near(&mut s.data, &row_id, side, nanoid::nanoid!()) else {
-                    drop_undo(s);
-                    return;
+                    return false;
                 };
-                s.touch();
-                // 新空行即操作落点：选中跟着它，插入位置一眼可见
-                s.view.selection = Some(ops::TableSelection::Row(new_id.clone()));
                 added = Some(new_id);
+                true
             });
             if let Some(id) = added {
+                // 新空行即操作落点：选中跟着它，插入位置一眼可见
+                with_session(app, |s| s.view.selection = Some(ops::TableSelection::Row(id.clone())));
                 crate::table_ai::note_new_rows(app, &[id]);
             }
             app.dismiss_popup();
             Task::none()
         }
         tv::TableMsg::MoveRow { row_id, delta } => {
-            with_session(app, |s| {
-                let Some(from) = s.data.rows.iter().position(|r| r.id == row_id) else { return };
+            mutate_table(app, |s| {
+                let Some(from) = s.data.rows.iter().position(|r| r.id == row_id) else { return false };
                 let target = if delta < 0 { from.saturating_sub(1) } else { from + 2 };
-                push_undo(s);
-                if ops::move_row(&mut s.data, &row_id, target) {
-                    s.touch();
-                } else {
-                    drop_undo(s);
-                }
+                ops::move_row(&mut s.data, &row_id, target)
             });
             app.dismiss_popup();
             Task::none()
         }
         tv::TableMsg::DeleteRows(ids) => {
-            with_session(app, |s| {
-                push_undo(s);
+            // 现状口径：即使没有命中任何行也置脏并保留撤销步（不做「是否有行被删」判定）
+            mutate_table(app, |s| {
                 ops::remove_rows(&mut s.data, &ids);
-                s.touch();
+                true
+            });
+            with_session(app, |s| {
                 clear_invalid_selection(s);
                 clamp_scroll(s);
             });
@@ -659,8 +650,7 @@ fn on_structure(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
             Task::none()
         }
         tv::TableMsg::AddField { name, ftype } => {
-            with_session(app, |s| {
-                push_undo(s);
+            mutate_table(app, |s| {
                 let n = if name.trim().is_empty() {
                     format!("字段{}", s.data.fields.len() + 1)
                 } else {
@@ -668,14 +658,13 @@ fn on_structure(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
                 };
                 let index = s.data.fields.len();
                 ops::insert_field(&mut s.data, index, nanoid::nanoid!(), &n, &ftype);
-                s.touch();
+                true
             });
             app.dismiss_popup();
             Task::none()
         }
         tv::TableMsg::InsertField { index, name } => {
-            with_session(app, |s| {
-                push_undo(s);
+            mutate_table(app, |s| {
                 let idx = index.unwrap_or(s.data.fields.len());
                 let n = if name.trim().is_empty() {
                     format!("字段{}", idx + 1)
@@ -683,16 +672,18 @@ fn on_structure(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
                     name.trim().to_string()
                 };
                 ops::insert_field(&mut s.data, idx, nanoid::nanoid!(), &n, "text");
-                s.touch();
+                true
             });
             app.dismiss_popup();
             Task::none()
         }
         tv::TableMsg::DeleteField(field_id) => {
-            with_session(app, |s| {
-                push_undo(s);
+            // 现状口径：即使字段已不存在也置脏并保留撤销步（不做「是否命中」判定）
+            mutate_table(app, |s| {
                 ops::remove_field(&mut s.data, &field_id);
-                s.touch();
+                true
+            });
+            with_session(app, |s| {
                 clear_invalid_selection(s);
                 clamp_scroll(s);
             });
@@ -701,14 +692,12 @@ fn on_structure(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
         }
         tv::TableMsg::RenameField { field_id, name } => {
             let mut blocked = false;
-            with_session(app, |s| {
-                push_undo(s);
+            mutate_table(app, |s| {
                 if ops::rename_field(&mut s.data, &field_id, &name) {
-                    s.touch();
-                } else {
-                    drop_undo(s);
-                    blocked = s.data.fields.iter().any(|f| f.id != field_id && f.name == name.trim());
+                    return true;
                 }
+                blocked = s.data.fields.iter().any(|f| f.id != field_id && f.name == name.trim());
+                false
             });
             if blocked {
                 app.notify(NoticeLevel::Warning, "字段名已存在，且改名会让 AI 字段的模板引用歧义");
@@ -717,14 +706,7 @@ fn on_structure(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
             Task::none()
         }
         tv::TableMsg::RetypeField { field_id, ftype } => {
-            with_session(app, |s| {
-                push_undo(s);
-                if ops::retype_field(&mut s.data, &field_id, &ftype) {
-                    s.touch();
-                } else {
-                    drop_undo(s);
-                }
-            });
+            mutate_table(app, |s| ops::retype_field(&mut s.data, &field_id, &ftype));
             app.dismiss_popup();
             Task::none()
         }
@@ -733,38 +715,27 @@ fn on_structure(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
             if name.is_empty() {
                 return Task::none();
             }
-            with_session(app, |s| {
+            mutate_table(app, |s| {
                 let mut options = current_options(s, &field_id);
                 options.push(name);
-                push_undo(s);
-                if ops::set_field_options(&mut s.data, &field_id, options) {
-                    s.touch();
-                } else {
-                    drop_undo(s);
-                }
+                ops::set_field_options(&mut s.data, &field_id, options)
             });
             app.table_popup_draft.clear();
             Task::none()
         }
         tv::TableMsg::OptionsRemove { field_id, index } => {
-            with_session(app, |s| {
+            mutate_table(app, |s| {
                 let mut options = current_options(s, &field_id);
                 if index >= options.len() {
-                    return;
+                    return false;
                 }
                 options.remove(index);
-                push_undo(s);
-                if ops::set_field_options(&mut s.data, &field_id, options) {
-                    s.touch();
-                } else {
-                    drop_undo(s);
-                }
+                ops::set_field_options(&mut s.data, &field_id, options)
             });
             Task::none()
         }
         tv::TableMsg::ColumnAutoWidth(field_id) => {
-            with_session(app, |s| {
-                push_undo(s);
+            mutate_table(app, |s| {
                 let targets: Vec<String> = match field_id {
                     Some(id) => vec![id],
                     None => s.data.fields.iter().map(|f| f.id.clone()).collect(),
@@ -775,40 +746,24 @@ fn on_structure(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
                     let w = ops::column_auto_width(&f, &s.data.rows);
                     changed |= ops::set_field_width(&mut s.data, &id, Some(w));
                 }
-                if changed {
-                    s.touch();
-                } else {
-                    drop_undo(s);
-                }
+                changed
             });
             app.dismiss_popup();
             Task::none()
         }
         tv::TableMsg::RowHeightAuto(row_id) => {
-            with_session(app, |s| {
-                push_undo(s);
+            mutate_table(app, |s| {
                 let ids: Vec<String> = match row_id {
                     Some(id) => vec![id],
                     None => s.data.rows.iter().filter(|r| r.height.is_some()).map(|r| r.id.clone()).collect(),
                 };
-                if ops::clear_row_heights(&mut s.data, &ids) {
-                    s.touch();
-                } else {
-                    drop_undo(s);
-                }
+                ops::clear_row_heights(&mut s.data, &ids)
             });
             app.dismiss_popup();
             Task::none()
         }
         tv::TableMsg::SetCalc { field_id, calc } => {
-            with_session(app, |s| {
-                push_undo(s);
-                if ops::set_calc_type(&mut s.data, &field_id, calc.as_deref()) {
-                    s.touch();
-                } else {
-                    drop_undo(s);
-                }
-            });
+            mutate_table(app, |s| ops::set_calc_type(&mut s.data, &field_id, calc.as_deref()));
             app.dismiss_popup();
             Task::none()
         }
@@ -835,9 +790,8 @@ fn on_ai(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
             crate::table_ai::open_config(app, window, &field_id)
         }
         tv::TableMsg::AiCreateField { window, name } => {
-            let field_id = {
-                let Some(s) = app.table.as_mut() else { return Task::none() };
-                push_undo(s);
+            let mut added = None;
+            mutate_table(app, |s| {
                 let label = if name.trim().is_empty() {
                     "AI 字段".to_string()
                 } else {
@@ -846,9 +800,10 @@ fn on_ai(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
                 let id = nanoid::nanoid!();
                 let index = s.data.fields.len();
                 ops::insert_field(&mut s.data, index, id.clone(), &label, "ai");
-                s.touch();
-                id
-            };
+                added = Some(id);
+                true
+            });
+            let Some(field_id) = added else { return Task::none() };
             app.dismiss_popup();
             crate::table_ai::open_config(app, window, &field_id)
         }
@@ -1238,31 +1193,28 @@ fn plugin_set_cell(
     field_id: &str,
     value: serde_json::Value,
 ) -> Result<(), String> {
-    let Some(session) = app.table.as_mut() else {
-        return Err("未打开表格，无法写入".to_string());
-    };
-    let Some(field) = session.data.fields.iter().find(|f| f.id == field_id) else {
-        return Err(format!("字段不存在：{field_id}"));
-    };
-    if field.field_type == "ai" {
-        return Err(format!("字段「{}」是 AI 字段，不能直接写入", field.name));
+    {
+        let Some(session) = app.table.as_ref() else {
+            return Err("未打开表格，无法写入".to_string());
+        };
+        let Some(field) = session.data.fields.iter().find(|f| f.id == field_id) else {
+            return Err(format!("字段不存在：{field_id}"));
+        };
+        if field.field_type == "ai" {
+            return Err(format!("字段「{}」是 AI 字段，不能直接写入", field.name));
+        }
+        if !session.data.rows.iter().any(|r| r.id == row_id) {
+            return Err(format!("行不存在：{row_id}"));
+        }
     }
-    if !session.data.rows.iter().any(|r| r.id == row_id) {
-        return Err(format!("行不存在：{row_id}"));
-    }
-    push_undo(session);
     let next = (!value.is_null()).then_some(value);
-    let changed = session
-        .data
-        .rows
-        .iter_mut()
-        .find(|r| r.id == row_id)
-        .is_some_and(|row| ops::set_cell_value(row, field_id, next));
-    if changed {
-        session.touch();
-    } else {
-        drop_undo(session);
-    }
+    mutate_table(app, |s| {
+        s.data
+            .rows
+            .iter_mut()
+            .find(|r| r.id == row_id)
+            .is_some_and(|row| ops::set_cell_value(row, field_id, next))
+    });
     Ok(())
 }
 
@@ -1293,28 +1245,34 @@ fn plugin_set_cell_image(
 
 /// 插件新增行：返回宿主分配的新行 id（插件据此继续引用该行）。
 fn plugin_add_row(app: &mut App) -> Result<String, String> {
-    let Some(session) = app.table.as_mut() else {
+    let mut id = String::new();
+    if !mutate_table(app, |s| {
+        id = ops::add_row(&mut s.data, nanoid::nanoid!());
+        true
+    }) {
         return Err("未打开表格，无法新增行".to_string());
-    };
-    push_undo(session);
-    let id = ops::add_row(&mut session.data, nanoid::nanoid!());
-    session.touch();
+    }
     Ok(id)
 }
 
 /// 插件删行：连带清掉失效选中并钳回滚动范围。
 fn plugin_remove_row(app: &mut App, row_id: &str) -> Result<(), String> {
-    let Some(session) = app.table.as_mut() else {
-        return Err("未打开表格，无法删除行".to_string());
-    };
-    if !session.data.rows.iter().any(|r| r.id == row_id) {
-        return Err(format!("行不存在：{row_id}"));
+    {
+        let Some(session) = app.table.as_ref() else {
+            return Err("未打开表格，无法删除行".to_string());
+        };
+        if !session.data.rows.iter().any(|r| r.id == row_id) {
+            return Err(format!("行不存在：{row_id}"));
+        }
     }
-    push_undo(session);
-    ops::remove_rows(&mut session.data, &[row_id.to_string()]);
-    session.touch();
-    clear_invalid_selection(session);
-    clamp_scroll(session);
+    mutate_table(app, |s| {
+        ops::remove_rows(&mut s.data, &[row_id.to_string()]);
+        true
+    });
+    with_session(app, |s| {
+        clear_invalid_selection(s);
+        clamp_scroll(s);
+    });
     Ok(())
 }
 
@@ -1490,8 +1448,7 @@ fn on_press(app: &mut App, window: iced::window::Id, pos: Point, size: Size, ori
                 let grab = if bar.contains(pos) {
                     pos.x - bar.x
                 } else {
-                    let t = ((pos.x - gutter - bar.width / 2.0) / (track_w - bar.width)).clamp(0.0, 1.0);
-                    s.view.scroll_x = t * max;
+                    s.view.scroll_x = scroll_to(gutter, track_w, bar.width, bar.width / 2.0, max, pos.x);
                     bar.width / 2.0
                 };
                 s.view.hscroll_drag = Some(tv::HScrollDrag { grab });
@@ -1509,8 +1466,7 @@ fn on_press(app: &mut App, window: iced::window::Id, pos: Point, size: Size, ori
                 let grab = if bar.contains(pos) {
                     pos.y - bar.y
                 } else {
-                    let t = ((pos.y - header - bar.height / 2.0) / (track_h - bar.height)).clamp(0.0, 1.0);
-                    s.view.scroll_y = t * max;
+                    s.view.scroll_y = scroll_to(header, track_h, bar.height, bar.height / 2.0, max, pos.y);
                     bar.height / 2.0
                 };
                 s.view.vscroll_drag = Some(tv::VScrollDrag { grab });
@@ -1682,14 +1638,14 @@ fn exec_cell_action(app: &mut App, window: iced::window::Id, action: CellAction,
         }
         CellAction::BeginEdit { r, c, draft } => begin_edit_with(app, r, c, draft, true, false),
         CellAction::NewRow => {
-            let id = {
-                let Some(s) = app.table.as_mut() else { return Task::none() };
-                push_undo(s);
-                let id = ops::add_row(&mut s.data, nanoid::nanoid!());
-                s.touch();
-                id
-            };
-            crate::table_ai::note_new_rows(app, &[id]);
+            let mut added = None;
+            mutate_table(app, |s| {
+                added = Some(ops::add_row(&mut s.data, nanoid::nanoid!()));
+                true
+            });
+            if let Some(id) = added {
+                crate::table_ai::note_new_rows(app, &[id]);
+            }
             Task::none()
         }
         CellAction::ShowBar { row_id, field_id } => {
@@ -1707,7 +1663,7 @@ fn exec_cell_action(app: &mut App, window: iced::window::Id, action: CellAction,
             }
         }
         CellAction::ToggleMode { row_id, field_id } => {
-            with_session(app, |s| {
+            mutate_table(app, |s| {
                 let Some(is_grid) = s
                     .data
                     .rows
@@ -1716,48 +1672,36 @@ fn exec_cell_action(app: &mut App, window: iced::window::Id, action: CellAction,
                     .and_then(|r| r.values.get(&field_id))
                     .map(|v| ops::image_display(v) == Some("grid"))
                 else {
-                    return;
+                    return false;
                 };
-                push_undo(s);
                 let Some(row) = s.data.rows.iter_mut().find(|r| r.id == row_id) else {
-                    drop_undo(s);
-                    return;
+                    return false;
                 };
                 let Some(v) = row.values.get_mut(&field_id) else {
-                    drop_undo(s);
-                    return;
+                    return false;
                 };
-                let changed = if is_grid {
+                if is_grid {
                     v.as_object_mut().map(|o| o.remove("display")).is_some()
                 } else if let Some(obj) = v.as_object_mut() {
                     obj.insert("display".into(), serde_json::Value::String("grid".into()));
                     true
                 } else {
                     false
-                };
-                if changed {
-                    s.touch();
-                } else {
-                    drop_undo(s);
                 }
             });
             Task::none()
         }
         CellAction::RemoveImage { row_id, field_id, index } => {
-            with_session(app, |s| {
-                push_undo(s);
-                let Some(images) = row_images_of(s, &row_id, &field_id) else {
-                    drop_undo(s);
-                    return;
+            mutate_table(app, |s| {
+                let Some(mut images) = row_images_of(s, &row_id, &field_id) else {
+                    return false;
                 };
                 if index >= images.len() {
-                    drop_undo(s);
-                    return;
+                    return false;
                 }
-                let mut images = images;
                 images.remove(index);
                 write_row_images(s, &row_id, &field_id, images);
-                s.touch();
+                true
             });
             Task::none()
         }
@@ -1869,8 +1813,7 @@ fn on_move(app: &mut App, window: iced::window::Id, pos: Point, size: Size, orig
     if let Some((grab, bar, max, header, viewport_bottom)) = vscroll {
         if let Some(bar) = bar {
             let track_h = (viewport_bottom - header).max(1.0);
-            let t = ((pos.y - header - grab) / (track_h - bar.height)).clamp(0.0, 1.0);
-            s.view.scroll_y = t * max;
+            s.view.scroll_y = scroll_to(header, track_h, bar.height, grab, max, pos.y);
         }
         return Task::none();
     }
@@ -1882,8 +1825,7 @@ fn on_move(app: &mut App, window: iced::window::Id, pos: Point, size: Size, orig
     if let Some((grab, bar, max, gutter, viewport_right)) = hscroll {
         if let Some(bar) = bar {
             let track_w = (viewport_right - gutter).max(1.0);
-            let t = ((pos.x - gutter - grab) / (track_w - bar.width)).clamp(0.0, 1.0);
-            s.view.scroll_x = t * max;
+            s.view.scroll_x = scroll_to(gutter, track_w, bar.width, grab, max, pos.x);
         }
         return Task::none();
     }
@@ -1968,13 +1910,7 @@ fn on_move(app: &mut App, window: iced::window::Id, pos: Point, size: Size, orig
         if active {
             let g = tv::geo(s, size);
             let cy = g.content_y(pos.y);
-            let mut at = s.data.rows.len();
-            for (i, y) in g.cache.row_y.iter().take(s.data.rows.len()).enumerate() {
-                if cy < y + g.cache.row_h[i] / 2.0 {
-                    at = i;
-                    break;
-                }
-            }
+            let at = insert_at_index(&g.cache.row_y, &g.cache.row_h, cy);
             s.view.reorder.as_mut().expect("reorder 已判存在").insert_at = at;
         }
         return Task::none();
@@ -1988,13 +1924,7 @@ fn on_move(app: &mut App, window: iced::window::Id, pos: Point, size: Size, orig
         if active {
             let g = tv::geo(s, size);
             let cx = g.content_x(pos.x);
-            let mut at = s.data.fields.len();
-            for (i, x) in g.cache.col_x.iter().take(s.data.fields.len()).enumerate() {
-                if cx < x + g.cache.col_w[i] / 2.0 {
-                    at = i;
-                    break;
-                }
-            }
+            let at = insert_at_index(&g.cache.col_x, &g.cache.col_w, cx);
             s.view.field_reorder.as_mut().expect("field_reorder 已判存在").insert_at = at;
         }
         return Task::none();
@@ -2078,23 +2008,13 @@ fn on_release(app: &mut App, pos: Point) -> Task<Message> {
     }
     if let Some(reo) = s.view.reorder.take() {
         if reo.active {
-            push_undo(s);
-            if ops::move_row(&mut s.data, &reo.row_id, reo.insert_at) {
-                s.touch();
-            } else {
-                drop_undo(s);
-            }
+            mutate_session(s, |s| ops::move_row(&mut s.data, &reo.row_id, reo.insert_at));
         }
         return Task::none();
     }
     if let Some(reo) = s.view.field_reorder.take() {
         if reo.active {
-            push_undo(s);
-            if ops::move_field(&mut s.data, &reo.field_id, reo.insert_at) {
-                s.touch();
-            } else {
-                drop_undo(s);
-            }
+            mutate_session(s, |s| ops::move_field(&mut s.data, &reo.field_id, reo.insert_at));
         }
         return Task::none();
     }
@@ -2176,6 +2096,19 @@ fn on_wheel(app: &mut App, delta_y: f32, delta_x: f32) -> Task<Message> {
 
 fn distance(a: Point, b: Point) -> f32 {
     ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt()
+}
+
+/// 滚动条跟手：按滑块行程比例换算滚动量（轴无关；track_origin = 行号列右缘 / 表头底缘）。
+fn scroll_to(track_origin: f32, track_len: f32, bar_len: f32, grab: f32, max: f32, at: f32) -> f32 {
+    let t = ((at - track_origin - grab) / (track_len - bar_len)).clamp(0.0, 1.0);
+    t * max
+}
+
+/// 拖拽排序插入位：第一个「格中点越过 at」的下标；都不越过 = 末尾。
+fn insert_at_index(starts: &[f32], sizes: &[f32], at: f32) -> usize {
+    (0..sizes.len())
+        .find(|&i| at < starts[i] + sizes[i] / 2.0)
+        .unwrap_or(sizes.len())
 }
 
 // ===== 灯箱缩放 / 平移 =====
@@ -2394,7 +2327,7 @@ fn cancel_edit(app: &mut App) {
 
 // 快照式撤销，栈深 UNDO_DEPTH；选中 ≠ 会话——导航/单击不产生撤销单元。
 
-/// 压入快照并维持栈深上限（会话快照在提交变化时、常规操作在变更前调用）。
+/// 压入快照并维持栈深上限（快照内容须为变更前状态；提交变化时才入栈）。
 fn push_snapshot(s: &mut tv::TableSession, snap: tv::TableSnapshot) {
     s.view.undo.push(snap);
     if s.view.undo.len() > tv::UNDO_DEPTH {
@@ -2407,13 +2340,28 @@ fn push_undo(s: &mut tv::TableSession) {
     push_snapshot(s, snap);
 }
 
-/// 回退刚压入的快照（无操作时丢弃，不入撤销栈）。
-fn drop_undo(s: &mut tv::TableSession) {
-    s.view.undo.pop();
+/// 表格数据变更的唯一记账口：闭包返回「数据真的改了」——
+/// true 才把变更前快照入栈并置脏，false 不触碰撤销栈与脏态。
+fn mutate_table(app: &mut App, f: impl FnOnce(&mut tv::TableSession) -> bool) -> bool {
+    let Some(s) = app.table.as_mut() else { return false };
+    mutate_session(s, f)
 }
 
-fn undo(app: &mut App) {
-    // 与 redo 同规：编辑会话中撤销会与编辑器草稿错位（提交/取消先于撤销）
+/// 会话级记账口（已持有会话借用时直接用这一层）。
+/// 快照在变更前取，确认有变更才入栈：无变更不压栈，满栈时也不会挤掉最旧一步。
+fn mutate_session(s: &mut tv::TableSession, f: impl FnOnce(&mut tv::TableSession) -> bool) -> bool {
+    let snapshot = (s.data.fields.clone(), s.data.rows.clone());
+    if !f(s) {
+        return false;
+    }
+    push_snapshot(s, snapshot);
+    s.touch();
+    true
+}
+
+/// 撤销 / 重做共用一条：从对应栈弹出快照，把当前内容压到反向栈，恢复数据。
+/// 编辑会话中两边都不接（会与编辑器草稿错位；编辑态撤销后的重做交由重新进入编辑承担）。
+fn history_step(app: &mut App, forward: bool) {
     if !app
         .table
         .as_ref()
@@ -2422,25 +2370,20 @@ fn undo(app: &mut App) {
         return;
     }
     let Some(s) = app.table.as_mut() else { return };
-    let Some(snap) = s.view.undo.pop() else { return };
-    s.view.redo.push((s.data.fields.clone(), s.data.rows.clone()));
-    ops::restore(&mut s.data, snap);
-    s.dirty = true;
-    s.save_error = None;
-    s.version += 1;
-    s.rebuild_layout();
-    s.view.bar_shown = false;
-    clear_invalid_selection(s);
+    history_step_in(s, forward);
 }
 
-fn redo(app: &mut App) {
-    // 编辑会话中重做会与编辑器草稿错位（编辑态撤销后重做交由重新进入编辑承担）
-    if !app.table.as_ref().is_some_and(|s| s.view.focused && s.view.editing.is_none()) {
-        return;
+/// 会话级撤销 / 重做；返回是否真的移动了一步（空栈 = false）。
+fn history_step_in(s: &mut tv::TableSession, forward: bool) -> bool {
+    let Some(snap) = (if forward { s.view.redo.pop() } else { s.view.undo.pop() }) else {
+        return false;
+    };
+    let current = (s.data.fields.clone(), s.data.rows.clone());
+    if forward {
+        push_snapshot(s, current);
+    } else {
+        s.view.redo.push(current);
     }
-    let Some(s) = app.table.as_mut() else { return };
-    let Some(snap) = s.view.redo.pop() else { return };
-    push_undo(s);
     ops::restore(&mut s.data, snap);
     s.dirty = true;
     s.save_error = None;
@@ -2448,6 +2391,7 @@ fn redo(app: &mut App) {
     s.rebuild_layout();
     s.view.bar_shown = false;
     clear_invalid_selection(s);
+    true
 }
 
 /// 行/字段增删后清失效选区（任一端 id 消失）。
@@ -2499,17 +2443,16 @@ fn on_paste(app: &mut App, text: String) -> Task<Message> {
     let mut pasted_rows: Vec<String> = Vec::new();
     let mut pasted_fields: Vec<String> = Vec::new();
     let mut created_rows: Vec<String> = Vec::new();
-    with_session(app, |s| {
+    mutate_table(app, |s| {
         if !table_active(s) {
-            return;
+            return false;
         }
         let Some(region) = ops::region_of(s.view.selection.as_ref(), &s.data.fields, &s.data.rows) else {
-            return;
+            return false;
         };
-        push_undo(s);
         let cols = grid.iter().map(Vec::len).max().unwrap_or(0);
         let before = s.data.rows.len();
-        if ops::apply_paste_grid(
+        if !ops::apply_paste_grid(
             &mut s.data.fields,
             &mut s.data.rows,
             region.row_start,
@@ -2517,21 +2460,20 @@ fn on_paste(app: &mut App, text: String) -> Task<Message> {
             &grid,
             || nanoid::nanoid!(),
         ) {
-            s.touch();
-            created_rows = s.data.rows[before..].iter().map(|row| row.id.clone()).collect();
-            pasted_rows = s.data.rows[region.row_start..]
-                .iter()
-                .take(grid.len())
-                .map(|row| row.id.clone())
-                .collect();
-            pasted_fields = s.data.fields[region.col_start..]
-                .iter()
-                .take(cols)
-                .map(|field| field.id.clone())
-                .collect();
-        } else {
-            drop_undo(s);
+            return false;
         }
+        created_rows = s.data.rows[before..].iter().map(|row| row.id.clone()).collect();
+        pasted_rows = s.data.rows[region.row_start..]
+            .iter()
+            .take(grid.len())
+            .map(|row| row.id.clone())
+            .collect();
+        pasted_fields = s.data.fields[region.col_start..]
+            .iter()
+            .take(cols)
+            .map(|field| field.id.clone())
+            .collect();
+        true
     });
     if !created_rows.is_empty() {
         crate::table_ai::note_new_rows(app, &created_rows);
@@ -2545,14 +2487,13 @@ fn on_paste(app: &mut App, text: String) -> Task<Message> {
 fn on_clear_selection(app: &mut App) -> Task<Message> {
     let mut cleared_rows: Vec<String> = Vec::new();
     let mut cleared_fields: Vec<String> = Vec::new();
-    with_session(app, |s| {
+    mutate_table(app, |s| {
         if !table_active(s) {
-            return;
+            return false;
         }
         let Some(region) = ops::region_of(s.view.selection.as_ref(), &s.data.fields, &s.data.rows) else {
-            return;
+            return false;
         };
-        push_undo(s);
         let mut changed = false;
         for r in region.row_start..=region.row_end {
             for c in region.col_start..=region.col_end {
@@ -2572,11 +2513,7 @@ fn on_clear_selection(app: &mut App) -> Task<Message> {
                 }
             }
         }
-        if changed {
-            s.touch();
-        } else {
-            drop_undo(s);
-        }
+        changed
     });
     cleared_rows.sort();
     cleared_rows.dedup();
@@ -2648,16 +2585,11 @@ fn clear_format_patch() -> ops::StylePatch {
 }
 
 fn apply_style(app: &mut App, patch: ops::StylePatch) -> Task<Message> {
-    with_session(app, |s| {
+    mutate_table(app, |s| {
         let Some(region) = ops::region_of(s.view.selection.as_ref(), &s.data.fields, &s.data.rows) else {
-            return;
+            return false;
         };
-        push_undo(s);
-        if ops::apply_style_patch(&s.data.fields, &mut s.data.rows, &region, &patch) {
-            s.touch();
-        } else {
-            drop_undo(s);
-        }
+        ops::apply_style_patch(&s.data.fields, &mut s.data.rows, &region, &patch)
     });
     Task::none()
 }
@@ -2815,12 +2747,13 @@ fn commit_image_drag(s: &mut tv::TableSession, drag: tv::ImageDrag) {
     if target == drag.from {
         return;
     }
-    push_undo(s);
-    let mut next = images;
-    let item = next.remove(drag.from);
-    next.insert(target, item);
-    write_row_images(s, &drag.row_id, &drag.field_id, next);
-    s.touch();
+    mutate_session(s, |s| {
+        let mut next = images;
+        let item = next.remove(drag.from);
+        next.insert(target, item);
+        write_row_images(s, &drag.row_id, &drag.field_id, next);
+        true
+    });
 }
 
 /// 长按激活检查（UiTick 心跳驱动）：缩略图按压超 400ms 未移动 = 进入图片拖拽排序
@@ -3237,4 +3170,139 @@ fn loaded_image(bytes: Vec<u8>) -> Result<tv::LoadedImage, String> {
     let thumb = image_thumb::thumbnail(&bytes, image_thumb::THUMB_MAX_EDGE)?;
     let size = (thumb.source.0 as f32, thumb.source.1 as f32);
     Ok(tv::LoadedImage { size, thumb })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use atelyx_core::vault::{TableField, TableFile, TableRow};
+
+    fn session(values: &[&str]) -> tv::TableSession {
+        let field = TableField {
+            id: "f1".to_string(),
+            name: "正文".to_string(),
+            field_type: "text".to_string(),
+            options: None,
+            width: Some(120.0),
+            calc_type: None,
+            ai: None,
+        };
+        let rows = values
+            .iter()
+            .enumerate()
+            .map(|(i, v)| {
+                let mut cell = serde_json::Map::new();
+                cell.insert("f1".to_string(), serde_json::Value::String(v.to_string()));
+                TableRow { id: format!("r{i}"), values: cell, height: None, styles: None, ai: None }
+            })
+            .collect();
+        tv::TableSession::new(
+            "t.atb".to_string(),
+            TableFile {
+                schema: String::new(),
+                id: "t".to_string(),
+                title: String::new(),
+                fields: vec![field],
+                rows,
+                created_at: 0,
+                updated_at: 0,
+            },
+        )
+    }
+
+    fn cell_text(s: &tv::TableSession) -> &str {
+        s.data.rows[0].values.get("f1").and_then(|v| v.as_str()).unwrap_or("")
+    }
+
+    /// 失效行上的单选改值（弹层打开期间行被删除）：不能留下无变更的撤销步。
+    #[test]
+    fn select_option_stale_row_leaves_no_undo_entry() {
+        let mut s = session(&["a"]);
+        assert!(!select_option(&mut s, "gone", "f1", Some("b".to_string())));
+        assert!(!s.dirty, "数据没动不置脏");
+        assert!(s.view.undo.is_empty(), "没改动不留撤销步");
+        assert_eq!(cell_text(&s), "a");
+    }
+
+    /// 记账口契约：闭包报告有变更才入栈并 touch；报告无变更不触碰撤销栈与脏态。
+    #[test]
+    fn mutate_session_touches_only_reported_changes() {
+        let mut s = session(&["a"]);
+        let version = s.version;
+        assert!(!mutate_session(&mut s, |_| false));
+        assert!(!s.dirty);
+        assert_eq!(s.version, version);
+        assert!(s.view.undo.is_empty());
+
+        assert!(mutate_session(&mut s, |s| {
+            ops::set_cell_value(&mut s.data.rows[0], "f1", Some("b".into()))
+        }));
+        assert!(s.dirty);
+        assert_eq!(s.version, version + 1);
+        assert_eq!(s.view.undo.len(), 1);
+
+        assert!(!mutate_session(&mut s, |_| false));
+        assert_eq!(s.view.undo.len(), 1, "无变更不新增撤销步");
+    }
+
+    /// 滚动条跟手：滑块行程两端对应滚动上下限（轴无关算式）。
+    #[test]
+    fn scroll_to_maps_track_position_to_offset() {
+        let (origin, track, bar, grab, max) = (10.0, 100.0, 20.0, 10.0, 400.0);
+        assert_eq!(scroll_to(origin, track, bar, grab, max, 20.0), 0.0);
+        assert_eq!(scroll_to(origin, track, bar, grab, max, 100.0), 400.0);
+        assert_eq!(scroll_to(origin, track, bar, grab, max, 60.0), 200.0);
+    }
+
+    /// 拖拽排序插入位取格中点：全不越过 = 末尾。
+    #[test]
+    fn insert_at_index_uses_cell_midpoints() {
+        let starts = [0.0, 32.0, 80.0];
+        let sizes = [32.0, 48.0];
+        assert_eq!(insert_at_index(&starts, &sizes, 10.0), 0);
+        assert_eq!(insert_at_index(&starts, &sizes, 40.0), 1);
+        assert_eq!(insert_at_index(&starts, &sizes, 100.0), 2);
+    }
+
+    /// 无变更的记账不压栈：撤销栈满时也不能挤掉最旧一步。
+    #[test]
+    fn mutate_session_noop_keeps_full_undo_stack() {
+        let mut s = session(&["a"]);
+        for i in 0..tv::UNDO_DEPTH {
+            let mut snap = (s.data.fields.clone(), s.data.rows.clone());
+            snap.0[0].name = format!("step{i}");
+            push_snapshot(&mut s, snap);
+        }
+        assert!(!mutate_session(&mut s, |_| false));
+        assert_eq!(s.view.undo.len(), tv::UNDO_DEPTH);
+        assert_eq!(s.view.undo[0].0[0].name, "step0", "最旧一步不能被无变更操作挤掉");
+    }
+
+    /// 撤销 / 重做共用一条：两步改动可来回，到底后空栈不再移动。
+    #[test]
+    fn history_step_undo_redo_round_trip() {
+        let mut s = session(&["a"]);
+        assert!(mutate_session(&mut s, |s| {
+            ops::set_cell_value(&mut s.data.rows[0], "f1", Some("b".into()))
+        }));
+        assert!(mutate_session(&mut s, |s| {
+            ops::set_cell_value(&mut s.data.rows[0], "f1", Some("c".into()))
+        }));
+        assert_eq!(cell_text(&s), "c");
+
+        assert!(history_step_in(&mut s, false));
+        assert_eq!(cell_text(&s), "b");
+        assert_eq!(s.view.redo.len(), 1);
+        assert_eq!(s.view.undo.len(), 1);
+
+        assert!(history_step_in(&mut s, true));
+        assert_eq!(cell_text(&s), "c");
+        assert_eq!(s.view.undo.len(), 2);
+        assert!(s.view.redo.is_empty());
+
+        assert!(history_step_in(&mut s, false));
+        assert!(history_step_in(&mut s, false));
+        assert_eq!(cell_text(&s), "a");
+        assert!(!history_step_in(&mut s, false), "空白撤销栈不再移动");
+    }
 }

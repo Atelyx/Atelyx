@@ -3,7 +3,7 @@
 
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::{container, mouse_area, opaque, space, stack};
-use iced::{Color, Element, Length, Padding, Point, Size, border, widget::container::Style};
+use iced::{Color, Element, Length, Padding, Point, Rectangle, Size, border, widget::container::Style};
 
 use super::palette as pal;
 use super::{UiHost, UiMsg};
@@ -20,6 +20,26 @@ pub struct PopupSpec {
     pub min_width: f32,
 }
 
+/// 落位边界：可用区域与四边留白（各边独立；可把弹层收在一段面板区内）。
+#[derive(Clone, Copy, Debug)]
+pub struct PopupBounds {
+    /// 可用区域；留白自该区域四边向内收。
+    pub area: Rectangle,
+    pub left: f32,
+    pub top: f32,
+    pub right: f32,
+    pub bottom: f32,
+}
+
+/// 竖直翻转偏好。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VFlip {
+    /// 下方放不下且上方放得下才翻到上方（弹层默认）。
+    BelowFirst,
+    /// 上方放得下就放上方，否则放下方（格式气泡）。
+    AboveFirst,
+}
+
 /// 解析后的弹层矩形（窗口局部坐标，已钳制/翻转）。
 pub struct PopupGeom {
     pub x: f32,
@@ -32,20 +52,47 @@ pub fn resolve(spec: &PopupSpec, viewport: Size) -> PopupGeom {
     // 宽度同样受视口约束（窄窗口下长标签弹层不能横向溢出）
     let max_w = (viewport.width - pal::VIEWPORT_GAP * 2.0).max(0.0);
     let w = spec.width.max(spec.min_width).min(max_w);
+    place(
+        spec,
+        w,
+        PopupBounds {
+            area: Rectangle::new(Point::ORIGIN, viewport),
+            left: pal::VIEWPORT_GAP,
+            top: pal::VIEWPORT_GAP,
+            right: pal::VIEWPORT_GAP,
+            bottom: pal::VIEWPORT_GAP,
+        },
+        VFlip::BelowFirst,
+    )
+}
+
+/// 自定义边界内的落位：与 [`resolve`] 共用翻转/钳制算式；宽度按规格取，不再按视口收窄。
+pub fn resolve_in(spec: &PopupSpec, bounds: PopupBounds, flip: VFlip) -> PopupGeom {
+    place(spec, spec.width.max(spec.min_width), bounds, flip)
+}
+
+/// 落位算式：位置钳在「可用区域 - 四边留白」内，翻转按偏好决定取上方还是下方候选。
+fn place(spec: &PopupSpec, w: f32, bounds: PopupBounds, flip: VFlip) -> PopupGeom {
     let h = spec.height;
-    let max_x = (viewport.width - w - pal::VIEWPORT_GAP).max(pal::VIEWPORT_GAP);
-    let x = spec.anchor.x.clamp(pal::VIEWPORT_GAP, max_x);
+    let min_x = bounds.area.x + bounds.left;
+    let max_x = (bounds.area.x + bounds.area.width - w - bounds.right).max(min_x);
+    let x = spec.anchor.x.clamp(min_x, max_x);
+    let min_y = bounds.area.y + bounds.top;
+    let max_y = (bounds.area.y + bounds.area.height - h - bounds.bottom).max(min_y);
     let mut y = spec.anchor.y;
-    if let Some(flip) = spec.flip_y {
-        let below_fits = spec.anchor.y + h <= viewport.height - pal::VIEWPORT_GAP;
-        let above_fits = flip - h >= pal::VIEWPORT_GAP;
-        if !below_fits && above_fits {
-            y = flip - h;
+    if let Some(flip_y) = spec.flip_y {
+        let above = flip_y - h;
+        let above_fits = above >= min_y;
+        let below_fits = spec.anchor.y + h <= bounds.area.y + bounds.area.height - bounds.bottom;
+        let use_above = match flip {
+            VFlip::BelowFirst => !below_fits && above_fits,
+            VFlip::AboveFirst => above_fits,
+        };
+        if use_above {
+            y = above;
         }
     }
-    let max_y = (viewport.height - h - pal::VIEWPORT_GAP).max(pal::VIEWPORT_GAP);
-    let y = y.clamp(pal::VIEWPORT_GAP, max_y);
-    PopupGeom { x, y, w }
+    PopupGeom { x, y: y.clamp(min_y, max_y), w }
 }
 
 /// 阴影环外扩量（左右/顶部/底部；与 positioned 偏移配对使用，调用方算可用高度时也按此扣）。
