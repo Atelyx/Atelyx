@@ -1204,10 +1204,8 @@ fn on_send(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
                             ..Default::default()
                         }) {
                             Ok(()) => app.plugins.on_chat_changed(&session_id, ChatChangeKind::Meta),
-                            Err(e) => eprintln!("会话标题保存失败：{e}"),
+                            Err(e) => app.chat.error = Some(format!("标题保存失败：{e}")),
                         }
-                    } else {
-                        eprintln!("会话标题生成失败：{session_id}");
                     }
                 }
             }
