@@ -71,6 +71,17 @@ impl<'a, M> MenuEntry<'a, M> {
         }
     }
 
+    /// 选中态行：`selected` 时是带对勾的当前项，否则是普通动作项。
+    /// 下拉选项列表统一用它，避免每处各写一遍 `if 选中 { Checked } else { action }`。
+    pub fn check(label: impl Into<String>, selected: bool, on_press: M) -> Self {
+        let label = label.into();
+        if selected {
+            MenuEntry::Checked { label, on_press }
+        } else {
+            MenuEntry::action(label, on_press)
+        }
+    }
+
     pub fn danger(label: impl Into<String>, icon: impl Into<String>, on_press: M) -> Self {
         MenuEntry::Action {
             label: label.into(),
@@ -306,6 +317,20 @@ fn item_button<M: UiHost>(
             .on_exit(M::ui(UiMsg::HoverTipEnd { window, label }))
             .into(),
         None => element,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn check_marks_selected_entry() {
+        assert!(matches!(MenuEntry::check("甲", true, 1u8), MenuEntry::Checked { .. }));
+        assert!(matches!(
+            MenuEntry::check("甲", false, 1u8),
+            MenuEntry::Action { disabled: false, danger: false, .. }
+        ));
     }
 }
 

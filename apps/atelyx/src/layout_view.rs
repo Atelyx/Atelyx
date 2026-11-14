@@ -4417,22 +4417,14 @@ fn popup_element<'a>(
             let current = app.entry_scene_id.as_deref();
             let mut entries: Vec<(usize, MenuEntry<'static, Message>)> = vec![(
                 0,
-                if current.is_none() {
-                    MenuEntry::Checked { label: "跟随当前".into(), on_press: pick(None) }
-                } else {
-                    MenuEntry::action("跟随当前", pick(None))
-                },
+                MenuEntry::check("跟随当前", current.is_none(), pick(None)),
             )];
             for s in &app.ui.scenes {
                 let is_current = current == Some(s.id.as_str());
                 let (id, name) = (s.id.clone(), s.name.clone());
                 entries.push((
                     0,
-                    if is_current {
-                        MenuEntry::Checked { label: name, on_press: pick(Some(id)) }
-                    } else {
-                        MenuEntry::action(name, pick(Some(id)))
-                    },
+                    MenuEntry::check(name, is_current, pick(Some(id))),
                 ));
             }
             entries
@@ -5445,36 +5437,13 @@ fn popup_element<'a>(
             };
             let mut entries = vec![(
                 0,
-                match current {
-                    None => MenuEntry::Checked { label: "未选择".into(), on_press: select(rid.clone(), fid.clone(), None) },
-                    Some(_) => MenuEntry::Action {
-                        label: "未选择".into(),
-                        icon: None,
-                        danger: false,
-                        disabled: false,
-                        on_press: Some(select(rid.clone(), fid.clone(), None)),
-                        note: None,
-                        hint: None,
-                    },
-                },
+                MenuEntry::check("未选择", current.is_none(), select(rid.clone(), fid.clone(), None)),
             )];
             for o in options {
                 let is_current = current.as_deref() == Some(o.as_str());
                 entries.push((
                     0,
-                    if is_current {
-                        MenuEntry::Checked { label: o.clone(), on_press: select(rid.clone(), fid.clone(), Some(o)) }
-                    } else {
-                        MenuEntry::Action {
-                            label: o.clone(),
-                            icon: None,
-                            danger: false,
-                            disabled: false,
-                            on_press: Some(select(rid.clone(), fid.clone(), Some(o))),
-                            note: None,
-                            hint: None,
-                        }
-                    },
+                    MenuEntry::check(o.clone(), is_current, select(rid.clone(), fid.clone(), Some(o))),
                 ));
             }
             entries
@@ -5499,11 +5468,7 @@ fn popup_element<'a>(
             let grid = Message::Table(crate::table_view::TableMsg::SetView(None));
             let mut entries: Vec<(usize, MenuEntry<Message>)> = vec![(
                 0,
-                if active.is_none() {
-                    MenuEntry::Checked { label: "表格".into(), on_press: grid }
-                } else {
-                    MenuEntry::action("表格", grid)
-                },
+                MenuEntry::check("表格", active.is_none(), grid),
             )];
             let views: Vec<(String, String)> = app
                 .registry
@@ -5514,11 +5479,8 @@ fn popup_element<'a>(
                 entries.push((0, MenuEntry::Divider));
                 for (label, kind) in views {
                     let pick = Message::Table(crate::table_view::TableMsg::SetView(Some(kind.clone())));
-                    entries.push((0, if active.as_deref() == Some(kind.as_str()) {
-                        MenuEntry::Checked { label, on_press: pick }
-                    } else {
-                        MenuEntry::action(label, pick)
-                    }));
+                    let selected = active.as_deref() == Some(kind.as_str());
+                    entries.push((0, MenuEntry::check(label, selected, pick)));
                 }
             }
             entries
@@ -5538,11 +5500,7 @@ fn popup_element<'a>(
                         .is_some_and(|o| o.provider_id == p.id && o.model == m.id);
                     let pick =
                         Message::Ai(ai::AiMsg::NamingModelPick(Some((p.id.clone(), m.id.clone()))));
-                    entries.push((0, if is_current {
-                        MenuEntry::Checked { label: model_display(m), on_press: pick }
-                    } else {
-                        MenuEntry::action(model_display(m), pick)
-                    }));
+                    entries.push((0, MenuEntry::check(model_display(m), is_current, pick)));
                 }
             }
             if entries.is_empty() {
@@ -5576,11 +5534,7 @@ fn popup_element<'a>(
                 let press = pick(agent.id.clone());
                 entries.push((
                     0,
-                    if current == agent.id {
-                        MenuEntry::Checked { label: agent.name.clone(), on_press: press }
-                    } else {
-                        MenuEntry::action(agent.name.clone(), press)
-                    },
+                    MenuEntry::check(agent.name.clone(), current == agent.id, press),
                 ));
             }
             entries
@@ -5656,11 +5610,7 @@ fn popup_element<'a>(
                         let is_current = current == value;
                         (
                             2,
-                            if is_current {
-                                MenuEntry::Checked { label: label.into(), on_press: pick }
-                            } else {
-                                MenuEntry::action(label, pick)
-                            },
+                            MenuEntry::check(label, is_current, pick),
                         )
                     })
                     .collect::<Vec<_>>()
@@ -5718,11 +5668,7 @@ fn popup_element<'a>(
             .into_iter()
             .map(|(m, label)| {
                 let pick = Message::Ai(ai::AiMsg::NamingModePick(m));
-                (0, if mode == m {
-                    MenuEntry::Checked { label: label.into(), on_press: pick }
-                } else {
-                    MenuEntry::action(label, pick)
-                })
+                (0, MenuEntry::check(label, mode == m, pick))
             })
             .collect()
         }
@@ -5731,21 +5677,13 @@ fn popup_element<'a>(
             let current = app.ai.agent_draft.as_ref().and_then(|d| d.prompt_file.clone());
             let mut entries: Vec<(usize, MenuEntry<Message>)> = vec![(
                 0,
-                if current.is_none() {
-                    MenuEntry::Checked { label: "无".into(), on_press: Message::Ai(ai::AiMsg::AgentPromptPick(None)) }
-                } else {
-                    MenuEntry::action("无", Message::Ai(ai::AiMsg::AgentPromptPick(None)))
-                },
+                MenuEntry::check("无", current.is_none(), Message::Ai(ai::AiMsg::AgentPromptPick(None))),
             )];
             for rel in &app.prompt_notes {
                 let label = rel.rsplit('/').next().unwrap_or(rel).trim_end_matches(".md").to_string();
                 let is_current = current.as_deref() == Some(rel.as_str());
                 let pick = Message::Ai(ai::AiMsg::AgentPromptPick(Some(rel.clone())));
-                entries.push((0, if is_current {
-                    MenuEntry::Checked { label, on_press: pick }
-                } else {
-                    MenuEntry::action(label, pick)
-                }));
+                entries.push((0, MenuEntry::check(label, is_current, pick)));
             }
             if app.prompt_notes.is_empty() {
                 entries.push((0, MenuEntry::Custom(popup_hint("暂无提示词标记（文件右键可注册）"), 18.0)));
@@ -5789,11 +5727,7 @@ fn popup_element<'a>(
                     // 空值 = 未配置，缺省语义按 Tavily 展示
                     let is_current = current == key || (current.is_empty() && key == "tavily");
                     let pick = Message::Ai(ai::AiMsg::SearchProviderPick(key.to_string()));
-                    (0, if is_current {
-                        MenuEntry::Checked { label: label.into(), on_press: pick }
-                    } else {
-                        MenuEntry::action(label, pick)
-                    })
+                    (0, MenuEntry::check(label, is_current, pick))
                 })
                 .collect()
         }
@@ -6001,11 +5935,7 @@ fn canvas_card_model_entries(app: &App, node_id: &str) -> Vec<(usize, MenuEntry<
             let is_current =
                 current.as_ref().is_some_and(|(provider, model)| provider == &p.id && model == &m.id);
             let press = pick(p.id.clone(), m.id.clone());
-            entries.push((0, if is_current {
-                MenuEntry::Checked { label: model_display(m), on_press: press }
-            } else {
-                MenuEntry::action(model_display(m), press)
-            }));
+            entries.push((0, MenuEntry::check(model_display(m), is_current, press)));
         }
     }
     if entries.len() == usize::from(card_has_model) {
@@ -6035,11 +5965,7 @@ fn chat_model_entries(app: &App) -> Vec<(usize, MenuEntry<'static, Message>)> {
                 p.id.clone(),
                 m.id.clone(),
             ))));
-            entries.push((0, if is_current {
-                MenuEntry::Checked { label: model_display(m), on_press: pick }
-            } else {
-                MenuEntry::action(model_display(m), pick)
-            }));
+            entries.push((0, MenuEntry::check(model_display(m), is_current, pick)));
         }
     }
     if entries.is_empty() {
@@ -7097,11 +7023,7 @@ fn space_invite_entries(
         let pick = Message::Space(crate::SpaceMsg::InviteRolePick(role));
         entries.push((
             1,
-            if app.space_invite_form.role == role {
-                MenuEntry::Checked { label: label.into(), on_press: pick }
-            } else {
-                MenuEntry::action(label, pick)
-            },
+            MenuEntry::check(label, app.space_invite_form.role == role, pick),
         ));
     }
     entries
