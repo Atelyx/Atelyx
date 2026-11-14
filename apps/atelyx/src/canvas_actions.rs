@@ -1697,13 +1697,17 @@ fn group_rename_start(
 fn group_rename_commit(app: &mut App, node: String, name: String) {
     let name = name.trim().to_string();
     let Some(s) = app.canvas.as_mut() else { return };
-    let current = s
+    // 改名期间该组可能已被远端补丁或本地撤销删掉：不产生空撤销步，也不把会话弄脏
+    let Some(current) = s
         .data
         .nodes
         .iter()
         .find(|n| n.id == node && n.node_type == "group")
-        .and_then(|n| n.data.get("label").and_then(Value::as_str))
-        .unwrap_or("");
+        .map(|n| n.data.get("label").and_then(Value::as_str).unwrap_or("").to_string())
+    else {
+        s.view.group_rename = None;
+        return;
+    };
     if current == name {
         // 名字没变：不产生空撤销单元，也不把会话弄脏
         s.view.group_rename = None;
