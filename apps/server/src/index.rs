@@ -937,14 +937,14 @@ mod tests {
         assert_eq!(rows[0].count, 2);
     }
 
-    /// 两端共用 `fixtures/tag-parse.json`：`cases` 是常规形态，`alignedCases` 是
+    /// 两端共用 `fixtures/tags/parse.json`：`cases` 是常规形态，`alignedCases` 是
     /// frontmatter 定界边界（BOM、非规范分隔行），期望值取自客户端；两端必须切在同一位置。
     /// 任一形态两端提取结果都必须与 tags 完全一致（顺序无关）。
     #[test]
     fn tag_parse_fixture() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/tag-parse.json");
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/tags/parse.json");
         let raw = std::fs::read_to_string(path)
-            .expect("夹具缺失：fixtures/tag-parse.json 应随源码入库");
+            .expect("夹具缺失：fixtures/tags/parse.json 应随源码入库");
         let fixture: serde_json::Value = serde_json::from_str(&raw).expect("夹具不是合法 JSON");
         let cases = fixture["cases"].as_array().expect("夹具缺 cases 数组");
         let aligned = fixture["alignedCases"]["cases"]
