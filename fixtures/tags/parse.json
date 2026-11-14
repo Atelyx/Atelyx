@@ -234,6 +234,15 @@
       "tags": [
         "tag"
       ]
+    },
+    {
+      "name": "bom_and_indented_block",
+      "description": "BOM 开场行 + 整块两空格缩进的 tags：开场行不能被当成顶层键把缩进压到 0",
+      "content": "\uFEFF---\n  tags: [bomind]\n---\n正文 #body\n",
+      "tags": [
+        "body",
+        "bomind"
+      ]
     }
   ],
   "alignedCases": {

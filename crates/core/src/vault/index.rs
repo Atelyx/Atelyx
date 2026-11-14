@@ -267,11 +267,12 @@ fn parse_fm_tags(fm: &str, tags: &mut HashSet<String>) {
     }
 }
 
-/// 顶层键的缩进：非空、非注释、非 `---` 行的最小前导空格数（整块映射可统一缩进）。
+/// 顶层键的缩进：非空、非注释、非分隔行（`---` / 带 BOM 的 `\u{feff}---`）的最小前导空格数
+/// （整块映射可统一缩进）。
 fn root_indent(fm: &str) -> usize {
     fm.lines()
         .filter(|line| {
-            let trimmed = line.trim();
+            let trimmed = line.trim().trim_start_matches('\u{feff}');
             !trimmed.is_empty() && !trimmed.starts_with('#') && !trimmed.starts_with("---")
         })
         .map(|line| line.len() - line.trim_start_matches(' ').len())
