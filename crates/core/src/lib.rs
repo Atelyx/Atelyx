@@ -25,6 +25,7 @@ pub mod path;
 pub mod note_collab;
 pub mod plugin_process;
 pub mod plugin_runtime;
+pub mod presence;
 pub mod remote_image;
 pub mod rebuild_links;
 pub mod search;
