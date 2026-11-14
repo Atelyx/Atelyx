@@ -538,7 +538,6 @@ fn contains_ignore_case(haystack: &str, needle: &[u8]) -> bool {
 
 // ===== 引用块 =====
 
-/// 一层引用前缀 `[ ]{0,3}>` + 至多 1 列空白：返回（跳过字节数，剩余缩进折成的空格列数）。
 /// 逐行剥掉引用前缀（缩进 ≤3 + `>` + 至多一个空格，可叠层）——只读渲染与插件占位共用。
 pub fn strip_quote_marks(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
@@ -566,6 +565,7 @@ fn quote_mark_width(text: &str) -> Option<usize> {
     Some(indent + 1 + spaces.min(1))
 }
 
+/// 一层引用前缀 `[ ]{0,3}>` + 至多 1 列空白：返回（跳过字节数，剩余缩进折成的空格列数）。
 fn quote_prefix(text: &str) -> Option<(usize, usize)> {
     let (ind, ind_cols) = indent_prefix(text);
     if ind_cols > 3 || !text[ind..].starts_with('>') {
@@ -1682,6 +1682,31 @@ mod tests {
 
     fn parse(source: &str) -> MarkdownDocument {
         parse_markdown(source, &ParseOptions::default())
+    }
+
+    /// 缩进 1–3 列的链接引用定义与不缩进同形：都按 LinkReference 形态段落处理（不产裸 URL autolink）。
+    #[test]
+    fn indented_link_ref_def_matches_unindented() {
+        let kinds = |source: &str| -> Vec<&'static str> {
+            match &parse(source).blocks[0] {
+                MarkdownBlock::Paragraph { inline, .. } => inline
+                    .iter()
+                    .map(|span| match span {
+                        InlineSpan::Text { .. } => "text",
+                        InlineSpan::Link { .. } => "link",
+                        _ => "other",
+                    })
+                    .collect(),
+                other => panic!("{other:?}"),
+            }
+        };
+        assert!(is_link_ref_def_line(trim_indent("  [a]: https://example.com")));
+        assert_eq!(
+            kinds("  [a]: https://example.com\n"),
+            kinds("[a]: https://example.com\n"),
+            "缩进 1–3 列的定义行与不缩进同形"
+        );
+        assert!(kinds("[a](https://example.com)\n").contains(&"link"), "普通链接仍产 link 片段");
     }
 
     /// 列表后紧跟分割线：标记后没有空白就不是项，Hr 不得被吞成列表项。
