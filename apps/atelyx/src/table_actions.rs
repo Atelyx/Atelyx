@@ -1396,7 +1396,7 @@ fn on_press(app: &mut App, window: iced::window::Id, pos: Point, size: Size, ori
         .last_press
         .take()
         .is_some_and(|(t, p)| {
-            now.duration_since(t).as_millis() < tv::DOUBLE_CLICK_MS
+            now.duration_since(t).as_millis() < crate::ui::timing::DOUBLE_CLICK_MS
                 && (p.x - pos.x).abs() < 4.0
                 && (p.y - pos.y).abs() < 4.0
         });
@@ -1694,7 +1694,7 @@ fn exec_cell_action(app: &mut App, window: iced::window::Id, action: CellAction,
             });
             if selected {
                 Task::perform(
-                    async move { tokio::time::sleep(std::time::Duration::from_millis(tv::DOUBLE_CLICK_MS as u64)).await },
+                    async move { tokio::time::sleep(std::time::Duration::from_millis(crate::ui::timing::DOUBLE_CLICK_MS as u64)).await },
                     move |()| Message::Table(tv::TableMsg::ShowBar { row_id, field_id }),
                 )
             } else {
@@ -2204,7 +2204,7 @@ fn on_lightbox_press(app: &mut App, pos: Point) -> Task<Message> {
     let Some(lb) = s.view.lightbox.as_mut() else { return Task::none() };
     let now = std::time::Instant::now();
     let double = lb.last_press.take().is_some_and(|(t, p)| {
-        now.duration_since(t).as_millis() < tv::DOUBLE_CLICK_MS
+        now.duration_since(t).as_millis() < crate::ui::timing::DOUBLE_CLICK_MS
             && (p.x - pos.x).abs() < tv::LIGHTBOX_CLICK_SLOP
             && (p.y - pos.y).abs() < tv::LIGHTBOX_CLICK_SLOP
     });
