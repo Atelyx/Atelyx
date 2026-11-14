@@ -1070,8 +1070,35 @@ fn http_error_reason(body: &str) -> String {
     match message {
         Some(m) if !m.trim().is_empty() => m.trim().chars().take(300).collect(),
         // 非 JSON 错误体（代理页 / 网关文本）：换行压成空格，别把半屏版面撑开
-        _ => body.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(300).collect(),
+        _ => one_line_clipped(body, 300),
     }
+}
+
+/// 空白压成单空格并截到 `limit` 字符：边扫边停。错误体可能是整页 HTML，
+/// 先 split+join 再截会为错误路径复制一份与响应体同量级的字符串。
+fn one_line_clipped(body: &str, limit: usize) -> String {
+    let mut out = String::new();
+    let mut len = 0usize;
+    for word in body.split_whitespace() {
+        if len >= limit {
+            break;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+            len += 1;
+            if len >= limit {
+                break;
+            }
+        }
+        for ch in word.chars() {
+            out.push(ch);
+            len += 1;
+            if len >= limit {
+                break;
+            }
+        }
+    }
+    out
 }
 
 // ===== 辅助调用（命名 / 压缩）：不算 run，不追加 assistant 消息 =====

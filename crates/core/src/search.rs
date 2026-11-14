@@ -53,7 +53,10 @@ async fn tavily_search(key: &str, query: &str) -> Result<Vec<SearchResultItem>, 
         .send()
         .await
         .map_err(|e| format!("Tavily 请求失败：{}", e))?;
-    let (bytes, _) = read_capped(resp, MAX_JSON_BYTES, "Tavily 请求失败").await?;
+    let (bytes, truncated) = read_capped(resp, MAX_JSON_BYTES, "Tavily 请求失败").await?;
+    if truncated {
+        return Err("Tavily 响应超过 2MB 上限".to_string());
+    }
     let json: serde_json::Value = serde_json::from_slice(&bytes)
         .map_err(|e| format!("Tavily 响应解析失败：{e}"))?;
     Ok(parse_results(json.get("results")))
@@ -74,7 +77,10 @@ async fn searxng_search(instance_url: &str, query: &str) -> Result<Vec<SearchRes
                 .to_string(),
         );
     }
-    let (bytes, _) = read_capped(resp, MAX_JSON_BYTES, "SearXNG 请求失败").await?;
+    let (bytes, truncated) = read_capped(resp, MAX_JSON_BYTES, "SearXNG 请求失败").await?;
+    if truncated {
+        return Err("SearXNG 响应超过 2MB 上限".to_string());
+    }
     let json: serde_json::Value = serde_json::from_slice(&bytes)
         .map_err(|e| format!("SearXNG 响应解析失败：{e}"))?;
     Ok(parse_results(json.get("results")))
