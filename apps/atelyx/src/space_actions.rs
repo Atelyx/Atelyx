@@ -165,6 +165,23 @@ pub fn session_of(app: &App) -> Option<SpaceSession> {
     }
 }
 
+/// 只读身份下丢弃写不进去的脏态并放行挂起动作：留脏只会让 flush 永远等不到落盘回执，
+/// 关窗 / 切文件 / 切仓库会静默挂起（权限在编辑途中被服务端收回时就是这条路径）。
+/// `clear` 清该文档的脏态并返回原本是否脏；`quiet` = 自动保存不打扰。
+fn discard_readonly_dirty(
+    app: &mut App,
+    quiet: bool,
+    clear: impl FnOnce(&mut App) -> bool,
+) -> Task<Message> {
+    if clear(app) {
+        app.autosave_deadline = None;
+        app.notify(NoticeLevel::Warning, "只读身份：未保存的改动不会写入空间");
+    } else if !quiet {
+        app.notify(NoticeLevel::Warning, "该空间为只读身份，无法保存");
+    }
+    app.after_any_flush()
+}
+
 /// 取会话并裁决写能力：viewer 直接提示不发起请求（服务端本会 403，无需空跑）。
 fn require_write(app: &mut App) -> Option<SpaceSession> {
     let session = session_of(app)?;
@@ -1365,20 +1382,15 @@ pub fn space_load_table(app: &App, rel: &str) -> Task<Message> {
 pub fn space_submit_save(app: &mut App, reason: SaveReason) -> Task<Message> {
     let Some(session) = session_of(app) else { return Task::none() };
     if !session.role.can_write() {
-        // 只读身份没有可写的地方：残留脏态必须就地丢弃，否则 flush 永远等不到落盘回执，
-        // gate 挂起的关窗 / 切文件会一起挂死（权限在编辑途中被收回时就是这条路径）
-        if app.dirty {
+        let quiet = matches!(reason, SaveReason::AutoSave);
+        return discard_readonly_dirty(app, quiet, |app| {
+            if !app.dirty {
+                return false;
+            }
             app.dirty = false;
             app.save_error = None;
-            app.autosave_deadline = None;
-            app.notify(NoticeLevel::Warning, "只读身份：未保存的改动不会写入空间");
-            return app.after_any_flush();
-        }
-        // 自动保存静默跳过（无内容可写）；手动保存与脏拦截放行前明确告知
-        if !matches!(reason, SaveReason::AutoSave) {
-            app.notify(NoticeLevel::Warning, "该空间为只读身份，无法保存");
-        }
-        return app.after_any_flush();
+            true
+        });
     }
     let Some(rel) = app.ui.last_note_file.clone() else {
         app.notify(NoticeLevel::Warning, "没有打开的文件");
@@ -1635,10 +1647,15 @@ pub fn space_submit_table_save(app: &mut App, reason: tv::SaveReason) -> Task<Me
     }
     let Some(session) = session_of(app) else { return Task::none() };
     if !session.role.can_write() {
-        if !matches!(reason, tv::SaveReason::AutoSave) {
-            app.notify(NoticeLevel::Warning, "该空间为只读身份，无法保存");
-        }
-        return Task::none();
+        let quiet = matches!(reason, tv::SaveReason::AutoSave);
+        return discard_readonly_dirty(app, quiet, |app| {
+            app.table.as_mut().is_some_and(|s| {
+                let was = s.dirty;
+                s.dirty = false;
+                s.save_error = None;
+                was
+            })
+        });
     }
     let gen = app.epoch();
     let file = s.file.clone();
@@ -1889,14 +1906,18 @@ pub fn space_submit_canvas_save(app: &mut App, reason: crate::canvas_view::SaveR
     let frozen = s.data.clone();
     let Some(session) = session_of(app) else { return Task::none() };
     if !session.role.can_write() {
-        // 只读拒绝也要回执：脏拦截靠保存回执放行，早退会让关闭 / 切换永久挂起
-        return Task::done(Message::Canvas(crate::canvas_view::CanvasMsg::Saved(
-            gen,
-            file,
-            reason,
-            Err("该空间为只读身份，无法保存".to_string()),
-            frozen,
-        )));
+        // 回执式「拒绝」会让脏态一直留着：每条画布消息都会再排一次自动保存，
+        // 于是变成每 500ms 一次失败重试；flush 场景还会把关窗 / 切文件的挂起动作丢掉。
+        // 写不进去的内容就地丢弃（与笔记链同口径），脏态清零后挂起动作即可放行。
+        let quiet = matches!(reason, crate::canvas_view::SaveReason::AutoSave);
+        return discard_readonly_dirty(app, quiet, |app| {
+            app.canvas.as_mut().is_some_and(|s| {
+                let was = s.dirty;
+                s.dirty = false;
+                s.save_error = None;
+                was
+            })
+        });
     }
     let client = session.client;
     let space_id = session.space_id;
