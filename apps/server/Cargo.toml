@@ -39,3 +39,8 @@ rcgen = "0.13"
 # 只保留行表，避免 pdb 膨胀（同 workspace 根）。
 [profile.dev]
 debug = "line-tables-only"
+
+# 本工程独立于 workspace，根清单的 package 覆盖不会传下来：
+# 非 ASCII 路径下 ring 的 cl /Z7 记录会触发 D8050，这里单独关掉它的调试信息。
+[profile.dev.package.ring]
+debug = false
