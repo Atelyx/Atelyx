@@ -1362,8 +1362,8 @@ fn on_press(app: &mut App, window: iced::window::Id, pos: Point, size: Size, ori
         .take()
         .is_some_and(|(t, p)| {
             now.duration_since(t).as_millis() < crate::ui::timing::DOUBLE_CLICK_MS
-                && (p.x - pos.x).abs() < 4.0
-                && (p.y - pos.y).abs() < 4.0
+                && (p.x - pos.x).abs() < crate::ui::timing::DOUBLE_CLICK_SLOP
+                && (p.y - pos.y).abs() < crate::ui::timing::DOUBLE_CLICK_SLOP
         });
     s.view.last_press = Some((now, pos));
     let g = tv::geo(s, size);
