@@ -198,6 +198,7 @@ pub fn walk_md_in(
 }
 
 /// 百分号解码（`%XX`），非法序列原样保留（匹配不上自然不命中，不报错）。
+/// 与宿主 `atelyx_core::vault::percent_decode` 同口径：本工程独立于 workspace，靠同一张期望表对拍。
 pub fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len());

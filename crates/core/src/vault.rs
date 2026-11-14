@@ -3350,7 +3350,7 @@ fn normalize_link_path(raw: &str) -> Option<String> {
 }
 
 /// 简易 percent 解码（%XX）；非法序列原样保留（匹配不上自然不命中，不报错）。
-/// pub：仓库历史聚合（commands/home.rs）解码历史文件名共用。
+/// 壳的链接 href 解码、服务端的仓库内链接解析都按这份语义走。
 pub fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
@@ -5184,6 +5184,20 @@ mod agents_file_tests {
         assert!(read_agents_file(&root).is_err());
         write_raw(&root, r#"{"schema":"atelyx-agents/v1"}"#);
         assert!(read_agents_file(&root).is_err());
+    }
+}
+
+#[cfg(test)]
+mod percent_decode_tests {
+    use super::*;
+
+    /// 与服务端 `fsops::percent_decode` 同口径（独立工程不共享代码，靠同一张期望表对拍）。
+    #[test]
+    fn keeps_invalid_sequences() {
+        assert_eq!(percent_decode("a%20b"), "a b");
+        assert_eq!(percent_decode("%zz"), "%zz");
+        assert_eq!(percent_decode("%2"), "%2");
+        assert_eq!(percent_decode("%E7%AC%94%E8%AE%B0"), "笔记");
     }
 }
 

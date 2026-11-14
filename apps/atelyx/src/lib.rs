@@ -234,33 +234,6 @@ fn line_end_of(text: &str, at: usize) -> usize {
     text[at..].find('\n').map_or(text.len(), |i| at + i)
 }
 
-/// 百分号解码（链接 href）。
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let (Some(h), Some(l)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
-                out.push(h * 16 + l);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-fn hex_val(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
-    }
-}
 
 /// 外链交系统浏览器打开：只放行常见协议，命令行走原样拼接并整串加引号，
 /// 拒绝引号/百分号/换行——避免 URL 内容被命令行解释成命令分隔或变量展开。
@@ -7979,7 +7952,7 @@ impl App {
 
     /// 打开链接：外链走系统浏览器，仓库路径/wiki 命中即打开笔记。
     fn open_link(&mut self, href: &str, form: LinkForm) -> Task<Message> {
-        let decoded = percent_decode(href);
+        let decoded = atelyx_core::vault::percent_decode(href);
         match form {
             LinkForm::External => {
                 open_external(&decoded);
