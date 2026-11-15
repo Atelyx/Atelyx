@@ -701,11 +701,6 @@ fn callout_badge<'a>(name: &str, color: Color, scale: f32) -> Element<'a, Messag
     .into()
 }
 
-/// 脚注正文件（左侧竖线由行装饰提供）。
-fn footnote_content<'a>(spans: Vec<Span<'a, LinkTarget, Font>>, size: f32, color: Color) -> Element<'a, Message> {
-    rich(spans, size, LINE_HEIGHT, Some(color), iced::alignment::Horizontal::Left)
-}
-
 /// 编辑档行类别：揭示单位按类别定——`Block` 整块回显源码、`Unit` 只回显本行、`Gap` / `Deco` 不揭示。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RowKind {
@@ -717,6 +712,15 @@ pub enum RowKind {
     Gap,
     /// 装饰行（callout 徽标）：命中吸到相邻内容行，不揭示。
     Deco,
+}
+
+/// 单个整块的内容件（只读面与编辑档整块行共用）。
+struct BlockContent<'a> {
+    runs: Vec<LineRun>,
+    /// 富渲染件（未含块级行装饰）。
+    element: Element<'a, Message>,
+    /// 围栏代码正文的源区间（代码正文的行列换算基准）。
+    code: Option<(usize, usize)>,
 }
 
 /// 编辑档一行：未揭示时的富渲染件 + 源锚 + 可见片段（源映射）与行装饰。
@@ -905,10 +909,33 @@ impl Render<'_> {
 
     fn block<'a>(&self, source: &'a str, block: &'a MarkdownBlock) -> Element<'a, Message> {
         match block {
+            MarkdownBlock::Blockquote { from, callout, children, .. } => {
+                self.blockquote(source, *from, callout.as_deref(), children)
+            }
+            MarkdownBlock::List { ordered, items, .. } => self.list(source, *ordered, items),
+            _ => {
+                let content = self.block_content(source, block, false);
+                wrap_row(&self.block_wraps(block), content.element)
+            }
+        }
+    }
+
+    /// 单个整块的内容件：可见片段、内层元素、围栏代码正文的源区间一次算出。
+    /// 只读面与编辑档整块行都走这里，两面只差行包裹与外层参数。
+    /// `code_cursor` = 给围栏代码正文挂编辑面源码光标。
+    fn block_content<'a>(
+        &self,
+        source: &'a str,
+        block: &'a MarkdownBlock,
+        code_cursor: bool,
+    ) -> BlockContent<'a> {
+        let mut runs = Vec::new();
+        let mut code = None;
+        let element = match block {
             MarkdownBlock::Heading { level, inline, .. } => {
                 let mut st = self.text_style();
                 st.font.weight = iced::font::Weight::Bold;
-                let runs = self.runs(source, inline, st);
+                runs = self.runs(source, inline, st);
                 self.rich_runs(
                     &runs,
                     self.heading(*level),
@@ -921,7 +948,7 @@ impl Render<'_> {
                 if let Some(InlineSpan::Image { src, alt, width, height, .. }) = image_only(inline) {
                     self.image_block(src, alt, width.as_deref(), height.as_deref())
                 } else {
-                    let runs = self.runs(source, inline, self.text_style());
+                    runs = self.runs(source, inline, self.text_style());
                     self.rich_runs(
                         &runs,
                         self.base(),
@@ -931,15 +958,13 @@ impl Render<'_> {
                     )
                 }
             }
-            MarkdownBlock::Blockquote { from, callout, children, .. } => {
-                self.blockquote(source, *from, callout.as_deref(), children)
+            MarkdownBlock::FencedCode { lang, code: body, content_from, content_to, .. } => {
+                code = Some((*content_from, *content_to));
+                let cursor = code_cursor.then(|| ((*content_from, *content_to), self.mono()));
+                self.code_block(block_from(block), lang, body, cursor)
             }
-            MarkdownBlock::List { ordered, items, .. } => self.list(source, *ordered, items),
-            MarkdownBlock::FencedCode { lang, code, .. } => {
-                self.code_block(block_from(block), lang, code, None)
-            }
-            MarkdownBlock::IndentedCode { code, .. } => {
-                self.code_block(block_from(block), "", code, None)
+            MarkdownBlock::IndentedCode { code: body, .. } => {
+                self.code_block(block_from(block), "", body, None)
             }
             MarkdownBlock::Hr { .. } => self.hr(),
             MarkdownBlock::Table { header, aligns, rows, .. } => {
@@ -948,8 +973,32 @@ impl Render<'_> {
             MarkdownBlock::MathBlock { tex, .. } => self.source_block(format!("$$\n{tex}\n$$")),
             MarkdownBlock::HtmlBlock { html, .. } => self.source_block(html.clone()),
             MarkdownBlock::FootnoteDef { from, label, inline, .. } => {
-                self.footnote(source, *from, label, inline)
+                runs = self.footnote_runs(source, *from, label, inline);
+                self.rich_runs(
+                    &runs,
+                    self.base() * 0.9,
+                    LINE_HEIGHT,
+                    Some(self.pal.muted),
+                    iced::alignment::Horizontal::Left,
+                )
             }
+            MarkdownBlock::List { .. } | MarkdownBlock::Blockquote { .. } => {
+                unreachable!("列表与引用按行拆开，不产生整块内容")
+            }
+        };
+        BlockContent { runs, element, code }
+    }
+
+    /// 整块行的块级行装饰（脚注左侧竖线）：只读面与编辑面共用同一处定义。
+    fn block_wraps(&self, block: &MarkdownBlock) -> Vec<RowWrap> {
+        match block {
+            MarkdownBlock::FootnoteDef { .. } => vec![RowWrap::Bar {
+                color: self.pal.border,
+                width: FOOTNOTE_BAR_W,
+                pad: 8.0,
+                bg: None,
+            }],
+            _ => Vec::new(),
         }
     }
 
@@ -1064,81 +1113,17 @@ impl Render<'_> {
         render: bool,
     ) -> EditRow<'a> {
         let (from, to) = (block_from(block), block_to(block));
-        let mut runs = Vec::new();
-        let mut code = None;
         let mut row_wraps = wraps.clone();
-        if matches!(block, MarkdownBlock::FootnoteDef { .. }) {
-            row_wraps.push(RowWrap::Bar {
-                color: self.pal.border,
-                width: FOOTNOTE_BAR_W,
-                pad: 8.0,
-                bg: None,
-            });
-        }
-        let inner: Option<Element<'a, Message>> = if !render {
-            None
-        } else {
-            match block {
-                MarkdownBlock::Heading { level, inline, .. } => {
-                    let st = TextStyle {
-                        font: crate::ui::bold(),
-                        ..self.text_style()
-                    };
-                    runs = self.runs(source, inline, st);
-                    Some(self.rich_runs(
-                        &runs,
-                        self.heading(*level),
-                        1.3,
-                        None,
-                        iced::alignment::Horizontal::Left,
-                    ))
-                }
-                MarkdownBlock::Paragraph { inline, .. } => {
-                    if let Some(InlineSpan::Image { src, alt, width, height, .. }) = image_only(inline) {
-                        Some(self.image_block(src, alt, width.as_deref(), height.as_deref()))
-                    } else {
-                        runs = self.runs(source, inline, self.text_style());
-                        Some(self.rich_runs(
-                            &runs,
-                            self.base(),
-                            LINE_HEIGHT,
-                            None,
-                            iced::alignment::Horizontal::Left,
-                        ))
-                    }
-                }
-                MarkdownBlock::FencedCode { lang, code: body, content_from, content_to, .. } => {
-                    code = Some((*content_from, *content_to));
-                    Some(self.code_block(
-                        block_from(block),
-                        lang,
-                        body,
-                        Some(((*content_from, *content_to), self.mono())),
-                    ))
-                }
-                MarkdownBlock::IndentedCode { code: body, .. } => {
-                    Some(self.code_block(block_from(block), "", body, None))
-                }
-                MarkdownBlock::Hr { .. } => Some(self.hr()),
-                MarkdownBlock::Table { header, aligns, rows, .. } => {
-                    Some(self.table(source, header, aligns, rows))
-                }
-                MarkdownBlock::MathBlock { tex, .. } => {
-                    Some(self.source_block(format!("$$\n{tex}\n$$")))
-                }
-                MarkdownBlock::HtmlBlock { html, .. } => Some(self.source_block(html.clone())),
-                MarkdownBlock::FootnoteDef { label, inline, .. } => {
-                    runs = self.footnote_runs(source, from, label, inline);
-                    Some(footnote_content(
-                        self.run_spans(runs.clone()),
-                        self.base() * 0.9,
-                        self.pal.muted,
-                    ))
-                }
-                MarkdownBlock::List { .. } | MarkdownBlock::Blockquote { .. } => {
-                    unreachable!("列表与引用按行拆开，不产生整块行")
-                }
-            }
+        row_wraps.extend(self.block_wraps(block));
+        // 窗口外的行不构建内容件，只留源锚与行装饰
+        let content = render.then(|| self.block_content(source, block, true));
+        let (runs, code, element) = match content {
+            Some(content) => (
+                content.runs,
+                content.code,
+                Some(wrap_row(&row_wraps, content.element)),
+            ),
+            None => (Vec::new(), None, None),
         };
         EditRow {
             kind: RowKind::Block,
@@ -1150,7 +1135,7 @@ impl Render<'_> {
             source: block_source_style(block, 1.0),
             gap_lines: Vec::new(),
             code,
-            element: inner.map(|inner| wrap_row(&row_wraps, inner)),
+            element,
             wraps: row_wraps,
         }
     }
@@ -1661,31 +1646,6 @@ fn code_body<'a>(code: &str, hit: Option<((usize, usize), f32)>, scale: f32) -> 
             .width(Length::Fill)
             .padding(Padding { top: half, bottom: half, ..Padding::default() })
             .into()
-    }
-
-    fn footnote<'a>(
-        &self,
-        source: &str,
-        from: usize,
-        label: &str,
-        inline: &[InlineSpan],
-    ) -> Element<'a, Message> {
-        let runs = self.footnote_runs(source, from, label, inline);
-        wrap_row(
-            &[RowWrap::Bar {
-                color: self.pal.border,
-                width: FOOTNOTE_BAR_W,
-                pad: 8.0,
-                bg: None,
-            }],
-            self.rich_runs(
-                &runs,
-                self.base() * 0.9,
-                LINE_HEIGHT,
-                Some(self.pal.muted),
-                iced::alignment::Horizontal::Left,
-            ),
-        )
     }
 
     fn callout_color(&self, name: &str) -> Color {
@@ -2351,18 +2311,6 @@ impl Render<'_> {
     }
 }
 
-/// 行内富文本（默认字色与行内对齐可选，供引用/脚注的弱化文本与表格单元格对齐用）。
-/// 链接触点常驻：纯只读档的行内片段不带链接，处理器不会触发。
-fn rich<'a>(
-    spans: Vec<Span<'a, LinkTarget, Font>>,
-    size: f32,
-    line_height: f32,
-    color: Option<Color>,
-    align: iced::alignment::Horizontal,
-) -> Element<'a, Message> {
-    rich_with(spans, size, line_height, color, align, Wrapping::default())
-}
-
 /// 行内富文本（可指定折行策略，表格单元格用 WordOrGlyph）。
 fn rich_with<'a>(
     spans: Vec<Span<'a, LinkTarget, Font>>,
@@ -2547,6 +2495,60 @@ mod tests {
         assert!(windowed[..2].iter().all(|row| row.element.is_none()));
         assert!(windowed[2..6].iter().all(|row| row.element.is_some()));
         assert!(windowed[6..].iter().all(|row| row.element.is_none()));
+    }
+
+    /// 整块内容分派覆盖全部整块类型，块级行装饰只来自同一处：两面不会再各长一份分支。
+    #[test]
+    fn block_content_covers_every_whole_block() {
+        let source = concat!(
+            "# 标题\n\n正文 abc\n\n```rs\ncode\n```\n\n    indented\n\n---\n\n",
+            "$$\nx\n$$\n\n<div>html</div>\n\n[^1]: 脚注\n",
+        );
+        let doc = parse_document(source);
+        let images = ImageHandles::default();
+        let theme = iced::Theme::Dark;
+        let render = Render {
+            pal: Palette::from_theme(&theme),
+            opts: link_options(),
+            interactive: true,
+            linkable: true,
+            code_expanded: None,
+            images: &images,
+            soft_break: true,
+            scale: 1.0,
+            select: SelectMode::Off,
+            window: None,
+            cell_cache: None,
+        };
+        let mut seen = 0;
+        for block in &doc.blocks {
+            assert!(
+                !matches!(block, MarkdownBlock::List { .. } | MarkdownBlock::Blockquote { .. }),
+                "样本里只有整块"
+            );
+            seen += 1;
+            let content = render.block_content(source, block, true);
+            match block {
+                MarkdownBlock::FencedCode { content_from, content_to, .. } => {
+                    assert_eq!(content.code, Some((*content_from, *content_to)));
+                    assert!(render.block_wraps(block).is_empty());
+                }
+                MarkdownBlock::FootnoteDef { .. } => {
+                    assert!(!content.runs.is_empty(), "脚注正文片段进源映射");
+                    assert_eq!(render.block_wraps(block).len(), 1, "脚注竖线只由 block_wraps 给出");
+                }
+                _ => assert!(render.block_wraps(block).is_empty()),
+            }
+        }
+        assert!(seen >= 7, "样本覆盖标题/段落/围栏/缩进/分隔线/公式/HTML/脚注");
+        // 编辑档整块行同样从这里取片段、代码区间与行装饰
+        let rows = render.rows(source, &doc.blocks);
+        let footnote = rows
+            .iter()
+            .find(|row| !row.wraps.is_empty())
+            .expect("脚注行带竖线");
+        assert_eq!(footnote.kind, RowKind::Block);
+        assert!(rows.iter().any(|row| row.code.is_some()));
     }
 
     /// 行中孤立回车符不占排版也不占选区区间：片段文本与源区间逐字对齐。
