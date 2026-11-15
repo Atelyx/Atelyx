@@ -448,6 +448,13 @@ fn apply_space_note(
         app.dirty = app.note_text != flushed;
         app.save_error = None;
     }
+    // 该文件没有活动协作文档：用一次性影子文档把本次改动编成增量，条件 PUT 落地后随帧上行
+    let shadow_update = if app.note_collab_file.as_deref() == Some(path.as_str()) {
+        None
+    } else {
+        shadow_note_update(&path, &source, &merged)
+    };
+    let cmds = app.space_cmds.clone();
     let summary = atelyx_core::history::version_summary(HistoryKind::Note, &source, &merged);
     let source_for_task = source.clone();
     let editor = editor_of(&actor);
@@ -478,6 +485,13 @@ fn apply_space_note(
                     .put_file_text_if(&space_id, &rel, &content, version.as_deref())
                     .await
                     .map_err(|e| e.to_string())?;
+                // 落盘成功才上行增量：PUT 被拒时对端不得先看到服务端没有的正文
+                if let (Some(cmds), Some(frame)) = (&cmds, &shadow_update) {
+                    let _ = cmds.send(atelyx_core::collab::SpaceCmd::NoteSync {
+                        file: rel.clone(),
+                        payload: frame.clone(),
+                    });
+                }
                 // 历史尽力而为：失败不阻塞正文
                 let _ = client
                     .history_record(
@@ -496,6 +510,20 @@ fn apply_space_note(
         },
         |msg| msg,
     )
+}
+
+/// 未打开笔记的增量：以服务端正文建一次性影子文档，把 AI 结果编成一条 CRDT 增量帧。
+/// 对端文档同基线时增量直接合入（未保存草稿按 CRDT 保留）；异基线的副本仍靠重载或保存合流对齐。
+fn shadow_note_update(file: &str, source: &str, merged: &str) -> Option<Vec<u8>> {
+    if source == merged {
+        return None;
+    }
+    let mut shadow = atelyx_core::note_collab::NoteCollab::new(space_actions::collab_author());
+    // 只取增量：对方的基线提案序号不会更低，通告换不到采纳，同基线副本也不需要重建
+    shadow.open(file, source);
+    let update = shadow.local_edit(merged)?;
+    let tag = shadow.tag()?;
+    Some(atelyx_core::space_frame::encode_note_sync(tag, &update))
 }
 
 /// AI 开始编辑：空间模式下上报在场状态（编辑中 + 操作者 + Agent），本地无协作通道。
@@ -608,6 +636,22 @@ pub fn on_done(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 未打开笔记的 AI 编辑编成增量：同基线的打开副本直接合入，未保存草稿按 CRDT 保留。
+    #[test]
+    fn shadow_update_merges_into_opened_copy() {
+        let base = "第一行\n第二行\n";
+        let merged = "第一行\n第二行改\n";
+        let frame = shadow_note_update("f.md", base, merged).expect("改动应产增量");
+        let mut peer = atelyx_core::note_collab::NoteCollab::new("peer".to_owned());
+        peer.open("f.md", base);
+        peer.local_edit("第一行改\n第二行\n").expect("草稿产增量");
+        let out = peer.apply_remote("ai", "f.md", &frame);
+        assert!(out.doc_changed);
+        assert_eq!(out.text.as_deref(), Some("第一行改\n第二行改\n"));
+        // 操作没带来变化时不出帧（避免无内容的上行）
+        assert!(shadow_note_update("f.md", base, base).is_none());
+    }
 
     /// 未回填即丢弃：工具线程收到可读失败，不会挂到超时。
     #[tokio::test]

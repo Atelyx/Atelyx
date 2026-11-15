@@ -3585,7 +3585,7 @@ fn collab_note_resume(app: &mut App) {
     resend_note_presence(app);
 }
 
-fn collab_author() -> String {
+pub(crate) fn collab_author() -> String {
     // 会话稳定身份（重开应用换新身份）：时间戳 + 随机 id，无跨端语义
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
