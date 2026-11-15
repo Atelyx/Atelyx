@@ -482,6 +482,7 @@ fn on_input(app: &mut App, node_id: &str, event: crate::chat_input::InputEvent) 
                 }
             }
         }
+        InputEvent::Blur => chat.draft.focused = false,
         InputEvent::Edited { text, caret, anchor } => {
             chat.draft.apply_edited(text, caret, anchor);
             // 首次真实输入占锁（幂等，已有锁不刷新 since）：只读身份与单机不占

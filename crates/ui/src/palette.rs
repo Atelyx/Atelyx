@@ -65,6 +65,8 @@ pub const ACCENT_FG: Color = rgb(0x14, 0x14, 0x14);
 pub const ACCENT_SOFT: Color = rgba(224, 169, 78, 0.14);
 /// 文本选区高亮（全应用唯一取值：输入框、编辑器与自绘选区共用）。
 pub const SELECTION: Color = rgba(224, 169, 78, 0.25);
+/// `#` 引用标签底（输入面与表格 AI 字段模板里的引用标签，比 `ACCENT_SOFT` 更实）。
+pub const REF_HIGHLIGHT: Color = rgba(224, 169, 78, 0.22);
 
 // ===== 状态语义色 =====
 /// 成功

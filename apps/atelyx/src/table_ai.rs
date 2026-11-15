@@ -2,15 +2,14 @@
 //! 值写入走表格会话（撤销栈 / 置脏 / 保存链），网络调用在独立任务里做、回执按批次与指纹守卫。
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
-use std::sync::Arc;
 
 use iced::widget::text_editor;
-use iced::widget::text_editor::Action;
 use iced::{Point, Task};
 
 use atelyx_core::table_ai as ai;
 use atelyx_core::vault::{self, AiCellMeta, AiFieldConfig, AiSystem, TableField, TableRow};
 
+use crate::chat_input::{self, Draft};
 use crate::layout_view::{PopupOpen, PopupState};
 use crate::table_view as tv;
 use crate::{App, Message, RepoKind};
@@ -34,7 +33,8 @@ pub struct AiDraft {
     pub system_mode: AiSystemMode,
     pub system_text: text_editor::Content,
     pub note: String,
-    pub prompt: text_editor::Content,
+    /// 指令模板草稿（自绘输入面：`#字段名` 带高亮底）。
+    pub prompt: Draft,
     /// 生成模型（供应商 id + 模型 id；None = 跟随仓库默认模型）。
     pub provider_id: Option<String>,
     pub model: Option<String>,
@@ -136,8 +136,7 @@ pub fn open_config(app: &mut App, window: iced::window::Id, field_id: &str) -> T
             min_width: 0.0,
         },
     ));
-    iced::widget::operation::focus(iced::widget::Id::new(crate::table_ai_view::PROMPT_EDITOR_ID))
-        .map(|()| Message::Table(tv::TableMsg::Noop))
+    Task::none()
 }
 
 fn draft_for(field: &TableField) -> AiDraft {
@@ -147,12 +146,15 @@ fn draft_for(field: &TableField) -> AiDraft {
         AiSystem::Inline { text } => (AiSystemMode::Inline, text.clone(), String::new()),
         AiSystem::Note { path } => (AiSystemMode::Note, String::new(), path.clone()),
     };
+    // 弹层一出来就能直接改模板
+    let mut prompt = Draft::with_text(&config.prompt);
+    prompt.focused = true;
     AiDraft {
         field_id: field.id.clone(),
         system_mode,
         system_text: text_editor::Content::with_text(&system_text),
         note,
-        prompt: text_editor::Content::with_text(&config.prompt),
+        prompt,
         provider_id: config.provider_id.clone(),
         model: config.model.clone(),
         auto_new: config.auto_new_row,
@@ -173,13 +175,9 @@ pub fn insert_ref(app: &mut App, field_id: &str) {
     };
     if let Some(session) = app.table.as_mut() {
         if let Some(draft) = session.view.ai.draft.as_mut() {
-            let text = draft.prompt.text();
-            let cursor = draft.prompt.cursor().position;
-            // 未在模板里落过光标 = 插入点仍在文首：追加到末尾更符合「继续补一句」的预期
-            if !text.is_empty() && cursor.line == 0 && cursor.column == 0 {
-                draft.prompt.perform(Action::Move(text_editor::Motion::DocumentEnd));
-            }
-            draft.prompt.perform(Action::Edit(text_editor::Edit::Paste(Arc::new(format!("#{name}")))));
+            draft.prompt.insert_text(&format!("#{name}"));
+            // 点完插入钮继续在模板里接着敲：交回焦点
+            draft.prompt.focused = true;
             draft.show_fields = false;
         }
     }
@@ -244,7 +242,7 @@ fn config_from_draft(draft: &AiDraft) -> AiFieldConfig {
     };
     AiFieldConfig {
         system,
-        prompt: draft.prompt.text(),
+        prompt: draft.prompt.text.clone(),
         provider_id: draft.provider_id.clone(),
         model: draft.model.clone(),
         auto_new_row: draft.auto_new,
@@ -1013,4 +1011,28 @@ pub fn edit_draft(app: &mut App, edit: impl FnOnce(&mut AiDraft)) {
             edit(draft);
         }
     }
+}
+
+/// 模板输入面事件落地：草稿突变、选区、焦点、组合串与撤销重做。
+pub fn on_prompt_input(app: &mut App, event: chat_input::InputEvent) {
+    use chat_input::InputEvent;
+    edit_draft(app, |draft| match event {
+        InputEvent::Focus => draft.prompt.focused = true,
+        InputEvent::Blur => draft.prompt.focused = false,
+        InputEvent::Edited { text, caret, anchor } => draft.prompt.apply_edited(text, caret, anchor),
+        InputEvent::Select { caret, anchor } => {
+            draft.prompt.caret = caret;
+            draft.prompt.anchor = anchor;
+        }
+        InputEvent::Preedit(preedit) => {
+            draft.prompt.preedit = crate::text_preedit::normalize(preedit)
+        }
+        InputEvent::Undo => draft.prompt.undo_step(),
+        InputEvent::Redo => draft.prompt.redo_step(),
+        // 模板内 Enter 换行，发送与候选浮层事件不适用
+        InputEvent::Send
+        | InputEvent::PickerNav(_)
+        | InputEvent::PickerCommit
+        | InputEvent::PickerClose => {}
+    });
 }

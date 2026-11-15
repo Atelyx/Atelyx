@@ -1720,6 +1720,7 @@ fn on_input(app: &mut App, event: chat_input::InputEvent) -> iced::Task<Message>
             // 面板输入取得焦点 = 画布卡输入面让出
             crate::canvas_chat::clear_card_focus(app);
         }
+        chat_input::InputEvent::Blur => app.chat.input.focused = false,
         chat_input::InputEvent::Edited { text, caret, anchor } => {
             app.chat.input.apply_edited(text, caret, anchor);
             return sync_mention_picker(app);

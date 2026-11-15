@@ -8,6 +8,7 @@ use serde_json::Value;
 
 use crate::canvas_view::CanvasMsg;
 use crate::chat_actions::{ChatMsg, MentionPicker, MentionTarget, PendingImage};
+use crate::chat_input::TagSource;
 use crate::ui::icon::icon;
 use crate::ui::text::ellipsize_estimated;
 use crate::ui::{controls, palette as pal, scroll, text};
@@ -105,7 +106,7 @@ pub fn composer<'a>(
         inner = inner.push(mention_picker_view(app, picker, scope, s));
     }
     // 自绘输入面（# 标签高亮 / 整标签交互由部件托管）
-    let surface = crate::chat_input::Input::new(draft, refs, route)
+    let surface = crate::chat_input::Input::new(draft, TagSource::Refs(refs), route)
         .picker_open(picker.is_some())
         .placeholder("输入消息，Enter 发送，Shift+Enter 换行")
         .scale(s);

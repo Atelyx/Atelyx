@@ -2,7 +2,7 @@
 
 use iced::widget::text_editor::Action;
 use iced::widget::{button, column, container, row, space, text, text_editor};
-use iced::{alignment, Border, Element, Length, Padding, Size, Theme};
+use iced::{alignment, Border, Color, Element, Length, Padding, Size, Theme};
 
 use atelyx_core::table_ai as ai;
 use atelyx_core::vault::TableField;
@@ -21,7 +21,8 @@ const PROMPT_EDITOR_H: f32 = 150.0;
 const SYSTEM_EDITOR_H: f32 = 88.0;
 /// 字段 / 笔记 / 模型候选列表高度。
 const PICKER_H: f32 = 112.0;
-pub(crate) const PROMPT_EDITOR_ID: &str = "table-ai-prompt-editor";
+/// 输入框内边距（背景外壳与内容共用）。
+const INPUT_PAD: f32 = 8.0;
 const SYSTEM_EDITOR_ID: &str = "table-ai-system-editor";
 
 /// 居中模态覆盖元素（遮罩 + 配置卡）；非本形态 / 非本窗口返回 None。
@@ -92,7 +93,7 @@ fn config_card<'a>(
         }
     }
 
-    let refs = ai::parse_refs(&draft.prompt.text(), &session.data.fields).unwrap_or_default();
+    let refs = ai::parse_refs(&draft.prompt.text, &session.data.fields).unwrap_or_default();
     let ref_names: Vec<String> = refs
         .iter()
         .filter_map(|r| {
@@ -111,12 +112,7 @@ fn config_card<'a>(
     };
     let mut prompt_block = column![
         section_label("指令模板", "用 #字段名 引用同行列"),
-        multiline_editor(
-            &draft.prompt,
-            PROMPT_EDITOR_ID,
-            PROMPT_EDITOR_H,
-            |action| Message::Table(tv::TableMsg::AiDraftPromptEdited(action)),
-        ),
+        prompt_editor(&draft.prompt, &session.data.fields),
         row![
             controls::btn(
                 if draft.show_fields { "收起字段" } else { "插入字段" },
@@ -266,29 +262,57 @@ fn checkbox_row(label: &str, checked: bool, on_press: Message) -> Element<'stati
     .into()
 }
 
+/// 输入框外壳：背景 / 描边 / 内边距（内容自绘不画底）。
+fn input_frame<'a>(height: f32, content: Element<'a, Message>) -> Element<'a, Message> {
+    container(content)
+        .width(Length::Fill)
+        .height(Length::Fixed(height))
+        .padding(INPUT_PAD)
+        .style(|_t| container::Style {
+            background: Some(pal::BG_SECONDARY.into()),
+            border: Border { color: pal::BORDER, width: 1.0, radius: pal::RADIUS_SM.into() },
+            ..container::Style::default()
+        })
+        .into()
+}
+
 fn multiline_editor<'a>(
     content: &'a text_editor::Content,
     id: &'static str,
     height: f32,
     on_action: impl Fn(Action) -> Message + 'a,
 ) -> Element<'a, Message> {
-    container(
-        text_editor(content)
-            .id(iced::widget::Id::new(id))
-            .on_action(on_action)
-            .size(pal::fs_ui())
-            .height(Length::Fixed(height))
-            .padding(8)
-            .style(|_t: &Theme, _s| text_editor::Style {
-                background: pal::BG_SECONDARY.into(),
-                border: Border { color: pal::BORDER, width: 1.0, radius: pal::RADIUS_SM.into() },
-                placeholder: pal::TEXT_MUTED,
-                value: pal::TEXT_PRIMARY,
-                selection: pal::SELECTION,
-            }),
+    let editor = text_editor(content)
+        .id(iced::widget::Id::new(id))
+        .on_action(on_action)
+        .size(pal::fs_ui())
+        .height(Length::Fill)
+        .padding(0)
+        .style(|_t: &Theme, _s| text_editor::Style {
+            background: Color::TRANSPARENT.into(),
+            border: Border::default(),
+            placeholder: pal::TEXT_MUTED,
+            value: pal::TEXT_PRIMARY,
+            selection: pal::SELECTION,
+        });
+    input_frame(height, editor.into())
+}
+
+/// 指令模板输入面：`#字段名` 带高亮底（与对话输入面同一部件），Enter 换行。
+fn prompt_editor<'a>(
+    draft: &'a crate::chat_input::Draft,
+    fields: &'a [TableField],
+) -> Element<'a, Message> {
+    let inner_h = PROMPT_EDITOR_H - 2.0 * INPUT_PAD;
+    let surface = crate::chat_input::Input::new(
+        draft,
+        crate::chat_input::TagSource::Fields(fields),
+        crate::chat_input::InputRoute::TableAiField,
     )
-    .width(Length::Fill)
-    .into()
+    .send_on_enter(false)
+    .text_size(pal::fs_ui())
+    .height(inner_h, inner_h);
+    input_frame(PROMPT_EDITOR_H, Element::new(surface))
 }
 
 fn note_picker<'a>(app: &'a App, draft: &'a AiDraft) -> Element<'a, Message> {

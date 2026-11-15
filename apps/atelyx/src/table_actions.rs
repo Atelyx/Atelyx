@@ -181,7 +181,7 @@ fn on_msg_open(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
             | tv::TableMsg::AiSystemReady { .. }
             | tv::TableMsg::AiDraftSystemMode(..)
             | tv::TableMsg::AiDraftSystemEdited(..)
-            | tv::TableMsg::AiDraftPromptEdited(..)
+            | tv::TableMsg::AiDraftInput(..)
             | tv::TableMsg::AiDraftNote(..)
             | tv::TableMsg::AiDraftAutoNew(..)
             | tv::TableMsg::AiDraftAutoSource(..)
@@ -823,8 +823,8 @@ fn on_ai(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
             crate::table_ai::edit_draft(app, |draft| draft.system_text.perform(action));
             Task::none()
         }
-        tv::TableMsg::AiDraftPromptEdited(action) => {
-            crate::table_ai::edit_draft(app, |draft| draft.prompt.perform(action));
+        tv::TableMsg::AiDraftInput(event) => {
+            crate::table_ai::on_prompt_input(app, event);
             Task::none()
         }
         tv::TableMsg::AiDraftNote(path) => {

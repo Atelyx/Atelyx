@@ -1,5 +1,6 @@
-//! 对话输入面：自绘多行文本部件（光标 / 选区 / IME / 剪贴板 / 撤销重做）+
-//! # 引用标签的选区式高亮与整标签交互；文本真相在编排层 `Draft`。
+//! 多行输入面：自绘文本部件（光标 / 选区 / IME / 剪贴板 / 撤销重做）+
+//! `#` 标签的高亮底与整标签交互；文本真相在编排层 `Draft`（对话面板、画布卡与
+//! 表格 AI 字段模板共用）。
 
 use iced::advanced::clipboard::Kind as ClipboardKind;
 use iced::advanced::input_method::{Event as ImeEvent, InputMethod, Purpose};
@@ -23,6 +24,8 @@ use iced::{Font, Length, Point, Rectangle, Size, Theme, Vector};
 use std::time::{Duration, Instant};
 
 use atelyx_core::ai::refs::{self, RefEntry};
+use atelyx_core::table_ai::parse_refs;
+use atelyx_core::vault::TableField;
 
 use crate::markdown_edit::{
     byte_of_char, char_index, line_end_at, line_start_at, selection_rects, visible_count,
@@ -61,6 +64,22 @@ pub struct Draft {
 }
 
 impl Draft {
+    /// 载入已有文本（光标落在文末）。
+    pub fn with_text(text: &str) -> Self {
+        Self {
+            text: text.to_string(),
+            caret: text.len(),
+            anchor: text.len(),
+            ..Self::default()
+        }
+    }
+
+    /// 在光标处插入（替换选区），压撤销快照。
+    pub fn insert_text(&mut self, insert: &str) {
+        let (text, caret) = insert_at(&self.text, self.caret, self.anchor, insert);
+        self.apply_edited(text, caret, caret);
+    }
+
     /// 清空草稿（保留焦点态）。
     pub fn clear(&mut self) {
         self.text.clear();
@@ -145,6 +164,8 @@ pub enum InputEvent {
     Select { caret: usize, anchor: usize },
     /// 部件内按下（取得焦点）。
     Focus,
+    /// 面外按下（失去焦点）。
+    Blur,
     /// Enter（无 Shift、非组合期）请求发送。
     Send,
     /// 输入法组合串变化。
@@ -157,35 +178,73 @@ pub enum InputEvent {
     PickerClose,
 }
 
-/// 输入面事件去向：面板草稿或某张画布卡草稿。
+/// 输入面事件去向：面板草稿、某张画布卡草稿或表格 AI 字段模板。
 #[derive(Clone, Debug)]
 pub enum InputRoute {
     Panel,
     Card(String),
+    TableAiField,
+}
+
+/// 高亮区间来源（`#` 标签的位置与整标签交互范围按它扫）。
+#[derive(Clone, Copy)]
+pub enum TagSource<'a> {
+    /// 对话：已登记的 `#前缀：标签` 引用。
+    Refs(&'a [RefEntry]),
+    /// 表格 AI 字段模板：`#字段名`。
+    Fields(&'a [TableField]),
+}
+
+impl TagSource<'_> {
+    /// 当前正文里的标签区间（字节，按位置升序、互不重叠）。
+    fn spans(&self, text: &str) -> Vec<(usize, usize)> {
+        match self {
+            TagSource::Refs(refs) => refs::scan_hits(text, refs)
+                .into_iter()
+                .map(|hit| (hit.start, hit.start + hit.len))
+                .collect(),
+            TagSource::Fields(fields) => parse_refs(text, fields)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|r| (r.start, r.end))
+                .collect(),
+        }
+    }
 }
 
 /// 自绘输入面部件。
 pub struct Input<'a> {
     pub draft: &'a Draft,
-    /// 已登记引用（标签高亮与整标签交互按此扫描）。
-    pub refs: &'a [RefEntry],
+    /// 标签来源（高亮底与整标签交互按此扫描）。
+    pub tags: TagSource<'a>,
     /// 候选浮层开启：方向 / Enter / Esc 转交浮层。
     pub picker_open: bool,
     pub placeholder: &'a str,
     pub route: InputRoute,
     /// 渲染缩放（画布卡随视口缩放；面板传 1.0）。
     pub scale: f32,
+    /// Enter 是否发送（多行模板输入关掉，Enter 换行）。
+    pub send_on_enter: bool,
+    /// 正文字号（未乘 `scale`）。
+    pub text_size: f32,
+    /// 可视高度范围（未乘 `scale`；超出内部滚动）。
+    pub min_height: f32,
+    pub max_height: f32,
 }
 
 impl<'a> Input<'a> {
-    pub fn new(draft: &'a Draft, refs: &'a [RefEntry], route: InputRoute) -> Self {
+    pub fn new(draft: &'a Draft, tags: TagSource<'a>, route: InputRoute) -> Self {
         Self {
             draft,
-            refs,
+            tags,
             picker_open: false,
             placeholder: "",
             route,
             scale: 1.0,
+            send_on_enter: true,
+            text_size: pal::fs_body(),
+            min_height: MIN_HEIGHT,
+            max_height: MAX_HEIGHT,
         }
     }
 
@@ -205,15 +264,49 @@ impl<'a> Input<'a> {
         self
     }
 
-    fn publish(&self, shell: &mut Shell<'_, Message>, event: InputEvent) {
-        let message = match &self.route {
+    /// Enter 发送开关（默认开）。
+    pub fn send_on_enter(mut self, send: bool) -> Self {
+        self.send_on_enter = send;
+        self
+    }
+
+    pub fn text_size(mut self, size: f32) -> Self {
+        self.text_size = size;
+        self
+    }
+
+    /// 可视高度范围（未乘缩放）。
+    pub fn height(mut self, min: f32, max: f32) -> Self {
+        self.min_height = min;
+        self.max_height = max;
+        self
+    }
+
+    fn size(&self) -> f32 {
+        self.text_size * self.scale
+    }
+
+    fn message(&self, event: InputEvent) -> Message {
+        match &self.route {
             InputRoute::Panel => Message::Chat(crate::chat_actions::ChatMsg::Input(event)),
             InputRoute::Card(node) => Message::Canvas(crate::canvas_view::CanvasMsg::Chat(
                 crate::canvas_chat::CanvasChatMsg::Input { node: node.clone(), event },
             )),
-        };
-        shell.publish(message);
+            InputRoute::TableAiField => {
+                Message::Table(crate::table_view::TableMsg::AiDraftInput(event))
+            }
+        }
+    }
+
+    fn publish(&self, shell: &mut Shell<'_, Message>, event: InputEvent) {
+        shell.publish(self.message(event));
         shell.capture_event();
+        shell.request_redraw();
+    }
+
+    /// 面外按压的失焦：不捕获事件（本次按压仍归被点的控件）。
+    fn publish_blur(&self, shell: &mut Shell<'_, Message>) {
+        shell.publish(self.message(InputEvent::Blur));
         shell.request_redraw();
     }
 }
@@ -544,7 +637,7 @@ impl Widget<Message, Theme, iced::Renderer> for Input<'_> {
     ) -> layout::Node {
         layout::sized(limits, Length::Fill, Length::Shrink, |limits| {
             let width = limits.max().width;
-            let size = pal::fs_body() * self.scale;
+            let size = self.size();
             let text = &self.draft.text;
             let line_px = size * LINE_FACTOR;
             let state = tree.state.downcast_mut::<InputState>();
@@ -574,8 +667,8 @@ impl Widget<Message, Theme, iced::Renderer> for Input<'_> {
                 .paragraph
                 .as_ref()
                 .map_or(line_px, |p| p.min_bounds().height);
-            let min_h = (MIN_HEIGHT * self.scale).max(24.0);
-            let max_h = (MAX_HEIGHT * self.scale).max(min_h);
+            let min_h = (self.min_height * self.scale).max(24.0);
+            let max_h = (self.max_height * self.scale).max(min_h);
             let height = content_h.clamp(min_h, max_h);
             // 滚动夹回可视区
             if let Some(p) = state.paragraph.as_ref() {
@@ -612,9 +705,8 @@ impl Widget<Message, Theme, iced::Renderer> for Input<'_> {
 
         // 全部内容画进按 bounds 裁剪的层：滚动时超出可视区的部分不外溢
         renderer.with_layer(clip, |renderer| {
-            // # 引用标签高亮（选区样式；正文底下）
-            for hit in refs::scan_hits(&self.draft.text, self.refs) {
-                let (lo, hi) = (hit.start, hit.start + hit.len);
+            // # 标签高亮底（正文之下）
+            for (lo, hi) in self.tags.spans(&self.draft.text) {
                 for r in selection_rects(
                     p,
                     at.index(char_index(&state.content, lo)),
@@ -632,7 +724,7 @@ impl Widget<Message, Theme, iced::Renderer> for Input<'_> {
                             },
                             ..Quad::default()
                         },
-                        pal::ACCENT_SOFT,
+                        pal::REF_HIGHLIGHT,
                     );
                 }
             }
@@ -775,6 +867,10 @@ impl Widget<Message, Theme, iced::Renderer> for Input<'_> {
         match event {
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 let Some(pos) = cursor.position_in(bounds) else {
+                    // 面外按下 = 失焦（与 iced 文本框同口径，不依赖外层按压消息）
+                    if self.draft.focused {
+                        self.publish_blur(shell);
+                    }
                     return;
                 };
                 // IME 组合期点击会中断组合会话，光标换算暂不接管
@@ -941,10 +1037,10 @@ impl Widget<Message, Theme, iced::Renderer> for Input<'_> {
 impl Input<'_> {
     /// 光标处的标签区间（命中范围内 = 整标签交互对象）。
     fn tag_at(&self, caret: usize) -> Option<(usize, usize)> {
-        refs::scan_hits(&self.draft.text, self.refs).into_iter().find_map(|h| {
-            let end = h.start + h.len;
-            (caret > h.start && caret < end).then_some((h.start, end))
-        })
+        self.tags
+            .spans(&self.draft.text)
+            .into_iter()
+            .find(|&(start, end)| caret > start && caret < end)
     }
 
     fn handle_key(
@@ -1131,11 +1227,11 @@ impl Input<'_> {
                 }
             }
             Key::Named(Named::Enter) => {
-                if extend {
+                if self.send_on_enter && !extend {
+                    self.publish(shell, InputEvent::Send);
+                } else {
                     let (t, c) = insert_at(&self.draft.text, caret, anchor, "\n");
                     self.publish(shell, InputEvent::Edited { text: t, caret: c, anchor: c });
-                } else {
-                    self.publish(shell, InputEvent::Send);
                 }
             }
             Key::Named(Named::Space) => {
@@ -1213,10 +1309,10 @@ impl Input<'_> {
         if self.draft.anchor != caret {
             return None;
         }
-        refs::scan_hits(&self.draft.text, self.refs).into_iter().find_map(|h| {
-            let end = h.start + h.len;
-            (caret == end).then_some((h.start, end))
-        })
+        self.tags
+            .spans(&self.draft.text)
+            .into_iter()
+            .find(|&(_, end)| caret == end)
     }
 
     /// Del 整删目标：光标恰在标签开头（无选区）时返回标签区间。
@@ -1224,9 +1320,10 @@ impl Input<'_> {
         if self.draft.anchor != caret {
             return None;
         }
-        refs::scan_hits(&self.draft.text, self.refs).into_iter().find_map(|h| {
-            (caret == h.start).then_some((h.start, h.start + h.len))
-        })
+        self.tags
+            .spans(&self.draft.text)
+            .into_iter()
+            .find(|&(start, _)| caret == start)
     }
 }
 
@@ -1330,6 +1427,54 @@ mod tests {
         let (t, c) = insert_at("abcdef", 4, 2, "X");
         assert_eq!(t, "abXef");
         assert_eq!(c, 3);
+    }
+
+    fn field(id: &str, name: &str, field_type: &str) -> TableField {
+        TableField {
+            id: id.into(),
+            name: name.into(),
+            field_type: field_type.into(),
+            options: None,
+            width: None,
+            calc_type: None,
+            ai: None,
+        }
+    }
+
+    #[test]
+    fn field_tags_cover_the_whole_tag() {
+        let fields = vec![field("f1", "标题", "text"), field("f2", "标题栏", "text")];
+        // 按最长字段名前缀断词：#标题 而非 #标题栏
+        let at_head = draft("#标题 加一句", 0);
+        let head = Input::new(&at_head, TagSource::Fields(&fields), InputRoute::TableAiField);
+        assert_eq!(head.tags.spans(&at_head.text), vec![(0, 7)]);
+        assert_eq!(head.tag_at(3), Some((0, 7)));
+        assert_eq!(head.tag_forward_target(0), Some((0, 7)));
+        // 光标恰在标签末尾（无选区）= 退格整删
+        let at_tail = draft("#标题 加一句", 7);
+        let tail = Input::new(&at_tail, TagSource::Fields(&fields), InputRoute::TableAiField);
+        assert_eq!(tail.tag_backspace_target(7), Some((0, 7)));
+    }
+
+    #[test]
+    fn field_tags_skip_ai_fields_and_free_text() {
+        let d = draft("看 #来源 与 #随手记", 0);
+        let fields = vec![field("f1", "来源", "text"), field("f2", "输出", "ai")];
+        let input = Input::new(&d, TagSource::Fields(&fields), InputRoute::TableAiField);
+        let text = &d.text;
+        let start = text.find("#来源").expect("命中引用");
+        assert_eq!(input.tags.spans(text), vec![(start, start + 7)]);
+    }
+
+    #[test]
+    fn insert_text_replaces_selection_and_pushes_undo() {
+        let mut d = draft("abc", 3);
+        d.apply_edited("abc".into(), 3, 1);
+        d.insert_text("#字段");
+        assert_eq!(d.text, "a#字段");
+        assert_eq!(d.caret, 8);
+        d.undo_step();
+        assert_eq!(d.text, "abc");
     }
 
     #[test]

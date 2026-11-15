@@ -1015,7 +1015,8 @@ pub enum TableMsg {
     AiSystemReady { gen: u64, path: String, result: Result<String, String> },
     AiDraftSystemMode(crate::table_ai::AiSystemMode),
     AiDraftSystemEdited(text_editor::Action),
-    AiDraftPromptEdited(text_editor::Action),
+    /// AI 字段模板输入面事件（自绘输入面回发）。
+    AiDraftInput(crate::chat_input::InputEvent),
     AiDraftNote(String),
     AiDraftAutoNew(bool),
     AiDraftAutoSource(bool),
