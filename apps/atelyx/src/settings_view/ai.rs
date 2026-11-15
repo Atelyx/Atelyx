@@ -26,7 +26,7 @@ const LIST_W: f32 = 220.0;
 /// 密钥链条目尾：Tavily key（对齐 config 注释里的 `provider-<sha>-search-tavily`）。
 const TAVILY_TAIL: &str = "search-tavily";
 
-/// 供应商预设（添加菜单；预设自带默认模型清单）。
+/// 供应商预设（添加菜单；预设自带默认模型清单，地址与模型取自各厂商官方文档）。
 pub(crate) struct ProviderPreset {
     pub name: &'static str,
     pub base_url: &'static str,
@@ -34,12 +34,50 @@ pub(crate) struct ProviderPreset {
 }
 
 pub(crate) const PROVIDER_PRESETS: &[ProviderPreset] = &[
-    ProviderPreset { name: "OpenAI", base_url: "https://api.openai.com/v1", models: &["gpt-4o-mini", "gpt-4o"] },
-    ProviderPreset { name: "DeepSeek", base_url: "https://api.deepseek.com/v1", models: &["deepseek-chat", "deepseek-reasoner"] },
+    ProviderPreset {
+        name: "OpenAI",
+        base_url: "https://api.openai.com/v1",
+        models: &["gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-luna"],
+    },
+    ProviderPreset {
+        name: "DeepSeek",
+        base_url: "https://api.deepseek.com",
+        models: &["deepseek-flash", "deepseek-v4-pro"],
+    },
     ProviderPreset {
         name: "通义千问",
         base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        models: &["qwen-plus", "qwen-max"],
+        models: &["qwen3.7-plus", "qwen3.8-flash", "qwen4-max-preview"],
+    },
+    ProviderPreset {
+        name: "智谱 GLM",
+        base_url: "https://open.bigmodel.cn/api/paas/v4",
+        models: &["glm-5.3", "glm-5.3-flash", "glm-5.3-flashx"],
+    },
+    ProviderPreset {
+        name: "Kimi",
+        base_url: "https://api.moonshot.ai/v1",
+        models: &["kimi-k3.1-pro", "kimi-k3.1-pro-highspeed", "kimi-k3"],
+    },
+    ProviderPreset {
+        name: "豆包",
+        base_url: "https://ark.cn-beijing.volces.com/api/v3",
+        models: &["doubao-seed-evolving", "doubao-seed-2-1-pro-260915", "doubao-seed-2-1-lite-260915"],
+    },
+    ProviderPreset {
+        name: "MiniMax",
+        base_url: "https://api.minimax.cn/v1",
+        models: &["MiniMax-M3.1-Flash", "MiniMax-M3"],
+    },
+    ProviderPreset {
+        name: "xAI",
+        base_url: "https://api.x.ai/v1",
+        models: &["grok-4.7", "grok-4.6"],
+    },
+    ProviderPreset {
+        name: "OpenRouter",
+        base_url: "https://openrouter.ai/api/v1",
+        models: &["openai/gpt-6.1-terra", "anthropic/claude-fable-5.2", "google/gemini-4-hydrogen"],
     },
 ];
 
@@ -1190,7 +1228,7 @@ fn providers_view(app: &App, window: iced::window::Id) -> Element<'static, Messa
         None => container(controls::empty_state(
             "bot",
             "还没有配置供应商",
-            "从左侧快速添加一个预设（OpenAI / DeepSeek / 通义千问）或自定义，填好地址与 API Key 后即可对话",
+            "从左侧快速添加一个预设或自定义，填好地址与 API Key 后即可对话",
             (!ro).then(|| (
                 "添加自定义供应商".to_string(),
                 Message::Ai(AiMsg::ProviderAddCustom),
