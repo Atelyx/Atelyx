@@ -344,8 +344,16 @@ pub(crate) fn ensure_images(app: &mut App) -> Task<Message> {
         });
     }
     let gen = app.epoch();
+    let root = app.vault.root().ok();
     let mut tasks = Vec::new();
     for (key, source) in pending {
+        // 同路径文件已被换掉（插件重写缩略图 / 外部替换）：旧句柄作废，按新内容重载
+        let stale = app.note_image_stamps.get(&key).is_some_and(|stamp| {
+            crate::image_cache::stamp_for(root.as_deref(), &key) != Some(*stamp)
+        });
+        if stale {
+            app.forget_image(&key);
+        }
         if !app.begin_image_load(&key) {
             continue;
         }
@@ -361,7 +369,7 @@ fn load_image(app: &App, gen: u64, key: String, source: ImageSource) -> Task<Mes
         ImageSource::Private { .. } => {
             let path = PathBuf::from(&key);
             Task::perform(
-                async move { std::fs::read(&path).map_err(|e| format!("读插件图片失败：{e}")) },
+                async move { crate::image_cache::read_local(&path) },
                 move |result| Message::ImageLoaded(gen, key, result),
             )
         }
@@ -369,7 +377,7 @@ fn load_image(app: &App, gen: u64, key: String, source: ImageSource) -> Task<Mes
         ImageSource::File { path } => {
             let path = PathBuf::from(path);
             Task::perform(
-                async move { std::fs::read(&path).map_err(|e| format!("读插件图片失败：{e}")) },
+                async move { crate::image_cache::read_local(&path) },
                 move |result| Message::ImageLoaded(gen, key, result),
             )
         }
@@ -381,7 +389,7 @@ fn load_image(app: &App, gen: u64, key: String, source: ImageSource) -> Task<Mes
                 Some(root) => {
                     let rel = path.clone();
                     Task::perform(
-                        async move { atelyx_core::vault::read_file_bytes(&root, &rel) },
+                        async move { crate::image_cache::read_vault(&root, &rel) },
                         move |result| Message::ImageLoaded(gen, key.clone(), result),
                     )
                 }
@@ -392,11 +400,12 @@ fn load_image(app: &App, gen: u64, key: String, source: ImageSource) -> Task<Mes
             let local = local.unwrap_or(false);
             Task::perform(
                 async move {
-                    if local {
+                    let fetched = if local {
                         atelyx_core::remote_image::fetch_local_image(&url).await
                     } else {
                         atelyx_core::remote_image::fetch_external_image(&url).await
-                    }
+                    };
+                    fetched.map(crate::image_cache::LoadedImage::remote)
                 },
                 move |result| Message::ImageLoaded(gen, key, result),
             )

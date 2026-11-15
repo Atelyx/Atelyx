@@ -293,6 +293,22 @@ pub(crate) fn load_refs(app: &App, paths: Vec<String>) -> Task<Message> {
     )
 }
 
+/// 文件树刷新后的画布图片重读：同路径文件被换掉时，贴片内容与 contain / cover 依据的
+/// 原图尺寸一并更新（磁盘无监听，刷新是认领外部改动的那一处）。
+pub(crate) fn reload_image_refs(app: &App) -> Task<Message> {
+    let Some(session) = app.canvas.as_ref() else { return Task::none() };
+    let paths: Vec<String> = session
+        .view
+        .refs
+        .iter()
+        .filter(|(_, content)| {
+            matches!(content, RefContent::Image { .. } | RefContent::BrokenImage)
+        })
+        .map(|(path, _)| path.clone())
+        .collect();
+    load_refs(app, paths)
+}
+
 /// 补读回执：合并引用缓存 + 重建文本卡正文（产出落卡的新笔记能直接显示）。
 fn on_refs_loaded(app: &mut App, gen: u64, refs: HashMap<String, RefRaw>) -> Task<Message> {
     if gen != app.epoch() {

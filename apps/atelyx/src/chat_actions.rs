@@ -1630,7 +1630,7 @@ fn finish_send(app: &mut App, payload: SendPayload, attachments: Vec<Value>) -> 
 
 /// 会话消息附件缩略图的按需载入：显示中会话的图片附件缺句柄且未在途/未失败时发起读盘
 /// （本地读盘 / 空间端点；缓存与在途集合与笔记图片共用，键 = 仓库相对路径）。
-fn ensure_chat_images(app: &mut App) -> iced::Task<Message> {
+pub(crate) fn ensure_chat_images(app: &mut App) -> iced::Task<Message> {
     let Some(active) = app.chat.active.clone() else {
         return iced::Task::none();
     };
@@ -1676,7 +1676,7 @@ fn ensure_chat_images(app: &mut App) -> iced::Task<Message> {
                 let root = root.clone();
                 let path = src.clone();
                 iced::Task::perform(
-                    async move { atelyx_core::vault::read_file_bytes(&root, &path) },
+                    async move { crate::image_cache::read_vault(&root, &path) },
                     move |r| Message::ImageLoaded(gen, src.clone(), r),
                 )
             }

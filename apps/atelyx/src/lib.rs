@@ -31,6 +31,7 @@ mod commands;
 mod doc_save;
 mod history_browser;
 mod hover_tip;
+mod image_cache;
 mod image_clipboard;
 mod layout_view;
 mod markdown_edit;
@@ -525,8 +526,8 @@ enum Message {
     Noop,
     /// 打开链接（外链 / 仓库路径 / wiki）。
     OpenLink(String, LinkForm),
-    /// 图片字节落地（gen 守卫 + 内容键；失败按退避重试，用尽次数回落占位）。
-    ImageLoaded(u64, String, Result<Vec<u8>, String>),
+    /// 图片字节落地（gen 守卫 + 内容键 + 本地文件指纹；失败按退避重试，用尽次数回落占位）。
+    ImageLoaded(u64, String, Result<image_cache::LoadedImage, String>),
     /// 一次失败重试到点（gen 守卫）：重扫插件界面里仍缺句柄的来源。
     ImageRetryDue(u64),
     /// 文件面板排序方式切换（落仓库 config 的 fileExplorerSort）。
@@ -1524,6 +1525,9 @@ pub struct App {
     pub note_images: markdown_view::ImageHandles,
     /// 图片像素尺寸（key 同 `note_images`）：自绘画布按 contain / cover 摆放贴片要用原图长宽。
     pub note_image_sizes: HashMap<String, (u32, u32)>,
+    /// 本地文件图片的载入时指纹（key 同 `note_images`）：刷新与窗口重新聚焦时据此判断
+    /// 同路径文件是否已被换掉，换掉的句柄与尺寸整体作废后重载。
+    note_image_stamps: HashMap<String, image_cache::FileStamp>,
     /// 图片句柄代数：句柄入表或整表清空即自增，自绘画布据此作废已缓存的几何。
     pub note_image_epoch: u64,
     note_images_inflight: HashSet<String>,
@@ -1865,6 +1869,7 @@ impl App {
                 note_scroll_ready: false,
                 note_images: markdown_view::ImageHandles::new(),
                 note_image_sizes: HashMap::new(),
+                note_image_stamps: HashMap::new(),
                 note_image_epoch: 0,
                 note_images_inflight: HashSet::new(),
                 note_images_failed: HashMap::new(),
@@ -2481,7 +2486,9 @@ impl App {
             ),
             Message::WindowFocused(id) => {
                 self.focused_window = Some(id);
-                Task::none()
+                // 外部程序替换图片后用户切回本应用：按指纹重载已换掉的句柄
+                // （空间来源不在此列：没有本地文件可查，重取留给刷新钮）
+                self.reload_changed_images(false)
             }
             _ => Task::none(),
         }
@@ -3950,6 +3957,7 @@ impl App {
                 // 图片缓存随文件清空：同 src 不同仓库指向不同文件，过期句柄不得复用
                 self.note_images.clear();
                 self.note_image_sizes.clear();
+                self.note_image_stamps.clear();
                 self.note_image_epoch = self.note_image_epoch.wrapping_add(1);
                 self.note_images_inflight.clear();
                 self.note_images_failed.clear();
@@ -4009,7 +4017,13 @@ impl App {
                 self.notify(NoticeLevel::Error, format!("统计文件失败：{e}"));
                 Task::none()
             }
-            Message::FileTreeRefresh => self.refresh_file_tree(),
+            Message::FileTreeRefresh => {
+                // 磁盘无监听：刷新钮同时认领外部换掉的图片（含空间来源；画布引用整批重读）
+                let images = self
+                    .reload_changed_images(true)
+                    .chain(canvas_actions::reload_image_refs(self));
+                self.refresh_file_tree().chain(images)
+            }
             Message::RemoveVaultAsk(root) => {
                 // 进弹层确认 pane（与删除确认同形）：条目留在当前菜单内二段确认
                 self.remove_vault_confirm = Some(root);
@@ -4917,8 +4931,18 @@ impl App {
                     return Task::none();
                 }
                 match result {
-                    Ok(bytes) => {
+                    Ok(loaded) => {
                         self.note_images_failed.remove(&key);
+                        let image_cache::LoadedImage { bytes, stamp } = loaded;
+                        // 本地文件来源记下内容指纹：同路径被换掉后刷新 / 聚焦据此作废旧句柄
+                        match stamp {
+                            Some(stamp) => {
+                                self.note_image_stamps.insert(key.clone(), stamp);
+                            }
+                            None => {
+                                self.note_image_stamps.remove(&key);
+                            }
+                        }
                         // 画布 contain / cover 需要原图尺寸，装载点顺手记下（解码失败不入表）
                         let size = crate::canvas_actions::image_dimensions(&bytes);
                         if size.0 > 0 && size.1 > 0 {
@@ -7336,6 +7360,56 @@ impl App {
         self.ensure_image_srcs(srcs);
     }
 
+    /// 图片句柄、尺寸与指纹一并作废（下次按需重新载入）。
+    pub(crate) fn forget_image(&mut self, key: &str) {
+        self.note_images.remove(key);
+        self.note_image_sizes.remove(key);
+        self.note_image_stamps.remove(key);
+        self.note_images_failed.remove(key);
+        self.note_image_epoch = self.note_image_epoch.wrapping_add(1);
+    }
+
+    /// 本地文件图片已被换掉（替换或消失）：丢弃句柄，交给可见面重新发起载入。
+    /// `include_space` = 空间来源也按服务端重取（刷新钮；空间覆盖写不广播，没有别的信号）。
+    fn drop_stale_images(&mut self, include_space: bool) {
+        let root = self.vault.root().ok();
+        let mut stale: Vec<String> = self
+            .note_image_stamps
+            .iter()
+            .filter(|(key, stamp)| image_cache::stamp_for(root.as_deref(), key) != Some(**stamp))
+            .map(|(key, _)| key.clone())
+            .collect();
+        if include_space && matches!(self.repo_kind, RepoKind::Space(_)) {
+            stale.extend(
+                self.note_images
+                    .keys()
+                    .filter(|key| {
+                        !self.note_image_stamps.contains_key(*key) && !image_cache::is_remote(key)
+                    })
+                    .cloned(),
+            );
+        }
+        for key in stale {
+            self.forget_image(&key);
+        }
+    }
+
+    /// 外部改动后的图片重载：按指纹丢弃旧句柄，再按当前可见内容重新发起载入
+    /// （笔记正文、对话附件与插件界面图片共用这一条缓存）。磁盘无监听，外部替换只在
+    /// 文件树刷新与窗口重新获得焦点两处被认领。
+    pub(crate) fn reload_changed_images(&mut self, include_space: bool) -> Task<Message> {
+        self.drop_stale_images(include_space);
+        let srcs = self
+            .preview_doc
+            .as_ref()
+            .or(self.edit_doc.as_ref())
+            .map(|doc| markdown_view::collect_image_srcs(&doc.source, &doc.blocks))
+            .unwrap_or_default();
+        self.ensure_image_srcs(srcs);
+        let chat = chat_actions::ensure_chat_images(self);
+        chat.chain(plugin_actions::ensure_images(self))
+    }
+
     /// 该内容键的图片是否可以发起载入：未失败，或失败已过退避且仍有重试余量。
     pub(crate) fn can_load_image(&self, key: &str) -> bool {
         match self.note_images_failed.get(key) {
@@ -7371,7 +7445,11 @@ impl App {
                 (_, true) => {
                     let url = src.clone();
                     Task::perform(
-                        async move { atelyx_core::remote_image::fetch_external_image(&url).await },
+                        async move {
+                            atelyx_core::remote_image::fetch_external_image(&url)
+                                .await
+                                .map(image_cache::LoadedImage::remote)
+                        },
                         move |r| Message::ImageLoaded(gen, src.clone(), r),
                     )
                 }
@@ -7382,7 +7460,7 @@ impl App {
                     let root = root.clone();
                     let path = src.clone();
                     Task::perform(
-                        async move { vault::read_file_bytes(&root, &path) },
+                        async move { image_cache::read_vault(&root, &path) },
                         move |r| Message::ImageLoaded(gen, src.clone(), r),
                     )
                 }
