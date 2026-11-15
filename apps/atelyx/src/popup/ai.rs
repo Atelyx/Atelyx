@@ -222,7 +222,7 @@ pub(super) fn entries<'a>(app: &'a App, state: &PopupState, pane: usize, window:
                 ),
                 (
                     1,
-                    MenuEntry::danger("确认删除（并清除其密钥链条目）", "bin", Message::Ai(ai::AiMsg::ProviderDelete)),
+                    MenuEntry::danger("确认删除", "bin", Message::Ai(ai::AiMsg::ProviderDelete)),
                 ),
                 (1, MenuEntry::action("取消", Message::Ui(crate::ui::UiMsg::PopupClose { window }))),
             ]
