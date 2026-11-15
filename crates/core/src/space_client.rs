@@ -658,6 +658,16 @@ impl SpaceClient {
     /// 回执缺 `content` 按错误返回：调用方会拿返回值当真内容做三方合流与写回，
     /// 「缺字段读成空串」等于把空文写回用户的文件。
     pub async fn get_file_text(&self, space_id: &str, path: &str) -> Result<String, SpaceError> {
+        self.get_file_text_versioned(space_id, path).await.map(|(text, _)| text)
+    }
+
+    /// 读文本文件并带回内容版本（条件写用）。服务端未返回 version 时给 None：调用方据此
+    /// 退回最后写入者胜，不对未知版本做条件写。
+    pub async fn get_file_text_versioned(
+        &self,
+        space_id: &str,
+        path: &str,
+    ) -> Result<(String, Option<String>), SpaceError> {
         let resp = self
             .get(&format!(
                 "/api/spaces/{space_id}/file?path={}",
@@ -689,20 +699,33 @@ impl SpaceClient {
     /// 写文本文件（原子写，自动建父目录；单文件 50MB 限额由服务端强制）。
     /// 返回是否新建（服务端在写锁内判定存在性）。
     pub async fn put_file_text(&self, space_id: &str, path: &str, content: &str) -> Result<bool, SpaceError> {
-        self.put_file_raw(space_id, path, content.as_bytes(), false, false).await
+        self.put_file_raw(space_id, path, content.as_bytes(), false, false, None).await
+    }
+
+    /// 条件写：带上读到的内容版本（空串 = 期待目标仍不存在），服务端在写锁内版本不符回 409。
+    /// 只用于「读到写」链，挡住两笔并发整文写互相覆盖最后写入者胜。
+    pub async fn put_file_text_if(
+        &self,
+        space_id: &str,
+        path: &str,
+        content: &str,
+        if_match: Option<&str>,
+    ) -> Result<bool, SpaceError> {
+        self.put_file_raw(space_id, path, content.as_bytes(), false, false, if_match)
+            .await
     }
 
     /// 只新建文本文件：写锁内发现目标已存在即 `Conflict`，不覆盖。
     /// 供「读到不存在 → 建空文件 → 补丁上行」的调用方消除读到写之间的覆盖窗口。
     pub async fn create_file_text(&self, space_id: &str, path: &str, content: &str) -> Result<(), SpaceError> {
-        self.put_file_raw(space_id, path, content.as_bytes(), false, true)
+        self.put_file_raw(space_id, path, content.as_bytes(), false, true, None)
             .await
             .map(|_| ())
     }
 
     /// 写二进制文件（base64 编码上行）。返回是否新建。
     pub async fn put_file_bytes(&self, space_id: &str, path: &str, bytes: &[u8]) -> Result<bool, SpaceError> {
-        self.put_file_raw(space_id, path, bytes, true, false).await
+        self.put_file_raw(space_id, path, bytes, true, false, None).await
     }
 
     async fn put_file_raw(
@@ -712,6 +735,7 @@ impl SpaceClient {
         bytes: &[u8],
         base64_enc: bool,
         create_only: bool,
+        if_match: Option<&str>,
     ) -> Result<bool, SpaceError> {
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
@@ -734,6 +758,9 @@ impl SpaceClient {
         };
         if create_only {
             body["createOnly"] = serde_json::Value::Bool(true);
+        }
+        if let Some(version) = if_match {
+            body["ifMatch"] = serde_json::Value::String(version.to_string());
         }
         self.send_json::<WriteAck, serde_json::Value>(
             reqwest::Method::PUT,
@@ -991,14 +1018,17 @@ async fn parse_json<T: serde::de::DeserializeOwned>(resp: reqwest::Response) -> 
 }
 
 /// 读文件回执解析：`content` 必填——缺字段与 null 都是响应损坏，不是「文件为空」。
-fn parse_file_text_body(text: &str) -> Result<String, SpaceError> {
+fn parse_file_text_body(text: &str) -> Result<(String, Option<String>), SpaceError> {
     #[derive(Deserialize)]
     struct FileBody {
         content: String,
+        /// 内容版本（条件写 If-Match）；旧服务端缺字段 = 未知，退回最后写入者胜。
+        #[serde(default)]
+        version: Option<String>,
     }
     let body: FileBody =
         serde_json::from_str(text).map_err(|e| SpaceError::Network(format!("响应解析失败：{e}")))?;
-    Ok(body.content)
+    Ok((body.content, body.version))
 }
 
 /// 查询参数段转义：非 RFC 3986 unreserved 字符按字节 `%XX` 编码。
@@ -1134,6 +1164,29 @@ mod tests {
             );
             server.join().expect("服务端线程不 panic");
         }
+    }
+
+    /// 读文件回执带回内容版本；旧服务端缺字段 = 未知版本（调用方退回最后写入者胜）。
+    #[tokio::test]
+    async fn 读文件回执取内容版本() {
+        let (base, server) = spawn_json_server(r#"{"content":"正文","version":"abc123"}"#);
+        let client = SpaceClient::new(&base, "tok".to_string()).expect("回环放行");
+        let (text, version) = client
+            .get_file_text_versioned("s1", "notes/a.md")
+            .await
+            .expect("回执应可解码");
+        assert_eq!(text, "正文");
+        assert_eq!(version.as_deref(), Some("abc123"));
+        server.join().expect("服务端线程不 panic");
+
+        let (base, server) = spawn_json_server(r#"{"content":"正文"}"#);
+        let client = SpaceClient::new(&base, "tok".to_string()).expect("回环放行");
+        let (_, version) = client
+            .get_file_text_versioned("s1", "notes/a.md")
+            .await
+            .expect("缺 version 仍可读");
+        assert_eq!(version, None, "旧服务端缺字段应为未知版本");
+        server.join().expect("服务端线程不 panic");
     }
 
     /// 二进制读回执同样要求 content 必填（与文本读同口径）。

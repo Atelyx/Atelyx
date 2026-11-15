@@ -1056,16 +1056,18 @@ async fn append_file(ctx: &ToolCtx, args: &Value) -> ToolResult {
                 .unwrap_or_else(|e| ToolResult::err(format!("追加失败：{e}")))
         }
         RepoAccess::Space { client, space_id } => {
-            // 空间端点无原子读改写：读与写之间他方（其他设备/成员）的写入会被本次整体覆盖，
-            // 这是服务端契约约束下的已知窗口（本地分支经写盘队列串行化，两侧出口语义不同源）
-            let existing = match client.get_file_text(space_id, &rel).await {
-                Ok(text) => text,
-                Err(crate::space_client::SpaceError::NotFound) => String::new(),
+            // 空间端点无原子读改写：读到的版本随条件写回流，读与写之间他方（其他设备/成员）
+            // 落盘即 409 而不是被本次整文覆盖（本地分支经写盘队列串行化，两侧出口语义不同源）
+            let (existing, version) = match client.get_file_text_versioned(space_id, &rel).await {
+                Ok(pair) => pair,
+                Err(crate::space_client::SpaceError::NotFound) => {
+                    (String::new(), Some(String::new()))
+                }
                 Err(e) => return ToolResult::err(format!("文件不可读：{rel}（{e}）")),
             };
             let next = crate::ai::edit_host::append_text(&existing, content);
             client
-                .put_file_text(space_id, &rel, &next)
+                .put_file_text_if(space_id, &rel, &next, version.as_deref())
                 .await
                 .map(|_| ToolResult::ok(format!("已追加到 {rel}")))
                 .unwrap_or_else(|e| ToolResult::err(format!("追加失败：{e}")))
@@ -1120,8 +1122,8 @@ async fn edit_file(ctx: &ToolCtx, args: &Value) -> ToolResult {
             }
         }
         RepoAccess::Space { client, space_id } => {
-            let existing = match client.get_file_text(space_id, &rel).await {
-                Ok(text) => text,
+            let (existing, version) = match client.get_file_text_versioned(space_id, &rel).await {
+                Ok(pair) => pair,
                 Err(e) => return ToolResult::err(format!("文件不存在或不可读：{rel}（{e}）")),
             };
             let (next, count) = match crate::ai::edit_host::replace_exact(&existing, &find, &replace, all) {
@@ -1129,7 +1131,7 @@ async fn edit_file(ctx: &ToolCtx, args: &Value) -> ToolResult {
                 Err(e) => return ToolResult::err(e),
             };
             client
-                .put_file_text(space_id, &rel, &next)
+                .put_file_text_if(space_id, &rel, &next, version.as_deref())
                 .await
                 .map(|_| ToolResult::ok(format!("已编辑 {rel}（替换 {count} 处）")))
                 .unwrap_or_else(|e| ToolResult::err(format!("写入失败：{e}")))

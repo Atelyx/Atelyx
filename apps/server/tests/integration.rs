@@ -3572,3 +3572,65 @@ async fn tree_scope_and_stat_path() {
         .await;
     assert_eq!(status, 400, "越界路径应拒绝");
 }
+
+
+#[tokio::test]
+async fn write_file_conditional_version_conflicts_instead_of_overwriting() {
+    // 两端基于同一祖先并发写：后到的一方拿到 409 而不是整文覆盖（条件写 If-Match）
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+    let space_id = setup_two_members(&ctx, "alice", "bob").await;
+    let a = login_as(&ctx, "alice").await;
+    let file_url = format!("/api/spaces/{space_id}/file");
+    let read_url = format!("/api/spaces/{space_id}/file?path={}", "并发.md");
+
+    let (status, _) = ctx
+        .put(&file_url, Some(&a), json!({ "path": "并发.md", "content": "v1" }))
+        .await;
+    assert_eq!(status, 200);
+
+    let (status, body) = ctx.get(&read_url, Some(&a), &[]).await;
+    assert_eq!(status, 200);
+    let version = body["version"].as_str().expect("读回执应带内容版本").to_string();
+    assert_eq!(body["content"], "v1");
+
+    // 读到写之间另一笔落盘：旧版本条件写必须冲突，且不覆盖对方内容
+    let (status, _) = ctx
+        .put(&file_url, Some(&a), json!({ "path": "并发.md", "content": "v2" }))
+        .await;
+    assert_eq!(status, 200);
+    let (status, body) = ctx
+        .put(
+            &file_url,
+            Some(&a),
+            json!({ "path": "并发.md", "content": "v1-旧", "ifMatch": version }),
+        )
+        .await;
+    assert_eq!(status, 409, "旧版本条件写应冲突：{body}");
+    let (_, body) = ctx.get(&read_url, Some(&a), &[]).await;
+    assert_eq!(body["content"], "v2", "冲突写不得覆盖对方内容");
+
+    // 最新版本条件写成功
+    let version = body["version"].as_str().unwrap().to_string();
+    let (status, _) = ctx
+        .put(
+            &file_url,
+            Some(&a),
+            json!({ "path": "并发.md", "content": "v3", "ifMatch": version }),
+        )
+        .await;
+    assert_eq!(status, 200);
+    let (_, body) = ctx.get(&read_url, Some(&a), &[]).await;
+    assert_eq!(body["content"], "v3");
+
+    // 期待不存在的条件写撞上已存在文件：409（不静默覆盖）
+    let (status, _) = ctx
+        .put(&file_url, Some(&a), json!({ "path": "并发.md", "content": "v4", "ifMatch": "" }))
+        .await;
+    assert_eq!(status, 409);
+    // 不带版本的请求保持最后写入者胜（未升级客户端兼容）
+    let (status, _) = ctx
+        .put(&file_url, Some(&a), json!({ "path": "并发.md", "content": "v5" }))
+        .await;
+    assert_eq!(status, 200);
+}

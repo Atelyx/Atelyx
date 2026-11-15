@@ -527,13 +527,44 @@ pub fn update(app: &mut App, msg: AiMsg) -> Task<Message> {
                         } else {
                             let client = session.client.clone();
                             let space_id = session.space_id.clone();
-                            let json = serde_json::to_string(&notes).unwrap_or_default();
+                            let missing = missing.clone();
                             tasks.push(Task::perform(
                                 async move {
+                                    // 读改写带版本：清理期间他人新增的标记不得被本端整份覆盖
+                                    let fetched = client
+                                        .get_file_text_versioned(
+                                            &space_id,
+                                            ".atelyx/prompt-notes.json",
+                                        )
+                                        .await;
+                                    let (raw, version) = match fetched {
+                                        Ok(pair) => pair,
+                                        Err(atelyx_core::space_client::SpaceError::NotFound) => {
+                                            return Ok(Vec::new());
+                                        }
+                                        Err(e) => return Err(e),
+                                    };
+                                    let mut current: Vec<String> = serde_json::from_str(&raw)
+                                        .map_err(|e| {
+                                            atelyx_core::space_client::SpaceError::Network(
+                                                format!("提示词标记解析失败：{e}"),
+                                            )
+                                        })?;
+                                    let before = current.len();
+                                    current.retain(|f| !missing.contains(f));
+                                    if current.len() == before {
+                                        return Ok(current);
+                                    }
+                                    let json = serde_json::to_string(&current).unwrap_or_default();
                                     client
-                                        .put_file_text(&space_id, ".atelyx/prompt-notes.json", &json)
+                                        .put_file_text_if(
+                                            &space_id,
+                                            ".atelyx/prompt-notes.json",
+                                            &json,
+                                            version.as_deref(),
+                                        )
                                         .await?;
-                                    Ok::<_, atelyx_core::space_client::SpaceError>(notes)
+                                    Ok::<_, atelyx_core::space_client::SpaceError>(current)
                                 },
                                 move |result| {
                                     Message::PromptNotesLoaded(gen, result.map_err(|e| e.to_string()))

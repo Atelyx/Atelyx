@@ -1418,43 +1418,59 @@ pub fn space_submit_save(app: &mut App, reason: SaveReason) -> Task<Message> {
     let author = crate::history_author(app);
     Task::perform(
         async move {
-            // PUT 前回读：服务端内容与上次落盘基线不一致 = 他人已落盘，三方合流后整文上行
-            let server_text = match client.get_file_text(&space_id, &rel).await {
-                Ok(t) => t,
-                // 首次保存：文件尚不存在，直接上行本端内容
-                Err(SpaceError::NotFound) => String::new(),
-                Err(e) => return Err(e),
+            // PUT 前回读：服务端内容与上次落盘基线不一致 = 他人已落盘，三方合流后整文上行。
+            // 读到的版本随 PUT 带回，回读之后的他人写入由服务端 409 挡住（不静默覆盖）；
+            // 撞上该窗口时重取再合流一次（等价于紧接着的下一次保存），仍冲突才报给界面
+            let mut retried = false;
+            let (merged, previous) = loop {
+                let fetched = client.get_file_text_versioned(&space_id, &rel).await;
+                let (server_text, version) = match fetched {
+                    Ok(pair) => pair,
+                    // 首次保存：文件尚不存在，条件写按「仍不存在」校验（他人抢先建出即冲突）
+                    Err(SpaceError::NotFound) => (String::new(), Some(String::new())),
+                    Err(e) => return Err(e),
+                };
+                // BOM 是编码标记不是正文：合流比较用去 BOM 文本，上行写回按服务端原文还原
+                let (server_text, had_bom) = atelyx_core::frontmatter::split_bom(&server_text);
+                let server_text = server_text.to_string();
+                // 编辑器内容未载入（打开失败的空态）禁止保存：本端空 + 服务端有正文时 PUT 会
+                // 清空他人可见的文件。正常清空已有全文走 base（落盘基线）在场的合流路径，不受影响
+                if base.is_none() && content.is_empty() && !server_text.is_empty() {
+                    return Err(SpaceError::BadRequest("文件内容未载入，已取消保存".into()));
+                }
+                let merged = match &base {
+                    Some(b) => match atelyx_core::merge3::plan_save(b, &content, &server_text) {
+                        atelyx_core::merge3::SavePlan::Write(text)
+                        | atelyx_core::merge3::SavePlan::Merge(text) => text,
+                        // 服务端已被他人改写且两侧改到同一处：拒绝写入（选边会静默丢掉对端内容，
+                        // 保存失败只是这一笔没写进去，正文仍在编辑面且可重试）
+                        atelyx_core::merge3::SavePlan::Conflict => {
+                            return Err(SpaceError::BadRequest(
+                                "文档有并发冲突，本次保存未写入，请稍后重试".into(),
+                            ));
+                        }
+                    },
+                    None => content.clone(),
+                };
+                match client
+                    .put_file_text_if(
+                        &space_id,
+                        &rel,
+                        &atelyx_core::frontmatter::with_bom(&merged, had_bom),
+                        version.as_deref(),
+                    )
+                    .await
+                {
+                    Ok(_) => break (merged, server_text),
+                    Err(SpaceError::Conflict(_)) if !retried => retried = true,
+                    Err(e) => return Err(e),
+                }
             };
-            // BOM 是编码标记不是正文：合流比较用去 BOM 文本，上行写回按服务端原文还原
-            let (server_text, had_bom) = atelyx_core::frontmatter::split_bom(&server_text);
-            let server_text = server_text.to_string();
-            // 编辑器内容未载入（打开失败的空态）禁止保存：本端空 + 服务端有正文时 PUT 会
-            // 清空他人可见的文件。正常清空已有全文走 base（落盘基线）在场的合流路径，不受影响
-            if base.is_none() && content.is_empty() && !server_text.is_empty() {
-                return Err(SpaceError::BadRequest("文件内容未载入，已取消保存".into()));
-            }
-            let merged = match &base {
-                Some(b) => match atelyx_core::merge3::plan_save(b, &content, &server_text) {
-                    atelyx_core::merge3::SavePlan::Write(text)
-                    | atelyx_core::merge3::SavePlan::Merge(text) => text,
-                    // 服务端已被他人改写且两侧改到同一处：拒绝写入（选边会静默丢掉对端内容，
-                    // 保存失败只是这一笔没写进去，正文仍在编辑面且可重试）
-                    atelyx_core::merge3::SavePlan::Conflict => {
-                        return Err(SpaceError::BadRequest(
-                            "文档有并发冲突，本次保存未写入，请稍后重试".into(),
-                        ));
-                    }
-                },
-                None => content.clone(),
-            };
-            client
-                .put_file_text(&space_id, &rel, &atelyx_core::frontmatter::with_bom(&merged, had_bom))
-                .await?;
             // 摘要对比 PUT 前回读的服务端内容（本次被替换的上一版；他人已写入时合并前的真源）；
             // 其他端记录的内容与序号以服务端为准，此处仅算展示用摘要
             let summary = atelyx_core::history::version_summary(
                 atelyx_core::history::HistoryKind::Note,
-                &server_text,
+                &previous,
                 &merged,
             );
             // 历史尽力而为：失败不阻塞正文链
@@ -1674,7 +1690,8 @@ pub fn space_submit_table_save(app: &mut App, reason: tv::SaveReason) -> Task<Me
                     // 补丁被拒（id 不符 / 文件损坏等）：回退前对拍服务端——文件仍为本端
                     // 保存基线才整文恢复；已被他人改写时不覆盖（内容红线），提示刷新
                     Err(SpaceError::BadRequest(_)) => {
-                        let server = client.get_file_text(&space_id, &file).await?;
+                        let (server, version) =
+                            client.get_file_text_versioned(&space_id, &file).await?;
                         let server_id = serde_json::from_str::<serde_json::Value>(&server)
                             .ok()
                             .and_then(|v| v.get("id").and_then(|i| i.as_str()).map(|s| s.to_owned()));
@@ -1684,7 +1701,7 @@ pub fn space_submit_table_save(app: &mut App, reason: tv::SaveReason) -> Task<Me
                             ));
                         }
                         let json = serde_json::to_string_pretty(&frozen).map_err(|e| SpaceError::Network(e.to_string()))?;
-                        client.put_file_text(&space_id, &file, &json).await?;
+                        client.put_file_text_if(&space_id, &file, &json, version.as_deref()).await?;
                         file.clone()
                     }
                     Err(e) => return Err(e),
@@ -1932,7 +1949,8 @@ pub fn space_submit_canvas_save(app: &mut App, reason: crate::canvas_view::SaveR
                     // 补丁被拒（id 不符 / 文件损坏等）：回退前对拍服务端——文件仍为本端
                     // 保存基线才整文恢复；已被他人改写时不覆盖（内容红线），提示刷新
                     Err(SpaceError::BadRequest(_)) => {
-                        let server = client.get_file_text(&space_id, &file).await?;
+                        let (server, version) =
+                            client.get_file_text_versioned(&space_id, &file).await?;
                         let server_id = serde_json::from_str::<serde_json::Value>(&server)
                             .ok()
                             .and_then(|v| v.get("id").and_then(|i| i.as_str()).map(|s| s.to_owned()));
@@ -1943,7 +1961,9 @@ pub fn space_submit_canvas_save(app: &mut App, reason: crate::canvas_view::SaveR
                         }
                         let json = serde_json::to_string_pretty(&frozen)
                             .map_err(|e| SpaceError::Network(e.to_string()))?;
-                        client.put_file_text(&space_id, &file, &json).await?;
+                        client
+                            .put_file_text_if(&space_id, &file, &json, version.as_deref())
+                            .await?;
                         file.clone()
                     }
                     Err(e) => return Err(e),
@@ -2102,12 +2122,15 @@ pub fn load_space_meta(app: &App) -> Task<Message> {
             // 只读不进写链：单个文件读不到就按默认继续（界面显示空态），不会反向覆盖服务端
             let config = read_space_json(&client, &space_id, ".atelyx/config.json")
                 .await
+                .map(|(value, _)| value)
                 .unwrap_or_default();
             let prompts = read_space_json(&client, &space_id, ".atelyx/prompt-notes.json")
                 .await
+                .map(|(value, _)| value)
                 .unwrap_or_default();
             let colors = read_space_json(&client, &space_id, ".atelyx/folder-colors.json")
                 .await
+                .map(|(value, _)| value)
                 .unwrap_or_default();
             Ok::<_, SpaceError>((config, prompts, colors))
         },
@@ -2118,6 +2141,7 @@ pub fn load_space_meta(app: &App) -> Task<Message> {
 }
 
 /// 读空间 `.atelyx/` 下的 JSON 配置：缺失 = 默认值；损坏与请求失败都返回 Err。
+/// 内容版本一并带回，读改写的写回按它做条件写（两端同时改配置不互相整份覆盖）。
 ///
 /// 读失败不得按空继续：这些配置都是「读 → 改 → 整份 PUT」，一次网络抖动就写成空配置，
 /// 把团队共享的供应商 / 提示词标记 / 颜色映射整份清掉。
@@ -2125,25 +2149,30 @@ async fn read_space_json<T: serde::de::DeserializeOwned + Default>(
     client: &SpaceClient,
     space_id: &str,
     path: &str,
-) -> Result<T, SpaceError> {
-    match client.get_file_text(space_id, path).await {
-        Ok(raw) => serde_json::from_str::<T>(&raw)
+) -> Result<(T, Option<String>), SpaceError> {
+    match client.get_file_text_versioned(space_id, path).await {
+        Ok((raw, version)) => serde_json::from_str::<T>(&raw)
+            .map(|value| (value, version))
             .map_err(|e| SpaceError::Network(format!("{path} 解析失败：{e}"))),
-        Err(SpaceError::NotFound) => Ok(T::default()),
+        Err(SpaceError::NotFound) => Ok((T::default(), Some(String::new()))),
         Err(e) => Err(e),
     }
 }
 
-/// 写空间 `.atelyx/` 下的 JSON 配置（整份覆盖）。
+/// 写空间 `.atelyx/` 下的 JSON 配置（整份覆盖，带读到的版本做条件写）。
 async fn write_space_json<T: serde::Serialize + ?Sized>(
     client: &SpaceClient,
     space_id: &str,
     path: &str,
     value: &T,
+    if_match: Option<&str>,
 ) -> Result<(), SpaceError> {
     let raw = serde_json::to_string(value)
         .map_err(|e| SpaceError::Network(format!("{path} 序列化失败：{e}")))?;
-    client.put_file_text(space_id, path, &raw).await.map(|_| ())
+    client
+        .put_file_text_if(space_id, path, &raw, if_match)
+        .await
+        .map(|_| ())
 }
 
 /// 提示词标记切换（空间模式：读改写 `.atelyx/prompt-notes.json`）。
@@ -2155,14 +2184,21 @@ pub fn space_toggle_prompt_note(app: &mut App, rel: &str) -> Task<Message> {
     let space_id = session.space_id;
     Task::perform(
         async move {
-            let mut notes: Vec<String> =
+            let (mut notes, version): (Vec<String>, _) =
                 read_space_json(&client, &space_id, ".atelyx/prompt-notes.json").await?;
             if let Some(i) = notes.iter().position(|n| n == &rel) {
                 notes.remove(i);
             } else {
                 notes.push(rel.clone());
             }
-            write_space_json(&client, &space_id, ".atelyx/prompt-notes.json", &notes).await?;
+            write_space_json(
+                &client,
+                &space_id,
+                ".atelyx/prompt-notes.json",
+                &notes,
+                version.as_deref(),
+            )
+            .await?;
             Ok::<_, SpaceError>(notes)
         },
         move |result| Message::PromptNotesLoaded(gen, result.map_err(err_text)),
@@ -2178,13 +2214,20 @@ pub fn space_set_folder_color(app: &mut App, rel: &str, color: Option<String>) -
     let space_id = session.space_id;
     Task::perform(
         async move {
-            let mut colors: HashMap<String, String> =
+            let (mut colors, version): (HashMap<String, String>, _) =
                 read_space_json(&client, &space_id, ".atelyx/folder-colors.json").await?;
             match color {
                 Some(c) => colors.insert(rel, c),
                 None => colors.remove(&rel),
             };
-            write_space_json(&client, &space_id, ".atelyx/folder-colors.json", &colors).await?;
+            write_space_json(
+                &client,
+                &space_id,
+                ".atelyx/folder-colors.json",
+                &colors,
+                version.as_deref(),
+            )
+            .await?;
             Ok::<_, SpaceError>(colors)
         },
         move |result| Message::FolderColorsLoaded(gen, result.map_err(err_text)),
@@ -2200,13 +2243,14 @@ pub fn space_set_sort(app: &mut App, sort: &str) -> Task<Message> {
     let space_id = session.space_id;
     Task::perform(
         async move {
-            let mut config: serde_json::Value =
+            let (mut config, version): (serde_json::Value, _) =
                 read_space_json(&client, &space_id, ".atelyx/config.json").await?;
             let Some(obj) = config.as_object_mut() else {
                 return Err(SpaceError::Network("空间配置不是 JSON 对象，已取消本次保存".into()));
             };
             obj.insert("fileExplorerSort".into(), serde_json::Value::String(value));
-            write_space_json(&client, &space_id, ".atelyx/config.json", &config).await?;
+            write_space_json(&client, &space_id, ".atelyx/config.json", &config, version.as_deref())
+                .await?;
             Ok::<_, SpaceError>(())
         },
         move |result| Message::ConfigSaved(gen, result.map_err(err_text)),
@@ -2221,7 +2265,7 @@ pub fn space_patch_config(app: &mut App, patch: serde_json::Value) -> Task<Messa
     let space_id = session.space_id;
     Task::perform(
         async move {
-            let mut config: serde_json::Value =
+            let (mut config, version): (serde_json::Value, _) =
                 read_space_json(&client, &space_id, ".atelyx/config.json").await?;
             let Some(keys) = patch.as_object() else {
                 return Err(SpaceError::Network("配置补丁必须是 JSON 对象".into()));
@@ -2231,7 +2275,8 @@ pub fn space_patch_config(app: &mut App, patch: serde_json::Value) -> Task<Messa
             };
             // 与本地补丁同口径：null = 删键、两侧同为对象递归合并、其余整体替换
             vault::merge_json_objects(base, keys);
-            write_space_json(&client, &space_id, ".atelyx/config.json", &config).await?;
+            write_space_json(&client, &space_id, ".atelyx/config.json", &config, version.as_deref())
+                .await?;
             Ok::<_, SpaceError>(())
         },
         move |result| Message::ConfigSaved(gen, result.map_err(err_text)),
@@ -2328,7 +2373,12 @@ pub fn space_load_image(app: &App, gen: u64, src: String) -> Task<Message> {
     let space_id = session.space_id;
     let src_for_cb = src.clone();
     Task::perform(
-        async move { client.get_file_bytes(&space_id, &src).await },
+        async move {
+            client
+                .get_file_bytes(&space_id, &src)
+                .await
+                .map(crate::image_cache::LoadedImage::remote)
+        },
         move |result| Message::ImageLoaded(gen, src_for_cb, result.map_err(err_text)),
     )
 }
@@ -2468,7 +2518,8 @@ pub fn space_create_entry(app: &mut App, dir: &str, kind: DraftKind, name: &str)
             let rel = if dir.is_empty() { candidate.clone() } else { format!("{dir}/{candidate}") };
             match kind {
                 DraftKind::Folder => client.create_folder(&space_id, &rel).await,
-                _ => client.put_file_text(&space_id, &rel, &initial).await.map(|_| ()),
+                // 只新建：去重后到写盘之间若他人抢先建出同名文件，409 而不是整文覆盖
+                _ => client.create_file_text(&space_id, &rel, &initial).await,
             }?;
             Ok::<_, SpaceError>(rel)
         },
@@ -2629,9 +2680,16 @@ pub(crate) async fn rewrite_links_after_rename(
         if path == old_rel || path == new_rel {
             continue;
         }
-        let Ok(text) = client.get_file_text(space_id, &path).await else { continue };
+        let Ok((text, version)) = client.get_file_text_versioned(space_id, &path).await else {
+            continue;
+        };
         let Some(rewritten) = rewrite_note_links(&text, old_rel, new_rel) else { continue };
-        if client.put_file_text(space_id, &path, &rewritten).await.is_ok() {
+        // 条件写：改写期间他人已落盘则跳过本文件（不整文覆盖对方的更新）
+        if client
+            .put_file_text_if(space_id, &path, &rewritten, version.as_deref())
+            .await
+            .is_ok()
+        {
             written.push(path);
         }
     }
@@ -2641,7 +2699,9 @@ pub(crate) async fn rewrite_links_after_rename(
         if path == old_rel || path == new_rel {
             continue;
         }
-        let Ok(text) = client.get_file_text(space_id, &path).await else { continue };
+        let Ok((text, version)) = client.get_file_text_versioned(space_id, &path).await else {
+            continue;
+        };
         let Ok(mut canvas) = serde_json::from_str::<atelyx_core::vault::CanvasFile>(&text) else {
             continue;
         };
@@ -2650,7 +2710,7 @@ pub(crate) async fn rewrite_links_after_rename(
         }
         canvas.updated_at = atelyx_core::vault::now_secs();
         let Ok(json) = serde_json::to_string_pretty(&canvas) else { continue };
-        let _ = client.put_file_text(space_id, &path, &json).await;
+        let _ = client.put_file_text_if(space_id, &path, &json, version.as_deref()).await;
     }
     written
 }
@@ -2724,16 +2784,18 @@ pub fn space_duplicate_entry(app: &mut App, rel: &str, is_dir: bool) -> Task<Mes
             // 服务端 copy 不重建实体 id：非目录副本读改写换新 id，内嵌标题改为副本自己的
             // 主名（留着原件的标题会让副本被当成原件改名，撞上原件即名冲突）
             if !is_dir && (new_rel.ends_with(".atb") || new_rel.ends_with(".atlx")) {
-                if let Ok(text) = client.get_file_text(&space_id, &new_rel).await {
+                let fetched = client.get_file_text_versioned(&space_id, &new_rel).await;
+                if let Ok((text, version)) = fetched {
                     if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&text) {
                         value["id"] = serde_json::Value::String(atelyx_core::vault::new_entity_id());
                         value["title"] =
                             serde_json::Value::String(atelyx_core::vault::file_stem(&target).to_string());
                         let _ = client
-                            .put_file_text(
+                            .put_file_text_if(
                                 &space_id,
                                 &new_rel,
                                 &serde_json::to_string_pretty(&value).unwrap_or_default(),
+                                version.as_deref(),
                             )
                             .await;
                     }

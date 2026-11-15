@@ -462,16 +462,20 @@ fn apply_space_note(
             let outcome = async {
                 // PUT 前回读：工具线程取服务端正文到落盘之间若有他人写入，整文覆盖会回退他人内容；
                 // 祖先不符即拒绝（不静默覆盖），与人工保存链的「回读合流」同一防线
-                let current = match client.get_file_text(&space_id, &rel).await {
-                    Ok(text) => text,
-                    Err(atelyx_core::space_client::SpaceError::NotFound) => String::new(),
+                let fetched = client.get_file_text_versioned(&space_id, &rel).await;
+                let (current, version) = match fetched {
+                    Ok(pair) => pair,
+                    // 目标尚不存在：条件写按「仍不存在」校验，他人抢先建出即冲突
+                    Err(atelyx_core::space_client::SpaceError::NotFound) => {
+                        (String::new(), Some(String::new()))
+                    }
                     Err(e) => return Err(e.to_string()),
                 };
                 if current != source_for_task {
                     return Err("文档有并发改动，AI 修改未落盘，请刷新后重试".to_string());
                 }
                 client
-                    .put_file_text(&space_id, &rel, &content)
+                    .put_file_text_if(&space_id, &rel, &content, version.as_deref())
                     .await
                     .map_err(|e| e.to_string())?;
                 // 历史尽力而为：失败不阻塞正文

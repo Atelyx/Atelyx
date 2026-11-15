@@ -12,6 +12,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 
 use crate::access::{join_err, member_root, write_root};
 use crate::auth::AuthUser;
@@ -24,6 +25,17 @@ use crate::{ApiError, ApiResult};
 
 /// 单文件字节上限（局域网传输与内存呈现的合理上限；过大单文件拖累服务端内存与同步）。
 pub const MAX_FILE_BYTES: usize = 50 * 1024 * 1024;
+
+/// 内容版本号（条件写的 If-Match 值）：文件字节的 sha256 十六进制。
+/// 与 mtime 不同，同一内容恒得同一版本、覆盖写后必变，重启与多副本下也成立。
+fn content_version(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut out = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}
 
 /// 文件树查询参数。
 #[derive(Deserialize, Default)]
@@ -138,6 +150,10 @@ pub struct WriteBody {
     /// 供「读到不存在 → 建空文件 → 补丁上行」的调用方消除读到写之间的窗口。
     #[serde(default)]
     create_only: bool,
+    /// 条件写：调用方读到的内容版本（空串 = 期待目标仍不存在）。写锁内版本不符即 409，
+    /// 挡住「读到写之间他人已落盘」的整文覆盖；缺省 = 最后写入者胜（旧客户端兼容）。
+    #[serde(default)]
+    if_match: Option<String>,
 }
 
 /// 读文本文件（非 UTF-8 字节按替换字符容错）。
@@ -155,15 +171,18 @@ pub async fn read_file(
     let bytes = std::fs::read(&path).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("读取失败：{e}")))?;
     // updatedAt = 文件 mtime 秒（元数据；不再参与任何冲突判定）
     let updated_at = file_mtime_secs(&path);
+    // 版本随内容一并回给调用方：条件写把它当 If-Match，挡住读到写之间的整文覆盖
+    let version = content_version(&bytes);
     match query.encoding.as_deref() {
         None => {
             let content = String::from_utf8_lossy(&bytes).into_owned();
-            Ok(Json(json!({ "content": content, "updatedAt": updated_at })))
+            Ok(Json(json!({ "content": content, "updatedAt": updated_at, "version": version })))
         }
         Some("base64") => Ok(Json(json!({
             "content": BASE64.encode(&bytes),
             "updatedAt": updated_at,
             "encoding": "base64",
+            "version": version,
         }))),
         Some(other) => Err(bad_request(&format!("不支持的编码：{other}"))),
     }
@@ -232,6 +251,24 @@ pub async fn write_file(
     // 只新建：存在性判定与落盘同在写锁内，调用方无需再赌「读到不存在」的结论
     if body.create_only && path.is_file() {
         return Err(ApiError(StatusCode::CONFLICT, format!("目标已存在：{}", body.path)));
+    }
+    // 条件写：版本判定与落盘同在写锁内。读到的版本之后若有人落盘，本次整文写会覆盖
+    // 对方内容，改为让调用方拿到可读的冲突再重取合并；缺省版本请求维持最后写入者胜
+    if let Some(expected) = body.if_match.as_deref() {
+        let current = if path.is_file() {
+            let current = std::fs::read(&path).map_err(|e| {
+                ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("读取失败：{e}"))
+            })?;
+            content_version(&current)
+        } else {
+            String::new()
+        };
+        if expected != current {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                "文件已被他人修改，本次写入未落盘，请刷新后重试".to_string(),
+            ));
+        }
     }
     atomic_write(&path, &bytes)
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
