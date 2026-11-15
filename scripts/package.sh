@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # 打包入口：构建 release 产物并产出当前平台的安装包到 target/dist/。
 #   Windows：Atelyx_<版本>_x64-setup.exe（NSIS，命名与更新链路约定一致）
-#   Linux：  atelyx_<版本>_amd64.deb 与 Atelyx_<版本>-x86_64.AppImage
+#   Linux：  atelyx_<版本>_amd64.deb、Atelyx_<版本>-x86_64.AppImage、atelyx_<版本>_linux_amd64.tar.gz
 # 各平台须在对应系统上分别打包。makensis 依次查找：$NSIS_EXE、PATH、NSIS 标准安装路径。
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
+. "$repo_root/scripts/payload.sh"  # 共享的 usr/ 数据清单
 # 构建与发行暂存都固定在仓库内 target/，不跟随外部 CARGO_TARGET_DIR
 export CARGO_TARGET_DIR="$repo_root/target"
 dist="$repo_root/target/dist"
@@ -64,20 +65,6 @@ package_windows() {
   echo "==> 产物：$dist/Atelyx_${version}_x64-setup.exe"
 }
 
-# 组装 usr/ 数据布局（deb 与 AppImage 共用同一套文件清单）
-stage_payload() {
-  local stage="$1" exe="$2"
-  local icons="$repo_root/assets/icons"
-  install -Dm755 "$exe" "$stage/usr/bin/atelyx"
-  install -Dm644 "$repo_root/packaging/linux/com.atelyx.desktop" "$stage/usr/share/applications/com.atelyx.desktop"
-  install -Dm644 "$repo_root/LICENSE" "$stage/usr/share/licenses/atelyx/LICENSE"
-  install -Dm644 "$notices" "$stage/usr/share/licenses/atelyx/THIRD_PARTY_NOTICES.md"
-  install -Dm644 "$icons/32x32.png" "$stage/usr/share/icons/hicolor/32x32/apps/atelyx.png"
-  install -Dm644 "$icons/64x64.png" "$stage/usr/share/icons/hicolor/64x64/apps/atelyx.png"
-  install -Dm644 "$icons/128x128.png" "$stage/usr/share/icons/hicolor/128x128/apps/atelyx.png"
-  install -Dm644 "$icons/128x128@2x.png" "$stage/usr/share/icons/hicolor/256x256/apps/atelyx.png"
-}
-
 package_deb() {
   local exe="$1"
   local stage="$repo_root/target/pkg/deb"
@@ -132,11 +119,22 @@ package_appimage() {
   echo "==> 产物：$dist/Atelyx_${version}-x86_64.AppImage"
 }
 
+# 属主固定 root 保证可复现
+package_tarball() {
+  local exe="$1"
+  local stage="$repo_root/target/pkg/tarball"
+  rm -rf "$stage"
+  stage_payload "$stage" "$exe"
+  (cd "$stage" && find . -type f -print0 | tar --null -T - --owner=0 --group=0 -czf "$dist/atelyx_${version}_linux_amd64.tar.gz")
+  echo "==> 产物：$dist/atelyx_${version}_linux_amd64.tar.gz"
+}
+
 package_linux() {
   local exe="$repo_root/target/release/atelyx"
   [ -f "$exe" ] || { echo "错误：未找到 $exe" >&2; exit 1; }
   package_deb "$exe"
   package_appimage "$exe"
+  package_tarball "$exe"
 }
 
 mkdir -p "$dist"

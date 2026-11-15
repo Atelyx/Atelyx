@@ -1,0 +1,18 @@
+# Maintainer: Atelyx <atelyx@users.noreply.github.com>
+# 需 Release 提供 atelyx_<版本>_linux_amd64.tar.gz；更新顺序 tag → Release → 改 pkgver 与 sha256sums。
+pkgname=atelyx-bin
+pkgver=0.6.8
+pkgrel=1
+pkgdesc="以人为本的可拓展桌面工作台"
+arch=(x86_64)
+url="https://github.com/Atelyx/Atelyx"
+license=(Apache)
+depends=(wayland libxkbcommon libx11 fontconfig freetype2 vulkan-icd-loader hicolor-icon-theme)
+provides=(atelyx)
+conflicts=(atelyx atelyx-git)
+source=("https://github.com/Atelyx/Atelyx/releases/download/v${pkgver}/atelyx_${pkgver}_linux_amd64.tar.gz")
+sha256sums=(SKIP)  # makepkg -g 填入
+
+package() {
+  cp -a "$srcdir/usr" "$pkgdir/usr"
+}

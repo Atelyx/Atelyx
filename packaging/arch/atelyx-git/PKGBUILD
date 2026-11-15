@@ -1,0 +1,41 @@
+# Maintainer: Atelyx <atelyx@users.noreply.github.com>
+# 需系统 rust >= 1.97.1（Arch 的 cargo 不读仓库的 rust-toolchain.toml）。
+pkgname=atelyx-git
+pkgver=0.6.7
+pkgrel=1
+pkgdesc="以人为本的可拓展桌面工作台（开发版）"
+arch=(x86_64)
+url="https://github.com/Atelyx/Atelyx"
+license=(Apache)
+depends=(wayland libxkbcommon libx11 fontconfig freetype2 vulkan-icd-loader hicolor-icon-theme)
+makedepends=(git cargo)
+provides=(atelyx)
+conflicts=(atelyx atelyx-bin)
+source=("git+$url.git")
+sha256sums=(SKIP)
+
+pkgver() {
+  cd Atelyx
+  git describe --long --tags --abbrev=12 | sed 's/^v//;s/\([^-]*-g\)/r\1/;s/-/./g'
+}
+
+prepare() {
+  cd Atelyx
+  bash patches/apply.sh
+}
+
+build() {
+  cd Atelyx
+  cargo build -p atelyx --release
+}
+
+package() {
+  cd Atelyx
+  install -Dm755 target/release/atelyx "$pkgdir/usr/bin/atelyx"
+  install -Dm644 packaging/linux/com.atelyx.desktop "$pkgdir/usr/share/applications/com.atelyx.desktop"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  for size in 32x32 64x64 128x128; do
+    install -Dm644 "assets/icons/${size}.png" "$pkgdir/usr/share/icons/hicolor/${size}/apps/atelyx.png"
+  done
+  install -Dm644 assets/icons/128x128@2x.png "$pkgdir/usr/share/icons/hicolor/256x256/apps/atelyx.png"
+}

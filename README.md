@@ -61,6 +61,7 @@ cargo test --workspace                             # 工作区测试
 cargo run -p xtask -- docs                         # 重新生成插件 API 参考（协议改动后）
 cargo test --manifest-path apps/server/Cargo.toml  # 服务端测试
 bash scripts/package.sh                            # 构建 release 并产出当前平台安装包到 target/dist/
+bash scripts/pacman-repo.sh                        # 构建 pacman 包并产出本地仓库（Arch Linux）
 ```
 
 前置要求：Rust stable（版本由 `rust-toolchain.toml` 锁定），Linux 另需 X11 / Wayland 开发库。打包另需 Windows 上的 NSIS 与 Linux 上的 `appimagetool`。
