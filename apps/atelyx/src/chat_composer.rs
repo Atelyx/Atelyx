@@ -10,7 +10,7 @@ use crate::canvas_view::CanvasMsg;
 use crate::chat_actions::{ChatMsg, MentionPicker, MentionTarget, PendingImage};
 use crate::chat_input::TagSource;
 use crate::ui::icon::icon;
-use crate::ui::text::ellipsize_estimated;
+use crate::ui::text::{ellipsize_estimated, estimate_width};
 use crate::ui::{controls, palette as pal, scroll, text};
 use crate::{App, Message};
 
@@ -26,6 +26,19 @@ const PICKER_MAX_H: f32 = 224.0;
 const PICKER_LINE_RATIO: f32 = 1.3;
 /// 画布卡候选的次行标注（卡片没有所在文件夹）。
 const CARD_SUB_LABEL: &str = "画布卡片";
+
+/// 工具排尺寸口径（缩放前）：渲染与固定占用核算共用，改一处两处同时生效。
+const TOOL_ROW_GAP: f32 = 6.0;
+const TOOL_BTN_PAD_X: f32 = 6.0;
+const PLUS_ICON_PX: f32 = 13.0;
+const SEND_BOX_PX: f32 = 28.0;
+const TRIGGER_PAD_X: f32 = 6.0;
+const TRIGGER_PAD_Y: f32 = 3.0;
+const TRIGGER_ICON_PX: f32 = 12.0;
+const TRIGGER_CHEVRON_PX: f32 = 10.0;
+const TRIGGER_GAP: f32 = 4.0;
+/// 触发钮标签的最小可读宽（屏幕像素，不随缩放）：再窄就整段隐藏，宽度让给发送钮。
+const LABEL_MIN_W: f32 = 16.0;
 
 /// 输入区作用域：决定草稿 / 引用 / 附件托盘与消息动作落在谁身上。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -141,6 +154,7 @@ pub fn composer<'a>(
 }
 
 /// 工具排（输入盒内底部）：左 + / Agent / 模型·等级；右 发送 / 停止。
+/// 宽度按容器实测分配：标签够放给满、不够先截断、再窄整段隐藏，更窄时触发钮一并收起。
 fn tool_row<'a>(
     app: &'a App,
     window: iced::window::Id,
@@ -149,51 +163,41 @@ fn tool_row<'a>(
     s: f32,
 ) -> iced::Element<'a, Message> {
     let config = config_scope(app, scope);
-    let plus_open = app
-        .popup
-        .as_ref()
-        .is_some_and(|(_, open)| matches!(&open.state, crate::layout_view::PopupState::ChatPlusMenu { scope: open } if *open == *scope));
-    let plus_btn = button(icon(
-        "plus",
-        (13.0 * s).max(8.0),
-        if plus_open { pal::ACCENT } else { pal::TEXT_SECONDARY },
-    ))
-    .padding(Padding::new(6.0 * s).vertical(4.0 * s))
-    .style(controls::row_style(false, pal::RADIUS_XS))
-    .on_press(crate::layout_view::btn_popup_min(
-        window,
-        app.cursor_for(window),
-        crate::layout_view::PopupState::ChatPlusMenu { scope: scope.clone() },
-        0.0,
-    ));
-    let send_btn = if streaming {
-        controls::icon_button(
-            "square",
-            (14.0 * s).max(9.0),
-            (28.0 * s).max(18.0),
-            controls::Variant::Secondary,
-            Some(send_stop_msg(scope, true)),
-            Some((window, "停止生成".to_string())),
-        )
-    } else {
-        controls::icon_button(
-            "arrow-up",
-            (14.0 * s).max(9.0),
-            (28.0 * s).max(18.0),
-            controls::Variant::Primary,
-            Some(send_stop_msg(scope, false)),
-            Some((window, "发送（Enter）".to_string())),
-        )
-    };
-    row![
-        plus_btn,
-        agent_trigger(app, window, &config, s),
-        model_trigger(app, window, &config, s),
-        Space::new().width(Length::Fill),
-        send_btn,
-    ]
-    .spacing(6.0 * s)
-    .align_y(iced::alignment::Vertical::Center)
+    let scope = scope.clone();
+    let fixed = tool_row_fixed_width(s);
+    let label_size = label_font_size(s);
+    iced::widget::responsive(move |size| {
+        // 连两个触发钮的图标列都放不下：只留 + 与发送，避免把发送钮挤出画面
+        if size.width < fixed {
+            return row![
+                plus_trigger(app, window, &scope, s),
+                Space::new().width(Length::Fill),
+                send_trigger(window, &scope, streaming, s),
+            ]
+            .spacing(TOOL_ROW_GAP * s)
+            .width(Length::Fill)
+            .align_y(iced::alignment::Vertical::Center)
+            .into();
+        }
+        let [agent_w, model_w] = label_budgets(
+            (size.width - fixed).max(0.0),
+            estimate_width(&agent_label(app, &config), label_size),
+            estimate_width(&model_full_label(app, &config), label_size),
+        );
+        row![
+            plus_trigger(app, window, &scope, s),
+            agent_trigger(app, window, &config, s, agent_w),
+            model_trigger(app, window, &config, s, model_w),
+            Space::new().width(Length::Fill),
+            send_trigger(window, &scope, streaming, s),
+        ]
+        .spacing(TOOL_ROW_GAP * s)
+        .width(Length::Fill)
+        .align_y(iced::alignment::Vertical::Center)
+        .into()
+    })
+    // responsive 默认双轴 Fill，不限高会把工具排拉满输入盒剩余高度
+    .height(Length::Shrink)
     .into()
 }
 
@@ -217,6 +221,132 @@ fn send_stop_msg(scope: &ComposerScope, stop: bool) -> Message {
     }
 }
 
+/// 只留 `+` 与发送钮时的不可压缩宽（三个子项两段间距），再窄的位置连这两个钮都放不下。
+fn tool_row_min_width(s: f32) -> f32 {
+    let plus = (PLUS_ICON_PX * s).max(8.0) + 2.0 * TOOL_BTN_PAD_X * s;
+    let send = (SEND_BOX_PX * s).max(18.0);
+    plus + send + 2.0 * TOOL_ROW_GAP * s
+}
+
+/// 工具排里不可压缩的宽度合计：最小排布 + 两个触发钮的宽度与间距。
+/// 标签只能在这之外的余量里分配（漏算任一项都会把发送钮挤出面板）。
+fn tool_row_fixed_width(s: f32) -> f32 {
+    tool_row_min_width(s) + 2.0 * TOOL_ROW_GAP * s + 2.0 * trigger_chrome_width(s)
+}
+
+fn trigger_icon_px(s: f32) -> f32 {
+    (TRIGGER_ICON_PX * s).clamp(8.0, 14.0)
+}
+
+fn trigger_chevron_px(s: f32) -> f32 {
+    (TRIGGER_CHEVRON_PX * s).clamp(7.0, 12.0)
+}
+
+fn trigger_gap(s: f32) -> f32 {
+    (TRIGGER_GAP * s).max(1.0)
+}
+
+fn label_font_size(s: f32) -> f32 {
+    (pal::fs_micro() * s).max(8.0)
+}
+
+/// 触发钮除标签外的固定宽：左右内衬 + 图标 + 箭头 + 两段内间距。
+fn trigger_chrome_width(s: f32) -> f32 {
+    2.0 * TRIGGER_PAD_X * s + trigger_icon_px(s) + trigger_chevron_px(s) + 2.0 * trigger_gap(s)
+}
+
+/// 触发钮高度（上下内衬 + 单行内容高），截断提示按它锚在钮下方。
+fn trigger_height(s: f32) -> f32 {
+    2.0 * TRIGGER_PAD_Y * s + (label_font_size(s) * PICKER_LINE_RATIO).max(trigger_icon_px(s))
+}
+
+/// 两个触发钮标签的可用宽：合计够放就各取固有宽；不够时短的一侧拿满、另一侧吃余量；
+/// 任一侧被截到低于最小可读宽则两侧一起隐藏（返回 None），把宽度让给发送钮。
+fn label_budgets(total: f32, agent: f32, model: f32) -> [Option<f32>; 2] {
+    let (agent_w, model_w) = if agent + model <= total {
+        (agent, model)
+    } else if agent <= total / 2.0 {
+        (agent, total - agent)
+    } else if model <= total / 2.0 {
+        (total - model, model)
+    } else {
+        (total / 2.0, total / 2.0)
+    };
+    // 固有宽本就低于最小可读宽的短名（如两三个字母）不算被截断，照原样显示
+    let readable = |budget: f32, intrinsic: f32| budget >= intrinsic.min(LABEL_MIN_W);
+    if readable(agent_w, agent) && readable(model_w, model) {
+        [Some(agent_w), Some(model_w)]
+    } else {
+        [None, None]
+    }
+}
+
+/// `+` 菜单触发钮（弹层归属本作用域的输入区）。
+fn plus_trigger<'a>(
+    app: &'a App,
+    window: iced::window::Id,
+    scope: &ComposerScope,
+    s: f32,
+) -> iced::Element<'a, Message> {
+    let open = app.popup.as_ref().is_some_and(|(_, open)| {
+        matches!(&open.state, crate::layout_view::PopupState::ChatPlusMenu { scope: open } if *open == *scope)
+    });
+    button(icon(
+        "plus",
+        (PLUS_ICON_PX * s).max(8.0),
+        if open { pal::ACCENT } else { pal::TEXT_SECONDARY },
+    ))
+    .padding(Padding::new(TOOL_BTN_PAD_X * s).vertical(4.0 * s))
+    .style(controls::row_style(false, pal::RADIUS_XS))
+    .on_press(crate::layout_view::btn_popup_min(
+        window,
+        app.cursor_for(window),
+        crate::layout_view::PopupState::ChatPlusMenu { scope: scope.clone() },
+        0.0,
+    ))
+    .into()
+}
+
+/// 发送 / 停止圆钮。
+fn send_trigger<'a>(
+    window: iced::window::Id,
+    scope: &ComposerScope,
+    streaming: bool,
+    s: f32,
+) -> iced::Element<'a, Message> {
+    let box_px = (SEND_BOX_PX * s).max(18.0);
+    if streaming {
+        controls::icon_button(
+            "square",
+            (14.0 * s).max(9.0),
+            box_px,
+            controls::Variant::Secondary,
+            Some(send_stop_msg(scope, true)),
+            Some((window, "停止生成".to_string())),
+        )
+    } else {
+        controls::icon_button(
+            "arrow-up",
+            (14.0 * s).max(9.0),
+            box_px,
+            controls::Variant::Primary,
+            Some(send_stop_msg(scope, false)),
+            Some((window, "发送（Enter）".to_string())),
+        )
+    }
+}
+
+/// 标签被截断时给触发钮挂悬停全文，未截断不挂（避免多余提示）。
+fn truncated_tip<'a>(
+    trigger: impl Into<iced::Element<'a, Message>>,
+    window: iced::window::Id,
+    full: String,
+    s: f32,
+) -> iced::Element<'a, Message> {
+    let area = iced::widget::mouse_area(trigger);
+    crate::hover_tip::with_tip(area, window, full, trigger_height(s)).into()
+}
+
 /// Agent 配置当前显示名（缺省 = 内置「对话」）。
 fn agent_label(app: &App, config: &ConfigScope) -> String {
     let id = match config {
@@ -238,35 +368,85 @@ fn agent_label(app: &App, config: &ConfigScope) -> String {
     }
 }
 
+/// 模型与推理等级文案（面板读面板覆盖，卡作用域读卡节点配置）。
+fn model_parts(app: &App, config: &ConfigScope) -> (String, String) {
+    match config {
+        ConfigScope::Panel => (
+            crate::layout_view::chat_model_trigger_label(app),
+            crate::layout_view::chat_effort_label(app).to_string(),
+        ),
+        ConfigScope::Card { node } => (
+            crate::layout_view::canvas_card_model_label(app, node),
+            crate::layout_view::canvas_card_effort_label(app, node).to_string(),
+        ),
+    }
+}
+
+/// 模型钮完整文案「模型 · 推理等级」。
+fn model_full_label(app: &App, config: &ConfigScope) -> String {
+    let (model, effort) = model_parts(app, config);
+    format!("{model} · {effort}")
+}
+
+/// 宽度不足时只截模型名、保留 `· 推理等级`；等级也放不下才截整串。
+fn model_label_text(model: &str, effort: &str, max_w: f32, size: f32) -> String {
+    let full = format!("{model} · {effort}");
+    if estimate_width(&full, size) <= max_w {
+        return full;
+    }
+    let tail = format!(" · {effort}");
+    let tail_w = estimate_width(&tail, size);
+    if max_w > tail_w {
+        let short = format!("{}{tail}", ellipsize_estimated(model, max_w - tail_w, size));
+        if estimate_width(&short, size) <= max_w {
+            return short;
+        }
+    }
+    ellipsize_estimated(&full, max_w, size)
+}
+
+/// Agent 触发钮：标签按可用宽截断，截断时悬停出全名。
 fn agent_trigger<'a>(
     app: &'a App,
     window: iced::window::Id,
     config: &ConfigScope,
     s: f32,
+    label_w: Option<f32>,
 ) -> iced::Element<'a, Message> {
     let locked = config_locked(app, config);
-    button(
-        row![
-            icon("bot", (12.0 * s).clamp(8.0, 14.0), pal::TEXT_SECONDARY),
-            text(agent_label(app, config))
-                .size((pal::fs_micro() * s).max(8.0))
+    let full = agent_label(app, config);
+    let mut truncated = None;
+    let mut content = row![icon("bot", trigger_icon_px(s), pal::TEXT_SECONDARY)]
+        .spacing(trigger_gap(s))
+        .align_y(iced::alignment::Vertical::Center);
+    if let Some(w) = label_w {
+        let shown = ellipsize_estimated(&full, w, label_font_size(s));
+        if shown != full {
+            truncated = Some(full.clone());
+        }
+        content = content.push(
+            text(shown)
+                .size(label_font_size(s))
+                .wrapping(Wrapping::None)
                 .color(pal::TEXT_SECONDARY),
-            icon("chevron-down", (10.0 * s).clamp(7.0, 12.0), pal::TEXT_MUTED),
-        ]
-        .spacing((4.0 * s).max(1.0))
-        .align_y(iced::alignment::Vertical::Center),
-    )
-    .padding(Padding::new(6.0 * s).vertical(3.0 * s))
-    .style(controls::row_style(false, pal::RADIUS_XS))
-    .on_press_maybe((!locked).then(|| {
-        crate::layout_view::btn_popup_min(
-            window,
-            app.cursor_for(window),
-            crate::layout_view::PopupState::ChatAgentMenu { scope: config.clone() },
-            0.0,
-        )
-    }))
-    .into()
+        );
+    }
+    content = content.push(icon("chevron-down", trigger_chevron_px(s), pal::TEXT_MUTED));
+    let btn = button(content)
+        .padding(Padding::new(TRIGGER_PAD_X * s).vertical(TRIGGER_PAD_Y * s))
+        .style(controls::row_style(false, pal::RADIUS_XS))
+        .on_press_maybe((!locked).then(|| {
+            crate::layout_view::btn_popup_min(
+                window,
+                app.cursor_for(window),
+                crate::layout_view::PopupState::ChatAgentMenu { scope: config.clone() },
+                0.0,
+            )
+        }));
+    match truncated {
+        Some(full) => truncated_tip(btn, window, full, s),
+        None => btn.into(),
+    }
 }
 
 /// 模型/推理等级复合触发钮：显示「模型 · 等级」，两级菜单分别设置。
@@ -275,38 +455,43 @@ fn model_trigger<'a>(
     window: iced::window::Id,
     config: &ConfigScope,
     s: f32,
+    label_w: Option<f32>,
 ) -> iced::Element<'a, Message> {
-    let model = match config {
-        ConfigScope::Panel => crate::layout_view::chat_model_trigger_label(app),
-        ConfigScope::Card { node } => crate::layout_view::canvas_card_model_label(app, node),
-    };
-    let effort = match config {
-        ConfigScope::Panel => crate::layout_view::chat_effort_label(app),
-        ConfigScope::Card { node } => crate::layout_view::canvas_card_effort_label(app, node),
-    };
+    let (model, effort) = model_parts(app, config);
+    let full = format!("{model} · {effort}");
     let locked = config_locked(app, config);
-    button(
-        row![
-            icon("sparkles", (12.0 * s).clamp(8.0, 14.0), pal::TEXT_SECONDARY),
-            text(format!("{model} · {effort}"))
-                .size((pal::fs_micro() * s).max(8.0))
+    let mut truncated = None;
+    let mut content = row![icon("sparkles", trigger_icon_px(s), pal::TEXT_SECONDARY)]
+        .spacing(trigger_gap(s))
+        .align_y(iced::alignment::Vertical::Center);
+    if let Some(w) = label_w {
+        let shown = model_label_text(&model, &effort, w, label_font_size(s));
+        if shown != full {
+            truncated = Some(full);
+        }
+        content = content.push(
+            text(shown)
+                .size(label_font_size(s))
+                .wrapping(Wrapping::None)
                 .color(pal::TEXT_SECONDARY),
-            icon("chevron-down", (10.0 * s).clamp(7.0, 12.0), pal::TEXT_MUTED),
-        ]
-        .spacing((4.0 * s).max(1.0))
-        .align_y(iced::alignment::Vertical::Center),
-    )
-    .padding(Padding::new(6.0 * s).vertical(3.0 * s))
-    .style(controls::row_style(false, pal::RADIUS_XS))
-    .on_press_maybe((!locked).then(|| {
-        crate::layout_view::btn_popup_min(
-            window,
-            app.cursor_for(window),
-            crate::layout_view::PopupState::ChatModelMenu { scope: config.clone() },
-            0.0,
-        )
-    }))
-    .into()
+        );
+    }
+    content = content.push(icon("chevron-down", trigger_chevron_px(s), pal::TEXT_MUTED));
+    let btn = button(content)
+        .padding(Padding::new(TRIGGER_PAD_X * s).vertical(TRIGGER_PAD_Y * s))
+        .style(controls::row_style(false, pal::RADIUS_XS))
+        .on_press_maybe((!locked).then(|| {
+            crate::layout_view::btn_popup_min(
+                window,
+                app.cursor_for(window),
+                crate::layout_view::PopupState::ChatModelMenu { scope: config.clone() },
+                0.0,
+            )
+        }));
+    match truncated {
+        Some(full) => truncated_tip(btn, window, full, s),
+        None => btn.into(),
+    }
 }
 
 /// # 引用候选浮层（输入面上方；画布卡目标与仓库文件混排，字号随缩放）。
@@ -605,5 +790,42 @@ mod tests {
             Some(CARD_SUB_LABEL)
         );
         assert!(picker_row_h(&file("笔记/乙.md"), 1.0) > picker_row_h(&file("甲.md"), 1.0));
+    }
+
+    /// 标签分栏：两侧都够放就各给固有宽；不够时短的一侧拿满、长的一侧吃余量；
+    /// 任一侧被截到低于最小可读宽就整组隐藏（发送钮不许被挤出）。
+    #[test]
+    fn label_budgets_share_remaining_width() {
+        assert_eq!(label_budgets(400.0, 56.0, 180.0), [Some(56.0), Some(180.0)]);
+        assert_eq!(label_budgets(120.0, 40.0, 300.0), [Some(40.0), Some(80.0)]);
+        assert_eq!(label_budgets(100.0, 300.0, 40.0), [Some(60.0), Some(40.0)]);
+        assert_eq!(label_budgets(120.0, 200.0, 200.0), [Some(60.0), Some(60.0)]);
+        assert_eq!(label_budgets(20.0, 200.0, 200.0), [None, None]);
+        // 短名（固有宽小于最小可读宽）没被截断就不算不可读，不能连带隐藏另一侧
+        assert_eq!(label_budgets(400.0, 11.0, 180.0), [Some(11.0), Some(180.0)]);
+    }
+
+    /// 模型文案先截模型名、保留「· 推理等级」；等级都放不下才退化成截整串。
+    #[test]
+    fn model_label_keeps_effort_when_narrow() {
+        let size = 10.0;
+        let model = "官网-deepseek-v4.1-flash";
+        assert_eq!(model_label_text(model, "默认", 400.0, size), format!("{model} · 默认"));
+        let budget = estimate_width("官网-… · 默认", size) + 1.0;
+        let shown = model_label_text(model, "默认", budget, size);
+        assert!(shown.ends_with(" · 默认"), "{shown}");
+        assert!(estimate_width(&shown, size) <= budget, "{shown}");
+        let shown = model_label_text(model, "默认", 20.0, size);
+        assert!(estimate_width(&shown, size) <= 20.0, "{shown}");
+    }
+
+    /// 固定占用 = `+` 钮 + 发送钮 + 四个行间距 + 两个触发钮的图形列；
+    /// 漏算任一项，标签就会把发送钮挤出面板；最窄兜底只看最小排布（这条锁住核算公式）。
+    #[test]
+    fn fixed_width_accounts_for_every_tool() {
+        // 1x：plus 13+12、send 28、间距 4×6、触发钮 (12+12+10+8)
+        assert!((tool_row_fixed_width(1.0) - 161.0).abs() < 1e-3);
+        // 收掉两个触发钮后只剩 plus + send + 两段间距，最窄面板也要放得下
+        assert!((tool_row_min_width(1.0) - 65.0).abs() < 1e-3);
     }
 }
