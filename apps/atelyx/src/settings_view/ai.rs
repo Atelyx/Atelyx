@@ -709,7 +709,7 @@ pub fn update(app: &mut App, msg: AiMsg) -> Task<Message> {
             }
             let (base_url, key) = provider_test_inputs(app);
             if base_url.trim().is_empty() {
-                app.notify(NoticeLevel::Warning, "先填写 baseUrl");
+                app.notify(NoticeLevel::Warning, "先填写 Base URL");
                 return Task::none();
             }
             app.ai.testing = true;
@@ -738,7 +738,7 @@ pub fn update(app: &mut App, msg: AiMsg) -> Task<Message> {
             }
             let (base_url, key) = provider_test_inputs(app);
             if base_url.trim().is_empty() {
-                app.notify(NoticeLevel::Warning, "先填写 baseUrl");
+                app.notify(NoticeLevel::Warning, "先填写 Base URL");
                 return Task::none();
             }
             app.ai.fetching = true;
@@ -778,6 +778,11 @@ pub fn update(app: &mut App, msg: AiMsg) -> Task<Message> {
             let mut providers = app.repo_config.providers.take().unwrap_or_default();
             providers.retain(|p| p.id != id);
             app.repo_config.providers = Some(providers.clone());
+            // 删后回到首项：清单非空时不得落进「还没有配置供应商」空态
+            app.ai.provider_sel = providers.first().map(|p| p.id.clone());
+            app.ai.provider_draft = providers
+                .first()
+                .map(|p| provider_draft_of(app, p));
             let Ok(list) = serde_json::to_value(&providers) else {
                 app.notify(NoticeLevel::Error, "供应商配置序列化失败");
                 return Task::none();
@@ -1272,7 +1277,7 @@ fn providers_view(app: &App, window: iced::window::Id) -> Element<'static, Messa
         None => container(controls::empty_state(
             "bot",
             "还没有配置供应商",
-            "从左侧快速添加一个预设或自定义，填好地址与 API Key 后即可对话",
+            "从左侧选择预设或自定义供应商，填入地址与 API Key 后即可使用",
             (!ro).then(|| (
                 "添加自定义供应商".to_string(),
                 Message::Ai(AiMsg::ProviderAddCustom),
@@ -1299,7 +1304,7 @@ fn providers_view(app: &App, window: iced::window::Id) -> Element<'static, Messa
     // 底栏：本地仓库 = key 落盘策略开关；空间 = 团队共享说明（key 由服务端承载，无开关）
     let bottom: Element<'static, Message> = if is_space(app) {
         container(
-            text("协作空间下供应商配置（含 API Key）保存在服务端、空间成员共用一份".to_string())
+            text("供应商与模型清单存放在服务端、空间成员共用；API key 默认只存各成员本机密钥链".to_string())
                 .size(pal::fs_caption())
                 .color(if ro { pal::WARNING } else { pal::TEXT_MUTED }),
         )
@@ -1661,12 +1666,12 @@ fn models_view(app: &App, window: iced::window::Id) -> Element<'static, Message>
             FORM_W,
             (!ro && model_count > 0).then(|| open_popup(app, window, PopupState::AiModelMenu)),
         );
-        col = col.push(super::setting_row("命名模型", "话题命名一般用小模型；跟随所选 = 用对话时选择的模型", model_trigger));
+        col = col.push(super::setting_row("命名模型", "一般用小模型；跟随所选 = 用对话时的模型", model_trigger));
     }
     col = col.push(super::group_head("画布", "", true));
     col = col.push(super::setting_row(
         "对话产出自动落卡",
-        "回复正文 / 图片 / Agent 写出的文件在对话卡旁生成卡片并连血缘线；Agent 读取的文件也会补引用卡",
+        "回复正文与 Agent 写出的文件在对话卡旁生成卡片并连线；Agent 读取的文件也会补引用卡",
         controls::toggle(
             app.repo_config.canvas_auto_materialize.unwrap_or(true),
             (!ro).then(|| Message::Ai(AiMsg::CanvasMaterializeToggle)),
@@ -1767,7 +1772,7 @@ fn agents_view(app: &App, window: iced::window::Id) -> Element<'static, Message>
         None => container(controls::empty_state(
             "bot",
             "还没有配置 Agent",
-            "Agent = 系统提示词 + 工具集；新建后可在对话输入区选择使用",
+            "系统提示词 + 工具集；新建后可在输入区选择",
             (!ro).then(|| ("新建 Agent".to_string(), Message::Ai(AiMsg::AgentNew))),
         ))
         .width(Length::Fill)
@@ -2037,7 +2042,7 @@ fn tool_row<'a>(
 /// 工具行尾附注：联网搜索未配置搜索源时说明发送即降级。
 fn tool_note(app: &App, id: &str) -> Option<Element<'static, Message>> {
     (id == "web_search" && !app.ai.search_ready).then(|| {
-        text("（未配置搜索源，发送时自动降级）")
+        text("（未配置搜索源，联网搜索将失败）")
             .size(pal::fs_micro())
             .color(pal::TEXT_MUTED)
             .into()
