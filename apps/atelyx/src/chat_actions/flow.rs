@@ -49,6 +49,15 @@ pub(crate) trait ChatStore {
     fn streaming(&self, app: &App) -> bool;
     /// 动作闸门（忙碌 / 只读 / 压缩在途的组合各侧不同）。
     fn blocked(&self, app: &App, action: ChatAction) -> bool;
+    /// 闸门拒绝时的可读原因（默认按动作给通用原因，各侧可覆盖）。
+    fn blocked_notice(&self, _app: &App, action: ChatAction) -> String {
+        match action {
+            ChatAction::Regenerate => "该会话已有回复进行中，无法重新生成",
+            ChatAction::Rollback => "该会话已有回复进行中，无法删除其后消息",
+            ChatAction::Compact => "该会话已有回复进行中，无法压缩",
+        }
+        .to_string()
+    }
     fn run_config(
         &self,
         app: &App,
@@ -169,6 +178,8 @@ pub(crate) fn regenerate<S: ChatStore>(
     resumed: Option<Vec<Value>>,
 ) -> iced::Task<Message> {
     if store.blocked(app, ChatAction::Regenerate) {
+        let notice = store.blocked_notice(app, ChatAction::Regenerate);
+        store.set_error(app, notice);
         return iced::Task::none();
     }
     let messages = store.messages(app);
@@ -211,6 +222,8 @@ pub(crate) fn rollback<S: ChatStore>(
     message_id: &str,
 ) -> iced::Task<Message> {
     if store.blocked(app, ChatAction::Rollback) {
+        let notice = store.blocked_notice(app, ChatAction::Rollback);
+        store.set_error(app, notice);
         return iced::Task::none();
     }
     let messages = store.messages(app);
@@ -229,6 +242,8 @@ pub(crate) fn rollback<S: ChatStore>(
 /// 手动压缩：全部消息折进检查点（≥2 条），摘要写本侧压缩注解（非破坏）。
 pub(crate) fn compact<S: ChatStore>(app: &mut App, store: &S) -> iced::Task<Message> {
     if store.blocked(app, ChatAction::Compact) {
+        let notice = store.blocked_notice(app, ChatAction::Compact);
+        store.set_error(app, notice);
         return iced::Task::none();
     }
     let mut config = None;
@@ -503,12 +518,27 @@ impl ChatStore for PanelStore {
         // 闸门只看投影流式态（与 hub 的复检只在发送收尾做）
         let streaming = app.chat.streaming.contains(&self.session_id);
         match action {
-            // 回滚只看 run 在途（压缩在途不影响回滚）
-            ChatAction::Rollback => streaming,
+            // 压缩在途同样禁回滚：摘要锚点会与截断后的消息集错位
+            ChatAction::Rollback => streaming || app.chat.compacting.is_some(),
             ChatAction::Regenerate | ChatAction::Compact => {
                 streaming || app.chat.compacting.is_some()
             }
         }
+    }
+
+    fn blocked_notice(&self, app: &App, action: ChatAction) -> String {
+        if app.chat.streaming.contains(&self.session_id) {
+            return match action {
+                ChatAction::Regenerate => "该会话已有回复进行中，无法重新生成",
+                ChatAction::Rollback => "该会话已有回复进行中，无法删除其后消息",
+                ChatAction::Compact => "该会话已有回复进行中，无法压缩",
+            }
+            .to_string();
+        }
+        if app.chat.compacting.is_some() {
+            return "该会话正在压缩，暂不能操作".to_string();
+        }
+        "当前状态不可执行该操作".to_string()
     }
 
     fn run_config(

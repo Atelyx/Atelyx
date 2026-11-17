@@ -236,8 +236,10 @@ fn top_bar(app: &App, window: iced::window::Id) -> iced::Element<'_, Message> {
     let has_error = app.chat.error.is_some() || app.chat.persist_error.is_some();
     let mut left = row![].spacing(6).align_y(iced::alignment::Vertical::Center);
     if has_error {
+        // 写盘失败独立成段：瞬时错误不得把它遮住，且「清除提示」只清瞬时错误
         let text_value = match (&app.chat.error, &app.chat.persist_error) {
-            (Some(e), _) => e.clone(),
+            (Some(e), Some((m, _))) => format!("{e} · 未保存：{m}"),
+            (Some(e), None) => e.clone(),
             (None, Some((m, _))) => m.clone(),
             (None, None) => String::new(),
         };
@@ -311,8 +313,14 @@ fn top_bar(app: &App, window: iced::window::Id) -> iced::Element<'_, Message> {
         ),
     ]
     .spacing(4);
+    // 压缩转圈按当前会话判定：别的会话在压缩时不改变本会话按钮
+    let compacting_here = app
+        .chat
+        .active
+        .as_deref()
+        .is_some_and(|id| app.chat.compacting.as_deref() == Some(id));
     if compactions {
-        right = right.push(if app.chat.compacting.is_some() {
+        right = right.push(if compacting_here {
             controls::icon_button("loader", 13.0, 24.0, controls::Variant::Ghost, None, None)
         } else {
             controls::icon_button(
@@ -540,7 +548,7 @@ fn action_row<'a>(
             12.0,
             22.0,
             controls::Variant::Ghost,
-            Some(Message::CopyCode(payload)),
+            Some(Message::CopyText(payload)),
             Some((window, "复制".to_string())),
         ));
     }

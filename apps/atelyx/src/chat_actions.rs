@@ -959,8 +959,8 @@ fn on_panel(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
             iced::Task::none()
         }
         ChatMsg::ClearError => {
+            // 只清瞬时错误；未落盘状态由写链恢复后自行消失
             app.chat.error = None;
-            app.chat.persist_error = None;
             iced::Task::none()
         }
         ChatMsg::FlushDone(result) => {
@@ -1461,7 +1461,12 @@ fn send_now(app: &mut App, space_prompt: Option<String>) -> iced::Task<Message> 
             app.chat.mention_refs = refs;
         }};
     }
-    if (display.is_empty() && images.is_empty()) || app.chat.compacting.is_some() {
+    if display.is_empty() && images.is_empty() {
+        restore!();
+        return iced::Task::none();
+    }
+    if app.chat.compacting.is_some() {
+        app.chat.error = Some("该会话正在压缩，消息未发送".to_string());
         restore!();
         return iced::Task::none();
     }

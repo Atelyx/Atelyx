@@ -1717,12 +1717,30 @@ impl ChatStore for CardStore {
     fn blocked(&self, app: &App, action: ChatAction) -> bool {
         let streaming = is_streaming(app, &self.node);
         let locked = locked_by_peer(app, &self.node);
+        let compacting = card_chat(app, &self.node).is_some_and(|c| c.compacting);
         match action {
-            ChatAction::Regenerate | ChatAction::Rollback => streaming || locked,
-            ChatAction::Compact => {
-                streaming || locked || card_chat(app, &self.node).is_some_and(|c| c.compacting)
-            }
+            // 压缩在途同样禁回滚：摘要锚点会与截断后的消息集错位
+            ChatAction::Regenerate | ChatAction::Rollback => streaming || locked || compacting,
+            ChatAction::Compact => streaming || locked || compacting,
         }
+    }
+
+    fn blocked_notice(&self, app: &App, action: ChatAction) -> String {
+        if locked_by_peer(app, &self.node) {
+            return "对端正在编辑该对话卡，暂不能操作".to_string();
+        }
+        if card_chat(app, &self.node).is_some_and(|c| c.compacting) {
+            return "该会话正在压缩，暂不能操作".to_string();
+        }
+        if is_streaming(app, &self.node) {
+            return match action {
+                ChatAction::Regenerate => "该会话已有回复进行中，无法重新生成",
+                ChatAction::Rollback => "该会话已有回复进行中，无法删除其后消息",
+                ChatAction::Compact => "该会话已有回复进行中，无法压缩",
+            }
+            .to_string();
+        }
+        "当前状态不可执行该操作".to_string()
     }
 
     fn run_config(
