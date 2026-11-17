@@ -203,16 +203,14 @@ pub(super) fn entries<'a>(app: &'a App, state: &PopupState, pane: usize, window:
                 .as_deref()
                 .zip(app.repo_config.model_provider_id.as_deref());
             let mut entries: Vec<(usize, MenuEntry<Message>)> = Vec::new();
-            // 已设置时给回退入口：否则选过一次就无法恢复「跟随默认 = 未设置」
-            if current.is_some() {
-                entries.push((
-                    0,
-                    MenuEntry::action(
-                        "不设置",
-                        Message::Ai(ai::AiMsg::DefaultModelPick(String::new(), String::new())),
-                    ),
-                ));
-            }
+            // 恒给回退入口：选过一次或只剩半份配置时都能清回「未设置」
+            entries.push((
+                0,
+                MenuEntry::action(
+                    "不设置",
+                    Message::Ai(ai::AiMsg::DefaultModelPick(String::new(), String::new())),
+                ),
+            ));
             for provider in app.repo_config.providers.iter().flatten() {
                 for model in &provider.models {
                     let picked = matches!(
@@ -276,7 +274,14 @@ pub(super) fn entries<'a>(app: &'a App, state: &PopupState, pane: usize, window:
                 .agents
                 .iter()
                 .find(|a| &a.id == agent_id)
-                .map(|a| a.name.trim().to_string())
+                .map(|a| {
+                    let name = a.name.trim();
+                    if name.chars().count() > 14 {
+                        format!("{}…", name.chars().take(14).collect::<String>())
+                    } else {
+                        name.to_string()
+                    }
+                })
                 .unwrap_or_default();
             let confirm = if name.is_empty() {
                 "确认删除".to_string()
