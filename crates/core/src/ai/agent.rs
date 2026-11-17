@@ -891,8 +891,8 @@ fn fix_pending_rows(state: &mut RunState, calls: &[(usize, ToolCall)]) {
 }
 
 /// 按调用序执行：连续 parallel_safe 成段并发（有界），读写/未知工具单独串行屏障；
-/// 结果按调用序回填对应行。用户停止时中止在途工具并返回 true：未执行的行保持 running，
-/// 由收尾的 finalize_interrupted 归一为「已中断」。
+/// 结果按调用序回填对应行。用户停止时中止在途工具并返回 true：已完成的调用先回填真实结果，
+/// 未完成的行保持 running，由收尾的 finalize_interrupted 归一为「已中断」。
 async fn execute_calls(
     ctx: &ToolCtx,
     calls: &[(usize, ToolCall)],
@@ -915,7 +915,9 @@ async fn execute_calls(
         if !is_parallel_safe(&call.name) {
             emit_tool_start(events, session_id, message_id, call);
             let args = parse_args(&call.arguments);
+            // biased：工具恰好在取消瞬间完成时按实际结果回填，不误报未执行
             let result = tokio::select! {
+                biased;
                 result = crate::ai::tools::execute(ctx, &call.name, args) => result,
                 _ = cancel.wait_for(|v| *v) => return true,
             };
@@ -956,7 +958,13 @@ async fn execute_calls(
                 }
             }
             if interrupted {
-                // 已发出的工具任务中止等待：写入类工具可能在收到停止前已提交，结果按中断丢弃
+                // 已收集的结果先回填：工具可能已提交（写入类），丢弃会误报未执行
+                for (id, result) in &outcomes {
+                    if let Some((_, call)) = chunk.iter().find(|(_, call)| &call.id == id) {
+                        settle_tool_row(state, events, session_id, message_id, call, result);
+                    }
+                }
+                // 未完成的工具任务中止等待，行保持 running 由收尾归一为「已中断」
                 for fut in futs {
                     fut.abort();
                 }
