@@ -750,8 +750,21 @@ async fn run_loop(p: RunParams) {
         }
         // 占位行固化：pending 行（按流内槽位 index）替换为真实 id 行
         fix_pending_rows(&mut state, &done_calls);
-        // 逐个执行：parallel_safe 段并发（上限 MAX_PARALLEL_TOOLS），读写段串行屏障
-        execute_calls(&ctx, &done_calls, &mut state, &events, &session_id, &message_id).await;
+        // 逐个执行：parallel_safe 段并发（上限 MAX_PARALLEL_TOOLS），读写段串行屏障；
+        // 用户停止会中止在途工具，本轮按中断收场（不留「停止后工具仍在跑」）
+        if execute_calls(
+            &ctx,
+            &done_calls,
+            &mut state,
+            &events,
+            &session_id,
+            &message_id,
+            &mut cancel,
+        )
+        .await
+        {
+            break Err(ABORTED.to_string());
+        }
         state.rev += 1;
         state.commit_patch(&persist, &events, &session_id, &message_id, created_at);
         // 工具结果回填线上历史（下一轮请求可见；只取本轮起点之后的工具行）
@@ -882,7 +895,8 @@ fn fix_pending_rows(state: &mut RunState, calls: &[(usize, ToolCall)]) {
 }
 
 /// 按调用序执行：连续 parallel_safe 成段并发（有界），读写/未知工具单独串行屏障；
-/// 结果按调用序回填对应行。
+/// 结果按调用序回填对应行。用户停止时中止在途工具并返回 true：未执行的行保持 running，
+/// 由收尾的 finalize_interrupted 归一为「已中断」。
 async fn execute_calls(
     ctx: &ToolCtx,
     calls: &[(usize, ToolCall)],
@@ -890,7 +904,8 @@ async fn execute_calls(
     events: &tokio::sync::mpsc::UnboundedSender<RunEvent>,
     session_id: &str,
     message_id: &str,
-) {
+    cancel: &mut tokio::sync::watch::Receiver<bool>,
+) -> bool {
     let defs = builtin_tools();
     let is_parallel_safe = |name: &str| {
         defs.iter()
@@ -904,7 +919,10 @@ async fn execute_calls(
         if !is_parallel_safe(&call.name) {
             emit_tool_start(events, session_id, message_id, call);
             let args = parse_args(&call.arguments);
-            let result = crate::ai::tools::execute(ctx, &call.name, args).await;
+            let result = tokio::select! {
+                result = crate::ai::tools::execute(ctx, &call.name, args) => result,
+                _ = cancel.wait_for(|v| *v) => return true,
+            };
             settle_tool_row(state, events, session_id, message_id, call, &result);
             i += 1;
             continue;
@@ -927,10 +945,26 @@ async fn execute_calls(
                 }));
             }
             let mut outcomes: Vec<(String, crate::ai::tools::ToolResult)> = Vec::new();
-            for fut in futs {
-                if let Ok(pair) = fut.await {
-                    outcomes.push(pair);
+            let mut interrupted = false;
+            for fut in futs.iter_mut() {
+                tokio::select! {
+                    result = fut => {
+                        if let Ok(pair) = result {
+                            outcomes.push(pair);
+                        }
+                    }
+                    _ = cancel.wait_for(|v| *v) => {
+                        interrupted = true;
+                        break;
+                    }
                 }
+            }
+            if interrupted {
+                // 已发出的工具任务中止等待：写入类工具可能在收到停止前已提交，结果按中断丢弃
+                for fut in futs {
+                    fut.abort();
+                }
+                return true;
             }
             for (_, call) in chunk {
                 let result = outcomes
@@ -946,6 +980,7 @@ async fn execute_calls(
         }
         i = j;
     }
+    false
 }
 
 fn parse_args(raw: &str) -> Value {
