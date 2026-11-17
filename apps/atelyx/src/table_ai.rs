@@ -888,14 +888,24 @@ pub fn drain_auto(app: &mut App) -> Task<Message> {
     let Some((field_id, _)) = session.view.ai.auto_due.iter().next().cloned() else {
         return Task::none();
     };
+    // 字段共享条目：字段已删或已不是 AI 字段（retype 只清 ai 配置、保留 field id）时条目作废
+    let (is_ai_field, resolved) = {
+        let Some(session) = app.table.as_ref() else { return Task::none() };
+        let field = session.data.fields.iter().find(|field| field.id == field_id);
+        (
+            field.is_some_and(|field| field.ai.is_some()),
+            field
+                .and_then(|field| field.ai.as_ref())
+                .map(|config| config_model(app, config)),
+        )
+    };
+    if !is_ai_field {
+        if let Some(session) = app.table.as_mut() {
+            session.view.ai.auto_due.retain(|(field, _)| field != &field_id);
+        }
+        return drain_auto(app);
+    }
     // 字段自身模型优先，缺省回落仓库默认模型；两者都缺时保留待办并提示一次，不静默丢弃
-    let resolved = session
-        .data
-        .fields
-        .iter()
-        .find(|field| field.id == field_id)
-        .and_then(|field| field.ai.as_ref())
-        .map(|config| config_model(app, config));
     if !matches!(resolved, Some(Ok(_))) {
         let first_hint = app
             .table
