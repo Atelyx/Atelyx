@@ -1199,7 +1199,7 @@ impl Inner {
         &mut self,
         config: &WriteChainConfig,
         work: &WorkSnapshot,
-        results: Vec<Result<(), String>>,
+        results: Vec<Result<WriteOutcome, String>>,
     ) -> Option<Option<PersistError>> {
         if work.epoch != self.epoch {
             return None; // 写在途期间换仓库：旧仓库写回结果与基线整体丢弃
@@ -1209,7 +1209,7 @@ impl Inner {
             // 删除项：成功即摘除待删记录；失败保留由下轮重试（意图不丢，文件不残留）
             if let WorkKind::Delete { io, file } = &item.kind {
                 match result {
-                    Ok(()) => {
+                    Ok(_) => {
                         let key = io.vault_key();
                         self.pending_deletes.retain(|(pending_io, pending_file)| {
                             !(pending_file == file && pending_io.vault_key() == key)
@@ -1229,7 +1229,7 @@ impl Inner {
                 }
             }
             match result {
-                Ok(()) => {
+                Ok(outcome) => {
                     let unchanged = match &item.session_id {
                         Some(id) => self.change_versions.get(id).copied().unwrap_or(0) == item.version,
                         None => self.overrides_version == item.version,
@@ -1241,15 +1241,35 @@ impl Inner {
                         (&item.kind, &item.session_id)
                     {
                         // 基线 = 磁盘成功内容的确定性形（不含尾 '\n'；磁盘由写函数恒补尾）
-                        let jsonl = match append_from {
-                            Some((base_jsonl, tail)) => {
-                                if base_jsonl.is_empty() {
-                                    tail.trim_end_matches('\n').to_string()
-                                } else {
-                                    format!("{base_jsonl}\n{}", tail.trim_end_matches('\n'))
+                        let jsonl = match &outcome {
+                            // 合并写：磁盘内容已含他端消息，内存镜像一并对齐，后续追加不再触发漂移
+                            WriteOutcome::Merged(content) => {
+                                let merged = parse_messages_jsonl(content);
+                                if !merged.is_empty() {
+                                    if let Some(session) = self.session_mut(id) {
+                                        if let Some(ts) = merged
+                                            .last()
+                                            .and_then(|m| m.get("createdAt"))
+                                            .and_then(Value::as_i64)
+                                        {
+                                            session.updated_at = session.updated_at.max(ts);
+                                        }
+                                        session.messages = merged;
+                                    }
+                                    self.bump_session(id);
                                 }
+                                content.trim_end_matches('\n').to_string()
                             }
-                            None => rewrite.clone(),
+                            WriteOutcome::Written => match append_from {
+                                Some((base_jsonl, tail)) => {
+                                    if base_jsonl.is_empty() {
+                                        tail.trim_end_matches('\n').to_string()
+                                    } else {
+                                        format!("{base_jsonl}\n{}", tail.trim_end_matches('\n'))
+                                    }
+                                }
+                                None => rewrite.clone(),
+                            },
                         };
                         self.persisted.insert(
                             id.clone(),
@@ -1346,14 +1366,22 @@ impl Inner {
     }
 }
 
+/// 写轮成功形态：Merged 带回实际落盘内容（基线按它推进，不能用被覆盖的本地快照）。
+enum WriteOutcome {
+    Written,
+    Merged(String),
+}
+
 /// 执行写盘工作项（锁外 I/O；各项独立成败）。追加前由后端按磁盘事实复核基线，
-/// 不一致即回落全量重写——磁盘内容不假设只由本进程改写。
-fn perform_writes(work: &WorkSnapshot) -> Vec<Result<(), String>> {
+/// 基线漂移（他端 / 他设备先写了）时读回磁盘按消息 id 合并后全量写，不整份覆盖他端内容。
+fn perform_writes(work: &WorkSnapshot) -> Vec<Result<WriteOutcome, String>> {
     work.items
         .iter()
         .map(|item| match &item.kind {
             // 删除项自带后端（换真源后仍删回原真源）
-            WorkKind::Delete { io, file } => io.delete_session_files(file),
+            WorkKind::Delete { io, file } => {
+                io.delete_session_files(file).map(|_| WriteOutcome::Written)
+            }
             WorkKind::Messages {
                 file,
                 append_from,
@@ -1364,21 +1392,66 @@ fn perform_writes(work: &WorkSnapshot) -> Vec<Result<(), String>> {
                 };
                 if let Some((base, tail)) = append_from {
                     if io.append_messages(file, base, tail).is_ok() {
-                        return Ok(());
+                        return Ok(WriteOutcome::Written);
                     }
+                    // 追加失败（多为基线漂移）：读回磁盘 / 服务端按消息 id 合并再全量写。
+                    // 文件不在或读不出时保底整份写（与既有回落一致），不在错误路径上无限重试。
+                    let content = match io.read_messages(file) {
+                        Ok(existing) => merge_jsonl_messages(&existing, rewrite),
+                        Err(_) => rewrite.clone(),
+                    };
+                    io.write_messages(file, &content)?;
+                    return Ok(WriteOutcome::Merged(content));
                 }
                 io.write_messages(file, rewrite)
+                    .map(|_| WriteOutcome::Written)
             }
             WorkKind::Meta { file, meta } => match &work.backend {
-                Some(io) => io.write_session_meta(file, meta),
+                Some(io) => io.write_session_meta(file, meta).map(|_| WriteOutcome::Written),
                 None => Err("会话仓库未装载，无法写盘".to_string()),
             },
             WorkKind::Overrides { file } => match &work.backend {
-                Some(io) => io.write_overrides(file),
+                Some(io) => io.write_overrides(file).map(|_| WriteOutcome::Written),
                 None => Err("会话仓库未装载，无法写盘".to_string()),
             },
         })
         .collect()
+}
+
+/// 追加基线漂移后的合并：保留磁盘现有行序，追加本端新消息（按消息 id 去重）。
+fn merge_jsonl_messages(existing: &str, incoming: &str) -> String {
+    let mut ids: HashSet<String> = HashSet::new();
+    let mut lines: Vec<String> = Vec::new();
+    for line in existing.lines().filter(|l| !l.trim().is_empty()) {
+        if let Some(id) = jsonl_line_id(line) {
+            ids.insert(id);
+        }
+        lines.push(line.to_string());
+    }
+    for line in incoming.lines().filter(|l| !l.trim().is_empty()) {
+        match jsonl_line_id(line) {
+            Some(id) => {
+                if ids.insert(id) {
+                    lines.push(line.to_string());
+                }
+            }
+            // 无 id 的异常行按整行去重（解析侧同样会丢弃这类行）
+            None => {
+                if !lines.iter().any(|l| l == line) {
+                    lines.push(line.to_string());
+                }
+            }
+        }
+    }
+    format!("{}\n", lines.join("\n"))
+}
+
+fn jsonl_line_id(line: &str) -> Option<String> {
+    serde_json::from_str::<Value>(line)
+        .ok()?
+        .get("id")?
+        .as_str()
+        .map(str::to_string)
 }
 
 #[cfg(test)]
@@ -1604,6 +1677,67 @@ mod tests {
         let events = events.lock().unwrap();
         assert_eq!(events.len(), 2, "恢复应上报一次");
         assert!(events[1].is_none());
+    }
+
+    #[test]
+    fn append_baseline_drift_merges_other_device_messages() {
+        let dir = TempDir::new("ai-session-merge");
+        let store = SessionStore::new(test_config());
+        store
+            .load(store.begin_load(), local_io(dir.to_path_buf()))
+            .unwrap();
+        store
+            .commit(CommitBatch {
+                created: vec![SessionDef {
+                    id: "s1".into(),
+                    file: chat_message_file("s1"),
+                    title: None,
+                    agent_id: None,
+                    compaction: None,
+                    created_at: 1,
+                    updated_at: 1,
+                    messages: vec![msg("m1", "user", "一")],
+                }],
+                ..Default::default()
+            })
+            .unwrap();
+        store.run_write_cycle();
+        // 他端先追加：本端下次追加的基线核对必然失败
+        crate::vault::append_chat_messages_raw(
+            &dir,
+            &chat_message_file("s1"),
+            "{\"id\":\"remote\",\"role\":\"user\",\"content\":\"他端\",\"createdAt\":2}\n",
+        )
+        .unwrap();
+        store
+            .commit(commit_batch(vec![AppendBatch {
+                session_id: "s1".into(),
+                messages: vec![msg("m2", "assistant", "二")],
+            }]))
+            .unwrap();
+        store.run_write_cycle();
+        let ids = |raw: &str| -> Vec<String> {
+            parse_messages_jsonl(raw)
+                .iter()
+                .filter_map(|m| m.get("id")?.as_str().map(str::to_string))
+                .collect()
+        };
+        let disk = crate::vault::read_chat_messages_file(&dir, &chat_message_file("s1")).unwrap();
+        assert_eq!(ids(&disk), vec!["m1", "remote", "m2"], "他端消息不得被覆盖");
+        assert!(
+            store.snapshot().persist_error.is_none(),
+            "合并成功不应报写失败"
+        );
+        // 合并后基线已对齐：后续追加不再重复漂移
+        store
+            .commit(commit_batch(vec![AppendBatch {
+                session_id: "s1".into(),
+                messages: vec![msg("m3", "user", "三")],
+            }]))
+            .unwrap();
+        store.run_write_cycle();
+        let disk = crate::vault::read_chat_messages_file(&dir, &chat_message_file("s1")).unwrap();
+        assert_eq!(ids(&disk), vec!["m1", "remote", "m2", "m3"]);
     }
 
     #[test]
