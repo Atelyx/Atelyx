@@ -978,8 +978,9 @@ pub fn update(app: &mut App, msg: AiMsg) -> Task<Message> {
             let mut agents = app.agents.clone();
             agents.retain(|a| a.id != id);
             app.agents = agents.clone();
-            // 删后回到一个可用条目，避免右栏空态误报「还没有配置 Agent」
+            // 删后回到一个可用条目：选中态与草稿一起重建，否则右栏表单编辑全被丢弃
             app.ai.agent_sel = app.agents.first().map(|a| a.id.clone());
+            app.ai.agent_draft = app.agents.first().map(agent_draft_of);
             save_agents(app, agents)
         }
 
