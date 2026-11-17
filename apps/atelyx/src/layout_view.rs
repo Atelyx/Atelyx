@@ -508,6 +508,14 @@ fn with_overlays<'a>(
             )
         {
             let (content, height) = crate::popup::element(app, &open.state, app.popup_pane, window);
+            // 输入盒底行的触发钮菜单（+ / Agent / 模型）恒贴钮上方展开：面板底缘与画布卡
+            // 下方的可读区都在钮上方。用硬边（放不下时不换边），模型菜单换子面板时高度变化不跳边。
+            let flip = match &open.state {
+                PopupState::ChatPlusMenu { .. }
+                | PopupState::ChatAgentMenu { .. }
+                | PopupState::ChatModelMenu { .. } => ui_popup::VFlip::Above,
+                _ => ui_popup::VFlip::BelowFirst,
+            };
             let spec = PopupSpec {
                 anchor: open.point,
                 width: open.state.width(),
@@ -515,7 +523,7 @@ fn with_overlays<'a>(
                 flip_y: open.flip_y,
                 min_width: open.min_width,
             };
-            let geom = ui_popup::resolve(&spec, viewport);
+            let geom = ui_popup::resolve_preferring(&spec, viewport, flip);
             root = root.push(ui_popup::overlay(
                 geom,
                 content,

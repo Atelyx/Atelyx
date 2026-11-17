@@ -31,13 +31,16 @@ pub struct PopupBounds {
     pub bottom: f32,
 }
 
-/// 竖直翻转偏好。
+/// 竖直落位偏好。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VFlip {
     /// 下方放不下且上方放得下才翻到上方（弹层默认）。
     BelowFirst,
     /// 上方放得下就放上方，否则放下方（格式气泡）。
     AboveFirst,
+    /// 恒在上方：贴触发器上缘展开，上方放不下就钳到可用区顶（不换边）。
+    /// 给"换子面板时高度变化"的菜单用：换边跳变比贴顶更碍事。
+    Above,
 }
 
 /// 解析后的弹层矩形（窗口局部坐标，已钳制/翻转）。
@@ -49,6 +52,11 @@ pub struct PopupGeom {
 
 /// 钳制 + 翻转（视口边距 6px；下方放不下且上方放得下才翻转）。
 pub fn resolve(spec: &PopupSpec, viewport: Size) -> PopupGeom {
+    resolve_preferring(spec, viewport, VFlip::BelowFirst)
+}
+
+/// 视口内落位，带竖直翻转偏好（底缘触发的菜单用 `VFlip::AboveFirst` 贴钮上方展开）。
+pub fn resolve_preferring(spec: &PopupSpec, viewport: Size, flip: VFlip) -> PopupGeom {
     // 宽度同样受视口约束（窄窗口下长标签弹层不能横向溢出）
     let max_w = (viewport.width - pal::VIEWPORT_GAP * 2.0).max(0.0);
     let w = spec.width.max(spec.min_width).min(max_w);
@@ -62,7 +70,7 @@ pub fn resolve(spec: &PopupSpec, viewport: Size) -> PopupGeom {
             right: pal::VIEWPORT_GAP,
             bottom: pal::VIEWPORT_GAP,
         },
-        VFlip::BelowFirst,
+        flip,
     )
 }
 
@@ -80,16 +88,27 @@ fn place(spec: &PopupSpec, w: f32, bounds: PopupBounds, flip: VFlip) -> PopupGeo
     let min_y = bounds.area.y + bounds.top;
     let max_y = (bounds.area.y + bounds.area.height - h - bounds.bottom).max(min_y);
     let mut y = spec.anchor.y;
-    if let Some(flip_y) = spec.flip_y {
-        let above = flip_y - h;
-        let above_fits = above >= min_y;
-        let below_fits = spec.anchor.y + h <= bounds.area.y + bounds.area.height - bounds.bottom;
-        let use_above = match flip {
-            VFlip::BelowFirst => !below_fits && above_fits,
-            VFlip::AboveFirst => above_fits,
-        };
-        if use_above {
-            y = above;
+    match flip {
+        // 硬边：不看空间，贴触发器上缘（放不下由下方钳制收到可用区顶）
+        VFlip::Above => {
+            if let Some(flip_y) = spec.flip_y {
+                y = flip_y - h;
+            }
+        }
+        VFlip::BelowFirst | VFlip::AboveFirst => {
+            if let Some(flip_y) = spec.flip_y {
+                let above = flip_y - h;
+                let above_fits = above >= min_y;
+                let below_fits =
+                    spec.anchor.y + h <= bounds.area.y + bounds.area.height - bounds.bottom;
+                let use_above = match flip {
+                    VFlip::BelowFirst => !below_fits && above_fits,
+                    _ => above_fits,
+                };
+                if use_above {
+                    y = above;
+                }
+            }
         }
     }
     PopupGeom { x, y: y.clamp(min_y, max_y), w }
@@ -177,6 +196,53 @@ pub fn floating<'a, M: Clone + 'a>(geom: PopupGeom, content: Element<'a, M>) -> 
         .align_y(iced::alignment::Vertical::Top)
         .padding(Padding::ZERO.left(geom.x - SHADOW_PAD_LEFT).top(geom.y - SHADOW_PAD_TOP))
         .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spec(anchor: Point, height: f32, flip_y: f32) -> PopupSpec {
+        PopupSpec {
+            anchor,
+            width: 100.0,
+            height,
+            flip_y: Some(flip_y),
+            min_width: 0.0,
+        }
+    }
+
+    /// 三种竖直偏好各自落位：默认放下方；AboveFirst 上方放得下才上翻；
+    /// Above 恒贴触发器上缘，上方放不下就钳到可用区顶、不换边。
+    #[test]
+    fn vertical_preferences_place_popup_on_expected_side() {
+        let viewport = Size::new(600.0, 400.0);
+        let mid = spec(Point::new(100.0, 200.0), 80.0, 188.0);
+        assert_eq!(resolve(&mid, viewport).y, 200.0, "默认放下方");
+        assert_eq!(
+            resolve_preferring(&mid, viewport, VFlip::AboveFirst).y,
+            108.0,
+            "上方放得下就贴触发器上缘"
+        );
+        assert_eq!(
+            resolve_preferring(&mid, viewport, VFlip::Above).y,
+            108.0,
+            "硬边上方"
+        );
+
+        // 触发器靠近顶部：上方放不下
+        let top = spec(Point::new(100.0, 60.0), 120.0, 48.0);
+        assert_eq!(
+            resolve_preferring(&top, viewport, VFlip::Above).y,
+            pal::VIEWPORT_GAP,
+            "硬边不换边，钳到可用区顶"
+        );
+        assert_eq!(
+            resolve_preferring(&top, viewport, VFlip::AboveFirst).y,
+            60.0,
+            "AboveFirst 上方放不下就放下方"
+        );
+    }
 }
 
 /// 居中模态覆盖层：全屏半透明黑遮罩（点击关闭）+ 阴影环 + 水平垂直居中卡。
