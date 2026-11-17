@@ -187,6 +187,11 @@ fn locked_by_peer(app: &App, node_id: &str) -> bool {
     )
 }
 
+/// 该卡是否在压缩（面板绑定同一卡会话时顶部行据此显示在途转圈）。
+pub(crate) fn is_compacting(app: &App, node_id: &str) -> bool {
+    card_chat(app, node_id).is_some_and(|c| c.compacting)
+}
+
 /// 当前是否有活跃 run（Hub 注册表为准）或卡片在流式态。
 pub fn is_streaming(app: &App, node_id: &str) -> bool {
     card_chat(app, node_id).is_some_and(|c| c.streaming)
@@ -1331,7 +1336,7 @@ fn set_card_config(app: &mut App, node_id: &str, key: &str, value: Option<Value>
 }
 
 /// 卡会话压缩：全部消息折进检查点（≥2 条），摘要写节点压缩注解（非破坏）。
-fn compact_card(app: &mut App, node_id: &str) -> Task<Message> {
+pub(crate) fn compact_card(app: &mut App, node_id: &str) -> Task<Message> {
     flow::compact(app, &CardStore::new(node_id))
 }
 

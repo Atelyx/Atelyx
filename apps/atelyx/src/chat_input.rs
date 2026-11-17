@@ -153,6 +153,19 @@ impl Draft {
             .all(|c| !c.is_whitespace())
             .then_some(at)
     }
+
+    /// 光标前是否存在激活的斜杠命令段：当前行以 `/` 开头，且其后到光标无空白
+    /// （返回 `/` 的字节位置；正常文本里的路径斜杠不在行首，不会被当成命令）。
+    pub fn active_slash_at(&self) -> Option<usize> {
+        let caret = self.caret.min(self.text.len());
+        if !self.text.is_char_boundary(caret) {
+            return None;
+        }
+        let seg = &self.text[..caret];
+        let at = seg.rfind('\n').map_or(0, |i| i + 1);
+        let line = &seg[at..];
+        (line.starts_with('/') && !line[1..].chars().any(char::is_whitespace)).then_some(at)
+    }
 }
 
 /// 部件回发事件（应用层据此更新草稿与浮层）。
@@ -219,6 +232,8 @@ pub struct Input<'a> {
     pub tags: TagSource<'a>,
     /// 候选浮层开启：方向 / Enter / Esc 转交浮层。
     pub picker_open: bool,
+    /// 单命令浮层开启（`/` 命令）：只转交 Enter / Esc，方向键仍归输入面。
+    pub command_open: bool,
     pub placeholder: &'a str,
     pub route: InputRoute,
     /// 渲染缩放（画布卡随视口缩放；面板传 1.0）。
@@ -238,6 +253,7 @@ impl<'a> Input<'a> {
             draft,
             tags,
             picker_open: false,
+            command_open: false,
             placeholder: "",
             route,
             scale: 1.0,
@@ -256,6 +272,12 @@ impl<'a> Input<'a> {
 
     pub fn picker_open(mut self, open: bool) -> Self {
         self.picker_open = open;
+        self
+    }
+
+    /// 单命令浮层开关（与 `#` 候选互斥；只转交 Enter / Esc）。
+    pub fn command_open(mut self, open: bool) -> Self {
+        self.command_open = open;
         self
     }
 
@@ -1123,18 +1145,19 @@ impl Input<'_> {
             }
         }
 
-        // 候选浮层开启：方向 / Enter / Esc 转交
-        if self.picker_open {
+        // 候选 / 命令浮层开启：方向（仅候选）/ Enter / Esc 转交。
+        // Shift+Enter 一律落到换行分支：浮层打开时按它不该执行命令（压缩不是文本插入）。
+        if self.picker_open || self.command_open {
             match key {
-                Key::Named(Named::ArrowUp) => {
+                Key::Named(Named::ArrowUp) if self.picker_open => {
                     self.publish(shell, InputEvent::PickerNav(-1));
                     return;
                 }
-                Key::Named(Named::ArrowDown) => {
+                Key::Named(Named::ArrowDown) if self.picker_open => {
                     self.publish(shell, InputEvent::PickerNav(1));
                     return;
                 }
-                Key::Named(Named::Enter) => {
+                Key::Named(Named::Enter) if !extend => {
                     self.publish(shell, InputEvent::PickerCommit);
                     return;
                 }
@@ -1403,6 +1426,21 @@ mod tests {
         // 触发段含空白 = 失活
         assert_eq!(draft("#笔 记", 9).active_mention_at(), None);
         assert_eq!(draft("", 0).active_mention_at(), None);
+    }
+
+    #[test]
+    fn active_slash_is_line_prefix_without_whitespace() {
+        assert_eq!(draft("/", 1).active_slash_at(), Some(0));
+        // 换行后行首同样算触发（字节位置 = 换行符之后）
+        assert_eq!(draft("问\n/", 5).active_slash_at(), Some(4));
+        // 继续键入查询不丢触发
+        assert_eq!(draft("/压缩", 7).active_slash_at(), Some(0));
+        // 路径斜杠不在行首 = 普通文本
+        assert_eq!(draft("src/", 4).active_slash_at(), None);
+        assert_eq!(draft(" /", 2).active_slash_at(), None);
+        // 触发段含空白 = 失活（已是普通正文）
+        assert_eq!(draft("/压 缩", 8).active_slash_at(), None);
+        assert_eq!(draft("", 0).active_slash_at(), None);
     }
 
     #[test]

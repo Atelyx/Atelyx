@@ -394,7 +394,8 @@ pub enum ChatMsg {
     /// 删除此消息之后的全部消息（二段确认：首次按下进入确认态，再按执行）。
     Rollback(String),
     RollbackCancel,
-    Compact,
+    /// 输入区 `/` 命令：压缩会话历史（先摘掉触发段再走压缩）。
+    SlashCompact,
     /// 展开 / 收起一个步骤块（思考 / 工具）。
     ToggleStep(String),
     /// 面板级模型选择（None = 清除选择）。
@@ -887,7 +888,7 @@ fn update_inner(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
             | ChatMsg::PromptReady(..)
             | ChatMsg::Rollback(..)
             | ChatMsg::RollbackCancel
-            | ChatMsg::Compact
+            | ChatMsg::SlashCompact
             | ChatMsg::Run(..)
             | ChatMsg::AidDone(..)) => on_send(app, m),
         m @ (ChatMsg::PluginSend { .. }
@@ -1194,12 +1195,7 @@ fn on_send(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
             app.chat.rollback_confirm = None;
             iced::Task::none()
         }
-        ChatMsg::Compact => {
-            let Some(session_id) = app.chat.active.clone() else {
-                return iced::Task::none();
-            };
-            compact(app, &session_id)
-        }
+        ChatMsg::SlashCompact => slash_compact(app),
         ChatMsg::Run(event) => on_run_event(app, event),
         ChatMsg::AidDone(kind, session_id, result) => {
             match kind {
@@ -1810,10 +1806,21 @@ fn on_input(app: &mut App, event: chat_input::InputEvent) -> iced::Task<Message>
             return panel_mention_follow(app);
         }
         chat_input::InputEvent::PickerCommit => {
+            // 斜杠命令优先：同一按键在两种浮层里含义不同（后者只建引用，前者要执行动作）
+            if crate::chat_composer::slash_command(&app.chat.input).is_some() {
+                return slash_compact(app);
+            }
             let selected = app.chat.mention_picker.as_ref().map_or(0, |p| p.selected);
             commit_mention(app, selected);
         }
-        chat_input::InputEvent::PickerClose => app.chat.mention_picker = None,
+        chat_input::InputEvent::PickerClose => {
+            // Esc 放弃命令输入：摘掉触发段，不留半截 `/查询` 在草稿里
+            if crate::chat_composer::slash_command(&app.chat.input).is_some() {
+                take_slash_command(&mut app.chat.input);
+                return iced::Task::none();
+            }
+            app.chat.mention_picker = None;
+        }
     }
     iced::Task::none()
 }
@@ -2067,9 +2074,50 @@ fn rollback(app: &mut App, message_id: &str) -> iced::Task<Message> {
     flow::rollback(app, &flow::PanelStore::new(session_id), message_id)
 }
 
-/// 手动压缩（面板）：全部消息折进检查点（≥2 条），摘要写会话 compaction 注解（非破坏）。
+/// 手动压缩：全部消息折进检查点（≥2 条），摘要写本侧压缩注解（非破坏）。
+/// 面板绑定画布卡会话时交卡侧（消息真源在卡节点，与回滚 / 重生成同口径）。
 fn compact(app: &mut App, session_id: &str) -> iced::Task<Message> {
+    if let Some(node) = crate::canvas_chat::node_of_session(session_id).map(str::to_string) {
+        return crate::canvas_chat::compact_card(app, &node);
+    }
     flow::compact(app, &flow::PanelStore::new(session_id.to_string()))
+}
+
+/// 输入区斜杠命令「会话压缩」：先摘掉触发段（`/` + 查询）再走压缩；
+/// 命令不可用时的原因由压缩闸门写进顶部错误行。
+fn slash_compact(app: &mut App) -> iced::Task<Message> {
+    take_slash_command(&mut app.chat.input);
+    let Some(session_id) = app.chat.active.clone() else {
+        app.chat.error = Some("当前没有会话可压缩".to_string());
+        return iced::Task::none();
+    };
+    compact(app, &session_id)
+}
+
+/// 从面板草稿里摘掉斜杠命令触发段：行首 `/` 到光标、选区覆盖部分与光标后的命令词尾。
+/// 触发段不存在时不动；光标停在查询中间或选区只盖住半截时也不留残段。
+fn take_slash_command(draft: &mut chat_input::Draft) {
+    let Some(at) = draft.active_slash_at() else {
+        return;
+    };
+    let mut text = draft.text.clone();
+    let caret = draft.caret.min(text.len());
+    let (_, sel_end) = draft.selection();
+    let line_end = text[at..].find('\n').map_or(text.len(), |i| at + i);
+    let mut end = caret.max(sel_end).min(line_end);
+    // 词尾：摘到本行下一个空白为止，半截命令不留在草稿里
+    while end < line_end {
+        let Some(c) = text[end..line_end].chars().next() else {
+            break;
+        };
+        if c.is_whitespace() {
+            break;
+        }
+        end += c.len_utf8();
+    }
+    text.replace_range(at..end, "");
+    let caret = at.min(text.len());
+    draft.apply_edited(text, caret, caret);
 }
 
 /// 压缩任务：按既有检查点重建转写并请求摘要，回执 ChatMsg::AidDone(Compact, ...)。
@@ -3167,6 +3215,47 @@ mod tests {
         let mut message = json!({ "id": "m1", "role": "user", "content": "旧正文" });
         rebuild_user_injection(&mut message);
         assert_eq!(message["content"], json!("旧正文"));
+    }
+
+    /// 斜杠命令落地 / Esc：摘掉整段命令词（行首到词尾，含选区与光标后残段），
+    /// 其余正文与行结构保留；触发段已不是命令形态（后面有空白）时是空操作。
+    #[test]
+    fn take_slash_command_strips_whole_command_token() {
+        let mut draft = crate::chat_input::Draft::with_text("正文\n/压");
+        take_slash_command(&mut draft);
+        assert_eq!(draft.text, "正文\n");
+        assert_eq!(draft.caret, 7, "光标落在摘除处");
+
+        // 光标停在查询中间：整段命令词摘掉，不留半截
+        let mut draft = crate::chat_input::Draft::default();
+        draft.text = "/compact".into();
+        draft.caret = 3;
+        draft.anchor = 3;
+        take_slash_command(&mut draft);
+        assert_eq!(draft.text, "");
+        assert_eq!(draft.caret, 0);
+
+        // 选区从查询中间延伸到词尾：一并摘掉，保留行内后随文本
+        let mut draft = crate::chat_input::Draft::default();
+        draft.text = "/compact 后续".into();
+        draft.caret = 3;
+        draft.anchor = 8;
+        take_slash_command(&mut draft);
+        assert_eq!(draft.text, " 后续");
+        assert_eq!(draft.caret, 0);
+
+        // 命令段之后的换行与下一行不受影响（光标停在命令行末尾）
+        let mut draft = crate::chat_input::Draft::default();
+        draft.text = "正文\n/压\n后续".into();
+        draft.caret = 11;
+        draft.anchor = 11;
+        take_slash_command(&mut draft);
+        assert_eq!(draft.text, "正文\n\n后续");
+        assert_eq!(draft.caret, 7);
+
+        let mut draft = crate::chat_input::Draft::with_text("/压缩 后续");
+        take_slash_command(&mut draft);
+        assert_eq!(draft.text, "/压缩 后续", "非触发段不动");
     }
 
     /// 候选浮层状态机：触发段出现即开、查询变化即换候选、候选空即收起。

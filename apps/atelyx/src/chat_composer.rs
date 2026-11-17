@@ -113,14 +113,21 @@ pub fn composer<'a>(
         ComposerScope::Card { node } => crate::canvas_chat::is_streaming(app, node),
         ComposerScope::Panel => crate::chat_view::is_streaming(app),
     };
+    // 斜杠命令只挂面板输入区：画布卡的压缩入口在卡头，卡片输入保持纯文本
+    let slash_open =
+        matches!(scope, ComposerScope::Panel) && slash_command(draft).is_some();
     let s = scale;
     let mut inner = column![].spacing(0).width(Length::Fill);
     if let Some(picker) = picker {
         inner = inner.push(mention_picker_view(app, picker, scope, s));
     }
+    if slash_open {
+        inner = inner.push(slash_picker_view(s));
+    }
     // 自绘输入面（# 标签高亮 / 整标签交互由部件托管）
     let surface = crate::chat_input::Input::new(draft, TagSource::Refs(refs), route)
         .picker_open(picker.is_some())
+        .command_open(slash_open)
         .placeholder("输入消息，Enter 发送，Shift+Enter 换行")
         .scale(s);
     inner = inner.push(
@@ -506,6 +513,59 @@ fn model_trigger<'a>(
     }
 }
 
+/// 斜杠命令「会话压缩」的名称与英文别名（查询按子串匹配，空查询恒命中）。
+const SLASH_COMPACT_NAME: &str = "会话压缩";
+const SLASH_COMPACT_ALIAS: &str = "compact";
+
+/// 面板输入区的斜杠命令触发点：`/` 在行首且其后到光标无空白，查询命中命令名或别名。
+/// 返回 `/` 的字节位置（命令落地时从该处到光标整段从草稿移除）。
+pub(crate) fn slash_command(draft: &crate::chat_input::Draft) -> Option<usize> {
+    let at = draft.active_slash_at()?;
+    let caret = draft.caret.min(draft.text.len());
+    let query = draft.text[at + 1..caret].to_lowercase();
+    let hit = query.is_empty()
+        || SLASH_COMPACT_NAME.contains(&query)
+        || SLASH_COMPACT_ALIAS.contains(&query);
+    hit.then_some(at)
+}
+
+/// 斜杠命令浮层（输入面上方单行：图标 + 命令名 + 用途）。
+fn slash_picker_view(s: f32) -> iced::Element<'static, Message> {
+    let row = row![
+        icon("layers", (PICKER_ICON * s).clamp(9.0, 14.0), pal::ACCENT),
+        text(SLASH_COMPACT_NAME.to_string())
+            .size((pal::fs_caption() * s).max(9.0))
+            .color(pal::TEXT_PRIMARY),
+        Space::new().width(Length::Fill),
+        text("压缩以上对话内容".to_string())
+            .size((pal::fs_micro() * s).max(8.0))
+            .color(pal::TEXT_MUTED),
+    ]
+    .spacing((PICKER_ROW_GAP * s).max(2.0))
+    .align_y(iced::alignment::Vertical::Center);
+    let command = button(row)
+        .width(Length::Fill)
+        .padding(
+            Padding::ZERO
+                .horizontal((PICKER_ROW_PAD_X * s).max(2.0))
+                .vertical((PICKER_ROW_PAD_Y * s).max(2.0)),
+        )
+        .style(controls::row_style(true, pal::RADIUS_SM))
+        .on_press(Message::Chat(ChatMsg::SlashCompact));
+    container(command)
+        .width(Length::Fill)
+        .style(|_| container::Style {
+            background: Some(pal::BG_SECONDARY.into()),
+            border: border::Border {
+                width: 0.5,
+                radius: pal::RADIUS_MD.into(),
+                color: pal::BORDER,
+            },
+            ..Default::default()
+        })
+        .into()
+}
+
 /// # 引用候选浮层（输入面上方；画布卡目标与仓库文件混排，字号随缩放）。
 /// 条目为双行卡片：主行文件名（按可用宽省略，不换行）+ 次行所在文件夹；
 /// 键盘选中的项用强调底色，其余项悬停时出浅底反馈。
@@ -802,6 +862,22 @@ mod tests {
             Some(CARD_SUB_LABEL)
         );
         assert!(picker_row_h(&file("笔记/乙.md"), 1.0) > picker_row_h(&file("甲.md"), 1.0));
+    }
+
+    /// 斜杠命令只认行首触发段，查询按命令名 / 别名过滤；查询不命中或已离开行首即不出现。
+    #[test]
+    fn slash_command_matches_compact_only() {
+        let draft = crate::chat_input::Draft::with_text;
+        assert_eq!(slash_command(&draft("/")), Some(0));
+        assert_eq!(slash_command(&draft("/压")), Some(0));
+        assert_eq!(slash_command(&draft("/compact")), Some(0));
+        // 换行后行首：返回该行行首的字节位置
+        assert_eq!(slash_command(&draft("第一行\n/会")), Some(10));
+        assert_eq!(slash_command(&draft("/x")), None);
+        assert_eq!(slash_command(&draft("路径/")), None);
+        // 空草稿 / 只有空白 / 命令后跟空格都不算命令段
+        assert_eq!(slash_command(&draft("")), None);
+        assert_eq!(slash_command(&draft("/压缩 内容")), None);
     }
 
     /// 标签分栏：两侧都够放就各给固有宽；不够时短的一侧拿满、长的一侧吃余量；

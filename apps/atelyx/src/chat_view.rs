@@ -297,14 +297,6 @@ fn top_bar(app: &App, window: iced::window::Id) -> iced::Element<'_, Message> {
         }
     }
     left = left.push(Space::new().width(Length::Fill));
-    // 压缩会话历史只对「有内容的会话」有意义：空会话 / 无会话时不出现（免成无意义按钮）
-    let compactions = app
-        .chat
-        .active
-        .as_ref()
-        .and_then(|id| app.chat.sessions.iter().find(|s| s["id"] == json!(id)))
-        .map(|s| s.get("messages").and_then(Value::as_array).map(|m| m.len()).unwrap_or(0) >= 2)
-        .unwrap_or(false);
     let mut right = row![
         controls::icon_button(
             "file-plus",
@@ -324,35 +316,21 @@ fn top_bar(app: &App, window: iced::window::Id) -> iced::Element<'_, Message> {
         ),
     ]
     .spacing(4);
-    // 压缩转圈按当前会话判定：别的会话在压缩时不改变本会话按钮
-    let compacting_here = app
-        .chat
-        .active
-        .as_deref()
-        .is_some_and(|id| app.chat.compacting.as_deref() == Some(id));
-    if compactions {
-        right = right.push(if compacting_here {
-            controls::icon_button("loader", 13.0, 24.0, controls::Variant::Ghost, None, None)
-        } else if app.chat.compacting.is_some() {
-            // 压缩全局单飞：别处压缩在途时入口禁用（点击必然被拒）
-            controls::icon_button(
-                "layers",
-                13.0,
-                24.0,
-                controls::Variant::Ghost,
-                None,
-                Some((window, "另一会话正在压缩，暂不能开始新的压缩".to_string())),
-            )
-        } else {
-            controls::icon_button(
-                "layers",
-                13.0,
-                24.0,
-                controls::Variant::Ghost,
-                Some(Message::Chat(ChatMsg::Compact)),
-                Some((window, "压缩会话历史（折叠为摘要，原文保留）".to_string())),
-            )
-        });
+    // 压缩入口在输入区 `/` 命令；在途只留转圈（按当前会话判定，别的会话压缩不显示）
+    let compacting_here = app.chat.active.as_deref().is_some_and(|id| {
+        app.chat.compacting.as_deref() == Some(id)
+            || crate::canvas_chat::node_of_session(id)
+                .is_some_and(|node| crate::canvas_chat::is_compacting(app, node))
+    });
+    if compacting_here {
+        right = right.push(controls::icon_button(
+            "loader",
+            13.0,
+            24.0,
+            controls::Variant::Ghost,
+            None,
+            Some((window, "正在压缩会话历史".to_string())),
+        ));
     }
     // 只有瞬时错误可清；仅剩「未保存」时不给死按钮
     if app.chat.error.is_some() {
