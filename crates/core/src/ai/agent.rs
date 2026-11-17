@@ -207,7 +207,7 @@ pub fn args_summary(args: &Value) -> String {
 // ===== 历史转换（纯函数）=====
 
 /// 会话消息（disk 形状）→ 线上消息序列。
-/// 语义：user 原样（refs 携带的文本段并入）；assistant 按 steps 展开——每工具轮一条
+/// 语义：user 原样；assistant 按 steps 展开——每工具轮一条
 /// assistant(tool_calls) + 逐个 role:tool；思考步不进上下文；纯叙述轮降级为普通文本；
 /// 最终正文收尾一条 assistant；`[错误]` 占位与 system 角色过滤；压缩注解非破坏折叠
 /// （锚点及其前替换为摘要块，锚点缺失退回全历史）。
