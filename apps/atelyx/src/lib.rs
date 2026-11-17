@@ -1250,7 +1250,7 @@ impl ImageRetry {
         std::time::Duration::from_millis(1000u64 << shift)
     }
 
-    fn exhausted(&self) -> bool {
+    pub(crate) fn exhausted(&self) -> bool {
         self.attempts >= Self::MAX_ATTEMPTS
     }
 }
@@ -1983,13 +1983,6 @@ impl App {
         plugin_actions::rebuild_registry(&mut app);
         boot = boot.chain(plugin_actions::refresh_projection(&mut app));
         (app, boot)
-    }
-
-    /// 图片重试用尽（附件与笔记缩略图共用同一失败表）。
-    pub(crate) fn image_failed(&self, key: &str) -> bool {
-        self.note_images_failed
-            .get(key)
-            .is_some_and(|retry| retry.exhausted())
     }
 
     /// 追加一条通知（右下角；容量上限防堆积，溢出优先淘汰最旧的非常驻条）。

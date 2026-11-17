@@ -433,7 +433,7 @@ fn message_flow(app: &App, window: iced::window::Id) -> iced::Element<'_, Messag
     let ctx = crate::chat_stream::StreamCtx {
         docs: &app.chat.docs,
         images: &app.note_images,
-        app,
+        images_failed: &app.note_images_failed,
         expanded: canvas_view.map_or(&app.chat.expanded, |v| &v.expanded),
         theme: &app.theme,
         scale: 1.0,

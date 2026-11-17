@@ -1,6 +1,6 @@
 //! 对话消息流渲染段：面板消息区与画布对话卡共用的可嵌入纯渲染层。
-//! 状态（markdown 解析缓存 / 图片句柄 / 折叠块展开集）经 [`StreamCtx`] 显式注入；
-//! 消息操作钮由操作钩子提供，只读流（画布）不传钩子即无按钮。
+//! 文档缓存 / 图片句柄 / 折叠展开集 / 载入失败谓词经 [`StreamCtx`] 显式注入；
+//! 消息操作钮由操作钩子提供（只读场景传 None）。
 
 use std::collections::{HashMap, HashSet};
 
@@ -40,8 +40,8 @@ pub struct StreamCtx<'a> {
     pub docs: &'a HashMap<u64, atelyx_core::markdown::MarkdownDocument>,
     /// 图片句柄缓存（键 = 相对路径；未命中回落占位块）。
     pub images: &'a crate::markdown_view::ImageHandles,
-    /// 应用状态：附件缩略图查失败重试表（渲染层不复制失败集合）。
-    pub app: &'a crate::App,
+    /// 附件图片失败重试表（键 = 相对路径；用尽即显示失败占位）。
+    pub images_failed: &'a HashMap<String, crate::ImageRetry>,
     /// 折叠块展开集（键 = 消息 id + 步骤序）。
     pub expanded: &'a HashSet<String>,
     /// 主题（markdown 渲染取色）。
@@ -250,7 +250,11 @@ fn attachment_thumb<'a>(ctx: &StreamCtx<'a>, rel: &str) -> iced::Element<'a, Mes
             .height(Length::Fixed(160.0 * s))
             .filter_method(iced::widget::image::FilterMethod::Linear)
             .into(),
-        None => placeholder(ctx.app.image_failed(rel)),
+        None => placeholder(
+            ctx.images_failed
+                .get(rel)
+                .is_some_and(|retry| retry.exhausted()),
+        ),
     }
 }
 
