@@ -1,6 +1,6 @@
 //! 对话消息流渲染段：面板消息区与画布对话卡共用的可嵌入纯渲染层。
-//! 文档缓存 / 图片句柄 / 折叠展开集 / 载入失败谓词经 [`StreamCtx`] 显式注入；
-//! 消息操作钮由操作钩子提供（只读场景传 None）。
+//! 文档缓存 / 图片句柄 / 折叠展开集 / 失败重试表经 [`StreamCtx`] 显式注入；
+//! 消息操作钮由操作钩子提供，钩子内部按只读与消息条件决定是否出钮。
 
 use std::collections::{HashMap, HashSet};
 
@@ -30,7 +30,7 @@ pub enum ToggleRoute {
     Canvas,
 }
 
-/// 消息操作按钮行钩子：参数 = (消息, 是否 assistant)。只读流传 `None`。
+/// 消息操作按钮行钩子：参数 = (消息, 是否 assistant)，是否出钮由钩子按只读等条件决定。
 pub type ActionsHook<'a> =
     Box<dyn for<'m> Fn(&'m Value, bool) -> iced::Element<'a, Message> + 'a>;
 
@@ -48,7 +48,7 @@ pub struct StreamCtx<'a> {
     pub theme: &'a iced::Theme,
     /// 渲染缩放系数（画布卡浮层传视口缩放；面板传 1.0）：字号、图标与留白均按此等比。
     pub scale: f32,
-    /// 消息操作按钮行钩子（None = 只读流）。
+    /// 消息操作按钮行钩子（None = 该渲染实例不出操作钮）。
     pub actions: Option<ActionsHook<'a>>,
     /// 流式中的消息 id（None = 无流式态；画布只读流恒 None）。
     pub streaming_id: Option<&'a str>,

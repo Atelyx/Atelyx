@@ -498,11 +498,11 @@ pub fn load_vault(app: &mut App, root: &std::path::Path) {
 pub fn load_space_sessions(app: &mut App) -> iced::Task<Message> {
     prepare_load(app);
     let Some(session) = crate::space_actions::session_of(app) else {
-        app.chat.error = Some("会话装载失败：协作空间会话缺失".to_string());
+        app.chat.error = Some("会话装载失败：协作空间会话缺失 · 请重新进入空间".to_string());
         return iced::Task::none();
     };
     let Some(token) = app.space_token.clone() else {
-        app.chat.error = Some("会话装载失败：协作空间未登录".to_string());
+        app.chat.error = Some("会话装载失败：协作空间未登录 · 请重新登录后重试".to_string());
         return iced::Task::none();
     };
     let io = match atelyx_core::ai::session_io::space_io(
@@ -512,7 +512,7 @@ pub fn load_space_sessions(app: &mut App) -> iced::Task<Message> {
     ) {
         Ok(io) => io,
         Err(e) => {
-            app.chat.error = Some(format!("会话装载失败：{e}"));
+            app.chat.error = Some(format!("会话装载失败：{e} · 请重新进入空间或重试"));
             return iced::Task::none();
         }
     };
@@ -612,7 +612,7 @@ fn collect_doc_keys(messages: &[Value], keys: &mut HashSet<u64>) {
 }
 
 /// 退出前落盘会话真源：写链是防抖的，未 flush 的变更会随进程结束丢失。
-/// 先停 AI run——其在途提交会不断产出新脏，否则 flush 要等到模型输出结束，关窗被挂住。
+/// 先停 AI run，让中断收尾（工具行归一、空占位移除）有机会赶在进程退出前落盘。
 pub fn flush_sessions() -> iced::Task<Message> {
     hub().stop_all();
     let store = Arc::clone(store());
@@ -1146,7 +1146,7 @@ fn on_send(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
                 Ok(()) => apply_snapshot(app, store().snapshot()),
                 Err(e) => {
                     app.chat.error = Some(format!(
-                        "会话装载失败：{e} · 对话列表未载入；可切回原仓库或重启应用"
+                        "会话装载失败：{e} · 对话列表未载入；可重新进入空间或重启应用"
                     ))
                 }
             }
@@ -1480,6 +1480,14 @@ fn send_now(app: &mut App, space_prompt: Option<String>) -> iced::Task<Message> 
         .is_some_and(|id| Some(id) == app.chat.active.as_deref())
     {
         app.chat.error = Some("该会话正在压缩，消息未发送".to_string());
+        restore!();
+        return iced::Task::none();
+    }
+    // 只读空间写不了空间内容：图片附件在会话创建前先拦；纯文本对话写本人元数据，不受限
+    if !images.is_empty()
+        && matches!(&app.repo_kind, crate::RepoKind::Space(space) if !space.role.can_write())
+    {
+        app.notify(crate::NoticeLevel::Warning, "只读身份，无法发送图片");
         restore!();
         return iced::Task::none();
     }
