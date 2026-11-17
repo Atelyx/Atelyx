@@ -437,7 +437,8 @@ pub async fn stream(
         return Err(StreamError::Http(status.as_u16(), body));
     }
     let mut accum = StreamAccum::new();
-    let mut buffer = String::new();
+    // 字节缓冲：多字节字符可能被网络块边界切开，只在完整帧边界解码
+    let mut buffer: Vec<u8> = Vec::new();
     let mut bytes = resp.bytes_stream();
     let mut finish: Option<StopReason> = None;
     loop {
@@ -462,11 +463,8 @@ pub async fn stream(
                 Ok(Some(Ok(bytes))) => bytes,
             }
         };
-        buffer.push_str(&String::from_utf8_lossy(&chunk));
-        // 按空行分帧（兼容 \r\n\r\n）
-        while let Some(pos) = find_frame_end(&buffer) {
-            let frame = buffer[..pos.0].to_string();
-            buffer.drain(..pos.1);
+        buffer.extend_from_slice(&chunk);
+        for frame in take_frames(&mut buffer) {
             for event in feed_frame(&mut accum, &frame) {
                 match event {
                     StreamEvent::Finish { reason } => finish = Some(reason),
@@ -479,8 +477,9 @@ pub async fn stream(
         }
     }
     // 流结束但未收到 Finish：残留兜底（网关忽略 stream:true 返回整 JSON 等）
-    if !buffer.trim().is_empty() {
-        for event in feed_frame(&mut accum, &buffer) {
+    let tail = String::from_utf8_lossy(&buffer).into_owned();
+    if !tail.trim().is_empty() {
+        for event in feed_frame(&mut accum, &tail) {
             match event {
                 StreamEvent::Finish { reason } => finish = Some(reason),
                 other => on_event(other),
@@ -512,9 +511,27 @@ fn feed_frame(accum: &mut StreamAccum, frame: &str) -> Vec<StreamEvent> {
     events
 }
 
+/// 取出完整帧：只在帧边界解码 UTF-8，跨块被切开的多字节字符不受影响。
+/// 完整帧仍解码失败说明上游内容损坏：按 lossy 保留可读文本并留日志，不丢整帧。
+fn take_frames(buffer: &mut Vec<u8>) -> Vec<String> {
+    let mut out = Vec::new();
+    while let Some((end, consume)) = find_frame_end(buffer) {
+        let raw = &buffer[..end];
+        let frame = match std::str::from_utf8(raw) {
+            Ok(frame) => frame.to_string(),
+            Err(e) => {
+                eprintln!("SSE 帧不是合法 UTF-8（{e}）：按替换字符保留");
+                String::from_utf8_lossy(raw).into_owned()
+            }
+        };
+        buffer.drain(..consume);
+        out.push(frame);
+    }
+    out
+}
+
 /// 找下一帧边界：返回（内容终点，消费长度），兼容 `\n\n` 与 `\r\n\r\n`。
-fn find_frame_end(buffer: &str) -> Option<(usize, usize)> {
-    let bytes = buffer.as_bytes();
+fn find_frame_end(bytes: &[u8]) -> Option<(usize, usize)> {
     let mut i = 0;
     while i + 1 < bytes.len() {
         if bytes[i] == b'\n' {
@@ -660,6 +677,24 @@ mod tests {
             "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\r\n\r\n:keepalive\n\n",
         );
         assert_eq!(events, vec![StreamEvent::TextDelta("a".into())]);
+    }
+
+    #[test]
+    fn utf8_split_across_chunks_decodes_at_frame_boundary() {
+        // 网络块可能在多字节字符中间切开：帧边界出现前不得解码，否则「你」会变替换字符
+        let frame = "data: {\"choices\":[{\"delta\":{\"content\":\"你好\"}}]}\n\n";
+        let bytes = frame.as_bytes();
+        let cut = frame.find('你').expect("fixture 含中文") + 1;
+        let mut buffer: Vec<u8> = Vec::new();
+        buffer.extend_from_slice(&bytes[..cut]);
+        assert!(take_frames(&mut buffer).is_empty());
+        buffer.extend_from_slice(&bytes[cut..]);
+        let frames = take_frames(&mut buffer);
+        assert_eq!(frames.len(), 1);
+        let mut acc = StreamAccum::new();
+        let events = feed_frame(&mut acc, &frames[0]);
+        assert_eq!(events, vec![StreamEvent::TextDelta("你好".into())]);
+        assert!(buffer.is_empty());
     }
 
     #[test]
