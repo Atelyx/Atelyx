@@ -446,7 +446,7 @@ fn model_picker<'a>(app: &'a App, draft: &AiDraft) -> Element<'a, Message> {
     }
     if !any_model {
         list = list.push(
-            text("暂无模型：先在「设置 → AI → 供应商」添加")
+            text("暂无模型：先在「设置 → AI 设置 → 供应商」添加")
                 .size(pal::fs_micro())
                 .color(pal::TEXT_MUTED),
         );

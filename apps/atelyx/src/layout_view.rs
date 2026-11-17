@@ -202,6 +202,7 @@ pub(crate) enum PopupState {
     ChatAgentMenu { scope: crate::chat_composer::ConfigScope },
     /// 设置-AI：话题自动命名模式。
     AiNamingMenu,
+    AiDefaultModelMenu,
     /// 设置-AI：Agent 系统提示词选择。
     AiAgentPromptMenu,
     /// 设置-AI：删除供应商二段确认（pane 1 = 确认）。

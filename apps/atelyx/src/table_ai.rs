@@ -104,6 +104,8 @@ pub struct TableAiState {
     pub auto_due: BTreeSet<(String, String)>,
     /// 本端新增、尚未生成过结果的行（「新增行时生成」的触发范围）。
     pub fresh_rows: HashSet<String>,
+    /// 自动生成因缺模型被跳过时只提示一次（避免每次保存都弹提示）。
+    model_hint_shown: bool,
 }
 
 impl TableAiState {
@@ -499,8 +501,10 @@ fn config_model(app: &App, config: &AiFieldConfig) -> Result<(String, String), S
             {
                 Ok((provider.clone(), model.clone()))
             }
-            _ => Err("未设置模型：在 AI 字段设置里选择模型，或在「设置 → AI」里设置默认模型"
-                .to_string()),
+            _ => Err(
+                "未设置模型：在 AI 字段设置里选择模型，或在「设置 → AI 设置 → 模型服务」选择默认模型"
+                    .to_string(),
+            ),
         },
     }
 }
@@ -877,13 +881,40 @@ pub fn drain_auto(app: &mut App) -> Task<Message> {
     if app.table.as_ref().is_none_or(|s| s.view.ai.batch.is_some()) {
         return Task::none();
     }
-    if app.repo_config.model.is_none() || app.repo_config.model_provider_id.is_none() {
-        return Task::none();
-    }
     let Some(session) = app.table.as_ref() else { return Task::none() };
     let Some((field_id, _)) = session.view.ai.auto_due.iter().next().cloned() else {
         return Task::none();
     };
+    // 字段自身模型优先，缺省回落仓库默认模型；两者都缺时保留待办并提示一次，不静默丢弃
+    let resolved = session
+        .data
+        .fields
+        .iter()
+        .find(|field| field.id == field_id)
+        .and_then(|field| field.ai.as_ref())
+        .map(|config| config_model(app, config));
+    if !matches!(resolved, Some(Ok(_))) {
+        let first_hint = app
+            .table
+            .as_mut()
+            .map(|session| {
+                let ai = &mut session.view.ai;
+                if ai.model_hint_shown {
+                    false
+                } else {
+                    ai.model_hint_shown = true;
+                    true
+                }
+            })
+            .unwrap_or(false);
+        if first_hint {
+            app.notify(
+                crate::ui::notify::Level::Info,
+                "自动生成未执行：字段与仓库默认模型都未设置；请到「设置 → AI 设置 → 模型服务」选择默认模型",
+            );
+        }
+        return Task::none();
+    }
     let rows: Vec<String> = session
         .view
         .ai

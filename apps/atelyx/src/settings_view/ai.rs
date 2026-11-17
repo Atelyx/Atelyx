@@ -277,6 +277,8 @@ pub enum AiMsg {
     // 模型服务
     NamingModePick(NamingMode),
     NamingModelPick(Option<(String, String)>),
+    /// 仓库级默认模型（表格 AI 字段与「跟随默认」使用）。
+    DefaultModelPick(String, String),
     /// 画布对话产出自动落卡开关。
     CanvasMaterializeToggle,
     // Agent
@@ -810,6 +812,15 @@ pub fn update(app: &mut App, msg: AiMsg) -> Task<Message> {
             app.patch_repo_config(serde_json::json!({
                 "autoNamingModel": { "providerId": pid, "model": mid },
             }))
+        }
+        AiMsg::DefaultModelPick(pid, mid) => {
+            app.dismiss_popup();
+            if readonly(app) {
+                return Task::none();
+            }
+            app.repo_config.model = Some(mid.clone());
+            app.repo_config.model_provider_id = Some(pid.clone());
+            app.patch_repo_config(serde_json::json!({ "model": mid, "modelProviderId": pid }))
         }
         AiMsg::CanvasMaterializeToggle => {
             if readonly(app) {
@@ -1625,6 +1636,17 @@ fn models_view(app: &App, window: iced::window::Id) -> Element<'static, Message>
         .height(Length::Fixed(220.0)));
     }
 
+    col = col.push(super::group_head("默认模型", "", true));
+    let default_trigger = controls::dropdown_trigger(
+        &default_model_label(app),
+        FORM_W,
+        (!ro && model_count > 0).then(|| open_popup(app, window, PopupState::AiDefaultModelMenu)),
+    );
+    col = col.push(super::setting_row(
+        "默认模型",
+        "表格 AI 字段与「跟随默认」的对话使用；未设置时相关功能会提示先选择",
+        default_trigger,
+    ));
     col = col.push(super::group_head("话题自动命名", "", true));
     let mode = naming_mode(app);
     let mode_trigger = controls::dropdown_trigger(
@@ -1654,6 +1676,37 @@ fn models_view(app: &App, window: iced::window::Id) -> Element<'static, Message>
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
+}
+
+/// 默认模型显示名：未设置或配置已失效时提示未设置，不展示失效的旧值。
+fn default_model_label(app: &App) -> String {
+    let Some(model) = app
+        .repo_config
+        .model
+        .as_deref()
+        .filter(|m| !m.trim().is_empty())
+    else {
+        return "未设置".to_string();
+    };
+    let Some(pid) = app
+        .repo_config
+        .model_provider_id
+        .as_deref()
+        .filter(|p| !p.trim().is_empty())
+    else {
+        return "未设置".to_string();
+    };
+    let exists = app
+        .repo_config
+        .providers
+        .iter()
+        .flatten()
+        .any(|p| p.id == pid && p.models.iter().any(|m| m.id == model));
+    if exists {
+        format!("{} / {model}", provider_name(app, pid))
+    } else {
+        "未设置（原配置已失效）".to_string()
+    }
 }
 
 fn provider_name(app: &App, id: &str) -> String {

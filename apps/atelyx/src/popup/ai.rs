@@ -196,6 +196,39 @@ pub(super) fn entries<'a>(app: &'a App, state: &PopupState, pane: usize, window:
             })
             .collect()
         }
+        PopupState::AiDefaultModelMenu => {
+            let current = app
+                .repo_config
+                .model
+                .as_deref()
+                .zip(app.repo_config.model_provider_id.as_deref());
+            let mut entries: Vec<(usize, MenuEntry<Message>)> = Vec::new();
+            for provider in app.repo_config.providers.iter().flatten() {
+                for model in &provider.models {
+                    let picked = matches!(
+                        current,
+                        Some((current_model, current_provider))
+                            if current_provider == provider.id && current_model == model.id
+                    );
+                    let label = model.nickname.as_deref().unwrap_or(&model.id);
+                    entries.push((
+                        0,
+                        MenuEntry::check(
+                            format!("{} / {label}", provider.name),
+                            picked,
+                            Message::Ai(ai::AiMsg::DefaultModelPick(
+                                provider.id.clone(),
+                                model.id.clone(),
+                            )),
+                        ),
+                    ));
+                }
+            }
+            if entries.is_empty() {
+                entries.push((0, MenuEntry::Custom(popup_hint("先在「供应商」添加模型"), 18.0)));
+            }
+            entries
+        }
         PopupState::AiAgentPromptMenu => {
             // 弹层由 Agent 表单触发：当前值以草稿优先（可能含未保存的改动）
             let current = app.ai.agent_draft.as_ref().and_then(|d| d.prompt_file.clone());
@@ -286,6 +319,7 @@ pub(super) fn width(state: &PopupState) -> f32 {
         PopupState::ChatAgentMenu { .. } => 200.0,
         PopupState::ChatPlusMenu { .. } => 176.0,
         PopupState::AiNamingMenu => 144.0,
+        PopupState::AiDefaultModelMenu => 208.0,
         PopupState::AiAgentPromptMenu => 208.0,
         PopupState::AiProviderDeleteMenu | PopupState::AiAgentDeleteMenu { .. } => 208.0,
         PopupState::AiSearchProviderMenu => 144.0,

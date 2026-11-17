@@ -73,6 +73,7 @@ pub(crate) fn element<'a>(
         | PopupState::ChatPlusMenu { .. }
         | PopupState::ChatModelMenu { .. }
         | PopupState::AiNamingMenu
+        | PopupState::AiDefaultModelMenu
         | PopupState::AiAgentPromptMenu
         | PopupState::AiProviderDeleteMenu
         | PopupState::AiAgentDeleteMenu { .. }
@@ -134,6 +135,7 @@ pub(crate) fn width(state: &PopupState) -> f32 {
         | PopupState::ChatPlusMenu { .. }
         | PopupState::ChatModelMenu { .. }
         | PopupState::AiNamingMenu
+        | PopupState::AiDefaultModelMenu
         | PopupState::AiAgentPromptMenu
         | PopupState::AiProviderDeleteMenu
         | PopupState::AiAgentDeleteMenu { .. }
