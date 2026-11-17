@@ -599,7 +599,13 @@ pub fn update(app: &mut App, msg: AiMsg) -> Task<Message> {
                 .collect();
             if cleared_refs > 0 {
                 app.agents = agents.clone();
-                app.ai.agent_draft = None;
+                // 与删除同口径：选中态有效就重建草稿，否则右栏表单编辑全被丢弃
+                app.ai.agent_draft = app
+                    .ai
+                    .agent_sel
+                    .as_ref()
+                    .and_then(|id| app.agents.iter().find(|a| &a.id == id))
+                    .map(agent_draft_of);
                 tasks.push(save_agents(app, agents));
                 app.notify(
                     NoticeLevel::Info,
