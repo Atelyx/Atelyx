@@ -1972,7 +1972,14 @@ pub struct PendingImage {
 /// 发送前置检查（会话真源已装载）。
 fn check_ready(app: &App) -> Result<(), String> {
     if app.chat.session_key.is_none() {
-        return Err("会话未装载：请先打开仓库或进入协作空间".to_string());
+        // 仓库可能已打开而会话源未装载（装载失败态）：给对应的重试入口，不说「请先打开」
+        return Err(match app.repo_kind {
+            RepoKind::Local if app.vault_root.is_some() => {
+                "会话未装载：请重新打开仓库或重启应用".to_string()
+            }
+            RepoKind::Space(_) => "会话未装载：请重新进入协作空间或重启应用".to_string(),
+            _ => "会话未装载：请先打开仓库或进入协作空间".to_string(),
+        });
     }
     if matches!(app.repo_kind, RepoKind::Local) && app.vault_root.is_none() {
         return Err("仓库未打开".to_string());
