@@ -59,6 +59,8 @@ pub struct AiBatch {
     pub first_error: Option<String>,
     pub running: usize,
     pub cancelled: bool,
+    /// 取消来源 = 用户显式停止（收尾按此清自动待办；配置变更取消不在此列）
+    pub stopped: bool,
     pub pushed_undo: bool,
     pub spec: AiRunSpec,
     /// 发起时冻结的字段配置（在途中改配置 = 结果作废）。
@@ -483,6 +485,7 @@ pub fn launch(app: &mut App, field_id: &str, rows: Vec<String>, system: Option<S
         first_error: None,
         running: 0,
         cancelled: false,
+        stopped: false,
         pushed_undo: false,
         spec,
         config,
@@ -799,18 +802,22 @@ pub fn finish(app: &mut App) -> Task<Message> {
             batch.failed,
             batch.skipped,
             batch.cancelled,
+            batch.stopped,
             batch.total,
             batch.first_error,
         )
     };
-    let (done, failed, skipped, cancelled, total, first_error) = summary;
+    let (done, failed, skipped, cancelled, stopped, total, first_error) = summary;
     if cancelled {
-        // 显式停止：未消费的自动待办一并作废，否则收尾会立刻再开一批
-        if let Some(session) = app.table.as_mut() {
-            session.view.ai.auto_due.clear();
+        // 只有用户显式停止才作废未消费的自动待办；配置变更取消的批次继续跑待办
+        if stopped {
+            if let Some(session) = app.table.as_mut() {
+                session.view.ai.auto_due.clear();
+            }
+            app.notify(crate::ui::notify::Level::Warning, format!("已停止生成（完成 {done}/{total} 格）"));
+            return Task::none();
         }
-        app.notify(crate::ui::notify::Level::Warning, format!("已停止生成（完成 {done}/{total} 格）"));
-        return Task::none();
+        return drain_auto(app);
     } else if failed == 0 && skipped == 0 {
         app.notify(crate::ui::notify::Level::Success, format!("AI 生成完成：{done} 格"));
     } else {
@@ -836,10 +843,12 @@ pub fn stop(app: &mut App) {
         let Some(session) = app.table.as_mut() else { return };
         let Some(batch) = session.view.ai.batch.as_mut() else { return };
         batch.cancelled = true;
+        batch.stopped = true;
         batch.queue.clear();
         if batch.running == 0 {
             session.view.ai.batch = None;
             session.view.ai.runs.clear();
+            session.view.ai.auto_due.clear();
             true
         } else {
             false
