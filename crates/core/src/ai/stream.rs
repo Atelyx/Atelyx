@@ -215,6 +215,8 @@ impl StreamAccum {
                     }
                 }
                 if let Some(calls) = message.get("tool_calls").and_then(Value::as_array) {
+                    // 整包兜底只有工具调用、没有正文：也算流已开始（EOF 收尾据此补发调用）
+                    self.saw_event = self.saw_event || !calls.is_empty();
                     for call in calls {
                         let index = call.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
                         let slot = self.tool_slots.entry(index).or_default();
