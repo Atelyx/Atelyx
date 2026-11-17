@@ -1985,6 +1985,13 @@ impl App {
         (app, boot)
     }
 
+    /// 图片重试用尽（附件与笔记缩略图共用同一失败表）。
+    pub(crate) fn image_failed(&self, key: &str) -> bool {
+        self.note_images_failed
+            .get(key)
+            .is_some_and(|retry| retry.exhausted())
+    }
+
     /// 追加一条通知（右下角；容量上限防堆积，溢出优先淘汰最旧的非常驻条）。
     pub(crate) fn notify(&mut self, level: NoticeLevel, text: impl Into<String>) {
         self.notify_seq += 1;

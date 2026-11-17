@@ -2279,6 +2279,7 @@ fn conversation_card_overlay<'a>(
     let ctx = crate::chat_stream::StreamCtx {
         docs: &session.view.docs,
         images: &app.note_images,
+        app,
         expanded: &session.view.expanded,
         theme: &app.theme,
         scale: zoom,

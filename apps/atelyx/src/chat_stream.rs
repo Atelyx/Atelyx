@@ -40,6 +40,8 @@ pub struct StreamCtx<'a> {
     pub docs: &'a HashMap<u64, atelyx_core::markdown::MarkdownDocument>,
     /// 图片句柄缓存（键 = 相对路径；未命中回落占位块）。
     pub images: &'a crate::markdown_view::ImageHandles,
+    /// 应用状态：附件缩略图查失败重试表（渲染层不复制失败集合）。
+    pub app: &'a crate::App,
     /// 折叠块展开集（键 = 消息 id + 步骤序）。
     pub expanded: &'a HashSet<String>,
     /// 主题（markdown 渲染取色）。
@@ -216,22 +218,31 @@ fn user_bubble<'a>(m: &'a Value, scope: u64, ctx: &StreamCtx<'a>) -> iced::Eleme
 /// 附件缩略图（上限 160px 见方；未载入显示占位块）。
 fn attachment_thumb<'a>(ctx: &StreamCtx<'a>, rel: &str) -> iced::Element<'a, Message> {
     let s = ctx.scale;
-    let placeholder = || {
-        container(icon("image", 20.0 * s, pal::TEXT_MUTED))
-            .width(96.0 * s)
-            .height(64.0 * s)
-            .align_y(iced::alignment::Vertical::Center)
-            .align_x(iced::alignment::Horizontal::Center)
-            .style(|_| container::Style {
-                background: Some(pal::BG_TERTIARY.into()),
-                border: border::Border {
-                    width: 0.5,
-                    radius: pal::RADIUS_SM.into(),
-                    color: pal::BORDER,
-                },
-                ..Default::default()
-            })
-            .into()
+    let placeholder = |failed: bool| {
+        // 占位与成品同尺寸（160），载入完成时不引发行高跳变；失败态写明原因
+        let body: iced::Element<'a, Message> = if failed {
+            text("图片加载失败")
+                .size((pal::fs_micro() * s).max(9.0))
+                .color(pal::TEXT_MUTED)
+                .into()
+        } else {
+            icon("image", 20.0 * s, pal::TEXT_MUTED).into()
+        };
+        container(body)
+        .width(160.0 * s)
+        .height(160.0 * s)
+        .align_y(iced::alignment::Vertical::Center)
+        .align_x(iced::alignment::Horizontal::Center)
+        .style(|_| container::Style {
+            background: Some(pal::BG_TERTIARY.into()),
+            border: border::Border {
+                width: 0.5,
+                radius: pal::RADIUS_SM.into(),
+                color: pal::BORDER,
+            },
+            ..Default::default()
+        })
+        .into()
     };
     match ctx.images.get(rel) {
         Some(handle) => iced::widget::image(handle.clone())
@@ -239,7 +250,7 @@ fn attachment_thumb<'a>(ctx: &StreamCtx<'a>, rel: &str) -> iced::Element<'a, Mes
             .height(Length::Fixed(160.0 * s))
             .filter_method(iced::widget::image::FilterMethod::Linear)
             .into(),
-        None => placeholder(),
+        None => placeholder(ctx.app.image_failed(rel)),
     }
 }
 

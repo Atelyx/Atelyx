@@ -430,6 +430,12 @@ fn agent_trigger<'a>(
                 .wrapping(Wrapping::None)
                 .color(pal::TEXT_SECONDARY),
         );
+    } else {
+        // 窄宽整段隐藏标签：退化为图标时悬停仍给全名
+        truncated = Some(full.clone());
+    }
+    if locked {
+        truncated = Some(format!("{full}（对端正在编辑该卡配置，暂不可改）"));
     }
     content = content.push(icon("chevron-down", trigger_chevron_px(s), pal::TEXT_MUTED));
     let btn = button(content)
@@ -467,7 +473,7 @@ fn model_trigger<'a>(
     if let Some(w) = label_w {
         let shown = model_label_text(&model, &effort, w, label_font_size(s));
         if shown != full {
-            truncated = Some(full);
+            truncated = Some(full.clone());
         }
         content = content.push(
             text(shown)
@@ -475,6 +481,12 @@ fn model_trigger<'a>(
                 .wrapping(Wrapping::None)
                 .color(pal::TEXT_SECONDARY),
         );
+    } else {
+        // 窄宽整段隐藏标签：退化为图标时悬停仍给全名
+        truncated = Some(full.clone());
+    }
+    if locked {
+        truncated = Some(format!("{full}（对端正在编辑该卡配置，暂不可改）"));
     }
     content = content.push(icon("chevron-down", trigger_chevron_px(s), pal::TEXT_MUTED));
     let btn = button(content)
