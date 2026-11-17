@@ -551,22 +551,27 @@ fn action_row<'a>(
             22.0,
             controls::Variant::Ghost,
             Some(Message::Chat(ChatMsg::Rollback(message_id.clone()))),
-            Some((window, "回到此处（该消息之后转为新话题）".to_string())),
+            Some((window, "删除此消息之后的全部消息（不可恢复）".to_string())),
         ));
         // 重新生成回复常驻显示（中断 / 历史消息位置不消失）；仅在「最后一条 + 非流式」时可点
         let actionable = is_last_message(app, m) && !is_streaming(app);
+        let regen_tip = if actionable {
+            "重新生成回复"
+        } else {
+            "重新生成回复（仅最后一条消息、非生成中可点）"
+        };
         row = row.push(controls::icon_button(
             "refresh",
             12.0,
             22.0,
             controls::Variant::Ghost,
             actionable.then(|| Message::Chat(ChatMsg::Regenerate)),
-            Some((window, "重新生成回复".to_string())),
+            Some((window, regen_tip.to_string())),
         ));
     }
     if app.chat.rollback_confirm.as_deref() == Some(message_id.as_str()) {
         row = row.push(
-            button(text("确认回滚？").size(pal::fs_micro()).color(pal::DANGER))
+            button(text("删除其后消息？").size(pal::fs_micro()).color(pal::DANGER))
                 .padding(4.0)
                 .style(controls::row_style(false, pal::RADIUS_XS))
                 .on_press(Message::Chat(ChatMsg::Rollback(message_id.clone()))),

@@ -193,7 +193,7 @@ pub(crate) fn regenerate<S: ChatStore>(
         }
     };
     if let Err(e) = store.truncate_to(app, &mut history) {
-        store.set_error(app, format!("回退失败：{e}"));
+        store.set_error(app, format!("重新生成失败：{e}"));
         return iced::Task::none();
     }
     // 面板按落盘真源回读（正文是磁盘事实），回读后再重拼注入块
@@ -219,7 +219,7 @@ pub(crate) fn rollback<S: ChatStore>(
     };
     let mut history = messages[..keep].to_vec();
     if let Err(e) = store.truncate_to(app, &mut history) {
-        store.set_error(app, format!("回滚失败：{e}"));
+        store.set_error(app, format!("删除其后消息失败：{e}"));
         return iced::Task::none();
     }
     store.refresh(app, ChatAction::Rollback);

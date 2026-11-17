@@ -2450,7 +2450,7 @@ fn card_action_row<'a>(
                 node: node_id.to_string(),
                 message_id: message_id.clone(),
             }))),
-            Some((window, "回到此处（该消息之后转为新话题）".to_string())),
+            Some((window, "删除此消息之后的全部消息（不可恢复）".to_string())),
         ));
         row = row.push(controls::icon_button(
             "columns-2",
@@ -2478,7 +2478,7 @@ fn card_action_row<'a>(
     }
     if confirm {
         row = row.push(
-            iced::widget::button(text("确认回滚？").size(pal::fs_micro()).color(pal::DANGER))
+            iced::widget::button(text("删除其后消息？").size(pal::fs_micro()).color(pal::DANGER))
                 .padding(4.0)
                 .style(controls::row_style(false, pal::RADIUS_XS))
                 .on_press(Message::Canvas(CanvasMsg::Chat(CanvasChatMsg::Rollback {
