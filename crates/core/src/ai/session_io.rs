@@ -39,7 +39,8 @@ pub trait SessionIo: Send + Sync {
     fn write_messages(&self, file: &str, content: &str) -> Result<(), String>;
 
     /// 追加消息：仅当当前内容与 `base` 一致时才落盘（不一致返回 `Err`，由调用方回落全量重写）。
-    fn append_messages(&self, file: &str, base: &str, tail: &str) -> Result<(), String>;
+    /// 追加行；`Ok(Some(content))` = 并发漂移后按合并内容整值写回，实际落盘内容由调用方接管基线。
+    fn append_messages(&self, file: &str, base: &str, tail: &str) -> Result<Option<String>, String>;
 
     fn read_session_meta(&self, file: &str) -> Result<Option<ChatSessionMeta>, String>;
 
@@ -140,12 +141,12 @@ impl SessionIo for LocalSessionIo {
         vault::write_chat_messages_file(&self.root, file, content)
     }
 
-    fn append_messages(&self, file: &str, base: &str, tail: &str) -> Result<(), String> {
+    fn append_messages(&self, file: &str, base: &str, tail: &str) -> Result<Option<String>, String> {
         let existing = vault::read_chat_messages_file(&self.root, file)?;
         if !matches_append_base(&existing, base) {
             return Err("磁盘内容与追加基线不一致".to_string());
         }
-        vault::append_chat_messages_raw(&self.root, file, tail)
+        vault::append_chat_messages_raw(&self.root, file, tail).map(|_| None)
     }
 
     fn read_session_meta(&self, file: &str) -> Result<Option<ChatSessionMeta>, String> {
@@ -331,12 +332,14 @@ impl SessionIo for SpaceSessionIo {
         self.meta_put(&format!("{META_MESSAGES_PREFIX}{id}"), &with_trailing_newline(content))
     }
 
-    fn append_messages(&self, file: &str, base: &str, tail: &str) -> Result<(), String> {
+    fn append_messages(&self, file: &str, base: &str, tail: &str) -> Result<Option<String>, String> {
         let id = message_file_id(file)?;
         let key = format!("{META_MESSAGES_PREFIX}{id}");
-        // 元数据无原子追加契约：读→整值写回→回读校验。写回后被另一设备覆盖时，
-        // 保留其内容并把本次新增行按消息 id 接上重试（有界），不静默丢并发消息。
+        // 元数据无原子追加 / 条件写契约：读→整值写回→回读校验。写回后被另一设备
+        // 覆盖时保留其内容、把本次新增行按 id 接上重试（有界）。残留窗口：读之后、
+        // 写之前他端写入仍会被本次整值覆盖，协议补条件写前无法根治。
         let mut body = appended_body(base, tail);
+        let mut merged = false;
         let mut check_base = true;
         for _ in 0..3 {
             if check_base {
@@ -348,9 +351,10 @@ impl SessionIo for SpaceSessionIo {
             self.meta_put(&key, &body)?;
             let after = self.meta_get(&key)?.unwrap_or_default();
             if after == body {
-                return Ok(());
+                return Ok(merged.then_some(body));
             }
             body = crate::ai::session::merge_jsonl_messages(&after, &body);
+            merged = true;
             check_base = false;
         }
         Err("空间内容被并发修改，会话写入失败".to_string())

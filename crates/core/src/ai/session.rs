@@ -1434,8 +1434,11 @@ fn perform_writes(work: &WorkSnapshot) -> Vec<Result<WriteOutcome, String>> {
                     return Err("会话仓库未装载，无法写盘".to_string());
                 };
                 if let Some((base, tail)) = append_from {
-                    if io.append_messages(file, base.as_ref(), tail).is_ok() {
-                        return Ok(WriteOutcome::Written);
+                    match io.append_messages(file, base.as_ref(), tail) {
+                        Ok(None) => return Ok(WriteOutcome::Written),
+                        // 空间并发漂移后已按合并内容整值写回：基线/内存按实际内容推进
+                        Ok(Some(content)) => return Ok(WriteOutcome::Merged(content)),
+                        Err(_) => {}
                     }
                     // 追加失败（多为基线漂移）：读回磁盘 / 服务端按消息 id 合并再全量写。
                     // 文件不在或读不出时保底整份写（与既有回落一致），不在错误路径上无限重试。
@@ -2383,7 +2386,7 @@ mod tests {
             Ok(())
         }
 
-        fn append_messages(&self, file: &str, base: &str, tail: &str) -> Result<(), String> {
+        fn append_messages(&self, file: &str, base: &str, tail: &str) -> Result<Option<String>, String> {
             self.enter_write(file);
             let mut files = self.files.lock().unwrap();
             let existing = files.get(file).cloned().unwrap_or_default();
@@ -2391,7 +2394,7 @@ mod tests {
                 return Err("内容与追加基线不一致".to_string());
             }
             files.insert(file.to_string(), appended_body(base, tail));
-            Ok(())
+            Ok(None)
         }
 
         fn read_session_meta(&self, _file: &str) -> Result<Option<ChatSessionMeta>, String> {
