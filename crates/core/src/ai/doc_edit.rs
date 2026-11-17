@@ -290,14 +290,15 @@ pub async fn apply_space<M: DocModel>(
             }
             // 读到存在之后被删除：重读后按新建处理（补丁端点要求目标已存在）
             Err(SpaceError::NotFound) if attempt == 0 => continue,
-            // 第二次仍被删：如实回冲突原因，不把「被他人修改」说成补丁非法
+            // 第二次仍被删：原因是被删除，重试会按新建处理
             Err(SpaceError::NotFound) => {
-                return Err(format!("{what}正在被他人修改，请稍后重试"))
+                return Err(format!("{what}已被他人删除，重试将按新建处理"))
             }
             Err(e) => return Err(patch_error(e, what)),
         }
     }
-    Err(format!("{what}正在被他人修改，请稍后重试"))
+    // 两次尝试内所有分支都已返回：循环退出不可达
+    unreachable!("apply_space 两次尝试均未返回")
 }
 
 fn json<T: Serialize>(model: &T) -> String {
