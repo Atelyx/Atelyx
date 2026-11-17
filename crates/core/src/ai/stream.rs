@@ -492,7 +492,18 @@ pub async fn stream(
     if !accum.has_seen_event() {
         return Err(StreamError::Transport("未收到任何流式事件".into()));
     }
-    Ok(StopReason::Stop)
+    // 网关未发 finish_reason / [DONE] 直接断流：已拼装的工具调用仍要交付，
+    // 否则本轮变成无动作空回复
+    let pending = accum.finish();
+    let reason = if pending.is_empty() {
+        StopReason::Stop
+    } else {
+        StopReason::ToolCalls
+    };
+    for event in pending {
+        on_event(event);
+    }
+    Ok(reason)
 }
 
 /// 喂入一个完整 SSE 帧（可能含多个 `data:` 行）。
@@ -629,6 +640,28 @@ mod tests {
                 } },
                 StreamEvent::Finish { reason: StopReason::ToolCalls },
             ]
+        );
+    }
+
+    #[test]
+    fn pending_tool_calls_flush_when_stream_ends_without_finish() {
+        let mut acc = StreamAccum::new();
+        let _ = feed(
+            &mut acc,
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"function\":{\"name\":\"glob\",\"arguments\":\"{}\"}}]}}]}\n\n",
+        );
+        assert!(acc.has_seen_event());
+        // 直接断流（无 finish_reason / [DONE]）：收尾仍要交出已拼装的完整调用
+        assert_eq!(
+            acc.finish(),
+            vec![StreamEvent::ToolCall {
+                index: 0,
+                call: ToolCall {
+                    id: "c1".into(),
+                    name: "glob".into(),
+                    arguments: "{}".into(),
+                },
+            }]
         );
     }
 
