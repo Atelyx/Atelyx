@@ -27,12 +27,12 @@ const SPIN_STEP_RAD: f32 = 0.63;
 
 fn chat_root<'a>(app: &'a App, window: iced::window::Id) -> iced::Element<'a, Message> {
     if !app.chat.sidebar_open {
-        return container(chat_column(app, window))
+        return container(chat_column(app, window, false))
             .width(Length::Fill)
             .height(Length::Fill)
             .into();
     }
-    // 宽度自适应：够宽 = 并排常驻；不足 = 盖层（点对话区收起，面板内按压不穿透）
+    // 宽度自适应：够宽 = 并排常驻；不足 = 盖层（点对话内容收起，面板内按压不穿透）
     iced::widget::responsive(move |size| {
         if size.width >= SIDEBAR_INLINE_MIN_W {
             row![
@@ -45,18 +45,17 @@ fn chat_root<'a>(app: &'a App, window: iced::window::Id) -> iced::Element<'a, Me
                         background: Some(pal::BORDER.into()),
                         ..Default::default()
                     }),
-                chat_column(app, window),
+                chat_column(app, window, false),
             ]
             .width(Length::Fill)
             .height(Length::Fill)
             .into()
         } else {
-            // 三层堆叠：底层全屏捕获（点对话区空白收起）→ 对话列（控件捕获时不穿透，
-            // 点发送/模型钮不会连带收起侧栏）→ 侧栏面板（面板内按压吞掉）
+            // 盖层：对话列在下、侧栏面板在上（面板内按压由自身的 mouse_area 吞掉）。
+            // 收起由对话内容区的按下上报触发，不靠下层捕获层：正文文本上报 Text 光标交互会
+            // 让下层光标「悬空」，输入面更直接捕获按压，下层都收不到（见 chat_column）。
             iced::widget::stack![
-                iced::widget::mouse_area(Space::new().width(Length::Fill).height(Length::Fill))
-                    .on_press(Message::Chat(ChatMsg::ToggleSidebar)),
-                container(chat_column(app, window))
+                container(chat_column(app, window, true))
                     .width(Length::Fill)
                     .height(Length::Fill),
                 iced::widget::mouse_area(sidebar(app))
@@ -220,16 +219,28 @@ fn rel_time(ts: i64) -> String {
 
 // ===== 对话列 =====
 
-fn chat_column(app: &App, window: iced::window::Id) -> iced::Element<'_, Message> {
-    column![
-        top_bar(app, window),
-        controls::h_divider_subtle(),
-        message_flow(app, window),
-        input_area(app, window),
-    ]
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .into()
+/// 对话列。dismiss = 盖层侧栏时的内容区按下上报：正文文本上报 Text 光标交互会让下层光标
+/// 悬空、输入面直接捕获按压，收起只能靠这一层上报；并排与关闭态不挂（点内容不该收起常驻侧栏）。
+/// 顶部行不包：里面的历史开关本身按一下会先开再被收起。
+fn chat_column(
+    app: &App,
+    window: iced::window::Id,
+    dismiss: bool,
+) -> iced::Element<'_, Message> {
+    let body: iced::Element<'_, Message> =
+        column![message_flow(app, window), input_area(app, window)]
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into();
+    let body: iced::Element<'_, Message> = if dismiss {
+        controls::PressReporter::new(body, Message::Chat(ChatMsg::ContentPress)).into()
+    } else {
+        body
+    };
+    column![top_bar(app, window), controls::h_divider_subtle(), body]
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
 }
 
 fn top_bar(app: &App, window: iced::window::Id) -> iced::Element<'_, Message> {

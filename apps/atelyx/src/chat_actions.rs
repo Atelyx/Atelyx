@@ -409,6 +409,9 @@ pub enum ChatMsg {
     ScrollToBottom,
     /// 按压落在盖层侧栏面板内（吞掉事件，防触发底层的「点外部收起」）。
     OverlayPress,
+    /// 盖层侧栏打开时对话内容区被按下（收起侧栏；正文文本的 Text 光标交互与输入面的按压捕获
+    /// 会让下层捕获层收不到事件，只能由内容区自己上报）。
+    ContentPress,
     /// 重新生成当前会话标题（AI 命名，手动触发）。
     RegenTitle,
     /// 清除顶部行的错误提示。
@@ -855,6 +858,7 @@ fn update_inner(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
             | ChatMsg::FlowScrolled(..)
             | ChatMsg::RowHover(..)
             | ChatMsg::OverlayPress
+            | ChatMsg::ContentPress
             | ChatMsg::RegenTitle
             | ChatMsg::ScrollToBottom
             | ChatMsg::ToggleStep(..)
@@ -952,6 +956,10 @@ fn on_panel(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
             iced::Task::none()
         }
         ChatMsg::OverlayPress => iced::Task::none(),
+        ChatMsg::ContentPress => {
+            app.chat.sidebar_open = false;
+            iced::Task::none()
+        }
         ChatMsg::RegenTitle => regenerate_title(app),
         ChatMsg::ScrollToBottom => {
             app.chat.follow_bottom = true;
