@@ -368,10 +368,7 @@ fn model_label(app: &App, draft: &AiDraft) -> String {
         (Some(provider), Some(model)) if !provider.is_empty() && !model.is_empty() => {
             model_name(app, provider, model)
         }
-        _ => match default_model_name(app) {
-            Some(name) => format!("跟随默认模型（{name}）"),
-            None => "跟随默认模型（未设置）".to_string(),
-        },
+        _ => format!("跟随默认模型（{}）", default_model_display(app)),
     }
 }
 
@@ -401,13 +398,25 @@ fn default_model_name(app: &App) -> Option<String> {
     }
 }
 
-/// 模型清单：跟随默认 + 按供应商分组的模型；定高内滚动。
+/// 默认模型状态文案（与设置页三态同口径）：未设置 / 配置不完整 / 已失效 / 名称。
+fn default_model_display(app: &App) -> String {
+    let model = app.repo_config.model.as_deref().filter(|m| !m.trim().is_empty());
+    let provider = app
+        .repo_config
+        .model_provider_id
+        .as_deref()
+        .filter(|p| !p.trim().is_empty());
+    match (provider, model) {
+        (None, None) => "未设置".to_string(),
+        (Some(_), Some(_)) => default_model_name(app).unwrap_or_else(|| "未设置（原配置已失效）".to_string()),
+        _ => "配置不完整（缺供应商或模型）".to_string(),
+    }
+}
+
+/// 模型清单：跟随默认模型 + 按供应商分组的模型；定高内滚动。
 fn model_picker<'a>(app: &'a App, draft: &AiDraft) -> Element<'a, Message> {
     let follow_selected = draft.provider_id.is_none() || draft.model.is_none();
-    let follow_label = format!(
-        "跟随默认模型 · {}",
-        default_model_name(app).unwrap_or_else(|| "未设置".to_string())
-    );
+    let follow_label = format!("跟随默认模型 · {}", default_model_display(app));
     let mut list = column![].spacing(2).push(pick_row(
         follow_label,
         follow_selected,
