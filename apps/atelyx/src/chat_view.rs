@@ -322,6 +322,16 @@ fn top_bar(app: &App, window: iced::window::Id) -> iced::Element<'_, Message> {
     if compactions {
         right = right.push(if compacting_here {
             controls::icon_button("loader", 13.0, 24.0, controls::Variant::Ghost, None, None)
+        } else if app.chat.compacting.is_some() {
+            // 压缩全局单飞：别处压缩在途时入口禁用（点击必然被拒）
+            controls::icon_button(
+                "layers",
+                13.0,
+                24.0,
+                controls::Variant::Ghost,
+                None,
+                Some((window, "另一会话正在压缩，暂不能开始新的压缩".to_string())),
+            )
         } else {
             controls::icon_button(
                 "layers",
@@ -554,7 +564,15 @@ fn action_row<'a>(
             Some((window, "复制".to_string())),
         ));
     }
-    let readonly = matches!(&app.repo_kind, crate::RepoKind::Space(session) if !session.role.can_write());
+    // 只读空间里普通会话写的是本人元数据（允许）；绑定的画布卡会话要写卡，与卡侧一致隐藏入口
+    let card_bound = app
+        .chat
+        .active
+        .as_deref()
+        .and_then(crate::canvas_chat::node_of_session)
+        .is_some();
+    let readonly = card_bound
+        && matches!(&app.repo_kind, crate::RepoKind::Space(session) if !session.role.can_write());
     let last = is_last_message(app, m);
     if is_assistant && !content.is_empty() && !content.starts_with("[错误]") && !readonly {
         // 末条消息之后没有可删内容：不出入口，避免确认后无动作
