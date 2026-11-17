@@ -528,7 +528,7 @@ pub fn update(app: &mut App, msg: AiMsg) -> Task<Message> {
                     crate::RepoKind::Space(session) => {
                         // 只读成员不发起无权限写盘（服务端会拒绝并污染通知）
                         if !session.role.can_write() {
-                            app.notify(NoticeLevel::Info, "只读身份：跳过提示词失效清理");
+                            app.notify(NoticeLevel::Info, "只读身份，跳过提示词笔记失效清理");
                         } else {
                             let client = session.client.clone();
                             let space_id = session.space_id.clone();
@@ -552,7 +552,7 @@ pub fn update(app: &mut App, msg: AiMsg) -> Task<Message> {
                                     let mut current: Vec<String> = serde_json::from_str(&raw)
                                         .map_err(|e| {
                                             atelyx_core::space_client::SpaceError::Network(
-                                                format!("提示词标记解析失败：{e}"),
+                                                format!("提示词笔记列表解析失败：{e}"),
                                             )
                                         })?;
                                     let before = current.len();
@@ -578,7 +578,7 @@ pub fn update(app: &mut App, msg: AiMsg) -> Task<Message> {
                         }
                     }
                 }
-                app.notify(NoticeLevel::Info, format!("已清理 {cleared} 条失效提示词标记"));
+                app.notify(NoticeLevel::Info, format!("已清理 {cleared} 条失效提示词笔记"));
             }
             // Agent 引用收敛（与注册列表对称；写失败不回滚注册列表，下轮再收敛残留）
             let mut cleared_refs = 0usize;
@@ -1480,10 +1480,11 @@ fn provider_form(app: &App, p: &vault::VaultProvider, window: iced::window::Id) 
     };
 
     // API Key 行：密文输入 + 测试连通性按钮（结果行内反馈，不弹通知）
-    // 只读视图同样把「key 只在本机密钥链」算作已配置，避免误判为未配置
-    let chain_key = key_scope(app)
-        .and_then(|scope| crate::credentials::load_provider_key(&scope, &p.id).ok().flatten())
-        .is_some_and(|k| !k.is_empty());
+    // 只读视图把「key 只在本机密钥链」算作已配置；编辑态不查密钥链（逐键渲染不碰系统凭据）
+    let chain_key = ro
+        && key_scope(app)
+            .and_then(|scope| crate::credentials::load_provider_key(&scope, &p.id).ok().flatten())
+            .is_some_and(|k| !k.is_empty());
     let key_control = if ro {
         value_text(if key.is_empty() && p.api_key.is_none() && !chain_key {
             "—"

@@ -3251,7 +3251,7 @@ impl App {
                 if gen == self.epoch() {
                     match result {
                         Ok(notes) => self.prompt_notes = notes,
-                        Err(e) => self.notify(NoticeLevel::Error, format!("保存提示词标记失败：{e}")),
+                        Err(e) => self.notify(NoticeLevel::Error, format!("保存提示词笔记失败：{e}")),
                     }
                 }
                 Task::none()

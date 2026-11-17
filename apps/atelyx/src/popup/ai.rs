@@ -266,7 +266,7 @@ pub(super) fn entries<'a>(app: &'a App, state: &PopupState, pane: usize, window:
                 .agents
                 .iter()
                 .find(|a| &a.id == agent_id)
-                .map(|a| a.name.chars().take(10).collect::<String>())
+                .map(|a| a.name.trim().to_string())
                 .unwrap_or_default();
             let confirm = if name.is_empty() {
                 "确认删除".to_string()
