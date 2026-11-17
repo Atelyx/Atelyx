@@ -607,8 +607,9 @@ fn collect_doc_keys(messages: &[Value], keys: &mut HashSet<u64>) {
 }
 
 /// 退出前落盘会话真源：写链是防抖的，未 flush 的变更会随进程结束丢失。
-/// 只等一轮（成功或失败），失败走提示 + 下次启动的退避重试，退出不无限等待。
+/// 先停 AI run——其在途提交会不断产出新脏，否则 flush 要等到模型输出结束，关窗被挂住。
 pub fn flush_sessions() -> iced::Task<Message> {
+    hub().stop_all();
     let store = Arc::clone(store());
     iced::Task::perform(async move { store.flush().await }, |result| {
         Message::Chat(ChatMsg::FlushDone(result))

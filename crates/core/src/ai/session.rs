@@ -217,7 +217,10 @@ struct Inner {
     overrides_version: u64,
     // 写链调度
     last_mark: Option<Instant>,
-    flush_requested: bool,
+    /// flush 以请求时刻的脏代数为界：写轮追平该代数即放行，之后的新提交不阻塞
+    flush_target: Option<u64>,
+    /// 脏变更代数（每次标脏递增）
+    dirty_gen: u64,
     retry_attempt: usize,
     next_retry_at: Option<Instant>,
     pending_flush: Vec<tokio::sync::oneshot::Sender<()>>,
@@ -257,10 +260,12 @@ impl Inner {
     fn bump_session(&mut self, id: &str) {
         let v = self.change_versions.entry(id.to_string()).or_insert(0);
         *v += 1;
+        self.dirty_gen += 1;
         self.last_mark = Some(Instant::now());
     }
 
     fn mark_overrides(&mut self) {
+        self.dirty_gen += 1;
         self.overrides_dirty = true;
         self.overrides_version += 1;
         self.last_mark = Some(Instant::now());
@@ -322,7 +327,8 @@ impl SessionStore {
                 change_versions: HashMap::new(),
                 overrides_version: 0,
                 last_mark: None,
-                flush_requested: false,
+                flush_target: None,
+                dirty_gen: 0,
                 retry_attempt: 0,
                 next_retry_at: None,
                 pending_flush: Vec::new(),
@@ -647,6 +653,7 @@ impl SessionStore {
                     continue;
                 }
                 inner.pending_deletes.push((Arc::clone(&io), file.clone()));
+                inner.dirty_gen += 1;
                 queued = true;
             }
             if queued {
@@ -667,13 +674,15 @@ impl SessionStore {
     /// 由 apply 阶段的会话存在性复核兜底。
     pub fn run_write_cycle(&self) {
         let _io = self.io_lock.lock().unwrap_or_else(poison);
-        let work = {
+        // 本轮快照对应的脏代数：flush 只需追平自己请求时刻的内容
+        let (work, gen) = {
             let mut inner = self.lock();
             if !inner.has_dirty() {
                 self.ack_flush(&mut inner);
                 return;
             }
-            inner.collect_work()
+            let gen = inner.dirty_gen;
+            (inner.collect_work(), gen)
         };
         let results = perform_writes(&work);
         let status_change = {
@@ -684,22 +693,24 @@ impl SessionStore {
             self.emit_status(status);
         }
         let mut inner = self.lock();
-        if inner.has_dirty() && inner.persist_error.is_none() {
-            // 写盘快照之后又有新提交：flush 继续等下一轮追平，不在未落盘时放行
+        let caught_up = inner.flush_target.is_some_and(|target| gen >= target);
+        if inner.has_dirty() && inner.persist_error.is_none() && !caught_up {
+            // 快照之后又有新提交：继续下一轮，不在未落盘时放行
             self.sched.notify_all();
         } else {
-            // 写失败时照常放行：错误已可见，退出 / 关窗不得被持续失败永久挂住
+            // 追平请求时刻或写失败时放行：错误已可见，退出 / 关窗不得被持续失败永久挂住
             self.ack_flush(&mut inner);
         }
     }
 
-    /// flush：请求立即写盘并等待本轮完成（resolve 不代表全部写成功——失败可见 + 退避重试）。
+    /// flush：请求立即写盘，等写轮追平请求时刻的内容即放行（此后新提交不阻塞本次等待）。
+    /// resolve 不代表全部写成功——失败已置 persistError 并走退避重试。
     pub async fn flush(&self) -> Result<(), String> {
         let rx = {
             let mut inner = self.lock();
             let (tx, rx) = tokio::sync::oneshot::channel();
             inner.pending_flush.push(tx);
-            inner.flush_requested = true;
+            inner.flush_target = Some(inner.dirty_gen);
             self.sched.notify_all();
             rx
         };
@@ -707,7 +718,7 @@ impl SessionStore {
     }
 
     fn ack_flush(&self, inner: &mut Inner) {
-        inner.flush_requested = false;
+        inner.flush_target = None;
         let pending: Vec<_> = inner.pending_flush.drain(..).collect();
         for tx in pending {
             let _ = tx.send(());
@@ -734,7 +745,7 @@ impl SessionStore {
                             .map(|mark| now.duration_since(mark) >= state.config.debounce)
                             .unwrap_or(true)
                     };
-                    if inner.flush_requested || (inner.has_dirty() && due) {
+                    if inner.flush_target.is_some() || (inner.has_dirty() && due) {
                         break;
                     }
                     // 等待到下一个到期点（无待办则无限等待）
@@ -1870,6 +1881,63 @@ mod tests {
             crate::vault::read_chat_messages_file(&dir, &chat_message_file("s1")).is_ok(),
             "flush 返回前消息应已落盘"
         );
+    }
+
+    #[test]
+    fn flush_resolves_after_catching_up_request_time_content() {
+        let gate = Arc::new(Gate::new());
+        let fake = Arc::new(FakeIo::with_gate(Arc::clone(&gate)));
+        let store = Arc::new(SessionStore::new(WriteChainConfig {
+            debounce: Duration::from_secs(3600), // 只允许 flush 通道触发起轮
+            retries: vec![Duration::ZERO],
+        }));
+        let io: Arc<dyn SessionIo> = fake.clone();
+        store.load(store.begin_load(), io).unwrap();
+        store
+            .commit(CommitBatch {
+                created: vec![def("s1")],
+                appends: vec![AppendBatch {
+                    session_id: "s1".into(),
+                    messages: vec![msg("m1", "user", "x")],
+                }],
+                ..Default::default()
+            })
+            .unwrap();
+        let _writer = Arc::clone(&store).spawn_writer();
+        // 写轮在途（阻塞在写入中途），flush 请求发生在此刻
+        let writing = {
+            let store = Arc::clone(&store);
+            std::thread::spawn(move || store.run_write_cycle())
+        };
+        fake.wait_write_started();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let flushing = {
+            let store = Arc::clone(&store);
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                tx.send(rt.block_on(store.flush())).unwrap();
+            })
+        };
+        // 请求时刻之后的提交：不得阻塞本次 flush 放行
+        store
+            .commit(CommitBatch {
+                appends: vec![AppendBatch {
+                    session_id: "s1".into(),
+                    messages: vec![msg("m2", "assistant", "y")],
+                }],
+                ..Default::default()
+            })
+            .unwrap();
+        gate.release();
+        writing.join().unwrap();
+        let result = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("flush 应在追平请求时刻内容后放行");
+        assert!(result.is_ok());
+        flushing.join().unwrap();
     }
 
     #[test]
