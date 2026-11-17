@@ -805,7 +805,12 @@ pub fn finish(app: &mut App) -> Task<Message> {
     };
     let (done, failed, skipped, cancelled, total, first_error) = summary;
     if cancelled {
+        // 显式停止：未消费的自动待办一并作废，否则收尾会立刻再开一批
+        if let Some(session) = app.table.as_mut() {
+            session.view.ai.auto_due.clear();
+        }
         app.notify(crate::ui::notify::Level::Warning, format!("已停止生成（完成 {done}/{total} 格）"));
+        return Task::none();
     } else if failed == 0 && skipped == 0 {
         app.notify(crate::ui::notify::Level::Success, format!("AI 生成完成：{done} 格"));
     } else {
