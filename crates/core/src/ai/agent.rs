@@ -945,7 +945,9 @@ async fn execute_calls(
             let mut outcomes: Vec<(String, crate::ai::tools::ToolResult)> = Vec::new();
             let mut interrupted = false;
             for fut in futs.iter_mut() {
+                // biased：中断瞬间恰好完成的工具按实际结果回填，不误报未执行
                 tokio::select! {
+                    biased;
                     result = fut => {
                         if let Ok(pair) = result {
                             outcomes.push(pair);
