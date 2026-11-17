@@ -2404,7 +2404,7 @@ fn conversation_card_overlay<'a>(
     Some(col.into())
 }
 
-/// 卡内消息操作行（复制 / 回到此处 / 分支 / 重新生成）。
+/// 卡内消息操作行（复制 / 删除其后消息 / 分支 / 重新生成）。
 fn card_action_row<'a>(
     app: &'a App,
     node_id: &str,
@@ -2442,17 +2442,20 @@ fn card_action_row<'a>(
         ));
     }
     if !readonly && is_assistant && !content.is_empty() && !content.starts_with("[错误]") && !streaming {
-        row = row.push(controls::icon_button(
-            "corner-up-left",
-            12.0,
-            22.0,
-            controls::Variant::Ghost,
-            Some(Message::Canvas(CanvasMsg::Chat(CanvasChatMsg::Rollback {
-                node: node_id.to_string(),
-                message_id: message_id.clone(),
-            }))),
-            Some((window, "删除此消息之后的全部消息（不可恢复）".to_string())),
-        ));
+        // 末条消息之后没有可删内容：不出入口（分支仍可基于末条新建卡）
+        if last_id != Some(message_id.as_str()) {
+            row = row.push(controls::icon_button(
+                "corner-up-left",
+                12.0,
+                22.0,
+                controls::Variant::Ghost,
+                Some(Message::Canvas(CanvasMsg::Chat(CanvasChatMsg::Rollback {
+                    node: node_id.to_string(),
+                    message_id: message_id.clone(),
+                }))),
+                Some((window, "删除此消息之后的全部消息（不可恢复）".to_string())),
+            ));
+        }
         row = row.push(controls::icon_button(
             "columns-2",
             12.0,

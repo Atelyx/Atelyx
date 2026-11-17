@@ -333,7 +333,8 @@ fn top_bar(app: &App, window: iced::window::Id) -> iced::Element<'_, Message> {
             )
         });
     }
-    if has_error {
+    // 只有瞬时错误可清；仅剩「未保存」时不给死按钮
+    if app.chat.error.is_some() {
         right = right.push(controls::icon_button(
             "x",
             13.0,
@@ -527,7 +528,7 @@ fn error_line(window: iced::window::Id, message: String) -> iced::Element<'stati
     .into()
 }
 
-/// 消息操作按钮组（复制 / 回到此处 / 重新生成；条件与对话面板约定一致）。
+/// 消息操作按钮组（复制 / 删除其后消息 / 重新生成；条件与对话面板约定一致）。
 fn action_row<'a>(
     app: &'a App,
     window: iced::window::Id,
@@ -553,15 +554,20 @@ fn action_row<'a>(
             Some((window, "复制".to_string())),
         ));
     }
-    if is_assistant && !content.is_empty() && !content.starts_with("[错误]") {
-        row = row.push(controls::icon_button(
-            "corner-up-left",
-            12.0,
-            22.0,
-            controls::Variant::Ghost,
-            Some(Message::Chat(ChatMsg::Rollback(message_id.clone()))),
-            Some((window, "删除此消息之后的全部消息（不可恢复）".to_string())),
-        ));
+    let readonly = matches!(&app.repo_kind, crate::RepoKind::Space(session) if !session.role.can_write());
+    let last = is_last_message(app, m);
+    if is_assistant && !content.is_empty() && !content.starts_with("[错误]") && !readonly {
+        // 末条消息之后没有可删内容：不出入口，避免确认后无动作
+        if !last {
+            row = row.push(controls::icon_button(
+                "corner-up-left",
+                12.0,
+                22.0,
+                controls::Variant::Ghost,
+                Some(Message::Chat(ChatMsg::Rollback(message_id.clone()))),
+                Some((window, "删除此消息之后的全部消息（不可恢复）".to_string())),
+            ));
+        }
         // 重新生成回复常驻显示（中断 / 历史消息位置不消失）；仅在「最后一条 + 非流式」时可点
         let actionable = is_last_message(app, m) && !is_streaming(app);
         let regen_tip = if actionable {
