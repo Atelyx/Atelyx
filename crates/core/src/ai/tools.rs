@@ -138,7 +138,7 @@ pub fn builtin_tools() -> &'static [ToolDef] {
                 name: "glob",
                 label: "查找文件",
                 icon: "files",
-                description: "按 glob 模式枚举仓库文件（**/ 任意深度），返回相对路径列表；结果超上限会截断，收窄 pattern 或限定 path 后再查。",
+                description: "按 glob 模式枚举仓库文件（**/ 任意深度），返回相对路径列表。",
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -155,7 +155,7 @@ pub fn builtin_tools() -> &'static [ToolDef] {
                 name: "grep",
                 label: "搜索内容",
                 icon: "search",
-                description: "在仓库文件内容中检索正则，返回命中文件与行预览；结果超上限会截断，收窄 pattern 或 include 后再查。",
+                description: "在仓库文件内容中检索正则，返回命中文件与行预览。",
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -200,7 +200,7 @@ pub fn builtin_tools() -> &'static [ToolDef] {
                 name: "write_file",
                 label: "写入文件",
                 icon: "file-plus",
-                description: "整文件写入（覆盖原内容）。先 read_file 确认现状；表格（.atb）与画布（.atlx）文件不支持用文件工具写入。",
+                description: "整文件写入（覆盖原内容）。",
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -217,7 +217,7 @@ pub fn builtin_tools() -> &'static [ToolDef] {
                 name: "append_file",
                 label: "追加内容",
                 icon: "file-plus",
-                description: "在文件末尾追加内容（文件不存在则创建；原内容末尾无换行时自动补一个换行）；表格与画布文件不支持用文件工具写入。",
+                description: "在文件末尾追加内容（文件不存在则创建；原内容末尾无换行时自动补一个换行）。",
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -305,7 +305,7 @@ pub fn builtin_tools() -> &'static [ToolDef] {
                 name: "table_edit",
                 label: "编辑表格",
                 icon: "pencil",
-                description: "编辑表格（.atb）：一次调用提交一批操作，整批落成一个补丁。op = set_cell（按 rowId / fieldId 写单元格，value 传 null 清空）| add_row（cells 按字段 id 给初值）| delete_rows（rowIds）。表格文件不存在时按给定路径新建（标题取文件名）。表格不能用文件工具整文件写。AI 字段（ai）的值由模型生成、本工具不能写也不能清空；要更新请让用户在字段菜单里重新生成。",
+                description: "编辑表格（.atb）：一次提交一批 ops，整批落成一个补丁（任一失败整批不生效）；文件不存在时按给定路径新建（标题取文件名）。",
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -351,7 +351,7 @@ pub fn builtin_tools() -> &'static [ToolDef] {
                 name: "canvas_edit",
                 label: "编辑画布",
                 icon: "layers",
-                description: "编辑画布（.atlx）：一次调用提交一批操作，整批落成一个补丁。op = add_text_card（text，x/y 缺省自动落位）| add_note_card（path 引用仓库笔记）| connect（from / to 节点 id，kind = data 数据流 / link 关联）| update_text（nodeId / text）| delete_node（nodeId）。画布文件不存在时按给定路径新建（标题取文件名）。画布不能用文件工具整文件写。",
+                description: "编辑画布（.atlx）：一次提交一批 ops，整批落成一个补丁（任一失败整批不生效）；文件不存在时按给定路径新建（标题取文件名），新卡坐标缺省自动落位。",
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -507,7 +507,7 @@ pub async fn resolve_image_attachments(messages: &mut [Value], repo: &RepoAccess
     }
 }
 
-/// 单行读取上限与结果文本上限（防一条结果撑爆上下文）。
+/// 单行读取上限与结果文本上限（字符数；防一条结果撑爆上下文）。
 const READ_LINE_CAP: usize = 2000;
 const READ_CHARS_CAP: usize = 60_000;
 
@@ -569,12 +569,8 @@ async fn execute_plugin_tool(
     match runtime.call_tool(&spec.name, args).await {
         Ok(output) => {
             let mut text = output.content;
-            if text.len() > READ_CHARS_CAP {
-                let mut cut = READ_CHARS_CAP;
-                while !text.is_char_boundary(cut) {
-                    cut -= 1;
-                }
-                text.truncate(cut);
+            if text.chars().count() > READ_CHARS_CAP {
+                text = text.chars().take(READ_CHARS_CAP).collect();
                 text.push_str("…（结果过长截断）");
             }
             ToolResult {
@@ -669,7 +665,7 @@ fn render_numbered(content: &str, args: &Value, rel: &str) -> ToolResult {
     for (i, line) in content.lines().enumerate().skip(start).take(end - start) {
         out.push_str(&format!("{}| {line}\n", i + 1));
         shown_until = i + 1;
-        if out.len() > READ_CHARS_CAP {
+        if out.chars().count() > READ_CHARS_CAP {
             out.push_str("…（结果过长截断）\n");
             break;
         }
@@ -803,7 +799,7 @@ async fn grep(ctx: &ToolCtx, args: &Value) -> ToolResult {
             let mut text = String::new();
             for (path, line_number, line) in matches.iter() {
                 text.push_str(&format!("{path}:{line_number}: {line}\n"));
-                if text.len() > READ_CHARS_CAP {
+                if text.chars().count() > READ_CHARS_CAP {
                     text.push_str("…（结果过长截断）\n");
                     break;
                 }
@@ -1354,7 +1350,7 @@ fn render_table(table: &vault::TableFile, args: &Value, rel: &str) -> String {
         out.push_str(&line);
         out.push('\n');
         shown = start + idx + 1;
-        if out.len() > READ_CHARS_CAP {
+        if out.chars().count() > READ_CHARS_CAP {
             out.push_str("…（结果过长截断）\n");
             break;
         }
@@ -1417,7 +1413,7 @@ fn render_canvas(canvas: &vault::CanvasFile, rel: &str) -> String {
         for n in canvas.nodes.iter().take(CANVAS_READ_CAP) {
             out.push_str(&canvas_node_line(n));
             out.push('\n');
-            if out.len() > READ_CHARS_CAP {
+            if out.chars().count() > READ_CHARS_CAP {
                 out.push_str("…（结果过长截断）\n");
                 break;
             }

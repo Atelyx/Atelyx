@@ -199,13 +199,13 @@ pub fn reference_path_block(hits: &[RefHit]) -> String {
 }
 
 /// 引用读取引导（名册含 read_file 时下发；与消息开头「引用文件」路径块配套）。
-pub const FILE_REFERENCE_PROMPT: &str = "以 # 前缀引用的文件是用户明确指定的内容，其相对仓库根路径列在消息开头「引用文件」列表中。需要其内容时用 read_file 工具读取，在读取之前不要声称已查看过该文件。以 / 结尾的引用是目录：先用 list_dir 工具列出其中的内容，再按需 read_file；glob 用于按模式检索文件。以 . 开头的目录/文件（如 .git、.atelyx）不可被 AI 工具访问。已读取过的文件内容在对话历史中，无需重复读取；仅在需要确认内容是否变更时重读。";
+pub const FILE_REFERENCE_PROMPT: &str = "以 # 前缀引用的文件是用户明确指定的内容，路径列在消息开头「引用文件」列表中。读取前不要声称已查看过。以 / 结尾的引用是目录：先用 list_dir 列出再按需 read_file。以 . 开头的目录/文件（如 .git、.atelyx）不可访问。已读内容在对话历史中，除非需要确认变更，无需重读。";
 
 /// 检索上限引导（名册含 glob / grep 时下发）。
 const SEARCH_PROMPT: &str = "检索结果有上限，超限会截断：按提示收窄 pattern、include 或 path 后再查，不要凭截断结果下结论。";
 
 /// 写入纪律引导（名册含任一写文件工具时下发）。
-const EDIT_PROMPT: &str = "改文件前先 read_file 确认现状；edit_file 的 find 缺省要求唯一命中，多处命中时补足上下文或显式设 replace_all=true；表格（.atb）与画布（.atlx）文件不能整文件改写。";
+const EDIT_PROMPT: &str = "改文件前先 read_file 确认现状；edit_file 的 find 缺省要求唯一命中，多处命中时补足上下文或显式设 replace_all=true。";
 
 /// 破坏性操作引导（名册含 move / delete 时下发）。
 const DESTRUCTIVE_PROMPT: &str = "move 与 delete 直接改动仓库：删除不可恢复、目录非空需 force=true，仅在用户明确要求时使用。";
