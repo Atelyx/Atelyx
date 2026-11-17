@@ -419,7 +419,7 @@ impl SessionStore {
                     .as_ref()
                     .map(|e| e.message.clone())
                     .unwrap_or_else(|| "写盘未完成".to_string());
-                return Err(format!("旧会话仍有未落盘内容，已保留重试并中止切换：{reason}"));
+                return Err(format!("旧会话仍有未落盘内容，已保留重试；本次会话装载中止：{reason}"));
             }
         }
         // 读真源：锁外完成（空间后端在此走网络，不能占着 io_lock 让别的装载排队）
@@ -441,7 +441,7 @@ impl SessionStore {
                 .as_ref()
                 .map(|e| e.message.clone())
                 .unwrap_or_else(|| "写盘未完成".to_string());
-            return Err(format!("旧会话仍有未落盘内容，已保留重试并中止切换：{reason}"));
+            return Err(format!("旧会话仍有未落盘内容，已保留重试；本次会话装载中止：{reason}"));
         }
         inner.epoch += 1;
         inner.backend = Some(io);

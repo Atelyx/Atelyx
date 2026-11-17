@@ -484,7 +484,12 @@ pub fn load_vault(app: &mut App, root: &std::path::Path) {
         Ok(Some(snap)) => apply_snapshot(app, snap),
         // 已被更新的装载取代：真源状态归那次装载，本次不再回填投影
         Ok(None) => {}
-        Err(e) => app.chat.error = Some(format!("会话装载失败：{e}")),
+        // 壳侧真源已切到新仓库，但会话源未装载：如实说明状态并给可执行下一步
+        Err(e) => {
+            app.chat.error = Some(format!(
+                "会话装载失败：{e} · 该仓库已打开，对话列表未载入；可切回原仓库或重启应用"
+            ))
+        }
     }
 }
 
@@ -1139,7 +1144,11 @@ fn on_send(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
             }
             match result {
                 Ok(()) => apply_snapshot(app, store().snapshot()),
-                Err(e) => app.chat.error = Some(format!("会话装载失败：{e}")),
+                Err(e) => {
+                    app.chat.error = Some(format!(
+                        "会话装载失败：{e} · 对话列表未载入；可切回原仓库或重启应用"
+                    ))
+                }
             }
             iced::Task::none()
         }
