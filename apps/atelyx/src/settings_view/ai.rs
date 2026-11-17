@@ -1092,10 +1092,15 @@ fn save_provider(app: &mut App, draft: ProviderDraft) -> Task<Message> {
             draft.sync_keys = prev;
         }
     };
-    let Some(scope) = key_scope(app) else { return Task::none() };
+    // 任一保存前早退都要把开关还原，否则显示态与落盘不一致
+    let Some(scope) = key_scope(app) else {
+        restore_sync(app);
+        return Task::none();
+    };
     let mut providers = app.repo_config.providers.clone().unwrap_or_default();
     let Some(index) = providers.iter().position(|p| p.id == draft.id) else {
         app.notify(NoticeLevel::Warning, "供应商已被删除");
+        restore_sync(app);
         return Task::none();
     };
     let models: Vec<vault::VaultModel> = draft
@@ -1111,6 +1116,7 @@ fn save_provider(app: &mut App, draft: ProviderDraft) -> Task<Message> {
     let name = draft.name.trim();
     if name.is_empty() {
         app.notify(NoticeLevel::Warning, "供应商名称不能为空");
+        restore_sync(app);
         return Task::none();
     }
     let entry = &mut providers[index];
