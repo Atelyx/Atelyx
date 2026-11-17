@@ -1504,6 +1504,19 @@ fn send_now(app: &mut App, space_prompt: Option<String>) -> iced::Task<Message> 
             return iced::Task::none();
         }
     };
+    // 图片落盘后端先解析：失败在创建会话前返回，不留空会话；无图片则不解析
+    let backend = if images.is_empty() {
+        None
+    } else {
+        match image_backend(app) {
+            Ok(backend) => Some(backend),
+            Err(e) => {
+                app.chat.error = Some(e);
+                restore!();
+                return iced::Task::none();
+            }
+        }
+    };
     // 会话就位：新对话态首条消息创建会话
     let session_id = match app.chat.active.clone() {
         Some(id) => id,
@@ -1540,15 +1553,15 @@ fn send_now(app: &mut App, space_prompt: Option<String>) -> iced::Task<Message> 
         return iced::Task::none(); // run 不变量：同会话单 run（以 hub 注册表为准）
     }
     // 附件字节先落仓库临时区（两段式：回执后落消息并启动 run；落盘失败不产生消息）
-    let backend = match image_backend(app) {
-        Ok(backend) => backend,
-        Err(e) => {
-            app.chat.error = Some(e);
-            restore!();
-            return iced::Task::none();
-        }
-    };
     let payload = SendPayload { session_id, config, display, refs };
+    let Some(backend) = backend else {
+        // 纯文本：不经图片写盘后端，直接续跑
+        return iced::Task::done(Message::Chat(ChatMsg::SendReady {
+            payload,
+            images: Vec::new(),
+            result: Ok(Vec::new()),
+        }));
+    };
     let sid = payload.session_id.clone();
     iced::Task::perform(
         materialize_images(backend, sid, images),

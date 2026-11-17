@@ -1060,6 +1060,10 @@ fn send_now(app: &mut App, plan: SendPlan, space_prompt: Option<String>) -> Task
             return Task::none();
         }
     }
+    // 无图片：不经写盘后端，直接落消息启动 run（纯文本对话不需要空间内容写权限）
+    if plan.images.is_empty() {
+        return finish_send(app, plan, Vec::new());
+    }
     let backend = match chat_actions::image_backend(app) {
         Ok(b) => b,
         Err(e) => {
