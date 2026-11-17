@@ -203,6 +203,16 @@ pub(super) fn entries<'a>(app: &'a App, state: &PopupState, pane: usize, window:
                 .as_deref()
                 .zip(app.repo_config.model_provider_id.as_deref());
             let mut entries: Vec<(usize, MenuEntry<Message>)> = Vec::new();
+            // 已设置时给回退入口：否则选过一次就无法恢复「跟随默认 = 未设置」
+            if current.is_some() {
+                entries.push((
+                    0,
+                    MenuEntry::action(
+                        "不设置",
+                        Message::Ai(ai::AiMsg::DefaultModelPick(String::new(), String::new())),
+                    ),
+                ));
+            }
             for provider in app.repo_config.providers.iter().flatten() {
                 for model in &provider.models {
                     let picked = matches!(
@@ -337,7 +347,7 @@ fn card_agent_id(app: &App, node_id: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// 卡模型子面板条目：跟随默认（卡有指定时）+ 按供应商分组的模型清单。
+/// 卡模型子面板条目：跟随默认模型（卡有指定时）+ 按供应商分组的模型清单。
 fn canvas_card_model_entries(app: &App, node_id: &str) -> Vec<(usize, MenuEntry<'static, Message>)> {
     use crate::canvas_chat::CanvasChatMsg;
     use crate::canvas_view::CanvasMsg;
@@ -361,7 +371,7 @@ fn canvas_card_model_entries(app: &App, node_id: &str) -> Vec<(usize, MenuEntry<
         entries.push((
             0,
             MenuEntry::action(
-                "跟随当前模型",
+                "跟随默认模型",
                 Message::Canvas(CanvasMsg::Chat(CanvasChatMsg::ModelPick {
                     node: node_id.to_string(),
                     pick: None,

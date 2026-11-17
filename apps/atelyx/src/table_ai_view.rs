@@ -369,8 +369,8 @@ fn model_label(app: &App, draft: &AiDraft) -> String {
             model_name(app, provider, model)
         }
         _ => match default_model_name(app) {
-            Some(name) => format!("跟随当前模型（{name}）"),
-            None => "跟随当前模型（未设置）".to_string(),
+            Some(name) => format!("跟随默认模型（{name}）"),
+            None => "跟随默认模型（未设置）".to_string(),
         },
     }
 }
@@ -405,7 +405,7 @@ fn default_model_name(app: &App) -> Option<String> {
 fn model_picker<'a>(app: &'a App, draft: &AiDraft) -> Element<'a, Message> {
     let follow_selected = draft.provider_id.is_none() || draft.model.is_none();
     let follow_label = format!(
-        "跟随当前模型 · {}",
+        "跟随默认模型 · {}",
         default_model_name(app).unwrap_or_else(|| "未设置".to_string())
     );
     let mut list = column![].spacing(2).push(pick_row(

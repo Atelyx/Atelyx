@@ -828,6 +828,15 @@ pub fn update(app: &mut App, msg: AiMsg) -> Task<Message> {
             if readonly(app) {
                 return Task::none();
             }
+            // 空值 = 回到未设置（清掉两个键，功能按「缺省」提示先选择）
+            if pid.is_empty() && mid.is_empty() {
+                app.repo_config.model = None;
+                app.repo_config.model_provider_id = None;
+                return app.patch_repo_config(serde_json::json!({
+                    "model": serde_json::Value::Null,
+                    "modelProviderId": serde_json::Value::Null
+                }));
+            }
             app.repo_config.model = Some(mid.clone());
             app.repo_config.model_provider_id = Some(pid.clone());
             app.patch_repo_config(serde_json::json!({ "model": mid, "modelProviderId": pid }))
@@ -1688,8 +1697,8 @@ fn models_view(app: &App, window: iced::window::Id) -> Element<'static, Message>
         (!ro && model_count > 0).then(|| open_popup(app, window, PopupState::AiDefaultModelMenu)),
     );
     col = col.push(super::setting_row(
-        "默认模型",
-        "表格 AI 字段与「跟随默认」的对话使用；未设置时相关功能会提示先选择",
+        "选择模型",
+        "画布对话卡与表格 AI 字段未指定模型时使用；未设置时相关功能会提示先选择",
         default_trigger,
     ));
     col = col.push(super::group_head("话题自动命名", "", true));
@@ -1723,34 +1732,43 @@ fn models_view(app: &App, window: iced::window::Id) -> Element<'static, Message>
         .into()
 }
 
-/// 默认模型显示名：未设置或配置已失效时提示未设置，不展示失效的旧值。
+/// 默认模型显示名：区分未设置 / 配置不完整 / 已失效；已失效时不展示旧值。
 fn default_model_label(app: &App) -> String {
-    let Some(model) = app
+    let model = app
         .repo_config
         .model
         .as_deref()
-        .filter(|m| !m.trim().is_empty())
-    else {
-        return "未设置".to_string();
-    };
-    let Some(pid) = app
+        .map(str::trim)
+        .filter(|m| !m.is_empty());
+    let pid = app
         .repo_config
         .model_provider_id
         .as_deref()
-        .filter(|p| !p.trim().is_empty())
-    else {
-        return "未设置".to_string();
+        .map(str::trim)
+        .filter(|p| !p.is_empty());
+    let (Some(pid), Some(model)) = (pid, model) else {
+        return if pid.is_none() && model.is_none() {
+            "未设置".to_string()
+        } else {
+            "配置不完整（缺供应商或模型）".to_string()
+        };
     };
-    let exists = app
+    let display = app
         .repo_config
         .providers
         .iter()
         .flatten()
-        .any(|p| p.id == pid && p.models.iter().any(|m| m.id == model));
-    if exists {
-        format!("{} / {model}", provider_name(app, pid))
-    } else {
-        "未设置（原配置已失效）".to_string()
+        .find(|p| p.id == pid)
+        .and_then(|p| p.models.iter().find(|m| m.id == model))
+        .map(|m| {
+            m.nickname
+                .clone()
+                .filter(|n| !n.trim().is_empty())
+                .unwrap_or_else(|| m.id.clone())
+        });
+    match display {
+        Some(name) => format!("{} / {name}", provider_name(app, pid)),
+        None => "未设置（原配置已失效）".to_string(),
     }
 }
 
