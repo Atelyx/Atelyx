@@ -4257,7 +4257,7 @@ pub enum DropZone {
 /// 枚举全部窗口的可停靠面板矩形（拖拽会话期间位置尺寸视为稳定）。
 /// 指定窗口当前是否渲染表格视图（活动标签 view = "table"；表格视图全局唯一，同时只在一窗渲染）。
 /// 窗口当前活动视图是否为指定类型（主窗扫描活动布局树；撕裂窗查其标签）。
-fn window_shows_view(app: &App, window: iced::window::Id, view: &str) -> bool {
+pub(crate) fn window_shows_view(app: &App, window: iced::window::Id, view: &str) -> bool {
     let active_is = |tabs: &[atelyx_core::layout::TabItem], active: Option<&str>| {
         active
             .and_then(|tid| tabs.iter().find(|t| t.id == tid))

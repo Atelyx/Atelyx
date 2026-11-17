@@ -1103,9 +1103,7 @@ fn on_composer(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
             // 画布对话卡悬停 / 选中优先：拖到卡输入面 = 该卡附件
             if let Some(node) = crate::canvas_chat::hovered_conversation(app) {
                 crate::canvas_chat::add_attachments(app, &node, vec![path]);
-            } else if crate::layout_view::window_has_view(app, "aichat")
-                && app.main_id.is_some_and(|main| main == window)
-            {
+            } else if crate::layout_view::window_shows_view(app, window, "aichat") {
                 add_attachments(app, vec![path]);
             }
             iced::Task::none()

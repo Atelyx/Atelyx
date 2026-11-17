@@ -1117,7 +1117,10 @@ impl Input<'_> {
                 );
                 return;
             }
-            return;
+            // Ctrl+方向键按词跳转：落到下方方向键分支处理，其余组合键到此为止
+            if !matches!(key, Key::Named(Named::ArrowLeft) | Key::Named(Named::ArrowRight)) {
+                return;
+            }
         }
 
         // 候选浮层开启：方向 / Enter / Esc 转交
