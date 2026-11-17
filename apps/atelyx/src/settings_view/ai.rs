@@ -725,10 +725,7 @@ pub fn update(app: &mut App, msg: AiMsg) -> Task<Message> {
                 return Task::none();
             }
             app.ai.testing = false;
-            match &result {
-                Ok(ms) => app.notify(NoticeLevel::Success, format!("连接成功（{ms}ms）")),
-                Err(e) => app.notify(NoticeLevel::Error, format!("连接失败：{e}")),
-            }
+            // 结果只在表单行内展示：同一动作不再叠加一条通知
             app.ai.test_result = Some(result);
             Task::none()
         }
@@ -757,9 +754,8 @@ pub fn update(app: &mut App, msg: AiMsg) -> Task<Message> {
             }
             app.ai.fetching = false;
             match result {
-                Ok((ids, ms)) => {
+                Ok((ids, _ms)) => {
                     app.ai.fetched = Some(ids);
-                    app.ai.test_result = Some(Ok(ms));
                 }
                 Err(e) => {
                     app.ai.fetched = None;
@@ -912,12 +908,17 @@ pub fn update(app: &mut App, msg: AiMsg) -> Task<Message> {
             if readonly(app) {
                 return Task::none();
             }
+            let name = draft.name.trim();
+            if name.is_empty() {
+                app.notify(NoticeLevel::Warning, "Agent 名称不能为空");
+                return Task::none();
+            }
             let mut agents = app.agents.clone();
             let Some(a) = agents.iter_mut().find(|a| a.id == draft.id) else {
                 app.notify(NoticeLevel::Warning, "Agent 已被删除");
                 return Task::none();
             };
-            a.name = draft.name.trim().to_string();
+            a.name = name.to_string();
             a.system_prompt_file = draft.prompt_file;
             a.tools = draft.tools;
             app.agents = agents.clone();
@@ -1091,8 +1092,13 @@ fn save_provider(app: &mut App, draft: ProviderDraft) -> Task<Message> {
         .filter(|m| !m.id.is_empty())
         .collect();
     let sync = draft.sync_keys;
+    let name = draft.name.trim();
+    if name.is_empty() {
+        app.notify(NoticeLevel::Warning, "供应商名称不能为空");
+        return Task::none();
+    }
     let entry = &mut providers[index];
-    entry.name = draft.name.trim().to_string();
+    entry.name = name.to_string();
     entry.base_url = draft.base_url.trim().to_string();
     entry.models = models;
     entry.api_key = sync.then(|| draft.api_key.clone()).filter(|k| !k.is_empty());
@@ -1449,8 +1455,16 @@ fn provider_form(app: &App, p: &vault::VaultProvider, window: iced::window::Id) 
     };
 
     // API Key 行：密文输入 + 测试连通性按钮（结果行内反馈，不弹通知）
+    // 只读视图同样把「key 只在本机密钥链」算作已配置，避免误判为未配置
+    let chain_key = key_scope(app)
+        .and_then(|scope| crate::credentials::load_provider_key(&scope, &p.id).ok().flatten())
+        .is_some_and(|k| !k.is_empty());
     let key_control = if ro {
-        value_text(if key.is_empty() && p.api_key.is_none() { "—" } else { "已配置" })
+        value_text(if key.is_empty() && p.api_key.is_none() && !chain_key {
+            "—"
+        } else {
+            "已配置"
+        })
     } else {
         let hint = if sync { "明文随仓库保存" } else { "只存本机密钥链；留空 = 不更改已存" };
         let test_btn = controls::btn(
@@ -2120,7 +2134,16 @@ fn search_view(app: &App, window: iced::window::Id) -> Element<'static, Message>
         ));
     } else {
         let key_control = if ro {
-            value_text(if sync && current_search.tavily_api_key.is_some() { "已配置" } else { "—" })
+            let chain_key = key_scope(app)
+                .and_then(|scope| {
+                    crate::credentials::load_provider_key(&scope, TAVILY_TAIL).ok().flatten()
+                })
+                .is_some_and(|k| !k.is_empty());
+            value_text(if current_search.tavily_api_key.is_some() || chain_key {
+                "已配置"
+            } else {
+                "—"
+            })
         } else {
             let hint = if sync { "明文随仓库保存" } else { "只存本机密钥链；留空 = 不更改已存" };
             container(
