@@ -173,10 +173,10 @@ fn session_row<'a>(app: &'a App, s: &'a Value) -> iced::Element<'a, Message> {
                 .on_press(Message::Chat(ChatMsg::DeleteSession(id.clone()))),
         );
         inner = inner.push(
-            button(icon("x", 12.0, pal::TEXT_MUTED))
+            button(text("取消").size(pal::fs_micro()).color(pal::TEXT_MUTED))
                 .padding(4.0)
                 .style(controls::row_style(false, pal::RADIUS_XS))
-                .on_press(Message::Chat(ChatMsg::SessionMenu(None))),
+                .on_press(Message::Chat(ChatMsg::DeleteCancel)),
         );
     } else if hovered || menu_open {
         inner = inner.push(

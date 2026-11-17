@@ -364,6 +364,7 @@ pub enum ChatMsg {
     SessionPicked(String),
     NewSession,
     DeleteSession(String),
+    DeleteCancel,
     ToggleSidebar,
     SidebarSearch(String),
     SessionMenu(Option<String>),
@@ -860,7 +861,8 @@ fn update_inner(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
             | ChatMsg::AgentPick(..)
             | ChatMsg::SessionPicked(..)
             | ChatMsg::NewSession
-            | ChatMsg::DeleteSession(..)) => on_panel(app, m),
+            | ChatMsg::DeleteSession(..)
+            | ChatMsg::DeleteCancel) => on_panel(app, m),
         m @ (ChatMsg::Input(..)
             | ChatMsg::MentionPick(..)
             | ChatMsg::TriggerMention
@@ -1028,6 +1030,8 @@ fn on_panel(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
         ChatMsg::SessionPicked(id) => {
             app.chat.active = Some(id.clone());
             app.chat.rollback_confirm = None;
+            app.chat.delete_confirm = None;
+            app.chat.session_menu = None;
             app.chat.error = None;
             app.chat.selection = None;
             // 切换会话即重建该会话的解析缓存（装载后历史消息不退化纯文本）
@@ -1039,6 +1043,8 @@ fn on_panel(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
         ChatMsg::NewSession => {
             app.chat.active = None;
             app.chat.selection = None;
+            app.chat.delete_confirm = None;
+            app.chat.session_menu = None;
             // 新会话继承上次使用的 Agent（面板覆盖；未选过 = 内置「对话」走名册缺省）
             app.chat.draft_agent_id = app.chat.agent_override.clone();
             app.chat.error = None;
@@ -1055,6 +1061,10 @@ fn on_panel(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
             if let Err(e) = delete_session_now(app, &id) {
                 app.notify(crate::NoticeLevel::Error, format!("会话删除失败：{e}"));
             }
+            iced::Task::none()
+        }
+        ChatMsg::DeleteCancel => {
+            app.chat.delete_confirm = None;
             iced::Task::none()
         }
         _ => iced::Task::none(),
