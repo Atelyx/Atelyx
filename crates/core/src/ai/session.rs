@@ -426,6 +426,16 @@ impl SessionStore {
         if backend_key(&inner).as_deref() == Some(key.as_str()) {
             return Ok(Some(snapshot_of(&inner))); // 并发 load 已完成
         }
+        // 读真源期间（空间为网络往返）到达的提交会标脏：换状态前必须在同一把内锁下复核，
+        // 否则这些内容会随下面的清脏一起丢弃
+        if inner.has_dirty() {
+            let reason = inner
+                .persist_error
+                .as_ref()
+                .map(|e| e.message.clone())
+                .unwrap_or_else(|| "写盘未完成".to_string());
+            return Err(format!("旧会话仍有未落盘内容，已保留重试并中止切换：{reason}"));
+        }
         inner.epoch += 1;
         inner.backend = Some(io);
         inner.sessions = sessions;
