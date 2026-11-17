@@ -349,13 +349,7 @@ pub fn on_msg(app: &mut App, msg: CanvasChatMsg) -> Task<Message> {
         }
         CanvasChatMsg::Branch { node, message_id } => branch(app, &node, &message_id),
         CanvasChatMsg::ClearError(node) => {
-            if let Some(chat) = app
-                .canvas
-                .as_mut()
-                .and_then(|s| s.view.card_chat.get_mut(&node))
-            {
-                chat.error = None;
-            }
+            clear_error(app, &node);
             Task::none()
         }
         CanvasChatMsg::FlowScrolled { node, y } => {
@@ -868,6 +862,21 @@ fn set_error(app: &mut App, node_id: &str, error: String) {
     }
 }
 
+/// 清卡错误；面板绑定同一会话时同步清面板错误槽（与 [`set_error`] 的双写对称）。
+fn clear_error(app: &mut App, node_id: &str) {
+    let bound = app.chat.active.as_deref() == Some(session_id(node_id).as_str());
+    if let Some(chat) = app
+        .canvas
+        .as_mut()
+        .and_then(|s| s.view.card_chat.get_mut(node_id))
+    {
+        chat.error = None;
+    }
+    if bound {
+        app.chat.error = None;
+    }
+}
+
 /// 卡输入面发送入口：取草稿 → 解析模型 → 空间提示词预取 → 附件落盘 → 启动 run。
 fn send(app: &mut App, node_id: &str) -> Task<Message> {
     let Some(chat) = app
@@ -1357,6 +1366,9 @@ pub fn on_run_event(app: &mut App, event: RunEvent) -> Task<Message> {
                 chat.streaming = true;
                 chat.error = None;
             }
+            if app.chat.active.as_deref() == Some(session_id(&node_id).as_str()) {
+                app.chat.error = None;
+            }
         }
         RunEvent::Snapshot { message, .. } => {
             let Some(session) = app.canvas.as_mut() else { return Task::none() };
@@ -1828,6 +1840,7 @@ impl ChatStore for CardStore {
             }
         }
         if origin == SendOrigin::Panel {
+            app.chat.error = None;
             app.chat.input.clear();
             app.chat.mention_picker = None;
             app.chat.follow_bottom = true;
@@ -1865,6 +1878,9 @@ impl ChatStore for CardStore {
                 chat.streaming = true;
                 chat.follow_bottom = true;
             }
+            if app.chat.active.as_deref() == Some(session_id(&self.node).as_str()) {
+                app.chat.error = None;
+            }
         }
         refresh_panel_if_bound(app, &self.node);
     }
@@ -1901,6 +1917,21 @@ impl ChatStore for CardStore {
     }
 
     fn clear_compacting(&self, app: &mut App) -> Option<(String, usize)> {
+        // 压缩期间被拒留下的提示已过期（与面板口径一致）
+        if let Some(chat) = app
+            .canvas
+            .as_mut()
+            .and_then(|s| s.view.card_chat.get_mut(&self.node))
+        {
+            if chat.error.as_deref().is_some_and(|e| e.contains("正在压缩")) {
+                chat.error = None;
+            }
+        }
+        if app.chat.active.as_deref() == Some(session_id(&self.node).as_str())
+            && app.chat.error.as_deref().is_some_and(|e| e.contains("正在压缩"))
+        {
+            app.chat.error = None;
+        }
         app.canvas
             .as_mut()
             .and_then(|s| s.view.card_chat.get_mut(&self.node))
