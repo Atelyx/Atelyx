@@ -2647,7 +2647,7 @@ fn import_images(app: &mut App, row_id: String, field_id: String, files: Vec<(St
     if matches!(app.repo_kind, crate::RepoKind::Space(_)) {
         let Some(session) = space_actions::session_of(app) else { return Task::none() };
         if !session.role.can_write() {
-            app.notify(NoticeLevel::Warning, "该空间为只读身份，无法上传图片");
+            app.notify(NoticeLevel::Warning, "只读身份，无法上传图片");
             return Task::none();
         }
         let client = session.client;

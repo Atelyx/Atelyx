@@ -1482,7 +1482,7 @@ fn on_service(app: &mut App, msg: PluginsMsg) -> Task<Message> {
                 return resolve_vault(
                     app,
                     request_id,
-                    Err("该空间为只读身份，无法修改团队元数据".to_string()),
+                    Err("只读身份，无法修改团队元数据".to_string()),
                 );
             }
             let (client, space_id) = (session.client, session.space_id);

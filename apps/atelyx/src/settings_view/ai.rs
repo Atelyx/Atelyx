@@ -279,7 +279,7 @@ pub enum AiMsg {
     // 模型服务
     NamingModePick(NamingMode),
     NamingModelPick(Option<(String, String)>),
-    /// 仓库级默认模型（表格 AI 字段与「跟随默认」使用）。
+    /// 仓库级默认模型（画布对话卡与表格 AI 字段未指定模型时使用）。
     DefaultModelPick(String, String),
     /// 画布对话产出自动落卡开关。
     CanvasMaterializeToggle,
@@ -810,7 +810,7 @@ pub fn update(app: &mut App, msg: AiMsg) -> Task<Message> {
             app.repo_config.auto_naming_enabled = Some(enabled);
             let mut patch = serde_json::json!({ "autoNamingEnabled": enabled });
             if mode != NamingMode::Custom {
-                // 不启用 / 跟随默认都清掉指定模型（缺省 = 跟随默认模型）
+                // 不启用 / 跟随当前模型都清掉指定模型（缺省 = 用对话当前模型）
                 app.repo_config.auto_naming_model = None;
                 patch["autoNamingModel"] = serde_json::Value::Null;
             }

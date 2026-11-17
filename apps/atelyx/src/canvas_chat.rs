@@ -374,7 +374,7 @@ pub fn on_msg(app: &mut App, msg: CanvasChatMsg) -> Task<Message> {
             Task::none()
         }
         CanvasChatMsg::ModelPick { node, pick } => {
-            // 供应商与模型成对写入；跟随默认 = 两键一并移除
+            // 供应商与模型成对写入；跟随默认模型 = 两键一并移除
             app.dismiss_popup();
             set_card_config(
                 app,

@@ -434,7 +434,7 @@ impl AgentHub {
         {
             let mut runs = self.runs.lock().unwrap_or_else(|e| e.into_inner());
             if runs.contains_key(&session_id) {
-                return Err("该会话已有进行中的对话".to_string());
+                return Err("该会话已有回复进行中，无法开始".to_string());
             }
             runs.insert(session_id.clone(), (cancel_tx, run_id.clone()));
         }

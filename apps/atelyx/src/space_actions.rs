@@ -177,7 +177,7 @@ fn discard_readonly_dirty(
         app.autosave_deadline = None;
         app.notify(NoticeLevel::Warning, "只读身份：未保存的改动不会写入空间");
     } else if !quiet {
-        app.notify(NoticeLevel::Warning, "该空间为只读身份，无法保存");
+        app.notify(NoticeLevel::Warning, "只读身份，无法保存");
     }
     app.after_any_flush()
 }
@@ -186,7 +186,7 @@ fn discard_readonly_dirty(
 fn require_write(app: &mut App) -> Option<SpaceSession> {
     let session = session_of(app)?;
     if !session.role.can_write() {
-        app.notify(NoticeLevel::Warning, "该空间为只读身份，无法执行此操作");
+        app.notify(NoticeLevel::Warning, "只读身份，无法执行此操作");
         return None;
     }
     Some(session)

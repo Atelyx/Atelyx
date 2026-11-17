@@ -197,11 +197,11 @@ pub(crate) enum PopupState {
     ChatModelMenu { scope: crate::chat_composer::ConfigScope },
     /// AI 对话：输入区「+」菜单（添加上下文 / 上传附件）；scope = 草稿作用域。
     ChatPlusMenu { scope: crate::chat_composer::ComposerScope },
-    /// AI 对话面板：推理等级下拉（面板级覆盖；跟随默认 = 不发送推理参数）。
     /// AI 对话：Agent 下拉（scope = 写入目标；缺省「对话」）。
     ChatAgentMenu { scope: crate::chat_composer::ConfigScope },
     /// 设置-AI：话题自动命名模式。
     AiNamingMenu,
+    /// 设置-AI：默认模型下拉。
     AiDefaultModelMenu,
     /// 设置-AI：Agent 系统提示词选择。
     AiAgentPromptMenu,

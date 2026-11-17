@@ -1588,7 +1588,7 @@ pub(crate) fn image_backend(app: &App) -> Result<ImageBackend, String> {
             let session =
                 crate::space_actions::session_of(app).ok_or_else(|| "协作空间未连接".to_string())?;
             if !session.role.can_write() {
-                return Err("该空间为只读身份，无法发送图片".to_string());
+                return Err("只读身份，无法发送图片".to_string());
             }
             Ok(ImageBackend::Space { client: session.client, space_id: session.space_id })
         }
