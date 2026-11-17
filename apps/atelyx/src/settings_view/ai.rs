@@ -288,7 +288,8 @@ pub enum AiMsg {
     /// 整类开关（TOOL_CATEGORIES 下标）：全开 → 全关，否则全开。
     AgentCategoryToggle(usize),
     AgentSave,
-    AgentDelete,
+    /// 删除指定 Agent（携带目标 id，避免按当前选中项误删）。
+    AgentDelete(String),
     /// Agent 列表行悬停（悬停显形操作钮）。
     AgentHover(Option<String>),
     /// 复制 Agent（新 id 副本，紧随原条目入列）。
@@ -937,12 +938,11 @@ pub fn update(app: &mut App, msg: AiMsg) -> Task<Message> {
             }
             Task::none()
         }
-        AiMsg::AgentDelete => {
+        AiMsg::AgentDelete(id) => {
             app.dismiss_popup();
             if readonly(app) {
                 return Task::none();
             }
-            let Some(id) = app.ai.agent_sel.clone() else { return Task::none() };
             // 内置 Agent 兜底保护（入口按钮已隐藏，防其它路径误删）：守卫先行，不动选中态
             if app
                 .agents
@@ -956,6 +956,8 @@ pub fn update(app: &mut App, msg: AiMsg) -> Task<Message> {
             let mut agents = app.agents.clone();
             agents.retain(|a| a.id != id);
             app.agents = agents.clone();
+            // 删后回到一个可用条目，避免右栏空态误报「还没有配置 Agent」
+            app.ai.agent_sel = app.agents.first().map(|a| a.id.clone());
             save_agents(app, agents)
         }
 
@@ -1783,7 +1785,11 @@ fn agent_card(
             Some((window, "复制 Agent".to_string())),
         ));
         if !builtin {
-            let del = open_popup(app, window, PopupState::AiAgentDeleteMenu);
+            let del = open_popup(
+                app,
+                window,
+                PopupState::AiAgentDeleteMenu { agent_id: a.id.clone() },
+            );
             line = line.push(controls::icon_button(
                 "bin",
                 12.0,
@@ -1863,7 +1869,11 @@ fn agent_form(app: &App, a: &vault::AgentConfig, window: iced::window::Id) -> El
             "删除",
             &controls::btn_sm(),
             controls::Variant::Ghost,
-            Some(open_popup(app, window, PopupState::AiAgentDeleteMenu)),
+            Some(open_popup(
+                app,
+                window,
+                PopupState::AiAgentDeleteMenu { agent_id: a.id.clone() },
+            )),
         ));
     }
     col = col.push(container(actions).width(Length::Fill));

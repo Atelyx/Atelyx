@@ -207,7 +207,7 @@ pub(crate) enum PopupState {
     /// 设置-AI：删除供应商二段确认（pane 1 = 确认）。
     AiProviderDeleteMenu,
     /// 设置-AI：删除 Agent 二段确认（pane 1 = 确认）。
-    AiAgentDeleteMenu,
+    AiAgentDeleteMenu { agent_id: String },
     /// 设置-AI：搜索源下拉。
     AiSearchProviderMenu,
     /// 历史记录弹层（居中模态；kind+file 定位侧文件）。

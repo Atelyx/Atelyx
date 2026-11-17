@@ -227,13 +227,32 @@ pub(super) fn entries<'a>(app: &'a App, state: &PopupState, pane: usize, window:
                 (1, MenuEntry::action("取消", Message::Ui(crate::ui::UiMsg::PopupClose { window }))),
             ]
         }
-        PopupState::AiAgentDeleteMenu => {
+        PopupState::AiAgentDeleteMenu { agent_id } => {
+            // 删除目标随弹层携带：悬停行与当前选中行可以不同，不能按选中项删
+            let name = app
+                .agents
+                .iter()
+                .find(|a| &a.id == agent_id)
+                .map(|a| a.name.chars().take(10).collect::<String>())
+                .unwrap_or_default();
+            let confirm = if name.is_empty() {
+                "确认删除".to_string()
+            } else {
+                format!("删除「{name}」")
+            };
             vec![
                 (
                     0,
                     MenuEntry::Submenu { label: "删除 Agent".into(), icon: Some("bin".into()), disabled: false, pane: 1 },
                 ),
-                (1, MenuEntry::danger("确认删除", "bin", Message::Ai(ai::AiMsg::AgentDelete))),
+                (
+                    1,
+                    MenuEntry::danger(
+                        confirm,
+                        "bin",
+                        Message::Ai(ai::AiMsg::AgentDelete(agent_id.clone())),
+                    ),
+                ),
                 (1, MenuEntry::action("取消", Message::Ui(crate::ui::UiMsg::PopupClose { window }))),
             ]
         }
@@ -268,7 +287,7 @@ pub(super) fn width(state: &PopupState) -> f32 {
         PopupState::ChatPlusMenu { .. } => 176.0,
         PopupState::AiNamingMenu => 144.0,
         PopupState::AiAgentPromptMenu => 208.0,
-        PopupState::AiProviderDeleteMenu | PopupState::AiAgentDeleteMenu => 208.0,
+        PopupState::AiProviderDeleteMenu | PopupState::AiAgentDeleteMenu { .. } => 208.0,
         PopupState::AiSearchProviderMenu => 144.0,
         _ => unreachable!("宽度按域分派，本域以外的变体不会到这里"),
     }

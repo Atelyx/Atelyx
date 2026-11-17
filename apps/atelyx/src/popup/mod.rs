@@ -75,7 +75,7 @@ pub(crate) fn element<'a>(
         | PopupState::AiNamingMenu
         | PopupState::AiAgentPromptMenu
         | PopupState::AiProviderDeleteMenu
-        | PopupState::AiAgentDeleteMenu
+        | PopupState::AiAgentDeleteMenu { .. }
         | PopupState::AiSearchProviderMenu => ai::entries(app, state, pane, window),
         // 居中模态不经锚点渲染（with_overlays 分流到各自 overlay）
         PopupState::HistoryBrowser { .. } | PopupState::TableAiField { .. } => Vec::new(),
@@ -136,7 +136,7 @@ pub(crate) fn width(state: &PopupState) -> f32 {
         | PopupState::AiNamingMenu
         | PopupState::AiAgentPromptMenu
         | PopupState::AiProviderDeleteMenu
-        | PopupState::AiAgentDeleteMenu
+        | PopupState::AiAgentDeleteMenu { .. }
         | PopupState::AiSearchProviderMenu => ai::width(state),
         PopupState::HistoryBrowser { .. }
         | PopupState::TableAiField { .. } => modal::width(state),
