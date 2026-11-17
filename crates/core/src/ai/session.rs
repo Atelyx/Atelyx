@@ -1490,7 +1490,7 @@ fn merge_rewrite_with_foreign_tail(rewrite: &str, foreign_tail: &str) -> String 
 }
 
 /// 追加基线漂移后的合并：保留磁盘现有行序，追加本端新消息（按消息 id 去重）。
-fn merge_jsonl_messages(existing: &str, incoming: &str) -> String {
+pub(crate) fn merge_jsonl_messages(existing: &str, incoming: &str) -> String {
     let mut ids: HashSet<String> = HashSet::new();
     let mut lines: Vec<String> = Vec::new();
     for line in existing.lines().filter(|l| !l.trim().is_empty()) {

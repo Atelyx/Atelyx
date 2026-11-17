@@ -334,14 +334,26 @@ impl SessionIo for SpaceSessionIo {
     fn append_messages(&self, file: &str, base: &str, tail: &str) -> Result<(), String> {
         let id = message_file_id(file)?;
         let key = format!("{META_MESSAGES_PREFIX}{id}");
-        let existing = self.meta_get(&key)?.unwrap_or_default();
-        if !matches_append_base(&existing, base) {
-            // 基线漂移（多为另一设备对同一会话追加了消息）：按约定回落全量重写，
-            // 以本进程内存视图为准（写链对 Err 的统一处置）；服务端无原子追加契约，无法两全
-            return Err("空间内容与追加基线不一致".to_string());
+        // 元数据无原子追加契约：读→整值写回→回读校验。写回后被另一设备覆盖时，
+        // 保留其内容并把本次新增行按消息 id 接上重试（有界），不静默丢并发消息。
+        let mut body = appended_body(base, tail);
+        let mut check_base = true;
+        for _ in 0..3 {
+            if check_base {
+                let existing = self.meta_get(&key)?.unwrap_or_default();
+                if !matches_append_base(&existing, base) {
+                    return Err("空间内容与追加基线不一致".to_string());
+                }
+            }
+            self.meta_put(&key, &body)?;
+            let after = self.meta_get(&key)?.unwrap_or_default();
+            if after == body {
+                return Ok(());
+            }
+            body = crate::ai::session::merge_jsonl_messages(&after, &body);
+            check_base = false;
         }
-        // 元数据无追加语义：整值写回「基线 + 新增行」，落盘形状与本地追加一致
-        self.meta_put(&key, &appended_body(base, tail))
+        Err("空间内容被并发修改，会话写入失败".to_string())
     }
 
     fn read_session_meta(&self, file: &str) -> Result<Option<ChatSessionMeta>, String> {
