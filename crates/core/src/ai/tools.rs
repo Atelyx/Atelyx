@@ -659,11 +659,14 @@ fn render_numbered(content: &str, args: &Value, rel: &str) -> ToolResult {
     let start = offset;
     let end = (start + limit).min(total);
     let mut out = String::new();
+    let mut chars = 0usize;
     let mut shown_until = start;
     for (i, line) in content.lines().enumerate().skip(start).take(end - start) {
-        out.push_str(&format!("{}| {line}\n", i + 1));
+        let rendered = format!("{}| {line}\n", i + 1);
+        chars += rendered.chars().count();
+        out.push_str(&rendered);
         shown_until = i + 1;
-        if out.chars().count() > READ_CHARS_CAP {
+        if chars > READ_CHARS_CAP {
             out.push_str("…（结果过长截断）\n");
             break;
         }
@@ -795,9 +798,12 @@ async fn grep(ctx: &ToolCtx, args: &Value) -> ToolResult {
                 return ToolResult::ok("无命中");
             }
             let mut text = String::new();
+            let mut chars = 0usize;
             for (path, line_number, line) in matches.iter() {
-                text.push_str(&format!("{path}:{line_number}: {line}\n"));
-                if text.chars().count() > READ_CHARS_CAP {
+                let rendered = format!("{path}:{line_number}: {line}\n");
+                chars += rendered.chars().count();
+                text.push_str(&rendered);
+                if chars > READ_CHARS_CAP {
                     text.push_str("…（结果过长截断）\n");
                     break;
                 }
@@ -1340,15 +1346,17 @@ fn render_table(table: &vault::TableFile, args: &Value, rel: &str) -> String {
     let end = (start + limit).min(total);
     out.push_str(&format!("行 {}-{}/共 {total}：\n", start + 1, end));
     let mut shown = start;
+    let mut chars = out.chars().count();
     for (idx, row) in table.rows[start..end].iter().enumerate() {
         let mut line = format!("- {}", row.id);
         for f in &table.fields {
             line.push_str(&format!(" | {}={}", f.id, cell_text(row.values.get(&f.id))));
         }
+        chars += line.chars().count() + 1;
         out.push_str(&line);
         out.push('\n');
         shown = start + idx + 1;
-        if out.chars().count() > READ_CHARS_CAP {
+        if chars > READ_CHARS_CAP {
             out.push_str("…（结果过长截断）\n");
             break;
         }
@@ -1408,10 +1416,13 @@ fn render_canvas(canvas: &vault::CanvasFile, rel: &str) -> String {
         out.push_str("节点：（无）\n");
     } else {
         out.push_str("节点：\n");
+        let mut chars = out.chars().count();
         for n in canvas.nodes.iter().take(CANVAS_READ_CAP) {
-            out.push_str(&canvas_node_line(n));
+            let line = canvas_node_line(n);
+            chars += line.chars().count() + 1;
+            out.push_str(&line);
             out.push('\n');
-            if out.chars().count() > READ_CHARS_CAP {
+            if chars > READ_CHARS_CAP {
                 out.push_str("…（结果过长截断）\n");
                 break;
             }
