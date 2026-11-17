@@ -1582,7 +1582,13 @@ async fn table_edit(ctx: &ToolCtx, args: &Value) -> ToolResult {
             )
             .await
             {
-                Ok(Some(_)) => ToolResult::ok(receipt),
+                // 回执必须按服务端实际补丁生成：本地模型的新行 id 在服务端不存在
+                Ok(Some(outcome)) => ToolResult::ok(crate::ai::doc_edit::edited_receipt::<vault::TableFile>(
+                    &rel,
+                    ops.len(),
+                    &outcome.summary,
+                    &outcome.patch,
+                )),
                 Ok(None) => ToolResult::ok(crate::ai::doc_edit::unchanged_receipt::<vault::TableFile>(&rel)),
                 Err(e) => ToolResult::err(crate::ai::doc_edit::write_failed(&e)),
             }
@@ -1657,7 +1663,13 @@ async fn canvas_edit(ctx: &ToolCtx, args: &Value) -> ToolResult {
             )
             .await
             {
-                Ok(Some(_)) => ToolResult::ok(receipt),
+                // 回执必须按服务端实际补丁生成：本地模型的新节点 id 在服务端不存在
+                Ok(Some(outcome)) => ToolResult::ok(crate::ai::doc_edit::edited_receipt::<vault::CanvasFile>(
+                    &rel,
+                    ops.len(),
+                    &outcome.summary,
+                    &outcome.patch,
+                )),
                 Ok(None) => ToolResult::ok(crate::ai::doc_edit::unchanged_receipt::<vault::CanvasFile>(&rel)),
                 Err(e) => ToolResult::err(crate::ai::doc_edit::write_failed(&e)),
             }

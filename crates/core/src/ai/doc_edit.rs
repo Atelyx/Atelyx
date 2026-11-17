@@ -257,6 +257,10 @@ pub async fn apply_space<M: DocModel>(
                     Ok(()) => {}
                     // 读到不存在之后被他人建出：重读后按补丁上行
                     Err(SpaceError::Conflict(_)) if attempt == 0 => continue,
+                    // 第二次仍冲突：如实回冲突原因，不把「被他人修改」说成新建失败
+                    Err(SpaceError::Conflict(_)) => {
+                        return Err(format!("{what}正在被他人修改，请稍后重试"))
+                    }
                     Err(e) => return Err(format!("新建失败：{e}")),
                 }
                 let file = M::submit_patch(client, space_id, rel, &planned.patch)
@@ -286,6 +290,10 @@ pub async fn apply_space<M: DocModel>(
             }
             // 读到存在之后被删除：重读后按新建处理（补丁端点要求目标已存在）
             Err(SpaceError::NotFound) if attempt == 0 => continue,
+            // 第二次仍被删：如实回冲突原因，不把「被他人修改」说成补丁非法
+            Err(SpaceError::NotFound) => {
+                return Err(format!("{what}正在被他人修改，请稍后重试"))
+            }
             Err(e) => return Err(patch_error(e, what)),
         }
     }
