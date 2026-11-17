@@ -188,6 +188,9 @@ struct Session {
     created_at: i64,
     updated_at: i64,
     messages: Vec<Value>,
+    /// 装载时磁盘原文与归一后序列化不一致（崩溃残留 running 行等）：保留原文做首次写基线，
+    /// 下一次重写把归一行落盘；装载完成后清空。
+    loaded_disk: Option<String>,
 }
 
 /// 消息 .jsonl 的追加基线：上次成功落盘的内容前缀（确定性序列化，字符串比对判定可追加）。
@@ -455,15 +458,23 @@ impl SessionStore {
             .sessions
             .iter()
             .map(|s| {
+                // 归一过的会话以磁盘原文为基线：首次重写即可落盘归一行
+                let jsonl = s
+                    .loaded_disk
+                    .clone()
+                    .unwrap_or_else(|| serialize_messages_jsonl(&s.messages));
                 (
                     s.id.clone(),
                     PersistedBase {
-                        len: s.messages.len(),
-                        jsonl: serialize_messages_jsonl(&s.messages).into(),
+                        len: jsonl.lines().count(),
+                        jsonl: jsonl.into(),
                     },
                 )
             })
             .collect();
+        for session in &mut inner.sessions {
+            session.loaded_disk = None;
+        }
         inner.change_versions.clear();
         inner.patch_revs.clear();
         inner.model_override = editor_meta
@@ -514,6 +525,7 @@ impl SessionStore {
                 created_at: def.created_at,
                 updated_at: def.updated_at,
                 messages: def.messages.clone(),
+                loaded_disk: None,
             };
             inner.mark_session_meta(&def.id);
             if !session.messages.is_empty() {
@@ -867,13 +879,17 @@ fn scan_sessions(io: &dyn SessionIo) -> Result<Vec<Session>, String> {
     let rows = io.list_sessions()?;
     let mut sessions = Vec::new();
     for row in rows {
-        let messages = match io.read_messages(&row.file) {
-            Ok(jsonl) => parse_messages_jsonl_loaded(&jsonl),
+        let raw = match io.read_messages(&row.file) {
+            Ok(raw) => raw,
             Err(e) => {
                 eprintln!("会话读取失败，本次跳过（不覆盖磁盘内容）：{} — {e}", row.file);
                 continue;
             }
         };
+        let messages = parse_messages_jsonl_loaded(&raw);
+        // 归一后的序列化与磁盘原文不一致时，保留原文做基线：首次写走重写，把归一行落盘
+        let disk = raw.trim_end_matches('\n');
+        let loaded_disk = (serialize_messages_jsonl(&messages) != disk).then(|| disk.to_string());
         let (title, agent_id, compaction) = match &row.meta {
             Some(meta) => (
                 meta.title.clone(),
@@ -901,6 +917,7 @@ fn scan_sessions(io: &dyn SessionIo) -> Result<Vec<Session>, String> {
                 .and_then(Value::as_i64)
                 .unwrap_or(0),
             messages,
+            loaded_disk,
         });
     }
     Ok(sessions)
@@ -1626,6 +1643,45 @@ mod tests {
         let run = &out.as_array().unwrap()[0]["run"];
         assert_eq!(run["status"], json!("error"));
         assert_eq!(run["resultSummary"], json!("（已中断）"));
+    }
+
+    #[test]
+    fn loaded_running_rows_stay_interrupted_after_first_append() {
+        let dir = TempDir::new("ai-session-load-normalize");
+        let file = chat_message_file("s1");
+        let raw = json!({
+            "id": "m1",
+            "role": "assistant",
+            "content": "",
+            "createdAt": 1,
+            "steps": [{ "kind": "tool", "run": {
+                "id": "real-run-1", "name": "read_file", "status": "running"
+            }}]
+        })
+        .to_string()
+            + "\n";
+        crate::vault::write_chat_messages_file(&dir, &file, &raw).unwrap();
+        let store = SessionStore::new(test_config());
+        store.load(store.begin_load(), local_io(dir.to_path_buf())).unwrap();
+        assert_eq!(
+            store.snapshot().sessions[0]["messages"][0]["steps"][0]["run"]["status"],
+            json!("error")
+        );
+        // 追加触发写链：归一结果必须落盘且不被合并回 running
+        store
+            .commit(commit_batch(vec![AppendBatch {
+                session_id: "s1".into(),
+                messages: vec![msg("m2", "user", "x")],
+            }]))
+            .unwrap();
+        store.run_write_cycle();
+        let disk = crate::vault::read_chat_messages_file(&dir, &file).unwrap();
+        let parsed = parse_messages_jsonl(&disk);
+        assert_eq!(parsed[0]["steps"][0]["run"]["status"], json!("error"));
+        assert_eq!(parsed[0]["steps"][0]["run"]["resultSummary"], json!("（已中断）"));
+        let snap = store.snapshot();
+        assert_eq!(snap.sessions[0]["messages"][0]["steps"][0]["run"]["status"], json!("error"));
+        assert_eq!(snap.sessions[0]["messages"].as_array().unwrap().len(), 2);
     }
 
     #[test]
