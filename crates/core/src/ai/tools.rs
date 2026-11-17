@@ -305,7 +305,7 @@ pub fn builtin_tools() -> &'static [ToolDef] {
                 name: "table_edit",
                 label: "编辑表格",
                 icon: "pencil",
-                description: "编辑表格（.atb）：一次调用提交一批操作，整批落成一个补丁。op = set_cell（按 rowId / fieldId 写单元格，value 传 null 清空）| add_row（cells 按字段 id 给初值）| delete_rows（rowIds）。表格文件不存在时按给定路径新建（标题取文件名）。表格不能用文件工具整文件写。",
+                description: "编辑表格（.atb）：一次调用提交一批操作，整批落成一个补丁。op = set_cell（按 rowId / fieldId 写单元格，value 传 null 清空）| add_row（cells 按字段 id 给初值）| delete_rows（rowIds）。表格文件不存在时按给定路径新建（标题取文件名）。表格不能用文件工具整文件写。AI 字段（ai）的值由模型生成、本工具不能写也不能清空；要更新请让用户在字段菜单里重新生成。",
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -319,7 +319,7 @@ pub fn builtin_tools() -> &'static [ToolDef] {
                                     "op": { "type": "string", "enum": ["set_cell", "add_row", "delete_rows"], "description": "操作类型" },
                                     "rowId": { "type": "string", "description": "set_cell：行 id" },
                                     "fieldId": { "type": "string", "description": "set_cell：字段 id" },
-                                    "value": { "description": "set_cell：值（文本 / 数字 / 单调选项；null 清空）" },
+                                    "value": { "description": "set_cell：值（文本 / 数字 / 单选项；null 清空；AI 字段不可写）" },
                                     "cells": { "type": "object", "description": "add_row：字段 id → 值" },
                                     "rowIds": { "type": "array", "items": { "type": "string" }, "description": "delete_rows：行 id 列表" }
                                 },
@@ -1300,6 +1300,11 @@ fn render_table(table: &vault::TableFile, args: &Value, rel: &str) -> String {
     } else {
         out.push_str("字段：\n");
         for f in &table.fields {
+            // AI 字段的值由模型生成、工具不可写：表头行直接标出来，避免模型先撞一次失败调用
+            if f.field_type == crate::table_ai::FIELD_TYPE {
+                out.push_str(&format!("- {} {}（ai：由模型生成，工具只读）\n", f.id, f.name));
+                continue;
+            }
             let options = f
                 .options
                 .as_ref()
@@ -2386,6 +2391,77 @@ mod tests {
         assert!(dir.join("新表.atb").is_file());
         let r = execute(&ctx, "table_read", json!({ "path": "无此表.atb" })).await;
         assert!(r.is_error && r.text.contains("不存在或不可读"), "{}", r.text);
+    }
+
+    #[tokio::test]
+    async fn table_ai_field_is_marked_and_rejects_tool_writes() {
+        let dir = TempDir::new("ai-table-ai-field");
+        let ctx = ctx(&dir);
+        let table = crate::vault::TableFile {
+            schema: crate::vault::TABLE_SCHEMA.into(),
+            id: "t1".into(),
+            title: "任务".into(),
+            fields: vec![
+                crate::vault::TableField {
+                    id: "f1".into(),
+                    name: "名称".into(),
+                    field_type: "text".into(),
+                    options: None,
+                    width: None,
+                    calc_type: None,
+                    ai: None,
+                },
+                crate::vault::TableField {
+                    id: "f2".into(),
+                    name: "摘要".into(),
+                    field_type: crate::table_ai::FIELD_TYPE.into(),
+                    options: None,
+                    width: None,
+                    calc_type: None,
+                    ai: Some(Default::default()),
+                },
+            ],
+            rows: vec![crate::vault::TableRow {
+                id: "r1".into(),
+                values: [("f2".to_string(), json!("模型生成的结果"))].into_iter().collect(),
+                height: None,
+                styles: None,
+                ai: None,
+            }],
+            created_at: 0,
+            updated_at: 0,
+        };
+        std::fs::write(
+            dir.join("表.atb"),
+            serde_json::to_string_pretty(&table).unwrap(),
+        )
+        .unwrap();
+        let r = execute(&ctx, "table_read", json!({ "path": "表.atb" })).await;
+        assert!(!r.is_error, "{}", r.text);
+        assert!(r.text.contains("f2 摘要（ai：由模型生成，工具只读）"), "{}", r.text);
+        assert!(r.text.contains("模型生成的结果"), "{}", r.text);
+        // AI 字段不能经工具写入，也不能用 null 清空：整批失败、不落盘
+        for value in [json!("手写"), json!(null)] {
+            let r = execute(
+                &ctx,
+                "table_edit",
+                json!({ "path": "表.atb", "ops": [{ "op": "set_cell", "rowId": "r1", "fieldId": "f2", "value": value }] }),
+            )
+            .await;
+            assert!(r.is_error && r.text.contains("AI 字段"), "{}", r.text);
+        }
+        let r = execute(
+            &ctx,
+            "table_edit",
+            json!({ "path": "表.atb", "ops": [{ "op": "add_row", "cells": { "f2": "手写" } }] }),
+        )
+        .await;
+        assert!(r.is_error && r.text.contains("AI 字段"), "{}", r.text);
+        queue_of(&ctx).drain().await.unwrap();
+        let saved: crate::vault::TableFile =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("表.atb")).unwrap()).unwrap();
+        assert_eq!(saved.rows[0].values["f2"], json!("模型生成的结果"));
+        assert_eq!(saved.rows.len(), 1);
     }
 
     #[tokio::test]
