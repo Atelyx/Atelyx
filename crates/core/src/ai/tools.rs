@@ -186,7 +186,7 @@ pub fn builtin_tools() -> &'static [ToolDef] {
                 name: "read_history",
                 label: "读取历史",
                 icon: "history",
-                description: "读取文件的历史版本列表（时间、作者、摘要）。",
+                description: "读取文件的历史版本列表（时间、作者、摘要）；笔记、表格、画布各有独立历史。",
                 parameters: json!({
                     "type": "object",
                     "properties": { "path": { "type": "string", "description": "仓库相对路径" } },
@@ -366,7 +366,7 @@ pub fn builtin_tools() -> &'static [ToolDef] {
                                     "text": { "type": "string", "description": "add_text_card / update_text：正文（Markdown）" },
                                     "path": { "type": "string", "description": "add_note_card：要引用的仓库笔记路径（.md）" },
                                     "x": { "type": "number", "description": "新卡横坐标（缺省自动放在现有卡右侧）" },
-                                    "y": { "type": "number", "description": "新卡纵坐标（缺省自动放在现有卡右侧）" },
+                                    "y": { "type": "number", "description": "新卡纵坐标（缺省与现有卡顶部对齐）" },
                                     "from": { "type": "string", "description": "connect：起点节点 id" },
                                     "to": { "type": "string", "description": "connect：终点节点 id" },
                                     "kind": { "type": "string", "enum": ["data", "link"], "description": "connect：连线类型（缺省 data）" },
@@ -386,7 +386,7 @@ pub fn builtin_tools() -> &'static [ToolDef] {
                 name: "todo_write",
                 label: "任务清单",
                 icon: "list",
-                description: "写入当前任务清单（全量覆盖）。任务进行中时应维护此清单让用户看到进展。",
+                description: "写入当前任务清单（全量覆盖）。有进展时更新清单，便于用户查看进度。",
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -859,7 +859,15 @@ async fn list_dir(ctx: &ToolCtx, args: &Value) -> ToolResult {
             rows
         }
         RepoAccess::Space { client, space_id } => match client.tree(space_id).await {
-            Ok(tree) => space_dir_rows(&tree, &dir),
+            Ok(tree) => match space_dir_rows(&tree, &dir) {
+                Some(rows) => rows,
+                None => {
+                    return ToolResult::err(format!(
+                        "目录不存在或不可读：{}",
+                        if dir.is_empty() { "." } else { dir.as_str() }
+                    ))
+                }
+            },
             Err(e) => return ToolResult::err(format!("目录不存在或不可读：{e}")),
         },
     };
@@ -872,16 +880,18 @@ async fn list_dir(ctx: &ToolCtx, args: &Value) -> ToolResult {
 }
 
 /// 空间整树 → 目标目录的直接子项（隐藏项过滤；目录带尾 `/`）。
-fn space_dir_rows(tree: &[crate::space_client::TreeNode], dir: &str) -> Vec<String> {
+/// None = 路径不存在或不是目录（与本地分支同口径报错，不伪装成空目录）。
+fn space_dir_rows(tree: &[crate::space_client::TreeNode], dir: &str) -> Option<Vec<String>> {
     let children: &[crate::space_client::TreeNode] = if dir.is_empty() {
         tree
     } else {
-        match find_tree_node(tree, dir) {
-            Some(node) => &node.children,
-            None => return Vec::new(),
+        let node = find_tree_node(tree, dir)?;
+        if !node.is_dir {
+            return None;
         }
+        &node.children
     };
-    children
+    Some(children
         .iter()
         .filter(|node| !node.name.starts_with('.'))
         .map(|node| {
@@ -891,7 +901,7 @@ fn space_dir_rows(tree: &[crate::space_client::TreeNode], dir: &str) -> Vec<Stri
                 node.name.clone()
             }
         })
-        .collect()
+        .collect())
 }
 
 fn find_tree_node<'a>(
@@ -909,20 +919,29 @@ fn find_tree_node<'a>(
     None
 }
 
+/// 历史侧文件的种类目录由扩展名决定（表格 / 画布各有子目录，其余按笔记）。
+fn history_kind_for(rel: &str) -> crate::history::HistoryKind {
+    let lower = rel.to_ascii_lowercase();
+    if lower.ends_with(".atb") {
+        crate::history::HistoryKind::Table
+    } else if lower.ends_with(".atlx") {
+        crate::history::HistoryKind::Canvas
+    } else {
+        crate::history::HistoryKind::Note
+    }
+}
+
 async fn read_history(ctx: &ToolCtx, args: &Value) -> ToolResult {
     let rel = arg!(args, "path");
     let rel = match rel_path(rel) {
         Ok(rel) => rel,
         Err(e) => return e,
     };
+    let kind = history_kind_for(&rel);
     let versions = match &ctx.repo {
-        RepoAccess::Local { root, .. } => Ok(crate::history::load_history(
-            root,
-            crate::history::HistoryKind::Note,
-            &rel,
-        )),
+        RepoAccess::Local { root, .. } => Ok(crate::history::load_history(root, kind, &rel)),
         RepoAccess::Space { client, space_id } => client
-            .history_versions(space_id, crate::history::HistoryKind::Note, &rel)
+            .history_versions(space_id, kind, &rel)
             .await
             .map_err(|e| e.to_string()),
     };
@@ -1947,6 +1966,15 @@ async fn todo_write(ctx: &ToolCtx, args: &Value) -> ToolResult {
     let Ok(content) = serde_json::to_string_pretty(&payload) else {
         return ToolResult::err("任务清单序列化失败".to_string());
     };
+    let dropped = todos.len().saturating_sub(cleaned.len());
+    let receipt = if dropped == 0 {
+        format!("任务清单已更新（{} 项）", cleaned.len())
+    } else {
+        format!(
+            "任务清单已更新（{} 项；忽略 {dropped} 条缺少 id/text 的条目）",
+            cleaned.len()
+        )
+    };
     match &ctx.repo {
         // 落点是工具私有路径（`.atelyx/`），不走 AI 路径校验
         RepoAccess::Local { root, queue } => {
@@ -1957,13 +1985,13 @@ async fn todo_write(ctx: &ToolCtx, args: &Value) -> ToolResult {
             queue
                 .write(path, content)
                 .await
-                .map(|_| ToolResult::ok(format!("任务清单已更新（{} 项）", todos.len())))
+                .map(|_| ToolResult::ok(receipt.clone()))
                 .unwrap_or_else(|e| ToolResult::err(format!("写入失败：{e}")))
         }
         RepoAccess::Space { client, space_id } => client
             .my_meta_patch(space_id, &[(TODO_META_KEY.to_string(), content)])
             .await
-            .map(|_| ToolResult::ok(format!("任务清单已更新（{} 项）", todos.len())))
+            .map(|_| ToolResult::ok(receipt))
             .unwrap_or_else(|e| ToolResult::err(format!("写入失败：{e}"))),
     }
 }
@@ -2125,11 +2153,46 @@ mod tests {
             node("根文件.md", false, vec![]),
         ];
         // 根目录：隐藏项过滤
-        assert_eq!(space_dir_rows(&tree, ""), vec!["笔记/", "根文件.md"]);
+        assert_eq!(
+            space_dir_rows(&tree, ""),
+            Some(vec!["笔记/".to_string(), "根文件.md".to_string()])
+        );
         // 子目录：列出直接子项，目录带尾斜杠
-        assert_eq!(space_dir_rows(&tree, "笔记"), vec!["a.md", "子目录/"]);
-        // 目录不存在 = 空（调用方按空目录呈现）
-        assert!(space_dir_rows(&tree, "无此目录").is_empty());
+        assert_eq!(
+            space_dir_rows(&tree, "笔记"),
+            Some(vec!["a.md".to_string(), "子目录/".to_string()])
+        );
+        // 路径不存在或不是目录 = None（调用方报「目录不存在或不可读」，不伪装空目录）
+        assert_eq!(space_dir_rows(&tree, "无此目录"), None);
+        assert_eq!(space_dir_rows(&tree, "根文件.md"), None);
+    }
+
+    #[test]
+    fn history_kind_follows_file_extension() {
+        use crate::history::HistoryKind;
+        assert_eq!(history_kind_for("笔记/方案.md"), HistoryKind::Note);
+        assert_eq!(history_kind_for("计划/排期.atb"), HistoryKind::Table);
+        assert_eq!(history_kind_for("方案.atlx"), HistoryKind::Canvas);
+        assert_eq!(history_kind_for("方案.ATLX"), HistoryKind::Canvas);
+        assert_eq!(history_kind_for("无扩展名"), HistoryKind::Note);
+    }
+
+    #[tokio::test]
+    async fn todo_receipt_counts_written_entries_only() {
+        let dir = TempDir::new("ai-todo-count");
+        let ctx = ctx(&dir);
+        let r = execute(
+            &ctx,
+            "todo_write",
+            json!({ "todos": [
+                { "id": "a", "text": "调研", "done": false },
+                { "text": "缺 id 的条目" }
+            ]}),
+        )
+        .await;
+        assert!(!r.is_error, "{}", r.text);
+        assert!(r.text.contains("（1 项"), "{}", r.text);
+        assert!(r.text.contains("忽略 1 条"), "{}", r.text);
     }
 
     #[tokio::test]
