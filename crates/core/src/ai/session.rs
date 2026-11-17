@@ -868,7 +868,7 @@ fn scan_sessions(io: &dyn SessionIo) -> Result<Vec<Session>, String> {
     let mut sessions = Vec::new();
     for row in rows {
         let messages = match io.read_messages(&row.file) {
-            Ok(jsonl) => parse_messages_jsonl(&jsonl),
+            Ok(jsonl) => parse_messages_jsonl_loaded(&jsonl),
             Err(e) => {
                 eprintln!("会话读取失败，本次跳过（不覆盖磁盘内容）：{} — {e}", row.file);
                 continue;
@@ -908,6 +908,15 @@ fn scan_sessions(io: &dyn SessionIo) -> Result<Vec<Session>, String> {
 
 /// 解析会话消息 .jsonl（逐行 JSON，损坏行跳过；id/createdAt 缺省派生；steps 收敛）。
 fn parse_messages_jsonl(jsonl: &str) -> Vec<Value> {
+    parse_messages(jsonl, false)
+}
+
+/// 装载磁盘真源：进程内不可能有在途 run，任何 running 工具行都归为已中断。
+fn parse_messages_jsonl_loaded(jsonl: &str) -> Vec<Value> {
+    parse_messages(jsonl, true)
+}
+
+fn parse_messages(jsonl: &str, interrupt_running: bool) -> Vec<Value> {
     let mut messages = Vec::new();
     for line in jsonl.split('\n') {
         let trimmed = line.trim();
@@ -938,7 +947,7 @@ fn parse_messages_jsonl(jsonl: &str) -> Vec<Value> {
         if let Some(steps) = raw.get("steps").and_then(Value::as_array) {
             obj.insert(
                 "steps".into(),
-                coalesce_agent_steps(&Value::Array(steps.clone())),
+                coalesce_agent_steps(&Value::Array(steps.clone()), interrupt_running),
             );
         }
         if let Some(atts) = raw.get("attachments").and_then(Value::as_array) {
@@ -956,7 +965,7 @@ fn parse_messages_jsonl(jsonl: &str) -> Vec<Value> {
 
 /// 归并被拆开的同轮思考/叙述步（幂等）：
 /// 按尾向前合并 reasoning/text，遇工具步即停；running 态合成工具行归一为已中断。
-fn coalesce_agent_steps(steps: &Value) -> Value {
+fn coalesce_agent_steps(steps: &Value, interrupt_running: bool) -> Value {
     let Some(items) = steps.as_array() else {
         return steps.clone();
     };
@@ -978,7 +987,7 @@ fn coalesce_agent_steps(steps: &Value) -> Value {
                     .and_then(Value::as_str)
                     .map(|id| id.starts_with(PENDING_RUN_ID_PREFIX))
                     .unwrap_or(false);
-                if is_pending
+                if (is_pending || interrupt_running)
                     && s.get("run")
                         .and_then(|r| r.get("status"))
                         .and_then(Value::as_str)
@@ -1599,7 +1608,7 @@ mod tests {
             { "kind": "tool", "run": { "id": "r1", "name": "read_file", "status": "done" } },
             { "kind": "reasoning", "text": "新一轮" }
         ]);
-        let out = coalesce_agent_steps(&steps);
+        let out = coalesce_agent_steps(&steps, false);
         let items = out.as_array().unwrap();
         assert_eq!(items.len(), 4);
         assert_eq!(items[0]["text"], json!("想继续"));
@@ -1613,10 +1622,22 @@ mod tests {
         let steps = json!([
             { "kind": "tool", "run": { "id": "pending:1:0", "name": "web_search", "status": "running" } }
         ]);
-        let out = coalesce_agent_steps(&steps);
+        let out = coalesce_agent_steps(&steps, false);
         let run = &out.as_array().unwrap()[0]["run"];
         assert_eq!(run["status"], json!("error"));
         assert_eq!(run["resultSummary"], json!("（已中断）"));
+    }
+
+    #[test]
+    fn load_normalizes_running_tool_rows_with_real_ids() {
+        let raw = "{\"id\":\"m1\",\"role\":\"assistant\",\"content\":\"\",\"createdAt\":1,\"steps\":[{\"kind\":\"tool\",\"run\":{\"id\":\"real-run-1\",\"name\":\"read_file\",\"status\":\"running\"}}]}\n";
+        let parsed = parse_messages_jsonl_loaded(raw);
+        let run = &parsed[0]["steps"][0]["run"];
+        assert_eq!(run["status"], json!("error"));
+        assert_eq!(run["resultSummary"], json!("（已中断）"));
+        // 运行期的合并解析不得误伤在途行（真源不是本次进程装载）
+        let live = parse_messages_jsonl(raw);
+        assert_eq!(live[0]["steps"][0]["run"]["status"], json!("running"));
     }
 
     fn commit_batch(appends: Vec<AppendBatch>) -> CommitBatch {
