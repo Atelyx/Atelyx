@@ -854,12 +854,17 @@ pub(crate) fn add_attachments(app: &mut App, node_id: &str, paths: Vec<std::path
 // ===== 发送 =====
 
 fn set_error(app: &mut App, node_id: &str, error: String) {
+    // 面板绑定该卡会话时同屏展示同一错误：卡错误槽只在画布浮层可见
+    let bound = app.chat.active.as_deref() == Some(session_id(node_id).as_str());
     if let Some(chat) = app
         .canvas
         .as_mut()
         .and_then(|s| s.view.card_chat.get_mut(node_id))
     {
-        chat.error = Some(error);
+        chat.error = Some(error.clone());
+    }
+    if bound {
+        app.chat.error = Some(error);
     }
 }
 
@@ -900,10 +905,17 @@ fn send_with(
     };
     if target.node_type != "conversation" || is_streaming(app, node_id) {
         restore_inputs(app, node_id, origin, images, refs);
+        // 卡内输入区在生成中会换成提示条，面板没有；面板点发送要有反馈
+        if origin == SendOrigin::Panel {
+            app.notify(crate::NoticeLevel::Warning, "该会话已有回复进行中，消息未发送");
+        }
         return Task::none();
     }
     if locked_by_peer(app, node_id) {
         restore_inputs(app, node_id, origin, images, refs);
+        if origin == SendOrigin::Panel {
+            app.notify(crate::NoticeLevel::Warning, "对端正在编辑该对话卡，消息未发送");
+        }
         return Task::none();
     }
     if matches!(&app.repo_kind, RepoKind::Space(session) if !session.role.can_write()) {
@@ -1715,6 +1727,9 @@ impl ChatStore for CardStore {
     }
 
     fn blocked(&self, app: &App, action: ChatAction) -> bool {
+        if matches!(&app.repo_kind, crate::RepoKind::Space(session) if !session.role.can_write()) {
+            return true;
+        }
         let streaming = is_streaming(app, &self.node);
         let locked = locked_by_peer(app, &self.node);
         let compacting = card_chat(app, &self.node).is_some_and(|c| c.compacting);
@@ -1726,6 +1741,9 @@ impl ChatStore for CardStore {
     }
 
     fn blocked_notice(&self, app: &App, action: ChatAction) -> String {
+        if matches!(&app.repo_kind, crate::RepoKind::Space(session) if !session.role.can_write()) {
+            return "只读身份，无法操作".to_string();
+        }
         if locked_by_peer(app, &self.node) {
             return "对端正在编辑该对话卡，暂不能操作".to_string();
         }
