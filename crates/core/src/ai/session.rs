@@ -193,7 +193,8 @@ struct Session {
 /// 消息 .jsonl 的追加基线：上次成功落盘的内容前缀（确定性序列化，字符串比对判定可追加）。
 struct PersistedBase {
     len: usize,
-    jsonl: String,
+    /// 上次成功落盘的内容（Arc 便于写轮快照零拷贝持有）
+    jsonl: Arc<str>,
 }
 
 struct Inner {
@@ -457,7 +458,7 @@ impl SessionStore {
                     s.id.clone(),
                     PersistedBase {
                         len: s.messages.len(),
-                        jsonl: serialize_messages_jsonl(&s.messages),
+                        jsonl: serialize_messages_jsonl(&s.messages).into(),
                     },
                 )
             })
@@ -1093,7 +1094,9 @@ enum WorkKind {
     /// 消息 .jsonl：追加（基线前缀逐字一致）或全量重写。
     Messages {
         file: String,
-        append_from: Option<(String, String)>, // (基线 jsonl, 追加行·带尾 '\n')
+        append_from: Option<(Arc<str>, String)>, // (基线 jsonl, 追加行·带尾 '\n')
+        /// 上次落盘基线（重写路径同样先对齐磁盘，防覆盖他端追加）
+        base: Option<Arc<str>>,
         rewrite: String,
     },
     Meta {
@@ -1130,18 +1133,19 @@ impl Inner {
             };
             let version = self.change_versions.get(&id).copied().unwrap_or(0);
             let full = serialize_messages_jsonl(&session.messages);
-            let append_from = self.persisted.get(&id).and_then(|base| {
-                if session.messages.len() > base.len {
+            let persisted = self.persisted.get(&id).map(|base| (base.len, Arc::clone(&base.jsonl)));
+            let append_from = persisted.as_ref().and_then(|(len, jsonl)| {
+                if session.messages.len() > *len {
                     // 基线自检：持久化时前缀与当前确定性序列化一致才允许追加
-                    let prefix = serialize_messages_jsonl(&session.messages[..base.len]);
-                    if prefix == base.jsonl {
+                    let prefix = serialize_messages_jsonl(&session.messages[..*len]);
+                    if prefix == jsonl.as_ref() {
                         // tail 以 '\n' 结尾（append 原语约定；磁盘行分隔由它保证）
-                        let tail = session.messages[base.len..]
+                        let tail = session.messages[*len..]
                             .iter()
                             .map(serialize_message_line)
                             .collect::<Vec<_>>()
                             .join("\n");
-                        return Some((base.jsonl.clone(), format!("{tail}\n")));
+                        return Some((Arc::clone(jsonl), format!("{tail}\n")));
                     }
                 }
                 None
@@ -1151,6 +1155,7 @@ impl Inner {
                     file: session.file.clone(),
                     append_from,
                     rewrite: full,
+                    base: persisted.map(|(_, jsonl)| jsonl),
                 },
                 session_id: Some(id),
                 version,
@@ -1301,7 +1306,7 @@ impl Inner {
                                     if base_jsonl.is_empty() {
                                         tail.trim_end_matches('\n').to_string()
                                     } else {
-                                        format!("{base_jsonl}\n{}", tail.trim_end_matches('\n'))
+                                        format!("{}\n{}", base_jsonl.as_ref(), tail.trim_end_matches('\n'))
                                     }
                                 }
                                 None => rewrite.clone(),
@@ -1311,7 +1316,7 @@ impl Inner {
                             id.clone(),
                             PersistedBase {
                                 len: jsonl.lines().count(),
-                                jsonl,
+                                jsonl: jsonl.into(),
                             },
                         );
                     }
@@ -1422,12 +1427,13 @@ fn perform_writes(work: &WorkSnapshot) -> Vec<Result<WriteOutcome, String>> {
                 file,
                 append_from,
                 rewrite,
+                base,
             } => {
                 let Some(io) = &work.backend else {
                     return Err("会话仓库未装载，无法写盘".to_string());
                 };
                 if let Some((base, tail)) = append_from {
-                    if io.append_messages(file, base, tail).is_ok() {
+                    if io.append_messages(file, base.as_ref(), tail).is_ok() {
                         return Ok(WriteOutcome::Written);
                     }
                     // 追加失败（多为基线漂移）：读回磁盘 / 服务端按消息 id 合并再全量写。
@@ -1438,6 +1444,21 @@ fn perform_writes(work: &WorkSnapshot) -> Vec<Result<WriteOutcome, String>> {
                     };
                     io.write_messages(file, &content)?;
                     return Ok(WriteOutcome::Merged(content));
+                }
+                // 重写路径（流式内容更新 / 截断）同样先看磁盘事实：他端在本地基线之后追加的
+                // 消息不得被整份覆盖；磁盘与基线一致时照常直写，基线之外无法归并时维持整份写。
+                if let Some(base) = base {
+                    if let Ok(existing) = io.read_messages(file) {
+                        let on_disk = existing.strip_suffix('\n').unwrap_or(&existing);
+                        if let Some(tail) = on_disk
+                            .strip_prefix(base.as_ref())
+                            .and_then(|rest| rest.strip_prefix('\n'))
+                        {
+                            let content = merge_rewrite_with_foreign_tail(rewrite, tail);
+                            io.write_messages(file, &content)?;
+                            return Ok(WriteOutcome::Merged(content));
+                        }
+                    }
                 }
                 io.write_messages(file, rewrite)
                     .map(|_| WriteOutcome::Written)
@@ -1452,6 +1473,20 @@ fn perform_writes(work: &WorkSnapshot) -> Vec<Result<WriteOutcome, String>> {
             },
         })
         .collect()
+}
+
+/// 重写前与磁盘合并：本地全量在前，磁盘基线之后多出的他端追加行按 id 去重接尾。
+fn merge_rewrite_with_foreign_tail(rewrite: &str, foreign_tail: &str) -> String {
+    let ids: HashSet<String> = rewrite.lines().filter_map(jsonl_line_id).collect();
+    let mut out = rewrite.trim_end_matches('\n').to_string();
+    for line in foreign_tail.lines().filter(|line| !line.trim().is_empty()) {
+        if jsonl_line_id(line).is_some_and(|id| ids.contains(&id)) {
+            continue;
+        }
+        out.push('\n');
+        out.push_str(line);
+    }
+    out
 }
 
 /// 追加基线漂移后的合并：保留磁盘现有行序，追加本端新消息（按消息 id 去重）。
@@ -1790,6 +1825,58 @@ mod tests {
         store.run_write_cycle();
         let disk = crate::vault::read_chat_messages_file(&dir, &chat_message_file("s1")).unwrap();
         assert_eq!(ids(&disk), vec!["m1", "remote", "m2", "m3"]);
+    }
+
+    #[test]
+    fn rewrite_preserves_messages_appended_after_base() {
+        let dir = TempDir::new("ai-session-rewrite-merge");
+        let store = SessionStore::new(test_config());
+        store
+            .load(store.begin_load(), local_io(dir.to_path_buf()))
+            .unwrap();
+        store
+            .commit(CommitBatch {
+                created: vec![SessionDef {
+                    id: "s1".into(),
+                    file: chat_message_file("s1"),
+                    title: None,
+                    agent_id: None,
+                    compaction: None,
+                    created_at: 1,
+                    updated_at: 1,
+                    messages: vec![msg("m1", "user", "一")],
+                }],
+                ..Default::default()
+            })
+            .unwrap();
+        store.run_write_cycle();
+        // 他端在本端基线之后追加：本端随后更新已有消息（走重写路径），不得整份覆盖
+        crate::vault::append_chat_messages_raw(
+            &dir,
+            &chat_message_file("s1"),
+            "{\"id\":\"remote\",\"role\":\"user\",\"content\":\"他端\",\"createdAt\":2}\n",
+        )
+        .unwrap();
+        store
+            .commit(CommitBatch {
+                patches: vec![PatchEntry {
+                    session_id: "s1".into(),
+                    message_id: "m1".into(),
+                    rev: 1,
+                    content: Some("更新后".into()),
+                    steps: None,
+                }],
+                ..Default::default()
+            })
+            .unwrap();
+        store.run_write_cycle();
+        let disk = crate::vault::read_chat_messages_file(&dir, &chat_message_file("s1")).unwrap();
+        let messages = parse_messages_jsonl(&disk);
+        let ids: Vec<&str> = messages.iter().filter_map(|m| m["id"].as_str()).collect();
+        assert_eq!(ids, vec!["m1", "remote"], "他端消息不得被重写覆盖");
+        assert_eq!(messages[0]["content"], json!("更新后"));
+        assert_eq!(messages[1]["content"], json!("他端"));
+        assert!(store.snapshot().persist_error.is_none(), "合并成功不应报写失败");
     }
 
     #[test]
