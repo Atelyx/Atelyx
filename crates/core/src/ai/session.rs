@@ -399,9 +399,21 @@ impl SessionStore {
                 return Ok(Some(snapshot_of(&inner)));
             }
         }
-        // 换根前先落旧真源在途写（失败不阻塞切换：错误可见 + 退避重试，与 flush 同语义）
+        // 换根前先落旧真源在途写：写不成功即中止切换，保留旧真源与脏状态继续退避重试。
+        // 不在这里清 persist_error / dirty——那会让已提交但未落盘的内容无提示丢失。
         if self.lock().has_dirty() {
             self.run_write_cycle();
+        }
+        {
+            let inner = self.lock();
+            if inner.has_dirty() {
+                let reason = inner
+                    .persist_error
+                    .as_ref()
+                    .map(|e| e.message.clone())
+                    .unwrap_or_else(|| "写盘未完成".to_string());
+                return Err(format!("旧会话仍有未落盘内容，已保留重试并中止切换：{reason}"));
+            }
         }
         // 读真源：锁外完成（空间后端在此走网络，不能占着 io_lock 让别的装载排队）
         let sessions = scan_sessions(io.as_ref())?;
@@ -1592,6 +1604,54 @@ mod tests {
         let events = events.lock().unwrap();
         assert_eq!(events.len(), 2, "恢复应上报一次");
         assert!(events[1].is_none());
+    }
+
+    #[test]
+    fn load_aborts_switch_while_old_backend_still_dirty() {
+        let dir = TempDir::new("ai-session-switch");
+        let other = TempDir::new("ai-session-switch-other");
+        let store = SessionStore::new(test_config());
+        store
+            .load(store.begin_load(), local_io(dir.to_path_buf()))
+            .unwrap();
+        store
+            .commit(CommitBatch {
+                created: vec![SessionDef {
+                    id: "s1".into(),
+                    file: chat_message_file("s1"),
+                    title: None,
+                    agent_id: None,
+                    compaction: None,
+                    created_at: 1,
+                    updated_at: 1,
+                    messages: vec![msg("m1", "user", "x")],
+                }],
+                ..Default::default()
+            })
+            .unwrap();
+        store.run_write_cycle();
+        // 制造写失败：目标文件位置被目录占用
+        let inner_root = dir.join(CHAT_HISTORY_DIR);
+        std::fs::remove_file(inner_root.join("s1.jsonl")).ok();
+        std::fs::create_dir_all(inner_root.join("s1.jsonl")).unwrap();
+        store
+            .commit(commit_batch(vec![AppendBatch {
+                session_id: "s1".into(),
+                messages: vec![msg("m2", "assistant", "y")],
+            }]))
+            .unwrap();
+        store.run_write_cycle();
+        let before = store.snapshot();
+        assert!(before.persist_error.is_some(), "写失败应可见");
+        let result = store.load(store.begin_load(), local_io(other.to_path_buf()));
+        let Err(error) = result else {
+            panic!("旧真源仍有脏内容时装载应中止");
+        };
+        assert!(error.contains("未落盘"), "{error}");
+        let after = store.snapshot();
+        assert_eq!(after.session_vault_key, before.session_vault_key, "不得切到新真源");
+        assert!(after.persist_error.is_some(), "错误与脏状态应保留");
+        assert_eq!(after.sessions.len(), 1, "会话不应被新真源替换");
     }
 
     #[test]
