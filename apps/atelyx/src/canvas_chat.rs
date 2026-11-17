@@ -1843,7 +1843,10 @@ impl ChatStore for CardStore {
                 chat.mention_picker = None;
             }
         }
-        if origin == SendOrigin::Panel {
+        // 回执到达时用户可能已切到别的会话：只清绑定的那个会话的错误与草稿
+        if origin == SendOrigin::Panel
+            && app.chat.active.as_deref() == Some(session_id(&self.node).as_str())
+        {
             app.chat.error = None;
             app.chat.input.clear();
             app.chat.mention_picker = None;
