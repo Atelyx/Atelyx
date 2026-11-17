@@ -223,14 +223,7 @@ pub fn history_to_llm_messages(
         match role {
             "system" => {}
             "user" => {
-                let mut parts = vec![content.to_string()];
-                if let Some(refs) = m.get("refs").and_then(Value::as_array) {
-                    for r in refs {
-                        if let Some(text) = r.get("text").and_then(Value::as_str) {
-                            parts.push(text.to_string());
-                        }
-                    }
-                }
+                let parts = vec![content.to_string()];
                 // 图片附件：payload 为调用方读回的 dataURL（空/缺 = 读回失败，该附件跳过）
                 let images: Vec<String> = m
                     .get("attachments")

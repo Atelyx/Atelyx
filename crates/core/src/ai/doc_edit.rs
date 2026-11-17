@@ -654,7 +654,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(root.join("坏.atb")).unwrap(), "{不是 JSON");
     }
 
-    /// 回执文案是工具侧与界面共用的对外文本：迁移前后逐字一致。
+    /// 回执文案是工具侧与界面共用的对外文本：改动需同步壳侧断言。
     #[test]
     fn receipts_keep_existing_text() {
         let baseline = table();

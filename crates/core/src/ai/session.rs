@@ -1659,8 +1659,7 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-        // 换到坏根模拟写失败：把文件路径指向目录使其不可写
-        // 制造写失败：把目标文件替换为目录（写路径 = <root>/.atelyx/对话历史/<id>.jsonl）
+        // 制造写失败：把目标文件位置换成目录（写路径 = <root>/.atelyx/对话历史/<id>.jsonl）
         let inner_root = dir.join(CHAT_HISTORY_DIR);
         std::fs::create_dir_all(&inner_root).unwrap();
         store.run_write_cycle();

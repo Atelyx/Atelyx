@@ -1,9 +1,6 @@
-//! AI 对话面板编排：会话投影、run 事件泵、发送/停止/重生成/压缩/命名的编排链。
-//!
-//! 状态真源分两层：磁盘真源在 `core::ai::session::SessionStore`（本模块只经
-//! commit/load 触达），展示投影 `ChatState.sessions` 由编排动作直接构造更新——
-//! 每次变更同时送达两层，不读回。run 循环在 core（`AgentHub`），事件经通道进
-//! Elm 循环（订阅流），事件按会话身份守卫后应用到投影。
+//! AI 对话面板编排：会话投影、run 事件泵与发送 / 停止 / 重生成 / 压缩 / 命名链。
+//! 磁盘真源在 `SessionStore`（只经 commit/load），展示投影由编排动作直接更新、不读回。
+//! run 循环在 core，事件经通道进 Elm 循环并按会话身份守卫后应用。
 
 use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
@@ -1036,7 +1033,7 @@ fn on_panel(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
             app.chat.session_menu = None;
             app.chat.error = None;
             app.chat.selection = None;
-            // 切换会话即重建该会话的解析缓存（装载后历史消息不退化纯文本）
+            // 切换会话即重建该会话的解析缓存
             app.chat.refresh_session(&id);
             // 切会话直接呈现到最新消息（贴底跟随一并复位）
             app.chat.follow_bottom = true;

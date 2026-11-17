@@ -1,11 +1,6 @@
-//! 会话真源后端：本地仓库目录与协作空间用户元数据两种落点，向写链暴露同一套同步读写接口。
-//!
-//! 空间落点是**用户元数据**（`/api/spaces/:id/meta/me`）——会话归本人私有、随账号跨设备，
-//! 不写进空间共享文件树。键位：`chat/messages/<会话 id>` 存该会话 JSONL 全文、
-//! `chat/sessions/<会话 id>` 存会话元数据、`chat/editor-meta` 存面板级覆盖。
-//!
-//! 同步接口是写链的要求（写盘轮在专用线程上串行执行）；空间实现因此用阻塞 HTTP，
-//! **不得在 tokio 线程上调用**——装载与写盘都必须落在自建线程 / 写链线程上。
+//! 会话真源后端：本地目录与空间用户元数据两种落点，同一套同步读写接口。
+//! 空间落点是用户元数据（`chat/messages/<id>` 正文、`chat/sessions/<id>` 元数据、
+//! `chat/editor-meta` 覆盖），不写进共享文件树；阻塞 HTTP 只能在自建线程 / 写链线程调用。
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
