@@ -551,7 +551,7 @@ impl RunState {
     ) {
         match persist {
             RunPersist::Store(store) => {
-                let _ = store.commit(CommitBatch {
+                if let Err(e) = store.commit(CommitBatch {
                     patches: vec![PatchEntry {
                         session_id: session_id.to_string(),
                         message_id: message_id.to_string(),
@@ -560,7 +560,10 @@ impl RunState {
                         steps: Some(self.steps_value()),
                     }],
                     ..Default::default()
-                });
+                }) {
+                    // 真源没有这条补丁：流式内容只存在于界面，重载即消失，必须留可定位原因
+                    eprintln!("会话补丁落盘失败（{session_id}/{message_id} rev {}）：{e}", self.rev);
+                }
             }
             // 直写：整条消息快照交编排方写自有真源（与存储模式的补丁同节拍）
             RunPersist::Direct => {
@@ -1058,13 +1061,15 @@ fn finalize_interrupted(
         // 空占位移除（决定清理：不可见内容不留垃圾行）
         match persist {
             RunPersist::Store(store) => {
-                let _ = store.commit(CommitBatch {
+                if let Err(e) = store.commit(CommitBatch {
                     message_removals: vec![crate::ai::session::MessageRemoval {
                         session_id: session_id.to_string(),
                         message_id: message_id.to_string(),
                     }],
                     ..Default::default()
-                });
+                }) {
+                    eprintln!("空占位消息移除失败（{session_id}/{message_id}）：{e}");
+                }
             }
             RunPersist::Direct => {
                 let _ = events.send(RunEvent::MessageRemoved {

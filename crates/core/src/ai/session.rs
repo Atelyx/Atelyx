@@ -477,6 +477,15 @@ impl SessionStore {
         if batch.created.len() != created_ids.len() {
             return Err("批次内会话 id 重复".to_string());
         }
+        // appends 先整体校验：目标会话不存在即拒绝整批（占位消息写入失败必须可见，
+        // 不能像补丁那样静默丢弃后仍让 run 空跑）
+        for append in &batch.appends {
+            if !created_ids.contains(append.session_id.as_str())
+                && inner.session(&append.session_id).is_none()
+            {
+                return Err(format!("会话不存在：{}", append.session_id));
+            }
+        }
         for def in &batch.created {
             let session = Session {
                 id: def.id.clone(),
@@ -665,7 +674,13 @@ impl SessionStore {
             self.emit_status(status);
         }
         let mut inner = self.lock();
-        self.ack_flush(&mut inner);
+        if inner.has_dirty() && inner.persist_error.is_none() {
+            // 写盘快照之后又有新提交：flush 继续等下一轮追平，不在未落盘时放行
+            self.sched.notify_all();
+        } else {
+            // 写失败时照常放行：错误已可见，退出 / 关窗不得被持续失败永久挂住
+            self.ack_flush(&mut inner);
+        }
     }
 
     /// flush：请求立即写盘并等待本轮完成（resolve 不代表全部写成功——失败可见 + 退避重试）。
@@ -1677,6 +1692,23 @@ mod tests {
         let events = events.lock().unwrap();
         assert_eq!(events.len(), 2, "恢复应上报一次");
         assert!(events[1].is_none());
+    }
+
+    #[test]
+    fn append_to_missing_session_is_rejected() {
+        let dir = TempDir::new("ai-session-missing");
+        let store = SessionStore::new(test_config());
+        store
+            .load(store.begin_load(), local_io(dir.to_path_buf()))
+            .unwrap();
+        let error = store
+            .commit(commit_batch(vec![AppendBatch {
+                session_id: "nope".into(),
+                messages: vec![msg("m1", "user", "x")],
+            }]))
+            .unwrap_err();
+        assert!(error.contains("会话不存在"), "{error}");
+        assert!(store.snapshot().sessions.is_empty(), "拒绝的批次不得半应用");
     }
 
     #[test]
