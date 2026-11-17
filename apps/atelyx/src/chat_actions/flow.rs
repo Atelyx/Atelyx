@@ -289,7 +289,11 @@ pub(crate) fn compact_done<S: ChatStore>(
     let anchor = store.clear_compacting(app);
     let summary_empty = result.as_ref().is_some_and(|s| s.trim().is_empty());
     let Some(summary) = result.filter(|s| !s.trim().is_empty()) else {
-        let message = if summary_empty { "压缩失败：摘要为空" } else { "压缩失败" };
+        let message = if summary_empty {
+            "压缩失败：模型未返回摘要"
+        } else {
+            "压缩失败：请重试"
+        };
         store.set_error(app, message.to_string());
         return;
     };

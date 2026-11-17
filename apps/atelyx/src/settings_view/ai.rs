@@ -210,6 +210,8 @@ pub struct AiState {
     pub fetch_error: Option<String>,
     /// 待清理的密钥链条目 (scope, 供应商 id)：供应商删除在配置落盘成功后执行。
     pub provider_key_delete_pending: Option<(String, String)>,
+    /// 密钥同步开关翻转前的值：保存失败时回滚开关显示（配置未改，开关也不得显示已改）。
+    provider_sync_prev: Option<bool>,
     /// Agent 列表悬停行（悬停显形复制/删除操作钮）。
     pub agent_hover: Option<String>,
     /// 工具分类折叠状态（缺省全折叠；不持久化，进设置页重置）。
@@ -692,9 +694,12 @@ pub fn update(app: &mut App, msg: AiMsg) -> Task<Message> {
             Task::none()
         }
         AiMsg::ProviderSyncToggle => {
+            let mut prev = None;
             if let Some(d) = app.ai.provider_draft.as_mut() {
+                prev = Some(d.sync_keys);
                 d.sync_keys = !d.sync_keys;
             }
+            app.ai.provider_sync_prev = prev;
             update(app, AiMsg::ProviderSave)
         }
         AiMsg::ProviderSave => {
@@ -1076,6 +1081,12 @@ fn save_provider(app: &mut App, draft: ProviderDraft) -> Task<Message> {
     if readonly(app) {
         return Task::none();
     }
+    let sync_prev = app.ai.provider_sync_prev.take();
+    let restore_sync = |app: &mut App| {
+        if let (Some(prev), Some(draft)) = (sync_prev, app.ai.provider_draft.as_mut()) {
+            draft.sync_keys = prev;
+        }
+    };
     let Some(scope) = key_scope(app) else { return Task::none() };
     let mut providers = app.repo_config.providers.clone().unwrap_or_default();
     let Some(index) = providers.iter().position(|p| p.id == draft.id) else {
@@ -1109,6 +1120,7 @@ fn save_provider(app: &mut App, draft: ProviderDraft) -> Task<Message> {
         if !draft.api_key.is_empty() {
             if let Err(e) = credentials::store_provider_key(&scope, &draft.id, &draft.api_key) {
                 app.notify(NoticeLevel::Error, format!("API key 写入密钥链失败，已取消保存：{e}"));
+                restore_sync(app);
                 return Task::none();
             }
         }
@@ -1119,6 +1131,7 @@ fn save_provider(app: &mut App, draft: ProviderDraft) -> Task<Message> {
                 }
                 if let Err(err) = credentials::store_provider_key(&scope, &e.id, &old) {
                     app.notify(NoticeLevel::Error, format!("API key 迁移密钥链失败，已取消保存：{err}"));
+                    restore_sync(app);
                     return Task::none();
                 }
             }
@@ -1132,12 +1145,14 @@ fn save_provider(app: &mut App, draft: ProviderDraft) -> Task<Message> {
         {
             if let Err(err) = credentials::store_provider_key(&scope, TAVILY_TAIL, &old) {
                 app.notify(NoticeLevel::Error, format!("API key 迁移密钥链失败，已取消保存：{err}"));
+                restore_sync(app);
                 return Task::none();
             }
         }
     }
     let Ok(list) = serde_json::to_value(&providers) else {
         app.notify(NoticeLevel::Error, "供应商配置序列化失败");
+        restore_sync(app);
         return Task::none();
     };
     app.repo_config.providers = Some(providers);

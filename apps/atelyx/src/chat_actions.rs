@@ -669,7 +669,9 @@ pub(crate) fn resolve_run_config(
                 crate::credentials::load_provider_key(&scope, &provider.id).ok().flatten()
             })
             .filter(|k| !k.is_empty())
-            .ok_or_else(|| "API key 未配置或密钥链不可用".to_string())?,
+            .ok_or_else(|| {
+                "API key 未配置或密钥链不可用：到「设置 → AI 设置 → 供应商」检查".to_string()
+            })?,
     };
     // Agent 名册：缺省预置「对话」（无提示词 + 只读工具）；指定 id 缺失时同样降级
     let agent = app.agents.iter().find(|a| Some(a.id.as_str()) == agent_id);

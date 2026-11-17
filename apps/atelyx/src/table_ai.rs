@@ -272,7 +272,10 @@ pub fn start_filtered(app: &mut App, field_id: &str, filter: ai::AiRowFilter) ->
         }
     };
     if rows.is_empty() {
-        app.notify(crate::ui::notify::Level::Warning, "没有可生成的行（引用列为空或配置不完整）");
+        app.notify(
+            crate::ui::notify::Level::Warning,
+            "没有待生成的行（引用列空或筛选后无匹配行）",
+        );
         return Task::none();
     }
     start_rows(app, field_id, rows)
