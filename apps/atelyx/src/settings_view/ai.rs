@@ -784,6 +784,10 @@ pub fn update(app: &mut App, msg: AiMsg) -> Task<Message> {
             app.ai.provider_draft = providers
                 .first()
                 .map(|p| provider_draft_of(app, p));
+            // 切换供应商同样要清：连通性结论与拉取清单都属于被删的那一个
+            app.ai.test_result = None;
+            app.ai.fetched = None;
+            app.ai.fetch_error = None;
             let Ok(list) = serde_json::to_value(&providers) else {
                 app.notify(NoticeLevel::Error, "供应商配置序列化失败");
                 return Task::none();
