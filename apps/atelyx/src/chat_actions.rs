@@ -391,7 +391,7 @@ pub enum ChatMsg {
     Stop,
     /// 重新生成最后一条回复（截断到最后一条 user 后重跑）。
     Regenerate,
-    /// 回到此处（二段确认：首次按下进入确认态，再按执行）。
+    /// 删除此消息之后的全部消息（二段确认：首次按下进入确认态，再按执行）。
     Rollback(String),
     RollbackCancel,
     Compact,

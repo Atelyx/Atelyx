@@ -1884,7 +1884,7 @@ impl ChatStore for CardStore {
     fn compact_precheck(&self, _app: &App, messages: &[Value]) -> Result<(), String> {
         match atelyx_core::ai::chat_send::compaction_anchor(messages) {
             Some(_) => Ok(()),
-            None => Err("压缩失败：会话记录不完整，请重试".to_string()),
+            None => Err("压缩失败：会话记录不完整，无法确定截止消息".to_string()),
         }
     }
 
@@ -1911,7 +1911,7 @@ impl ChatStore for CardStore {
     }
 
     fn missing_anchor_error(&self) -> Option<&'static str> {
-        Some("压缩失败：会话记录不完整，请重试")
+        Some("压缩失败：会话记录不完整，无法确定截止消息")
     }
 }
 
@@ -1922,7 +1922,7 @@ pub fn regenerate_card(app: &mut App, node_id: &str) -> Task<Message> {
     regenerate(app, node_id)
 }
 
-/// 面板绑定会话的回到此处（委托卡内实现）。
+/// 面板绑定会话的删除其后消息（委托卡内实现）。
 pub fn rollback_card(app: &mut App, node_id: &str, message_id: &str) {
     rollback(app, node_id, message_id);
 }
