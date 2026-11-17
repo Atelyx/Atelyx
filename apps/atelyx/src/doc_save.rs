@@ -245,7 +245,7 @@ fn apply_space<M: DocModel>(
         return fail(app, reply, "仓库类型不匹配".to_string());
     };
     if !session.role.can_write() {
-        return fail(app, reply, "该空间为只读身份，无法编辑".to_string());
+        return fail(app, reply, "只读身份，无法编辑".to_string());
     }
     let client = session.client.clone();
     let space_id = session.space_id.clone();

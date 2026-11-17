@@ -155,7 +155,7 @@ fn move_entry(app: &mut App, from: String, to: String, id: u64) -> iced::Task<Me
         }
         RepoKind::Space(session) => {
             if !session.role.can_write() {
-                settle(id, Err("该空间为只读身份，无法编辑".to_string()));
+                settle(id, Err("只读身份，无法编辑".to_string()));
                 return iced::Task::none();
             }
             let client = session.client.clone();
@@ -270,7 +270,7 @@ fn delete_entry(app: &mut App, path: String, force: bool, id: u64) -> iced::Task
         }
         RepoKind::Space(session) => {
             if !session.role.can_write() {
-                settle(id, Err("该空间为只读身份，无法编辑".to_string()));
+                settle(id, Err("只读身份，无法编辑".to_string()));
                 return iced::Task::none();
             }
             let client = session.client.clone();

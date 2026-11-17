@@ -243,7 +243,7 @@ pub(crate) fn compact<S: ChatStore>(app: &mut App, store: &S) -> iced::Task<Mess
     }
     let messages = store.messages(app);
     if messages.len() < 2 {
-        store.set_error(app, "对话内容太少，无需压缩".to_string());
+        store.set_error(app, "消息少于 2 条，无需压缩".to_string());
         return iced::Task::none();
     }
     if let Err(e) = store.compact_precheck(app, &messages) {
@@ -543,7 +543,7 @@ impl ChatStore for PanelStore {
     }
 
     fn busy_notice(&self) -> &'static str {
-        "该会话已有对话进行中，消息未发送"
+        "该会话已有回复进行中，消息未发送"
     }
 
     fn after_append(&self, app: &mut App, _origin: SendOrigin) {

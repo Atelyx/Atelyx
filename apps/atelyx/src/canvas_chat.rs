@@ -908,7 +908,7 @@ fn send_with(
     }
     if matches!(&app.repo_kind, RepoKind::Space(session) if !session.role.can_write()) {
         restore_inputs(app, node_id, origin, images, refs);
-        app.notify(crate::NoticeLevel::Warning, "该空间为只读身份，无法发送");
+        app.notify(crate::NoticeLevel::Warning, "只读身份，无法发送");
         return Task::none();
     }
     if display.is_empty() && images.is_empty() {
@@ -1777,7 +1777,7 @@ impl ChatStore for CardStore {
     }
 
     fn busy_notice(&self) -> &'static str {
-        "该对话已有回复进行中，消息未发送"
+        "该会话已有回复进行中，消息未发送"
     }
 
     fn after_append(&self, app: &mut App, origin: SendOrigin) {
@@ -1848,7 +1848,7 @@ impl ChatStore for CardStore {
     fn compact_precheck(&self, _app: &App, messages: &[Value]) -> Result<(), String> {
         match atelyx_core::ai::chat_send::compaction_anchor(messages) {
             Some(_) => Ok(()),
-            None => Err("压缩失败：末条消息缺少 id".to_string()),
+            None => Err("压缩失败：会话记录不完整，请重试".to_string()),
         }
     }
 
@@ -1875,7 +1875,7 @@ impl ChatStore for CardStore {
     }
 
     fn missing_anchor_error(&self) -> Option<&'static str> {
-        Some("压缩失败：消息锚点缺失")
+        Some("压缩失败：会话记录不完整，请重试")
     }
 }
 
@@ -1898,7 +1898,7 @@ pub fn open_in_panel(app: &mut App, node_id: &str) {
         return;
     }
     if !crate::layout_view::window_has_view(app, "aichat") {
-        app.notify(crate::NoticeLevel::Warning, "先在布局中打开 AI 对话面板");
+        app.notify(crate::NoticeLevel::Warning, "布局中没有 AI 对话面板，请先在布局中添加");
         return;
     }
     let sid = session_id(node_id);

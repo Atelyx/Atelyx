@@ -2096,7 +2096,7 @@ fn toolbar<'a>(
                 Some(Message::Canvas(CanvasMsg::Chat(
                     crate::canvas_chat::CanvasChatMsg::OpenInPanel(n.id.clone()),
                 ))),
-                Some((window, "在 AI 面板打开".into())),
+                Some((window, "在 AI 对话面板打开".into())),
             )
         });
 

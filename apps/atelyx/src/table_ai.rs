@@ -188,7 +188,7 @@ pub fn insert_ref(app: &mut App, field_id: &str) {
 /// 保存草稿：允许留下未填项（配置可先存下，缺项在生成 / 更新时再报错）。
 pub fn save_draft(app: &mut App) -> Task<Message> {
     if matches!(&app.repo_kind, RepoKind::Space(space) if !space.role.can_write()) {
-        app.notify(crate::ui::notify::Level::Warning, "该空间为只读身份，无法修改 AI 字段");
+        app.notify(crate::ui::notify::Level::Warning, "只读身份，无法修改 AI 字段");
         return Task::none();
     }
     let Some(session) = app.table.as_ref() else { return Task::none() };
@@ -281,7 +281,7 @@ pub fn start_filtered(app: &mut App, field_id: &str, filter: ai::AiRowFilter) ->
 /// 指定行生成。
 pub fn start_rows(app: &mut App, field_id: &str, rows: Vec<String>) -> Task<Message> {
     if matches!(&app.repo_kind, RepoKind::Space(space) if !space.role.can_write()) {
-        app.notify(crate::ui::notify::Level::Warning, "该空间为只读身份，无法生成");
+        app.notify(crate::ui::notify::Level::Warning, "只读身份，无法生成");
         return Task::none();
     }
     let Some(session) = app.table.as_ref() else { return Task::none() };

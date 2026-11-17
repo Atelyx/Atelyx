@@ -395,7 +395,7 @@ fn apply_space_note(
         return iced::Task::none();
     };
     if !session.role.can_write() {
-        reply.err("该空间为只读身份，无法编辑".to_string());
+        reply.err("只读身份，无法编辑".to_string());
         return iced::Task::none();
     }
     // 同一文件在途的人工保存会整文上行：先等它收尾，避免两笔整文写交错（别的文件在途无关）

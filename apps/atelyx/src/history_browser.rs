@@ -320,7 +320,7 @@ fn version_row(v: &HistoryVersion, viewer: bool, expanded: bool, window: iced::w
             crate::hover_tip::with_tip(
                 iced::widget::mouse_area(widget),
                 window,
-                "当前角色为只读",
+                "只读身份，无法回滚到此版本",
                 controls::btn_sm().h,
             )
             .into()

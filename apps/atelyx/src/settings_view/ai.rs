@@ -460,7 +460,7 @@ fn read_only_banner() -> Element<'static, Message> {
     container(
         row![
             icon("info", 13.0, pal::TEXT_MUTED),
-            text("当前角色为只读，无法修改 AI 设置").size(pal::fs_caption()).color(pal::TEXT_SECONDARY),
+            text("只读身份，无法修改 AI 设置").size(pal::fs_caption()).color(pal::TEXT_SECONDARY),
         ]
         .spacing(6),
     )
@@ -1666,7 +1666,7 @@ fn models_view(app: &App, window: iced::window::Id) -> Element<'static, Message>
             FORM_W,
             (!ro && model_count > 0).then(|| open_popup(app, window, PopupState::AiModelMenu)),
         );
-        col = col.push(super::setting_row("命名模型", "一般用小模型；跟随所选 = 用对话时的模型", model_trigger));
+        col = col.push(super::setting_row("命名模型", "一般用小模型；跟随当前模型 = 用对话时的模型", model_trigger));
     }
     col = col.push(super::group_head("画布", "", true));
     col = col.push(super::setting_row(
@@ -1727,7 +1727,7 @@ fn provider_name(app: &App, id: &str) -> String {
 fn naming_label(mode: NamingMode) -> &'static str {
     match mode {
         NamingMode::Off => "不启用",
-        NamingMode::FollowDefault => "跟随所选模型",
+        NamingMode::FollowDefault => "跟随当前模型",
         NamingMode::Custom => "指定模型",
     }
 }
@@ -1735,7 +1735,7 @@ fn naming_label(mode: NamingMode) -> &'static str {
 fn naming_model_label(app: &App) -> String {
     match &app.repo_config.auto_naming_model {
         Some(o) => format!("{} / {}", provider_name(app, &o.provider_id), o.model),
-        None => "跟随所选模型".into(),
+        None => "跟随当前模型".into(),
     }
 }
 
@@ -1900,7 +1900,7 @@ fn agent_form(app: &App, a: &vault::AgentConfig, window: iced::window::Id) -> El
     col = col.push(super::setting_row("名称", "对话入口处的显示名", name_control));
     col = col.push(super::setting_row(
         "系统提示词",
-        "引用提示词标记的笔记，发送时注入正文",
+        "选一篇已注册为提示词的笔记，作为每次生成的 system 提示词",
         prompt_control,
     ));
 

@@ -71,7 +71,7 @@ fn config_card<'a>(
         row![
             system_mode_button("无", AiSystemMode::None, draft.system_mode),
             system_mode_button("手写", AiSystemMode::Inline, draft.system_mode),
-            system_mode_button("引用笔记", AiSystemMode::Note, draft.system_mode),
+            system_mode_button("提示词笔记", AiSystemMode::Note, draft.system_mode),
         ]
         .spacing(6),
     ]
@@ -176,7 +176,7 @@ fn config_card<'a>(
 
     let read_only = matches!(&app.repo_kind, RepoKind::Space(space) if !space.role.can_write());
     let save = (!read_only).then_some(Message::Table(tv::TableMsg::AiSaveConfig));
-    let ro_hint: Element<'static, Message> = text("只读身份：AI 字段配置不可保存")
+    let ro_hint: Element<'static, Message> = text("只读身份，无法保存 AI 字段配置")
         .size(pal::fs_micro())
         .color(pal::TEXT_MUTED)
         .into();
@@ -319,7 +319,7 @@ fn note_picker<'a>(app: &'a App, draft: &'a AiDraft) -> Element<'a, Message> {
     let mut list = column![].spacing(2);
     if app.prompt_notes.is_empty() {
         list = list.push(
-            text("暂无提示词标记（文件右键笔记可注册）")
+            text("暂无提示词笔记（文件右键「注册为提示词」）")
                 .size(pal::fs_micro())
                 .color(pal::TEXT_MUTED),
         );
@@ -369,8 +369,8 @@ fn model_label(app: &App, draft: &AiDraft) -> String {
             model_name(app, provider, model)
         }
         _ => match default_model_name(app) {
-            Some(name) => format!("跟随默认（{name}）"),
-            None => "跟随默认（未设置）".to_string(),
+            Some(name) => format!("跟随当前模型（{name}）"),
+            None => "跟随当前模型（未设置）".to_string(),
         },
     }
 }
@@ -405,7 +405,7 @@ fn default_model_name(app: &App) -> Option<String> {
 fn model_picker<'a>(app: &'a App, draft: &AiDraft) -> Element<'a, Message> {
     let follow_selected = draft.provider_id.is_none() || draft.model.is_none();
     let follow_label = format!(
-        "跟随默认 · {}",
+        "跟随当前模型 · {}",
         default_model_name(app).unwrap_or_else(|| "未设置".to_string())
     );
     let mut list = column![].spacing(2).push(pick_row(

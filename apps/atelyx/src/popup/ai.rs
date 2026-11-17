@@ -186,7 +186,7 @@ pub(super) fn entries<'a>(app: &'a App, state: &PopupState, pane: usize, window:
             let mode = ai::naming_mode(app);
             [
                 (ai::NamingMode::Off, "不启用"),
-                (ai::NamingMode::FollowDefault, "跟随默认"),
+                (ai::NamingMode::FollowDefault, "跟随当前模型"),
                 (ai::NamingMode::Custom, "指定模型"),
             ]
             .into_iter()
@@ -243,7 +243,7 @@ pub(super) fn entries<'a>(app: &'a App, state: &PopupState, pane: usize, window:
                 entries.push((0, MenuEntry::check(label, is_current, pick)));
             }
             if app.prompt_notes.is_empty() {
-                entries.push((0, MenuEntry::Custom(popup_hint("暂无提示词标记（文件右键可注册）"), 18.0)));
+                entries.push((0, MenuEntry::Custom(popup_hint("暂无提示词笔记（文件右键「注册为提示词」）"), 18.0)));
             }
             entries
         }
@@ -361,7 +361,7 @@ fn canvas_card_model_entries(app: &App, node_id: &str) -> Vec<(usize, MenuEntry<
         entries.push((
             0,
             MenuEntry::action(
-                "跟随默认",
+                "跟随当前模型",
                 Message::Canvas(CanvasMsg::Chat(CanvasChatMsg::ModelPick {
                     node: node_id.to_string(),
                     pick: None,

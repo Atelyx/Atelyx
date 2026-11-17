@@ -84,7 +84,7 @@ fn sidebar(app: &App) -> iced::Element<'_, Message> {
             query.is_empty()
                 || s.get("title")
                     .and_then(Value::as_str)
-                    .unwrap_or("未命名对话")
+                    .unwrap_or("未命名会话")
                     .to_lowercase()
                     .contains(&query)
         })
@@ -129,7 +129,7 @@ fn session_row<'a>(app: &'a App, s: &'a Value) -> iced::Element<'a, Message> {
     let title = s
         .get("title")
         .and_then(Value::as_str)
-        .unwrap_or("未命名对话")
+        .unwrap_or("未命名会话")
         .to_string();
     let active = app.chat.active.as_deref() == Some(id.as_str());
     let menu_open = app.chat.session_menu.as_deref() == Some(id.as_str());
@@ -299,7 +299,7 @@ fn top_bar(app: &App, window: iced::window::Id) -> iced::Element<'_, Message> {
             24.0,
             controls::Variant::Ghost,
             Some(Message::Chat(ChatMsg::NewSession)),
-            Some((window, "新建会话".to_string())),
+            Some((window, "开始新对话".to_string())),
         ),
         controls::icon_button(
             "history",
@@ -366,10 +366,10 @@ fn active_title(app: &App) -> String {
                 .iter()
                 .find(|s| s["id"] == json!(id))
                 .and_then(|s| s.get("title").and_then(Value::as_str))
-                .unwrap_or("新对话")
+                .unwrap_or("新会话")
                 .to_string()
         }
-        None => "新对话".to_string(),
+        None => "新会话".to_string(),
     }
 }
 

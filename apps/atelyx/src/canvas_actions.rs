@@ -622,7 +622,7 @@ fn block_readonly(app: &mut App, msg: &CanvasMsg) -> bool {
         if let Some(s) = app.canvas.as_mut() {
             s.view.readonly_hint = true;
         }
-        app.notify(crate::NoticeLevel::Warning, "该空间为只读身份，画布不可编辑");
+        app.notify(crate::NoticeLevel::Warning, "只读身份，画布不可编辑");
     }
     true
 }

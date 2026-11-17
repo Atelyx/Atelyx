@@ -3252,7 +3252,7 @@ impl App {
             Message::ToggleTask(item_from) => {
                 if self.note_readonly() {
                     // 只读档任务框仍是可点样式：点了要有反馈，不能静默无反应
-                    self.notify(NoticeLevel::Warning, "只读身份：任务改动不会写入空间");
+                    self.notify(NoticeLevel::Warning, "只读身份，任务改动不会写入空间");
                     return Task::none();
                 }
                 if let Some((next, at)) = markdown_edit::toggle_task(self.edit_body(), item_from) {

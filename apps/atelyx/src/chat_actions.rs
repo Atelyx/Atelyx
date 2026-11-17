@@ -2640,7 +2640,7 @@ fn plugin_chat_send_now(
     // 会话可用性先于任何副作用（归档会往会话目录写文件）：拒绝时不留孤儿附件
     if app.chat.compacting.as_deref() == Some(session_id.as_str()) {
         recycle_created_session(app, &plan);
-        deny(app, "该会话正在压缩上下文".to_string());
+        deny(app, "该会话正在压缩，暂不能发送".to_string());
         return iced::Task::none();
     }
     if hub().is_running(&session_id) {
