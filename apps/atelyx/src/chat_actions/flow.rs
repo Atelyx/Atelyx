@@ -521,12 +521,14 @@ impl ChatStore for PanelStore {
     fn blocked(&self, app: &App, action: ChatAction) -> bool {
         // 闸门只看投影流式态（与 hub 的复检只在发送收尾做）
         let streaming = app.chat.streaming.contains(&self.session_id);
+        // 压缩按会话判定：别的会话压缩不影响本会话的发送 / 回滚 / 重生成
+        let compacting_here = app.chat.compacting.as_deref() == Some(self.session_id.as_str());
         match action {
-            // 压缩在途同样禁回滚：摘要锚点会与截断后的消息集错位
-            ChatAction::Rollback => streaming || app.chat.compacting.is_some(),
-            ChatAction::Regenerate | ChatAction::Compact => {
-                streaming || app.chat.compacting.is_some()
-            }
+            // 压缩在途禁回滚：摘要锚点会与截断后的消息集错位
+            ChatAction::Rollback => streaming || compacting_here,
+            ChatAction::Regenerate => streaming || compacting_here,
+            // 压缩本身全局单飞：任一会话在压缩都不得再起压缩
+            ChatAction::Compact => streaming || app.chat.compacting.is_some(),
         }
     }
 
@@ -539,8 +541,11 @@ impl ChatStore for PanelStore {
             }
             .to_string();
         }
-        if app.chat.compacting.is_some() {
+        if app.chat.compacting.as_deref() == Some(self.session_id.as_str()) {
             return "该会话正在压缩，暂不能操作".to_string();
+        }
+        if app.chat.compacting.is_some() {
+            return "另一会话正在压缩，暂不能开始新的压缩".to_string();
         }
         "当前状态不可执行该操作".to_string()
     }
@@ -618,6 +623,10 @@ impl ChatStore for PanelStore {
 
     fn clear_compacting(&self, app: &mut App) -> Option<(String, usize)> {
         app.chat.compacting = None;
+        // 压缩期间被拒留下的提示已过期
+        if app.chat.error.as_deref().is_some_and(|e| e.contains("正在压缩")) {
+            app.chat.error = None;
+        }
         chat_send::compaction_anchor(&projection_messages(app, &self.session_id))
     }
 }

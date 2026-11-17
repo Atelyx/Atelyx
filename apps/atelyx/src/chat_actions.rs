@@ -1472,7 +1472,13 @@ fn send_now(app: &mut App, space_prompt: Option<String>) -> iced::Task<Message> 
         restore!();
         return iced::Task::none();
     }
-    if app.chat.compacting.is_some() {
+    // 压缩按会话单飞：别的会话在压缩不应阻塞本会话发送
+    if app
+        .chat
+        .compacting
+        .as_deref()
+        .is_some_and(|id| Some(id) == app.chat.active.as_deref())
+    {
         app.chat.error = Some("该会话正在压缩，消息未发送".to_string());
         restore!();
         return iced::Task::none();
@@ -2657,7 +2663,7 @@ fn plugin_chat_send_now(
     }
     if hub().is_running(&session_id) {
         recycle_created_session(app, &plan);
-        deny(app, "该会话已有进行中的对话".to_string());
+        deny(app, "该会话已有回复进行中，无法发送".to_string());
         return iced::Task::none();
     }
     // 插件暂存的图片先进会话附件目录：消息只引用会话目录，插件自己的临时区随之不再被引用
@@ -2898,13 +2904,13 @@ fn plugin_compact_check(app: &App, session_id: &str) -> Result<(), String> {
         return Err(format!("会话 {session_id} 不存在"));
     }
     if app.chat.compacting.is_some() {
-        return Err("已有压缩在进行".to_string());
+        return Err("已有压缩在进行，暂不能开始新的压缩".to_string());
     }
     if app.chat.streaming.contains(&session_id.to_string()) {
-        return Err("该会话有进行中的回复，暂不能压缩".to_string());
+        return Err("该会话已有回复进行中，无法压缩".to_string());
     }
     if store().session_messages(session_id).unwrap_or_default().len() < 2 {
-        return Err("对话内容太少，无需压缩".to_string());
+        return Err("消息少于 2 条，无需压缩".to_string());
     }
     Ok(())
 }
