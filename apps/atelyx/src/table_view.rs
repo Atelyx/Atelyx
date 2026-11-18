@@ -481,6 +481,8 @@ pub struct TableViewState {
     pub hscroll_drag: Option<HScrollDrag>,
     /// 竖向滚动条拖拽（grab = 按压点相对滑块上缘的偏移）。
     pub vscroll_drag: Option<VScrollDrag>,
+    /// 中键平移会话（last = 上次指针位置，按两次位置的差滚动）。
+    pub pan_drag: Option<PanDrag>,
     /// 单元格按压会话（框选候选 / 图片手势）。
     pub press: Option<PressState>,
     pub col_drag: Option<ColDrag>,
@@ -547,6 +549,24 @@ impl TableViewState {
     pub fn viewport_size(&self) -> Size {
         self.canvas_viewport.map(|(_, size)| size).unwrap_or(self.canvas_size)
     }
+
+    /// 有拖拽 / 按压会话在途（任一键）：多键并按时不叠加新手势（互清的代价是残留会话）。
+    pub fn gesture_active(&self) -> bool {
+        self.pan_drag.is_some() || self.left_gesture_active()
+    }
+
+    /// 左键会话在途（按压 / 框选 / 滚动条 / 列宽行高 / 重排 / 图片手势）。
+    pub fn left_gesture_active(&self) -> bool {
+        self.hscroll_drag.is_some()
+            || self.vscroll_drag.is_some()
+            || self.press.is_some()
+            || self.col_drag.is_some()
+            || self.row_drag.is_some()
+            || self.reorder.is_some()
+            || self.field_reorder.is_some()
+            || self.img_drag.is_some()
+            || self.swipe.is_some()
+    }
 }
 
 #[derive(Clone)]
@@ -576,6 +596,12 @@ pub struct HScrollDrag {
 #[derive(Clone, Copy)]
 pub struct VScrollDrag {
     pub grab: f32,
+}
+
+/// 中键平移会话。
+#[derive(Clone, Copy)]
+pub struct PanDrag {
+    pub last: Point,
 }
 
 /// 单元格按压会话。
@@ -872,6 +898,10 @@ pub struct LayoutCache {
 pub enum TableMsg {
     /// 画布内左键按下（画布局部坐标；origin = 画布在窗口中的原点，供弹层锚定单元格）。
     Press { window: iced::window::Id, pos: Point, size: Size, origin: Point },
+    /// 中键按下 = 平移起手（不改变选区；光标移出画布仍跟手）。
+    PanPress { pos: Point },
+    /// 中键抬起 = 平移收口（与左键松手分开，互不误清对方会话）。
+    PanRelease(Point),
     /// 画布内右键按下（上下文菜单）。
     Context { window: iced::window::Id, pos: Point, size: Size },
     /// 画布内鼠标移动（携带画布尺寸与画布原点：首帧悬停即播种 canvas_size / canvas_origin）。
@@ -1781,6 +1811,13 @@ impl canvas::Program<Message> for TableView<'_> {
                     .and_capture()
                 })
             }
+            // 中键 = 平移起手（单元格 / 表头 / 滚动条上都可起手）
+            Ev::Mouse(MouseEv::ButtonPressed(iced::mouse::Button::Middle)) => {
+                cursor.position_in(bounds).map(|p| {
+                    iced::widget::Action::publish(Message::Table(TableMsg::PanPress { pos: p }))
+                        .and_capture()
+                })
+            }
             Ev::Mouse(MouseEv::ButtonPressed(iced::mouse::Button::Right)) => {
                 cursor.position_in(bounds).map(|p| {
                     iced::widget::Action::publish(Message::Table(TableMsg::Context { window, pos: p, size: bounds.size() }))
@@ -1788,7 +1825,13 @@ impl canvas::Program<Message> for TableView<'_> {
                 })
             }
             Ev::Mouse(MouseEv::CursorMoved { .. }) => {
-                cursor.position_in(bounds).map(|p| {
+                // 平移捕获期间光标可越出画布：绝对坐标换算回画布局部
+                let pos = if self.session.view.pan_drag.is_some() {
+                    cursor.position_from(bounds.position())
+                } else {
+                    cursor.position_in(bounds)
+                };
+                pos.map(|p| {
                     iced::widget::Action::publish(Message::Table(TableMsg::Move {
                         window,
                         pos: p,
@@ -1797,10 +1840,24 @@ impl canvas::Program<Message> for TableView<'_> {
                     }))
                 })
             }
+            // 会话在途时松手可能落在画布外或窗口外：按窗口坐标回算（坐标不可得就沿用
+            // 最近悬停点），会话不能滞留。无会话时只认画布内——画布内的同批按压与松手
+            // 仍要成对发出，画布外则不截走落在其它面板上的松开。
             Ev::Mouse(MouseEv::ButtonReleased(iced::mouse::Button::Left)) => {
-                cursor
-                    .position_in(bounds)
-                    .map(|p| iced::widget::Action::publish(Message::Table(TableMsg::Release(p))).and_capture())
+                let p = if self.session.view.left_gesture_active() {
+                    release_point(cursor, bounds, self.session.view.hover)
+                } else {
+                    cursor.position_in(bounds)?
+                };
+                Some(iced::widget::Action::publish(Message::Table(TableMsg::Release(p))).and_capture())
+            }
+            Ev::Mouse(MouseEv::ButtonReleased(iced::mouse::Button::Middle)) => {
+                let p = if self.session.view.pan_drag.is_some() {
+                    release_point(cursor, bounds, self.session.view.hover)
+                } else {
+                    cursor.position_in(bounds)?
+                };
+                Some(iced::widget::Action::publish(Message::Table(TableMsg::PanRelease(p))).and_capture())
             }
             Ev::Mouse(MouseEv::WheelScrolled { delta }) => {
                 // iced 把全窗口鼠标事件广播给所有 widget：只认光标落在画布内的滚轮（防跨面板串扰）
@@ -1860,6 +1917,10 @@ impl canvas::Program<Message> for TableView<'_> {
         bounds: Rectangle,
         cursor: iced::mouse::Cursor,
     ) -> iced::mouse::Interaction {
+        // 平移不受画布边界限制：越出画布仍按住中键，光标保持抓取态
+        if self.session.view.pan_drag.is_some() {
+            return iced::mouse::Interaction::Grabbing;
+        }
         let Some(p) = cursor.position_in(bounds) else {
             return iced::mouse::Interaction::default();
         };
@@ -1871,6 +1932,11 @@ impl canvas::Program<Message> for TableView<'_> {
             _ => iced::mouse::Interaction::default(),
         }
     }
+}
+
+/// 松手坐标：窗口绝对坐标换算回画布局部；光标不可得时退回最近悬停点。
+fn release_point(cursor: iced::mouse::Cursor, bounds: Rectangle, hover: Point) -> Point {
+    cursor.position_from(bounds.position()).unwrap_or(hover)
 }
 
 impl<'a> From<TableView<'a>> for Element<'a, Message> {
@@ -3524,6 +3590,10 @@ impl canvas::Program<Message> for LightboxCanvas<'_> {
                 }
                 Some(iced::widget::Action::capture())
             }
+            // 预览为模态：中键同样不得穿透到下层表格（否则平移发生在预览背后）
+            Ev::Mouse(MouseEv::ButtonPressed(iced::mouse::Button::Middle)) => {
+                Some(iced::widget::Action::capture())
+            }
             Ev::Mouse(MouseEv::CursorMoved { .. }) => {
                 let pos = cursor.position_in(bounds)?;
                 // 预览为模态：预览层内吞掉全部移动，下层工具条不产生悬停提示
@@ -4323,6 +4393,83 @@ mod tests {
             .is_none(),
             "同一尺寸不重复上报"
         );
+    }
+
+    /// 中键按压发布平移起手；平移中指针越出画布仍按窗口坐标回算局部坐标，
+    /// 中键抬起同样要收口（不能只认画布内）。无会话时的松开不发布——
+    /// 否则会连同捕获一起截走落在其它面板上的松手。
+    #[test]
+    fn middle_button_pans_beyond_canvas_bounds() {
+        use iced::mouse::{Button, Cursor, Event as MouseEvent};
+        let mut s = text_session(&["短"]);
+        let window = iced::window::Id::unique();
+        let bounds = Rectangle::new(Point::new(100.0, 50.0), Size::new(640.0, 480.0));
+        let mut state = ();
+        let mut dispatch = |s: &TableSession, ev: &canvas::Event, at: Point| {
+            let view = TableView { session: s, window, remote: &[] };
+            canvas::Program::update(&view, &mut state, ev, bounds, Cursor::Available(at))
+        };
+
+        let press = canvas::Event::Mouse(MouseEvent::ButtonPressed(Button::Middle));
+        let action = dispatch(&s, &press, Point::new(120.0, 70.0)).expect("中键按下应发布平移起手");
+        match action.into_inner().0 {
+            Some(Message::Table(TableMsg::PanPress { pos })) => {
+                assert_eq!(pos, Point::new(20.0, 20.0), "pos 是画布局部坐标")
+            }
+            _ => panic!("中键按下应发布 PanPress"),
+        }
+
+        s.view.pan_drag = Some(PanDrag { last: Point::new(20.0, 20.0) });
+        let moved = canvas::Event::Mouse(MouseEvent::CursorMoved { position: Point::new(10.0, 10.0) });
+        let action = dispatch(&s, &moved, Point::new(10.0, 10.0)).expect("平移中越出画布的移动仍要上报");
+        match action.into_inner().0 {
+            Some(Message::Table(TableMsg::Move { pos, .. })) => {
+                assert_eq!(pos, Point::new(-90.0, -40.0), "画布外按窗口坐标回算")
+            }
+            _ => panic!("平移中应发布 Move"),
+        }
+
+        let left_release = canvas::Event::Mouse(MouseEvent::ButtonReleased(Button::Left));
+        assert!(
+            dispatch(&s, &left_release, Point::new(10.0, 10.0)).is_none(),
+            "只有中键平移在途时不发布左键释放"
+        );
+
+        // 画布内松手无会话照旧发布：按压与松手可能落在同一批更新里
+        let action = dispatch(&s, &left_release, Point::new(120.0, 70.0)).expect("画布内松手照旧发布");
+        match action.into_inner().0 {
+            Some(Message::Table(TableMsg::Release(pos))) => assert_eq!(pos, Point::new(20.0, 20.0)),
+            _ => panic!("画布内松开左键应发布 Release"),
+        }
+
+        s.view.press = Some(PressState {
+            start: Point::new(20.0, 20.0),
+            active: false,
+            anchor: (0, 0),
+            no_range: false,
+            img: None,
+        });
+        let action = dispatch(&s, &left_release, Point::new(10.0, 10.0)).expect("左键抬起落在画布外也要收口");
+        match action.into_inner().0 {
+            Some(Message::Table(TableMsg::Release(pos))) => assert_eq!(pos, Point::new(-90.0, -40.0)),
+            _ => panic!("画布外松开左键仍应发布 Release"),
+        }
+
+        let release = canvas::Event::Mouse(MouseEvent::ButtonReleased(Button::Middle));
+        // 无平移会话时画布内中键松手同样照旧发布：同批的 press+release 才不留悬挂平移
+        s.view.pan_drag = None;
+        let action = dispatch(&s, &release, Point::new(120.0, 70.0)).expect("画布内中键松手照旧发布");
+        match action.into_inner().0 {
+            Some(Message::Table(TableMsg::PanRelease(pos))) => assert_eq!(pos, Point::new(20.0, 20.0)),
+            _ => panic!("画布内松开中键应发布 PanRelease"),
+        }
+
+        s.view.pan_drag = Some(PanDrag { last: Point::new(20.0, 20.0) });
+        let action = dispatch(&s, &release, Point::new(10.0, 10.0)).expect("中键抬起必须收口");
+        match action.into_inner().0 {
+            Some(Message::Table(TableMsg::PanRelease(pos))) => assert_eq!(pos, Point::new(-90.0, -40.0)),
+            _ => panic!("中键抬起应发布 PanRelease"),
+        }
     }
 
     fn test_field(id: &str, name: &str, field_type: &str, width: f64) -> TableField {

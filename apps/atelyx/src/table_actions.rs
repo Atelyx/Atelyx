@@ -115,6 +115,8 @@ fn on_msg_open(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
             | tv::TableMsg::ExportPathPicked(..)
             | tv::TableMsg::Exported(..)) => on_load(app, m),
         m @ (tv::TableMsg::Press { .. }
+            | tv::TableMsg::PanPress { .. }
+            | tv::TableMsg::PanRelease(..)
             | tv::TableMsg::Context { .. }
             | tv::TableMsg::Move { .. }
             | tv::TableMsg::Viewport { .. }
@@ -328,6 +330,14 @@ fn on_load(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
 fn on_gesture(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
     match msg {
         tv::TableMsg::Press { window, pos, size, origin } => on_press(app, window, pos, size, origin),
+        tv::TableMsg::PanPress { pos } => on_pan_press(app, pos),
+        tv::TableMsg::PanRelease(pos) => {
+            if let Some(s) = app.table.as_mut() {
+                s.view.pan_drag = None;
+                s.view.hover = pos;
+            }
+            Task::none()
+        }
         tv::TableMsg::Context { window, pos, size } => on_context(app, window, pos, size),
         tv::TableMsg::Move { window, pos, size, origin } => on_move(app, window, pos, size, origin),
         tv::TableMsg::Viewport { window, size } => on_viewport(app, window, size),
@@ -1324,8 +1334,25 @@ fn clamp_scroll_at(s: &mut tv::TableSession, size: Size) {
     s.view.scroll_y = s.view.scroll_y.clamp(0.0, max_y);
 }
 
+/// 中键平移起手：只动滚动量——不夺键盘焦点、不改选区、不提交在编辑的单元格；
+/// 已有手势在途时让位。
+fn on_pan_press(app: &mut App, pos: Point) -> Task<Message> {
+    let Some(s) = app.table.as_mut() else { return Task::none() };
+    if s.view.gesture_active() {
+        return Task::none();
+    }
+    s.view.pan_drag = Some(tv::PanDrag { last: pos });
+    Task::none()
+}
+
 fn on_press(app: &mut App, window: iced::window::Id, pos: Point, size: Size, origin: Point) -> Task<Message> {
     let Some(s) = app.table.as_mut() else { return Task::none() };
+    // 中键平移到一半再按左键不叠加新手势：互清的代价是残留会话。
+    // 按压仍落在表格面：保持键盘焦点（同批全局 Press 按 press_seen 判定）
+    if s.view.pan_drag.is_some() {
+        s.view.press_seen = true;
+        return Task::none();
+    }
     s.view.focused = true;
     s.view.press_seen = true;
     s.view.canvas_size = size;
@@ -1807,6 +1834,19 @@ fn on_move(app: &mut App, window: iced::window::Id, pos: Point, size: Size, orig
         s.view.canvas_viewport = Some((window, size));
         clamp_scroll(s);
     }
+    // 中键平移：内容随光标同向移动（滚动量取反），越界钳在滚动上限
+    if let Some(last) = s.view.pan_drag.map(|d| d.last) {
+        let (max_x, max_y) = {
+            let g = tv::geo(s, size);
+            (g.max_scroll_x(), g.max_scroll_y())
+        };
+        s.view.scroll_x = pan_scroll(s.view.scroll_x, pos.x - last.x, max_x);
+        s.view.scroll_y = pan_scroll(s.view.scroll_y, pos.y - last.y, max_y);
+        if let Some(drag) = s.view.pan_drag.as_mut() {
+            drag.last = pos;
+        }
+        return Task::none();
+    }
     // 竖向滚动条拖拽（滑块按 grab 偏移跟手）
     let vscroll = s.view.vscroll_drag.as_ref().map(|d| d.grab).map(|grab| {
         let g = tv::geo(s, size);
@@ -2101,6 +2141,11 @@ fn on_wheel(app: &mut App, delta_y: f32, delta_x: f32) -> Task<Message> {
 
 fn distance(a: Point, b: Point) -> f32 {
     ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt()
+}
+
+/// 中键平移一步：内容跟手（滚动量反向），两端钳在有效范围内。
+fn pan_scroll(scroll: f32, delta: f32, max: f32) -> f32 {
+    (scroll - delta).clamp(0.0, max)
 }
 
 /// 滚动条跟手：按滑块行程比例换算滚动量（轴无关；track_origin = 行号列右缘 / 表头底缘）。
@@ -3248,6 +3293,18 @@ mod tests {
 
         assert!(!mutate_session(&mut s, |_| false));
         assert_eq!(s.view.undo.len(), 1, "无变更不新增撤销步");
+    }
+
+    /// 中键平移：内容跟手（滚动量反向），两端钳在有效范围内。
+    #[test]
+    fn pan_scroll_follows_pointer_and_clamps() {
+        // 向右拖 30 → 视图左移（滚动量减 30）
+        assert_eq!(pan_scroll(100.0, 30.0, 400.0), 70.0);
+        // 拖到两端不越界
+        assert_eq!(pan_scroll(10.0, 30.0, 400.0), 0.0);
+        assert_eq!(pan_scroll(390.0, -30.0, 400.0), 400.0);
+        // 内容不足一屏（max = 0）时不动
+        assert_eq!(pan_scroll(0.0, -50.0, 0.0), 0.0);
     }
 
     /// 滚动条跟手：滑块行程两端对应滚动上下限（轴无关算式）。

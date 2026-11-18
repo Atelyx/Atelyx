@@ -2390,8 +2390,11 @@ impl App {
                 }
             }
             Message::DetachedFocusLost(os_id) => {
-                // 失焦期间系统不再投递鼠标释放：画布拖拽会话必须就地收口
+                // 失焦期间系统不再投递鼠标释放：画布拖拽与表格中键平移必须就地收口
                 canvas_actions::cancel_drag(self);
+                if let Some(s) = self.table.as_mut() {
+                    s.view.pan_drag = None;
+                }
                 plugin_actions::release_plugin_focus(self, os_id);
                 // 插件窗口：声明 hide_on_blur 的隐藏（浮窗形态）
                 if self.plugin_windows.contains_key(&os_id) {
@@ -2782,6 +2785,7 @@ impl App {
                 // 防下一次无关移动触发幽灵灯箱/翻页/框选；画布内松手已在同批先行消费）
                 if let Some(s) = self.table.as_mut() {
                     s.view.press = None;
+                    s.view.pan_drag = None;
                     s.view.swipe = None;
                     s.view.img_drag = None;
                     s.view.reorder = None;
