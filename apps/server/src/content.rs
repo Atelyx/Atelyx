@@ -153,8 +153,8 @@ fn list_tree_at(
 #[serde(rename_all = "camelCase")]
 pub struct FilePathQuery {
     path: String,
-    /// 缺省 = 文本（非 UTF-8 字节按替换字符容错）；`base64` = 原始字节按标准 base64 返回。
-    /// 附件/媒体等二进制内容必须走 base64，文本读会损坏字节。
+    /// 缺省 = 文本（要求合法 UTF-8，否则 400 并提示改用 base64）；`base64` = 原始字节按标准 base64 返回。
+    /// 附件/媒体等二进制内容必须走 base64。
     #[serde(default)]
     encoding: Option<String>,
 }
@@ -178,7 +178,7 @@ pub struct WriteBody {
     if_match: Option<String>,
 }
 
-/// 读文本文件（非 UTF-8 字节按替换字符容错）。
+/// 读文本文件（严格 UTF-8；非 UTF-8 字节 400 并提示改用 base64 读）。
 pub async fn read_file(
     State(state): State<ServerState>,
     user: AuthUser,
@@ -203,7 +203,11 @@ pub async fn read_file(
     let version = content_version(&bytes);
     match encoding.as_deref() {
         None => {
-            let content = String::from_utf8_lossy(&bytes).into_owned();
+            // 文本读必须是合法 UTF-8：有损解码会把非法字节换成替换字符，客户端读回再写
+            // 就把原字节永久改掉（附件/媒体只能走 base64 读）
+            let content = String::from_utf8(bytes).map_err(|_| {
+                bad_request("非 UTF-8 文本，请用 base64 读取（?encoding=base64）")
+            })?;
             Ok(Json(json!({ "content": content, "updatedAt": updated_at, "version": version })))
         }
         Some("base64") => Ok(Json(json!({

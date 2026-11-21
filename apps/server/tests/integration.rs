@@ -822,6 +822,58 @@ async fn history_record_aggregate_and_rename_migration() {
 }
 
 
+/// 文本读严格 UTF-8：非 UTF-8 字节 400 并提示改用 base64，base64 读仍拿得到原始字节；
+/// base64 写回后字节不变（不得被有损解码改掉）。
+#[tokio::test]
+async fn text_read_rejects_non_utf8_and_base64_keeps_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+    let space_id = setup_two_members(&ctx, "alice", "bob").await;
+    let a_token = login_as(&ctx, "alice").await;
+    let raw: &[u8] = &[0x66, 0x6f, 0x80, 0xfe, 0x6f];
+    let (status, _) = ctx
+        .put(
+            &format!("/api/spaces/{space_id}/file"),
+            Some(&a_token),
+            json!({ "path": "坏字节.bin", "content": B64.encode(raw), "encoding": "base64" }),
+        )
+        .await;
+    assert_eq!(status, 200, "二进制写应成功");
+
+    let (status, body) = ctx
+        .get(&format!("/api/spaces/{space_id}/file"), Some(&a_token), &[("path", "坏字节.bin")])
+        .await;
+    assert_eq!(status, 400, "非 UTF-8 文本读应 400：{body}");
+    assert!(
+        body["error"].as_str().unwrap_or_default().contains("base64"),
+        "错误须提示改用 base64 读：{body}"
+    );
+
+    let (status, body) = ctx
+        .get(
+            &format!("/api/spaces/{space_id}/file"),
+            Some(&a_token),
+            &[("path", "坏字节.bin"), ("encoding", "base64")],
+        )
+        .await;
+    assert_eq!(status, 200, "base64 读应成功：{body}");
+    assert_eq!(B64.decode(body["content"].as_str().unwrap()).unwrap(), raw, "原始字节必须原样返回");
+    // 合法 UTF-8 文本读不受影响
+    let (status, _) = ctx
+        .put(
+            &format!("/api/spaces/{space_id}/file"),
+            Some(&a_token),
+            json!({ "path": "正常.md", "content": "正文" }),
+        )
+        .await;
+    assert_eq!(status, 200);
+    let (status, body) = ctx
+        .get(&format!("/api/spaces/{space_id}/file"), Some(&a_token), &[("path", "正常.md")])
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(body["content"], "正文");
+}
+
 /// 递归深度超限：复制与树列举都返回明确错误，且失败的复制不留半份副本。
 #[tokio::test]
 async fn deep_tree_rejected_and_copy_failure_leaves_nothing() {
@@ -2660,10 +2712,22 @@ async fn binary_file_base64_roundtrip() {
     .unwrap();
     assert_eq!(on_disk, bytes);
 
-    // 缺省读保持文本行为：响应形状不变（无 encoding 字段），二进制按替换字符容错
+    // 缺省读是文本读：非 UTF-8 字节 400 并提示改用 base64，不静默替换字节
     let (status, r) = ctx.get(&url, Some(&a), &[("path", "附件/图片.png")]).await;
+    assert_eq!(status, 400, "缺省读遇非 UTF-8 字节应拒绝：{r}");
+    assert!(
+        r["error"].as_str().unwrap_or_default().contains("base64"),
+        "错误须提示改用 base64 读：{r}"
+    );
+    // 纯 UTF-8 文本的缺省读形状不变（无 encoding 字段）
+    let (status, _) = ctx
+        .put(&url, Some(&a), json!({ "path": "附件/说明.txt", "content": "文本" }))
+        .await;
+    assert_eq!(status, 200);
+    let (status, r) = ctx.get(&url, Some(&a), &[("path", "附件/说明.txt")]).await;
     assert_eq!(status, 200);
     assert!(r.get("encoding").is_none(), "缺省读不应带 encoding 字段：{r}");
+    assert_eq!(r["content"], "文本");
     assert!(r["updatedAt"].is_number());
 
     // 非法 base64 / 未知编码 → 400，不静默
