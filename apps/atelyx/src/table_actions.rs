@@ -60,6 +60,12 @@ pub(crate) fn broadcast_selection(app: &mut App) {
 }
 
 pub fn on_msg(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
+    // 布局缓存缺失只可能来自重建 / 拖拽换出窗口内的 panic：消息入口就地重建，恢复实测口径
+    if let Some(s) = app.table.as_mut() {
+        if s.view.layout.is_none() {
+            s.rebuild_layout();
+        }
+    }
     let task = dispatch(app, msg);
     // 选区可能已变（点选 / 拖选 / 键盘 / 行头列头 / 回滚清空）：全部消息的唯一收口
     space_actions::table_collab_sync(app);
