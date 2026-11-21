@@ -3980,7 +3980,18 @@ fn backlinks_section(app: &App) -> Element<'_, Message> {
             .on_press(Message::OpenFile(rel)),
         );
     }
-    if n == 0 {
+    if let Some(reason) = &app.backlinks_error {
+        // 索引不可用与「确实没有反链」分开显示：读不出来不得抹平成空态
+        col = col.push(
+            row![
+                icon("alert", 12.0, pal::WARNING),
+                text(format!("索引不可用：{reason}"))
+                    .size(pal::fs_micro())
+                    .color(pal::WARNING),
+            ]
+            .spacing(4),
+        );
+    } else if n == 0 {
         col = col.push(text("暂无其他笔记引用当前笔记").size(pal::fs_micro()).color(pal::TEXT_MUTED));
     }
     container(col).width(Length::Fill).into()

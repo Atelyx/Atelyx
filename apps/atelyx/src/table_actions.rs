@@ -1151,25 +1151,23 @@ pub(crate) fn on_saved(
             };
             // 失败口径与笔记 / 空间链同一入口：冲突 / 只读这类不可恢复的失败不排重试、
             // 就地收口挂起动作，只留错误徽标与一次提示；可恢复的按轮次退避重排。
-            let (plan, guard) = {
+            let guard = {
                 let s = app.table.as_mut().expect("身份守卫已判会话仍在");
                 let mut guard = std::mem::take(&mut s.save_inflight);
                 // 回执已把待续项取走：先放回，再由统一处置按本笔是否 Flush 决定去留
                 if queued_flush {
                     guard.requeue_flush(gen, &file);
                 }
-                let (plan, guard) =
+                let (_, guard) =
                     app.apply_save_failure(guard, gen, &file, flush, &e, reset_backoff, "保存失败");
-                (plan, guard)
+                guard
             };
             if let Some(s) = app.table.as_mut() {
                 s.save_inflight = guard;
             }
-            match plan.retry_in {
-                Some(delay) => retry_after(delay, tv::TableMsg::RetrySave(gen, file)),
-                // 不可恢复：不排重试，保留未落盘内容与错误徽标等用户处置
-                None => Task::none(),
-            }
+            // 下一次期限已由统一入口排在 autosave_deadline 上，链上不再另排一次
+            // （两套定时器各打一拍会让同一笔重试重复下发）；不可恢复的失败什么都不排。
+            Task::none()
         }
         Ok(()) => {
             // 只认磁盘事实：冻结快照与当前数据一致才算落盘；期间又有编辑则保持脏，下一轮补写
@@ -1186,10 +1184,12 @@ pub(crate) fn on_saved(
                     s.saved = frozen.clone();
                 }
             }
-            // 落盘成功即结束失败序列
+            // 落盘成功即结束失败序列：会话内退避基线 + 全局提示闸门都要清，
+            // 只清会话会让残留的摘要吞掉此后任何同型失败
             if let Some(s) = app.table.as_mut() {
                 s.clear_save_failure();
             }
+            crate::clear_save_failure(&mut app.save_retry, &file);
             // 记版先挂上，再决定收尾动作：中途 return 会把已落盘的这一步漏出历史
             if stable {
                 app.settle_history_restore(true);

@@ -876,6 +876,10 @@ fn clear_session_state(app: &mut App) {
     app.preview_doc = None;
     app.dirty = false;
     app.save_error = None;
+    // 失败记账按裸相对路径分键：换容器后同名文件不得沿用上一个容器的失败序列
+    app.save_retry.clear();
+    app.backlinks_error = None;
+    app.tag_vocab_error = None;
     app.reset_props();
     app.file_count = None;
     app.expand_all = false;
@@ -893,6 +897,8 @@ fn clear_session_state(app: &mut App) {
     app.space_note_save_flush_queued.clear();
     app.backlinks.clear();
     app.tag_vocab.clear();
+    app.backlinks_error = None;
+    app.tag_vocab_error = None;
     app.note_files.clear();
     app.history.clear();
     app.history_gen = 0;
@@ -1534,16 +1540,23 @@ fn on_note_saved(
     if result.is_ok() {
         app.plugins.on_file_changed(rel, FileChangeKind::Updated, None);
     }
-    // flush 失败先回填挂起的 AI 文件操作：失败面可能已被切走，挂起项不得残留到之后的放行
-    if let (Err(e), true) = (&result, matches!(reason, SaveReason::Flush)) {
-        crate::ai_fs_edit::abort_pending(app, e);
-    }
     if app.ui.last_note_file.as_deref() != Some(rel) {
-        // 旧文件的失败仍须可见（内容没写进去是用户要知道的事实），但不得覆盖当前文件的错误位与挂起动作
+        // 旧文件的失败仍须可见（内容没写进去是用户要知道的事实），但不得覆盖当前文件的错误位与挂起动作：
+        // 交给统一入口的 own=false 记账 + 提示，顺带结清该文件的在途键与待续项。
+        // own=false 不收口挂起动作，Flush 失败时仍须就地回填等回执的 AI 文件操作（否则永久空等）。
         if let Err(e) = &result {
-            app.notify(
-                NoticeLevel::Error,
-                format!("「{}」保存失败：{e}", rel.rsplit('/').next().unwrap_or(rel)),
+            if matches!(reason, SaveReason::Flush) {
+                crate::ai_fs_edit::abort_pending(app, e);
+            }
+            app.settle_slot_save_failure(
+                crate::SaveSlot::NoteSpace,
+                gen,
+                rel,
+                matches!(reason, SaveReason::Flush),
+                e,
+                false,
+                &format!("「{}」保存失败", rel.rsplit('/').next().unwrap_or(rel)),
+                false,
             );
         }
         return Task::none();
@@ -1854,10 +1867,6 @@ pub(crate) fn on_table_patch_done(
                 hint,
                 true,
             );
-            // Flush 失败：等回执的 AI 文件操作不能空等，就地回填
-            if flush {
-                crate::ai_fs_edit::abort_pending(app, &e);
-            }
             let Some(s) = app.table.as_mut() else { return Task::none() };
             s.save_error = Some(e.clone());
             // 树只在首轮失败或文件确已被改名 / 删除时重拉：每轮重拉整棵树是纯浪费
@@ -2293,9 +2302,6 @@ pub(crate) fn on_canvas_patch_done(
                 hint,
                 true,
             );
-            if flush {
-                crate::ai_fs_edit::abort_pending(app, &e);
-            }
             let Some(s) = app.canvas.as_mut() else { return Task::none() };
             s.save_error = Some(e.clone());
             // 树只在首轮失败或文件确已被改名 / 删除时重拉

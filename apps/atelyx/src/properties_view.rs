@@ -841,6 +841,21 @@ fn suggest_card<'a>(
     surface: PropsSurface,
 ) -> Element<'a, Message> {
     if list.items.is_empty() {
+        // 标签索引读不出来时不得显示成「没有匹配的标签」
+        if let Some(reason) = app.tag_vocab_error.as_ref().filter(|_| tags) {
+            return suggest_card_frame(
+                container(
+                    text(format!("标签索引不可用：{reason}"))
+                        .size(pal::fs_caption())
+                        .color(pal::WARNING),
+                )
+                .width(Length::Fill)
+                .height(Length::Fixed(suggest_row_h()))
+                .padding(Padding::ZERO.horizontal(6.0))
+                .align_y(iced::alignment::Vertical::Center)
+                .into(),
+            );
+        }
         // 池非空而过滤无命中：留一行提示，卡片高度不随键入忽隐忽现
         let hint = if tags { "没有匹配的标签" } else { "没有匹配的键名" };
         return suggest_card_frame(
