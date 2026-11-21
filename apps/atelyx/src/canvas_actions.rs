@@ -570,6 +570,15 @@ pub(crate) fn on_saved(
             if let Some(s) = app.canvas.as_mut() {
                 s.save_retry = 0;
             }
+            // 记版先挂上，再决定收尾动作：中途 return 会把已落盘的这一步漏出历史
+            if stable {
+                app.settle_history_restore(true);
+                match serde_json::to_string(&frozen) {
+                    Ok(content) => task = task.chain(record_canvas_history(app, &content)),
+                    // 序列化失败：宁缺版本也不把空串写入历史（结构体序列化失败为极端异常）
+                    Err(e) => app.notify(crate::NoticeLevel::Error, format!("历史版本记录失败：{e}")),
+                }
+            }
             // 在途期间排队的 Flush：内容已稳就放行，仍脏就补一笔收尾（脏拦截点不能白等）
             if queued_flush {
                 let dirty = app.canvas.as_ref().is_some_and(|s| s.dirty);
@@ -582,25 +591,17 @@ pub(crate) fn on_saved(
             if flush {
                 // 落盘期间有新编辑（unstable）：重收一轮 Flush——脏拦截已在放行前 flush，
                 // 此轮丢失会让关闭 / 切换动作静默挂起
-                if stable {
-                    task = task.chain(app.after_any_flush());
+                task = task.chain(if stable {
+                    app.after_any_flush()
                 } else {
-                    task = task.chain(submit_canvas_save(app, SaveReason::Flush));
-                }
+                    submit_canvas_save(app, SaveReason::Flush)
+                });
             } else if !stable {
                 // 落盘期间又有编辑：补排一次自动保存（期限可能已随本笔回执清空）
                 task = task.chain(retry_after(
                     crate::AUTOSAVE_DEBOUNCE,
                     CanvasMsg::RetrySave(gen, file),
                 ));
-            }
-            if stable {
-                app.settle_history_restore(true);
-                match serde_json::to_string(&frozen) {
-                    Ok(content) => task = task.chain(record_canvas_history(app, &content)),
-                    // 序列化失败：宁缺版本也不把空串写入历史（结构体序列化失败为极端异常）
-                    Err(e) => app.notify(crate::NoticeLevel::Error, format!("历史版本记录失败：{e}")),
-                }
             }
             task
         }
