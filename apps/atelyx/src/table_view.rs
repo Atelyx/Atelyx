@@ -1204,6 +1204,10 @@ impl SaveInflight {
     }
 }
 
+/// 连续失败的重试次数上限：用尽即停（保留 `save_error` 与工具条重试入口）。
+/// 无上限会在权限 / 磁盘满这类持久失败上每 30s 空转一次写盘。
+pub const SAVE_RETRY_MAX: u32 = 5;
+
 /// 保存失败后的自动重试间隔：1s / 2s / 4s / 8s / 16s / 30s（封顶）。
 /// 失败只写 `save_error` 而不重排期限，用户停手后这笔内容就永远不落盘。
 pub fn save_retry_delay(attempts: u32) -> std::time::Duration {
@@ -4125,6 +4129,8 @@ mod tests {
         assert_eq!(save_retry_delay(0), std::time::Duration::from_millis(1000));
         assert_eq!(save_retry_delay(9), std::time::Duration::from_millis(30_000));
         assert_eq!(save_retry_delay(u32::MAX), std::time::Duration::from_millis(30_000));
+        // 次数上限与退避档位对齐：用尽前最后一档仍有可观的退避
+        assert!(save_retry_delay(SAVE_RETRY_MAX - 1) >= std::time::Duration::from_secs(8));
     }
 
     /// 灯箱原图重试上限：用尽即停（只留缩略图），换图后重新获得完整次数。

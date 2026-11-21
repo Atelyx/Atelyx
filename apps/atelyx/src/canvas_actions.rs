@@ -544,10 +544,17 @@ pub(crate) fn on_saved(
                 }
                 s.save_retry
             };
-            if flush {
-                app.notify(crate::NoticeLevel::Error, format!("保存失败，操作未执行：{e}"));
-            } else {
-                app.notify(crate::NoticeLevel::Error, format!("保存失败：{e}"));
+            // 只在首轮失败时出声：重试链每轮都弹一次会把提示栏刷屏
+            if attempt == 1 {
+                if flush {
+                    app.notify(crate::NoticeLevel::Error, format!("保存失败，操作未执行：{e}"));
+                } else {
+                    app.notify(crate::NoticeLevel::Error, format!("保存失败：{e}"));
+                }
+            }
+            if attempt >= crate::table_view::SAVE_RETRY_MAX {
+                // 次数用尽：停在可见错误上，工具条的「重试」仍是唯一入口
+                return Task::none();
             }
             retry_after(
                 crate::table_view::save_retry_delay(attempt),
