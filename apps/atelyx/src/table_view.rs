@@ -4259,6 +4259,7 @@ mod tests {
         assert_eq!(third.cache.row_h.len(), 3, "新内容重新兜底");
         assert!(s.view.layout.is_none(), "兜底不写正式缓存");
     }
+
     /// 布局缓存为 None（重建途中被 take 走、或上一次重建中途 panic）时几何仍可用：
     /// 兜底重建一份自持缓存，读路径不 panic 也不返回空几何。
     #[test]
