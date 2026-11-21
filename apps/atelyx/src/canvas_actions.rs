@@ -538,9 +538,12 @@ pub(crate) fn on_saved(
                 let Some(s) = app.canvas.as_mut() else { return Task::none() };
                 s.save_error = Some(e.clone());
                 s.save_retry = s.save_retry.saturating_add(1);
-                // 失败已就地取消挂起动作（abort_pending_flush）：待续 Flush 一并丢弃，
-                // 否则重试成功后还会去跑一次已经作废的关闭 / 切换
-                s.save_inflight.drop_flush(gen, &file);
+                // 本笔就是 Flush 且已失败：挂起动作已就地取消，待续 Flush 一并丢弃，
+                // 否则重试成功后还会去跑一次已经作废的关闭 / 切换。
+                // 本笔不是 Flush 时保留待续项：重试成功后由它补发，挂起动作才不会永久等下去。
+                if flush {
+                    s.save_inflight.drop_flush(gen, &file);
+                }
                 s.save_retry
             };
             // 只在首轮失败时出声：重试链每轮都弹一次会把提示栏刷屏
