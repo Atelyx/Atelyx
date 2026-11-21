@@ -1168,10 +1168,16 @@ pub enum SaveAdmission {
 
 impl SaveInflight {
     /// 准入判定：可提交即登记在途；在途时 Flush 记队列，其余顺延。
+    ///
+    /// 只认「当前世代 + 当前文件」的键：切仓库、改名（会话 file 变了）之后旧键的回执已被
+    /// 文件身份守卫丢弃，留着会把这个文件后续每笔提交都永久顺延。
     pub fn begin(&mut self, gen: u64, file: &str, flush: bool) -> SaveAdmission {
-        // 切仓库后旧世代的键再也不会被结算，先清掉免得永久挡住新仓库同路径文件
-        self.keys.retain(|(inflight_gen, _)| *inflight_gen == gen);
-        self.flush_queued.retain(|(queued_gen, _)| *queued_gen == gen);
+        self.keys.retain(|(inflight_gen, inflight_file)| {
+            *inflight_gen == gen && inflight_file == file
+        });
+        self.flush_queued.retain(|(queued_gen, queued_file)| {
+            *queued_gen == gen && queued_file == file
+        });
         let key = (gen, file.to_string());
         if self.keys.contains(&key) {
             if flush {
@@ -4087,13 +4093,21 @@ mod tests {
         assert_eq!(guard.begin(1, "a.atb", false), SaveAdmission::Start);
         assert_eq!(guard.begin(1, "a.atb", false), SaveAdmission::Deferred);
         assert_eq!(guard.begin(1, "a.atb", true), SaveAdmission::Queued);
-        // 另一份文件不受同键守卫阻塞，且它自己的回执不带别人的待续 Flush
-        assert_eq!(guard.begin(1, "b.atb", false), SaveAdmission::Start);
-        assert!(!guard.finish(1, "b.atb"), "待续 Flush 属于另一份文件");
         // 回执结清后才交付待续 Flush，且只交付一次
         assert!(guard.finish(1, "a.atb"), "在途期间排队的 Flush 要补发");
         assert!(!guard.finish(1, "a.atb"), "结清后不再重复补发");
         assert_eq!(guard.begin(1, "a.atb", false), SaveAdmission::Start);
+    }
+
+    /// 会话改名的在途键必须失效：旧文件名的回执已被身份守卫丢弃，永远等不到结算。
+    #[test]
+    fn save_inflight_drops_keys_of_previous_name() {
+        let mut guard = SaveInflight::default();
+        assert_eq!(guard.begin(1, "旧名.atb", true), SaveAdmission::Start);
+        // 改名后按新名提交：旧键与旧待续 Flush 一并作废，新名立刻可提交
+        assert_eq!(guard.begin(1, "新名.atb", false), SaveAdmission::Start);
+        assert_eq!(guard.begin(1, "新名.atb", false), SaveAdmission::Deferred, "新名仍在途");
+        assert!(!guard.finish(1, "旧名.atb"), "旧名的回执不再结算任何队列");
     }
 
     /// 保存失败已取消挂起动作：待续 Flush 必须一并丢弃，不能留到重试成功后补发。
