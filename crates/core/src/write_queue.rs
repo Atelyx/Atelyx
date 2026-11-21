@@ -3,11 +3,10 @@
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
-/// 慢作业阈值：单个作业执行超过它即记进 `QueueStats::last_slow` 并写一行 stderr。
-/// 磁盘或网络盘卡住时，这是「全部本地写盘停住」唯一不依赖日志框架的可见信号。
+/// 慢作业阈值：单个作业执行超过它即记进 `QueueStats::last_slow` 并上报 [`set_slow_job_reporter`]。
 pub const SLOW_JOB_THRESHOLD: Duration = Duration::from_secs(5);
 
 /// 一条队列作业。
@@ -78,6 +77,28 @@ fn poison<T>(err: PoisonError<MutexGuard<'_, T>>) -> MutexGuard<'_, T> {
     err.into_inner()
 }
 
+/// 慢作业上报回调：（目标路径, 耗时）。批量与栅栏作业没有目标路径（空路径）。
+type SlowJobReporter = Box<dyn Fn(PathBuf, Duration) + Send + Sync>;
+
+/// 进程级慢作业回调：壳侧注册一次即覆盖全部队列实例（队列散在仓库会话、批处理与插件安装各处）。
+static SLOW_JOB_REPORTER: OnceLock<SlowJobReporter> = OnceLock::new();
+
+/// 注册慢作业上报回调（壳侧据此接崩溃日志 / 通知）。首次注册生效，重复注册返回 `false` 且不改原回调；
+/// 未注册时慢作业只留 [`QueueStats::last_slow`]。回调在写盘工作线程上同步执行、且持着该作业后的执行序，
+/// 所以它不得阻塞，也不得向写盘队列提交作业（同线程等自己会死锁）。
+pub fn set_slow_job_reporter(reporter: impl Fn(PathBuf, Duration) + Send + Sync + 'static) -> bool {
+    SLOW_JOB_REPORTER.set(Box::new(reporter)).is_ok()
+}
+
+fn report_slow_job(target: &Path, elapsed: Duration) {
+    if let Some(reporter) = SLOW_JOB_REPORTER.get() {
+        reporter(target.to_path_buf(), elapsed);
+    }
+    // 开发构建才写 stderr：发布版 windows 子系统没有控制台可收，真正可达的通道是上面的回调
+    #[cfg(debug_assertions)]
+    eprintln!("写盘队列慢作业：{} 耗时 {elapsed:?}", target.display());
+}
+
 /// 两个时刻之间的微秒数（饱和到 u64；量级不会溢出，这里只是不 panic）。
 fn micros_between(from: Instant, to: Instant) -> u64 {
     u64::try_from(to.saturating_duration_since(from).as_micros()).unwrap_or(u64::MAX - 1)
@@ -102,8 +123,7 @@ impl Default for WriteQueue {
 pub struct QueueStats {
     /// 已提交、尚未开始执行的作业数（批量作业内部的多次写盘不计，整体只占一个序位）。
     pub pending: usize,
-    /// 当前在途作业已开始多久；`None` = 队列空闲。它持续增长而 `pending` 不降，
-    /// 就是「某个作业卡住、后续全部写盘永久排队」的可观测形态。
+    /// 在途作业自开始执行起已过去的时长；`None` = 队列空闲。
     pub busy_since: Option<Duration>,
     /// 最近一次执行耗时超过 [`SLOW_JOB_THRESHOLD`] 的作业：（目标路径, 耗时）。
     /// 批量与栅栏作业没有单一目标路径，给的是空路径。
@@ -134,8 +154,13 @@ impl WriteQueue {
         let busy_start = self.inner.busy_start_us.load(Ordering::Acquire);
         QueueStats {
             pending: self.inner.pending.load(Ordering::Acquire),
-            busy_since: (busy_start != 0)
-                .then(|| self.inner.origin.elapsed() - Duration::from_micros(busy_start - 1)),
+            // saturating：起点与当前时刻分开读，毫秒级竞争下差值可能瞬时为负
+            busy_since: (busy_start != 0).then(|| {
+                self.inner
+                    .origin
+                    .elapsed()
+                    .saturating_sub(Duration::from_micros(busy_start - 1))
+            }),
             last_slow: self
                 .inner
                 .last_slow
@@ -261,13 +286,9 @@ fn worker(inner: Arc<QueueInner>) {
         let elapsed = started.elapsed();
         if elapsed >= inner.slow_threshold {
             let target = job.target.clone();
-            eprintln!(
-                "写盘队列慢作业：{} 耗时 {:?}（阈值 {:?}）",
-                target.display(),
-                elapsed,
-                inner.slow_threshold
-            );
-            *inner.last_slow.lock().unwrap_or_else(poison) = Some((target, elapsed));
+            *inner.last_slow.lock().unwrap_or_else(poison) = Some((target.clone(), elapsed));
+            // 上报放在取锁之后：回调里再读 stats 不会自锁
+            report_slow_job(&target, elapsed);
         }
         // 空闲标记在回执前落下：回执之后提交方读到的统计不得再把刚完成的作业算作在途
         inner.busy_start_us.store(0, Ordering::Release);
@@ -416,7 +437,7 @@ mod tests {
         assert_eq!(idle.busy_since, None, "回执之后不得再把已完成作业算作在途");
     }
 
-    /// 超阈值的作业记进 last_slow 并写一行 stderr：批量作业没有单一目标路径，路径记空。
+    /// 超阈值的作业记进 last_slow：批量作业没有单一目标路径，路径记空。
     #[tokio::test]
     async fn slow_job_is_recorded() {
         let queue = WriteQueue::with_slow_threshold(Duration::from_millis(30));
@@ -430,6 +451,50 @@ mod tests {
         let slow = queue.stats().last_slow.expect("超过阈值的作业应被记录");
         assert_eq!(slow.0, PathBuf::new(), "批量作业没有单一目标路径");
         assert!(slow.1 >= Duration::from_millis(30), "记录的耗时取自实测：{:?}", slow.1);
+    }
+
+    /// 进程级回调只能注册一次：全仓测试共用这一个名额，故所有上报断言收在同一用例里。
+    /// 未注册与重复注册都必须安全（壳侧可能忘记注册，重复注册不得覆盖已装好的接线）。
+    #[tokio::test]
+    async fn slow_job_reports_through_registered_reporter() {
+        // 未注册时的慢作业：只记 stats，不 panic
+        let queue = WriteQueue::with_slow_threshold(Duration::from_millis(20));
+        queue
+            .bulk(|| {
+                std::thread::sleep(Duration::from_millis(80));
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert!(queue.stats().last_slow.is_some(), "未注册回调时仍要留统计");
+
+        let reported: Arc<Mutex<Vec<(PathBuf, Duration)>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&reported);
+        assert!(
+            set_slow_job_reporter(move |path, elapsed| {
+                sink.lock().unwrap_or_else(poison).push((path, elapsed));
+            }),
+            "首次注册应成功"
+        );
+        assert!(
+            !set_slow_job_reporter(|_, _| panic!("重复注册不得生效")),
+            "重复注册被拒绝"
+        );
+
+        // 大载荷写盘：写 + fsync 稳定超过 1ms 阈值，同时验证上报的是该作业自己的目标路径
+        let tmp = crate::vault::test_support::TempDir::new("wq-reporter");
+        let target = tmp.join("slow.md");
+        let queue = WriteQueue::with_slow_threshold(Duration::from_millis(1));
+        queue.write(target.clone(), "x".repeat(16 * 1024 * 1024)).await.unwrap();
+        // 同一测试进程内其它用例的慢作业也会进同一个回调，按本用例的唯一路径过滤
+        let calls = reported.lock().unwrap_or_else(poison).clone();
+        let matched: Vec<_> = calls.iter().filter(|(path, _)| *path == target).collect();
+        assert_eq!(matched.len(), 1, "该路径的慢作业只上报一次：{:?}", calls);
+        assert!(
+            matched[0].1 >= Duration::from_millis(1),
+            "上报耗时取自实测：{:?}",
+            matched[0].1
+        );
     }
 
     #[tokio::test]

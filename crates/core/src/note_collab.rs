@@ -159,9 +159,8 @@ impl NoteCollab {
         // 单事务恒产出单个 update 事件；空 update（hunk 全被钳掉）不上行。
         // 多条即不变式被破坏（静默丢弃会丢内容），debug 构建当场暴露
         let msgs = {
-            // outbox 锁不可重入（取锁处不嵌套）。毒化只说明上一次持锁线程 panic 过，
-            // 表内消息本身完整；expect 会把那一次 panic 放大成此后每次编辑都 panic
-            // （壳侧 update 内 → 进程退出），故取回内部值继续用。
+            // outbox 锁不可重入（取锁处不嵌套）。毒化只代表上一次持锁线程崩过，
+            // 不代表表内容不一致：取回内部表继续用，编辑不被一次崩溃连带卡死。
             let mut sink = self.outbox.lock().unwrap_or_else(PoisonError::into_inner);
             sink.drain(..).collect::<Vec<_>>()
         };
