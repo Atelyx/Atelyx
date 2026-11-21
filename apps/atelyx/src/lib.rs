@@ -225,6 +225,33 @@ fn next_boundary(text: &str, at: usize) -> usize {
     i
 }
 
+/// 退格删一个字符：光标先收到字符边界，返回（新正文，新光标）。
+/// 光标落在字符中间时按整字符删，不按半字符切正文。
+fn backspace_at(body: &str, caret: usize) -> Option<(String, usize)> {
+    let caret = markdown_edit::floor_char_boundary(body, caret);
+    if caret == 0 {
+        return None;
+    }
+    let prev = prev_boundary(body, caret);
+    let mut next = String::with_capacity(body.len());
+    next.push_str(&body[..prev]);
+    next.push_str(&body[caret..]);
+    Some((next, prev))
+}
+
+/// 删除一个字符：光标先收到字符边界，返回新正文。
+fn delete_at(body: &str, caret: usize) -> Option<String> {
+    let caret = markdown_edit::floor_char_boundary(body, caret);
+    if caret >= body.len() {
+        return None;
+    }
+    let after = next_boundary(body, caret);
+    let mut next = String::with_capacity(body.len());
+    next.push_str(&body[..caret]);
+    next.push_str(&body[after..]);
+    Some(next)
+}
+
 /// `at` 所在行行首。
 fn line_start_of(text: &str, at: usize) -> usize {
     let at = at.min(text.len());
@@ -6581,8 +6608,10 @@ impl App {
         self.edit.snapshot(&self.note_text);
         self.note_text = version.content.clone();
         self.reset_note_metrics();
-        // 回滚目标正文可能更短：偏移先收进范围，否则编辑面按越界光标取块会落空
-        self.edit.clamp_caret(self.edit_body().len());
+        // 回滚目标正文可能更短：偏移先收进正文（长度 + 字符边界），否则编辑面按
+        // 越界光标取块会落空
+        let body = self.edit_body().to_string();
+        self.edit.clamp_caret(&body);
         // 源码档正文真源 = note_text 派生的编辑器内容：程序化替换须同步重建
         if self.note_mode == NoteMode::Source {
             self.source_editor = text_editor::Content::with_text(&self.note_text);
@@ -7486,9 +7515,10 @@ impl App {
         self.note_mode = NoteMode::Edit;
         self.reset_note_metrics();
         self.preview_doc = None;
-        // 源码档可能已把正文改短：光标 / 锚点收进正文范围再交给编辑面
-        let body_len = self.edit_body().len();
-        self.edit.clamp_caret(body_len);
+        // 阅读态期间正文可能已被远端合流改短：光标 / 锚点收进正文（长度 + 字符边界）
+        // 再交给编辑面
+        let body = self.edit_body().to_string();
+        self.edit.clamp_caret(&body);
         self.edit.active = None;
         self.edit.preedit = None;
         self.edit.focused = false;
@@ -8002,7 +8032,8 @@ impl App {
     /// 删除选区（有则删）。
     fn delete_selection(&mut self) -> bool {
         let body = self.edit_body().to_string();
-        // 选区来自编辑面 / 远端合流，偏移可能越界或落在字符中间：入口统一收进正文
+        // 选区端点可能越界或不在字符边界上（远端合流 / 编辑面命中都只保证近似），
+        // 切片前统一收进正文
         let (a, b) = self.edit.selection_within(&body);
         if b <= a {
             return false;
@@ -8083,18 +8114,13 @@ impl App {
                 return;
             }
         }
-        let caret = self.edit.caret.min(body.len());
-        if caret == 0 {
+        let Some((next, caret)) = backspace_at(&body, self.edit.caret) else {
             return;
-        }
-        let prev = prev_boundary(&body, caret);
+        };
         self.edit.snapshot(&self.note_text);
-        let mut next = String::with_capacity(body.len());
-        next.push_str(&body[..prev]);
-        next.push_str(&body[caret..]);
         self.set_edit_body(next);
-        self.edit.caret = prev;
-        self.edit.anchor = prev;
+        self.edit.caret = caret;
+        self.edit.anchor = caret;
         self.after_edit();
     }
 
@@ -8104,15 +8130,13 @@ impl App {
             return;
         }
         let body = self.edit_body().to_string();
-        let caret = self.edit.caret.min(body.len());
-        if caret >= body.len() {
+        let Some(next) = delete_at(&body, self.edit.caret) else {
             return;
-        }
-        let after = next_boundary(&body, caret);
+        };
         self.edit.snapshot(&self.note_text);
-        let mut next = String::with_capacity(body.len());
-        next.push_str(&body[..caret]);
-        next.push_str(&body[after..]);
+        // 起点可能刚被收过：删除后把光标 / 锚点落回同一处，下一拍的取块与切片才对得上
+        self.edit.caret = markdown_edit::floor_char_boundary(&body, self.edit.caret);
+        self.edit.anchor = self.edit.caret;
         self.set_edit_body(next);
         self.after_edit();
     }
@@ -8935,6 +8959,7 @@ fn space_pump_stream(
 #[cfg(test)]
 mod file_drop_tests {
     use super::{file_drop_check, DropReject};
+    use crate::markdown_edit;
 
     #[test]
     fn accepts_other_folders_and_root() {
@@ -9026,6 +9051,40 @@ mod file_drop_tests {
             super::retry_after_failure(Some(&("a.md".to_string(), 7)), "b.md", now);
         assert_eq!((file.as_str(), attempt), ("b.md", 1));
         assert_eq!(at, now + Duration::from_secs(1));
+    }
+
+    /// 退格 / 删除的光标落在字符中间（远端合流或程序化偏移留下的非法值）时，
+    /// 光标收到字符起点后按整字符删，不能按半字符切正文 panic。
+    #[test]
+    fn backspace_and_delete_snap_caret_to_char_boundary() {
+        let body = "a中😀b";
+        assert_eq!(body.len(), 9, "a=1 中=3 emoji=4 b=1");
+        // 退格：光标在「中」中间（2）→ 收到 1 → 删掉前面的 a
+        let (next, caret) = super::backspace_at(body, 2).expect("非文首可退格");
+        assert_eq!(next, "中😀b");
+        assert_eq!(caret, 0);
+        // 删除：光标在 emoji 中间（6）→ 收到 4 → 删掉整个 emoji
+        assert_eq!(super::delete_at(body, 6).expect("非文末可删除"), "a中b");
+        // 边界：文首退格与文末删除都不产生空差
+        assert!(super::backspace_at(body, 0).is_none());
+        assert!(super::delete_at(body, body.len()).is_none());
+        // 越界同样只落到文末
+        assert_eq!(markdown_edit::floor_char_boundary(body, body.len() + 5), body.len());
+        assert!(super::delete_at(body, body.len() + 5).is_none());
+    }
+
+    /// 阅读态期间远端合流把正文改短：切回编辑态时光标 / 锚点按字符边界收敛，
+    /// 非法偏移不得带进编辑面。
+    #[test]
+    fn clamp_caret_snaps_to_char_boundary() {
+        let mut edit = markdown_edit::EditorState::default();
+        let body = "a中😀";
+        edit.caret = 20;
+        edit.anchor = 6;
+        edit.clamp_caret(body);
+        assert_eq!(edit.caret, body.len(), "长度夹到正文末尾");
+        assert!(body.is_char_boundary(edit.anchor), "锚点吸附到字符边界");
+        assert_eq!(edit.anchor, 4, "emoji 中间的偏移收到字符起点");
     }
 
     /// 裁剪崩溃日志只按文件名时间戳取舍：同秒多份与无关文件并存时，只删最旧的那几份

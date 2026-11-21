@@ -2687,7 +2687,7 @@ impl EditorState {
     }
 
     /// 有序选区收进 `body`：两端夹到正文长度并向下吸附到字符边界。
-    /// 任何按选区切正文的入口都走它——上游偏移失准只损失一次落点，不会切碎字符 panic。
+    /// 返回值可直接用于切 `body`：端点恒在界内且落在字符边界上。
     pub fn selection_within(&self, body: &str) -> (usize, usize) {
         let from = floor_char_boundary(body, self.selection().0);
         let to = floor_char_boundary(body, self.selection().1).max(from);
@@ -2700,10 +2700,10 @@ impl EditorState {
         self.anchor = floor_char_boundary(body, anchor);
     }
 
-    /// 光标 / 锚点收进正文范围（程序化替换正文后偏移可能越界）。
-    pub fn clamp_caret(&mut self, body_len: usize) {
-        self.caret = self.caret.min(body_len);
-        self.anchor = self.anchor.min(body_len);
+    /// 光标 / 锚点收进正文：夹到正文长度并向下吸附到字符边界，可直接用于切正文。
+    pub fn clamp_caret(&mut self, body: &str) {
+        self.caret = floor_char_boundary(body, self.caret);
+        self.anchor = floor_char_boundary(body, self.anchor);
     }
 
     /// 非入栈的正文变更（源码档输入 / 远端合入 / 属性重写）后作废重做：
