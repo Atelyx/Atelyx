@@ -46,9 +46,13 @@ impl WrapKey {
 }
 
 impl WrapCache {
-    /// 开一轮布局重建。
+    /// 开一轮布局重建。字体系统锁被毒化时照常取内层值：读到的只是版本号，
+    /// 一次 panic 不该让此后每次重排都再 panic。
     pub fn begin_pass(&mut self) {
-        let version = font_system().read().expect("读取字体系统").version();
+        let version = font_system()
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .version();
         if self.font_version != Some(version) {
             self.entries.clear();
             self.font_version = Some(version);
@@ -111,6 +115,18 @@ fn layout(segment: &str, size: f32, font: Font, wrap_w: f32) -> Paragraph {
     })
 }
 
+/// 一个 run 的字形字节区间 → 源串切片。
+///
+/// 字形区间来自 cosmic-text，正常情形落在源串内且对齐字符边界；字体回退、代理对与组合
+/// 字符重排都可能给出越界或落在字符中间的下标，直接切片会 panic。非法区间返回 `None`：
+/// 该行只保留实测行宽与行高，不因此丢掉整段正文，也不中断同一段后续行的测量。
+fn line_slice(segment: &str, from: usize, to: usize) -> Option<&str> {
+    if from > to || to > segment.len() {
+        return None;
+    }
+    segment.get(from..to)
+}
+
 /// 单个硬换行段的排版结果：至少一行（空段也占一行高，与编辑浮层同口径）。
 fn measure_segment(segment: &str, size: f32, font: Font, wrap_w: f32) -> Vec<TextLine> {
     let paragraph = layout(segment, size, font, wrap_w);
@@ -122,11 +138,12 @@ fn measure_segment(segment: &str, size: f32, font: Font, wrap_w: f32) -> Vec<Tex
             .glyphs
             .iter()
             .fold((usize::MAX, 0usize), |acc, glyph| (acc.0.min(glyph.start), acc.1.max(glyph.end)));
-        if from > to {
-            lines.push(TextLine { text: String::new(), width: 0.0 });
-            continue;
-        }
-        lines.push(TextLine { text: segment[from..to].to_string(), width: run.line_w });
+        // 无字形的 run（空行）没有可供下划线取宽的正文，宽度按 0 记
+        let width = if from > to { 0.0 } else { run.line_w };
+        lines.push(TextLine {
+            text: line_slice(segment, from, to).unwrap_or_default().to_string(),
+            width,
+        });
     }
     if lines.is_empty() {
         lines.push(TextLine { text: String::new(), width: 0.0 });
@@ -176,6 +193,21 @@ mod tests {
                 measure(text, 14.0, Font::DEFAULT, wrap_w).len(),
             );
         }
+    }
+
+    /// 越界或落在字符中间的字形区间不切片，返回 None（调用方退回空文本，不 panic）。
+    #[test]
+    fn line_slice_rejects_out_of_range_and_split_chars() {
+        let text = "中文ab";
+        assert_eq!(line_slice(text, 0, 3), Some("中"));
+        assert_eq!(line_slice(text, 6, 8), Some("ab"));
+        assert_eq!(line_slice(text, 0, 0), Some(""));
+        // 越界
+        assert_eq!(line_slice(text, 0, text.len() + 1), None);
+        assert_eq!(line_slice(text, text.len() + 2, text.len() + 3), None);
+        // 落在 3 字节汉字的中间
+        assert_eq!(line_slice(text, 1, 3), None);
+        assert_eq!(line_slice(text, 0, 4), None);
     }
 
     /// 一轮重建收口后只留本轮用过的键；换行宽是键的一部分。

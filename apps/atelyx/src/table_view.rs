@@ -184,6 +184,15 @@ impl TableSession {
     /// 布局重建（数据版本或 zoom 变化时调用；zoom 变更后由调用方补调）。
     pub fn rebuild_layout(&mut self) {
         self.view.layout_epoch = self.view.layout_epoch.wrapping_add(1);
+        // 行段缓存随布局滚动：收口时丢掉本轮没再用到的旧键
+        let wrap = self.view.layout.take().map(|cache| cache.wrap).unwrap_or_default();
+        self.view.layout = Some(self.build_layout(wrap, true));
+        self.refresh_ai_state();
+    }
+
+    /// 按当前数据与缩放构建一份布局缓存。`measure = false` 时不实测行段（断行按字符估算），
+    /// 供读路径在会话缓存被临时取走时兜底：实测要拿全局字体系统的写锁，绘制通道内不可重入。
+    fn build_layout(&self, mut wrap: WrapCache, measure: bool) -> LayoutCache {
         let zoom = self.view.zoom;
         let data = &self.data;
         let col_w: Vec<f32> = data
@@ -201,9 +210,10 @@ impl TableSession {
         col_x.push(x);
         let total_w = x + ADD_COL_W * zoom;
 
-        // 行段缓存随布局滚动：收口时丢掉本轮没再用到的键
-        let mut wrap = self.view.layout.take().map(|cache| cache.wrap).unwrap_or_default();
-        wrap.begin_pass();
+        // 不实测的一轮（读路径兜底）不开 pass：否则收口会把上一轮实测的行段全丢掉
+        if measure {
+            wrap.begin_pass();
+        }
         // 列宽拖拽在途：该列换行宽每帧都变，实测会把每次指针移动变成整表重排。
         // 这列本轮不实测（定高与绘制同走字符估算），松手后的重建回到实测口径
         let dragging = self.view.col_drag.as_ref().map(|d| d.field_id.clone());
@@ -215,7 +225,11 @@ impl TableSession {
             // 显式行高的行同样实测：绘制这些格的正文要有行段可取
             let mut content = 0.0f32;
             for (i, f) in data.fields.iter().enumerate() {
-                let slot = if dragging.as_deref() == Some(f.id.as_str()) { None } else { Some(&mut wrap) };
+                let slot = if measure && dragging.as_deref() != Some(f.id.as_str()) {
+                    Some(&mut wrap)
+                } else {
+                    None
+                };
                 content = content.max(cell_content_height(slot, f, row, row.values.get(&f.id), col_w[i], zoom));
             }
             let h = match row.height {
@@ -227,14 +241,16 @@ impl TableSession {
             y += h;
         }
         row_y.push(y);
-        wrap.end_pass();
+        if measure {
+            wrap.end_pass();
+        }
         // 状态栏列计算随数据版本重建：绘制只查结果，不在每次重绘扫全表
         let calc = data
             .fields
             .iter()
             .map(|field| table_ops::compute_column_calc(field, &data.rows))
             .collect();
-        self.view.layout = Some(LayoutCache {
+        LayoutCache {
             version: self.version,
             zoom,
             col_w,
@@ -245,8 +261,7 @@ impl TableSession {
             content_h: y + NEW_ROW_H * zoom,
             wrap,
             calc,
-        });
-        self.refresh_ai_state();
+        }
     }
 
     /// 重建 AI 字段的引用解析与过期标记：绘制只读，不在每帧解析模板。
@@ -1089,7 +1104,7 @@ pub enum SaveReason {
 /// 表格几何：全部尺寸已乘 zoom，坐标为画布局部。
 pub struct Geo<'a> {
     pub session: &'a TableSession,
-    pub cache: &'a LayoutCache,
+    pub cache: LayoutRef<'a>,
     pub width: f32,
     pub height: f32,
     pub z: f32,
@@ -1269,7 +1284,40 @@ impl<'a> Geo<'a> {
     }
     /// 只取位置口径（不携带视口宽高；伪尺寸取几何的替代入口）。
     pub fn positions(&self) -> LayoutPositions<'_> {
-        LayoutPositions { session: self.session, cache: self.cache }
+        // 复用本几何已备好的缓存：兜底布局只在 geo() 里建一次，逐格取矩形不重复重建
+        LayoutPositions { session: self.session, cache: LayoutRef::Borrowed(&self.cache) }
+    }
+}
+
+/// 布局缓存借用：会话有缓存时直接借，没有时自持一份按最小信息重建的兜底值。
+///
+/// 布局重建期间缓存会被 `take()` 走（variant 不能原地改），读路径此刻拿不到它；
+/// 这里兜底重建而不是 panic——panic 会让 `take()` 的缓存永久丢失，此后每帧都炸。
+pub enum LayoutRef<'a> {
+    /// 会话自己的缓存。
+    Borrowed(&'a LayoutCache),
+    /// 会话没有缓存时的自持兜底布局。
+    Owned(Box<LayoutCache>),
+}
+
+impl<'a> LayoutRef<'a> {
+    /// 会话有缓存 = 直接借；没有 = 重建一份。`measure = true` 时带实测行段（仅非绘制路径）。
+    fn of(session: &'a TableSession, measure: bool) -> Self {
+        match session.view.layout.as_ref() {
+            Some(cache) => Self::Borrowed(cache),
+            None => Self::Owned(Box::new(session.build_layout(WrapCache::default(), measure))),
+        }
+    }
+}
+
+impl std::ops::Deref for LayoutRef<'_> {
+    type Target = LayoutCache;
+
+    fn deref(&self) -> &LayoutCache {
+        match self {
+            Self::Borrowed(cache) => cache,
+            Self::Owned(cache) => cache,
+        }
     }
 }
 
@@ -1277,7 +1325,7 @@ impl<'a> Geo<'a> {
 /// 这类依赖视口尺寸的派生量在类型上不可达。
 pub struct LayoutPositions<'a> {
     session: &'a TableSession,
-    cache: &'a LayoutCache,
+    cache: LayoutRef<'a>,
 }
 
 impl LayoutPositions<'_> {
@@ -1995,15 +2043,20 @@ impl<'a> From<TableChrome<'a>> for Element<'a, Message> {
 }
 
 /// 构建 Geo（布局缓存由 touch/zoom 变更路径保证最新）。
+/// 会话没有缓存时（首帧 / 重建中途）按当前数据兜底重建一份，绘制照常出图而不是整帧 panic。
 pub fn geo(session: &TableSession, size: Size) -> Geo<'_> {
-    let cache = session.view.layout.as_ref().expect("布局缓存未初始化");
-    Geo { session, cache, width: size.width, height: size.height, z: session.view.zoom }
+    Geo {
+        session,
+        cache: LayoutRef::of(session, false),
+        width: size.width,
+        height: size.height,
+        z: session.view.zoom,
+    }
 }
 
 /// 位置口径入口：同一份布局缓存与滚动量，不含视口尺寸。
 pub fn layout_positions(session: &TableSession) -> LayoutPositions<'_> {
-    let cache = session.view.layout.as_ref().expect("布局缓存未初始化");
-    LayoutPositions { session, cache }
+    LayoutPositions { session, cache: LayoutRef::of(session, false) }
 }
 
 // ===== 绘制 =====
@@ -3924,6 +3977,24 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// 布局缓存为 None（重建途中被 take 走、或上一次重建中途 panic）时几何仍可用：
+    /// 兜底重建一份自持缓存，读路径不 panic 也不返回空几何。
+    #[test]
+    fn geo_without_layout_cache_falls_back_instead_of_panicking() {
+        let mut s = text_session(&["短", "尾"]);
+        s.view.layout = None;
+        let size = Size::new(640.0, 480.0);
+        let g = geo(&s, size);
+        assert_eq!(g.cache.row_h.len(), 2, "兜底缓存覆盖全部行");
+        assert_eq!(g.cache.col_w.len(), 1, "兜底缓存覆盖全部列");
+        // 命中与位置换算同样可用
+        assert!(matches!(hit_at(&g, Point::new(120.0, 42.0)), Hit::Cell(0, 0)));
+        let pos = layout_positions(&s);
+        assert_eq!(pos.cell_rect(1, 0).y, g.cache.row_y[1] - s.view.scroll_y + pos.header_h());
+        // 兜底只服务读路径：会话本身不被写缓存（重建仍是唯一写者）
+        assert!(s.view.layout.is_none());
     }
 
     /// 自动行高按实测行段累加：一行放不下的正文把行撑高（同批行段供画布绘制与编辑浮层共用）。
