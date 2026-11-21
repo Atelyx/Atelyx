@@ -18,7 +18,7 @@ use crate::access::{join_err, member_root, write_root};
 use crate::auth::AuthUser;
 use crate::fsops::{
     atomic_write, blocking, file_mtime_secs, read_dir_filtered, read_dir_including_hidden, JoinError,
-    SpaceRoot, RESERVED_MEDIA_DIR,
+    SpaceRoot, MAX_TREE_DEPTH, RESERVED_MEDIA_DIR,
 };
 use crate::state::{bad_request, max_file_bytes, not_found, ServerState};
 use crate::{ApiError, ApiResult};
@@ -26,8 +26,7 @@ use crate::{ApiError, ApiResult};
 /// 单文件字节上限（局域网传输与内存呈现的合理上限；过大单文件拖累服务端内存与同步）。
 pub const MAX_FILE_BYTES: usize = 50 * 1024 * 1024;
 
-/// 目录递归深度上限：异常目录结构（超深嵌套 / 目录符号链接环）不得把递归撑成栈溢出。
-pub(crate) const MAX_TREE_DEPTH: usize = 64;
+
 
 /// 内容版本号（条件写的 If-Match 值）：文件字节的 sha256 十六进制。
 /// 与 mtime 不同，同一内容恒得同一版本、覆盖写后必变，重启与多副本下也成立。
@@ -454,13 +453,27 @@ pub async fn copy(
         if to.exists() {
             return Err(ApiError(StatusCode::CONFLICT, format!("目标已存在：{to_path}")));
         }
-        copy_recursive(&from, &to, 0)
-            .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("复制失败：{e}")))
+        if let Err(e) = copy_recursive(&from, &to, 0) {
+            // 失败清理已复制部分（尽力而为）：留下半份副本会被后续读取当成真源
+            remove_partial(&to);
+            return Err(ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("复制失败：{e}")));
+        }
+        Ok(())
     })
     .await?;
     tracing::info!(space_id = %space_id, from = %body.from_path, to = %body.to_path, "内容复制");
     crate::ws::broadcast_fs_changed(&state.hub(), &format!("space:{space_id}"));
     Ok(Json(json!({})))
+}
+
+/// 清理失败复制的半成品：目录整删、文件删单件；清理失败只记日志（原错误更重要）。
+fn remove_partial(to: &std::path::Path) {
+    let result = if to.is_dir() { std::fs::remove_dir_all(to) } else { std::fs::remove_file(to) };
+    if let Err(e) = result {
+        if to.exists() {
+            tracing::warn!(path = %to.display(), "复制失败后的清理未完成：{e}");
+        }
+    }
 }
 
 fn copy_recursive(from: &std::path::Path, to: &std::path::Path, depth: usize) -> Result<(), String> {

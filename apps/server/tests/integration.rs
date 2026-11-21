@@ -822,6 +822,47 @@ async fn history_record_aggregate_and_rename_migration() {
 }
 
 
+/// 递归深度超限：复制与树列举都返回明确错误，且失败的复制不留半份副本。
+#[tokio::test]
+async fn deep_tree_rejected_and_copy_failure_leaves_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+    let space_id = setup_two_members(&ctx, "alice", "bob").await;
+    let a_token = login_as(&ctx, "alice").await;
+    let space_root = dir.path().join("spaces").join(&space_id);
+    // 80 层嵌套（超过统一上限 64），底层放一个文件
+    let mut deep = space_root.join("深");
+    std::fs::create_dir_all(&deep).unwrap();
+    for _ in 0..80 {
+        deep = deep.join("d");
+        std::fs::create_dir_all(&deep).unwrap();
+    }
+    std::fs::write(deep.join("底.md"), b"x").unwrap();
+
+    let (status, body) = ctx
+        .get(&format!("/api/spaces/{space_id}/tree"), Some(&a_token), &[])
+        .await;
+    assert_eq!(status, 500, "超深目录不得整树返回：{body}");
+    assert!(
+        body["error"].as_str().unwrap_or_default().contains("目录层级超过上限"),
+        "错误须点明层级超限：{body}"
+    );
+
+    let (status, body) = ctx
+        .post(
+            &format!("/api/spaces/{space_id}/copy"),
+            Some(&a_token),
+            json!({ "fromPath": "深", "toPath": "深副本" }),
+        )
+        .await;
+    assert_eq!(status, 500, "超深复制应失败：{body}");
+    assert!(
+        body["error"].as_str().unwrap_or_default().contains("目录层级超过上限"),
+        "错误须点明层级超限：{body}"
+    );
+    assert!(!space_root.join("深副本").exists(), "失败的复制必须清掉已复制部分");
+}
+
 /// 侧文件在磁盘上的路径（默认布局：数据目录下 spaces/<id>/ + 编码后的侧文件名）。
 fn history_side_path(data_dir: &Path, space_id: &str, file: &str) -> std::path::PathBuf {
     let encoded: String = file

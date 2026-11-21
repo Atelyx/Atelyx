@@ -39,6 +39,10 @@ impl fmt::Display for JoinError {
 /// 空间根（内容文件树根）。
 pub struct SpaceRoot(pub PathBuf);
 
+/// 目录递归深度上限：异常结构（超深嵌套 / 目录符号链接环）不得把递归撑成栈溢出或无限扫描。
+/// 树列举、复制、删除清点、媒体枚举与索引遍历共用同一上限。
+pub const MAX_TREE_DEPTH: usize = 64;
+
 /// 保留目录：空间内的内部内容区（附件临时区，与个人仓库 `.atelyx/temp/` 同构的媒体根）。
 /// 以隐藏段（`.` 前缀）命名——目录遍历的隐藏项过滤天然把它排除在树 / glob / grep /
 /// 反链标签索引之外；文件读写 API 不做隐藏段限制，按相对路径正常可达。
@@ -97,6 +101,15 @@ impl SpaceRoot {
 fn is_drive_prefix(seg: &str) -> bool {
     let bytes = seg.as_bytes();
     bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic()
+}
+
+/// 相对路径的层级深度（段数；根为空路径 = 0）。
+fn rel_depth(rel: &str) -> usize {
+    if rel.is_empty() {
+        0
+    } else {
+        rel.split('/').count()
+    }
 }
 
 /// 相对路径是否含隐藏段（`.` 前缀段，`.`/`..` 不算——后者由路径安全校验按越界拒绝）。
@@ -181,6 +194,9 @@ pub fn walk_files(
     entries.sort_by(|a, b| a.0.cmp(&b.0));
     for (child_rel, is_dir) in entries {
         if is_dir {
+            if rel_depth(&child_rel) > MAX_TREE_DEPTH {
+                return Err(format!("目录层级超过上限 {MAX_TREE_DEPTH}：{child_rel}"));
+            }
             walk_files(root, &child_rel, exclude_folders, out)?;
         } else {
             // 先取 mtime 再 move：元组按序求值，先 move 会让 mtime 计算借用失效
@@ -204,6 +220,9 @@ pub fn walk_md_in(
     }
     for (child_rel, is_dir) in read_dir_filtered(&dir, rel, exclude_folders)? {
         if is_dir {
+            if rel_depth(&child_rel) > MAX_TREE_DEPTH {
+                return Err(format!("目录层级超过上限 {MAX_TREE_DEPTH}：{child_rel}"));
+            }
             walk_md_in(root, &child_rel, exclude_folders, f)?;
         } else if child_rel.ends_with(".md") {
             f(&child_rel, &root.join(&child_rel))?;
