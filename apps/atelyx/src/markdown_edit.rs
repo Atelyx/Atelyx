@@ -1311,11 +1311,12 @@ fn selected_text(text: &str, anchor: usize, caret: usize) -> String {
     }
 }
 
-/// 把选区交给剪贴板并回读校验：只有回读内容与写入内容一致才返回真（可以删正文）。
-/// 剪贴板被系统或其他程序占用时写入会静默失败，此时删正文等于丢内容。
+/// 把选区交给剪贴板并回读校验：只有回读内容确实是刚写进去的才返回真（可以删正文）。
+/// 判定与输入面共用一处（含 CRLF 归一化）；剪贴板被占用时写入会静默失败，此时删正文等于丢内容。
 fn cut_copied(sel: &str, clipboard: &mut dyn Clipboard) -> bool {
     clipboard.write(ClipboardKind::Standard, sel.to_string());
-    clipboard.read(ClipboardKind::Standard).as_deref() == Some(sel)
+    let readback = clipboard.read(ClipboardKind::Standard);
+    crate::chat_input::clipboard_write_landed(sel, readback.as_deref())
 }
 
 /// Ctrl+C/X/V 就地处理（C 复制非空选区；X 复制并删选区；V 粘贴）。

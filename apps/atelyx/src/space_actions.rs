@@ -1521,8 +1521,14 @@ fn on_note_saved(
     // 回执即摘本笔在途（无论回执归属）：同键不会再有第二笔，不摘会永久阻塞该文件的后续保存
     let key = (gen, rel.to_string());
     app.space_note_save_inflight.retain(|entry| entry != &key);
+    // 待续 Flush：本笔就是 Flush 时丢弃（挂起动作已 abort，补发会重复执行）；
+    // 非 Flush 失败保留，重试成功后由它补发收尾
     let queued = app.space_note_save_flush_queued.contains(&key);
+    let keeps_queued = crate::keep_queued_flush(queued, reason) && result.is_err();
     app.space_note_save_flush_queued.retain(|entry| entry != &key);
+    if keeps_queued {
+        app.space_note_save_flush_queued.push(key.clone());
+    }
     // 世代 + 文件身份双守卫：保存期间切换文件后，旧文件回执不得回填新文件的编辑面与合流基线
     // （世代过期作废；文件身份不符仍要广播已落盘事件，切换文件不改变服务端已写入的事实）
     if gen != app.epoch() {
@@ -1550,27 +1556,32 @@ fn on_note_saved(
         Err(e) => {
             app.settle_history_restore(false);
             app.save_error = Some(e.clone());
-            // 失败后必排下一次期限：用户停手后没有新的输入事件，不重排就永不重试上行。
-            // 期限已在现场则顺其自然（更早的失败期限不被这一次覆盖）
-            let (failed, attempt, at) =
-                crate::retry_after_failure(app.save_retry.as_ref(), rel, Instant::now());
-            app.save_retry = Some((failed, attempt));
-            app.autosave_deadline = Some(at);
-            app.autosave_timer = false;
-            // flush 失败：动作不放行、窗口不关，脏态与 save_error 保留等下一笔重试
-            // （只回填等回执的 AI 文件操作，其余挂起动作留待重试后放行）
+            // 失败记账按文件分键；不可恢复的失败（冲突 / 只读）不排自动重试
+            let retryable = crate::save_failure_retryable(&e);
+            let (attempt, at) =
+                crate::record_save_failure(&mut app.save_retry, rel, Instant::now());
+            if retryable {
+                app.autosave_deadline = Some(at);
+                app.autosave_timer = false;
+            }
+            // 一次失败序列只提示一次
+            let first = attempt == 1;
             if matches!(reason, SaveReason::Flush) {
-                app.notify(
-                    NoticeLevel::Error,
-                    format!("保存失败，操作未执行：{e}（未落盘内容已保留，稍后自动重试）"),
-                );
-            } else {
+                // 本笔就是 Flush 且失败：挂起动作已 abort，待续 Flush 已在上方出队
+                if first {
+                    let suffix = if retryable { "（未落盘内容已保留，稍后自动重试）" } else { "" };
+                    app.notify(
+                        NoticeLevel::Error,
+                        format!("保存失败，操作未执行：{e}{suffix}"),
+                    );
+                }
+            } else if first {
                 app.notify(NoticeLevel::Error, format!("保存失败：{e}"));
             }
         }
         Ok(merged) => {
             app.save_error = None;
-            app.save_retry = None;
+            crate::clear_save_failure(&mut app.save_retry, rel);
             app.space_note_flushed = Some(merged.clone());
             // 协作基线祖先推进（CRDT 三方合并的 base）
             collab_note_flushed(app, &merged);
@@ -1838,8 +1849,8 @@ pub(crate) fn on_table_patch_done(
     match result {
         Err(e) => {
             app.settle_history_restore(false);
-            // 失败必排下一次期限（退避），否则用户停手后正文永不重试落盘
-            arm_space_doc_retry(app, &file);
+            // 失败记账 + 可重试才排下一次期限（退避），返回本文件连续失败次数
+            let attempt = arm_space_doc_retry(app, &file, &e);
             // Flush 失败：等回执的 AI 文件操作不能空等，就地回填；其余挂起动作保留待重试
             // （待续的 Flush 已随回执出队，重试成功后不会重复执行关闭 / 切换）
             if flush {
@@ -1848,17 +1859,26 @@ pub(crate) fn on_table_patch_done(
             let Some(s) = app.table.as_mut() else { return Task::none() };
             s.save_error = Some(e.clone());
             // 404 = 文件被改名（他端标题漂移未广播时）或删除：明示刷新，不做路径猜测
-            let hint = if e.contains("不存在") {
+            let missing = e.contains("不存在");
+            let hint = if missing {
                 "表格已被他人改名或删除，请刷新空间后重新打开"
             } else {
                 "保存失败"
             };
-            if flush {
-                app.notify(NoticeLevel::Error, format!("{hint}，操作未执行：{e}"));
-            } else {
-                app.notify(NoticeLevel::Error, format!("{hint}：{e}"));
+            // 一次失败序列只提示一次：重试链每轮都弹一次会把提示栏刷屏
+            if attempt == 1 {
+                if flush {
+                    app.notify(NoticeLevel::Error, format!("{hint}，操作未执行：{e}"));
+                } else {
+                    app.notify(NoticeLevel::Error, format!("{hint}：{e}"));
+                }
             }
-            return refresh_space_tree(app);
+            // 树只在首轮失败或文件确已被改名 / 删除时重拉：每轮重拉整棵树是纯浪费
+            return if missing || attempt == 1 {
+                refresh_space_tree(app)
+            } else {
+                Task::none()
+            };
         }
         Ok(_) => {
             // 补丁带 title 时服务端按标题改名：本端跟随路径与内嵌标题（会话与最近表路径）
@@ -1889,6 +1909,7 @@ pub(crate) fn on_table_patch_done(
                     s.saved = frozen.clone();
                 }
             }
+            crate::clear_save_failure(&mut app.save_retry, &file);
             if stable {
                 app.settle_history_restore(true);
             }
@@ -1988,14 +2009,16 @@ fn settle_space_doc_save(app: &mut App, gen: u64, file: &str) -> bool {
     )
 }
 
-/// 保存失败后的退避重排（表格 / 画布共用）：失败后必须自己排下一次期限——
-/// 用户停手后没有新输入事件，只靠内容变更排期限等于永不重试。
-fn arm_space_doc_retry(app: &mut App, file: &str) {
-    let (failed, attempt, at) =
-        crate::retry_after_failure(app.save_retry.as_ref(), file, Instant::now());
-    app.save_retry = Some((failed, attempt));
-    app.autosave_deadline = Some(at);
-    app.autosave_timer = false;
+/// 空间表格 / 画布失败后的记账与退避重排（两条链共用）：可重试的失败排下一次期限
+/// （用户停手后没有新输入事件，只靠内容变更排期限等于永不重试），不可恢复的只留错误位。
+/// 返回该文件的连续失败次数（提示闸门用：一次失败序列只出声一次）。
+fn arm_space_doc_retry(app: &mut App, file: &str, err: &str) -> u32 {
+    let (attempt, at) = crate::record_save_failure(&mut app.save_retry, file, Instant::now());
+    if crate::save_failure_retryable(err) {
+        app.autosave_deadline = Some(at);
+        app.autosave_timer = false;
+    }
+    attempt
 }
 
 // ===== 画布（空间模式） =====
@@ -2296,26 +2319,35 @@ pub(crate) fn on_canvas_patch_done(
     match result {
         Err(e) => {
             app.settle_history_restore(false);
-            // 失败必排下一次期限（退避）；Flush 失败就地回填等回执的 AI 文件操作，
+            // 失败记账 + 可重试才排下一次期限；Flush 失败就地回填等回执的 AI 文件操作，
             // 待续的 Flush 已随回执出队（重试成功后不重复执行关闭 / 切换）
-            arm_space_doc_retry(app, &file);
+            let attempt = arm_space_doc_retry(app, &file, &e);
             if flush {
                 crate::ai_fs_edit::abort_pending(app, &e);
             }
             let Some(s) = app.canvas.as_mut() else { return Task::none() };
             s.save_error = Some(e.clone());
             // 404 = 文件被改名（他端标题漂移未广播时）或删除：明示刷新，不做路径猜测
-            let hint = if e.contains("不存在") {
+            let missing = e.contains("不存在");
+            let hint = if missing {
                 "画布已被他人改名或删除，请刷新空间后重新打开"
             } else {
                 "保存失败"
             };
-            if flush {
-                app.notify(NoticeLevel::Error, format!("{hint}，操作未执行：{e}"));
-            } else {
-                app.notify(NoticeLevel::Error, format!("{hint}：{e}"));
+            // 一次失败序列只提示一次
+            if attempt == 1 {
+                if flush {
+                    app.notify(NoticeLevel::Error, format!("{hint}，操作未执行：{e}"));
+                } else {
+                    app.notify(NoticeLevel::Error, format!("{hint}：{e}"));
+                }
             }
-            return refresh_space_tree(app);
+            // 树只在首轮失败或文件确已被改名 / 删除时重拉
+            return if missing || attempt == 1 {
+                refresh_space_tree(app)
+            } else {
+                Task::none()
+            };
         }
         Ok(_) => {
             // 补丁带 title 时服务端按标题改名：本端跟随路径与内嵌标题（会话与最近画布路径）
@@ -2340,6 +2372,7 @@ pub(crate) fn on_canvas_patch_done(
                     s.saved = frozen.clone();
                 }
             }
+            crate::clear_save_failure(&mut app.save_retry, &file);
             if stable {
                 app.settle_history_restore(true);
             }
