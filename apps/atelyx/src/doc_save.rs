@@ -445,7 +445,7 @@ fn merge_table_into_session(
         s.view.redo.clear();
     }
     // 合入即排自动保存：写盘失败后由防抖重试，不留「脏但无重试拍」的悬空会话
-    app.autosave_deadline = Some(std::time::Instant::now() + crate::AUTOSAVE_DEBOUNCE);
+    app.debounce_tail();
     // 打开中的表格内容变更属宿主发起的编辑结算：与人工保存同口径通知插件
     app.plugins.on_table_changed(Some(path));
     iced::Task::none()

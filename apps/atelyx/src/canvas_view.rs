@@ -3510,6 +3510,7 @@ mod tests {
             false,
             "画布已被他人修改，请刷新后重试",
             s.failure_backoff_reset(),
+            true,
         );
         assert_eq!(plan.retry_in, None, "不可恢复的失败不排期");
         assert!(queued.is_empty(), "不会再重试：待续项丢弃，挂起的关闭 / 切换不再等它");

@@ -519,41 +519,34 @@ pub(crate) fn plan_save_failure(
 /// 保存失败收口挂起动作的统一原因串（五条链共用；AI 文件操作回执在它后面接具体错误）。
 pub(crate) const SAVE_FAILED_ABORT: &str = "保存失败，操作未执行";
 
-/// 失败处置落到挂起动作与提示栏的结果：不可重试就地收口（原因串带具体错误），
-/// 提示只在首轮或错误性质变化时出声。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct FailedSaveEffects {
-    /// 收口挂起动作的原因串；`None` = 可重试，挂起动作留给之后的回执放行。
-    pub abort_why: Option<String>,
-    /// 提示文案；`None` = 这一轮不出声（重试链每轮都弹会刷爆提示栏）。
-    pub notice: Option<String>,
-}
-
 /// 收口原因串：失败不可重试、或本笔就是 Flush，挂起动作都再没有回执来放行它。
 /// Flush 的待续项已丢弃，重试以 AutoSave 下发（queued_flush = false），那条路径不调 after_any_flush。
 fn abort_reason(plan: FailedSave, message: &str, flush: bool) -> Option<String> {
     (!plan.retryable || flush).then(|| format!("{SAVE_FAILED_ABORT}：{message}"))
 }
 
-/// `forfeit` = 这次处置会取走挂起动作，用户必须知道动作没执行：提示闸门只管「别重复刷屏」，
-/// 不拦「动作被取消却没交代」——关窗 / 切文件因保存失败被丢是用户必须看到的事实。
-pub(crate) fn failed_save_effects(
+/// 这次处置的提示文案；`None` = 不出声。是否收口挂起动作只由 `abort_reason` 判定，
+/// 这里只管让用户看见：首轮失败、错误性质变化、或动作已被取消都要出声。
+/// `forfeit` = 这次处置取走了挂起动作：提示闸门只管「别重复刷屏」，不拦「动作被取消却没交代」
+/// ——关窗 / 切文件因保存失败被丢是用户必须看到的事实。
+pub(crate) fn failed_save_notice(
     plan: FailedSave,
     message: &str,
     flush: bool,
     hint: &str,
     forfeit: bool,
-) -> FailedSaveEffects {
-    FailedSaveEffects {
-        abort_why: abort_reason(plan, message, flush),
-        notice: (plan.notify || forfeit).then(|| match (plan.retryable, flush) {
-            (false, _) => format!("{hint}：{message}（操作已暂停，处理后重试）"),
-            (true, true) => {
-                format!("{hint}，操作未执行：{message}（未落盘内容已保留，稍后自动重试）")
-            }
-            (true, false) => format!("{hint}：{message}（未落盘内容已保留，稍后自动重试）"),
-        }),
-    }
+) -> Option<String> {
+    (plan.notify || forfeit).then(|| match (plan.retryable, flush, forfeit) {
+        (false, _, _) => format!("{hint}：{message}（操作已暂停，处理后重试）"),
+        // 被放弃的关窗 / 切仓库 / 插件改名不会自动重试：只有自动保存链的 Flush 会
+        (true, true, false) => {
+            format!("{hint}，操作未执行：{message}（未落盘内容已保留，稍后自动重试）")
+        }
+        (true, true, true) => {
+            format!("{hint}，操作未执行：{message}（该动作已取消，处理后请重试）")
+        }
+        (true, false, _) => format!("{hint}：{message}（未落盘内容已保留，稍后自动重试）"),
+    })
 }
 
 /// 收口挂起动作：能回填的（AI 文件操作 / 插件结构变更）交回可读错误，其余就地丢弃。
@@ -618,6 +611,9 @@ pub(crate) fn save_failure_retryable(message: &str) -> bool {
 
 /// 一次失败回执的完整处置（五条保存链共用）：结清在途键、按语义处置待续 Flush、
 /// 记账给出期限 / 提示，不可重试时收口挂起的后续动作。调用方只执行返回的结果。
+/// `schedule_retry` = 这次失败还会自动重试：只有「失败面仍是当前面」才为真——
+/// 别的面不会替它排重试，它的待续项就此摘掉（留着永远等不到消费它的人）。
+/// 待续项去留只在这里判定一次：先摘本键，再按「要重试且本笔不是 Flush」放回。
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_failed_save(
     book: &mut SaveFailureBook,
@@ -628,16 +624,17 @@ pub(crate) fn apply_failed_save(
     flush: bool,
     message: &str,
     reset_backoff: bool,
+    schedule_retry: bool,
 ) -> FailedSave {
     let key = (gen, file.to_string());
     inflight.retain(|entry| entry != &key);
-    // 队列里此刻还留着的待续项才谈去留（回执先取走的由调用方 requeue_flush 后交进来）
+    // 回执不删队列：本函数按「是否还会重试」决定去留。取走消费只发生在成功回执侧
     let was_queued = queued_flush.contains(&key);
     queued_flush.retain(|entry| entry != &key);
-    // 非 Flush 且可重试：挂起动作没被取消，待续项留队列等重试成功后的回执收尾。
-    // Flush 失败与不可重试的失败就地丢弃——挂起动作已被收口，补发会再执行一次关闭 / 切换
     let plan = plan_save_failure(book, file, message, reset_backoff);
-    if was_queued && !flush && plan.retryable {
+    // 会重试且本笔不是 Flush：挂起动作没被取消，待续项留队列等重试成功后的回执收尾。
+    // Flush 失败与不可重试的失败就地丢弃——挂起动作已被收口，补发会再执行一次关闭 / 切换
+    if was_queued && schedule_retry && plan.retryable && !flush {
         queued_flush.push(key);
     }
     plan
@@ -667,6 +664,7 @@ pub(crate) fn settle_failure_tables(
     own: bool,
     schedule: &mut dyn FnMut(std::time::Duration),
 ) -> (FailedSave, Option<String>, Vec<(u64, String)>, Vec<(u64, String)>) {
+    // 只有失败面仍是当前面才会为它排重试，它自己的待续项才有回执来消费
     let plan = apply_failed_save(
         book,
         &mut keys,
@@ -676,6 +674,7 @@ pub(crate) fn settle_failure_tables(
         flush,
         message,
         reset_backoff,
+        own,
     );
     // 收口先做再算提示：只有真的取走挂起项才需要补一条「动作被取消」。
     // own=false 只在 Flush 失败时回填挂起项——那是用户动作当场被取消、等回执的一方在空等；
@@ -690,14 +689,9 @@ pub(crate) fn settle_failure_tables(
         if let Some(delay) = plan.retry_in {
             schedule(delay);
         }
-    } else {
-        // 失败面不是当前面：不会为它排重试，它自己的待续项再没有回执来消费；
-        // 只摘这一笔——同一容器里其它文件的待续项仍要等各自的回执
-        let key = (gen, file.to_string());
-        queued.retain(|entry| entry != &key);
     }
-    let effects = failed_save_effects(plan, message, flush, hint, taken);
-    (plan, effects.notice, keys, queued)
+    let notice = failed_save_notice(plan, message, flush, hint, taken);
+    (plan, notice, keys, queued)
 }
 
 /// 自动保存一拍是否真的把笔记提交顺延了：提交后该 (世代, 文件) 键本就在在途表里
@@ -2040,8 +2034,10 @@ pub struct App {
     pub dirty: bool,
     /// 上次保存失败原因（None = 无；保存成功或再次编辑即清除）。
     pub save_error: Option<String>,
-    /// 笔记下一次保存的期限：内容变更按防抖（+500ms），保存失败后按退避间隔重排。
-    autosave_deadline: Option<Instant>,
+    /// 内容防抖期限（五条链共用）：每次内容变更覆盖为 now + 防抖时长，即尾沿后推。
+    pub(crate) autosave_deadline: Option<Instant>,
+    /// 失败重试期限（五条链共用）：只取最早，后失败 / 后变更的链不得把已排的更早期限往后推。
+    pub(crate) autosave_retry_deadline: Option<Instant>,
     /// 自动保存定时器在途标志（单定时器链：到期检查期限，被推迟则续排剩余时长）。
     autosave_timer: bool,
     /// 保存失败的重试记账（按文件分键：笔记 / 空间笔记 / 空间表格 / 空间画布共用）：
@@ -2416,6 +2412,7 @@ impl App {
                 dirty: false,
                 save_error: None,
                 autosave_deadline: None,
+                autosave_retry_deadline: None,
                 autosave_timer: false,
                 save_retry: SaveFailureBook::new(),
                 note_save_inflight: Vec::new(),
@@ -2647,7 +2644,7 @@ impl App {
         if let Some(rel) = self.ui.last_note_file.clone() {
             reset_save_backoff(&mut self.save_retry, &rel);
         }
-        self.arm_debounce_earliest();
+        self.debounce_tail();
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
@@ -2680,32 +2677,38 @@ impl App {
         self.table_event_path = current;
     }
 
-    /// 内容变更后的防抖期限：五条链共用一个期限，取最早——后变更的链不得把别的链
-    /// 已排好的更早期限（尤其是重试退避）往后推。
-    pub(crate) fn arm_debounce_earliest(&mut self) {
-        let at = Instant::now() + AUTOSAVE_DEBOUNCE;
-        self.schedule_save_deadline(at);
+    /// 内容变更后的防抖期限：覆盖成 now + 防抖时长（尾沿后推），停止输入该时长才写回。
+    /// 只动防抖槽——重试退避另占一槽，待续的失败重试不会被输入顶掉。
+    pub(crate) fn debounce_tail(&mut self) {
+        self.autosave_deadline = Some(Instant::now() + AUTOSAVE_DEBOUNCE);
+        self.autosave_timer = false;
     }
 
-    /// 期限取最早：五条链共用一个期限位，覆盖会让后失败 / 后变更的链
-    /// 把别的链已排好的更早期限（退避重试、防抖尾沿）往后推。
-    pub(crate) fn schedule_save_deadline(&mut self, at: Instant) {
-        self.autosave_deadline = Some(self.autosave_deadline.map_or(at, |cur| cur.min(at)));
+    /// 失败重试期限：取最早，后失败 / 后变更的链不得把已排好的更早期限往后推。
+    pub(crate) fn schedule_retry_deadline(&mut self, at: Instant) {
+        self.autosave_retry_deadline =
+            Some(self.autosave_retry_deadline.map_or(at, |cur| cur.min(at)));
         self.autosave_timer = false;
+    }
+
+    /// 定时器该唤醒的时刻：两个槽取最早（内容防抖先到就先落盘，重试退避先到就先重试）。
+    fn next_save_deadline(&self) -> Option<Instant> {
+        match (self.autosave_deadline, self.autosave_retry_deadline) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     /// 排定下一次笔记保存期限：失败重试序列未结束时按退避间隔，否则按防抖尾沿。
-    /// 期限已在现场时不动（在途保存顺延后补排，不能把已推进的退避拉回防抖）。
+    /// 已有期限时不动（在途保存顺延后补排，不能把已推进的退避拉回防抖）。
     fn arm_retry_or_debounce(&mut self) {
-        if self.autosave_deadline.is_some() {
+        if self.next_save_deadline().is_some() {
             return;
         }
-        let at = match self.retry_deadline(Instant::now()) {
-            Some(at) => at,
-            None => Instant::now() + AUTOSAVE_DEBOUNCE,
-        };
-        self.autosave_deadline = Some(at);
-        self.autosave_timer = false;
+        match self.retry_deadline(Instant::now()) {
+            Some(at) => self.schedule_retry_deadline(at),
+            None => self.debounce_tail(),
+        }
     }
 
     /// 重试序列里下一次失败期限：当前笔记仍有未落盘输入、自己失败过、且那次失败可重试。
@@ -2721,12 +2724,9 @@ impl App {
 
     /// 内容变更后补排自动保存定时器（单定时器链）：期限被输入推迟时按剩余时长续排，否则到期触发保存。
     fn chain_autosave_timer(&mut self, task: Task<Message>) -> Task<Message> {
-        if self.autosave_deadline.is_some() && !self.autosave_timer {
+        if let (Some(at), false) = (self.next_save_deadline(), self.autosave_timer) {
             self.autosave_timer = true;
-            let delay = self
-                .autosave_deadline
-                .unwrap_or_else(Instant::now)
-                .saturating_duration_since(Instant::now());
+            let delay = at.saturating_duration_since(Instant::now());
             return task.chain(Task::perform(
                 async move { tokio::time::sleep(delay).await },
                 |_| Message::AutosaveTick,
@@ -3618,11 +3618,21 @@ impl App {
             Message::AutosaveTick => {
                 self.autosave_timer = false;
                 // 期限已到才触发；未到 = 输入推迟了期限，chain_autosave_timer 会按剩余时长续排
-                if self.autosave_deadline.is_some_and(|at| at <= Instant::now()) {
+                let now = Instant::now();
+                let due = self.next_save_deadline().is_some_and(|at| at <= now);
+                if due {
                     let mut task = Task::none();
-                    // 期限可能由表格 / 画布单独排下（笔记不脏或未打开）：本拍必须先无条件清掉，
-                    // 否则已到期的期限留在场上让定时器链按 0 延迟续排，每拍空转
-                    self.autosave_deadline = None;
+                    // 两槽各按自己是否到期出手：防抖先到只落盘，重试先到重排重试；
+                    // 到期的那一槽必须先无条件清掉，否则定时器链按 0 延迟续排，每拍空转
+                    let debounce_due = self.autosave_deadline.is_some_and(|at| at <= now);
+                    if debounce_due {
+                        self.autosave_deadline = None;
+                    }
+                    // 重试那一拍：本拍提交仍被判顺延时按退避重排，否则清掉（回执或内容变更会重排）
+                    let retry_due = self.autosave_retry_deadline.is_some_and(|at| at <= now);
+                    if retry_due {
+                        self.autosave_retry_deadline = None;
+                    }
                     let attempt = self
                         .ui
                         .last_note_file
@@ -3632,7 +3642,9 @@ impl App {
                         .unwrap_or(1);
                     let note_dirty = self.dirty;
                     let mut submitted_deferred = false;
-                    if note_dirty {
+                    // 防抖到点要落盘；退避到点同样要重试（用户还在打字时防抖一直被后推，
+                    // 没落盘的内容只能靠重试拍写回）
+                    if note_dirty && (debounce_due || retry_due) {
                         if let Some(rel) = self.ui.last_note_file.clone() {
                             let gen = self.epoch();
                             task = task.chain(self.submit_save(SaveReason::AutoSave));
@@ -3641,22 +3653,43 @@ impl App {
                                 note_submit_deferred(&self.note_save_inflight, gen, &rel);
                         }
                     }
-                    // 顺延的那笔不会有回执：期限按退避重排到未来（正文停手后仍会重试）；
+                    // 顺延的那笔不会有回执：重试期限按退避重排到未来（正文停手后仍会重试）；
                     // 其余情形本拍已清空，由回执或下一拍内容变更重排
-                    self.autosave_deadline = autosave_tick_decision(
-                        note_dirty,
+                    let (_, deferred_at) = autosave_tick_decision(
+                        note_dirty && (debounce_due || retry_due),
                         submitted_deferred,
                         attempt,
                         Instant::now(),
-                    )
-                    .1;
-                    if self.table.as_ref().is_some_and(|t| t.dirty) {
-                        // 内容结算点即广播：本地编辑已稳定，插件据此重读
-                        self.plugins.on_table_changed(self.table.as_ref().map(|t| t.file.as_str()));
-                        task = task
-                            .chain(table_actions::submit_table_save(self, table_view::SaveReason::AutoSave));
+                    );
+                    if let Some(at) = deferred_at {
+                        self.schedule_retry_deadline(at);
                     }
-                    if self.canvas.as_ref().is_some_and(|c| c.dirty) {
+                    // 表格 / 画布的失败重试排在同一重试槽上：重试拍只补它们自己失败过的那笔。
+                    // 内容防抖还没到就不能写——尾沿未到即落盘会把持续编辑切成一拍一写
+                    let table_retry =
+                        retry_due && self.table.as_ref().is_some_and(|t| t.save_error.is_some());
+                    if self.table.as_ref().is_some_and(|t| t.dirty)
+                        && (debounce_due || table_retry)
+                    {
+                        if debounce_due {
+                            // 内容结算点即广播：本地编辑已稳定，插件据此重读
+                            self.plugins
+                                .on_table_changed(self.table.as_ref().map(|t| t.file.as_str()));
+                        }
+                        task = task.chain(table_actions::submit_table_save(
+                            self,
+                            table_view::SaveReason::AutoSave,
+                        ));
+                    }
+                    // 拖拽中的几何是中间态：与 schedule_canvas_save 同一口径，等松手再落盘
+                    let canvas_retry = retry_due
+                        && self
+                            .canvas
+                            .as_ref()
+                            .is_some_and(|c| c.save_error.is_some() && c.view.drag.is_none());
+                    if self.canvas.as_ref().is_some_and(|c| c.dirty)
+                        && (debounce_due || canvas_retry)
+                    {
                         task = task.chain(canvas_actions::submit_canvas_save(
                             self,
                             canvas_view::SaveReason::AutoSave,
@@ -4205,7 +4238,7 @@ impl App {
                 if self.table.as_ref().is_some_and(|t| t.dirty)
                     && self.table.as_ref().map(|t| t.version) != version_before
                 {
-                    self.arm_debounce_earliest();
+                    self.debounce_tail();
                 }
                 // 滚动/载入后补拉可见区图片句柄（无待加载 = 无任务）
                 task.chain(table_actions::ensure_image_loads(self).unwrap_or_default())
@@ -6212,7 +6245,7 @@ impl App {
         }
         let streaming = canvas.view.card_chat.values().any(|chat| chat.streaming);
         if !streaming || self.autosave_deadline.is_none() {
-            self.arm_debounce_earliest();
+            self.debounce_tail();
         }
     }
 
@@ -6251,8 +6284,14 @@ impl App {
             Some(PendingAfterFlush::AiFs { id, .. }) => {
                 ai_fs_edit::settle(id, Err("被更晚的宿主操作取代，请重试".to_string()));
             }
-            // 未被取代的其它挂起动作原样保留（放行由保存回执触发）
-            other => self.flush_pending = other,
+            // 关窗 / 切换 / 删除这类没有回执可回填：被取代就等于放弃执行，必须让用户知道
+            Some(_) => self.notify_throttled(
+                "flush_pending:superseded",
+                NoticeLevel::Warning,
+                "上一个操作已被更晚的操作取代，未执行",
+            ),
+            // 挂起位本来就空
+            None => {}
         }
         if self.any_dirty() {
             self.flush_pending = Some(pending);
@@ -6338,10 +6377,12 @@ impl App {
         let mut resolve = |request_id: u64, why: String| {
             plugins.resolve_shell_call(request_id, Err(why));
         };
-        // 只碰期限与定时器标志：与上下两处状态借位互不相交（整 self 借位会撞上 save_retry）
+        // 只碰重试槽与定时器标志：借位与上下两处状态（save_retry / flush_pending）互不相交。
+        // 取最早与清定时器标志的规则只在 schedule_retry_deadline 一处
         let mut schedule = |delay: std::time::Duration| {
             let at = Instant::now() + delay;
-            self.autosave_deadline = Some(self.autosave_deadline.map_or(at, |cur| cur.min(at)));
+            self.autosave_retry_deadline =
+                Some(self.autosave_retry_deadline.map_or(at, |cur| cur.min(at)));
             self.autosave_timer = false;
         };
         let (plan, notice, keys, queued) = settle_failure_tables(
@@ -6649,7 +6690,7 @@ impl App {
         self.save_error = None;
         // 失败记账的键是裸相对路径：容器身份一换，同名文件的旧记录不得沿用
         self.save_retry.clear();
-        // 提示节流同上：键含文件名，新容器里的同名失败是新的失败序列
+        // 提示节流同上：键含本次容器的失败面串，换了容器就是新的失败序列
         self.notice_throttle.clear();
         self.backlinks_error = None;
         self.tag_vocab_error = None;
@@ -7105,7 +7146,7 @@ impl App {
                     return Task::none();
                 };
                 if table_actions::apply_history_snapshot(self, table) {
-                    self.arm_debounce_earliest();
+                    self.debounce_tail();
                 }
                 // 回滚替换了可见内容：按当前视口补拉图片（不依赖之后是否还有指针事件）
                 let images = table_actions::ensure_image_loads(self).unwrap_or_default();
@@ -9711,6 +9752,7 @@ mod file_drop_tests {
             false,
             "网络错误：超时",
             false,
+            true,
         );
         assert_eq!(queued, vec![(1u64, "a.md".to_string())], "非 Flush 失败放回待续项");
     }
@@ -9785,9 +9827,12 @@ mod file_drop_tests {
         assert!(plan.notify, "性质变了要再出声一次");
         assert_eq!(plan.retry_in, None, "不可重试不排期限");
         assert!(!plan.retryable, "不可重试");
-        let effects = super::failed_save_effects(plan, "文件已被外部修改", false, "保存失败", true);
-        assert!(effects.abort_why.is_some(), "不可重试必须收口挂起动作");
-        assert!(effects.notice.is_some_and(|n| n.contains("操作已暂停")), "提示要交代操作已暂停");
+        let notice =
+            super::failed_save_notice(plan, "文件已被外部修改", false, "保存失败", true);
+        assert!(
+            notice.is_some_and(|n| n.contains("操作已暂停")),
+            "不可重试要收口挂起动作并交代操作已暂停"
+        );
     }
 
     /// 空间冲突的真实文案不含「冲突」二字，也必须判成不可重试（否则每 30s 打一次）。
@@ -9814,6 +9859,7 @@ mod file_drop_tests {
             false,
             "网络错误：超时",
             false,
+            true,
         );
         assert!(inflight.is_empty(), "回执必须结清在途键");
         assert_eq!(queued, vec![(3u64, "a.md".to_string())], "非 Flush 失败要放回待续项");
@@ -9832,6 +9878,7 @@ mod file_drop_tests {
             true,
             "网络错误：超时",
             false,
+            true,
         );
         assert!(queued.is_empty(), "Flush 失败不得补发");
         assert!(plan.retry_in.is_some());
@@ -9845,7 +9892,7 @@ mod file_drop_tests {
         let gen = app.epoch();
         app.notifications.clear();
         app.notice_throttle.clear();
-        app.autosave_deadline = None;
+        app.autosave_retry_deadline = None;
         app.flush_pending = Some(super::PendingAfterFlush::CloseMain(iced::window::Id::unique()));
         app.note_save_inflight.push((gen, "a.md".to_string()));
         app.note_save_flush_queued.push((gen, "a.md".to_string()));
@@ -9867,7 +9914,7 @@ mod file_drop_tests {
         assert!(app.note_save_flush_queued.is_empty(), "不再重试就没人收尾，待续 Flush 不得悬挂");
         assert!(!plan.retryable, "冲突不可重试");
         assert_eq!(plan.retry_in, None, "冲突不排重试");
-        assert!(app.autosave_deadline.is_none(), "不可重试的失败不排期限");
+        assert!(app.autosave_retry_deadline.is_none(), "不可重试的失败不排期限");
         assert!(crate::save_failure(&app.save_retry, "a.md").is_some(), "失败要记账");
         let notice = app
             .notifications
@@ -10005,7 +10052,7 @@ mod file_drop_tests {
             .map(|n| n.text.clone())
             .expect("可重试的 Flush 失败也要有一条提示");
         assert!(notice.contains("操作未执行"), "提示要交代挂起动作未执行：{notice}");
-        assert!(app.autosave_deadline.is_some(), "失败处置要排下一次期限");
+        assert!(app.autosave_retry_deadline.is_some(), "失败处置要排下一次期限");
     }
 
     /// 同一错误提示过之后再失败时闸门静默；但用户动作若被 Flush 失败收口，
@@ -10017,7 +10064,7 @@ mod file_drop_tests {
         app.notifications.clear();
         app.notice_throttle.clear();
         app.flush_pending = None;
-        app.autosave_deadline = None;
+        app.autosave_retry_deadline = None;
         let msg = "磁盘忙：设备未就绪";
         // 自动重试的这一轮：首轮失败已出声，此后再失败闸门不再提示
         app.settle_slot_save_failure(
@@ -10097,7 +10144,7 @@ mod file_drop_tests {
         app.notifications.clear();
         app.notice_throttle.clear();
         // ① 表格链首轮失败排 1s
-        app.autosave_deadline = None;
+        app.autosave_retry_deadline = None;
         app.save_retry.clear();
         app.settle_slot_save_failure(
             super::SaveSlot::DocSpace,
@@ -10109,7 +10156,7 @@ mod file_drop_tests {
             "保存失败",
             true,
         );
-        let doc_at = app.autosave_deadline.expect("表格链排了期限");
+        let doc_at = app.autosave_retry_deadline.expect("表格链排了期限");
         assert!(doc_at <= std::time::Instant::now() + Duration::from_secs(2), "首轮退避 1s");
         // ② 笔记链连败到第 5 轮要排 16s：不得把表格已排好的 1s 顶掉
         for _ in 0..5 {
@@ -10124,10 +10171,10 @@ mod file_drop_tests {
                 true,
             );
         }
-        assert_eq!(app.autosave_deadline, Some(doc_at), "更早的表格期限不被笔记顶掉");
+        assert_eq!(app.autosave_retry_deadline, Some(doc_at), "更早的表格期限不被笔记顶掉");
         // ③ 反向：已排 16s 的链不拦后到的 1s —— 取最早者，谁先到期谁先重试
         let far = std::time::Instant::now() + Duration::from_secs(16);
-        app.autosave_deadline = Some(far);
+        app.autosave_retry_deadline = Some(far);
         app.save_retry.clear();
         app.settle_slot_save_failure(
             super::SaveSlot::DocSpace,
@@ -10140,8 +10187,88 @@ mod file_drop_tests {
             true,
         );
         assert!(
-            app.autosave_deadline.is_some_and(|at| at < far),
+            app.autosave_retry_deadline.is_some_and(|at| at < far),
             "更早的失败链把期限往前收，而不是被 16s 拖住"
+        );
+    }
+
+    /// 尾沿防抖：连续输入每次都要把落盘期限往后推（内容防抖互相覆盖），不能由首次按键
+    /// 定死一个固定触发点——那样持续打字期间每 500ms 就落一次盘。
+    #[test]
+    fn debounce_keeps_pushing_the_tail_while_typing() {
+        use std::time::{Duration, Instant};
+        let (mut app, _boot) = super::App::boot();
+        app.autosave_deadline = None;
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            app.debounce_tail();
+            seen.push(app.autosave_deadline.expect("内容变更要排防抖期限"));
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        assert!(seen[1] > seen[0] && seen[2] > seen[1], "每次输入后期限单调后推：{seen:?}");
+        let left = seen[2].saturating_duration_since(Instant::now());
+        assert!(left <= super::AUTOSAVE_DEBOUNCE, "尾沿 = 最后一次输入再等一个防抖窗口");
+    }
+
+    /// 内容防抖与失败退避分槽：重试期限仍取最早（后失败 / 后变更的链不得把它往后推），
+    /// 内容输入只后推防抖槽，不动重试槽。
+    #[test]
+    fn content_debounce_and_retry_backoff_use_separate_slots() {
+        use std::time::{Duration, Instant};
+        let (mut app, _boot) = super::App::boot();
+        let gen = app.epoch();
+        let msg = "磁盘忙：设备未就绪";
+        app.save_retry.clear();
+        app.autosave_deadline = None;
+        app.autosave_retry_deadline = None;
+        // ① 表格链首轮失败排 1s
+        app.settle_slot_save_failure(
+            super::SaveSlot::DocSpace,
+            gen,
+            "t.atb",
+            false,
+            msg,
+            false,
+            "保存失败",
+            true,
+        );
+        let doc_at = app.autosave_retry_deadline.expect("表格链排了重试期限");
+        assert!(doc_at <= Instant::now() + Duration::from_secs(2), "首轮退避 1s");
+        // ② 笔记链连败五轮要排 16s：不得把表格已排好的 1s 顶掉
+        for _ in 0..5 {
+            app.settle_slot_save_failure(
+                super::SaveSlot::NoteLocal,
+                gen,
+                "a.md",
+                false,
+                msg,
+                false,
+                "保存失败",
+                true,
+            );
+        }
+        assert_eq!(app.autosave_retry_deadline, Some(doc_at), "更早的表格期限不被笔记顶掉");
+        // ③ 用户继续输入：只后推内容防抖，重试期限保持不动
+        app.debounce_tail();
+        assert_eq!(app.autosave_retry_deadline, Some(doc_at), "输入不得推迟已排的重试");
+        assert!(app.autosave_deadline.is_some(), "输入要排防抖期限");
+        // ④ 两条链的重试退避取最早：后到更早者把槽往前收
+        let far = Instant::now() + Duration::from_secs(16);
+        app.autosave_retry_deadline = Some(far);
+        app.save_retry.clear();
+        app.settle_slot_save_failure(
+            super::SaveSlot::DocSpace,
+            gen,
+            "t.atb",
+            false,
+            msg,
+            false,
+            "保存失败",
+            true,
+        );
+        assert!(
+            app.autosave_retry_deadline.is_some_and(|at| at < far),
+            "更早的失败链把重试期限往前收，而不是被 16s 拖住"
         );
     }
 
@@ -10217,6 +10344,7 @@ mod file_drop_tests {
             false,
             "磁盘忙：设备未就绪",
             false,
+            true,
         );
         assert!(crate::save_failure(&app.save_retry, "a.md").is_some(), "先要有一笔失败记录");
 
@@ -10236,6 +10364,7 @@ mod file_drop_tests {
             false,
             "磁盘忙：设备未就绪",
             false,
+            true,
         );
         assert!(crate::save_failure(&app.save_retry, "b.md").is_some(), "先要有一笔空间失败记录");
         crate::space_actions::leave_space_identity(&mut app);
@@ -10263,15 +10392,16 @@ mod file_drop_tests {
             false,
             message,
             false,
+            true,
         );
         assert!(!plan.retryable, "不可重试");
         assert_eq!(plan.retry_in, None, "不可重试不排期限");
         assert!(plan.notify, "要有一条可执行提示");
         assert!(queued.is_empty(), "不再重试就没人收尾，待续项不得悬挂");
-        let effects = super::failed_save_effects(plan, message, false, "保存失败", true);
-        let why = effects.abort_why.expect("不可重试必须收口挂起动作");
-        assert!(why.starts_with(super::SAVE_FAILED_ABORT), "原因串统一：{why}");
-        assert!(why.contains(message), "AI 文件操作回执要带上具体错误：{why}");
+        // 不可重试：挂起动作必被取走（收口判定与提示同源），文案要能带出具体错误
+        let notice =
+            super::failed_save_notice(plan, message, false, "保存失败", true).expect("要出声");
+        assert!(notice.contains(message), "提示要带出具体错误：{notice}");
     }
 
     /// 不可恢复的失败不排自动重试：冲突要用户裁决、只读身份写不进去，重试只会刷屏。

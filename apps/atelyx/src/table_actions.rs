@@ -1171,7 +1171,7 @@ pub(crate) fn on_saved(
             if let Some(s) = app.table.as_mut() {
                 s.save_inflight = guard;
             }
-            // 下一次期限已由统一入口排在 autosave_deadline 上，链上不再另排一次
+            // 下一次期限已由统一入口排在 autosave_retry_deadline 上，链上不再另排一次
             // （两套定时器各打一拍会让同一笔重试重复下发）；不可恢复的失败什么都不排。
             Task::none()
         }
@@ -3458,6 +3458,7 @@ mod tests {
             false,
             "磁盘忙：设备未就绪",
             s.failure_backoff_reset(),
+            true,
         );
         assert!(plan.retry_in.is_some(), "可恢复失败要排重试");
         s.save_inflight = crate::table_view::SaveInflight::from_parts(keys, queued);
@@ -3484,6 +3485,7 @@ mod tests {
             false,
             msg,
             s.failure_backoff_reset(),
+            true,
         );
         assert!(first.notify, "首轮要提示");
         let again = crate::apply_failed_save(
@@ -3495,6 +3497,7 @@ mod tests {
             false,
             msg,
             s.failure_backoff_reset(),
+            true,
         );
         assert!(!again.notify, "重试轮静默");
         // 用户继续编辑：退避回到首档，但这条错误已经提示过
@@ -3508,6 +3511,7 @@ mod tests {
             false,
             msg,
             s.failure_backoff_reset(),
+            true,
         );
         assert_eq!(after_edit.retry_in, Some(std::time::Duration::from_secs(1)), "退避从首档起");
         assert!(!after_edit.notify, "同一错误改内容后再失败不重复提示");
@@ -3521,6 +3525,7 @@ mod tests {
             false,
             "文件已被外部修改，本次保存未写入",
             s.failure_backoff_reset(),
+            true,
         );
         assert!(other.notify, "错误性质变了要重新提示");
         assert!(other.retry_in.is_none(), "冲突不排重试");

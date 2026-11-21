@@ -4181,6 +4181,7 @@ mod tests {
             false,
             "文件已被外部修改",
             false,
+            true,
         );
         assert_eq!(plan.retry_in, None, "不可恢复的失败不排下一次重试");
         assert!(queued.is_empty(), "不再重试就没有回执可交付待续项");
@@ -4201,6 +4202,7 @@ mod tests {
             false,
             "磁盘忙：设备未就绪",
             false,
+            true,
         );
         assert_eq!(plan.retry_in, Some(crate::next_retry_delay(1)), "退避按轮次升档");
         assert_eq!(queued, vec![(1u64, "a.atb".to_string())], "非 Flush 失败放回待续项");
@@ -4216,6 +4218,7 @@ mod tests {
             true,
             "磁盘忙：设备未就绪",
             false,
+            true,
         );
         assert!(queued.is_empty(), "本笔是 Flush：待续项丢弃");
     }
@@ -4228,20 +4231,19 @@ mod tests {
         let first = crate::plan_save_failure(&mut book, "t.atb", msg, false);
         assert!(first.notify, "首轮要提示");
         assert!(!crate::plan_save_failure(&mut book, "t.atb", msg, false).notify, "重试轮不再提示");
-        let retryable_effects = crate::failed_save_effects(first, msg, false, "保存失败", false);
-        let retryable_notice = retryable_effects.notice.expect("首轮有提示");
+        let retryable_notice =
+            crate::failed_save_notice(first, msg, false, "保存失败", false).expect("首轮有提示");
         assert!(
             retryable_notice.contains("自动重试"),
             "可恢复失败要说明稍后自动重试：{retryable_notice}"
         );
         // 不可恢复：文案改说「操作已暂停」，同时收口挂起动作
         let blocked = crate::plan_save_failure(&mut book, "x.atb", "文件已被外部修改", false);
-        let blocked_effects =
-            crate::failed_save_effects(blocked, "文件已被外部修改", true, "保存失败", true);
-        let notice = blocked_effects.notice.expect("不可恢复失败要出声");
+        let notice =
+            crate::failed_save_notice(blocked, "文件已被外部修改", true, "保存失败", true)
+                .expect("不可恢复失败要出声");
         assert!(notice.contains("操作已暂停"), "不可恢复失败要交代操作已暂停：{notice}");
         assert!(!notice.contains("自动重试"), "不得承诺自动重试：{notice}");
-        assert!(blocked_effects.abort_why.is_some(), "不可恢复必须收口挂起动作");
     }
 
     /// 非 Flush 失败：待续 Flush 必须留在队列，重试成功后才消费。
@@ -4264,6 +4266,7 @@ mod tests {
             false,
             "磁盘忙：设备未就绪",
             false,
+            true,
         );
         assert!(plan.retry_in.is_some(), "可恢复失败仍要重试");
         assert_eq!(queued, vec![(1u64, "a.atb".to_string())], "非 Flush 失败不得丢掉待续项");

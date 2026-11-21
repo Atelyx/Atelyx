@@ -175,6 +175,7 @@ fn discard_readonly_dirty(
 ) -> Task<Message> {
     if clear(app) {
         app.autosave_deadline = None;
+        app.autosave_retry_deadline = None;
         app.notify(NoticeLevel::Warning, "只读身份：未保存的改动不会写入空间");
     } else if !quiet {
         app.notify(NoticeLevel::Warning, "只读身份，无法保存");
@@ -1834,11 +1835,27 @@ pub(crate) fn on_table_patch_done(
     // 身份守卫：gen + 文件路径（或标题漂移后的新路径）双校验
     // 回执即摘本笔在途（无论成败）：键按发起时的文件，改名与否都要结清，否则永久阻塞
     let queued = settle_space_doc_save(app, gen, &file);
+    // 失败面已不是当前文件：仍记账与提示（内容没写进去是用户要知道的事实），
+    // 并就地回填 Flush 失败的挂起项；成功面则只消费本笔的待续项
     if !atelyx_core::ai::doc_edit::receipt_file_matches(
         app.table.as_ref().map(|s| s.file.as_str()),
         &file,
         &new_file,
     ) {
+        if let Err(e) = &result {
+            app.settle_slot_save_failure(
+                crate::SaveSlot::DocSpace,
+                gen,
+                &file,
+                flush,
+                e,
+                false,
+                &format!("「{}」保存失败", crate::layout_view::file_label(&file)),
+                false,
+            );
+        } else if queued || flush {
+            app.space_doc_save_flush_queued.retain(|entry| entry != &(gen, file.clone()));
+        }
         return Task::none();
     }
     let mut task = Task::none();
@@ -2269,11 +2286,26 @@ pub(crate) fn on_canvas_patch_done(
     // 回执即摘本笔在途（无论成败）：键按发起时的文件，改名与否都要结清
     let queued = settle_space_doc_save(app, gen, &file);
     // 身份守卫：gen + 文件路径（或标题漂移后的新路径）双校验
+    // 失败面已不是当前文件：仍记账与提示，并就地回填 Flush 失败的挂起项；成功面只消费待续项
     if !atelyx_core::ai::doc_edit::receipt_file_matches(
         app.canvas.as_ref().map(|s| s.file.as_str()),
         &file,
         &new_file,
     ) {
+        if let Err(e) = &result {
+            app.settle_slot_save_failure(
+                crate::SaveSlot::DocSpace,
+                gen,
+                &file,
+                flush,
+                e,
+                false,
+                &format!("「{}」保存失败", crate::layout_view::file_label(&file)),
+                false,
+            );
+        } else if queued || flush {
+            app.space_doc_save_flush_queued.retain(|entry| entry != &(gen, file.clone()));
+        }
         return Task::none();
     }
     let mut task = Task::none();
@@ -4537,6 +4569,7 @@ mod tests {
             false,
             "网络错误：超时",
             false,
+            true,
         );
         assert!(inflight.is_empty(), "回执先结清在途键");
         assert_eq!(queued, vec![(1u64, "a.atb".to_string())], "非 Flush 失败必须回填");
@@ -4554,6 +4587,7 @@ mod tests {
             true,
             "网络错误：超时",
             false,
+            true,
         );
         assert!(queued.is_empty(), "Flush 失败不得补发");
 
@@ -4569,6 +4603,7 @@ mod tests {
             false,
             "网络错误：超时",
             false,
+            true,
         );
         assert!(queued.is_empty(), "本来没有待续项不凭空造一个");
     }

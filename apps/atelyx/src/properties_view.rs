@@ -6,7 +6,6 @@ use atelyx_core::frontmatter::{self, PropType, Yaml};
 use iced::widget::{button, column, container, mouse_area, operation, row, scrollable, space, text_input, Column, Id};
 use iced::{border, Color, Element, Length, Padding, Point, Size, Task};
 use std::rc::Rc;
-use std::time::Instant;
 
 use crate::layout_view::PopupState;
 use crate::ui::controls;
@@ -1657,7 +1656,7 @@ impl App {
         }
         self.dirty = true;
         self.save_error = None;
-        self.autosave_deadline = Some(Instant::now() + crate::AUTOSAVE_DEBOUNCE);
+        self.debounce_tail();
         self.refresh_props();
         // 空间模式：正文以协作文档为真源，属性改动同样要差分上行（否则对端看不到、下次远端合入退回旧块）
         crate::space_actions::collab_after_edit(self);

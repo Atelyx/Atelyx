@@ -549,7 +549,7 @@ pub(crate) fn on_saved(
             if let Some(s) = app.canvas.as_mut() {
                 s.save_inflight = guard;
             }
-            // 下一次期限已由统一入口排在 autosave_deadline 上，链上不再另排一次
+            // 下一次期限已由统一入口排在 autosave_retry_deadline 上，链上不再另排一次
             // （两套定时器各打一拍会让同一笔重试重复下发）；不可恢复的失败什么都不排。
             Task::none()
         }

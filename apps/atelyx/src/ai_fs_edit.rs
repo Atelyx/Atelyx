@@ -54,7 +54,6 @@ pub fn apply(
     app.gate(crate::PendingAfterFlush::AiFs { op, id, gen })
 }
 
-
 /// 挂起项被放行时是否仍可执行：提交时与放行时的仓库世代一致才算有效。
 pub(crate) fn pending_is_live(app: &App, gen: u64) -> bool {
     gen == app.epoch()
