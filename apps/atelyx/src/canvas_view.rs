@@ -386,6 +386,10 @@ pub struct CanvasSession {
     pub save_error: Option<String>,
     /// 数据变更代：任何 data 变更自增（自动保存触发判据；视图态变化不动它）。
     pub version: u64,
+    /// 保存在途守卫（按世代 + 文件分键）：同键在途时不并发提交，Flush 记账排队。
+    pub save_inflight: crate::table_view::SaveInflight,
+    /// 连续保存失败次数：驱动失败退避，落盘成功即清零。
+    pub save_retry: u32,
     pub view: CanvasViewState,
 }
 
@@ -407,6 +411,8 @@ impl CanvasSession {
             dirty: false,
             save_error: None,
             version: 1,
+            save_inflight: crate::table_view::SaveInflight::default(),
+            save_retry: 0,
             view,
         }
     }
@@ -848,6 +854,8 @@ pub enum CanvasMsg {
     Loaded(u64, String, Result<LoadOut, String>),
     /// 保存回执（冻结快照供「落盘期间无新编辑」判定）。
     Saved(u64, String, SaveReason, Result<(), String>, atelyx_core::vault::CanvasFile),
+    /// 保存失败 / 期间又有编辑的到期重试（gen 守卫：切仓库后旧任务作废）。
+    RetrySave(u64, String),
     Press { pos: Point, size: Size },
     /// 中键按下 = 平移起手（不改变选中；卡上也可起手平移）。
     PanPress { pos: Point, size: Size },

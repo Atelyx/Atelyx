@@ -432,19 +432,33 @@ pub(crate) fn prepare_text_docs(
 /// 提交一次画布落盘：与磁盘真源按补丁合并（基线 diff → id 合并 → 队列原子写）。
 /// 文件缺失 / 外部替换为其他实体 → 全量重建；冻结快照随回执带回供「落盘期间无新编辑」判定。
 pub fn submit_canvas_save(app: &mut App, reason: SaveReason) -> Task<Message> {
-    let Some(s) = app.canvas.as_ref() else { return Task::none() };
-    if !s.dirty {
-        return Task::none();
-    }
-    // 空间模式：基线 diff → 服务端补丁仲裁（id 不符回退全量），回执走 Space 消息
-    if matches!(app.repo_kind, RepoKind::Space(_)) {
-        return crate::space_actions::space_submit_canvas_save(app, reason);
-    }
+    let (gen, file, baseline, frozen) = {
+        let Some(s) = app.canvas.as_ref() else { return Task::none() };
+        if !s.dirty {
+            return Task::none();
+        }
+        // 空间模式：基线 diff → 服务端补丁仲裁（id 不符回退全量），回执走 Space 消息
+        if matches!(app.repo_kind, RepoKind::Space(_)) {
+            return crate::space_actions::space_submit_canvas_save(app, reason);
+        }
+        (app.epoch(), s.file.clone(), s.saved.clone(), s.data.clone())
+    };
+    // 仓库根先取：取不到就不登记在途（登记了却发不出任务，该文件此后每笔都被守卫挡下）
     let Some(root) = app.vault.root().ok() else { return Task::none() };
-    let gen = app.epoch();
-    let file = s.file.clone();
-    let baseline = s.saved.clone();
-    let frozen = s.data.clone();
+    // 同键在途不并发提交：后一笔只有旧基线，慢网络下两笔补丁会按各自的旧基线互相覆盖
+    let flush = matches!(reason, SaveReason::Flush);
+    match app.canvas.as_mut().map(|s| s.save_inflight.begin(gen, &file, flush)) {
+        Some(crate::table_view::SaveAdmission::Start) => {}
+        // 回执里补发，收尾动作不会丢
+        Some(crate::table_view::SaveAdmission::Queued) => return Task::none(),
+        Some(crate::table_view::SaveAdmission::Deferred) => {
+            if matches!(reason, SaveReason::Manual) {
+                app.notify(crate::NoticeLevel::Info, "正在写入，完成后自动保存新改动");
+            }
+            return Task::none();
+        }
+        None => return Task::none(),
+    }
     let queue = app.vault.writes.clone();
     let state = app.vault.clone();
     Task::perform(
@@ -501,6 +515,11 @@ pub(crate) fn on_saved(
     if let (Err(e), true) = (&result, flush) {
         crate::ai_fs_edit::abort_pending(app, e);
     }
+    // 本笔回执即结清该键的在途标记；在途期间排队的 Flush 留待内容稳定后补发
+    let queued_flush = app
+        .canvas
+        .as_mut()
+        .is_some_and(|s| s.save_inflight.finish(gen, &file));
     if !atelyx_core::ai::doc_edit::receipt_file_matches(
         app.canvas.as_ref().map(|s| s.file.as_str()),
         &file,
@@ -514,14 +533,26 @@ pub(crate) fn on_saved(
             if flush {
                 app.abort_pending_flush("保存失败，操作未执行");
             }
-            let Some(s) = app.canvas.as_mut() else { return Task::none() };
-            s.save_error = Some(e.clone());
+            // 失败也必须重排一次自动重试：只写错误而不重试，用户停手后这笔内容永不落盘
+            let attempt = {
+                let Some(s) = app.canvas.as_mut() else { return Task::none() };
+                s.save_error = Some(e.clone());
+                s.save_retry = s.save_retry.saturating_add(1);
+                // 失败时把在途期间排队的 Flush 放回队列：重试成功后才补发收尾
+                if queued_flush {
+                    s.save_inflight.requeue_flush(gen, &file);
+                }
+                s.save_retry
+            };
             if flush {
                 app.notify(crate::NoticeLevel::Error, format!("保存失败，操作未执行：{e}"));
             } else {
                 app.notify(crate::NoticeLevel::Error, format!("保存失败：{e}"));
             }
-            Task::none()
+            retry_after(
+                crate::table_view::save_retry_delay(attempt),
+                CanvasMsg::RetrySave(gen, file),
+            )
         }
         Ok(()) => {
             // 只认磁盘事实：冻结快照与当前数据一致才算落盘；期间又有编辑则保持脏，下一轮补写
@@ -535,6 +566,19 @@ pub(crate) fn on_saved(
                     s.saved = frozen.clone();
                 }
             }
+            // 落盘成功即清零失败退避计数
+            if let Some(s) = app.canvas.as_mut() {
+                s.save_retry = 0;
+            }
+            // 在途期间排队的 Flush：内容已稳就放行，仍脏就补一笔收尾（脏拦截点不能白等）
+            if queued_flush {
+                let dirty = app.canvas.as_ref().is_some_and(|s| s.dirty);
+                return task.chain(if dirty {
+                    submit_canvas_save(app, SaveReason::Flush)
+                } else {
+                    app.after_any_flush()
+                });
+            }
             if flush {
                 // 落盘期间有新编辑（unstable）：重收一轮 Flush——脏拦截已在放行前 flush，
                 // 此轮丢失会让关闭 / 切换动作静默挂起
@@ -543,6 +587,12 @@ pub(crate) fn on_saved(
                 } else {
                     task = task.chain(submit_canvas_save(app, SaveReason::Flush));
                 }
+            } else if !stable {
+                // 落盘期间又有编辑：补排一次自动保存（期限可能已随本笔回执清空）
+                task = task.chain(retry_after(
+                    crate::AUTOSAVE_DEBOUNCE,
+                    CanvasMsg::RetrySave(gen, file),
+                ));
             }
             if stable {
                 app.settle_history_restore(true);
@@ -627,6 +677,22 @@ fn block_readonly(app: &mut App, msg: &CanvasMsg) -> bool {
     true
 }
 
+/// 保存重试到点：仓库世代与文件仍是当前这份才补交一笔。
+fn on_retry_save(app: &mut App, gen: u64, file: &str) -> Task<Message> {
+    if gen != app.epoch() || app.canvas.as_ref().map(|s| s.file.as_str()) != Some(file) {
+        return Task::none();
+    }
+    if !app.canvas.as_ref().is_some_and(|s| s.dirty) {
+        return Task::none();
+    }
+    submit_canvas_save(app, SaveReason::AutoSave)
+}
+
+/// 一次性延时任务投递（不依赖 UI 心跳）。
+fn retry_after(delay: std::time::Duration, msg: CanvasMsg) -> Task<Message> {
+    Task::perform(tokio::time::sleep(delay), move |_| Message::Canvas(msg))
+}
+
 /// 画布消息入口（对称表格 on_msg；数据版本变化由主循环判脏排自动保存）。
 pub fn on_msg(app: &mut App, msg: CanvasMsg) -> Task<Message> {
     crate::canvas_chat::sync_card_chats(app);
@@ -638,6 +704,7 @@ pub fn on_msg(app: &mut App, msg: CanvasMsg) -> Task<Message> {
         CanvasMsg::Saved(gen, file, reason, result, frozen) => {
             on_saved(app, gen, file, matches!(reason, SaveReason::Flush), result, frozen)
         }
+        CanvasMsg::RetrySave(gen, file) => on_retry_save(app, gen, &file),
         CanvasMsg::Chat(msg) => crate::canvas_chat::on_msg(app, msg),
         CanvasMsg::Hover(hover) => {
             let Some(s) = app.canvas.as_mut() else { return Task::none() };

@@ -141,6 +141,10 @@ pub struct TableSession {
     pub save_error: Option<String>,
     /// 数据变更代：任何 data 变更自增（布局缓存失效判据）。
     pub version: u64,
+    /// 保存在途守卫（按世代 + 文件分键）：同键在途时不并发提交，Flush 记账排队。
+    pub save_inflight: SaveInflight,
+    /// 连续保存失败次数：驱动失败退避，落盘成功即清零。
+    pub save_retry: u32,
     pub view: TableViewState,
 }
 
@@ -161,6 +165,8 @@ impl TableSession {
             dirty: false,
             save_error: None,
             version: 1,
+            save_inflight: SaveInflight::default(),
+            save_retry: 0,
             view: TableViewState { zoom: 1.0, ..Default::default() },
         };
         s.saved = s.data.clone();
@@ -1016,6 +1022,8 @@ pub enum TableMsg {
     RetryImages,
     /// 灯箱原图读取失败后的定时重试。
     LightboxRetry,
+    /// 保存失败 / 期间又有编辑的到期重试（gen 守卫：切仓库后旧任务作废）。
+    RetrySave(u64, String),
     ImagesWritten { row_id: String, field_id: String, rels: Vec<String>, failed: usize },
     LightboxClose,
     LightboxNav(i32),
@@ -1133,6 +1141,76 @@ pub enum SaveReason {
 }
 
 // ===== 几何 =====
+
+/// 文档保存在途守卫：同一 `(世代, 文件)` 不并发提交。
+///
+/// 表格与画布共用：后一笔只能拿到上一笔落盘前的旧基线，慢盘 / 慢网络下并发提交会把
+/// 彼此的补丁按旧基线重算，堆叠出互相覆盖的写。在途时的 `Flush` 记入待续队列由回执补发，
+/// 其余保存顺延（调用方据动机决定是否提示）。
+#[derive(Default)]
+pub struct SaveInflight {
+    /// 在途项（世代 + 相对路径）。按文件分键：切文件不互相阻塞。
+    keys: Vec<(u64, String)>,
+    /// 在途期间又收到 Flush 的键：回执后补一笔收尾。
+    flush_queued: Vec<(u64, String)>,
+}
+
+/// 一次提交的准入结论。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SaveAdmission {
+    /// 可以提交（已登记在途）。
+    Start,
+    /// 同键在途且本次是 Flush：已记入待续队列，回执后补发。
+    Queued,
+    /// 同键在途且本次不是 Flush：顺延，不发任务。
+    Deferred,
+}
+
+impl SaveInflight {
+    /// 准入判定：可提交即登记在途；在途时 Flush 记队列，其余顺延。
+    pub fn begin(&mut self, gen: u64, file: &str, flush: bool) -> SaveAdmission {
+        // 切仓库后旧世代的键再也不会被结算，先清掉免得永久挡住新仓库同路径文件
+        self.keys.retain(|(inflight_gen, _)| *inflight_gen == gen);
+        self.flush_queued.retain(|(queued_gen, _)| *queued_gen == gen);
+        let key = (gen, file.to_string());
+        if self.keys.contains(&key) {
+            if flush {
+                if !self.flush_queued.contains(&key) {
+                    self.flush_queued.push(key);
+                }
+                return SaveAdmission::Queued;
+            }
+            return SaveAdmission::Deferred;
+        }
+        self.keys.push(key);
+        SaveAdmission::Start
+    }
+
+    /// 回执结清：返回「在途期间排队过 Flush」（调用方据此补发收尾）。
+    pub fn finish(&mut self, gen: u64, file: &str) -> bool {
+        let key = (gen, file.to_string());
+        self.keys.retain(|entry| entry != &key);
+        let queued = self.flush_queued.contains(&key);
+        self.flush_queued.retain(|entry| entry != &key);
+        queued
+    }
+
+    /// 失败回执把待续 Flush 放回队列：重试成功后再补发，挂起的关闭 / 切换动作不会丢。
+    pub fn requeue_flush(&mut self, gen: u64, file: &str) {
+        let key = (gen, file.to_string());
+        if !self.flush_queued.contains(&key) {
+            self.flush_queued.push(key);
+        }
+    }
+}
+
+/// 保存失败后的自动重试间隔：1s / 2s / 4s / 8s / 16s / 30s（封顶）。
+/// 失败只写 `save_error` 而不重排期限，用户停手后这笔内容就永远不落盘。
+pub fn save_retry_delay(attempts: u32) -> std::time::Duration {
+    const CAP_MS: u64 = 30_000;
+    let shift = attempts.saturating_sub(1).min(5);
+    std::time::Duration::from_millis((1000u64 << shift).min(CAP_MS))
+}
 
 /// 表格几何：全部尺寸已乘 zoom，坐标为画布局部。
 pub struct Geo<'a> {
@@ -4010,6 +4088,43 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// 同键在途时的准入：Flush 记队列、其余顺延，绝不并发提交。
+    #[test]
+    fn save_inflight_defers_and_queues_flush() {
+        let mut guard = SaveInflight::default();
+        assert_eq!(guard.begin(1, "a.atb", false), SaveAdmission::Start);
+        assert_eq!(guard.begin(1, "a.atb", false), SaveAdmission::Deferred);
+        assert_eq!(guard.begin(1, "a.atb", true), SaveAdmission::Queued);
+        // 另一份文件不受同键守卫阻塞，且它自己的回执不带别人的待续 Flush
+        assert_eq!(guard.begin(1, "b.atb", false), SaveAdmission::Start);
+        assert!(!guard.finish(1, "b.atb"), "待续 Flush 属于另一份文件");
+        // 回执结清后才交付待续 Flush，且只交付一次
+        assert!(guard.finish(1, "a.atb"), "在途期间排队的 Flush 要补发");
+        assert!(!guard.finish(1, "a.atb"), "结清后不再重复补发");
+        assert_eq!(guard.begin(1, "a.atb", false), SaveAdmission::Start);
+    }
+
+    /// 过期回执（世代 / 文件不符）不清别人的在途键。
+    #[test]
+    fn save_inflight_ignores_stale_receipt() {
+        let mut guard = SaveInflight::default();
+        assert_eq!(guard.begin(2, "a.atb", true), SaveAdmission::Start);
+        assert!(!guard.finish(1, "a.atb"), "旧世代回执不结算");
+        assert!(!guard.finish(2, "旧的.atb"), "旧文件回执不结算");
+        assert_eq!(guard.begin(2, "a.atb", false), SaveAdmission::Deferred, "在途仍被守住");
+    }
+
+    /// 失败退避：指数增长并封顶，任何次数都不返回零延迟（零延迟会打满写队列）。
+    #[test]
+    fn save_retry_delay_backs_off_and_caps() {
+        assert_eq!(save_retry_delay(1), std::time::Duration::from_millis(1000));
+        assert_eq!(save_retry_delay(2), std::time::Duration::from_millis(2000));
+        assert_eq!(save_retry_delay(3), std::time::Duration::from_millis(4000));
+        assert_eq!(save_retry_delay(0), std::time::Duration::from_millis(1000));
+        assert_eq!(save_retry_delay(9), std::time::Duration::from_millis(30_000));
+        assert_eq!(save_retry_delay(u32::MAX), std::time::Duration::from_millis(30_000));
     }
 
     /// 灯箱原图重试上限：用尽即停（只留缩略图），换图后重新获得完整次数。
