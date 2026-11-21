@@ -141,7 +141,7 @@ fn on_msg_open(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
             | tv::TableMsg::LightboxDownload
             | tv::TableMsg::LightboxCopy
             | tv::TableMsg::Copied(..)
-            | tv::TableMsg::CutVerified(..)
+            | tv::TableMsg::CutVerified { .. }
             | tv::TableMsg::RetrySave(..)
             | tv::TableMsg::OpenLightboxMenu(..)
             | tv::TableMsg::OpenViewMenu(..)
@@ -428,7 +428,7 @@ fn on_gesture(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
             app.dismiss_popup();
             copy_lightbox_image(app)
         }
-        tv::TableMsg::CutVerified(landed) => on_cut_verified(app, landed),
+        tv::TableMsg::CutVerified { landed, selection } => on_cut_verified(app, landed, selection),
         tv::TableMsg::RetrySave(gen, file) => on_retry_save(app, gen, &file),
         tv::TableMsg::Copied(result) => {
             match result {
@@ -2555,9 +2555,14 @@ fn on_copy(app: &mut App, cut: bool) -> Task<Message> {
         return iced::clipboard::write(tsv);
     }
     // 剪切先写后回读：写入被剪贴板占用吞掉时不能删内容（否则原内容丢失、剪贴板还是旧的）
+    // 回执到来前选区可能已移动，冻结发起时的选区，只有它仍是当前选区才删
     let expected = tsv.clone();
+    let selection = s.view.selection.clone().unwrap_or(ops::TableSelection::All);
     iced::clipboard::write(tsv).chain(iced::clipboard::read().map(move |got| {
-        Message::Table(tv::TableMsg::CutVerified(cut_write_landed(&expected, got.as_deref())))
+        Message::Table(tv::TableMsg::CutVerified {
+            landed: cut_write_landed(&expected, got.as_deref()),
+            selection: selection.clone(),
+        })
     }))
 }
 
@@ -2570,10 +2575,15 @@ fn cut_write_landed(expected: &str, readback: Option<&str>) -> bool {
     readback.is_some_and(|got| got.replace("\r\n", "\n") == expected.replace("\r\n", "\n"))
 }
 
-/// 剪切回读结论落地：一致才清选区，不一致保留内容并提示。
-fn on_cut_verified(app: &mut App, landed: bool) -> Task<Message> {
+/// 剪切回读结论落地：回读一致且选区未移动才清内容，否则保留并提示。
+fn on_cut_verified(app: &mut App, landed: bool, selection: ops::TableSelection) -> Task<Message> {
     if !landed {
         app.notify(NoticeLevel::Warning, "剪贴板被占用，未剪切（内容已保留）");
+        return Task::none();
+    }
+    // 回执前用户已换了选区：此刻清空会删掉另一处内容
+    let unchanged = app.table.as_ref().is_some_and(|s| s.view.selection.as_ref() == Some(&selection));
+    if !unchanged {
         return Task::none();
     }
     on_clear_selection(app)
