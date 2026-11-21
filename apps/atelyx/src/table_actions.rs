@@ -1151,14 +1151,16 @@ pub(crate) fn on_saved(
             let attempt = {
                 let Some(s) = app.table.as_mut() else { return Task::none() };
                 s.save_error = Some(e.clone());
-                s.save_retry = s.save_retry.saturating_add(1);
-                // 本笔就是 Flush 且已失败：挂起动作已就地取消，待续 Flush 一并丢弃，
-                // 否则重试成功后还会去跑一次已经作废的关闭 / 切换。
-                // 本笔不是 Flush 时保留待续项：重试成功后由它补发，挂起动作才不会永久等下去。
+                let attempt = s.note_save_failure();
+                // 待续 Flush 已被本笔回执取走，这里按失败性质决定去向：
+                // 本笔就是 Flush = 挂起动作已就地取消，待续项一并丢弃，否则重试成功后还会再跑一次；
+                // 本笔不是 Flush = 挂起动作仍在等，回填队列，重试成功后补发收尾。
                 if flush {
                     s.save_inflight.drop_flush(gen, &file);
+                } else if queued_flush {
+                    s.save_inflight.requeue_flush(gen, &file);
                 }
-                s.save_retry
+                attempt
             };
             // 只在首轮失败时出声：重试链每轮都弹一次会把提示栏刷屏
             if attempt == 1 {
@@ -1186,9 +1188,9 @@ pub(crate) fn on_saved(
                     s.saved = frozen.clone();
                 }
             }
-            // 落盘成功即清零失败退避计数
+            // 落盘成功即结束失败序列
             if let Some(s) = app.table.as_mut() {
-                s.save_retry = 0;
+                s.clear_save_failure();
             }
             // 记版先挂上，再决定收尾动作：中途 return 会把已落盘的这一步漏出历史
             if stable {
@@ -2558,9 +2560,10 @@ fn on_copy(app: &mut App, cut: bool) -> Task<Message> {
         return iced::clipboard::write(tsv);
     }
     // 剪切先写后回读：写入被剪贴板占用吞掉时不能删内容（否则原内容丢失、剪贴板还是旧的）
-    // 回执到来前选区可能已移动，冻结发起时的选区，只有它仍是当前选区才删
+    // 回执到来前选区可能已移动，冻结发起时的选区，只有它仍是当前选区才删。
+    // region_of(None) 已在上面提前返回，此处 selection 必然存在
     let expected = tsv.clone();
-    let selection = s.view.selection.clone().unwrap_or(ops::TableSelection::All);
+    let Some(selection) = s.view.selection.clone() else { return Task::none() };
     iced::clipboard::write(tsv).chain(iced::clipboard::read().map(move |got| {
         Message::Table(tv::TableMsg::CutVerified {
             landed: crate::chat_input::clipboard_write_landed(&expected, got.as_deref()),
@@ -2568,7 +2571,6 @@ fn on_copy(app: &mut App, cut: bool) -> Task<Message> {
         })
     }))
 }
-
 
 /// 剪切回读结论落地：回读一致且选区未移动才清内容，否则保留并提示。
 fn on_cut_verified(app: &mut App, landed: bool, selection: ops::TableSelection) -> Task<Message> {
@@ -3399,7 +3401,6 @@ mod tests {
         s.data.rows[0].values.get("f1").and_then(|v| v.as_str()).unwrap_or("")
     }
 
-
     /// 在途标记按发起身份清理：改名 / 换表后旧标记不再挡住新表的同名图片。
     #[test]
     fn stale_inflight_is_pruned_by_identity() {
@@ -3424,6 +3425,44 @@ mod tests {
         assert!(s.view.image_inflight.contains_key("imgs/a.png"));
         assert!(!s.view.image_inflight.contains_key("imgs/b.png"), "旧文件的在途标记要清");
         assert!(!s.view.image_inflight.contains_key("imgs/c.png"), "旧表的在途标记要清");
+    }
+
+    /// 一次失败序列只提示一次，且序列随内容变更重开：新的失败重新提示并从 1s 退避起步。
+    /// 只在落盘成功时清零会让后续失败永久静默（提示被首轮闸住、退避从封顶档起步）。
+    #[test]
+    fn content_change_restarts_failure_sequence() {
+        let mut s = session(&["a"]);
+        // 同版本连续失败：次数累加、退避逐轮升档
+        assert_eq!(s.note_save_failure(), 1);
+        assert_eq!(s.note_save_failure(), 2);
+        assert_eq!(s.note_save_failure(), 3);
+        assert_eq!(s.save_retry, 3);
+        // 用户继续编辑：新的失败序列从首轮重新计，提示与退避都回到起点
+        s.touch();
+        assert_eq!(s.save_retry, 0, "内容变更是新失败序列的起点");
+        assert_eq!(s.note_save_failure(), 1, "新一轮失败要重新提示一次");
+        assert_eq!(crate::next_retry_delay(1), std::time::Duration::from_secs(1), "退避从 1s 起");
+    }
+
+    /// 落盘成功结束序列：之后再次失败同样从首轮起。
+    #[test]
+    fn save_success_ends_failure_sequence() {
+        let mut s = session(&["a"]);
+        assert_eq!(s.note_save_failure(), 1);
+        assert_eq!(s.note_save_failure(), 2);
+        s.clear_save_failure();
+        assert_eq!(s.note_save_failure(), 1);
+    }
+
+    /// 撤销 / 重做同样是内容变更：失败序列随新内容复位。
+    #[test]
+    fn history_step_resets_failure_sequence() {
+        let mut s = session(&["a", "b"]);
+        mutate_session(&mut s, |s| ops::set_cell_value(&mut s.data.rows[0], "f1", Some("c".into())));
+        assert_eq!(s.note_save_failure(), 1);
+        assert_eq!(s.note_save_failure(), 2);
+        assert!(history_step_in(&mut s, false));
+        assert_eq!(s.note_save_failure(), 1, "撤销后的失败是新序列的首轮");
     }
 
     /// 失效行上的单选改值（弹层打开期间行被删除）：不能留下无变更的撤销步。

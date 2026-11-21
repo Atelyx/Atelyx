@@ -537,14 +537,16 @@ pub(crate) fn on_saved(
             let attempt = {
                 let Some(s) = app.canvas.as_mut() else { return Task::none() };
                 s.save_error = Some(e.clone());
-                s.save_retry = s.save_retry.saturating_add(1);
-                // 本笔就是 Flush 且已失败：挂起动作已就地取消，待续 Flush 一并丢弃，
-                // 否则重试成功后还会去跑一次已经作废的关闭 / 切换。
-                // 本笔不是 Flush 时保留待续项：重试成功后由它补发，挂起动作才不会永久等下去。
+                let attempt = s.note_save_failure();
+                // 待续 Flush 已被本笔回执取走，这里按失败性质决定去向：
+                // 本笔就是 Flush = 挂起动作已就地取消，待续项一并丢弃，否则重试成功后还会再跑一次；
+                // 本笔不是 Flush = 挂起动作仍在等，回填队列，重试成功后补发收尾。
                 if flush {
                     s.save_inflight.drop_flush(gen, &file);
+                } else if queued_flush {
+                    s.save_inflight.requeue_flush(gen, &file);
                 }
-                s.save_retry
+                attempt
             };
             // 只在首轮失败时出声：重试链每轮都弹一次会把提示栏刷屏
             if attempt == 1 {
@@ -569,9 +571,9 @@ pub(crate) fn on_saved(
                     s.saved = frozen.clone();
                 }
             }
-            // 落盘成功即清零失败退避计数
+            // 落盘成功即结束失败序列
             if let Some(s) = app.canvas.as_mut() {
-                s.save_retry = 0;
+                s.clear_save_failure();
             }
             // 记版先挂上，再决定收尾动作：中途 return 会把已落盘的这一步漏出历史
             if stable {
@@ -983,7 +985,7 @@ fn on_move(app: &mut App, pos: iced::Point, size: iced::Size) -> Task<Message> {
             mark_drag_mutated(s);
             // 拖动中只改内存 + 重绘：置脏但不排保存（松手收口才触发落盘期限）
             s.dirty = true;
-            s.save_error = None;
+            s.clear_failure_sequence();
             s.view.content_cache.clear();
         }
         DragKind::Resize(id) => {
@@ -999,7 +1001,7 @@ fn on_move(app: &mut App, pos: iced::Point, size: iced::Size) -> Task<Message> {
             }
             mark_drag_mutated(s);
             s.dirty = true;
-            s.save_error = None;
+            s.clear_failure_sequence();
             s.view.content_cache.clear();
         }
         DragKind::Link(_) => {

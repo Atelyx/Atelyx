@@ -388,8 +388,10 @@ pub struct CanvasSession {
     pub version: u64,
     /// 保存在途守卫（按世代 + 文件分键）：同键在途时不并发提交，Flush 记账排队。
     pub save_inflight: crate::table_view::SaveInflight,
-    /// 连续保存失败次数：驱动失败退避，落盘成功即清零。
+    /// 连续保存失败次数：驱动失败退避，落盘成功或内容再变即清零。
     pub save_retry: u32,
+    /// 上一笔失败记账时的数据版本：版本变了 = 新的一轮失败序列。
+    save_retry_version: u64,
     pub view: CanvasViewState,
 }
 
@@ -413,6 +415,7 @@ impl CanvasSession {
             version: 1,
             save_inflight: crate::table_view::SaveInflight::default(),
             save_retry: 0,
+            save_retry_version: 0,
             view,
         }
     }
@@ -423,11 +426,35 @@ impl CanvasSession {
     }
 
     /// 数据已变更：置脏 + 版本自增 + 内容缓存失效。
+    /// 失败记账随新内容复位：新的失败序列重新提示一次、退避从首档起步。
     pub fn touch(&mut self) {
+        self.clear_failure_sequence();
         self.dirty = true;
-        self.save_error = None;
         self.version += 1;
         self.view.content_cache.clear();
+    }
+
+    /// 新内容 = 新失败序列：错误位与连续失败计数一起清（拖拽路径直接置脏，也走这里）。
+    pub fn clear_failure_sequence(&mut self) {
+        self.save_error = None;
+        self.clear_save_failure();
+    }
+
+    /// 记一笔保存失败，返回本轮失败序列的第几次（退避档位）。
+    /// 序列按数据版本切分：内容再变（含不经 touch 的合入）即从第 1 次重新算。
+    pub fn note_save_failure(&mut self) -> u32 {
+        if self.save_retry_version != self.version {
+            self.save_retry = 0;
+            self.save_retry_version = self.version;
+        }
+        self.save_retry = self.save_retry.saturating_add(1);
+        self.save_retry
+    }
+
+    /// 落盘成功：失败序列结束。
+    pub fn clear_save_failure(&mut self) {
+        self.save_retry = 0;
+        self.save_retry_version = self.version;
     }
 
     /// 仅重绘（视图态变化，不动数据也不动版本代）。

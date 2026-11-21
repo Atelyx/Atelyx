@@ -143,8 +143,13 @@ pub struct TableSession {
     pub version: u64,
     /// 保存在途守卫（按世代 + 文件分键）：同键在途时不并发提交，Flush 记账排队。
     pub save_inflight: SaveInflight,
-    /// 连续保存失败次数：驱动失败退避，落盘成功即清零。
+    /// 连续保存失败次数：驱动失败退避，落盘成功或内容再变即清零。
     pub save_retry: u32,
+    /// 上一笔失败记账时的数据版本：版本变了 = 新的一轮失败序列（AI 合入等不经过 touch 的写者也覆盖）。
+    save_retry_version: u64,
+    /// 布局缓存缺失期间的兜底布局（按数据版本 + 缩放 + 列数复用）：
+    /// 同帧内 `geo()` 与 `layout_positions()` 共用一份，不逐次重跑逐列自动计算。
+    fallback_layout: RefCell<Option<std::sync::Arc<LayoutCache>>>,
     pub view: TableViewState,
 }
 
@@ -167,6 +172,8 @@ impl TableSession {
             version: 1,
             save_inflight: SaveInflight::default(),
             save_retry: 0,
+            save_retry_version: 0,
+            fallback_layout: RefCell::new(None),
             view: TableViewState { zoom: 1.0, ..Default::default() },
         };
         s.saved = s.data.clone();
@@ -182,16 +189,48 @@ impl TableSession {
 
     /// 只登记数据变更（置脏 / 版本 / 作废重做），不重建布局。
     /// 调用方须在同一次变更里就地增量更新布局（失败回退 rebuild_layout），松手后再整表重建。
+    /// 失败记账随新内容复位：新的失败序列重新提示一次、退避从首档起步。
     pub fn touch_data_only(&mut self) {
         self.dirty = true;
         self.save_error = None;
+        self.save_retry = 0;
         self.version += 1;
         self.view.redo.clear();
+    }
+
+    /// 记一笔保存失败，返回本轮失败序列的第几次（退避档位）。
+    ///
+    /// 序列按数据版本切分：内容再变（含不经 touch 的 AI 合入）即从第 1 次重新算，
+    /// 提示与退避才不会在上一次失败序列之后永久静默 / 从封顶档起步。
+    pub fn note_save_failure(&mut self) -> u32 {
+        if self.save_retry_version != self.version {
+            self.save_retry = 0;
+            self.save_retry_version = self.version;
+        }
+        self.save_retry = self.save_retry.saturating_add(1);
+        self.save_retry
+    }
+
+    /// 落盘成功：失败序列结束。
+    pub fn clear_save_failure(&mut self) {
+        self.save_retry = 0;
+        self.save_retry_version = self.version;
+    }
+
+    /// 兜底布局是否已对不上当前数据 / 缩放 / 列数。
+    fn fallback_stale(&self) -> bool {
+        self.fallback_layout.borrow().as_ref().is_none_or(|cache| {
+            cache.version != self.version
+                || cache.zoom != self.view.zoom
+                || cache.calc.len() != self.data.fields.len()
+        })
     }
 
     /// 布局重建（数据版本或 zoom 变化时调用；zoom 变更后由调用方补调）。
     pub fn rebuild_layout(&mut self) {
         self.view.layout_epoch = self.view.layout_epoch.wrapping_add(1);
+        // 正式缓存建起来了，兜底值随之作废（它只是缓存缺失窗口内的替身）
+        self.fallback_layout.get_mut().take();
         // 行段缓存随布局滚动：收口时丢掉本轮没再用到的旧键
         let wrap = self.view.layout.take().map(|cache| cache.wrap).unwrap_or_default();
         self.view.layout = Some(self.build_layout(wrap, true));
@@ -1206,6 +1245,15 @@ impl SaveInflight {
         let key = (gen, file.to_string());
         self.flush_queued.retain(|entry| entry != &key);
     }
+
+    /// 把回执取走的待续 Flush 放回队列：本笔不是 Flush 的失败不取消挂起动作，
+    /// 重试成功后才补发收尾（不回填的话挂起的关闭 / 切换会永久等下去）。
+    pub fn requeue_flush(&mut self, gen: u64, file: &str) {
+        let key = (gen, file.to_string());
+        if !self.flush_queued.contains(&key) {
+            self.flush_queued.push(key);
+        }
+    }
 }
 
 /// 表格几何：全部尺寸已乘 zoom，坐标为画布局部。
@@ -1403,16 +1451,27 @@ impl<'a> Geo<'a> {
 pub enum LayoutRef<'a> {
     /// 会话自己的缓存。
     Borrowed(&'a LayoutCache),
-    /// 会话没有缓存时的自持兜底布局。
-    Owned(Box<LayoutCache>),
+    /// 会话没有缓存时的兜底布局（与会话里缓存的那份共享，按版本复用）。
+    Owned(std::sync::Arc<LayoutCache>),
 }
 
 impl<'a> LayoutRef<'a> {
-    /// 会话有缓存 = 直接借；没有 = 重建一份。`measure = true` 时带实测行段（仅非绘制路径）。
+    /// 会话有缓存 = 直接借；没有 = 取会话自持的兜底布局（必要时先重建）。
+    /// 兜底布局按数据版本 / 缩放 / 列数复用，同一帧内的多次访问只建一份。
     fn of(session: &'a TableSession, measure: bool) -> Self {
-        match session.view.layout.as_ref() {
-            Some(cache) => Self::Borrowed(cache),
-            None => Self::Owned(Box::new(session.build_layout(WrapCache::default(), measure))),
+        if let Some(cache) = session.view.layout.as_ref() {
+            return Self::Borrowed(cache);
+        }
+        if session.fallback_stale() {
+            let built = std::sync::Arc::new(session.build_layout(WrapCache::default(), measure));
+            *session.fallback_layout.borrow_mut() = Some(built);
+        }
+        match session.fallback_layout.borrow().clone() {
+            Some(cache) => Self::Owned(cache),
+            // 上面刚补齐；显式分支而不是 expect：读路径不该再有 panic 点
+            None => Self::Owned(std::sync::Arc::new(
+                session.build_layout(WrapCache::default(), measure),
+            )),
         }
     }
 }
@@ -4110,6 +4169,34 @@ mod tests {
         assert!(!guard.finish(1, "旧名.atb"), "旧名的回执不再结算任何队列");
     }
 
+    /// 非 Flush 失败：回执取走的待续 Flush 必须回填，重试成功后才补发收尾。
+    /// 不回填的话挂起的关闭 / 切换会永久等下去（挂起动作并未被取消）。
+    #[test]
+    fn non_flush_failure_requeues_flush_for_retry() {
+        let mut guard = SaveInflight::default();
+        assert_eq!(guard.begin(1, "a.atb", false), SaveAdmission::Start);
+        assert_eq!(guard.begin(1, "a.atb", true), SaveAdmission::Queued);
+        // 失败回执先结清在途标记并取走待续项，再按「本笔不是 Flush」回填
+        assert!(guard.finish(1, "a.atb"), "回执当场拿到待续 Flush");
+        guard.requeue_flush(1, "a.atb");
+        // 重试成功后由回执补发：待续项必须还在，且只交付一次
+        assert_eq!(guard.begin(1, "a.atb", false), SaveAdmission::Start, "重试仍可提交");
+        assert!(guard.finish(1, "a.atb"), "回填的待续 Flush 要交付");
+        assert!(!guard.finish(1, "a.atb"), "同一待续项只交付一次");
+    }
+
+    /// 本笔就是 Flush 且失败：挂起动作已就地取消，待续项必须丢弃，不能重试成功后再跑一次。
+    #[test]
+    fn flush_failure_drops_queued_flush() {
+        let mut guard = SaveInflight::default();
+        assert_eq!(guard.begin(1, "a.atb", true), SaveAdmission::Start);
+        assert_eq!(guard.begin(1, "a.atb", true), SaveAdmission::Queued);
+        assert!(guard.finish(1, "a.atb"));
+        guard.drop_flush(1, "a.atb");
+        assert_eq!(guard.begin(1, "a.atb", true), SaveAdmission::Start);
+        assert!(!guard.finish(1, "a.atb"), "丢弃后不再有待续项");
+    }
+
     /// 保存失败已取消挂起动作：待续 Flush 必须一并丢弃，不能留到重试成功后补发。
     #[test]
     fn failed_receipt_drops_queued_flush() {
@@ -4146,6 +4233,32 @@ mod tests {
         assert!(lb.original_retry_delay().is_some(), "换图后重新计次");
     }
 
+    /// 兜底布局按数据版本复用：同版本内多次取用同一份，内容变更后才重建。
+    /// 逐次重建会让同一帧的 geo() 与 layout_positions() 各跑一遍逐列自动计算。
+    #[test]
+    fn fallback_layout_is_reused_until_data_changes() {
+        let mut s = text_session(&["短", "尾"]);
+        s.view.layout = None;
+        let size = Size::new(640.0, 480.0);
+        let first = geo(&s, size).cache.row_y.clone();
+        // 同一版本再取：复用会话里那份，而不是重新构建
+        let second = geo(&s, size).cache.row_y.clone();
+        assert_eq!(first, second);
+        assert!(!s.fallback_stale(), "同版本兜底布局不算过期");
+        // 内容变更后必须重建（行数变了，旧兜底布局对不上）
+        s.data.rows.push(TableRow {
+            id: "r2".to_string(),
+            values: std::iter::once(("f1".to_string(), serde_json::json!("新增"))).collect(),
+            height: None,
+            styles: None,
+            ai: None,
+        });
+        s.version += 1;
+        assert!(s.fallback_stale(), "新版本要重建兜底布局");
+        let third = geo(&s, size);
+        assert_eq!(third.cache.row_h.len(), 3, "新内容重新兜底");
+        assert!(s.view.layout.is_none(), "兜底不写正式缓存");
+    }
     /// 布局缓存为 None（重建途中被 take 走、或上一次重建中途 panic）时几何仍可用：
     /// 兜底重建一份自持缓存，读路径不 panic 也不返回空几何。
     #[test]
@@ -4407,12 +4520,12 @@ mod tests {
         assert!(bar_placement(&s, window, viewport).is_none(), "插件表格面在场时不弹");
     }
 
-    /// 重构前的气泡落位算式（仅测试对照：伪尺寸几何 + 手写翻转/钳制）。
-    fn legacy_bar_rect(s: &TableSession, window: iced::window::Id, viewport: Size) -> Rectangle {
+    /// 独立对照算式（伪尺寸几何 + 手写翻转/钳制）：只用于验证落位实现，不参与生产路径。
+    fn reference_bar_rect(s: &TableSession, window: iced::window::Id, viewport: Size) -> Rectangle {
         let view = &s.view;
         let (_, origin) = view.canvas_origin.filter(|(w, _)| *w == window).expect("锚点");
         let region = table_ops::region_of(view.selection.as_ref(), &s.data.fields, &s.data.rows).expect("选区");
-        // 旧路径用伪尺寸 Geo 只取这几个位置量；这里直接照抄同一算式（尺寸不参与）
+        // 只用位置量（列起点 / 行上下缘），视口尺寸不参与这一层的换算
         let cache = s.view.layout.as_ref().expect("布局缓存");
         let (header_h, gutter_w) = (HEADER_H * view.zoom, GUTTER_W * view.zoom);
         let x0 = (cache.col_x[region.col_start] - view.scroll_x + gutter_w).max(8.0);
@@ -4433,9 +4546,9 @@ mod tests {
         )
     }
 
-    /// 气泡落位复用弹层算式后与旧算式同矩形（亚像素内）：窗口 / 原点 / 滚动 / 网格高组合。
+    /// 气泡落位与独立对照算式同矩形（亚像素内）：窗口 / 原点 / 滚动 / 网格高组合。
     #[test]
-    fn format_bar_placement_matches_legacy_rect() {
+    fn format_bar_placement_matches_reference_rect() {
         let origins = [Point::new(0.0, 0.0), Point::new(100.0, 200.0), Point::new(640.0, 460.0)];
         let viewports = [Size::new(900.0, 500.0), Size::new(600.0, 320.0), Size::new(1920.0, 1080.0)];
         let canvases = [Size::new(600.0, 300.0), Size::new(200.0, 40.0)];
@@ -4449,7 +4562,7 @@ mod tests {
                         s.view.scroll_x = 17.0;
                         s.view.scroll_y = 33.0;
                         let got = bar_placement(&s, window, viewport).expect("会话成立").rect;
-                        let want = legacy_bar_rect(&s, window, viewport);
+                        let want = reference_bar_rect(&s, window, viewport);
                         assert!((got.x - want.x).abs() < 0.001, "x {got:?} vs {want:?}");
                         assert!((got.y - want.y).abs() < 0.001, "y {got:?} vs {want:?}");
                         assert_eq!(got.width, want.width);

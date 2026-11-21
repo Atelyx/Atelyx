@@ -2072,7 +2072,7 @@ mod tests {
         assert!(resolve_row(&d, &out_of_range).is_none());
     }
 
-    /// 时间戳项仍是可编辑标量：否则数组里的时间值点不开、Tab 也跳过（改动前是字符串可编辑）。
+    /// 时间戳项仍是可编辑标量：否则数组里的时间值点不开、Tab 也跳过。
     #[test]
     fn timestamp_items_stay_editable() {
         let value = Yaml::Timestamp("2024-01-02 09:30:00".into());
