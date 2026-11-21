@@ -171,6 +171,8 @@ struct ServerStateInner {
     persist: Arc<dyn Fn(&Path, &[(&'static str, serde_json::Value)]) -> Result<(), String> + Send + Sync>,
     /// 名册存储健康（回滚也失败即降级）。
     health: Arc<StorageHealth>,
+    /// 启动时磁盘上的名册内容：写者懒拉起时取走当作首批失败的回滚基线（只取一次）。
+    initial_baseline: Mutex<Option<Vec<(&'static str, serde_json::Value)>>>,
     /// 派生索引缓存（空间 id → 反链/标签索引；纯内存只读派生，可随时重建，不落盘）。
     index_cache: Arc<crate::index::SpaceIndexCache>,
     /// WS 房间表（`/ws/space` 入口的房间机制）。
@@ -318,10 +320,12 @@ mod persist_worker {
 
     /// 拉起写者任务，返回提交通道。必须在 tokio 运行时上下文内调用：
     /// 构造可在运行时之外（如进程入口先建状态后建运行时），写者随首次提交懒拉起。
+    /// `initial_baseline` = 拉起时刻磁盘上已确认的内容（首批失败时的回滚基线）。
     pub(super) fn spawn(
         data_dir: std::path::PathBuf,
         persist: Arc<PersistFn>,
         health: Arc<StorageHealth>,
+        initial_baseline: Option<Vec<(&'static str, serde_json::Value)>>,
     ) -> Option<tokio::sync::mpsc::UnboundedSender<PersistJob>> {
         let handle = tokio::runtime::Handle::try_current().ok()?;
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<PersistJob>();
@@ -329,7 +333,7 @@ mod persist_worker {
         handle.spawn(async move {
             // 上一批成功落盘的内容：本批失败时写回它，磁盘回到「失败的操作不生效」的状态
             // （本批可能已写成功前几个文件，不回写会留下半截新态）
-            let mut last_written: Option<Vec<(&'static str, serde_json::Value)>> = None;
+            let mut last_written: Option<Vec<(&'static str, serde_json::Value)>> = initial_baseline;
             while let Some(job) = rx.recv().await {
                 let seq = job.seq;
                 let result = persist(&data_dir, &job.files);
@@ -435,6 +439,8 @@ impl ServerState {
             spaces: load_array(data_dir, "spaces.json"),
             invites: load_array(data_dir, "invites.json"),
         };
+        // 启动态 = 磁盘内容：写者拉起前的首批失败要能回到它（此时尚无「上一批」）
+        let initial_baseline = describe(&memory);
         let journal = Arc::new(Journal {
             locked: Mutex::new(JournalState { memory, ..Default::default() }),
             commit: tokio::sync::Mutex::new(()),
@@ -445,7 +451,12 @@ impl ServerState {
         let health = Arc::new(StorageHealth::default());
         // 构造期若已在运行时上下文内则顺手拉起写者；运行时之外（进程入口先建状态后建运行时）
         // 拿不到 Handle，写者随首次提交在运行时上下文内懒拉起
-        let sender = persist_worker::spawn(data_dir.to_path_buf(), persist.clone(), health.clone());
+        let sender = persist_worker::spawn(
+            data_dir.to_path_buf(),
+            persist.clone(),
+            health.clone(),
+            Some(initial_baseline.clone()),
+        );
         let writer = tokio::sync::OnceCell::new();
         if let Some(sender) = sender {
             let _ = writer.set(sender);
@@ -457,6 +468,7 @@ impl ServerState {
             writer,
             persist,
             health,
+            initial_baseline: Mutex::new(Some(initial_baseline)),
             index_cache: Arc::new(SpaceIndexCache::new()),
             hub: Hub::default(),
             path_locks: PathLocks::new(),
@@ -555,10 +567,13 @@ impl ServerState {
         if let Some(sender) = self.inner.writer.get() {
             return persist_worker::submit(sender, seq, files);
         }
+        // 只有首次提交会走到这里：取走启动基线，交给写者作首批失败的回滚目标
+        let baseline = self.inner.initial_baseline.lock().unwrap().take();
         let started = persist_worker::spawn(
             self.inner.data_dir.clone(),
             self.inner.persist.clone(),
             self.inner.health.clone(),
+            baseline,
         );
         match started {
             Some(sender) => {
@@ -663,6 +678,51 @@ mod tests {
             disk.iter().map(|u| u.username.as_str()).collect::<Vec<_>>(),
             vec!["alice", "bob"]
         );
+    }
+
+    /// 首批落盘失败也要能回滚：基线 = 启动时的磁盘内容，进程刚起就遇上坏盘不得留下半截新态。
+    #[tokio::test]
+    async fn first_batch_failure_rolls_back_to_startup_content() {
+        let dir = tempfile::tempdir().unwrap();
+        // 先造一份已落盘的启动态
+        let seed = ServerState::open(dir.path());
+        seed.mutate(|p| {
+            p.users.push(User {
+                id: "a".to_string(),
+                username: "alice".to_string(),
+                password_hash: "x".to_string(),
+                display_name: "alice".to_string(),
+                created_at: 0,
+            });
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let startup = std::fs::read_to_string(dir.path().join("accounts.json")).unwrap();
+
+        // 新进程重启：首批写盘必失败，回滚必须回到启动内容
+        let state = ServerState::open_with_persist(dir.path(), |_dir, _files| {
+            Err("模拟磁盘只读".to_string())
+        });
+        let failed = state
+            .mutate(|p| {
+                p.users.push(User {
+                    id: "b".to_string(),
+                    username: "bob".to_string(),
+                    password_hash: "x".to_string(),
+                    display_name: "bob".to_string(),
+                    created_at: 0,
+                });
+                Ok(())
+            })
+            .await;
+        assert!(failed.is_err(), "首批落盘失败必须报错");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("accounts.json")).unwrap(),
+            startup,
+            "首批失败不得让磁盘停在本批半截新态"
+        );
+        assert_eq!(state.read(|p| p.users.len()), 1, "内存回滚到启动态");
     }
 
     /// 回滚写盘也失败 → 存储降级：本次报错，此后所有 mutate 直接 503，磁盘不再被继续覆盖。
