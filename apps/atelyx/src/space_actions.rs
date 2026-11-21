@@ -992,6 +992,22 @@ pub fn handle(app: &mut App, msg: SpaceMsg) -> Task<Message> {
         SpaceMsg::JoinSpace => join_space(app),
         SpaceMsg::JoinSpaceDone { result } => on_space_joined(app, result),
         SpaceMsg::TreeLoaded { gen, result } => on_tree_loaded(app, gen, result),
+        SpaceMsg::CanvasLoaded { gen, rel, truncated, result } => {
+            let failed = result.is_err();
+            // 内容回执先过画布侧的身份守卫：过期回执不得提示，也不得改动当前画布
+            let task = crate::canvas_actions::on_msg(
+                app,
+                crate::canvas_view::CanvasMsg::Loaded(gen, rel.clone(), result),
+            );
+            let (_, partial) = canvas_load_outcome(truncated, failed);
+            if partial
+                && gen == app.epoch()
+                && app.ui.last_canvas_file.as_deref() == Some(rel.as_str())
+            {
+                app.notify(NoticeLevel::Warning, "部分引用的内容未能载入（读取超时）");
+            }
+            task
+        }
         SpaceMsg::NoteSaved { gen, rel, frozen, reason, result } => {
             on_note_saved(app, gen, &rel, frozen, reason, result)
         }
@@ -1704,6 +1720,11 @@ pub fn space_submit_table_save(app: &mut App, reason: tv::SaveReason) -> Task<Me
     let client = session.client;
     let space_id = session.space_id;
     let author = crate::history_author(app);
+    // 同键在途：慢网络下补丁并发堆叠会乱序落地覆盖服务端。AutoSave / Manual 顺延，
+    // Flush 记账由回执补发（关窗 / 切文件依赖它一定收尾）
+    if !claim_space_doc_save(app, gen, &file, matches!(reason, tv::SaveReason::Flush)) {
+        return Task::none();
+    }
     let frozen_for_msg = frozen.clone();
     let file_for_msg = file.clone();
     Task::perform(
@@ -1804,6 +1825,8 @@ pub(crate) fn on_table_patch_done(
         }
     }
     // 身份守卫：gen + 文件路径（或标题漂移后的新路径）双校验
+    // 回执即摘本笔在途（无论成败）：键按发起时的文件，改名与否都要结清，否则永久阻塞
+    let queued = settle_space_doc_save(app, gen, &file);
     if !atelyx_core::ai::doc_edit::receipt_file_matches(
         app.table.as_ref().map(|s| s.file.as_str()),
         &file,
@@ -1815,6 +1838,13 @@ pub(crate) fn on_table_patch_done(
     match result {
         Err(e) => {
             app.settle_history_restore(false);
+            // 失败必排下一次期限（退避），否则用户停手后正文永不重试落盘
+            arm_space_doc_retry(app, &file);
+            // Flush 失败：等回执的 AI 文件操作不能空等，就地回填；其余挂起动作保留待重试
+            // （待续的 Flush 已随回执出队，重试成功后不会重复执行关闭 / 切换）
+            if flush {
+                crate::ai_fs_edit::abort_pending(app, &e);
+            }
             let Some(s) = app.table.as_mut() else { return Task::none() };
             s.save_error = Some(e.clone());
             // 404 = 文件被改名（他端标题漂移未广播时）或删除：明示刷新，不做路径猜测
@@ -1862,6 +1892,15 @@ pub(crate) fn on_table_patch_done(
             if stable {
                 app.settle_history_restore(true);
             }
+            // 在途期间排队的 Flush：本笔落稳就补发收尾（脏则立刻再写一笔 Flush）
+            let dirty = app.table.as_ref().is_some_and(|s| s.dirty);
+            if resolve_queued_flush(queued, flush, dirty) {
+                return task.chain(space_submit_table_save(app, tv::SaveReason::Flush));
+            }
+            if queued {
+                // 待续 Flush 已无需再写（内容稳定 / 本笔即 Flush）：直接放行挂起动作
+                return task.chain(app.after_any_flush());
+            }
             // Flush 回执期间有新编辑（unstable）：重收一轮 Flush——脏拦截已在放行前 flush，
             // 此轮丢失会让关闭/切换动作静默挂起（对齐笔记保存链）
             if flush {
@@ -1877,7 +1916,204 @@ pub(crate) fn on_table_patch_done(
     task
 }
 
+/// 表格 / 画布保存在途的原子判定（与笔记链 `space_note_save_inflight` 同构）：
+/// 键为空即登记并放行；同键在途时 Flush 记入待续队列、其余顺延。
+/// 返回 false 表示本次不下发。
+fn claim_space_doc_save(app: &mut App, gen: u64, file: &str, flush: bool) -> bool {
+    claim_space_save_inflight(
+        &mut app.space_doc_save_inflight,
+        &mut app.space_doc_save_flush_queued,
+        gen,
+        file,
+        flush,
+    )
+}
+
+/// 在途判定的纯逻辑（表格 / 画布共用，笔记链同构）：返回 false = 本次不下发。
+/// 世代变更即清空旧世代的键（切仓库后旧回执再也回不来，留着会永久挡住新仓库同名文件）。
+pub(crate) fn claim_space_save_inflight(
+    inflight: &mut Vec<(u64, String)>,
+    queued_flush: &mut Vec<(u64, String)>,
+    gen: u64,
+    file: &str,
+    flush: bool,
+) -> bool {
+    inflight.retain(|(key_gen, _)| *key_gen == gen);
+    queued_flush.retain(|(key_gen, _)| *key_gen == gen);
+    let key = (gen, file.to_string());
+    if inflight.contains(&key) {
+        if flush && !queued_flush.contains(&key) {
+            queued_flush.push(key);
+        }
+        return false;
+    }
+    inflight.push(key);
+    true
+}
+
+/// 回执结清（纯逻辑）：返回本笔回执前是否有排队的 Flush。
+pub(crate) fn settle_space_save_inflight(
+    inflight: &mut Vec<(u64, String)>,
+    queued_flush: &mut Vec<(u64, String)>,
+    gen: u64,
+    file: &str,
+) -> bool {
+    let key = (gen, file.to_string());
+    inflight.retain(|entry| entry != &key);
+    let queued = queued_flush.contains(&key);
+    queued_flush.retain(|entry| entry != &key);
+    queued
+}
+
+/// 空间画布载入的收尾判定：部分引用超预算仍算载入成功（画布照常打开），
+/// 只有整体失败（画布正文都没取到）才走失败态。返回（是否打开，是否提示部分缺失）。
+pub(crate) fn canvas_load_outcome(truncated: bool, failed: bool) -> (bool, bool) {
+    (!failed, truncated && !failed)
+}
+
+/// 成功回执后是否补写一轮 Flush：有待续项、本笔不是 Flush、且内容仍脏。
+/// 本笔即 Flush 时待续项一律作废——挂起动作已随失败收口，再补发会重复执行关闭 / 切换。
+pub(crate) fn resolve_queued_flush(queued: bool, flush: bool, dirty: bool) -> bool {
+    queued && !flush && dirty
+}
+
+/// 回执结清在途项：无论成败都摘（不摘会永久阻塞该文档后续保存）。
+/// 返回本笔回执前是否有排队的 Flush。
+fn settle_space_doc_save(app: &mut App, gen: u64, file: &str) -> bool {
+    settle_space_save_inflight(
+        &mut app.space_doc_save_inflight,
+        &mut app.space_doc_save_flush_queued,
+        gen,
+        file,
+    )
+}
+
+/// 保存失败后的退避重排（表格 / 画布共用）：失败后必须自己排下一次期限——
+/// 用户停手后没有新输入事件，只靠内容变更排期限等于永不重试。
+fn arm_space_doc_retry(app: &mut App, file: &str) {
+    let (failed, attempt, at) =
+        crate::retry_after_failure(app.save_retry.as_ref(), file, Instant::now());
+    app.save_retry = Some((failed, attempt));
+    app.autosave_deadline = Some(at);
+    app.autosave_timer = false;
+}
+
 // ===== 画布（空间模式） =====
+
+/// 空间画布引用并发上限：引用数量通常是个位数，限速只为不同时压满连接池。
+const SPACE_CANVAS_REF_CONCURRENCY: usize = 5;
+
+/// 空间画布整批引用的总预算：超过即带着已取到的部分回执（单条读另有自己的超时）。
+const SPACE_CANVAS_REF_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// 有界并发 + 总预算的批量抓取：至多 `limit` 个在飞，整批不超过 `budget`。
+/// 返回（已取到的项，是否因预算用尽提前收手）；未回执的项不在结果里，
+/// 调用方按缺失处理——单项失败或慢不阻塞其它项。
+pub(crate) async fn collect_with_budget<F, Fut>(
+    paths: Vec<(String, canvas_actions::RefKind)>,
+    limit: usize,
+    budget: std::time::Duration,
+    fetch: F,
+) -> (HashMap<String, canvas_actions::RefRaw>, bool)
+where
+    F: Fn(String, canvas_actions::RefKind) -> Fut + Clone + Send + 'static,
+    Fut: std::future::Future<Output = canvas_actions::RefRaw> + Send + 'static,
+{
+    let limit = limit.max(1);
+    let (tx, mut rx) =
+        tokio::sync::mpsc::channel::<(String, canvas_actions::RefRaw)>(limit);
+    let budget = tokio::time::sleep(budget);
+    tokio::pin!(budget);
+    let mut pending = paths.into_iter();
+    let mut out: HashMap<String, canvas_actions::RefRaw> = HashMap::new();
+    let mut inflight = 0usize;
+    let mut truncated = false;
+    loop {
+        // 补满并发窗口
+        while inflight < limit {
+            let Some((path, kind)) = pending.next() else { break };
+            let tx = tx.clone();
+            let fetch = fetch.clone();
+            inflight += 1;
+            tokio::spawn(async move {
+                let raw = fetch(path.clone(), kind).await;
+                let _ = tx.send((path, raw)).await;
+            });
+        }
+        if inflight == 0 {
+            break;
+        }
+        tokio::select! {
+            got = rx.recv() => {
+                let Some((path, raw)) = got else { break };
+                inflight -= 1;
+                out.insert(path, raw);
+            }
+            _ = &mut budget => {
+                // 预算用尽：未回执的项按缺失，已取到的照常展示
+                truncated = true;
+                break;
+            }
+        }
+    }
+    (out, truncated)
+}
+
+/// 空间画布引用抓取：把请求口径绑进 collect_with_budget 的取数闭包。
+pub(crate) async fn fetch_canvas_refs(
+    client: Arc<SpaceClient>,
+    space_id: String,
+    paths: Vec<(String, canvas_actions::RefKind)>,
+) -> (HashMap<String, canvas_actions::RefRaw>, bool) {
+    collect_with_budget(
+        paths,
+        SPACE_CANVAS_REF_CONCURRENCY,
+        SPACE_CANVAS_REF_BUDGET,
+        move |path, kind| {
+            let client = client.clone();
+            let space_id = space_id.clone();
+            async move { fetch_one_canvas_ref(&client, &space_id, &path, kind).await }
+        },
+    )
+    .await
+}
+
+/// 单个引用内容的抓取口径（与本地同源）：文本 / 媒体取原始字节，UTF-8 可解码 = 文本，
+/// 否则二进制占位；表格走文本端点；读不到 = 缺失。
+async fn fetch_one_canvas_ref(
+    client: &SpaceClient,
+    space_id: &str,
+    path: &str,
+    kind: canvas_actions::RefKind,
+) -> canvas_actions::RefRaw {
+    match kind {
+        canvas_actions::RefKind::Text | canvas_actions::RefKind::Media => {
+            match client.get_file_bytes(space_id, path).await {
+                Ok(bytes) => match String::from_utf8(bytes) {
+                    Ok(t) => canvas_actions::RefRaw::Text(t),
+                    Err(_) => canvas_actions::RefRaw::Binary,
+                },
+                Err(_) => canvas_actions::RefRaw::Missing,
+            }
+        }
+        canvas_actions::RefKind::Image => match client.get_file_bytes(space_id, path).await {
+            Ok(bytes) => {
+                let (width, height) = canvas_actions::image_dimensions(&bytes);
+                canvas_actions::RefRaw::Image { bytes, width, height }
+            }
+            Err(_) => canvas_actions::RefRaw::Missing,
+        },
+        canvas_actions::RefKind::Table => match client.get_file_text(space_id, path).await {
+            Ok(t) => serde_json::from_str::<atelyx_core::vault::TableFile>(&t)
+                .map(|tb| canvas_actions::RefRaw::Table {
+                    summary: format!("{} 字段 · {} 行", tb.fields.len(), tb.rows.len()),
+                    body: atelyx_core::table_ops::table_to_text(&tb),
+                })
+                .unwrap_or(canvas_actions::RefRaw::Missing),
+            Err(_) => canvas_actions::RefRaw::Missing,
+        },
+    }
+}
 
 /// 空间模式载入 .atlx：画布文本 + 引用内容一并拉取（文本 / 媒体 / 图片取字节端点，表格走文本端点）。
 pub fn space_load_canvas(app: &App, rel: &str) -> Task<Message> {
@@ -1894,43 +2130,20 @@ pub fn space_load_canvas(app: &App, rel: &str) -> Task<Message> {
             let canvas: atelyx_core::vault::CanvasFile =
                 serde_json::from_str(&text).map_err(|e| format!("画布解析失败：{e}"))?;
             let docs = canvas_actions::prepare_docs(&canvas);
-            let mut refs: HashMap<String, canvas_actions::RefRaw> = HashMap::new();
-            for (path, kind) in canvas_actions::collect_ref_paths(&canvas) {
-                // 与本地同口径：取原始字节，UTF-8 可解码 = 文本，否则 = 二进制占位，读不到 = 缺失。
-                // 不经文本端点——它按 lossy 解码返回，非文本内容与缺失在响应里无从区分
-                let raw = match kind {
-                    canvas_actions::RefKind::Text | canvas_actions::RefKind::Media => {
-                        match client.get_file_bytes(&space_id, &path).await {
-                            Ok(bytes) => match String::from_utf8(bytes) {
-                                Ok(t) => canvas_actions::RefRaw::Text(t),
-                                Err(_) => canvas_actions::RefRaw::Binary,
-                            },
-                            Err(_) => canvas_actions::RefRaw::Missing,
-                        }
-                    }
-                    canvas_actions::RefKind::Image => match client.get_file_bytes(&space_id, &path).await {
-                        Ok(bytes) => {
-                            let (width, height) = canvas_actions::image_dimensions(&bytes);
-                            canvas_actions::RefRaw::Image { bytes, width, height }
-                        }
-                        Err(_) => canvas_actions::RefRaw::Missing,
-                    },
-                    canvas_actions::RefKind::Table => match client.get_file_text(&space_id, &path).await {
-                        Ok(t) => serde_json::from_str::<atelyx_core::vault::TableFile>(&t)
-                            .map(|tb| canvas_actions::RefRaw::Table {
-                                summary: format!("{} 字段 · {} 行", tb.fields.len(), tb.rows.len()),
-                                body: atelyx_core::table_ops::table_to_text(&tb),
-                            })
-                            .unwrap_or(canvas_actions::RefRaw::Missing),
-                        Err(_) => canvas_actions::RefRaw::Missing,
-                    },
-                };
-                refs.insert(path, raw);
-            }
+            let paths = canvas_actions::collect_ref_paths(&canvas);
+            let (refs, truncated) = fetch_canvas_refs(client, space_id, paths).await;
             let text_docs = canvas_actions::prepare_text_docs(&canvas, &refs);
-            Ok(canvas_actions::LoadOut { canvas, docs, text_docs, refs })
+            // 部分引用超预算按缺失处理：画布照常打开，缺失项由回执侧提示
+            let out = canvas_actions::LoadOut { canvas, docs, text_docs, refs };
+            Ok::<_, String>((out, truncated))
         },
-        move |result| Message::Canvas(crate::canvas_view::CanvasMsg::Loaded(gen, rel_for_cb, result)),
+        move |result| {
+            let (result, truncated) = match result {
+                Ok((out, truncated)) => (Ok(out), truncated),
+                Err(e) => (Err(e), false),
+            };
+            Message::Space(SpaceMsg::CanvasLoaded { gen, rel: rel_for_cb, truncated, result })
+        },
     )
 }
 
@@ -1963,6 +2176,10 @@ pub fn space_submit_canvas_save(app: &mut App, reason: crate::canvas_view::SaveR
     let client = session.client;
     let space_id = session.space_id;
     let author = crate::history_author(app);
+    // 同键在途：AutoSave / Manual 顺延，Flush 记账由回执补发（与笔记链同构）
+    if !claim_space_doc_save(app, gen, &file, matches!(reason, crate::canvas_view::SaveReason::Flush)) {
+        return Task::none();
+    }
     let frozen_for_msg = frozen.clone();
     let file_for_msg = file.clone();
     Task::perform(
@@ -2065,6 +2282,8 @@ pub(crate) fn on_canvas_patch_done(
             app.plugins.on_file_changed(&new_file, FileChangeKind::Updated, None);
         }
     }
+    // 回执即摘本笔在途（无论成败）：键按发起时的文件，改名与否都要结清
+    let queued = settle_space_doc_save(app, gen, &file);
     // 身份守卫：gen + 文件路径（或标题漂移后的新路径）双校验
     if !atelyx_core::ai::doc_edit::receipt_file_matches(
         app.canvas.as_ref().map(|s| s.file.as_str()),
@@ -2077,6 +2296,12 @@ pub(crate) fn on_canvas_patch_done(
     match result {
         Err(e) => {
             app.settle_history_restore(false);
+            // 失败必排下一次期限（退避）；Flush 失败就地回填等回执的 AI 文件操作，
+            // 待续的 Flush 已随回执出队（重试成功后不重复执行关闭 / 切换）
+            arm_space_doc_retry(app, &file);
+            if flush {
+                crate::ai_fs_edit::abort_pending(app, &e);
+            }
             let Some(s) = app.canvas.as_mut() else { return Task::none() };
             s.save_error = Some(e.clone());
             // 404 = 文件被改名（他端标题漂移未广播时）或删除：明示刷新，不做路径猜测
@@ -2117,6 +2342,17 @@ pub(crate) fn on_canvas_patch_done(
             }
             if stable {
                 app.settle_history_restore(true);
+            }
+            // 在途期间排队的 Flush：本笔落稳就补发收尾（脏则立刻再写一笔 Flush）
+            let dirty = app.canvas.as_ref().is_some_and(|s| s.dirty);
+            if resolve_queued_flush(queued, flush, dirty) {
+                return task.chain(space_submit_canvas_save(
+                    app,
+                    crate::canvas_view::SaveReason::Flush,
+                ));
+            }
+            if queued {
+                return task.chain(app.after_any_flush());
             }
             // Flush 回执期间有新编辑（unstable）：重收一轮 Flush——脏拦截已在放行前 flush，
             // 此轮丢失会让关闭/切换动作静默挂起（对齐笔记 / 表格保存链）
@@ -4197,6 +4433,122 @@ mod tests {
         }
     }
 
+    /// 有界并发 + 总预算：并发窗口不超过上限、预算用尽带回已取到的部分、
+    /// 单项失败不阻塞其它项。
+    #[tokio::test(flavor = "current_thread")]
+    async fn 引用抓取有界并发且超预算保留已取部分() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let paths: Vec<(String, canvas_actions::RefKind)> = (0..8)
+            .map(|i| (format!("p{i}.md"), canvas_actions::RefKind::Text))
+            .collect();
+        let (inflight, peak_handle) = (in_flight.clone(), peak.clone());
+        let fetch = move |path: String, _kind: canvas_actions::RefKind| {
+            let inflight = inflight.clone();
+            let peak = peak_handle.clone();
+            async move {
+                let now = inflight.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(now, Ordering::SeqCst);
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                inflight.fetch_sub(1, Ordering::SeqCst);
+                canvas_actions::RefRaw::Text(path)
+            }
+        };
+        let (out, truncated) = collect_with_budget(
+            paths,
+            3,
+            std::time::Duration::from_secs(5),
+            fetch,
+        )
+        .await;
+        assert_eq!(out.len(), 8, "预算充足时全部取回");
+        assert!(!truncated);
+        assert!(peak.load(Ordering::SeqCst) <= 3, "在飞数不得超过并发上限");
+
+        // 总预算远小于单项耗时：只带回已完成的项，并标记 truncated
+        let paths: Vec<(String, canvas_actions::RefKind)> = (0..6)
+            .map(|i| (format!("q{i}.md"), canvas_actions::RefKind::Text))
+            .collect();
+        let fetch = |path: String, _kind: canvas_actions::RefKind| async move {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            canvas_actions::RefRaw::Text(path)
+        };
+        let (out, truncated) = collect_with_budget(
+            paths,
+            2,
+            std::time::Duration::from_millis(50),
+            fetch,
+        )
+        .await;
+        assert!(truncated, "超预算必须标记部分载入");
+        assert!(out.len() < 6, "超预算时不会等齐全部引用：{} 项", out.len());
+
+        // 单项失败（这里用 panic 模拟）不影响其它项
+        let paths: Vec<(String, canvas_actions::RefKind)> = (0..3)
+            .map(|i| (format!("r{i}.md"), canvas_actions::RefKind::Text))
+            .collect();
+        let fetch = |path: String, _kind: canvas_actions::RefKind| async move {
+            if path == "r1.md" {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                return canvas_actions::RefRaw::Missing;
+            }
+            canvas_actions::RefRaw::Text(path)
+        };
+        let (out, truncated) = collect_with_budget(
+            paths,
+            3,
+            std::time::Duration::from_secs(5),
+            fetch,
+        )
+        .await;
+        assert!(!truncated);
+        assert_eq!(out.len(), 3, "失败项也占位，不拉下其它项");
+        assert!(matches!(out["r1.md"], canvas_actions::RefRaw::Missing));
+    }
+    /// 空间表格 / 画布在途守卫：同键 AutoSave 顺延、Flush 入队、回执补发、
+    /// 失败回执丢弃待续项（避免重试成功后重复执行关闭 / 切换）。
+    #[test]
+    fn 空间文档保存在途守卫与待续_flush() {
+        let (mut inflight, mut queued) = (Vec::new(), Vec::new());
+        assert!(claim_space_save_inflight(&mut inflight, &mut queued, 1, "a.atb", false));
+        // 同键在途：AutoSave 顺延且不入队
+        assert!(!claim_space_save_inflight(&mut inflight, &mut queued, 1, "a.atb", false));
+        assert!(queued.is_empty(), "AutoSave 顺延不记待续");
+        // 同键 Flush：入队一次（重复 Flush 不重复入队）
+        assert!(!claim_space_save_inflight(&mut inflight, &mut queued, 1, "a.atb", true));
+        assert!(!claim_space_save_inflight(&mut inflight, &mut queued, 1, "a.atb", true));
+        assert_eq!(queued, vec![(1u64, "a.atb".to_string())]);
+        // 其它文件不受同键在途影响
+        assert!(claim_space_save_inflight(&mut inflight, &mut queued, 1, "b.atb", false));
+        // 回执结清并报出待续项
+        assert!(settle_space_save_inflight(&mut inflight, &mut queued, 1, "a.atb"));
+        assert_eq!(inflight, vec![(1u64, "b.atb".to_string())], "只摘本笔");
+        assert!(queued.is_empty(), "待续项随回执出队");
+
+        // 成功回执 + 仍有脏 + 有待续 → 补发 Flush
+        assert!(resolve_queued_flush(true, false, true));
+        // 内容已稳定 → 不再补写
+        assert!(!resolve_queued_flush(true, false, false));
+        // 本笔就是 Flush（已失败 abort）→ 丢弃待续，不重复执行挂起动作
+        assert!(!resolve_queued_flush(true, true, true));
+        // 回执无论成败都摘键：失败后再提交同一文件必须放行
+        assert!(claim_space_save_inflight(&mut inflight, &mut queued, 1, "a.atb", false));
+
+        // 世代变更：旧世代键清空，新仓库同名文件不被挡
+        let (mut inflight, mut queued) =
+            (vec![(1u64, "a.atb".to_string())], vec![(1u64, "a.atb".to_string())]);
+        assert!(claim_space_save_inflight(&mut inflight, &mut queued, 2, "a.atb", false));
+        assert_eq!(inflight, vec![(2u64, "a.atb".to_string())]);
+        assert!(queued.is_empty(), "旧世代的待续项一并丢弃");
+    }
+    /// 部分引用超预算不算打开失败：画布照常打开并提示缺失；整体失败才进失败态。
+    #[test]
+    fn 部分引用缺失仍算载入成功() {
+        assert_eq!(canvas_load_outcome(false, false), (true, false), "全部取到：打开且不提示");
+        assert_eq!(canvas_load_outcome(true, false), (true, true), "部分取到：打开并提示");
+        assert_eq!(canvas_load_outcome(true, true), (false, false), "整体失败：不打开");
+    }
     #[test]
     fn 整树填充各目录切片() {
         // 三层树：a/{b/{c.md}, d.md}、顶层 x.md——每个目录键的切片都应含直接子项
