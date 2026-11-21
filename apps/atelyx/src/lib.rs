@@ -710,14 +710,15 @@ pub(crate) fn tick_deadline(deferred: bool, now: Instant, attempt: u32) -> Optio
 
 /// 自动保存一拍的完整决策：先清期限（可能来自表格 / 画布），再决定是否顺延重排。
 /// 顺序是关键——提交前清掉，顺延的那笔才不会被「已到期的旧期限」留在场上空转。
+/// `note_submit` = 本拍确实要提交笔记（防抖到点，或本面失败过且可重试的重试拍）。
 /// 返回（本拍是否顺延，本拍之后的期限）。
 pub(crate) fn autosave_tick_decision(
-    note_dirty: bool,
+    note_submit: bool,
     note_deferred: bool,
     attempt: u32,
     now: Instant,
 ) -> (bool, Option<Instant>) {
-    let deferred = note_dirty && note_deferred;
+    let deferred = note_submit && note_deferred;
     (deferred, tick_deadline(deferred, now, attempt))
 }
 
@@ -3633,18 +3634,24 @@ impl App {
                     if retry_due {
                         self.autosave_retry_deadline = None;
                     }
-                    let attempt = self
+                    let note_failure = self
                         .ui
                         .last_note_file
                         .as_deref()
-                        .and_then(|rel| save_failure(&self.save_retry, rel))
-                        .map(|f| f.attempt)
-                        .unwrap_or(1);
+                        .and_then(|rel| save_failure(&self.save_retry, rel));
+                    let attempt = note_failure.map(|f| f.attempt).unwrap_or(1);
                     let note_dirty = self.dirty;
+                    // 重试拍只对「本面确实失败过且可重试」生效：重试槽是三条链共用的单一最早期限，
+                    // 表格 / 画布排下的那一拍不得把从未失败（或已换成冲突 / 只读这类不可重试错误）
+                    // 的笔记提前落盘。`save_error` 在内容再次变更时清掉——新输入只走防抖尾沿。
+                    let note_retry = retry_due
+                        && self.save_error.is_some()
+                        && note_failure.is_some_and(|f| f.retryable);
+                    // 单槽契约：重试拍重试所有「本面失败过且可重试」的脏面，三面同构；重试槽只留
+                    // 最早一条，先到期的那拍把其余面一并重试，不会有链因槽被占而失去重试。
+                    let note_due = note_dirty && (debounce_due || note_retry);
                     let mut submitted_deferred = false;
-                    // 防抖到点要落盘；退避到点同样要重试（用户还在打字时防抖一直被后推，
-                    // 没落盘的内容只能靠重试拍写回）
-                    if note_dirty && (debounce_due || retry_due) {
+                    if note_due {
                         if let Some(rel) = self.ui.last_note_file.clone() {
                             let gen = self.epoch();
                             task = task.chain(self.submit_save(SaveReason::AutoSave));
@@ -3656,7 +3663,7 @@ impl App {
                     // 顺延的那笔不会有回执：重试期限按退避重排到未来（正文停手后仍会重试）；
                     // 其余情形本拍已清空，由回执或下一拍内容变更重排
                     let (_, deferred_at) = autosave_tick_decision(
-                        note_dirty && (debounce_due || retry_due),
+                        note_due,
                         submitted_deferred,
                         attempt,
                         Instant::now(),
@@ -10270,6 +10277,119 @@ mod file_drop_tests {
             app.autosave_retry_deadline.is_some_and(|at| at < far),
             "更早的失败链把重试期限往前收，而不是被 16s 拖住"
         );
+    }
+
+    /// 两槽测试的夹具：临时仓库 + 空计时器与在途表。
+    /// 目录按单调序号命名：同进程并行跑的用例若按秒取名会撞到同一个仓库目录互删。
+    fn autosave_slot_fixture() -> (super::App, std::path::PathBuf, u64) {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "atelyx-autosave-slot-{}-{seq}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("建临时仓库");
+        let (mut app, _boot) = super::App::boot();
+        let _ = app.enter_vault(dir.clone(), false);
+        let gen = app.epoch();
+        app.save_retry.clear();
+        app.notifications.clear();
+        app.notice_throttle.clear();
+        app.autosave_retry_deadline = None;
+        app.autosave_deadline = None;
+        app.note_save_inflight.clear();
+        (app, dir, gen)
+    }
+    /// 两槽各按自己到期出手：只有重试槽到期时笔记不落盘（防抖尾沿未到），重试槽清空、
+    /// 防抖槽原样保留。走真实入口 Message::AutosaveTick，判据用在途表而不是真写盘；
+    /// 仓库是临时目录——没有仓库时提交会在登记在途键之前就返回，测不出「有没有提交」。
+    #[test]
+    fn retry_tick_keeps_content_debounce_slot() {
+        use std::time::{Duration, Instant};
+        let (mut app, dir, gen) = autosave_slot_fixture();
+        // 表格链失败排下重试；笔记侧同时有持续输入但防抖尾沿还没到
+        app.settle_slot_save_failure(
+            super::SaveSlot::DocSpace,
+            gen,
+            "t.atb",
+            false,
+            "磁盘忙：设备未就绪",
+            false,
+            "保存失败",
+            true,
+        );
+        app.ui.last_note_file = Some("a.md".into());
+        app.dirty = true;
+        app.autosave_deadline = Some(Instant::now() + Duration::from_millis(400));
+        let debounce_at = app.autosave_deadline;
+        // 重试槽到期
+        app.autosave_retry_deadline = Some(Instant::now() - Duration::from_millis(1));
+        let _ = app.update(super::Message::AutosaveTick);
+
+        assert_eq!(app.autosave_deadline, debounce_at, "重试拍不得动内容防抖槽");
+        assert!(
+            !app.note_save_inflight.iter().any(|(g, rel)| *g == gen && rel == "a.md"),
+            "防抖没到点，笔记不得被别链的重试拍提交"
+        );
+        assert!(app.autosave_retry_deadline.is_none(), "到期的重试槽必须先清空");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 只有内容防抖槽到期时提交笔记，重试槽原样保留（别的链排下的重试不会被打断）。
+    #[test]
+    fn debounce_tick_keeps_retry_slot() {
+        use std::time::{Duration, Instant};
+        let (mut app, dir, gen) = autosave_slot_fixture();
+        app.settle_slot_save_failure(
+            super::SaveSlot::DocSpace,
+            gen,
+            "t.atb",
+            false,
+            "磁盘忙：设备未就绪",
+            false,
+            "保存失败",
+            true,
+        );
+        let retry_at = app.autosave_retry_deadline.expect("表格链排了重试期限");
+        app.ui.last_note_file = Some("a.md".into());
+        app.dirty = true;
+        app.autosave_deadline = Some(Instant::now() - Duration::from_millis(1));
+        let _ = app.update(super::Message::AutosaveTick);
+
+        assert_eq!(app.autosave_retry_deadline, Some(retry_at), "防抖拍不得动重试槽");
+        assert!(app.autosave_deadline.is_none(), "到期的防抖槽必须清空");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 重试拍只对「本面确实失败过」生效：表格失败排下重试、笔记正在输入时，
+    /// 笔记不得被这一拍提交（它自己的防抖尾沿还没到）。
+    #[test]
+    fn retry_tick_does_not_submit_note_that_never_failed() {
+        use std::time::{Duration, Instant};
+        let (mut app, dir, gen) = autosave_slot_fixture();
+        app.settle_slot_save_failure(
+            super::SaveSlot::DocSpace,
+            gen,
+            "t.atb",
+            false,
+            "磁盘忙：设备未就绪",
+            false,
+            "保存失败",
+            true,
+        );
+        app.ui.last_note_file = Some("a.md".into());
+        app.dirty = true;
+        app.autosave_deadline = Some(Instant::now() + Duration::from_millis(400));
+        let debounce_at = app.autosave_deadline;
+        app.autosave_retry_deadline = Some(Instant::now() - Duration::from_millis(1));
+        let _ = app.update(super::Message::AutosaveTick);
+
+        assert!(
+            !app.note_save_inflight.iter().any(|(g, rel)| *g == gen && rel == "a.md"),
+            "笔记没有失败过，别链的重试拍不得替它提前落盘"
+        );
+        assert_eq!(app.autosave_deadline, debounce_at, "防抖槽仍等尾沿");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 真实入口：索引读不出来不等于「没有反链」。失败回执要留可定位的不可用状态并出声，
