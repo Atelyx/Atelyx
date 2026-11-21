@@ -295,6 +295,34 @@ const FRAME_TICK: std::time::Duration = std::time::Duration::from_millis(8);
 /// 自动保存防抖：最近一次内容变更后停止输入该时长才写回（尾沿 debounce，单定时器链续排）。
 pub(crate) const AUTOSAVE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(500);
 
+/// 保存失败后的首次重试间隔（此后每次翻倍）。
+pub(crate) const SAVE_RETRY_BASE: std::time::Duration = std::time::Duration::from_millis(1000);
+
+/// 保存失败重试间隔上限：正文没落盘要一直重试，但反复撞同一个失败没有意义。
+pub(crate) const SAVE_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// 第 `attempt` 次失败后的重试间隔（1s 起按 2 倍退避，封顶 [`SAVE_RETRY_MAX`]）。
+pub(crate) fn next_retry_delay(attempt: u32) -> std::time::Duration {
+    let shift = attempt.saturating_sub(1).min(5);
+    SAVE_RETRY_BASE
+        .saturating_mul(1u32 << shift)
+        .min(SAVE_RETRY_MAX)
+}
+
+/// 失败后的重试记账（纯函数）：同一文件累加失败次数，换文件或首次失败从 1 起。
+/// 返回（文件，失败次数，下一次期限）。
+pub(crate) fn retry_after_failure(
+    prev: Option<&(String, u32)>,
+    rel: &str,
+    now: Instant,
+) -> (String, u32, Instant) {
+    let attempt = match prev {
+        Some((failed, n)) if failed == rel => n.saturating_add(1),
+        _ => 1,
+    };
+    (rel.to_string(), attempt, now + next_retry_delay(attempt))
+}
+
 /// 标签候选词表的最小刷新间隔：反复点开/关闭候选不重复扫仓库（保存链不刷，只在开候选时刷）。
 pub(crate) const TAG_VOCAB_REFRESH_GAP: std::time::Duration = std::time::Duration::from_secs(2);
 
@@ -1576,10 +1604,13 @@ pub struct App {
     pub dirty: bool,
     /// 上次保存失败原因（None = 无；保存成功或再次编辑即清除）。
     pub save_error: Option<String>,
-    /// 自动保存期限（最近一次内容变更 + 500ms；保存落地或到期触发时清空）。
+    /// 笔记下一次保存的期限：内容变更按防抖（+500ms），保存失败后按退避间隔重排。
     autosave_deadline: Option<Instant>,
     /// 自动保存定时器在途标志（单定时器链：到期检查期限，被推迟则续排剩余时长）。
     autosave_timer: bool,
+    /// 最近一次保存失败的重试记账（文件，连续失败次数）：下一次期限按它退避，
+    /// 落盘成功或内容再变即清空。空 = 当前失败序列已结束。
+    save_retry: Option<(String, u32)>,
     /// 本地笔记保存在途项（键 = 世代 + 相对路径）：同文件不再并发提交——后一笔只能拿到
     /// 旧基线，会把本端上一笔刚写下的内容误判成外部修改。按文件分键，切文件不互相阻塞。
     note_save_inflight: Vec<(u64, String)>,
@@ -1943,6 +1974,7 @@ impl App {
                 save_error: None,
                 autosave_deadline: None,
                 autosave_timer: false,
+                save_retry: None,
                 note_save_inflight: Vec::new(),
                 note_save_flush_queued: Vec::new(),
                 note_mode: NoteMode::Read,
@@ -2137,6 +2169,13 @@ impl App {
         next.push_str(&body);
         self.note_text = next;
         self.dirty = true;
+        self.note_content_changed();
+    }
+
+    /// 正文实际变化后的统一记账：清失败位与失败重试序列，按防抖重排期限。
+    fn note_content_changed(&mut self) {
+        self.save_error = None;
+        self.save_retry = None;
         self.autosave_deadline = Some(Instant::now() + AUTOSAVE_DEBOUNCE);
     }
 
@@ -2168,6 +2207,29 @@ impl App {
         }
         self.plugins.on_table_changed(current.as_deref());
         self.table_event_path = current;
+    }
+
+    /// 排定下一次笔记保存期限：失败重试序列未结束时按退避间隔，否则按防抖尾沿。
+    /// 期限已在现场时不动（在途保存顺延后补排，不能把已推进的退避拉回防抖）。
+    fn arm_retry_or_debounce(&mut self) {
+        if self.autosave_deadline.is_some() {
+            return;
+        }
+        let at = match self.retry_deadline(Instant::now()) {
+            Some(at) => at,
+            None => Instant::now() + AUTOSAVE_DEBOUNCE,
+        };
+        self.autosave_deadline = Some(at);
+        self.autosave_timer = false;
+    }
+
+    /// 重试序列里下一次失败期限：本端仍有未落盘输入且正文与失败时不同的文件才算数。
+    fn retry_deadline(&self, now: Instant) -> Option<Instant> {
+        let (failed, attempt) = self.save_retry.as_ref()?;
+        if !self.dirty || self.ui.last_note_file.as_deref() != Some(failed.as_str()) {
+            return None;
+        }
+        Some(now + next_retry_delay(*attempt))
     }
 
     /// 内容变更后补排自动保存定时器（单定时器链）：期限被输入推迟时按剩余时长续排，否则到期触发保存。
@@ -2202,11 +2264,11 @@ impl App {
                 task.chain(self.after_any_flush())
             };
         }
-        if !self.dirty || self.autosave_deadline.is_some() {
+        if !self.dirty {
             return task;
         }
-        self.autosave_deadline = Some(Instant::now() + AUTOSAVE_DEBOUNCE);
-        self.autosave_timer = false;
+        // 正文仍有未落盘输入：保留的失败重试序列优先于防抖期限（失败后必须还有下一次期限）
+        self.arm_retry_or_debounce();
         task.chain(self.chain_autosave_timer(Task::none()))
     }
 
@@ -3011,8 +3073,7 @@ impl App {
                         // 源码档输入不经编辑面快照：重做栈里的旧全文已对不上本屏正文，直接作废
                         self.edit.invalidate_redo();
                         self.dirty = true;
-                        self.save_error = None;
-                        self.autosave_deadline = Some(Instant::now() + AUTOSAVE_DEBOUNCE);
+                        self.note_content_changed();
                         self.refresh_edit();
                         // Source 档同样接入协作：差分合入协作文档并上行（否则本端按键对端不可见，
                         // 且远端合入后本端继续输入会以旧全文覆盖 note_text 回退远端内容）
@@ -3098,6 +3159,7 @@ impl App {
                 let mut task = Task::none();
                 if mine {
                     self.save_error = None;
+                    self.save_retry = None;
                     if self.note_text == frozen {
                         // 编辑面与冻结内容一致：落盘合流结果就是新基线
                         self.note_base = disk.clone();
@@ -3166,11 +3228,21 @@ impl App {
                 self.settle_history_restore(false);
                 // 回滚没写进磁盘：Restore 版本作废（不得留一条从未落盘的回滚记录）
                 self.pending_restore_note = None;
-                // flush 被保存失败打断：动作不放行（放行会丢弃未落盘内容），挂起输入保留待重试；
-                // 等回执的 AI 文件操作不能一直挂着，就地回填失败原因
+                // 失败后必排下一次期限：用户停手时没有新的输入事件，不重排就永不重试落盘。
+                // 期限已在现场（如手动保存失败、防抖尚未到期）则顺其自然
+                let (failed, attempt, at) =
+                    retry_after_failure(self.save_retry.as_ref(), &rel, Instant::now());
+                self.save_retry = Some((failed, attempt));
+                self.autosave_deadline = Some(at);
+                self.autosave_timer = false;
+                // flush 被保存失败打断：挂起动作不执行（放行会丢掉未落盘内容）、窗口不关、原因可见；
+                // 脏态与 save_error 保留，等下一笔重试落盘
                 if matches!(reason, SaveReason::Flush) {
-                    ai_fs_edit::abort_pending(self, &e);
-                    self.notify(NoticeLevel::Error, format!("保存失败，操作未执行：{e}"));
+                    self.abort_pending_flush("保存失败，操作未执行");
+                    self.notify(
+                        NoticeLevel::Error,
+                        format!("保存失败，操作未执行：{e}（未落盘内容已保留，稍后自动重试）"),
+                    );
                 } else {
                     self.notify(NoticeLevel::Error, format!("保存失败：{e}"));
                 }
@@ -6504,8 +6576,7 @@ impl App {
             self.source_editor = text_editor::Content::with_text(&self.note_text);
         }
         self.dirty = true;
-        self.save_error = None;
-        self.autosave_deadline = Some(Instant::now() + AUTOSAVE_DEBOUNCE);
+        self.note_content_changed();
         self.refresh_preview();
         self.refresh_edit();
         self.refresh_props();
@@ -7886,7 +7957,7 @@ impl App {
     fn after_edit(&mut self) {
         self.refresh_edit();
         self.sync_active();
-        self.autosave_deadline = Some(Instant::now() + AUTOSAVE_DEBOUNCE);
+        self.note_content_changed();
         self.sync_wiki_picker();
         // 空间模式：差分合入协作文档并上行 Update 帧（不置脏、不排保存）
         space_actions::collab_after_edit(self);
@@ -8217,6 +8288,7 @@ impl App {
             self.note_text = text;
             self.reset_note_metrics();
             self.dirty = true;
+            self.note_content_changed();
             let body_len = self.edit_body().len();
             self.edit.caret = caret.min(body_len);
             self.edit.anchor = anchor.min(body_len);
@@ -8915,6 +8987,33 @@ mod file_drop_tests {
         let body = "【【乙";
         let (out, _) = super::wiki_splice(body, 0, body.len(), "乙.md", "a b.md");
         assert_eq!(out, "[乙](a%20b.md)");
+    }
+
+    /// 退避策略：1s 起翻倍、封顶 30s，且「失败一次之后必然还有下一次期限」——
+    /// 用户停手后没有新输入事件，失败分支必须自己把期限排出来。
+    #[test]
+    fn retry_delay_backs_off_and_stays_scheduled() {
+        use std::time::{Duration, Instant};
+        assert_eq!(super::next_retry_delay(1), Duration::from_secs(1));
+        assert_eq!(super::next_retry_delay(2), Duration::from_secs(2));
+        assert_eq!(super::next_retry_delay(3), Duration::from_secs(4));
+        assert_eq!(super::next_retry_delay(4), Duration::from_secs(8));
+        assert_eq!(super::next_retry_delay(5), Duration::from_secs(16));
+        assert_eq!(super::next_retry_delay(6), Duration::from_secs(30));
+        assert_eq!(super::next_retry_delay(99), Duration::from_secs(30), "退避有上限");
+
+        // 连续失败按同一文件累加：换文件从 1 起算
+        let now = Instant::now();
+        let (file, attempt, at) = super::retry_after_failure(None, "a.md", now);
+        assert_eq!((file.as_str(), attempt), ("a.md", 1));
+        assert_eq!(at, now + Duration::from_secs(1));
+        let (_, attempt, at) = super::retry_after_failure(Some(&(file, attempt)), "a.md", now);
+        assert_eq!(attempt, 2);
+        assert_eq!(at, now + Duration::from_secs(2));
+        let (file, attempt, at) =
+            super::retry_after_failure(Some(&("a.md".to_string(), 7)), "b.md", now);
+        assert_eq!((file.as_str(), attempt), ("b.md", 1));
+        assert_eq!(at, now + Duration::from_secs(1));
     }
 
     /// 裁剪崩溃日志只按文件名时间戳取舍：同秒多份与无关文件并存时，只删最旧的那几份

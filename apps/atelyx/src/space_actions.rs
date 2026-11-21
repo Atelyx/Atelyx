@@ -1534,14 +1534,27 @@ fn on_note_saved(
         Err(e) => {
             app.settle_history_restore(false);
             app.save_error = Some(e.clone());
+            // 失败后必排下一次期限：用户停手后没有新的输入事件，不重排就永不重试上行。
+            // 期限已在现场则顺其自然（更早的失败期限不被这一次覆盖）
+            let (failed, attempt, at) =
+                crate::retry_after_failure(app.save_retry.as_ref(), rel, Instant::now());
+            app.save_retry = Some((failed, attempt));
+            app.autosave_deadline = Some(at);
+            app.autosave_timer = false;
+            // flush 失败：挂起动作不执行、窗口不关，脏态与 save_error 保留等下一笔重试
             if matches!(reason, SaveReason::Flush) {
-                app.notify(NoticeLevel::Error, format!("保存失败，操作未执行：{e}"));
+                app.abort_pending_flush("保存失败，操作未执行");
+                app.notify(
+                    NoticeLevel::Error,
+                    format!("保存失败，操作未执行：{e}（未落盘内容已保留，稍后自动重试）"),
+                );
             } else {
                 app.notify(NoticeLevel::Error, format!("保存失败：{e}"));
             }
         }
         Ok(merged) => {
             app.save_error = None;
+            app.save_retry = None;
             app.space_note_flushed = Some(merged.clone());
             // 协作基线祖先推进（CRDT 三方合并的 base）
             collab_note_flushed(app, &merged);
