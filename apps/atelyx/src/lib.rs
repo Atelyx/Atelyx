@@ -265,6 +265,8 @@ pub fn run() -> iced::Result {
     if let Some(code) = cli::dispatch(&args) {
         std::process::exit(code);
     }
+    // 崩溃日志先于窗口与渲染器安装：此后任一拍 panic 都不会无痕退出
+    install_panic_hook();
     // 字体族清单必须在建渲染器之前备好：default_font 只在渲染器创建时读一次
     ui::font::init();
     iced::daemon(App::boot, App::update, App::view)
@@ -328,6 +330,97 @@ fn update_download_dir() -> PathBuf {
         .unwrap_or_else(|| std::env::temp_dir().join("atelyx-updates"));
     let _ = std::fs::create_dir_all(&dir);
     dir
+}
+
+/// 崩溃日志保留上限（只留最近的若干份，避免反复崩溃刷满应用数据目录）。
+const CRASH_LOG_KEEP: usize = 10;
+
+/// 崩溃日志文件名前缀：`crash-<unix 秒>.log`。
+const CRASH_LOG_PREFIX: &str = "crash-";
+
+/// 崩溃日志落点目录：应用数据目录不可用时回落系统临时目录（进程已崩，不追求可发现性）。
+fn crash_log_dir() -> PathBuf {
+    app_data_dir().unwrap_or_else(std::env::temp_dir)
+}
+
+/// 崩溃日志路径：同名已存在时追加序号，同秒内的多次崩溃不互相覆盖。
+fn crash_log_path(dir: &std::path::Path, unix_secs: u64) -> PathBuf {
+    let base = dir.join(format!("{CRASH_LOG_PREFIX}{unix_secs}.log"));
+    if !base.exists() {
+        return base;
+    }
+    let mut n = 2u32;
+    loop {
+        let path = dir.join(format!("{CRASH_LOG_PREFIX}{unix_secs}-{n}.log"));
+        if !path.exists() {
+            return path;
+        }
+        n += 1;
+    }
+}
+
+/// 崩溃日志的排序键 `(unix 秒, 同秒序号)`：文件名不同长度也不能按字典序比较。
+fn crash_log_key(path: &std::path::Path) -> Option<(u64, u64)> {
+    let stem = path
+        .file_name()?
+        .to_str()?
+        .strip_prefix(CRASH_LOG_PREFIX)?
+        .strip_suffix(".log")?;
+    match stem.split_once('-') {
+        Some((stamp, seq)) => Some((stamp.parse().ok()?, seq.parse().ok()?)),
+        None => Some((stem.parse().ok()?, 0)),
+    }
+}
+
+/// 裁剪崩溃日志：按排序键保留最新的 `keep` 份，其余删除。
+/// 读目录失败或删不掉都静默——崩溃路径上不产生新的失败。
+fn prune_crash_logs(dir: &std::path::Path, keep: usize) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let mut logs: Vec<((u64, u64), PathBuf)> = entries
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter_map(|p| crash_log_key(&p).map(|key| (key, p)))
+        .collect();
+    logs.sort_by_key(|(key, _)| *key);
+    let drop = logs.len().saturating_sub(keep);
+    for (_, path) in logs.into_iter().take(drop) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// 安装崩溃日志 hook：release 无控制台，进程静默退出时只留这一份现场。
+fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        // hook 内只做格式化与一次写盘：此刻堆与锁都可能已被 panic 破坏，
+        // 再取锁、再 panic 或让错误逃逸都会把一次崩溃变成静默死锁
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "<未知位置>".to_string());
+        let message = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "<非字符串 panic>".to_string());
+        let name = std::thread::current()
+            .name()
+            .map(str::to_string)
+            .unwrap_or_else(|| "<未命名线程>".to_string());
+        let text = format!(
+            "版本: {}\n系统: {} {}\n线程: {name}\n信息: {message}\n位置: {location}\n\n{}",
+            env!("CARGO_PKG_VERSION"),
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            std::backtrace::Backtrace::force_capture(),
+        );
+        let dir = crash_log_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        // 写盘失败不重试也不外抛：崩溃现场已丢失，再失败一次只会让退出更不干净
+        if std::fs::write(crash_log_path(&dir, now_secs()), text.as_bytes()).is_ok() {
+            prune_crash_logs(&dir, CRASH_LOG_KEEP);
+        }
+        eprintln!("{text}");
+    }));
 }
 
 /// 启动读全局配置；读错误（原文损坏且备份失败等）回传文案供通知。
@@ -8822,6 +8915,38 @@ mod file_drop_tests {
         let body = "【【乙";
         let (out, _) = super::wiki_splice(body, 0, body.len(), "乙.md", "a b.md");
         assert_eq!(out, "[乙](a%20b.md)");
+    }
+
+    /// 裁剪崩溃日志只按文件名时间戳取舍：同秒多份与无关文件并存时，只删最旧的那几份
+    /// 崩溃日志（用临时目录，不碰真实应用数据目录）。
+    #[test]
+    fn prune_crash_logs_keeps_newest() {
+        let dir = std::env::temp_dir().join(format!(
+            "atelyx-crash-test-{}-{}",
+            std::process::id(),
+            super::now_secs()
+        ));
+        std::fs::create_dir_all(&dir).expect("建临时目录");
+        for stamp in [100u64, 200, 300, 400] {
+            std::fs::write(super::crash_log_path(&dir, stamp), b"x").expect("写日志");
+        }
+        // 同秒的第二份参与计数，无关文件不参与也不被删
+        std::fs::write(super::crash_log_path(&dir, 400), b"x").expect("写同秒日志");
+        std::fs::write(dir.join("global.json"), b"{}").expect("写无关文件");
+
+        super::prune_crash_logs(&dir, 3);
+
+        let mut left: Vec<String> = std::fs::read_dir(&dir)
+            .expect("读目录")
+            .filter_map(|e| e.ok())
+            .filter_map(|e| e.file_name().to_str().map(str::to_string))
+            .filter(|n| n.starts_with(super::CRASH_LOG_PREFIX))
+            .collect();
+        left.sort();
+        // 同秒两份按序号排：`-2` 是后来者
+        assert_eq!(left, vec!["crash-300.log", "crash-400-2.log", "crash-400.log"]);
+        assert!(dir.join("global.json").exists(), "无关文件不得被裁掉");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
