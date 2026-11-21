@@ -1195,12 +1195,10 @@ impl SaveInflight {
         queued
     }
 
-    /// 失败回执把待续 Flush 放回队列：重试成功后再补发，挂起的关闭 / 切换动作不会丢。
-    pub fn requeue_flush(&mut self, gen: u64, file: &str) {
+    /// 丢弃该键的待续 Flush（失败回执已经就地取消了挂起动作，不能再补发一次）。
+    pub fn drop_flush(&mut self, gen: u64, file: &str) {
         let key = (gen, file.to_string());
-        if !self.flush_queued.contains(&key) {
-            self.flush_queued.push(key);
-        }
+        self.flush_queued.retain(|entry| entry != &key);
     }
 }
 
@@ -4108,6 +4106,18 @@ mod tests {
         assert!(guard.finish(1, "a.atb"), "在途期间排队的 Flush 要补发");
         assert!(!guard.finish(1, "a.atb"), "结清后不再重复补发");
         assert_eq!(guard.begin(1, "a.atb", false), SaveAdmission::Start);
+    }
+
+    /// 保存失败已取消挂起动作：待续 Flush 必须一并丢弃，不能留到重试成功后补发。
+    #[test]
+    fn failed_receipt_drops_queued_flush() {
+        let mut guard = SaveInflight::default();
+        assert_eq!(guard.begin(1, "a.atb", false), SaveAdmission::Start);
+        assert_eq!(guard.begin(1, "a.atb", true), SaveAdmission::Queued);
+        assert!(guard.finish(1, "a.atb"), "回执先取走排队标记");
+        guard.drop_flush(1, "a.atb");
+        assert_eq!(guard.begin(1, "a.atb", false), SaveAdmission::Start);
+        assert!(!guard.finish(1, "a.atb"), "失败路径不留待续 Flush");
     }
 
     /// 过期回执（世代 / 文件不符）不清别人的在途键。
