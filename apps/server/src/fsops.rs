@@ -6,6 +6,21 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use crate::ApiError;
+
+/// 阻塞文件 IO 统一入口：放进阻塞线程池执行，不占 async 执行器（单个慢盘请求不会拖死全部 worker）。
+/// 锁语义不变——调用方在锁内 `await` 它，读写与判定仍在同一把锁的保护下完成。
+/// 任务 panic 或线程池关闭按 500 返回，错误信息带阶段名便于定位。
+pub(crate) async fn blocking<T, F>(what: &'static str, f: F) -> Result<T, ApiError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, ApiError> + Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| ApiError(axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("{what}失败：{e}")))?
+}
+
 /// join 失败的两种性质：`Invalid` = 语义拒绝（穿越/绝对路径/越界，HTTP 400）；
 /// `NotFound` = 父目录不存在（HTTP 404，与「文件不存在」同口径）。
 pub enum JoinError {

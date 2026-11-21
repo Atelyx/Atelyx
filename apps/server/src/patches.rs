@@ -14,7 +14,7 @@ use serde_json::json;
 
 use crate::auth::AuthUser;
 use crate::access::{join_err, write_root};
-use crate::fsops::{atomic_write, file_mtime_secs, is_windows_reserved_name};
+use crate::fsops::{atomic_write, blocking, file_mtime_secs, is_windows_reserved_name, SpaceRoot};
 use crate::state::{bad_request, internal, now_secs};
 use crate::{ApiError, ServerState};
 
@@ -451,7 +451,7 @@ fn table_patch_io() -> PatchEntityIo<TableFile, TablePatch> {
 /// 补丁端点公共骨架：存在检查 → 解析补丁 → 读盘 → id 守卫 → title 应用 → 漂移目标锁 →
 /// 漂移冲突守卫 → 合并 → 原子写 → 旧文件清理 → 广播帧。结构锁与请求路径锁由 handler 持有后调用；
 /// title 漂移产生的第二条落盘路径在本函数内补取路径锁（见下）。
-async fn patch_entity<E: serde::de::DeserializeOwned, P>(
+async fn patch_entity<E: serde::de::DeserializeOwned + Send + 'static, P>(
     state: &ServerState,
     space_id: &str,
     path: &Path,
@@ -461,14 +461,17 @@ async fn patch_entity<E: serde::de::DeserializeOwned, P>(
     sender_session: &str,
 ) -> Result<Response, ApiError> {
     // 磁盘文件缺失：补丁只有变化实体，重建会丢未变化部分——拒绝
-    if !path.is_file() {
+    let missing = path.to_path_buf();
+    if !blocking("补丁检查", move || Ok(missing.is_file())).await? {
         return Err(crate::state::not_found(&format!(
             "{}文件不存在（已从磁盘删除）",
             io.kind
         )));
     }
     let patch = (io.parse)(raw_patch, io.what)?;
-    let mut entity = (io.read_file)(path)?;
+    let entity_path = path.to_path_buf();
+    let read_file = io.read_file;
+    let mut entity = blocking("补丁读取", move || read_file(&entity_path)).await?;
     // 防串文件守卫：补丁属于另一实体（陈旧保存回调）→ 拒绝，防跨文件混写
     if (io.patch_id)(&patch) != (io.entity_id)(&entity) {
         return Err(bad_request(&format!(
@@ -509,23 +512,40 @@ async fn patch_entity<E: serde::de::DeserializeOwned, P>(
         None
     };
     if new_path != path {
-        ensure_no_id_conflict(
-            &new_path,
-            (io.entity_id)(&entity),
-            &|p: &Path| {
-                std::fs::read_to_string(p)
-                    .ok()
-                    .and_then(|t| serde_json::from_str::<E>(&t).ok())
-                    .map(|e| (io.entity_id)(&e).to_string())
-            },
-            io.kind,
-            (io.entity_title)(&entity),
-        )?;
+        let conflict_path = new_path.clone();
+        let entity_id = (io.entity_id)(&entity).to_string();
+        let kind = io.kind;
+        let title = (io.entity_title)(&entity).to_string();
+        let entity_id_of = io.entity_id;
+        // 名冲突守卫要读并解析目标文件（阻塞 IO），整段进阻塞池
+        blocking("同名冲突检查", move || {
+            ensure_no_id_conflict(
+                &conflict_path,
+                &entity_id,
+                &|p: &Path| {
+                    std::fs::read_to_string(p)
+                        .ok()
+                        .and_then(|t| serde_json::from_str::<E>(&t).ok())
+                        .map(|e| entity_id_of(&e).to_string())
+                },
+                kind,
+                &title,
+            )
+        })
+        .await?;
     }
     (io.apply)(&mut entity, &patch);
     (io.set_updated_at)(&mut entity, now_secs());
-    (io.write_file)(&new_path, &entity)?;
-    remove_replaced_file(path, &new_path, io.kind)?;
+    // 写盘与旧文件清理是同步 IO，留在锁内但放进阻塞池
+    let (write_io, write_rel) = (io.write_file, new_path.clone());
+    let (old_path, fresh_path) = (path.to_path_buf(), new_path.clone());
+    let write_kind = io.kind;
+    blocking("补丁落盘", move || {
+        write_io(&write_rel, &entity)?;
+        remove_replaced_file(&old_path, &fresh_path, write_kind)?;
+        Ok(())
+    })
+    .await?;
     // 标题漂移改名了路径：补广播 renamed 帧——其他端打开中文件的路径是旧路径，只收
     // table-patch（file=新路径）会被整帧丢弃，滞留旧路径后每次保存 404
     if new_rel != body_path {
@@ -534,7 +554,8 @@ async fn patch_entity<E: serde::de::DeserializeOwned, P>(
     // 落地后向空间房间广播补丁帧（与客户端 WS 透传帧同形状）；失败只记日志不回滚——真源已落盘
     ws_broadcast(state, space_id, io.broadcast_kind, &new_rel, raw_patch.clone(), sender_session);
     tracing::info!(space_id = %space_id, path = %new_rel, "{}补丁落地", io.kind);
-    let updated_at = file_mtime_secs(&new_path);
+    let stat_path = new_path.clone();
+    let updated_at = blocking("时间戳读取", move || Ok(file_mtime_secs(&stat_path))).await?;
     Ok(Json(json!({ "updatedAt": updated_at, "file": new_rel })).into_response())
 }
 
@@ -546,7 +567,9 @@ pub async fn patch_canvas(
     Json(body): Json<CanvasPatchBody>,
 ) -> Result<Response, ApiError> {
     let root = write_root(&state, &space_id, &user)?;
-    let path = root.join(&body.path, false).map_err(join_err)?;
+    let join_root = root.0.clone();
+    let join_rel = body.path.clone();
+    let path = blocking("路径检查", move || SpaceRoot(join_root).join(&join_rel, false).map_err(join_err)).await?;
     // 结构锁 → 请求路径锁：与改名端点互斥（改名同样持结构锁 + 双路径锁），防在途改名/补丁
     // 互相重建对方路径的文件；title 漂移目标的第二把路径锁在骨架内补取（漂移点才可知）
     let _structure = state.structure_lock(&space_id).await;
@@ -562,7 +585,9 @@ pub async fn patch_table(
     Json(body): Json<TablePatchBody>,
 ) -> Result<Response, ApiError> {
     let root = write_root(&state, &space_id, &user)?;
-    let path = root.join(&body.path, false).map_err(join_err)?;
+    let join_root = root.0.clone();
+    let join_rel = body.path.clone();
+    let path = blocking("路径检查", move || SpaceRoot(join_root).join(&join_rel, false).map_err(join_err)).await?;
     // 结构锁 → 请求路径锁（与画布补丁同构）；漂移目标锁在骨架内补取
     let _structure = state.structure_lock(&space_id).await;
     let _lock = state.path_lock(&space_id, &body.path).await;

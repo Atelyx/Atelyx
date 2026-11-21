@@ -12,7 +12,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::auth::AuthUser;
-use crate::fsops::{atomic_write, is_windows_reserved_name, walk_files};
+use crate::fsops::{atomic_write, blocking, is_windows_reserved_name, walk_files};
 use crate::state::{bad_request, internal, max_meta_value_bytes, not_found, ServerState};
 use crate::spaces::{require_role, space_of, ALL_ROLES};
 use crate::{ApiError, ApiResult};
@@ -108,16 +108,20 @@ const TEAM_EXCLUSIONS_KEY: &str = "exclusions";
 /// 后者在任一无关键损坏时返回读失败（本函数只能降级空名单），会让排除名单在请求间闪烁，
 /// 也顺带读入 `ai-providers` 等含明文 key 的无关键。缺失/损坏/解析失败一律返回空
 /// （排错配置不阻塞读取，与元数据读取容错同口径）。
-pub(crate) fn space_exclusions(data_dir: &FsPath, space_id: &str) -> Vec<String> {
-    let root = space_scope_root(data_dir, space_id);
+pub(crate) async fn space_exclusions(state: &ServerState, space_id: &str) -> Vec<String> {
+    let root = space_scope_root(state.data_dir(), space_id);
     // 键名固定合法（无隐藏段/保留名），key_to_path 不会失败；防御性降级空名单
     let Ok(path) = key_to_path(&root, TEAM_EXCLUSIONS_KEY) else {
         return vec![];
     };
-    let Ok(raw) = std::fs::read_to_string(&path) else {
-        return vec![];
-    };
-    serde_json::from_str::<Vec<String>>(&raw).unwrap_or_default()
+    blocking("排除名单读取", move || {
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            return Ok(vec![]);
+        };
+        Ok(serde_json::from_str::<Vec<String>>(&raw).unwrap_or_default())
+    })
+    .await
+    .unwrap_or_default()
 }
 
 /// 读某 scope 全量键值（目录不存在 = 空 map）。遍历复用 fsops::walk_files（屏蔽隐藏项与 `.tmp` 临时件）。
@@ -214,11 +218,13 @@ pub async fn get_space_meta(
 ) -> ApiResult<Json<serde_json::Value>> {
     require_member(&state, &space_id, &user)?;
     let root = space_scope_root(state.data_dir(), &space_id);
-    if let Some(key) = &query.key {
-        return Ok(Json(read_single_key(&root, key)?));
-    }
-    let values = list_scope(&root)?;
-    Ok(Json(json!({ "values": values })))
+    let key = query.key.clone();
+    let value = blocking("元信息读取", move || match key {
+        Some(key) => read_single_key(&root, &key).map(|v| Ok(Json(v))),
+        None => list_scope(&root).map(|values| Ok(Json(json!({ "values": values })))),
+    })
+    .await??;
+    Ok(value)
 }
 
 /// PATCH /api/spaces/{space_id}/meta — 按键合并写入；仅 owner/editor。
@@ -235,7 +241,8 @@ pub async fn patch_space_meta(
     // 每键在写锁内落盘：同键的写与删除按到达序串行（防删后被在途写复活），广播顺序 = 落盘顺序
     for (key, value) in &body.values {
         let _lock = state.path_lock(&space_id, &space_meta_lock_key(key)).await;
-        write_key(&root, key, value)?;
+        let (lock_root, lock_key, payload) = (root.clone(), key.clone(), value.clone());
+        blocking("元信息写入", move || write_key(&lock_root, &lock_key, &payload)).await?;
         crate::ws::broadcast_meta_changed(&state.hub(), &format!("space:{space_id}"), key);
     }
     tracing::info!(space_id = %space_id, keys = body.values.len(), "空间元信息写入");
@@ -260,10 +267,13 @@ pub async fn delete_space_meta(
     let path = key_to_path(&root, &query.key)?;
     // 写锁内完成存在检查与删除（与 patch_space_meta 同一把键锁，防删/写交错复活）
     let _lock = state.path_lock(&space_id, &space_meta_lock_key(&query.key)).await;
-    if !path.exists() {
-        return Err(not_found("键不存在"));
-    }
-    std::fs::remove_file(&path).map_err(|e| internal(format!("删除失败：{e}")))?;
+    blocking("元信息删除", move || {
+        if !path.exists() {
+            return Err(not_found("键不存在"));
+        }
+        std::fs::remove_file(&path).map_err(|e| internal(format!("删除失败：{e}")))
+    })
+    .await?;
     crate::ws::broadcast_meta_changed(&state.hub(), &format!("space:{space_id}"), &query.key);
     Ok(Json(json!({ "deleted": true })))
 }
@@ -280,11 +290,13 @@ pub async fn get_user_meta(
 ) -> ApiResult<Json<serde_json::Value>> {
     require_member(&state, &space_id, &user)?;
     let root = user_scope_root(state.data_dir(), &space_id, &user.user_id);
-    if let Some(key) = &query.key {
-        return Ok(Json(read_single_key(&root, key)?));
-    }
-    let values = list_scope(&root)?;
-    Ok(Json(json!({ "values": values })))
+    let key = query.key.clone();
+    let value = blocking("元信息读取", move || match key {
+        Some(key) => read_single_key(&root, &key).map(|v| Ok(Json(v))),
+        None => list_scope(&root).map(|values| Ok(Json(json!({ "values": values })))),
+    })
+    .await??;
+    Ok(value)
 }
 
 /// PATCH /api/spaces/{space_id}/meta/me — 合并写本人键值。
@@ -302,7 +314,8 @@ pub async fn patch_user_meta(
         let _lock = state
             .path_lock(&space_id, &format!("__meta_user__/{}/{}", user.user_id, key))
             .await;
-        write_key(&root, key, value)?;
+        let (lock_root, lock_key, payload) = (root.clone(), key.clone(), value.clone());
+        blocking("元信息写入", move || write_key(&lock_root, &lock_key, &payload)).await?;
     }
     tracing::info!(space_id = %space_id, user_id = %user.user_id, keys = body.values.len(), "用户元信息写入");
     Ok(Json(json!({ "updated": body.values.len() })))
@@ -323,9 +336,12 @@ pub async fn delete_user_meta(
     let _lock = state
         .path_lock(&space_id, &format!("__meta_user__/{}/{}", user.user_id, query.key))
         .await;
-    if !path.exists() {
-        return Err(not_found("键不存在"));
-    }
-    std::fs::remove_file(&path).map_err(|e| internal(format!("删除失败：{e}")))?;
+    blocking("元信息删除", move || {
+        if !path.exists() {
+            return Err(not_found("键不存在"));
+        }
+        std::fs::remove_file(&path).map_err(|e| internal(format!("删除失败：{e}")))
+    })
+    .await?;
     Ok(Json(json!({ "deleted": true })))
 }

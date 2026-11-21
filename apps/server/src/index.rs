@@ -16,7 +16,7 @@ use serde_json::json;
 
 use crate::auth::AuthUser;
 use crate::access::member_root;
-use crate::fsops::{file_mtime_secs, percent_decode, walk_md_in, SpaceRoot};
+use crate::fsops::{blocking, file_mtime_secs, percent_decode, walk_md_in, SpaceRoot};
 use crate::state::ServerState;
 use crate::{ApiError, ApiResult};
 
@@ -702,36 +702,57 @@ fn scan_for_matches(
 /// 空间派生索引缓存（space_id → 反链/标签索引；纯内存只读派生，可随时重建，不落盘）。
 /// 持有方 = `ServerState`；本类型自足封装取用与刷新，不反向依赖状态模块。
 #[derive(Default)]
-pub(crate) struct SpaceIndexCache(Mutex<HashMap<String, SpaceIndex>>);
+pub(crate) struct SpaceIndexCache {
+    caches: Mutex<HashMap<String, SpaceIndex>>,
+    /// 刷新串行化：刷新要搬出索引在阻塞池里做（不占 async 执行器），
+    /// 同一时刻只允许一次刷新在途，避免并发请求各自全量扫描同一空间。
+    refresh: tokio::sync::Mutex<()>,
+}
 
 impl SpaceIndexCache {
     pub(crate) fn new() -> Self {
-        Self(Mutex::new(HashMap::new()))
+        Self { caches: Mutex::new(HashMap::new()), refresh: tokio::sync::Mutex::new(()) }
     }
 
-    /// 取（或懒建）空间的派生索引并增量刷新后在 `f` 内访问。刷新是 stat 遍历 + 变化文件重读；
-    /// 缓存为全局单锁（所有空间串行刷新），且持锁做阻塞文件 I/O——目标规模（≤30 人内容量）
-    /// 下延迟可忽略，不值得为此引入分空间锁或后台任务。
+    /// 取（或懒建）空间的派生索引并增量刷新后在 `f` 内访问。刷新是 stat 遍历 + 变化文件重读，
+    /// 在阻塞池里跑（不占 async 执行器）；刷新期间不持缓存锁，其他空间的查询不被拖住。
     /// 团队排除名单变化时整份缓存作废重建（成员改了排除夹后索引立即收敛，不留陈旧条目）。
-    pub(crate) fn with_space<R>(
+    pub(crate) async fn with_space<R>(
         &self,
-        data_dir: &FsPath,
+        state: &ServerState,
         space_id: &str,
         root: &FsPath,
         f: impl FnOnce(&mut SpaceIndex) -> R,
     ) -> R {
-        let exclude = crate::meta::space_exclusions(data_dir, space_id);
-        let mut caches = self.0.lock().unwrap();
+        let exclude = crate::meta::space_exclusions(state, space_id).await;
+        // 刷新串行化：搬出索引 → 阻塞池刷新 → 写回，同一空间不并发全量扫描
+        let _refresh = self.refresh.lock().await;
+        let (mut wiki, mut tags) = {
+            let mut caches = self.caches.lock().unwrap();
+            let index = caches.entry(space_id.to_string()).or_default();
+            if index.exclude_folders != exclude {
+                *index = SpaceIndex { exclude_folders: exclude.clone(), ..Default::default() };
+            }
+            (std::mem::take(&mut index.wiki), std::mem::take(&mut index.tags))
+        };
+        let (refreshed, _) = blocking("索引刷新", {
+            let space_id = space_id.to_string();
+            let root = root.to_path_buf();
+            move || {
+                if let Err(e) = refresh_wiki_index(&root, &exclude, &mut wiki) {
+                    tracing::warn!(space_id = %space_id, "反链索引刷新失败：{e}");
+                }
+                if let Err(e) = refresh_tag_index(&root, &exclude, &mut tags) {
+                    tracing::warn!(space_id = %space_id, "标签索引刷新失败：{e}");
+                }
+                Ok(((wiki, tags), ()))
+            }
+        })
+        .await
+        .unwrap_or_default();
+        let mut caches = self.caches.lock().unwrap();
         let index = caches.entry(space_id.to_string()).or_default();
-        if index.exclude_folders != exclude {
-            *index = SpaceIndex { exclude_folders: exclude.clone(), ..Default::default() };
-        }
-        if let Err(e) = refresh_wiki_index(root, &exclude, &mut index.wiki) {
-            tracing::warn!(space_id = %space_id, "反链索引刷新失败：{e}");
-        }
-        if let Err(e) = refresh_tag_index(root, &exclude, &mut index.tags) {
-            tracing::warn!(space_id = %space_id, "标签索引刷新失败：{e}");
-        }
+        (index.wiki, index.tags) = refreshed;
         f(index)
     }
 }
@@ -750,9 +771,12 @@ pub async fn backlinks(
     Query(query): Query<BacklinksQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let root = member_root(&state, &space_id, &user)?;
-    let rows = state.index_cache().with_space(state.data_dir(), &space_id, &root.0, |index| {
-        query_wiki_backlinks(&index.wiki, &query.note_name, &query.note_file)
-    });
+    let rows = state
+        .index_cache()
+        .with_space(&state, &space_id, &root.0, |index| {
+            query_wiki_backlinks(&index.wiki, &query.note_name, &query.note_file)
+        })
+        .await;
     Ok(Json(serde_json::to_value(rows).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?))
 }
 
@@ -762,7 +786,10 @@ pub async fn tags(
     Path(space_id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let root = member_root(&state, &space_id, &user)?;
-    let rows = state.index_cache().with_space(state.data_dir(), &space_id, &root.0, |index| aggregate_tag_counts(&index.tags));
+    let rows = state
+        .index_cache()
+        .with_space(&state, &space_id, &root.0, |index| aggregate_tag_counts(&index.tags))
+        .await;
     Ok(Json(serde_json::to_value(rows).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?))
 }
 
@@ -782,11 +809,19 @@ pub async fn glob(
 ) -> ApiResult<Json<serde_json::Value>> {
     let root = member_root(&state, &space_id, &user)?;
     let matcher = build_glob_matcher(&body.pattern).map_err(|e| ApiError(StatusCode::BAD_REQUEST, e))?;
-    let (base_rel, base_is_file) = resolve_base(&root, body.path.as_deref()).map_err(|e| ApiError(StatusCode::BAD_REQUEST, e))?;
-    let exclude = crate::meta::space_exclusions(state.data_dir(), &space_id);
-    let mut entries = collect_glob_files(&root.0, &base_rel, base_is_file, &matcher, &exclude)
-        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    entries.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+    let exclude = crate::meta::space_exclusions(&state, &space_id).await;
+    let requested = body.path.clone();
+    // 基准路径解析与全树遍历都是阻塞 IO：整段放进阻塞池
+    let (root_dir, matcher_for_io) = (root.0.clone(), matcher.clone());
+    let entries = blocking("glob 扫描", move || {
+        let (base_rel, base_is_file) = resolve_base(&SpaceRoot(root_dir.clone()), requested.as_deref())
+            .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e))?;
+        let mut entries = collect_glob_files(&root_dir, &base_rel, base_is_file, &matcher_for_io, &exclude)
+            .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        entries.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+        Ok(entries)
+    })
+    .await?;
     let total = entries.len();
     let capped = total > GLOB_MAX_RESULTS;
     let paths: Vec<String> = entries.into_iter().take(GLOB_MAX_RESULTS).map(|(rel, _)| rel).collect();
@@ -817,12 +852,30 @@ pub async fn grep(
         Some(p) => Some(build_glob_matcher(p).map_err(|e| ApiError(StatusCode::BAD_REQUEST, e))?),
         None => None,
     };
-    let (base_rel, base_is_file) = resolve_base(&root, body.path.as_deref()).map_err(|e| ApiError(StatusCode::BAD_REQUEST, e))?;
-    let exclude = crate::meta::space_exclusions(state.data_dir(), &space_id);
-    let mut retained: Vec<GrepMatchRow> = Vec::new();
-    let mut total = 0usize;
-    scan_for_matches(&root.0, &base_rel, base_is_file, &re, include_matcher.as_ref(), &exclude, &mut retained, &mut total)
+    let exclude = crate::meta::space_exclusions(&state, &space_id).await;
+    let requested = body.path.clone();
+    // 基准路径解析与逐文件扫描都是阻塞 IO（正则匹配也在其中），整段放进阻塞池
+    let (root_dir, include_for_io) = (root.0.clone(), include_matcher);
+    let (retained, total) = blocking("grep 扫描", move || {
+        let (base_rel, base_is_file) =
+            resolve_base(&SpaceRoot(root_dir.clone()), requested.as_deref())
+                .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e))?;
+        let mut retained: Vec<GrepMatchRow> = Vec::new();
+        let mut total = 0usize;
+        scan_for_matches(
+            &root_dir,
+            &base_rel,
+            base_is_file,
+            &re,
+            include_for_io.as_ref(),
+            &exclude,
+            &mut retained,
+            &mut total,
+        )
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        Ok((retained, total))
+    })
+    .await?;
     let capped = total > retained.len();
     tracing::debug!(space_id = %space_id, pattern_len = body.pattern.len(), total, "grep 完成");
     Ok(Json(json!({ "matches": retained, "total": total, "capped": capped })))

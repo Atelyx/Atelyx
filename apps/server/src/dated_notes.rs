@@ -104,7 +104,7 @@ pub async fn dated_notes(
     AxumPath(space_id): AxumPath<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let root = member_root(&state, &space_id, &user)?;
-    let exclude = crate::meta::space_exclusions(state.data_dir(), &space_id);
+    let exclude = crate::meta::space_exclusions(&state, &space_id).await;
     let root_path = root.0.clone();
     let notes = tokio::task::spawn_blocking(move || {
         let mut notes: Vec<DatedNote> = Vec::new();

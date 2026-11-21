@@ -16,7 +16,8 @@ use tokio::sync::broadcast;
 
 use crate::auth::{self, AuthUser};
 use crate::logs::{self, LogEntry};
-use crate::state::{internal, Persisted, ServerState};
+use crate::fsops::blocking;
+use crate::state::{Persisted, ServerState};
 use crate::ws::KickReason;
 use crate::{ApiError, ApiResult};
 
@@ -249,6 +250,7 @@ pub async fn list_spaces(
     user: AuthUser,
 ) -> ApiResult<Json<serde_json::Value>> {
     require_admin(&state, &user)?;
+    // 名册锁只取内存态，路径拼装与用户反查都不碰磁盘
     let rows = state.read(|p| {
         p.spaces
             .iter()
@@ -272,14 +274,13 @@ pub async fn list_spaces(
             })
             .collect::<Vec<_>>()
     });
-    // 目录占用实算是跨全部空间的递归遍历（纯阻塞 IO），放 spawn_blocking：
+    // 目录占用实算是跨全部空间的递归遍历（纯阻塞 IO），放阻塞池：
     // 不占 async 执行器（大目录可达秒级，与 dated_notes 扫描同口径）
     let roots = rows.iter().map(|(_, _, _, _, _, _, root)| root.clone()).collect::<Vec<_>>();
-    let sizes = tokio::task::spawn_blocking(move || {
-        roots.iter().map(|root| dir_size_bytes(root)).collect::<Vec<_>>()
+    let sizes = blocking("目录占用统计", move || {
+        Ok(roots.iter().map(|root| dir_size_bytes(root)).collect::<Vec<_>>())
     })
-    .await
-    .map_err(|e| internal(format!("目录占用统计失败：{e}")))?;
+    .await?;
     let spaces = rows
         .into_iter()
         .zip(sizes)

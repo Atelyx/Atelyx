@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 
 use crate::auth::AuthUser;
 use crate::access::{join_err, write_root};
-use crate::fsops::{atomic_write, percent_decode, SpaceRoot};
+use crate::fsops::{atomic_write, blocking, percent_decode, SpaceRoot};
 use crate::state::ServerState;
 use crate::{ApiError, ApiResult};
 
@@ -185,11 +185,17 @@ pub async fn record_history(
     let kind = kind_of(&body.kind)?;
     let root = write_root(&state, &space_id, &user)?;
     let rel = side_rel(kind, &body.file);
-    let path = root.join(&rel, true).map_err(join_err)?;
+    let side_path = root.0.clone();
+    let side_rel_for_join = rel.clone();
+    let path = blocking("历史路径检查", move || {
+        SpaceRoot(side_path).join(&side_rel_for_join, true).map_err(join_err)
+    })
+    .await?;
     // 同路径串行：读—改—写在锁内完成，读到的即最新真源
     let _lock = state.path_lock(&space_id, &rel).await;
 
-    let mut versions = read_versions(&path);
+    let read_path = path.clone();
+    let mut versions = blocking("历史读取", move || Ok(read_versions(&read_path))).await?;
     let last = versions.last().cloned();
     // 与最新版本内容/动作相同 = no-op（防重复存档点）
     if let Some(l) = &last {
@@ -284,7 +290,10 @@ pub async fn record_history(
             "历史侧文件过大，已拒绝写入".to_string(),
         ));
     }
-    atomic_write(&path, &bytes).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    blocking("历史落盘", move || {
+        atomic_write(&path, &bytes).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))
+    })
+    .await?;
     Ok(Json(json!({ "ok": true })).into_response())
 }
 
@@ -379,9 +388,15 @@ pub async fn aggregate_history(
     AxumPath(space_id): AxumPath<String>,
 ) -> ApiResult<Json<Value>> {
     let root = crate::access::member_root(&state, &space_id, &user)?;
-    let mut entries: Vec<RepoHistoryEntry> = vec![];
-    let mut timestamps: Vec<i64> = vec![];
-    collect_history_dir(&root.0.join(HISTORY_DIR), "note", &mut entries, &mut timestamps);
+    // 递归读三类侧文件是阻塞 IO，整段放进阻塞池
+    let history_root = root.0.join(HISTORY_DIR);
+    let (mut entries, timestamps) = blocking("历史聚合", move || {
+        let mut entries: Vec<RepoHistoryEntry> = vec![];
+        let mut timestamps: Vec<i64> = vec![];
+        collect_history_dir(&history_root, "note", &mut entries, &mut timestamps);
+        Ok((entries, timestamps))
+    })
+    .await?;
     entries.sort_by(|a, b| b.ts.cmp(&a.ts));
     entries.truncate(HISTORY_FEED_CAP);
     Ok(Json(json!({
