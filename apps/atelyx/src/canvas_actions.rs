@@ -551,14 +551,8 @@ pub(crate) fn on_saved(
                     app.notify(crate::NoticeLevel::Error, format!("保存失败：{e}"));
                 }
             }
-            if attempt >= crate::table_view::SAVE_RETRY_MAX {
-                // 次数用尽：停在可见错误上，工具条的「重试」仍是唯一入口
-                return Task::none();
-            }
-            retry_after(
-                crate::table_view::save_retry_delay(attempt),
-                CanvasMsg::RetrySave(gen, file),
-            )
+            // 退避与上限同笔记保存链：一直重试到成功，间隔封顶（正文没落盘不能放弃）
+            retry_after(crate::next_retry_delay(attempt), CanvasMsg::RetrySave(gen, file))
         }
         Ok(()) => {
             // 只认磁盘事实：冻结快照与当前数据一致才算落盘；期间又有编辑则保持脏，下一轮补写
