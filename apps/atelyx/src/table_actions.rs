@@ -135,6 +135,7 @@ fn on_msg_open(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
             | tv::TableMsg::LightboxDownload
             | tv::TableMsg::LightboxCopy
             | tv::TableMsg::Copied(..)
+            | tv::TableMsg::CutVerified(..)
             | tv::TableMsg::OpenLightboxMenu(..)
             | tv::TableMsg::OpenViewMenu(..)
             | tv::TableMsg::SetView(..)
@@ -414,6 +415,7 @@ fn on_gesture(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
             app.dismiss_popup();
             copy_lightbox_image(app)
         }
+        tv::TableMsg::CutVerified(landed) => on_cut_verified(app, landed),
         tv::TableMsg::Copied(result) => {
             match result {
                 Ok(()) => app.notify(NoticeLevel::Success, "已复制图片到剪贴板"),
@@ -2477,12 +2479,32 @@ fn on_copy(app: &mut App, cut: bool) -> Task<Message> {
         return Task::none();
     };
     let tsv = ops::build_region_tsv(&s.data.fields, &s.data.rows, &region);
-    let write = iced::clipboard::write(tsv);
-    if cut {
-        write.chain(Task::perform(async {}, |_| Message::Table(tv::TableMsg::ClearSelection)))
-    } else {
-        write
+    if !cut {
+        return iced::clipboard::write(tsv);
     }
+    // 剪切先写后回读：写入被剪贴板占用吞掉时不能删内容（否则原内容丢失、剪贴板还是旧的）
+    let expected = tsv.clone();
+    iced::clipboard::write(tsv).chain(iced::clipboard::read().map(move |got| {
+        Message::Table(tv::TableMsg::CutVerified(cut_write_landed(&expected, got.as_deref())))
+    }))
+}
+
+/// 回读判定：剪贴板内容与本次写出的 TSV 一致才允许清除原选区。
+///
+/// iced 的剪贴板写入失败只记日志（`iced_winit` 内部吞掉错误），调用方拿不到结果；
+/// 剪贴板被其他进程占用时写入会静默失败，此刻照常清空选区就是「内容删了、剪贴板还是旧的」。
+fn cut_write_landed(expected: &str, readback: Option<&str>) -> bool {
+    // 换行归一：部分平台回读把 CRLF 折成 LF，这条差异不代表写入失败
+    readback.is_some_and(|got| got.replace("\r\n", "\n") == expected.replace("\r\n", "\n"))
+}
+
+/// 剪切回读结论落地：一致才清选区，不一致保留内容并提示。
+fn on_cut_verified(app: &mut App, landed: bool) -> Task<Message> {
+    if !landed {
+        app.notify(NoticeLevel::Warning, "剪贴板被占用，未剪切（内容已保留）");
+        return Task::none();
+    }
+    on_clear_selection(app)
 }
 
 fn on_paste(app: &mut App, text: String) -> Task<Message> {
@@ -3262,6 +3284,19 @@ mod tests {
 
     fn cell_text(s: &tv::TableSession) -> &str {
         s.data.rows[0].values.get("f1").and_then(|v| v.as_str()).unwrap_or("")
+    }
+
+    /// 剪切回读判定：只有剪贴板里确实是本次写出的 TSV 才允许清除原内容。
+    /// 写入被剪贴板占用吞掉时回读拿到旧内容 / None，判定必须为 false。
+    #[test]
+    fn cut_landed_only_when_readback_matches() {
+        let tsv = "姓名\t年龄\n小明\t18";
+        assert!(cut_write_landed(tsv, Some(tsv)));
+        // 换行差异不算写入失败（平台回读把 CRLF 折成 LF）
+        assert!(cut_write_landed("a\r\nb", Some("a\nb")));
+        // 剪贴板内容仍是旧的 / 读不到 = 写入没落地
+        assert!(!cut_write_landed(tsv, Some("旧的剪贴板内容")));
+        assert!(!cut_write_landed(tsv, None));
     }
 
     /// 失效行上的单选改值（弹层打开期间行被删除）：不能留下无变更的撤销步。

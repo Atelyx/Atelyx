@@ -993,6 +993,8 @@ pub enum TableMsg {
     LightboxCopy,
     /// 复制到系统剪贴板的结果。
     Copied(Result<(), String>),
+    /// 剪切写入的回读结论（true = 剪贴板里已是本次内容，删除原内容才安全）。
+    CutVerified(bool),
     /// 灯箱滚轮缩放（pos = 灯箱局部坐标，view = 灯箱尺寸）。
     LightboxZoom { pos: Point, view: Size, delta_y: f32 },
     /// 灯箱图片按压（双击复位 / 放大后开始拖动）。

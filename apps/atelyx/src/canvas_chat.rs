@@ -496,6 +496,9 @@ fn on_input(app: &mut App, node_id: &str, event: crate::chat_input::InputEvent) 
             chat.draft.anchor = anchor;
         }
         InputEvent::Preedit(preedit) => chat.draft.preedit = text_preedit::normalize(preedit),
+        InputEvent::CutFailed => {
+            app.notify(crate::NoticeLevel::Warning, "剪贴板被占用，未剪切（文本已保留）");
+        }
         InputEvent::Undo => chat.draft.undo_step(),
         InputEvent::Redo => chat.draft.redo_step(),
         InputEvent::Send => {

@@ -1087,10 +1087,11 @@ pub fn on_prompt_input(app: &mut App, event: chat_input::InputEvent) {
         }
         InputEvent::Undo => draft.prompt.undo_step(),
         InputEvent::Redo => draft.prompt.redo_step(),
-        // 模板内 Enter 换行，发送与候选浮层事件不适用
+        // 模板内 Enter 换行，发送与候选浮层事件不适用；剪切失败无面板级提示位，按无操作处理
         InputEvent::Send
         | InputEvent::PickerNav(_)
         | InputEvent::PickerCommit
-        | InputEvent::PickerClose => {}
+        | InputEvent::PickerClose
+        | InputEvent::CutFailed => {}
     });
 }

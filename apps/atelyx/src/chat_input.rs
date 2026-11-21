@@ -168,6 +168,15 @@ impl Draft {
     }
 }
 
+/// 剪贴板写入的回读判定：只有剪贴板里确实是本端刚写的内容才允许删除原文本。
+///
+/// iced 的剪贴板写入失败只记日志（`iced_winit` 内部吞掉错误），调用方拿不到结果；
+/// 剪贴板被其他进程占用时写会静默失败，若此时照常剪切就是「内容删了、剪贴板还是旧的」。
+pub fn clipboard_write_landed(written: &str, readback: Option<&str>) -> bool {
+    // 换行归一：部分平台回读时把 CRLF 折成 LF，这条差异不代表写入失败
+    readback.is_some_and(|got| got.replace("\r\n", "\n") == written.replace("\r\n", "\n"))
+}
+
 /// 部件回发事件（应用层据此更新草稿与浮层）。
 #[derive(Debug, Clone)]
 pub enum InputEvent {
@@ -183,6 +192,8 @@ pub enum InputEvent {
     Send,
     /// 输入法组合串变化。
     Preedit(Option<String>),
+    /// 剪切未能写入剪贴板（回读不一致）：文本原样保留，由应用层给一次可见提示。
+    CutFailed,
     Undo,
     Redo,
     /// 候选浮层开启时方向键 / Enter / Esc 的转交。
@@ -1093,9 +1104,18 @@ impl Input<'_> {
                     }
                     "x" => {
                         if has_sel {
-                            clipboard.write(ClipboardKind::Standard, self.draft.selected_text());
-                            let (t, c) = cut_selection(&self.draft.text, caret, anchor);
-                            self.publish(shell, InputEvent::Edited { text: t, caret: c, anchor: c });
+                            // 写入 → 回读比对 → 一致才删：写入被剪贴板占用吞掉时保留原文本
+                            let sel = self.draft.selected_text();
+                            clipboard.write(ClipboardKind::Standard, sel.clone());
+                            let landed = clipboard
+                                .read(ClipboardKind::Standard)
+                                .is_some_and(|got| clipboard_write_landed(&sel, Some(&got)));
+                            if landed {
+                                let (t, c) = cut_selection(&self.draft.text, caret, anchor);
+                                self.publish(shell, InputEvent::Edited { text: t, caret: c, anchor: c });
+                            } else {
+                                self.publish(shell, InputEvent::CutFailed);
+                            }
                         }
                         shell.capture_event();
                         return;
@@ -1397,6 +1417,15 @@ mod tests {
             anchor: caret,
             ..Draft::default()
         }
+    }
+
+    /// 剪贴板写入判定：回读一致才删原文；换行差异不算失败，旧内容 / 读不到都算没落地。
+    #[test]
+    fn clipboard_verdict_requires_matching_readback() {
+        let text = "第一行\r\n第二行";
+        assert!(clipboard_write_landed(text, Some("第一行\n第二行")));
+        assert!(!clipboard_write_landed(text, Some("上一份内容")));
+        assert!(!clipboard_write_landed(text, None));
     }
 
     #[test]

@@ -1786,6 +1786,9 @@ fn on_input(app: &mut App, event: chat_input::InputEvent) -> iced::Task<Message>
         chat_input::InputEvent::Preedit(preedit) => {
             app.chat.input.preedit = text_preedit::normalize(preedit);
         }
+        chat_input::InputEvent::CutFailed => {
+            app.notify(crate::NoticeLevel::Warning, "剪贴板被占用，未剪切（文本已保留）");
+        }
         chat_input::InputEvent::Send => return chat_entry(app, PendingChatAction::Send),
         chat_input::InputEvent::Undo => {
             app.chat.input.undo_step();
