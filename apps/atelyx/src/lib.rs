@@ -420,19 +420,60 @@ pub(crate) fn next_retry_delay(attempt: u32) -> std::time::Duration {
         .min(SAVE_RETRY_MAX)
 }
 
-/// 保存失败计数表：按文件路径分键（笔记 / 空间笔记 / 空间表格 / 空间画布共用一张表，
-/// 各自递进互不重置），值为（连续失败次数，最近一次失败时刻）。
-pub(crate) type SaveFailureBook = HashMap<String, (u32, Instant)>;
+/// 单个文件的失败序列：连续失败次数 + 最近一次的错误摘要与可重试性。
+/// 错误性质变了（如网络抖动变成并发冲突）就是新的一次需要出声的失败。
+#[derive(Debug, Clone)]
+pub(crate) struct SaveFailure {
+    pub attempt: u32,
+    /// 错误摘要：只用来判断「性质是否变了」，不进提示原文。
+    pub summary: String,
+    /// 是否值得自动重试。
+    pub retryable: bool,
+}
 
-/// 记一次失败：该文件计数 +1，返回（次数，下一次期限）。首次失败从 1 起。
-pub(crate) fn record_save_failure(
+/// 保存失败计数表：按文件路径分键（笔记 / 空间笔记 / 空间表格 / 空间画布共用一张表，
+/// 各自递进互不重置）。
+pub(crate) type SaveFailureBook = HashMap<String, SaveFailure>;
+
+/// 一次失败回执的处置计划（纯数据，调用方逐条执行）：
+/// 何时重排期限、要不要提示、要不要取消挂起的后续动作。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SaveFailurePlan {
+    pub attempt: u32,
+    /// 下一次期限；None = 不重试（不可恢复的失败）。
+    pub retry_at: Option<Instant>,
+    /// 是否出声：新序列首轮，或错误性质与上一轮不同。
+    pub notify: bool,
+    /// 是否取消挂起的后续动作（不可恢复的失败不能让它静默悬挂）。
+    pub abort_pending: bool,
+}
+
+/// 记一次失败并给出处置计划。`retryable` 为假时不排期限、立即收口挂起动作。
+pub(crate) fn plan_save_failure(
     book: &mut SaveFailureBook,
     rel: &str,
     now: Instant,
-) -> (u32, Instant) {
-    let attempt = book.get(rel).map_or(1, |(n, _)| n.saturating_add(1));
-    book.insert(rel.to_string(), (attempt, now));
-    (attempt, now + next_retry_delay(attempt))
+    message: &str,
+    retryable: bool,
+) -> SaveFailurePlan {
+    let summary = failure_summary(message);
+    let prev = book.get(rel);
+    let attempt = prev.map_or(1, |p| p.attempt.saturating_add(1));
+    let notify = attempt == 1 || prev.is_some_and(|p| p.summary != summary);
+    let plan = SaveFailurePlan {
+        attempt,
+        retry_at: retryable.then(|| now + next_retry_delay(attempt)),
+        notify,
+        abort_pending: !retryable,
+    };
+    book.insert(rel.to_string(), SaveFailure { attempt, summary, retryable });
+    plan
+}
+
+/// 错误摘要（判「性质是否变了」用）：取首句并截断，避免长文案逐字变化都算新错误。
+fn failure_summary(message: &str) -> String {
+    let head = message.split(['：', '\n']).next().unwrap_or(message).trim();
+    head.chars().take(40).collect()
 }
 
 /// 落盘成功：清掉该文件的失败记录（其它文件保留）。
@@ -440,45 +481,86 @@ pub(crate) fn clear_save_failure(book: &mut SaveFailureBook, rel: &str) {
     book.remove(rel);
 }
 
-/// 该文件的连续失败次数（None = 无失败记录）。
-pub(crate) fn save_failure_attempt(book: &SaveFailureBook, rel: &str) -> Option<u32> {
-    book.get(rel).map(|(n, _)| *n)
+/// 该文件最近一次失败（None = 无失败记录）。
+pub(crate) fn save_failure<'a>(book: &'a SaveFailureBook, rel: &str) -> Option<&'a SaveFailure> {
+    book.get(rel)
 }
 
-/// 这条失败是否值得自动重试：并发冲突要用户裁决、只读 / 权限拒绝重试也写不进去，
-/// 反复重试只会把同一条错误刷满提示栏。
+/// 错误文案的可重试性兜底判据。冲突 / 只读 / 权限这类重试也写不进去，
+/// 反复重试只会把同一条错误刷满提示栏。空间冲突的真实文案带「已被他人修改」。
 pub(crate) fn save_failure_retryable(message: &str) -> bool {
-    const FINAL: [&str; 5] = [
+    const FINAL: [&str; 8] = [
         "已被外部修改",
+        "已被他人修改",
         "并发冲突",
         "只读",
         "无权限",
         "权限不足",
+        "不存在",
+        "操作已取消",
     ];
     !FINAL.iter().any(|needle| message.contains(needle))
 }
 
-/// 失败回执后是否保留待续 Flush：只有本笔自己是 Flush 时才丢弃——那种情况下挂起动作
-/// 已随失败收口，补发会把关闭 / 切换再执行一遍。
-pub(crate) fn keep_queued_flush(queued: bool, reason: SaveReason) -> bool {
-    queued && !matches!(reason, SaveReason::Flush)
+/// 一次失败回执的完整处置（四条保存链共用）：结清在途键、按成败处置待续 Flush、
+/// 记账并给出期限 / 提示 / 收口计划。调用方只需执行返回的计划。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FailedReceiptPlan {
+    pub failure: SaveFailurePlan,
+    /// 处置后该文件的待续 Flush 是否仍在队列里。
+    pub flush_queued: bool,
 }
 
-/// 自动保存一拍是否真的把笔记提交顺延了：笔记脏、有打开文件，且提交后没有新增在途项。
-/// 只有这种情形才需要把期限留到下一拍（那一笔不会有回执，清了就再没人重排）。
-pub(crate) fn note_submit_deferred(
-    dirty: bool,
-    has_file: bool,
-    inflight_before: usize,
-    inflight_after: usize,
-) -> bool {
-    dirty && has_file && inflight_after <= inflight_before
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn plan_failed_receipt(
+    book: &mut SaveFailureBook,
+    inflight: &mut Vec<(u64, String)>,
+    queued_flush: &mut Vec<(u64, String)>,
+    gen: u64,
+    file: &str,
+    flush: bool,
+    message: &str,
+    retryable: bool,
+    now: Instant,
+) -> FailedReceiptPlan {
+    let key = (gen, file.to_string());
+    inflight.retain(|entry| entry != &key);
+    // 非 Flush 失败把待续项留在队列里（重试成功后的回执靠它放行挂起动作）；
+    // Flush 失败则出队，不能重试成功后再执行一次已收口的关闭 / 切换
+    if flush {
+        queued_flush.retain(|entry| entry != &key);
+    }
+    FailedReceiptPlan {
+        failure: plan_save_failure(book, file, now, message, retryable),
+        flush_queued: queued_flush.contains(&key),
+    }
+}
+
+/// 自动保存一拍是否真的把笔记提交顺延了：提交后该 (世代, 文件) 键本就在在途表里
+/// （本笔没登记上），说明这次被顺延、不会有回执——期限必须留到下一拍重排。
+/// 判键而不是判表长：同一拍里其它文件的键进出不会改变本键的在途事实。
+pub(crate) fn note_submit_deferred(inflight: &[(u64, String)], gen: u64, rel: &str) -> bool {
+    let key = (gen, rel.to_string());
+    inflight.iter().any(|entry| *entry == key)
 }
 
 /// 一拍之后期限的去留：顺延则按退避重排到未来，否则清空（已到期的期限留在场上会让
 /// 定时器链按 0 延迟续排，每拍空转发一个 AutosaveTick，打满一个核）。
 pub(crate) fn tick_deadline(deferred: bool, now: Instant, attempt: u32) -> Option<Instant> {
     deferred.then(|| now + next_retry_delay(attempt))
+}
+
+/// 自动保存一拍的完整决策：先清期限（可能来自表格 / 画布），再决定是否顺延重排。
+/// 顺序是关键——提交前清掉，顺延的那笔才不会被「已到期的旧期限」留在场上空转。
+/// 返回（本拍是否顺延，本拍之后的期限）。
+pub(crate) fn autosave_tick_decision(
+    note_dirty: bool,
+    note_deferred: bool,
+    attempt: u32,
+    now: Instant,
+) -> (bool, Option<Instant>) {
+    let deferred = note_dirty && note_deferred;
+    (deferred, tick_deadline(deferred, now, attempt))
 }
 
 /// 标签候选词表的最小刷新间隔：反复点开/关闭候选不重复扫仓库（保存链不刷，只在开候选时刷）。
@@ -2399,14 +2481,15 @@ impl App {
         self.autosave_timer = false;
     }
 
-    /// 重试序列里下一次失败期限：当前笔记仍有未落盘输入且它自己失败过才算数。
+    /// 重试序列里下一次失败期限：当前笔记仍有未落盘输入、自己失败过、且那次失败可重试。
+    /// 不可重试的失败（冲突 / 只读）不再补排退避——重试也写不进去。
     fn retry_deadline(&self, now: Instant) -> Option<Instant> {
         let rel = self.ui.last_note_file.as_deref()?;
-        let attempt = save_failure_attempt(&self.save_retry, rel)?;
-        if !self.dirty {
+        let failure = save_failure(&self.save_retry, rel)?;
+        if !self.dirty || !failure.retryable {
             return None;
         }
-        Some(now + next_retry_delay(attempt))
+        Some(now + next_retry_delay(failure.attempt))
     }
 
     /// 内容变更后补排自动保存定时器（单定时器链）：期限被输入推迟时按剩余时长续排，否则到期触发保存。
@@ -3297,23 +3380,29 @@ impl App {
                         .ui
                         .last_note_file
                         .as_deref()
-                        .and_then(|rel| save_failure_attempt(&self.save_retry, rel))
+                        .and_then(|rel| save_failure(&self.save_retry, rel))
+                        .map(|f| f.attempt)
                         .unwrap_or(1);
                     let note_dirty = self.dirty;
-                    let has_file = self.ui.last_note_file.is_some();
-                    let mut deferred = false;
-                    if note_dirty && has_file {
-                        let before = self.note_save_inflight.len();
-                        task = task.chain(self.submit_save(SaveReason::AutoSave));
-                        deferred = note_submit_deferred(
-                            note_dirty,
-                            has_file,
-                            before,
-                            self.note_save_inflight.len(),
-                        );
+                    let mut submitted_deferred = false;
+                    if note_dirty {
+                        if let Some(rel) = self.ui.last_note_file.clone() {
+                            let gen = self.epoch();
+                            task = task.chain(self.submit_save(SaveReason::AutoSave));
+                            // 提交后键仍在在途表 = 本笔被判顺延（本笔没登记上）
+                            submitted_deferred =
+                                note_submit_deferred(&self.note_save_inflight, gen, &rel);
+                        }
                     }
-                    // 顺延的那笔不会有回执：期限按退避重排到未来（正文停手后仍会重试）
-                    self.autosave_deadline = tick_deadline(deferred, Instant::now(), attempt);
+                    // 顺延的那笔不会有回执：期限按退避重排到未来（正文停手后仍会重试）；
+                    // 其余情形本拍已清空，由回执或下一拍内容变更重排
+                    self.autosave_deadline = autosave_tick_decision(
+                        note_dirty,
+                        submitted_deferred,
+                        attempt,
+                        Instant::now(),
+                    )
+                    .1;
                     if self.table.as_ref().is_some_and(|t| t.dirty) {
                         // 内容结算点即广播：本地编辑已稳定，插件据此重读
                         self.plugins.on_table_changed(self.table.as_ref().map(|t| t.file.as_str()));
@@ -3411,52 +3500,58 @@ impl App {
                 if gen != self.epoch() {
                     return Task::none();
                 }
-                // 本笔失败也要结清在途标记，否则该文件后续保存会被永久挡住
-                let key = (gen, rel.clone());
-                self.note_save_inflight.retain(|entry| entry != &key);
-                // 待续 Flush：本笔就是 Flush 时丢弃（挂起动作已 abort，补发会重复执行）；
-                // 非 Flush 失败原样保留在队列里，等退避重试成功后的回执补发收尾
-                let keep_queued = keep_queued_flush(
-                    self.note_save_flush_queued.contains(&key),
-                    reason,
+                // 统一处置：结清在途键、按语义处置待续 Flush、记账给出期限 / 提示 / 收口计划。
+                // 旧文件的失败也要记账，否则该文件的重试序列永远停在首轮
+                let retryable = save_failure_retryable(&e);
+                let receipt = plan_failed_receipt(
+                    &mut self.save_retry,
+                    &mut self.note_save_inflight,
+                    &mut self.note_save_flush_queued,
+                    gen,
+                    &rel,
+                    matches!(reason, SaveReason::Flush),
+                    &e,
+                    retryable,
+                    Instant::now(),
                 );
-                if !keep_queued {
-                    self.note_save_flush_queued.retain(|entry| entry != &key);
-                }
-                // 旧文件的失败仍须可见，但不得覆盖当前文件的错误位与挂起动作
+                let plan = receipt.failure;
+                // 旧文件的失败仍须可见，但不得覆盖当前文件的错误位、期限与挂起动作
                 if self.ui.last_note_file.as_deref() != Some(rel.as_str()) {
-                    self.notify(
-                        NoticeLevel::Error,
-                        format!("「{}」保存失败：{e}", rel.rsplit('/').next().unwrap_or(&rel)),
-                    );
+                    if plan.notify {
+                        self.notify(
+                            NoticeLevel::Error,
+                            format!("「{}」保存失败：{e}", rel.rsplit('/').next().unwrap_or(&rel)),
+                        );
+                    }
+                    self.settle_history_restore(false);
                     return Task::none();
                 }
                 self.settle_history_restore(false);
                 // 回滚没写进磁盘：Restore 版本作废（不得留一条从未落盘的回滚记录）
                 self.pending_restore_note = None;
-                // 失败记账按文件分键；不可恢复的失败（冲突 / 只读）不排自动重试，
-                // 只留 save_error 徽标等用户处置——重试也写不进去，只会把同一条错误刷满提示栏
-                let retryable = save_failure_retryable(&e);
-                let (attempt, at) = record_save_failure(&mut self.save_retry, &rel, Instant::now());
-                if retryable {
+                // 可重试的失败按退避排下一次期限；不可重试的不排（重试也写不进去）
+                if let Some(at) = plan.retry_at {
                     self.autosave_deadline = Some(at);
                     self.autosave_timer = false;
                 }
-                // 一次失败序列只提示一次：重试链每轮都弹一次会把提示栏刷屏
-                let first = attempt == 1;
-                // flush 被保存失败打断：动作不放行、窗口不关、原因可见（脏态与 save_error 保留，
-                // 等下一笔重试落盘）。仅回填等回执的 AI 文件操作，其余挂起动作留待重试后放行
-                if matches!(reason, SaveReason::Flush) {
+                // 不可恢复的失败：挂起的后续动作不能静默悬挂，就地收口并给出可执行的提示
+                if plan.abort_pending {
+                    self.abort_pending_flush("保存失败");
+                }
+                // flush 被保存失败打断：仅回填等回执的 AI 文件操作，其余挂起动作留待重试后放行
+                let flush = matches!(reason, SaveReason::Flush);
+                if flush {
                     ai_fs_edit::abort_pending(self, &e);
-                    if first {
-                        let suffix = if retryable { "（未落盘内容已保留，稍后自动重试）" } else { "" };
-                        self.notify(
-                            NoticeLevel::Error,
-                            format!("保存失败，操作未执行：{e}{suffix}"),
-                        );
-                    }
-                } else if first {
-                    self.notify(NoticeLevel::Error, format!("保存失败：{e}"));
+                }
+                if plan.notify {
+                    let notice = if plan.abort_pending {
+                        format!("保存失败：{e}（操作已暂停，处理后重试）")
+                    } else if flush {
+                        format!("保存失败，操作未执行：{e}（未落盘内容已保留，稍后自动重试）")
+                    } else {
+                        format!("保存失败：{e}")
+                    };
+                    self.notify(NoticeLevel::Error, notice);
                 }
                 self.save_error = Some(e);
                 Task::none()
@@ -9220,12 +9315,13 @@ mod file_drop_tests {
         // save_failure_book_is_per_file）
         let now = Instant::now();
         let mut book = super::SaveFailureBook::new();
-        let (attempt, at) = super::record_save_failure(&mut book, "a.md", now);
-        assert_eq!(attempt, 1);
-        assert_eq!(at, now + Duration::from_secs(1));
-        let (attempt, at) = super::record_save_failure(&mut book, "a.md", now);
-        assert_eq!(attempt, 2);
-        assert_eq!(at, now + Duration::from_secs(2));
+        let plan = super::plan_save_failure(&mut book, "a.md", now, "网络错误：超时", true);
+        assert_eq!(plan.attempt, 1);
+        assert_eq!(plan.retry_at, Some(now + Duration::from_secs(1)));
+        let plan = super::plan_save_failure(&mut book, "a.md", now, "网络错误：超时", true);
+        assert_eq!(plan.attempt, 2);
+        assert_eq!(plan.retry_at, Some(now + Duration::from_secs(2)));
+        assert!(!plan.notify, "同一性质的重试轮次不再出声");
     }
 
     /// 退格 / 删除的光标落在字符中间（远端合流或程序化偏移留下的非法值）时，
@@ -9266,11 +9362,22 @@ mod file_drop_tests {
     /// 本笔就是 Flush 且失败则丢弃（挂起动作已 abort，补发会重复执行关闭 / 切换）。
     #[test]
     fn queued_flush_survives_non_flush_failure() {
-        use crate::SaveReason;
-        assert!(super::keep_queued_flush(true, SaveReason::AutoSave), "AutoSave 失败保留");
-        assert!(super::keep_queued_flush(true, SaveReason::Manual), "Manual 失败保留");
-        assert!(!super::keep_queued_flush(true, SaveReason::Flush), "Flush 失败丢弃");
-        assert!(!super::keep_queued_flush(false, SaveReason::AutoSave), "本来没有待续项");
+        // 语义由 plan_failed_receipt 统一承担，见 failed_receipt_keeps_queued_flush_for_retry
+        let mut book = super::SaveFailureBook::new();
+        let mut inflight = Vec::new();
+        let mut queued = vec![(1u64, "a.md".to_string())];
+        let plan = super::plan_failed_receipt(
+            &mut book,
+            &mut inflight,
+            &mut queued,
+            1,
+            "a.md",
+            false,
+            "网络错误：超时",
+            true,
+            std::time::Instant::now(),
+        );
+        assert!(plan.flush_queued, "非 Flush 失败保留");
     }
     /// 自动保存一拍之后期限的去留：只有「笔记脏且本笔被判在途顺延」才重排，
     /// 其余（表格 / 画布单独排的期限、笔记未打开、笔记已提交）一律清空。
@@ -9284,27 +9391,131 @@ mod file_drop_tests {
         // 笔记脏但提交被判在途顺延：按退避重排（保留重试，且不留在过去时刻上空转）
         assert_eq!(super::tick_deadline(true, now, 1), Some(now + Duration::from_secs(1)));
         assert_eq!(super::tick_deadline(true, now, 3), Some(now + Duration::from_secs(4)));
-        // 判定「是否顺延」只认「脏 + 有打开文件 + 未新增在途项」
-        assert!(super::note_submit_deferred(true, true, 0, 0));
-        assert!(!super::note_submit_deferred(true, true, 0, 1), "真的下发了不算顺延");
-        assert!(!super::note_submit_deferred(false, true, 0, 0), "笔记不脏不下发");
-        assert!(!super::note_submit_deferred(true, false, 0, 0), "没有打开文件不下发");
+        // 判定「是否顺延」只看本键是否仍在在途表：别的文件键进出不影响结论
+        let keys = vec![(7u64, "a.md".to_string())];
+        assert!(super::note_submit_deferred(&keys, 7, "a.md"), "本键仍在在途 = 顺延");
+        assert!(!super::note_submit_deferred(&keys, 7, "b.md"), "别的文件不算顺延");
+        assert!(!super::note_submit_deferred(&keys, 8, "a.md"), "别的世代不算顺延");
+        assert!(!super::note_submit_deferred(&[], 7, "a.md"), "本笔登记上了就真的下发了");
     }
 
     /// 失败后的重试记账按文件分键：两条链同时失败各自递进，互不重置。
     #[test]
     fn save_failure_book_is_per_file() {
-        use std::collections::HashMap;
         use std::time::Instant;
         let now = Instant::now();
-        let mut book: HashMap<String, (u32, Instant)> = HashMap::new();
-        assert_eq!(super::record_save_failure(&mut book, "a.md", now).0, 1);
-        assert_eq!(super::record_save_failure(&mut book, "a.md", now).0, 2);
-        assert_eq!(super::record_save_failure(&mut book, "t.atb", now).0, 1, "另一条链从 1 起");
-        assert_eq!(super::record_save_failure(&mut book, "a.md", now).0, 3, "互不影响");
+        let mut book = super::SaveFailureBook::new();
+        let msg = "网络错误：超时";
+        assert_eq!(super::plan_save_failure(&mut book, "a.md", now, msg, true).attempt, 1);
+        assert_eq!(super::plan_save_failure(&mut book, "a.md", now, msg, true).attempt, 2);
+        assert_eq!(
+            super::plan_save_failure(&mut book, "t.atb", now, msg, true).attempt,
+            1,
+            "另一条链从 1 起"
+        );
+        assert_eq!(super::plan_save_failure(&mut book, "a.md", now, msg, true).attempt, 3, "互不影响");
         super::clear_save_failure(&mut book, "a.md");
-        assert_eq!(super::record_save_failure(&mut book, "a.md", now).0, 1, "成功后复位");
-        assert_eq!(super::record_save_failure(&mut book, "t.atb", now).0, 2, "其它文件不受影响");
+        assert_eq!(super::plan_save_failure(&mut book, "a.md", now, msg, true).attempt, 1, "成功后复位");
+        assert_eq!(super::plan_save_failure(&mut book, "t.atb", now, msg, true).attempt, 2, "其它文件不受影响");
+    }
+
+    /// 失败序列中途错误性质变化要重新出声：网络抖动转成并发冲突，用户必须看到新原因。
+    #[test]
+    fn changed_failure_kind_notifies_again() {
+        use std::time::Instant;
+        let now = Instant::now();
+        let mut book = super::SaveFailureBook::new();
+        assert!(super::plan_save_failure(&mut book, "a.md", now, "网络错误：超时", true).notify);
+        assert!(!super::plan_save_failure(&mut book, "a.md", now, "网络错误：超时", true).notify);
+        let plan = super::plan_save_failure(
+            &mut book,
+            "a.md",
+            now,
+            "文件已被外部修改，本次保存未写入",
+            false,
+        );
+        assert!(plan.notify, "性质变了要再出声一次");
+        assert_eq!(plan.retry_at, None, "不可重试不排期限");
+        assert!(plan.abort_pending, "不可重试必须收口挂起动作");
+    }
+
+    /// 空间冲突的真实文案不含「冲突」二字，也必须判成不可重试（否则每 30s 打一次）。
+    #[test]
+    fn space_conflict_wording_is_not_retried() {
+        assert!(!super::save_failure_retryable("表格已被他人修改，请刷新后重试"));
+        assert!(!super::save_failure_retryable("画布已被他人修改，请刷新后重试"));
+        assert!(super::save_failure_retryable("网络错误：超时"));
+    }
+
+    /// S1 接线：AutoSave 在途 + 关窗入队 Flush + 失败回执 → 待续项必须仍在，
+    /// 重试成功后才放行；本笔即 Flush 的失败则丢弃（不能重复执行挂起动作）。
+    #[test]
+    fn failed_receipt_keeps_queued_flush_for_retry() {
+        use std::time::Instant;
+        let now = Instant::now();
+        let mut book = super::SaveFailureBook::new();
+        let mut inflight = vec![(3u64, "a.md".to_string())];
+        let mut queued = vec![(3u64, "a.md".to_string())];
+        let plan = super::plan_failed_receipt(
+            &mut book,
+            &mut inflight,
+            &mut queued,
+            3,
+            "a.md",
+            false,
+            "网络错误：超时",
+            true,
+            now,
+        );
+        assert!(inflight.is_empty(), "回执必须结清在途键");
+        assert!(plan.flush_queued, "非 Flush 失败要把待续 Flush 留在队列里");
+        assert_eq!(queued, vec![(3u64, "a.md".to_string())]);
+        assert!(plan.failure.retry_at.is_some(), "可重试失败要排下一次期限");
+        assert!(plan.failure.notify);
+        assert!(!plan.failure.abort_pending);
+
+        // 本笔即 Flush 失败：待续项丢弃
+        let mut queued = vec![(3u64, "a.md".to_string())];
+        let plan = super::plan_failed_receipt(
+            &mut book,
+            &mut inflight,
+            &mut queued,
+            3,
+            "a.md",
+            true,
+            "网络错误：超时",
+            true,
+            now,
+        );
+        assert!(!plan.flush_queued, "Flush 失败不得补发");
+        assert!(queued.is_empty());
+    }
+
+    /// S2 接线：冲突这类不可重试的失败必须收口挂起动作并给出可执行提示，
+    /// 不能让关闭 / 切换静默悬挂；非 Flush 失败的待续项仍保留给用户处理后收尾。
+    #[test]
+    fn failed_receipt_aborts_pending_on_conflict() {
+        use std::time::Instant;
+        let now = Instant::now();
+        let mut book = super::SaveFailureBook::new();
+        let mut inflight = vec![(3u64, "a.md".to_string())];
+        let mut queued = vec![(3u64, "a.md".to_string())];
+        let message = "文件已被外部修改，本次保存未写入";
+        let plan = super::plan_failed_receipt(
+            &mut book,
+            &mut inflight,
+            &mut queued,
+            3,
+            "a.md",
+            false,
+            message,
+            super::save_failure_retryable(message),
+            now,
+        );
+        assert!(plan.failure.abort_pending, "不可重试必须收口挂起动作");
+        assert!(plan.failure.retry_at.is_none(), "不可重试不排期限");
+        assert!(plan.failure.notify, "要有一条可执行提示");
+        assert!(plan.flush_queued, "非 Flush 失败的待续项保留，用户处理后仍可收尾");
     }
 
     /// 不可恢复的失败不排自动重试：冲突要用户裁决、只读身份写不进去，重试只会刷屏。
