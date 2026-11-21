@@ -448,11 +448,37 @@ pub fn restore_snapshot(root: &Path, kind: HistoryKind, file: &str, content: &st
     crate::vault::atomic_write(&path, content)
 }
 
+/// 版本列表的序列化字节数（与写盘同一份编码）。
+fn serialized_len(versions: &[HistoryVersion]) -> usize {
+    serde_json::to_string(&HistoryFile { versions: versions.to_vec() })
+        .map(|json| json.len())
+        .unwrap_or(usize::MAX)
+}
+
+/// 单版在侧文件里占的字节：自身编码 + 一个分隔逗号（末版没有逗号，差额由外层固定开销抵消）。
+fn version_len(version: &HistoryVersion) -> usize {
+    serde_json::to_string(version).map_or(usize::MAX, |json| json.len() + 1)
+}
+
 /// 字节预算剪枝：超限从最旧丢，仅剩 1 版也超则保留兜底。
+/// 先整体序列化判一次预算，再用逐版实际字节从最旧侧累计，只对结果序列化一次复核——
+/// 不再「每删一版就整份重序列化」。
 fn prune_bytes(versions: Vec<HistoryVersion>, budget: usize) -> Vec<HistoryVersion> {
     let mut next = versions;
-    let size = |v: &[HistoryVersion]| serde_json::to_string(&HistoryFile { versions: v.to_vec() }).map(|s| s.len()).unwrap_or(usize::MAX);
-    while next.len() > 1 && size(&next) > budget {
+    let total = serialized_len(&next);
+    if next.len() <= 1 || total <= budget {
+        return next;
+    }
+    // 从精确总量里逐版扣实际字节：等价于「删掉这几版后重新序列化」，不必真的重算
+    let mut remaining = total;
+    let mut drop_count = 0usize;
+    while drop_count + 1 < next.len() && remaining > budget {
+        remaining = remaining.saturating_sub(version_len(&next[drop_count]));
+        drop_count += 1;
+    }
+    next.drain(..drop_count);
+    // 复核：扣减与实际编码若因外层开销细节差出几字节，仍超预算就继续整份剪
+    while next.len() > 1 && serialized_len(&next) > budget {
         next.remove(0);
     }
     next
@@ -705,6 +731,91 @@ mod tests {
         let versions = load_history(&tmp, HistoryKind::Note, "a.md");
         assert_eq!(versions.len(), 3);
         assert_eq!(versions[0].content, "v3");
+    }
+
+    fn version(seq: u64, content: &str) -> HistoryVersion {
+        HistoryVersion {
+            seq,
+            ts: 0,
+            author: author(),
+            editor: None,
+            action: HistoryAction::Edit,
+            content: content.into(),
+            summary: None,
+            note: None,
+            co_authors: None,
+        }
+    }
+
+    /// 剪枝口径与旧实现一致：预算内原样保留，超限从最旧丢且结果落在预算内，最新版永不丢。
+    #[test]
+    fn prune_bytes_keeps_budget_and_newest_versions() {
+        let small = vec![version(1, "a"), version(2, "b")];
+        let budget = serialized_len(&small);
+        assert_eq!(prune_bytes(small.clone(), budget).len(), 2, "预算内不得剪枝");
+
+        let many: Vec<HistoryVersion> =
+            (0..10).map(|i| version(i, &"x".repeat(1000))).collect();
+        let budget = serialized_len(&many) / 3;
+        let pruned = prune_bytes(many.clone(), budget);
+        assert!(pruned.len() < many.len(), "超预算必须剪枝");
+        assert!(
+            serialized_len(&pruned) <= budget,
+            "剪枝后仍须落在预算内：{}",
+            serialized_len(&pruned)
+        );
+        assert_eq!(pruned.last().map(|v| v.seq), Some(9), "保留的是最新版本");
+        // 仅剩 1 版也超预算：保留兜底，不清空历史
+        let single = vec![version(1, &"y".repeat(1000))];
+        assert_eq!(prune_bytes(single, 10).len(), 1);
+    }
+
+    /// 与「每删一版就整份重序列化」的旧口径逐例对拍：剪枝位置必须完全一致，
+    /// 否则同样的编辑历史会在新旧构建之间少留或多留版本。
+    #[test]
+    fn prune_bytes_matches_reserialize_per_drop_reference() {
+        fn reference(versions: Vec<HistoryVersion>, budget: usize) -> Vec<HistoryVersion> {
+            let mut next = versions;
+            while next.len() > 1 && serialized_len(&next) > budget {
+                next.remove(0);
+            }
+            next
+        }
+        let contents = [
+            "abc".to_string(),
+            "x\n".repeat(500),
+            "\u{1}".repeat(300),
+            "中文正文".repeat(400),
+            String::new(),
+        ];
+        let mut cases = 0;
+        for count in 1..=5usize {
+            let versions: Vec<HistoryVersion> =
+                (0..count).map(|i| version(i as u64, &contents[i % contents.len()])).collect();
+            let full = serialized_len(&versions);
+            for step in 0..=10usize {
+                let budget = full * step / 10;
+                assert_eq!(
+                    prune_bytes(versions.clone(), budget),
+                    reference(versions.clone(), budget),
+                    "count={count} budget={budget}"
+                );
+                cases += 1;
+            }
+        }
+        assert!(cases > 0);
+    }
+
+    /// 正文含大量需转义的字符时，逐版字节与实际编码的差额不得让结果超预算，
+    /// 也不得把还能留的版本一起剪掉（旧实现与本实现都必须落在同一档）。
+    #[test]
+    fn prune_bytes_budget_holds_with_escaped_content() {
+        let escaped = "\u{1}".repeat(1000);
+        let many: Vec<HistoryVersion> = (0..5).map(|i| version(i, &escaped)).collect();
+        let budget = 15_000;
+        let pruned = prune_bytes(many, budget);
+        assert!(pruned.len() > 1, "预算内还能留的版本不得被一起剪掉：{}", pruned.len());
+        assert!(serialized_len(&pruned) <= budget, "复核后必须落在预算内");
     }
 
     #[test]
