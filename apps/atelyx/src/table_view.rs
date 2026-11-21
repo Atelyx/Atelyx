@@ -1229,22 +1229,22 @@ impl SaveInflight {
         SaveAdmission::Start
     }
 
-    /// 回执结清：返回「在途期间排队过 Flush」（调用方据此补发收尾）。
+    /// 回执结清：只摘在途键，返回「在途期间是否排队过 Flush」。
+    ///
+    /// 队列不在这里删——回执可能是失败，失败侧要靠「还在队列里」判断该不该补发。
+    /// 五条链的待续 Flush 只有一套结清协议：成功回执调 consume_flush 消费，
+    /// 失败回执整份交给 `apply_failed_save`（按本笔是否 Flush、可否重试决定丢弃或留下）。
+    /// 守卫自己删队列会让失败侧以为从没排过队，挂起的关闭 / 切换从此空等。
     pub fn finish(&mut self, gen: u64, file: &str) -> bool {
         let key = (gen, file.to_string());
         self.keys.retain(|entry| entry != &key);
-        let queued = self.flush_queued.contains(&key);
-        self.flush_queued.retain(|entry| entry != &key);
-        queued
+        self.flush_queued.contains(&key)
     }
 
-    /// 把回执取走的待续 Flush 放回队列：本笔不是 Flush 的失败不取消挂起动作，
-    /// 重试成功后才补发收尾（不回填的话挂起的关闭 / 切换会永久等下去）。
-    pub fn requeue_flush(&mut self, gen: u64, file: &str) {
+    /// 成功回执消费待续项：落盘已成功，补发与放行交给收尾逻辑，队列里不再留这一笔。
+    pub fn consume_flush(&mut self, gen: u64, file: &str) {
         let key = (gen, file.to_string());
-        if !self.flush_queued.contains(&key) {
-            self.flush_queued.push(key);
-        }
+        self.flush_queued.retain(|entry| entry != &key);
     }
 }
 
@@ -4144,8 +4144,9 @@ mod tests {
         assert_eq!(guard.begin(1, "a.atb", false), SaveAdmission::Start);
         assert_eq!(guard.begin(1, "a.atb", false), SaveAdmission::Deferred);
         assert_eq!(guard.begin(1, "a.atb", true), SaveAdmission::Queued);
-        // 回执结清后才交付待续 Flush，且只交付一次
+        // 回执看得见待续 Flush（消费由成功收尾单独做，只交付一次）
         assert!(guard.finish(1, "a.atb"), "在途期间排队的 Flush 要补发");
+        guard.consume_flush(1, "a.atb");
         assert!(!guard.finish(1, "a.atb"), "结清后不再重复补发");
         assert_eq!(guard.begin(1, "a.atb", false), SaveAdmission::Start);
     }
@@ -4227,7 +4228,7 @@ mod tests {
         let first = crate::plan_save_failure(&mut book, "t.atb", msg, false);
         assert!(first.notify, "首轮要提示");
         assert!(!crate::plan_save_failure(&mut book, "t.atb", msg, false).notify, "重试轮不再提示");
-        let retryable_effects = crate::failed_save_effects(first, msg, false, "保存失败");
+        let retryable_effects = crate::failed_save_effects(first, msg, false, "保存失败", false);
         let retryable_notice = retryable_effects.notice.expect("首轮有提示");
         assert!(
             retryable_notice.contains("自动重试"),
@@ -4235,26 +4236,42 @@ mod tests {
         );
         // 不可恢复：文案改说「操作已暂停」，同时收口挂起动作
         let blocked = crate::plan_save_failure(&mut book, "x.atb", "文件已被外部修改", false);
-        let blocked_effects = crate::failed_save_effects(blocked, "文件已被外部修改", true, "保存失败");
+        let blocked_effects =
+            crate::failed_save_effects(blocked, "文件已被外部修改", true, "保存失败", true);
         let notice = blocked_effects.notice.expect("不可恢复失败要出声");
         assert!(notice.contains("操作已暂停"), "不可恢复失败要交代操作已暂停：{notice}");
         assert!(!notice.contains("自动重试"), "不得承诺自动重试：{notice}");
         assert!(blocked_effects.abort_why.is_some(), "不可恢复必须收口挂起动作");
     }
 
-    /// 非 Flush 失败：回执取走的待续 Flush 必须回填，重试成功后才补发收尾。
-    /// 不回填的话挂起的关闭 / 切换会永久等下去（挂起动作并未被取消）。
+    /// 非 Flush 失败：待续 Flush 必须留在队列，重试成功后才消费。
+    /// 守卫在失败回执里自己删队列会让挂起的关闭 / 切换永久等下去（挂起动作并未被取消）。
     #[test]
-    fn non_flush_failure_requeues_flush_for_retry() {
+    fn non_flush_failure_keeps_flush_for_retry() {
         let mut guard = SaveInflight::default();
+        let mut book = crate::SaveFailureBook::new();
         assert_eq!(guard.begin(1, "a.atb", false), SaveAdmission::Start);
         assert_eq!(guard.begin(1, "a.atb", true), SaveAdmission::Queued);
-        // 失败回执先结清在途标记并取走待续项，再按「本笔不是 Flush」回填
+        // 失败回执只摘在途键；队列交给统一处置（本笔不是 Flush → 留下）
         assert!(guard.finish(1, "a.atb"), "回执当场拿到待续 Flush");
-        guard.requeue_flush(1, "a.atb");
-        // 重试成功后由回执补发：待续项必须还在，且只交付一次
+        let (mut keys, mut queued) = guard.into_parts();
+        let plan = crate::apply_failed_save(
+            &mut book,
+            &mut keys,
+            &mut queued,
+            1,
+            "a.atb",
+            false,
+            "磁盘忙：设备未就绪",
+            false,
+        );
+        assert!(plan.retry_in.is_some(), "可恢复失败仍要重试");
+        assert_eq!(queued, vec![(1u64, "a.atb".to_string())], "非 Flush 失败不得丢掉待续项");
+        guard = SaveInflight::from_parts(keys, queued);
+        // 重试成功后由回执消费：待续项还在，且只交付一次
         assert_eq!(guard.begin(1, "a.atb", false), SaveAdmission::Start, "重试仍可提交");
-        assert!(guard.finish(1, "a.atb"), "回填的待续 Flush 要交付");
+        assert!(guard.finish(1, "a.atb"), "保留的待续 Flush 要交付");
+        guard.consume_flush(1, "a.atb");
         assert!(!guard.finish(1, "a.atb"), "同一待续项只交付一次");
     }
 

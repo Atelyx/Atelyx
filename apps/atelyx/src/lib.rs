@@ -529,17 +529,24 @@ pub(crate) struct FailedSaveEffects {
     pub notice: Option<String>,
 }
 
+/// 收口原因串：失败不可重试、或本笔就是 Flush，挂起动作都再没有回执来放行它。
+/// Flush 的待续项已丢弃，重试以 AutoSave 下发（queued_flush = false），那条路径不调 after_any_flush。
+fn abort_reason(plan: FailedSave, message: &str, flush: bool) -> Option<String> {
+    (!plan.retryable || flush).then(|| format!("{SAVE_FAILED_ABORT}：{message}"))
+}
+
+/// `forfeit` = 这次处置会取走挂起动作，用户必须知道动作没执行：提示闸门只管「别重复刷屏」，
+/// 不拦「动作被取消却没交代」——关窗 / 切文件因保存失败被丢是用户必须看到的事实。
 pub(crate) fn failed_save_effects(
     plan: FailedSave,
     message: &str,
     flush: bool,
     hint: &str,
+    forfeit: bool,
 ) -> FailedSaveEffects {
     FailedSaveEffects {
-        // Flush 失败一律收口：待续 Flush 已丢弃，挂起动作若留着就再也没有回执放行它。
-        // 重试以 AutoSave 下发（queued_flush = false），那条路径不会调 after_any_flush。
-        abort_why: (!plan.retryable || flush).then(|| format!("{SAVE_FAILED_ABORT}：{message}")),
-        notice: plan.notify.then(|| match (plan.retryable, flush) {
+        abort_why: abort_reason(plan, message, flush),
+        notice: (plan.notify || forfeit).then(|| match (plan.retryable, flush) {
             (false, _) => format!("{hint}：{message}（操作已暂停，处理后重试）"),
             (true, true) => {
                 format!("{hint}，操作未执行：{message}（未落盘内容已保留，稍后自动重试）")
@@ -551,19 +558,23 @@ pub(crate) fn failed_save_effects(
 
 /// 收口挂起动作：能回填的（AI 文件操作 / 插件结构变更）交回可读错误，其余就地丢弃。
 /// 挂起动作一律不执行——脏面没落盘时执行会丢掉未落盘内容。
+/// 返回是否真的取走了挂起项：取走 = 用户动作被取消，调用方必须让用户看到原因。
 pub(crate) fn abort_pending(
     pending: &mut Option<PendingAfterFlush>,
     resolve_plugin: &mut dyn FnMut(u64, String),
     why: &str,
-) {
+) -> bool {
     match pending.take() {
+        None => return false,
         Some(PendingAfterFlush::AiFs { id, .. }) => ai_fs_edit::settle(id, Err(why.to_string())),
         Some(
             PendingAfterFlush::PluginVaultRemove { request_id, .. }
             | PendingAfterFlush::PluginVaultRename { request_id, .. },
         ) => resolve_plugin(request_id, why.to_string()),
-        _ => {}
+        // 关闭 / 切换 / 改名这类动作无处回执：就地丢弃，由调用方补一条提示
+        Some(_) => {}
     }
+    true
 }
 
 /// 内容变更后只重置退避阶梯：连续失败次数回到首档，「这条错误是否已提示过」的摘要保留。
@@ -634,7 +645,10 @@ pub(crate) fn apply_failed_save(
 
 /// 统一处置本体（五条保存链共用，不依赖整个 App）：记账 + 待续 Flush 去留，
 /// 再按处置收口挂起动作、提示、排下一次期限。
-/// `own` 为假 = 失败面已不是当前面：只记账与提示，不动当前面的期限与挂起动作。
+/// `own` 为假 = 失败面已不是当前面：只记账与提示，不动当前面的期限；
+/// 但 Flush 失败的挂起项仍要回填（取走动作不执行，不替用户取消当前面的动作），
+/// 否则插件 / AI 调用空等到下一道闸门；
+/// 该面也不会再排重试，它自己的待续项一并摘掉——留着永远等不到消费它的人。
 /// `schedule` 只在需要排下一次期限时调用（收口侧已一致的链不该再排一遍）。
 /// 返回处置结果与处置后的（在途键, 待续队列），调用方负责把它们放回原槽位。
 #[allow(clippy::too_many_arguments)]
@@ -663,15 +677,26 @@ pub(crate) fn settle_failure_tables(
         message,
         reset_backoff,
     );
-    let effects = failed_save_effects(plan, message, flush, hint);
-    if own {
-        if let Some(why) = &effects.abort_why {
-            abort_pending(pending, resolve_plugin, why);
+    // 收口先做再算提示：只有真的取走挂起项才需要补一条「动作被取消」。
+    // own=false 只在 Flush 失败时回填挂起项——那是用户动作当场被取消、等回执的一方在空等；
+    // 旧文件的非 Flush 失败与当前面的挂起动作无关，不得替用户取消它。
+    let mut taken = false;
+    if own || flush {
+        if let Some(why) = &abort_reason(plan, message, flush) {
+            taken = abort_pending(pending, resolve_plugin, why);
         }
+    }
+    if own {
         if let Some(delay) = plan.retry_in {
             schedule(delay);
         }
+    } else {
+        // 失败面不是当前面：不会为它排重试，它自己的待续项再没有回执来消费；
+        // 只摘这一笔——同一容器里其它文件的待续项仍要等各自的回执
+        let key = (gen, file.to_string());
+        queued.retain(|entry| entry != &key);
     }
+    let effects = failed_save_effects(plan, message, flush, hint, taken);
     (plan, effects.notice, keys, queued)
 }
 
@@ -710,10 +735,17 @@ pub(crate) const NOTICE_THROTTLE: std::time::Duration = std::time::Duration::fro
 
 /// 应用数据目录（bundle identifier = com.atelyx.desktop）；ui-state.json 与 global.json 同放此处。
 fn app_data_dir() -> Option<PathBuf> {
-    // 单测不读写用户应用数据：启动装配（ui-state / global / 插件根）落隔离目录
+    // 单测不读写用户应用数据：启动装配（ui-state / global / 插件根）落进程隔离目录。
+    // 目录名带 pid：并行 / 反复起的测试进程互不踩对方的 ui-state 与插件根。
     #[cfg(test)]
     {
-        return Some(std::env::temp_dir().join("atelyx-test-data"));
+        let dir = std::env::temp_dir().join(format!("atelyx-test-data-{}", std::process::id()));
+        // 本进程首次取用时清一次：pid 被复用时不得继承上一轮留下的布局与全局配置
+        static CLEAN: std::sync::Once = std::sync::Once::new();
+        CLEAN.call_once(|| {
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+        return Some(dir);
     }
     #[cfg(not(test))]
     {
@@ -2615,7 +2647,7 @@ impl App {
         if let Some(rel) = self.ui.last_note_file.clone() {
             reset_save_backoff(&mut self.save_retry, &rel);
         }
-        self.autosave_deadline = Some(Instant::now() + AUTOSAVE_DEBOUNCE);
+        self.arm_debounce_earliest();
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
@@ -2646,6 +2678,20 @@ impl App {
         }
         self.plugins.on_table_changed(current.as_deref());
         self.table_event_path = current;
+    }
+
+    /// 内容变更后的防抖期限：五条链共用一个期限，取最早——后变更的链不得把别的链
+    /// 已排好的更早期限（尤其是重试退避）往后推。
+    pub(crate) fn arm_debounce_earliest(&mut self) {
+        let at = Instant::now() + AUTOSAVE_DEBOUNCE;
+        self.schedule_save_deadline(at);
+    }
+
+    /// 期限取最早：五条链共用一个期限位，覆盖会让后失败 / 后变更的链
+    /// 把别的链已排好的更早期限（退避重试、防抖尾沿）往后推。
+    pub(crate) fn schedule_save_deadline(&mut self, at: Instant) {
+        self.autosave_deadline = Some(self.autosave_deadline.map_or(at, |cur| cur.min(at)));
+        self.autosave_timer = false;
     }
 
     /// 排定下一次笔记保存期限：失败重试序列未结束时按退避间隔，否则按防抖尾沿。
@@ -4159,7 +4205,7 @@ impl App {
                 if self.table.as_ref().is_some_and(|t| t.dirty)
                     && self.table.as_ref().map(|t| t.version) != version_before
                 {
-                    self.autosave_deadline = Some(Instant::now() + AUTOSAVE_DEBOUNCE);
+                    self.arm_debounce_earliest();
                 }
                 // 滚动/载入后补拉可见区图片句柄（无待加载 = 无任务）
                 task.chain(table_actions::ensure_image_loads(self).unwrap_or_default())
@@ -6166,7 +6212,7 @@ impl App {
         }
         let streaming = canvas.view.card_chat.values().any(|chat| chat.streaming);
         if !streaming || self.autosave_deadline.is_none() {
-            self.autosave_deadline = Some(Instant::now() + AUTOSAVE_DEBOUNCE);
+            self.arm_debounce_earliest();
         }
     }
 
@@ -6216,6 +6262,7 @@ impl App {
     }
 
     /// 本地表格 / 画布链走这里：在途守卫由会话持有，处置后连同处置结果一起交回调用方。
+    /// `own` 为假 = 失败面已不是当前文件：只记账与提示，不动当前面的期限。
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn apply_save_failure(
         &mut self,
@@ -6226,6 +6273,7 @@ impl App {
         message: &str,
         reset_backoff: bool,
         hint: &str,
+        own: bool,
     ) -> (FailedSave, SaveInflight) {
         let (keys, queued) = inflight.into_parts();
         let (plan, keys, queued) = self.settle_failure_owned(
@@ -6237,7 +6285,7 @@ impl App {
             message,
             reset_backoff,
             hint,
-            true,
+            own,
         );
         (plan, SaveInflight::from_parts(keys, queued))
     }
@@ -6290,9 +6338,10 @@ impl App {
         let mut resolve = |request_id: u64, why: String| {
             plugins.resolve_shell_call(request_id, Err(why));
         };
-        // 排期只碰期限与定时器标志：与上下两处状态借位互不相交
+        // 只碰期限与定时器标志：与上下两处状态借位互不相交（整 self 借位会撞上 save_retry）
         let mut schedule = |delay: std::time::Duration| {
-            self.autosave_deadline = Some(Instant::now() + delay);
+            let at = Instant::now() + delay;
+            self.autosave_deadline = Some(self.autosave_deadline.map_or(at, |cur| cur.min(at)));
             self.autosave_timer = false;
         };
         let (plan, notice, keys, queued) = settle_failure_tables(
@@ -6600,6 +6649,8 @@ impl App {
         self.save_error = None;
         // 失败记账的键是裸相对路径：容器身份一换，同名文件的旧记录不得沿用
         self.save_retry.clear();
+        // 提示节流同上：键含文件名，新容器里的同名失败是新的失败序列
+        self.notice_throttle.clear();
         self.backlinks_error = None;
         self.tag_vocab_error = None;
         self.reset_props();
@@ -7054,7 +7105,7 @@ impl App {
                     return Task::none();
                 };
                 if table_actions::apply_history_snapshot(self, table) {
-                    self.autosave_deadline = Some(Instant::now() + AUTOSAVE_DEBOUNCE);
+                    self.arm_debounce_earliest();
                 }
                 // 回滚替换了可见内容：按当前视口补拉图片（不依赖之后是否还有指针事件）
                 let images = table_actions::ensure_image_loads(self).unwrap_or_default();
@@ -9734,7 +9785,7 @@ mod file_drop_tests {
         assert!(plan.notify, "性质变了要再出声一次");
         assert_eq!(plan.retry_in, None, "不可重试不排期限");
         assert!(!plan.retryable, "不可重试");
-        let effects = super::failed_save_effects(plan, "文件已被外部修改", false, "保存失败");
+        let effects = super::failed_save_effects(plan, "文件已被外部修改", false, "保存失败", true);
         assert!(effects.abort_why.is_some(), "不可重试必须收口挂起动作");
         assert!(effects.notice.is_some_and(|n| n.contains("操作已暂停")), "提示要交代操作已暂停");
     }
@@ -9957,6 +10008,143 @@ mod file_drop_tests {
         assert!(app.autosave_deadline.is_some(), "失败处置要排下一次期限");
     }
 
+    /// 同一错误提示过之后再失败时闸门静默；但用户动作若被 Flush 失败收口，
+    /// 「关窗 / 切文件被取消」必须补一条提示——否则窗口不关、仓库不切，用户零反馈。
+    #[test]
+    fn silenced_flush_failure_still_reports_cancelled_action() {
+        let (mut app, _boot) = super::App::boot();
+        let gen = app.epoch();
+        app.notifications.clear();
+        app.notice_throttle.clear();
+        app.flush_pending = None;
+        app.autosave_deadline = None;
+        let msg = "磁盘忙：设备未就绪";
+        // 自动重试的这一轮：首轮失败已出声，此后再失败闸门不再提示
+        app.settle_slot_save_failure(
+            super::SaveSlot::NoteLocal,
+            gen,
+            "a.md",
+            false,
+            msg,
+            false,
+            "保存失败",
+            true,
+        );
+        assert!(
+            app.notifications.iter().any(|n| n.text.contains(msg)),
+            "首轮失败要出声"
+        );
+        app.notifications.clear();
+        // 用户点关闭 → Flush 失败：挂起动作被收口
+        let window = iced::window::Id::unique();
+        app.flush_pending = Some(super::PendingAfterFlush::CloseMain(window));
+        let plan = app.settle_slot_save_failure(
+            super::SaveSlot::NoteLocal,
+            gen,
+            "a.md",
+            true,
+            msg,
+            false,
+            "保存失败",
+            true,
+        );
+        assert!(!plan.notify, "同一条错误的提示闸门仍然静默");
+        assert!(app.flush_pending.is_none(), "Flush 失败必须收口挂起的关窗");
+        let notice = app
+            .notifications
+            .iter()
+            .find(|n| n.text.contains(msg))
+            .map(|n| n.text.clone())
+            .expect("动作被取消必须让用户看到");
+        assert!(notice.contains("操作未执行"), "提示要交代关窗未执行：{notice}");
+    }
+
+    /// 失败面已不是当前文件（own=false）时 Flush 失败同样要回填挂起项：
+    /// 插件结构变更 / AI 文件操作在等回执，留着它会空等到下一道闸门。
+    #[test]
+    fn non_own_flush_failure_still_settles_plugin_pending() {
+        let (mut app, _boot) = super::App::boot();
+        let gen = app.epoch();
+        app.notifications.clear();
+        app.notice_throttle.clear();
+        app.flush_pending = Some(super::PendingAfterFlush::PluginVaultRemove {
+            request_id: u64::MAX,
+            path: "a.md".into(),
+        });
+        app.settle_slot_save_failure(
+            super::SaveSlot::NoteSpace,
+            gen,
+            "a.md",
+            true,
+            "网络错误：超时",
+            false,
+            "「a.md」保存失败",
+            false,
+        );
+        assert!(
+            app.flush_pending.is_none(),
+            "own=false 也要回填挂起项，不能留到下一次 gate"
+        );
+    }
+
+    /// 五条链共用一个期限位：排期取最早，后失败 / 后变更的链不得把已排好的更早期限往后推。
+    #[test]
+    fn save_retry_deadline_merges_to_earliest() {
+        use std::time::Duration;
+        let (mut app, _boot) = super::App::boot();
+        let gen = app.epoch();
+        let msg = "磁盘忙：设备未就绪";
+        app.notifications.clear();
+        app.notice_throttle.clear();
+        // ① 表格链首轮失败排 1s
+        app.autosave_deadline = None;
+        app.save_retry.clear();
+        app.settle_slot_save_failure(
+            super::SaveSlot::DocSpace,
+            gen,
+            "t.atb",
+            false,
+            msg,
+            false,
+            "保存失败",
+            true,
+        );
+        let doc_at = app.autosave_deadline.expect("表格链排了期限");
+        assert!(doc_at <= std::time::Instant::now() + Duration::from_secs(2), "首轮退避 1s");
+        // ② 笔记链连败到第 5 轮要排 16s：不得把表格已排好的 1s 顶掉
+        for _ in 0..5 {
+            app.settle_slot_save_failure(
+                super::SaveSlot::NoteLocal,
+                gen,
+                "a.md",
+                false,
+                msg,
+                false,
+                "保存失败",
+                true,
+            );
+        }
+        assert_eq!(app.autosave_deadline, Some(doc_at), "更早的表格期限不被笔记顶掉");
+        // ③ 反向：已排 16s 的链不拦后到的 1s —— 取最早者，谁先到期谁先重试
+        let far = std::time::Instant::now() + Duration::from_secs(16);
+        app.autosave_deadline = Some(far);
+        app.save_retry.clear();
+        app.settle_slot_save_failure(
+            super::SaveSlot::DocSpace,
+            gen,
+            "t.atb",
+            false,
+            msg,
+            false,
+            "保存失败",
+            true,
+        );
+        assert!(
+            app.autosave_deadline.is_some_and(|at| at < far),
+            "更早的失败链把期限往前收，而不是被 16s 拖住"
+        );
+    }
+
     /// 真实入口：索引读不出来不等于「没有反链」。失败回执要留可定位的不可用状态并出声，
     /// 同一错误在节流窗口内只提示一次；成功回执再把状态位清掉。
     #[test]
@@ -10080,7 +10268,7 @@ mod file_drop_tests {
         assert_eq!(plan.retry_in, None, "不可重试不排期限");
         assert!(plan.notify, "要有一条可执行提示");
         assert!(queued.is_empty(), "不再重试就没人收尾，待续项不得悬挂");
-        let effects = super::failed_save_effects(plan, message, false, "保存失败");
+        let effects = super::failed_save_effects(plan, message, false, "保存失败", true);
         let why = effects.abort_why.expect("不可重试必须收口挂起动作");
         assert!(why.starts_with(super::SAVE_FAILED_ABORT), "原因串统一：{why}");
         assert!(why.contains(message), "AI 文件操作回执要带上具体错误：{why}");

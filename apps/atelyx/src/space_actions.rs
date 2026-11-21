@@ -876,8 +876,9 @@ fn clear_session_state(app: &mut App) {
     app.preview_doc = None;
     app.dirty = false;
     app.save_error = None;
-    // 失败记账按裸相对路径分键：换容器后同名文件不得沿用上一个容器的失败序列
+    // 失败记账与提示节流都按裸相对路径分键：换容器后同名文件不得沿用上一个容器的失败序列
     app.save_retry.clear();
+    app.notice_throttle.clear();
     app.backlinks_error = None;
     app.tag_vocab_error = None;
     app.reset_props();
@@ -897,8 +898,6 @@ fn clear_session_state(app: &mut App) {
     app.space_note_save_flush_queued.clear();
     app.backlinks.clear();
     app.tag_vocab.clear();
-    app.backlinks_error = None;
-    app.tag_vocab_error = None;
     app.note_files.clear();
     app.history.clear();
     app.history_gen = 0;
@@ -1524,8 +1523,8 @@ fn on_note_saved(
     reason: SaveReason,
     result: Result<String, String>,
 ) -> Task<Message> {
-    // 回执即摘本笔在途；待续 Flush 的处置：成功在这里取走并补发，
-    // 失败由失败分支的 apply_failed_save 统一处理（非 Flush 失败放回，Flush 失败丢弃并收口）
+    // 回执即摘本笔在途；待续 Flush 的去留只有两处：成功回执就地消费，
+    // 失败回执交给统一处置（非 Flush 失败放回，Flush 失败丢弃并收口）
     let key = (gen, rel.to_string());
     app.space_note_save_inflight.retain(|entry| entry != &key);
     let queued = app.space_note_save_flush_queued.contains(&key);
@@ -1541,13 +1540,10 @@ fn on_note_saved(
         app.plugins.on_file_changed(rel, FileChangeKind::Updated, None);
     }
     if app.ui.last_note_file.as_deref() != Some(rel) {
-        // 旧文件的失败仍须可见（内容没写进去是用户要知道的事实），但不得覆盖当前文件的错误位与挂起动作：
-        // 交给统一入口的 own=false 记账 + 提示，顺带结清该文件的在途键与待续项。
-        // own=false 不收口挂起动作，Flush 失败时仍须就地回填等回执的 AI 文件操作（否则永久空等）。
+        // 旧文件的失败仍须可见（内容没写进去是用户要知道的事实），但不得覆盖当前文件的错误位与期限：
+        // 交给统一入口的 own=false 记账 + 提示，顺带结清该文件的在途键与待续项；
+        // Flush 失败的挂起项（AI 文件操作 / 插件结构变更）同样由它就地回填，不会空等。
         if let Err(e) = &result {
-            if matches!(reason, SaveReason::Flush) {
-                crate::ai_fs_edit::abort_pending(app, e);
-            }
             app.settle_slot_save_failure(
                 crate::SaveSlot::NoteSpace,
                 gen,

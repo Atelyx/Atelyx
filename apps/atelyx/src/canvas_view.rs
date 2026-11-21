@@ -3498,11 +3498,12 @@ mod tests {
             s.save_inflight.begin(1, "c.atlx", true),
             crate::table_view::SaveAdmission::Queued
         );
-        let mut queued = vec![(1u64, "c.atlx".to_string())];
         assert!(s.save_inflight.finish(1, "c.atlx"), "回执当场取到排队过的 Flush");
+        let (mut keys, mut queued) = std::mem::take(&mut s.save_inflight).into_parts();
+        assert_eq!(queued, vec![(1u64, "c.atlx".to_string())], "守卫不自己删队列");
         let plan = crate::apply_failed_save(
             &mut book,
-            &mut Vec::new(),
+            &mut keys,
             &mut queued,
             1,
             "c.atlx",
@@ -3512,6 +3513,7 @@ mod tests {
         );
         assert_eq!(plan.retry_in, None, "不可恢复的失败不排期");
         assert!(queued.is_empty(), "不会再重试：待续项丢弃，挂起的关闭 / 切换不再等它");
+        s.save_inflight = crate::table_view::SaveInflight::from_parts(keys, queued);
         assert_eq!(s.save_inflight.begin(1, "c.atlx", false), crate::table_view::SaveAdmission::Start);
         assert!(!s.save_inflight.finish(1, "c.atlx"), "不可恢复失败后不再有待续 Flush");
     }

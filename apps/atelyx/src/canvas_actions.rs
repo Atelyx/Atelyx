@@ -511,43 +511,41 @@ pub(crate) fn on_saved(
     if result.is_ok() {
         app.plugins.on_file_changed(&file, atelyx_core::plugin_runtime::FileChangeKind::Updated, None);
     }
-    // flush 失败先回填挂起的 AI 文件操作：失败面可能已被切走，挂起项不得残留到之后的放行
-    if let (Err(e), true) = (&result, flush) {
-        crate::ai_fs_edit::abort_pending(app, e);
-    }
-    // 本笔回执即结清该键的在途标记；在途期间排队的 Flush 交给统一处置（成功分支补发、失败分支按语义去留）
-    let queued_flush = app
-        .canvas
-        .as_mut()
-        .is_some_and(|s| s.save_inflight.finish(gen, &file));
-    if !atelyx_core::ai::doc_edit::receipt_file_matches(
+    // 本笔回执只结清该键的在途标记；待续 Flush 的去留一律交给统一处置（成功才消费）
+    let mut guard = {
+        let Some(s) = app.canvas.as_mut() else { return Task::none() };
+        std::mem::take(&mut s.save_inflight)
+    };
+    let queued_flush = guard.finish(gen, &file);
+    let own = atelyx_core::ai::doc_edit::receipt_file_matches(
         app.canvas.as_ref().map(|s| s.file.as_str()),
         &file,
         &file,
-    ) {
-        return Task::none();
-    }
+    );
     match result {
         Err(e) => {
-            app.settle_history_restore(false);
-            let reset_backoff = {
+            // 失败面已不是当前文件：仍记账与提示（内容没写进去是用户要知道的事实），
+            // 但不动当前文件的错误位与期限；Flush 失败的挂起项照旧回填
+            let reset_backoff = if own {
                 let Some(s) = app.canvas.as_mut() else { return Task::none() };
                 s.save_error = Some(e.clone());
                 s.failure_backoff_reset()
+            } else {
+                false
             };
             // 失败口径与笔记 / 空间链同一入口：冲突 / 只读这类不可恢复的失败不排重试、
             // 就地收口挂起动作，只留错误徽标与一次提示；可恢复的按轮次退避重排。
-            let guard = {
-                let s = app.canvas.as_mut().expect("身份守卫已判会话仍在");
-                let mut guard = std::mem::take(&mut s.save_inflight);
-                // 回执已把待续项取走：先放回，再由统一处置按本笔是否 Flush 决定去留
-                if queued_flush {
-                    guard.requeue_flush(gen, &file);
-                }
-                let (_, guard) =
-                    app.apply_save_failure(guard, gen, &file, flush, &e, reset_backoff, "保存失败");
-                guard
+            if own {
+                app.settle_history_restore(false);
+            }
+            let hint = if own {
+                "保存失败".to_string()
+            } else {
+                format!("「{}」保存失败", crate::layout_view::file_label(&file))
             };
+            let (_, rest) =
+                app.apply_save_failure(guard, gen, &file, flush, &e, reset_backoff, &hint, own);
+            guard = rest;
             if let Some(s) = app.canvas.as_mut() {
                 s.save_inflight = guard;
             }
@@ -556,6 +554,16 @@ pub(crate) fn on_saved(
             Task::none()
         }
         Ok(()) => {
+            // 旧文件的成功回执：只消费它自己的待续项，不得动当前文件的基线 / 错误位 / 脏态
+            if !own {
+                if queued_flush || flush {
+                    guard.consume_flush(gen, &file);
+                }
+                if let Some(s) = app.canvas.as_mut() {
+                    s.save_inflight = guard;
+                }
+                return Task::none();
+            }
             // 只认磁盘事实：冻结快照与当前数据一致才算落盘；期间又有编辑则保持脏，下一轮补写
             let stable = app.canvas.as_ref().is_some_and(|s| s.data.same_content(&frozen));
             let mut task = Task::none();
@@ -581,6 +589,13 @@ pub(crate) fn on_saved(
                     // 序列化失败：宁缺版本也不把空串写入历史（结构体序列化失败为极端异常）
                     Err(e) => app.notify(crate::NoticeLevel::Error, format!("历史版本记录失败：{e}")),
                 }
+            }
+            // 守卫先放回：收尾可能立刻补发一笔 Flush，那一笔要在本会话的守卫上登记在途
+            if let Some(s) = app.canvas.as_mut() {
+                if queued_flush || flush {
+                    guard.consume_flush(gen, &file);
+                }
+                s.save_inflight = guard;
             }
             // 在途期间排队的 Flush / 本笔就是 Flush：落稳才放行挂起动作，仍脏就再收一轮
             task = app.settle_doc_receipt_tail(task, queued_flush, flush, stable, |app| {

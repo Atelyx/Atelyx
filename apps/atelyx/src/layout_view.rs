@@ -3950,14 +3950,19 @@ fn wiki_picker_geom(
 
 /// 反链区（常驻）：引用当前笔记的笔记列表，点击打开。
 fn backlinks_section(app: &App) -> Element<'_, Message> {
+    // 索引不可用时手上的清单是上一次成功的结果：计数如实标成上次值，不冒充当前反链数
     let n = app.backlinks.len();
+    let count_label = match &app.backlinks_error {
+        Some(_) => format!("反链 (上次 {n})"),
+        None => format!("反链 ({n})"),
+    };
     let mut col = iced::widget::Column::<Message>::new()
         .padding(Padding::ZERO.horizontal(16.0).vertical(6.0))
         .spacing(2);
     col = col.push(
         row![
             icon("unlink", 12.0, pal::TEXT_MUTED),
-            text(format!("反链 ({n})")).size(pal::fs_caption()).color(pal::TEXT_SECONDARY),
+            text(count_label).size(pal::fs_caption()).color(pal::TEXT_SECONDARY),
         ]
         .spacing(6),
     );
