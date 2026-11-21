@@ -69,19 +69,18 @@ fn side_rel(kind: &str, file: &str) -> String {
     }
 }
 
-/// 读侧文件版本列表（缺失/损坏 = 空；历史尽力而为，不阻塞写入）。
-fn read_versions(path: &Path) -> Vec<Value> {
-    let Ok(raw) = std::fs::read_to_string(path) else {
-        return vec![];
+/// 读侧文件版本列表。只有「文件不存在」（首次存档）按空列表处理；
+/// 其它读失败（EIO / 权限 / 半截文件）与解析失败一律返回 Err——调用方据此拒绝本次写入，
+/// 否则空列表会成为新基线，随后整文件覆盖把该文件的全部历史清空。
+fn read_versions(path: &Path) -> Result<Vec<Value>, String> {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+        Err(e) => return Err(format!("历史侧文件读取失败（{}）：{e}", path.display())),
     };
-    let Ok(parsed) = serde_json::from_str::<Value>(&raw) else {
-        return vec![];
-    };
-    parsed
-        .get("versions")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default()
+    let parsed: Value = serde_json::from_str(&raw)
+        .map_err(|e| format!("历史侧文件解析失败（{}）：{e}", path.display()))?;
+    Ok(parsed.get("versions").and_then(|v| v.as_array()).cloned().unwrap_or_default())
 }
 
 fn now_millis() -> i64 {
@@ -195,7 +194,12 @@ pub async fn record_history(
     let _lock = state.path_lock(&space_id, &rel).await;
 
     let read_path = path.clone();
-    let mut versions = blocking("历史读取", move || Ok(read_versions(&read_path))).await?;
+    // 读失败即拒绝本次追加：空列表当基线会把该文件的全部历史覆盖掉
+    let mut versions = blocking("历史读取", move || {
+        read_versions(&read_path)
+            .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("历史读取失败，已拒绝本次写入：{e}")))
+    })
+    .await?;
     let last = versions.last().cloned();
     // 与最新版本内容/动作相同 = no-op（防重复存档点）
     if let Some(l) = &last {

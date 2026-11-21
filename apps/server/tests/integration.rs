@@ -822,6 +822,89 @@ async fn history_record_aggregate_and_rename_migration() {
 }
 
 
+/// 侧文件在磁盘上的路径（默认布局：数据目录下 spaces/<id>/ + 编码后的侧文件名）。
+fn history_side_path(data_dir: &Path, space_id: &str, file: &str) -> std::path::PathBuf {
+    let encoded: String = file
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '%' => format!("%{:02X}", c as u32),
+            c => c.to_string(),
+        })
+        .collect();
+    data_dir.join("spaces").join(space_id).join(".atelyx/history").join(format!("{encoded}.json"))
+}
+
+/// 侧文件读不出来（这里用同名目录制造非 NotFound 的读失败）时，追加必须整笔拒绝，
+/// 不得把空列表当基线覆盖掉该文件的全部历史。
+#[tokio::test]
+async fn history_record_refuses_to_clear_history_when_side_file_unreadable() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+    let space_id = setup_two_members(&ctx, "alice", "bob").await;
+    let a_token = login_as(&ctx, "alice").await;
+    let record = |content: &str| {
+        let ctx = &ctx;
+        let token = a_token.clone();
+        let space = space_id.clone();
+        let content = content.to_string();
+        async move {
+            ctx.post(
+                &format!("/api/spaces/{space}/history/record"),
+                Some(&token),
+                json!({
+                    "kind": "note", "file": "笔记/a.md", "content": content, "action": "edit",
+                    "author": { "device": "dev" },
+                }),
+            )
+            .await
+        }
+    };
+    let (status, _) = record("v1").await;
+    assert_eq!(status, 200, "首次记录应成功");
+
+    // 把侧文件换成同名目录：读侧文件得到非 NotFound 的 IO 错误
+    let side = history_side_path(dir.path(), &space_id, "笔记/a.md");
+    std::fs::remove_file(&side).unwrap();
+    std::fs::create_dir(&side).unwrap();
+    let marker = side.join("marker.txt");
+    std::fs::write(&marker, b"keep").unwrap();
+
+    let (status, body) = record("v2").await;
+    assert_eq!(status, 500, "读不出历史必须拒绝写入，而不是当空历史重建：{body}");
+    assert!(
+        body["error"].as_str().unwrap_or_default().contains("历史读取失败"),
+        "错误信息须点明读失败：{body}"
+    );
+    assert!(marker.is_file(), "被占位的历史侧文件不得被覆盖/删除");
+    assert_eq!(std::fs::read(&marker).unwrap(), b"keep");
+}
+
+/// 侧文件内容损坏（半截 / 非 JSON）同样必须拒绝写入，原文件字节保持不变。
+#[tokio::test]
+async fn history_record_keeps_corrupt_side_file_intact() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = Ctx::new(spawn_server(dir.path()).await);
+    let space_id = setup_two_members(&ctx, "alice", "bob").await;
+    let a_token = login_as(&ctx, "alice").await;
+    let side = history_side_path(dir.path(), &space_id, "笔记/a.md");
+    std::fs::create_dir_all(side.parent().unwrap()).unwrap();
+    let corrupt = b"{\"versions\": [{\"seq\": 1";
+    std::fs::write(&side, corrupt).unwrap();
+
+    let (status, body) = ctx
+        .post(
+            &format!("/api/spaces/{space_id}/history/record"),
+            Some(&a_token),
+            json!({
+                "kind": "note", "file": "笔记/a.md", "content": "新内容", "action": "edit",
+                "author": { "device": "dev" },
+            }),
+        )
+        .await;
+    assert_eq!(status, 500, "解析失败必须拒绝写入：{body}");
+    assert_eq!(std::fs::read(&side).unwrap(), corrupt, "损坏的侧文件不得被覆盖");
+}
+
 /// 历史记录入参（editor 传 null = 人类编辑）；固定同作者 + 60s 合并窗口。
 async fn record_note_with_editor(
     ctx: &Ctx,
