@@ -1,8 +1,14 @@
 //! 仓库写盘串行队列：同进程内全部仓库内容写盘收敛到单一 FIFO 执行序。
 
 use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
+
+/// 慢作业阈值：单个作业执行超过它即记进 `QueueStats::last_slow` 并写一行 stderr。
+/// 磁盘或网络盘卡住时，这是「全部本地写盘停住」唯一不依赖日志框架的可见信号。
+pub const SLOW_JOB_THRESHOLD: Duration = Duration::from_secs(5);
 
 /// 一条队列作业。
 enum JobKind {
@@ -19,20 +25,62 @@ enum JobKind {
     Barrier,
 }
 
+impl JobKind {
+    /// 本作业的目标路径（批量与栅栏作业没有单一目标，返回空路径）。
+    fn target(&self) -> &Path {
+        match self {
+            JobKind::Write { path, .. }
+            | JobKind::WriteBytes { path, .. }
+            | JobKind::WriteFromFile { path, .. } => path,
+            JobKind::Bulk(_) | JobKind::Barrier => Path::new(""),
+        }
+    }
+}
+
 struct Job {
     kind: JobKind,
+    /// 目标路径在提交时冻结（作业执行时 kind 已被取走）：慢作业记录与统计要用它。
+    target: PathBuf,
     /// 回执：`Ok(created)` 的 `created` = 本次落盘前目标是否不存在（由执行序内判定）。
     done: tokio::sync::oneshot::Sender<Result<bool, String>>,
 }
 
-#[derive(Default)]
 struct QueueInner {
     jobs: Mutex<VecDeque<Job>>,
     signal: Condvar,
+    /// 已提交未开始的作业数：原子计数，读统计不抢队列锁。
+    pending: AtomicUsize,
+    /// 在途作业开始时刻（相对 `origin` 的微秒数 + 1；0 = 空闲）——原子量存不下 Instant 本身。
+    busy_start_us: AtomicU64,
+    /// `busy_start_us` 的时间原点。
+    origin: Instant,
+    /// 慢作业阈值：生产取 `SLOW_JOB_THRESHOLD`，单测调小。
+    slow_threshold: Duration,
+    /// 最近一次超阈值作业：（目标路径, 耗时）；批量与栅栏作业没有目标路径（空路径）。
+    last_slow: Mutex<Option<(PathBuf, Duration)>>,
+}
+
+impl QueueInner {
+    fn new(slow_threshold: Duration) -> Self {
+        Self {
+            jobs: Mutex::new(VecDeque::new()),
+            signal: Condvar::new(),
+            pending: AtomicUsize::new(0),
+            busy_start_us: AtomicU64::new(0),
+            origin: Instant::now(),
+            slow_threshold,
+            last_slow: Mutex::new(None),
+        }
+    }
 }
 
 fn poison<T>(err: PoisonError<MutexGuard<'_, T>>) -> MutexGuard<'_, T> {
     err.into_inner()
+}
+
+/// 两个时刻之间的微秒数（饱和到 u64；量级不会溢出，这里只是不 panic）。
+fn micros_between(from: Instant, to: Instant) -> u64 {
+    u64::try_from(to.saturating_duration_since(from).as_micros()).unwrap_or(u64::MAX - 1)
 }
 
 /// FIFO 写盘队列：`write` 按提交顺序逐个执行原子写并回执单次结果，`drain` 等此前提交全部落地。
@@ -49,11 +97,29 @@ impl Default for WriteQueue {
     }
 }
 
+/// 队列可观测快照（读它不抢队列锁，也不改变执行序）。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct QueueStats {
+    /// 已提交、尚未开始执行的作业数（批量作业内部的多次写盘不计，整体只占一个序位）。
+    pub pending: usize,
+    /// 当前在途作业已开始多久；`None` = 队列空闲。它持续增长而 `pending` 不降，
+    /// 就是「某个作业卡住、后续全部写盘永久排队」的可观测形态。
+    pub busy_since: Option<Duration>,
+    /// 最近一次执行耗时超过 [`SLOW_JOB_THRESHOLD`] 的作业：（目标路径, 耗时）。
+    /// 批量与栅栏作业没有单一目标路径，给的是空路径。
+    pub last_slow: Option<(PathBuf, Duration)>,
+}
+
 impl WriteQueue {
     /// 创建队列并启动常驻工作线程（随进程退出结束）。
     pub fn new() -> Self {
+        Self::with_slow_threshold(SLOW_JOB_THRESHOLD)
+    }
+
+    /// 同 [`Self::new`]，慢作业阈值可调（单测用；生产走 [`SLOW_JOB_THRESHOLD`]）。
+    fn with_slow_threshold(slow_threshold: Duration) -> Self {
         let queue = Self {
-            inner: Arc::new(QueueInner::default()),
+            inner: Arc::new(QueueInner::new(slow_threshold)),
         };
         let inner = Arc::clone(&queue.inner);
         std::thread::Builder::new()
@@ -61,6 +127,22 @@ impl WriteQueue {
             .spawn(move || worker(inner))
             .expect("启动写盘队列线程");
         queue
+    }
+
+    /// 当前排队与在途统计。
+    pub fn stats(&self) -> QueueStats {
+        let busy_start = self.inner.busy_start_us.load(Ordering::Acquire);
+        QueueStats {
+            pending: self.inner.pending.load(Ordering::Acquire),
+            busy_since: (busy_start != 0)
+                .then(|| self.inner.origin.elapsed() - Duration::from_micros(busy_start - 1)),
+            last_slow: self
+                .inner
+                .last_slow
+                .lock()
+                .unwrap_or_else(poison)
+                .clone(),
+        }
     }
 
     /// 提交一次原子写，完成后回执本次写盘结果；同路径并发提交按提交顺序执行（后写者胜）。
@@ -131,7 +213,10 @@ impl WriteQueue {
     fn push(&self, kind: JobKind) -> tokio::sync::oneshot::Receiver<Result<bool, String>> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let mut jobs = self.inner.jobs.lock().unwrap_or_else(poison);
-        jobs.push_back(Job { kind, done: tx });
+        let target = kind.target().to_path_buf();
+        jobs.push_back(Job { kind, target, done: tx });
+        // 计数与入队同在锁内：stats 不会漏掉刚入队的作业
+        self.inner.pending.fetch_add(1, Ordering::AcqRel);
         self.inner.signal.notify_one();
         rx
     }
@@ -148,6 +233,13 @@ fn worker(inner: Arc<QueueInner>) {
                 jobs = inner.signal.wait(jobs).unwrap_or_else(poison);
             }
         };
+        // 出队即转「在途」：两个计数分开推进，读侧最坏看到一个极短的「既未排队也未在途」
+        // 窗口，但不会把同一个作业重复计数——统计是快照，不是线性一致的视图
+        inner.pending.fetch_sub(1, Ordering::AcqRel);
+        let started = Instant::now();
+        inner
+            .busy_start_us
+            .store(micros_between(inner.origin, started) + 1, Ordering::Release);
         let result = match job.kind {
             // 存在性取执行序内的磁盘事实：排在前面的同路径作业已落地，此处看到的才是本次真实起点
             JobKind::Write { path, content } => {
@@ -165,6 +257,20 @@ fn worker(inner: Arc<QueueInner>) {
             JobKind::Bulk(job) => job().map(|()| false),
             JobKind::Barrier => Ok(false),
         };
+        // 慢作业只做记录：不重试、不取消、不改变 FIFO。它卡住时缺的不是重试，而是「看得出卡在哪」
+        let elapsed = started.elapsed();
+        if elapsed >= inner.slow_threshold {
+            let target = job.target.clone();
+            eprintln!(
+                "写盘队列慢作业：{} 耗时 {:?}（阈值 {:?}）",
+                target.display(),
+                elapsed,
+                inner.slow_threshold
+            );
+            *inner.last_slow.lock().unwrap_or_else(poison) = Some((target, elapsed));
+        }
+        // 空闲标记在回执前落下：回执之后提交方读到的统计不得再把刚完成的作业算作在途
+        inner.busy_start_us.store(0, Ordering::Release);
         let _ = job.done.send(result);
     }
 }
@@ -279,6 +385,51 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
             .collect();
         assert!(leftover.is_empty(), "失败路径必须清掉临时文件");
+    }
+
+    /// 统计口径：排队中 = 已提交未出队，在途 = 已出队未回执。阻塞作业持住执行序时，
+    /// 排在其后的写盘必须仍在 pending 里、busy_since 必须非空——这是「写盘全停」唯一的可读信号。
+    #[tokio::test]
+    async fn stats_reports_pending_and_busy_since() {
+        let tmp = crate::vault::test_support::TempDir::new("wq-stats");
+        let queue = WriteQueue::new();
+        let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        // 阻塞作业占住执行序，后续作业只能排队
+        let blocking = queue.push(JobKind::Bulk(Box::new(move || {
+            started_tx.send(()).map_err(|_| "夹具已回收".to_string())?;
+            release_rx.recv().map_err(|_| "夹具已回收".to_string())?;
+            Ok(())
+        })));
+        started_rx.recv().unwrap();
+        let _a = queue.push(JobKind::Write { path: tmp.join("a.md"), content: "a".into() });
+        let _b = queue.push(JobKind::Write { path: tmp.join("b.md"), content: "b".into() });
+        let stats = queue.stats();
+        assert_eq!(stats.pending, 2, "两个写盘应仍在排队");
+        assert!(stats.busy_since.is_some(), "阻塞作业在途时其在途时长必须有值");
+        assert_eq!(stats.last_slow, None, "尚未到慢作业阈值");
+        release_tx.send(()).unwrap();
+        blocking.await.unwrap().unwrap();
+        queue.drain().await.unwrap();
+        let idle = queue.stats();
+        assert_eq!(idle.pending, 0);
+        assert_eq!(idle.busy_since, None, "回执之后不得再把已完成作业算作在途");
+    }
+
+    /// 超阈值的作业记进 last_slow 并写一行 stderr：批量作业没有单一目标路径，路径记空。
+    #[tokio::test]
+    async fn slow_job_is_recorded() {
+        let queue = WriteQueue::with_slow_threshold(Duration::from_millis(30));
+        queue
+            .bulk(|| {
+                std::thread::sleep(Duration::from_millis(120));
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let slow = queue.stats().last_slow.expect("超过阈值的作业应被记录");
+        assert_eq!(slow.0, PathBuf::new(), "批量作业没有单一目标路径");
+        assert!(slow.1 >= Duration::from_millis(30), "记录的耗时取自实测：{:?}", slow.1);
     }
 
     #[tokio::test]
