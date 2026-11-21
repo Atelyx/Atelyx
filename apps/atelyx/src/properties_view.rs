@@ -853,8 +853,7 @@ fn suggest_card<'a>(
         );
     }
     let arms = app.props.suggest.armed;
-    // 高亮下标钳到命中范围内：清单在编辑途中变短（词汇表刷新）时 Enter 仍落在被点亮的行上
-    let active = app.props.suggest.index.min(list.items.len() - 1);
+    let active = clamp_active(app.props.suggest.index, list.items.len());
     let mut rows = Column::<Message>::new().spacing(0);
     for (i, item) in list.items.iter().enumerate() {
         let selected = arms && i == active;
@@ -898,6 +897,12 @@ fn suggest_card<'a>(
         rows.height(list_h).into()
     };
     suggest_card_frame(content)
+}
+
+/// 高亮下标钳到命中范围内：清单在编辑途中变短（词汇表刷新）时 Enter 仍落在被点亮的行上；
+/// 空清单返回 0（调用方已提前返回，这里兜住「池非空但命中为空」被后续改动漏判的情况）。
+fn clamp_active(index: usize, len: usize) -> usize {
+    index.min(len.saturating_sub(1))
 }
 
 /// 候选卡外壳（三级底 + 小圆角，上下留 2px 内衬）。
@@ -2147,6 +2152,15 @@ mod tests {
         let list = filter_tags(vocab.iter().map(String::as_str), &[], "");
         assert_eq!(list.items.len(), 20);
         assert_eq!(list.pool, 20);
+    }
+
+    /// 池非空而过滤无命中（items 空）时高亮下标必须落在 0：直接减一会无符号下溢。
+    #[test]
+    fn active_row_clamps_without_underflow() {
+        assert_eq!(clamp_active(0, 0), 0);
+        assert_eq!(clamp_active(7, 0), 0);
+        assert_eq!(clamp_active(7, 3), 2);
+        assert_eq!(clamp_active(0, 3), 0);
     }
 
     #[test]
