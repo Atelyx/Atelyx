@@ -17,7 +17,7 @@ use serde_json::json;
 use crate::auth::AuthUser;
 use crate::access::member_root;
 use crate::fsops::{blocking, file_mtime_secs, percent_decode, walk_md_in, SpaceRoot};
-use crate::state::ServerState;
+use crate::state::{lock_recover, ServerState};
 use crate::{ApiError, ApiResult};
 
 // ===== 索引缓存（进程内，随空间内容重建，不持久化） =====
@@ -50,14 +50,14 @@ struct WikiRef {
 }
 
 /// 文件指纹：mtime 毫秒 + 大小。
-#[derive(PartialEq)]
+#[derive(Clone, PartialEq)]
 struct FileStamp {
     mtime_ms: u128,
     size: u64,
 }
 
 /// 反链索引：rel 路径 → 指纹 + 已提取引用（倒排查询时遍历，纯内存迭代无 I/O）。
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct WikiIndex {
     files: HashMap<String, FileStamp>,
     refs: HashMap<String, Vec<WikiRef>>,
@@ -143,7 +143,7 @@ pub struct TagRow {
 }
 
 /// 标签索引：rel 路径 → 指纹 + 标签集合。
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct TagIndex {
     files: HashMap<String, FileStamp>,
     tags: HashMap<String, HashSet<String>>,
@@ -716,7 +716,8 @@ impl SpaceIndexCache {
 
     /// 取（或懒建）空间的派生索引并增量刷新后在 `f` 内访问。刷新是 stat 遍历 + 变化文件重读，
     /// 在阻塞池里跑（不占 async 执行器）；刷新期间不持缓存锁，其他空间的查询不被拖住。
-    /// 团队排除名单变化时整份缓存作废重建（成员改了排除夹后索引立即收敛，不留陈旧条目）。
+    /// 团队排除名单变化时从空索引重建（成员改了排除夹后索引立即收敛，不留陈旧条目）；
+    /// 刷新失败保留上一次的成功结果——宁可暂时陈旧，也不能把索引变成「全仓无引用」。
     pub(crate) async fn with_space<R>(
         &self,
         state: &ServerState,
@@ -725,34 +726,55 @@ impl SpaceIndexCache {
         f: impl FnOnce(&mut SpaceIndex) -> R,
     ) -> R {
         let exclude = crate::meta::space_exclusions(state, space_id).await;
-        // 刷新串行化：搬出索引 → 阻塞池刷新 → 写回，同一空间不并发全量扫描
+        // 刷新串行化：搬出索引 → 阻塞池刷新 → 成功后写回，同一空间不并发全量扫描
         let _refresh = self.refresh.lock().await;
+        // 搬出的是「副本」：刷新期间缓存里保留旧索引，取消或刷新失败都不会让该空间索引变空。
+        // 排除名单变化时从空索引重建（旧条目指向已排除目录）；重建失败则保留旧缓存，下次再试。
         let (mut wiki, mut tags) = {
-            let mut caches = self.caches.lock().unwrap();
+            let mut caches = lock_recover(&self.caches);
             let index = caches.entry(space_id.to_string()).or_default();
             if index.exclude_folders != exclude {
-                *index = SpaceIndex { exclude_folders: exclude.clone(), ..Default::default() };
+                (WikiIndex::default(), TagIndex::default())
+            } else {
+                (index.wiki.clone(), index.tags.clone())
             }
-            (std::mem::take(&mut index.wiki), std::mem::take(&mut index.tags))
         };
-        let (refreshed, _) = blocking("索引刷新", {
+        let refreshed = blocking("索引刷新", {
             let space_id = space_id.to_string();
             let root = root.to_path_buf();
+            let exclude = exclude.clone();
             move || {
+                // 两个索引各自尽力刷新：一个失败不影响另一个，失败原因合并上报
+                let mut failure: Option<String> = None;
                 if let Err(e) = refresh_wiki_index(&root, &exclude, &mut wiki) {
                     tracing::warn!(space_id = %space_id, "反链索引刷新失败：{e}");
+                    failure = Some(format!("反链索引刷新失败：{e}"));
                 }
                 if let Err(e) = refresh_tag_index(&root, &exclude, &mut tags) {
                     tracing::warn!(space_id = %space_id, "标签索引刷新失败：{e}");
+                    failure.get_or_insert(format!("标签索引刷新失败：{e}"));
                 }
-                Ok(((wiki, tags), ()))
+                match failure {
+                    Some(message) => Err(ApiError(StatusCode::INTERNAL_SERVER_ERROR, message)),
+                    None => Ok((wiki, tags)),
+                }
             }
         })
-        .await
-        .unwrap_or_default();
-        let mut caches = self.caches.lock().unwrap();
+        .await;
+        let mut caches = lock_recover(&self.caches);
         let index = caches.entry(space_id.to_string()).or_default();
-        (index.wiki, index.tags) = refreshed;
+        match refreshed {
+            // 刷新成功才替换；失败保留旧缓存（宁可暂时陈旧，也不把索引清空成「全仓无引用」），
+            // 排除名单也不更新，下次请求会再按新名单重建
+            Ok((wiki, tags)) => {
+                index.wiki = wiki;
+                index.tags = tags;
+                index.exclude_folders = exclude;
+            }
+            Err(e) => {
+                tracing::warn!(space_id = %space_id, "索引刷新失败，保留上次结果：{}", e.1)
+            }
+        }
         f(index)
     }
 }

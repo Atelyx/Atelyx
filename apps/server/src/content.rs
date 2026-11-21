@@ -26,8 +26,6 @@ use crate::{ApiError, ApiResult};
 /// 单文件字节上限（局域网传输与内存呈现的合理上限；过大单文件拖累服务端内存与同步）。
 pub const MAX_FILE_BYTES: usize = 50 * 1024 * 1024;
 
-
-
 /// 内容版本号（条件写的 If-Match 值）：文件字节的 sha256 十六进制。
 /// 与 mtime 不同，同一内容恒得同一版本、覆盖写后必变，重启与多副本下也成立。
 fn content_version(bytes: &[u8]) -> String {

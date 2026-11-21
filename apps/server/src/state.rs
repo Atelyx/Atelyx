@@ -106,9 +106,14 @@ struct StorageHealth {
     reason: Mutex<Option<String>>,
 }
 
+/// 锁毒化后取内层值：这里保护的都只是可重建的状态，panic 不该把后续请求一并拖死。
+pub(crate) fn lock_recover<T>(lock: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 impl StorageHealth {
     fn degrade(&self, reason: String) {
-        *self.reason.lock().unwrap() = Some(reason);
+        *lock_recover(&self.reason) = Some(reason);
         self.degraded.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
@@ -117,7 +122,7 @@ impl StorageHealth {
         if !self.degraded.load(std::sync::atomic::Ordering::SeqCst) {
             return Ok(());
         }
-        let reason = self.reason.lock().unwrap().clone().unwrap_or_else(|| "原因未知".to_string());
+        let reason = lock_recover(&self.reason).clone().unwrap_or_else(|| "原因未知".to_string());
         Err(ApiError(
             StatusCode::SERVICE_UNAVAILABLE,
             format!("存储不可用，请检查磁盘（{reason}）"),
@@ -207,7 +212,7 @@ impl PathLocks {
     /// 取 `key`（空间 id + 相对路径）对应的锁并等待持有。
     pub(crate) async fn lock(&self, key: &str) -> PathLockGuard {
         let entry = {
-            let mut map = self.map.lock().unwrap();
+            let mut map = lock_recover(&self.map);
             map.entry(key.to_string())
                 .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
                 .clone()
@@ -227,7 +232,7 @@ impl Drop for PathLockGuard {
         unsafe { std::mem::ManuallyDrop::drop(&mut self.guard) };
         // 摘除判定在表锁内完成：其余取锁者要么已克隆走 Arc（计数 > 1，不摘），
         // 要么尚未取表锁（自会插入新条目），不存在「条目被摘而旧锁仍在服」的窗口
-        let mut map = self.map.lock().unwrap();
+        let mut map = lock_recover(&self.map);
         if let Some(entry) = map.get(&self.key) {
             if Arc::strong_count(entry) == 1 {
                 map.remove(&self.key);
@@ -458,8 +463,11 @@ impl ServerState {
             Some(initial_baseline.clone()),
         );
         let writer = tokio::sync::OnceCell::new();
+        // 基线只留一份：写者已拉起时由写者持有，单元格清空（否则进程内长期多存一份全量名册）
+        let baseline_cell = Mutex::new(Some(initial_baseline));
         if let Some(sender) = sender {
             let _ = writer.set(sender);
+            *lock_recover(&baseline_cell) = None;
         }
         let inner = Arc::new(ServerStateInner {
             data_dir: data_dir.to_path_buf(),
@@ -468,7 +476,7 @@ impl ServerState {
             writer,
             persist,
             health,
-            initial_baseline: Mutex::new(Some(initial_baseline)),
+            initial_baseline: baseline_cell,
             index_cache: Arc::new(SpaceIndexCache::new()),
             hub: Hub::default(),
             path_locks: PathLocks::new(),
@@ -479,7 +487,7 @@ impl ServerState {
 
     /// 只读访问（不落盘）。
     pub(crate) fn read<R>(&self, f: impl FnOnce(&Persisted) -> R) -> R {
-        let guard = self.inner.journal.locked.lock().unwrap();
+        let guard = lock_recover(&self.inner.journal.locked);
         f(&guard.memory)
     }
 
@@ -488,7 +496,7 @@ impl ServerState {
     /// 只取内存锁（落盘在写者任务上进行），磁盘阻塞不会串行鉴权。
     pub(crate) fn authenticate(&self, token_hash: &str) -> Option<crate::auth::AuthUser> {
         let now = now_secs();
-        let mut guard = self.inner.journal.locked.lock().unwrap();
+        let mut guard = lock_recover(&self.inner.journal.locked);
         let (user_id, session_id) = {
             let session = guard.memory.sessions.iter_mut().find(|s| s.token_hash == token_hash)?;
             session.last_seen_at = now;
@@ -502,7 +510,7 @@ impl ServerState {
 
     /// 刷新会话的内存 last_seen（随下次结构变更落盘）。
     pub(crate) fn touch_session(&self, session_id: &str, at: i64) {
-        let mut guard = self.inner.journal.locked.lock().unwrap();
+        let mut guard = lock_recover(&self.inner.journal.locked);
         if let Some(s) = guard.memory.sessions.iter_mut().find(|s| s.id == session_id) {
             s.last_seen_at = at;
         }
@@ -521,7 +529,7 @@ impl ServerState {
         let _commit = self.inner.journal.commit.lock().await;
         self.inner.health.check()?;
         let (seq, snapshot, files, out) = {
-            let mut g = self.inner.journal.locked.lock().unwrap();
+            let mut g = lock_recover(&self.inner.journal.locked);
             // 先快照再变更：落盘失败时回滚内存，保证「失败的操作不生效」
             let snapshot = g.memory.clone();
             let out = match f(&mut g.memory) {
@@ -541,7 +549,7 @@ impl ServerState {
             Ok(rx) => rx.await.unwrap_or_else(|_| Err("名册写者已停止".to_string())),
             Err(e) => Err(e.1),
         };
-        let mut g = self.inner.journal.locked.lock().unwrap();
+        let mut g = lock_recover(&self.inner.journal.locked);
         // seq 守卫：只清理本次提交的在途标记，不回滚别人的
         if g.dirty_seq == Some(seq) {
             g.dirty_seq = None;
@@ -567,8 +575,8 @@ impl ServerState {
         if let Some(sender) = self.inner.writer.get() {
             return persist_worker::submit(sender, seq, files);
         }
-        // 只有首次提交会走到这里：取走启动基线，交给写者作首批失败的回滚目标
-        let baseline = self.inner.initial_baseline.lock().unwrap().take();
+        // 只有首次提交会走到这里：启动基线随写者一起移交（拉起失败则保留，供下次重试）
+        let baseline = lock_recover(&self.inner.initial_baseline).clone();
         let started = persist_worker::spawn(
             self.inner.data_dir.clone(),
             self.inner.persist.clone(),
@@ -579,6 +587,8 @@ impl ServerState {
             Some(sender) => {
                 let sent = persist_worker::submit(&sender, seq, files);
                 let _ = self.inner.writer.set(sender);
+                // 移交完成才清空：失败时基线仍在，下次懒拉起还能拿到
+                *lock_recover(&self.inner.initial_baseline) = None;
                 sent
             }
             None => Err(ApiError(

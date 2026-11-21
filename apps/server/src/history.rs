@@ -69,17 +69,48 @@ fn side_rel(kind: &str, file: &str) -> String {
     }
 }
 
-/// 读侧文件版本列表。只有「文件不存在」（首次存档）按空列表处理；
-/// 其它读失败（EIO / 权限 / 半截文件）与解析失败一律返回 Err——调用方据此拒绝本次写入，
-/// 否则空列表会成为新基线，随后整文件覆盖把该文件的全部历史清空。
+/// 侧文件损坏留档：原名改名成 `<原名>.corrupt-<随机>`，原文完整保留供排查与人工取回。
+/// 名字带随机后缀——同名目标在 Windows 上会被 rename 静默替换，固定名会让新损坏冲掉旧备份。
+fn backup_corrupt(path: &Path) -> Option<std::path::PathBuf> {
+    let name = path.file_name()?.to_string_lossy().into_owned();
+    let backup = path.with_file_name(format!("{name}.corrupt-{}", crate::state::random_hex(4)));
+    match std::fs::rename(path, &backup) {
+        Ok(()) => Some(backup),
+        Err(e) => {
+            tracing::error!(path = %path.display(), "历史侧文件备份失败：{e}");
+            None
+        }
+    }
+}
+
+/// 读侧文件版本列表，分三种情形：
+/// - 不存在（首次存档）→ 空列表；
+/// - 解析失败 → 原文改名留档后按空列表重建（自愈，不永久拒写），并记一条 warn；
+/// - 其它读失败（EIO / 权限 / 共享冲突）→ Err，调用方拒绝本次写入、磁盘不动。
+/// 解析失败若连备份都失败则同样报 Err——留不下原文还继续，紧接着就会把它覆盖掉。
 fn read_versions(path: &Path) -> Result<Vec<Value>, String> {
     let raw = match std::fs::read_to_string(path) {
         Ok(raw) => raw,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
         Err(e) => return Err(format!("历史侧文件读取失败（{}）：{e}", path.display())),
     };
-    let parsed: Value = serde_json::from_str(&raw)
-        .map_err(|e| format!("历史侧文件解析失败（{}）：{e}", path.display()))?;
+    let parsed: Value = match serde_json::from_str(&raw) {
+        Ok(parsed) => parsed,
+        Err(e) => {
+            let Some(backup) = backup_corrupt(path) else {
+                return Err(format!(
+                    "历史侧文件解析失败且原文备份失败（{}），已中止写入以免覆盖原文：{e}",
+                    path.display()
+                ));
+            };
+            tracing::warn!(
+                path = %path.display(),
+                backup = %backup.display(),
+                "历史侧文件损坏，已留档并从空列表重新记录：{e}"
+            );
+            return Ok(vec![]);
+        }
+    };
     Ok(parsed.get("versions").and_then(|v| v.as_array()).cloned().unwrap_or_default())
 }
 
@@ -194,7 +225,8 @@ pub async fn record_history(
     let _lock = state.path_lock(&space_id, &rel).await;
 
     let read_path = path.clone();
-    // 读失败即拒绝本次追加：空列表当基线会把该文件的全部历史覆盖掉
+    // 读不出来（非解析类 IO 失败）即拒绝本次追加：空列表当基线会把该文件的全部历史覆盖掉；
+    // 解析失败则在 read_versions 内部先留档再重建
     let mut versions = blocking("历史读取", move || {
         read_versions(&read_path)
             .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("历史读取失败，已拒绝本次写入：{e}")))

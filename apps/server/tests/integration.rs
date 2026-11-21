@@ -972,9 +972,9 @@ async fn history_record_refuses_to_clear_history_when_side_file_unreadable() {
     assert_eq!(std::fs::read(&marker).unwrap(), b"keep");
 }
 
-/// 侧文件内容损坏（半截 / 非 JSON）同样必须拒绝写入，原文件字节保持不变。
+/// 侧文件解析失败要能自愈：原文改名留档，本次照常记录，下一笔从空列表重建。
 #[tokio::test]
-async fn history_record_keeps_corrupt_side_file_intact() {
+async fn history_record_backs_up_corrupt_side_file_and_recovers() {
     let dir = tempfile::tempdir().unwrap();
     let ctx = Ctx::new(spawn_server(dir.path()).await);
     let space_id = setup_two_members(&ctx, "alice", "bob").await;
@@ -984,18 +984,47 @@ async fn history_record_keeps_corrupt_side_file_intact() {
     let corrupt = b"{\"versions\": [{\"seq\": 1";
     std::fs::write(&side, corrupt).unwrap();
 
-    let (status, body) = ctx
-        .post(
-            &format!("/api/spaces/{space_id}/history/record"),
-            Some(&a_token),
-            json!({
-                "kind": "note", "file": "笔记/a.md", "content": "新内容", "action": "edit",
-                "author": { "device": "dev" },
-            }),
-        )
-        .await;
-    assert_eq!(status, 500, "解析失败必须拒绝写入：{body}");
-    assert_eq!(std::fs::read(&side).unwrap(), corrupt, "损坏的侧文件不得被覆盖");
+    let record = |content: &str| {
+        let ctx = &ctx;
+        let token = a_token.clone();
+        let space = space_id.clone();
+        let content = content.to_string();
+        async move {
+            ctx.post(
+                &format!("/api/spaces/{space}/history/record"),
+                Some(&token),
+                json!({
+                    "kind": "note", "file": "笔记/a.md", "content": content, "action": "edit",
+                    "author": { "device": "dev" },
+                }),
+            )
+            .await
+        }
+    };
+
+    let (status, body) = record("新内容").await;
+    assert_eq!(status, 200, "解析失败应留档后照常记录：{body}");
+    assert!(!body["skipped"].as_bool().unwrap_or(false), "不应被当作重复版本跳过：{body}");
+
+    // 原文必须完整留在备份文件里（名字带 .corrupt- 后缀），主文件已按空列表重建
+    let dir_entries = std::fs::read_dir(side.parent().unwrap())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    let backup_name = dir_entries
+        .iter()
+        .find(|n| n.contains(".corrupt-"))
+        .unwrap_or_else(|| panic!("损坏原文应被改名留档：{dir_entries:?}"));
+    let backup = side.parent().unwrap().join(backup_name);
+    assert_eq!(std::fs::read(&backup).unwrap(), corrupt, "备份须逐字节保留损坏原文");
+
+    // 自愈后侧文件只有本次一版；下一笔继续正常追加
+    let record_side: Value = serde_json::from_slice(&std::fs::read(&side).unwrap()).unwrap();
+    assert_eq!(record_side["versions"].as_array().unwrap().len(), 1, "从空列表重建：{record_side}");
+    let (status, _) = record("再一笔").await;
+    assert_eq!(status, 200, "自愈后应能持续记录");
+    let record_side: Value = serde_json::from_slice(&std::fs::read(&side).unwrap()).unwrap();
+    assert_eq!(record_side["versions"].as_array().unwrap().len(), 2, "{record_side}");
 }
 
 /// 历史记录入参（editor 传 null = 人类编辑）；固定同作者 + 60s 合并窗口。
