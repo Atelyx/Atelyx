@@ -2563,20 +2563,12 @@ fn on_copy(app: &mut App, cut: bool) -> Task<Message> {
     let selection = s.view.selection.clone().unwrap_or(ops::TableSelection::All);
     iced::clipboard::write(tsv).chain(iced::clipboard::read().map(move |got| {
         Message::Table(tv::TableMsg::CutVerified {
-            landed: cut_write_landed(&expected, got.as_deref()),
+            landed: crate::chat_input::clipboard_write_landed(&expected, got.as_deref()),
             selection: selection.clone(),
         })
     }))
 }
 
-/// 回读判定：剪贴板内容与本次写出的 TSV 一致才允许清除原选区。
-///
-/// iced 的剪贴板写入失败只记日志（`iced_winit` 内部吞掉错误），调用方拿不到结果；
-/// 剪贴板被其他进程占用时写入会静默失败，此刻照常清空选区就是「内容删了、剪贴板还是旧的」。
-fn cut_write_landed(expected: &str, readback: Option<&str>) -> bool {
-    // 换行归一：部分平台回读把 CRLF 折成 LF，这条差异不代表写入失败
-    readback.is_some_and(|got| got.replace("\r\n", "\n") == expected.replace("\r\n", "\n"))
-}
 
 /// 剪切回读结论落地：回读一致且选区未移动才清内容，否则保留并提示。
 fn on_cut_verified(app: &mut App, landed: bool, selection: ops::TableSelection) -> Task<Message> {
@@ -3407,18 +3399,6 @@ mod tests {
         s.data.rows[0].values.get("f1").and_then(|v| v.as_str()).unwrap_or("")
     }
 
-    /// 剪切回读判定：只有剪贴板里确实是本次写出的 TSV 才允许清除原内容。
-    /// 写入被剪贴板占用吞掉时回读拿到旧内容 / None，判定必须为 false。
-    #[test]
-    fn cut_landed_only_when_readback_matches() {
-        let tsv = "姓名\t年龄\n小明\t18";
-        assert!(cut_write_landed(tsv, Some(tsv)));
-        // 换行差异不算写入失败（平台回读把 CRLF 折成 LF）
-        assert!(cut_write_landed("a\r\nb", Some("a\nb")));
-        // 剪贴板内容仍是旧的 / 读不到 = 写入没落地
-        assert!(!cut_write_landed(tsv, Some("旧的剪贴板内容")));
-        assert!(!cut_write_landed(tsv, None));
-    }
 
     /// 在途标记按发起身份清理：改名 / 换表后旧标记不再挡住新表的同名图片。
     #[test]
