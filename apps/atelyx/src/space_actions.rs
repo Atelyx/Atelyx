@@ -4119,6 +4119,56 @@ mod tests {
         }
     }
 
+    /// 光标所在整段被替换成更短文本、其后再无第二处改动时，映射结果必须是该段在
+    /// 新正文中的起点。
+    /// 推理（同时是断言依据）：光标 p 落在 hunk 的删除区间内，p 之前的 hunk 都已
+    /// 生效，累计净平移 shift 把「旧坐标 h.at」搬到「新坐标 h.at + shift」——这正是该
+    /// 改动区间在新正文里的起点。p 若还越过改动区间，后续 hunk 会继续累计 shift；
+    /// 因此「停在该 hunk 的新起点」与「继续累计」只在 p 的落点上有差别，不会互相矛盾。
+    /// 断言用「该段首字符是否在插入结果里出现」证明落点确实贴着段首，而不是另一段。
+    #[test]
+    fn 整段替换后光标落在该段新起点() {
+        let old_body = "开头一句。\n这一段本来很长，会整段被换掉。\n结尾一句。\n";
+        let new_body = "开头一句。\n短句。\n结尾一句。\n";
+        let hunks = atelyx_core::merge3::diff_hunks(old_body, new_body);
+        assert_eq!(hunks.len(), 1, "整段替换应合成单个 hunk：{hunks:?}");
+        let h = &hunks[0];
+        // 光标落在被替换段落的中间
+        let caret = h.at + h.remove / 2;
+        let mapped = map_offset_after_merge(old_body, new_body, &hunks, caret);
+        // 该段在新正文中的起点 = h.at + 本 hunk 之前的净平移（此例为 0）
+        assert_eq!(mapped, h.at);
+        assert_eq!(&new_body[mapped..], "短句。\n结尾一句。\n", "落点必须贴在该段段首");
+        assert!(new_body.is_char_boundary(mapped));
+        // 后续编辑插在这个落点上时，插入内容确实进到该段段首
+        let mut after_insert = String::with_capacity(new_body.len() + 3);
+        after_insert.push_str(&new_body[..mapped]);
+        after_insert.push_str("插入");
+        after_insert.push_str(&new_body[mapped..]);
+        assert_eq!(after_insert, "开头一句。\n插入短句。\n结尾一句。\n");
+    }
+
+    /// 同一段被替换成更短文本、其后还有第二处改动：光标落在整段内时只落到该段新起点
+    /// （后段 hunk 在光标之后，尚未生效）；光标越过两处改动后两段平移都要累计。
+    #[test]
+    fn 整段替换后仍有后续改动时落点不变() {
+        let old_body = "甲段。\n这一段会被替换掉。\n中间段。\n结尾会被删一段。\n";
+        let new_body = "甲段。\n新段。\n中间段。\n";
+        let hunks = atelyx_core::merge3::diff_hunks(old_body, new_body);
+        assert_eq!(hunks.len(), 2, "替换与删除须各成一 hunk：{hunks:?}");
+        let (first, second) = (&hunks[0], &hunks[1]);
+        assert!(second.at > first.at + first.remove, "第二处改动在整段之后");
+        let mapped = map_offset_after_merge(old_body, new_body, &hunks, first.at + 4);
+        assert_eq!(mapped, first.at, "落点 = 该段在新正文中的起点（前段无净平移）");
+        assert_eq!(&new_body[mapped..], "新段。\n中间段。\n");
+        assert!(new_body.is_char_boundary(mapped));
+        // 后段改动之后的光标：两段平移都要算上（旧正文全长 → 新正文全长）
+        assert_eq!(
+            map_offset_after_merge(old_body, new_body, &hunks, old_body.len()),
+            new_body.len()
+        );
+    }
+
     #[test]
     fn 随机正文下映射恒在界内且为字符边界() {
         // 固定种子的线性同余：不引依赖，且每次跑同一批样本
