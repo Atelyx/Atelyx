@@ -285,6 +285,84 @@ fn open_external(url: &str) {
     }
 }
 
+/// 慢作业日志文件名：与崩溃日志同目录，按大小滚动保留最近若干份。
+const SLOW_WRITE_LOG: &str = "slow-write.log";
+
+/// 慢作业日志保留份数（含当前文件）。
+const SLOW_WRITE_LOG_KEEP: usize = 3;
+
+/// 单份慢作业日志的大小上限：超过即滚动，避免长期运行无界增长。
+const SLOW_WRITE_LOG_MAX_BYTES: u64 = 256 * 1024;
+
+/// 同一条路径的慢作业提示间隔：写盘慢通常是设备级问题，逐笔弹通知只会淹没界面。
+const SLOW_WRITE_NOTICE_GAP: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// 慢作业提示的节流表：路径 → 上次提示时刻。
+static SLOW_WRITE_NOTICED: std::sync::Mutex<Option<HashMap<String, Instant>>> =
+    std::sync::Mutex::new(None);
+
+/// 这条路径现在是否该发提示：首次或距上次提示已满 [`SLOW_WRITE_NOTICE_GAP`]。
+fn slow_write_should_notice(last: Option<Instant>, now: Instant) -> bool {
+    last.is_none_or(|at| now.saturating_duration_since(at) >= SLOW_WRITE_NOTICE_GAP)
+}
+
+/// 追加一行慢作业日志：超过大小上限即滚动（log → log.1 → log.2，最旧丢弃）。
+/// 写盘失败静默——这条路径报告的正是磁盘慢，不能因为写不进去再起波澜。
+fn append_slow_job_log(dir: &std::path::Path, line: &str) {
+    let path = dir.join(SLOW_WRITE_LOG);
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() >= SLOW_WRITE_LOG_MAX_BYTES) {
+        for n in (1..SLOW_WRITE_LOG_KEEP).rev() {
+            let from = if n == 1 {
+                path.clone()
+            } else {
+                dir.join(format!("{SLOW_WRITE_LOG}.{}", n - 1))
+            };
+            let _ = std::fs::rename(from, dir.join(format!("{SLOW_WRITE_LOG}.{n}")));
+        }
+    }
+    use std::io::Write;
+    let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) else {
+        return;
+    };
+    let _ = writeln!(file, "{line}");
+}
+
+/// 写盘慢作业的壳侧接线：日志 + 节流通知。
+/// 回调跑在写盘工作线程上，只做一次 O(1) 追加与一次通道投递——不阻塞、不向写盘队列提交作业。
+fn install_slow_job_reporter() {
+    let tx = chat_actions::control_channel_sender();
+    let _ = atelyx_core::write_queue::set_slow_job_reporter(move |path, elapsed| {
+        let secs = elapsed.as_secs_f32();
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("<未知目标>")
+            .to_string();
+        // 日志写盘交给独立线程：回调持着写盘执行序，不能在磁盘慢时再同步等一次写
+        let line =
+            format!("{} {name} {secs:.1}s {}", now_secs(), path.display());
+        std::thread::spawn(move || append_slow_job_log(&crash_log_dir(), &line));
+        let now = Instant::now();
+        let key = path.to_string_lossy().to_string();
+        let should = {
+            let mut guard = SLOW_WRITE_NOTICED.lock().unwrap_or_else(|e| e.into_inner());
+            let map = guard.get_or_insert_with(HashMap::new);
+            let last = map.get(&key).copied();
+            let should = slow_write_should_notice(last, now);
+            if should {
+                map.insert(key, now);
+            }
+            // 节流表只为「同一路径 60s 内只提示一次」服务：过期条目随用随清，
+            // 否则长时间运行会让每个写过的路径都留一条
+            map.retain(|_, at| now.saturating_duration_since(*at) < SLOW_WRITE_NOTICE_GAP);
+            should
+        };
+        if should {
+            let _ = tx.send(chat_actions::ChatMsg::SlowWrite { name, secs });
+        }
+    });
+}
+
 /// 启动 daemon：建主窗口、装配功能模块、跑 iced 事件循环。
 pub fn run() -> iced::Result {
     // 命令行分流在建窗口之前：扩展的打包 / 校验 / 装卸不需要界面，跑完直接退出
@@ -294,6 +372,8 @@ pub fn run() -> iced::Result {
     }
     // 崩溃日志先于窗口与渲染器安装：此后任一拍 panic 都不会无痕退出
     install_panic_hook();
+    // 写盘慢作业的日志与提醒同样在建窗之前接上：启动期的落盘也能被看见
+    install_slow_job_reporter();
     // 字体族清单必须在建渲染器之前备好：default_font 只在渲染器创建时读一次
     ui::font::init();
     iced::daemon(App::boot, App::update, App::view)
@@ -1290,6 +1370,13 @@ pub enum SpaceMsg {
         gen: u64,
         result: Result<Vec<atelyx_core::space_client::TreeNode>, atelyx_core::space_client::SpaceError>,
     },
+    /// 空间画布载入回执（truncated = 部分引用超预算未取到，画布照常打开）。
+    CanvasLoaded {
+        gen: u64,
+        rel: String,
+        truncated: bool,
+        result: Result<crate::canvas_view::LoadOut, String>,
+    },
     /// 空间笔记保存回执（rel = 发起时文件；frozen = 发起时冻结的正文，Ok 携带服务端合流后的最终全文）。
     NoteSaved {
         gen: u64,
@@ -1550,6 +1637,11 @@ pub struct App {
     space_note_save_inflight: Vec<(u64, String)>,
     /// 在途保存期间同一文件又收到 Flush：回执后补一笔串行收尾（关窗/切文件的脏拦截依赖它）。
     space_note_save_flush_queued: Vec<(u64, String)>,
+    /// 空间表格 / 画布保存在途项（键 = 世代 + 相对路径，与笔记链同构）：慢网络下补丁
+    /// 并发堆叠会乱序落地覆盖服务端，回执即摘。
+    pub(crate) space_doc_save_inflight: Vec<(u64, String)>,
+    /// 在途期间同一文档又收到 Flush：回执后补一笔串行收尾。
+    pub(crate) space_doc_save_flush_queued: Vec<(u64, String)>,
     /// 各空间独立的文件树展开集（会话内记忆；键 = 服务器/空间 id）。
     expanded_by_space: HashMap<String, Vec<String>>,
     /// 设备会话列表（设置页「多人协作」；打开该页时拉取）。
@@ -2094,6 +2186,8 @@ impl App {
                 space_note_flushed: None,
                 space_note_save_inflight: Vec::new(),
                 space_note_save_flush_queued: Vec::new(),
+                space_doc_save_inflight: Vec::new(),
+                space_doc_save_flush_queued: Vec::new(),
                 expanded_by_space: HashMap::new(),
                 space_devices: Vec::new(),
                 space_token: None,
@@ -9085,6 +9179,49 @@ mod file_drop_tests {
         assert_eq!(edit.caret, body.len(), "长度夹到正文末尾");
         assert!(body.is_char_boundary(edit.anchor), "锚点吸附到字符边界");
         assert_eq!(edit.anchor, 4, "emoji 中间的偏移收到字符起点");
+    }
+
+    /// 同一路径的慢作业提示按 60s 节流：首次必提示，间隔内不再提示，满窗后再次提示。
+    #[test]
+    fn slow_write_notice_is_throttled_per_path() {
+        use std::time::{Duration, Instant};
+        let now = Instant::now();
+        assert!(super::slow_write_should_notice(None, now), "首次必提示");
+        assert!(!super::slow_write_should_notice(Some(now), now + Duration::from_secs(59)));
+        assert!(super::slow_write_should_notice(Some(now), now + Duration::from_secs(60)));
+        assert!(super::slow_write_should_notice(Some(now), now + Duration::from_secs(600)));
+    }
+
+    /// 慢作业日志写满上限即滚动：当前文件 + 至多 KEEP - 1 份历史，最旧的丢弃。
+    #[test]
+    fn slow_job_log_rolls_at_size_cap() {
+        let dir = std::env::temp_dir().join(format!(
+            "atelyx-slow-log-test-{}-{}",
+            std::process::id(),
+            super::now_secs()
+        ));
+        std::fs::create_dir_all(&dir).expect("建临时目录");
+        let path = dir.join(super::SLOW_WRITE_LOG);
+        // 先写满一份超上限的日志，再追加一行触发滚动
+        std::fs::write(&path, vec![b'x'; super::SLOW_WRITE_LOG_MAX_BYTES as usize])
+            .expect("写满日志");
+        super::append_slow_job_log(&dir, "第二份");
+        assert!(dir.join("slow-write.log.1").exists(), "超限后旧文件滚动为 .1");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("读新文件").trim(),
+            "第二份",
+            "滚动后新文件从本次这一行开始"
+        );
+        // 再滚一次：.1 让位给 .2，份数仍不超过 KEEP
+        std::fs::write(&path, vec![b'y'; super::SLOW_WRITE_LOG_MAX_BYTES as usize])
+            .expect("再写满");
+        super::append_slow_job_log(&dir, "第三份");
+        assert!(dir.join("slow-write.log.2").exists(), "第二次滚动产生 .2");
+        assert!(
+            !dir.join(format!("slow-write.log.{}", super::SLOW_WRITE_LOG_KEEP)).exists(),
+            "不超过保留份数"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 裁剪崩溃日志只按文件名时间戳取舍：同秒多份与无关文件并存时，只删最旧的那几份

@@ -83,6 +83,11 @@ pub(crate) fn run_event_channel() -> &'static EventSlot<RunEvent> {
     })
 }
 
+/// 控制通道发送端：写盘工作线程等非 Elm 线程用它投递消息（不得阻塞）。
+pub(crate) fn control_channel_sender() -> mpsc::UnboundedSender<ChatMsg> {
+    control_channel().0.clone()
+}
+
 fn control_channel() -> &'static EventSlot<ChatMsg> {
     CONTROL.get_or_init(|| {
         let (tx, rx) = mpsc::unbounded_channel();
@@ -358,6 +363,8 @@ fn latest_session_id(sessions: &[Value]) -> Option<String> {
 pub enum ChatMsg {
     /// 落盘失败状态（写链观察者；None = 恢复）。
     PersistStatus(Option<(String, i64)>),
+    /// 写盘慢作业（写盘工作线程回调投递）：文件名 + 已耗时秒数。
+    SlowWrite { name: String, secs: f32 },
     SessionPicked(String),
     NewSession,
     DeleteSession(String),
@@ -854,6 +861,7 @@ pub fn update(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
 fn update_inner(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
     match msg {
         m @ (ChatMsg::PersistStatus(..)
+            | ChatMsg::SlowWrite { .. }
             | ChatMsg::ModelPicked(..)
             | ChatMsg::EffortPicked(..)
             | ChatMsg::FlowScrolled(..)
@@ -906,6 +914,14 @@ fn on_panel(app: &mut App, msg: ChatMsg) -> iced::Task<Message> {
     match msg {
         ChatMsg::PersistStatus(status) => {
             app.chat.persist_error = status;
+            iced::Task::none()
+        }
+        // 写盘慢作业：用户在等一次落盘，给一条可定位的提醒（节流在写盘线程侧完成）
+        ChatMsg::SlowWrite { name, secs } => {
+            app.notify(
+                crate::NoticeLevel::Warning,
+                format!("写盘缓慢：{name} 已耗时 {secs:.1}s，请检查磁盘"),
+            );
             iced::Task::none()
         }
         ChatMsg::ModelPicked(pick) => {
