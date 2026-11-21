@@ -4,7 +4,7 @@
 //! 计（与 Yjs 数据模型一致）；yrs 默认的 `OffsetKind::Bytes` 索引单位为 UTF-8 字节，不用于本模块。
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use yrs::updates::decoder::Decode;
@@ -159,7 +159,10 @@ impl NoteCollab {
         // 单事务恒产出单个 update 事件；空 update（hunk 全被钳掉）不上行。
         // 多条即不变式被破坏（静默丢弃会丢内容），debug 构建当场暴露
         let msgs = {
-            let mut sink = self.outbox.lock().expect("outbox 锁不可重入");
+            // outbox 锁不可重入（取锁处不嵌套）。毒化只说明上一次持锁线程 panic 过，
+            // 表内消息本身完整；expect 会把那一次 panic 放大成此后每次编辑都 panic
+            // （壳侧 update 内 → 进程退出），故取回内部值继续用。
+            let mut sink = self.outbox.lock().unwrap_or_else(PoisonError::into_inner);
             sink.drain(..).collect::<Vec<_>>()
         };
         let mut msgs = msgs.into_iter().filter(|m| m.len() > 2);
@@ -571,7 +574,8 @@ fn spawn_doc(text: &str, outbox: &Arc<Mutex<Vec<Vec<u8>>>>) -> (Doc, yrs::TextRe
         let mut msg = Vec::new();
         write_var_uint(&mut msg, SYNC_MSG_UPDATE);
         write_var_bytes(&mut msg, &event.update);
-        sink.lock().expect("outbox 锁不可重入").push(msg);
+        // 同 local_edit：毒化只说明上次持锁线程崩过，表内消息完整，继续用内部表而不是 panic
+        sink.lock().unwrap_or_else(PoisonError::into_inner).push(msg);
     })
     .expect("单线程内挂订阅不会与并发事务冲突");
     (doc, ytext)
@@ -867,6 +871,28 @@ mod tests {
         let out = a.apply_remote("q", "f.md", &sync_frame(&good, &q_msg));
         assert!(out.doc_changed);
         assert_eq!(a.current_text().as_deref(), Some("新基线改\n"));
+    }
+
+    /// outbox 锁毒化后仍须可编辑：毒化只说明上次持锁线程崩过，表内消息本身完整。
+    /// 取锁 panic 会把一次崩溃放大成此后每次编辑都崩（壳侧 update 内 → 进程退出）。
+    #[test]
+    fn outbox锁毒化后本地编辑仍可用() {
+        let mut nc = NoteCollab::new("a".to_owned());
+        nc.open("f.md", "v1\n");
+        // 持锁线程 panic 制造毒化；hook 静音只为不让这条已捕获的 panic 混进测试输出
+        let sink = Arc::clone(&nc.outbox);
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _held = sink.lock().unwrap();
+            panic!("持锁线程崩溃");
+        }));
+        std::panic::set_hook(previous);
+        assert!(poisoned.is_err(), "持锁线程应已 panic");
+        assert!(nc.outbox.is_poisoned(), "夹具前提：outbox 锁已毒化");
+        assert!(nc.local_edit("v2\n").is_some(), "毒化后本地编辑仍须产出增量");
+        assert_eq!(nc.current_text().as_deref(), Some("v2\n"));
+        assert!(nc.outbox.lock().unwrap_or_else(PoisonError::into_inner).is_empty());
     }
 
     #[test]
