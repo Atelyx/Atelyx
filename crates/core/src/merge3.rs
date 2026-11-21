@@ -85,6 +85,34 @@ fn unique_anchors(a: &[&str], b: &[&str]) -> Vec<(usize, usize)> {
     out
 }
 
+/// 段落切段的最短段长：比这更短的段不再单独切出，免得碎段让切段本身成为开销。
+const MIN_PARAGRAPH_TOKENS: usize = 8;
+
+/// 空行分段点：两侧按同一序号出现的空行（`unique_anchors` 要求行在全篇唯一，正文以重复行
+/// 为主时一个锚点都拿不到，而段落边界仍能把两侧改动隔开）。段长不足 / 两侧空行数不等
+/// 时多出的空行不切，交给段内差分。
+fn blank_line_anchors(a: &[&str], b: &[&str]) -> Vec<(usize, usize)> {
+    let min_segment = MIN_PARAGRAPH_TOKENS;
+    let blanks = |tokens: &[&str]| -> Vec<usize> {
+        tokens
+            .iter()
+            .enumerate()
+            .filter(|(_, token)| **token == "\n")
+            .map(|(i, _)| i)
+            .collect()
+    };
+    let mut out: Vec<(usize, usize)> = Vec::new();
+    let mut segment_start = 0usize;
+    for (i, j) in blanks(a).into_iter().zip(blanks(b)) {
+        if i + 1 - segment_start < min_segment {
+            continue;
+        }
+        out.push((i, j));
+        segment_start = i + 1;
+    }
+    out
+}
+
 /// `a[0]` 位于原文的 `base_at` 字节处时求差异块（分段差分用）。
 fn hunks_from_tokens_at(a: &[&str], b: &[&str], base_at: usize) -> Vec<TextHunk> {
     let a_offsets = token_offsets(a);
@@ -110,8 +138,12 @@ fn hunks_from_tokens_at(a: &[&str], b: &[&str], base_at: usize) -> Vec<TextHunk>
     }
     if a_mid.len() > MAX_DIFF_TOKENS || b_mid.len() > MAX_DIFF_TOKENS {
         // 长中段：按公共锚点行切段，各段独立差分（两侧改动落在不同段即互不影响）；
-        // 无锚点才退化为整段替换——那一段里对侧的改动会被整体判为冲突
-        let anchors = unique_anchors(a_mid, b_mid);
+        // 唯一行锚点一个都没有时再退到空行段落边界，仍切不出段才整段替换——
+        // 整段替换会把对侧落在同段的改动一并判成冲突（两个 hunk 塌成一个）
+        let mut anchors = unique_anchors(a_mid, b_mid);
+        if anchors.is_empty() {
+            anchors = blank_line_anchors(a_mid, b_mid);
+        }
         if anchors.is_empty() {
             return vec![TextHunk { at, remove: a_mid.concat().len(), insert: b_mid.concat() }];
         }
@@ -548,6 +580,51 @@ c
         assert_eq!(merged, ours.replacen("l1990
 ", "theirs1990
 ", 1));
+    }
+
+    /// 超限中段里全是重复行（没有「两侧各出现一次」的行）时单行锚点为空，但这不代表两侧改动
+    /// 重叠：按空行分隔的段落块切段后各改动各归一段。没有段落锚点就会退化成一整段替换，
+    /// 把对侧落在其中的改动画进同区间，合并时只取一侧、对侧内容丢失。
+    #[test]
+    fn 长中段重复行按段落块切段保留两侧改动() {
+        // 每段 12 行 a/b 位模式 + 空行：a、b、空行三种 token 全篇重复，整段拿不到唯一行锚点
+        let mut lines: Vec<String> = Vec::new();
+        for block in 0..400usize {
+            for bit in 0..12 {
+                lines.push(if (block >> bit) & 1 == 1 { "a\n".into() } else { "b\n".into() });
+            }
+            lines.push("\n".into());
+        }
+        let base = lines.concat();
+        // 本端首末两处改动相距整篇：裁掉公共前后缀后中段仍超出 LCS 上限，进锚点切段分支；
+        // 对端改在中段内部，退化成一整段替换时必然与本端 hunk 重叠
+        let edit = |indices: [usize; 2], replacement: &str| -> String {
+            let mut next = lines.clone();
+            for index in indices {
+                next[index] = replacement.to_owned();
+            }
+            next.concat()
+        };
+        let ours = edit([2 * 13, 390 * 13], "ours\n");
+        // 对端两处改动相邻（合成一个 hunk），整体落在本端两处改动之间
+        let theirs = edit([200 * 13, 200 * 13 + 1], "theirs\n");
+        assert!(
+            tokenize(&base).len() > MAX_DIFF_TOKENS,
+            "夹具前提：改动落在长中段的差分路径上"
+        );
+        let our_hunks = diff_hunks(&base, &ours);
+        assert_eq!(our_hunks.len(), 2, "两端各一处改动：{:?}", our_hunks);
+        // 关键：每个 hunk 只覆盖被改的那一行，而不是把中间整段一起替换掉
+        assert_eq!(our_hunks[0].remove, "b\n".len(), "hunk 不得退化成整段替换");
+        assert_eq!(our_hunks[1].remove, "b\n".len(), "hunk 不得退化成整段替换");
+        assert_eq!(diff_hunks(&base, &theirs).len(), 1);
+        assert!(!merge3_conflict(&base, &ours, &theirs), "三处改动互不重叠，不是冲突");
+        let mut expected = lines.clone();
+        expected[2 * 13] = "ours\n".into();
+        expected[390 * 13] = "ours\n".into();
+        expected[200 * 13] = "theirs\n".into();
+        expected[200 * 13 + 1] = "theirs\n".into();
+        assert_eq!(merge3(&base, &ours, &theirs, ConflictSide::Theirs), expected.concat());
     }
 
     #[test]
