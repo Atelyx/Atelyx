@@ -872,6 +872,8 @@ enum Message {
     SaveErrorDismiss,
     /// 未实现功能的占位通知。
     NotImplemented(&'static str),
+    /// 编辑面就地拒绝的操作（如剪贴板不可用时取消剪切）：只给一条提醒，不改正文。
+    NoteNotice(&'static str),
     /// 协作空间消息（账号 / 空间切换 / 空间保存回执）。
     Space(SpaceMsg),
     /// 文件面板云钮：打开协作空间菜单（未登录先弹登录层）。
@@ -2474,7 +2476,8 @@ impl App {
             Message::Escape(..)
             | Message::PopupOpen(..) => self.handle_popup(message),
             Message::Noop
-            | Message::NotImplemented(..) => self.handle_misc(message),
+            | Message::NotImplemented(..)
+            | Message::NoteNotice(..) => self.handle_misc(message),
             Message::Ui(msg) => self.handle_ui(msg),
             Message::Update(msg) => self.handle_update(msg),
         }
@@ -5274,6 +5277,10 @@ impl App {
             Message::NotImplemented(what) => {
                 self.dismiss_popup();
                 self.notify(NoticeLevel::Info, format!("「{what}」尚未实现"));
+                Task::none()
+            }
+            Message::NoteNotice(text) => {
+                self.notify(NoticeLevel::Warning, text);
                 Task::none()
             }
             _ => Task::none(),

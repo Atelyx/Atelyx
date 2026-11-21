@@ -1311,6 +1311,13 @@ fn selected_text(text: &str, anchor: usize, caret: usize) -> String {
     }
 }
 
+/// 把选区交给剪贴板并回读校验：只有回读内容与写入内容一致才返回真（可以删正文）。
+/// 剪贴板被系统或其他程序占用时写入会静默失败，此时删正文等于丢内容。
+fn cut_copied(sel: &str, clipboard: &mut dyn Clipboard) -> bool {
+    clipboard.write(ClipboardKind::Standard, sel.to_string());
+    clipboard.read(ClipboardKind::Standard).as_deref() == Some(sel)
+}
+
 /// Ctrl+C/X/V 就地处理（C 复制非空选区；X 复制并删选区；V 粘贴）。
 /// 剪贴板经部件入参读写，避免应用层往返。返回是否消费该按键。
 fn handle_clipboard_key(
@@ -1329,9 +1336,12 @@ fn handle_clipboard_key(
         }
         "x" => {
             if !sel.is_empty() {
-                clipboard.write(ClipboardKind::Standard, sel);
-                shell.publish(Message::Editor(EditorEvent::DeleteSelection));
-                shell.request_redraw();
+                if cut_copied(&sel, clipboard) {
+                    shell.publish(Message::Editor(EditorEvent::DeleteSelection));
+                    shell.request_redraw();
+                } else {
+                    shell.publish(Message::NoteNotice("剪贴板不可用，已取消剪切"));
+                }
             }
             shell.capture_event();
             true
@@ -2731,6 +2741,38 @@ impl EditorState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 剪贴板替身：可设定「写入被吞」与「回读为空」两种真实失败形态。
+    struct FakeClipboard {
+        content: Option<String>,
+        drop_writes: bool,
+    }
+
+    impl Clipboard for FakeClipboard {
+        fn read(&self, _kind: ClipboardKind) -> Option<String> {
+            self.content.clone()
+        }
+
+        fn write(&mut self, _kind: ClipboardKind, contents: String) {
+            if !self.drop_writes {
+                self.content = Some(contents);
+            }
+        }
+    }
+
+    /// 剪切只在剪贴板回读一致时删正文：写入被吞或回读不到内容即保留正文。
+    #[test]
+    fn cut_requires_clipboard_readback() {
+        let mut ok = FakeClipboard { content: None, drop_writes: false };
+        assert!(cut_copied("正文", &mut ok), "写入成功且回读一致才删正文");
+
+        let mut swallowed = FakeClipboard { content: None, drop_writes: true };
+        assert!(!cut_copied("正文", &mut swallowed), "写入被吞不得删正文");
+
+        let mut stale = FakeClipboard { content: Some("旧内容".into()), drop_writes: true };
+        assert!(!cut_copied("正文", &mut stale), "回读不一致不得删正文");
+        assert_eq!(stale.content.as_deref(), Some("旧内容"), "校验不改动原剪贴板内容");
+    }
 
     /// 选区入口的兜底：越界与半字符偏移都由 `selection_within` / `settle_offsets` 收敛，
     /// 上游（远端合流 / 编辑面命中）算错时切正文不会 panic。
