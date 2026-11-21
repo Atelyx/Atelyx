@@ -42,21 +42,24 @@ pub struct LineEdit {
     pub to: usize,
 }
 
-/// `offset` 所在行的行首偏移（offset 非字符边界时向下取整）。
-pub(crate) fn line_start_at(text: &str, offset: usize) -> usize {
+/// 把偏移收敛到 `[0, text.len()]` 内的字符边界（向下吸附）：切片前的一切偏移都过这里。
+pub(crate) fn floor_char_boundary(text: &str, offset: usize) -> usize {
     let mut offset = offset.min(text.len());
     while !text.is_char_boundary(offset) {
         offset -= 1;
     }
+    offset
+}
+
+/// `offset` 所在行的行首偏移。
+pub(crate) fn line_start_at(text: &str, offset: usize) -> usize {
+    let offset = floor_char_boundary(text, offset);
     text[..offset].rfind('\n').map_or(0, |i| i + 1)
 }
 
 /// 自 `offset` 起本行行尾偏移（不含换行符）。
 pub(crate) fn line_end_at(text: &str, offset: usize) -> usize {
-    let mut offset = offset.min(text.len());
-    while !text.is_char_boundary(offset) {
-        offset -= 1;
-    }
+    let offset = floor_char_boundary(text, offset);
     text[offset..].find('\n').map_or(text.len(), |i| offset + i)
 }
 
@@ -2673,6 +2676,20 @@ impl EditorState {
         (self.anchor.min(self.caret), self.anchor.max(self.caret))
     }
 
+    /// 有序选区收进 `body`：两端夹到正文长度并向下吸附到字符边界。
+    /// 任何按选区切正文的入口都走它——上游偏移失准只损失一次落点，不会切碎字符 panic。
+    pub fn selection_within(&self, body: &str) -> (usize, usize) {
+        let from = floor_char_boundary(body, self.selection().0);
+        let to = floor_char_boundary(body, self.selection().1).max(from);
+        (from, to)
+    }
+
+    /// 远端合流后的偏移落地：越界或落在字符中间一律向下吸附，不把非法偏移写进状态。
+    pub fn settle_offsets(&mut self, body: &str, caret: usize, anchor: usize) {
+        self.caret = floor_char_boundary(body, caret);
+        self.anchor = floor_char_boundary(body, anchor);
+    }
+
     /// 光标 / 锚点收进正文范围（程序化替换正文后偏移可能越界）。
     pub fn clamp_caret(&mut self, body_len: usize) {
         self.caret = self.caret.min(body_len);
@@ -2714,6 +2731,29 @@ impl EditorState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 选区入口的兜底：越界与半字符偏移都由 `selection_within` / `settle_offsets` 收敛，
+    /// 上游（远端合流 / 编辑面命中）算错时切正文不会 panic。
+    #[test]
+    fn selection_within_clamps_to_char_boundary() {
+        let body = "a\n中😀b\n";
+        let mut edit = EditorState::default();
+        // 选区越过正文长度
+        edit.anchor = 5;
+        edit.caret = body.len() + 20;
+        assert_eq!(edit.selection_within(body), (5, body.len()));
+        // 两端都落在 emoji（4 字节）中间：向下吸附到字符起点，且 from 不超过 to
+        edit.anchor = 7;
+        edit.caret = 8;
+        let (from, to) = edit.selection_within(body);
+        assert!(body.is_char_boundary(from) && body.is_char_boundary(to));
+        assert!(from <= to);
+        assert_eq!((from, to), (5, 5));
+        // 远端合流后的落点同样收敛
+        edit.settle_offsets(body, body.len() + 9, 8);
+        assert_eq!(edit.caret, body.len());
+        assert!(body.is_char_boundary(edit.anchor));
+    }
 
     /// 编辑面光标位置与全文字节偏移互为逆映射（列按字节计，字符中间的偏移收到字符起点）。
     /// CRLF 与空行都覆盖：行尾回车符算行内字节，不能被当成换行。

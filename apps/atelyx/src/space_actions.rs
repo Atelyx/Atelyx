@@ -1600,6 +1600,33 @@ fn on_note_saved(
     task
 }
 
+/// 远端合流后的正文偏移映射（坐标相对正文）：多 hunk 按区间累计平移，落在改动区间内的
+/// 偏移吸附到该区间起点。结果恒落在 `[0, new_body.len()]` 且为字符边界。
+pub(crate) fn map_offset_after_merge(
+    old_body: &str,
+    new_body: &str,
+    hunks: &[atelyx_core::merge3::TextHunk],
+    pos: usize,
+) -> usize {
+    let p = pos.min(old_body.len());
+    let mut shift: i64 = 0;
+    let mut mapped: Option<i64> = None;
+    for h in hunks {
+        if p <= h.at {
+            break;
+        }
+        if p >= h.at + h.remove {
+            shift += h.insert.len() as i64 - h.remove as i64;
+        } else {
+            // 落入改动区间：钳到区间起点（h.at 是旧坐标，累计平移为负时结果可能为负）
+            mapped = Some(h.at as i64 + shift);
+            break;
+        }
+    }
+    let raw = mapped.unwrap_or(p as i64 + shift).max(0) as usize;
+    crate::markdown_edit::floor_char_boundary(new_body, raw.min(new_body.len()))
+}
+
 /// 远端文本落地（服务端合流回填 / 协作远端合入共用）：旧文本压撤销检查点（快照
 /// 只含本端输入历史，不得借撤销把远端内容整体回滚）、光标按差异区间映射、
 /// 解析产物重建、不置脏。frontmatter 前缀保持不变（差异按正文计算）。
@@ -1610,32 +1637,16 @@ pub fn apply_remote_text(app: &mut App, new_text: String) {
     }
     let old_body_start = atelyx_core::frontmatter::block_end(&old).unwrap_or(0);
     let new_body_start = atelyx_core::frontmatter::block_end(&new_text).unwrap_or(0);
+    // block_end 只落在行尾换行之后（无块为 0），两处切片都在字符边界上
     let old_body = &old[old_body_start..];
     let new_body = &new_text[new_body_start..];
     let hunks = atelyx_core::merge3::diff_hunks(old_body, new_body);
     app.note_text = new_text.clone();
     app.reset_note_metrics();
     if app.note_mode == NoteMode::Edit {
-        // 光标映射（正文相对坐标）：hunks 全基于旧文本坐标，p 保持原坐标、按区间相对位置
-        // 累计平移量（否则 p 的「部分映射坐标」与后续 hunk 的旧坐标混用，多 hunk 时漂移）
-        let map = |pos: usize| -> usize {
-            let p = pos.min(old_body.len());
-            let mut shift: i64 = 0;
-            for h in &hunks {
-                if p <= h.at {
-                    break;
-                }
-                if p >= h.at + h.remove {
-                    shift += h.insert.len() as i64 - h.remove as i64;
-                } else {
-                    // 落入改动区间：钳到区间起点（含此前累计平移）
-                    return h.at + shift.max(0) as usize;
-                }
-            }
-            (p as i64 + shift).clamp(0, new_body.len() as i64) as usize
-        };
-        app.edit.caret = map(app.edit.caret);
-        app.edit.anchor = map(app.edit.anchor);
+        let map = |pos: usize| map_offset_after_merge(old_body, new_body, &hunks, pos);
+        let (caret, anchor) = (map(app.edit.caret), map(app.edit.anchor));
+        app.edit.settle_offsets(new_body, caret, anchor);
     } else {
         // Source 档编辑面回填：远端合入后 source_editor 若滞留旧全文，本端继续输入会以
         // 旧全文覆盖 note_text（静默回退远端内容）
@@ -4055,6 +4066,72 @@ mod tests {
 
     fn node(name: &str, path: &str, is_dir: bool, children: Vec<TreeNode>) -> TreeNode {
         TreeNode { name: name.to_string(), path: path.to_string(), is_dir, updated_at: 0, children }
+    }
+
+    /// 映射结果必须同时满足「不越界」与「落在字符边界」：两者任一被破坏，远端合流后
+    /// 拿它切正文就 panic。以下用例各锁一条，随机一组扫全部位置组合。
+    #[test]
+    fn 远端合流后偏移不越界() {
+        // 旧 30B → 新 18B：前段缩短（累计平移为负）+ 后段整段删除，
+        // 光标落在后段改动区间——原实现按区间起点 + 截断为 0 的累计平移算出 22，越过新正文
+        let old_body = "aaa\nccc\naaa\nd\naaa\nbbb\naaa\nccc\n";
+        let new_body = "aaa\nccc\naaa\n\n\nbbb\n";
+        assert_eq!((old_body.len(), new_body.len()), (30, 18));
+        let hunks = atelyx_core::merge3::diff_hunks(old_body, new_body);
+        assert_eq!(hunks.len(), 2, "前置缩短与后段删除须各成一 hunk：{hunks:?}");
+        let caret = 23;
+        assert_eq!(map_offset_after_merge(old_body, new_body, &hunks, caret), new_body.len());
+        // 全位置扫描：任何输入偏移都不得产出越界 / 半字符位置
+        for pos in 0..=old_body.len() + 3 {
+            let v = map_offset_after_merge(old_body, new_body, &hunks, pos);
+            assert!(v <= new_body.len(), "pos={pos} → {v}");
+            assert!(new_body.is_char_boundary(v), "pos={pos} → {v} 非字符边界");
+        }
+    }
+
+    #[test]
+    fn 多字节字符下映射落在字符边界() {
+        // 前段整体缩短（累计平移为负）+ 后段整段删除：区间起点减去累计平移后落在新正文
+        // 汉字的中间字节，原实现直接返回该值（10），按它切正文即 panic
+        let old_body = "x🎉\n中\n\nxaa\nxé\n";
+        let new_body = "x\n中\n";
+        let hunks = atelyx_core::merge3::diff_hunks(old_body, new_body);
+        assert_eq!(hunks.len(), 2, "前后两段改动须各成一 hunk：{hunks:?}");
+        let caret = 11;
+        assert_eq!(map_offset_after_merge(old_body, new_body, &hunks, caret), new_body.len());
+        for pos in 0..=old_body.len() {
+            let v = map_offset_after_merge(old_body, new_body, &hunks, pos);
+            assert!(v <= new_body.len(), "pos={pos} → {v}");
+            assert!(new_body.is_char_boundary(v), "pos={pos} → {v} 落在字符中间");
+        }
+    }
+
+    #[test]
+    fn 随机正文下映射恒在界内且为字符边界() {
+        // 固定种子的线性同余：不引依赖，且每次跑同一批样本
+        let mut seed: u64 = 0x5eed;
+        let mut next = move || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 33) as usize
+        };
+        let alphabet = ['a', 'b', '\n', '中', 'é', '🎉'];
+        let mut sample = || {
+            let len = next() % 40;
+            (0..len).map(|_| alphabet[next() % alphabet.len()]).collect::<String>()
+        };
+        for _ in 0..300 {
+            let old_body = sample();
+            let new_body = sample();
+            let hunks = atelyx_core::merge3::diff_hunks(&old_body, &new_body);
+            for pos in 0..=old_body.len() {
+                let v = map_offset_after_merge(&old_body, &new_body, &hunks, pos);
+                assert!(v <= new_body.len(), "{old_body:?} → {new_body:?} pos={pos} → {v}");
+                assert!(
+                    new_body.is_char_boundary(v),
+                    "{old_body:?} → {new_body:?} pos={pos} → {v} 落在字符中间"
+                );
+            }
+        }
     }
 
     #[test]

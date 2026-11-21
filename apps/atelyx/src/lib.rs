@@ -7825,11 +7825,12 @@ impl App {
 
     /// 删除选区（有则删）。
     fn delete_selection(&mut self) -> bool {
-        let (a, b) = self.edit.selection();
+        let body = self.edit_body().to_string();
+        // 选区来自编辑面 / 远端合流，偏移可能越界或落在字符中间：入口统一收进正文
+        let (a, b) = self.edit.selection_within(&body);
         if b <= a {
             return false;
         }
-        let body = self.edit_body().to_string();
         self.edit.snapshot(&self.note_text);
         let mut next = String::with_capacity(body.len());
         next.push_str(&body[..a]);
@@ -7850,7 +7851,7 @@ impl App {
         }
         let body = self.edit_body().to_string();
         self.edit.snapshot(&self.note_text);
-        let (a, b) = self.edit.selection();
+        let (a, b) = self.edit.selection_within(&body);
         let mut next = String::with_capacity(body.len() + text.len());
         next.push_str(&body[..a]);
         next.push_str(&text);
@@ -7868,9 +7869,7 @@ impl App {
             return EditorSelection::empty(path);
         }
         let body = self.edit_body();
-        let (from, to) = self.edit.selection();
-        let from = from.min(body.len());
-        let to = to.min(body.len()).max(from);
+        let (from, to) = self.edit.selection_within(body);
         EditorSelection { path, text: body[from..to].to_string(), from, to }
     }
 
@@ -7964,8 +7963,8 @@ impl App {
 
     /// Tab 缩进 / Shift+Tab 反缩进。
     fn edit_indent(&mut self, outdent: bool) {
-        let (from, to) = self.edit.selection();
         let body = self.edit_body().to_string();
+        let (from, to) = self.edit.selection_within(&body);
         let edit = if outdent {
             match markdown_edit::outdent_edit(&body, from, to) {
                 Some(edit) => edit,
