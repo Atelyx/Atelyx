@@ -533,31 +533,34 @@ pub(crate) fn on_saved(
             if flush {
                 app.abort_pending_flush("保存失败，操作未执行");
             }
-            // 失败也必须重排一次自动重试：只写错误而不重试，用户停手后这笔内容永不落盘
-            let attempt = {
+            // 失败口径与笔记 / 空间链一致：冲突 / 只读这类不可恢复的失败不排重试，
+            // 只留错误徽标与一次提示；可恢复的按轮次退避重排（用户停手后没人再排期限）。
+            let retryable = crate::save_failure_retryable(&e);
+            let (attempt, outcome) = {
                 let Some(s) = app.canvas.as_mut() else { return Task::none() };
                 s.save_error = Some(e.clone());
                 let attempt = s.note_save_failure();
-                // 待续 Flush 已被本笔回执取走，这里按失败性质决定去向：
-                // 本笔就是 Flush = 挂起动作已就地取消，待续项一并丢弃，否则重试成功后还会再跑一次；
-                // 本笔不是 Flush = 挂起动作仍在等，回填队列，重试成功后补发收尾。
-                if flush {
-                    s.save_inflight.drop_flush(gen, &file);
-                } else if queued_flush {
-                    s.save_inflight.requeue_flush(gen, &file);
-                }
-                attempt
+                // 待续 Flush 已被本笔回执取走，按本笔是否 Flush 决定丢弃 / 回填
+                let outcome = crate::table_view::apply_save_failure(
+                    &mut s.save_inflight,
+                    gen,
+                    &file,
+                    flush,
+                    queued_flush,
+                    retryable,
+                    attempt,
+                );
+                (attempt, outcome)
             };
-            // 只在首轮失败时出声：重试链每轮都弹一次会把提示栏刷屏
-            if attempt == 1 {
-                if flush {
-                    app.notify(crate::NoticeLevel::Error, format!("保存失败，操作未执行：{e}"));
-                } else {
-                    app.notify(crate::NoticeLevel::Error, format!("保存失败：{e}"));
-                }
+            // 一次失败序列只出声首轮：重试链每轮都弹一次会把提示栏刷屏
+            if let Some(text) = crate::table_view::save_failure_notice(attempt, retryable, flush, &e) {
+                app.notify(crate::NoticeLevel::Error, text);
             }
-            // 退避与上限同笔记保存链：一直重试到成功，间隔封顶（正文没落盘不能放弃）
-            retry_after(crate::next_retry_delay(attempt), CanvasMsg::RetrySave(gen, file))
+            match outcome.retry_in {
+                Some(delay) => retry_after(delay, CanvasMsg::RetrySave(gen, file)),
+                // 不可恢复：不排重试，保留未落盘内容与错误徽标等用户处置
+                None => Task::none(),
+            }
         }
         Ok(()) => {
             // 只认磁盘事实：冻结快照与当前数据一致才算落盘；期间又有编辑则保持脏，下一轮补写

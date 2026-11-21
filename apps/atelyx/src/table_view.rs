@@ -1256,6 +1256,57 @@ impl SaveInflight {
     }
 }
 
+/// 失败回执的处置：待续 Flush 的去向 + 下一次重试间隔（表格与画布本地链共用）。
+///
+/// 与笔记 / 空间链同口径：本笔是 Flush 才丢弃待续项（挂起动作已随失败收口），
+/// 否则回填等待重试成功的回执补发；不可恢复的失败（冲突 / 只读）不排下一次重试。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SaveFailureOutcome {
+    /// 下一次自动重试间隔：`None` = 这类失败重试也写不进去，只留错误位等用户处置。
+    pub retry_in: Option<std::time::Duration>,
+}
+
+pub fn apply_save_failure(
+    inflight: &mut SaveInflight,
+    gen: u64,
+    file: &str,
+    is_flush: bool,
+    queued_flush: bool,
+    retryable: bool,
+    attempt: u32,
+) -> SaveFailureOutcome {
+    // 回填只在「还有下一笔」时才成立：本笔是 Flush 已收口，不可恢复的失败不再重试，
+    // 这两类都要丢弃待续项——否则挂起的关闭 / 切换会等一笔永远不会再来的回执。
+    let will_retry = retryable && !is_flush;
+    if queued_flush {
+        if will_retry {
+            inflight.requeue_flush(gen, file);
+        } else {
+            inflight.drop_flush(gen, file);
+        }
+    }
+    SaveFailureOutcome {
+        // 退避与上限同笔记保存链：可恢复失败一直重试到成功，间隔封顶
+        retry_in: retryable.then(|| crate::next_retry_delay(attempt)),
+    }
+}
+
+/// 失败提示文案：一次失败序列只出声首轮，不可恢复失败额外说明不承诺自动重试。
+/// 返回 `None` = 这一轮不再提示（重试链每轮都弹会把提示栏刷屏）。
+/// 后缀措辞与笔记 / 空间链一致：不可恢复的失败明确「操作已暂停」，不承诺自动重试。
+pub fn save_failure_notice(attempt: u32, retryable: bool, flush: bool, err: &str) -> Option<String> {
+    if attempt != 1 {
+        return None;
+    }
+    let suffix =
+        if retryable { "（未落盘内容已保留，稍后自动重试）" } else { "（操作已暂停，处理后重试）" };
+    Some(if flush {
+        format!("保存失败，操作未执行：{err}{suffix}")
+    } else {
+        format!("保存失败：{err}{suffix}")
+    })
+}
+
 /// 表格几何：全部尺寸已乘 zoom，坐标为画布局部。
 pub struct Geo<'a> {
     pub session: &'a TableSession,
@@ -4167,6 +4218,55 @@ mod tests {
         assert_eq!(guard.begin(1, "新名.atb", false), SaveAdmission::Start);
         assert_eq!(guard.begin(1, "新名.atb", false), SaveAdmission::Deferred, "新名仍在途");
         assert!(!guard.finish(1, "旧名.atb"), "旧名的回执不再结算任何队列");
+    }
+
+    /// 不可恢复的失败（冲突 / 只读）不排下一次重试；待续 Flush 一并丢弃，
+    /// 否则挂起的关闭 / 切换会等一笔永远不会再来的回执。
+    #[test]
+    fn final_failure_arms_no_retry_and_drops_queued_flush() {
+        let mut inflight = SaveInflight::default();
+        assert_eq!(inflight.begin(1, "a.atb", false), SaveAdmission::Start);
+        assert_eq!(inflight.begin(1, "a.atb", true), SaveAdmission::Queued);
+        let queued = inflight.finish(1, "a.atb");
+        assert!(queued, "回执当场取到排队过的 Flush");
+        let out = apply_save_failure(&mut inflight, 1, "a.atb", false, queued, false, 1);
+        assert_eq!(out.retry_in, None, "不可恢复的失败不排下一次重试");
+        assert_eq!(inflight.begin(1, "a.atb", false), SaveAdmission::Start);
+        assert!(!inflight.finish(1, "a.atb"), "不再重试就没有回执可交付待续项");
+    }
+
+    /// 可恢复失败按轮次退避，且待续 Flush 按「本笔是否 Flush」分流。
+    #[test]
+    fn retryable_failure_arms_retry_and_routes_queued_flush() {
+        let mut inflight = SaveInflight::default();
+        assert_eq!(inflight.begin(1, "a.atb", false), SaveAdmission::Start);
+        assert_eq!(inflight.begin(1, "a.atb", true), SaveAdmission::Queued);
+        // 回执先取走待续项，再按本笔不是 Flush 回填
+        assert!(inflight.finish(1, "a.atb"));
+        let out = apply_save_failure(&mut inflight, 1, "a.atb", false, true, true, 2);
+        assert_eq!(out.retry_in, Some(crate::next_retry_delay(2)), "退避按轮次升档");
+        assert_eq!(inflight.begin(1, "a.atb", false), SaveAdmission::Start);
+        assert!(inflight.finish(1, "a.atb"), "本笔不是 Flush：待续项回填等重试");
+
+        // 本笔就是 Flush：挂起动作已收口，待续项丢弃
+        let mut inflight = SaveInflight::default();
+        assert_eq!(inflight.begin(1, "b.atb", false), SaveAdmission::Start);
+        assert_eq!(inflight.begin(1, "b.atb", true), SaveAdmission::Queued);
+        assert!(inflight.finish(1, "b.atb"));
+        apply_save_failure(&mut inflight, 1, "b.atb", true, true, true, 1);
+        assert_eq!(inflight.begin(1, "b.atb", false), SaveAdmission::Start);
+        assert!(!inflight.finish(1, "b.atb"), "本笔是 Flush：待续项丢弃");
+    }
+
+    /// 提示：一次失败序列只出声首轮；不可恢复失败的文案不承诺自动重试。
+    #[test]
+    fn failure_notice_only_fires_on_first_attempt() {
+        assert!(save_failure_notice(1, true, false, "磁盘忙").is_some());
+        assert!(save_failure_notice(2, true, false, "磁盘忙").is_none(), "重试轮不再提示");
+        let final_notice = save_failure_notice(1, false, false, "文件已被外部修改").unwrap();
+        assert!(!final_notice.contains("自动重试"), "不可恢复失败不得承诺自动重试：{final_notice}");
+        let retry_notice = save_failure_notice(1, true, true, "磁盘忙").unwrap();
+        assert!(retry_notice.contains("自动重试"), "可恢复失败要说明稍后自动重试：{retry_notice}");
     }
 
     /// 非 Flush 失败：回执取走的待续 Flush 必须回填，重试成功后才补发收尾。

@@ -3464,6 +3464,60 @@ mod tests {
         assert_eq!(snap_size(3.0, 3.0), (CARD_MIN_W, CARD_MIN_H));
     }
 
+    /// 画布失败序列：内容再变即重开（版本变了从 1 起），成功即结束。
+    #[test]
+    fn save_failure_sequence_reopens_on_new_content() {
+        let c = canvas(vec![node("a", "text", 0.0, 0.0, Some(100.0), Some(100.0))], vec![]);
+        let mut s = CanvasSession::new("c.atlx".to_string(), c);
+        assert_eq!(s.note_save_failure(), 1);
+        assert_eq!(s.note_save_failure(), 2, "同一版本内连续累加");
+        // 内容再变：版本推进 = 新失败序列
+        s.touch();
+        assert_eq!(s.note_save_failure(), 1, "新内容的失败重新从首轮起");
+        // 落盘成功：序列结束，之后再次失败仍从首轮起
+        s.clear_save_failure();
+        assert_eq!(s.note_save_failure(), 1);
+    }
+
+    /// 画布错误位随新内容复位（拖拽路径直接置脏也走同一条），但不改脏态与版本以外的语义。
+    #[test]
+    fn content_change_clears_error_and_failure_count() {
+        let c = canvas(vec![node("a", "text", 0.0, 0.0, Some(100.0), Some(100.0))], vec![]);
+        let mut s = CanvasSession::new("c.atlx".to_string(), c);
+        s.save_error = Some("保存失败".to_string());
+        s.note_save_failure();
+        s.clear_failure_sequence();
+        assert!(s.save_error.is_none());
+        assert_eq!(s.save_retry, 0);
+    }
+
+    /// 不可恢复的失败不排下一次重试，待续 Flush 同时丢弃（挂起动作不能等一笔不会来的回执）。
+    #[test]
+    fn final_failure_arms_no_retry_but_still_routes_flush() {
+        let c = canvas(vec![node("a", "text", 0.0, 0.0, Some(100.0), Some(100.0))], vec![]);
+        let mut s = CanvasSession::new("c.atlx".to_string(), c);
+        assert_eq!(s.save_inflight.begin(1, "c.atlx", false), crate::table_view::SaveAdmission::Start);
+        assert_eq!(
+            s.save_inflight.begin(1, "c.atlx", true),
+            crate::table_view::SaveAdmission::Queued
+        );
+        let queued = s.save_inflight.finish(1, "c.atlx");
+        assert!(queued, "回执当场取到排队过的 Flush");
+        let out = crate::table_view::apply_save_failure(
+            &mut s.save_inflight,
+            1,
+            "c.atlx",
+            false,
+            queued,
+            false,
+            1,
+        );
+        assert_eq!(out.retry_in, None, "不可恢复的失败不排期");
+        // 不会再有重试回执：待续项丢弃，挂起的关闭 / 切换不再等它
+        assert_eq!(s.save_inflight.begin(1, "c.atlx", false), crate::table_view::SaveAdmission::Start);
+        assert!(!s.save_inflight.finish(1, "c.atlx"), "不可恢复失败后不再有待续 Flush");
+    }
+
     #[test]
     fn edges_aggregate_to_collapsed_group_edge() {
         let mut conv = node("conv", "conversation", 1000.0, 100.0, Some(200.0), Some(200.0));

@@ -1147,31 +1147,34 @@ pub(crate) fn on_saved(
             if flush {
                 app.abort_pending_flush("保存失败，操作未执行");
             }
-            // 失败也必须重排一次自动重试：只写错误而不重试，用户停手后这笔内容永不落盘
-            let attempt = {
+            // 失败口径与笔记 / 空间链一致：冲突 / 只读这类不可恢复的失败不排重试，
+            // 只留错误徽标与一次提示；可恢复的按轮次退避重排（用户停手后没人再排期限）。
+            let retryable = crate::save_failure_retryable(&e);
+            let (attempt, outcome) = {
                 let Some(s) = app.table.as_mut() else { return Task::none() };
                 s.save_error = Some(e.clone());
                 let attempt = s.note_save_failure();
-                // 待续 Flush 已被本笔回执取走，这里按失败性质决定去向：
-                // 本笔就是 Flush = 挂起动作已就地取消，待续项一并丢弃，否则重试成功后还会再跑一次；
-                // 本笔不是 Flush = 挂起动作仍在等，回填队列，重试成功后补发收尾。
-                if flush {
-                    s.save_inflight.drop_flush(gen, &file);
-                } else if queued_flush {
-                    s.save_inflight.requeue_flush(gen, &file);
-                }
-                attempt
+                // 待续 Flush 已被本笔回执取走，按本笔是否 Flush 决定丢弃 / 回填
+                let outcome = tv::apply_save_failure(
+                    &mut s.save_inflight,
+                    gen,
+                    &file,
+                    flush,
+                    queued_flush,
+                    retryable,
+                    attempt,
+                );
+                (attempt, outcome)
             };
-            // 只在首轮失败时出声：重试链每轮都弹一次会把提示栏刷屏
-            if attempt == 1 {
-                if flush {
-                    app.notify(NoticeLevel::Error, format!("保存失败，操作未执行：{e}"));
-                } else {
-                    app.notify(NoticeLevel::Error, format!("保存失败：{e}"));
-                }
+            // 一次失败序列只出声首轮：重试链每轮都弹一次会把提示栏刷屏
+            if let Some(text) = tv::save_failure_notice(attempt, retryable, flush, &e) {
+                app.notify(NoticeLevel::Error, text);
             }
-            // 退避与上限同笔记保存链：一直重试到成功，间隔封顶（正文没落盘不能放弃）
-            retry_after(crate::next_retry_delay(attempt), tv::TableMsg::RetrySave(gen, file))
+            match outcome.retry_in {
+                Some(delay) => retry_after(delay, tv::TableMsg::RetrySave(gen, file)),
+                // 不可恢复：不排重试，保留未落盘内容与错误徽标等用户处置
+                None => Task::none(),
+            }
         }
         Ok(()) => {
             // 只认磁盘事实：冻结快照与当前数据一致才算落盘；期间又有编辑则保持脏，下一轮补写
@@ -3425,6 +3428,55 @@ mod tests {
         assert!(s.view.image_inflight.contains_key("imgs/a.png"));
         assert!(!s.view.image_inflight.contains_key("imgs/b.png"), "旧文件的在途标记要清");
         assert!(!s.view.image_inflight.contains_key("imgs/c.png"), "旧表的在途标记要清");
+    }
+
+    /// 真实接线：AutoSave 在途时 Flush 入队 → 失败回执 → Flush 回填 → 重试成功只交付一次。
+    /// 走的是 on_saved 里同一串调用（finish → apply_save_failure → … → 成功回执 finish）。
+    #[test]
+    fn auto_save_inflight_flush_queued_survives_failure_and_delivers_once() {
+        let mut s = session(&["a"]);
+        // ① AutoSave 起笔：登记在途
+        assert_eq!(s.save_inflight.begin(1, "t.atb", false), tv::SaveAdmission::Start);
+        // ② Flush 到来：同键在途 → 入队，不下发第二笔
+        assert_eq!(s.save_inflight.begin(1, "t.atb", true), tv::SaveAdmission::Queued);
+        // ③ AutoSave 失败回执：先结清（取出排队标记），失败分支按「本笔不是 Flush」回填
+        let queued = s.save_inflight.finish(1, "t.atb");
+        assert!(queued, "回执应看到排队过的 Flush");
+        s.save_error = Some("磁盘忙".to_string());
+        let attempt = s.note_save_failure();
+        let outcome = tv::apply_save_failure(
+            &mut s.save_inflight,
+            1,
+            "t.atb",
+            false,
+            queued,
+            crate::save_failure_retryable("磁盘忙"),
+            attempt,
+        );
+        assert_eq!(attempt, 1, "首轮失败");
+        assert!(outcome.retry_in.is_some(), "可恢复失败要排重试");
+        assert!(tv::save_failure_notice(attempt, true, false, "磁盘忙").is_some(), "首轮要提示");
+        // ④ 重试成功回执：只交付一次回填的 Flush
+        assert_eq!(s.save_inflight.begin(1, "t.atb", false), tv::SaveAdmission::Start, "重试可提交");
+        assert!(s.save_inflight.finish(1, "t.atb"), "回填的 Flush 在重试成功后交付");
+        assert!(!s.save_inflight.finish(1, "t.atb"), "同一待续项只交付一次");
+    }
+
+    /// 真实接线：内容变更后再次失败，提示重新出现（首轮闸门按序列重开而非永久）。
+    #[test]
+    fn failure_notice_reappears_after_content_change() {
+        let mut s = session(&["a"]);
+        // 第一轮失败：首轮提示出现，重试轮静默
+        assert!(tv::save_failure_notice(s.note_save_failure(), true, false, "磁盘忙").is_some());
+        assert!(tv::save_failure_notice(s.note_save_failure(), true, false, "磁盘忙").is_none());
+        // 用户继续编辑 → 新失败序列：提示必须重新出现
+        s.touch();
+        let attempt = s.note_save_failure();
+        assert_eq!(attempt, 1, "新内容回到首轮");
+        assert!(
+            tv::save_failure_notice(attempt, true, false, "磁盘忙").is_some(),
+            "改内容后再失败要重新提示一次"
+        );
     }
 
     /// 一次失败序列只提示一次，且序列随内容变更重开：新的失败重新提示并从 1s 退避起步。
