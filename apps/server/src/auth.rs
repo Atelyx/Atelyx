@@ -93,7 +93,7 @@ async fn create_account(state: ServerState, body: Credentials) -> ApiResult<axum
         p.users.push(user.clone());
         p.sessions.push(session.clone());
         Ok(())
-    })?;
+    }).await?;
     tracing::info!(username = %user.username, "用户注册");
     Ok(Json(json!({
         "userId": user.id,
@@ -163,7 +163,7 @@ pub async fn login(State(state): State<ServerState>, Json(body): Json<Credential
         return Err(ApiError(StatusCode::UNAUTHORIZED, "用户名或密码错误".to_string()));
     }
     let (session, token) = new_session(&user.id, body.device_name, body.device_id);
-    let (session, reused) = state.mutate(|p| Ok::<_, ApiError>(install_session(p, &user.id, session)))?;
+    let (session, reused) = state.mutate(|p| Ok::<_, ApiError>(install_session(p, &user.id, session))).await?;
     let session_id = session.id.clone();
     // 换发令牌 = 旧令牌即刻失效：踢掉仍持旧令牌的在途连接，强制以新令牌重连
     if reused {
@@ -211,7 +211,7 @@ pub async fn logout(State(state): State<ServerState>, user: AuthUser) -> ApiResu
     state.mutate(|p| {
         p.sessions.retain(|s| s.id != user.session_id);
         Ok(())
-    })?;
+    }).await?;
     Ok(Json(json!({})))
 }
 
@@ -249,7 +249,7 @@ pub async fn revoke_device(
             return Err(ApiError(StatusCode::NOT_FOUND, "会话不存在".to_string()));
         }
         Ok(())
-    })?;
+    }).await?;
     let _ = removed;
     Ok(Json(json!({})))
 }

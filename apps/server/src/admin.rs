@@ -207,7 +207,7 @@ pub async fn reset_password(
             .collect();
         p.sessions.retain(|s| s.user_id != user_id);
         Ok(ids)
-    })?;
+    }).await?;
     // 吊销只删会话记录，已建立的实时频道连接凭入房时的会话 id 主动断开
     let kicked = state.hub().kick_sessions(None, &revoked_sessions, KickReason::SessionRevoked);
     tracing::info!(target_user = %user_id, sessions = revoked_sessions.len(), kicked, "管理员重置密码（联动吊销其全部会话）");
@@ -235,7 +235,7 @@ pub async fn revoke_user_sessions(
             .collect();
         p.sessions.retain(|s| s.user_id != user_id);
         Ok((ids.len(), ids))
-    })?;
+    }).await?;
     let kicked = state.hub().kick_sessions(None, &session_ids, KickReason::SessionRevoked);
     tracing::info!(target_user = %user_id, revoked, kicked, "管理员吊销用户全部会话");
     Ok(Json(json!({ "revoked": revoked })))

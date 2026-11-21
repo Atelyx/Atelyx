@@ -154,6 +154,7 @@ pub async fn serve_on(
 }
 
 /// 错误响应体（`{"error": "..."}` + HTTP 状态码）。
+#[derive(Debug)]
 pub struct ApiError(pub axum::http::StatusCode, pub String);
 
 impl axum::response::IntoResponse for ApiError {

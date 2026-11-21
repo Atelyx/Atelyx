@@ -125,7 +125,7 @@ pub async fn create_space(
         }
         p.spaces.push(space.clone());
         Ok(())
-    })?;
+    }).await?;
     tracing::info!(space_id = %id, name = %name, adopted = adopted.is_some(), "空间创建");
     Ok(Json(json!({ "spaceId": id, "name": name, "role": ROLE_OWNER, "rootPath": adopted })))
 }
@@ -171,7 +171,7 @@ pub async fn rename_space(
         require_role(space, &user.user_id, &[ROLE_OWNER])?;
         space.name = name.clone();
         Ok(())
-    })?;
+    }).await?;
     tracing::info!(space_id = %space_id, "空间改名");
     Ok(Json(json!({ "spaceId": space_id, "name": name })))
 }
@@ -211,7 +211,7 @@ pub async fn transfer_ownership(
             }
         }
         Ok(())
-    })?;
+    }).await?;
     tracing::info!(space_id = %space_id, "空间管理权转让");
     Ok(Json(json!({ "spaceId": space_id, "ownerUserId": new_owner })))
 }
@@ -266,7 +266,7 @@ pub async fn remove_member(
         }
         space.members.retain(|m| m.user_id != target);
         Ok(())
-    })?;
+    }).await?;
     // 成员资格只在入房时校验：不踢连接，被移除者会继续接收房间内的笔记同步/补丁广播
     // （含笔记正文），也可继续向房间注入帧。按该用户全部设备会话踢其在本空间的连接
     // （同会话在其他空间的连接不受影响），重连会因成员校验失败被拒。
@@ -337,7 +337,7 @@ pub async fn create_invite(
         require_role(space, &user.user_id, &[ROLE_OWNER])?;
         p.invites.push(invite.clone());
         Ok(())
-    })?;
+    }).await?;
     tracing::info!(space_id = %space_id, "邀请码签发");
     Ok(Json(json!({
         "code": code,
@@ -387,7 +387,7 @@ pub async fn revoke_invite(
             return Err(not_found("邀请码不存在"));
         }
         Ok(())
-    })?;
+    }).await?;
     Ok(Json(json!({})))
 }
 
@@ -440,7 +440,7 @@ pub async fn accept_invite(
             invite.used_count += 1;
         }
         Ok(json!({ "spaceId": space_id, "name": name, "role": role }))
-    })?;
+    }).await?;
     tracing::info!(space_id = accepted["spaceId"].as_str().unwrap_or(""), "邀请被接受");
     Ok(Json(accepted))
 }
