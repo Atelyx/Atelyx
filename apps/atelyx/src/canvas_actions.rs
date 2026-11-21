@@ -515,7 +515,7 @@ pub(crate) fn on_saved(
     if let (Err(e), true) = (&result, flush) {
         crate::ai_fs_edit::abort_pending(app, e);
     }
-    // 本笔回执即结清该键的在途标记；在途期间排队的 Flush 留待内容稳定后补发
+    // 本笔回执即结清该键的在途标记；在途期间排队的 Flush 交给统一处置（成功分支补发、失败分支按语义去留）
     let queued_flush = app
         .canvas
         .as_mut()
@@ -530,33 +530,28 @@ pub(crate) fn on_saved(
     match result {
         Err(e) => {
             app.settle_history_restore(false);
-            if flush {
-                app.abort_pending_flush("保存失败，操作未执行");
-            }
-            // 失败口径与笔记 / 空间链一致：冲突 / 只读这类不可恢复的失败不排重试，
-            // 只留错误徽标与一次提示；可恢复的按轮次退避重排（用户停手后没人再排期限）。
-            let retryable = crate::save_failure_retryable(&e);
-            let (attempt, outcome) = {
+            let reset_backoff = {
                 let Some(s) = app.canvas.as_mut() else { return Task::none() };
                 s.save_error = Some(e.clone());
-                let attempt = s.note_save_failure();
-                // 待续 Flush 已被本笔回执取走，按本笔是否 Flush 决定丢弃 / 回填
-                let outcome = crate::table_view::apply_save_failure(
-                    &mut s.save_inflight,
-                    gen,
-                    &file,
-                    flush,
-                    queued_flush,
-                    retryable,
-                    attempt,
-                );
-                (attempt, outcome)
+                s.failure_backoff_reset()
             };
-            // 一次失败序列只出声首轮：重试链每轮都弹一次会把提示栏刷屏
-            if let Some(text) = crate::table_view::save_failure_notice(attempt, retryable, flush, &e) {
-                app.notify(crate::NoticeLevel::Error, text);
+            // 失败口径与笔记 / 空间链同一入口：冲突 / 只读这类不可恢复的失败不排重试、
+            // 就地收口挂起动作，只留错误徽标与一次提示；可恢复的按轮次退避重排。
+            let (plan, guard) = {
+                let s = app.canvas.as_mut().expect("身份守卫已判会话仍在");
+                let mut guard = std::mem::take(&mut s.save_inflight);
+                // 回执已把待续项取走：先放回，再由统一处置按本笔是否 Flush 决定去留
+                if queued_flush {
+                    guard.requeue_flush(gen, &file);
+                }
+                let (plan, guard) =
+                    app.apply_save_failure(guard, gen, &file, flush, &e, reset_backoff, "保存失败");
+                (plan, guard)
+            };
+            if let Some(s) = app.canvas.as_mut() {
+                s.save_inflight = guard;
             }
-            match outcome.retry_in {
+            match plan.retry_in {
                 Some(delay) => retry_after(delay, CanvasMsg::RetrySave(gen, file)),
                 // 不可恢复：不排重试，保留未落盘内容与错误徽标等用户处置
                 None => Task::none(),
@@ -587,24 +582,11 @@ pub(crate) fn on_saved(
                     Err(e) => app.notify(crate::NoticeLevel::Error, format!("历史版本记录失败：{e}")),
                 }
             }
-            // 在途期间排队的 Flush：内容已稳就放行，仍脏就补一笔收尾（脏拦截点不能白等）
-            if queued_flush {
-                let dirty = app.canvas.as_ref().is_some_and(|s| s.dirty);
-                return task.chain(if dirty {
-                    submit_canvas_save(app, SaveReason::Flush)
-                } else {
-                    app.after_any_flush()
-                });
-            }
-            if flush {
-                // 落盘期间有新编辑（unstable）：重收一轮 Flush——脏拦截已在放行前 flush，
-                // 此轮丢失会让关闭 / 切换动作静默挂起
-                task = task.chain(if stable {
-                    app.after_any_flush()
-                } else {
-                    submit_canvas_save(app, SaveReason::Flush)
-                });
-            } else if !stable {
+            // 在途期间排队的 Flush / 本笔就是 Flush：落稳才放行挂起动作，仍脏就再收一轮
+            task = app.settle_doc_receipt_tail(task, queued_flush, flush, stable, |app| {
+                submit_canvas_save(app, SaveReason::Flush)
+            });
+            if !queued_flush && !flush && !stable {
                 // 落盘期间又有编辑：补排一次自动保存（期限可能已随本笔回执清空）
                 task = task.chain(retry_after(
                     crate::AUTOSAVE_DEBOUNCE,

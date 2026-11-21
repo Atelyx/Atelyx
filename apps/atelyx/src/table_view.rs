@@ -143,9 +143,7 @@ pub struct TableSession {
     pub version: u64,
     /// 保存在途守卫（按世代 + 文件分键）：同键在途时不并发提交，Flush 记账排队。
     pub save_inflight: SaveInflight,
-    /// 连续保存失败次数：驱动失败退避，落盘成功或内容再变即清零。
-    pub save_retry: u32,
-    /// 上一笔失败记账时的数据版本：版本变了 = 新的一轮失败序列（AI 合入等不经过 touch 的写者也覆盖）。
+    /// 上一笔失败记账时的数据版本：版本变了 = 退避回到首档（提示闸门只认错误摘要，不随内容重开）。
     save_retry_version: u64,
     /// 布局缓存缺失期间的兜底布局（按数据版本 + 缩放 + 列数复用）：
     /// 同帧内 `geo()` 与 `layout_positions()` 共用一份，不逐次重跑逐列自动计算。
@@ -171,7 +169,6 @@ impl TableSession {
             save_error: None,
             version: 1,
             save_inflight: SaveInflight::default(),
-            save_retry: 0,
             save_retry_version: 0,
             fallback_layout: RefCell::new(None),
             view: TableViewState { zoom: 1.0, ..Default::default() },
@@ -189,31 +186,22 @@ impl TableSession {
 
     /// 只登记数据变更（置脏 / 版本 / 作废重做），不重建布局。
     /// 调用方须在同一次变更里就地增量更新布局（失败回退 rebuild_layout），松手后再整表重建。
-    /// 失败记账随新内容复位：新的失败序列重新提示一次、退避从首档起步。
     pub fn touch_data_only(&mut self) {
         self.dirty = true;
         self.save_error = None;
-        self.save_retry = 0;
         self.version += 1;
         self.view.redo.clear();
     }
 
-    /// 记一笔保存失败，返回本轮失败序列的第几次（退避档位）。
-    ///
-    /// 序列按数据版本切分：内容再变（含不经 touch 的 AI 合入）即从第 1 次重新算，
-    /// 提示与退避才不会在上一次失败序列之后永久静默 / 从封顶档起步。
-    pub fn note_save_failure(&mut self) -> u32 {
-        if self.save_retry_version != self.version {
-            self.save_retry = 0;
-            self.save_retry_version = self.version;
-        }
-        self.save_retry = self.save_retry.saturating_add(1);
-        self.save_retry
+    /// 内容在上一笔失败后变过：下一次失败的退避回到首档（提示闸门不随之重开）。
+    pub fn failure_backoff_reset(&mut self) -> bool {
+        let changed = self.save_retry_version != self.version;
+        self.save_retry_version = self.version;
+        changed
     }
 
-    /// 落盘成功：失败序列结束。
+    /// 落盘成功：失败序列结束，之后再次失败按首档退避。
     pub fn clear_save_failure(&mut self) {
-        self.save_retry = 0;
         self.save_retry_version = self.version;
     }
 
@@ -1206,6 +1194,16 @@ pub enum SaveAdmission {
 }
 
 impl SaveInflight {
+    /// 拆成两张键表（统一失败处置借出整份守卫，App 与会话的借用才能分开）。
+    pub fn into_parts(self) -> (Vec<(u64, String)>, Vec<(u64, String)>) {
+        (self.keys, self.flush_queued)
+    }
+
+    /// 由两张键表还原（与 into_parts 成对使用）。
+    pub fn from_parts(keys: Vec<(u64, String)>, flush_queued: Vec<(u64, String)>) -> Self {
+        Self { keys, flush_queued }
+    }
+
     /// 准入判定：可提交即登记在途；在途时 Flush 记队列，其余顺延。
     ///
     /// 只认「当前世代 + 当前文件」的键：切仓库、改名（会话 file 变了）之后旧键的回执已被
@@ -1240,12 +1238,6 @@ impl SaveInflight {
         queued
     }
 
-    /// 丢弃该键的待续 Flush（失败回执已经就地取消了挂起动作，不能再补发一次）。
-    pub fn drop_flush(&mut self, gen: u64, file: &str) {
-        let key = (gen, file.to_string());
-        self.flush_queued.retain(|entry| entry != &key);
-    }
-
     /// 把回执取走的待续 Flush 放回队列：本笔不是 Flush 的失败不取消挂起动作，
     /// 重试成功后才补发收尾（不回填的话挂起的关闭 / 切换会永久等下去）。
     pub fn requeue_flush(&mut self, gen: u64, file: &str) {
@@ -1254,57 +1246,6 @@ impl SaveInflight {
             self.flush_queued.push(key);
         }
     }
-}
-
-/// 失败回执的处置：待续 Flush 的去向 + 下一次重试间隔（表格与画布本地链共用）。
-///
-/// 与笔记 / 空间链同口径：本笔是 Flush 才丢弃待续项（挂起动作已随失败收口），
-/// 否则回填等待重试成功的回执补发；不可恢复的失败（冲突 / 只读）不排下一次重试。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SaveFailureOutcome {
-    /// 下一次自动重试间隔：`None` = 这类失败重试也写不进去，只留错误位等用户处置。
-    pub retry_in: Option<std::time::Duration>,
-}
-
-pub fn apply_save_failure(
-    inflight: &mut SaveInflight,
-    gen: u64,
-    file: &str,
-    is_flush: bool,
-    queued_flush: bool,
-    retryable: bool,
-    attempt: u32,
-) -> SaveFailureOutcome {
-    // 回填只在「还有下一笔」时才成立：本笔是 Flush 已收口，不可恢复的失败不再重试，
-    // 这两类都要丢弃待续项——否则挂起的关闭 / 切换会等一笔永远不会再来的回执。
-    let will_retry = retryable && !is_flush;
-    if queued_flush {
-        if will_retry {
-            inflight.requeue_flush(gen, file);
-        } else {
-            inflight.drop_flush(gen, file);
-        }
-    }
-    SaveFailureOutcome {
-        // 退避与上限同笔记保存链：可恢复失败一直重试到成功，间隔封顶
-        retry_in: retryable.then(|| crate::next_retry_delay(attempt)),
-    }
-}
-
-/// 失败提示文案：一次失败序列只出声首轮，不可恢复失败额外说明不承诺自动重试。
-/// 返回 `None` = 这一轮不再提示（重试链每轮都弹会把提示栏刷屏）。
-/// 后缀措辞与笔记 / 空间链一致：不可恢复的失败明确「操作已暂停」，不承诺自动重试。
-pub fn save_failure_notice(attempt: u32, retryable: bool, flush: bool, err: &str) -> Option<String> {
-    if attempt != 1 {
-        return None;
-    }
-    let suffix =
-        if retryable { "（未落盘内容已保留，稍后自动重试）" } else { "（操作已暂停，处理后重试）" };
-    Some(if flush {
-        format!("保存失败，操作未执行：{err}{suffix}")
-    } else {
-        format!("保存失败：{err}{suffix}")
-    })
 }
 
 /// 表格几何：全部尺寸已乘 zoom，坐标为画布局部。
@@ -4224,49 +4165,81 @@ mod tests {
     /// 否则挂起的关闭 / 切换会等一笔永远不会再来的回执。
     #[test]
     fn final_failure_arms_no_retry_and_drops_queued_flush() {
-        let mut inflight = SaveInflight::default();
-        assert_eq!(inflight.begin(1, "a.atb", false), SaveAdmission::Start);
-        assert_eq!(inflight.begin(1, "a.atb", true), SaveAdmission::Queued);
-        let queued = inflight.finish(1, "a.atb");
-        assert!(queued, "回执当场取到排队过的 Flush");
-        let out = apply_save_failure(&mut inflight, 1, "a.atb", false, queued, false, 1);
-        assert_eq!(out.retry_in, None, "不可恢复的失败不排下一次重试");
-        assert_eq!(inflight.begin(1, "a.atb", false), SaveAdmission::Start);
-        assert!(!inflight.finish(1, "a.atb"), "不再重试就没有回执可交付待续项");
+        let mut guard = SaveInflight::default();
+        let mut book = crate::SaveFailureBook::new();
+        assert_eq!(guard.begin(1, "a.atb", false), SaveAdmission::Start);
+        assert_eq!(guard.begin(1, "a.atb", true), SaveAdmission::Queued);
+        assert!(guard.finish(1, "a.atb"), "回执当场取到排队过的 Flush");
+        let mut queued = vec![(1u64, "a.atb".to_string())];
+        let plan = crate::apply_failed_save(
+            &mut book,
+            &mut Vec::new(),
+            &mut queued,
+            1,
+            "a.atb",
+            false,
+            "文件已被外部修改",
+            false,
+        );
+        assert_eq!(plan.retry_in, None, "不可恢复的失败不排下一次重试");
+        assert!(queued.is_empty(), "不再重试就没有回执可交付待续项");
     }
 
     /// 可恢复失败按轮次退避，且待续 Flush 按「本笔是否 Flush」分流。
     #[test]
     fn retryable_failure_arms_retry_and_routes_queued_flush() {
-        let mut inflight = SaveInflight::default();
-        assert_eq!(inflight.begin(1, "a.atb", false), SaveAdmission::Start);
-        assert_eq!(inflight.begin(1, "a.atb", true), SaveAdmission::Queued);
-        // 回执先取走待续项，再按本笔不是 Flush 回填
-        assert!(inflight.finish(1, "a.atb"));
-        let out = apply_save_failure(&mut inflight, 1, "a.atb", false, true, true, 2);
-        assert_eq!(out.retry_in, Some(crate::next_retry_delay(2)), "退避按轮次升档");
-        assert_eq!(inflight.begin(1, "a.atb", false), SaveAdmission::Start);
-        assert!(inflight.finish(1, "a.atb"), "本笔不是 Flush：待续项回填等重试");
+        let mut book = crate::SaveFailureBook::new();
+        let mut queued = vec![(1u64, "a.atb".to_string())];
+        // 本笔不是 Flush：待续项放回队列等重试成功后收尾
+        let plan = crate::apply_failed_save(
+            &mut book,
+            &mut Vec::new(),
+            &mut queued,
+            1,
+            "a.atb",
+            false,
+            "磁盘忙：设备未就绪",
+            false,
+        );
+        assert_eq!(plan.retry_in, Some(crate::next_retry_delay(1)), "退避按轮次升档");
+        assert_eq!(queued, vec![(1u64, "a.atb".to_string())], "非 Flush 失败放回待续项");
 
         // 本笔就是 Flush：挂起动作已收口，待续项丢弃
-        let mut inflight = SaveInflight::default();
-        assert_eq!(inflight.begin(1, "b.atb", false), SaveAdmission::Start);
-        assert_eq!(inflight.begin(1, "b.atb", true), SaveAdmission::Queued);
-        assert!(inflight.finish(1, "b.atb"));
-        apply_save_failure(&mut inflight, 1, "b.atb", true, true, true, 1);
-        assert_eq!(inflight.begin(1, "b.atb", false), SaveAdmission::Start);
-        assert!(!inflight.finish(1, "b.atb"), "本笔是 Flush：待续项丢弃");
+        let mut queued = vec![(1u64, "b.atb".to_string())];
+        crate::apply_failed_save(
+            &mut book,
+            &mut Vec::new(),
+            &mut queued,
+            1,
+            "b.atb",
+            true,
+            "磁盘忙：设备未就绪",
+            false,
+        );
+        assert!(queued.is_empty(), "本笔是 Flush：待续项丢弃");
     }
 
     /// 提示：一次失败序列只出声首轮；不可恢复失败的文案不承诺自动重试。
     #[test]
-    fn failure_notice_only_fires_on_first_attempt() {
-        assert!(save_failure_notice(1, true, false, "磁盘忙").is_some());
-        assert!(save_failure_notice(2, true, false, "磁盘忙").is_none(), "重试轮不再提示");
-        let final_notice = save_failure_notice(1, false, false, "文件已被外部修改").unwrap();
-        assert!(!final_notice.contains("自动重试"), "不可恢复失败不得承诺自动重试：{final_notice}");
-        let retry_notice = save_failure_notice(1, true, true, "磁盘忙").unwrap();
-        assert!(retry_notice.contains("自动重试"), "可恢复失败要说明稍后自动重试：{retry_notice}");
+    fn failure_notice_only_fires_once_per_error() {
+        let mut book = crate::SaveFailureBook::new();
+        let msg = "磁盘忙：设备未就绪";
+        let first = crate::plan_save_failure(&mut book, "t.atb", msg, false);
+        assert!(first.notify, "首轮要提示");
+        assert!(!crate::plan_save_failure(&mut book, "t.atb", msg, false).notify, "重试轮不再提示");
+        let retryable_effects = crate::failed_save_effects(first, msg, false, "保存失败");
+        let retryable_notice = retryable_effects.notice.expect("首轮有提示");
+        assert!(
+            retryable_notice.contains("自动重试"),
+            "可恢复失败要说明稍后自动重试：{retryable_notice}"
+        );
+        // 不可恢复：文案改说「操作已暂停」，同时收口挂起动作
+        let blocked = crate::plan_save_failure(&mut book, "x.atb", "文件已被外部修改", false);
+        let blocked_effects = crate::failed_save_effects(blocked, "文件已被外部修改", true, "保存失败");
+        let notice = blocked_effects.notice.expect("不可恢复失败要出声");
+        assert!(notice.contains("操作已暂停"), "不可恢复失败要交代操作已暂停：{notice}");
+        assert!(!notice.contains("自动重试"), "不得承诺自动重试：{notice}");
+        assert!(blocked_effects.abort_why.is_some(), "不可恢复必须收口挂起动作");
     }
 
     /// 非 Flush 失败：回执取走的待续 Flush 必须回填，重试成功后才补发收尾。
@@ -4283,30 +4256,6 @@ mod tests {
         assert_eq!(guard.begin(1, "a.atb", false), SaveAdmission::Start, "重试仍可提交");
         assert!(guard.finish(1, "a.atb"), "回填的待续 Flush 要交付");
         assert!(!guard.finish(1, "a.atb"), "同一待续项只交付一次");
-    }
-
-    /// 本笔就是 Flush 且失败：挂起动作已就地取消，待续项必须丢弃，不能重试成功后再跑一次。
-    #[test]
-    fn flush_failure_drops_queued_flush() {
-        let mut guard = SaveInflight::default();
-        assert_eq!(guard.begin(1, "a.atb", true), SaveAdmission::Start);
-        assert_eq!(guard.begin(1, "a.atb", true), SaveAdmission::Queued);
-        assert!(guard.finish(1, "a.atb"));
-        guard.drop_flush(1, "a.atb");
-        assert_eq!(guard.begin(1, "a.atb", true), SaveAdmission::Start);
-        assert!(!guard.finish(1, "a.atb"), "丢弃后不再有待续项");
-    }
-
-    /// 保存失败已取消挂起动作：待续 Flush 必须一并丢弃，不能留到重试成功后补发。
-    #[test]
-    fn failed_receipt_drops_queued_flush() {
-        let mut guard = SaveInflight::default();
-        assert_eq!(guard.begin(1, "a.atb", false), SaveAdmission::Start);
-        assert_eq!(guard.begin(1, "a.atb", true), SaveAdmission::Queued);
-        assert!(guard.finish(1, "a.atb"), "回执先取走排队标记");
-        guard.drop_flush(1, "a.atb");
-        assert_eq!(guard.begin(1, "a.atb", false), SaveAdmission::Start);
-        assert!(!guard.finish(1, "a.atb"), "失败路径不留待续 Flush");
     }
 
     /// 过期回执（世代 / 文件不符）不清别人的在途键。

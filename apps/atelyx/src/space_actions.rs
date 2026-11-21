@@ -1519,7 +1519,7 @@ fn on_note_saved(
     result: Result<String, String>,
 ) -> Task<Message> {
     // 回执即摘本笔在途；待续 Flush 的处置：成功在这里取走并补发，
-    // 失败由失败分支的 plan_failed_receipt 统一处理（非 Flush 失败保留，Flush 失败丢弃）
+    // 失败由失败分支的 apply_failed_save 统一处理（非 Flush 失败放回，Flush 失败丢弃并收口）
     let key = (gen, rel.to_string());
     app.space_note_save_inflight.retain(|entry| entry != &key);
     let queued = app.space_note_save_flush_queued.contains(&key);
@@ -1553,38 +1553,18 @@ fn on_note_saved(
         Err(e) => {
             app.settle_history_restore(false);
             app.save_error = Some(e.clone());
-            // 统一处置：结清在途键、按语义处置待续 Flush、记账给出期限 / 提示 / 收口计划
-            let retryable = crate::save_failure_retryable(&e);
+            // 统一处置：结清在途键、按语义处置待续 Flush、记账、收口挂起动作并提示
             let flush_now = matches!(reason, SaveReason::Flush);
-            let receipt = crate::plan_failed_receipt(
-                &mut app.save_retry,
-                &mut app.space_note_save_inflight,
-                &mut app.space_note_save_flush_queued,
+            app.settle_slot_save_failure(
+                crate::SaveSlot::NoteSpace,
                 gen,
                 rel,
                 flush_now,
                 &e,
-                retryable,
-                Instant::now(),
+                false,
+                "保存失败",
+                true,
             );
-            let plan = receipt.failure;
-            if let Some(at) = plan.retry_at {
-                app.autosave_deadline = Some(at);
-                app.autosave_timer = false;
-            }
-            if plan.abort_pending {
-                app.abort_pending_flush("保存失败");
-            }
-            if plan.notify {
-                let notice = if plan.abort_pending {
-                    format!("保存失败：{e}（操作已暂停，处理后重试）")
-                } else if flush_now {
-                    format!("保存失败，操作未执行：{e}（未落盘内容已保留，稍后自动重试）")
-                } else {
-                    format!("保存失败：{e}")
-                };
-                app.notify(NoticeLevel::Error, notice);
-            }
         }
         Ok(merged) => {
             app.save_error = None;
@@ -1856,23 +1836,6 @@ pub(crate) fn on_table_patch_done(
     match result {
         Err(e) => {
             app.settle_history_restore(false);
-            // 待续 Flush：本笔即 Flush 时丢弃（挂起动作已收口）；非 Flush 失败回填，
-            // 重试成功后的回执靠它放行挂起动作（否则关窗 / 切文件会静默不执行）
-            settle_queued_flush_on_failure(
-                &mut app.space_doc_save_flush_queued,
-                gen,
-                &file,
-                queued,
-                flush,
-            );
-            // 失败记账 + 可重试才排期限；不可重试时就地收口挂起动作
-            let plan = arm_space_doc_retry(app, &file, &e);
-            // Flush 失败：等回执的 AI 文件操作不能空等，就地回填
-            if flush {
-                crate::ai_fs_edit::abort_pending(app, &e);
-            }
-            let Some(s) = app.table.as_mut() else { return Task::none() };
-            s.save_error = Some(e.clone());
             // 404 = 文件被改名（他端标题漂移未广播时）或删除：明示刷新，不做路径猜测
             let missing = e.contains("不存在");
             let hint = if missing {
@@ -1880,17 +1843,23 @@ pub(crate) fn on_table_patch_done(
             } else {
                 "保存失败"
             };
-            // 一次失败序列只提示一次；不可重试的失败额外交代「操作已暂停」
-            if plan.notify {
-                let notice = if plan.abort_pending {
-                    format!("{hint}：{e}（操作已暂停，处理后重试）")
-                } else if flush {
-                    format!("{hint}，操作未执行：{e}")
-                } else {
-                    format!("{hint}：{e}")
-                };
-                app.notify(NoticeLevel::Error, notice);
+            // 统一处置：待续 Flush 按本笔是否 Flush 放回或丢弃，不可重试时就地收口挂起动作
+            let plan = app.settle_slot_save_failure(
+                crate::SaveSlot::DocSpace,
+                gen,
+                &file,
+                flush,
+                &e,
+                false,
+                hint,
+                true,
+            );
+            // Flush 失败：等回执的 AI 文件操作不能空等，就地回填
+            if flush {
+                crate::ai_fs_edit::abort_pending(app, &e);
             }
+            let Some(s) = app.table.as_mut() else { return Task::none() };
+            s.save_error = Some(e.clone());
             // 树只在首轮失败或文件确已被改名 / 删除时重拉：每轮重拉整棵树是纯浪费
             return if missing || plan.notify {
                 refresh_space_tree(app)
@@ -1935,23 +1904,9 @@ pub(crate) fn on_table_patch_done(
             // 成功回执先把它出队——失败分支负责回填，成功分支必须消费掉，否则会重复补发
             app.space_doc_save_flush_queued
                 .retain(|entry| entry != &(gen, file.clone()));
-            let dirty = app.table.as_ref().is_some_and(|s| s.dirty);
-            if resolve_queued_flush(queued, flush, dirty) {
-                return task.chain(space_submit_table_save(app, tv::SaveReason::Flush));
-            }
-            if queued {
-                // 待续 Flush 已无需再写（内容稳定 / 本笔即 Flush）：直接放行挂起动作
-                return task.chain(app.after_any_flush());
-            }
-            // Flush 回执期间有新编辑（unstable）：重收一轮 Flush——脏拦截已在放行前 flush，
-            // 此轮丢失会让关闭/切换动作静默挂起（对齐笔记保存链）
-            if flush {
-                if stable {
-                    task = task.chain(app.after_any_flush());
-                } else {
-                    task = task.chain(space_submit_table_save(app, tv::SaveReason::Flush));
-                }
-            }
+            task = app.settle_doc_receipt_tail(task, queued, flush, stable, |app| {
+                space_submit_table_save(app, tv::SaveReason::Flush)
+            });
             task = task.chain(reload_space_history(app));
         }
     }
@@ -2011,12 +1966,6 @@ pub(crate) fn canvas_load_outcome(truncated: bool, failed: bool) -> (bool, bool)
     (!failed, truncated && !failed)
 }
 
-/// 成功回执后是否补写一轮 Flush：有待续项、本笔不是 Flush、且内容仍脏。
-/// 本笔即 Flush 时待续项一律作废——挂起动作已随失败收口，再补发会重复执行关闭 / 切换。
-pub(crate) fn resolve_queued_flush(queued: bool, flush: bool, dirty: bool) -> bool {
-    queued && !flush && dirty
-}
-
 /// 回执结清在途项：无论成败都摘（不摘会永久阻塞该文档后续保存）。
 /// 返回本笔回执前是否有排队的 Flush。
 fn settle_space_doc_save(app: &mut App, gen: u64, file: &str) -> bool {
@@ -2026,43 +1975,6 @@ fn settle_space_doc_save(app: &mut App, gen: u64, file: &str) -> bool {
         gen,
         file,
     )
-}
-
-/// 空间表格 / 画布失败后的记账与退避重排（两条链共用）：可重试的失败排下一次期限
-/// （用户停手后没有新输入事件，只靠内容变更排期限等于永不重试），不可恢复的只留错误位。
-/// 返回该文件的连续失败次数（提示闸门用：一次失败序列只出声一次）。
-fn arm_space_doc_retry(app: &mut App, file: &str, err: &str) -> crate::SaveFailurePlan {
-    let retryable = crate::save_failure_retryable(err);
-    let plan =
-        crate::plan_save_failure(&mut app.save_retry, file, Instant::now(), err, retryable);
-    if let Some(at) = plan.retry_at {
-        app.autosave_deadline = Some(at);
-        app.autosave_timer = false;
-    }
-    if plan.abort_pending {
-        // 重试也写不进去：挂起的关闭 / 切换不能静默等下去
-        app.abort_pending_flush("保存失败");
-    }
-    plan
-}
-
-/// S1：失败回执后的待续 Flush 处置——本笔即 Flush 时丢弃（挂起动作已收口），
-/// 非 Flush 失败回填（重试成功后的回执靠它放行挂起动作）。
-fn settle_queued_flush_on_failure(
-    queued_flush: &mut Vec<(u64, String)>,
-    gen: u64,
-    file: &str,
-    queued: bool,
-    flush: bool,
-) {
-    if !queued {
-        return;
-    }
-    let key = (gen, file.to_string());
-    queued_flush.retain(|entry| entry != &key);
-    if !flush {
-        queued_flush.push(key);
-    }
 }
 
 // ===== 画布（空间模式） =====
@@ -2363,22 +2275,6 @@ pub(crate) fn on_canvas_patch_done(
     match result {
         Err(e) => {
             app.settle_history_restore(false);
-            // 待续 Flush：本笔即 Flush 时丢弃（挂起动作已收口）；非 Flush 失败回填，
-            // 重试成功后的回执靠它放行挂起动作
-            settle_queued_flush_on_failure(
-                &mut app.space_doc_save_flush_queued,
-                gen,
-                &file,
-                queued,
-                flush,
-            );
-            // 失败记账 + 可重试才排期限；不可重试时就地收口挂起动作
-            let plan = arm_space_doc_retry(app, &file, &e);
-            if flush {
-                crate::ai_fs_edit::abort_pending(app, &e);
-            }
-            let Some(s) = app.canvas.as_mut() else { return Task::none() };
-            s.save_error = Some(e.clone());
             // 404 = 文件被改名（他端标题漂移未广播时）或删除：明示刷新，不做路径猜测
             let missing = e.contains("不存在");
             let hint = if missing {
@@ -2386,17 +2282,22 @@ pub(crate) fn on_canvas_patch_done(
             } else {
                 "保存失败"
             };
-            // 一次失败序列只提示一次；不可重试的失败额外交代「操作已暂停」
-            if plan.notify {
-                let notice = if plan.abort_pending {
-                    format!("{hint}：{e}（操作已暂停，处理后重试）")
-                } else if flush {
-                    format!("{hint}，操作未执行：{e}")
-                } else {
-                    format!("{hint}：{e}")
-                };
-                app.notify(NoticeLevel::Error, notice);
+            // 统一处置：待续 Flush 按本笔是否 Flush 放回或丢弃，不可重试时就地收口挂起动作
+            let plan = app.settle_slot_save_failure(
+                crate::SaveSlot::DocSpace,
+                gen,
+                &file,
+                flush,
+                &e,
+                false,
+                hint,
+                true,
+            );
+            if flush {
+                crate::ai_fs_edit::abort_pending(app, &e);
             }
+            let Some(s) = app.canvas.as_mut() else { return Task::none() };
+            s.save_error = Some(e.clone());
             // 树只在首轮失败或文件确已被改名 / 删除时重拉
             return if missing || plan.notify {
                 refresh_space_tree(app)
@@ -2435,25 +2336,9 @@ pub(crate) fn on_canvas_patch_done(
             // 成功回执先出队，避免与失败分支的回填叠加成重复补发
             app.space_doc_save_flush_queued
                 .retain(|entry| entry != &(gen, file.clone()));
-            let dirty = app.canvas.as_ref().is_some_and(|s| s.dirty);
-            if resolve_queued_flush(queued, flush, dirty) {
-                return task.chain(space_submit_canvas_save(
-                    app,
-                    crate::canvas_view::SaveReason::Flush,
-                ));
-            }
-            if queued {
-                return task.chain(app.after_any_flush());
-            }
-            // Flush 回执期间有新编辑（unstable）：重收一轮 Flush——脏拦截已在放行前 flush，
-            // 此轮丢失会让关闭/切换动作静默挂起（对齐笔记 / 表格保存链）
-            if flush {
-                if stable {
-                    task = task.chain(app.after_any_flush());
-                } else {
-                    task = task.chain(space_submit_canvas_save(app, crate::canvas_view::SaveReason::Flush));
-                }
-            }
+            task = app.settle_doc_receipt_tail(task, queued, flush, stable, |app| {
+                space_submit_canvas_save(app, crate::canvas_view::SaveReason::Flush)
+            });
             task = task.chain(reload_space_history(app));
         }
     }
@@ -4617,12 +4502,6 @@ mod tests {
         assert_eq!(inflight, vec![(1u64, "b.atb".to_string())], "只摘本笔");
         assert_eq!(queued, vec![(1u64, "a.atb".to_string())], "待续项留给调用方处置");
 
-        // 成功回执 + 仍有脏 + 有待续 → 补发 Flush
-        assert!(resolve_queued_flush(true, false, true));
-        // 内容已稳定 → 不再补写
-        assert!(!resolve_queued_flush(true, false, false));
-        // 本笔就是 Flush（已失败 abort）→ 丢弃待续，不重复执行挂起动作
-        assert!(!resolve_queued_flush(true, true, true));
         // 回执无论成败都摘键：失败后再提交同一文件必须放行
         assert!(claim_space_save_inflight(&mut inflight, &mut queued, 1, "a.atb", false));
 
@@ -4640,20 +4519,55 @@ mod tests {
         assert_eq!(canvas_load_outcome(true, false), (true, true), "部分取到：打开并提示");
         assert_eq!(canvas_load_outcome(true, true), (false, false), "整体失败：不打开");
     }
-    /// S1：AutoSave 失败回执不能吃掉期间入队的 Flush——回填后重试成功必须放行；
-    /// 本笔即 Flush 的失败则丢弃（挂起动作已收口）。
+    /// 空间文档失败回执：AutoSave 在途 + Flush 入队 → 失败回执把待续项放回（重试成功后再收尾）；
+    /// 本笔就是 Flush 的失败则丢弃（挂起动作已就地收口，补发会再执行一次关闭 / 切换）。
     #[test]
     fn 失败回执按是否_flush_回填或丢弃待续项() {
+        let mut book = crate::SaveFailureBook::new();
+        let mut inflight = vec![(1u64, "a.atb".to_string())];
         let mut queued = vec![(1u64, "a.atb".to_string())];
-        settle_queued_flush_on_failure(&mut queued, 1, "a.atb", true, false);
+        let plan = crate::apply_failed_save(
+            &mut book,
+            &mut inflight,
+            &mut queued,
+            1,
+            "a.atb",
+            false,
+            "网络错误：超时",
+            false,
+        );
+        assert!(inflight.is_empty(), "回执先结清在途键");
         assert_eq!(queued, vec![(1u64, "a.atb".to_string())], "非 Flush 失败必须回填");
+        assert!(plan.retry_in.is_some(), "可重试失败排下一次期限");
 
+        let mut book = crate::SaveFailureBook::new();
+        let mut inflight = vec![(1u64, "a.atb".to_string())];
         let mut queued = vec![(1u64, "a.atb".to_string())];
-        settle_queued_flush_on_failure(&mut queued, 1, "a.atb", true, true);
+        crate::apply_failed_save(
+            &mut book,
+            &mut inflight,
+            &mut queued,
+            1,
+            "a.atb",
+            true,
+            "网络错误：超时",
+            false,
+        );
         assert!(queued.is_empty(), "Flush 失败不得补发");
 
+        let mut book = crate::SaveFailureBook::new();
+        let mut inflight = Vec::new();
         let mut queued = Vec::new();
-        settle_queued_flush_on_failure(&mut queued, 1, "a.atb", false, false);
+        crate::apply_failed_save(
+            &mut book,
+            &mut inflight,
+            &mut queued,
+            1,
+            "b.atb",
+            false,
+            "网络错误：超时",
+            false,
+        );
         assert!(queued.is_empty(), "本来没有待续项不凭空造一个");
     }
     #[test]

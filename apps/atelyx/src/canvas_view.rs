@@ -388,9 +388,7 @@ pub struct CanvasSession {
     pub version: u64,
     /// 保存在途守卫（按世代 + 文件分键）：同键在途时不并发提交，Flush 记账排队。
     pub save_inflight: crate::table_view::SaveInflight,
-    /// 连续保存失败次数：驱动失败退避，落盘成功或内容再变即清零。
-    pub save_retry: u32,
-    /// 上一笔失败记账时的数据版本：版本变了 = 新的一轮失败序列。
+    /// 上一笔失败记账时的数据版本：版本变了 = 退避回到首档（提示闸门只认错误摘要，不随内容重开）。
     save_retry_version: u64,
     pub view: CanvasViewState,
 }
@@ -414,7 +412,6 @@ impl CanvasSession {
             save_error: None,
             version: 1,
             save_inflight: crate::table_view::SaveInflight::default(),
-            save_retry: 0,
             save_retry_version: 0,
             view,
         }
@@ -440,20 +437,15 @@ impl CanvasSession {
         self.clear_save_failure();
     }
 
-    /// 记一笔保存失败，返回本轮失败序列的第几次（退避档位）。
-    /// 序列按数据版本切分：内容再变（含不经 touch 的合入）即从第 1 次重新算。
-    pub fn note_save_failure(&mut self) -> u32 {
-        if self.save_retry_version != self.version {
-            self.save_retry = 0;
-            self.save_retry_version = self.version;
-        }
-        self.save_retry = self.save_retry.saturating_add(1);
-        self.save_retry
+    /// 内容在上一笔失败后变过：下一次失败的退避回到首档（提示闸门不随之重开）。
+    pub fn failure_backoff_reset(&mut self) -> bool {
+        let changed = self.save_retry_version != self.version;
+        self.save_retry_version = self.version;
+        changed
     }
 
-    /// 落盘成功：失败序列结束。
+    /// 落盘成功：失败序列结束，之后再次失败按首档退避。
     pub fn clear_save_failure(&mut self) {
-        self.save_retry = 0;
         self.save_retry_version = self.version;
     }
 
@@ -3464,31 +3456,35 @@ mod tests {
         assert_eq!(snap_size(3.0, 3.0), (CARD_MIN_W, CARD_MIN_H));
     }
 
-    /// 画布失败序列：内容再变即重开（版本变了从 1 起），成功即结束。
+    /// 画布退避阶梯：内容再变回到首档（版本推进），成功也回到首档。
     #[test]
-    fn save_failure_sequence_reopens_on_new_content() {
+    fn failure_backoff_resets_on_new_content() {
         let c = canvas(vec![node("a", "text", 0.0, 0.0, Some(100.0), Some(100.0))], vec![]);
         let mut s = CanvasSession::new("c.atlx".to_string(), c);
-        assert_eq!(s.note_save_failure(), 1);
-        assert_eq!(s.note_save_failure(), 2, "同一版本内连续累加");
-        // 内容再变：版本推进 = 新失败序列
+        assert!(s.failure_backoff_reset(), "首笔失败按首档退避（记下本次版本）");
+        assert!(!s.failure_backoff_reset(), "同一版本内不再重置");
+        // 内容再变：版本推进 = 新的退避起点
         s.touch();
-        assert_eq!(s.note_save_failure(), 1, "新内容的失败重新从首轮起");
-        // 落盘成功：序列结束，之后再次失败仍从首轮起
+        assert!(s.failure_backoff_reset(), "新内容从首档重排");
+        // 落盘成功：序列结束，之后再次失败仍从首档起
+        let mut book = crate::SaveFailureBook::new();
+        for _ in 0..2 {
+            crate::plan_save_failure(&mut book, "c.atlx", "磁盘忙：设备未就绪", false);
+        }
         s.clear_save_failure();
-        assert_eq!(s.note_save_failure(), 1);
+        crate::clear_save_failure(&mut book, "c.atlx");
+        let plan = crate::plan_save_failure(&mut book, "c.atlx", "磁盘忙：设备未就绪", false);
+        assert_eq!(plan.retry_in, Some(std::time::Duration::from_secs(1)), "成功后复位");
     }
 
     /// 画布错误位随新内容复位（拖拽路径直接置脏也走同一条），但不改脏态与版本以外的语义。
     #[test]
-    fn content_change_clears_error_and_failure_count() {
+    fn content_change_clears_error() {
         let c = canvas(vec![node("a", "text", 0.0, 0.0, Some(100.0), Some(100.0))], vec![]);
         let mut s = CanvasSession::new("c.atlx".to_string(), c);
         s.save_error = Some("保存失败".to_string());
-        s.note_save_failure();
         s.clear_failure_sequence();
         assert!(s.save_error.is_none());
-        assert_eq!(s.save_retry, 0);
     }
 
     /// 不可恢复的失败不排下一次重试，待续 Flush 同时丢弃（挂起动作不能等一笔不会来的回执）。
@@ -3496,24 +3492,26 @@ mod tests {
     fn final_failure_arms_no_retry_but_still_routes_flush() {
         let c = canvas(vec![node("a", "text", 0.0, 0.0, Some(100.0), Some(100.0))], vec![]);
         let mut s = CanvasSession::new("c.atlx".to_string(), c);
+        let mut book = crate::SaveFailureBook::new();
         assert_eq!(s.save_inflight.begin(1, "c.atlx", false), crate::table_view::SaveAdmission::Start);
         assert_eq!(
             s.save_inflight.begin(1, "c.atlx", true),
             crate::table_view::SaveAdmission::Queued
         );
-        let queued = s.save_inflight.finish(1, "c.atlx");
-        assert!(queued, "回执当场取到排队过的 Flush");
-        let out = crate::table_view::apply_save_failure(
-            &mut s.save_inflight,
+        let mut queued = vec![(1u64, "c.atlx".to_string())];
+        assert!(s.save_inflight.finish(1, "c.atlx"), "回执当场取到排队过的 Flush");
+        let plan = crate::apply_failed_save(
+            &mut book,
+            &mut Vec::new(),
+            &mut queued,
             1,
             "c.atlx",
             false,
-            queued,
-            false,
-            1,
+            "画布已被他人修改，请刷新后重试",
+            s.failure_backoff_reset(),
         );
-        assert_eq!(out.retry_in, None, "不可恢复的失败不排期");
-        // 不会再有重试回执：待续项丢弃，挂起的关闭 / 切换不再等它
+        assert_eq!(plan.retry_in, None, "不可恢复的失败不排期");
+        assert!(queued.is_empty(), "不会再重试：待续项丢弃，挂起的关闭 / 切换不再等它");
         assert_eq!(s.save_inflight.begin(1, "c.atlx", false), crate::table_view::SaveAdmission::Start);
         assert!(!s.save_inflight.finish(1, "c.atlx"), "不可恢复失败后不再有待续 Flush");
     }

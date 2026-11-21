@@ -1129,7 +1129,7 @@ pub(crate) fn on_saved(
     if let (Err(e), true) = (&result, flush) {
         crate::ai_fs_edit::abort_pending(app, e);
     }
-    // 本笔回执即结清该键的在途标记；在途期间排队的 Flush 留待内容稳定后补发
+    // 本笔回执即结清该键的在途标记；在途期间排队的 Flush 取出交给统一处置（成功分支补发、失败分支按语义去留）
     let queued_flush = app
         .table
         .as_mut()
@@ -1144,33 +1144,28 @@ pub(crate) fn on_saved(
     match result {
         Err(e) => {
             app.settle_history_restore(false);
-            if flush {
-                app.abort_pending_flush("保存失败，操作未执行");
-            }
-            // 失败口径与笔记 / 空间链一致：冲突 / 只读这类不可恢复的失败不排重试，
-            // 只留错误徽标与一次提示；可恢复的按轮次退避重排（用户停手后没人再排期限）。
-            let retryable = crate::save_failure_retryable(&e);
-            let (attempt, outcome) = {
+            let reset_backoff = {
                 let Some(s) = app.table.as_mut() else { return Task::none() };
                 s.save_error = Some(e.clone());
-                let attempt = s.note_save_failure();
-                // 待续 Flush 已被本笔回执取走，按本笔是否 Flush 决定丢弃 / 回填
-                let outcome = tv::apply_save_failure(
-                    &mut s.save_inflight,
-                    gen,
-                    &file,
-                    flush,
-                    queued_flush,
-                    retryable,
-                    attempt,
-                );
-                (attempt, outcome)
+                s.failure_backoff_reset()
             };
-            // 一次失败序列只出声首轮：重试链每轮都弹一次会把提示栏刷屏
-            if let Some(text) = tv::save_failure_notice(attempt, retryable, flush, &e) {
-                app.notify(NoticeLevel::Error, text);
+            // 失败口径与笔记 / 空间链同一入口：冲突 / 只读这类不可恢复的失败不排重试、
+            // 就地收口挂起动作，只留错误徽标与一次提示；可恢复的按轮次退避重排。
+            let (plan, guard) = {
+                let s = app.table.as_mut().expect("身份守卫已判会话仍在");
+                let mut guard = std::mem::take(&mut s.save_inflight);
+                // 回执已把待续项取走：先放回，再由统一处置按本笔是否 Flush 决定去留
+                if queued_flush {
+                    guard.requeue_flush(gen, &file);
+                }
+                let (plan, guard) =
+                    app.apply_save_failure(guard, gen, &file, flush, &e, reset_backoff, "保存失败");
+                (plan, guard)
+            };
+            if let Some(s) = app.table.as_mut() {
+                s.save_inflight = guard;
             }
-            match outcome.retry_in {
+            match plan.retry_in {
                 Some(delay) => retry_after(delay, tv::TableMsg::RetrySave(gen, file)),
                 // 不可恢复：不排重试，保留未落盘内容与错误徽标等用户处置
                 None => Task::none(),
@@ -1204,24 +1199,11 @@ pub(crate) fn on_saved(
                     Err(e) => app.notify(NoticeLevel::Error, format!("历史版本记录失败：{e}")),
                 }
             }
-            // 在途期间排队的 Flush：内容已稳就放行，仍脏就补一笔收尾（脏拦截点不能白等）
-            if queued_flush {
-                let dirty = app.table.as_ref().is_some_and(|s| s.dirty);
-                return task.chain(if dirty {
-                    submit_table_save(app, tv::SaveReason::Flush)
-                } else {
-                    app.after_any_flush()
-                });
-            }
-            if flush {
-                // 落盘期间有新编辑（unstable）：重收一轮 Flush——脏拦截已在放行前 flush，
-                // 此轮丢失会让关闭 / 切换动作静默挂起
-                task = task.chain(if stable {
-                    app.after_any_flush()
-                } else {
-                    submit_table_save(app, tv::SaveReason::Flush)
-                });
-            } else if !stable {
+            // 在途期间排队的 Flush / 本笔就是 Flush：落稳才放行挂起动作，仍脏就再收一轮
+            task = app.settle_doc_receipt_tail(task, queued_flush, flush, stable, |app| {
+                submit_table_save(app, tv::SaveReason::Flush)
+            });
+            if !queued_flush && !flush && !stable {
                 // 落盘期间又有编辑：补排一次自动保存（期限可能已随本笔回执清空）
                 task = task.chain(retry_after(
                     crate::AUTOSAVE_DEBOUNCE,
@@ -3430,91 +3412,124 @@ mod tests {
         assert!(!s.view.image_inflight.contains_key("imgs/c.png"), "旧表的在途标记要清");
     }
 
-    /// 真实接线：AutoSave 在途时 Flush 入队 → 失败回执 → Flush 回填 → 重试成功只交付一次。
-    /// 走的是 on_saved 里同一串调用（finish → apply_save_failure → … → 成功回执 finish）。
+    /// 真实接线：AutoSave 在途时 Flush 入队 → 失败回执（统一入口）→ Flush 放回 →
+    /// 重试成功只交付一次。走的是 on_saved 里同一串调用（finish → apply_save_failure → … → finish）。
     #[test]
     fn auto_save_inflight_flush_queued_survives_failure_and_delivers_once() {
         let mut s = session(&["a"]);
+        let mut book = crate::SaveFailureBook::new();
         // ① AutoSave 起笔：登记在途
         assert_eq!(s.save_inflight.begin(1, "t.atb", false), tv::SaveAdmission::Start);
         // ② Flush 到来：同键在途 → 入队，不下发第二笔
         assert_eq!(s.save_inflight.begin(1, "t.atb", true), tv::SaveAdmission::Queued);
-        // ③ AutoSave 失败回执：先结清（取出排队标记），失败分支按「本笔不是 Flush」回填
-        let queued = s.save_inflight.finish(1, "t.atb");
-        assert!(queued, "回执应看到排队过的 Flush");
+        // ③ AutoSave 失败回执：守卫整份取出交统一处置，处置后原样放回会话
+        assert!(s.save_inflight.finish(1, "t.atb"), "回执应看到排队过的 Flush");
         s.save_error = Some("磁盘忙".to_string());
-        let attempt = s.note_save_failure();
-        let outcome = tv::apply_save_failure(
-            &mut s.save_inflight,
+        s.save_inflight.requeue_flush(1, "t.atb");
+        let (mut keys, mut queued) = std::mem::take(&mut s.save_inflight).into_parts();
+        let plan = crate::apply_failed_save(
+            &mut book,
+            &mut keys,
+            &mut queued,
             1,
             "t.atb",
             false,
-            queued,
-            crate::save_failure_retryable("磁盘忙"),
-            attempt,
+            "磁盘忙：设备未就绪",
+            s.failure_backoff_reset(),
         );
-        assert_eq!(attempt, 1, "首轮失败");
-        assert!(outcome.retry_in.is_some(), "可恢复失败要排重试");
-        assert!(tv::save_failure_notice(attempt, true, false, "磁盘忙").is_some(), "首轮要提示");
-        // ④ 重试成功回执：只交付一次回填的 Flush
+        assert!(plan.retry_in.is_some(), "可恢复失败要排重试");
+        s.save_inflight = crate::table_view::SaveInflight::from_parts(keys, queued);
+        // ④ 重试成功回执：只交付一次放回的 Flush
         assert_eq!(s.save_inflight.begin(1, "t.atb", false), tv::SaveAdmission::Start, "重试可提交");
-        assert!(s.save_inflight.finish(1, "t.atb"), "回填的 Flush 在重试成功后交付");
+        assert!(s.save_inflight.finish(1, "t.atb"), "放回的 Flush 在重试成功后交付");
         assert!(!s.save_inflight.finish(1, "t.atb"), "同一待续项只交付一次");
     }
 
-    /// 真实接线：内容变更后再次失败，提示重新出现（首轮闸门按序列重开而非永久）。
+    /// 提示闸门与笔记 / 空间链同口径：同一条错误在「改内容 → 再失败」后不再重复提示，
+    /// 只有错误性质变化才重新出声。
     #[test]
-    fn failure_notice_reappears_after_content_change() {
+    fn failure_notice_survives_content_change() {
         let mut s = session(&["a"]);
-        // 第一轮失败：首轮提示出现，重试轮静默
-        assert!(tv::save_failure_notice(s.note_save_failure(), true, false, "磁盘忙").is_some());
-        assert!(tv::save_failure_notice(s.note_save_failure(), true, false, "磁盘忙").is_none());
-        // 用户继续编辑 → 新失败序列：提示必须重新出现
-        s.touch();
-        let attempt = s.note_save_failure();
-        assert_eq!(attempt, 1, "新内容回到首轮");
-        assert!(
-            tv::save_failure_notice(attempt, true, false, "磁盘忙").is_some(),
-            "改内容后再失败要重新提示一次"
+        let mut book = crate::SaveFailureBook::new();
+        let msg = "磁盘忙：设备未就绪";
+        let first = crate::apply_failed_save(
+            &mut book,
+            &mut Vec::new(),
+            &mut Vec::new(),
+            1,
+            "t.atb",
+            false,
+            msg,
+            s.failure_backoff_reset(),
         );
-    }
-
-    /// 一次失败序列只提示一次，且序列随内容变更重开：新的失败重新提示并从 1s 退避起步。
-    /// 只在落盘成功时清零会让后续失败永久静默（提示被首轮闸住、退避从封顶档起步）。
-    #[test]
-    fn content_change_restarts_failure_sequence() {
-        let mut s = session(&["a"]);
-        // 同版本连续失败：次数累加、退避逐轮升档
-        assert_eq!(s.note_save_failure(), 1);
-        assert_eq!(s.note_save_failure(), 2);
-        assert_eq!(s.note_save_failure(), 3);
-        assert_eq!(s.save_retry, 3);
-        // 用户继续编辑：新的失败序列从首轮重新计，提示与退避都回到起点
+        assert!(first.notify, "首轮要提示");
+        let again = crate::apply_failed_save(
+            &mut book,
+            &mut Vec::new(),
+            &mut Vec::new(),
+            1,
+            "t.atb",
+            false,
+            msg,
+            s.failure_backoff_reset(),
+        );
+        assert!(!again.notify, "重试轮静默");
+        // 用户继续编辑：退避回到首档，但这条错误已经提示过
         s.touch();
-        assert_eq!(s.save_retry, 0, "内容变更是新失败序列的起点");
-        assert_eq!(s.note_save_failure(), 1, "新一轮失败要重新提示一次");
-        assert_eq!(crate::next_retry_delay(1), std::time::Duration::from_secs(1), "退避从 1s 起");
+        let after_edit = crate::apply_failed_save(
+            &mut book,
+            &mut Vec::new(),
+            &mut Vec::new(),
+            1,
+            "t.atb",
+            false,
+            msg,
+            s.failure_backoff_reset(),
+        );
+        assert_eq!(after_edit.retry_in, Some(std::time::Duration::from_secs(1)), "退避从首档起");
+        assert!(!after_edit.notify, "同一错误改内容后再失败不重复提示");
+        // 错误性质变化：重新提示一次
+        let other = crate::apply_failed_save(
+            &mut book,
+            &mut Vec::new(),
+            &mut Vec::new(),
+            1,
+            "t.atb",
+            false,
+            "文件已被外部修改，本次保存未写入",
+            s.failure_backoff_reset(),
+        );
+        assert!(other.notify, "错误性质变了要重新提示");
+        assert!(other.retry_in.is_none(), "冲突不排重试");
     }
 
-    /// 落盘成功结束序列：之后再次失败同样从首轮起。
+    /// 落盘成功结束失败序列：之后再次失败按退避首档重新提示。
     #[test]
     fn save_success_ends_failure_sequence() {
         let mut s = session(&["a"]);
-        assert_eq!(s.note_save_failure(), 1);
-        assert_eq!(s.note_save_failure(), 2);
+        let mut book = crate::SaveFailureBook::new();
+        for _ in 0..2 {
+            crate::plan_save_failure(&mut book, "t.atb", "磁盘忙：设备未就绪", false);
+        }
+        s.failure_backoff_reset();
         s.clear_save_failure();
-        assert_eq!(s.note_save_failure(), 1);
+        let plan = crate::plan_save_failure(&mut book, "t.atb", "磁盘忙：设备未就绪", false);
+        assert_eq!(plan.retry_in, Some(std::time::Duration::from_secs(4)), "成功前已累加到第 3 次");
+        crate::clear_save_failure(&mut book, "t.atb");
+        let plan = crate::plan_save_failure(&mut book, "t.atb", "磁盘忙：设备未就绪", false);
+        assert_eq!(plan.retry_in, Some(std::time::Duration::from_secs(1)), "成功后复位");
+        assert!(plan.notify, "新的一轮失败要提示");
     }
 
-    /// 撤销 / 重做同样是内容变更：失败序列随新内容复位。
+    /// 撤销 / 重做同样是内容变更：失败退避随新内容回到首档。
     #[test]
     fn history_step_resets_failure_sequence() {
         let mut s = session(&["a", "b"]);
         mutate_session(&mut s, |s| ops::set_cell_value(&mut s.data.rows[0], "f1", Some("c".into())));
-        assert_eq!(s.note_save_failure(), 1);
-        assert_eq!(s.note_save_failure(), 2);
-        assert!(history_step_in(&mut s, false));
-        assert_eq!(s.note_save_failure(), 1, "撤销后的失败是新序列的首轮");
+        assert!(s.failure_backoff_reset());
+        assert!(!s.failure_backoff_reset(), "同一版本内不再重置");
+        s.touch();
+        assert!(s.failure_backoff_reset(), "撤销后的内容变更是新的退避起点");
     }
 
     /// 失效行上的单选改值（弹层打开期间行被删除）：不能留下无变更的撤销步。
