@@ -701,22 +701,24 @@ fn scan_for_matches(
 
 // ===== HTTP 端点 =====
 
-/// 刷新失败后的冷却窗口：窗口内不再重扫，直接沿用上次成功结果（坏盘期间不制造重试风暴）。
+/// 刷新失败后的冷却窗口：窗口内不再重扫——有旧索引就沿用，没有就透出上次错误（坏盘期间不制造重试风暴）。
 const FAILED_RETRY_TTL: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// 单个空间的刷新节流状态：失败时刻 + 失败原因（成功即清空）。
+/// 单个空间的刷新节流状态：失败时刻 + 失败原因 + 失败时有无成功缓存（成功即清空）。
 #[derive(Default, Clone)]
 struct RefreshFailure {
     /// 上次刷新失败的时刻（None = 上次刷新成功）。
     at: Option<std::time::Instant>,
     reason: Option<String>,
+    /// 上次失败时该空间是否已有成功缓存：决定冷却期内是沿用旧索引还是原样透出错误。
+    had_success: bool,
 }
 
 /// 空间派生索引缓存（space_id → 反链/标签索引；纯内存只读派生，可随时重建，不落盘）。
 /// 持有方 = `ServerState`；本类型自足封装取用与刷新，不反向依赖状态模块。
 pub(crate) struct SpaceIndexCache {
     caches: Mutex<HashMap<String, SpaceIndex>>,
-    /// 各空间刷新失败的时刻：TTL 内不再重扫（冷却），TTL 过后允许重试。
+    /// 各空间刷新失败的时刻（含从未成功过的空间）：TTL 内不再重扫，TTL 过后允许重试。
     failures: Mutex<HashMap<String, RefreshFailure>>,
     /// 刷新串行化：刷新要搬出索引在阻塞池里做（不占 async 执行器），
     /// 同一时刻只允许一次刷新在途，避免并发请求各自全量扫描同一空间。
@@ -759,12 +761,12 @@ impl SpaceIndexCache {
     ///
     /// 失败语义（契约）：
     /// - 刷新失败保留上一次的成功结果——宁可暂时陈旧，也不能把索引变成「全仓无引用」；
-    /// - 只有成功刷新过的空间才进冷却：失败后在 `FAILED_RETRY_TTL` 内沿用旧缓存、不再重扫
-    ///   （坏盘期间不制造重试风暴）；
-    /// - 从没成功过的空间刷新失败一律回错误（端点 → 500），不返回空索引——空索引会被读成
-    ///   「没有反链 / 没有标签」，等于把「读不出来」说成「本来就没有」；
+    /// - 任何刷新失败都进冷却：`FAILED_RETRY_TTL` 内不再重扫（坏盘期间不制造重试风暴）；
+    /// - 冷却期内**有成功缓存**沿用旧索引；**从没成功过**则原样透出上次的错误（端点 → 500），
+    ///   不返回空索引——空索引会被读成「没有反链 / 没有标签」，等于把「读不出来」说成
+    ///   「本来就没有」。错误照旧透出，只是不重复扫盘；窗口过后允许重试；
     /// - 失败期间以**旧排除名单**回答：名单刚改又恰好刷不出来时，本 TTL 窗口内被排除目录
-    ///   的反链/标签仍可见，过期后重新按新名单重建并收敛。
+    ///   的反链/标签仍可见，过期后重新按新名单重建并收敛（从没成功过的空间没有旧名单可谈）。
     pub(crate) async fn with_space<R>(
         &self,
         state: &ServerState,
@@ -773,21 +775,15 @@ impl SpaceIndexCache {
         f: impl FnOnce(&mut SpaceIndex) -> R,
     ) -> Result<R, ApiError> {
         let exclude = crate::meta::space_exclusions(state, space_id).await;
-        // 冷却窗口内直接返回旧缓存：不取刷新锁、不重扫（只有成功过的空间才有旧缓存可给）
-        if let Some(reason) = self.cooling_down(space_id) {
-            tracing::debug!(space_id = %space_id, "索引刷新冷却中，沿用上次结果：{reason}");
-            let mut caches = lock_recover(&self.caches);
-            let index = caches.entry(space_id.to_string()).or_default();
-            return Ok(f(index));
+        // 冷却窗口内不取刷新锁、不重扫：有成功缓存给旧索引，没有就把上次的失败原样透出
+        if let Some(failure) = self.cooling_down(space_id) {
+            return self.answer_cooling_down(space_id, failure, f);
         }
         // 刷新串行化：搬出索引 → 阻塞池刷新 → 成功后写回，同一空间不并发全量扫描
         let _refresh = self.refresh.lock().await;
         // 等锁期间可能已被前一个持有者刷新过（成功或失败）：再看一次冷却状态
-        if let Some(reason) = self.cooling_down(space_id) {
-            tracing::debug!(space_id = %space_id, "索引刷新冷却中，沿用上次结果：{reason}");
-            let mut caches = lock_recover(&self.caches);
-            let index = caches.entry(space_id.to_string()).or_default();
-            return Ok(f(index));
+        if let Some(failure) = self.cooling_down(space_id) {
+            return self.answer_cooling_down(space_id, failure, f);
         }
         // 搬出的是「副本」：刷新期间缓存里保留旧索引，取消或刷新失败都不会让该空间索引变空。
         // 排除名单变化时从空索引重建（旧条目指向已排除目录）；重建失败则沿用旧缓存（含旧名单）。
@@ -833,27 +829,52 @@ impl SpaceIndexCache {
             Ok((Err(reason), _, _)) => reason,
             Err(e) => e.1,
         };
-        tracing::warn!(space_id = %space_id, "索引刷新失败：{reason}");
-        if !has_success {
-            // 从没成功过的空间没有可沿用的旧结果：回错误，别让空索引冒充「没有反链 / 没有标签」
-            return Err(ApiError(StatusCode::INTERNAL_SERVER_ERROR, reason));
-        }
-        // 有过成功缓存：记冷却后沿用旧索引与旧名单（契约见函数头），窗口内不再重扫
+        // 日志带空间根：权限被收 / 层级超限时只凭 io 错误文本无法定位是哪个空间
+        tracing::warn!(space_id = %space_id, root = %root.display(), "索引刷新失败：{reason}");
+        // 成功与否都记冷却：从没成功过的空间每查一次就全仓 stat 一遍，坏盘时会退化成重试风暴
         failures.insert(
             space_id.to_string(),
-            RefreshFailure { at: Some(std::time::Instant::now()), reason: Some(reason) },
+            RefreshFailure {
+                at: Some(std::time::Instant::now()),
+                reason: Some(reason.clone()),
+                had_success: has_success,
+            },
         );
+        if !has_success {
+            // 没有可沿用的旧结果：回错误，别让空索引冒充「没有反链 / 没有标签」；
+            // 冷却窗口内本次错误原样复用，窗口过后再重扫
+            return Err(ApiError(StatusCode::INTERNAL_SERVER_ERROR, reason));
+        }
+        // 有过成功缓存：沿用旧索引与旧名单（契约见函数头），窗口内不再重扫
         let index = caches.entry(space_id.to_string()).or_default();
         Ok(f(index))
     }
 
-    /// 冷却窗口内返回上次失败原因（None = 可以尝试刷新）。
-    fn cooling_down(&self, space_id: &str) -> Option<String> {
+    /// 冷却窗口内的回答：有成功缓存给旧索引，从未成功过则透出上次错误。
+    /// 两条分支都不碰文件系统——冷却的语义就是「错误照旧，别重复扫盘」。
+    fn answer_cooling_down<R>(
+        &self,
+        space_id: &str,
+        failure: RefreshFailure,
+        f: impl FnOnce(&mut SpaceIndex) -> R,
+    ) -> Result<R, ApiError> {
+        let reason = failure.reason.unwrap_or_else(|| "上次刷新失败".to_string());
+        if !failure.had_success {
+            tracing::debug!(space_id = %space_id, "索引刷新冷却中，透出上次错误：{reason}");
+            return Err(ApiError(StatusCode::INTERNAL_SERVER_ERROR, reason));
+        }
+        tracing::debug!(space_id = %space_id, "索引刷新冷却中，沿用上次结果：{reason}");
+        let mut caches = lock_recover(&self.caches);
+        let index = caches.entry(space_id.to_string()).or_default();
+        Ok(f(index))
+    }
+
+    /// 冷却窗口内返回上次的失败记录（None = 可以尝试刷新）。
+    fn cooling_down(&self, space_id: &str) -> Option<RefreshFailure> {
         let failures = lock_recover(&self.failures);
         let failure = failures.get(space_id)?;
-        let at = failure.at?;
-        if at.elapsed() < self.retry_ttl {
-            Some(failure.reason.clone().unwrap_or_else(|| "上次刷新失败".to_string()))
+        if failure.at?.elapsed() < self.retry_ttl {
+            Some(failure.clone())
         } else {
             None
         }
@@ -1029,7 +1050,7 @@ mod tests {
         cache.with_space(state, "space-1", dir, |index| index.wiki.files.len()).await
     }
 
-    /// 放一份「上次成功」的索引：冷却只对成功过的空间生效，测试须先造出这份缓存。
+    /// 放一份「上次成功」的索引：冷却期内有它才沿用旧结果，没有就透出上次错误。
     fn seed_successful_cache(cache: &SpaceIndexCache) {
         let mut caches = lock_recover(&cache.caches);
         caches.entry("space-1".to_string()).or_default().refreshed = true;
@@ -1052,7 +1073,7 @@ mod tests {
             failing_refresher(calls.clone()),
             std::time::Duration::from_millis(150),
         );
-        // 先有成功缓存，失败才进冷却；没有成功缓存时不会冷却（见下一条用例）
+        // 先有成功缓存，冷却窗口内才有旧索引可沿用；没有时冷却期内照旧回错误（见下一条用例）
         seed_successful_cache(&cache);
         query(&cache, &state, dir.path()).await.expect("有成功缓存时刷新失败应沿用旧结果");
         query(&cache, &state, dir.path()).await.expect("冷却窗口内应沿用旧结果");
@@ -1062,9 +1083,9 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 2, "TTL 过后应允许重试");
     }
 
-    /// 缓存为空 + 刷新失败：必须回错误，不能拿空索引冒充「没有反链」。
+    /// 缓存为空 + 刷新失败：必须回错误，且同样进冷却——窗口内复用该错误、不再扫盘。
     #[tokio::test]
-    async fn index_refresh_failure_without_success_cache_returns_error() {
+    async fn index_refresh_failure_without_success_cache_cools_down_and_returns_error() {
         let dir = tempfile::tempdir().unwrap();
         let state = ServerState::open(dir.path());
         let calls = Arc::new(AtomicUsize::new(0));
@@ -1077,11 +1098,15 @@ mod tests {
             .expect_err("没有成功缓存时刷新失败必须回错误");
         assert_eq!(err.0, StatusCode::INTERNAL_SERVER_ERROR);
         assert!(err.1.contains("模拟刷新失败"), "错误原因应透出刷新失败本身：{}", err.1);
-        // 没有旧结果可冷却：下次查询立即重试（空缓存不能进入 5s 静默期）
-        let err = query(&cache, &state, dir.path()).await.expect_err("仍失败时继续回错误");
+        assert!(lock_recover(&cache.failures).contains_key("space-1"), "无成功缓存也要写冷却记录");
+        // 冷却窗口内：错误照旧透出，但不重复扫盘（坏盘期间不制造重试风暴）
+        let err = query(&cache, &state, dir.path()).await.expect_err("冷却窗口内仍回错误");
         assert_eq!(err.0, StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(calls.load(Ordering::SeqCst), 2, "无成功缓存时不进冷却窗口");
-        assert!(lock_recover(&cache.failures).is_empty(), "无成功缓存不得写冷却记录");
+        assert_eq!(err.1, "模拟刷新失败", "冷却窗口内复用上次错误，不换文案");
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "冷却窗口内不得重扫");
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        query(&cache, &state, dir.path()).await.expect_err("TTL 过后重试仍失败时继续回错误");
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "TTL 过后应允许重试");
     }
 
     /// 排除名单变化 + 刷新失败：旧索引与旧名单继续对外服务（契约），冷却过后再按新名单重建。
