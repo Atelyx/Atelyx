@@ -84,8 +84,11 @@ type SlowJobReporter = Box<dyn Fn(PathBuf, Duration) + Send + Sync>;
 static SLOW_JOB_REPORTER: OnceLock<SlowJobReporter> = OnceLock::new();
 
 /// 注册慢作业上报回调（壳侧据此接崩溃日志 / 通知）。首次注册生效，重复注册返回 `false` 且不改原回调；
-/// 未注册时慢作业只留 [`QueueStats::last_slow`]。回调在写盘工作线程上同步执行、且持着该作业后的执行序，
-/// 所以它不得阻塞，也不得向写盘队列提交作业（同线程等自己会死锁）。
+/// 未注册时慢作业只留 [`QueueStats::last_slow`]。
+///
+/// 回调在写盘工作线程上同步执行，且此刻整个队列停在这一笔作业之后、下一笔之前：回调里阻塞多久，
+/// 全部本地写盘就跟着停多久。因此它只能做投递（写日志文件、发通道、置状态），不得阻塞，
+/// 也不得向同一队列提交作业（同线程等自己会死锁）。
 pub fn set_slow_job_reporter(reporter: impl Fn(PathBuf, Duration) + Send + Sync + 'static) -> bool {
     SLOW_JOB_REPORTER.set(Box::new(reporter)).is_ok()
 }
