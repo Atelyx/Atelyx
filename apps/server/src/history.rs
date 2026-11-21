@@ -69,9 +69,18 @@ fn side_rel(kind: &str, file: &str) -> String {
     }
 }
 
+/// 测试钩子：置真时 `backup_corrupt` 直接返回 None（模拟留档失败）。
+/// 留档失败只能靠文件系统状态制造，跨平台不稳定，故用编译期隔离的开关代替。
+#[cfg(test)]
+static BACKUP_FAILURE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// 侧文件损坏留档：原名改名成 `<原名>.corrupt-<随机>`，原文完整保留供排查与人工取回。
 /// 名字带随机后缀——同名目标在 Windows 上会被 rename 静默替换，固定名会让新损坏冲掉旧备份。
 fn backup_corrupt(path: &Path) -> Option<std::path::PathBuf> {
+    #[cfg(test)]
+    if BACKUP_FAILURE.load(std::sync::atomic::Ordering::SeqCst) {
+        return None;
+    }
     let name = path.file_name()?.to_string_lossy().into_owned();
     let backup = path.with_file_name(format!("{name}.corrupt-{}", crate::state::random_hex(4)));
     match std::fs::rename(path, &backup) {
@@ -549,6 +558,29 @@ pub async fn remap_after_rename(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn backup_failure_keeps_corrupt_file_untouched_and_reports_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a%2Fb.md.json");
+        let corrupt = b"{\"versions\": [{\"seq\": 1";
+        std::fs::write(&path, corrupt).unwrap();
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                BACKUP_FAILURE.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        BACKUP_FAILURE.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _reset = Reset;
+        let result = read_versions(&path);
+        assert!(result.is_err(), "留档失败必须报错而不是当空列表重建：{result:?}");
+        assert!(
+            result.unwrap_err().contains("备份失败"),
+            "错误须点明备份失败，便于人工处理"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), corrupt, "原文件不得被改动");
+    }
 
     #[test]
     fn side_rel_matches_client_layout() {
