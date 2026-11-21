@@ -3238,10 +3238,10 @@ impl App {
                 self.save_retry = Some((failed, attempt));
                 self.autosave_deadline = Some(at);
                 self.autosave_timer = false;
-                // flush 被保存失败打断：挂起动作不执行（放行会丢掉未落盘内容）、窗口不关、原因可见；
-                // 脏态与 save_error 保留，等下一笔重试落盘
+                // flush 被保存失败打断：动作不放行、窗口不关、原因可见（脏态与 save_error 保留，
+                // 等下一笔重试落盘）。仅回填等回执的 AI 文件操作，其余挂起动作留待重试后放行
                 if matches!(reason, SaveReason::Flush) {
-                    self.abort_pending_flush("保存失败，操作未执行");
+                    ai_fs_edit::abort_pending(self, &e);
                     self.notify(
                         NoticeLevel::Error,
                         format!("保存失败，操作未执行：{e}（未落盘内容已保留，稍后自动重试）"),

@@ -1541,9 +1541,9 @@ fn on_note_saved(
             app.save_retry = Some((failed, attempt));
             app.autosave_deadline = Some(at);
             app.autosave_timer = false;
-            // flush 失败：挂起动作不执行、窗口不关，脏态与 save_error 保留等下一笔重试
+            // flush 失败：动作不放行、窗口不关，脏态与 save_error 保留等下一笔重试
+            // （只回填等回执的 AI 文件操作，其余挂起动作留待重试后放行）
             if matches!(reason, SaveReason::Flush) {
-                app.abort_pending_flush("保存失败，操作未执行");
                 app.notify(
                     NoticeLevel::Error,
                     format!("保存失败，操作未执行：{e}（未落盘内容已保留，稍后自动重试）"),
