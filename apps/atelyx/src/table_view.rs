@@ -114,6 +114,8 @@ pub const IMAGE_EDGE_DAMPING: f32 = 0.35;
 pub const IMAGE_MAX_BYTES: usize = 50 * 1024 * 1024;
 /// 加载失败后的重试间隔（固定间隔；仍在可见区时也按此间隔重试）。
 pub const IMAGE_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+/// 灯箱原图读取的尝试次数上限（含首次）：用尽即停，只继续显示缩略图。
+pub const LIGHTBOX_MAX_ATTEMPTS: u32 = 3;
 
 /// 编辑器浮层的 widget id（挂焦点用）。
 pub const CELL_EDITOR_ID: &str = "table-cell-editor";
@@ -515,7 +517,8 @@ pub struct TableViewState {
     /// 轮播当前页（行 id → 字段 id → 页）。
     pub carousel: HashMap<String, HashMap<String, usize>>,
     pub images: HashMap<String, CachedImage>,
-    pub image_inflight: HashSet<String>,
+    /// 在途缩略图（引用 → 发起时的会话身份）：回执被世代 / 文件守卫丢弃时按它自愈。
+    pub image_inflight: HashMap<String, ImageInflight>,
     /// 加载失败时间（固定间隔重试；仍在可见区内也按间隔重试）。
     pub image_failed: HashMap<String, Instant>,
     /// 缩略图纹理常驻登记（绘制时登记，见 [`ThumbPins`]）。
@@ -844,6 +847,16 @@ impl PinBudget {
     }
 }
 
+/// 一条在途的图片载入：发起时的会话身份决定回执还能不能落地。
+///
+/// 载入回执在 `lib.rs` 侧按「世代 + 文件 + 表 id」三重守卫丢弃（切表 / 改名换入另一份文件），
+/// 丢弃时不会回头清在途标记；标记若永不清理，改名后的这些图就再也不发加载请求。
+#[derive(Clone)]
+pub struct ImageInflight {
+    pub file: String,
+    pub table_id: String,
+}
+
 #[derive(Clone)]
 pub struct Lightbox {
     pub row_id: String,
@@ -863,6 +876,8 @@ pub struct Lightbox {
     pub original_rel: Option<String>,
     /// 原图读取失败原因（有缩略图时仍可继续看缩略图）。
     pub original_error: Option<String>,
+    /// 当前图原图读取失败次数：用尽即停，不再无限退避重试。
+    pub original_attempts: u32,
 }
 
 impl Lightbox {
@@ -878,6 +893,7 @@ impl Lightbox {
             original: None,
             original_rel: None,
             original_error: None,
+            original_attempts: 0,
         }
     }
 
@@ -887,6 +903,21 @@ impl Lightbox {
         self.pan = Vector::ZERO;
         self.drag = None;
         self.last_press = None;
+    }
+
+    /// 换图 / 重开时清空重试记账（新图重新获得完整的重试次数）。
+    pub fn reset_original_attempts(&mut self) {
+        self.original_attempts = 0;
+    }
+
+    /// 原图读取失败后的下次重试间隔：`None` = 次数用尽，不再自动重试。
+    /// 退避与上限同笔记图片重试（1s / 2s，共三次尝试）：缩略图仍在，放弃只影响清晰度。
+    pub fn original_retry_delay(&self) -> Option<std::time::Duration> {
+        if self.original_attempts >= LIGHTBOX_MAX_ATTEMPTS {
+            return None;
+        }
+        let shift = self.original_attempts.saturating_sub(1).min(LIGHTBOX_MAX_ATTEMPTS - 1);
+        Some(std::time::Duration::from_millis(1000u64 << shift))
     }
 }
 
@@ -3981,6 +4012,19 @@ mod tests {
         }
     }
 
+    /// 灯箱原图重试上限：用尽即停（只留缩略图），换图后重新获得完整次数。
+    #[test]
+    fn lightbox_original_retry_is_capped_and_resets_on_new_image() {
+        let mut lb = Lightbox::new("r0".to_string(), "f1".to_string(), 0);
+        assert_eq!(lb.original_retry_delay(), Some(std::time::Duration::from_millis(1000)));
+        lb.original_attempts = 2;
+        assert_eq!(lb.original_retry_delay(), Some(std::time::Duration::from_millis(2000)));
+        lb.original_attempts = LIGHTBOX_MAX_ATTEMPTS;
+        assert_eq!(lb.original_retry_delay(), None, "次数用尽不再自动重试");
+        lb.reset_original_attempts();
+        assert!(lb.original_retry_delay().is_some(), "换图后重新计次");
+    }
+
     /// 布局缓存为 None（重建途中被 take 走、或上一次重建中途 panic）时几何仍可用：
     /// 兜底重建一份自持缓存，读路径不 panic 也不返回空几何。
     #[test]
@@ -4234,6 +4278,7 @@ mod tests {
             original: None,
             original_rel: None,
             original_error: None,
+            original_attempts: 0,
         });
         assert!(bar_placement(&s, window, viewport).is_none(), "灯箱预览期间不弹");
         let mut s = bar_session(window, origin, "r0");

@@ -275,7 +275,12 @@ fn on_load(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
                     lb.original = None;
                     lb.original_rel = Some(rel);
                     lb.original_error = Some(e);
-                    retry_after(tv::IMAGE_RETRY_INTERVAL, tv::TableMsg::LightboxRetry)
+                    lb.original_attempts = lb.original_attempts.saturating_add(1);
+                    match lb.original_retry_delay() {
+                        Some(delay) => retry_after(delay, tv::TableMsg::LightboxRetry),
+                        // 用尽即停：缩略图仍在屏上，不再对同一张图无限重试
+                        None => Task::none(),
+                    }
                 }
             }
         }
@@ -401,6 +406,7 @@ fn on_gesture(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
                 lb.original = None;
                 lb.original_rel = None;
                 lb.original_error = None;
+                lb.reset_original_attempts();
             }
             load_lightbox_original(app)
         }
@@ -2911,9 +2917,13 @@ fn load_lightbox_original(app: &mut App) -> Task<Message> {
 }
 
 /// 登记一次原图请求：清掉旧图与错误，记住请求路径供回执 / 重试守卫。
+/// 同一张图的自动重试保留已用次数（上限按整张图计，不按单次请求计）。
 fn mark_lightbox_original_request(app: &mut App, rel: &str) {
     if let Some(s) = app.table.as_mut() {
         if let Some(lb) = s.view.lightbox.as_mut() {
+            if lb.original_rel.as_deref() != Some(rel) {
+                lb.reset_original_attempts();
+            }
             lb.original = None;
             lb.original_error = None;
             lb.original_rel = Some(rel.to_string());
@@ -2926,11 +2936,14 @@ fn retry_after(delay: std::time::Duration, msg: tv::TableMsg) -> Task<Message> {
     Task::perform(tokio::time::sleep(delay), move |_| Message::Table(msg))
 }
 
-/// 原图读取失败后的定时重试（当前图未变、仍未就绪才发起）。
+/// 原图读取失败后的定时重试（当前图未变、仍未就绪且次数未用尽才发起）。
 fn retry_lightbox_original(app: &mut App) -> Task<Message> {
     let Some(s) = app.table.as_ref() else { return Task::none() };
     let Some(lb) = s.view.lightbox.as_ref() else { return Task::none() };
     if lb.original.is_some() || lb.original_error.is_none() {
+        return Task::none();
+    }
+    if lb.original_retry_delay().is_none() {
         return Task::none();
     }
     let current = tv::lightbox_rel(s, lb);
@@ -3091,6 +3104,9 @@ fn export_xlsx(app: &App, path: Option<std::path::PathBuf>) -> Task<Message> {
 /// 确保当前绘制到的图片已发起加载（打开 / 滚动 / 缩放 / 翻页后调用）。
 /// 失败条目按固定间隔重试（可见的到期即重新发起，离屏的等重新可见）。
 pub fn ensure_image_loads(app: &mut App) -> Option<Task<Message>> {
+    // 先按会话身份自愈在途标记：回执被 lib 侧守卫（切表 / 改名换入另一份文件）丢弃时
+    // 没人回头清理它，留着会让这些图此后永不再发加载请求
+    prune_stale_inflight(app);
     let s = app.table.as_ref()?;
     if !s.data.fields.iter().any(|field| field.field_type == "image") {
         return None;
@@ -3107,7 +3123,7 @@ pub fn ensure_image_loads(app: &mut App) -> Option<Task<Message>> {
     let now = Instant::now();
     let mut rels: Vec<String> = Vec::new();
     for rel in visible {
-        if view.images.contains_key(&rel) || view.image_inflight.contains(&rel) {
+        if view.images.contains_key(&rel) || view.image_inflight.contains_key(&rel) {
             continue;
         }
         if let Some(failed_at) = view.image_failed.get(&rel) {
@@ -3121,8 +3137,10 @@ pub fn ensure_image_loads(app: &mut App) -> Option<Task<Message>> {
         return None;
     }
     let gen = app.epoch();
+    // 发起身份与回执消息共用同一份（异步块里会移走一份，在途标记用留存的另一份）
     let file = s.file.clone();
     let table_id = s.data.id.clone();
+    let origin = tv::ImageInflight { file: file.clone(), table_id: table_id.clone() };
     let inflight = rels.clone();
     // 空间模式：逐张走服务端字节读取（无文件指纹，dataURL 同样解码即用）
     let task = if matches!(app.repo_kind, crate::RepoKind::Space(_)) {
@@ -3207,10 +3225,20 @@ pub fn ensure_image_loads(app: &mut App) -> Option<Task<Message>> {
         for rel in inflight {
             // 已发起本次重试：失败时间戳作废，避免重试 tick 在同一张图上反复扫
             s.view.image_failed.remove(&rel);
-            s.view.image_inflight.insert(rel);
+            s.view.image_inflight.insert(rel, origin.clone());
         }
     }
     Some(task)
+}
+
+/// 丢弃不属于当前会话身份的缩略图在途标记（按发起时的文件 + 表 id 匹配）。
+fn prune_stale_inflight(app: &mut App) {
+    let Some(s) = app.table.as_mut() else { return };
+    let file = s.file.clone();
+    let table_id = s.data.id.clone();
+    s.view
+        .image_inflight
+        .retain(|_, origin| origin.file == file && origin.table_id == table_id);
 }
 
 /// UI tick 兜底：失败条目到期就摘掉重试标记并重新发起（可见的立即拉，离屏的等重新可见）。
@@ -3297,6 +3325,32 @@ mod tests {
         // 剪贴板内容仍是旧的 / 读不到 = 写入没落地
         assert!(!cut_write_landed(tsv, Some("旧的剪贴板内容")));
         assert!(!cut_write_landed(tsv, None));
+    }
+
+    /// 在途标记按发起身份清理：改名 / 换表后旧标记不再挡住新表的同名图片。
+    #[test]
+    fn stale_inflight_is_pruned_by_identity() {
+        let mut s = session(&["a"]);
+        s.view.image_inflight.insert(
+            "imgs/a.png".to_string(),
+            tv::ImageInflight { file: s.file.clone(), table_id: s.data.id.clone() },
+        );
+        s.view.image_inflight.insert(
+            "imgs/b.png".to_string(),
+            tv::ImageInflight { file: "旧名.atb".to_string(), table_id: s.data.id.clone() },
+        );
+        s.view.image_inflight.insert(
+            "imgs/c.png".to_string(),
+            tv::ImageInflight { file: s.file.clone(), table_id: "另一张表".to_string() },
+        );
+        let file = s.file.clone();
+        let table_id = s.data.id.clone();
+        s.view
+            .image_inflight
+            .retain(|_, origin| origin.file == file && origin.table_id == table_id);
+        assert!(s.view.image_inflight.contains_key("imgs/a.png"));
+        assert!(!s.view.image_inflight.contains_key("imgs/b.png"), "旧文件的在途标记要清");
+        assert!(!s.view.image_inflight.contains_key("imgs/c.png"), "旧表的在途标记要清");
     }
 
     /// 失效行上的单选改值（弹层打开期间行被删除）：不能留下无变更的撤销步。
