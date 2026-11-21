@@ -3309,7 +3309,10 @@ pub fn ensure_image_loads(app: &mut App) -> Option<Task<Message>> {
 }
 
 /// 丢弃不属于当前会话身份的缩略图在途标记（按发起时的文件 + 表 id 匹配）。
-fn prune_stale_inflight(app: &mut App) {
+///
+/// 供图片批次回执的身份守卫在丢弃前调用（丢弃发生在 lib 侧）：不清的话该图此后再不
+/// 发加载请求。当前由 `ensure_image_loads` 在每次补拉前自愈，守卫侧调用是更早的时机。
+pub(crate) fn prune_stale_inflight(app: &mut App) {
     let Some(s) = app.table.as_mut() else { return };
     let file = s.file.clone();
     let table_id = s.data.id.clone();
