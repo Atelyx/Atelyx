@@ -1931,7 +1931,10 @@ pub(crate) fn on_table_patch_done(
             if stable {
                 app.settle_history_restore(true);
             }
-            // 在途期间排队的 Flush：本笔落稳就补发收尾（脏则立刻再写一笔 Flush）
+            // 在途期间排队的 Flush：本笔落稳就补发收尾（脏则立刻再写一笔 Flush）。
+            // 成功回执先把它出队——失败分支负责回填，成功分支必须消费掉，否则会重复补发
+            app.space_doc_save_flush_queued
+                .retain(|entry| entry != &(gen, file.clone()));
             let dirty = app.table.as_ref().is_some_and(|s| s.dirty);
             if resolve_queued_flush(queued, flush, dirty) {
                 return task.chain(space_submit_table_save(app, tv::SaveReason::Flush));
@@ -2428,7 +2431,10 @@ pub(crate) fn on_canvas_patch_done(
             if stable {
                 app.settle_history_restore(true);
             }
-            // 在途期间排队的 Flush：本笔落稳就补发收尾（脏则立刻再写一笔 Flush）
+            // 在途期间排队的 Flush：本笔落稳就补发收尾（脏则立刻再写一笔 Flush）。
+            // 成功回执先出队，避免与失败分支的回填叠加成重复补发
+            app.space_doc_save_flush_queued
+                .retain(|entry| entry != &(gen, file.clone()));
             let dirty = app.canvas.as_ref().is_some_and(|s| s.dirty);
             if resolve_queued_flush(queued, flush, dirty) {
                 return task.chain(space_submit_canvas_save(
