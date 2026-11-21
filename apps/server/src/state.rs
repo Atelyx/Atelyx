@@ -98,6 +98,33 @@ pub struct ServerState {
     inner: Arc<ServerStateInner>,
 }
 
+/// 名册存储健康：回滚写盘也失败时磁盘与内存已分歧且无法自愈，置为降级；
+/// 降级后拒绝一切名册变更（只读端点照常），直到人工修复磁盘并重启进程。
+#[derive(Default)]
+struct StorageHealth {
+    degraded: std::sync::atomic::AtomicBool,
+    reason: Mutex<Option<String>>,
+}
+
+impl StorageHealth {
+    fn degrade(&self, reason: String) {
+        *self.reason.lock().unwrap() = Some(reason);
+        self.degraded.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// 已降级时返回带原始原因的 503（不再继续覆盖磁盘）。
+    fn check(&self) -> Result<(), ApiError> {
+        if !self.degraded.load(std::sync::atomic::Ordering::SeqCst) {
+            return Ok(());
+        }
+        let reason = self.reason.lock().unwrap().clone().unwrap_or_else(|| "原因未知".to_string());
+        Err(ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("存储不可用，请检查磁盘（{reason}）"),
+        ))
+    }
+}
+
 /// 名册内存态 + 落盘监管：内存变更（`mutate`）与落盘解耦。
 /// 内存锁只保护内存态本身（鉴权与成员校验只短暂取它，磁盘阻塞不串行全站请求）；
 /// 提交锁把「快照 → 变更 → 落盘 → 成败处理」整体串行化，保证任一时刻至多一批在途：
@@ -138,8 +165,12 @@ struct ServerStateInner {
     /// 进程启动时刻（unix 秒；管理台运行状态展示用）。
     started_at: i64,
     journal: Arc<Journal>,
-    /// 名册落盘串行通道（构造或首次落盘时拉起单写者任务，见 `state::persist_worker`）。
+    /// 名册落盘串行通道（首次提交时在运行时上下文内拉起单写者任务，见 `state::persist_worker`）。
     writer: tokio::sync::OnceCell<tokio::sync::mpsc::UnboundedSender<PersistJob>>,
+    /// 落盘实现（写者与懒拉起共用一个；测试可注入慢盘 / 必失败替身）。
+    persist: Arc<dyn Fn(&Path, &[(&'static str, serde_json::Value)]) -> Result<(), String> + Send + Sync>,
+    /// 名册存储健康（回滚也失败即降级）。
+    health: Arc<StorageHealth>,
     /// 派生索引缓存（空间 id → 反链/标签索引；纯内存只读派生，可随时重建，不落盘）。
     index_cache: Arc<crate::index::SpaceIndexCache>,
     /// WS 房间表（`/ws/space` 入口的房间机制）。
@@ -275,18 +306,23 @@ pub fn max_meta_value_bytes() -> usize {
 }
 
 /// 名册落盘写者：单任务串行消费提交（顺序 = 提交号顺序），每批四个文件按序原子写；
-/// 失败时把上一批已写成功的新文件重写回该批快照（尽力而为，失败只记日志），
-/// 再回报结果由 `mutate` 回滚内存。
+/// 失败时把上一批已写成功的新文件重写回该批快照；回滚本身再失败即标记 degraded
+/// （磁盘停在本批半截新态、内存回快照），此后拒绝一切名册变更直到进程重启。
 mod persist_worker {
     use std::path::Path;
     use std::sync::Arc;
 
-    use super::{atomic_write_json, PersistJob};
+    use super::{PersistJob, StorageHealth};
 
     type PersistFn = dyn Fn(&Path, &[(&'static str, serde_json::Value)]) -> Result<(), String> + Send + Sync;
 
-    /// 拉起写者任务；当前线程没有 tokio 运行时时返回 None（由调用方在落盘时重试）。
-    pub(super) fn spawn(data_dir: std::path::PathBuf, persist: Arc<PersistFn>) -> Option<tokio::sync::mpsc::UnboundedSender<PersistJob>> {
+    /// 拉起写者任务，返回提交通道。必须在 tokio 运行时上下文内调用：
+    /// 构造可在运行时之外（如进程入口先建状态后建运行时），写者随首次提交懒拉起。
+    pub(super) fn spawn(
+        data_dir: std::path::PathBuf,
+        persist: Arc<PersistFn>,
+        health: Arc<StorageHealth>,
+    ) -> Option<tokio::sync::mpsc::UnboundedSender<PersistJob>> {
         let handle = tokio::runtime::Handle::try_current().ok()?;
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<PersistJob>();
         // 只持数据目录、不持状态本体：`ServerState` 全部句柄释放后通道关闭，写者任务随之退出
@@ -302,7 +338,19 @@ mod persist_worker {
                     Err(e) => {
                         tracing::error!(seq, "名册落盘失败：{e}");
                         if let Some(baseline) = &last_written {
-                            restore(&data_dir, baseline, e);
+                            if let Err(re) = restore(&*persist, &data_dir, baseline) {
+                                // 回滚写回失败：磁盘停在本批半截新态，内存即将回滚到本批快照，
+                                // 二者分歧且无法自愈——标记 degraded，此后不再接受名册变更
+                                tracing::error!(
+                                    dir = %data_dir.display(),
+                                    cause = %e,
+                                    "名册回滚写盘失败，存储降级：{re}"
+                                );
+                                health.degrade(format!(
+                                    "回滚写盘失败（{}）：{re}",
+                                    data_dir.display()
+                                ));
+                            }
                         }
                     }
                 }
@@ -325,17 +373,19 @@ mod persist_worker {
         Ok(rx)
     }
 
-    /// 失败回滚：把已落盘的新文件重写回基线内容，让磁盘回到与内存一致的状态。
-    fn restore(data_dir: &Path, previous: &[(&'static str, serde_json::Value)], cause: &str) {
-        for (name, value) in previous {
-            if let Err(e) = atomic_write_json(&data_dir.join(name), value) {
-                tracing::error!(file = name, cause = %cause, "名册回滚写盘失败：{e}");
-            }
-        }
+    /// 失败回滚：经同一落盘通道把基线内容重写回去，让磁盘回到与内存一致的状态。
+    /// 用注入的 `persist` 而非直接写盘——回滚与正常落盘走同一条路径，失败也可被测试注入。
+    fn restore(
+        persist: &PersistFn,
+        data_dir: &Path,
+        previous: &[(&'static str, serde_json::Value)],
+    ) -> Result<(), String> {
+        persist(data_dir, previous)
     }
 }
 
 /// 快照 → 待落盘值（四个名册文件）。
+/// Persisted 各字段均为可序列化结构体，序列化无失败分支。
 fn describe(snapshot: &Persisted) -> Vec<(&'static str, serde_json::Value)> {
     vec![
         ("accounts.json", serde_json::to_value(&snapshot.users).expect("名册快照序列化必成")),
@@ -363,7 +413,8 @@ fn load_array<T: serde::de::DeserializeOwned>(data_dir: &Path, name: &str) -> Ve
 }
 
 impl ServerState {
-    /// 打开（或初始化）数据目录。
+    /// 打开（或初始化）数据目录。可在 tokio 运行时之外调用（进程入口先建状态后建运行时）：
+    /// 名册写者随首次提交在运行时上下文内懒拉起。
     pub fn open(data_dir: &Path) -> Self {
         Self::open_with_persist(data_dir, persist_files)
     }
@@ -388,22 +439,29 @@ impl ServerState {
             locked: Mutex::new(JournalState { memory, ..Default::default() }),
             commit: tokio::sync::Mutex::new(()),
         });
+        let persist: Arc<
+            dyn Fn(&Path, &[(&'static str, serde_json::Value)]) -> Result<(), String> + Send + Sync,
+        > = Arc::new(persist);
+        let health = Arc::new(StorageHealth::default());
+        // 构造期若已在运行时上下文内则顺手拉起写者；运行时之外（进程入口先建状态后建运行时）
+        // 拿不到 Handle，写者随首次提交在运行时上下文内懒拉起
+        let sender = persist_worker::spawn(data_dir.to_path_buf(), persist.clone(), health.clone());
+        let writer = tokio::sync::OnceCell::new();
+        if let Some(sender) = sender {
+            let _ = writer.set(sender);
+        }
         let inner = Arc::new(ServerStateInner {
             data_dir: data_dir.to_path_buf(),
             started_at: now_secs(),
             journal,
-            writer: tokio::sync::OnceCell::new(),
+            writer,
+            persist,
+            health,
             index_cache: Arc::new(SpaceIndexCache::new()),
             hub: Hub::default(),
             path_locks: PathLocks::new(),
             structure_locks: PathLocks::new(),
         });
-        let persist: Arc<dyn Fn(&Path, &[(&'static str, serde_json::Value)]) -> Result<(), String> + Send + Sync> =
-            Arc::new(persist);
-        // 运行时缺席（非 tokio 线程上构造）时留空槽：首次落盘再拉起写者
-        if let Some(sender) = persist_worker::spawn(data_dir.to_path_buf(), persist) {
-            let _ = inner.writer.set(sender);
-        }
         Self { inner }
     }
 
@@ -444,9 +502,12 @@ impl ServerState {
         &self,
         f: impl FnOnce(&mut Persisted) -> Result<R, ApiError>,
     ) -> Result<R, ApiError> {
+        // 降级后不再落盘：磁盘与内存已分歧且无法自愈，继续覆盖只会扩大损坏
+        self.inner.health.check()?;
         // 提交串行化：多批在途时前批失败回滚会让后批带上已回滚的变更落盘，
         // 内存与磁盘从此分歧；串行化后至多一批在途，回滚边界唯一
         let _commit = self.inner.journal.commit.lock().await;
+        self.inner.health.check()?;
         let (seq, snapshot, files, out) = {
             let mut g = self.inner.journal.locked.lock().unwrap();
             // 先快照再变更：落盘失败时回滚内存，保证「失败的操作不生效」
@@ -485,7 +546,7 @@ impl ServerState {
         Ok(out)
     }
 
-    /// 取写者通道（首次调用时拉起写者任务）；同步上下文中没有运行时则返回错误。
+    /// 取写者通道（首次提交时在运行时上下文内懒拉起）；当前线程没有运行时则报错。
     fn send_persist(
         &self,
         seq: u64,
@@ -494,8 +555,11 @@ impl ServerState {
         if let Some(sender) = self.inner.writer.get() {
             return persist_worker::submit(sender, seq, files);
         }
-        let started =
-            persist_worker::spawn(self.inner.data_dir.clone(), std::sync::Arc::new(persist_files));
+        let started = persist_worker::spawn(
+            self.inner.data_dir.clone(),
+            self.inner.persist.clone(),
+            self.inner.health.clone(),
+        );
         match started {
             Some(sender) => {
                 let sent = persist_worker::submit(&sender, seq, files);
@@ -503,8 +567,8 @@ impl ServerState {
                 sent
             }
             None => Err(ApiError(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "名册写者不可用（无 tokio 运行时）".to_string(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "名册写者不可用（无 tokio 运行时），请稍后重试".to_string(),
             )),
         }
     }
@@ -563,6 +627,111 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
+
+    /// 构造期没有 tokio 运行时（进程入口先建状态、后建运行时）：写者必须随首次提交懒拉起。
+    /// 用普通 #[test] + 自建 Runtime，覆盖 `ServerState::open` 在生产里的真实调用时序。
+    #[test]
+    fn open_outside_runtime_persists_on_first_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = ServerState::open(dir.path());
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let push = |name: &'static str| {
+            let state = state.clone();
+            async move {
+                state
+                    .mutate(|p| {
+                        p.users.push(User {
+                            id: name.to_string(),
+                            username: name.to_string(),
+                            password_hash: "x".to_string(),
+                            display_name: name.to_string(),
+                            created_at: 0,
+                        });
+                        Ok(())
+                    })
+                    .await
+            }
+        };
+        runtime.block_on(push("alice")).expect("运行时之外构造后首次提交应落盘成功");
+        let disk: Vec<User> =
+            serde_json::from_str(&std::fs::read_to_string(dir.path().join("accounts.json")).unwrap()).unwrap();
+        assert_eq!(disk.iter().map(|u| u.username.as_str()).collect::<Vec<_>>(), vec!["alice"]);
+        runtime.block_on(push("bob")).expect("第二次提交应照常落盘");
+        let disk: Vec<User> =
+            serde_json::from_str(&std::fs::read_to_string(dir.path().join("accounts.json")).unwrap()).unwrap();
+        assert_eq!(
+            disk.iter().map(|u| u.username.as_str()).collect::<Vec<_>>(),
+            vec!["alice", "bob"]
+        );
+    }
+
+    /// 回滚写盘也失败 → 存储降级：本次报错，此后所有 mutate 直接 503，磁盘不再被继续覆盖。
+    #[tokio::test]
+    async fn rollback_failure_degrades_storage_and_stops_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = calls.clone();
+        let state = ServerState::open_with_persist(dir.path(), move |dir, files| {
+            // 第 2 次调用 = 本批落盘失败；第 3 次调用 = 回滚写回，同样失败
+            if counter.fetch_add(1, Ordering::SeqCst) >= 1 {
+                return Err("模拟磁盘只读".to_string());
+            }
+            persist_files(dir, files)
+        });
+        state
+            .mutate(|p| {
+                p.users.push(User {
+                    id: "a".to_string(),
+                    username: "alice".to_string(),
+                    password_hash: "x".to_string(),
+                    display_name: "alice".to_string(),
+                    created_at: 0,
+                });
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let on_disk = std::fs::read_to_string(dir.path().join("accounts.json")).unwrap();
+
+        let failed = state
+            .mutate(|p| {
+                p.users.push(User {
+                    id: "b".to_string(),
+                    username: "bob".to_string(),
+                    password_hash: "x".to_string(),
+                    display_name: "bob".to_string(),
+                    created_at: 0,
+                });
+                Ok(())
+            })
+            .await;
+        let err = failed.expect_err("落盘失败必须报错");
+        assert_eq!(err.0, StatusCode::INTERNAL_SERVER_ERROR, "本批报 500：{err:?}");
+
+        let next = state
+            .mutate(|p| {
+                p.users.push(User {
+                    id: "c".to_string(),
+                    username: "carol".to_string(),
+                    password_hash: "x".to_string(),
+                    display_name: "carol".to_string(),
+                    created_at: 0,
+                });
+                Ok(())
+            })
+            .await;
+        let err = next.expect_err("降级后必须拒绝变更");
+        assert_eq!(err.0, StatusCode::SERVICE_UNAVAILABLE, "降级后应 503：{err:?}");
+        assert!(err.1.contains("存储不可用"), "错误须点明存储不可用：{err:?}");
+        assert!(err.1.contains("模拟磁盘只读"), "错误须带原始原因：{err:?}");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("accounts.json")).unwrap(),
+            on_disk,
+            "降级后不得再覆盖磁盘"
+        );
+        let memory = state.read(|p| p.users.len());
+        assert_eq!(memory, 1, "内存回滚到已确认状态：{memory}");
+    }
 
     /// 落盘替身：记录每批写到的账号名，再按真实实现落盘（顺序可断言、磁盘内容可断言）。
     fn recorded(
