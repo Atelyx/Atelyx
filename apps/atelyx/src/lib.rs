@@ -3114,10 +3114,15 @@ impl App {
                 self.autosave_timer = false;
                 // 期限已到才触发；未到 = 输入推迟了期限，chain_autosave_timer 会按剩余时长续排
                 if self.autosave_deadline.is_some_and(|at| at <= Instant::now()) {
-                    self.autosave_deadline = None;
                     let mut task = Task::none();
                     if self.dirty && self.ui.last_note_file.is_some() {
+                        // 本笔被判在途而顺延（未新增在途项）时不会再有回执：期限留到下一拍
+                        // 按退避重排——在这里清掉，正文停手后就永不重试落盘
+                        let in_flight = self.note_save_inflight.len();
                         task = task.chain(self.submit_save(SaveReason::AutoSave));
+                        if self.note_save_inflight.len() > in_flight {
+                            self.autosave_deadline = None;
+                        }
                     }
                     if self.table.as_ref().is_some_and(|t| t.dirty) {
                         // 内容结算点即广播：本地编辑已稳定，插件据此重读
@@ -8996,8 +9001,8 @@ mod file_drop_tests {
         assert_eq!(out, "[乙](a%20b.md)");
     }
 
-    /// 退避策略：1s 起翻倍、封顶 30s，且「失败一次之后必然还有下一次期限」——
-    /// 用户停手后没有新输入事件，失败分支必须自己把期限排出来。
+    /// 退避策略：1s 起翻倍、封顶 30s。失败分支必须自己排出下一次期限——用户停手后
+    /// 没有新的输入事件，只靠内容变更排期限等于永不重试。
     #[test]
     fn retry_delay_backs_off_and_stays_scheduled() {
         use std::time::{Duration, Instant};
