@@ -64,6 +64,9 @@ pub enum SpaceError {
     /// 410：邀请码过期。
     #[error("邀请码已过期或已失效")]
     Gone,
+    /// 文本读拿到的不是合法 UTF-8：不能按文本返回，否则替换字符会被写回覆盖原字节。
+    #[error("{0}")]
+    NotUtf8(String),
     /// 5xx：服务端错误（原文带回，调用方按可重试处理）。
     #[error("服务端错误：{0}")]
     Server(String),
@@ -653,8 +656,10 @@ impl SpaceClient {
         Ok(body.exists)
     }
 
-    /// 读文本文件（非 UTF-8 字节按替换字符容错；encoding 缺省即文本，服务端无 text 值）。
+    /// 读文本文件（encoding 缺省即文本）。
     ///
+    /// 严格 UTF-8：非 UTF-8 字节回 [`SpaceError::NotUtf8`]，不做替换字符容错——调用方会把
+    /// 读到的字符串合流后整文写回，替换字符一路落盘就把原字节永久改掉。
     /// 回执缺 `content` 按错误返回：调用方会拿返回值当真内容做三方合流与写回，
     /// 「缺字段读成空串」等于把空文写回用户的文件。
     pub async fn get_file_text(&self, space_id: &str, path: &str) -> Result<String, SpaceError> {
@@ -674,7 +679,11 @@ impl SpaceClient {
                 urlencode_component(path)
             ))
             .await?;
-        let text = resp.text().await.map_err(|e| SpaceError::Network(e.to_string()))?;
+        // 先取原始字节再严格解码：resp.text() 按 UTF-8 有损解码，非法字节会变成替换字符
+        let bytes = resp.bytes().await.map_err(|e| SpaceError::Network(e.to_string()))?;
+        let text = String::from_utf8(bytes.to_vec()).map_err(|_| {
+            SpaceError::NotUtf8("文件非 UTF-8 文本，已拒绝以文本方式读取".to_string())
+        })?;
         parse_file_text_body(&text)
     }
 
@@ -991,19 +1000,31 @@ impl SpaceClient {
 }
 
 /// 状态码 → `SpaceError`：2xx 原样返回；错误体 `{"error"}` 信息带回（超长截断，防网关 HTML 淹没提示）。
+/// 错误体读不到或为空时退回状态行原文，错误信息不出现空串——空串在调用方会显示成「操作失败」
+/// 且丢掉状态码这条唯一定位线索。
 async fn check_status(resp: reqwest::Response) -> Result<reqwest::Response, SpaceError> {
     let status = resp.status();
     if status.is_success() {
         return Ok(resp);
     }
-    let info = resp.text().await.unwrap_or_default();
+    let status_text = format!("HTTP {status}");
+    // 错误体只用于提示文案：读失败或非 UTF-8 都按有损解码，不掩盖真正要看的状态码
+    let info = match resp.bytes().await {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        Err(_) => String::new(),
+    };
     let msg = serde_json::from_str::<serde_json::Value>(&info)
         .ok()
         .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_owned))
         .unwrap_or(info);
-    let msg = msg.chars().take(200).collect::<String>();
+    let msg = msg.trim().chars().take(200).collect::<String>();
+    let msg = if msg.is_empty() { status_text.clone() } else { msg };
     Err(match status.as_u16() {
-        401 => SpaceError::Unauthorized(if msg.is_empty() { "会话已失效".to_string() } else { msg }),
+        // 401 空体保留「会话已失效」的提示语（用户可见），状态码附后便于定位
+        401 if msg.starts_with("HTTP ") => {
+            SpaceError::Unauthorized(format!("会话已失效（{status_text}）"))
+        }
+        401 => SpaceError::Unauthorized(msg),
         403 => SpaceError::Forbidden(msg),
         404 => SpaceError::NotFound,
         409 => SpaceError::Conflict(msg),
@@ -1148,6 +1169,111 @@ mod tests {
             .put_file_text("s1", "notes/a.md", "正文")
             .await
             .expect("camelCase 回执应可解码");
+        server.join().expect("服务端线程不 panic");
+    }
+
+    /// 多请求假服务端：按顺序对每个连接回一个固定响应（状态行 + 头 + 原始字节体）。
+    fn spawn_raw_server(
+        responses: Vec<(u16, &'static str, Vec<u8>)>,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("回环端口可绑");
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for (code, reason, body) in responses {
+                let (stream, _) = listener.accept().expect("客户端会连入");
+                let mut reader = std::io::BufReader::new(stream);
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    if std::io::BufRead::read_line(&mut reader, &mut line).unwrap_or(0) == 0 {
+                        break;
+                    }
+                    if line == "\r\n" || line == "\n" {
+                        break;
+                    }
+                }
+                let mut stream = reader.into_inner();
+                use std::io::Write as _;
+                let head = format!(
+                    "HTTP/1.1 {code} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream.write_all(head.as_bytes()).expect("响应头写出");
+                stream.write_all(&body).expect("响应体写出");
+            }
+        });
+        (format!("http://{addr}"), server)
+    }
+
+    /// 回执字节含非法 UTF-8：必须以明确错误拒绝，不得给出带替换字符的「正文」——
+    /// 那个字符串会被调用方合流后整文写回，把服务端原字节永久改掉。
+    #[tokio::test]
+    async fn 读文本遇非utf8字节报明确错误() {
+        // 合法 JSON 外层 + 正文里的孤立 0x80（UTF-8 里非法）：能过 JSON 解析，只有严格解码能拦
+        let mut body = b"{\"content\":\"".to_vec();
+        body.push(0x80);
+        body.extend_from_slice(b"\",\"version\":\"v1\"}");
+        let (base, server) = spawn_raw_server(vec![(200, "OK", body)]);
+        let client = SpaceClient::new(&base, "tok".to_string()).expect("回环放行");
+        let err = client
+            .get_file_text_versioned("s1", "notes/a.md")
+            .await
+            .expect_err("非 UTF-8 不得按文本返回");
+        assert!(
+            matches!(err, SpaceError::NotUtf8(_)),
+            "应回 NotUtf8 而不是替换字符：{err:?}"
+        );
+        assert_eq!(err.to_string(), "文件非 UTF-8 文本，已拒绝以文本方式读取");
+        server.join().expect("服务端线程不 panic");
+    }
+
+    /// 合法 UTF-8 文本照旧可读：严格解码不得误伤正常正文（含 CJK 与多字节边界）。
+    #[tokio::test]
+    async fn 读文本合法utf8照常返回() {
+        let body = r#"{"content":"正文😀尾","version":"v2"}"#.as_bytes().to_vec();
+        let (base, server) = spawn_raw_server(vec![(200, "OK", body)]);
+        let client = SpaceClient::new(&base, "tok".to_string()).expect("回环放行");
+        let (text, version) = client
+            .get_file_text_versioned("s1", "notes/a.md")
+            .await
+            .expect("合法 UTF-8 应可读");
+        assert_eq!(text, "正文😀尾");
+        assert_eq!(version.as_deref(), Some("v2"));
+        server.join().expect("服务端线程不 panic");
+    }
+
+    /// 错误体为空 / 读不到时文案必须含状态码：空串在壳侧会显示成「操作失败」并丢掉定位线索。
+    /// 401 例外——空体仍给用户可读的「会话已失效」，状态码附在其后。
+    #[tokio::test]
+    async fn 错误体为空时文案含状态码() {
+        for (code, reason, expected_prefix) in [
+            (400, "Bad Request", "HTTP 400"),
+            (401, "Unauthorized", "会话已失效（HTTP 401"),
+            (500, "Internal Server Error", "HTTP 500"),
+        ] {
+            let (base, server) = spawn_raw_server(vec![(code, reason, Vec::new())]);
+            let client = SpaceClient::new(&base, "tok".to_string()).expect("回环放行");
+            let err = client
+                .get_file_text("s1", "a.md")
+                .await
+                .expect_err("非 2xx 必报错");
+            let text = err.to_string();
+            assert!(
+                text.contains(expected_prefix),
+                "错误体为空时文案须含状态码：{text}"
+            );
+            server.join().expect("服务端线程不 panic");
+        }
+    }
+
+    /// 错误体带服务端原文时按原样带回，不被状态码文案覆盖。
+    #[tokio::test]
+    async fn 错误体有原文时优先用原文() {
+        let body = r#"{"error":"非 UTF-8 文本，请用 base64 读取（?encoding=base64）"}"#.as_bytes().to_vec();
+        let (base, server) = spawn_raw_server(vec![(400, "Bad Request", body)]);
+        let client = SpaceClient::new(&base, "tok".to_string()).expect("回环放行");
+        let err = client.get_file_text("s1", "a.md").await.expect_err("400 必报错");
+        assert_eq!(err.to_string(), "非 UTF-8 文本，请用 base64 读取（?encoding=base64）");
         server.join().expect("服务端线程不 panic");
     }
 
