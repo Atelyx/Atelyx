@@ -1074,6 +1074,11 @@ pub fn edit_draft(app: &mut App, edit: impl FnOnce(&mut AiDraft)) {
 /// 模板输入面事件落地：草稿突变、选区、焦点、组合串与撤销重做。
 pub fn on_prompt_input(app: &mut App, event: chat_input::InputEvent) {
     use chat_input::InputEvent;
+    // 剪切未写入剪贴板要出声：模板面没有独立提示位，统一走应用级提示
+    if matches!(event, InputEvent::CutFailed) {
+        app.notify(crate::NoticeLevel::Warning, "剪贴板被占用，未剪切（文本已保留）");
+        return;
+    }
     edit_draft(app, |draft| match event {
         InputEvent::Focus => draft.prompt.focused = true,
         InputEvent::Blur => draft.prompt.focused = false,
@@ -1087,7 +1092,7 @@ pub fn on_prompt_input(app: &mut App, event: chat_input::InputEvent) {
         }
         InputEvent::Undo => draft.prompt.undo_step(),
         InputEvent::Redo => draft.prompt.redo_step(),
-        // 模板内 Enter 换行，发送与候选浮层事件不适用；剪切失败无面板级提示位，按无操作处理
+        // 模板内 Enter 换行，发送与候选浮层事件不适用（CutFailed 已在入口处理）
         InputEvent::Send
         | InputEvent::PickerNav(_)
         | InputEvent::PickerCommit
