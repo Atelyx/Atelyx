@@ -4,7 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use iced::widget::text::Span;
+use iced::widget::text::{Span, Wrapping};
 use iced::widget::{button, column, container, row};
 use iced::{border, Length, Padding};
 use serde_json::{json, Value};
@@ -17,9 +17,6 @@ use crate::ui::{controls, palette as pal};
 use crate::ui::scroll;
 use crate::ui::text;
 use crate::Message;
-
-/// 折叠态摘要的单行字符上限（中英文混排按字符计）。
-const SUMMARY_LINE_CHARS: usize = 56;
 
 /// 折叠块开合的消息路由（开合状态落在谁的视图状态里由调用方定）。
 #[derive(Debug, Clone, Copy)]
@@ -399,18 +396,44 @@ struct StepBlock<'a> {
     empty_hint: &'a str,
 }
 
-/// 可折叠步骤块（思考 / 工具共用）：折叠态一行，展开态正文（超高滚动）。
-/// 展开集由调用方自持（键 = 消息 id + 步骤序），开合经 [`ToggleRoute`] 路由。
-/// 折叠块摘要单行化：换行折叠为空格 + 按字符数截断加省略号（工具结果天然多行）。
-fn one_line(s: &str, cap_chars: usize) -> String {
-    let mut out: String = s.chars().filter(|c| !c.is_control()).take(cap_chars + 1).collect();
-    if out.chars().count() > cap_chars {
-        out = out.chars().take(cap_chars).collect();
-        out.push('\u{2026}');
-    }
-    out
+/// 折叠块摘要单行化：换行与制表并成空格、其余控制符丢弃（工具结果天然多行）。
+fn one_line(s: &str) -> String {
+    s.chars()
+        .filter_map(|c| match c {
+            '\n' | '\t' => Some(' '),
+            c if c.is_control() => None,
+            c => Some(c),
+        })
+        .collect()
 }
 
+/// 折叠块摘要槽：只占头部剩余宽，按实测宽截断加省略号并单行排版。
+/// 摘要取自工具参数 / 结果，宽度远超剩余宽时若允许换行会把头部撑成两三行。
+fn summary_slot(summary: String, size: f32, mono: bool) -> iced::Element<'static, Message> {
+    let font = if mono { crate::ui::mono() } else { crate::ui::regular() };
+    iced::widget::responsive(move |bounds| {
+        let max_width = bounds.width.max(0.0);
+        let clipped = crate::ui::text::ellipsize(&summary, max_width, |candidate| {
+            crate::ui::text::measure(candidate, size, font)
+        });
+        container(
+            text(clipped)
+                .size(size)
+                .color(pal::TEXT_MUTED)
+                .font(font)
+                .wrapping(Wrapping::None),
+        )
+        .width(Length::Fill)
+        .clip(true)
+        .into()
+    })
+    .width(Length::Fill)
+    .height(Length::Shrink)
+    .into()
+}
+
+/// 可折叠步骤块（思考 / 工具共用）：折叠态一行，展开态正文（超高滚动）。
+/// 展开集由调用方自持（键 = 消息 id + 步骤序），开合经 [`ToggleRoute`] 路由。
 fn details_block<'a>(
     ctx: &StreamCtx<'a>,
     key: &str,
@@ -436,17 +459,18 @@ fn details_block<'a>(
     for item in leading {
         head = head.push(item);
     }
-    head = head.push(text(title).size(pal::fs_micro() * s).color(pal::TEXT_SECONDARY));
+    head = head.push(
+        text(title)
+            .size(pal::fs_micro() * s)
+            .color(pal::TEXT_SECONDARY)
+            .wrapping(Wrapping::None),
+    );
     if !summary.is_empty() {
-        // 折叠态头部恒一行：超长摘要视图层截断（展开正文仍完整），防头部被撑成多行
-        let mut summary_text =
-            text(one_line(&summary, SUMMARY_LINE_CHARS))
-                .size(pal::fs_micro() * s)
-                .color(pal::TEXT_MUTED);
-        if mono_summary {
-            summary_text = summary_text.font(crate::ui::mono());
-        }
-        head = head.push(summary_text);
+        head = head.push(summary_slot(
+            one_line(&summary),
+            pal::fs_micro() * s,
+            mono_summary,
+        ));
     }
     let toggle_msg = match ctx.toggle {
         ToggleRoute::Panel => Message::Chat(ChatMsg::ToggleStep(key.to_string())),
