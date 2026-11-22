@@ -3754,6 +3754,9 @@ fn edit_view(app: &App) -> Element<'_, Message> {
                 let covered =
                     !revealed && sel_to > sel_from && sel_from < to && sel_to > from;
                 let source = row.source;
+                // 揭示态源码面的左内缩只余行装饰：标记列由源码自身承担，
+                // 沿用富渲染行的内缩会把落点与光标整体右移一个标记列
+                let indent = row.indent_for(revealed);
                 let element: Element<'_, Message> = if revealed {
                     row.revealed(source_block_element(
                         app,
@@ -3773,7 +3776,7 @@ fn edit_view(app: &App) -> Element<'_, Message> {
                     to,
                     revealed,
                     runs: row.runs,
-                    indent: row.indent,
+                    indent,
                     source,
                     code: row.code,
                     covered,

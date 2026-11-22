@@ -363,7 +363,8 @@ pub enum HitTarget {
     Offset(usize),
     /// 无逐字映射的富渲染行（表格 / 图片 / 分隔线等）：按行内上下半区吸到行首 / 行尾。
     RowEdge { from: usize, to: usize, upper: bool },
-    /// 已揭示行：按其源码排版精确换算落点。
+    /// 已揭示行：按其源码排版精确换算落点。`point` / `width` 已是源码面自身坐标
+    /// （编辑面扣掉行装饰内缩），源码面内不再有标记列。
     SourceText { from: usize, to: usize, source: SourceKind, point: Point, width: f32 },
     /// 代码正文内的局部坐标（相对正文文本左上角）：正文在面板内层滚动容器里，
     /// 原点不可由外部推得，故由正文自己上报。
@@ -1468,7 +1469,8 @@ pub(crate) enum SurfaceRow<'a> {
         revealed: bool,
         /// 可见片段（富渲染行的落点探针）；无逐字映射的富渲染行为空。
         runs: Vec<LineRun>,
-        /// 可见片段相对行左缘的横向偏移。
+        /// 行内容相对行左缘的横向偏移：富渲染行让开本项标记列，揭示态只余行装饰
+        /// （源码面自带标记串）。落点换算与光标自绘都按它折算坐标。
         indent: f32,
         /// 探针排版口径（与富渲染同一字号行高）。
         source: SourceKind,
@@ -1743,7 +1745,15 @@ impl<'a> EditSurface<'a> {
             RowHit::Row(i, local, width, height) => match &self.rows[i] {
                 SurfaceRow::Row { from, to, revealed, runs, indent, source, code, .. } => {
                     if *revealed {
-                        HitTarget::SourceText { from: *from, to: *to, source: *source, point: local, width }
+                        // 源码面自带行内缩，落点须先折算到它的坐标（行内元素从内缩处起排）
+                        let local = Point::new(local.x - *indent, local.y);
+                        HitTarget::SourceText {
+                            from: *from,
+                            to: *to,
+                            source: *source,
+                            point: local,
+                            width: width - *indent,
+                        }
                     } else if !runs.is_empty() {
                         match probe_offset(runs, source, width, *indent, local) {
                             Some(offset) => HitTarget::Offset(offset),
@@ -2813,6 +2823,67 @@ mod tests {
                 assert!(back <= offset, "偏移 {offset} 收到字符起点");
             }
         }
+    }
+
+    /// 揭示行的落点须先扣行装饰内缩：源码面从行装饰之后起排，标记列由源码自身承担。
+    /// 嵌套列表下层装饰内缩逐层累加，不扣就会把光标推到落点右侧。
+    #[test]
+    fn revealed_row_hit_subtracts_decoration_inset() {
+        // 第二行是上一行的子项：装饰内缩 = 一个标记列宽
+        let body = "- 甲\n  - 乙\n";
+        let item_from = 8;
+        let item_to = 13;
+        let decor = crate::ui::text::measure_per_char(
+            "- ",
+            crate::markdown_view::base_size(),
+            crate::ui::regular(),
+        );
+        let pal = EditPalette {
+            text: Color::BLACK,
+            muted: Color::BLACK,
+            accent: Color::BLACK,
+            panel: Color::TRANSPARENT,
+            mark_bg: Color::TRANSPARENT,
+        };
+        let source =
+            SourceKind::Prose { size: crate::markdown_view::base_size(), line_height: 1.625 };
+        let probe: CaretProbeSlot = Rc::new(RefCell::new(CaretProbe::default()));
+        let cursors: Vec<crate::RemoteCursorView> = Vec::new();
+        let rows = vec![SurfaceRow::Row {
+            from: item_from,
+            to: item_to,
+            revealed: true,
+            runs: Vec::new(),
+            indent: decor,
+            source,
+            code: None,
+            covered: false,
+            element: iced::widget::Space::new().into(),
+        }];
+        let surface = EditSurface::new(
+            rows,
+            pal,
+            body,
+            item_from,
+            item_from,
+            None,
+            true,
+            false,
+            NoteBindings::default(),
+            &cursors,
+            0,
+            probe,
+            false,
+        );
+        // 点在 "- " 之后（正文首字左缘）：局部坐标 = 装饰内缩 + 标记串宽
+        let local = Point::new(decor + decor, 8.0);
+        let target = surface.target_of(RowHit::Row(0, local, 600.0, 24.0));
+        let HitTarget::SourceText { from, to, source, point, width } = target else {
+            panic!("揭示行应走源码排版换算");
+        };
+        let opts = crate::markdown_view::link_options();
+        let offset = offset_in_block(body, from, to, &source, width, point, &opts);
+        assert_eq!(offset, 10, "落点应换算到正文首字（'乙'）之前");
     }
 
     /// 组合串字宽须等于绘制末字的右缘（竖条才落在拼音末尾）：同参数造单 span 段落取几何比对；

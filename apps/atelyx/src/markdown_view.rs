@@ -752,6 +752,15 @@ impl<'a> EditRow<'a> {
     pub fn revealed(&self, inner: Element<'a, Message>) -> Element<'a, Message> {
         wrap_row(&self.wraps, inner)
     }
+
+    /// 行的左内缩：富渲染行的可见片段让开标记列；揭示态源码面自带标记，只余行装饰。
+    pub fn indent_for(&self, revealed: bool) -> f32 {
+        if revealed {
+            wrap_indent(&self.wraps)
+        } else {
+            self.indent
+        }
+    }
 }
 
 /// 编辑档行清单入口（富渲染 + 源锚 + 可见片段）。
@@ -2740,6 +2749,27 @@ mod tests {
         let images = ImageHandles::default();
         let rows = edit_rows(source, &doc.blocks, &iced::Theme::Dark, &images);
         assert_eq!(rows[0].indent, LIST_MARKER_W);
+    }
+
+    /// 揭示态源码面自带标记列：行内缩只余行装饰，否则落点与光标整体右移一个标记列
+    /// （嵌套列表越深偏得越多）。
+    #[test]
+    fn revealed_rows_inset_only_counts_decorations() {
+        let source = "- 甲\n  - 乙\n    - 丙\n";
+        let doc = parse_document(source);
+        let images = ImageHandles::default();
+        let rows = edit_rows(source, &doc.blocks, &iced::Theme::Dark, &images);
+        let items: Vec<&EditRow<'_>> =
+            rows.iter().filter(|row| row.kind == RowKind::Unit).collect();
+        assert_eq!(items.len(), 3);
+        let marker = marker_column_width("- ", 1.0);
+        for (depth, row) in items.iter().enumerate() {
+            let decorations = wrap_indent(&row.wraps);
+            assert_eq!(decorations, marker * depth as f32, "第 {depth} 层的装饰内缩");
+            assert_eq!(row.indent, decorations + marker, "富渲染行让出本项标记列");
+            assert_eq!(row.indent_for(false), row.indent);
+            assert_eq!(row.indent_for(true), decorations);
+        }
     }
 
     #[test]
