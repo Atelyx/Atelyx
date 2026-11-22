@@ -383,12 +383,13 @@ impl PluginHandler for Todo {
 | `button` / `ghost_button` / `button_enabled` / `ghost_button_enabled` | 常规底 / 无底色 / 带禁用态，点击回 `Click { id }` |
 | `text_input(id, value, placeholder)` | 单行输入框；`text_input_sized` 固定宽，`text_input_password` 密文；回车回 `Submit { id }` |
 | `text_area(id, value, placeholder, height)` | 多行输入框：软换行与显式换行都排，回车**插入换行**不回 `Submit`，上下键 / 行首尾键按可视行走，光标超出内框时纵向跟随。`text_area_submit` 是回车提交、Shift+回车换行的变体（聊天输入） |
-| `select(id, options, selected)` | 下拉；选中回 `Select { id, index }`，展开时**就地撑开**后续内容 |
+| `select(id, options, selected)` / `select_overlay(...)` | 下拉；选中回 `Select { id, index }`。`select` 展开时**就地撑开**后续内容；`select_overlay` 浮层展开不挤占布局，按面内可用空间上下翻转、限高可滚，菜单外页面照常滚动 |
 | `checkbox(id, checked, label)` | 勾选，点击回 `Click { id }`（勾选值由插件自己翻转） |
 | `chip(label, color)` | 小号圆角徽标（计数 / 状态标签），不承接点击 |
 | `icon_button(id, Icon)` / `icon(Icon)` | 方形图标钮（回 `Click`）/ 纯装饰图标；内置 `Copy` / `Refresh` / `Eraser` / `Download` / `Search` / `HardDrive` / `Wrench` / `FileText` / `Box` |
 | `progress(value)` | 0–1 的进度条 |
 | `card(id, selected, ...)` | 整块可点卡片（选中档强调底色与描边），回 `Click` / `RightClick`；子控件压住卡片的命中 |
+| `card_with_cursor(id, selected, cursor, ...)` | 同上但自定命中光标；声明 `Grab` / `Grabbing` 时整块可拖，回 `DragStart` / `Drag` / `DragEnd`，拖动后抬起不算点击 |
 | `card_with_shadow(id, selected, shadow, ...)` | 同上并给卡片加投影（`shadow(offsetX, offsetY, blur, color)` 构造） |
 | `overlay(rect, ...)` | 覆盖层：子项按 `rect` 浮在主内容之后绘制，整块承接点击（子控件优先，空白处不穿透下层）；打开期间滚轮只落到浮层内声明过的滚动容器 |
 | `panel(...)` | 圆角表面容器，承接子项、不承接点击 |

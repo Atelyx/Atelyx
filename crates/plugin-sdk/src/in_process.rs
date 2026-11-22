@@ -24,11 +24,13 @@ use crate::surface::AbiSurface;
 
 /// 会话线程自行收尾的等待上限：超时即视为仍在库内运行，动态库不能卸载。
 const JOIN_TIMEOUT: Duration = Duration::from_secs(3);
+/// 宿主下行队列上限：插件长期不读时按 `SEND_DROPPED` 报给宿主，不无限吃内存。
+const INBOX_LIMIT: usize = 1024;
 
 /// 一个插件会话。句柄即本结构的裸指针，生命周期由宿主的 create / destroy 配对决定。
 struct Session {
     /// 宿主 → 插件的投递口；摘掉即让插件读端读到 EOF。
-    incoming: Mutex<Option<tokio_mpsc::UnboundedSender<Vec<u8>>>>,
+    incoming: Mutex<Option<tokio_mpsc::Sender<Vec<u8>>>>,
     /// 会话线程结束信号。
     done: Receiver<()>,
     /// 会话线程 id：宿主在插件线程上调用 destroy 时不能自己等自己。
@@ -101,7 +103,7 @@ impl HostLink {
 
 /// 读端：宿主下发的字节按到达序进队，通道关闭等价于管道读到结尾。
 struct Incoming {
-    rx: tokio_mpsc::UnboundedReceiver<Vec<u8>>,
+    rx: tokio_mpsc::Receiver<Vec<u8>>,
     buf: Vec<u8>,
     pos: usize,
 }
@@ -183,7 +185,7 @@ pub unsafe fn serve<H: PluginHandler>(
         version: cstr(api.plugin_version).unwrap_or_default(),
     };
 
-    let (in_tx, in_rx) = tokio_mpsc::unbounded_channel::<Vec<u8>>();
+    let (in_tx, in_rx) = tokio_mpsc::channel::<Vec<u8>>(INBOX_LIMIT);
     let (out_tx, out_rx) = tokio_mpsc::unbounded_channel::<Vec<u8>>();
     let (done_tx, done_rx) = mpsc::channel::<()>();
     let session_thread = Arc::new(Mutex::new(None::<ThreadId>));
@@ -246,10 +248,11 @@ pub unsafe fn deliver(handle: crate::abi::PluginHandle, ptr: *const u8, len: usi
     let Some(tx) = incoming.as_ref() else {
         return crate::abi::SEND_CLOSED;
     };
-    match tx.send(bytes) {
-        // 队列无界：入队即算送达；插件长期不读由宿主侧的投递限流兜住
+    match tx.try_send(bytes) {
         Ok(()) => crate::abi::SEND_OK,
-        Err(_) => crate::abi::SEND_CLOSED,
+        // 队列满：如实报「丢弃」，宿主按限频记日志，不阻塞宿主回调
+        Err(tokio_mpsc::error::TrySendError::Full(_)) => crate::abi::SEND_DROPPED,
+        Err(tokio_mpsc::error::TrySendError::Closed(_)) => crate::abi::SEND_CLOSED,
     }
 }
 
@@ -347,7 +350,7 @@ fn run_session(
     plugin: PluginInfo,
     handler: Arc<dyn PluginHandler>,
     surfaces: Surfaces,
-    in_rx: tokio_mpsc::UnboundedReceiver<Vec<u8>>,
+    in_rx: tokio_mpsc::Receiver<Vec<u8>>,
     out_tx: tokio_mpsc::UnboundedSender<Vec<u8>>,
     mut out_rx: tokio_mpsc::UnboundedReceiver<Vec<u8>>,
 ) -> Result<(), String> {

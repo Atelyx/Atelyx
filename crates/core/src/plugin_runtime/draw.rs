@@ -393,6 +393,14 @@ unsafe extern "C" fn sink_hit(ctx: *mut c_void, hit: *const abi::AbiHit) {
     let Some(hit) = hit.as_ref() else {
         return;
     };
+    if ctx.hits.len() >= frame::MAX_HITS {
+        ctx.reject(format!("命中区不得超过 {}", frame::MAX_HITS));
+        return;
+    }
+    if hit.id.len > frame::MAX_HIT_ID_LEN {
+        ctx.reject(format!("命中区 id 不得超过 {} 字节", frame::MAX_HIT_ID_LEN));
+        return;
+    }
     let Some(id) = hit.id.read() else {
         ctx.reject("命中区 id 不可读".into());
         return;

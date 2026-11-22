@@ -154,6 +154,7 @@ impl FrameUi {
             self.state.scroll_max = out.scroll_max;
             self.state.follow_prev = out.follow_prev;
             self.state.overlays = out.overlays;
+            self.state.float_menus = out.float_menus;
             self.state.overlay_scrolls = out.overlay_scrolls;
             // Markdown 缓存按条数上限收敛：滚出视口的内容不再算「本帧用到」，不能被立即剪掉
             if self.state.markdown.len() > MAX_MARKDOWN_CACHE {
@@ -487,6 +488,15 @@ mod tests {
         frame.hits.iter().any(|hit| hit.id == id)
     }
 
+    fn hit_top(frame: &SurfaceFrame, id: &str) -> Option<f32> {
+        frame.hits.iter().find(|hit| hit.id == id).map(|hit| hit.y)
+    }
+
+    /// 命中声明序：宿主按声明逆序取最上面的一条，后声明者压住先声明者。
+    fn hit_order(frame: &SurfaceFrame, id: &str) -> Option<usize> {
+        frame.hits.iter().position(|hit| hit.id == id)
+    }
+
     /// 某个坐标上最后声明的命中（宿主取最上面的一条）。
     fn top_hit(frame: &SurfaceFrame, x: f32, y: f32) -> Option<&str> {
         frame
@@ -767,6 +777,125 @@ mod tests {
 
         let events = bench.click_and_collect("mirror::option:1").await;
         assert_eq!(events, vec![UiEvent::Select { id: "mirror".into(), index: 1 }]);
+    }
+
+    #[tokio::test]
+    async fn select_overlay_floats_over_content_without_moving_it() {
+        let mut bench = Bench::new(240.0, 200.0).await;
+        let options = vec!["hf".to_string(), "hf-mirror".to_string()];
+        let build = |ui: &mut build::Ui<'_, '_>| {
+            ui.column(6.0, |c| {
+                c.select_overlay("mirror", options.clone(), 0);
+                c.button("below", "下面");
+            });
+        };
+        let closed = bench.draw(build);
+        let y_closed = hit_top(&closed, "below").expect("下方按钮有命中");
+        assert!(!has_hit(&closed, "mirror::option:1"), "未展开时没有选项行");
+
+        bench.click_and_collect("mirror").await;
+        let open = bench.draw(build);
+        assert_eq!(hit_top(&open, "below"), Some(y_closed), "展开不撑开布局，下方内容不跳动");
+        assert!(has_hit(&open, "mirror::option:1"), "选项以浮层出现");
+        assert!(
+            hit_order(&open, "mirror::option:0") > hit_order(&open, "below"),
+            "浮层命中声明在主内容之后，压住下方内容"
+        );
+
+        let events = bench.click_and_collect("mirror::option:1").await;
+        assert_eq!(events, vec![UiEvent::Select { id: "mirror".into(), index: 1 }]);
+    }
+
+    #[tokio::test]
+    async fn select_overlay_inside_an_overlay_expands_inline_instead_of_vanishing() {
+        let mut bench = Bench::new(240.0, 200.0).await;
+        let build = |ui: &mut build::Ui<'_, '_>| {
+            ui.overlay(Rect::new(20.0, 20.0, 200.0, 140.0), |o| {
+                o.column(6.0, |c| {
+                    c.select_overlay("inner", vec!["一".to_string(), "二".to_string()], 0);
+                    c.button("ok", "确定");
+                });
+            });
+        };
+        bench.draw(build);
+        bench.click_and_collect("inner").await;
+        let frame = bench.draw(build);
+        assert!(has_hit(&frame, "inner::option:1"), "浮层里的下拉就地展开，不回落成收不到的浮层");
+
+        let events = bench.click_and_collect("inner::option:1").await;
+        assert_eq!(events, vec![UiEvent::Select { id: "inner".into(), index: 1 }]);
+    }
+
+    #[tokio::test]
+    async fn select_overlay_menu_scrolls_itself_without_blocking_the_page() {
+        let mut bench = Bench::new(240.0, 200.0).await;
+        let options: Vec<String> = (0..30).map(|index| format!("选项{index}")).collect();
+        let build = {
+            let options = options.clone();
+            move |ui: &mut build::Ui<'_, '_>| {
+                ui.scroll("page", 6.0, |s| {
+                    s.select_overlay("mirror", options.clone(), 0);
+                    for index in 0..12 {
+                        s.button(format!("row{index}"), format!("行{index}"));
+                    }
+                });
+            }
+        };
+        bench.draw(&build);
+        bench.click_and_collect("mirror").await;
+        let frame = bench.draw(&build);
+        assert!(!has_hit(&frame, "mirror::option:29"), "长列表按菜单高度截住");
+        let row = frame.hits.iter().find(|hit| hit.id == "mirror::option:5").cloned().expect("第五行有命中");
+
+        let events = bench
+            .event(FrameInput::Wheel { x: row.x + 8.0, y: row.y + row.h / 2.0, delta_x: 0.0, delta_y: 100.0, hit: None })
+            .await;
+        assert!(
+            matches!(events.as_slice(), [UiEvent::Scroll { id, .. }] if id == "mirror::menu"),
+            "滚轮落在菜单上只滚菜单：{events:?}"
+        );
+        let frame = bench.draw(&build);
+        assert!(!has_hit(&frame, "mirror::option:0"), "菜单自身滚走了首行");
+        assert!(has_hit(&frame, "mirror::option:8"), "滚出的下一段可见");
+
+        // 键盘也要能把高亮行滚进视口，否则选到不可见的行
+        for _ in 0..12 {
+            bench.event(key(NamedKey::ArrowDown)).await;
+        }
+        let frame = bench.draw(&build);
+        assert!(has_hit(&frame, "mirror::option:11"), "键盘移到第 12 项时菜单跟到该行");
+
+        let events = bench
+            .event(FrameInput::Wheel { x: 60.0, y: 10.0, delta_x: 0.0, delta_y: 100.0, hit: None })
+            .await;
+        assert!(
+            matches!(events.as_slice(), [UiEvent::Scroll { id, .. }] if id == "page"),
+            "菜单之外页面照常滚动，不把整面滚轮吞掉：{events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn card_with_grab_cursor_reports_drag_instead_of_click() {
+        let mut bench = Bench::new(200.0, 120.0).await;
+        let build = |ui: &mut build::Ui<'_, '_>| {
+            ui.card_with_cursor("job", false, HitCursor::Grab, |c| {
+                c.text("任务", TextRole::Label);
+            });
+        };
+        let frame = bench.draw(build);
+        let row = frame.hits.iter().find(|hit| hit.id == "job").cloned().expect("卡片有命中");
+        let (x, y) = (row.x + 10.0, row.y + row.h / 2.0);
+        bench.event(FrameInput::PointerDown { x, y, button: MouseButton::Left, hit: Some("job".into()) }).await;
+        let events = bench.event(FrameInput::PointerMove { x: x + 40.0, y, hit: None }).await;
+        assert_eq!(
+            events,
+            vec![UiEvent::DragStart { id: "job".into() }, UiEvent::Drag { id: "job".into(), dx: 40.0, dy: 0.0 }],
+            "声明拖动光标的卡片按下后进入拖拽"
+        );
+        let events = bench
+            .event(FrameInput::PointerUp { x: x + 40.0, y, button: MouseButton::Left, hit: None })
+            .await;
+        assert_eq!(events, vec![UiEvent::DragEnd { id: "job".into(), dx: 40.0, dy: 0.0 }], "抬起只收尾，不再算点击");
     }
 
     #[tokio::test]

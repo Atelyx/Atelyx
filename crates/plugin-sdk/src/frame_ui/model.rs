@@ -103,6 +103,8 @@ pub(crate) struct UiState {
     pub markdown_layouts: Arc<markdown::LayoutCache>,
     /// 上一帧声明的浮层区域：有浮层时滚轮只作用于浮层内的滚动区。
     pub overlays: Vec<Rect>,
+    /// 浮动下拉菜单：区域与自己的滚动容器 id，滚轮优先作用在这里。
+    pub float_menus: Vec<(Rect, String)>,
     /// 浮层内的滚动容器 id：浮层打开时不把滚轮落到下层列表。
     pub overlay_scrolls: std::collections::HashSet<String>,
 }
@@ -129,6 +131,7 @@ impl Default for UiState {
             markdown: HashMap::new(),
             markdown_layouts: Arc::default(),
             overlays: Vec::new(),
+            float_menus: Vec::new(),
             overlay_scrolls: std::collections::HashSet::new(),
         }
     }

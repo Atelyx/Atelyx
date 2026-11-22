@@ -33,13 +33,25 @@ pub(crate) struct BuildCtx<'a> {
     /// 光标声明为拖动形态的子区：按下它们才建拖拽候选。
     pub draggables: HashSet<String>,
     /// 浮层：主内容布局完成后按声明序绘制，指令与命中区都压在主内容之上。
-    pub overlays: Vec<(Rect, Vec<Item>)>,
+    pub overlays: Vec<Overlay>,
     /// 已布局的浮层区域（随帧交给状态，供滚轮隔离判定）。
     pub overlay_rects: Vec<Rect>,
-    /// 正在绘制浮层：滚动容器据此记入 `overlay_scrolls`（滚轮隔离）。
-    in_overlay: bool,
+    /// 非模态浮层（浮动下拉菜单）：区域与它自己的滚动容器 id，滚轮优先落在这里。
+    pub float_menus: Vec<(Rect, String)>,
+    /// 正在绘制浮层：滚动容器据此记入 `overlay_scrolls`（滚轮隔离）；
+    /// 控件也据此判断「已在浮层内」，不再往下开子浮层。
+    pub(crate) in_overlay: bool,
     /// 浮层内的滚动容器 id。
     pub overlay_scrolls: HashSet<String>,
+}
+
+/// 一层浮层：子项、区域，以及滚轮归属。
+/// 模态浮层由 `owns_wheel` 独占整个面；浮动下拉菜单用 `wheel_target` 指向自己的滚动容器。
+pub(crate) struct Overlay {
+    pub rect: Rect,
+    pub items: Vec<Item>,
+    pub owns_wheel: bool,
+    pub wheel_target: Option<String>,
 }
 
 pub(crate) struct BuildOut {
@@ -56,6 +68,7 @@ pub(crate) struct BuildOut {
     /// 光标声明为拖动形态的子区：按下它们才建拖拽候选。
     pub draggables: HashSet<String>,
     pub overlays: Vec<Rect>,
+    pub float_menus: Vec<(Rect, String)>,
     pub overlay_scrolls: HashSet<String>,
 }
 
@@ -78,6 +91,7 @@ impl<'a> BuildCtx<'a> {
             draggables: HashSet::new(),
             overlays: Vec::new(),
             overlay_rects: Vec::new(),
+            float_menus: Vec::new(),
             in_overlay: false,
             overlay_scrolls: HashSet::new(),
         }
@@ -148,6 +162,7 @@ impl<'a> BuildCtx<'a> {
             misses,
             draggables: self.draggables,
             overlays: self.overlay_rects,
+            float_menus: self.float_menus,
             overlay_scrolls: self.overlay_scrolls,
         }
     }
@@ -316,10 +331,14 @@ impl<'c, 'a> Ui<'c, 'a> {
     /// 浮层：内容按纵向容器排在 `rect` 内，主内容布局完成后整体追加绘制与命中区。
     /// 整块登记点击兜底（子项命中优先），空白处不穿透到下层；有浮层时滚轮只作用于浮层内的滚动区。
     pub fn overlay(&mut self, rect: Rect, build: impl FnOnce(&mut Ui<'_, 'a>)) {
+        // 构建期也算「在浮层内」：浮层里的下拉不再另开一层浮层，退回就地展开。
+        let outer = self.ctx.in_overlay;
+        self.ctx.in_overlay = true;
         let mut sub = Ui::new(&mut *self.ctx, rect);
         build(&mut sub);
         let items = sub.into_items();
-        self.ctx.overlays.push((rect, items));
+        self.ctx.in_overlay = outer;
+        self.ctx.overlays.push(Overlay { rect, items, owns_wheel: true, wheel_target: None });
     }
 }
 
@@ -339,8 +358,15 @@ pub(crate) fn layout_root(ctx: &mut BuildCtx<'_>, mut items: Vec<Item>, rect: Re
 pub(crate) fn layout_overlays(ctx: &mut BuildCtx<'_>) {
     let overlays = std::mem::take(&mut ctx.overlays);
     ctx.in_overlay = true;
-    for (index, (rect, items)) in overlays.into_iter().enumerate() {
-        ctx.overlay_rects.push(rect);
+    for (index, overlay) in overlays.into_iter().enumerate() {
+        let Overlay { rect, items, owns_wheel, wheel_target } = overlay;
+        // 只有模态浮层独占滚轮；下拉菜单的浮层只借绘制与命中顺序，不锁死页面滚动。
+        if owns_wheel {
+            ctx.overlay_rects.push(rect);
+        }
+        if let Some(target) = wheel_target {
+            ctx.float_menus.push((rect, target));
+        }
         // 浮层整块承接点击：子项随后登记，命中优先于这块兜底
         ctx.hit(&format!("@overlay:{index}"), rect, HitCursor::Default);
         draw_column(ctx, &items, rect, rect, 0.0);

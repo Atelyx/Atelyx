@@ -115,8 +115,37 @@ fn source_outside_root(root: &Path, src: &Path) -> Result<PathBuf, String> {
 }
 
 /// 卸载：删整个插件目录（安装内容、私有数据、上一代与启用标记都在其内）。调用方须先停插件。
+///
+/// `id` 来自命令行时不可信：先按清单的目录名规则校验，再确认落点恰为 `root/<id>` 一层，
+/// 防止 `..`、`.` 或绝对路径把删除扩到插件根之外。
 pub(crate) fn uninstall(root: &Path, id: &str) -> Result<(), String> {
-    remove_dir_all_with_retry(&layout::plugin_dir(root, id))
+    if !plugin_dir_id(id) {
+        return Err(format!("插件 id 非法：{id}"));
+    }
+    let dir = layout::plugin_dir(root, id);
+    let mut rel = dir.strip_prefix(root).map_err(|_| format!("插件目录越界：{id}"))?.components();
+    let (Some(std::path::Component::Normal(name)), None) = (rel.next(), rel.next()) else {
+        return Err(format!("插件目录越界：{id}"));
+    };
+    if name != std::ffi::OsStr::new(id) {
+        return Err(format!("插件目录越界：{id}"));
+    }
+    remove_dir_all_with_retry(&dir)
+}
+
+/// 目录名规则与清单 id 一致：反向域名、至少两段，段内只允许字母数字与 `-`。
+fn plugin_dir_id(id: &str) -> bool {
+    if id.starts_with('.') || id.contains(['/', '\\']) {
+        return false;
+    }
+    let labels: Vec<&str> = id.split('.').collect();
+    labels.len() >= 2
+        && labels.iter().all(|label| {
+            !label.is_empty()
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        })
 }
 
 /// 把已就绪的 `staged` 目录落位为 `<root>/<id>/`：旧内容轮换进 `previous/<ts>/`（只留一代），
@@ -717,6 +746,20 @@ mod tests {
         assert!(!layout::is_enabled(&root, &id), "安装只落位内容，不自动启用");
         uninstall(&root, &id).unwrap();
         assert!(!layout::plugin_dir(&root, &id).exists());
+    }
+
+    #[test]
+    fn uninstall_rejects_ids_outside_plugin_root() {
+        let tmp = TempDir::new("plugin-uninstall-traversal");
+        let root = plugin_root(&tmp);
+        std::fs::create_dir_all(&root).unwrap();
+        let sentinel = tmp.join("keep.txt");
+        std::fs::write(&sentinel, b"keep").unwrap();
+        for id in ["..", ".", "../keep", "com.example/../keep", r"C:\Windows"] {
+            assert!(uninstall(&root, id).is_err(), "越界 id 应被拒绝：{id}");
+        }
+        assert!(sentinel.exists(), "越界 id 不得删除插件根之外的内容");
+        assert!(root.exists(), "越界 id 不得删除插件根本身");
     }
 
     #[test]

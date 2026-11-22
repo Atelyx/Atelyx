@@ -104,6 +104,8 @@ pub(crate) struct Instance {
     last_write_error: Mutex<Option<Instant>>,
     /// 上次「绘制超预算」记日志的时刻（限频用）。
     last_slow_draw: Mutex<Option<Instant>>,
+    /// draw 期间回调宿主已记过一次违规：同一会话只提示一次，避免刷屏日志。
+    carrier_reentry_noted: AtomicBool,
     /// 已注册贡献点（按注册序）；id 插件内唯一，撤销按 id 摘除。
     contributions: Mutex<Vec<ContributionEntry>>,
     draws: AtomicU64,
@@ -200,6 +202,7 @@ impl Instance {
             surface_clocks: Mutex::new(HashMap::new()),
             last_write_error: Mutex::new(None),
             last_slow_draw: Mutex::new(None),
+            carrier_reentry_noted: AtomicBool::new(false),
             contributions: Mutex::new(Vec::new()),
             draws: AtomicU64::new(0),
             crash_times: Mutex::new(Vec::new()),
@@ -461,6 +464,7 @@ impl Instance {
             self.subscriptions.lock().unwrap().clear();
             self.undeclared_methods.lock().unwrap().clear();
             self.undeclared_calls.store(0, Ordering::Relaxed);
+            self.carrier_reentry_noted.store(false, Ordering::Relaxed);
             {
                 let mut frames = self.frames.lock().unwrap();
                 frames_dropped = !frames.is_empty();
@@ -657,6 +661,13 @@ impl Instance {
     pub(crate) fn note_carrier_garbled(self: &Arc<Self>, reason: &str) {
         self.log.line(&format!("[协议] 非 UTF-8 输出（已停机）：{reason}"));
         self.fail(format!("插件输出非协议内容（须为 UTF-8 信封）：{reason}"));
+    }
+
+    /// 插件在 draw 里回调宿主：宿主拒绝这次调用并记一条违规（会让阶段锁互等）。
+    pub(crate) fn note_carrier_reentry(&self) {
+        if !self.carrier_reentry_noted.swap(true, Ordering::SeqCst) {
+            self.log.line("[协议] draw 期间调用宿主能力面，已拒绝");
+        }
     }
 
     /// 承载送来的一行诊断输出：控制台 + 插件日志两处落点。
@@ -1827,6 +1838,9 @@ impl Instance {
 
     /// 告知插件某个面已移除（`host:surface.detached`）。
     pub(crate) fn notify_surface_detached(&self, surface_id: &str) {
+        // 面已不在布局里：收起该面的帧与节拍，否则已关面板仍按 fps 唤醒壳并保留整帧。
+        self.frames.lock().unwrap().remove(surface_id);
+        self.surface_clocks.lock().unwrap().remove(surface_id);
         let params = SurfaceDetachedParams { surface_id: surface_id.to_string() };
         self.notify(method::view::HOST_DETACHED, &params);
     }
@@ -1868,15 +1882,15 @@ impl Instance {
     }
 
     /// 向插件发一条宿主通知（`host:` 前缀方法）。进程未在跑时静默丢弃（对端已不在）。
-    fn notify(&self, method_name: &str, params: &impl Serialize) {
+    fn notify(&self, method_name: &str, params: &impl Serialize) -> bool {
         let params = match serde_json::to_value(params) {
             Ok(value) => value,
             Err(e) => {
                 eprintln!("[plugin {}] 通知 {method_name} 序列化失败：{e}", self.id);
-                return;
+                return false;
             }
         };
-        self.write_envelope(Envelope::notification(method_name, params), "通知");
+        self.write_envelope(Envelope::notification(method_name, params), "通知")
     }
 
     /// 取宿主运行时的强引用（弱引用失效 = 宿主已销毁）。
@@ -1889,13 +1903,14 @@ impl Instance {
     }
 
     /// 下发一次 AI 工具调用（`host:ai.toolCall`）；插件须用同一 `callId` 经 `ai.toolResult` 回报。
-    pub(crate) fn notify_tool_call(&self, call_id: &str, name: &str, arguments: Value) {
+    /// 返回是否送达承载：未送达时调用方应立即失败，而不是等满超时。
+    pub(crate) fn notify_tool_call(&self, call_id: &str, name: &str, arguments: Value) -> bool {
         let params = method::ToolCallParams {
             call_id: call_id.to_string(),
             name: name.to_string(),
             arguments,
         };
-        self.notify(method::ai::HOST_TOOL_CALL, &params);
+        self.notify(method::ai::HOST_TOOL_CALL, &params)
     }
 
     /// 记录一条能力调用。声明与否都执行——记录只提供知情：设置页据此区分「声明能力」与
@@ -1971,18 +1986,20 @@ impl Instance {
     }
 
     /// 写一条信封到插件（进程 stdin 或同进程函数表）。会话已停时静默丢弃（对端已不在）；
-    /// 写失败按限频记入插件日志。
-    fn write_envelope(&self, envelope: Envelope, what: &str) {
+    /// 写失败按限频记入插件日志。返回是否真正落到承载。
+    fn write_envelope(&self, envelope: Envelope, what: &str) -> bool {
         let Some(carrier) = self.carrier.lock().unwrap().clone() else {
             // 会话已收尾：对端已不在，静默丢弃
-            return;
+            return false;
         };
         // 行分隔必须保留：插件的读端按行切分信封，少一个换行就等于永不回执
         let mut line = envelope.to_line();
         line.push('\n');
         if let Err(e) = carrier.deliver(&line) {
             self.note_write_failure(what, &e);
+            return false;
         }
+        true
     }
 
     fn note_write_failure(&self, what: &str, reason: &str) {
@@ -3073,6 +3090,22 @@ api_version = 1
         assert!(instance.surface_frame("main").is_none());
         assert!(!instance.has_frame_ticks());
     }
+
+    /// 单面卸载同样收掉帧与节拍：关面板不经过贡献撤销，不能留下永久 8ms 唤醒。
+    #[test]
+    fn surface_detach_drops_frame_and_clock() {
+        let (_tmp, instance) = make_instance(Vec::new());
+        let frame = frame::SurfaceFrame { fps: Some(60), ..frame::SurfaceFrame::default() };
+        instance.frames.lock().unwrap().insert("main".into(), Arc::new(frame));
+        instance
+            .surface_clocks
+            .lock()
+            .unwrap()
+            .insert("main".into(), FrameClock::new(60, Instant::now()));
+        instance.notify_surface_detached("main");
+        assert!(instance.surface_frame("main").is_none());
+        assert!(!instance.has_frame_ticks(), "面卸载后不得再按 fps 唤醒");
+    }
     /// 等在途工具调用落表（发起任务被调度后才登记）。
     async fn wait_call_id(runtime: &PluginRuntime) -> String {
         for _ in 0..100 {
@@ -3092,6 +3125,8 @@ api_version = 1
         instance.attach_runtime(&runtime);
         instance.set_status(PluginStatus::Running);
         instance.session_active.store(true, Ordering::SeqCst);
+        // 真实会话一定有承载；单测装一个恒投递成功的空壳，验证下游登记与回报通路
+        *instance.carrier.lock().unwrap() = Some(carrier::Loaded::test_double(&instance));
         runtime
             .instances
             .lock()

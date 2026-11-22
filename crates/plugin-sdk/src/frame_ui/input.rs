@@ -7,6 +7,8 @@ use atelyx_plugin_protocol::method::MAX_MEASURE_ITEMS;
 use super::geom::Rect;
 use super::model::{Drag, FontSpec, InputState, Layout, Press, UiState};
 use super::text;
+use super::theme::OPTION_H;
+use super::widgets::menu_scroll_id;
 use crate::frame_ui::UiEvent;
 use crate::Context;
 
@@ -155,18 +157,19 @@ async fn pointer_down(
             let select = state.selects.entry(id.to_string()).or_default();
             select.open = !select.open;
             select.hover = None;
+            if select.open {
+                // 每次展开都从第一项开始看，不沿用上次滚到的位置
+                state.scroll.remove(&menu_scroll_id(id));
+            }
             state.press = Some(Press { id: id.to_string(), from_input: false });
         }
         Layout::Checkbox => {
             set_focus(state, Some(id.to_string()), value_of, events);
             state.press = Some(Press { id: id.to_string(), from_input: false });
         }
-        Layout::Button | Layout::Option { .. } => {
+        Layout::Button | Layout::Option { .. } | Layout::Custom => {
             state.press = Some(Press { id: id.to_string(), from_input: false });
-        }
-        Layout::Custom => {
-            state.press = Some(Press { id: id.to_string(), from_input: false });
-            // 只有光标声明为拖动形态的子区才吃拖拽；普通点选区的小抖动仍按点击解释
+            // 只有命中区声明拖动光标才吃拖拽（如可拖卡片）；普通点击的小抖动仍按点击解释
             if state.draggables.contains(id) {
                 state.drag = Some(Drag {
                     id: id.to_string(),
@@ -302,9 +305,22 @@ fn bar_offset(track: Rect, thumb: f32, max_offset: f32, y: f32) -> f32 {
 
 /// 滚轮改滚动偏移：增量是像素（宿主已把「行」换算成像素），按光标所在的最内层滚动容器走。
 fn wheel(state: &mut UiState, x: f32, y: f32, delta_y: f32) -> Option<UiEvent> {
-    // 浮层打开时滚轮只作用于浮层内：落点不在浮层上即丢弃，也不把滚动漏给下层列表
+    // 模态浮层打开时滚轮只作用于浮层内：落点不在浮层上即丢弃，也不把滚动漏给下层列表
     if !state.overlays.is_empty() && !state.overlays.iter().any(|rect| rect.contains(x, y)) {
         return None;
+    }
+    // 浮动下拉菜单不是模态浮层：滚轮落在菜单上时只滚菜单自己的选项，落到别处仍滚页面。
+    let target = state
+        .float_menus
+        .iter()
+        .find(|(rect, _)| rect.contains(x, y))
+        .map(|(_, id)| id.clone());
+    if let Some(target) = target {
+        let (content, viewport) = match state.layouts.get(&target) {
+            Some(Layout::Scroll { content, viewport }) => (*content, *viewport),
+            _ => return None,
+        };
+        return scroll_by(state, target, content, viewport, delta_y);
     }
     // 嵌套滚动区取面积最小者（最内层）：否则滚动会作用到外层容器上
     let (id, content, viewport) = state
@@ -320,6 +336,11 @@ fn wheel(state: &mut UiState, x: f32, y: f32, delta_y: f32) -> Option<UiEvent> {
             _ => None,
         })
         .min_by(|a, b| (a.2.w * a.2.h).total_cmp(&(b.2.w * b.2.h)))?;
+    scroll_by(state, id, content, viewport, delta_y)
+}
+
+/// 把一次滚轮增量落到指定滚动区，返回事件（没有实际位移时不出事件）。
+fn scroll_by(state: &mut UiState, id: String, content: f32, viewport: Rect, delta_y: f32) -> Option<UiEvent> {
     let max_offset = (content - viewport.h).max(0.0);
     let current = state.scroll.get(&id).copied().unwrap_or(0.0);
     let next = (current + delta_y).clamp(0.0, max_offset);
@@ -446,6 +467,34 @@ fn select_key(state: &mut UiState, id: &str, options: usize, key: &Key, events: 
         }
         _ => {}
     }
+    if select.open {
+        if let Some(index) = select.hover {
+            reveal_menu_option(state, id, index);
+        }
+    } else {
+        state.scroll.remove(&menu_scroll_id(id));
+    }
+}
+
+/// 浮层菜单限高后，键盘移动选项要把它滚进视口：否则高亮行落在可见区之外。
+fn reveal_menu_option(state: &mut UiState, id: &str, index: usize) {
+    let scroll_id = menu_scroll_id(id);
+    let Some(Layout::Scroll { content, viewport }) = state.layouts.get(&scroll_id) else {
+        return;
+    };
+    let (content, viewport) = (*content, *viewport);
+    let max_offset = (content - viewport.h).max(0.0);
+    let current = state.scroll.get(&scroll_id).copied().unwrap_or(0.0);
+    let top = OPTION_H * index as f32;
+    let bottom = top + OPTION_H - 2.0;
+    let next = if top < current {
+        top
+    } else if bottom > current + viewport.h {
+        bottom - viewport.h
+    } else {
+        current
+    };
+    state.scroll.insert(scroll_id, next.clamp(0.0, max_offset));
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -51,6 +51,18 @@ type ToolReplyTx = tokio::sync::oneshot::Sender<Result<PluginToolOutput, String>
 /// 在途工具调用：发起插件 id + 结果回传通道。
 pub(super) type ToolCallWait = (String, ToolReplyTx);
 
+/// 在途调用的清理卫兵：调用方取消（future 被丢弃）也要把登记摘掉。
+struct PendingCall<'a> {
+    calls: &'a std::sync::Mutex<std::collections::HashMap<String, ToolCallWait>>,
+    id: String,
+}
+
+impl Drop for PendingCall<'_> {
+    fn drop(&mut self) {
+        self.calls.lock().unwrap().remove(&self.id);
+    }
+}
+
 impl PluginRuntime {
     /// 注册一个工具。同一插件重复注册同名工具 = 原地更新描述与 schema；
     /// 与内置工具或其他插件重名、名称非法、描述为空、schema 非对象都报可读错误。
@@ -156,24 +168,28 @@ impl PluginRuntime {
             self.next_tool_call_id.fetch_add(1, Ordering::SeqCst)
         );
         let (tx, rx) = tokio::sync::oneshot::channel();
-        instance.with_active_session(|| {
+        let sent = instance.with_active_session(|| {
             self.tool_calls
                 .lock()
                 .unwrap()
                 .insert(call_id.clone(), (spec.plugin_id.clone(), tx));
-            instance.notify_tool_call(&call_id, &spec.name, arguments);
-            Ok(())
+            let sent = instance.notify_tool_call(&call_id, &spec.name, arguments);
+            if !sent {
+                self.tool_calls.lock().unwrap().remove(&call_id);
+            }
+            Ok(sent)
         })?;
+        if !sent {
+            return Err(format!("工具调用未送达插件：{name}"));
+        }
+        let _pending = PendingCall { calls: &self.tool_calls, id: call_id.clone() };
         match tokio::time::timeout(TOOL_CALL_TIMEOUT, rx).await {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => Err("工具调用已取消".to_string()),
-            Err(_) => {
-                self.tool_calls.lock().unwrap().remove(&call_id);
-                Err(format!(
-                    "工具调用超时（{} 秒内未回传结果）：{name}",
-                    TOOL_CALL_TIMEOUT.as_secs()
-                ))
-            }
+            Err(_) => Err(format!(
+                "工具调用超时（{} 秒内未回传结果）：{name}",
+                TOOL_CALL_TIMEOUT.as_secs()
+            )),
         }
     }
 

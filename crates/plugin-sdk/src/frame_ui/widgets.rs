@@ -4,11 +4,13 @@
 use std::rc::Rc;
 use std::sync::Arc;
 
-use atelyx_plugin_protocol::paint::{PaintPoint, DrawCommand, ImageFit, ImageSource, PaintShadow, TextAlign};
+use atelyx_plugin_protocol::paint::{
+    DrawCommand, ImageFit, ImageSource, PaintColor, PaintPoint, PaintShadow, TextAlign,
+};
 use atelyx_plugin_protocol::frame::HitCursor;
 use atelyx_plugin_protocol::paint::{ColorToken, TextFamily, TextWeight};
 
-use super::build::{child_height, child_width, column_height, draw_column, BuildCtx, Canvas, Item, Ui, Width};
+use super::build::{child_height, child_width, column_height, draw_column, BuildCtx, Canvas, Item, Overlay, Ui, Width};
 use super::geom::Rect;
 use super::model::{FontSpec, InputState, Layout};
 use super::text;
@@ -27,6 +29,12 @@ const CARD_PAD: f32 = 9.0;
 const CARD_GAP: f32 = 5.0;
 /// 提示块的内边距。
 const NOTICE_PAD: f32 = 8.0;
+/// 浮层菜单的投影：与下方内容拉开层次（就地展开的菜单在内层流程里，不投影）。
+const MENU_SHADOW: PaintShadow =
+    PaintShadow { offset_x: 0.0, offset_y: 4.0, blur: 12.0, color: PaintColor::Rgba { rgba: [0, 0, 0, 96] } };
+/// 浮层下拉最多显示的行数与离面边缘的余量：超出即在菜单内滚动。
+const FLOAT_MENU_MAX_ROWS: usize = 10;
+const FLOAT_MENU_MARGIN: f32 = 4.0;
 
 /// 多行输入框的垂直内边距。
 const AREA_PAD_Y: f32 = 6.0;
@@ -452,12 +460,34 @@ impl<'c, 'a> Ui<'c, 'a> {
         self.card_with_shadow(id, selected, None, build);
     }
 
+    /// 可点卡片，但命中区使用指定光标：整块仍承接点击，悬停时光标不一定是手型。
+    pub fn card_with_cursor(
+        &mut self,
+        id: impl Into<String>,
+        selected: bool,
+        cursor: HitCursor,
+        build: impl FnOnce(&mut Ui<'_, 'a>),
+    ) {
+        self.card_with_shadow_cursor(id, selected, None, cursor, build);
+    }
+
     /// 带投影的卡片：浮层里的卡片用它压住下层内容（投影先于填充绘制）。
     pub fn card_with_shadow(
         &mut self,
         id: impl Into<String>,
         selected: bool,
         shadow: Option<PaintShadow>,
+        build: impl FnOnce(&mut Ui<'_, 'a>),
+    ) {
+        self.card_with_shadow_cursor(id, selected, shadow, HitCursor::Pointer, build);
+    }
+
+    fn card_with_shadow_cursor(
+        &mut self,
+        id: impl Into<String>,
+        selected: bool,
+        shadow: Option<PaintShadow>,
+        cursor: HitCursor,
         build: impl FnOnce(&mut Ui<'_, 'a>),
     ) {
         let id = id.into();
@@ -492,7 +522,7 @@ impl<'c, 'a> Ui<'c, 'a> {
                     shadow,
                 });
                 // 命中区先于子项登记：宿主按声明逆序取最上面的命中，子控件才不会被子项之后的卡片命中盖住
-                ctx.hit(&id, visible, HitCursor::Pointer);
+                ctx.hit(&id, visible, cursor);
                 ctx.record(&id, Layout::Button);
                 let inner = Rect::new(
                     rect.x + CARD_PAD,
@@ -715,15 +745,28 @@ impl<'c, 'a> Ui<'c, 'a> {
         });
     }
 
-    /// 下拉：展开时就地撑开后续内容（不做覆盖式浮层，选项与触发钮连续排布）。
+    /// 下拉：展开时就地撑开后续内容（选项与触发钮连续排布）。
     pub fn select(&mut self, id: impl Into<String>, options: Vec<String>, selected: usize) {
+        self.select_impl(id, options, selected, false);
+    }
+
+    /// 下拉：展开时菜单浮在下方内容之上，触发框高度不变、后续内容不跳动。
+    /// 菜单不占布局高度、不锁死页面滚轮；选项超过一屏时在菜单内滚动，靠近面底会自动向上展开。
+    /// 已在浮层内的下拉没有第二层浮层，退回就地展开。
+    pub fn select_overlay(&mut self, id: impl Into<String>, options: Vec<String>, selected: usize) {
+        self.select_impl(id, options, selected, true);
+    }
+
+    fn select_impl(&mut self, id: impl Into<String>, options: Vec<String>, selected: usize, float: bool) {
         let id = id.into();
         let theme = self.ctx().theme.clone();
         let font = FontSpec { size: theme.sizes.caption, weight: None, family: None };
         let open = self.ctx().state.selects.get(&id).is_some_and(|state| state.open);
+        let float = float && !self.ctx().in_overlay;
         let options = Rc::new(options);
         let count = options.len();
-        let menu_height = if open { OPTION_GAP + OPTION_H * count as f32 } else { 0.0 };
+        // 浮层模式下列表不占布局高度：展开只改绘制，不挤动下方内容
+        let menu_height = if open && !float { OPTION_GAP + OPTION_H * count as f32 } else { 0.0 };
         self.push(Item {
             width: Width::Fill,
             fill_height: false,
@@ -757,8 +800,41 @@ impl<'c, 'a> Ui<'c, 'a> {
                     ctx.record(&id, Layout::Select { options: count });
                     ctx.focusables.push(id.clone());
                     if open {
-                        let menu = Rect::new(rect.x, rect.y + INPUT_H + OPTION_GAP, rect.w, OPTION_H * count as f32);
-                        draw_menu(ctx, &theme, &id, &options, selected, menu, clip);
+                        if float {
+                            // 菜单交给浮层通道：主内容之后绘制，命中优先于下方列表。
+                            // 高度按面内可用空间收起，超出部分由菜单自己的滚动容器接住。
+                            let area = Rect::new(0.0, 0.0, ctx.state.size.0, ctx.state.size.1);
+                            let full = OPTION_H * count as f32;
+                            let cap = full.min(OPTION_H * FLOAT_MENU_MAX_ROWS as f32);
+                            let below = rect.y + INPUT_H + OPTION_GAP;
+                            let space_below = (area.bottom() - below - FLOAT_MENU_MARGIN).max(0.0);
+                            let space_above = (rect.y - OPTION_GAP - area.y - FLOAT_MENU_MARGIN).max(0.0);
+                            let place_below = space_below >= space_above || space_below >= cap;
+                            let height = cap.min(if place_below { space_below } else { space_above });
+                            let width = rect.w.min((area.right() - rect.x).max(0.0));
+                            if height >= OPTION_H && width > 1.0 {
+                                let y = if place_below { below } else { rect.y - OPTION_GAP - height };
+                                let scroll_id = menu_scroll_id(&id);
+                                let item = menu_item(
+                                    theme.clone(),
+                                    id.clone(),
+                                    Rc::clone(&options),
+                                    selected,
+                                    scroll_id.clone(),
+                                    height,
+                                    Some(MENU_SHADOW),
+                                );
+                                ctx.overlays.push(Overlay {
+                                    rect: Rect::new(rect.x, y, width, height),
+                                    items: vec![item],
+                                    owns_wheel: false,
+                                    wheel_target: Some(scroll_id),
+                                });
+                            }
+                        } else {
+                            let menu = Rect::new(rect.x, rect.y + INPUT_H + OPTION_GAP, rect.w, OPTION_H * count as f32);
+                            draw_menu(ctx, &theme, &id, &options, selected, menu, clip, None);
+                        }
                     }
                 }
             }),
@@ -1021,6 +1097,7 @@ fn draw_chevron(ctx: &mut BuildCtx<'_>, trigger: Rect, visible: Rect) {
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_menu(
     ctx: &mut BuildCtx<'_>,
     theme: &Theme,
@@ -1029,6 +1106,7 @@ fn draw_menu(
     selected: usize,
     menu: Rect,
     clip: Rect,
+    shadow: Option<PaintShadow>,
 ) {
     let visible = menu.intersect(clip);
     if visible.is_empty() {
@@ -1043,7 +1121,7 @@ fn draw_menu(
         stroke: Some(theme::token(ColorToken::Border)),
         stroke_width: Some(1.0),
         corner_radius: Some(theme.radii.sm),
-        shadow: None,
+        shadow,
     });
     let hover = ctx.state.selects.get(id).and_then(|state| state.hover);
     let font = FontSpec { size: theme.sizes.caption, weight: None, family: None };
@@ -1089,6 +1167,125 @@ fn draw_menu(
         ctx.hit(&option_id, row_visible, HitCursor::Pointer);
         ctx.record(&option_id, Layout::Option { select: id.to_string(), index });
     }
+}
+
+/// 浮层菜单项：矩形由浮层通道给出，内容超出视口时在本菜单内滚动。
+#[allow(clippy::too_many_arguments)]
+fn menu_item(
+    theme: Theme,
+    id: String,
+    options: Rc<Vec<String>>,
+    selected: usize,
+    scroll_id: String,
+    height: f32,
+    shadow: Option<PaintShadow>,
+) -> Item {
+    let count = options.len();
+    Item {
+        width: Width::Fill,
+        fill_height: false,
+        height: Box::new(move |_, _| height),
+        draw: Box::new(move |ctx, rect, clip| {
+            let frame = rect.intersect(clip);
+            if frame.is_empty() {
+                return;
+            }
+            ctx.draw(DrawCommand::Rect {
+                x: frame.x,
+                y: frame.y,
+                w: frame.w,
+                h: frame.h,
+                fill: Some(theme::token(ColorToken::Surface)),
+                stroke: Some(theme::token(ColorToken::Border)),
+                stroke_width: Some(1.0),
+                corner_radius: Some(theme.radii.sm),
+                shadow,
+            });
+            let viewport = Rect::new(
+                rect.x + 2.0,
+                rect.y + 2.0,
+                (rect.w - 4.0).max(0.0),
+                (rect.h - 4.0).max(0.0),
+            )
+            .intersect(clip);
+            if viewport.is_empty() {
+                return;
+            }
+            let content = OPTION_H * count as f32;
+            let max_offset = (content - viewport.h).max(0.0);
+            let offset = ctx.scrolls.get(&scroll_id).copied().unwrap_or(0.0).clamp(0.0, max_offset);
+            // 行数变少时把越界偏移收回，避免下一帧滚轮 / 键盘从旧的大偏移起算
+            ctx.scrolls.insert(scroll_id.clone(), offset);
+            let hover = ctx.state.selects.get(&id).and_then(|state| state.hover);
+            let font = FontSpec { size: theme.sizes.caption, weight: None, family: None };
+            let bar = max_offset > 0.0;
+            let row_w = (rect.w - 4.0 - if bar { 4.0 } else { 0.0 }).max(0.0);
+            for (index, option) in options.iter().enumerate() {
+                let row = Rect::new(
+                    rect.x + 2.0,
+                    rect.y + OPTION_H * index as f32 - offset + 2.0,
+                    row_w,
+                    OPTION_H - 2.0,
+                );
+                let row_visible = row.intersect(viewport);
+                if row_visible.is_empty() {
+                    continue;
+                }
+                let background = if index == selected {
+                    Some(theme::token(ColorToken::AccentSoft))
+                } else if hover == Some(index) {
+                    Some(theme::token(ColorToken::Hover))
+                } else {
+                    None
+                };
+                if let Some(fill) = background {
+                    ctx.draw(DrawCommand::Rect {
+                        x: row_visible.x,
+                        y: row_visible.y,
+                        w: row_visible.w,
+                        h: row_visible.h,
+                        fill: Some(fill),
+                        stroke: None,
+                        stroke_width: None,
+                        corner_radius: Some(theme.radii.xs),
+                        shadow: None,
+                    });
+                }
+                let shown = text::elide(&mut ctx.metrics, option, font, (row.w - PAD_X * 2.0).max(0.0));
+                let line_h = text::line_height(&mut ctx.metrics, font);
+                text::paint_line(
+                    ctx,
+                    &shown,
+                    font,
+                    theme::token(ColorToken::Text),
+                    row.x + PAD_X,
+                    row.y + (row.h - line_h) / 2.0,
+                    line_h,
+                    row_visible,
+                );
+                let option_id = option_hit_id(&id, index);
+                ctx.hit(&option_id, row_visible, HitCursor::Pointer);
+                ctx.record(&option_id, Layout::Option { select: id.clone(), index });
+            }
+            if bar {
+                let track = Rect::new(rect.right() - 4.0, rect.y + 2.0, 3.0, (rect.h - 4.0).max(0.0));
+                draw_scrollbar(ctx, &scroll_id, track, frame, content, offset, max_offset);
+            }
+            // 菜单自己的滚动区：滚轮落在菜单上时只改这份偏移，不落到下层页面。
+            ctx.record(
+                &scroll_id,
+                Layout::Scroll {
+                    viewport,
+                    content,
+                },
+            );
+        }),
+    }
+}
+
+/// 浮层下拉内部滚动容器的 id（插件看不到，也不与控件 id 冲突）。
+pub(crate) fn menu_scroll_id(select: &str) -> String {
+    format!("{select}::menu")
 }
 
 /// 下拉选项的内部命中 id（插件看不到，也不与控件 id 冲突）。
