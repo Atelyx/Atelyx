@@ -59,28 +59,27 @@ pub async fn generate(
     Ok(text)
 }
 
-/// 仅传输级失败与限流重试一次；HTTP 4xx / 流开始后的失败不重试。
+/// 与服务未就绪 / 短暂故障同口径重试一次；4xx 与流开始后的失败不重试。
 fn retryable(error: &StreamError) -> bool {
-    match error {
-        StreamError::Transport(_) => true,
-        StreamError::Http(code, _) => *code == 429,
-        StreamError::MidStream(_) | StreamError::Aborted => false,
-    }
+    use crate::ai::stream::RetryClass;
+    error.retry_class() != RetryClass::None
 }
 
 fn describe(error: StreamError) -> String {
     match error {
         StreamError::Transport(message) => format!("网络连接失败：{message}"),
         StreamError::MidStream(message) => format!("生成中断：{message}"),
-        StreamError::Http(401 | 403, _) => "API 密钥无效或无权限，请到设置里检查".to_string(),
-        StreamError::Http(429, _) => "模型请求过于频繁（429），稍后重试".to_string(),
-        StreamError::Http(code, body) => {
+        StreamError::Http { status: 401 | 403, .. } => {
+            "API 密钥无效或无权限，请到设置里检查".to_string()
+        }
+        StreamError::Http { status: 429, .. } => "模型请求过于频繁（429），稍后重试".to_string(),
+        StreamError::Http { status, body, .. } => {
             let body = body.trim();
             let detail: String = body.chars().take(200).collect();
             if detail.is_empty() {
-                format!("模型请求失败（HTTP {code}）")
+                format!("模型请求失败（HTTP {status}）")
             } else {
-                format!("模型请求失败（HTTP {code}）：{detail}")
+                format!("模型请求失败（HTTP {status}）：{detail}")
             }
         }
         StreamError::Aborted => "生成已取消".to_string(),

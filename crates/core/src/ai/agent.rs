@@ -10,7 +10,8 @@ use tokio::sync::watch;
 use crate::ai::{PENDING_RUN_ID_PREFIX};
 use crate::ai::session::{AppendBatch, CommitBatch, PatchEntry, SessionStore};
 use crate::ai::stream::{
-    LlmMessage, ReasoningEffort, StreamEvent, StreamRequest, ToolCall, ToolDecl,
+    LlmMessage, ReasoningEffort, RetryBudget, RetryPolicy, RetryWait, StopReason, StreamError,
+    StreamEvent, StreamRequest, ToolCall, ToolDecl,
 };
 use crate::ai::tools::{builtin_tools, resolve_image_attachments, SearchConfig, ToolCtx};
 
@@ -111,6 +112,20 @@ pub enum RunEvent {
     },
     /// 直写模式的占位消息移除（空回复中断；编排方据此删掉空气泡）。
     MessageRemoved { session_id: String, message_id: String },
+    /// 失败后即将重试：编排方展示等待态，不写会话。
+    Retrying {
+        session_id: String,
+        message_id: String,
+        /// 本次等待序号；`ready` 时按探测次数计，其余按退避次数计。
+        attempt: u32,
+        /// 有界退避上限；0 = 无上限（等服务就绪）。
+        max_attempts: u32,
+        delay_ms: u64,
+        /// true = 服务未就绪（本地模型加载等），等它起来；false = 短暂故障退避。
+        ready: bool,
+        /// 一句可读原因（HTTP 状态与响应体摘要 / 传输错误）。
+        reason: String,
+    },
 }
 
 /// run 的落点：会话存储（面板 / 插件会话）或直写（画布卡由编排方持有真源）。
@@ -698,27 +713,27 @@ async fn run_loop(p: RunParams) {
                 }
                 StreamEvent::Finish { .. } => {}
             };
-            let stream_fut = crate::ai::stream::stream(&client, &req, &mut on_event);
-            let cancel_fut = cancel.wait_for(|v| *v);
-            let result = tokio::select! {
-                r = stream_fut => r,
-                _ = cancel_fut => Err(crate::ai::stream::StreamError::Aborted),
-            };
+            let result = stream_with_retry(
+                &client,
+                &req,
+                &mut cancel,
+                &mut on_event,
+                &mut |wait, error| {
+                    let _ = events.send(RunEvent::Retrying {
+                        session_id: session_id.clone(),
+                        message_id: message_id.clone(),
+                        attempt: wait.attempt,
+                        max_attempts: wait.max_attempts,
+                        delay_ms: wait.delay.as_millis() as u64,
+                        ready: wait.ready,
+                        reason: retry_reason(error),
+                    });
+                },
+                RetryPolicy::default(),
+            )
+            .await;
             match result {
                 Ok(_) => {}
-                Err(crate::ai::stream::StreamError::Transport(_e)) => {
-                    // 请求未建立 / 未收到任何事件：传输级失败重试一次（流开始后不重试）
-                    if *cancel.borrow() {
-                        break Err(ABORTED.to_string());
-                    }
-                    let retry = tokio::select! {
-                        r = crate::ai::stream::stream(&client, &req, &mut on_event) => r,
-                        _ = cancel.wait_for(|v| *v) => Err(crate::ai::stream::StreamError::Aborted),
-                    };
-                    if let Err(e) = retry {
-                        break Err(stream_error_text(e));
-                    }
-                }
                 Err(crate::ai::stream::StreamError::Aborted) => break Err(ABORTED.to_string()),
                 Err(e) => break Err(stream_error_text(e)),
             }
@@ -809,6 +824,62 @@ async fn run_loop(p: RunParams) {
                 });
             }
         }
+    }
+}
+
+/// 单轮流式请求（含重试）：失败按 `RetryPolicy` 等待后重跑，每次等待前回调 `announce`。
+/// 流一旦产出事件错误就定级为 `MidStream`，不再重试——半截输出重跑会重复计费。
+async fn stream_with_retry(
+    client: &reqwest::Client,
+    req: &StreamRequest,
+    cancel: &mut watch::Receiver<bool>,
+    on_event: &mut impl FnMut(StreamEvent),
+    announce: &mut impl FnMut(RetryWait, &StreamError),
+    policy: RetryPolicy,
+) -> Result<StopReason, StreamError> {
+    let mut budget = RetryBudget::new(policy);
+    loop {
+        // 已停止就不再发新请求（select 两臂同刻就绪时不应赌谁先被轮询）
+        if *cancel.borrow() {
+            return Err(StreamError::Aborted);
+        }
+        let result = tokio::select! {
+            r = crate::ai::stream::stream(client, req, &mut *on_event) => r,
+            _ = cancel.wait_for(|v| *v) => Err(StreamError::Aborted),
+        };
+        let error = match result {
+            Ok(reason) => return Ok(reason),
+            Err(e) => e,
+        };
+        let Some(wait) = budget.next_wait(&error, std::time::Instant::now()) else {
+            return Err(error);
+        };
+        announce(wait, &error);
+        // 等待可被用户停止打断：不必等到退避结束才收场
+        let cancelled = tokio::select! {
+            _ = tokio::time::sleep(wait.delay) => false,
+            _ = cancel.wait_for(|v| *v) => true,
+        };
+        if cancelled {
+            return Err(StreamError::Aborted);
+        }
+    }
+}
+
+/// 重试原因一句话（界面折叠态下方明细；不含密钥）。
+fn retry_reason(error: &StreamError) -> String {
+    match error {
+        StreamError::Http { status, body, .. } => {
+            let reason = http_error_reason(body);
+            if reason.is_empty() {
+                format!("HTTP {status}")
+            } else {
+                format!("HTTP {status}：{reason}")
+            }
+        }
+        StreamError::Transport(m) => format!("连接失败：{m}"),
+        StreamError::MidStream(m) => m.clone(),
+        StreamError::Aborted => ABORTED.to_string(),
     }
 }
 
@@ -1092,8 +1163,8 @@ fn finalize_interrupted(
 
 fn stream_error_text(e: crate::ai::stream::StreamError) -> String {
     match e {
-        crate::ai::stream::StreamError::Http(code, body) => {
-            format!("请求失败：HTTP {code}（{}）", http_error_reason(&body))
+        crate::ai::stream::StreamError::Http { status, body, .. } => {
+            format!("请求失败：HTTP {status}（{}）", http_error_reason(&body))
         }
         crate::ai::stream::StreamError::Transport(m) => format!("请求失败：{m}"),
         crate::ai::stream::StreamError::MidStream(m) => format!("流式响应中断：{m}"),
@@ -1488,5 +1559,151 @@ mod tests {
         assert_eq!(v["run"]["args"]["path"], json!("a.md"));
         assert_eq!(v["run"]["result"], json!("内容"));
         assert!(PENDING_RUN_ID_PREFIX.starts_with("pending:"));
+    }
+
+    /// 最小假服务：按给定响应逐连接回包（读完请求头即回，body 忽略）。
+    fn spawn_http(responses: Vec<&'static str>) -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for response in responses {
+                let Ok((mut socket, _)) = listener.accept() else { return };
+                let mut head = Vec::new();
+                let mut buf = [0u8; 512];
+                while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match std::io::Read::read(&mut socket, &mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => head.extend_from_slice(&buf[..n]),
+                    }
+                }
+                let _ = std::io::Write::write_all(&mut socket, response.as_bytes());
+                let _ = std::io::Write::flush(&mut socket);
+            }
+        });
+        port
+    }
+
+    fn test_request(base_url: String) -> StreamRequest {
+        StreamRequest {
+            base_url,
+            api_key: "k".into(),
+            model: "m".into(),
+            messages: vec![LlmMessage::User { parts: vec!["hi".into()], images: Vec::new() }],
+            tools: Vec::new(),
+            reasoning_effort: None,
+            max_tokens: None,
+        }
+    }
+
+    fn local_client(base_url: &str) -> reqwest::Client {
+        let policy = crate::net_guard::policy_for_configured_url(base_url);
+        crate::net_guard::client_for(policy, crate::net_guard::ClientTimeout::IdleRead(5)).unwrap()
+    }
+
+    #[tokio::test]
+    async fn loading_model_503_is_retried_until_the_stream_starts() {
+        // 回归：llama-server 加载期就在端口上回 503 Loading model，
+        // 旧实现把它当终局错误直接失败，用户看到「模型还在加载就报错」。
+        let loading = concat!(
+            "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\n",
+            "Connection: close\r\n\r\n",
+            r#"{"error":{"message":"Loading model","type":"unavailable_error","code":503}}"#
+        );
+        let ok = concat!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let port = spawn_http(vec![loading, ok]);
+        let base_url = format!("http://127.0.0.1:{port}/v1");
+        let client = local_client(&base_url);
+        let req = test_request(base_url);
+        let (tx, mut cancel) = watch::channel(false);
+        let _keep = tx;
+
+        let mut text = String::new();
+        let mut notices: Vec<RetryWait> = Vec::new();
+        let result = stream_with_retry(
+            &client,
+            &req,
+            &mut cancel,
+            &mut |event| {
+                if let StreamEvent::TextDelta(t) = event {
+                    text.push_str(&t);
+                }
+            },
+            &mut |wait, _| notices.push(wait),
+            RetryPolicy { ready_poll: std::time::Duration::from_millis(1), ..RetryPolicy::default() },
+        )
+        .await;
+
+        assert!(matches!(result, Ok(StopReason::Stop)));
+        assert_eq!(text, "hi");
+        assert_eq!(notices.len(), 1, "加载中只等一轮就成功");
+        assert!(notices[0].ready && notices[0].max_attempts == 0, "就绪等待不按次数封顶");
+    }
+
+    #[tokio::test]
+    async fn stop_interrupts_the_wait_between_retries() {
+        // 停止不能等退避 / 就绪轮询走完：等待期间收到取消即收场
+        let loading = concat!(
+            "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\n",
+            "Connection: close\r\n\r\n",
+            r#"{"error":{"message":"Loading model","type":"unavailable_error"}}"#
+        );
+        let port = spawn_http(vec![loading]);
+        let base_url = format!("http://127.0.0.1:{port}/v1");
+        let client = local_client(&base_url);
+        let req = test_request(base_url);
+        let (tx, mut cancel) = watch::channel(false);
+        let stop = tx.clone();
+
+        let result = stream_with_retry(
+            &client,
+            &req,
+            &mut cancel,
+            &mut |_| {},
+            // 第一次等待提示发出即点停止：长轮询（5s）不该真的走完
+            &mut |_, _| {
+                let _ = stop.send(true);
+            },
+            RetryPolicy {
+                ready_poll: std::time::Duration::from_secs(5),
+                ..RetryPolicy::default()
+            },
+        )
+        .await;
+        assert!(matches!(result, Err(StreamError::Aborted)));
+    }
+
+    #[tokio::test]
+    async fn auth_failure_is_not_retried() {
+        let unauthorized = concat!(
+            "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\n",
+            "Connection: close\r\n\r\n",
+            r#"{"error":{"message":"Invalid API Key"}}"#
+        );
+        let port = spawn_http(vec![unauthorized]);
+        let base_url = format!("http://127.0.0.1:{port}/v1");
+        let client = local_client(&base_url);
+        let req = test_request(base_url);
+        let (tx, mut cancel) = watch::channel(false);
+        let _keep = tx;
+
+        let mut notices = Vec::new();
+        let result = stream_with_retry(
+            &client,
+            &req,
+            &mut cancel,
+            &mut |_| {},
+            &mut |wait, _| notices.push(wait),
+            RetryPolicy::default(),
+        )
+        .await;
+        match result {
+            Err(StreamError::Http { status: 401, .. }) => {}
+            other => panic!("401 应按终局失败收场：{other:?}"),
+        }
+        assert!(notices.is_empty(), "不可重试的失败不该发等待态");
     }
 }

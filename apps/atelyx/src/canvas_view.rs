@@ -2312,6 +2312,7 @@ fn conversation_card_overlay<'a>(
         scale: zoom,
         actions: Some(actions),
         streaming_id,
+        retry: streaming_id.and_then(|id| app.chat.retrying.get(id)),
         toggle: crate::chat_stream::ToggleRoute::Canvas,
         selectable: false,
         selection: None,

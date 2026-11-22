@@ -121,16 +121,159 @@ pub enum StreamEvent {
     Finish { reason: StopReason },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum StreamError {
     /// 请求未建立或未收到任何事件（传输级失败，可重试）。
     Transport(String),
     /// 流已开始后的失败（不可重试）。
     MidStream(String),
-    /// HTTP 非 2xx（body 文本随行）。
-    Http(u16, String),
+    /// HTTP 非 2xx（body 文本与 `Retry-After` 随行）。
+    Http {
+        status: u16,
+        body: String,
+        retry_after: Option<Duration>,
+    },
     /// 调用方取消。
     Aborted,
+}
+
+/// 失败类别：服务未就绪等它起来、短暂故障退避、其余不可重试。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetryClass {
+    /// 服务在加载模型 / 暂无可用槽位（llama-server 等启动期即回 503）。
+    Ready,
+    /// 限流与服务端故障。
+    Transient,
+    /// 终局失败（认证、协议、流内损坏等）。
+    None,
+}
+
+impl StreamError {
+    pub fn retry_class(&self) -> RetryClass {
+        match self {
+            StreamError::Transport(_) => RetryClass::Transient,
+            StreamError::Http { status, body, .. } => http_retry_class(*status, body),
+            StreamError::MidStream(_) | StreamError::Aborted => RetryClass::None,
+        }
+    }
+
+    fn retry_after(&self) -> Option<Duration> {
+        match self {
+            StreamError::Http { retry_after, .. } => *retry_after,
+            _ => None,
+        }
+    }
+}
+
+/// HTTP 失败分类：503 且是「服务未就绪」体 → 等就绪，其它 5xx / 429 → 有界退避。
+fn http_retry_class(status: u16, body: &str) -> RetryClass {
+    if status == 503 && body_is_unavailable(body) {
+        return RetryClass::Ready;
+    }
+    match status {
+        429 | 500..=599 => RetryClass::Transient,
+        _ => RetryClass::None,
+    }
+}
+
+/// 未就绪体识别：OpenAI 兼容端点用 `unavailable_error`；llama-server 文案是 `Loading model`。
+fn body_is_unavailable(body: &str) -> bool {
+    let lower = body.to_ascii_lowercase();
+    lower.contains("unavailable_error") || lower.contains("loading model")
+}
+
+/// 重试节奏：有界指数退避；服务未就绪时按固定间隔轮询，总预算封顶。
+#[derive(Debug, Clone, Copy)]
+pub struct RetryPolicy {
+    pub max_attempts: u32,
+    pub initial_delay: Duration,
+    pub max_delay: Duration,
+    pub ready_poll: Duration,
+    pub ready_budget: Duration,
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_attempts: 5,
+            initial_delay: Duration::from_millis(500),
+            max_delay: Duration::from_secs(10),
+            ready_poll: Duration::from_secs(1),
+            ready_budget: Duration::from_secs(300),
+        }
+    }
+}
+
+/// 下一次等待：`ready` = 等服务就绪（无上限，受预算约束），否则是有界退避的第几次。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetryWait {
+    pub delay: Duration,
+    pub attempt: u32,
+    /// 有界退避上限；0 = 无上限。
+    pub max_attempts: u32,
+    pub ready: bool,
+}
+
+/// 一次请求的重试预算：两类失败各自记账，耗尽的类别不再给出等待。
+pub struct RetryBudget {
+    policy: RetryPolicy,
+    attempts: u32,
+    ready_since: Option<std::time::Instant>,
+    ready_attempts: u32,
+}
+
+impl RetryBudget {
+    pub fn new(policy: RetryPolicy) -> Self {
+        Self {
+            policy,
+            attempts: 0,
+            ready_since: None,
+            ready_attempts: 0,
+        }
+    }
+
+    /// 按失败类别给下一次等待；`None` = 该类别预算已尽，按最终失败收场。
+    pub fn next_wait(&mut self, error: &StreamError, now: std::time::Instant) -> Option<RetryWait> {
+        match error.retry_class() {
+            RetryClass::Ready => {
+                let since = *self.ready_since.get_or_insert(now);
+                if now.saturating_duration_since(since) >= self.policy.ready_budget {
+                    return None;
+                }
+                self.ready_attempts += 1;
+                Some(RetryWait {
+                    delay: self.policy.ready_poll,
+                    attempt: self.ready_attempts,
+                    max_attempts: 0,
+                    ready: true,
+                })
+            }
+            RetryClass::Transient => {
+                if self.attempts >= self.policy.max_attempts {
+                    return None;
+                }
+                self.attempts += 1;
+                let exp = self.attempts.saturating_sub(1).min(10);
+                let backoff = self
+                    .policy
+                    .initial_delay
+                    .saturating_mul(1u32 << exp)
+                    .min(self.policy.max_delay);
+                // 提供方给出的 Retry-After 优先，但仍受上限约束（避免被一条指令挂死）
+                let delay = error
+                    .retry_after()
+                    .map(|d| d.min(self.policy.max_delay))
+                    .unwrap_or(backoff);
+                Some(RetryWait {
+                    delay,
+                    attempt: self.attempts,
+                    max_attempts: self.policy.max_attempts,
+                    ready: false,
+                })
+            }
+            RetryClass::None => None,
+        }
+    }
 }
 
 // ===== 解析器 =====
@@ -435,8 +578,13 @@ pub async fn stream(
         .map_err(|e| StreamError::Transport(e.to_string()))?;
     let status = resp.status();
     if !status.is_success() {
+        let retry_after = parse_retry_after(resp.headers());
         let body = resp.text().await.unwrap_or_default();
-        return Err(StreamError::Http(status.as_u16(), body));
+        return Err(StreamError::Http {
+            status: status.as_u16(),
+            body,
+            retry_after,
+        });
     }
     let mut accum = StreamAccum::new();
     // 字节缓冲：多字节字符可能被网络块边界切开，只在完整帧边界解码
@@ -506,6 +654,13 @@ pub async fn stream(
         on_event(event);
     }
     Ok(reason)
+}
+
+/// `Retry-After` 只认秒数形态（HTTP-date 形态罕见，忽略后按本地退避）。
+fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    let value = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
+    let secs: u64 = value.trim().parse().ok()?;
+    (secs > 0).then(|| Duration::from_secs(secs))
 }
 
 /// 喂入一个完整 SSE 帧（可能含多个 `data:` 行）。
@@ -842,5 +997,85 @@ mod tests {
             images: Vec::new(),
         });
         assert_eq!(plain["content"], json!("普通"));
+    }
+
+    fn http_error(status: u16, body: &'static str, retry_after: Option<Duration>) -> StreamError {
+        StreamError::Http { status, body: body.into(), retry_after }
+    }
+
+    #[test]
+    fn loading_model_is_classified_as_wait_for_ready() {
+        // llama-server 加载期即在端口上回 503：属于「等服务起来」，不是终局失败
+        let loading = http_error(503, r#"{"error":{"message":"Loading model","type":"unavailable_error"}}"#, None);
+        assert_eq!(loading.retry_class(), RetryClass::Ready);
+        // 其它 503（无未就绪标记）按短暂故障有界重试
+        let gateway = http_error(503, "upstream connect error", None);
+        assert_eq!(gateway.retry_class(), RetryClass::Transient);
+        assert_eq!(http_error(429, "", None).retry_class(), RetryClass::Transient);
+        assert_eq!(http_error(500, "", None).retry_class(), RetryClass::Transient);
+        assert_eq!(http_error(401, "", None).retry_class(), RetryClass::None);
+        assert_eq!(StreamError::Aborted.retry_class(), RetryClass::None);
+        assert_eq!(StreamError::MidStream("x".into()).retry_class(), RetryClass::None);
+        assert_eq!(StreamError::Transport("x".into()).retry_class(), RetryClass::Transient);
+    }
+
+    #[test]
+    fn bounded_backoff_doubles_until_cap_and_stops_after_budget() {
+        let policy = RetryPolicy::default();
+        let mut budget = RetryBudget::new(policy);
+        let now = std::time::Instant::now();
+        let mut delays = Vec::new();
+        while let Some(wait) = budget.next_wait(&StreamError::Transport("x".into()), now) {
+            delays.push(wait.delay);
+            assert_eq!(wait.max_attempts, policy.max_attempts);
+            assert!(!wait.ready);
+        }
+        assert_eq!(
+            delays,
+            vec![
+                Duration::from_millis(500),
+                Duration::from_secs(1),
+                Duration::from_secs(2),
+                Duration::from_secs(4),
+                Duration::from_secs(8),
+            ],
+            "指数退避到上限为止，最多重试 max_attempts 次"
+        );
+
+        // 提供方 Retry-After 优先，但不超过本地上限
+        let mut budget = RetryBudget::new(policy);
+        let wait = budget
+            .next_wait(&http_error(429, "", Some(Duration::from_secs(3))), now)
+            .expect("429 可重试");
+        assert_eq!(wait.delay, Duration::from_secs(3));
+        let mut budget = RetryBudget::new(policy);
+        let wait = budget
+            .next_wait(&http_error(429, "", Some(Duration::from_secs(60))), now)
+            .expect("429 可重试");
+        assert_eq!(wait.delay, policy.max_delay, "超上限的 Retry-After 被收敛");
+    }
+
+    #[test]
+    fn ready_wait_is_unbounded_by_attempts_but_bounded_by_time() {
+        let policy = RetryPolicy {
+            ready_poll: Duration::from_secs(1),
+            ready_budget: Duration::from_secs(10),
+            ..RetryPolicy::default()
+        };
+        let loading = http_error(503, r#"{"error":{"message":"Loading model"}}"#, None);
+        let start = std::time::Instant::now();
+        let mut budget = RetryBudget::new(policy);
+        // 次数远超有界上限仍然给等待：模型加载不看尝试次数
+        for secs in 0..10 {
+            let wait = budget
+                .next_wait(&loading, start + Duration::from_secs(secs))
+                .expect("预算内持续等待");
+            assert!(wait.ready && wait.max_attempts == 0);
+            assert_eq!(wait.delay, policy.ready_poll);
+        }
+        assert!(
+            budget.next_wait(&loading, start + Duration::from_secs(10)).is_none(),
+            "超出就绪预算即收场"
+        );
     }
 }

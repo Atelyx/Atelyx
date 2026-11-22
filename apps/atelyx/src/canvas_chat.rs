@@ -1360,6 +1360,7 @@ pub fn on_run_event(app: &mut App, event: RunEvent) -> Task<Message> {
         | RunEvent::ToolEnd { session_id, message_id, .. }
         | RunEvent::Finished { session_id, message_id, .. }
         | RunEvent::Failed { session_id, message_id, .. }
+        | RunEvent::Retrying { session_id, message_id, .. }
         | RunEvent::Snapshot { session_id, message_id, .. }
         | RunEvent::MessageRemoved { session_id, message_id } => {
             (session_id.clone(), message_id.clone())

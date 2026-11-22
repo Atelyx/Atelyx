@@ -231,6 +231,8 @@ async fn chat_contract_roundtrip_via_plugin() {
                 | RunEvent::Failed { message_id, .. }
                 | RunEvent::Snapshot { message_id, .. }
                 | RunEvent::MessageRemoved { message_id, .. } => message_id.clone(),
+                // 与壳侧同口径：重试等待是界面态，不向插件发消息拍
+                RunEvent::Retrying { .. } => continue,
             };
             let chat_event = match &event {
                 RunEvent::Finished { reason, .. } => {

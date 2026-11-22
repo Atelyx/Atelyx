@@ -438,6 +438,7 @@ fn message_flow(app: &App, window: iced::window::Id) -> iced::Element<'_, Messag
         scale: 1.0,
         actions: Some(actions),
         streaming_id,
+        retry: streaming_id.and_then(|id| app.chat.retrying.get(id)),
         toggle: if canvas_node.is_some() {
             crate::chat_stream::ToggleRoute::Canvas
         } else {

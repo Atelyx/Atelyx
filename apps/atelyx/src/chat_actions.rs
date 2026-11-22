@@ -182,6 +182,8 @@ pub struct ChatState {
     pub spin_tick: u32,
     /// 活跃 run 的会话集合。
     pub streaming: HashSet<String>,
+    /// 请求重试等待态（键 = 消息 id；瞬时，不写会话）。
+    pub retrying: std::collections::HashMap<String, crate::chat_stream::RetryNotice>,
     /// 压缩中的会话。
     pub compacting: Option<String>,
     /// 请求级错误（顶部行展示；X 清除）。
@@ -2184,8 +2186,59 @@ fn transcript_excerpt(messages: &[Value]) -> String {
 
 // ===== run 事件应用 =====
 
+/// 重试等待态与 run 事件同步：等待态由 `Retrying` 注入，流一恢复或收场即清。
+fn track_retry(app: &mut App, event: &RunEvent) {
+    let message_id = match event {
+        RunEvent::Started { message_id, .. }
+        | RunEvent::TextDelta { message_id, .. }
+        | RunEvent::ReasoningDelta { message_id, .. }
+        | RunEvent::ToolStart { message_id, .. }
+        | RunEvent::ToolEnd { message_id, .. }
+        | RunEvent::Finished { message_id, .. }
+        | RunEvent::Failed { message_id, .. }
+        | RunEvent::Retrying { message_id, .. }
+        | RunEvent::Snapshot { message_id, .. }
+        | RunEvent::MessageRemoved { message_id, .. } => message_id,
+    };
+    match event {
+        RunEvent::Retrying { attempt, max_attempts, delay_ms, ready, reason, .. } => {
+            // 同类等待连续到来时沿用起点，摘要里的「已等」才是累计值
+            let started = app
+                .chat
+                .retrying
+                .get(message_id)
+                .filter(|prev| prev.ready == *ready)
+                .map(|prev| prev.started)
+                .unwrap_or_else(std::time::Instant::now);
+            app.chat.retrying.insert(
+                message_id.clone(),
+                crate::chat_stream::RetryNotice {
+                    attempt: *attempt,
+                    max_attempts: *max_attempts,
+                    delay: std::time::Duration::from_millis(*delay_ms),
+                    ready: *ready,
+                    reason: reason.clone(),
+                    started,
+                },
+            );
+        }
+        RunEvent::Started { .. }
+        | RunEvent::TextDelta { .. }
+        | RunEvent::ReasoningDelta { .. }
+        | RunEvent::ToolStart { .. }
+        | RunEvent::ToolEnd { .. }
+        | RunEvent::Finished { .. }
+        | RunEvent::Failed { .. } => {
+            app.chat.retrying.remove(message_id);
+        }
+        // 直写快照不表示重试结束（本轮起点提交也会发快照）
+        RunEvent::Snapshot { .. } | RunEvent::MessageRemoved { .. } => {}
+    }
+}
+
 fn on_run_event(app: &mut App, event: RunEvent) -> iced::Task<Message> {
     let session_id = event_session(&event).to_string();
+    track_retry(app, &event);
     // 画布卡会话：消息真源在节点 data.messages，由画布侧应用快照
     if crate::canvas_chat::node_of_session(&session_id).is_some() {
         return crate::canvas_chat::on_run_event(app, event);
@@ -2255,6 +2308,8 @@ fn on_run_event(app: &mut App, event: RunEvent) -> iced::Task<Message> {
             }
             tail(follow)
         }
+        // 重试等待态已由 track_retry 落状态：只需贴底跟随，让等待行可见
+        RunEvent::Retrying { .. } => tail(follow),
         // 直写快照（画布卡会话）：面板投影不消费，由画布侧应用
         RunEvent::Snapshot { .. } | RunEvent::MessageRemoved { .. } => iced::Task::none(),
     }
@@ -2269,6 +2324,7 @@ fn event_session(event: &RunEvent) -> &str {
         | RunEvent::ToolEnd { session_id, .. }
         | RunEvent::Finished { session_id, .. }
         | RunEvent::Failed { session_id, .. }
+        | RunEvent::Retrying { session_id, .. }
         | RunEvent::Snapshot { session_id, .. }
         | RunEvent::MessageRemoved { session_id, .. } => session_id,
     }
@@ -3044,6 +3100,10 @@ fn plugin_chat_event_of(event: &RunEvent, message: Option<Value>, rev: u64) -> O
 
 /// run 事件转发给插件会话：终态（Finished / Failed）强制；流式拍按 `due` 节流发消息快照。
 fn forward_plugin_event(app: &mut App, event: &RunEvent, due: bool) {
+    // 重试等待是界面态：不向插件伪造消息拍
+    if matches!(event, RunEvent::Retrying { .. }) {
+        return;
+    }
     let Some(plugin_id) = app.chat.plugin_sessions.get(event_session(event)).cloned() else {
         return;
     };
@@ -3056,6 +3116,7 @@ fn forward_plugin_event(app: &mut App, event: &RunEvent, due: bool) {
         | RunEvent::ToolEnd { message_id, .. }
         | RunEvent::Finished { message_id, .. }
         | RunEvent::Failed { message_id, .. }
+        | RunEvent::Retrying { message_id, .. }
         | RunEvent::Snapshot { message_id, .. }
         | RunEvent::MessageRemoved { message_id, .. } => message_id.clone(),
     };

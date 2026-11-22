@@ -9350,6 +9350,8 @@ impl App {
                 .as_ref()
                 .is_some_and(|tc| tc.has_pending() || tc.has_peers())
             || !self.chat.renaming.is_empty()
+            // 请求重试等待态：倒计时与已等时长按心跳刷新
+            || !self.chat.retrying.is_empty()
             // AI 协作者在场：远端条目过期剔除与胶囊脉冲
             || !self.remote_ai.is_empty()
             || self

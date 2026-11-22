@@ -31,6 +31,74 @@ pub enum ToggleRoute {
 pub type ActionsHook<'a> =
     Box<dyn for<'m> Fn(&'m Value, bool) -> iced::Element<'a, Message> + 'a>;
 
+/// 请求重试的瞬时界面态（run 事件注入；首个增量 / 终态即清，不写会话）。
+#[derive(Debug, Clone)]
+pub struct RetryNotice {
+    pub attempt: u32,
+    /// 有界退避上限；0 = 无上限（等服务就绪）。
+    pub max_attempts: u32,
+    pub delay: std::time::Duration,
+    /// true = 服务未就绪（本地模型加载等），按固定间隔探测。
+    pub ready: bool,
+    pub reason: String,
+    /// 本次等待起点：倒计时与已等时长都按它算。
+    pub started: std::time::Instant,
+}
+
+impl RetryNotice {
+    /// 折叠态摘要：就绪等待报已等时长，退避报倒计时，到点改「正在重试」。
+    fn summary(&self) -> String {
+        let waited = self.started.elapsed();
+        if self.ready {
+            let secs = waited.as_secs();
+            if self.attempt > 1 {
+                format!("已等 {secs}s · 第 {} 次探测", self.attempt)
+            } else {
+                format!("已等 {secs}s")
+            }
+        } else {
+            let remaining = self.delay.saturating_sub(waited);
+            let secs = remaining.as_millis().div_ceil(1000) as u64;
+            if secs > 0 {
+                format!("{secs}s 后重试（{}/{}）", self.attempt, self.max_attempts)
+            } else {
+                format!("正在重试（{}/{}）", self.attempt, self.max_attempts)
+            }
+        }
+    }
+}
+
+/// 重试等待行：折叠态一行摘要，展开态给等待口径与失败原因（与思考 / 工具块同形态）。
+fn retry_block<'a>(
+    ctx: &StreamCtx<'a>,
+    notice: &'a RetryNotice,
+    message_id: &str,
+) -> iced::Element<'a, Message> {
+    let key = format!("{message_id}:retry");
+    let waits = if notice.max_attempts == 0 {
+        "按固定间隔探测，服务就绪后继续".to_string()
+    } else {
+        format!(
+            "第 {} 次重试（上限 {}）· 等待 {} 毫秒",
+            notice.attempt,
+            notice.max_attempts,
+            notice.delay.as_millis()
+        )
+    };
+    details_block(
+        ctx,
+        &key,
+        StepBlock {
+            leading: vec![icon("loader", 12.0 * ctx.scale, pal::TEXT_MUTED)],
+            title: if notice.ready { "等待服务就绪" } else { "请求重试" }.to_string(),
+            summary: notice.summary(),
+            mono_summary: false,
+            body: format!("{waits}\n\n失败原因：{}", notice.reason),
+            empty_hint: "",
+        },
+    )
+}
+
 /// 消息流渲染上下文。
 pub struct StreamCtx<'a> {
     /// 消息正文 markdown 解析缓存（键 = 源哈希 / 源 + 引用签名哈希；未命中回落纯文本）。
@@ -49,6 +117,8 @@ pub struct StreamCtx<'a> {
     pub actions: Option<ActionsHook<'a>>,
     /// 流式中的消息 id（None = 无流式态；画布只读流恒 None）。
     pub streaming_id: Option<&'a str>,
+    /// 当前流式消息的重试等待态（None = 无重试在途）。
+    pub retry: Option<&'a RetryNotice>,
     /// 折叠块开合的消息路由。
     pub toggle: ToggleRoute,
     /// 正文可拖选（对话面板；画布只读流为假）。
@@ -294,7 +364,11 @@ fn assistant_block<'a>(
     }
     if !content.is_empty() {
         col = col.push(markdown_doc(ctx, content, final_scope));
-    } else if streaming && steps.map(|ss| ss.is_empty()).unwrap_or(true) {
+    }
+    // 重试行只挂在流式末条消息上（历史消息即便存在等待态也不重绘）
+    if let Some(notice) = ctx.retry.filter(|_| streaming) {
+        col = col.push(retry_block(ctx, notice, message_id));
+    } else if streaming && steps.map(|ss| ss.is_empty()).unwrap_or(true) && content.is_empty() {
         col = col.push(text("生成中…").size(pal::fs_caption() * s).color(pal::TEXT_MUTED));
     }
     if let Some(actions) = &ctx.actions {
