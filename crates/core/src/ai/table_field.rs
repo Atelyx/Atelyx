@@ -45,7 +45,7 @@ pub async fn generate(
         .await;
         match outcome {
             Ok(_) => break Ok(()),
-            Err(error) if attempt < 2 && retryable(&error) => {
+            Err(error) if attempt < 2 && retryable(&error, base_url) => {
                 tokio::time::sleep(std::time::Duration::from_millis(RETRY_DELAY_MS)).await;
             }
             Err(error) => break Err(describe(error)),
@@ -60,9 +60,9 @@ pub async fn generate(
 }
 
 /// 与服务未就绪 / 短暂故障同口径重试一次；4xx 与流开始后的失败不重试。
-fn retryable(error: &StreamError) -> bool {
+fn retryable(error: &StreamError, base_url: &str) -> bool {
     use crate::ai::stream::RetryClass;
-    error.retry_class() != RetryClass::None
+    error.retry_class(crate::net_guard::is_local_service_url(base_url)) != RetryClass::None
 }
 
 fn describe(error: StreamError) -> String {

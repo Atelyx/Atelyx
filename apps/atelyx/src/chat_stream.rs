@@ -50,9 +50,10 @@ impl RetryNotice {
     fn summary(&self) -> String {
         let waited = self.started.elapsed();
         if self.ready {
+            // 就绪等待只有时长有意义：探测次数是内部节拍，不该每秒跳数字
             let secs = waited.as_secs();
-            if self.attempt > 1 {
-                format!("已等 {secs}s · 第 {} 次探测", self.attempt)
+            if secs == 0 {
+                "正在等待服务就绪".to_string()
             } else {
                 format!("已等 {secs}s")
             }
@@ -76,7 +77,7 @@ fn retry_block<'a>(
 ) -> iced::Element<'a, Message> {
     let key = format!("{message_id}:retry");
     let waits = if notice.max_attempts == 0 {
-        "按固定间隔探测，服务就绪后继续".to_string()
+        format!("每 {} 秒探测一次，服务就绪后自动继续", notice.delay.as_secs().max(1))
     } else {
         format!(
             "第 {} 次重试（上限 {}）· 等待 {} 毫秒",

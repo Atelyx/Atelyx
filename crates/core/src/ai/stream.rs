@@ -140,7 +140,8 @@ pub enum StreamError {
 /// 失败类别：服务未就绪等它起来、短暂故障退避、其余不可重试。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RetryClass {
-    /// 服务在加载模型 / 暂无可用槽位（llama-server 等启动期即回 503）。
+    /// 服务还没起来：加载模型、暂无可用槽位，或本机服务端口还没监听
+    /// （llama-server / 托管插件在启动窗口内连 HTTP 都接不上）。
     Ready,
     /// 限流与服务端故障。
     Transient,
@@ -149,10 +150,13 @@ pub enum RetryClass {
 }
 
 impl StreamError {
-    pub fn retry_class(&self) -> RetryClass {
+    /// `local` = 目标地址是本机 / 局域网自建服务：这类端点连接被拒、等响应头超时
+    /// 都意味着「服务正在加载模型还没开始接请求」，按就绪等待处理而不是有界退避。
+    pub fn retry_class(&self, local: bool) -> RetryClass {
         match self {
+            StreamError::Transport(_) if local => RetryClass::Ready,
             StreamError::Transport(_) => RetryClass::Transient,
-            StreamError::Http { status, body, .. } => http_retry_class(*status, body),
+            StreamError::Http { status, body, .. } => http_retry_class(*status, body, local),
             StreamError::MidStream(_) | StreamError::Aborted => RetryClass::None,
         }
     }
@@ -166,8 +170,9 @@ impl StreamError {
 }
 
 /// HTTP 失败分类：503 且是「服务未就绪」体 → 等就绪，其它 5xx / 429 → 有界退避。
-fn http_retry_class(status: u16, body: &str) -> RetryClass {
-    if status == 503 && body_is_unavailable(body) {
+/// 本机服务的 503 一律按未就绪（本地 llama-server 与托管插件的启动期都只回 503）。
+fn http_retry_class(status: u16, body: &str, local: bool) -> RetryClass {
+    if status == 503 && (local || body_is_unavailable(body)) {
         return RetryClass::Ready;
     }
     match status {
@@ -176,10 +181,11 @@ fn http_retry_class(status: u16, body: &str) -> RetryClass {
     }
 }
 
-/// 未就绪体识别：OpenAI 兼容端点用 `unavailable_error`；llama-server 文案是 `Loading model`。
+/// 未就绪体识别：OpenAI 兼容端点用 `unavailable_error`；llama-server 文案是 `Loading model`；
+/// 托管插件等不到服务就绪时回 `auto_start_timeout`。
 fn body_is_unavailable(body: &str) -> bool {
     let lower = body.to_ascii_lowercase();
-    lower.contains("unavailable_error") || lower.contains("loading model")
+    lower.contains("unavailable_error") || lower.contains("loading model") || lower.contains("auto_start_timeout")
 }
 
 /// 重试节奏：有界指数退避；服务未就绪时按固定间隔轮询，总预算封顶。
@@ -198,7 +204,7 @@ impl Default for RetryPolicy {
             max_attempts: 5,
             initial_delay: Duration::from_millis(500),
             max_delay: Duration::from_secs(10),
-            ready_poll: Duration::from_secs(1),
+            ready_poll: Duration::from_secs(3),
             ready_budget: Duration::from_secs(300),
         }
     }
@@ -217,15 +223,18 @@ pub struct RetryWait {
 /// 一次请求的重试预算：两类失败各自记账，耗尽的类别不再给出等待。
 pub struct RetryBudget {
     policy: RetryPolicy,
+    /// 目标是否本机 / 局域网自建服务（决定传输级失败算就绪等待还是短暂故障）。
+    local: bool,
     attempts: u32,
     ready_since: Option<std::time::Instant>,
     ready_attempts: u32,
 }
 
 impl RetryBudget {
-    pub fn new(policy: RetryPolicy) -> Self {
+    pub fn new(policy: RetryPolicy, local: bool) -> Self {
         Self {
             policy,
+            local,
             attempts: 0,
             ready_since: None,
             ready_attempts: 0,
@@ -234,7 +243,7 @@ impl RetryBudget {
 
     /// 按失败类别给下一次等待；`None` = 该类别预算已尽，按最终失败收场。
     pub fn next_wait(&mut self, error: &StreamError, now: std::time::Instant) -> Option<RetryWait> {
-        match error.retry_class() {
+        match error.retry_class(self.local) {
             RetryClass::Ready => {
                 let since = *self.ready_since.get_or_insert(now);
                 if now.saturating_duration_since(since) >= self.policy.ready_budget {
@@ -1007,22 +1016,52 @@ mod tests {
     fn loading_model_is_classified_as_wait_for_ready() {
         // llama-server 加载期即在端口上回 503：属于「等服务起来」，不是终局失败
         let loading = http_error(503, r#"{"error":{"message":"Loading model","type":"unavailable_error"}}"#, None);
-        assert_eq!(loading.retry_class(), RetryClass::Ready);
-        // 其它 503（无未就绪标记）按短暂故障有界重试
+        assert_eq!(loading.retry_class(false), RetryClass::Ready);
+        assert_eq!(loading.retry_class(true), RetryClass::Ready);
+        // 托管插件等不到服务就绪时回 503 auto_start_timeout：同样按未就绪等待
+        let start_timeout = http_error(503, r#"{"error":{"message":"服务在 180s 内未就绪","type":"auto_start_timeout"}}"#, None);
+        assert_eq!(start_timeout.retry_class(false), RetryClass::Ready);
+        // 公网端点上的无标记 503 按短暂故障有界重试；本机端点上的 503 一律是服务还没起来
         let gateway = http_error(503, "upstream connect error", None);
-        assert_eq!(gateway.retry_class(), RetryClass::Transient);
-        assert_eq!(http_error(429, "", None).retry_class(), RetryClass::Transient);
-        assert_eq!(http_error(500, "", None).retry_class(), RetryClass::Transient);
-        assert_eq!(http_error(401, "", None).retry_class(), RetryClass::None);
-        assert_eq!(StreamError::Aborted.retry_class(), RetryClass::None);
-        assert_eq!(StreamError::MidStream("x".into()).retry_class(), RetryClass::None);
-        assert_eq!(StreamError::Transport("x".into()).retry_class(), RetryClass::Transient);
+        assert_eq!(gateway.retry_class(false), RetryClass::Transient);
+        assert_eq!(gateway.retry_class(true), RetryClass::Ready);
+        assert_eq!(http_error(429, "", None).retry_class(false), RetryClass::Transient);
+        assert_eq!(http_error(500, "", None).retry_class(false), RetryClass::Transient);
+        assert_eq!(http_error(401, "", None).retry_class(false), RetryClass::None);
+        assert_eq!(StreamError::Aborted.retry_class(true), RetryClass::None);
+        assert_eq!(StreamError::MidStream("x".into()).retry_class(true), RetryClass::None);
+        // 传输级失败：公网端点按短暂故障退避；本机端点是端口还没监听（模型正在加载）
+        assert_eq!(StreamError::Transport("x".into()).retry_class(false), RetryClass::Transient);
+        assert_eq!(StreamError::Transport("x".into()).retry_class(true), RetryClass::Ready);
+    }
+
+    #[test]
+    fn local_transport_failure_waits_within_ready_budget() {
+        let policy = RetryPolicy {
+            ready_poll: Duration::from_secs(3),
+            ready_budget: Duration::from_secs(10),
+            ..RetryPolicy::default()
+        };
+        let start = std::time::Instant::now();
+        let mut budget = RetryBudget::new(policy, true);
+        // 端口还没监听时反复连不上：不消耗有界重试次数，只在就绪预算内持续等待
+        for secs in 0..10 {
+            let wait = budget
+                .next_wait(&StreamError::Transport("connection refused".into()), start + Duration::from_secs(secs))
+                .expect("预算内持续等待");
+            assert!(wait.ready && wait.max_attempts == 0);
+            assert_eq!(wait.delay, policy.ready_poll);
+        }
+        assert!(
+            budget.next_wait(&StreamError::Transport("x".into()), start + Duration::from_secs(10)).is_none(),
+            "超出就绪预算即收场"
+        );
     }
 
     #[test]
     fn bounded_backoff_doubles_until_cap_and_stops_after_budget() {
         let policy = RetryPolicy::default();
-        let mut budget = RetryBudget::new(policy);
+        let mut budget = RetryBudget::new(policy, false);
         let now = std::time::Instant::now();
         let mut delays = Vec::new();
         while let Some(wait) = budget.next_wait(&StreamError::Transport("x".into()), now) {
@@ -1043,12 +1082,12 @@ mod tests {
         );
 
         // 提供方 Retry-After 优先，但不超过本地上限
-        let mut budget = RetryBudget::new(policy);
+        let mut budget = RetryBudget::new(policy, false);
         let wait = budget
             .next_wait(&http_error(429, "", Some(Duration::from_secs(3))), now)
             .expect("429 可重试");
         assert_eq!(wait.delay, Duration::from_secs(3));
-        let mut budget = RetryBudget::new(policy);
+        let mut budget = RetryBudget::new(policy, false);
         let wait = budget
             .next_wait(&http_error(429, "", Some(Duration::from_secs(60))), now)
             .expect("429 可重试");
@@ -1064,7 +1103,7 @@ mod tests {
         };
         let loading = http_error(503, r#"{"error":{"message":"Loading model"}}"#, None);
         let start = std::time::Instant::now();
-        let mut budget = RetryBudget::new(policy);
+        let mut budget = RetryBudget::new(policy, false);
         // 次数远超有界上限仍然给等待：模型加载不看尝试次数
         for secs in 0..10 {
             let wait = budget

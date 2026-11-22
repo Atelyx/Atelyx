@@ -652,6 +652,8 @@ async fn run_loop(p: RunParams) {
             return;
         }
     };
+    // 本机 / 局域网自建服务启动期接不上连接：那是在加载模型，按就绪等待而不是快速退避
+    let local = crate::net_guard::is_local_service_url(&config.base_url);
     let outcome: Result<(), String> = loop {
         if *cancel.borrow() {
             break Err(ABORTED.to_string());
@@ -726,10 +728,11 @@ async fn run_loop(p: RunParams) {
                         max_attempts: wait.max_attempts,
                         delay_ms: wait.delay.as_millis() as u64,
                         ready: wait.ready,
-                        reason: retry_reason(error),
+                        reason: retry_reason(error, wait.ready),
                     });
                 },
                 RetryPolicy::default(),
+                local,
             )
             .await;
             match result {
@@ -836,8 +839,9 @@ async fn stream_with_retry(
     on_event: &mut impl FnMut(StreamEvent),
     announce: &mut impl FnMut(RetryWait, &StreamError),
     policy: RetryPolicy,
+    local: bool,
 ) -> Result<StopReason, StreamError> {
-    let mut budget = RetryBudget::new(policy);
+    let mut budget = RetryBudget::new(policy, local);
     loop {
         // 已停止就不再发新请求（select 两臂同刻就绪时不应赌谁先被轮询）
         if *cancel.borrow() {
@@ -867,7 +871,7 @@ async fn stream_with_retry(
 }
 
 /// 重试原因一句话（界面折叠态下方明细；不含密钥）。
-fn retry_reason(error: &StreamError) -> String {
+fn retry_reason(error: &StreamError, ready: bool) -> String {
     match error {
         StreamError::Http { status, body, .. } => {
             let reason = http_error_reason(body);
@@ -877,6 +881,7 @@ fn retry_reason(error: &StreamError) -> String {
                 format!("HTTP {status}：{reason}")
             }
         }
+        StreamError::Transport(m) if ready => format!("服务未就绪：{m}"),
         StreamError::Transport(m) => format!("连接失败：{m}"),
         StreamError::MidStream(m) => m.clone(),
         StreamError::Aborted => ABORTED.to_string(),
@@ -1634,6 +1639,7 @@ mod tests {
             },
             &mut |wait, _| notices.push(wait),
             RetryPolicy { ready_poll: std::time::Duration::from_millis(1), ..RetryPolicy::default() },
+            true,
         )
         .await;
 
@@ -1671,6 +1677,7 @@ mod tests {
                 ready_poll: std::time::Duration::from_secs(5),
                 ..RetryPolicy::default()
             },
+            true,
         )
         .await;
         assert!(matches!(result, Err(StreamError::Aborted)));
@@ -1698,6 +1705,7 @@ mod tests {
             &mut |_| {},
             &mut |wait, _| notices.push(wait),
             RetryPolicy::default(),
+            true,
         )
         .await;
         match result {

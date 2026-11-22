@@ -87,6 +87,12 @@ pub fn policy_for_configured_url(raw: &str) -> HostPolicy {
     HostPolicy::PublicOnly
 }
 
+/// 配置地址是否指向本机 / 局域网自建服务（与 `policy_for_configured_url` 同口径）。
+/// AI 供应商用它决定传输级失败是「服务还在加载」还是「远端故障」。
+pub fn is_local_service_url(raw: &str) -> bool {
+    matches!(policy_for_configured_url(raw), HostPolicy::LocalService)
+}
+
 /// 该 IP 是否被策略拒绝。
 fn blocked_addr(ip: std::net::IpAddr, policy: HostPolicy) -> bool {
     match ip {
@@ -401,6 +407,9 @@ mod net_guard_tests {
         assert!(is_public("http://[2001:db8::1]/v1"));
         // 无法解析的输入按公网策略兜底（后续入口校验会拒绝）
         assert!(is_public("not a url"));
+        // 同口径助手：AI 供应商据此区分「本地服务还在加载」与「远端故障」
+        assert!(is_local_service_url("http://192.168.1.250:3011/v1"));
+        assert!(!is_local_service_url("https://api.openai.com/v1"));
     }
 
     /// 解析 + 过滤直测（IP 字面量不发起真实 DNS）：公网策略拒内网解析结果，本机策略放行回环/私网。
