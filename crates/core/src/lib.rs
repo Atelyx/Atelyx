@@ -23,6 +23,7 @@ pub mod merge3;
 pub mod net_guard;
 pub mod path;
 pub mod note_collab;
+pub mod open_files;
 pub mod plugin_process;
 pub mod plugin_runtime;
 pub mod presence;
