@@ -388,7 +388,7 @@ pub fn props_panel<'a>(
     window: iced::window::Id,
     standalone: bool,
 ) -> Option<Element<'a, Message>> {
-    if crate::open_route::note_path(app).is_none() || (!standalone && app.note_mode == NoteMode::Source) {
+    if app.ui.last_note_file.is_none() || (!standalone && app.note_mode == NoteMode::Source) {
         return None;
     }
     // 载入在途 / 载入失败先给状态，不给空态：否则面板整块消失，用户无从知道为什么没有属性
@@ -401,7 +401,7 @@ pub fn props_panel<'a>(
         ));
     }
     if let Some(reason) = &app.note_load_error {
-        let retry = crate::open_route::note_path(app).map(Message::OpenFile);
+        let retry = app.ui.last_note_file.clone().map(Message::OpenFile);
         return Some(status_row(
             &format!("笔记载入失败，属性不可用：{reason}"),
             pal::DANGER,
@@ -952,7 +952,7 @@ pub fn suggest_overlay<'a>(
     viewport: Size,
 ) -> Option<Element<'a, Message>> {
     // 面板不渲染的两种情形（没打开笔记 / 内联面在源码档隐藏）不出浮层
-    if crate::open_route::note_path(app).is_none() {
+    if app.ui.last_note_file.is_none() {
         return None;
     }
     if app.props.editing_surface == PropsSurface::Inline && app.note_mode == NoteMode::Source {

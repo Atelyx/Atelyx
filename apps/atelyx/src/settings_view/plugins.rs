@@ -1233,21 +1233,28 @@ fn on_vault_change(app: &mut App, msg: PluginsMsg) -> Task<Message> {
                 app.plugins.resolve_shell_call(request_id, result);
                 return Task::none();
             }
+            let mut follow_task = Task::none();
             match &change {
                 VaultChange::Removed { rel } => {
                     app.plugins.on_file_changed(rel, FileChangeKind::Deleted, None);
+                    // 打开文件集合按磁盘事实移除（与文件树删除同一口径）
+                    follow_task = app.apply_follow(&crate::FollowUp::Deleted {
+                        rel: rel.clone(),
+                        is_dir: false,
+                    });
                 }
                 VaultChange::Renamed { from, to } => {
                     app.plugins
                         .on_file_changed(to, FileChangeKind::Renamed, Some(from.as_str()));
                     // 展开集 / 打开中文件路径与文件树子目录缓存跟随（与文件树改名同一口径）
-                    app.apply_follow(&crate::FollowUp::Renamed {
+                    let follow = app.apply_follow(&crate::FollowUp::Renamed {
                         from: from.clone(),
                         to: to.clone(),
                         rewritten: Vec::new(),
                         announce: false,
                     });
                     app.follow_children_cache(from, to);
+                    follow_task = follow_task.chain(follow);
                 }
             }
             // 引用同步代写了打开中的笔记：磁盘正文已变，重读对齐——结构变更经 gate
@@ -1256,9 +1263,10 @@ fn on_vault_change(app: &mut App, msg: PluginsMsg) -> Task<Message> {
             let reload = open.filter(|path| rewritten.iter().any(|rel| rel == path));
             let refresh = refresh_after_vault_change(app, &change);
             app.plugins.resolve_shell_call(request_id, result);
+            let task = refresh.chain(follow_task);
             match reload {
-                Some(path) => refresh.chain(app.load_note(&path)),
-                None => refresh,
+                Some(path) => task.chain(app.load_note(&path)),
+                None => task,
             }
         }
         _ => Task::none(),

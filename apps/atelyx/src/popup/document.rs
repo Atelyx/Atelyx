@@ -7,7 +7,7 @@ use crate::{App, Message, NoteMode};
 pub(super) fn entries<'a>(app: &'a App, state: &PopupState, window: iced::window::Id) -> Vec<(usize, MenuEntry<'a, Message>)> {
     match state {
         PopupState::NoteMenu => {
-            let note_open = crate::open_route::note_path(app).is_some();
+            let note_open = app.ui.last_note_file.is_some();
             // 只读身份：属性写入与历史回滚都改正文，菜单项直接禁用（不留下点击无反应的入口）
             let readonly = app.note_readonly();
             let readonly_hint = readonly.then(|| "当前身份为只读".to_string());
@@ -42,7 +42,7 @@ pub(super) fn entries<'a>(app: &'a App, state: &PopupState, window: iced::window
                         on_press: if readonly {
                             None
                         } else {
-                            crate::open_route::note_path(app).map(|file| {
+                            app.ui.last_note_file.clone().map(|file| {
                                 Message::History(crate::history_browser::HistoryBrowserMsg::Open {
                                     window,
                                     kind: atelyx_core::history::HistoryKind::Note,

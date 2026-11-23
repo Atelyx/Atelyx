@@ -269,7 +269,7 @@ fn apply_note(
     actor: EditActor,
     reply: Reply,
 ) -> iced::Task<Message> {
-    let open = crate::open_route::note_path(app).as_deref() == Some(path.as_str());
+    let open = app.ui.last_note_file.as_deref() == Some(path.as_str());
     match &app.repo_kind {
         RepoKind::Local => apply_local_note(app, path, op, open, actor, reply),
         RepoKind::Space(_) => apply_space_note(app, path, op, server_text, open, actor, reply),
@@ -598,7 +598,7 @@ pub fn on_done(
     }
     end_presence(app);
     // 只有「当前打开的笔记」才回填编辑面状态：写别的文件失败不得污染本篇的脏标记与错误条
-    let is_open_note = crate::open_route::note_path(app).as_deref() == Some(path.as_str());
+    let is_open_note = app.ui.last_note_file.as_deref() == Some(path.as_str());
     let settle = atelyx_core::ai::note_edit::settle_note_done(
         is_open_note,
         &content,

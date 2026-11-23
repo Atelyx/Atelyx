@@ -359,7 +359,7 @@ pub(crate) fn on_done(app: &mut App, done: AiFsDone) -> iced::Task<Message> {
         }
         _ => {}
     }
-    app.apply_follow(&follow);
+    let follow_task = app.apply_follow(&follow);
     let mut reload_note: Option<String> = None;
     if let crate::FollowUp::Renamed { rewritten, .. } = &follow {
         if let Some(f) = app.ui.last_note_file.clone() {
@@ -386,6 +386,7 @@ pub(crate) fn on_done(app: &mut App, done: AiFsDone) -> iced::Task<Message> {
         }
     }
     let mut next = next
+        .chain(follow_task)
         .chain(app.refresh_note_files())
         .chain(app.refresh_tag_vocab())
         .chain(app.refresh_backlinks());

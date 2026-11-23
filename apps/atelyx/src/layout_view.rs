@@ -15,7 +15,6 @@ use iced::{Color, Element, Length, Padding, Point, Rectangle, Size, border, widg
 
 use atelyx_core::global_config::RecentVault;
 use atelyx_core::layout::{self, AppUiState, LayoutNode, TabItem};
-use atelyx_core::open_files::{DocKind, Host};
 
 use crate::hover_tip::with_tip;
 use crate::ui::controls::{self, Variant};
@@ -1557,7 +1556,7 @@ fn panel_tab<'a>(
 
 /// 笔记保存状态徽标：错误 = ErrorPill（红调底 + 重试/关闭），未保存 = 圆点徽标。
 fn note_status_pill(app: &App) -> Option<Element<'static, Message>> {
-    app.open_files.recent_of_kind(&DocKind::Note, &Host::Main)?;
+    app.ui.last_note_file.as_ref()?;
     if app.save_error.is_some() {
         Some(
             container(
@@ -2085,7 +2084,7 @@ pub(crate) fn inspector_view<'a>(app: &'a App, window: iced::window::Id) -> Elem
     if app.canvas.is_some() && view_displayed(app, "canvas") {
         return crate::canvas_view::props_panel(app);
     }
-    if app.open_files.recent_of_kind(&DocKind::Note, &Host::Main).is_none() {
+    if app.ui.last_note_file.is_none() {
         return controls::empty_state(
             "info",
             "笔记属性",
@@ -3170,7 +3169,7 @@ pub use atelyx_core::vault::file_label;
 
 /// note 视图：工具条（模式分段 + ···菜单）+ 对应档位的内容面。
 pub(crate) fn note_view(app: &App, window: iced::window::Id) -> Element<'_, Message> {
-    if app.open_files.recent_of_kind(&DocKind::Note, &Host::Main).is_none() {
+    if app.ui.last_note_file.is_none() {
         return controls::empty_state(
             "sticky-note",
             "打开笔记",
@@ -3219,7 +3218,7 @@ pub(crate) fn note_view(app: &App, window: iced::window::Id) -> Element<'_, Mess
     let ai_remotes: Vec<crate::ai_presence::RemoteAi> = app
         .remote_ai
         .iter()
-        .filter(|r| r.view == "note" && r.file.as_deref() == crate::open_route::note_path(app).as_deref())
+        .filter(|r| r.view == "note" && r.file.as_deref() == app.ui.last_note_file.as_deref())
         .cloned()
         .collect();
     if matches!(app.repo_kind, crate::RepoKind::Space(_)) && !ai_remotes.is_empty() {
@@ -3414,7 +3413,7 @@ thread_local! {
 
 /// 页面内标题：正文列顶部的文件名（去扩展名）；点击就地改名，重命名在途 = 原位输入框。
 fn page_title(app: &App, window: iced::window::Id) -> Element<'_, Message> {
-    let rel = crate::open_route::note_path(app).unwrap_or_default();
+    let rel = app.ui.last_note_file.clone().unwrap_or_default();
     let title = file_label(&rel);
     let (renaming, value) = match &app.rename {
         Some(r) if r.from_title => (true, r.value.clone()),

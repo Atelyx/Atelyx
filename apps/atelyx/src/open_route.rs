@@ -50,6 +50,10 @@ pub fn doc_opened(app: &mut App, path: &str, kind: DocKind) {
             app.open_files.close(&id);
         }
     }
+    let view = view_of_kind(&kind).to_string();
+    if layout::is_builtin_doc_view(&view) {
+        layout::clear_tab_files(&mut app.ui, &view);
+    }
     app.open_files.open(path, kind);
 }
 
@@ -118,11 +122,6 @@ pub fn slot_path(app: &App, tab: &TabItem) -> Option<String> {
 /// 某类型在主窗口的当前文档（集合该类型最近激活）。
 pub fn doc_path(app: &App, kind: &DocKind) -> Option<String> {
     app.open_files.recent_of_kind(kind, &Host::Main).map(|d| d.path.clone())
-}
-
-/// 笔记视图当前显示的笔记路径。
-pub fn note_path(app: &App) -> Option<String> {
-    doc_path(app, &DocKind::Note)
 }
 
 /// 标签是否显示 ×（视图有打开中的文件）。

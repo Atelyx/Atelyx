@@ -447,6 +447,8 @@ fn normalize_layout(layout: &mut WorkspaceLayout) {
             },
             _ => p.clone(),
         });
+        // 有主要面板时文档只呈现在它上面：其它面板残留的文档槽属坏状态，一并清掉
+        layout.tree = clear_doc_slots(&layout.tree, &is_builtin_doc_view);
     }
     layout.tree = dedupe_view_slots(&layout.tree);
 }
@@ -1339,6 +1341,34 @@ pub fn set_tab_file(ui: &mut AppUiState, panel_id: &str, tab_id: &str, path: &st
         _ => p.clone(),
     });
     true
+}
+
+/// 清空当前激活布局里该视图全部类型槽的手动选择（打开文件即落槽：显式打开优先于旧选择）。
+pub fn clear_tab_files(ui: &mut AppUiState, view: &str) {
+    fn clear(node: &LayoutNode, view: &str) -> LayoutNode {
+        match node {
+            LayoutNode::Panel { id, tabs, active_tab_id } => LayoutNode::Panel {
+                id: id.clone(),
+                tabs: tabs
+                    .iter()
+                    .map(|t| match t.view == view {
+                        true => TabItem { file: None, ..t.clone() },
+                        false => t.clone(),
+                    })
+                    .collect(),
+                active_tab_id: active_tab_id.clone(),
+            },
+            LayoutNode::Split { id, direction, children, sizes } => LayoutNode::Split {
+                id: id.clone(),
+                direction: direction.clone(),
+                children: children.iter().map(|c| clear(c, view)).collect(),
+                sizes: sizes.clone(),
+            },
+        }
+    }
+    let tree = active_layout(ui).tree;
+    let tree = clear(&tree, view);
+    set_active_tree(ui, tree);
 }
 
 /// 清空树中的文档槽（工具视图原样保留，激活态失效回落第一个标签）。
@@ -2538,6 +2568,53 @@ mod tests {
         ui.scenes[0].home_layout.primary_panel_id = Some("missing".into());
         normalize(&mut ui);
         assert_eq!(ui.scenes[0].home_layout.primary_panel_id, None);
+    }
+
+    #[test]
+    fn normalize_clears_other_doc_slots_when_primary_exists() {
+        // 有主要面板时文档只在它上面呈现：其它面板残留的文档槽属坏状态，normalize 清掉
+        let tree = LayoutNode::Split {
+            id: "s1".into(),
+            direction: "horizontal".into(),
+            children: vec![panel("p1", &["search"]), panel("p2", &["canvas", "files"])],
+            sizes: vec![20.0, 80.0],
+        };
+        let mut ui = ui_with(tree);
+        active_scene_mut(&mut ui).layouts[0].primary_panel_id = Some("p1".into());
+        normalize(&mut ui);
+        let layout = &active_scene(&ui).layouts[0];
+        assert_eq!(layout.primary_panel_id.as_deref(), Some("p1"));
+        assert_eq!(find_panel(&layout.tree, "p1").unwrap().len(), 0, "主要面板标签只由投影提供");
+        let p2 = find_panel(&layout.tree, "p2").unwrap();
+        let views: Vec<&str> = p2.iter().map(|t| t.view.as_str()).collect();
+        assert_eq!(views, vec!["files"], "普通面板的文档槽被清掉，工具视图不动");
+    }
+
+    #[test]
+    fn clear_tab_files_drops_manual_slot_choice() {
+        let tree = LayoutNode::Split {
+            id: "s1".into(),
+            direction: "horizontal".into(),
+            children: vec![
+                LayoutNode::Panel {
+                    id: "p1".into(),
+                    tabs: vec![TabItem { id: "t1".into(), view: "note".into(), locked: false, file: Some("a.md".into()) }],
+                    active_tab_id: Some("t1".into()),
+                },
+                LayoutNode::Panel {
+                    id: "p2".into(),
+                    tabs: vec![TabItem { id: "t2".into(), view: "table".into(), locked: false, file: Some("t.atb".into()) }],
+                    active_tab_id: Some("t2".into()),
+                },
+            ],
+            sizes: vec![50.0, 50.0],
+        };
+        let mut ui = ui_with(tree);
+        clear_tab_files(&mut ui, "note");
+        let p1 = find_panel(&active_layout(&ui).tree, "p1").unwrap();
+        let p2 = find_panel(&active_layout(&ui).tree, "p2").unwrap();
+        assert_eq!(p1[0].file, None, "同类型槽的手动选择清空");
+        assert_eq!(p2[0].file.as_deref(), Some("t.atb"), "其它类型槽不受影响");
     }
 
     #[test]
