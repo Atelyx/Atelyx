@@ -106,6 +106,10 @@ pub(super) fn entries<'a>(app: &'a App, state: &PopupState) -> Vec<(usize, MenuE
             for kind in available_view_kinds(app) {
                 let entry = if current_view.as_deref() == Some(kind.as_str()) {
                     MenuEntry::noted(view_label(app, &kind), view_icon(app, &kind), "当前", true, None)
+                } else if layout::is_builtin_doc_view(&kind) {
+                    // 撕裂窗口按活动会话渲染：文档标签会显示成另一个文件，只接工具视图
+                    MenuEntry::noted(view_label(app, &kind), view_icon(app, &kind), "主窗口", true, None)
+                        .hinted("文档只在主窗口内显示")
                 } else if view_occupied(app, &kind, None) {
                     MenuEntry::noted(view_label(app, &kind), view_icon(app, &kind), "已占用", true, None)
                         .hinted("该视图已在其他位置（全局唯一）")
@@ -405,7 +409,7 @@ fn tab_context_entries(
             let view = crate::open_route::view_of_kind(&kind).to_string();
             let siblings: Vec<String> = app
                 .open_files
-                .of_kind(&kind, &atelyx_core::open_files::Host::Main)
+                .of_kind(&kind)
                 .into_iter()
                 .map(|d| d.path.clone())
                 .collect();

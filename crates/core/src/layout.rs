@@ -402,7 +402,14 @@ pub fn normalize(ui: &mut AppUiState) {
     if !active_valid {
         ui.active_layout_id = Some(HOME_LAYOUT_ID.to_string());
     }
-    // 撕裂窗口过滤空条目（tabs 非空；损坏条目在 serde 层已整文件回退）
+    // 撕裂窗口：剔除内置文档标签（文档只在主窗口承载）后过滤空条目
+    // （损坏条目在 serde 层已整文件回退）
+    for w in &mut ui.detached_windows {
+        w.tabs.retain(|t| !is_builtin_doc_view(&t.view));
+        if !w.tabs.iter().any(|t| Some(&t.id) == w.active_tab_id.as_ref()) {
+            w.active_tab_id = w.tabs.first().map(|t| t.id.clone());
+        }
+    }
     ui.detached_windows.retain(|w| !w.tabs.is_empty());
     if ui.recent_files.len() > MAX_RECENT_FILES {
         ui.recent_files.truncate(MAX_RECENT_FILES);
@@ -1043,9 +1050,22 @@ fn new_detached_window(tab: TabItem, bounds: &WindowBounds, window_id: Option<St
     }
 }
 
+/// 标签视图（主窗口激活布局树与撕裂窗口两处查找）。
+fn tab_view(ui: &AppUiState, tab_id: &str) -> Option<String> {
+    let tree = active_layout(ui).tree;
+    if let Some(view) = find_tab_in_tree(&tree, tab_id).map(|(_, t)| t.view.clone()) {
+        return Some(view);
+    }
+    ui.detached_windows
+        .iter()
+        .find_map(|w| w.tabs.iter().find(|t| t.id == tab_id).map(|t| t.view.clone()))
+}
+
 /// 撕裂落点（来源 = 树面板）：标签移出面板并把新撕裂窗口条目挂上（面板留空）。
-/// 返回新条目；标签不在该面板 = None（布局不动）。与 `apply_layout_op` 的 TearOff 共用同一实现，
-/// 差别只在窗口 id 是否由调用方预分配（拖拽落点复用预热窗口时预分配）。
+/// 返回新条目；标签不在该面板或为内置文档视图 = None（布局不动）。内置文档只在主窗口承载：
+/// 编辑面是单份活动会话，跨窗口呈现会出现「标签写 A、正文是 B」。
+/// 与 `apply_layout_op` 的 TearOff 共用同一实现，差别只在窗口 id 是否由调用方预分配
+/// （拖拽落点复用预热窗口时预分配）。
 pub fn tear_off_from_panel(
     ui: &mut AppUiState,
     panel_id: &str,
@@ -1053,6 +1073,9 @@ pub fn tear_off_from_panel(
     bounds: &WindowBounds,
     window_id: Option<String>,
 ) -> Option<DetachedWindow> {
+    if tab_view(ui, tab_id).is_some_and(|v| is_builtin_doc_view(&v)) {
+        return None;
+    }
     let tree = active_layout(ui).tree;
     let (new_tree, tab) = tear_off_from_panel_op(&tree, panel_id, tab_id)?;
     let window = new_detached_window(tab, bounds, window_id);
@@ -1070,6 +1093,9 @@ pub fn tear_off_from_detached(
     bounds: &WindowBounds,
     window_id: Option<String>,
 ) -> Option<DetachedWindow> {
+    if tab_view(ui, tab_id).is_some_and(|v| is_builtin_doc_view(&v)) {
+        return None;
+    }
     let (source, tab) = find_tab_in_detached(&ui.detached_windows, tab_id)?;
     if source != source_window_id {
         return None;
@@ -1446,8 +1472,11 @@ pub(crate) fn with_group(ui: &mut AppUiState, target: &Target, f: &dyn Fn(&TabGr
 // ---- 标签组操作（面板与撕裂窗口共用一份实现）----
 
 /// 添加视图：面板路径在组内已有同视图时激活它；撕裂窗口路径把组内同视图视作已占用而忽略。
-/// 两条路径都只在视图全局未被占用时追加标签并激活。
+/// 两条路径都只在视图全局未被占用时追加标签并激活；撕裂窗口不接受内置文档视图。
 fn add_view(ui: &mut AppUiState, target: &Target, view: &str, activate_existing: bool) {
+    if matches!(target, Target::Detached(_)) && is_builtin_doc_view(view) {
+        return;
+    }
     if activate_existing {
         if let Some(existing) = group_at(ui, target).and_then(|g| g.tabs.into_iter().find(|t| t.view == view)) {
             let tab_id = existing.id;
@@ -1478,8 +1507,12 @@ fn set_tab_locked(ui: &mut AppUiState, target: &Target, tab_id: &str, locked: bo
     with_group(ui, target, &|g| Some(group_set_tab_locked(g, tab_id, locked)));
 }
 
-/// 切换标签视图：锁定拒改；目标视图被其他位置占用时忽略（切回自身当前视图恒允许）。
+/// 切换标签视图：锁定拒改；目标视图被其他位置占用时忽略（切回自身当前视图恒允许）；
+/// 撕裂窗口不接受内置文档视图。
 fn set_tab_view(ui: &mut AppUiState, target: &Target, tab_id: &str, view: &str) {
+    if matches!(target, Target::Detached(_)) && is_builtin_doc_view(view) {
+        return;
+    }
     let Some(tab) = group_at(ui, target).and_then(|g| g.tabs.into_iter().find(|t| t.id == tab_id)) else {
         return;
     };
@@ -1630,6 +1663,10 @@ fn dock_into_detached(ui: &mut AppUiState, window_id: &str, tab_id: &str, index:
     if !ui.detached_windows.iter().any(|w| w.id == window_id) {
         return;
     }
+    // 内置文档只在主窗口承载（撕裂窗口里的文档标签会按活动会话渲染成别的文件）
+    if tab_view(ui, tab_id).is_some_and(|v| is_builtin_doc_view(&v)) {
+        return;
+    }
     if let Some(w) = ui.detached_windows.iter().find(|w| w.id == window_id) {
         if w.tabs.iter().any(|t| t.id == tab_id) {
             let len = w.tabs.len();
@@ -1659,14 +1696,14 @@ fn dock_into_detached(ui: &mut AppUiState, window_id: &str, tab_id: &str, index:
     }
 }
 
-/// 免面板直撕：新建承载单个视图的撕裂窗口条目（视图全局已占用 = None）。
+/// 免面板直撕：新建承载单个视图的撕裂窗口条目（视图全局已占用或为内置文档 = None）。
 fn create_detached_window(
     ui: &mut AppUiState,
     view: &str,
     bounds: &WindowBounds,
     restore_on_launch: Option<bool>,
 ) -> Option<DetachedWindow> {
-    if view_occupied(ui, view, None) {
+    if is_builtin_doc_view(view) || view_occupied(ui, view, None) {
         return None;
     }
     let tab = create_tab(view);
@@ -1685,6 +1722,7 @@ fn create_detached_window(
 }
 
 /// 按视图定位并显隐翻转撕裂窗口；无则按声明新建（新建条目不参与启动恢复，由创建方显式触发出现）。
+/// 内置文档无撕裂条目可翻转，也不新建（文档只在主窗口承载）。
 fn toggle_detached_window(
     ui: &mut AppUiState,
     view: &str,
@@ -1696,7 +1734,7 @@ fn toggle_detached_window(
         w.hidden = !w.hidden;
         return Some(w.clone());
     }
-    if view_occupied(ui, view, None) {
+    if is_builtin_doc_view(view) || view_occupied(ui, view, None) {
         return None;
     }
     let tab = create_tab(view);
@@ -2444,20 +2482,63 @@ mod tests {
     fn add_view_panel_and_detached_share_group_semantics() {
         let mut panel_ui = panel_case(&["files"], None);
         let mut detached_ui = detached_case(&["files"], None);
+        // 工具视图两条路径同规：追加即激活
+        let _ = apply_layout_op(&mut panel_ui, &LayoutOp::AddView { panel_id: "p1".into(), view: "search".into() });
+        let _ = apply_layout_op(&mut detached_ui, &LayoutOp::DetachedAddView { window_id: "w1".into(), view: "search".into() });
+        for views in [
+            panel_group(&panel_ui).unwrap().tabs.iter().map(|t| t.view.clone()).collect::<Vec<_>>(),
+            window_group(&detached_ui).unwrap().tabs.iter().map(|t| t.view.clone()).collect::<Vec<_>>(),
+        ] {
+            assert_eq!(views, vec!["files", "search"]);
+        }
+        // 内置文档只在主窗口承载：面板路径加槽，撕裂窗口拒收
         let _ = apply_layout_op(&mut panel_ui, &LayoutOp::AddView { panel_id: "p1".into(), view: "note".into() });
         let _ = apply_layout_op(&mut detached_ui, &LayoutOp::DetachedAddView { window_id: "w1".into(), view: "note".into() });
-        assert_eq!(
-            panel_group(&panel_ui).as_ref().map(group_shape),
-            window_group(&detached_ui).as_ref().map(group_shape)
-        );
-        let added = window_group(&detached_ui).unwrap();
-        assert_eq!(added.active_tab_id.as_deref(), Some(added.tabs[1].id.as_str()), "新加标签即激活");
+        assert_eq!(panel_group(&panel_ui).unwrap().tabs.len(), 3, "面板路径加笔记槽");
+        assert_eq!(window_group(&detached_ui).unwrap().tabs.len(), 2, "撕裂窗口拒收文档标签");
         // 组内已有同视图：面板路径激活该标签；撕裂窗口按「视图已占用」忽略，不切换激活位
         let _ = apply_layout_op(&mut panel_ui, &LayoutOp::AddView { panel_id: "p1".into(), view: "files".into() });
         let _ = apply_layout_op(&mut detached_ui, &LayoutOp::DetachedAddView { window_id: "w1".into(), view: "files".into() });
         assert_eq!(panel_group(&panel_ui).unwrap().active_tab_id.as_deref(), Some("t-files"));
         let kept = window_group(&detached_ui).unwrap();
         assert_eq!(kept.active_tab_id.as_deref(), Some(kept.tabs[1].id.as_str()), "激活位不变");
+    }
+
+    #[test]
+    fn builtin_doc_tabs_never_enter_detached_windows() {
+        let bounds = WindowBounds { x: 0.0, y: 0.0, width: 100.0, height: 100.0, scale: 1.0 };
+        // 面板标签撕出：布局不动（标签留在面板）
+        let mut ui = panel_case(&["note"], None);
+        assert!(tear_off_from_panel(&mut ui, "p1", "t-note", &bounds, None).is_none());
+        assert_eq!(panel_group(&ui).unwrap().tabs.len(), 1);
+        // 停靠进撕裂窗口：撕裂窗口标签组不变
+        let mut ui = detached_case(&["files"], None);
+        let tree = LayoutNode::Panel { id: "p1".into(), tabs: vec![TabItem { id: "t-note".into(), view: "note".into(), locked: false, file: None }], active_tab_id: Some("t-note".into()) };
+        set_active_tree(&mut ui, tree);
+        let _ = apply_layout_op(&mut ui, &LayoutOp::DockIntoDetached { window_id: "w1".into(), tab_id: "t-note".into(), index: None });
+        assert_eq!(window_group(&ui).unwrap().tabs.len(), 1);
+        assert!(panel_group(&ui).unwrap().tabs.iter().any(|t| t.id == "t-note"), "拒绝时代码不搬走标签");
+        // 免面板直撕与按视图翻转：都不给文档建条目
+        let mut ui = panel_case(&["files"], None);
+        let opened = apply_layout_op(&mut ui, &LayoutOp::CreateDetachedWindow { view: "note".into(), bounds: bounds.clone(), restore_on_launch: None });
+        assert!(opened.detached_window.is_none());
+        assert!(ui.detached_windows.is_empty());
+        let toggled = apply_layout_op(&mut ui, &LayoutOp::ToggleDetachedWindow { view: "note".into(), bounds, options: WindowOptions::default() });
+        assert!(toggled.detached_window.is_none());
+    }
+
+    #[test]
+    fn normalize_drops_doc_tabs_left_in_detached_windows() {
+        // 旧 ui-state 里残留的文档标签：剔除后窗口条目一并回收
+        let mut ui = detached_case(&["note"], None);
+        normalize(&mut ui);
+        assert!(ui.detached_windows.is_empty());
+        // 混合条目只剔文档标签，激活位回落到剩下的首个
+        let mut ui = detached_case(&["note", "files"], Some("note"));
+        normalize(&mut ui);
+        let kept = window_group(&ui).unwrap();
+        assert_eq!(kept.tabs.iter().map(|t| t.view.as_str()).collect::<Vec<_>>(), vec!["files"]);
+        assert_eq!(kept.active_tab_id.as_deref(), Some(kept.tabs[0].id.as_str()));
     }
 
     #[test]

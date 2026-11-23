@@ -1,5 +1,5 @@
 //! 打开文件集合：全部已打开文档实例的有序表（应用级唯一，运行时不落盘）。
-//! 纯逻辑、无 I/O；容器（主要面板 / 类型槽 / 撕裂窗口）的呈现由壳侧按集合投影。
+//! 纯逻辑、无 I/O；主要面板与普通面板的类型槽由壳侧按集合投影，文档只在主窗口承载。
 
 use nanoid::nanoid;
 
@@ -13,13 +13,6 @@ pub enum DocKind {
     Table,
     Canvas,
     Plugin(String),
-}
-
-/// 实例宿主：主窗口（主要面板或类型槽投影）或某个撕裂窗口。
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Host {
-    Main,
-    Detached(String),
 }
 
 impl DocKind {
@@ -41,7 +34,6 @@ pub struct DocInstance {
     pub id: InstanceId,
     pub path: String,
     pub kind: DocKind,
-    pub host: Host,
 }
 
 /// 打开文件集合：有序项 + 激活项 + 最近激活序（类型槽回退用）。
@@ -62,7 +54,7 @@ impl OpenFiles {
             return id;
         }
         let id = nanoid!();
-        self.items.push(DocInstance { id: id.clone(), path: path.to_string(), kind, host: Host::Main });
+        self.items.push(DocInstance { id: id.clone(), path: path.to_string(), kind });
         self.active = Some(id.clone());
         self.touch(&id);
         id
@@ -106,13 +98,6 @@ impl OpenFiles {
         self.activated.insert(0, id.to_string());
     }
 
-    /// 换宿主（实例不存在 = 忽略）。
-    pub fn set_host(&mut self, id: &str, host: Host) {
-        if let Some(item) = self.items.iter_mut().find(|d| d.id == id) {
-            item.host = host;
-        }
-    }
-
     /// 调整集合顺序（前移后移均按移除后下标处理；不存在 = 忽略）。
     pub fn reorder(&mut self, id: &str, to_index: usize) {
         let Some(from) = self.items.iter().position(|d| d.id == id) else { return };
@@ -137,24 +122,19 @@ impl OpenFiles {
         }
     }
 
-    /// 按类型与宿主过滤（集合顺序）。
-    pub fn of_kind(&self, kind: &DocKind, host: &Host) -> Vec<&DocInstance> {
-        self.items
-            .iter()
-            .filter(|d| &d.kind == kind && &d.host == host)
-            .collect()
+    /// 按类型过滤（集合顺序）。
+    pub fn of_kind(&self, kind: &DocKind) -> Vec<&DocInstance> {
+        self.items.iter().filter(|d| &d.kind == kind).collect()
     }
 
-    /// 该类型与宿主最近激活的实例（类型槽回退依据）。
-    pub fn recent_of_kind(&self, kind: &DocKind, host: &Host) -> Option<&DocInstance> {
-        self.activated
-            .iter()
-            .find_map(|id| self.get(id).filter(|d| &d.kind == kind && &d.host == host))
+    /// 该类型最近激活的实例（类型槽回退依据）。
+    pub fn recent_of_kind(&self, kind: &DocKind) -> Option<&DocInstance> {
+        self.activated.iter().find_map(|id| self.get(id).filter(|d| &d.kind == kind))
     }
 
-    /// 该宿主最近激活的实例（跨类型；投影激活项不在本宿主时的回退）。
-    pub fn recent_of_host(&self, host: &Host) -> Option<&DocInstance> {
-        self.activated.iter().find_map(|id| self.get(id).filter(|d| &d.host == host))
+    /// 最近激活的实例（跨类型；激活项缺失时的回落）。
+    pub fn recent(&self) -> Option<&DocInstance> {
+        self.activated.iter().find_map(|id| self.get(id))
     }
 
     /// 按路径查找（全集合唯一）。
@@ -265,19 +245,15 @@ mod tests {
     }
 
     #[test]
-    fn of_kind_filters_by_kind_and_host() {
+    fn of_kind_filters_by_kind() {
         let mut set = OpenFiles::default();
         set.open("a.md", note());
         set.open("b.md", note());
         set.open("c.atb", DocKind::Table);
-        let detached = set.open("d.md", note());
-        set.set_host(&detached, Host::Detached("w1".into()));
-        let main_notes = set.of_kind(&note(), &Host::Main);
-        assert_eq!(main_notes.len(), 2);
-        assert_eq!(main_notes[0].path, "a.md");
-        let detached_notes = set.of_kind(&note(), &Host::Detached("w1".into()));
-        assert_eq!(detached_notes.len(), 1);
-        assert_eq!(set.of_kind(&DocKind::Plugin("x".into()), &Host::Main).len(), 0);
+        let notes = set.of_kind(&note());
+        assert_eq!(notes.len(), 2);
+        assert_eq!(notes[0].path, "a.md");
+        assert_eq!(set.of_kind(&DocKind::Plugin("x".into())).len(), 0);
     }
 
     #[test]
@@ -308,13 +284,14 @@ mod tests {
         let mut set = OpenFiles::default();
         let a = set.open("a.md", note());
         let b = set.open("b.md", note());
-        assert_eq!(set.recent_of_kind(&note(), &Host::Main).map(|d| d.path.as_str()), Some("b.md"));
+        assert_eq!(set.recent_of_kind(&note()).map(|d| d.path.as_str()), Some("b.md"));
         set.activate(&a);
-        assert_eq!(set.recent_of_kind(&note(), &Host::Main).map(|d| d.path.as_str()), Some("a.md"));
+        assert_eq!(set.recent_of_kind(&note()).map(|d| d.path.as_str()), Some("a.md"));
         // 关闭最近项 → 回退到剩下的最近项；全部关闭 → None
         set.close(&a);
-        assert_eq!(set.recent_of_kind(&note(), &Host::Main).map(|d| d.path.as_str()), Some("b.md"));
+        assert_eq!(set.recent_of_kind(&note()).map(|d| d.path.as_str()), Some("b.md"));
         set.close(&b);
-        assert!(set.recent_of_kind(&note(), &Host::Main).is_none());
+        assert!(set.recent_of_kind(&note()).is_none());
+        assert!(set.recent().is_none());
     }
 }

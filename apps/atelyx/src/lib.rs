@@ -84,7 +84,7 @@ use atelyx_core::layout::{
     LayoutOp, WindowBounds, LEGACY_UI_STATE_SCHEMA, UI_STATE_SCHEMA,
 };
 use atelyx_core::markdown::{LinkForm, MarkdownDocument};
-use atelyx_core::open_files::{DocKind, Host, OpenFiles};
+use atelyx_core::open_files::{DocKind, OpenFiles};
 use atelyx_core::plugin_runtime::{
     EditorSelection, FileChangeKind, PluginEvent, PluginRuntime, PluginStatus, SurfaceKind,
 };
@@ -6262,7 +6262,6 @@ impl App {
             .open_files
             .items()
             .iter()
-            .filter(|d| d.host == Host::Main)
             .map(|d| d.id.clone())
             .collect();
         let Some(from) = main_ids.iter().position(|i| i == id) else { return Task::none() };
@@ -6320,8 +6319,10 @@ impl App {
             return Task::none();
         }
         let Some(h) = hover else {
-            // 主面板投影标签拖出窗口：集合项留在主面板（撕出新窗口属撕裂宿主）
-            if d.from_docs {
+            // 内置文档只在主窗口承载：拖出窗口不放行（撕出新窗口只接工具视图）。
+            // 主要面板投影标签都是文档视图，由这一条覆盖。
+            if layout::is_builtin_doc_view(&d.view) {
+                self.notify(NoticeLevel::Info, "文档只能留在主窗口内");
                 return Task::none();
             }
             let bounds = WindowBounds {
@@ -6353,6 +6354,11 @@ impl App {
             .unwrap_or(0.0);
         let index = (h.kind == layout_view::DropZone::Tab)
             .then(|| layout_view::tab_index_at(&h.zone, d.current.x, scroll_x));
+        // 内置文档只在主窗口承载（撕裂窗口按活动会话渲染，标签会显示成别的文件）
+        if h.zone.detached_id.is_some() && layout::is_builtin_doc_view(&d.view) {
+            self.notify(NoticeLevel::Info, "文档只能留在主窗口内");
+            return Task::none();
+        }
         // 主面板投影标签：拖动只重排集合（不换布局、不产生副本），丢到别处 = 留在主面板
         if d.from_docs {
             let primary = layout::primary_panel_of_active(&self.ui).map(str::to_string);
@@ -7313,7 +7319,7 @@ impl App {
             self.open_files.close(id);
             return Task::none();
         }
-        let others = self.open_files.of_kind(&DocKind::Note, &Host::Main).len();
+        let others = self.open_files.of_kind(&DocKind::Note).len();
         if others <= 1 {
             return self.close_file_tab("note");
         }
@@ -7323,7 +7329,7 @@ impl App {
         self.ui.last_note_file = None;
         let Some((next_id, next_path)) = self
             .open_files
-            .recent_of_kind(&DocKind::Note, &Host::Main)
+            .recent_of_kind(&DocKind::Note)
             .map(|d| (d.id.clone(), d.path.clone()))
         else {
             return Task::none();
@@ -7336,7 +7342,7 @@ impl App {
             self.open_files.close(id);
             return Task::none();
         }
-        let others = self.open_files.of_kind(&DocKind::Table, &Host::Main).len();
+        let others = self.open_files.of_kind(&DocKind::Table).len();
         if others <= 1 {
             return self.close_file_tab("table");
         }
@@ -7345,7 +7351,7 @@ impl App {
         self.ui.last_table_file = None;
         let Some((next_id, next_path)) = self
             .open_files
-            .recent_of_kind(&DocKind::Table, &Host::Main)
+            .recent_of_kind(&DocKind::Table)
             .map(|d| (d.id.clone(), d.path.clone()))
         else {
             return Task::none();
@@ -7358,7 +7364,7 @@ impl App {
             self.open_files.close(id);
             return Task::none();
         }
-        let others = self.open_files.of_kind(&DocKind::Canvas, &Host::Main).len();
+        let others = self.open_files.of_kind(&DocKind::Canvas).len();
         if others <= 1 {
             return self.close_file_tab("canvas");
         }
@@ -7368,7 +7374,7 @@ impl App {
         self.ui.last_canvas_file = None;
         let Some((next_id, next_path)) = self
             .open_files
-            .recent_of_kind(&DocKind::Canvas, &Host::Main)
+            .recent_of_kind(&DocKind::Canvas)
             .map(|d| (d.id.clone(), d.path.clone()))
         else {
             return Task::none();
@@ -11448,7 +11454,6 @@ mod ui_state_tests {
 mod open_route_tests {
     use super::*;
     use atelyx_core::layout::TabItem;
-    use atelyx_core::open_files::Host;
 
     fn app() -> App {
         let (app, _boot) = App::boot();
@@ -11460,7 +11465,7 @@ mod open_route_tests {
         let mut app = app();
         open_route::doc_opened(&mut app, "a.md", DocKind::Note);
         open_route::doc_opened(&mut app, "b.md", DocKind::Note);
-        let notes = app.open_files.of_kind(&DocKind::Note, &Host::Main);
+        let notes = app.open_files.of_kind(&DocKind::Note);
         assert_eq!(notes.len(), 2, "本地仓库笔记多实例");
         assert_eq!(notes[0].path, "a.md");
         assert_eq!(notes[1].path, "b.md");
@@ -11474,11 +11479,11 @@ mod open_route_tests {
         open_route::doc_opened(&mut app, "t2.atb", DocKind::Table);
         open_route::doc_opened(&mut app, "c1.atlx", DocKind::Canvas);
         open_route::doc_opened(&mut app, "c2.atlx", DocKind::Canvas);
-        assert_eq!(app.open_files.of_kind(&DocKind::Table, &Host::Main).len(), 2);
-        assert_eq!(app.open_files.of_kind(&DocKind::Canvas, &Host::Main).len(), 2);
+        assert_eq!(app.open_files.of_kind(&DocKind::Table).len(), 2);
+        assert_eq!(app.open_files.of_kind(&DocKind::Canvas).len(), 2);
         let t2 = app.open_files.find_by_path("t2.atb").unwrap().id.clone();
         open_route::doc_opened(&mut app, "t2.atb", DocKind::Table);
-        assert_eq!(app.open_files.of_kind(&DocKind::Table, &Host::Main).len(), 2);
+        assert_eq!(app.open_files.of_kind(&DocKind::Table).len(), 2);
         assert_eq!(app.open_files.active_id(), Some(t2.as_str()));
     }
 
@@ -11685,7 +11690,7 @@ mod doc_multi_tests {
         app.tables.insert(b, table_view::TableSession::new("b.atb".into(), table_file("b")));
 
         let _ = app.close_file_instance(&a);
-        assert_eq!(app.open_files.of_kind(&DocKind::Table, &Host::Main).len(), 1);
+        assert_eq!(app.open_files.of_kind(&DocKind::Table).len(), 1);
         assert_eq!(app.table.as_ref().map(|s| s.file.as_str()), Some("b.atb"));
         assert!(app.tables.is_empty());
     }
@@ -11751,7 +11756,7 @@ mod note_session_tests {
         open_note(&mut app, "b.md", "B");
         let a = app.open_files.find_by_path("a.md").unwrap().id.clone();
         let _ = app.close_file_instance(&a);
-        assert_eq!(app.open_files.of_kind(&DocKind::Note, &Host::Main).len(), 1);
+        assert_eq!(app.open_files.of_kind(&DocKind::Note).len(), 1);
         assert_eq!(app.ui.last_note_file.as_deref(), Some("b.md"));
         assert_eq!(app.note_text, "B");
         assert!(app.notes.is_empty());
@@ -11765,7 +11770,7 @@ mod note_session_tests {
         open_note(&mut app, "b.md", "B");
         let b = app.open_files.find_by_path("b.md").unwrap().id.clone();
         let _ = app.close_file_instance(&b);
-        assert_eq!(app.open_files.of_kind(&DocKind::Note, &Host::Main).len(), 1);
+        assert_eq!(app.open_files.of_kind(&DocKind::Note).len(), 1);
         assert_eq!(app.ui.last_note_file.as_deref(), Some("a.md"), "关掉活动笔记后换入剩下的最近激活项");
         assert_eq!(app.note_text, "A");
         assert!(app.notes.is_empty());
@@ -11784,7 +11789,7 @@ mod note_session_tests {
         let parked_id = app.open_files.find_by_path("b.md").unwrap().id.clone();
         assert_eq!(app.notes.len(), 1, "换出的 b 会话整份停放");
         assert!(app.notes.contains_key(&parked_id));
-        assert_eq!(app.open_files.of_kind(&DocKind::Note, &Host::Main).len(), 2);
+        assert_eq!(app.open_files.of_kind(&DocKind::Note).len(), 2);
     }
 
     #[test]
@@ -11796,7 +11801,7 @@ mod note_session_tests {
         let _ = app.apply_follow(&FollowUp::Deleted { rel: "b.md".into(), is_dir: false });
         assert_eq!(app.ui.last_note_file.as_deref(), Some("a.md"), "活动项被删后换入剩下的打开项");
         assert_eq!(app.note_text, "A");
-        assert_eq!(app.open_files.of_kind(&DocKind::Note, &Host::Main).len(), 1);
+        assert_eq!(app.open_files.of_kind(&DocKind::Note).len(), 1);
     }
 
     #[test]
@@ -11862,7 +11867,7 @@ mod note_session_tests {
 
         // 槽 ×：关 a 后顺延回 b
         let _ = app.close_slot_file("note");
-        assert_eq!(app.open_files.of_kind(&DocKind::Note, &Host::Main).len(), 1);
+        assert_eq!(app.open_files.of_kind(&DocKind::Note).len(), 1);
         assert_eq!(app.ui.last_note_file.as_deref(), Some("b.md"));
         assert_eq!(app.note_text, "B");
     }

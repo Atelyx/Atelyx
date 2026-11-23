@@ -2,7 +2,7 @@
 //! 集合模型在 `atelyx_core::open_files`；本模块只把会话态与会话容器接上。
 
 use atelyx_core::layout::{self, LayoutNode, TabItem};
-use atelyx_core::open_files::{DocKind, Host};
+use atelyx_core::open_files::DocKind;
 
 use crate::layout_view::file_label;
 use crate::App;
@@ -38,7 +38,7 @@ pub fn doc_opened(app: &mut App, path: &str, kind: DocKind) {
     if !multi {
         let others: Vec<String> = app
             .open_files
-            .of_kind(&kind, &Host::Main)
+            .of_kind(&kind)
             .into_iter()
             .filter(|d| d.path != path)
             .map(|d| d.id.clone())
@@ -83,12 +83,11 @@ pub fn clear_all(app: &mut App) {
     app.canvases.clear();
 }
 
-/// 主要面板投影标签：宿主在主窗口的实例按集合顺序生成（id = 实例 id）。
+/// 主要面板投影标签：集合顺序生成（id = 实例 id）。
 pub fn primary_tabs(app: &App) -> Vec<TabItem> {
     app.open_files
         .items()
         .iter()
-        .filter(|d| d.host == Host::Main)
         .map(|d| TabItem {
             id: d.id.clone(),
             view: view_of_kind(&d.kind).to_string(),
@@ -98,20 +97,20 @@ pub fn primary_tabs(app: &App) -> Vec<TabItem> {
         .collect()
 }
 
-/// 主要面板当前激活标签：集合激活项在主窗口则用它，否则回退最近激活的主窗口实例。
+/// 主要面板当前激活标签：集合激活项；缺失时回退最近激活项。
 pub fn primary_active(app: &App) -> Option<String> {
-    if let Some(d) = app.open_files.active().filter(|d| d.host == Host::Main) {
+    if let Some(d) = app.open_files.active() {
         return Some(d.id.clone());
     }
-    app.open_files.recent_of_host(&Host::Main).map(|d| d.id.clone())
+    app.open_files.recent().map(|d| d.id.clone())
 }
 
-/// 类型槽当前显示文件：手动选择（集合内同类、宿主在主窗口）> 集合该类型最近激活 > 空态。
+/// 类型槽当前显示文件：手动选择（集合内同类）> 集合该类型最近激活 > 空态。
 pub fn slot_path(app: &App, tab: &TabItem) -> Option<String> {
     let kind = doc_kind_of_view(&tab.view)?;
     if let Some(file) = &tab.file {
         if let Some(d) = app.open_files.find_by_path(file) {
-            if d.kind == kind && d.host == Host::Main {
+            if d.kind == kind {
                 return Some(file.clone());
             }
         }
@@ -119,19 +118,19 @@ pub fn slot_path(app: &App, tab: &TabItem) -> Option<String> {
     doc_path(app, &kind)
 }
 
-/// 某类型在主窗口的当前文档（集合该类型最近激活）。
+/// 某类型当前打开的文档（集合该类型最近激活）。
 pub fn doc_path(app: &App, kind: &DocKind) -> Option<String> {
-    app.open_files.recent_of_kind(kind, &Host::Main).map(|d| d.path.clone())
+    app.open_files.recent_of_kind(kind).map(|d| d.path.clone())
 }
 
 /// 标签是否显示 ×（视图有打开中的文件）。
 pub fn tab_has_file(app: &App, tab: &TabItem) -> bool {
     if let Some(file) = &tab.file {
-        if app.open_files.find_by_path(file).is_some_and(|d| d.host == Host::Main) {
+        if app.open_files.find_by_path(file).is_some() {
             return true;
         }
     }
-    doc_kind_of_view(&tab.view).is_some_and(|kind| app.open_files.recent_of_kind(&kind, &Host::Main).is_some())
+    doc_kind_of_view(&tab.view).is_some_and(|kind| app.open_files.recent_of_kind(&kind).is_some())
 }
 
 /// 标签文字：文档槽/投影 = 文件名；工具视图 = 视图名。
@@ -146,7 +145,7 @@ pub fn tab_label(app: &App, tab: &TabItem) -> String {
 pub fn collapse_slots(app: &App) -> Vec<(String, Option<String>)> {
     let mut out = Vec::new();
     for kind in [DocKind::Note, DocKind::Table, DocKind::Canvas] {
-        if let Some(d) = app.open_files.recent_of_kind(&kind, &Host::Main) {
+        if let Some(d) = app.open_files.recent_of_kind(&kind) {
             out.push((view_of_kind(&kind).to_string(), Some(d.path.clone())));
         }
     }
