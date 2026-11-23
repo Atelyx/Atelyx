@@ -1339,6 +1339,14 @@ fn panel_view<'a>(
 }
 
 /// 主要面板标识：左侧强调竖条 + 「主要面板」小标题（固定在标签条最左，不随标签滚动）。
+/// 主要面板徽标文案（渲染与标签条命中几何共用一份）。
+const PRIMARY_BADGE_TEXT: &str = "主要面板";
+
+/// 徽标占位宽：3 竖条 + 6 间距 + 文本 + 左右内边距（标签条起点右移这么多）。
+fn primary_badge_width() -> f32 {
+    estimate_width(PRIMARY_BADGE_TEXT, pal::fs_micro()) + 3.0 + 6.0 + 6.0 + 4.0
+}
+
 fn primary_badge() -> Element<'static, Message> {
     container(
         row![
@@ -1350,7 +1358,7 @@ fn primary_badge() -> Element<'static, Message> {
                     border: border::rounded(1.0),
                     ..Style::default()
                 }),
-            text("主要面板").size(pal::fs_micro()).color(pal::TEXT_MUTED),
+            text(PRIMARY_BADGE_TEXT).size(pal::fs_micro()).color(pal::TEXT_MUTED),
         ]
         .spacing(6)
         .align_y(Vertical::Center),
@@ -1506,7 +1514,7 @@ fn tab_button<'a>(
 }
 
 /// 面板标签（激活 = 内容区同色底 + 2px 金下边盖线；打开文件的 × = 关文件留标签）。
-/// 主要面板的标签是集合投影：按下/右键走实例通道，不做标签拖拽。
+/// 主要面板的标签是集合投影：按下走实例通道（点击激活实例，拖动只重排集合）。
 fn panel_tab<'a>(
     app: &'a App,
     panel_id: &str,
@@ -1540,7 +1548,14 @@ fn panel_tab<'a>(
     };
     let area = mouse_area(btn).on_right_press(ctx_popup(window, cursor, menu));
     if primary {
-        return area.into();
+        return controls::PressReporter::new(
+            area.into(),
+            Message::DocTabPress {
+                panel_id: panel_id.to_string(),
+                instance_id: t.id.clone(),
+            },
+        )
+        .into();
     }
     // 按下候选经 PressReporter 上报（mouse_area 对被按钮捕获的按下事件不触发）；
     // 锁定标签右键仍开菜单（iced mouse_area 无 maybe 变体），条目全部禁用表达锁定语义
@@ -4361,6 +4376,8 @@ pub struct PanelZone {
     pub rect: Rectangle,
     /// 各标签宽度（自适应标签的命中几何基准，与渲染同源估算）。
     pub tab_widths: Vec<f32>,
+    /// 标签条起点相对面板左缘的额外偏移（主要面板的徽标占位）。
+    pub tab_x_inset: f32,
 }
 
 /// 拖拽 drop 的落点种类（标签条排序 / 中部加标签 / 四边缘分割）。
@@ -4474,6 +4491,7 @@ pub fn panel_zones(app: &App) -> Vec<PanelZone> {
                     height: (sz.height - UiMetrics::TITLEBAR_H).max(0.0),
                 },
                 tab_widths: widths,
+                tab_x_inset: 0.0,
             });
         }
     }
@@ -4483,8 +4501,9 @@ pub fn panel_zones(app: &App) -> Vec<PanelZone> {
 fn walk_panels(node: &LayoutNode, area: Rectangle, out: &mut Vec<PanelZone>, app: &App) {
     match node {
         LayoutNode::Panel { id, tabs, .. } => {
+            let primary = layout::primary_panel_of_active(&app.ui) == Some(id.as_str());
             // 主要面板的标签条宽度按集合投影记账（命中几何与渲染同源）
-            let widths: Vec<f32> = if layout::primary_panel_of_active(&app.ui) == Some(id.as_str()) {
+            let widths: Vec<f32> = if primary {
                 crate::open_route::primary_tabs(app)
                     .iter()
                     .map(|t| approx_tab_width(&tab_label(app, t), false, true))
@@ -4501,6 +4520,7 @@ fn walk_panels(node: &LayoutNode, area: Rectangle, out: &mut Vec<PanelZone>, app
                 detached_id: None,
                 rect: area,
                 tab_widths: widths,
+                tab_x_inset: if primary { primary_badge_width() } else { 0.0 },
             })
         }
         LayoutNode::Split { direction, children, sizes, .. } => {
@@ -4534,7 +4554,7 @@ fn walk_panels(node: &LayoutNode, area: Rectangle, out: &mut Vec<PanelZone>, app
 /// 左半 = 该标签前，右半 = 该标签后；`scroll_x` = 该标签条横向滚动偏移，
 /// 估宽与真实 shaping 的偏差只影响插入位差半格以内）。
 pub fn tab_index_at(zone: &PanelZone, global_x: f32, scroll_x: f32) -> usize {
-    let mut x = zone.rect.x + UiMetrics::HEADER_INSET - scroll_x;
+    let mut x = zone.rect.x + UiMetrics::HEADER_INSET + zone.tab_x_inset - scroll_x;
     for (i, w) in zone.tab_widths.iter().enumerate() {
         if global_x < x + w / 2.0 {
             return i;
@@ -4574,12 +4594,33 @@ pub fn drop_zone_at(zone: &PanelZone, global: iced::Point) -> DropZone {
 mod tests {
     use super::{
         device_meta_line, divider_size, ext_badge_reserve, file_label, merge_peers, name_slot,
-        row_window, wiki_picker_geom, UiMetrics, SUGGEST_W,
+        row_window, tab_index_at, wiki_picker_geom, PanelZone, UiMetrics, SUGGEST_W,
     };
     use crate::ui::palette as pal;
     use crate::ui::text::{ellipsize_estimated, estimate_width};
     use atelyx_core::collab::PeerInfo;
-    use iced::Length;
+    use iced::{Length, Rectangle};
+
+    #[test]
+    fn tab_index_at_accounts_for_primary_badge() {
+        let zone = PanelZone {
+            panel_id: Some("p".into()),
+            detached_id: None,
+            rect: Rectangle { x: 0.0, y: 0.0, width: 600.0, height: 40.0 },
+            tab_widths: vec![100.0, 100.0],
+            tab_x_inset: 60.0,
+        };
+        let start = UiMetrics::HEADER_INSET + 60.0;
+        // 徽标区与第一个标签左半：插到最前
+        assert_eq!(tab_index_at(&zone, start - 1.0, 0.0), 0);
+        assert_eq!(tab_index_at(&zone, start + 20.0, 0.0), 0);
+        // 越过第一个标签半宽 → 第 1 位；滚到末尾 → 末尾位
+        assert_eq!(tab_index_at(&zone, start + 60.0, 0.0), 1);
+        assert_eq!(tab_index_at(&zone, start + 100.0 + 2.0 + 60.0, 0.0), 2);
+        // 标签条横向滚动后，同一光标位置对应更靠后的插入位
+        assert_eq!(tab_index_at(&zone, start + 10.0, 0.0), 0);
+        assert_eq!(tab_index_at(&zone, start + 10.0, 40.0), 1);
+    }
 
     #[test]
     fn wiki_picker_lands_below_and_right_of_caret() {

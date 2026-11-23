@@ -1161,6 +1161,8 @@ enum Message {
     DetachedTabFileClose(String),
     /// 标签按下：拖拽候选由标签按钮自证命中（渲染自适应后几何不再可靠）。
     PanelTabPress { panel_id: String, tab_id: String },
+    /// 主要面板投影标签按下（标签 id = 集合实例 id）：只做集合重排，不做标签拖拽。
+    DocTabPress { panel_id: String, instance_id: String },
     DetachedTabPress { window_id: String, tab_id: String },
     LayoutTabPress { layout_id: String, name: String },
     PanelTabClose(String, String),
@@ -1574,6 +1576,8 @@ struct DragSession {
     from_detached: Option<String>,
     /// 布局 tab 拖拽的 1-based 合成序（标签拖拽恒为 0）。
     layout_from: usize,
+    /// 来源是主要面板投影标签（实例 id 不是树里的标签）。
+    from_docs: bool,
     /// 全局光标（源窗口位置 + 本地坐标）。
     current: Point,
     /// 光标当前所在窗口（ghost 显示归属）。
@@ -1589,6 +1593,8 @@ struct DragHover {
 /// 拖拽候选来源（按下时由标签按钮自证命中，转正时再查锁定与标签信息）。
 enum PressSource {
     Panel { panel_id: String, tab_id: String },
+    /// 主要面板投影标签（tab_id = 集合实例 id）。
+    Primary { panel_id: String, instance_id: String },
     Detached { window_id: String, tab_id: String },
     Layout { layout_id: String, name: String },
 }
@@ -2966,6 +2972,7 @@ impl App {
             | Message::FilePicked(..)
             | Message::DetachedTabFileClose(..)
             | Message::PanelTabPress { .. }
+            | Message::DocTabPress { .. }
             | Message::DetachedTabPress { .. }
             | Message::LayoutTabPress { .. }
             | Message::PanelTabClose(..)
@@ -4496,6 +4503,13 @@ impl App {
                 self.tab_press = Some(TabPress {
                     window: self.main_id.unwrap_or(iced::window::Id::unique()),
                     source: PressSource::Panel { panel_id, tab_id },
+                });
+                Task::none()
+            }
+            Message::DocTabPress { panel_id, instance_id } => {
+                self.tab_press = Some(TabPress {
+                    window: self.main_id.unwrap_or(iced::window::Id::unique()),
+                    source: PressSource::Primary { panel_id, instance_id },
                 });
                 Task::none()
             }
@@ -6158,6 +6172,25 @@ impl App {
                     from_panel: Some(panel_id),
                     from_detached: None,
                     layout_from: 0,
+                    from_docs: false,
+                    current: press_global,
+                    cursor_window: tp.window,
+                }
+            }
+            PressSource::Primary { panel_id, instance_id } => {
+                let Some(item) = self.open_files.get(&instance_id) else {
+                    return Task::none();
+                };
+                let view = open_route::view_of_kind(&item.kind).to_string();
+                let label = atelyx_core::vault::file_label(&item.path).to_string();
+                DragSession {
+                    tab_id: instance_id,
+                    view,
+                    label,
+                    from_panel: Some(panel_id),
+                    from_detached: None,
+                    layout_from: 0,
+                    from_docs: true,
                     current: press_global,
                     cursor_window: tp.window,
                 }
@@ -6190,6 +6223,7 @@ impl App {
                     from_panel: None,
                     from_detached: Some(window_id),
                     layout_from: 0,
+                    from_docs: false,
                     current: press_global,
                     cursor_window: tp.window,
                 }
@@ -6211,6 +6245,7 @@ impl App {
                     from_panel: None,
                     from_detached: None,
                     layout_from: from_index,
+                    from_docs: false,
                     current: press_global,
                     cursor_window: tp.window,
                 }
@@ -6218,6 +6253,33 @@ impl App {
         };
         self.drag = Some(drag);
         self.drag_hover = None;
+        Task::none()
+    }
+
+    /// 主面板投影标签拖动 = 重排集合：标签条第 n 位 = 插入到同宿主第 n 项之前。
+    fn reorder_projection(&mut self, id: &str, strip_index: usize) -> Task<Message> {
+        let main_ids: Vec<String> = self
+            .open_files
+            .items()
+            .iter()
+            .filter(|d| d.host == Host::Main)
+            .map(|d| d.id.clone())
+            .collect();
+        let Some(from) = main_ids.iter().position(|i| i == id) else { return Task::none() };
+        // 落回自己原位两侧都不动（集合顺序即呈现顺序）
+        if strip_index == from || strip_index == from + 1 {
+            return Task::none();
+        }
+        let to_full = match main_ids.get(strip_index) {
+            Some(next) => self
+                .open_files
+                .items()
+                .iter()
+                .position(|d| &d.id == next)
+                .unwrap_or(self.open_files.len()),
+            None => self.open_files.len(),
+        };
+        self.open_files.reorder(id, to_full);
         Task::none()
     }
 
@@ -6258,6 +6320,10 @@ impl App {
             return Task::none();
         }
         let Some(h) = hover else {
+            // 主面板投影标签拖出窗口：集合项留在主面板（撕出新窗口属撕裂宿主）
+            if d.from_docs {
+                return Task::none();
+            }
             let bounds = WindowBounds {
                 x: d.current.x as f64,
                 y: d.current.y as f64,
@@ -6287,6 +6353,18 @@ impl App {
             .unwrap_or(0.0);
         let index = (h.kind == layout_view::DropZone::Tab)
             .then(|| layout_view::tab_index_at(&h.zone, d.current.x, scroll_x));
+        // 主面板投影标签：拖动只重排集合（不换布局、不产生副本），丢到别处 = 留在主面板
+        if d.from_docs {
+            let primary = layout::primary_panel_of_active(&self.ui).map(str::to_string);
+            if h.kind == layout_view::DropZone::Tab
+                && h.zone.panel_id.as_deref() == primary.as_deref()
+            {
+                if let Some(to_index) = index {
+                    return self.reorder_projection(&d.tab_id, to_index);
+                }
+            }
+            return Task::none();
+        }
         // 四边缘 = 分割落点（仅主窗口面板；撕裂窗口整体 = 加标签）
         if h.zone.panel_id.is_some()
             && matches!(
@@ -11719,6 +11797,30 @@ mod note_session_tests {
         assert_eq!(app.ui.last_note_file.as_deref(), Some("a.md"), "活动项被删后换入剩下的打开项");
         assert_eq!(app.note_text, "A");
         assert_eq!(app.open_files.of_kind(&DocKind::Note, &Host::Main).len(), 1);
+    }
+
+    #[test]
+    fn projection_reorder_moves_item_to_strip_slot() {
+        let mut app = app();
+        let a = app.open_files.open("a.md", DocKind::Note);
+        app.open_files.open("b.atb", DocKind::Table);
+        let c = app.open_files.open("c.atlx", DocKind::Canvas);
+        // 拖到标签条最前 / 原位两侧 / 中间 / 末尾
+        let _ = app.reorder_projection(&c, 0);
+        assert_eq!(paths(&app), vec!["c.atlx", "a.md", "b.atb"]);
+        let _ = app.reorder_projection(&c, 1);
+        assert_eq!(paths(&app), vec!["c.atlx", "a.md", "b.atb"], "落回自己右侧原位不动");
+        let _ = app.reorder_projection(&c, 2);
+        assert_eq!(paths(&app), vec!["a.md", "c.atlx", "b.atb"], "插到第 2 位之前");
+        let _ = app.reorder_projection(&a, 3);
+        assert_eq!(paths(&app), vec!["c.atlx", "b.atb", "a.md"], "拖到末尾");
+        let _ = app.reorder_projection(&a, 0);
+        assert_eq!(paths(&app), vec!["a.md", "c.atlx", "b.atb"]);
+        let _ = a;
+    }
+
+    fn paths(app: &App) -> Vec<&str> {
+        app.open_files.items().iter().map(|d| d.path.as_str()).collect()
     }
 
     #[test]
