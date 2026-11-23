@@ -6256,29 +6256,16 @@ impl App {
         Task::none()
     }
 
-    /// 主面板投影标签拖动 = 重排集合：标签条第 n 位 = 插入到同宿主第 n 项之前。
+    /// 主面板投影标签拖动 = 重排集合：标签条第 n 位 = 插到集合第 n 项之前（集合顺序即标签顺序）。
     fn reorder_projection(&mut self, id: &str, strip_index: usize) -> Task<Message> {
-        let main_ids: Vec<String> = self
-            .open_files
-            .items()
-            .iter()
-            .map(|d| d.id.clone())
-            .collect();
-        let Some(from) = main_ids.iter().position(|i| i == id) else { return Task::none() };
+        let Some(from) = self.open_files.items().iter().position(|d| d.id == id) else {
+            return Task::none();
+        };
         // 落回自己原位两侧都不动（集合顺序即呈现顺序）
         if strip_index == from || strip_index == from + 1 {
             return Task::none();
         }
-        let to_full = match main_ids.get(strip_index) {
-            Some(next) => self
-                .open_files
-                .items()
-                .iter()
-                .position(|d| &d.id == next)
-                .unwrap_or(self.open_files.len()),
-            None => self.open_files.len(),
-        };
-        self.open_files.reorder(id, to_full);
+        self.open_files.reorder(id, strip_index);
         Task::none()
     }
 
@@ -6359,7 +6346,7 @@ impl App {
             self.notify(NoticeLevel::Info, "文档只能留在主窗口内");
             return Task::none();
         }
-        // 主面板投影标签：拖动只重排集合（不换布局、不产生副本），丢到别处 = 留在主面板
+        // 主面板投影标签：拖动只重排集合（不换布局、不产生副本），丢到别处说明原因
         if d.from_docs {
             let primary = layout::primary_panel_of_active(&self.ui).map(str::to_string);
             if h.kind == layout_view::DropZone::Tab
@@ -6369,6 +6356,7 @@ impl App {
                     return self.reorder_projection(&d.tab_id, to_index);
                 }
             }
+            self.notify(NoticeLevel::Info, "主要面板标签是打开文件集合的投影，只在标签条内调整顺序");
             return Task::none();
         }
         // 四边缘 = 分割落点（仅主窗口面板；撕裂窗口整体 = 加标签）
