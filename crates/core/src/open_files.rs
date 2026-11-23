@@ -75,12 +75,6 @@ impl OpenFiles {
         Some(removed)
     }
 
-    /// 移除路径对应的实例（外部删除）：激活转移同 `close`。
-    pub fn close_path(&mut self, path: &str) -> Option<DocInstance> {
-        let id = self.find_by_path(path)?.id.clone();
-        self.close(&id)
-    }
-
     /// 激活实例（不存在返回 false）。
     pub fn activate(&mut self, id: &str) -> bool {
         if self.items.iter().any(|d| d.id == id) {
@@ -106,14 +100,7 @@ impl OpenFiles {
         self.items.insert(target.min(self.items.len()), moved);
     }
 
-    /// 路径改名 / 移动后更新集合内路径（旧路径已不存在时忽略）。
-    pub fn rename_path(&mut self, from: &str, to: &str) {
-        if let Some(item) = self.items.iter_mut().find(|d| d.path == from) {
-            item.path = to.to_string();
-        }
-    }
-
-    /// 目录改名 / 移动后按前缀改写集合内路径（文件精确改写也走这里）。
+    /// 目录改名 / 移动后按前缀改写集合内路径（文件自身改名也走这里）。
     pub fn rename_prefix(&mut self, from: &str, to: &str) {
         for item in &mut self.items {
             if let Some(next) = crate::path::remap_prefix(&item.path, from, to) {
@@ -269,14 +256,18 @@ mod tests {
     }
 
     #[test]
-    fn rename_and_close_path() {
+    fn rename_prefix_rewrites_paths() {
         let mut set = OpenFiles::default();
-        let a = set.open("a.md", note());
-        set.rename_path("a.md", "dir/a.md");
-        assert_eq!(set.find_by_path("a.md"), None);
-        assert_eq!(set.find_by_path("dir/a.md").map(|d| d.id.as_str()), Some(a.as_str()));
-        set.close_path("dir/a.md");
-        assert!(set.is_empty());
+        let a = set.open("dir/a.md", note());
+        set.open("dir/sub/b.md", note());
+        set.open("other/c.md", note());
+        set.rename_prefix("dir", "moved");
+        assert_eq!(set.find_by_path("dir/a.md"), None);
+        assert_eq!(set.find_by_path("moved/a.md").map(|d| d.id.as_str()), Some(a.as_str()));
+        assert_eq!(
+            set.items().iter().map(|d| d.path.as_str()).collect::<Vec<_>>(),
+            vec!["moved/a.md", "moved/sub/b.md", "other/c.md"]
+        );
     }
 
     #[test]
