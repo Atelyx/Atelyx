@@ -8149,6 +8149,20 @@ impl App {
                         *d = next;
                     }
                 }
+                // 集合与停放会话的路径随改名 / 移动更新（打开文件集合是路径唯一真源）
+                self.open_files.rename_prefix(from, to);
+                for s in self.tables.values_mut() {
+                    if let Some(next) = remap(&s.file) {
+                        s.file = next.clone();
+                        s.data.title = layout_view::file_label(&next);
+                    }
+                }
+                for s in self.canvases.values_mut() {
+                    if let Some(next) = remap(&s.file) {
+                        s.file = next.clone();
+                        s.data.title = layout_view::file_label(&next);
+                    }
+                }
                 if let Some(next) = self.ui.last_note_file.as_deref().and_then(remap) {
                     self.ui.last_note_file = Some(next);
                     self.schedule_persist();
@@ -8191,6 +8205,29 @@ impl App {
                 space_actions::collab_follow_rename(self, from, to);
             }
             FollowUp::Deleted { rel, is_dir } => {
+                // 集合按磁盘事实移除：被删的实例（含停放会话）不再属于打开文件
+                let doomed: Vec<String> = self
+                    .open_files
+                    .items()
+                    .iter()
+                    .filter(|d| {
+                        if *is_dir {
+                            atelyx_core::path::under(&d.path, rel)
+                        } else {
+                            d.path == *rel
+                        }
+                    })
+                    .map(|d| d.id.clone())
+                    .collect();
+                if !doomed.is_empty() {
+                    self.notify(NoticeLevel::Info, "文件已被删除，已从打开文件移除");
+                }
+                for id in doomed {
+                    self.notes.remove(&id);
+                    self.tables.remove(&id);
+                    self.canvases.remove(&id);
+                    self.open_files.close(&id);
+                }
                 let hit = self.ui.last_note_file.as_deref().is_some_and(|f| {
                     if *is_dir {
                         atelyx_core::path::under(f, rel)

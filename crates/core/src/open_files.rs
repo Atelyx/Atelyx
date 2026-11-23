@@ -128,6 +128,15 @@ impl OpenFiles {
         }
     }
 
+    /// 目录改名 / 移动后按前缀改写集合内路径（文件精确改写也走这里）。
+    pub fn rename_prefix(&mut self, from: &str, to: &str) {
+        for item in &mut self.items {
+            if let Some(next) = crate::path::remap_prefix(&item.path, from, to) {
+                item.path = next;
+            }
+        }
+    }
+
     /// 按类型与宿主过滤（集合顺序）。
     pub fn of_kind(&self, kind: &DocKind, host: &Host) -> Vec<&DocInstance> {
         self.items
@@ -214,6 +223,17 @@ mod tests {
         // 重新打开既有项只激活，不改变顺序
         set.open("a.md", note());
         assert_eq!(set.items()[0].path, "a.md");
+    }
+
+    #[test]
+    fn rename_prefix_rewrites_nested_items() {
+        let mut set = OpenFiles::default();
+        set.open("dir/a.md", note());
+        set.open("dir/sub/b.atb", DocKind::Table);
+        set.open("other.md", note());
+        set.rename_prefix("dir", "docs");
+        let paths: Vec<&str> = set.items().iter().map(|d| d.path.as_str()).collect();
+        assert_eq!(paths, vec!["docs/a.md", "docs/sub/b.atb", "other.md"]);
     }
 
     #[test]
