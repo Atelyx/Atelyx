@@ -541,6 +541,8 @@ pub struct TableViewState {
     pub field_reorder: Option<FieldReorder>,
     pub img_drag: Option<ImageDrag>,
     pub swipe: Option<SwipeState>,
+    /// 拖拽图片悬停中的图片单元格（文件树 / 系统文件拖入；松开即导入）。
+    pub image_drop: Option<ImageDropTarget>,
     /// 光标位置（画布局部；hover 表达用）。
     pub hover: Point,
     pub undo: Vec<TableSnapshot>,
@@ -564,8 +566,9 @@ pub struct TableViewState {
     /// 最近一次重绘上报 / 指针事件播种的画布尺寸与来源窗口。
     /// 前提：表格视图全局唯一（布局层的 view_occupied 保证同一视图不会同时占两个标签）。
     pub canvas_viewport: Option<(iced::window::Id, Size)>,
-    /// 画布在窗口中的原点与来源窗口（Press/Move 播种）：格式气泡据此把选区偏移换算成窗口锚点。
-    /// 窗口不符（切窗 / 撕裂）或画布未收到过事件 = 锚点不成立，气泡不弹。
+    /// 画布在窗口中的原点与来源窗口（重绘上报 / Press / Move 播种）：格式气泡据此把选区偏移
+    /// 换算成窗口锚点；系统文件拖入的落点换算也以此为基准。
+    /// 窗口不符（切窗 / 撕裂）或画布从未上报 = 锚点不成立，气泡不弹。
     pub canvas_origin: Option<(iced::window::Id, Point)>,
     /// 布局重建计数：字号 / 字体 / 缩放等不改变数据版本的重建也据此让拖拽快照失效。
     pub layout_epoch: u64,
@@ -590,9 +593,10 @@ impl TableViewState {
         self.carousel.entry(row_id.to_string()).or_default().insert(field_id.to_string(), index);
     }
 
-    /// 记录画布真实尺寸（重绘上报 / 指针事件）：表格视图全局唯一，最近一次即当前视口。
-    pub fn record_viewport(&mut self, window: iced::window::Id, size: Size) {
+    /// 记录画布真实尺寸与原点（重绘上报 / 指针事件）：表格视图全局唯一，最近一次即当前视口。
+    pub fn record_viewport(&mut self, window: iced::window::Id, size: Size, origin: Point) {
         self.canvas_viewport = Some((window, size));
+        self.canvas_origin = Some((window, origin));
         self.canvas_size = size;
     }
 
@@ -735,6 +739,14 @@ pub struct ImageDrag {
     pub rel: String,
     pub from: usize,
     pub pos: Point,
+}
+
+/// 图片单元格落点（文件树拖拽 / 系统文件拖入共用；`window` = 画布所在窗口）。
+#[derive(Clone, PartialEq)]
+pub struct ImageDropTarget {
+    pub window: iced::window::Id,
+    pub row_id: String,
+    pub field_id: String,
 }
 
 pub struct SwipeState {
@@ -985,8 +997,8 @@ pub enum TableMsg {
     Context { window: iced::window::Id, pos: Point, size: Size },
     /// 画布内鼠标移动（携带画布尺寸与画布原点：首帧悬停即播种 canvas_size / canvas_origin）。
     Move { window: iced::window::Id, pos: Point, size: Size, origin: Point },
-    /// 重绘时上报的画布真实尺寸（打开 / 切标签 / 面板与窗口改尺寸；指针事件另会播种同尺寸）。
-    Viewport { window: iced::window::Id, size: Size },
+    /// 重绘时上报的画布真实尺寸与原点（打开 / 切标签 / 面板与窗口改尺寸；指针事件另会播种同尺寸）。
+    Viewport { window: iced::window::Id, size: Size, origin: Point },
     Release(Point),
     /// 滚轮（ctrl = 缩放，修饰态由 App.mods 维护）。
     Wheel { delta_y: f32, delta_x: f32 },
@@ -1052,6 +1064,8 @@ pub enum TableMsg {
     /// 保存失败 / 期间又有编辑的到期重试（gen 守卫：切仓库后旧任务作废）。
     RetrySave(u64, String),
     ImagesWritten { row_id: String, field_id: String, rels: Vec<String>, failed: usize },
+    /// 拖入图片读取失败（附原因）。
+    ImageDropFailed(String),
     LightboxClose,
     LightboxNav(i32),
     LightboxDownload,
@@ -1615,6 +1629,17 @@ pub fn cell_rect(g: &Geo, r: usize, c: usize) -> Rectangle {
     g.positions().cell_rect(r, c)
 }
 
+/// 画布局部坐标落在图片字段单元格 → (行 id, 字段 id)；非图片格与表头 / 状态栏不接收。
+pub fn image_cell_at(session: &TableSession, size: Size, pos: Point) -> Option<(String, String)> {
+    let g = geo(session, size);
+    let Hit::Cell(r, c) = hit_at(&g, pos) else { return None };
+    let field = session.data.fields.get(c)?;
+    if field.field_type != "image" {
+        return None;
+    }
+    Some((session.data.rows.get(r)?.id.clone(), field.id.clone()))
+}
+
 /// 自动行高：内容高 + 上下内衬，不低于 32 逻辑像素（随缩放）。
 fn auto_row_height(content: f32, zoom: f32) -> f32 {
     (content + 2.0 * CELL_PAD_Y * zoom).max(32.0 * zoom)
@@ -2077,20 +2102,26 @@ impl canvas::Program<Message> for TableView<'_> {
                     delta_x: dx,
                 })))
             }
-            // 画布真实尺寸只有重绘时拿得到：尺寸变了就上报，打开 / 切标签 / 改面板尺寸后
-            // 图片不必等鼠标事件才加载；表格视图全局唯一，同一窗口同一尺寸只上报一次，不会回环
+            // 画布真实尺寸 / 原点是重绘时才拿得到的事实：变了就上报，打开 / 切标签 / 改面板
+            // 尺寸后图片不必等鼠标事件才加载，拖入落点换算也不依赖指针消息；表格视图全局唯一，
+            // 同一窗口同一尺寸只上报一次，不会回环
             Ev::Window(iced::window::Event::RedrawRequested(_)) => {
                 let size = bounds.size();
                 if size.width < 1.0 || size.height < 1.0 {
                     return None;
                 }
-                let known = self
-                    .session
-                    .view
-                    .canvas_viewport
-                    .is_some_and(|known| known == (window, size));
+                let origin = bounds.position();
+                let view = &self.session.view;
+                let known = view.canvas_viewport == Some((window, size))
+                    && view
+                        .canvas_origin
+                        .is_some_and(|(w, p)| w == window && p == origin);
                 (!known).then(|| {
-                    iced::widget::Action::publish(Message::Table(TableMsg::Viewport { window, size }))
+                    iced::widget::Action::publish(Message::Table(TableMsg::Viewport {
+                        window,
+                        size,
+                        origin,
+                    }))
                 })
             }
             _ => None,
@@ -2368,6 +2399,36 @@ fn draw_table(
             rect(x1 - bw, y0, bw, y1 - y0),
         ] {
             frame.fill_rectangle(line.position(), line.size(), pal::ACCENT);
+        }
+    }
+
+    // 拖拽图片落入的目标高亮（文件树 / 系统文件拖入）
+    if let Some(target) = &view.image_drop {
+        let (row, col) = (
+            data.rows.iter().position(|x| x.id == target.row_id),
+            data.fields.iter().position(|f| f.id == target.field_id),
+        );
+        if let (Some(r), Some(c)) = (row, col) {
+            let x = g.cache.col_x[c] - view.scroll_x + g.gutter_w();
+            let y = g.cache.row_y[r] - view.scroll_y + g.header_h();
+            let w = g.cache.col_w[c];
+            let h = g.cache.row_h[r];
+            let visible = y + h > g.header_h()
+                && y < g.rows_bottom()
+                && x + w > g.gutter_w()
+                && x < g.cols_viewport_right();
+            if visible {
+                frame.fill_rectangle(Point::new(x, y), Size::new(w, h), pal::ACCENT_SOFT);
+                let bw = 2.0 * g.z;
+                for line in [
+                    rect(x, y, w, bw),
+                    rect(x, y + h - bw, w, bw),
+                    rect(x, y, bw, h),
+                    rect(x + w - bw, y, bw, h),
+                ] {
+                    frame.fill_rectangle(line.position(), line.size(), pal::ACCENT);
+                }
+            }
         }
     }
 
@@ -4097,6 +4158,26 @@ mod tests {
         ((*seed >> 8) & 0xFF_FFFF) as f32 / 16_777_216.0
     }
 
+    /// 落点只认图片字段的单元格：文本格 / 表头 / 状态栏与表外区域都不接收。
+    #[test]
+    fn image_drop_target_only_hits_image_cells() {
+        let mut s = grid_session(2, &[120.0, 140.0], &[None, None]);
+        s.data.fields[1].field_type = "image".to_string();
+        s.rebuild_layout();
+        let size = Size::new(640.0, 480.0);
+        let g = geo(&s, size);
+        let image_cell = cell_rect(&g, 1, 1);
+        assert_eq!(
+            image_cell_at(&s, size, image_cell.center()),
+            Some(("r1".to_string(), "f1".to_string()))
+        );
+        // 文本格不接收
+        assert!(image_cell_at(&s, size, cell_rect(&g, 0, 0).center()).is_none());
+        // 表头与表外不接收
+        assert!(image_cell_at(&s, size, Point::new(200.0, 8.0)).is_none());
+        assert!(image_cell_at(&s, size, Point::new(2000.0, 900.0)).is_none());
+    }
+
     /// 位置入口与真实尺寸 Geo 的逐格坐标一致（行列数 / 列宽 / 手工行高 / 滚动 / 缩放组合）。
     #[test]
     fn layout_positions_match_geo_coordinates() {
@@ -4796,13 +4877,14 @@ mod tests {
         )
         .expect("首帧重绘应上报视口");
         match action.into_inner().0 {
-            Some(Message::Table(TableMsg::Viewport { window: reported, size })) => {
+            Some(Message::Table(TableMsg::Viewport { window: reported, size, origin })) => {
                 assert_eq!(reported, window);
                 assert_eq!(size, bounds.size());
+                assert_eq!(origin, bounds.position());
             }
             _ => panic!("首帧重绘应发布视口消息"),
         }
-        s.view.record_viewport(window, bounds.size());
+        s.view.record_viewport(window, bounds.size(), bounds.position());
         let view = TableView { session: &s, window, remote: &[] };
         assert!(
             canvas::Program::update(
@@ -5114,8 +5196,16 @@ mod tests {
     #[test]
     fn viewport_report_replaces_previous_window() {
         let mut s = text_session(&["短"]);
-        s.view.record_viewport(iced::window::Id::unique(), Size::new(800.0, 600.0));
-        s.view.record_viewport(iced::window::Id::unique(), Size::new(400.0, 300.0));
+        s.view.record_viewport(
+            iced::window::Id::unique(),
+            Size::new(800.0, 600.0),
+            Point::new(10.0, 20.0),
+        );
+        s.view.record_viewport(
+            iced::window::Id::unique(),
+            Size::new(400.0, 300.0),
+            Point::new(5.0, 8.0),
+        );
         assert_eq!(s.view.viewport_size(), Size::new(400.0, 300.0));
     }
 }

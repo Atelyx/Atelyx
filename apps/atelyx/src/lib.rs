@@ -45,6 +45,7 @@ mod plugin_theme;
 mod plugin_frame;
 mod plugin_paint;
 mod plugin_view;
+mod pointer;
 mod popup;
 mod properties_view;
 mod recent_view;
@@ -1102,6 +1103,12 @@ enum Message {
     FileDragEnter { drop: FileDropKey, rel: String, is_dir: bool },
     /// 拖拽悬停离开某行 / 落点区（`drop` 与进入时一致才清除）。
     FileDragExit { drop: FileDropKey },
+    /// 系统文件拖入窗口（仅路径，无落点；只用于点亮表格图片格目标）。
+    OsFileHovered { window: window::Id, path: PathBuf },
+    /// 系统文件拖出窗口（悬停取消）。
+    OsFilesLeft(window::Id),
+    /// 系统文件落在窗口（落点按系统光标重算；落在图片格即入库，其余交对话面板）。
+    OsFileDropped { window: window::Id, path: PathBuf },
     /// 在系统文件管理器中显示条目（目录 = 打开，文件 = 打开所在目录并选中）。
     RevealEntry { rel: String, is_dir: bool },
     /// 复制条目路径到系统剪贴板（absolute = 绝对路径，否则仓库内相对路径）。
@@ -1171,6 +1178,8 @@ enum Message {
     PositionKnown(window::Id, Option<Point>),
     Press(window::Id),
     CursorMoved(window::Id, Point),
+    /// 指针离开窗口（悬停类的落点提示随之失效）。
+    CursorLeft,
     Release,
     /// ui 层消息（悬停提示 / 弹层关闭与面板导航 / 通知关闭）。
     Ui(ui::UiMsg<Message>),
@@ -2209,6 +2218,10 @@ pub struct App {
     pub file_drag: Option<FileDrag>,
     /// 拖拽悬停中的落点（目标目录相对路径，`""` = 仓库根；None = 不在可落点上）。
     pub file_drag_target: Option<String>,
+    /// 系统文件拖入悬停中的窗口（拖拽期间收不到指针移动，心跳按系统光标刷落点）。
+    pub os_drag: Option<window::Id>,
+    /// 窗口缩放比（系统光标物理坐标 → 窗口局部逻辑坐标；窗口建窗时查询、Rescaled 更新）。
+    pub window_scales: HashMap<window::Id, f32>,
 }
 
 /// 编辑面渲染用的远端光标视图（字节偏移，UTF-16 已换算）。选区缺省 = 对端在场但
@@ -2282,6 +2295,15 @@ impl App {
         }
     }
 
+    /// 指针在指定窗口内的逻辑坐标：系统文件拖入只有路径没有落点，按系统光标 + 窗口位置 / 缩放换算。
+    /// 查询不到（非 Windows 平台 / 缩放或窗口位置未知）= None，调用方退回不做落点判定。
+    pub(crate) fn pointer_local(&self, window: window::Id) -> Option<Point> {
+        let screen = pointer::screen_cursor()?;
+        let scale = self.window_scales.get(&window).copied()?;
+        let wpos = self.os_positions.get(&window).copied()?;
+        pointer::window_local(screen, wpos, scale)
+    }
+
     /// 编辑面是否持键盘：属性槽位输入激活时键盘归属性面板，直到 Enter/Tab/Esc 退出。
     pub(crate) fn edit_surface_focused(&self) -> bool {
         self.edit.focused && self.props.editing.is_none()
@@ -2318,7 +2340,8 @@ impl App {
         };
         let mut boot = open
             .map(Message::WindowOpened)
-            .chain(window::position(main_os).map(move |p| Message::PositionKnown(main_os, p)));
+            .chain(window::position(main_os).map(move |p| Message::PositionKnown(main_os, p)))
+            .chain(window::scale_factor(main_os).map(move |sf| Message::ScaleKnown(main_os, sf)));
         if let Some(text) = global_notice {
             boot = boot.chain(Task::done(Message::StartupNotice(text)));
         }
@@ -2475,6 +2498,8 @@ impl App {
                 file_press: None,
                 file_drag: None,
                 file_drag_target: None,
+                os_drag: None,
+                window_scales: HashMap::new(),
                 persist_dirty: false,
                 main_size: DEFAULT_WINDOW_SIZE,
                 os_positions: HashMap::new(),
@@ -2828,7 +2853,11 @@ impl App {
             | Message::WindowFocused(..) => self.handle_window(message),
             Message::Press(..)
             | Message::CursorMoved(..)
+            | Message::CursorLeft
             | Message::Release
+            | Message::OsFileHovered { .. }
+            | Message::OsFilesLeft(..)
+            | Message::OsFileDropped { .. }
             | Message::ModsChanged(..) => self.handle_input(message),
             Message::UiTick => self.handle_ui_tick(),
             Message::Edited(..)
@@ -3051,6 +3080,11 @@ impl App {
             }
             Message::WindowClosed(id) => {
                 plugin_actions::release_plugin_focus(self, id);
+                // 系统文件拖入的悬停按窗口记账：关窗即摘掉，防心跳为已不存在的窗口常驻
+                if self.os_drag == Some(id) {
+                    self.os_drag = None;
+                    table_actions::clear_image_drop(self);
+                }
                 // 表格画布尺寸按窗口记账：关窗即摘掉该窗视口与失效的交互原点
                 if let Some(table) = self.table.as_mut() {
                     if table.view.canvas_viewport.is_some_and(|(window, _)| window == id) {
@@ -3122,6 +3156,7 @@ impl App {
                 Task::none()
             }
             Message::ScaleKnown(id, sf) => {
+                self.window_scales.insert(id, sf);
                 let Some(model_id) = self.detached_os.get(&id) else { return Task::none() };
                 if let Some(w) = self.ui.detached_windows.iter_mut().find(|w| w.id == *model_id) {
                     if (w.bounds.scale - sf as f64).abs() > f64::EPSILON {
@@ -3335,9 +3370,46 @@ impl App {
                 self.last_cursor_window = Some(id);
                 Task::none()
             }
+            Message::CursorLeft => {
+                // 指针离开窗口：图片格落点提示不能留在屏幕上（回到画布由移动消息重新点亮）
+                table_actions::clear_image_drop(self);
+                Task::none()
+            }
+            Message::OsFileHovered { window, path } => {
+                // 系统拖拽悬停只有路径：按系统光标点亮当前图片格落点（拖拽期间靠心跳刷新）
+                let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
+                self.os_drag = name
+                    .filter(|n| vault::image_ext_of(n).is_some())
+                    .map(|_| window);
+                if self.os_drag.is_some() {
+                    table_actions::refresh_os_hover(self);
+                } else {
+                    table_actions::clear_image_drop(self);
+                }
+                Task::none()
+            }
+            Message::OsFilesLeft(window) => {
+                if self.os_drag == Some(window) {
+                    self.os_drag = None;
+                    table_actions::clear_image_drop(self);
+                }
+                Task::none()
+            }
+            Message::OsFileDropped { window, path } => {
+                self.os_drag = None;
+                // 落在图片格 → 入库；其余走既有的对话面板附件路由
+                if let Some(task) = table_actions::import_os_drop(self, window, &path) {
+                    table_actions::clear_image_drop(self);
+                    return task;
+                }
+                table_actions::clear_image_drop(self);
+                chat_actions::update(self, chat_actions::ChatMsg::FileDropped { window, path })
+            }
             Message::CursorMoved(id, pos) => {
                 self.cursors.insert(id, pos);
                 self.last_cursor_window = Some(id);
+                // 文件树拖拽图片：图片格落点跟随光标（非拖拽 / 画布外即清空）
+                table_actions::on_cursor_moved(self, id, pos);
                 if self.divider.is_some() {
                     if self.main_id != Some(id) {
                         return Task::none();
@@ -3488,8 +3560,9 @@ impl App {
                         lb.drag = None;
                     }
                 }
+                let image_drop = self.table.as_mut().and_then(|s| s.view.image_drop.take());
                 if let Some(d) = self.file_drag.take() {
-                    return self.resolve_file_drop(d);
+                    return self.resolve_file_drop(d, image_drop);
                 }
                 if self.divider.take().is_some() {
                     return Task::none();
@@ -3517,6 +3590,8 @@ impl App {
         let spring = self.spring_open_dir();
         // 表格图片长按检查（拖拽排序激活）
         table_actions::check_long_press(self);
+        // 系统文件拖入悬停：落点按拍重算（拖拽期间无指针消息）
+        table_actions::refresh_os_hover(self);
         // 远端光标过期剔除节流（1s）：对端崩溃/断网无离场帧，靠通道超时惰性剔除
         if self.note_collab_channel.is_some()
             && self
@@ -5820,6 +5895,7 @@ impl App {
                 if self.file_drag.take().is_some() {
                     self.file_drag_target = None;
                     self.file_press = None;
+                    table_actions::clear_image_drop(self);
                     return Task::none();
                 }
                 if self.wiki_picker.is_some() {
@@ -8562,7 +8638,25 @@ impl App {
     }
 
     /// 拖拽释放落点 → 移动（挂起输入先落盘：引用同步会代写打开中的笔记，防回写覆盖）。
-    fn resolve_file_drop(&mut self, d: FileDrag) -> Task<Message> {
+    /// 图片文件落在图片格 = 读源字节入库（不走目录移动）。
+    fn resolve_file_drop(
+        &mut self,
+        d: FileDrag,
+        image_drop: Option<tv::ImageDropTarget>,
+    ) -> Task<Message> {
+        if let Some(target) = image_drop {
+            let valid = target.window == d.cursor_window
+                && self.table.as_ref().is_some_and(|s| {
+                    s.cell_index(&target.row_id, &target.field_id).is_some_and(|(_, c)| {
+                        s.data.fields[c].field_type == "image"
+                    })
+                });
+            if valid {
+                // 上一轮目录悬停不能留给下一次拖拽（图像入库不走目录移动）
+                self.file_drag_target = None;
+                return table_actions::import_dragged_image(self, &target, &d.from);
+            }
+        }
         let Some(target_dir) = self.file_drag_target.take() else { return Task::none() };
         // 释放前按同一判据复核：视图重建滞后可能让落点停在不可放的位置
         if file_drop_check(&d.from, d.is_dir, &target_dir, true).is_err() {
@@ -9386,6 +9480,8 @@ impl App {
             || self.edit.focused
             // 文件拖拽悬停折叠目录：自动展开挂起需心跳到点判定
             || self.file_drag.as_ref().is_some_and(|d| d.spring.is_some())
+            // 系统文件拖入悬停：拖拽期间无指针消息，落点按心跳重算
+            || self.os_drag.is_some()
             // 笔记在场：有待发状态或有对端时需要周期拍；单人无对端不挂拍，避免空闲被 10Hz 重绘
             || self
                 .note_collab_channel
@@ -9544,12 +9640,17 @@ impl App {
                 Event::Mouse(mouse::Event::CursorMoved { position }) => {
                     Some(Message::CursorMoved(window, position))
                 }
+                Event::Mouse(mouse::Event::CursorLeft) => Some(Message::CursorLeft),
                 Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
                     Some(Message::Release)
                 }
+                Event::Window(window::Event::FileHovered(path)) => {
+                    Some(Message::OsFileHovered { window, path })
+                }
+                Event::Window(window::Event::FilesHoveredLeft) => Some(Message::OsFilesLeft(window)),
                 Event::Window(window::Event::FileDropped(path)) => {
-                    // 外部文件拖入：路由到对话面板（是否纳用由编排按当前布局判定）
-                    Some(Message::Chat(chat_actions::ChatMsg::FileDropped { window, path }))
+                    // 外部文件拖入：先看是否落在表格图片格，其余路由到对话面板
+                    Some(Message::OsFileDropped { window, path })
                 }
                 _ => None,
             }),

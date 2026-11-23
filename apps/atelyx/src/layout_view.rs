@@ -623,6 +623,13 @@ fn with_overlays<'a>(
                     file_icon(app, &drag.label)
                 };
                 let reject = drag.reject.as_ref().map(|(_, why)| *why);
+                // 表格图片格落点与目录落点互斥（同一时刻只会有一个悬停区）
+                let image_hint = app
+                    .table
+                    .as_ref()
+                    .and_then(|s| s.view.image_drop.as_ref())
+                    .filter(|t| t.window == window)
+                    .map(|_| "添加到图片单元格".to_string());
                 let hint = match reject {
                     Some(crate::DropReject::NotADir) => Some("只能放进文件夹".to_string()),
                     Some(crate::DropReject::SameDir) => Some("已在此目录".to_string()),
@@ -634,7 +641,7 @@ fn with_overlays<'a>(
                             let name = dir.rsplit('/').next().unwrap_or(dir);
                             format!("移动到「{name}」")
                         }
-                    }),
+                    }).or(image_hint),
                 };
                 let reject = reject.is_some();
                 let mut card = column![

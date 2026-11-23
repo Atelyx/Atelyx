@@ -112,6 +112,7 @@ fn on_msg_open(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
             | tv::TableMsg::ImageImportPick { .. }
             | tv::TableMsg::ImagesPicked { .. }
             | tv::TableMsg::ImagesWritten { .. }
+            | tv::TableMsg::ImageDropFailed(..)
             | tv::TableMsg::ImageLoaded { .. }
             | tv::TableMsg::LightboxImageLoaded { .. }
             | tv::TableMsg::RetryImages
@@ -246,6 +247,10 @@ fn on_load(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
             });
             Task::none()
         }
+        tv::TableMsg::ImageDropFailed(reason) => {
+            app.notify(NoticeLevel::Warning, format!("图片未添加：{reason}"));
+            Task::none()
+        }
         tv::TableMsg::ImageLoaded { rel, fp, result } => {
             let Some(s) = app.table.as_mut() else { return Task::none() };
             s.view.image_inflight.remove(&rel);
@@ -353,7 +358,7 @@ fn on_gesture(app: &mut App, msg: tv::TableMsg) -> Task<Message> {
         }
         tv::TableMsg::Context { window, pos, size } => on_context(app, window, pos, size),
         tv::TableMsg::Move { window, pos, size, origin } => on_move(app, window, pos, size, origin),
-        tv::TableMsg::Viewport { window, size } => on_viewport(app, window, size),
+        tv::TableMsg::Viewport { window, size, origin } => on_viewport(app, window, size, origin),
         tv::TableMsg::Release(pos) => on_release(app, pos),
         tv::TableMsg::Wheel { delta_y, delta_x } => on_wheel(app, delta_y, delta_x),
         tv::TableMsg::ShowStyleBar => {
@@ -1902,9 +1907,9 @@ fn on_context(app: &mut App, window: iced::window::Id, pos: Point, size: Size) -
 
 /// 重绘上报的画布尺寸：首帧 / 面板或窗口改尺寸时由重绘事件带来。
 /// 图片加载与滚动上限据此取当前可见区。
-fn on_viewport(app: &mut App, window: iced::window::Id, size: Size) -> Task<Message> {
+fn on_viewport(app: &mut App, window: iced::window::Id, size: Size, origin: Point) -> Task<Message> {
     let Some(s) = app.table.as_mut() else { return Task::none() };
-    s.view.record_viewport(window, size);
+    s.view.record_viewport(window, size, origin);
     clamp_scroll(s);
     Task::none()
 }
@@ -2885,6 +2890,153 @@ fn row_images_len(s: &tv::TableSession, row_id: &str, field_id: &str) -> usize {
 fn write_row_images(s: &mut tv::TableSession, row_id: &str, field_id: &str, images: Vec<String>) {
     let Some(row) = s.data.rows.iter_mut().find(|r| r.id == row_id) else { return };
     row.values.insert(field_id.to_string(), serde_json::json!({ "images": images }));
+}
+
+// ===== 拖拽图片落格 =====
+
+/// 画布窗口内的指针位置 → 图片格目标（文件树拖拽与系统文件拖入共用）。
+/// 网格被别的形态顶替（设置整页 / 插件表格面 / 灯箱 / 单元格编辑）时不接收：拖入会改到看不见的格。
+fn image_drop_at(
+    app: &App,
+    window: iced::window::Id,
+    window_pos: Point,
+) -> Option<tv::ImageDropTarget> {
+    if app.main_id == Some(window) && app.settings_open {
+        return None;
+    }
+    if !crate::layout_view::window_shows_table(app, window) {
+        return None;
+    }
+    let s = app.table.as_ref()?;
+    if s.view.active_view.is_some() || s.view.lightbox.is_some() || s.view.editing.is_some() {
+        return None;
+    }
+    let (origin_window, origin) = s.view.canvas_origin?;
+    if origin_window != window {
+        return None;
+    }
+    let local = Point::new(window_pos.x - origin.x, window_pos.y - origin.y);
+    let (row_id, field_id) = tv::image_cell_at(s, s.view.canvas_size, local)?;
+    Some(tv::ImageDropTarget { window, row_id, field_id })
+}
+
+fn set_image_drop(app: &mut App, target: Option<tv::ImageDropTarget>) {
+    let Some(s) = app.table.as_mut() else { return };
+    if s.view.image_drop != target {
+        s.view.image_drop = target;
+    }
+}
+
+/// 光标移动：文件树拖拽图片时落点跟随光标（非拖拽 / 非图片文件 / 画布外即清空）。
+pub(crate) fn on_cursor_moved(app: &mut App, window: iced::window::Id, pos: Point) {
+    // 系统文件拖入期间由心跳按系统光标刷新落点，指针消息不得覆盖
+    if app.os_drag.is_some() {
+        return;
+    }
+    let dragging = app
+        .file_drag
+        .as_ref()
+        .is_some_and(|d| !d.is_dir && vault::image_ext_of(&d.from).is_some());
+    let target = if dragging { image_drop_at(app, window, pos) } else { None };
+    set_image_drop(app, target);
+}
+
+/// 清空图片格落点（拖拽取消 / 松开 / 拖出窗口）。
+pub(crate) fn clear_image_drop(app: &mut App) {
+    set_image_drop(app, None);
+}
+
+/// 系统文件拖入悬停刷新：拖拽期间收不到指针移动，按系统光标重算落点（由界面心跳驱动）。
+pub(crate) fn refresh_os_hover(app: &mut App) {
+    let Some(window) = app.os_drag else { return };
+    let target = app.pointer_local(window).and_then(|pos| image_drop_at(app, window, pos));
+    set_image_drop(app, target);
+}
+
+/// 系统文件拖入：落在图片格即读字节入库；未落格返回 None（交回对话面板的原路由）。
+pub(crate) fn import_os_drop(
+    app: &mut App,
+    window: iced::window::Id,
+    path: &std::path::Path,
+) -> Option<Task<Message>> {
+    let name = path.file_name()?.to_string_lossy().into_owned();
+    vault::image_ext_of(&name)?;
+    let pos = app.pointer_local(window)?;
+    let target = image_drop_at(app, window, pos)?;
+    let (row_id, field_id) = (target.row_id, target.field_id);
+    let path = path.to_path_buf();
+    Some(Task::perform(
+        async move {
+            tokio::task::spawn_blocking(move || {
+                std::fs::read(&path).map_err(|e| format!("读取图片失败：{e}"))
+            })
+            .await
+            .map_err(|e| e.to_string())?
+        },
+        move |result| match result {
+            Ok(bytes) => Message::Table(tv::TableMsg::ImagesPicked {
+                row_id,
+                field_id,
+                files: vec![(name, bytes)],
+            }),
+            Err(e) => Message::Table(tv::TableMsg::ImageDropFailed(e)),
+        },
+    ))
+}
+
+/// 文件树拖入：读取仓库内源文件字节，走同一条选图入库管线（附件复制进表目录、整批一步撤销）。
+pub(crate) fn import_dragged_image(
+    app: &App,
+    target: &tv::ImageDropTarget,
+    rel: &str,
+) -> Task<Message> {
+    let name = rel.rsplit('/').next().unwrap_or(rel).to_string();
+    let (row_id, field_id) = (target.row_id.clone(), target.field_id.clone());
+    if matches!(app.repo_kind, crate::RepoKind::Space(_)) {
+        let Some(session) = space_actions::session_of(app) else {
+            return Task::done(Message::Table(tv::TableMsg::ImageDropFailed(
+                "空间会话未就绪".into(),
+            )));
+        };
+        let client = session.client;
+        let space_id = session.space_id;
+        let rel = rel.to_string();
+        let (row_cb, field_cb) = (row_id, field_id);
+        return Task::perform(
+            async move { client.get_file_bytes(&space_id, &rel).await.map_err(|e| e.to_string()) },
+            move |result| match result {
+                Ok(bytes) => Message::Table(tv::TableMsg::ImagesPicked {
+                    row_id: row_cb,
+                    field_id: field_cb,
+                    files: vec![(name, bytes)],
+                }),
+                Err(e) => Message::Table(tv::TableMsg::ImageDropFailed(e)),
+            },
+        );
+    }
+    let Some(root) = app.vault.root().ok() else {
+        return Task::done(Message::Table(tv::TableMsg::ImageDropFailed("仓库未就绪".into())));
+    };
+    let rel = rel.to_string();
+    let (row_cb, field_cb) = (row_id, field_id);
+    Task::perform(
+        async move {
+            tokio::task::spawn_blocking(move || {
+                let path = vault::safe_join(&root, &rel, false)?;
+                std::fs::read(&path).map_err(|e| format!("读取图片失败：{e}"))
+            })
+            .await
+            .map_err(|e| e.to_string())?
+        },
+        move |result| match result {
+            Ok(bytes) => Message::Table(tv::TableMsg::ImagesPicked {
+                row_id: row_cb,
+                field_id: field_cb,
+                files: vec![(name, bytes)],
+            }),
+            Err(e) => Message::Table(tv::TableMsg::ImageDropFailed(e)),
+        },
+    )
 }
 
 /// 提交图片拖拽顺序：命中槽位重排（槽位下标 = 布局携带的真实图片下标）。
