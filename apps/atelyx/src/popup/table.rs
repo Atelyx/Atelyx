@@ -2,6 +2,7 @@
 
 use iced::Element;
 
+use atelyx_core::open_files::DocKind;
 use atelyx_core::plugin_runtime::ContributionSlot;
 
 use crate::layout_view::{PopupOpen, PopupState};
@@ -456,7 +457,7 @@ pub(super) fn entries<'a>(app: &'a App, state: &PopupState, window: iced::window
             ),
         ],
         PopupState::TableMoreMenu => {
-            let table_open = app.ui.last_table_file.is_some();
+            let table_open = crate::open_route::doc_path(app, &DocKind::Table);
             vec![
                 (
                     0,
@@ -464,8 +465,8 @@ pub(super) fn entries<'a>(app: &'a App, state: &PopupState, window: iced::window
                         label: "历史记录".into(),
                         icon: Some("history".into()),
                         danger: false,
-                        disabled: !table_open,
-                        on_press: app.ui.last_table_file.clone().map(|file| {
+                        disabled: table_open.is_none(),
+                        on_press: table_open.map(|file| {
                             Message::History(crate::history_browser::HistoryBrowserMsg::Open {
                                 window,
                                 kind: atelyx_core::history::HistoryKind::Table,
@@ -473,7 +474,7 @@ pub(super) fn entries<'a>(app: &'a App, state: &PopupState, window: iced::window
                             })
                         }),
                         note: None,
-                        hint: (!table_open).then(|| "未打开表格".to_string()),
+                        hint: None,
                     },
                 ),
                 (0, MenuEntry::action_icon("导出 xlsx", "download", Message::Table(crate::table_view::TableMsg::ExportXlsxPick))),

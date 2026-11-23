@@ -969,6 +969,7 @@ fn open_table_popup_at(
 /// 打开 .atb（open_file 按扩展名分流入口）：登记最近表格并载入。
 pub fn open_table(app: &mut App, rel: &str) -> Task<Message> {
     app.ui.last_table_file = Some(rel.to_string());
+    crate::open_route::doc_opened(app, rel, atelyx_core::open_files::DocKind::Table);
     // 清掉上一表会话：载入在途期间不留旧数据（防串表写盘）
     app.table = None;
     app.history_kind = atelyx_core::history::HistoryKind::Table;

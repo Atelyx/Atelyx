@@ -35,6 +35,7 @@ pub(super) fn entries<'a>(app: &'a App, state: &PopupState) -> Vec<(usize, MenuE
         PopupState::TabContext { panel_id, tab_id } => {
             tab_context_entries(app, panel_id, tab_id)
         }
+        PopupState::PrimaryTabContext { instance_id } => primary_tab_entries(app, instance_id),
         PopupState::ViewPicker { panel_id } => view_picker_entries(app, panel_id),
         PopupState::DetachedPanelMenu { window_id } => {
             let locked = app
@@ -133,6 +134,7 @@ pub(super) fn width(state: &PopupState) -> f32 {
         PopupState::LayoutTabMenu { .. } => 144.0,
         PopupState::PanelMenu { .. } => 160.0,
         PopupState::TabContext { .. } | PopupState::DetachedTabContext { .. } => 176.0,
+        PopupState::PrimaryTabContext { .. } => 176.0,
         PopupState::ViewPicker { .. } => 160.0,
         PopupState::DetachedPanelMenu { .. } => 160.0,
         _ => unreachable!("宽度按域分派，本域以外的变体不会到这里"),
@@ -288,11 +290,15 @@ fn scene_selector_entries(app: &App, confirm: &Option<String>) -> Vec<(usize, Me
     root.into_iter().chain(confirm_entries).collect()
 }
 
-/// 面板 ≡ 菜单：锁定（整块）/ 删除面板（最后一个禁用）/ 分割；空面板无锁定项。
+/// 面板 ≡ 菜单：主要面板身份 / 锁定（整块）/ 删除面板（最后一个与主要面板禁用）/ 分割。
 fn panel_menu_entries(app: &App, panel_id: &str) -> Vec<(usize, MenuEntry<'static, Message>)> {
     let has_active = find_active_tab_in(app, panel_id).is_some();
     let main_tree = layout::active_layout(&app.ui).tree;
     let panel_count = count_panels(&main_tree);
+    let primary_here = layout::primary_panel_of_active(&app.ui) == Some(panel_id);
+    // 主要面板只接文档：面板内任何工具视图都让它不能成为主要面板
+    let has_tool = layout::find_panel(&main_tree, panel_id)
+        .is_some_and(|tabs| tabs.iter().any(|t| !layout::is_builtin_doc_view(&t.view)));
     // 整块锁定基准 = 面板全部标签已锁
     let locked = has_active
         && panel_tab_ids_in(&layout::active_layout(&app.ui).tree, panel_id)
@@ -302,7 +308,31 @@ fn panel_menu_entries(app: &App, panel_id: &str) -> Vec<(usize, MenuEntry<'stati
             });
     let pid = panel_id.to_string();
     let mut entries = Vec::new();
-    if has_active {
+    if primary_here {
+        entries.push((
+            0,
+            MenuEntry::action_icon(
+                "取消主要面板",
+                "files",
+                Message::PrimaryPanelClear(pid.clone()),
+            ),
+        ));
+    } else {
+        entries.push((
+            0,
+            MenuEntry::Action {
+                label: "设为主要面板".into(),
+                icon: Some("files".into()),
+                danger: false,
+                disabled: has_tool,
+                on_press: (!has_tool).then(|| Message::PrimaryPanelSet(pid.clone())),
+                note: None,
+                hint: has_tool.then(|| "先把工具视图移出面板".to_string()),
+            },
+        ));
+    }
+    entries.push((0, MenuEntry::Divider));
+    if has_active && !primary_here {
         entries.push((
             0,
             MenuEntry::action_icon(
@@ -313,16 +343,23 @@ fn panel_menu_entries(app: &App, panel_id: &str) -> Vec<(usize, MenuEntry<'stati
         ));
     }
     if !locked {
+        let cannot_delete = panel_count <= 1 || primary_here;
         entries.push((
             0,
             MenuEntry::Action {
                 label: "删除面板".into(),
                 icon: None,
                 danger: true,
-                disabled: panel_count <= 1,
-                on_press: (panel_count > 1).then(|| Message::PanelClose(pid.clone())),
+                disabled: cannot_delete,
+                on_press: (!cannot_delete).then(|| Message::PanelClose(pid.clone())),
                 note: None,
-                hint: (panel_count <= 1).then(|| "最后一个面板不可删除".to_string()),
+                hint: if primary_here {
+                    Some("主要面板不可删除".to_string())
+                } else if panel_count <= 1 {
+                    Some("最后一个面板不可删除".to_string())
+                } else {
+                    None
+                },
             },
         ));
         entries.push((0, MenuEntry::Divider));
@@ -385,6 +422,9 @@ fn tab_context_entries(
     for kind in available_view_kinds(app) {
         let entry = if current_view.as_deref() == Some(kind.as_str()) {
             MenuEntry::noted(view_label(app, &kind), view_icon(app, &kind), "当前", true, None)
+        } else if let Some(hint) = doc_view_blocked(app, &kind) {
+            MenuEntry::noted(view_label(app, &kind), view_icon(app, &kind), "主要", true, None)
+                .hinted(hint)
         } else if view_occupied(app, &kind, Some(tab_id)) {
             MenuEntry::noted(view_label(app, &kind), view_icon(app, &kind), "已占用", true, None)
                 .hinted("该视图已在其他位置（全局唯一）")
@@ -398,6 +438,30 @@ fn tab_context_entries(
         entries.push((1, entry));
     }
     entries
+}
+
+/// 主要面板投影标签菜单：关闭文件 / 在文件面板定位 / 复制相对路径。
+fn primary_tab_entries(app: &App, instance_id: &str) -> Vec<(usize, MenuEntry<'static, Message>)> {
+    let Some(d) = app.open_files.get(instance_id) else { return Vec::new() };
+    let (id, path) = (d.id.clone(), d.path.clone());
+    vec![
+        (
+            0,
+            MenuEntry::action_icon("关闭", "x", Message::DocInstanceClose(id)),
+        ),
+        (
+            0,
+            MenuEntry::action_icon("在文件面板定位", "files", Message::LocateInFiles(path.clone())),
+        ),
+        (
+            0,
+            MenuEntry::action_icon(
+                "复制相对路径",
+                "link",
+                Message::CopyEntryPath { rel: path, absolute: false },
+            ),
+        ),
+    ]
 }
 
 /// 主树标签信息（(view, locked)）。
@@ -420,6 +484,9 @@ fn view_picker_entries(app: &App, panel_id: &str) -> Vec<(usize, MenuEntry<'stat
                     false,
                     Some(Message::PanelTab(pid.clone(), tab_id)),
                 )
+            } else if let Some(hint) = doc_view_blocked(app, &kind) {
+                MenuEntry::noted(view_label(app, &kind), view_icon(app, &kind), "主要", true, None)
+                    .hinted(hint)
             } else if view_occupied(app, &kind, None) {
                 MenuEntry::noted(view_label(app, &kind), view_icon(app, &kind), "已占用", true, None)
                     .hinted("该视图已在其他位置（全局唯一）")
@@ -433,6 +500,12 @@ fn view_picker_entries(app: &App, panel_id: &str) -> Vec<(usize, MenuEntry<'stat
             (0, entry)
         })
         .collect()
+}
+
+/// 布局已有主要面板时文档视图被接管：选择器里停用并说明（文档只在主要面板显示）。
+fn doc_view_blocked(app: &App, kind: &str) -> Option<&'static str> {
+    (layout::primary_panel_of_active(&app.ui).is_some() && layout::is_builtin_doc_view(kind))
+        .then_some("文档只在主要面板中显示")
 }
 
 /// 面板内持有该视图的标签 id。

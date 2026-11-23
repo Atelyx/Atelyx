@@ -852,14 +852,19 @@ pub fn enter_space(app: &mut App, session: SpaceSession, from_boot: bool) -> Tas
         app.note_press_inside = false;
         app.history.clear();
     }
+    // 打开文件集合随容器切换清空（启动恢复的文件在下面逐个登记）
+    crate::open_route::clear_all(app);
     if from_boot && app.global.auto_restore {
         if let Some(rel) = app.ui.last_note_file.clone() {
+            crate::open_route::doc_opened(app, &rel, atelyx_core::open_files::DocKind::Note);
             task = task.chain(space_load_note(app, &rel));
         }
         if let Some(rel) = app.ui.last_table_file.clone() {
+            crate::open_route::doc_opened(app, &rel, atelyx_core::open_files::DocKind::Table);
             task = task.chain(space_load_table(app, &rel));
         }
         if let Some(rel) = app.ui.last_canvas_file.clone() {
+            crate::open_route::doc_opened(app, &rel, atelyx_core::open_files::DocKind::Canvas);
             task = task.chain(crate::canvas_actions::load_canvas(app, &rel));
         }
     }

@@ -15,6 +15,7 @@ use iced::{Color, Element, Length, Padding, Point, Rectangle, Size, border, widg
 
 use atelyx_core::global_config::RecentVault;
 use atelyx_core::layout::{self, AppUiState, LayoutNode, TabItem};
+use atelyx_core::open_files::{DocKind, Host};
 
 use crate::hover_tip::with_tip;
 use crate::ui::controls::{self, Variant};
@@ -62,18 +63,9 @@ pub fn available_view_kinds(app: &App) -> Vec<String> {
     app.registry.views().map(|entry| entry.id.clone()).collect()
 }
 
-/// 面板标签文字（笔记/表格/画布视图打开文件 = 文件名去扩展名后缀，否则视图名）。
-pub fn tab_label(app: &App, view: &str) -> String {
-    let open = match view {
-        "note" => app.ui.last_note_file.as_deref(),
-        "table" => app.ui.last_table_file.as_deref(),
-        "canvas" => app.ui.last_canvas_file.as_deref(),
-        _ => None,
-    };
-    match open {
-        Some(file) => file_label(file),
-        None => view_label(app, view),
-    }
+/// 面板标签文字（文档槽 = 当前文件的名字；工具视图 = 视图名）。
+pub fn tab_label(app: &App, tab: &TabItem) -> String {
+    crate::open_route::tab_label(app, tab)
 }
 
 /// 面板标签近似宽度（拖拽命中几何用；渲染宽度由内容自适应，见 panel_tab）。
@@ -117,6 +109,8 @@ pub(crate) enum PopupState {
     LayoutTabMenu { layout_id: String },
     PanelMenu { panel_id: String },
     TabContext { panel_id: String, tab_id: String },
+    /// 主要面板投影标签右键（id = 打开文件实例；菜单只有关闭 / 定位 / 复制路径）。
+    PrimaryTabContext { instance_id: String },
     ViewPicker { panel_id: String },
     DetachedPanelMenu { window_id: String },
     DetachedTabContext { window_id: String, tab_id: String },
@@ -1139,7 +1133,16 @@ pub fn render_node<'a>(
                 c.into()
             }
         }
-        LayoutNode::Panel { id, tabs, active_tab_id } => panel_view(app, id, tabs, active_tab_id),
+        LayoutNode::Panel { id, tabs, active_tab_id } => {
+            if layout::primary_panel_of_active(&app.ui) == Some(id.as_str()) {
+                // 主要面板标签 = 打开文件集合的投影（模型里没有标签）
+                let projected = crate::open_route::primary_tabs(app);
+                let active = crate::open_route::primary_active(app);
+                panel_view(app, id, &projected, &active, true)
+            } else {
+                panel_view(app, id, tabs, active_tab_id, false)
+            }
+        }
     }
 }
 
@@ -1179,28 +1182,34 @@ fn divider_size(horizontal: bool) -> (Length, Length) {
 }
 
 /// 面板：标签条（底色 + 1px 底线 + 激活标签盖线）+ 内容区；拖拽悬停期叠 drop 指示。
+/// 主要面板的标签由打开文件集合投影生成（`tabs` 为投影结果，模型里没有标签）。
 fn panel_view<'a>(
     app: &'a App,
     panel_id: &str,
-    tabs: &'a [TabItem],
+    tabs: &[TabItem],
     active_tab_id: &Option<String>,
+    primary: bool,
 ) -> Element<'a, Message> {
     let window = app.main_id.unwrap_or(iced::window::Id::unique());
     let mut tab_row = row![].spacing(2).height(Length::Fill);
     // 拖拽插入条：命中本面板标签条时在插入位渲染 2px 强调竖条（随行内元素移位）
-    let insert_at = app.drag.as_ref().and_then(|d| {
-        let hover = app.drag_hover.as_ref()?;
-        (hover.zone.panel_id.as_deref() == Some(panel_id) && hover.kind == DropZone::Tab)
-            .then(|| {
-                let scroll_x = app.panel_tab_scroll_x.get(panel_id).copied().unwrap_or(0.0);
-                tab_index_at(&hover.zone, d.current.x, scroll_x)
-            })
-    });
+    let insert_at = if primary {
+        None
+    } else {
+        app.drag.as_ref().and_then(|d| {
+            let hover = app.drag_hover.as_ref()?;
+            (hover.zone.panel_id.as_deref() == Some(panel_id) && hover.kind == DropZone::Tab)
+                .then(|| {
+                    let scroll_x = app.panel_tab_scroll_x.get(panel_id).copied().unwrap_or(0.0);
+                    tab_index_at(&hover.zone, d.current.x, scroll_x)
+                })
+        })
+    };
     for (i, t) in tabs.iter().enumerate() {
         if insert_at == Some(i) {
             tab_row = tab_row.push(insertion_marker());
         }
-        tab_row = tab_row.push(panel_tab(app, panel_id, t, active_tab_id));
+        tab_row = tab_row.push(panel_tab(app, panel_id, t, active_tab_id, primary));
     }
     if insert_at == Some(tabs.len()) {
         tab_row = tab_row.push(insertion_marker());
@@ -1250,32 +1259,50 @@ fn panel_view<'a>(
         container(controls::divider(false, pal::BORDER, Length::Fill))
             .height(Length::Fill)
             .align_y(Vertical::Bottom),
-        row![
-            scrollable(container(row![tab_row]).padding(Padding::ZERO.left(UiMetrics::HEADER_INSET)))
-                .direction(scrollable::Direction::Horizontal(scroll::hidden()))
-                .on_scroll({
-                    let panel_id = panel_id.to_string();
-                    move |v| Message::TabStripScrolled(Some(panel_id.clone()), v.absolute_offset().x)
-                })
-                .width(Length::Fill)
-                .height(Length::Fill),
-            right,
-        ]
-        .height(Length::Fixed(UiMetrics::TAB_BAR_H))
-        .align_y(Vertical::Center),
+        {
+            let mut head = row![].height(Length::Fill).align_y(Vertical::Center);
+            if primary {
+                head = head.push(primary_badge());
+            }
+            head.push(
+                scrollable(container(row![tab_row]).padding(Padding::ZERO.left(UiMetrics::HEADER_INSET)))
+                    .direction(scrollable::Direction::Horizontal(scroll::hidden()))
+                    .on_scroll({
+                        let panel_id = panel_id.to_string();
+                        move |v| Message::TabStripScrolled(Some(panel_id.clone()), v.absolute_offset().x)
+                    })
+                    .width(Length::Fill)
+                    .height(Length::Fill),
+            )
+            .push(right)
+            .height(Length::Fixed(UiMetrics::TAB_BAR_H))
+        },
     ]
     .width(Length::Fill)
     .height(Length::Fixed(UiMetrics::TAB_BAR_H));
-    // 头部空白右键 = 视图选择菜单（标签右键为空档位，同样落到此处；与空面板内容区一致）
+    // 头部空白右键：主要面板只有文档集会承载，右键不出视图选择器（普通面板仍走视图选择菜单）
     let cursor = app.cursor_for(window);
-    let header = mouse_area(header).on_right_press(ctx_popup(
-        window,
-        cursor,
-        PopupState::ViewPicker { panel_id: panel_id.to_string() },
-    ));
+    let header: Element<'a, Message> = if primary {
+        mouse_area(header).into()
+    } else {
+        mouse_area(header)
+            .on_right_press(ctx_popup(
+                window,
+                cursor,
+                PopupState::ViewPicker { panel_id: panel_id.to_string() },
+            ))
+            .into()
+    };
 
     let content: Element<'a, Message> = match active {
-        // 空面板 = 纯空白（右键唤起视图选择器）
+        // 主要面板空集合 = 空态（打开文件）；普通空面板 = 纯空白（右键唤起视图选择器）
+        None if primary => controls::empty_state(
+            "files",
+            "没有打开的文件",
+            "从文件面板打开笔记、表格或画布",
+            Some(("打开文件".to_string(), Message::OpenFilePick)),
+        )
+        .into(),
         None => mouse_area(space().width(Length::Fill).height(Length::Fill))
             .on_right_press(Message::PopupOpen(
                 window,
@@ -1310,6 +1337,29 @@ fn panel_view<'a>(
         root = root.push(drop_indicator(kind));
     }
     root.width(Length::Fill).height(Length::Fill).into()
+}
+
+/// 主要面板标识：左侧强调竖条 + 「主要面板」小标题（固定在标签条最左，不随标签滚动）。
+fn primary_badge() -> Element<'static, Message> {
+    container(
+        row![
+            container(space())
+                .width(Length::Fixed(3.0))
+                .height(Length::Fixed(14.0))
+                .style(|_t| Style {
+                    background: Some(pal::ACCENT.into()),
+                    border: border::rounded(1.0),
+                    ..Style::default()
+                }),
+            text("主要面板").size(pal::fs_micro()).color(pal::TEXT_MUTED),
+        ]
+        .spacing(6)
+        .align_y(Vertical::Center),
+    )
+    .padding(Padding::ZERO.left(6.0).right(4.0))
+    .height(Length::Fill)
+    .align_y(Vertical::Center)
+    .into()
 }
 
 /// 标签排序插入位标记（2px 强调竖条，随标签条拉伸）。
@@ -1378,34 +1428,28 @@ fn drop_indicator(kind: DropZone) -> Element<'static, Message> {
 }
 
 /// 标签外框：视图图标 + 省略后的标题 + 锁标记 + 关文件 ×，激活时内容同色底并以 2px 金线压底。
-/// 关闭动作由调用方给（主窗面板与撕裂窗各有关文件消息）。
+/// 关闭动作由调用方给（主窗面板、主要面板投影与撕裂窗各有关文件消息）。
 fn tab_button<'a>(
     app: &'a App,
-    t: &'a TabItem,
+    view: &str,
+    label: String,
+    has_file: bool,
+    locked: bool,
     active: bool,
     close: Message,
 ) -> iced::widget::Button<'a, Message> {
-    let label = tab_label(app, &t.view);
-    let has_file = (t.view == "note" && app.ui.last_note_file.is_some())
-        || (t.view == "table" && app.ui.last_table_file.is_some())
-        || (t.view == "canvas" && app.ui.last_canvas_file.is_some())
-        || app
-            .doc_open
-            .as_ref()
-            .is_some_and(|d| crate::plugin_actions::doc_view_kind(&d.plugin_id, &d.contribution_id) == t.view);
-
     let text_color = if active { pal::TEXT_PRIMARY } else { pal::TEXT_SECONDARY };
     let mut label_row = row![].spacing(4);
-    label_row = label_row.push(icon_stroke(&view_icon(app, &t.view), 13.0, text_color, 2.0));
+    label_row = label_row.push(icon_stroke(&view_icon(app, view), 13.0, text_color, 2.0));
     label_row = label_row.push(
         text(ellipsize_estimated(&label, UiMetrics::TAB_TEXT_MAX_W, 12.0))
             .size(pal::fs_caption())
             .color(text_color),
     );
-    if t.locked {
+    if locked {
         label_row = label_row.push(icon("lock", 9.0, text_color));
     }
-    if has_file && !t.locked {
+    if has_file && !locked {
         label_row = label_row.push(
             button(icon("x", 11.0, pal::TEXT_MUTED))
                 .padding(2.0)
@@ -1463,31 +1507,46 @@ fn tab_button<'a>(
 }
 
 /// 面板标签（激活 = 内容区同色底 + 2px 金下边盖线；打开文件的 × = 关文件留标签）。
+/// 主要面板的标签是集合投影：按下/右键走实例通道，不做标签拖拽。
 fn panel_tab<'a>(
     app: &'a App,
     panel_id: &str,
-    t: &'a TabItem,
+    t: &TabItem,
     active_tab_id: &Option<String>,
+    primary: bool,
 ) -> Element<'a, Message> {
     let active = active_tab_id.as_deref() == Some(t.id.as_str());
     let window = app.main_id.unwrap_or(iced::window::Id::unique());
     let cursor = app.cursor_for(window);
-    let btn = tab_button(app, t, active, Message::PanelTabFileClose(t.view.clone()))
-        .on_press_maybe((!active).then(|| Message::PanelTab(panel_id.to_string(), t.id.clone())));
-
+    let label = tab_label(app, t);
+    let has_file = crate::open_route::tab_has_file(app, t);
+    let close = if primary {
+        Message::DocInstanceClose(t.id.clone())
+    } else {
+        Message::PanelTabFileClose(t.view.clone())
+    };
+    let btn = tab_button(app, &t.view, label, has_file, t.locked, active, close).on_press_maybe(
+        (!active).then(|| {
+            if primary {
+                Message::DocInstanceActivate(t.id.clone())
+            } else {
+                Message::PanelTab(panel_id.to_string(), t.id.clone())
+            }
+        }),
+    );
+    let menu = if primary {
+        PopupState::PrimaryTabContext { instance_id: t.id.clone() }
+    } else {
+        PopupState::TabContext { panel_id: panel_id.to_string(), tab_id: t.id.clone() }
+    };
+    let area = mouse_area(btn).on_right_press(ctx_popup(window, cursor, menu));
+    if primary {
+        return area.into();
+    }
     // 按下候选经 PressReporter 上报（mouse_area 对被按钮捕获的按下事件不触发）；
     // 锁定标签右键仍开菜单（iced mouse_area 无 maybe 变体），条目全部禁用表达锁定语义
     controls::PressReporter::new(
-        mouse_area(btn)
-            .on_right_press(ctx_popup(
-                window,
-                cursor,
-                PopupState::TabContext {
-                    panel_id: panel_id.to_string(),
-                    tab_id: t.id.clone(),
-                },
-            ))
-            .into(),
+        area.into(),
         Message::PanelTabPress {
             panel_id: panel_id.to_string(),
             tab_id: t.id.clone(),
@@ -1498,7 +1557,7 @@ fn panel_tab<'a>(
 
 /// 笔记保存状态徽标：错误 = ErrorPill（红调底 + 重试/关闭），未保存 = 圆点徽标。
 fn note_status_pill(app: &App) -> Option<Element<'static, Message>> {
-    app.ui.last_note_file.as_ref()?;
+    app.open_files.recent_of_kind(&DocKind::Note, &Host::Main)?;
     if app.save_error.is_some() {
         Some(
             container(
@@ -2026,7 +2085,7 @@ pub(crate) fn inspector_view<'a>(app: &'a App, window: iced::window::Id) -> Elem
     if app.canvas.is_some() && view_displayed(app, "canvas") {
         return crate::canvas_view::props_panel(app);
     }
-    if app.ui.last_note_file.is_none() {
+    if app.open_files.recent_of_kind(&DocKind::Note, &Host::Main).is_none() {
         return controls::empty_state(
             "info",
             "笔记属性",
@@ -2082,8 +2141,18 @@ pub fn detached_view<'a>(
             tab_row = tab_row.push(insertion_marker());
         }
         let active = w.active_tab_id.as_deref() == Some(t.id.as_str());
-        let btn = tab_button(app, t, active, Message::DetachedTabFileClose(t.view.clone()))
-            .on_press_maybe((!active).then(|| Message::DetachedTab(w.id.clone(), t.id.clone())));
+        let label = tab_label(app, t);
+        let has_file = crate::open_route::tab_has_file(app, t);
+        let btn = tab_button(
+            app,
+            &t.view,
+            label,
+            has_file,
+            t.locked,
+            active,
+            Message::DetachedTabFileClose(t.view.clone()),
+        )
+        .on_press_maybe((!active).then(|| Message::DetachedTab(w.id.clone(), t.id.clone())));
         tab_row = tab_row.push(controls::PressReporter::new(
             mouse_area(btn)
                 .on_right_press(ctx_popup(window, cursor, PopupState::DetachedTabContext { window_id: w.id.clone(), tab_id: t.id.clone(), }))
@@ -3086,10 +3155,7 @@ fn push_children(
         let is_dir = child.is_dir;
         let is_expanded = expanded.contains(rel.as_str());
         let name = rel.rsplit('/').next().unwrap_or(&rel).to_string();
-        let active = !is_dir
-            && (app.ui.last_note_file.as_deref() == Some(rel.as_str())
-                || app.ui.last_table_file.as_deref() == Some(rel.as_str())
-                || app.ui.last_canvas_file.as_deref() == Some(rel.as_str()));
+        let active = !is_dir && app.open_files.find_by_path(&rel).is_some();
         rows.push(TreeRow { name, depth, is_dir, expanded: is_expanded, rel: rel.clone(), active, guides: Vec::new() });
         if is_dir && is_expanded {
             push_children(app, rows, &rel, depth + 1, expanded);
@@ -3104,7 +3170,7 @@ pub use atelyx_core::vault::file_label;
 
 /// note 视图：工具条（模式分段 + ···菜单）+ 对应档位的内容面。
 pub(crate) fn note_view(app: &App, window: iced::window::Id) -> Element<'_, Message> {
-    if app.ui.last_note_file.is_none() {
+    if app.open_files.recent_of_kind(&DocKind::Note, &Host::Main).is_none() {
         return controls::empty_state(
             "sticky-note",
             "打开笔记",
@@ -3153,7 +3219,7 @@ pub(crate) fn note_view(app: &App, window: iced::window::Id) -> Element<'_, Mess
     let ai_remotes: Vec<crate::ai_presence::RemoteAi> = app
         .remote_ai
         .iter()
-        .filter(|r| r.view == "note" && r.file.as_deref() == app.ui.last_note_file.as_deref())
+        .filter(|r| r.view == "note" && r.file.as_deref() == crate::open_route::note_path(app).as_deref())
         .cloned()
         .collect();
     if matches!(app.repo_kind, crate::RepoKind::Space(_)) && !ai_remotes.is_empty() {
@@ -3348,7 +3414,7 @@ thread_local! {
 
 /// 页面内标题：正文列顶部的文件名（去扩展名）；点击就地改名，重命名在途 = 原位输入框。
 fn page_title(app: &App, window: iced::window::Id) -> Element<'_, Message> {
-    let rel = app.ui.last_note_file.clone().unwrap_or_default();
+    let rel = crate::open_route::note_path(app).unwrap_or_default();
     let title = file_label(&rel);
     let (renaming, value) = match &app.rename {
         Some(r) if r.from_title => (true, r.value.clone()),
@@ -4159,20 +4225,41 @@ fn mini_badge(label: &str, color: iced::Color) -> Element<'static, Message> {
 /// 该视图是否正展示在任一窗口（主窗口激活布局的各面板激活标签 / 撕裂窗口激活标签）；
 /// 面板懒加载（PersistTick 搭载）据此判定是否发起数据任务。
 pub fn view_displayed(app: &App, kind: &str) -> bool {
-    fn tree_shows(node: &LayoutNode, kind: &str) -> bool {
+    fn tree_shows(node: &LayoutNode, kind: &str, app: &App) -> bool {
         match node {
-            LayoutNode::Panel { tabs, active_tab_id, .. } => tabs
-                .iter()
-                .any(|t| t.view == kind && active_tab_id.as_deref() == Some(t.id.as_str())),
-            LayoutNode::Split { children, .. } => children.iter().any(|c| tree_shows(c, kind)),
+            LayoutNode::Panel { id, tabs, active_tab_id } => {
+                if layout::primary_panel_of_active(&app.ui) == Some(id.as_str()) {
+                    // 主要面板的「前台标签」 = 集合激活项投影出的视图
+                    return crate::open_route::primary_active(app)
+                        .and_then(|iid| app.open_files.get(&iid).map(|d| crate::open_route::view_of_kind(&d.kind).to_string()))
+                        .is_some_and(|v| v == kind);
+                }
+                tabs.iter()
+                    .any(|t| t.view == kind && active_tab_id.as_deref() == Some(t.id.as_str()))
+            }
+            LayoutNode::Split { children, .. } => children.iter().any(|c| tree_shows(c, kind, app)),
         }
     }
-    tree_shows(&layout::active_layout(&app.ui).tree, kind)
+    tree_shows(&layout::active_layout(&app.ui).tree, kind, app)
         || app.ui.detached_windows.iter().any(|w| {
             w.active_tab_id.as_deref().is_some_and(|aid| {
                 w.tabs.iter().any(|t| t.id == aid && t.view == kind)
             })
         })
+}
+
+/// 当前布局内持有该视图的（面板 id, 标签 id）。
+pub fn panel_tab_with_view_any(ui: &crate::layout::AppUiState, view: &str) -> Option<(String, String)> {
+    fn find(node: &LayoutNode, view: &str) -> Option<(String, String)> {
+        match node {
+            LayoutNode::Panel { id, tabs, .. } => tabs
+                .iter()
+                .find(|t| t.view == view)
+                .map(|t| (id.clone(), t.id.clone())),
+            LayoutNode::Split { children, .. } => children.iter().find_map(|c| find(c, view)),
+        }
+    }
+    find(&crate::layout::active_layout(ui).tree, view)
 }
 
 /// 主树面板的全部标签 id（整块锁定判定用）。
@@ -4370,11 +4457,9 @@ pub fn panel_zones(app: &App) -> Vec<PanelZone> {
                         .iter()
                         .map(|t| {
                             approx_tab_width(
-                                &tab_label(app, &t.view),
+                                &tab_label(app, t),
                                 t.locked,
-                                (t.view == "note" && app.ui.last_note_file.is_some())
-                                    || (t.view == "table" && app.ui.last_table_file.is_some())
-                                    || (t.view == "canvas" && app.ui.last_canvas_file.is_some()),
+                                crate::open_route::tab_has_file(app, t),
                             )
                         })
                         .collect()
@@ -4398,23 +4483,27 @@ pub fn panel_zones(app: &App) -> Vec<PanelZone> {
 
 fn walk_panels(node: &LayoutNode, area: Rectangle, out: &mut Vec<PanelZone>, app: &App) {
     match node {
-        LayoutNode::Panel { id, tabs, .. } => out.push(PanelZone {
-            panel_id: Some(id.clone()),
-            detached_id: None,
-            rect: area,
-            tab_widths: tabs
-                .iter()
-                .map(|t| {
-                    approx_tab_width(
-                        &tab_label(app, &t.view),
-                        t.locked,
-                        (t.view == "note" && app.ui.last_note_file.is_some())
-                            || (t.view == "table" && app.ui.last_table_file.is_some())
-                            || (t.view == "canvas" && app.ui.last_canvas_file.is_some()),
-                    )
-                })
-                .collect(),
-        }),
+        LayoutNode::Panel { id, tabs, .. } => {
+            // 主要面板的标签条宽度按集合投影记账（命中几何与渲染同源）
+            let widths: Vec<f32> = if layout::primary_panel_of_active(&app.ui) == Some(id.as_str()) {
+                crate::open_route::primary_tabs(app)
+                    .iter()
+                    .map(|t| approx_tab_width(&tab_label(app, t), false, true))
+                    .collect()
+            } else {
+                tabs.iter()
+                    .map(|t| {
+                        approx_tab_width(&tab_label(app, t), t.locked, crate::open_route::tab_has_file(app, t))
+                    })
+                    .collect()
+            };
+            out.push(PanelZone {
+                panel_id: Some(id.clone()),
+                detached_id: None,
+                rect: area,
+                tab_widths: widths,
+            })
+        }
         LayoutNode::Split { direction, children, sizes, .. } => {
             let n = children.len();
             if n == 0 || sizes.len() != n {

@@ -44,11 +44,13 @@ pub struct DocInstance {
     pub host: Host,
 }
 
-/// 打开文件集合：有序项 + 激活项。
+/// 打开文件集合：有序项 + 激活项 + 最近激活序（类型槽回退用）。
 #[derive(Clone, Debug, Default)]
 pub struct OpenFiles {
     items: Vec<DocInstance>,
     active: Option<InstanceId>,
+    /// 最近激活序（新在前的实例 id）：同类型多实例时「最近激活」的判定依据。
+    activated: Vec<InstanceId>,
 }
 
 impl OpenFiles {
@@ -56,12 +58,13 @@ impl OpenFiles {
     pub fn open(&mut self, path: &str, kind: DocKind) -> InstanceId {
         if let Some(existing) = self.items.iter().find(|d| d.path == path) {
             let id = existing.id.clone();
-            self.active = Some(id.clone());
+            self.activate(&id);
             return id;
         }
         let id = nanoid!();
         self.items.push(DocInstance { id: id.clone(), path: path.to_string(), kind, host: Host::Main });
         self.active = Some(id.clone());
+        self.touch(&id);
         id
     }
 
@@ -69,6 +72,7 @@ impl OpenFiles {
     pub fn close(&mut self, id: &str) -> Option<DocInstance> {
         let index = self.items.iter().position(|d| d.id == id)?;
         let removed = self.items.remove(index);
+        self.activated.retain(|a| a != id);
         if self.active.as_deref() == Some(id) {
             self.active = self
                 .items
@@ -89,10 +93,17 @@ impl OpenFiles {
     pub fn activate(&mut self, id: &str) -> bool {
         if self.items.iter().any(|d| d.id == id) {
             self.active = Some(id.to_string());
+            self.touch(id);
             true
         } else {
             false
         }
+    }
+
+    /// 记为最近激活（已在表首则不动）。
+    fn touch(&mut self, id: &str) {
+        self.activated.retain(|a| a != id);
+        self.activated.insert(0, id.to_string());
     }
 
     /// 换宿主（实例不存在 = 忽略）。
@@ -123,6 +134,18 @@ impl OpenFiles {
             .iter()
             .filter(|d| &d.kind == kind && &d.host == host)
             .collect()
+    }
+
+    /// 该类型与宿主最近激活的实例（类型槽回退依据）。
+    pub fn recent_of_kind(&self, kind: &DocKind, host: &Host) -> Option<&DocInstance> {
+        self.activated
+            .iter()
+            .find_map(|id| self.get(id).filter(|d| &d.kind == kind && &d.host == host))
+    }
+
+    /// 该宿主最近激活的实例（跨类型；投影激活项不在本宿主时的回退）。
+    pub fn recent_of_host(&self, host: &Host) -> Option<&DocInstance> {
+        self.activated.iter().find_map(|id| self.get(id).filter(|d| &d.host == host))
     }
 
     /// 按路径查找（全集合唯一）。
@@ -158,6 +181,7 @@ impl OpenFiles {
     pub fn clear(&mut self) {
         self.items.clear();
         self.active = None;
+        self.activated.clear();
     }
 }
 
@@ -257,5 +281,20 @@ mod tests {
         assert_eq!(set.find_by_path("dir/a.md").map(|d| d.id.as_str()), Some(a.as_str()));
         set.close_path("dir/a.md");
         assert!(set.is_empty());
+    }
+
+    #[test]
+    fn recent_of_kind_follows_activation() {
+        let mut set = OpenFiles::default();
+        let a = set.open("a.md", note());
+        let b = set.open("b.md", note());
+        assert_eq!(set.recent_of_kind(&note(), &Host::Main).map(|d| d.path.as_str()), Some("b.md"));
+        set.activate(&a);
+        assert_eq!(set.recent_of_kind(&note(), &Host::Main).map(|d| d.path.as_str()), Some("a.md"));
+        // 关闭最近项 → 回退到剩下的最近项；全部关闭 → None
+        set.close(&a);
+        assert_eq!(set.recent_of_kind(&note(), &Host::Main).map(|d| d.path.as_str()), Some("b.md"));
+        set.close(&b);
+        assert!(set.recent_of_kind(&note(), &Host::Main).is_none());
     }
 }

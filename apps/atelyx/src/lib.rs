@@ -60,6 +60,7 @@ mod table_ai_view;
 mod table_collab;
 mod note_collab_channel;
 mod canvas_collab;
+mod open_route;
 mod table_text;
 mod table_view;
 mod text_preedit;
@@ -82,6 +83,7 @@ use atelyx_core::layout::{
     LayoutOp, WindowBounds, LEGACY_UI_STATE_SCHEMA, UI_STATE_SCHEMA,
 };
 use atelyx_core::markdown::{LinkForm, MarkdownDocument};
+use atelyx_core::open_files::{DocKind, OpenFiles};
 use atelyx_core::plugin_runtime::{
     EditorSelection, FileChangeKind, PluginEvent, PluginRuntime, PluginStatus, SurfaceKind,
 };
@@ -1124,6 +1126,8 @@ enum Message {
     CopyEntryPath { rel: String, absolute: bool },
     /// 文件树结构刷新（工具栏刷新钮；本地重读展开集，空间整树重拉）。
     FileTreeRefresh,
+    /// 在文件面板定位：展开祖先目录并激活文件视图（主要面板标签右键）。
+    LocateInFiles(String),
     /// 切换任务勾选框（携带列表项源起点）。
     ToggleTask(usize),
     /// 复制代码块正文到系统剪贴板。
@@ -1142,6 +1146,15 @@ enum Message {
     /// 关闭文件（×：摘下文件、标签保留回未打开态）。
     /// × = 关文件留标签（kind = "note" / "table" / "canvas"，只关对应面）。
     PanelTabFileClose(String),
+    /// 主要面板投影标签：激活 / 关闭打开的文件实例（id = 集合实例 id）。
+    DocInstanceActivate(String),
+    DocInstanceClose(String),
+    /// 面板 ≡ 菜单：把该面板设为主要面板 / 取消主要身份。
+    PrimaryPanelSet(String),
+    PrimaryPanelClear(String),
+    /// 主要面板空态「打开文件」：系统文件选择器挑一个仓库内文件打开。
+    OpenFilePick,
+    FilePicked(Result<PathBuf, String>),
     DetachedTabFileClose(String),
     /// 标签按下：拖拽候选由标签按钮自证命中（渲染自适应后几何不再可靠）。
     PanelTabPress { panel_id: String, tab_id: String },
@@ -1609,6 +1622,12 @@ enum PendingAfterFlush {
     HideMain(window::Id),
     /// 关文件留标签（kind = "note" / "table" / "canvas"，只关对应面）。
     CloseFileTab(String),
+    /// 主要面板投影标签的 ×：按实例 id 关文件（先落盘再销毁实例）。
+    CloseFileInstance(String),
+    /// 设为主要面板（先落盘再迁迁移挂槽到集合）。
+    SetPrimaryPanel(String),
+    /// 取消主要面板（先落盘再按集合塌缩成类型槽）。
+    ClearPrimaryPanel(String),
     /// 画布历史回滚：挂起输入先落盘，再把快照写回真源（空间模式先写服务端再记史）。
     CanvasRestore { rel: String, version: atelyx_core::history::HistoryVersion },
     /// 仓库内笔记链接（已解码；能进 flush 的只有 Path/Wiki/Create 形态，外链直接打开）。
@@ -1833,6 +1852,8 @@ impl ImageRetry {
 pub struct App {
     /// 布局状态真源（core 模型；磁盘格式由 schema 版本标识）。
     pub ui: AppUiState,
+    /// 打开文件集合（应用级唯一、运行时不落盘；容器按它投影 / 选槽）。
+    pub open_files: OpenFiles,
     /// 唯一注册表（视图 / 服务 / 文档类型；选择器、标签与设置页只读它）。
     /// 启动装配期与投影刷新时整体重建，运行期只读。
     pub registry: crate::registry::Registry,
@@ -2392,6 +2413,7 @@ impl App {
         }
         let mut app = Self {
                 ui: load_ui_state(),
+                open_files: OpenFiles::default(),
                 registry: crate::registry::Registry::default(),
                 vault: Arc::new(vault::VaultState::default()),
                 theme: ui::palette::app_theme(),
@@ -2919,6 +2941,12 @@ impl App {
             | Message::SetTabView { .. }
             | Message::DetachedSetTabView { .. }
             | Message::PanelTabFileClose(..)
+            | Message::DocInstanceActivate(..)
+            | Message::DocInstanceClose(..)
+            | Message::PrimaryPanelSet(..)
+            | Message::PrimaryPanelClear(..)
+            | Message::OpenFilePick
+            | Message::FilePicked(..)
             | Message::DetachedTabFileClose(..)
             | Message::PanelTabPress { .. }
             | Message::DetachedTabPress { .. }
@@ -2977,6 +3005,7 @@ impl App {
             | Message::DeleteEntry(..)
             | Message::RevealVaultAt(..)
             | Message::RevealEntry { .. }
+            | Message::LocateInFiles(..)
             | Message::CopyEntryPath { .. }
             | Message::ExpandAllToggle
             | Message::ExpandChildrenLoaded(..)
@@ -4419,6 +4448,30 @@ impl App {
             Message::PanelTabFileClose(kind) | Message::DetachedTabFileClose(kind) => {
                 self.gate(PendingAfterFlush::CloseFileTab(kind))
             }
+            Message::DocInstanceActivate(id) => self.activate_doc_instance(&id),
+            Message::DocInstanceClose(id) => self.gate(PendingAfterFlush::CloseFileInstance(id)),
+            Message::PrimaryPanelSet(panel_id) => self.gate(PendingAfterFlush::SetPrimaryPanel(panel_id)),
+            Message::PrimaryPanelClear(panel_id) => self.gate(PendingAfterFlush::ClearPrimaryPanel(panel_id)),
+            Message::OpenFilePick => {
+                // 选择器从仓库根起步：越出仓库的文件在选中后仍会被拒（只在根内打开）
+                let dir = self.vault.root().ok();
+                Task::perform(
+                    async move {
+                        let mut dialog = rfd::AsyncFileDialog::new();
+                        if let Some(dir) = dir {
+                            dialog = dialog.set_directory(dir);
+                        }
+                        dialog
+                            .pick_file()
+                            .await
+                            .map(|f| f.path().to_path_buf())
+                            .ok_or_else(|| "未选择文件".to_string())
+                    },
+                    Message::FilePicked,
+                )
+            }
+            Message::FilePicked(Ok(path)) => self.open_picked_file(&path),
+            Message::FilePicked(Err(_)) => Task::none(),
             Message::PanelTabPress { panel_id, tab_id } => {
                 self.tab_press = Some(TabPress {
                     window: self.main_id.unwrap_or(iced::window::Id::unique()),
@@ -5208,6 +5261,17 @@ impl App {
                 };
                 reveal_in_file_manager(&path, is_dir);
                 Task::none()
+            }
+            Message::LocateInFiles(rel) => {
+                // 逐级展开祖先目录（懒加载树按目录补子项），再激活文件视图标签
+                let mut task = Task::none();
+                for dir in ancestor_dirs(&rel) {
+                    task = task.chain(self.expand_dir(&dir));
+                }
+                if let Some((panel_id, tab_id)) = layout_view::panel_tab_with_view_any(&self.ui, "files") {
+                    task = task.chain(self.apply(LayoutOp::SetActive { panel_id, tab_id }));
+                }
+                task
             }
             Message::CopyEntryPath { rel, absolute } => {
                 let text = if absolute {
@@ -6024,17 +6088,22 @@ impl App {
             return (Task::none(), layout::LayoutOpResult::default());
         }
         let result = apply_layout_op(&mut self.ui, &op);
+        (self.after_layout_change(), result)
+    }
+
+    /// 布局模型已变更后的统一收尾：收弹层、置落盘脏、插件面差额通知与运行时调和。
+    /// 经 `LayoutOp` 之外的模型入口（主要面板身份 / 补槽）改树的路径同样走这里。
+    fn after_layout_change(&mut self) -> Task<Message> {
         self.dismiss_popup();
         self.schedule_persist();
         // 布局变化可能增减插件面：差额通知插件（attached / detached）；面集合确实变了才重投影
         // （改分割比例这类高频布局操作不触发重投影）
         let surfaces_changed = plugin_actions::sync_surfaces(self);
         let reconcile = self.reconcile();
-        let task = match surfaces_changed {
+        match surfaces_changed {
             true => reconcile.chain(plugin_actions::refresh_projection(self)),
             false => reconcile,
-        };
-        (task, result)
+        }
     }
 
     /// 收起当前弹层（菜单动作完成后的统一收尾）。
@@ -6063,7 +6132,7 @@ impl App {
                 let Some((view, label)) = self
                     .active_tree()
                     .and_then(|tree| layout::find_tab_in_tree(&tree, &tab_id))
-                    .map(|(_, t)| (t.view.clone(), layout_view::tab_label(self, &t.view)))
+                    .map(|(_, t)| (t.view.clone(), layout_view::tab_label(self, &t)))
                 else {
                     return Task::none();
                 };
@@ -6095,7 +6164,7 @@ impl App {
                     .iter()
                     .find(|w| w.id == window_id)
                     .and_then(|w| w.tabs.iter().find(|t| t.id == tab_id))
-                    .map(|t| (t.view.clone(), layout_view::tab_label(self, &t.view)))
+                    .map(|t| (t.view.clone(), layout_view::tab_label(self, t)))
                 else {
                     return Task::none();
                 };
@@ -6585,6 +6654,9 @@ impl App {
                 chat_actions::flush_sessions().chain(window::close(id))
             }
             PendingAfterFlush::CloseFileTab(kind) => self.close_file_tab(&kind),
+            PendingAfterFlush::CloseFileInstance(id) => self.close_file_instance(&id),
+            PendingAfterFlush::SetPrimaryPanel(panel_id) => self.make_primary_panel(&panel_id),
+            PendingAfterFlush::ClearPrimaryPanel(panel_id) => self.unset_primary_panel(&panel_id),
             // 隐藏到托盘：进程继续跑，不需要收尾会话侧车
             PendingAfterFlush::HideMain(id) => {
                 self.dismiss_popup();
@@ -6702,6 +6774,7 @@ impl App {
     fn begin_note_load(&mut self, rel: &str) -> Task<Message> {
         self.history_kind = atelyx_core::history::HistoryKind::Note;
         self.ui.last_note_file = Some(rel.to_string());
+        crate::open_route::doc_opened(self, rel, DocKind::Note);
         // 笔记视图按文件重新挂载：档位不跨文件延续
         self.note_mode = NoteMode::Read;
         self.note_text.clear();
@@ -6818,6 +6891,8 @@ impl App {
             self.note_press_inside = false;
             self.history.clear();
         }
+        // 打开文件集合随容器切换清空（启动恢复的文件在下面逐个登记）
+        open_route::clear_all(self);
         self.children.clear();
         self.note_text.clear();
         self.source_editor = text_editor::Content::new();
@@ -6892,14 +6967,22 @@ impl App {
         // 启动自动进入且「自动恢复」开启：恢复上次打开的文件；运行中切换不恢复（文件已随切仓关闭）
         if from_boot && self.global.auto_restore {
             if let Some(rel) = self.ui.last_note_file.clone() {
+                open_route::doc_opened(self, &rel, DocKind::Note);
                 task = task.chain(self.load_note(&rel));
             }
             if let Some(rel) = self.ui.last_table_file.clone() {
+                open_route::doc_opened(self, &rel, DocKind::Table);
                 task = task.chain(table_actions::load_table(self, &rel));
             }
             if let Some(rel) = self.ui.last_canvas_file.clone() {
+                open_route::doc_opened(self, &rel, DocKind::Canvas);
                 task = task.chain(canvas_actions::load_canvas(self, &rel));
             }
+        } else if from_boot {
+            // 启动不自动恢复：持久化种子一并作废，集合为空、槽走空态
+            self.ui.last_note_file = None;
+            self.ui.last_table_file = None;
+            self.ui.last_canvas_file = None;
         }
         task
     }
@@ -6956,6 +7039,7 @@ impl App {
             "table" => {
                 self.ui.last_table_file = None;
                 self.table = None;
+                open_route::doc_closed(self, &DocKind::Table);
                 // 与笔记关闭同规：历史面板不再有对应文件可查，清空防列表冻结在旧数据
                 self.history.clear();
                 // 空间模式回收在场（名册不再滞留「正在编辑该表格」）
@@ -6967,6 +7051,7 @@ impl App {
                 self.ui.last_canvas_file = None;
                 canvas_chat::detach_canvas(self);
                 self.canvas = None;
+                open_route::doc_closed(self, &DocKind::Canvas);
                 self.history.clear();
                 if matches!(self.repo_kind, RepoKind::Space(_)) {
                     space_actions::send_presence(self);
@@ -6978,6 +7063,7 @@ impl App {
                     space_actions::collab_unbind_note(self);
                 }
                 self.ui.last_note_file = None;
+                open_route::doc_closed(self, &DocKind::Note);
                 self.note_text.clear();
                 self.note_base.clear();
                 self.source_editor = text_editor::Content::new();
@@ -6997,6 +7083,117 @@ impl App {
 
     fn active_tree(&self) -> Option<layout::LayoutNode> {
         Some(layout::active_layout(&self.ui).tree)
+    }
+
+    // ===== 打开文件集合 / 主要面板 =====
+
+    /// 激活打开文件实例（主要面板投影标签的点击）：集合激活 + 类型槽与投影随之切换显示。
+    fn activate_doc_instance(&mut self, id: &str) -> Task<Message> {
+        if !self.open_files.activate(id) {
+            return Task::none();
+        }
+        if let Some(d) = self.open_files.get(id) {
+            // 启动恢复种子随激活项更新（渲染路径只读集合，种子仅作下次启动）
+            match &d.kind {
+                DocKind::Note => self.ui.last_note_file = Some(d.path.clone()),
+                DocKind::Table => self.ui.last_table_file = Some(d.path.clone()),
+                DocKind::Canvas => self.ui.last_canvas_file = Some(d.path.clone()),
+                DocKind::Plugin(_) => {}
+            }
+        }
+        self.schedule_persist();
+        Task::none()
+    }
+
+    /// 主要面板投影标签的 ×：关文件（每类型只有一个会话文件，按类型走关文件链）。
+    fn close_file_instance(&mut self, id: &str) -> Task<Message> {
+        let Some(view) = self
+            .open_files
+            .get(id)
+            .map(|d| open_route::view_of_kind(&d.kind).to_string())
+        else {
+            return Task::none();
+        };
+        self.close_file_tab(&view)
+    }
+
+    /// 设为主要面板：先把该布局的文档槽按有效文件并入集合，再把原主要面板塌缩成类型槽。
+    fn make_primary_panel(&mut self, panel_id: &str) -> Task<Message> {
+        let resolved = open_route::layout_doc_paths(self);
+        match layout::set_primary_panel(&mut self.ui, panel_id, &layout::is_builtin_doc_view) {
+            Ok(()) => {
+                let mut first: Option<String> = None;
+                for (view, path) in resolved {
+                    let (Some(kind), Some(path)) = (open_route::doc_kind_of_view(&view), path) else {
+                        continue;
+                    };
+                    let id = self.open_files.open(&path, kind);
+                    first.get_or_insert(id);
+                }
+                // 迁入的槽里第一个作为激活项（顺序 = 标签顺序）
+                if let Some(id) = first {
+                    let _ = self.open_files.activate(&id);
+                }
+                self.after_layout_change()
+            }
+            Err(layout::PrimaryPanelError::ToolView(view)) => {
+                self.notify(
+                    NoticeLevel::Info,
+                    format!(
+                        "先把「{}」移出面板再设为主要面板",
+                        layout_view::view_label(self, &view)
+                    ),
+                );
+                Task::none()
+            }
+            Err(layout::PrimaryPanelError::NotFound) => Task::none(),
+        }
+    }
+
+    /// 取消主要面板：按集合每类型塌缩成一个槽（优先该类型最近激活的文件）。
+    fn unset_primary_panel(&mut self, panel_id: &str) -> Task<Message> {
+        let slots = open_route::collapse_slots(self);
+        if layout::clear_primary_panel(&mut self.ui, panel_id, &slots) {
+            self.after_layout_change()
+        } else {
+            Task::none()
+        }
+    }
+
+    /// 主要面板空态「打开文件」：系统选择器挑的文件按扩展名分流（越出仓库根 = 提示拒绝）。
+    fn open_picked_file(&mut self, path: &Path) -> Task<Message> {
+        if matches!(self.repo_kind, RepoKind::Space(_)) {
+            // 协作空间没有本地仓库根：选择器语义不成立，指向文件面板
+            self.notify(NoticeLevel::Info, "协作空间内请从文件面板打开文件".to_string());
+            return Task::none();
+        }
+        let Ok(root) = self.vault.root() else {
+            self.notify(NoticeLevel::Info, "请先打开仓库".to_string());
+            return Task::none();
+        };
+        let rel = match path.strip_prefix(&root) {
+            Ok(rel) => rel.to_string_lossy().replace('\\', "/"),
+            Err(_) => {
+                self.notify(NoticeLevel::Info, "只能打开当前仓库内的文件".to_string());
+                return Task::none();
+            }
+        };
+        if !self.can_open_rel(&rel) {
+            self.notify(NoticeLevel::Info, "暂不支持打开该类型的文件".to_string());
+            return Task::none();
+        }
+        self.gate(PendingAfterFlush::OpenFile(rel))
+    }
+
+    /// 可打开的文档后缀：笔记 / 表格 / 画布，或插件注册的文档类型（其余不让落到笔记载入链）。
+    fn can_open_rel(&self, rel: &str) -> bool {
+        let ext = rel.rsplit('.').next().unwrap_or_default();
+        matches!(ext, "md" | "atb" | "atlx")
+            || self
+                .registry
+                .doc_types()
+                .iter()
+                .any(|info| info.registration.extension.eq_ignore_ascii_case(ext))
     }
 
     // ===== 反链 / 标签词汇表 / 双链候选 =====
@@ -8634,15 +8831,20 @@ impl App {
             return Task::none();
         }
         d.spring = None;
-        if self.ui.file_explorer_expanded.iter().any(|e| e == &dir) {
+        self.expand_dir(&dir)
+    }
+
+    /// 展开指定目录（定位文件用）：已在展开集 = 无任务；缓存已有 = 直接可见，否则补子项。
+    fn expand_dir(&mut self, dir: &str) -> Task<Message> {
+        if self.ui.file_explorer_expanded.iter().any(|e| e == dir) {
             return Task::none();
         }
-        self.ui.file_explorer_expanded.push(dir.clone());
+        self.ui.file_explorer_expanded.push(dir.to_string());
         self.schedule_persist();
-        if self.children.contains_key(&dir) {
+        if self.children.contains_key(dir) {
             Task::none()
         } else {
-            self.load_children(&dir)
+            self.load_children(dir)
         }
     }
 
@@ -10786,6 +10988,21 @@ mod file_drop_tests {
     }
 }
 
+/// 文件路径的祖先目录（含根 ""，不含自身）：定位文件时逐级展开用。
+fn ancestor_dirs(rel: &str) -> Vec<String> {
+    let mut out = vec![String::new()];
+    let parts: Vec<&str> = rel.split('/').collect();
+    let mut acc = String::new();
+    for part in parts.iter().take(parts.len().saturating_sub(1)) {
+        if !acc.is_empty() {
+            acc.push('/');
+        }
+        acc.push_str(part);
+        out.push(acc.clone());
+    }
+    out
+}
+
 #[cfg(test)]
 mod ui_state_tests {
     use super::parse_ui_state;
@@ -10810,5 +11027,131 @@ mod ui_state_tests {
         assert!(parse_ui_state("{not json").scenes.is_empty());
         let unknown = r#"{"schema":"atelyx-ui-state/v1","scenes":[]}"#;
         assert!(parse_ui_state(unknown).scenes.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod open_route_tests {
+    use super::*;
+    use atelyx_core::layout::TabItem;
+    use atelyx_core::open_files::Host;
+
+    fn app() -> App {
+        let (app, _boot) = App::boot();
+        app
+    }
+
+    #[test]
+    fn opened_docs_are_single_instance_per_kind() {
+        let mut app = app();
+        open_route::doc_opened(&mut app, "a.md", DocKind::Note);
+        open_route::doc_opened(&mut app, "b.md", DocKind::Note);
+        let notes = app.open_files.of_kind(&DocKind::Note, &Host::Main);
+        assert_eq!(notes.len(), 1, "影子集合每类型至多一项");
+        assert_eq!(notes[0].path, "b.md");
+        // 重复打开同一路径 = 激活既有实例，不新增
+        let id = app.open_files.find_by_path("b.md").unwrap().id.clone();
+        open_route::doc_opened(&mut app, "b.md", DocKind::Note);
+        assert_eq!(app.open_files.len(), 1);
+        assert_eq!(app.open_files.active_id(), Some(id.as_str()));
+    }
+
+    #[test]
+    fn primary_projection_and_slot_fallback() {
+        let mut app = app();
+        open_route::doc_opened(&mut app, "a.md", DocKind::Note);
+        open_route::doc_opened(&mut app, "t.atb", DocKind::Table);
+        let tabs = open_route::primary_tabs(&app);
+        assert_eq!(
+            tabs.iter().map(|t| t.view.as_str()).collect::<Vec<_>>(),
+            vec!["note", "table"]
+        );
+        assert_eq!(tabs[0].file.as_deref(), Some("a.md"));
+        assert_eq!(open_route::primary_active(&app), tabs.last().map(|t| t.id.clone()));
+        // 槽内手动选择失效（集合里没有该路径）→ 回落该类型最近激活
+        let tab = TabItem {
+            id: "x".into(),
+            view: "note".into(),
+            locked: false,
+            file: Some("gone.md".into()),
+        };
+        assert_eq!(open_route::slot_path(&app, &tab).as_deref(), Some("a.md"));
+        assert!(open_route::tab_has_file(&app, &tab));
+        // 取消主要面板的塌缩槽：每类型一个，优先激活项
+        assert_eq!(
+            open_route::collapse_slots(&app),
+            vec![
+                ("note".to_string(), Some("a.md".to_string())),
+                ("table".to_string(), Some("t.atb".to_string())),
+            ]
+        );
+    }
+
+    #[test]
+    fn closed_doc_leaves_slot_empty() {
+        let mut app = app();
+        open_route::doc_opened(&mut app, "a.md", DocKind::Note);
+        open_route::doc_closed(&mut app, &DocKind::Note);
+        let tab = TabItem { id: "x".into(), view: "note".into(), locked: false, file: None };
+        assert_eq!(open_route::slot_path(&app, &tab), None);
+        assert!(!open_route::tab_has_file(&app, &tab));
+    }
+
+    /// 两面板布局：p1 = 工具视图，p2 = 笔记槽（槽内文件走集合回落）。
+    fn two_panel_layout(app: &mut App) -> (String, String) {
+        let files = atelyx_core::layout::create_tab("files");
+        let note = atelyx_core::layout::create_tab("note");
+        let tree = layout::LayoutNode::Split {
+            id: "s1".into(),
+            direction: "horizontal".into(),
+            children: vec![
+                layout::LayoutNode::Panel {
+                    id: "p1".into(),
+                    tabs: vec![files.clone()],
+                    active_tab_id: Some(files.id),
+                },
+                layout::LayoutNode::Panel {
+                    id: "p2".into(),
+                    tabs: vec![note.clone()],
+                    active_tab_id: Some(note.id),
+                },
+            ],
+            sizes: vec![50.0, 50.0],
+        };
+        let idx = app
+            .ui
+            .active_scene_id
+            .as_ref()
+            .and_then(|id| app.ui.scenes.iter().position(|s| &s.id == id))
+            .unwrap_or(0);
+        app.ui.active_scene_id = Some(app.ui.scenes[idx].id.clone());
+        let layout_id = app.ui.scenes[idx].layouts[0].id.clone();
+        app.ui.scenes[idx].layouts[0].tree = tree;
+        app.ui.scenes[idx].active_layout_id = Some(layout_id.clone());
+        app.ui.active_layout_id = Some(layout_id);
+        ("p1".into(), "p2".into())
+    }
+
+    #[test]
+    fn make_and_unset_primary_migrates_slots_into_collection() {
+        let mut app = app();
+        let (p1, p2) = two_panel_layout(&mut app);
+        open_route::doc_opened(&mut app, "a.md", DocKind::Note);
+        // 工具视图面板不能设为主要面板（提示拒绝，模型不动）
+        let _ = app.make_primary_panel(&p1);
+        assert_eq!(layout::primary_panel_of_active(&app.ui), None);
+        // 文档槽面板可设：槽迁入集合，模型里标签清空
+        let _ = app.make_primary_panel(&p2);
+        assert_eq!(layout::primary_panel_of_active(&app.ui), Some(p2.as_str()));
+        let tabs = open_route::primary_tabs(&app);
+        assert_eq!(tabs.len(), 1, "槽里的笔记迁入集合");
+        assert_eq!(tabs[0].file.as_deref(), Some("a.md"));
+        assert!(layout::find_panel(&layout::active_layout(&app.ui).tree, &p2).unwrap().is_empty());
+        // 取消：按集合塌缩回类型槽
+        let _ = app.unset_primary_panel(&p2);
+        assert_eq!(layout::primary_panel_of_active(&app.ui), None);
+        let panel = layout::find_panel(&layout::active_layout(&app.ui).tree, &p2).unwrap();
+        assert_eq!(panel.iter().map(|t| t.view.as_str()).collect::<Vec<_>>(), vec!["note"]);
+        assert_eq!(panel[0].file.as_deref(), Some("a.md"));
     }
 }

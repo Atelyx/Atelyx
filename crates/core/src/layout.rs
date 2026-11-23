@@ -1218,6 +1218,123 @@ pub fn renamed_layout_name(scene: &Scene, id: &str, requested: &str) -> Option<S
 }
 
 
+// ===== 主要面板（模型部分：身份 + 标签迁移；集合在壳侧）=====
+
+/// 内置文档视图 kind（类型槽每类型至多一个；插件文档视图由壳侧按注册表补充）。
+pub fn is_builtin_doc_view(view: &str) -> bool {
+    matches!(view, "note" | "table" | "canvas")
+}
+
+/// 设置主要面板失败原因。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PrimaryPanelError {
+    /// 面板不在当前激活布局树内。
+    NotFound,
+    /// 面板含工具视图：主要面板只接文档。
+    ToolView(String),
+}
+
+/// 当前激活布局的主要面板 id（不克隆整棵树；normalize 保证它指向本布局面板）。
+pub fn primary_panel_of_active(ui: &AppUiState) -> Option<&str> {
+    let scene = active_scene(ui);
+    let layout = match ui.active_layout_id.as_deref() {
+        Some(id) if id != HOME_LAYOUT_ID => scene
+            .layouts
+            .iter()
+            .find(|l| Some(&l.id) == ui.active_layout_id.as_ref())
+            .expect("激活布局恒有效（normalize 保证、操作维持）"),
+        _ => &scene.home_layout,
+    };
+    layout.primary_panel_id.as_deref()
+}
+
+/// 可变借用当前激活布局。
+fn active_layout_mut(ui: &mut AppUiState) -> &mut WorkspaceLayout {
+    let active_id = ui.active_layout_id.clone();
+    let scene = active_scene_mut(ui);
+    match active_id.as_deref() {
+        Some(id) if id != HOME_LAYOUT_ID => scene
+            .layouts
+            .iter_mut()
+            .find(|l| Some(&l.id) == active_id.as_ref())
+            .expect("激活布局恒有效（normalize 保证、操作维持）"),
+        _ => &mut scene.home_layout,
+    }
+}
+
+/// 设置主要面板：目标面板内的工具视图导致拒绝（主要面板只接文档）；成功后清空本布局
+/// 全部文档槽，由壳侧按迁出的文件并入打开文件集合。
+/// 原主要面板只降级、不回填槽：文档仍由集合并经主要面板投影呈现（I4）。
+pub fn set_primary_panel(
+    ui: &mut AppUiState,
+    panel_id: &str,
+    is_doc_view: &dyn Fn(&str) -> bool,
+) -> Result<(), PrimaryPanelError> {
+    let layout = active_layout_mut(ui);
+    let Some(node) = find_node(&layout.tree, panel_id) else {
+        return Err(PrimaryPanelError::NotFound);
+    };
+    let LayoutNode::Panel { tabs, .. } = node else {
+        return Err(PrimaryPanelError::NotFound);
+    };
+    if let Some(tool) = tabs.iter().find(|t| !is_doc_view(&t.view)) {
+        return Err(PrimaryPanelError::ToolView(tool.view.clone()));
+    }
+    layout.tree = clear_doc_slots(&layout.tree, is_doc_view);
+    layout.primary_panel_id = Some(panel_id.to_string());
+    Ok(())
+}
+
+/// 取消主要面板：去掉主要身份，并按壳侧给的每类型槽重建该面板标签（空槽列表 = 空面板）。
+/// 面板不是当前布局的主要面板 = false（模型不动）。
+pub fn clear_primary_panel(
+    ui: &mut AppUiState,
+    panel_id: &str,
+    slots: &[(String, Option<String>)],
+) -> bool {
+    let layout = active_layout_mut(ui);
+    if layout.primary_panel_id.as_deref() != Some(panel_id) {
+        return false;
+    }
+    layout.primary_panel_id = None;
+    layout.tree = map_panel(&layout.tree, panel_id, &|p| match p {
+        LayoutNode::Panel { id, .. } => {
+            let tabs: Vec<TabItem> = slots
+                .iter()
+                .map(|(view, file)| {
+                    let mut tab = create_tab(view);
+                    tab.file = file.clone();
+                    tab
+                })
+                .collect();
+            let active_tab_id = tabs.first().map(|t| t.id.clone());
+            LayoutNode::Panel { id: id.clone(), tabs, active_tab_id }
+        }
+        _ => p.clone(),
+    });
+    true
+}
+
+/// 清空树中的文档槽（工具视图原样保留，激活态失效回落第一个标签）。
+fn clear_doc_slots(tree: &LayoutNode, is_doc_view: &dyn Fn(&str) -> bool) -> LayoutNode {
+    match tree {
+        LayoutNode::Panel { id, tabs, active_tab_id } => {
+            let kept: Vec<TabItem> = tabs.iter().filter(|t| !is_doc_view(&t.view)).cloned().collect();
+            let active = active_tab_id
+                .clone()
+                .filter(|a| kept.iter().any(|t| &t.id == a))
+                .or_else(|| kept.first().map(|t| t.id.clone()));
+            LayoutNode::Panel { id: id.clone(), tabs: kept, active_tab_id: active }
+        }
+        LayoutNode::Split { id, direction, children, sizes } => LayoutNode::Split {
+            id: id.clone(),
+            direction: direction.clone(),
+            children: children.iter().map(|c| clear_doc_slots(c, is_doc_view)).collect(),
+            sizes: sizes.clone(),
+        },
+    }
+}
+
 // ===== 布局操作应用（唯一变更入口）=====
 
 /// 视图是否已被占用（树 + 撕裂窗口合计；自身当前视图除外）。
@@ -1320,17 +1437,49 @@ fn move_tab_within(ui: &mut AppUiState, target: &Target, tab_id: &str, to_index:
     with_group(ui, target, &|g| group_move_tab(g, tab_id, to_index));
 }
 
+/// 当前布局是否已有主要面板（文档标签只应出现在它的投影里）。
+fn has_primary(ui: &AppUiState) -> bool {
+    primary_panel_of_active(ui).is_some()
+}
+
+/// 该面板是否为当前布局的主要面板。
+fn is_primary_panel(ui: &AppUiState, panel_id: &str) -> bool {
+    primary_panel_of_active(ui) == Some(panel_id)
+}
+
+/// 撕裂窗口里该标签的视图 kind（停靠前的来源视图）。
+fn detached_tab_view<'a>(ui: &'a AppUiState, tab_id: &str) -> Option<&'a str> {
+    ui.detached_windows
+        .iter()
+        .find_map(|w| w.tabs.iter().find(|t| t.id == tab_id))
+        .map(|t| t.view.as_str())
+}
+
 /// 应用一个布局操作并返回结果。模型变更后由调用方负责广播 + 调度落盘。
 pub fn apply_layout_op(ui: &mut AppUiState, op: &LayoutOp) -> LayoutOpResult {
     let mut result = LayoutOpResult::default();
     match op {
-        LayoutOp::AddView { panel_id, view } => add_view(ui, &Target::Panel(panel_id.clone()), view, true),
+        LayoutOp::AddView { panel_id, view } => {
+            if !is_primary_panel(ui, panel_id) && !(has_primary(ui) && is_builtin_doc_view(view)) {
+                add_view(ui, &Target::Panel(panel_id.clone()), view, true);
+            }
+        }
         LayoutOp::SetActive { panel_id, tab_id } => activate_tab(ui, &Target::Panel(panel_id.clone()), tab_id),
         LayoutOp::CloseTab { panel_id, tab_id } => close_tab(ui, &Target::Panel(panel_id.clone()), tab_id),
         LayoutOp::SetLocked { panel_id, tab_id, locked } => set_tab_locked(ui, &Target::Panel(panel_id.clone()), tab_id, *locked),
-        LayoutOp::SetTabView { panel_id, tab_id, view } => set_tab_view(ui, &Target::Panel(panel_id.clone()), tab_id, view),
+        LayoutOp::SetTabView { panel_id, tab_id, view } => {
+            // 主要面板的标签是投影，不接受视图切换；含主要面板的布局里文档视图不落进普通面板
+            if !is_primary_panel(ui, panel_id) && !(has_primary(ui) && is_builtin_doc_view(view)) {
+                set_tab_view(ui, &Target::Panel(panel_id.clone()), tab_id, view);
+            }
+        }
         LayoutOp::MoveTabWithin { panel_id, tab_id, to_index } => move_tab_within(ui, &Target::Panel(panel_id.clone()), tab_id, *to_index),
-        LayoutOp::MoveTabBetween { from_panel_id, to_panel_id, tab_id, index } => move_tab_between(ui, from_panel_id, to_panel_id, tab_id, *index),
+        LayoutOp::MoveTabBetween { from_panel_id, to_panel_id, tab_id, index } => {
+            // 主要面板的标签是投影：不接受把标签移进去
+            if !is_primary_panel(ui, to_panel_id) {
+                move_tab_between(ui, from_panel_id, to_panel_id, tab_id, *index);
+            }
+        }
         LayoutOp::SplitPanel { panel_id, direction, position } => {
             let pos = position.as_deref().unwrap_or("after");
             let tree = active_layout(ui).tree;
@@ -1339,6 +1488,10 @@ pub fn apply_layout_op(ui: &mut AppUiState, op: &LayoutOp) -> LayoutOpResult {
             result.split_panel_id = Some(new_id);
         }
         LayoutOp::ClosePanel { panel_id } => {
+            // 主要面板不可删除：先取消主要身份
+            if is_primary_panel(ui, panel_id) {
+                return result;
+            }
             let tree = active_layout(ui).tree;
             if let Some(new_tree) = close_panel_op(&tree, panel_id) {
                 set_active_tree(ui, new_tree);
@@ -1350,7 +1503,13 @@ pub fn apply_layout_op(ui: &mut AppUiState, op: &LayoutOp) -> LayoutOpResult {
         LayoutOp::TearOffFromDetached { window_id, tab_id, bounds } => {
             result.detached_window = tear_off_from_detached(ui, window_id, tab_id, bounds, None);
         }
-        LayoutOp::DockIntoPanel { panel_id, tab_id, index } => dock_into_panel(ui, panel_id, tab_id, *index),
+        LayoutOp::DockIntoPanel { panel_id, tab_id, index } => {
+            // 主要面板的标签是投影，不接受停靠；含主要面板的布局里文档也不落进普通面板
+            let docked_doc = detached_tab_view(ui, tab_id).is_some_and(is_builtin_doc_view);
+            if !is_primary_panel(ui, panel_id) && !(has_primary(ui) && docked_doc) {
+                dock_into_panel(ui, panel_id, tab_id, *index);
+            }
+        }
         LayoutOp::DockIntoDetached { window_id, tab_id, index } => dock_into_detached(ui, window_id, tab_id, *index),
         LayoutOp::DetachedAddView { window_id, view } => add_view(ui, &Target::Detached(window_id.clone()), view, false),
         LayoutOp::DetachedSetActive { window_id, tab_id } => activate_tab(ui, &Target::Detached(window_id.clone()), tab_id),
@@ -2400,5 +2559,92 @@ mod tests {
         normalize(&mut ui);
         assert_eq!(ui.schema, UI_STATE_SCHEMA);
         assert_eq!(active_scene(&ui).layouts[0].primary_panel_id, None);
+    }
+
+    fn doc_only(view: &str) -> bool {
+        is_builtin_doc_view(view)
+    }
+
+    #[test]
+    fn set_primary_panel_migrates_and_clears_doc_slots() {
+        let tree = LayoutNode::Split {
+            id: "s1".into(),
+            direction: "horizontal".into(),
+            children: vec![panel("p1", &["note", "table"]), panel("p2", &["files", "canvas"])],
+            sizes: vec![50.0, 50.0],
+        };
+        let mut ui = ui_with(tree);
+        set_primary_panel(&mut ui, "p1", &doc_only).unwrap();
+        let layout = &active_scene(&ui).layouts[0];
+        assert_eq!(layout.primary_panel_id.as_deref(), Some("p1"));
+        assert!(find_panel(&layout.tree, "p1").unwrap().is_empty());
+        // 其他面板的文档槽同样清空（I4），工具视图保留
+        let p2 = find_panel(&layout.tree, "p2").unwrap();
+        assert_eq!(p2.iter().map(|t| t.view.as_str()).collect::<Vec<_>>(), vec!["files"]);
+    }
+
+    #[test]
+    fn set_primary_panel_rejects_tool_views_and_switches_identity() {
+        let mut ui = ui_with(two_panels_horizontal());
+        let err = set_primary_panel(&mut ui, "p1", &doc_only).unwrap_err();
+        assert_eq!(err, PrimaryPanelError::ToolView("files".into()));
+        assert_eq!(active_scene(&ui).layouts[0].primary_panel_id, None);
+
+        // 已有一个主要面板时再设另一个：身份换到新面板，原面板只降级（不回填槽）
+        let mut ui = ui_with(two_panels_horizontal());
+        set_primary_panel(&mut ui, "p2", &doc_only).unwrap();
+        set_primary_panel(&mut ui, "p1", &|v| is_builtin_doc_view(v) || v == "files").unwrap();
+        assert_eq!(active_scene(&ui).layouts[0].primary_panel_id.as_deref(), Some("p1"));
+        assert!(find_panel(&active_layout(&ui).tree, "p2").unwrap().is_empty());
+    }
+
+    #[test]
+    fn clear_primary_panel_rebuilds_slots() {
+        let mut ui = ui_with(two_panels_horizontal());
+        set_primary_panel(&mut ui, "p2", &doc_only).unwrap();
+        let ok = clear_primary_panel(
+            &mut ui,
+            "p2",
+            &[("note".into(), Some("a.md".into())), ("table".into(), None)],
+        );
+        assert!(ok);
+        let layout = &active_scene(&ui).layouts[0];
+        assert_eq!(layout.primary_panel_id, None);
+        let p2 = find_panel(&layout.tree, "p2").unwrap();
+        assert_eq!(p2.iter().map(|t| t.view.as_str()).collect::<Vec<_>>(), vec!["note", "table"]);
+        assert_eq!(p2[0].file.as_deref(), Some("a.md"));
+        match find_node(&layout.tree, "p2") {
+            Some(LayoutNode::Panel { active_tab_id, .. }) => assert_eq!(active_tab_id.as_deref(), Some(p2[0].id.as_str())),
+            _ => unreachable!(),
+        }
+        // 非主要面板 = 不动
+        assert!(!clear_primary_panel(&mut ui, "p1", &[]));
+    }
+
+    #[test]
+    fn primary_panel_identity_survives_serialization() {
+        let mut ui = ui_with(two_panels_horizontal());
+        set_primary_panel(&mut ui, "p2", &doc_only).unwrap();
+        let json = serde_json::to_string(&ui).unwrap();
+        assert!(json.contains("\"primaryPanelId\":\"p2\""));
+        let mut back: AppUiState = serde_json::from_str(&json).unwrap();
+        normalize(&mut back);
+        assert_eq!(active_scene(&back).layouts[0].primary_panel_id.as_deref(), Some("p2"));
+        assert!(find_panel(&active_layout(&back).tree, "p2").unwrap().is_empty(), "投影不落盘");
+    }
+
+    #[test]
+    fn primary_panel_rejects_direct_tab_ops() {        let mut ui = ui_with(two_panels_horizontal());
+        set_primary_panel(&mut ui, "p2", &doc_only).unwrap();
+        // 主要面板不接受加视图（工具与文档都不行）
+        let _ = apply_layout_op(&mut ui, &LayoutOp::AddView { panel_id: "p2".into(), view: "calendar".into() });
+        assert!(find_panel(&active_layout(&ui).tree, "p2").unwrap().is_empty());
+        // 含主要面板的布局里，普通面板不再落文档标签
+        let _ = apply_layout_op(&mut ui, &LayoutOp::AddView { panel_id: "p1".into(), view: "note".into() });
+        let p1 = find_panel(&active_layout(&ui).tree, "p1").unwrap();
+        assert_eq!(p1.iter().map(|t| t.view.as_str()).collect::<Vec<_>>(), vec!["files"]);
+        // 主要面板不可删除
+        let _ = apply_layout_op(&mut ui, &LayoutOp::ClosePanel { panel_id: "p2".into() });
+        assert!(find_panel(&active_layout(&ui).tree, "p2").is_some());
     }
 }

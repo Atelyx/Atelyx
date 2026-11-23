@@ -29,6 +29,7 @@ pub(crate) fn element<'a>(
         | PopupState::LayoutTabMenu { .. }
         | PopupState::PanelMenu { .. }
         | PopupState::TabContext { .. }
+        | PopupState::PrimaryTabContext { .. }
         | PopupState::ViewPicker { .. }
         | PopupState::DetachedPanelMenu { .. }
         | PopupState::DetachedTabContext { .. } => menu::entries(app, state),
@@ -91,6 +92,7 @@ pub(crate) fn width(state: &PopupState) -> f32 {
         | PopupState::LayoutTabMenu { .. }
         | PopupState::PanelMenu { .. }
         | PopupState::TabContext { .. }
+        | PopupState::PrimaryTabContext { .. }
         | PopupState::ViewPicker { .. }
         | PopupState::DetachedPanelMenu { .. }
         | PopupState::DetachedTabContext { .. } => menu::width(state),

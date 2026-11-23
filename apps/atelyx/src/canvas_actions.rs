@@ -25,6 +25,7 @@ const PASTE_SPOT_STEP: f64 = 24.0;
 /// 打开 .atlx（脏拦截已由 gate 处理）：置「上次打开」、清旧会话、走载入链。
 pub fn open_canvas(app: &mut App, rel: &str) -> Task<Message> {
     app.ui.last_canvas_file = Some(rel.to_string());
+    crate::open_route::doc_opened(app, rel, atelyx_core::open_files::DocKind::Canvas);
     // 清掉上一画布会话：先停掉卡内 run，载入在途期间不留旧数据（防串画布写盘）
     crate::canvas_chat::detach_canvas(app);
     app.canvas = None;
