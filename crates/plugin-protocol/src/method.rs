@@ -132,9 +132,9 @@ pub mod notification {
     pub const SHOW: &str = "notification.show";
 }
 
-/// 系统托盘：插件提交自己的菜单条目，宿主维护唯一托盘图标（无条目时图标消失）。
+/// 系统托盘：插件提交自己的菜单条目，宿主维护唯一常驻托盘图标。
 pub mod tray {
-    /// 整发整换本插件的托盘菜单（空清单 = 收起）。宿主自有的「显示 / 退出」条目恒在末尾。
+    /// 整发整换本插件的托盘菜单（空清单 = 收起）。条目按插件分栏，宿主自有的「打开工作区 / 设置 / 退出」恒在末尾。
     pub const SET_ITEMS: &str = "tray.setItems";
     /// 用户点了本插件的某个托盘条目（通知）。
     pub const HOST_CLICK: &str = "host:tray.click";
@@ -1492,8 +1492,10 @@ pub struct TableSetCellImageParams {
 
 // ---------- tray / collab ----------
 
-/// 托盘菜单条目上限（超出拒绝）。
+/// 托盘菜单条目上限（整棵树合计，超出拒绝）。
 const MAX_TRAY_ITEMS: usize = 32;
+/// 子菜单层数上限：根条目 + 一层 children（悬停展开的二级子菜单）。
+const MAX_TRAY_DEPTH: usize = 1;
 /// 协作通道名长度上限（字符数）。
 const MAX_CHANNEL_CHARS: usize = 64;
 
@@ -1507,6 +1509,43 @@ pub struct TrayItemSpec {
     /// 置灰不可点（缺省 true）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
+    /// 非空即成为二级子菜单（悬停展开）；带 children 的条目只作子菜单标题，
+    /// 点击父条目不回调。子条目的 `id` 同样随点击回发，只允许一层（子条目不得再带 children）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<TrayItemSpec>,
+}
+
+impl TrayItemSpec {
+    /// 递归校验子树：整棵树的 id 唯一、文字非空、子菜单只允许一层。
+    fn validate_tree<'a>(
+        &'a self,
+        ids: &mut std::collections::HashSet<&'a str>,
+        count: &mut usize,
+        depth: usize,
+    ) -> Result<(), String> {
+        *count += 1;
+        if *count > MAX_TRAY_ITEMS {
+            return Err(format!("托盘条目不能超过 {MAX_TRAY_ITEMS} 条"));
+        }
+        if self.id.trim().is_empty() {
+            return Err("托盘条目 id 不能为空".into());
+        }
+        if !ids.insert(self.id.as_str()) {
+            return Err(format!("托盘条目 id 重复：{}", self.id));
+        }
+        if self.label.trim().is_empty() {
+            return Err(format!("托盘条目 {} 的文字不能为空", self.id));
+        }
+        if !self.children.is_empty() {
+            if depth >= MAX_TRAY_DEPTH {
+                return Err(format!("托盘条目 {} 的子菜单只允许一层", self.id));
+            }
+            for child in &self.children {
+                child.validate_tree(ids, count, depth + 1)?;
+            }
+        }
+        Ok(())
+    }
 }
 
 /// [`tray::SET_ITEMS`] 的 params：整发整换本插件的托盘菜单，空清单 = 收起。
@@ -1518,20 +1557,10 @@ pub struct SetTrayItemsParams {
 
 impl SetTrayItemsParams {
     pub fn validate(&self) -> Result<(), String> {
-        if self.items.len() > MAX_TRAY_ITEMS {
-            return Err(format!("托盘条目不能超过 {MAX_TRAY_ITEMS} 条"));
-        }
         let mut ids = std::collections::HashSet::new();
+        let mut count = 0usize;
         for item in &self.items {
-            if item.id.trim().is_empty() {
-                return Err("托盘条目 id 不能为空".into());
-            }
-            if !ids.insert(item.id.as_str()) {
-                return Err(format!("托盘条目 id 重复：{}", item.id));
-            }
-            if item.label.trim().is_empty() {
-                return Err(format!("托盘条目 {} 的文字不能为空", item.id));
-            }
+            item.validate_tree(&mut ids, &mut count, 0)?;
         }
         Ok(())
     }
@@ -1970,28 +1999,104 @@ mod tests {
                 id: "open".into(),
                 label: "打开".into(),
                 enabled: None,
+                children: Vec::new(),
             }],
         };
         assert!(ok.validate().is_ok());
         let dup = SetTrayItemsParams {
             items: vec![
-                TrayItemSpec { id: "a".into(), label: "甲".into(), enabled: None },
-                TrayItemSpec { id: "a".into(), label: "乙".into(), enabled: Some(false) },
+                TrayItemSpec { id: "a".into(), label: "甲".into(), enabled: None, children: Vec::new() },
+                TrayItemSpec {
+                    id: "a".into(),
+                    label: "乙".into(),
+                    enabled: Some(false),
+                    children: Vec::new(),
+                },
             ],
         };
         assert!(dup.validate().unwrap_err().contains("重复"));
         let blank = SetTrayItemsParams {
-            items: vec![TrayItemSpec { id: "a".into(), label: " ".into(), enabled: None }],
+            items: vec![TrayItemSpec {
+                id: "a".into(),
+                label: " ".into(),
+                enabled: None,
+                children: Vec::new(),
+            }],
         };
         assert!(blank.validate().unwrap_err().contains("文字"));
         let many = SetTrayItemsParams {
             items: (0..=MAX_TRAY_ITEMS)
-                .map(|i| TrayItemSpec { id: format!("i{i}"), label: format!("条目 {i}"), enabled: None })
+                .map(|i| TrayItemSpec {
+                    id: format!("i{i}"),
+                    label: format!("条目 {i}"),
+                    enabled: None,
+                    children: Vec::new(),
+                })
                 .collect(),
         };
         assert!(many.validate().unwrap_err().contains("不能超过"));
         // 空清单合法（收起菜单）
         assert!(SetTrayItemsParams { items: vec![] }.validate().is_ok());
+    }
+
+    #[test]
+    fn tray_submenu_is_one_level_and_counts_whole_tree() {
+        let leaf = |id: &str| TrayItemSpec {
+            id: id.into(),
+            label: id.into(),
+            enabled: None,
+            children: Vec::new(),
+        };
+        let ok = SetTrayItemsParams {
+            items: vec![TrayItemSpec {
+                id: "tools".into(),
+                label: "工具".into(),
+                enabled: None,
+                children: vec![leaf("a"), leaf("b")],
+            }],
+        };
+        assert!(ok.validate().is_ok());
+        // 子条目不得再带 children
+        let deep = SetTrayItemsParams {
+            items: vec![TrayItemSpec {
+                id: "tools".into(),
+                label: "工具".into(),
+                enabled: None,
+                children: vec![TrayItemSpec {
+                    id: "a".into(),
+                    label: "甲".into(),
+                    enabled: None,
+                    children: vec![leaf("deep")],
+                }],
+            }],
+        };
+        assert!(deep.validate().unwrap_err().contains("一层"));
+        // 子条目 id 与根条目同一命名空间
+        let dup = SetTrayItemsParams {
+            items: vec![TrayItemSpec {
+                id: "a".into(),
+                label: "甲".into(),
+                enabled: None,
+                children: vec![leaf("a")],
+            }],
+        };
+        assert!(dup.validate().unwrap_err().contains("重复"));
+        // 容量按整棵树计
+        let mut items: Vec<TrayItemSpec> = (0..MAX_TRAY_ITEMS)
+            .map(|i| TrayItemSpec {
+                id: format!("i{i}"),
+                label: format!("条目 {i}"),
+                enabled: None,
+                children: Vec::new(),
+            })
+            .collect();
+        items[0].children = vec![leaf("extra")];
+        assert!(
+            SetTrayItemsParams { items }
+                .validate()
+                .unwrap_err()
+                .contains("不能超过")
+        );
     }
 
     #[test]

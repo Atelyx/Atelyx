@@ -1738,9 +1738,9 @@ pub mod ai {
 
 ```rust
 // crates/plugin-protocol/src/method.rs
-/// 系统托盘：插件提交自己的菜单条目，宿主维护唯一托盘图标（无条目时图标消失）。
+/// 系统托盘：插件提交自己的菜单条目，宿主维护唯一常驻托盘图标。
 pub mod tray {
-    /// 整发整换本插件的托盘菜单（空清单 = 收起）。宿主自有的「显示 / 退出」条目恒在末尾。
+    /// 整发整换本插件的托盘菜单（空清单 = 收起）。条目按插件分栏，宿主自有的「打开工作区 / 设置 / 退出」恒在末尾。
     pub const SET_ITEMS: &str = "tray.setItems";
     /// 用户点了本插件的某个托盘条目（通知）。
     pub const HOST_CLICK: &str = "host:tray.click";
@@ -2700,6 +2700,10 @@ pub struct TrayItemSpec {
     /// 置灰不可点（缺省 true）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
+    /// 非空即成为二级子菜单（悬停展开）；带 children 的条目只作子菜单标题，
+    /// 点击父条目不回调。子条目的 `id` 同样随点击回发，只允许一层（子条目不得再带 children）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<TrayItemSpec>,
 }
 ```
 

@@ -34,6 +34,7 @@ mod hover_tip;
 mod image_cache;
 mod image_clipboard;
 mod layout_view;
+mod main_window;
 mod markdown_edit;
 mod markdown_select;
 mod markdown_table;
@@ -50,6 +51,7 @@ mod recent_view;
 mod registry;
 mod repohistory_view;
 mod settings_view;
+mod single_instance;
 mod space_actions;
 mod table_actions;
 mod table_ai;
@@ -373,6 +375,10 @@ pub fn run() -> iced::Result {
     let args: Vec<String> = std::env::args().collect();
     if let Some(code) = cli::dispatch(&args) {
         std::process::exit(code);
+    }
+    // 单实例：已有进程在跑就唤出它的主窗口，本进程不再建界面直接退出
+    if !single_instance::ensure_single() {
+        return Ok(());
     }
     // 崩溃日志先于窗口与渲染器安装：此后任一拍 panic 都不会无痕退出
     install_panic_hook();
@@ -1195,6 +1201,8 @@ enum Message {
     ShortcutReset(commands::CommandId),
     /// 打开 / 关闭设置整页；设置左栏切 tab；折叠钮切换。
     SettingsToggle,
+    /// 打开设置整页（托盘「设置」用：已打开时只把窗口唤回，不切换页面）。
+    SettingsOpen,
     SettingsTab(String),
     SettingsNavCollapse,
     /// AI 设置页消息（子分区 / 供应商 / 模型服务 / Agent / 搜索）。
@@ -1579,6 +1587,8 @@ enum PendingAfterFlush {
     /// 从最近仓库列表进入指定仓库（from_boot 区分启动进入与运行中切换）。
     SelectVault { path: PathBuf, from_boot: bool },
     CloseMain(window::Id),
+    /// 关主窗 = 隐藏到托盘：挂起输入先落盘，窗口藏起来但进程继续。
+    HideMain(window::Id),
     /// 关文件留标签（kind = "note" / "table" / "canvas"，只关对应面）。
     CloseFileTab(String),
     /// 画布历史回滚：挂起输入先落盘，再把快照写回真源（空间模式先写服务端再记史）。
@@ -2335,6 +2345,19 @@ impl App {
                 manual: false,
             })));
         }
+        // 托盘常驻：图标建不起来先提示一次（托盘线程会按定时器继续重试）
+        let tray_service = tray::Service::new();
+        #[cfg(windows)]
+        if let Some(reason) = tray_service.unavailable_reason() {
+            boot = boot.chain(Task::done(Message::Tray(tray::TrayEvent::Unavailable(
+                reason.to_string(),
+            ))));
+        }
+        if tray_service.available() && !tray_service.icon_visible() {
+            boot = boot.chain(Task::done(Message::Tray(tray::TrayEvent::Unavailable(
+                "图标创建失败，稍后自动重试".to_string(),
+            ))));
+        }
         let mut app = Self {
                 ui: load_ui_state(),
                 registry: crate::registry::Registry::default(),
@@ -2359,7 +2382,7 @@ impl App {
                 settings_tab: "general".into(),
                 shortcut_recording: None,
                 plugins: plugins.clone(),
-                tray: tray::Service::new(),
+                tray: tray_service,
                 plugins_state: settings_view::plugins::PluginsState::default(),
                 plugin_contributions: Vec::new(),
                 plugin_surfaces: HashSet::new(),
@@ -2922,6 +2945,7 @@ impl App {
             | Message::RenamePressInside => self.handle_file_tree(message),
             Message::RebuildLinks(..)
             | Message::SettingsToggle
+            | Message::SettingsOpen
             | Message::SettingsTab(..)
             | Message::Ai(..)
             | Message::Plugins(..)
@@ -3002,7 +3026,11 @@ impl App {
             }
             Message::WindowCloseRequested(id) => {
                 if self.main_id == Some(id) {
-                    // 关窗 = 退出：挂起输入先落盘（保存失败则留在应用内重试）
+                    // 关闭按钮 = 隐藏到托盘：在途改动先落盘（保存失败则留在应用内重试）；
+                    // 托盘不可用没有唤回入口，仍按退出处理
+                    if self.tray.icon_visible() {
+                        return self.gate(PendingAfterFlush::HideMain(id));
+                    }
                     return self.gate(PendingAfterFlush::CloseMain(id));
                 }
                 // 撕裂窗口按条目选项分流：close_hides = 隐藏不销毁，否则销毁条目
@@ -5186,6 +5214,13 @@ impl App {
                 }
                 Task::none()
             }
+            // 托盘「设置」：只打开不关闭，已打开时保持当前分区
+            Message::SettingsOpen => {
+                self.settings_open = true;
+                self.dismiss_popup();
+                self.autostart_enabled = Some(autostart::enabled());
+                Task::none()
+            }
             Message::SettingsTab(tab) => {
                 // 切分区即取消快捷键录制（录制行不在新分区，防录制态悬挂吃键）
                 self.shortcut_recording = None;
@@ -5492,12 +5527,16 @@ impl App {
                     Task::none()
                 }
                 tray::TrayEvent::ShowMain => match self.main_id {
-                    Some(id) => window::minimize(id, false).chain(window::gain_focus(id)),
+                    Some(id) => main_window::show(id),
                     None => Task::none(),
                 },
-                // 退出与关主窗同一条路径：先放行在途保存再收尾退出
+                tray::TrayEvent::OpenSettings => match self.main_id {
+                    Some(id) => main_window::show(id).chain(self.update(Message::SettingsOpen)),
+                    None => self.update(Message::SettingsOpen),
+                },
+                // 退出走独立收尾路径：关窗请求的语义是隐藏到托盘
                 tray::TrayEvent::Quit => match self.main_id {
-                    Some(id) => self.update(Message::WindowCloseRequested(id)),
+                    Some(id) => self.gate(PendingAfterFlush::CloseMain(id)),
                     None => iced::exit(),
                 },
                 tray::TrayEvent::Unavailable(reason) => {
@@ -6291,6 +6330,9 @@ impl App {
             Some(PendingAfterFlush::AiFs { id, .. }) => {
                 ai_fs_edit::settle(id, Err("被更晚的宿主操作取代，请重试".to_string()));
             }
+            // 连点关闭造成的重复隐藏请求不算取代：静默换掉挂起位
+            Some(PendingAfterFlush::HideMain(_))
+                if matches!(&pending, PendingAfterFlush::HideMain(_)) => {}
             // 关窗 / 切换 / 删除这类没有回执可回填：被取代就等于放弃执行，必须让用户知道
             Some(_) => self.notify_throttled(
                 "flush_pending:superseded",
@@ -6458,6 +6500,11 @@ impl App {
                 chat_actions::flush_sessions().chain(window::close(id))
             }
             PendingAfterFlush::CloseFileTab(kind) => self.close_file_tab(&kind),
+            // 隐藏到托盘：进程继续跑，不需要收尾会话侧车
+            PendingAfterFlush::HideMain(id) => {
+                self.dismiss_popup();
+                main_window::hide(id)
+            }
             PendingAfterFlush::CanvasRestore { rel, version } => {
                 self.canvas_history_restore(rel, version)
             }

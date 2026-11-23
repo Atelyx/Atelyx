@@ -625,16 +625,25 @@ ctx.subscribe("vault:file.changed").await?; // 仓库文件被宿主写入（保
 
 ```rust
 ctx.tray_set_items(vec![
-    TrayItemSpec { id: "open".into(), label: "打开面板".into(), enabled: None },
-    TrayItemSpec { id: "pause".into(), label: "暂停".into(), enabled: Some(false) },
+    TrayItemSpec {
+        id: "tools".into(),
+        label: "工具".into(),
+        enabled: None,
+        children: vec![
+            TrayItemSpec { id: "open".into(), label: "打开面板".into(), enabled: None, children: Vec::new() },
+            TrayItemSpec { id: "pause".into(), label: "暂停".into(), enabled: Some(false), children: Vec::new() },
+        ],
+    },
 ]).await?;   // 整发整换本插件的条目；空清单 = 收起
 ```
 
-- 全应用共用一枚托盘图标，图标只在「还有条目」时出现；各插件的条目按插件 id 排序，宿主自有的「显示主窗口 / 退出」恒在末尾。
-- 用户点击经 `on_tray_click` 回发条目 `id`；置灰条目（`enabled: false`）不响应。
-- 至多 32 条，`id` 与文字都要非空、`id` 不得重复，违反即整批拒绝并给可读原因。
+- 全应用共用一枚托盘图标，图标常驻（首次启动即出现，不等插件提交条目）。插件条目按插件分栏（分隔线隔开），宿主自有的「打开工作区 / 设置 / 退出」恒在最底部。
+- 带 `children` 的条目是二级子菜单：鼠标悬停即展开，主菜单保持打开；它只作子菜单标题，点击父条目不回调。子条目的 `id` 与根条目同一命名空间，点击同样按 `id` 回发，只允许一层（子条目不得再带 `children`）。
+- 用户点击经 `on_tray_click` 回发条目 `id`；置灰条目（`enabled: false`）不响应，置灰的子菜单也不展开。
+- 至多 32 条（整棵树合计），`id` 与文字都要非空、`id` 不得重复，违反即整批拒绝并给可读原因。
 - 停用 / 崩溃 / 卸载时宿主摘掉本插件的条目，重启后需要重新提交；插件不必自己收尾。
 - 托盘目前只有 Windows 实现，其余平台调用返回可读错误。按失败降级、不要在循环里重试，也别把托盘当必需的入口。
+- 关闭窗口右上角只把主窗口藏到托盘，托盘「打开工作区」把它唤回；再次启动本应用进程会唤出已在运行的窗口而不是再起一份。
 
 ### 8.6 同空间插件互联
 
