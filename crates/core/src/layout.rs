@@ -37,6 +37,9 @@ pub struct TabItem {
     pub view: ViewKind,
     /// 锁定（固定）：禁拖/禁撕裂/禁关闭，需先解锁。
     pub locked: bool,
+    /// 类型槽当前显示的文档路径（运行期字段，不进磁盘：重启不恢复槽内选择）。
+    #[serde(default, skip)]
+    pub file: Option<String>,
 }
 
 /// 布局树节点：Panel 叶子 = 停靠位置（标签组）；Split = 分割方向 + 子树 + 占比。
@@ -72,6 +75,10 @@ pub struct WorkspaceLayout {
     pub id: String,
     pub name: String,
     pub tree: LayoutNode,
+    /// 主要面板 id（本布局树内恒存在；`None` = 无主要面板）。主要面板只接文档，
+    /// 其 `tabs` 恒为空——标签由打开文件集合投影生成，不落盘。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_panel_id: Option<String>,
 }
 
 /// 场景（布局之上的容器：专属主页 + 一组命名布局 + 场景内激活记忆）。
@@ -183,7 +190,9 @@ pub struct AppUiState {
 }
 
 /// ui-state.json 的 schema 版本（格式变更直接升版，旧文件按默认态处理）。
-pub const UI_STATE_SCHEMA: &str = "atelyx-ui-state/v3";
+pub const UI_STATE_SCHEMA: &str = "atelyx-ui-state/v4";
+/// 上一版 schema：读入时就地升级（新增字段走 serde 默认值，normalize 补不变量并改写版本号）。
+pub const LEGACY_UI_STATE_SCHEMA: &str = "atelyx-ui-state/v3";
 /// 主页布局的稳定 id（固定置顶、不可删除/排序/重命名）。
 pub const HOME_LAYOUT_ID: &str = "home";
 /// 默认场景的稳定 id（固定置顶、不可删除/排序/重命名；含主页布局）。
@@ -351,8 +360,8 @@ where
 /// 归一化（normalize = 模型不变量的唯一修复点：种子化 + 形状修复 + 激活态有效；
 /// 运行期各处直信这些不变量，不再各自兜底）：
 /// schema 补齐 + 场景列表非空 + 默认场景固定置顶 + 各场景布局非空
-/// + 各 Split/主页尺寸形状修复 + 各场景激活记忆有效 + 激活场景/激活布局有效 + 撕裂窗口过滤
-/// + 最近打开截断。
+/// + 各 Split/主页尺寸形状修复 + 各布局主要面板有效性与槽去重 + 各场景激活记忆有效
+/// + 激活场景/激活布局有效 + 撕裂窗口过滤 + 最近打开截断。
 pub fn normalize(ui: &mut AppUiState) {
     ui.schema = UI_STATE_SCHEMA.to_string();
     // 默认场景恒存在且固定置顶（缺失即补入：新装/文件按默认态处理/手改可造）
@@ -366,8 +375,10 @@ pub fn normalize(ui: &mut AppUiState) {
         // 而形状守卫只拦新写入、不会覆盖既有坏值 → 该 Split 的拖宽永远只发坏帧而被拒。
         for layout in &mut scene.layouts {
             repair_tree_sizes(&mut layout.tree);
+            normalize_layout(layout);
         }
         repair_tree_sizes(&mut scene.home_layout.tree);
+        normalize_layout(&mut scene.home_layout);
         // 场景记忆有效：主页恒可作记忆；否则必须是场景内布局，失效回退场景内第一个
         let memory_ok = scene.active_layout_id.as_deref() == Some(HOME_LAYOUT_ID)
             || scene
@@ -417,6 +428,58 @@ fn repair_tree_sizes(node: &mut LayoutNode) {
     }
 }
 
+/// 布局级不变量修复（normalize 的一部分）：
+/// 主要面板 id 必须指向本布局树内的面板（否则置 None）；被标为主要面板的节点 `tabs` 清空
+/// （标签是集合的投影，不进模型）；面板内同视图的槽去重（保留第一个，激活态失效回落第一个）。
+fn normalize_layout(layout: &mut WorkspaceLayout) {
+    if let Some(id) = layout.primary_panel_id.as_deref() {
+        let exists = find_node(&layout.tree, id).is_some_and(|n| matches!(n, LayoutNode::Panel { .. }));
+        if !exists {
+            layout.primary_panel_id = None;
+        }
+    }
+    if let Some(id) = layout.primary_panel_id.clone() {
+        layout.tree = map_panel(&layout.tree, &id, &|p| match p {
+            LayoutNode::Panel { id, .. } => LayoutNode::Panel {
+                id: id.clone(),
+                tabs: vec![],
+                active_tab_id: None,
+            },
+            _ => p.clone(),
+        });
+    }
+    layout.tree = dedupe_view_slots(&layout.tree);
+}
+
+/// 面板内同视图标签去重（保留第一个）：类型槽每类型至多一个，视图全局唯一时同面板
+/// 重复项只可能是手改文件造出的坏状态。去掉后激活 id 失效则回落第一个标签。
+fn dedupe_view_slots(tree: &LayoutNode) -> LayoutNode {
+    match tree {
+        LayoutNode::Panel { id, tabs, active_tab_id } => {
+            let mut seen: Vec<&str> = Vec::new();
+            let mut kept: Vec<TabItem> = Vec::new();
+            for tab in tabs {
+                if seen.iter().any(|v| *v == tab.view) {
+                    continue;
+                }
+                seen.push(&tab.view);
+                kept.push(tab.clone());
+            }
+            let active = active_tab_id
+                .clone()
+                .filter(|a| kept.iter().any(|t| &t.id == a))
+                .or_else(|| kept.first().map(|t| t.id.clone()));
+            LayoutNode::Panel { id: id.clone(), tabs: kept, active_tab_id: active }
+        }
+        LayoutNode::Split { id, direction, children, sizes } => LayoutNode::Split {
+            id: id.clone(),
+            direction: direction.clone(),
+            children: children.iter().map(dedupe_view_slots).collect(),
+            sizes: sizes.clone(),
+        },
+    }
+}
+
 /// 保证默认场景存在且恒置顶（默认场景不可删除/排序/重命名；已存在的保留用户改动，缺失只补一次）。
 fn ensure_default_scene_first(scenes: Vec<Scene>) -> Vec<Scene> {
     let default = scenes.iter().find(|s| s.id == DEFAULT_SCENE_ID).cloned();
@@ -445,9 +508,9 @@ pub fn next_scene_name(names: &[String]) -> String {
     format!("场景 {n}")
 }
 
-/// 新建标签（锁定恒 false；视图恒非 empty）。
+/// 新建标签（锁定恒 false；视图恒非 empty；类型槽未选文件）。
 pub fn create_tab(view: &str) -> TabItem {
-    TabItem { id: nanoid!(), view: view.to_string(), locked: false }
+    TabItem { id: nanoid!(), view: view.to_string(), locked: false, file: None }
 }
 
 /// 新建单标签面板。
@@ -462,6 +525,7 @@ pub fn create_home_layout() -> WorkspaceLayout {
     WorkspaceLayout {
         id: HOME_LAYOUT_ID.to_string(),
         name: "主页".to_string(),
+        primary_panel_id: None,
         tree: LayoutNode::Split {
             id: nanoid!(),
             direction: "horizontal".to_string(),
@@ -490,6 +554,7 @@ fn create_default_layouts() -> Vec<WorkspaceLayout> {
         WorkspaceLayout {
             id: nanoid!(),
             name: name.to_string(),
+            primary_panel_id: None,
             tree: LayoutNode::Split {
                 id: nanoid!(),
                 direction: "horizontal".to_string(),
@@ -526,7 +591,12 @@ fn create_default_scene() -> Scene {
 
 /// 空场景兜底布局（单文件面板）：手改文件可造出空布局场景，兜底保证场景布局恒非空。
 fn create_blank_layout(name: &str) -> WorkspaceLayout {
-    WorkspaceLayout { id: nanoid!(), name: name.to_string(), tree: create_panel("files") }
+    WorkspaceLayout {
+        id: nanoid!(),
+        name: name.to_string(),
+        primary_panel_id: None,
+        tree: create_panel("files"),
+    }
 }
 
 /// 空面板树（新建布局的初始形态：单个空面板占位，可添加视图或分割）。
@@ -786,7 +856,7 @@ pub fn group_set_tab_view(g: &TabGroup, tab_id: &str, view: &str) -> TabGroup {
         tabs: g
             .tabs
             .iter()
-            .map(|t| if t.id == tab_id { TabItem { id: t.id.clone(), view: view.to_string(), locked: t.locked } } else { t.clone() })
+            .map(|t| if t.id == tab_id { TabItem { id: t.id.clone(), view: view.to_string(), locked: t.locked, file: None } } else { t.clone() })
             .collect(),
         active_tab_id: g.active_tab_id.clone(),
     }
@@ -798,7 +868,7 @@ pub fn group_set_tab_locked(g: &TabGroup, tab_id: &str, locked: bool) -> TabGrou
         tabs: g
             .tabs
             .iter()
-            .map(|t| if t.id == tab_id { TabItem { id: t.id.clone(), view: t.view.clone(), locked } } else { t.clone() })
+            .map(|t| if t.id == tab_id { TabItem { id: t.id.clone(), view: t.view.clone(), locked, file: t.file.clone() } } else { t.clone() })
             .collect(),
         active_tab_id: g.active_tab_id.clone(),
     }
@@ -1016,7 +1086,7 @@ pub fn tear_off_from_detached(
 pub fn regenerate_ids(node: &LayoutNode) -> LayoutNode {
     match node {
         LayoutNode::Panel { tabs, .. } => {
-            let tabs: Vec<TabItem> = tabs.iter().map(|t| TabItem { id: nanoid!(), view: t.view.clone(), locked: t.locked }).collect();
+            let tabs: Vec<TabItem> = tabs.iter().map(|t| TabItem { id: nanoid!(), view: t.view.clone(), locked: t.locked, file: t.file.clone() }).collect();
             let active = tabs.first().map(|t| t.id.clone());
             LayoutNode::Panel { id: nanoid!(), tabs, active_tab_id: active }
         }
@@ -1029,6 +1099,38 @@ pub fn regenerate_ids(node: &LayoutNode) -> LayoutNode {
             }
         }
     }
+}
+
+/// 复制布局（场景复制用）：树 id 全部重建，主要面板按原树的第 n 个面板映射到新树同一位置。
+fn regenerate_layout(layout: &WorkspaceLayout) -> WorkspaceLayout {
+    let primary = layout.primary_panel_id.clone();
+    let tree = regenerate_ids(&layout.tree);
+    let primary_panel_id = remap_primary(&layout.tree, &tree, primary.as_deref());
+    WorkspaceLayout { id: nanoid::nanoid!(), name: layout.name.clone(), tree, primary_panel_id }
+}
+
+/// 复制主页布局：id 恒为 `HOME_LAYOUT_ID`，主要面板按面板序位重映射。
+fn regenerate_home_layout(layout: &WorkspaceLayout) -> WorkspaceLayout {
+    let primary = layout.primary_panel_id.clone();
+    let tree = regenerate_ids(&layout.tree);
+    let primary_panel_id = remap_primary(&layout.tree, &tree, primary.as_deref());
+    WorkspaceLayout {
+        id: HOME_LAYOUT_ID.to_string(),
+        name: layout.name.clone(),
+        tree,
+        primary_panel_id,
+    }
+}
+
+/// 按面板深度优先序位把旧树的主要面板 id 映射到新树（旧 id 不在旧树 = None）。
+fn remap_primary(old: &LayoutNode, new: &LayoutNode, primary: Option<&str>) -> Option<String> {
+    let id = primary?;
+    let mut old_panels = Vec::new();
+    collect_panels(old, &mut old_panels);
+    let index = old_panels.iter().position(|p| p.node_id() == id)?;
+    let mut new_panels = Vec::new();
+    collect_panels(new, &mut new_panels);
+    new_panels.get(index).map(|p| p.node_id().to_string())
 }
 
 // ===== 插件默认布局规格 =====
@@ -1429,7 +1531,7 @@ fn add_layout(ui: &mut AppUiState, spec: Option<(&str, &LayoutSpecNode)>) {
             Some((name, spec)) => (unique_layout_name(&names, name.trim()), instantiate_layout_spec(spec)),
             None => (next_layout_name(&names), create_blank_tree()),
         };
-        let layout = WorkspaceLayout { id: nanoid::nanoid!(), name, tree };
+        let layout = WorkspaceLayout { id: nanoid::nanoid!(), name, tree, primary_panel_id: None };
         let new_id = layout.id.clone();
         scene.layouts.push(layout);
         scene.active_layout_id = Some(new_id.clone());
@@ -1519,19 +1621,11 @@ fn add_scene(ui: &mut AppUiState) {
         .layouts
         .iter()
         .position(|l| Some(&l.id) == source.active_layout_id.as_ref());
-    let layouts: Vec<WorkspaceLayout> = source
-        .layouts
-        .iter()
-        .map(|l| WorkspaceLayout { id: nanoid::nanoid!(), name: l.name.clone(), tree: regenerate_ids(&l.tree) })
-        .collect();
+    let layouts: Vec<WorkspaceLayout> = source.layouts.iter().map(regenerate_layout).collect();
     let copy = Scene {
         id: nanoid::nanoid!(),
         name: next_scene_name(&names),
-        home_layout: WorkspaceLayout {
-            id: HOME_LAYOUT_ID.to_string(),
-            name: source.home_layout.name.clone(),
-            tree: regenerate_ids(&source.home_layout.tree),
-        },
+        home_layout: regenerate_home_layout(&source.home_layout),
         active_layout_id: match source.active_layout_id.as_deref() {
             Some(HOME_LAYOUT_ID) => Some(HOME_LAYOUT_ID.to_string()),
             _ => active_index.and_then(|i| layouts.get(i)).map(|l| l.id.clone()),
@@ -1622,7 +1716,7 @@ mod tests {
                 name: "默认".into(),
                 home_layout: create_home_layout(),
                 active_layout_id: Some("l1".into()),
-                layouts: vec![WorkspaceLayout { id: "l1".into(), name: "L".into(), tree }],
+                layouts: vec![WorkspaceLayout { id: "l1".into(), name: "L".into(), primary_panel_id: None, tree }],
             }],
             active_scene_id: Some(DEFAULT_SCENE_ID.into()),
             active_layout_id: Some("l1".into()),
@@ -1637,7 +1731,7 @@ mod tests {
     fn panel(id: &str, views: &[&str]) -> LayoutNode {
         let tabs: Vec<TabItem> = views
             .iter()
-            .map(|v| TabItem { id: format!("t-{v}"), view: v.to_string(), locked: false })
+            .map(|v| TabItem { id: format!("t-{v}"), view: v.to_string(), locked: false, file: None })
             .collect();
         let active = tabs.first().map(|t| t.id.clone());
         LayoutNode::Panel { id: id.to_string(), tabs, active_tab_id: active }
@@ -1688,7 +1782,7 @@ mod tests {
                 name: "默认".into(),
                 home_layout: create_home_layout(),
                 active_layout_id: Some("l1".into()),
-                layouts: vec![WorkspaceLayout { id: "l1".into(), name: "L".into(), tree: bad_tree }],
+                layouts: vec![WorkspaceLayout { id: "l1".into(), name: "L".into(), primary_panel_id: None, tree: bad_tree }],
             }],
             active_scene_id: Some(DEFAULT_SCENE_ID.into()),
             active_layout_id: Some("l1".into()),
@@ -1713,7 +1807,7 @@ mod tests {
                 name: "默认".into(),
                 home_layout: create_home_layout(),
                 active_layout_id: Some("l1".into()),
-                layouts: vec![WorkspaceLayout { id: "l1".into(), name: "L".into(), tree: two_panels_horizontal() }],
+                layouts: vec![WorkspaceLayout { id: "l1".into(), name: "L".into(), primary_panel_id: None, tree: two_panels_horizontal() }],
             }],
             active_scene_id: Some(DEFAULT_SCENE_ID.into()),
             active_layout_id: Some("l1".into()),
@@ -2079,7 +2173,7 @@ mod tests {
     fn grouped_panel(id: &str, views: &[&str], active: Option<&str>) -> LayoutNode {
         let tabs: Vec<TabItem> = views
             .iter()
-            .map(|v| TabItem { id: format!("t-{v}"), view: v.to_string(), locked: false })
+            .map(|v| TabItem { id: format!("t-{v}"), view: v.to_string(), locked: false, file: None })
             .collect();
         let active = active.map(|v| format!("t-{v}")).or_else(|| tabs.first().map(|t| t.id.clone()));
         LayoutNode::Panel { id: id.to_string(), tabs, active_tab_id: active }
@@ -2238,5 +2332,73 @@ mod tests {
         assert!(find_node(&tree, "nope").is_none());
         // 只认叶子：id 落在分割上不算面板
         assert!(find_panel(&tree, "s1").is_none());
+    }
+
+    #[test]
+    fn normalize_primary_panel_id_and_clears_its_tabs() {
+        // 指向不存在的面板：置 None
+        let mut ui = ui_with(two_panels_horizontal());
+        active_scene_mut(&mut ui).layouts[0].primary_panel_id = Some("nope".into());
+        normalize(&mut ui);
+        assert_eq!(active_scene(&ui).layouts[0].primary_panel_id, None);
+        // 指向存在面板：保留身份并清空其标签（投影不进模型）
+        let mut ui = ui_with(two_panels_horizontal());
+        active_scene_mut(&mut ui).layouts[0].primary_panel_id = Some("p2".into());
+        normalize(&mut ui);
+        let layout = &active_scene(&ui).layouts[0];
+        assert_eq!(layout.primary_panel_id.as_deref(), Some("p2"));
+        assert!(find_panel(&layout.tree, "p2").unwrap().is_empty());
+        // 主页布局同规
+        let mut ui = ui_with(two_panels_horizontal());
+        ui.scenes[0].home_layout.primary_panel_id = Some("missing".into());
+        normalize(&mut ui);
+        assert_eq!(ui.scenes[0].home_layout.primary_panel_id, None);
+    }
+
+    #[test]
+    fn normalize_dedupes_duplicate_view_slots() {
+        // 手改文件可造出同面板两个同类型槽：保留第一个，激活失效回落第一个
+        let tree = LayoutNode::Panel {
+            id: "p1".into(),
+            tabs: vec![
+                TabItem { id: "t1".into(), view: "note".into(), locked: false, file: Some("a.md".into()) },
+                TabItem { id: "t2".into(), view: "note".into(), locked: false, file: Some("b.md".into()) },
+                TabItem { id: "t3".into(), view: "files".into(), locked: false, file: None },
+            ],
+            active_tab_id: Some("t2".into()),
+        };
+        let mut ui = ui_with(tree);
+        normalize(&mut ui);
+        let panel = find_panel(&active_layout(&ui).tree, "p1").unwrap();
+        let views: Vec<&str> = panel.iter().map(|t| t.view.as_str()).collect();
+        assert_eq!(views, vec!["note", "files"]);
+        assert_eq!(panel[0].file.as_deref(), Some("a.md"));
+        match &active_layout(&ui).tree {
+            LayoutNode::Panel { active_tab_id, .. } => assert_eq!(active_tab_id.as_deref(), Some("t1")),
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn tab_file_is_runtime_only() {
+        let tab = TabItem { id: "t1".into(), view: "note".into(), locked: false, file: Some("a.md".into()) };
+        let json = serde_json::to_string(&tab).unwrap();
+        assert!(!json.contains("file"));
+        let back: TabItem = serde_json::from_str(r#"{"id":"t1","view":"note","locked":false}"#).unwrap();
+        assert_eq!(back.file, None);
+    }
+
+    #[test]
+    fn ui_state_schema_is_v4_and_old_layout_reads_without_primary() {
+        let mut ui = ui_with(two_panels_horizontal());
+        normalize(&mut ui);
+        let json = serde_json::to_string(&ui).unwrap();
+        assert!(json.contains("atelyx-ui-state/v4"));
+        // 旧版（无 primaryPanelId）直接读入 = 无主要面板
+        let legacy = r#"{"schema":"atelyx-ui-state/v3","scenes":[{"id":"default","name":"默认","homeLayout":{"id":"home","name":"主页","tree":{"kind":"panel","id":"p1","tabs":[],"activeTabId":null}},"layouts":[{"id":"l1","name":"L","tree":{"kind":"panel","id":"p9","tabs":[],"activeTabId":null}}]}]}"#;
+        let mut ui: AppUiState = serde_json::from_str(legacy).unwrap();
+        normalize(&mut ui);
+        assert_eq!(ui.schema, UI_STATE_SCHEMA);
+        assert_eq!(active_scene(&ui).layouts[0].primary_panel_id, None);
     }
 }

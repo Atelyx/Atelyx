@@ -79,7 +79,7 @@ use atelyx_core::credentials;
 use atelyx_core::global_config::{self, LastActive};
 use atelyx_core::layout::{
     self, apply_layout_op, normalize, op_passes_shape_check, AppUiState, DetachedWindow,
-    LayoutOp, WindowBounds, UI_STATE_SCHEMA,
+    LayoutOp, WindowBounds, LEGACY_UI_STATE_SCHEMA, UI_STATE_SCHEMA,
 };
 use atelyx_core::markdown::{LinkForm, MarkdownDocument};
 use atelyx_core::plugin_runtime::{
@@ -943,17 +943,26 @@ fn table_msg_of(id: commands::CommandId) -> Option<tv::TableMsg> {
     }
 }
 
-/// 从磁盘恢复布局状态：缺失/损坏/schema 不符一律回落默认态。
+/// 从磁盘恢复布局状态：缺失/损坏/无法识别的 schema 一律回落默认态；上一版 schema 就地升级
+/// （新增字段走 serde 默认值，normalize 补不变量并改写版本号），不能因升版丢掉用户布局。
 fn load_ui_state() -> AppUiState {
     let mut ui = match ui_state_path()
         .and_then(|p| std::fs::read_to_string(p).ok())
-        .map(|json| serde_json::from_str::<AppUiState>(&json))
+        .map(|json| parse_ui_state(&json))
     {
-        Some(Ok(ui)) if ui.schema == UI_STATE_SCHEMA => ui,
-        _ => AppUiState::default(),
+        Some(ui) => ui,
+        None => AppUiState::default(),
     };
     normalize(&mut ui);
     ui
+}
+
+/// 解析 ui-state JSON：当前版本与上一版直接采用（上一版由 normalize 升级），其余回落默认态。
+fn parse_ui_state(json: &str) -> AppUiState {
+    match serde_json::from_str::<AppUiState>(json) {
+        Ok(ui) if ui.schema == UI_STATE_SCHEMA || ui.schema == LEGACY_UI_STATE_SCHEMA => ui,
+        _ => AppUiState::default(),
+    }
 }
 
 /// 分割把手拖拽在途：尺寸调整基于按下时冻结的起点（轴坐标/区域总长/尺寸数组）。
@@ -10774,5 +10783,32 @@ mod file_drop_tests {
             file_drop_check("docs", true, "", true),
             Err(DropReject::SameDir)
         );
+    }
+}
+
+#[cfg(test)]
+mod ui_state_tests {
+    use super::parse_ui_state;
+    use atelyx_core::layout::{normalize, LEGACY_UI_STATE_SCHEMA, UI_STATE_SCHEMA};
+
+    const LEGACY: &str = r#"{"schema":"atelyx-ui-state/v3","scenes":[{"id":"default","name":"默认","activeLayoutId":"l1","homeLayout":{"id":"home","name":"主页","tree":{"kind":"panel","id":"hp","tabs":[],"activeTabId":null}},"layouts":[{"id":"l1","name":"我的布局","tree":{"kind":"panel","id":"p1","tabs":[{"id":"t1","view":"files","locked":false}],"activeTabId":"t1"}}]}]}"#;
+
+    #[test]
+    fn legacy_schema_upgrades_without_losing_layouts() {
+        let mut ui = parse_ui_state(LEGACY);
+        assert_eq!(ui.schema, LEGACY_UI_STATE_SCHEMA);
+        normalize(&mut ui);
+        assert_eq!(ui.schema, UI_STATE_SCHEMA);
+        let scene = &ui.scenes[0];
+        assert_eq!(scene.layouts[0].name, "我的布局");
+        assert_eq!(scene.layouts[0].primary_panel_id, None);
+        assert_eq!(scene.layouts[0].tree.node_id(), "p1");
+    }
+
+    #[test]
+    fn corrupted_or_unknown_schema_falls_back_to_default() {
+        assert!(parse_ui_state("{not json").scenes.is_empty());
+        let unknown = r#"{"schema":"atelyx-ui-state/v1","scenes":[]}"#;
+        assert!(parse_ui_state(unknown).scenes.is_empty());
     }
 }
