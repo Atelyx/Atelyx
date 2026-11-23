@@ -1315,6 +1315,32 @@ pub fn clear_primary_panel(
     true
 }
 
+/// 类型槽显示文件：把该面板该标签切到 `path`（标签不在该面板 = false）。
+pub fn set_tab_file(ui: &mut AppUiState, panel_id: &str, tab_id: &str, path: &str) -> bool {
+    let layout = active_layout_mut(ui);
+    let present = matches!(
+        find_node(&layout.tree, panel_id),
+        Some(LayoutNode::Panel { tabs, .. }) if tabs.iter().any(|t| t.id == tab_id)
+    );
+    if !present {
+        return false;
+    }
+    layout.tree = map_panel(&layout.tree, panel_id, &|p| match p {
+        LayoutNode::Panel { id, tabs, active_tab_id } => {
+            let tabs = tabs
+                .iter()
+                .map(|t| {
+                    let file = if t.id == tab_id { Some(path.to_string()) } else { t.file.clone() };
+                    TabItem { id: t.id.clone(), view: t.view.clone(), locked: t.locked, file }
+                })
+                .collect();
+            LayoutNode::Panel { id: id.clone(), tabs, active_tab_id: active_tab_id.clone() }
+        }
+        _ => p.clone(),
+    });
+    true
+}
+
 /// 清空树中的文档槽（工具视图原样保留，激活态失效回落第一个标签）。
 fn clear_doc_slots(tree: &LayoutNode, is_doc_view: &dyn Fn(&str) -> bool) -> LayoutNode {
     match tree {
@@ -2634,7 +2660,19 @@ mod tests {
     }
 
     #[test]
-    fn primary_panel_rejects_direct_tab_ops() {        let mut ui = ui_with(two_panels_horizontal());
+    fn set_tab_file_updates_target_tab_only() {
+        let mut ui = ui_with(two_panels_horizontal());
+        assert!(set_tab_file(&mut ui, "p2", "t-canvas", "c.atlx"));
+        let p2 = find_panel(&active_layout(&ui).tree, "p2").unwrap();
+        assert_eq!(p2[0].file.as_deref(), Some("c.atlx"));
+        // 标签不在该面板 = false，模型不动
+        assert!(!set_tab_file(&mut ui, "p1", "t-canvas", "x.atlx"));
+        assert!(find_panel(&active_layout(&ui).tree, "p2").unwrap()[0].file.as_deref() == Some("c.atlx"));
+    }
+
+    #[test]
+    fn primary_panel_rejects_direct_tab_ops() {
+        let mut ui = ui_with(two_panels_horizontal());
         set_primary_panel(&mut ui, "p2", &doc_only).unwrap();
         // 主要面板不接受加视图（工具与文档都不行）
         let _ = apply_layout_op(&mut ui, &LayoutOp::AddView { panel_id: "p2".into(), view: "calendar".into() });

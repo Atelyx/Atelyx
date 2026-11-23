@@ -61,6 +61,7 @@ mod table_collab;
 mod note_collab_channel;
 mod canvas_collab;
 mod open_route;
+mod note_session;
 mod table_text;
 mod table_view;
 mod text_preedit;
@@ -83,7 +84,7 @@ use atelyx_core::layout::{
     LayoutOp, WindowBounds, LEGACY_UI_STATE_SCHEMA, UI_STATE_SCHEMA,
 };
 use atelyx_core::markdown::{LinkForm, MarkdownDocument};
-use atelyx_core::open_files::{DocKind, OpenFiles};
+use atelyx_core::open_files::{DocKind, Host, OpenFiles};
 use atelyx_core::plugin_runtime::{
     EditorSelection, FileChangeKind, PluginEvent, PluginRuntime, PluginStatus, SurfaceKind,
 };
@@ -1149,6 +1150,8 @@ enum Message {
     /// 主要面板投影标签：激活 / 关闭打开的文件实例（id = 集合实例 id）。
     DocInstanceActivate(String),
     DocInstanceClose(String),
+    /// 类型槽「切换显示的文件」：把该槽切到集合里的同类型实例（path 为集合内路径）。
+    SlotFileSet { panel_id: String, tab_id: String, path: String },
     /// 面板 ≡ 菜单：把该面板设为主要面板 / 取消主要身份。
     PrimaryPanelSet(String),
     PrimaryPanelClear(String),
@@ -1624,6 +1627,10 @@ enum PendingAfterFlush {
     CloseFileTab(String),
     /// 主要面板投影标签的 ×：按实例 id 关文件（先落盘再销毁实例）。
     CloseFileInstance(String),
+    /// 主要面板投影标签的点击：换入该实例（先落盘再切活动会话）。
+    ActivateInstance(String),
+    /// 类型槽切换显示文件（先落盘再切活动会话）。
+    SlotFileSet { panel_id: String, tab_id: String, path: String },
     /// 设为主要面板（先落盘再迁迁移挂槽到集合）。
     SetPrimaryPanel(String),
     /// 取消主要面板（先落盘再按集合塌缩成类型槽）。
@@ -1854,6 +1861,8 @@ pub struct App {
     pub ui: AppUiState,
     /// 打开文件集合（应用级唯一、运行时不落盘；容器按它投影 / 选槽）。
     pub open_files: OpenFiles,
+    /// 非激活笔记的会话（键 = 集合实例 id；活动笔记的会话在下面那批活动字段里）。
+    pub notes: HashMap<String, note_session::NoteSession>,
     /// 唯一注册表（视图 / 服务 / 文档类型；选择器、标签与设置页只读它）。
     /// 启动装配期与投影刷新时整体重建，运行期只读。
     pub registry: crate::registry::Registry,
@@ -2414,6 +2423,7 @@ impl App {
         let mut app = Self {
                 ui: load_ui_state(),
                 open_files: OpenFiles::default(),
+                notes: HashMap::new(),
                 registry: crate::registry::Registry::default(),
                 vault: Arc::new(vault::VaultState::default()),
                 theme: ui::palette::app_theme(),
@@ -2943,6 +2953,7 @@ impl App {
             | Message::PanelTabFileClose(..)
             | Message::DocInstanceActivate(..)
             | Message::DocInstanceClose(..)
+            | Message::SlotFileSet { .. }
             | Message::PrimaryPanelSet(..)
             | Message::PrimaryPanelClear(..)
             | Message::OpenFilePick
@@ -4448,8 +4459,11 @@ impl App {
             Message::PanelTabFileClose(kind) | Message::DetachedTabFileClose(kind) => {
                 self.gate(PendingAfterFlush::CloseFileTab(kind))
             }
-            Message::DocInstanceActivate(id) => self.activate_doc_instance(&id),
+            Message::DocInstanceActivate(id) => self.gate(PendingAfterFlush::ActivateInstance(id)),
             Message::DocInstanceClose(id) => self.gate(PendingAfterFlush::CloseFileInstance(id)),
+            Message::SlotFileSet { panel_id, tab_id, path } => {
+                self.gate(PendingAfterFlush::SlotFileSet { panel_id, tab_id, path })
+            }
             Message::PrimaryPanelSet(panel_id) => self.gate(PendingAfterFlush::SetPrimaryPanel(panel_id)),
             Message::PrimaryPanelClear(panel_id) => self.gate(PendingAfterFlush::ClearPrimaryPanel(panel_id)),
             Message::OpenFilePick => {
@@ -4881,13 +4895,7 @@ impl App {
                 // 换文件即换索引面：上一篇的「索引不可用」不得挂到新文件上
                 self.backlinks_error = None;
                 self.history.clear();
-                // 图片缓存随文件清空：同 src 不同仓库指向不同文件，过期句柄不得复用
-                self.note_images.clear();
-                self.note_image_sizes.clear();
-                self.note_image_stamps.clear();
-                self.note_image_epoch = self.note_image_epoch.wrapping_add(1);
-                self.note_images_inflight.clear();
-                self.note_images_failed.clear();
+                self.reset_note_media();
                 self.refresh_preview();
                 self.refresh_edit();
                 self.notify(NoticeLevel::Success, "已打开");
@@ -6653,8 +6661,12 @@ impl App {
                 // 会话真源的最后一次落盘：写链防抖未到的变更不落盘即随进程丢失
                 chat_actions::flush_sessions().chain(window::close(id))
             }
-            PendingAfterFlush::CloseFileTab(kind) => self.close_file_tab(&kind),
+            PendingAfterFlush::CloseFileTab(kind) => self.close_slot_file(&kind),
             PendingAfterFlush::CloseFileInstance(id) => self.close_file_instance(&id),
+            PendingAfterFlush::ActivateInstance(id) => self.activate_instance(&id),
+            PendingAfterFlush::SlotFileSet { panel_id, tab_id, path } => {
+                self.set_slot_file(&panel_id, &tab_id, &path)
+            }
             PendingAfterFlush::SetPrimaryPanel(panel_id) => self.make_primary_panel(&panel_id),
             PendingAfterFlush::ClearPrimaryPanel(panel_id) => self.unset_primary_panel(&panel_id),
             // 隐藏到托盘：进程继续跑，不需要收尾会话侧车
@@ -6773,8 +6785,16 @@ impl App {
     /// 上一文件的内容写进新路径。载入回执（FileLoaded 成功或失败）负责解除载入态。
     fn begin_note_load(&mut self, rel: &str) -> Task<Message> {
         self.history_kind = atelyx_core::history::HistoryKind::Note;
+        // 换到另一篇笔记：先把当前会话整份停放（多实例，切回时装回）
+        if self.ui.last_note_file.as_deref().is_some_and(|cur| cur != rel) {
+            self.park_active_note();
+        }
         self.ui.last_note_file = Some(rel.to_string());
         crate::open_route::doc_opened(self, rel, DocKind::Note);
+        // 重开同一文件 = 以磁盘为准重载：残留的同实例停放快照作废，免得下次切回把旧正文装回来
+        if let Some(d) = self.open_files.find_by_path(rel) {
+            self.notes.remove(&d.id);
+        }
         // 笔记视图按文件重新挂载：档位不跨文件延续
         self.note_mode = NoteMode::Read;
         self.note_text.clear();
@@ -7087,34 +7107,142 @@ impl App {
 
     // ===== 打开文件集合 / 主要面板 =====
 
-    /// 激活打开文件实例（主要面板投影标签的点击）：集合激活 + 类型槽与投影随之切换显示。
-    fn activate_doc_instance(&mut self, id: &str) -> Task<Message> {
+    /// 激活打开文件实例：笔记换入活动会话（同类型其余笔记停放在 `notes`），其余类型只改激活项
+    /// 与启动种子（其会话已按单实例语义常驻）。
+    fn activate_instance(&mut self, id: &str) -> Task<Message> {
+        let Some((kind, path)) = self.open_files.get(id).map(|d| (d.kind.clone(), d.path.clone())) else {
+            return Task::none();
+        };
+        if let DocKind::Note = kind {
+            return self.switch_note(id, &path);
+        }
         if !self.open_files.activate(id) {
             return Task::none();
         }
-        if let Some(d) = self.open_files.get(id) {
-            // 启动恢复种子随激活项更新（渲染路径只读集合，种子仅作下次启动）
-            match &d.kind {
-                DocKind::Note => self.ui.last_note_file = Some(d.path.clone()),
-                DocKind::Table => self.ui.last_table_file = Some(d.path.clone()),
-                DocKind::Canvas => self.ui.last_canvas_file = Some(d.path.clone()),
-                DocKind::Plugin(_) => {}
-            }
-        }
+        self.stamp_seed(&kind, &path);
         self.schedule_persist();
         Task::none()
     }
 
-    /// 主要面板投影标签的 ×：关文件（每类型只有一个会话文件，按类型走关文件链）。
+    /// 笔记换入：已显示的文件只改激活项；否则先停放当前会话，再把目标从停放区装回或读盘载入。
+    fn switch_note(&mut self, id: &str, path: &str) -> Task<Message> {
+        let already_live = self.ui.last_note_file.as_deref() == Some(path);
+        if already_live {
+            self.open_files.activate(id);
+            self.stamp_seed(&DocKind::Note, path);
+            self.schedule_persist();
+            return Task::none();
+        }
+        self.park_active_note();
+        if !self.open_files.activate(id) {
+            return Task::none();
+        }
+        self.ui.last_note_file = Some(path.to_string());
+        self.stamp_seed(&DocKind::Note, path);
+        self.schedule_persist();
+        match self.notes.remove(id) {
+            Some(session) => {
+                // 属性 / 反链 / 历史跟随激活项，装回后按新会话刷新
+                session.install(self);
+                self.refresh_note_facets()
+            }
+            None => self.begin_note_load(path),
+        }
+    }
+
+    /// 把当前活动笔记整份停放（本地仓库多实例用）；返回是否真的停放。
+    fn park_active_note(&mut self) -> bool {
+        if !matches!(self.repo_kind, RepoKind::Local) {
+            return false;
+        }
+        let Some(cur) = self.ui.last_note_file.clone() else { return false };
+        let Some(id) = self.open_files.find_by_path(&cur).map(|d| d.id.clone()) else {
+            return false;
+        };
+        match note_session::NoteSession::take(self) {
+            Some(session) => {
+                self.notes.insert(id, session);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// 激活项旁路刷新：反链与属性、历史列表都随当前笔记重建。
+    fn refresh_note_facets(&mut self) -> Task<Message> {
+        self.history_kind = atelyx_core::history::HistoryKind::Note;
+        self.reset_props();
+        self.history.clear();
+        self.refresh_backlinks()
+    }
+
+    /// 启动种子随激活项更新（渲染路径只读集合，种子仅作下次启动）。
+    fn stamp_seed(&mut self, kind: &DocKind, path: &str) {
+        match kind {
+            DocKind::Note => self.ui.last_note_file = Some(path.to_string()),
+            DocKind::Table => self.ui.last_table_file = Some(path.to_string()),
+            DocKind::Canvas => self.ui.last_canvas_file = Some(path.to_string()),
+            DocKind::Plugin(_) => {}
+        }
+    }
+
+    /// 主要面板投影标签的 × / 类型槽 ×：关文件（停放实例直接移除；活动笔记有别的实例时换入下一个）。
     fn close_file_instance(&mut self, id: &str) -> Task<Message> {
-        let Some(view) = self
+        let Some(kind) = self.open_files.get(id).map(|d| d.kind.clone()) else {
+            return Task::none();
+        };
+        if !matches!(kind, DocKind::Note) {
+            return self.close_file_tab(open_route::view_of_kind(&kind));
+        }
+        // 停放中的笔记：没有活动态要收，直接移出集合
+        if self.notes.remove(id).is_some() {
+            self.open_files.close(id);
+            return Task::none();
+        }
+        let others = self.open_files.of_kind(&DocKind::Note, &Host::Main).len();
+        if others <= 1 {
+            return self.close_file_tab("note");
+        }
+        // 活动笔记：先丢弃其编辑态，再把集合里剩下的最近激活项换入
+        self.open_files.close(id);
+        self.blank_note();
+        self.ui.last_note_file = None;
+        let Some((next_id, next_path)) = self
             .open_files
-            .get(id)
-            .map(|d| open_route::view_of_kind(&d.kind).to_string())
+            .recent_of_kind(&DocKind::Note, &Host::Main)
+            .map(|d| (d.id.clone(), d.path.clone()))
         else {
             return Task::none();
         };
-        self.close_file_tab(&view)
+        self.switch_note(&next_id, &next_path)
+    }
+
+    /// 类型槽「切换显示的文件」：槽记下手动选择，再把该文件换入活动笔记。
+    fn set_slot_file(&mut self, panel_id: &str, tab_id: &str, path: &str) -> Task<Message> {
+        if !layout::set_tab_file(&mut self.ui, panel_id, tab_id, path) {
+            return Task::none();
+        }
+        self.schedule_persist();
+        let Some(id) = self.open_files.find_by_path(path).map(|d| d.id.clone()) else {
+            return Task::none();
+        };
+        self.activate_instance(&id)
+    }
+
+    /// 类型槽 ×：关当前显示的文件（笔记有别的实例时换入下一个，槽随集合回退显示）。
+    fn close_slot_file(&mut self, kind: &str) -> Task<Message> {
+        if kind != "note" {
+            return self.close_file_tab(kind);
+        }
+        let Some(id) = self
+            .ui
+            .last_note_file
+            .clone()
+            .and_then(|cur| self.open_files.find_by_path(&cur).map(|d| d.id.clone()))
+        else {
+            return self.close_file_tab("note");
+        };
+        self.close_file_instance(&id)
     }
 
     /// 设为主要面板：先把该布局的文档槽按有效文件并入集合，再把原主要面板塌缩成类型槽。
@@ -8421,9 +8549,49 @@ impl App {
     }
 
     /// 笔记正文换文件：行高缓存与滚动回执一起作废，下一帧整篇测量。
-    fn reset_note_rows(&mut self) {
+    pub(crate) fn reset_note_rows(&mut self) {
         self.reset_note_metrics();
         self.note_scroll_ready = false;
+    }
+
+    /// 图片缓存随文件清空：同 src 不同仓库指向不同文件，过期句柄不得复用。
+    pub(crate) fn reset_note_media(&mut self) {
+        self.note_images.clear();
+        self.note_image_sizes.clear();
+        self.note_image_stamps.clear();
+        self.note_image_epoch = self.note_image_epoch.wrapping_add(1);
+        self.note_images_inflight.clear();
+        self.note_images_failed.clear();
+    }
+
+    /// 活动笔记整份清空（关文件 / 换入下一个实例前调用）：正文、编辑态、派生缓存一并复位。
+    pub(crate) fn blank_note(&mut self) {
+        self.note_text.clear();
+        self.note_base.clear();
+        self.source_editor = text_editor::Content::new();
+        self.edit = markdown_edit::EditorState::default();
+        self.note_mode = NoteMode::Read;
+        self.edit_doc = None;
+        self.edit_meta.clear();
+        self.preview_doc = None;
+        self.note_code_expanded.clear();
+        self.note_selection = None;
+        self.note_edit_caret_pending = false;
+        self.dirty = false;
+        self.save_error = None;
+        self.note_load_error = None;
+        self.history_restore_pending = false;
+        self.pending_restore_note = None;
+        self.space_note_flushed = None;
+        self.autosave_deadline = None;
+        self.note_scroll_y = 0.0;
+        self.reset_note_rows();
+        self.reset_note_media();
+        self.props.loading = false;
+        self.reset_props();
+        self.backlinks.clear();
+        self.backlinks_error = None;
+        self.history.clear();
     }
 
     /// 换档 / 远端正文替换：滚动容器与偏移沿用（同型同位），只作废行高。
@@ -11042,18 +11210,25 @@ mod open_route_tests {
     }
 
     #[test]
-    fn opened_docs_are_single_instance_per_kind() {
+    fn opened_notes_are_deduped_by_path() {
         let mut app = app();
         open_route::doc_opened(&mut app, "a.md", DocKind::Note);
         open_route::doc_opened(&mut app, "b.md", DocKind::Note);
         let notes = app.open_files.of_kind(&DocKind::Note, &Host::Main);
-        assert_eq!(notes.len(), 1, "影子集合每类型至多一项");
-        assert_eq!(notes[0].path, "b.md");
+        assert_eq!(notes.len(), 2, "本地仓库笔记多实例");
+        assert_eq!(notes[0].path, "a.md");
+        assert_eq!(notes[1].path, "b.md");
         // 重复打开同一路径 = 激活既有实例，不新增
         let id = app.open_files.find_by_path("b.md").unwrap().id.clone();
         open_route::doc_opened(&mut app, "b.md", DocKind::Note);
-        assert_eq!(app.open_files.len(), 1);
+        assert_eq!(app.open_files.len(), 2);
         assert_eq!(app.open_files.active_id(), Some(id.as_str()));
+        // 非笔记类型仍单实例：再打开同类型不同文件只留新开的那份
+        open_route::doc_opened(&mut app, "t1.atb", DocKind::Table);
+        open_route::doc_opened(&mut app, "t2.atb", DocKind::Table);
+        let tables = app.open_files.of_kind(&DocKind::Table, &Host::Main);
+        assert_eq!(tables.len(), 1);
+        assert_eq!(tables[0].path, "t2.atb");
     }
 
     #[test]
@@ -11153,5 +11328,113 @@ mod open_route_tests {
         let panel = layout::find_panel(&layout::active_layout(&app.ui).tree, &p2).unwrap();
         assert_eq!(panel.iter().map(|t| t.view.as_str()).collect::<Vec<_>>(), vec!["note"]);
         assert_eq!(panel[0].file.as_deref(), Some("a.md"));
+    }
+}
+
+#[cfg(test)]
+mod note_session_tests {
+    use super::*;
+
+    fn app() -> App {
+        App::boot().0
+    }
+
+    /// 模拟一次已完成的打开：集合登记 + 活动字段落位。
+    fn open_note(app: &mut App, path: &str, text: &str) {
+        open_route::doc_opened(app, path, DocKind::Note);
+        app.ui.last_note_file = Some(path.to_string());
+        app.note_text = text.to_string();
+        app.note_base = text.to_string();
+    }
+
+    #[test]
+    fn parked_note_keeps_text_dirty_and_mode() {
+        let mut app = app();
+        open_note(&mut app, "a.md", "A");
+        app.dirty = true;
+        app.note_mode = NoteMode::Edit;
+        assert!(app.park_active_note());
+        let id = app.open_files.find_by_path("a.md").unwrap().id.clone();
+        assert!(app.notes.contains_key(&id), "切走的笔记整份停放");
+        assert!(app.note_text.is_empty(), "活动字段已清空");
+        assert!(!app.dirty);
+        let session = app.notes.remove(&id).unwrap();
+        session.install(&mut app);
+        assert_eq!(app.note_text, "A");
+        assert!(app.dirty);
+        assert_eq!(app.note_mode, NoteMode::Edit);
+        assert!(app.autosave_deadline.is_some(), "脏会话装回即重排防抖");
+    }
+
+    #[test]
+    fn closing_parked_note_leaves_active_one() {
+        let mut app = app();
+        open_note(&mut app, "a.md", "A");
+        assert!(app.park_active_note());
+        open_note(&mut app, "b.md", "B");
+        let a = app.open_files.find_by_path("a.md").unwrap().id.clone();
+        let _ = app.close_file_instance(&a);
+        assert_eq!(app.open_files.of_kind(&DocKind::Note, &Host::Main).len(), 1);
+        assert_eq!(app.ui.last_note_file.as_deref(), Some("b.md"));
+        assert_eq!(app.note_text, "B");
+        assert!(app.notes.is_empty());
+    }
+
+    #[test]
+    fn closing_active_note_promotes_remaining() {
+        let mut app = app();
+        open_note(&mut app, "a.md", "A");
+        assert!(app.park_active_note());
+        open_note(&mut app, "b.md", "B");
+        let b = app.open_files.find_by_path("b.md").unwrap().id.clone();
+        let _ = app.close_file_instance(&b);
+        assert_eq!(app.open_files.of_kind(&DocKind::Note, &Host::Main).len(), 1);
+        assert_eq!(app.ui.last_note_file.as_deref(), Some("a.md"), "关掉活动笔记后换入剩下的最近激活项");
+        assert_eq!(app.note_text, "A");
+        assert!(app.notes.is_empty());
+    }
+
+    #[test]
+    fn slot_switch_activates_and_preserves_both_sessions() {
+        let mut app = app();
+        let note = atelyx_core::layout::create_tab("note");
+        let note_id = note.id.clone();
+        let files = atelyx_core::layout::create_tab("files");
+        let tree = layout::LayoutNode::Split {
+            id: "s1".into(),
+            direction: "horizontal".into(),
+            children: vec![
+                layout::LayoutNode::Panel { id: "p1".into(), tabs: vec![files.clone()], active_tab_id: Some(files.id) },
+                layout::LayoutNode::Panel { id: "p2".into(), tabs: vec![note], active_tab_id: Some(note_id.clone()) },
+            ],
+            sizes: vec![40.0, 60.0],
+        };
+        let idx = app
+            .ui
+            .active_scene_id
+            .as_ref()
+            .and_then(|id| app.ui.scenes.iter().position(|s| &s.id == id))
+            .unwrap_or(0);
+        let layout_id = app.ui.scenes[idx].layouts[0].id.clone();
+        app.ui.scenes[idx].layouts[0].tree = tree;
+        app.ui.scenes[idx].active_layout_id = Some(layout_id.clone());
+        app.ui.active_layout_id = Some(layout_id);
+
+        open_note(&mut app, "a.md", "A");
+        assert!(app.park_active_note());
+        open_note(&mut app, "b.md", "B");
+
+        // 槽切到 a.md：槽记下手动选择，a 的会话装回活动字段
+        let _ = app.set_slot_file("p2", &note_id, "a.md");
+        let tab = layout::find_panel(&layout::active_layout(&app.ui).tree, "p2").unwrap()[0].clone();
+        assert_eq!(tab.file.as_deref(), Some("a.md"));
+        assert_eq!(app.ui.last_note_file.as_deref(), Some("a.md"));
+        assert_eq!(app.note_text, "A");
+
+        // 槽 ×：关 a 后顺延回 b
+        let _ = app.close_slot_file("note");
+        assert_eq!(app.open_files.of_kind(&DocKind::Note, &Host::Main).len(), 1);
+        assert_eq!(app.ui.last_note_file.as_deref(), Some("b.md"));
+        assert_eq!(app.note_text, "B");
     }
 }

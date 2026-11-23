@@ -5,7 +5,7 @@ use iced::widget::{button, column, container, row, space};
 use iced::{Element, Length, Padding, border};
 use atelyx_core::layout::{self, LayoutNode};
 
-use crate::layout_view::{available_view_kinds, panel_tab_ids_in, view_label, view_icon, PopupState, RenameTarget};
+use crate::layout_view::{available_view_kinds, file_label, panel_tab_ids_in, view_label, view_icon, PopupState, RenameTarget};
 use crate::ui::controls;
 use crate::ui::icon::icon;
 use crate::ui::menu::MenuEntry;
@@ -396,7 +396,56 @@ fn tab_context_entries(
     let locked = tab.as_ref().is_some_and(|(_, locked)| *locked);
     let current_view = tab.as_ref().map(|(view, _)| view.clone());
     let (pid, tid) = (panel_id.to_string(), tab_id.to_string());
-    let mut entries: Vec<(usize, MenuEntry<'static, Message>)> = vec![
+    let slot_tab = active_tab_item(app, tab_id);
+    let mut entries: Vec<(usize, MenuEntry<'static, Message>)> = Vec::new();
+    // 文档槽：切换显示的文件（同类型还有别的打开项时才给入口；锁定标签不给改显示文件）
+    if let Some(tab) = &slot_tab {
+        if let Some(kind) = crate::open_route::doc_kind_of_view(&tab.view) {
+            let current = crate::open_route::slot_path(app, tab);
+            let view = crate::open_route::view_of_kind(&kind).to_string();
+            let siblings: Vec<String> = app
+                .open_files
+                .of_kind(&kind, &atelyx_core::open_files::Host::Main)
+                .into_iter()
+                .map(|d| d.path.clone())
+                .collect();
+            if siblings.len() > 1 && !locked {
+                entries.push((
+                    0,
+                    MenuEntry::Submenu { label: "切换显示的文件".into(), icon: None, disabled: false, pane: 2 },
+                ));
+                for path in siblings {
+                    let entry = if current.as_deref() == Some(path.as_str()) {
+                        MenuEntry::noted(file_label(&path), view_icon(app, &view), "当前", true, None)
+                    } else {
+                        MenuEntry::action_icon(
+                            file_label(&path),
+                            view_icon(app, &view),
+                            Message::SlotFileSet {
+                                panel_id: pid.clone(),
+                                tab_id: tid.clone(),
+                                path,
+                            },
+                        )
+                    };
+                    entries.push((2, entry));
+                }
+            }
+        }
+    }
+    entries.extend([
+        (
+            0,
+            MenuEntry::Action {
+                label: "关闭文件".into(),
+                icon: Some("x".into()),
+                danger: false,
+                disabled: slot_tab.as_ref().is_none_or(|t| !crate::open_route::tab_has_file(app, t)),
+                on_press: slot_tab.as_ref().map(|t| Message::PanelTabFileClose(t.view.clone())),
+                note: None,
+                hint: None,
+            },
+        ),
         (
             0,
             MenuEntry::Action {
@@ -418,7 +467,7 @@ fn tab_context_entries(
                 pane: 1,
             },
         ),
-    ];
+    ]);
     for kind in available_view_kinds(app) {
         let entry = if current_view.as_deref() == Some(kind.as_str()) {
             MenuEntry::noted(view_label(app, &kind), view_icon(app, &kind), "当前", true, None)
@@ -468,6 +517,12 @@ fn primary_tab_entries(app: &App, instance_id: &str) -> Vec<(usize, MenuEntry<'s
 fn find_tab_in_active(app: &App, tab_id: &str) -> Option<(String, bool)> {
     let tree = layout::active_layout(&app.ui).tree;
     layout::find_tab_in_tree(&tree, tab_id).map(|(_, t)| (t.view, t.locked))
+}
+
+/// 主树里的标签本体（文档槽菜单要读槽内文件字段）。
+fn active_tab_item(app: &App, tab_id: &str) -> Option<layout::TabItem> {
+    let tree = layout::active_layout(&app.ui).tree;
+    layout::find_tab_in_tree(&tree, tab_id).map(|(_, t)| t.clone())
 }
 
 /// 空面板右键的视图选择器：本组 = 点击激活已有标签（角标「本组」）；已占用停用；其余添加。

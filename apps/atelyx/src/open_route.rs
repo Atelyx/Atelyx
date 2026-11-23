@@ -29,18 +29,23 @@ pub fn view_of_kind(kind: &DocKind) -> &str {
     }
 }
 
-/// 文档已打开（会话载入时调用）：集合登记并激活。影子集合限「每类型至多一项」——
-/// 同类型另一个文件先移出集合（其会话已被新文件替换）。
+/// 文件已打开（会话载入时调用）：集合登记并激活。本地笔记保留同类型多实例（其余打开项
+/// 的编辑态停放在 `App.notes`）；表格 / 画布 / 空间笔记仍每类型至多一项，先把同类型
+/// 别的实例移出集合（其会话已被新文件替换）。
 pub fn doc_opened(app: &mut App, path: &str, kind: DocKind) {
-    let others: Vec<String> = app
-        .open_files
-        .of_kind(&kind, &Host::Main)
-        .into_iter()
-        .filter(|d| d.path != path)
-        .map(|d| d.id.clone())
-        .collect();
-    for id in others {
-        app.open_files.close(&id);
+    let multi = matches!(kind, DocKind::Note) && matches!(app.repo_kind, crate::RepoKind::Local);
+    if !multi {
+        let others: Vec<String> = app
+            .open_files
+            .of_kind(&kind, &Host::Main)
+            .into_iter()
+            .filter(|d| d.path != path)
+            .map(|d| d.id.clone())
+            .collect();
+        for id in others {
+            app.notes.remove(&id);
+            app.open_files.close(&id);
+        }
     }
     app.open_files.open(path, kind);
 }
@@ -56,6 +61,7 @@ pub fn doc_closed(app: &mut App, kind: &DocKind) {
         .map(|d| d.id.clone())
         .collect();
     for id in ids {
+        app.notes.remove(&id);
         app.open_files.close(&id);
     }
 }
@@ -63,6 +69,7 @@ pub fn doc_closed(app: &mut App, kind: &DocKind) {
 /// 切仓库 / 离开空间：集合清空（打开的会话随后全部关闭）。
 pub fn clear_all(app: &mut App) {
     app.open_files.clear();
+    app.notes.clear();
 }
 
 /// 主要面板投影标签：宿主在主窗口的实例按集合顺序生成（id = 实例 id）。
