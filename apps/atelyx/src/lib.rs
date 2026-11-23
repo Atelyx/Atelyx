@@ -6289,10 +6289,10 @@ impl App {
         false
     }
 
-    /// 释放落点解析：布局 tab = 排序；同宿主标签条 = 重排序、跨宿主 = 移动/停靠、
+    /// 释放落点解析：布局 tab = 排序；同容器标签条 = 重排序、跨容器 = 移动/停靠、
     /// 四边缘 = 分割落点、桌面 = 撕出新窗口。
     fn resolve_drop(&mut self, d: DragSession, hover: Option<DragHover>) -> Task<Message> {
-        // 布局 tab 拖拽（无宿主面板）：落回标题栏 tab 条 = 排序，其余取消
+        // 布局 tab 拖拽（无来源面板）：落回标题栏 tab 条 = 排序，其余取消
         // （titlebar_tab_insert 返回主窗口本地坐标下的插入位，光标须换算回本地）
         if d.from_panel.is_none() && d.from_detached.is_none() {
             if let Some(main_id) = self.main_id {
@@ -6412,7 +6412,7 @@ impl App {
             }
             return Task::none();
         }
-        // 跨宿主
+        // 跨容器
         if let Some(to_panel) = h.zone.panel_id {
             return self.move_tab_into(d, to_panel, index);
         }
