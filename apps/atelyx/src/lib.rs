@@ -11476,6 +11476,30 @@ mod open_route_tests {
     }
 
     #[test]
+    fn projection_gives_each_same_kind_instance_its_own_tab() {
+        let mut app = app();
+        open_route::doc_opened(&mut app, "a.md", DocKind::Note);
+        open_route::doc_opened(&mut app, "b.md", DocKind::Note);
+        open_route::doc_opened(&mut app, "t.atb", DocKind::Table);
+        let tabs = open_route::primary_tabs(&app);
+        assert_eq!(
+            tabs.iter().map(|t| t.view.as_str()).collect::<Vec<_>>(),
+            vec!["note", "note", "table"],
+            "同类多实例各占一个标签"
+        );
+        assert_eq!(
+            tabs.iter().map(|t| t.file.as_deref().unwrap()).collect::<Vec<_>>(),
+            vec!["a.md", "b.md", "t.atb"],
+            "标签顺序 = 集合顺序"
+        );
+        assert_eq!(
+            tabs.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            app.open_files.items().iter().map(|d| d.id.as_str()).collect::<Vec<_>>(),
+            "标签 id = 实例 id"
+        );
+    }
+
+    #[test]
     fn primary_projection_and_slot_fallback() {
         let mut app = app();
         open_route::doc_opened(&mut app, "a.md", DocKind::Note);
