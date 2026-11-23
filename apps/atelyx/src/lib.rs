@@ -1863,6 +1863,10 @@ pub struct App {
     pub open_files: OpenFiles,
     /// 非激活笔记的会话（键 = 集合实例 id；活动笔记的会话在下面那批活动字段里）。
     pub notes: HashMap<String, note_session::NoteSession>,
+    /// 非激活表格的会话（键 = 集合实例 id）。
+    pub tables: HashMap<String, table_view::TableSession>,
+    /// 非激活画布的会话（键 = 集合实例 id）。
+    pub canvases: HashMap<String, canvas_view::CanvasSession>,
     /// 唯一注册表（视图 / 服务 / 文档类型；选择器、标签与设置页只读它）。
     /// 启动装配期与投影刷新时整体重建，运行期只读。
     pub registry: crate::registry::Registry,
@@ -2424,6 +2428,8 @@ impl App {
                 ui: load_ui_state(),
                 open_files: OpenFiles::default(),
                 notes: HashMap::new(),
+                tables: HashMap::new(),
+                canvases: HashMap::new(),
                 registry: crate::registry::Registry::default(),
                 vault: Arc::new(vault::VaultState::default()),
                 theme: ui::palette::app_theme(),
@@ -7107,14 +7113,17 @@ impl App {
 
     // ===== 打开文件集合 / 主要面板 =====
 
-    /// 激活打开文件实例：笔记换入活动会话（同类型其余笔记停放在 `notes`），其余类型只改激活项
-    /// 与启动种子（其会话已按单实例语义常驻）。
+    /// 激活打开文件实例：笔记 / 表格 / 画布换入活动会话（同类型其余实例停放在
+    /// `notes` / `tables` / `canvases`），其余类型只改激活项与启动种子。
     fn activate_instance(&mut self, id: &str) -> Task<Message> {
         let Some((kind, path)) = self.open_files.get(id).map(|d| (d.kind.clone(), d.path.clone())) else {
             return Task::none();
         };
-        if let DocKind::Note = kind {
-            return self.switch_note(id, &path);
+        match kind {
+            DocKind::Note => return self.switch_note(id, &path),
+            DocKind::Table => return table_actions::switch_table(self, id, &path),
+            DocKind::Canvas => return canvas_actions::switch_canvas(self, id, &path),
+            DocKind::Plugin(_) => {}
         }
         if !self.open_files.activate(id) {
             return Task::none();
@@ -7186,14 +7195,21 @@ impl App {
         }
     }
 
-    /// 主要面板投影标签的 × / 类型槽 ×：关文件（停放实例直接移除；活动笔记有别的实例时换入下一个）。
+    /// 主要面板投影标签的 × / 类型槽 ×：关文件（停放实例直接移除；活动实例有同类型别的
+    /// 打开项时换入最近激活项）。
     fn close_file_instance(&mut self, id: &str) -> Task<Message> {
-        let Some(kind) = self.open_files.get(id).map(|d| d.kind.clone()) else {
+        let Some((kind, path)) = self.open_files.get(id).map(|d| (d.kind.clone(), d.path.clone())) else {
             return Task::none();
         };
-        if !matches!(kind, DocKind::Note) {
-            return self.close_file_tab(open_route::view_of_kind(&kind));
+        match kind {
+            DocKind::Note => self.close_note_instance(id),
+            DocKind::Table => self.close_table_instance(id, &path),
+            DocKind::Canvas => self.close_canvas_instance(id, &path),
+            DocKind::Plugin(_) => self.close_file_tab(open_route::view_of_kind(&kind)),
         }
+    }
+
+    fn close_note_instance(&mut self, id: &str) -> Task<Message> {
         // 停放中的笔记：没有活动态要收，直接移出集合
         if self.notes.remove(id).is_some() {
             self.open_files.close(id);
@@ -7217,6 +7233,52 @@ impl App {
         self.switch_note(&next_id, &next_path)
     }
 
+    fn close_table_instance(&mut self, id: &str, path: &str) -> Task<Message> {
+        if self.tables.remove(id).is_some() || self.ui.last_table_file.as_deref() != Some(path) {
+            self.open_files.close(id);
+            return Task::none();
+        }
+        let others = self.open_files.of_kind(&DocKind::Table, &Host::Main).len();
+        if others <= 1 {
+            return self.close_file_tab("table");
+        }
+        self.open_files.close(id);
+        self.table = None;
+        self.ui.last_table_file = None;
+        let Some((next_id, next_path)) = self
+            .open_files
+            .recent_of_kind(&DocKind::Table, &Host::Main)
+            .map(|d| (d.id.clone(), d.path.clone()))
+        else {
+            return Task::none();
+        };
+        table_actions::switch_table(self, &next_id, &next_path)
+    }
+
+    fn close_canvas_instance(&mut self, id: &str, path: &str) -> Task<Message> {
+        if self.canvases.remove(id).is_some() || self.ui.last_canvas_file.as_deref() != Some(path) {
+            self.open_files.close(id);
+            return Task::none();
+        }
+        let others = self.open_files.of_kind(&DocKind::Canvas, &Host::Main).len();
+        if others <= 1 {
+            return self.close_file_tab("canvas");
+        }
+        self.open_files.close(id);
+        canvas_chat::detach_canvas(self);
+        self.canvas = None;
+        self.ui.last_canvas_file = None;
+        let Some((next_id, next_path)) = self
+            .open_files
+            .recent_of_kind(&DocKind::Canvas, &Host::Main)
+            .map(|d| (d.id.clone(), d.path.clone()))
+        else {
+            return Task::none();
+        };
+        canvas_actions::install_canvas(self, &next_id);
+        canvas_actions::switch_canvas(self, &next_id, &next_path)
+    }
+
     /// 类型槽「切换显示的文件」：槽记下手动选择，再把该文件换入活动笔记。
     fn set_slot_file(&mut self, panel_id: &str, tab_id: &str, path: &str) -> Task<Message> {
         if !layout::set_tab_file(&mut self.ui, panel_id, tab_id, path) {
@@ -7229,18 +7291,18 @@ impl App {
         self.activate_instance(&id)
     }
 
-    /// 类型槽 ×：关当前显示的文件（笔记有别的实例时换入下一个，槽随集合回退显示）。
+    /// 类型槽 ×：关当前显示的文件（同类有别的打开项时换入下一个，槽随集合回退显示）。
     fn close_slot_file(&mut self, kind: &str) -> Task<Message> {
-        if kind != "note" {
+        if crate::plugin_actions::parse_view_kind(kind).is_some() {
             return self.close_file_tab(kind);
         }
-        let Some(id) = self
-            .ui
-            .last_note_file
-            .clone()
-            .and_then(|cur| self.open_files.find_by_path(&cur).map(|d| d.id.clone()))
-        else {
-            return self.close_file_tab("note");
+        let shown = match kind {
+            "table" => self.ui.last_table_file.clone(),
+            "canvas" => self.ui.last_canvas_file.clone(),
+            _ => self.ui.last_note_file.clone(),
+        };
+        let Some(id) = shown.and_then(|cur| self.open_files.find_by_path(&cur).map(|d| d.id.clone())) else {
+            return self.close_file_tab(kind);
         };
         self.close_file_instance(&id)
     }
@@ -11210,7 +11272,7 @@ mod open_route_tests {
     }
 
     #[test]
-    fn opened_notes_are_deduped_by_path() {
+    fn opened_docs_are_deduped_by_path() {
         let mut app = app();
         open_route::doc_opened(&mut app, "a.md", DocKind::Note);
         open_route::doc_opened(&mut app, "b.md", DocKind::Note);
@@ -11223,12 +11285,17 @@ mod open_route_tests {
         open_route::doc_opened(&mut app, "b.md", DocKind::Note);
         assert_eq!(app.open_files.len(), 2);
         assert_eq!(app.open_files.active_id(), Some(id.as_str()));
-        // 非笔记类型仍单实例：再打开同类型不同文件只留新开的那份
+        // 表格 / 画布同样按路径去重并保留多实例
         open_route::doc_opened(&mut app, "t1.atb", DocKind::Table);
         open_route::doc_opened(&mut app, "t2.atb", DocKind::Table);
-        let tables = app.open_files.of_kind(&DocKind::Table, &Host::Main);
-        assert_eq!(tables.len(), 1);
-        assert_eq!(tables[0].path, "t2.atb");
+        open_route::doc_opened(&mut app, "c1.atlx", DocKind::Canvas);
+        open_route::doc_opened(&mut app, "c2.atlx", DocKind::Canvas);
+        assert_eq!(app.open_files.of_kind(&DocKind::Table, &Host::Main).len(), 2);
+        assert_eq!(app.open_files.of_kind(&DocKind::Canvas, &Host::Main).len(), 2);
+        let t2 = app.open_files.find_by_path("t2.atb").unwrap().id.clone();
+        open_route::doc_opened(&mut app, "t2.atb", DocKind::Table);
+        assert_eq!(app.open_files.of_kind(&DocKind::Table, &Host::Main).len(), 2);
+        assert_eq!(app.open_files.active_id(), Some(t2.as_str()));
     }
 
     #[test]
@@ -11328,6 +11395,93 @@ mod open_route_tests {
         let panel = layout::find_panel(&layout::active_layout(&app.ui).tree, &p2).unwrap();
         assert_eq!(panel.iter().map(|t| t.view.as_str()).collect::<Vec<_>>(), vec!["note"]);
         assert_eq!(panel[0].file.as_deref(), Some("a.md"));
+    }
+}
+
+#[cfg(test)]
+mod doc_multi_tests {
+    use super::*;
+    use atelyx_core::vault::{CanvasFile, TableFile};
+
+    fn app() -> App {
+        App::boot().0
+    }
+
+    fn table_file(id: &str) -> TableFile {
+        TableFile {
+            schema: "atelyx-table/v1".into(),
+            id: id.into(),
+            title: id.into(),
+            fields: Vec::new(),
+            rows: Vec::new(),
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    fn canvas_file(id: &str) -> CanvasFile {
+        CanvasFile {
+            schema: "atelyx-canvas/v1".into(),
+            id: id.into(),
+            title: id.into(),
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    #[test]
+    fn table_instances_park_and_install() {
+        let mut app = app();
+        open_route::doc_opened(&mut app, "a.atb", DocKind::Table);
+        app.ui.last_table_file = Some("a.atb".into());
+        app.table = Some(table_view::TableSession::new("a.atb".into(), table_file("a")));
+        open_route::doc_opened(&mut app, "b.atb", DocKind::Table);
+        let b = app.open_files.find_by_path("b.atb").unwrap().id.clone();
+
+        assert!(table_actions::park_table(&mut app));
+        assert!(app.table.is_none(), "停放后活动槽清空");
+        assert_eq!(app.tables.len(), 1);
+        app.tables.insert(b.clone(), table_view::TableSession::new("b.atb".into(), table_file("b")));
+        assert!(table_actions::install_table(&mut app, &b));
+        assert_eq!(app.table.as_ref().map(|s| s.file.as_str()), Some("b.atb"));
+        assert_eq!(app.ui.last_table_file.as_deref(), Some("b.atb"));
+        assert_eq!(app.history_kind, atelyx_core::history::HistoryKind::Table);
+    }
+
+    #[test]
+    fn closing_live_table_promotes_parked_sibling() {
+        let mut app = app();
+        open_route::doc_opened(&mut app, "a.atb", DocKind::Table);
+        app.ui.last_table_file = Some("a.atb".into());
+        app.table = Some(table_view::TableSession::new("a.atb".into(), table_file("a")));
+        open_route::doc_opened(&mut app, "b.atb", DocKind::Table);
+        let a = app.open_files.find_by_path("a.atb").unwrap().id.clone();
+        let b = app.open_files.find_by_path("b.atb").unwrap().id.clone();
+        app.tables.insert(b, table_view::TableSession::new("b.atb".into(), table_file("b")));
+
+        let _ = app.close_file_instance(&a);
+        assert_eq!(app.open_files.of_kind(&DocKind::Table, &Host::Main).len(), 1);
+        assert_eq!(app.table.as_ref().map(|s| s.file.as_str()), Some("b.atb"));
+        assert!(app.tables.is_empty());
+    }
+
+    #[test]
+    fn canvas_instances_park_and_install() {
+        let mut app = app();
+        open_route::doc_opened(&mut app, "a.atlx", DocKind::Canvas);
+        app.ui.last_canvas_file = Some("a.atlx".into());
+        app.canvas = Some(canvas_view::CanvasSession::new("a.atlx".into(), canvas_file("a")));
+        open_route::doc_opened(&mut app, "b.atlx", DocKind::Canvas);
+        let b = app.open_files.find_by_path("b.atlx").unwrap().id.clone();
+
+        assert!(canvas_actions::park_canvas(&mut app));
+        assert!(app.canvas.is_none());
+        app.canvases.insert(b.clone(), canvas_view::CanvasSession::new("b.atlx".into(), canvas_file("b")));
+        assert!(canvas_actions::install_canvas(&mut app, &b));
+        assert_eq!(app.canvas.as_ref().map(|s| s.file.as_str()), Some("b.atlx"));
+        assert_eq!(app.history_kind, atelyx_core::history::HistoryKind::Canvas);
     }
 }
 

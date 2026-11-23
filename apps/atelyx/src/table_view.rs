@@ -1213,6 +1213,11 @@ impl SaveInflight {
         (self.keys, self.flush_queued)
     }
 
+    /// 没有任何在途项与待续 Flush：会话此刻可整体搬走，回执到达后不会落空。
+    pub fn is_idle(&self) -> bool {
+        self.keys.is_empty() && self.flush_queued.is_empty()
+    }
+
     /// 由两张键表还原（与 into_parts 成对使用）。
     pub fn from_parts(keys: Vec<(u64, String)>, flush_queued: Vec<(u64, String)>) -> Self {
         Self { keys, flush_queued }

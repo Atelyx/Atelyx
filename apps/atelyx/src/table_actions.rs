@@ -9,7 +9,7 @@ use iced::Task;
 use iced::{Point, Rectangle, Size};
 
 use crate::table_view as tv;
-use crate::{space_actions, App, ImageLoadBatch, Message};
+use crate::{space_actions, App, ImageLoadBatch, Message, RepoKind};
 use atelyx_core::ai::doc_edit::DocModel;
 use atelyx_core::image_thumb;
 use atelyx_core::table_ops as ops;
@@ -966,8 +966,12 @@ fn open_table_popup_at(
 
 // ===== 载入 / 保存 =====
 
-/// 打开 .atb（open_file 按扩展名分流入口）：登记最近表格并载入。
+/// 打开 .atb（open_file 按扩展名分流入口）：先把活动表格整份停放，再登记最近表格并载入。
 pub fn open_table(app: &mut App, rel: &str) -> Task<Message> {
+    if app.ui.last_table_file.as_deref() != Some(rel) && app.table.is_some() && !park_table(app) {
+        app.notify(NoticeLevel::Info, "表格正在保存或刚失败，稍后再切换");
+        return Task::none();
+    }
     app.ui.last_table_file = Some(rel.to_string());
     crate::open_route::doc_opened(app, rel, atelyx_core::open_files::DocKind::Table);
     // 清掉上一表会话：载入在途期间不留旧数据（防串表写盘）
@@ -975,6 +979,57 @@ pub fn open_table(app: &mut App, rel: &str) -> Task<Message> {
     app.history_kind = atelyx_core::history::HistoryKind::Table;
     app.schedule_persist();
     load_table(app, rel)
+}
+
+/// 把活动表格整份放进 `App.tables`（本地仓库多实例用）。在途有回执未归时不搬（回执按
+/// 活动会话结算，搬走会留下永久在途键）；脏会话照搬，装回时重排防抖。
+pub(crate) fn park_table(app: &mut App) -> bool {
+    if !matches!(app.repo_kind, RepoKind::Local) {
+        return false;
+    }
+    let Some(session) = app.table.as_ref() else { return false };
+    if !session.save_inflight.is_idle() {
+        return false;
+    }
+    let Some(id) = app.open_files.find_by_path(&session.file).map(|d| d.id.clone()) else {
+        return false;
+    };
+    let session = app.table.take().expect("表会话刚判存在");
+    app.tables.insert(id, session);
+    true
+}
+
+/// 把停放区的表格装回活动会话；返回是否装上。
+pub(crate) fn install_table(app: &mut App, id: &str) -> bool {
+    let Some(session) = app.tables.remove(id) else { return false };
+    app.ui.last_table_file = Some(session.file.clone());
+    let dirty = session.dirty;
+    app.table = Some(session);
+    app.history_kind = atelyx_core::history::HistoryKind::Table;
+    app.history.clear();
+    // 表格视图面随激活项换：挂载状态归壳侧会话选择，切回来要重发差额
+    crate::plugin_actions::sync_table_surfaces(app);
+    if dirty {
+        app.debounce_tail();
+    }
+    true
+}
+
+/// 表格实例换入：已显示的文件只改激活项；否则停放当前会话，再装回停放区或读盘载入。
+pub(crate) fn switch_table(app: &mut App, id: &str, path: &str) -> Task<Message> {
+    let already_live = app.ui.last_table_file.as_deref() == Some(path);
+    if already_live {
+        app.open_files.activate(id);
+        app.schedule_persist();
+        return Task::none();
+    }
+    park_table(app);
+    if install_table(app, id) {
+        app.open_files.activate(id);
+        app.schedule_persist();
+        return Task::none();
+    }
+    open_table(app, path)
 }
 
 /// 载入 .atb（spawn_blocking + 缓存；回执 gen 守卫）。空间模式走服务端读取。

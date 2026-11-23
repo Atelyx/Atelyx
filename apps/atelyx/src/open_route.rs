@@ -29,11 +29,12 @@ pub fn view_of_kind(kind: &DocKind) -> &str {
     }
 }
 
-/// 文件已打开（会话载入时调用）：集合登记并激活。本地笔记保留同类型多实例（其余打开项
-/// 的编辑态停放在 `App.notes`）；表格 / 画布 / 空间笔记仍每类型至多一项，先把同类型
-/// 别的实例移出集合（其会话已被新文件替换）。
+/// 文件已打开（会话载入时调用）：集合登记并激活。本地仓库文档多实例（其余打开项的
+/// 编辑态停放在 `App.notes` / `App.tables` / `App.canvases`）；协作空间每类型至多一项，
+/// 先把同类型别的实例移出集合（其会话已被新文件替换）。
 pub fn doc_opened(app: &mut App, path: &str, kind: DocKind) {
-    let multi = matches!(kind, DocKind::Note) && matches!(app.repo_kind, crate::RepoKind::Local);
+    let multi = matches!(app.repo_kind, crate::RepoKind::Local)
+        && matches!(kind, DocKind::Note | DocKind::Table | DocKind::Canvas);
     if !multi {
         let others: Vec<String> = app
             .open_files
@@ -44,6 +45,8 @@ pub fn doc_opened(app: &mut App, path: &str, kind: DocKind) {
             .collect();
         for id in others {
             app.notes.remove(&id);
+            app.tables.remove(&id);
+            app.canvases.remove(&id);
             app.open_files.close(&id);
         }
     }
@@ -62,6 +65,8 @@ pub fn doc_closed(app: &mut App, kind: &DocKind) {
         .collect();
     for id in ids {
         app.notes.remove(&id);
+        app.tables.remove(&id);
+        app.canvases.remove(&id);
         app.open_files.close(&id);
     }
 }
@@ -70,6 +75,8 @@ pub fn doc_closed(app: &mut App, kind: &DocKind) {
 pub fn clear_all(app: &mut App) {
     app.open_files.clear();
     app.notes.clear();
+    app.tables.clear();
+    app.canvases.clear();
 }
 
 /// 主要面板投影标签：宿主在主窗口的实例按集合顺序生成（id = 实例 id）。

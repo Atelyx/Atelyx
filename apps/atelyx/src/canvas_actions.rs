@@ -22,8 +22,12 @@ use crate::{chat_actions, recent_view, vault, App, Message, RepoKind};
 /// 粘贴整组避让的纵向搜索步长（世界坐标，同产出落卡）。
 const PASTE_SPOT_STEP: f64 = 24.0;
 
-/// 打开 .atlx（脏拦截已由 gate 处理）：置「上次打开」、清旧会话、走载入链。
+/// 打开 .atlx（脏拦截已由 gate 处理）：先把活动画布整份停放，再置「上次打开」、清旧会话、走载入链。
 pub fn open_canvas(app: &mut App, rel: &str) -> Task<Message> {
+    if app.ui.last_canvas_file.as_deref() != Some(rel) && app.canvas.is_some() && !park_canvas(app) {
+        app.notify(crate::ui::notify::Level::Info, "画布正在保存或刚失败，稍后再切换");
+        return Task::none();
+    }
     app.ui.last_canvas_file = Some(rel.to_string());
     crate::open_route::doc_opened(app, rel, atelyx_core::open_files::DocKind::Canvas);
     // 清掉上一画布会话：先停掉卡内 run，载入在途期间不留旧数据（防串画布写盘）
@@ -32,6 +36,55 @@ pub fn open_canvas(app: &mut App, rel: &str) -> Task<Message> {
     app.history_kind = atelyx_core::history::HistoryKind::Canvas;
     app.schedule_persist();
     load_canvas(app, rel)
+}
+
+/// 把活动画布整份放进 `App.canvases`（本地仓库多实例用）。在途有回执未归时不搬（口径同表格）。
+pub(crate) fn park_canvas(app: &mut App) -> bool {
+    if !matches!(app.repo_kind, RepoKind::Local) {
+        return false;
+    }
+    let Some(session) = app.canvas.as_ref() else { return false };
+    if !session.save_inflight.is_idle() {
+        return false;
+    }
+    let Some(id) = app.open_files.find_by_path(&session.file).map(|d| d.id.clone()) else {
+        return false;
+    };
+    crate::canvas_chat::detach_canvas(app);
+    let session = app.canvas.take().expect("画布会话刚判存在");
+    app.canvases.insert(id, session);
+    true
+}
+
+/// 把停放区的画布装回活动会话；返回是否装上。
+pub(crate) fn install_canvas(app: &mut App, id: &str) -> bool {
+    let Some(session) = app.canvases.remove(id) else { return false };
+    app.ui.last_canvas_file = Some(session.file.clone());
+    let dirty = session.dirty;
+    app.canvas = Some(session);
+    app.history_kind = atelyx_core::history::HistoryKind::Canvas;
+    app.history.clear();
+    if dirty {
+        app.debounce_tail();
+    }
+    true
+}
+
+/// 画布实例换入：已显示的文件只改激活项；否则停放当前会话，再装回停放区或读盘载入。
+pub(crate) fn switch_canvas(app: &mut App, id: &str, path: &str) -> Task<Message> {
+    let already_live = app.ui.last_canvas_file.as_deref() == Some(path);
+    if already_live {
+        app.open_files.activate(id);
+        app.schedule_persist();
+        return Task::none();
+    }
+    park_canvas(app);
+    if install_canvas(app, id) {
+        app.open_files.activate(id);
+        app.schedule_persist();
+        return Task::none();
+    }
+    open_canvas(app, path)
 }
 
 /// 载入 .atlx（本地 spawn_blocking + 缓存；空间走服务端读取）。回执 gen 守卫。
@@ -237,6 +290,8 @@ pub(crate) fn load_refs(app: &App, paths: Vec<String>) -> Task<Message> {
         return Task::none();
     }
     let gen = app.epoch();
+    // 回执按文件身份结算：切走画布后迟到的引用不得拼进新画布的视图缓存
+    let file = app.canvas.as_ref().map(|s| s.file.clone()).unwrap_or_default();
     if matches!(app.repo_kind, RepoKind::Space(_)) {
         let Some(session) = crate::space_actions::session_of(app) else {
             return Task::none();
@@ -273,7 +328,7 @@ pub(crate) fn load_refs(app: &App, paths: Vec<String>) -> Task<Message> {
                 }
                 out
             },
-            move |refs| Message::Canvas(CanvasMsg::RefsLoaded(gen, refs)),
+            move |refs| Message::Canvas(CanvasMsg::RefsLoaded(gen, file.clone(), refs)),
         );
     }
     let Ok(root) = app.vault.root() else { return Task::none() };
@@ -290,7 +345,7 @@ pub(crate) fn load_refs(app: &App, paths: Vec<String>) -> Task<Message> {
             .await
             .unwrap_or_default()
         },
-        move |refs| Message::Canvas(CanvasMsg::RefsLoaded(gen, refs)),
+        move |refs| Message::Canvas(CanvasMsg::RefsLoaded(gen, file.clone(), refs)),
     )
 }
 
@@ -311,11 +366,11 @@ pub(crate) fn reload_image_refs(app: &App) -> Task<Message> {
 }
 
 /// 补读回执：合并引用缓存 + 重建文本卡正文（产出落卡的新笔记能直接显示）。
-fn on_refs_loaded(app: &mut App, gen: u64, refs: HashMap<String, RefRaw>) -> Task<Message> {
+fn on_refs_loaded(app: &mut App, gen: u64, file: String, refs: HashMap<String, RefRaw>) -> Task<Message> {
     if gen != app.epoch() {
         return Task::none();
     }
-    if app.canvas.is_none() {
+    if !app.canvas.as_ref().is_some_and(|s| s.file == file) {
         return Task::none();
     }
     // 先分派再取会话借用：图片分派要改句柄缓存（另一字段），与会话借用不能同时持有
@@ -721,7 +776,7 @@ pub fn on_msg(app: &mut App, msg: CanvasMsg) -> Task<Message> {
             }
             Task::none()
         }
-        CanvasMsg::RefsLoaded(gen, refs) => on_refs_loaded(app, gen, refs),
+        CanvasMsg::RefsLoaded(gen, file, refs) => on_refs_loaded(app, gen, file, refs),
         CanvasMsg::Press { pos, size } => on_press(app, pos, size),
         CanvasMsg::PanPress { pos, size } => on_pan_press(app, pos, size),
         CanvasMsg::Context { window, pos, size } => on_context(app, window, pos, size),

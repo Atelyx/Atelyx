@@ -896,7 +896,7 @@ pub enum CanvasMsg {
     /// 悬停卡变化（指针移出画布时清空连接点与拖入路由）。
     Hover(Option<String>),
     /// 新引用卡正文 / 图片载入回执（产出落卡后按需补内容）。
-    RefsLoaded(u64, HashMap<String, RefRaw>),
+    RefsLoaded(u64, String, HashMap<String, RefRaw>),
     /// 右键菜单动作（菜单按压先关弹层再执行）。
     Menu(CanvasMenuAction),
     /// 粘贴回执（系统剪贴板文本；非画布格式忽略）。
