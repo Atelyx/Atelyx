@@ -1287,6 +1287,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sized_column_keeps_its_width_beside_a_filling_one() {
+        let mut bench = Bench::new(400.0, 160.0).await;
+        let frame = bench.draw(|ui| {
+            ui.row(8.0, |row| {
+                row.column_sized(120.0, 4.0, |left| left.card("sized", false, |body| body.text("边栏", TextRole::Label)));
+                row.column(4.0, |right| right.card("fill", false, |body| body.text("主区", TextRole::Label)));
+            });
+        });
+        let left = frame.hits.iter().find(|hit| hit.id == "sized").expect("定宽边栏应可见");
+        let right = frame.hits.iter().find(|hit| hit.id == "fill").expect("撑满主区应可见");
+        assert_eq!((left.x, left.w), (0.0, 120.0), "定宽栏不被行宽拉伸：{left:?}");
+        assert_eq!(right.x, 128.0, "主区从定宽栏 + 间距处起排：{right:?}");
+        assert_eq!(right.w, 272.0, "主区吃掉剩余宽度：{right:?}");
+    }
+
+    #[tokio::test]
     async fn fill_row_gives_a_sized_scroll_the_whole_row_height() {
         let mut bench = Bench::new(400.0, 200.0).await;
         let frame = bench.draw(|ui| {

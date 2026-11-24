@@ -399,7 +399,7 @@ impl PluginHandler for Todo {
 | `scroll_sized(id, height, gap, follow_end, ...)` | 定高滚动区；`follow_end` 时停在终点就跟到新终点（日志、消息流） |
 | `rule()` / `spacer(h)` / `grow()` | 分隔线 / 固定高度空白 / 吃剩余宽度的弹簧 |
 | `pad(horizontal, vertical, ...)` | 内边距容器：子项按列排布并整体内缩（滚动条要贴边、内容又要留白时用） |
-| `column(gap, ...)` / `row(gap, ...)` / `row_fill(gap, ...)` | 纵向 / 横向 / 占满剩余高度的横向容器（并排分栏各自滚动） |
+| `column(gap, ...)` / `column_sized(width, gap, ...)` / `row(gap, ...)` / `row_fill(gap, ...)` | 纵向 / 定宽纵向（分栏的边栏，不与相邻撑满栏均分）/ 横向 / 占满剩余高度的横向容器（并排分栏各自滚动） |
 
 Markdown 不要自己解析：`ui.markdown(text)` 由宿主按笔记同一套语义解析，内容按原文缓存（缓存有限，滚出视野的旧内容会被收敛掉），内容不变不重解析。
 

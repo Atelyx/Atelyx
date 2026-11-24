@@ -314,6 +314,13 @@ impl<'c, 'a> Ui<'c, 'a> {
         self.items.push(column_item(sub.items, gap));
     }
 
+    /// 固定宽度的纵向容器：横向排布里占常量宽度，其余撑满子项分剩余宽度（分栏的窄边栏用它）。
+    pub fn column_sized(&mut self, width: f32, gap: f32, build: impl FnOnce(&mut Ui<'_, 'a>)) {
+        let mut sub = Ui { ctx: &mut *self.ctx, clip: self.clip, items: Vec::new() };
+        build(&mut sub);
+        self.items.push(column_item_width(sub.items, gap, Width::Fixed(width)));
+    }
+
     /// 横向容器：收缩子项按内容宽，撑满子项均分剩余宽度，子项在行内垂直居中。
     pub fn row(&mut self, gap: f32, build: impl FnOnce(&mut Ui<'_, 'a>)) {
         let mut sub = Ui { ctx: &mut *self.ctx, clip: self.clip, items: Vec::new() };
@@ -387,10 +394,15 @@ pub(crate) fn child_height(item: &Item, metrics: &mut Metrics, width: f32) -> f3
 }
 
 fn column_item(items: Vec<Item>, gap: f32) -> Item {
+    column_item_width(items, gap, Width::Fill)
+}
+
+/// 纵向容器：宽度口径由调用方给——撑满子项取 `Fill`，分栏里的定宽边栏取 `Fixed`。
+fn column_item_width(items: Vec<Item>, gap: f32, width: Width) -> Item {
     let shared = Rc::new(items);
     let for_size = Rc::clone(&shared);
     Item {
-        width: Width::Fill,
+        width,
         fill_height: false,
         height: Box::new(move |metrics, width| column_height(&for_size, metrics, width, gap)),
         draw: Box::new(move |ctx, rect, clip| draw_column(ctx, &shared, rect, clip, gap)),
