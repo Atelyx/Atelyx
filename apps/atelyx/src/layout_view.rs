@@ -1294,12 +1294,12 @@ fn panel_view<'a>(
     };
 
     let content: Element<'a, Message> = match active {
-        // 主要面板空集合 = 空态（打开文件）；普通空面板 = 纯空白（右键唤起视图选择器）
+        // 主要面板空集合 = 空态（没有打开的文件）；普通空面板 = 纯空白（右键唤起视图选择器）
         None if primary => controls::empty_state(
             "files",
             "没有打开的文件",
             "从文件面板打开笔记、表格或画布",
-            Some(("打开文件".to_string(), Message::OpenFilePick)),
+            None,
         )
         .into(),
         None => mouse_area(space().width(Length::Fill).height(Length::Fill))
@@ -1338,9 +1338,9 @@ fn panel_view<'a>(
     root.width(Length::Fill).height(Length::Fill).into()
 }
 
-/// 主要面板标识：左侧强调竖条 + 「主要面板」小标题（固定在标签条最左，不随标签滚动）。
+/// 主要面板标识：左侧强调竖条 + 「主面板」小标题（固定在标签条最左，不随标签滚动）。
 /// 主要面板徽标文案（渲染与标签条命中几何共用一份）。
-const PRIMARY_BADGE_TEXT: &str = "主要面板";
+const PRIMARY_BADGE_TEXT: &str = "主面板";
 
 /// 徽标占位宽：3 竖条 + 6 间距 + 文本 + 左右内边距（标签条起点右移这么多）。
 fn primary_badge_width() -> f32 {

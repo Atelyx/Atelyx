@@ -316,7 +316,7 @@ fn panel_menu_entries(app: &App, panel_id: &str) -> Vec<(usize, MenuEntry<'stati
         entries.push((
             0,
             MenuEntry::action_icon(
-                "取消主要面板",
+                "取消主面板",
                 "files",
                 Message::PrimaryPanelClear(pid.clone()),
             ),
@@ -325,7 +325,7 @@ fn panel_menu_entries(app: &App, panel_id: &str) -> Vec<(usize, MenuEntry<'stati
         entries.push((
             0,
             MenuEntry::Action {
-                label: "设为主要面板".into(),
+                label: "设为主面板".into(),
                 icon: Some("files".into()),
                 danger: false,
                 disabled: has_tool,
@@ -358,7 +358,7 @@ fn panel_menu_entries(app: &App, panel_id: &str) -> Vec<(usize, MenuEntry<'stati
                 on_press: (!cannot_delete).then(|| Message::PanelClose(pid.clone())),
                 note: None,
                 hint: if primary_here {
-                    Some("主要面板不可删除".to_string())
+                    Some("主面板不可删除".to_string())
                 } else if panel_count <= 1 {
                     Some("最后一个面板不可删除".to_string())
                 } else {
@@ -564,7 +564,7 @@ fn view_picker_entries(app: &App, panel_id: &str) -> Vec<(usize, MenuEntry<'stat
 /// 布局已有主要面板时文档视图被接管：选择器里停用并说明（文档只在主要面板显示）。
 fn doc_view_blocked(app: &App, kind: &str) -> Option<&'static str> {
     (layout::primary_panel_of_active(&app.ui).is_some() && layout::is_builtin_doc_view(kind))
-        .then_some("文档只在主要面板中显示")
+        .then_some("文档只在主面板中显示")
 }
 
 /// 面板内持有该视图的标签 id。

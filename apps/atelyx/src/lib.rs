@@ -1155,9 +1155,6 @@ enum Message {
     /// 面板 ≡ 菜单：把该面板设为主要面板 / 取消主要身份。
     PrimaryPanelSet(String),
     PrimaryPanelClear(String),
-    /// 主要面板空态「打开文件」：系统文件选择器挑一个仓库内文件打开。
-    OpenFilePick,
-    FilePicked(Result<PathBuf, String>),
     DetachedTabFileClose(String),
     /// 标签按下：拖拽候选由标签按钮自证命中（渲染自适应后几何不再可靠）。
     PanelTabPress { panel_id: String, tab_id: String },
@@ -2968,8 +2965,6 @@ impl App {
             | Message::SlotFileSet { .. }
             | Message::PrimaryPanelSet(..)
             | Message::PrimaryPanelClear(..)
-            | Message::OpenFilePick
-            | Message::FilePicked(..)
             | Message::DetachedTabFileClose(..)
             | Message::PanelTabPress { .. }
             | Message::DocTabPress { .. }
@@ -4479,26 +4474,6 @@ impl App {
             }
             Message::PrimaryPanelSet(panel_id) => self.gate(PendingAfterFlush::SetPrimaryPanel(panel_id)),
             Message::PrimaryPanelClear(panel_id) => self.gate(PendingAfterFlush::ClearPrimaryPanel(panel_id)),
-            Message::OpenFilePick => {
-                // 选择器从仓库根起步：越出仓库的文件在选中后仍会被拒（只在根内打开）
-                let dir = self.vault.root().ok();
-                Task::perform(
-                    async move {
-                        let mut dialog = rfd::AsyncFileDialog::new();
-                        if let Some(dir) = dir {
-                            dialog = dialog.set_directory(dir);
-                        }
-                        dialog
-                            .pick_file()
-                            .await
-                            .map(|f| f.path().to_path_buf())
-                            .ok_or_else(|| "未选择文件".to_string())
-                    },
-                    Message::FilePicked,
-                )
-            }
-            Message::FilePicked(Ok(path)) => self.open_picked_file(&path),
-            Message::FilePicked(Err(_)) => Task::none(),
             Message::PanelTabPress { panel_id, tab_id } => {
                 self.tab_press = Some(TabPress {
                     window: self.main_id.unwrap_or(iced::window::Id::unique()),
@@ -6356,7 +6331,7 @@ impl App {
                     return self.reorder_projection(&d.tab_id, to_index);
                 }
             }
-            self.notify(NoticeLevel::Info, "主要面板标签是打开文件集合的投影，只在标签条内调整顺序");
+            self.notify(NoticeLevel::Info, "主面板标签是打开文件集合的投影，只在标签条内调整顺序");
             return Task::none();
         }
         // 四边缘 = 分割落点（仅主窗口面板；撕裂窗口整体 = 加标签）
@@ -6437,7 +6412,7 @@ impl App {
         if layout::primary_panel_of_active(&self.ui) == Some(to_panel.as_str()) {
             self.notify(
                 NoticeLevel::Info,
-                "主要面板只接文档，请先取消主要面板再移入",
+                "主面板只接文档，请先取消主面板再移入",
             );
             return Task::none();
         }
@@ -7423,7 +7398,7 @@ impl App {
         if layout::find_panel(&layout::active_layout(&self.ui).tree, panel_id)
             .is_some_and(|tabs| tabs.iter().any(|t| self.is_plugin_doc_view(&t.view)))
         {
-            self.notify(NoticeLevel::Info, "先把插件文档移出面板再设为主要面板");
+            self.notify(NoticeLevel::Info, "先把插件文档移出面板再设为主面板");
             return Task::none();
         }
         let resolved = open_route::layout_doc_paths(self);
@@ -7448,7 +7423,7 @@ impl App {
                 self.notify(
                     NoticeLevel::Info,
                     format!(
-                        "先把「{}」移出面板再设为主要面板",
+                        "先把「{}」移出面板再设为主面板",
                         layout_view::view_label(self, &view)
                     ),
                 );
@@ -7466,42 +7441,6 @@ impl App {
         } else {
             Task::none()
         }
-    }
-
-    /// 主要面板空态「打开文件」：系统选择器挑的文件按扩展名分流（越出仓库根 = 提示拒绝）。
-    fn open_picked_file(&mut self, path: &Path) -> Task<Message> {
-        if matches!(self.repo_kind, RepoKind::Space(_)) {
-            // 协作空间没有本地仓库根：选择器语义不成立，指向文件面板
-            self.notify(NoticeLevel::Info, "协作空间内请从文件面板打开文件".to_string());
-            return Task::none();
-        }
-        let Ok(root) = self.vault.root() else {
-            self.notify(NoticeLevel::Info, "请先打开仓库".to_string());
-            return Task::none();
-        };
-        let rel = match path.strip_prefix(&root) {
-            Ok(rel) => rel.to_string_lossy().replace('\\', "/"),
-            Err(_) => {
-                self.notify(NoticeLevel::Info, "只能打开当前仓库内的文件".to_string());
-                return Task::none();
-            }
-        };
-        if !self.can_open_rel(&rel) {
-            self.notify(NoticeLevel::Info, "暂不支持打开该类型的文件".to_string());
-            return Task::none();
-        }
-        self.gate(PendingAfterFlush::OpenFile(rel))
-    }
-
-    /// 可打开的文档后缀：笔记 / 表格 / 画布，或插件注册的文档类型（其余不让落到笔记载入链）。
-    fn can_open_rel(&self, rel: &str) -> bool {
-        let ext = rel.rsplit('.').next().unwrap_or_default();
-        matches!(ext, "md" | "atb" | "atlx")
-            || self
-                .registry
-                .doc_types()
-                .iter()
-                .any(|info| info.registration.extension.eq_ignore_ascii_case(ext))
     }
 
     // ===== 反链 / 标签词汇表 / 双链候选 =====
@@ -11722,6 +11661,61 @@ mod doc_multi_tests {
         assert!(canvas_actions::install_canvas(&mut app, &b));
         assert_eq!(app.canvas.as_ref().map(|s| s.file.as_str()), Some("b.atlx"));
         assert_eq!(app.history_kind, atelyx_core::history::HistoryKind::Canvas);
+    }
+
+    /// 协作空间会话身份（内容面在服务端；测试只借它走空间分派）。
+    fn space_app() -> App {
+        let mut app = app();
+        app.repo_kind = RepoKind::Space(space_actions::SpaceSession {
+            client: std::sync::Arc::new(
+                atelyx_core::space_client::SpaceClient::new("http://127.0.0.1:9", "t".into())
+                    .expect("本地服务 HTTP 地址可构造客户端"),
+            ),
+            server_url: "http://127.0.0.1:9".into(),
+            space_id: "s1".into(),
+            name: "空间".into(),
+            role: atelyx_core::space_client::SpaceRole::Editor,
+        });
+        app
+    }
+
+    /// 空间模式没有停放语义：换文件只替换会话，不得被「换不出」挡下。
+    #[test]
+    fn space_switch_replaces_live_doc_sessions() {
+        let mut app = space_app();
+        open_route::doc_opened(&mut app, "a.atb", DocKind::Table);
+        app.ui.last_table_file = Some("a.atb".into());
+        app.table = Some(table_view::TableSession::new("a.atb".into(), table_file("a")));
+        open_route::doc_opened(&mut app, "a.atlx", DocKind::Canvas);
+        app.ui.last_canvas_file = Some("a.atlx".into());
+        app.canvas = Some(canvas_view::CanvasSession::new("a.atlx".into(), canvas_file("a")));
+
+        let _ = table_actions::open_table(&mut app, "b.atb");
+        assert_eq!(app.ui.last_table_file.as_deref(), Some("b.atb"), "表格直接换文件");
+        assert!(app.table.is_none(), "载入在途期间不留旧表格会话");
+
+        let _ = canvas_actions::open_canvas(&mut app, "b.atlx");
+        assert_eq!(app.ui.last_canvas_file.as_deref(), Some("b.atlx"), "画布直接换文件");
+        assert!(app.canvas.is_none(), "载入在途期间不留旧画布会话");
+    }
+
+    /// 本地仓库在途回执未归时仍拒绝换出：回执按活动会话结算，搬走会丢在途键。
+    #[test]
+    fn local_switch_refused_while_save_inflight() {
+        let mut app = app();
+        open_route::doc_opened(&mut app, "a.atb", DocKind::Table);
+        app.ui.last_table_file = Some("a.atb".into());
+        let mut session = table_view::TableSession::new("a.atb".into(), table_file("a"));
+        let gen = app.epoch();
+        assert_eq!(
+            session.save_inflight.begin(gen, "a.atb", false),
+            table_view::SaveAdmission::Start
+        );
+        app.table = Some(session);
+
+        let _ = table_actions::open_table(&mut app, "b.atb");
+        assert_eq!(app.ui.last_table_file.as_deref(), Some("a.atb"), "在途未归拒绝切换");
+        assert!(app.table.is_some(), "活动会话不被覆盖");
     }
 }
 

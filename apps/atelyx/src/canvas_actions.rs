@@ -22,10 +22,13 @@ use crate::{chat_actions, recent_view, vault, App, Message, RepoKind};
 /// 粘贴整组避让的纵向搜索步长（世界坐标，同产出落卡）。
 const PASTE_SPOT_STEP: f64 = 24.0;
 
-/// 打开 .atlx（脏拦截已由 gate 处理）：先把活动画布整份停放，再置「上次打开」、清旧会话、走载入链。
+/// 切换被在途保存挡住时给用户的提示（open_canvas / switch_canvas 共用一份）。
+const SWITCH_BUSY_NOTICE: &str = "画布正在保存或刚失败，稍后再切换";
+
+/// 打开 .atlx（脏拦截已由 gate 处理）：先把活动画布换出，再置「上次打开」、清旧会话、走载入链。
 pub fn open_canvas(app: &mut App, rel: &str) -> Task<Message> {
-    if app.ui.last_canvas_file.as_deref() != Some(rel) && app.canvas.is_some() && !park_canvas(app) {
-        app.notify(crate::ui::notify::Level::Info, "画布正在保存或刚失败，稍后再切换");
+    if app.ui.last_canvas_file.as_deref() != Some(rel) && !swap_out_canvas(app) {
+        app.notify(crate::ui::notify::Level::Info, SWITCH_BUSY_NOTICE);
         return Task::none();
     }
     app.ui.last_canvas_file = Some(rel.to_string());
@@ -36,6 +39,15 @@ pub fn open_canvas(app: &mut App, rel: &str) -> Task<Message> {
     app.history_kind = atelyx_core::history::HistoryKind::Canvas;
     app.schedule_persist();
     load_canvas(app, rel)
+}
+
+/// 换出活动画布会话：本地仓库把会话搬进停放区（在途回执未归则拒绝切换，回执不得落空）；
+/// 空间模式没有停放语义，会话随载入直接替换（补丁按文件在 App 级在途表结算）。
+fn swap_out_canvas(app: &mut App) -> bool {
+    if app.canvas.is_none() || !matches!(app.repo_kind, RepoKind::Local) {
+        return true;
+    }
+    park_canvas(app)
 }
 
 /// 把活动画布整份放进 `App.canvases`（本地仓库多实例用）。在途有回执未归时不搬（口径同表格）。
@@ -70,7 +82,7 @@ pub(crate) fn install_canvas(app: &mut App, id: &str) -> bool {
     true
 }
 
-/// 画布实例换入：已显示的文件只改激活项；否则停放当前会话，再装回停放区或读盘载入。
+/// 画布实例换入：已显示的文件只改激活项；否则换出当前会话，再装回停放区或读盘载入。
 pub(crate) fn switch_canvas(app: &mut App, id: &str, path: &str) -> Task<Message> {
     let already_live = app.ui.last_canvas_file.as_deref() == Some(path);
     if already_live {
@@ -78,7 +90,11 @@ pub(crate) fn switch_canvas(app: &mut App, id: &str, path: &str) -> Task<Message
         app.schedule_persist();
         return Task::none();
     }
-    park_canvas(app);
+    // 换不出当前会话（在途回执未归）就拒绝：随后装回目标会覆盖掉活动会话
+    if !swap_out_canvas(app) {
+        app.notify(crate::ui::notify::Level::Info, SWITCH_BUSY_NOTICE);
+        return Task::none();
+    }
     if install_canvas(app, id) {
         app.open_files.activate(id);
         app.schedule_persist();
