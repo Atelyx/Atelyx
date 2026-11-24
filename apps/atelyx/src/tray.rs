@@ -450,9 +450,18 @@ mod platform {
             CALLBACK => {
                 // 托盘回调把鼠标消息塞在 lParam 低字
                 let mouse = lparam.0 as u32 & 0xFFFF;
-                if matches!(mouse, WM_LBUTTONUP | WM_RBUTTONUP | WM_CONTEXTMENU) {
+                match mouse {
+                    // 左键单击不进菜单，直接唤出工作区；菜单走右键与上下文菜单
+                    WM_LBUTTONUP => STATE.with(|cell| {
+                        let Ok(borrowed) = cell.try_borrow() else { return };
+                        let Some(state) = borrowed.as_ref() else { return };
+                        if state.visible.load(Ordering::Relaxed) {
+                            let _ = state.events.send(TrayEvent::ShowMain);
+                        }
+                    }),
                     // 菜单是嵌套消息循环：此时不能持锁，取不到状态就忽略这次点击
-                    show_menu();
+                    WM_RBUTTONUP | WM_CONTEXTMENU => show_menu(),
+                    _ => {}
                 }
                 LRESULT(0)
             }
