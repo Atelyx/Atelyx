@@ -500,7 +500,7 @@ mod tests {
             plugin_name: std::ptr::null(),
             plugin_version: std::ptr::null(),
         };
-        assert_eq!(api.abi_version, 1);
+        assert_eq!(api.abi_version, ABI_VERSION);
     }
 
     /// 绘制函数表同样只能是标量 + 函数指针：任何 Rust 枚举混进来都会让布局不可预期。
