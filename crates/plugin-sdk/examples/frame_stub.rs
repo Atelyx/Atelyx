@@ -133,6 +133,7 @@ impl PluginHandler for FrameStub {
             Some(FrameRect { x: 18.0, y: 238.0, w: 2.0, h: 18.0 }),
             true,
             Some(4),
+            false,
         );
     }
 

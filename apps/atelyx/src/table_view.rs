@@ -3239,16 +3239,26 @@ pub fn table_view<'a>(app: &'a crate::App, window: iced::window::Id) -> Element<
         );
     };
 
-    // 插件表格视图：面板内以插件面替掉网格（工具条保留，「视图」下拉可切回内置网格）
+    // 插件表格视图：面板内以插件面替掉网格（未声明模态时保留工具条，「视图」下拉可切回内置网格）
     if let Some(kind) = session.view.active_view.as_deref() {
         let members = collab_members(app, session);
-        return column![
-            toolbar(app, &members, session, window),
-            crate::plugin_view::surface_view(app, window, kind, "表格视图"),
-        ]
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into();
+        // 插件声明模态（图片灯箱、确认框）时工具条被遮住并停用，宿主命令不可达
+        let chrome: Element<Message> = if crate::plugin_view::surface_modal(app, kind) {
+            container(space())
+                .width(Length::Fill)
+                .height(Length::Fixed(TOOLBAR_H))
+                .style(|_t| iced::widget::container::Style {
+                    background: Some(iced::Background::Color(pal::SCRIM_STRONG)),
+                    ..Default::default()
+                })
+                .into()
+        } else {
+            toolbar(app, &members, session, window)
+        };
+        return column![chrome, crate::plugin_view::surface_view(app, window, kind, "表格视图")]
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into();
     }
 
     let remote = app

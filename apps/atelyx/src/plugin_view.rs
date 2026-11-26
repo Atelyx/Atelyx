@@ -63,6 +63,14 @@ pub(crate) fn surface_view<'a>(
     crate::plugin_frame::frame_view(app, window, plugin_id, surface_id, frame, outer_pad)
 }
 
+/// 该插件面最近一帧是否声明模态：宿主据此遮住并停用同一视图容器里该面之外的宿主命令区。
+pub(crate) fn surface_modal(app: &App, view: &str) -> bool {
+    let Some((plugin_id, surface_id)) = crate::plugin_actions::parse_view_kind(view) else {
+        return false;
+    };
+    app.plugins.surface_frame(plugin_id, surface_id).is_some_and(|frame| frame.modal)
+}
+
 /// 面外壳内边距 → iced 内边距（上 / 右 / 下 / 左）。
 pub(crate) fn padding_of(spec: PaddingSpec) -> Padding {
     let [top, right, bottom, left] = spec.edges();

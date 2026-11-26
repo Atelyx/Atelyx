@@ -70,6 +70,10 @@ pub struct SurfaceFrame {
     /// 帧率（1–120）：声明后宿主按该节拍回发 `host:frame.tick`；缺省不推帧。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fps: Option<u16>,
+    /// 声明本面为模态：宿主把同一视图容器里该面之外的宿主命令区（表格视图工具条）遮住并停用，
+    /// 指针与滚轮不再落到那些命令上；面本身照常绘制与命中。缺省 = 不声明。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub modal: bool,
 }
 
 impl SurfaceFrame {
@@ -324,6 +328,7 @@ mod tests {
             ime: None,
             keys: true,
             fps: Some(60),
+            modal: false,
         };
         assert!(frame.validate().is_ok());
 
@@ -356,6 +361,17 @@ mod tests {
             clip: None,
         }];
         assert!(frame.validate().unwrap_err().contains("第 0 条指令"));
+    }
+
+    #[test]
+    fn modal_is_off_by_default_and_roundtrips() {
+        let mut frame = SurfaceFrame::default();
+        assert!(serde_json::to_value(&frame).unwrap().get("modal").is_none(), "缺省不落字段");
+        frame.modal = true;
+        let wire = serde_json::to_value(&frame).unwrap();
+        assert_eq!(wire["modal"], true);
+        assert_eq!(serde_json::from_value::<SurfaceFrame>(wire).unwrap(), frame);
+        assert!(frame.validate().is_ok());
     }
 
     #[test]

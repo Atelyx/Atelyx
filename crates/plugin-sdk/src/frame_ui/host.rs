@@ -34,8 +34,9 @@ pub trait DrawSurface {
     fn command(&self, command: &DrawCommand);
     /// 推一个命中区（同帧内后声明的在上）。
     fn hit(&self, hit: &HitRegion);
-    /// 推输入声明：`ime` 为空表示不声明输入法，`fps` 为空表示不推帧拍。
-    fn policy(&self, ime: Option<FrameRect>, keys: bool, fps: Option<u16>);
+    /// 推输入声明：`ime` 为空表示不声明输入法，`fps` 为空表示不推帧拍；
+    /// `modal` 为真表示本面是模态（宿主遮住并停用同一视图容器里该面之外的宿主命令区）。
+    fn policy(&self, ime: Option<FrameRect>, keys: bool, fps: Option<u16>, modal: bool);
 }
 
 /// 宿主交给插件的一次 draw：目标面 + 这一面的控件层状态。
@@ -77,6 +78,11 @@ impl<'a, 'ui> DrawFrame<'a, 'ui> {
     /// 声明这一面的帧拍频率（1–120；`None` = 不推帧拍）。绘制里改也会应用到下一拍的输入声明。
     pub fn set_fps(&mut self, fps: Option<u16>) {
         self.ui.set_fps(fps);
+    }
+
+    /// 声明本面为模态（宿主遮住并停用同一视图容器里该面之外的宿主命令区）。语义见 [`FrameUi::set_modal`]。
+    pub fn set_modal(&mut self, modal: bool) {
+        self.ui.set_modal(modal);
     }
 
     /// 程序化聚焦输入框（浮层接管键盘、行内编辑这类场景）：须在 `build` 之前调用。

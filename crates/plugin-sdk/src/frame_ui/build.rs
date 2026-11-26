@@ -150,7 +150,7 @@ impl<'a> BuildCtx<'a> {
         let ime = self.ime.map(|r| FrameRect { x: r.x, y: r.y, w: r.w, h: r.h });
         let misses = self.metrics.has_misses();
         BuildOut {
-            frame: SurfaceFrame { commands: self.commands, hits: self.hits, ime, keys, fps: None },
+            frame: SurfaceFrame { commands: self.commands, hits: self.hits, ime, keys, fps: None, modal: false },
             layouts: self.layouts,
             focusables: self.focusables,
             scrolls: self.scrolls,

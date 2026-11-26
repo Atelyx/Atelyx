@@ -948,6 +948,10 @@ pub struct SurfaceFrame {
     /// 帧率（1–120）：声明后宿主按该节拍回发 `host:frame.tick`；缺省不推帧。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fps: Option<u16>,
+    /// 声明本面为模态：宿主把同一视图容器里该面之外的宿主命令区（表格视图工具条）遮住并停用，
+    /// 指针与滚轮不再落到那些命令上；面本身照常绘制与命中。缺省 = 不声明。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub modal: bool,
 }
 ```
 

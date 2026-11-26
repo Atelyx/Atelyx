@@ -118,6 +118,7 @@ struct DrawCtx<'a> {
     ime: Option<FrameRect>,
     keys: bool,
     fps: Option<u16>,
+    modal: bool,
     /// 插件侧的第一处违规：整帧按违规丢弃，原因给宿主记日志。
     error: Option<String>,
     arena: Arena,
@@ -133,6 +134,7 @@ impl<'a> DrawCtx<'a> {
             ime: None,
             keys: false,
             fps: None,
+            modal: false,
             error: None,
             arena: Arena::default(),
         }
@@ -155,6 +157,7 @@ impl<'a> DrawCtx<'a> {
             ime: self.ime,
             keys: self.keys,
             fps: self.fps,
+            modal: self.modal,
         };
         frame.validate().map_err(|err| format!("帧内容不合法：{err}"))?;
         Ok(frame)
@@ -426,7 +429,13 @@ unsafe extern "C" fn sink_log(ctx: *mut c_void, level: u32, ptr: *const u8, len:
     (ctx.log)(level, &String::from_utf8_lossy(bytes));
 }
 
-unsafe extern "C" fn sink_policy(ctx: *mut c_void, ime: *const abi::AbiRect, keys: u32, fps: u32) {
+unsafe extern "C" fn sink_policy(
+    ctx: *mut c_void,
+    ime: *const abi::AbiRect,
+    keys: u32,
+    fps: u32,
+    modal: u32,
+) {
     let Some(ctx) = (ctx as *mut DrawCtx<'_>).as_mut() else {
         return;
     };
@@ -434,6 +443,7 @@ unsafe extern "C" fn sink_policy(ctx: *mut c_void, ime: *const abi::AbiRect, key
     ctx.keys = keys != 0;
     // 越界按上限收：静默丢弃与整帧拒收对插件作者是同一种「画面停了」，夹取至少能跑
     ctx.fps = u16::try_from(fps.min(u32::from(paint::MAX_FPS))).ok().filter(|fps| *fps > 0);
+    ctx.modal = modal != 0;
 }
 
 /// 按 kind 读一条绘制指令。
@@ -775,7 +785,7 @@ mod tests {
             cursor: abi::CURSOR_POINTER,
         };
         (sink.hit.unwrap())(sink.ctx, &hit);
-        (sink.policy.unwrap())(sink.ctx, std::ptr::null(), 1, 30);
+        (sink.policy.unwrap())(sink.ctx, std::ptr::null(), 1, 30, 1);
         abi::DRAW_OK
     }
 
@@ -791,6 +801,7 @@ mod tests {
         assert_eq!(frame.hits[0].cursor, Some(HitCursor::Pointer));
         assert!(frame.keys);
         assert_eq!(frame.fps, Some(30));
+        assert!(frame.modal, "模态声明随帧交回");
         assert_eq!(frame.hit_at(10.0, 10.0), Some("inc"));
     }
 

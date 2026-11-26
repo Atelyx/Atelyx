@@ -433,9 +433,11 @@ pub struct DrawSink {
     pub command: Option<unsafe extern "C" fn(ctx: *mut c_void, kind: u32, data: *const c_void)>,
     /// 推一个命中区。
     pub hit: Option<unsafe extern "C" fn(ctx: *mut c_void, hit: *const AbiHit)>,
-    /// 推输入声明：`ime` 为空表示不声明输入法，`fps = 0` 表示不声明帧拍。
-    pub policy:
-        Option<unsafe extern "C" fn(ctx: *mut c_void, ime: *const AbiRect, keys: u32, fps: u32)>,
+    /// 推输入声明：`ime` 为空表示不声明输入法，`fps = 0` 表示不声明帧拍，
+    /// `modal != 0` 声明本面为模态（宿主遮住并停用同一视图容器里该面之外的宿主命令区）。
+    pub policy: Option<
+        unsafe extern "C" fn(ctx: *mut c_void, ime: *const AbiRect, keys: u32, fps: u32, modal: u32),
+    >,
     /// 绘制期的诊断输出（落插件日志，等级同 `LOG_*`）。绘制跑在宿主线程上，stderr 在发布版
     /// 不可见，出了事只能走这条。
     pub log: Option<unsafe extern "C" fn(ctx: *mut c_void, level: u32, ptr: *const u8, len: usize)>,

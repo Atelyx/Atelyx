@@ -185,7 +185,7 @@ fn on_draw(&self, frame: &mut DrawFrame<'_, '_) {
     let host = frame.surface();                   // 端到端能力面：同步量算 / 取主题 / 直接推指令
     host.command(&rect(0.0, 0.0, width, height, Some(token(ColorToken::Surface)), None));
     host.hit(&HitRegion { id: "ping".into(), x: 12.0, y: 12.0, w: 120.0, h: 32.0, cursor: None });
-    host.policy(None, true, None);                // ime / 收键盘 / 帧拍
+    host.policy(None, true, None, false);         // ime / 收键盘 / 帧拍 / 模态
 }
 ```
 
@@ -228,11 +228,11 @@ fn paint_panel(host: &dyn DrawSurface, width: f32, height: f32, clicks: u32) {
     host.command(&text_wrapped(12.0, 64.0, "长说明按可用宽度换行", 12.0,
         token(ColorToken::TextMuted), width - 24.0, None));
     host.hit(&hit_with_cursor("ping", 12.0, 12.0, 120.0, 32.0, HitCursor::Pointer));
-    host.policy(None, true, None);   // 需要键盘才声明 keys，见 5.3
+    host.policy(None, true, None, false);   // 需要键盘才声明 keys，见 5.3
 }
 ```
 
-- **坐标是面本地逻辑像素、左上原点**。宿主不做坐标变换，指令集也没有裁剪原语：要滚动就自己减偏移，要裁剪就自己按矩形收敛坐标（整帧最终按面边界裁剪，不会画进相邻面板）。矩形要投影时给 `shadow` 字段，用 `shadow(offsetX, offsetY, blur, color)` 构造。
+- **坐标是面本地逻辑像素、左上原点**。宿主不做坐标变换：要滚动就自己减偏移；文字指令可带 `clip` 矩形只画可见部分（形状没有裁剪字段，自己按矩形收敛坐标）。整帧最终按面边界裁剪，不会画进相邻面板。矩形要投影时给 `shadow` 字段，用 `shadow(offsetX, offsetY, blur, color)` 构造。
 - `fill` 与 `stroke` 至少给其一（都不给是空指令，会被拒收）；`strokeWidth` 只在有描边时生效，缺省 1。
 - **指令严格按声明顺序绘制**：文字与形状交错，投影随矩形画在它的填充与描边之下。要「被形状盖住的文字」，就把形状声明在文字之后；覆盖式浮层用 SDK 的 `overlay`（见 5.5）。
 - 字号 `size` 是绝对逻辑像素（与 `query.measure` 同口径），不是倍率；`weight` 取 `normal` / `medium` / `semiBold`，`family` 取 `ui`（缺省，跟随界面字体）或 `mono`。
@@ -371,7 +371,8 @@ impl PluginHandler for Todo {
 - **尺寸跟手**：`frame.size()` 就是这一拍的真实尺寸，不存在「先按旧尺寸画、下拍再修正」的那一帧；改宽时文字量算与 Markdown 缺项在同一个调用里补齐。
 - **重绘要自己请求**：宿主也会因为别处的界面变化重绘并顺带调 `on_draw`，但那是不可预期的；改完状态要调 `ctx.request_redraw()` 让宿主这一拍就重画。绘制因此必须便宜且只读——它可能比你想的更频繁地被调。
 - **绘制里别调 `Context`**：量算、Markdown、主题都在 `frame.surface()` 上同步取，不需要（也不允许）在绘制里走能力面。
-- **帧拍在绘制里声明**：`frame.set_fps(Some(30))`，或经 `frame.surface().policy(ime, keys, fps)` 一次给全；不声明就不推 `host:frame.tick`。
+- **帧拍在绘制里声明**：`frame.set_fps(Some(30))`，或经 `frame.surface().policy(ime, keys, fps, modal)` 一次给全；不声明就不推 `host:frame.tick`。
+- **模态要显式声明**：灯箱 / 确认框这类必须挡住宿主命令的界面，绘制时调 `frame.set_modal(true)`（控件层）或 `surface().policy(.., true)`（手绘指令）；宿主把该面所在容器的工具条遮住并停用，面本身照常绘制与命中。退出模态时再声明一次 `false`。
 - **绘制期的错要去日志里看**：绘制跑在宿主线程上，发布版没有 stderr 可看；控件层校验失败、Markdown 解析失败这类问题都会写进插件日志（设置页「详情 → 日志」）。
 
 控件（细节以源码文档注释为准）：
@@ -403,7 +404,7 @@ impl PluginHandler for Todo {
 
 Markdown 不要自己解析：`ui.markdown(text)` 由宿主按笔记同一套语义解析，内容按原文缓存（缓存有限，滚出视野的旧内容会被收敛掉），内容不变不重解析。
 
-三条边界：指令集没有裁剪，滚动只画视口内的子项；需要覆盖主内容的浮层用 `ui.overlay(rect, ...)`（画在主内容之后，打开时滚轮只落到浮层里的滚动区），下拉仍就地展开；无障碍基本没有（自绘帧对读屏器只是一块区域，键鼠可达性要自己保证）；观感一致性靠 SDK 默认样式，不要写死色值和像素。
+三条边界：滚动只画视口内的子项（与视口相交的边缘行按视口裁剪，不会整行消失）；需要覆盖主内容的浮层用 `ui.overlay(rect, ...)`（画在主内容之后，打开时滚轮只落到浮层里的滚动区），下拉仍就地展开；无障碍基本没有（自绘帧对读屏器只是一块区域，键鼠可达性要自己保证）；观感一致性靠 SDK 默认样式，不要写死色值和像素。
 
 要自带 GUI 运行时的插件可以自己创建系统窗口跑自有渲染（不走 `window.open`），但那种界面不参与工作台组合：没有面板 dock、没有标签页，宿主主题与快捷键也不生效，插件一停就跟着消失。想留在工作台里，就走帧。
 

@@ -66,6 +66,7 @@ pub enum UiEvent {
 pub struct FrameUi {
     state: model::UiState,
     fps: Option<u16>,
+    modal: bool,
 }
 
 impl Default for FrameUi {
@@ -76,7 +77,7 @@ impl Default for FrameUi {
 
 impl FrameUi {
     pub fn new() -> Self {
-        Self { state: model::UiState::default(), fps: None }
+        Self { state: model::UiState::default(), fps: None, modal: false }
     }
 
     /// 面最近一次绘制用的逻辑尺寸；宿主首次绘制前是缺省占位。
@@ -88,6 +89,12 @@ impl FrameUi {
     /// 插件的播放 / 动画在帧拍里推进并请求重绘；`None` = 不推帧拍。
     pub fn set_fps(&mut self, fps: Option<u16>) {
         self.fps = fps;
+    }
+
+    /// 声明本面为模态：宿主遮住并停用同一视图容器里该面之外的宿主命令区（表格视图工具条），
+    /// 面本身照常绘制与命中。灯箱、确认框这类必须挡住宿主命令的场景在进入与退出时各调一次。
+    pub fn set_modal(&mut self, modal: bool) {
+        self.modal = modal;
     }
 
     /// 程序化聚焦输入框（如点开行内编辑）：光标与选区落到 `value` 末尾。已聚焦时不重复置位，
@@ -186,10 +193,12 @@ impl FrameUi {
                 passes += 1;
                 continue;
             }
-            out.frame.validate().map_err(|err| {
+            let mut frame = out.frame;
+            frame.modal = self.modal;
+            frame.validate().map_err(|err| {
                 RpcError::failed(format!("面 {} 的帧不合法：{err}", surface.surface_id()))
             })?;
-            emit(surface, &out.frame, self.fps);
+            emit(surface, &frame, self.fps);
             return Ok(());
         }
     }
@@ -203,7 +212,7 @@ fn emit(surface: &dyn DrawSurface, frame: &SurfaceFrame, fps: Option<u16>) {
     for hit in &frame.hits {
         surface.hit(hit);
     }
-    surface.policy(frame.ime, frame.keys, fps);
+    surface.policy(frame.ime, frame.keys, fps, frame.modal);
 }
 
 #[cfg(test)]
@@ -234,6 +243,7 @@ mod tests {
         ime: Cell<Option<FrameRect>>,
         keys: Cell<bool>,
         fps: Cell<Option<u16>>,
+        modal: Cell<bool>,
         /// 量算次数：同步通路下用来断言「命中缓存就不再量」。
         measures: Cell<usize>,
         /// Markdown 解析次数（同上）。
@@ -249,6 +259,7 @@ mod tests {
                 ime: Cell::new(None),
                 keys: Cell::new(false),
                 fps: Cell::new(None),
+                modal: Cell::new(false),
                 measures: Cell::new(0),
                 parses: Cell::new(0),
             }
@@ -261,6 +272,7 @@ mod tests {
                 ime: self.ime.get(),
                 keys: self.keys.get(),
                 fps: self.fps.get(),
+                modal: self.modal.get(),
             }
         }
     }
@@ -323,10 +335,11 @@ mod tests {
             self.hits.borrow_mut().push(hit.clone());
         }
 
-        fn policy(&self, ime: Option<FrameRect>, keys: bool, fps: Option<u16>) {
+        fn policy(&self, ime: Option<FrameRect>, keys: bool, fps: Option<u16>, modal: bool) {
             self.ime.set(ime);
             self.keys.set(keys);
             self.fps.set(fps);
+            self.modal.set(modal);
         }
     }
 
@@ -549,6 +562,16 @@ mod tests {
         assert!(texts(&frame).iter().any(|text| text == "服务"));
         assert!(texts(&frame).iter().any(|text| text == "启动"));
         assert!(frame.ime.is_none(), "没有聚焦输入框时不声明输入法光标");
+    }
+
+    #[tokio::test]
+    async fn modal_declaration_reaches_the_frame() {
+        let mut bench = Bench::new(200.0, 100.0).await;
+        bench.ui.try_lock().expect("控件层应空闲").set_modal(true);
+        let frame = bench.draw(|ui| {
+            ui.text("灯箱", TextRole::Label);
+        });
+        assert!(frame.modal, "声明模态后随帧交给宿主");
     }
 
     #[tokio::test]

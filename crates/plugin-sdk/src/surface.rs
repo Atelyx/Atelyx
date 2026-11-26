@@ -256,13 +256,21 @@ impl DrawSurface for AbiSurface<'_> {
         unsafe { push(self.sink.ctx, &item) };
     }
 
-    fn policy(&self, ime: Option<FrameRect>, keys: bool, fps: Option<u16>) {
+    fn policy(&self, ime: Option<FrameRect>, keys: bool, fps: Option<u16>, modal: bool) {
         let Some(push) = self.sink.policy else {
             return;
         };
         let rect = ime.map(|ime| abi::AbiRect { x: ime.x, y: ime.y, w: ime.w, h: ime.h });
         let pointer = rect.as_ref().map_or(std::ptr::null(), |rect| rect as *const abi::AbiRect);
-        unsafe { push(self.sink.ctx, pointer, u32::from(keys), u32::from(fps.unwrap_or(0))) };
+        unsafe {
+            push(
+                self.sink.ctx,
+                pointer,
+                u32::from(keys),
+                u32::from(fps.unwrap_or(0)),
+                u32::from(modal),
+            )
+        };
     }
 }
 

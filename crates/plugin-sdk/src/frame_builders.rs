@@ -183,9 +183,9 @@ pub fn ime_rect(x: f32, y: f32, w: f32, h: f32) -> FrameRect {
     FrameRect { x, y, w, h }
 }
 
-/// 帧外壳：指令与命中区，不声明按键 / 输入法 / 帧率。
+/// 帧外壳：指令与命中区，不声明按键 / 输入法 / 帧率 / 模态。
 pub fn frame(commands: Vec<DrawCommand>, hits: Vec<HitRegion>) -> SurfaceFrame {
-    SurfaceFrame { commands, hits, ime: None, keys: false, fps: None }
+    SurfaceFrame { commands, hits, ime: None, keys: false, fps: None, modal: false }
 }
 
 /// 声明本面收键盘：指针按下取焦，随后全部按键（含修饰键组合）经 `FrameInput::Key` 回发。
@@ -203,5 +203,11 @@ pub fn ime(mut frame: SurfaceFrame, rect: FrameRect) -> SurfaceFrame {
 /// 声明帧率（1–120）：宿主按该节拍回发 `host:frame.tick`。
 pub fn fps(mut frame: SurfaceFrame, fps: u16) -> SurfaceFrame {
     frame.fps = Some(fps);
+    frame
+}
+
+/// 声明本面为模态：宿主遮住并停用同一视图容器里该面之外的宿主命令区（表格视图工具条）。
+pub fn modal(mut frame: SurfaceFrame) -> SurfaceFrame {
+    frame.modal = true;
     frame
 }
