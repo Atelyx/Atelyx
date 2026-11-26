@@ -257,7 +257,7 @@ fn clip_of(block: Rect, clip: Rect) -> Clipped {
 }
 
 /// 单行文字绘制：`max_width` 给定时文字按该宽度换行（只用于输入框这类定宽单行控件）。
-/// 与视口相交时按可见矩形裁剪，半行文字只丢超出部分。
+/// 与视口相交时裁到视口，半行文字只丢超出部分。
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn paint(
     ctx: &mut BuildCtx<'_>,
