@@ -186,6 +186,7 @@ impl DrawSurface for AbiSurface<'_> {
                     family,
                     max_width,
                     align,
+                    clip,
                 } => {
                     let text = abi::AbiText {
                         x: *x,
@@ -197,6 +198,10 @@ impl DrawSurface for AbiSurface<'_> {
                         family: family_code(*family),
                         align: align_code(*align),
                         max_width: max_width.unwrap_or(-1.0),
+                        has_clip: u32::from(clip.is_some()),
+                        clip: clip.map_or(abi::AbiRect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 }, |clip| {
+                            abi::AbiRect { x: clip.x, y: clip.y, w: clip.w, h: clip.h }
+                        }),
                     };
                     push(ctx, abi::CMD_TEXT, (&text as *const abi::AbiText).cast());
                 }

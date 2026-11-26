@@ -166,6 +166,15 @@ pub struct PaintPoint {
     pub y: f32,
 }
 
+/// 面本地矩形（逻辑像素），用于声明绘制裁剪区。
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PaintRect {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
 fn default_stroke_width() -> f32 {
     1.0
 }
@@ -248,6 +257,9 @@ pub enum DrawCommand {
         max_width: Option<f32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         align: Option<TextAlign>,
+        /// 裁剪矩形：文字只画落在矩形内的部分。缺省 = 不裁剪（只受面边界约束）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        clip: Option<PaintRect>,
     },
     /// 图片贴片：绘制在给定矩形内。
     Image {
@@ -287,13 +299,19 @@ impl DrawCommand {
                 ensure_non_negative(*r, "圆半径")?;
                 ensure_positive(stroke_width.unwrap_or(1.0), "描边宽")
             }
-            Self::Text { size, max_width, align, .. } => {
+            Self::Text { size, max_width, align, clip, .. } => {
                 ensure_positive(*size, "字号")?;
                 if let Some(max_width) = max_width {
                     ensure_positive(*max_width, "文字可用宽度")?;
                 }
                 if align.is_some() && max_width.is_none() {
                     return Err("文字对齐须与 maxWidth 同时给出".into());
+                }
+                if let Some(clip) = clip {
+                    ensure_non_negative(clip.w, "文字裁剪宽")?;
+                    ensure_non_negative(clip.h, "文字裁剪高")?;
+                    ensure_finite(clip.x, "文字裁剪横坐标")?;
+                    ensure_finite(clip.y, "文字裁剪纵坐标")?;
                 }
                 Ok(())
             }
@@ -366,6 +384,7 @@ mod tests {
             family: Some(TextFamily::Mono),
             max_width,
             align,
+            clip: None,
         }
     }
 
@@ -521,5 +540,40 @@ mod tests {
         let wire = serde_json::to_value(text(None, None)).unwrap();
         assert!(wire.get("maxWidth").is_none() && wire.get("align").is_none());
         assert_eq!(wire["family"], "mono");
+    }
+
+    #[test]
+    fn text_clip_is_optional_and_validated() {
+        let clipped = DrawCommand::Text {
+            x: 10.0,
+            y: 18.0,
+            content: "半行".into(),
+            size: 13.0,
+            color: PaintColor::Rgba { rgba: [0, 0, 0, 255] },
+            weight: None,
+            family: None,
+            max_width: None,
+            align: None,
+            clip: Some(PaintRect { x: 0.0, y: 20.0, w: 200.0, h: 40.0 }),
+        };
+        let wire = serde_json::to_value(&clipped).unwrap();
+        assert_eq!(wire["clip"], serde_json::json!({"x": 0.0, "y": 20.0, "w": 200.0, "h": 40.0}));
+        assert_eq!(serde_json::from_value::<DrawCommand>(wire).unwrap(), clipped);
+        assert!(validate_commands(&[clipped]).is_ok());
+        assert!(serde_json::to_value(text(None, None)).unwrap().get("clip").is_none(), "缺省不落字段");
+
+        let negative = DrawCommand::Text {
+            x: 0.0,
+            y: 0.0,
+            content: "裁".into(),
+            size: 13.0,
+            color: PaintColor::Rgba { rgba: [0, 0, 0, 255] },
+            weight: None,
+            family: None,
+            max_width: None,
+            align: None,
+            clip: Some(PaintRect { x: 0.0, y: 0.0, w: -10.0, h: 20.0 }),
+        };
+        assert!(validate_commands(&[negative]).is_err());
     }
 }

@@ -318,6 +318,7 @@ mod tests {
                 family: None,
                 max_width: Some(80.0),
                 align: Some(TextAlign::Center),
+                clip: None,
             }],
             hits: vec![hit("inc", 0.0, 0.0, 40.0, 24.0)],
             ime: None,
@@ -352,6 +353,7 @@ mod tests {
             family: None,
             max_width: None,
             align: None,
+            clip: None,
         }];
         assert!(frame.validate().unwrap_err().contains("第 0 条指令"));
     }

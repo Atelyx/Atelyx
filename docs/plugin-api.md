@@ -566,6 +566,9 @@ pub enum DrawCommand {
         max_width: Option<f32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         align: Option<TextAlign>,
+        /// 裁剪矩形：文字只画落在矩形内的部分。缺省 = 不裁剪（只受面边界约束）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        clip: Option<PaintRect>,
     },
     /// 图片贴片：绘制在给定矩形内。
     Image {
@@ -617,6 +620,17 @@ pub struct PaintShadow {
 pub struct PaintPoint {
     pub x: f32,
     pub y: f32,
+}
+```
+
+```rust
+// crates/plugin-protocol/src/paint.rs
+/// 面本地矩形（逻辑像素），用于声明绘制裁剪区。
+pub struct PaintRect {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
 }
 ```
 
@@ -3025,7 +3039,7 @@ pub struct SubscribeResult {
 ```rust
 // crates/plugin-abi/src/lib.rs
 /// ABI 版本：宿主与插件不一致即拒绝装载（不兼容就响亮失败，不做兼容层）。
-pub const ABI_VERSION: u32 = 1;
+pub const ABI_VERSION: u32 = 2;
 ```
 
 ```rust

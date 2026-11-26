@@ -5,7 +5,7 @@
 use std::ffi::{c_char, c_void, CStr};
 
 /// ABI 版本：宿主与插件不一致即拒绝装载（不兼容就响亮失败，不做兼容层）。
-pub const ABI_VERSION: u32 = 1;
+pub const ABI_VERSION: u32 = 2;
 
 /// 插件导出的四个符号名。宿主按名解析，导出宏按名声明——两处必须一致。
 pub const CREATE_SYMBOL: &str = "atelyx_plugin_create";
@@ -262,6 +262,10 @@ pub struct AbiText {
     pub align: u32,
     /// 可用宽度：负 = 不换行。
     pub max_width: f32,
+    /// 0 = 无裁剪声明；其余 = `clip` 有效。
+    pub has_clip: u32,
+    /// 裁剪矩形（面本地逻辑像素）：文字只画落在矩形内的部分。
+    pub clip: AbiRect,
 }
 
 /// [`CMD_IMAGE`] 的载荷：`path` / `url` 只在本次回调内有效。

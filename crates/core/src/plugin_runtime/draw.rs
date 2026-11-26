@@ -10,8 +10,8 @@ use atelyx_plugin_protocol::method::{
     self, MarkdownBlock, MarkdownSpan, MeasureTextResult, ThemeResult,
 };
 use atelyx_plugin_protocol::paint::{
-    self, ColorToken, DrawCommand, ImageFit, ImageSource, PaintColor, PaintPoint, PaintShadow,
-    TextAlign, TextFamily, TextWeight,
+    self, ColorToken, DrawCommand, ImageFit, ImageSource, PaintColor, PaintPoint, PaintRect,
+    PaintShadow, TextAlign, TextFamily, TextWeight,
 };
 
 /// 量算请求：借用插件给出的文本，宿主侧不再复制一份。
@@ -518,6 +518,12 @@ unsafe fn command_of(kind: u32, data: *const c_void) -> Result<DrawCommand, Stri
                 family: family_of(text.family),
                 max_width: (text.max_width > 0.0).then_some(text.max_width),
                 align: align_of(text.align),
+                clip: (text.has_clip != 0).then(|| PaintRect {
+                    x: text.clip.x,
+                    y: text.clip.y,
+                    w: text.clip.w,
+                    h: text.clip.h,
+                }),
             }
         }
         abi::CMD_IMAGE => {
@@ -833,5 +839,36 @@ mod tests {
         assert_eq!(rgba("#0f1011"), [0x0f, 0x10, 0x11, 0xff]);
         assert_eq!(rgba("#0f101180"), [0x0f, 0x10, 0x11, 0x80]);
         assert_eq!(rgba("bad"), [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn text_clip_crosses_the_abi() {
+        let color = abi::AbiColor { kind: abi::COLOR_RGBA, token: 0, rgba: [0, 0, 0, 255] };
+        let text = abi::AbiText {
+            x: 4.0,
+            y: -6.0,
+            size: 13.0,
+            content: abi::AbiStr::of("半行"),
+            color,
+            weight: 0,
+            family: 0,
+            align: 0,
+            max_width: -1.0,
+            has_clip: 1,
+            clip: abi::AbiRect { x: 0.0, y: 0.0, w: 200.0, h: 40.0 },
+        };
+        let command = unsafe { command_of(abi::CMD_TEXT, (&text as *const abi::AbiText).cast()) }.unwrap();
+        let DrawCommand::Text { clip, y, .. } = command else {
+            panic!("应为文字指令");
+        };
+        assert_eq!(y, -6.0);
+        assert_eq!(clip, Some(PaintRect { x: 0.0, y: 0.0, w: 200.0, h: 40.0 }));
+
+        let none = abi::AbiText { has_clip: 0, ..text };
+        let command = unsafe { command_of(abi::CMD_TEXT, (&none as *const abi::AbiText).cast()) }.unwrap();
+        let DrawCommand::Text { clip, .. } = command else {
+            panic!("应为文字指令");
+        };
+        assert_eq!(clip, None, "未声明即不裁剪");
     }
 }

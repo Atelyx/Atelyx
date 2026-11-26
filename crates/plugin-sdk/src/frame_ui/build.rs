@@ -169,7 +169,7 @@ impl<'a> BuildCtx<'a> {
 }
 
 /// 自绘画布：区域与裁剪由容器给定，闭包里画指令并登记子区命中。
-/// 指令集没有裁剪，超出 `visible()` 的内容由闭包自己收住；子区命中按声明逆序取最上面的一个。
+/// 形状指令没有裁剪字段，超出 `visible()` 的部分由闭包自己收住；子区命中按声明逆序取最上面的一个。
 pub struct Canvas<'c, 'a> {
     ctx: &'c mut BuildCtx<'a>,
     rect: Rect,
@@ -238,6 +238,7 @@ impl<'c, 'a> Canvas<'c, 'a> {
             family: None,
             max_width: None,
             align: None,
+            clip: None,
         });
     }
 

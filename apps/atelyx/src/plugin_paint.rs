@@ -12,7 +12,8 @@ use iced::widget::canvas::{self, Path as CanvasPath, Stroke};
 use iced::{Color, Point, Rectangle, Size};
 
 use atelyx_core::plugin_runtime::{
-    PaintColor, PaintPoint, DrawCommand, ImageFit, ImageSource, TextAlign, TextFamily, TextWeight,
+    PaintColor, PaintPoint, PaintRect, DrawCommand, ImageFit, ImageSource, TextAlign, TextFamily,
+    TextWeight,
 };
 
 use crate::App;
@@ -166,17 +167,22 @@ impl TextCache {
             family,
             max_width,
             align,
+            clip,
         } = command
         else {
             return;
         };
         let (paragraph, width) = self.entry(content, *size, *weight, *family, *max_width);
         let x = aligned_x(*x, *max_width, *align, width);
+        let clip_bounds = text_clip_bounds(bounds, *clip);
+        if clip_bounds.width <= 0.0 || clip_bounds.height <= 0.0 {
+            return;
+        }
         renderer.fill_paragraph(
             paragraph,
             Point::new(bounds.x + x, bounds.y + *y),
             color(*text_color),
-            bounds,
+            clip_bounds,
         );
     }
 
@@ -281,6 +287,19 @@ fn aligned_x(x: f32, max_width: Option<f32>, align: Option<TextAlign>, width: f3
         (Some(max_width), Some(TextAlign::End)) => x + max_width - width,
         _ => x,
     }
+}
+
+/// 文字的裁剪区：声明了裁剪即取面矩形与裁剪矩形的交集（面本地坐标换算到图层坐标），
+/// 未声明即整面。交集为空时返回零面积矩形，渲染器不画任何字。
+fn text_clip_bounds(bounds: Rectangle, clip: Option<PaintRect>) -> Rectangle {
+    let Some(clip) = clip else {
+        return bounds;
+    };
+    let clip = Rectangle::new(
+        Point::new(bounds.x + clip.x, bounds.y + clip.y),
+        Size::new(clip.w, clip.h),
+    );
+    bounds.intersection(&clip).unwrap_or(Rectangle::new(bounds.position(), Size::ZERO))
 }
 
 fn text_hash(
@@ -476,7 +495,22 @@ mod tests {
             family: None,
             max_width: None,
             align: None,
+            clip: None,
         }
+    }
+
+    #[test]
+    fn text_clip_is_translated_and_intersected_with_the_face() {
+        let face = Rectangle::new(Point::new(20.0, 10.0), Size::new(100.0, 50.0));
+        assert_eq!(text_clip_bounds(face, None), face, "未声明裁剪即整面");
+
+        let clip = PaintRect { x: 0.0, y: 20.0, w: 200.0, h: 40.0 };
+        let bounds = text_clip_bounds(face, Some(clip));
+        assert_eq!(bounds, Rectangle::new(Point::new(20.0, 30.0), Size::new(100.0, 30.0)));
+
+        let outside = PaintRect { x: 300.0, y: 0.0, w: 10.0, h: 10.0 };
+        let empty = text_clip_bounds(face, Some(outside));
+        assert!(empty.width == 0.0 && empty.height == 0.0, "完全在外即零面积");
     }
 
     #[test]

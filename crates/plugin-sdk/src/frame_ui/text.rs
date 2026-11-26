@@ -1,8 +1,9 @@
 //! 输入框内的文字排布：用量算宽度换算光标 / 选区 / 省略，并在光标超出可见宽度时水平滚动窗口。
 
-use atelyx_plugin_protocol::paint::{PaintColor, DrawCommand, TextAlign};
+use atelyx_plugin_protocol::paint::{PaintColor, PaintRect, DrawCommand, TextAlign};
 
 use super::build::BuildCtx;
+use super::geom::Rect;
 use super::metrics::Metrics;
 use super::model::FontSpec;
 
@@ -232,8 +233,31 @@ pub(crate) fn wrapped_height(metrics: &mut Metrics, text: &str, spec: FontSpec, 
     lines as f32 * line_height(metrics, spec)
 }
 
+/// 一块文字与容器可见区求交的结果。
+enum Clipped {
+    /// 整块落在可见区内：不必声明裁剪。
+    Whole,
+    /// 部分可见：裁剪到可见矩形，宿主只丢掉超出部分。
+    Part(PaintRect),
+    /// 完全在外：不画。
+    Hidden,
+}
+
+/// 文字块（`x` / `y` 为左上角）与容器可见区求交。
+/// 部分可见时裁到可见区本身（视口边缘），不按估算出的块尺寸裁——估算高度偏小时会把字尾切掉。
+fn clip_of(block: Rect, clip: Rect) -> Clipped {
+    let visible = block.intersect(clip);
+    if visible.is_empty() {
+        Clipped::Hidden
+    } else if visible == block {
+        Clipped::Whole
+    } else {
+        Clipped::Part(PaintRect { x: clip.x, y: clip.y, w: clip.w, h: clip.h })
+    }
+}
+
 /// 单行文字绘制：`max_width` 给定时文字按该宽度换行（只用于输入框这类定宽单行控件）。
-/// 指令集没有裁剪：文字按整块判断，垂直方向不完整落在可见区内即不画（半截文字会串到相邻区域）。
+/// 与视口相交时按可见矩形裁剪，半行文字只丢超出部分。
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn paint(
     ctx: &mut BuildCtx<'_>,
@@ -247,9 +271,10 @@ pub(crate) fn paint(
     clip: super::geom::Rect,
 ) {
     let height = ctx.metrics.measure(content, spec, max_width).height.max(spec.size * 1.2);
-    if y < clip.y || y + height > clip.bottom() + 0.5 {
+    let block = Rect::new(x, y, max_width.unwrap_or(clip.w), height);
+    let Some(command_clip) = clip_command(clip_of(block, clip)) else {
         return;
-    }
+    };
     ctx.draw(DrawCommand::Text {
         x,
         y,
@@ -260,6 +285,7 @@ pub(crate) fn paint(
         family: spec.family,
         max_width,
         align,
+        clip: command_clip,
     });
 }
 
@@ -276,9 +302,10 @@ pub(crate) fn paint_line(
     height: f32,
     clip: super::geom::Rect,
 ) {
-    if y < clip.y || y + height > clip.bottom() + 0.5 {
+    let block = Rect::new(x, y, (clip.right() - x).max(0.0), height);
+    let Some(command_clip) = clip_command(clip_of(block, clip)) else {
         return;
-    }
+    };
     ctx.draw(DrawCommand::Text {
         x,
         y,
@@ -289,7 +316,17 @@ pub(crate) fn paint_line(
         family: spec.family,
         max_width: None,
         align: None,
+        clip: command_clip,
     });
+}
+
+/// 求交结果 → 指令里的裁剪字段；完全不可见即 `None`（调用方据此跳过绘制）。
+fn clip_command(outcome: Clipped) -> Option<Option<PaintRect>> {
+    match outcome {
+        Clipped::Hidden => None,
+        Clipped::Whole => Some(None),
+        Clipped::Part(clip) => Some(Some(clip)),
+    }
 }
 
 #[cfg(test)]
@@ -355,5 +392,22 @@ mod tests {
         let mut metrics = Metrics::default();
         assert_eq!(caret_at_x(&mut metrics, "abcd", font(), 6.0), 1);
         assert_eq!(caret_at_x(&mut metrics, "abcd", font(), 100.0), 4);
+    }
+
+    #[test]
+    fn partially_visible_line_is_still_drawn_with_a_clip() {
+        let clip = Rect::new(0.0, 10.0, 200.0, 40.0);
+        // 行高 20、y = 0：上半在视口外，仍应画出并只裁掉超出视口的部分
+        let half_above = Rect::new(5.0, 0.0, 190.0, 20.0);
+        assert_eq!(
+            clip_command(clip_of(half_above, clip)),
+            Some(Some(PaintRect { x: 0.0, y: 10.0, w: 200.0, h: 40.0 }))
+        );
+        // 整行在内：不声明裁剪
+        let inside = Rect::new(5.0, 20.0, 190.0, 20.0);
+        assert_eq!(clip_command(clip_of(inside, clip)), Some(None));
+        // 整行在外：不画
+        let outside = Rect::new(5.0, 60.0, 190.0, 20.0);
+        assert_eq!(clip_command(clip_of(outside, clip)), None);
     }
 }

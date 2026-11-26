@@ -53,7 +53,7 @@ pub use atelyx_plugin_protocol::frame::{
 };
 pub use atelyx_plugin_protocol::paint::{
     layout_width, ColorToken, DrawCommand, ImageFit, ImageSource, PaintColor, PaintPoint,
-    PaintShadow, TextAlign, TextFamily, TextWeight, TEXT_LAYOUT_STEP,
+    PaintRect, PaintShadow, TextAlign, TextFamily, TextWeight, TEXT_LAYOUT_STEP,
 };
 pub use atelyx_plugin_protocol::event::{
     ChatChangeKind, ChatChangedPayload, FileChangeKind, FileChangedPayload,

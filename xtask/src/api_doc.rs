@@ -101,6 +101,7 @@ const SECTIONS: &[Section] = &[
             "paint.rs": "PaintColor",
             "paint.rs": "PaintShadow",
             "paint.rs": "PaintPoint",
+            "paint.rs": "PaintRect",
             "paint.rs": "TextAlign",
             "paint.rs": "TextFamily",
             "paint.rs": "TextWeight",
