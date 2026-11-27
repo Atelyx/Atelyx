@@ -1,5 +1,6 @@
 //! 笔记正文三方合并（纯函数，不依赖 CRDT）：以最近落盘文本为共同祖先，
 //! 把两侧差异都保留；冲突粒度为单个差异块（hunk 原子整体），重叠时按指定侧取舍。
+//! 差异块先按行定位改动，再在块内按字符细化，同一行里互不相邻的改动可合流。
 
 /// 单个差异块：`base` 的 `[at, at + remove)` 字节区间替换为 `insert`（`remove = 0` 为纯插入）。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -210,12 +211,51 @@ fn hunks_from_tokens_at(a: &[&str], b: &[&str], base_at: usize) -> Vec<TextHunk>
     hunks
 }
 
-/// 求 `base → next` 的差异块（相等返回空表）。
+/// 字符级细化上限：改动块与替换文本都在此长度内才在块内再按字符求差；超出保持整块替换
+/// （字符 LCS 表代价 O(n*m)，上限内约 1200² 格）。
+const MAX_REFINE_CHARS: usize = 1200;
+
+/// 按单字符切 token（`token_offsets` 累加仍得原字节偏移，多字节字符也落在字符边界）。
+fn tokenize_chars(text: &str) -> Vec<&str> {
+    text.char_indices()
+        .map(|(i, c)| &text[i..i + c.len_utf8()])
+        .collect()
+}
+
+/// 行级 hunk 细化到字符级：行级差分只按整行定位改动，同一行里互不相邻的两处改动会并成
+/// 一个替换块——两侧各改一处就被判成区间重叠，协作笔记里同改一段必然拒写。块内再按字符
+/// 求差后两处改动各自成块，不相邻即可合流；长块保持整块只让粒度变粗，不改坏结果。
+fn refine_hunks(base: &str, hunks: Vec<TextHunk>) -> Vec<TextHunk> {
+    let mut out = Vec::with_capacity(hunks.len());
+    for hunk in hunks {
+        let region = &base[hunk.at..hunk.at + hunk.remove];
+        // 纯插入 / 纯删除不会被字符差分再拆开，只有替换块需要细化
+        if hunk.remove == 0
+            || hunk.insert.is_empty()
+            || region.chars().count() > MAX_REFINE_CHARS
+            || hunk.insert.chars().count() > MAX_REFINE_CHARS
+        {
+            out.push(hunk);
+            continue;
+        }
+        let refined =
+            hunks_from_tokens_at(&tokenize_chars(region), &tokenize_chars(&hunk.insert), hunk.at);
+        if refined.is_empty() {
+            // 非空改动块恒产出至少一块；空结果只可能来自不变量被破坏，退回整块不丢内容
+            out.push(hunk);
+        } else {
+            out.extend(refined);
+        }
+    }
+    out
+}
+
+/// 求 `base → next` 的差异块（相等返回空表）。先按行定位改动，再在改动块内细化到字符。
 pub fn diff_hunks(base: &str, next: &str) -> Vec<TextHunk> {
     if base == next {
         return Vec::new();
     }
-    hunks_from_tokens(&tokenize(base), &tokenize(next))
+    refine_hunks(base, hunks_from_tokens(&tokenize(base), &tokenize(next)))
 }
 
 /// 两条同锚点纯插入是否共享行：共享行时按并集拼接会把同一行写成两遍（静默重复内容），
@@ -223,6 +263,22 @@ pub fn diff_hunks(base: &str, next: &str) -> Vec<TextHunk> {
 fn inserts_share_lines(a: &str, b: &str) -> bool {
     let left: std::collections::HashSet<&str> = tokenize(a).into_iter().collect();
     tokenize(b).into_iter().any(|line| left.contains(line))
+}
+
+/// 同锚点两条纯插入该落哪一份：一侧的文本完整出现在另一侧（收敛后的正文已含对端已落盘
+/// 那段，本端的新字可能落在它的前后或中间）时取更长一份——两侧文本都在，也不会写两遍；
+/// 两条互不包含的插入返回 None，由调用方按序拼接。
+fn dedupe_anchor_insert<'a>(a: &'a str, b: &'a str) -> Option<&'a str> {
+    if a == b {
+        return Some(a);
+    }
+    if a.len() > b.len() && a.contains(b) {
+        return Some(a);
+    }
+    if b.len() > a.len() && b.contains(a) {
+        return Some(b);
+    }
+    None
 }
 
 /// 保存落盘决策（本地写盘与空间整文上行同一条策略）。
@@ -252,10 +308,13 @@ fn hunks_overlap(a: &TextHunk, b: &TextHunk) -> bool {
     if a.remove > 0 && b.remove > 0 {
         return a.at < b.at + b.remove && b.at < a.at + a.remove;
     }
-    // 同一锚点上的纯插入：内容互不相同且不共享行才按序拼接（内容都保留）；
-    // 完全相同的插入由 merge3 只落一份，共享行的插入判冲突（拼接会重复）
+    // 同一锚点上的纯插入：一侧完整含另一侧时只落更长一份（收敛后的正文含对端内容）；
+    // 独立插入按序拼接（内容都保留），共享行的独立插入判冲突（拼接会重复）
     if a.remove == 0 && b.remove == 0 {
-        return a.at == b.at && a.insert != b.insert && inserts_share_lines(&a.insert, &b.insert);
+        if a.at != b.at || dedupe_anchor_insert(&a.insert, &b.insert).is_some() {
+            return false;
+        }
+        return inserts_share_lines(&a.insert, &b.insert);
     }
     let (insert, remove) = if a.remove == 0 { (a, b) } else { (b, a) };
     // 落在对方区间端点上的插入不冲突：先插后删（顺序分支的「同起点先插」）即两侧内容都保留
@@ -300,6 +359,18 @@ pub fn merge3(base: &str, ours: &str, theirs: &str, side: ConflictSide) -> Strin
         let ours_hunk = our_hunks.get(i);
         let theirs_hunk = their_hunks.get(j);
         if let (Some(oh), Some(th)) = (ours_hunk, theirs_hunk) {
+            // 同锚点两条纯插入：一侧完整含另一侧（收敛后本端已含对端那段）时只落更长一份
+            // ——拼接会把共有的文本写两遍
+            if oh.at == th.at && oh.remove == 0 && th.remove == 0 {
+                if let Some(text) = dedupe_anchor_insert(&oh.insert, &th.insert) {
+                    out.push_str(&base[pos..oh.at]);
+                    out.push_str(text);
+                    pos = oh.at;
+                    i += 1;
+                    j += 1;
+                    continue;
+                }
+            }
             // 两侧完全相同的改动只落一份：同锚点纯插入已不算区间冲突，不能再靠冲突分支去重
             if oh.at == th.at && oh.remove == th.remove && oh.insert == th.insert {
                 out.push_str(&base[pos..oh.at]);
@@ -369,14 +440,14 @@ mod tests {
     #[test]
     fn 差分与合并的基本还原() {
         assert!(diff_hunks("abc", "abc").is_empty());
-        // 无换行文本为单 token：差异按 token 粒度整段替换
+        // 先按行定位改动，再在改动块内按字符细化：只替换变了的字符，公共前后缀不进 hunk
         assert_eq!(
             diff_hunks("abc", "abXc"),
-            vec![TextHunk { at: 0, remove: 3, insert: "abXc".into() }]
+            vec![TextHunk { at: 2, remove: 0, insert: "X".into() }]
         );
         assert_eq!(
             diff_hunks("a\nb\nc\n", "a\nX\nc\n"),
-            vec![TextHunk { at: 2, remove: 2, insert: "X\n".into() }]
+            vec![TextHunk { at: 2, remove: 1, insert: "X".into() }]
         );
         // 拼接 token 恒等于原文
         assert_eq!(tokenize("a\r\nb\nc").concat(), "a\r\nb\nc");
@@ -417,11 +488,12 @@ mod tests {
 
     #[test]
     fn 同区间冲突按侧取舍() {
+        // 同一段文字被两侧改成不同内容：删除区间重叠，无法两侧都保留，按侧取舍
         let base = "aa\nbb\ncc\n";
-        let ours = base.replace("bb", "ours-bb");
-        let theirs = base.replace("bb", "theirs-bb");
-        assert_eq!(merge3(base, &ours, &theirs, ConflictSide::Theirs), "aa\ntheirs-bb\ncc\n");
-        assert_eq!(merge3(base, &ours, &theirs, ConflictSide::Ours), "aa\nours-bb\ncc\n");
+        let ours = "aa\nOurs\ncc\n";
+        let theirs = "aa\nTheirs\ncc\n";
+        assert_eq!(merge3(base, &ours, &theirs, ConflictSide::Theirs), "aa\nTheirs\ncc\n");
+        assert_eq!(merge3(base, &ours, &theirs, ConflictSide::Ours), "aa\nOurs\ncc\n");
     }
 
     #[test]
@@ -492,15 +564,128 @@ b
         assert_eq!(plan_save(base, "a\nX\nc\n", "a\nY\nc\n"), SavePlan::Conflict);
     }
 
+    /// 两人在同一段落（同一行）的不同位置各改一处：行级差分把整行并成一个替换块，
+    /// 两侧块区间重叠被误判冲突——协作笔记里同改一段就必然保存失败。块内按字符再差分后
+    /// 两处改动各成一块，互不重叠即合流保留。
+    #[test]
+    fn 同一行两端改动合流而不判冲突() {
+        let base = "共享段落\n";
+        let ours = "共享段落甲\n";
+        let theirs = "共享段落乙\n";
+        assert!(!merge3_conflict(base, ours, theirs), "两处改动不相邻，不是冲突");
+        assert_eq!(merge3(base, ours, theirs, ConflictSide::Ours), "共享段落甲乙\n");
+        assert_eq!(
+            plan_save(base, ours, theirs),
+            SavePlan::Merge("共享段落甲乙\n".into()),
+            "保存决策必须给合流而不是拒写"
+        );
+
+        // 单行正文（无换行）两端各追加：行级差分同样是整行替换
+        assert_eq!(
+            plan_save("记录", "记录甲", "记录乙"),
+            SavePlan::Merge("记录甲乙".into())
+        );
+
+        // 长段落里两处相隔很远的改动：必须各自成块
+        let long = "开头一句。中间这一句很长，用来把两处改动隔开。结尾一句。";
+        let ours = long.replace("开头一句。", "开头一句（甲）。");
+        let theirs = long.replace("结尾一句。", "结尾一句（乙）。");
+        assert!(!merge3_conflict(long, &ours, &theirs));
+        assert_eq!(
+            merge3(long, &ours, &theirs, ConflictSide::Ours),
+            "开头一句（甲）。中间这一句很长，用来把两处改动隔开。结尾一句（乙）。"
+        );
+    }
+
+    /// 复现「多人同时编辑同一篇笔记 → 并发保存失败」的连续多轮：同一段落里两端各改一处，
+    /// 每轮保存都必须给出合流结果且双方改动都在（不拒写、不重复写）。
+    #[test]
+    fn 多人同段落连续多轮保存都能合流() {
+        let t0 = "会议纪要\n\n今天讨论了排期和预算两个议题。\n";
+        // 甲改段首、乙改段尾：同一行两端，彼此都没收到对方改动
+        let a = t0.replacen("今天讨论", "今天上午讨论", 1);
+        let b = t0.replacen("两个议题。", "两个议题，下周一确认。", 1);
+        // 甲先落盘；乙带旧基线到达，此时服务端已是甲的版本
+        assert_eq!(plan_save(t0, &a, t0), SavePlan::Write(a.clone()));
+        let merged = match plan_save(t0, &b, &a) {
+            SavePlan::Merge(text) => text,
+            other => panic!("同一段落的并发保存不得拒写：{other:?}"),
+        };
+        assert_eq!(
+            merged,
+            "会议纪要\n\n今天上午讨论了排期和预算两个议题，下周一确认。\n"
+        );
+
+        // 第二轮：都收到合流结果后继续在本段两处各自补写，落盘顺序重演
+        let a2 = merged.replacen("今天上午讨论", "今天上午讨论（甲）", 1);
+        let b2 = merged.replacen("下周一确认。", "下周一确认（乙）。", 1);
+        assert_eq!(plan_save(&merged, &a2, &merged), SavePlan::Write(a2.clone()));
+        let merged2 = match plan_save(&merged, &b2, &a2) {
+            SavePlan::Merge(text) => text,
+            other => panic!("第二轮并发保存不得拒写：{other:?}"),
+        };
+        assert!(merged2.contains("今天上午讨论（甲）"), "甲的改动不能丢：{merged2}");
+        assert!(merged2.contains("下周一确认（乙）。"), "乙的改动不能丢：{merged2}");
+
+        // 第三轮：段落末尾同一锚点各自追加，对端那句已含在本端内容里 → 只落一份
+        let converged = format!("{merged2}新增丙。\n新增丁。\n");
+        let peer = format!("{merged2}新增丙。\n");
+        assert_eq!(
+            plan_save(&merged2, &converged, &peer),
+            SavePlan::Merge(converged.clone())
+        );
+    }
+
+    /// 字符级细化只拆开互不相邻的改动，同一段文字被两侧改成不同内容仍是冲突：
+    /// 拒绝写入让用户的输入留在编辑面，不得替它选边。
+    #[test]
+    fn 同字符区间两侧改写仍判冲突() {
+        assert_eq!(plan_save("abc", "xbc", "ybc"), SavePlan::Conflict);
+        assert_eq!(plan_save("共享段落\n", "共享甲\n", "共享乙\n"), SavePlan::Conflict);
+    }
+
     #[test]
     fn 同锚点插入共享行判冲突() {
-        // 两侧同一行后各插入一段，但两段都含 "X"：按并集拼会写出两个 X，判冲突交调用方拒绝
+        // 两侧同一行后各插入一段，两段共享一行但不是前缀关系：按并集拼会写出两个 "X"，
+        // 判冲突交调用方拒绝
         let base = "a\nb\n";
         let ours = "a\nX\nY\nb\n";
-        let theirs = "a\nX\nb\n";
+        let theirs = "a\nT\nX\nb\n";
         assert!(merge3_conflict(base, ours, theirs));
         // 不共享行仍按序拼接（两侧内容都保留）
         assert!(!merge3_conflict(base, "a\nP\nb\n", "a\nQ\nb\n"));
+    }
+
+    /// 协作收敛后本端内容已含对端已落盘的那段（一侧完整含另一侧）：同锚点只落更长一份，
+    /// 不得拼接成重复文本，也不得判冲突拒写。
+    #[test]
+    fn 同锚点包含关系只落更长一份() {
+        let base = "a\nb\n";
+        let ours = "a\nX\nY\nb\n";
+        let theirs = "a\nX\nb\n";
+        assert!(!merge3_conflict(base, ours, theirs));
+        assert_eq!(merge3(base, ours, theirs, ConflictSide::Ours), "a\nX\nY\nb\n");
+        assert_eq!(
+            plan_save(base, ours, theirs),
+            SavePlan::Merge("a\nX\nY\nb\n".into())
+        );
+
+        // 段落末尾同一锚点各自追加：对端那句已含在本端内容里
+        let base = "段落\n";
+        let theirs = "段落甲\n";
+        let ours = "段落甲乙\n";
+        assert_eq!(plan_save(base, ours, theirs), SavePlan::Merge("段落甲乙\n".into()));
+        // 反过来（本端落后于对端）同样取更长一份，两侧文本都在
+        assert_eq!(plan_save(base, theirs, ours), SavePlan::Merge("段落甲乙\n".into()));
+
+        // 对端在锚点处先插入「甲」并已落盘，本端随后在这段文字前后各写一句：
+        // 本端插入完整含对端那段（不限于前缀），仍只落一份
+        let base = "段落\n";
+        let theirs = "段落甲\n";
+        let ours = "段落乙甲丙\n";
+        assert_eq!(plan_save(base, ours, theirs), SavePlan::Merge("段落乙甲丙\n".into()));
+        let ours = "段落乙甲\n";
+        assert_eq!(plan_save(base, ours, theirs), SavePlan::Merge("段落乙甲\n".into()));
     }
 
     #[test]
@@ -614,10 +799,15 @@ c
         );
         let our_hunks = diff_hunks(&base, &ours);
         assert_eq!(our_hunks.len(), 2, "两端各一处改动：{:?}", our_hunks);
-        // 关键：每个 hunk 只覆盖被改的那一行，而不是把中间整段一起替换掉
-        assert_eq!(our_hunks[0].remove, "b\n".len(), "hunk 不得退化成整段替换");
-        assert_eq!(our_hunks[1].remove, "b\n".len(), "hunk 不得退化成整段替换");
-        assert_eq!(diff_hunks(&base, &theirs).len(), 1);
+        // 关键：每个 hunk 只覆盖被改的那一行内变化的字符，而不是把中间整段一起替换掉
+        for hunk in &our_hunks {
+            assert!(
+                !base[hunk.at..hunk.at + hunk.remove].contains('\n'),
+                "hunk 不得退化成整段替换：{:?}",
+                hunk
+            );
+        }
+        assert!(!diff_hunks(&base, &theirs).is_empty());
         assert!(!merge3_conflict(&base, &ours, &theirs), "三处改动互不重叠，不是冲突");
         let mut expected = lines.clone();
         expected[2 * 13] = "ours\n".into();

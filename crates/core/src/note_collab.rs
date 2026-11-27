@@ -838,10 +838,11 @@ mod tests {
         // 合法对端的同 id 同正文通告解除拉黑；回通告被上面的限频拦下，仅解除实证结论
         let out = a.apply_remote("p", "f.md", &encode_note_baseline(&forged, text, text));
         assert!(out.reply.is_empty() && !out.doc_changed);
-        // 解除后其 sync 帧恢复应用：delete set 按 ID 落在本端同区间 struct 上，正文被对端当前文本替换
+        // 解除后其 sync 帧恢复应用：增量只带变化的字符（这里是在 UTF-16 偏移 2 插入「改」），
+        // 按 clock 落在本端同一偏移。本例是伪造的异正文基线，断言只锁「帧被应用」，不锁正文
         let out = a.apply_remote("p", "f.md", &sync_frame(&forged, &p_msg));
         assert!(out.doc_changed);
-        assert_eq!(a.current_text().as_deref(), Some("x1改\n"));
+        assert_eq!(a.current_text().as_deref(), Some("v1改\n"));
     }
 
     #[test]

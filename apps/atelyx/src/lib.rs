@@ -1328,6 +1328,8 @@ enum Message {
     DividerAdjust(bool, bool),
     /// 保存失败徽标的关闭。
     SaveErrorDismiss,
+    /// 保存失败徽标：放弃未落盘的本地改动并按最新内容重载（首击进入确认，再击执行）。
+    DiscardLocalEdits,
     /// 未实现功能的占位通知。
     NotImplemented(&'static str),
     /// 编辑面就地拒绝的操作（如剪贴板不可用时取消剪切）：只给一条提醒，不改正文。
@@ -2100,6 +2102,8 @@ pub struct App {
     pub dirty: bool,
     /// 上次保存失败原因（None = 无；保存成功或再次编辑即清除）。
     pub save_error: Option<String>,
+    /// 「放弃改动」的二次确认：记它当时确认的那条错误，错误位一换即失效，避免误击丢草稿。
+    pub(crate) save_error_discard_armed: Option<String>,
     /// 内容防抖期限（五条链共用）：每次内容变更覆盖为 now + 防抖时长，即尾沿后推。
     pub(crate) autosave_deadline: Option<Instant>,
     /// 失败重试期限（五条链共用）：只取最早，后失败 / 后变更的链不得把已排的更早期限往后推。
@@ -2508,6 +2512,7 @@ impl App {
                 props: PropsPanel::default(),
                 dirty: false,
                 save_error: None,
+                save_error_discard_armed: None,
                 autosave_deadline: None,
                 autosave_retry_deadline: None,
                 autosave_timer: false,
@@ -2935,7 +2940,8 @@ impl App {
             | Message::CopyCode(..)
             | Message::CopyText(..)
             | Message::NoteTitleRenameStart(..)
-            | Message::SaveErrorDismiss => self.handle_note(message),
+            | Message::SaveErrorDismiss
+            | Message::DiscardLocalEdits => self.handle_note(message),
             Message::Props(m) => {
                 // 画布前台（属性槽未在编辑）时 Tab = 建子卡并连线；其余情况 Tab 仍归属性槽移动
                 if self.props.editing.is_none()
@@ -3770,6 +3776,7 @@ impl App {
             }
             Message::Save => {
                 // Ctrl+S：单元格编辑先提交，笔记 / 表格 / 画布各自手动保存（无打开内容 = 提示）
+                self.save_error_discard_armed = None;
                 table_actions::commit_edit(self);
                 let mut task = Task::none();
                 if self.ui.last_note_file.is_some() {
@@ -3988,6 +3995,7 @@ impl App {
                 // 回滚没写进磁盘：Restore 版本作废（不得留一条从未落盘的回滚记录）
                 self.pending_restore_note = None;
                 self.save_error = Some(e);
+                self.save_error_discard_armed = None;
                 Task::none()
             }
             _ => Task::none(),
@@ -4246,8 +4254,10 @@ impl App {
             }
             Message::SaveErrorDismiss => {
                 self.save_error = None;
+                self.save_error_discard_armed = None;
                 Task::none()
             }
+            Message::DiscardLocalEdits => self.discard_local_edits(),
             _ => Task::none(),
         }
     }
@@ -4930,7 +4940,7 @@ impl App {
                 if matches!(self.repo_kind, RepoKind::Space(_)) {
                     space_actions::collab_note_loaded(self, &rel);
                 }
-                self.refresh_backlinks().chain(self.reload_history())
+                self.refresh_backlinks().chain(self.reload_history()).chain(self.after_any_flush())
             }
             Message::FileLoaded(gen, rel, Err(e)) => {
                 // 只有当前文件、当前世代的载入失败才清编辑面：过期回执（快速连点文件 /
@@ -4958,7 +4968,8 @@ impl App {
                 self.remote_cursors.clear();
                 self.note_load_error = Some(e.clone());
                 self.notify(NoticeLevel::Error, e);
-                Task::none()
+                // 载入失败同样收尾：「放弃改动」后挂起的关窗 / 切换不得因一次重读失败继续悬挂
+                self.after_any_flush()
             }
             Message::FileCount(gen, Ok(n)) => {
                 if gen != self.epoch() {
@@ -6873,6 +6884,34 @@ impl App {
         )
     }
 
+    /// 保存失败后的逃生口：放弃未落盘的本地改动，按最新正文重载当前笔记（空间模式连同
+    /// 协作文档与合流基线一起重建）。首击只进入确认；有在途保存时不执行——回执会把被放弃的
+    /// 草稿写回编辑面。
+    fn discard_local_edits(&mut self) -> Task<Message> {
+        let Some(error) = self.save_error.clone() else { return Task::none() };
+        if self.save_error_discard_armed.as_deref() != Some(error.as_str()) {
+            self.save_error_discard_armed = Some(error);
+            return Task::none();
+        }
+        self.save_error_discard_armed = None;
+        let Some(rel) = self.ui.last_note_file.clone() else { return Task::none() };
+        if !self.dirty {
+            return Task::none();
+        }
+        let key = (self.epoch(), rel.clone());
+        if self.note_save_inflight.contains(&key) || self.space_note_save_inflight.contains(&key) {
+            self.notify(NoticeLevel::Info, "正在保存，请稍后再放弃");
+            return Task::none();
+        }
+        // 失败记账与待续 Flush 作废：重载落地前不得把即将放弃的草稿再提交一次
+        clear_save_failure(&mut self.save_retry, &rel);
+        self.note_save_flush_queued.retain(|entry| entry != &key);
+        self.space_note_save_flush_queued.retain(|entry| entry != &key);
+        self.notify(NoticeLevel::Info, "已放弃本地改动，正在载入最新内容");
+        // 重开同一文件 = 以最新正文重建；脏态、错误位与挂起动作的收尾见载入回执
+        self.begin_note_load(&rel)
+    }
+
     /// 进入笔记载入：先把上一文件的会话态复位到「空正文、只读、无脏」，再发起读盘。
     /// 载入在途期间编辑面必须是空正文且属性面板不接受输入——否则 Ctrl+S / 属性提交会拿
     /// 上一文件的内容写进新路径。载入回执（FileLoaded 成功或失败）负责解除载入态。
@@ -6904,6 +6943,7 @@ impl App {
         self.note_selection = None;
         self.dirty = false;
         self.save_error = None;
+        self.save_error_discard_armed = None;
         self.note_edit_caret_pending = false;
         // 回滚提示与待记版本属于上一文件：换文档后不得再挂到新文件上
         self.history_restore_pending = false;
@@ -10684,6 +10724,79 @@ mod file_drop_tests {
         );
         assert!(app.notifications.is_empty(), "同一条错误不再重复提示");
         assert!(again.retry_in.is_none(), "冲突始终不排重试");
+    }
+
+    /// 保存失败徽标「放弃改动」：首击只转确认态，再击才丢草稿；失败记账与待续 Flush
+    /// 一并作废，协作文档与合流基线交给重载回执按最新正文重建。
+    #[test]
+    fn discard_edits_needs_confirm_and_clears_save_state() {
+        let (mut app, _boot) = super::App::boot();
+        let gen = app.epoch();
+        let message = "文档有并发冲突，本次保存未写入，请稍后重试";
+        app.ui.last_note_file = Some("a.md".to_string());
+        app.note_text = "本端草稿\n".to_string();
+        app.dirty = true;
+        app.save_error = Some(message.to_string());
+        app.note_save_flush_queued.push((gen, "a.md".to_string()));
+        app.space_note_save_flush_queued.push((gen, "a.md".to_string()));
+        super::plan_save_failure(&mut app.save_retry, "a.md", message, false);
+
+        let _ = app.handle_note(super::Message::DiscardLocalEdits);
+        assert!(app.save_error_discard_armed.is_some(), "首击只进入确认");
+        assert!(app.dirty, "确认前不得丢正文");
+        assert!(app.note_text.contains("草稿"));
+
+        let _ = app.handle_note(super::Message::DiscardLocalEdits);
+        assert!(!app.dirty, "确认后草稿作废");
+        assert!(app.save_error.is_none(), "错误位随放弃清除");
+        assert!(app.note_save_flush_queued.is_empty());
+        assert!(app.space_note_save_flush_queued.is_empty());
+        assert!(crate::save_failure(&app.save_retry, "a.md").is_none(), "失败记账作废");
+        assert!(
+            app.note_collab.is_none() && app.note_collab_file.is_none(),
+            "协作文档交给重载回执按最新正文重建"
+        );
+    }
+
+    /// 确认态绑定当时那条错误：错误换掉后一次点击只重新确认，不得丢草稿。
+    #[test]
+    fn discard_confirmation_does_not_carry_over_to_another_error() {
+        let (mut app, _boot) = super::App::boot();
+        app.ui.last_note_file = Some("a.md".to_string());
+        app.dirty = true;
+        app.save_error = Some("第一条错误".to_string());
+        let _ = app.handle_note(super::Message::DiscardLocalEdits);
+        app.save_error = Some("第二条错误".to_string());
+        let _ = app.handle_note(super::Message::DiscardLocalEdits);
+        assert!(app.dirty, "换了错误必须重新确认");
+        assert_eq!(app.save_error_discard_armed.as_deref(), Some("第二条错误"));
+    }
+
+    /// 放弃改动后重载落地即放行此前因脏挂起的关窗（不能既不能保存也不能退出）；
+    /// 有保存在途时拒绝放弃——回执会把被放弃的草稿写回编辑面。
+    #[test]
+    fn discard_releases_pending_close_but_not_while_saving() {
+        let (mut app, _boot) = super::App::boot();
+        let gen = app.epoch();
+        app.ui.last_note_file = Some("a.md".to_string());
+        app.note_text = "草稿\n".to_string();
+        app.dirty = true;
+        app.save_error = Some("文档有并发冲突，本次保存未写入，请稍后重试".to_string());
+        app.flush_pending = Some(super::PendingAfterFlush::CloseMain(iced::window::Id::unique()));
+        app.space_note_save_inflight.push((gen, "a.md".to_string()));
+
+        let _ = app.handle_note(super::Message::DiscardLocalEdits);
+        let _ = app.handle_note(super::Message::DiscardLocalEdits);
+        assert!(app.dirty, "在途保存未回执时不得放弃");
+        assert!(app.flush_pending.is_some());
+
+        // 回执结清后再放弃：草稿作废，载入回执放行挂起的关窗
+        app.space_note_save_inflight.clear();
+        let _ = app.handle_note(super::Message::DiscardLocalEdits);
+        let _ = app.handle_note(super::Message::DiscardLocalEdits);
+        assert!(!app.dirty);
+        let _ = app.after_any_flush();
+        assert!(app.flush_pending.is_none(), "放弃后挂起的关窗必须放行");
     }
 
     /// 真实入口：本地画布成功回执必须清掉全局失败记账——失败 → 重试成功 → 再同型失败，

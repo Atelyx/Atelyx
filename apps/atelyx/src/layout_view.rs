@@ -1571,42 +1571,63 @@ fn panel_tab<'a>(
     .into()
 }
 
-/// 笔记保存状态徽标：错误 = ErrorPill（红调底 + 重试/关闭），未保存 = 圆点徽标。
+/// 笔记保存状态徽标：错误 = ErrorPill（红调底 + 重试 / 放弃改动 / 关闭），未保存 = 圆点徽标。
 fn note_status_pill(app: &App) -> Option<Element<'static, Message>> {
     app.ui.last_note_file.as_ref()?;
-    if app.save_error.is_some() {
-        Some(
-            container(
-                row![
-                    text(ellipsize_estimated(
-                        app.save_error.as_deref().unwrap_or("保存失败"),
-                        160.0,
-                        11.0,
-                    ))
-                    .size(pal::fs_micro())
+    if let Some(err) = app.save_error.as_deref() {
+        // 脏态多一个「放弃改动」，错误文案让出宽度，免得窄面板把动作挤出可视区
+        let room = if app.dirty { 120.0 } else { 160.0 };
+        let mut actions = row![
+            text(ellipsize_estimated(err, room, 11.0))
+                .size(pal::fs_micro())
+                .color(pal::DANGER),
+            button(text("重试").size(pal::fs_micro()).color(pal::DANGER))
+                .padding(Padding::ZERO.horizontal(6.0).vertical(1.0))
+                .style(|_t, _s| button::Style {
+                    background: Some(pal::DANGER.scale_alpha(0.2).into()),
+                    border: border::rounded(pal::RADIUS_XS),
+                    ..Default::default()
+                })
+                .on_press(Message::Save),
+        ]
+        .spacing(4);
+        // 放弃改动会丢掉未落盘正文：首击转成确认态，再击才执行
+        if app.dirty {
+            let armed = app.save_error_discard_armed.is_some();
+            actions = actions.push(
+                button(
+                    text(if armed { "确认放弃" } else { "放弃改动" })
+                        .size(pal::fs_micro())
                         .color(pal::DANGER),
-                    button(text("重试").size(pal::fs_micro()).color(pal::DANGER))
-                        .padding(Padding::ZERO.horizontal(6.0).vertical(1.0))
-                        .style(|_t, _s| button::Style {
-                            background: Some(pal::DANGER.scale_alpha(0.2).into()),
-                            border: border::rounded(pal::RADIUS_XS),
-                            ..Default::default()
-                        })
-                        .on_press(Message::Save),
-                    button(icon("x", 11.0, pal::DANGER))
-                        .padding(1.0)
-                        .style(|_t, _s| button::Style::default())
-                        .on_press(Message::SaveErrorDismiss),
-                ]
-                .spacing(4),
-            )
-            .padding(Padding::ZERO.horizontal(6.0).vertical(2.0))
-            .style(|_t| Style {
-                background: Some(pal::DANGER.scale_alpha(0.12).into()),
-                border: border::rounded(pal::RADIUS_XS),
-                ..Style::default()
-            })
-            .into(),
+                )
+                .padding(Padding::ZERO.horizontal(6.0).vertical(1.0))
+                .style(move |_t, _s| button::Style {
+                    background: Some(
+                        pal::DANGER
+                            .scale_alpha(if armed { 0.4 } else { 0.2 })
+                            .into(),
+                    ),
+                    border: border::rounded(pal::RADIUS_XS),
+                    ..Default::default()
+                })
+                .on_press(Message::DiscardLocalEdits),
+            );
+        }
+        actions = actions.push(
+            button(icon("x", 11.0, pal::DANGER))
+                .padding(1.0)
+                .style(|_t, _s| button::Style::default())
+                .on_press(Message::SaveErrorDismiss),
+        );
+        Some(
+            container(actions)
+                .padding(Padding::ZERO.horizontal(6.0).vertical(2.0))
+                .style(|_t| Style {
+                    background: Some(pal::DANGER.scale_alpha(0.12).into()),
+                    border: border::rounded(pal::RADIUS_XS),
+                    ..Style::default()
+                })
+                .into(),
         )
     } else if app.dirty {
         Some(controls::status_pill(controls::PillStatus::Pending, "未保存"))

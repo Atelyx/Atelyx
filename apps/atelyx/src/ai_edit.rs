@@ -613,6 +613,7 @@ pub fn on_done(
     }
     if let Some(error) = settle.save_error {
         app.save_error = error;
+        app.save_error_discard_armed = None;
     }
     match err {
         None => {
