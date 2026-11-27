@@ -943,7 +943,20 @@ fn on_press(app: &mut App, pos: iced::Point, size: iced::Size) -> Task<Message> 
         s.redraw();
         return Task::none();
     }
-    match hit_card(&s.data, world) {
+    let card_hit = hit_card(&s.data, world);
+    // 只在空白或分组体上才判连线（卡体按下按卡处理；分组是容器，组内连线要能点中）
+    let over_group = card_hit.is_some_and(|i| s.data.nodes[i].node_type == "group");
+    let edge_at = (card_hit.is_none() || over_group)
+        .then(|| crate::canvas_view::hit_edge(&s.data, &view, (pos.x, pos.y)))
+        .flatten();
+    if let Some(edge) = edge_at.clone().filter(|_| over_group) {
+        s.view.selected_edge = Some(edge);
+        s.view.selection.clear();
+        close_text_edit(s);
+        s.redraw();
+        return Task::none();
+    }
+    match card_hit {
         Some(i) => {
             let (id, node_type) = (s.data.nodes[i].id.clone(), s.data.nodes[i].node_type.clone());
             s.view.selected_edge = None;
@@ -982,7 +995,7 @@ fn on_press(app: &mut App, pos: iced::Point, size: iced::Size) -> Task<Message> 
         }
         None => {
             // 空白处先判连线：点中一条边 = 选中该边（不进入框选）
-            if let Some(edge) = crate::canvas_view::hit_edge(&s.data, &view, (pos.x, pos.y)) {
+            if let Some(edge) = edge_at {
                 s.view.selected_edge = Some(edge);
                 s.view.selection.clear();
                 close_text_edit(s);
@@ -1648,36 +1661,40 @@ fn on_context(
     commit_fit(s, size);
     let view = View::of(&s.view);
     let world = world_from_screen(&view, pos.x, pos.y);
-    let state = match hit_card(&s.data, world) {
-        Some(i) => {
-            let (id, node_type) = (s.data.nodes[i].id.clone(), s.data.nodes[i].node_type.clone());
-            // 卡 / 分组右键接管选中：连线选中让位，否则菜单里的「删除」会删掉上一条选中的边
-            s.view.selected_edge = None;
-            if !s.view.selection.iter().any(|x| x == &id) {
-                s.view.selection = vec![id.clone()];
-                s.redraw();
+    let card_hit = hit_card(&s.data, world);
+    // 空白或分组体上的连线出连线菜单（与左键判定同口径，组内连线也可右键）
+    let over_group = card_hit.is_some_and(|i| s.data.nodes[i].node_type == "group");
+    let edge_at = (card_hit.is_none() || over_group)
+        .then(|| crate::canvas_view::hit_edge(&s.data, &view, (pos.x, pos.y)))
+        .flatten();
+    let state = if let Some(edge) = edge_at {
+        s.view.selected_edge = Some(edge.clone());
+        s.view.selection.clear();
+        close_text_edit(s);
+        s.redraw();
+        PopupState::CanvasEdgeMenu { edge_id: edge }
+    } else {
+        match card_hit {
+            Some(i) => {
+                let (id, node_type) = (s.data.nodes[i].id.clone(), s.data.nodes[i].node_type.clone());
+                // 卡 / 分组右键接管选中：连线选中让位，否则菜单里的「删除」会删掉上一条选中的边
+                s.view.selected_edge = None;
+                if !s.view.selection.iter().any(|x| x == &id) {
+                    s.view.selection = vec![id.clone()];
+                    s.redraw();
+                }
+                // 多选优先：含组的批量选中右键任一成员都出批量菜单（删除 / 编组作用整个选中集）
+                if s.view.selection.len() > 1 {
+                    PopupState::CanvasMultiMenu
+                } else if node_type == "group" {
+                    PopupState::CanvasGroupMenu { node_id: id }
+                } else {
+                    PopupState::CanvasCardMenu { node_id: id }
+                }
             }
-            // 多选优先：含组的批量选中右键任一成员都出批量菜单（删除 / 编组作用整个选中集）
-            if s.view.selection.len() > 1 {
-                PopupState::CanvasMultiMenu
-            } else if node_type == "group" {
-                PopupState::CanvasGroupMenu { node_id: id }
-            } else {
-                PopupState::CanvasCardMenu { node_id: id }
-            }
-        }
-        // 空白不清选中：菜单「复制」作用于当前选中集（左键原地点击仍清选）
-        None => match crate::canvas_view::hit_edge(&s.data, &view, (pos.x, pos.y)) {
-            // 点在连线上 = 连线菜单（同时选中这条边，Delete 也可删）
-            Some(edge) => {
-                s.view.selected_edge = Some(edge.clone());
-                s.view.selection.clear();
-                close_text_edit(s);
-                s.redraw();
-                PopupState::CanvasEdgeMenu { edge_id: edge }
-            }
+            // 空白不清选中：菜单「复制」作用于当前选中集（左键原地点击仍清选）
             None => PopupState::CanvasBlankMenu { x: world.0, y: world.1 },
-        },
+        }
     };
     // 锚点取窗口坐标（pos 是画布部件局部坐标，弹层按窗口视口定位）；经 PopupOpen 统一复位 pane
     let point = app.cursor_for(window);

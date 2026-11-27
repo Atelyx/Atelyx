@@ -1447,9 +1447,9 @@ pub fn on_run_event(app: &mut App, event: RunEvent) -> Task<Message> {
 
 // ===== 产出落卡 =====
 
-/// 落卡产物：文件引用卡（读 / 写）或最终正文文本卡。
+/// 落卡产物：文件引用卡（读 / 写）。
+/// 回复正文不落卡——对话卡自己承载答复，逐条复制成文本卡只会把白板铺满。
 enum Material {
-    OutputText(String),
     OutputFile(String),
     InputFile(String),
 }
@@ -1465,8 +1465,6 @@ fn materialize(app: &mut App, node_id: &str, message_id: &str) -> Option<Task<Me
         .get("messages")
         .and_then(Value::as_array)
         .and_then(|ms| ms.iter().find(|m| m.get("id").and_then(Value::as_str) == Some(message_id)))?;
-    let content = message.get("content").and_then(Value::as_str).unwrap_or("");
-    let readable = !content.trim().is_empty() && !content.starts_with("[错误]");
     let mut materials = Vec::new();
     if let Some(steps) = message.get("steps").and_then(Value::as_array) {
         for step in steps {
@@ -1492,9 +1490,6 @@ fn materialize(app: &mut App, node_id: &str, message_id: &str) -> Option<Task<Me
             }
         }
     }
-    if readable {
-        materials.push(Material::OutputText(content.to_string()));
-    }
     apply_materials(app, node_id, materials)
 }
 
@@ -1506,38 +1501,6 @@ fn apply_materials(app: &mut App, conversation: &str, materials: Vec<Material>) 
     let mut new_paths: Vec<String> = Vec::new();
     for material in materials {
         match material {
-            Material::OutputText(text) => {
-                if session.data.nodes.iter().any(|n| {
-                    n.node_type == "text"
-                        && n.data.get("file").and_then(Value::as_str).is_none()
-                        && n.data.get("bodyMd").and_then(Value::as_str) == Some(text.as_str())
-                }) {
-                    continue;
-                }
-                let spot = crate::canvas_view::find_free_spot(
-                    &session.data.nodes,
-                    (conv.x + cw + CARD_GAP, conv.y),
-                    (TEXT_CARD_W, TEXT_CARD_H),
-                    SPOT_STEP,
-                );
-                let id = chat_actions::uuid_v4();
-                let title = first_line_prefix(&text, 16);
-                session.data.nodes.push(atelyx_core::vault::CanvasFileNode {
-                    id: id.clone(),
-                    node_type: "text".into(),
-                    x: spot.0,
-                    y: spot.1,
-                    width: Some(TEXT_CARD_W),
-                    height: Some(TEXT_CARD_H),
-                    data: json!({ "title": title, "bodyMd": text }),
-                });
-                session.view.text_docs.insert(
-                    id.clone(),
-                    crate::markdown_view::parse_document(&text),
-                );
-                session.data.edges.push(edge(conversation, &id));
-                changed = true;
-            }
             Material::OutputFile(path) => {
                 if let Some(existing) = find_file_card(session, &path) {
                     if !has_edge(session, conversation, existing) {

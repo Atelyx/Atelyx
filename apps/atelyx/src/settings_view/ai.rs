@@ -1726,7 +1726,7 @@ fn models_view(app: &App, window: iced::window::Id) -> Element<'static, Message>
     col = col.push(super::group_head("画布", "", true));
     col = col.push(super::setting_row(
         "对话产出自动落卡",
-        "回复正文与 Agent 写出的文件在对话卡旁生成卡片并连线；Agent 读取的文件也会补引用卡",
+        "回复正文不落卡（答复留在对话卡）；Agent 写出的文件在对话卡旁生成卡片并连线，读取的文件补引用卡",
         controls::toggle(
             app.repo_config.canvas_auto_materialize.unwrap_or(true),
             (!ro).then(|| Message::Ai(AiMsg::CanvasMaterializeToggle)),
