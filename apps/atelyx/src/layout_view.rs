@@ -4393,7 +4393,6 @@ pub enum DropZone {
     Bottom,
 }
 
-/// 枚举全部窗口的可停靠面板矩形（拖拽会话期间位置尺寸视为稳定）。
 /// 指定窗口当前是否渲染表格视图（活动标签 view = "table"；表格视图全局唯一，同时只在一窗渲染）。
 /// 窗口当前活动视图是否为指定类型（主窗扫描活动布局树；撕裂窗查其标签）。
 pub(crate) fn window_shows_view(app: &App, window: iced::window::Id, view: &str) -> bool {
@@ -4403,25 +4402,49 @@ pub(crate) fn window_shows_view(app: &App, window: iced::window::Id, view: &str)
             .is_some_and(|t| t.view == view)
     };
     if app.main_id == Some(window) {
-        fn scan(node: &atelyx_core::layout::LayoutNode, view: &str) -> bool {
-            match node {
-                atelyx_core::layout::LayoutNode::Panel { tabs, active_tab_id, .. } => {
-                    active_tab_id
-                        .as_deref()
-                        .and_then(|tid| tabs.iter().find(|t| t.id == tid))
-                        .is_some_and(|t| t.view == view)
-                }
-                atelyx_core::layout::LayoutNode::Split { children, .. } => {
-                    children.iter().any(|n| scan(n, view))
-                }
-            }
-        }
-        scan(&atelyx_core::layout::active_layout(&app.ui).tree, view)
+        // 主面板的标签是打开集合的投影（模型树里没有文档标签），前台视图取集合激活项
+        let primary = atelyx_core::layout::primary_panel_of_active(&app.ui);
+        let projected = crate::open_route::primary_active(app).and_then(|id| {
+            app.open_files
+                .get(&id)
+                .map(|d| crate::open_route::view_of_kind(&d.kind).to_string())
+        });
+        tree_shows_view(
+            &atelyx_core::layout::active_layout(&app.ui).tree,
+            primary,
+            projected.as_deref(),
+            view,
+        )
     } else {
         app.detached_os
             .get(&window)
             .and_then(|model_id| app.ui.detached_windows.iter().find(|w| &w.id == model_id))
             .is_some_and(|w| active_is(&w.tabs, w.active_tab_id.as_deref()))
+    }
+}
+
+/// 布局树里指定视图是否处于前台：`primary` 面板的前台视图由集合投影给出（`projected`），
+/// 其余面板取模型标签。
+fn tree_shows_view(
+    node: &atelyx_core::layout::LayoutNode,
+    primary: Option<&str>,
+    projected: Option<&str>,
+    view: &str,
+) -> bool {
+    use atelyx_core::layout::LayoutNode;
+    match node {
+        LayoutNode::Panel { id, tabs, active_tab_id } => {
+            if primary == Some(id.as_str()) {
+                return projected == Some(view);
+            }
+            active_tab_id
+                .as_deref()
+                .and_then(|tid| tabs.iter().find(|t| t.id == tid))
+                .is_some_and(|t| t.view == view)
+        }
+        LayoutNode::Split { children, .. } => {
+            children.iter().any(|n| tree_shows_view(n, primary, projected, view))
+        }
     }
 }
 
@@ -4434,6 +4457,7 @@ pub fn window_shows_canvas(app: &App, window: iced::window::Id) -> bool {
     window_shows_view(app, window, "canvas")
 }
 
+/// 枚举全部窗口的可停靠面板矩形（拖拽会话期间位置尺寸视为稳定）。
 pub fn panel_zones(app: &App) -> Vec<PanelZone> {
     let mut out = Vec::new();
     if let Some(main_id) = app.main_id {
@@ -4596,12 +4620,44 @@ pub fn drop_zone_at(zone: &PanelZone, global: iced::Point) -> DropZone {
 mod tests {
     use super::{
         device_meta_line, divider_size, ext_badge_reserve, file_label, merge_peers, name_slot,
-        row_window, tab_index_at, wiki_picker_geom, PanelZone, UiMetrics, SUGGEST_W,
+        row_window, tab_index_at, tree_shows_view, wiki_picker_geom, PanelZone, UiMetrics,
+        SUGGEST_W,
     };
     use crate::ui::palette as pal;
     use crate::ui::text::{ellipsize_estimated, estimate_width};
     use atelyx_core::collab::PeerInfo;
     use iced::{Length, Rectangle};
+
+    /// 主面板标签是打开集合的投影：前台视图只认集合激活项，模型树里的残留标签不参与。
+    #[test]
+    fn tree_shows_view_reads_primary_projection() {
+        use atelyx_core::layout::{create_tab, LayoutNode};
+        let panel = |id: &str, view: Option<&str>| {
+            let tabs: Vec<_> = view.map(|v| create_tab(v)).into_iter().collect();
+            let active = tabs.first().map(|t| t.id.clone());
+            LayoutNode::Panel { id: id.into(), tabs, active_tab_id: active }
+        };
+        let tree = LayoutNode::Split {
+            id: "s".into(),
+            direction: "horizontal".into(),
+            children: vec![panel("primary", None), panel("slot", Some("files"))],
+            sizes: vec![50.0, 50.0],
+        };
+        // 主面板投影出画布 = 画布在前台；投影成表格时画布不在前台
+        assert!(tree_shows_view(&tree, Some("primary"), Some("canvas"), "canvas"));
+        assert!(!tree_shows_view(&tree, Some("primary"), Some("table"), "canvas"));
+        // 非主面板仍按模型标签判定（主面板投影不遮蔽其余面板）
+        let slot_canvas = LayoutNode::Split {
+            id: "s2".into(),
+            direction: "horizontal".into(),
+            children: vec![panel("primary", None), panel("slot", Some("canvas"))],
+            sizes: vec![50.0, 50.0],
+        };
+        assert!(tree_shows_view(&slot_canvas, Some("primary"), Some("table"), "canvas"));
+        // 没有主面板时只认模型标签
+        assert!(tree_shows_view(&slot_canvas, None, None, "canvas"));
+        assert!(!tree_shows_view(&tree, None, None, "canvas"));
+    }
 
     #[test]
     fn tab_index_at_accounts_for_primary_badge() {
